@@ -1,0 +1,1455 @@
+Inverse Rendering of Translucent Objects using Physical and Neural Renderers
+Chenhao Li, Trung Thanh Ngo, Hajime Nagahara
+Institute for Datability Science, Osaka University
+arXiv:2305.08336v1 [cs.CV] 15 May 2023
+{lch@is.ids, trung@am.sanken, nagahara@ids}.osaka-u.ac.jp
+Abstract
+In this work, we propose an inverse rendering model that
+estimates 3D shape, spatially-varying reflectance, homogeneous subsurface scattering parameters, and an environment illumination jointly from only a pair of captured images of a translucent object. In order to solve the ambiguity problem of inverse rendering, we use a physically-based
+renderer and a neural renderer for scene reconstruction and
+material editing. Because two renderers are differentiable,
+we can compute a reconstruction loss to assist parameter
+estimation. To enhance the supervision of the proposed neural renderer, we also propose an augmented loss. In addition, we use a flash and no-flash image pair as the input.
+To supervise the training, we constructed a large-scale synthetic dataset of translucent objects, which consists of 117K
+scenes. Qualitative and quantitative results on both synthetic and real-world datasets demonstrated the effectiveness of the proposed model. Code and Data are available
+at https://github.com/ligoudaner377/homo translucent
+1. Introduction
+Inverse rendering is a long-standing problem in computer vision, which decomposes captured images into multiple intrinsic factors such as geometry, illumination, and
+material. With the estimated factors, many challenging applications like relighting [40,47,51,60,65,72], material editing [41, 52] and object manipulation [29, 57, 62, 70] become
+feasible. In this work, we focus on a very complicated object for inverse rendering: translucent objects. From biological tissue to various minerals, from industrial raw materials
+to a glass of milk, translucent objects are everywhere in our
+daily lives. A critical physical phenomenon in translucent
+objects is SubSurface Scattering (SSS): a photon penetrates
+the object’s surface and, after multiple bounces, is eventually absorbed or exits at a different surface point. This
+non-linear, multiple bounces, multiple path process makes
+inverse rendering extremely ill-posed. To reduce the complexity of the task, we assume that the SSS parameters of
+the object are constant in a continuous 3-dimensional space
+(homogeneous subsurface scattering). So, given a translucent object, our task is to simultaneously estimate shape,
+spatially-varying reflectance, homogeneous SSS parameters, and environment illumination.
+However, a well-known issue of inverse rendering is the
+ambiguity problem—the final appearance of an object results from a combination of illumination, geometry, and material. For instance, a brighter area in the image may be due
+to the specular highlight. It may be very close to the light
+source; the coloration may also come from the light source
+or the object itself. The situation becomes more complicated when SSS is also considered because it is hard to tell
+the object intensity comes whether from the surface, subsurface, or both.
+Solutions to the ambiguity problem can be roughly divided into two groups. The first group of researchers
+addresses the ambiguity problem by providing more information to the model. For example, some works use
+multi-view [5–7, 38, 59, 63, 69] or multi-light [8, 59] set
+up. The solution of the second group is based on various assumptions and simplifications. For example, some
+researchers simplify the reflectance model by assuming a
+Lambertian reflectance [51], some simplify the illumination by assuming that the object is illuminated by a single point light source [15], some simplify the geometry by
+assuming a near-planar [35]. For the SSS, most existing
+works [4, 8, 9, 12, 16, 34, 37, 45, 49, 50, 56, 58] simply ignore it by assuming that light does not penetrate the object’s surface, and the final appearance only depends on
+the pure surface reflectance. On the other hand, some researchers [11, 21, 22, 28, 30, 71] consider a pure SSS without surface reflectance. Some works [14, 17, 26, 61] use the
+BSSRDF model to simplify SSS of optically thick materials
+in the form of complex surface reflectance. The limitation
+of these works is obvious: most translucent objects (e.g.
+wax, plastic, crystal) in our world can easily break their assumptions, as it contains both surface reflectance and SSS.
+We tackle a more challenging problem by considering both
+surface reflectance and SSS of translucent objects with an
+arbitrary shape under an environment illumination. However, using a complex scene representation means introduc-
+Input
+Flash
+(a)
+No-flash
+(b)
+Output
+Mask
+(c)
+SSS
+(d)
+Normal
+(e)
+Depth
+(f)
+Roughness Reflectance Reconstruct
+(g)
+(h)
+(i)
+Figure 1. Inverse rendering results of real-world translucent objects. Our model takes (a) a flash image, (b) a no-flash image, and (c)
+a mask as input. Then, it decomposes them into (d) homogeneous subsurface scattering parameters (denoted as SSS in the figure), (e)
+surface normal, (f) depth, and (g) spatially-varying roughness. We use the predicted parameters to re-render the image that only considers
+(h) the surface reflectance, and (i) both surface reflectance and subsurface scattering. Note that (d) subsurface scattering only contains
+7 parameters (3 for extinction coefficient σt , 3 for volumetric albedo α, 1 for phase function parameter g), we use these parameters to
+render a sphere using Mitsuba [46] for visualization. Brighter areas in the depth map represent a greater distance, and brighter areas in the
+roughness map represent a rougher surface.
+ing more ambiguity.
+In this work, we propose an inverse rendering framework
+that handles both surface reflectance and SSS. Specifically,
+we use a deep neural network for parameter estimation. To
+enable the proposed model to train and estimate the intrinsic
+physical parameters more efficiently, we employ two differentiable renderers: a physically-based renderer that only
+considers the surface reflectance of the direct illumination
+and a neural renderer that creates the multiple bounce illumination as well as SSS effect. Two renderers work together to re-render the input scene based on the estimated
+parameters and at the same time enable material editing. To
+enhance the supervision of the proposed neural renderer, we
+also propose an augmented loss by editing the SSS parameters. Moreover, inspired by the recent BRDF estimation
+methods [2, 8] that use a flash and no-flash set up to address the problem of unpredictability in saturated highlight,
+we also adopt this two-shot setup not only to deal with the
+saturated highlight problem but also to disentangle the surface reflectance and SSS. To train our model, we construct
+a synthetic dataset consisting of more than 117K translucent scenes because there is no sufficient dataset supporting
+translucent objects. Each scene contains a human-created
+3D model and is rendered with a spatially-varying microfacet BSDF, homogeneous SSS, under an environment illumination.
+Our contributions are summarized as follows:
+• We first tackle the problem of estimating shape,
+spatially-varying surface reflectance, homogeneous
+SSS, and illumination simultaneously from a flash and
+no-flash pair of captured images at a single viewpoint.
+• We build a novel model that combines a physicallybased renderer and a neural renderer for explicitly separating the SSS and the other parameters.
+• We introduce the augmented loss to train the neural
+renderer supervised by altered images whose SSS parameters were edited.
+• We construct a large-scale photorealistic synthetic
+dataset that consists of more than 117K scenes.
+2. Related Work
+2.1. Inverse rendering of surface reflectance
+There has been a lot of work on estimating depth [18,31,
+48], BRDF [1,2,15,33,35,42], and illumination [19,20,25]
+separately.
+With the recent rise of deep learning, more and more research is focusing on simultaneous parameter estimation.
+Li et al. [37] propose the first single-view method to estimate the shape, SVBRDF, and illumination of a single object. They use a cascaded network to tackle the ambiguity
+problem and an in-network rendering layer to create global
+illumination. A few research groups demonstrate that a similar idea can be applied in more complex situations, such as
+indoor scene inverse rendering by using a Residual Appearance Renderer [50] or spatially-varying lighting [34,54,74].
+Li et al. [36] extend the inverse rendering of indoor scenes
+by considering more complex materials like metal or mirror.
+Boss et al. [8] tackle the ambiguity problem under a saturated highlight by using a two-shot setup. Sang et al. [49]
+implement shape, SVBRDF estimation, and relighting by
+using a physically-based renderer and a neural renderer. Deschaintre et al. [16] introduce polarization into shape and
+SVBRDF estimation. Wu et al. [58] train the model in an
+unsupervised way with the help of the rotational symmetry
+of specific objects. Lichy et al. [39] enables a high resolution shape and material reconstruction by a recursive neural
+architecture. Our model can be interpreted as an extended
+version of these methods that also take SSS into account.
+2.2. Inverse rendering of subsurface scattering
+Subsurface scattering is essential for rendering translucent objects such as human skin, minerals, smoke, etc. The
+reconstruction and editing of these objects heavily rely on
+scattering parameter estimation. However, inverse scattering is a challenging task due to the multiple bounces
+and multiple paths of light inside the object. Some works
+[21,22,28,30,71] combine analysis by synthesis and Monte
+Carlo volume rendering techniques to tackle this problem.
+However, they suffer from some problems like local minimal and long optimization time.
+Recently, Che et al. [11] used a deep neural network to
+predict the homogeneous scattering parameters as a warm
+start for analysis by synthesis. However, they do not estimate parameters such as geometry, illumination, etc. This
+means that their model can not handle applications like
+scene reconstruction, material editing. In addition, they
+only consider pure SSS. However, most translucent objects
+in our real-world consist of both surface reflectance and
+SSS. Our model estimates geometry, illumination, surface
+reflectance, and SSS simultaneously.
+2.3. Differentiable rendering
+Differentiable renderers are broadly used in inverse rendering field for reconstructing human faces [51, 55], indoor scenes [34, 50], buildings [43, 65], and single objects
+[8, 37, 49]. However, most of them use the physically-based
+renderer that only considers direct illumination. Such a renderer cannot produce high-quality images as they do not allow for effects like soft shadows, interreflection, and SSS.
+Recently, there have been some general-purpose differentiable renderers [32, 46, 66, 67] that consider indirect illumination. However, such a Monte Carlo path tracing graph
+takes a lot of memory and computing resources, especially
+when a large sample per pixel (spp) is used. Instead, some
+works [37, 44, 49, 50, 64, 68] splice a neural network behind
+direct illumination only renderer to enable global illumination or scene editing. Inspired by them, we also designed a
+renderer-neural network architecture for the SSS task.
+2.4. Scene editing
+Scene editing is a broad research topic, and recent research advances have been dominated by deep learning. A
+bunch of works has been reported for relighting [40, 47, 51,
+60, 65, 72], material editing [41, 52] and object manipulation [29, 57, 62, 70]. We take the first step on the scattering
+parameter editing of translucent objects by observing only
+two images.
+3. Methods
+In this section, we introduce the proposed inverse rendering framework. Section 3.1 presents how we model our
+input and output. In Section 3.2, we talk about a neural
+network that is used for parameter estimation. In Section
+3.3 we discuss the proposed two-renderer structure. Then,
+we illustrate an augmented loss to enhance the supervision
+of the proposed neural renderer in Section 3.4. Finally, in
+Section 3.5 we show the loss function.
+3.1. Problem setup
+Scene representation For the geometry part, we use a
+depth map D to roughly represent the shape of the object
+and a normal map N to provide local details. For the surface
+part, we use a microfacet BSDF model proposed by [53].
+A roughness map R is used to represent BSDF parameters. The homogeneous SSS is modeled by three terms:
+an extinction coefficient σt which controls the optical density, a volumetric albedo α which determines the probability
+of whether photons are scattered or absorbed during a volume event, and a Henyey-Greenstein phase function [24]
+parameter g which defines whether the scattering is forward
+(g > 0), backward (g < 0) or isotropic (g = 0). We estimate the spherical harmonics sh as a side-prediction to
+assist the other part of the model. A flashlight intensity i is
+also predicted, taking into account that the intensity of the
+flashlight varies from device to device.
+Model design Inspired by Aittala et al. [2] and Boss et
+al. [8], we also use a flash and no-flash image setup. Our
+motivation for this design is that the visibility of translucent
+objects will vary at different light intensities. For example, if a bright light is placed on the back of a finger, we
+can clearly see the color of the blood. Such a property facilitates scattering parameter estimation and enables better
+disentanglement of surface reflectance and SSS.
+So, given a translucent object of unknown shape, material, and under unknown illumination, our target is to estimate these parameters simultaneously. In addition, we
+also enable material editing by manipulating the estimated
+Two-renderer reconstruction
+𝐵
+Estimator
+𝑓" Normal
+,
+𝑁
+Depth
+,
+𝐷
+Roughness
+𝑅/
+Neural Renderer
+𝑓-
+𝐼,!
+𝐼!
+𝐼
+Encoder
+Physical Renderer
+𝑓$
+𝐼,$
+Decoder
+Scattering
+Encoder
+Neural Renderer
+𝑓-
+Illumination
+𝑀
+Surface
+Encoder
+,
+𝐼8)*#"+
+' , 𝚤̃
+𝑠ℎ
+Scattering
+Surface
+Encoder
+Decoder
+𝜎1# , 𝛼3, 𝑔3
+Parameter estimation
+𝜎1# + 𝛿 & , 𝛼3 + 𝛿' , 𝑔3 + 𝛿(
+!
+Scattering
+Encoder
+×𝑲
+Augmented loss
+Figure 2. Overview of the proposed model. We use different colors to indicate different functions: green for the estimator, orange for the
+physically-based renderer, red for the neural renderer. We have K augmented loss modules and only show one in the figure.
+parameters. Figure 2 shows an overview of our model.
+The inputs of our model are three images: a flash image
+If ∈ R3×256×256 , a no-flash image I ∈ R3×256×256 , and a
+binary mask M ∈ R256×256 . For each scene, the estimated
+parameters are:
+• A depth map D ∈ R256×256 and a normal map N ∈
+R3×256×256 to represent the shape.
+• A roughness map R ∈ R256×256 used in the microfacet
+BSDF model.
+• The spherical harmonics sh ∈ R3×9 and a flashlight
+intensity i ∈ R1 to represent illumination.
+• The extinction coefficient σt ∈ R3 , volumetric albedo
+α ∈ R3 , and Henyey-Greenstein phase function parameter g ∈ R1 .
+3.2. Parameter estimation
+Taking advantage of recent developments in deep learning, we use a deep convolutional neural network as our estimator. We use the one encoder and multiple heads structure. Our motivation for this design is that estimating shape,
+material, and illumination can be thought of as multi-task
+learning. Ideally, each task can assist the other to learn a
+robust encoder. The encoder extract features from the input
+images and each head estimate parameters accordingly. So,
+given a flash image If , no-flash image I, and a binary mask
+M , the estimated physical parameters are:
+˜ ĩ, σ˜t , α̃, g̃ = fe (I, If , M ),
+D̃, Ñ , R̃, sh,
+(1)
+˜ ĩ, σ˜t , α̃, g̃ are
+where fe denotes the estimator. D̃, Ñ , R̃, sh,
+the estimated depth, normal, roughness, spherical harmonics coefficient, flashlight intensity, extinction coefficient,
+volumetric albedo, and Henyey-Greenstein phase function
+parameter.
+3.3. Physical renderer and neural renderer
+The use of reconstruction loss to supervise network training is a widespread technique in deep learning. Specifically,
+reconstruction in inverse rendering means re-rendering the
+scene with the estimated parameters. In addition, the rendering module must be differentiable to pass the gradient of
+reconstruction loss to the estimator.
+One potential option is to use a general-purpose differentiable renderer such as Mitsuba [46]. However, we have
+two problems. First, current general-purpose differentiable
+renderers have memory and training speed problems for
+consumer-grade GPUs, especially when using a high sample rate. Because the computational cost of path tracing is
+much larger than that of standard neural works. For example, differentially rendering a single translucent object
+image with 256 × 256 resolution and 64 samples per pixel
+(spp) requires more than 5 seconds and 20 GB memory on
+an RTX3090 GPU. Moreover, the rendering time and memory will increase linearly when spp increase. Second, rerendering the object with SSS requires the entire 3D shape
+(e.g., a 3D mesh). However, it is not easy to estimate the
+complete 3D information at a single viewpoint. That is
+the reason we only estimate a normal and a depth map as
+our geometry representation. This representation is sufficient for rendering surface reflectance but not for SSS. Another option [8, 58] is to use a differentiable renderer that
+only considers direct illumination. This sacrifices some reconstruction quality but dramatically improves efficiency.
+However, such a method cannot be applied to a translucent
+object because SSS depends on multiple bounces of light
+inside the object.
+With the assist of recent advances in image-to-image
+translation [27,73], many works have demonstrated the successful use of neural networks for adding indirect illumination [37, 44], photorealistic effect [43, 50], or relighting
+[49, 64]. Inspired by them, we propose a two-step rendering pipeline to mimic the rendering performance of SSS of
+a general-purpose differentiable renderer. The first step is a
+physically-based rendering module that only considers direct illumination:
+I˜d = fd (D̃, Ñ , R̃, ĩ, ˜
+sh),
+(2)
+where fd is a physically-based renderer that follow the implementation of [49], and it has no trainable parameters. I˜d
+is the re-rendered image that only consider the surface reflectance. The second step is a neural renderer fn to create
+SSS effect:
+I˜f = fn (I˜d , ˜
+sh, ĩ, σ˜t , α̃, g̃, B),
+(3)
+where I˜f is the re-rendered flash image. fn is the proposed
+neural renderer, and it consists of 3 parts (See Figure 2 for
+reference), a Surface encoder, a Scattering encoder, and a
+decoder. The Surface encoder maps the estimated surface
+reflectance image I˜d into a feature map. In addition to the
+surface reflectance image, we also input the background image B (masked-out version of If ) to the Surface encoder
+to provide high frequency illumination information. The
+Scattering encoder consists of a few upsampling layers. It
+maps ˜
+sh, ĩ, σ˜t , α̃, g̃ to a feature map. The decoder consists
+of some Resnet blocks [23] and upsampling layers. The task
+of our neural renderer can be considered as a conditional
+image-to-image translation, where the condition is the SSS
+parameters.
+The advantage of the two-renderer design is that it is naturally differentiable. At the same time, the training cost is
+acceptable. In addition, the physically-based renderer can
+provide physical hints to the neural renderer. Because we
+separate the reconstruction of surface reflectance and SSS
+explicitly, the problem of ambiguity can be alleviated.
+3.4. Augmented loss
+In this subsection, we present an augmented loss to address the hidden information problem by using multiple altered images to supervise the proposed neural renderer. In
+Section 3.3, we propose a two-renderer structure to compute the reconstruction images to improve the parameter
+estimation. However, a well-known problem of reconstruction loss in deep learning is that neural networks learn to
+“hide” information within them [13]. This may cause our
+neural renderer to ignore the estimated SSS parameters and
+only reconstruct the input image by the hidden information.
+If so, the reconstruction loss cannot give correct gradients
+and thus fail to guide the training of the estimator.
+In order to solve this problem, we enhance the supervision of the proposed neural renderer by an augmented loss.
+Specifically, after the parameters are estimated, we edit the
+estimated SSS parameters and let the Neural renderer reconstruct image based on the edited SSS parameters. We also
+k
+render K altered images Ialter
+as their ground truth labels to
+train the neural renderer. The altered images have the same
+parameters as the original flash image, except the SSS pak
+rameters. Specifically, If and Ialter
+share the same shape,
+surface reflectance, and illumination, but different extinction coefficient, phase function, and volumetric albedo. The
+edited SSS parameters are randomly sampled from the same
+distribution as the original ones:
+k
+˜ ĩ, σ˜t + δσ , α̃ + δα , g̃ + δg , B),
+I˜alter
+= fn (I˜d , sh,
+t
+(4)
+where δσt , δα , δg are the differences between target SSS pak
+rameters (subsurface scattering parameters of Ialter
+) and
+k
+the estimated ones, I˜alter is the reconstructed altered images. The benefits of this design are as follows. First,
+the input image is not the same as the image to be reconstructed, which makes it meaningless for the neural network to “hide” the information of the original input image.
+Second, the variety of input parameters and output images
+makes the neural renderer more sensitive to the changes in
+SSS parameters. These two points make the neural renderer
+a good guide for the estimator, which allows for a more accurate estimation of the SSS parameters. Considering the
+time and computing resources it takes to render the training
+images, in practice, we set K = 3.
+Flash
+No-flash
+Mask
+Normal
+Depth
+Roughness Reflectance
+SSS
+Spherical harmoincs Altered 1 Altered 2
+Altered 3
+Figure 3. Examples of the proposed dataset, we use the ground truth shape and illumination to visualize SSS parameters.
+3.5. Loss functions
+4.2. State-of-the-art comparison
+The proposed model is fully supervised and trained end
+to end, and we compute the loss between the estimated parameters their ground truths:
+To the best of our knowledge, we are the first to tackle the
+inverse rendering problem of translucent objects containing
+both surface reflectance and SSS. It is not easy to compare
+our method with pure surface reflectance methods [8, 37].
+Although similar to our method, these methods also predict parameters like surface normal, depth, and roughness.
+The key problem is that the coloration of pure surface reflectance models is affected by “diffuse albedo”, which is a
+parameter of BRDF. However, in our proposed scene representation, the surface reflection and refraction are modeled by BSDF, and the SSS is modeled by the Radiative
+Transport Equation (RTE), which means that the coloration
+is affected by the volumetric albedo, extinction coefficient,
+and phase function. In conclusion, training pure surface reflectance methods on our dataset is impossible. Thus, we
+choose a pure SSS method proposed by Che et al. [11] to
+compare with our model. Their method requires an edge
+map as the additional input of the neural network. We follow their paper to generate the edge maps for our dataset.
+We train their model on our dataset with the same hyperparameters as our method. We report the Mean Absolute
+Error (MAE) in Table 1, and visual comparison in Figure 4.
+It is difficult to compare the parameter estimation accuracy
+without GT parameter references, so we only show the synthetic data results. It is observed that their method fails to
+estimate reasonable SSS parameters due to the highly ambiguous scene representation.
+L = LD + LN + LR + Lsh + Li
+X
++ Lσt + Lα + Lg + LIf +
+Lkalter ,
+(5)
+K
+where LD , LN , LR , LIf , Lkalter stand for the L1 loss
+between the estimated depth, normal, roughness, flash
+image, altered images and their ground truth ones.
+Lsh , Li , Lσt , Lα , Lg stands for the L2 loss between the estimated spherical harmonics, flashlight intensity, extinction
+coefficient, volumetric albedo, Henyey-Greenstein phase
+function parameter and their ground truth ones.
+4. Experiments
+We introduce our dataset in Section 4.1. In Section 4.2,
+we compare our model with Che et al. [11]. We conduct
+an ablation study and report the quantitative and qualitative
+results in Section 4.3. In Section 4.4 we show the results of
+SSS parameter editing application. More experiment results
+can be found in the supplementary document.
+4.1. Datasets
+In this work, we propose the first large-scale synthetic
+translucent dataset that contains both surface reflectance
+and SSS. We collected the 3D objects from ShapeNet [10],
+human-created roughness map and auxiliary normal map
+from several public resources, and environment map from
+the Laval Indoor HDR dataset [19].
+For each scene, we used Mitsuba [46] to render five images: flash image, no-flash image, and three altered images. Each scene contains a randomly selected object, auxiliary normal map, roughness map, environment map. We
+also randomly sample the SSS parameters and flash light
+intensity. Similar to some SfP (Shape from Polarization)
+works [3], we assume a constant IoR (Index of Refraction)
+to reduce the ambiguity problem. A full introduction to our
+dataset can be found in the supplementary documentation.
+4.3. Ablation study
+We conduct ablation studies to evaluate the effects of
+each component of the proposed model. Specifically, we
+start with a Baseline model, which uses the same estimator
+as our Full model, but only reconstructs the input scene with
+a neural network. So, the baseline model is essentially an
+autoencoder. Then, we divide the reconstruction into two
+steps: a physically-based renderer that reconstructs the surface reflectance and a neural renderer that create the multibounce illumination as well as the SSS effect. We call this
+model “2R”. After that, we introduce the augmented loss
+to the “2R” model and denote it as “2R-AUG”. Finally, we
+implement the Full model by adding the two-shot setting
+Table 1. MAE results on 17140 test scenes. For each element we report mean(std) value. The scale of mean is 1 × 100 , and std is 1 × 10−3 .
+Geometry
+Baseline
+2R
+2R-AUG
+Che et al. [11]
+Full model
+N
+D
+BSDF
+R
+sh
+Illumination
+i
+σt
+SSS
+α
+g
+.0918(.4395)
+.0916(.3009)
+.0913(.1768)
+.0894(.1532)
+.0705(.4443)
+.0697(.3617)
+.0699(1.271)
+.0646(.3283)
+.0811(.5303)
+.0811(.4903)
+.0807(.2714)
+.0769(.2659)
+.1083(.6571)
+.1064(.8984)
+.1105(8.926)
+.0989(1.017)
+.0912(1.042)
+.0908(.7697)
+.0893(1.151)
+.0804(1.736)
+.1670(.7904)
+.1675(1.072)
+.1619(.9635)
+.1828
+.1590(.2286)
+.1061(.5792)
+.1057(.4191)
+.1040(.1578)
+.1115
+.1002(.5185)
+.1762(.8811)
+.1777(2.562)
+.1703(.8856)
+.2123
+.1655(.3932)
+GT
+Ours
+Che et al.
+SSS
+SSS+BSDF
+SSS
+SSS+BSDF
+SSS
+SSS+BSDF
+SSS
+SSS+BSDF
+Figure 4. Visual comparison with Che et al. [11]. We use two visualizations which are “SSS” and “SSS+BSDF” to show the parameter
+estimation results. “SSS” is rendered by the GT illumination, shape, and predicted SSS. “SSS+BSDF” is rendered by the GT illumination,
+shape, BSDF, and predicted SSS. Images in red rectangles are input images. Error maps are in the upper right corner.
+to “2R-AUG”. We report the MAE results on the synthetic
+data of all experiments in Table 1. It is observed that for
+most of the metrics, “2R” model outperforms the Baseline
+model. Especially for the illumination part, the accuracy
+improved a lot. This confirms our previous point that is explicitly separating the surface reflectance, and SSS reduces
+ambiguity. Although the performance of “2R” and “2RAUG” are similar for geometry, illumination, and surface
+reflectance parts, the result of SSS parameters which are
+enhanced by the augmented loss, is improved. Comparison between the “2R-AUG” and Full model proves that the
+proposed two two-shot problem settings can further reduce
+the ambiguity problem. Figure 5 demonstrate some visual
+comparisons. It is observed that the SSS images of the Full
+model are most similar to the ground truth ones, and the
+other models are unstable. In addition, because of the twoshot setting, the full model’s estimation of environment illumination is also more accurate. To show the flexibility of
+the proposed model, we also test on several common realworld translucent objects, and illustrate the results in Figure
+1. The results show that our model can estimate reasonable
+SSS parameters.
+4.4. Material editing
+Given a translucent object with an unknown shape, illumination, and material, we show that the proposed inverse
+rendering framework can edit translucent objects based on
+the given SSS parameters. Figure 6 shows the editing results.
+5. Conclusions and Limitations
+In this paper, we made the first attempt to jointly estimate
+shape, spatially-varying surface reflectance, homogeneous
+SSS, and illumination from a flash and no-flash image pair.
+The proposed two-shot, two-renderer, and augmented loss
+reduced the ambiguity of inverse rendering and improved
+the parameter estimation. In addition, we also constructed
+a large-scale synthetic dataset of fully labeled translucent
+objects. The experiments of the real-world dataset demonstrated that our model could be applied to images captured
+by a smartphone camera. Finally, we demonstrated that our
+pipeline is also capable of SSS parameter editing.
+The proposed method still has some limitations. First,
+to reduce the ambiguity problem, we set the IoR to be
+constant and do not estimate it. However, IoR affects
+light transmission through object boundaries and thus in-
+Baseline
+NULL
+NULL
+2R
+2R-AUG
+Full model
+GT
+Normal
+Depth
+Roughness Reflectance
+SSS
+Spherical harmoincs Reconstruct
+Normal
+Depth
+SSS
+Spherical harmoincs Reconstruct
+SSS
+Spherical harmoincs Reconstruct
+NULL
+NULL
+Baseline
+Roughness Reflectance
+2R
+2R-AUG
+Full model
+GT
+Normal
+Depth
+Roughness Reflectance
+SSS
+Spherical harmoincs Reconstruct
+Normal
+Depth
+Roughness Reflectance
+Figure 5. Visual results of ablation study on the synthetic dataset. For visualization, we use the ground truth shape and illumination to
+render the image of the estimated SubSurface Scattering parameters (denoted as SSS in the figure).
+GT
+Estimated
+Input
+Figure 6. SSS parameter editing results. The 3rd row is the input images. We randomly edit the scattering parameters before inputting
+them into the neural renderer. The 2nd row is the estimated images, and we show their ground truth images in the 1st row.
+fluences the SSS. For some materials with large or small
+IoR, our model may not work. Second, our model does
+not support relighting and novel-view synthesis. Unlike
+pure surface reconstruction models that the estimated normals can be easily applied to physically-based renderers
+for relighting or novel-view synthesis, rendering translucent objects requires a full 3D estimation (e.g., mesh) in-
+cluding the backside information. However, estimating the
+complete geometry is difficult for single-view reconstruction method. Solving these challenges can be good future
+work.
+References
+[1] Miika Aittala, Timo Aila, and Jaakko Lehtinen. Reflectance
+modeling by neural texture synthesis. ACM Transactions on
+Graphics (ToG), 35(4):1–13, 2016. 2
+[2] Miika Aittala, Tim Weyrich, Jaakko Lehtinen, et al. Twoshot svbrdf capture for stationary materials. ACM Trans.
+Graph., 34(4):110–1, 2015. 2, 3
+[3] Yunhao Ba, Alex Gilbert, Franklin Wang, Jinfa Yang,
+Rui Chen, Yiqin Wang, Lei Yan, Boxin Shi, and Achuta
+Kadambi. Deep shape from polarization. In European Conference on Computer Vision, pages 554–571. Springer, 2020.
+6
+[4] Jonathan T Barron and Jitendra Malik. Shape, illumination,
+and reflectance from shading. IEEE transactions on pattern
+analysis and machine intelligence, 37(8):1670–1687, 2014.
+1
+[5] Sai Bi, Zexiang Xu, Kalyan Sunkavalli, David Kriegman,
+and Ravi Ramamoorthi. Deep 3d capture: Geometry and reflectance from sparse multi-view images. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 5960–5969, 2020. 1
+[6] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T. Barron, Ce Liu, and Hendrik P.A. Lensch. Nerd: Neural reflectance decomposition from image collections. In IEEE
+International Conference on Computer Vision (ICCV), 2021.
+1
+[7] Mark Boss, Varun Jampani, Raphael Braun, Ce Liu,
+Jonathan T. Barron, and Hendrik P.A. Lensch. Neuralpil: Neural pre-integrated lighting for reflectance decomposition. In Advances in Neural Information Processing Systems (NeurIPS), 2021. 1
+[8] Mark Boss, Varun Jampani, Kihwan Kim, Hendrik Lensch,
+and Jan Kautz. Two-shot spatially-varying brdf and shape
+estimation. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 3982–
+3991, 2020. 1, 2, 3, 5, 6
+[9] Mark Boss and Hendrik P.A. Lensch. Single image brdf parameter estimation with a conditional adversarial network. In
+ArXiv e-prints, 2019. 1
+[10] Angel X. Chang, Thomas Funkhouser, Leonidas Guibas, Pat
+Hanrahan, Qixing Huang, Zimo Li, Silvio Savarese, Manolis Savva, Shuran Song, Hao Su, Jianxiong Xiao, Li Yi,
+and Fisher Yu. ShapeNet: An Information-Rich 3D Model
+Repository. Technical Report arXiv:1512.03012 [cs.GR],
+Stanford University — Princeton University — Toyota Technological Institute at Chicago, 2015. 6
+[11] Chengqian Che, Fujun Luan, Shuang Zhao, Kavita Bala, and
+Ioannis Gkioulekas. Towards learning-based inverse subsurface scattering. In 2020 IEEE International Conference
+on Computational Photography (ICCP), pages 1–12. IEEE,
+2020. 1, 3, 6, 7
+[12] Wenzheng Chen, Joey Litalien, Jun Gao, Zian Wang,
+Clement Fuji Tsang, Sameh Khamis, Or Litany, and Sanja
+Fidler. Dib-r++: Learning to predict lighting and material
+with a hybrid differentiable renderer. Advances in Neural
+Information Processing Systems, 34, 2021. 1
+[13] Casey Chu, Andrey Zhmoginov, and Mark Sandler. Cyclegan, a master of steganography.
+arXiv preprint
+arXiv:1712.02950, 2017. 5
+[14] Xi Deng, Fujun Luan, Bruce Walter, Kavita Bala, and Steve
+Marschner. Reconstructing translucent objects using differentiable rendering. In ACM SIGGRAPH 2022 Conference
+Proceedings, pages 1–10, 2022. 1
+[15] Valentin Deschaintre, Miika Aittala, Fredo Durand, George
+Drettakis, and Adrien Bousseau. Single-image svbrdf capture with a rendering-aware deep network. ACM Transactions on Graphics (ToG), 37(4):1–15, 2018. 1, 2
+[16] Valentin Deschaintre, Yiming Lin, and Abhijeet Ghosh.
+Deep polarization imaging for 3d shape and svbrdf acquisition. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 15567–15576,
+2021. 1, 3
+[17] Bo Dong, Kathleen D Moore, Weiyi Zhang, and Pieter Peers.
+Scattering parameters and surface normals from homogeneous translucent materials using photometric stereo. In Proceedings of the IEEE Conference on Computer Vision and
+Pattern Recognition, pages 2291–2298, 2014. 1
+[18] Huan Fu, Mingming Gong, Chaohui Wang, Kayhan Batmanghelich, and Dacheng Tao. Deep ordinal regression network for monocular depth estimation. In Proceedings of the
+IEEE conference on computer vision and pattern recognition, pages 2002–2011, 2018. 2
+[19] Marc-André Gardner, Kalyan Sunkavalli, Ersin Yumer, Xiaohui Shen, Emiliano Gambaretto, Christian Gagné, and
+Jean-François Lalonde. Learning to predict indoor illumination from a single image. arXiv preprint arXiv:1704.00090,
+2017. 2, 6
+[20] Stamatios Georgoulis, Konstantinos Rematas, Tobias
+Ritschel, Mario Fritz, Tinne Tuytelaars, and Luc Van Gool.
+What is around the camera? In Proceedings of the IEEE
+International Conference on Computer Vision, pages 5170–
+5178, 2017. 2
+[21] Ioannis Gkioulekas, Anat Levin, and Todd Zickler. An evaluation of computational imaging techniques for heterogeneous inverse scattering. In European Conference on Computer Vision, pages 685–701. Springer, 2016. 1, 3
+[22] Ioannis Gkioulekas, Shuang Zhao, Kavita Bala, Todd Zickler, and Anat Levin. Inverse volume rendering with material dictionaries. ACM Transactions on Graphics (TOG),
+32(6):1–13, 2013. 1, 3
+[23] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern
+recognition, pages 770–778, 2016. 5
+[24] L. G. Henyey and J. L. Greenstein. Diffuse radiation in the
+Galaxy. The Astrophysical Journal, 93:70–83, Jan. 1941. 3
+[25] Yannick Hold-Geoffroy, Kalyan Sunkavalli, Sunil Hadap,
+Emiliano Gambaretto, and Jean-François Lalonde. Deep
+outdoor illumination estimation. In Proceedings of the
+IEEE conference on computer vision and pattern recognition, pages 7312–7321, 2017. 2
+[26] Chika Inoshita, Yasuhiro Mukaigawa, Yasuyuki Matsushita,
+and Yasushi Yagi. Surface normal deconvolution: Photometric stereo for optically thick translucent objects. In European
+Conference on Computer Vision, pages 346–359. Springer,
+2014. 1
+[27] Phillip Isola, Jun-Yan Zhu, Tinghui Zhou, and Alexei A
+Efros. Image-to-image translation with conditional adversarial networks. CVPR, 2017. 5
+[28] Pramook Khungurn, Daniel Schroeder, Shuang Zhao, Kavita
+Bala, and Steve Marschner. Matching real fabrics with
+micro-appearance models. ACM Trans. Graph., 35(1):1–1,
+2015. 1, 3
+[29] Tejas D Kulkarni, Will Whitney, Pushmeet Kohli, and
+Joshua B Tenenbaum. Deep convolutional inverse graphics
+network. arXiv preprint arXiv:1503.03167, 2015. 1, 3
+[30] Aviad Levis, Yoav Y Schechner, Amit Aides, and Anthony B
+Davis. Airborne three-dimensional cloud tomography. In
+Proceedings of the IEEE International Conference on Computer Vision, pages 3379–3387, 2015. 1, 3
+[31] Ruibo Li, Ke Xian, Chunhua Shen, Zhiguo Cao, Hao Lu, and
+Lingxiao Hang. Deep attention-based classification network
+for robust depth prediction. In Asian Conference on Computer Vision, pages 663–678. Springer, 2018. 2
+[32] Tzu-Mao Li, Miika Aittala, Frédo Durand, and Jaakko Lehtinen. Differentiable monte carlo ray tracing through edge
+sampling. ACM Transactions on Graphics (TOG), 37(6):1–
+11, 2018. 3
+[33] Xiao Li, Yue Dong, Pieter Peers, and Xin Tong. Modeling surface appearance from a single photograph using selfaugmented convolutional neural networks. ACM Transactions on Graphics (ToG), 36(4):1–11, 2017. 2
+[34] Zhengqin Li, Mohammad Shafiei, Ravi Ramamoorthi,
+Kalyan Sunkavalli, and Manmohan Chandraker. Inverse rendering for complex indoor scenes: Shape, spatially-varying
+lighting and svbrdf from a single image. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 2475–2484, 2020. 1, 3
+[35] Zhengqin Li, Kalyan Sunkavalli, and Manmohan Chandraker. Materials for masses: Svbrdf acquisition with a
+single mobile phone image. In Proceedings of the European Conference on Computer Vision (ECCV), pages 72–87,
+2018. 1, 2
+[36] Zhen Li, Lingli Wang, Xiang Huang, Cihui Pan, and Jiaqi
+Yang. Phyir: Physics-based inverse rendering for panoramic
+indoor images. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 12713–
+12723, 2022. 3
+[37] Zhengqin Li, Zexiang Xu, Ravi Ramamoorthi, Kalyan
+Sunkavalli, and Manmohan Chandraker. Learning to reconstruct shape and spatially-varying reflectance from a single
+image. ACM Transactions on Graphics (TOG), 37(6):1–11,
+2018. 1, 2, 3, 5, 6
+[38] Zhengqin Li, Yu-Ying Yeh, and Manmohan Chandraker.
+Through the looking glass: neural 3d reconstruction of transparent shapes. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 1262–
+1271, 2020. 1
+[39] Daniel Lichy, Jiaye Wu, Soumyadip Sengupta, and David W
+Jacobs. Shape and material capture at home. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 6123–6133, 2021. 3
+[40] Andrew Liu, Shiry Ginosar, Tinghui Zhou, Alexei A Efros,
+and Noah Snavely. Learning to factorize and relight a city. In
+Computer Vision–ECCV 2020: 16th European Conference,
+Glasgow, UK, August 23–28, 2020, Proceedings, Part IV 16,
+pages 544–561. Springer, 2020. 1, 3
+[41] Guilin Liu, Duygu Ceylan, Ersin Yumer, Jimei Yang, and
+Jyh-Ming Lien. Material editing using a physically based
+rendering network. In Proceedings of the IEEE International
+Conference on Computer Vision, pages 2261–2269, 2017. 1,
+3
+[42] Abhimitra Meka, Maxim Maximov, Michael Zollhoefer,
+Avishek Chatterjee, Hans-Peter Seidel, Christian Richardt,
+and Christian Theobalt. Lime: Live intrinsic material estimation. In Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition, pages 6315–6324, 2018. 2
+[43] Moustafa Meshry, Dan B Goldman, Sameh Khamis, Hugues
+Hoppe, Rohit Pandey, Noah Snavely, and Ricardo MartinBrualla. Neural rerendering in the wild. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 6878–6887, 2019. 3, 5
+[44] Oliver Nalbach, Elena Arabadzhiyska, Dushyant Mehta, HP Seidel, and Tobias Ritschel. Deep shading: convolutional
+neural networks for screen space shading. In Computer
+graphics forum, volume 36, pages 65–78. Wiley Online Library, 2017. 3, 5
+[45] Giljoo Nam, Joo Ho Lee, Diego Gutierrez, and Min H Kim.
+Practical svbrdf acquisition of 3d objects with unstructured
+flash photography. ACM Transactions on Graphics (TOG),
+37(6):1–12, 2018. 1
+[46] Merlin Nimier-David, Delio Vicini, Tizian Zeltner, and Wenzel Jakob. Mitsuba 2: A retargetable forward and inverse
+renderer. ACM Transactions on Graphics (TOG), 38(6):1–
+17, 2019. 2, 3, 5, 6
+[47] Rohit Pandey, Sergio Orts Escolano, Chloe Legendre, Christian Haene, Sofien Bouaziz, Christoph Rhemann, Paul Debevec, and Sean Fanello. Total relighting: learning to relight
+portraits for background replacement. ACM Transactions on
+Graphics (TOG), 40(4):1–21, 2021. 1, 3
+[48] René Ranftl, Katrin Lasinger, David Hafner, Konrad
+Schindler, and Vladlen Koltun. Towards robust monocular
+depth estimation: Mixing datasets for zero-shot cross-dataset
+transfer. arXiv preprint arXiv:1907.01341, 2019. 2
+[49] Shen Sang and Manmohan Chandraker. Single-shot neural
+relighting and svbrdf estimation. In European Conference on
+Computer Vision, pages 85–101. Springer, 2020. 1, 3, 5
+[50] Soumyadip Sengupta, Jinwei Gu, Kihwan Kim, Guilin Liu,
+David W Jacobs, and Jan Kautz. Neural inverse rendering
+of an indoor scene from a single image. In Proceedings
+of the IEEE/CVF International Conference on Computer Vision, pages 8598–8607, 2019. 1, 3, 5
+[51] Soumyadip Sengupta, Angjoo Kanazawa, Carlos D Castillo,
+and David W Jacobs. Sfsnet: Learning shape, reflectance
+and illuminance of facesin the wild’. In Proceedings of the
+IEEE conference on computer vision and pattern recognition, pages 6296–6305, 2018. 1, 3
+[52] Jian Shi, Yue Dong, Hao Su, and Stella X Yu. Learning
+non-lambertian object intrinsics across shapenet categories.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 1685–1694, 2017. 1, 3
+[53] Bruce Walter, Stephen R Marschner, Hongsong Li, and Kenneth E Torrance. Microfacet models for refraction through
+rough surfaces. Rendering techniques, 2007:18th, 2007. 3
+[54] Zian Wang, Jonah Philion, Sanja Fidler, and Jan Kautz.
+Learning indoor inverse rendering with 3d spatially-varying
+lighting. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision (ICCV), pages 12538–
+12547, October 2021. 3
+[55] Yandong Wen, Weiyang Liu, Bhiksha Raj, and Rita Singh.
+Self-supervised 3d face reconstruction via conditional estimation. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 13289–13298, 2021. 3
+[56] Felix Wimbauer, Shangzhe Wu, and Christian Rupprecht.
+De-rendering 3d objects in the wild. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 18490–18499, 2022. 1
+[57] Jiajun Wu, Joshua B Tenenbaum, and Pushmeet Kohli. Neural scene de-rendering. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pages
+699–707, 2017. 1, 3
+[58] Shangzhe Wu, Ameesh Makadia, Jiajun Wu, Noah Snavely,
+Richard Tucker, and Angjoo Kanazawa. De-rendering
+the world’s revolutionary artefacts. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 6338–6347, 2021. 1, 3, 5
+[59] Zexiang Xu, Sai Bi, Kalyan Sunkavalli, Sunil Hadap, Hao
+Su, and Ravi Ramamoorthi. Deep view synthesis from sparse
+photometric images. ACM Transactions on Graphics (ToG),
+38(4):1–13, 2019. 1
+[60] Zexiang Xu, Kalyan Sunkavalli, Sunil Hadap, and Ravi
+Ramamoorthi. Deep image-based relighting from optimal
+sparse samples. ACM Transactions on Graphics (ToG),
+37(4):1–13, 2018. 1, 3
+[61] Jingjie Yang and Shuangjiu Xiao. An inverse rendering approach for heterogeneous translucent materials. In Proceedings of the 15th ACM SIGGRAPH Conference on VirtualReality Continuum and Its Applications in Industry-Volume
+1, pages 79–88, 2016. 1
+[62] Shunyu Yao, Tzu Ming Harry Hsu, Jun-Yan Zhu, Jiajun Wu,
+Antonio Torralba, William T Freeman, and Joshua B Tenenbaum. 3d-aware scene manipulation via inverse graphics.
+arXiv preprint arXiv:1808.09351, 2018. 1, 3
+[63] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan
+Atzmon, Ronen Basri, and Yaron Lipman. Multiview neural surface reconstruction by disentangling geometry and appearance. arXiv preprint arXiv:2003.09852, 2020. 1
+[64] Ye Yu, Abhimitra Meka, Mohamed Elgharib, Hans-Peter
+Seidel, Christian Theobalt, and William AP Smith. Selfsupervised outdoor scene relighting. In European Conference on Computer Vision, pages 84–101. Springer, 2020. 3,
+5
+[65] Ye Yu and William AP Smith. Inverserendernet: Learning single image inverse rendering. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 3155–3164, 2019. 1, 3
+[66] Cheng Zhang, Bailey Miller, Kai Yan, Ioannis Gkioulekas,
+and Shuang Zhao. Path-space differentiable rendering. ACM
+Trans. Graph., 39(4):143:1–143:19, 2020. 3
+[67] Cheng Zhang, Lifan Wu, Changxi Zheng, Ioannis
+Gkioulekas, Ravi Ramamoorthi, and Shuang Zhao. A differential theory of radiative transfer. ACM Trans. Graph.,
+38(6):227:1–227:16, 2019. 3
+[68] Cheng Zhang, Zihan Yu, and Shuang Zhao. Path-space differentiable rendering of participating media. ACM Transactions on Graphics (TOG), 40(4):1–15, 2021. 3
+[69] Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and
+Noah Snavely. Physg: Inverse rendering with spherical gaussians for physics-based material editing and relighting. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5453–5462, 2021. 1
+[70] Yuxuan Zhang, Wenzheng Chen, Huan Ling, Jun Gao,
+Yinan Zhang, Antonio Torralba, and Sanja Fidler. Image gans meet differentiable rendering for inverse graphics and interpretable 3d neural rendering. arXiv preprint
+arXiv:2010.09125, 2020. 1, 3
+[71] Shuang Zhao, Lifan Wu, Frédo Durand, and Ravi Ramamoorthi. Downsampling scattering parameters for rendering anisotropic media. ACM Transactions on Graphics
+(TOG), 35(6):1–11, 2016. 1, 3
+[72] Hao Zhou, Sunil Hadap, Kalyan Sunkavalli, and David W Jacobs. Deep single-image portrait relighting. In Proceedings
+of the IEEE/CVF International Conference on Computer Vision, pages 7194–7202, 2019. 1, 3
+[73] Jun-Yan Zhu, Taesung Park, Phillip Isola, and Alexei A
+Efros. Unpaired image-to-image translation using cycleconsistent adversarial networks. In Proceedings of the IEEE
+international conference on computer vision, pages 2223–
+2232, 2017. 5
+[74] Rui Zhu, Zhengqin Li, Janarbek Matai, Fatih Porikli, and
+Manmohan Chandraker. Irisformer: Dense vision transformers for single-image inverse rendering in indoor scenes. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 2822–2831, 2022. 3
+arXiv:2305.08336v1 [cs.CV] 15 May 2023
+Supplementary Document for
+Inverse Rendering of Translucent Objects using Physical and Neural Renderers
+A. Introduction
+In this document, we provide the supplementary material of the proposed model. In Section B, we demonstrate
+the additional experiment results. In Section C, we introduce the proposed dataset. In Section D, we introduce our
+scene representation. Section E shows the training details
+of the proposed model. Section F demonstrates our network
+structure.
+B. Additional Results
+B.1. Real-world objects decomposition
+We demonstrate the additional results of real-world
+translucent objects in Figure 1. From the figure, we can obseve that our model estimates reasonable subsurface scattering parameters (d) and the re-rendered images (i) look
+similar to the original input ones (a).
+B.2. Parameter space exploring
+In this section, we explore how well the neural renderer
+learned the subsurface scattering parameter space by two
+experiments. The first one is the linear interpolation of volumetric albedo α. Given a target volumetric albedo and an
+original one, we linearly interpolate them and input to our
+neural renderer. Figure 2 shows that the generated images
+are similar to their GTs. Second, we use the same method
+to edit the extinction coefficient σt from a extremely large
+value to a small value. We demonstrate the results in Figure
+3.
+B.3. Relighting of surface reflectance
+Although relighting is not one of our target applications,
+it is easy to understand how well the normal and depth
+are estimated by showing the results under novel illumination coditions. We demonstrate them in Figure 4. It can
+be observed that although our model fails to capture some
+high frequency details of surface normals, it achieves overall good performance.
+B.4. Comparison with the existing works
+We compare our model with a surface reflectance only
+method that also uses a two-shot setup proposed by Boss et
+al. [?]. They use a novel stage-wise neural network for the
+shape and SVBRDF estimation. However, if we compare
+our model with the pure surface reflectance model, a problem arises. For a fair and equitable comparison, all models’ training and testing data must be the same. However,
+training their model requires the GT value of diffuse albedo,
+which is not a part of the translucent object parameters. So
+we choose to use their own dataset to train the model and
+not compare diffuse albedo during testing. We illustrate the
+results of visual comparison of real-world translucent objects in Figure 5. Considering we do not have the same
+problem setting as their work, the result here is just for user
+reference.
+C. Datasets
+Measuring a large number of real-world translucent objects that include shape, surface reflectance, and subsurface
+scattering parameters is time-consuming. However, training data is an indispensable part of deep neural networks.
+Thus, we created a large-scale synthetic dataset by photorealistic rendering. In the following few subsections, we
+discuss how we prepared the assets for rendering, including
+3D objects, BSDF maps, subsurface scattering parameters,
+and illumination.
+3D Objects Some existing works [?, ?, ?] use the Domain Randomized method to synthesize 3D objects by randomly assembling some simple shapes such as spheres,
+cylinders, cones, etc. For the shape complexity and diversity of our dataset, we collected human-created 3D objects
+from ShapeNet [?] and some other public resources. However, some objects in the ShapeNet have flipped surface normal, which can result in entirely black pixels when intersecting with light. We used a script to delete these objects,
+and finally, 5,847 3D objects were retained. All objects
+were scaled into a cube with a length of 50cm and placed
+at the origin and were randomly rotated, scaled, and translated during the rendering process. We use 5,000 objects for
+training and 857 for testing.
+Roughness and auxiliary normal maps To make a
+meaningful surface reflectance pattern, we collected a large
+number of human-created surface reflectance maps from
+several open-source websites. Each of them contains a nor-
+mal auxiliary map and a roughness map. We use a “smart
+uv mapping” function of Blender [?] to apply the collected
+roughness map and normal maps to objects. The normal
+map was applied on the original 3D object to modify its
+surface normal that makes more realistic surface. Before
+being applied to the objects, all roughness maps and normal maps were randomly resized. In the end, we achieved
+2,745 surface reflectance maps and used 2,470 for training
+and 275 for testing.
+IoR In order to reduce the ambiguity problem of inverse
+rendering, we set the index of refraction (IoR) to a constant (1.5046) and do not estimate it. We choose this value
+because many of our world’s popular materials like glass
+(1.5046), amber (1.55), and polyethylene (1.49) have similar IORs.
+Subsurface scattering parameters Follow the previous work [?], we randomly sampled the subsurface scattering parameters from a uniform distribution with extinction coefficient σt ∈ [0, 32], volumetric albedo α ∈
+[0.3, 0.95], and Henyey-Greenstein phase function parameter g ∈ [0, 0.9].
+Illumination To mimic the completed light condition in
+our real world, we choose environment maps as the light
+source. We used the Laval Indoor HDR dataset [?], which
+consists of 2,357 high-resolution indoor panoramas. During rendering, the pitch and roll were fixed, and they only
+rotated around the yaw axis. We computed a 3×9 Spherical
+Harmonics coefficients for each environment map to supervise our model. In total, 1500 environment maps were used
+for training, and 857 were used for testing.
+Initially, we were going to use a point light to simulate
+the flashlight. However, for some very smooth objects, we
+observed severe noise when using a point light. Therefore,
+we used a tiny sphere area light with a radius of 10cm instead of a point light. The area light is placed 10cm behind
+the camera. Taking into account the different flashlight intensity of various devices in the real world, we also used a
+random radiance between 35 to 75 W · m−2 sr−1 .
+Synthetic dataset For each scene, we used Mitsuba2 [?]
+to render five images: flash image, no-flash image, and three
+altered images. Each scene contains a randomly selected
+object, normal map, roughness map, environment map, and
+subsurface scattering parameters. The camera is placed
+70cm away from the origin on the positive z-axis and looks
+at the origin. For the flash image, we used a small area light
+source behind the viewpoint to simulate the camera flashlight. For the no-flash image, we remove the small area
+light source and slightly change the camera’s look-at direction to simulate the camera shake. For the three altered images, the subsurface scattering parameters were edited from
+those of the original flash image. In addition, we also rendered the ground truth depth, normal, roughness, and binary
+masks for the intermediate supervision. We obtained a total
+of 100,000 training scenes and 17,140 test scenes.
+Real-world dataset For a more comprehensive test of
+our model, we also constructed a real-world dataset consisting of several common translucent objects. We took a
+flash photo and a no-flash photo with a smartphone camera.
+We manually created a binary mask for each object.
+D. Scene Representation
+In this section, we introduce the scene representation of
+our model. Figure 6 illustrates the differences between our
+scene representation and the existing works. The simplification of the scene representation can greatly reduce the problem of ambiguity, thereby reducing the difficulty of parameter estimation. However, at the same time, the scenarios in
+which the model can be applied are also reduced. For example, if we assume a diffuse reflectance like (a) in Figure 6,
+we can only solve the inverse rendering problem of objects
+like paper, rubber, etc. We make the first attempt at an inverse rendering problem involving both surface reflectance
+and subsurface scattering. Most translucent objects in our
+world like wax, plastic, and jade satisfy this scene representation.
+For the surface part, we use a microfacet BSDF model
+proposed by [?]. Let p be a point at the object surface, the
+outgoing light radiance L(wo ) of direction wo at point p is
+defined by:
+L(wo ) =
+Z
+L(wi )fr (wi , wo , R(p), N (p)) max(wi · N (p), 0) dwi +
+Ω
+Z
+0
+0
+0
+0
+L(wi )ft (wi , wo , R(p), N (p)) max(wi · N (p), 0) dwi ,
+Ω0
+(1)
+where Ω is the hemisphere outside the object surface and
+0
+Ω is the hemisphere inside the object. L(wi ) stands for
+the incident light radiance that comes from outside of the
+0
+object and L(wi ) is the incident light radiance that comes
+from inside of the object. fr and ft are the reflectance term
+and transmission term of the microfacet BSDF [?] respectively. R is the roughness map and N is the surface normal
+0
+map. The radiance L(wi ) is the result of multiple scattering
+through the volume before going out of the surface at p. We
+use the Radiative Transport Equation as our homogeneous
+subsurface scattering model:
+0
+0
+0
+(wo · ∇)L(wo ) = − σt L(wo )
+Z
+(2)
+0
+0
+0
+0
++ σs
+L(wi )fp (wi , wo , g) dwi ,
+S2
+0
+0
+where L(wi ) and L(wo ) are the incident and outgoing light
+radiance respectively. The integral domain S 2 is a sphere.
+σt is the extinction coefficient, σs is the scattering coefficient. fp is the Henyey-Greenstein phase function, it has
+one parameter g which defines whether the scattering is forward (g > 0), backward (g < 0), or isotropic (g = 0):
+fp (θ, g) =
+1 − g2
+1
+,
+4π (1 + g 2 − 2g cos θ)3/2
+0
+(3)
+0
+where θ is the angle between wi and wo . In the main paper,
+we estimate the volumetric albedo α which is defined as:
+α = σs /σt .
+(4)
+E. Model Details
+We assume that the size of input images is 256 × 256.
+All pixels and physical parameters including extinction coefficient σt , volumetric albedo α, phase function parameter g, flashlight intensity i are normalized to −1 to 1. The
+network parameters are initialized by Normal Initialization
+with the mean equal to 0 and variance equal to 0.02. During
+the training, we set batch size to 32. We train the model for
+20 epochs by using Adam optimizer [?] with β1 = 0.5, β2
+= 0.999, and learning rate lr = 0.0002 in the first 10 epochs
+and a linear decay in the remaining 10 epochs. We also use
+Batch Normalization to stabilize training. For the loss functions, we empirically set the weight of depth LD to 5 and
+the others to 1.
+F. Network Structure
+We illustrate the detailed network structure in this section. The estimator contains a encoder and several heads.
+We show the structure of the proposed encoder in Table 1,
+Normal, Roughness, and Depth head in Table 2, Scattering and Illumination head in Table 3. Our neural renderer
+contains a Surface Encoder, a Scattering Encoder and a Decoder, we show the structure in Table 5, 4, and 6, respectively.
+Table 1. Network structure of the proposed encoder. Numbers in the building blocks mean kernel size, number of output channel, and
+stride, respectively.
+stage
+input convolution
+downsampling convolution 1
+downsampling convolution 2
+resnet blocks
+building blocks
+
+
+7×7
+64
+1×1
+
+
+BN
+ReLU
+
+
+3 × 3 128 2 × 2
+
+
+BN
+ReLU
+
+
+3 × 3 256 2 × 2
+
+
+BN
+ReLU
+
+
+3 × 3 256 1 × 1
+
+
+BN
+
+
+
+
+ReLU
+
+
+3 × 3 256 1 × 1 × 9
+
+
+
+
+BN
+ReLU
+output size
+H × W × 64
+W
+H
+2 × 2 × 128
+W
+H
+4 × 4 × 256
+H
+W
+4 × 4 × 256
+Table 2. Network structure for the Normal, Roughness, and Depth head. Numbers in the building blocks mean kernel size, number of
+output channel, and stride, respectively. Output channel C for Normal head is 3, and for Roughness and Depth head is 1.
+stage
+upsampling convolution 1
+upsampling convolution 2
+output convolution
+building blocks
+
+
+3 × 3 128 2 × 2
+
+
+BN
+ReLU
+
+
+3×3
+64
+2×2
+
+
+BN
+ReLU
+
+
+7×7 C 1×1
+BN
+output size
+H
+W
+2 × 2 × 128
+H × W × 64
+H ×W ×C
+Table 3. Network structure for the Scattering and Illumination head. Numbers in the building blocks mean kernel size, number of output
+channel, and stride, respectively. Output channel C for SSS head is 7, and for Illumination head is 28.
+stage
+upsampling convolution 1
+upsampling convolution 2
+output linear
+building blocks
+
+
+3 × 3 128 2 × 2
+
+
+BN
+ReLU
+
+
+3×3
+64
+2×2
+
+
+BN
+ReLU
+
+
+C
+BN
+output size
+H
+W
+2 × 2 × 128
+H × W × 64
+C
+Input
+Flash
+(a)
+No-flash
+(b)
+Output
+Mask
+(c)
+SSS
+(d)
+Normal
+(e)
+Depth
+(f)
+Roughness Reflectance Reconstruct
+(g)
+(h)
+(i)
+Figure 1. Inverse rendering results of real-world translucent objects. Our model takes a (a) flash image, a (b) no-flash image, and a (c)
+mask as input. Then, it decomposes them into (d) homogeneous subsurface scattering parameters (denoted as SSS in the figure), (e) surface
+normal, (f) depth, and (g) spatially-varying roughness. We use the predicted parameters to re-render the image that only considers (h) the
+surface reflectance, and (i) both surface reflectance and subsurface scattering. Note that (d) subsurface scattering only contains 7 parameters
+(3 for extinction coefficient σt , 3 for volumetric albedo α, 1 for phase function parameter g), we use these parameters to render a sphere
+using Mitsuba2 [?] for visualization. Brighter areas in the depth map represent a greater distance, and brighter areas in the roughness map
+represent a rougher surface.
+Input
+Target
+Estimated
+Scattering parameter
+interpolated
+GT
+Estimated
+GT
+Figure 2. Linear interpolation results of volumetric albedo α.
+Low 𝜎!
+High 𝜎!
+Low 𝜎!
+Estimated
+Estimated
+Input
+GT
+High 𝜎!
+Input
+GT
+Figure 3. Extinction coefficient σt editing results. We edit the σt of the input translucent object and compare the estimated images with
+their ground truth at two different levels.
+Relit 1
+Relit 2
+Relit 3
+Relit 4
+Relit 5
+Estimated
+Input
+GT
+Estimated
+Input
+GT
+Figure 4. Surface reflectance under different illumination conditions.
+Mask
+No-flash
+Flash
+Mask
+Input
+NULL
+NULL
+NULL
+Boss et al.
+Depth
+Roughness
+Diffuse
+SSS
+NULL
+Reconstruct
+Normal
+Depth
+Roughness
+Diffuse
+SSS
+Reconstruct
+Mask
+No-flash
+Flash
+(c)
+(a)
+Mask
+No-flash
+Flash
+Input
+Input
+Ours
+NULL
+NULL
+NULL
+Boss et al.
+Normal
+Depth
+Flash
+Input
+Ours
+Normal
+No-flash
+Roughness
+Diffuse
+(b)
+SSS
+NULL
+Reconstruct
+Normal
+Depth
+Roughness
+Diffuse
+SSS
+Reconstruct
+(d)
+Figure 5. Visual comparison with Boss et al. [?]. “Diffuse” in the figure means the surface diffuse albedo. “SSS” denote the subsurface
+scattering parameters, we use these parameters to render a sphere using Mitsuba2 [?] for visualization. We select two translucent object
+(a) and (b) with low transparency, and two translucent object (c) and (d) with high transparency for qualitative comparison. Boss et al. [?]
+method only works well for low transparency when subsurface scattering is close to surface scattering (diffuse reflectance). Meanwhile,
+the proposed method works well for both cases.
+Diffuse
+Specular
+wi
+wi
+Glossy
+&Transparent
+Glossy
+wo
+wo
+Glossy
+&Translucent
+wo wi
+wi
+wo
+wo
+(a)
+(b)
+(c)
+(d)
+wo’
+wo’
+(e)
+Figure 6. Illustration of different scene representations. The diffuse material (a) assumes that light is reflected uniformly, while the specular
+material (b) assumes that the incident light and the outgoing light are symmetrical along the surface normal. The glossy material (c) is
+a generalized version of (a) and (b) that assumes the outgoing light follows a distribution. Introducing refraction into (c) results along
+a glossy transparent material (d). However, (d) assumes that the light travels in a straight line inside an object. We focus the glossy
+translucent material (e) which introduces the multiple bounces and multiple paths inside the object.
+Table 4. Network structure for the Scattering Encoder. Numbers in the building blocks mean kernel size, number of output channel, and
+stride, respectively.
+stage
+upsampling convolution 1
+upsampling convolution 2
+upsampling convolution 3
+upsampling convolution 4
+upsampling convolution 5
+upsampling convolution 6
+building blocks
+
+
+4 × 4 1024 2 × 2
+
+
+BN
+ReLU
+
+
+4 × 4 512 2 × 2
+
+
+BN
+ReLU
+
+
+4 × 4 256 2 × 2
+
+
+BN
+ReLU
+
+
+4 × 4 128 2 × 2
+
+
+BN
+ReLU
+
+
+4×4
+64
+2×2
+
+
+BN
+ReLU
+
+
+4×4
+32
+2×2
+
+
+BN
+ReLU
+output size
+H
+W
+128 × 128 × 1024
+H
+W
+64 × 64 × 512
+H
+W
+32 × 32 × 256
+H
+W
+16 × 16 × 128
+H
+W
+8 × 8 × 64
+H
+W
+4 × 4 × 32
+Table 5. Network structure of the Surface Encoder. Numbers in the building blocks mean kernel size, number of output channel, and stride,
+respectively.
+stage
+input convolution
+downsampling convolution 1
+downsampling convolution 2
+building blocks
+
+
+7×7
+64
+1×1
+
+
+BN
+ReLU
+
+
+3 × 3 128 2 × 2
+
+
+BN
+ReLU
+
+
+3 × 3 256 2 × 2
+
+
+BN
+ReLU
+output size
+H × W × 64
+H
+W
+2 × 2 × 128
+H
+W
+4 × 4 × 256
+Table 6. Network structure of the Decoder. Numbers in the building blocks mean kernel size, number of output channel, and stride,
+respectively.
+stage
+resnet blocks
+upsampling convolution 1
+upsampling convolution 2
+output convolution
+building blocks
+
+
+3 × 3 288 1 × 1
+
+
+BN
+
+
+
+
+ReLU
+
+
+3 × 3 288 1 × 1 × 9
+
+
+
+
+BN
+ReLU
+
+
+3 × 3 128 2 × 2
+
+
+BN
+ReLU
+
+
+3×3
+64
+2×2
+
+
+BN
+ReLU
+
+
+7×7 3 1×1
+BN
+output size
+H
+W
+4 × 4 × 256
+H
+W
+2 × 2 × 128
+H × W × 64
+H ×W ×3

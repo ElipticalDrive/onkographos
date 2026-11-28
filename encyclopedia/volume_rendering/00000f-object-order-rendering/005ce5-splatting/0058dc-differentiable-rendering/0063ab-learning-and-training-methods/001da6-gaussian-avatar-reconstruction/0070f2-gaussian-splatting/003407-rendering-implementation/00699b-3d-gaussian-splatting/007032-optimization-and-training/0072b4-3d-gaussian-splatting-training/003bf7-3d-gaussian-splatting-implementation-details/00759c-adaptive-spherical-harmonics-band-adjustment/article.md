@@ -1,0 +1,181 @@
+# Adaptive Spherical Harmonics Band Adjustment
+
+Also called: Adaptive SH Bands, SH Band Culling, Variable SH, Variable SH Bands, Variable Spherical Harmonics Bands
+
+## Overview
+Adaptive Spherical Harmonics Band Adjustment is a memory optimization technique for 3D Gaussian Splatting that assigns a variable number of spherical harmonics (SH) bands (0 to 3) to each primitive based on its view-dependent appearance complexity [S1]. It addresses the wasteful memory utilization of the standard fixed 3-band SH representation, where 76% of the primitive storage is dedicated to SH coefficients, by disabling higher-order bands for primitives that can be adequately represented by a single RGB color or fewer bands [S1]. Unlike [DeSplat](12925-desplat.md) which focuses on spatial redundancy, this method specifically targets the attribute storage overhead of view-dependent shading [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D Gaussian primitives optimized for 15,000 iterations (the point where densification stops), including their positions, covariances, opacities, rotations, base RGB colors, and full 3-band SH coefficients.
+*   **Output:** The same set of primitives, but with SH coefficients pruned to the minimum necessary bands (0, 1, 2, or 3), stored in four separate sets based on band count [S1].
+
+**Data Structures:**
+The primitive structure in the original 3DGS method consists of 14 base floats plus SH coefficients [S1].
+*   Base attributes: Position (3), Scale (3), Rotation (4, quaternion), Opacity (1), RGB Color (3). Total: 14 floats.
+*   SH coefficients: For $b$ bands, the number of coefficients is $\sum_{l=1}^{b} (2l+1)$.
+    *   0 bands: 0 floats.
+    *   1 band: 3 floats.
+    *   2 bands: 3 + 5 = 8 floats.
+    *   3 bands: 8 + 7 = 15 floats.
+*   Total storage per primitive: $14 + 3 \times \sum_{l=1}^{b} (2l+1)$ floats [S1].
+*   Storage layout: Primitives are stored in 4 separate contiguous sets (or lists), one for each band count $b \in \{0, 1, 2, 3\}$ [S1].
+
+**Parameters:**
+*   $\sigma_{th}$: Variance threshold for Approach 1. Default: 0.04 [S1].
+*   $\sigma_{cdist}$: Distance threshold for Approach 2. Default: 0.04 [S1].
+*   Densification stop iteration: The iteration count at which SH analysis begins. Default: 15,000 [S1].
+
+**Steps:**
+1.  **Timing:** Perform the analysis once at the halfway point of training (15,000 iterations) to allow remaining optimization steps to compensate for quality degradation [S1].
+2.  **Evaluation:** For each primitive, evaluate its color from all input training views [S1].
+3.  **Approach 1 (Variance Check):**
+    *   Calculate the average transmittance $\bar{T}_i$ for the primitive in each view $i$ [S1].
+    *   Calculate the weighted average color $\mu_c$ and weighted variance $\sigma_c$ across all $N$ views [S1].
+    *   If $\sigma_c < \sigma_{th}$, assign the primitive 0 SH bands. Replace its base RGB color with $\mu_c$ and discard all SH coefficients [S1].
+4.  **Approach 2 (Distance Check):** (Applied to primitives not already assigned 0 bands, or as a secondary check)
+    *   For each view, evaluate the primitive's color using only the first $b$ SH bands for $b \in \{0, 1, 2, 3\}$, resulting in colors $\mathbf{c}_b$ [S1].
+    *   Calculate the Euclidean distance between the full 3-band color $\mathbf{c}_3$ and the reduced colors $\mathbf{c}_0, \mathbf{c}_1, \mathbf{c}_2$, resulting in distances $d_0, d_1, d_2$ [S1].
+    *   Average each distance value across all views, weighted by average transmittance $\bar{T}_i$ [S1].
+    *   Find the lowest band $b$ such that the average distance is below $\sigma_{cdist}$ [S1].
+    *   Assign the primitive $b$ bands and remove all coefficients for bands higher than $b$ [S1].
+5.  **Storage:** Partition the primitives into 4 sets based on their assigned band count [S1].
+
+**Formulas:**
+*   Average transmittance for primitive in view $i$ [S1]:
+    $$ \bar{T}_i = \frac{\sum_{k=1}^{P} T_{ik}}{P} $$
+    where $P$ is the number of pixels the primitive is splatted to in view $i$, and $T_{ik}$ is the transmittance of the primitive for pixel $k$.
+
+*   Weighted average color $\mu_c$ [S1]:
+    $$ \mu_c = \frac{\sum_{i=1}^{N} \mathbf{c}_i \bar{T}_i}{\sum_{i=1}^{N} \bar{T}_i} $$
+    where $N$ is the number of views containing the primitive, and $\mathbf{c}_i$ is the color of the primitive in view $i$.
+
+*   Weighted color variance $\sigma_c$ [S1]:
+    $$ \sigma_c = \frac{\sum_{i=1}^{N} (\mathbf{c}_i - \mu_c)^2 \bar{T}_i}{\sum_{i=1}^{N} \bar{T}_i} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_sh_band_adjustment(primitives, training_views, num_iterations, densification_stop_iter=15000):
+    """
+    Adjusts SH bands for primitives based on view-dependent variance and error.
+    primitives: List of Gaussian primitives. Each has .pos, .scale, .rot, .opacity, .sh_coeffs (list of floats), .rgb.
+    training_views: List of view data. Each view has .camera, .image, .transmittance_map (for each primitive splat).
+    """
+    if num_iterations < densification_stop_iter:
+        return primitives
+
+    # Group primitives by assigned band count
+    primitives_by_band = {0: [], 1: [], 2: [], 3: []}
+
+    for prim in primitives:
+        # Evaluate color from all views
+        view_colors = []
+        view_transmittances = []
+        
+        for view in training_views:
+            # Get color of this primitive in this view using full SH
+            color = evaluate_sh_color(prim.sh_coeffs, view.camera.direction)
+            view_colors.append(color)
+            
+            # Get average transmittance for this primitive in this view
+            # T_ik is transmittance for pixel k. P is number of pixels splatted.
+            # Assuming view provides a way to get splat coverage or transmittance sum
+            p_count = view.get_pixel_count_for_primitive(prim)
+            t_sum = view.get_transmittance_sum_for_primitive(prim)
+            avg_t = t_sum / p_count if p_count > 0 else 0
+            view_transmittances.append(avg_t)
+
+        # Approach 1: Variance Check
+        total_t = sum(view_transmittances)
+        if total_t > 0:
+            mu_c = sum(c * t for c, t in zip(view_colors, view_transmittances)) / total_t
+            sigma_c = sum((c - mu_c)**2 * t for c, t in zip(view_colors, view_transmittances)) / total_t
+            
+            if sigma_c < 0.04: # sigma_th
+                prim.rgb = mu_c
+                prim.sh_coeffs = [] # 0 bands
+                primitives_by_band[0].append(prim)
+                continue
+
+        # Approach 2: Distance Check
+        # Evaluate colors with 0, 1, 2 bands
+        colors_reduced = []
+        for b in range(4): # 0 to 3
+            reduced_coeffs = prim.sh_coeffs[:sum(2*l+1 for l in range(1, b+1))]
+            colors_b = []
+            for view in training_views:
+                c_b = evaluate_sh_color(reduced_coeffs, view.camera.direction)
+                colors_b.append(c_b)
+            colors_reduced.append(colors_b)
+        
+        # Calculate distances from full color (3 bands)
+        full_colors = colors_reduced[3]
+        distances = []
+        for b in range(3): # 0, 1, 2
+            dists_per_view = []
+            for c_full, c_red in zip(full_colors, colors_reduced[b]):
+                d = euclidean_distance(c_full, c_red)
+                dists_per_view.append(d)
+            # Weighted average distance
+            avg_dist = sum(d * t for d, t in zip(dists_per_view, view_transmittances)) / total_t
+            distances.append(avg_dist)
+        
+        # Find lowest band b where avg_dist < sigma_cdist
+        assigned_band = 3
+        for b in range(3):
+            if distances[b] < 0.04: # sigma_cdist
+                assigned_band = b
+                break
+        
+        # Keep only necessary coefficients
+        num_coeffs = sum(2*l+1 for l in range(1, assigned_band+1))
+        prim.sh_coeffs = prim.sh_coeffs[:num_coeffs]
+        primitives_by_band[assigned_band].append(prim)
+
+    return primitives_by_band
+
+def evaluate_sh_color(sh_coeffs, direction):
+    """
+    Evaluates the color from SH coefficients given a viewing direction.
+    Standard SH evaluation.
+    """
+    # Implementation of SH basis evaluation
+    # Returns RGB vector
+    pass
+
+def euclidean_distance(c1, c2):
+    return sum((a-b)**2 for a, b in zip(c1, c2))**0.5
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method relies on floating-point variance and distance calculations. Small inaccuracies in transmittance or color evaluation can lead to incorrect band assignment [S1].
+*   **Timing:** Applying culling too early (before 15,000 iterations) may prevent the optimizer from compensating for the loss of view-dependent detail, leading to quality degradation [S1].
+*   **Degenerate Input:** If a primitive is not visible in any training view, transmittance is zero, leading to division by zero in variance/distance calculations. Such primitives should be handled or excluded [G].
+
+## Subtopics
+
+### Variable Basis Mapping (VBM)
+A related approach to variable representation, but focuses on mapping basis functions differently rather than just culling SH bands [17312-variable-basis-mapping-vbm.md].
+
+### Pruning and Density Control
+General techniques for removing primitives, often used in conjunction with SH adjustment to further reduce memory [16215-pruning-and-density-control.md].
+
+### Quantization of the Final Representation
+A subsequent step that compresses the remaining attributes (including the variable SH bands) using codebooks, achieving further memory reduction [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The analysis step is performed once at 15,000 iterations. It requires evaluating the SH function for each primitive across all training views, which is $O(N_{primitives} \times N_{views})$ [S1].
+*   **Memory Complexity:** Reduces memory footprint by approximately 87% when combined with other optimizations (like quantization) [S1]. The original 3DGS uses 59 floats per primitive (45 for SH); this method reduces the SH portion significantly [S1].
+*   **Measured Performance:** In the source experiments, the distribution of primitives over bands was 89% for 0 bands, 0.1% for 1 band, 2.7% for 2 bands, and 8.2% for 3 bands [S1].
+*   **Strengths:** Significantly reduces memory usage without substantial quality loss, as most primitives are diffuse and require only 0 bands [S1].
+*   **Limitations:** Disabling SH bands causes small quality degradation, mitigated by the timing of the culling and sparsity loss [S1].
+*   **When to use:** When memory is a constraint and the scene contains many diffuse surfaces.
+*   **When not to use:** When high-fidelity view-dependent effects (e.g., glossy reflections) are critical and cannot be approximated by fewer bands [S1].
+
+## Background
+The method was introduced in "Reducing the Memory Footprint of 3D Gaussian Splatting" (2024) [S1]. It addresses the observation that the standard 3DGS representation uses 76% of its storage for SH coefficients, which is wasteful for diffuse materials [S1]. The authors observed that view-dependent effects can often be modeled by combinations of primitives or lower-order SH bands [S1]. The method is part of a broader strategy that includes redundant primitive removal and codebook quantization to achieve a 27x memory reduction with a 0.21 dB PSNR drop [S1].
+
+## Sources
+[S1] Reducing the Memory Footprint of 3D Gaussian Splatting, https://doi.org/10.1145/3651282, fetched 2026-10-26

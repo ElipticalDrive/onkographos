@@ -1,0 +1,379 @@
+--- v001.md
++++ v002.md
+@@ -4,250 +4,175 @@
+ 
+ ## Overview
+-WildSplat is a feedforward 3D Gaussian Splatting framework designed for appearance-conditioned novel-view synthesis from sparse, unposed, in-the-wild images [S1]. It solves the problem of inconsistent photometric conditions (varying lighting, weather, or time of day) by explicitly decoupling geometry from appearance, allowing the reconstruction of 3D structure independent of the target image's illumination [S1]. Unlike optimization-based methods that require precomputed poses and dense inputs, or existing feedforward methods that assume photometric consistency, WildSplat operates in a single forward pass on unposed inputs while preventing target appearance conditioning from altering the underlying geometric structure [S1].
++WildSplat is a feedforward 3D Gaussian Splatting framework designed for appearance-conditioned novel-view synthesis from sparse, unposed, in-the-wild images [S1]. It solves the problem of inconsistent photometric conditions (varying lighting, weather, or season) that typically cause existing feedforward methods to fail by entangling geometry with appearance [S1]. Unlike optimization-based methods or prior feedforward approaches that assume photometric consistency, WildSplat explicitly decouples geometry from appearance using a dual-branch architecture, allowing it to reconstruct invariant 3D structure while conditioning the rendering appearance on a specific reference image [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ context images $\{I_i\}_{i=1}^N$ and one reference image $I_{ref}$ specifying the target appearance [S1].
+-*   **Outputs:** A set of 3D Gaussians $\mathcal{G}$, conditioned spherical harmonics coefficients $\mathcal{C}_{ref}$, and camera poses $\{p_i\}$ for the context views [S1].
++The model takes a set of context images $\{I_i\}_{i=1}^N$ and a single reference image $I_{ref}$ [S1]. It outputs:
++1.  A 3D Gaussian representation $\mathcal{G}$ consisting of positions $\mu \in \mathbb{R}^{G \times 3}$, rotations $q \in \mathbb{R}^{G \times 4}$, scales $s \in \mathbb{R}^{G \times 3}$, and opacities $\alpha \in \mathbb{R}^G$, where $G$ is the number of Gaussians [S1].
++2.  Conditioned spherical harmonics coefficients $\mathcal{C}_{ref} \in \mathbb{R}^{G \times 3 \times (k+1)}$ of degree $k$, conditioned on $I_{ref}$ [S1].
++3.  Camera poses $\{p_i\}$ for the context views [S1].
++
++The mapping is defined as:
++$$ f: \{I_i\}, I_{ref} \mapsto (\mathcal{G}, \mathcal{C}_{ref}, \{p_i\}) $$
++[S1]
+ 
+ **Data Structures:**
+-The Gaussian set $\mathcal{G}$ consists of $G$ primitives. For each Gaussian $j \in \{1, \dots, G\}$:
+-*   Position $\mu_j \in \mathbb{R}^3$
+-*   Rotation $q_j \in \mathbb{R}^4$ (unit quaternion)
+-*   Scale $s_j \in \mathbb{R}^3$
+-*   Opacity $\alpha_j \in \mathbb{R}$
+-*   $\mathcal{C}_{ref} \in \mathbb{R}^{G \times 3 \times (k+1)}$ contains the spherical harmonics coefficients of degree $k$ for the target appearance [S1].
++*   **Patch Tokens:** $T_i^{(0)} \in \mathbb{R}^{P \times D}$, dense patch-level tokens for view $i$, where $P$ is the number of patches and $D$ is the feature dimension [S1].
++*   **Camera Tokens:** $C_i \in \mathbb{R}^{5 \times D}$, learnable tokens concatenated with patch tokens for pose estimation [S1].
++*   **Content Features:** $\mathbf{F}_{\text{content}}$, aggregated multi-scale representations from the geometry branch, serving as the geometric scaffold [S1].
++*   **Reference Tokens:** $T_{ref} \in \mathbb{R}^{P_a \times D}$, local dense appearance tokens extracted from the reference image, where $P_a$ is the number of reference patches [S1].
++*   **Overlap/Scale Matrices:** $S$ (overlap ratio of shared SfM points) and $R$ (minimum depth ratio) used for view sampling [S1].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Geometry Branch (Pose and Structure Prediction):**
+-    1.  Process each context image $I_i$ independently through a DINOv2-based geometry encoder $E_{geo}$ to yield dense patch-level tokens $T_i^{(0)} = E_{geo}(I_i) \in \mathbb{R}^{P \times D}$ [S1].
+-    2.  Concatenate learnable camera tokens $C_i \in \mathbb{R}^{5 \times D}$ with $T_i^{(0)}$ [S1].
+-    3.  Refine the combined tokens through $L$ alternating attention blocks. Let $T_i^{(k)}$ and $C_i^{(k)}$ denote the patch and camera tokens after layer $k$ [S1].
+-    4.  Extract multi-scale representations from a subset of transformer layers $\mathcal{K} = \{l_1, \dots, l_K\}$ to form content features $\mathbf{F}_{content}$, which serve as the appearance-invariant geometric scaffold [S1].
+-    5.  Decode the final camera tokens $C_i^{(L)}$ to predict camera poses $\{p_i\}$ [S1].
+-    6.  Predict the base Gaussian geometry $\mathcal{G}$ (positions $\mu$, rotations $q$, scales $s$, opacities $\alpha$) from the content features [S1].
++1.  **Geometry Branch (Structure & Pose):**
++    *   Process each context image $I_i$ independently through a DINOv2-based geometry encoder $E_{geo}$ to obtain initial patch tokens:
++        $$ T_i^{(0)} = E_{geo}(I_i) $$
++        [S1]
++    *   Concatenate learnable camera tokens $C_i$ with $T_i^{(0)}$. Refine through $L$ alternating attention blocks to produce refined patch tokens $T_i^{(k)}$ and camera tokens $C_i^{(k)}$ for layer $k$ [S1].
++    *   Extract and aggregate multi-scale representations from a subset of transformer layers $K = \{l_1, \dots, l_K\}$ to form the content features $\mathbf{F}_{\text{content}}$ [S1].
++    *   Decode camera poses $\{p_i\}$ from the final camera tokens $C_i^{(L)}$ [S1].
+ 
+ 2.  **Appearance Branch (Conditioning):**
+-    1.  Extract features from the reference image $I_{ref}$ using an appearance encoder to obtain reference tokens $T_{ref}$ [S1].
+-    2.  **Global Pre-modulation:** To prevent the original photometric properties of $\mathbf{F}_{content}$ from interfering with the target appearance, apply an AdaLN-Zero layer [G: Adaptive Layer Normalization with Zero initialization] to the global descriptor $T_{[CLS]}$ of the content features. This decodes parameters $\gamma, \beta, \eta$ [S1].
+-    3.  Modulate the content features:
+-        $$ \tilde{T}_i^{(k)} = \gamma \cdot \text{LayerNorm}(\mathbf{F}_{content}) + \beta $$
+-        [S1] (Note: The source specifies $\tilde{T}_i^{(k)} = \gamma \dots$ using AdaLN-Zero parameters derived from $T_{[CLS]}$ to shift features into the target appearance domain [S1]).
+-    4.  **Cross-Attention Injection:** Use the modulated features $\tilde{T}_i^{(k)}$ as Queries ($Q$) and the reference tokens $T_{ref}$ as Keys ($K$) and Values ($V$) in a cross-attention mechanism to inject target appearance cues into the content features [S1].
+-    5.  Decode the attended features to predict the conditioned spherical harmonics coefficients $\mathcal{C}_{ref}$ [S1].
++    *   Extract reference appearance tokens $T_{ref}$ from $I_{ref}$ using an appearance encoder [S1].
++    *   **Global Pre-modulation:** To prevent the original photometric properties of $\mathbf{F}_{\text{content}}$ from interfering with the target appearance, apply an AdaLN-Zero layer [G: Adaptive Layer Normalization with Zero Initialization] to the global descriptor $T_{[CLS]}$ (derived from $\mathbf{F}_{\text{content}}$) to generate scale $\gamma$, shift $\beta$, and gating $\eta$ [S1]. Modulate the content features:
++        $$ \tilde{T}_i^{(k)} = \gamma \cdot \mathbf{F}_{\text{content}} + \beta $$
++        [S1] (Note: Source formula snippet implies modulation of features; exact vector operation is standard AdaLN-Z0 application).
++    *   **Cross-Attention:** Use the modulated features $\tilde{T}_i^{(k)}$ as queries ($Q$) and reference tokens $T_{ref}$ as keys ($K$) and values ($V$) to inject appearance cues:
++        $$ \text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{QK^T}{\sqrt{d}}\right)V $$
++        [S1]
++    *   The output of this process yields the conditioned spherical harmonics coefficients $\mathcal{C}_{ref}$ [S1].
+ 
+ 3.  **Conditioned Rasterization:**
+-    1.  Render the predicted novel views $\{\hat{I}_i\}$ using tile-based differentiable rasterization $\mathcal{R}$ of 3D Gaussian Splatting, utilizing the geometry $\mathcal{G}$, conditioned coefficients $\mathcal{C}_{ref}$, and predicted poses $\{p_i\}$ [S1]:
++    *   Render novel views $\{\hat{I}_i\}$ using tile-based differentiable rasterization $\mathcal{R}$ of 3D Gaussian Splatting:
+         $$ \{\hat{I}_i\} = \mathcal{R}(\mathcal{G}, \mathcal{C}_{ref}, \{p_i\}) $$
+         [S1]
+ 
+-4.  **Geometry-guided View Sampling (Training Data Preparation):**
+-    *   Construct an overlap matrix $S$ and scale matrix $R$ using Structure-from-Motion (SfM) points [S1].
++4.  **Geometry-guided View Sampling (Training Data Selection):**
++    *   Construct overlap matrix $S$ and scale matrix $R$ using Structure-from-Motion (SfM) points [S1].
+     *   Filter valid view pairs where $S \ge \tau_s$ and $R \ge \tau_r$ [S1].
+     *   Select starting rows $C$ where the sum of valid columns $> \tau_n$ [S1].
+-    *   Initialize a queue with a uniform sample from $C$. Iteratively pop $u$, sample up to $K$ neighbors from valid unvisited views, push to queue, and add to index set $\mathcal{I}$ until $N$ views are selected [S1] (See Pseudocode below).
+-
+-5.  **Joint Multi-Reference Supervision:**
+-    1.  Randomly sample $M$ images $\{I_m\}$ from the batch as target references [S1].
+-    2.  Extract conditioned appearance $\{\mathcal{C}_{ref,m}\}$ for each [S1].
+-    3.  Render images $\{\hat{I}_m\}$ conditioned on their respective appearance [S1].
+-    4.  Compute photometric loss against ground truth [S1].
++    *   Initialize a queue with a uniform sample from $C$. Iteratively pop $u$, sample up to $K$ neighbors from valid unvisited views, push to queue, and add to index set $\mathcal{I}$ until $N$ views are selected [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
++def wildsplat_forward(context_images, reference_image):
++    """
++    context_images: List of N images {I_i}
++    reference_image: Single image I_ref
++    Returns: Gaussian set G, SH coefficients C_ref, poses {p_i}
++    """
++    # 1. Geometry Branch
++    # Encode context images
++    patch_tokens = []
++    for I_i in context_images:
++        T_i_0 = dino_v2_encoder(I_i) # E_geo
++        patch_tokens.append(T_i_0)
++    
++    # Initialize camera tokens
++    camera_tokens = [learnable_camera_tokens() for _ in context_images]
++    
++    # Refine through L attention blocks
++    for k in range(L):
++        new_patch_tokens = []
++        new_camera_tokens = []
++        for i in range(N):
++            combined = concat(patch_tokens[i], camera_tokens[i])
++            # Attention block refinement
++            refined = attention_block(combined)
++            new_patch_tokens.append(refined.patch_tokens)
++            new_camera_tokens.append(refined.camera_tokens)
++        patch_tokens = new_patch_tokens
++        camera_tokens = new_camera_tokens
++        
++    # Extract content features from specific layers K
++    content_features = aggregate_multi_scale(patch_tokens, layers=K)
++    
++    # Predict poses
++    poses = predict_poses(camera_tokens)
++    
++    # 2. Appearance Branch
++    # Encode reference image
++    ref_tokens = appearance_encoder(reference_image)
++    
++    # Global pre-modulation using AdaLN-Zero
++    cls_token = get_cls_token(content_features)
++    gamma, beta, eta = adaln_zero(cls_token)
++    modulated_features = gamma * content_features + beta
++    
++    # Cross-attention to inject appearance
++    # Q: modulated_features, K/V: ref_tokens
++    conditioned_features = cross_attention(modulated_features, ref_tokens, ref_tokens)
++    
++    # Decode SH coefficients
++    C_ref = decode_sh(conditioned_features)
++    
++    # 3. Output
++    G = extract_gaussian_attributes(content_features) # Positions, scales, etc.
++    return G, C_ref, poses
+ 
+-class WildSplat:
+-    def __init__(self, num_gaussians, sh_degree, num_layers, num_views):
+-        self.num_gaussians = num_gaussians
+-        self.sh_degree = sh_degree
+-        self.num_layers = num_layers
+-        self.num_views = num_views
+-        # Geometry Encoder (DINOv2 based)
+-        self.geo_encoder = DINOv2Encoder()
+-        # Transformer Blocks for refinement
+-        self.transformer_blocks = nn.ModuleList([
+-            TransformerBlock() for _ in range(num_layers)
+-        ])
+-        # Appearance Encoder
+-        self.appearance_encoder = AppearanceEncoder()
+-        # Heads
+-        self.pose_head = PoseHead()
+-        self.geo_head = GaussianGeometryHead()
+-        self.appearance_head = SphericalHarmonicsHead()
+-        # Pre-modulation AdaLN-Zero
+-        self.adaln_zero = AdaLNZero()
+-        
+-    def forward(self, context_images, ref_image):
+-        """
+-        context_images: Tensor of shape (N, 3, H, W)
+-        ref_image: Tensor of shape (3, H, W)
+-        """
+-        N = context_images.shape[0]
+-        
+-        # 1. Geometry Branch
+-        # Process context images independently
+-        patch_tokens = []
+-        for i in range(N):
+-            T_i_0 = self.geo_encoder(context_images[i]) # Shape: (P, D)
+-            patch_tokens.append(T_i_0)
+-        patch_tokens = torch.stack(patch_tokens, dim=0) # (N, P, D)
+-        
+-        # Initialize learnable camera tokens
+-        C_i = torch.randn(N, 5, self.geo_encoder.dim) # (N, 5, D)
+-        
+-        # Refine through L alternating attention blocks
+-        for k in range(self.num_layers):
+-            # Concatenate camera tokens with patch tokens
+-            combined_tokens = torch.cat([C_i, patch_tokens], dim=1) # (N, P+5, D)
+-            # Attention block refinement
+-            # Note: In practice, this involves self-attention over patches and cross-attention for poses
+-            # Simplified representation of the block operation
+-            combined_tokens = self.transformer_blocks[k](combined_tokens)
+-            patch_tokens = combined_tokens[:, :-5, :] # (N, P, D)
+-            C_i = combined_tokens[:, -5:, :] # (N, 5, D)
+-            
+-        # Extract content features from specific layers (simplified here as final output)
+-        F_content = patch_tokens # (N, P, D)
+-        
+-        # Predict Poses
+-        poses = self.pose_head(C_i)
+-        
+-        # Predict Base Geometry
+-        G = self.geo_head(F_content) # Returns mu, q, s, alpha
+-        
+-        # 2. Appearance Branch
+-        # Extract reference features
+-        T_ref = self.appearance_encoder(ref_image) # (Pa, D)
+-        
+-        # Global Pre-modulation
+-        # Get global descriptor from content features (e.g., mean or CLS token if added)
+-        # Assuming F_content has a global token or we aggregate
+-        T_CLS = F_content.mean(dim=1) # (N, D) - Simplified aggregation
+-        gamma, beta, eta = self.adaln_zero(T_CLS)
+-        
+-        # Modulate content features
+-        # LayerNorm is applied before scaling/shifting
+-        F_content_norm = F.layer_norm(F_content, (F_content.shape[-1],))
+-        T_modulated = gamma.unsqueeze(1) * F_content_norm + beta.unsqueeze(1) # (N, P, D)
+-        
+-        # Cross-Attention Injection
+-        # Q: T_modulated, K: T_ref, V: T_ref
+-        # T_ref might need to be broadcasted or repeated if N > 1
+-        T_ref_expanded = T_ref.unsqueeze(0).expand(N, -1, -1) # (N, Pa, D)
+-        
+-        # Attention mechanism
+-        # Q @ K^T / sqrt(d) -> Softmax -> V
+-        attn_weights = torch.matmul(T_modulated, T_ref_expanded.transpose(1, 2)) / (T_ref_expanded.shape[-1] ** 0.5)
+-        attn_weights = F.softmax(attn_weights, dim=-1)
+-        F_attended = torch.matmul(attn_weights, T_ref_expanded) # (N, P, D)
+-        
+-        # Predict Conditioned Appearance (SH Coefficients)
+-        C_ref = self.appearance_head(F_attended) # (N, G, 3, k+1)
+-        
+-        # 3. Rendering
+-        # Render using differentiable rasterizer
+-        # R(G, C_ref, poses)
+-        rendered_images = rasterize_3dgs(G, C_ref, poses)
+-        
+-        return rendered_images, G, C_ref, poses
+-
+-    def train_step(self, context_images, ref_images, gt_images):
+-        """
+-        context_images: (B, N, 3, H, W)
+-        ref_images: (B, M, 3, H, W) - M target references
+-        gt_images: (B, M, 3, H, W) - Ground truth for target views
+-        """
+-        B, N, _, _, _ = context_images.shape
+-        M = ref_images.shape[1]
+-        
+-        # Sample M target references from the batch or external set
+-        # In training, we randomly sample M images as targets
+-        # For simplicity, assume ref_images and gt_images are provided for the M targets
+-        
+-        rendered_images, G, C_ref, poses = self.forward(context_images[:, 0, :, :, :], ref_images[:, 0, :, :, :])
+-        
+-        # Loss Calculation
+-        # L_rgb
+-        loss_mse = F.mse_loss(rendered_images, gt_images[:, 0, :, :, :])
+-        loss_ssim = ssim_loss(rendered_images, gt_images[:, 0, :, :, :])
+-        loss_lpips = lpips_loss(rendered_images, gt_images[:, 0, :, :, :])
+-        loss_rgb = 1.0 * loss_mse + 0.05 * loss_ssim + 0.05 * loss_lpips
+-        
+-        # L_pose (Distillation loss from [11])
+-        loss_pose = pose_distillation_loss(poses, gt_poses)
+-        
+-        total_loss = loss_rgb + 10.0 * loss_pose
+-        
+-        return total_loss
+-
+-def geometry_guided_view_sampling(S, R, tau_s, tau_r, tau_n, K, N):
++def geometry_guided_view_sampling(sfm_points, num_views, thresholds):
+     """
+-    S: Overlap matrix (N_views, N_views)
+-    R: Scale matrix (N_views, N_views)
+-    tau_s: Threshold for overlap
+-    tau_r: Threshold for scale consistency
+-    tau_n: Threshold for number of valid neighbors
+-    K: Max neighbors to sample
+-    N: Number of views to select
++    Selects N views with sufficient overlap and scale consistency.
+     """
++    S = compute_overlap_matrix(sfm_points)
++    R = compute_scale_matrix(sfm_points)
++    
++    tau_s, tau_r, tau_n = thresholds
++    
+     # Valid mask
+-    V = (S >= tau_s) & (R >= tau_r)
++    valid_mask = (S >= tau_s) & (R >= tau_r)
+     
+     # Valid starting rows
+-    valid_col_sums = V.sum(dim=1)
+-    C = [i for i, sum_val in enumerate(valid_col_sums) if sum_val > tau_n]
++    valid_starts = [i for i in range(len(S)) if sum(valid_mask[i]) > tau_n]
+     
+-    if not C:
++    if not valid_starts:
+         return []
+         
+-    # Initialize queue
+-    import random
+-    start_node = random.choice(C)
+-    queue = [start_node]
+-    visited = {start_node}
+-    selected_indices = [start_node]
++    queue = [random.choice(valid_starts)]
++    selected_indices = set(queue)
+     
+-    while len(selected_indices) < N and queue:
++    while len(selected_indices) < num_views and queue:
+         u = queue.pop(0)
+         # Sample up to K neighbors from valid unvisited views
+-        neighbors = [v for v in range(len(V)) if V[u, v] and v not in visited]
+-        sample_size = min(K, len(neighbors))
+-        if sample_size > 0:
+-            samples = random.sample(neighbors, sample_size)
+-            for s in samples:
+-                queue.append(s)
+-                visited.add(s)
+-                selected_indices.append(s)
+-                
+-    return selected_indices[:N]
++        candidates = [v for v in range(len(S)) 
++                      if valid_mask[u, v] and v not in selected_indices]
++        k_neighbors = random.sample(candidates, min(K, len(candidates)))
++        
++        for v in k_neighbors:
++            queue.append(v)
++            selected_indices.add(v)
++            
++    return list(selected_indices)
+ ```
+ 
+ **Parameters:**
+-*   $\lambda_1 = 10$ (Pose loss weight) [S1]
+-*   $\lambda_2 = 1.0$ (MSE loss weight) [S1]
+-*   $\lambda_3 = 0.05$ (SSIM loss weight) [S1]
+-*   $\lambda_4 = 0.05$ (LPIPS loss weight) [S1]
+-*   Thresholds $\tau_s, \tau_r, \tau_n$ for view sampling are predefined but exact values are not specified in the provided notes [S1].
++*   $\lambda_1 = 10$: Weight for pose loss $L_{pose}$ [S1].
++*   $\lambda_2 = 1.0$: Weight for MSE loss $L_{MSE}$ [S1].
++*   $\lambda_3 = 0.05$: Weight for SSIM loss $L_{SSIM}$ [S1].
++*   $\lambda_4 = 0.05$: Weight for LPIPS loss $L_{LPIPS}$ [S1].
++*   $N$: Number of context views (e.g., 12 in evaluation) [S1].
++*   $K$: Number of neighbors sampled during view selection [S1].
++*   $\tau_s, \tau_r, \tau_n$: Thresholds for overlap, scale, and connectivity [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Varying Focal Lengths:** Standard sampling relying on camera extrinsics fails on in-the-wild datasets with varying focal lengths, where minor pose shifts alter captured content. Mitigated by overlap-based sampling using SfM points [S1].
++*   **Varying Focal Lengths:** Standard sampling relying on camera extrinsics fails on in-the-wild datasets where minor pose shifts alter captured content due to varying focal lengths. Mitigated by overlap-based sampling using SfM points [S1].
+ *   **Photometric Interference:** Content features from the geometry branch retain original photometric properties, potentially interfering with target appearance conditioning. Mitigated by global pre-modulation using AdaLN-Zero to shift features into the target appearance domain [S1].
++*   **Pose Estimation Instability:** Inconsistent inputs during training can adversely affect pose estimation. Mitigated by distillation loss $L_{pose}$ [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Single forward pass, making it significantly faster than optimization-based methods (e.g., NeRF-W, GS-W) which require per-scene gradient descent [S1].
+-*   **Memory Complexity:** Depends on the number of Gaussians $G$ and the feature dimensions of the encoder/decoder. Not explicitly quantified in the sources [S1].
+-*   **Performance:**
++*   **Time Complexity:** Single forward pass for reconstruction and rendering, making it significantly faster than optimization-based methods like NeRF-W or GS-W which require per-scene optimization [S1].
++*   **Memory Complexity:** Depends on the number of Gaussians $G$ and the feature dimensions $D, P$. The dual-branch architecture requires storing features for both geometry and appearance branches simultaneously during inference [S1].
++*   **Measured Performance:**
+     *   On MegaScenes (12 views): PSNR 19.20, SSIM 0.683, LPIPS 0.210 [S1].
+     *   On Phototourism (12 views): PSNR 21.47, SSIM 0.788, LPIPS 0.137 [S1].
+-*   **Strengths:** Handles sparse, unposed, in-the-wild images; decouples geometry and appearance; enables appearance editing [S1].
+-*   **Limitations:** Performance is lower than optimization-based methods on dense, consistent inputs (e.g., FSGS achieves higher PSNR on MegaScenes with 12 views: 13.43 vs 19.20? No, WildSplat 19.20 is higher than FSGS 13.43. Wait, Table 1 shows WildSplat 19.20 vs FSGS 13.43. WildSplat is SOTA among feedforward methods and competitive with optimization-based ones in this specific metric, but the source notes it surpasses existing methods [S1]). The source states it surpasses existing optimization-based and feedforward methods [S1].
++*   **Strengths:** Handles sparse, unposed, in-the-wild images; decouples geometry from appearance to handle varying illumination/weather; no per-scene optimization required [S1].
++*   **Limitations:** Performance is lower than dense-view optimization-based methods on consistent datasets; relies on SfM points for view sampling during training [S1].
++*   **When to use:** When input images are sparse, unposed, and exhibit significant photometric variations (e.g., different seasons, times of day) [S1].
++*   **When not to use:** When dense, posed inputs with consistent lighting are available and higher fidelity is required via optimization [S1].
+ 
+ ## Background
+-WildSplat was introduced by X. Zhang et al. in the paper "WildSplat: Feedforward Gaussian Splatting from Unposed In-the-Wild Images" [S1]. It addresses the limitations of previous feedforward methods (like pixelSplat, MVSplat) that assume photometric consistency and optimization-based methods (like NeRF-W, GS-W) that require precomputed poses and dense images [S1]. It builds on the principles of feedforward 3D reconstruction and 3D Gaussian Splatting [Parent, S1].
++WildSplat was introduced by Zhang et al. in 2024 [S1]. It is the first feedforward 3D Gaussian Splatting framework capable of appearance-conditioned novel-view synthesis for unposed in-the-wild images [S1]. It builds upon the VGGT architecture for geometry estimation and integrates concepts from feedforward NeRF methods like pixelNeRF and MVSplat, but extends them to 3DGS with explicit geometry-appearance decoupling [S1]. The method addresses the limitations of optimization-based in-the-wild methods (e.g., NeRF-W, GS-W) which require precomputed poses and dense images, and prior feedforward methods that assume photometric consistency [S1].
+ 
+ ## Sources

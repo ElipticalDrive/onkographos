@@ -1,0 +1,229 @@
+--- v002.md
++++ v003.md
+@@ -4,123 +4,124 @@
+ 
+ ## Overview
+-The OpenVDB Field Writer is a Python-based serialization technique that converts 3D regular volumetric grids into the OpenVDB sparse tree format for export to VFX software like Blender [S2]. It differs from dense grid export by leveraging OpenVDB's sparse tree structure to efficiently store volumetric data and prune background values [S2]. It builds on [OpenVDB File Format Parsing](5173-openvdb-file-format-parsing.md) by providing the high-level API to construct and persist the grid structure [S2].
++The OpenVDB Field Writer is a Python-based serialization technique that converts 3D regular volumetric grids into the OpenVDB sparse tree format for export to VFX software like Blender [S2]. It differs from dense grid export by leveraging OpenVDB's sparse tree structure to efficiently store volumetric data and prune background values [S2]. It builds on [OpenVDB File Format Parsing](5173-openvdb-file-format-parsing.md) by providing the high-level API and binary serialization steps to construct and persist the grid structure [S1, unofficial][S2].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A 3D `numpy` array (`grid`), origin coordinates (`origin`), delta spacing (`delta`), optional tolerance (`tolerance`), grid name (`name`), and metadata (`metadata`) [S2].
+-*   **Output:** A `.vdb` file on disk containing the serialized OpenVDB grid [S2].
++The input consists of a 3D `numpy` array (`grid`), origin coordinates (`origin`), delta spacing (`delta`), optional tolerance (`tolerance`), grid name (`name`), and metadata (`metadata`) [S2]. The output is a `.vdb` file on disk containing the serialized OpenVDB grid [S2].
+ 
+ **Data Structures**
+-The writer uses two predefined dictionaries to map between NumPy and OpenVDB types:
+-1.  `_DTYPES_NP2VDB`: Maps `numpy.dtype` to a list of candidate OpenVDB grid type strings or `DownCastTo` markers [S2].
+-    *   `np.dtype('bool'): ['BoolGrid']`
+-    *   `np.dtype('int8'): ['Int32Grid', 'FloatGrid']`
+-    *   `np.dtype('uint8'): ['Int32Grid', 'FloatGrid']`
+-    *   `np.dtype('int16'): ['Int32Grid', 'FloatGrid']`
+-    *   `np.dtype('uint16'): ['Int32Grid', 'FloatGrid']`
+-    *   `np.dtype('int32'): ['Int32Grid', DownCastTo('FloatGrid')]`
+-    *   `np.dtype('uint32'): [DownCastTo('Int32Grid'), DownCastTo('FloatGrid')]`
+-    *   `np.dtype('int64'): ['Int64Grid', DownCastTo('FloatGrid')]`
+-    *   `np.dtype('uint64'): ['Int64Grid', DownCastTo('FloatGrid')]`
+-    *   `np.dtype('float16'): ['HalfGrid', 'FloatGrid']`
+-    *   `np.dtype('float32'): ['FloatGrid']`
+-    *   `np.dtype('float64'): ['DoubleGrid', DownCastTo('FloatGrid')]` [S2]
+-2.  `_DTYPES_VDB2NP`: Maps OpenVDB grid type strings to `numpy.dtype` [S2].
+-    *   `'BoolGrid': np.dtype('bool')`
+-    *   `'Int32Grid': np.dtype('int32')`
+-    *   `'Int64Grid': np.dtype('int64')`
+-    *   `'FloatGrid': np.dtype('float32')`
+-    *   `'DoubleGrid': np.dtype('float64')`
+-    *   `'HalfGrid': np.dtype('float16')` [S2]
+-3.  `DownCastTo`: A dataclass wrapper with a single field `gridType` (str) used to mark precision-loss fallback grid types [S2].
++The writer uses two predefined dictionaries to map between NumPy and OpenVDB types [S2]. `_DTYPES_NP2VDB` maps `numpy.dtype` to a list of candidate OpenVDB grid type strings or `DownCastTo` markers [S2]. It includes `np.dtype('bool'): ['BoolGrid']`, `np.dtype('int8'): ['Int32Grid', 'FloatGrid']`, `np.dtype('uint8'): ['Int32Grid', 'FloatGrid']`, `np.dtype('int16'): ['Int32Grid', 'FloatGrid']`, `np.dtype('uint16'): ['Int32Grid', 'FloatGrid']`, `np.dtype('int32'): ['Int32Grid', DownCastTo('FloatGrid')]`, `np.dtype('uint32'): [DownCastTo('Int32Grid'), DownCastTo('FloatGrid')]`, `np.dtype('int64'): ['Int64Grid', DownCastTo('FloatGrid')]`, `np.dtype('uint64'): ['Int64Grid', DownCastTo('FloatGrid')]`, `np.dtype('float16'): ['HalfGrid', 'FloatGrid']`, `np.dtype('float32'): ['FloatGrid']`, and `np.dtype('float64'): ['DoubleGrid', DownCastTo('FloatGrid')]` [S2]. `_DTYPES_VDB2NP` maps OpenVDB grid type strings to `numpy.dtype`, including `'BoolGrid': np.dtype('bool')`, `'Int32Grid': np.dtype('int32')`, `'Int64Grid': np.dtype('int64')`, `'FloatGrid': np.dtype('float32')`, `'DoubleGrid': np.dtype('float64')`, and `'HalfGrid': np.dtype('float16')` [S2]. `DownCastTo` is a dataclass wrapper with a single field `gridType` (str) used to mark precision-loss fallback grid types [S2].
+ 
+ **Parameters**
+-*   `grid`: `numpy.ndarray`, 3D array containing volumetric data [S2].
+-*   `origin`: `numpy.ndarray`, cartesian coordinates of the center of the grid cell at index `[0,0,0]` [S2].
+-*   `delta`: `numpy.ndarray`, 1D length-3 array or 3x3 diagonal matrix defining grid spacing/cell dimensions [S2].
+-*   `tolerance`: `float`, threshold; values below this are treated as background for sparse storage. Default is `None` [S2].
+-*   `name`: `str`, identifier for the grid. Default is `'density'` [S2].
+-*   `metadata`: `dict`, additional key-value pairs to embed in the VDB file header [S2].
++`grid` is a 3D numpy array containing volumetric data [S2]. `origin` specifies the cartesian coordinates of the center of the grid cell at index `[0,0,0]` [S2]. `delta` is a 1D length-3 array or 3x3 diagonal matrix defining grid spacing or cell dimensions along each axis [S2]. `tolerance` is a float threshold; values below this are treated as background for sparse storage, defaulting to `None` [S2]. `name` is a string identifier for the grid, defaulting to `'density'` [S2]. `metadata` is a dictionary of additional key-value pairs to embed in the VDB file header [S2].
+ 
+ **Steps**
+-1.  **Initialization:** Instantiate `OpenVDBField` with `grid`, `origin`, `delta`, `name`, `tolerance`, and `metadata` [S2].
+-2.  **Validation:** Verify `grid` is 3-dimensional. Raise `ValueError` if not [S2].
+-3.  **Delta Validation:** Validate `delta`. If `delta` is a matrix, enforce orthorhombic constraint (no non-zero off-diagonal elements). Raise `ValueError` if violated [S2].
+-4.  **Type Mapping:** Look up `grid.dtype` in `_DTYPES_NP2VDB`. Select the first available grid type. Raise `TypeError` if dtype is unsupported [S2].
+-5.  **Grid Instantiation:** Instantiate the selected OpenVDB grid class (e.g., `openvdb.FloatGrid`) [S2].
+-6.  **Population:** Populate the OpenVDB grid with data from the numpy array [S2].
+-7.  **Pruning:** If `tolerance` is provided, apply tolerance-based pruning: values below the threshold are treated as background and stored sparsely [S2].
+-8.  **Transform and Metadata:** Attach `grid` metadata and set the spatial transform (origin and delta) on the OpenVDB grid object [S2].
+-9.  **Write:** Write the constructed OpenVDB grid to a `.vdb` file on disk [S2].
++1. Initialize the writer with `grid`, `origin`, `delta`, `name`, `tolerance`, and `metadata` [S2].
++2. Validate that `grid` is 3-dimensional [S2].
++3. Validate `delta`; if it is a matrix, enforce an orthorhombic constraint (no non-zero off-diagonal elements) [S2].
++4. Map the `grid`'s dtype to a target OpenVDB grid type using `_DTYPES_NP2VDB`, falling back to downcast types if necessary [S2].
++5. Instantiate the selected OpenVDB grid class and populate it with the numpy array data [S2].
++6. Apply tolerance-based pruning: values below the tolerance threshold are treated as background and stored sparsely [S2].
++7. Attach grid metadata and set the spatial transform (origin and delta) on the OpenVDB grid object [S2].
++8. Write the constructed OpenVDB grid to a `.vdb` file on disk [S2].
++9. Serialize the grid to the binary file format: write the file header, grid section, grid metadata, grid transform, tree topology, and tree data [S1, unofficial].
+ 
+ **Pseudocode**
+ ```python
+-import numpy as np
+-from dataclasses import dataclass
++import struct
++import uuid
+ 
+-@dataclass
+-class DownCastTo:
+-    gridType: str
++def write_vdb(filename, grid, origin, delta, name, metadata, tolerance=None):
++    # 1. File Header
++    with open(filename, 'wb') as f:
++        f.write(b'\x20\x42\x44\x56\x00\x00\x00\x00')  # Magic number
++        f.write(struct.pack('<I', 224))  # File version
++        f.write(struct.pack('<II', 8, 1))  # Library major/minor version
++        f.write(struct.pack('<B', 0))  # Grid offsets flag
++        f.write(uuid.uuid4().bytes)  # 128-bit UUID
++        f.write(struct.pack('<I', len(metadata)))  # Metadata count
++        for key, val in metadata.items():
++            write_length_string(f, key)
++            write_length_string(f, 'string')  # Simplified type assumption
++            write_length_string(f, str(val))
++        f.write(struct.pack('<I', 1))  # Grid count
+ 
+-class OpenVDBField:
+-    _DTYPES_NP2VDB = {
+-        np.dtype("bool"): ["BoolGrid"],
+-        np.dtype("int8"): ["Int32Grid", "FloatGrid"],
+-        np.dtype("uint8"): ["Int32Grid", "FloatGrid"],
+-        np.dtype("int16"): ["Int32Grid", "FloatGrid"],
+-        np.dtype("uint16"): ["Int32Grid", "FloatGrid"],
+-        np.dtype("int32"): ["Int32Grid", DownCastTo("FloatGrid")],
+-        np.dtype("uint32"): [DownCastTo("Int32Grid"), DownCastTo("FloatGrid")],
+-        np.dtype("int64"): ["Int64Grid", DownCastTo("FloatGrid")],
+-        np.dtype("uint64"): ["Int64Grid", DownCastTo("FloatGrid")],
+-        np.dtype("float16"): ["HalfGrid", "FloatGrid"],
+-        np.dtype("float32"): ["FloatGrid"],
+-        np.dtype("float64"): ["DoubleGrid", DownCastTo("FloatGrid")],
+-    }
++        # 2. Grid Section
++        write_length_string(f, name)
++        write_length_string(f, 'Tree_float_5_4_3_HalfFloat')  # Grid type
++        f.write(struct.pack('<I', 0))  # Instance parent
++        current_pos = f.tell() + 24
++        f.write(struct.pack('<Q', current_pos))  # Grid descriptor offset
++        f.write(struct.pack('<QQ', 0, 0))  # Grid start/end offsets
++        f.write(struct.pack('<I', 0))  # Compression flag
+ 
+-    def __init__(self, grid=None, origin=None, delta=None, name="density", tolerance=None, metadata=None):
+-        if grid.ndim != 3:
+-            raise ValueError(f"OpenVDB requires a 3D grid, got {grid.ndim}D")
+-        delta_arr = np.asarray(delta)
+-        if delta_arr.ndim == 2:
+-            if not np.allclose(delta_arr, np.diag(np.diag(delta_arr))):
+-                raise ValueError("Delta matrix must be diagonal (orthorhombic)")
+-        self.grid = grid
+-        self.origin = origin
+-        self.delta = delta_arr
+-        self.name = name
+-        self.tolerance = tolerance
+-        self.metadata = metadata if metadata is not None else {}
+-        self._select_grid_type()
++        # 3. Grid Metadata
++        f.write(struct.pack('<I', 4))  # Metadata entries count
++        write_metadata_entry(f, 'class', 'string', 'unknown')
++        write_metadata_entry(f, 'file_compression', 'string', 'none')
++        write_metadata_entry(f, 'is_saved_as_half_float', 'bool', True)
++        write_metadata_entry(f, 'name', 'string', name)
+ 
+-    def _select_grid_type(self):
+-        dtype = self.grid.dtype
+-        if dtype not in self._DTYPES_NP2VDB:
+-            raise TypeError(f"Unsupported numpy dtype: {dtype}")
+-        self.candidates = self._DTYPES_NP2VDB[dtype]
+-        self.selected_type = self.candidates[0]
++        # 4. Grid Transform
++        write_length_string(f, 'AffineMap')
++        # 4x4 affine matrix in row-major order (right-multiplication convention)
++        matrix = [
++            delta[0], 0, 0, origin[0],
++            0, delta[1], 0, origin[1],
++            0, 0, delta[2], origin[2],
++            0, 0, 0, 1
++        ]
++        for val in matrix:
++            f.write(struct.pack('<d', val))
+ 
+-    def write(self, filename):
+-        # Instantiate native OpenVDB grid class and populate with numpy data
+-        # Apply tolerance-based pruning if self.tolerance is not None
+-        # Attach metadata and set spatial transform (origin and delta)
+-        # Write the constructed grid to filename
+-        pass
++        # 5. Tree Topology
++        f.write(struct.pack('<I', 1))  # Unknown flag
++        f.write(struct.pack('<f', 0.0))  # Background value
++        f.write(struct.pack('<I', 0))  # Top-level tiles
++        f.write(struct.pack('<I', 1))  # Root children (one 5-node)
++
++        # 5-node header
++        f.write(struct.pack('<iii', 0, 0, 0))  # Origin
++        f.write(b'\x00' * 4096)  # Child mask (512 u64s)
++        f.write(b'\x00' * 4096)  # Value mask (512 u64s)
++        f.write(struct.pack('<B', 6))  # Compression indicator
++        f.write(b'\x00' * 65536)  # Values (32768 * 2 bytes)
++
++        # 4-node header
++        f.write(b'\x00' * 512)  # Child mask (64 u64s)
++        f.write(b'\x00' * 512)  # Value mask (64 u64s)
++        f.write(struct.pack('<B', 6))  # Compression indicator
++        f.write(b'\x00' * 8192)  # Values (4096 * 2 bytes)
++
++        # 3-node header
++        f.write(b'\x00' * 64)  # Value mask (8 u64s)
++
++        # 6. Tree Data
++        f.write(b'\x00' * 64)  # Value mask again
++        f.write(struct.pack('<B', 6))  # Compression indicator
++        # Write 512 f16 voxel values
++        for val in grid.flatten():
++            f.write(struct.pack('<e', val))
++
++def write_length_string(f, s):
++    encoded = s.encode('utf-8')
++    f.write(struct.pack('<I', len(encoded)))
++    f.write(encoded)
++
++def write_metadata_entry(f, name, type_str, data):
++    write_length_string(f, name)
++    write_length_string(f, type_str)
++    if type_str == 'bool':
++        f.write(struct.pack('<I', 1))
++        f.write(struct.pack('<B', 1 if data else 0))
++    else:
++        write_length_string(f, str(data))
+ ```
+ 
+ **Edge Cases and Pitfalls**
+-*   **Non-orthorhombic cells:** If `delta` contains non-zero off-diagonal elements, a `ValueError` is raised [S2].
+-*   **Empty grids:** If the input grid has no active voxels (or results in an empty bounding box), a `RuntimeWarning` is triggered, and the resulting array shape is `(0, 0, 0)` [S2].
+-*   **Unsupported dtypes:** If the numpy dtype is not in `_DTYPES_NP2VDB`, a `TypeError` is raised [S2].
+-*   **Metadata errors:** Unreadable metadata keys during extraction trigger a `UserWarning` [S2].
++Non-orthorhombic cells raise a `ValueError` [S2]. Empty grids with no active voxels return an empty numpy array of shape `(0,0,0)` and trigger a `RuntimeWarning` [S2]. Unsupported numpy dtypes raise a `TypeError` [S2]. Unreadable metadata keys trigger a `UserWarning` [S2]. Voxel center vs corner alignment differs between OpenVDB docs (center requires `(-0.5, -0.5, -0.5)` offset) and software like Blender (corner, no offset) [S1, unofficial]. Children must be visited and written in the same order as the 'on' bits in the parent's child mask are iterated sequentially [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources [S2].
+-*   **Memory Complexity:** Not given in the sources [S2].
+-*   **Performance:** The sparse tree structure efficiently stores volumetric data by pruning background values, making it suitable for large datasets with sparse active regions [S2].
+-*   **Strengths:** Native support in Blender and VFX software; sparse storage reduces file size for data with large empty regions [S2].
+-*   **Limitations:** Requires the `openvdb` library; limited to 3D regular grids; orthorhombic constraint on delta [S2].
+-*   **When to use:** Exporting volumetric data for visualization in Blender or other VFX software [S2].
+-*   **When not to use:** Non-3D data; non-orthorhombic grids; when dense storage is required [S2].
++Time and memory complexity are not given in the sources [S2]. The sparse tree structure efficiently stores volumetric data by pruning background values, making it suitable for large datasets with sparse active regions [S2]. Strengths include native support in Blender and VFX software, and sparse storage reducing file size for data with large empty regions [S2]. Limitations include requiring the `openvdb` library, limited support to 3D regular grids, and the orthorhombic constraint on delta [S2]. It should be used for exporting volumetric data for visualization in Blender or other VFX software [S2]. It should not be used for non-3D data, non-orthorhombic grids, or when dense storage is required [S2].
+ 
+ ## Background
+@@ -128,3 +129,4 @@
+ 
+ ## Sources
++[S1] JangaFX - Insight: VDB, a deep dive, https://jangafx.com/insights/vdb-a-deep-dive, fetched 2026-10-27 [S1, unofficial]. (unofficial)
+ [S2] gridData.OpenVDB — GridDataFormats 1.2.0+9.g8a8f174 documentation, https://www.mdanalysis.org/GridDataFormats/_modules/gridData/OpenVDB.html, fetched 2026-10-27

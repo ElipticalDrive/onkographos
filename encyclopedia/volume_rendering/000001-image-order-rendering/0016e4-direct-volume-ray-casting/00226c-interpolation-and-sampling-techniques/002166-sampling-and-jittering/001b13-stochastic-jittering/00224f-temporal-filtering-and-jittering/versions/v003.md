@@ -1,0 +1,56 @@
+# Temporal Filtering and Jittering
+
+Also called: Jittering, Temporal Filtering, Temporal Supersampling
+
+## Overview
+This technique reduces spatial banding artifacts and noise in volume rendering by combining sub-voxel ray jittering with temporal reprojection, effectively increasing perceived resolution without additional raymarching steps [S1, unofficial]. It leverages temporal coherence and camera motion vectors to blend frame data over time [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Current frame’s volumetric data (stored in a 3D texture), previous frame’s 3D texture, camera motion vectors, and a pseudo-random sequence generator (e.g., blue noise or Halton sequence) [S1, unofficial].
+*   **Outputs:** A temporally filtered 3D texture representing the accumulated volumetric light and transmittance [S1, unofficial].
+
+**Data Structures:**
+*   **3D Texture:** Stores the integrated volumetric data (in-scattered light and transmittance). The implementation uses hardware trilinear interpolation (`GL_LINEAR`) for sampling [S1, unofficial].
+*   **Motion Vectors:** A buffer storing the displacement of each pixel from the previous frame to the current frame, derived from camera transforms [S1, unofficial].
+
+**Steps:**
+1.  **Depth Jittering:** Each frame, calculate a sub-voxel offset derived from a pseudo-random sequence (such as blue noise or a Halton sequence) and apply it to offset ray positions to hide spatial banding artifacts caused by coarse slice resolution [S1, unofficial].
+2.  **Ray Marching:** Perform ray marching using the jittered rays to accumulate volumetric data into a temporary 3D texture for the current frame [S1, unofficial].
+3.  **Temporal Reprojection:** Execute a compute pass that blends the current frame’s 3D texture with the previous frame's 3D texture using camera motion vectors [S1, unofficial].
+4.  **Final Composition:** During post-processing or forward-lighting, retrieve the linear depth of the opaque scene fragment from the depth buffer [S1, unofficial]. Convert the fragment's screen coordinates and linear depth into 3D texture coordinates $(u, v, w)$ using an exponential depth equation [S1, unofficial]. Sample the integrated 3D texture using hardware trilinear interpolation (`GL_LINEAR`) [S1, unofficial]. Add the sampled in-scattered light to the scene color, and attenuate the scene color by the sampled transmittance [S1, unofficial].
+
+**Formulas:**
+*   **Ray Offset:** $P_{jittered} = P_{base} + \Delta P_{random}$, where $\Delta P_{random}$ is the sub-voxel offset derived from the pseudo-random sequence [G].
+*   **Reprojection & Blending:** Not given in the sources. [S1, unofficial]
+*   **Scene Composition:** $C_{out} = C_{scene} \cdot T_{sampled} + L_{in-scattered}$, where $T_{sampled}$ is the transmittance and $L_{in-scattered}$ is the in-scattered light sampled from the 3D texture [G].
+
+**Parameters:**
+*   **Random Sequence Type:** Blue noise or Halton sequence [S1, unofficial].
+*   **Interpolation Method:** Trilinear interpolation (`GL_LINEAR`) [S1, unofficial].
+*   **Blending Factor:** Not given in the sources. [S1, unofficial]
+
+**Edge Cases and Pitfalls:**
+*   Not given in the sources. [S1, unofficial]
+
+## Subtopics
+
+### Bicubic Filtering Upscaling
+A post-processing technique that smooths noise artifacts from blue noise dithering by calculating a new pixel value using a cubic polynomial over 16 neighboring pixels [S2, unofficial]. It is chosen when residual noise patterns remain after temporal filtering and spatial jittering [S2, unofficial]. Implementation involves rendering the raymarched scene into a Frame Buffer Object (FBO), passing the FBO texture as a uniform to a bicubic filtering material, and rendering a fullscreen triangle with that material to output the smoothed scene [S2, unofficial]. It retains details while smoothing noise, particularly at edges and in less dense regions [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. [S1, unofficial]
+*   **Memory Complexity:** Requires storage for the current and previous frame’s 3D textures, plus motion vectors and FBOs for post-processing [S1, unofficial][S2, unofficial].
+*   **Measured Performance:** Not given in the sources. [S1, unofficial]
+*   **Scaling:** Not given in the sources. [S1, unofficial]
+*   **Strengths:** Improves perceived volume resolution without extra raymarching steps; effectively hides spatial banding artifacts [S1, unofficial].
+*   **Limitations:** Requires motion vectors for reprojection; residual noise may still require additional post-processing like bicubic filtering [S1, unofficial][S2, unofficial].
+*   **When to use:** When spatial banding and noise are visible due to coarse slice resolution or limited raymarching steps [S1, unofficial].
+*   **When not to use:** Not given in the sources. [S1, unofficial]
+
+## Background
+This technique is described in the context of volumetric fog rendering using 3D textures in OpenGL [S1, unofficial]. It builds on the concept of stochastic jittering to reduce banding and extends it with temporal reprojection to smooth noise over time [S1, unofficial]. Bicubic filtering upsampling is mentioned as a complementary post-processing step to further reduce noise artifacts in raymarched scenes [S2, unofficial].
+
+## Sources
+[S1] Volumetric Fog Using 3D Textures in OpenGL, https://salivity.github.io/opengl/article/volumetric-fog-using-3-d-textures-in-open-gl, fetched 2026-10-27 (unofficial)
+[S2] Real-time dreamy Cloudscapes with Volumetric Raymarching, https://blog.maximeheckel.com/posts/real-time-cloudscapes-with-volumetric-raymarching/, fetched 2026-10-28 (unofficial)

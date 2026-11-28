@@ -1,0 +1,574 @@
+# voxel-traversal
+Voxel renderer using raytracing instead of triangle rasterization
+
+### src/camera.cpp
+```
+#include "wincam.hpp"
+#include <cmath>
+#include <algorithm>
+
+void Camera::update_camera_vectors(void) {
+    glm::vec3 temp_front{0, 0, 0};
+    temp_front.x = cosf(to_radian(yaw_)) * cosf(to_radian(pitch_));
+    temp_front.y = sinf(to_radian(pitch_));
+    temp_front.z = sinf(to_radian(yaw_)) * cosf(to_radian(pitch_));
+
+    front_ = glm::normalize(temp_front);
+    right_ = glm::normalize(glm::cross(front_, world_up_));
+    up_    = glm::normalize(glm::cross(right_, front_));
+}
+
+void Camera::update_move_speed(Timer& timer) {
+    move_speed_ = 5.0f * timer.delta_time_;
+}
+
+void Camera::move(void) {
+    const bool *key_states{ SDL_GetKeyboardState(nullptr) };
+
+    if (key_states[SDL_SCANCODE_W])
+        position_ += front_ * move_speed_;
+    if (key_states[SDL_SCANCODE_S])
+        position_ -= front_ * move_speed_;
+    if (key_states[SDL_SCANCODE_A])
+        position_ -= glm::normalize(glm::cross(front_, up_)) * move_speed_;
+    if (key_states[SDL_SCANCODE_D])
+        position_ += glm::normalize(glm::cross(front_, up_)) * move_speed_;
+}
+
+glm::vec3 Camera::get_pos(void) const {
+    return position_;
+}
+
+glm::vec3 Camera::get_front(void) const {
+    return front_;
+}
+
+float Camera::get_fovy(void) const {
+    return fovy_;
+}
+
+glm::mat4 Camera::get_view_matrix(void) const {
+    glm::vec3 center = position_ + front_;
+    auto view = glm::lookAt(position_, center, up_);
+    return view;
+}
+
+glm::mat4 Camera::get_projection_matrix(void) const {
+    return glm::perspective(fovy_, ASPECT_RATIO, z_near_, z_far_);
+}
+
+void Camera::set_mouse_pos(float mouse_x, float mouse_y) {
+    mouse_x_ += mouse_x;
+    mouse_y_ += mouse_y;
+}
+
+void Camera::point(void) {
+    if (firstmouse_) {
+        last_x_ = mouse_x_;
+        last_y_ = mouse_y_;
+        firstmouse_ = false;
+    }
+
+    float xoffset{ mouse_x_ - last_x_ };
+    float yoffset{ last_y_ - mouse_y_ };
+    last_x_ = mouse_x_;
+    last_y_ = mouse_y_;
+    constexpr float sens = 0.1f;
+    xoffset *= sens;
+    yoffset *= sens;
+
+    yaw_ += xoffset;
+    pitch_ += yoffset;
+    pitch_ = std::clamp(pitch_, -89.0f, 89.0f);
+}
+```
+
+### src/main.cpp
+```
+#include "wincam.hpp"
+
+int main(void) {
+    Window win{};
+    Camera cam{};
+
+    if (win.init()) 
+        return 1;
+
+    win.render_loop(cam);
+    return 0;
+}
+```
+
+### src/voxel.cpp
+```
+#include "voxel.hpp"
+#include <cmath>
+#include <assert.h>
+
+#if 1
+#define V_DELIM "v "
+#define F_DELIM "f "
+#define F_SLICE "/"
+#define VN_DELIM "vn "
+
+/* Wavefront .OBJ file loader for loading models, voxelizer to be added */
+int VoxelObject::loadObj(const char* obj_file) {
+    FILE *file = fopen(obj_file, "r");
+
+    if (file == NULL) {
+        fprintf(stderr, "%s cannot be opened/found\n", obj_file);
+        return 1;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        if (strstr(line, V_DELIM)) {
+            char tmp_line[256];
+            char *grace;
+            strcpy(tmp_line, line);
+
+            glm::vec3 vertex{};
+            vertex.x = atof(strtok_r(tmp_line, V_DELIM, &grace));
+            vertex.y = atof(strtok_r(NULL, V_DELIM, &grace));
+            vertex.z = atof(strtok_r(NULL, V_DELIM, &grace));
+
+            this->verts.push_back(vertex);
+        } 
+        if (strstr(line, VN_DELIM)) {
+            char tmp_line[256];
+            char *grace;
+            strcpy(tmp_line, line);
+
+            glm::vec3 vertex{};
+            vertex.x = atof(strtok_r(tmp_line, VN_DELIM, &grace));
+            vertex.y = atof(strtok_r(NULL, VN_DELIM, &grace));
+            vertex.z = atof(strtok_r(NULL, VN_DELIM, &grace));
+
+            this->norms.push_back(vertex);
+        }
+        if (strstr(line, F_DELIM)) {
+            char tmp_line[256];
+            char *grace1;
+            strcpy(tmp_line, line);
+
+            char *face = strtok_r(tmp_line, F_DELIM, &grace1);
+            while (face != NULL) {
+                char *item[256];
+                char *grace2;
+                strcpy((char*)item, face);
+                this->inds.push_back(atoi(strtok_r((char*)item, F_SLICE, &grace2)));
+                strtok_r(NULL, F_SLICE, &grace2); // skip texture faces for now
+                this->n_inds.push_back(atoi(strtok_r(NULL, F_SLICE, &grace2)));
+                face = strtok_r(NULL, F_DELIM, &grace1);
+            }
+        }
+    }
+    fclose(file);
+    return 0;
+}
+#endif
+
+static float slab_intersect(Ray& ray, const AABB& bb) {
+    float tmin{0.0f};
+    float tmax{INFINITY};
+
+    for (auto i{0uz}; i < 3; ++i) {
+        auto t1{ (bb.min[i] - ray.origin[i]) * ray.inv[i] };
+        auto t2{ (bb.max[i] - ray.origin[i]) * ray.inv[i] };
+        tmin = std::max(tmin, std::min(t1, t2));
+        tmax = std::min(tmax, std::max(t1, t2));
+    }
+
+    if (tmax >= tmin)
+        return tmin;
+    return INFINITY;
+}
+
+static size_t flatten(glm::vec3 vec) {
+    glm::vec3 floored = glm::floor(vec);
+    return static_cast<size_t>(floored.x) + floored.y * W + floored.z * W * H;
+}
+
+void VoxelObject::generate_grid() {
+    for (auto k{0u}; k < D; ++k) {
+        for (auto j{0u}; j < H; ++j) {
+            for (auto i{0u}; i < W; ++i) {
+                if (i % 5 == 0 && j % 5 == 0 && k % 5 == 0) {
+                    glm::vec3 point(i, j, k);
+                    this->grid[flatten(point)] = true;
+                }
+            }
+        }
+    }
+}
+
+#if 0
+void VoxelObject::generate_grid(const char* obj_file) {
+    if (this->loadObj(obj_file)) throw;
+    for (auto vertex : this->verts) {
+        auto floored{ (glm::abs(glm::round(vertex)) + 1.0f) * static_cast<float>(CUBE_DIM) / 2.0f };
+        this->grid[flatten(floored)] = true; 
+    }
+    assert(inds.size() == n_inds.size());
+    for (auto l{0uz}; l < this->inds.size()/3; ++l) {
+        glm::vec3 v0{ verts[inds[l*3]] };
+        glm::vec3 v1{ verts[inds[l*3+1]] };
+        glm::vec3 v2{ verts[inds[l*3+2]] };
+        glm::vec3 triverts[3]{ v0, v1, v2 };
+        glm::vec3 n0{ norms[n_inds[l*3]] };
+        glm::vec3 n1{ norms[n_inds[l*3+1]] };
+        glm::vec3 n2{ norms[n_inds[l*3+2]] };
+        glm::vec3 normals[3]{ n0, n1 ,n2 };
+        for (auto k{0u}; k < D; ++k) {
+            for (auto j{0u}; j < H; ++j) {
+                for (auto i{0u}; i < W; ++i) {
+                    glm::vec3 half_box{ i+0.5, j+0.5, k+0.5 };
+                    if (triBoxOverlap(half_box, normals, triverts)) {
+                        glm::vec3 point{i, j, k};
+                        this->grid[flatten(point)] = true;
+                    }
+                }
+            }
+        }
+    }
+}
+#endif
+
+/*
+** Resources:
+** https://www.youtube.com/watch?v=ztkh1r1ioZo
+** https://m4xc.dev/articles/amanatides-and-woo/
+ */
+static constexpr int MAX_STEPS = 128;
+float VoxelObject::traverse(Ray& ray) const {
+    constexpr glm::vec3 vmin{0.0f, 0.0f, 0.0f};
+    constexpr glm::vec3 vmax{CUBE_DIM - 1 , CUBE_DIM - 1, CUBE_DIM - 1};
+
+    const float entry_t{ slab_intersect(ray, this->bb) };
+    if (entry_t == INFINITY) {
+        return INFINITY;
+    }
+
+    const glm::vec3 entry_pos{ (ray.origin + ray.dir * (entry_t + 0.0001f)) 
+        * static_cast<float>(CUBE_DIM) };
+    const glm::vec3 step{ glm::sign(ray.inv) };
+    const glm::vec3 delta{ glm::abs(ray.inv) }; 
+    glm::vec3 pos{ glm::clamp(glm::floor(entry_pos), vmin, vmax) };
+    glm::vec3 tmax{ (pos - entry_pos + glm::max(step, vmin)) * ray.inv };
+
+    int axis = 0;
+    for (int steps = 0; steps < MAX_STEPS; ++steps) {
+        const bool voxel = this->grid[flatten(pos)];
+
+        if (voxel) {
+            if (steps == 0) return entry_t;
+            return entry_t + (tmax[axis] + delta[axis]) / CUBE_DIM;
+        }
+
+        if (tmax.x < tmax.y) {
+            if (tmax.x < tmax.z) {
+                pos.x += step.x;
+                if (pos.x < 0 || pos.x >= CUBE_DIM) break;
+                axis = 0;
+                tmax.x += delta.x;
+            } else {
+                pos.z += step.z;
+                if (pos.z < 0 || pos.z >= CUBE_DIM) break;
+                axis = 2;
+                tmax.z += delta.z;
+            }
+        } else {
+            if (tmax.y < tmax.z) {
+                pos.y += step.y;
+                if (pos.y < 0 || pos.y >= CUBE_DIM) break;
+                axis = 1;
+                tmax.y += delta.y;
+            } else {
+                pos.z += step.z;
+                if (pos.z < 0 || pos.z >= CUBE_DIM) break;
+                axis = 2;
+                tmax.z += delta.z;
+            }
+        }
+    }
+
+    return INFINITY;
+}
+```
+
+### src/voxel.hpp
+```
+#pragma once
+
+#include <glm/glm.hpp>
+#include <vector>
+
+#define CUBE_DIM 64
+
+using u32 = unsigned int;
+
+static constexpr u32 W = CUBE_DIM;
+static constexpr u32 H = CUBE_DIM;
+static constexpr u32 D = CUBE_DIM;
+
+struct Ray {
+    glm::vec3 origin{};
+    glm::vec3 dir{};
+    glm::vec3 inv{};
+
+    Ray() = default;
+    Ray(glm::vec3 origin, glm::vec3 dir) : origin(origin), dir(dir) {
+        float x = (dir.x != 0) ? 1/dir.x : INFINITY;
+        float y = (dir.y != 0) ? 1/dir.y : INFINITY;
+        float z = (dir.z != 0) ? 1/dir.z : INFINITY;
+        inv = glm::vec3(x, y, z);
+    }
+};
+
+struct AABB {
+    glm::vec3 min{}, max{};
+
+    AABB(int dim) : min(glm::vec3(0, 0, 0)), max(glm::vec3(dim, dim, dim)) {}
+};
+
+class VoxelObject {
+    bool* grid;
+    AABB bb;
+    std::vector<glm::vec3> verts;
+    std::vector<glm::vec3> norms;
+    std::vector<int> inds;
+    std::vector<int> n_inds;
+    int loadObj(const char* obj_file);
+public:
+    VoxelObject(int dim) : grid(new bool[W*H*D]), bb(AABB(dim)) {} 
+    void generate_grid(void);
+    [[nodiscard]] float traverse(Ray& ray) const;
+};
+```
+
+### src/wincam.hpp
+```
+#pragma once
+
+#include <SDL3/SDL_video.h>
+#include <SDL3/SDL_events.h>
+#include <SDL3/SDL_mouse.h>
+#include <SDL3/SDL_scancode.h>
+#include <SDL3/SDL_init.h>
+#include <SDL3/SDL_log.h>
+#include <SDL3/SDL_error.h>
+#include <SDL3/SDL_timer.h>
+#include <SDL3/SDL_render.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+#define WIDTH 1024
+#define HEIGHT 768
+#define ASPECT_RATIO static_cast<float>(WIDTH)/HEIGHT
+
+#define PI 3.1415f
+#define to_radian(angle) (angle * PI/180.0f)
+#define GET_SECONDS static_cast<float>(SDL_GetTicks())/1000.0f
+
+struct Timer {
+    float current_frame_{};
+    float delta_time_{};
+    float last_frame_{};
+
+    void update(void);
+};
+
+class Camera {
+public:
+    Camera() = default;
+    void move(void);
+    void point(void);
+    void update_camera_vectors(void);
+    void update_move_speed(Timer& timer);
+    void set_mouse_pos(float mouse_x, float mouse_y);
+    [[nodiscard]] glm::vec3 get_pos(void) const;
+    [[nodiscard]] glm::vec3 get_front(void) const;
+    [[nodiscard]] float get_fovy(void) const;
+    [[nodiscard]] glm::mat4 get_view_matrix(void) const;
+    [[nodiscard]] glm::mat4 get_projection_matrix(void) const;
+private:
+    float mouse_x_{0.0f};
+    float mouse_y_{0.0f};
+    const float z_near_{1.0f};
+    const float z_far_{100.0f};
+    glm::vec3 position_{ 0.0f, 0.0f, -1.0f };
+    glm::vec3 world_up_{ 0.0f, 1.0f, 0.0f };
+    glm::vec3 front_{};
+    glm::vec3 up_{};
+    glm::vec3 right_{};
+    float yaw_{-90.0f};
+    float pitch_{0.0f};
+    float fovy_{ to_radian(50.0f) };
+    float last_x_{ static_cast<float>(WIDTH)/2.0f };
+    float last_y_{ static_cast<float>(HEIGHT)/2.0f };
+    float move_speed_{};
+    bool firstmouse_{true};
+};
+
+class Window {
+public:
+    ~Window();
+    int init();
+    void event_loop(Camera& camera);
+    void render_loop(Camera& camera);
+private:
+    SDL_Window* window_{};
+    SDL_Renderer* renderer_{};
+    const uint32_t max_fps_{60};
+    const float frame_delay_{ 1000.0f / max_fps_ };
+    int exit_{};
+};
+```
+
+### src/window.cpp
+```
+#include "wincam.hpp"
+#include "voxel.hpp"
+
+#include <thread>
+#include <vector>
+#include <print>
+
+static VoxelObject vox{CUBE_DIM};
+
+int Window::init() {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        SDL_Log("Couldn't initialize SDL: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    bool status = SDL_CreateWindowAndRenderer("Pure Voxels", WIDTH, HEIGHT, 0, &window_, &renderer_);
+    if (!status) {
+        SDL_Log("Couldn't create window: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    if (!SDL_SetWindowRelativeMouseMode(window_, true)) {
+        SDL_Log("Couldn't capture mouse: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    vox.generate_grid();
+
+    return 0;
+}
+
+void Window::event_loop(Camera& camera) {
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        switch (event.type) {
+        case SDL_EVENT_QUIT:
+            exit_ = 1;
+            break;
+        case SDL_EVENT_MOUSE_MOTION:
+            camera.set_mouse_pos(event.motion.xrel, event.motion.yrel);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+/* this allows to do the ray traversal in multiple threads */
+static void render_thread(int height_min, int height_max, float& fovy, glm::mat4& view,
+                   glm::vec3& cam_pos, std::vector<SDL_FPoint>& buffer)
+{
+    for (auto j{height_min}; j <  height_max; ++j) {
+        for (auto i{0}; i < WIDTH; ++i) {
+            auto x_ndc = (2 * (i + 0.5) / WIDTH) - 1;
+            auto y_ndc = 1 - (2 * (j + 0.5) /  HEIGHT);
+            auto x_cam = x_ndc * tanf(fovy/2) * (static_cast<double>(WIDTH)/HEIGHT);
+            auto y_cam = y_ndc * tanf(fovy/2);
+            glm::vec4 ray_cam{x_cam, y_cam, -1.0f, 0.0f};
+            auto ray_world{ glm::normalize(glm::inverse(view) * ray_cam) };
+            Ray ray{cam_pos, ray_world};
+            if (vox.traverse(ray) != INFINITY) {
+                buffer[i + j * WIDTH] = SDL_FPoint(i, j);
+            }
+        }
+    }
+}
+
+
+void Window::render_loop(Camera& camera) {
+    size_t NUM_THREADS = std::thread::hardware_concurrency();
+    std::println("Allowable Threads: {}", NUM_THREADS);
+
+    // https://www.shadertoy.com/view/WlfXRN
+    auto inferno = [](float t) {
+
+        const glm::vec3 c0 = glm::vec3(0.0002189403691192265, 0.001651004631001012, -0.01948089843709184);
+        const glm::vec3 c1 = glm::vec3(0.1065134194856116, 0.5639564367884091, 3.932712388889277);
+        const glm::vec3 c2 = glm::vec3(11.60249308247187, -3.972853965665698, -15.9423941062914);
+        const glm::vec3 c3 = glm::vec3(-41.70399613139459, 17.43639888205313, 44.35414519872813);
+        const glm::vec3 c4 = glm::vec3(77.162935699427, -33.40235894210092, -81.80730925738993);
+        const glm::vec3 c5 = glm::vec3(-71.31942824499214, 32.62606426397723, 73.20951985803202);
+        const glm::vec3 c6 = glm::vec3(25.13112622477341, -12.24266895238567, -23.07032500287172);
+
+        return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6)))));
+
+    };
+
+    // colors are not yet properly implemented
+    glm::vec3 inf_res{ glm::round(glm::clamp(inferno(128.0f), 0.0f, 1.0f) * 255.0f) };
+    Timer timer{};
+    while (!exit_) {
+        Uint32 start_frame = SDL_GetTicks();
+
+        this->event_loop(camera);
+        timer.update();
+        camera.point();
+        camera.update_move_speed(timer);
+        camera.move();
+        camera.update_camera_vectors();
+
+        std::vector<std::thread> threads{};
+        std::vector<SDL_FPoint> buffer(WIDTH*HEIGHT);
+        glm::mat4 view = camera.get_view_matrix();
+        float cur_fovy = camera.get_fovy();
+        glm::vec3 cur_pos = camera.get_pos();
+
+        int height_min = 0;
+        int height_max = HEIGHT/NUM_THREADS;
+        for (auto i{0uz}; i < NUM_THREADS; ++i) {
+            threads.emplace_back(std::thread(&render_thread, height_min, height_max, std::ref(cur_fovy), std::ref(view), std::ref(cur_pos), std::ref(buffer)));
+            height_min += HEIGHT/NUM_THREADS;
+            height_max += HEIGHT/NUM_THREADS;
+        }
+
+        for (auto &thread : threads) {
+          if (thread.joinable())
+              thread.join();
+        }
+
+        SDL_SetRenderDrawColor(renderer_, 33, 33, 33, SDL_ALPHA_OPAQUE);
+        SDL_RenderClear(renderer_);
+
+        SDL_SetRenderDrawColor(renderer_, inf_res.x, inf_res.y, inf_res.z, SDL_ALPHA_OPAQUE);
+        SDL_RenderPoints(renderer_, buffer.data(), buffer.size());
+
+        SDL_RenderPresent(renderer_);
+
+        Uint32 end_frame = SDL_GetTicks() - start_frame;
+        if (frame_delay_ > end_frame)
+            SDL_Delay(frame_delay_ - end_frame);
+    }
+}
+
+Window::~Window(void) {
+    SDL_DestroyRenderer(renderer_);
+    SDL_DestroyWindow(window_);
+    SDL_Quit();
+}
+
+void Timer::update(void) {
+    current_frame_ = GET_SECONDS;
+    delta_time_ = current_frame_ - last_frame_;
+    last_frame_ = current_frame_;
+}
+```

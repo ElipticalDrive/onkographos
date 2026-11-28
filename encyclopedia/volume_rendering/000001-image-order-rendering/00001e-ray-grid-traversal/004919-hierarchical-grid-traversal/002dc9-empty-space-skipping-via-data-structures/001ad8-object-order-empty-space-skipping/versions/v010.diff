@@ -1,0 +1,122 @@
+--- v009.md
++++ v010.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Object-Order Empty Space Skipping is a volume rendering optimization technique that reduces the number of volume samples by culling transparent or irrelevant regions before raycasting begins [S1][S2, unofficial]. It differs from its siblings by performing culling during the rasterization setup phase using precomputed block statistics, rather than during ray traversal or via bounding geometry rasterization [S1][S2, unofficial]. Unlike [Early Shader Termination](969-early-shader-termination.md), which stops rays dynamically during compositing, this method prevents rays from entering empty blocks entirely [S1][S2, unofficial]. Unlike [Rasterizing Bounding Geometry for Empty Space Skipping](5141-rasterizing-bounding-geometry-for-empty-space-skipping.md), it relies on scalar block bounds rather than polygonal approximations [S1][S2, unofficial].
++Object-Order Empty Space Skipping is a volume rendering optimization technique that reduces the number of volume samples by culling transparent or irrelevant regions before raycasting begins [S1][S2, unofficial]. It differs from its siblings by performing culling during the rasterization setup phase using precomputed block statistics and bounding geometry, rather than relying solely on hierarchical tree traversal or dynamic shader termination [S1][S2, unofficial]. Unlike [Early Shader Termination](969-early-shader-termination.md), which stops rays dynamically during compositing, this method computes ray depth ranges per frame via rasterization to skip large inactive regions upfront [S1]. Unlike [Rasterizing Bounding Geometry for Empty Space Skipping](5141-rasterizing-bounding-geometry-for-empty-space-skipping.md), it explicitly maintains min-max values for regular block subdivisions to drive the culling logic [S1].
+ 
+ ## How it works
+@@ -10,46 +10,52 @@
+ 
+ **Inputs and Outputs:**
+-- Input: Volume texture $V$, isovalue threshold $T$, camera parameters (position $c$, screen coordinates $(x,y)$), block size $B$ (e.g., $4^3$ or $8^3$ voxels) [S1][S2, unofficial].
++- Input: Volume texture $V$, isovalue $T$, camera position $c$, screen coordinates $(x, y)$, block size $B$ (e.g., $4^3$ or $8^3$ voxels) [S1].
+ - Output: Rendered image with rays skipping inactive regions [S1].
+ 
+ **Data Structures:**
+-1.  **Volume Texture:** 3D texture storing voxel values [S1].
+-2.  **Min-Max Block Structure:** A secondary structure storing the minimum and maximum values for each block in the regular subdivision of the volume. The block dimensions are typically $4^3$ or $8^3$ voxels [S1].
+-3.  **Bounding Geometry:** Implicitly defined by the active blocks. Active blocks are those where $\max(V_{block}) \ge T$ [S1].
++1. **Volume Texture:** 3D texture storing voxel values [S1].
++2. **Min-Max Block Structure:** A secondary structure storing the minimum and maximum values for each block in the regular subdivision of the volume [S1].
++3. **Bounding Geometry:** Explicit geometry formed by the faces of active blocks that are adjacent to inactive blocks [S1].
+ 
+ **Steps:**
++1. **Initialization (Pre-computation):** Subdivide the volume into blocks of size $B \times B \times B$ [S1]. Compute and store the minimum and maximum voxel values for each block in the Min-Max Block Structure [S1]. Identify active blocks where the maximum value meets the isovalue criterion [S1]. Generate the bounding geometry by creating faces for active blocks adjacent to inactive blocks [S1].
++2. **Per-Frame Setup (Object-Order Skipping):** Compute ray direction $\mathbf{d}(x, y)$ from camera position $c$:
++   $$ \mathbf{p}(t, x, y) = c + t \mathbf{d}(x, y) $$
++   Determine the initial ray depth range $[t_{\text{start}}(x, y), t_{\text{exit}}(x, y)]$ by rasterizing the bounding geometry [S1]. Render front faces with a depth test retaining the closest intersection (e.g., `GL_LESS`) to obtain $t_{\text{start}}(x, y)$ [S1]. Render back faces with a depth test retaining the farthest intersection (e.g., `GL_GREATER`) to obtain $t_{\text{exit}}(x, y)$ [S1].
++3. **Ray Casting Loop (Image-Order Skipping):** For each pixel, cast a ray in front-to-back order within $[t_{\text{start}}(x, y), t_{\text{exit}}(x, y)]$ [S1]. At each sample, compute the block index using integer division:
++   $$ u_{\text{block}} = \lfloor u_{\text{vol}} / B \rfloor $$
++   where $u_{\text{vol}}$ is the coordinate in the volume texture and $B$ is the block size [G]. Retrieve the block's min-max values [S1]. If the block is inactive (e.g., max value below isovalue), skip the sample [S1]. If active, perform standard ray casting (texture fetch, compositing) [S1]. Terminate the ray upon isosurface intersection or volume exit [S1].
+ 
+-1.  **Initialization (Pre-computation):**
+-    - Subdivide the volume into blocks of size $B \times B \times B$ [S1].
+-    - For each block, compute and store the minimum and maximum voxel values in the Min-Max Block Structure [S1].
+-    - Identify active blocks: A block is active if its maximum value is greater than or equal to the isovalue threshold $T$ [S1].
+-    - Generate bounding geometry for active blocks. This involves identifying faces of active blocks that are adjacent to inactive blocks [S1].
+-
+-2.  **Per-Frame Setup (Object-Order Skipping):**
+-    - Compute ray direction $\mathbf{d}(x, y)$ for each pixel $(x, y)$ from camera position $c$:
+-      $$ \mathbf{p}(t, x, y) = c + t \mathbf{d}(x, y) $$
+-    - Determine the initial ray depth range $[t_{start}(x, y), t_{exit}(x, y)]$ by rasterizing the bounding geometry of active blocks [S1]:
+-      - Render front faces of the active block bounding geometry with a depth test that retains the closest intersection (e.g., `GL_LESS`) to obtain $t_{start}(x, y)$ [S1].
+-      - Render back faces of the active block bounding geometry with a depth test that retains the farthest intersection (e.g., `GL_GREATER`) to obtain $t_{exit}(x, y)$ [S1].
+-    - Note: This approach does not exclude inactive blocks enclosed by active blocks from the search range $[t_{start}, t_{exit}]$ [S1].
+-
+-3.  **Ray Casting Loop (Image-Order Skipping):**
+-    - For each pixel, cast a ray in front-to-back order within the range $[t_{start}(x, y), t_{exit}(x, y)]$ [S1].
+-    - At each sample point, determine which block the sample belongs to using integer division:
+-      $$ u_{block} = \lfloor u_{vol} / B \rfloor $$
+-      where $u_{vol}$ is the coordinate in the volume texture and $B$ is the block size [G].
+-    - Retrieve the min-max values for the current block from the Min-Max Block Structure [S1].
+-    - **Skip Condition:** If the current sample's value (or the block's max value, depending on implementation detail) indicates the region is inactive (e.g., block max < $T$ for isosurface, or specific opacity criteria for volume rendering), skip the sample [S1].
+-    - For isosurface rendering, if the block is inactive, skip all samples within that block [S1].
+-    - If the block is active, perform the standard ray casting computation (e.g., texture fetch, compositing) [S1].
+-    - Terminate the ray if the isosurface is found or the ray exits the volume [S1].
++**Pseudocode:**
++```python
++def object_order_skip(volume, min_max_blocks, camera, block_size, isovalue, step_size):
++    for y, x in screen_pixels:
++        ray_dir = compute_direction(camera, x, y)
++        ray_origin = camera.position
++        # Object-order skip: compute depth range via bounding geometry rasterization
++        t_start, t_exit = get_depth_range_from_rasterization(ray_origin, ray_dir, min_max_blocks)
++        t = t_start
++        while t < t_exit:
++            vol_pos = ray_origin + t * ray_dir
++            block_idx = floor(vol_pos / block_size)
++            block_min, block_max = min_max_blocks[block_idx]
++            if block_max < isovalue:
++                # Image-order skip: block is inactive
++                t += step_size
++                continue
++            # Sample active block
++            color, opacity = sample_volume(volume, vol_pos)
++            composite(color, opacity)
++            if opacity >= threshold:
++                break
++            t += step_size
++```
+ 
+ **Parameters:**
+ - Block size $B$: Typically $4^3$ or $8^3$ voxels per block [S1].
+-- Isovalue threshold $T$: Determines active blocks [S1].
++- Isovalue $T$: Determines active blocks [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Enclosed Inactive Blocks:** Inactive blocks enclosed by active blocks are not excluded from the search range $[t_{start}, t_{exit}]$ by the bounding geometry. Samples in these blocks are skipped on a per-sample basis early in the ray-casting loop [S1].
+-- **Performance Overhead:** Inactive blocks enclosed by active blocks result in per-sample checks, which adds overhead compared to fully excluded regions [S1].
++- **Enclosed Inactive Blocks:** Inactive blocks enclosed by active blocks are not excluded from the search range $[t_{\text{start}}, t_{\text{exit}}]$ by the bounding geometry [S1]. Samples in these blocks are skipped on a per-sample basis early in the ray-casting loop [S1].
+ - **Isovalue Changes:** When the isovalue changes, the active status of blocks must be recomputed, and the bounding geometry updated [S1].
+ 
+@@ -66,20 +72,14 @@
+ 
+ ### Overlapped Min-Max Block
+-A data structure for empty-space skipping in pre-integrated volume rendering. It modifies the region covered by each block so that each block covers some region of which thickness is at least the sampling distance. By overlapping the region of each block, a line segment formed by two sampling points can be tested for transparency using only one block, avoiding the overhead of determining which of multiple intersecting blocks are transparent [S3].
+-
+-- **Definition:** Each block covers a region of thickness at least the sampling distance, creating overlaps between adjacent blocks [S3].
+-- **Steps:**
+-  1. Modify the region covered by each block such that each block covers a region of thickness at least the sampling distance, creating overlaps between adjacent blocks [S3].
+-  2. To skip a line segment formed by two sampling points, test only the single block that contains the line segment (or overlaps it sufficiently) to determine if it is transparent. If the block is transparent, skip the sampling process for that segment [S3].
+-- **Comparison:** Unlike previous methods where a line segment may intersect at most three blocks and requires testing all intersecting blocks (creating overhead to determine cases like Fig. 1a vs 1b), this method tests only one block due to the overlapping region design [S3].
++A data structure for empty-space skipping in pre-integrated volume rendering [S3]. It modifies the region covered by each block so that each block covers some region of which thickness is at least the sampling distance [S3]. By overlapping the region of each block, a line segment formed by two sampling points can be tested for transparency using only one block, avoiding the overhead of determining which of multiple intersecting blocks are transparent [S3]. Each block covers a region of thickness at least the sampling distance, creating overlaps between adjacent blocks [S3]. To skip a line segment formed by two sampling points, test only the single block that contains the line segment (or overlaps it sufficiently) to determine if it is transparent [S3]. If the block is transparent, skip the sampling process for that segment [S3]. Unlike previous methods where a line segment may intersect at most three blocks and requires testing all intersecting blocks (creating overhead to determine cases like Fig. 1a vs 1b), this method tests only one block due to the overlapping region design [S3].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The object-order skipping phase is $O(1)$ per pixel for depth range computation (via rasterization) and $O(N)$ for ray casting, where $N$ is the number of samples in the active range. The per-sample check for image-order skipping is $O(1)$.
+-- **Memory Complexity:** $O(V/B^3)$ for the min-max block structure, where $V$ is the volume size and $B$ is the block size [S1].
+-- **Measured Performance:** The method reduces overhead by skipping most empty space with no cost using modified ray segments. Only a small number of samples require per-sample skipping, accelerated via adaptive sampling [S1].
+-- **Strengths:** Reduces the number of volume samples significantly for sparse volumes. Simple to implement with standard GPU rasterization features.
+-- **Limitations:** Inactive blocks enclosed by active blocks are not excluded from the search range, leading to per-sample checks. Performance may degrade if the volume is dense or if the block size is not optimal [S1].
+-- **When to Use:** Suitable for sparse volumes with clear isosurfaces or transparent regions. Effective when combined with adaptive sampling [S1].
+-- **When Not to Use:** Not suitable for dense volumes where most blocks are active, as the overhead of per-sample checks may outweigh the benefits [S1].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Measured Performance:** The method reduces overhead by skipping most empty space with no cost using modified ray segments $[t_{\text{start}}, t_{\text{exit}}]$ [S1]. Only a small number of samples require per-sample skipping, which is accelerated via an adaptive sampling strategy [S1].
++- **Strengths:** Reduces the number of volume samples significantly for sparse volumes [S1]. Simple to implement with standard GPU rasterization features [S1].
++- **Limitations:** Inactive blocks enclosed by active blocks are not excluded from the search range, leading to per-sample checks [S1].
++- **When to Use:** Suitable for sparse volumes with clear isosurfaces or transparent regions [S1].
++- **When Not to Use:** Not given in the sources.
+ 
+ ## Background

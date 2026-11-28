@@ -1,0 +1,151 @@
+--- v002.md
++++ v003.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-A command-line utility for converting between various Gaussian splat formats (PLY, SPLAT, KSPLAT, SOG, HTML) and generating voxel/collision data for downstream processing [S1]. It distinguishes itself from in-memory converters by supporting out-of-core processing pipelines for large datasets, ensuring scalability for scenes exceeding available system RAM [S1].
++A command-line utility for converting between various Gaussian splat formats (PLY, SPLAT, KSPLAT, SOG, HTML) and generating voxel/collision data for downstream processing [S1]. It focuses on format translation and spatial data generation rather than in-memory scene rendering [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** Source splat files (PLY, SPLAT, KSPLAT, SOG, HTML) and optional configuration parameters.
+-- **Outputs:** Converted splat formats, `.voxel.json` (metadata), `.voxel.bin` (binary voxel data), and optionally `.collision.glb` (mesh) [S1].
++- **Inputs:** Source splat files (PLY, SPLAT, KSPLAT, SOG, HTML) and optional configuration parameters [S1].
++- **Outputs:** Converted splat formats (CSV, compressed PLY, standalone/unbundled HTML), `.voxel.json` (metadata), `.voxel.bin` (binary voxel data), and optionally `.collision.glb` (mesh) [S1].
+ 
+ **Data Structures:**
+-- **Voxel Grid:** Defined by `--voxel-size` and `--voxel-opacity`. The grid resolution is determined by the scene bounds and voxel size. Opacity thresholds determine voxel inclusion [S1].
+-- **Collision Mesh:** Generated as a GLB file, optionally smoothed [S1].
++- **Voxel Grid:** A 3D occupancy grid defined by `--voxel-size` and `--voxel-opacity`. Voxel inclusion is determined by the opacity threshold [S1].
++- **Collision Mesh:** A GLB file representing navigable space, optionally smoothed [S1].
+ 
+ **Parameters:**
+@@ -24,6 +24,6 @@
+ 
+ **Steps:**
+-1. **Input Parsing:** Read the source splat file and parse Gaussian parameters (position, covariance, opacity, spherical harmonics) [S1].
+-2. **Voxelization:** Project Gaussians onto a 3D grid. Determine voxel occupancy based on `--voxel-opacity` [S1].
++1. **Input Parsing:** Read the source splat file and extract format-specific data [S1].
++2. **Voxelization:** Project splats onto a 3D grid. Determine voxel occupancy based on `--voxel-opacity` [S1].
+ 3. **External Fill Logic:** Use `--seed-pos` to verify volume enclosure. If the seed position is reachable from outside the voxel volume, the fill operation is skipped [S1].
+ 4. **Floor Fill (Optional):** If `--voxel-floor-fill` is specified, fill columns upward from the bottom of the grid until solid geometry is encountered, patching XZ areas surrounded by floor within `2*size` [S1].
+@@ -34,50 +34,53 @@
+ **Pseudocode:**
+ ```python
+-def splat_transform_cli(input_file, output_dir, options):
+-    # Parse input file
+-    splats = load_splats(input_file)
+-    
+-    # Determine voxel grid parameters
+-    voxel_size = options.get('voxel_size', 0.05)
+-    voxel_opacity = options.get('voxel_opacity', 0.1)
+-    seed_pos = options.get('seed_pos', (0, 0, 0))
+-    
+-    # Create voxel grid
+-    voxel_grid = create_voxel_grid(splats, voxel_size, voxel_opacity)
+-    
+-    # External fill logic
+-    if options.get('external_fill_check', True):
+-        if is_reachable_from_outside(voxel_grid, seed_pos):
+-            # Skip fill if seed is reachable from outside
+-            pass
+-        else:
+-            # Perform fill
+-            voxel_grid = fill_voxels(voxel_grid, seed_pos)
+-    
+-    # Floor fill
+-    if options.get('voxel_floor_fill'):
+-        floor_fill_size = options.get('floor_fill_size', 1.6)
+-        voxel_grid = fill_floor_columns(voxel_grid, floor_fill_size)
+-    
+-    # Carving
+-    if options.get('voxel_carve'):
+-        carve_height = options.get('carve_height', 1.6)
+-        carve_radius = options.get('carve_radius', 0.2)
+-        voxel_grid = carve_navigable_space(voxel_grid, seed_pos, carve_height, carve_radius)
+-    
+-    # Collision mesh generation
+-    if options.get('collision_mesh'):
+-        mesh_type = options.get('collision_mesh_type', 'smooth')
+-        collision_mesh = generate_collision_mesh(voxel_grid, mesh_type)
+-        save_mesh(collision_mesh, join(output_dir, 'collision.glb'))
+-    
+-    # Save voxel data
+-    save_voxel_metadata(voxel_grid, join(output_dir, 'voxel.json'))
+-    save_voxel_data(voxel_grid, join(output_dir, 'voxel.bin'))
+-    
+-    # Convert to other formats if requested
+-    if options.get('convert_to'):
+-        for fmt in options['convert_to']:
+-            convert_splats(splats, fmt, join(output_dir, f'output.{fmt}'))
++def splat_transform_cli(input_file, output_dir, args):
++    # 1. Parse input file
++    splats = read_splat_file(input_file)  # [G] Standard parser for PLY/SPLAT/KSPLAT/SOG/HTML formats
++
++    # 2. Extract parameters with defaults
++    voxel_size = args.get('voxel_size', 0.05)
++    voxel_opacity = args.get('voxel_opacity', 0.1)
++    seed_pos = args.get('seed_pos', (0.0, 0.0, 0.0))
++    floor_fill_size = args.get('voxel_floor_fill', 1.6)
++    carve_h, carve_r = args.get('voxel_carve', (1.6, 0.2))
++    collision_mode = args.get('collision_mesh', 'smooth')
++
++    # 3. Voxelization: project splats onto 3D grid, filter by opacity threshold
++    voxel_grid = {}
++    for s in splats:
++        grid_coords = (int(s.position.x / voxel_size), int(s.position.y / voxel_size), int(s.position.z / voxel_size))
++        if s.opacity >= voxel_opacity:
++            voxel_grid[grid_coords] = s
++
++    # 4. External fill logic: verify volume enclosure
++    boundary_cells = get_grid_boundary(voxel_grid)  # [G] Cells on the min/max extents of the grid
++    reachable = flood_fill_from(boundary_cells, voxel_grid)  # [G] BFS/DFS traversal through occupied cells
++    if seed_pos not in reachable:
++        voxel_grid = flood_fill_from(seed_pos, voxel_grid)  # [G] Fill enclosed voids
++
++    # 5. Floor fill (optional)
++    if 'voxel_floor_fill' in args:
++        for x, z in grid_xz_columns(voxel_grid):  # [G] Iterate over unique (x, z) coordinates
++            min_y = min(y for y in grid_y_column(x, z, voxel_grid))
++            fill_upward_from(voxel_grid, x, min_y, z, floor_fill_size)  # [G] Extend column upward until solid hit
++
++    # 6. Carving (optional)
++    if 'voxel_carve' in args:
++        carve_region = capsule_flood_fill(seed_pos, carve_h, carve_r, voxel_grid)  # [G] Capsule-shaped traversal from seed
++        voxel_grid = remove_cells(voxel_grid, carve_region)  # [G] Remove carved cells from grid
++
++    # 7. Collision mesh generation (optional)
++    if 'collision_mesh' in args:
++        mesh = voxel_grid_to_mesh(voxel_grid, collision_mode)  # [G] Convert voxel occupancy to GLB mesh geometry
++        save_file(output_dir + '/collision.glb', mesh)
++
++    # 8. Output voxel data
++    save_file(output_dir + '/voxel.json', voxel_grid.metadata)
++    save_file(output_dir + '/voxel.bin', voxel_grid.binary_data)
++
++    # 9. Format conversion (if requested)
++    if 'convert_to' in args:
++        for fmt in args['convert_to']:
++            save_file(output_dir + '/output.' + fmt, convert_format(splats, fmt))  # [G] Standard format serializer
+ ```
+ 
+@@ -89,14 +92,14 @@
+ ## Operating characteristics
+ - **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Supports out-of-core processing to handle datasets larger than available RAM [S1].
++- **Memory Complexity:** Not given in the sources.
+ - **Measured Performance:** Not given in the sources.
+-- **Scaling:** Scales to large datasets via out-of-core processing [S1].
+-- **Strengths:** Supports multiple input/output formats, out-of-core processing, and voxel/collision generation [S1].
++- **Scaling:** Not given in the sources.
++- **Strengths:** Supports multiple input/output formats, voxel generation, and collision mesh creation [S1].
+ - **Limitations:** Not given in the sources.
+ - **When to Use:** When converting between splat formats or generating voxel/collision data for Gaussian splats [S1].
+-- **When Not to Use:** When in-memory processing is sufficient and out-of-core overhead is undesirable [S1].
++- **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-The Splat Transform CLI is part of the `playcanvas/splat-transform` project [S1]. It is used for converting and processing Gaussian splat data for various applications, including web-based viewers and collision detection systems [S1].
++Origin and development details are not given in the sources. The tool is used for converting and processing Gaussian splat data for downstream applications [S1].
+ 
+ ## Sources

@@ -1,0 +1,191 @@
+# LightImage Precomputation
+
+Also called: LightImage
+
+## Overview
+LightImage Precomputation accelerates the computation of multiple scattering in participating media by precomputing the visibility of the light source from the perspective of the volume into a 2D texture map [S1]. It solves the problem of expensive per-shading-point light-ray marching by storing light visibility modulated by source intensity, allowing efficient blur-based approximation of indirect illumination [S1]. It differs from its parent method, Light-space opacity precomputation, by specifically targeting the visibility component via a 2D orthographic projection of the volume's bounding box, rather than storing full 3D light-segment integrals for every voxel [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Static volume density field $\sigma_t(x)$ (or scattering coefficient $b(x)$) [S1].
+*   Static light source direction $\omega_{light}$ and intensity distribution $L_i(\omega)$ [S1].
+*   Scene geometry (occluders) [S1].
+*   Volume bounding box [S1].
+
+**Outputs:**
+*   A 2D texture map (LightImage) storing visibility values [S1].
+*   A 3D texture map (`light` volume) storing integrated light segment lengths [S1].
+
+### Data Structures
+
+**1. `light` Volume (3D Texture)**
+*   **Format:** `GL_LUMINANCE` floating-point texture [S1].
+*   **Orientation:** The 3D volume is oriented such that the z-axis is aligned with the light direction $\omega_{light}$ [S1].
+*   **Extents:** Large enough to completely contain the density volume [S1].
+*   **Content:** Each voxel stores $\ell_{light} = \int b(x) ds$, the integral of the scattering coefficient along the straight line from the voxel to the light [S1].
+*   **Wavelength Handling:** If $b$ depends on wavelength, wavelength-averaged values are used to save storage and computation [S1].
+
+**2. LightImage (2D Texture)**
+*   **Format:** 2D texture map [S1].
+*   **Orientation:** Perpendicular to the light direction, mapped onto the bounding box of the `light` volume [S1].
+*   **Content:** Pixels store visibility of the light source from the volume, modulated by the light source's spatial intensity distribution [S1].
+    *   Value 1: Light is visible [S1].
+    *   Value 0: Light is completely blocked [S1].
+    *   Intermediate values: Partial visibility or intensity modulation [S1].
+*   **Mipmap Pyramid:** A mipmap pyramid is constructed to allow efficient computation of radiance blurred over a width $w$ using `GL_LINEAR_MIPMAP_LINEAR` filtering [S1].
+
+### Steps
+
+1.  **Compute `light` Volume:**
+    *   For every volume cell, integrate the scattering coefficient $b$ along the light direction from the cell to the light source [S1].
+    *   Store the result in the 3D texture oriented with the z-axis aligned to the light [S1].
+
+2.  **Determine Maximum Blur Width:**
+    *   Calculate the maximum blur width $w_{max}$ required for the mipmap pyramid [S1].
+    *   Formula: $w_{max} = w(\ell_{max}, s_{max})$ [S1].
+    *   Where $s_{max}$ is the length of the volume diagonal [S1].
+    *   And $\ell_{max} = s_{max} \bar{b}$, where $\bar{b}$ is the average scattering coefficient [S1].
+
+3.  **Render LightImage Base Level:**
+    *   Orient an orthographic camera in the direction of the light [S1].
+    *   Render all scene objects (occluders) in black [S1].
+    *   Render the bounding box of the medium in white [S1].
+    *   The resulting image represents the visibility of the light source from the volume's perspective [S1].
+    *   *Note:* Objects completely inside the volume do not affect the LightImage and are ignored in multiple scattering calculations, though they affect single scattering [S1].
+    *   *Edge Case:* If no objects obscure the volume, the LightImage has a uniform constant value of 1 [S1].
+
+4.  **Construct Mipmap Pyramid:**
+    *   Generate a Gaussian mipmap pyramid for the LightImage [S1].
+    *   Blur widths increase linearly from 0 (lowest level, original LightImage) to $w_{max}$ (final level) [S1].
+    *   Implementation options:
+        *   Software Gaussian filtering (accurate) [S1].
+        *   Hardware Gaussian filter [Jargstorff 2004] [S1].
+        *   `GL_SGIS_generate_mipmap` (box filter, cheaper in software but expensive in hardware) [S1].
+
+### Formulas
+
+*   **Light Segment Integral:**
+    $$ \ell_{light} = \int b(x) ds $$
+    Integrated along the straight line from the voxel to the light [S1].
+
+*   **Maximum Blur Width:**
+    $$ w_{max} = w(\ell_{max}, s_{max}) $$
+    Where $s_{max}$ is the volume diagonal length and $\ell_{max} = s_{max} \bar{b}$ [S1].
+
+### Parameters
+
+*   **Average Scattering Coefficient ($\bar{b}$):** Used to estimate $\ell_{max}$ [S1].
+*   **Blur Width Function ($w$):** Maps $\ell_{max}$ and $s_{max}$ to a pixel width [S1].
+*   **Mipmap Levels:** Determined by the linear increase from 0 to $w_{max}$ [S1].
+
+### Edge Cases and Pitfalls
+
+*   **Dynamic Data:** If volume density or light direction changes, the `light` volume and LightImage must be updated [S1].
+*   **Internal Occluders:** Objects completely inside the volume do not affect the LightImage [S1]. They are ignored in multiple scattering calculations but still affect single scattering [S1].
+*   **No Occlusion:** If no objects obscure the volume, the LightImage is a uniform constant value of 1 [S1].
+*   **Color Dependence:** The `light` volume uses wavelength-averaged scattering coefficients [S1]. This is considered sufficiently accurate for most participating media, which are rarely strongly colored [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def precompute_light_image(volume_density, light_direction, scene_objects, volume_bbox):
+    # Step 1: Compute `light` Volume
+    # Orient 3D volume such that z-axis aligns with light_direction
+    light_volume = [[0.0 for _ in range(volume_bbox.depth)] for _ in range(volume_bbox.height)]
+    for z in range(volume_bbox.depth):
+        for y in range(volume_bbox.height):
+            for x in range(volume_bbox.width):
+                # Integrate scattering coefficient along the line from voxel to light
+                ray_origin = volume_bbox.origin + volume_bbox.step * (x, y, z)
+                ray_direction = light_direction
+                path_length = volume_bbox.extent_along(ray_direction)
+                integral = 0.0
+                step_size = volume_bbox.step[0]
+                for t in range(0, int(path_length), step_size):
+                    point = ray_origin + ray_direction * t
+                    integral += volume_density[point] * step_size
+                light_volume[z][y][x] = integral
+
+    # Step 2: Determine Maximum Blur Width
+    s_max = volume_bbox.diagonal_length()
+    # [G] Average scattering coefficient bar_b
+    bar_b = sum(sum(sum(cell for cell in row) for row in plane) for plane in volume_density) / volume_density.size
+    l_max = s_max * bar_b
+    # [G] Exact formula for w(l_max, s_max) not given in sources.
+    w_max = l_max
+
+    # Step 3: Render LightImage Base Level
+    # Orient orthographic camera in direction of light
+    camera_width, camera_height = volume_bbox.resolution_2d
+    base_image = [[0.0 for _ in range(camera_width)] for _ in range(camera_height)]
+    for y in range(camera_height):
+        for x in range(camera_width):
+            ray = camera.cast_ray(x, y, light_direction)
+            if volume_bbox.intersects(ray):
+                base_image[y][x] = 1.0
+            # Objects completely inside the volume do not affect the LightImage
+            # Objects outside the volume block the light (value remains 0)
+
+    # Step 4: Construct Mipmap Pyramid
+    light_image = generate_mipmap_pyramid(base_image, max_blur_width=w_max)
+    return light_volume, light_image
+
+def generate_mipmap_pyramid(image, max_blur_width):
+    # [G] Standard Gaussian mipmap generation
+    levels = [image]
+    current = image
+    num_levels = math.ceil(math.log2(min(len(image[0]), len(image))))
+    for i in range(1, num_levels):
+        # Blur widths increase linearly from 0 to w_max
+        blur_sigma = (i / num_levels) * max_blur_width
+        blurred = apply_gaussian_filter(current, blur_sigma)
+        downsampled = [[blurred[j][k] for k in range(0, len(blurred[0]), 2)] for j in range(0, len(blurred), 2)]
+        levels.append(downsampled)
+        current = downsampled
+    return levels
+
+def apply_gaussian_filter(image, sigma):
+    # [G] Standard separable Gaussian convolution
+    kernel_size = int(math.ceil(4 * sigma))
+    kernel = [math.exp(-0.5 * (x / sigma) ** 2) for x in range(-kernel_size, kernel_size + 1)]
+    kernel_sum = sum(kernel)
+    kernel = [k / kernel_sum for k in kernel]
+    # Apply horizontal pass
+    h_pass = [[sum(image[r][c - k] * kernel[k] for k in range(len(kernel))) for c in range(len(image[0]))] for r in range(len(image))]
+    # Apply vertical pass
+    v_pass = [[sum(h_pass[r - k][c] * kernel[k] for k in range(len(kernel))) for c in range(len(h_pass[0]))] for r in range(len(h_pass))]
+    return v_pass
+```
+
+## Operating characteristics
+
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Performance scales with the resolution of the `light` volume and the LightImage [S1]. The mipmap pyramid allows efficient lookup at different blur widths [S1].
+*   **Strengths:**
+    *   Accelerates multiple scattering computation by avoiding per-shading-point light-ray marching [S1].
+    *   Simple to implement using standard OpenGL texture and rendering features [S1].
+    *   Handles non-uniform light source intensity [S1].
+*   **Limitations:**
+    *   Assumes static light and volume density [S1]. Updates are required for dynamic scenes [S1].
+    *   Objects inside the volume are ignored in multiple scattering, which may lead to inaccuracies if such objects are significant [S1].
+    *   Approximation via Gaussian blur may lose high-frequency details [S1].
+*   **When to Use:** Static scenes with participating media where multiple scattering is significant and performance is critical [S1].
+*   **When Not to Use:** Dynamic scenes with changing light or density, or scenes with significant internal occluders affecting multiple scattering [S1].
+
+## Background
+
+*   **Origin:** The method was introduced in "A lighting model for general participating media" by Premože et al. [S1].
+*   **History:** It is described as a variation of a deep shadow map [Lokovic and Veach 2000] [S1].
+*   **Usage:** Used in OpenGL pipelines with NVIDIA CG for real-time rendering of participating media [S1].
+
+## Sources
+
+[S1] A lighting model for general participating media, https://doi.org/10.1145/1053427.1053446, fetched 2026-11-02

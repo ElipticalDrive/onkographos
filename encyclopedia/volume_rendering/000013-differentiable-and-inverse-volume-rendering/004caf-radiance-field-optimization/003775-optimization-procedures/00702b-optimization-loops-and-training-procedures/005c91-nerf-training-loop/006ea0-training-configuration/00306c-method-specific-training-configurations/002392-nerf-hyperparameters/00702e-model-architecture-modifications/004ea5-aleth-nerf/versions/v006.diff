@@ -1,0 +1,99 @@
+--- v005.md
++++ v006.md
+@@ -57,5 +57,4 @@
+     *   **Contrast Degree Loss ($L_{\text{co}}$):** Maintains structural similarity and controls contrast between adjacent sampling pixels of predicted normal-light and ground truth adverse-light images [S1].
+         $$ L_{\text{co}} = \sum_{\mathbf{r}} \sum_{k \in \{+1, -1\}} \| \hat{C}_{\text{nor}}(\mathbf{r}) - \hat{C}_{\text{adv}}(\mathbf{r}+k) \|^2 $$
+-        Parameter $\eta$ controls contrast degree. In over-exposure scenes, $e \cdot \eta$ is fixed to 0.5 [S1].
+     *   **Color Constancy Loss ($L_{\text{cc}}$):** Regularizes color based on the gray-world assumption to prevent color imbalance from removing/adding concealing fields [S1].
+         $$ L_{\text{cc}} = \sum_{\mathbf{r}} \sum_{p,q} (\hat{C}_{\text{nor}}(\mathbf{r})_p - \hat{C}_{\text{nor}}(\mathbf{r})_q)^2 $$
+@@ -87,5 +86,6 @@
+     def forward(self, x):
+         h = self.net(x)
+-        return self.sigma_head(h).squeeze(-1), self.h_head(h)
++        # Density is activated by ReLU to [0, ∞) [S1]
++        return torch.relu(self.sigma_head(h)).squeeze(-1), self.h_head(h)
+ 
+ class ColorMLP(nn.Module):
+@@ -101,5 +101,6 @@
+         hd = torch.cat([h, d], dim=-1)
+         h = self.net(hd)
+-        return self.color_head(h)
++        # Color is activated by Sigmoid to [0, 1) [S1]
++        return torch.sigmoid(self.color_head(h))
+ 
+ class AlethNeRF:
+@@ -107,7 +108,9 @@
+         self.F_sigma = DensityMLP(hidden_dim)
+         self.F_c = ColorMLP(hidden_dim)
+-        self.conv_local = nn.Conv2d(1, 1, kernel_size=7, padding=3)
++        # Local concealing field uses a 7x7 convolution on spatial sigma [S1]
++        self.conv_local = nn.Conv1d(1, 1, kernel_size=7, padding=3)
++        # Global concealing field initialized to 0.5 [S1]
+         self.theta_G = nn.Parameter(torch.full((num_rays,), 0.5))
+-        self.delta = 0.01
++        self.delta = 0.01  # Not given in the sources. [G]
+         self.e = 0.45
+         self.epsilon = 1e-3
+@@ -116,9 +119,11 @@
+     def inverse_tone_curve(self, x):
+         x = torch.clamp(x, 0.0, 1.0)
++        # Inverse tone curve Φ(x) [S1]
+         return (1/3) * (torch.asin(1 - 2 * x) - torch.sin((1 - 2 * x) / 2))
+ 
+-    def compute_omega(self, sigma_image):
++    def compute_omega(self, sigma_1d):
+         # Applies 7x7 convolution to spatial sigma representation [S1]
+-        return torch.sigmoid(self.conv_local(sigma_image))
++        # sigma_1d shape: (num_samples,)
++        return self.conv_local(sigma_1d.unsqueeze(0).unsqueeze(0)).squeeze(0)
+ 
+     def render_ray(self, ray_o, ray_d, ray_idx, num_samples):
+@@ -133,5 +138,5 @@
+ 
+         theta_g = self.theta_G[ray_idx]
+-        omega = torch.sigmoid(sigma)
++        omega = self.compute_omega(sigma)
+ 
+         prod_input = omega * theta_g
+@@ -149,4 +154,5 @@
+ 
+     def compute_loss(self, C_nor, C_adv, C_gt):
++        # C_nor, C_adv, C_gt are batched tensors of shape (B, 3)
+         phi_C_nor = self.inverse_tone_curve(C_nor + self.epsilon)
+         phi_C_gt = self.inverse_tone_curve(C_gt + self.epsilon)
+@@ -155,8 +161,14 @@
+         L_de = (torch.mean(C_nor) - self.e) ** 2
+ 
+-        C_adv_shifted = torch.roll(C_adv, shifts=1, dims=0)
+-        L_co = torch.mean((C_nor - C_adv_shifted) ** 2)
+-
+-        L_cc = torch.mean((C_nor[:, 0] - C_nor[:, 1]) ** 2)
++        # Contrast degree loss over k ∈ {+1, -1} [S1]
++        # Shifts over batch/spatial dimension to approximate adjacent pixels
++        C_adv_shift_p = torch.roll(C_adv, shifts=1, dims=0)
++        C_adv_shift_m = torch.roll(C_adv, shifts=-1, dims=0)
++        L_co = torch.mean((C_nor - C_adv_shift_p) ** 2 + (C_nor - C_adv_shift_m) ** 2)
++
++        # Color constancy loss over channels p, q [S1]
++        L_cc = torch.mean((C_nor[:, 0] - C_nor[:, 1]) ** 2 + 
++                          (C_nor[:, 0] - C_nor[:, 2]) ** 2 + 
++                          (C_nor[:, 1] - C_nor[:, 2]) ** 2)
+ 
+         return L_it_mse + self.lambda1 * L_de + self.lambda2 * L_co + self.lambda3 * L_cc
+@@ -166,5 +178,5 @@
+ *   $\delta$: Constant distance between adjacent sample points. Not given in the sources. [G]
+ *   $e$: 0.45, hyperparameter signifying the enhancement degree [S1].
+-*   $\eta$: Hyperparameter controlling contrast degree. In over-exposure scenes, $e \cdot \eta$ is fixed to 0.5 [S1].
++*   $\eta$: Hyperparameter controlling contrast degree [S1]. In over-exposure scenes, $e \cdot \eta$ is fixed to 0.5 [S1].
+ *   $\lambda_1$: $10^{-3}$, weight for degree loss $L_{\text{de}}$ [S1].
+ *   $\lambda_2$: $10^{-3}$, weight for contrast loss $L_{\text{co}}$ [S1].
+@@ -180,7 +192,7 @@
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** Not given in the sources.
++*   **Time and Memory Complexity:** Not given in the sources. [S1]
+ *   **Measured Performance:** Evaluated on the LOM dataset (5 scenes: 'buu', 'chair', 'sofa', 'bike', 'shrub') with paired low-light, normal-light, and over-exposure images. Images collected at $3000 \times 4000$, down-sampled to $375 \times 500$ [S1].
+-*   **Scaling:** Not given in the sources.
++*   **Scaling:** Not given in the sources. [S1]
+ *   **Strengths:** End-to-end training without pre-processing or post-processing; handles 8-bit LDR inputs unlike RAW-NeRF; effective in low-light and over-exposure conditions [S1].
+ *   **Limitations:** Requires paired ground truth images for evaluation metrics, though training uses unsupervised lightness correction losses alongside a regression loss [S1].

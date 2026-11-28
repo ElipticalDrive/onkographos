@@ -1,0 +1,271 @@
+--- v001.md
++++ v002.md
+@@ -8,20 +8,20 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:** A batch of $k \le N$ input images $\{I_n\}_{n=1}^k$, their corresponding binary object masks $\{M_n\}_{n=1}^k$, and viewpoint parameters $\{C_n\}_{n=1}^k$. The model parameters are $\Phi_\theta$ (SDF), $E_\xi$ (encoder), $D_\psi$ (decoder), and $\Gamma_\zeta$ (aggregator).
+-*   **Outputs:** A synthesized target image $\hat{I}_t$, a rendered mask $\hat{M}_t$, and the updated model parameters after minimizing the total loss.
++*   **Inputs:** A batch of $k \le N$ input images $\{I_n\}_{n=1}^k$, their corresponding binary object masks $\{M_n\}_{n=1}^k$, and viewpoint parameters $\{C_n\}_{n=1}^k$ [S1, unofficial].
++*   **Outputs:** A synthesized target image $\hat{I}_t$, a rendered mask $\hat{M}_t$, and updated model parameters after minimizing the total loss [S1, unofficial].
+ 
+ **Data Structures**
+-*   **SDF ($\Phi_\theta$):** An implicit function mapping 3D coordinates to signed distance values. Initialized as a unit sphere of radius 0.5 using a pre-trained SIREN [S1, unofficial].
+-*   **Radiance Field:** Defined by the encoder $E$, decoder $D$, and aggregator $\Gamma$, which map view-dependent features to color.
+-*   **Ray Sampling:** For each pixel $p$, a ray is traced from the camera center defined by $C_t$.
++*   **SDF ($\Phi_\theta$):** An implicit function mapping 3D coordinates to signed distance values, initialized as a unit sphere of radius 0.5 using a pre-trained SIREN [S1, unofficial].
++*   **Radiance Field:** Defined by the encoder $E_\xi$, decoder $D_\psi$, and aggregator $\Gamma_\zeta$, which map view-dependent features to color [S1, unofficial].
++*   **Model Parameters:** $\Theta = [\xi, \psi, \zeta, \theta]$ [S1, unofficial].
+ 
+ **Numbered Steps**
+-1.  **Batch Sampling:** For each training iteration, sample a set of $k \le N$ images $\{I_n\}_{n=1}^k$ from the available $N$ input images.
+-2.  **Target Selection:** Designate one image as the primary ground-truth target $I_t$, with its mask $M_t$ and viewpoint $C_t$.
+-3.  **Multi-Target Gradient Computation:** To improve gradient accuracy and utilize GPU memory, treat $l < k$ images in the batch as target images. Compute gradients for each of these $l$ targets using the other images in the batch as input context [S1, unofficial].
++1.  **Batch Sampling:** For each training iteration, sample a set of $k \le N$ images $\{I_n\}_{n=1}^k$ from the available $N$ input images [S1, unofficial].
++2.  **Target Selection:** Designate one image as the ground-truth target $I_t$, with its mask $M_t$ and viewpoint $C_t$ [S1, unofficial].
++3.  **Multi-Target Gradient Computation:** To improve gradient accuracy, treat $l < k$ images in the batch as target images, computing gradients for each from the other images in the batch, limited by GPU memory [S1, unofficial].
+ 4.  **Synthesis:** Generate the synthesized target image $\hat{I}_t$ and rendered mask $\hat{M}_t$ from viewpoint $C_t$ using the NLR++ image formation model [S1, unofficial].
+ 5.  **Loss Calculation:** Compute the total loss $\mathcal{L}$ as the sum of image reconstruction loss, soft mask loss, and eikonal regularization [S1, unofficial].
+-6.  **Scheduled Shape Supervision:** Enforce shape-related losses ($\mathcal{L}_M$ and $\mathcal{L}_E$) only for the first $t_1$ iterations, and then every $t_2$ iterations thereafter. This allows initial shape approximation before refining with better feature encoding [S1, unofficial].
+-7.  **Optimization:** Update parameters $\Theta = [\xi, \psi, \zeta, \theta]$ using the Adam optimizer [S1, unofficial].
++6.  **Scheduled Shape Supervision:** Enforce shape-related losses $\mathcal{L}_M$ and $\mathcal{L}_E$ only for the first $t_1$ iterations, and then every $t_2$ iterations thereafter, allowing initial shape approximation before refining with better feature encoding [S1, unofficial].
++7.  **Optimization:** Update parameters $\Theta$ using the Adam optimizer [S1, unofficial].
+ 
+ **Formulas**
+@@ -47,5 +47,5 @@
+     *   $\text{BCE}(y, \hat{y}) = -[y \log(\hat{y}) + (1-y) \log(1-\hat{y})]$ is the Binary Cross Entropy.
+ 
+-3.  **Eikonal Regularization ($\mathcal{L}_E$):** Enforces the eikonal constraint on randomly sampled points $p_i$ in a unit cube containing the scene [S1, unofficial]:
++3.  **Eikonal Regularization ($\mathcal{L}_E$):** Enforces the eikonal constraint on randomly sampled points $p_i \in \mathbb{R}^3$ in a unit cube containing the scene [S1, unofficial]:
+     $$
+     \mathcal{L}_E(\Phi_\theta) = \frac{1}{P} \sum_{i=0}^{P} ||(||\nabla_{p_i} \Phi_\theta(p_i)||^2 - 1)||^2_2
+@@ -67,5 +67,4 @@
+     """
+     Performs one training step for NLR++.
+-    
+     Args:
+         batch_images: List of k images {I_n}
+@@ -74,154 +73,74 @@
+         model_params: Parameters [xi, psi, zeta, theta] for E, D, Gamma, Phi
+         optimizer: Adam optimizer instance
+-        hyperparams: Dict containing alpha, tau, lambda1, lambda2, t1, t2, l, k
+-        
++        hyperparams: Dict containing alpha, tau, lambda1, lambda2, t1, t2, l, P_eikonal
+     Returns:
+         loss_value: Scalar loss value
+     """
+     k = len(batch_images)
+-    l = hyperparams['l'] # Number of target images in batch, l < k
++    l = hyperparams['l']
+     t1 = hyperparams['t1']
+     t2 = hyperparams['t2']
+-    current_iter = get_current_iteration() # Global iteration counter
+-    
+-    # Select l target images from the batch
+-    # In practice, this might be random or sequential; here we assume indices 0 to l-1
+-    target_indices = list(range(l))
++    current_iter = get_current_iteration() # [G] Global iteration counter
++    alpha = hyperparams['alpha']
++    tau = hyperparams['tau']
++    lambda1 = hyperparams['lambda1']
++    lambda2 = hyperparams['lambda2']
++    P_eikonal = hyperparams['P_eikonal']
+     
+     total_loss = 0.0
+     
+-    for idx in target_indices:
++    # Multi-Target Gradient Computation: treat l < k images as targets [S1, unofficial]
++    for idx in range(l):
+         I_t = batch_images[idx]
+         M_t = batch_masks[idx]
+         C_t = batch_cameras[idx]
+         
+-        # 1. Synthesize target image and mask
+-        # Uses the NLR++ image formation model with current model_params
+-        # The model takes other images in the batch as context if needed, 
+-        # but typically I_t is synthesized from C_t and the global representation.
+-        # Note: The source implies gradients are computed for I_t from other images,
+-        # meaning the context images are used to build the feature representation.
+-        context_images = [batch_images[i] for i in range(k) if i != idx]
++        # Synthesis: generate synthesized target image and mask [S1, unofficial]
++        I_hat_t, M_hat_t = synthesize_image(C_t, batch_images, model_params)
+         
+-        I_hat_t, M_hat_t = synthesize_image(
+-            viewpoint=C_t, 
+-            context_images=context_images, 
+-            params=model_params
+-        )
++        # Image Reconstruction Loss (Masked L1) [S1, unofficial]
++        mask_pixels = [p for p in range(len(I_t)) if M_t[p] == 1]
++        lr_loss = sum(abs(I_t[p] - I_hat_t[p]) for p in mask_pixels) / len(mask_pixels) if mask_pixels else 0.0
+         
+-        # 2. Compute Image Reconstruction Loss (Masked L1)
+-        # Only compute over pixels where M_t[p] == 1
+-        mask_pixels = get_masked_pixels(M_t)
+-        lr_loss = 0.0
+-        count = 0
+-        for p in mask_pixels:
+-            lr_loss += abs(I_t[p] - I_hat_t[p])
+-            count += 1
+-        if count > 0:
+-            lr_loss /= count
+-        else:
+-            lr_loss = 0.0
+-            
+-        # 3. Compute Soft Mask Loss (Shape Loss)
+-        # Only enforced if current_iter <= t1 OR current_iter % t2 == 0
++        # Scheduled Shape Supervision [S1, unofficial]
+         lm_loss = 0.0
+-        if current_iter <= t1 or current_iter % t2 == 0:
+-            # Find minimum SDF along ray for each pixel
+-            # This requires dense sampling of Phi_theta along rays
+-            phi_min_values = []
+-            valid_mask_sum = 0.0
+-            
+-            for p in range(M_t.height * M_t.width):
+-                # Check condition: M_t[p] == 0 OR Phi_min[p] < tau
+-                # We need Phi_min[p] to check the condition, so we compute it first
+-                ray = get_ray_from_pixel(p, C_t)
+-                phi_min = find_min_sdf_along_ray(ray, model_params.phi)
+-                
+-                if M_t[p] == 0 or phi_min < hyperparams['tau']:
+-                    phi_min_values.append(phi_min)
+-                    valid_mask_sum += M_t[p] # Note: M_t[p] is 0 or 1. 
+-                                              # If M_t[p]==0, it adds 0 to sum? 
+-                                              # Formula says: sum_{p|...} M_t[p]. 
+-                                              # If M_t[p]==0, term is 0. 
+-                                              # If M_t[p]==1, term is 1.
+-                                              # But the condition includes M_t[p]==0.
+-                                              # Let's re-read formula:
+-                                              # sum_{p | M_t[p]=0 v Phi_min[p]<tau} M_t[p]
+-                                              # If M_t[p]=0, M_t[p] is 0. So it contributes 0 to denominator.
+-                                              # If M_t[p]=1 and Phi_min < tau, it contributes 1.
+-                                              # If M_t[p]=1 and Phi_min >= tau, it is excluded.
+-                                              # If M_t[p]=0, it is included in sum but adds 0.
+-                                              # So denominator is effectively count of pixels where M_t[p]=1 AND Phi_min < tau.
+-                                              # Wait, if M_t[p]=0, the term M_t[p] is 0. 
+-                                              # So the denominator is sum of M_t[p] for valid p.
+-                                              # This effectively counts pixels where M_t[p]=1 and Phi_min < tau.
+-                                              # However, the numerator sums BCE for ALL valid p.
+-                                              # If M_t[p]=0, BCE(sigmoid(-alpha*phi), 0).
+-                                              # If M_t[p]=1, BCE(sigmoid(-alpha*phi), 1).
+-                                              pass 
+-            
+-            # Recalculate denominator correctly based on formula
+-            denominator_sum = 0.0
+-            numerator_sum = 0.0
+-            
+-            for p in range(M_t.height * M_t.width):
+-                ray = get_ray_from_pixel(p, C_t)
+-                phi_min = find_min_sdf_along_ray(ray, model_params.phi)
+-                
+-                if M_t[p] == 0 or phi_min < hyperparams['tau']:
+-                    # Add to denominator sum: M_t[p]
+-                    denominator_sum += M_t[p]
+-                    
+-                    # Add to numerator sum: BCE(sigmoid(-alpha * phi_min), M_t[p])
+-                    sig_val = sigmoid(-hyperparams['alpha'] * phi_min)
+-                    bce_val = binary_cross_entropy(sig_val, M_t[p])
+-                    numerator_sum += bce_val
+-            
+-            if denominator_sum > 0:
+-                lm_loss = numerator_sum / (hyperparams['alpha'] * denominator_sum)
+-            else:
+-                lm_loss = 0.0
+-                
+-        # 4. Compute Eikonal Regularization (Shape Loss)
+-        # Only enforced if current_iter <= t1 OR current_iter % t2 == 0
+         le_loss = 0.0
+         if current_iter <= t1 or current_iter % t2 == 0:
+-            # Sample P random points in unit cube
+-            points = sample_random_points(hyperparams['P'], bounds=[-1, 1])
+-            grad_norm_sq_sum = 0.0
+-            for p_i in points:
+-                grad = compute_gradient(model_params.phi, p_i)
+-                norm_sq = dot(grad, grad)
+-                le_loss += pow(norm_sq - 1, 2)
+-            le_loss /= len(points)
++            # Soft Mask Loss [S1, unofficial]
++            valid_pixels = []
++            for p in range(len(M_t)):
++                ray = get_ray_from_pixel(p, C_t) # [G]
++                phi_min = find_min_sdf_along_ray(ray, model_params.phi) # [G]
++                if M_t[p] == 0 or phi_min < tau:
++                    valid_pixels.append((p, phi_min))
+             
+-        # 5. Combine Losses
+-        loss = lr_loss + hyperparams['lambda1'] * lm_loss + hyperparams['lambda2'] * le_loss
++            denom = sum(M_t[p] for p, _ in valid_pixels)
++            num = sum(binary_cross_entropy(sigmoid(-alpha * phi_min), M_t[p]) for p, phi_min in valid_pixels)
++            lm_loss = num / (alpha * denom) if denom > 0 else 0.0
++            
++            # Eikonal Regularization [S1, unofficial]
++            points = sample_random_points(P_eikonal, bounds=[-1, 1]) # [G]
++            le_loss = sum((norm(compute_gradient(model_params.phi, p_i))**2 - 1)**2 for p_i in points) / len(points)
++            
++        # Combine Losses [S1, unofficial]
++        loss = lr_loss + lambda1 * lm_loss + lambda2 * le_loss
+         total_loss += loss
+         
+-    # Average loss over l targets
+     total_loss /= l
+-    
+-    # 6. Backpropagation
+     optimizer.zero_grad()
+     total_loss.backward()
+     optimizer.step()
+-    
+     return total_loss
+ 
+-def find_min_sdf_along_ray(ray, phi):
+-    """
+-    Finds the minimum SDF value along a ray.
+-    Requires dense sampling.
+-    """
+-    # Sample points along the ray
+-    # Typically from near to far plane
+-    samples = sample_along_ray(ray, num_samples=256) # Example count
+-    min_val = infinity
+-    for p in samples:
+-        val = phi(p)
+-        if val < min_val:
+-            min_val = val
+-    return min_val
++# Standard math/vector operations [G]
++def sigmoid(x): return 1.0 / (1.0 + exp(-x))
++def binary_cross_entropy(y_pred, y_true): return -(y_true * log(y_pred) + (1 - y_true) * log(1 - y_pred))
++def norm(v): return sqrt(sum(x**2 for x in v))
++def compute_gradient(phi, p): return [phi(p + eps * d) - phi(p - eps * d) for d in [1, 0, 0, 0, 1, 0, 0, 0, 1]] # Central difference
++def sample_random_points(n, bounds): return [[uniform(bounds[0], bounds[1]) for _ in range(3)] for _ in range(n)]
++def get_ray_from_pixel(p, C): return [C.origin + p * C.direction] # [G]
++def find_min_sdf_along_ray(ray, phi): return min(phi(pt) for pt in ray) # [G]
++def synthesize_image(C, context, params): return render_image(C, context, params) # [G]
++def get_current_iteration(): return 0 # [G] Placeholder for external state
+ ```
+ 
+@@ -229,5 +148,4 @@
+ *   **Compute Bottleneck:** $\mathcal{L}_M$ requires finding the minimum of $\Phi_\theta$ along a ray, which necessitates dense sampling of the network and accounts for most of the compute time of each forward pass [S1, unofficial].
+ *   **Precision:** The threshold $\tau$ must be small enough to detect the zero level set but large enough to avoid noise. The softness parameter $\alpha$ controls the sharpness of the mask boundary; if too high, gradients may become unstable [S1, unofficial].
+-*   **Degenerate Input:** If no pixels satisfy the condition $M_t[p]=0 \lor \Phi_{\min}[p]<\tau$, the denominator in $\mathcal{L}_M$ becomes zero. The implementation must handle this division by zero case (e.g., by setting loss to 0 or adding a small epsilon) [S1, unofficial].
+ 
+ ## Subtopics
+@@ -237,13 +155,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The training is dominated by the dense sampling required for $\mathcal{L}_M$, which accounts for most of the compute time per forward pass [S1, unofficial]. The multi-target batching strategy adds forward passes to $\Gamma$ and $D$, which are fast to evaluate [S1, unofficial].
+-*   **Memory Complexity:** The number of target images $l$ treated as targets in the batch is limited by GPU memory [S1, unofficial].
+-*   **Performance:** On the ShapeNet dataset, NLR++ is slower to converge than MetaNLR++. For instance, on the chairs split, NLR++ takes 3.6 minutes to reach 30dB PSNR, while MetaNLR++ takes 1.5 minutes [S1, unofficial].
+-*   **Strengths:** The scheduled shape supervision allows for faster initial convergence by decoupling shape approximation from feature refinement [S1, unofficial]. The use of CNN encoder/decoder increases the receptive field of the image loss, allowing for more meaningful gradients [S1, unofficial].
+-*   **Limitations:** The dense sampling for $\mathcal{L}_M$ is computationally expensive [S1, unofficial]. NLR++ without meta-learning converges slower than MetaNLR++ [S1, unofficial].
+-*   **When to Use:** Use NLR++ when a standard neural lumigraph representation is needed without the overhead of meta-learning setup. Use MetaNLR++ when rapid convergence on unseen scenes is critical.
++*   **Time Complexity:** Training is dominated by dense sampling for $\mathcal{L}_M$, accounting for most compute time per forward pass [S1, unofficial]. Multi-target batching adds forward passes to $\Gamma$ and $D$, which are fast to evaluate [S1, unofficial].
++*   **Memory Complexity:** Number of target images $l$ treated as targets is limited by GPU memory [S1, unofficial].
++*   **Performance:** On ShapeNet, NLR++ converges slower than MetaNLR++; on chairs split, NLR++ takes 3.6 min to reach 30dB PSNR vs MetaNLR++'s 1.5 min [S1, unofficial].
++*   **Strengths:** Scheduled shape supervision decouples shape approximation from feature refinement for faster initial convergence [S1, unofficial]. CNN encoder/decoder increases image loss receptive field for more meaningful gradients [S1, unofficial].
++*   **Limitations:** Dense sampling for $\mathcal{L}_M$ is computationally expensive [S1, unofficial]. NLR++ without meta-learning converges slower than MetaNLR++ [S1, unofficial].
++*   **When to Use:** Use NLR++ for standard neural lumigraph representation without meta-learning overhead [S1, unofficial]. Use MetaNLR++ when rapid convergence on unseen scenes is critical [S1, unofficial].
+ 
+ ## Background
+-NLR++ was introduced as an end-to-end differentiable neural lumigraph representation optimized to reconstruct target views from a set of input images using a CNN encoder/decoder and a signed distance function (SDF) for shape [S1, unofficial]. It serves as the baseline for MetaNLR++, which improves upon it using meta-learning [S1, unofficial]. The method was developed to enable real-time export of view-dependent textured meshes from posed 2D images [S1, unofficial]. The implementation details, including hyperparameters and training schedules, are described in the supplementary material of the source paper [S1, unofficial]. Experiments were conducted on Nvidia Quadro RTX8000 and RTX6000 GPUs [S1, unofficial].
++NLR++ was introduced as an end-to-end differentiable neural lumigraph representation optimized to reconstruct target views from posed 2D images using a CNN encoder/decoder and an SDF for shape [S1, unofficial]. It serves as the baseline for MetaNLR++, which improves upon it using meta-learning [S1, unofficial]. The implementation details, including hyperparameters and training schedules, are described in the supplementary material of the source paper [S1, unofficial]. Experiments were conducted on Nvidia Quadro RTX8000 and RTX6000 GPUs [S1, unofficial].
+ 
+ ## Sources

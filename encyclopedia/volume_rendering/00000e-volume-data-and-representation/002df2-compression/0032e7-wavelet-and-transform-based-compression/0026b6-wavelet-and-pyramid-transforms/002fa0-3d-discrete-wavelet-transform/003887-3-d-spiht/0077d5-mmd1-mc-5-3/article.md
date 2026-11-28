@@ -1,0 +1,248 @@
+# MMD1_MC_5/3
+
+Also called: MMD and MC_5/3 with 3D SPIHT, MMD1_MC_5/3 compression
+
+## Overview
+MMD1_MC_5/3 is a lossless volumetric compression technique for 3D medical images that combines spatial decorrelation via asymmetric transforms with motion-compensated temporal filtering [S1]. It differs from its sibling [MMD2_MC_5/3](23833-mmd2-mc-5-3.md) by using 1D Multiplicative Multiresolution Decomposition (MMD) in the $x$-direction and 1D integer wavelet transform in the $y$-direction, whereas MMD2_MC_5/3 uses 2D MMD in both spatial directions [S1]. It differs from [MMD1_3D-SPIHT](23818-mmd1-mc-5-3.md) by applying the MC_5/3 filter in the inter-slice ($z$) direction, while MMD1_3D-SPIHT uses a standard 1D integer wavelet transform 5/3 in that direction [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D medical image $X$ with dimensions $[x, y, z]$ [S1].
+- Output: A compressed bit stream containing sub-band coefficients, motion vectors, and etiquettes [S1].
+
+**Data Structures:**
+- The image is partitioned into Groups of Slices (GOS), each containing $M$ consecutive slices in the $z$-direction [S1].
+- Spatial decomposition is performed for $L$ levels [S1].
+- Sub-bands are generated at each level for spatial and inter-slice directions [S1].
+
+**Parameters:**
+- $M$: Number of consecutive slices in a GOS. Typical values are 8 or 16 [S1].
+- $L$: Number of levels of spatial decomposition. Typical values are 2 or 3 [S1].
+
+**Algorithm Steps:**
+1.  **Initialization:** Determine the size of the input image $X$ as $[x, y, z]$ [S1].
+2.  **Grouping:** Divide the volume into GOS. Let $z1$ be the index of the first slice of a GOS and $z2 = z1 + M - 1$ be the index of the last slice [S1].
+3.  **Spatial Decomposition:** For each GOS, perform $L$ levels of spatial decomposition [S1].
+    -   For each level from 1 to $L$:
+        -   Iterate through slices from $z1$ to $z2 + 1$. Note that $z2 + 1$ represents the first slice of the next GOS, which is required for the inter-slice filtering step [S1].
+        -   Apply 1D MMD in the $x$-direction to the current slice [S1].
+        -   Apply 1D integer wavelet transform 5/3 in the $y$-direction to the result [S1].
+        -   Update dimensions: $x \leftarrow x/2$, $y \leftarrow y/2$ [S1].
+4.  **Inter-slice Filtering:** For each level from 1 to $L$, apply the MC_5/3 filter in the $z$-direction to the sub-bands of the GOS [S1]. The MC_5/3 filter uses motion compensation via block matching with a full search method using variable search window sizes (increasing with decomposition level) or truncated 5/3 lifting transform prediction to reduce energy [S1].
+5.  **Coding:**
+    -   Code the resulting sub-bands using 3D SPIHT and an arithmetic coder [S1].
+    -   Code motion vectors and etiquettes using an arithmetic coder [S1].
+6.  **Iteration:** Repeat steps 2–5 for all GOS until the entire volume is coded [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mmd1_mc_5_3_compress(X, M, L):
+    """
+    Compress 3D medical image X using MMD1_MC_5/3.
+    
+    Args:
+        X: 3D numpy array of shape (x, y, z)
+        M: Number of slices per Group of Slices (GOS)
+        L: Number of spatial decomposition levels
+        
+    Returns:
+        compressed_stream: Bit stream (represented as list of encoded data)
+    """
+    x_dim, y_dim, z_dim = X.shape
+    compressed_stream = []
+    
+    # Step 2: Divide image into Groups of Slices (GOS)
+    # Iterate through GOS
+    z1 = 0
+    while z1 < z_dim:
+        z2 = min(z1 + M - 1, z_dim - 1)
+        
+        # Step 3: Spatial Decomposition
+        current_x, current_y = x_dim, y_dim
+        
+        # We need to process up to z2 + 1 for the inter-slice filter
+        # If z2 is the last slice, we don't have a next slice, so handle boundary
+        max_z_idx = z2 + 1
+        if max_z_idx >= z_dim:
+            max_z_idx = z_dim - 1 # Or handle padding/boundary condition [G]
+            
+        # Perform L levels of spatial decomposition
+        for level in range(1, L + 1):
+            # Temporary storage for the current GOS spatially decomposed
+            # In practice, this might be done in-place or with buffers
+            # For clarity, we assume a buffer 'slice_data' holds the current state
+            # Initial state is the raw slices in the GOS range
+            # Note: The source implies processing slices z1 to z2+1 for spatial transform
+            # but the inter-slice filter uses the result.
+            
+            # Apply spatial transforms to slices in the GOS range
+            # The loop in source is: for z1 to z2 + 1
+            # However, z2+1 is the start of the NEXT GOS.
+            # The source says: "z2 + 1 represents first slice of next GOS used in MC_5/3 filter"
+            # This implies the spatial transform is applied to slices z1...z2,
+            # and potentially z2+1 is included in the spatial transform loop 
+            # to prepare it for the inter-slice filter with z2?
+            # Let's follow the pseudo-code strictly:
+            # "for z1 to z2 + 1" inside the level loop.
+            
+            for z_idx in range(z1, max_z_idx + 1):
+                # Extract slice
+                slice_data = X[:, :, z_idx]
+                
+                # 1D MMD in x direction
+                # MMD is a multiplicative transform. 
+                # Standard 1D MMD involves splitting into even/odd and predicting/multiplying.
+                # Since exact MMD formula is not in source, we assume a function exists.
+                slice_data = apply_1d_mmd_x(slice_data)
+                
+                # 1D integer wavelet transform 5/3 in y direction
+                slice_data = apply_1d_iwt_5_3_y(slice_data)
+                
+                # Store result. Note: dimensions halve each level.
+                # We need to store these sub-bands for the inter-slice step.
+                # This requires a data structure to hold sub-bands across z.
+                pass 
+            
+            # Update dimensions for next level
+            current_x = current_x // 2
+            current_y = current_y // 2
+            
+        # Step 4: Inter-slice filtering
+        # Apply MC_5/3 filter in z direction for each level
+        # The source says: "MC_5/3 filter in z direction of GOS"
+        # This operates on the sub-bands generated in Step 3.
+        # It uses motion compensation between slices.
+        
+        for level in range(1, L + 1):
+            # Apply MC_5/3 filter to the sub-bands of this level
+            # The filter uses motion vectors and etiquettes
+            sub_bands_level = get_sub_bands_for_level(level) # Implementation detail [G]
+            mc_5_3_result, motion_vectors, etiquettes = apply_mc_5_3_filter(sub_bands_level)
+            
+            # Step 5: Coding
+            # Code sub-bands with 3D SPIHT
+            spiht_encoded = encode_3d_spiht(mc_5_3_result)
+            compressed_stream.append(spiht_encoded)
+            
+            # Code motion vectors and etiquettes with arithmetic coder
+            mv_encoded = encode_arithmetic(motion_vectors)
+            et_encoded = encode_arithmetic(etiquettes)
+            compressed_stream.append(mv_encoded)
+            compressed_stream.append(et_encoded)
+            
+        # Move to next GOS
+        z1 = z2 + 1
+        
+    return compressed_stream
+
+def apply_1d_mmd_x(data):
+    """
+    Apply 1D Multiplicative Multiresolution Decomposition in x-direction.
+    MMD splits the signal into even and odd samples.
+    It predicts odd samples from even samples using a multiplicative model.
+    """
+    # Split into even and odd columns
+    even_cols = data[:, ::2, :]
+    odd_cols = data[:, 1::2, :]
+    
+    # Prediction: odd = even * (1 + error) or similar multiplicative relation
+    # Standard lifting step for MMD:
+    # P = even * (1 + D(odd)) ... or similar.
+    # Since exact formula is not provided, we assume a standard MMD lifting step.
+    # A common MMD form: 
+    # low = even
+    # high = odd / even (or odd - even * pred)
+    # Let's assume a standard lifting scheme structure for MMD.
+    # Note: The source does not give the exact MMD formula, only that it is used.
+    # We will use a placeholder for the specific MMD math which is defined in external literature [G].
+    # However, to be self-contained, we must write out the logic.
+    # MMD typically: 
+    # s[n] = x[2n]
+    # d[n] = x[2n+1] / x[2n] (or similar)
+    # Then predict/update.
+    
+    # Assuming a basic MMD lifting step:
+    # Predict odd from even
+    # Update even from odd
+    
+    # This is a gap filled by [G] as the exact MMD formula is not in the source text.
+    # We will assume a generic lifting structure.
+    pass
+
+def apply_1d_iwt_5_3_y(data):
+    """
+    Apply 1D Integer Wavelet Transform 5/3 in y-direction.
+    This is the reversible lifting scheme for 5/3 wavelet.
+    """
+    # Split into even and odd rows
+    even_rows = data[::2, :, :]
+    odd_rows = data[1::2, :, :]
+    
+    # Predict step: odd = odd - (even_left + even_right) / 4
+    # Update step: even = even + (odd_left + odd_right + 2) / 4 (integer arithmetic)
+    
+    # Prediction
+    # For interior points:
+    pred = (even_rows[:-1, :, :] + even_rows[1:, :, :]) // 4
+    detail = odd_rows - pred
+    
+    # Update
+    # For interior points:
+    update = (detail[:-1, :, :] + detail[1:, :, :] + 2) // 4
+    approx = even_rows + update
+    
+    # Handle boundaries [G]
+    
+    return approx, detail
+
+def apply_mc_5_3_filter(sub_bands):
+    """
+    Apply MC_5/3 filter in z-direction.
+    Uses motion compensation or truncated 5/3 lifting.
+    """
+    # Motion compensation via block matching
+    # Full search with variable window size
+    pass
+
+def encode_3d_spiht(data):
+    """
+    Encode sub-bands using 3D SPIHT.
+    """
+    pass
+
+def encode_arithmetic(data):
+    """
+    Encode data using arithmetic coding.
+    """
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+-   **Boundary Conditions:** The spatial decomposition and inter-slice filtering must handle the boundaries of the volume and the GOS. The source mentions $z2 + 1$ is used for the MC_5/3 filter, implying that the last slice of a GOS interacts with the first slice of the next GOS [S1].
+-   **Precision:** The use of integer wavelet transform 5/3 ensures lossless compression by avoiding floating-point rounding errors [S1].
+-   **Motion Compensation:** The MC_5/3 filter relies on block matching. Degenerate cases (e.g., no motion, uniform regions) should be handled by the block matching algorithm [S1].
+
+## Subtopics
+
+### [MMD2_MC_5/3](23833-mmd2-mc-5-3.md)
+MMD2_MC_5/3 is a lossless volumetric compression technique that applies a 2D Multiplicative Multiresolution Decomposition (MMD) for spatial decomposition within each slice, followed by an MC_5/3 filter in the inter-slice direction, and finally encodes the resulting sub-bands using 3D SPIHT. It differs from its sibling [MMD1_MC_5/3](23818-mmd1-mc-5-3.md) by using 2D MMD in both $x$ and $y$ directions for spatial decorrelation, whereas MMD1_MC_5/3 uses 1D MMD in $x$ and 1D integer wavelet transform in $y$.
+
+### MMD1_3D-SPIHT
+MMD1_3D-SPIHT is a compression technique applying 1D MMD in the $x$ direction, 1D integer wavelet transform in the $y$ direction, and 1D integer wavelet transform 5/3 in the inter-slice direction, coded with 3D SPIHT [S1]. It differs from [MMD1_MC_5/3](23818-mmd1-mc-5-3.md) by using 1D integer wavelet transform 5/3 in the $z$-direction, whereas MMD1_MC_5/3 uses the MC_5/3 filter in the $z$-direction [S1].
+
+## Operating characteristics
+-   **Time Complexity:** Not given in the sources.
+-   **Memory Complexity:** Not given in the sources.
+-   **Measured Performance:** The technique is evaluated on 3D medical images (CT and MR) with 8-bit pixel values [S1]. It provides lossless compression improvement compared to classic approaches such as 3D SPIHT and JP3D [S1].
+-   **Strengths:** Exploits redundancies in all dimensions (spatial and inter-slice) [S1]. The use of MMD and MC_5/3 allows for lossless compression with better performance than standard 3D integer wavelet transforms [S1].
+-   **Limitations:** The complexity of motion compensation in the MC_5/3 filter may increase computational cost [S1].
+-   **When to use:** Suitable for lossless compression of 3D medical images where preserving exact pixel values is critical [S1].
+
+## Background
+The technique was proposed in the context of volumetric medical image compression, aiming to exploit redundancies in all dimensions (spatial and inter-slice) [S1]. It is part of a family of techniques based on the Multiplicative Multiresolution Decomposition (MMD) and wavelet transforms [S1]. The work compares these techniques against standard 3D SPIHT and JP3D, showing improvements in lossless compression [S1].
+
+## Sources
+[S1] Multiplicative Multiresolution Decomposition for Lossless Volumetric Medical Images Compression, https://doi.org/10.3311/ppee.20256, fetched 2026-10-30

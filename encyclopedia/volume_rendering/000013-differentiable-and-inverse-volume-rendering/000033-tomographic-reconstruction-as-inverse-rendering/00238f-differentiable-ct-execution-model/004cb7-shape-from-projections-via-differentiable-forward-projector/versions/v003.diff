@@ -1,0 +1,163 @@
+--- v002.md
++++ v003.md
+@@ -4,41 +4,39 @@
+ 
+ ## Overview
+-This method estimates 3D shapes represented by a triangular mesh directly from tomographic projection data [S1, unofficial]. It treats tomographic reconstruction as a rendering process, extending a differentiable rasterizer to optimize the 3D geometry [S1, unofficial]. Unlike volumetric approaches, it operates directly on surface meshes, distinguishing it from volumetric differentiable renderers like [DiffVox](10071-diffvox.md) or emissivity-based methods like [EmissivityRenderer](4811-emissivityrenderer.md).
++This method estimates 3D shapes represented by a triangular mesh directly from tomographic projection data [S1, unofficial]. It treats tomographic reconstruction as a rendering process, extending a differentiable rasterizer to optimize the 3D geometry [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- A 3D triangular mesh (vertices and faces).
+-- Tomographic projection data (2D sinograms or projection images).
+-- Projection geometry parameters (source position, detector position, orientation).
++- A 3D triangular mesh (vertices and faces) [S1, unofficial].
++- Tomographic projection data (2D sinograms or projection images) [S1, unofficial].
++- Projection geometry parameters (source position, detector position, orientation) [G].
+ 
+ **Outputs:**
+-- Optimized 3D triangular mesh that minimizes the difference between simulated projections and input data.
++- Optimized 3D triangular mesh that minimizes the difference between simulated projections and input data [S1, unofficial].
+ 
+ **Data Structures:**
+-- Mesh: List of vertices (3D coordinates) and faces (indices into vertices).
+-- Projections: 2D arrays representing intensity values.
+-- Geometry: Parameters defining the X-ray source and detector for each view.
++- Mesh: List of vertices (3D coordinates) and faces (indices into vertices) [G].
++- Projections: 2D arrays representing intensity values [G].
++- Geometry: Parameters defining the X-ray source and detector for each view [G].
+ 
+ **Steps:**
+-1. **Initialization:** Start with an initial guess of the 3D mesh.
+-2. **Forward Projection:** For each view, simulate the projection of the current mesh through the X-ray geometry. This involves calculating the path length of rays through the mesh triangles.
+-3. **Loss Calculation:** Compare the simulated projections with the input tomographic data. Compute a loss function (e.g., Mean Squared Error).
+-4. **Backpropagation:** Compute gradients of the loss with respect to the mesh vertices using the differentiable forward projector.
+-5. **Optimization:** Update the mesh vertices using an optimizer (e.g., Adam) to minimize the loss.
+-6. **Iteration:** Repeat steps 2-5 until convergence or a maximum number of iterations is reached.
++1. **Initialization:** Start with an initial guess of the 3D mesh [G].
++2. **Forward Projection:** For each view, simulate the projection of the current mesh through the X-ray geometry [S1, unofficial]. This involves calculating the path length of rays through the mesh triangles [G].
++3. **Loss Calculation:** Compare the simulated projections with the input tomographic data [S1, unofficial]. Compute a loss function (e.g., Mean Squared Error) [G].
++4. **Backpropagation:** Compute gradients of the loss with respect to the mesh vertices using the differentiable forward projector [S1, unofficial].
++5. **Optimization:** Update the mesh vertices using an optimizer (e.g., Adam) to minimize the loss [G].
++6. **Iteration:** Repeat steps 2-5 until convergence or a maximum number of iterations is reached [G].
+ 
+ **Formulas:**
+-- Loss: $L = \sum_{i} (P_{sim}^{(i)} - P_{true}^{(i)})^2$ where $P_{sim}$ is the simulated projection and $P_{true}$ is the true projection.
+-- Gradient: $\frac{\partial L}{\partial V}$ where $V$ are the mesh vertices.
++- Loss: $L = \sum_{i} (P_{sim}^{(i)} - P_{true}^{(i)})^2$ where $P_{sim}$ is the simulated projection and $P_{true}$ is the true projection [G].
++- Gradient: $\frac{\partial L}{\partial V}$ where $V$ are the mesh vertices [G].
+ 
+ **Parameters:**
+-- Learning rate: Not specified in sources.
+-- Number of iterations: Not specified in sources.
+-- Optimizer: Adam (implied by PyTorch usage).
++- Learning rate: Not given in the sources.
++- Number of iterations: Not given in the sources.
++- Optimizer: Adam [G].
+ 
+ **Edge Cases and Pitfalls:**
+-- Degenerate triangles: Ensure mesh validity.
+-- Missing data: Handle incomplete projections.
+-- Precision: Floating-point precision in gradient calculations.
++- Not given in the sources.
+ 
+ **Pseudocode:**
+@@ -46,4 +44,22 @@
+ import torch
+ import torch.nn as nn
++
++def ray_triangle_intersect(origin, direction, v0, v1, v2):
++    # Standard differentiable ray-triangle intersection (Möller–Trumbore variant)
++    edge1 = v1 - v0
++    edge2 = v2 - v0
++    h = torch.cross(direction, edge2)
++    a = torch.dot(edge1, h)
++    if a < 1e-8: return -1.0
++    f = 1.0 / a
++    s = origin - v0
++    u = f * torch.dot(s, h)
++    if u < 0.0 or u > 1.0: return -1.0
++    q = torch.cross(s, edge1)
++    v = f * torch.dot(direction, q)
++    if v < 0.0 or u + v > 1.0: return -1.0
++    t = f * torch.dot(edge2, q)
++    if t > 1e-8: return t
++    return -1.0
+ 
+ class DifferentiableForwardProjector(nn.Module):
+@@ -53,39 +69,30 @@
+ 
+     def forward(self, vertices, faces):
+-        # Simulate projection of mesh through geometry
+-        # This is a placeholder for the actual differentiable projection logic
+-        # which involves ray-triangle intersection and path length calculation
+-        projections = simulate_projection(vertices, faces, self.geometry)
++        projections = torch.zeros(self.geometry.detector_shape, device=vertices.device)
++        for i in range(self.geometry.num_rays):
++            origin = self.geometry.ray_origins[i]
++            direction = self.geometry.ray_directions[i]
++            max_t = 0.0
++            for face in faces:
++                v0, v1, v2 = vertices[face[0]], vertices[face[1]], vertices[face[2]]
++                t = ray_triangle_intersect(origin, direction, v0, v1, v2)
++                if t > 0.0 and t < max_t:
++                    max_t = t
++            if max_t > 0.0:
++                proj_idx = self.geometry.ray_to_pixel[i]
++                projections[proj_idx] += max_t
+         return projections
+ 
+ def optimize_mesh(projections_true, geometry, initial_vertices, initial_faces, num_iterations=1000):
+-    # Initialize mesh
+     vertices = nn.Parameter(initial_vertices.float(), requires_grad=True)
+     faces = initial_faces
+-
+-    # Define differentiable forward projector
+     projector = DifferentiableForwardProjector(geometry)
+-
+-    # Define optimizer
+     optimizer = torch.optim.Adam([vertices], lr=0.01)
+-
+     for i in range(num_iterations):
+         optimizer.zero_grad()
+-
+-        # Forward projection
+         projections_sim = projector(vertices, faces)
+-
+-        # Calculate loss
+         loss = torch.mean((projections_sim - projections_true) ** 2)
+-
+-        # Backpropagation
+         loss.backward()
+-
+-        # Update vertices
+         optimizer.step()
+-
+-        if i % 100 == 0:
+-            print(f"Iteration {i}, Loss: {loss.item()}")
+-
+     return vertices.detach(), faces
+ ```
+@@ -97,14 +104,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Depends on the number of iterations, mesh complexity, and projection geometry. Each iteration involves forward projection and backpropagation.
+-- **Memory Complexity:** Proportional to the size of the mesh and the projection data.
+-- **Performance:** Not given in the sources.
+-- **Strengths:** Direct mesh optimization, differentiable geometry.
+-- **Limitations:** Requires differentiable projection implementation, sensitive to initialization.
+-- **When to use:** When a mesh representation is desired and tomographic data is available.
+-- **When not to use:** When volumetric representation is preferred or data is insufficient.
++- Time Complexity: Not given in the sources.
++- Memory Complexity: Not given in the sources.
++- Performance: Not given in the sources.
++- Strengths: Not given in the sources.
++- Limitations: Not given in the sources.
++- When to use: Not given in the sources.
++- When not to use: Not given in the sources.
+ 
+ ## Background
+-The method was introduced in the paper "Shape from Projections via Differentiable Forward Projector for Computed Tomography" published in Ultramicroscopy [S1, unofficial]. It builds on the idea of viewing tomographic reconstruction as a rendering process. The code is available on GitHub [S1, unofficial].
++The method was introduced in the paper "Shape from Projections via Differentiable Forward Projector for Computed Tomography" published in Ultramicroscopy [S1, unofficial]. It builds on the idea of viewing tomographic reconstruction as a rendering process [S1, unofficial]. The code is available on GitHub [S1, unofficial].
+ 
+ ## Sources

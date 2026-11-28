@@ -1,0 +1,97 @@
+# MapReduce Rendering
+
+Also called: GPU cluster MapReduce rendering
+
+## Overview
+MapReduce Rendering adapts the MapReduce programming model to distributed volume rendering on GPU clusters, enabling parallel computation and communication. It solves the scalability bottleneck of traditional MPI-based rendering by allowing network communication, CPU/GPU data transfers, disk access, and GPU kernel execution to occur concurrently via an asynchronous streaming interface [S1, unofficial]. Unlike standard synchronous MPI approaches, this method decouples computation from communication, making it suitable for large-scale clusters where I/O and network latency are significant factors [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Distributed volume dataset (partitioned across nodes), camera parameters, transfer function.
+*   **Output:** Composited final image or partial images sent to a client.
+
+**Data Structures:**
+*   **Map Task:** Processes a partition of the volume data. Generates a partial image (framebuffer) or intermediate ray-casting results.
+*   **Reduce Task:** Receives partial images from Map tasks, composites them according to depth order, and produces the final image.
+*   **Streaming Interface:** Manages asynchronous queues for data transfer and kernel execution [S1, unofficial].
+
+**Steps:**
+1.  **Partitioning:** The volume dataset is decomposed into subdomains or bricks distributed across the cluster nodes [G].
+2.  **Map Phase (Parallel Rendering):**
+    *   Each node (worker) loads its assigned volume partition.
+    *   The node executes GPU kernels to render its partition into a partial image.
+    *   Concurrently, the asynchronous interface handles data transfers and disk access if needed [S1, unofficial].
+3.  **Communication:** Partial images are transmitted from worker nodes to a designated reducer node or a tree of reducers. The transmission can be optimized by compressing the partial images before sending [S1, unofficial].
+4.  **Reduce Phase (Compositing):**
+    *   The reducer receives partial images.
+    *   It composites them in the correct depth order (back-to-front or front-to-back depending on the compositing strategy) to produce the final image [G].
+    *   Alternatively, partial images can be sent directly to the client without compositing if the client handles the final composition [S1, unofficial].
+5.  **Output:** The final composited image is displayed or saved.
+
+**Formulas:**
+*   **Total Time:** $T_{total} = \max(T_{map, i}) + T_{comm} + T_{reduce}$, where $T_{map, i}$ is the rendering time for partition $i$, $T_{comm}$ is the communication time, and $T_{reduce}$ is the compositing time [G].
+*   **Asynchronous Overlap:** The effective time for I/O and communication is overlapped with GPU kernel execution, reducing the critical path [S1, unofficial].
+
+**Parameters:**
+*   **Partition Size:** Determined by available memory and network bandwidth. Not given in the sources.
+*   **Compression:** Optional compression for partial images to reduce network load [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Load Imbalance:** If partitions have varying densities or complexities, some nodes may finish significantly later than others, leading to idle time [S1, unofficial].
+*   **Communication Bottleneck:** High network latency or bandwidth saturation can negate the benefits of parallel computation.
+*   **Compositing Order:** Incorrect depth ordering of partial images leads to visual artifacts. The spatial position of partitions relative to the view direction must be respected [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def map_reduce_rendering(volume_data, camera, transfer_function):
+    # Partition volume data across nodes
+    partitions = partition_volume(volume_data)
+    
+    # Map Phase: Parallel rendering on each node
+    partial_images = []
+    for partition in partitions:
+        # Load partition data (asynchronous I/O)
+        data = load_partition(partition)
+        
+        # Execute GPU kernel for rendering
+        # This happens concurrently with other tasks via streaming interface
+        partial_image = render_partition(data, camera, transfer_function)
+        
+        # Store partial image for reduction
+        partial_images.append(partial_image)
+        
+    # Communication Phase: Transfer partial images
+    # Compress if necessary
+    compressed_images = [compress(img) for img in partial_images]
+    
+    # Reduce Phase: Compositing
+    # Sort images by depth order relative to camera
+    sorted_images = sort_by_depth(compressed_images, camera)
+    
+    final_image = composite_images(sorted_images)
+    
+    return final_image
+```
+
+## Subtopics
+
+### Distributed Ortholidar Processing via Spark
+A distributed computing pipeline that scales ortholidar rendering to arbitrary large datasets using the Apache Spark framework [S2]. It leverages Resilient Distributed Datasets (RDD) and Dataframe abstractions, extending the MapReduce Hadoop paradigm for in-memory processing [S2]. Spark SQL’s Dataframe API enables columnar SQL handling with optimizations like predicate pushdown [S2]. It is specifically used for processing Mobile Mapping System (MMS) lidar datasets, which can be huge (e.g., 12 million points) [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the slowest Map task and the communication/compositing phase. Asynchronous streaming overlaps I/O and computation, potentially reducing wall-clock time compared to synchronous MPI [S1, unofficial].
+*   **Memory Complexity:** Depends on the partition size and the ability to cache data in memory (especially in Spark-based variants) [S2].
+*   **Performance:** Scales well with the number of nodes, provided load balancing is effective [S1, unofficial].
+*   **Strengths:** Handles large datasets; overlaps I/O and computation; robust to node failures (especially in Spark variants) [S2].
+*   **Limitations:** Load imbalance can occur; communication overhead can be high if not optimized; requires careful tuning of partition sizes [S1, unofficial].
+*   **When to Use:** Large-scale volume rendering on GPU clusters where I/O and network latency are significant; datasets too large for single-node rendering.
+*   **When Not to Use:** Small datasets where overhead outweighs benefits; scenarios requiring strict real-time interaction with minimal latency.
+
+## Background
+MapReduce Rendering was introduced to address the limitations of MPI-based volume rendering on large-scale displays. It utilizes the MapReduce API to handle communication and computation in parallel, leveraging an asynchronous streaming interface [S1, unofficial]. Stuart et al. [81] used a cluster of GPUs to perform parallel volume rendering using MapReduce [S1, unofficial]. Fogal et al. [21] presented a system meant to run on a cluster of GPUs, where multiple GPUs per node are possible, matching each GPU to a CPU core as part of a parallel streaming model [S1, unofficial].
+
+## Sources
+[S1] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
+[S2] Distributed dimensonality-based rendering of lidar point clouds, https://doi.org/10.5194/isprsarchives-XL-3-W3-559-2015, fetched 2026-10-26

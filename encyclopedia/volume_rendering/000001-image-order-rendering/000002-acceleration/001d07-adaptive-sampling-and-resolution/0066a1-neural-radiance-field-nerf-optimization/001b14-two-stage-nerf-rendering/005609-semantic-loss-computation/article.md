@@ -1,0 +1,140 @@
+# Semantic Loss Computation
+## Overview
+Semantic Loss Computation computes the cross-entropy loss over coarse and fine semantic predictions for query rays to train a generalizable semantic field [S1]. It differs from standard photometric NeRF losses by enforcing semantic consistency across views via ray-based feature projection, allowing the model to learn contextual geometry for semantic information rather than just color [S1]. It is a core component of the Two-stage NeRF Rendering pipeline, specifically enabling the training of the semantic head alongside the geometry-aware network [S1].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+1. **Query Rays ($\mathcal{R}$):** A set of sample rays within a training batch, generated via two-stage (coarse and fine) ray sampling [S1].
+2. **Source Views:** Reference images and their associated features used for cross-reprojection [S1].
+3. **Ground Truth Labels:** Semantic segmentation masks for the query view [S1].
+4. **Network Outputs:** Coarse semantic logits ($\hat{p}_{lc}$) and fine semantic logits ($\hat{p}_{lf}$) for each ray [S1].
+
+**Outputs:**
+* Scalar value $L_{\text{sem}}$ representing the semantic cross-entropy loss [S1].
+
+### Data Structures
+* **Ray Batch:** A collection of rays $r \in \mathcal{R}$ processed together [S1].
+* **Semantic Logits:** Tensors containing coarse and fine predictions for each ray [S1].
+* **Ground Truth Probabilities:** Tensors representing the multi-class probability $p_l(r)$ at class $l$ for each ray [S1].
+
+### Steps
+1. **Ray Projection and Feature Fetching:** At training time, project each query ray (not just a single point) into each source view and fetch the corresponding ray-based feature, which contains rich contextual information within each intra-view [S1].
+2. **Two-Stage Sampling:** Apply two-stage ray sampling (coarse and fine) to generate the sample rays within the training batch, consistent with the NeRF sampling strategy [S1].
+3. **Logit Generation:** Pass the sampled rays through the semantic network to obtain coarse semantic logits ($\hat{p}_{lc}$) and fine semantic logits ($\hat{p}_{lf}$) [S1].
+4. **Probability Conversion:** Convert the logits to probabilities using the softmax function [G].
+5. **Loss Calculation:** Compute the cross-entropy loss for both coarse and fine predictions against the ground truth probabilities [S1].
+
+### Formulas
+The semantic loss $L_{\text{sem}}$ is defined as [S1]:
+
+$$
+L_{\text{sem}} = -\sum_{r \in \mathcal{R}} \sum_{l=1}^{L} \left( p_l(r) \log \hat{p}_{lc}(r) + p_l(r) \log \hat{p}_{lf}(r) \right)
+$$
+
+Where:
+* $\mathcal{R}$ is the set of sample rays within a training batch [S1].
+* $1 \le l \le L$ is the class index, where $L$ is the total number of semantic classes [S1].
+* $p_l(r)$ is the multi-class probability at class $l$ of the ground truth for query ray $r$ [S1].
+* $\hat{p}_{lc}(r)$ is the multi-class probability at class $l$ of the coarse semantic logits for ray $r$ [S1].
+* $\hat{p}_{lf}(r)$ is the multi-class probability at class $l$ of the fine semantic logits for ray $r$ [S1].
+
+The total loss used for training combines this with the photometric loss [S1]:
+
+$$
+L_{\text{total}} = \lambda_1 L_{\text{sem}} + \lambda_2 L_{\text{photometric}}
+$$
+
+Where $L_{\text{photometric}}$ is the color rendering loss from the geometry-aware network [S1].
+
+### Parameters
+* **$\lambda_1$ (Semantic Weight):** Weighting factor for semantic loss. Typical value: 1.0 for main experiments [S1].
+* **$\lambda_2$ (Photometric Weight):** Weighting factor for photometric loss. Typical value: 1.0 for main experiments [S1].
+* **Ablation Settings:** $\lambda_1 = 0, \lambda_2 = 1$ is used for ablation studies to isolate photometric training [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_semantic_loss(query_rays, ground_truth_labels, coarse_logits, fine_logits, num_classes):
+    """
+    Computes the semantic loss L_sem for a batch of rays.
+    
+    Args:
+        query_rays: List of rays in the batch.
+        ground_truth_labels: Tensor of shape (num_rays, num_classes) containing 
+                             ground truth probabilities p_l(r).
+        coarse_logits: Tensor of shape (num_rays, num_classes) containing 
+                       coarse semantic logits.
+        fine_logits: Tensor of shape (num_rays, num_classes) containing 
+                     fine semantic logits.
+        num_classes: Integer L, the number of semantic classes.
+        
+    Returns:
+        Scalar loss value L_sem.
+    """
+    # Helper: Standard softmax function [G]
+    def softmax(logits, dim=-1):
+        max_logits = max(logits)
+        exp_logits = [math.exp(x - max_logits) for x in logits]
+        sum_exp = sum(exp_logits)
+        return [x / sum_exp for x in exp_logits]
+
+    # Convert logits to probabilities using softmax
+    coarse_probs = [softmax(row) for row in coarse_logits]
+    fine_probs = [softmax(row) for row in fine_logits]
+    
+    # Initialize loss accumulator
+    loss = 0.0
+    
+    # Iterate over rays in the batch
+    for r_idx in range(len(query_rays)):
+        # Get ground truth probabilities for this ray
+        p_l = ground_truth_labels[r_idx]
+        
+        # Get coarse and fine probabilities for this ray
+        p_lc = coarse_probs[r_idx]
+        p_lf = fine_probs[r_idx]
+        
+        # Compute cross-entropy for coarse prediction
+        # Sum over classes l=1 to L
+        coarse_loss = -sum(p_l[l] * math.log(p_lc[l] + 1e-7) for l in range(num_classes))
+        
+        # Compute cross-entropy for fine prediction
+        fine_loss = -sum(p_l[l] * math.log(p_lf[l] + 1e-7) for l in range(num_classes))
+        
+        # Accumulate loss
+        loss += coarse_loss + fine_loss
+        
+    return loss
+```
+
+### Edge Cases and Pitfalls
+* **Zero Probabilities:** If $\hat{p}_{lc}(r)$ or $\hat{p}_{lf}(r)$ is zero, the log term becomes undefined. Standard numerical stability techniques (e.g., clipping probabilities to a small epsilon value like $1e-7$) should be applied [G].
+* **Class Imbalance:** The loss is a simple sum over classes. The sources do not specify class weighting or handling for rare classes [S1].
+* **Ray Projection Accuracy:** The method relies on projecting query rays to source views to fetch ray-based features [S1].
+
+## Subtopics
+
+### [Semantic Radiance Field Rendering](18400-semantic-radiance-field-rendering.md)
+Generates point-wise semantic labels for simulated LiDAR points by volume-rendering semantic logits, using weak 2D image labels as supervision. It differs from standard NeRF rendering by outputting a semantic distribution (logits) rather than just RGB color, enabling the training of semantic fields through cross-entropy loss against ground-truth or weak labels.
+
+## Operating characteristics
+* **Time Complexity:** Not given in the sources.
+* **Memory Complexity:** Not given in the sources.
+* **Performance Impact:** The semantic loss drives the model to learn contextual geometry [S1]. On ScanNet generalization settings, varying $\lambda_1/\lambda_2$ ratios significantly affects PSNR and mIoU [S1]:
+    * $\lambda_1=1, \lambda_2=0$: 17.49 PSNR / 55.10 mIoU
+    * $\lambda_1=0.75, \lambda_2=0.25$: 25.26 PSNR / 56.51 mIoU
+    * $\lambda_1=0.5, \lambda_2=0.5$: 25.35 PSNR / 57.15 mIoU
+    * $\lambda_1=0.25, \lambda_2=0.75$: 26.24 PSNR / 58.12 mIoU
+    * $\lambda_1=0, \lambda_2=1$: 26.57 PSNR / 3.62 mIoU [S1]
+* **Strengths:** Enables generalization to unseen semantic scenarios. Semantic loss alone can drive the model to learn reasonable contextual geometry [S1].
+* **Limitations:** Requires accurate ray projection and feature fetching. High computational cost and GPU memory usage associated with the cross-reprojection attention module [S1].
+
+## Background
+Semantic Loss Computation was introduced in the paper "Semantic Ray: Learning a Generalizable Semantic Field with Cross-Reprojection Attention" (CVPR 2023) [S1]. It builds upon the NeRF rendering pipeline and Semantic-NeRF [63], adapting the loss function to work with ray-based features and two-stage sampling [S1]. The method was designed to improve generalization to unseen semantic scenarios by leveraging cross-view attention and ray-based feature projection [S1].
+
+## Sources
+[S1] Semantic Ray: Learning a Generalizable Semantic Field with Cross-Reprojection Attention, https://doi.org/10.1109/cvpr52729.2023.01668, fetched 2026-10-29

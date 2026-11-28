@@ -1,0 +1,58 @@
+# Hierarchical and Sparse Grid Representations
+
+Also called: Grid-based NeRF, Voxel-based NeRF, Sparse Voxel Octrees (SVO) in NeRF
+
+## Overview
+Hierarchical and Sparse Grid Representations discretize 3D space into learnable structures (grids, octrees, or hash tables) to store density and feature vectors, enabling efficient differentiable querying via interpolation [S1, unofficial]. Unlike coordinate-based MLPs that map coordinates to color directly, this family decouples spatial storage from decoding, allowing for faster rendering and explicit scene manipulation [S1, unofficial][S2]. It distinguishes itself from sibling planar representations (e.g., Triplanes) by maintaining full 3D spatial coherence and from pure neural implicit methods by providing an explicit, queryable data structure that can be sparsified or binarized for efficiency [S1, unofficial][S2].
+
+## Shared principles
+The family shares a mechanism of discretizing 3D space into learnable structures and querying them via differentiable interpolation.
+
+**Discretization**
+The 3D scene space is divided into voxels organized in a hierarchy (e.g., coarse-to-fine levels, octrees) or a regular tensor $\mathbb{R}^{H \times W \times D}$ [S1, unofficial].
+
+**Feature Storage**
+Each voxel (or octree node) stores learnable parameters, which may include:
+*   Volume density $\sigma$ [S1, unofficial].
+*   Latent feature vectors $f$ or $e$ used to decode color or SDF [S1, unofficial].
+*   Binary values $\{-1, +1\}$ for compressed storage [S2].
+
+**Differentiable Query**
+For a query point $\mathbf{x}$, values are retrieved via interpolation. Standard trilinear interpolation is used for 3D grids:
+$$ f(\mathbf{x}) = \text{interp}(\mathbf{x}, \mathbf{V}) $$
+where $\mathbf{V}$ is the feature grid [S1, unofficial]. This operation is differentiable, allowing gradients to flow back to the grid values during optimization [S1, unofficial].
+
+**Decoding**
+Interpolated features are passed to a small decoder network (typically an MLP) $S_\Theta$ to predict final outputs like color $\mathbf{c}$ or SDF $s$:
+$$ \mathbf{c}(\mathbf{x}) = S_\Theta(\text{interp}(\mathbf{x}, \mathbf{V}_a)) $$
+[S1, unofficial].
+
+## Subtopics
+
+### [Voxel and Grid Representations](18218-voxel-and-grid-representations.md)
+Voxel and Grid Representations discretize 3D space into learnable structures (grids, octrees, or hash tables) to store density and feature vectors, enabling efficient differentiable querying via interpolation. Unlike coordinate-based MLPs that map coordinates to color directly, this family decouples spatial storage from decoding, allowing for faster rendering and explicit scene manipulation. It distinguishes itself from sibling planar representations (e.g., Triplanes) by maintaining full 3D spatial coherence and from pure neural implicit methods by providing an explicit, queryable data structure that can be sparsified or binarized for efficiency. [Voxel and Grid Representations](18218-voxel-and-grid-representations.md)
+
+### [Triplane and Planar Representations](18410-triplane-and-planar-representations.md)
+Triplane and Planar Representations encode 3D scenes using a set of learnable 2D feature grids (planes) aligned with the canonical coordinate axes, rather than a 3D voxel grid. This approach reduces memory complexity from cubic to linear relative to resolution while maintaining high fidelity. It distinguishes itself from standard 3D voxel grids by leveraging 2D convolutions for efficient feature aggregation and from pure MLPs by avoiding local minima issues associated with high-resolution spatial queries. It serves as a generative backbone for state-of-the-art 3D-aware GANs and efficient neural rendering of dynamic or outdoor scenes. [Triplane and Planar Representations](18410-triplane-and-planar-representations.md)
+
+### [HIVE (HIerarchical Volume Encoding)](20376-hive-hierarchical-volume-encoding.md)
+HIVE is a hierarchical volume encoding module for neural implicit surface reconstruction that explicitly encodes spatial information using multi-scale feature volumes to capture high-frequency details while enforcing spatial consistency. It replaces or augments the implicit encoding of MLPs by concatenating trilinearly interpolated features from low-to-medium resolution volumes with sparsified high-resolution volumes. Unlike single high-resolution volumes that suffer from global incoherence due to isolated voxel updates, or hash-table encodings that suffer from collisions, HIVE uses low-resolution volumes to enforce smoothness and high-resolution volumes for detail, reducing memory consumption via sparsification. [HIVE (HIerarchical Volume Encoding)](20376-hive-hierarchical-volume-encoding.md)
+
+### [Octree-based Implicit Surface Representation with SH and SDF Optimization](22788-octree-based-implicit-surface-representation-with-sh-and-sdf.md)
+This method represents a 3D scene using an adaptive octree structure where leaf nodes store learnable property values, specifically Spherical Harmonic (SH) coefficients for color and Signed Distance Function (SDF) values for geometry. It solves the trade-off between the high quality of continuous neural fields and the computational cost of trilinear interpolation by using constant property values at leaf nodes for rendering, achieving over 30x speedup while maintaining visual fidelity through fine-tuning. Unlike standard grid-based methods that rely on interpolation for continuity, this approach explicitly optimizes the discrete leaf node values to approximate the continuous field, allowing for real-time rendering speeds comparable to or exceeding point-based methods like 3DGS. [Octree-based Implicit Surface Representation with SH and SDF Optimization](22788-octree-based-implicit-surface-representation-with-sh-and-sdf.md)
+
+### Localized NeRFs
+- [S1, unofficial] Handles large-scale scenes by decomposing the scene on different scales, including a progressive training scheme.
+- [S1, unofficial] Decompose the scene on different scales.
+- [S1, unofficial] Use a progressive training scheme.
+
+### MERF (Memory-Efficient Radiance Field)
+- [S2] A representation introduced by Reiser et al. that allows for fast rendering of large-scale scenes.
+- [S2] Utilizes a sparse feature grid and high-resolution 2D feature planes.
+
+## Background
+The shift from pure MLP-based NeRFs to grid-based representations was driven by the need to scale to large environments and improve rendering speed. Early work by Mildenhall et al. [M+20] established the coordinate-based MLP approach. Subsequent research introduced voxel grids to accelerate training and rendering [S1, unofficial]. For large-scale scenes, methods like URF [RLS+21] and those by Xu et al. [XXP+21] and Tang et al. [TRS21] utilized localized NeRFs, decomposing the scene into spatial cells or different scales with progressive training schemes [S1, unofficial]. Reiser et al. [68] introduced MERF, which combines sparse feature grids with 2D planes for efficient large-scale rendering [S2]. The use of hierarchical volumes (HIVE) and octrees with SH/SDF optimization further refined the balance between memory efficiency and geometric detail [S1, unofficial].
+
+## Sources
+[S1] Advances in Neural Rendering, https://doi.org/10.48550/arxiv.2111.05849, fetched 2026-10-26 (unofficial)
+[S2] A Critical Analysis of NeRF-Based 3D Reconstruction, https://doi.org/10.3390/rs15143585, fetched 2026-10-26

@@ -1,0 +1,515 @@
+High-performance DICOM Viewer with 3D Volume Rendering, MPR views, and PACS integration - feat(render): implement GPU volume rendering with CPU fallback (#13) · kcenon/dicom_viewer@35c7643
+
+feat(render): implement GPU volume rendering with CPU fallback (#13) · kcenon/dicom_viewer@35c7643 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+README.kr.md
+README.md
+include/services
+volume_renderer.hpp
+src/services/render
+volume_renderer.cpp
+tests
+CMakeLists.txt
+unit
+volume_renderer_test.cpp
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎README.kr.md‎
+Copy file name to clipboardExpand all lines: README.kr.md
++9-5Lines changed: 9 additions & 5 deletions
+Display the source diff
+Display the rich diff
+Original file line numberDiff line numberDiff line change
+@@ -182,11 +182,15 @@ dicom_viewer/
+182182
+│ ├── SDS.md # 소프트웨어 설계 명세서
+183183
+│ └── reference/ # 기술 참조 문서
+184184
+├── include/ # 헤더 파일
+185-
+│ └── core/ # 코어 모듈 헤더
+186-
+│ ├── dicom_loader.hpp # DICOM 파일 로딩
+187-
+│ ├── series_builder.hpp # 시리즈 조립 및 3D 볼륨
+188-
+│ ├── transfer_syntax_decoder.hpp # 전송 구문 디코딩 지원
+189-
+│ └── image_converter.hpp # 이미지 포맷 변환
+185+
+│ ├── core/ # 코어 모듈 헤더
+186+
+│ │ ├── dicom_loader.hpp # DICOM 파일 로딩
+187+
+│ │ ├── series_builder.hpp # 시리즈 조립 및 3D 볼륨
+188+
+│ │ ├── transfer_syntax_decoder.hpp # 전송 구문 디코딩 지원
+189+
+│ │ ├── hounsfield_converter.hpp # CT 픽셀 to HU 변환
+190+
+│ │ └── image_converter.hpp # 이미지 포맷 변환
+191+
+│ └── services/ # 서비스 레이어 헤더
+192+
+│ ├── volume_renderer.hpp # GPU 볼륨 렌더링 (CPU 폴백 지원)
+193+
+│ └── mpr_renderer.hpp # MPR (다중 평면 재구성) 뷰
+190194
+├── src/ # 소스 코드
+191195
+│ ├── core/ # 핵심 데이터 구조
+192196
+│ │ ├── dicom/ # DICOM 로딩 및 시리즈 조립
+Collapse file
+‎README.md‎
+Copy file name to clipboardExpand all lines: README.md
++9-6Lines changed: 9 additions & 6 deletions
+Display the source diff
+Display the rich diff
+Original file line numberDiff line numberDiff line change
+@@ -182,12 +182,15 @@ dicom_viewer/
+182182
+│ ├── SDS.md # Software Design Specification
+183183
+│ └── reference/ # Technical Reference Documentation
+184184
+├── include/ # Header Files
+185-
+│ └── core/ # Core module headers
+186-
+│ ├── dicom_loader.hpp # DICOM file loading
+187-
+│ ├── series_builder.hpp # Series assembly and 3D volume
+188-
+│ ├── transfer_syntax_decoder.hpp # Transfer syntax decoding support
+189-
+│ ├── hounsfield_converter.hpp # CT pixel to HU conversion
+190-
+│ └── image_converter.hpp # Image format conversion
+185+
+│ ├── core/ # Core module headers
+186+
+│ │ ├── dicom_loader.hpp # DICOM file loading
+187+
+│ │ ├── series_builder.hpp # Series assembly and 3D volume
+188+
+│ │ ├── transfer_syntax_decoder.hpp # Transfer syntax decoding support
+189+
+│ │ ├── hounsfield_converter.hpp # CT pixel to HU conversion
+190+
+│ │ └── image_converter.hpp # Image format conversion
+191+
+│ └── services/ # Service layer headers
+192+
+│ ├── volume_renderer.hpp # GPU volume rendering with CPU fallback
+193+
+│ └── mpr_renderer.hpp # MPR (Multi-Planar Reconstruction) views
+191194
+├── src/ # Source Code
+192195
+│ ├── core/ # Core Data Structures
+193196
+│ │ ├── dicom/ # DICOM loading and series assembly
+Collapse file
+‎include/services/volume_renderer.hpp‎
+Copy file name to clipboardExpand all lines: include/services/volume_renderer.hpp
++10Lines changed: 10 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -98,6 +98,16 @@ class VolumeRenderer {
+9898
+*/
+9999
+bool isGPURenderingEnabled() const;
+100100
+101+
+/**
+102+
+* @brief Validate GPU support with render window
+103+
+* @param renderWindow VTK render window for GPU capability check
+104+
+* @return True if GPU rendering is supported
+105+
+*
+106+
+* This method checks if the current GPU supports volume ray casting.
+107+
+* If GPU is not supported, automatically falls back to CPU rendering.
+108+
+*/
+109+
+bool validateGPUSupport(vtkSmartPointer<vtkRenderWindow> renderWindow);
+110+
+101111
+/**
+102112
+* @brief Enable LOD (Level of Detail) during interaction
+103113
+* @param enable True to enable LOD
+Collapse file
+‎src/services/render/volume_renderer.cpp‎
+Copy file name to clipboardExpand all lines: src/services/render/volume_renderer.cpp
++93-10Lines changed: 93 additions & 10 deletions
+Original file line numberDiff line numberDiff line change
+@@ -5,6 +5,11 @@
+55
+#include <vtkVolumeProperty.h>
+66
+#include <vtkColorTransferFunction.h>
+77
+#include <vtkPiecewiseFunction.h>
+8+
+#include <vtkPlanes.h>
+9+
+#include <vtkPlane.h>
+10+
+#include <vtkPoints.h>
+11+
+#include <vtkDoubleArray.h>
+12+
+#include <vtkNew.h>
+813
+914
+namespace dicom_viewer::services {
+1015
+@@ -17,9 +22,12 @@ class VolumeRenderer::Impl {
+1722
+vtkSmartPointer<vtkColorTransferFunction> colorTF;
+1823
+vtkSmartPointer<vtkPiecewiseFunction> opacityTF;
+1924
+vtkSmartPointer<vtkPiecewiseFunction> gradientOpacityTF;
+25+
+vtkSmartPointer<vtkPlanes> clippingPlanes;
+2026
+27+
+vtkSmartPointer<vtkImageData> inputData;
+2128
+bool useGPU = true;
+2229
+bool useLOD = true;
+30+
+bool gpuValidated = false;
+2331
+2432
+Impl() {
+2533
+volume = vtkSmartPointer<vtkVolume>::New();
+@@ -29,6 +37,7 @@ class VolumeRenderer::Impl {
+2937
+colorTF = vtkSmartPointer<vtkColorTransferFunction>::New();
+3038
+opacityTF = vtkSmartPointer<vtkPiecewiseFunction>::New();
+3139
+gradientOpacityTF = vtkSmartPointer<vtkPiecewiseFunction>::New();
+40+
+clippingPlanes = vtkSmartPointer<vtkPlanes>::New();
+3241
+3342
+// Setup property
+3443
+property->SetInterpolationTypeToLinear();
+@@ -38,8 +47,29 @@ class VolumeRenderer::Impl {
+3847
+property->SetSpecular(0.2);
+3948
+property->SetSpecularPower(10.0);
+4049
+50+
+// Configure GPU mapper for optimal performance
+51+
+gpuMapper->SetAutoAdjustSampleDistances(1);
+52+
+gpuMapper->SetSampleDistance(0.5);
+53+
+54+
+// Configure smart mapper as fallback
+55+
+smartMapper->SetRequestedRenderModeToRayCast();
+56+
+4157
+volume->SetProperty(property);
+4258
+}
+59+
+60+
+void updateMapper() {
+61+
+if (useGPU && gpuValidated) {
+62+
+if (inputData) {
+63+
+gpuMapper->SetInputData(inputData);
+64+
+}
+65+
+volume->SetMapper(gpuMapper);
+66+
+} else {
+67+
+if (inputData) {
+68+
+smartMapper->SetInputData(inputData);
+69+
+}
+70+
+volume->SetMapper(smartMapper);
+71+
+}
+72+
+}
+4373
+};
+4474
+4575
+VolumeRenderer::VolumeRenderer() : impl_(std::make_unique<Impl>()) {}
+@@ -49,13 +79,8 @@ VolumeRenderer& VolumeRenderer::operator=(VolumeRenderer&&) noexcept = default;
+4979
+5080
+void VolumeRenderer::setInputData(vtkSmartPointer<vtkImageData> imageData)
+5181
+{
+52-
+if (impl_->useGPU) {
+53-
+impl_->gpuMapper->SetInputData(imageData);
+54-
+impl_->volume->SetMapper(impl_->gpuMapper);
+55-
+} else {
+56-
+impl_->smartMapper->SetInputData(imageData);
+57-
+impl_->volume->SetMapper(impl_->smartMapper);
+58-
+}
+82+
+impl_->inputData = imageData;
+83+
+impl_->updateMapper();
+5984
+}
+6085
+6186
+vtkSmartPointer<vtkVolume> VolumeRenderer::getVolume() const
+@@ -124,12 +149,30 @@ void VolumeRenderer::setBlendMode(BlendMode mode)
+124149
+bool VolumeRenderer::setGPURenderingEnabled(bool enable)
+125150
+{
+126151
+impl_->useGPU = enable;
+127-
+return enable;
+152+
+impl_->updateMapper();
+153+
+return impl_->useGPU && impl_->gpuValidated;
+128154
+}
+129155
+130156
+bool VolumeRenderer::isGPURenderingEnabled() const
+131157
+{
+132-
+return impl_->useGPU;
+158+
+return impl_->useGPU && impl_->gpuValidated;
+159+
+}
+160+
+161+
+bool VolumeRenderer::validateGPUSupport(vtkSmartPointer<vtkRenderWindow> renderWindow)
+162+
+{
+163+
+if (!renderWindow) {
+164+
+impl_->gpuValidated = false;
+165+
+impl_->updateMapper();
+166+
+return false;
+167+
+}
+168+
+169+
+// Check if GPU volume ray casting is supported
+170+
+bool gpuSupported = impl_->gpuMapper->IsRenderSupported(
+171+
+renderWindow, impl_->property);
+172+
+173+
+impl_->gpuValidated = gpuSupported;
+174+
+impl_->updateMapper();
+175+
+return impl_->gpuValidated;
+133176
+}
+134177
+135178
+void VolumeRenderer::setInteractiveLODEnabled(bool enable)
+@@ -144,7 +187,47 @@ void VolumeRenderer::setInteractiveLODEnabled(bool enable)
+144187
+145188
+void VolumeRenderer::setClippingPlanes(const std::array<double, 6>& planes)
+146189
+{
+147-
+// TODO: Implement clipping with vtkPlanes
+190+
+// Create 6 clipping planes for a bounding box
+191+
+// planes = [xmin, xmax, ymin, ymax, zmin, zmax]
+192+
+auto clippingPlanes = vtkSmartPointer<vtkPlanes>::New();
+193+
+194+
+// Define plane normals and points for box clipping
+195+
+// Each plane is defined by a point on the plane and its normal
+196+
+vtkNew<vtkPoints> points;
+197+
+vtkNew<vtkDoubleArray> normals;
+198+
+normals->SetNumberOfComponents(3);
+199+
+normals->SetNumberOfTuples(6);
+200+
+201+
+// X-min plane (normal pointing +X)
+202+
+points->InsertNextPoint(planes[0], 0, 0);
+203+
+normals->SetTuple3(0, 1, 0, 0);
+204+
+205+
+// X-max plane (normal pointing -X)
+206+
+points->InsertNextPoint(planes[1], 0, 0);
+207+
+normals->SetTuple3(1, -1, 0, 0);
+208+
+209+
+// Y-min plane (normal pointing +Y)
+210+
+points->InsertNextPoint(0, planes[2], 0);
+211+
+normals->SetTuple3(2, 0, 1, 0);
+212+
+213+
+// Y-max plane (normal pointing -Y)
+214+
+points->InsertNextPoint(0, planes[3], 0);
+215+
+normals->SetTuple3(3, 0, -1, 0);
+216+
+217+
+// Z-min plane (normal pointing +Z)
+218+
+points->InsertNextPoint(0, 0, planes[4]);
+219+
+normals->SetTuple3(4, 0, 0, 1);
+220+
+221+
+// Z-max plane (normal pointing -Z)
+222+
+points->InsertNextPoint(0, 0, planes[5]);
+223+
+normals->SetTuple3(5, 0, 0, -1);
+224+
+225+
+clippingPlanes->SetPoints(points);
+226+
+clippingPlanes->SetNormals(normals);
+227+
+228+
+impl_->clippingPlanes = clippingPlanes;
+229+
+impl_->gpuMapper->SetClippingPlanes(clippingPlanes);
+230+
+impl_->smartMapper->SetClippingPlanes(clippingPlanes);
+148231
+}
+149232
+150233
+void VolumeRenderer::clearClippingPlanes()
+Collapse file
+‎tests/CMakeLists.txt‎
+Copy file name to clipboardExpand all lines: tests/CMakeLists.txt
++22Lines changed: 22 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -48,8 +48,30 @@ target_include_directories(hounsfield_converter_test PRIVATE
+4848
+${CMAKE_SOURCE_DIR}/include
+4949
+)
+5050
+51+
+# Unit tests for Volume Renderer
+52+
+add_executable(volume_renderer_test
+53+
+unit/volume_renderer_test.cpp
+54+
+)
+55+
+56+
+target_link_libraries(volume_renderer_test PRIVATE
+57+
+render_service
+58+
+GTest::gtest
+59+
+GTest::gtest_main
+60+
+)
+61+
+62+
+target_include_directories(volume_renderer_test PRIVATE
+63+
+${CMAKE_SOURCE_DIR}/include
+64+
+)
+65+
+66+
+# VTK module autoinit for tests
+67+
+vtk_module_autoinit(
+68+
+TARGETS volume_renderer_test
+69+
+MODULES ${VTK_LIBRARIES}
+70+
+)
+71+
+5172
+# Register tests with CTest
+5273
+include(GoogleTest)
+5374
+gtest_discover_tests(series_assembly_test)
+5475
+gtest_discover_tests(transfer_syntax_decoder_test)
+5576
+gtest_discover_tests(hounsfield_converter_test)
+77+
+gtest_discover_tests(volume_renderer_test)
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

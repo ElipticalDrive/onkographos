@@ -1,0 +1,82 @@
+--- v007.md
++++ v008.md
+@@ -33,8 +33,8 @@
+     *   Initialize `needs_cdf = false` [S2, unofficial].
+     *   Iterate `i` from 1 to `lut.size() - 1` [S2, unofficial].
+-    *   If `lut[i-1].a > lut[i].a`, set `needs_cdf = true` and break. This checks if alpha values are monotonically nondecreasing [S2, unofficial].
++    *   If `lut[i-1].a > lut[i].a`, set `needs_cdf = true` and break [S2, unofficial]. This checks if alpha values are monotonically nondecreasing [S2, unofficial].
+ 
+ 2.  **CDF Correction (Optional):**
+-    *   If `needs_cdf` is true, compute the CDF version of the LUT. The CDF ensures monotonicity required for DDA optimizations [S2, unofficial]. Let `lut_gpu` be the resulting array.
++    *   If `needs_cdf` is true, compute the CDF version of the LUT [S2, unofficial]. The CDF ensures monotonicity required for DDA optimizations [S2, unofficial]. Let `lut_gpu` be the resulting array.
+     *   If `needs_cdf` is false, `lut_gpu` is a copy of `lut` [S2, unofficial].
+ 
+@@ -67,4 +67,5 @@
+     # 2. Prepare data
+     if needs_cdf:
++        # CDF computation step not given in sources; standard implementation: alpha_cdf[i] = 1 - (1 - alpha[i]) * (1 - alpha_cdf[i-1]) [G]
+         lut_gpu = ComputeCDF(lut)
+     else:
+@@ -75,9 +76,9 @@
+         ssbo_size = len(lut_gpu) * 16 # sizeof(glm::vec4)
+         ssbo = allocate_buffer(ssbo_size)
+-        ssbo[:len(lut_gpu)*16] = lut_gpu
++        ssbo[:] = flatten(lut_gpu)
+         bind_buffer(ssbo, binding_point=0)
+         
+         # 4. Set Uniforms
+-        set_uniform("tf_size", len(lut_gpu))
++        set_uniform("tf_size", uint32_t(ssbo.size_bytes / 16))
+         set_uniform("tf_window_left", window_left)
+         set_uniform("tf_window_width", window_width)
+@@ -95,5 +96,5 @@
+             "rowsPerImage": 1
+         }
+-        write_texture(texture, lut_gpu, layout)
++        write_texture(texture, flatten(lut_gpu), layout)
+         
+         # 4. Bind Group and Uniforms
+@@ -142,4 +143,5 @@
+ def create_bind_group(entries): return {"entries": entries}
+ def set_bind_group(bind_group): pass
++def flatten(vec4_list): return [val for v in vec4_list for val in [v.r, v.g, v.b, v.a]]
+ ```
+ 
+@@ -156,21 +158,24 @@
+ 
+ ### SVR Renderer Initialization
+-This variant initializes the transfer function texture in a WebGPU-based SVR renderer. It calculates `bytesPerRow` as `tf.size[0] * 4 * 4` and writes the data to a `GPUTexture` with format `rgba32float` and dimension `1d` [S3, unofficial]. It also manages a `uniformData` buffer of length 28, containing camera view (16 floats), light direction (4 floats), GUI settings (6 floats), and TF size (2 floats) [S3, unofficial].
++This variant initializes the transfer function texture in a WebGPU-based SVR renderer [S3, unofficial]. It calculates `bytesPerRow` as `tf.size[0] * 4 * 4` and writes the data to a `GPUTexture` with format `rgba32float` and dimension `1d` [S3, unofficial]. It also manages a `uniformData` buffer of length 28, containing camera view (16 floats), light direction (4 floats), GUI settings (6 floats), and TF size (2 floats) [S3, unofficial].
+ 
+ ### Histogram-Based Transfer Function Update
+ This method updates the color map by analyzing accumulated opacity values from the previous frame's buffer [S4, unofficial].
+ 1.  **Download:** Fetch the opacity buffer to determine $\alpha_{max}$ [S4, unofficial].
+-2.  **Histogram Initialization:** Add opacity values $\alpha_i$ to histogram $H$. Bin index is calculated as $bin(\alpha_i) = \alpha_i \alpha_{max} N_{bin}$ [S4, unofficial].
+-3.  **Equalization (Optional):** Generate a lookup table mapping old opacity values to new ones based on optimized distribution. If disabled, use linear mapping [S4, unofficial].
+-4.  **Color Map Sampling:** Sample the lookup table with a user-defined color map to generate colors for the next frame. Insert these into a Color buffer of size $N_{color} \times N_{bin}$ [S4, unofficial].
++2.  **Histogram Initialization:** Add opacity values $\alpha_i$ to histogram $H$ [S4, unofficial]. Bin index is calculated as $bin(\alpha_i) = \alpha_i \alpha_{max} N_{bin}$ [S4, unofficial].
++3.  **Equalization (Optional):** Generate a lookup table mapping old opacity values to new ones based on optimized distribution [S4, unofficial]. If disabled, use linear mapping [S4, unofficial].
++4.  **Color Map Sampling:** Sample the lookup table with a user-defined color map to generate colors for the next frame [S4, unofficial]. Insert these into a Color buffer of size $N_{color} \times N_{bin}$ [S4, unofficial].
+ 5.  **Upload:** Upload the Color buffer to the GPU as a lookup table [S4, unofficial].
+ Parameter: $N_{bin}$ is the number of bins in the histogram [S4, unofficial].
+ 
++### Volume Transfer Function Update
++This method updates the scalar opacity and RGB color transfer functions for a volume actor based on provided gray level and color value vectors [S5, unofficial]. Parameters include `greylevel` (std::vector<double>) for input scalar values, and `value`/`red`/`green`/`blue` (std::vector<double>) for corresponding opacity or color channel values [S5, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** The validation step is $O(N)$ where $N$ is the number of LUT entries. The CDF computation is also $O(N)$. The upload is $O(N)$ memory bandwidth bound [G].
++*   **Time Complexity:** The validation step is $O(N)$ where $N$ is the number of LUT entries [G]. The CDF computation is also $O(N)$ [G]. The upload is $O(N)$ memory bandwidth bound [G].
+ *   **Memory Complexity:** $O(N)$ for the LUT storage on the GPU [G].
+-*   **Performance:** The SSBO approach allows for dynamic updates and complex indexing in shaders. The texture approach is standard for hardware-accelerated interpolation [G]. The CDF check is required for DDA optimizations [S2, unofficial].
+-*   **Strengths:** Supports dynamic transfer function updates. Handles non-monotonic inputs via CDF correction. Compatible with both SSBO and Texture-based sampling [G].
+-*   **Limitations:** Requires a full upload if the TF changes. The CDF correction may alter the visual appearance of the transfer function if not carefully calibrated [S2, unofficial].
++*   **Performance:** The SSBO approach allows for dynamic updates and complex indexing in shaders [G]. The texture approach is standard for hardware-accelerated interpolation [G]. The CDF check is required for DDA optimizations [S2, unofficial].
++*   **Strengths:** Supports dynamic transfer function updates [G]. Handles non-monotonic inputs via CDF correction [S2, unofficial]. Compatible with both SSBO and Texture-based sampling [G].
++*   **Limitations:** Requires a full upload if the TF changes [G]. The CDF correction may alter the visual appearance of the transfer function if not carefully calibrated [S2, unofficial].
+ 
+ ## Background
+@@ -181,3 +186,4 @@
+ [S2] nihofm/volren: Simple OpenGL-based renderer for ..., https://github.com/nihofm/volren, fetched 2026-10-29 (unofficial)
+ [S3] fraserlove/ossium, https://github.com/fraserlove/ossium, fetched 2026-10-27 (unofficial)
+-[S4] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)+[S4] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)
++[S5] juanprietob/QtVTKViewer, https://github.com/juanprietob/QtVTKViewer, fetched 2026-10-27 (unofficial)

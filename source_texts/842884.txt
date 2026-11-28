@@ -1,0 +1,170 @@
+Train, inspect, edit, automate, and export 3D Gaussian Splatting scenes from a single native application. - Speed up the fastgs blend kernels by MrNeRF · Pull Request #3898 · MrNeRF/LichtFeld-Studio
+
+Speed up the fastgs blend kernels by MrNeRF · Pull Request #3898 · MrNeRF/LichtFeld-Studio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+MrNeRF
+commented
+Oct 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+The techniques follow George Kopanas' write-up "What the 3DGS Literature Left on the Table" (https://grgkopanas.github.io/3dgs_cuda_blog/): warp reduce-scatter with two-splat folding, SH streaming, contributor compaction with touched gating, branchless evaluation, and 8x8 quadrants with two pixels per thread. Thanks for publishing the steps and the negative results in such detail. This PR implements them for the fastgs kernels and their extra outputs (depth, normals, densification, edge and impact scores, color variance).
+Restructures the fastgs blend kernels so most per-pixel work becomes per-column or per-warp work. The training step (forward, backward and fused Adam) is 17 % faster (median; 13 to 22 % per scene) on the seven local Mip-NeRF 360 scenes at unchanged quality.
+Backward blend
+Each warp owns one 8x8 quadrant and each thread two vertically adjacent pixels of one column. Per splat, the dx-free sums (h, h·dy, h·dy², color, depth, normal, densification, edge and impact) are reduced over the column first; the mean and conic terms that need dx are formed once per column; then everything is reduced across columns with a halving reduce-scatter, so the totals end in distinct lanes and leave in one atomic instruction.
+Two consecutive splats share the first exchange (one per half-warp).
+The walk is barrier-free: each warp stages only the splats the forward pass recorded for its regions in its own 32-entry slice.
+The kernel fits in registers without spilling.
+Transmittance is recovered with one approximate reciprocal per pixel.
+Forward blend
+The same quadrant geometry; both rows of a thread share one column evaluation (two FMAs, one exp2, one multiply per row).
+The overlap mask of each splat's 8x4 regions is computed once when it is staged instead of by every warp.
+Splats that no pixel blends are compacted out of the tile list in place; the coverage bits let backward skip them per warp.
+Touched flags are set by the backward walk instead of forward atomics.
+Also
+48-byte projected record (center, conic, opacity, color in three float4 loads).
+Two-level stable depth/tile sort for large frames, packed keys for small ones.
+SH coefficients are streamed during color evaluation instead of decoded into a 45-float array.
+Behavior
+The ±1e4 safety clamp on per-warp gradient sums now groups the pixels of an 8x8 quadrant instead of two 8x4 regions eight rows apart. Results differ only when such a partial sum exceeds 1e4.
+Acceptance at the 1/255 alpha threshold can differ in the last bit from the previous evaluation order.
+Validation (RTX 4090, frozen 30k MRNF checkpoints of the seven local Mip-NeRF 360 scenes)
+Training step (forward + backward + fused Adam), two views per scene, ABAB:
+Scene
+master
+this PR
+change
+bicycle
+3.66 ms
+3.07 ms
+-15.9 %
+bonsai
+4.80 ms
+3.96 ms
+-17.5 %
+counter
+5.75 ms
+4.52 ms
+-21.4 %
+garden
+3.61 ms
+3.04 ms
+-15.9 %
+kitchen
+6.01 ms
+4.92 ms
+-18.1 %
+room
+5.14 ms
+4.03 ms
+-21.6 %
+stump
+3.60 ms
+3.11 ms
+-13.7 %
+Raster backward 0.68x of master (median), raster forward 0.98x, preprocess and sort unchanged.
+Gradients against master: color, SH and opacity within 1e-5 relative L2; means, scales and rotations within 1e-4 to 1e-3 relative L2 (master against itself: 1e-6 to 6e-5), consistent with the reordered sums, the approximate reciprocal and last-bit acceptance changes; the finite-difference and autograd gradient tests pass.
+30k MRNF training on bicycle: PSNR 25.769 / SSIM 0.7708 / LPIPS 0.2206 (master 25.755 / 0.7707 / 0.2207). Full seven-scene quality run pending.
+Rasterizer, gradient (finite-difference and autograd), normal, depth, color-variance, POP scoring and touched-gating tests pass, as do the Python fast suite and the Windows source preflight.
+Speed up the fastgs blend kernels
+…
+6b7d43c
+```
+The backward blend reduces each splat's gradients per pixel column before
+forming the dx-dependent mean and conic terms, and scatters the totals with a
+halving reduce-scatter. Each warp owns one 8x8 quadrant and walks only the
+splats recorded for it, without block barriers; two consecutive splats share
+the first exchange. The forward blend evaluates both rows of a thread from one
+column term, computes each splat's region mask once while staging, compacts
+splats that no pixel blends out of the tile list, and records the regions
+they reached for the backward walk.
+
+Also stages a 48-byte projected record, sorts large frames by stable depth
+then tile, and streams SH coefficients during color evaluation.
+```
+Copilot
+AI
+balanced review requested due to automatic review settings
+October 29, 2026 09:28
+Copilot
+AI
+reviewed
+Oct 29, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot was unable to review this pull request because the user who requested the review has insufficient remaining quota.
+MrNeRF
+marked this pull request as ready for review
+October 29, 2026 09:35
+Hide details
+View details
+MrNeRF
+merged commit 8c3a445
+into
+master
+Oct 29, 2026
+8 of 9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+francescofugazzi
+mentioned this pull request
+Oct 29, 2026
+Fix Windows Debug timeout in sequencer layout tests
+#3904
+Merged
+MrNeRF
+mentioned this pull request
+Oct 30, 2026
+Port the fastgs blend speedups (#3898) to the Metal and Vulkan training rasterizers
+#3922
+Merged
+MrNeRF
+added a commit
+that referenced
+this pull request
+Oct 30, 2026
+Port the fastgs blend speedups (#3898) to the Metal and Vulkan traini…
+…
+42def4d
+```
+…ng rasterizers (#3922)
+```
+MrNeRF
+mentioned this pull request
+Oct 30, 2026
+Port the quadrant blend kernels to Vulkan FastGS training
+#3931
+Merged
+MrNeRF
+deleted the
+fastgs-blend-speedup
+branch
+November 5, 2026 13:17
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

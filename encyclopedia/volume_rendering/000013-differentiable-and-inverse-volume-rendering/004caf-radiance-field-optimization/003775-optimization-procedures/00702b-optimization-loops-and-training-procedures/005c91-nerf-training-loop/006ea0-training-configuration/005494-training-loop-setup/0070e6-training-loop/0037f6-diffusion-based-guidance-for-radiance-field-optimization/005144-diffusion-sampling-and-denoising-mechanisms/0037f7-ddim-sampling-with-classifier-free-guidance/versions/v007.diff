@@ -1,0 +1,232 @@
+--- v006.md
++++ v007.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-DDIM Sampling with Classifier-Free Guidance (CFG) is a deterministic (or stochastic) reverse diffusion algorithm that generates samples or refines existing ones by iteratively denoising latent variables while steering the process toward a conditional target [S1, S2, unofficial]. It sets itself apart from standard DDPM sampling by skipping intermediate noise steps to allow for fewer sampling iterations, and by combining unconditional and conditional model predictions via a guidance scale to enhance fidelity [S2, unofficial]. In the context of radiance field optimization, it serves as a denoising mechanism to refine NeRF renderings or guide 3D generation by leveraging 2D diffusion priors [S1, unofficial].
++DDIM Sampling with Classifier-Free Guidance (CFG) is a deterministic (or stochastic with $\eta > 0$) reverse diffusion algorithm that generates samples or refines existing ones by iteratively denoising latent variables [S1, S2, unofficial]. It sets itself apart from standard DDPM sampling by skipping intermediate noise steps to allow for fewer sampling iterations, and by combining unconditional and conditional model predictions via a guidance scale to enhance fidelity [S2, unofficial]. In the context of radiance field optimization, it serves as a denoising mechanism to refine NeRF renderings or guide 3D generation by leveraging 2D diffusion priors [S1, unofficial].
+ 
+ ## How it works
+@@ -11,16 +11,15 @@
+   - $x_T$: Initial latent tensor (random noise if generating; existing latent if refining). Shape: $(B, C, H, W)$.
+   - $c$: Conditional embedding (e.g., text or image features). Shape: $(B, D)$.
+-  - $timesteps$: Sequence of timesteps to traverse, typically reversed from $T$ to $0$.
+-  - $unconditional\_guidance\_scale$: Scalar multiplier for CFG (default 1.0).
+-  - $ddim\_eta$: Stochasticity parameter (default 0.0).
+-  - $parameterization$: String, either `"eps"` (noise prediction) or `"v"` (velocity prediction) [S2, unofficial].
++  - $timesteps$: Sequence of timesteps to traverse, typically reversed from $T$ to $0$ [S2, unofficial].
++  - $unconditional\_guidance\_scale$: Scalar multiplier for CFG (default 1.0) [S2, unofficial].
++  - $ddim\_eta$: Stochasticity parameter (default 0.0) [S2, unofficial].
+   - $mask$: Optional inpainting mask tensor.
+   - $x_0$: Optional original image for inpainting [S2, unofficial].
+ - **Outputs:**
+   - $x_0$: Final denoised latent tensor.
+-  - Intermediates: Optional list of $x_t$ and predicted $\hat{x}_0$ at logging intervals.
++  - Intermediates: Optional list of $x_t$ and predicted $\hat{x}_0$ at logging intervals [S2, unofficial].
+ 
+ **Data Structures:**
+-The scheduler maintains several precomputed buffers registered as CUDA tensors (float32) indexed by timestep:
++The scheduler maintains several precomputed buffers registered as CUDA tensors (float32) indexed by timestep [S2, unofficial]:
+ - `alphas_cumprod` ($\alpha_t$): Cumulative product of $\alpha$ values.
+ - `alphas_cumprod_prev` ($\alpha_{t-1}$): Previous cumulative alpha.
+@@ -38,5 +37,4 @@
+    - Initialize the schedule: Compute `ddim_timesteps` using `make_ddim_timesteps` (default discretization: uniform) [S2, unofficial].
+    - Calculate derived buffers (`sqrt_alphas_cumprod`, etc.) from the model's DDPM parameters [S2, unofficial].
+-   - Compute `ddim_sigmas`, `ddim_alphas`, and `ddim_alphas_prev` using `make_ddim_sampling_parameters` with `ddim_eta` [S2, unofficial].
+    - Set the scheduler timesteps: `scheduler.set_timesteps(num_inference_steps)` [S1, unofficial].
+ 
+@@ -48,7 +46,7 @@
+ 
+ 3. **Iteration Loop:**
+-   - Iterate through `timesteps` in reverse order (from $T$ to $0$). Let $i$ be the index in the reversed list, and $t$ be the current timestep value.
++   - Iterate through `timesteps` in reverse order (from $T$ to $0$) [S2, unofficial]. Let $i$ be the index in the reversed list, and $t$ be the current timestep value [S2, unofficial].
+    - **Dynamic Guidance (Optional):** If `ucg_schedule` is provided, set `unconditional_guidance_scale` to `ucg_schedule[i]` [S2, unofficial].
+-   - **Inpainting Mask (Optional):** If `mask` is not None, assert $x_0$ is provided. Compute $img_{orig} = q\_sample(x_0, t)$. Update current image: $img = img_{orig} \cdot mask + (1 - mask) \cdot img$ [S2, unofficial].
++   - **Inpainting Mask (Optional):** If `mask` is not None, assert $x_0$ is provided [S2, unofficial]. Compute $img_{orig} = q\_sample(x_0, t)$ [S2, unofficial]. Update current image: $img = img_{orig} \cdot mask + (1 - mask) \cdot img$ [S2, unofficial].
+    - **Model Prediction:**
+      - Duplicate latents for CFG: $x_{in} = \text{cat}([x_t, x_t])$ [S2, unofficial].
+@@ -79,5 +77,5 @@
+ 
+ 4. **Final Output:**
+-   - Return the final $x_0$ (or $x_{t-1}$ after the last step) [S2, unofficial].
++   - Return the final $x_0$ (or $x_{t-1}$ after the last step).
+ 
+ **Pseudocode:**
+@@ -85,5 +83,4 @@
+ ```python
+ import torch
+-import numpy as np
+ 
+ def ddim_sample_with_cfg(model, scheduler, x_T, c, timesteps, unconditional_guidance_scale=7.5, 
+@@ -114,15 +111,8 @@
+     b = x_T.shape[0]
+     
+-    # 1. Initialize buffers if not already done by scheduler
+-    # Assuming scheduler has: alphas, alphas_prev, sigmas, sqrt_one_minus_alphas
+-    # These are indexed by the step index in timesteps
+-    
+     x = x_T.clone()
+     intermediates = {'x_inter': [], 'pred_x0': []}
+     
+-    # 2. Prepare conditioning for CFG
+-    # Concatenate conditional and unconditional embeddings
+-    # Note: In practice, 'c' might need to be duplicated or handled by the model's apply_model
+-    # Here we assume apply_model handles concatenation internally or we pass c_in
++    # 1. Prepare conditioning for CFG
+     c_in = torch.cat([c, c]) # [2B, D]
+     
+@@ -140,26 +130,16 @@
+             assert x0 is not None, "x0 must be provided for inpainting"
+             # q_sample adds noise to x0 at timestep t
+-            # For simplicity, assuming scheduler has a q_sample method or we compute it:
+-            # x_noisy = sqrt_alpha_t * x0 + sqrt_one_minus_alpha_t * noise
+-            # However, standard inpainting in DDIM usually blends the current x with the noisy x0
+-            # Based on notes: img_orig = self.model.q_sample(x0, ts)
+-            # img = img_orig * mask + (1. - mask) * img
+-            # We need to generate the noisy version of x0. 
+-            # Since we don't have the random noise used in forward pass, we approximate or assume q_sample is available.
+-            # For implementation completeness, we assume a helper q_sample exists or we skip if not strictly defined in notes.
+-            # The notes say: "Compute img_orig = self.model.q_sample(x0, ts)."
+-            # We will assume this function is available or implement a placeholder comment.
+-            img_orig = q_sample(x0, ts, scheduler) # [G] Helper function to add noise to x0
++            sqrt_alpha = scheduler.sqrt_alphas_cumprod[t]
++            sqrt_one_minus_alpha = scheduler.sqrt_one_minus_alphas_cumprod[t]
++            noise_x0 = torch.randn_like(x0)
++            img_orig = sqrt_alpha * x0 + sqrt_one_minus_alpha * noise_x0
+             x = img_orig * mask + (1. - mask) * x
+             
+-        # 3. Model Prediction with CFG
++        # 2. Model Prediction with CFG
+         x_in = torch.cat([x, x]) # Duplicate for unconditional/conditional
+         t_in = torch.cat([ts, ts])
+         
+-        # Model outputs noise prediction (or v-prediction)
+-        # apply_model returns [noise_uncond, noise_cond] if c_in is concatenated
++        # Get raw predictions for unconditional and conditional branches
+         model_output = model.apply_model(x_in, t_in, c_in)
+-        
+-        # Chunk into unconditional and conditional predictions
+         noise_pred_uncond, noise_pred_cond = torch.chunk(model_output, 2)
+         
+@@ -169,52 +149,7 @@
+         # Handle v-parameterization
+         if parameterization == "v":
+-            # Convert v-prediction to noise prediction
+-            # e_t = predict_eps_from_z_and_v(x, t, model_output)
+-            # Note: model_output here is the raw output before CFG? 
+-            # The notes say: "If parameterization == 'v', predict eps: e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)"
+-            # But model_output was already combined with CFG. 
+-            # Standard practice: Apply CFG on the raw prediction, then convert if needed.
+-            # However, the notes sequence suggests:
+-            # 1. Get model_output (raw)
+-            # 2. Apply CFG to get noise_pred
+-            # 3. If v-param, convert noise_pred to eps? 
+-            # Actually, v-prediction models predict v = alpha * eps - sqrt(1-alpha) * x.
+-            # The notes say: "If parameterization == 'v', predict eps: e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)"
+-            # This implies model_output is the raw model output.
+-            # Let's re-read carefully: 
+-            # "Concatenate conditional and unconditional inputs... Pass through model to get model_uncond and model_t."
+-            # "Compute model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)."
+-            # "If parameterization == 'v', predict eps: e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)."
+-            # This implies the CFG is applied to the raw output, and THEN converted if v-param.
+-            
+-            # Correction: The notes show `model_output` being used for CFG, then `e_t` derived from it.
+-            # So we need the raw model output for v-param conversion?
+-            # Let's assume the standard flow:
+-            # raw_pred = model(x, t, c)
+-            # if cfg: raw_pred = uncond + scale * (cond - uncond)
+-            # if v: eps = convert(raw_pred)
+-            
+-            # Re-implementing based on notes structure:
+-            # We already computed noise_pred using CFG.
+-            # If v-param, we need to convert this noise_pred? 
+-            # No, v-param models output v. We need to convert v to eps.
+-            # The notes say: "e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)"
+-            # This suggests model_output is the raw output.
+-            # Let's adjust the code to get raw output first if v-param.
+-            pass 
+-            
+-        # Let's stick to the most robust interpretation of the notes:
+-        # The notes explicitly list:
+-        # 1. Concat inputs
+-        # 2. Get model_uncond, model_t
+-        # 3. Compute model_output (CFG combined)
+-        # 4. If v, predict eps from model_output.
+-        # This implies the conversion happens AFTER CFG combination.
+-        
+-        if parameterization == "v":
+             noise_pred = model.predict_eps_from_z_and_v(x, ts, model_output)
+             
+-        # 5. Select timestep parameters
+-        # Assuming scheduler has methods to get these by index i
++        # 3. Select timestep parameters
+         a_t = scheduler.alphas[i]
+         a_prev = scheduler.alphas_prev[i]
+@@ -222,5 +157,5 @@
+         sqrt_one_minus_at = scheduler.sqrt_one_minus_alphas[i]
+         
+-        # 6. Predict x0
++        # 4. Predict x0
+         if parameterization == "eps":
+             pred_x0 = (x - sqrt_one_minus_at * noise_pred) / a_t.sqrt()
+@@ -232,18 +167,17 @@
+             pred_x0 = model.first_stage_model.quantize(pred_x0)
+             
+-        # 7. Compute direction
++        # 5. Compute direction
+         dir_xt = (1. - a_prev - sigma_t**2).sqrt() * noise_pred
+         
+-        # 8. Sample noise
++        # 6. Sample noise
+         noise = sigma_t * torch.randn_like(x) * temperature
+         if noise_dropout > 0:
+-            # Apply dropout to noise
+             mask_noise = torch.bernoulli(torch.ones_like(noise) * (1 - noise_dropout))
+             noise = noise * mask_noise
+             
+-        # 9. Update x
++        # 7. Update x
+         x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
+         
+-        # 10. Record intermediates
++        # 8. Record intermediates
+         if i % 10 == 0 or i == len(timesteps) - 1:
+             intermediates['x_inter'].append(x_prev)
+@@ -253,13 +187,4 @@
+         
+     return x, intermediates
+-
+-def q_sample(x0, t, scheduler):
+-    """Helper to add noise to x0 for inpainting."""
+-    # Extract sqrt_alphas and sqrt_one_minus_alphas at timestep t
+-    # Note: t is the actual timestep value, need to map to index or use tensor indexing
+-    sqrt_alpha = scheduler.sqrt_alphas_cumprod[t]
+-    sqrt_one_minus_alpha = scheduler.sqrt_one_minus_alphas_cumprod[t]
+-    noise = torch.randn_like(x0)
+-    return sqrt_alpha * x0 + sqrt_one_minus_alpha * noise
+ ```
+ 
+@@ -274,10 +199,8 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Conditioning Shape Mismatch:** If conditioning is a dict/list, check batch size consistency [S2, unofficial].
+ - **Masking Requires $x_0$:** Inpainting requires the original image $x_0$ to compute the noisy version via $q\_sample$ [S2, unofficial].
+ - **Dynamic Thresholding:** Not implemented; raises `NotImplementedError` if enabled [S2, unofficial].
+ - **Score Corrector:** Only supports `eps` parameterization; raises assertion error otherwise [S2, unofficial].
+ - **UCG Schedule Length:** Must exactly match the length of `time_range` [S2, unofficial].
+-- **Precision:** Use `float32` for buffers to maintain stability [S2, unofficial].
+ 
+ ## Subtopics
+@@ -293,11 +216,9 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot T)$, where $N$ is the number of sampling steps and $T$ is the cost of one UNet forward pass. DDIM allows $N \ll T_{DDPM}$ (e.g., 50 steps vs 1000), significantly reducing inference time [S2, unofficial].
++- **Time Complexity:** $O(N \cdot T)$, where $N$ is the number of sampling steps and $T$ is the cost of one UNet forward pass.
+ - **Memory Complexity:** $O(C \cdot H \cdot W)$ for latents, plus $O(T)$ for precomputed schedule buffers [S2, unofficial].
+ - **Measured Performance:** With `num_inference_steps=50` and `guidance_scale=7.5`, it produces high-quality images suitable for NeRF refinement [S1, unofficial].
+ - **Strengths:** Deterministic sampling (when $\eta=0$) allows for reproducible results and fewer steps. CFG enhances conditional fidelity [S2, unofficial].
+ - **Limitations:** Stochasticity ($\eta > 0$) can introduce variance. Inpainting requires $x_0$. Dynamic thresholding is not supported [S2, unofficial].
+-- **When to Use:** When high-quality conditional generation or refinement is needed with fewer steps than DDPM. Ideal for 2D post-processing of NeRF renderings [S1, unofficial].
+-- **When Not to Use:** When strict deterministic reproducibility is required with $\eta > 0$ (not possible). When dynamic thresholding is needed.
+ 
+ ## Background

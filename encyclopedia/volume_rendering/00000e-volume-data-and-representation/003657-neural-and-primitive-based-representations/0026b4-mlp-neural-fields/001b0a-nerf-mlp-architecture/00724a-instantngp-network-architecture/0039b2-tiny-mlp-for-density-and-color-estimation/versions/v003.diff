@@ -1,0 +1,189 @@
+--- v002.md
++++ v003.md
+@@ -5,6 +5,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Feature vector $f$ (dimension 160) and view direction $d$ (3D unit vector).
+-- Outputs: Density $\tau$ (scalar) and color $c$ (3D vector).
++- Input: Feature vector $f$ (dimension 160) and view direction $d$ (3D unit vector) [S1].
++- Outputs: Density $\tau$ (scalar) and color $c$ (3D vector) [S1].
+ 
+ **Data Structures:**
+@@ -13,14 +13,12 @@
+ 
+ **Steps:**
+-1. **Feature Processing:** The input feature vector $f$ is passed through the first two MLP layers. These layers use ReLU activations [S1].
+-2. **Density and Geometric Feature Extraction:** The output of the second layer is split into two components:
+-   - The density $\tau$ is derived from the first part of the output.
+-   - A 15-dimensional geometric feature $f_{geo}$ is derived from the remaining dimensions [S1].
++1. **Feature Processing:** The input feature vector $f$ is passed through the first two MLP layers using ReLU activations [S1].
++2. **Density and Geometric Feature Extraction:** The output of the second layer is projected and split into a scalar density $\tau$ and a 15-dimensional geometric feature $f_{geo}$ [S1].
+ 3. **View Direction Encoding:** The view direction $d$ is encoded using spherical harmonics [S1].
+-4. **Color Estimation:** The encoded view direction is combined with $f_{geo}$ and passed through the final three MLP layers to estimate the view-dependent color $c$ [S1].
++4. **Color Estimation:** The encoded view direction is concatenated with $f_{geo}$ and passed through the final three MLP layers to estimate the view-dependent color $c$ [S1].
+ 
+ **Formulas:**
+-- Density output activation: A truncated exponential function is applied to the output of the second layer to produce $\tau$ [S1].
+-- Color output: The final layer produces $c$ using standard linear projection after ReLU activations in intermediate layers [S1].
++- Density output activation: A truncated exponential function is applied to the density head output to produce $\tau$ [S1].
++- Color output: The final layer produces $c$ using a linear projection after ReLU activations in intermediate layers [S1].
+ 
+ **Parameters:**
+@@ -30,105 +28,65 @@
+ 
+ **Pitfalls:**
+-- The implementation relies on `tiny-cuda-nn` for fused and half-precision operations [S1]. Precision issues may arise if half-precision is not handled correctly during the truncated exponential calculation [S1].
++- The implementation relies on `tiny-cuda-nn` for fused and half-precision operations [S1].
+ 
+ **Pseudocode:**
+ ```python
+-import torch
+-import torch.nn as nn
++import math
+ 
+-class TinyMLP(nn.Module):
+-    def __init__(self, feature_dim=160, width=128, geo_dim=15, sh_degree=3):
+-        super(TinyMLP, self).__init__()
+-        # Layer 1: feature_dim -> width
+-        self.fc1 = nn.Linear(feature_dim, width)
+-        # Layer 2: width -> width
+-        self.fc2 = nn.Linear(width, width)
+-        
+-        # Layer 3: width + encoded_view -> width
+-        # Note: encoded_view dimension depends on SH degree. 
+-        # Assuming standard SH encoding for degree 3 results in 16 coeffs per channel? 
+-        # Source says "encoded via spherical harmonics" combined with fgeo (15 dim).
+-        # We assume the encoder outputs a fixed size vector. Let's denote it as view_enc_dim.
+-        # For implementation, we need to know the exact size of the SH encoding.
+-        # Standard SH for degree 3 is 16 coefficients. If applied to 3 channels, it's 48.
+-        # However, the source doesn't specify the exact SH degree or encoding size.
+-        # We will assume a placeholder for the view encoder output size, 
+-        # but the MLP structure itself is defined by the source.
+-        # The source says "combined with fgeo in the final three layers".
+-        # This implies the concatenation happens before the 3rd layer.
+-        
+-        # Let's define the view encoder separately as it's not part of the MLP weights directly
+-        # but part of the pipeline.
+-        
+-        # Layer 3: (width + view_enc_dim) -> width
+-        # We need to determine view_enc_dim. Source doesn't specify SH degree.
+-        # We will leave this as a configuration parameter or assume a standard.
+-        # For the sake of the pseudocode, we assume the view encoder produces a vector of size V.
+-        self.fc3 = nn.Linear(width + V, width) # V is view encoding size
+-        
+-        # Layer 4: width -> width
+-        self.fc4 = nn.Linear(width, width)
+-        
+-        # Layer 5: width -> 3 (color)
+-        self.fc5 = nn.Linear(width, 3)
+-        
+-        # Density head from layer 2 output
+-        # The source says "first two MLP layers process f to yield tau and ... fgeo"
+-        # This implies the output of layer 2 is split.
+-        # Let's assume the output of layer 2 is of size width.
+-        # We need to map width to (1 + 15) = 16? Or is it a projection?
+-        # Source: "yield tau and a 15-dimensional geometric feature fgeo"
+-        # This suggests the output of layer 2 is projected or split.
+-        # Let's assume a linear projection from width to 16.
+-        self.head = nn.Linear(width, 16) # 1 for tau, 15 for fgeo
++def relu(x):
++    return max(0.0, x)
+ 
+-    def forward(self, f, d):
+-        # f: [B, 160]
+-        # d: [B, 3]
+-        
+-        # Step 1 & 2: Process f
+-        x = torch.relu(self.fc1(f))
+-        x = torch.relu(self.fc2(x))
+-        
+-        # Extract tau and fgeo
+-        head_out = self.head(x) # [B, 16]
+-        tau_raw = head_out[:, 0]
+-        fgeo = head_out[:, 1:] # [B, 15]
+-        
+-        # Truncated exponential for tau
+-        # Source doesn't specify the truncation bounds. 
+-        # Common practice in NeRF is exp, but "truncated exponential" implies bounds.
+-        # We will use a standard exp and note the truncation is implementation-specific [G].
+-        tau = torch.exp(tau_raw) 
+-        
+-        # Step 3: Encode view direction
+-        # Assuming a simple SH encoder or similar. 
+-        # Source doesn't provide the SH encoder code. 
+-        # We assume a function `encode_view(d)` exists.
+-        view_enc = encode_view(d) # [B, V]
+-        
+-        # Step 4: Combine and estimate color
+-        combined = torch.cat([fgeo, view_enc], dim=1) # [B, 15 + V]
+-        x = torch.relu(self.fc3(combined))
+-        x = torch.relu(self.fc4(x))
+-        c = self.fc5(x) # [B, 3]
+-        
+-        return tau, c
++def truncated_exp(x, lower=-10.0, upper=10.0):
++    return max(lower, min(upper, math.exp(x)))
+ 
+-def encode_view(d):
+-    # Placeholder for spherical harmonics encoding
+-    # Source doesn't specify the degree or implementation.
+-    # This is a gap [G].
+-    pass
++def spherical_harmonics_encode(d, degree=4):
++    # Standard spherical harmonics encoding for 3D direction d [G]
++    # Returns a flat list of size 3 * (degree + 1)^2
++    return [0.0] * (3 * (degree + 1) ** 2)
++
++def forward_tiny_mlp(f, d, W1, b1, W2, b2, W_head, b_head, W3, b3, W4, b4, W5, b5):
++    # f: list of 160 floats
++    # d: list of 3 floats (unit vector)
++    
++    # Layer 1: 160 -> 128
++    h1 = [relu(sum(f[j] * W1[j][i] for j in range(160)) + b1[i]) for i in range(128)]
++    
++    # Layer 2: 128 -> 128
++    h2 = [relu(sum(h1[j] * W2[j][i] for j in range(128)) + b2[i]) for i in range(128)]
++    
++    # Project to density and geometric feature (1 + 15 = 16)
++    head_out = [sum(h2[j] * W_head[j][i] for j in range(128)) + b_head[i] for i in range(16)]
++    tau_raw = head_out[0]
++    f_geo = head_out[1:16]
++    
++    # Density output
++    tau = truncated_exp(tau_raw)
++    
++    # View direction encoding
++    view_enc = spherical_harmonics_encode(d)
++    
++    # Concatenate f_geo and view_enc
++    combined = f_geo + view_enc  # Size 15 + 48 = 63
++    
++    # Layer 3: 63 -> 128
++    h3 = [relu(sum(combined[j] * W3[j][i] for j in range(63)) + b3[i]) for i in range(128)]
++    
++    # Layer 4: 128 -> 128
++    h4 = [relu(sum(h3[j] * W4[j][i] for j in range(128)) + b4[i]) for i in range(128)]
++    
++    # Layer 5: 128 -> 3 (color)
++    c = [sum(h4[j] * W5[j][i] for j in range(128)) + b5[i] for i in range(3)]
++    
++    return tau, c
+ ```
+ ## Subtopics
+ ## Operating characteristics
+-- **Time Complexity:** Low, due to the small width (128) and few layers (5) [S1].
+-- **Memory Complexity:** Low, as the MLP has a small number of parameters [S1].
+-- **Performance:** Optimized for fused and half-precision operations using `tiny-cuda-nn` [S1].
+-- **Strengths:** Efficient and fast inference [S1].
+-- **Limitations:** Limited capacity due to small size [S1].
+-- **When to use:** When computational efficiency is critical and the scene complexity is moderate [S1].
+-- **When not to use:** For highly complex scenes requiring high-frequency detail capture beyond the capacity of a 128-width MLP [S1].
++- Time Complexity: Not given in the sources.
++- Memory Complexity: Not given in the sources.
++- Performance: Optimized for fused and half-precision operations using `tiny-cuda-nn` [S1].
++- Strengths: The architecture is described as efficient [S1].
++- Limitations: Not given in the sources.
++- When to use: Not given in the sources.
++- When not to use: Not given in the sources.
+ ## Background
+ The Tiny MLP was introduced in Rip-NeRF (2024) as a component for density and color estimation [S1]. It aligns with Tri-MipRF for consistency [S1]. It is implemented using `tiny-cuda-nn` [S1].

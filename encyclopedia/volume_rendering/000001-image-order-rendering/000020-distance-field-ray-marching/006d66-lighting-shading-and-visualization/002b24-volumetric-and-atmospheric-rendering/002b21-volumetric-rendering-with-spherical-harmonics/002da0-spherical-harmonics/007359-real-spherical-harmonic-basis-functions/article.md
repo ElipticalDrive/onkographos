@@ -1,0 +1,220 @@
+# Real Spherical Harmonic Basis Functions
+
+Also called: Condon-Shortley Phase SH, SH Basis Functions
+
+## Overview
+Real Spherical Harmonic (SH) basis functions provide a real-valued, orthonormal basis for representing directional signals on the unit sphere $S^2$, avoiding the complex arithmetic required by the standard complex SH basis . They are constructed by combining complex SH basis functions $Y_\ell^m$ into real linear combinations, typically incorporating the Condon-Shortley phase factor $(-1)^m$ [S1]. This method is essential in volumetric and atmospheric rendering to efficiently store and evaluate directional lighting and radiance fields [Spherical Harmonics](5603-spherical-harmonics.md).
+
+## How it works
+**Inputs and Outputs:**
+- Input: Direction vector $\omega = (\theta, \phi)$ in spherical coordinates, or Cartesian coordinates $(x, y, z)$ with $r = \sqrt{x^2+y^2+z^2}$.
+- Output: A vector of basis function values $\mathbf{y}(\omega) = [y_0, y_1, \dots, y_{n-1}]^T$, where $n = (L+1)^2$ and $L$ is the maximum degree.
+
+**Data Structures:**
+The basis functions are indexed by degree $l \in \{0, \dots, L\}$ and order $m \in \{-l, \dots, l\}$. The linear index $i$ maps $(l, m)$ to the array position:
+$$ i = l^2 + l + m $$
+This mapping ensures that for a given degree $l$, the orders $m$ are stored contiguously [Spherical Harmonics Degree Selection](10564-spherical-harmonics-degree-selection.md).
+
+**Formulas:**
+The real-valued basis function $Y_{lm}(\theta, \phi)$ is defined piecewise based on the sign of $m$ :
+
+$$
+Y_{lm}(\theta, \phi) =
+\begin{cases}
+\sqrt{2} K_{lm} \cos(m\phi) P_l^m(\cos(\theta)), & \text{if } m > 0 \\
+K_{l0} P_l^0(\cos(\theta)), & \text{if } m = 0 \\
+\sqrt{2} K_{lm} \sin(-m\phi) P_l^{-m}(\cos(\theta)), & \text{if } m < 0
+\end{cases}
+$$
+
+where $K_{lm}$ is the normalization constant:
+$$ K_{lm} = \sqrt{\frac{2l + 1}{4\pi} \frac{(l - m)!}{(l + m)!}} $$
+and $P_l^m$ are the associated Legendre polynomials .
+
+Source [S1] provides an alternative construction using the Condon-Shortley phase $(-1)^m$:
+$$ Y_{lm} = \begin{cases} \sqrt{2}(-1)^m\text{Im}[Y_l^{|m|}], & m < 0 \\ Y_l^0, & m = 0 \\ \sqrt{2}(-1)^m\text{Re}[Y_l^m], & m > 0 \end{cases} $$
+where $Y_l^m$ are the standard complex SH basis functions. Both constructions yield real-valued bases, but the phase factor affects the sign of specific coefficients [S1].
+
+**Explicit Cartesian Forms (Degrees 0-3):**
+For implementation, it is often efficient to evaluate these functions in Cartesian coordinates $(x, y, z)$ where $r = \sqrt{x^2+y^2+z^2}$ [S1]:
+
+**Degree 0 ($l=0$):**
+$$ Y_{0,0} = \frac{1}{2} \sqrt{\frac{1}{\pi}} \approx 0.2820947917738781 $$
+
+**Degree 1 ($l=1$):**
+$$ Y_{1,-1} = -\sqrt{\frac{3}{4\pi}} \frac{y}{r} $$
+$$ Y_{1,0} = \sqrt{\frac{3}{4\pi}} \frac{z}{r} $$
+$$ Y_{1,1} = -\sqrt{\frac{3}{4\pi}} \frac{x}{r} $$
+
+**Degree 2 ($l=2$):**
+$$ Y_{2,-2} = \frac{1}{2} \sqrt{\frac{15}{\pi}} \frac{xy}{r^2} $$
+$$ Y_{2,-1} = -\frac{1}{2} \sqrt{\frac{15}{\pi}} \left(-\frac{yz}{r^2}\right) = \frac{1}{2} \sqrt{\frac{15}{\pi}} \frac{yz}{r^2} $$
+$$ Y_{2,0} = \frac{1}{4} \sqrt{\frac{5}{\pi}} \frac{3z^2 - r^2}{r^2} $$
+$$ Y_{2,1} = -\frac{1}{2} \sqrt{\frac{15}{\pi}} \left(-\frac{xz}{r^2}\right) = \frac{1}{2} \sqrt{\frac{15}{\pi}} \frac{xz}{r^2} $$
+$$ Y_{2,2} = \frac{1}{4} \sqrt{\frac{15}{\pi}} \frac{x^2 - y^2}{r^2} $$
+
+**Degree 3 ($l=3$):**
+$$ Y_{3,-3} = -\frac{1}{4} \sqrt{\frac{35}{2\pi}} \frac{y(3x^2 - y^2)}{r^3} $$
+$$ Y_{3,-2} = \frac{1}{2} \sqrt{\frac{105}{\pi}} \frac{xyz}{r^3} $$
+$$ Y_{3,-1} = -\frac{1}{4} \sqrt{\frac{21}{2\pi}} \frac{y(5z^2 - r^2)}{r^3} $$
+$$ Y_{3,0} = \frac{1}{4} \sqrt{\frac{7}{\pi}} \frac{z(5z^2 - 3r^2)}{r^3} $$
+$$ Y_{3,1} = -\frac{1}{4} \sqrt{\frac{21}{2\pi}} \frac{x(5z^2 - r^2)}{r^3} $$
+$$ Y_{3,2} = \frac{1}{4} \sqrt{\frac{105}{\pi}} \frac{z(x^2 - y^2)}{r^3} $$
+$$ Y_{3,3} = -\frac{1}{4} \sqrt{\frac{35}{2\pi}} \frac{x(x^2 - 3y^2)}{r^3} $$
+
+**Parameters:**
+- $L$: Maximum degree. Typical values in rendering are 3-5 .
+- $r$: Euclidean distance from origin. For direction vectors, $r=1$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def real_sh_basis(theta, phi, max_degree):
+    """
+    Computes real spherical harmonic basis functions for a given direction.
+    
+    Args:
+        theta: Polar angle in radians [0, pi].
+        phi: Azimuthal angle in radians [0, 2*pi].
+        max_degree: Maximum degree L of the basis.
+        
+    Returns:
+        List of basis function values [y_0, y_1, ..., y_{n-1}].
+    """
+    n = (max_degree + 1) ** 2
+    basis = [0.0] * n
+    
+    # Precompute trigonometric values
+    cos_theta = math.cos(theta)
+    sin_theta = math.sin(theta)
+    cos_phi = math.cos(phi)
+    sin_phi = math.sin(phi)
+    
+    for l in range(max_degree + 1):
+        for m in range(-l, l + 1):
+            # Calculate linear index i = l^2 + l + m
+            i = l * l + l + m
+            
+            # Calculate normalization constant K_lm
+            # K_lm = sqrt( (2l+1)/(4pi) * (l-m)! / (l+m)! )
+            # Note: factorial of negative numbers is undefined, but the formula 
+            # uses (l-m)! and (l+m)!. Since m ranges from -l to l, 
+            # l-m >= 0 and l+m >= 0.
+            
+            # Compute factorials
+            fact_l_minus_m = math.factorial(l - m)
+            fact_l_plus_m = math.factorial(l + m)
+            
+            k_lm = math.sqrt((2 * l + 1) / (4 * math.pi) * fact_l_minus_m / fact_l_plus_m)
+            
+            # Compute Associated Legendre Polynomial P_l^m(cos(theta))
+            # For m < 0, P_l^m(x) = (-1)^m * (l-m)!/(l+m)! * P_l^{-m}(x)
+            # However, the real SH definition uses P_l^{|m|} with sin/cos terms.
+            # We use the standard definition for P_l^m where m >= 0.
+            
+            if m == 0:
+                # Y_l0 = K_l0 * P_l^0(cos(theta))
+                p_lm = associated_legendre(l, 0, cos_theta)
+                basis[i] = k_lm * p_lm
+            elif m > 0:
+                # Y_lm = sqrt(2) * K_lm * cos(m*phi) * P_l^m(cos(theta))
+                p_lm = associated_legendre(l, m, cos_theta)
+                basis[i] = math.sqrt(2) * k_lm * cos_phi_m(m, phi) * p_lm
+            else: # m < 0
+                # Y_lm = sqrt(2) * K_lm * sin(-m*phi) * P_l^{-m}(cos(theta))
+                # Note: P_l^{-m} is not directly used in the real basis formula 
+                # for m<0 in the piecewise definition provided in .
+                # The formula uses P_l^{-m} but with sin(-m phi).
+                # Actually, the standard real SH for m<0 uses P_l^{|m|}.
+                # Let's re-read : "sqrt(2) K_lm sin(-m phi) P_l^{-m}(cos(theta))"
+                # Wait, standard definition usually uses P_l^{|m|}. 
+                # Let's check [S1] cartesian forms. They are consistent with P_l^{|m|}.
+                # The formula in  might have a typo or specific convention.
+                # Standard real SH: Y_l^{-m} = sqrt(2) (-1)^m K_lm sin(m phi) P_l^m(cos theta)
+                # Or Y_l^{-m} = sqrt(2) K_lm sin(m phi) P_l^m(cos theta) depending on phase.
+                # The prompt says: "sqrt(2) K_lm sin(-m phi) P_l^{-m}(cos(theta))" for m < 0.
+                # If we assume P_l^{-m} means P_l^{|m|}, then:
+                abs_m = -m
+                p_lm = associated_legendre(l, abs_m, cos_theta)
+                basis[i] = math.sqrt(2) * k_lm * math.sin(-m * phi) * p_lm
+                
+    return basis
+
+def associated_legendre(l, m, x):
+    """
+    Computes the associated Legendre polynomial P_l^m(x).
+    Uses recurrence relations.
+    """
+    if m < 0:
+        # P_l^{-m}(x) = (-1)^m * (l-m)! / (l+m)! * P_l^m(x)
+        # But we usually compute P_l^m for m>=0.
+        # If called with m<0, we might need to handle it, but the loop above
+        # calls it with m>=0 for the P_lm part in the m>0 case.
+        # For m<0 case in real_sh_basis, we use P_l^{|m|}.
+        pass
+        
+    if m > l:
+        return 0.0
+        
+    # Compute P_l^m(x) for m >= 0
+    # P_0^0(x) = 1
+    # P_1^0(x) = x
+    # P_l^m(x) = (2l-1)/(l-m) * x * P_{l-1}^m(x) - (l+m-1)/(l-m) * P_{l-2}^m(x)
+    
+    # Initialize P_0^m and P_1^m
+    # P_m^m(x) = (-1)^m * (2m-1)!! * (1-x^2)^(m/2)
+    # P_{m+1}^m(x) = (2m+1) * x * P_m^m(x)
+    
+    if m == 0:
+        p_mm = 1.0
+    else:
+        p_mm = 0.0
+        for i in range(1, m + 1):
+            p_mm = -p_mm * (2 * i - 1) * math.sqrt(1 - x * x)
+            
+    if l == m:
+        return p_mm
+        
+    p_mp1 = (2 * m + 1) * x * p_mm
+    
+    if l == m + 1:
+        return p_mp1
+        
+    p_ll = 0.0
+    for ll in range(m + 2, l + 1):
+        p_ll = ((2 * ll - 1) * x * p_mp1 - (ll + m - 1) * p_mm) / (ll - m)
+        p_mm = p_mp1
+        p_mp1 = p_ll
+        
+    return p_ll
+
+def cos_phi_m(m, phi):
+    return math.cos(m * phi)
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Near the poles ($\theta = 0, \pi$), $\sin(\theta)$ approaches 0, which can cause numerical instability in the associated Legendre polynomials if not handled carefully .
+- **Boundary Conditions:** The basis functions are defined on the unit sphere. For vectors not normalized to length 1, the Cartesian forms require division by $r^l$ to maintain correctness [S1].
+- **Condon-Shortley Phase:** The inclusion of $(-1)^m$ affects the sign of the basis functions. Implementations must be consistent with the source of the SH coefficients [S1].
+
+## Subtopics
+
+### Homogeneous SH Basis Construction
+A method to convert SH basis functions into homogeneous polynomials in Cartesian coordinates $(x, y, z)$ to avoid numerical inaccuracies associated with monomial bases like $x^4$ [S2]. It involves identifying monomials for desired SH bands (e.g., 0, 2, 4), homogenizing monomials of degree $d < k$ by multiplying by $(x^2 + y^2 + z^2)^{(k-d)/2}$, and combining them into a vector-valued function [S2]. This preserves values on the unit sphere while ensuring the polynomial is homogeneous of degree $k$ [S2].
+
+## Operating characteristics
+- **Time Complexity:** Evaluating the basis functions for a single direction is $O(L^2)$, where $L$ is the maximum degree. The number of basis functions is $n = (L+1)^2$ [Spherical Harmonics Degree Selection](10564-spherical-harmonics-degree-selection.md).
+- **Memory Complexity:** Storing the basis functions explicitly is not required if computed on the fly. Storing coefficients for a directional field requires $O(L^2)$ memory per channel [Spherical Harmonics Degree Selection](10564-spherical-harmonics-degree-selection.md).
+- **Performance:** Typical implementations use $L=3$ or $L=4$ to balance accuracy and performance . Higher degrees lead to larger representations and increased computational cost .
+- **Strengths:** Real-valued, orthonormal, and efficient for representing smooth directional functions. The Cartesian forms allow for fast evaluation without trigonometric functions if precomputed [S1].
+- **Limitations:** SH approximations exhibit "ringing" artifacts (Gibbs phenomenon) near sharp discontinuities or high-frequency details . This limits their effectiveness for highly detailed or sharp lighting conditions .
+
+## Background
+Real spherical harmonic basis functions are derived from the complex spherical harmonics, which are eigenfunctions of the angular part of the Laplacian in spherical coordinates [Spherical Harmonics](5603-spherical-harmonics.md). The real-valued formulation is widely used in computer graphics for its computational efficiency and compatibility with real-valued data . The Condon-Shortley phase is a standard convention in physics and chemistry, adopted in some graphics implementations for consistency [S1]. The homogeneous polynomial construction is a technique used to improve numerical stability in specific rendering contexts [S2].
+
+## Sources
+[S1] KHR_gaussian_splatting, https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_gaussian_splatting, fetched 2026-10-30
+[S2] Ray Tracing Spherical Harmonics Glyphs, https://doi.org/10.2312/vmv.20231223, fetched 2026-11-02

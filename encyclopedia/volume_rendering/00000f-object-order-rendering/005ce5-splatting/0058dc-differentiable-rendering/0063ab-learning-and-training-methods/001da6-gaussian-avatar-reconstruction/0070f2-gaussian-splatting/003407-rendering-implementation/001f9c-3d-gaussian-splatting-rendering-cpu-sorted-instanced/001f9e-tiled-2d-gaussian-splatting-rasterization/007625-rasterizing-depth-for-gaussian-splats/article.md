@@ -1,0 +1,103 @@
+# Rasterizing Depth for Gaussian Splats
+
+Also called: RaDe-GS depth, Spatially varying depth
+
+## Overview
+A method to compute a spatially varying depth within the projected 2D Gaussian, rather than using a constant depth per Gaussian splat, to capture shape details [S1]. Standard Gaussian Splatting evaluates the depth of each 2D Gaussian by its center to sort them for alpha blending; this constant depth cannot capture shape details [S1]. This method derives a rasterized formula for efficient evaluation of spatially varying depths within a projected Gaussian [S1].
+
+## How it works
+**Inputs:** 3D Gaussian parameters (center $\mathbf{x}_c$, covariance $\Sigma$), camera parameters (center $\mathbf{o}$, extrinsics), pixel coordinates $(u, v)$.
+**Outputs:** Depth $d$ for the pixel $(u, v)$ relative to the Gaussian splat.
+
+**Data Structures:**
+*   **Ray Space Coordinates:** A point $\mathbf{u} = (u, v, t)^\top$ where $(u, v)$ are image plane coordinates and $t$ is the distance between the point and the $uv$-plane ($t = \sqrt{x^2 + y^2 + z^2}$ in camera space, mapped to ray space).
+*   **Transformed Center:** $\mathbf{u}_c = (u_c, v_c, t_c)^\top$.
+*   **Transformed Covariance:** $\Sigma'$, the covariance matrix transformed into ray space.
+*   **Pre-computed Vectors:**
+    *   $\hat{\mathbf{q}}$: A $1 \times 3$ vector defined as $\hat{\mathbf{q}} = \frac{\mathbf{v}'^\top \Sigma'^{-1}}{\mathbf{v}'^\top \Sigma'^{-1}\mathbf{v}'}$, where $\mathbf{v}' = (0, 0, 1)^\top$.
+    *   $\hat{\mathbf{p}}$: A $1 \times 3$ vector defined as $\hat{\mathbf{p}} = \frac{z_c}{t_c} \hat{\mathbf{q}}$, where $z_c$ is the z-coordinate of the Gaussian center in camera space.
+    *   $\mathbf{p}$: A $1 \times 2$ vector derived from $\hat{\mathbf{p}}$ by skipping the third element.
+
+**Steps:**
+1.  **Transform to Ray Space:** Transform the Gaussian center $\mathbf{x}_c$ and covariance $\Sigma$ from camera space to ray space, resulting in $\mathbf{u}_c = (u_c, v_c, t_c)^\top$ and $\Sigma'$ [S1]. In ray space, the light ray direction is normalized to $\mathbf{v}' = (0, 0, 1)^\top$ [S1].
+2.  **Compute Pre-computed Vectors:** Calculate $\hat{\mathbf{q}}$ and $\hat{\mathbf{p}}$ for the Gaussian splat [S1].
+    *   $\hat{\mathbf{q}} = \frac{\mathbf{v}'^\top \Sigma'^{-1}}{\mathbf{v}'^\top \Sigma'^{-1}\mathbf{v}'}$
+    *   $\hat{\mathbf{p}} = \frac{z_c}{t_c} \hat{\mathbf{q}}$
+    *   $\mathbf{p}$ consists of the first two elements of $\hat{\mathbf{p}}$ [S1].
+3.  **Calculate Relative Pixel Position:** For a pixel $(u, v)$, compute $\Delta u = u_c - u$ and $\Delta v = v_c - v$ [S1].
+4.  **Compute Depth:** Use the rasterized depth formula [S1]:
+    $$d = z_c + \mathbf{p} \begin{pmatrix} \Delta u \\ \Delta v \end{pmatrix}$$
+    Alternatively, using the full vector form [S1]:
+    $$d = \hat{\mathbf{p}}(\mathbf{u}_c - \mathbf{u}_o) = \hat{\mathbf{p}} \begin{pmatrix} u_c - u \\ v_c - v \\ t_c \end{pmatrix}$$
+    where $\mathbf{u}_o = (u, v, 0)^\top$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rasterize_depth_gaussian(u, v, u_c, v_c, t_c, z_c, Sigma_prime_inv):
+    """
+    Compute spatially varying depth for a pixel (u, v) covered by a Gaussian splat.
+    
+    Args:
+        u, v: Pixel coordinates.
+        u_c, v_c, t_c: Ray space coordinates of the Gaussian center.
+        z_c: Z-coordinate of the Gaussian center in camera space.
+        Sigma_prime_inv: Inverse of the transformed covariance matrix in ray space (3x3).
+        
+    Returns:
+        d: Depth value.
+    """
+    # Define ray direction in ray space
+    v_prime = [0, 0, 1]
+    
+    # Compute v'^T * Sigma'^-1
+    v_T_Sigma_inv = [
+        sum(v_prime[k] * Sigma_prime_inv[k][0] for k in range(3)),
+        sum(v_prime[k] * Sigma_prime_inv[k][1] for k in range(3)),
+        sum(v_prime[k] * Sigma_prime_inv[k][2] for k in range(3))
+    ]
+    
+    # Compute v'^T * Sigma'^-1 * v'
+    v_T_Sigma_inv_v = sum(v_T_Sigma_inv[k] * v_prime[k] for k in range(3))
+    
+    # Compute q_hat (1x3 vector)
+    # q_hat = (v'^T * Sigma'^-1) / (v'^T * Sigma'^-1 * v')
+    q_hat = [val / v_T_Sigma_inv_v for val in v_T_Sigma_inv]
+    
+    # Compute p_hat (1x3 vector)
+    # p_hat = (z_c / t_c) * q_hat
+    p_hat = [val * (z_c / t_c) for val in q_hat]
+    
+    # Compute p (1x2 vector) by skipping the third element of p_hat
+    p = [p_hat[0], p_hat[1]]
+    
+    # Compute relative pixel positions
+    delta_u = u_c - u
+    delta_v = v_c - v
+    
+    # Compute depth
+    # d = z_c + p * [delta_u, delta_v]^T
+    d = z_c + p[0] * delta_u + p[1] * delta_v
+    
+    return d
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The derivation assumes local affine projection [S1].
+*   **Boundaries:** The method is valid for pixels $(u, v)$ covered by the projected Gaussian [S1].
+*   **Degenerate Input:** If $t_c = 0$, the division by $t_c$ in $\hat{\mathbf{p}}$ is undefined. This corresponds to the Gaussian center being in the camera plane, which is typically excluded or handled separately in rendering pipelines.
+
+## Subtopics
+
+### Rasterizing Normal for Gaussian Splats
+Computes surface normal directions projected by a Gaussian splat by deriving the plane equation in ray space for the intersection points [S1]. The intersection points form a plane in ray space, and the plane's normal direction is taken as that of the projected Gaussian [S1]. The plane equation in ray space is given by $(\mathbf{u} - \mathbf{u}_c) = \begin{pmatrix} -\Delta u \\ -\Delta v \\ (\Delta u - \Delta v) \mathbf{q}^\top \end{pmatrix}$, where $\mathbf{q}$ is the same as $\hat{\mathbf{q}}$ skipping the last component [S1]. The normal vector is then transformed from ray space to camera space to compute the normal map [S1].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Origin: [S1] RaDe-GS: Rasterizing Depth in Gaussian Splatting, https://arxiv.org/abs/2406.01467v2, fetched 2026-10-26
+
+## Sources
+[S1] RaDe-GS: Rasterizing Depth in Gaussian Splatting, https://arxiv.org/abs/2406.01467v2, fetched 2026-10-26

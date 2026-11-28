@@ -1,0 +1,145 @@
+--- v001.md
++++ v002.md
+@@ -1,39 +1,97 @@
+ # Voxel-based Volume Rendering
+ 
+-Also called: Voxel-based Radiance Field, Dense Voxel Rendering
+ 
+ ## Overview
+-Voxel-based Volume Rendering is a technique that trains a dense or semi-dense voxel representation of a radiance field, where multiple voxels contribute to a single sample during rendering [S1, unofficial]. It differs from sparse voxelization (such as octrees) by using a fixed grid structure where the model determines opacity and color through aggregation over voxel intervals [S1, unofficial]. It is primarily used as a coarse model in two-tier sampling architectures to identify opaque regions in space before fine-grained sampling [S1, unofficial].
++Voxel-based Volume Rendering is a technique that trains a dense or semi-dense voxel representation of a radiance field, where multiple voxels contribute to a single sample during rendering [S1, unofficial]. It differs from sparse voxelization (such as octrees) by using a fixed grid structure where the model determines opacity and color through aggregation over voxel intervals, whereas voxelization creates a sparse octree containing voxels only where the model determines the space is solid [S1, unofficial]. It is primarily used as a coarse model in two-tier sampling architectures to identify opaque regions in space before fine-grained sampling [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of calibrated images with known camera poses $(P_i)$ and intrinsics.
+-*   **Output:** A rendered RGB image and optionally depth/opacity maps for a target camera pose.
++*   **Input:** A set of calibrated images with known camera poses and intrinsics [G].
++*   **Output:** A rendered RGB image and optionally depth or opacity maps for a target camera pose [G].
+ 
+ **Data Structures:**
+-*   **Voxel Grid:** A 3D tensor of shape $D \times D \times D$ (where $D$ is the resolution, e.g., 128).
+-*   **Voxel Values:** Each voxel stores a feature vector. In standard implementations, this includes density ($\sigma$) and color ($C$) or a latent feature vector decoded by an MLP [S1, unofficial]. The opacity is predicted without view direction to encourage structural consistency [S1, unofficial].
++*   **Voxel Grid:** A 3D tensor of shape $D \times D \times D$ (where $D$ is the resolution, e.g., 128) [S1, unofficial].
++*   **Voxel Values:** Each voxel stores a feature vector [G]. The opacity is predicted without view direction to encourage structural consistency [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Grid Initialization:** Initialize a 3D grid of size $D^3$. Each cell contains learnable parameters (density and color/feature).
+-2.  **Ray Casting:** For each pixel in the target image, cast a ray from the camera origin through the pixel center into the volume.
+-3.  **Voxel Intersection:** Determine the entry and exit points of the ray within the voxel grid boundaries.
+-4.  **Sampling:** Sample points along the ray. Unlike continuous NeRF sampling, samples are often aligned with voxel boundaries or distributed uniformly within the ray's intersection with the grid [S1, unofficial].
+-5.  **Aggregation:** For each sample point, retrieve the voxel value. If a sample falls within a voxel, the contribution is derived from that voxel's stored density and color. Multiple voxels may contribute to a single sample interval if the sampling strategy spans voxel boundaries [S1, unofficial].
+-6.  **Volume Rendering:** Perform standard volumetric rendering integration (alpha compositing) along the ray:
+-    $$
+-    C(r) = \sum_{i=1}^{N} T_i \left( 1 - \exp(-\sigma_i \delta_i) \right) c_i
+-    $$
+-    where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the accumulated transmittance, $\sigma_i$ is the density, $\delta_i$ is the distance between samples, and $c_i$ is the color [S1, unofficial].
+-7.  **Training:** Minimize the difference between rendered and ground truth images using gradient descent.
++1.  **Grid Initialization:** Initialize a 3D grid of size $D^3$ with learnable feature parameters [G].
++2.  **Ray Casting:** For each pixel in the target image, cast a ray from the camera origin through the pixel center into the volume [G].
++3.  **Voxel Intersection:** Determine the entry and exit points of the ray within the voxel grid boundaries [G].
++4.  **Sampling:** Sample points along the ray, distributing them uniformly within the ray's intersection with the grid or aligning them with voxel boundaries [G]. Multiple voxels may contribute to a single sample interval if the sampling strategy spans voxel boundaries [S1, unofficial].
++5.  **Aggregation:** For each ray interval defined by the intersection with a specific voxel, retrieve the voxel's feature vector [G].
++6.  **Decoding:** Decode the aggregated features to produce density and color, or predict opacity directly without view direction [S1, unofficial].
++7.  **Integration:** Perform differentiable volume rendering integration (alpha compositing) along the ray [G].
++8.  **Training:** Minimize the difference between rendered and ground truth images using gradient descent [G].
++
++**Pseudocode:**
++```python
++import numpy as np
++
++def render_voxel_grid(voxel_grid, ray_origin, ray_direction, grid_size, grid_extent):
++    # voxel_grid: 3D tensor of shape (D, D, D) storing feature vectors
++    # ray_origin, ray_direction: 3D vectors
++    # grid_size: integer D
++    # grid_extent: float, half-extent of the grid (e.g., 1.0)
++    
++    # 1. Compute ray-grid intersection
++    t_min = (-grid_extent - ray_origin) / ray_direction
++    t_max = (grid_extent - ray_origin) / ray_direction
++    t_min, t_max = np.maximum(t_min, t_max), np.minimum(t_min, t_max)
++    if t_min > t_max:
++        return np.zeros(3)  # Ray misses grid
++    
++    t_start = max(t_min, 0.0)
++    t_end = t_max
++    
++    # 2. Initialize rendering state
++    T = 1.0  # Accumulated transmittance
++    color = np.zeros(3)
++    t = t_start
++    
++    # 3. March along the ray
++    step_size = 0.01  # Fixed step size or adaptive based on grid resolution [G]
++    while t < t_end:
++        # 4. Map ray position to voxel coordinates
++        pos = ray_origin + ray_direction * t
++        voxel_coords = ((pos + grid_extent) / (2 * grid_extent)) * (grid_size - 1)
++        voxel_coords = np.clip(voxel_coords, 0, grid_size - 1)
++        
++        # 5. Retrieve voxel feature
++        feature = voxel_grid[voxel_coords[0], voxel_coords[1], voxel_coords[2]]
++        
++        # 6. Decode feature to density and color [G]
++        density, rgb = decode_feature(feature)
++        
++        # 7. Compute opacity for this step
++        delta = step_size
++        alpha = 1.0 - np.exp(-density * delta)
++        
++        # 8. Composite
++        color += T * alpha * rgb
++        T *= (1.0 - alpha)
++        
++        if T < 1e-4:
++            break  # Early exit if ray is fully opaque
++        
++        t += step_size
++        
++    return color
++
++def decode_feature(feature):
++    # Standard MLP or linear projection to map feature vector to density and RGB [G]
++    # Opacity is predicted without view direction to encourage structural consistency [S1, unofficial]
++    density = np.maximum(feature[..., 0], 0.0)
++    rgb = np.sigmoid(feature[..., 1:4])
++    return density, rgb
++```
+ 
+ **Parameters:**
+-*   **Grid Resolution ($D$):** Typical values include 128, 256, or 512. Higher resolution increases memory usage quadratically/cubically but improves detail [S1, unofficial].
+-*   **Number of Samples:** Determined by the grid resolution and ray length.
++*   **Grid Resolution ($D$):** Typical values include 128 [S1, unofficial].
++*   **Sampling Strategy:** Uniform or boundary-aligned sampling within the ray's intersection with the grid [G].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory Usage:** Dense voxel grids consume significant memory ($O(D^3)$). For $D=128$, this is manageable; for $D=512$, it becomes prohibitive without optimization [S1, unofficial].
+-*   **Aliasing:** Low-resolution grids may produce blurry results or aliasing artifacts if not properly filtered [S1, unofficial].
+-*   **Boundary Conditions:** Rays exiting the grid must be handled to avoid undefined behavior.
++*   **Boundary Conditions:** Rays exiting the grid must be clamped or terminated to avoid undefined behavior [G].
++*   **Memory Usage:** Dense voxel grids consume significant memory ($O(D^3)$) [G].
++*   **Zero Direction Components:** Division by zero in ray-grid intersection calculation must be handled by using `np.maximum` and `np.minimum` for $t_{min}$ and $t_{max}$ [G].
+ 
+ ## Subtopics
+@@ -46,14 +104,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot D^3)$ for training, where $N$ is the number of pixels and $D$ is the grid resolution. Rendering is $O(N \cdot S)$, where $S$ is the number of samples per ray.
+-*   **Memory Complexity:** $O(D^3)$ for the voxel grid. This is a significant limitation compared to sparse representations.
+-*   **Performance:** Fast training and inference compared to continuous MLP-based NeRFs for low-to-medium resolutions. However, memory constraints limit scalability to high resolutions [S1, unofficial].
+-*   **Strengths:** Structurally consistent opacity prediction; efficient for coarse modeling; simple implementation.
+-*   **Limitations:** High memory usage for high resolutions; potential for aliasing; less flexible than sparse representations for complex scenes.
+-*   **When to Use:** As a coarse model in two-tier sampling; scenes with moderate complexity; resource-constrained environments where memory is not the primary bottleneck.
+-*   **When Not to Use:** High-resolution requirements; highly sparse scenes; real-time applications requiring very high fidelity.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** $O(D^3)$ for the dense voxel grid [G].
++*   **Performance:** Fast training and inference compared to continuous MLP-based NeRFs for low-to-medium resolutions [G].
++*   **Strengths:** Structurally consistent opacity prediction; efficient for coarse modeling; simple implementation [S1, unofficial].
++*   **Limitations:** High memory usage for high resolutions; potential for aliasing at low resolutions; less flexible than sparse representations for complex scenes [G].
++*   **When to Use:** As a coarse model in two-tier sampling; scenes with moderate complexity; resource-constrained environments where memory is not the primary bottleneck [S1, unofficial].
++*   **When Not to Use:** High-resolution requirements; highly sparse scenes; real-time applications requiring very high fidelity [G].
+ 
+ ## Background
+-Voxel-based volume rendering in the context of neural radiance fields was introduced as a baseline technique in educational materials for Fourier Feature Networks and Neural Volume Rendering [S1, unofficial]. It serves as a conceptual stepping stone to more advanced methods like NeRF, highlighting the trade-offs between discrete and continuous representations. The technique was later refined in methods like DIVeR, which introduced deterministic integration and feature decoding [S2].
++Voxel-based volume rendering was introduced as a baseline technique in educational materials for neural volume rendering [S1, unofficial]. It serves as a conceptual stepping stone to more advanced methods like NeRF, highlighting the trade-offs between discrete and continuous representations [S1, unofficial]. The technique was later refined in methods like DIVeR, which introduced deterministic integration and feature decoding [S2].
+ 
+ ## Sources

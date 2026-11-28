@@ -1,0 +1,992 @@
+Vox-Fusion: Dense Tracking and Mapping with Voxel-based
+Neural Implicit Representation
+Xingrui Yang1 * Hai Li1 * Hongjia Zhai1
+Yuhang Ming2
+Yuqian Liu3
+Guofeng Zhang1†
+1 State Key Lab of CAD&CG, Zhejiang University
+2 Visual Information Laboratory, University of Bristol
+3 Autonomous Driving Group, SenseTime
+arXiv:2210.15858v3 [cs.CV] 6 Mar 2023
+xingruiy@gmail.com, {garyli, zhj1999, zhangguofeng}@zju.edu.cn,
+yuhang.ming@bristol.ac.uk, liuyuqian@senseauto.com
+Figure 1: We present Vox-Fusion, a SLAM system that incrementally reconstructs scenes from RGB-D frames using neural
+implicit networks. The current camera frame is in red and the camera trajectory is in green. Our method divides the scene into an
+explicit voxel grid representation (depicted as black bounding boxes) which is gradually built on-the-fly. Inside each voxel, we
+fuse depth and color observations into local feature embeddings through volume rendering.
+A BSTRACT
+In this work, we present a dense tracking and mapping system
+named Vox-Fusion, which seamlessly fuses neural implicit representations with traditional volumetric fusion methods. Our approach is inspired by the recently developed implicit mapping and
+positioning system and further extends the idea so that it can be
+freely applied to practical scenarios. Specifically, we leverage a
+voxel-based neural implicit surface representation to encode and
+optimize the scene inside each voxel. Furthermore, we adopt an
+octree-based structure to divide the scene and support dynamic expansion, enabling our system to track and map arbitrary scenes
+without knowing the environment like in previous works. Moreover,
+we proposed a high-performance multi-process framework to speed
+up the method, thus supporting some applications that require realtime performance. The evaluation results show that our methods can
+achieve better accuracy and completeness than previous methods.
+We also show that our Vox-Fusion can be used in augmented reality
+and virtual reality applications. Our source code is publicly available
+at https://github.com/zju3dv/Vox-Fusion.
+Index Terms: Dense SLAM—Implicit Networks—Voxelization—
+Surface Rendering
+1 I NTRODUCTION
+Dense simultaneous localization and mapping (SLAM) aims to track
+the 6 degrees of freedom (DoF) poses of a moving RGB-D camera
+whilst constructing a dense map of the surrounding environment
+* Equal contribution
+† Corresponding author
+in real-time. It is an essential part of augmented reality (AR) and
+virtual reality (VR). With high tracking accuracy and the ability to
+recover complete surfaces, it can support real-time occlusion effects
+and collision detection during virtual interaction.
+Traditional SLAM methods using either feature matching [3,
+16–18], nonlinear energy minimization [20], or a combination of
+both [7, 39] to solve the camera poses. These poses are then coupled
+with their corresponding input point clouds to update a global map
+represented by geometric primitives such as cost volumes [20, 37],
+surfels [29, 35, 38] or voxels [11, 19, 21]. Although these methods
+have been well studied and have shown good reconstruction results,
+they are incapable of rendering novel views as they cannot hallucinate the unseen parts of the scene. Storing and distributing the maps
+can be challenging as well due to the requirement of large video
+memory (VRAM). Moreover, modifying the map on-the-fly is also
+difficult because of the large number of elements in the map and
+weaker data associations compared to feature-based methods [7, 26].
+Focusing on reducing memory usage and improving efficiency,
+recent works such as CodeSLAM [2] and the follow-up works [5, 8]
+have demonstrated that neural networks have the ability to encode
+depth maps using fixed-length optimizable latent embeddings. These
+latent codes can be updated with multi-view constraints. This
+method provides a good trade-off between scene quality and memory usage. However, the pre-trained networks used in these systems
+generalize poorly to different types of scenes, making them less
+useful in practical scenarios. Also, a consistent global representation
+is difficult to obtain due to the use of local latent codes.
+To address these issues, recent works take advantage of the
+success of NeRF [15] and train a neural implicit network on-thefly to represent 3D scenes continuously in dense SLAM applications [31, 40]. Specifically, iMap [31] directly uses a single multilayer perceptron (MLP) to approximate a global scene map and
+jointly optimizes the map and the camera poses. However, the use of
+Figure 2: Overview of our SLAM system. Our system consists of three parts: 1) Volume Renderer, which encodes the scene in a MLP and
+embedding vectors, and outputs the rendered color and SDF value for a given pixel; 2) Tracking Process, which takes as input RGB-D frames
+and optimizes the camera poses via differentiable rendering and 3) Mapping Process, which reconstructs the geometry of the scene.
+a single MLP makes it difficult to represent geometric details of the
+scene as well as scale to larger environments without significantly
+increasing the network capacity.
+In this paper, we are interested in mapping unknown scenes with
+neural implicit networks. Inspired by traditional volumetric SLAM
+systems [34] and the successful application of neural implicit representation in parallel tracking and mapping [31], we propose a
+more efficient hybrid data structure that combines a sparse voxel
+representation with neural implicit embeddings. More specifically,
+we use a sparse octree with Morton coding for fast allocation and
+retrieval of voxels, which have been proven to be real-time capable
+for dense mapping [34]. We model the scene geometry within local
+voxels as a continuous signed distance function (SDF) [4], which is
+encoded by a neural implicit decoder and shared feature embeddings.
+The shared embedding vectors allow us to use a more lightweight
+decoder because they contain knowledge of local geometry and
+appearance. The tracking and mapping process is achieved with
+differentiable volumetric rendering. We show that our explicit voxel
+representation is beneficial to AR applications and our mapping
+method creates more detailed reconstructions compared to current
+state-of-the-art (SOTA) systems, as we show in the experiments
+section. To summarize, our contributions are:
+1. We propose a novel fusion system for real-time implicit tracking and mapping. Our Vox-Fusion combines voxel embeddings
+indexed by an explicit octree and a neural implicit network to
+achieve scalable implicit scene reconstruction with sufficient
+details.
+2. We show that by directly rendering signed distance volumes,
+our system provides better tracking accuracy and reconstruction quality compared to current SOTA systems with no performance overhead.
+3. We propose to use a fast and efficient keyframe selection strategy based on ratio test and measuring information gain, which
+is more suitable to maintain large-sized maps.
+4. We perform extensive experiments on synthetic and real-world
+scenes to demonstrate the proposed method is capable of producing high-quality 3D reconstructions, which can directly
+benefit many AR applications.
+This paper is organized as follows: Sect. 2 gives a review of
+related works. Sect. 3 presents an overview of our proposed VoxFusion system. We explain our reconstruction pipeline in Sect. 4.
+Finally, we evaluate the proposed system on various synthetic and
+real-world tasks in Sect. 5. We then conclude our paper by introducing potential applications in Sect. 6 and discussing limitations
+in Sect. 7.
+2 R ELATED W ORK
+2.1 Dense SLAM
+Traditional SLAM Methods. DTAM [20] introduced the first
+dense SLAM system that uses every pixel photometric consistency
+to track a handheld camera. They employ multi-view stereo constraints to update a dense scene model, represented as a cost volume.
+However, their method is only applicable to small workshop-like
+spaces. Taking advantage of RGB-D cameras, KinectFusion [19]
+proposes a novel reconstruction pipeline, which exploits the accurate
+depth acquisition from commodity depth sensors and the parallel
+processing power of modern graphics units (GPUs). They track
+input depth maps with iterative closest point (ICP) and progressively
+update a voxel grid with aligned depth maps. They also proposed
+a novel frame-to-model tracking method that greatly reduces shortterm drifts with circular camera motion. Following this basic design,
+many systems gain improvements by introducing different 3D structures [38], exploring space subdivision [21, 24] and performing
+global map optimization [10,12,26]. Another interesting research direction is to combine features and dense maps [7, 39], which greatly
+increases the robustness of iterative methods. These systems provide
+good results on scene reconstruction at the expense of having a large
+memory footprint.
+Learning-based Methods. Exploiting the power of learned geometric priors, DI-Fusion [9] proposes to encode points in a low
+0
+00
+1
+01
+2
+10
+3
+11
+y
+1010 1011 1110 1111
+1000 1001 1100 1101
+0010 0011 0110 0111
+0000 0001 0100 0101
+0
+00
+1
+01
+2
+10
+x
+3
+11
+Figure 4: Example of our hierarchical octree structure. For simplicity
+we only show a four-level octree here.
+Figure 3: Example of Morton coding on a two-level quad-tree.
+dimensional latent space, which can be decoded to generate SDF values. However, the learned geometric prior is inaccurate in complex
+areas, which leads to poor reconstruction quality. CodeSLAM [2]
+proposes to use an encoder-decoder structure to embed depth maps
+as low dimensional codes. These codes, combined with the pretrained neural decoder, can be used to jointly optimize a collection of key-frames and camera poses. However, similar to other
+learning-based methods, their approach is not robust to scene variations. Another successful design is to learn feature matching and
+scene reconstruction separately [33]. Recently there have been successful experiments on representing scenes with a single implicit
+networks [31]. They formulate the dense SLAM problem as a continuous learning paradigm. To bound optimization time, they use
+heuristic sampling strategies and keyframe selection based on information gain. This method provides a good trade-off between
+compactness and accuracy. Our method is directly inspired by their
+design.
+A recent concurrent work NICE-SLAM [40]proposes to tackle
+the scalability problem by subdividing the world coordinate system
+into uniform grids. Their system is similar to ours in that we both
+use voxel features instead of encoding 3D coordinates. However,
+our approach differs from theirs in the following aspects: (1) NICESLAM pre-allocates a dense hierarchical voxel grid for an entire
+scene, which is not suitable for a practical scenario where the scene
+bound is unknown, while ours dynamically allocate sparse voxels on
+the fly, as shown in Fig. 1, which not only improves usability but also
+drastically reduces memory consumption; (2) NICE-SLAM uses
+a pre-trained geometry decoder which could reduce generalization
+ability while our parameters are all learned on-the-fly, thus our
+reconstructed surface is not affected by prior information; (3) We
+propose a keyframe strategy suitable for sparse voxels which is
+simple and efficient, while NICE-SLAM adopts the strategy from
+iMap which does not take advantage of the voxel representation.
+2.2
+Neural Implicit Networks
+NeRF [15] proposes a method to render the scene as volumes that
+have density, which is good for representing transparent objects.
+Their method is only interested in rendering photo-realistic images,
+a good surface reconstruction is not guaranteed. However, for most
+AR tasks it is important to know where the surface lies. To solve
+the surface reconstruction problem, many new methods assume that
+color is only contributed by points near or on the surface. They propose to identify the surface via iterative root-finding [22], weighting
+the rendered color with the associated SDF values [36], forcing the
+network to learn more details near the surface within a pre-defined
+truncation distance [1]. We adopt the rendering method from [1] but
+instead of regressing absolute coordinates, we work on interpolated
+voxel embeddings.
+As a single network often has limited capacity and cannot be
+scaled to larger scenes without dramatically increasing the number
+of learnable parameters, NSVF [14] proposes to embed local information in a separate voxel grid of features. They are able to generate
+similar if not better results with fewer parameters. Plenoxels [25] introduced spherical harmonic functions as voxel embeddings, which
+completely removed the need for a neural network. The other benefit
+of an explicit feature grid is the faster rendering speed, since the implicit network can be much smaller compared to the original NeRF
+network. This uniform grid design can be found in other neural
+reconstruction methods. E.g. NGLOD [32] leverages a hierarchical
+data structure by concatenating features from each level to achieve
+scene representation with different levels of details.
+Our hybrid scene representation is inspired by recent works that
+use voxel-based neural implicit representations [13, 14]. More
+specifically, we share a similar structure with Vox-Surf [13] which
+encodes 3D scenes with neural networks and local embeddings.
+However, Vox-Surf is an offline system that requires posed images,
+while our system is a SLAM method that consumes consecutive
+RGB-D frames for pose estimation and scene reconstruction simultaneously. Vox-surf also needs to allocate all voxels in advance, while
+our system can manage voxels on-the-fly to allow dynamic growth
+of the map. Moreover, we use a different rendering function that
+reconstructs scenes more efficiently.
+3
+S YSTEM OVERVIEW
+An overview of our system is shown in Fig. 2. The input to our
+system is continuous RGB-D frames which consist of RGB images
+Ii ∈ R3 and depth maps Di ∈ R. We use the pinhole model as
+the default camera model and assume that the intrinsic matrix K ∈
+R3×3 of the camera is known. Similar to other well-known SLAM
+architectures, our systems also maintain two separate processes: a
+tracking process to estimate the current camera pose as the frontend
+and a mapping process to optimize the global map as the backend.
+When the system starts, we initialize the global map by running a
+few mapping iterations for the first frame. For subsequent frames,
+the tracking process first estimate a 6-DoF pose Ti ∈ SE(3) w.r.t.
+the fixed implicit scene network Fθ via our differentiable volume
+rendering method. Then, each tracked frame is sent to the mapping
+process for constructing the global map. The mapping process first
+takes the estimated camera poses Ti from frontend and allocates new
+voxels from the back-projected and appropriately transformed 3D
+point cloud Pi ∈ R3 from the input depth map Di . Then it fuses the
+new voxel-based scene into the global map and applies the joint
+optimization. In order to reduce the complexity of optimization,
+we only maintain a small number of keyframes, which are selected
+by measuring the ratio of observed voxels. And the long-term map
+consistency is maintained by constantly optimizing a fixed window
+of keyframes. These individual components will be explained in
+detail in the following subsections.
+4 M ETHOD
+4.1 Volume Renderer
+Voxel-based sampling. We represent our scene as an implicit SDF
+decoder Fθ with optimizable parameters θ , and a collection of Ndimensional sparse voxel embeddings. The voxel embeddings are
+attached to the vertices of each voxel and are shared by neighboring
+voxels. The shared embeddings alleviate voxel border artifacts as
+commonly seen in non-sharing structures [9].
+However, sampling points inside the sparse voxel representation
+is not straightforward. Naive sampling methods such as stratified
+random sampling [15] waste computational power on sampling
+spaces that are not covered by valid voxels. Therefore, we adopt the
+method used in [14] to perform efficient point sampling. For each
+sampled pixel, we first check if it has hit any voxel along the visual
+ray by performing a fast ray-voxel intersection test. Pixels without
+any hit are masked out since they do not contribute to rendering.
+As the scene could be unbounded in complex scenes, we enforce a
+limit Mh on how many voxels a single pixel is able to see. Unlike
+prior works where the limit is heuristically specified [13, 14], we
+dynamically change it according to the specified maximum sampling
+distance Dmax .
+Implicit surface rendering. Unlike NeRF [15] where an MLP
+is used to predict occupancy for 3D points, we directly regress SDF
+values which is a more useful geometric representation that can
+support tasks such as ray tracing. The key to our approach is to use
+voxel embeddings instead of 3D coordinates as opposed to previous
+works. To render color and depth from the map, we adopt the volume
+rendering method proposed in [1]. However, we modify it to apply
+to feature embeddings instead of global coordinates. We sample N
+points to render the color for each ray. More specifically, we use the
+following rendering function to obtain the color C and depth D for
+each ray:
+(ci , si ) = Fθ (TriLerp(ξˆi Ti pi , e)),
+si
+si
+wi = σ ( ) · σ (− ),
+tr
+tr
+N−1
+1
+C = N−1
+∑ w j · c j,
+∑ j=0 w j i=0
+D=
+1
+(1)
+(2)
+(3)
+N−1
+∑ w j · d j,
+∑N−1
+j=0 wi j=0
+(4)
+where Ti is the current camera pose, TriLerp(·, ·) is the trilinear
+interpolation function, Fθ is the implicit network with trainable
+parameters θ , and ξ ∈ se(3) is the frame pose update. c j is the
+predicted color for each 3D point from the network, by trilinearly
+interpolating voxel embeddings e. Likewise, si is the predicted SDF
+value, and d j the j-th depth sample along the ray. σ (·) is the sigmoid
+function and tr is a pre-defined truncation distance. The depth map
+is similarly rendered from the map by weighting sampled distance
+instead of colors.
+Optimization. To supervise the network, we apply four different
+loss functions: RGB loss, depth loss, free-space loss and SDF loss
+on the sampled points P. The RGB and depth losses are simply
+absolute differences between render and ground-truth images:
+Lrgb =
+1 |P|
+∑ kCi − Cgti k,
+|P| i=0
+1 |P|
+Ldepth =
+∑ kDi − Dgti k,
+|P| i=0
+(5)
+where Di ,Ci are the rendered depth and color of the i-th pixel in
+gt gt
+a batch, respectively. Di ,Ci are the corresponding ground truth
+Figure 5: Network architecture.
+values. The free-space loss works with a truncation distance tr
+within which the surface is defined. The MLP is forced to learn a
+truncation value tr for any points lie within the camera center and
+the positive truncation region of the surface:
+Lfs =
+1
+1
+∑ S f s ∑f s (Ds − tr)2 .
+|P| p∈P
+p
+(6)
+s∈S p
+Finally, we apply SDF loss to force the MLP to learn accurate surface
+representations within the surface truncation area:
+Lsd f =
+1
+1
+∑ Strp ∑tr (Ds − Dgts )2 .
+|P| p∈P
+s∈S
+(7)
+p
+Unlike methods such as [23] that force the network to learn a negative truncation value −tr for points behind the truncation region,
+we simply mask out these points during rendering to avoid solving
+surface intersection ambiguities [36] as proposed in [1]. This simple
+formulation allows us to obtain accurate surface reconstructions with
+a much faster processing speed.
+4.2 Tracking
+During tracking, we keep our voxel embeddings and the parameters of the implicit network fixed, i.e., we only optimize a 6-DoF
+pose T ∈ SE(3) for the current camera frame. Similar to previous
+methods where pose estimates are iteratively updated by solving
+an incremental update, in each update step, we measure the pose
+update in the tangent space of SE(3), represented as the lie algebra
+ξ ∈ se(3). We assume a zero motion model where the new frame
+is sufficiently close to the last tracked frame, therefore we initialize
+the pose of the new frame to be identical to that of the last tracked
+frame. Although other motion models such as constant motion are
+also applicable here. For each frame, we sample a sparse set of
+Nt pixels from the input images for tracking. We follow the procedure described in Sect. 4.1 to sample candidate points and perform
+volume rendering, respectively. The frame pose is updated in each
+iteration via back-propagation. Similar to [31], we keep a copy of
+our SDF decoder and voxel embeddings for the tracking process.
+This map copy is directly obtained from the mapping process and
+updated each time a new frame has been fused into the map.
+4.3 Mapping
+Key-frame selection. In online continuous learning, keyframe selection is the key to ensuring long-term map consistency and preventing catastrophic forgetting [31]. Unlike previous works where
+key-frames are only inserted based on heuristically chosen metrics [31] or at a fixed interval [40], our explicit voxel structure
+allows us to determine when to insert key-frames by performing
+an intersection test. Specifically, each successfully tracked frame
+is tested against the existing map to find the number of voxels Nc
+that would be allocated if we are to choose it as a new keyframe.
+(a) Ground truth
+(b) Ours (voxel length=0.2)
+(c) NICE-SLAM (voxel length=0.16)
+Figure 6: Surface reconstruction details comparison. Our system is able to recover thin structures, such as chair legs and flowers, from the raw
+scans, albeit using a slightly larger voxel.
+We insert a new keyframe if the ratio pk f = Nc /No is larger than a
+threshold, where No is the number of currently observed voxels.
+This simple strategy is adequate for exploratory movements as
+new voxels are constantly being allocated. However, for loopy
+camera motions, especially trajectories with long-term loops, there is
+a risk that we may never allocate new keyframes as we keep looking
+at an existing scene model. This will result in part of the model being
+completely missing or not having enough multi-view constraints. To
+solve this problem, we also enforce a maximum interval between
+adjacent frames, i.e., we will create a new keyframe if have not done
+so for the past N frames. This key-frame selection strategy is simple
+yet effective at creating consistent scene maps.
+Joint mapping and pose update. Our mapping subroutine accepts tracked RGB-D frames and fuses them into the existing scene
+map by jointly optimizing the scene geometry and camera poses. It
+is noted by [31] that online incremental learning is prone to network
+forgetting. Therefore we use a similar method to jointly optimize
+the scene network and feature embeddings. For each frame, we
+randomly select Nk f keyframes. These keyframes, including the
+recently tracked frame, can be seen as an optimization window
+akin to the sliding window approach employed in traditional SLAM
+systems [27].
+Similar to our tracking process, for each frame in the actively
+sampled optimization window, we randomly sample Nm rays. These
+rays are transformed into the world coordinate system with estimated
+frame poses. Then we sample points within our sparse voxels and
+then render a set of pixels from the sample points and calculate
+related loss functions, using the method described in Sect. 4.1.
+4.4
+Dynamic Voxel Management
+Contrary to existing approaches where the full extent of the scene
+is encoded [31], we are only interested in reconstructing surfaces
+that have observations. Therefore, on-the-fly voxel allocation and
+searching are of most importance to us. For this reason, we adopt an
+octree structure to divide the whole scene into mutually exclusive
+axis-aligned voxels where we consider the voxel as the basic scene
+unit and the leaf node of the scene octree. An example octree is
+shown in Fig. 4. We make our system usable in unexplored areas
+by dynamically allocating new voxels when new observations are
+made.
+Specifically, we initially set the leaf nodes corresponding to the
+unobserved scene area to empty, when a new frame is successfully
+tracked, we back-project its depth map into 3D points, these points
+are then transformed by the estimated camera pose. We then allocate
+new voxels for any point that does not fall into an existing voxel.
+Since this process needs to be applied for every point, which could
+have tens of thousands based on the resolution of the input images,
+we use an octree structure to store voxels and feature embeddings to
+enable fast voxel allocation and retrieval.
+Morton coding Inspired by traditional volumetric SLAM systems [34], we choose to encode voxel coordinates as Morton codes.
+Morton codes are generated by interleaving the bits from each coordinate into a unique number. A 2D example of Morton coding is
+given in Fig. 3. Given the 3D coordinate (x, y, z) of a voxel, we can
+quickly find its position in the octree by traversing through its Morton code. It is also possible to recover the encoded coordinates by
+applying a decoding operation. The neighbors are also identifiable
+by shifting the appropriate bits of the code, which is beneficial for
+quickly finding shared embedding vectors.
+5
+5.1
+E XPERIMENTS
+Experimental Setup
+Datasets: In our experiments we use 3 different datasets: (1) Replica
+dataset [28] which contains 18 different scenes captured by a camera
+rig. Based on Replica dataset, [31] further synthesizes the RGB-D sequences, which are used in our experiments. (2) ScanNet dataset [6]
+which contains more than 1000 captured RGB-D sequences and
+ground truth poses estimated from a SLAM system [7]. (3) Several
+indoor and outdoor RGB-D sequences that were captured by iOS
+devices equipped with range sensors such as iPhone 13 Pro and iPad
+Pro. These datasets cover a wide range of applications and scenarios,
+therefore are well suited to study our proposed system.
+Evaluation Metrics: We use several different metrics to measure
+the performance of our system as well as other competing methods.
+For reconstruction quality, we measure accuracy and completion,
+this is in line with previous works [31, 40]. Mesh accuracy (Acc.)
+is defined as the un-directional Chamfer distance from the reconstructed mesh to the ground-truth. Completion (Comp.) is similarly
+defined as the distance the other way around. We also measure the
+completion ratio, which is the percentage of the reconstructed points
+whose distance to the ground truth mesh is smaller than 5cm. We
+show the formulation of Chamfer distance in Equation 8, where
+p ∈ P and q ∈ Q are two point sets sampled from the reconstructed
+Table 1: Trajectory estimation results on the Replica dataset. Our method obtained better results on all sequences.
+Methods
+Metric
+Room-0
+Room-1
+Room-2
+Office-0
+Office-1
+Office-2
+Office-3
+Office-4
+Avg.
+iMap* [31]
+RMSE[m]↓
+mean[m]↓
+median[m]↓
+0.7005
+0.5891
+0.4478
+0.0453
+0.0395
+0.0335
+0.0220
+0.0195
+0.0173
+0.0232
+0.01652
+0.0135
+0.0174
+0.0155
+0.0137
+0.0487
+0.0319
+0.0235
+0.5840
+0.5488
+0.4756
+0.0262
+0.0215
+0.0186
+0.1834
+0.1603
+0.1304
+NICE-SLAM [40]
+RMSE[m]↓
+mean[m]↓
+median[m]↓
+0.0169
+0.0150
+0.0138
+0.0204
+0.0180
+0.0167
+0.01554
+0.0118
+0.0098
+0.0099
+0.0086
+0.0076
+0.0090
+0.0081
+0.0074
+0.0139
+0.0120
+0.0109
+0.0397
+0.0205
+0.0128
+0.0308
+0.0209
+0.0153
+0.0195
+0.0144
+0.0118
+Ours
+RMSE[m]↓
+mean[m]↓
+median[m]↓
+0.0040
+0.0036
+0.0033
+0.0054
+0.0043
+0.0038
+0.0054
+0.0041
+0.0036
+0.0050
+0.0040
+0.0035
+0.0046
+0.0043
+0.0041
+0.0075
+0.0058
+0.0048
+0.0050
+0.0045
+0.0042
+0.0060
+0.0055
+0.0053
+0.0054
+0.0045
+0.0041
+(a) iMap∗
+(b) NICE-SLAM
+(c) Ours
+(d) Ground truth
+Figure 7: Qualitative reconstruction results on the Replica dataset. From left to right, we show the results of scene reconstruction of different
+methods (iMAP∗ , NICE-SLAM, our method, and ground truth). It can be clearly seen that our reconstruction results are much better than
+iMAP∗ . To better show the difference in reconstruction between NICE-SLAM and our method, we use red boxes in the figures to indicate the
+improvements over NICE-SLAM.
+Table 2: Reconstruction Results of 8 Scenes in the Replica dataset. Compared with iMAP and NICE-SLAM, our approach yields better results
+consistently.
+Methods
+Metric
+Room-0
+Room-1
+Room-2
+Office-0
+Office-1
+Office-2
+Office-3
+Office-4
+Avg.
+iMap [31]
+Acc.[cm]↓
+Comp.[cm]↓
+Comp. Ratio[< 5cm %]↑
+3.58
+5.06
+83.91
+3.69
+4.87
+83.45
+4.68
+5.51
+75.53
+5.87
+6.11
+77.71
+3.71
+5.26
+79.64
+4.81
+5.65
+77.22
+4.27
+5.45
+77.34
+4.83
+6.59
+77.63
+4.43
+5.56
+79.06
+NICE-SLAM [40]
+Acc.[cm]↓
+Comp.[cm]↓
+Comp. Ratio[< 5cm %]↑
+3.53
+3.40
+86.05
+3.60
+3.62
+80.75
+3.03
+3.27
+87.23
+5.56
+4.55
+79.34
+3.35
+4.03
+82.13
+4.71
+3.94
+80.35
+3.84
+3.99
+80.55
+3.35
+4.15
+82.88
+3.87
+3.87
+82.41
+Ours
+Acc.[cm]↓
+Comp.[cm]↓
+Comp. Ratio[< 5cm %]↑
+2.41
+2.60
+92.87
+1.62
+2.23
+93.48
+3.11
+1.93
+94.34
+1.74
+1.39
+97.21
+1.69
+1.80
+93.76
+2.23
+2.71
+90.98
+2.84
+2.69
+90.73
+3.31
+2.88
+89.48
+2.37
+2.28
+92.86
+Figure 8: Reconstruction of real-world RGB-D sequences captured with a handheld device. The images were taken by an iPhone 13 Pro. We
+get depth images directly from the onboard lidar sensor. We show (top) reconstructions and (bottom) an example of the original input image.
+Table 3: Trajectory estimation results on the ScanNet dataset
+(RMSE).
+and ground truth meshes:
+dCham f er = |P|−1
+∑
+kp − qk2 ,
+(p,q)∈ΛP,Q
+(8)
+Λ∗Q,P = {(p, argminq kp − qk)}.
+To benchmark pose estimation, we adopt the commonly used
+absolute trajectory error (ATE) using the scripts provided by [30].
+ATE is calculated as the absolute translational difference between
+the estimated and ground truth poses.
+Implementation Details: We illustrate our network architecture
+in Fig. 5. Our decoder is implemented as an MLP consisting of several fully-connected layers (FC) and skip connections. The input to
+our network is a 16-D feature embedding. The features are generally
+processed by 2-4 FC layers that each has 256 hidden units. The SDF
+head outputs a scalar SDF value s and a 128-D hidden vector. The
+color head has two FC layers with 256 hidden units each. We apply
+sigmoid to generate RGB values in the range [0, 1]. The step size
+ratio for sampling voxel points is generally set to 0.05-0.1. For all
+scenes, we use a voxel size of 0.2m.
+5.2 Reconstruct Synthetic Scenes
+To test our system on reconstructing synthetic scenes, we use the
+Replica dataset. The RGB-D sequences we use are released by [31]
+and subsequently used in NICE-SLAM [40]. We compare our system qualitatively with iMap and NICE-SLAM. The results of iMap
+are directly obtained from their paper, while the results for NICESLAM is generated from their official code release. We show the
+qualitative evaluation results in Fig. 7. It can be seen that our method
+produces better maps than iMap, and performs on par with NICESLAM.
+It is worth noting that both NICE-SLAM and iMap assume
+densely populated surfaces, therefore they will create surfaces even
+in places that is not observed. Surfaces created in this way will
+be realistic when the gap is small, but deviates from the ground
+truth by a large margin when there is a huge gap. Our use of an
+explicit voxel map prevents this from happening, i.e., our system
+only hallucinates surfaces inside the visible sparse voxels, therefore
+we can still produce plausible hole fill-in effects, while leaving large
+unobserved spaces empty. By doing so, we effectively combine the
+best of both worlds. Although it might seem like a disadvantage at
+first, we argue that for real-world tasks it is often more important to
+know where has been observed and where has not.
+Scene ID
+0000
+0106
+0169
+0181
+0207
+DI-Fusion [9]
+iMap* [31]
+NICE-SLAM [40]
+Ours
+0.6299
+0.5595
+0.0864
+0.0839
+0.1850
+0.1750
+0.0809
+0.0744
+0.7580
+0.7051
+0.1028
+0.0653
+0.8788
+0.3210
+0.1293
+0.1220
+1.0019
+0.1191
+0.0559
+0.0557
+Owing to the expressiveness of the signed distance representation,
+Our method is also able to reconstruct more detailed surfaces. This
+is shown in Fig. 6. In our results, the table legs and flowers are
+clearly seen but missing in the results of NICE-SLAM, despite that
+we use slightly larger voxels and only a single voxel grid level as
+opposed to three levels in NICE-SLAM.
+We also quantitatively compared our system on reconstruction
+quality and trajectory estimation with iMap and NICE-SLAM.
+Please note that the results of reconstruction quality for iMap are
+directly obtained from its paper [31], while the trajectory estimation
+experiment was performed with the iMap implementation of [40]
+since the original authors do not open source their code (denoted
+as iMap*). The results for NICE-SLAM are taken from the supplementary material of the published paper. Please note that we use the
+results computed without mesh culling for a fair comparison. The
+results on reconstruction accuracy are listed in Table 2. The results
+for trajectory estimation accuracy are listed in Table 1. It is clear
+that we surpass both systems on all metrics. We also obtained much
+better results on camera pose estimation with a large margin. These
+results further confirm our observation that our system is able to
+produce state-of-the-art results on synthetic datasets.
+5.3
+Reconstruct Real Scans
+Unlike synthetic datasets, real scans are noisier and contain erroneous measurements. Reconstructing real scans is considered a
+challenging task that has not yet been solved. We benchmarked
+our system on selected sequences of ScanNet [6]. The selection of
+sequences is in line with [40], and the results from DI-Fusion [9],
+iMap* and NICE-SLAM are directly taken from [40]. The quantitative results are shown in Table 3. It can be seen that despite
+the simplicity of our design, our method still achieves better results
+than iMap and NICE-SLAM. We also provide geometric reconstruction with sufficient details, which provides better results in scene
+(a) Ground Truth
+(b) Rendered Image
+(c) AR View1
+(d) AR View2
+Figure 9: The ground truth image (a) in the Replica office3 dataset and its rendered image (b) with our reconstructed scene. And we place
+some pre-defined objects in office3, which is shown by (c) and (d) in different viewpoints. We show that we can achieve a good occlusion
+relationship between real and virtual objects.
+Table 4: Average time spent on each component.
+Components
+Measured time
+Tracking
+Mapping
+12 ms
+55 ms
+Voxel allocation
+Ray-voxel intersection test
+Point sampling
+Volume rendering
+Back-propagation
+0.1 ms
+0.9 ms
+1 ms
+4 ms
+6 ms
+accuracy and completion.
+We also tested our system on reconstructing outdoor RGB-D
+sequences captured with a handheld device. In our case, we take
+these images with an iPhone 13 Pro and an iPad Pro (2020). Our
+system is able to reconstruct the scene with reasonable accuracy
+without prior knowledge of the scene. We demonstrate the results
+in Fig. 8. Please note that iOS devices can only provide depth maps
+with very low resolution, which limits the reconstruction quality. As
+can be seen from the figure, our system can reconstruct the scene
+in various scenarios, and we believe this is a big step towards truly
+useful neural implicit SLAM systems.
+5.4
+Table 5: Memory consumption for implicit features.
+Time and Memory Efficiency
+We use a highly efficient multi-process implementation for the parallel tracking and mapping. Since we make a local copy of shared
+resources (e.g. voxels, features, and the implicit decoder, etc.) for
+the tracking process each time the map is updated, the probability of
+resource contention between the two processes is low. The performance hit of accessing the same resource can be further minimized
+using better engineered lock-free structures, which are not covered
+in our work.
+To study the impact on running time for our sparse voxel-based
+sampling and rendering method, we profile our system on the synthetic Replica dataset. We measure the average time spent on important components, including voxel allocation, ray-voxel intersection
+test and volume rendering, etc. The experiment is performed on a
+single NVidia RTX 3090 video card. The results are listed in Table 4.
+Please note that tracking and mapping are profiled on a per-iteration
+basis. As can be seen, our voxel manipulation functions have no
+significant impact on the running time of the reconstruction pipeline.
+Depending on the scene complexity, our method can take around
+150-200 ms to track a new frame and 450-550 ms for the joint frame
+and map optimization. In a typical setting, our system can run 5hz for
+tracking, and 2hz for optimization. However, for more challenging
+scenarios, the system might run slower.
+As explained before, our sparse voxel structure allows us to only
+allocate voxels occupied by objects and surfaces, which is often only
+a fraction of the entire environment. We profile our system as well
+as NICE-SLAM for memory consumption of implicit decoders and
+Method
+Decoder
+Embedding
+Ours
+NICE-SLAM
+1.04MB
+0.22MB
+0.149MB
+238.88MB
+voxel embeddings on the Replica office-0 scene. the results are listed
+in Table 5. Please note that NICE-SLAM uses 4 layers of densely
+populated voxel grids while we only use one. It can be clearly seen
+that our method can achieve better reconstruction accuracy while
+using significantly less memory.
+6
+A PPLICATIONS
+Our Vox-Fusion can not only estimate accurate camera poses in
+cluttered scenes, but also obtain dense depth maps with fine geometric details and render realistic images through our differentiable
+rendering. Therefore, it can be applied to many AR and VR applications. For AR applications, our method allows us to place arbitrary
+virtual objects into reconstructed scenes, and accurately represent
+the occlusion relationship between real and virtual contents using
+the rendered depth maps. We show examples of rendered images
+and AR demo images in Fig. 9. As can be seen, our dense scene representation allows us to handle occlusion between different objects
+very well in the AR demo.
+For VR applications, apart from providing accurate camera tracking result, the realistic rendering ability can be used in free-view
+virtual scene traveling. Our voxel-based method also makes scene
+editing much easier since we can remove part of the scene by simply
+deleting its supporting voxels and the associated feature embeddings.
+The explicit voxel representation can also be used to perform fast collision detection. We can also control the level of details by splitting
+and refining feature embeddings as introduced in [14].
+7
+C ONCLUSION
+We propose Vox-Fusion, a novel dense tracking and mapping system
+built on voxel-based implicit surface representation. Our Vox-Fusion
+system supports dynamic voxel creation, which is more suitable for
+practical scenes. Moreover, we design a multi-process architecture
+and corresponding strategies for better performance. Experiments
+show that our method achieves higher accuracy while using smaller
+memory and faster speed. Currently, our Vox-Fusion method cannot
+robustly handle dynamic objects and drift in long-time tracking. We
+consider these as potential future works.
+ACKNOWLEDGMENTS
+This work was partially supported by the National Key Research and
+Development Program of China under Grant 2020AAA0105900.
+R EFERENCES
+[1] D. Azinović, R. Martin-Brualla, D. B. Goldman, M. Nießner, and
+J. Thies. Neural RGB-D surface reconstruction. In IEEE Conference
+on Computer Vision and Pattern Recognition, pp. 6290–6301, 2022.
+[2] M. Bloesch, J. Czarnowski, R. Clark, S. Leutenegger, and A. J. Davison.
+CodeSLAM - learning a compact, optimisable representation for dense
+visual SLAM. In IEEE Conference on Computer Vision and Pattern
+Recognition, pp. 2560–2568, 2018.
+[3] C. Campos, R. Elvira, J. J. G. Rodrı́guez, J. M. M. Montiel, and
+J. D. Tardós. ORB-SLAM3: an accurate open-source library for visual, visual-inertial, and multimap SLAM. IEEE Trans. Robotics,
+37(6):1874–1890, 2021.
+[4] B. Curless and M. Levoy. A volumetric method for building complex
+models from range images. Annual Conference on Computer Graphics
+and Interactive Techniques, pp. 303–312, 1996.
+[5] J. Czarnowski, T. Laidlow, R. Clark, and A. Davison. DeepFactors:
+Real-time probabilistic dense monocular slam. IEEE Robotics and
+Automation Letters, 5:721–728, 2020.
+[6] A. Dai, A. X. Chang, M. Savva, M. Halber, T. Funkhouser, and
+M. Nießner. ScanNet: Richly-annotated 3D reconstructions of indoor scenes. In IEEE Conference on Computer Vision and Pattern
+Recognition, pp. 2432–2443, 2017.
+[7] A. Dai, M. Nießner, M. Zollhöfer, S. Izadi, and C. Theobalt. BundleFusion: Real-time globally consistent 3D reconstruction using on-the-fly
+surface reintegration. ACM Trans. Graph., 36(3):24:1–24:18, 2017.
+[8] M. Hidenobu, S. Raluca, C. Jan, and J. D. Andrew. CodeMapping:
+Real-time dense mapping for sparse slam using compact scene representations. IEEE Robotics and Automation Letters, 2021.
+[9] J. Huang, S. Huang, H. Song, and S. Hu. DI-Fusion: Online implicit
+3d reconstruction with deep priors. In IEEE Conference on Computer
+Vision and Pattern Recognition, pp. 8932–8941, 2021.
+[10] O. Kähler, V. A. Prisacariu, and D. W. Murray. Real-time large-scale
+dense 3D reconstruction with loop closure. In 14th European Conference on Computer Vision, vol. 9912, pp. 500–516, 2016.
+[11] O. Kähler, V. A. Prisacariu, C. Y. Ren, X. Sun, P. H. S. Torr, and D. W.
+Murray. Very high frame rate volumetric integration of depth images on
+mobile devices. IEEE Trans. Vis. Comput. Graph., 21(11):1241–1250,
+2015.
+[12] C. Kerl, J. Sturm, and D. Cremers. Dense visual SLAM for RGB-D
+cameras. In IEEE/RSJ International Conference on Intelligent Robots
+and Systems, pp. 2100–2106, 2013.
+[13] H. Li, X. Yang, H. Zhai, Y. Liu, H. Bao, and G. Zhang. Vox-surf: Voxelbased implicit surface representation. arXiv preprint arXiv:2208.10925,
+2022.
+[14] L. Liu, J. Gu, K. Z. Lin, T. Chua, and C. Theobalt. Neural sparse
+voxel fields. In Annual Conference on Neural Information Processing
+Systems, 2020.
+[15] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng. NeRF: representing scenes as neural radiance fields for
+view synthesis. Commun. ACM, 65(1):99–106, 2022.
+[16] R. Mur-Artal, J. M. M. Montiel, and J. D. Tardós. ORB-SLAM: A
+versatile and accurate monocular SLAM system. IEEE Trans. Robotics,
+31(5):1147–1163, 2015.
+[17] R. Mur-Artal and J. D. Tardós. ORB-SLAM2: an open-source SLAM
+system for monocular, stereo, and RGB-D cameras. IEEE Trans.
+Robotics, 33(5):1255–1262, 2017.
+[18] R. A. Newcombe and A. J. Davison. Live dense reconstruction with a
+single moving camera. In IEEEConference on Computer Vision and
+Pattern Recognition, pp. 1498–1505, 2010.
+[19] R. A. Newcombe, S. Izadi, O. Hilliges, D. Molyneaux, D. Kim, A. J.
+Davison, P. Kohli, J. Shotton, S. Hodges, and A. Fitzgibbon. KinectFusion: Real-time dense surface mapping and tracking. In IEEE International Symposium on Mixed and Augmented Reality, pp. 127–136,
+2011.
+[20] R. A. Newcombe, S. J. Lovegrove, and A. J. Davison. DTAM: Dense
+tracking and mapping in real-time. In IEEE International Conference
+on Computer Vision, pp. 2320–2327, 2011.
+[21] M. Nießner, M. Zollhöfer, S. Izadi, and M. Stamminger. Real-time
+3D reconstruction at scale using voxel hashing. ACM Transactions on
+Graphics, 32(6), 2013.
+[22] M. Oechsle, S. Peng, and A. Geiger. UNISURF: unifying neural
+implicit surfaces and radiance fields for multi-view reconstruction. In
+IEEE/CVF International Conference on Computer Vision, pp. 5569–
+5579, 2021.
+[23] K. Rematas, A. Liu, P. P. Srinivasan, J. T. Barron, A. Tagliasacchi,
+T. Funkhouser, and V. Ferrari. Urban radiance fields. In IEEE Conference on Computer Vision and Pattern Recognition, 2022.
+[24] H. Roth and M. Vona. Moving volume kinectfusion. In British Machine
+Vision Conference, BMVC, pp. 1–11, 2012.
+[25] Sara Fridovich-Keil and Alex Yu, M. Tancik, Q. Chen, B. Recht, and
+A. Kanazawa. Plenoxels: Radiance fields without neural networks. In
+IEEE Conference on Computer Vision and Pattern Recognition, 2022.
+[26] T. Schöps, T. Sattler, and M. Pollefeys. BAD SLAM: bundle adjusted
+direct RGB-D SLAM. In IEEE Conference on Computer Vision and
+Pattern Recognition, pp. 134–144, 2019.
+[27] H. Strasdat, A. J. Davison, J. M. Montiel, and K. Konolige. Double window optimisation for constant time visual SLAM. IEEE International
+Conference on Computer Vision, pp. 2352–2359, 2011.
+[28] J. Straub, T. Whelan, L. Ma, Y. Chen, E. Wijmans, S. Green, J. J. Engel, R. Mur-Artal, C. Ren, S. Verma, A. Clarkson, M. Yan, B. Budge,
+Y. Yan, X. Pan, J. Yon, Y. Zou, K. Leon, N. Carter, J. Briales, T. Gillingham, E. Mueggler, L. Pesqueira, M. Savva, D. Batra, H. M. Strasdat,
+R. D. Nardi, M. Goesele, S. Lovegrove, and R. Newcombe. The
+Replica dataset: A digital replica of indoor spaces. arXiv preprint
+arXiv:1906.05797, 2019.
+[29] J. Stückler and S. Behnke. Multi-resolution surfel maps for efficient
+dense 3D modeling and tracking. Journal of Visual Communication
+and Image Representation, 25:137–147, 2014.
+[30] J. Sturm, N. Engelhard, F. Endres, W. Burgard, and D. Cremers. A
+benchmark for the evaluation of RGB-D SLAM systems. In IEEE/RSJ
+International Conference on Intelligent Robots and Systems, pp. 573–
+580, 2012.
+[31] E. Sucar, S. Liu, J. Ortiz, and A. J. Davison. iMAP: Implicit mapping
+and positioning in real-time. In IEEE/CVF International Conference
+on Computer Vision, pp. 6209–6218. IEEE, 2021.
+[32] T. Takikawa, J. Litalien, K. Yin, K. Kreis, C. T. Loop,
+D. Nowrouzezahrai, A. Jacobson, M. McGuire, and S. Fidler. Neural
+geometric level of detail: Real-time rendering with implicit 3d shapes.
+In IEEE Conference on Computer Vision and Pattern Recognition, pp.
+11358–11367, 2021.
+[33] Z. Teed and J. Deng. DROID-SLAM: deep visual SLAM for monocular, stereo, and RGB-D cameras. In Annual Conference on Neural
+Information Processing Systems, pp. 16558–16569, 2021.
+[34] E. Vespa, N. Nikolov, M. Grimm, L. Nardi, P. H. J. Kelly, and
+S. Leutenegger. Efficient octree-based volumetric SLAM supporting signed-distance and occupancy mapping. IEEE Robotics Autom.
+Lett., 3(2):1144–1151, 2018.
+[35] K. Wang, F. Gao, and S. Shen. Real-time scalable dense surfel mapping.
+In IEEE International Conference on Robotics and Automation, pp.
+6919–6925, 2019.
+[36] P. Wang, L. Liu, Y. Liu, C. Theobalt, T. Komura, and W. Wang. Neus:
+Learning neural implicit surfaces by volume rendering for multi-view
+reconstruction. In Annual Conference on Neural Information Processing Systems 2021, pp. 27171–27183, 2021.
+[37] C. S. Weerasekera, R. Garg, Y. Latif, and I. Reid. Learning Deeply Supervised Good Features to Match for Dense Monocular Reconstruction.
+Lecture Notes in Computer Science, 11365 LNCS:609–624, 2019.
+[38] T. Whelan, S. Leutenegger, R. F. Salas-Moreno, B. Glocker, and A. J.
+Davison. ElasticFusion: Dense SLAM without a pose graph. In
+Robotics: Science and Systems, vol. 11, 2015.
+[39] X. Yang, Y. Ming, Z. Cui, and A. Calway. FD-SLAM: 3-D reconstruction using features and dense matching. In International Conference
+on Robotics and Automation, pp. 8040–8046, 2022.
+[40] Z. Zhu, S. Peng, V. Larsson, W. Xu, H. Bao, Z. Cui, M. R. Oswald,
+and M. Pollefeys. NICE-SLAM: neural implicit scalable encoding
+for SLAM. In IEEE Conference on Computer Vision and Pattern
+Recognition, pp. 12786–12796, 2022.

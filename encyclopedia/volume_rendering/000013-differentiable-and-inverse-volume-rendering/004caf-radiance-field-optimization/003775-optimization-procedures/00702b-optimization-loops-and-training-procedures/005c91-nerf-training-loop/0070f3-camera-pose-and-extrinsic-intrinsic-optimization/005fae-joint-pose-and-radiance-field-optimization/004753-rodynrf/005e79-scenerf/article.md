@@ -1,0 +1,44 @@
+# SceneRF
+
+Also called: Behind the Scenes
+
+## Overview
+SceneRF is a self-supervised monocular 3D scene reconstruction method that trains using only image sequences with known poses [S2]. It distinguishes itself from standard NeRF approaches by reducing scene representation complexity through the integration of monocular depth estimation, enabling efficient handling of large scenes via explicit depth optimization and a novel probabilistic sampling strategy [S1, S2].
+
+## How it works
+SceneRF operates by leveraging a self-supervised depth network to guide the radiance field optimization, thereby bypassing the need for explicit geometric labels while maintaining high fidelity for large-scale environments [S2].
+
+**Inputs and Outputs**
+- **Inputs:** A sequence of monocular images with known camera poses.
+- **Outputs:** A radiance field representation optimized for new view synthesis and depth estimation.
+
+**Data Structures**
+The method redefines feature extraction and ray/color sampling to account for the self-supervised depth network [S1]. Specific data structure layouts (e.g., voxel grid dimensions, feature vector sizes, or depth map resolutions) are not given in the sources.
+
+**Algorithm Steps**
+1. **Monocular Depth Estimation:** Utilize a self-supervised depth estimation network to generate depth priors for the input image sequence [S1].
+2. **Feature Extraction Redefinition:** Redefine the feature extraction process to incorporate the geometric information provided by the monocular depth estimator [S1].
+3. **Ray and Color Sampling:** Redefine the ray marching and color sampling strategies to explicitly account for the self-supervised depth network's output, ensuring consistency between the rendered depth and the estimated depth [S1].
+4. **Explicit Depth Optimization:** Optimize the scene representation by explicitly optimizing the depth component, which reduces the complexity of the scene representation [S2].
+5. **Probabilistic Sampling:** Apply a novel probabilistic sampling strategy to handle large scenes efficiently, focusing computational resources on relevant regions [S2].
+6. **Self-Supervised Training:** Train the model using only the image sequences and their poses, relying on photometric consistency and depth consistency as training cues [S2].
+
+**Formulas and Parameters**
+The specific mathematical formulations for the probabilistic sampling strategy, the loss functions combining photometric and depth consistency, and the architecture of the self-supervised depth network are not given in the sources.
+
+**Edge Cases and Pitfalls**
+- **Large Scenes:** Standard NeRF methods may struggle with large scenes; SceneRF addresses this via explicit depth optimization and probabilistic sampling [S2].
+- **Self-Supervised Depth Errors:** The method relies on the accuracy of the self-supervised depth network; errors in depth estimation may propagate into the radiance field [S1].
+
+## Subtopics
+None.
+
+## Operating characteristics
+SceneRF achieves the best performance in all metrics for new depth view synthesis, including absolute relative error, root mean square error, and IoU, outperforming existing methods for both new view synthesis and scene reconstruction tasks [S2]. Specific time and memory complexity metrics, hardware performance data, or resolution limits are not given in the sources.
+
+## Background
+SceneRF was proposed in 2023 as a NeRF-based autonomous learning technique that employs the scene’s geometric and lighting details as training cues, bypassing direct labeling [S2]. It is part of a lineage of methods, including MINE and Behind the Scenes, that reduce scene representation complexity by leveraging monocular depth estimation [S1].
+
+## Sources
+[S1] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27
+[S2] Neural Radiance Field-based Visual Rendering: a Comprehensive Review, https://ieeexplore.ieee.org/abstract/document/11455380, fetched 2026-10-30

@@ -1,0 +1,32 @@
+# Morton Order Storage Layout
+
+Also called: 3D Z-curve layout, Performance and Storage Scaling, Z-order storage
+
+## Overview
+Morton order storage layout arranges volumetric data in memory according to the 3D Z-order (Lebesgue) curve to maximize spatial locality and cache efficiency during traversal [S1]. It differs from standard row-major layouts by ensuring that voxels with adjacent spatial coordinates are stored adjacently in linear memory, which is critical for minimizing cache misses in encrypted or large-scale volume rendering pipelines [S1].
+
+## How it works
+**Inputs and Outputs:** Not given in the sources.
+**Data Structures:** The sources describe a naive three-dimensional BigInteger array as the volume storage implementation [S1]. The exact bit-interleaving algorithm for Morton codes is not detailed in the sources [S1].
+**Steps:** The sources do not provide a step-by-step algorithm for constructing or sorting Morton codes [S1]. Standard practice involves computing Morton codes for each voxel coordinate and sorting the data accordingly, but this is not specified in the provided text [G].
+**Parameters:** Bit width and voxel size are discussed in the context of storage calculations. For a $512 \times 512 \times 512$ grid, plaintext uses 16-bit voxels (256 MB total), while encrypted data uses 2048-bit keys (64 GB total) [S1]. A four-dimensional encoding increases storage to 256 GB [S1].
+**Edge Cases and Pitfalls:** The sources note that the cited implementation uses a naive three-dimensional BigInteger array rather than Morton order, which may incur overhead for large keys [S1]. Irregular grid handling is not discussed [S1].
+**Pseudocode:** Not given in the sources.
+
+## Subtopics
+
+### [Global Static Indexing for Regular Grids](21466-global-static-indexing-for-regular-grids.md)
+Extends Morton order to a multi-resolution hierarchy (Lebesgue curve) for out-of-core visualization, offering faster traversal than standard Z-ordering without data replication.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Morton order is proposed to improve cache usage, but the tested implementation used a naive 3D BigInteger array [S1].
+- **Scalability:** Highly parallelizable; encryption processes voxels independently and rendering processes pixels independently, scaling linearly with processing power [S1].
+- **Limitations:** Storage amplification is significant for encrypted data (e.g., 256 GB for 4D encoding) [S1]. Requires multiple GPUs (e.g., six 48 GB GPUs for 256 GB) [S1].
+
+## Background
+In the context of volume rendering, Morton order has been proposed to improve cache usage for encrypted volumes [S1]. Stuart et al. proposed its use as a mapper for MapReduce implementations on GPU-accelerated distributed memory systems [S1]. The specific application to homomorphic-encrypted volume rendering is detailed in the cited paper [S1].
+
+## Sources
+[S1] Homomorphic-Encrypted Volume Rendering, https://arxiv.org/abs/2009.02122v2, fetched 2026-10-26

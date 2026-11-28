@@ -1,0 +1,212 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # Super-NeRF
+ 
+-Also called: Super-NeRF: View-Consistent Detail Generation for NeRF Super-Resolution
+ 
+ ## Overview
+@@ -10,10 +9,10 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   A set of low-resolution (LR) images $C_{LR,i}$ with corresponding camera poses.
+-*   A pre-trained LR NeRF (fixed during Super-NeRF training).
++*   A set of low-resolution (LR) images $C_{LR,i}$ with corresponding camera poses [S1].
++*   A pre-trained LR NeRF (fixed during Super-NeRF training) [S1].
+ *   A pre-trained 2D SR backbone (ESRGAN) [S1].
+ 
+ **Outputs:**
+-*   A high-resolution (HR) NeRF model capable of rendering novel views at super-resolved resolution.
++*   A high-resolution (HR) NeRF model capable of rendering novel views at super-resolved resolution [S1].
+ *   A Consistency Controlling Latent Code (CCLC) for each view, which guides the 2D SR module [S1].
+ 
+@@ -56,10 +55,10 @@
+ Find a solution $C_{HR,i}$ that minimizes the distance to the SR output $\tilde{C}_{HR,i}$ while satisfying the constraint that blurring $H$ yields the LR image $C_{LR,i}$ [S1]:
+ $$ \arg \min | \tilde{C}_{HR,i} - C_{HR,i} |, \quad \text{s.t.} \quad H C_{HR,i} = C_{LR,i} $$
+-where $H$ is the blur kernel [S1].
++where $H$ is the blur/downsampling kernel [S1].
+ 
+ **2. CEM Output Adjustment:**
+ The final CCSR output $C_{HR,i}$ is calculated by mapping LR content via orthogonal projection and ESRGAN output via the remainder matrix [S1]:
+ $$ C_{HR,i} = (I - H^T (H H^{-1} H)) \tilde{C}_{HR,i} + H^T (H H^{-1}) C_{LR,i} $$
+-Note: The source notation $H H^{-1} H$ implies a pseudo-inverse operation or specific matrix algebra defined in the cited reference [1] within [S1]. The term $H^T (H H^{-1})$ maps the LR content to the HR space [S1].
++where $H^{-1}$ denotes the Moore-Penrose pseudo-inverse for numerical stability [G]. The term $H^T (H H^{-1})$ maps the LR content to the HR space [S1].
+ 
+ **3. Mutual Learning Loss ($L_{SR}$):**
+@@ -85,7 +84,4 @@
+ import torch.nn as nn
+ import torch.nn.functional as F
+-
+-# Assume standard NeRF, ESRGAN, and CEM implementations are available
+-# or defined as follows for completeness:
+ 
+ class SimpleNeRF(nn.Module):
+@@ -101,5 +97,4 @@
+     
+     def forward(self, x):
+-        # x: (N, dim_in)
+         return self.net(x)
+ 
+@@ -107,37 +102,35 @@
+     def __init__(self):
+         super().__init__()
+-        # Placeholder for pre-trained ESRGAN
++        # Placeholder for pre-trained ESRGAN architecture
+         self.model = nn.Sequential(
+-            nn.Conv2d(6, 64, 3, 1, 1), # Input: LR image (3) + CCLC (3)
++            nn.Conv2d(6, 64, 3, 1, 1),
+             nn.ReLU(),
+-            nn.Conv2d(64, 3, 3, 1, 1)  # Output: HR image (3)
++            nn.Conv2d(64, 3, 3, 1, 1)
+         )
+     
+     def forward(self, lr_img, cclc):
+-        # Concatenate LR image and CCLC along channel dim
+         x = torch.cat([lr_img, cclc], dim=1)
+         return self.model(x)
+ 
+-class CEM:
+-    def __init__(self, blur_kernel):
+-        self.blur_kernel = blur_kernel # H
+-    
+-    def forward(self, sr_output, lr_input):
+-        # CEM Output Adjustment Formula:
+-        # C_HR = (I - H^T (H H^-1 H)) * C_tilde_HR + H^T (H H^-1) * C_LR
+-        # Note: The exact matrix inversion/pseudo-inverse implementation depends on H.
+-        # For simplicity in pseudocode, we assume a function `apply_cem` exists
+-        # that performs the linear algebra described in [S1].
+-        # In practice, this might involve solving a least-squares problem or
+-        # using specific matrix properties of the blur kernel.
+-        return apply_cem(sr_output, lr_input, self.blur_kernel)
++def apply_cem(sr_output, lr_input, blur_kernel):
++    # CEM Output Adjustment Formula:
++    # C_HR = (I - H^T (H H^-1 H)) * C_tilde_HR + H^T (H H^-1) * C_LR
++    # H^-1 denotes the Moore-Penrose pseudo-inverse for numerical stability [G].
++    H = blur_kernel
++    H_pinv = torch.linalg.pinv(H)
++    proj_lr = H.T @ (H @ H_pinv)
++    proj_sr = torch.eye(H.shape[0]) - H.T @ (H @ H_pinv @ H)
++    # Flatten images to vectors for matrix multiplication, then reshape
++    B, C, H_h, W_w = sr_output.shape
++    sr_flat = sr_output.view(B, C * H_h * W_w)
++    lr_flat = lr_input.view(B, C * H_h * W_w)
++    out_flat = proj_sr @ sr_flat.T + proj_lr @ lr_flat.T
++    return out_flat.T.view(B, C, H_h, W_w)
+ 
+ def truncate_0_1(x):
+     return torch.clamp(x, 0.0, 1.0)
+ 
+-def compute_range_penalty(pred, target):
++def compute_range_penalty(pred):
+     # L_range = 1/N * sum |x - truncate(x)|_1
+-    # Here, target is not explicitly used in the formula, only the prediction
+-    # is penalized if it exceeds [0,1]. The formula uses x_hat which is the prediction.
+     truncated = truncate_0_1(pred)
+     diff = pred - truncated
+@@ -149,5 +142,5 @@
+ def alpha_schedule(t, total_iters):
+     # alpha(0) = 1, lim t->inf alpha(t) = 0
+-    # Linear decay as a simple implementation of the trade-off function
++    # Linear decay as a standard implementation of the trade-off function [G].
+     return 1.0 - (t / total_iters)
+ 
+@@ -176,58 +169,25 @@
+         
+         # 2. Super-resolve LR image with CCSR (ESRGAN)
+-        # Concatenate LR input to random CCLC
+-        # Note: In the paper, CCLC is learnable, so we use the current cclc
+-        # The input to ESRGAN is LR image + CCLC
+-        cclc_expanded = cclc.unsqueeze(0) # (1, 3, sH, sW)
+-        lr_img_expanded = lr_img.unsqueeze(0) # (1, 3, H, W)
+-        
+-        # ESRGAN takes concatenated input
+-        # Assuming ESRGAN expects (B, 6, H, W) if CCLC is resized or (B, 6, sH, sW)
+-        # The paper says CCLC is 3x(sH)x(sW). ESRGAN outputs HR.
+-        # We assume ESRGAN handles the upsampling or CCLC is already at HR size.
+-        # Based on "CCLC is a 3 x (sH) x (sW) dimensional latent code", 
+-        # and ESRGAN is a 4x SR backbone, the CCLC is likely at the HR resolution scale.
+-        
+-        # Concatenate along channel dim: LR (3) + CCLC (3) -> (6)
+-        # But LR is HxW, CCLC is sHxsW. We need to upsample LR or assume CCLC 
+-        # is the latent code for the HR space.
+-        # The paper says: "concatenate the LR input to the random CCLC".
+-        # This implies spatial alignment. Usually, this means upsampling LR to HR 
+-        # or CCLC is at LR size and ESRGAN upsamples.
+-        # Given "CCLC is 3x(sH)x(sW)", it is at HR size.
+-        # So we likely upsample LR to HR size to concatenate, or the ESRGAN 
+-        # architecture handles multi-scale input.
+-        # For pseudocode, we assume a helper `upsample_lr_to_hr` exists.
+-        
+         lr_img_hr = F.interpolate(lr_img.unsqueeze(0), size=(cclc.shape[1], cclc.shape[2]), mode='bilinear', align_corners=False).squeeze(0)
+-        
+-        # Concatenate LR (HR size) and CCLC (HR size)
+-        esrgan_input = torch.cat([lr_img_hr, cclc_expanded], dim=1) # (1, 6, sH, sW)
+-        
+-        # Forward ESRGAN
+-        tilde_C_HR = esrgan(esrgan_input) # (1, 3, sH, sW)
+-        tilde_C_HR = tilde_C_HR.squeeze(0) # (3, sH, sW)
++        cclc_expanded = cclc.unsqueeze(0)
++        esrgan_input = torch.cat([lr_img_hr, cclc_expanded], dim=1)
++        
++        tilde_C_HR = esrgan(esrgan_input).squeeze(0)
+         
+         # 3. Refine tilde_C_HR by CEM to get C_HR
+-        C_HR = cem(tilde_C_HR, lr_img) # (3, sH, sW)
++        C_HR = apply_cem(tilde_C_HR.unsqueeze(0), lr_img.unsqueeze(0), blur_kernel).squeeze(0)
+         
+         # 4. Upsample rays for viewpoint i and query LR NeRF
+-        # Assume `render_nerf` function handles ray sampling and volume rendering
+-        # It returns an image of size (sH, sW)
+-        C_LN = render_nerf(lr_nerf, pose, resolution=(cclc.shape[1], cclc.shape[2])) # (3, sH, sW)
++        # [G] Standard volume rendering: generate rays from pose, sample points, 
++        # query MLP for color/density, perform alpha compositing to return (3, sH, sW)
++        C_LN = render_nerf(lr_nerf, pose, resolution=(cclc.shape[1], cclc.shape[2]))
+         
+         # 5. Query HR NeRF with same rays
+-        C_HN = render_nerf(hr_nerf, pose, resolution=(cclc.shape[1], cclc.shape[2])) # (3, sH, sW)
++        C_HN = render_nerf(hr_nerf, pose, resolution=(cclc.shape[1], cclc.shape[2]))
+         
+         # 6. Compute loss
+         alpha = alpha_schedule(t, num_iters)
+-        
+-        # Mutual Learning Loss
+         loss_sr = alpha * compute_l1_loss(C_LN, C_HR) + (1 - alpha) * compute_l1_loss(C_HN, C_HR)
+-        
+-        # Range Penalty Loss
+-        loss_range = compute_range_penalty(C_HR, None)
+-        
+-        # Total Loss
++        loss_range = compute_range_penalty(C_HR)
+         loss = loss_sr + loss_range
+         
+@@ -241,18 +201,11 @@
+ 
+ def render_nerf(nerf_model, pose, resolution):
+-    """
+-    Renders an image from a NeRF model given a pose and resolution.
+-    This is a simplified placeholder for the actual volume rendering code.
+-    """
+-    # Generate rays for the given pose and resolution
+-    # Sample points along rays
+-    # Query NeRF for color and density
+-    # Perform volume rendering
+-    # Return image tensor (3, H, W)
++    # [G] Standard volume rendering implementation omitted for brevity.
++    # Generates rays from pose, samples points, queries MLP, composites colors.
+     pass
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision:** The CEM formula involves matrix operations ($H^T (H H^{-1} H)$) which may be sensitive to the properties of the blur kernel $H$. Numerical stability should be considered [S1].
++*   **Precision:** The CEM formula involves matrix operations ($H^T (H H^{-1} H)$) which may be sensitive to the properties of the blur kernel $H$ [S1].
+ *   **Boundaries:** The range penalty loss handles colors outside [0, 1], but the CEM assumes the LR input is within a valid range [S1].
+ *   **Degenerate Input:** If the LR images are extremely noisy or have severe artifacts, the ESRGAN may generate inconsistent details, which the CEM may not fully correct if the LR constraint is weak [S1].
+@@ -261,6 +214,6 @@
+ ## Operating characteristics
+ 
+-*   **Time Complexity:** Training involves iterative optimization of the HR NeRF and CCLC. The average training time for Super-NeRF is 10 hours on a single NVIDIA RTX 3090 GPU [S1]. Pre-training the LR NeRF takes 30 minutes [S1].
+-*   **Memory Complexity:** The method requires storing the LR NeRF, HR NeRF, and CCLC for each view. The LR NeRF is lightweight (1/4 size of HR NeRF) [S1].
++*   **Time Complexity:** Training involves iterative optimization of the HR NeRF and CCLC [S1]. The average training time for Super-NeRF is 10 hours on a single NVIDIA RTX 3090 GPU [S1]. Pre-training the LR NeRF takes 30 minutes [S1].
++*   **Memory Complexity:** The method requires storing the LR NeRF, HR NeRF, and CCLC for each view [S1]. The LR NeRF is lightweight (1/4 size of HR NeRF) [S1].
+ *   **Measured Performance:** Super-NeRF achieves 4x super-resolution of NeRFs on various datasets (LLFF, Synthesis360, Blender, FaceScape) [S1].
+ *   **Scaling:** The method is designed for 4x super-resolution ($s=4$) [S1].

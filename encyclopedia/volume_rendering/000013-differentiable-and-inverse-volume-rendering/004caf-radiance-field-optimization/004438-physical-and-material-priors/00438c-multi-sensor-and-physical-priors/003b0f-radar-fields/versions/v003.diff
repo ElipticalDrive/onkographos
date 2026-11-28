@@ -1,0 +1,335 @@
+--- v002.md
++++ v003.md
+@@ -4,217 +4,147 @@
+ 
+ ## Overview
+-Radar Fields is a differentiable rendering framework that extends the radiance field concept to Synthetic Aperture Radar (SAR) imagery, enabling the learning of volumetric surface models from multiple SAR measurements [S1]. Unlike optical radiance fields that integrate emission along individual rays, Radar Fields integrates radar signal contributions across all rays within a given azimuth plane that share the same range distance [S1]. This architectural difference allows for the reconstruction of 3D geometry from SAR data, which offers day-night and cloud-penetrating imaging capabilities [S1].
++Radar Fields is a differentiable rendering framework that extends radiance fields to Synthetic Aperture Radar (SAR) imagery, enabling the learning of volumetric surface models from multiple SAR measurements [S1]. Unlike optical radiance fields that integrate radiance along individual rays, Radar Fields integrates radar signal contributions across all rays within a given azimuth plane that share the same range distance [S1]. This method solves the problem of 3D reconstruction from SAR data by adapting the volume rendering equation to the specific physics of SAR image formation, where the integration dimension is swapped from the ray direction to the azimuth direction [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A collection of SAR images (complex-valued or intensity) acquired from different azimuth positions; camera poses (satellite positions and viewing directions); SAR range sampling parameters [S1].
+-*   **Outputs:** A Digital Surface Model (DSM) representing the scene geometry, and optionally a specularity parameter map $\theta$ [S1].
++*   **Inputs:** A collection of SAR images (complex-valued or intensity) of a scene from different viewpoints; camera poses (satellite positions and orientations).
++*   **Outputs:** A learned surface model of the scene, typically represented as a Digital Surface Model (DSM) or implicit function, and optionally surface properties like specularity.
+ 
+ **Data Structures:**
+-*   **Surface Model:** The scene surface is defined by a Digital Surface Model function $dsm: [0, 1]^2 \rightarrow [0, 1]$, where the output represents normalized height [S1].
+-*   **Implicit Function:** The surface is represented implicitly by $F(x) = z - dsm(x, y)$ for $x=(x,y,z) \in [0, 1]^3$ [S1].
+-*   **Implementation:** The DSM is rasterized into an image where each pixel stores the height value. These pixel values are directly optimized during training [S1]. Normals are computed via bilinear interpolation of the nearest height values [S1].
++*   **Surface Model:** The surface is defined by a Digital Surface Model (DSM) function $dsm: [0, 1]^2 \rightarrow [0, 1]$, mapping 2D coordinates to height [S1]. The implicit function is defined as $F(x) = z - dsm(x, y)$ for $x=(x,y,z) \in [0,1]^3$ [S1].
++*   **Implementation:** The DSM is rasterized into an image where each pixel represents the height value. These pixel values are directly optimized during training [S1]. Subpixel heights are estimated using bilinear interpolation of the nearest values, and surface normals are computed accordingly [S1].
++*   **Ray Data:** For each azimuth plane, a set of rays $r_j$ is defined by origin $o_j$ and direction $v_j$ [S1]. Distance samples $d_i$ are fixed by the SAR range sampling [S1].
+ 
+-**Numbered Steps:**
++**Parameters:**
++*   **Specularity Parameter ($\theta$):** Used in the reflection model $s = -\langle v|n \rangle^\theta$ [S1]. $\theta=1$ corresponds to a Lambertian surface; larger values represent specular surfaces. This parameter can be learned alongside the surface location [S1].
++*   **Training Hyperparameters:** 10,000 optimization steps; initial learning rate 1.0, reduced to 0.1 at step 5,000, and to $10^{-2}$ at step 8,000 [S1]. Azimuth planes are sampled uniformly and batched in groups of 64, with 256 rays sampled per azimuth plane [S1].
+ 
+-1.  **Ray and Azimuth Plane Definition:**
+-    For a given azimuth plane (spanning the satellite flight direction and range direction), define a set of rays $\{r_j\}$ with origins $o_j$ and directions $v_j$ [S1]. The distance sampling $\{d_i\}$ is fixed and defined by the SAR range sampling resolution [S1].
+-
+-2.  **Ray Origin Perturbation:**
+-    To improve optimization performance (analogous to noise injection in NeRF), perturb the ray origin [S1]. Since fixed uniform sampling along rays is not possible due to fixed SAR range sampling, noise is added to the origin [S1].
+-    $$
+-    \tilde{o}_j = o_j + n w_j
+-    $$
+-    where $w_j$ is a vector orthogonal to $v_j$ within the azimuth plane, and $n \sim \mathcal{N}(0, 1)$ [S1].
+-
+-3.  **Signal Computation per Ray:**
+-    For each ray $r_j$ and distance sample $d_i$, compute the sensed signal contribution $s_{r_j}(d_i)$ [S1]. This involves evaluating the surface implicit function $F$ to determine intersection and normal $n_{i,j}$ [S1]. The signal is modeled using a specular reflection model:
+-    $$
+-    s_{r_j}(d_i) = -T_{i,j} \sigma_{i,j} \langle v_j | n_{i,j} \rangle^\theta
+-    $$
+-    where:
+-    *   $T_{i,j}$ is the transmittance [S1].
+-    *   $\sigma_{i,j}$ is the density/scattering coefficient [S1].
+-    *   $\langle v_j | n_{i,j} \rangle$ is the dot product of the incidence direction and surface normal [S1].
+-    *   $\theta$ is the specularity parameter ($\theta=1$ is Lambertian; $\theta > 1$ is specular) [S1].
+-
+-4.  **Cross-Ray Integration (Radar Rendering):**
+-    Unlike optical rendering which sums along a ray, Radar Fields sums contributions from all rays $j$ in the azimuth plane that correspond to the same range distance $d_i$ [S1]. The total signal $s(d_i)$ for a pixel at distance $d_i$ is:
+-    $$
+-    s(d_i) = \sum_j s_{r_j}(d_i) = \sum_j -T_{i,j} \sigma_{i,j} \langle v_j | n_{i,j} \rangle^\theta
+-    $$
+-    Note that the index $i$ (distance) is the primary key for the pixel, while $j$ (ray) is summed over [S1].
+-
+-5.  **Noise Modeling:**
+-    For single-channel single-look intensity images, the noise-free reflectance $R$ is related to the observed intensity $I$ by multiplicative speckle noise:
+-    $$
+-    I = n \times R
+-    $$
+-    where $n \sim \Gamma(1, 1)$ [S1]. This $n$ is distinct from the perturbation noise in Step 2.
+-
+-6.  **Optimization:**
+-    Minimize the difference between the rendered signal $s(d_i)$ and the observed SAR intensity $I$ [S1]. The DSM height values and specularity parameter $\theta$ are optimized [S1]. Surface regularization can be applied using terms like:
+-    $$
+-    L_{d} = \frac{1}{|\mathcal{C}|} \sum_{C \in \mathcal{C}} \exp \left( -\frac{L}{d} \text{Tr}(\Sigma^{-1} C) \right)
+-    $$
+-    with $\Gamma_d(L) = \pi^{d(d-1)/2} \prod_{k=1}^{d} \Gamma(L - k + 1)$ [S1].
++**Algorithm Steps:**
++1.  **Ray Sampling:** For a given azimuth plane, sample a set of rays $r_j$ with origins $o_j$ and directions $v_j$. The distance sampling $d_i$ is fixed by the SAR data's range resolution [S1].
++2.  **Ray Origin Perturbation:** To improve optimization performance (analogous to noise injection in NeRF), perturb the ray origin. Let $w_j$ be the vector orthogonal to $v_j$ inside the azimuth plane. The perturbed origin is $\tilde{o}_j = o_j + n w_j$, where $n \sim \mathcal{N}(0, 1)$ [S1].
++3.  **Signal Computation:** For each ray $r_j$ and distance sample $d_i$, compute the sensed signal $s_{r_j}(d_i)$. This involves evaluating the density $\sigma_{i,j}$ and normal $n_{i,j}$ at the intersection point, and applying the reflection model [S1]:
++    $$ s_{r_j}(d_i) = -T_{i,j} \sigma_{i,j} \langle v_j | n_{i,j} \rangle^\theta $$
++    where $T_{i,j}$ is the transmittance along ray $j$ up to sample $i$ [S1].
++4.  **Azimuth Integration:** Batch all rays belonging to the same azimuth plane. Compute the total signal for a pixel at distance $d_i$ by summing the contributions from all rays $j$ in that plane [S1]:
++    $$ s(d_i) = \sum_j s_{r_j}(d_i) = \sum_j -T_{i,j} \sigma_{i,j} \langle v_j | n_{i,j} \rangle^\theta $$
++    Note that the index $j$ (ray) is summed over, while $i$ (distance) defines the pixel [S1].
++5.  **Loss Computation:** Compare the rendered signal $s(d_i)$ with the observed SAR intensity $I$. For single-channel single-look intensity images, model the speckle noise as multiplicative: $I = n \times R$, where $R$ is the noise-free reflectance and $n \sim \Gamma(1, 1)$ [S1]. Minimize the difference between the rendered signal and the observed intensity, potentially using a Noise2Noise approach or explicit noise modeling [S1].
++6.  **Optimization:** Back-propagate the loss to update the DSM pixel values and the specularity parameter $\theta$ [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+-import math
++import torch
++import torch.nn as nn
+ import numpy as np
+ 
+ class RadarField:
+-    def __init__(self, dsm_grid, azimuth_planes, rays_per_plane=256):
++    def __init__(self, dsm_image, camera_poses, azimuth_planes):
+         """
+         Initialize Radar Field.
++        :param dsm_image: Tensor of shape (H, W) representing the rasterized DSM.
++        :param camera_poses: List of camera poses for each SAR acquisition.
++        :param azimuth_planes: List of azimuth plane definitions.
++        """
++        self.dsm = nn.Parameter(dsm_image.clone().float())
++        self.theta = nn.Parameter(torch.tensor(1.0)) # Specularity parameter
++        self.camera_poses = camera_poses
++        self.azimuth_planes = azimuth_planes
++
++    def get_surface_normal(self, x, y):
++        """
++        Compute surface normal from DSM using finite differences.
++        """
++        # Bilinear interpolation to get height at subpixel coordinates
++        h = self.dsm[y, x]
++        # Compute gradients for normal
++        # [G] Standard finite difference or Sobel filter implementation
++        dz_dx, dz_dy = compute_gradient(self.dsm, y, x)
++        normal = torch.stack([-dz_dx, -dz_dy, torch.ones_like(h)], dim=-1)
++        return torch.nn.functional.normalize(normal, dim=-1)
++
++    def render_azimuth_plane(self, azimuth_plane, rays, distance_samples):
++        """
++        Render signal for a single azimuth plane.
++        :param azimuth_plane: Index of the azimuth plane.
++        :param rays: List of ray origins and directions for the plane.
++        :param distance_samples: Fixed distance samples from SAR data.
++        :return: Rendered signal tensor.
++        """
++        rendered_signal = torch.zeros_like(distance_samples)
+         
+-        Args:
+-            dsm_grid: 2D array of shape (H, W) representing the rasterized DSM.
+-                      Values are normalized heights in [0, 1].
+-            azimuth_planes: List of azimuth plane configurations.
+-                           Each plane contains ray origins, directions, and range samples.
+-            rays_per_plane: Number of rays to sample per azimuth plane.
++        # Batch all rays in the azimuth plane
++        for j, (origin, direction) in enumerate(rays):
++            # Perturb ray origin
++            w = get_orthogonal_vector(direction, azimuth_plane)
++            n_noise = torch.randn(1)
++            perturbed_origin = origin + n_noise * w
++            
++            # Compute transmittance and signal for each distance sample
++            # [G] Standard volume rendering integration along the ray
++            # However, signal is accumulated per distance sample across rays
++            for i, d_i in enumerate(distance_samples):
++                # Find intersection or sample point at distance d_i
++                point = perturbed_origin + d_i * direction
++                x, y = project_to_dsm(point)
++                
++                # Get density and normal
++                # [G] Density is derived from DSM gradient or implicit function
++                sigma = compute_density(self.dsm, x, y)
++                normal = get_surface_normal(x, y)
++                
++                # Compute transmittance T_{i,j}
++                # [G] Accumulate opacity along the ray up to i
++                T = compute_transmittance(perturbed_origin, direction, d_i, sigma)
++                
++                # Compute reflection signal
++                # s_{r_j}(d_i) = -T_{i,j} * sigma * <v_j | n_{i,j}>^theta
++                cos_angle = torch.dot(direction, normal)
++                signal = -T * sigma * torch.pow(cos_angle, self.theta)
++                
++                # Accumulate across rays for the same distance sample
++                rendered_signal[i] += signal
++                
++        return rendered_signal
++
++    def forward(self, azimuth_plane_idx):
+         """
+-        self.dsm = dsm_grid.copy()
+-        self.dsm.requires_grad = True
+-        self.theta = np.ones_like(dsm_grid) * 1.0
+-        self.rays_per_plane = rays_per_plane
++        Forward pass for optimization.
++        """
++        azimuth_plane = self.azimuth_planes[azimuth_plane_idx]
++        rays = sample_rays(azimuth_plane, num_rays=256)
++        distance_samples = get_sar_range_samples(azimuth_plane)
+         
+-    def get_normal_and_height(self, x, y):
+-        """
+-        Compute height and normal from rasterized DSM using bilinear interpolation.
++        rendered = self.render_azimuth_plane(azimuth_plane, rays, distance_samples)
++        observed = get_observed_sar_intensity(azimuth_plane)
+         
+-        Args:
+-            x, y: Coordinates in [0, 1] range.
+-            
+-        Returns:
+-            z: Height value.
+-            n: Surface normal vector.
+-        """
+-        # Bilinear interpolation to get height
+-        z = self._bilinear_interp(self.dsm, x, y)
+-        
+-        # Compute normal via finite differences or gradient of DSM
+-        dz_dx, dz_dy = self._compute_gradients(self.dsm, x, y)
+-        
+-        # Normal vector n = (-dz/dx, -dz/dy, 1) normalized
+-        n = np.stack([-dz_dx, -dz_dy, np.ones_like(z)], axis=-1)
+-        n = n / np.linalg.norm(n, axis=-1, keepdims=True)
+-        
+-        return z, n
++        # Loss computation with speckle noise model
++        # [G] Implement negative log-likelihood for Gamma distribution or MSE
++        loss = compute_loss(rendered, observed)
++        return loss
+ 
+-    def _bilinear_interp(self, grid, x, y):
+-        # Standard bilinear interpolation implementation
+-        # Returns interpolated height values
+-        pass
+-
+-    def _compute_gradients(self, grid, x, y):
+-        # Standard gradient computation implementation
+-        # Returns dz/dx and dz/dy
+-        pass
+-
+-    def render_azimuth_plane(self, azimuth_plane_config):
+-        """
+-        Render a single azimuth plane following the cross-ray integration formula.
+-        
+-        Args:
+-            azimuth_plane_config: Dictionary containing:
+-                - origins: Array (N, 3) ray origins o_j
+-                - directions: Array (N, 3) ray directions v_j
+-                - distances: Array (M,) fixed range samples d_i
+-                
+-        Returns:
+-            rendered_signal: Array (M,) signal for each range bin.
+-        """
+-        origins = azimuth_plane_config['origins']
+-        directions = azimuth_plane_config['directions']
+-        distances = azimuth_plane_config['distances']
+-        
+-        N = origins.shape[0]
+-        M = distances.shape[0]
+-        
+-        # 1. Perturb ray origins
+-        # w_j is orthogonal to v_j in the azimuth plane
+-        noise = np.random.randn(N, 1)
+-        w = azimuth_plane_config['orthogonal_vectors'] # (N, 3)
+-        perturbed_origins = origins + noise * w
+-        
+-        # Initialize signal accumulator for each distance bin
+-        total_signal = np.zeros(M)
+-        
+-        # 2. Cross-Ray Integration: s(d_i) = sum_j s_{r_j}(d_i)
+-        for i in range(M):
+-            d_i = distances[i]
+-            ray_contribution_sum = 0.0
+-            
+-            for j in range(N):
+-                o_j = perturbed_origins[j]
+-                v_j = directions[j]
+-                
+-                # 3. Compute intersection and signal for ray j at distance d_i
+-                # Intersection logic not provided in sources [G].
+-                # Typically involves solving F(x) = 0 along the ray or checking
+-                # if the ray intersects the DSM at the specified range bin.
+-                # For this pseudocode, we assume a helper returns sigma, normal, transmittance.
+-                sigma, normal, transmittance = self._compute_ray_intersection(
+-                    o_j, v_j, d_i, self.dsm
+-                )
+-                
+-                if sigma is not None:
+-                    dot_product = np.dot(v_j, normal)
+-                    # Specular model: s = - <v|n> ^ theta
+-                    signal_j = -transmittance * sigma * (dot_product ** self.theta)
+-                    ray_contribution_sum += signal_j
+-                    
+-            total_signal[i] = ray_contribution_sum
+-            
+-        return total_signal
+-
+-    def _compute_ray_intersection(self, origin, direction, distance, dsm):
+-        # Computes intersection point, normal, sigma, and transmittance.
+-        # Returns None if no valid intersection is found.
+-        # Implementation details omitted as they are not provided in sources [G].
+-        pass
+-
+-    def train_step(self, target_signal, azimuth_plane_config, learning_rate):
+-        """
+-        Perform one optimization step.
+-        """
+-        rendered_signal = self.render_azimuth_plane(azimuth_plane_config)
+-        
+-        # Loss: MSE between rendered and target (accounting for speckle noise)
+-        loss = np.mean((rendered_signal - target_signal) ** 2)
+-        
+-        # Backpropagation and parameter update would occur here
+-        # self.dsm -= learning_rate * grad(loss, self.dsm)
+-        # self.theta -= learning_rate * grad(loss, self.theta)
+-        
+-        return loss
++def compute_loss(rendered, observed):
++    """
++    Compute loss based on multiplicative speckle noise model.
++    I = n * R, n ~ Gamma(1, 1)
++    """
++    # [G] Simple MSE as a proxy for the source's description of handling noisy data
++    # More rigorous implementation would use Gamma NLL
++    return torch.mean((rendered - observed) ** 2)
+ ```
+ 
+-**Parameters:**
+-*   **Specularity $\theta$:** Initial value 1.0 (Lambertian). Can be learned [S1].
+-*   **Learning Rate:** Initial 1.0, reduced to 0.1 at step 5,000, and to $10^{-2}$ at step 8,000 [S1].
+-*   **Training Steps:** 10,000 steps [S1].
+-*   **Batching:** Azimuth planes are sampled uniformly and grouped into batches of size 64 [S1].
+-*   **Rays per Plane:** 256 rays sampled per azimuth plane [S1].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Multi-bounce Effects:** Signals from double or multiple bounces (e.g., A->B->receiver) appear at incorrect positions (e.g., at C) [S1]. This violates the zero-doppler assumption, requiring batching multiple azimuth planes, which is highly unfeasible without strong priors [S1].
+-*   **Fixed Sampling:** Fixed uniform sampling along rays is not possible because the sampling step is defined by the SAR range sampling [S1]. Noise must be added to the ray origin instead [S1].
+-*   **Complex Data:** SAR raw data stores complex numbers [S1]. The method typically uses intensity images, losing phase information which contains path delay data [S1].
+-*   **Batching Requirement:** Requires significant batching for azimuth planes because computing a single pixel requires computing all rays in that azimuth plane [S1].
++*   **Fixed Sampling:** Unlike NeRF, fixed uniform sampling along rays is not possible because the sampling step is defined by the SAR range sampling [S1]. Noise must be added to the ray origin instead [S1].
++*   **Multi-bounce Effects:** Signals from double or multiple bounces appear at incorrect positions (e.g., signal from A->B->receiver appears at C) [S1]. The generic case violates the zero-doppler assumption, requiring batching multiple azimuth planes, which is highly unfeasible without strong priors [S1].
++*   **Complex Data:** SAR raw data stores complex numbers separating amplitude and phase. The method primarily focuses on intensity images, but phase contains satellite-target path delay modulo the wavelength [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** On average, the computations necessary to learn a radar field remain the same as those for a radiance field, with the primary difference being the batching strategy [S1].
+-*   **Memory Complexity:** Requires batching all rays of a given azimuth plane together during computation, as computing a single pixel requires computing all rays in that azimuth plane [S1].
++*   **Time Complexity:** The computational complexity remains similar to standard radiance fields on average, with the primary difference being the batching requirement [S1]. All rays of a given azimuth plane must be batched together during computation [S1].
++*   **Memory Complexity:** Not explicitly given, but batching all rays in an azimuth plane may increase memory usage compared to per-ray processing in optical NeRF [S1].
+ *   **Performance:** Reconstruction errors are in the order of $10^{-2}$ pixels relative to ground pixel resolution [S1].
+-*   **Strengths:** Enables 3D reconstruction from SAR data, leveraging its day-night and cloud-penetrating capabilities. Does not prescribe geometric configuration of acquisitions, allowing opportunistic use [S1].
+-*   **Limitations:** Struggles with multi-bounce effects. Requires significant batching for azimuth planes. Assumes non-absorbing medium [S1].
++*   **Strengths:** Enables 3D reconstruction from SAR data, which has day-night and cloud-penetrating capabilities [S1]. Does not prescribe geometric configuration, allowing opportunistic acquisitions [S1].
++*   **Limitations:** Multi-bounce effects are not fully handled in the generic case [S1]. Requires batching rays by azimuth plane, which may limit scalability [S1].
+ 
+ ## Background
+-Radar Fields was introduced to extend radiance fields to Synthetic Aperture Radar (SAR) data [S1]. SAR systems emit electromagnetic pulses and receive backscattered echoes [S1]. Unlike optical sensors, SAR wavelengths experience minimal interaction with atmospheric gases, allowing for imaging in all weather conditions and at night [S1]. The method adapts the differentiable rendering framework to account for the unique SAR image formation model, where integration occurs across rays in an azimuth plane rather than along individual rays [S1].
++Radar Fields was introduced in the paper "Radar Fields: An Extension of Radiance Fields to SAR" [S1]. The method extends the concept of radiance fields to Synthetic Aperture Radar (SAR) imagery. SAR systems use side-looking geometry and emit electromagnetic pulses, receiving echoes backscattered by the ground surface. The resulting images are complex-valued, with amplitude related to ground reflectivity and angle, and phase containing path delay information [S1]. The method was developed to leverage the widespread availability of SAR data for global 3D reconstruction [S1].
+ 
+ ## Sources

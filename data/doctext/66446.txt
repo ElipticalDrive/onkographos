@@ -1,0 +1,1290 @@
+1
+PERF: Panoramic Neural Radiance Field from a
+Single Panorama
+arXiv:2310.16831v2 [cs.CV] 28 Oct 2023
+Guangcong Wang*, Peng Wang*, Zhaoxi Chen, Wenping Wang, Chen Change Loy, and Ziwei Liu
+Abstract—Neural Radiance Field (NeRF) has achieved substantial progress in novel view synthesis given multi-view images.
+Recently, some works have attempted to train a NeRF from a single image with 3D priors. They mainly focus on a limited field of view
+with a few occlusions, which greatly limits their scalability to real-world 360-degree panoramic scenarios with large-size occlusions. In
+this paper, we present PERF, a 360-degree novel view synthesis framework that trains a panoramic neural radiance field from a single
+panorama. Notably, PERF allows 3D roaming in a complex scene without expensive and tedious image collection. To achieve this goal,
+we propose a novel collaborative RGBD inpainting method and a progressive inpainting-and-erasing method to lift up a 360-degree 2D
+scene to a 3D scene. Specifically, we first predict a panoramic depth map as initialization given a single panorama and reconstruct
+visible 3D regions with volume rendering. Then we introduce a collaborative RGBD inpainting approach into a NeRF for completing
+RGB images and depth maps from random views, which is derived from an RGB Stable Diffusion model and a monocular depth
+estimator. Finally, we introduce an inpainting-and-erasing strategy to avoid inconsistent geometry between a newly-sampled view and
+reference views. The two components are integrated into the learning of NeRFs in a unified optimization framework and achieve
+promising results. Extensive experiments on Replica and a new dataset PERF-in-the-wild demonstrate the superiority of our PERF over
+state-of-the-art methods. Our PERF can be widely used for real-world applications, such as panorama-to-3D, text-to-3D, and 3D scene
+stylization applications. Project page and code are available at https://perf-project.github.io/ and https://github.com/perf-project/PeRF.
+Index Terms—Panoramic Neural Radiance Field, Novel View Synthesis, 3D Scene Synthesis, Single Panorama
+✦
+1
+I NTRODUCTION
+N
+EURAL Radiance Field (NeRF) [1], [2], [3], [4] has
+recently gained increasing attention in the task of
+novel view synthesis for its amazing rendering quality.
+Successful training of a NeRF model generally requires
+multiple images from different viewpoints for supervision.
+However, densely capturing multiple images of a single
+scene requires a significant amount of effort. In many realworld scenarios, capturing the scene with only a single
+image is the more convenient option for most people. In
+this paper, we are interested in training a panoramic neural radiance field given a single 360-degree 2D image as
+input. This promising task enables us to roam an indoor
+room without exhausting image capturing, which has many
+practical applications such as house touring, virtual-reality
+games, and teleconferences.
+Training a panoramic neural radiance field from a single
+panorama has several critical challenges. First, a panoramic
+image has a 360-degree view captured at a position but does
+not contain 3D information. Without any 3D priors, it is
+impossible to train a valid NeRF from a single panorama.
+Second, since a single panoramic image is only a partial
+observation of a scene due to occlusions, training a singleview panoramic neural radiance field becomes a complex
+coupled problem of both 3D scene reconstruction and 3D
+scene generation. On the one hand, we need to reconstruct
+visible regions of the input panorama, while on the other, we
+have to generate reasonable contents in invisible regions to
+semantically match the visible regions in a 3D space, which
+•
+The * denotes equal contribution. G. Wang, Z. Chen, C. C. Loy and Z. Liu
+are affiliated with S-Lab, Nanyang Technological University. P. Wang is
+affiliated with The University of Hong Kong. W. Wang is affiliated with
+Texas A&M University.
+is difficult. Third, different from the 3D reconstruction of a
+limited field-of-view scene [5], [6], [7] or a 360-degree objectcentric scene [8], a panoramic scene often contains large-size
+occlusions and various open-world objects. Fourth, it is a
+challenge to avoid geometry conflict between visible and
+invisible regions. When completing the shape of invisible
+regions, the newly synthesized 3D geometry should not
+occlude the original visible regions from the given single
+view. Otherwise, some visible points in the given panorama
+will become “invisible points” from the given view, which
+leads to conflicted geometry during training.
+Existing methods only offer partial solutions to these
+problems. Instead of using dense views to train a NeRF,
+some NeRF methods [9], [10], [11], [12], [13], [14] reduce the
+requirement of dense views and conduct 3D reconstruction
+with a few images by considering geometry constraints and
+high-level semantic constraints. These NeRF approaches
+mainly study 3D scene reconstruction from several image
+views but do not consider 3D scene generation, which fails
+to tackle invisible occlusions. Recently, a few methods [5],
+[7] attempt to train a NeRF from a single image. They
+either directly use adversarial training to synthesize smallsize invisible regions or need to pre-train the NeRF on
+other similar scenes. However, these approaches investigate limited field-of-view 3D generation from a single image. They fail to achieve good results on challenging 360degree panoramic scenes due to large-size occlusions in a
+panoramic scene. Other methods [15], [16] proposed to use
+multi-plane images to represent 3D scenes instead of NeRFs.
+In these methods, the field of view is also limited. Different
+from these previous arts, our method aims at training a
+panoramic neural radiance field from a single panorama,
+allowing 3D roaming by generating photo-realistic novel
+2
+views of complex scenes. Recently, some methods have
+made initial attempts to tailor the learning of the panoramic
+neural radiance field from a single panorama. They introduced semantic-aware constraints [17], [18], data augmentation of incompleted panoramas [19], or selection of
+completed images with less overlap [20]. These methods still
+fail to generate high-quality 3D panoramic neural radiance
+fields. Instead of studying general 360-degree scenes, some
+methods [8] study a 360-degree object-centric scene, where
+multiple images are captured around an object and there are
+few occlusions. Our goal is to generate a 3D scene from a single panorama that includes large occluded regions, which is
+different. Other concurrent methods [21], [22] inpainted the
+holes for 3D, but they focus on limited field-of-view or mesh
+[23].
+To address these challenges, we propose PERF, a 360degree novel view synthesis method that trains a panoramic
+neural radiance field from a single panorama. Specifically,
+we predict a panoramic depth map as the initial geometry
+given a single panorama. We propose a collaborative RGBD
+inpainting method to complete RGB images and depth maps
+of visible regions with a trained Stable Diffusion for RGB inpainting and a trained monocular depth estimator for depth
+completion, aiming to generate novel appearances and 3D
+shapes that are invisible from the input panorama. More
+precisely, we warp the panoramic scene to an unseen view
+and complete invisible regions of interest (ROI) with a Stable
+Diffusion model [24]. We then predict the depth map of ROI
+and optimize the depth map to be consistent with the global
+panoramic scene (Challenges 1 & 2). Moreover, we also propose a progressive inpainting-and-erasing method to avoid
+inconsistent geometry among different views (Challenges 3
+& 4). The inpainting-and-erasing method inpaints invisible
+regions from a random view and erases conflicted geometry
+regions observed from other reference views, yielding better
+3D scene completion. We do this by progressively sampling
+novel views. We conduct experiments on the Replica and
+PERF-in-the-wild datasets, showing the superiority and effectiveness of our proposed PERF method.
+Overall, the main contributions of this paper are 1) PERF,
+a new method that trains a panoramic neural radiance
+field from a single panorama. To this end, we propose a
+collaborative RGBD inpainting with a trained Stable Diffusion model for RGB inpainting and a trained monocular
+depth estimator for geometry completion. Notably, the collaborative RGBD inpainting requires no extra training. 2)
+We propose a progressive inpainting-and-erasing method
+to avoid geometry conflict among different views. We inpaint invisible regions by progressively increasing a random
+view, and erase the conflicted regions by comparing the
+newly added views and the reference views. 3) Extensive
+experiments on the Replica and PERF-in-the-wild datasets
+demonstrate that PERF achieves a new state-of-the-art in
+single-view panoramic neural radiance field. The proposed
+PERF can be applied to panorama-to-3D, text-to-3D, and
+3D scene stylization tasks, showing surprising results on
+several promising applications.
+2
+R ELATED W ORK
+Panoramic Neural Radiance Fields. NeRF [1], [3] has
+achieved impressive results in novel view synthesis thanks
+to the good representation of neural networks. Recent research extends the vanilla NeRF to large-scale scenes [25],
+[26], [27], NeRF with imperfect camera poses [28], [29],
+[30], efficient representations [31], [32], [33], [34], [35], [36],
+[37], [38], [39], [40], and dynamic scenes [41], [42], [43],
+[44]. Some methods focus on novel view synthesis with
+panoramic images [45], [46], omnidirectional videos [47]
+or object-centric projective images [4]. For example, OmniNeRF [45] proposed a novel end-to-end framework for
+training Neural Radiance Field (NeRF) models given only
+360◦ RGB images and their rough poses. Omni-NeRF jointly
+learns the scene geometry and optimizes the camera parameters without knowing the fish eye projection. 360Roam
+[46] proposed to learn an omnidirectional neural radiance
+field and progressively estimate a 3D probabilistic occupancy map to accelerate volume rendering. Mip-NeRF360
+[4] used a non-linear scene parameterization, online distillation, and a novel distortion-based regularizer to overcome
+the challenges presented by unbounded panoramic scenes.
+PanoHDR-NeRF [47] proposed to capture a low dynamic
+range (LDR) omnidirectional video of the scene by freely
+waving an off-the-shelf camera around the scene and uplift
+the captured LDR frames to HDR. Different from these
+approaches that train panoramic NeRFs with multiple-view
+panoramas or limited field-of-view omnidirectional images,
+we aim at using a single panorama to train a panoramic
+NeRF.
+Single-view Novel View Synthesis. Instead of using
+dense views to train a NeRF, some few-shot NeRF methods [9], [10], [11], [12], [13], [14] reduce the requirement of
+dense views to train a NeRF by integrating 3D priors. These
+NeRF approaches mainly aim at 3D scene reconstruction
+from several image views, which cannot be applied to
+single-view scene generation. Recently, a few methods [5],
+[7] attempt to train a NeRF from a single image. For example, SinNeRF [5] used image warping to obtain geometry
+from unseen poses, and utilized adversarial training and
+high-level semantics extracted from pre-trained ViT for 3D
+scene completion. However, it mainly focuses on a limited
+field of view. When applied to a panoramic scene that
+contains large-size occlusions, SinNeRF fails to complete
+such scenes with adversarial training. PixelNeRF [7] first
+pre-trained a NeRF on other similar scenes and fine-tuned
+it on the target scene. PixelNeRF heavily depends on the
+knowledge transfer from similar scenes, so as to achieve
+promising single-view training of a NeRF. Moreover, PixelNeRF focuses on simple object-level scenes with a limited field of view. It significantly degrades when applied
+to complex panoramic scenes, as analyzed in [5]. Some
+methods [15], [16] exploited multi-plane images to represent
+3D scenes instead of NeRFs. These approaches investigate
+limited field-of-view 3D generation from a single image.
+They cannot achieve impressive results on challenging 360degree panoramic scenes due to large-size occlusions.
+To extend the limited neural radiance field to the
+panoramic radiance field with large-size occlusion, some
+methods make initial attempts to solve this problem.
+3
+OmniNeRF [19] generates new training panoramas with
+new virtual camera poses with a panorama and an auxiliary
+depth map. It directly uses visible pixels of the augmented
+images. 360FusionNeRF [17] introduced a semantic constraint via CLIP-ViT [48] to encourage the embeddings of
+different views to be as similar as possible. 360FusionNeRF also adopted a geometric constraint based on the
+reference depth map and warped depth maps. OmniNeRF
+and 360FusionNeRF cannot handle large-size occlusions. In
+addition, Hara et al. [20] proposed a method to learn a
+panoramic NeRF by selecting a subset of completed images
+that cover the target scene with less overlap of completed
+regions, but it is hard to preserve semantic coherence among
+completed images. Some methods [18] used a boundary
+map and a corner map as layout conditions to synthesize
+novel panoramic views. It does not use 3D representations
+and is thus inconsistent when roaming in the 3D space.
+In addition, some methods [21], [22] inpainted the holes
+for 3D, but they focus on a limited field-of-view and do
+not fully address geometry consistency. For example, SPInNeRF inpaints depth maps and uses a perceptual loss to
+complete the RGB appearance of a scene, and does not introduce mechanisms to avoid geometry consistency. Weder
+et al. [21] proposed to re-weight multiple views to reduce geometry inconsistency based on confidence scores of views.
+A concurrent work [23] introduced RGB inpainting, imageguided depth completion, and view-consistency inspired
+refinement for mesh reconstruction. Compared with [23],
+our method is different in several aspects: 1) we focus on
+single-view panoramic NeRF while it focuses on removing
+objects and inpainting meshes; 2) we design trajectories
+and sample views for reconstruction and it performs clutter
+segmentation; 3) we directly predict depth maps of regions
+of interest and stitch depth maps while it uses image-guided
+depth completion. OtherSLAM methods [49], [50] aim at
+simultaneous localization and mapping, which takes an
+RGB-D image stream as input and outputs a camera pose
+and a scene representation. They significantly differ from
+the proposed method in that our method only requires a
+single panorama.
+3
+O UR A PPROACH
+Training a panoramic neural radiance field (NeRF) from a
+single panorama is a challenging problem due to 1) lack of
+3D information, 2) large-size object occlusion, 3) a coupled
+problem on reconstruction and generation, and 4) geometry
+conflict between visible regions and invisible regions during
+inpainting. Some methods resort to direct interpolation [19]
+of NeRFs, adversarial learning [5], high-level semantic constraints [5], [14], [17], or pre-training on similar scenes [7] to
+recover invisible regions. However, in complex panoramic
+scenes, large-size occlusions often occur when arbitrary
+human viewpoints are allowed. Directly using these approaches to solve single-view panoramic NeRF struggles
+to synthesize high-quality 3D semantics and geometry. In
+this paper, we present PERF to tackle these challenges.
+In Section 3.1, we give a brief introduction to NeRF and
+problem definition. Then, we provide an overview of PERF
+in Section 3.2. Specifically, we train a single-view NeRF with
+depth maps for visible regions of a scene in Section 3.3.
+We integrate a collaborative RGBD inpainting method to
+guide the training of a NeRF to complete RGB images and
+depth maps of regions of interest as presented in Section
+3.4. To avoid geometry conflict between visible regions
+and invisible regions, we propose a progressive inpaintingand-erasing scheme in Section 3.5. Finally, we provide an
+overview of the whole PERF algorithm in Section 3.6.
+3.1
+Preliminary and Problem Definition
+Neural Radiance Fields. The goal of a NeRF [1] is to learn
+a neural function f that maps a 3D spatial location x and
+a viewing direction d into a volume density σ and a color
+value c. The expected pixel color Ĉ(r) is rendered by casting
+a ray r(t) = o + td with near and far bounds tn and tf ,
+which is partitioned into N points (t1 , t2 , ..., tN ) along a ray
+P
+r. The color Ĉ(r) is blended by Ĉ(r) P
+= N
+i=1 wi ci , where
+i−1
+wi = Ti (1 − exp(−σi δi )), Ti = exp(− j=1 σj δj ) and δi =
+ti −ti−1 . The NeRF is trained by a reconstruction loss, which
+is given by
+X
+||Ĉ(r) − C(r)||2 ,
+(1)
+Lnerf =
+r∈R
+where C(r) is the ground-truth pixel color.
+Problem Definition. Conventional NeRFs aim to learn a
+mapping function f with images from multiple views by
+minimizing the color reconstruction loss in Eq. (1). When
+the number of views is reduced to one, the optimization
+problem is under-constrained. The goal of this paper is to
+train a panoramic NeRF to recover a 3D scene from a single
+RGB panorama.
+3.2
+Overview of PERF
+The framework of PERF is illustrated in Figure 1. PERF
+mainly consists of three components, including 1) singleview NeRF training with depth supervision; 2) collaborative RGBD inpainting of ROI (region of interest); and 3)
+progressive inpainting-and-erasing generation. Specifically,
+given a single RGB panorama, we predict its depth map
+with a depth estimation model [45] and train a NeRF
+with both the RGB panorama and the depth map as initialization. Then, starting with the input panorama as a
+reference view, we perform a collaborative RGBD inpainting process to extend NeRF to several random views. For
+each randomly sampled pose, we use Stable Diffusion [24]
+to complete the appearance of occluded regions and then
+complete the shape of these regions by depth prediction and
+scale-invariant stitching. We note that the newly completed
+geometry of the invisible region may have conflicts with
+the observations of the already-learned reference views. To
+this end, we propose a progressive inpainting-and-erasing
+strategy to compute a mask of the conflicted regions and
+eliminate these regions from the NeRF training. We then
+fine-tune the panoramic NeRF with the reference panorama
+views and the new panorama generated from the random
+viewpoint. After fine-tuning, the new panorama is also set
+as a reference panorama for the upcoming NeRF learning of
+the random viewpoint. We progressively enlarge the range
+of viewpoints of the NeRF by randomly sampling a camera
+pose and training the NeRF until convergence. With these
+4
+New Ref View
+Ref View
+Add
+Input
+Depth
+Estimator
+Warping
+Depth
+Estimator
+Conflicted Area
+Dual
+Warping
+Stitch
+Volume
+Rendering
+Proj.
+Stable
+Diffusion
+Sampling
+Points
+Random Views
+Invisible Area
+Completed Pano.
+Progressive Inpainting-and-Erasing
+(Sec 3.5)
+Collaborative
+RGBD Inpainting
+(Sec. 3.4)
+MLP
+Single-view NeRF
+(Sec. 3.3)
+Erasing
+Fig. 1. Framework Overview. PERF mainly consists of three components, including 1) single-view NeRF training with depth maps; 2) collaborative
+RGBD inpainting; and 3) progressive inpainting-and-erasing. Specifically, given a single panorama, we predict its depth map with a Depth Estimation
+model and train a NeRF with the input view as initialization. Then a collaborative RGBD inpainting module that contains a Depth Estimator and a
+Stable Diffusion is proposed to extend NeRF to random views. To avoid geometry conflict, a progressive inpainting-and-erasing module is used to
+compute a mask of the conflicted regions and eliminate these regions. We fine-tune the panoramic NeRF with the reference single-view panorama
+and new panoramas generated from random viewpoints until convergence.
+three components, we achieve a photo-realistic panoramic
+NeRF with a single-view panorama, enabling users to roam
+in a complex scene.
+3.3
+Single-view NeRF Training with Depth Map
+To start with, we initialize the geometry of the visible
+regions with a 360-degree depth estimation method. To
+this end, we use a similar approach following 360MonoDepth [51] that predicts the depth map of the panorama
+by fusing multiple depth maps of perspective-projected images. Specifically, given a single panorama Irgb , we project
+k
+the image to K images in perspective projections {I¯rgb
+}K
+k=1
+by different directions. We set K = 20. We do this because
+the existing monocular depth estimator trained on largescale datasets only works for limited field-of-view images
+instead of panoramas that warped 360-degree scenes into
+a rectangular matrix. Then we use the depth estimation
+k
+model [52] to estimate the depth values of {I¯rgb
+} and obtain
+k
+the depth map {I¯d }. Note that due to the scale ambiguity of
+single-view depth estimation, the estimated depth values of
+those overlapped regions can be largely different. Therefore,
+after estimating the perspective depth maps, we perform the
+deformable align operation to jointly align those depth maps
+to a canonical learnable panorama depth map Id . For each
+perspective depth map {I¯dk }, we assign it a scale value wk
+and local bias values {bki,j }. To perform the alignment, we
+optimize
+X
+k
+||v̄i,j
+w+bkij −vM(i,j) ||+Ls (bi,j+1 , bi,j )+Ls (bi+1,j , bi,j ),
+k,i,j
+(2)
+Eq. (2) is composed of a data alignment term and a total
+variation term [53]. Here v̄ k denotes the pixel value of depth
+map {I¯dk }, v denotes the pixel value of a panorama depth
+map Id , Ls is the smooth L1 loss, and M is a projective
+operation that maps the perspective image coordinates to
+panorama image coordinates. With both RGB panoramas
+and depth maps, we train a single-view NeRF for visible regions. Specifically, given a single panorama Irgb , we predict
+its depth map as Id by the depth estimator fd . We integrate
+Id into the training of a NeRF, which is given by
+X
+′
+Lnerf =
+(||Ĉ(r) − C(r)||2 + ||D̂(r) − D̄(r)||2 ),
+(3)
+r∈R
+where D̂(r) denotes the expected depth values rendered by
+the NeRF and D̄(r) denotes the corresponding depth pixels
+′
+computed by the depth estimator. We optimize Lnerf to train
+a NeRF to be aware of the 3D shape of the visible regions.
+Since only a single panorama is available, the trained NeRF
+fnerf only works for visible regions. We then complete the
+invisible regions of the scene as described below.
+3.4 Collaborative RGBD Inpainting with Stable Diffusion and Monocular Depth Estimator
+Single-view NeRF training with depth maps provides accurate reconstruction for visible regions of a scene. For the
+occluded regions, the trained NeRF yields blurred interpolation because we train the NeRF with pixel-wise reconstruction only for visible regions. Pixel-wise reconstruction
+does not consider high-level semantics and is thus hard
+to interpolate large-size occluded regions. Therefore, after
+learning the geometry and appearance of the visible region
+from the input view, we need to guide the NeRF model to
+infer the invisible regions in a 3D space, given our learned
+regions as contextual semantic information. On the one
+hand, we have the freedom to choose paths for inpainting in
+5
+a 3D scene; on the other hand, we have to complete invisible
+3D regions given invisible 3D regions. We address the
+inpainting trajectory problem by sampling points according
+to the estimated single-view panoramic depth map.
+More precisely, given our estimated single-view
+panoramic depth map, we get the distance values of all pixels on zero elevation angle position. These distance values
+form a closed curve on the horizontal plane. Noting that the
+distance values can change suddenly between neighboring
+pixels, we apply 1D Gaussian filtering on the distances
+and get a smoothed closed curve C . This curve defines
+the maximum space within which the camera can move.
+To sample new camera positions, we progressively sample
+camera positions on shrunk curves {Ci } whose scale is
+{si } times the largest curve C . In our experiments, the
+number of shrunk curves is 4 and the scale factors {si } are
+0.15, 0.3, 0.45, and 0.6 respectively. We uniformly sample 8
+camera positions on each shrunk curve {si }. As a result, 32
+positions are sampled in total.
+Then we address the RGBD inpainting problem in a
+3D scene. The intuitive idea is directly training an RGBD
+inpainting model on a large-scale RGBD dataset. Currently,
+the largest RGBD dataset is MIX 6 described in DPT [54],
+which combines multiple diverse public datasets and contains about 1.4 million images. However, the state-of-theart text-to-image generation model conditioned on language
+prompts, Stable Diffusion, is trained on LAION-400M [55],
+which contains CLIP-filtered 400 million image-text pairs.
+An inpainting version of Stable Diffusion resumed from
+the base Stable Diffusion, adds input channels for masked
+images, and is further fine-tuned for RGB inpainting. It
+motivates us to make full use of such a large RGB inpainting
+model pre-trained on a 400M-level dataset to help RGBD
+inpainting. Our idea is to perform collaborative RGBD inpainting by marrying the Stable Diffusion with the monocular depth estimator DPT [54].
+To achieve this goal, we have to 1) identify the invisible
+regions and get the projective 2D masks and RGB images
+(limited field-of-view images) of occluded regions for each
+newly sampled camera view; 2) inpaint RGB images with
+an off-the-shelf Stable Diffusion model and use a depth
+estimator to collaboratively inpaint the corresponding depth
+maps for a newly sampled camera view. In this way, the
+appearance and geometry of these occluded regions are
+completed.
+Identify Invisible Regions. In Section 3.3, we train a
+single-view NeRF which provides accurate reconstruction
+for visible regions of a 3D scene but fails to interpolate
+photo-realistic invisible regions. After a single-view NeRF
+is trained, we cannot directly identify if a 3D point is visible
+from a given reference view.
+In this section, we propose to identify the invisible
+regions by a warped depth check scheme. Specifically, for
+′
+a newly sampled camera pose p , we perform volume
+′
+rendering and obtain a panoramic depth map Id and an
+′
+RGB panorama Irgb . To distinguish whether a pixel is visible
+or invisible, for each reference view (reference views will
+′
+gradually increase), we warp the depth map Id back to the
+viewpoint p of the reference panorama and distinguish if
+each depth value matches the corresponding depth value of
+Warp
+Reference
+View
+Reference
+View
+New View
+Invisible
+Region
+Visible Depth
+Warped Depth
+Visible from Ref.
+(a)
+Invis. from Ref.
+(b)
+Fig. 2. Identify invisible regions. (a) The depth values from a given
+reference view. (b) The depth values warped from a new view to the
+reference view. For example, the yellow solid point is warped from a
+new view to the reference view, and the depth values are the same in
+(a) and (b). Therefore, it is visible. When the yellow hollow point in (b)
+is warped from the new view to the reference view, the wrapped depth
+value is greater than the visible depth value in (a). We identify it as an
+invisible point (Best viewed in color).
+Id , which is given by
+′
+′
+mij = I(warp(vij ) − vij > ε),
+′
+′
+(4)
+where vij and vij are pixel values of Id and Id , respectively.
+The ε is a small value that allows a small error. The warp(·)
+is a warping function. The I(·) denotes an indicator function.
+′
+′
+The mij denotes a pixel of a mask m , indicating invisible (1)
+or visible (0). As illustrated in Fig. 2 (a), we can compute the
+depth value from a reference view to the surface of a scene
+given a trained NeRF. In Fig. 2 (b), we warp two points
+from a new view to the reference view. After warping, it is
+observed that the depth of the yellow solid point remains
+unchanged while the warped depth of the yellow hollow
+point is larger than the depth in Fig. 2 (a). We conclude
+that the yellow solid point is visible and the yellow hollow
+′
+point is invisible according to Eq. (4). The mask m helps
+us recognize the invisible regions of each reference view to
+′
+guide the upcoming inpainting process. The final mask m
+indicating the invisible regions is computed by performing
+the logic AND operation of all the masks regarding the
+reference views (we progressively add reference views as
+′
+described in Section 3.5). We use m to mask Irgb and Id , and
+′
+get the masked RGB image I¯rgb = Irgb ⊗ (1 − m ) and the
+′
+masked depth map I¯d = Id ⊗ (1 − m ) for RGBD inpainting
+(see Fig. 1).
+Collaborative RGBD Inpainting. Then we complete the
+contents of these invisible regions. The existing methods,
+such as SinNeRF [5], [17], directly use adversarial learning
+or high-level semantic features to fill occlusions. However,
+in complex 3D panoramic scenes, large-size occlusions often
+occur. Directly using adversarial learning or high-level semantic constraints fails to fill the large-size invisible regions,
+which will be shown in Sections 4.1 and 4.2. In contrast,
+we propose a collaborative RGBD inpainting method that
+integrates a diffusion-based RGB inpainting model 1 and
+a monocular depth estimator DPT 2 . Given masked RGB
+1. https://github.com/Stability-AI/stablediffusion
+2. https://github.com/isl-org/DPT
+6
+Warp
+and depth panoramas I¯rgb and I¯d , noting that the content
+organization of the panorama images are different from the
+Reference
+Reference
+New View
+usually used perspective cameras, which are out-of-domain
+View
+View
+for most main-stream pre-trained models, we first select the
+regions of interest (ROI) that contain partial invisible areas
+with bounding boxes and project them into normal FOV
+ROI
+(field-of-view) images, denoted as I¯rgb
+and I¯dROI . We use
+ROI
+ROI
+Stable Diffusion [24] to complete I¯rgb as Iˆrgb
+. Here, the
+Invisible
+Region
+inpainting model combines the latent VAE representations
+of the masked images as an additional conditioning. It
+Visible Depth
+Warped Depth Visible from Ref. Invis. from Ref.
+Inpainted
+uses additional input channels for U-Net, which is zero(a)
+(b)
+initialized and fine-tuned with inpainting datasets. SpecifROI
+ically, the Stable Diffusion model takes I¯rgb
+and its mask as Fig. 3. Conflicted geometry between reference view and a random new
+conditions, and outputs an inpainted RGB image. Instead of view. (a) Before inpainting: the gray region is invisible to the reference
+directly inpainting depth maps, we use a depth estimator to view due to occlusion. (b) After inpainting: direct inpainting (the green
+collaboratively complete depth maps. We infer the geometry segments, newly inpainted geometry) of the indivisible region from a
+new view might cause inter-view geometry inconsistency. The upper
+ROI
+of the newly inpainted image Iˆrgb
+by predicting the depth point is visible in (a) but invisible in (b) from the reference view. The lower
+map IˆdROI with a monocular depth estimator. Because the point is invisible in both (a) and (b) from the reference view. Therefore,
+visible region of I¯dROI is known, our idea is to align the the lower inpainted segment is acceptable, while the upper inpainted
+segment leads to geometry conflict. We detect these conflicted regions
+visible region between I¯dROI and IˆdROI , and thus inpaint the by Eq. (6), i.e., the warped depth is smaller than the visible depth from
+invisible geometry. Since the scale and shift are different the reference view (Best viewed in color).
+between IˆdROI and I¯dROI , we stitch IˆdROI into I¯dROI with a
+linear-invariant constraint to align the visible regions and
+It hurts the training of the NeRF with conflicted views and
+fill invisible regions, which is optimized by
+the geometric generation of a 3D scene.
+X
+||v̂i,j w+bij −v̄i,j ||+Ls (bi,j+1 , bi,j )+Ls (bi+1,j , bi,j )
+arg min
+To avoid the conflicted geometry, our idea is an
+w,b
+i,j
+inpainting-and-erasing strategy. Inpainting aims at com(5) pleting invisible regions and erasing aims at removing
+where v̂i,j and v̄i,j are pixels of IˆdROI and I¯dROI . The w conflicted inpainted regions. We perform RGBD inpainting
+denotes a scalar shared by all pixels of the ROI. The b is from a sampled view and erase conflicted regions of the
+the same size as the ROI. The Ls is a smooth L1 loss. The new view according to reference views. The inpaintedfirst term regularizes IˆdROI and I¯dROI to be linear-invariant. and-erased new view is then added to the collection of
+The second and third terms are the TV loss inspired by [53]. reference views. Specifically, we first compute a mask M ′′
+After aligning IˆdROI and I¯dROI , we can stitch IˆdROI into a that denotes the conflicted geometry between the new view
+masked panorama I¯ and obtain a completed panorama.
+and the reference views. This is achieved by a similar depthThe completed RGB images and depth of the panorama checking strategy used in invisible region detection in Secfrom a new viewpoint are then used to fine-tune the NeRF, tion 3.4. As shown in Fig. 3, for the upper inpainted segment
+which encourages the NeRF to generate reasonable novel (conflicted geometry), the warped depth value in Fig. 3 (b)
+views from invisible regions. We progressively perform the is smaller than the visible depth value in Fig. 3 (a). For the
+collaborative RGBD inpainting by sampling camera poses lower inpainted segment (no conflict), the warped depth is
+until convergence. However, the collaborative RGBD in- larger than the visible depth value. Formally, considering
+painting independently completes invisible regions for each checking the geometry consistency of the new view with
+view, leading to inconsistent 3D geometry from different the inpainted depth map, for each learned reference view,
+views.
+we warp the depth map back to the reference panorama and
+check if the depth value is smaller than the corresponding
+depth value of Id , which is given by
+3.5 Progressive Inpainting-and-Erasing Generation
+The proposed collaborative RGBD inpainting does not guarantee consistent geometry between the reference panorama
+and the new panorama from a random novel view. As
+illustrated in Fig. 3, we first train a single-view NeRF given
+a reference view shown in Fig. 3 (a). From a new view, the
+model inpaints two green segments (e.g., desk and floor), as
+shown in Fig. 3 (b). We find that the upper point is visible
+in Fig. 3 (a) and becomes invisible from the reference view
+as observed in Fig. 3 (b). That is, the newly synthesized geometry of the invisible regions (the upper green segment in
+Fig. 3 (b)) occludes some visible regions from the reference
+viewpoint (e.g., the upper point). This occlusion makes a
+part of visible regions of reference view become invisible
+regions, leading to geometry conflict across different views.
+′′
+′
+mij = I(vij − warp(vij ) > ε),
+′
+′
+(6)
+where vij and vij are pixel values of Id and Id , respectively.
+′′
+′′
+The mij denotes a pixel of a mask m , indicating inconsistent (1) or consistent (0) geometry. The final mask of the
+conflict regions is computed by the logic AND operation
+of all the individual mask of the reference views. After the
+conflict regions are identified, we eliminate these regions
+from the supervision of NeRF. We iterate inpainting invisible regions and eliminating conflicted regions from sampled
+novel views until the algorithm converges to a completed
+3D geometry. Note that the first warping operation in Section 3.4 is to detect invisible regions and the second warping
+7
+operation in this section is to detect the conflicted inpainted
+regions that violate the consistent geometry constraint.
+3.6
+Algorithm
+In this section, we provide an overall pseudo algorithm of
+PERF to make it clear, as shown in Algorithm 1. Basically,
+given a single panorama Irgb , we first estimate its depth
+map as Id . Given Irgb and Id , we train a panoramic NeRF
+with a single-view panorama. Training a single-view NeRF
+only works for visible regions but fails to interpolate geometry and appearance for the invisible regions. To address this
+problem, we start with sampling novel views based on the
+depth map Id . Gvien a sampled novel view, we compute the
+invisible regions and get an invisible mask according to Eq.
+(4). We perform collaborative RGBD inpainting with a Stable
+Diffusion and a pre-trained monocular depth estimator DPT.
+Since the RGBD inpainting is performed for each view
+independently, it leads to consistent geometry from different
+views. To solve this problem, we compare the sampled view
+and each reference view, and erase the conflicted regions.
+The inpainted-and-erased new view is added into the reference view set. We fine-tune the panoramic NeRF with all of
+the reference views.
+Algorithm 1 Algorithm of PERF
+Input: A single panorama Irgb
+Output: A panoramic NeRF fnerf
+1: Estimate a depth map Id of the given panorama Irgb
+based on Eq. (2), and obtain Irgbd .
+2: Train a single-view NeRF fnerf with Id and Irgb based
+on Eq. (3).
+3: Generate trajectories {pk } of novel views based on the
+depth map.
+4: Initialize a set of reference views as Iref = {Irgbd }
+5: for n ← 1 to iters do
+′
+6:
+Randomly sample a new camera view p from {pk }.
+7:
+Compute the invisible regions according to Eq. 4.
+8:
+Perform collaborative RGBD inpainting using a Stable
+Diffusion for RGB inpainting and a depth estimator
+for stitching (Eq. 5).
+9:
+for ∀Iref ∈ Iref do
+10:
+Compute the conflicted region and erase it according to Eq. (6).
+11:
+end for
+12:
+Add this new view into the reference views Iref .
+13:
+Finetune fnerf with Iref .
+14: end for
+4
+E XPERIMENTS
+Datasets. We conduct experiments on the Replica [56]
+dataset for both quantitative and qualitative evaluations.
+The Replica dataset contains eight scenes. On the Replica
+dataset, for each scene, we render three panorama images
+with the resolution of 2048 × 1024, where one is used for
+training and the others for testing. The rendered testing
+images are not from the sampled views in the training. To
+demonstrate the generalization of PERF, we also evaluate
+the proposed method on in-the-wild data for qualitative
+evaluation. We collect a new dataset, PERF-in-the-wild,
+which contains eight indoor scenes downloaded from the
+Internet. Each scene has only one single panorama.
+Evaluation Metrics and Protocols. We adopt four evaluation metrics in our experiment. Among them, three metrics
+are the standard metrics of view synthesis computed against
+the whole testing images - PSNR, SSIM [57], and LPIPS [58].
+In addition to these three metrics, we report a “masked”
+version of PSNR. In this metric calculation, for each testing
+view, we generate the mask of invisible regions by our aforementioned collaborative RGBD inpainting and progressive
+inpainting-and-erasing methods, and only the pixels that
+are in the invisible regions are counted for the evaluation
+of PSNR. The masked PSNR is a key metric to measure
+the single-view panoramic 3D generation since synthesizing
+invisible regions is the most challenging problem.
+To evaluate pixel-level metrics, we need to align the rendered images and ground-truth images. During the training
+of PERF, the 3D geometry of PERF is initialized by a depth
+estimator and followed by geometry inference, where there
+is a scale ambiguity between our predicted geometry and
+the ground-truth geometry. Therefore, to correctly evaluate
+the rendered images from novel views, we conduct a global
+scale alignment between the predicted depth map of the
+reference view and the ground-truth depth map.
+Implementation Details. We use Instant-NGP [40] for the
+representation of the NeRF model. The hash table size is 219
+with 16 levels of feature vectors of channel size 2. To learn
+PERF, we first train NeRF with the single input panorama
+in 10k iterations. We then progressively sample 32 new
+positions with approximately gradually increased distance
+from the original position of the reference panorama view.
+For each newly added reference view, after our collaborative
+RGBD inpainting and progressive inpainting-and-erasing,
+we continue the training of NeRF for 2000 iterations, where
+for the first 100 iterations we only use the new reference
+view for supervision, and for the other 1900 iterations
+we supervise NeRF with all the reference views. We use
+Adam [59] to optimize the parameters of the NeRF. For each
+learning stage of a newly sampled view, the learning rate is
+initially set to 10−3 and then decayed to 10−4 with the cosine annealing strategy. During training at each iteration, we
+randomly sample 2048 rays with ground-truth or inpainted
+colors and depth values to supervise NeRF. Training a scene
+usually takes about 2 hours on a single Nvidia V100 GPU
+with 32G memory.
+More precisely, we use NeRFAcc [60] framework to implement the Instant-NGP [40] NeRF training and rendering.
+We use the pre-trained model from Stable-Diffusion-2 [61]
+as our inpainting model. We note that the training images
+of the inpainting model are mostly captured in perspective
+field-of-view camera projections and it is not proper to
+directly use the inpainting model on the panoramas, where
+distortions exist. Therefore for all the masked regions, we
+project the regions to the perspective views, adopt inpainting, and then project back the inpainted region to the
+panoramas. To regularize NeRF from foggy effects, for PERF
+and all the baseline methods that are integrated into our
+panorama framework, we additionally adopt the distortion
+loss [4] with weight λdist = 1 to encourage the volume
+densities of NeRF to converge to a valid surface instead of
+8
+TABLE 1
+Quantitative Comparison on the Replica dataset.
+DS-NeRF
+DietNeRF
+SinNeRF
+360FusionNeRF
+Omni-NeRF
+PERF
+PSNRmask. ↑
+11.73
+11.52
+9.80
+11.87
+10.42
+12.63
+PSNR ↑
+23.29
+23.24
+22.70
+23.20
+18.98
+23.49
+SSIM↑
+0.834
+0.836
+0.826
+0.833
+0.790
+0.838
+LPIPS↓
+0.265
+0.291
+0.251
+0.245
+0.522
+0.244
+“floating” everywhere.
+Comparison Methods. To demonstrate the effectiveness of
+our proposed method, we compare PERF with the following
+three state-of-the-art few-shot NeRF techniques and two
+recent single panorama view synthesis works.
+1) DS-NeRF [12] increases the generalization ability of
+vanilla NeRF on few-shot novel view synthesis by adding
+a depth constraint for geometry regularization. However, it
+cannot synthesize occluded regions well.
+2) DietNeRF [14] regularizes the rendered novel prospectively projected views of NeRF by adding a semantic regularization, which is achieved via computing the cosine
+similarity between novel views and reference views of
+CLIP [48] features. To integrate DietNeRF in our framework
+or panoramic NeRF learning, we randomly render prospectively projected image patches with NeRF on the occluded
+regions of the novel views and optimize the CLIP [48] loss
+against the image patches of the reference input view.
+3) SinNeRF [5] adds a similar image patch regularizer
+by computing the feature differences by the DINO ViT [62].
+Besides the semantic loss, SinNeRF also conducts an adversarial training strategy with the hinge GAN Loss [63]. To
+integrate SinNeRF in our framework or panoramic NeRF
+learning, we randomly render projected image patches on
+these occluded regions and optimize the semantic loss extracted by the DINO ViT [62]. Besides the semantic loss, for
+SinNeRF we follow the adversarial training strategy that we
+train the NeRF model against a discriminator with the hinge
+GAN Loss [63].
+4) Omni-NeRF [45] synthesizes novel panorama views
+from a single RGBD panorama. We use our predicted depth
+map as its depth input. Omni-NeRF is trained by multiple
+”pseudo ground truth” RGB panorama images of the sampled poses by point cloud projection.
+5) 360FusionNeRF [17] also synthesizes novel panorama
+views from a single RGBD panorama. It also adds semantic
+consistency regularization by the CLIP [48] loss but on the
+whole panorama instead of perspective views. The main
+difference to DietNeRF is that it directly computes CLIP
+loss on the whole rendered panorama images instead of the
+perspectively projected images.
+4.1
+Comparisons on the Replica Dataset
+We compare PERF with the state-of-the-art NeRF methods
+on the Replica dataset. The quantitative result in the Replica
+Dataset is shown in Table 1. Not surprisingly, PERF achieves
+the best performance in terms of all the metrics. More
+importantly, our method achieves significant improvement
+on masked PSNR, which demonstrates that our method
+can well-inpaint invisible regions compared with other
+state-of-the-art methods. In Fig. 4, we provide more visual
+comparisons. As the figure shows, several foggy effects
+TABLE 2
+Ablation Studies. Without the proposed inpainting-and-erasing
+technique, our method shows degraded performance due to the
+geometry conflicts (Fig. 8). This is because our method inpaints good
+semantics from a view and erases conflicted regions from other views.
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNRmask. ↑
+w/o inpainting-and-erasing
+23.34
+0.837
+0.246
+12.23
+Ours
+23.49
+0.838
+0.244
+12.63
+in the occluded regions appear in the rendered results of
+DS-NeRF. This is because the NeRF model itself does not
+have the ability to semantically infer the content of the
+occluded regions without extra supervision. The rendered
+results of DietNeRF, SinNeRF, and 360FusionNeRF are of
+better fidelity than those of DS-NeRF, without foggy effects.
+However, the contents filled in the occluded regions do not
+well follow the semantic contexts, which looks unnatural
+for the human sense. The synthesized results of OmniNeRF
+are blurred because only the color information is used to
+supervise the NeRF model without geometric regularization. Thanks to the strong inpainting ability of the Stable
+Diffusion model, our method PERF synthesizes the images
+with the best visual quality and the inferred contents in
+the occluded regions can smoothly transition to the visible
+regions of the reference view.
+4.2
+Comparisons on the PERF-in-the-wild Dataset
+Qualitative comparison. To demonstrate the robustness of
+PERF, we additionally evaluate PERF and the baseline fewshot NeRF methods on our collected in-the-wild dataset.
+Since there is no ground truth geometry for the in-thewild images, we only show qualitative comparisons of the
+novel views. Fig. 5 shows the visual comparisons, where the
+synthesis results of PERF are of the best visual quality.
+User Study. Since there is no ground truth geometry for the
+in-the-wild images, we only show qualitative comparisons
+of the novel views on the PERF-in-the-wild dataset. To
+complement the lack of quantitative results on PERF-inthe-wild, we conduct a user study to compare the visual
+effects of various single-view methods. We render the novel
+panorama images predicted by three methods [5], [12], [14]
+and ours, and show the cropped regions that are invisible
+from the input views. For each question, users were asked
+to pick the image that best meets the following criteria
+in their mind: 1) Clearness - The image should not have
+any blurring, noise, or other visual distortions. 2) Semantic
+coherence - The image should not have any jarring or
+unrelated elements that do not fit with the overall theme or
+meaning of the image. Fig. 7 shows two example questions
+of the user study. We rendered 16 examples, and 29 users
+participated in the study. Results are shown in Fig. 6. We can
+observe that about 81% prefer our rendered results, which
+significantly outperforms other methods.
+4.3
+Ablation Study
+We conduct the ablation study on the Replica dataset. In
+this experiment, we evaluate PERF without our proposed
+Ground truth
+PERF
+OmniNeRF
+360FusionNeRF
+SinNeRF
+DietNeRF
+DS-NeRF
+9
+Fig. 4. Visual comparison on the Replica dataset. One can observe foggy artifacts in the occluded regions of DS-NeRF, which is due to the
+incapability of a pure NeRF model to infer occluded content semantically. The renderings of DietNeRF and SinNeRF do not follow the coherent
+semantic contexts of the scene. In contrast, PERF synthesizes coherent novel views and has a smooth transition to the occluded region.
+inpainting-and-erasing strategy, i.e., we do not check geometry conflicts and let all the inpainted results participate in
+the supervision of the NeRF model. As shown in Table 2, our
+method without the inpainting-and-erasing strategy shows
+worse quantitative results in terms of all the metrics. We further provide the visual results in Fig. 8, where PERF with the
+full method designs has better quality in both the rendered
+images and the depths. Without our inpainting-and-erasing
+strategy, wrong redundant geometry appears, consequently
+hurting the synthesized RGB values. The experimental results demonstrate that the inpainting-and-erasing method
+is able to avoid conflicted geometry from different views,
+and thus achieves better 3D scene generation.
+4.4
+Applications
+Our PERF is originally designed for single panorama novel
+view synthesis, which can be also extended to some other
+applications like text-to-3D, and 3D scene stylization. For
+these extended applications, we combine related technologies to achieve these applications, as briefly shown in Fig. 9
+and Fig. 10. We invite the readers to watch detailed rendered
+videos on our project page.
+PERF
+SinNeRF
+DietNeRF
+DS-NeRF
+10
+from the corresponding panora
+help choose one of the 4 pictur
+meets the following criteria in
+1. Clearness: The image shou
+blurring, noise or other visual
+2. Semantic coherence: The i
+not have
+Fig. 5. Visual comparison on the PERF-in-the-wild dataset. In the more challenging real-world scenarios, PERF significantly outperforms
+otherany jarring or unrelat
+that do not
+methods in terms of visual quality and semantic coherence. For example, reasonable structures of windows (bottom row) and smooth transition
+of fit with the overall
+meaning of the image.
+the occluded corners (top row).
+80
+80.73
+Perceptual User Study
+Methods
+PERF (ours)
+DS-NeRF
+SinNeRF
+DietNeRF
+70
+Percentage (%)
+60
+50
+A
+B
+A
+B
+C
+D
+C
+D
+40
+30
+20
+10
+10.38
+0
+6.47
+2.41
+Fig. 6. User study on PERF-in-the-wild dataset. PERF is the most
+preferred among all the methods including DS-NeRF, SinNeRF, and
+DietNeRF. The experimental results demonstrate the effectiveness of
+our proposed method (Best viewed in color).
+Panorama-to-3D. PERF enables panoramic indoor scene
+reconstruction from a single panorama, which can be observed in Figs. 4 and 5. PERF has a wide range of applications in real-world scenes, such as 3D virtual tours, virtualreality games/conferences, and filmmaking.
+Text-to-3D. Current text-to-3D methods [66], [67], [68],
+[69] mainly focus on object-centric 3D generation driven
+by a text. We find that combing PERF and text-driven 2D
+panorama generation methods, such as Blockade Labs 3 or
+3. https://skybox.blockadelabs.com/
+Fig. 7. Two example questions of a user study on PERF-in-the-wild
+dataset. For these two questions, the options “D” (left) and “A” (right)
+represent PERF’s results.
+Text2Light [70], can generate promising 3D scenes. We first
+generate a 2D panorama with a text, and then reconstruct a
+3D scene with the 2D panorama. The results are shown in
+Fig. 9.
+3D Scene Stylization. Since PERF is a method that
+reconstructs a 3D scene from a single panorama, it is easy
+to stylize the 3D scene. Given a panorama I , we can reconstruct a 3D scene S by PERF. If we want to stylize the 3D
+′
+scene S to a new 3D scene S , we only need to stylize the 2D
+′
+panorama I to I as a reference view and then reconstruct
+′
+S by PERF. We use InstructPix2Pix [65] to perform style
+transfer of 2D panoramas and synthesize stylized 3D scenes
+11
+Ours
+Origin
+Ground truth
+Pointillism
+Cartoon
+Van Gogh
+Depth
+RGB
+Depth
+RGB
+w/o Inpainting & Erasing
+Fig. 10. 3D Scene Stylization. We use InstructPix2Pix [65] to change
+the 2D panorama image style and we can synthesize a 3D-consistent
+stylized scene via PERF. Please refer to the project page for rendered
+videos.
+Fig. 8. The effect of the inpainting-and-erasing strategy. Without
+inpainting-and-erasing, the wrong geometry could appear and hurt the
+quality of the synthesized views as well.
+visible 3D geometry with volume rendering. Then we integrate a collaborative RGBD inpainting approach into a
+NeRF to complete the invisible regions of RGB images and
+depth maps from random views. Moreover, we introduce
+a progressive inpainting-and-erasing generation method to
+avoid inconsistent geometry between visible regions and inpainted invisible regions. Extensive experiments on Replica
+and in-the-wild scenes demonstrate the superiority of our
+PERF over state-of-the-art methods.
+Limitation. PERF significantly improves the performance of
+single-shot NeRF, but heavily depends on the accuracy of
+the depth estimator and the Stable Diffusion.
+ACKNOWLEDGMENTS
+Fig. 9. Text-to-3D. Each row shows an example. The sampled frames
+are presented from left to right by time. We use Blockade Labs sky
+box [64] to generate the panorama and we produce the 3D roaming
+effect by our PERF. Please refer to the project page for the text and the
+rendered videos.
+by PERF. The results are shown in Fig. 10.
+5
+C ONCLUSION
+In this paper, we introduce a new method to train a
+panoramic NeRF from a single panorama. We present PERF,
+a 360-degree novel view synthesis framework that trains a
+panoramic neural radiance field from a single panorama.
+Specifically, given a single panorama, we first predict an
+initial depth map with a depth estimator and reconstruct
+This work is supported by the National Research Foundation, Singapore under its AI Singapore Programme (AISG
+Award No: AISG2-PhD-2021-08-019), NTU NAP, MOE
+AcRF Tier 2 (T2EP20221-0012), and under the RIE2020 Industry Alignment Fund - Industry Collaboration Projects
+(IAF-ICP) Funding Initiative, as well as cash and in-kind
+contribution from the industry partner(s).
+R EFERENCES
+[1]
+[2]
+[3]
+[4]
+B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng, “Nerf: Representing scenes as neural radiance fields for view synthesis,” in European conference on computer
+vision. Springer, 2020, pp. 405–421.
+L. Liu, J. Gu, K. Zaw Lin, T.-S. Chua, and C. Theobalt, “Neural
+sparse voxel fields,” Advances in Neural Information Processing
+Systems, vol. 33, pp. 15 651–15 663, 2020.
+J. T. Barron, B. Mildenhall, M. Tancik, P. Hedman, R. MartinBrualla, and P. P. Srinivasan, “Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields,” in Proceedings of
+the IEEE/CVF International Conference on Computer Vision, 2021, pp.
+5855–5864.
+J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman, “Mip-nerf 360: Unbounded anti-aliased neural radiance
+fields,” in Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, 2022, pp. 5470–5479.
+12
+[5]
+D. Xu, Y. Jiang, P. Wang, Z. Fan, H. Shi, and Z. Wang, “Sinnerf:
+Training neural radiance fields on complex scenes from a single
+image,” in Computer Vision–ECCV 2022: 17th European Conference, Tel Aviv, Israel, October 23–27, 2022, Proceedings, Part XXII.
+Springer, 2022, pp. 736–753.
+[6] Z. Yu, S. Peng, M. Niemeyer, T. Sattler, and A. Geiger, “Monosdf:
+Exploring monocular geometric cues for neural implicit surface
+reconstruction,” Advances in Neural Information Processing Systems
+(NeurIPS), 2022.
+[7] A. Yu, V. Ye, M. Tancik, and A. Kanazawa, “pixelnerf: Neural
+radiance fields from one or few images,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2021, pp. 4578–4587.
+[8] D. Xu, Y. Jiang, P. Wang, Z. Fan, Y. Wang, and Z. Wang, “Neurallift360: Lifting an in-the-wild 2d photo to a 3d object with 360deg
+views,” in Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 2023, pp. 4479–4489.
+[9] M. Niemeyer, J. T. Barron, B. Mildenhall, M. S. Sajjadi, A. Geiger,
+and N. Radwan, “Regnerf: Regularizing neural radiance fields for
+view synthesis from sparse inputs,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2022, pp.
+5480–5490.
+[10] Guangcong, Z. Chen, C. C. Loy, and Z. Liu, “Sparsenerf: Distilling
+depth ranking for few-shot novel view synthesis,” 2023.
+[11] M. Kim, S. Seo, and B. Han, “Infonerf: Ray entropy minimization for few-shot neural volume rendering,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2022, pp. 12 912–12 921.
+[12] K. Deng, A. Liu, J.-Y. Zhu, and D. Ramanan, “Depth-supervised
+nerf: Fewer views and faster training for free,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2022, pp. 12 882–12 891.
+[13] A. Chen, Z. Xu, F. Zhao, X. Zhang, F. Xiang, J. Yu, and H. Su,
+“Mvsnerf: Fast generalizable radiance field reconstruction from
+multi-view stereo,” in Proceedings of the IEEE/CVF International
+Conference on Computer Vision, 2021, pp. 14 124–14 133.
+[14] A. Jain, M. Tancik, and P. Abbeel, “Putting nerf on a diet: Semantically consistent few-shot view synthesis,” in Proceedings of
+the IEEE/CVF International Conference on Computer Vision, 2021, pp.
+5885–5894.
+[15] J. Li, Z. Feng, Q. She, H. Ding, C. Wang, and G. H. Lee, “Mine: Towards continuous depth mpi with nerf for novel view synthesis,”
+in Proceedings of the IEEE/CVF International Conference on Computer
+Vision, 2021, pp. 12 578–12 588.
+[16] M.-L. Shih, S.-Y. Su, J. Kopf, and J.-B. Huang, “3d photography
+using context-aware layered depth inpainting,” in Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2020, pp. 8028–8038.
+[17] S. Kulkarni, P. Yin, and S. Scherer, “360fusionnerf: Panoramic
+neural radiance fields with joint guidance,” arXiv preprint
+arXiv:2209.14265, 2022.
+[18] J. Xu, J. Zheng, Y. Xu, R. Tang, and S. Gao, “Layout-guided novel
+view synthesis from a single indoor panorama,” in Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2021, pp. 16 438–16 447.
+[19] C.-Y. Hsu, C. Sun, and H.-T. Chen, “Moving in a 360 world: Synthesizing panoramic parallaxes from a single panorama,” arXiv
+preprint arXiv:2106.10859, 2021.
+[20] T. Hara and T. Harada, “Enhancement of novel view synthesis using omnidirectional image completion,” arXiv preprint
+arXiv:2203.09957, 2022.
+[21] S. Weder, G. Garcia-Hernando, A. Monszpart, M. Pollefeys, G. J.
+Brostow, M. Firman, and S. Vicente, “Removing objects from
+neural radiance fields,” in Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, 2023, pp. 16 528–16 538.
+[22] A. Mirzaei, T. Aumentado-Armstrong, K. G. Derpanis, J. Kelly,
+M. A. Brubaker, I. Gilitschenski, and A. Levinshtein, “Spin-nerf:
+Multiview segmentation and perceptual inpainting with neural
+radiance fields,” in Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, 2023, pp. 20 669–20 679.
+[23] F. Wei, T. Funkhouser, and S. Rusinkiewicz, “Clutter detection
+and removal in 3d scenes with view-consistent inpainting,” in
+Proceedings of the IEEE/CVF International Conference on Computer
+Vision, 2023, pp. 18 131–18 141.
+[24] R. Rombach, A. Blattmann, D. Lorenz, P. Esser, and B. Ommer,
+“High-resolution image synthesis with latent diffusion models,”
+2021.
+[25] M. Tancik, V. Casser, X. Yan, S. Pradhan, B. Mildenhall, P. P.
+Srinivasan, J. T. Barron, and H. Kretzschmar, “Block-nerf: Scalable
+large scene neural view synthesis,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2022, pp.
+8248–8258.
+[26] Y. Xiangli, L. Xu, X. Pan, N. Zhao, A. Rao, C. Theobalt, B. Dai,
+and D. Lin, “Bungeenerf: Progressive neural radiance field for
+extreme multi-scale scene rendering,” in The European Conference
+on Computer Vision (ECCV), 2022.
+[27] H. Turki, D. Ramanan, and M. Satyanarayanan, “Mega-nerf: Scalable construction of large-scale nerfs for virtual fly-throughs,”
+in Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2022, pp. 12 922–12 931.
+[28] Z. Wang, S. Wu, W. Xie, M. Chen, and V. A. Prisacariu, “Nerf–:
+Neural radiance fields without known camera parameters,” arXiv
+preprint arXiv:2102.07064, 2021.
+[29] Q. Meng, A. Chen, H. Luo, M. Wu, H. Su, L. Xu, X. He, and J. Yu,
+“Gnerf: Gan-based neural radiance field without posed camera,”
+in Proceedings of the IEEE/CVF International Conference on Computer
+Vision, 2021, pp. 6351–6361.
+[30] C.-H. Lin, W.-C. Ma, A. Torralba, and S. Lucey, “Barf: Bundleadjusting neural radiance fields,” in Proceedings of the IEEE/CVF
+International Conference on Computer Vision, 2021, pp. 5741–5751.
+[31] S. Fridovich-Keil, A. Yu, M. Tancik, Q. Chen, B. Recht, and
+A. Kanazawa, “Plenoxels: Radiance fields without neural networks,” in Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), June 2022, pp. 5501–5510.
+[32] A. Yu, R. Li, M. Tancik, H. Li, R. Ng, and A. Kanazawa, “Plenoctrees for real-time rendering of neural radiance fields,” in Proceedings of the IEEE/CVF International Conference on Computer Vision,
+2021, pp. 5752–5761.
+[33] T. Takikawa, J. Litalien, K. Yin, K. Kreis, C. Loop,
+D. Nowrouzezahrai, A. Jacobson, M. McGuire, and S. Fidler,
+“Neural geometric level of detail: Real-time rendering with
+implicit 3d shapes,” in Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, 2021, pp. 11 358–11 367.
+[34] D. B. Lindell, J. N. Martel, and G. Wetzstein, “Autoint: Automatic
+integration for fast neural volume rendering,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2021, pp. 14 556–14 565.
+[35] S. Wizadwongsa, P. Phongthawee, J. Yenphraphai, and S. Suwajanakorn, “Nex: Real-time view synthesis with neural basis expansion,” in Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 2021, pp. 8534–8543.
+[36] S. J. Garbin, M. Kowalski, M. Johnson, J. Shotton, and J. Valentin,
+“Fastnerf: High-fidelity neural rendering at 200fps,” in Proceedings
+of the IEEE/CVF International Conference on Computer Vision, 2021,
+pp. 14 346–14 355.
+[37] C. Reiser, S. Peng, Y. Liao, and A. Geiger, “Kilonerf: Speeding up
+neural radiance fields with thousands of tiny mlps,” in Proceedings
+of the IEEE/CVF International Conference on Computer Vision, 2021,
+pp. 14 335–14 345.
+[38] P. Hedman, P. P. Srinivasan, B. Mildenhall, J. T. Barron, and
+P. Debevec, “Baking neural radiance fields for real-time view
+synthesis,” in Proceedings of the IEEE/CVF International Conference
+on Computer Vision, 2021, pp. 5875–5884.
+[39] T. Neff, P. Stadlbauer, M. Parger, A. Kurz, J. H. Mueller, C. R. A.
+Chaitanya, A. Kaplanyan, and M. Steinberger, “Donerf: Towards
+real-time rendering of compact neural radiance fields using depth
+oracle networks,” in Computer Graphics Forum, vol. 40, no. 4. Wiley
+Online Library, 2021, pp. 45–59.
+[40] T. Müller, A. Evans, C. Schied, and A. Keller, “Instant neural
+graphics primitives with a multiresolution hash encoding,” ACM
+Transactions on Graphics (ToG), vol. 41, no. 4, pp. 1–15, 2022.
+[41] A. Pumarola, E. Corona, G. Pons-Moll, and F. Moreno-Noguer, “Dnerf: Neural radiance fields for dynamic scenes,” in Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2021, pp. 10 318–10 327.
+[42] Z. Li, S. Niklaus, N. Snavely, and O. Wang, “Neural scene flow
+fields for space-time view synthesis of dynamic scenes,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 2021, pp. 6498–6508.
+[43] W. Xian, J.-B. Huang, J. Kopf, and C. Kim, “Space-time neural
+irradiance fields for free-viewpoint video,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2021, pp. 9421–9431.
+13
+[44] G. Gafni, J. Thies, M. Zollhofer, and M. Nießner, “Dynamic neural
+radiance fields for monocular 4d facial avatar reconstruction,”
+in Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2021, pp. 8649–8658.
+[45] K. Gu, T. Maugey, S. Knorr, and C. Guillemot, “Omni-nerf: neural
+radiance field from 360 image captures,” in 2022 IEEE International
+Conference on Multimedia and Expo (ICME). IEEE, 2022, pp. 1–6.
+[46] H. Huang, Y. Chen, T. Zhang, and S.-K. Yeung, “360roam: Realtime indoor roaming using geometry-aware 3600 radiance fields,”
+arXiv preprint arXiv:2208.02705, 2022.
+[47] P. Gera, M. R. K. Dastjerdi, C. Renaud, P. Narayanan, and J.-F.
+Lalonde, “Casual indoor hdr radiance capture from omnidirectional images,” arXiv preprint arXiv:2208.07903, 2022.
+[48] A. Radford, J. W. Kim, C. Hallacy, A. Ramesh, G. Goh, S. Agarwal, G. Sastry, A. Askell, P. Mishkin, J. Clark et al., “Learning
+transferable visual models from natural language supervision,”
+in International conference on machine learning. PMLR, 2021, pp.
+8748–8763.
+[49] Z. Zhu, S. Peng, V. Larsson, W. Xu, H. Bao, Z. Cui, M. R. Oswald,
+and M. Pollefeys, “Nice-slam: Neural implicit scalable encoding
+for slam,” in Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 2022, pp. 12 786–12 796.
+[50] E. Sucar, S. Liu, J. Ortiz, and A. J. Davison, “imap: Implicit mapping and positioning in real-time,” in Proceedings of the IEEE/CVF
+International Conference on Computer Vision, 2021, pp. 6229–6238.
+[51] M. Rey-Area, M. Yuan, and C. Richardt, “360monodepth: Highresolution 360deg monocular depth estimation,” in Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2022, pp. 3762–3772.
+[52] A. Eftekhar, A. Sax, J. Malik, and A. Zamir, “Omnidata: A scalable
+pipeline for making multi-task mid-level vision datasets from 3d
+scans,” in Proceedings of the IEEE/CVF International Conference on
+Computer Vision, 2021, pp. 10 786–10 796.
+[53] L. I. Rudin and S. Osher, “Total variation based image restoration with free local constraints,” in Proceedings of 1st international
+conference on image processing, vol. 1. IEEE, 1994, pp. 31–35.
+[54] R. Ranftl, K. Lasinger, D. Hafner, K. Schindler, and V. Koltun,
+“Towards robust monocular depth estimation: Mixing datasets
+for zero-shot cross-dataset transfer,” IEEE transactions on pattern
+analysis and machine intelligence, 2020.
+[55] C. Schuhmann, R. Vencu, R. Beaumont, R. Kaczmarczyk, C. Mullis,
+A. Katta, T. Coombes, J. Jitsev, and A. Komatsuzaki, “Laion-400m:
+Open dataset of clip-filtered 400 million image-text pairs,” arXiv
+preprint arXiv:2111.02114, 2021.
+[56] J. Straub, T. Whelan, L. Ma, Y. Chen, E. Wijmans, S. Green, J. J.
+Engel, R. Mur-Artal, C. Ren, S. Verma, A. Clarkson, M. Yan,
+B. Budge, Y. Yan, X. Pan, J. Yon, Y. Zou, K. Leon, N. Carter,
+J. Briales, T. Gillingham, E. Mueggler, L. Pesqueira, M. Savva,
+D. Batra, H. M. Strasdat, R. D. Nardi, M. Goesele, S. Lovegrove,
+and R. Newcombe, “The Replica dataset: A digital replica of
+indoor spaces,” arXiv preprint arXiv:1906.05797, 2019.
+[57] Z. Wang, A. C. Bovik, H. R. Sheikh, and E. P. Simoncelli, “Image
+quality assessment: from error visibility to structural similarity,”
+IEEE transactions on image processing, vol. 13, no. 4, pp. 600–612,
+2004.
+[58] R. Zhang, P. Isola, A. A. Efros, E. Shechtman, and O. Wang,
+“The unreasonable effectiveness of deep features as a perceptual
+metric,” in Proceedings of the IEEE conference on computer vision and
+pattern recognition, 2018, pp. 586–595.
+[59] D. P. Kingma and J. Ba, “Adam: A method for stochastic optimization,” arXiv preprint arXiv:1412.6980, 2014.
+[60] R. Li, M. Tancik, and A. Kanazawa, “Nerfacc: A general nerf
+acceleration toolbox,” arXiv preprint arXiv:2210.04847, 2022.
+[61] Stability-AI, “Stable diffusion version 2,” https://github.com/
+Stability-AI/stablediffusion, 2022.
+[62] M. Caron, H. Touvron, I. Misra, H. Jégou, J. Mairal, P. Bojanowski,
+and A. Joulin, “Emerging properties in self-supervised vision
+transformers,” in Proceedings of the International Conference on Computer Vision (ICCV), 2021.
+[63] J. H. Lim and J. C. Ye, “Geometric gan,” arXiv preprint
+arXiv:1705.02894, 2017.
+[64] B. Labs, “Blockade labs sky box,” https://www.blockadelabs.
+com/, 2023.
+[65] T. Brooks, A. Holynski, and A. A. Efros, “Instructpix2pix:
+Learning to follow image editing instructions,” arXiv preprint
+arXiv:2211.09800, 2022.
+[66] A. Raj, S. Kaza, B. Poole, M. Niemeyer, B. Mildenhall, N. Ruiz,
+S. Zada, K. Aberman, M. Rubenstein, J. Barron, Y. Li, and V. Jampani, “Dreambooth3d: Subject-driven text-to-3d generation,” 2023.
+[67] G. Metzer, E. Richardson, O. Patashnik, R. Giryes, and D. CohenOr, “Latent-nerf for shape-guided generation of 3d shapes and
+textures,” arXiv preprint arXiv:2211.07600, 2022.
+[68] B. Poole, A. Jain, J. T. Barron, and B. Mildenhall, “Dreamfusion:
+Text-to-3d using 2d diffusion,” arXiv preprint arXiv:2209.14988,
+2022.
+[69] J. Seo, W. Jang, M.-S. Kwak, J. Ko, H. Kim, J. Kim, J.-H. Kim,
+J. Lee, and S. Kim, “Let 2d diffusion model know 3d-consistency
+for robust text-to-3d generation,” arXiv preprint arXiv:2303.07937,
+2023.
+[70] Z. Chen, G. Wang, and Z. Liu, “Text2light: Zero-shot text-driven
+hdr panorama generation,” ACM Transactions on Graphics (TOG),
+vol. 41, no. 6, pp. 1–16, 2022.

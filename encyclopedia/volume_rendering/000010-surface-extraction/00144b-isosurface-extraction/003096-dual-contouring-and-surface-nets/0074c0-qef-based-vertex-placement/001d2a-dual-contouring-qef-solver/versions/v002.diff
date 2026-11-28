@@ -1,0 +1,195 @@
+--- v001.md
++++ v002.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The solver operates on a per-voxel basis, taking the geometric constraints derived from the voxel grid and producing a single 3D vertex position.
++The solver operates on a per-voxel basis, taking the geometric constraints derived from the voxel grid and producing a single 3D vertex position [S1, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -13,5 +13,5 @@
+     *   `voxel_cell`: The current voxel cell index.
+     *   `grid_vertices`: Array of voxel grid corner coordinates $(V, 3)$ [S1, unofficial].
+-    *   `voxels`: Sparse voxel grid data structure containing sign values (SDF values or occupancy) at grid corners [S1, unofficial].
++    *   `voxels`: Sparse voxel grid data structure containing sign values or occupancy data [S1, unofficial].
+     *   `sdf`: Implicit function evaluator returning signed distance and gradient (normal) for any point [S1, unofficial].
+     *   `grid_normals` (Optional): Pre-computed exact Hermite or triangle normals. If omitted, trilinear gradients are computed from the SDF [S1, unofficial].
+@@ -23,9 +23,9 @@
+ 
+ ### Data Structures
+-The solver accumulates plane constraints into a linear system. The QEF for a set of $N$ planes is defined as:
++The solver accumulates plane constraints into a linear system [S1, unofficial]. The QEF for a set of $N$ planes is defined as:
+ $$ E(x) = \sum_{i=1}^{N} (n_i^T (x - p_i))^2 $$
+-where $n_i$ is the unit normal and $p_i$ is a point on the $i$-th plane. This expands to the standard least-squares form:
++where $n_i$ is the unit normal and $p_i$ is a point on the $i$-th plane [G]. This expands to the standard least-squares form:
+ $$ E(x) = \| Ax - b \|^2 $$
+-where $A$ is an $N \times 3$ matrix with rows $n_i^T$, and $b$ is an $N \times 1$ vector with entries $n_i^T p_i$.
++where $A$ is an $N \times 3$ matrix with rows $n_i^T$, and $b$ is an $N \times 1$ vector with entries $n_i^T p_i$ [G].
+ 
+ The solver constructs the symmetric normal equations matrix $M = A^T A$ ($3 \times 3$) and vector $c = A^T b$ ($3 \times 1$):
+@@ -34,8 +34,8 @@
+ 
+ ### Steps
+-1.  **Identify Sign-Crossing Edges**: For the current voxel cell, examine the 12 edges. An edge is "active" if the sign values (or SDF signs) at its two endpoints differ.
++1.  **Identify Sign-Crossing Edges**: For the current voxel cell, examine the 12 edges [S1, unofficial]. An edge is "active" if the sign values at its two endpoints differ [G].
+ 2.  **Collect Plane Constraints**: For each active edge:
+-    *   Calculate the intersection point $p_i$ on the edge where the isosurface is crossed (typically via linear interpolation of SDF values).
+-    *   Calculate the normal $n_i$. If `grid_normals` are provided, use them. Otherwise, compute the gradient of the SDF at $p_i$ and normalize it [S1, unofficial].
++    *   Calculate the intersection point $p_i$ on the edge where the isosurface is crossed (typically via linear interpolation of SDF values) [G].
++    *   Calculate the normal $n_i$. If `grid_normals` are provided, use them [S1, unofficial]. Otherwise, compute the gradient of the SDF at $p_i$ and normalize it [G].
+     *   Accumulate $n_i n_i^T$ into $M$ and $n_i (n_i^T p_i)$ into $c$ [S1, unofficial].
+ 3.  **Solve QEF via Regularized SVD**:
+@@ -69,82 +69,71 @@
+         faces: (F, 3) or (F, 4) array, mesh faces.
+     """
++    # [G] Standard vector operations
++    def dot(u, v): return sum(ui * vi for ui, vi in zip(u, v))
++    def normalize(v): s = dot(v, v)**0.5; return [vi/s for vi in v]
++    def lerp(a, b, t): return [a[i] + t * (b[i] - a[i]) for i in range(3)]
++
+     # 1. Identify active edges and collect constraints
+-    M = zeros((3, 3))  # Accumulator for A^T A
+-    c = zeros(3)       # Accumulator for A^T b
++    M = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
++    c = [0.0, 0.0, 0.0]
+     active_edges = []
+-    
++
+     # Get the 8 corners of the voxel
+-    corners = get_voxel_corners(voxel_cell, grid_vertices)
+-    corner_signs = get_voxel_signs(voxel_cell, voxels)
+-    
++    corners = [grid_vertices[voxel_cell * 8 + i] for i in range(8)]
++    corner_signs = [voxels[voxel_cell * 8 + i] for i in range(8)]
++
+     # Iterate over the 12 edges of the cube
+-    for edge_idx in range(12):
+-        p1_idx, p2_idx = edge_indices[edge_idx]
+-        
+-        # Check for sign crossing
++    edge_indices = [
++        (0,1), (1,3), (3,2), (2,0), (4,5), (5,7), (7,6), (6,4),
++        (0,4), (1,5), (3,7), (2,6)
++    ]
++    for p1_idx, p2_idx in edge_indices:
+         if corner_signs[p1_idx] * corner_signs[p2_idx] < 0:
+-            # Calculate intersection point p_i
+-            # Linear interpolation based on SDF values
+-            v1 = sdf_value(corners[p1_idx])
+-            v2 = sdf_value(corners[p2_idx])
++            v1 = corner_signs[p1_idx]
++            v2 = corner_signs[p2_idx]
+             t = v1 / (v1 - v2)
+             p_i = lerp(corners[p1_idx], corners[p2_idx], t)
+-            
+-            # Calculate normal n_i
++
+             if grid_normals is not None:
+-                # Use pre-computed normals (e.g., Hermite or triangle normals)
+-                # Interpolate normals at p_i if necessary, or use corner normals
+-                n_i = interpolate_normals(grid_normals, corners, p_i)
++                n_i = normalize(grid_normals[p1_idx]) # [G] Interpolate or use corner normal
+             else:
+-                # Compute gradient from SDF
+                 _, grad = sdf(p_i)
+                 n_i = normalize(grad)
+-            
+-            # Accumulate QEF components
+-            # M += n_i * n_i^T
+-            M += outer_product(n_i, n_i)
+-            # c += n_i * (n_i^T * p_i)
+-            c += n_i * dot(n_i, p_i)
+-            
+-            active_edges.append(edge_idx)
+-            
++
++            # Accumulate QEF components: M += n_i * n_i^T, c += n_i * (n_i^T * p_i)
++            M = [[M[i][j] + n_i[i] * n_i[j] for j in range(3)] for i in range(3)]
++            c = [c[i] + n_i[i] * dot(n_i, p_i) for i in range(3)]
++            active_edges.append((p1_idx, p2_idx))
++
+     # 2. Solve the linear system M * x = c using Regularized SVD
+-    # Perform SVD on the implicit A matrix or directly on M
+-    # Since M is 3x3 symmetric positive semi-definite, we can use Jacobi eigenvalue solver
++    # [G] Standard Jacobi eigenvalue solver for 3x3 symmetric matrix
+     eigenvalues, eigenvectors = jacobi_eigensolver(M)
+-    
+-    # Regularization: Clamp small singular values
++
+     sigma_max = max(eigenvalues)
+     threshold = 0.01 * sigma_max
+-    
+-    # Compute inverse of regularized eigenvalues
+-    # If eigenvalue < threshold, treat as zero (or use regularization mass)
+-    inv_eigenvalues = zeros(3)
++
++    inv_eigenvalues = [0.0, 0.0, 0.0]
+     for i in range(3):
+         if eigenvalues[i] > threshold:
+             inv_eigenvalues[i] = 1.0 / eigenvalues[i]
+         else:
+-            # Mass-centroid regularization: project onto null space or clamp to centroid
+-            # [G] Implementation detail: typically involves adding a small lambda to diagonal
+-            # or projecting the solution onto the subspace of significant singular vectors.
+-            # Here we assume a simple clamp to zero contribution for ill-conditioned directions.
++            # Mass-centroid regularization: clamp contribution to zero
+             inv_eigenvalues[i] = 0.0
+-            
++
+     # Reconstruct solution x = V * diag(1/sigma) * V^T * c
+-    # Note: c must be transformed into the eigenbasis
+-    c_eigen = dot(eigenvectors.T, c)
+-    x_eigen = c_eigen * inv_eigenvalues
+-    x = dot(eigenvectors, x_eigen)
+-    
++    c_eigen = [sum(eigenvectors[i][k] * c[k] for k in range(3)) for i in range(3)]
++    x_eigen = [c_eigen[i] * inv_eigenvalues[i] for i in range(3)]
++    x = [sum(eigenvectors[i][k] * x_eigen[k] for k in range(3)) for i in range(3)]
++
+     # 3. Generate Topology
+-    # Use deterministic lookup table to map active edges to quad slots
++    # [S1, unofficial] Uses static compile-time lookup table dc_edge_quadrant[12]
+     quad_slots = dc_edge_quadrant_lookup(active_edges)
+-    
++
+     if quad_split:
+-        # Apply Delaunay max-min angle splitting
++        # [S1, unofficial] Delaunay max-min angle splitting
+         faces = split_quads_to_triangles(quad_slots)
+     else:
+         faces = quad_slots
+-        
++
+     return x, faces
+ ```
+@@ -155,7 +144,7 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Coplanar Normals**: If normals are nearly coplanar, the QEF matrix becomes ill-conditioned. The solver uses Regularized SVD Truncation (clamping singular values $< 0.01 \sigma_{\max}$) and mass-centroid regularization to prevent the vertex from drifting outside the voxel [S1, unofficial].
+-*   **Sharp Features**: Trilinear gradient smoothing across $C^0$ slope discontinuities can blur sharp edges. Passing exact Hermite or triangle normals via `grid_normals` is required to preserve razor-sharp knife edges on CAD models [S1, unofficial].
+-*   **Single Vertex Limitation**: Each voxel contains at most one dual vertex. Complex sub-voxel topology with multiple disconnected sheets inside a single voxel can lead to non-manifold geometry (pinch points) [S1, unofficial].
++*   **Coplanar Normals**: If normals are nearly coplanar, the QEF matrix becomes ill-conditioned [S1, unofficial]. The solver uses Regularized SVD Truncation (clamping singular values $< 0.01 \sigma_{\max}$) and mass-centroid regularization to prevent the vertex from drifting outside the voxel [S1, unofficial].
++*   **Sharp Features**: Trilinear gradient smoothing across $C^0$ slope discontinuities can blur sharp edges [S1, unofficial]. Passing exact Hermite or triangle normals via `grid_normals` is required to preserve razor-sharp knife edges on CAD models [S1, unofficial].
++*   **Single Vertex Limitation**: Each voxel contains at most one dual vertex [S1, unofficial]. Complex sub-voxel topology with multiple disconnected sheets inside a single voxel can lead to non-manifold geometry (pinch points) [S1, unofficial].
+ *   **Brute-Force Fallback**: Some 3D implementations disable QEF solving entirely in favor of brute-force search, but this is less efficient and not the standard approach for high-performance variants [S2, unofficial].
+ 
+@@ -184,14 +173,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The core QEF solve is $O(1)$ per voxel for a $3 \times 3$ system, dominated by the SVD/eigensolver which is constant time for fixed dimension. The overall complexity is linear with respect to the number of voxels $V$, $O(V)$.
+-*   **Memory Complexity**: $O(V)$ for storing voxel data and normals. The solver itself uses constant memory per voxel.
++*   **Time Complexity**: The core QEF solve is $O(1)$ per voxel for a $3 \times 3$ system, dominated by the SVD/eigensolver which is constant time for fixed dimension [G]. The overall complexity is linear with respect to the number of voxels $V$, $O(V)$ [G].
++*   **Memory Complexity**: $O(V)$ for storing voxel data and normals [G]. The solver itself uses constant memory per voxel [G].
+ *   **Performance**: On an NVIDIA GeForce RTX 4090, the implementation achieves >230 M faces/s on sparse Fandisk CAD at $1024^3$ resolution (14.36 ms latency for 3,432,768 triangles) [S1, unofficial]. For pure quad output, throughput is 134 M quads/s [S1, unofficial].
+ *   **Strengths**: Preserves sharp features (creases, apexes) better than Dual Marching Cubes by placing vertices directly on sharp creases via QEF SVD [S1, unofficial]. Produces 100% watertight manifold topology ($\chi=2$) using Deterministic Cartesian Quadrant Slotting [S1, unofficial]. Fully differentiable, allowing backpropagation of gradients into SDF values and colors [S1, unofficial].
+ *   **Limitations**: Single dual vertex per cell limitation can cause non-manifold geometry in complex sub-voxel topologies [S1, unofficial]. Requires boundary padding (`pad=1`) for sparse grids [S1, unofficial]. Performance depends on the quality of normals; trilinear gradients can blur sharp edges [S1, unofficial].
+-*   **When to Use**: High-quality surface extraction from SDFs or neural implicit fields where sharp feature preservation and watertight topology are critical.
+-*   **When Not to Use**: When sub-voxel topology is extremely complex (multiple sheets per voxel) and vertex sharing is not acceptable, or when computational resources are too limited for SVD operations (though $3 \times 3$ SVD is very fast).
++*   **When to Use**: High-quality surface extraction from SDFs or neural implicit fields where sharp feature preservation and watertight topology are critical [S1, unofficial].
++*   **When Not to Use**: When sub-voxel topology is extremely complex (multiple sheets per voxel) and vertex sharing is not acceptable, or when computational resources are too limited for SVD operations (though $3 \times 3$ SVD is very fast) [S1, unofficial].
+ 
+ ## Background
+-Dual Contouring was introduced by Ju et al. in 2002 as a method to extract watertight meshes from volumetric data by placing a single vertex in each intersecting voxel [S1, unofficial]. The QEF solver variant described here is a modern, high-performance CUDA implementation (e.g., `conquer3d`) that enhances the original method with regularized SVD for numerical stability and deterministic topology generation [S1, unofficial]. It addresses the limitations of earlier dual contouring implementations that suffered from self-intersecting quads and poor sharp feature preservation. The method is widely used in real-time rendering and CAD visualization where exact manifold topology and sharp features are required [S1, unofficial].
++Dual Contouring was introduced by Ju et al. in 2002 as a method to extract watertight meshes from volumetric data by placing a single vertex in each intersecting voxel [S1, unofficial]. The QEF solver variant described here is a modern, high-performance CUDA implementation (e.g., `conquer3d`) that enhances the original method with regularized SVD for numerical stability and deterministic topology generation [S1, unofficial]. It addresses the limitations of earlier dual contouring implementations that suffered from self-intersecting quads and poor sharp feature preservation [S1, unofficial]. The method is widely used in real-time rendering and CAD visualization where exact manifold topology and sharp features are required [S1, unofficial].
+ 
+ ## Sources

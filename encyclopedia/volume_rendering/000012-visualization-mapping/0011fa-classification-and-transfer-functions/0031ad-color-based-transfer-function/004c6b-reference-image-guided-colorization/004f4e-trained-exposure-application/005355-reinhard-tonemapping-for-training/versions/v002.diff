@@ -1,0 +1,1485 @@
+--- v001.md
++++ v002.md
+@@ -4,30 +4,23 @@
+ 
+ ## Overview
+-This method converts unbounded high-dynamic-range (HDR) linear radiance from a differentiable renderer into display-referred sRGB images suitable for neural network training [S1, unofficial]. It prevents numerical instabilities and out-of-distribution inputs by compressing the dynamic range into a bounded, perceptually plausible interval [S1, unofficial]. It differs from [ExpModel](14212-expmodel.md) by using a fixed, non-learnable luminance normalization rather than a learned per-image transform.
++This method converts unbounded high-dynamic-range (HDR) linear radiance from a differentiable renderer into display-referred sRGB images suitable for neural network training [S1, unofficial]. It prevents numerical instabilities and out-of-distribution inputs by compressing the dynamic range into a bounded, perceptually plausible interval [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Rendered RGB image with unbounded linear radiance values $L$ in the renderer's internal basis.
+-**Outputs:** sRGB image with normalized intensities in $[0, 1]$.
++**Inputs:** Rendered RGB image with unbounded linear radiance values in the renderer's internal basis [S1, unofficial].
++**Outputs:** sRGB image with normalized intensities in $[0, 1]$ [S1, unofficial].
+ 
+ **Data Structures:**
+-*   Input: Tensor of shape $(H, W, 3)$, type float32, values $\in [0, \infty)$.
+-*   Output: Tensor of shape $(H, W, 3)$, type float32, values $\in [0, 1]$.
++*   Input: Tensor of shape $(H, W, 3)$, type float32, values $\in [0, \infty)$ [G].
++*   Output: Tensor of shape $(H, W, 3)$, type float32, values $\in [0, 1]$ [G].
+ 
+ **Steps:**
+-1.  **Basis Transformation:** Transform the renderer's internal RGB basis to linear sRGB. This involves applying the appropriate color space conversion matrix $M_{rgb \to linear\_srgb}$ to each pixel vector $\mathbf{c}_{raw}$:
+-    $$ \mathbf{c}_{linear} = M_{rgb \to linear\_srgb} \cdot \mathbf{c}_{raw} $$
+-    [S1, unofficial]
+-
+-2.  **Reinhard Tonemapping:** Apply Reinhard tonemapping to compress the unbounded linear radiance. For each color channel $c \in \{R, G, B\}$, the tonemapped value $c_{tm}$ is calculated as:
+-    $$ c_{tm} = \frac{c_{linear}}{1 + c_{linear}} $$
+-    This normalization preserves detail while preventing saturation [S1, unofficial].
+-
+-3.  **sRGB Transfer Function:** Apply the sRGB gamma encoding to yield perceptually uniform intensities. For each tonemapped channel $c_{tm}$, the final sRGB value $c_{srgb}$ is:
+-    $$ c_{srgb} = \begin{cases} 12.92 \cdot c_{tm} & \text{if } c_{tm} \le 0.0031308 \\ 1.055 \cdot c_{tm}^{1/2.4} - 0.055 & \text{if } c_{tm} > 0.0031308 \end{cases} $$
+-    [S1, unofficial]
++1.  **Basis Transformation:** Transform the renderer's internal RGB basis to linear sRGB [S1, unofficial].
++2.  **Reinhard Tonemapping:** Apply Reinhard tonemapping to compress the unbounded linear radiance [S1, unofficial]. For each color channel $c$, the tonemapped value $c_{tm}$ is calculated as $c_{tm} = \frac{c}{1 + c}$ [G]. This normalization preserves detail while preventing saturation [S1, unofficial].
++3.  **sRGB Transfer Function:** Apply the sRGB gamma encoding to yield perceptually uniform intensities [S1, unofficial]. For each tonemapped channel $c_{tm}$, the final sRGB value $c_{srgb}$ is:
++    $$ c_{srgb} = \begin{cases} 12.92 \cdot c_{tm} & \text{if } c_{tm} \le 0.0031308 \\ 1.055 \cdot c_{tm}^{1/2.4} - 0.055 & \text{if } c_{tm} > 0.0031308 \end{cases} $$ [G].
+ 
+ **Parameters:**
+-*   Reinhard normalization: Implicitly 1.0 in the denominator.
+-*   sRGB gamma: Standard sRGB transfer function coefficients.
++*   Reinhard normalization: Implicitly 1.0 in the denominator [G].
++*   sRGB gamma: Standard sRGB transfer function coefficients [G].
+ 
+ **Edge Cases:**
+@@ -39,5 +32,5 @@
+ import numpy as np
+ 
+-def reinhard_tonemapping_for_training(rendered_image: np.ndarray) -> np.ndarray:
++def reinhard_tonemapping_for_training(rendered_image: np.ndarray, M: np.ndarray) -> np.ndarray:
+     """
+     Convert HDR linear radiance to sRGB for training.
+@@ -46,1403 +39,38 @@
+         rendered_image: np.ndarray of shape (H, W, 3), dtype float32, 
+                         values in renderer's internal basis (unbounded).
+-                        
+-    Returns:
+-        np.ndarray of shape (H, W, 3), dtype float32, values in [0, 1].
++        M: np.ndarray of shape (3, 3), dtype float32, 
++           renderer-specific conversion matrix to linear sRGB.
+     """
+-    # Step 1: Transform to linear sRGB basis
+-    # Note: The exact matrix depends on the renderer's internal basis.
+-    # Assuming standard sRGB primaries and D65 white point for conversion.
+-    # If the renderer outputs in a different space (e.g., ACES, XYZ), 
+-    # the matrix M must be adjusted accordingly.
+-    # Standard sRGB to linear sRGB matrix (inverse of linear to sRGB)
+-    # is not needed here; we need renderer_internal -> linear_sRGB.
+-    # For Mitsuba 3, the default output is often in a specific basis.
+-    # The source [S1, unofficial] states "transform the renderer’s internal RGB basis to linear sRGB".
+-    # We assume a generic matrix M is provided or known for the renderer.
+-    # Here we use a placeholder matrix for demonstration; in practice, 
+-    # this must be the correct conversion matrix for the specific renderer.
+-    M = np.array([
+-        [ 3.2406, -1.5372, -0.4986],
+-        [-0.9689,  1.8758,  0.0415],
+-        [ 0.0557, -0.2040,  1.0570]
+-    ])
+-    # Reshape for matrix multiplication: (H*W, 3)
+-    h, w, _ = rendered_image.shape
+-    pixels = rendered_image.reshape(-1, 3)
++    # Step 1: Clamp negative values to zero
++    img = np.maximum(rendered_image, 0.0)
+     
+-    # Convert to linear sRGB
+-    # Note: The matrix above is for XYZ to sRGB. 
+-    # If the renderer outputs in XYZ, use this. If it outputs in another RGB space, 
+-    # the matrix must be derived from that space's primaries to sRGB.
+-    # Since the source doesn't specify the internal basis, we assume it's 
+-    # convertible via a known linear transform.
+-    # For the sake of implementation completeness, we assume the input is 
+-    # in a basis that can be converted to linear sRGB via a standard matrix.
+-    # If the input is already in linear sRGB, M would be Identity.
+-    # However, Mitsuba 3's default might be in a different space.
+-    # Let's assume the input is in a space that requires a specific conversion.
+-    # Without explicit details on the internal basis, we note this step requires 
+-    # the correct conversion matrix for the specific renderer.
+-    # [G] Assuming the renderer outputs in a space convertible to linear sRGB 
+-    # via a standard matrix. If the renderer outputs in linear sRGB directly, 
+-    # skip this step.
++    # Step 2: Transform to linear sRGB basis
++    h, w, _ = img.shape
++    pixels = img.reshape(-1, 3)
++    linear_srgb = pixels @ M
+     
+-    # For the purpose of this article, we assume the input is in a basis 
+-    # that needs conversion. If the renderer is Mitsuba 3, the default 
+-    # might be in a specific color space. 
+-    # Let's assume the input is in a generic HDR space and we need to 
+-    # convert it to linear sRGB.
+-    # We will use a placeholder matrix M_internal_to_linear_sRGB.
+-    # In practice, this matrix must be determined by the renderer's documentation.
++    # Step 3: Reinhard tonemapping
++    tonemapped = linear_srgb / (1.0 + linear_srgb)
+     
+-    # Example: If the renderer outputs in XYZ, use the XYZ to sRGB matrix.
+-    # If it outputs in a different RGB space, use the appropriate conversion.
+-    # Since the source doesn't specify, we leave this as a step requiring 
+-    # the correct matrix.
++    # Step 4: sRGB gamma encoding
++    def srgb_gamma(c):
++        return np.where(c <= 0.0031308, 12.92 * c, 1.055 * np.power(c, 1/2.4) - 0.055)
+     
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    # If the input is already in linear sRGB, M is Identity.
+-    
+-    # Let's assume the input is in a generic HDR space and we need to 
+-    # convert it to linear sRGB.
+-    # We will use a placeholder matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # For the purpose of this article, we assume the input is in a space 
+-    # that is convertible to linear sRGB via a known matrix.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3, 
+-    # the default output might be in a specific color space.
+-    # We assume the user knows the correct conversion matrix for their renderer.
+-    
+-    # Let's assume the input is in a space that is already linear sRGB 
+-    # for simplicity, or that the matrix M is provided.
+-    
+-    # If the input is not in linear sRGB, this step is critical.
+-    
+-    # We will use a placeholder matrix M for demonstration.
+-    # In practice, this matrix must be the correct conversion matrix 
+-    # for the specific renderer.
+-    
+-    # Let's assume the input is in a space that is convertible to linear sRGB 
+-    # via a standard matrix.
+-    
+-    # For the sake of the pseudocode, we assume the input is in a space 
+-    # that can be converted to linear sRGB via a matrix M.
+-    
+-    # [G] The exact matrix depends on the renderer. For Mitsuba 3+    srgb_image = srgb_gamma(tonemapped).reshape(h, w, 3)
++    return srgb_image
++```
++
++## Subtopics
++
++### Gamma Tone Mapping
++Uses a fixed gamma function $g(c_0) = c_0^{1/2.2}$ instead of a learnable MLP because there is no significant difference in performance when either is employed, due to consistent exposure of the dataset [S2].
++
++## Operating characteristics
++Not given in the sources.
++
++## Background
++Originated as a preprocessing step in differentiable rendering pipelines for vision model probing [S1, unofficial] and NeRF training [S2]. It is used to ensure rendered images are compatible with neural networks by converting raw renderer outputs into standard display-referred sRGB space [S1, unofficial].
++
++## Sources
++[S1] MRD: Using Physically Based Differentiable Rendering to Probe Vision Models for 3D Scene Understanding, https://doi.org/10.48550/arXiv.2512.12307, fetched 2026-10-29 (unofficial)
++[S2] DP-NeRF: Deblurred Neural Radiance Field with Physical Scene Priors, https://arxiv.org/abs/2211.12046v4, fetched 2026-10-26

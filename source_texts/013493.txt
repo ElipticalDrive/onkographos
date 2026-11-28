@@ -1,0 +1,242 @@
+Runtime global illumination for PbrRenderer: a DDGI-style probe volume fed by a compute ray tracer over BVHs cooked in the asset pipeline, with the exported SH sky as the miss term. Built small first, with four data-layout decisions fixe...
+
+Runtime GI: DDGI probe volume over a cooked-BVH compute tracer, built small and grown to cascades · Issue #262 · ParadiseEngine/ParadiseEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Runtime GI: DDGI probe volume over a cooked-BVH compute tracer, built small and grown to cascades #262
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#263
+Closed
+Runtime GI: DDGI probe volume over a cooked-BVH compute tracer, built small and grown to cascades#262
+#263
+Copy link
+Assignees
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+quabug
+opened on Sep 6, 2026
+Issue body actions
+Runtime global illumination for PbrRenderer: a DDGI-style probe volume fed by a compute
+ray tracer over BVHs cooked in the asset pipeline, with the exported SH sky as the miss term.
+Built small first, with four data-layout decisions fixed up front so the large-scene version
+(cascades, GPU scheduling, thousands of instances) is additive rather than a rewrite.
+Constraints that decided the design
+Read from the renderer at fe49496:
+WebGPU is the only backend (Dawn on desktop, browser WebGPU for wasm). No hardware ray
+tracing, no bindless, no geometry shaders or conservative raster. Default limit of 4 bind
+groups; groups 0–3 are all taken, so GI resources land in group 3's free slots.
+Forward+ over a single HDR target. Ambient is a hemisphere blend or the exported L2 SH sky
+(FrameUniforms.ambientSh). No normal buffer; the only prepass writes world position as
+Rgba32Float for SSAO. Lights are capped at MaxSceneLights = 64, CPU-binned into froxels.
+Compute is in the command stream but not the graph. RenderCommandKind.BeginComputePass/
+Dispatch exist; FrameGraph only has AddRasterPass.
+Mesh geometry is already a cooked Paradise.BLOB (Paradise.Assets.Mesh), which is where a
+per-mesh BVH belongs.
+Why probes + a compute BVH tracer
+DDGI (Majercik et al.; RTXGI) decouples cost from screen resolution, handles fully dynamic
+lights and moving props, gets infinite bounce by shading ray hits with the previous frame's
+probes, and needs only compute. The tracer is the one hard part, and WebGPU path tracers have
+shown compute BVH traversal is viable on ordinary GPUs.
+Rejected:
+Option
+Why not
+Baked lightmaps + probes
+Not runtime; procedural and user-built levels (Pingu, CultWithin) have nothing to bake. Possible later fallback, not the core.
+SDFGI / voxel cone tracing
+Cascaded SDF or voxelization rebuilt as the camera moves; compute voxelization with 3D-texture atomics on WebGPU; memory scales with world volume; leaks through thin walls.
+Screen-space GI only
+Sees only what is on screen. A later contact-detail layer, not the GI.
+Radiance cascades
+2D form is trivial; the world-space 3D form is unsettled and ends up probe-based anyway, so the probe infrastructure here carries over if adopted later.
+Surfels / Lumen-like
+Far more machinery than the games need.
+A two-level BVH also scales the right way: one bottom-level per unique mesh, one top-level over
+instances, trace cost growing with the log of triangle count. Volume methods grow with world
+size, which is exactly what gets worse in a large scene. And a triangle hit reads the
+instance's material directly; voxel or SDF hits need a separate lighting cache to know a
+surface's color.
+The four decisions fixed on day one
+Each of these costs almost nothing to do the scalable way now and would force a rewrite if done
+the small way:
+One merged storage buffer per kind, with per-mesh offsets. All BVH nodes in one buffer,
+all triangles in another, all vertices in a third; the instance table carries an offset into
+each. One buffer per mesh is impossible without bindless.
+Cook the BVH in its final node layout. A wide (8-ary) node with quantized child bounds, in
+the style of Ylitie et al.'s compressed wide BVH. Swapping formats later means redoing the
+cook, the shader, and every shipped mesh blob.
+The probe volume is a value in an array, not the feature's fields. Origin, spacing,
+counts and atlas offsets live in a struct the shader indexes. One volume is an array of
+length one; cascades are length four plus a selection function.
+The ray budget is a parameter, not the probe count. The trace dispatches over a list of
+probe indices, initially every probe filled on the CPU. Classification later fills the list
+in compute and the dispatch becomes indirect.
+Engine fit
+Cook a BLAS per .mesh document next to the mesh blob, as a Paradise.BLOB layout in the
+merged-buffer node format. Rigid instances go into a CPU-built top-level structure per frame.
+Skinned characters receive GI but trace against their rest-pose BLAS under the instance
+transform (fine for a bounce that is blurred into probes).
+Hit shading: direct light from the existing light array and shadow atlas, factor-only
+albedo plus emissive, and the previous frame's probe irradiance for the bounce.
+Rays that miss sample the SH sky, so a scene with no probe volume renders exactly as it
+does now.
+Probe atlases: octahedral irradiance at 8×8 per probe and visibility at 16×16 per probe
+(depth and depth²), both Rgba16Float, bound into group 3. pbrCore.slang replaces the ambient
+term with a Chebyshev-weighted probe lookup when a volume is present.
+One IRenderFeature. The probe GI feature declares its compute passes and publishes its
+atlases on the blackboard (Frame graph for PbrRenderer: named events, graph-owned targets, and an IRenderFeature seam #242's seam). It runs unchanged in the Godot editor's play mode
+because everything stays inside Dawn.
+Phases
+Prerequisites. FrameGraph.AddComputePass. Replace the Rgba32Float position prepass with
+depth + octahedral normal (SSAO consumes it; later screen-space work needs it). Carry
+previous-frame camera matrices for temporal reprojection.
+The tracer, proven in isolation. Cook BVHs in the merged-buffer layout, build the
+per-frame instance structure, write the WGSL traversal (one thread per ray first), and
+validate with a ray-traced ambient-occlusion debug view before any probe code exists.
+Request desktop limits/features here: large maxStorageBufferBindingSize, shader-f16,
+subgroups, timestamp queries.
+Probe volume. Trace, blend irradiance and visibility, sample in the shader. One volume
+auto-fit to the static scene, with an authored override from the Godot/Blender exporters.
+Scaling. Probe classification and relocation, per-host ray and probe budgets, browser
+tuning on an integrated GPU.
+Later layers. Screen-space contact GI for detail below probe spacing; reflections as SSR
+with a probe fallback (specular is where probe GI is weakest).
+Growing to thousands of instances
+Each item is one PR on top of the above; none touches the tracer or the probe blend:
+Addition
+Size
+What it replaces
+Cascaded probe volumes (3–4, doubling spacing, camera-following, grid-snapped)
+Medium
+The length-one volume array
+GPU classification + indirect dispatch
+Medium
+The CPU-filled probe list
+Static/dynamic top-level split (static refits on change)
+Low
+One per-frame CPU rebuild
+Cooked albedo array texture (~16×16 per material, indexed by material id)
+Low
+Factor-only albedo at hits
+World-space light grid aligned to the cascades
+Medium
+Looping the 64-light array at hits — and the raster side's CPU froxel binning; belongs with the renderer's light-model rework, not GI
+Wavefront (persistent-thread) traversal with subgroup compaction
+Medium
+One thread per ray
+Fallback if the tracer measures too slow for the outer cascades: a global SDF clipmap composited
+from cooked per-mesh SDFs for far-field rays, with the BVH kept for the near cascade. Same probe
+layer.
+Budgets (indicative)
+Setting
+Probes
+Rays/probe
+Rays/frame
+Expected
+Desktop, one volume
+24×8×24 (4,608)
+128
+~590k
+1.5–3 ms
+Browser / iGPU, one volume
+16×6×16 (1,536)
+64
+~98k
+2–4 ms
+Desktop, 4 cascades, near every frame, outer round-robin
+27,648
+64
+~600k
+2–5 ms
+Same, half the probes classified active
+~14k active
+64
+~350k
+1.5–3 ms
+Assumes compute traversal in the 150–300 Mrays/s range WebGPU path tracers reach on discrete
+GPUs. Phase 2 measures this before anything depends on it.
+Authoring
+By design there is almost no manual process: a scene lights itself the moment it loads. What
+remains is optional authoring, every item with a working default.
+Nothing to do
+No bake step. Probes update continuously; a procedural or user-built level gets GI with no
+offline pass.
+BVH cooking is automatic. The build cooks a BVH beside every .mesh blob the way it already
+cooks the mesh; an author never sees it.
+Materials need no extra data. Hit shading reads the material's base color factor and
+emissive (later the cooked albedo array), all derived from what the material already carries.
+The sky is already exported. The SH sky the exporters write today becomes the miss term, so
+a scene without a probe volume looks exactly as it does now.
+Optional, each with a default
+Control
+Default
+Override
+Probe volume bounds and spacing
+Auto-fit to the static scene's bounds
+A volume node: Godot's VoxelGI/SDFGI-style node exported as a volume; in Blender an empty with a custom property. For levels much larger than their interesting interior, or tighter spacing indoors.
+Per-instance participation
+Static for anything not skinned
+Godot's GeometryInstance3D.gi_mode carried verbatim: Static bounces light and lives in the static top-level structure; Dynamic receives GI but does not bounce; Disabled is ignored by the tracer.
+Excluding meshes from tracing
+Everything traces
+Flag out dense foliage, particles, or a terrain skirt to save rays.
+Indirect energy per light
+1
+A scalar for how much a light contributes to bounce, matching Godot's light_indirect_energy.
+Quality budget per host
+Engine defaults for desktop and browser
+Rays per probe, probe counts and the ray budget are renderer settings a game sets once per host.
+Things to know while authoring
+Emissive materials are light sources. Anything emissive bounces into the probes with no
+light node needed — handy for signage and lava, a surprise if an emissive factor was only meant
+as a glow.
+Thin walls and probe spacing. Probe methods leak when spacing is coarser than a wall. The
+visibility atlas handles most of it, but paper-thin interior walls want tighter spacing there,
+which is the main reason the volume override exists.
+Skinned characters do not cast bounce light. They are lit by GI but trace as their rest
+pose. A character holding a torch lights the room through its light node, not its body.
+The day-to-day workflow is: place geometry and lights, press play. The overrides are for tuning,
+not for making it work.
+Not carried over
+The Rgba32Float world-position prepass (replaced in phase 1 either way).
+CPU froxel binning and the 64-light cap eventually give way to the world-space light grid;
+that is renderer work a large scene needs regardless of GI, and should be scheduled alongside
+phase 1 together with GPU-driven instancing and culling.
+Reactions are currently unavailable
+Activity
+quabug
+self-assigned this
+on Sep 6, 2026
+quabug
+added
+enhancementNew feature or requestNew feature or request
+on Sep 6, 2026
+quabug
+closed this as completedin #263on Sep 7, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+quabug
+Labels
+enhancementNew feature or requestNew feature or request
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

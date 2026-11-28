@@ -1,0 +1,308 @@
+hi everyone, I would like to get some help on optimizing an OptiX code that we have been working on. 
+first, some background, my group does research on Monte Carlo (MC) photon transport simulations and we have published …
+
+Help reduce the high register count of an Optix raytracer code - OptiX - NVIDIA Developer Forums
+Help reduce the high register count of an Optix raytracer code
+Gaming and Visualization Technologies
+Visualization
+OptiX
+FangQ
+August 3, 2022, 3:07pm
+1
+hi everyone, I would like to get some help on optimizing an OptiX code that we have been working on.
+first, some background, my group does research on Monte Carlo (MC) photon transport simulations and we have published open-source codes (portal: http://mcx.space, CUDA-code: GitHub - fangq/mcx: Monte Carlo eXtreme (MCX) - Physically accurate and validated GPU ray-tracer · GitHub, OpenCL code: GitHub - fangq/mcxcl: Monte Carlo eXtreme for OpenCL (MCXCL) · GitHub) and research papers (Monte Carlo eXtreme - Physically accurate and validated photon ray-tracer). The primary users of our simulators are biomedical optics researchers for modeling light-tissue interactions.
+Although under the hood our MC simulators are just ray-tracers, there are a few major differences compared to typical ray-tracing, which I summarized in this previous post (in short - we deal with lots of short rays due to high scattering in diffusive light, and we focus on volumetric optical properties instead of surfaces)
+One of my students recently wrote a prototype OptiX code to implement our algorithm. The good news is that it works and gives correct answer. However, we were a bit disappointed that it was 2-3x slower than our CUDA code - despite the OptiX code only has a barebone implementation.
+We are trying to figure out why this OptiX code is slow. We got some profiling results from nsight-compute, the profiling result for the OptiX code and CUDA codes are attached at the end.
+Overall, all key performance metrics, including compute efficiency, memory efficiency, occupancy, the OptiX code is about half of those for the CUDA code (same hardware, same driver, same thread/block size, same type of workload, but CUDA code runs more photons). Also, CUDA code has 64 registers but the OptiX code has 117 registers.
+We only have 3 optix shaders - raygen, closesthit and intersection, each is quite short, about 15-20 lines. We used 17 payload registers and 4 attribute registers. The registers used in each shader is definitely much less than what we used in the CUDA code main kernel.
+I am wondering: why OptiX uses so many registers? is it common to have such a high overhead?
+It is interesting to note that in the CUDA code, when I comment out the global-memory reading and writing part, I can see significant speed increase, but I am not able to see such change in Optix based implementation, showing that something else is the bottleneck that is much higher than global memory cost (which is supposed to be the highest of this type of algorithm).
+any suggestion is appreciated!
+Optix code profiling result:
+optix_new_threadnum_prof1419×3747 520 KB
+in comparison, the report for the CUDA version is listed below:
+mcx_nsight_report1920×3282 490 KB
+Understanding Register Allocation in Optix ray-gen kernel
+Discrepancy between live registers in SASS and occupancy
+dhart
+August 3, 2022, 11:44pm
+2
+Hi @FangQ,
+Interesting questions! Are you using OptiX 6 or 7? I see you’re testing with a 2080 GPU, correct?
+So there are a few things to keep in mind here. One is that generally speaking OptiX is geared for surface rendering and not really setup for voxel based volume rendering. Your flowchart implies to me that your CUDA code is primarily a voxel renderer, is that correct? CUDA is a more natural fit for voxel traversal, and is indeed likely to go faster for many reasons. Doing voxel traversal in OptiX means that you won’t really be taking advantage of any of the hardware features in RTX. Are you using the RTX hardware triangles in your pipeline? And what does your scene look like, is it a single voxel grid, or many grids, or a mix of grids and surfaces?
+It is quite likely that the higher register usage in OptiX has a lot to do with why your OptiX code appears to be slower than your CUDA code. As you probably know, the register count changes the occupancy of your kernel, and prevents you from having the same number of threads running simultaneously in both cases. OptiX does have a certain number of registers reserved for the device functions that one normally needs to use when doing surface rendering. Note that you can change your max register count in OptiX 7 using OptixModuleCompileOptions.maxRegisterCount. You can try turning that down, it might help, but on the other hand it might slow things down if it leads to register spills and more memory traffic.
+That said, your profile screen captures are showing a smaller run time and fewer number of cycles for the OptiX code - those make it look like the OptiX code is faster. (OptiX shows 1.15 seconds, CUDA shows 1.43 seconds). Do you know why that is? Did you perhaps measure two different workloads here, is that why the CUDA profile takes longer? What is the number of rays per second that you can render for your launch in each case? We like to measure launch speed in rays per second because it gives us an easy way to compare different approaches and very good sense of how close the rendering is to peak performance for any given GPU.
+What does your voxel data look like? Is it sparse or dense? Is it highly transmissive, or opaque? How large are the grids? Does the ray tend to stop before you have traversed the entire grid, or does it usually need to access all voxels that intersect the ray all the way through the grid?
+–
+David.
+dhart
+August 3, 2022, 11:48pm
+3
+I also forgot to ask if you have tried using NanoVDB for volume rendering? OptiX has an SDK sample called optixVolumeViewer that integrates NanoVDB and might be worth investigating. NanoVDB can do a hierarchical DDA and is good for accelerating voxel traversal by skipping empty space and/or regions of constant density in your volume data. We have generally found that using NanoVDB for the voxel traversal and switching to OptiX for the surface traversal is faster than trying to do everything purely in OptiX.
+–
+David.
+FangQ
+August 4, 2022, 4:30am
+4
+thanks @dhart for your quick reply, see my responses below
+I used OptiX 7.4 with CUDA 11.6 and 510.x driver.
+these are physically-accurate light solvers, they don’t really display anything, but in a way, yes they are “volume renderers” and output volumetric light distributions. The Monte Carlo algorithm is generally considered gold-standard of the radiative transfer equation (RTE). Most researchers use it to generate ground-truth solutions. In the past, solving one solution can take a day, now people can solve a typical domain size in less than 1 min. Still pretty far away from real-time rendering.
+we actually have 3 flavors of these solvers - voxel-based MC (MCX), surface-based MC and mesh-based MC (tetrahedral mesh based, MMC). Because bio-tissues have high scattering, photons usually scatter many times when traversing a voxel/tetraheral mesh/region separated by surfaces (on average, ~10 times/mm path length). Our current attempt is to port the voxel-based MC to OptiX, but will also port surface and tetrahedral-mesh based MC if the performance shows advantage.
+It sounds like the longer the ray, the better the performance. In our application, ultimately, the average ray-length is limited by the scattering length, which is determined by tissue’s scattering coefficient, the domain discretization (voxel, tet-mesh, triangles) may become secondary.
+if I do not intend to render anything, can I disable these registers? my outputs are accumulated in a 1-D buffer in the global memory, saving energy deposit in each voxel of the domain.
+yes, the total simulated photon of the CUDA code is roughly 2x of the OptiX code, indicated in the “Instructions” section. so, overall, the optix code is still slower.
+the below figure may give you some idea about the rays - here is a simulation with 1000 photons in a 60x60x60 voxelated domain with a 1 mm isotropic voxels - the volume is filled with medium with scattering coeff. mu_s=1/mm, anisotropy g=0, refractive index n=1.37. The long radial lines shall be ignored as they connect the last position of a photon and the launched position of the next photon. This is a simplified version - in real tissues, scattering coeff is about 10/mm, and anisotropy is around 0.9, which means photons scatter 10x more frequent.
+traj1920×1795 619 KB
+the output of the simulator looks like this (from 10^8 photons) - each voxel stores the photon fluence (in 1/mm^2) by accumulating energy depositions made by each photon that traversed that voxel. There is a simulated absorber in the domain, shown as a low-fluence region above the source.
+fluence1056×1062 54.2 KB
+dhart
+August 4, 2022, 3:32pm
+5
+Thanks I understand your simulation much better now, and the pictures are really neat!
+Yes, we almost always use Monte Carlo algorithms for surface rendering as well. The main question for OptiX performance is what ray-object intersection methods and ray traversal methods you’re using.
+For example, OptiX supports “custom primitives” in which you provide your own intersector and an array of AABBs to bound your primitives. If you use only a single custom primitive in your scene that contains a voxel grid, and your intersection program does DDA through the voxel grid, then in that case you’re not taking advantage of any of the hardware acceleration that RTX / OptiX offers.
+For OptiX & RTX hardware to accelerate your renderer over CUDA, you will need to be taking advantage of the RTX hardware, which means having many objects in your scene (which will use hardware traversal of the scene) and using the built-in triangle primitive (which will use hardware triangle intersection).
+For that reason, you shouldn’t expect OptiX to provide an advantage when doing voxel-based MC, but you should expect OptiX to accelerate your surface-based MC. For a tetrahedral mesh, you might consider how to map the tetrahedra to hardware triangles that RTX can accelerate. If you use a software custom intersection program for tetrahedra, instead of hardware triangles, then that will also be slower than it could be… but at least if you have many tetrahedra in your scene you can take advantage of hardware scene traversal regardless of whether your tetrahedra intersector is software or hardware. The main point here is that voxel-based MC in OptiX is the least likely method to provide any speed advantages compared to CUDA, so you shouldn’t decide whether to try surfaces or tetrahedra based on your results with voxels.
+It sounds like the longer the ray, the better the performance.
+The typical rule of thumb we have for OptiX/RTX surface rendering is that short rays are better for performance when using hardware acceleration. Your case is quite different if you’re not using hardware acceleration and not measuring surface intersections, so it might be true that voxel traversal favors longer rays because of amortization of the work needed to start traversal through a grid.
+if I do not intend to render anything, can I disable these registers?
+The main control you have is the maxRegisterCount. The registers that aren’t actually needed will be removed by the compiler, but OptiX still has a different ABI than CUDA and may need more registers anyway, even just for thread indexing for example. Otherwise, the next best way to control register usage is just via adding or removing computation from the code, and/or packing data more tightly when possible.
+the volume is filled with medium with scattering coeff
+Okay, that helps. This sounds like “dense” volume data. I asked about this because if you have sparse data, that’s when NanoVDB can help more. Even OptiX can help traverse sparse volumes, if you subdivide your voxel grid into multiple sub-blocks, and insert each sub-block into the scene separately. If you do that, you could prune any sub-blocks that are empty. If your scene has large regions of empty volume space, and you avoid traversal over those sub-blocks by leaving them out of the scene, then you can significantly accelerate the volume rendering.
+I just wanted to mention that possibility for sparse volumes in case it could help you, but right now this doesn’t seem like a realistic scenario in your case, because your data is dense and your rays are scattering frequently throughout the volume. It sounds like you will need to continue using voxel traversal throughout and that you don’t have any easy ways to take advantage of the RTX hardware for your voxel traversal.
+This could mean that it would be better to stay with your CUDA code for voxel traversal. On the other hand, if you want to mix voxel traversal with surface-based MC in the same scene, then you should test the speedup of surface traversal and mixed traversal. If you render mixed surfaces and voxel grids, using OptiX may still be beneficial even if the voxel traversal is slower than CUDA, because the surface traversal benefit could compensate for the voxel traversal losses.
+–
+David.
+FangQ
+August 4, 2022, 9:17pm
+6
+this is super helpful! thank you @dhart for your detailed suggestions.
+my student just tried using this option, unfortunately it did not make much difference in terms of speed.
+now I understand this better after you explaining it. looks like if one writes own intersection shader, then it won’t use the special hardware.
+the main strength of our voxel and tetrahedral mesh based MC codes, comparing to surface based MC, is the ability to restrict ray-primitive intersection calculations - in the voxel grid case, the intersection is limited to the 6-facets of the enclosing voxel BBX; in the tet-mesh case, the intersection is limited to the 4 triangles of the enclosing tet element (on average 2.5 ray-triangle intersection test per step).
+We have been arguing that these algorithms offer much better computational efficiency compared to surface based MC which requires to traverse the scene/AS and test for many triangles to determine which one the ray hit, thus much higher overhead.
+In a way, voxel and tet-mesh based geometries provides a very efficient AS for the ray-traversal (with high locality), especially for dense rays (due to frequent scattering).
+From my reading of your above messages, it appears that the ray-tracer core accelerates the AS traversal and ray-triangle testing, but moving to surface-MC brings back the intersection overhead mentioned above. We will definitely give it a try, but likely we will only be able to see speed up when the hardware acceleration is much greater than the intrinsic intersection overhead of surface MC (i.e. requiring >>2.5x ray-triangle testing per step).
+On the other hand, implementing tet-mesh based MC could be a good mix. If we can write our own AS, or somehow OptiX can recognize that only 4 triangles are all that needed to be tested for every ray-casting step. This way, we will be able to use the hardware, as well as benefit from the restricted ray-triangle testing.
+I do see that when the scene is sparse (i.e., not optically thick = no or low scattering), then the ray-primitive boundary intersection becomes dominant, as a result, the surface MC with hardware acceleration could become more efficient (for advancing ray - may still need frequent intersection when volumetric deposition is needed though).
+FangQ
+August 5, 2022, 6:58pm
+7
+I have another question related to register counts.
+where does PTX .local variables locate? I am asking because in the CUDA literature, “local memory” means global memory.
+I saw such declaration when reading the ptx of the intersection shader:
+```
+extern "C" __global__ void __intersection__voxel() {
+    const float3 v = optixGetWorldRayDirection();
+    const float3 p0 = optixGetWorldRayOrigin();
+    const int3 vox = getVoxelPayload();
+  ...
+}
+```
+the corresponding PTX codes are:
+```
+	// .globl	__intersection__voxel
+.visible .entry __intersection__voxel()
+{
+	.local .align 4 .b8 	__local_depot3[24];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .pred 	%p<8>;
+	.reg .f32 	%f<34>;
+	.reg .b32 	%r<48>;
+	.reg .b64 	%rd<15>;
+
+	mov.u64 	%SPL, __local_depot3;
+	add.u64 	%rd1, %SPL, 0;
+	add.u64 	%rd2, %SPL, 12;
+	call (%f4), _optix_get_world_ray_direction_x, ();
+	call (%f5), _optix_get_world_ray_direction_y, ();
+	call (%f6), _optix_get_world_ray_direction_z, ();
+	st.local.f32 	[%rd1], %f4;
+	st.local.f32 	[%rd1+4], %f5;
+	st.local.f32 	[%rd1+8], %f6;
+	call (%f7), _optix_get_world_ray_origin_x, ();
+	call (%f8), _optix_get_world_ray_origin_y, ();
+	call (%f9), _optix_get_world_ray_origin_z, ();
+	mov.u32 	%r13, 13;
+	call (%r46), _optix_get_payload, (%r13);
+	mov.u32 	%r15, 14;
+	call (%r45), _optix_get_payload, (%r15);
+	mov.u32 	%r17, 15;
+	call (%r44), _optix_get_payload, (%r17);
+	st.local.u32 	[%rd2], %r46;
+	st.local.u32 	[%rd2+4], %r45;
+	st.local.u32 	[%rd2+8], %r44;
+```
+so, it appears to me that float3 v and p3 are stored in the .local variable __local_depot3[24];. Understanding where these variables are stored is helpful in further optimizing the speed.
+also, I know a payload is in uint32, so if I want to unpack it to a float32, I will have to do a type-casting, such as
+```
+    int value = optixGetPayload_??();
+    return *((float*)&value);
+```
+this requires to use a temporary register value. for a read-only float payload, I am wondering if there is a more efficient way to return the type-casted value without needing to introduce additional registers?
+thanks
+FangQ
+August 7, 2022, 3:41pm
+8
+very strange - I removed 9 local variables inside the intersection shader, by rewriting the below code
+```
+ extern "C" __global__ void __intersection__voxel() {
+    float3 v = optixGetWorldRayDirection();
+    float3 p0 = optixGetWorldRayOrigin();
+    int3 vox = getVoxelPayload();
+
+    float3 htime = make_float3(
+        fabs((vox.x + (v.x > 0.f) - p0.x) * __fdividef(1.f, v.x)),
+        fabs((vox.y + (v.y > 0.f) - p0.y) * __fdividef(1.f, v.y)),
+        fabs((vox.z + (v.z > 0.f) - p0.z) * __fdividef(1.f, v.z))
+        );
+    ....
+}
+```
+as
+```
+extern "C" __global__ void __intersection__voxel() {
+    float3 htime = make_float3(
+        fabs(((float)(optixGetPayload_13() + (__uint_as_float(optixGetPayload_3()) > 0.f)) - __uint_as_float(optixGetPayload_0())) * __fdividef(1.f, __uint_as_float(optixGetPayload_3()))),
+        fabs(((float)(optixGetPayload_14() + (__uint_as_float(optixGetPayload_4()) > 0.f)) - __uint_as_float(optixGetPayload_1())) * __fdividef(1.f, __uint_as_float(optixGetPayload_4()))),
+        fabs(((float)(optixGetPayload_15() + (__uint_as_float(optixGetPayload_5()) > 0.f)) - __uint_as_float(optixGetPayload_2())) * __fdividef(1.f, __uint_as_float(optixGetPayload_5())))
+        );
+    ....
+}
+```
+thought that I will see notable register count cut, unfortunately, neither the runtime nor register count was reduced :( this is quite frustrating …
+in the PTX, I do not see any .local variables, still, I don’t understand why this makes no change to the register count!
+is this behavior expected?
+FangQ
+August 9, 2022, 10:18pm
+9
+I feel totally frustrated by how optix allocates registers :-(
+I spent the past two days completely rewriting the CH shader to significantly reduce the internal variables, with a hope to cut down register numbers.
+The previous CH shader looks like this:
+```
+extern "C" __global__ void __closesthit__ch() {
+    mcx::VoxelPhotonPayload pl;   // a local copy of all payloads
+    getPayload(pl);               // call optixGetPayload*() to sync
+
+    pl.value1=...                 // update each payload
+    pl.value2=...
+
+    setPayload(pl);               // call optixSetPayload*() to store
+}
+```
+I imagine that this code doubled the register use because there is a local copy pl of all payloads.
+I completely removed pl and rewrote it to
+```
+extern "C" __global__ void __closesthit__ch() {
+    optixSetPayload_0(optixGetPayload_0() + ...);   // in-place update payload 0
+    optixSetPayload_1(optixGetPayload_1() + ...);   // in-place update payload 1
+    ...
+}
+```
+with a hope that this eliminates at least 50% of the registers. However, when I compile and rerun the code in nsight, it prints exactly the same register count as before - 117!
+I really don’t understand why the register use is unchanged after this code restructure. I also changed the OptixModuleCompileOptions.maxRegisterCount, it also has absolutely no effect :(
+any comments on why this is happening?
+dhart
+August 15, 2022, 5:29pm
+10
+where does PTX .local variables locate? I am asking because in the CUDA literature, “local memory” means global memory.
+Yes, st.local does indicate a store in to local memory I believe. You should check the SASS instructions though, because store instructions in PTX are not always compiled into store instructions in SASS.
+Local memory does mean more or less the same thing as global memory from a cost perspective. The difference between local and global is described in the CUDA programming guide: CUDA C++ Programming Guide
+“The local memory space resides in device memory, so local memory accesses have the same high latency and low bandwidth as global memory accesses and are subject to the same requirements for memory coalescing as described in Device Memory Accesses. Local memory is however organized such that consecutive 32-bit words are accessed by consecutive thread IDs. Accesses are therefore fully coalesced as long as all threads in a warp access the same relative address (for example, same index in an array variable, same member in a structure variable).”
+I know a payload is in uint32, so if I want to unpack it to a float32, I will have to do a type-casting, such as
+```
+    int value = optixGetPayload_??();
+    return *((float*)&value);
+```
+this requires to use a temporary register value. for a read-only float payload, I am wondering if there is a more efficient way to return the type-casted value without needing to introduce additional registers?
+Please note that the presence of a local variable does not imply that an extra register is used. The compiler can and does overwrite register values as soon as they are no longer needed, so this example code is unlikely to use more registers than any other method. If you profile your shader and inspect the SASS using Nsight Compute, one of the features you’ll find is the register dependencies column where you can see when each register’s status changes from inactive to active or the other way around.
+To convert a float value to uint or vice-versa, without changing the bits, you should be using the CUDA built-in functions __float_as_uint() and __uint_as_float().
+I don’t know if the type-casting method is any better or worse, but be aware that there is some fear about whether type casting is always valid & portable according to the C++ spec, and you can find long and confusing conversations on Stack Overflow about the alternatives. ;) (for example: c++ - What's a proper way of type-punning a float to an int and vice-versa? - Stack Overflow) The recommended approach for CPU code is to use memcpy(), and the idea is the compiler should optimize away the function call and all register usage. For CUDA device code, just use the above intrinsic functions.
+still, I don’t understand why this makes no change to the register count! is this behavior expected? […] I feel totally frustrated by how optix allocates registers :-( I imagine that this code doubled the register use because there is a local copy pl of all payloads. I completely removed pl and rewrote it […] with a hope that this eliminates at least 50% of the registers. However, when I compile and rerun the code in nsight, it prints exactly the same register count as before - 117! I really don’t understand why the register use is unchanged after this code restructure. any comments on why this is happening?
+FWIW, I feel your pain! We often try to reduce register counts internally and face the same issues, where changes to the code do not result in changes to the register usage, or they are very unintuitive. I think the CUDA compiler team is working on making this process easier and adding more register introspection tools, but I can agree it’s sometimes very difficult to optimize register usage. The single best thing you can do is to actually get rid of data you don’t absolutely need. Shuffling it around randomly and/or changing the way you access it tends to not help. If you use values that are less than 32 bits, then packing multiple values together can sometimes help. If you have any loops, then preventing loop unrolling can potentially help. Sometimes you can selectively re-compute values later in a function to prevent having to keep it around (this is better used to prevent memory access than reduce register count, but is an option).
+It is good to learn as much as you can about how the compiler works, and to prefer inspecting the resulting SASS code over PTX. The problem here is likely that the compiler is already doing a very good job of using a small number of registers, meaning your original code was getting optimized such that your local variables were not occupying extra registers. The main thing to really think about is that variables != registers. Maximum register usage is primarily driven by a combination of the number of conceptual values that need to be around at the same time, along with whatever other constraints the compiler has like array usage and unrolled loops and OptiX internals. Since there aren’t yet super great ways to inspect optimized code and register allocation, it’s mostly trial and error, but I do recommend playing around in Nsight Compute and looking at SASS and the Register Dependencies column. See docs in the Nsight Compute Guide, at the bottom of the Source Page section Nsight Compute :: Nsight Compute Documentation – here’s an example screenshot with register dependencies on the right side:
+–
+David.
+FangQ
+August 17, 2022, 8:38pm
+11
+thank you David (@dhart) again, your comments are always very helpful! much appreciated.
+it comes clear to me that I should have not paid too much attention to PTX as it is not directly related to the final register count allocation; SASS, on the other hand, is.
+it is also becoming clear to me that the high-register count is not because I had inefficient use of temporary variables/payloads - compiler seems to have done its job to optimize out those inefficient register declarations. Instead, it is simply because of the internal states of OptiX - that it has to use internal registers to keep track of information such as bary-centric coordinates, front/back faces of the triangles etc, EVEN I DO NOT USE THOSE AT ALL (because I define my own intersection shader).
+Over the last weekend, I was trying to read through the .h header files in include/internal/optix_7_device_impl*.h, with a hope to identify some of these built-in states/overheads and hopefully I can find a way to disable those - unfortunately I wasn’t able to do so. The implementations are largely asm calls to black-box built-in _optix_... functions, and these function’s C implementations were not exposed.
+I wonder if there is any macros or optix options that I can disable these internal registers that are not really used in my customized ray-tracing?
+if this is not possible, I will have to accept the fact that OptiX, as a general framework for ray-tracing, will not likely offer speed up for non-triangular-surface based ray-tracing tasks compared to a CUDA based implementation.
+My student had started working on testing triangle-based MC simulations and will compare with voxel/tetrahedral-mesh based MC and see if it can benefit from OptiX and RT cores. It is hard to tell as the ray-tracing overhead (i.e. performing >2.5 ray-triangle intersection tests per advancing step) may eat up the hardware benefit. we will have to see on that front.
+For voxel-based dense volumetric ray-tracing, my next step may be taking a look at Vulkan. If anyone has hands on experience on Vulkan vs OptiX, I’d be happy to know if it also requires a good amount of internal register usage or has limitations on the number of payloads that can be used in shaders.
+dhart
+August 18, 2022, 4:10pm
+12
+As long as you don’t use any OptiX device functions, you are probably getting the minimum register usage in OptiX that you can get.
+There is one possibility I can think of that might reduce registers, which is the payload annotation API introduced in OptiX 7.4. If you use an OptiX payload, and if your payload has any one-way data traffic (for example you write into the payload in a shader program and read that data in raygen after the ray trace returns, but you don’t read the data in your shader) or if you have any payload values that are used by only a subset of your shader programs and not all of them, then in that case you can tell OptiX how you use your payload, and OptiX might be able to reduce the register count as a result. It’s most likely to help if you have multiple payload values that each have different “semantics” - meaning they are read or written differently, or they are used by different shader programs. Registers allocated to the payload can be re-used if the compiler knows that you don’t always need the data, and if different payload values don’t overlap in time.
+There are a bunch of things OptiX provides that are mandatory for the programming model, and that’s where all the extra registers are going. The CUDA programming model and the OptiX programming model are quite different. Traversing a BVH and calling shader programs like intersect and closest-hit at the right time are things OptiX does that CUDA does not do. These are architectural features that make surface-based ray tracing easier, and you don’t have any of this stuff in your CUDA voxel renderer, which is why your CUDA code much more lightweight. The register usage for data that OptiX passes to your shader programs is based on whether you access that data, so you don’t need any macros really, you just avoid asking OptiX for data and the register count will be lower. Or conversely, if you did use OptiX device functions in your intersector or hit shaders, then you will likely see your register count go up further.
+I hope that helps clarify. OptiX is just designed for something a bit different than voxel traversal with very simple shading programs. OptiX is better suited to accelerating your workflow when your inputs are surface based (e.g., mesh) and when they require a BVH, and when your shading is complex enough to warrant some material management and a shading system.
+We do have some people who are experienced with Vulkan ray tracing. You’re likely to get better support for that in the Vulkan forum here (I recommend appending the optional tag “vulkan-raytracing” for RTX questions): Vulkan - NVIDIA Developer Forums
+I don’t know for certain, but I think you will have the same issue with Vulkan RT, namely that it will require a bunch of registers above and beyond what you need for software voxel traversal. If you aren’t ray-tracing a large scene, but only marching through a voxel grid, I think CUDA is going to be the best choice.
+–
+David.
+Related topics
+Topic
+Replies
+Views
+Activity
+Comparing Optix performance to CUDA
+OptiX
+19
+6773
+January 12, 2021
+How CUDA works within Optix
+OptiX
+cuda
+20
+1158
+March 25, 2025
+Is there any performance difference implementing a ray-tracer in cuda vs. rendering pipelines?
+CUDA Programming and Performance
+7
+3172
+March 2, 2019
+OptiX 7 and MSVS 2017 - Hello World on Windows 10
+OptiX
+cuda
+,
+visual-studio
+9
+3424
+July 20, 2020
+Exploring the sample optixTriangle program
+OptiX
+4
+1969
+April 12, 2023
+How does optix code compilation work?
+OptiX
+24
+4242
+July 7, 2022
+Latest NVIDIA OptiX Renders Ray Tracing Faster Than Ever Before
+Technical Blog
+8
+1447
+August 26, 2022
+OptiX for usage in VR headsets?
+OptiX
+9
+2330
+January 5, 2022
+Struct of vectors instead of vector of structs in Optix API
+OptiX
+5
+1721
+January 10, 2018
+Trimesh.ray equivalent in Optix
+OptiX
+1
+115
+April 17, 2026

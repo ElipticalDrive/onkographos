@@ -1,0 +1,155 @@
+--- v004.md
++++ v005.md
+@@ -1,5 +1,4 @@
+ # Terrain Shader Lighting and Effects
+ 
+-Also called: Voxel Terrain Lighting, Chunk Mesh Lighting, Directional Face Shading
+ 
+ ## Overview
+@@ -8,79 +7,36 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Vertex Inputs:** `vertexPosition` (vec3), `vertexNormal` (vec3), `vertexColor` (vec4, where RGB is albedo and A is a mode-switch factor).
+-*   **Uniforms:** Model matrix `matModel`, MVP matrix `mvp`, `sunDirection` (vec3), `sunColor` (vec3), `ambientColor` (vec3), `cameraPosition` (vec3), `fogColor` (vec3), `fogStart` (float), `fogEnd` (float), `occluders` (array of vec4, xyz=center, w=radius), `pointLights` (array of vec4, xyz=position, w=range), `pointLightColors` (array of vec3), `waveCenter` (vec3), `waveRadius` (float), `waveWidth` (float), `waveStrength` (float), `waveColor` (vec3), `gridSpacing` (float), `gridStrength` (float), `worldShade` (float).
+-*   **Constants:** `MAX_OCCLUDERS = 8`, `MAX_POINT_LIGHTS = 8`.
+-*   **Output:** Fragment color (vec3).
++*   **Vertex Inputs:** `vertexPosition` (vec3), `vertexNormal` (vec3), `vertexColor` (vec4, where RGB is albedo and A is a mode-switch factor) [S1, unofficial].
++*   **Uniforms:** Model matrix `matModel`, MVP matrix `mvp`, `sunDirection` (vec3), `sunColor` (vec3), `ambientColor` (vec3), `cameraPosition` (vec3), `fogColor` (vec3), `fogStart` (float), `fogEnd` (float), `occluders` (array of vec4, xyz=center, w=radius), `pointLights` (array of vec4, xyz=position, w=range), `pointLightColors` (array of vec4), `waveCenter` (vec3), `waveRadius` (float), `waveWidth` (float), `waveStrength` (float), `waveColor` (vec3), `gridSpacing` (float), `gridStrength` (float), `worldShade` (float) [S1, unofficial].
++*   **Constants:** `MAX_OCCLUDERS = 8`, `MAX_POINT_LIGHTS = 8` [S1, unofficial].
++*   **Output:** Fragment color (vec3) [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Occluders:** Array of 8 `vec4` structures. Each `vec4` represents a spherical occluder: `xyz` is the center position, `w` is the radius.
+-*   **Point Lights:** Array of 8 `vec4` structures. Each `vec4` represents a point light: `xyz` is the position, `w` is the maximum range.
+-*   **Point Light Colors:** Array of 8 `vec3` structures. Each `vec3` is the color of the corresponding point light.
++*   **Occluders:** Array of 8 `vec4` structures. Each `vec4` represents a spherical occluder: `xyz` is the center position, `w` is the radius [S1, unofficial].
++*   **Point Lights:** Array of 8 `vec4` structures. Each `vec4` represents a point light: `xyz` is the position, `w` is the maximum range [S1, unofficial].
++*   **Point Light Colors:** Array of 8 `vec4` structures. Each `vec4` stores the color of the corresponding point light [S1, unofficial].
+ 
+ **Steps:**
++1.  **Vertex Shader Processing:** Transform the vertex position to clip space: `gl_Position = mvp * vec4(vertexPosition, 1.0)` [S1, unofficial]. Transform the vertex normal to world space: `fragNormal = mat3(matModel) * vertexNormal` [S1, unofficial]. Pass the vertex position to world space: `fragPosition = vec3(matModel * vec4(vertexPosition, 1.0))` [S1, unofficial]. Pass the vertex color: `fragColor = vertexColor` [S1, unofficial].
++2.  **Directional Face Shading:** Compute a directional shade factor based on the surface normal `n` (normalized `fragNormal`) [S1, unofficial]. Formula: `shade = n.x^2 * 0.80 + n.z^2 * 0.72 + n.y^2 * (n.y > 0.0 ? 1.00 : 0.55)` [S1, unofficial]. This blends face shades based on squared normal components, making top faces brighter (1.00) and bottom faces darker (0.55) [S1, unofficial].
++3.  **Sun Visibility and Shadowing:** Initialize `sunVisibility = 1.0` [S1, unofficial]. For each occluder in `occluders`: compute `toSun = -sunDirection` [S1, unofficial]. Compute `relative = occluder.xyz - fragPosition` [S1, unofficial]. Compute `along = dot(relative, toSun)` [S1, unofficial]. If `along <= 0.0`, the occluder is behind the surface; skip [S1, unofficial]. Compute perpendicular distance: `perpendicular = length(relative - toSun * along)` [S1, unofficial]. Apply soft edge shadowing: `shadow = smoothstep(occluder.w * 0.80, occluder.w * 1.20, perpendicular)` [S1, unofficial]. Update `sunVisibility *= (1.0 - shadow)` [S1, unofficial].
++4.  **Point Light Attenuation:** Initialize `pointLightSum = vec3(0.0)` [S1, unofficial]. For each point light in `pointLights`: compute `distance = length(light.xyz - fragPosition)` [S1, unofficial]. If `distance >= light.w`, skip [S1, unofficial]. Compute attenuation: `attenuation = (1.0 - distance / light.w)^2` [S1, unofficial]. Compute light direction: `toLight = normalize(light.xyz - fragPosition)` [S1, unofficial]. Compute Lambertian term: `lambert = max(dot(normalize(fragNormal), toLight / max(distance, 0.0001)), 0.0)` [S1, unofficial]. Add to sum: `pointLightSum += pointLightColors[i] * lambert * attenuation` [S1, unofficial].
++5.  **Final Color Composition:** Normalize `fragNormal` [S1, unofficial]. Compute albedo: `albedo = fragColor.rgb * mix(vec3(1.0), vec3(shade), worldShade)` [S1, unofficial]. Compute diffuse sunlight: `sunDiffuse = max(dot(normalize(fragNormal), -sunDirection), 0.0) * sunVisibility` [S1, unofficial]. Combine lighting: `litColor = albedo * (ambientColor + sunDiffuse * sunColor) + pointLightSum` [S1, unofficial]. Mix between lit and self-lit (vertex alpha): `finalColor = mix(litColor, albedo, fragColor.a)` [S1, unofficial].
++6.  **Grid Overlay:** If `gridStrength > 0.0`: compute grid coordinates: `p = fragPosition / gridSpacing` [S1, unofficial]. Compute width: `w = max(fwidth(p), 1e-4)` [S1, unofficial]. Compute grid mask: `g = abs(fract(p - 0.5) - 0.5) / w + abs(normalize(fragNormal)) * 10.0` [S1, unofficial]. Compute line mask: `line = clamp(1.0 - min(min(g.x, g.y), g.z), 0.0, 1.0)` [S1, unofficial]. Fade with distance: `near = 1.0 - smoothstep(6.0, 14.0, eyeDistance)` [S1, unofficial]. Apply: `finalColor *= 1.0 - 0.16 * line * near * gridStrength` [S1, unofficial].
++7.  **Mode-Switch Wave:** If `waveStrength > 0.0`: compute distance: `d = length(fragPosition.xz - waveCenter.xz)` [S1, unofficial]. Compute band: `band = 1.0 - smoothstep(0.0, waveWidth, abs(d - waveRadius))` [S1, unofficial]. Compute rim lighting: `rim = pow(1.0 - max(dot(normalize(fragNormal), normalize(cameraPosition - fragPosition)), 0.0), 2.0)` [S1, unofficial]. Compute wave color: `waveContrib = waveColor * band * waveStrength * (0.3 + 0.5 * rim)` [S1, unofficial]. Mute outside terrain: `mute = smoothstep(waveRadius, waveRadius + waveWidth, d)` [S1, unofficial]. Apply: `finalColor = mix(finalColor, dot(finalColor, vec3(0.299, 0.587, 0.114)), mute) + waveContrib` [S1, unofficial].
++8.  **Exponential Fog:** Compute fog factor: `fog = smoothstep(fogStart, fogEnd, eyeDistance)` [S1, unofficial]. Mix color with fog: `finalColor = mix(finalColor, fogColor, fog)` [S1, unofficial].
+ 
+-1.  **Vertex Shader Processing:**
+-    *   Transform the vertex position to clip space: `gl_Position = mvp * vec4(vertexPosition, 1.0)`.
+-    *   Transform the vertex normal to world space: `fragNormal = mat3(matModel) * vertexNormal`.
+-    *   Pass the vertex position to world space: `fragPosition = vec3(matModel * vec4(vertexPosition, 1.0))`.
+-    *   Pass the vertex color: `fragColor = vertexColor`.
++**Parameters:**
++*   `MAX_OCCLUDERS = 8`, `MAX_POINT_LIGHTS = 8` [S1, unofficial].
++*   `gridSpacing`, `gridStrength`, `waveRadius`, `waveWidth`, `waveStrength`, `fogStart`, `fogEnd`, `worldShade` are runtime uniforms [S1, unofficial].
++*   Typical values are not given in the sources.
+ 
+-2.  **Directional Face Shading:**
+-    *   Compute a directional shade factor based on the surface normal `n` (normalized `fragNormal`).
+-    *   Formula: `shade = n.x^2 * 0.80 + n.z^2 * 0.72 + n.y^2 * (n.y > 0.0 ? 1.00 : 0.55)`.
+-    *   This blends face shades based on squared normal components, making top faces brighter (1.00) and bottom faces darker (0.55) [S1, unofficial].
+-
+-3.  **Sun Visibility and Shadowing:**
+-    *   Initialize `sunVisibility = 1.0`.
+-    *   For each occluder in `occluders`:
+-        *   Compute `toSun = -sunDirection`.
+-        *   Compute `relative = occluder.xyz - fragPosition`.
+-        *   Compute `along = dot(relative, toSun)`.
+-        *   If `along <= 0.0`, the occluder is behind the surface; skip.
+-        *   Compute perpendicular distance: `perpendicular = length(relative - toSun * along)`.
+-        *   Apply soft edge shadowing: `shadow = smoothstep(occluder.w * 0.80, occluder.w * 1.20, perpendicular)`.
+-        *   Update `sunVisibility *= (1.0 - shadow)`.
+-
+-4.  **Point Light Attenuation:**
+-    *   Initialize `pointLightSum = vec3(0.0)`.
+-    *   For each point light in `pointLights`:
+-        *   Compute `distance = length(light.xyz - fragPosition)`.
+-        *   If `distance >= light.w`, skip.
+-        *   Compute attenuation: `attenuation = (1.0 - distance / light.w)^2`.
+-        *   Compute light direction: `toLight = normalize(light.xyz - fragPosition)`.
+-        *   Compute Lambertian term: `lambert = max(dot(normalize(fragNormal), toLight), 0.0)`.
+-        *   Add to sum: `pointLightSum += pointLightColors[i] * lambert * attenuation`.
+-
+-5.  **Final Color Composition:**
+-    *   Normalize `fragNormal`.
+-    *   Compute albedo: `albedo = fragColor.rgb * mix(vec3(1.0), vec3(shade), worldShade)`.
+-    *   Compute diffuse sunlight: `sunDiffuse = max(dot(normalize(fragNormal), -sunDirection), 0.0) * sunVisibility`.
+-    *   Combine lighting: `litColor = albedo * (ambientColor + sunDiffuse * sunColor) + pointLightSum`.
+-    *   Mix between lit and self-lit (vertex alpha): `finalColor = mix(litColor, albedo, fragColor.a)`.
+-
+-6.  **Grid Overlay:**
+-    *   If `gridStrength > 0.0`:
+-        *   Compute grid coordinates: `p = fragPosition / gridSpacing`.
+-        *   Compute width: `w = max(fwidth(p), 1e-4)`.
+-        *   Compute grid mask: `g = abs(fract(p - 0.5) - 0.5) / w + abs(normalize(fragNormal)) * 10.0`.
+-        *   Compute line mask: `line = clamp(1.0 - min(min(g.x, g.y), g.z), 0.0, 1.0)`.
+-        *   Fade with distance: `near = 1.0 - smoothstep(6.0, 14.0, length(cameraPosition - fragPosition))`.
+-        *   Apply: `finalColor *= 1.0 - 0.16 * line * near * gridStrength`.
+-
+-7.  **Mode-Switch Wave:**
+-    *   If `waveStrength > 0.0`:
+-        *   Compute distance: `d = length(fragPosition.xz - waveCenter.xz)`.
+-        *   Compute band: `band = 1.0 - smoothstep(0.0, waveWidth, abs(d - waveRadius))`.
+-        *   Compute rim lighting: `rim = pow(1.0 - max(dot(normalize(fragNormal), normalize(cameraPosition - fragPosition)), 0.0), 2.0)`.
+-        *   Compute wave color: `waveContrib = waveColor * band * waveStrength * (0.3 + 0.5 * rim)`.
+-        *   Mute outside terrain: `mute = smoothstep(waveRadius, waveRadius + waveWidth, d)`.
+-        *   Apply: `finalColor = mix(finalColor, dot(finalColor, vec3(0.299, 0.587, 0.114)), mute) + waveContrib`.
+-
+-8.  **Exponential Fog:**
+-    *   Compute fog factor: `fog = smoothstep(fogStart, fogEnd, length(cameraPosition - fragPosition))`.
+-    *   Mix color with fog: `finalColor = mix(finalColor, fogColor, fog)`.
++**Edge Cases and Pitfalls:**
++*   Division by zero in Lambertian term is guarded by `max(distance, 0.0001)` [S1, unofficial].
++*   `fwidth(p)` requires fragment shader derivative context; if unavailable, substitute with screen-space pixel size approximation [G].
++*   Degenerate normals or zero-length vectors should be normalized before dot products to avoid NaN propagation [G].
++*   Not given in the sources.
+ 
+ **Pseudocode:**
+-
+ ```python
+ def terrain_shader_lighting_effects(
+@@ -122,5 +78,5 @@
+         attenuation = (1.0 - distance / light.w)**2
+         to_light = normalize(light.xyz - frag_position)
+-        lambert = max(dot(n, to_light), 0.0)
++        lambert = max(dot(n, to_light / max(distance, 0.0001)), 0.0)
+         point_light_sum += point_light_colors[i] * lambert * attenuation
+ 
+@@ -158,16 +114,28 @@
+ 
+     return final_color
++
++def fwidth(p):
++    """Sum of absolute partial derivatives in screen space (GLSL standard)."""
++    return abs(dFdx(p)) + abs(dFdy(p))
++
++def dFdx(p):
++    """Partial derivative of p with respect to screen-space x (fragment shader context)."""
++    pass  # Provided by fragment shader runtime
++
++def dFdy(p):
++    """Partial derivative of p with respect to screen-space y (fragment shader context)."""
++    pass  # Provided by fragment shader runtime
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of occluders and point lights. Each occluder and point light requires a constant number of vector operations per fragment.
+-*   **Memory Complexity:** Constant, determined by the maximum number of occluders and point lights (8 each).
+-*   **Strengths:** Provides visually appealing terrain lighting with soft shadows and face-dependent shading. Efficient for real-time rendering on chunk meshes.
+-*   **Limitations:** Limited to spherical occluders and point lights. Grid and wave effects are purely visual and do not affect lighting physics. Performance degrades with a large number of dynamic lights or occluders.
+-*   **When to Use:** Suitable for voxel-based terrain rendering where visual fidelity is important but full global illumination is too expensive.
+-*   **When Not to Use:** Not suitable for physically accurate light transport or complex shadowing scenarios.
++*   **Time Complexity:** Linear with respect to the number of occluders and point lights; each requires a constant number of vector operations per fragment [G].
++*   **Memory Complexity:** Constant, determined by the maximum number of occluders and point lights (8 each) [G].
++*   **Strengths:** Provides visually appealing terrain lighting with soft shadows and face-dependent shading; efficient for real-time rendering on chunk meshes [G].
++*   **Limitations:** Limited to spherical occluders and point lights; grid and wave effects are purely visual and do not affect lighting physics; performance degrades with a large number of dynamic lights or occluders [G].
++*   **When to Use:** Suitable for voxel-based terrain rendering where visual fidelity is important but full global illumination is too expensive [G].
++*   **When Not to Use:** Not suitable for physically accurate light transport or complex shadowing scenarios [G].
+ 
+ ## Background
+-This method is implemented in the VoxelTerraformer project, an unofficial voxel engine [S1, unofficial]. It is designed to provide a rich visual experience for voxel terrain by combining various lighting and post-processing effects in a fragment shader. The method is specific to the VoxelTerraformer engine and is not a general-purpose technique found in standard graphics literature.
++The method is defined in a GLSL 330 fragment shader for chunk meshes within the VoxelTerraformer project [S1, unofficial]. It is designed to provide a rich visual experience for voxel terrain by combining various lighting and post-processing effects in a fragment shader. The method is specific to the VoxelTerraformer engine and is not a general-purpose technique found in standard graphics literature [S1, unofficial].
+ 
+ ## Sources

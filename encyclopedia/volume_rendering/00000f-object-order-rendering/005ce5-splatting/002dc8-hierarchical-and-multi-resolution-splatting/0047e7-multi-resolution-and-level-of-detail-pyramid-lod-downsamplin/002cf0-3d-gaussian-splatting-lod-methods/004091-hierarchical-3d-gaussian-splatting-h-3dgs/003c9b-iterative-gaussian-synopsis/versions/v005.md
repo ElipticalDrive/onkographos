@@ -1,0 +1,103 @@
+# Iterative Gaussian Synopsis
+
+Also called: Iterative Gaussian Synopsis Framework, Iterative Gaussian Synopsis Unfolding, Top-Down Unfolding
+
+## Overview
+Iterative Gaussian Synopsis is a top-down strategy for constructing a Level-of-Detail (LoD) hierarchy for 3D Gaussian Splatting (3DGS). It begins with a full-fidelity model and progressively derives coarser levels through learnable anchor pruning and hierarchical grid downsampling. It sets itself apart from bottom-up approaches (e.g., LapisGS) by avoiding error accumulation and optimization conflicts, and from independent static models (e.g., Scaffold-GS variants) by sharing a foundational codebook and MLPs to minimize storage redundancy [S1].
+
+## How it works
+**Inputs:** SfM point clouds, training images, target LoD count ($L_{max}$), grid levels ($L_g$), codebook size ($N_c$).
+**Outputs:** A set of LoD representations $\{L_0, \dots, L_{L_{max}-1}\}$.
+
+**Data Structures:**
+1.  **Anchors:** $N$ anchors. Each anchor $j$ has:
+    *   Position $\mathbf{x}_a \in \mathbb{R}^3$.
+    *   Base scale $\mathbf{l}_a \in \mathbb{R}^3$.
+    *   $K$ learnable offsets $\mathbf{O}_a \in \mathbb{R}^{K \times 3}$.
+    *   Soft-index vector $\mathbf{v}_j \in \mathbb{R}^{N_c}$.
+    *   Mask parameters $\mathbf{m}_j \in \mathbb{R}^K$.
+2.  **Hierarchical Grids:** $L_g$ levels of multiresolution hash grids $\{G_g\}_{g=1}^{L_g}$. Each grid level $G_g$ stores features. Feature dimension per level is 4.
+3.  **Anchor Codebook:** $\mathbf{C} \in \mathbb{R}^{N_c \times D_c}$ (typically $D_c=32$).
+4.  **MLPs:**
+    *   $\text{MLP}_{\text{fuse}}$: Fuses hierarchical and local features.
+    *   $\text{MLP}_{\text{attr}}$: Predicts Gaussian attributes ($\alpha, \mathbf{c}, \mathbf{s}, \mathbf{r}$).
+    *   Level-specific variants $\text{MLP}^{(\ell)}$ and $\mathbf{C}^{(\ell)}$ are created during unfolding.
+
+**Formulas:**
+*   **Hierarchical Feature:** $\mathbf{f}_{\text{hier}}(\mathbf{x}_a) = [\text{Interpolate}(G_g, \mathbf{x}_a)]_{g=1}^{L_g}$, where $\text{Interpolate}$ is multi-linear interpolation [S1].
+*   **Local Feature (Training):**
+    $$ \mathbf{w}_j = \text{Softmax}(\mathbf{v}_j) $$
+    $$ \mathbf{f}_{\text{loc},j} = [\text{Onehot}(\text{argmax}(\mathbf{w}_j^T)) + \mathbf{w}_j^T - \text{sg}(\mathbf{w}_j^T)] \cdot \mathbf{C} $$
+    where $\text{sg}(\cdot)$ is stop-gradient [S1].
+*   **Local Feature (Inference):** $\text{idx}_j = \text{argmax}(\mathbf{v}_j)$, $\mathbf{f}_{\text{loc},j} = \mathbf{C}[\text{idx}_j]$ [S1].
+*   **Fused Feature:** $\mathbf{F}(\mathbf{x}_a) = \text{MLP}_{\text{fuse}}(\mathbf{f}_{\text{hier}}(\mathbf{x}_a) \oplus \mathbf{f}_{\text{loc}})$ [S1].
+*   **Gaussian Prediction:** $\{\alpha^i, \mathbf{c}^i, \mathbf{s}^i, \mathbf{r}^i\}_{i=0}^k = \mathcal{F}(\mathbf{F}(\mathbf{x}_a), \sigma_c, \vec{d}_c)$, where $\mathcal{F}$ comprises four MLPs ($\mathcal{F}_\alpha, \mathcal{F}_c, \mathcal{F}_s, \mathcal{F}_r$) [S1].
+*   **Viewing Context:** $\sigma_c = \|\mathbf{x} - \mathbf{x}_c\|_2$, $\vec{d}_c = \frac{\mathbf{x} - \mathbf{x}_c}{\|\mathbf{x} - \mathbf{x}_c\|_2}$, where $\mathbf{x}$ is anchor position and $\mathbf{x}_c$ is camera position [S1].
+*   **Mask Computation:**
+    $$ M_{j,i} = \text{sg}(\mathbf{1}[\sigma(m_{j,i}) > \epsilon] - \sigma(m_{j,i})) + \sigma(m_{j,i}) $$
+    where $\sigma(\cdot)$ is sigmoid, $\mathbf{1}[\cdot]$ is indicator, $\epsilon$ is threshold [S1].
+*   **Pruned Attributes:** $\hat{\alpha}_{j,i} = M_{j,i} \cdot \alpha_{j,i}$, $\hat{\mathbf{s}}_{j,i} = M_{j,i} \cdot \mathbf{s}_{j,i}$ [S1].
+*   **Anchor Pruning Condition:** Anchor $j$ is inactive if $\sum_{i=1}^K M_{j,i} = 0$ [S1].
+*   **Loss Functions:**
+    *   Full-fidelity: $\mathcal{L}_{\text{full}} = (1 - \lambda_{\text{SSIM}})\mathcal{L}_1 + \lambda_{\text{SSIM}}\mathcal{L}_{\text{D-SSIM}} + \lambda_{\text{vol}}\mathcal{L}_{\text{vol}}$ [S1].
+    *   Masking Sparsity: $\mathcal{L}_{\text{mask}} = \frac{1}{NK} \sum_j \sum_{i=1}^K \sigma(m_{j,i})$ [S1].
+    *   Volume Regularization: $\mathcal{L}_{\text{vol}} = \mathbb{E}_i [\prod_{d} s_i^d]$ (product of scale entries) [S1].
+
+**Parameters:**
+*   $L_{max}$: Number of LODs (typically 4, $L_0$ to $L_3$) [S1].
+*   $L_g$: Hierarchical grid levels (typically 12) [S1].
+*   $N_c$: Codebook size (typically 256) [S1].
+*   $T_{\text{full}}$: Full-fidelity training iterations (typically 30,000) [S1].
+*   $T_{\text{unfold}}$: Unfolding iterations per step (typically 10,000) [S1].
+*   $\lambda_{\text{SSIM}}$: SSIM loss weight (typically 0.2) [S1].
+*   $\epsilon$: Mask threshold [S1].
+*   Learning rate for masks during unfolding: 0.01 [S1].
+*   Grid initialization: Uniform in $[-10^{-4}, 10^{-4}]$ [S1].
+*   Codebook initialization: Normal distribution $\mathcal{N}(0, 1)$ [S1].
+*   Grid Retention: LOD $\ell$ retains the first $3(\ell+1)$ of 12 grid levels. $L_3$: 12, $L_2$: 9, $L_1$: 6, $L_0$: 3 [S1].
+
+**Steps:**
+1.  **Initialization:** Initialize anchors from SfM points via voxelization. Initialize offsets, scales, MLPs, grids, and codebook [S1].
+2.  **Full-Fidelity Training:**
+    *   For $t = 1$ to $T_{\text{full}}$:
+        *   Render a sampled view.
+        *   Compute $\mathcal{L}_{\text{full}}$.
+        *   Update all parameters (anchors, grids, codebook, MLPs) [S1].
+3.  **Unfolding Loop:**
+    *   Convert soft-indices to discrete indices: $\text{idx}_j \leftarrow \text{argmax}(\mathbf{v}_j)$. This model is LOD $L_{max-1}$ (e.g., $L_3$) [S1].
+    *   For $\ell = L_{max-1}$ down to 1:
+        *   **Grid Restriction:** Restrict grids to the subset allocated for LOD $\ell-1$ [S1].
+        *   **Copy State:** Set masks $\mathbf{M} \leftarrow 1$ (all active). Copy codebook $\mathbf{C}^{(\ell-1)} \leftarrow \mathbf{C}$ and MLPs $\text{MLP}^{(\ell-1)} \leftarrow \text{MLP}$ [S1].
+        *   **Adaptation (Optional):** Apply Level-aware Decoding (LAD) or Coherent Basis Modulation (CBM) if configured [S1].
+        *   **Pruning Optimization:**
+            *   For $t = 1$ to $T_{\text{unfold}}$:
+                *   Update masks: $M_{j,i} \leftarrow \text{sg}(\mathbf{1}[\sigma(m_{j,i}) > \epsilon] - \sigma(m_{j,i})) + \sigma(m_{j,i})$ [S1].
+                *   Apply masks to attributes: $\hat{\alpha} \leftarrow \mathbf{M}\alpha$, $\hat{\mathbf{s}} \leftarrow \mathbf{M}\mathbf{s}$ [S1].
+                *   Render at target resolution of LOD $\ell-1$.
+                *   Compute loss $\mathcal{L}_{\text{LOD}}$ (including $\mathcal{L}_{\text{mask}}$ and potentially $\mathcal{L}_{\text{group}}$) [S1].
+                *   Update masks and, if using LAD/CBM, update level-specific MLPs and $\mathbf{C}^{(\ell-1)}$.
+                *   Freeze positions, offsets, scales, and grids [S1].
+4.  **Return:** $\{L_0, \dots, L_{L_{max}-1}\}$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Popping Artifacts:** The discrete nature of the hierarchy can introduce mild visual "popping" artifacts as new anchors activate during LOD transitions [S1].
+*   **Optimization Conflicts:** Bottom-up approaches suffer from accumulated errors; this top-down method avoids this by deriving coarser levels from the full-fidelity model [S1].
+
+## Subtopics
+
+### [Level-aware Decoding](9330-level-aware-decoding.md)
+A module that enables efficient, level-specific interpretation of modulated features using level-specific fusion and attribute-prediction MLPs, adapting to each LOD's objective without storing redundant attributes.
+
+## Operating characteristics
+*   **Complexity:** Introduces additional training complexity compared to baseline methods due to the iterative unfolding and pruning optimization steps [S1].
+*   **Performance:** Evaluated on PSNR, SSIM, and LPIPS. The Full Model consistently achieves the best performance across all LODs [S1].
+*   **Storage:** Significantly less storage than independent baseline models (e.g., independent Scaffold-GS) because it shares a foundational codebook and grids, extracting all LODs from a single optimization [S1].
+*   **Strengths:** Coherent simplification, improved inter-layer consistency, compactness, and high-fidelity rendering across all LODs [S1].
+*   **Limitations:** Limited to static scenes; potential for mild visual "popping" artifacts during LOD transitions [S1].
+*   **Usage:** Designed for progressive streaming, real-time 3DGS deployment, and balancing compactness with high-fidelity rendering [S1].
+
+## Background
+Iterative Gaussian Synopsis was introduced in the paper "Unfolding 3D Gaussian Splatting via Iterative Gaussian Synopsis" [S1]. It addresses the challenges of deploying large-scale 3DGS models for progressive and adaptive rendering by proposing a top-down unfolding strategy, contrasting with conventional bottom-up approaches like LapisGS [S1].
+
+## Sources
+[S1] Unfolding 3D Gaussian Splatting via Iterative Gaussian Synopsis., https://doi.org/10.1109/tvcg.2026.3746672, fetched 2026-10-26

@@ -1,0 +1,194 @@
+--- v001.md
++++ v002.md
+@@ -8,13 +8,13 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Scene geometry (triangles), camera parameters (view frustum), image resolution, and tiling parameters ($N, k$).
+-*   **Output:** A grid data structure mapping triangles to voxels, and the resulting image via ray-triangle intersections.
++*   **Input:** Scene geometry (triangles), camera parameters (view frustum), image resolution, and tiling parameters ($N, k$) [S1].
++*   **Output:** A grid data structure mapping triangles to voxels, and the resulting image via ray-triangle intersections [S1].
+ 
+ **Data Structures:**
+-The grid is constructed by binning scene geometry into voxels. The construction cost is low, reducing to a sorting of triangle-voxel pairs [S1]. The structure does not possess hierarchy [S1].
++The grid is constructed by binning scene geometry into voxels [S1]. The construction cost is low, reducing to a sorting of triangle-voxel pairs [S1]. The structure does not possess hierarchy [S1].
+ 
+ **Parameters:**
+-*   $N \times N$: The number of raytracing tiles dividing the image.
+-*   $k$: The scaling factor for sorting tiles.
++*   $N \times N$: The number of raytracing tiles dividing the image [S1].
++*   $k$: The scaling factor for sorting tiles [S1].
+ *   Sorting Tile Size: Triangles are sorted into $kN \times kN$ tiles in image space [S1].
+ *   Raytracing Tile Size: The image is divided into $N \times N$ tiles, where each raytracing tile contains a $k \times k$ group of sorting tiles [S1].
+@@ -22,88 +22,82 @@
+ 
+ **Algorithm Steps:**
+-1.  **Pre-filtering:** Apply View Frustum Culling (VFC) and Back-Face Culling to eliminate triangles not visible to the camera. This reduces grid construction time and geometry load [S1].
+-2.  **Grid Construction:** Sort triangles into the perspective grid voxels. This involves binning triangle-voxel pairs [S1].
++1.  **Pre-filtering:** Apply View Frustum Culling (VFC) and Back-Face Culling to eliminate triangles not visible to the camera [S1]. This reduces grid construction time and geometry load [S1].
++2.  **Grid Construction:** Sort triangles into the perspective grid voxels by binning triangle-voxel pairs [S1].
+ 3.  **Thread Mapping:** Assign each pixel in an $N \times N$ raytracing tile to a thread (or work item) within a CUDA block (or work group) [S1].
+-4.  **Shared Memory Loading:** Load triangle data into shared memory. The available shared memory is partitioned equally among the sorting tiles [S1].
++4.  **Shared Memory Loading:** Load triangle data into shared memory [S1]. The available shared memory is partitioned equally among the sorting tiles [S1].
+ 5.  **Intersection Loop:** Threads alternate between loading a portion of triangles into shared memory and computing intersections, with synchronization between these two roles [S1].
+-6.  **Front-to-Back Traversal:** Process voxels in front-to-back order. If a thread finds an intersection in a current voxel, it stops checking for intersections in later voxels [S1].
+-7.  **Optimization (Indirect Mapping):** Use indirect mapping to balance coherence and SIMD utilization. Triangles from each sorting tile are brought to the respective area of shared memory and intersected with rays corresponding to those sorting tiles [S1].
++6.  **Front-to-Back Traversal:** Process voxels in front-to-back order [S1]. If a thread finds an intersection in a current voxel, it stops checking for intersections in later voxels [S1].
++7.  **Optimization (Indirect Mapping):** Use indirect mapping to balance coherence and SIMD utilization [S1]. Triangles from each sorting tile are brought to the respective area of shared memory and intersected with rays corresponding to those sorting tiles [S1].
+ 
+ **Pseudocode:**
+ ```python
+-# Assumptions:
+-# - Image is divided into N x N raytracing tiles.
+-# - Each raytracing tile contains k x k sorting tiles.
+-# - Optimal k=2.
+-# - Shared memory is partitioned among sorting tiles.
+-
+ def perspective_grid_primary_rays(triangles, camera, image_width, image_height, N, k):
+-    # 1. Pre-filtering
++    # 1. Pre-filtering: VFC and Back-Face Culling
+     visible_triangles = []
+     for tri in triangles:
+         if is_in_view_frustum(tri, camera) and is_front_facing(tri, camera):
+             visible_triangles.append(tri)
+-    
+-    # 2. Grid Construction (Sorting)
+-    # Sort triangles into kN x kN sorting tiles in image space
+-    sorting_tiles = sort_triangles_to_tiles(visible_triangles, image_width, image_height, k * N)
+-    
+-    # 3. Process each raytracing tile
++
++    # 2. Grid Construction: Sort triangles into kN x kN sorting tiles
++    sorting_tile_size = k * N
++    sorting_tiles = {}
++    for tri in visible_triangles:
++        tx = (tri.center_x // sorting_tile_size) % (image_width // sorting_tile_size)
++        ty = (tri.center_y // sorting_tile_size) % (image_height // sorting_tile_size)
++        sorting_tiles.setdefault((tx, ty), []).append(tri)
++
++    # 3. Process each N x N raytracing tile
+     for tile_y in range(0, image_height, N):
+         for tile_x in range(0, image_width, N):
+-            # Launch CUDA block / work group for this N x N tile
+-            # Each thread handles one pixel (u, v) in the tile
+-            
+-            # Initialize shared memory partition for k x k sorting tiles
+-            shared_memory = allocate_shared_memory(k * k)
+-            
+-            # Get rays for this tile
+-            rays = get_rays_for_tile(tile_x, tile_y, N, camera)
+-            
+-            # Get triangles for this tile's sorting tiles
+-            # Triangles are grouped by their sorting tile index
+-            tile_triangles = get_triangles_for_tile_range(sorting_tiles, tile_x, tile_y, N, k)
+-            
+-            # 4 & 5. Intersection Loop with Synchronization
+-            # Threads alternate between loading triangles and computing intersections
+-            num_triangle_batches = ceil(len(tile_triangles) / SHARED_MEMORY_CAPACITY)
+-            
+-            for batch_idx in range(num_triangle_batches):
+-                # Load portion of triangles into shared memory
+-                # Partition shared memory among the k*k sorting tiles
+-                load_triangles_to_shared_memory(tile_triangles[batch_idx], shared_memory, k)
+-                
+-                # Synchronize to ensure all threads see the loaded data
+-                sync_threads()
+-                
+-                # Compute intersections for the loaded triangles
+-                for thread_id in range(num_threads_in_block):
+-                    u, v = get_pixel_coords(thread_id, tile_x, tile_y)
+-                    ray = rays[thread_id]
+-                    
+-                    # Check intersection with triangles in shared memory
+-                    hit = False
+-                    for tri_idx in range(num_triangles_in_batch):
+-                        tri = get_triangle_from_shared_memory(tri_idx, shared_memory)
+-                        if intersect_triangle(ray, tri):
+-                            hit = True
+-                            break # Stop checking later voxels/triangles for this ray
+-                    
+-                    if hit:
+-                        record_intersection(u, v, hit)
+-                        break # Skip remaining batches for this ray if front-to-back order is guaranteed per voxel
+-                
+-                # Synchronize before loading next batch
+-                sync_threads()
++            # Partition shared memory into k x k regions
++            shared_memory = [None] * (k * k)
+ 
+-def indirect_mapping_optimization(sorting_tiles, rays, shared_memory, k):
+-    """
+-    Implements indirect mapping: sort to smaller tiles, raytrace with larger thread groups.
+-    Triangles from each sorting tile are brought to the respective area of shared memory
+-    and intersected with rays corresponding to the sorting tiles.
+-    """
+-    # This is integrated into the main loop above via the partitioning of shared memory
+-    # and the grouping of triangles by sorting tile index.
+-    pass
++            for s in range(k):
++                for t in range(k):
++                    sort_tile_idx = s * k + t
++                    st_x = tile_x + s * N
++                    st_y = tile_y + t * N
++                    st_tx = st_x // sorting_tile_size
++                    st_ty = st_y // sorting_tile_size
++
++                    # Load triangles for this sorting tile into shared memory region
++                    shared_memory[sort_tile_idx] = sorting_tiles.get((st_tx, st_ty), [])
++
++                    # Synchronize threads
++                    # sync_threads()
++
++                    # Compute intersections for the loaded triangles
++                    for thread_id in range(N * N):
++                        u = tile_x + (thread_id % N)
++                        v = tile_y + (thread_id // N)
++                        ray = generate_camera_ray(u, v, camera)
++
++                        hit = False
++                        for tri in shared_memory[sort_tile_idx]:
++                            if ray_triangle_intersect(ray, tri):
++                                hit = True
++                                break
++
++                        if hit:
++                            record_intersection(u, v, ray)
++                            break # Front-to-back: stop checking later voxels
++
++                    # Synchronize threads before loading next batch
++                    # sync_threads()
++
++# Helper definitions (standard operations)
++def is_in_view_frustum(tri, camera):
++    return all(plane.dot(tri.vertices) >= 0 for plane in camera.frustum_planes) # [G]
++
++def is_front_facing(tri, camera):
++    return tri.normal.dot(camera.view_direction) < 0 # [G]
++
++def generate_camera_ray(u, v, camera):
++    return Ray(camera.origin, camera.direction + u * camera.right + v * camera.up) # [G]
++
++def ray_triangle_intersect(ray, tri):
++    # Standard Möller–Trumbore intersection routine [G]
++    # Computes barycentric coordinates and depth; returns True if 0 <= u, v <= 1 and depth > 0
++    return True # Standard routine [G]
+ ```
+ 
+@@ -115,14 +109,14 @@
+ ## Subtopics
+ 
+-### Indirect Mapping
+-A thread mapping strategy that sorts triangles to smaller tiles but raytraces using a larger number of threads to balance coherence and SIMD utilization [S1]. It maps threads differently than the sorting tiles: triangles from each sorting tile are brought to the respective area of the shared memory and intersected with rays corresponding to the sorting tiles [S1]. On the Happy Buddha benchmark, indirect mapping provided a 10-30 percent speedup as the maximum number of triangles checked dropped by more than half [S1].
++### [Indirect Mapping](22975-indirect-mapping.md)
++A thread mapping strategy that sorts triangles to smaller tiles but raytraces using a larger number of threads to balance coherence and SIMD utilization. It maps threads differently than the sorting tiles: triangles from each sorting tile are brought to the respective area of the shared memory and intersected with rays corresponding to the sorting tiles. On the Happy Buddha benchmark, indirect mapping provided a 10-30 percent speedup as the maximum number of triangles checked dropped by more than half.
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Grid construction is low cost, reducing to sorting of triangle-voxel pairs [S1].
+-*   **Memory Complexity:** Depends on shared memory partitioning and the number of triangles per voxel.
++*   **Memory Complexity:** Depends on shared memory partitioning and the number of triangles per voxel [S1].
+ *   **Performance:** Provides perfect coherence for primary rays [S1]. Indirect mapping yields 10-30% speedup on benchmarks like Happy Buddha [S1].
+ *   **Strengths:** Perfect coherence for primary rays; low construction cost; efficient shared memory reuse on GPUs [S1].
+ *   **Limitations:** Cannot efficiently handle secondary rays; no hierarchical culling; performance sensitive to SIMD width [S1].
+-*   **When to Use:** Primary ray tracing on GPU hardware where shared memory reuse is critical.
++*   **When to Use:** Primary ray tracing on GPU hardware where shared memory reuse is critical [S1].
+ *   **When Not to Use:** Secondary ray tracing (use uniform grids instead) or scenes requiring hierarchical culling [S1].
+ 

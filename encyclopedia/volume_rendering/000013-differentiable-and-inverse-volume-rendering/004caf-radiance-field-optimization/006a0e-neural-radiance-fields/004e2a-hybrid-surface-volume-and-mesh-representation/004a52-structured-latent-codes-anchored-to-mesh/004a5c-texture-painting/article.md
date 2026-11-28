@@ -1,0 +1,96 @@
+# Texture Painting
+
+Also called: local texture editing
+
+## Overview
+Texture painting is a method for locally editing the appearance of a 3D avatar or mesh by fine-tuning specific latent codes to match a 2D input painting [S1][S2, unofficial]. It solves the problem of transferring 2D artistic intent to a 3D neural representation while preserving the geometry and appearance of unedited regions [S1]. It operates on a subset of anchor nodes, allowing for independent, spatial-aware local edits [S2, unofficial].
+
+## How it works
+**Inputs:** A 2D painting image, a binary mask indicating the region to edit, the current mesh scaffold (vertices and faces), and the neural implicit field parameters (shading network, signed height indicator, and latent codes) [S1][S2, unofficial].
+**Outputs:** Updated latent codes for the affected anchor nodes [S1][S2, unofficial].
+
+**Data Structures:**
+*   **Mesh Scaffold:** Defined by vertices $V$ and faces $F$, where each vertex $v_i$ stores an anchor latent code $c_i$ [S1][S2, unofficial].
+*   **Binary Mask:** A 2D image $M$ where $M(u,v)=1$ if the pixel $(u,v)$ is painted, $0$ otherwise [S1][S2, unofficial].
+*   **Neural Field Parameters:** Shading network $f_{\text{shade}}$, non-trainable signed height indicator $h$, and latent codes $C = \{c_i\}$ [S2, unofficial].
+
+**Steps:**
+1.  **Ray Casting:** Shoot probing rays from the camera through the painted pixels in the 2D painting image towards the mesh scaffold [S1].
+2.  **Hit Detection:** Identify the faces hit by these rays. Collect all vertices of the hit faces to determine the set of affected anchor nodes $V_{\text{affected}}$ [S1].
+3.  **Mask Dilation:** Dilate the binary mask $M$ slightly to create a boundary region [S2, unofficial].
+4.  **Training Ray Sampling:** Sample training rays using the dilated mask. This ensures smooth texture boundaries by including pixels adjacent to the painted region in the optimization [S2, unofficial].
+5.  **Optimization Setup:** Fix the shading network parameters. Fix the latent codes for all nodes $v_j \notin V_{\text{affected}}$. Enable gradient updates only for latent codes $c_i$ where $v_i \in V_{\text{affected}}$ [S1][S2, unofficial].
+6.  **Loss Function:** Minimize the difference between the rendered pixel values and the target painting pixel values. The pixel value is determined by the interpolated latent code, the local signed height indicator, and the shading factor [S2, unofficial].
+7.  **Learning Rate Adjustment:** Use a higher learning rate for the latent codes compared to other parameters to prevent the non-trainable signed height indicator from dominating the optimization [S2, unofficial]. Specifically, increase the learning rate gap further during texture painting compared to standard training [S2, unofficial].
+8.  **Iteration:** Repeat steps 5-7 for a fixed number of iterations [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def texture_painting(painting_img, mask, mesh_V, mesh_F, latent_codes, shading_net, signed_height, lr_code, num_iters=8000):
+    # 1. Identify affected nodes via ray casting
+    hit_faces = []
+    for u, v in zip(*np.where(mask > 0)):
+        ray_origin = camera_projection(u, v)
+        ray_dir = normalize(ray_origin - camera_center)
+        hit = ray_triangle_intersection(ray_origin, ray_dir, mesh_V, mesh_F)
+        if hit is not None:
+            hit_faces.append(hit.face_id)
+    affected_V = set()
+    for f_id in hit_faces:
+        affected_V.update(mesh_F[f_id].vertices)
+
+    # 2. Prepare optimizer state
+    trainable_mask = {v: (v in affected_V) for v in mesh_V}
+    for v in mesh_V:
+        if not trainable_mask[v]:
+            latent_codes[v].requires_grad = False
+
+    # 3. Dilate mask for smooth boundaries
+    dilated_mask = morphological_dilate(mask, kernel_size=3)
+
+    # 4. Optimization loop
+    optimizer = Adam([latent_codes[v] for v in affected_V], lr=lr_code)
+    for i in range(num_iters):
+        rays = sample_rays_through_mask(dilated_mask)
+        rendered_colors = []
+        target_colors = []
+
+        for ray in rays:
+            c_interp = interpolate_latents(ray.hit_point, mesh_V, mesh_F, latent_codes)
+            color = shading_net(c_interp, signed_height[ray.face_id])
+            rendered_colors.append(color)
+            target_colors.append(painting_img[ray.u, ray.v])
+
+        loss = mse_loss(rendered_colors, target_colors)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    return latent_codes
+```
+*(Note: Helper functions `camera_projection`, `ray_triangle_intersection`, `morphological_dilate`, `sample_rays_through_mask`, `interpolate_latents`, `mse_loss`, and `Adam` are standard operations [G].)*
+
+**Parameters:**
+*   **Learning Rate (Latent Codes):** Significantly higher than other parameters (e.g., 10 times higher than standard training) [S2, unofficial].
+*   **Iterations:** 8000 iterations [S1].
+*   **Optimization Duration:** ~1 hour on the reported hardware [S1].
+*   **Optimizer:** Adam [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Overfitting to Signed Height:** The texture decoder may overfit to the non-trainable signed height indicator during single-image fine-tuning, generating artifacts at other positions [S2, unofficial]. This is mitigated by increasing the learning rate gap [S2, unofficial].
+*   **Boundary Artifacts:** Without mask dilation, texture boundaries may appear sharp or aliased [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given in the sources. Empirically, optimization takes ~1 hour for 8000 iterations [S1].
+*   **Memory Complexity:** Not explicitly given in the sources. Only a subset of latent codes are updated during optimization [S1][S2, unofficial].
+*   **Strengths:** Allows precise, local 2D-to-3D texture transfer; preserves geometry and unedited appearance; supports novel view synthesis of edited textures [S2, unofficial].
+*   **Limitations:** Requires a neural implicit field setup; optimization can be slow (~1 hour); risk of artifacts if learning rates are not tuned correctly [S2, unofficial].
+*   **When to use:** When local appearance editing is required without retraining the entire model or altering geometry [S2, unofficial].
+
+## Background
+Texture painting was introduced in the context of Unified Volumetric Avatars (UVA) and NeuMesh for editing human avatars and 3D objects [S1][S2, unofficial]. It addresses the challenge of disentangling geometry and appearance in neural implicit fields to allow for fine-grained editing [S2, unofficial]. Previous methods relied on neural texture map replacement or separate implicit fields, which lacked the flexibility of this approach [S2, unofficial].
+
+## Sources
+[S1] NeuMesh: Learning Disentangled Neural Mesh-Based Implicit Field for Geometry and Texture Editing, https://doi.org/10.1007/978-3-031-19787-1_34, fetched 2026-10-26
+[S2] UVA: Towards Unified Volumetric Avatar for View Synthesis, Pose rendering, Geometry and Texture Editing, https://doi.org/10.48550/arXiv.2304.06969, fetched 2026-10-29 (unofficial)

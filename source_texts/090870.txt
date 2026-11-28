@@ -1,0 +1,218 @@
+# 概要
+本ワークフローは全天球画像:Equirectangular(正距円筒図法)画像を使って、ロバストかつ比較的高速にカメラアラインメント(SfM)を行い、3D Gaussian Splatting(3DGS)の学習を行うワークフロー例を示します<br>
+本ワークフローは[簡単＆高速 360°全天球カメラとMetashapeで高品質3D Gaussian Splatting制作](https://qiita.com/kotohibi/items/2ba07a7a30e5c16c1b49)のMetashapeによるカメラアラインメント(SfM)をColmap利用に書き換えたものになります。併せて一読下さい。
+# 参考
+※下記作例はMetashapeを利用したものですが、Colmapでも近いものを制作可能です。
+### DJI AVATA360での作例
+* https://x.com/kotohibi_3d/status/2079907663895482456
+* https://x.com/kotohibi_3d/status/2040724840504758578
+* https://x.com/naribubu/status/2038881884558791088
+* https://x.com/naribubu/status/2038875398717722743
+### DJI OSMO360での作例
+* https://x.com/kotohibi_3d/status/2088521899160879450
+* https://x.com/kotohibi_3d/status/2082426800215654725
+* https://x.com/kotohibi_3d/status/2074821581948481758
+* https://x.com/kotohibi_3d/status/2038179454367957106
+# 必要な物
+* 360° カメラ
+    * DJI OSMO360
+    * DJI AVATA360
+    * Insta360
+ 
+* ハイエンドPCとNVIDIA GPU
+    * 3DGSの学習には高性能なGPUが必要になります。特にVRAMは多い方が良いです。最低でも12GB以上のVRAMを搭載したGPUを推奨します。
+  
+* Colmap
+  * オープンソースソフトウェアのカメラアラインメント(SfM)ソフトです
+    * https://colmap.github.io/
+  * 全天球画像を直接SfM可能で、比較的ロバスト、高速です
+  * 本ワークフローは執筆時点の最新版V4.2.0を利用しています。以下からダウンロード可能です
+    * https://github.com/colmap/colmap/tags
+    * バイナリ(CUDA対応)版 **colmap-x64-windows-cuda.zip**の利用をお勧めします
+
+* 3D Gaussian Splatting software
+    * LichtFeld Studio(LFS): https://lichtfeld.io/
+    * Postshot: https://www.jawset.com/
+    * Brush: https://github.com/ArthurBrussee/brush
+* 動画から静止画切り出しツール
+    * Extract Sharpest Frame（無料版）
+        * https://github.com/Kotohibi/Extract_sharpest_frame
+    * 360 Extractor（有料版）
+        * https://kotohibi.f5.si/360/extractor.html
+* Colmap 360 SfMの結果をCubemapに変換ツール
+    * 360 CCConverter（有料版）
+        * https://kotohibi.f5.si/360/ccconverter.html
+
+
+# 動画撮影する(e.g. OSMO360)
+カメラを自撮り棒に付けて、キャプチャしたい範囲をゆっくりと歩きます
+動画設定はD-Log M, 30fps以上の撮影がお勧めです
+# 動画を現像する
+### DJI Studioに撮影データを取り込み、現像処理(色復元)をします
+* 下記画像の赤枠の設定を実施。
+![](https://static.zenn.studio/user-upload/73e15e4400df-20260919.jpg)
+* (高度な設定)Extract Sharpest Frame V1.0.0から実装されたシームマスクを利用する場合、RockSteadyをoffにします。RockSteadyは電子手振れ補正、水平維持をする機能ですが、ステッチラインが変化します。Insta360の場合もそれに相当する機能はオフにします。
+    * (補足)シームマスクは前後の魚眼カメラのステッチラインのズレにマスクをして、後述のカメラアラインメントおよび3DGS学習から当該部分を除外することが可能です。
+![](https://static.zenn.studio/user-upload/256666a37f9e-20260919.jpg)
+### 動画を書き出す
+* 全天球動画としてMP4ファイルで動画を書き出します。設定例を下図に示します
+  * ノイズリダクションはオンにして、品質優先を選択します
+  * 10-Bit Colorはオフにします
+* 複数クリップの場合は"複数クリップ"で現像してもＯＫです。後述するExtract Sharpest Frameは複数動画をバッチ処理できます。
+![](https://static.zenn.studio/user-upload/4319b9bb7727-20260919.jpg)
+# 動画から静止画を切り出す
+* 動画から静止画を切り出す方法は様々あります。お好きな方法を調査、選択してください
+ここでは私が公開しているツールをご紹介します
+**Extract Sharpest Frame**は指定フレーム間隔で一番シャープな画像を切り出すツールです
+* **新機能はBOOTH版を優先的にupdateしております**
+![](https://static.zenn.studio/user-upload/48077f5baf77-20260919.png)
+
+|主要項目|説明|
+|---|---|
+|Video file|全天球動画を選択。複数動画を選択し一括処理可能です。<br><small>注）マルチバイト文字を含むファイルパスは未サポート</small>|
+|Output folder|静止画とマスクを切り出す先のフォルダを指定。このフォルダ以下にframesとmasksフォルダが作られます。複数動画から切り出した画像を一つのフォルダにまとめるかを選択可能です<br><small>注）マルチバイト文字を含むファイルパスは未サポート</small>||
+|Scale width|全動画フレームの画像のシャープさを計算する時の画サイズです。大きくした方が緻密に計算されます。注）切り出し画像は常にオリジナル動画と同じ画サイズで切り出されます|
+|Chunk size|静止画を切り出す間隔を指定。30fps動画で30を指定すると1秒間隔で切り出されます。まずは1秒間間隔がお勧めです|
+|Workers|抽出処理の同時実行数を指定。CPUのコア数に応じて増やしてください|
+|Start(HH:MM:SS)|切り出しを開始する時間を指定します。形式はHH:MM:SSです<br><small>空の場合は動画の先頭から開始します</small>|
+|End(HH:MM:SS)|切り出しを終了する時間を指定します。形式はHH:MM:SSです<br><small>空の場合は動画の末尾まで処理します</small>|
+|Remove similar frames|類似フレームを除外します。ReviewをONにすると実行時に閾値調整して切り出し枚数を調整可能です|
+|pHash threshold|類似フレームの判定閾値を指定します。値が大きいほど画像を間引きます。撮影時の移動速度が不規則な場合に有効な機能です|
+|Mask Generation|人や自動車等のマスク画像を生成します。後段のSfMの精度が上がります|
+|SAM3 Dual Mask|最新版はSAM3マスク対応済みです。任意の短いセンテンスでマスク可能です。Preview/Editボタンでマスク結果を確認できます。![](https://static.zenn.studio/user-upload/7c4c7eba8d1a-20260919.png)https://x.com/kotohibi_3d/status/2061044432837972367<br>(高度な設定)SAM3は二通りのマスクを設定することが可能です。カメラアラインメントと3DGS学習用のマスクを分けることが可能です。詳細は次のGoogle Slideを参照してください<br>https://t.co/X0uRH959RV (Metashapeの例ですがColmapも同様の考え方です)|
+|YOLO Mask|[YOLO Class IDs]<br>検出したいクラスIDを指定します。 0: person, 1: bicycle, 2: car, etc.カンマ区切りで複数ID指定可能です。https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/datasets/coco.yaml<br>[YOLO Confidence]<br>閾値を上げると誤検知を減らせます。下げるとより多くを検出しますが誤検知は増えます<br>[YOLO Model]<br>yolo11nからyolo11x方向にモデルサイズが大きくなり高性能になりますが処理負荷は大きくなります<br>![](https://static.zenn.studio/user-upload/f33edb0b3f70-20260919.png)|
+|Seam Mask|２つの魚眼画像を繋げたステッチラインのズレにマスクをかける機能です。ステッチライン位置を固定するため、DJI Studio or Insta360 Studio等の水平維持機能をオフにして現像して本機能をご利用ください![](https://static.zenn.studio/user-upload/1bf86078cd28-20260919.png)|
+|Custom Mask|固定のマスク画像を指定します。上記マスクと併用する場合は融合されます。カメラリグ等が常に映り込む部分をマスクするのに有効です。<br><small>注）動画と同じ解像度のPNG画像を指定してください</small>![](https://static.zenn.studio/user-upload/052aed9a546c-20260919.png)|
+|Analysis only|画像のシャープさの計算のみ行います。出力フォルダに計算結果（メタ情報）が保存されます。次回から出力フォルダにメタ情報があると、解析フェーズをスキップして画像切り出しができます。Chunk sizeを調整した場合に有効です。|
+|Save config|上記の設定を設定ファイルとして保存します|
+|Load config|保存した設定ファイルを読み込みます|
+|Run|処理実行|
+
+### 実行結果
+* このように静止画が切り出されます。次StepのSfMが失敗する場合は静止画切り出し間隔を小さくしてみてください
+![](https://static.zenn.studio/user-upload/dd0ef12a7897-20260919.jpg)
+* マスクも自動で生成されます(SAM3 + Seam mask適用例)
+![](https://static.zenn.studio/user-upload/bed01dd46911-20260919.jpg)
+
+# カメラアラインメント(SfM)をする
+* colmap-x64-windows-cuda.zipを任意のフォルダに解凍し、**COLMAP.bat**を実行します
+### データベースの作成と画像ファイルを指定する
+* COLMAP.bat実行後GUIが起動します
+* [File] -> [New Project]を選択すると、以下のダイアログが表示されます
+  ![](https://static.zenn.studio/user-upload/4e7d59150f1d-20260919.jpg)
+  |項目|説明|
+  |---|---|
+  |Database|[New]ボタンを押下して新規データベースファイルを任意の場所に作成します。このファイルに処理途中のデータが格納されます|
+  |Images|動画から切り出した静止画フォルダを指定します|
+  |Save|最後に[Save]ボタンを押下してダイアログを閉じます|
+
+
+### 画像から特徴点を抽出する
+* メインウィンドウから[Processing]->[Feature extraction]を選択すると、以下のダイアログが表示されます
+![](https://static.zenn.studio/user-upload/c297285ccf05-20260919.jpg)
+  |項目|説明|
+  |---|---|
+  |Camera model|EQUIRECTANGULARを選択します|
+  |Shared for all images|ONにします|
+  |mask_path|生成したカメラアラインメント用マスクを指定します|
+  |use_gpu|ONにします|
+  |sift.max_num_features|初期値の8192でもOKですが、増やした方が3DGS学習時の初期点群が増え学習が安定します。ハイスペックPC利用の場合は、2～3倍(もしくはそれ以上)に増やしてみてください|
+  |Extract|特徴点抽出を開始します|
+
+### 特徴点マッチングを実行する
+* メインウィンドウから[Processing]->[Feature matching]を選択すると、以下のダイアログが表示されます
+![](https://static.zenn.studio/user-upload/205deaf7f66f-20260919.jpg)
+  |項目|説明|
+  |---|---|
+  |Type|今回は最も基礎的なSIFT_BRUTEFORCEを選択します。Colmapは様々な特徴点マッチングアルゴリズムが選択可能です。また別の記事で取り上げたいと思います|
+  |max_num_matches|初期値の32768でもOKですが、増やした方が3DGS学習時の初期点群が増え学習が安定します。ハイスペックPC利用の場合は、2～3倍(もしくはそれ以上)に増やしてみてください|
+  |Run|特徴点マッチングを開始します|
+
+### カメラアラインメントを実行する
+* メインウィンドウから[Reconstruction]->[Start reconstruction]を選択してカメラアラインメントを開始します
+![](https://static.zenn.studio/user-upload/ba43b53852a6-20260919.jpg)
+### カメラアラインメント結果を確認する
+* 処理が正常に完了すると下記のような結果になります。カメラ位置(球体マーク)が期待通りか確認します
+![](https://static.zenn.studio/user-upload/86a07ee7879b-20260919.jpg)
+### カメラアラインメント結果のエクスポート
+  * メインウィンドウから[File]->[Export model as text]を選択してカメラアラインメント情報をテキスト形式で出力します
+  * 出力フォルダには以下のようなファイルが出力されます
+![](https://static.zenn.studio/user-upload/5c78ffd6325d-20260919.jpg)
+# Cubemapに変換する
+* Colmapのカメラアラインメント結果から6方向画像のCubemapに展開します<br>
+ここでは私が公開しているツール**360 CCConverter**をご紹介します<br>
+
+### 設定 1
+![](https://static.zenn.studio/user-upload/545e8003d620-20260919.jpg)
+|主要項目|説明|
+|---|---|
+|Equirectangular Images Folder|切り出した全天球画像フォルダを指定<br><small>注）マルチバイト文字を含むファイルパスは未サポート</small>|
+|COLMAP Model Folder|Colmapのカメラアラインメント出力フォルダを指定<br><small>注）マルチバイト文字を含むファイルパスは未サポート</small>|
+|Output Folder|Cubemap展開先のフォルダを指定<br><small>注）マルチバイト文字を含むファイルパスは未サポート</small>|
+|Crop Size|6方向に切り出す画サイズ、OSMO360の8K動画の場合は1920でOK|
+|FoV|6方向に切り出す視野角、90°でOK|
+|Max Images|全天球画像の処理枚数上限、動作テストする際に小さい値を指定してください|
+|Image Range|処理対象の全天球画像を範囲指定可能、部分的に処理する際に指定ください|
+|Workers|処理のプロセス数、お使いのCPUのコア数に応じて増減させてください|
+|Yaw Offset|CubemapのYaw角度にバリエーションを持たせることが可能。Cubemap毎に指定角度が加算されます。5～30°の範囲がお勧めです|
+|Save Config|上記設定値を設定ファイルとして保存可能|
+|Run Conversion|Cubemap変換処理を開始|
+
+### 設定 2 マスク処理
+* Cubemap展開した画像に人物や自動車等のマスクを生成することが可能です。
+* Extract Sharpest Frameで生成したSAM3マスクは後述のカスタムマスクに指定してください。YOLOマスクと併用可能です。
+![](https://static.zenn.studio/user-upload/32259e40e204-20260919.jpg)
+
+|主要項目|説明|
+|---|---|
+|Mask Pass Mode|Singleは全天球画像でオブジェクト認識します。高速ですが精度は低いです。Dualは全天球画像とCubemap画像両方でオブジェクト認識します。処理量は多いですが、認識精度が高いです|
+|Merge Mode|Dualモード時にマスクを結合させるモードです。unionは双方の単純結合、refineはCubemapのマスクをベースに全天球マスクが統合されます。refineがお勧めです|
+|YOLO Class IDs|検出したいクラスIDを指定します。 0: person, 1: bicycle, 2: car, etc. カンマ区切りで複数ID指定可能です。https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/datasets/coco.yaml|
+|YOLO Confidence|閾値を下げると認識率は上がりますが、ノイズも増えます|
+|Enable overexposure mask|白飛び画素は3DGS学習時にノイズ成分になる場合があります、除去したい場合に有効にしてください|
+
+### 設定 3（高度な設定）カスタムマスク
+* Extract Sharpest Frameで生成したSAM3 Dual Mask(3DGS学習用)または任意のマスクをロード可能です。マスク画像は静止画と同じ枚数、同じ解像度のPNG画像、同じファイル名で指定してください。<br>参考：Google Slide -> https://t.co/X0uRH959RV (Metashapeの例ですがColmapも同様の考え方です)
+![](https://static.zenn.studio/user-upload/293c6d72d1a3-20260919.jpg)
+### 設定 4（高度な設定）Cubemap削減
+* 3DGSの品質低下を最小限に抑え、Cubemapを削減する機能です。3DGS学習時間の短縮、VRAM使用量の削減を期待できます
+* BOOTHからダウンロードしたzipに詳細な操作説明書(PDF)が含まれています。それを参照してください
+* 参考：https://x.com/kotohibi_3d/status/2078671971639009313
+![](https://static.zenn.studio/user-upload/98e268ae6302-20260919.jpg)
+
+### 実行
+* 処理実行後、正常に完了すると出力フォルダに以下のようなフォルダとファイルが生成されます<br>![](https://static.zenn.studio/user-upload/cafa6f300e89-20260919.png)
+# （LichtFeld Studio編）3D Gaussian Splattingの学習
+ここではLichtFeld Studio(LFS) V0.5.3を使って説明します
+### Cubemapの取り込み
+* [File]-> [Import Dataset]を選択して、CCConverterのOutput Folderを指定します<br>
+![](https://static.zenn.studio/user-upload/e13cdeabf363-20260919.png)
+* 正しくデータが見つかると下記のようなダイアログが出ます。内容を確認して[Load]ボタンを押して次に進みます
+![](https://static.zenn.studio/user-upload/5baa1c1890df-20260919.jpg)
+* データが正しくロードされると下記のような画面が出ます
+![](https://static.zenn.studio/user-upload/f758afca0ad2-20260919.jpg)
+### 3DGS学習開始
+* Mask設定
+  * [Training Parameters]->[Mask Mode]->[Ignore]を選択します
+  * [Alpha Mask]はオフにします
+* 学習パラメータ
+  * 私が良く使う設定を下図に示します
+  * [Strategy]->[MRNF]をお勧めします（※この記事執筆時点）
+  * Max Gaussiansをシーンの大きさに応じて変更します(3,000,000～12,000,000)
+  * SH Degreeを調整します(1～3), VRAMが少ない環境は1を推奨します
+  * IterationsとSteps Scalerは画像枚数に応じて自動計算されます
+  * MRNFの場合、その他のパラメータの変更はあまり必要ありません
+  * LFSはパラメーターが多いため、Webで調べてシーンに最適な設定を探してください
+  * ※最近はBilateral Gridはオフにする場合が多いです。(PPISPで十分な場合が多い)
+![](https://static.zenn.studio/user-upload/f8e7b4f7efdd-20260919.png)
+* [Start Training]を押して3DGSの学習を開始します。
+
+### 3DGS学習結果
+* 学習が進むと、3DGSが見えてくると思います！
+![](https://static.zenn.studio/user-upload/03535d1d667e-20260919.jpg)
+# 最後に
+3DGSの手法は様々で、本記事は一例に過ぎません。最新の情報は私のXで発信していきます
+是非ご自身でも調査してより良い手法を開発してください。Enjoy 3DGS :) 
+* my 360 Tools: https://kotohibi.f5.si/360
+* my X: https://x.com/kotohibi_3d
+* 3DGS pipeline guide: https://github.com/Kotohibi/3DGS_pipeline_guide

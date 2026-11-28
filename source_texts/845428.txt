@@ -1,0 +1,1518 @@
+A next-generation video editor combining timeline-based editing with procedural node graph workflows. - docs: add the OpenFX host implementation plan by narusenia · Pull Request #293 · narusenia/ravel
+
+docs: add the OpenFX host implementation plan by narusenia · Pull Request #293 · narusenia/ravel · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+narusenia
+commented
+Aug 5, 2026
+•
+edited by coderabbitai
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+REQ-PLUGIN-001（Must）の実装計画。コード変更なし。
+GPUBK-8（#287）と MED-GPU-07（#292）が済んで、要件が課していた「GPUBK-8 の完了後でないと計画を書かない」条件が満たされた。前提が動いて腐るのを避けるための後置だったので、GPUBK-8 が実際に何を出せるかを実測した上で書いている。
+計画の形を決めた発見
+OFX に D3D12 は無い。 AcademySoftwareFoundation/openfx の include/ofxGPURender.h を読んだ結果、定義されている GPU API は OpenGL / CUDA / Metal / OpenCL の 4 つだけ。ヘッダ冒頭が明言している。
+It allows hosts and plug-ins to support OpenGL, OpenCL, CUDA, and Metal.
+プラットフォーム
+Ravel の描画
+OFX 側の受け口
+ゼロコピー
+macOS
+Metal
+Metal
+成立する（#292 で MTLCommandQueue も取れるようになった）
+Windows
+D3D12
+無い
+成立しない → CUDA 外部メモリで橋を架ける
+つまり GPUBK-8 が用意した D3D12 interop は OFX ではなく HW デコード（REQ-GPU-001）側の資産。
+これにより要件書に 2 箇所の誤りが見つかった（OFX-9 で訂正する単位として持つ）。「GPU Render Suite (OpenGL/Metal/CUDA)」は OpenCL が抜けており、「その抽象が OFX が要求する texture / device pointer をそのまま露出できる」は D3D12 について偽。
+主な決定
+論点
+決定
+プロセス分離
+REQ-PROJ-002 の要件。最初から別プロセス（後付けしない）
+ビルド
+CMake。ofx-host/ を Rust ワークスペースの外に置く
+ノード同一性
+type_key = "ofx:<識別子>"。バージョンを含めず、入っている版に束縛
+プロセス粒度
+全プラグインで 1 つ（GPU コンテキストがプロセスごとに要るため）。プロトコルにホスト ID を持たせ後で分割可能に
+走査
+常にキャッシュ + background / startup / manual を設定で選択（既定 background）
+制御 IPC
+JSON over pipe。C++ 側は nlohmann/json を vendoring。画像は共有メモリ / GPU ハンドルで JSON を通らない
+GPU の順
+6a(interop インポート) → 6b(Metal) → 7a(CUDA) → 7b(OpenCL, Experimental)
+OpenGL
+やらない。 D3D12 から橋が架からず D3D12 → CPU → GL になる。ゼロコピーにならない GPU 経路は CPU 経路より悪い
+可搬性はデータモデルが既に解いていた
+Node（graph.rs:412）は type_key / inputs / outputs / parameters を全部自分で持ち、GraphDoc がそのまま直列化する。プラグインが無いマシンで開いてもノードは丸ごと残り、壊れるのは評価だけ（既存の EvalError::NoProcessorRegistered）。
+したがって足すべきは「消えないようにする仕組み」ではなく、エラーを具体的にすることと版差のパラメータ突き合わせ。とくに「インストール版に無いパラメータを捨てない」を完了条件で固定した — 捨てると再インストールしても戻せない。
+プラグインの UI とパラメータ
+Dialog Suite（ofxDialog.h）が「ホストの UI スレッドで、閉じるまでブロックして」自前ウィンドウを開く仕組みを規定している。この suite の存在理由（プラグインが自前ウィンドウを開くとホストの run loop と衝突する）が、プロセス分離の追い風になる — プラグインのウィンドウは ofx-host のもので Ravel を壊せない。代償として ofx-host は GUI 対応プロセス（run loop 必須）にする必要があり、OFX-1 の骨格に織り込んだ。
+パラメータは双方向に流れる。 PushButton は値ではなくアクションで、プラグインは kOfxActionInstanceChanged の中で他のパラメータを書き換えてよい。プラグイン起点の書き込みを受けて undo に 1 手として乗せる必要があり、片方向で作ると undo の粒度が後から決まらないので OFX-2 の前提にした。
+型の穴は 3 つ — PushButton（値でない）、Bytes（String に入らない、永続化フォーマット変更が要る）、Group/Page（レイアウト構造）。Custom は不透明文字列なので保存と往復だけして編集はプラグインに任せる。対応できない型を黙って落とさないを最低ラインとして完了条件に入れた。
+検証環境の制約を設計に織り込んだ
+windows-latest に GPU が無い → CUDA 経路は CI で一度も実行されない。コンパイル確認は CI、実行確認は実機（手元にある）で、手順と結果を PR に書くことを完了条件に
+Radeon が無いがテスターはいる → OpenCL は Experimental として実装。定義も置いた（既定無効 / 外部検証 / UI 表示 / リリースを止めない）
+単位
+OFX-0（❓ゲート）〜 OFX-9 の 12 単位。OFX-0 は macOS のゼロコピー・Windows の橋・CPU 往復コストの 3 本をプロトタイプで確かめる先行投資で、前提が崩れたときの手戻りを最小にするため先頭に置いている。
+backlog.md / roadmap.md / README.md に配線済み。mise run docs:check clean。
+Summary by CodeRabbit
+Documentation
+Added a detailed OpenFX integration roadmap covering plugin hosting, GPU interoperability, process isolation, and fallback behavior.
+Documented platform-specific considerations for macOS, Windows, and Linux.
+Added an OFX-0 validation milestone and organized implementation work into OFX-0 through OFX-9.
+Updated the broader implementation roadmap to reflect the new OpenFX phases and Windows GPU decision points.
+narusenia
+added 3 commits
+August 5, 2026 23:50
+docs: add the OpenFX host implementation plan
+8ae7423
+docs: settle node identity, process model, scanning, and the IPC form…
+…
+9ab7b5c
+```
+… for the OFX host
+```
+docs: cover plugin dialogs, push buttons, and the parameter types wit…
+…
+9e41d95
+```
+…h no Ravel equivalent
+```
+coderabbitai
+Bot
+commented
+Aug 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+📝 Walkthrough
+Walkthrough
+This PR adds a detailed OFX host implementation plan, defines OFX-0 to OFX-9 work units, and updates the implementation index, backlog, and roadmap to reference the new plan and the Windows GPU path decision gate.
+Changes
+OFX host planning
+Layer / File(s)
+Summary
+Plan scope and architecture
+docs/implementation/ofx-host-plan.md
+Adds the OFX host planning document scope, requirement corrections, process separation, build setup, GPU interoperability rules, plugin discovery, IPC, and parameter and UI behavior.
+Implementation units and platform paths
+docs/implementation/ofx-host-plan.md
+Defines OFX-0 through OFX-9. These units cover prerequisite validation, host setup, IPC and crash isolation, plugin scanning, CPU rendering, parameter and UI integration, shared interop, macOS Metal, Windows CUDA, Windows Experimental OpenCL, unsupported-suite handling, and follow-up documentation.
+Validation and limits
+docs/implementation/ofx-host-plan.md
+Adds validation commands, CI and comparison rules, transfer-counter checks, third-party plugin verification rules, known pitfalls, non-target scope, and related planning references.
+Roadmap and index updates
+docs/implementation/README.md, docs/implementation/backlog.md, docs/implementation/roadmap.md
+Links the new OFX host plan from the implementation index, adds OFX-0 and an OFX ホスト section to the backlog, and replaces the roadmap OFX item with the OFX-0 to OFX-9 plan units.
+Estimated code review effort: 3 (Moderate) | ~25 minutes
+Possibly related PRs
+narusenia/ravel#271: Both PRs define OFX host planning, GPU interoperability constraints, and related implementation documentation updates.
+narusenia/ravel#292: Both PRs touch OFX host planning and GPU backend interoperability details that the OFX host plan depends on.
+🚥 Pre-merge checks | ✅ 5
+✅ Passed checks (5 passed)
+Check name
+Status
+Explanation
+Description Check
+✅ Passed
+Check skipped - CodeRabbit’s high-level summary is enabled.
+Title check
+✅ Passed
+The title directly and clearly identifies the main change: addition of the OpenFX host implementation plan, which accounts for the vast majority of the changeset (749 lines in ofx-host-plan.md plus supporting documentation updates).
+Docstring Coverage
+✅ Passed
+No functions found in the changed files to evaluate docstring coverage. Skipping docstring coverage check.
+Linked Issues check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+Out of Scope Changes check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+✨ Finishing Touches
+🧪 Generate unit tests (beta)
+Create PR with unit tests
+Commit unit tests in branch docs/ofx-host-plan
+Comment @coderabbitai help to get the list of available commands.
+coderabbitai
+Bot
+reviewed
+Aug 5, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 14
+🧹 Nitpick comments (1)
+docs/implementation/backlog.md (1)
+593-596: 🗄️ Data Integrity & Integration | 🔵 Trivial | ⚡ Quick win
+Clarify OFX-6a as an internal D3D12 prerequisite.
+OpenFX has no D3D12 route. State that OFX-6a supports shared-texture import for the later D3D12 → CUDA/OpenCL bridge, while OFX-0 selects the Windows path. Do not present D3D12 as an OFX API route or claim that the Windows path is already selected.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/backlog.md` around lines 593 - 596, Update the OFX-6a
+backlog entry to identify it as an internal D3D12 prerequisite for
+shared-texture import supporting the later D3D12-to-CUDA/OpenCL bridge, not an
+OpenFX API route; retain OFX-0 as the selector for the Windows path without
+implying that selection is already implemented.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@docs/implementation/ofx-host-plan.md`:
+- Around line 311-317: Expand the image-transfer section around the
+Ravel-allocated CPU/GPU resources to define frame IDs, ownership or lease
+states, and explicit completion signaling before reuse or release. Specify how
+the OFX host/plugin acknowledges completion and how Ravel cleans up outstanding
+shared memory and GPU handles after a host restart, covering the related flow at
+the later image-transfer section as well.
+- Around line 301-309: Replace the Cyrillic term `протокол` in the
+control-message documentation with the established Japanese `プロトコル` spelling,
+keeping the surrounding explanation unchanged.
+- Around line 159-172: Update the lead-in text before both bullet lists in the
+OFX-7a plan so it is grammatically complete, replacing the fragment “したがって:”
+with a complete Japanese introduction such as “したがって、” or “以下のとおりです。” while
+leaving the list contents unchanged.
+- Around line 290-297: Update the single-process host design around the
+“プロセスは全プラグインで 1 つ” section to define host-wide crash and hang recovery: specify
+failure state, affected-instance recreation, request timeouts, and kill/restart
+behavior consistent with OFX-2. Apply the same recovery model to the related
+sections noted in the review, or revise the architecture to use per-plugin
+processes.
+- Around line 244-265: Update the OFX compatibility design around type_key and
+the parameter restoration rules to store plugin version or schema metadata
+separately from type_key, then define how updates are detected and migrated.
+During restoration, compare each saved parameter’s type and dimensions with the
+installed schema, preserve incompatible or missing values without coercing or
+dropping them, and emit a warning; continue using plugin defaults only for
+parameters absent from the saved data.
+- Around line 56-65: OFX-9 must explicitly reject OpenGL while preserving the
+existing plan decision not to implement it. Update the OFX-9 requirements
+wording to mark OpenGL unsupported, document the visible CPU fallback in OFX-8,
+and revise the related REQ-INFRA-009 wording so it does not claim unsupported
+OpenGL exposure; do not alter REQ-PLUGIN-001 in this plan.
+- Around line 603-641: Update the OFX-7a CUDA section to define only the CUDA
+properties and CUDA external-memory bridge, without covering OpenCL fallback
+behavior. Move OpenCL properties and the D3D12-to-OpenCL bridge ownership
+entirely to OFX-7b, and revise its dependency wording so the OpenCL path depends
+on the OFX-0 bridge selection rather than OFX-7a or CUDA completion.
+- Around line 590-600: Update the OFX-6b Metal GPU render plan to remove the
+cross-process shared MTLCommandQueue requirement from the
+IOSurface/MetalCommandQueue wording and instead anchor the design on a queue
+created in ravel-ofx-host with explicit cross-process synchronization for shared
+IOSurface work, such as MTLSharedEvent signal/wait ordering. Extend the OFX-0
+prototype section to cover this synchronization path before OFX-6b, and keep the
+completion criteria focused on zero readback and CPU/GPU output parity rather
+than queue sharing.
+- Around line 299-312: Update the OFX-2 JSON IPC contract in the plan so it
+explicitly defines byte-stream framing for both directions instead of relying on
+protocol version alone; use the existing control-message area around the
+JSON-pipe section to specify how messages are delimited, capped, timed out, and
+handled when malformed or when the host stops reading. Keep the current
+JSON-over-pipe choice and protocol-version mismatch check, but add bounded
+buffering/backpressure and clear partial/coalesced message handling so the Rust
+side cannot block indefinitely.
+- Around line 369-387: Update the parameter-type count in the “OFX のパラメータ型と
+Ravel の対応” section from 15 to 18 to match the table. Also clarify the targeted
+OFX specification version, explicitly stating whether the plan supports OFX 1.5
+or a later version because the table includes kOfxParamTypeStrChoice.
+- Around line 470-489: Update the completion criteria in the OFX-1 plan to
+record each vendored dependency’s license separately: keep the OFX entry as BSD,
+and add a distinct nlohmann/json entry as MIT with the copyright and permission
+notice requirement. Adjust the surrounding license-recording wording so the
+symbols for the vendored assets (ofx-host/vendor/openfx and
+ofx-host/vendor/json) map to their own compliance expectations instead of a
+single combined BSD note.
+- Around line 369-397: Update the OFX-5 planning summary in the
+parameter-mapping section so the unresolved list matches the table and includes
+every open mapping: Integer2D/Integer3D, Choice/StrChoice choice-list storage,
+Group/Page, PushButton, and Bytes. Use the existing OFX-5 symbols in this
+section to state the intended preservation/UI behavior for each gap, and keep
+the gap summary aligned with the table instead of listing only a subset.
+- Around line 353-367: Specify the missing transaction semantics for
+plugin-originated parameter writes in the OFX-2/OFX-5 design path referenced by
+the parameter flow section: define how a plugin-initiated change set is grouped
+into one undo unit, how the origin and transaction ID are tracked, how multiple
+writes are ordered within a single action, and how nested plugin calls and echo
+suppression are handled. Anchor this update around the “パラメータは双方向に流れる” section
+and the OFX-2 protocol / OFX-5 parameter suite design, so the document clearly
+states the atomic write model instead of leaving it implied.
+
+In `@docs/implementation/README.md`:
+- Line 71: Update the OFX host row in the implementation README to list only its
+blocking prerequisites: retain gpu-backend-plan.md (GPUBK-8, merged) and replace
+plugin-system-plan.md (PLUG-1) with gpu-backend-plan.md (MED-GPU-07, `#292`),
+preserving the remaining requirements unchanged.
+
+---
+
+Nitpick comments:
+In `@docs/implementation/backlog.md`:
+- Around line 593-596: Update the OFX-6a backlog entry to identify it as an
+internal D3D12 prerequisite for shared-texture import supporting the later
+D3D12-to-CUDA/OpenCL bridge, not an OpenFX API route; retain OFX-0 as the
+selector for the Windows path without implying that selection is already
+implemented.
+```
+🪄 Autofix
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: defaults
+Review profile: CHILL
+Plan: Pro Plus
+Run ID: 96f98c31-b43e-401b-8e9e-8924e0a3dbc4
+📥 Commits
+Reviewing files that changed from the base of the PR and between e5bb527 and 9e41d95.
+📒 Files selected for processing (4)
+docs/implementation/README.md
+docs/implementation/backlog.md
+docs/implementation/ofx-host-plan.md
+docs/implementation/roadmap.md
+Comment thread
+docs/implementation/ofx-host-plan.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/implementation/ofx-host-plan.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/implementation/ofx-host-plan.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/implementation/ofx-host-plan.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+docs/implementation/ofx-host-plan.md
+Comment on lines
++299
+to
++312
+### 制御は JSON、画像は共有メモリか GPU ハンドル
+制御メッセージ（describe / インスタンス生成 / render 要求 / パラメータ設定）は
+**JSON をパイプで流す**（ユーザー判断、2026-08-05）。頻度が低く、
+**ログをそのまま読める**のが効く — 行儀の悪いサードパーティプラグインを
+相手にするとき、протокол を目で追えることの価値が速度に勝る。
+- Rust 側は `serde_json`（既にワークスペース依存）
+- C++ 側は `nlohmann/json`（ヘッダ 1 ファイル）を **OFX ヘッダと同じく
+vendoring** する。`OFX-1` の作業に含める
+- **メッセージにプロトコル版を持たせ、不一致を検出して拒否する**
+画像は JSON を通らない。CPU 経路は共有メモリ、GPU 経路は共有ハンドル
+（`IOSurface` / D3D12 の共有ハンドル）で、**JSON に乗るのは ID だけ**。
+coderabbitai
+Bot
+Aug 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🩺 Stability & Availability | 🟠 Major | 🏗️ Heavy lift
+🧩 Analysis chain
+🏁 Script executed:
+```
+#!/bin/bash
+set -e
+printf '%s\n' '--- documentation rules ---'
+cat .agents/rules/documentation.md
+printf '%s\n' '--- candidate file outline ---'
+ast-grep outline docs/implementation/ofx-host-plan.md --view compact || true
+printf '%s\n' '--- cited section ---'
+sed -n '260,335p' docs/implementation/ofx-host-plan.md
+printf '%s\n' '--- relevant terms ---'
+rg -n -i 'json|pipe|protocol|frame|framing|length|newline|deadline|timeout|backpressure|malformed|message.?size|サイズ|境界|タイムアウト|不正|背圧' docs .agents -g '*.md'
+```
+Repository: narusenia/ravel
+Length of output: 50374
+🏁 Script executed:
+```
+#!/bin/bash
+set -e
+printf '%s\n' '--- OFX-related files ---'
+git ls-files | rg -i '(^|/)(ofx|.*ofx.*|.*host.*plan.*)\.(md|rs|cc|cpp|h|hpp|toml|yaml|yml|json)$'
+printf '%s\n' '--- targeted host/protocol references ---'
+rg -n -i 'ofx-host|ofx|host process|host id|control message|制御メッセージ|プロトコル|protocol|共有メモリ|shared memory|pipe|パイプ' docs/implementation docs/specifications -g '*.md' | rg -i 'ofx|host|protocol|message|メッセージ|shared memory|pipe|パイプ' | head -300
+printf '%s\n' '--- OFX plan headings ---'
+rg -n '^#{1,6} ' docs/implementation/ofx-host-plan.md
+printf '%s\n' '--- OFX plan size and later sections ---'
+wc -l docs/implementation/ofx-host-plan.md
+sed -n '335,520p' docs/implementation/ofx-host-plan.md
+```
+Repository: narusenia/ravel
+Length of output: 37296
+🏁 Script executed:
+```
+#!/bin/bash
+set -e
+python3 - <<'PY'
+import json
+
+messages = [
+    {"protocol_version": 1, "type": "describe"},
+    {"protocol_version": 1, "type": "render", "image_id": 7},
+]
+wire = "".join(json.dumps(message, separators=(",", ":")) for message in messages).encode()
+chunks = [wire[:9], wire[9:23], wire[23:]]
+
+parsed_chunks = []
+decoder = json.JSONDecoder()
+buffer = ""
+for chunk in chunks:
+    buffer += chunk.decode()
+    try:
+        value, end = decoder.raw_decode(buffer)
+    except json.JSONDecodeError:
+        parsed_chunks.append(("incomplete", len(buffer)))
+        continue
+    parsed_chunks.append(("complete", value, end))
+
+print("fragmented reads:", parsed_chunks)
+print("coalesced wire bytes:", wire.decode())
+try:
+    print("single JSON parse:", json.loads(wire))
+except json.JSONDecodeError as error:
+    print("single JSON parse:", type(error).__name__, str(error).split(":")[0])
+
+value, end = decoder.raw_decode(wire.decode())
+print("first value leaves bytes:", end, "of", len(wire))
+PY
+```
+Repository: narusenia/ravel
+Length of output: 469
+Define the JSON pipe contract.
+OFX-2 must specify framing for both IPC directions. Define length-prefix or newline framing, maximum message size, read/write deadlines, malformed-message handling, and bounded backpressure. A protocol-version field does not delimit a byte stream; partial or coalesced messages and an unresponsive host can block the Rust side or cause unbounded buffering.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/ofx-host-plan.md` around lines 299 - 312, Update the
+OFX-2 JSON IPC contract in the plan so it explicitly defines byte-stream framing
+for both directions instead of relying on protocol version alone; use the
+existing control-message area around the JSON-pipe section to specify how
+messages are delimited, capped, timed out, and handled when malformed or when
+the host stops reading. Keep the current JSON-over-pipe choice and
+protocol-version mismatch check, but add bounded buffering/backpressure and
+clear partial/coalesced message handling so the Rust side cannot block
+indefinitely.
+```
+Comment thread
+docs/implementation/ofx-host-plan.md
+Comment on lines
++369
+to
++397
+### OFX のパラメータ型と Ravel の対応
+`kOfxParamType*` は 15 種類。Ravel の `ParameterValue`（`graph.rs:205`）と
+突き合わせると、**大半は素直に載り、3 つが穴**。
+| OFX | Ravel | 備考 |
+|---|---|---|
+| Double / Double2D / Double3D | `Channel` / `Channel2` / `Channel3` | アニメート可。素直 |
+| RGB / RGBA | `Channel3` / `Channel4` | 素直 |
+| Integer | `Int` | |
+| Boolean | `Bool` | |
+| String | `String` | |
+| Parametric（`ofxParametricParam.h`） | `Curve`（`CurveParam`） | Ravel はカーブエディタを持つ（`PARAM-2` 済み）ので載る見込み |
+| Custom | `String` | 値はプラグインが解釈する不透明文字列。**Ravel は保存と往復だけ**し、編集はプラグインの UI に任せる |
+| Integer2D / Integer3D | — | 整数の 2D / 3D が無い。`Channel2/3`（float）に載せるか分解する |
+| Choice / StrChoice | `Int` / `String` + 選択肢 | **選択肢の一覧をどこに持つか**が未定 |
+| Group / Page | — | レイアウト構造。Properties パネルに階層とページの概念が要る |
+| **PushButton** | — | 値ではない。**新しい機構が要る** |
+| **Bytes** | — | 不透明バイナリ。`String` では入らない（UTF-8 でない） |
+**穴は `PushButton` / `Bytes` / `Group`・`Page`。** いずれも `OFX-5` で
+扱いを決める。`Bytes` は `ParameterValue` に variant を足すことになるが、
+**永続化フォーマットの変更**（bincode の positional index、journal の版）に
+なるので `docs/dev/persistence.md` の手順に従う。
+> **重要**: 対応できない型を**黙って落とさない**。落とすと、プラグインの
+> UI で設定した内容がプロジェクトから消える。保存だけはして
+> 「Ravel からは編集できない」と示すのが最低ライン。
+coderabbitai
+Bot
+Aug 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🗄️ Data Integrity & Integration | 🟠 Major | ⚡ Quick win
+🧩 Analysis chain
+🏁 Script executed:
+```
+# First, locate the file and check its actual content
+find . -name "ofx-host-plan.md" -type f
+```
+Repository: narusenia/ravel
+Length of output: 192
+🏁 Script executed:
+```
+# Check if documentation consistency rules apply
+cat .agents/rules/documentation.md 2>/dev/null || echo "File not found"
+```
+Repository: narusenia/ravel
+Length of output: 1925
+🏁 Script executed:
+```
+# Read the actual file content around lines 369-397 to verify the snippet
+sed -n '360,405p' ./docs/implementation/ofx-host-plan.md
+```
+Repository: narusenia/ravel
+Length of output: 1640
+🏁 Script executed:
+```
+# Also get context on the full line count and structure
+wc -l ./docs/implementation/ofx-host-plan.md
+```
+Repository: narusenia/ravel
+Length of output: 196
+🏁 Script executed:
+```
+# Get exact line numbers for the gap summary to verify the claim
+grep -n "穴は" ./docs/implementation/ofx-host-plan.md
+```
+Repository: narusenia/ravel
+Length of output: 220
+🏁 Script executed:
+```
+# Count unresolved items in the table to confirm the discrepancy
+sed -n '369,397p' ./docs/implementation/ofx-host-plan.md | grep -E '^\|.*—' | wc -l
+```
+Repository: narusenia/ravel
+Length of output: 155
+🏁 Script executed:
+```
+# Get the exact table rows to verify all unresolved items
+sed -n '375,387p' ./docs/implementation/ofx-host-plan.md
+```
+Repository: narusenia/ravel
+Length of output: 856
+Enumerate all unresolved parameter mappings in the OFX-5 planning section.
+The table shows four unmapped types (Integer2D/Integer3D, Choice/StrChoice choice-list placement, Group/Page, PushButton, Bytes), but line 389 lists only three gaps (PushButton, Bytes, Group/Page). Line 389 omits Integer2D/Integer3D and the unresolved choice-list storage location for Choice/StrChoice. Include all unresolved mappings in the gap summary. Define preservation and UI behavior for each one in OFX-5.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/ofx-host-plan.md` around lines 369 - 397, Update the
+OFX-5 planning summary in the parameter-mapping section so the unresolved list
+matches the table and includes every open mapping: Integer2D/Integer3D,
+Choice/StrChoice choice-list storage, Group/Page, PushButton, and Bytes. Use the
+existing OFX-5 symbols in this section to state the intended preservation/UI
+behavior for each gap, and keep the gap summary aligned with the table instead
+of listing only a subset.
+```
+Comment thread
+docs/implementation/ofx-host-plan.md
+Comment on lines
++470
+to
++489
+### OFX-1 `ofx-host` の骨格と CMake ビルド
+- `ofx-host/` に CMake プロジェクトを作る。成果物は実行ファイル 1 つ
+- OFX ヘッダを `ofx-host/vendor/openfx/` に取り込む。**取り込み元のコミット
+ハッシュを `vendor/openfx/README.md` に記録する**
+- `nlohmann/json`（ヘッダ 1 ファイル）を `ofx-host/vendor/json/` に同じ形で
+取り込む。制御プロトコルで使う
+- **GUI 対応プロセスとして作る。** run loop（macOS は `NSApplication`、
+Windows はメッセージポンプ）を最初から持たせる — Dialog Suite も、
+自前でウィンドウを開くプラグインも、これが無いと成立しない。
+後から足すとプロセスの構造が変わる
+- 起動して即終了するだけのホストで、**macOS と Windows の CI に載せる**
+**完了条件**
+- `cmake --build` が macOS（clang）と Windows（MSVC）で通る
+- CI が両方でホストをビルドする。**Rust 側のビルドとは独立に失敗する**
+（シムが壊れても Ravel 本体の CI 結果が読めること）
+- ライセンス表記が `assets/fonts/` と同じ扱いで記録される
+（BSD。配布物に同梱が要る）
+coderabbitai
+Bot
+Aug 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+📐 Maintainability & Code Quality | 🟠 Major | ⚡ Quick win
+🧩 Analysis chain
+🏁 Script executed:
+```
+# Read the specific lines mentioned in the review
+sed -n '470,489p' docs/implementation/ofx-host-plan.md
+```
+Repository: narusenia/ravel
+Length of output: 817
+🏁 Script executed:
+```
+# Check if nlohmann/json license file exists or is documented in the repo
+git ls-files | grep -iE '(nlohmann|json)' | head -20
+```
+Repository: narusenia/ravel
+Length of output: 200
+🌐 Web query:
+nlohmann/json license MIT embedded notices requirements
+💡 Result:
+The nlohmann/json library is licensed under the MIT License [1][2]. To comply with the license when distributing software that includes this library, you must satisfy the core requirement of the MIT License: the original copyright notice and the permission notice must be included in all copies or substantial portions of the software [1][3]. In the context of embedded systems, this entails the following: 1. Requirement: You must include the license text (which contains the copyright notice) in your distribution [4][5]. The license specifically states: "The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software" [1][3]. 2. Implementation for Embedded Systems: - For devices with a user interface, a common and compliant practice is to provide an "About," "Legal," or "Licenses" section in the device's UI (e.g., via a web interface or settings menu) where the library's license text is accessible to the user [4][5]. - If the device lacks a user interface, the license and copyright notice should typically be included in the accompanying product documentation (such as a user manual or an online support page associated with the product) [6][4][5]. 3. In-House Use: If the software is used only internally and not distributed or sold to third parties, there is generally no requirement to display or provide these notices externally [6]. The nlohmann/json source code itself contains the relevant copyright notice and license information [7]. When you integrate this library into your project, ensure that this information is preserved in your documentation or device interface to maintain compliance [4][8][5]. Note: This information is for educational purposes and does not constitute legal advice. You should consult with a legal professional regarding specific compliance strategies for your product.
+Citations:
+1: https://github.com/nlohmann/json/blob/master/LICENSE.MIT
+2: https://github.com/nlohmann/json
+3: https://github.com/nlohmann/json/blob/develop/LICENSE.MIT
+4: https://opensource.stackexchange.com/questions/6081/i-am-using-a-mit-licensed-module-in-a-closed-source-consumer-device-what-are-my
+5: https://promwad.com/news/open-source-license-compliance-embedded-firmware-gpl-mit-apache
+6: https://opensource.stackexchange.com/questions/12421/applying-mit-license-to-internal-embedded-linux-system
+7: https://github.com/nlohmann/json/blob/develop/include/nlohmann/json.hpp
+8: https://opensource.stackexchange.com/questions/10593/mit-license-text-as-elf-section
+Record licenses for all vendored dependencies explicitly.
+The plan vendors nlohmann/json (lines 475–476) as a header-only file, but the completion criteria (lines 488–489) state only "BSD" licensing. The nlohmann/json library uses the MIT License, which requires the copyright notice and permission notice to be included in any distribution. Update the completion criteria to document both:
+OFX: BSD
+nlohmann/json: MIT (copyright and license text must accompany the distribution)
+Do not conflate the two licenses in the compliance check.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/ofx-host-plan.md` around lines 470 - 489, Update the
+completion criteria in the OFX-1 plan to record each vendored dependency’s
+license separately: keep the OFX entry as BSD, and add a distinct nlohmann/json
+entry as MIT with the copyright and permission notice requirement. Adjust the
+surrounding license-recording wording so the symbols for the vendored assets
+(ofx-host/vendor/openfx and ofx-host/vendor/json) map to their own compliance
+expectations instead of a single combined BSD note.
+```
+Comment thread
+docs/implementation/ofx-host-plan.md
+Comment on lines
++590
+to
++600
+### OFX-6b Metal GPU レンダー（macOS）
+- `IOSurface` 経由でプロセス間の画像共有を成立させる
+- `kOfxImageEffectPropMetalEnabled` / `…MetalCommandQueue` を立て、
+**Ravel と同じキューに積ませる**（`MED-GPU-07` でキューが取れるようになった）
+**完了条件**
+- macOS で GPU レンダー対応プラグインが**リードバック 0 回**で完走する
+（`TransferCounters::delta()` で機械的に確認。`GPUCOMP-*` と同じ手法）
+- CPU 経路と GPU 経路の出力が一致する
+coderabbitai
+Bot
+Aug 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🩺 Stability & Availability | 🟠 Major | 🏗️ Heavy lift
+🧩 Analysis chain
+🏁 Script executed:
+```
+printf '%s\n' '--- documentation rules ---'
+cat .agents/rules/documentation.md
+printf '%s\n' '--- target section ---'
+sed -n '560,610p' docs/implementation/ofx-host-plan.md
+printf '%s\n' '--- process and related plan references ---'
+sed -n '60,100p' docs/implementation/ofx-host-plan.md
+rg -n -C 3 'OFX-0|MetalCommandQueue|MTLCommandQueue|IOSurface|cross-process|プロセス間|同じキュー|キュー' docs/implementation/ofx-host-plan.md docs .agents/rules
+```
+Repository: narusenia/ravel
+Length of output: 50373
+🌐 Web query:
+site:developer.apple.com Metal MTLCommandQueue share between processes IOSurface synchronization cross process
+💡 Result:
+MTLCommandQueue instances cannot be shared between processes [1][2]. A command queue is strictly tied to the specific MTLDevice instance that created it, and command queue objects do not possess the necessary inter-process communication mechanisms to be accessed by external processes [1][2]. To achieve cross-process rendering or compute tasks involving shared resources, you must use a combination of shared memory objects and cross-process synchronization primitives [3][4]. 1. Shared Memory (IOSurface): IOSurfaces are the standard way to share image data across process boundaries [5]. You can create a Metal texture from an IOSurface in each process using MTLDevice methods (e.g., newTextureWithDescriptor:iosurface:plane:) [6]. For more modern, structured sharing, Metal also supports shared textures, which can be shared by creating and passing texture handles [7]. 2. Synchronization (MTLSharedEvent): Because command queues are process-local, they cannot natively coordinate with each other across process boundaries [1]. You must use an MTLSharedEvent [3][4]. A shared event can be created, shared between processes (typically via Mach ports or XPC), and then used in each process to signal and wait for completion [3][4]. This allows you to encode GPU work in one process, signal that the work is finished, and have the second process wait for that signal before executing its own commands on its own command queue [3]. Summary of Workflow: - Each process maintains its own MTLDevice and MTLCommandQueue [3][1]. - Processes share the underlying memory (e.g., IOSurface) to reference the same data [5]. - Processes use an MTLSharedEvent to coordinate access and manage dependencies between the asynchronous GPU workloads [3][4].
+Citations:
+1: https://developer.apple.com/documentation/metal/mtldevice/makecommandqueue()?language=objc
+2: https://developer.apple.com/library/archive/documentation/Miscellaneous/Conceptual/MetalProgrammingGuide/Cmd-Submiss/Cmd-Submiss.html
+3: https://developer.apple.com/documentation/metal/synchronizing-events-across-multiple-devices-or-processes
+4: https://developer.apple.com/documentation/metal/resource-synchronization
+5: https://developer.apple.com/library/archive/documentation/Performance/Conceptual/OpenCL_MacProgGuide/SynchronizingIOSurfacesAcrossProcessors/SynchronizingIOSurfacesAcrossProcessors.html
+6: https://developer.apple.com/library/archive/documentation/Miscellaneous/Conceptual/MetalProgrammingGuide/WhatsNewiniOS9andOSX1011/WhatsNewiniOS9andOSX1011.html
+7: https://developer.apple.com/documentation/metal/mtldevice/makesharedtexture(descriptor:)
+🌐 Web query:
+site:developer.apple.com/documentation/metal MTLCommandQueue process shared object
+💡 Result:
+In the context of Apple's Metal framework, MTLCommandQueue does not have a specific built-in mechanism to "process shared objects" as a primary function [1]. Instead, MTLCommandQueue acts as a queue for submitting command buffers to a GPU device [2][1]. If you are dealing with "shared objects" in Metal, the term typically refers to resources or synchronization primitives that are shared across different contexts, such as across multiple CPUs, GPUs, or process boundaries [3][4]. Key mechanisms for handling these include: 1. Shared Events (MTLSharedEvent): These are used for synchronizing memory operations and command execution across different devices, processes, or CPU/GPU boundaries [5][3]. You use MTLCommandQueue to encode signal and wait commands for these shared events to ensure proper synchronization between different queues [5]. 2. Shared Textures/Resources: While an MTLCommandQueue itself does not "process" these objects, it manages the submission of commands that operate on them [1]. Resources like textures or buffers can be created as shareable to be accessible across different process boundaries, but their lifecycle and access are managed via Metal's resource synchronization and residency APIs, not directly by the queue itself [3][4][6]. 3. Expensive Shared Objects: Metal documentation recommends creating "shared objects" such as command queues, pipelines, buffers, and textures during initialization, rather than in time-critical code paths, because they are expensive to allocate but fast to reuse [1]. In this context, "shared" simply means objects that you create once and reuse throughout your application [1]. In summary, MTLCommandQueue is responsible for ordering and submitting commands [1], while synchronization and sharing of resources across boundaries are handled by specific Metal types like MTLSharedEvent [3] and shared resource handles [4].
+Citations:
+1: https://developer.apple.com/documentation/metal/setting-up-a-command-structure
+2: https://developer.apple.com/documentation/metal/mtldevice/makecommandqueue()?language=objc
+3: https://developer.apple.com/documentation/metal/resource-synchronization
+4: https://developer.apple.com/documentation/metal/mtldevice/makesharedtexture(handle:)
+5: https://developer.apple.com/documentation/metal/synchronizing-events-across-multiple-devices-or-processes
+6: https://developer.apple.com/documentation/metal/mtlcommandqueue/addresidencyset(_:)
+🌐 Web query:
+site:openfx.readthedocs.io MetalCommandQueue kOfxImageEffectPropMetalCommandQueue
+💡 Result:
+kOfxImageEffectPropMetalCommandQueue is an OpenFX (OFX) property that provides a pointer to the Metal command queue (id) used for GPU rendering [1][2]. Key details regarding its usage include: - Purpose: It allows an OpenFX plug-in to access the host's Metal command queue, enabling the plug-in to perform Metal-based rendering operations within the host's context [1][2]. - Accessing the pointer: The property contains a pointer that must be retrieved and then cast using reinterpret_cast<id>(pointer) to be used correctly in Metal code [1][3]. - Implementation requirements: - Plug-ins should enqueue any asynchronous Metal operations onto this provided queue to ensure proper synchronization within the host application [1][2]. - Plug-ins must not wait for these asynchronous operations to finish before returning from the render action, allowing the host to manage the command buffer execution pipeline efficiently [1][2].
+Citations:
+1: https://openfx.readthedocs.io/en/main/Reference/ofxRendering.html
+2: https://openfx.readthedocs.io/en/latest/Reference/api/file/ofxGPURender_8h.html
+3: https://openfx.readthedocs.io/en/latest/Reference/suites/ofxOpenGLRenderSuiteReference.html
+🏁 Script executed:
+```
+python3 - <<'PY'
+from pathlib import Path
+
+path = Path("docs/implementation/ofx-host-plan.md")
+lines = path.read_text().splitlines()
+
+def show(start, end):
+    for number in range(start, end + 1):
+        print(f"{number}: {lines[number - 1]}")
+
+print("--- process architecture ---")
+show(70, 95)
+print("--- OFX-0 gate ---")
+show(443, 455)
+print("--- OFX-6b ---")
+show(590, 602)
+
+terms = ("MTLSharedEvent", "shared event", "synchron", "signal", "wait")
+section = "\n".join(lines[589:602]).lower()
+print("--- synchronization terms in OFX-6b ---")
+for term in terms:
+    print(f"{term}: {term.lower() in section}")
+
+print("--- synchronization references in the plan ---")
+for number, line in enumerate(lines, 1):
+    if any(term.lower() in line.lower() for term in terms):
+        print(f"{number}: {line}")
+PY
+```
+Repository: narusenia/ravel
+Length of output: 1953
+Replace the cross-process “same Metal queue” requirement. Ravel and ravel-ofx-host are separate processes, so MTLCommandQueue cannot be shared through …MetalCommandQueue. Create the queue in ravel-ofx-host and define explicit synchronization for shared IOSurface work, such as cross-process MTLSharedEvent signal/wait ordering. Extend OFX-0 to prototype this path before OFX-6b; IOSurface wrapping alone is insufficient.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/ofx-host-plan.md` around lines 590 - 600, Update the
+OFX-6b Metal GPU render plan to remove the cross-process shared MTLCommandQueue
+requirement from the IOSurface/MetalCommandQueue wording and instead anchor the
+design on a queue created in ravel-ofx-host with explicit cross-process
+synchronization for shared IOSurface work, such as MTLSharedEvent signal/wait
+ordering. Extend the OFX-0 prototype section to cover this synchronization path
+before OFX-6b, and keep the completion criteria focused on zero readback and
+CPU/GPU output parity rather than queue sharing.
+```
+Comment thread
+docs/implementation/ofx-host-plan.md
+Comment on lines
++603
+to
++641
+### OFX-7a CUDA GPU レンダー（Windows）
+**Windows は準 1 級なので後回しにしない。** 共通の前提は `OFX-6a` だけで、
+`OFX-6b` の完了は待たない。実際の着手順は Metal → CUDA
+（開発機が macOS で反復が速く、`OFX-6a` の設計欠陥がそこで先に出るため。
+ユーザー判断、2026-08-05）。
+- `OFX-0` が選んだ橋（CUDA 外部メモリ、駄目なら OpenCL）を実装する
+- `kOfxImageEffectPropCudaEnabled` / `…CudaStream` を立てる
+- Ravel の D3D12 リソースを共有可能として確保し、CUDA 側へインポートさせる
+**完了条件**
+- Windows + NVIDIA の実機で GPU レンダー対応プラグインが
+**リードバック 0 回**で完走する
+- CPU 経路と GPU 経路の出力が一致する
+- **CI でコンパイル確認が走る**（GPU が無いので実行はされない。
+型とリンクの破壊は CI で落ちること）
+- **実機確認の手順・機材・結果が PR に書かれている**
+- CUDA が使えない環境（AMD / Intel GPU）で、落ちずに CPU 往復へ縮退し、
+そのことが `OFX-8` の表示に出る
+### OFX-7b OpenCL GPU レンダー（Experimental）
+AMD / Intel を GPU 経路に乗せるための追加経路。**CUDA の代替ではなく、
+CUDA が成立した上での拡張**。手元に Radeon が無いので**開発機でも CI でも
+検証されない** — 外部テスターの確認だけが根拠になる。
+- `kOfxImageEffectPropOpenCLEnabled` / `…OpenCLCommandQueue` を立てる
+- D3D12 → OpenCL の外部メモリ（OpenCL 3.0 拡張）で共有する
+- **既定で無効。** 設定で明示的に有効化する
+**完了条件**
+- 「Experimental」の 4 条件（既定無効・外部検証・UI 表示・リリースを止めない）
+をすべて満たす
+- **テスターによる実機確認の結果が PR に記録される**（機材と GPU を明記）
+- 拡張が使えない環境で、有効化していても落ちずに CPU 往復へ縮退する
+- CI でコンパイル確認が走る
+coderabbitai
+Bot
+Aug 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🎯 Functional Correctness | 🟠 Major | 🏗️ Heavy lift
+🧩 Analysis chain
+🏁 Script executed:
+```
+set -eu
+printf '%s\n' '--- documentation rules ---'
+cat .agents/rules/documentation.md
+printf '%s\n' '--- target excerpt ---'
+sed -n '560,670p' docs/implementation/ofx-host-plan.md
+printf '%s\n' '--- related OFX references ---'
+rg -n -C 3 'OFX-0|OFX-6a|OFX-6b|OFX-7a|OFX-7b|Cuda|CUDA|OpenCL' docs/implementation/ofx-host-plan.md
+```
+Repository: narusenia/ravel
+Length of output: 15278
+🏁 Script executed:
+```
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+path = Path("docs/implementation/ofx-host-plan.md")
+text = path.read_text()
+sections = {}
+for match in re.finditer(r"^### (OFX-[0-9a-z]+) (.+)$", text, re.M):
+    start = match.start()
+    end_match = re.search(r"^### ", text[match.end():], re.M)
+    end = match.end() + end_match.start() if end_match else len(text)
+    sections[match.group(1)] = text[start:end]
+
+for unit in ("OFX-0", "OFX-7a", "OFX-7b"):
+    print(f"--- {unit} ---")
+    print(sections.get(unit, "<missing>"))
+
+print("--- dependency table rows ---")
+for line in text.splitlines():
+    if re.match(r"\| OFX-(0|7a|7b) \|", line):
+        print(line)
+
+print("--- decision-recording evidence ---")
+for line_no, line in enumerate(text.splitlines(), 1):
+    if "どの橋を使うかを決める" in line or "CUDA / OpenCL" in line or "OFX-0" in line and "結果" in line:
+        print(f"{line_no}: {line}")
+PY
+```
+Repository: narusenia/ravel
+Length of output: 2793
+Separate the CUDA and OpenCL implementation paths.
+OFX-0 already records the selected bridge. Make OFX-7a CUDA-only. If OFX-0 selects OpenCL, let OFX-7b own the OpenCL properties and D3D12 bridge. Update OFX-7b’s dependency so the OpenCL path does not require OFX-7a or CUDA completion.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/ofx-host-plan.md` around lines 603 - 641, Update the
+OFX-7a CUDA section to define only the CUDA properties and CUDA external-memory
+bridge, without covering OpenCL fallback behavior. Move OpenCL properties and
+the D3D12-to-OpenCL bridge ownership entirely to OFX-7b, and revise its
+dependency wording so the OpenCL path depends on the OFX-0 bridge selection
+rather than OFX-7a or CUDA completion.
+```
+Comment thread
+docs/implementation/README.md
+| `exposed-parameters-plan.md` | Declared named inputs — the one mechanism behind CLI `--param`, subgraph templates, network interfaces, and shader manifests | `network-interface-editing-plan.md` | REQ-PROJ-006 |
+| `plugin-system-plan.md` | `ProcessorRegistry`, package manifests, WGSL shader plugins, WASM geometry nodes | `exposed-parameters-plan.md`, `gpu-backend-plan.md` (GPUBK-1) | REQ-PLUGIN-002, REQ-PLUGIN-004 |
+| `gpu-backend-plan.md` | Hide the backend behind an abstraction, then add Metal/D3D12/Vulkan — unblocks OFX and takes over MED-GPU-01 | — | REQ-INFRA-009, REQ-GPU-001 |
+| `ofx-host-plan.md` | The OpenFX host: an isolated C++ process, the suites, and the GPU interop — **OFX defines no D3D12 path, so Windows has no zero-copy route** | `gpu-backend-plan.md` (GPUBK-8, merged), `plugin-system-plan.md` (PLUG-1) | REQ-PLUGIN-001, REQ-PROJ-002 |
+coderabbitai
+Bot
+Aug 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🗄️ Data Integrity & Integration | 🟡 Minor | ⚡ Quick win
+🧩 Analysis chain
+🏁 Script executed:
+```
+#!/bin/bash
+set -euo pipefail
+
+test -f .agents/rules/documentation.md
+rg -n -C 3 'ofx-host-plan\.md|OFX-0|GPUBK-8|MED-GPU-07|PLUG-1' \
+  .agents/rules/documentation.md \
+  docs/implementation/README.md \
+  docs/implementation/backlog.md \
+  docs/implementation/roadmap.md \
+  docs/implementation/ofx-host-plan.md
+```
+Repository: narusenia/ravel
+Length of output: 21232
+🏁 Script executed:
+```
+cat -n .agents/rules/documentation.md | head -100
+```
+Repository: narusenia/ravel
+Length of output: 2177
+🏁 Script executed:
+```
+# Check if mise run docs:check is available and what it validates
+cd /tmp && mise run docs:check --help 2>&1 || echo "No docs:check target or no mise available"
+```
+Repository: narusenia/ravel
+Length of output: 233
+🏁 Script executed:
+```
+# Also search for any specific table/dependency formatting rules in documentation.md
+cat .agents/rules/documentation.md | grep -A 5 -B 5 "table\|depend\|link\|reference" || echo "No specific table rules found"
+```
+Repository: narusenia/ravel
+Length of output: 886
+🏁 Script executed:
+```
+# Verify the exact prerequisite structure by examining the relationship comments in ofx-host-plan.md more closely
+sed -n '5,50p' docs/implementation/ofx-host-plan.md
+```
+Repository: narusenia/ravel
+Length of output: 1859
+Update line 71 to list only blocking prerequisites.
+Line 71 lists plugin-system-plan.md (PLUG-1), which is not a prerequisite for the OFX plan. The authoritative sources—backlog.md line 587, roadmap.md line 720, and ofx-host-plan.md lines 11-16 and 430—identify GPUBK-8 and MED-GPU-07 as the prerequisites for OFX-0. PLUG-1 has no dependencies and is used only later for node registration. Replace plugin-system-plan.md (PLUG-1) with gpu-backend-plan.md (MED-GPU-07, #292) to reconcile the table with the planned dependencies.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/README.md` at line 71, Update the OFX host row in the
+implementation README to list only its blocking prerequisites: retain
+gpu-backend-plan.md (GPUBK-8, merged) and replace plugin-system-plan.md (PLUG-1)
+with gpu-backend-plan.md (MED-GPU-07, `#292`), preserving the remaining
+requirements unchanged.
+```
+docs: align the OFX failure model with one host process and widen the…
+…
+e6e68a8
+```
+… requirement corrections
+```
+coderabbitai
+Bot
+reviewed
+Aug 5, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 5
+Caution
+Some comments are outside the diff and can’t be posted inline due to platform limitations.
+⚠️ Outside diff range comments (1)
+docs/implementation/ofx-host-plan.md (1)
+249-251: 🗄️ Data Integrity & Integration | 🟠 Major | ⚡ Quick win
+Verify that OpenFX identifiers are enforced as globally unique and that collision is detectable or prevented.
+The OpenFX specification recommends reverse-domain naming (e.g., uk.co.thefoundry.effect) to avoid collisions, but does NOT enforce identifier uniqueness at the protocol level. If two OFX bundles declare the same identifier, Ravel's ProcessorRegistry (HashMap-based) will silently overwrite the first with the second during registration. This causes saved nodes to resolve to the wrong plugin implementation without warning.
+Define either (1) a collision detection check during manifest/bundle loading that rejects duplicate identifiers with a clear error, or (2) a deterministic selection rule (e.g., first-loaded wins, or latest version wins) with explicit logging. If relying on convention alone, document the identifier collision risk in the plugin packaging guide.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/ofx-host-plan.md` around lines 249 - 251, Update the
+OpenFX manifest or bundle loading flow, using the visible ProcessorRegistry
+registration path, to prevent silent overwrites when multiple bundles declare
+the same identifier. Prefer rejecting duplicate identifiers with a clear error;
+alternatively, implement and explicitly log a deterministic selection rule. If
+uniqueness remains convention-based, document the collision risk in the plugin
+packaging guide.
+```
+🧹 Nitpick comments (1)
+docs/implementation/ofx-host-plan.md (1)
+512-515: 🔒 Security & Privacy | 🔵 Trivial | ⚡ Quick win
+Security Misconfiguration (CWE-693)
+Clarify the trust boundary of the shared OFX host.
+All OFX plug-ins share one native process. This isolates the main Ravel process from plug-in crashes, but it does not isolate plug-in memory or peer state. State that plug-ins are mutually trusted, or use per-plug-in processes or sandboxing.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/ofx-host-plan.md` around lines 512 - 515, Clarify the
+shared OFX host design near REQ-PROJ-002 by explicitly stating that OFX plug-ins
+are mutually trusted and share process memory and peer state, so one plug-in can
+affect others. If mutual trust is not acceptable, revise the design to use
+per-plug-in processes or sandboxing instead.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@docs/implementation/ofx-host-plan.md`:
+- Around line 695-699: Update the OFX-9 unit in the plan so it explicitly
+includes REQ-INFRA-009 in its scope and completion check, matching the related
+change called out in the problem statement. Use the OFX-9 section and its
+checklist items to add the missing document reference, or remove the item 3
+dependency from the problem statement if it is no longer required, so the D3D12
+contract change cannot be skipped.
+- Around line 506-508: Update the IPC design in the plan section around the
+control-message/image handoff to require capability-scoped image identifiers
+instead of raw or predictable handles. Specify that each image ID or GPU handle
+must be bound to the host, node, and render request, validated for ownership on
+every message, and revoked after completion or host termination; explicitly
+disallow arbitrary handles and shared-memory names that can be guessed.
+- Around line 61-66: Update the Phase B GPU Render Suite description in the OFX
+host plan so it no longer implies unconditional CPU fallback for
+OpenGL-unsupported plugins; instead, explicitly state that OpenGL is not
+supported, include OpenCL in the initial support list alongside the other GPU
+suites, and note that plugins without CPU rendering support must return
+kOfxStatErrUnsupported rather than falling back silently. Also align the OFX-8
+plugin list wording so the CPU downgrade/reason is shown there when a fallback
+is used.
+- Around line 524-526: Clarify the restart-limit plan to define how the failing
+plug-in is identified when a shared OFX host process crashes, such as tracking
+the plug-in handling the active request or isolating plug-ins into separate
+restartable processes. Only disable a plug-in after its crash attribution is
+established; otherwise preserve all instances as lost without guessing.
+- Line 255: Update the NodeMetadata design referenced by the GraphDoc
+serialization plan to include a plugin version field, ensuring Node
+serialization preserves it at creation time. Define backward-compatible
+deserialization so older projects without the field load with an absent/default
+version, and align the documented plan with the existing NodeMetadata/Node
+serialization behavior.
+
+---
+
+Outside diff comments:
+In `@docs/implementation/ofx-host-plan.md`:
+- Around line 249-251: Update the OpenFX manifest or bundle loading flow, using
+the visible ProcessorRegistry registration path, to prevent silent overwrites
+when multiple bundles declare the same identifier. Prefer rejecting duplicate
+identifiers with a clear error; alternatively, implement and explicitly log a
+deterministic selection rule. If uniqueness remains convention-based, document
+the collision risk in the plugin packaging guide.
+
+---
+
+Nitpick comments:
+In `@docs/implementation/ofx-host-plan.md`:
+- Around line 512-515: Clarify the shared OFX host design near REQ-PROJ-002 by
+explicitly stating that OFX plug-ins are mutually trusted and share process
+memory and peer state, so one plug-in can affect others. If mutual trust is not
+acceptable, revise the design to use per-plug-in processes or sandboxing
+instead.
+```
+🪄 Autofix
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: defaults
+Review profile: CHILL
+Plan: Pro Plus
+Run ID: 80b8c9fa-680b-4489-a8d5-dd461fb00695
+📥 Commits
+Reviewing files that changed from the base of the PR and between 9e41d95 and e6e68a8.
+📒 Files selected for processing (1)
+docs/implementation/ofx-host-plan.md
+Comment thread
+docs/implementation/ofx-host-plan.md
+Comment on lines
++61
+to
++66
+1. 「初期サポート (Phase B) … **GPU Render Suite (OpenGL/Metal/CUDA)**」 —
+**OpenCL が抜けている**。ヘッダは 4 つ定義している
+2. **同じ行が OpenGL を初期サポートに数えている**が、本計画は
+OpenGL を実装しない（D3D12 から橋が架からない。上の優先順位表）。
+**「OpenGL は非対応、該当プラグインは CPU 往復へ縮退」と書き換える**。
+縮退することは `OFX-8` の表示に出す
+coderabbitai
+Bot
+Aug 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🎯 Functional Correctness | 🟠 Major | 🏗️ Heavy lift
+🧩 Analysis chain
+🏁 Script executed:
+```
+#!/bin/bash
+set -euo pipefail
+rg -n -C 5 -i 'OpenGL|CPU|kOfxStatErrUnsupported|OFX-8|render.*support|support.*CPU' \
+  docs/implementation/ofx-host-plan.md docs/requirements
+```
+Repository: narusenia/ravel
+Length of output: 27813
+🏁 Script executed:
+```
+#!/bin/bash
+set -euo pipefail
+
+# Search for CPU capability, plugin capability checking, error handling for missing paths
+rg -n -A 3 -B 3 'CPU.*capability|capability.*check|kOfxStatErrUnsupported|unsupported.*Suite|plugin.*CPU|render.*path' \
+  docs/implementation/ofx-host-plan.md | head -80
+```
+Repository: narusenia/ravel
+Length of output: 897
+🏁 Script executed:
+```
+#!/bin/bash
+set -euo pipefail
+
+# Look for explicit plugin capability checking, error scenarios, and handling of no-supported-path
+rg -n -A 5 'OFX-8|プラグイン.*チェック|プラグイン.*サポート|render.*Suite.*チェック|GPU.*CPU.*決定' \
+  docs/implementation/ofx-host-plan.md | grep -A 5 "OFX-8"
+```
+Repository: narusenia/ravel
+Length of output: 1496
+🏁 Script executed:
+```
+#!/bin/bash
+set -euo pipefail
+
+# Search for sections about determining plugin capabilities, checking render paths, or failing over
+rg -n -A 8 'プラグイン.*能力|プラグイン.*判定|CPU.*サポート|render.*チェック|Suite.*チェック|GPU.*CPU.*判定' \
+  docs/implementation/ofx-host-plan.md | head -100
+
+# Also check if there's explicit error handling for "no render path available"
+echo "---"
+rg -n 'プラグイン.*レンダー|render.*path|no.*render|利用不可|サポート.*ない' \
+  docs/implementation/ofx-host-plan.md | head -50
+```
+Repository: narusenia/ravel
+Length of output: 153
+🏁 Script executed:
+```
+#!/bin/bash
+set -euo pipefail
+
+# Search for how plugins are screened, checked, or evaluated at startup
+rg -n 'startup|初期化|スキャン|ロード|チェック' docs/implementation/ofx-host-plan.md | head -30
+
+echo "---"
+
+# Search for render suite, image suite, capability in context
+rg -n -B 2 -A 2 'Suite.*サポート|Suite.*チェック|GPU.*決定|CPU.*決定' docs/implementation/ofx-host-plan.md | head -60
+```
+Repository: narusenia/ravel
+Length of output: 513
+🏁 Script executed:
+```
+#!/bin/bash
+set -euo pipefail
+
+# Search specifically for OFX-4 and how it handles plugins that may not support CPU rendering
+rg -n -B 2 -A 8 'OFX-4.*CPU|Image Effect Suite' docs/implementation/ofx-host-plan.md
+
+echo "---"
+
+# Search for how the plan handles plugins without GPU support falling back to CPU
+rg -n -B 3 -A 3 'GPU.*CPU|CPU.*経路|往復.*条件|conditio' docs/implementation/ofx-host-plan.md | head -80
+```
+Repository: narusenia/ravel
+Length of output: 3115
+Specify what happens when a plugin lacks CPU rendering support.
+Line 65 states unconditionally that OpenGL-unsupported plugins fall back to CPU rendering (該当プラグインは CPU 往復へ縮退). However, an OpenGL-only plugin may not provide CPU rendering. Add explicit logic: before falling back to CPU, check whether the plugin supports CPU rendering. If CPU support is absent, do not fall back silently. Instead, return kOfxStatErrUnsupported for the GPU Render Suite and display the reason in the plugin list per OFX-8 (line 690–691). This aligns with the principle "黙って遅くなる経路が無い" (no silent slowdown).
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/ofx-host-plan.md` around lines 61 - 66, Update the Phase
+B GPU Render Suite description in the OFX host plan so it no longer implies
+unconditional CPU fallback for OpenGL-unsupported plugins; instead, explicitly
+state that OpenGL is not supported, include OpenCL in the initial support list
+alongside the other GPU suites, and note that plugins without CPU rendering
+support must return kOfxStatErrUnsupported rather than falling back silently.
+Also align the OFX-8 plugin list wording so the CPU downgrade/reason is shown
+there when a fallback is used.
+```
+Comment thread
+docs/implementation/ofx-host-plan.md
+**可搬性はデータモデルが既に解いている。** `Node`（`graph.rs:412`）は
+`type_key` / `inputs` / `outputs` / `parameters` をすべて自分で持ち、
+`GraphDoc` がそれをそのまま直列化する。したがって、次の 2 つが成り立つ。
+coderabbitai
+Bot
+Aug 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🗄️ Data Integrity & Integration | 🟠 Major | 🏗️ Heavy lift
+🧩 Analysis chain
+🏁 Script executed:
+```
+#!/bin/bash
+set -euo pipefail
+rg -n -C 6 '\bNodeMetadata\b|\bGraphDoc\b|type_key|parameters' \
+  --glob '*.rs' --glob '*.md' .
+```
+Repository: narusenia/ravel
+Length of output: 50372
+🏁 Script executed:
+```
+# Read the specific documentation section
+cat -n docs/implementation/ofx-host-plan.md | sed -n '245,285p'
+```
+Repository: narusenia/ravel
+Length of output: 1612
+🏁 Script executed:
+```
+# Find where NodeMetadata is defined and what fields it has
+rg -A 10 'struct NodeMetadata' --glob '*.rs'
+```
+Repository: narusenia/ravel
+Length of output: 153
+🏁 Script executed:
+```
+# Search for the serialization statement mentioned in the review
+rg -B 3 -A 3 'type_key.*inputs.*outputs.*parameters|GraphDoc.*serialize' --glob '*.rs' --glob '*.md' | head -100
+```
+Repository: narusenia/ravel
+Length of output: 153
+🏁 Script executed:
+```
+# Search more broadly for NodeMetadata across all files
+rg -i 'nodemetadata' --glob '*.rs' --glob '*.md'
+```
+Repository: narusenia/ravel
+Length of output: 153
+🏁 Script executed:
+```
+# Look at the Node struct definition mentioned in the docs (graph.rs:412)
+sed -n '400,450p' crates/ravel-core/src/graph.rs
+```
+Repository: narusenia/ravel
+Length of output: 1951
+🏁 Script executed:
+```
+# Search for serialization/deserialization of Node
+rg -B 5 -A 5 'serialize.*Node|Deserialize.*Node|#\[derive.*Serialize' crates/ravel-core/src/graph.rs | head -80
+```
+Repository: narusenia/ravel
+Length of output: 2790
+🏁 Script executed:
+```
+# Get the complete NodeMetadata struct definition
+rg -A 15 'pub struct NodeMetadata' crates/ravel-core/src/graph.rs
+```
+Repository: narusenia/ravel
+Length of output: 908
+🏁 Script executed:
+```
+# Search for any version or plugin_version fields in the codebase
+rg 'plugin_version|ofx_version|node_version' --glob '*.rs' --glob '*.md'
+```
+Repository: narusenia/ravel
+Length of output: 153
+🏁 Script executed:
+```
+# Check if there are any TODOs or FIXMEs related to NodeMetadata or version tracking
+rg -i 'todo|fixme|xxx|hack.*metadata|hack.*version' crates/ravel-core/src/graph.rs
+```
+Repository: narusenia/ravel
+Length of output: 153
+🏁 Script executed:
+```
+# Get the full NodeMetadata definition
+sed -n '140,160p' crates/ravel-core/src/graph.rs
+```
+Repository: narusenia/ravel
+Length of output: 796
+🏁 Script executed:
+```
+# Check the context around line 273-277 in the plan document more carefully
+cat -n docs/implementation/ofx-host-plan.md | sed -n '270,280p'
+```
+Repository: narusenia/ravel
+Length of output: 512
+🏁 Script executed:
+```
+# Verify the current Node serialization includes metadata
+ast-grep run --pattern 'struct Node { $$$ metadata: NodeMetadata, $$$ }' --lang rust crates/ravel-core/src/graph.rs
+```
+Repository: narusenia/ravel
+Length of output: 153
+🏁 Script executed:
+```
+# Get the complete NodeMetadata struct with all fields
+sed -n '130,165p' crates/ravel-core/src/graph.rs
+```
+Repository: narusenia/ravel
+Length of output: 1234
+🏁 Script executed:
+```
+# Double-check: search for any version-related fields in NodeMetadata
+rg -A 20 'pub struct NodeMetadata' crates/ravel-core/src/graph.rs
+```
+Repository: narusenia/ravel
+Length of output: 1233
+🏁 Script executed:
+```
+# Get more context around the NodeMetadata definition - look for the z field and beyond
+sed -n '152,180p' crates/ravel-core/src/graph.rs
+```
+Repository: narusenia/ravel
+Length of output: 1163
+🏁 Script executed:
+```
+# Verify if the complete Node struct definition shows metadata field
+sed -n '400,420p' crates/ravel-core/src/graph.rs
+```
+Repository: narusenia/ravel
+Length of output: 694
+🏁 Script executed:
+```
+# Get the complete Node struct definition to see if metadata has any serde annotations
+sed -n '408,435p' crates/ravel-core/src/graph.rs
+```
+Repository: narusenia/ravel
+Length of output: 1252
+🏁 Script executed:
+```
+# Check the NodeMetadata struct one more time to see ALL fields
+sed -n '175,210p' crates/ravel-core/src/graph.rs
+```
+Repository: narusenia/ravel
+Length of output: 1710
+Add plugin version field to NodeMetadata.
+The plan (lines 273–277) requires storing the plugin version at node creation time in NodeMetadata to detect version changes when reopening a project. The Node struct already serializes its metadata: NodeMetadata field, but the current NodeMetadata struct (graph.rs) lacks a version field. Add a plugin version field to NodeMetadata and implement backward-compatible deserialization for projects created before this field existed (they will deserialize with a default/absent version).
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/ofx-host-plan.md` at line 255, Update the NodeMetadata
+design referenced by the GraphDoc serialization plan to include a plugin version
+field, ensuring Node serialization preserves it at creation time. Define
+backward-compatible deserialization so older projects without the field load
+with an absent/default version, and align the documented plan with the existing
+NodeMetadata/Node serialization behavior.
+```
+Comment thread
+docs/implementation/ofx-host-plan.md
+Comment on lines
++506
+to
++508
+- 制御メッセージ（describe / render 要求など）と画像の受け渡しを分ける。
+画像は共有メモリ、制御は構造化メッセージ
+- **プラグイン起点のパラメータ書き込み**を受け取る（双方向。上記の決定事項）
+coderabbitai
+Bot
+Aug 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔒 Security & Privacy | 🟠 Major | 🏗️ Heavy lift
+🧩 Analysis chain
+🏁 Script executed:
+```
+#!/bin/bash
+set -euo pipefail
+rg -n -C 5 -i 'shared memory|GPU handle|frame.?id|image.?id|lease|owner|cleanup|duplicate|permission' \
+  docs/implementation docs/specifications docs/dev
+```
+Repository: narusenia/ravel
+Length of output: 41818
+Resource Access Scoping Missing From IPC Design (CWE-668)
+Exploitability: Theoretical
+Define scoped image-resource capabilities.
+If the IPC carries only an image ID or GPU handle, bind it to the host, node, and render request. Use opaque, capability-scoped identifiers, validate ownership on every message, and revoke them after completion or host termination. Do not accept arbitrary handles or predictable shared-memory names.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/ofx-host-plan.md` around lines 506 - 508, Update the IPC
+design in the plan section around the control-message/image handoff to require
+capability-scoped image identifiers instead of raw or predictable handles.
+Specify that each image ID or GPU handle must be bound to the host, node, and
+render request, validated for ownership on every message, and revoked after
+completion or host termination; explicitly disallow arbitrary handles and
+shared-memory names that can be guessed.
+```
+Comment thread
+docs/implementation/ofx-host-plan.md
+Comment on lines
++524
+to
++526
+- **再起動の回数を制限する。** 起動 → 即クラッシュを繰り返すプラグインで
+無限ループにしない。上限に達したらそのプラグインを無効化して
+ユーザーに見せる（`OFX-8` の表示に乗る）
+coderabbitai
+Bot
+Aug 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🩺 Stability & Availability | 🟠 Major | 🏗️ Heavy lift
+🧩 Analysis chain
+🏁 Script executed:
+```
+#!/bin/bash
+set -euo pipefail
+rg -n -C 5 -i 'crash|restart|disable|quarantine|attribut|safe mode|active plugin|request context' \
+  docs/implementation/ofx-host-plan.md docs/implementation docs/dev
+```
+Repository: narusenia/ravel
+Length of output: 50374
+🏁 Script executed:
+```
+cd docs/implementation && head -530 ofx-host-plan.md | tail -15
+```
+Repository: narusenia/ravel
+Length of output: 617
+🏁 Script executed:
+```
+wc -l docs/implementation/ofx-host-plan.md && \
+sed -n '510,540p' docs/implementation/ofx-host-plan.md
+```
+Repository: narusenia/ravel
+Length of output: 1103
+🏁 Script executed:
+```
+sed -n '470,550p' docs/implementation/ofx-host-plan.md
+```
+Repository: narusenia/ravel
+Length of output: 2632
+🏁 Script executed:
+```
+rg -n 'plugin|attribute|identify|which|sequence|launch|start|load' \
+  docs/implementation/ofx-host-plan.md | head -40
+```
+Repository: narusenia/ravel
+Length of output: 410
+🏁 Script executed:
+```
+rg -n 'active|instance|process|enable|disable|safe|isolat|request|context' \
+  docs/implementation/ofx-host-plan.md | grep -E '(active|instance|disable|safe|isolat|context)' | head -30
+```
+Repository: narusenia/ravel
+Length of output: 199
+🏁 Script executed:
+```
+sed -n '540,620p' docs/implementation/ofx-host-plan.md
+```
+Repository: narusenia/ravel
+Length of output: 2597
+🏁 Script executed:
+```
+rg -n 'describe|render|effect|request|active|current|track|log|record' \
+  docs/implementation/ofx-host-plan.md | head -50
+```
+Repository: narusenia/ravel
+Length of output: 1137
+🏁 Script executed:
+```
+sed -n '1,100p' docs/implementation/ofx-host-plan.md
+```
+Repository: narusenia/ravel
+Length of output: 3176
+The plan does not define which plug-in to disable after restart limits are reached.
+The architecture runs all OFX instances in one host process. A crash in that process marks all instances as lost. The plan instructs to disable a plug-in after restart limits are exceeded, but provides no mechanism to determine which plug-in caused the crash. When multiple plug-ins share the same process and the process crashes, the system cannot distinguish which one failed without logging the active plug-in or isolating crash origins. Specify how the system identifies the failing plug-in before disabling it. Consider tracking which plug-in handled each request, or implement restart isolation for individual plug-in candidates.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/ofx-host-plan.md` around lines 524 - 526, Clarify the
+restart-limit plan to define how the failing plug-in is identified when a shared
+OFX host process crashes, such as tracking the plug-in handling the active
+request or isolating plug-ins into separate restartable processes. Only disable
+a plug-in after its crash attribution is established; otherwise preserve all
+instances as lost without guessing.
+```
+Comment thread
+docs/implementation/ofx-host-plan.md
+Comment on lines
++695
+to
++699
+- **`REQ-PLUGIN.md` の 3 箇所を訂正する**（本計画「問題」節の 1〜3）。
+OpenGL を非対応として明記することを含む
+- REQ-PLUGIN-001 / REQ-PROJ-002 の受入条件を実測に合わせる
+- `docs/specifications/architecture.md` にホストプロセスを載せる
+- `docs/dev/` にプラグインを追加・デバッグする手順を足す
+coderabbitai
+Bot
+Aug 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🗄️ Data Integrity & Integration | 🟠 Major
+Include REQ-INFRA-009 in OFX-9.
+Earlier in this plan, item 3 requires the related REQ-INFRA-009 wording to change. The OFX-9 unit does not list that document or its completion check. Add it, or remove item 3 from the problem statement. Otherwise OFX-9 can complete while the D3D12 contract remains incorrect.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@docs/implementation/ofx-host-plan.md` around lines 695 - 699, Update the
+OFX-9 unit in the plan so it explicitly includes REQ-INFRA-009 in its scope and
+completion check, matching the related change called out in the problem
+statement. Use the OFX-9 section and its checklist items to add the missing
+document reference, or remove the item 3 dependency from the problem statement
+if it is no longer required, so the D3D12 contract change cannot be skipped.
+```
+Hide details
+View details
+narusenia
+merged commit 5e8fd70
+into
+main
+Aug 5, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+narusenia
+deleted the
+docs/ofx-host-plan
+branch
+August 5, 2026 15:42
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

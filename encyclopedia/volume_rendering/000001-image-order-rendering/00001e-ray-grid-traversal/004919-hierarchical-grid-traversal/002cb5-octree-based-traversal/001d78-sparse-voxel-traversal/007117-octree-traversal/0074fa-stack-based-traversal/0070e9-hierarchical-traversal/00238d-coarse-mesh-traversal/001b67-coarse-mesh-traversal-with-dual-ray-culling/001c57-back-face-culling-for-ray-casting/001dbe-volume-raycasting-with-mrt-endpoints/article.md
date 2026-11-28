@@ -1,0 +1,122 @@
+# Volume Raycasting with MRT Endpoints
+
+Also called: MRT Ray Start/Stop Determination, Two-pass raycasting
+
+## Overview
+Volume Raycasting with MRT Endpoints is a technique to determine the entry and exit points of rays into a volume by rendering the volume's bounding box to two separate color attachments in a single GPU pass, avoiding analytical ray-cube intersection calculations [S1, unofficial][S2, unofficial]. It sets itself apart from analytical intersection methods by leveraging the graphics pipeline's face culling and multiple render target (MRT) capabilities to store object-space coordinates directly, building on the back-face culling logic of [Back-Face Culling for Ray Casting](1236-back-face-culling-for-ray-casting.md) [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume texture, a bounding box geometry (typically a two-unit cube centered at the origin), and a viewport [S1, unofficial][S2, unofficial].
+*   **Output:** Two textures (RayStart, RayStop) containing the entry and exit points for each pixel, and a final 2D image with the composited volume [S1, unofficial][S2, unofficial].
+
+**Data Structures:**
+*   **Bounding Box:** A cube with vertices in object space ranging from $[-1, 1]$ on all axes [S1, unofficial][S2, unofficial].
+*   **Frame Buffer Objects (FBO):** Must support two color attachments (e.g., `GL_COLOR_ATTACHMENT0` and `GL_COLOR_ATTACHMENT1`) [S2, unofficial].
+*   **Textures:** Two 2D floating-point RGB textures (e.g., `GL_RGBA32F`) to store the 3D coordinates. Initialized to black (zero) [S2, unofficial].
+
+**Steps:**
+
+1.  **Pass 1: Compute Endpoints**
+    1.  Bind an FBO with two color attachments [S2, unofficial].
+    2.  Enable blending with additive mode: `glBlendFunc(GL_ONE, GL_ONE)` [S1, unofficial][S2, unofficial].
+    3.  Set draw buffers to both attachments: `glDrawBuffers(2, {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1})` [S2, unofficial].
+    4.  Render the bounding box cube [S2, unofficial].
+    5.  The vertex shader transforms vertices to clip space using the Model-View-Projection matrix but passes the original object-space position to the fragment shader [S1, unofficial][S2, unofficial].
+    6.  The fragment shader writes the object-space position to one attachment if the face is front-facing, and to the other if back-facing [S1, unofficial][S2, unofficial].
+    7.  Convert coordinates from $[-1, 1]$ to $[0, 1]$ range: $coord = 0.5 \times (position + 1.0)$ [S1, unofficial][S2, unofficial].
+
+2.  **Pass 2: Raycasting and Compositing**
+    1.  Bind the RayStart and RayStop textures to texture units [S1, unofficial][S2, unofficial].
+    2.  Render a full-screen quad [S1, unofficial][S2, unofficial].
+    3.  For each fragment, sample the entry point $P_{start}$ from RayStart and exit point $P_{stop}$ from RayStop using screen coordinates [S1, unofficial][S2, unofficial].
+    4.  If $P_{start} == P_{stop}$, discard the fragment (no intersection) [S2, unofficial].
+    5.  Compute ray vector $\vec{R} = P_{stop} - P_{start}$ and length $L = \|\vec{R}\|$ [S2, unofficial].
+    6.  Compute step vector $\vec{S} = \text{StepLength} \times \frac{\vec{R}}{L}$ [S2, unofficial].
+    7.  Apply stochastic jitter to $P_{start}$ using a jitter texture to reduce aliasing: $P_{start} \leftarrow P_{start} + \vec{S} \times \text{jitter}$ [S1, unofficial].
+    8.  Initialize current position $P = P_{start}$ and destination color $C_{dst} = (0, 0, 0, 0)$ [S2, unofficial].
+    9.  Loop while $L > 0$ and $C_{dst}.a < 1.0$:
+        *   Sample volume density $d = \text{texture}(\text{Volume}, P).r$ [S2, unofficial].
+        *   Create source color $C_{src} = (d, d, d, d)$ (assuming grayscale density maps to RGB) [S2, unofficial].
+        *   Apply front-to-back blending: $C_{dst} = (1.0 - C_{dst}.a) \times C_{src} + C_{dst}$ [S2, unofficial].
+        *   Advance position: $P \leftarrow P + \vec{S}$ [S2, unofficial].
+        *   Decrease remaining length: $L \leftarrow L - \text{StepLength}$ [S2, unofficial].
+    10. Output $C_{dst}$ as the fragment color [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pass1_vertex(position: vec3, mvp_matrix: mat4) -> vec4:
+    return mvp_matrix * vec4(position, 1.0)
+
+def pass1_fragment(position: vec3, is_front_facing: bool) -> tuple[vec3, vec3]:
+    coord = 0.5 * (position + 1.0)
+    if is_front_facing:
+        return coord, vec3(0.0)
+    else:
+        return vec3(0.0), coord
+
+def pass2_fragment(screen_pos: vec2, 
+                   ray_start_tex: sampler2D, 
+                   ray_stop_tex: sampler2D, 
+                   volume_tex: sampler3D, 
+                   jitter_tex: sampler2D, 
+                   step_length: float) -> vec4:
+    coord = 0.5 * (screen_pos + 1.0)
+    ray_start = texture(ray_start_tex, coord).xyz
+    ray_stop = texture(ray_stop_tex, coord).xyz
+    
+    if ray_start == ray_stop:
+        return vec4(0.0)
+        
+    ray_vec = ray_stop - ray_start
+    ray_length = length(ray_vec)
+    if ray_length <= 0.0:
+        return vec4(0.0)
+    step_vec = step_length * (ray_vec / ray_length)
+    
+    jitter_val = texture(jitter_tex, coord).r
+    current_pos = ray_start + step_vec * jitter_val
+    
+    dst_color = vec4(0.0)
+    
+    while ray_length > 0.0 and dst_color.a < 1.0:
+        density = texture(volume_tex, current_pos).r
+        src_color = vec4(density, density, density, density)
+        dst_color = (1.0 - dst_color.a) * src_color + dst_color
+        current_pos += step_vec
+        ray_length -= step_length
+        
+    return dst_color
+```
+
+**Parameters:**
+*   `step_length`: Distance between samples. Typical value: 0.01 [S2, unofficial]. Smaller values increase quality but cost; larger values increase speed but reduce quality [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Non-intersecting rays:** Handled by checking if `ray_start == ray_stop` [S2, unofficial]. If the ray misses the volume, both textures return zero (or the cleared value), resulting in a zero vector [S2, unofficial].
+*   **Precision:** Using floating-point textures for endpoints is critical to avoid quantization errors in start/stop positions, which would cause gaps or overlaps in the raymarching [G].
+*   **Jitter Texture:** Requires a pre-generated texture of random values on the CPU to be passed to the GPU [S1, unofficial]. Without jitter, regular sampling can cause moiré patterns or "wood grain" artifacts [S1, unofficial].
+*   **Coordinate Space Alignment:** The volume texture must be sampled using coordinates normalized to $[0, 1]$ [S1, unofficial]. The endpoint textures store values in this range, so `current_pos` is directly usable [S1, unofficial]. If the volume data is not aligned with the $[-1, 1]$ bounding box, a transformation must be applied before sampling [G].
+
+## Subtopics
+
+### [Volumetric Lighting via Gradient Normals](1625-volumetric-lighting-via-gradient-normals.md)
+A technique to compute lighting normals in volume data by approximating the gradient vector, which points in the direction of greatest change and whose magnitude indicates surface intersection. It sets itself apart from standard gradient-based shading by using the gradient magnitude to gate computation, avoiding unnecessary texture lookups for empty space. Choose it when lighting accuracy in sparse regions is prioritized over raw throughput.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Simple to implement; leverages standard GPU rasterization; avoids complex analytical intersection math in shaders [S1, unofficial].
+*   **Limitations:** Requires two rendering passes; requires additional memory for endpoint textures; suboptimal due to the overhead of two passes and expensive texture samplings in the second pass [S1, unofficial].
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
+
+## Background
+The technique is described in blog posts and unofficial guides on GPU-accelerated volumetric raycasting [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] GPU-accelerated single-pass volumetric raycasting in Qt ..., https://martinopilia.com/posts/2018/09/17/volume-raycasting.html, fetched 2026-10-27 (unofficial)
+[S2] Volumetric Splatting at The Little Grasshopper, https://prideout.net/blog/old/blog/index.html%40p%3D60.html, fetched 2026-10-28 (unofficial)

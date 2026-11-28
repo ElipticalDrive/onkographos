@@ -1,0 +1,156 @@
+# Volume Relaxation
+
+Also called: Heuristic-based generalization, relaxed variant, relaxed volumetric version
+
+## Overview
+Volume Relaxation is a heuristic optimization strategy that allows a surface-based radiance field to revert to volumetric alpha blending in challenging regions (e.g., sub-pixel structures, directional materials) where the opaque surface assumption is insufficient, while retaining surface-like properties elsewhere [S1]. It differs from its siblings, such as [Neural Surfel Radiance Fields](7358-neural-surfel-radiance-fields.md) and [Unified Neural Implicit Surface and Radiance Field Rendering](9732-unified-neural-implicit-surface-and-radiance-field-rendering.md), by dynamically switching the loss supervision mode per sample based on a local heuristic, rather than using a fixed hybrid representation or separate surface/volume branches [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A trained surface representation (e.g., from [Hybrid Surface-Volume and Mesh Representation](13663-hybrid-surface-volume-and-mesh-representation.md)), a set of rays, and target pixel colors $L_{\text{target}}$.
+*   **Output:** Gradients for the surface representation parameters, updated to minimize the relaxed loss.
+
+**Data Structures:**
+The method operates on standard ray-marching data structures. For each ray, a sequence of samples $i=1 \dots m$ is evaluated. Each sample $i$ yields:
+*   $\alpha_i$: Opacity (Heaviside-like for surface regions, continuous for relaxed regions).
+*   $L_i$: Radiance (color) at the sample point.
+*   $T_{\text{prev}}$: Transmittance from the camera to sample $i$, defined as $T_{\text{prev}} = \prod_{j=1}^{i-1} (1 - \alpha_j)$.
+
+**Numbered Steps:**
+1.  **Initial Surface Training:** Train the surface representation for 20,000 iterations using the standard radiance field loss (Equation 8 in [S1]), which enforces the surface assumption [S1].
+2.  **Identify Challenging Regions:** During subsequent training steps, evaluate the local loss for each sample to identify regions where the surface assumption fails [S1].
+3.  **Compute Modified Target Color:** For each sample $i$, calculate the modified target color $L_{\text{goal}}$ which accounts for the color contribution of prior samples and the transmittance [S1]:
+    $$
+    L_{\text{goal}} = \frac{L_{\text{target}} - L_{\text{prev}}}{T_{\text{prev}}} = \frac{L_{\text{target}} - \sum_{j=1}^{i-1} \left( \prod_{k=1}^{j-1} (1 - \alpha_k) \right) \alpha_j L_j}{\prod_{j=1}^{i-1} (1 - \alpha_j)}
+    $$
+    where $L_{\text{prev}}$ is the accumulated color from prior samples [S1].
+4.  **Heuristic Comparison:** Compare the local loss without blending against the local loss with blending [S1]:
+    *   **Unblended Loss:** $\ell(L_i, L_{\text{goal}})$
+    *   **Blended Loss:** $\ell \left( \alpha_i L_i + (1 - \alpha_i) \mathbb{E}_{t > t_i}[L_t], L_{\text{goal}} \right)$
+    *   If $\ell(L_i, L_{\text{goal}}) \leq \ell \left( \alpha_i L_i + (1 - \alpha_i) \mathbb{E}_{t > t_i}[L_t], L_{\text{goal}} \right)$, use the unblended loss term for sample $i$ [S1].
+    *   Otherwise, use the blended loss term [S1].
+    *   Note: $\mathbb{E}_{t > t_i}[L_t]$ represents the expected radiance of subsequent samples. In practice, this is often approximated or treated as a background color if not explicitly modeled, but the heuristic compares the *potential* blended result against the direct sample result [S1].
+5.  **Accumulate Ray Loss:** Sum the weighted local losses for all samples $i=1 \dots m$ along the ray:
+    $$
+    \mathcal{L}_{\text{ray}}^{\text{vol}} = \sum_{i=1}^m \left[ T_{\text{prev}} \cdot \ell_{\text{local}}(i) \right]
+    $$
+    where $\ell_{\text{local}}(i)$ is the chosen loss term (blended or unblended) for sample $i$ [S1].
+6.  **Backpropagation:** Compute gradients and update the model parameters [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_relaxation_loss(rays, model, L_target, error_metric):
+    """
+    Computes the volume relaxation loss for a batch of rays.
+    
+    Args:
+        rays: List of ray origins and directions.
+        model: The surface radiance field model.
+        L_target: Target pixel colors for the rays.
+        error_metric: Function l(a, b) computing the error between prediction a and target b.
+        
+    Returns:
+        Total loss scalar.
+    """
+    total_loss = 0.0
+    
+    for ray, target_color in zip(rays, L_target):
+        ray_loss = 0.0
+        accumulated_color = 0.0
+        transmittance = 1.0
+        
+        # Standard ray marching loop
+        # Note: The number of samples m and their positions t_i are determined by the sampling strategy
+        # For surface methods, this often involves adaptive sampling or fixed steps near the surface.
+        # We assume a list of samples (t_i, alpha_i, L_i) is generated by eval_model.
+        samples = []
+        t_current = ray.origin + ray.direction * min_t
+        while t_current < ray.max_t:
+            alpha, L = model.evaluate(ray, t_current)
+            samples.append((t_current, alpha, L))
+            t_current += step_size # Or adaptive step
+            
+        # Process samples in order (front to back)
+        for i, (t_i, alpha_i, L_i) in enumerate(samples):
+            # Calculate transmittance to current sample
+            T_prev = transmittance
+            
+            # Calculate accumulated color from prior samples
+            L_prev = accumulated_color
+            
+            # Calculate modified target color L_goal
+            # Avoid division by zero if T_prev is very small
+            if T_prev < 1e-6:
+                # If transmittance is effectively zero, the sample is occluded.
+                # The loss contribution should be negligible or handled via gradient stopping.
+                # [G] Standard practice: if T_prev is near zero, skip gradient contribution
+                # or treat L_goal as undefined. We set local_loss to 0.
+                local_loss = 0.0
+            else:
+                L_goal = (target_color - L_prev) / T_prev
+                
+                # Calculate expected radiance of subsequent samples
+                # [G] In many implementations, if no further samples are taken or 
+                # background is not modeled, E[L_t] might be assumed to be 0 or a 
+                # constant background color. The source [S1] implies it's part of the 
+                # blended term. For a pure surface method, subsequent samples are 
+                # often transparent. We assume a background color L_bg if needed, 
+                # or 0 if the volume is empty.
+                # Here we assume L_bg is 0 for simplicity unless specified.
+                L_bg = 0.0 
+                E_L_subsequent = L_bg 
+                
+                # Unblended loss: sample matches L_goal directly
+                loss_unblended = error_metric(L_i, L_goal)
+                
+                # Blended loss: sample contributes to a blended color
+                # Blended color = alpha_i * L_i + (1 - alpha_i) * E_L_subsequent
+                blended_color = alpha_i * L_i + (1 - alpha_i) * E_L_subsequent
+                loss_blended = error_metric(blended_color, L_goal)
+                
+                # Heuristic: choose the smaller loss
+                if loss_unblended <= loss_blended:
+                    local_loss = loss_unblended
+                else:
+                    local_loss = loss_blended
+            
+            # Weight by transmittance
+            ray_loss += T_prev * local_loss
+            
+            # Update accumulated color and transmittance for next sample
+            accumulated_color += T_prev * alpha_i * L_i
+            transmittance *= (1 - alpha_i)
+            
+        total_loss += ray_loss
+        
+    return total_loss / len(rays)
+```
+
+**Parameters:**
+*   **Initial Training Iterations:** 20,000 iterations for the initial surface-only phase [S1].
+*   **Error Metric $\ell$:** Typically L1 or L2 loss [S1].
+*   **Overhead:** The heuristic comparison introduces no additional computational overhead, as all necessary values ($\alpha_i, L_i, T_{\text{prev}}, L_{\text{prev}}$) are computed during the standard ray marching pass [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Over-Relaxation:** When applied to refine a converged surface scene, the relaxed loss often converts the *entire* scene into a volumetric representation, even in visually adequate regions. This occurs because fitting colors in a volume (with more degrees of freedom) reduces the loss more easily than fitting colors on a surface [S1]. The heuristic is designed to mitigate this but may not prevent it entirely in highly underconstrained scenes [S1].
+*   **Division by Zero:** If transmittance $T_{\text{prev}}$ becomes very small (near zero), $L_{\text{goal}}$ becomes numerically unstable. A guard condition is required [G].
+*   **Expected Radiance:** The term $\mathbb{E}_{t > t_i}[L_t]$ requires a model for subsequent samples. If the scene is treated as opaque surfaces, subsequent samples are transparent, making the blended term effectively just $\alpha_i L_i$. However, in relaxed regions, this term allows for volumetric blending. The exact implementation of this expectation depends on the background model or further sampling [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Comparable to standard NeRF or surface-based training, as the heuristic adds no extra passes [S1]. However, the initial 20,000 iterations are surface-only, after which the relaxation is applied [S1].
+*   **Memory Complexity:** No additional memory structures are required beyond standard ray marching buffers [S1].
+*   **Performance:** Empirically performs well as a volume reconstruction algorithm in challenging regions while preserving surface properties elsewhere [S1]. Convergence rate is comparable to NeRF in the Instant NGP codebase, though it may have a longer tail in the loss curve due to spawning more rays per iteration [S1].
+*   **Strengths:** Handles sub-pixel structures and directional materials better than pure surface methods; retains sharp surface details in well-constrained regions.
+*   **Limitations:** Risk of over-relaxation; heuristic is not a fundamental part of the method and results may vary [S1].
+*   **When to Use:** When refining a surface representation in regions with complex geometry or material properties that violate the opaque surface assumption [S1].
+*   **When Not to Use:** When the scene is well-constrained and purely surface-based; or when computational resources are extremely limited and the overhead of the heuristic (though minimal) is unacceptable [S1].
+
+## Background
+*   **Origin:** Proposed in "Radiance Surfaces: Optimizing Surface Representations with a 5D Radiance Field Loss" [S1].
+*   **History:** Developed as an optional, heuristic-based generalization to the core Radiance Surfaces method to handle limitations of the opaque surface assumption [S1].
+*   **Usage:** Implemented in the Instant NGP and ZipNeRF codebases for novel view synthesis and geometry reconstruction experiments [S1].
+
+## Sources
+[S1] Radiance Surfaces: Optimizing Surface Representations with a 5D Radiance Field Loss, https://doi.org/10.1145/3721238.3730713, fetched 2026-10-26

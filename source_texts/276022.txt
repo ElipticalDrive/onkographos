@@ -1,0 +1,450 @@
+The official home of the Presto distributed SQL query engine for big data - Distributed spatial join by mbasmanova · Pull Request #11072 · prestodb/presto
+
+Distributed spatial join by mbasmanova · Pull Request #11072 · prestodb/presto · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mbasmanova
+commented
+Jul 18, 2018
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Distributed spatial join uses spatial partitioning scheme based on a K-D-B-tree https://en.wikipedia.org/wiki/K-D-B-tree to partition both sides of the join, then processes individual pairs of partitions using R-Tree formed from the geometries in the build partition.
+K-D-B-tree describing the partitioning scheme is provided by the user via spatial_partitioning_table_name session property. The value is the name of the table having one row and one column storing the JSON representation of the K-D-B-tree. The name of the column doesn't matter. To create such a table, run a query:
+CREATE TABLE p AS SELECT spatial_partitioning(ST_GeometryFromText(wkt)) as v FROM t
+spatial_partitioning is a new aggregate function that takes a geometry, builds a KDB tree and returns its JSON representation as a string. The above query will compute minimum bounding box containing all of the geometries and partition it into non-overlapping rectangles using a sample of the data. For each partition, the number of geometries overlapping partition rectangle will be roughly the same. The implementation uses reservoir sampling with maximum sample size of 1M geometries.
+The presence of the spatial_partitioning_table_name session property turns a broadcast spatial join into distributed spatial join. Distributed join is available for inner joins using ST_Contains, ST_Intersects or ST_Distance functions to define join condition.
+```
+CREATE TABLE t_partitioning AS 
+SELECT spatial_partitioning(ST_Point(t.longitude, t.latitude)) as v FROM t;
+
+SET SESSION spatial_partitioning_table_name = 't_partitioning';
+
+SELECT * 
+FROM t, u
+WHERE ST_Contains(ST_GeometryFromText(u.wkt), ST_Point(t.longitude, t.latitude))
+```
+TransformSpatialPredicates optimizer rule reads KDB tree from the table specified in spatial_partitioning_table_name session property and plans the distributed spatial join.
+```
+- filter (ST_Contains(a, b)) 
+   - cross-join 
+      - probe
+      - build
+```
+becomes
+```
+- spatial_join(ST_Contains(a, b))
+  - unnest(pids)
+     - project(pids := spatial_partitions(kdbTree, a))
+        - probe
+  - unnest(pids)
+     - project(pids := spatial_partitions(kdbTree, b))
+         - build
+```
+and
+```
+- filter (ST_Distance(a, b) <= r) 
+   - cross-join 
+      - probe
+      - build
+```
+becomes
+```
+- spatial_join(ST_Distance(a, b) <= r)
+  - unnest(pids)
+     - project(pids := spatial_partitions(kdbTree, a))
+        - probe
+  - unnest(pids)
+     - project(pids := spatial_partitions(kdbTree, b, r))
+        - build
+```
+Since the number of spatial partitions may not match the number of nodes available for the join stage, AddExchanges adds hash-based exchanges over partition ID columns. Therefore, a single node may process multiple spatial partitions.
+Unlike hash partitioning, spatial partitioning may place a single row into multiple partitions (e.g. a polygon may intersect multiple partitions) and cause multiple nodes to produce identical pairs of matching geometries. To avoid duplicate results, the spatial join operator uses inline deduplication technique. It works as follows:
+on each node, a join operator figures a set of spatial partitions it is processing using task ID and a mapping between all spatial partition IDs and corresponding extents: task_id = hash(spatial_partition_id) % total_tasks
+when considering a potential match (e.g. a pair of geometries with intersecting bounding boxes), the join operator runs a sequence of checks:
+check if probe.spatial_partition_id == build.spatial_partition_id and skip the match if not;
+if neither probe nor build geometry is a point, compute the intersection of the bounding boxes and check whether the reference point of that intersection belongs to the spatial partition; the reference point is defined as lower left corner (it can be anything, but must be consistent across all join operators and must belong to the intersection); if the reference point located outside of the spatial partition, skip the potential match;
+This technique relies on (1) non-overlapping spatial partitions (provided by the K-D-B-tree) and (2) containment check that considers partition extent as a rectangle open on the right and upper sides (e.g. any given point belongs to only one partition).
+This change is part of #9834
+facebook-github-bot
+added
+the
+CLA Signed
+label
+Jul 18, 2018
+facebook-github-bot
+commented
+Jul 25, 2018
+Copy link
+Copy Markdown
+Collaborator
+Thank you for your pull request. We require contributors to sign our Contributor License Agreement, and yours has expired.
+Before we can review or merge your code, we need you to email cla@fb.com with your details so we can update your status.
+mbasmanova
+force-pushed
+the
+distributed-spatial-join-v2
+branch
+from
+26111f5 to
+2789cb0
+Compare
+July 30, 2018 20:52
+facebook-github-bot
+commented
+Jul 30, 2018
+Copy link
+Copy Markdown
+Collaborator
+Thank you for signing our Contributor License Agreement. We can now accept your code for this (and any) Facebook open source project. Thanks!
+mbasmanova
+force-pushed
+the
+distributed-spatial-join-v2
+branch
+10 times, most recently
+from
+d6daf7c to
+a51f0ff
+Compare
+August 1, 2018 03:01
+mbasmanova
+force-pushed
+the
+distributed-spatial-join-v2
+branch
+7 times, most recently
+from
+c142be6 to
+f51f07c
+Compare
+August 9, 2018 17:33
+mbasmanova
+mentioned this pull request
+Aug 9, 2018
+Add SpatialJoinNode
+#11235
+Merged
+mbasmanova
+force-pushed
+the
+distributed-spatial-join-v2
+branch
+2 times, most recently
+from
+2f88b90 to
+ddf368c
+Compare
+August 14, 2018 05:00
+mbasmanova
+mentioned this pull request
+Aug 14, 2018
+Move BenchmarkSpatialJoin to presto-geospatial
+#11269
+Merged
+mbasmanova
+force-pushed
+the
+distributed-spatial-join-v2
+branch
+5 times, most recently
+from
+61f621f to
+9ad14de
+Compare
+August 21, 2018 17:43
+mbasmanova
+commented
+Oct 3, 2018
+Copy link
+Copy Markdown
+Contributor
+Author
+@arhimondr @martint Andrii, Martin, I noticed a few things while doing some final testing.
+Live Plan didn't show spatial joins correctly. The join stage wasn't connected to it's source stages
+spatial_partitioning aggregation failed with java.lang.IllegalArgumentException: bound must be positive for some large tables:
+```
+java.lang.IllegalArgumentException: bound must be positive
+  at java.base/java.util.concurrent.ThreadLocalRandom.nextInt(ThreadLocalRandom.java:310)
+  at com.facebook.presto.plugin.geospatial.SpatialPartitioningInternalAggregateFunction.input(SpatialPartitioningInternalAggregateFunction.java:72)
+```
+KDB tree argument to spatial_partitions functions was included in its entirety in the plan; I added logic to truncate it to 256 characters.
+I added new and fixup commits for these fixes to allow for incremental review. Please, take a look.
+arhimondr
+approved these changes
+Oct 3, 2018
+View reviewed changes
+arhimondr
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+fixup! Update rules to plan distributed spatial join
+As discussed offline, i have a concern that this change may trim some useful output for long expressions.
+I think we should check for the function that takes KDB tree explicitly, and truncate only a single parameter, the KdbTree itself.
+Or, instead of printing the prefix we can print some placeholder, say <KDB TREE>. But we can keep the prefix, if we think it could be useful.
+I don't feel strong about it. Feel free to discuss it with someone else.
+fixup! Add spatial_partitioning aggregation function
+LGTM
+Fix display of spatial joins in Live Plan UI
+LGTM
+martint
+commented
+Oct 11, 2018
+Copy link
+Copy Markdown
+Contributor
+KDB tree argument to spatial_partitions functions was included in its entirety in the plan; I added logic to truncate it to 256 characters.
+I can't think of any simple way of doing this such that it applies only to the kdb tree argument. It's probably ok for now, but may be an issue in the future (it may hinder debuggability of certain queries). Please pull out that change into a separate commit so we can track it and see it in the commit history independently.
+martint
+approved these changes
+Oct 11, 2018
+View reviewed changes
+mbasmanova
+force-pushed
+the
+distributed-spatial-join-v2
+branch
+3 times, most recently
+from
+c8513c0 to
+6c711cc
+Compare
+October 16, 2018 01:34
+mbasmanova
+added 13 commits
+October 15, 2018 21:56
+Add 2-dimensional KDB tree
+…
+0c2d0da
+```
+2-dim KDB tree described in https://en.wikipedia.org/wiki/K-D-B-tree will be
+used to generate spatial partitioning for the distributed spatial join.
+Similarly to a Quad tree, KDB tree produces non-overlaping partitions which
+allows for efficient inline deduplication in the join execution. Unlike a Quad
+tree, partitioning mechanism based on KDB tree handles skew well.
+```
+Add non-serializable type KDBTree
+…
+bc1ae36
+```
+This new type will enable distributed spatial join by allowing to define
+spatial_partitions(kdbTree, geometry) functions that compute a set of spatial
+partitions for a given geometry.
+
+This type supports casting from VARCHAR values that contain JSON
+representations of the KDB trees. The cast will allow to avoid parsing KDB
+tree JSON on every invocation of the spatial_partitions function.
+
+Due to class loading limitations, the new type residing in presto-geospatial
+uses Object as its Java type.
+```
+Add static imports for StandardType.XXX
+4ff9b7a
+Add static imports for Double.isNaN and isInfinite
+a06a133
+Add spatial_partitions functions
+…
+5e1109a
+```
+spatial_partitions(KDBTree, Geometry) function returns a list of spatial
+partition IDs for a given geometry. This function will be used to partition
+inputs for a spatial join defined via ST_Contains or ST_Intersects.
+
+spatial_partitions(KDBTree, Geometry, distance) function returns a list of
+spatial partition IDs for a geometry representing a set of points within the
+specified distance from the input geometry. This version will be used to
+partition inputs for a distance query (e.g. a spatial join defined via
+ST_Distance(a, b) <= r).
+
+For a given geometry, a set of spatial partitions is defined as a set of
+partitions whose extents intersect geometry's bounding box. For points, to
+avoid unnecessary duplication of data when points fall on the borders of the
+partition extents, spatial_partitions function returns at most one partition
+by considering partition extents as rectangles open on the right and upper
+sides.
+```
+Add spatial_partitioning aggregation function
+…
+c5e75de
+```
+spatial_partitioning(geometry) aggregate function computes an overall bounding
+box containing all of the input geometries and partitions it using KDB tree
+built from a sample of input geometries. The overall bounding box is extended
+a little bit on the right and upper sides to enable partitioning based on
+half-open rectangles. Only bounding boxes of the input geometries are used to
+build the partitioning. The implementation attempts to create roughly
+hash_partition_count partitions.
+
+Since aggregate functions don't have access to session properties, this commit
+introduces an internal version of spatial_partitioning aggregate function
+which takes an additional partition_count argument and a new
+RewriteSpatialPartitioningAggregate rule that replaces external
+spatial_partitioning function invocation with an internal one.
+```
+Add distributed join properties to SpatialJoinNode
+aadd716
+Add getters for SplitManager and PageSourceManager to QueryRunner
+07181dd
+Add session property to specify spatial partitioning
+a098891
+Update rules to plan distributed spatial join
+…
+63ca5e1
+```
+Update ExtractSpatialJoins rule to read a KDB tree from the table
+specified in spatial_partitioning_table_name session property and plan the
+distributed spatial join.
+
+- filter (ST_Contains(a, b))
+   - cross-join
+      - probe
+      - build
+
+becomes
+
+- spatial_join(ST_Contains(a, b))
+  - unnest(pids)
+     - project(pids := spatial_partitions(kdbTree, a))
+        - probe
+  - unnest(pids)
+     - project(pids := spatial_partitions(kdbTree, b))
+         - build
+and
+
+- filter (ST_Distance(a, b) <= r)
+   - cross-join
+      - probe
+      - build
+becomes
+
+- spatial_join(ST_Distance(a, b) <= r)
+  - unnest(pids)
+     - project(pids := spatial_partitions(kdbTree, a))
+        - probe
+  - unnest(pids)
+     - project(pids := spatial_partitions(kdbTree, b, r))
+        - build
+```
+Distributed spatial join
+9288277
+Document AggregationFunction#isOrderSensitive property
+bb596ec
+Fix display of spatial joins in Live Plan UI
+dd548c2
+mbasmanova
+force-pushed
+the
+distributed-spatial-join-v2
+branch
+from
+6c711cc to
+dd548c2
+Compare
+October 16, 2018 02:00
+findepi
+commented
+Oct 16, 2018
+Copy link
+Copy Markdown
+Contributor
+🎉
+mbasmanova
+mentioned this pull request
+Mar 15, 2019
+Expand geospatial capabilities
+#12478
+Closed
+drnextgis
+commented
+Mar 24, 2020
+Copy link
+Copy Markdown
+I cannot find spatial_partitioning in documentation.
+mbasmanova
+commented
+Mar 24, 2020
+Copy link
+Copy Markdown
+Contributor
+Author
+CC: @jagill
+I cannot find spatial_partitioning in documentation.
+@drnextgis What are you trying to achieve?
+drnextgis
+commented
+Mar 24, 2020
+Copy link
+Copy Markdown
+@mbasmanova thanks for a quick reply! I'm testing PrestoDB in order to get a better understanding how it performs with geospatial data. During reading this PR I've realized that spatial joins require creating an intermediate table manually to get a better performance. Is that correct? Also I'm wondering how select by polygon (ST_Intersects) works in PrestoDB. Does it create any spatial indices on the fly?
+jagill
+commented
+Mar 24, 2020
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+@drnextgis Presto uses two levels of spatial partitioning when doing spatial joins. (I'm assuming you know how distributed joins work in general; if not, we can talk about that too!) Each join worker has a set of rows/geometries from the build side table (generally, the table on the right of the join). It will create an R-tree out of these, so when the geometries from the probe side (eg, the left side) come streaming through, it uses the R-tree to only select candidates (by envelope intersection).
+By default, all of the build rows/geometries go to all of the join workers (this is a broadcast join). However, if you set the spatial_partition_table session parameter, each join worker will only be responsible for a subset of the spatial partitions: they will only see build geometries that intersect the partitions for which they are responsible. To create that table, you use a query such as:
+```
+CREATE TABLE my_spatial_partition AS
+SELECT spatial_partitioning(geometry) as v
+FROM my_source_table
+```
+Under the hood, the spatial partition is a kd-tree.
+Does this answer your question?
+drnextgis
+commented
+Mar 24, 2020
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Great! Thank you @jagill. No more questions about that but it would be great to have this as part of the official documentation. So as far as I understand R-tree is used only for joins but and is not used in the following case:
+```
+presto:public> select * from osm_spain_buildings where ST_Intersects(ST_GeometryFromText(geom), ST_Polygon('POLYGON ((-3.676468 42.353183, -3.674561 42.353183, -3.674561 42.3536, -3.676468 42.3536, -3.676468 42.353183))'));
+```
+jagill
+commented
+Mar 24, 2020
+Copy link
+Copy Markdown
+Contributor
+That is correct. There are a number of optimizations done for joins that are not done for normal filters. This is partly because it's not clear when the benefit of the optimizations will offset their cost.
+In the case you describe, there's no way to build an R-tree, because the rows from osm_spain_buildings will be streaming. The cost of the filter goes like O(N_rows). Were we to build an R-tree (in addition to requiring all those rows to fit in memory), the cost of building the R-tree would be O(N_rows * log(N_rows), then the lookup would cost O(log(N_rows)). Whether that's beneficial depends on the constants.
+JamesRTaylor
+mentioned this pull request
+Feb 1, 2021
+Document spatial_partitioning_table_name system property
+trinodb/trino#6768
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+7 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

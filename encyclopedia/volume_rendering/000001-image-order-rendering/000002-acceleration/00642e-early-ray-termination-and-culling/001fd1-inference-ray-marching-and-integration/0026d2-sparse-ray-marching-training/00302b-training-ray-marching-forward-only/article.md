@@ -1,0 +1,322 @@
+# Training Ray Marching (Forward Only)
+
+Also called: Ray Marching with Sparse Voxel Grid (Training), two-pass ray marching
+
+## Overview
+A two-pass GPU algorithm that samples a ray through a sparse voxel grid (density bitfield) to collect 3D positions, directions, step sizes (deltas), and t-values for training neural radiance fields [S2, unofficial]. It sets itself apart from its siblings by explicitly decoupling the counting of occupied samples from the writing of sample data, allowing for dynamic memory allocation based on actual occupancy rather than fixed worst-case bounds, while supporting an optimization where the maximum allocation size is estimated from previous training epochs [S1, unofficial][S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `rays_o`: Origin positions, shape `[N_rays, 3]` [S2, unofficial].
+    *   `rays_d`: Direction vectors, shape `[N_rays, 3]` [S2, unofficial].
+    *   `hits_t`: Hit intervals (nears/fars), shape `[N_rays, 2]` [S2, unofficial].
+    *   `density_bitfield`: Sparse voxel occupancy bitfield, `uint8_t*` [S2, unofficial].
+    *   `noise`: Perturbation noise, shape `[N_rays, 1]` [S1, unofficial].
+    *   `cascades`: Number of MIP cascades, `int` [S2, unofficial].
+    *   `scale`: Spatial boundary scale, `float` [S2, unofficial].
+    *   `exp_step_factor`: Exponential step factor, `float` [S2, unofficial].
+    *   `grid_size`: Density grid resolution, `int` [S2, unofficial].
+    *   `max_samples`: Hard limit on samples per ray, `int` [S2, unofficial].
+    *   `mean_count`: Estimated max points from previous epoch, `int` [S3, unofficial].
+    *   `force_all_rays`: Boolean flag to ignore `mean_count` and process all rays, `bool` [S3, unofficial].
+    *   `perturb`: Boolean flag to enable perturbation, `bool` [S3, unofficial].
+    *   `align`: Alignment padding value, `int` [S3, unofficial].
+*   **Outputs:**
+    *   `rays_a`: Ray metadata, shape `[N_rays, 3]`, dtype `int64_t`. Columns: `[ray_idx, start_idx, N_samples]` [S2, unofficial].
+    *   `xyzs`: Sample positions, shape `[M, 3]` [S2, unofficial].
+    *   `dirs`: Sample directions, shape `[M, 3]` [S2, unofficial].
+    *   `deltas`: Step sizes, shape `[M]` [S2, unofficial].
+    *   `ts`: T-values, shape `[M]` [S2, unofficial].
+    *   `counter`: Atomic counter, shape `[2]`, dtype `int32_t` [S2, unofficial].
+
+**Data Structures:**
+*   `rays`: Internal int array `[N, 3]` storing ray metadata: column 0 is ray ID, column 1 is offset into the `xyzs`/`dirs`/`deltas` arrays, column 2 is number of steps for that ray [S2, unofficial].
+*   `density_bitfield`: Bit-packed occupancy grid. Index `idx` corresponds to voxel `(nx, ny, nz)` via Morton code [S2, unofficial].
+
+**Parameters:**
+*   `threads`: 256 threads per block [S2, unofficial].
+*   `blocks`: `(N_rays + threads - 1) / threads` blocks [S2, unofficial].
+*   `bound`: Spatial boundary, default `1e-4` [S3, unofficial].
+*   `density_grid`: Float array `[H, H, H]` [S3, unofficial].
+*   `mean_density`: Mean density value [S3, unofficial].
+*   `iter_density`: Density value for current iteration [S3, unofficial].
+*   `step_counter`: Optional int array `[2]`, defaults to zeros if `None` [S3, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Reshape Inputs:** Reshape `rays_o` and `rays_d` to contiguous views of shape `[-1, 3]` [S1, unofficial].
+2.  **Initialize Loop Variables:** For each ray, set `t = t1` (start t from `hits_t`), `N_samples = 0` [S2, unofficial].
+3.  **Calculate Position:** Compute current 3D position: `x = ox + t*dx`, `y = oy + t*dy`, `z = oz + t*dz` [S2, unofficial].
+4.  **Calculate Step Size:** Compute `dt` using helper function: `dt = calc_dt(t, exp_step_factor, max_samples, grid_size, scale)` [S2, unofficial].
+5.  **Determine MIP Level:** Calculate MIP level `mip` as the maximum of position-based and dt-based selection: `mip = max(mip_from_pos(x, y, z, cascades), mip_from_dt(dt, grid_size, cascades))` [S2, unofficial].
+6.  **Calculate MIP Bound:** Compute MIP bound and its inverse: `mip_bound = fminf(scalbnf(1.0f, mip-1), scale)` and `mip_bound_inv = 1.0f / mip_bound` [S2, unofficial].
+7.  **Map to Grid Coordinates:** Map position to grid coordinates `nx, ny, nz` by rounding down to nearest grid position:
+    `nx = clamp(0.5f * (x * mip_bound_inv + 1.0f) * grid_size, 0.0f, grid_size - 1.0f)` (similarly for `y`, `z`) [S2, unofficial].
+8.  **Compute Morton Index:** Compute linear index in the bitfield: `idx = mip * grid_size^3 + __morton3D(nx, ny, nz)` where `grid_size^3 = grid_size * grid_size * grid_size` [S2, unofficial].
+9.  **Check Occupancy:** Check occupancy: `occ = density_bitfield[idx / 8] & (1 << (idx % 8))` [S2, unofficial].
+10. **Advance Ray:**
+    *   If occupied (`occ` is true): Increment `t` by `dt` (`t += dt`) and increment sample count (`N_samples++`) [S2, unofficial].
+    *   If not occupied: Calculate target t to skip to next voxel boundary. Compute `tx, ty, tz` as distances to the next voxel face in each axis:
+        `tx = (((nx + 0.5f + 0.5f * signf(dx)) * grid_size_inv * 2 - 1) * mip_bound - x) * dx_inv` (similarly for `ty`, `tz`) [S2, unofficial].
+        Set `t_target = t + fmaxf(0.0f, fminf(tx, fminf(ty, tz)))` [S2, unofficial].
+        Advance `t` in a do-while loop: `do { t += calc_dt(...) } while (t < t_target);` [S2, unofficial].
+11. **Loop Condition:** Continue while `0 <= t && t < t2 && N_samples < max_samples` [S2, unofficial].
+12. **First Pass Allocation:** After the first pass, allocate output indices using atomic operations on a shared counter:
+    `start_idx = atomicAdd(counter, N_samples)` and `ray_count = atomicAdd(counter + 1, 1)` [S2, unofficial].
+13. **Store Ray Metadata:** Store ray metadata: `rays_a[ray_count][0] = r`, `rays_a[ray_count][1] = start_idx`, `rays_a[ray_count][2] = N_samples` [S2, unofficial].
+14. **Second Pass Initialization:** Reset `t = t1`, `samples = 0` [S2, unofficial].
+15. **Second Pass Loop:** Loop condition: `while (t < t2 && samples < N_samples)` [S2, unofficial].
+16. **Second Pass Traversal:** Repeat steps 3-11 to re-traverse the ray [S2, unofficial].
+17. **Write Sample Data:** If occupied: write sample data to global arrays at index `s = start_idx + samples`:
+    `xyzs[s] = {x, y, z}`, `dirs[s] = {dx, dy, dz}`, `ts[s] = t`, `deltas[s] = dt`. Increment `t` by `dt` and `samples` [S2, unofficial].
+18. **Memory Allocation Optimization:**
+    *   Initialize `M` (max points) to `N * 1024` as a hardcoded default [S1, unofficial].
+    *   If not `force_all_rays` and `mean_count > 0`, use `mean_count` as `M` [S3, unofficial].
+    *   If `align > 0`, pad `M` to the next multiple of `align` [S3, unofficial].
+    *   Initialize output tensors `xyzs`, `dirs`, `deltas` with zeros of shape `[M, 3]`, `[M, 3]`, `[M]` respectively [S1, unofficial].
+    *   Initialize `rays` tensor of shape `[N, 3]` with dtype `int32` [S1, unofficial].
+    *   If `step_counter` is `None`, initialize it as a zero tensor of shape `[2]` with dtype `int32` [S1, unofficial].
+    *   If `force_all_rays` or `mean_count <= 0`, retrieve the actual number of points `m` from `step_counter[0].item()` and pad `m` to the next multiple of `align` if `align > 0` [S3, unofficial].
+    *   Slice `xyzs`, `dirs`, and `deltas` to size `m` if the condition in the previous step was met [S3, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+
+def calc_dt(t, exp_step_factor, max_samples, grid_size, scale):
+    """Helper to calculate step size dt."""
+    # Standard exponential spacing logic for NGP-style ray marching
+    return exp_step_factor * (scale / grid_size) * (2.0 ** (t / max_samples))
+
+def mip_from_pos(x, y, z, cascades):
+    """Placeholder for MIP level selection based on position."""
+    # Not given in the sources. Returns 0 as fallback.
+    return 0
+
+def mip_from_dt(dt, grid_size, cascades):
+    """Placeholder for MIP level selection based on step size."""
+    # Not given in the sources. Returns 0 as fallback.
+    return 0
+
+def __morton3D(nx, ny, nz):
+    """Placeholder for Morton code calculation."""
+    # Not given in the sources. Simple interleaving for demonstration.
+    return (nx << 10) | (ny << 5) | nz
+
+def clamp(val, min_val, max_val):
+    return max(min_val, min(val, max_val))
+
+def signf(x):
+    return 1.0 if x > 0 else (-1.0 if x < 0 else 0.0)
+
+def scalbnf(x, n):
+    return x * (2.0 ** n)
+
+def fminf(a, b):
+    return min(a, b)
+
+def fmaxf(a, b):
+    return max(a, b)
+
+def training_ray_marching(rays_o, rays_d, hits_t, density_bitfield, noise,
+                          cascades, scale, exp_step_factor, grid_size, max_samples,
+                          mean_count, force_all_rays, perturb, align):
+    """
+    Two-pass GPU algorithm for training ray marching.
+    
+    Args:
+        rays_o: Tensor [N_rays, 3]
+        rays_d: Tensor [N_rays, 3]
+        hits_t: Tensor [N_rays, 2]
+        density_bitfield: uint8_t* (simulated as tensor for pseudocode)
+        noise: Tensor [N_rays, 1]
+        cascades: int
+        scale: float
+        exp_step_factor: float
+        grid_size: int
+        max_samples: int
+        mean_count: int
+        force_all_rays: bool
+        perturb: bool
+        align: int
+        
+    Returns:
+        rays_a: Tensor [N_rays, 3]
+        xyzs: Tensor [M, 3]
+        dirs: Tensor [M, 3]
+        deltas: Tensor [M]
+        ts: Tensor [M]
+    """
+    N_rays = rays_o.shape[0]
+    
+    # Reshape inputs
+    rays_o = rays_o.view(-1, 3)
+    rays_d = rays_d.view(-1, 3)
+    
+    # Determine M (max points)
+    M = N_rays * 1024  # Default
+    if not force_all_rays and mean_count > 0:
+        M = mean_count
+    if align > 0:
+        M = ((M + align - 1) // align) * align
+        
+    # Initialize output tensors
+    xyzs = torch.zeros((M, 3), dtype=torch.float32)
+    dirs = torch.zeros((M, 3), dtype=torch.float32)
+    deltas = torch.zeros((M,), dtype=torch.float32)
+    ts = torch.zeros((M,), dtype=torch.float32)
+    rays_a = torch.zeros((N_rays, 3), dtype=torch.int64)
+    
+    # Counter for atomic operations (simulated)
+    counter = torch.zeros((2,), dtype=torch.int32)
+    
+    grid_size_inv = 1.0 / grid_size
+    
+    for r in range(N_rays):
+        ox, oy, oz = rays_o[r]
+        dx, dy, dz = rays_d[r]
+        t1, t2 = hits_t[r]
+        
+        # First Pass: Count samples
+        t = t1
+        N_samples = 0
+        
+        while (0 <= t and t < t2 and N_samples < max_samples):
+            # Calculate position
+            x = ox + t * dx
+            y = oy + t * dy
+            z = oz + t * dz
+            
+            # Calculate step size
+            dt = calc_dt(t, exp_step_factor, max_samples, grid_size, scale)
+            
+            # Determine MIP level
+            mip = max(mip_from_pos(x, y, z, cascades), mip_from_dt(dt, grid_size, cascades))
+            
+            # Calculate MIP bound
+            mip_bound = fminf(scalbnf(1.0, mip - 1), scale)
+            mip_bound_inv = 1.0 / mip_bound
+            
+            # Map to grid coordinates
+            nx = clamp(0.5 * (x * mip_bound_inv + 1.0) * grid_size, 0.0, grid_size - 1.0)
+            ny = clamp(0.5 * (y * mip_bound_inv + 1.0) * grid_size, 0.0, grid_size - 1.0)
+            nz = clamp(0.5 * (z * mip_bound_inv + 1.0) * grid_size, 0.0, grid_size - 1.0)
+            
+            # Compute Morton Index
+            grid_size3 = grid_size * grid_size * grid_size
+            idx = mip * grid_size3 + __morton3D(int(nx), int(ny), int(nz))
+            
+            # Check occupancy (simulated bitfield access)
+            # In real implementation, this accesses density_bitfield[idx // 8] & (1 << (idx % 8))
+            occ = False  # Placeholder: Actual occupancy check depends on bitfield
+            
+            if occ:
+                t += dt
+                N_samples += 1
+            else:
+                # Skip to next voxel boundary
+                dx_inv = 1.0 / dx if dx != 0 else float('inf')
+                dy_inv = 1.0 / dy if dy != 0 else float('inf')
+                dz_inv = 1.0 / dz if dz != 0 else float('inf')
+                
+                tx = (((nx + 0.5 + 0.5 * signf(dx)) * grid_size_inv * 2 - 1) * mip_bound - x) * dx_inv
+                ty = (((ny + 0.5 + 0.5 * signf(dy)) * grid_size_inv * 2 - 1) * mip_bound - y) * dy_inv
+                tz = (((nz + 0.5 + 0.5 * signf(dz)) * grid_size_inv * 2 - 1) * mip_bound - z) * dz_inv
+                
+                t_target = t + fmaxf(0.0, fminf(tx, fminf(ty, tz)))
+                
+                while t < t_target:
+                    t += calc_dt(t, exp_step_factor, max_samples, grid_size, scale)
+        
+        # Allocate output indices
+        start_idx = counter[0] + N_samples  # Simulated atomicAdd
+        ray_count = counter[1] + 1  # Simulated atomicAdd
+        counter[0] += N_samples
+        counter[1] += 1
+        
+        rays_a[r][0] = r
+        rays_a[r][1] = start_idx
+        rays_a[r][2] = N_samples
+        
+        # Second Pass: Write samples
+        t = t1
+        samples = 0
+        
+        while (t < t2 and samples < N_samples):
+            x = ox + t * dx
+            y = oy + t * dy
+            z = oz + t * dz
+            
+            dt = calc_dt(t, exp_step_factor, max_samples, grid_size, scale)
+            mip = max(mip_from_pos(x, y, z, cascades), mip_from_dt(dt, grid_size, cascades))
+            mip_bound = fminf(scalbnf(1.0, mip - 1), scale)
+            mip_bound_inv = 1.0 / mip_bound
+            
+            nx = clamp(0.5 * (x * mip_bound_inv + 1.0) * grid_size, 0.0, grid_size - 1.0)
+            ny = clamp(0.5 * (y * mip_bound_inv + 1.0) * grid_size, 0.0, grid_size - 1.0)
+            nz = clamp(0.5 * (z * mip_bound_inv + 1.0) * grid_size, 0.0, grid_size - 1.0)
+            
+            grid_size3 = grid_size * grid_size * grid_size
+            idx = mip * grid_size3 + __morton3D(int(nx), int(ny), int(nz))
+            
+            occ = False  # Placeholder
+            
+            if occ:
+                s = start_idx + samples
+                xyzs[s] = torch.tensor([x, y, z])
+                dirs[s] = torch.tensor([dx, dy, dz])
+                ts[s] = t
+                deltas[s] = dt
+                t += dt
+                samples += 1
+            else:
+                dx_inv = 1.0 / dx if dx != 0 else float('inf')
+                dy_inv = 1.0 / dy if dy != 0 else float('inf')
+                dz_inv = 1.0 / dz if dz != 0 else float('inf')
+                
+                tx = (((nx + 0.5 + 0.5 * signf(dx)) * grid_size_inv * 2 - 1) * mip_bound - x) * dx_inv
+                ty = (((ny + 0.5 + 0.5 * signf(dy)) * grid_size_inv * 2 - 1) * mip_bound - y) * dy_inv
+                tz = (((nz + 0.5 + 0.5 * signf(dz)) * grid_size_inv * 2 - 1) * mip_bound - z) * dz_inv
+                
+                t_target = t + fmaxf(0.0, fminf(tx, fminf(ty, tz)))
+                
+                while t < t_target:
+                    t += calc_dt(t, exp_step_factor, max_samples, grid_size, scale)
+                
+    # Slice outputs to actual size if needed
+    actual_samples = counter[0]
+    xyzs = xyzs[:actual_samples]
+    dirs = dirs[:actual_samples]
+    deltas = deltas[:actual_samples]
+    ts = ts[:actual_samples]
+    
+    return rays_a, xyzs, dirs, deltas, ts
+```
+
+## Subtopics
+
+### [NeuralPointsRayMarching](6818-neuralpointsraymarching.md)
+NeuralPointsRayMarching is a PyTorch module that performs ray marching for neural point rendering by aggregating sampled neural point features and blending them along rays. It estimates the maximum number of points to allocate based on mean count from previous epochs, enabling faster training by avoiding over-allocation, while supporting force-all-rays mode for stability. It sets itself apart from standard volume rendering by operating on discrete, learned point entities rather than continuous volumetric fields.
+
+## Operating characteristics
+*   **Time Complexity:** Two passes over the ray space. The first pass counts occupied samples, the second pass writes them. Complexity is proportional to the number of rays and the average number of occupied samples per ray [S2, unofficial].
+*   **Memory Complexity:** Memory allocation is dynamic based on `mean_count` or `max_samples`. The `xyzs`, `dirs`, `deltas`, and `ts` tensors are allocated up to size `M` [S1, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales with the number of rays `N_rays` and the density of the voxel grid.
+*   **Strengths:** Avoids over-allocation by using `mean_count` from previous epochs. Supports `force_all_rays` for stability.
+*   **Limitations:** If `mean_count` underestimates the required points, rays may be randomly ignored unless `force_all_rays` is enabled [S3, unofficial].
+*   **When to use:** Training neural radiance fields with sparse voxel grids where memory efficiency is critical [S1, unofficial].
+*   **When not to use:** Inference where fixed allocation is preferred for simplicity, or when `mean_count` is not available.
+
+## Background
+Originating from the NVIDIA Instant Neural Graphics Primitives (NGP) framework, this method was adapted for PyTorch Lightning training pipelines [S1, unofficial]. It is used in training neural radiance fields to efficiently sample sparse voxel grids [S1, unofficial].
+
+## Sources
+[S1] ashawkey/stable-dreamfusion, https://github.com/ashawkey/stable-dreamfusion, fetched 2026-10-26 (unofficial)
+[S2] kwea123/ngp_pl, https://github.com/kwea123/ngp_pl, fetched 2026-10-26 (unofficial)
+[S3] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)

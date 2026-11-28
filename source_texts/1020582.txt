@@ -1,0 +1,352 @@
+Updated sample 14_MarchingCubes to manage chunks lifecycle for position-based infinite mesh generation.
+Sample
+
+Upgraded sample 14 from a static single-chunk view to an infinite, real-time procedural world streamed around a free-fly camera using dynamic chunk recycling and compute-driven Marching Cubes.
+Changed the density function to feature a procedural terrain generator with layered FBM noise, domain warping, canyons, terraces, caves, and flared stone pillars.
+
+Framework
+
+Upgraded the free-fly camera controller with smooth world-axis vertical movement (E/Q) and speed multipliers (Shift/Ctrl).
+
+[MarchingCubes] Infinite Grid and Procedural Terrain Streaming by tcoppex · Pull Request #40 · tcoppex/aer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[MarchingCubes] Infinite Grid and Procedural Terrain Streaming
+#40
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Merged
+tcoppex
+merged 9 commits into
+master
+from
+marchingcube_v2
+Oct 21, 2026
+Uh oh!
+There was an error while loading. Please reload this page.
+Merged
+[MarchingCubes] Infinite Grid and Procedural Terrain Streaming
+#40
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+9 commits
+Select commit
+Hold shift + click to select a range
+d921317
+[MarchingCubes] cleanup shaders and improve overflow guards.
+tcoppex Oct 21, 2026
+cf5ca03
+[MarchingCubes] ChunkGrid: implement dynamic chunk streaming around c…
+tcoppex Oct 21, 2026
+4ef39cc
+[MarchingCubes] simplify buildChunk passes and synchronization barriers.
+tcoppex Oct 21, 2026
+5990c80
+[FlyViewController] Add support for altitude control, acceleration an…
+tcoppex Oct 21, 2026
+ffbf2ed
+[MarchingCubes] Update density function shaders.
+tcoppex Oct 21, 2026
+c1f0ef3
+[MArchingCubes] Update UI: add information and chunk build control.
+tcoppex Oct 21, 2026
+c7a589d
+Update README
+tcoppex Oct 21, 2026
+a3c64d6
+fix up/down not triggered when not moving in another direction
+tcoppex Oct 21, 2026
+d5e204f
+Update README.md
+tcoppex Oct 21, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+[MarchingCubes] Update density function shaders.
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+tcoppex
+committed
+Oct 21, 2026
+commit ffbf2ed59faa81ebf9a631ac9b1c8a69cd499054
+There are no files selected for viewing
+101 changes: 2 additions & 99 deletions
+101
+samples/desktop/14_marching_cubes/shaders/slang/build_density_volume.slang
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -1,5 +1,7 @@
+#include "../interop.h"
+#include "custom_density.slang.h" //
+// ----------------------------------------------------------------------------
+[[vk::push_constant]]
+Expand All
+@@ -11,105 +13,6 @@ RWTexture3D<float> outDensityVolume;
+// ----------------------------------------------------------------------------
+float3x3 rotateAxisAngle(float3 _axis, float angle)
+{
+float3 axis = normalize(_axis);
+float c = cos(angle);
+float s = sin(angle);
+float t = 1.0 - c;
+return float3x3(
+t * axis.x * axis.x + c, t * axis.x * axis.y - s * axis.z, t * axis.x * axis.z + s * axis.y,
+t * axis.x * axis.y + s * axis.z, t * axis.y * axis.y + c, t * axis.y * axis.z - s * axis.x,
+t * axis.x * axis.z - s * axis.y, t * axis.y * axis.z + s * axis.x, t * axis.z * axis.z + c
+);
+}
+// ----------------------------------------------------------------------------
+float opUnion(float a, float b) {
+return min(a, b);
+}
+float opIntersection(float a, float b) {
+return max(a, b);
+}
+float opSubstraction(float a, float b) {
+return max(a, -b);
+}
+float opSmoothUnion(float a, float b, float k) {
+float res = exp(-k * a) + exp(-k * b);
+return -log(res) / k;
+}
+float3 opRepeat(float3 p, float3 c) {
+return p - c * (floor(c / p) + 0.5);
+}
+float opDisplacement(float3 p, float3 d) {
+float3 dp = d * p;
+return sin(p.x) * sin(p.y) * sin(p.z);
+}
+float sdPlane(float3 p, float4 n) {
+return n.w + dot(p, n.xyz);
+}
+float sdSphere(float3 p, float r) {
+return length(p) - r;
+}
+float udRoundBox(float3 p, float3 b, float r) {
+return length(max(abs(p) - b, float3(0.0))) - r;
+}
+float sdCylinder(float3 p, float r) {
+return length(p.xy) - r;
+}
+float sdCylinder2(float3 p, float3 c) {
+return opIntersection(length(p.xz - c.xy) - c.z, abs(p.y) - c.y);
+}
+float sdTorus(float3 p, float2 t) {
+float2 q = float2(length(p.xz) - t.x, p.y);
+return length(q) - t.y;
+}
+// ----------------------------------------------------------------------------
+float computeDensity(float3 ws)
+{
+var d = 0.0;
+var p = ws;
+let radius = 8.0;
+let axis = float3(1, 0, 1);
+p = mul(rotateAxisAngle(axis, 3.14/4.0), p);
+d = udRoundBox(p, float3(radius), 0.175*radius);
+let hs = 0.34;
+let helix = float2(cos(hs * ws.y), sin(hs * ws.y));
+d += opIntersection(dot(helix, hs * ws.xz), d);
+p = ws.yzx;
+p = mul(rotateAxisAngle(float3(1), 0.472), p);
+d = opSmoothUnion(
+d,
+sdTorus(p, float2(2.1 * radius, 2.0)),
+0.45
+);
+return d;
+}
+// ----------------------------------------------------------------------------
+[shader("compute")]
+[numthreads(
+kCompute_BuildDensity_kernelSize,
+Expand Down
+122 changes: 122 additions & 0 deletions
+122
+samples/desktop/14_marching_cubes/shaders/slang/custom_density.slang.h
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -0,0 +1,122 @@
+// import "density_common.slang";
+#include "sdf_shared.slang.h" //
+// ----------------------------------------------------------------------------
+//
+// Procedural Terrain
+//
+// ----------------------------------------------------------------------------
+// Ground.
+static const float kGroundLevel = 8.0;
+// Relief (3 + 3 + 2 octaves of 3D noise).
+static const float kReliefFreq = 0.0065; // base frequency (1 / world unit)
+static const float kReliefAmp = 36.0; // base amplitude (world unit)
+static const float kDetailFreq = 0.052;
+static const float kDetailAmp = 6.5;
+static const float kGrainFreq = 0.31;
+static const float kGrainAmp = 0.9;
+static const float kVerticalSquash = 0.75;
+// Domain warp.
+static const float kWarpFreq = 0.006;
+static const float3 kWarpAmp = float3(24.0, 9.0, 24.0);
+// Terraces.
+static const float kTerraceHeight = 13.0;
+static const float kTerraceStrength = 0.7;
+// Canyons.
+static const float kCanyonFreq = 0.0036;
+static const float kCanyonWidth = 0.085;
+static const float kCanyonDepth = 26.0;
+// Pillars.
+static const float kPillarCell = 96.0;
+static const float kPillarChance = 0.42;
+static const float kPillarHalfHeight = 44.0;
+// Caves & floor.
+static const float kCaveFreq = 0.022;
+static const float kCaveRadius = 4.5;
+static const float kFloorLevel = -30.0;
+// ----------------------------------------------------------------------------
+float sdPillars(float3 p) {
+let cell = floor(p.xz / kPillarCell);
+let h = float3(pcg3d(uint3(int3(int(cell.x), 7, int(cell.y))))) * (1.0f / 4294967295.0f);
+if (h.x > kPillarChance) {
+return 1.0e3;
+}
+// (kept away from the cell borders so no neighbour lookup is needed)
+let center = (cell + 0.3 + 0.4 * h.yz) * kPillarCell;
+let height = kPillarHalfHeight * (0.45 + 0.55 * h.z);
+let radius = (3.0 + 4.0 * h.y) * (1.0 + 0.35 * noise3(p * 0.12));
+let local = float3(p.x - center.x, p.y - kGroundLevel + 24.0 - height, p.z - center.y);
+// Flared base (the bottom is buried 24 units under the ground).
+let flare = 1.0 + 1.6 * exp(-max(p.y - kGroundLevel + 24.0, 0.0) * 0.06);
+return sdCappedCylinder(local, height, radius * flare) * 0.7;
+}
+// ----------------------------------------------------------------------------
+float sdTerrain(float3 p) {
+// Domain warp.
+let wp = p * kWarpFreq;
+let warp = float3(
+fbm3(wp + float3( 3.1, 7.7, 1.3), 2),
+fbm3(wp + float3( 9.2, 1.4, 5.5), 2),
+fbm3(wp + float3( 5.5, 2.2, 8.1), 2)
+);
+var q = p + warp * kWarpAmp;
+{
+let mask = smoothstep(-0.1, 0.35, fbm3(float3(q.x, 1.7, q.z) * 0.004, 2));
+let ty = q.y / kTerraceHeight;
+let step = kTerraceHeight * (floor(ty) + smoothstep(0.62, 0.95, frac(ty)));
+q.y = lerp(q.y, step, kTerraceStrength * mask);
+}
+let s = float3(1.0, kVerticalSquash, 1.0);
+let relief = kReliefAmp * fbm3(q * s * kReliefFreq, 3)
++ kDetailAmp * fbm3(q * s * kDetailFreq, 2)
++ kGrainAmp * noise3(q * kGrainFreq);
+var d = q.y - kGroundLevel - relief;
+{
+let n = fbm3(float3(q.x, 5.5, q.z) * kCanyonFreq, 3);
+let canyon = 1.0 - smoothstep(0.0, kCanyonWidth, abs(n));
+d += kCanyonDepth * canyon * smoothstep(-0.2, 0.3, relief / kReliefAmp + 0.2);
+}
+d = opSmoothUnion(d, sdPillars(p), 6.0);
+d -= saturate((kFloorLevel - p.y) / 20.0) * 80.0;
+{
+let cq = p * kCaveFreq;
+let tube = length(float2(
+fbm3(cq + float3(17.0, 3.0, 29.0), 2),
+fbm3(cq + float3(71.0, 41.0, 5.0), 2)
+)) * 45.0;
+var cave = tube - kCaveRadius - 1.6 * noise3(p * 0.11);
+cave += (1.0 - smoothstep(-62.0, -44.0, p.y)) * 30.0;
+d = opSmoothSubtraction(d, cave, 2.5);
+}
+return d;
+}
+// ----------------------------------------------------------------------------
+float computeDensity(float3 ws) {
+return sdTerrain(ws);
+}
+// ----------------------------------------------------------------------------
+6 changes: 4 additions & 2 deletions
+6
+samples/desktop/14_marching_cubes/shaders/slang/rendering.slang
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -47,9 +47,11 @@ VSOutput vertexMain(
+[shader("fragment")]
+float4 fragmentMain(VSOutput input) : SV_Target0 {
+var color = float4(0.5 * input.normal + 0.5, 1.0);
+let nor = normalize(input.normal);
+var color = float4(0.5 * nor + 0.5, 1.0);
+let irradiance = uEnvMapIrradiance.Sample(nor).rgb;
+color.rgb = uEnvMapIrradiance.Sample(normalize(input.normal)).rgb;
+color.rgb = color.rgb * irradiance;
+color.rgb *= 0.25;
+color.rgb *= input.ao;
+Expand Down
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

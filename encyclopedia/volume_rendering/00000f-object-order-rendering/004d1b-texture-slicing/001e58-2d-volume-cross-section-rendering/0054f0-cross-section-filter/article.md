@@ -1,0 +1,148 @@
+# Cross Section Filter
+
+Also called: Cross-Section Rendering, Cube-4/VolumePro Arbitrary Oriented Cut Plane, Multi-Planar Reconstruction, Multi-Planar Reformation, Multi-planar reformatting, Reslicing, Single-Slice Rendering, Visualisation par section
+
+## Overview
+The Cross Section Filter extracts a 2D slice from a 3D volume array and visualizes the scalar field on that plane using a color code [S1, unofficial]. It solves the problem of inspecting internal anatomical or volumetric structures that are not aligned with the standard axial, coronal, or sagittal planes by allowing arbitrary or axis-aligned reslicing [S6]. Unlike full 3D volume rendering methods, it provides a data-compression approach that yields an obscure representation of the external structure but avoids computationally prohibitive ray-marching [S3, unofficial]. It sets itself apart by supporting arbitrarily thick slices with variable-width transition regions for antialiasing, and by natively blending segmentation masks onto the extracted plane [S2, unofficial][S5, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** 3D volume dataset (scalar field), slicing plane definition (axis-aligned `x, y, z` or arbitrary orientation/position), layer masks and opacities, window/level parameters, and filter toggles (emboss, clipping, clip low value, transition width) [S2, unofficial][S4][S5, unofficial].
+*   **Outputs:** A contiguous 2D RGB image array representing the cross-section [S2, unofficial].
+
+**Data Structures:**
+The source does not specify internal memory layouts or bit-packing for the volume data [S2, unofficial].
+
+**Parameters:**
+1.  **Plane Definition:** The orientation and position of the cross-section, typically axis-aligned (`x, y, z`) unless rotated [S4].
+2.  **Window/Level:** Controls intensity mapping for the grayscale conversion [S2, unofficial].
+3.  **Clip Low Value:** A threshold intensity; pixels below this value become transparent [S4].
+4.  **Transition Width:** Variable width for the inside/outside boundary to allow translucent voxels for antialiasing [S5, unofficial].
+5.  **Emboss Shading:** Enhances the cross-section appearance with surface detail highlighting [S4].
+6.  **Clipping:** Hides half of the volume beyond the cross-section surface [S4].
+
+**Steps:**
+1.  **Extract Slice Plane:** Determine the geometric plane intersecting the 3D volume [S2, unofficial]. If the data is misaligned with the principal axes, apply the Data Rotate Filter to reorient the data itself before slicing [S4].
+2.  **Sample Volume Data:** Interpolate the volume data along the defined plane to generate the 2D slice [G]. For arbitrarily thick slices, set voxel opacity to 1.0 inside the slice, 0.0 outside, and apply a variable-width transition region between them for antialiasing [S5, unofficial].
+3.  **Calculate Intensity:** Convert the sampled scalar values to grayscale using window/level mapping: $grey = \text{clip}\left(\frac{plane - (level - window / 2)}{window} \times 255, 0, 255\right)$, cast to `uint8` [S2, unofficial]. If inversion is enabled, compute $grey = 255 - grey$ [S2, unofficial].
+4.  **Convert to RGB:** Expand the single-channel grayscale array to three channels: $rgb = \text{repeat}(grey, 3, \text{axis}=2)$ [S2, unofficial].
+5.  **Blend Segmentation Layers:** For each visible layer, extract its 2D mask slice [S2, unofficial]. Calculate alpha as $\alpha = layer.opacity \times 0.55$ [S2, unofficial]. Update RGB pixels where the mask is true using the blend equation: $rgb_{new} = rgb_{old} \times (1 - \alpha) + color_{layer} \times \alpha$, cast to `uint8` [S2, unofficial].
+6.  **Apply Filters:** If emboss shading is enabled, apply a standard convolution kernel to highlight surface details [G]. If clipping is enabled, mask out voxels on one side of the plane [G]. If "Clip low value" is active, set alpha to 0.0 for pixels below the threshold [S4].
+7.  **Finalize Output:** Ensure the resulting RGB array is contiguous in memory and construct the final image frame [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def cross_section_filter(volume_data, mask_data, plane_origin, plane_u, plane_v, plane_normal, height, width, window, level, invert, layers, emboss, clip_half, clip_threshold):
+    # Step 1 & 2: Extract 2D plane from 3D volume data
+    slice_data = np.zeros((height, width))
+    mask_data_out = np.zeros((height, width))
+    for y in range(height):
+        for x in range(width):
+            # Compute 3D point on plane: P = origin + x*u + y*v
+            p3d = plane_origin + (x * plane_u) + (y * plane_v)
+            # Trilinear interpolation to sample volume_data at p3d [G]
+            slice_data[y, x] = sample_trilinear(volume_data, p3d)
+            # Trilinear interpolation to sample mask_data at p3d [G]
+            mask_data_out[y, x] = sample_trilinear(mask_data, p3d)
+
+    # Step 3: Calculate grey intensity
+    grey = np.clip((slice_data - (level - window / 2)) / window * 255, 0, 255).astype(np.uint8)
+    if invert:
+        grey = 255 - grey
+
+    # Step 4: Convert single-channel grey array to RGB
+    rgb = np.repeat(grey[:, :, None], 3, axis=2)
+
+    # Step 5: Blend segmentation layers
+    for layer in layers:
+        alpha = layer.opacity * 0.55
+        mask_bool = mask_data_out > 0.5
+        rgb[mask_bool] = np.clip((rgb[mask_bool].astype(float) * (1 - alpha) + np.array(layer.color) * alpha).astype(np.uint8), 0, 255)
+
+    # Step 6: Apply filters
+    if emboss:
+        # Standard 3x3 emboss convolution kernel [G]
+        kernel = np.array([[-2, -1, 0], [-1, 1, 1], [0, 1, 2]])
+        rgb = np.convolve(rgb, kernel, mode='same')
+    if clip_half:
+        # Hide half side of volume beyond the cross section surface [S4]
+        half_mask = np.zeros((height, width), dtype=bool)
+        for y in range(height):
+            for x in range(width):
+                p3d = plane_origin + (x * plane_u) + (y * plane_v)
+                half_mask[y, x] = np.dot(p3d - plane_origin, plane_normal) > 0
+        rgb[~half_mask] = 0
+    if clip_threshold is not None:
+        # Make part of the cross section transparent below a critical value [S4]
+        low_mask = grey < clip_threshold
+        rgb[low_mask] = 0
+
+    # Step 7: Ensure contiguous memory and create image
+    rgb = np.ascontiguousarray(rgb)
+    # Create a QImage from the RGB data with format Format_RGB888, then copy it to self.pix [S2, unofficial]
+    return rgb
+
+def sample_trilinear(volume, point):
+    # Standard trilinear interpolation [G]
+    x, y, z = point
+    x0, y0, z0 = int(np.floor(x)), int(np.floor(y)), int(np.floor(z))
+    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
+    # Clamp to volume bounds
+    x0, x1 = max(0, min(x0, volume.shape[0]-1)), max(0, min(x1, volume.shape[0]-1))
+    y0, y1 = max(0, min(y0, volume.shape[1]-1)), max(0, min(y1, volume.shape[1]-1))
+    z0, z1 = max(0, min(z0, volume.shape[2]-1)), max(0, min(z1, volume.shape[2]-1))
+    dx, dy, dz = x - x0, y - y0, z - z0
+    v000 = volume[x0, y0, z0]
+    v100 = volume[x1, y0, z0]
+    v010 = volume[x0, y1, z0]
+    v110 = volume[x1, y1, z0]
+    v001 = volume[x0, y0, z1]
+    v101 = volume[x1, y0, z1]
+    v011 = volume[x0, y1, z1]
+    v111 = volume[x1, y1, z1]
+    c00 = v000 * (1-dx) + v100 * dx
+    c10 = v010 * (1-dx) + v110 * dx
+    c01 = v001 * (1-dx) + v101 * dx
+    c11 = v011 * (1-dx) + v111 * dx
+    c0 = c00 * (1-dy) + c10 * dy
+    c1 = c01 * (1-dy) + c11 * dy
+    return c0 * (1-dz) + c1 * dz
+```
+
+**Edge Cases and Pitfalls:**
+*   **Axis Alignment:** Standard cross-sectional images can only be made across the x, y, and z axes [S4]. If the data is not aligned well with these axes, the result may be poor unless the Data Rotate Filter is used [S4].
+*   **Preview vs. Render:** The filtering operations (including clipping and transparency) are applied in the preview environment [S4]. They do not automatically persist to the final PovRay rendering unless the data is exported [S4].
+*   **Large Volumes:** Implementation for very large data volumes (hundreds of gigabytes) can become complex to manage [S1, unofficial].
+
+## Subtopics
+
+### [Three-faced Image Filter](15359-three-faced-image-filter.md)
+Displays three cross-sections simultaneously. It includes an **Offset** parameter, which defines the distance between the projected image and the volume. This allows the user to view the three orthogonal slices with a spatial gap, providing context of their position within the volume.
+
+### Data Rotate Filter
+Rotates the data itself within the volume, rather than just rotating the databox or the view [S4]. This is necessary because the standard Cross Section Filter can only generate cross-sectional images across the x, y, and z axes [S4]. If the volume data is misaligned, this filter reorients the data to allow for proper reslicing [S4]. **Pitfall:** This filter works only in the preview environment. Filtered data must be exported to new `.df3` files to be used in PovRay rendering [S4].
+
+### Isopycnic Layer Slicing
+A feature allowing users to "dive" down to any isopycnic layer and examine slices of any dimensions [S7, unofficial]. Users can select specific layers (e.g., layers 2 and 13) and examine slices in various orientations (XZ, YZ) using transfer functions to build custom color maps [S7, unofficial].
+
+## Operating characteristics
+*   **Performance:** The source does not provide specific time or memory complexity metrics.
+*   **Limitations:** The filter is primarily a visualization aid within the DF3 Viewer Oosawa environment. It does not perform volume integration or ray-marching in the traditional sense but extracts a 2D slice [S1, unofficial].
+*   **Rendering Constraint:** The visual effects (emboss, clipping, transparency) are preview-only. To achieve these results in a final render, the data must be pre-processed and exported [S4].
+*   **Scaling:** Data compression to implement and provides an obscure representation of the external structure of the data, but doesn't provide a full 3D rendering [S3, unofficial].
+
+## Background
+The Cross Section Filter is part of the DF3 Viewer Oosawa software, a tool for viewing and processing 3D volume data in the `.df3` format [S4]. It is designed to facilitate the inspection of internal structures in volumetric datasets, particularly in contexts where axis-aligned slicing is insufficient due to data misalignment [S4]. The concept of arbitrary oriented cut planes is also implemented in hardware like the Cube-4/VolumePro, which supports anisotropic and gantry-tilted datasets by adjusting rays and correcting opacity values via lookup tables [S5, unofficial]. In scientific visualization, similar techniques are used in tools like VShell to examine isopycnic layers in oceanographic data [S7, unofficial].
+
+## Sources
+[S1] Visualisation de données volumiques massives : application aux données sismiques, https://hal.univ-lorraine.fr/tel-01752737v1, fetched 2026-10-26 (unofficial)
+[S2] kadmielp/MRI3D, https://github.com/kadmielp/MRI3D, fetched 2026-10-26 (unofficial)
+[S3] Llama version of Voxel Compression, https://www.flyriver.com/l/voxel-compression, fetched 2026-10-27 (unofficial)
+[S4] DF3 Viewer Oosawa, https://qcganime.web.fc2.com/OOSAWA/MANUAL/FilterE.html, fetched 2026-10-29
+[S5] Real-Time Volume Rendering, https://cfcs.pku.edu.cn/baoquan/docs/20180622110335231616.pdf, fetched 2026-10-30 (unofficial)
+[S6] ボリュームデータの可視化技術の説明 | TomoShop - 高性能次 ..., https://www.ikeda-shoponline.com/ctsoft/technical_information/volume_visual/, fetched 2026-10-30
+[S7] "Volume Rendering with Animation of Gulf Stream Currents", http://web.eng.ucsd.edu/~jschulze/publications/Ehrens2005.pdf, fetched 2026-10-29 (unofficial)

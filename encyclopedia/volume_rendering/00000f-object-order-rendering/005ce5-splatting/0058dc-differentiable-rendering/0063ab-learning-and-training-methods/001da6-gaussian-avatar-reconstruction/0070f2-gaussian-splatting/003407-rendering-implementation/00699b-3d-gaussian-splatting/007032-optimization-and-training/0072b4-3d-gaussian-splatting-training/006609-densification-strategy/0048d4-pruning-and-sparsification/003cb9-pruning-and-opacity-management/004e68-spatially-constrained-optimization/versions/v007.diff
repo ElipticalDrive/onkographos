@@ -1,0 +1,182 @@
+--- v006.md
++++ v007.md
+@@ -4,38 +4,27 @@
+ 
+ ## Overview
+-Spatially Constrained Optimization is a post-processing constraint workflow that applies an opacity loss to ensure full coverage of target objects, followed by the re-initialization of boundary primitives to clean up rendering artifacts [S1, unofficial]. It differs from applying opacity loss alone by specifically addressing the issue where primitives on object boundaries retain low opacity, which degrades qualitative results; adding re-initialization produces the best visual fidelity [S1, unofficial].
++Spatially Constrained Optimization is a post-processing constraint workflow that applies opacity loss to ensure full coverage of a target object, followed by the re-initialization of boundary primitives to clean up artifacts [S1, unofficial]. It solves the problem of incomplete object rendering and boundary artifacts that arise when optimizing for foreground-only appearance, distinguishing itself from standard pruning methods by retaining and reusing transparent primitives rather than removing them [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of primitives $\Theta$ (positions, scales, rotations, opacities, colors), a target image $I^{target}$, and a target alpha mask $I_{\alpha}^{target}$.
+-*   **Output:** Optimized primitives $\Theta$ where foreground objects are rendered with full opacity and background primitives are suppressed or re-initialized.
++*   **Input:** A set of 3D Gaussian primitives $\mathcal{G} = \{g_1, \dots, g_N\}$ with parameters $\Theta$ (position, scale, rotation, opacity $\nu$, color), a target image $I^{\text{target}}$, and a target alpha mask $I_\alpha^{\text{target}}$.
++*   **Output:** Optimized parameters $\Theta$ where foreground primitives have high opacity and background primitives are handled via re-initialization.
+ 
+ **Data Structures:**
+-*   **Primitives:** Each primitive $i$ has an opacity parameter $\sigma(\nu_i)$ derived from its spatial configuration $\nu_i$.
+-*   **Target Masks:** Binary or continuous masks indicating the presence of foreground content ($I_{\alpha}^{target} > 0$) and the desired alpha channel.
+-
+-**Parameters:**
+-*   **Prune threshold:** The opacity value below which primitives are considered transparent and marked for re-initialization. Typical value: $0.3$ [S1, unofficial].
+-*   **Prune iterations:** The frequency at which re-initialization is performed. Typical value: every $50$ iterations [S1, unofficial].
+-*   **$\lambda_{\alpha}$:** Weight for the alpha loss term. Not given in the sources.
++*   **Primitives:** Each primitive $i$ has an opacity value $\nu_i$ (or $\sigma(\nu_i)$ after sigmoid activation).
++*   **Thresholds:** `prune_threshold` (default 0.3) and `prune_iterations` (default 50).
+ 
+ **Steps:**
+-1.  **Compute Loss:** Calculate the composite loss $\mathcal{L}$ to penalize deviations in color and alpha from the target, specifically masking the color loss to the foreground region [S1, unofficial].
+-    $$ \mathcal{L} = \| (I_{\alpha}^{target} > 0) \odot (I - I^{target}) \|_2^2 + \lambda_{\alpha} \| I_{\alpha} - I_{\alpha}^{target} \|_2^2 $$
++1.  **Compute Loss:** Calculate the composite loss $\mathcal{L}$ which penalizes differences in color where the target alpha is non-zero, and differences in alpha everywhere [S1, unofficial]:
++    $$ \mathcal{L} = \| (I_\alpha^{\text{target}} > 0) \odot (I - I^{\text{target}}) \|_2^2 + \lambda_{\alpha} \| I_\alpha - I_\alpha^{\text{target}} \|_2^2 $$
+     Where:
+-    *   $I$ is the rendered image.
+-    *   $I^{target}$ is the target image.
+-    *   $I_{\alpha}$ is the rendered alpha, computed as $1 - T_N$ (where $T_N$ is the accumulated transmittance) [S1, unofficial].
+-    *   $I_{\alpha}^{target}$ is the target alpha mask.
++    *   $I$ is the rendered color image.
++    *   $I_\alpha = 1 - T_N$ is the rendered alpha image, with $T_N$ being the accumulated transmittance [S1, unofficial].
+     *   $\odot$ denotes element-wise multiplication.
+-    *   $(I_{\alpha}^{target} > 0)$ creates a binary mask selecting foreground pixels.
+-
+-2.  **Optimize:** Update primitive parameters $\Theta$ using gradient descent on $\mathcal{L}$ [S1, unofficial].
+-
+-3.  **Identify Boundary Primitives:** After optimization steps, identify primitives $i$ where the computed opacity $\sigma(\nu_i)$ is below the prune threshold [S1, unofficial].
+-
+-4.  **Re-initialize:** Instead of removing these low-opacity primitives, re-initialize them randomly using the Structure-aware initialization method [S1, unofficial]. This preserves the primitive count and aids coverage in complex regions [S1, unofficial].
+-
+-5.  **Schedule:** Re-initialization occurs every `prune iterations` (e.g., 50). It is excluded during an initial warmup period and final iterations to prevent destabilization of the optimization [S1, unofficial].
++    *   $\lambda_{\alpha}$ is a weighting hyperparameter.
++2.  **Optimize:** Update parameters $\Theta$ using gradient descent to minimize $\mathcal{L}$ [S1, unofficial].
++3.  **Identify Low-Opacity Primitives:** After optimization steps, identify primitives where the activated opacity $\sigma(\nu_i)$ is below the `prune_threshold` [S1, unofficial].
++4.  **Re-initialize:** Instead of removing these primitives, re-initialize their parameters randomly using the Structure-aware initialization method [S1, unofficial]. This involves sampling new positions, scales, and rotations to cover the canvas, ensuring full coverage [S1, unofficial].
++5.  **Iterate:** Repeat steps 1-4 every `prune_iterations` (e.g., 50 iterations), excluding an initial warmup period and final iterations to prevent destabilization [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -43,79 +32,76 @@
+ def spatially_constrained_optimization(primitives, target_image, target_alpha, 
+                                       lambda_alpha=1.0, prune_threshold=0.3, 
+-                                      prune_interval=50, warmup_steps=100, 
+-                                      total_steps=1000):
++                                      prune_iterations=50, warmup_iters=1000, 
++                                      total_iters=10000):
+     """
+-    Optimizes primitives to match target image with full foreground opacity.
+-    Re-initializes low-opacity primitives instead of pruning them.
++    Optimizes primitives with spatial constraints and re-initialization.
+     """
+-    for step in range(total_steps):
+-        # 1. Forward pass: Render image and alpha
+-        rendered_image, rendered_alpha = render(primitives)
++    for i in range(total_iters):
++        # 1. Forward pass and Loss computation
++        rendered_color, rendered_alpha = render(primitives, target_image)
+         
+-        # 2. Compute Loss
+-        # Mask for foreground pixels where target alpha is non-zero
+-        foreground_mask = (target_alpha > 0).float()
++        # Mask for color loss: only where target alpha is present
++        color_mask = (target_alpha > 0).float()
+         
+-        # Color loss only on foreground
+-        color_loss = torch.norm(foreground_mask * (rendered_image - target_image), p=2) ** 2
++        # Loss components
++        color_loss = torch.sum((color_mask * (rendered_color - target_image))**2)
++        alpha_loss = torch.sum((rendered_alpha - target_alpha)**2)
+         
+-        # Alpha loss on all pixels
+-        alpha_loss = torch.norm(rendered_alpha - target_alpha, p=2) ** 2
++        total_loss = color_loss + lambda_alpha * alpha_loss
+         
+-        loss = color_loss + lambda_alpha * alpha_loss
++        # 2. Backward pass and update
++        total_loss.backward()
++        optimizer.step()
++        optimizer.zero_grad()
+         
+-        # 3. Backward pass
+-        loss.backward()
+-        optimize_step(primitives) # Standard optimizer step (e.g., Adam)
+-        
+-        # 4. Re-initialization logic
+-        # Skip during warmup and final steps to prevent destabilization
+-        if step >= warmup_steps and step < total_steps - 50:
+-            if step % prune_interval == 0:
++        # 3. Re-initialization check
++        if i > warmup_iters and i < total_iters - 1000: # Exclude final iterations
++            if i % prune_iterations == 0:
+                 reinitialize_low_opacity_primitives(primitives, prune_threshold)
+ 
+ def reinitialize_low_opacity_primitives(primitives, threshold):
+     """
+-    Identifies primitives with opacity below threshold and re-initializes them
+-    using Structure-aware initialization instead of removing them.
++    Re-initializes primitives with opacity below threshold.
+     """
+-    for i in range(len(primitives)):
+-        # Compute current opacity sigma(nu_i)
+-        opacity = compute_opacity(primitives[i].nu)
++    for prim in primitives:
++        # Compute activated opacity
++        opacity = sigmoid(prim.opacity_param)
+         
+         if opacity < threshold:
+-            # Re-initialize randomly using Structure-aware method
+-            # This maintains primitive count and aids coverage
+-            primitives[i] = structure_aware_init(primitives[i].position)
++            # Re-initialize using Structure-aware method
++            # This typically involves random sampling within the scene bounds
++            # or based on the canvas structure to ensure coverage
++            prim.position = random_uniform_sample(scene_bounds)
++            prim.scale = random_uniform_sample(scale_range)
++            prim.rotation = random_uniform_rotation()
++            prim.opacity_param = initial_opacity_value # Reset opacity parameter
++```
+ 
+-def structure_aware_init(position):
+-    """
+-    Placeholder for Structure-aware initialization method (Sec 3.2.2 of [S1, unofficial]).
+-    Re-initializes primitive parameters randomly but respecting spatial structure.
+-    """
+-    # Implementation details depend on specific structure-aware strategy
+-    # Typically involves sampling from a distribution centered on position
+-    # with scale/rotation perturbations.
+-    return create_primitive(position)
+-```
++**Parameters:**
++*   `prune_threshold`: Threshold for opacity below which primitives are re-initialized. Typical value: 0.3 [S1, unofficial].
++*   `prune_iterations`: Frequency of re-initialization. Typical value: every 50 iterations [S1, unofficial].
++*   `lambda_alpha`: Weight for the alpha loss term. Not given in the sources.
++
++**Edge Cases and Pitfalls:**
++*   **Destabilization:** Re-initialization is excluded during an initial warmup period and final iterations to prevent destabilization of the optimization [S1, unofficial].
++*   **Boundary Artifacts:** Using opacity loss alone leaves low-opacity primitives on the boundary of the object; adding re-initialization produces the best qualitative results [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Structure-aware Re-initialization
+-A mechanism to handle transparent primitives in spatially constrained rendering by re-initializing them randomly instead of pruning them, to prevent destabilization and ensure coverage [S1, unofficial]. It checks opacity $\sigma(\nu_i)$ for each primitive $i$; if $\sigma(\nu_i) <$ prune threshold (typically 0.3), the primitive is marked for re-initialization [S1, unofficial]. Re-initialization occurs every prune iterations (typically 50), excluding an initial warmup period and final iterations to prevent destabilization [S1, unofficial]. It differs from standard pruning (e.g., [34]) by re-initializing transparent primitives rather than removing them, maintaining the primitive count and potentially aiding coverage in complex regions [S1, unofficial].
++A mechanism to handle transparent primitives in spatially constrained rendering by re-initializing them randomly instead of pruning them, to prevent destabilization and ensure coverage [S1, unofficial]. It differs from standard pruning (e.g., [34]) by re-initializing transparent primitives rather than removing them, maintaining the primitive count and potentially aiding coverage in complex regions [S1, unofficial]. It uses a `prune_threshold` of 0.3 and occurs every 50 iterations, excluding warmup and final iterations [S1, unofficial].
+ 
+ ### Foreground-only Rendering
+-A method to render only foreground by optimizing primitive opacity to match target alpha, enabling applications like appearance editing [S1, unofficial]. It optimizes $\Theta$ using the loss $\mathcal{L} = \| (I_{\alpha}^{target} > 0) \odot (I - I^{target}) \|_2^2 + \lambda_{\alpha} \| I_{\alpha} - I_{\alpha}^{target} \|_2^2$, where $I_{\alpha} = 1 - T_N$ [S1, unofficial]. It re-initializes transparent primitives instead of pruning them for further applications [S1, unofficial].
++A method to render only foreground by optimizing primitive opacity to match target alpha, enabling applications like appearance editing [S1, unofficial]. It uses the loss $\mathcal{L} = \| (I_\alpha^{\text{target}} > 0) \odot (I - I^{\text{target}}) \|_2^2 + \lambda_{\alpha} \| I_\alpha - I_\alpha^{\text{target}} \|_2^2$ and re-initializes transparent primitives instead of pruning them [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Per-iteration performance depends on the renderer implementation. On an RTX 3090 at 1024x1024 resolution with 16x16 tiles, forward pass takes ~5514ms and backward pass ~9811ms (FP32) [S1, unofficial]. Custom CUDA kernels can reduce this to ~1393ms forward / ~2477ms backward [S1, unofficial].
+-*   **Memory Complexity:** VRAM usage scales with resolution and primitive count. At 1024x1024, VRAM usage is ~12.0 GB (FP32) or ~5.0 GB (FP16/CUDA optimized) [S1, unofficial].
+-*   **Strengths:** Enables full opacity rendering of foreground objects, crucial for post-processing and appearance editing [S1, unofficial]. Re-initialization prevents the loss of coverage in complex boundary regions compared to simple pruning [S1, unofficial].
+-*   **Limitations:** Requires careful scheduling of re-initialization (warmup/final steps) to avoid destabilization [S1, unofficial]. Performance overhead from re-initialization steps is not explicitly quantified but adds to the per-iteration cost [S1, unofficial].
+-*   **When to use:** When full opacity of specific objects is required for downstream tasks like appearance editing or compositing [S1, unofficial].
+-*   **When not to use:** When preserving the exact number of primitives is not critical and simple pruning is sufficient, or when computational resources are extremely limited and the overhead of re-initialization is prohibitive.
++*   **Time Complexity:** Adds overhead due to periodic re-initialization and loss computation. The re-initialization step is $O(N)$ where $N$ is the number of primitives.
++*   **Memory Complexity:** Maintains the primitive count, so memory usage is similar to the base Gaussian Splatting method, unlike pruning which reduces it.
++*   **Performance:** On an RTX 3090, the custom CUDA implementation achieves 1360ms forward / 2337ms backward per iteration at 512x512 resolution with 6.4 GB VRAM [S1, unofficial].
++*   **Strengths:** Produces best qualitative results for foreground-only rendering by cleaning up boundary artifacts [S1, unofficial]. Enables downstream applications like appearance editing [S1, unofficial].
++*   **Limitations:** Does not reduce memory usage as effectively as pruning methods. Re-initialization can destabilize optimization if not properly scheduled [S1, unofficial].
+ 
+ ## Background
+-Originated in the DiffBMP paper (2026) by the authors of "DiffBMP: Differentiable Rendering with Bitmap Primitives" [S1, unofficial]. The idea is modified from [52]'s work for triangle mesh rendering [24], but adapted for bitmap primitives by sampling $\beta$ only once per iteration instead of averaging gradients over five samples [S1, unofficial]. It is used in differentiable rendering pipelines to enable foreground-only rendering and appearance editing applications [S1, unofficial].
++Originated in the DiffBMP paper (2026) as a modification of triangle mesh rendering work [52] [S1, unofficial]. It was developed to support rendering only the foreground, enabling downstream applications such as appearance editing [S1, unofficial]. The method combines opacity loss with a re-initialization mechanism to handle transparent primitives, differing from standard pruning approaches [S1, unofficial].
+ 
+ ## Sources

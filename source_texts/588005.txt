@@ -1,0 +1,568 @@
+An offline Android app for street artists, using AR to project images onto walls using a confidence-based voxel mapping system. - Implement 3D Gaussian Splatting Rendering in MobileGS by HereLiesAz · Pull Request #985 · HereLiesAz/GraffitiXR
+
+Implement 3D Gaussian Splatting Rendering in MobileGS by HereLiesAz · Pull Request #985 · HereLiesAz/GraffitiXR · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+HereLiesAz
+commented
+Feb 13, 2026
+•
+edited by sourcery-ai
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+This change replaces the basic point cloud rendering in the native engine (MobileGS) with a 3D Gaussian Splatting implementation. This provides a denser, higher-quality reconstruction by rendering scaled and rotated splats instead of fixed-size points. Key changes include updating the Splat struct, rewriting the shaders to handle Gaussian splatting logic, implementing instanced rendering for performance, and adding sorting for correct transparency. Map serialization was also updated to version 2 to support the new data structure while maintaining backward compatibility for loading version 1 maps.
+PR created automatically by Jules for task 11447115055786287585 started by @HereLiesAz
+Summary by Sourcery
+Replace point-based rendering in the MobileGS native engine with instanced 3D Gaussian splatting using quads, including updated shaders, data structures, and camera handling.
+New Features:
+Introduce a richer Splat representation supporting position, per-axis scale, rotation (quaternion), color, and opacity for 3D Gaussian splats.
+Implement instanced quad-based rendering with Gaussian falloff in shaders to produce dense, high-quality splat visuals.
+Add depth-based sorting of splats to ensure correct alpha blending during rendering.
+Enhancements:
+Refactor matrix and vector math to use GLM for view/projection, pose handling, and camera position extraction.
+Improve voxel integration logic to refine existing splats via moving averages for position and color, and adjusted opacity ramping.
+Chores:
+Extend on-disk map format to version 2 for the new Splat layout while maintaining backward-compatible loading of version 1 models.
+Implement Gaussian Splatting rendering in MobileGS
+…
+829e12f
+```
+- Replaces simple point rendering with instanced 3D Gaussian Splatting.
+- Updates `Splat` struct to include position, scale, rotation, color, and opacity.
+- Adds vertex shader for quad projection and fragment shader for Gaussian falloff.
+- Implements `feedDepthData` to initialize splats based on depth/FOV and update them via moving average.
+- Adds `sortSplats` for correct alpha blending order.
+- Updates `saveModel`/`loadModel` to support new Splat format with backward compatibility.
+
+Co-authored-by: google-labs-jules[bot] <161369871+google-labs-jules[bot]@users.noreply.github.com>
+```
+google-labs-jules
+Bot
+commented
+Feb 13, 2026
+Copy link
+Copy Markdown
+Contributor
+👋 Jules, reporting for duty! I'm here to lend a hand with this pull request.
+When you start a review, I'll add a 👀 emoji to each comment to let you know I've read it. I'll focus on feedback directed at me and will do my best to stay out of conversations between you and other bots or reviewers to keep the noise down.
+I'll push a commit with your requested changes shortly after. Please note there might be a delay between these steps, but rest assured I'm on the job!
+For more direct control, you can switch me to Reactive Mode. When this mode is on, I will only act on comments where you specifically mention me with @jules. You can find this option in the Pull Request section of your global Jules UI settings. You can always switch back!
+New to Jules? Learn more at jules.google/docs.
+For security, I will only act on instructions from the user who triggered this task.
+sourcery-ai
+Bot
+commented
+Feb 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Reviewer's Guide
+Replace point-based rendering in MobileGS with an instanced 3D Gaussian splatting pipeline, introducing a richer Splat struct, new GLSL shaders, view/projection handling via glm, per-frame depth sorting for correct transparency, and a versioned, backward-compatible map serialization format.
+Sequence diagram for frame rendering with 3D Gaussian splats
+```
+sequenceDiagram
+    participant App
+    participant MobileGS
+    participant OpenGL
+    participant ShaderProgram
+
+    App->>MobileGS: updateCamera(viewMtx, projMtx)
+    activate MobileGS
+    MobileGS->>MobileGS: mViewMat = glm_make_mat4(viewMtx)
+    MobileGS->>MobileGS: mProjMat = glm_make_mat4(projMtx)
+    MobileGS->>MobileGS: invView = glm_inverse(mViewMat)
+    MobileGS->>MobileGS: mCamPos = invView_col3
+    deactivate MobileGS
+
+    App->>MobileGS: draw()
+    activate MobileGS
+    MobileGS->>OpenGL: glUseProgram(mProgram)
+    MobileGS->>OpenGL: glUniformMatrix4fv(mLocView, mViewMat)
+    MobileGS->>OpenGL: glUniformMatrix4fv(mLocProj, mProjMat)
+
+    MobileGS->>MobileGS: uploadSplatData()
+    activate MobileGS
+    alt quad_vbo_not_initialized
+        MobileGS->>OpenGL: glGenBuffers(mVBO_Quad)
+        MobileGS->>OpenGL: glBindBuffer(GL_ARRAY_BUFFER, mVBO_Quad)
+        MobileGS->>OpenGL: glBufferData(QUAD_VERTICES)
+        MobileGS->>OpenGL: glBindBuffer(GL_ARRAY_BUFFER, 0)
+    end
+    alt instance_vbo_not_initialized
+        MobileGS->>OpenGL: glGenBuffers(mVBO_Instance)
+    end
+    MobileGS->>MobileGS: sortSplats()
+    MobileGS->>OpenGL: glBindBuffer(GL_ARRAY_BUFFER, mVBO_Instance)
+    MobileGS->>OpenGL: glBufferData(mSplats)
+    MobileGS->>OpenGL: glBindBuffer(GL_ARRAY_BUFFER, 0)
+    deactivate MobileGS
+
+    MobileGS->>OpenGL: glBindBuffer(GL_ARRAY_BUFFER, mVBO_Quad)
+    MobileGS->>OpenGL: glEnableVertexAttribArray(0)
+    MobileGS->>OpenGL: glVertexAttribPointer(0, aQuadVert)
+    MobileGS->>OpenGL: glVertexAttribDivisor(0, 0)
+
+    MobileGS->>OpenGL: glBindBuffer(GL_ARRAY_BUFFER, mVBO_Instance)
+    MobileGS->>OpenGL: glEnableVertexAttribArray(1..5)
+    MobileGS->>OpenGL: glVertexAttribPointer(1..5, instance_attributes)
+    MobileGS->>OpenGL: glVertexAttribDivisor(1..5, 1)
+
+    MobileGS->>OpenGL: glDrawArraysInstanced(GL_TRIANGLE_STRIP, 4, mSplats_size)
+
+    MobileGS->>OpenGL: glDisableVertexAttribArray(0..5)
+    MobileGS->>OpenGL: glVertexAttribDivisor(0..5, 0)
+    MobileGS->>OpenGL: glBindBuffer(GL_ARRAY_BUFFER, 0)
+    deactivate MobileGS
+
+    OpenGL->>ShaderProgram: execute_vertex_and_fragment_shaders()
+```
+Loading
+Updated class diagram for MobileGS Gaussian splatting pipeline
+```
+classDiagram
+    class VoxelKey {
+        int x
+        int y
+        int z
+    }
+
+    class VoxelKeyHash {
+        +size_t operator_call(VoxelKey key)
+    }
+
+    class Splat {
+        glm_vec3 pos
+        glm_vec3 scale
+        glm_quat rot
+        glm_vec3 color
+        float opacity
+    }
+
+    class SplatV1 {
+        float x
+        float y
+        float z
+        float r
+        float g
+        float b
+        float opacity
+    }
+
+    class MobileGS {
+        -GLuint mProgram
+        -GLint mLocView
+        -GLint mLocProj
+        -GLint mLocCamPos
+        -GLuint mVBO_Quad
+        -GLuint mVBO_Instance
+        -bool mGlDirty
+
+        -std_vector~Splat~ mSplats
+        -std_unordered_map~VoxelKey,size_t,VoxelKeyHash~ mVoxelGrid
+        -std_mutex mChunkMutex
+
+        -glm_mat4 mViewMat
+        -glm_mat4 mProjMat
+        -glm_vec3 mCamPos
+
+        -cv_Mat mTargetDescriptors
+        -int mFrameCount
+        -int mViewportWidth
+        -int mViewportHeight
+
+        +MobileGS()
+        +~MobileGS()
+        +initialize() void
+        +resetGL() void
+        +updateCamera(float_pointer viewMtx, float_pointer projMtx) void
+        +feedDepthData(uint16_t_pointer depthData, uint8_t_pointer colorData, int width, int height, int stride, float_pointer poseMtx, float fov) void
+        +saveModel(std_string path) bool
+        +loadModel(std_string path) bool
+        +draw() void
+
+        -updateMatrices() void
+        -uploadSplatData() void
+        -sortSplats() void
+    }
+
+    VoxelKeyHash --> VoxelKey : hashes
+    MobileGS --> Splat : manages
+    MobileGS --> VoxelKey : voxel_grid_key
+    MobileGS --> VoxelKeyHash : uses_hash
+    MobileGS ..> SplatV1 : loads_legacy_data
+```
+Loading
+File-Level Changes
+Change
+Details
+Files
+Implement instanced 3D Gaussian splatting in the rendering pipeline instead of fixed-size GL points.
+Replace point-based vertex and fragment shaders with Gaussian splatting shaders that expand oriented, scaled quads in camera space and apply a Gaussian alpha falloff in the fragment shader.
+Add a static quad vertex buffer and an instanced splat buffer, wiring up per-vertex and per-instance vertex attributes (position, scale, rotation, color, opacity) with divisors and instanced draw calls.
+Introduce a glm-based Splat struct using vec3 for position/scale/color and quat for rotation, and update all rendering code to consume the new layout via offsetof-based attribute pointers.
+core/nativebridge/src/main/cpp/MobileGS.cpp
+core/nativebridge/src/main/cpp/include/MobileGS.h
+Introduce view/projection matrix handling via glm and sort splats back-to-front for correct alpha blending.
+Replace manual float-array MVP math with glm::mat4 storage for view and projection matrices, populated using glm::make_mat4 in updateCamera.
+Compute camera position each frame by inverting the view matrix and extracting the translation component for use in depth-based sorting.
+Add a sortSplats helper that orders splats by squared distance from the camera (far to near) and call it before uploading instance data each frame.
+core/nativebridge/src/main/cpp/MobileGS.cpp
+core/nativebridge/src/main/cpp/include/MobileGS.h
+Refine splat integration from depth/color frames to initialize and update Gaussian parameters.
+In feedDepthData, switch to glm-based pose handling and unprojection, computing world-space positions with a glm::mat4 pose matrix.
+Initialize new splats with position, an estimated scale based on depth/FOV/SAMPLE_STRIDE, identity rotation, color from an assumed RGBA buffer (or green default), and mid-range opacity.
+For existing voxels, apply a running average for position and color and increment opacity toward 1.0 to represent increasing confidence.
+core/nativebridge/src/main/cpp/MobileGS.cpp
+Update model serialization to support the new Splat layout while maintaining backward compatibility.
+Bump the map file format version from 1 to 2 when saving, writing the new Splat struct directly.
+Introduce a legacy SplatV1 struct for loading version 1 files and convert them into the new Splat representation with default scale and rotation.
+On load, branch on version, read either SplatV1 or Splat, then rebuild the voxel grid using the new glm-based position fields, rejecting unknown versions.
+core/nativebridge/src/main/cpp/MobileGS.cpp
+Possibly linked issues
+#Build Failure on PR Fix AR black screen, GL context errors, and enhance editor robustness. #945: PR unifies and updates the Splat struct in MobileGS.h, eliminating the duplicate definition that broke the build.
+#Build Failure on PR Refactor Target Creation Flow and fix build issues #937: The PR rewrites MobileGS.cpp, including the constructor and GL members where the reported build errors occur.
+Tips and commands
+Interacting with Sourcery
+Trigger a new review: Comment @sourcery-ai review on the pull request.
+Continue discussions: Reply directly to Sourcery's review comments.
+Generate a GitHub issue from a review comment: Ask Sourcery to create an
+issue from a review comment by replying to it. You can also reply to a
+review comment with @sourcery-ai issue to create an issue from it.
+Generate a pull request title: Write @sourcery-ai anywhere in the pull
+request title to generate a title at any time. You can also comment
+@sourcery-ai title on the pull request to (re-)generate the title at any time.
+Generate a pull request summary: Write @sourcery-ai summary anywhere in
+the pull request body to generate a PR summary at any time exactly where you
+want it. You can also comment @sourcery-ai summary on the pull request to
+(re-)generate the summary at any time.
+Generate reviewer's guide: Comment @sourcery-ai guide on the pull
+request to (re-)generate the reviewer's guide at any time.
+Resolve all Sourcery comments: Comment @sourcery-ai resolve on the
+pull request to resolve all Sourcery comments. Useful if you've already
+addressed all the comments and don't want to see them anymore.
+Dismiss all Sourcery reviews: Comment @sourcery-ai dismiss on the pull
+request to dismiss all existing Sourcery reviews. Especially useful if you
+want to start fresh with a new review - don't forget to comment
+@sourcery-ai review to trigger a new review!
+Customizing Your Experience
+Access your dashboard to:
+Enable or disable review features such as the Sourcery-generated pull request
+summary, the reviewer's guide, and others.
+Change the review language.
+Add, remove or edit custom review instructions.
+Adjust other review settings.
+Getting Help
+Contact our support team for questions or feedback.
+Visit our documentation for detailed guides and information.
+Keep in touch with the Sourcery team by following us on X/Twitter, LinkedIn or GitHub.
+gemini-code-assist
+Bot
+commented
+Feb 13, 2026
+Copy link
+Copy Markdown
+Contributor
+Summary of Changes
+Hello @HereLiesAz, I'm Gemini Code Assist1! I'm currently reviewing this pull request and will post my feedback shortly. In the meantime, here's a summary to help you and other reviewers quickly get up to speed!
+This pull request significantly enhances the rendering capabilities of MobileGS by replacing the previous point cloud visualization with a full 3D Gaussian Splatting implementation. This change introduces more sophisticated rendering techniques, including instanced drawing and proper transparency handling, to achieve a more realistic and detailed representation of scanned environments. The underlying data structures and serialization methods have been updated to support these new features, while maintaining compatibility with existing data.
+Highlights
+3D Gaussian Splatting Implementation: The core rendering engine has been upgraded from basic point cloud rendering to 3D Gaussian Splatting, enabling denser and higher-quality reconstructions.
+Shader Rewrite and Instanced Rendering: Both the vertex and fragment shaders have been completely rewritten to support rendering scaled and rotated quads with Gaussian falloff, utilizing instanced rendering for improved performance.
+Updated Splat Data Structure: The Splat struct now includes glm::vec3 for position, scale, and color, and glm::quat for rotation, replacing individual float components to better represent Gaussian splats.
+Transparency Sorting: A back-to-front sorting mechanism has been implemented for splats based on their distance to the camera, ensuring correct alpha blending and transparency.
+Map Serialization Versioning: The map serialization format has been updated to version 2 to accommodate the new Splat data structure, with backward compatibility implemented to load older version 1 maps.
+Changelog
+core/nativebridge/src/main/cpp/MobileGS.cpp
+Added GLM library includes for vector, matrix, and quaternion operations.
+Rewrote VERTEX_SHADER and FRAGMENT_SHADER to implement 3D Gaussian Splatting, including quad vertex processing, rotation, scaling, and Gaussian falloff.
+Updated MobileGS class members to use GLM types for matrices and camera position, and new uniform locations for view and projection matrices.
+Refactored GL buffer management to use separate VBOs for static quad vertices and dynamic instance data, and switched to glDrawArraysInstanced.
+Implemented sortSplats function to sort splats back-to-front for correct alpha blending.
+Modified updateCamera to use GLM for matrix handling and camera position extraction.
+Updated feedDepthData to use GLM for pose matrix transformations, initialize new splats with scale and rotation, and apply moving averages for position and color updates.
+Incremented the map serialization version to 2 in saveModel.
+Added SplatV1 struct and logic in loadModel to handle backward compatibility for version 1 maps, converting old splat data to the new format with default scale and rotation.
+core/nativebridge/src/main/cpp/include/MobileGS.h
+Included GLM headers for glm::glm.hpp and glm::gtc::quaternion.hpp.
+Redefined the Splat struct to use glm::vec3 for pos, scale, and color, and glm::quat for rot, replacing individual float members.
+Updated MobileGS class private members to reflect changes in GL uniform locations (mLocView, mLocProj, mLocCamPos) and VBOs (mVBO_Quad, mVBO_Instance).
+Replaced raw float arrays for matrices (mViewMatrix, mProjMatrix, mMVPMatrix) with glm::mat4 mViewMat, glm::mat4 mProjMat, and glm::vec3 mCamPos.
+Added sortSplats() method declaration.
+Using Gemini Code Assist
+The full guide for Gemini Code Assist can be found on our documentation page, here are some quick tips.
+Invoking Gemini
+You can request assistance from Gemini at any point by creating a comment using either /gemini <command> or @gemini-code-assist <command>. Below is a summary of the supported commands on the current page.
+Feature
+Command
+Description
+Code Review
+/gemini review
+Performs a code review for the current pull request in its current state.
+Pull Request Summary
+/gemini summary
+Provides a summary of the current pull request in its current state.
+Comment
+@gemini-code-assist
+Responds in comments when explicitly tagged, both in pull request comments and review comments.
+Help
+/gemini help
+Displays a list of available commands.
+Customization
+To customize Gemini Code Assist for GitHub experience, repository maintainers can create a configuration file and/or provide a custom code review style guide (such as PEP-8 for Python) by creating and adding files to a .gemini/ folder in the base of the repository. Detailed instructions can be found here.
+Limitations & Feedback
+Gemini Code Assist may make mistakes. Please leave feedback on any instances where its feedback is incorrect or counter productive. You can react with 👍 and 👎 on @gemini-code-assist comments. If you're interested in giving your feedback about your experience with Gemini Code Assist for Github and other Google products, sign up here.
+You can also get AI-powered code generation, chat, as well as code reviews directly in the IDE at no cost with the Gemini Code Assist IDE Extension.
+Footnotes
+Review the Privacy Notices, Generative AI Prohibited Use Policy, Terms of Service, and learn how to configure Gemini Code Assist in GitHub here. Gemini can make mistakes, so double check it and use code with caution. ↩
+github-actions
+Bot
+added
+documentation
+Improvements or additions to documentation
+feature
+core
+native
+build
+labels
+Feb 13, 2026
+gemini-code-assist
+Bot
+reviewed
+Feb 13, 2026
+View reviewed changes
+gemini-code-assist
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Code Review
+This pull request significantly upgrades the rendering system by replacing point cloud rendering with a 3D Gaussian Splatting implementation, leveraging glm and instanced rendering for performance, and adding splat sorting and backward compatibility. However, a high-severity insecure deserialization vulnerability exists in the loadModel function due to unbounded memory allocation from untrusted input. There's also a medium-severity issue in feedDepthData related to inconsistent and unvalidated buffer indexing, which could lead to out-of-bounds reads. Additionally, a potential bug in color data handling and some dead code in a header file require attention.
+Comment thread
+core/nativebridge/src/main/cpp/MobileGS.cpp
+@@ -343,17 +431,39 @@ bool MobileGS::loadModel(const std::string& path) {
+int count;
+in.read((char*)&count, sizeof(int));
+gemini-code-assist
+Bot
+Feb 13, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The loadModel function reads an integer count directly from the file and uses it to allocate memory via std::vector or resize() without any validation. A maliciously crafted file with a very large or negative count value can cause the application to crash due to an out-of-memory (OOM) condition or a length error. It is recommended to validate count against a reasonable upper bound, such as MAX_SPLATS, before proceeding with the allocation.
+```
+    in.read((char*)&count, sizeof(int));
+    if (count < 0 || count > MAX_SPLATS) {
+        LOGE("Invalid splat count in model file: %d", count);
+        return false;
+    }
+```
+Comment thread
+core/nativebridge/src/main/cpp/MobileGS.cpp
+Comment on lines
++356
+to
++361
+int pIdx = (y * width + x) * 4;
+s.color = glm::vec3(
+colorData[pIdx] / 255.0f,
+colorData[pIdx + 1] / 255.0f,
+colorData[pIdx + 2] / 255.0f
+);
+gemini-code-assist
+Bot
+Feb 13, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The feedDepthData function has a medium-severity issue related to inconsistent and unvalidated buffer indexing, which can lead to out-of-bounds reads. Specifically, the colorData buffer is accessed using an index calculated from width and height (int pIdx = (y * width + x) * 4;) without verifying the buffer's capacity or accounting for potential row stride. Image buffers from camera APIs often have a row stride larger than width * pixel_size due to memory alignment. A similar stride parameter, as used for the depth buffer, is needed for the color buffer to ensure correct sampling and prevent out-of-bounds access. It is recommended to update the JNI interface and this function to accept a colorStride and use it for indexing the colorData buffer, for example: int pIdx = (y * color_stride_in_bytes) + (x * 4);.
+Comment thread
+core/nativebridge/src/main/cpp/include/MobileGS.h
+GLuint mVBO = 0;
+GLint mLocView = -1;
+GLint mLocProj = -1;
+GLint mLocCamPos = -1;
+gemini-code-assist
+Bot
+Feb 13, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The member variable mLocCamPos is declared but it's never initialized in initialize() or used anywhere in MobileGS.cpp. The shaders also don't have a uCamPos uniform. This appears to be dead code and can be removed to improve clarity.
+Comment thread
+core/nativebridge/src/main/cpp/include/MobileGS.h
+int mViewportHeight = 0;
+void updateMVP();
+void updateMatrices();
+gemini-code-assist
+Bot
+Feb 13, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The function updateMatrices() is declared here, but it is not defined in MobileGS.cpp and is never called. The previous updateMVP() function was removed, and its responsibilities seem to have been absorbed into updateCamera(). This declaration appears to be unused and can be removed.
+HereLiesAz
+marked this pull request as ready for review
+February 13, 2026 19:12
+Hide details
+View details
+HereLiesAz
+merged commit b972028
+into
+main
+Feb 13, 2026
+9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+HereLiesAz
+deleted the
+implement-gaussian-splatting-rendering-11447115055786287585
+branch
+February 13, 2026 19:12
+sourcery-ai
+Bot
+reviewed
+Feb 13, 2026
+View reviewed changes
+sourcery-ai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Hey - I've found 2 issues, and left some high level feedback:
+The new mLocCamPos uniform handle and updateMatrices() method in MobileGS are declared but never used or defined; either wire them into the rendering path or remove them to avoid dead code and confusion.
+In draw(), uploadSplatData() re-uploads the entire instance buffer every frame even when splats haven't changed, which can be expensive at high splat counts; consider separating sorting from buffer updates or tracking a dirty flag to avoid unnecessary uploads.
+The new feedDepthData path assumes colorData is RGBA, while earlier comments mention NV21/YUV from ARCore; it would be safer to assert or clearly handle the expected format here to avoid subtle color corruption if the input format changes.
+Prompt for AI Agents
+```
+Please address the comments from this code review:
+
+## Overall Comments
+- The new `mLocCamPos` uniform handle and `updateMatrices()` method in `MobileGS` are declared but never used or defined; either wire them into the rendering path or remove them to avoid dead code and confusion.
+- In `draw()`, `uploadSplatData()` re-uploads the entire instance buffer every frame even when splats haven't changed, which can be expensive at high splat counts; consider separating sorting from buffer updates or tracking a dirty flag to avoid unnecessary uploads.
+- The new `feedDepthData` path assumes `colorData` is RGBA, while earlier comments mention NV21/YUV from ARCore; it would be safer to assert or clearly handle the expected format here to avoid subtle color corruption if the input format changes.
+
+## Individual Comments
+
+### Comment 1
+<location> `core/nativebridge/src/main/cpp/include/MobileGS.h:92` </location>
+<code_context>
+     int mViewportHeight = 0;
+
+-    void updateMVP();
++    void updateMatrices();
+     void uploadSplatData(); // Helper to send mSplats to GPU
++    void sortSplats();
+</code_context>
+
+<issue_to_address>
+**issue (bug_risk):** updateMatrices is declared in the header but has no visible definition, which will cause a link error or dead declaration.
+
+The previous `updateMVP()` implementation was removed, and there’s no new `updateMatrices()` definition or call sites. Either remove the declaration if it’s no longer needed, or add the corresponding definition so you don’t end up with an unused or link-breaking symbol later.
+</issue_to_address>
+
+### Comment 2
+<location> `core/nativebridge/src/main/cpp/MobileGS.cpp:356` </location>
+<code_context>
+-                    // For the sake of this fix, let's assume valid data or default.
+-                    s.r = 1.0f; s.g = 1.0f; s.b = 1.0f;
++                    // Assuming RGBA buffer from JNI
++                    int pIdx = (y * width + x) * 4;
++                    s.color = glm::vec3(
++                        colorData[pIdx] / 255.0f,
+</code_context>
+
+<issue_to_address>
+**issue (bug_risk):** Color indexing assumes tightly packed RGBA with no stride or format variation, which may not match the actual input.
+
+This indexing only works if `colorData` is tightly packed RGBA of size `width * height * 4` with no row padding. Since depth uses a separate `stride` and ARCore can provide different formats/strides, this assumption may be invalid and could cause incorrect sampling or out-of-bounds reads. Consider passing the actual color stride/format, or explicitly enforcing this layout at the API boundary.
+</issue_to_address>
+```
+Sourcery is free for open source - if you like our reviews please consider sharing them ✨
+X
+Mastodon
+LinkedIn
+Facebook
+Help me be more useful! Please click 👍 or 👎 on each comment and I'll use the feedback to improve your reviews.
+Comment thread
+core/nativebridge/src/main/cpp/include/MobileGS.h
+int mViewportHeight = 0;
+void updateMVP();
+void updateMatrices();
+sourcery-ai
+Bot
+Feb 13, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+issue (bug_risk): updateMatrices is declared in the header but has no visible definition, which will cause a link error or dead declaration.
+The previous updateMVP() implementation was removed, and there’s no new updateMatrices() definition or call sites. Either remove the declaration if it’s no longer needed, or add the corresponding definition so you don’t end up with an unused or link-breaking symbol later.
+Comment thread
+core/nativebridge/src/main/cpp/MobileGS.cpp
+// For the sake of this fix, let's assume valid data or default.
+s.r = 1.0f; s.g = 1.0f; s.b = 1.0f;
+// Assuming RGBA buffer from JNI
+int pIdx = (y * width + x) * 4;
+sourcery-ai
+Bot
+Feb 13, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+issue (bug_risk): Color indexing assumes tightly packed RGBA with no stride or format variation, which may not match the actual input.
+This indexing only works if colorData is tightly packed RGBA of size width * height * 4 with no row padding. Since depth uses a separate stride and ARCore can provide different formats/strides, this assumption may be invalid and could cause incorrect sampling or out-of-bounds reads. Consider passing the actual color stride/format, or explicitly enforcing this layout at the API boundary.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+build
+core
+documentation
+Improvements or additions to documentation
+feature
+native
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

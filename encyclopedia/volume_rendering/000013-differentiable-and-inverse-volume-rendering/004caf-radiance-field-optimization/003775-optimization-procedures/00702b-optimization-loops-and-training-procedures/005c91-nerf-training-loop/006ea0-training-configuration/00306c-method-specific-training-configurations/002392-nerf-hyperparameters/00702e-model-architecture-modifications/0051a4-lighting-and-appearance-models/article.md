@@ -1,0 +1,33 @@
+# Lighting and Appearance Models
+
+Also called: Relighting NeRF, Appearance-Aware NeRF, Stylized NeRF
+
+## Overview
+Lighting and Appearance Models extend the standard NeRF representation $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$ by decoupling intrinsic scene properties (geometry, albedo) from extrinsic appearance factors (illumination, artistic style) [Parent]. This separation enables explicit control over lighting conditions or global stylistic transformations while maintaining 3D geometric consistency, addressing the limitations of implicit view-dependent color prediction in standard NeRFs .
+
+## Shared principles
+The family modifies the baseline NeRF architecture [Parent](3065-nerf-hyperparameters.md) primarily through **Input Space** augmentation and **Output Space** extension.
+
+1.  **Input Augmentation:** The input tuple $(\mathbf{x}, \mathbf{d})$ is augmented with additional signals to condition appearance. Common augmentations include:
+    *   Illumination embeddings $\mathbf{z}_l$ representing light source parameters or environment maps .
+    *   Roughness scalars $b_r$ for material properties .
+    *   Latent codes $\mathbf{z}$ for style or identity .
+2.  **Output Decoupling:** The output tuple $(\sigma, \mathbf{c})$ is modified to predict intermediate physical quantities rather than final color.
+    *   **Albedo/Geometry:** Networks predict accumulated albedo $\mathbf{A}$ and surface normals $\mathbf{N}$ derived from density gradients, which are then shaded by a separate lighting model .
+    *   **Pre-integrated Light:** Networks predict pre-integrated radiance $\tilde{L}_i$ to approximate the rendering equation without numerical integration .
+3.  **Joint Optimization:** In appearance editing tasks, the 3D radiance field is optimized jointly with a 2D appearance network (e.g., style transfer or lighting estimation) to enforce consistency between the 3D structure and the 2D appearance target .
+
+## Subtopics
+
+### [Neural Pre-Integrated Lighting (Neural-PIL)](13783-neural-pre-integrated-lighting-neural-pil.md)
+Replaces numerical light integration with a neural network query predicting pre-integrated light $\tilde{L}_i$ from illumination embedding, direction, and roughness. Chosen when fine-grained illumination details are required without the memory cost of Spherical Harmonics.
+
+### [Spherical Harmonics NeRF](14480-spherical-harmonics-nerf.md)
+Replaces view-dependent color prediction with an explicit 2nd-order Spherical Harmonics (SH) illumination model. Chosen when explicit relighting via learnable SH coefficients is needed, separating albedo/geometry from lighting.
+
+### [StylizedNeRF](14882-stylizednerf.md)
+Applies artistic styles to 3D scenes using a mutual learning strategy between a 3D NeRF and a 2D stylization network with latent codes. Chosen for global artistic style transfer while maintaining geometric consistency, unlike region-specific or view-inconsistent methods.
+
+## Background
+Originating from the need to control appearance in Neural Radiance Fields, these methods evolved from implicit view-dependent modeling to explicit physical or stylistic decomposition. Spherical Harmonics NeRF introduced explicit lighting control , while Neural-PIL addressed the computational cost of light integration . StylizedNeRF extended this to non-photorealistic rendering by jointly optimizing 3D and 2D networks . These approaches are used in relighting, virtual production, and artistic content creation.
+

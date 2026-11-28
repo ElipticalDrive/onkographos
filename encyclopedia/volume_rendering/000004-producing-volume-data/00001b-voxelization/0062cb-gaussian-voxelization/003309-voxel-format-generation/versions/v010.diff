@@ -1,0 +1,169 @@
+--- v009.md
++++ v010.md
+@@ -33,6 +33,6 @@
+ 2.  **Voxelization:** Implicitly enabled by outputting to `.voxel.json`. Voxelizes the scene into a sparse voxel grid using `voxel-size` and `voxel-opacity` [S2].
+ 3.  **Sealing the shell:** Two mutually exclusive options seal the thin voxel shell to create a watertight volume for carving [S2].
+-    *   **Interior scenes (rooms):** Apply `--voxel-external-fill`. Dilates the solid grid by `size` world units to bridge small holes. Flood-fills empty space inward from the bounding-box boundary, marking reachable voxels as exterior. Marks the exterior region as solid, leaving the enclosed interior empty. Uses `seed-pos` as a sanity check: if the seed is reachable from outside, the fill is skipped and the original grid is returned [S2].
+-    *   **Exterior scenes (terrain):** Apply `--voxel-floor-fill`. Walks each XZ column upward from the bottom of the bounding box until it hits a solid voxel, marking everything below as solid. Restricts patching to XZ columns surrounded by floor within `2 * size` [S2].
++    *   **Interior scenes (rooms):** Apply `--voxel-external-fill` [S2]. Dilates the solid grid by `size` world units to bridge small holes [S2]. Flood-fills empty space inward from the bounding-box boundary, marking reachable voxels as exterior [S2]. Marks the exterior region as solid, leaving the enclosed interior empty [S2]. Uses `seed-pos` as a sanity check: if the seed is reachable from outside, the fill is skipped and the original grid is returned [S2].
++    *   **Exterior scenes (terrain):** Apply `--voxel-floor-fill` [S2]. Walks each XZ column upward from the bottom of the bounding box until it hits a solid voxel, marking everything below as solid [S2]. Restricts patching to XZ columns surrounded by floor within `2 * size` [S2].
+ 4.  **Carving:** Apply `--voxel-carve` using `navCapsule` dimensions to flood-fill a capsule volume from `seed-pos`, marking voxels the capsule can reach as navigable. Produces the walkable region. A height of `0` disables carving [S2].
+ 5.  **Mesh Generation (Optional):** Generate `.collision.glb` using `--collision-mesh`. `smooth` uses marching cubes with lossless coplanar merge (lower triangle count, natural contours). `faces` generates watertight axis-aligned voxel faces (higher triangle count, exactly matches voxel volume) [S2].
+@@ -43,23 +43,24 @@
+ **Pseudocode:**
+ ```python
+-def generate_voxel_format(splats, args):
+-    # Step 1: Filter cluster (coarse voxelization)
++import numpy as np
++
++def generate_voxel_format(splats, scene_bounds, args):
++    # Step 1: Filter cluster
+     coarse_res = args.filter_cluster_res  # default 1.0
+-    coarse_grid = init_grid(coarse_res)
++    coarse_grid = init_grid(scene_bounds, coarse_res)
+     for s in splats:
+-        gx, gy, gz = world_to_grid(s.pos, coarse_res)
++        gx, gy, gz = world_to_grid(s.pos, coarse_res, scene_bounds)
+         if is_inside(gx, gy, gz, coarse_grid):
+             coarse_grid[gx, gy, gz] = coarse_grid[gx, gy, gz] or (s.opacity > args.filter_cluster_op)
+-    # Keep connected component containing seed_pos
+     seed = args.seed_pos
+-    coarse_grid = keep_connected_component(coarse_grid, seed)
+-    splats = [s for s in splats if is_inside(*world_to_grid(s.pos, coarse_res), coarse_grid)]
++    coarse_grid = keep_connected_component(coarse_grid, seed, coarse_res, scene_bounds)
++    splats = [s for s in splats if is_inside(*world_to_grid(s.pos, coarse_res, scene_bounds), coarse_grid)]
+ 
+     # Step 2: Voxelization
+     voxel_size = args.voxel_size  # default 0.05
+     opacity_cutoff = args.voxel_opacity  # default 0.1
+-    grid = init_grid(voxel_size)
++    grid = init_grid(scene_bounds, voxel_size)
+     for s in splats:
+-        gx, gy, gz = world_to_grid(s.pos, voxel_size)
++        gx, gy, gz = world_to_grid(s.pos, voxel_size, scene_bounds)
+         if is_inside(gx, gy, gz, grid):
+             grid[gx, gy, gz] += s.opacity
+@@ -68,22 +69,25 @@
+     # Step 3: Fill
+     if args.voxel_external_fill:
+-        size = args.external_fill_size  # default 1.6
+-        dilated = morphological_dilate(grid, size)
+-        exterior = np.zeros_like(grid)
++        size_world = args.external_fill_size  # default 1.6
++        size_vox = int(size_world / voxel_size)
++        dilated = morphological_dilate(grid, size_vox)
++        exterior = np.zeros_like(grid, dtype=bool)
+         queue = get_boundary_cells(grid)
+         for p in queue: exterior[p] = True
+         bfs_fill(exterior, dilated, queue)
+-        sgx, sgy, sgz = world_to_grid(seed, voxel_size)
++        sgx, sgy, sgz = world_to_grid(seed, voxel_size, scene_bounds)
+         if exterior[sgx, sgy, sgz]:
+             return grid  # Sanity check: seed reachable from outside, skip fill
+         grid = grid & ~exterior
+     elif args.floor_fill:
+-        size = args.floor_fill_size  # default 1.6
++        size_world = args.floor_fill_size  # default 1.6
++        size_vox = int(size_world / voxel_size)
++        y_min = 0
+         for x in range(grid.shape[0]):
+             for z in range(grid.shape[2]):
+-                for y in range(grid.shape[1]):
++                for y in range(y_min, grid.shape[1]):
+                     if grid[x, y, z]:
+                         break
+-                    if is_surrounded_by_floor(grid, x, y, z, size):
++                    if is_surrounded_by_floor(grid, x, y, z, size_vox):
+                         grid[x, y, z] = True
+ 
+@@ -92,5 +96,5 @@
+         h, r = args.carve_h, args.carve_r
+         navigable = np.zeros_like(grid, dtype=bool)
+-        queue = [world_to_grid(seed, voxel_size)]
++        queue = [world_to_grid(seed, voxel_size, scene_bounds)]
+         navigable[queue[0]] = True
+         while queue:
+@@ -99,5 +103,5 @@
+                 nx, ny, nz = cx + dx, cy + dy, cz + dz
+                 if is_inside(nx, ny, nz, grid) and not navigable[nx, ny, nz]:
+-                    if capsule_distance((nx, ny, nz), seed, h, r, voxel_size) <= 0 and not grid[nx, ny, nz]:
++                    if capsule_distance((nx, ny, nz), seed, h, r, voxel_size, scene_bounds) <= 0 and not grid[nx, ny, nz]:
+                         navigable[nx, ny, nz] = True
+                         queue.append((nx, ny, nz))
+@@ -114,10 +118,17 @@
+     return grid, mesh
+ 
+-# Helper definitions (standard operations)
+-def init_grid(res): return np.zeros((W, H, D), dtype=float)
+-def world_to_grid(pos, res): return int(pos.x/res), int(pos.y/res), int(pos.z/res)
+-def is_inside(gx, gy, gz, grid): return 0 <= gx < grid.shape[0] and 0 <= gy < grid.shape[1] and 0 <= gz < grid.shape[2]
+-def keep_connected_component(grid, seed):
+-    sgx, sgy, sgz = world_to_grid(seed, 1.0)
++# Helper definitions
++def init_grid(bounds, res):
++    dims = [int((bounds.max[i] - bounds.min[i]) / res) for i in range(3)]
++    return np.zeros(dims, dtype=float)
++
++def world_to_grid(pos, res, bounds):
++    return (int((pos.x - bounds.min.x) / res), int((pos.y - bounds.min.y) / res), int((pos.z - bounds.min.z) / res))
++
++def is_inside(gx, gy, gz, grid):
++    return 0 <= gx < grid.shape[0] and 0 <= gy < grid.shape[1] and 0 <= gz < grid.shape[2]
++
++def keep_connected_component(grid, seed, res, bounds):
++    sgx, sgy, sgz = world_to_grid(seed, res, bounds)
+     visited = np.zeros_like(grid, dtype=bool)
+     queue = [(sgx, sgy, sgz)]
+@@ -131,13 +142,15 @@
+                 queue.append((nx, ny, nz))
+     return visited
+-def morphological_dilate(grid, size):
++
++def morphological_dilate(grid, size_vox):
+     dilated = np.zeros_like(grid, dtype=bool)
+     for x, y, z in np.argwhere(grid):
+-        for dx in range(-int(size), int(size)+1):
+-            for dy in range(-int(size), int(size)+1):
+-                for dz in range(-int(size), int(size)+1):
++        for dx in range(-size_vox, size_vox+1):
++            for dy in range(-size_vox, size_vox+1):
++                for dz in range(-size_vox, size_vox+1):
+                     if is_inside(x+dx, y+dy, z+dz, dilated):
+                         dilated[x+dx, y+dy, z+dz] = True
+     return dilated
++
+ def get_boundary_cells(grid):
+     cells = []
+@@ -152,4 +165,5 @@
+             for y in range(grid.shape[1]): cells.append((x, y, z))
+     return cells
++
+ def bfs_fill(exterior, dilated, queue):
+     while queue:
+@@ -160,11 +174,14 @@
+                 exterior[nx, ny, nz] = True
+                 queue.append((nx, ny, nz))
+-def is_surrounded_by_floor(grid, x, y, z, size):
+-    for dx in range(-int(size), int(size)+1):
+-        for dz in range(-int(size), int(size)+1):
+-            if grid[x+dx, 0, z+dz]: return True
++
++def is_surrounded_by_floor(grid, x, y, z, size_vox):
++    for dx in range(-size_vox, size_vox+1):
++        for dz in range(-size_vox, size_vox+1):
++            if is_inside(x+dx, y, z+dz, grid) and grid[x+dx, y, z+dz]: return True
+     return False
+-def capsule_distance(point, seed, h, r, res):
+-    px, py, pz = [p * res for p in point]
++
++def capsule_distance(point, seed, h, r, res, bounds):
++    # Standard capsule distance check [G]
++    px, py, pz = [p * res + bounds.min[i] for i, p in enumerate(point)]
+     sx, sy, sz = seed
+     dx, dz = abs(px - sx), abs(pz - sz)
+@@ -172,4 +189,5 @@
+     dist_y = max(0, abs(py - sy) - h / 2)
+     return np.sqrt(dist_xy**2 + dist_y**2)
++
+ neighbors_6 = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]
+ ```

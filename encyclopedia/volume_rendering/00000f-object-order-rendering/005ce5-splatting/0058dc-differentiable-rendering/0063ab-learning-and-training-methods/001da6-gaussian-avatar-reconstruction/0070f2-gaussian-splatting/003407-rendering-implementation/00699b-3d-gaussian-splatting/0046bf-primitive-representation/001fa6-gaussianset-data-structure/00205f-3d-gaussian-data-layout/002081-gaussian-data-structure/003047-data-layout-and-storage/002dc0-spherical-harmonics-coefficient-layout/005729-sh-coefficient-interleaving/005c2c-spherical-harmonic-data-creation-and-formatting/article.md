@@ -1,0 +1,176 @@
+# Spherical Harmonic Data Creation and Formatting
+
+Also called: CreateSHDataJob, SH Data Encoding, SH Format Conversion
+
+## Overview
+This method converts raw spherical harmonic (SH) coefficients from input splat data into a specific binary format for storage in a Gaussian Splat asset [S1, unofficial]. It supports multiple encoding formats (`Float32`, `Float16`, `Norm11`, `Norm6`) to balance precision and memory usage [S1, unofficial]. It differs from sibling methods by focusing on the final serialization step into a contiguous byte array, rather than the interleaving of coefficients or the optimization of the splat parameters themselves.
+
+## How it works
+**Inputs and Outputs:**
+- Input: `NativeArray<InputSplatData>` containing splat data with fields `sh1` through `shF` (15 coefficients per splat) [S1, unofficial].
+- Output: `NativeArray<byte>` containing the serialized SH data [S1, unofficial].
+- Format Selector: `GaussianSplatAsset.SHFormat` enum defining the target encoding [S1, unofficial].
+
+**Data Structures:**
+The output is structured as an array of `SHTableItem` variants, depending on the format:
+- `SHTableItemFloat32`: Contains 15 `float3` fields (`sh1` to `shF`) and one `float3` padding field (`shPadding`) [S1, unofficial].
+- `SHTableItemFloat16`: Contains 15 `half3` fields (`sh1` to `shF`) and one `float3` padding field (`shPadding`) [S1, unofficial].
+- `SHTableItemNorm11`: Contains 15 `uint` fields (encoded via `EncodeFloat3ToNorm11`) and one `uint` padding field (`shPadding`) [S1, unofficial].
+- `SHTableItemNorm6`: Contains 15 `uint` fields (encoded via `EncodeFloat3ToNorm565`) and one `uint` padding field (`shPadding`) [S1, unofficial].
+
+**Steps:**
+1. Determine if clustered SH data is available. If `clusteredSHs` exists, calculate size as `clusteredSHs.Length * SizeOf<SHTableItemFloat16>`, create a byte array, copy `clusteredSHs` reinterpreted as bytes, and return [S1, unofficial].
+2. If no clustered data, calculate `dataLen` using `GaussianSplatAsset.CalcSHDataSize(inputSplats.Length, shFormat)` [S1, unofficial].
+3. Create a `NativeArray<byte> data` of size `dataLen` [S1, unofficial].
+4. Instantiate a `CreateSHDataJob` with `m_Input`, `m_Format`, and `m_Output` (the byte array) [S1, unofficial].
+5. Schedule the job with `job.Schedule(inputSplats.Length, 8192)` [S1, unofficial].
+6. Complete the job and copy `data` to a result byte array [S1, unofficial].
+7. Dispose of the `NativeArray<byte>` and return the result [S1, unofficial].
+
+**Job Execution (Parallel Step):**
+For each index in the input array:
+1. Read `splat = m_Input[index]` [S1, unofficial].
+2. Switch on `m_Format`:
+   - **Float32**: Create `SHTableItemFloat32 res`. Copy `splat.sh1` through `splat.shF` to `res.sh1` through `res.shF`. Set `res.shPadding = default`. Write `res` to `m_Output[index]` [S1, unofficial].
+   - **Float16**: Cast `splat.sh1` through `splat.shF` to `half3`. Copy to `SHTableItemFloat16`. Set `shPadding = default`. Write to output [S1, unofficial].
+   - **Norm11**: Encode `splat.sh1` through `splat.shF` using `EncodeFloat3ToNorm11`. Copy to `SHTableItemNorm11`. Write to output [S1, unofficial].
+   - **Norm6**: Encode `splat.sh1` through `splat.shF` using `EncodeFloat3ToNorm565`. Copy to `SHTableItemNorm6`. Set `shPadding = default`. Write to output [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def CreateSHData(inputSplats: NativeArray, shFormat: SHFormat, clusteredSHs: Optional[NativeArray] = None) -> bytes:
+    if clusteredSHs is not None:
+        item_size = sizeof(SHTableItemFloat16)
+        size = len(clusteredSHs) * item_size
+        result = bytearray(size)
+        # Reinterpret clusteredSHs as bytes and copy
+        for i in range(len(clusteredSHs)):
+            src_bytes = reinterpret_as_bytes(clusteredSHs[i])
+            result[i*item_size:(i+1)*item_size] = src_bytes
+        return result
+
+    data_len = GaussianSplatAsset.CalcSHDataSize(len(inputSplats), shFormat)
+    output_data = NativeArray[byte](data_len)
+    
+    job = CreateSHDataJob()
+    job.m_Input = inputSplats
+    job.m_Format = shFormat
+    job.m_Output = output_data
+    
+    # Schedule with batch size 8192
+    job.Schedule(len(inputSplats), 8192)
+    job.Complete()
+    
+    result = bytearray(output_data)
+    output_data.Dispose()
+    return result
+
+class CreateSHDataJob:
+    def Execute(self, index: int):
+        splat = self.m_Input[index]
+        output_ptr = self.m_Output.GetUnsafePtr()
+        
+        if self.m_Format == SHFormat.Float32:
+            res = SHTableItemFloat32()
+            res.sh1 = splat.sh1
+            res.sh2 = splat.sh2
+            res.sh3 = splat.sh3
+            res.sh4 = splat.sh4
+            res.sh5 = splat.sh5
+            res.sh6 = splat.sh6
+            res.sh7 = splat.sh7
+            res.sh8 = splat.sh8
+            res.sh9 = splat.sh9
+            res.shA = splat.shA
+            res.shB = splat.shB
+            res.shC = splat.shC
+            res.shD = splat.shD
+            res.shE = splat.shE
+            res.shF = splat.shF
+            res.shPadding = 0.0
+            output_ptr[index] = res
+            
+        elif self.m_Format == SHFormat.Float16:
+            res = SHTableItemFloat16()
+            res.sh1 = half3(splat.sh1)
+            res.sh2 = half3(splat.sh2)
+            res.sh3 = half3(splat.sh3)
+            res.sh4 = half3(splat.sh4)
+            res.sh5 = half3(splat.sh5)
+            res.sh6 = half3(splat.sh6)
+            res.sh7 = half3(splat.sh7)
+            res.sh8 = half3(splat.sh8)
+            res.sh9 = half3(splat.sh9)
+            res.shA = half3(splat.shA)
+            res.shB = half3(splat.shB)
+            res.shC = half3(splat.shC)
+            res.shD = half3(splat.shD)
+            res.shE = half3(splat.shE)
+            res.shF = half3(splat.shF)
+            res.shPadding = 0.0
+            output_ptr[index] = res
+            
+        elif self.m_Format == SHFormat.Norm11:
+            res = SHTableItemNorm11()
+            res.sh1 = EncodeFloat3ToNorm11(splat.sh1)
+            res.sh2 = EncodeFloat3ToNorm11(splat.sh2)
+            res.sh3 = EncodeFloat3ToNorm11(splat.sh3)
+            res.sh4 = EncodeFloat3ToNorm11(splat.sh4)
+            res.sh5 = EncodeFloat3ToNorm11(splat.sh5)
+            res.sh6 = EncodeFloat3ToNorm11(splat.sh6)
+            res.sh7 = EncodeFloat3ToNorm11(splat.sh7)
+            res.sh8 = EncodeFloat3ToNorm11(splat.sh8)
+            res.sh9 = EncodeFloat3ToNorm11(splat.sh9)
+            res.shA = EncodeFloat3ToNorm11(splat.shA)
+            res.shB = EncodeFloat3ToNorm11(splat.shB)
+            res.shC = EncodeFloat3ToNorm11(splat.shC)
+            res.shD = EncodeFloat3ToNorm11(splat.shD)
+            res.shE = EncodeFloat3ToNorm11(splat.shE)
+            res.shF = EncodeFloat3ToNorm11(splat.shF)
+            res.shPadding = 0
+            output_ptr[index] = res
+            
+        elif self.m_Format == SHFormat.Norm6:
+            res = SHTableItemNorm6()
+            res.sh1 = EncodeFloat3ToNorm565(splat.sh1)
+            res.sh2 = EncodeFloat3ToNorm565(splat.sh2)
+            res.sh3 = EncodeFloat3ToNorm565(splat.sh3)
+            res.sh4 = EncodeFloat3ToNorm565(splat.sh4)
+            res.sh5 = EncodeFloat3ToNorm565(splat.sh5)
+            res.sh6 = EncodeFloat3ToNorm565(splat.sh6)
+            res.sh7 = EncodeFloat3ToNorm565(splat.sh7)
+            res.sh8 = EncodeFloat3ToNorm565(splat.sh8)
+            res.sh9 = EncodeFloat3ToNorm565(splat.sh9)
+            res.shA = EncodeFloat3ToNorm565(splat.shA)
+            res.shB = EncodeFloat3ToNorm565(splat.shB)
+            res.shC = EncodeFloat3ToNorm565(splat.shC)
+            res.shD = EncodeFloat3ToNorm565(splat.shD)
+            res.shE = EncodeFloat3ToNorm565(splat.shE)
+            res.shF = EncodeFloat3ToNorm565(splat.shF)
+            res.shPadding = 0
+            output_ptr[index] = res
+```
+
+**Parameters:**
+- `m_Format`: The encoding format (`Float32`, `Float16`, `Norm11`, `Norm6`) [S1, unofficial].
+- Batch size for job scheduling: 8192 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Precision loss in `Norm11` and `Norm6` formats may affect visual quality for high-dynamic-range SH coefficients [S1, unofficial].
+- The `shPadding` field must be initialized to default values to ensure memory alignment and avoid undefined behavior in downstream readers [S1, unofficial].
+- If `clusteredSHs` is present, the method bypasses the job and assumes `Float16` format for the clustered data [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of splats, $O(N)$, where $N$ is the number of input splats [S1, unofficial].
+- **Memory Complexity:** Linear with respect to the number of splats, $O(N)$, for the output byte array [S1, unofficial].
+- **Performance:** The use of a compute job with a batch size of 8192 allows for parallel processing on the GPU, improving performance for large datasets [S1, unofficial].
+- **Strengths:** Supports multiple formats for flexibility in precision vs. memory trade-offs [S1, unofficial].
+- **Limitations:** The method is specific to the Unity Gaussian Splatting implementation and may not be directly portable to other engines without adaptation [S1, unofficial].
+
+## Background
+This method is part of the Unity Gaussian Splatting implementation by World Labs [S1, unofficial]. It is used to serialize spherical harmonic coefficients for efficient storage and rendering in real-time applications [S1, unofficial].
+
+## Sources
+[S1] nigelhartman/worldlabs_unity, https://github.com/nigelhartman/worldlabs_unity, fetched 2026-10-27 (unofficial)

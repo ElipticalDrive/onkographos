@@ -1,0 +1,25 @@
+# Multiresolution and Adaptive Extraction
+
+
+## Overview
+This family covers methods that extract isosurfaces from hierarchical volume data by dynamically adjusting extraction resolution to balance computational cost and visual fidelity [G]. It sets itself apart from fixed-resolution approaches by using frame-timing feedback to modulate detail [7457-adaptive-minimum-projected-size-adjustment.md], omitting geometric reconnection to maximize display rates [7512-non-reconnected-multiresolution-isosurfacing.md], or employing oracle-driven traversal with explicit crack patching to guarantee watertightness [11830-adaptive-multiresolution-extraction-with-oracle.md].
+
+## Shared principles
+All methods in this family operate on a discretized domain, typically a regular grid (Cartesian, octree, or tetrahedral) where each cell contains scalar values or occupancy states at its vertices or centers [G]. For detailed traversal, surface determination, and mesh coherence mechanisms, see [Surface extraction](29-surface-extraction.md).
+
+## Subtopics
+
+### [Adaptive Minimum Projected Size Adjustment](7457-adaptive-minimum-projected-size-adjustment.md)
+A dynamic level-of-detail control mechanism that adjusts the minimum projected size of surface elements frame-to-frame based on measured rendering times. It differs from distance-based LOD by using a cubic weighting of time deviations to prevent oscillation and maintain target framerates during interaction. Choose this when interactive performance stability is prioritized over absolute geometric consistency across frames.
+
+### [Non-reconnected Multiresolution Isosurfacing](7512-non-reconnected-multiresolution-isosurfacing.md)
+A surface extraction method that generates independent surface primitives per cell without enforcing geometric connectivity between adjacent cells of different resolutions. It solves the overhead of neighbor tracking by accepting visual cracks, relying on sufficient polygon density to make gaps negligible. Choose this for real-time applications where minor gaps are acceptable and maximum display rates are critical.
+
+### [Adaptive Multiresolution Extraction with Oracle](11830-adaptive-multiresolution-extraction-with-oracle.md)
+A technique that adaptively extracts meshes from coarser-resolution octree nodes using an oracle structure to manage level of detail and patch cracks at resolution junctions. It differs from leaf-only traversal by exploiting multiresolution data to process higher-resolution volumes at real-time rates while guaranteeing continuity. Choose this when a watertight, crack-free mesh is required at high performance levels.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] Notes on Multiresolution and Adaptive Extraction, provided in prompt.

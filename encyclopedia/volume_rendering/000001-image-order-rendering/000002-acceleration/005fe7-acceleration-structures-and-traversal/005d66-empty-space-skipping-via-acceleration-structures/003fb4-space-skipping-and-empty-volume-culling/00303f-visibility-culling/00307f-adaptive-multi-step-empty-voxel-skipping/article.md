@@ -1,0 +1,133 @@
+# Adaptive Multi-Step Empty Voxel Skipping
+
+Also called: Improved Ray Casting with Empty Voxel Skipping and Multi-Step Length, Space leap empty voxel ray-casting algorithm, Three-step jump algorithm
+
+## Overview
+Adaptive Multi-Step Empty Voxel Skipping is an acceleration technique for direct volume rendering that combines space leaping (empty voxel skipping) with adaptive variable step-size sampling [S1]. It solves the problem of redundant computation in large datasets containing significant empty space, such as medical CT scans, by bypassing empty regions entirely and adjusting sampling density based on local voxel occupancy [S1]. Unlike traditional equidistant ray casting, this method reduces computational overhead without altering the input data structure [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset (e.g., CT scan), camera parameters, and ray generation state [S1].
+*   **Output:** A 2D image with accumulated color and opacity [S1].
+
+**Data Structures:**
+The algorithm is implemented by inheriting the VTK base class `vtkVolumeRayCastingFunction` to create a new class `vtkMyVolumeRayCastFunction` that encapsulates the improved logic [S1]. The core data structure tracks the ray's current position along the ray and its current operational mode [S1].
+
+**Ray States:**
+The ray operates in one of two mutually exclusive states [S1]:
+1.  **Search State:** The ray traverses empty voxels to find the next non-empty voxel without compositing [S1].
+2.  **Accumulation State:** The ray samples non-empty voxels, accumulating color and transparency [S1].
+
+**Algorithm Steps:**
+1.  **Pre-check Validity:** Detect if any non-empty voxels exist along the ray direction [S1]. If no non-empty voxels are detected, mark the ray as invalid and skip all operations, proceeding to the next ray [S1].
+2.  **Initialize Ray State:** Set the ray to the Search State [S1].
+3.  **Adaptive Step Selection:** Determine the sampling step length based on local voxel density at the current ray position [S1]. If the area contains many empty voxels, set a longer step value [S1]. If voxel density is high, set a shorter step value to increase accuracy [S1].
+4.  **Traverse and Compositing Loop:** While the ray is within the volume bounds, sample the current voxel [S1]. If in Search State and the voxel is empty, advance the ray position by the current step length and repeat [S1]. If in Search State and the voxel is non-empty, switch to Accumulation State [S1]. If in Accumulation State, sample the voxel, accumulate color and transparency using front-to-back compositing, advance the ray position by the step length, and re-evaluate local density to adjust the step length for the next iteration [S1].
+5.  **Resample and Synthesize:** Perform resampling and compositing only on the identified non-empty voxels using the selected step length, skipping invalid computations on empty regions [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_ray(ray_origin, ray_direction, volume_data, volume_bounds):
+    # Check if ray intersects volume bounds
+    if not intersects_volume(ray_origin, ray_direction, volume_bounds):
+        return (0.0, 0.0, 0.0, 0.0)
+
+    # Pre-check: Detect if any non-empty voxels exist along the ray direction
+    # The sources do not specify the exact acceleration structure for this check [S1].
+    if not has_non_empty_voxels_along_ray(ray_origin, ray_direction, volume_bounds, volume_data):
+        return (0.0, 0.0, 0.0, 0.0)
+
+    # Initialize ray state
+    current_pos = ray_origin
+    ray_state = "SEARCH"  # SEARCH or ACCUMULATE
+    accumulated_color = (0.0, 0.0, 0.0)
+    accumulated_opacity = 0.0
+
+    # Initial step length (default or derived from global density)
+    step_length = get_initial_step_length(volume_data)
+
+    while is_inside_volume(current_pos, volume_bounds):
+        voxel_value = sample_voxel(current_pos, volume_data)
+
+        if ray_state == "SEARCH":
+            if is_empty(voxel_value):
+                # Skip empty voxel
+                current_pos = current_pos + ray_direction * step_length
+                step_length = adaptive_step_length(current_pos, volume_data)
+            else:
+                # Found non-empty voxel, switch to accumulation
+                ray_state = "ACCUMULATE"
+                # Fall through to accumulation logic for this voxel
+
+        if ray_state == "ACCUMULATE":
+            color, alpha = transfer_function(voxel_value)
+            # Front-to-back compositing
+            accumulated_color = accumulated_color + (color * alpha * (1.0 - accumulated_opacity))
+            accumulated_opacity = accumulated_opacity + (alpha * (1.0 - accumulated_opacity))
+
+            # Advance ray and adjust step length based on new position's density
+            current_pos = current_pos + ray_direction * step_length
+            step_length = adaptive_step_length(current_pos, volume_data)
+
+    return accumulated_color
+
+# Helper functions not specified in the sources [S1]:
+def intersects_volume(origin, direction, bounds):
+    # Standard ray-AABB intersection test [G]
+    pass
+
+def has_non_empty_voxels_along_ray(origin, direction, bounds, data):
+    # The sources do not specify the exact acceleration structure for this check [S1].
+    pass
+
+def get_initial_step_length(data):
+    # The sources do not specify the exact initialization logic [S1].
+    pass
+
+def is_inside_volume(pos, bounds):
+    # Standard bounds check [G]
+    pass
+
+def sample_voxel(pos, data):
+    # Standard trilinear/trilinear interpolation or direct lookup [G]
+    pass
+
+def is_empty(value):
+    # Standard threshold comparison [G]
+    pass
+
+def transfer_function(value):
+    # Standard opacity/color mapping [G]
+    pass
+
+def adaptive_step_length(pos, data):
+    # The sources do not specify the exact density evaluation function [S1].
+    pass
+```
+
+**Parameters:**
+*   **Step Length ($s$):** A variable step size. It is not fixed [S1]. Typical values are not given in the sources [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Porphyritic Artifacts:** The combination of empty voxel jumping and uneven (adaptive) sampling can cause a patchy or mottled appearance in the rendered image, particularly noticeable during rotation interactions [S1].
+*   **Boundary Conditions:** Rays that do not intersect the volume or pass entirely through empty space must be handled efficiently to avoid unnecessary computation [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Reduces the number of samples per ray by skipping empty voxels [S1]. The complexity depends on the sparsity of the volume [S1].
+*   **Memory Complexity:** Requires storage for the volume data and potentially auxiliary structures for empty voxel detection [S1]. The VTK implementation inherits from `vtkVolumeRayCastingFunction`, implying minimal additional memory overhead beyond the base class [S1].
+*   **Measured Performance:** Tested on Windows 7, Visual Studio 2010, VTK 5.10.1, using virtual human head CT scan data [S1]. Rendering speed was measured by rotation time [S1]. The method achieved significant speedup compared to traditional ray casting [S1].
+*   **Strengths:** Reduces computational overhead without changing the input 2D sequence images [S1]. Maintains visual quality almost identical to the original method, despite artifacts [S1].
+*   **Limitations:** Can introduce visual artifacts (porphyritic appearance) due to uneven sampling [S1].
+*   **When to Use:** Suitable for large-volume datasets with significant empty space, such as medical CT scans [S1].
+*   **When Not to Use:** Not given in the sources.
+
+## Background
+*   **Origin:** The method was proposed in a paper titled "The research of improved ray casting algorithm on VTK" [S1].
+*   **History:** It builds upon the traditional ray-casting algorithm proposed by Marc Levoy [S1]. The algorithm was implemented using the Visualization Toolkit (VTK) [S1].
+*   **Development:** The method combines space leaping (empty voxel skipping) with adaptive multi-step length sampling [S1]. It was tested on VTK 5.10.1 [S1].
+*   **Usage:** Primarily used in medical image visualization, specifically for CT scan data [S1].
+
+## Sources
+[S1] The research of improved ray casting algorithm on VTK, https://doi.org/10.2991/iccsae-15.2016.172, fetched 2026-10-26

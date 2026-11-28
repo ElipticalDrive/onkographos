@@ -1,0 +1,95 @@
+# High-Frequency Aware Loss
+Also called: LHF, Shallow VGG Loss
+## Overview
+High-Frequency Aware Loss (LHF) is a perceptual regularization term designed to recover high-frequency details in rendered images while avoiding the texture distortion common in deeper perceptual losses [S1]. It sets itself apart from standard VGG-based perceptual losses by restricting feature extraction to the first block of the network, thereby preserving fine structural details without enforcing semantic texture consistency that may conflict with the ground truth [S1]. It builds on [Perceptual Loss Training](2000-perceptual-loss-training.md) by providing a differentiable proxy for high-frequency similarity [G].
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** $G_i$ (ground truth image patch after alignment), $R$ (rendered image patch) [S1].
+*   **Output:** Scalar loss value $L_{HF}$ [S1].
+
+**Data Structures:**
+*   **Feature Extractor ($F$):** The first block of a pre-trained VGG-19 model, consisting of convolutional layers and ReLU activations, explicitly excluding the max-pooling layer that follows this block in the standard architecture [S1].
+*   **Feature Maps:** The output of $F$ is a tensor of dimensions $C \times W \times H$, where $C$ is the number of channels, and $W, H$ are the width and height of the feature map [S1].
+
+**Parameters:**
+*   $w$: Weight for the LHF term in the total loss function (value not specified in sources) [S1].
+*   $F$: Pre-trained VGG-19 weights, kept frozen during optimization [S1].
+
+**Steps:**
+1.  Extract features from the ground truth patch $G_i$ using the shallow VGG block: $F(G_i)$ [S1].
+2.  Extract features from the rendered patch $R$ using the same block: $F(R)$ [S1].
+3.  Compute the squared Euclidean distance between the feature maps [S1].
+4.  Normalize by the total number of elements in the feature map ($C \times W \times H$) and divide by 2 [S1].
+
+**Formula:**
+$$L_{HF}(G_i, R) = \frac{1}{2CW H} \|F(G_i) - F(R)\|_2^2$$ [S1]
+
+Where:
+*   $\| \cdot \|_2^2$ denotes the squared L2 norm (sum of squared differences) [S1].
+*   $C, W, H$ are the dimensions of the extracted feature maps [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def high_frequency_aware_loss(ground_truth_patch, rendered_patch, vgg_block):
+    """
+    Computes the High-Frequency Aware Loss using the first block of VGG-19.
+    
+    Args:
+        ground_truth_patch (list of lists of lists): Ground truth image patch G_i.
+        rendered_patch (list of lists of lists): Rendered image patch R.
+        vgg_block (callable): The first block of a pre-trained VGG-19 model 
+                              (convolutions + ReLUs, no max-pooling).
+                              
+    Returns:
+        float: Scalar loss value L_HF.
+    """
+    # Extract features using the shallow VGG block
+    # F(G_i) and F(R) are 3D structures of shape (C, W, H)
+    features_gt = vgg_block(ground_truth_patch)
+    features_rendered = vgg_block(rendered_patch)
+    
+    # Compute squared L2 distance between feature maps
+    squared_diff = [
+        [
+            (features_gt[c][w][h] - features_rendered[c][w][h]) ** 2
+            for h in range(len(features_gt[0][0]))
+        ]
+        for w in range(len(features_gt[0]))
+        for c in range(len(features_gt))
+    ]
+    
+    # Sum over all elements (C, W, H)
+    sum_squared_diff = sum(sum(row) for row in squared_diff)
+    
+    # Normalize by 2 * C * W * H
+    c = len(features_gt)
+    w = len(features_gt[0])
+    h = len(features_gt[0][0])
+    normalization_factor = 2.0 * c * w * h
+    
+    loss = sum_squared_diff / normalization_factor
+    
+    return loss
+```
+
+**Edge Cases and Pitfalls:**
+*   **Misalignment:** The loss assumes $G_i$ and $R$ are aligned; misalignment prevents the recovery of high-frequency details, as the feature comparison penalizes structural shifts rather than texture errors [S1].
+*   **Texture Distortion:** Using deeper VGG blocks can distort actual textures; restricting to the first block mitigates this [S1].
+## Subtopics
+
+### [VGG Loss for Image Patches](7699-vgg-loss-for-image-patches.md)
+A differentiable loss function that measures perceptual similarity by comparing high-level features of rendered and reference image patches.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Improves high-frequency details while preserving real textures, addressing the smoothness issues of pixel-wise MSE losses [S1].
+*   **Limitations:** Sensitive to misalignment between ground truth and rendered patches [S1].
+*   **When to use:** When optimizing radiance fields or images where high-frequency detail recovery is critical and standard MSE loss results in overly smooth outputs [S1].
+*   **When not to use:** Not given in the sources.
+## Background
+The High-Frequency Aware Loss was introduced in the AligNeRF paper [S1]. It modifies the original perceptual loss proposed by Johnson et al. by using only the output of the first block of a pre-trained VGG-19 model, before the max-pooling layer [S1]. This modification was motivated by observations in image restoration tasks where deeper perceptual losses distorted actual textures [S1]. The loss is typically combined with a patch-based MSE loss to handle misalignment, replacing the standard per-pixel MSE loss [S1].
+## Sources
+[S1] AligNeRF: High-Fidelity Neural Radiance Fields via Alignment-Aware Training, https://doi.org/10.1109/cvpr52729.2023.00013, fetched 2026-10-26

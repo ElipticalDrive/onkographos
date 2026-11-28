@@ -1,0 +1,144 @@
+--- v002.md
++++ v003.md
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-The input stream consists of the replicated vertex data paired with a vertex ID (0–3) [S1, unofficial].
++The input stream consists of the replicated vertex data paired with a vertex ID (0–3) [S1, unofficial]. Each vertex is stored as a 4D vector $(x, y, z, w)$ [S1, unofficial].
+ 
+ **Steps:**
+@@ -20,59 +20,68 @@
+ 4.  **Output Generation:** Emit the calculated vertices as triangles based on the determined topology [S1, unofficial].
+ 
+-**Pitfalls:**
++**Formulas:**
++*   Plane evaluation: $d_i = n_x v_{i,x} + n_y v_{i,y} + n_z v_{i,z} + n_w v_{i,w} + d$ [S1, unofficial].
++*   Intersection parameter: $t = \frac{d_i}{d_i - d_j}$ [S1, unofficial].
++*   Intersection point: $\mathbf{p}_{3D} = \mathbf{v}_i + t(\mathbf{v}_j - \mathbf{v}_i)$, projected to 3D by discarding the $w$ component [S1, unofficial].
++*   Symbols: $\mathbf{n} = (n_x, n_y, n_z, n_w)$ is the 4D plane normal, $\mathbf{v}_i = (v_{i,x}, v_{i,y}, v_{i,z}, v_{i,w})$ is the $i$-th vertex, $d$ is the plane offset, $d_i$ and $d_j$ are signed distances for vertices $i$ and $j$, and $t \in [0, 1]$ is the interpolation factor along the edge [S1, unofficial].
++
++**Parameters:**
++*   Typical values: Not given in the sources [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
+ *   **Branching:** The algorithm involves many conditional branches based on vertex signs to determine topology and output vertices, which hurts GPU parallel efficiency [S1, unofficial].
+ *   **Mitigation:** Use a pre-computed lookup table (texture) to determine the output topology and avoid conditional branches in the shader [S1, unofficial].
++*   **Precision:** Degenerate cases where $d_i = d_j$ cause division by zero in the interpolation factor; these occur when an edge lies exactly on the slicing plane and should be handled with a small epsilon or treated as coincident [G].
++*   **Boundaries:** Vertices exactly on the plane ($d_i = 0$) are classified as positive to ensure consistent topology mapping [G].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_cross_section(tetrahedra, plane_normal, plane_dist):
++def vertex_shader_slice(tet_vertices, plane_normal, plane_dist):
+     """
+-    Computes 3D cross-sections of 4D tetrahedra against a slicing hyperplane.
+-    tetrahedra: list of 4-tuples, each containing 4D vectors (x, y, z, w)
++    Simulates the Vertex Shader processing for one 4D tetrahedron.
++    tet_vertices: list of 4 vectors, each (x, y, z, w)
+     plane_normal: 4D vector (nx, ny, nz, nw)
+-    plane_dist: float (d in nx*x + ny*y + nz*z + nw*w + d = 0)
+-    Returns: list of triangles, each triangle is a list of 3D vectors (x, y, z)
++    plane_dist: float d
++    Returns: list of triangles, each triangle is list of 3D vectors (x, y, z)
+     """
++    # Step 1: Evaluate plane equation for each vertex
++    signs = 0
++    distances = []
++    for i, v in enumerate(tet_vertices):
++        d = plane_normal[0]*v[0] + plane_normal[1]*v[1] + plane_normal[2]*v[2] + plane_normal[3]*v[3] + plane_dist
++        distances.append(d)
++        if d >= 0:
++            signs |= (1 << i)
++
++    # Step 2: Lookup topology from pre-computed table
++    # Maps bitmask to list of edge indices that form the intersection polygon
++    # Edges are ordered: (0,1), (0,2), (0,3), (1,2), (1,3), (2,3) -> indices 0..5
++    topology_table = {
++        0b0000: [], 0b1111: [],
++        0b0001: [0, 1, 3], 0b0010: [0, 2, 4], 0b0100: [1, 2, 5], 0b1000: [3, 4, 5],
++        0b0011: [0, 2, 3, 4], 0b0101: [0, 1, 4, 5], 0b1001: [0, 3, 1, 5], 0b1100: [2, 3, 4, 5],
++        0b0110: [1, 3, 2, 4], 0b1010: [3, 5, 4, 2], 0b1101: [4, 5, 0, 3], 0b1011: [5, 0, 1, 4]
++    }
++    edge_indices = topology_table.get(signs, [])
++    if not edge_indices:
++        return []
++
++    # Step 3: Compute intersection points on crossing edges
++    intersections = []
++    edge_map = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
++    for e_idx in edge_indices:
++        v1_idx, v2_idx = edge_map[e_idx]
++        d1, d2 = distances[v1_idx], distances[v2_idx]
++        t = d1 / (d1 - d2)
++        p4 = [tet_vertices[v1_idx][k] + t * (tet_vertices[v2_idx][k] - tet_vertices[v1_idx][k]) for k in range(4)]
++        intersections.append(p4[:3])
++
++    # Step 4: Output triangles
+     triangles = []
+-    # Pre-computed topology lookup: maps sign bitmask to intersection point indices
+-    # 0 = negative side, 1 = positive side. Bit i corresponds to vertex i.
+-    # Standard combinatorial mapping for 1v3 (triangle) and 2v2 (quad) cases.
+-    topology_lookup = {
+-        0b0000: [], 0b1111: [],
+-        0b0001: [[0, 1, 2]], 0b0010: [[1, 0, 2]], 0b0100: [[2, 0, 1]], 0b1000: [[3, 1, 2]],
+-        0b0011: [[0, 1, 2, 3]], 0b0101: [[0, 2, 1, 3]], 0b1001: [[0, 3, 1, 2]], 0b1100: [[0, 1, 3, 2]],
+-        # Remaining permutations follow the same pattern
+-    }
+-
+-    for tet in tetrahedra:
+-        signs = 0
+-        distances = []
+-        for i, v in enumerate(tet):
+-            d = plane_normal[0]*v[0] + plane_normal[1]*v[1] + plane_normal[2]*v[2] + plane_normal[3]*v[3] + plane_dist
+-            distances.append(d)
+-            if d >= 0:
+-                signs |= (1 << i)
+-
+-        topology = topology_lookup.get(signs, [])
+-        if not topology:
+-            continue
+-
+-        # Calculate intersection points on crossing edges
+-        intersections = []
+-        for i in range(4):
+-            for j in range(i + 1, 4):
+-                # Sign difference guarantees non-zero denominator
+-                if (distances[i] >= 0) != (distances[j] >= 0):
+-                    t = distances[i] / (distances[i] - distances[j])
+-                    p4 = [tet[i][k] + t * (tet[j][k] - tet[i][k]) for k in range(4)]
+-                    intersections.append(p4[:3])
+-
+-        for tri_indices in topology:
+-            if len(tri_indices) == 3:
+-                triangles.append([intersections[k] for k in tri_indices])
+-            elif len(tri_indices) == 4:
+-                # Quad decomposed into two triangles
+-                triangles.append([intersections[tri_indices[0]], intersections[tri_indices[1]], intersections[tri_indices[2]]])
+-                triangles.append([intersections[tri_indices[0]], intersections[tri_indices[2]], intersections[tri_indices[3]]])
++    if len(edge_indices) == 3:
++        triangles.append(intersections)
++    elif len(edge_indices) == 4:
++        triangles.append([intersections[0], intersections[1], intersections[2]])
++        triangles.append([intersections[0], intersections[2], intersections[3]])
+     return triangles
+ ```
+@@ -81,14 +90,14 @@
+ 
+ ### 4D Rasterization Pipeline Adaptation
+-A technique to render 4D cross-sections on standard 3D GPUs by adapting the coordinate system [S1, unofficial]. It uses a 5D homogeneous coordinate system conceptually, but implements it using 4D vectors and a separate float to handle depth and perspective [S1, unofficial]. It is chosen when rendering on hardware that lacks native 5D support [S1, unofficial]. Steps: Transform 4D vertices to 5D homogeneous coordinates. Since `vec5` is unavailable, store the 5th component (depth) in a separate float variable and the first 4 components in a `vec4` [S1, unofficial]. If the slicing plane is perpendicular to a coordinate axis, discard the coordinate corresponding to that axis (as it is constant for the slice). Reduce the homogeneous vector to 4D [S1, unofficial]. Pass the resulting 4D vector to the Vertex Shader. The first 3 components are treated as 3D screen position, the 4th component is used for depth testing (Z-buffer), and the 4th component is also used for perspective division (w-component) [S1, unofficial].
++A technique to render 4D cross-sections on standard 3D GPUs by adapting the coordinate system [S1, unofficial]. It uses a 5D homogeneous coordinate system conceptually, but implements it using 4D vectors and a separate float to handle depth and perspective [S1, unofficial]. It is chosen when rendering on hardware that lacks native 5D support [S1, unofficial]. Steps: Transform 4D vertices to 5D homogeneous coordinates [S1, unofficial]. Since `vec5` is unavailable, store the 5th component (depth) in a separate float variable and the first 4 components in a `vec4` [S1, unofficial]. If the slicing plane is perpendicular to a coordinate axis, discard the coordinate corresponding to that axis (as it is constant for the slice) [S1, unofficial]. Reduce the homogeneous vector to 4D [S1, unofficial]. Pass the resulting 4D vector to the Vertex Shader [S1, unofficial]. The first 3 components are treated as 3D screen position, the 4th component is used for depth testing (Z-buffer), and the 4th component is also used for perspective division (w-component) [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+ *   **Performance:** Efficient on GPUs with strong vertex processing capabilities, but may suffer from branch divergence due to the conditional logic required for topology determination [S1, unofficial].
+ *   **Strengths:** Simple implementation, no need for Geometry Shader support, compatible with WebGL and WebGPU which lack Geometry Shader support [S1, unofficial].
+-*   **Limitations:** Data replication (4x vertex data) increases memory bandwidth usage. Branching can reduce parallel efficiency [S1, unofficial].
++*   **Limitations:** Data replication (4x vertex data) increases memory bandwidth usage [S1, unofficial]. Branching can reduce parallel efficiency [S1, unofficial].
+ *   **When to use:** When targeting platforms without Geometry Shader support (e.g., WebGL, WebGPU) or when simplicity of implementation is prioritized over memory efficiency [S1, unofficial].
+-*   **When not to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources [S1, unofficial].
+ 
+ ## Background

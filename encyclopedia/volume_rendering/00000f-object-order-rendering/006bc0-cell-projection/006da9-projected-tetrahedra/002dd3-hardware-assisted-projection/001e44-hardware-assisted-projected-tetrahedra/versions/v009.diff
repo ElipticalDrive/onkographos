@@ -1,0 +1,210 @@
+--- v008.md
++++ v009.md
+@@ -1,19 +1,17 @@
+ # Hardware-Assisted Projected Tetrahedra
+ 
+-Also called: CellFast algorithm, HAPT, Hardware CellFast
++Also called: CellFast algorithm, Hardware CellFast
+ 
+ ## Overview
+-Hardware-Assisted Projected Tetrahedra (HAPT) is a flexible, highly efficient volume rendering method that adapts the original Projected Tetrahedra (PT) algorithm to exploit programmable graphics hardware [S2, unofficial]. It solves the visibility ordering and rendering bottleneck of irregular tetrahedral meshes by streaming sorted tetrahedra as point primitives, decomposing them into triangles in a geometry shader, and evaluating the volume ray integral per fragment during rasterization [S1, unofficial]. Unlike its sibling [PTINT](1861-tetrahedral-projection-with-partial-pre-integration.md), which requires a two-pass approach with GPU read-back, HAPT performs the entire rendering pipeline in a single GPU pass, eliminating auxiliary data structures and reducing GPU memory consumption [S2, unofficial].
++Hardware-Assisted Projected Tetrahedra (HAPT) is a flexible, highly efficient volume rendering method grounded on the original Projected Tetrahedra (PT) algorithm [S2, unofficial]. It solves the visibility ordering and rendering bottleneck of irregular tetrahedral meshes by streaming sorted tetrahedra as point primitives, decomposing them into triangles in a geometry shader, and evaluating the volume ray integral per fragment during rasterization [S1, unofficial]. Unlike its sibling [PTINT](1861-tetrahedral-projection-with-partial-pre-integration.md), which requires a two-pass approach with GPU read-back, HAPT performs the entire rendering pipeline in a single GPU pass, eliminating auxiliary data structures and reducing GPU memory consumption [S2, unofficial].
+ 
+ ## How it works
+-HAPT builds on [Hardware-Assisted Projection](5625-hardware-assisted-projection.md) by replacing software-based cell projection with hardware rasterization. The method consists of two main phases: sorting and rendering.
+-
+ ### Inputs and Outputs
+-*   **Input:** An unstructured tetrahedral mesh where each vertex has a scalar value. The data may be static or time-varying.
+-*   **Output:** A 2D image composited from back-to-front, representing direct volume rendering (DVR) or iso-surface rendering.
++*   **Input:** An unstructured tetrahedral mesh where each vertex has a scalar value. The data may be static or time-varying [S2, unofficial].
++*   **Output:** A 2D image representing direct volume rendering (DVR) or iso-surface rendering [S3, unofficial].
+ 
+ ### Data Structures
+-Tetrahedra are streamed to the GPU as **point primitives**. To minimize data throughput, each point primitive represents one tetrahedron and carries the following attributes:
+-1.  **Position:** The position of one vertex of the tetrahedron (e.g., $v_0$).
++Tetrahedra are streamed to the GPU as point primitives [S1, unofficial]. To minimize data throughput, each point primitive represents one tetrahedron and carries the following attributes:
++1.  **Position:** The position of one vertex of the tetrahedron (e.g., $v_0$) [S2, unofficial].
+ 2.  **Texture Coordinates:** The positions of the other three vertices ($v_1, v_2, v_3$) are passed as texture coordinates [S2, unofficial].
+ 3.  **Scalar Value:** The scalar value of the primary vertex is passed as the $w$ coordinate of the vertex [S2, unofficial].
+@@ -27,5 +25,4 @@
+ ### Rendering Pipeline
+ The rendering is performed in a single pass through the GPU pipeline [S1, unofficial].
+-
+ 1.  **Vertex Shader (VS):** Receives the point primitives. If time-varying data is used, an early discard test removes empty tetrahedra (all vertices mapped to zero opacity) [S2, unofficial].
+ 2.  **Geometry Shader (GS):**
+@@ -38,25 +35,17 @@
+     *   Stores $s_f, s_b, l$ as RGB color attributes of the vertices to pass information to the fragment shader [S2, unofficial].
+     *   For iso-surface rendering, the GS extracts the iso-surface as one or two triangles with face normals [S2, unofficial].
+-3.  **Rasterization:** The hardware rasterizer processes the triangles.
++3.  **Rasterization:** The hardware rasterizer processes the triangles [G].
+ 4.  **Fragment Shader (FS):**
+     *   Interpolates $s_f, s_b, l$ per fragment [S2, unofficial].
+-    *   Computes the volume ray integral using **partial pre-integration**.
++    *   Computes the volume ray integral using partial pre-integration [S1, unofficial].
+     *   Accesses a pre-computed table using indices derived from $l$ and the front/back colors (extracted from $s_f/s_b$ via the transfer function) [S2, unofficial].
+-    *   Composites the result using hardware blending [S1, unofficial].
+ 
+ ### Pseudocode
+-
+ ```python
+-# HAPT Rendering Pipeline
+-
+ def hapt_render(tetrahedra, viewpoint, transfer_function, pre_int_table):
+     # 1. Sorting
+-    # Sort tetrahedra back-to-front. 
+-    # Example: Use CUDA quicksort on indices.
+-    sorted_indices = cuda_quicksort(tetrahedra, viewpoint)
++    sorted_indices = sort_back_to_front(tetrahedra, viewpoint)
+     
+-    # 2. Stream to GPU
+-    # Create point primitives. 
+-    # Each primitive: pos=v0, tex_coords=(v1, v2, v3), w=scalar(v0)
++    # 2. Stream to GPU as point primitives
+     point_primitives = []
+     for idx in sorted_indices:
+@@ -71,101 +60,75 @@
+     triangles = []
+     for prim in point_primitives:
+-        # Decompose into triangles based on projection case
+-        # Case determination: 4 cross products + table lookup
+-        case = determine_projection_case(prim.pos, prim.tex_coords, viewpoint)
++        # Determine projection case using 4 cross products and table lookup
++        case = compute_projection_case(prim.pos, prim.tex_coords, viewpoint)
+         
+-        generated_triangles = decompose_tetrahedron(case, prim.pos, prim.tex_coords)
++        # Decompose into triangles based on case
++        tri_vertices = decompose_tetrahedron(case, prim.pos, prim.tex_coords)
+         
+-        for tri in generated_triangles:
+-            # Compute attributes for each vertex of the triangle
++        for tri in tri_vertices:
+             verts = []
+-            for v in tri.vertices:
+-                # Determine if v is a 'thick' or 'thin' vertex
++            for v in tri:
++                # Determine vertex type and compute attributes
+                 if is_thick_vertex(v, case):
+-                    # Thick vertex: max traversal distance
+                     l = compute_traversal_length(v, case)
+                     sf = interpolate_scalar(v, case, prim)
+                     sb = interpolate_scalar(v, case, prim)
+                 else:
+-                    # Thin vertex: no traversal
+                     l = 0.0
+-                    sf = get_scalar(v, prim)
+-                    sb = get_scalar(v, prim)
++                    sf = prim.w
++                    sb = prim.w
+                 
+                 # Store as RGB color for interpolation
+-                color = rgb_from_values(sf, sb, l)
+-                verts.append({'pos': v, 'color': color})
+-            
++                verts.append({'pos': v, 'color': (sf, sb, l)})
+             triangles.append(verts)
+     
+     # 4. Rasterization and Fragment Shader Execution
+-    image = empty_image()
++    image = initialize_image()
+     
+     for tri in triangles:
+-        # Rasterize triangle
+-        fragments = rasterize(tri)
+-        
++        fragments = rasterize_triangle(tri)
+         for frag in fragments:
+-            # Interpolated values from vertex colors
+-            sf = frag.color.r
+-            sb = frag.color.g
+-            l = frag.color.b
+-            
+-            # Partial Pre-Integration
+-            # Extract colors from transfer function
++            sf, sb, l = frag.color
+             c_front = transfer_function(sf)
+             c_back = transfer_function(sb)
+-            
+-            # Compute indices for pre-integration table
+-            idx1 = compute_index(l)
+-            idx2 = compute_index_from_colors(c_front, c_back)
+-            
+-            # Lookup result
++            idx1 = map_length_to_index(l)
++            idx2 = map_colors_to_index(c_front, c_back)
+             result = pre_int_table[idx1][idx2]
+-            
+-            # Composite into image (back-to-front)
+             image.composite(frag.pos, result)
+             
+     return image
+ 
++# Helper functions (implementation details for PTINT classification and table mapping are not given in the sources)
++def compute_projection_case(v0, v1, v2, v3, viewpoint):
++    # Computes 4 cross products and performs a table lookup to determine projection case
++    pass # Not given in the sources.
++
+ def decompose_tetrahedron(case, v0, v1, v2, v3):
+-    # Returns list of triangles based on PTINT classification
+-    # Case 1: 3 triangles
+-    # Case 2: 2 triangles
+-    # Case 3: 2 triangles
+-    # Case 4: 1 triangle (degenerate)
+-    # Implementation details depend on specific PTINT table
+-    pass
++    # Returns list of vertex triplets based on the determined case
++    pass # Not given in the sources.
+ 
+ def is_thick_vertex(v, case):
+-    # Returns True if v is the entry point with max traversal distance
+-    # Depends on the specific projection case
+-    pass
++    # Checks if vertex is the entry point with maximum traversal distance
++    pass # Not given in the sources.
+ 
+ def compute_traversal_length(v, case):
+-    # Computes Euclidean distance. 
+-    # May require square root (lookup table in hardware)
+-    pass
++    # Computes Euclidean distance, potentially using hardware square root lookup
++    pass # Not given in the sources.
+ 
+ def interpolate_scalar(v, case, prim):
+-    # Interpolates scalar value at thick vertex
+-    pass
++    # Interpolates scalar value at the thick vertex
++    pass # Not given in the sources.
+ 
+-def get_scalar(v, prim):
+-    # Returns original scalar value of vertex v
+-    pass
++def rasterize_triangle(tri):
++    # Rasterizes triangle and interpolates vertex colors to fragments
++    pass # Not given in the sources.
+ 
+-def rgb_from_values(sf, sb, l):
+-    # Maps sf, sb, l to RGB color components
+-    # sf -> R, sb -> G, l -> B
+-    return (sf, sb, l)
++def map_length_to_index(l):
++    # Maps traversal length to pre-integration table index
++    pass # Not given in the sources.
+ 
+-def compute_index(l):
+-    # Maps traversal length to table index
+-    pass
+-
+-def compute_index_from_colors(c_front, c_back):
+-    # Maps front/back colors to table index
+-    pass
++def map_colors_to_index(c_front, c_back):
++    # Maps front/back colors to pre-integration table index
++    pass # Not given in the sources.
+ ```
+ 
+@@ -196,5 +159,5 @@
+ 
+ ## Background
+-HAPT was introduced by A. Maximo, R. Marroquim, and R. Farias in 2010, published in the Journal of Computer Graphics Techniques [S3, unofficial]. It is an adaptation of the PTINT method, designed to exploit programmable graphics hardware by performing the entire algorithm in a single GPU pass [S2, unofficial]. It addresses the visibility ordering problem using fast sorting algorithms (quicksort, MPVONC) and leverages the geometry shader for triangle decomposition [S3, unofficial].
++HAPT was introduced by A. Maximo, R. Marroquim, and R. Farias in 2010, published in the Journal of Computer Graphics Techniques [S3, unofficial]. It is an adaptation of the PTINT method, designed to exploit programmable graphics hardware by performing the entire algorithm in a single GPU pass [S2, unofficial]. It addresses the visibility ordering problem using sorting algorithms such as CUDA quicksort or CPU MPVONC, and leverages the geometry shader for triangle decomposition [S2, unofficial][S3, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,330 @@
+# GPU Volume Rendering with Shared Memory Caching and Phong Shading
+
+Also called: CUDA volume ray marching, volume-viz kernel
+
+## Overview
+An interactive CUDA-based volume rendering method that performs ray marching through a 3D texture while employing a shared memory cache to store voxel samples for a block of pixels, enabling efficient neighbor access for gradient-based Phong shading [S1, unofficial]. It differs from standard per-pixel ray marching by batching sample fetches into shared memory to reduce global memory bandwidth pressure when computing gradients for lighting, and it differs from its sibling [1D Volume Ray Casting with Z-Buffer Clipping](22426-1d-volume-ray-casting-with-z-buffer-clipping.md) by explicitly supporting plane slicing and adaptive shading calculations within a block-based execution model [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `inTexture0`: 2D texture (`texture<uchar4, cudaTextureType2D>`) storing front buffer colors (RGBA) from OpenGL, used to determine ray origins.
+    *   `inTexture1`: 2D texture (`texture<uchar4, cudaTextureType2D>`) storing back buffer colors (RGBA) from OpenGL, used to determine ray destinations.
+    *   `texVolume`: 3D texture (`texture<unsigned char, cudaTextureType3D, cudaReadModeNormalizedFloat>`) storing the scalar volume data.
+    *   `transferTexture`: 1D texture (`texture<float4, cudaTextureType1D>`) mapping 8-bit voxel values (0-255) to 32-bit float4 (color/opacity). Bound with size 1024 * sizeof(float).
+    *   `pixels`: Device memory array for output.
+    *   `cameraPosition`: World-space camera position.
+    *   `cameraLook`: World-space look-at vector.
+    *   `cameraUp`: World-space up vector.
+    *   `fov`: Field of view angle.
+    *   `imageWidth`, `imageHeight`: Resolution of the output image.
+    *   `sliceType`: Enum for plane slicing (`SLICE_PLANE_CUT` or `SLICE_PLANE`).
+    *   `planeNormal`, `planeDistance`: Plane definition for slicing.
+*   **Outputs:**
+    *   `pixels`: Array of `uchar4` containing the composited RGBA color for each pixel.
+
+**Data Structures:**
+*   **Shared Memory:** A 1D array of `unsigned char` (uchar) with size `CACHE_DEPTH * BLOCK_WIDTH * BLOCK_HEIGHT`.
+    *   Layout: `sharedMemory[offset * cacheDim.x * cacheDim.y + cacheIdx.y * cacheDim.x + cacheIdx.x]`.
+    *   `offset`: Sample index along the ray (0 to `CACHE_DEPTH-1`).
+    *   `cacheIdx`: Relative position within the block's slab (x, y).
+*   **Constants:**
+    *   `BLOCK_WIDTH`: 16.
+    *   `BLOCK_HEIGHT`: 16.
+    *   `CACHE_DEPTH`: 32.
+    *   `CACHE_DEPTH_MINUS_TWOF`: 30.0f (`CACHE_DEPTH - 2`).
+    *   `DIRECT_FACTOR`: 0.3f.
+    *   `ONE_MINUS_DIRECT_FACTOR`: 0.7f.
+
+**Step-by-Step Method:**
+
+1.  **Initialization:**
+    *   Register OpenGL resources (textures 0, 1, and pixel buffer) with CUDA.
+    *   Map resources.
+    *   Bind OpenGL textures to CUDA 2D textures (`inTexture0`, `inTexture1`).
+    *   Bind device memory array to CUDA 1D transfer function texture (`transferTexture`).
+    *   Bind volume array to 3D texture (`texVolume`).
+
+2.  **Grid/Block Setup:**
+    *   Calculate slab dimensions: `slabSize.x = BLOCK_WIDTH - 2`, `slabSize.y = BLOCK_HEIGHT - 2`.
+    *   Calculate block dimensions: `blockDims.x = ceil(imageWidth / slabSize.x)`, `blockDims.y = ceil(imageHeight / slabSize.y)`.
+    *   Launch kernel with block size `(BLOCK_WIDTH, BLOCK_HEIGHT)`.
+
+3.  **Thread Indexing:**
+    *   Each thread calculates its global pixel coordinate `(x, y)`.
+    *   Determine the `slab` boundaries (`slabLowerX`, `slabLowerY`, `slabUpperX`, `slabUpperY`) the thread belongs to.
+    *   Threads on the border of the block (`threadIdx.x == 0`, `threadIdx.y == 0`, or `threadIdx.x == BLOCK_WIDTH - 1`, `threadIdx.y == BLOCK_HEIGHT - 1`) are marked as `isBorder` and do not write to the output buffer.
+
+4.  **Ray Origin/Direction Calculation:**
+    *   Sample front color `c_front` from `inTexture0` at `(x, y)` and back color `c_back` from `inTexture1` at `(x, y)`.
+    *   Convert `c_front` and `c_back` to `float3` world positions.
+    *   Calculate `camDist` from `cameraPosition` to `front`.
+    *   Perform a block-wide reduction in shared memory to find the minimum distance `rad` from the camera to the bounding sphere of the volume for all threads in the block.
+    *   Calculate ray direction `ray = normalize(back - front)`.
+    *   **Pitfall:** If `length(back - front) < 0.001f`, the ray is degenerate. Output black/transparent and return.
+
+5.  **Main Loop Initialization:**
+    *   Initialize `dist = 0.0f`, `result = (0.0f, 0.0f, 0.0f, 0.0f)`.
+    *   Calculate `tanFovX` and `tanFovY` from camera FOV and image dimensions.
+    *   Calculate `scaledDirection` and `scaledStep` based on voxel dimensions and ray direction.
+
+6.  **Plane Slicing (Optional):**
+    *   If `sliceType == SLICE_PLANE_CUT`:
+        *   Check if the ray segment (front to back) is entirely on one side of the plane using `signedDistancePlane`.
+        *   If entirely on one side, return (pixel remains transparent/black).
+        *   Otherwise, calculate intersection `t` with the plane.
+        *   If intersection exists, set `dist = t`. If not, adjust `upper` bound.
+    *   If `sliceType == SLICE_PLANE`:
+        *   This is handled during shading (see Step 8).
+
+7.  **Ray Marching Loop:**
+    *   While `dist < upper`:
+        1.  Call `rayMarch` to fill the shared memory cache with `CACHE_DEPTH` samples starting from `pos` along `scaledDirection`.
+        2.  Synchronize threads: `__syncthreads()`.
+        3.  Iterate `i` from 1 to `CACHE_DEPTH - 2`.
+        4.  Calculate `voxelDist` for sample `i`. If `voxelDist > upper`, break loop.
+        5.  Calculate `voxelDim` and `voxelPos`.
+        6.  Call `shadeVoxel` to get shaded color `shaded`.
+        7.  If opacity `shaded.w > 1e-6`, blend `shaded` into `result` using front-to-back alpha blending.
+        8.  If `result.w > 0.95f`, break loop (early ray termination).
+
+8.  **Shading (Phong):**
+    *   Inside `shadeVoxel`:
+        *   If `phongShading` is true and opacity > 1e-6:
+            1.  Get neighbor voxels from shared memory:
+                *   Front: `offset - 1`
+                *   Back: `offset + 1`
+                *   Left: `cacheIdx.x - 1`
+                *   Right: `cacheIdx.x + 1`
+                *   Top: `cacheIdx.y + 1`
+                *   Bottom: `cacheIdx.y - 1`
+            2.  Convert neighbor values to float.
+            3.  Calculate gradient:
+                $$ \nabla = \left( \frac{R - L}{voxelDim.x}, \frac{T - B}{voxelDim.y}, \frac{A - F}{voxelDim.z} \right) $$
+                Where $R, L, T, B, A, F$ are Right, Left, Top, Bottom, Back, Front neighbor values.
+            4.  Normalize gradient if non-zero.
+            5.  Calculate direct lighting:
+                $$ direct = \max(0.0f, \text{dot}(\nabla, \text{normalize}(-1, -1, 1))) \times DIRECT\_FACTOR $$
+                Clamp `direct` to `[0, DIRECT_FACTOR]`.
+            6.  Update color:
+                $$ value = value \times ONE\_MINUS\_DIRECT\_FACTOR + (direct, direct, direct, 0) $$
+        *   If `sliceType == SLICE_PLANE`:
+            *   Calculate distance `d` from voxel position to plane.
+            *   If `d < 0.01f`, boost color:
+                $$ value.x = \text{clamp}(value.x + (0.01f - d) \times 100.0f, 0.0f, 1.0f) $$
+
+9.  **Blending:**
+    *   Standard front-to-back alpha blending:
+        $$ blendFactor = src.w \times (1.0f - dst.w) $$
+        $$ ret.rgb = dst.rgb + src.rgb \times blendFactor $$
+        $$ ret.w = dst.w + blendFactor $$
+
+10. **Output:**
+    *   If not a border thread:
+        *   Clamp result RGBW to `[0, 1]`.
+        *   Convert to `uchar4` (multiply by 0xff).
+        *   Write to `pixels[index]`.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+BLOCK_WIDTH = 16
+BLOCK_HEIGHT = 16
+CACHE_DEPTH = 32
+CACHE_DEPTH_MINUS_TWOF = 30.0
+DIRECT_FACTOR = 0.3
+ONE_MINUS_DIRECT_FACTOR = 0.7
+EPSILON = 1e-6
+
+# Shared memory declaration (conceptual)
+# __shared__ uchar sharedMemory[CACHE_DEPTH * BLOCK_WIDTH * BLOCK_HEIGHT]
+
+def rayMarchKernel(inTexture0, inTexture1, texVolume, transferTexture, pixels, 
+                   cameraPosition, cameraLook, cameraUp, fov, imageWidth, imageHeight,
+                   sliceType, planeNormal, planeDistance, phongShading):
+    
+    # 1. Grid/Block Setup
+    slabSizeX = BLOCK_WIDTH - 2
+    slabSizeY = BLOCK_HEIGHT - 2
+    blockDimsX = ceil(imageWidth / slabSizeX)
+    blockDimsY = ceil(imageHeight / slabSizeY)
+    
+    # 2. Thread Indexing
+    globalX = blockIdx.x * slabSizeX + threadIdx.x
+    globalY = blockIdx.y * slabSizeY + threadIdx.y
+    
+    isBorder = (threadIdx.x == 0 or threadIdx.y == 0 or 
+                threadIdx.x == BLOCK_WIDTH - 1 or threadIdx.y == BLOCK_HEIGHT - 1)
+    
+    if globalX >= imageWidth or globalY >= imageHeight:
+        return
+
+    # 3. Ray Origin/Direction Calculation
+    c_front = tex2D(inTexture0, globalX, globalY)
+    c_back = tex2D(inTexture1, globalX, globalY)
+    
+    front = float3(c_front.r, c_front.g, c_back.b) # Assuming specific mapping from notes
+    back = float3(c_back.r, c_back.g, c_back.b)
+    
+    rayLength = length(back - front)
+    if rayLength < 0.001f:
+        if not isBorder:
+            pixels[globalY * imageWidth + globalX] = uchar4(0, 0, 0, 0)
+        return
+
+    ray = normalize(back - front)
+    
+    # Block-wide reduction for bounding sphere radius 'rad'
+    # [G] Implementation of reduction omitted; assume 'rad' is computed in shared memory
+    rad = compute_block_min_distance(cameraPosition, front, back)
+    
+    # 4. Main Loop Initialization
+    dist = 0.0f
+    result = float4(0.0f, 0.0f, 0.0f, 0.0f)
+    
+    # [G] tanFovX, tanFovY, scaledDirection, scaledStep calculation based on FOV and image dims
+    tanFovX = tan(fov / 2.0f) * (imageWidth / imageHeight)
+    tanFovY = tan(fov / 2.0f)
+    scaledDirection = ray * scaledStepFactor
+    scaledStep = voxelSize / length(ray)
+    
+    upper = length(back - front)
+    
+    # 5. Plane Slicing (SLICE_PLANE_CUT)
+    if sliceType == SLICE_PLANE_CUT:
+        d_front = signedDistancePlane(front, planeNormal, planeDistance)
+        d_back = signedDistancePlane(back, planeNormal, planeDistance)
+        
+        if (d_front > 0 and d_back > 0) or (d_front < 0 and d_back < 0):
+            return # Entirely on one side
+            
+        t = intersection_t(front, back, planeNormal, planeDistance)
+        if t >= 0:
+            dist = t
+            upper = min(upper, t + epsilon) # Adjust upper if needed, or just start at t
+            
+    # 6. Ray Marching Loop
+    while dist < upper:
+        # Fill shared memory cache
+        for i in range(CACHE_DEPTH):
+            pos = front + ray * (dist + i * scaledStep)
+            # Map pos to texture coordinates
+            texCoord = (pos - 0.5f) / scale + 0.5f
+            val = tex3D(texVolume, texCoord.x, texCoord.y, texCoord.z)
+            val = clamp(val, 0.0f, 1.0f) # Assuming normalized float read, convert to uchar if needed
+            
+            # Store in shared memory
+            cacheIdxX = threadIdx.x
+            cacheIdxY = threadIdx.y
+            idx = i * BLOCK_WIDTH * BLOCK_HEIGHT + cacheIdxY * BLOCK_WIDTH + cacheIdxX
+            sharedMemory[idx] = uchar(val * 255.0f)
+            
+        __syncthreads()
+        
+        # Iterate through cached samples
+        for i in range(1, CACHE_DEPTH - 1):
+            voxelDist = dist + i * scaledStep
+            if voxelDist > upper:
+                break
+                
+            cacheIdxX = threadIdx.x
+            cacheIdxY = threadIdx.y
+            idx = i * BLOCK_WIDTH * BLOCK_HEIGHT + cacheIdxY * BLOCK_WIDTH + cacheIdxX
+            
+            # Get current voxel value
+            currentVal = sharedMemory[idx]
+            
+            # Get neighbors
+            # [G] Assuming padding or valid indexing ensures neighbors exist
+            val_front = sharedMemory[(i-1) * BLOCK_WIDTH * BLOCK_HEIGHT + cacheIdxY * BLOCK_WIDTH + cacheIdxX]
+            val_back = sharedMemory[(i+1) * BLOCK_WIDTH * BLOCK_HEIGHT + cacheIdxY * BLOCK_WIDTH + cacheIdxX]
+            val_left = sharedMemory[i * BLOCK_WIDTH * BLOCK_HEIGHT + cacheIdxY * BLOCK_WIDTH + (cacheIdxX-1)]
+            val_right = sharedMemory[i * BLOCK_WIDTH * BLOCK_HEIGHT + cacheIdxY * BLOCK_WIDTH + (cacheIdxX+1)]
+            val_top = sharedMemory[i * BLOCK_WIDTH * BLOCK_HEIGHT + (cacheIdxY+1) * BLOCK_WIDTH + cacheIdxX]
+            val_bottom = sharedMemory[i * BLOCK_WIDTH * BLOCK_HEIGHT + (cacheIdxY-1) * BLOCK_WIDTH + cacheIdxX]
+            
+            # Convert to float
+            f_front = float(val_front)
+            f_back = float(val_back)
+            f_left = float(val_left)
+            f_right = float(val_right)
+            f_top = float(val_top)
+            f_bottom = float(val_bottom)
+            f_current = float(currentVal)
+            
+            # Calculate gradient
+            gradX = (f_right - f_left) / voxelDimX
+            gradY = (f_top - f_bottom) / voxelDimY
+            gradZ = (f_back - f_front) / voxelDimZ
+            gradient = normalize(float3(gradX, gradY, gradZ))
+            
+            # Phong Shading
+            shaded = float4(0.0f, 0.0f, 0.0f, 0.0f)
+            if phongShading and f_current > EPSILON:
+                # Direct lighting
+                lightDir = normalize(float3(-1.0f, -1.0f, 1.0f))
+                diff = max(0.0f, dot(gradient, lightDir)) * DIRECT_FACTOR
+                diff = min(diff, DIRECT_FACTOR)
+                
+                # Get color from transfer function
+                tf = tex1D(transferTexture, f_current / 255.0f)
+                
+                # Update color
+                shaded = tf
+                shaded.rgb = shaded.rgb * ONE_MINUS_DIRECT_FACTOR + float3(diff, diff, diff)
+            else:
+                tf = tex1D(transferTexture, f_current / 255.0f)
+                shaded = tf
+                
+            # Plane Slicing (SLICE_PLANE)
+            if sliceType == SLICE_PLANE:
+                d = signedDistancePlane(pos, planeNormal, planeDistance)
+                if d < 0.01f:
+                    shaded.r = clamp(shaded.r + (0.01f - d) * 100.0f, 0.0f, 1.0f)
+                    
+            # Blending
+            blendFactor = shaded.w * (1.0f - result.w)
+            result.rgb = result.rgb + shaded.rgb * blendFactor
+            result.w = result.w + blendFactor
+            
+            if result.w > 0.95f:
+                break
+                
+        dist += CACHE_DEPTH_MINUS_TWOF * scaledStep
+        
+    # 7. Output
+    if not isBorder:
+        result.rgb = clamp(result.rgb, 0.0f, 1.0f)
+        result.w = clamp(result.w, 0.0f, 1.0f)
+        outColor = uchar4(
+            uchar(result.r * 255.0f),
+            uchar(result.g * 255.0f),
+            uchar(result.b * 255.0f),
+            uchar(result.w * 255.0f)
+        )
+        pixels[globalY * imageWidth + globalX] = outColor
+```
+
+## Subtopics
+
+### [CUDA 1D Volume Mapper with Adaptive Step Size and Shading](22425-cuda-1d-volume-mapper-with-adaptive-step-size-and-shading.md)
+A GPU-based volume rendering method that casts rays through a 3D volume using an adaptive step size to skip empty space and compute photorealistic shading (Phong-Lambert) based on volume gradients. It uses 1D transfer functions for opacity and color, and early ray termination for performance. It builds on [GPU Volume Rendering with Shared Memory Caching and Phong Shading](21421-gpu-volume-rendering-with-shared-memory-caching-and-phong-sh.md) by replacing the shared memory caching with a direct 1D texture lookup approach and introducing adaptive stepping logic that backtracks in opaque regions to improve gradient estimation.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of pixels and $M$ is the average number of samples per ray (dependent on volume density and `CACHE_DEPTH`). The shared memory cache reduces the number of global memory reads per shading calculation from 7 (for neighbors) to 1 (for the block), improving memory bandwidth efficiency.
+*   **Memory Complexity:** $O(BLOCK\_WIDTH \cdot BLOCK\_HEIGHT \cdot CACHE\_DEPTH)$ bytes of shared memory per block. For default values, this is $16 \cdot 16 \cdot 32 = 8192$ bytes (8 KB) per block.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Performance scales with the number of blocks launched. The shared memory cache is most effective when the volume is dense and shading is enabled, as it amortizes the cost of fetching neighbor samples.
+*   **Strengths:** Efficient gradient computation for Phong shading due to shared memory caching; supports plane slicing; early ray termination.
+*   **Limitations:** Fixed block size and cache depth; requires OpenGL interop for front/back buffer inputs; border threads do not contribute to output, potentially causing artifacts at image edges if not handled correctly.
+*   **When to use:** Interactive volume rendering on CUDA-capable GPUs where shading quality is important and memory bandwidth is a bottleneck.
+*   **When not to use:** When adaptive stepping is required (use [CUDA 1D Volume Mapper with Adaptive Step Size and Shading](22425-cuda-1d-volume-mapper-with-adaptive-step-size-and-shading.md)) or when running on non-CUDA hardware.
+
+## Background
+This method originates from a final project for CS224 Interactive Computer Graphics, developed by Travis Fischer and Ben Herila in Fall 2010 [S1, unofficial]. It is part of the `volume-viz` repository, which demonstrates interactive volume rendering techniques using CUDA and OpenGL interop [S1, unofficial].
+
+## Sources
+[S1] jacobstern/volume-viz, https://github.com/jacobstern/volume-viz, fetched 2026-10-27 (unofficial)

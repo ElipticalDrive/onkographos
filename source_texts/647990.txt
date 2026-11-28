@@ -1,0 +1,176 @@
+Found while auditing #2674 (B1c-1) review 1. Both defects are pre-existing: base 46f8cd1 and #2674's head 912cb8d give identical output. (a) Under domain_sdf, corner_strategy never applies BoundaryConditions.segment_for_point reads a poi...
+
+Point owner under domain_sdf: a corner never reaches corner_strategy, and a point on no boundary is held by an unplaced segment · Issue #2675 · derrring/MFGArchon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Point owner under domain_sdf: a corner never reaches corner_strategy, and a point on no boundary is held by an unplaced segment #2675
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Point owner under domain_sdf: a corner never reaches corner_strategy, and a point on no boundary is held by an unplaced segment#2675
+Copy link
+Labels
+area: geometryMesh generation and geometric domainsMesh generation and geometric domainsfamily: per-backend-no-conformanceDispatch-selected implementations of one contract (backend/path/dim) with no conformance checkDispatch-selected implementations of one contract (backend/path/dim) with no conformance checkfamily: stratum-decided-per-consumerCorners, edges, CSG seams, kinks, BC-data jumps: each consumer decides alone; no owner classifiesCorners, edges, CSG seams, kinks, BC-data jumps: each consumer decides alone; no owner classifiespriority: mediumMedium priority issues for planned developmentMedium priority issues for planned developmentsize: mediumMedium effort - 1-3 daysMedium effort - 1-3 daystype: bugSomething isn't workingSomething isn't working
+Description
+derrring
+opened on Oct 14, 2026
+Issue body actions
+Found while auditing #2674 (B1c-1) review 1. Both defects are pre-existing: base 46f8cd1 and #2674's head 912cb8d give identical output.
+(a) Under domain_sdf, corner_strategy never applies
+BoundaryConditions.segment_for_point reads a point's faces from the box when there is one (_query_bounds). Otherwise it reads them from domain_sdf, through identify_boundary_id (conditions.py:682-701 at 912cb8d).
+The SDF arm returns one face: the dominant axis of the SDF gradient. At a box corner, the exact gradient is not unique, and the central-difference gradient ties, and argmax takes the lowest axis the rounding of the central difference picks the axis (corrected 2026-10-15; dev-mfgarchon found (0, 1) going to y_max). _compute_sdf_gradient(c, box, epsilon=1e-5) at 912cb8d gives (0, 0): [-0.49999999999772443, -0.49999999999772443] → x_min (exact tie, argmax takes axis 0); (1, 0): [0.5000000000032756, -0.49999999999772443] → x_max; (0, 1): [-0.49999999999772443, 0.5000000000032756] → y_max; (1, 1): [0.5000000000032756, 0.5000000000032756] → x_max. So a point at a corner reaches neither the corner order nor corner_strategy, and which face it takes is a rounding artefact.
+Setup:
+BC: in = DIRICHLET 1 on y_min, plus an unplaced NO_FLUX wall; corner_strategy default.
+Grid: TensorProductGrid on the unit square, Nx=[6, 6].
+Query: segment_for_point(p, geometry=grid, tolerance=BOUNDARY_TOL).
+domain_sdf
+(0, 0)
+(1, 0)
+(0.5, 0)
+none
+in
+in
+in
+box SDF max(abs(x-0.5)) - 0.5
+wall
+wall
+in
+The box SDF and the grid's bounds describe the same box, and the two arms of one owner give different answers at its corners.
+(b) A point on no boundary of the BC's SDF is held by an unplaced segment
+When the face set is empty, segment_for_point falls through to [None]. Then matches_point(point, None, ...) lets an unplaced segment hold the point.
+Setup:
+domain_sdf is an obstacle, 0.2 - |x - (0.5, 0.5)|, with no domain_bounds.
+in = DIRICHLET 1 is placed on x_min.
+The point is (0, 0.5), where the SDF is -0.3. That is inside the BC's domain, not on its boundary.
+segment_for_point returns wall. Points (0, 0), (1, 0) and (0.5, 0) also give wall, for both in@x_min and in@y_min. The owner does not refuse the point; it answers a condition the user did not place there.
+After #2674's fix round, HJB-GFDM refuses this point, because its face set is empty, while segment_for_point still answers it. So the two point readers disagree here.
+Probe
+owner_sdf.py, run once per tree with PYTHONPATH=<tree>, prints its carrier (mfgarchon.__file__):
+```
+import warnings; warnings.simplefilter("ignore")
+import numpy as np, mfgarchon
+print("CARRIER", mfgarchon.__file__)
+from mfgarchon.geometry import TensorProductGrid
+from mfgarchon.geometry.boundary import BCSegment as S, BCType, BoundaryConditions
+from mfgarchon.geometry.boundary.tolerances import BOUNDARY_TOL
+D, NF = BCType.DIRICHLET, BCType.NO_FLUX
+box = lambda x: float(np.max(np.abs(np.asarray(x, float) - 0.5)) - 0.5)
+hole = lambda x: float(0.2 - np.linalg.norm(np.asarray(x, float) - 0.5))
+def q(bc, pts):
+    g = TensorProductGrid(bounds=[(0.0, 1.0)] * 2, Nx=[6, 6], boundary_conditions=bc)
+    out = []
+    for p in pts:
+        try:
+            out.append(bc.segment_for_point(np.array(p), geometry=g, tolerance=BOUNDARY_TOL).name)
+        except Exception as e:
+            out.append("REFUSED:" + type(e).__name__)
+    return out
+pts = [(0, 0.5), (0, 0), (1, 0), (0.5, 0)]
+for where in ("x_min", "y_min"):
+    segs = lambda: [S(name="in", bc_type=D, value=1.0, boundary=where), S(name="wall", bc_type=NF)]
+    print(f"in@{where} pts={pts}")
+    print("   no sdf  :", q(BoundaryConditions(dimension=2, segments=segs()), pts))
+    print("   box sdf :", q(BoundaryConditions(dimension=2, segments=segs(), domain_sdf=box), pts))
+    print("   hole sdf:", q(BoundaryConditions(dimension=2, segments=segs(), domain_sdf=hole), pts))
+```
+Output at both 46f8cd1 and 912cb8d:
+```
+in@x_min pts=[(0, 0.5), (0, 0), (1, 0), (0.5, 0)]
+   no sdf  : ['in', 'in', 'wall', 'wall']
+   box sdf : ['in', 'in', 'wall', 'wall']
+   hole sdf: ['wall', 'wall', 'wall', 'wall']
+in@y_min pts=[(0, 0.5), (0, 0), (1, 0), (0.5, 0)]
+   no sdf  : ['wall', 'in', 'in', 'in']
+   box sdf : ['wall', 'wall', 'wall', 'in']
+   hole sdf: ['wall', 'wall', 'wall', 'wall']
+```
+Control for (b): the same hole-SDF BC with domain_bounds=[[0,1],[0,1]] added classifies in HJB-GFDM at 912cb8d as {in: 7, wall: 17}, which is the no-SDF answer.
+Reach
+segment_for_point and get_bc_at_point, which delegates to it, are public.
+Callers outside conditions.py at 912cb8d:
+HJB-GFDM's preclassification (hjb_gfdm.py:1388-1399). It reads the face set first and refuses an empty one.
+The particle applicator (applicator_particle.py:230, :327). It always passes a boundary_id, so neither arm above is reached.
+Separately, at :207-208 and :305-306 the particle applicator writes the box into the caller's bc.domain_bounds when that is None. That mutates a BC object other solvers may share. Its effect is not measured here.
+HJB-GFDM classifies its boundary points through the point owner (#2512 row B1, stage B1c-1) #2674 is to state in its body that R1 and the point corner rule do not reach a BC with domain_sdf.
+What a fix decides
+(a) Whether the SDF arm returns every face whose normal component equals the maximum within a tolerance (exact equality misses (1, 0) and (0, 1) above), so that a corner of a box-shaped SDF reaches the corner rule. The alternative is to refuse an SDF BC at a point where the gradient is not unique.
+(b) What may hold a point that lies on no face and off the SDF's zero level. One option is to refuse it. The other is to answer only through a placement that holds the point without a face (region, sdf_region). An unplaced segment is not such a placement.
+Refs #2512 (row B1), #2674.
+Activity
+derrring
+added
+type: bugSomething isn't workingSomething isn't working
+priority: mediumMedium priority issues for planned developmentMedium priority issues for planned development
+area: geometryMesh generation and geometric domainsMesh generation and geometric domains
+size: mediumMedium effort - 1-3 daysMedium effort - 1-3 days
+family: per-backend-no-conformanceDispatch-selected implementations of one contract (backend/path/dim) with no conformance checkDispatch-selected implementations of one contract (backend/path/dim) with no conformance check
+on Oct 14, 2026
+derrring commented on Oct 15, 2026
+derrring
+on Oct 15, 2026
+OwnerAuthor
+More actions
+The corners' normals after #2674's fix round (dbb0dde, on the PR branch, not yet merged). Under a box SDF with no domain_bounds, the mixed GFDM path and the uniform path now write different normals at the four corners.
+Command: env -i … PYTHONPATH=<git archive of dbb0dde7> python -B -P a1corners_mine.py, carrier printed. The fixture is review 1's A1: a 6 × 6 grid on $[0,1]^2$, domain_sdf = the $L^\infty$ box, in DIRICHLET on x_min, plus wall NO_FLUX. The uniform comparison is the same box SDF with one NO_FLUX segment.
+corner
+mixed: segment, normal
+uniform: normal
+(0, 0)
+in, [−0.707107, −0.707107]
+[−1, 0]
+(1, 0)
+wall, [0.707107, −0.707107]
+[1, 0]
+(0, 1)
+wall, [−0.707107, 0.707107]
+[−1, 0]
+(1, 1)
+wall, [0.707107, 0.707107]
+[1, 0]
+Why they differ.
+The mixed path reads the BC's own domain. Under an SDF, _query_bounds ignores the geometry's box, so the normal is get_outward_normal: the SDF gradient's central difference at the kink, which is the diagonal.
+The uniform handler reads the geometry's box first (compute_boundary_normals path 1), so it writes the lowest-axis face's normal.
+The segment at a corner is still the argmax artefact described above. (0, 0) takes in, and (0, 1) takes wall through y_max.
+What a fix decides, in addition to the tie tolerance: which normal a corner gets under the SDF arm. The candidates are the diagonal, as now, or the chosen face's normal per corner_strategy. It also decides whether the uniform handler and the point owner read one box. That second question is GFDM boundary handler: the single-point normal is zero on a curved domain_sdf, where the bulk normal is the SDF's #2677's family, the three normal sources.
+derrring
+added 2 commits that reference this issue on Oct 15, 2026
+Close review 3 of #2674: scope the uniform-normal claim, correct the …
+...
+c7f613d
+HJB-GFDM classifies its boundary points through the point owner (#2512 …
+...
+a5a9898
+derrring
+added
+family: stratum-decided-per-consumerCorners, edges, CSG seams, kinks, BC-data jumps: each consumer decides alone; no owner classifiesCorners, edges, CSG seams, kinks, BC-data jumps: each consumer decides alone; no owner classifies
+on Oct 15, 2026
+derrring commented on Oct 15, 2026
+derrring
+on Oct 15, 2026
+OwnerAuthor
+More actions
+Family stratum-decided-per-consumer (#2698), adopted 2026-10-15. The fix goes through the point owner face_segments_at_point, which gains the reading of a corner or kink under domain_sdf. A second classifier is not the fix.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area: geometryMesh generation and geometric domainsMesh generation and geometric domainsfamily: per-backend-no-conformanceDispatch-selected implementations of one contract (backend/path/dim) with no conformance checkDispatch-selected implementations of one contract (backend/path/dim) with no conformance checkfamily: stratum-decided-per-consumerCorners, edges, CSG seams, kinks, BC-data jumps: each consumer decides alone; no owner classifiesCorners, edges, CSG seams, kinks, BC-data jumps: each consumer decides alone; no owner classifiespriority: mediumMedium priority issues for planned developmentMedium priority issues for planned developmentsize: mediumMedium effort - 1-3 daysMedium effort - 1-3 daystype: bugSomething isn't workingSomething isn't working
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

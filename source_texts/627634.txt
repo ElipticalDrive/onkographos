@@ -1,0 +1,455 @@
+Game Engine with Claude Code support. Contribute to MatthewLacerda2/rusty development by creating an account on GitHub.
+
+Per-object motion blur: TileMax/NeighborMax reconstruction filter (#1436) by MatthewLacerda2 · Pull Request #1458 · MatthewLacerda2/rusty · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+MatthewLacerda2
+commented
+Oct 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+What changed
+The camera-only motion blur (reprojecting each pixel's depth through last frame's view-projection, inside the composite) is replaced by per-object motion blur over the velocity target #1435 writes: the reconstruction filter of McGuire et al. 2012, weighted as Jimenez refined it for CoD: Advanced Warfare (2014).
+Shader engine/shaders/postfx/motion_blur.wgsl (new, standalone; split along the motion-blur seam only, postfx.wgsl's grading code is untouched apart from deleting the old motion_blur fn and its call):
+fs_tile_max_x then fs_tile_max_y: TileMax in two passes (each tile's pixel rows, then the tile), one texel per tile holding its longest streak. A streak is the pixel's NDC motion in pixels × intensity, clamped to max_length × view height; a non-finite motion (checked on the exponent bits) is no streak, so no inf/NaN reaches the gather or bloom. Two passes keep a 216 px tile (4K, clamp 0.2) at two 216-tap loops instead of one 46k-tap loop.
+fs_neighbor_max: the longest streak of each tile's 3×3 neighbourhood, so blur spreads past a silhouette.
+fs_gather: samples taps along the neighbourhood streak, each offset by a screen-space interleaved-gradient-noise jitter (pixel-keyed, not time-keyed). Tap weight = behind · reach(center_radius) + in_front · reach(tap_radius). Order is stack first, then distance (behind()): a tap drawn by a higher camera of the stack is wholly in front, a lower one wholly behind; on the same camera, a soft compare on each pixel's view distance from the velocity target (0.1 m soft band). Uncovered weight keeps the centre colour. A pixel whose neighbourhood streak is under 1 px returns textureLoad of the centre, so a still frame is exact.
+Rust render::postfx::motion_blur (new):
+MotionBlurPasses: the renderer-owned layout and four LazyPipelines, listed in Renderer::lazy_pipelines and so warmed by a windowed renderer.
+BlurTargets: per view, owned by PostFx::blur. A full-res HDR "blurred scene" target and the params uniform, kept while the view's size holds, plus TileTargets (TileMax rows, TileMax, NeighborMax; Rg16Float), kept while the tile size holds too, so a clamp ramp rebuilds only the tile textures. Allocated only while the view blurs, dropped on resize or on a frame without blur.
+PostFx::run_motion_blur encodes the four passes before the chain. PostFx::scene_color() is what bloom's bright-pass, the composite and the UI backdrop's composite_into now read (motion blur before bloom, as URP/HDRP).
+BlurParams (params.rs) is pure: the tile size is the half-streak rounded up to a multiple of 8 (Unity's rule, so the 3×3 neighbourhood covers every streak). BlurParams::per_frames(n) divides the shutter by n.
+Velocity target widened (Per-object motion vectors: a velocity buffer from each draw's current and previous transform (incl. skinned) #1435's): Rgba16Float. .b = the surface's distance from the camera that drew it (fs_velocity: length(world_position - camera_pos); the sky and unwritten pixels: render::motion::SKY_DISTANCE = 65504, mirrored in sky/motion.wgsl and held equal by a test). .a = the drawing camera's index in its stack (0 the base; the sky and the clear stay 0), from a new CameraUniforms.stack vec4 (x; Rust CameraUniform::stack, layout test updated to 256 bytes). It clears and composites like the velocity (nearest camera wins), so the blur's depth order survives a DepthOnly overlay that cleared the depth buffer, an overlay with a different near plane or FOV, and a wall nearer to the world camera than the gun is to its own camera.
+Behind-camera guard (restored from the old blur): fs_velocity writes zero motion where last frame's clip.w <= 1e-4, a surface that was behind the camera last frame (a projectile past the player's head), instead of a huge reprojected streak.
+Render-texture shutter: a render-texture camera drawn every N frames has a motion history N frames old. StackPass::motion_frames carries the frames since the slot last drew (render_texture::slots::frames_since, 1 on a first draw and for the screen), and the blur's shutter is divided by it, so a monitor's blur matches one frame's.
+Gate: motion::wanted(post, graphics, full, scene_view) decides both the velocity pass and the blur (blur_params(..).filter(..)), and run_motion_blur also needs this frame's velocity target. So no velocity target (first frame, a cut, Low, the player option, a shader preview, post_fx = false, the editor's Scene view) means no blur and no targets. The Scene view never blurs (Unity's doesn't), so flying the editor camera writes no velocity; the Game view and Play still blur.
+Removed: PostParams::prev_view_proj (and its common.wgsl mirror), the motion-blur slots in PostParams.flags / misc (now unused), and CameraCtx::base_prev_view_proj (no reader left).
+Knobs on CameraComponent (the issue's decision, answered yes):
+motion_blur_intensity: Unity's Intensity, the shutter fraction. Default 0.5 (180°), clamped 0..=1.
+motion_blur_max_length: Unity's Clamp, the longest streak as a fraction of view height. Default 0.05, clamped 0..=0.2.
+Each one has a shared authoring op (set_motion_blur_intensity / set_motion_blur_max_length, which hold the clamps), a Camera-card slider (the motion-blur widgets moved to inspector/components/camera/motion_blur.rs), Graphics.Get/SetMotionBlurIntensity / MaxLength, a field op, doc rows and save/load (serde default for a file without them).
+Timing: new GpuPass::MotionBlur (gpu_passes.motion_blur in Debug.Stats) covers the three tile passes and the gather.
+Getters without a screen camera all read "off" (false, 0, 0, 0): nothing blurs, so none claims a default. Graphics.md says exactly that.
+Docs: docs/api/Graphics.md gains a Per-object motion blur section (Scene view, stack-then-distance order under an overlay, the behind-camera guard, render-texture shutter, bloom order) and the two rows; docs/api/Debug.md gains the motion_blur pass key; docs/api-faithfulness.md's motion-blur row lists all four setters at their real read-site. PostFx::run's doc no longer says the blur reads depth_view.
+Why
+The camera-only blur smeared the viewmodel and never blurred anything moving under a still camera (an enemy sprinting past, a swing, a ragdoll). A gather along each pixel's own velocity would blur inside a silhouette and leave the edges hard, which reads worse than no blur. The reconstruction filter is what shipping shooters use, and Trepang2-class combat is the bar.
+Effect
+An object moving past a still camera blurs, and its blur reaches past its silhouette onto the background.
+The world blurs under camera rotation while a DepthOnly overlay camera's gun stays sharp, even with the player pressed against a wall.
+A still frame is pixel-identical to motion blur off.
+Behaviour change: motion blur no longer needs an active PostProcessing volume. It is the camera's, like FXAA, and the velocity pass (Per-object motion vectors: a velocity buffer from each draw's current and previous transform (incl. skinned) #1435) already ran without one, so a camera with motion blur on and no volume used to pay for velocity and get no blur. A camera with motion blur on (new cameras default to on) now blurs whatever moves in Play.
+Decisions
+Blur as its own pass, before the composite, not inside it. The composite just reads scene_color(). That keeps the blur out of Post Processing: colour grading (white balance, lift/gamma/gain) through an internal LUT #1440's grading code and makes "off" a byte-exact pass-through.
+Tile size from the clamp (Unity's rule) rather than a fixed ≈20 px, so the 3×3 NeighborMax always covers the longest allowed streak at any resolution.
+Clamp is a fraction of the view's height (Unity's convention; the issue said "screen fraction").
+Soft distance band 0.1 world units, on Euclidean view distance in a half float (its step passes 0.1 beyond ~128 m, where the compare becomes a hard nearer-wins).
+Stack index in a new CameraUniforms.stack slot rather than a push constant or a second uniform: every pass already binds the camera uniform, and the sky shaders' .a stays 0 untouched.
+Render-texture shutter divides by the actual frames since the last draw (update_every in steady state), so a monitor that skipped frames while hidden still blurs one frame's worth.
+Review fixes (second brief): Scene view gate, per-camera distance in the velocity target, bloom after blur, two-pass TileMax, size-only key for the blurred target, faithfulness row, consistent no-camera getters. Folding the passes into PostFx::run's encoder (optional) was not done: the blur still submits its own encoder.
+Review fixes (third brief): stack order before distance, the behind-camera guard plus non-finite streaks, the render-texture shutter, PostFx::run's doc.
+main is merged in, not rebased: the container refused the force-push, so 65e0816 (Post Processing: colour grading (white balance, lift/gamma/gain) through an internal LUT #1440, colour grading) came in as a merge commit. The conflicts were the shader registry list, the renderer's resource lists, the camera card's module list and postfx.wgsl's header and old motion_blur fn (deleted; grading's LUT kept).
+Captures
+The Camera card on main vs this branch (scratch scene with a camera; the default scene has none):
+before: https://github.com/MatthewLacerda2/rusty/blob/753851ee691b5cb9c3f2e39946ceba72942f0a8a/captures/1436-camera-card-before.png
+after (Intensity and Clamp sliders): https://github.com/MatthewLacerda2/rusty/blob/753851ee691b5cb9c3f2e39946ceba72942f0a8a/captures/1436-camera-card-after.png
+Both PNGs are removed in the next commit; none is on the branch head.
+Measurements (lavapipe, 640×360, 200 moving cubes + sky, turning camera, mean of 40 frames)
+Measured after the second review's fixes (uncommitted timing harness; "tiles only" short-circuits the gather to a copy by editing the runtime-loaded shader). The third review's fixes add one compare per tap and nothing to the tile passes; not re-measured.
+Medium
+High
+motion blur off (no velocity, no blur)
+36.1 ms
+35.4 ms
+velocity + three tile passes, gather a copy
+41.0 ms
+42.5 ms
+full blur (32 samples)
+45.0 ms
+41.6 ms
+Run-to-run noise on the container's CPU rasterizer is several ms (a repeat of the same runs read 36–50 ms), so the tile passes are within the noise beside the velocity pass. The 32-tap gather is the bulk of the rest. Lavapipe has no timestamp queries, so the real-GPU gpu_passes.motion_blur figure is a human item.
+Tests
+render::postfx::motion_blur::gpu_tests (lavapipe, RUSTY_REQUIRE_GPU=1):
+A cube moving past a still camera: pixels 1–4 px past both edges of its silhouette differ from the blur-off frame by 10 and 11 (≥ 4 required); the far sky is untouched.
+A still cube under a still camera, blur on, is byte-identical to blur off.
+Viewmodel: world + DepthOnly overlay camera with a gun, turned 8°. The gun's centre 7×7 px differ by 0; the world differs by up to 23.
+motion_blur::overlay_gpu_tests: the FPS stack, an enemy cube moving past a still wall. The wall past the enemy's edges smears by 73 (≥ 8 required), and the rows the enemy crosses are identical, to 0, to the same scene without the gun camera.
+motion_blur::stack_order_gpu_tests (new): a wall 0.35 m from the world camera, a gun 0.5–0.7 m from its DepthOnly camera bordering the wall on screen, the world camera turning 8°. The gun's inside (every pixel 2 px clear of its silhouette) differs from blur-off by 2 (≤ 2 required) while the wall's edge blurs by 111. With behind() reverted to distance only (shader edited at runtime), the gun differs by 80 and the test fails.
+motion::gpu_tests::gpu_a_surface_behind_the_camera_last_frame_writes_no_motion (new): a 10 m slab sliding forward past the camera's shoulder; the part of its side now 2 m ahead was 4 m behind the camera last frame and writes (0, 0). Without the guard it writes (0.68, -0.03) and fails.
+motion::gpu_tests: the velocity target's .b holds the face's distance (±0.05) and the sky's is SKY_DISTANCE.
+motion_blur::params_tests (adapter-free): tile sizing, the knobs landing in the uniform, out-of-range clamps, per_frames shrinking the shutter and not the clamp, and SKY_DISTANCE equal in Rust and WGSL. render_texture::tests: frames_since (1 on a first draw, never 0).
+postfx::params_tests: blur_params gating on Low, by the player option and allowed; motion blur runs without a volume. motion::tests: wanted is false for the Scene view.
+tests/graphics/main_camera.rs: without a screen camera the four motion-blur getters read false, 0, 0, 0.
+Authoring ops, Graphics.* clamp, parity (op vs Lua), the lazy-pipeline count, the timing pass names, the camera uniform's layout, and the scene-format fingerprint (re-blessed: two new camera fields).
+Gates
+On head 696cc35 (merges main 65e0816; its tree is byte-identical to the rebased tree the gates ran on): make quick-gates, make clippy, make doc deny, and make test with RUSTY_REQUIRE_GPU=1 (2919 + 3326 passed) all green. The GPU tests ran on the container's lavapipe; no snapshot or capture was blessed. Windows not dispatched: no path or process code.
+A scoped mutation run (mutants-on-request.yml, scope: diff) has been dispatched on this head; its report lands here.
+Seam
+PostFx::scene_color() is the HDR image bloom and the composite read: the blurred scene when motion blur ran this frame, else scene_hdr. A later pass that must run after motion blur and before the composite should read and write through it.
+The velocity target (render::motion::VELOCITY_FORMAT, Rgba16Float) carries .xy NDC motion, .b the drawing camera's view distance (SKY_DISTANCE where the sky or nothing drew) and .a that camera's stack index (CameraUniforms.stack.x). Any pass writing it as a second colour target writes all four.
+motion::wanted(post, graphics, full, scene_view) is the one gate for velocity and blur.
+postfx::params::blur_params is the one place the camera's knobs become BlurParams, StackPass::motion_frames how many frames one draw's velocities span, and GpuPass::MotionBlur its timing bucket.
+For a human
+On a real GPU (Metal), read Debug.Stats().gpu_passes.motion_blur on Medium and High in a dense scene with the camera turning, and check the gather's cost at 32 samples.
+In a real window, play-test a strafe past an enemy, a fast mouse flick and standing against a wall, and check that the gun stays crisp and the 0.05 clamp feels right.
+Closes #1436
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01MHYiuvGdPSrwDx5XqtXgjT
+claude
+added 6 commits
+October 26, 2026 08:20
+Per-object motion blur: TileMax/NeighborMax reconstruction filter (#1436
+…
+746fca5
+```
+)
+
+Replace the camera-only reprojection blur with McGuire's reconstruction
+filter over the velocity target: two tile passes and a depth-weighted
+gather into a blurred HDR scene the composite reads. Adds the camera's
+motion_blur_intensity and motion_blur_max_length knobs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FkEPH7rMQVuaT99MzkjAQq
+```
+motion blur test: check the four pixels past each edge, not one
+…
+e1930f4
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FkEPH7rMQVuaT99MzkjAQq
+```
+Bless the scene format and count the motion blur's lazy pipelines (#1436
+…
+6aa763b
+```
+)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FkEPH7rMQVuaT99MzkjAQq
+```
+Graphics.md: per-object motion blur and its knobs (#1436)
+…
+639951f
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FkEPH7rMQVuaT99MzkjAQq
+```
+Captures for the PR (removed in the next commit)
+…
+753851e
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FkEPH7rMQVuaT99MzkjAQq
+```
+Remove the PR's captures
+…
+c1bf1d4
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FkEPH7rMQVuaT99MzkjAQq
+```
+MatthewLacerda2
+marked this pull request as ready for review
+October 26, 2026 08:48
+MatthewLacerda2
+marked this pull request as draft
+October 26, 2026 08:55
+MatthewLacerda2
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Independent review
+A fresh reviewer at high level (two saved CameraComponent fields). 7 findings, each checked against the code, all sent back to the coder (re-brief on the issue):
+The editor's Scene view blurs whenever the developer moves the camera (no edit-mode gate, and the volume condition is gone).
+Under a DepthOnly viewmodel overlay, the stack's depth is cleared, so the gather's depth ordering is lost for every world pixel.
+Bloom's bright-pass reads the unblurred scene.
+TileMax is a serial tile×tile loop per fragment: slow at a large clamp and high resolution.
+A tile-size change reallocates the full-resolution blurred target.
+docs/api-faithfulness.md's motion-blur row is stale.
+The motion-blur getters disagree with each other, and with the page, when there's no screen camera.
+Checked and fine: no migration or alias; GPU state isn't saved; the gate covers post_fx = false and the shader preview; targets are dropped on resize; pipelines are lazy and warmed; knobs are clamped; parity holds.
+This was referenced Oct 26, 2026
+Per-object motion blur: reconstruction filter (TileMax/NeighborMax) over the velocity buffer
+#1436
+Closed
+Post Processing: colour grading (white balance, lift/gamma/gain) through an internal LUT
+#1440
+Closed
+Motion blur: the review's fixes (#1436)
+…
+9df66f8
+```
+- The editor's Scene view never blurs and writes no velocity, as Unity's
+  doesn't: `motion::wanted` takes the view's `editor_mode`, and the blur
+  is gated by the same predicate.
+- Depth order under a `DepthOnly` overlay: the velocity target is now
+  `Rgba16Float` and carries each camera's own view distance in `.b`
+  (sky and unwritten pixels: `SKY_DISTANCE`), composited nearest camera
+  wins like the velocity. The gather reads it instead of decoding the
+  stack's depth through the base projection; the depth binding and
+  `BlurParams::depth` are gone. New lavapipe test: world + gun camera
+  on its own layer orders the moving enemy against the wall exactly as
+  without the gun camera (fails on the previous head by 35).
+- Bloom's bright-pass reads `scene_color()`: motion blur before bloom,
+  as in URP/HDRP.
+- TileMax reduces in two passes (each tile row, then the tile), so a
+  216 px tile is two 216-tap loops, not one 46k-tap loop.
+- `BlurTargets` keeps the full-size blurred target across a tile-size
+  change; only the tile textures are rebuilt.
+- Without a screen camera every motion-blur getter reads "off"
+  (false/0/0/0), documented in Graphics.md; api-faithfulness lists the
+  two new setters at their real read-site.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015Gmnkn13AvMmRYBUzTbALn
+```
+MatthewLacerda2
+marked this pull request as ready for review
+October 26, 2026 09:33
+MatthewLacerda2
+marked this pull request as draft
+October 26, 2026 09:40
+MatthewLacerda2
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Independent review, round 2
+A second fresh reviewer read 9df66f8c at high level. 4 findings, each checked, all sent back to the coder (re-brief on the issue):
+Ordering by each camera's own view distance loses the stack order: a wall nearer the world camera than the gun is to its camera smears over the gun. This is a regression of this commit, which the overlay test doesn't reach.
+The old blur's guard on last frame's clip.w <= 0 was dropped: a flipped streak, or inf/NaN into bloom.
+A render-texture slot drawn every N frames blurs N frames of motion.
+PostFx::run's doc says motion blur reads depth.
+Dropped: the serde(default) pattern (matches its siblings); per-frame bind groups (the post-FX norm); the extra submit (optional per the brief).
+This was referenced Oct 26, 2026
+Post Processing: import user LUTs (.cube and strip PNG) for colour lookup
+#1441
+Closed
+Post Processing: auto-exposure (histogram eye adaptation)
+#1444
+Closed
+claude
+added 3 commits
+October 26, 2026 09:56
+Motion blur: stack order before distance, the behind-camera guard, re…
+…
+cda0e35
+```
+…nder-texture shutter (#1436)
+
+The velocity target's .a carries the drawing camera's stack index, and
+fs_gather puts a higher camera in front before comparing distances, so a
+gun stays sharp against a wall nearer to the world camera than the gun is
+to its own. fs_velocity writes no motion for a surface behind the camera
+last frame, and a non-finite streak reads as none. A render texture drawn
+every N frames divides its shutter by the frames since its last draw.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MHYiuvGdPSrwDx5XqtXgjT
+```
+uniform layout test: the camera uniform's stack slot (#1436)
+…
+1c443b3
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MHYiuvGdPSrwDx5XqtXgjT
+```
+Merge main (colour grading, #1440) into 1436-object-motion-blur
+…
+696cc35
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MHYiuvGdPSrwDx5XqtXgjT
+```
+MatthewLacerda2
+marked this pull request as ready for review
+October 26, 2026 10:21
+MatthewLacerda2
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Independent review, round 3: cda0e358 addresses round 2's findings. The stack index in .a puts a higher camera in front before distance (stack_order_gpu_tests::gpu_the_gun_stays_over_a_wall_nearer_to_its_own_camera); the behind-camera guard is restored and non-finite streaks read as none; render-texture shutter is divided by its frame gap; the PostFx::run doc is fixed. Merged with main (#1440). Direct fixes, so no further reviewer.
+MatthewLacerda2
+added
+queue
+Go-ahead: the merge queue may take this PR
+and removed
+queue
+Go-ahead: the merge queue may take this PR
+labels
+Oct 26, 2026
+MatthewLacerda2
+marked this pull request as draft
+October 26, 2026 10:23
+MatthewLacerda2
+mentioned this pull request
+Oct 26, 2026
+cloud-brief: rebase onto main, never merge main into a branch
+#1462
+Merged
+MatthewLacerda2
+added a commit
+that referenced
+this pull request
+Oct 26, 2026
+cloud-brief: rebase onto main, never merge main into a branch (#1462)
+…
+f0f41a8
+```
+A merge of main in PR #1458 made the queue's rebase replay conflicts the merge
+had resolved, and the PR was handed back.
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+```
+MatthewLacerda2
+mentioned this pull request
+Oct 26, 2026
+Post Processing: automatic exposure by a GPU luminance histogram (#1444)
+#1460
+Merged
+1 task
+github-actions
+Bot
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Mutation on request
+Scoped on request to the Rust this branch changed against origin/main (30 files): 43 mutants planned.
+caught
+missed
+timeout
+unviable
+28
+6
+0
+9
+These were mutated and no test failed. Strengthen the tests covering them, or say why a survivor is equivalent:
+```
+src/editor/inspector/components/camera/mod.rs:30:5: replace draw_camera with ()
+src/editor/inspector/components/camera/motion_blur.rs:17:5: replace draw_motion_blur with ()
+src/editor/inspector/components/camera/motion_blur.rs:52:5: replace slider -> bool with false
+src/editor/inspector/components/camera/motion_blur.rs:52:5: replace slider -> bool with true
+src/render/postfx/motion_blur/mod.rs:146:52: replace != with == in PostFx::run_motion_blur
+src/render/postfx/params.rs:80:9: delete field inv_view_proj from struct PostParams expression in build_post_params
+```
+From this run.
+MatthewLacerda2
+mentioned this pull request
+Oct 26, 2026
+Per-object motion blur: TileMax/NeighborMax reconstruction filter (#1436)
+#1463
+Closed
+2 tasks
+MatthewLacerda2
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Superseded by #1463: the same tree, flattened onto main on a new branch (this branch's merge commit can't be rebased by the queue, and the force-push to flatten it was refused). The review history stays here.
+MatthewLacerda2
+closed this
+Oct 26, 2026
+MatthewLacerda2
+mentioned this pull request
+Oct 26, 2026
+Per-object motion blur: TileMax/NeighborMax reconstruction filter (#1436)
+#1464
+Merged
+2 tasks
+MatthewLacerda2
+added a commit
+that referenced
+this pull request
+Oct 26, 2026
+Per-object motion blur: TileMax/NeighborMax reconstruction over the v…
+…
+9ba4716
+```
+…elocity target (#1436)
+
+PR #1458's branch flattened onto main: it carried a merge of main, which the
+merge queue's rebase can't replay. The tree is that branch merged with main.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+MatthewLacerda2
+added a commit
+that referenced
+this pull request
+Oct 26, 2026
+Per-object motion blur: TileMax/NeighborMax reconstruction filter (#1436
+…
+fa9b601
+```
+) (#1464)
+
+* Per-object motion blur: TileMax/NeighborMax reconstruction over the velocity target (#1436)
+
+PR #1458's branch flattened onto main: it carried a merge of main, which the
+merge queue's rebase can't replay. The tree is that branch merged with main.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Move the motion-blur block into Renderer::blur_scene (#1436)
+
+run_post_fx grew past clippy's 50-line limit once #1444's exposure meter
+joined it; the blur gating now lives in its own method.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XBaBXgGPRKzVKVHuE5gucy
+
+---------
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+```
+This was referenced Oct 26, 2026
+Post effects as modules: one folder per effect, one registry line per layer, no shared struct or shader body
+#1467
+Closed
+cloud-brief: the fallback when a force-push is refused
+#1475
+Merged
+MatthewLacerda2
+deleted the
+1436-object-motion-blur
+branch
+October 27, 2026 02:33
+This was referenced Oct 29, 2026
+Update PR branches by merging main in, not rebasing: no force-push in the normal flow
+#1568
+Closed
+Update PR branches by merging main in, not rebasing (#1568)
+#1577
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

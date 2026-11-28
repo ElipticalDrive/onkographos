@@ -1,0 +1,103 @@
+--- v007.md
++++ v008.md
+@@ -28,16 +28,14 @@
+ 
+ ### Training Steps
+-1.  Define bounding box $V$ for the scene [S6, unofficial].
+-2.  Sample $k$ uniform values for $x, y, z$ within $V$ and $l$ uniform values for $\theta \in [0, \pi], \phi \in [0, 2\pi]$ [S6, unofficial].
+-3.  Compute $\mathcal{F}_{\text{pos}}$ for all position combinations and $\mathcal{F}_{\text{dir}}$ for all direction combinations to initialize caches (optional, primarily for initialization or analysis; training typically optimizes the MLPs directly on rendered images) [S6, unofficial].
+-4.  Train $\mathcal{F}_{\text{pos}}$ and $\mathcal{F}_{\text{dir}}$ jointly using the standard NeRF loss (MSE between rendered and ground truth colors) [S6, unofficial].
++1.  Train $\mathcal{F}_{\text{pos}}$ and $\mathcal{F}_{\text{dir}}$ jointly using the standard NeRF loss (MSE between rendered and ground truth colors) [S6, unofficial].
++2.  Define a bounding box $V$ covering the scene [S6, unofficial].
++3.  Uniformly sample $k$ values for $x, y, z$ within $V$ and $l$ values for $\theta \in [0, \pi], \phi \in [0, 2\pi]$ [S6, unofficial].
++4.  Compute $\mathcal{F}_{\text{pos}}$ for all position combinations and $\mathcal{F}_{\text{dir}}$ for all direction combinations to populate the caches [S6, unofficial].
+ 
+ ### Inference Steps
+ 1.  **Ray Generation:** For each pixel, generate a ray $\mathbf{r}$ defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [G].
+-2.  **Empty Space Skipping:** Intersect $\mathbf{r}$ with the collision mesh. Start integration only after the first hit [S6, unofficial].
++2.  **Empty Space Skipping:** Intersect $\mathbf{r}$ with the collision mesh derived from the density volume via Marching Cubes [S6, unofficial]. Start integration only after the first hit [S6, unofficial].
+ 3.  **Sampling:** Uniformly sample $N$ points $\mathbf{p}_i$ along the ray within the mesh bounds [S6, unofficial].
+-4.  **Cache Lookup:**
+-    *   For each $\mathbf{p}_i$, lookup $\sigma_i$ and $(\mathbf{u}_i, \mathbf{v}_i, \mathbf{w}_i)$ from the Position Cache using nearest-neighbor interpolation [S6, unofficial].
+-    *   For the ray direction $\mathbf{d}$, lookup $\boldsymbol{\beta}$ from the Direction Cache using trilinear sampling (on the $\theta, \phi$ grid) [S6, unofficial].
++4.  **Cache Lookup:** For each $\mathbf{p}_i$, lookup $\sigma_i$ and $(\mathbf{u}_i, \mathbf{v}_i, \mathbf{w}_i)$ from the Position Cache using nearest-neighbor interpolation [S6, unofficial]. For the ray direction $\mathbf{d}$, lookup $\boldsymbol{\beta}$ from the Direction Cache using trilinear sampling on the $\theta, \phi$ grid [S6, unofficial].
+ 5.  **Color Computation:** Compute color $\mathbf{c}_i$ for each sample point:
+     $$
+@@ -74,4 +72,15 @@
+     return t_min, t_max
+ 
++def nearest_neighbor_lookup(grid, point):
++    """Simplified nearest-neighbor lookup returning (sigma, u, v, w)."""
++    idx = [int(round(p)) for p in point]
++    return grid[idx]
++
++def trilinear_lookup(grid, theta, phi):
++    """Simplified trilinear lookup returning beta vector."""
++    idx_t = int(theta / math.pi * (grid.shape[0] - 1))
++    idx_p = int(phi / (2 * math.pi) * (grid.shape[1] - 1))
++    return grid[idx_t, idx_p]
++
+ def fast_nerf_infer(ray_origin, ray_direction, pos_cache, dir_cache, D, bounds, step_size):
+     """
+@@ -81,6 +90,6 @@
+         ray_origin: (3,) array, camera origin.
+         ray_direction: (3,) array, normalized ray direction.
+-        pos_cache: Sparse 3D grid storing {sigma, u, v, w}. Access via nearest neighbor.
+-        dir_cache: Sparse 2D grid storing beta. Access via trilinear interpolation on theta/phi.
++        pos_cache: Sparse 3D grid storing {sigma, u, v, w}.
++        dir_cache: Sparse 2D grid storing beta.
+         D: Number of components (e.g., 8).
+         bounds: [min_x, max_x, min_y, max_y, min_z, max_z] of the scene bounding box.
+@@ -90,14 +99,11 @@
+         color: (3,) array, RGB color.
+     """
+-    # 1. Empty Space Skipping using Bounding Box (proxy for collision mesh)
++    # 1. Empty Space Skipping: Intersect ray with collision mesh (approximated here by AABB) [S6, unofficial]
+     t_near, t_far = ray_aabb_intersect(ray_origin, ray_direction, bounds)
+     if t_near is None:
+         return (0.0, 0.0, 0.0)
+     
+-    # Handle rays starting inside the volume
+     t_start = max(0.0, t_near)
+     t_end = t_far
+-    
+-    # 2. Sample points along the ray
+     num_samples = int(round((t_end - t_start) / step_size))
+     if num_samples <= 0:
+@@ -107,5 +113,5 @@
+     theta = math.acos(max(-1.0, min(1.0, ray_direction[2])))
+     phi = math.atan2(ray_direction[1], ray_direction[0])
+-    beta = dir_cache.trilinear_sample(theta, phi)
++    beta = trilinear_lookup(dir_cache, theta, phi)
+     
+     total_color = (0.0, 0.0, 0.0)
+@@ -116,8 +122,8 @@
+         p = ray_origin + ray_direction * t
+         
+-        # 3. Cache Lookup
+-        sigma, u, v, w = pos_cache.nearest_neighbor_sample(p)
++        # 2. Cache Lookup
++        sigma, u, v, w = nearest_neighbor_lookup(pos_cache, p)
+         
+-        # 4. Color Computation
++        # 3. Color Computation
+         r = sum(beta[j] * u[j] for j in range(D))
+         g = sum(beta[j] * v[j] for j in range(D))
+@@ -125,5 +131,5 @@
+         c = (r, g, b)
+         
+-        # 5. Volume Rendering Integration
++        # 4. Volume Rendering Integration
+         alpha = 1.0 - math.exp(-sigma * step_size)
+         weight = transmittance * alpha
+@@ -144,8 +150,9 @@
+ *   **$l$ (Direction Grid Size):** Number of uniform samples for each ray direction coordinate ($\theta, \phi$). Typical values: 256 [S6, unofficial].
+ *   **Grid Resolution:** Number of divisions of the longest side of the bounding volume. Typical values: $256^3, 384^3, 512^3, 768^3, 1024^3$ [S6, unofficial].
++*   **Memory Limits:** Discretizing the full 5D space with 512 bins per dimension would require ~176 TB, which is infeasible. FastNeRF reduces this to ~54 GB (dense) or ~3 GB (sparse) [S6, unofficial][S5].
++*   **Memory Complexity:** Caching standard NeRF is $O(k^3 l^2)$. FastNeRF reduces this to $O(k^3 (1 + 3D) + l^2 D)$ [S6, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+ *   **Aliasing:** Caching the model to a grid after training can introduce aliasing artifacts, leading to a decrease in metrics as a function of grid resolution [S6, unofficial].
+-*   **Memory Limits:** Discretizing the full 5D space with 512 bins per dimension would require ~176 TB, which is infeasible. FastNeRF reduces this to ~54 GB (dense) or ~3 GB (sparse) [S6, unofficial][S5].
+ *   **Mesh Complexity:** For density volumes larger than $512^3$, the collision mesh must be downsampled by a factor of two to reduce complexity [S6, unofficial].
+ *   **Uncached Performance:** Without caching, FastNeRF is slower than standard NeRF due to larger MLPs (384 hidden units vs 256), though it performs identically to NeRF when using 256 hidden units [S6, unofficial].

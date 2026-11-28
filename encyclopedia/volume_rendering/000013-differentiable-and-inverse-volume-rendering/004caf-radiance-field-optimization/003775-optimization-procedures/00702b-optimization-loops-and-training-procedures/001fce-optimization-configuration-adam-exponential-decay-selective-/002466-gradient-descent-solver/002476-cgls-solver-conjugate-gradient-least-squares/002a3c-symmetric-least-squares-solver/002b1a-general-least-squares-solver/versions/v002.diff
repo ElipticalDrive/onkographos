@@ -1,0 +1,175 @@
+--- v001.md
++++ v002.md
+@@ -1,4 +1,3 @@
+ # General Least Squares Solver
+-Also called: Normal Equations Solver (via Symmetric Solver), Non-Symmetric Least Squares via Normal Equations
+ ## Overview
+ The General Least Squares Solver addresses the overdetermined linear system $Ax = b$ for a non-symmetric matrix $A$ by transforming it into a symmetric positive semi-definite system via the normal equations $A^T A x = A^T b$ [S1, unofficial]. It is distinguished from its parent, the Symmetric Least Squares Solver, by its preprocessing step of explicitly forming $A^T A$ and $A^T b$, which squares the condition number of the original system, thereby gaining computational speed at the cost of numerical stability for ill-conditioned inputs [S1, unofficial].
+@@ -21,70 +20,109 @@
+ 
+ **Steps:**
+-1. **Transpose**: Compute $A^T$ from $A$. Let this be $A^T$.
+-2. **Form Normal Matrix**: Compute $A^T A$. Since $A^T A$ is symmetric, store it in a symmetric matrix structure $ATA$.
+-3. **Form Right-Hand Side**: Compute $A^T b$. Let this be $b'$.
+-4. **Solve Symmetric System**: Call the Symmetric Least Squares Solver (SVD-based pseudoinverse) on $ATA$ and $b'$ to find $x$.
+-   - The Symmetric Solver computes the SVD of $ATA$, calculates the pseudoinverse, and multiplies by $b'$.
+-5. **Return**: Return $x$ and the residual error $\|Ax - b\|$.
++1. **Transpose**: Compute $A^T$ from $A$ using `MatUtils.transpose` [S1, unofficial].
++2. **Form Normal Matrix**: Compute $ATA = A^T A$ using `MatUtils.mmul_ata` [S1, unofficial].
++3. **Form Right-Hand Side**: Compute $ATb = A^T b$ using `MatUtils.vmul` [S1, unofficial].
++4. **Solve Symmetric System**: Call `solveSymmetric(ata, atb, x, svd_tol, svd_sweeps, pinv_tol)` to find $x$ [S1, unofficial].
++5. **Return**: Return $x$ and the residual error $\|Ax - b\|$ [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def solve_general_least_squares(A, b, svd_tol, svd_sweeps, pinv_tol):
+-    # Step 1: Transpose A
++    # Step 1: Transpose A into AT
+     AT = transpose(A)
+-    
+     # Step 2: Compute ATA = A^T * A
+-    # Since ATA is symmetric, we can use a symmetric matrix structure
+     ATA = matmul_symmetric(AT, A)
+-    
+     # Step 3: Compute ATb = A^T * b
+     ATb = vmul(AT, b)
+-    
+-    # Step 4: Solve symmetric system ATA * x = ATb using SVD pseudoinverse
+-    # This calls the Symmetric Least Squares Solver
++    # Step 4: Solve symmetric system ATA * x = ATb
+     x = solve_symmetric(ATA, ATb, svd_tol, svd_sweeps, pinv_tol)
+-    
+     # Step 5: Calculate residual error
+     residual = calc_error(A, x, b)
+-    
+     return x, residual
+ 
++def transpose(M):
++    rows, cols = len(M), len(M[0])
++    return [[M[j][i] for j in range(rows)] for i in range(cols)]
++
++def matmul_symmetric(AT, A):
++    # Computes A^T * A. Since result is symmetric, fills both triangles.
++    n = len(A)
++    ATA = [[0.0] * n for _ in range(n)]
++    for i in range(n):
++        for j in range(i, n):
++            val = sum(AT[i][k] * A[k][j] for k in range(len(A)))
++            ATA[i][j] = val
++            ATA[j][i] = val
++    return ATA
++
++def vmul(M, v):
++    return [sum(M[i][j] * v[j] for j in range(len(v))) for i in range(len(M))]
++
+ def solve_symmetric(ATA, ATb, svd_tol, svd_sweeps, pinv_tol):
+-    # Compute SVD of symmetric matrix ATA
+-    # ATA = V * D * V^T (since symmetric, U=V)
++    # Compute SVD of symmetric ATA: ATA = V * D * V^T
+     V, D = get_symmetric_svd(ATA, svd_tol, svd_sweeps)
+-    
+-    # Compute pseudoinverse of ATA
+-    # ATA^+ = V * D^+ * V^T
++    # Compute pseudoinverse: ATA^+ = V * D^+ * V^T
+     ATA_pinv = pseudoinverse_symmetric(ATA, V, D, pinv_tol)
+-    
+     # Solve for x
+     x = vmul(ATA_pinv, ATb)
+-    
+     return x
+ 
++def get_symmetric_svd(M, tol, sweeps):
++    # Standard Jacobi SVD for symmetric matrices [G]
++    # Iteratively applies Givens rotations to diagonalize M
++    n = len(M)
++    V = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
++    D = [M[i][i] for i in range(n)]
++    for _ in range(sweeps):
++        for i in range(n):
++            for j in range(i + 1, n):
++                if abs(M[i][j]) < tol: continue
++                tau = (D[j] - D[i]) / (2.0 * M[i][j])
++                stt = (1.0 + tau * tau) ** 0.5
++                tan_val = 1.0 / ((tau >= 0) * (tau + stt) + (tau < 0) * (tau - stt))
++                c = 1.0 / (1.0 + tan_val * tan_val) ** 0.5
++                s = tan_val * c
++                # Apply rotation to M and accumulate in V
++                for k in range(n):
++                    M[i][k], M[j][k] = c * M[i][k] + s * M[j][k], -s * M[i][k] + c * M[j][k]
++                    V[k][i], V[k][j] = c * V[k][i] + s * V[k][j], -s * V[k][i] + c * V[k][j]
++                D[i], D[j] = M[i][i], M[j][j]
++    return V, D
++
+ def pseudoinverse_symmetric(ATA, V, D, pinv_tol):
+-    # D is diagonal matrix of singular values
+-    # Compute D^+ where 1/sigma if sigma > pinv_tol else 0
+-    D_inv = zeros_like(D)
+-    for i in range(len(D)):
+-        if D[i] > pinv_tol:
+-            D_inv[i] = 1.0 / D[i]
+-        else:
+-            D_inv[i] = 0.0
+-            
+-    # ATA^+ = V * D^+ * V^T
++    # D is diagonal of singular values
++    D_inv = [1.0 / d if d > pinv_tol else 0.0 for d in D]
++    # ATA^+ = V * diag(D_inv) * V^T
+     ATA_pinv = matmul(V, matmul_diag(D_inv, transpose(V)))
+     return ATA_pinv
++
++def matmul_diag(D_inv, M):
++    # Multiplies diagonal matrix D_inv with M
++    return [[D_inv[i] * M[i][j] for j in range(len(M[0]))] for i in range(len(M))]
++
++def matmul(A, B):
++    rows_A, cols_A = len(A), len(A[0])
++    cols_B = len(B[0])
++    C = [[0.0] * cols_B for _ in range(rows_A)]
++    for i in range(rows_A):
++        for k in range(cols_A):
++            if A[i][k] == 0: continue
++            for j in range(cols_B):
++                C[i][j] += A[i][k] * B[k][j]
++    return C
++
++def calc_error(A, x, b):
++    Ax = vmul(A, x)
++    return sum((Ax[i] - b[i]) ** 2 for i in range(len(b))) ** 0.5
+ ```
+ 
+ **Parameters:**
+-- $svd\_tol$: Default not given in sources. [G] Typical value $1e-6$.
+-- $svd\_sweeps$: Default not given in sources. [G] Typical value 10-20 for $3 \times 3$ matrices.
+-- $pinv\_tol$: Default not given in sources. [G] Typical value $1e-6$.
++- $svd\_tol$: Default not given in the sources. [G] Typical value $1e-6$.
++- $svd\_sweeps$: Default not given in the sources. [G] Typical value 10-20 for $3 \times 3$ matrices.
++- $pinv\_tol$: Default not given in the sources. [G] Typical value $1e-6$.
+ 
+ **Edge Cases:**
+-- Ill-conditioned $A$: Squaring the condition number ($\kappa(A^T A) = \kappa(A)^2$) can lead to significant numerical instability and loss of precision.
+-- Singular $A^T A$: The pseudoinverse handles this by zeroing out components corresponding to singular values below $pinv\_tol$.
++- Ill-conditioned $A$: Squaring the condition number ($\kappa(A^T A) = \kappa(A)^2$) can lead to significant numerical instability and loss of precision [G].
++- Singular $A^T A$: The pseudoinverse handles this by zeroing out components corresponding to singular values below $pinv\_tol$ [G].
+ 
+ ## Subtopics
+@@ -94,13 +132,13 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Dominated by matrix multiplication $O(M^2 N)$ for forming $A^T A$ and $A^T b$, and $O(N^3)$ for SVD. For $3 \times 3$ matrices, this is constant time but faster than iterative methods like CGLS for small systems.
+-- **Memory Complexity**: $O(MN)$ to store $A$, $A^T$, $ATA$, and $ATb$.
+-- **Strengths**: Simple to implement; leverages highly optimized symmetric solvers; fast for small, well-conditioned systems.
+-- **Limitations**: Numerically unstable for ill-conditioned matrices due to squared condition number; not suitable for large sparse systems where forming $A^T A$ is prohibitive.
+-- **When to use**: Small dense systems where speed is critical and $A$ is well-conditioned.
+-- **When not to use**: Ill-conditioned systems or large sparse systems.
++- Time Complexity: Not given in the sources.
++- Memory Complexity: Not given in the sources.
++- Strengths: Not given in the sources.
++- Limitations: Not given in the sources.
++- When to use: Not given in the sources.
++- When not to use: Not given in the sources.
+ 
+ ## Background
+-The method is derived from the standard normal equations approach to least squares, implemented in the DualContouringCSharp repository [S1, unofficial]. It builds on the Symmetric Least Squares Solver which uses SVD for robust pseudoinverse calculation.
++The method is derived from the standard normal equations approach to least squares, implemented in the DualContouringCSharp repository [S1, unofficial]. It builds on the Symmetric Least Squares Solver which uses SVD for robust pseudoinverse calculation [G].
+ 
+ ## Sources

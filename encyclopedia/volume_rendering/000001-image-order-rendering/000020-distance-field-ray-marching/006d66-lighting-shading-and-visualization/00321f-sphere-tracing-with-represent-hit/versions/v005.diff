@@ -1,0 +1,353 @@
+--- v004.md
++++ v005.md
+@@ -4,191 +4,205 @@
+ 
+ ## Overview
+-Sphere Tracing with Represent Hit is a deferred rendering technique that extends standard sphere tracing by tracking two distinct hit points per pixel: a primary **surface hit** (the nearest geometric intersection) and a **represent hit** (a proxy for the surface at the pixel's radius) [S1, unofficial]. This dual-pass approach is designed to handle transparency and aliasing artifacts at object edges by evaluating visibility and occlusion from both points and selecting the ray with greater visual impact (higher alpha) [S1, unofficial]. It differs from standard sphere tracing by explicitly maintaining a "represent" state to capture edge information that would otherwise be missed by a single convergence check [S1, unofficial].
++Sphere Tracing with Represent Hit is a deferred rendering technique for Signed Distance Fields (SDF) that tracks both a primary surface hit and a 'represent' hit (a proxy for the surface at the pixel radius) to handle transparency and aliasing at object edges [S1, unofficial]. It selects the ray with greater visual impact (higher alpha) to trace, writing results to two render targets: index 0 for the surface and index 1 for the represent hit [S1, unofficial].
+ 
+ ## How it works
+-The method operates as a deferred rendering pass, writing results to two render targets: index 0 for the surface hit and index 1 for the represent hit [S1, unofficial]. It assumes a Signed Distance Field (SDF) map is available, where each sample returns a `float2` containing the distance and a material ID [S1, unofficial].
+-
+-### Inputs and Outputs
+-**Inputs:**
+-*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized) [S1, unofficial].
+-*   Clipping planes: `ClippingPlanes.x` (near) and `ClippingPlanes.y` (far) [S1, unofficial].
+-*   `SphereTracingSteps`: Maximum number of marching iterations [S1, unofficial].
+-*   `RadiusPixel`: The radius of the pixel in world space, used to determine the "represent" zone [S1, unofficial].
+-*   SDF Map: A texture or function returning `(distance, material_id)` [S1, unofficial].
+-*   `DisableAntiAliasing`: Boolean flag to switch between AA and non-AA variants [S1, unofficial].
+-
+-**Outputs:**
+-*   `surfaceHit`: Structure containing `DistanceToWorld`, `TraceDistance`, `MaterialId`, and `Position` [S1, unofficial].
+-*   `representHit`: Structure containing `DistanceToWorld`, `Alpha`, `MaterialId`, and `Position` [S1, unofficial].
+-
+-### Data Structures
+-The algorithm maintains two hit structures. The exact layout is inferred from the usage in [S1, unofficial]:
+-
+-**Hit Structure:**
+-*   `DistanceToWorld`: `float` (distance from camera origin to hit point)
+-*   `TraceDistance`: `float` (distance along the ray for shading/lighting calculations)
+-*   `MaterialId`: `int` (identifier for the material at the hit point; -1 indicates no hit)
+-*   `Position`: `float3` (world space position of the hit)
+-*   `Alpha`: `float` (opacity/visual impact, specific to represent hit)
+-
+-### Algorithm Steps
+-1.  **Initialization**:
+-    *   Set `surfaceHit` and `representHit` distances to `ClippingPlanes.x` and `ClippingPlanes.y` respectively [S1, unofficial].
+-    *   Set `surfaceHit.MaterialId = -1` and `representHit.MaterialId = -1` [S1, unofficial].
+-    *   Set `representHit.DistanceToWorld = 1000000` (a large value to ensure updates) [S1, unofficial].
+-    *   Set `representHit.Alpha = 0` [S1, unofficial].
+-    *   Initialize ray distance `t = ClippingPlanes.x` [S1, unofficial].
+-    *   Sample the SDF at `r.Origin + t * r.Direction` to get `currentMap` (distance, material ID) [S1, unofficial].
+-    *   Initialize loop counter `i = 0` and `representFound = false` [S1, unofficial].
+-
+-2.  **Marching Loop**:
+-    *   Loop `i` from 0 to `SphereTracingSteps - 1` [S1, unofficial].
+-    *   Calculate adaptive epsilon: `epsilon = 0.0015 * t` [S1, unofficial].
+-    *   **Surface Hit Check**: If `currentMap.distance <= epsilon`:
+-        *   Set `surfaceHit.DistanceToWorld = t` [S1, unofficial].
+-        *   Set `surfaceHit.TraceDistance = t` [S1, unofficial].
+-        *   Set `surfaceHit.MaterialId = currentMap.material_id` [S1, unofficial].
+-        *   Set `surfaceHit.Position = r.Origin + t * r.Direction` [S1, unofficial].
+-        *   Break loop [S1, unofficial].
+-    *   **Represent Hit Logic**:
+-        *   Sample next point: `nextMap = Map(r.Origin + (t + currentMap.distance) * r.Direction)` [S1, unofficial].
+-        *   Check if inside pixel radius: If `currentMap.distance < (t * RadiusPixel)`:
+-            *   If `nextMap.distance > currentMap.distance` (moving away from surface) and `representFound == false`:
+-                *   Set `representFound = true` [S1, unofficial].
+-            *   If `currentMap.distance < representHit.DistanceToWorld` and (`representHit.MaterialId == -1` or `representHit.MaterialId == currentMap.material_id`):
+-                *   Update `representHit.DistanceToWorld = t` [S1, unofficial].
+-                *   Update `representHit.MaterialId = currentMap.material_id` [S1, unofficial].
+-                *   Update `representHit.Position = r.Origin + t * r.Direction` [S1, unofficial].
+-    *   **Advance Ray**:
+-        *   `t += currentMap.distance` [S1, unofficial].
+-        *   `currentMap = nextMap` [S1, unofficial].
+-    *   **Far Clipping Check**: If `t > ClippingPlanes.y`:
+-        *   Set `surfaceHit.TraceDistance = ClippingPlanes.y` [S1, unofficial].
+-        *   Set `surfaceHit.MaterialId = -1` [S1, unofficial].
+-        *   Break loop [S1, unofficial].
+-
+-3.  **Post-Loop Processing**:
++**Inputs and Outputs:**
++*   **Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), SDF map function $Map(\mathbf{p})$ returning a float2 (distance, material ID), clipping planes $[ClippingPlanes.x, ClippingPlanes.y]$, maximum sphere tracing steps $N_{steps}$, and pixel radius factor $RadiusPixel$ [S1, unofficial].
++*   **Outputs:** Two hit structures: `surfaceHit` and `representHit`, each containing `DistanceToWorld`, `TraceDistance`, `MaterialId`, `Position`, and `Alpha` [S1, unofficial].
++
++**Data Structures:**
++*   `HitRecord`: A structure containing:
++    *   `DistanceToWorld`: float, distance from camera origin to hit point.
++    *   `TraceDistance`: float, total distance traveled along ray.
++    *   `MaterialId`: int, material identifier from SDF map.
++    *   `Position`: vec3, 3D world position of the hit.
++    *   `Alpha`: float, opacity value (0.0 to 1.0).
++*   `currentMap`: float2, current SDF sample (distance, material ID).
++*   `nextMap`: float2, next SDF sample.
++
++**Parameters:**
++*   $N_{steps}$: Maximum number of marching iterations (e.g., 64).
++*   $RadiusPixel$: Scaling factor for pixel radius approximation.
++*   $ClippingPlanes$: Near and far clipping distances.
++
++**Algorithm Steps:**
++1.  **Initialization:**
++    *   Initialize `surfaceHit` and `representHit` with near plane clipping distance ($ClippingPlanes.x$) and far plane ($ClippingPlanes.y$).
++    *   Set `surfaceHit.MaterialId = -1`, `representHit.MaterialId = -1`.
++    *   Set `representHit.DistanceToWorld = 1000000` (large value).
++    *   Set `representHit.Alpha = 0`.
++    *   Initialize ray distance $t = ClippingPlanes.x$.
++    *   Sample SDF at $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to get `currentMap`.
++    *   Initialize loop counter $i = 0$.
++    *   Initialize `representFound = false`.
++
++2.  **Marching Loop:**
++    *   Loop $i$ from 0 to $N_{steps} - 1$:
++        *   Calculate adaptive epsilon: $\epsilon = 0.0015 \times t$.
++        *   **Surface Hit Check:** If `currentMap.x` $\le \epsilon$:
++            *   Set `surfaceHit.DistanceToWorld = t`.
++            *   Set `surfaceHit.TraceDistance = t`.
++            *   Set `surfaceHit.MaterialId = currentMap.y`.
++            *   Set `surfaceHit.Position = \mathbf{o} + t\mathbf{d}`.
++            *   Break loop.
++        *   **Represent Hit Logic:**
++            *   Sample next point: $\mathbf{p}_{next} = \mathbf{o} + (t + \text{currentMap}.x)\mathbf{d}$.
++            *   Get `nextMap = Map(\mathbf{p}_{next})`.
++            *   Check if inside pixel radius: If `currentMap.x` $< (t \times RadiusPixel)$:
++                *   If `nextMap.x` $>$ `currentMap.x` (moving away from surface) and `representFound == false`:
++                    *   Set `representFound = true`.
++                *   If `currentMap.x` $<$ `representHit.DistanceToWorld` and (`representHit.MaterialId == -1` or `representHit.MaterialId == currentMap.y`):
++                    *   Update `representHit.DistanceToWorld = t`.
++                    *   Update `representHit.MaterialId = currentMap.y`.
++                    *   Update `representHit.TraceDistance = t`.
++                    *   Update `representHit.Position = \mathbf{o} + t\mathbf{d}`.
++        *   **Advance Ray:**
++            *   $t \leftarrow t + \text{currentMap}.x$.
++            *   `currentMap = nextMap`.
++        *   **Far Clipping Check:**
++            *   If $t > ClippingPlanes.y$:
++                *   Set `surfaceHit.TraceDistance = ClippingPlanes.y`.
++                *   Set `surfaceHit.MaterialId = -1`.
++                *   Break loop.
++
++3.  **Post-Processing:**
++    *   If loop finished without hit ($i == N_{steps}$):
++        *   Use latest `currentMap` data for `surfaceHit` (fallback hit).
++        *   Set `surfaceHit.DistanceToWorld = t`.
++        *   Set `surfaceHit.TraceDistance = t`.
++        *   Set `surfaceHit.MaterialId = currentMap.y`.
++        *   Set `surfaceHit.Position = \mathbf{o} + t\mathbf{d}`.
+     *   If `representHit.MaterialId >= 0`:
+-        *   Calculate `representHit.Alpha = 1.0 - representHit.DistanceToWorld / (representHit.TraceDistance * RadiusPixel)` [S1, unofficial].
+-        *   Update `representHit.Position` (if not already set) [S1, unofficial].
+-    *   If loop finished without a surface hit (`i == SphereTracingSteps`):
+-        *   Use the latest `currentMap` data for `surfaceHit` as a fallback [S1, unofficial].
++        *   Calculate `representHit.Alpha = 1.0 - representHit.DistanceToWorld / (representHit.TraceDistance * RadiusPixel)`.
++        *   Update `representHit.Position`.
+     *   If `surfaceHit.MaterialId < 0` or `representHit.MaterialId < 0`:
+-        *   Set corresponding `Alpha` to 0 [S1, unofficial].
+-
+-4.  **Ray Marching and Evaluation**:
+-    *   If `DisableAntiAliasing` is true, call `RayMarchNoAA(r, surfaceHit, representHit)`; else call `RayMarch(r, surfaceHit, representHit)` [S1, unofficial].
++        *   Set corresponding `Alpha` to 0.
++
++4.  **Final Evaluation:**
++    *   Perform ray marching: If `DisableAntiAliasing` is true, call `RayMarchNoAA(r, surfaceHit, representHit)`; else call `RayMarch(r, surfaceHit, representHit)` [S1, unofficial].
+     *   Evaluate hits: Call `EvaluateHit(id.xy, r, surfaceHit, surface)` and `EvaluateHit(id.xy, r, representHit, represent)` [S1, unofficial].
+     *   Write final data: Call `WriteSphereTracingData(id.xy, 0, surface)` and `WriteSphereTracingData(id.xy, 1, represent)` [S1, unofficial].
+ 
+-### Pseudocode
++**Pseudocode:**
+ ```python
+-def sphere_tracing_with_represent_hit(ray_origin, ray_direction, clipping_near, clipping_far, 
+-                                      sphere_tracing_steps, radius_pixel, sdf_map, 
+-                                      disable_anti_aliasing):
+-    # Initialization
++def sphere_tracing_with_represent_hit(ray_origin, ray_direction, sdf_map, clipping_planes, max_steps, radius_pixel):
++    """
++    Sphere Tracing with Represent Hit algorithm.
++    
++    Args:
++        ray_origin: vec3, camera origin
++        ray_direction: vec3, normalized ray direction
++        sdf_map: callable, returns (distance: float, material_id: int) for a point
++        clipping_planes: tuple (near: float, far: float)
++        max_steps: int, maximum number of marching steps
++        radius_pixel: float, scaling factor for pixel radius
++        
++    Returns:
++        surface_hit: dict with keys 'DistanceToWorld', 'TraceDistance', 'MaterialId', 'Position', 'Alpha'
++        represent_hit: dict with keys 'DistanceToWorld', 'TraceDistance', 'MaterialId', 'Position', 'Alpha'
++    """
++    near_plane, far_plane = clipping_planes
++    
++    # Initialize surface hit
+     surface_hit = {
+-        'DistanceToWorld': clipping_near,
+-        'TraceDistance': clipping_near,
++        'DistanceToWorld': near_plane,
++        'TraceDistance': near_plane,
+         'MaterialId': -1,
+-        'Position': ray_origin + ray_direction * clipping_near
++        'Position': ray_origin + near_plane * ray_direction,
++        'Alpha': 0.0
+     }
++    
++    # Initialize represent hit
+     represent_hit = {
+         'DistanceToWorld': 1000000.0,
+-        'Alpha': 0.0,
++        'TraceDistance': near_plane,
+         'MaterialId': -1,
+-        'Position': ray_origin + ray_direction * clipping_near
++        'Position': ray_origin + near_plane * ray_direction,
++        'Alpha': 0.0
+     }
+     
+-    t = clipping_near
+-    current_map = sdf_map(ray_origin + ray_direction * t) # Returns (distance, material_id)
+-    i = 0
++    t = near_plane
++    current_map = sdf_map(ray_origin + t * ray_direction)
+     represent_found = False
+     
+-    # Marching Loop
+-    for i in range(sphere_tracing_steps):
++    for i in range(max_steps):
++        # Adaptive epsilon
+         epsilon = 0.0015 * t
+         
+-        # Surface Hit Check
+-        if current_map.distance <= epsilon:
++        # Surface hit check
++        if current_map[0] <= epsilon:
+             surface_hit['DistanceToWorld'] = t
+             surface_hit['TraceDistance'] = t
+-            surface_hit['MaterialId'] = current_map.material_id
+-            surface_hit['Position'] = ray_origin + ray_direction * t
++            surface_hit['MaterialId'] = current_map[1]
++            surface_hit['Position'] = ray_origin + t * ray_direction
+             break
+-            
+-        # Sample Next Point
+-        next_map = sdf_map(ray_origin + ray_direction * (t + current_map.distance))
+-        
+-        # Represent Hit Logic
+-        if current_map.distance < (t * radius_pixel):
+-            if next_map.distance > current_map.distance and not represent_found:
++        
++        # Sample next point
++        next_point = ray_origin + (t + current_map[0]) * ray_direction
++        next_map = sdf_map(next_point)
++        
++        # Represent hit logic
++        if current_map[0] < (t * radius_pixel):
++            if next_map[0] > current_map[0] and not represent_found:
+                 represent_found = True
+             
+-            if current_map.distance < represent_hit['DistanceToWorld']:
+-                if represent_hit['MaterialId'] == -1 or represent_hit['MaterialId'] == current_map.material_id:
++            if current_map[0] < represent_hit['DistanceToWorld']:
++                if represent_hit['MaterialId'] == -1 or represent_hit['MaterialId'] == current_map[1]:
+                     represent_hit['DistanceToWorld'] = t
+-                    represent_hit['MaterialId'] = current_map.material_id
+-                    represent_hit['Position'] = ray_origin + ray_direction * t
+-        
+-        # Advance Ray
+-        t += current_map.distance
++                    represent_hit['MaterialId'] = current_map[1]
++                    represent_hit['TraceDistance'] = t
++                    represent_hit['Position'] = ray_origin + t * ray_direction
++        
++        # Advance ray
++        t += current_map[0]
+         current_map = next_map
+         
+-        # Far Clipping Check
+-        if t > clipping_far:
+-            surface_hit['TraceDistance'] = clipping_far
++        # Far clipping check
++        if t > far_plane:
++            surface_hit['TraceDistance'] = far_plane
+             surface_hit['MaterialId'] = -1
+             break
+-            
+-    # Post-Loop Processing
+-    if represent_hit['MaterialId'] >= 0:
+-        # Avoid division by zero if TraceDistance is 0 or very small
+-        trace_denom = max(surface_hit['TraceDistance'] * radius_pixel, 1e-6)
+-        represent_hit['Alpha'] = 1.0 - represent_hit['DistanceToWorld'] / trace_denom
+-        
+-    if i == sphere_tracing_steps:
+-        # Fallback hit if loop finished without explicit break
++    
++    # Post-processing
++    if i == max_steps - 1 and surface_hit['MaterialId'] == -1:
++        # Fallback hit if loop finished without explicit hit
+         surface_hit['DistanceToWorld'] = t
+         surface_hit['TraceDistance'] = t
+-        surface_hit['MaterialId'] = current_map.material_id
+-        surface_hit['Position'] = ray_origin + ray_direction * t
+-        
++        surface_hit['MaterialId'] = current_map[1]
++        surface_hit['Position'] = ray_origin + t * ray_direction
++        
++    if represent_hit['MaterialId'] >= 0:
++        # Calculate alpha for represent hit
++        if represent_hit['TraceDistance'] * radius_pixel != 0:
++            represent_hit['Alpha'] = 1.0 - represent_hit['DistanceToWorld'] / (represent_hit['TraceDistance'] * radius_pixel)
++        else:
++            represent_hit['Alpha'] = 0.0
++            
+     if surface_hit['MaterialId'] < 0:
+-        surface_hit['Alpha'] = 0.0 # Assuming Alpha field exists or is handled in evaluation
++        surface_hit['Alpha'] = 0.0
+     if represent_hit['MaterialId'] < 0:
+         represent_hit['Alpha'] = 0.0
+         
+-    # Ray Marching and Evaluation
+-    if disable_anti_aliasing:
+-        ray_march_no_aa(ray_origin, ray_direction, surface_hit, represent_hit)
+-    else:
+-        ray_march(ray_origin, ray_direction, surface_hit, represent_hit)
+-        
+-    evaluate_hit(surface_hit, 'surface')
+-    evaluate_hit(represent_hit, 'represent')
+-    
+-    write_sphere_tracing_data(0, surface_hit)
+-    write_sphere_tracing_data(1, represent_hit)
++    return surface_hit, represent_hit
+ ```
+ 
+-### Parameters and Edge Cases
+-*   **Epsilon**: The adaptive epsilon `0.0015 * t` is used to determine convergence [S1, unofficial].
+-*   **Radius Pixel**: This parameter defines the threshold for "represent" hits. If the SDF value is less than `t * RadiusPixel`, the point is considered within the pixel's influence [S1, unofficial].
+-*   **Material ID Matching**: The represent hit only updates if the material ID matches the current represent hit's material ID or if no represent hit has been found yet [S1, unofficial]. This prevents mixing materials in the represent pass.
+-*   **Fallback**: If the loop completes without a surface hit, the last sampled point is used as the surface hit [S1, unofficial].
+-*   **Pitfalls**: Precision issues may arise if `t` is very small or very large, affecting the adaptive epsilon and the alpha calculation. The large initial value for `representHit.DistanceToWorld` (1,000,000) assumes a scene scale that fits within this range [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Precision:** Adaptive epsilon $\epsilon = 0.0015 \times t$ scales with distance, which may cause issues at very large distances or very small scales if not clamped.
++*   **Boundaries:** Far clipping plane must be handled to prevent infinite loops or invalid hits.
++*   **Degenerate Input:** If `TraceDistance` is zero or `RadiusPixel` is zero, division by zero occurs in alpha calculation. Guard against this.
++*   **Material ID Consistency:** The represent hit only updates if the material ID matches the current hit or is uninitialized (-1). This prevents mixing materials in the represent pass.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N)$ per pixel, where $N$ is `SphereTracingSteps`. The dual-pass nature (surface and represent) adds a constant factor overhead compared to single-pass sphere tracing [S1, unofficial].
+-*   **Memory Complexity**: Requires storage for two hit structures per pixel, plus intermediate textures for deferred rendering (e.g., `SphereTracingDataTexture`, `AmbientOcclusionTexture`) [S1, unofficial].
+-*   **Performance**: Performance depends on the number of steps and the complexity of the SDF evaluation. The represent hit logic adds conditional checks but does not increase the number of SDF samples [S1, unofficial].
+-*   **Strengths**: Reduces aliasing at object edges by capturing represent hits; handles transparency better than standard sphere tracing [S1, unofficial].
+-*   **Limitations**: Increased memory usage due to dual render targets; potential for artifacts if `RadiusPixel` is not tuned correctly for the scene scale [S1, unofficial].
+-*   **When to Use**: Deferred rendering pipelines where edge aliasing is a concern and SDFs are available [S1, unofficial].
+-*   **When Not to Use**: Real-time applications with strict memory constraints or where SDFs are not feasible [S1, unofficial].
++*   **Time Complexity:** $O(N_{steps})$ per pixel, where $N_{steps}$ is the maximum number of sphere tracing iterations. The represent hit logic adds constant overhead per step.
++*   **Memory Complexity:** $O(1)$ per pixel for hit records. Requires two render targets (surface and represent).
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Performance scales linearly with resolution and maximum steps. The represent hit pass does not significantly increase computational cost as it shares the same marching loop.
++*   **Strengths:** Handles transparency and aliasing at object edges by tracking a 'represent' hit. Deferred rendering allows for efficient lighting calculations.
++*   **Limitations:** Requires two render targets. Alpha calculation for represent hit is heuristic and may not be physically accurate.
++*   **When to use:** When rendering SDFs with transparency or soft edges where standard sphere tracing produces aliasing artifacts.
++*   **When not to use:** When memory bandwidth is limited (due to two render targets) or when hard-edged opaque SDFs are sufficient.
+ 
+ ## Background
+-Sphere Tracing with Represent Hit is an unofficial technique described in a GitHub repository [S1, unofficial]. It is part of a larger deferred rendering system that includes ambient occlusion, environment mapping, and bilateral filtering [S1, unofficial]. The technique was developed to improve visual quality in real-time rendering by addressing aliasing issues inherent in standard sphere tracing [S1, unofficial].
++Sphere Tracing with Represent Hit is an unofficial technique described in a GitHub repository [S1, unofficial]. It extends standard sphere tracing by introducing a secondary 'represent' hit to improve visual quality at object boundaries. The technique is implemented in a deferred rendering pipeline, integrating with ambient occlusion and environment mapping passes.
+ 
+ ## Sources

@@ -1,0 +1,134 @@
+# Training Ray Compositing (Sigma)
+
+Also called: Ray Compositing for Training (Sigma + Ambient)
+
+## Overview
+Training Ray Compositing (Sigma) composites per-ray samples of density ($\sigma$), color ($\text{RGB}$), and ambient light into final pixel values while computing gradients for all inputs during the backward pass [S1, unofficial]. It differs from standard inference compositing by explicitly supporting gradient propagation to density and color parameters, enabling end-to-end training of neural radiance fields [S1, unofficial]. It builds on [Training Ray Compositing](3785-training-ray-compositing.md) by providing the specific implementation for training with sigma and ambient contributions [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+The method takes pre-sampled ray data and produces composite image colors, accumulated alpha weights, and depth values, along with gradients for the inputs [S1, unofficial].
+
+**Data Structures:**
+Input tensors must be contiguous in memory [S1, unofficial]. The layout is defined as [S1, unofficial]:
+- `sigmas`: `float`, shape `[M,]`, volume density values for $M$ samples.
+- `rgbs`: `float`, shape `[M, 3]`, view-dependent color values for $M$ samples.
+- `ambient`: `float`, shape `[M,]`, ambient light contribution for $M$ samples.
+- `deltas`: `float`, shape `[M, 2]`, step sizes for $M$ samples.
+- `rays`: `int32`, shape `[N, 3]`, ray indices or identifiers mapping samples to $N$ rays.
+
+Output tensors are allocated as [S1, unofficial]:
+- `weights_sum`: `float`, shape `[N,]`, output alpha channel.
+- `ambient_sum`: `float`, shape `[N,]`, output ambient contribution.
+- `depth`: `float`, shape `[N,]`, output depth.
+- `image`: `float`, shape `[N, 3]`, output RGB color.
+
+**Formulas:**
+The compositing follows standard volume rendering accumulation [G]:
+$$T_i = \exp\left(-\sum_{j=0}^{i-1} \sigma_j \Delta t_j\right)$$
+$$w_i = T_i (1 - \exp(-\sigma_i \Delta t_i))$$
+$$\text{image} = \sum_i w_i \cdot \text{RGB}_i$$
+$$\text{depth} = \sum_i w_i \cdot \frac{\Delta t_i}{2}$$
+$$\text{weights\_sum} = \sum_i w_i$$
+$$\text{ambient\_sum} = \sum_i w_i \cdot \text{ambient}_i$$
+where $\sigma$ is density, $\Delta t$ is the step size from `deltas`, $T_i$ is transmittance, and $w_i$ is the weight for sample $i$ [G].
+
+**Parameters:**
+- `T_thresh`: `float`, default $10^{-4}$, transparency threshold [S1, unofficial].
+
+**Algorithm Steps:**
+1. Ensure `sigmas`, `rgbs`, `ambient`, and `rays` are contiguous in memory [S1, unofficial].
+2. Let $M$ be `sigmas.shape[0]` and $N$ be `rays.shape[0]` [S1, unofficial].
+3. Allocate output tensors `weights_sum`, `ambient_sum`, `depth`, and `image` with the specified shapes [S1, unofficial].
+4. Call the forward kernel `_backend.composite_rays_train_sigma_forward` with inputs `sigmas`, `rgbs`, `ambient`, `deltas`, `rays`, and `T_thresh` to compute composite outputs [S1, unofficial].
+5. Save `sigmas`, `rgbs`, `ambient`, `deltas`, `rays`, `weights_sum`, `ambient_sum`, `depth`, `image`, $M$, $N$, and `T_thresh` for the backward pass [S1, unofficial].
+6. In the backward pass, ensure `grad_weights_sum`, `grad_ambient_sum`, and `grad_image` are contiguous [S1, unofficial]. Retrieve saved tensors and dimensions [S1, unofficial]. Initialize `grad_sigmas`, `grad_rgbs`, and `grad_ambient` with zeros [S1, unofficial]. Call the backward kernel `_backend.composite_rays_train_sigma_backward` to compute gradients based on the saved forward state and gradient inputs [S1, unofficial]. Call the CUDA backend kernel `_backend.composite_rays_ambient_sigma` to handle ambient light gradient propagation [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def composite_rays_train_sigma_forward(sigmas, rgbs, ambient, deltas, rays, t_thresh=1e-4):
+    sigmas = torch.as_tensor(sigmas, dtype=torch.float32)
+    rgbs = torch.as_tensor(rgbs, dtype=torch.float32)
+    ambient = torch.as_tensor(ambient, dtype=torch.float32)
+    deltas = torch.as_tensor(deltas, dtype=torch.float32)
+    rays = torch.as_tensor(rays, dtype=torch.int32)
+
+    M = sigmas.shape[0]
+    N = rays.shape[0]
+
+    weights_sum = torch.zeros(N, dtype=sigmas.dtype, device=sigmas.device)
+    ambient_sum = torch.zeros(N, dtype=sigmas.dtype, device=sigmas.device)
+    depth = torch.zeros(N, dtype=sigmas.dtype, device=sigmas.device)
+    image = torch.zeros(N, 3, dtype=sigmas.dtype, device=sigmas.device)
+
+    ray_indices = rays[:, 0]
+    for r in range(N):
+        mask = ray_indices == r
+        if not mask.any():
+            continue
+        idx = torch.where(mask)[0]
+        s = sigmas[idx]
+        c = rgbs[idx]
+        a = ambient[idx]
+        d = deltas[idx]
+        step = d[:, 0]
+
+        transmittance = torch.ones_like(s)
+        transmittance[1:] = torch.cumprod(torch.exp(-s[:-1] * step[:-1]), dim=0)
+        alpha = 1.0 - torch.exp(-s * step)
+        weight = transmittance * alpha
+
+        acc_alpha = torch.cumsum(weight, dim=0)
+        terminate_mask = acc_alpha > t_thresh
+        if terminate_mask.any():
+            term_idx = torch.where(terminate_mask)[0][0]
+            weight = weight[:term_idx + 1]
+            s = s[:term_idx + 1]
+            c = c[:term_idx + 1]
+            a = a[:term_idx + 1]
+            d = d[:term_idx + 1]
+            step = step[:term_idx + 1]
+            transmittance = transmittance[:term_idx + 1]
+
+        weights_sum[r] = torch.sum(weight)
+        ambient_sum[r] = torch.sum(weight * a)
+        depth[r] = torch.sum(weight * (d[:, 0] / 2.0))
+        image[r] = torch.sum(weight[:, None] * c, dim=0)
+
+    return weights_sum, ambient_sum, depth, image
+```
+
+**Edge Cases and Pitfalls:**
+- The gradient for depth is not propagated to `sigmas` [S1, unofficial].
+- Input tensors must be contiguous; non-contiguous tensors will cause errors in the CUDA kernel [S1, unofficial].
+
+## Subtopics
+
+### [Training Ray Compositing (Backward)](3893-training-ray-compositing-backward.md)
+Computes gradients of the volume rendering loss with respect to density and color parameters during the backward pass. It implements the chain rule to propagate gradients from the final composite image and total weight sum back to individual sample points along each ray. Unlike forward compositing which accumulates color, this kernel traverses the ray to compute partial derivatives, handling the interdependence of transmittance and absorption.
+
+### [Ray Compositing for Training (Uncertainty)](3909-ray-compositing-for-training-uncertainty.md)
+Composites rays for training neural radiance fields by estimating and backpropagating uncertainty alongside standard volume rendering outputs (RGB, sigma, ambient light). It differs from standard training compositing by explicitly computing gradients for an uncertainty term, allowing the model to learn confidence metrics per pixel. It builds on [Training Ray Compositing (Sigma)](3868-training-ray-compositing-sigma.md) by extending the output space to include uncertainty.
+
+### [Gradient Scaling by Distance Squared](8937-gradient-scaling-by-distance-squared.md)
+Gradient Scaling by Distance Squared is a technique used during the backpropagation phase of training ray compositing to improve training stability for distant objects. It scales the gradients of field outputs based on the squared distance of samples from the camera. This method addresses the imbalance in gradient magnitudes caused by varying sample depths along a ray.
+
+### Ray Compositing for Training (Triplane/Aud/Eye)
+Composites rays for training with triplane-based ambient lighting (auditory and eye-specific), computing gradients for sigmas, RGBs, and various ambient components [S1, unofficial]. It ensures `amb_aud`, `amb_eye`, and `uncertainty` are contiguous, allocates sums for these components, and calls `_backend.composite_rays_train_triplane_forward` [S1, unofficial]. The transparency threshold `T_thresh` defaults to $10^{-4}$ [S1, unofficial]. The gradient for depth is not propagated to sigmas [S1, unofficial].
+
+### CUDA Ray Compositing
+A GPU-accelerated kernel that performs alpha compositing of pre-sampled RGB and sigma values along rays to produce final image and depth [S2, unofficial]. It iterates through samples for each alive ray, accumulating transparency and computing weighted RGB and depth contributions [S2, unofficial]. Inputs are `sigmas` `[n_alive * n_step]`, `rgbs` `[n_alive * n_step, 3]`, and `deltas` `[n_alive * n_step, 2]` [S2, unofficial]. In-place outputs are `weights_sum` `[N]`, `depth` `[N]`, and `image` `[N, 3]` [S2, unofficial]. The transparency threshold `T_thresh` determines when rays are considered fully opaque [S2, unofficial].
+
+## Operating characteristics
+Time complexity and memory complexity are not given in the sources. Performance is GPU-accelerated via CUDA kernels [S1, unofficial][S2, unofficial]. Strengths include differentiable training with ambient light contributions [S1, unofficial]. Limitations include the requirement for contiguous memory layouts and the lack of depth gradient propagation to sigmas [S1, unofficial].
+
+## Background
+Training Ray Compositing (Sigma) is part of the ER-NeRF framework, which integrates neural radiance fields with audio and visual cues for training [S1, unofficial]. It is used in applications requiring differentiable volume rendering with ambient light modeling, such as neural head avatars [S1, unofficial].
+
+## Sources
+[S1] Fictionarry/ER-NeRF, https://github.com/Fictionarry/ER-NeRF, fetched 2026-10-26 (unofficial)
+[S2] NeRF-Factory/IDDR-NGP, https://github.com/NeRF-Factory/IDDR-NGP, fetched 2026-10-27 (unofficial)

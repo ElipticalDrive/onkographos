@@ -1,0 +1,221 @@
+--- v008.md
++++ v009.md
+@@ -4,50 +4,141 @@
+ 
+ ## Overview
+-The Training Pipeline is the iterative optimization loop for 3D Gaussian Splatting that initializes a set of 3D Gaussians and optimizes their parameters (position, covariance, opacity, color, and spherical harmonics coefficients) via gradient descent [S1, S2, unofficial]. It solves the inverse problem of reconstructing a scene from multi-view images by projecting Gaussians onto 2D slice views, computing a rendering loss, and performing backpropagation [S1, unofficial]. It distinguishes itself from standard optimization by integrating dynamic Gaussian management (pruning, densification, cloning) within the training loop to adapt the representation density to the scene complexity [S1, unofficial].
++The Training Pipeline is the iterative optimization loop for 3D Gaussian Splatting that initializes a set of 3D Gaussians and optimizes their parameters (position, scale, rotation, opacity, and color) via gradient descent [S1, S2, unofficial]. It solves the problem of reconstructing a 3D scene from 2D observations by dynamically adapting the Gaussian representation through pruning, cloning, and splitting [S1, unofficial]. It is distinguished from its siblings by its core structure: a nested loop over spatial axes and slices that accumulates gradients across multiple views before a single optimizer step, coupled with periodic refinement phases that modify the Gaussian count [S1, unofficial].
+ 
+ ## How it works
+-The pipeline operates as a nested loop structure: an outer loop iterates over training steps, an intermediate loop iterates over spatial axes (x, y, z), and an inner loop iterates over slices along those axes [S1, unofficial].
++The pipeline operates as a standard differentiable rendering training loop, but with specific data organization (axis-aligned slices) and dynamic topology management [S1, unofficial].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** Training dataset $\mathcal{D} = \{(I_i^{\text{axis}}, \pi_i^{\text{axis}})\}$, where $I$ is a 2D slice image and $\pi$ is the slice position [S1, unofficial]. Grid resolution $g_{\text{res}}$ for initialization [S1, unofficial].
+-*   **Output:** Optimized set of Gaussians $\mathcal{G} = \{(\mu, \Sigma, c, \alpha)\}$ [S1, unofficial].
++*   **Input:** A set of training slices $D = \{(I_i^{\text{axis}}, \pi_i^{\text{axis}})\}$, where $\text{axis} \in \{x, y, z\}$, $I$ is a 2D slice image, and $\pi$ is the slice position [S1, unofficial].
++*   **Input:** Initial Gaussian parameters $\theta$, typically initialized on a regular 3D grid of resolution $g_{\text{res}}$ or from SfM points [S1, unofficial].
++*   **Input:** Hyperparameters: opacity threshold $\tau_\alpha$, gradient threshold $\tau_p$, scale threshold $\tau_s$, and maximum iterations $T_{\text{max}}$ [S1, unofficial].
++*   **Output:** Optimized set of Gaussians $G = \{(\boldsymbol{\mu}, \boldsymbol{\Sigma}, \mathbf{c}, \alpha)\}$ [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Gaussian State:** Each Gaussian $n$ is defined by mean $\mu_n$, covariance $\Sigma_n$, color $c_n$, and opacity $\alpha_n$ [S1, unofficial]. The covariance is decomposed into rotation $R_n$ and scale $S_n$ such that $\Sigma_n = R_n S_n S_n R_n^\top$ [S1, unofficial].
+-*   **Optimizer State:** Adam optimizer maintains moments for parameters $\theta$ with learning rate $\eta$ [S1, unofficial].
++*   **Gaussian State ($G$):** Each Gaussian $n$ is defined by mean $\boldsymbol{\mu}_n$, covariance $\boldsymbol{\Sigma}_n$, color $\mathbf{c}_n$, and opacity $\alpha_n$. The covariance is decomposed into rotation $R_n$ and scale $S_n$ such that $\boldsymbol{\Sigma}_n = R_n S_n S_n^\top R_n^\top$ [S1, unofficial].
++*   **Optimizer State:** Adam optimizer state for parameters $\theta$ [S1, unofficial].
++*   **Loss Accumulators:** Scalar $L_{\text{total}}$ and gradient tensor $\nabla_\theta$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Initialization:** Build a regular 3D grid $\mathcal{P}$ of size $g_{\text{res}}$ or use Structure-from-Motion (SfM) estimated points. Initialize each Gaussian with mean $\mu$ around grid points and default values for scale $s$, color $c$, opacity $\alpha$, and quaternion $q$ [S1, unofficial].
++1.  **Initialization:** Build a regular grid $P$ of size $g_{\text{res}}$ (or use SfM points). Initialize each Gaussian with mean $\boldsymbol{\mu}$ around grid points and default values for scale $s$, color $c$, opacity $\alpha$, and quaternion $q$ [S1, unofficial].
+ 2.  **Optimizer Setup:** Initialize the Adam optimizer with parameters $\theta$ and learning rate $\eta$ [S1, unofficial].
+-3.  **Outer Loop:** Iterate for `step` from 1 to `stepmax` [S1, unofficial].
+-4.  **Reset Accumulators:** Set total loss $L_{\text{total}}$ to 0 and zero gradients $\nabla_\theta$ [S1, unofficial].
++3.  **Outer Loop:** Iterate from step $t = 1$ to $T_{\text{max}}$.
++4.  **Reset Accumulators:** Set total loss $L_{\text{total}} \leftarrow 0$ and zero gradients $\nabla_\theta \leftarrow 0$ [S1, unofficial].
+ 5.  **Axis Loop:** Iterate over axes $\text{axis} \in \{x, y, z\}$ [S1, unofficial].
+-6.  **Slice Loop:** For each slice $(I_i^{\text{axis}}, \pi_i^{\text{axis}})$ in the dataset $\mathcal{D}_{\text{axis}}$ [S1, unofficial]:
+-    a.  **Covariance Computation:** Compute 3D covariance $\Sigma_n \leftarrow R_n S_n S_n R_n^\top$ [S1, unofficial].
+-    b.  **Rendering:** Rasterize the Gaussian parameters to predict the image $I_{\text{pred}} \leftarrow \text{Rasterize}(\mu_n, \Sigma_n, \alpha_n, c_n)$ [S1, unofficial].
++6.  **Slice Loop:** For each slice $(I_i^{\text{axis}}, \pi_i^{\text{axis}})$ in the dataset $D_{\text{axis}}$:
++    a.  **Covariance Computation:** Compute 3D covariance $\boldsymbol{\Sigma}_n \leftarrow R_n S_n S_n^\top R_n^\top$ [S1, unofficial].
++    b.  **Rendering:** Rasterize the Gaussian parameters to predict the image $I_{\text{pred}} \leftarrow \text{Rasterize}(\boldsymbol{\mu}_n, \boldsymbol{\Sigma}_n, \alpha_n, \mathbf{c}_n)$ [S1, unofficial].
+     c.  **Loss Computation:** Compute loss $L$ between predicted image $I_{\text{pred}}$ and ground truth slice $I_i^{\text{axis}}$ [S1, unofficial].
+     d.  **Accumulate Loss:** $L_{\text{total}} \leftarrow L_{\text{total}} + L$ [S1, unofficial].
+-7.  **Backpropagation:** Perform backward pass on the total loss $L_{\text{total}}$ [S1, unofficial].
+-8.  **Parameter Update:** Update parameters $\theta$ using the Adam step [S1, unofficial].
+-9.  **Refinement Check:** If the current step is a refinement iteration ($\text{IsRefinementIteration}(t)$) [S1, unofficial]:
+-    a.  **Gaussian Iteration:** Iterate over all Gaussians $(\mu, \Sigma, c, \alpha) \in \mathcal{G}$ [S1, unofficial].
+-    b.  **Pruning Condition:** If opacity $\alpha < \tau_\alpha$ or the Gaussian is too large ($\text{IsTooLarge}(\mu, \Sigma)$) [S1, unofficial]:
+-        i.  **Pruning Action:** Call $\text{RemoveGaussian}()$ [S1, unofficial].
+-    c.  **Densification Condition:** Else if the L2 norm of the gradient of $\mu$ with respect to loss is greater than $\tau_p$ ($\|\nabla_\mu L\|_2 > \tau_p$) [S1, unofficial]:
+-        i.  **Over-reconstruction Check:** If the Frobenius norm of $\Sigma$ is greater than $\tau_s$ ($\|\Sigma\|_F > \tau_s$) [S1, unofficial]:
+-            *   **Split Action:** Call $\text{SplitGaussian}(\mu, \Sigma, c, \alpha)$ [S1, unofficial].
+-        ii. **Under-reconstruction Action:** Else, call $\text{CloneGaussian}(\mu, \Sigma, c, \alpha)$ [S1, unofficial].
++7.  **Backpropagation:** Perform backward pass on $L_{\text{total}}$ to compute gradients $\nabla_\theta$ [S1, unofficial].
++8.  **Parameter Update:** Update parameters $\theta$ using the Adam optimizer step [S1, unofficial].
++9.  **Refinement Check:** If the current step is a refinement iteration (determined by schedule $IsRefinementIteration(t)$):
++    a.  **Gaussian Iteration:** Iterate over all Gaussians $(\boldsymbol{\mu}, \boldsymbol{\Sigma}, \mathbf{c}, \alpha) \in G$.
++    b.  **Pruning Condition:** If opacity $\alpha < \tau_\alpha$ or the Gaussian is too large ($IsTooLarge(\boldsymbol{\mu}, \boldsymbol{\Sigma})$), remove the Gaussian [S1, unofficial].
++    c.  **Densification Condition:** Else if the L2 norm of the gradient of $\boldsymbol{\mu}$ with respect to loss is greater than $\tau_p$ ($\|\nabla_{\boldsymbol{\mu}} L\|_2 > \tau_p$):
++        i.  **Over-reconstruction Check:** If the Frobenius norm of $\boldsymbol{\Sigma}$ is greater than $\tau_s$ ($\|\boldsymbol{\Sigma}\|_F > \tau_s$), split the Gaussian [S1, unofficial].
++        ii. **Under-reconstruction Action:** Else, clone the Gaussian [S1, unofficial].
+ 
+-**Parameters:**
+-*   $g_{\text{res}}$: Grid resolution for initialization [S1, unofficial].
+-*   $\tau_\alpha$: Opacity threshold for pruning [S1, unofficial].
+-*   $\tau_p$: Gradient threshold for densification [S1, unofficial].
+-*   $\tau_s$: Scale threshold for distinguishing over-reconstruction (split) vs under-reconstruction (clone) [S1, unofficial].
++**Pseudocode:**
++
++```python
++def training_pipeline(
++    training_slices: List[Tuple[Image, float]], # (I, pi) for each axis
++    grid_resolution: int,
++    max_iterations: int,
++    alpha_threshold: float,
++    gradient_threshold: float,
++    scale_threshold: float,
++    is_refinement_iteration: Callable[[int], bool]
++) -> List[Gaussian]:
++    # 1. Initialization
++    # Build regular grid P of size grid_resolution
++    # Initialize Gaussians G with mean mu around grid points
++    # Default values for scale s, color c, opacity alpha, quaternion q
++    G = initialize_gaussians(grid_resolution)
++    
++    # 2. Optimizer Setup
++    # Initialize Adam optimizer with parameters theta and learning rate eta
++    optimizer = Adam(parameters=G, lr=eta)
++    
++    # 3. Outer Loop
++    for step in range(1, max_iterations + 1):
++        # 4. Reset Accumulators
++        L_total = 0.0
++        optimizer.zero_grad()
++        
++        # 5. Axis Loop
++        for axis in ['x', 'y', 'z']:
++            # 6. Slice Loop
++            # Filter slices for current axis
++            axis_slices = [s for s in training_slices if s.axis == axis]
++            
++            for slice_image, slice_pos in axis_slices:
++                # 6a. Covariance Computation
++                # For each Gaussian n in G:
++                # Sigma_n = R_n @ S_n @ S_n.T @ R_n.T
++                covariances = compute_covariances(G)
++                
++                # 6b. Rendering
++                # I_pred = Rasterize(mu, Sigma, alpha, c)
++                # Rasterize projects Gaussians to 2D slice view
++                I_pred = rasterize(G, slice_pos, axis)
++                
++                # 6c. Loss Computation
++                # L = Loss(I_pred, slice_image)
++                # Typically L1 + SSIM
++                L = compute_loss(I_pred, slice_image)
++                
++                # 6d. Accumulate Loss
++                L_total += L
++        
++        # 7. Backpropagation
++        # L_total.backward()
++        L_total.backward()
++        
++        # 8. Parameter Update
++        # theta = AdamStep(theta, grad)
++        optimizer.step()
++        
++        # 9. Refinement Check
++        if is_refinement_iteration(step):
++            gaussians_to_remove = []
++            gaussians_to_split = []
++            gaussians_to_clone = []
++            
++            # 9a. Gaussian Iteration
++            for g in G:
++                # 9b. Pruning Condition
++                if g.alpha < alpha_threshold or is_too_large(g.mu, g.Sigma):
++                    gaussians_to_remove.append(g)
++                # 9c. Densification Condition
++                elif norm(g.grad_mu) > gradient_threshold:
++                    # 9c-i. Over-reconstruction Check
++                    if frobenius_norm(g.Sigma) > scale_threshold:
++                        gaussians_to_split.append(g)
++                    # 9c-ii. Under-reconstruction Action
++                    else:
++                        gaussians_to_clone.append(g)
++            
++            # 9b. Pruning Action
++            for g in gaussians_to_remove:
++                remove_gaussian(G, g)
++            
++            # 9c-i. Split Action
++            for g in gaussians_to_split:
++                split_gaussian(G, g)
++            
++            # 9c-ii. Clone Action
++            for g in gaussians_to_clone:
++                clone_gaussian(G, g)
++                
++    return G
++```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The covariance decomposition $\Sigma = R S S R^\top$ requires careful handling of rotation parameterization to ensure positive semi-definiteness [S1, unofficial].
+-*   **Boundaries:** The axis-slice approach requires consistent handling of slice boundaries to avoid gaps or overlaps in the 3D volume representation [S1, unofficial].
+-*   **Degenerate Input:** If the initialization grid is too coarse, the model may fail to capture fine details; if too fine, it may lead to excessive memory usage and slow convergence [S1, unofficial].
++*   **Precision:** The covariance decomposition $\boldsymbol{\Sigma} = R S S^\top R^\top$ requires stable rotation representations (quaternions) to avoid singularities [S1, unofficial].
++*   **Boundaries:** The axis-loop structure assumes the scene can be adequately covered by orthogonal slices. If the scene has strong depth-dependent structures not aligned with axes, coverage may be uneven [S1, unofficial].
++*   **Degenerate Input:** If the initial grid resolution $g_{\text{res}}$ is too low, the model may fail to capture fine details; if too high, training becomes computationally expensive and prone to overfitting [S1, unofficial].
+ 
+ ## Subtopics
+@@ -60,35 +151,25 @@
+ 
+ ### FaCT-GS Optimization Loop
+-FaCT-GS extends the standard training loop by incorporating total variation regularization for CT reconstruction [S4].
+-*   **Steps:** Rasterize Gaussians into a 2D image ($\mathbf{I}_r$) and compare to projection data ($\mathbf{I}_{gt}$) using L1 and SSIM losses [S4]. Voxelize a small, randomly sampled section of the volume ($\mathbf{V}_{px3}$) and calculate 3D total variation ($\mathcal{L}_{TV}$) as a homogeneity regularization prior [S4]. In the backward pass, use the loss to prune, clone, or split Gaussians (Adaptive Control) and adjust parameters based on propagated gradients [S4].
+-*   **Formula:** $\mathcal{C}_{\text{total}} = \mathcal{L}_1 (\mathbf{I}_1, \mathbf{I}_{\text{tet}}) + \alpha_{\text{SSIM}} \mathcal{L}_{\text{SSIM}} (\mathbf{I}_1, \mathbf{I}_{\text{tet}}) + \alpha_{\text{TV}} \mathcal{L}_{\text{TV}} (\mathbf{V}_{32^3})$, where $\alpha_{\text{SSIM}}$ and $\alpha_{\text{TV}}$ are SSIM and TV loss weights respectively [S4].
+-*   **Parameters:** Sampling size for voxelization is increased from $8^3$ to $32^3$ [S4].
++The FaCT-GS optimization loop extends the standard pipeline by adding a 3D total variation (TV) regularization term [S4]. It rasterizes Gaussians into a 2D image $\mathbf{I}_r$ and compares it to projection data $\mathbf{I}_{gt}$ using L1 and SSIM losses [S4]. Additionally, it voxelize a small, randomly sampled section of the volume $\mathbf{V}_{px3}$ and calculates 3D total variation $\mathcal{L}_{TV}$ as a homogeneity regularization prior [S4]. The total loss is $\mathcal{C}_{\text{total}} = \mathcal{L}_1 (\mathbf{I}_1, \mathbf{I}_{\text{tet}}) + \alpha_{\text{SSIM}} \mathcal{L}_{\text{SSIM}} (\mathbf{I}_1, \mathbf{I}_{\text{tet}}) + \alpha_{\text{TV}} \mathcal{L}_{\text{TV}} (\mathbf{V}_{32^3})$, where $\alpha_{\text{SSIM}}$ and $\alpha_{\text{TV}}$ are SSIM and TV loss weights respectively [S4]. In the backward pass, the loss is used to prune, clone, or split Gaussians (Adaptive Control) and adjust parameters based on propagated gradients [S4]. The sampling size for voxelization is increased from $8^3$ to $32^3$ [S4].
+ 
+ ### Cut-Set Gradient Update
+-In hierarchical representations, the training loop updates only the parameters of the "cut set" of Gaussians intersecting the current training view [S3, unofficial]. Gradients propagate to Gaussians in the middle of the hierarchy, diffusing across the entire structure over many iterations with diverse views [S3, unofficial].
++The Cut-Set Gradient Update method modifies the standard gradient accumulation by identifying the "cut set" of Gaussians intersecting the current training view and updating only their parameters [S3, unofficial]. Gradients propagate to Gaussians in the middle of the hierarchy, diffusing across the entire structure over many iterations with diverse views [S3, unofficial]. This approach is used to fulfill tight memory requirements in large-scale reconstruction [S3, unofficial].
+ 
+ ### 3D Gaussian Splatting Initialization & Training Schedule
+-This variant uses LiDAR point clouds and pseudo-view guidance for initialization and training [S5].
+-*   **Steps:** Project LiDAR frame to corresponding image frame to assign color to each LiDAR point, then re-project colored points into 3D space [S5]. Accumulate all frames of point clouds and voxel-downsample with a voxel size of 5 [S5]. Warm-up phase: train for 500 iterations without sampling pseudo views [S5]. Guided phase: for every 10 iterations, sample 4 pseudo views for training [S5].
+-*   **Parameters:** Total training iterations: 50,000 for both SGD and baseline 3DGS models [S5].
++This variant initializes the model using LiDAR point clouds and pseudo-view guidance [S5]. It projects LiDAR frames to corresponding image frames to assign color to each LiDAR point, then re-projects colored points into 3D space [S5]. It accumulates all frames of point clouds and voxel-downsamples with a voxel size of 5 [S5]. The training schedule includes a warm-up phase of 500 iterations without sampling pseudo views, followed by a guided phase where 4 pseudo views are sampled for every 10 iterations [S5]. Total training iterations are 50,000 [S5].
+ 
+ ### fMRI Temporal Adaptation
+-This strategy adapts 3D Gaussian Splatting for functional MRI data by freezing geometry parameters and allowing only color and opacity to vary over time, capturing voxel-wise radiance changes from neural activity [S1, unofficial].
+-*   **Steps:** Stage 1: Build a static anatomical structure over 1000 warm-up iterations using initial frames [S1, unofficial]. Stage 2: Run 3000 iterations where only color and opacity evolve temporally [S1, unofficial].
+-*   **Parameters:** Dataset: OpenfMRI project (Xue and Poldrack, 2018), ds000003, consisting of 160 temporal frames, each with 33 axial brain slices at 64x64 resolution [S1, unofficial]. Training/Test Split: 140 frames for training, every 8th frame (20 total) for testing [S1, unofficial].
+-*   **Pitfalls:** A custom data loader ensures all slices from a given timestamp are processed synchronously to preserve inter-slice consistency [S1, unofficial].
++This strategy adapts the training pipeline for functional MRI (fMRI) data by freezing geometry parameters (Gaussian positions and covariances) and allowing only color and opacity to vary over time [S1, unofficial]. It uses a two-stage strategy: Stage 1 builds a static anatomical structure over 1000 warm-up iterations using initial frames; Stage 2 runs 3000 iterations where only color and opacity evolve temporally [S1, unofficial]. It processes datasets like OpenfMRI (160 temporal frames, 33 axial brain slices at 64x64 resolution) with 140 frames for training and every 8th frame (20 total) for testing [S1, unofficial]. A custom data loader ensures all slices from a given timestamp are processed synchronously to preserve inter-slice consistency [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The complexity is dominated by the rasterization and backpropagation steps, which are parallelized across pixels and Gaussians. The nested loop structure (steps $\times$ axes $\times$ slices) increases the number of forward/backward passes per optimization step, but allows for efficient memory usage by processing slices independently [S1, unofficial].
+-*   **Memory Complexity:** Memory usage scales with the number of Gaussians and the resolution of the training slices. The dynamic management (pruning/cloning) helps keep the Gaussian count manageable [S1, unofficial].
+-*   **Measured Performance:** On standard datasets, the pipeline achieves high-quality reconstructions with PSNR values comparable to other state-of-the-art methods [S1, unofficial].
+-*   **Scaling:** The method scales well with the number of training views, as the loss is accumulated over multiple slices [S1, unofficial].
+-*   **Strengths:** Dynamic adaptation allows the model to capture both coarse and fine details efficiently [S1, unofficial].
+-*   **Limitations:** The nested loop structure can be computationally expensive if the number of slices is large [S1, unofficial].
+-*   **When to use:** Suitable for scenes where the density of features varies significantly, requiring adaptive representation [S1, unofficial].
+-*   **When not to use:** Not ideal for real-time applications where the overhead of the nested loop and dynamic management is prohibitive [S1, unofficial].
++*   **Time Complexity:** The complexity is dominated by the rasterization and backpropagation steps, which are linear in the number of Gaussians $N$ and pixels $P$ per slice, i.e., $O(N \cdot P)$ per slice [S1, unofficial]. The nested loop over axes and slices multiplies this by the number of slices $S$, resulting in $O(S \cdot N \cdot P)$ per iteration [S1, unofficial].
++*   **Memory Complexity:** Memory usage is proportional to the number of Gaussians $N$ and their parameters (position, covariance, color, opacity) [S1, unofficial]. The cut-set variant reduces memory by only storing gradients for the cut set [S3, unofficial].
++*   **Measured Performance:** Standard 3D Gaussian Splatting training typically runs for 30,000 iterations [S2, unofficial]. FaCT-GS uses a smaller voxelization volume ($32^3$) for TV loss [S4]. fMRI adaptation uses 4,000 total iterations (1,000 warm-up + 3,000 temporal) [S1, unofficial].
++*   **Strengths:** Dynamic adaptation allows the model to start with a coarse representation and refine it, balancing efficiency and fidelity [S1, unofficial].
++*   **Limitations:** The axis-slice structure may not be optimal for all scene geometries [S1, unofficial]. The refinement steps (pruning/splitting) add overhead and require careful tuning of thresholds $\tau_\alpha, \tau_p, \tau_s$ [S1, unofficial].
++*   **When to use:** Use for general 3D scene reconstruction from multi-view images or slices [S1, unofficial]. Use FaCT-GS for CT reconstruction where homogeneity is desired [S4]. Use fMRI adaptation for temporal medical imaging [S1, unofficial].
+ 
+ ## Background
+-The Training Pipeline originates from the 3D Gaussian Splatting method introduced by Kerbl et al. [2023], which uses a differentiable rasterizer to optimize 3D Gaussians for novel view synthesis [S1, S3, unofficial]. The specific inner loop structure with axis-slice decomposition and dynamic densification/pruning was detailed in subsequent works such as InnerGS [S1, unofficial] and various implementations [S2, S3, unofficial]. The method has been extended to various domains including CT reconstruction (FaCT-GS) [S4], LiDAR integration (SGD) [S5], and fMRI analysis [S1, unofficial].
++The Training Pipeline originates from the 3D Gaussian Splatting method by Kerbl et al. [2023], which introduced differentiable rasterization for 3D Gaussians [S1, S3, unofficial]. The specific inner loop structure with axis-aligned slices and dynamic densification/pruning was detailed in subsequent works such as InnerGS [S1, unofficial] and FaCT-GS [S4]. The method has been adapted for various domains including fMRI [S1, unofficial], CT [S4], and large-scale reconstruction [S3, unofficial].
+ 
+ ## Sources

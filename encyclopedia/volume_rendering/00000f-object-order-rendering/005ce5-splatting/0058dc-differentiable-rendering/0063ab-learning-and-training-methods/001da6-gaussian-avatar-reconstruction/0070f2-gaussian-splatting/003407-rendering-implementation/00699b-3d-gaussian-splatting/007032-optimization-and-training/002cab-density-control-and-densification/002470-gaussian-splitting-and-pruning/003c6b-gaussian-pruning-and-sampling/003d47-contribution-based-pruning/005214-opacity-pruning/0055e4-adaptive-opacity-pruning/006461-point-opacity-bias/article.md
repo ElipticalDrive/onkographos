@@ -1,0 +1,94 @@
+# Point Opacity Bias
+
+Also called: Opacity Bias for Point Clouds
+
+## Overview
+Point Opacity Bias is a regularization technique used during the optimization of point-based neural rendering (specifically within the Visual Error Tomography pipeline) to efficiently prune redundant or outlier Gaussian primitives. By adding a small constant to the opacity gradient, the method drives the opacities of unnecessary points toward zero, allowing them to be removed without significantly increasing rendering loss [S1]. It distinguishes itself from fixed-threshold pruning by integrating density control directly into the gradient descent process, enabling automatic identification of outliers during training [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** The current opacity gradient $\frac{\partial L}{\partial \alpha_i}$ for each point $i$ in the scene, where $L$ is the rendering loss and $\alpha_i$ is the opacity of point $i$.
+- **Output:** The modified gradient $\frac{\partial L'}{\partial \alpha_i}$ used for the optimizer step.
+
+**Data Structures:**
+- Each point $i$ maintains an opacity value $\alpha_i \in [0, 1]$.
+- The gradient $\frac{\partial L}{\partial \alpha_i}$ is computed via backpropagation through the differentiable blending point renderer [S1].
+
+**Parameters:**
+- **Bias ($\epsilon$):** A small positive constant added to the gradient.
+  - Typical value: $10^{-7}$ [S1].
+  - Alternative value: $10^{-6}$ (efficient reduction, slightly worse metrics) [S1].
+  - Range tested: $10^{-5}$ to $10^{-10}$ [S1].
+
+**Steps:**
+1. Compute the standard opacity gradient $\frac{\partial L}{\partial \alpha_i}$ for all points $i$ using the differentiable renderer [S1].
+2. Add the bias $\epsilon$ to the gradient:
+   $$ \frac{\partial L'}{\partial \alpha_i} = \frac{\partial L}{\partial \alpha_i} + \epsilon $$
+3. Perform the optimizer update step using $\frac{\partial L'}{\partial \alpha_i}$ [S1].
+4. During optimization, points with low opacity are identified as outliers and automatically removed [S1].
+
+**Edge Cases and Pitfalls:**
+- **Excessive Bias:** If $\epsilon$ is too large (e.g., $10^{-5}$), point removal becomes aggressive, leading to significant degradation in rendering quality (PSNR drops from 19.66 to 18.85 on the Garden scene) and increased perceptual loss (LPIPS increases from 0.178 to 0.406) [S1].
+- **Insufficient Bias:** If $\epsilon$ is too small (e.g., $10^{-10}$), point reduction is minimal (9.6M points retained vs 7.3M with $10^{-7}$), offering little efficiency gain [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_opacity_bias(gradient_opacity, bias=1e-7):
+    """
+    Applies the opacity bias to the gradient of point opacities.
+    
+    Args:
+        gradient_opacity (Tensor): The raw gradient of the loss with respect to opacity alpha.
+        bias (float): The epsilon value to add to the gradient. Default 1e-7.
+        
+    Returns:
+        Tensor: The modified gradient including the bias.
+    """
+    # Add bias to the gradient to encourage opacity reduction
+    modified_gradient = gradient_opacity + bias
+    return modified_gradient
+
+def optimize_points(gradient_opacity, optimizer, bias=1e-7):
+    """
+    Performs one optimization step with opacity bias.
+    
+    Args:
+        gradient_opacity (Tensor): Raw gradients from the differentiable renderer.
+        optimizer: The optimization object (e.g., Adam).
+        bias (float): The opacity bias value.
+    """
+    # 1. Apply bias
+    biased_gradient = apply_opacity_bias(gradient_opacity, bias)
+    
+    # 2. Update parameters using the biased gradient
+    optimizer.zero_grad()
+    # Note: In a real implementation, gradients are assigned to the optimizer's
+    # parameter group for 'alpha'. Here we assume the optimizer handles the
+    # assignment based on the provided gradient tensor.
+    optimizer.step()
+    
+    # 3. Pruning logic (conceptual)
+    # Points with alpha < threshold are removed.
+    # This is typically handled by a separate cleaning procedure triggered
+    # after optimization steps, as described in Sec 4 of [S1].
+```
+
+## Subtopics
+
+### [Differentiable Blending Point Renderer](19119-differentiable-blending-point-renderer.md)
+The Differentiable Blending Point Renderer is a point-based rasterization method that replaces fuzzy depth-testing with front-to-back alpha blending to enable the direct optimization of point opacities via backpropagation.
+
+## Operating characteristics
+- **Time Complexity:** Adds negligible overhead ($O(N)$ addition) to the backward pass [S1].
+- **Memory Complexity:** No additional memory required beyond storing the bias constant [S1].
+- **Performance:** On the Garden scene (7.8M initial points), a bias of $10^{-7}$ reduces the point count to 7.3M while maintaining high quality (PSNR 19.66, LPIPS 0.178) [S1]. A bias of $10^{-6}$ reduces points to 8.0M with slightly lower quality (PSNR 19.44, LPIPS 0.177) [S1]. A bias of $10^{-5}$ reduces points to 0.2M but severely degrades quality (PSNR 18.85, LPIPS 0.406) [S1].
+- **Strengths:** Efficiently lowers point cloud size while maintaining low rendering loss; automatically identifies outliers [S1].
+- **Limitations:** Requires careful tuning of $\epsilon$; too high a value causes significant quality loss [S1].
+
+## Background
+Point Opacity Bias was introduced in the VET (Visual Error Tomography) pipeline for point cloud completion and high-quality neural rendering [S1]. It builds on the differentiable point rasterizer with blending proposed by Rückert et al. [2022] [S1]. The method addresses issues such as missing points, local minima in descriptor optimization, and strong view dependency by allowing the system to remove redundant primitives during optimization [S1].
+
+## Sources
+[S1] VET: Visual Error Tomography for Point Cloud Completion and High-Quality Neural Rendering, https://doi.org/10.1145/3610548.3618212, fetched 2026-10-26

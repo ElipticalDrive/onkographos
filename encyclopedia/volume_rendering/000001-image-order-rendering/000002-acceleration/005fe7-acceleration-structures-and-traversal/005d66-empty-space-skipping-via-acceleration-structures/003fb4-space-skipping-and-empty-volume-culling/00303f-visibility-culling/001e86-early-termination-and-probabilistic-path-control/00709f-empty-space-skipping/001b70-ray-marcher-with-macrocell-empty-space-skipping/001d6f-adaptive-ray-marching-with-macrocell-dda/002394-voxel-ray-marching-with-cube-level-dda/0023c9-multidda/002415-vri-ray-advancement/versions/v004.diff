@@ -1,0 +1,148 @@
+--- v003.md
++++ v004.md
+@@ -1,4 +1,3 @@
+ # VRI Ray Advancement
+-
+ 
+ ## Overview
+@@ -11,14 +10,14 @@
+ 
+ **Data Structures:**
+-*   **I2 Node:** Represents a coarse block containing a `children` array of I1 nodes and a `child_mask` bitmask [S1, unofficial].
+-*   **I1 Node:** Represents a $8^3$ voxel sub-grid (brick) containing a `child_mask` and a `children` array of leaf voxels [S1, unofficial].
+-*   **Leaf Voxel:** The finest granularity of the hierarchical grid [S1, unofficial].
+-*   **DDA State:** `state.i2_ndda`, `state.i1_ndda` store the current DDA iterators; `state.i2_node`, `state.i1_node` store the current node references; `state.root_idx` tracks the current root entry [S1, unofficial].
++*   **I2 Node:** Contains a `child_mask` (bitmask), a `children` array of I1 nodes, and an `origin` coordinate [S1, unofficial].
++*   **I1 Node:** Contains a `child_mask` (bitmask), a `children` array of leaf voxels, and an `origin` coordinate [S1, unofficial].
++*   **Leaf Voxel:** Contains an `origin` coordinate and represents the finest granularity of the hierarchical grid [S1, unofficial].
++*   **DDA State:** `state.i2_ndda`, `state.i1_ndda` store the current DDA iterators; `state.i2_node`, `state.i1_node` store the current node references; `state.root_idx` tracks the current root entry index [S1, unofficial].
+ 
+ **Parameters:**
+-*   I1 brick size: $8^3$ voxels [S1, unofficial].
+-*   I2 node size: $128$ units (implied by $16 \times 8$) [S1, unofficial].
+-*   Root block size: $32$ units (implied by DDA init) [S1, unofficial].
+-*   Leaf voxel size: $1$ unit [S1, unofficial].
++*   Leaf voxel size: $8$ units [S1, unofficial].
++*   I1 brick size: $16$ units [S1, unofficial].
++*   I2 node size: $128$ units [S1, unofficial].
++*   Root block size: $32$ units [S1, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -35,20 +34,43 @@
+     return bin(mask & ((1 << idx) - 1)).count('1')
+ 
+-def intersect_ray_aabb(ray_origin, ray_dir, aabb_min, aabb_max):
+-    # Standard slab method for ray-AABB intersection [G]
++def intersect_ray_aabb(origin, direction, aabb_min, aabb_max):
+     tmin = -float('inf')
+     tmax = float('inf')
+     for i in range(3):
+-        if ray_dir[i] == 0:
+-            if ray_origin[i] < aabb_min[i] or ray_origin[i] > aabb_max[i]:
++        if direction[i] == 0:
++            if origin[i] < aabb_min[i] or origin[i] > aabb_max[i]:
+                 return None
+         else:
+-            t1 = (aabb_min[i] - ray_origin[i]) / ray_dir[i]
+-            t2 = (aabb_max[i] - ray_origin[i]) / ray_dir[i]
++            t1 = (aabb_min[i] - origin[i]) / direction[i]
++            t2 = (aabb_max[i] - origin[i]) / direction[i]
+             tmin = max(tmin, min(t1, t2))
+             tmax = min(tmax, max(t1, t2))
+-    if tmax < tmin:
+-        return None
+-    return tmin
++    return tmin if tmax >= tmin else None
++
++class DDAState:
++    def __init__(self, ray_origin, ray_dir, t_min, origin, block_size, cell_size):
++        self.t_min = t_min
++        self.origin = origin
++        self.block_size = block_size
++        self.cell_size = cell_size
++        self.current_cell = [0, 0, 0]
++        self.t_enter = t_min
++        self.t_exit = t_min + cell_size
++        self.step = [1 if d > 0 else -1 for d in ray_dir]
++        self.t_max = [t_min + cell_size if d != 0 else float('inf') for d in ray_dir]
++
++    def query(self):
++        inside = self.t_enter < self.t_min + self.block_size
++        stride = self.block_size // self.cell_size
++        child_idx = self.current_cell[0] * (stride ** 2) + self.current_cell[1] * stride + self.current_cell[2]
++        return inside, child_idx
++
++    def step(self):
++        min_t_idx = 0
++        if self.t_max[1] < self.t_max[min_t_idx]: min_t_idx = 1
++        if self.t_max[2] < self.t_max[min_t_idx]: min_t_idx = 2
++        self.t_enter = self.t_max[min_t_idx]
++        self.current_cell[min_t_idx] += self.step[min_t_idx]
++        self.t_max[min_t_idx] += self.cell_size
+ 
+ def vri_advance(state, ray, roots):
+@@ -56,5 +78,5 @@
+         # Phase 1: Drain current I1 DDA for leaf hits
+         while state.i1_ndda is not None:
+-            inside, child_idx = node_dda_query(state.i1_ndda)
++            inside, child_idx = state.i1_ndda.query()
+             if not inside:
+                 break
+@@ -65,9 +87,9 @@
+                 s = 8
+                 bbox_min = o
+-                bbox_max = Coord(o[0] + s - 1, o[1] + s - 1, o[2] + s - 1)
+-                t_enter = intersect_ray_aabb(ray.origin, ray.dir, bbox_min, bbox_max)
++                bbox_max = (o[0] + s - 1, o[1] + s - 1, o[2] + s - 1)
++                t_enter = intersect_ray_aabb(ray.origin, ray.direction, bbox_min, bbox_max)
+                 if t_enter is not None:
+-                    return LeafIntersection(t_enter, t_enter + 1.0, leaf), state
+-                step_dda(state.i1_ndda)
++                    return (t_enter, t_enter + 8.0, leaf), state
++                state.i1_ndda.step()
+ 
+         # Phase 2: Step I2 DDA to find next I1 child
+@@ -76,5 +98,5 @@
+         found_i1 = False
+         while state.i2_ndda is not None:
+-            inside, child_idx = node_dda_query(state.i2_ndda)
++            inside, child_idx = state.i2_ndda.query()
+             if inside and is_on(state.i2_node.child_mask, child_idx):
+                 idx = count_on_before(state.i2_node.child_mask, child_idx) + 1
+@@ -82,10 +104,10 @@
+                 o = state.i2_node.origin
+                 aabb_min = o
+-                aabb_max = Coord(o[0] + 128.0, o[1] + 128.0, o[2] + 128.0)
+-                t_min = intersect_ray_aabb(ray.origin, ray.dir, aabb_min, aabb_max)
++                aabb_max = (o[0] + 128.0, o[1] + 128.0, o[2] + 128.0)
++                t_min = intersect_ray_aabb(ray.origin, ray.direction, aabb_min, aabb_max)
+                 if t_min is not None:
+-                    state.i1_ndda = node_dda_init(ray, t_min, o, 16, 8)
++                    state.i1_ndda = DDAState(ray, t_min, o, 16, 8)
+                     state.i1_node = i1_node
+-                    step_dda(state.i2_ndda)
++                    state.i2_ndda.step()
+                     found_i1 = True
+                     break
+@@ -100,7 +122,6 @@
+             t_min, i2_node = roots[state.root_idx]
+             o = i2_node.origin
+-            state.i2_ndda = node_dda_init(ray, t_min, o, 32, 128)
++            state.i2_ndda = DDAState(ray, t_min, o, 32, 128)
+             state.i2_node = i2_node
+-            # Loop back to Phase 1
+ ```
+ 
+@@ -109,10 +130,10 @@
+ *   **Boundaries:** Ensure `intersect_ray_aabb` handles edge cases where the ray is parallel to a face or originates inside the volume [G].
+ *   **Degenerate Input:** If `roots` is empty, the method should immediately return `nothing` [G].
+-*   **Mask Handling:** `is_on` and `count_on_before` must correctly handle the bitmasks; `child_idx` is the linear index in the DDA, not the bit position [S1, unofficial].
++*   **Mask Handling:** `is_on` and `count_on_before` must correctly handle the bitmasks; `child_idx` is the bit position returned by the DDA query, used directly to index the mask [S1, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Not given in the sources.
+ *   **Memory Complexity:** Not given in the sources.
+-*   **Performance:** Designed for GPU execution (CUDA/JULIA KernelAbstractions) [S1, unofficial]. Outperforms flat DDA in sparse volumes [S1, unofficial].
++*   **Performance:** Designed for GPU execution (CUDA/JULIA KernelAbstractions) [S1, unofficial].
+ *   **Strengths:** Efficient empty-space skipping; leverages pre-sorted root entries for coherent traversal [S1, unofficial].
+ *   **Limitations:** Requires a pre-built hierarchical grid; overhead of managing multiple DDA states [S1, unofficial].

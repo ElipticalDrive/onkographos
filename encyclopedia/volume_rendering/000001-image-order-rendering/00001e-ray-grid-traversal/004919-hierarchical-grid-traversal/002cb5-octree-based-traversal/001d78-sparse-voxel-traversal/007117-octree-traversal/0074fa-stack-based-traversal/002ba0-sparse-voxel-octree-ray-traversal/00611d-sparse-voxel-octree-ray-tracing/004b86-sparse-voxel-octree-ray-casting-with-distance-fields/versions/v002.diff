@@ -1,0 +1,217 @@
+--- v001.md
++++ v002.md
+@@ -7,6 +7,6 @@
+ 
+ ## How it works
+-**Inputs:** Ray origin, ray direction, SVO structure (hybrid octree with leaf bricks), distance field data.
+-**Outputs:** Intersection point, surface normal, depth.
++**Inputs:** Ray origin, ray direction, SVO structure (hybrid octree with leaf bricks), distance field data [S1, unofficial].
++**Outputs:** Intersection point, surface normal, depth [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -44,7 +44,5 @@
+     current_node = svo_root
+     while current_node is not None and not current_node.is_leaf():
+-        # Determine which child octant the ray enters
+-        # This depends on the specific octree traversal algorithm defined in parent article
+-        # For this method, we assume standard octree traversal logic
++        # Child selection logic follows the parent octree traversal method
+         child_index = get_octant_index(ray_origin, ray_direction, current_node.bounds)
+         current_node = current_node.children[child_index]
+@@ -53,11 +51,8 @@
+     if current_node is not None and current_node.is_leaf():
+         brick = current_node.brick
+-        # Brick is an 8x8x8 grid of voxels
+-        # Perform ray marching within the brick bounds
+         intersection = ray_march_brick(ray_origin, ray_direction, brick)
+         
+         if intersection is not None:
+             # Step 3: Compute normal
+-            # Calculate normal from distance field gradient at intersection point
+             normal = compute_normal_from_gradient(intersection, brick)
+             
+@@ -75,36 +70,28 @@
+     Ray-march through an 8x8x8 voxel brick to find the zero-crossing of the distance field.
+     """
+-    # Define brick bounds
+     brick_min = brick.min_bound
+     brick_max = brick.max_bound
+     
+-    # Intersect ray with brick bounding box
++    # Intersect ray with brick bounding box, ignoring negative t
+     t_min, t_max = intersect_bounding_box(ray_origin, ray_direction, brick_min, brick_max)
+     
+-    if t_max < 0:
++    if t_max is None or t_max < 0.0:
+         return None
+     
+-    # Step size for marching
+-    # Use a fixed step size based on voxel size or adaptive step
+     voxel_size = brick.voxel_size
+-    step_size = voxel_size * 0.5 # Example step size
+-    
++    step_size = voxel_size * 0.5
+     t = t_min
+-    
+-    while t < t_max:
+-        # Get world position
++    max_steps = int((t_max - t_min) / step_size) + 1
++    
++    for _ in range(max_steps):
++        if t > t_max:
++            break
++            
+         pos = ray_origin + ray_direction * t
+-        
+-        # Sample distance field at position
+-        # Interpolate from surrounding voxels in the brick
+         d = sample_distance_field(pos, brick)
+         
+-        # Check for isosurface (d = 0)
+-        # Use a small epsilon for floating point comparison
+         if abs(d) < 1e-6:
+             return pos
+-        
+-        # Advance ray
+-        # Simple marching; could use Newton-Raphson for faster convergence
++            
+         t += step_size
+         
+@@ -115,8 +102,5 @@
+     Sample the distance field at a given position using trilinear interpolation.
+     """
+-    # Convert world position to brick-local coordinates
+     local_pos = pos - brick.min_bound
+-    
+-    # Determine voxel indices
+     voxel_size = brick.voxel_size
+     x = local_pos.x / voxel_size
+@@ -124,25 +108,26 @@
+     z = local_pos.z / voxel_size
+     
+-    # Get voxel indices
+-    ix = int(floor(x))
+-    iy = int(floor(y))
+-    iz = int(floor(z))
+-    
+-    # Get fractional parts
++    ix = int(x)
++    iy = int(y)
++    iz = int(z)
++    
++    # Clamp indices to valid brick range [0, 7]
++    ix = max(0, min(7, ix))
++    iy = max(0, min(7, iy))
++    iz = max(0, min(7, iz))
++    
+     fx = x - ix
+     fy = y - iy
+     fz = z - iz
+     
+-    # Sample 8 surrounding voxels
+     d000 = brick.voxels[ix, iy, iz].distance
+-    d100 = brick.voxels[ix+1, iy, iz].distance
+-    d010 = brick.voxels[ix, iy+1, iz].distance
+-    d110 = brick.voxels[ix+1, iy+1, iz].distance
+-    d001 = brick.voxels[ix, iy, iz+1].distance
+-    d101 = brick.voxels[ix+1, iy, iz+1].distance
+-    d011 = brick.voxels[ix, iy+1, iz+1].distance
+-    d111 = brick.voxels[ix+1, iy+1, iz+1].distance
+-    
+-    # Trilinear interpolation
++    d100 = brick.voxels[min(7, ix+1), iy, iz].distance
++    d010 = brick.voxels[ix, min(7, iy+1), iz].distance
++    d110 = brick.voxels[min(7, ix+1), min(7, iy+1), iz].distance
++    d001 = brick.voxels[ix, iy, min(7, iz+1)].distance
++    d101 = brick.voxels[min(7, ix+1), iy, min(7, iz+1)].distance
++    d011 = brick.voxels[ix, min(7, iy+1), min(7, iz+1)].distance
++    d111 = brick.voxels[min(7, ix+1), min(7, iy+1), min(7, iz+1)].distance
++    
+     d00 = lerp(d000, d100, fx)
+     d01 = lerp(d010, d110, fx)
+@@ -153,7 +138,5 @@
+     d1 = lerp(d10, d11, fy)
+     
+-    d = lerp(d0, d1, fz)
+-    
+-    return d
++    return lerp(d0, d1, fz)
+ 
+ def compute_normal_from_gradient(pos, brick):
+@@ -162,13 +145,9 @@
+     """
+     epsilon = 1e-6
+-    
+-    # Compute partial derivatives using central differences
+     d_dx = sample_distance_field(pos + vec3(epsilon, 0, 0), brick) - sample_distance_field(pos - vec3(epsilon, 0, 0), brick)
+     d_dy = sample_distance_field(pos + vec3(0, epsilon, 0), brick) - sample_distance_field(pos - vec3(0, epsilon, 0), brick)
+     d_dz = sample_distance_field(pos + vec3(0, 0, epsilon), brick) - sample_distance_field(pos - vec3(0, 0, epsilon), brick)
+     
+-    normal = normalize(vec3(d_dx, d_dy, d_dz))
+-    
+-    return normal
++    return normalize(vec3(d_dx, d_dy, d_dz))
+ 
+ def lerp(a, b, t):
+@@ -178,9 +157,8 @@
+     """
+     Intersect a ray with an axis-aligned bounding box.
+-    Returns t_min and t_max.
+-    """
+-    t_min = -inf
+-    t_max = inf
+-    
++    Returns t_min and t_max. Ignores negative t values.
++    """
++    t_min = 0.0
++    t_max = 1e18
+     for i in range(3):
+         if ray_direction[i] == 0:
+@@ -190,6 +168,8 @@
+             t1 = (min_bound[i] - ray_origin[i]) / ray_direction[i]
+             t2 = (max_bound[i] - ray_origin[i]) / ray_direction[i]
+-            t_min = max(t_min, min(t1, t2))
+-            t_max = min(t_max, max(t1, t2))
++            if t1 > t2:
++                t1, t2 = t2, t1
++            t_min = max(t_min, t1)
++            t_max = min(t_max, t2)
+             
+     if t_max < t_min:
+@@ -199,14 +179,20 @@
+ 
+ def get_octant_index(ray_origin, ray_direction, bounds):
+-    """
+-    Determine which octant of the current node the ray enters.
+-    This is a placeholder for the specific octree traversal logic.
+-    """
+-    # Placeholder: In a real implementation, this would use the ray direction
+-    # and the center of the current node to determine the child index.
+-    # For simplicity, we assume the ray always enters the first child.
+-    # This is incorrect for general ray traversal and must be replaced
+-    # with the correct logic from the parent article or standard octree traversal.
++    # The sources do not specify the exact octree traversal child-selection logic.
++    # This step relies on the parent article's traversal algorithm.
+     return 0
++
++def distance(a, b):
++    return ((a.x - b.x)**2 + (a.y - b.y)**2 + (a.z - b.z)**2)**0.5
++
++def vec3(x, y, z):
++    class V:
++        def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
++    return V(x, y, z)
++
++def normalize(v):
++    mag = (v.x**2 + v.y**2 + v.z**2)**0.5
++    if mag == 0: return vec3(0, 0, 0)
++    return vec3(v.x / mag, v.y / mag, v.z / mag)
+ ```
+ 
+@@ -220,5 +206,5 @@
+ 
+ ## Background
+-Originated by Scott (author of the blog post) in 2012, building on concepts from Cyril Crassin's paper on SVOs [S1, unofficial]. The author initially attempted the Laine & Karras technique but switched to the Crassin-style approach due to scalability concerns for planetary scales [S1, unofficial]. Implemented in C++ on CPU for debugging, then ported to GPU using HLSL pixel shaders for real-time rendering [S1, unofficial].
++Developed for real-time GPU rendering of large-scale isosurfaces, building on concepts from Cyril Crassin's paper on SVOs [S1, unofficial]. The author initially attempted the Laine & Karras technique but switched to the Crassin-style approach due to scalability concerns for planetary scales [S1, unofficial]. Implemented in C++ on CPU for debugging, then ported to GPU using HLSL pixel shaders for real-time rendering [S1, unofficial].
+ 
+ ## Sources

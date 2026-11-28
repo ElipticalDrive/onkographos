@@ -1,0 +1,566 @@
+--- v001.md
++++ v002.md
+@@ -4,83 +4,93 @@
+ 
+ ## Overview
+-ExaBricks is a rendering method for Block-Structured Adaptive Mesh Refinement (BS-AMR) data that re-organizes input cells into compact, non-overlapping bricks and uses a secondary spatial partitioning called Active Brick Regions (ABRs) to enable smooth, high-quality interpolation across level boundaries [S1]. It sets itself apart from prior methods by eliminating costly per-sample cell location kernels (required by the basis method [37]) and deep AMR hierarchy traversals, instead relying on ABRs for fast sample reconstruction and an RTX BVH for hardware-accelerated ray marching [S1].
++ExaBricks is a rendering method for Block-Structured Adaptive Mesh Refinement (BS-AMR) data that re-organizes input cells into compact, non-overlapping bricks and builds a spatial partitioning structure called Active Brick Regions (ABRs) to support smooth, high-quality interpolation across level boundaries [S1]. It solves the problem of discontinuous reconstruction and costly cell-location kernels inherent in standard AMR rendering by decoupling storage from the original hierarchy and using hardware-accelerated ray traversal [S1]. Unlike its siblings, which focus on sparse page tables or compressed segmentation, ExaBricks explicitly constructs a secondary spatial index (ABRs) to manage the overlapping support regions of smooth basis functions, enabling efficient space skipping and adaptive sampling via an RTX BVH [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A set of AMR cells, each defined by lower-left unit coordinates $(i, j, k)$, level $l$, and a scalar data value $C_v$. Level 0 is the finest level (implicit cell size $1^3$); level $l$ has cell size $2^l$ [S1].
+-*   **Output:** A set of bricks, a hierarchy of Active Brick Regions (ABRs), and an RTX Bounding Volume Hierarchy (BVH) over the ABRs, enabling ray traversal and volume rendering [S1].
+-
+-**Data Structures:**
+-
+-1.  **Brick:**
+-    *   `lower_left`: Tuple $(i, j, k)$ of integer coordinates [S1].
+-    *   `level`: Integer $l$ [S1].
+-    *   `dims`: Tuple $(N, M, K)$ representing the number of cells in each dimension [S1].
+-    *   `scalars`: A 3D array of size $N \times M \times K$ storing the data values [S1].
+-
+-2.  **Active Brick Region (ABR):**
+-    *   `bbox`: Bounding box of the region [S1].
+-    *   `active_bricks`: List of brick IDs that influence this region [S1].
+-    *   `min_val`: Minimum scalar value of any cell whose support overlaps the region [S1].
+-    *   `max_val`: Maximum scalar value of any cell whose support overlaps the region [S1].
+-    *   `finest_cell_width`: Cell width of the finest AMR level influencing the region [S1].
+-
+-**Algorithm Steps:**
+-
+-1.  **Brick Generation:**
+-    *   Build a k-d tree top-down from the input AMR cells [S1].
+-    *   For a current node, check if all cells are on the same AMR level and completely fill their combined bounding box [S1].
+-    *   If yes, create a leaf node (a brick) [S1].
+-    *   If no, split the node along the longest axis of its bounding box [S1].
+-    *   Round split positions to an integer multiple of the current coarsest cell width [S1].
+-    *   Limit leaf size to at most 32 cells wide on any axis to ensure fine granularity for space skipping [S1].
+-    *   Discard the internal hierarchy; store only the leaf bricks [S1].
+-
+-2.  **ABR Construction:**
+-    *   Create a list of "brick support fragments". Each fragment is a box representing the support of a brick and its brick ID [S1].
+-    *   Compute the bounding box of all fragments [S1].
+-    *   Recursively subdivide the bounding box:
+-        *   For the current region and its overlapping fragments, find a partitioning plane from the fragment boundaries closest to the region's spatial center [S1].
+-        *   Prefer the widest dimension for the split [S1].
+-        *   If no valid plane exists, create a leaf ABR containing the current list of brick IDs [S1].
+-        *   Otherwise, partition the region, sort fragments into left/right subtrees, and recurse [S1].
+-    *   For each leaf ABR, compute `min_val`, `max_val`, and `finest_cell_width` from the active bricks [S1].
+-
+-3.  **BVH Construction:**
+-    *   Build an RTX BVH over the leaf ABRs [S1].
+-
+-4.  **Ray Traversal and Rendering:**
+-    *   Use the RTX BVH to iterate over ABRs a ray intersects, skipping those it is safe to ignore [S1].
+-    *   For samples within an ABR leaf, retrieve the list of active bricks [S1].
+-    *   Perform basis reconstruction using the cells within those bricks [S1].
+-
+-**Reconstruction Formula:**
+-The method uses the basis function by Wald et al. [37] for smooth interpolation [S1]. For a cell $C$ of width $C_w$, the basis function is:
++The method operates in three stages: brick generation, ABR construction, and ray traversal. It discards the original AMR hierarchy to create a flat, memory-efficient representation suitable for GPU rendering.
++
++### Inputs and Outputs
++- **Input:** A set of AMR cells, each defined by lower-left coordinates $(i, j, k)$, level $l$, and a scalar value $v$. Level 0 is the finest level with implicit cell size $1^3$; level $l$ has cell size $2^l$. Cells do not overlap, and coordinates are multiples of $2^l$ [S1].
++- **Output:** A set of Bricks, a set of Active Brick Regions (ABRs), and an RTX Bounding Volume Hierarchy (BVH) built over the ABRs [S1].
++
++### Data Structures
++
++**Brick**
++Each brick stores a dense 3D array of scalars. The metadata fields are:
++- `lower_left`: $(i, j, k)$, the integer coordinates of the brick's corner.
++- `level`: $l$, the AMR level of the cells contained.
++- `dims`: $(N, M, K)$, the number of cells in each dimension.
++- `data`: A 3D array of size $N \times M \times K$ storing the scalar values [S1].
++
++**Active Brick Region (ABR)**
++Each ABR represents a rectangular region of space and stores:
++- `bbox`: The bounding box of the region.
++- `active_bricks`: A list of brick IDs that have non-zero support in this region.
++- `min_val`: The minimum scalar value of any cell whose support overlaps the region.
++- `max_val`: The maximum scalar value of any cell whose support overlaps the region.
++- `finest_cell_width`: The cell width of the finest AMR level influencing this region [S1].
++
++### Step 1: Brick Generation
++The input AMR cells are reorganized into bricks using a top-down k-d tree construction. The original hierarchy is discarded.
++
++1.  **Initialize:** Create a root node containing all input cells.
++2.  **Check Leaf Condition:** For the current node, check if all cells are on the same AMR level $l$ and if they completely fill their combined bounding box.
++    -   If yes, create a leaf node (a Brick). Store its metadata and scalar data.
++    -   If no, proceed to split.
++3.  **Split:**
++    -   Identify the longest axis of the current node's bounding box.
++    -   Determine a split position along this axis. The split position must be rounded to an integer multiple of the coarsest cell width present in the node (typically $2^l$ where $l$ is the level of the cells, or the global coarsest level if mixed, but the source specifies "integer multiple of current coarsest cell width" [S1]).
++    -   Partition the cells into left and right child nodes based on the split.
++4.  **Size Limit:** Ensure no leaf node exceeds 32 cells in width on any axis. If a potential leaf would exceed this, force a split even if the leaf condition is met, or adjust the split to respect the limit [S1].
++5.  **Recurse:** Recursively apply steps 2–4 to the child nodes.
++
++### Step 2: ABR Construction
++ABRs are built to handle the overlapping support regions of the smooth reconstruction filter.
++
++1.  **Compute Support Fragments:** For each Brick $B$ with level $l$ and cell width $C_w = 2^l$, compute its support region. The support of a cell extends half a cell width beyond its bounds. Thus, the support of a brick is a box exactly half the brick's cell width larger than the brick itself. Create a "brick support fragment" for each brick, storing its support bounding box and the brick's ID [S1].
++2.  **Initialize Root:** Compute the bounding box of all support fragments. Create the root ABR node covering this global bounding box, with an initial list of all fragments overlapping it.
++3.  **Recursive Subdivision:**
++    -   Let $R$ be the current region and $F$ be the list of overlapping fragments.
++    -   If $F$ is empty, the region is empty; discard.
++    -   If no partitioning plane can be found (all fragments cover the region or boundaries are coincident), create a leaf ABR. Set `active_bricks` to the IDs in $F$, and compute `min_val`, `max_val`, and `finest_cell_width` from the cells in those bricks.
++    -   Otherwise, find a partitioning plane. Iterate through the boundaries of the fragments in $F$. Select the plane closest to the spatial center of $R$, preferring the widest dimension of $R$ [S1].
++    -   Split $R$ into left ($R_L$) and right ($R_R$) sub-regions.
++    -   Partition $F$ into $F_L$ (overlapping $R_L$) and $F_R$ (overlapping $R_R$).
++    -   Recurse on $(R_L, F_L)$ and $(R_R, F_R)$.
++
++### Step 3: Ray Traversal and Reconstruction
++1.  **Build BVH:** Construct an RTX BVH over the leaf ABRs.
++2.  **Ray Marching:** For each ray, traverse the BVH.
++    -   **Space Skipping:** If a ray intersects an ABR leaf where `min_val` == `max_val` (and the value is background/empty), skip the region.
++    -   **Adaptive Sampling:** Use `finest_cell_width` of the current ABR leaf to determine the sampling step size, ensuring the sampling frequency adapts to the finest level in that region [S1].
++3.  **Sample Reconstruction:** When a sample point $p$ falls within an ABR leaf:
++    -   Retrieve the list of `active_bricks`.
++    -   For each brick, iterate through its cells. A cell $C_i$ contributes if $p$ is within its support.
++    -   Compute the basis function value and accumulate the weighted sum.
++
++#### Basis Function and Reconstruction Formula
++The method uses the hat-shaped basis function (linear B-spline) [S1]:
++
++$$ \hat{h}(x) = \max(1 - x, 0) $$
++
++For a cell $C$ of width $C_w$, the basis function at position $p$ is:
+ 
+ $$ \hat{H}_C(p) = \hat{h}\left(\frac{|C_{p_x} - p_x|}{C_w}\right) \hat{h}\left(\frac{|C_{p_y} - p_y|}{C_w}\right) \hat{h}\left(\frac{|C_{p_z} - p_z|}{C_w}\right) $$
+ 
+-where $\hat{h}(x) = \max(1 - x, 0)$ [S1].
+-
+-The reconstruction at position $p$ is:
++The reconstructed value $B(p)$ is the normalized weighted sum of all cells $C_i$ with non-zero support at $p$:
+ 
+ $$ B(p) = \frac{\sum_{C_i} \hat{H}_{C_i}(p) C_{v_i}}{\sum_{C_i} \hat{H}_{C_i}(p)} $$
+ 
+-where $C_i$ are cells with non-zero support at $p$, and $C_{v_i}$ is the data value [S1].
+-
+-**Cell Support Definition:**
+-*   The support of a cell $C$ is a rectangular box extending exactly half a cell width beyond the cell itself [S1].
+-*   The support of a brick $B$ is the union of the supports of its cells, resulting in a box exactly half the brick's cell width larger than the brick [S1].
+-
+-**Pseudocode:**
++where $C_{v_i}$ is the scalar value of cell $C_i$ [S1].
++
++#### Pseudocode
+ 
+ ```python
+ def generate_bricks(cells):
+     """
+-    Re-organize AMR cells into non-overlapping bricks.
+-    cells: List of dicts with keys 'i', 'j', 'k', 'l', 'bbox'
+-    Returns: List of Brick objects
+-    """
+-    # Build k-d tree top-down
+-    root = KDNode(cells)
++    Reorganizes AMR cells into non-overlapping bricks.
++    cells: List of dicts with keys 'i', 'j', 'k', 'l', 'v'.
++    Returns: List of Brick objects.
++    """
++    root = Node(cells=cells)
+     bricks = []
+     stack = [root]
+@@ -88,242 +98,184 @@
+     while stack:
+         node = stack.pop()
++        current_cells = node.cells
++        
+         # Check if leaf condition is met
+-        if is_leaf(node):
+-            bricks.append(create_brick(node))
++        levels = set(c['l'] for c in current_cells)
++        if len(levels) == 1:
++            l = levels.pop()
++            # Check if cells fill the bounding box completely
++            # This requires checking for gaps in the grid defined by level l
++            if cells_fill_bbox(current_cells, l):
++                brick = create_brick(current_cells, l)
++                bricks.append(brick)
++                continue
++        
++        # Check size limit
++        bbox = get_bbox(current_cells)
++        if is_too_large(bbox, max_width=32):
++            # Must split
++            pass
+         else:
+-            # Split along longest axis
+-            split_axis = node.longest_axis()
+-            # Round split position to integer multiple of coarsest cell width
+-            split_pos = round_to_multiple(node.bbox.center()[split_axis], node.coarsest_cell_width)
+-            
+-            left_cells, right_cells = split_cells(node.cells, split_axis, split_pos)
+-            
+-            if left_cells:
+-                stack.append(KDNode(left_cells))
+-            if right_cells:
+-                stack.append(KDNode(right_cells))
+-                
++            # If not leaf and not too large, we might still need to split if hierarchy is mixed
++            # The source says: "leaf node created if all cells... same level AND completely fill"
++            # If not, we split.
++            pass
++
++        # Split logic
++        axis = get_longest_axis(bbox)
++        split_pos = find_split_position(current_cells, axis, l) # Rounded to multiple of 2^l
++        
++        left_cells, right_cells = split_cells(current_cells, axis, split_pos)
++        
++        if left_cells:
++            stack.append(Node(cells=left_cells))
++        if right_cells:
++            stack.append(Node(cells=right_cells))
++            
+     return bricks
+ 
+-def is_leaf(node):
+-    """
+-    Leaf if all cells are same level, fill bounding box, and size <= 32 on any axis.
+-    """
+-    if not node.cells:
+-        return False
+-    
+-    levels = set(c['l'] for c in node.cells)
+-    if len(levels) > 1:
+-        return False
+-        
+-    # Check if cells completely fill bounding box
+-    if not cells_fill_bbox(node.cells, node.bbox):
+-        return False
+-        
+-    # Check size limit
+-    dims = node.bbox.size()
+-    if any(d > 32 for d in dims):
+-        return False
+-        
+-    return True
+-
+-def create_brick(node):
+-    """
+-    Create Brick object from leaf node cells.
+-    """
+-    cells = node.cells
+-    # Assume all cells are same level and contiguous
+-    l = cells[0]['l']
+-    # Determine lower-left and dimensions from cells
+-    # [G] Implementation detail: Sort cells to find min coordinates and max dimensions
++def create_brick(cells, level):
++    """
++    Creates a Brick data structure from a list of cells at the same level.
++    """
++    # Determine dimensions and lower-left
++    # Cells are at integer coordinates multiples of 2^level
++    # Brick dims N, M, K are derived from the extent of cells
+     min_i = min(c['i'] for c in cells)
+     min_j = min(c['j'] for c in cells)
+     min_k = min(c['k'] for c in cells)
+     
+-    # [G] Determine N, M, K by counting unique coordinates or bounding box size / cell_size
+-    cell_size = 2 ** l
+-    max_i = max(c['i'] for c in cells)
+-    max_j = max(c['j'] for c in cells)
+-    max_k = max(c['k'] for c in cells)
+-    
+-    N = (max_i - min_i) // cell_size + 1
+-    M = (max_j - min_j) // cell_size + 1
+-    K = (max_k - min_k) // cell_size + 1
+-    
+-    # [G] Extract scalar values into 3D array
+-    scalars = zeros((N, M, K))
+-    for c in cells:
+-        idx_i = (c['i'] - min_i) // cell_size
+-        idx_j = (c['j'] - min_j) // cell_size
+-        idx_k = (c['k'] - min_k) // cell_size
+-        scalars[idx_i, idx_j, idx_k] = c['value']
+-        
+-    return Brick(lower_left=(min_i, min_j, min_k), level=l, dims=(N, M, K), scalars=scalars)
+-
+-def construct_abrs(bricks):
+-    """
+-    Build Active Brick Regions from bricks.
+-    """
+-    # Create support fragments
++    # Assuming cells form a contiguous block
++    # N = (max_i - min_i) / 2^level + 1
++    # ... similar for M, K
++    
++    brick = Brick(
++        lower_left=(min_i, min_j, min_k),
++        level=level,
++        dims=(N, M, K), # Calculated from extent
++        data=map_cells_to_array(cells, N, M, K)
++    )
++    return brick
++
++def build_abrs(bricks):
++    """
++    Builds Active Brick Regions.
++    bricks: List of Brick objects.
++    Returns: List of ABR leaf nodes.
++    """
++    # 1. Create support fragments
+     fragments = []
+     for brick in bricks:
+-        support_box = compute_brick_support(brick)
+-        fragments.append({'box': support_box, 'brick_id': brick.id})
+-        
+-    # Compute global bounding box
+-    global_bbox = union_boxes([f['box'] for f in fragments])
+-    
+-    # Recursive subdivision
+-    abrs = []
+-    build_abr_recursive(global_bbox, fragments, abrs)
+-    return abrs
+-
+-def compute_brick_support(brick):
+-    """
+-    Support is brick bbox extended by half cell width.
+-    """
+-    cell_size = 2 ** brick.level
+-    half_cell = cell_size / 2.0
+-    bbox = brick.bbox # [G] Derived from lower_left and dims
+-    # Extend bbox by half_cell in all directions
+-    return bbox.extend(half_cell)
+-
+-def build_abr_recursive(region_bbox, overlapping_fragments, abrs):
+-    """
+-    Recursively subdivide region to create ABRs.
+-    """
+-    if not overlapping_fragments:
+-        return
+-        
+-    # Find partitioning plane
+-    plane = find_best_split_plane(region_bbox, overlapping_fragments)
+-    
+-    if plane is None:
+-        # Create leaf ABR
+-        abrs.append(ABR(
+-            bbox=region_bbox,
+-            active_bricks=[f['brick_id'] for f in overlapping_fragments],
+-            min_val=compute_min_val(overlapping_fragments),
+-            max_val=compute_max_val(overlapping_fragments),
+-            finest_cell_width=compute_finest_width(overlapping_fragments)
+-        ))
+-    else:
+-        left_frags, right_frags = split_fragments(overlapping_fragments, plane)
+-        left_bbox, right_bbox = split_bbox(region_bbox, plane)
+-        
+-        if left_frags:
+-            build_abr_recursive(left_bbox, left_frags, abrs)
+-        if right_frags:
+-            build_abr_recursive(right_bbox, right_frags, abrs)
+-
+-def find_best_split_plane(region, fragments):
+-    """
+-    Find fragment boundary closest to region center, preferring widest dimension.
+-    """
+-    center = region.center()
+-    best_plane = None
+-    best_dist = infinity
+-    best_dim = -1
+-    
+-    # Iterate fragment boundaries
+-    for frag in fragments:
+-        for dim in [0, 1, 2]:
+-            # Get min and max of fragment in dim
+-            min_val = frag['box'].min[dim]
+-            max_val = frag['box'].max[dim]
+-            
+-            # Check if boundary is inside region
+-            if min_val > region.min[dim] and min_val < region.max[dim]:
+-                dist = abs(min_val - center[dim])
+-                if dist < best_dist:
+-                    best_dist = dist
+-                    best_plane = {'dim': dim, 'pos': min_val}
+-                    best_dim = dim
+-            if max_val > region.min[dim] and max_val < region.max[dim]:
+-                dist = abs(max_val - center[dim])
+-                if dist < best_dist:
+-                    best_dist = dist
+-                    best_plane = {'dim': dim, 'pos': max_val}
+-                    best_dim = dim
+-                    
+-    # Prefer widest dimension if distances are equal? 
+-    # Note: Sources say "prefer widest dimension" but also "closest to center".
+-    # Implementation: If multiple planes have same min distance, pick widest.
+-    # Simplified: Just pick closest. If tie, pick widest.
+-    
+-    return best_plane
+-
+-def basis_reconstruct(p, abrs, bricks):
+-    """
+-    Reconstruct value at point p using ABRs and bricks.
+-    """
+-    # Find ABR leaf containing p
+-    abr = find_abr_leaf(abrs, p)
+-    
+-    total_weight = 0.0
+-    total_value = 0.0
+-    
+-    for brick_id in abr.active_bricks:
++        l = brick.level
++        cell_width = 2**l
++        # Support extends half cell width beyond brick bounds
++        # Brick bounds: [i, i + N*cell_width)
++        # Support bounds: [i - cell_width/2, i + N*cell_width + cell_width/2)
++        bbox = expand_bbox(brick.bbox, cell_width / 2.0)
++        fragments.append(SupportFragment(bbox=bbox, brick_id=brick.id))
++        
++    if not fragments:
++        return []
++        
++    global_bbox = get_union_bbox([f.bbox for f in fragments])
++    root_abr = ABRNode(bbox=global_bbox, fragments=fragments)
++    
++    stack = [root_abr]
++    leaves = []
++    
++    while stack:
++        node = stack.pop()
++        frags = node.fragments
++        
++        # Find partitioning plane
++        plane = find_best_split_plane(node.bbox, frags)
++        
++        if plane is None:
++            # Leaf
++            active_ids = [f.brick_id for f in frags]
++            # Compute min/max/finest from the actual cells in these bricks
++            # This requires accessing the original cell data or storing it in Brick
++            min_val, max_val, finest_w = compute_region_stats(active_ids, bricks)
++            
++            leaf = ABRLeaf(
++                bbox=node.bbox,
++                active_bricks=active_ids,
++                min_val=min_val,
++                max_val=max_val,
++                finest_cell_width=finest_w
++            )
++            leaves.append(leaf)
++        else:
++            # Split
++            left_frags, right_frags = partition_frags(frags, plane)
++            
++            if left_frags:
++                left_bbox = split_bbox(node.bbox, plane, side='left')
++                stack.append(ABRNode(bbox=left_bbox, fragments=left_frags))
++            if right_frags:
++                right_bbox = split_bbox(node.bbox, plane, side='right')
++                stack.append(ABRNode(bbox=right_bbox, fragments=right_frags))
++                
++    return leaves
++
++def reconstruct_sample(p, active_bricks, bricks):
++    """
++    Reconstructs value at p using basis method.
++    """
++    numerator = 0.0
++    denominator = 0.0
++    
++    for brick_id in active_bricks:
+         brick = bricks[brick_id]
+-        # Find cells in brick that influence p
+-        # [G] Determine which cells in the 3D array have non-zero support
+-        cell_width = 2 ** brick.level
+-        half_cell = cell_width / 2.0
+-        
+-        # Iterate over relevant cells in brick
+-        # [G] Optimization: Only iterate cells whose support overlaps p
+-        # Support of cell (i,j,k) is [i-half, i+half] x ...
+-        # p is in support if |p_coord - cell_center| < half_cell
+-        
+-        for i in range(brick.dims[0]):
+-            for j in range(brick.dims[1]):
+-                for k in range(brick.dims[2]):
+-                    cell_center = brick.lower_left + (i + 0.5) * cell_width
+-                    # Check if p is in cell support
+-                    if is_in_support(p, cell_center, cell_width):
+-                        # Compute basis function
+-                        h_x = max(1.0 - abs(p.x - cell_center.x) / cell_width, 0.0)
+-                        h_y = max(1.0 - abs(p.y - cell_center.y) / cell_width, 0.0)
+-                        h_z = max(1.0 - abs(p.z - cell_center.z) / cell_width, 0.0)
+-                        
+-                        weight = h_x * h_y * h_z
+-                        value = brick.scalars[i, j, k]
+-                        
+-                        total_weight += weight
+-                        total_value += weight * value
+-                        
+-    if total_weight == 0:
+-        return 0.0 # Or handle as empty space
+-    return total_value / total_weight
+-
+-def is_in_support(p, cell_center, cell_width):
+-    half = cell_width / 2.0
+-    return (abs(p.x - cell_center.x) < half and
+-            abs(p.y - cell_center.y) < half and
+-            abs(p.z - cell_center.z) < half)
++        l = brick.level
++        Cw = 2**l
++        
++        # Iterate over cells in brick that could influence p
++        # Optimization: only check cells whose support overlaps p
++        # Support of cell (i,j,k) is [i-Cw/2, i+Cw/2) etc.
++        
++        # Determine range of cell indices to check
++        # ...
++        
++        for cell in get_cells_in_range(brick, p, Cw):
++            # Compute basis function
++            # h_hat(x) = max(1 - |x|/Cw, 0)
++            hx = max(1.0 - abs(cell.i - p.x) / Cw, 0.0)
++            hy = max(1.0 - abs(cell.j - p.y) / Cw, 0.0)
++            hz = max(1.0 - abs(cell.k - p.z) / Cw, 0.0)
++            
++            H = hx * hy * hz
++            
++            if H > 0:
++                numerator += H * cell.v
++                denominator += H
++                
++    if denominator == 0:
++        return 0.0 # Or background color
++        
++    return numerator / denominator
+ ```
+ 
++### Edge Cases and Pitfalls
++-   **Precision:** The split positions in brick generation must be rounded to integer multiples of the cell width to ensure alignment. Failure to do so may result in gaps or overlaps between bricks [S1].
++-   **Empty Regions:** ABRs with no overlapping fragments should be discarded or marked as empty to enable space skipping [S1].
++-   **Degenerate Input:** If the input AMR data has gaps (cells do not form a contiguous block), the "completely fill bounding box" check in brick generation will fail, forcing further subdivision. The method assumes Block-Structured AMR layouts where refinement rules prevent arbitrary gaps [S1].
++
+ ## Subtopics
+ 
+ ### [Octant Method](2648-octant-method.md)
+-A reconstruction strategy for cell-centered Block-Structured Adaptive Mesh Refinement (BS-AMR) data that maps a sample point $p=(x,y,z)$ to a scalar value $F(p)$ by decomposing the domain into non-overlapping rectilinear octants, ensuring continuity across level boundaries and supporting fast implicit ray-isosurface intersections.
++A reconstruction strategy for BS-AMR data that maps sample points to scalar values using non-overlapping rectilinear octants. It solves discontinuous interpolation at level boundaries by tiling the domain without gaps, unlike ExaBricks which uses overlapping support regions managed by ABRs. Choose when strict non-overlapping geometric decomposition is preferred over smooth basis function overlap.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering time is dominated by ray traversal through the RTX BVH and basis reconstruction. The ABR structure allows $O(1)$ retrieval of influencing bricks for a given region, avoiding the $O(\log N)$ or worse per-sample k-d tree traversals required by prior methods [S1].
+-*   **Memory Complexity:** Memory usage is proportional to the number of bricks and ABRs. Bricks store only the necessary cells, and ABRs store metadata and lists of brick IDs. The structure avoids storing the full AMR hierarchy [S1].
+-*   **Measured Performance:** The method supports interactive high-quality direct volume rendering with smooth AMR reconstruction and gradient-based shading [S1]. It enables adaptive sampling that adapts to the finest level cell size while keeping total sample counts tractable [S1].
+-*   **Strengths:**
+-    *   Smooth interpolation across level boundaries using the basis method [S1].
+-    *   Fast sample reconstruction without costly cell location kernels [S1].
+-    *   Hardware-accelerated ray marching and space skipping via RTX BVH [S1].
+-    *   Supports interactive transfer function and iso-surface editing [S1].
+-*   **Limitations:**
+-    *   The basis method's support is not truncated at the first sample on the neighboring side, leading to larger support overlap between cells from neighboring blocks compared to some prior methods [S1].
+-    *   Requires re-organizing input data into bricks, discarding the original AMR hierarchy [S1].
+-*   **When to use:** When rendering BS-AMR data with smooth interpolation requirements and hardware-accelerated ray tracing capabilities (RTX) are available.
+-*   **When not to use:** When the input data is Tree-Based AMR and the overhead of brick generation is prohibitive, or when nearest-neighbor interpolation is sufficient and the complexity of ABR construction is not justified.
++-   **Time Complexity:** Brick generation is $O(N \log N)$ or $O(N)$ depending on the k-d tree implementation, where $N$ is the number of cells. ABR construction is also recursive and depends on the number of support overlaps. Ray traversal is $O(\log M)$ for BVH traversal, where $M$ is the number of ABRs.
++-   **Memory Complexity:** Stores all cell data in bricks (compact) plus ABR metadata. The ABR structure adds overhead proportional to the number of regions and active bricks per region.
++-   **Performance:** The method enables hardware-accelerated ray marching via RTX BVH, allowing for interactive frame rates. It avoids costly per-sample k-d tree traversals for cell location, which were a bottleneck in prior methods like Wald et al. [37] [S1].
++-   **Strengths:** High-quality smooth interpolation across AMR level boundaries; efficient space skipping and adaptive sampling; hardware-accelerated traversal.
++-   **Limitations:** The basis function's support is not truncated, leading to larger support overlaps and potentially more cells contributing to a single sample compared to nearest-neighbor methods. The ABR construction can be complex for highly heterogeneous data [S1].
++-   **When to use:** Interactive direct volume rendering of large AMR datasets requiring smooth gradients and adaptive sampling.
++-   **When not to use:** When memory is extremely constrained and the overhead of ABRs is prohibitive, or when nearest-neighbor interpolation is sufficient.
+ 
+ ## Background
+-ExaBricks was introduced by Wald et al. in 2020 [S1]. It builds on the brick-based organization proposed by Kähler et al. [17] and the basis reconstruction method by Wald et al. [37]. The method addresses the limitations of prior AMR rendering work, such as the costly cell location kernels used in [37] and the lack of smooth interpolation in methods like [21]. It is designed for Block-Structured AMR layouts but can be applied to a wide range of AMR refinement schemes [S1].
++ExaBricks was introduced by Wald et al. in 2020 in the paper "Ray Tracing Structured AMR Data Using ExaBricks" [S1]. It builds on previous work by Kähler et al. [17] for brick generation and Wald et al. [37] for the basis reconstruction method. The method addresses the limitations of prior AMR rendering techniques that required costly cell location kernels or failed to provide smooth interpolation across level boundaries. It is designed for high-performance computing environments, leveraging RTX hardware for ray traversal.
+ 
+ ## Sources

@@ -1,0 +1,139 @@
+--- v002.md
++++ v003.md
+@@ -4,96 +4,62 @@
+ 
+ ## Overview
+-Monocular Normal Regularization is a geometric supervision technique that constrains the predicted surface normals of a volume rendering or radiance field optimization by comparing them against smooth normal estimates derived from a pretrained monocular vision model [S1, S2]. Unlike methods that derive ground-truth normals from the gradients of rendered depth maps—which are often noisy and artifact-prone in complex scenes—this method leverages the semantic and geometric priors of foundation models to provide stable, smooth normal cues [S1]. It sets itself apart from sibling methods like [Predicted Normal Loss](7713-predicted-normal-loss.md) by replacing the rendered normal (which may be inconsistent with the underlying geometry) with an external monocular prediction, thereby decoupling the supervision signal from the noisy differentiable rendering pipeline [S1, S2].
++Monocular Normal Regularization is a geometric loss function that supervises the predicted surface normals of a volume rendering optimization using smooth normal estimates from a pretrained monocular network, rather than noisy gradients of rendered depths. It addresses the artifact-prone nature of gradient-based normal estimation in complex scenes by leveraging external geometric priors. It differs from [Density Gradient Normal Loss](9575-density-gradient-normal-loss.md) by relying on external monocular cues instead of internal density gradients.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:**
+-    *   $\hat{\boldsymbol{N}}$: The predicted normals from the scene representation (e.g., Gaussian splats or neural field).
+-    *   $\tilde{\boldsymbol{N}}$: The monocular normal estimate from a pretrained model (e.g., Omnidata [S1] or Stable Normal [S2]).
+-    *   $m$: A margin parameter to handle view-dependent inconsistencies in monocular predictions [S2].
+-    *   $\lambda_n$: The weight for the monocular normal loss in the total objective [S2].
+-*   **Outputs:**
+-    *   $\mathcal{L}_{mono}$: The scalar loss value.
++- **Inputs:** Rendered normals $\mathbf{N}$ (or predicted normals $\hat{\mathbf{N}}$ depending on the specific implementation variant), monocular normal predictions $\hat{\mathbf{N}}_{mono}$ from a pretrained model (e.g., Omnidata [S1, S3] or Stable Normal [S2]), and optional margin $m$ [S2].
++- **Outputs:** Scalar loss value $\mathcal{L}_n$ or $\mathcal{L}_{\hat{N}}$.
+ 
+ **Data Structures:**
+-*   $\hat{\boldsymbol{N}}$: A tensor of shape $(H, W, 3)$ containing unit normal vectors for each pixel.
+-*   $\tilde{\boldsymbol{N}}$: A tensor of shape $(H, W, 3)$ containing unit normal vectors from the monocular network.
++- Normals are represented as 3D unit vectors $\mathbf{n} \in \mathbb{R}^3$.
++- Monocular predictions are typically per-pixel maps aligned with the camera view.
+ 
+ **Steps:**
+-1.  **Compute Predicted Normals:** Extract normals from the scene representation. For Gaussian Splatting, this is often derived from the scaling axes. If a Gaussian $i$ has rotation matrix $R_i$ and scaling coefficients $s_i \in \mathbb{R}^3$, the normal is approximated by the axis with the smallest scale [S1]:
+-    $$ \hat{\boldsymbol{n}}_i = R_i \cdot \text{OneHot}(\arg\min(s_{i,1}, s_{i,2}, s_{i,3})) $$
+-    [S1]
+-2.  **Retrieve Monocular Cues:** Pass the input image through the pretrained monocular model to obtain $\tilde{\boldsymbol{N}}$. [S1, S2]
+-3.  **Compute Loss:** Calculate the discrepancy between $\hat{\boldsymbol{N}}$ and $\tilde{\boldsymbol{N}}$. Two common formulations exist:
+-    *   **L1 Loss:** Used in DN-Splatter [S1]:
+-        $$ \mathcal{L}_{\hat{N}} = \frac{1}{|\hat{N}|} \sum \| \hat{\boldsymbol{N}} - \tilde{\boldsymbol{N}} \|_1 $$
+-        [S1]
+-    *   **Margin-based Loss:** Used in OMeGa [S2]:
+-        $$ L_n = \sum \max(\| \boldsymbol{N} - \tilde{\boldsymbol{N}} \| - m, 0) $$
+-        where $\boldsymbol{N}$ is the predicted normal, $\tilde{\boldsymbol{N}}$ is the monocular cue, and $m$ is a small margin [S2].
+-4.  **Update Objective:** Add the weighted loss to the total training objective:
+-    $$ \mathcal{L}_{total} = \dots + \lambda_n \mathcal{L}_{mono} $$
+-    [S2]
++1. **Obtain Monocular Cues:** Render or predict the scene from the current camera viewpoint. Pass the input image or rendered depth/color through a pretrained monocular normal estimation network (e.g., Omnidata [S1, S3] or Stable Normal [S2]) to get $\hat{\mathbf{N}}_{mono}$.
++2. **Compute Rendered/Predicted Normals:**
++   - In Gaussian Splatting contexts, normals are derived from the Gaussian covariance. For a Gaussian $i$ with rotation matrix $R_i$ and scaling coefficients $s_i \in \mathbb{R}^3$, the normal direction is approximated by the axis with the smallest scale:
++     $$ \hat{\mathbf{n}}_i = R_i \cdot \text{OneHot}(\arg\min(s_{i,1}, s_{i,2}, s_{i,3})) $$
++     [S1]
++   - In SDF/SRDF contexts, normals are derived from the gradient of the signed distance field or density function, or composited from sampled points:
++     $$ \mathbf{N} = \sum_{i=1}^N T_i \alpha_i \mathbf{n}_i $$
++     [S3]
++3. **Calculate Loss:**
++   - **L1 Alignment (Omnidata):** Minimize the L1 distance between predicted normals $\hat{\mathbf{N}}$ and monocular cues $\mathbf{N}$:
++     $$ \mathcal{L}_{\hat{N}} = \frac{1}{|\hat{N}|} \sum \| \hat{\mathbf{N}} - \mathbf{N} \|_1 $$
++     [S1]
++   - **Margin-based Loss (Stable Normal):** Use a hinge-like loss with margin $m$ to handle inconsistencies across views:
++     $$ L_n = \sum \max(\| \mathbf{N} - \hat{\mathbf{N}} \| - m, 0) $$
++     [S2]
++   - **Depth and Normal Joint Loss (SRDF):** If depth is also involved, align rendered depth $D$ with monocular depth $\bar{D}$ using affine parameters $w, q$, and enforce normal consistency:
++     $$ \mathcal{L}_d = \frac{1}{N_s} \sum_{\mathbf{r} \in \mathcal{S}^2} \| (w D + q) - \bar{D} \|_2 $$
++     $$ \mathcal{L}_n = \frac{1}{N_s} \sum_{\mathbf{r} \in \mathcal{S}^2} \left( \| \mathbf{N} - \bar{\mathbf{N}} \|_1 + \| 1 - \mathbf{N}^T \bar{\mathbf{N}} \|_1 \right) $$
++     [S3]
++     Here, $\bar{D}, \bar{\mathbf{N}}$ are ground truth estimates from Omnidata, and $T_i, \alpha_i$ are transmittance/opacity weights.
+ 
+ **Parameters:**
+-*   $m$: A small margin value to handle inherent normal inconsistency across different views produced by monocular foundational models. [S2]
+-*   $\lambda_n$: The weight controlling the influence of the monocular normal loss. [S2]
++- $m$: Small margin for Stable Normal loss. Value not given in sources. [S2]
++- $\lambda_n$: Weight of the monocular normal loss in the total objective. Value not given in sources. [S2]
++- $w, q$: Scale and shift parameters for depth alignment, optimized per minibatch. [S3]
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Monocular Inconsistency:** Monocular models may produce normals that are inconsistent across different views or slightly misaligned with the true 3D geometry. The margin $m$ in the OMeGa formulation helps mitigate this by ignoring small discrepancies [S2].
+-*   **Noise in Gradient-Based Normals:** The primary motivation for this method is the noise in rendered depth gradients. If the monocular model is not used, artifacts may appear in the reconstruction [S1].
+-
+-**Pseudocode:**
+-```python
+-def monocular_normal_loss(predicted_normals, monocular_normals, margin=0.0, use_margin=False):
+-    """
+-    Computes the monocular normal regularization loss.
+-    
+-    Args:
+-        predicted_normals: Tensor of shape (H, W, 3), unit normals from scene representation.
+-        monocular_normals: Tensor of shape (H, W, 3), normals from pretrained monocular model.
+-        margin: Float, margin for hinge-like loss (default 0.0).
+-        use_margin: Bool, whether to use the margin-based loss from OMeGa [S2].
+-        
+-    Returns:
+-        Scalar loss value.
+-    """
+-    # Compute element-wise L1 distance
+-    diff = torch.abs(predicted_normals - monocular_normals)
+-    
+-    if use_margin:
+-        # OMeGa formulation: max(||N - N_hat|| - m, 0)
+-        # Note: The source [S2] uses L2 norm for the difference magnitude inside max
+-        l2_diff = torch.norm(predicted_normals - monocular_normals, dim=-1)
+-        loss_per_pixel = torch.clamp(l2_diff - margin, min=0.0)
+-        return torch.mean(loss_per_pixel)
+-    else:
+-        # DN-Splatter formulation: L1 loss
+-        # Source [S1] uses L1 norm on the vector difference, which is sum of abs diffs
+-        # Normalized by number of pixels (|N|)
+-        return torch.mean(diff)
+-```
+-[G] The pseudocode assumes `torch.norm` computes the L2 norm of the vector difference as implied by the OMeGa formula $\|N - \hat{N}\|$. The DN-Splatter formula $\|\hat{N} - N\|_1$ is interpreted as the sum of absolute differences per component, averaged over pixels.
++- **Depth Ambiguity:** Monocular depth prediction suffers from scale and shift ambiguities. This is resolved by optimizing affine parameters $w$ and $q$ per minibatch, following MonoSDF [S3].
++- **View Inconsistency:** Monocular models may produce inconsistent normals across different views. The margin $m$ in the Stable Normal loss helps mitigate this [S2].
++- **Noise in Gradients:** Using gradients of rendered depths for supervision results in artifacts, especially in complex scenes. Monocular cues provide smoother estimates [S1].
+ 
+ ## Subtopics
+ 
+-### Depth and Normal Losses
+-This variant, described in Ray-Distance Volume Rendering [S3], extends monocular supervision to include depth. It constrains 3D geometry by comparing rendered depth $D$ and normals $\mathbf{N}$ against ground truth estimates $\bar{D}, \bar{\mathbf{N}}$ from a pretrained Omnidata model [S3]. The rendered values are computed via transmittance-weighted accumulation: $D = \sum_{i=1}^N T_i \alpha_i z_i$ and $\mathbf{N} = \sum_{i=1}^N T_i \alpha_i \mathbf{n}_i$, where $T_i, \alpha_i$ are transmittance and opacity weights from SRDF density [S3]. The loss functions are:
+-$$ \mathcal{L}_d = \frac{1}{N_s} \sum_{\mathbf{r} \in \mathcal{S}^2} \| (w D + q) - \bar{D} \|_2 $$
+-$$ \mathcal{L}_n = \frac{1}{N_s} \sum_{\mathbf{r} \in \mathcal{S}^2} \left( \| \mathbf{N} - \bar{\mathbf{N}} \|_1 + \| 1 - \mathbf{N}^T \bar{\mathbf{N}} \|_1 \right) $$
+-[S3]
+-Parameters $w$ (scale) and $q$ (shift) are optimized per minibatch to resolve depth scale and shift ambiguities, following MonoSDF [S3]. This approach is chosen when both depth and normal consistency are critical for surface reconstruction, particularly in neural SDF-based rendering [S3].
++### [Geometric Prior Guided Geometry Learning](16865-geometric-prior-guided-geometry-learning.md)
++A two-stage method for high-fidelity 3D reconstruction that leverages geometric priors during both pre-training and volume rendering optimization. It addresses the lack of ground-truth surface normals in monocular settings by using a pretrained monocular normal estimator to supervise the optimization stage, while using ground-truth mesh normals during pre-training. It builds on [Monocular Normal Regularization](13425-monocular-normal-regularization.md) by extending the use of external normal predictions to the entire optimization pipeline, rather than just as a regularizer on gradients.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The additional cost is the forward pass of the pretrained monocular model, which is independent of the scene resolution in terms of gradient computation but adds inference time proportional to the image size. [S1, S2]
+-*   **Memory Complexity:** Requires storing the monocular normal map $\tilde{\boldsymbol{N}}$ in memory during training. [S1, S2]
+-*   **Performance:** Improves surface quality and reduces artifacts compared to gradient-based normal supervision, especially in textureless or complex regions [S1, S2].
+-*   **Strengths:** Provides smooth, semantically consistent normals; robust to noise in rendered depth. [S1, S2]
+-*   **Limitations:** Relies on the quality of the pretrained monocular model; may introduce biases if the model's priors conflict with the scene geometry; monocular normals may be inconsistent across views [S2].
+-*   **When to use:** When high-quality surface normals are required for mesh extraction or rendering, and gradient-based normals are too noisy. [S1, S2]
+-*   **When not to use:** When computational resources are extremely limited and the monocular model inference is prohibitive; or when the scene contains strong specularities that confuse monocular normal estimation.
++- **Time Complexity:** Depends on the monocular network inference time. Adding a pretrained network inference step increases per-step cost compared to gradient-based methods.
++- **Memory Complexity:** Requires storing the pretrained monocular model weights and intermediate feature maps if used in a differentiable pipeline, or just the output normal maps if treated as static supervision.
++- **Strengths:** Provides smoother normal estimates than gradient-based methods, reducing artifacts in complex scenes [S1]. Handles geometric priors effectively in monocular settings.
++- **Limitations:** Relies on the quality and consistency of the pretrained monocular model. May introduce view-inconsistent biases if not handled (e.g., via margin $m$) [S2].
++- **When to use:** When gradient-based normals are too noisy or when ground-truth normals are unavailable.
++- **When not to use:** When computational resources are extremely limited and monocular inference is prohibitive, or when ground-truth normals are available.
+ 
+ ## Background
+-Monocular normal regularization was introduced to address the limitations of using gradients of rendered depth maps for normal supervision, which are prone to noise and artifacts [S1]. DN-Splatter [S1] first proposed using Omnidata [7] for this purpose. OMeGa [S2] later adopted similar principles using Stable Normal [42] and introduced a margin-based loss to handle view inconsistencies. Ray-Distance Volume Rendering [S3] extended this to include depth supervision with affine alignment. These methods build on the broader trend of using pretrained foundation models for geometric priors in 3D reconstruction [S1, S2, S3].
++Originated from the need to improve 3D reconstruction quality in monocular settings where ground-truth normals are unavailable. Previous works used gradients of rendered depths, which are noisy [S1, S2]. The method leverages foundational monocular models like Omnidata [S1, S3] and Stable Normal [S2] to provide smooth geometric cues. It is used in Gaussian Splatting [S1, S2] and SDF/SRDF-based volume rendering [S3] to regularize geometry.
+ 
+ ## Sources

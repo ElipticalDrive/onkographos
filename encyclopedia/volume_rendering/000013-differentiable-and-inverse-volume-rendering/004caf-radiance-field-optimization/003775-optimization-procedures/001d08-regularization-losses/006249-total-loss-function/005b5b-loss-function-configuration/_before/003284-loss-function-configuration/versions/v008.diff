@@ -1,0 +1,428 @@
+--- v007.md
++++ v008.md
+@@ -1,45 +1,50 @@
+ # Loss Function Configuration
+ 
+-Also called: Loss Weighting Scheme, Total Training Loss, Training Loss Weights
++Also called: Loss Weighting Scheme, Loss function parameter configuration, Removing Repulsion Loss, Total Training Loss, Training Loss Weights, w/o Lrep
+ 
+ ## Overview
+-Loss Function Configuration defines the composite objective function and hyperparameter weights used to supervise the optimization of differentiable radiance fields. It combines geometric reconstruction fidelity, perceptual quality metrics, and regularization terms to guide the neural network or primitive-based representation toward the desired visual output. It differs from simple reconstruction objectives by integrating high-level perceptual metrics (SSIM, LPIPS) and specific regularization constraints (normal consistency, depth smoothness) to stabilize training and improve generalization.
++Loss function configuration defines the composite objective and hyperparameter schedule used to train differentiable radiance fields, balancing geometric reconstruction fidelity with perceptual and semantic constraints. It differs from simple reconstruction objectives by integrating high-level perceptual metrics (SSIM, LPIPS) and specific regularization terms (e.g., repulsion, sky, palette sparsity) to guide the network toward desired visual outputs, often varying weights across training stages or scene characteristics.
+ 
+ ## How it works
+-The total loss $\mathcal{L}$ is a weighted sum of individual loss components. The specific components and weights depend on the rendering representation (e.g., Gaussian Splatting, Voxel Grids) and the training stage (coarse vs. fine).
+-
+ ### Inputs and Outputs
+-- **Inputs**: Rendered image $I$, ground-truth target image $\hat{I}$, predicted normals $\mathbf{n}$, target normals $\hat{\mathbf{n}}$, predicted depth $d$, target depth $\hat{d}$, and transparent mask $m$.
+-- **Outputs**: Scalar loss value $\mathcal{L}$ and its gradient with respect to the scene parameters.
++**Inputs:**
++- Rendered images $\hat{I}$ and ground-truth images $I$.
++- Predicted geometric fields (density $\sigma$, occupancy, normals $\mathbf{n}$, depth $d$).
++- Optional masks (transparent mask, sky label, foreground/background masks).
++- Training iteration count $t$ and total iterations $T$.
++- Scene-specific flags (e.g., large motion, static vs. dynamic).
++
++**Outputs:**
++- Scalar total loss $\mathcal{L}$ and its components for backpropagation.
++- Updated model parameters via gradient descent.
+ 
+ ### Data Structures
+-No specific data structures are required beyond standard tensors for images, depths, and normals. The configuration is defined by scalar hyperparameters.
+-
+-### Formulas and Parameters
++The loss configuration is typically stored as a dictionary or object containing:
++- `weights`: A mapping of loss term names to scalar coefficients (e.g., `{"w_ptc": 0.1}`).
++- `schedules`: Optional step functions or thresholds for dynamic weight adjustment (e.g., hybrid gradient switching).
++- `flags`: Boolean or categorical flags for conditional logic (e.g., `is_large_motion`, `use_nerfacto`).
++
++### Formulas and Steps
++The total loss $\mathcal{L}$ is a weighted sum of multiple components. The specific formulation depends on the variant (see Subtopics). Below are the primary configurations cited.
+ 
+ #### 1. Joint Reflection-Transmission Model (RT-Splatting)
+-Used for training joint reflection-transmission Gaussian splatting models [S1, unofficial].
+-
+-The total loss is:
+-$$ \mathcal{L} = \mathcal{L}_{\text{img}} + \lambda_{\text{n}}\mathcal{L}_{\text{n}} + \lambda_{\text{mask}}\mathcal{L}_{\text{mask}} $$
+-
++The total loss combines appearance, normal consistency, and transparent mask regularization [S1, unofficial]:
++$$
++\mathcal{L} = \mathcal{L}_{\text{img}} + \lambda_{\text{n}}\mathcal{L}_{\text{n}} + \lambda_{\text{mask}}\mathcal{L}_{\text{mask}}
++$$
+ Where:
+-- $\mathcal{L}_{\text{img}}$ is the appearance loss.
+-- $\mathcal{L}_{\text{n}}$ is the normal consistency loss.
+-- $\mathcal{L}_{\text{mask}}$ is the transparent mask regularization loss.
+-- $\lambda_{\text{n}}$ is the normal loss weight.
+-- $\lambda_{\text{mask}}$ is the mask loss weight.
+-
+-The appearance loss $\mathcal{L}_{\text{img}}$ is defined as:
+-$$ \mathcal{L}_{\text{img}} = (1 - \lambda)\mathcal{L}_{1} + \lambda \mathcal{L}_{\text{D-SSIM}} + \lambda_{\text{perc}}\mathcal{L}_{\text{perc}} $$
+-
+-Where:
+-- $\mathcal{L}_{1}$ is the L1 loss.
+-- $\mathcal{L}_{\text{D-SSIM}}$ is the D-SSIM loss.
+-- $\mathcal{L}_{\text{perc}}$ is the perceptual loss from EnvGS.
+-- $\lambda$ is the D-SSIM weight.
+-- $\lambda_{\text{perc}}$ is the perceptual loss weight.
+-
+-**Typical Values [S1, unofficial]:**
++- $\mathcal{L}_{\text{img}}$ is the appearance loss:
++  $$
++  \mathcal{L}_{\text{img}} = (1 - \lambda)\mathcal{L}_{1} + \lambda \mathcal{L}_{\text{D-SSIM}} + \lambda_{\text{perc}}\mathcal{L}_{\text{perc}}
++  $$
++  - $\mathcal{L}_{1}$: L1 loss between rendered and ground-truth images.
++  - $\mathcal{L}_{\text{D-SSIM}}$: D-SSIM loss [S1, unofficial].
++  - $\mathcal{L}_{\text{perc}}$: Perceptual loss from EnvGS [S1, unofficial].
++  - $\lambda$: D-SSIM weight.
++  - $\lambda_{\text{perc}}$: Perceptual loss weight.
++- $\mathcal{L}_{\text{n}}$: Normal consistency loss.
++- $\mathcal{L}_{\text{mask}}$: Transparent mask regularization loss.
++
++**Parameters [S1, unofficial]:**
+ - $\lambda = 0.2$
+ - $\lambda_{\text{perc}} = 0.01$
+@@ -47,169 +52,202 @@
+ - $\lambda_{\text{mask}} = 0.01$
+ 
+-#### 2. Dynamic View Synthesis (Neural Deformable Voxel Grid)
+-Used for dynamic view synthesis with coarse-to-fine training [S2].
+-
+-The total loss is:
+-$$ \mathcal{L} = \mathcal{L}_{\text{photo}} + w_{\text{ptc}} \cdot \mathcal{L}_{\text{ptc}} + w_{\text{bg}} \cdot \mathcal{L}_{\text{bg}} + w_{d\_norm} \cdot \mathcal{L}_{d\_norm} + w_{d\_tv} \cdot \mathcal{L}_{d\_tv} $$
+-
++**Density Control Strategy [S1, unofficial]:**
++- Interleaved reset schedule: Pruning and resetting occur every 1,500 iterations, alternating between geometric occupancy $\sigma$ and optical opacity $\alpha$.
++- Pruning is based on geometric occupancy $\sigma$ to prevent removal of semi-transparent structures.
++
++#### 2. Neural Deformable Voxel Grid (Coarse-to-Fine)
++The overall loss for dynamic view synthesis [S2]:
++$$
++\mathcal{L} = \mathcal{L}_{\text{photo}} + w_{\text{ptc}} \cdot \mathcal{L}_{\text{ptc}} + w_{\text{bg}} \cdot \mathcal{L}_{\text{bg}} + w_{d\_norm} \cdot \mathcal{L}_{d\_norm} + w_{d\_tv} \cdot \mathcal{L}_{d\_tv}
++$$
+ Where:
+-- $\mathcal{L}_{\text{photo}}$ is the photometric loss.
+-- $\mathcal{L}_{\text{ptc}}$ is the photometric consistency loss.
+-- $\mathcal{L}_{\text{bg}}$ is the background loss.
+-- $\mathcal{L}_{d\_norm}$ is the deformation norm regularization loss.
+-- $\mathcal{L}_{d\_tv}$ is the total variation loss on depth.
+-- $w_{\text{ptc}}, w_{\text{bg}}, w_{d\_norm}, w_{d\_tv}$ are the respective weights.
+-
+-**Typical Values [S2]:**
+-- **Coarse Stage**: $w_{\text{ptc}}=0.1$, $w_{\text{bg}}=0.01$, $w_{d\_norm}=0.1$, $w_{d\_tv}=1$.
+-- **Fine Stage**: $w_{\text{ptc}}=0.01$, $w_{\text{bg}}=0.001$, $w_{d\_norm}=0.01$, $w_{d\_tv}=1$.
++- $\mathcal{L}_{\text{photo}}$: Photometric loss.
++- $\mathcal{L}_{\text{ptc}}$: Point consistency loss.
++- $\mathcal{L}_{\text{bg}}$: Background loss.
++- $\mathcal{L}_{d\_norm}$: Deformation norm regularization.
++- $\mathcal{L}_{d\_tv}$: Total variation loss on deformation.
++
++**Parameters [S2]:**
++- **Coarse Stage:** $w_{\text{ptc}}=0.1$, $w_{\text{bg}}=0.01$, $w_{d\_norm}=0.1$, $w_{d\_tv}=1$.
++- **Fine Stage:** $w_{\text{ptc}}=0.01$, $w_{\text{bg}}=0.001$, $w_{d\_norm}=0.01$, $w_{d\_tv}=1$.
+ - **Large Motion Scenes** ('Hell Warrior', 'Jumping Jacks', 'T-Rex'): $w_{d\_norm}$ is reduced to $0.01$ (coarse) and $0.001$ (fine).
+ 
+-#### 3. Feed-Forward 3D Gaussian Splatting (SplatVoxel)
+-Used for training feed-forward networks with multi-view and voxel transformers [S4].
+-
+-The loss function is:
+-$$ \mathcal{L} = \mathcal{L}_{\text{MSE}}(\hat{I}, I) + \lambda \mathcal{L}_{\text{LPIPS}}(\hat{I}, I) $$
+-
+-Where:
+-- $\hat{I}$ is the ground-truth target image.
+-- $I$ is the rendered target image.
+-- $\mathcal{L}_{\text{MSE}}$ is the Mean Squared Error loss.
+-- $\mathcal{L}_{\text{LPIPS}}$ is the Learned Perceptual Image Patch Similarity loss.
+-- $\lambda$ is the LPIPS weight.
+-
+-**Typical Values [S4]:**
+-- Multi-view transformer: $\lambda = 0.5$.
+-- Voxel transformer: $\lambda = 4.0$.
+-- Batch size: 128.
+-- Total iterations: 300K.
++#### 3. SplatVoxel Feed-Forward Networks
++The loss function for training multi-view and voxel transformers [S6]:
++$$
++\mathcal{L} = \mathcal{L}_{\text{MSE}}(\hat{I}, I) + \lambda \mathcal{L}_{\text{LPIPS}}(\hat{I}, I)
++$$
++**Parameters [S6]:**
++- **Multi-view Transformer:** $\lambda = 0.5$.
++- **Voxel Transformer:** $\lambda = 4.0$.
++- **Batch Size:** 128.
++- **Total Iterations:** 300K.
++
++#### 4. Hybrid Gradients (Differentiable Rendering with RGBXY)
++A strategy combining RGBXY derivatives and standard derivatives [S5]:
++- **Step 1:** Use RGBXY derivatives (Eq. 15 in [S5]) for the first 75% of optimization iterations.
++- **Step 2:** Switch to standard derivatives (Eq. 5 in [S5]) for the last 25% of optimization iterations.
++
++#### 5. Sky Loss (SDFStudio/NeRF)
++Conditional loss for sky regions [S7, unofficial]:
++- Compute `sky_label` as $1.0 - \text{batch}['\text{sky}']$ (converted to float, moved to device).
++- If `use_nerfacto`:
++  - Compute `sky_loss` = BCE(sum of `density_field_weights` over dim=1, clipped to $[10^{-3}, 1-10^{-3}]$, `sky_label`) $\times 0.01$.
++- If occupancy field:
++  - Compute `osky_loss` = BCE(sum of `occupancy_field_weights` over dim=1, clipped to $[10^{-3}, 1-10^{-3}]$, `sky_label`) $\times 0.01$.
++
++#### 6. Color Palette Sparsity Loss (LAENeRF)
++Measures sparsity of learned color palette $\hat{P}$ [S8]:
++$$
++\mathcal{L}_{\text{sp}} = \frac{\sum_{i=1}^{N_{\hat{P}}} \hat{w}_i}{\sum_{i=1}^{N_{\hat{P}}} \hat{w}_i^2} - 1
++$$
++Where $\hat{w}_i$ is the per-palette weight and $N_{\hat{P}}$ is the number of palettes.
++
++#### 7. Shape Part Addition Loss (Editing Conditional Radiance Fields)
++Loss for adding a local part to a shape instance [S9]:
++$$
++\mathcal{L}_{\text{add}} = \mathcal{L}_{\text{rec}} + \lambda_{\text{reg}} \cdot \mathcal{L}_{\text{reg}}
++$$
++Where $\mathcal{L}_{\text{rec}}$ is the reconstruction loss on the composite image (foreground from new instance, background from original) and $\mathcal{L}_{\text{reg}}$ is a regularization term (e.g., weight difference penalty).
++**Parameters [S9]:**
++- $\lambda_{\text{reg}} = 10$.
++- Optimizer: Adam, learning rate $10^{-2}$.
+ 
+ ### Pseudocode
+-The following pseudocode illustrates the configuration of loss weights for a generic differentiable renderer, incorporating the specific strategies from the sources.
+-
+ ```python
+-def compute_total_loss(rendered_image, gt_image, normals, gt_normals, 
+-                       depth, gt_depth, mask, config):
++def compute_total_loss(rendered_image, gt_image, geometry, masks, iteration, total_iterations, config):
+     """
+-    Computes the total loss based on the configuration.
++    Computes the total loss based on the configured variant.
++    """
++    loss = 0.0
+     
+-    Args:
+-        rendered_image: Tensor of shape (H, W, 3)
+-        gt_image: Tensor of shape (H, W, 3)
+-        normals: Tensor of predicted normals
+-        gt_normals: Tensor of ground-truth normals
+-        depth: Tensor of predicted depth
+-        gt_depth: Tensor of ground-truth depth
+-        mask: Tensor of transparent mask
+-        config: Dictionary containing loss weights and stage info
+-        
+-    Returns:
+-        Total loss scalar
+-    """
+-    total_loss = 0.0
+-    
+-    # 1. Photometric/Appearance Loss
+-    # Supports L1, D-SSIM, MSE, LPIPS based on config
+-    if config.get('use_l1', False):
+-        l1_loss = torch.mean(torch.abs(rendered_image - gt_image))
+-        total_loss += (1 - config['lambda_dssim']) * l1_loss
+-        
+-    if config.get('use_dssim', False):
+-        # D-SSIM loss implementation assumed available
+-        dssim_loss = compute_dssim_loss(rendered_image, gt_image)
+-        total_loss += config['lambda_dssim'] * dssim_loss
+-        
+-    if config.get('use_mse', False):
+-        mse_loss = torch.mean((rendered_image - gt_image) ** 2)
+-        total_loss += mse_loss
+-        
+-    if config.get('use_lpips', False):
+-        lpips_loss = compute_lpips_loss(rendered_image, gt_image)
+-        total_loss += config['lambda_lpips'] * lpips_loss
+-        
+-    # 2. Normal Consistency Loss (RT-Splatting)
+-    if config.get('use_normal_loss', False):
+-        normal_loss = torch.mean((normals - gt_normals) ** 2)
+-        total_loss += config['lambda_n'] * normal_loss
+-        
+-    # 3. Transparent Mask Regularization (RT-Splatting)
+-    if config.get('use_mask_loss', False):
+-        mask_loss = compute_mask_regularization(mask)
+-        total_loss += config['lambda_mask'] * mask_loss
+-        
+-    # 4. Dynamic/Deformation Losses (Neural Deformable Voxel Grid)
+-    if config.get('stage') == 'coarse':
+-        w_ptc = 0.1
+-        w_bg = 0.01
+-        w_d_norm = 0.1
+-        w_d_tv = 1.0
+-    elif config.get('stage') == 'fine':
+-        w_ptc = 0.01
+-        w_bg = 0.001
+-        w_d_norm = 0.01
+-        w_d_tv = 1.0
+-    else:
+-        w_ptc = config.get('w_ptc', 0.1)
+-        w_bg = config.get('w_bg', 0.01)
+-        w_d_norm = config.get('w_d_norm', 0.1)
+-        w_d_tv = config.get('w_d_tv', 1.0)
+-        
+-    # Adjust for large motion scenes
+-    if config.get('large_motion', False):
+-        if config.get('stage') == 'coarse':
++    # Determine variant based on config flags or context
++    if config.variant == "rt_splatting":
++        # 1. Appearance Loss
++        l1 = l1_loss(rendered_image, gt_image)
++        d_ssim = d_ssim_loss(rendered_image, gt_image)
++        perc = perceptual_loss(rendered_image, gt_image)
++        
++        lambda_d_ssim = 0.2
++        lambda_perc = 0.01
++        l_img = (1 - lambda_d_ssim) * l1 + lambda_d_ssim * d_ssim + lambda_perc * perc
++        
++        # 2. Normal Consistency
++        l_n = normal_consistency_loss(geometry.normals, geometry.gt_normals)
++        lambda_n = 0.05
++        
++        # 3. Transparent Mask Regularization
++        l_mask = transparent_mask_loss(geometry.opacity, masks.transparent)
++        lambda_mask = 0.01
++        
++        loss = l_img + lambda_n * l_n + lambda_mask * l_mask
++        
++    elif config.variant == "deformable_voxel":
++        # Photometric and auxiliary losses
++        l_photo = mse_loss(rendered_image, gt_image)
++        l_ptc = point_consistency_loss(geometry.points, geometry.gt_points)
++        l_bg = background_loss(rendered_image, masks.background)
++        l_d_norm = deformation_norm_loss(geometry.deformation)
++        l_d_tv = total_variation_loss(geometry.deformation)
++        
++        # Stage-specific weights
++        if config.stage == "coarse":
++            w_ptc = 0.1
++            w_bg = 0.01
++            w_d_norm = 0.1
++            w_d_tv = 1.0
++        else: # fine
++            w_ptc = 0.01
++            w_bg = 0.001
+             w_d_norm = 0.01
+-        elif config.get('stage') == 'fine':
+-            w_d_norm = 0.001
++            w_d_tv = 1.0
+             
+-    if config.get('use_ptc', False):
+-        ptc_loss = compute_photometric_consistency(rendered_image, gt_image)
+-        total_loss += w_ptc * ptc_loss
+-        
+-    if config.get('use_bg', False):
+-        bg_loss = compute_background_loss(rendered_image, gt_image)
+-        total_loss += w_bg * bg_loss
+-        
+-    if config.get('use_d_norm', False):
+-        d_norm_loss = compute_deformation_norm(depth)
+-        total_loss += w_d_norm * d_norm_loss
+-        
+-    if config.get('use_d_tv', False):
+-        d_tv_loss = compute_total_variation(depth)
+-        total_loss += w_d_tv * d_tv_tv_loss
+-        
+-    return total_loss
++        # Large motion adjustment
++        if config.is_large_motion:
++            w_d_norm = 0.01 if config.stage == "coarse" else 0.001
++            
++        loss = l_photo + w_ptc * l_ptc + w_bg * l_bg + w_d_norm * l_d_norm + w_d_tv * l_d_tv
++        
++    elif config.variant == "splatvoxel":
++        l_mse = mse_loss(rendered_image, gt_image)
++        l_lpips = lpips_loss(rendered_image, gt_image)
++        
++        if config.transformer_type == "multi_view":
++            lambda_lpips = 0.5
++        else: # voxel
++            lambda_lpips = 4.0
++            
++        loss = l_mse + lambda_lpips * l_lpips
++        
++    elif config.variant == "hybrid_gradients":
++        # This variant affects the gradient computation, not just the loss value.
++        # The loss value itself is typically standard photometric/perceptual.
++        # However, the derivative calculation changes based on iteration.
++        if iteration < 0.75 * total_iterations:
++            gradients = compute_rgbxy_gradients(rendered_image, gt_image)
++        else:
++            gradients = compute_standard_gradients(rendered_image, gt_image)
++        # Loss value is standard, but gradients are hybrid
++        loss = mse_loss(rendered_image, gt_image)
++        
++    elif config.variant == "sky_loss":
++        # Add sky loss to existing loss
++        sky_label = 1.0 - masks.sky.float()
++        if config.use_nerfacto:
++            density_weights = geometry.density_field_weights.sum(dim=1)
++            density_weights = torch.clamp(density_weights, 1e-3, 1-1e-3)
++            sky_loss = bce_loss(density_weights, sky_label) * 0.01
++        else:
++            occ_weights = geometry.occupancy_field_weights.sum(dim=1)
++            occ_weights = torch.clamp(occ_weights, 1e-3, 1-1e-3)
++            sky_loss = bce_loss(occ_weights, sky_label) * 0.01
++        loss += sky_loss
++        
++    elif config.variant == "palette_sparsity":
++        # Add palette sparsity loss
++        l_sp = palette_sparsity_loss(geometry.palette_weights)
++        loss += l_sp
++        
++    elif config.variant == "shape_addition":
++        # Composite image rendering
++        composite_image = render_composite(geometry, masks, config.edit_params)
++        l_rec = reconstruction_loss(composite_image, gt_image, masks.foreground, masks.background)
++        l_reg = regularization_loss(geometry.weights)
++        lambda_reg = 10.0
++        loss = l_rec + lambda_reg * l_reg
++        
++    return loss
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-- **Hybrid Gradients**: When initial and target shapes are already aligned very well, the approximated optimal transport method used in RGBXY derivatives may lead to inaccurate matching, making RGBXY derivatives less effective [S3]. In such cases, switching to standard derivatives is recommended.
+-- **Large Motion Scenes**: For scenes with large motion (e.g., 'Hell Warrior', 'Jumping Jacks', 'T-Rex'), the deformation norm regularization weight $w_{d\_norm}$ must be reduced to prevent over-regularization [S2].
+-- **Precision**: The choice of loss weights significantly impacts convergence. Incorrect weights can lead to poor geometry or artifacts.
++- **Repulsion Loss Removal:** In sphere-cloud guided training, removing the repulsion loss ($L_{rep}$) causes spheres to clump together instead of covering the object, leading to poor reconstructions [S3].
++- **Hybrid Gradient Alignment:** When initial and target shapes are already well-aligned, the approximated optimal transport method for RGBXY derivatives may lead to inaccurate matching, making them less effective in late stages [S5].
++- **MS-SSIM Defects:** Using MS-SSIM loss instead of MSE for defocus-engineered holography optimization resulted in unclear effects and defects in the synthesized images [S4].
++- **Defocus Blur Weighting:** In defocus-blur considered depth maps, out-of-focus images (20) significantly outnumber in-focus images (1). The weight $\beta$ must be set to 20 to compensate and ensure in-focus images have similar or higher influence [S4].
++- **Gamma Parameter:** $\gamma$ should be fixed to 40 to avoid simultaneous focusing of an object at two different focal planes [S4].
+ 
+ ## Subtopics
+ 
+ ### [Overall Training Objective](13444-overall-training-objective.md)
+-The Overall Training Objective defines the composite loss function and optimization schedule used to train differentiable radiance fields, specifically in the context of text-driven stylization and multi-baseline reconstruction. It combines geometric reconstruction fidelity with perceptual and semantic constraints to guide the neural network toward the desired visual output. It differs from simple reconstruction objectives by integrating high-level perceptual metrics (SSIM, LPIPS) and, in stylization variants, contrastive text-image alignment losses. [13444-overall-training-objective.md]
+-
+-### Hybrid Gradients
+-A strategy combining RGBXY derivatives and standard derivatives to leverage global matching in early stages and precise local alignment in late stages. Use RGBXY derivatives for the first 75% of optimization iterations, then switch to standard derivatives for the last 25%. Pitfall: When initial and target shapes are already aligned very well, the approximated optimal transport method may lead to inaccurate matching, making RGBXY derivatives less effective. [S3]
+-
+-### Two-Stage Photometric and Perceptual Training Strategy
+-A two-stage training strategy for the SplatVoxel feed-forward networks using photometric loss. Stage 1: Train the multi-view Transformer backbone for 200K iterations. Stage 2: Jointly fine-tune both the multi-view and voxel Transformers for an additional 100K iterations. Loss function: $\mathcal{L} = \mathcal{L}_{\text{MSE}}(\hat{I}, I) + \lambda \mathcal{L}_{\text{LPIPS}}(\hat{I}, I)$. LPIPS weight for multi-view transformer: $\lambda = 0.5$. LPIPS weight for voxel transformer: $\lambda = 4.0$. Batch size: 128. Total iterations: 300K. Trained on multi-view static scene datasets [87, 35], specifically DL3DV [35] for cross-dataset generalization. [S4]
++The Overall Training Objective defines the composite loss function and optimization schedule used to train differentiable radiance fields, specifically in the context of text-driven stylization and multi-baseline reconstruction. It combines geometric reconstruction fidelity with perceptual and semantic constraints to guide the neural network toward the desired visual output. It differs from simple reconstruction objectives by integrating high-level perceptual metrics (SSIM, LPIPS) and, in stylization variants, contrastive text-image alignment losses.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: The computation of perceptual losses (LPIPS, D-SSIM) adds overhead compared to simple L1/MSE losses. The hybrid gradient strategy requires managing two derivative computations, but the switch is based on iteration count, not per-step complexity.
+-- **Memory Complexity**: No additional memory structures are required beyond the standard scene representation and intermediate gradients.
+-- **Measured Performance**: In RT-Splatting, the configuration with $\lambda=0.2$ and $\lambda_{\text{perc}}=0.01$ provides a good trade-off between reconstruction fidelity and perceptual quality [S1, unofficial]. In Neural Deformable Voxel Grid, the coarse-to-fine weighting scheme allows for faster convergence and better handling of dynamic scenes [S2].
+-- **Strengths**: Integrates multiple constraints for robust training. Adapts to different scene characteristics (e.g., large motion).
+-- **Limitations**: Requires careful tuning of hyperparameters. Perceptual losses can be computationally expensive.
+-- **When to Use**: When training differentiable radiance fields for high-quality view synthesis, especially with dynamic scenes or reflective/transmissive materials.
+-- **When Not to Use**: For simple static scenes where basic photometric loss is sufficient, or when computational resources are extremely limited.
++- **Complexity:** The computational overhead of loss configuration is generally low compared to the rendering and gradient computation steps, as it involves simple weighted sums and element-wise operations on tensors.
++- **Performance Impact:** Proper weighting is critical for convergence. Incorrect weights (e.g., too high perceptual loss) can lead to artifacts or slow convergence. The two-stage strategy (SplatVoxel) allows for faster initial convergence with the multi-view transformer before fine-tuning [S6].
++- **Scalability:** The hybrid gradient strategy [S5] improves optimization quality without increasing memory footprint, though it requires tracking iteration counts.
++- **Strengths:** Flexibility to incorporate diverse constraints (normal, mask, sky, palette) allows for specialized training regimes (e.g., relighting, stylization, editing).
++- **Limitations:** Hyperparameter sensitivity is high. For example, the gating strength $k$ in RT-Splatting peaks at $k=4$ [S1, unofficial], and large motion scenes require specific weight adjustments [S2].
+ 
+ ## Background
+-Loss function configuration has evolved alongside differentiable rendering techniques. Early methods relied primarily on photometric losses (L1, MSE). As the field advanced, perceptual losses (SSIM, LPIPS) and regularization terms (normal consistency, depth smoothness) were introduced to improve geometric and visual quality [S1, unofficial][S2, S4]. The specific configurations discussed here are derived from recent works on Gaussian Splatting [S1, unofficial][S4], Neural Deformable Voxel Grids [S2], and differentiable rendering with optimal transport [S3].
++Loss function configuration has evolved alongside differentiable rendering techniques. Early methods relied primarily on photometric (L1/MSE) losses. As radiance fields became more complex (incorporating normals, depth, and semantic information), auxiliary losses were introduced. The RT-Splatting method [S1, unofficial] (2025) explicitly combines appearance, normal, and mask losses for joint reflection-transmission modeling. The Neural Deformable Voxel Grid [S2] (2023) introduced stage-specific weighting for dynamic scenes. The SplatVoxel method [S6] (2025) utilizes a two-stage photometric and perceptual training strategy for feed-forward networks. The Hybrid Gradients approach [S5] (2022) addresses the limitations of standard derivatives in optimal transport-based rendering.
+ 
+ ## Sources
+ [S1] RT-Splatting: Joint Reflection-Transmission Modeling with Gaussian Splatting, https://github.com/WoojunePark/splat_papers/issues/71, fetched 2026-10-27 (unofficial)
+ [S2] Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis, https://doi.org/10.1007/978-3-031-26319-4_27, fetched 2026-10-26
+-[S3] Differentiable Rendering Using RGBXY Derivatives and Optimal Transport, https://doi.org/10.1145/3550454.3555479, fetched 2026-10-27
+-[S4] Learning Efficient Fuse-and-Refine for Feed-Forward 3D Gaussian Splatting, https://arxiv.org/abs/2503.14698v2, fetched 2026-10-27+[S3] Sphere-Guided Training of Neural Implicit Surfaces, http://arxiv.org/abs/2209.15511v2, fetched 2026-10-27
++[S4] Diffraction-engineered holography: Beyond the depth representation limit of holographic displays, https://www.nature.com/articles/s41467-022-33728-5, fetched 2026-10-29
++[S5] Differentiable Rendering Using RGBXY Derivatives and Optimal Transport, https://doi.org/10.1145/3550454.3555479, fetched 2026-10-27
++[S6] Learning Efficient Fuse-and-Refine for Feed-Forward 3D Gaussian Splatting, https://arxiv.org/abs/2503.14698v2, fetched 2026-10-27
++[S7] autonomousvision/sdfstudio, https://github.com/autonomousvision/sdfstudio, fetched 2026-10-26 (unofficial)
++[S8] LAENeRF: Local Appearance Editing for Neural Radiance Fields, https://doi.org/10.1109/cvpr52733.2024.00475, fetched 2026-10-26
++[S9] Editing Conditional Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00572, fetched 2026-10-26

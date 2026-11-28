@@ -1,0 +1,148 @@
+# Multi-Material Dual Contouring
+
+Also called: Implicit Material Partitioning, Multi-material Implicit Modeling, Textured Dual Contouring
+
+## Overview
+Multi-Material Dual Contouring is a surface extraction method that models solids composed of multiple distinct materials by replacing the binary occupancy signs (empty/solid) in a grid with material indices [S1, S2, unofficial]. It solves the problem of extracting high-fidelity, textured meshes from multi-material volumetric data, allowing for accurate reproduction of complex features like embossed outlines where traditional cube-based methods constrain vertices to grid edges [S2, unofficial]. It sets itself apart from standard Dual Contouring by handling material boundaries as implicit partitions rather than simple occupancy transitions, and from Multi-Isosurface methods by using Hermite data and QEF minimization to place vertices at material intersections rather than just isosurface crossings [S1, S2, unofficial].
+
+## How it works
+**Inputs:** A regular 3D grid where each vertex stores a material index (integer) instead of a scalar sign. Each material has an associated texture mapping function (a "black box") that converts 3D geometric coordinates to 2D texture coordinates [S2, unofficial].
+**Outputs:** A triangle or quad mesh representing the boundaries between materials, textured with the corresponding material properties.
+
+**Data Structures:**
+*   **Grid:** A 3D array of material indices. Let $M(x,y,z)$ be the material index at grid vertex $(x,y,z)$.
+*   **Hermite Data:** For every edge in the grid that connects two vertices with different material indices, store:
+    *   Intersection point $P$: The exact 3D location where the material boundary crosses the edge.
+    *   Normal vector $N$: The gradient of the material transition at $P$.
+*   **QEF (Quadratic Error Function):** For each grid cube, a system of linear equations derived from the Hermite data of its edges.
+
+**Steps:**
+1.  **Grid Construction:** Populate the grid with material indices. When adding a new material volume, use CSG operations:
+    *   `Add`: Overwrites existing model with the new material.
+    *   `Replace`: Overwrites only the solid portion of the model with the new material.
+    *   Empty space can be added via `Add` to simulate subtractive operations [S2, unofficial].
+2.  **Edge Tagging:** Iterate over all grid edges. If an edge connects vertex $V_i$ with material index $M_i$ and vertex $V_j$ with material index $M_j$, and $M_i \neq M_j$:
+    *   Compute the intersection point $P$ along the edge.
+    *   Compute the normal $N$ at the boundary.
+    *   Tag this edge with $(P, N)$ and the material index of the solid endpoint (if one endpoint is empty) or both indices.
+3.  **QEF Assembly:** For each cube in the grid:
+    *   Collect Hermite data $(P_k, N_k)$ from all edges of the cube that exhibit index changes.
+    *   Construct the QEF for the cube. The QEF minimizes the distance from a candidate vertex $v$ to the planes defined by the Hermite data. The standard Dual Contouring QEF is:
+        $$ \min_v \sum_k (N_k \cdot (v - P_k))^2 $$
+        where the sum is over all tagged edges of the cube [S1, unofficial].
+4.  **Vertex Placement:** Solve the QEF for each cube to find the optimal vertex position $v_{cube}$.
+    *   If three or more materials meet inside a single cube, the QEF minimizer places the vertex at or near their intersection point [S2, unofficial]. This allows accurate reproduction of embossed outlines, which is difficult for methods constraining vertices to grid edges [S2, unofficial].
+5.  **Quad Generation:** Iterate over all grid edges that exhibit an index change.
+    *   Identify the four cubes sharing this edge.
+    *   Retrieve the minimizer vertices $v_1, v_2, v_3, v_4$ from the QEF solutions of these four cubes.
+    *   Generate a quad connecting these four vertices.
+6.  **Optimization (Empty Space Viewer):** If the viewer is restricted to empty space:
+    *   Do not generate quads for edges connecting two solid materials (solid/solid edges). These are internal and not visible [S1, S2, unofficial].
+    *   Only generate quads for edges connecting a solid material and empty space (solid/empty edges) [S1, S2, unofficial].
+    *   Textures these quads using the material properties of the solid endpoint [S2, unofficial].
+    *   Red/gold edges (in the source example) do not generate quads if they are solid/solid [S1, unofficial].
+7.  **Texturing:** Apply the material's "black box" texture mapping function to the generated mesh vertices to convert 3D positions to 2D texture coordinates [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_material_dual_contouring(grid, materials):
+    """
+    grid: 3D array of material indices.
+    materials: dict mapping index -> { 'texture_map': func, 'is_solid': bool }
+    """
+    # Step 1 & 2: Tag edges with Hermite data
+    edge_hermite = {} # Key: (edge_id), Value: (P, N, mat_index)
+    for edge in grid.edges:
+        v1, v2 = edge.vertices
+        m1 = grid[v1]
+        m2 = grid[v2]
+        if m1 != m2:
+            # Compute intersection P and normal N
+            P, N = compute_intersection_and_normal(v1, v2, m1, m2)
+            # Determine which material to associate with the edge for texturing
+            # If one is empty, use the solid one. If both solid, handle later.
+            solid_mat = None
+            if materials[m1].is_solid and not materials[m2].is_solid:
+                solid_mat = m1
+            elif materials[m2].is_solid and not materials[m1].is_solid:
+                solid_mat = m2
+            edge_hermite[edge.id] = (P, N, solid_mat)
+
+    # Step 3 & 4: Solve QEF for each cube
+    cube_vertices = {} # Key: cube_id, Value: v_minimizer
+    for cube in grid.cubes:
+        hermite_data = []
+        for edge in cube.edges:
+            if edge.id in edge_hermite:
+                P, N, _ = edge_hermite[edge.id]
+                hermite_data.append((P, N))
+        
+        # Solve QEF: min_v sum( (N . (v - P))^2 )
+        # This is a linear system A*v = b
+        A = zeros((3, 3))
+        b = zeros(3)
+        for P, N in hermite_data:
+            # Outer product of normal
+            A += outer(N, N)
+            # Right hand side
+            b += dot(N, P) * N
+        
+        # Solve for v
+        if det(A) != 0:
+            v = solve(A, b)
+        else:
+            v = cube.center # Fallback [G]
+        cube_vertices[cube.id] = v
+
+    # Step 5 & 6: Generate Quads
+    mesh = Mesh()
+    for edge in grid.edges:
+        if edge.id not in edge_hermite:
+            continue
+        
+        P, N, solid_mat = edge_hermite[edge.id]
+        
+        # Optimization: Skip solid/solid edges if viewer is in empty space
+        # Check if both endpoints are solid
+        v1, v2 = edge.vertices
+        m1 = grid[v1]
+        m2 = grid[v2]
+        if materials[m1].is_solid and materials[m2].is_solid:
+            continue
+            
+        # Get the 4 cubes sharing this edge
+        cubes = edge.sharing_cubes
+        if len(cubes) != 4:
+            continue # Boundary case [G]
+        
+        v1_c, v2_c, v3_c, v4_c = [cube_vertices[c.id] for c in cubes]
+        
+        # Create quad
+        mesh.add_quad(v1_c, v2_c, v3_c, v4_c)
+        
+        # Step 7: Texturing
+        if solid_mat is not None:
+            tex_func = materials[solid_mat].texture_map
+            # Apply texture map to vertices
+            for v in [v1_c, v2_c, v3_c, v4_c]:
+                v.tex_coords = tex_func(v.xyz)
+
+    return mesh
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of grid cells, assuming constant-time QEF solving (3x3 linear system). The dominant cost is the QEF assembly and solution per cube.
+*   **Memory Complexity:** $O(N)$ for storing the grid, Hermite data, and QEF results.
+*   **Strengths:** Accurately reproduces complex multi-material intersections and embossed details that cube-based methods (like Marching Cubes) struggle with due to vertex constraints on grid edges [S2, unofficial]. Supports CSG operations for constructive solid modeling [S2, unofficial].
+*   **Limitations:** Requires Hermite data (normals) at material boundaries, which must be computed or provided. QEF solving can be unstable if the Hermite data is degenerate (e.g., all normals parallel). The optimization for empty-space viewers reduces mesh size but assumes a specific viewing constraint [S1, S2, unofficial].
+*   **When to use:** When modeling solids with multiple distinct materials and high-fidelity surface details (like text or embossing) are required.
+*   **When not to use:** If the viewer is not restricted to empty space and internal solid/solid boundaries need to be visible, the optimization cannot be applied, leading to a denser mesh. If normals are not available, Hermite data cannot be constructed.
+
+## Background
+Multi-Material Dual Contouring extends the original Dual Contouring method [S1, unofficial] to handle implicit material partitioning. It builds on earlier work by Bloomenthal and Ferguson [1995] and Bonnell et al. [2000] who explored similar approaches for multi-material modeling [S1, S2, unofficial]. The method was detailed in papers by Tao Ju and colleagues, leveraging the QEF framework to place vertices at material intersections rather than just isosurface crossings [S1, S2, unofficial].
+
+## Sources
+[S1] PDF Dual Contouring of Hermite Data - Rice University, https://www.cs.rice.edu/~jwarren/papers/dualcontour.pdf, fetched 2026-10-27 (unofficial)
+[S2] Dual Contouring, https://web.archive.org/web/20060906091758id_/http://www.cs.wustl.edu/%7Etaoju/research/dualContour.pdf, fetched 2026-10-29 (unofficial)

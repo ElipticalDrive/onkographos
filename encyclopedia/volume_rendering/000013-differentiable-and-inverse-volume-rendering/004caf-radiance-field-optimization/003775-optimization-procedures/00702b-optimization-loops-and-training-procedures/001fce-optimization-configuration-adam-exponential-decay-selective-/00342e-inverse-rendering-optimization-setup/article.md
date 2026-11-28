@@ -1,0 +1,95 @@
+# Inverse Rendering Optimization Setup
+
+Also called: Adam optimizer for inverse rendering, L2 loss optimization
+
+## Overview
+This method defines the standard hyperparameter configuration for optimizing implicit surface representations (such as SDFs) in inverse rendering tasks. It solves the problem of recovering geometry and appearance from multi-view observations by minimizing the discrepancy between rendered and ground-truth images. It is distinguished from other solvers by its reliance on the Adam optimizer [S1] combined with a strict L2 loss function, providing a stable baseline for gradient-based optimization of differentiable renderers [S1].
+
+## How it works
+The optimization process minimizes a rendering loss over a set of camera views. The core components are the optimizer state, the loss metric, and the sampling strategy.
+
+**Inputs:**
+*   Implicit surface representation (e.g., grid-based SDF with tricubic interpolation) [S1].
+*   $N_v = 8$ camera views [S1].
+*   Ground-truth HDR images for these views [S1].
+*   Differentiable renderer (e.g., Mitsuba 3 with cuda_ad_rgb backend) [S1].
+
+**Outputs:**
+*   Optimized implicit surface parameters (SDF grid values) [S1].
+
+**Data Structures:**
+*   **Optimizer State:** Adam maintains first and second moment estimates for each parameter in the SDF grid.
+*   **Batch:** A subset of views is selected for each update step.
+
+**Parameters:**
+*   **Optimizer:** Adam [Kingma and Ba 2014] [S1].
+*   **Loss Function:** L2 loss (Mean Squared Error) [S1].
+*   **Number of Views ($N_v$):** 8 [S1].
+*   **Batch Size ($B$):** 2 [S1].
+*   **Epochs:** 64 to 256 [S1].
+
+**Steps:**
+1.  **Initialize:** Initialize the SDF grid parameters. Initialize Adam optimizer states (first moment $m$, second moment $v$) to zero.
+2.  **Sample Views:** Randomly select a batch of $B=2$ views from the total $N_v=8$ views [S1].
+3.  **Render:** For each view in the batch, render the image using the current SDF representation and the differentiable renderer [S1].
+4.  **Compute Loss:** Calculate the L2 loss between the rendered image $I_{rendered}$ and the ground-truth image $I_{gt}$ for the batch [S1]:
+    $$ L = \frac{1}{B \cdot W \cdot H} \sum_{i=1}^{B} \sum_{j=1}^{W} \sum_{k=1}^{H} (I_{rendered}^{(i)}[j,k] - I_{gt}^{(i)}[j,k])^2 $$
+    where $W$ and $H$ are image width and height.
+5.  **Backpropagate:** Compute gradients $\nabla L$ with respect to the SDF parameters using automatic differentiation [S1].
+6.  **Update:** Update SDF parameters using the Adam optimizer step [S1].
+7.  **Repeat:** Repeat steps 2-6 for the specified number of epochs (64-256) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+sdf_params = initialize_sdf_grid()
+optimizer = Adam(params=sdf_params)
+num_views = 8
+batch_size = 2
+num_epochs = 256 # Typical upper bound [S1]
+
+for epoch in range(num_epochs):
+    # Sample batch of views
+    view_indices = random_sample(range(num_views), batch_size)
+    
+    total_loss = 0.0
+    
+    for view_idx in view_indices:
+        # Render image for current view
+        rendered_image = differentiable_render(sdf_params, view_idx)
+        ground_truth_image = get_ground_truth(view_idx)
+        
+        # Compute L2 loss
+        # Note: Implementation details of L2 loss are standard
+        loss = mean_squared_error(rendered_image, ground_truth_image)
+        
+        # Backpropagation
+        loss.backward()
+        
+        total_loss += loss.item()
+    
+    # Update parameters
+    optimizer.step()
+    optimizer.zero_grad()
+```
+
+**Edge Cases:**
+*   **Occlusion:** In configurations where light is blocked by geometry (e.g., ceiling with small hole), sampling becomes difficult. The gradient may consist only of secondary boundary integrals, making optimization hard [S1].
+*   **Precision:** The use of tricubic interpolation ensures continuous surface normals, which aids gradient stability [S1].
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** Runtime is typically 30 to 90 minutes per optimization run [S1].
+*   **Hardware:** Experiments conducted on NVIDIA RTX 4090 GPU [S1].
+*   **Scalability:** The method uses a small batch size (2) and limited views (8), suggesting it is not designed for large-scale distributed training but rather for high-fidelity single-GPU optimization [S1].
+*   **Strengths:** Stable convergence due to Adam and L2 loss; continuous normals via tricubic interpolation [S1].
+*   **Limitations:** Struggles with highly occluded scenes where light sampling is difficult [S1].
+
+## Background
+This setup is derived from the "Path-Space Differentiable Rendering of Implicit Surfaces" paper [S1]. It builds on the diffsdf approach [Vicini et al. 2022] for implicit surface representation [S1]. The method is used in inverse rendering experiments to quantitatively compare optimized shapes using Chamfer distance [S1].
+
+## Sources
+[S1] Path-Space Differentiable Rendering of Implicit Surfaces, https://doi.org/10.1145/3641519.3657473, fetched 2026-10-30

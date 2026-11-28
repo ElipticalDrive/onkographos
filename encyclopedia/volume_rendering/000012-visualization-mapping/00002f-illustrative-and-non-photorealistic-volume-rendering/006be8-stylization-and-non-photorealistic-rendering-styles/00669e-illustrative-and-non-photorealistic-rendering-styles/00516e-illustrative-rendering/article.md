@@ -1,0 +1,150 @@
+# Illustrative Rendering
+
+Also called: Illustrative visualization, Streamtape illustrative rendering
+
+## Overview
+Illustrative rendering is a non-photorealistic visualization technique that combines Phong shading, half-tone hatching shadows, and silhouette outlines to enhance the depth and structural perception of volumetric objects, specifically streamtapes in 3D vector fields [S1]. It differs from procedural texture-based methods (e.g., Hummel et al.) by avoiding complex line patterns on narrow objects, which would increase visual complexity, instead relying on stylized lighting and edge detection to clarify geometry [S1].
+
+## How it works
+**Inputs:**
+- 3D vector field data [S1].
+- Pre-computed streamtapes (narrow tubular surfaces representing flow) [S1].
+- Camera position and light direction [S1].
+
+**Outputs:**
+- Final illustrative image combining Phong shading, hatched shadows, and silhouette outlines [S1].
+
+**Data Structures:**
+- Framebuffer Object (FBO) for storing luminance [S1].
+- Color buffer for storing normalized normal vectors (RGB) and clamped depth (Alpha) [S1].
+- Discontinuity mask buffer for silhouette detection [S1].
+
+**Parameters:**
+- Torsion normalization: $\tau$ is normalized to $[0, 1]$ [S1].
+- Streamtape width formula: $\omega = 1.0 - \tau$ [S1].
+- Discontinuity threshold: Not given in the sources [S1].
+
+**Steps:**
+
+1. **Phong Shading Pass:** Render the streamtapes using standard Phong shading. Record the resulting luminance into a framebuffer object [S1].
+
+2. **Hatched Shadow Generation:** Generate a hatched shadow image using half-tone rendering styles to incorporate lighting and display depth/rotation information [S1].
+
+3. **Silhouette Extraction Pass:** Render the scene again to obtain silhouettes [S1]. Write the normalized normal direction of each fragment to the RGB channels of the output color [S1]. Clamp the depth value to $[0, 1]$ and write it to the alpha channel [S1].
+
+4. **Silhouette Detection:** Check for discontinuities in the up, down, left, and right directions in image space on the output from Step 3 [S1]. Mark pixels with large discontinuities as silhouette pixels [S1].
+
+5. **Composition:** Compose the hatched shadow image and the silhouette image with the Phong shaded image [S1].
+
+6. **Coloring:** Color the streamtapes either by cluster ID using a predefined color table or by local features such as curvature [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def illustrative_render(streamtapes, camera, light_dir):
+    # Step 1: Phong Shading Pass
+    phong_luminance = render_phong_pass(streamtapes, camera, light_dir)
+    
+    # Step 2: Hatched Shadow Generation
+    hatched_shadow = render_hatched_shadow_pass(streamtapes, camera, light_dir)
+    
+    # Step 3: Silhouette Extraction Pass
+    normal_depth_buffer = render_normals_and_depth_pass(streamtapes, camera)
+    
+    # Step 4: Silhouette Detection
+    silhouette_mask = detect_silhouettes(normal_depth_buffer)
+    
+    # Step 5: Composition
+    final_image = compose_images(phong_luminance, hatched_shadow, silhouette_mask)
+    
+    # Step 6: Coloring
+    final_image = apply_coloring(final_image, streamtapes)
+    
+    return final_image
+
+def render_phong_pass(streamtapes, camera, light_dir):
+    buffer = create_buffer(streamtapes.width, streamtapes.height)
+    for frag in streamtapes.fragments:
+        diffuse = max(dot(frag.normal, light_dir), 0.0)
+        specular = pow(max(dot(reflect(-light_dir, frag.normal), camera.view_dir), 0.0), 32.0)
+        lum = frag.base_color * (0.5 + 0.5 * diffuse + 0.2 * specular)
+        buffer.set(frag.u, frag.v, lum)
+    return buffer
+
+def render_hatched_shadow_pass(streamtapes, camera, light_dir):
+    buffer = create_buffer(streamtapes.width, streamtapes.height)
+    for frag in streamtapes.fragments:
+        intensity = max(dot(frag.normal, light_dir), 0.0)
+        # Half-tone hatching style based on lighting and depth [S1]
+        buffer.set(frag.u, frag.v, intensity)
+    return buffer
+
+def render_normals_and_depth_pass(streamtapes, camera):
+    buffer = create_buffer(streamtapes.width, streamtapes.height)
+    for frag in streamtapes.fragments:
+        norm = normalize(frag.normal)
+        depth = clamp(frag.depth, 0.0, 1.0)
+        buffer.set_rgb(frag.u, frag.v, norm)
+        buffer.set_a(frag.u, frag.v, depth)
+    return buffer
+
+def detect_silhouettes(buffer):
+    mask = create_buffer(buffer.width, buffer.height)
+    for y in range(buffer.height):
+        for x in range(buffer.width):
+            pixel = buffer.get(x, y)
+            up = buffer.get(x, min(y + 1, buffer.height - 1))
+            down = buffer.get(x, max(y - 1, 0))
+            right = buffer.get(min(x + 1, buffer.width - 1), y)
+            left = buffer.get(max(x - 1, 0), y)
+            # Mark pixels with large discontinuities as silhouette pixels [S1]
+            if (abs_diff(pixel, up) > 0.1 or abs_diff(pixel, down) > 0.1 or
+                abs_diff(pixel, right) > 0.1 or abs_diff(pixel, left) > 0.1):
+                mask.set(x, y, 1.0)
+    return mask
+
+def compose_images(phong, shadow, silhouette):
+    result = create_buffer(phong.width, phong.height)
+    for y in range(phong.height):
+        for x in range(phong.width):
+            # Compose hatched shadow and silhouette with Phong shaded image [S1]
+            base = phong.get(x, y)
+            shadow_val = shadow.get(x, y)
+            sil = silhouette.get(x, y)
+            result.set(x, y, base * shadow_val + sil * 0.8)
+    return result
+
+def apply_coloring(image, streamtapes):
+    for frag in streamtapes.fragments:
+        # Assign colors by cluster ID or local features like curvature [S1]
+        if frag.color_mode == 'cluster':
+            color = cluster_color_table[frag.cluster_id]
+        else:
+            color = curvature_to_color(frag.curvature)
+        image.set(frag.u, frag.v, color)
+    return image
+
+# Standard helpers
+def create_buffer(w, h): return [[None]*w for _ in range(h)]
+def abs_diff(a, b): return sum(abs(a[i]-b[i]) for i in range(len(a)))
+cluster_color_table = {0: [1,0,0], 1: [0,1,0], 2: [0,0,1]}
+def curvature_to_color(curv): return [curv, curv, curv]
+```
+
+**Edge Cases and Pitfalls:**
+- **Self-Intersection:** When local flow twists sharply, streamtape surfaces can self-intersect [S1]. This is addressed by normalizing torsion $\tau$ to $[0, 1]$ and setting width $\omega = 1.0 - \tau$ [S1].
+- **Visual Complexity:** Procedural line stripes (e.g., Hummel et al.) are incompatible because streamtapes are narrow objects where complex patterns increase visual complexity [S1].
+
+## Operating characteristics
+- **Time Complexity:** Entropy field calculation and streamline generation are implemented on the GPU (CUDA) and complete within a few seconds for given flow datasets [S1]. K-means clustering and streamtape generation are implemented on the CPU [S1].
+- **Memory:** Requires 1.5GB of video memory for the GPU (tested on Geforce GTX 480) and 16GB system memory (tested on Xeon 5450) [S1].
+- **Strengths:** Enhances depth and structural perception; reveals structural information via curvature-based coloring [S1].
+- **Limitations:** Not suitable for integral surfaces requiring adaptive line stripes; limited to narrow objects like streamtapes [S1].
+
+## Background
+The method was introduced in 2011 as part of an illustrative visualization framework for 3D vector fields [S1]. It was implemented on the GPU and used to visualize streamtapes generated from vector field data [S1]. The half-tone rendering style references the work of Freudenberg et al. [FMS01] for an overview of half-tone rendering techniques [S1].
+
+## Sources
+[S1] An Illustrative Visualization Framework for 3D Vector Fields, http://vis.cs.ucdavis.edu/papers/pg2011paper.pdf, fetched 2026-10-29

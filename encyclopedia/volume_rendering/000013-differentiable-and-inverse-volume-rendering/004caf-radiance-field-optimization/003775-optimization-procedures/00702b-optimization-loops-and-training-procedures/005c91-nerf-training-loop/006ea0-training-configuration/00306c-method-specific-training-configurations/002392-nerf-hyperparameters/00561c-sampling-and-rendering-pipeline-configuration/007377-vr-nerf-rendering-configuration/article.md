@@ -1,0 +1,124 @@
+# VR NeRF Rendering Configuration
+
+Also called: Meta Quest Pro NeRF Config
+
+## Overview
+This configuration defines the hyperparameters and rendering pipeline settings for training and rendering room-scale Neural Radiance Fields (NeRF) specifically for native execution on the Meta Quest Pro headset [S1]. It addresses the constraints of high-resolution (dual 2K×2K), high-frame-rate (72 FPS), and low-latency rendering in virtual reality [S1]. It distinguishes itself from standard NeRF configurations by targeting iNGP-style hash grid networks with specific MLP depths and a fixed sampling strategy optimized for VR hardware, rather than general-purpose desktop rendering [S1].
+
+## How it works
+The method configures the training loop and rendering parameters to balance visual fidelity with the strict performance budgets of standalone VR headsets [S1].
+
+**Inputs and Outputs**
+- **Inputs**: Training images (1K or 2K resolution), camera poses, and scene bounds.
+- **Outputs**: Trained hash grid embeddings and MLP weights for the density and color fields.
+
+**Data Structures**
+- **Hash Grid**: $L=16$ levels, base resolution $T_0=128$, scaling factor $s=1.4$ [S1].
+- **Density MLP**: 1 hidden layer, 64 neurons [S1].
+- **Color MLP**: 2 hidden layers, 64 neurons [S1].
+- **Optimizer State**: Adam state for hash grids and remaining modules [S1].
+
+**Numbered Steps**
+1. **Initialize Networks**: Initialize the hash grid embeddings and the two MLPs (density and color) as specified [S1].
+2. **Configure Sampling**: Set the number of samples per ray to $N_{samples} = 1024$ [S1]. Use exponential distance sampling for integration along the ray [S1].
+3. **Set Learning Rates**: Assign a learning rate of $\eta_{grid} = 0.01$ for the hash grid embeddings and $\eta_{mlp} = 0.005$ for the density and color MLPs [S1].
+4. **Configure Optimizer**: Use the Adam optimizer with parameters $\beta_1 = 0.9$, $\beta_2 = 0.99$, and $\epsilon = 10^{-15}$ [S1].
+5. **Batch Construction**: For each training step, sample a batch of 12,800 rays. This is achieved by selecting 256 random rays from 50 random training images [S1].
+6. **Training Loop**: Iterate for the specified number of steps (110K for ablation, >200K for demo videos) [S1].
+7. **Rendering**: During inference, render to dual 2K×2K eyebuffers at 72 FPS using a custom multi-GPU CUDA renderer [S1].
+
+**Formulas**
+- **Hash Grid Resolution**: The resolution at level $l$ is $T_l = T_0 \cdot s^l$ [S1].
+- **Batch Ray Count**: $N_{batch} = N_{rays\_per\_img} \times N_{imgs} = 256 \times 50 = 12,800$ [S1].
+
+**Parameters**
+- **Target Resolution**: Dual 2K×2K eyebuffers [S1].
+- **Target Frame Rate**: 72 FPS [S1].
+- **Hash Grid Levels ($L$)**: 16 [S1].
+- **Base Resolution ($T_0$)**: 128 [S1].
+- **Scaling Factor ($s$)**: 1.4 [S1].
+- **Samples per Ray ($N_{samples}$)**: 1024 [S1].
+- **Batch Size**: 12,800 rays [S1].
+- **Learning Rate (Hash Grids)**: 0.01 [S1].
+- **Learning Rate (MLPs)**: 0.005 [S1].
+- **Adam $\beta_1$**: 0.9 [S1].
+- **Adam $\beta_2$**: 0.99 [S1].
+- **Adam $\epsilon$**: $10^{-15}$ [S1].
+- **Training Iterations (Ablation)**: 110K [S1].
+- **Training Iterations (Demo)**: >200K [S1].
+- **Dataset Resolution (Ablation)**: 1K [S1].
+- **Dataset Resolution (Demo)**: 2K [S1].
+
+**Edge Cases and Pitfalls**
+- **Unbounded Scenes**: For unbounded scenes, far-field contraction must be applied [S1].
+- **HDR**: The configuration supports HDR modeling, potentially using PQ color space and weighted loss to prevent bright areas from dominating [S1].
+- **Pruning**: A coarse occupancy grid of $128^3$ resolution is used, upsampled at predefined iteration milestones to prune scenes [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def configure_vr_nerf_training():
+    # Hyperparameters from [S1]
+    L = 16
+    T0 = 128
+    s = 1.4
+    N_samples = 1024
+    N_batch = 12800
+    N_rays_per_img = 256
+    N_imgs = 50
+    lr_grid = 0.01
+    lr_mlp = 0.005
+    beta1 = 0.9
+    beta2 = 0.99
+    eps = 1e-15
+    
+    # Network architecture
+    density_mlp = MLP(hidden_layers=1, neurons=64)
+    color_mlp = MLP(hidden_layers=2, neurons=64)
+    hash_grid = HashGrid(levels=L, base_resolution=T0, scaling_factor=s)
+    
+    # Optimizer setup
+    optimizer = Adam(
+        params=[{'params': hash_grid.parameters(), 'lr': lr_grid},
+                {'params': list(density_mlp.parameters()) + list(color_mlp.parameters()), 'lr': lr_mlp}],
+        betas=(beta1, beta2),
+        eps=eps
+    )
+    
+    # Training loop configuration
+    # For ablation: 110K iterations on 1K resolution images
+    # For demo: >200K iterations on 2K resolution images
+    # [G] Standard training loop structure assumed
+    
+    return {
+        'hash_grid': hash_grid,
+        'density_mlp': density_mlp,
+        'color_mlp': color_mlp,
+        'optimizer': optimizer,
+        'N_samples': N_samples,
+        'N_batch': N_batch,
+        'N_rays_per_img': N_rays_per_img,
+        'N_imgs': N_imgs
+    }
+```
+
+## Subtopics
+
+### [VR-NeRF](22718-vr-nerf.md)
+A holistic pipeline for capturing and rendering high-fidelity walkable spaces in VR, targeting native rendering on Meta Quest Pro with strict latency and resolution constraints, utilizing specific training configurations and pruning strategies to maintain smoothness via Asynchronous Spacewarp (ASW).
+
+## Operating characteristics
+- **Time Complexity**: The most computationally expensive portion is MLP evaluation, which is optimized by evaluating all layers within registers using Nvidia Tensor Cores [S1].
+- **Memory Complexity**: Uses a hash grid with 16 levels, base resolution 128, and scaling factor 1.4 [S1].
+- **Measured Performance**: Tested on a 20-GPU workstation (20 Nvidia A40 GPUs) [S1]. Dynamic work distribution across GPUs achieves 49% higher FPS compared to static splits [S1].
+- **Strengths**: High resolution (dual 2K×2K), high frame rate (72 FPS), and low latency suitable for VR [S1].
+- **Limitations**: Requires significant hardware resources (20-GPU workstation) for training [S1].
+- **When to use**: When rendering room-scale NeRF models for native VR headsets like Meta Quest Pro [S1].
+- **When not to use**: For general-purpose desktop rendering or when hardware resources are limited [S1].
+
+## Background
+VR-NeRF was introduced to address the challenges of rendering room-scale NeRF models in virtual reality, specifically targeting the Meta Quest Pro headset [S1]. The work combines hardware, software, and model optimizations to achieve high resolution, high frame rates, and low latency [S1]. It builds on iNGP for efficient hash grid-based NeRF representation and incorporates techniques for HDR modeling and LOD [S1].
+
+## Sources
+[S1] VR-NeRF: High-Fidelity Virtualized Walkable Spaces, https://doi.org/10.1145/3610548.3618139, fetched 2026-10-28

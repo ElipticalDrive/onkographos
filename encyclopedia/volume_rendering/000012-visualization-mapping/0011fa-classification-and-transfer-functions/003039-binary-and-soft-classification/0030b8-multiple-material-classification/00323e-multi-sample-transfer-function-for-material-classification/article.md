@@ -1,0 +1,124 @@
+# Multi-sample Transfer Function for Material Classification
+
+Also called: 3D LTF Application, Multi-sample transfer function for lighting and opacity, multi-sample transfer function method
+
+## Overview
+The multi-sample transfer function method classifies volume data by using a sample's scalar value and two additional scalar values read along the gradient direction as the domain for a transfer function, allowing specification of color and opacity based on values on each side of a material boundary [S1, unofficial][S2]. It solves the problem of misclassifying voxels at transitions between materials with similar densities by considering the actual distribution of scalar values directly, rather than relying on linear estimates or conventional 1D transfer functions [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A scalar volume dataset $V$.
+*   **Output:** Color $C$ and opacity $\alpha$ for each voxel.
+
+**Data Structures**
+*   **Scalar Field:** A 3D grid of scalar values representing density or intensity [G].
+*   **Gradient Direction:** A unit vector indicating the direction of steepest ascent at each voxel [G].
+*   **Transfer Function:** A mapping from the input domain $(v_{\text{center}}, v_{+}, v_{-})$ to output $(C, \alpha)$ [S1, unofficial].
+
+**Steps**
+1.  **Estimate Gradient Direction:** Compute the gradient direction vector $\mathbf{d}$ at voxel position $\mathbf{p}$ [G].
+2.  **Read Center Value:** Read the scalar value at the center voxel: $v_{\text{center}} = V(\mathbf{p})$ [S1, unofficial].
+3.  **Read Gradient-Aligned Samples:** Read two scalar values along the gradient direction at unit spacing from the center voxel [S1, unofficial][S2].
+    *   Read the value in the positive gradient direction: $v_{+} = V(\mathbf{p} + \mathbf{d})$ [S1, unofficial][S2].
+    *   Read the value in the negative gradient direction: $v_{-} = V(\mathbf{p} - \mathbf{d})$ [S1, unofficial][S2].
+    *   Interpolation is required if $\mathbf{p} \pm \mathbf{d}$ falls between voxel centers [G].
+4.  **Classify:** Use the triplet $(v_{\text{center}}, v_{+}, v_{-})$ as the input domain for the transfer function to determine color and opacity [S1, unofficial]. The method allows specifying color and opacity based on the values on each side of a material boundary ($v_{+}$ and $v_{-}$) [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_sample_transfer_function(volume, gradient_field, transfer_function_2d):
+    """
+    Applies the multi-sample transfer function method.
+    
+    Args:
+        volume: 3D array of scalar values with shape (depth, height, width).
+        gradient_field: 3D array of gradient direction vectors with shape (depth, height, width, 3).
+        transfer_function_2d: A function mapping (v_plus, v_minus) -> (color, opacity).
+        
+    Returns:
+        result_volume: 3D array of RGBA values with shape (depth, height, width, 4).
+    """
+    depth, height, width = volume.shape
+    result_volume = [[[[0.0, 0.0, 0.0, 0.0] for _ in range(width)] for _ in range(height)] for _ in range(depth)]
+
+    for z in range(depth):
+        for y in range(height):
+            for x in range(width):
+                # Step 1: Read center value
+                v_center = volume[z][y][x]
+
+                # Step 2: Get gradient direction vector
+                grad = gradient_field[z][y][x]
+                gx, gy, gz = grad[0], grad[1], grad[2]
+                norm = (gx*gx + gy*gy + gz*gz) ** 0.5
+
+                # Step 3: Read samples along gradient direction at unit spacing
+                if norm > 1e-6:
+                    dx, dy, dz = gx / norm, gy / norm, gz / norm
+                else:
+                    dx, dy, dz = 0.0, 0.0, 0.0
+
+                pos_plus = (x + dx, y + dy, z + dz)
+                pos_minus = (x - dx, y - dy, z - dz)
+
+                v_plus = trilinear_interpolate(volume, pos_plus)
+                v_minus = trilinear_interpolate(volume, pos_minus)
+
+                # Step 4: Classify using the transfer function
+                color, opacity = transfer_function_2d(v_plus, v_minus)
+
+                result_volume[z][y][x] = [color[0], color[1], color[2], opacity]
+
+    return result_volume
+
+def trilinear_interpolate(volume, pos):
+    """
+    Trilinear interpolation of the volume at a continuous position.
+    """
+    x, y, z = pos
+    # Clamp to volume bounds
+    x = max(0.0, min(x, volume.shape[2] - 1))
+    y = max(0.0, min(y, volume.shape[1] - 1))
+    z = max(0.0, min(z, volume.shape[0] - 1))
+
+    x0, y0, z0 = int(x), int(y), int(z)
+    x1, y1, z1 = min(x0 + 1, volume.shape[2] - 1), min(y0 + 1, volume.shape[1] - 1), min(z0 + 1, volume.shape[0] - 1)
+
+    fx, fy, fz = x - x0, y - y0, z - z0
+
+    c00 = volume[z0][y0][x0] * (1 - fx) + volume[z0][y0][x1] * fx
+    c01 = volume[z0][y1][x0] * (1 - fx) + volume[z0][y1][x1] * fx
+    c10 = volume[z1][y0][x0] * (1 - fx) + volume[z1][y0][x1] * fx
+    c11 = volume[z1][y1][x0] * (1 - fx) + volume[z1][y1][x1] * fx
+
+    i0 = c00 * (1 - fy) + c01 * fy
+    i1 = c10 * (1 - fy) + c11 * fy
+
+    return i0 * (1 - fz) + i1 * fz
+```
+
+**Parameters**
+*   **Sampling Offset:** Unit spacing along the gradient direction [S1, unofficial][S2].
+*   **Transfer Function Dimensionality:** The cited implementation uses a 2D lighting transfer function based on the pair $(v_{+}, v_{-})$ [S1, unofficial]. A 3D transfer function using $(v_{\text{center}}, v_{+}, v_{-})$ is mentioned as a possibility but not implemented in the primary example due to UI complexity and storage requirements [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Non-linear Scalar Fields:** Material boundaries often have scalar fields that behave non-linearly, making linear estimation inaccurate [S1, unofficial].
+*   **Inherent Blur:** Data acquisition blur can cause regions surrounding materials to have the same density/intensity as the material itself [S1, unofficial].
+*   **Zero Gradient:** If the gradient magnitude is zero, the direction is undefined [G].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Better suited than gradient magnitude estimation for non-linear variations in scalar values at material transitions because it takes into account the actual distribution of scalar values directly [S1, unofficial][S2]. It properly segments materials at boundaries where intensities are similar [S1, unofficial][S2].
+*   **Limitations:** Additional computation for scalar value reads [S1, unofficial]. Using a 3D transfer function adds significant complexity to the user interface and requires additional texture storage [S1, unofficial].
+*   **When to Use:** When material boundaries are blurred and adjacent materials have similar scalar values, leading to misclassification with 1D transfer functions [S1, unofficial][S2].
+*   **When Not to Use:** Not given in the sources.
+
+## Background
+The method was presented in the paper "Lighting Transfer Functions for Direct Volume Rendering" by Joe Kniss, Simon Premoze, Charles Hansen, and David Ebert, published in IEEE Transactions on Visualization and Computer Graphics, 9(2):150–162, April-June 2003 [S1, unofficial]. It was developed to address the limitations of conventional 1D transfer functions in handling material boundaries with similar intensities, such as the "moss-like" artifacts seen around branches in tree datasets [S1, unofficial][S2].
+
+## Sources
+[S1] Lighting Transfer Functions for Direct Volume Rendering, https://escholarship.org/uc/item/71g7h4kx, fetched 2026-10-26 (unofficial)
+[S2] PDF Lighting Transfer Functions Using Gradient Aligned Sampling, https://www.cs.ucdavis.edu/~ma/papers/lightingtf.pdf, fetched 2026-10-29

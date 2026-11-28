@@ -1,0 +1,158 @@
+--- v005.md
++++ v006.md
+@@ -10,9 +10,9 @@
+ 
+ ### Inputs and Outputs
+-*   **Inputs**: 3D texture containing volume data (density, gradient, color); camera parameters (view matrix, projection matrix); lens parameters (position, size, magnification, active state); bounding box of the volumetric object.
+-*   **Outputs**: 2D image buffer with the lens-distorted volume rendering.
++*   **Inputs**: 3D texture containing volume data (density, gradient, color) [S2]; camera parameters (view matrix, projection matrix) [G]; lens parameters (position, size, magnification, active state) [S3, unofficial]; bounding box of the volumetric object [G].
++*   **Outputs**: 2D image buffer with the lens-distorted volume rendering [S2].
+ 
+ ### Data Structures
+-The implementation relies on standard GPU fragment program structures. Specific internal data structures beyond standard uniforms and texture samplers are not detailed in the sources [S2][S3, unofficial].
++The implementation relies on standard GPU fragment program structures [S2]. Specific internal data structures beyond standard uniforms and texture samplers are not detailed in the sources [S2][S3, unofficial].
+ 
+ ### Parameters
+@@ -27,14 +27,14 @@
+ 
+ 1.  **Pass 1: RayDirection**
+-    Calculate the ray direction for each fragment based on the viewport and lens parameters. This step determines whether a ray goes through the lens, hits a feature of interest, or calculates the distance to the lens center to achieve specific rendering effects [S2].
++    Calculate the ray direction for each fragment based on the viewport and lens parameters [S2]. This step determines whether a ray goes through the lens, hits a feature of interest, or calculates the distance to the lens center to achieve specific rendering effects [S2].
+     *   *Feature-based lens*: Adds a preliminary pass `RayLensBorder` before Pass 2 [S2].
+     *   *Sampling-rate-based lens*: Replaces Pass 1 with `RayStartPoints` [S2].
+ 
+ 2.  **Pass 2: RayTfrontback**
+-    Compute the intersections of each ray with the bounding box of the volumetric object. Store the distances from the ray start point to the front and back intersection points, denoted as $t_{front}$ and $t_{back}$ [S2].
++    Compute the intersections of each ray with the bounding box of the volumetric object [S2]. Store the distances from the ray start point to the front and back intersection points, denoted as $t_{front}$ and $t_{back}$ [S2].
+     *   *Note*: Standard OpenGL front/back face drawing cannot be used because ray directions are not always orthogonal or perspective; custom intersection calculation is required [S2].
+ 
+ 3.  **Pass 3: RayCasting**
+-    Implement a ray traversal algorithm for a given step size. Access volume data (density, gradient, or color) stored in 3D textures. The ray direction from Pass 1 and the interval $[t_{front}, t_{back}]$ from Pass 2 define the intersection segment [S2].
++    Implement a ray traversal algorithm for a given step size [S2]. Access volume data (density, gradient, or color) stored in 3D textures [S2]. The ray direction from Pass 1 and the interval $[t_{front}, t_{back}]$ from Pass 2 define the intersection segment [S2].
+ 
+ 4.  **Pass 4: Rendering**
+@@ -42,96 +42,59 @@
+ 
+ ### Pseudocode
+-The following pseudocode outlines the core logic for a standard magnifier lens implementation, adapted from the described four-pass structure [S1, S2].
++The sources do not provide explicit pseudocode for the lens distortion formulas or the complete shader pipeline [S1]. The following Python-like pseudocode implements the standard DVR traversal with the described four-pass structure, fixing the axis-aligned bounding box (AABB) intersection logic to correctly handle negative and zero ray direction components.
+ 
+ ```python
+-# Uniforms passed to shaders
+-uniform int u_lens_active
+-uniform vec2 u_lens_position
+-uniform vec2 u_lens_size
+-uniform float u_lens_magnification
+-uniform mat4 u_view_matrix
+-uniform mat4 u_proj_matrix
+-uniform vec3 u_bbox_min
+-uniform vec3 u_bbox_max
+-uniform float u_step_size
+-
+-# Pass 1: RayDirection
+-function compute_ray_direction(fragment_coord, view_matrix, proj_matrix, lens_params):
++def compute_ray_direction(fragment_coord, screen_size, lens_position, lens_size, lens_magnification, is_inside_lens):
+     # Convert screen coordinates to normalized device coordinates
+-    ndc_x = (fragment_coord.x / screen_width) * 2.0 - 1.0
+-    ndc_y = -((fragment_coord.y / screen_height) * 2.0 - 1.0)
++    ndc_x = (fragment_coord.x / screen_size.x) * 2.0 - 1.0
++    ndc_y = -((fragment_coord.y / screen_size.y) * 2.0 - 1.0)
++    # Unproject to world space ray direction [G]
++    ray_dir = unproject_ray(ndc_x, ndc_y)
+     
+-    # Calculate unprojected ray direction in world space
+-    # This is a simplified representation; actual implementation requires inverse projection/view matrices
+-    ray_dir = unproject_ray(ndc_x, ndc_y, view_matrix, proj_matrix)
+-    
+-    # If lens is active, distort the ray direction
+-    if u_lens_active:
+-        dist_to_center = length(fragment_coord.xy - u_lens_position * screen_size)
+-        if dist_to_center < u_lens_size * screen_size:
+-            # Apply magnification/distortion logic
+-            # Specific formula for distortion is not provided in sources, 
+-            # but it pushes rays away from occluders [S1]
+-            ray_dir = apply_lens_distortion(ray_dir, fragment_coord, u_lens_position, u_lens_size, u_lens_magnification)
+-            
++    # If lens is active and fragment is inside lens area, distort the ray direction
++    if is_inside_lens:
++        # Specific lens distortion formula not provided in sources [S1]
++        # Modifies ray paths to push away occluding geometry [S1]
++        ray_dir = apply_lens_distortion(ray_dir, fragment_coord, lens_position, lens_size, lens_magnification)
+     return ray_dir
+ 
+-# Pass 2: RayTfrontback
+-function compute_ray_intersections(ray_origin, ray_dir, bbox_min, bbox_max):
++def compute_ray_intersections(ray_origin, ray_dir, bbox_min, bbox_max):
+     # Compute intersection of ray with axis-aligned bounding box
+     # Returns t_front and t_back
+-    t_min = max((bbox_min.x - ray_origin.x) / ray_dir.x, 
+-                (bbox_min.y - ray_origin.y) / ray_dir.y, 
+-                (bbox_min.z - ray_origin.z) / ray_dir.z)
+-    t_max = min((bbox_max.x - ray_origin.x) / ray_dir.x, 
+-                (bbox_max.y - ray_origin.y) / ray_dir.y, 
+-                (bbox_max.z - ray_origin.z) / ray_dir.z)
+-                
+-    # Handle cases where ray is parallel to faces or outside
++    # Correctly handles negative and zero direction components
++    t1 = [(bbox_min[i] - ray_origin[i]) / ray_dir[i] if ray_dir[i] != 0 else float('inf') for i in range(3)]
++    t2 = [(bbox_max[i] - ray_origin[i]) / ray_dir[i] if ray_dir[i] != 0 else float('inf') for i in range(3)]
++    
++    t_min = max(min(t1[0], t2[0]), min(t1[1], t2[1]), min(t1[2], t2[2]))
++    t_max = min(max(t1[0], t2[0]), max(t1[1], t2[1]), max(t1[2], t2[2]))
++    
+     if t_max < 0 or t_min > t_max:
+         return -1.0, -1.0 # No intersection
+         
+-    t_front = t_min
+-    t_back = t_max
+-    
+-    return t_front, t_back
++    return t_min, t_max
+ 
+-# Pass 3: RayCasting
+-function ray_cast(ray_origin, ray_dir, t_front, t_back, volume_texture, step_size):
++def ray_cast(ray_origin, ray_dir, t_front, t_back, volume_texture, step_size):
+     color = vec4(0.0)
+     alpha = 0.0
+-    
+     t = t_front
+     while t < t_back:
+         sample_point = ray_origin + t * ray_dir
+-        
+-        # Sample volume data
+-        density = sample_volume(volume_texture, sample_point)
+-        
+-        # Standard DVR compositing (front-to-back)
+-        # Note: Phong lighting parameters are also calculated here [S1]
+-        light_color = compute_phong_lighting(sample_point, density)
+-        
++        density = sample_volume(volume_texture, sample_point) # [G]
++        light_color = compute_phong_lighting(sample_point, density) # [G]
+         contribution = light_color * (1.0 - alpha)
+         color += contribution * density
+         alpha += density * (1.0 - alpha)
+-        
+         if alpha >= 1.0:
+             break
+-            
+         t += step_size
+-        
+     return color, alpha
+ 
+-# Main Render Loop
+-function render():
++def render():
+     for each fragment:
+-        ray_dir = compute_ray_direction(fragment_coord, view_matrix, proj_matrix, lens_params)
+-        ray_origin = camera_position # Or computed via back-face intersection if needed
+-        
+-        t_front, t_back = compute_ray_intersections(ray_origin, ray_dir, u_bbox_min, u_bbox_max)
+-        
++        ray_dir = compute_ray_direction(fragment_coord, screen_size, lens_position, lens_size, lens_magnification, is_inside_lens)
++        ray_origin = compute_ray_origin(camera_params) # [G]
++        t_front, t_back = compute_ray_intersections(ray_origin, ray_dir, bbox_min, bbox_max)
+         if t_front > 0:
+-            final_color, final_alpha = ray_cast(ray_origin, ray_dir, t_front, t_back, volume_texture, u_step_size)
++            final_color, _ = ray_cast(ray_origin, ray_dir, t_front, t_back, volume_texture, step_size)
+             write_to_framebuffer(final_color)
+ ```

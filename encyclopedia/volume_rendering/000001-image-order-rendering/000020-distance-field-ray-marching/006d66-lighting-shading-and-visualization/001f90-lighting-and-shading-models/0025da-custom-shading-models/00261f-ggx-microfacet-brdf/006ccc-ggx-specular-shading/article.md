@@ -1,0 +1,149 @@
+# GGX Specular Shading
+
+
+## Overview
+GGX Specular Shading is a path-tracing shading method for voxel-based volume rendering that combines a Cook-Torrance microfacet model with GGX specular reflection, Lambertian diffuse shading from an irradiance cache, and dielectric transmission handling [S1, unofficial]. It differs from its parent [GGX Microfacet BRDF](3715-ggx-microfacet-brdf.md) by providing the complete shading loop (emission, reflection, refraction, and diffuse accumulation) rather than just the BRDF components. It is distinct from [Specular Reflection](5690-specular-reflection.md) by including transmission and diffuse GI, and from [Microfacet BRDF with Simplified GGX and Schlick Fresnel](10259-microfacet-brdf-with-simplified-ggx-and-schlick-fresnel.md) by using the full Cook-Torrance formulation with explicit transmission logic [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `rayDir`: Current ray direction (normalized).
+- `normal`: Surface normal at hit point (normalized).
+- `material`: Material properties including `albedo` (RGB), `metallic` (float), `roughness` (float), `transmission` (float), `ior` (float), `emission_color` (RGB), `emission_strength` (float).
+- `u_gi`: Irradiance cache texture for diffuse GI.
+- `u_gi_scale`: Scale factor for GI contribution.
+- `rng`: Random number generator state.
+- `u_max_bounces`: Maximum path depth.
+
+**Outputs:**
+- `radiance`: Accumulated radiance value.
+
+**Data Structures:**
+- `Material`: Defined in [S1, unofficial]. Fields: `id`, `name`, `use_voxel_color`, `albedo` (tuple), `metallic`, `roughness`, `emission_color`, `emission_strength`, `emission_use_voxel_color`, `transmission`, `ior`, `flags`, `extra`.
+- `VoxelGrid`: Defined in [S1, unofficial]. Fields: `rgba` (4D array), `material_id` (3D array), `dims`.
+
+**Steps:**
+1. Initialize `radiance = 0`, `throughput = 1`.
+2. Loop `bounce` from 0 to `u_max_bounces`:
+   a. Add `throughput * material.emission * material.emission_strength` to `radiance`.
+   b. If `material.transmission > 0.0`:
+      i. Compute `viewFresnel` using Schlick approximation or similar for dielectric: `F0 = mix(vec3(0.04), material.albedo, material.metallic)`. For dielectric transmission, use `ior` to compute Fresnel reflectance.
+      ii. Sample `random01(rng)`. If `random01(rng) < fresnel_dielectric(abs(dot(rayDir, normal)), material.ior)`, set `rayDir` to reflected direction and continue.
+      iii. Else, call `transmit_block`. If `transmit_block` returns `false`, add `throughput * sample_env(rayDir)` to `radiance` and break loop.
+   c. If `landed` is true (hit surface):
+      i. Update hit point, cell, normal, and material.
+      ii. If material is opaque (or after reflection):
+         1. Compute `view = -rayDir`.
+         2. Compute `ndv = max(dot(normal, view), 1e-4)`.
+         3. Compute Fresnel `F0`: `fresnelF0 = mix(vec3(0.04), material.albedo, material.metallic)`.
+         4. Compute diffuse term: `diffuse = (1.0 - viewFresnel) * (1.0 - material.metallic) * material.albedo`.
+         5. Add diffuse radiance: `throughput * diffuse * texelFetch(u_gi, ...).rgb * u_gi_scale`.
+         6. Sample GGX microfacet normal: `microNormal = ggx_sample(normal, material.roughness, rng)`.
+         7. Compute reflected direction using `microNormal` and `view`.
+         8. Update `throughput` by multiplying with BRDF value and `ndv`.
+         9. Update `rayDir` to reflected direction.
+   d. If `landed` is false (missed or transmitted out), break loop.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ggx_specular_shading(ray_dir, normal, material, u_gi, u_gi_scale, rng, u_max_bounces):
+    radiance = 0.0
+    throughput = 1.0
+    ray_dir = normalize(ray_dir)
+    normal = normalize(normal)
+    
+    for bounce in range(u_max_bounces):
+        # Add emission
+        emission = material.emission_color * material.emission_strength
+        radiance += throughput * emission
+        
+        # Handle transmission
+        if material.transmission > 0.0:
+            # Dielectric Fresnel
+            ndv = abs(dot(normal, ray_dir))
+            # Simplified Schlick for dielectric with IOR
+            f0 = 0.04 # Default for dielectric
+            # More accurate: f0 = ((ior - 1) / (ior + 1))**2
+            fresnel = f0 + (1.0 - f0) * (1.0 - ndv)**5
+            
+            if random01(rng) < fresnel:
+                # Reflect
+                ray_dir = reflect(ray_dir, normal)
+                continue
+            else:
+                # Transmit
+                if not transmit_block(ray_dir, normal, material.ior, rng):
+                    # Hit environment or failed transmission
+                    radiance += throughput * sample_env(ray_dir)
+                    break
+        
+        # Handle opaque/reflected shading
+        # Assume landed is true if we are shading a surface
+        view = -ray_dir
+        ndv = max(dot(normal, view), 1e-4)
+        
+        # Fresnel for metal/dielectric mix
+        fresnelF0 = mix(vec3(0.04), material.albedo, material.metallic)
+        viewFresnel = fresnelF0 + (1.0 - fresnelF0) * (1.0 - ndv)**5
+        
+        # Diffuse term
+        diffuse = (1.0 - viewFresnel) * (1.0 - material.metallic) * material.albedo
+        
+        # Add diffuse GI
+        # texelFetch depends on UV coordinates, assumed to be available
+        gi_color = texelFetch(u_gi, ...) # Placeholder for UV lookup
+        radiance += throughput * diffuse * gi_color * u_gi_scale
+        
+        # Specular term
+        micro_normal = ggx_sample(normal, material.roughness, rng)
+        half_vec = normalize(view + micro_normal) # For reflection, half_vec is not directly used for direction, but micro_normal is
+        # Reflected direction
+        ray_dir = reflect(ray_dir, micro_normal)
+        
+        # Update throughput
+        # BRDF = D * G * F / (4 * |n.o| * |n.i|)
+        # D = ggx_distribution(micro_normal, normal, material.roughness)
+        # G = schlick_ggx(micro_normal, normal, view, material.roughness)
+        # F = fresnel_schlick(ndv, fresnelF0)
+        # throughput *= D * G * F / (4.0 * ndv * ndv) # Simplified, actual G and D needed
+        
+        # For simplicity, assuming throughput update is handled by BRDF evaluation
+        # throughput *= brdf_value * ndv # Standard path tracing throughput update
+        
+        # If opaque, we might break or continue depending on implementation
+        # The source implies continuing the loop for bounces
+```
+
+**Parameters:**
+- `u_max_bounces`: Maximum number of bounces. Typical value: Not given in the sources.
+- `u_gi_scale`: Scale for GI contribution. Typical value: Not given in the sources.
+- `roughness`: GGX roughness parameter. Typical value: 0.5 (from Material default).
+- `ior`: Index of refraction. Typical value: 1.45 (from Material default).
+
+**Edge cases and pitfalls:**
+- Precision: Use `1e-4` for `ndv` to avoid division by zero.
+- Boundaries: Handle transmission failures gracefully by sampling environment.
+- Degenerate input: Ensure `normal` and `ray_dir` are normalized.
+
+## Subtopics
+
+### Cook-Torrance Refraction with Jacobian
+A modification of the Cook-Torrance model for surface-to-surface refraction by recalculating the Jacobian matrix for the transform between half-vector and outgoing vector [S2, unofficial]. The refraction BSDF is given by $f_r = \frac{D \cdot G \cdot F}{4 \cdot |n \cdot o| \cdot |n \cdot i| \cdot |J|}$, where $D$ is the microfacet distribution function (Beckmann), $G$ is the shadowing term (numerical approximation to Smith shadowing function), $F$ is Fresnel, and $J$ is the Jacobian determinant [S2, unofficial]. The half-vector in refraction indicates the normal of the sampled microfacet, obtained by $h = \text{normalize}(v + l)$ if BSDF needs to be determined from arbitrary incoming and outgoing radiance [S2, unofficial]. For anisotropic materials, the roughness coefficient inside the shadowing term $G$ is substituted by $1/\sqrt{\text{roughness}_x \cdot \text{roughness}_y}$ [S2, unofficial].
+
+## Operating characteristics
+- Time complexity: Linear in the number of bounces, with GGX sampling and Fresnel calculations per bounce.
+- Memory complexity: Depends on the irradiance cache size and material library.
+- Measured performance: Not given in the sources.
+- Scaling: Scales with resolution and scene complexity.
+- Strengths: Physically based, handles both reflection and transmission, integrates with GI.
+- Limitations: Computationally expensive due to path tracing and GGX sampling.
+- When to use: For realistic rendering of dielectric and metallic surfaces in voxel environments.
+- When not: For real-time applications requiring high performance, or for non-physically based rendering.
+
+## Background
+Originated from the Cook-Torrance microfacet model and GGX distribution, adapted for voxel-based volume rendering [S1, unofficial]. The refraction variant with Jacobian calculation is based on Walter et al. (2007) [S2, unofficial]. Used in voxel-based rendering systems like Voxmat [S1, unofficial].
+
+## Sources
+[S1] HollaFoil/Voxmat, https://github.com/HollaFoil/Voxmat, fetched 2026-10-28 (unofficial)
+[S2] [GAPT Series - 10] Rendering Effects - Daqi's Blog, https://dqlin.xyz/tech/2017/06/30/10_fx/, fetched 2026-10-29 (unofficial)

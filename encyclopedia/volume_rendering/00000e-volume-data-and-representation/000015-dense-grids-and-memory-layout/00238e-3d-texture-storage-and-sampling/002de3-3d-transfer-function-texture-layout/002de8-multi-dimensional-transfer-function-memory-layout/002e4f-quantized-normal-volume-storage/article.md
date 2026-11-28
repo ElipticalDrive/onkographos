@@ -1,0 +1,81 @@
+# Quantized Normal Volume Storage
+
+Also called: Normal Volume Memory Layout
+
+## Overview
+Quantized Normal Volume Storage is a memory layout technique for hardware-accelerated volume rendering that stores precomputed lighting normals alongside transfer function variables at each voxel sample point [S1]. It addresses the memory overhead of storing transfer function variables and normals at each voxel for hardware-based rendering, where on-the-fly computation is not feasible [S1]. It differs from dynamic normal calculation, which requires multiple texture lookups and risks bandwidth bottlenecks, by using pre-stored data at a fixed storage cost [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Volume data and transfer function parameters requiring surface normals for lighting [S1].
+*   **Output:** A 3D texture volume containing the dataset representation, specifically transfer function variables and quantized normals [S1].
+
+**Data Structures:**
+The dataset is stored in a 3D texture volume [S1]. Each voxel occupies 6 bytes total [S1]. This comprises the quantized normal volume, which takes 3 bytes per voxel due to pixel field alignment restrictions rather than optimal bit-packing [S1]. The remaining bytes store transfer function variables, though their exact count and layout are not detailed in the sources.
+
+**Numbered Steps:**
+1.  **Precompute Normals:** Calculate surface normals during preprocessing [G]. (Sources do not specify the exact precomputation algorithm.)
+2.  **Quantize Normals:** Convert continuous vectors to a discrete representation fitting 3 bytes [G]. (The specific quantization grid for this layout is not detailed in the sources.)
+3.  **Pack Data:** Combine the transfer function variables and the 3-byte quantized normal into a 6-byte structure per voxel [S1].
+4.  **Upload to GPU:** Store the 6-byte-per-voxel dataset into GPU texture memory [S1].
+
+**Formulas:**
+$$M = V \times B$$
+where $M$ is the total memory required in bytes, $V$ is the total voxel count, and $B$ is the bytes per voxel (6) [S1].
+
+**Parameters:**
+*   **Memory Limit:** 104 MB of texture memory restricts the implementation to datasets of size $256 \times 256 \times 128$ [S1].
+*   **Voxel Size:** 6 bytes per voxel [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Memory Constraints:** The fixed 6-byte per voxel cost limits maximum resolution; larger datasets require parallel hardware rendering methods [S1].
+*   **Alignment:** The 3-byte normal storage is dictated by pixel field alignment restrictions, not bit efficiency [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_memory_required(voxel_count: int, bytes_per_voxel: int = 6) -> int:
+    """Calculate total memory in bytes for the quantized normal volume storage [S1]."""
+    return voxel_count * bytes_per_voxel
+
+def check_memory_limit(max_texture_memory_mb: int = 104, resolution: tuple = (256, 256, 128)) -> bool:
+    """Check if a given resolution fits within the texture memory limit [S1]."""
+    voxel_count = resolution[0] * resolution[1] * resolution[2]
+    bytes_required = calculate_memory_required(voxel_count)
+    max_bytes = max_texture_memory_mb * 1024 * 1024
+    return bytes_required <= max_bytes
+```
+
+## Subtopics
+
+### Paletted Texture Normal Storage
+A storage method for lighting normals using paletted textures to save space, storing an index into a normal lookup table per voxel [S2]. Directions are quantized to one of $2^{40}$ vectors obtained from the faces of a subdivided combined dodecahedron and icosahedron [S2]. This approach requires only one byte per voxel to store normal directions, significantly reducing memory usage compared to the standard layout [S2]. It is chosen when memory is extremely constrained and the specific quantization grid is acceptable [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Memory:** 6 bytes per voxel for the standard layout [S1]. 1 byte per voxel for Paletted Texture Normal Storage [S2].
+*   **Time:** Precomputation adds preprocessing time; rendering samples directly from texture without on-the-fly gradient calculation [S1, S2].
+
+**Measured Performance:**
+*   With 104 MB texture memory, the standard layout supports up to $256 \times 256 \times 128$ voxels [S1].
+*   Paletted textures reduce storage, allowing larger volumes or more transfer function variables within the same budget [S2].
+
+**Scaling:**
+*   Standard method scales linearly with voxel count but is hard-limited by texture memory [S1].
+*   Paletted textures improve scaling for memory-constrained systems [S2].
+
+**Strengths and Limitations:**
+*   **Strengths:** Enables hardware-based lighting with precomputed normals, avoiding bandwidth costs of on-the-fly gradients [S1, S2]. Paletted textures offer significant memory savings [S2].
+*   **Limitations:** Fixed memory overhead per voxel [S1]. Standard method limited by texture memory size [S1]. Paletted textures require a specific quantization scheme and lookup table [S2].
+
+**When to Use:**
+*   Use standard layout when hardware rendering is required and memory suffices for 6 bytes per voxel [S1].
+*   Use Paletted Texture Normal Storage when memory is critical and the quantization grid is acceptable [S2].
+
+## Background
+The Quantized Normal Volume Storage method was introduced in the context of interactive volume rendering using multi-dimensional transfer functions [S1]. It was developed to address the increased memory consumption needed to store transfer function variables and normals at each voxel sample point for hardware-based rendering [S1]. The Paletted Texture Normal Storage method was proposed as a space-saving alternative using paletted textures [S2].
+
+## Sources
+[S1] PDF Interactive Volume Rendering Using Multi-Dimensional Transfer Functions ..., https://publications.sci.utah.edu/publications/jmk01/simian-paper.pdf, fetched 2026-10-27
+[S2] Recent advances in hardware-accelerated volume rendering, https://doi.org/10.1016/s0097-8493(03)00146-8, fetched 2026-10-26

@@ -1,0 +1,100 @@
+# Voxel-grid Super-Resolution
+
+Also called: Fast grid upsampling
+
+## Overview
+Voxel-grid Super-Resolution predicts an upsampled voxel grid of higher resolution from a lower-resolution input grid using a U-Net style encoder-decoder network [S1]. It serves as a fast alternative to querying an implicit Multi-Layer Perceptron (MLP) for higher resolution data, addressing the computational bottleneck associated with dense sampling in neural implicit representations [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A low-resolution voxel grid $V_{input}$ with dimensions $160^3$ [S1].
+- Output: A high-resolution voxel grid $V_{upsample}$ with dimensions $384^3$ [S1].
+
+**Data Structures:**
+The input and output are dense 3D grids where each voxel contains feature vectors [S1]. The specific channel dimension $C$ is not explicitly defined for the base super-resolution task in the sources, though the refinement variant uses $C$ channels [S2].
+
+**Method:**
+The transformation is defined as:
+$$ V_{upsample} = g(V_{input}, \text{resolution}) $$
+where $g$ is a U-Net style encoder-decoder network [S1]. The network takes the low-resolution grid and the target resolution as parameters to generate the higher-resolution representation [S1].
+
+**Parameters:**
+- Input resolution: $160^3$ [S1].
+- Output resolution: $384^3$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_grid_super_resolution(v_input: Tensor, target_res: int) -> Tensor:
+    """
+    Upsamples a low-resolution voxel grid to a higher resolution using a U-Net.
+    Args:
+        v_input: Tensor of shape (H, W, D, C) representing the input voxel grid.
+        target_res: Integer, the target resolution dimension (e.g., 384).
+    Returns:
+        Tensor of shape (target_res, target_res, target_res, C) representing the upsampled grid.
+    """
+    # Standard 3D operations: conv3d, max_pool3d, upsample3d, concat, resize_3d [G]
+    # Encoder path: downsampling with convolutions to capture context [G]
+    e1 = conv3d(v_input, filters=64, kernel_size=3, stride=1)
+    e2 = conv3d(max_pool3d(e1, kernel_size=2, stride=2), filters=128, kernel_size=3, stride=1)
+    e3 = conv3d(max_pool3d(e2, kernel_size=2, stride=2), filters=256, kernel_size=3, stride=1)
+    # Bottleneck: deep feature extraction [G]
+    b1 = conv3d(max_pool3d(e3, kernel_size=2, stride=2), filters=512, kernel_size=3, stride=1)
+    # Decoder path: upsampling with convolutions to restore resolution [G]
+    d1 = conv3d(upsample3d(b1, scale_factor=2), filters=256, kernel_size=3, stride=1)
+    d1 = concat(d1, e3)
+    d1 = conv3d(d1, filters=256, kernel_size=3, stride=1)
+    d2 = conv3d(upsample3d(d1, scale_factor=2), filters=128, kernel_size=3, stride=1)
+    d2 = concat(d2, e2)
+    d2 = conv3d(d2, filters=128, kernel_size=3, stride=1)
+    d3 = conv3d(upsample3d(d2, scale_factor=2), filters=64, kernel_size=3, stride=1)
+    d3 = concat(d3, e1)
+    d3 = conv3d(d3, filters=64, kernel_size=3, stride=1)
+    # Output projection to match target resolution and channels [G]
+    v_upsample = conv3d(d3, filters=1, kernel_size=1, stride=1)
+    v_upsample = resize_3d(v_upsample, size=(target_res, target_res, target_res))
+    return v_upsample
+```
+
+## Subtopics
+
+### Sparse 3D Decoder
+A refinement stage that improves spatial consistency and structural fidelity of a voxel representation by predicting residual features for each voxel using a sparse 3D U-Net [S2]. It is chosen when the base voxel features require correction for fine geometric details and consistency, stabilizing training by learning correction terms rather than relearning entire feature content [S2]. It builds on [Voxel Super-Resolution Decoder](11760-voxel-super-resolution-decoder.md).
+
+**Definition:**
+A sparse convolutional 3D U-Net $R$ predicts a residual voxel field $R$ from an input voxel grid $V$ with per-voxel feature vectors [S2].
+
+**Steps:**
+1. Input a voxel grid $V$ with per-voxel feature vectors into a sparse convolutional 3D U-Net $R$ [S2].
+2. Predict a residual voxel field $R$ where $R \in \mathbb{R}^{V \times C}$ and $R = R(V)$, with $V$ denoting the set of occupied voxels [S2].
+3. Obtain refined voxel features $V'$ by adding the residual field to the original features: $V' = V + R$ [S2].
+
+**Layout:**
+The refinement network uses hierarchical sparse 3D convolutional blocks, symmetric encoder-decoder stages, and upsampling layers connected by skip connections [S2].
+
+**Pitfalls:**
+Relearning entire feature content can destabilize training; the residual formulation encourages learning correction terms (fine geometric detail and consistency cues) to stabilize training and preserve coarse voxel information [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources [S1, S2]. However, the method is described as a "fast alternative" to querying an implicit MLP [S1], implying lower latency for high-resolution generation compared to per-point MLP evaluation. The sparse variant maintains efficiency through sparsity [S2].
+
+**Measured Performance:**
+Not given in the sources [S1, S2].
+
+**Strengths and Limitations:**
+- Strength: Fast grid upsampling compared to implicit MLP querying [S1].
+- Strength: The residual formulation in the sparse variant stabilizes training and preserves coarse information [S2].
+- Limitation: Requires training a U-Net architecture; specific accuracy metrics are not provided in the sources [S1, S2].
+
+**When to use it:**
+Use when high-resolution voxel grids are needed quickly and querying an implicit MLP is too slow [S1]. Use the sparse variant when spatial consistency and structural fidelity need refinement from coarse voxel features [S2].
+
+## Background
+The method is described as a fast grid upsampling technique for 3D vision tasks [S1]. The sparse 3D refinement variant was proposed in the context of feed-forward 3D Gaussian Splatting with voxel-aligned prediction [S2].
+
+## Sources
+[S1] NeRF-MAE: Masked AutoEncoders for Self-Supervised 3D Representation Learning for Neural Radiance Fields, https://arxiv.org/abs/2404.01300v3, fetched 2026-10-26
+[S2] VolSplat: Rethinking Feed-Forward 3D Gaussian Splatting with Voxel-Aligned Prediction, https://doi.org/10.1007/978-3-032-37232-1_1, fetched 2026-10-26

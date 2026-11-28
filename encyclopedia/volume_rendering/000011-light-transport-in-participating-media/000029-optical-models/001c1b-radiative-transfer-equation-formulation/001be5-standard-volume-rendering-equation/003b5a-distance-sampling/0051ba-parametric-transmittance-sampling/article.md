@@ -1,0 +1,133 @@
+# Parametric Transmittance Sampling
+
+Also called: Parametric transmittance curves, Statistical distributions for transmittance
+
+## Overview
+Parametric Transmittance Sampling provides a framework for radiative transfer in non-exponential media by modeling extinction transmittance with statistical distributions [S1]. It differs from [Whole Volume Distance Sampling](9002-whole-volume-distance-sampling.md) by using local parametric families rather than global volume statistics, and from [Closed-form Tracking](9223-closed-form-tracking.md) by relying on sampled parametric curves instead of analytical integration [S1].
+
+## How it works
+**Inputs:** Current position $x_0$, direction $\omega$, distribution family $\mathcal{D}$ with parameters $\theta$, and a uniform random variate $\xi \in [0, 1)$ [S1, G].
+**Outputs:** Sampled free-flight distance $d$ and transmittance $T(x_0, x_0+d)$ [S1, G].
+**Data Structures:** The method stores distribution parameters. For Gamma $\Gamma(\mu, \alpha)$, it stores mean $\mu \ge 0$ and shape $\alpha > 0$ [S1]. For DeltaSum III(n), it stores impulses $\{\mu_1, \dots, \mu_n\}$ [S1].
+**Numbered Steps:**
+1. Select distribution family $\mathcal{D}$ from the supported parametric families [S1].
+2. Parameterize $\mathcal{D}$ using local extinction properties [G].
+3. Sample distance $d$ using the distribution's sampling algorithm [S1].
+4. Evaluate transmittance $T(x_0, x_0+d)$ along the sampled distance [G].
+5. Compute importance sampling weight if the sampling PDF differs from the true transmittance PDF [G].
+**Formulas:**
+- **Delta Distribution $\delta_\mu$:**
+  - PDF: $p(x) = \delta(x - \mu)$
+  - CDF: $H(x - \mu)$
+  - Characteristic function: $e^{ir\mu}$
+  - Sampling: $x_\delta = \mu$ [S1]
+  - Transmittance weight: $-\frac{\ln \xi}{x_\delta}$ [S1]
+- **DeltaSum III(n):**
+  - PDF: $p(x) = \frac{1}{n} \sum_{i=1}^n \delta(x - \mu_i)$
+  - CDF: $F(x) = \frac{1}{n} \sum_{i=1}^n H(x - \mu_i)$
+  - Characteristic function: $\frac{1}{n} \sum_{i=1}^n e^{ir\mu_i}$
+  - Sampling: $x_{\text{III}} = \text{uniform from } \{\mu_1, \dots, \mu_n\}$ [S1]
+  - Transmittance weight: $-\frac{\ln \xi}{x_{\text{III}}}$ [S1]
+- **Uniform Distribution $\mathcal{U}(a, b)$:**
+  - PDF: $p(x) = \frac{1}{b-a}$
+  - CDF: $F(x) = \frac{x-a}{b-a}$
+  - Characteristic function: $\frac{e^{irb}-e^{ira}}{ir(b-a)}$
+  - Sampling: $x_u = (b-a)\xi + a$ [S1]
+- **Linear Distribution $\mathcal{L}(b)$:**
+  - PDF: $p(x) = \frac{2}{b} (1 - \frac{x}{b})$
+  - CDF: $F(x) = 1 - 2\frac{x}{b} + \frac{x^2}{b^2}$
+  - Sampling: $x_l = b(1 - \sqrt{\xi})$ [S1]
+- **Normal Distribution $\mathcal{N}(\mu, \nu)$:**
+  - PDF: $p(x) = (2\pi)^{-\frac{1}{2}} e^{-\frac{\nu^2 - \mu^2}{2\nu}}$
+  - Characteristic function: $e^{ir\mu - r^2\nu/2}$
+  - Sampling: $x_n = \sqrt{-2\ln \xi_1} \cos(2\pi \xi_2)$ [S1]
+- **Gamma Distribution $\Gamma(\mu, \alpha)$:**
+  - PDF: $p(x) = \frac{1}{\Gamma(\alpha)} (\frac{\alpha}{\mu})^{\alpha} x^{\alpha-1} e^{-x\alpha/\mu}$
+  - CDF: $F(x) = \frac{1}{\Gamma(\alpha)} \varphi(x, x\alpha/\mu)$
+  - Characteristic function: $(1 - ir\mu/\alpha)^{-\alpha}$
+  - Sampling: Marsaglia's method [S1]
+**Parameters:**
+- Delta: mean $\mu > 0$ [S1].
+- DeltaSum: impulses $\{\mu_1, \dots, \mu_n\}$ [S1].
+- Uniform: range $0 < a < x < b < \infty$ [S1].
+- Linear: parameter $b > 0$ [S1].
+- Normal: parameters $\mu, \nu$ [S1].
+- Gamma: mean $\mu \ge 0$, shape $\alpha > 0$ [S1]. $\Gamma(\alpha)$ is the complete gamma function, $\varphi(x, a)$ is the lower incomplete gamma function [S1].
+**Edge Cases and Pitfalls:**
+- Delta distribution has zero variance, which may not be suitable for all Monte Carlo estimators [S1].
+- Uniform distribution requires $a < b$ [S1].
+- Gamma distribution sampling uses Marsaglia's method [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def sample_parametric_transmittance(dist_type, params, xi):
+    """
+    Sample a distance from a parametric distribution.
+    
+    Args:
+        dist_type: String identifying the distribution ('delta', 'delta_sum', 'uniform', 'linear', 'gamma').
+        params: Dictionary of parameters.
+        xi: Uniform random variate in [0, 1).
+        
+    Returns:
+        Sampled distance d.
+    """
+    if dist_type == 'delta':
+        mu = params['mu']
+        return mu
+    
+    elif dist_type == 'delta_sum':
+        impulses = params['impulses']
+        n = len(impulses)
+        idx = random.randint(0, n - 1)
+        return impulses[idx]
+    
+    elif dist_type == 'uniform':
+        a = params['a']
+        b = params['b']
+        return (b - a) * xi + a
+    
+    elif dist_type == 'linear':
+        b = params['b']
+        return b * (1 - math.sqrt(xi))
+    
+    elif dist_type == 'gamma':
+        mu = params['mu']
+        alpha = params['alpha']
+        # Marsaglia's method for Gamma distribution [G]
+        d = alpha - 1.0/3.0
+        c = 1.0 / math.sqrt(9.0 * d)
+        while True:
+            x = random.gauss(0, 1)
+            v = 1.0 + c * x
+            while v <= 0.0:
+                v = 1.0 + c * random.gauss(0, 1)
+            v = v * v * v
+            u = random.random()
+            if u < 1.0 - 0.0331 * (x * x) * (x * x):
+                return d * v * mu / alpha
+            if math.log(u) < 0.5 * x * x + d * (1.0 - v + math.log(v)):
+                return d * v * mu / alpha
+    else:
+        raise ValueError("Unknown distribution type")
+
+def evaluate_transmittance(distance, sigma_t):
+    """
+    Evaluate transmittance for exponential medium.
+    """
+    return math.exp(-sigma_t * distance)
+```
+
+## Operating characteristics
+Time complexity is $O(1)$ for Delta, Uniform, Linear, and Normal distributions, and average $O(1)$ for Gamma using Marsaglia's method [S1]. Memory complexity is $O(n)$ for DeltaSum III(n) to store $n$ impulses [S1].
+
+## Background
+The method originates from the paper "A radiative transfer framework for non-exponential media" [S1]. It extends radiative transfer to handle media where the exponential distribution assumption does not hold by providing a framework for importance sampling using various statistical distributions [S1].
+
+## Sources
+[S1] A radiative transfer framework for non-exponential media, https://doi.org/10.1145/3272127.3275103, fetched 2026-11-08

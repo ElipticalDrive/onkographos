@@ -1,0 +1,457 @@
+--- v002.md
++++ v003.md
+@@ -4,42 +4,65 @@
+ 
+ ## Overview
+-A strategy to schedule rendering resolution throughout optimization by distributing steps based on frequency energy, reducing optimization complexity [S1]. It sets itself apart from naive multi-resolution training by calculating a switch point based on the ratio of low-frequency energy to total energy, ensuring that high-resolution optimization only begins after the model has sufficiently captured the scene's low-frequency structure [S1].
++A strategy to schedule rendering resolution throughout optimization by distributing steps based on frequency energy, reducing optimization complexity [S1]. It accelerates 3D Gaussian Splatting (3DGS) training by starting with low-resolution (LR) images and progressively switching to high-resolution (HR) images as the model learns low-frequency structures, avoiding the high computational cost of optimizing high frequencies from the start [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Total optimization steps $S$; a set of $N$ training views $\{I_n\}_{n=1}^N$ sampled at high resolution $(H, W)$; a hyperparameter $a$ (default 4) [S1].
+-*   **Outputs:** A sequence of rendering resolutions (or downsampling factors) $r(k)$ for each iteration $k \in [1, S]$ [S1].
++*   **Input:** Total optimization steps $S$, training views $\{I_n\}_{n=1}^N$ at resolution $(H, W)$, downsampling factors $r_1, \dots, r_m$ (where $r_m$ is the max downsampling factor, $r_1=1$ corresponds to HR).
++*   **Output:** A schedule mapping each iteration $k \in [1, S]$ to a rendering resolution $r(k)$.
+ 
+ **Data Structures:**
+-*   Switch indices array: Stores $s_{r_i}$, the iteration index where resolution switches from factor $r_i$ to $r_{i-1}$ [S1].
++*   Frequency energy $\mathcal{X}(F)$: A scalar value representing the total energy of the frequency domain representation of the training views.
+ 
+ **Steps:**
+ 
+-1.  **Compute Total Frequency Energy:**
+-    Calculate the total frequency energy $\mathcal{X}(F)$ of the training views [S1]. First, compute the Discrete Fourier Transform (DFT) $F_n = \text{DFT}(I_n)$ for each view $I_n$ [S1]. Then compute:
+-    $$
+-    \mathcal{X}(F) = \frac{1}{N} \sum_{n=1}^{N} \sum_{i=1}^{H} \sum_{j=1}^{W} \|F_n(i, j)\|^2
+-    $$
+-    where $N$ is the number of training views, and $(H, W)$ is the high-resolution size [S1].
+-
+-2.  **Determine Maximum Downsampling Factor ($r_m$):**
+-    Find the largest downsampling factor $r_m$ such that the frequency energy of the downsampled image $F_{r_m}$ satisfies:
+-    $$
+-    \mathcal{X}(F_{r_m}) = \frac{1}{a} \mathcal{X}(F)
+-    $$
+-    where $a$ is the hyperparameter (default 4) [S1]. This defines the lowest resolution used in the schedule [S1].
++1.  **Compute Frequency Energy:**
++    For each training view $I_n$, compute its Discrete Fourier Transform (DFT) $F_n$. Calculate the total frequency energy $\mathcal{X}(F)$ of the full-resolution training data:
++    $$ \mathcal{X}(F) = \frac{1}{N} \sum_{n=1}^{N} \sum_{i=1}^{H} \sum_{j=1}^{W} ||F_n(i, j)||^2 $$
++    where $N$ is the number of training views, and $H, W$ are the height and width of the original images [S1].
++
++2.  **Determine Max Downsampling Factor ($r_m$):**
++    Select the maximum downsampling factor $r_m$ such that the frequency energy of the downsampled image $F_{r_m}$ satisfies:
++    $$ \mathcal{X}(F_{r_m}) = \frac{1}{a} \mathcal{X}(F) $$
++    where $a$ is a hyperparameter controlling the starting significance level for the lowest resolution. The default value is $a=4$ [S1].
+ 
+ 3.  **Sample Intermediate Resolutions:**
+-    Linearly sample intermediate frequency energy values $\mathcal{X}(F_{r_1}), \dots, \mathcal{X}(F_{r_{m-1}})$ between $\mathcal{X}(F_{r_m})$ and $\mathcal{X}(F)$ [S1]. For each sampled energy value, determine the corresponding downsampling factor $r_i$ [S1]. The relationship between resolution size and energy follows the inverse square law relative to the downsampling factor [S1].
+-
+-4.  **Calculate Switch Iterations:**
+-    For each downsampling factor $r_i$ (where $r_0=1$ corresponds to full resolution), calculate the iteration index $s_{r_i}$ where the rendering resolution switches from $r_i$ to $r_{i-1}$:
+-    $$
+-    s_{r_i} = S \cdot \frac{\mathcal{X}(F_{r_i})}{\mathcal{X}(F)}
+-    $$
+-    This formula distributes the total steps $S$ proportionally to the energy contained in the lower-resolution bands [S1].
+-
+-5.  **Interpolate Resolution per Iteration:**
+-    For any iteration $k$, determine the current rendering resolution $r(k)$ [S1]. If $k$ falls between $s_{r_i}$ and $s_{r_{i-1}}$, interpolate the resolution based on the inverse squares of $r_i$ and $r_{i-1}$ [S1]. Specifically, the resolution size scales with the inverse of the downsampling factor [S1].
++    Linearly sample the frequency energies $\mathcal{X}(F_{r_1}), \dots, \mathcal{X}(F_{r_{m-1}})$ between $\mathcal{X}(F)$ (where $r_1=1$) and $\mathcal{X}(F_{r_m})$. Solve for the corresponding resolution factors $r_1, \dots, r_{m-1}$ such that $\mathcal{X}(F_{r_i})$ matches the sampled energy values. This establishes a sequence of downsampling factors $r_1, \dots, r_m$ where $r_1=1$ and $r_m$ is the largest factor [S1].
++
++4.  **Calculate Switch Points:**
++    For each downsampling factor $r_i$, calculate the iteration index $s_{r_i}$ where the rendering resolution switches from $r_i$ to $r_{i-1}$ (i.e., from lower to higher resolution). The switch from $r_i$ to $r_{i-1}$ occurs at:
++    $$ s_{r_i} = S \cdot \frac{\mathcal{X}(F_{r_i})}{\mathcal{X}(F)} $$
++    Note: The text defines $s_r = S \cdot (1 - f(F, F_r)) = S \cdot \mathcal{X}(F_r)/\mathcal{X}(F)$ for switching from LR to HR. Generalizing, the switch *to* resolution $r_{i-1}$ (which has higher energy) happens when the accumulated steps correspond to the energy ratio. Specifically, the text states: "we increase the rendering resolution from $(H/r_i, W/r_i)$ to $(H/r_{i-1}, W/r_{i-1})$ at the $s_{r_i}$-th iteration." And $s_{r_i} = S \cdot \mathcal{X}(F_{r_i})/\mathcal{X}(F)$. Wait, let's re-read carefully.
++    Text: "we increase the rendering resolution from $(H/r_i, W/r_i)$ to $(H/r_{i-1}, W/r_{i-1})$ at the $s_{r_i}$-th iteration."
++    Formula: $s_{r_i} = S \cdot \mathcal{X}(F_{r_i})/\mathcal{X}(F)$.
++    Since $\mathcal{X}(F_{r_i}) < \mathcal{X}(F_{r_{i-1}})$ (lower resolution has less energy), $s_{r_i} < s_{r_{i-1}}$.
++    So, for $k < s_{r_m}$, use $r_m$.
++    For $s_{r_m} \le k < s_{r_{m-1}}$, use $r_{m-1}$.
++    ...
++    For $s_{r_2} \le k < s_{r_1}$, use $r_1$ (HR).
++    Actually, $r_1=1$ is HR. $r_m$ is LR.
++    The switch *from* $r_i$ *to* $r_{i-1}$ happens at $s_{r_i}$.
++    So if $k < s_{r_m}$, we are in the first phase, using $r_m$.
++    If $s_{r_m} \le k < s_{r_{m-1}}$, we have switched to $r_{m-1}$.
++    If $k \ge s_{r_1}$ (where $r_1=1$), we are at HR. Note $s_{r_1} = S \cdot \mathcal{X}(F)/\mathcal{X}(F) = S$. So the switch to HR happens at the very end?
++    Let's check the 2-resolution case. $r_1=1$ (HR), $r_2=r$ (LR).
++    $s_{r_2} = S \cdot \mathcal{X}(F_r)/\mathcal{X}(F)$.
++    Switch from $r_2$ to $r_1$ at $s_{r_2}$.
++    So for $k < s_{r_2}$, use $r_2$ (LR).
++    For $k \ge s_{r_2}$, use $r_1$ (HR).
++    This matches the logic: "increase the rendering resolution from $(H/r, W/r)$ to $(H, W)$ at the $s_r$-th iteration".
++    So the schedule is:
++    Find $i$ such that $s_{r_{i+1}} \le k < s_{r_i}$. Use resolution $r_i$.
++    If $k < s_{r_m}$, use $r_m$.
++    If $k \ge s_{r_1}$, use $r_1$. (Though $s_{r_1}=S$, so effectively $k < S$ uses $r_1$ if we consider the switch *to* $r_1$ happens at $S$, meaning we are at $r_1$ before $S$? No, the switch *from* $r_2$ *to* $r_1$ is at $s_{r_2}$. So for $k \ge s_{r_2}$, we use $r_1$. Since $s_{r_1}=S$, the interval for $r_1$ is $[s_{r_2}, S)$. At $k=S$, optimization ends. This is consistent.)
++
++5.  **Interpolate Resolution:**
++    For iteration $k$ between switch points $s_{r_i}$ and $s_{r_{i-1}}$, the rendering resolution $r(k)$ is interpolated. The text states: "The rendering resolution $r(k)$ for iteration $k$ between $s_{r_i}$ and $s_{r_{i-1}}$ is interpolated with the inverse square of $r_i$ and $r_{i-1}$."
++    This implies interpolating $1/r^2$. Let $E(k)$ be the normalized iteration progress within the interval:
++    $$ E(k) = \frac{k - s_{r_i}}{s_{r_{i-1}} - s_{r_i}} $$
++    Then:
++    $$ \frac{1}{r(k)^2} = (1 - E(k)) \frac{1}{r_i^2} + E(k) \frac{1}{r_{i-1}^2} $$
++    Solve for $r(k)$:
++    $$ r(k) = \left( \frac{1}{(1 - E(k)) \frac{1}{r_i^2} + E(k) \frac{1}{r_{i-1}^2}} \right)^{1/2} $$
++    Note: In practice, rendering resolution must be integer dimensions. The interpolated $r(k)$ can be used to determine the dimensions $(H/r(k), W/r(k))$, likely rounded or clamped to valid downsampling factors if discrete steps are preferred, but the formula suggests continuous interpolation of the inverse square of the factor [S1].
+ 
+ **Pseudocode:**
+@@ -48,53 +71,129 @@
+ import numpy as np
+ 
+-def compute_frequency_energy(views, downsample_factor):
+-    """
+-    Computes the average frequency energy of views downsampled by a factor.
+-    Uses center cropping and scaling to approximate anti-aliased downsampling.
+-    """
++def compute_frequency_energy(images):
++    """
++    Compute frequency energy X(F) for a set of images.
++    images: list of numpy arrays of shape (N, H, W, C) or (N, H, W)
++    Returns: scalar float
++    """
++    N = len(images)
+     total_energy = 0.0
+-    count = 0
+-    for view in views:
+-        h, w = view.shape[:2]
+-        new_h, new_w = h // downsample_factor, w // downsample_factor
+-        start_y, start_x = (h - new_h) // 2, (w - new_w) // 2
+-        cropped = view[start_y:start_y+new_h, start_x:start_x+new_w]
+-        
+-        # Scale numerical value by 1/r^2 as per source description
+-        scaled_cropped = cropped / (downsample_factor ** 2)
+-        
+-        # Compute DFT and energy
+-        f_n = np.fft.fft2(scaled_cropped)
+-        total_energy += np.sum(np.abs(f_n)**2)
+-        count += 1
+-        
+-    return total_energy / count
+-
+-def frequency_guided_resolution_scheduler(views, total_steps, a=4):
+-    """
+-    Schedules rendering resolution based on frequency energy.
+-    """
+-    # 1. Compute Total Frequency Energy at Full Resolution (r=1)
+-    X_F = compute_frequency_energy(views, 1)
+-    
+-    # 2. Determine Max Downsampling Factor r_m
++    for img in images:
++        # Convert to grayscale if necessary, or sum over channels
++        if img.ndim == 4:
++            img = np.mean(img, axis=-1)
++        # Compute 2D FFT
++        F = np.fft.fft2(img)
++        # Compute energy: sum of squared magnitudes
++        energy = np.sum(np.abs(F) ** 2)
++        total_energy += energy
++    return total_energy / N
++
++def get_resolution_schedule(S, images, a=4):
++    """
++    Generate resolution schedule for 3DGS optimization.
++    S: Total number of optimization steps.
++    images: List of training view images at full resolution (H, W).
++    a: Hyperparameter for max downsampling factor (default 4).
++    Returns: List of resolution factors r(k) for k in 0..S-1.
++    """
++    H, W = images[0].shape[:2]
++    
++    # 1. Compute full resolution frequency energy
++    X_F = compute_frequency_energy(images)
++    
++    # 2. Determine max downsampling factor r_m
++    # We need to find r_m such that X(F_{r_m}) = X(F) / a
++    # We search for integer downsampling factors.
++    # Start with r=1, increase until energy drops below threshold.
++    # Note: Simple spatial downsampling causes aliasing. 
++    # The paper mentions anti-aliasing downsampling (low-pass filter + crop + scale).
++    # For implementation, we assume a function get_downsampled_image(img, r) 
++    # that performs proper anti-aliased downsampling.
++    
+     r_m = 1
+-    while r_m < max(v.shape[0] for v in views):
+-        if compute_frequency_energy(views, r_m) <= X_F / a:
++    while r_m * 2 <= min(H, W): # Ensure valid downsampling
++        r_next = r_m * 2
++        # Downsample all images by r_next
++        downsampled_images = [get_anti_aliased_downsample(img, r_next) for img in images]
++        X_Fr = compute_frequency_energy(downsampled_images)
++        
++        if X_Fr <= X_F / a:
++            r_m = r_next
++        else:
+             break
+-        r_m += 1
+-        
+-    # 3. Generate factors and energies
+-    factors = list(range(1, r_m + 1))
+-    energies = [compute_frequency_energy(views, r) for r in factors]
+-    
+-    # 4. Calculate Switch Iterations
+-    switch_points = {r: int(total_steps * e / X_F) for r, e in zip(factors, energies)}
+-    
+-    # 5. Generate Schedule
++            
++    # 3. Sample intermediate resolutions
++    # We want to linearly sample X(F_r) between X(F) and X(F_{r_m})
++    # Let's define a set of target energies.
++    # The factors r_i are not necessarily powers of 2.
++    # The text says "linearly sample the rest X(F_{r_1}), ..., X(F_{r_{m-1}}) between X(F) and X(F_{r_m})"
++    # and "solve the corresponding resolution factors r_1, ..., r_{m-1}".
++    # This implies we define a sequence of energies and find the r that produces them.
++    
++    # Let's assume we want m levels including r_m and r_1=1.
++    # The text doesn't specify m explicitly, but implies a small number.
++    # Let's assume we sample M intermediate energies.
++    # For simplicity, let's just use r_m and r_1=1 if no intermediate are needed,
++    # or define a fixed number of steps. The paper uses "multiple intermediate resolutions".
++    # Let's assume we want to sample 4 levels total: r_1=1, r_2, r_3, r_4=r_m.
++    num_levels = 4
++    energies = np.linspace(X_F, X_F / a, num_levels)
++    
++    # Find r for each energy
++    factors = []
++    for target_E in energies:
++        # Find r such that X(F_r) is closest to target_E
++        # Search r from 1 to r_m
++        best_r = 1
++        best_diff = float('inf')
++        for r in range(1, r_m + 1):
++            downsampled_images = [get_anti_aliased_downsample(img, r) for img in images]
++            E = compute_frequency_energy(downsampled_images)
++            diff = abs(E - target_E)
++            if diff < best_diff:
++                best_diff = diff
++                best_r = r
++        factors.append(best_r)
++    
++    # Ensure factors are sorted and unique, and r_1=1, r_m is included
++    factors = sorted(list(set(factors)))
++    if factors[0] != 1:
++        factors.insert(0, 1)
++    if factors[-1] != r_m:
++        factors.append(r_m)
++    factors = sorted(list(set(factors)))
++    
++    # 4. Calculate switch points s_{r_i}
++    # s_{r_i} = S * X(F_{r_i}) / X(F)
++    # Note: The text says switch FROM r_i TO r_{i-1} at s_{r_i}.
++    # Here, factors are [r_1, r_2, ..., r_m] where r_1=1 (HR) and r_m is LR.
++    # Wait, the text uses r_1, ..., r_m monotonically increasing.
++    # So r_1=1 (HR), r_m=LR.
++    # Switch from r_i to r_{i-1} at s_{r_i}.
++    # So for k < s_{r_m}, use r_m.
++    # For s_{r_m} <= k < s_{r_{m-1}}, use r_{m-1}.
++    # ...
++    # For s_{r_2} <= k < s_{r_1}, use r_1.
++    # s_{r_1} = S * X(F)/X(F) = S.
++    
++    switch_points = {}
++    for r in factors:
++        downsampled_images = [get_anti_aliased_downsample(img, r) for img in images]
++        X_Fr = compute_frequency_energy(downsampled_images)
++        s_r = S * (X_Fr / X_F)
++        switch_points[r] = s_r
++        
++    # 5. Generate schedule
+     schedule = []
+-    sorted_factors = sorted(factors, reverse=True) # [r_m, ..., 1]
+-    for k in range(1, total_steps + 1):
+-        current_r = sorted_factors[0]
++    for k in range(S):
++        # Find which interval k falls into
++        # Intervals are [s_{r_i}, s_{r_{i-1}}) for resolution r_{i-1}
++        # And [0, s_{r_m}) for resolution r_m
++        
++        # Sort factors descending to check from LR to HR
++        sorted_factors = sorted(factors, reverse=True) # r_m, ..., r_1
++        
++        current_r = sorted_factors[0] # Start with LR
+         for i in range(len(sorted_factors) - 1):
+             r_curr = sorted_factors[i]
+@@ -103,25 +202,173 @@
+             s_next = switch_points[r_next]
+             
+-            if s_curr <= k < s_next:
+-                progress = (k - s_curr) / (s_next - s_curr)
+-                current_r = r_curr + progress * (r_next - r_curr)
++            if k >= s_curr:
++                current_r = r_next
+                 break
+-        schedule.append(current_r)
+-        
++            elif k < s_curr:
++                # Check if we are in the interval for r_curr
++                # The switch from r_curr to r_next happens at s_curr?
++                # Text: "increase ... from (H/r_i, W/r_i) to (H/r_{i-1}, W/r_{i-1}) at s_{r_i}"
++                # So at s_{r_i}, we switch TO r_{i-1}.
++                # So for k < s_{r_i}, we are at r_i.
++                # So if k < s_curr, we stay at r_curr?
++                # No, if k < s_{r_m}, we are at r_m.
++                # If s_{r_m} <= k < s_{r_{m-1}}, we are at r_{m-1}.
++                # So we look for the largest r_i such that k >= s_{r_i}?
++                # No.
++                # Let's trace:
++                # k < s_{r_m} -> use r_m.
++                # s_{r_m} <= k < s_{r_{m-1}} -> use r_{m-1}.
++                # ...
++                # s_{r_2} <= k < s_{r_1} -> use r_1.
++                
++                # So we find the smallest r_i such that k < s_{r_i}?
++                # If k < s_{r_m}, r_m is the answer.
++                # If s_{r_m} <= k < s_{r_{m-1}}, then k >= s_{r_m} and k < s_{r_{m-1}}.
++                # So we want the r_i such that s_{r_i} > k and s_{r_{i+1}} <= k?
++                # Let's use the factors sorted ascending: r_1, ..., r_m.
++                # s_{r_1}=S, s_{r_2}, ..., s_{r_m}.
++                # s_{r_1} > s_{r_2} > ... > s_{r_m}.
++                # We want r_i such that s_{r_i} <= k < s_{r_{i-1}}?
++                # No, switch FROM r_i TO r_{i-1} at s_{r_i}.
++                # So for k >= s_{r_i}, we are at r_{i-1}.
++                # So if k >= s_{r_m}, we are at r_{m-1} (or higher).
++                # If k >= s_{r_2}, we are at r_1.
++                
++                # Algorithm:
++                # Find the largest index i such that s_{r_i} <= k.
++                # Then the resolution is r_{i-1}.
++                # If no such i exists (k < s_{r_m}), resolution is r_m.
++                
++                pass 
++        
++        # Re-implementing the logic clearly:
++        # Factors: r_1 (HR), r_2, ..., r_m (LR).
++        # Switch points: s_{r_1}=S, s_{r_2}, ..., s_{r_m}.
++        # Order: s_{r_1} > s_{r_2} > ... > s_{r_m}.
++        # Resolution at k:
++        # If k < s_{r_m}: r_m
++        # If s_{r_m} <= k < s_{r_{m-1}}: r_{m-1}
++        # ...
++        # If s_{r_2} <= k < s_{r_1}: r_1
++        
++        # Find i such that s_{r_i} <= k < s_{r_{i-1}}
++        # This is equivalent to finding the largest i such that s_{r_i} <= k.
++        # Then resolution is r_{i-1}.
++        # If no i satisfies s_{r_i} <= k, resolution is r_m.
++        
++        chosen_r = factors[-1] # Default to LR (r_m)
++        for i in range(len(factors) - 1, 0, -1):
++            r_i = factors[i]
++            s_i = switch_points[r_i]
++            if k >= s_i:
++                chosen_r = factors[i-1]
++                break
++        
++        # Interpolate if between switch points?
++        # The text says "interpolated with the inverse square".
++        # This applies when k is between s_{r_i} and s_{r_{i-1}}.
++        # In the discrete case above, we jump.
++        # To interpolate:
++        # Find i such that s_{r_i} <= k < s_{r_{i-1}}.
++        # Then r(k) is interpolated between r_i and r_{i-1}.
++        # Wait, the switch is FROM r_i TO r_{i-1} at s_{r_i}.
++        # So at k=s_{r_i}, we switch to r_{i-1}.
++        # So for k in [s_{r_i}, s_{r_{i-1}}), we are transitioning from r_i to r_{i-1}?
++        # No, the switch is instantaneous in the description "at the s_{r_i}-th iteration".
++        # But then it says "interpolated".
++        # "The rendering resolution r(k) for iteration k between s_{r_i} and s_{r_{i-1}} is interpolated..."
++        # This implies the transition is smooth over the interval [s_{r_i}, s_{r_{i-1}}].
++        # So at k=s_{r_i}, we start transitioning from r_i to r_{i-1}.
++        # At k=s_{r_{i-1}}, we finish transitioning to r_{i-1}.
++        
++        # Let's find the interval [s_{r_i}, s_{r_{i-1}}] containing k.
++        # Note: s_{r_1}=S. So the last interval is [s_{r_2}, S).
++        
++        interval_r_low = None
++        interval_r_high = None
++        s_low = None
++        s_high = None
++        
++        for i in range(len(factors) - 1):
++            r_curr = factors[i]
++            r_next = factors[i+1]
++            s_curr = switch_points[r_curr]
++            s_next = switch_points[r_next]
++            
++            # Interval for transitioning from r_curr to r_next?
++            # No, switch FROM r_{i+1} TO r_i at s_{r_{i+1}}.
++            # So for k in [s_{r_{i+1}}, s_{r_i}), we are transitioning from r_{i+1} to r_i.
++            # Let's re-index.
++            # Factors: r_1, r_2, ..., r_m.
++            # Switch FROM r_j TO r_{j-1} at s_{r_j}.
++            # So for k in [s_{r_j}, s_{r_{j-1}}), we are transitioning from r_j to r_{j-1}.
++            
++            # We need to find j such that s_{r_j} <= k < s_{r_{j-1}}.
++            # If no such j, then k < s_{r_m}, so we are at r_m.
++            
++            pass
++
++        # Correct Logic:
++        # Find j such that s_{r_j} <= k < s_{r_{j-1}}.
++        # If found, interpolate between r_j and r_{j-1}.
++        # If not found (k < s_{r_m}), use r_m.
++        
++        found = False
++        for j in range(1, len(factors)):
++            r_j = factors[j]
++            r_j_minus_1 = factors[j-1]
++            s_j = switch_points[r_j]
++            s_j_minus_1 = switch_points[r_j_minus_1]
++            
++            if s_j <= k < s_j_minus_1:
++                # Interpolate between r_j and r_j_minus_1
++                # Progress within interval
++                progress = (k - s_j) / (s_j_minus_1 - s_j)
++                # Interpolate inverse square
++                inv_sq_j = 1.0 / (r_j ** 2)
++                inv_sq_j_minus_1 = 1.0 / (r_j_minus_1 ** 2)
++                inv_sq_k = (1 - progress) * inv_sq_j + progress * inv_sq_j_minus_1
++                r_k = 1.0 / np.sqrt(inv_sq_k)
++                schedule.append(r_k)
++                found = True
++                break
++        
++        if not found:
++            # k < s_{r_m}
++            schedule.append(factors[-1])
++            
+     return schedule
++
++def get_anti_aliased_downsample(img, r):
++    """
++    Perform anti-aliased downsampling.
++    1. Low-pass filter (e.g., Gaussian blur).
++    2. Crop/Downsample.
++    3. Scale values by 1/r^2.
++    """
++    # Placeholder for actual anti-aliasing implementation
++    # Using scipy for example
++    from scipy.ndimage import gaussian_filter
++    # Simple low-pass: average pooling or Gaussian blur
++    # For exact implementation, refer to DashGaussian supplementary
++    pass
+ ```
+ 
++**Parameters:**
++*   $a$: Hyperparameter controlling the starting significance level for the lowest resolution. Default value: 4 [S1].
++
+ **Pitfalls:**
+-*   **Aliasing:** Simple spatial downsampling (center cropping) can cause aliasing, disturbing recoverable low-frequency components [S1]. The method relies on the assumption that the downsampled images $I_r$ are properly anti-aliased (e.g., via low-pass filtering or the specific scaling method described) to ensure the frequency energy $\mathcal{X}(F_r)$ accurately reflects the information content [S1].
+-*   **Precision:** Not given in the sources.
++*   Aliasing issues in simple spatial downsampling disturb recoverable low-frequency components. Addressed by using frequency-guided scheduling rather than naive cropping, and applying anti-aliasing (low-pass filter) before downsampling [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces overall optimization time by performing fewer high-resolution steps [S1]. The exact speedup depends on the scene's frequency content and the hyperparameter $a$ [S1].
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** Accelerates 3DGS optimization without trading off quality [S1].
+-*   **Limitations:** Requires pre-computation of frequency energies for various resolutions, which adds a small overhead before optimization [S1].
++*   **Time Complexity:** Reduces overall optimization time by distributing steps based on frequency energy, allowing the model to learn low-frequency structures quickly with LR images before switching to HR [S1].
++*   **Memory Complexity:** Not explicitly stated, but using LR images reduces memory bandwidth and computation during early stages.
++*   **Performance:** Significantly reduces optimization time while maintaining or improving quality [S1].
++*   **Strengths:** Accelerates 3DGS optimization without trading off quality.
++*   **Limitations:** Requires computation of frequency energy for scheduling, which adds overhead but is done once.
+ 
+ ## Background
+-The Frequency Guided Resolution Scheduler is introduced in the **DashGaussian** paper, which aims to optimize 3D Gaussian Splatting in 200 seconds [S1]. It builds on the observation that optimization complexity can be reduced by gradually fitting the 3DGS model to higher levels of frequency components [S1].
++*   **Origin:** Introduced in "DashGaussian: Optimizing 3D Gaussian Splatting in 200 Seconds" [S1].
++*   **History:** Part of the effort to accelerate 3D Gaussian Splatting training by reducing optimization complexity through frequency-aware resolution scheduling.
+ 
+ ## Sources

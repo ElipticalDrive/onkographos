@@ -1,0 +1,209 @@
+--- v003.md
++++ v004.md
+@@ -35,9 +35,9 @@
+ The model is trained to minimize the rendering loss, which enforces equivariance [S1, unofficial].
+ 
+-1.  **Data Sampling:** For a given scene, capture multiple views. Randomly sample a pair of images $(x_1, x_2)$ and compute the relative rotation $\theta$ between their camera poses. Assume cameras are on a sphere looking at the origin [S1, unofficial].
++1.  **Data Sampling:** For a given scene, capture multiple views [S1, unofficial]. Randomly sample a pair of images $(x_1, x_2)$ and compute the relative rotation $\theta$ between their camera poses [S1, unofficial]. Assume cameras are on a sphere looking at the origin [S1, unofficial].
+ 2.  **Encoding:** Pass both images through the inverse renderer $f$ to obtain scene representations:
+     $$z_1 = f(x_1)$$
+     $$z_2 = f(x_2)$$
+-3.  **Rotation:** Rotate the encoded representations by the relative transformation $\theta$. Let $R^Z_\theta$ be the rotation operator in scene space [S1, unofficial]. Compute:
++3.  **Rotation:** Rotate the encoded representations by the relative transformation $\theta$ [S1, unofficial]. Let $R^Z_\theta$ be the rotation operator in scene space [S1, unofficial]. Compute:
+     $$\tilde{z}_1 = R^Z_\theta z_1$$
+     $$\tilde{z}_2 = (R^Z_\theta)^{-1} z_2$$
+@@ -55,126 +55,72 @@
+ ```python
+ import torch
+-import torch.nn as nn
+ import torch.nn.functional as F
+ 
+-class EquivariantNeuralRenderer:
+-    def __init__(self, inverse_renderer: nn.Module, forward_renderer: nn.Module):
+-        """
+-        Args:
+-            inverse_renderer: nn.Module mapping Image -> VoxelGrid (f)
+-            forward_renderer: nn.Module mapping VoxelGrid -> Image (g)
+-        """
+-        self.f = inverse_renderer
+-        self.g = forward_renderer
++def rotate_voxel_grid(z: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
++    """
++    Rotates a voxel grid z by inverse warping with trilinear interpolation.
++    Args:
++        z: Tensor of shape (B, C, D, H, W)
++        R: 3x3 rotation matrix for scene space
++    Returns:
++        Rotated tensor of shape (B, C, D, H, W)
++    """
++    B, C, D, H, W = z.shape
++    # Create normalized coordinate grid [-1, 1] for the output voxel locations
++    coords = torch.stack(torch.meshgrid(
++        torch.linspace(-1, 1, D),
++        torch.linspace(-1, 1, H),
++        torch.linspace(-1, 1, W),
++        indexing='ij'
++    ), dim=-1)  # Shape (D, H, W, 3)
+ 
+-    def rotate_voxel_grid(self, z: torch.Tensor, rotation_matrix: torch.Tensor) -> torch.Tensor:
+-        """
+-        Rotates a voxel grid z by applying rotation_matrix to its coordinates.
+-        Uses inverse warping with trilinear interpolation [S1, unofficial].
+-        
+-        Args:
+-            z: Tensor of shape (B, C, D, H, W)
+-            rotation_matrix: Tensor of shape (3, 3)
+-            
+-        Returns:
+-            Rotated tensor of shape (B, C, D, H, W)
+-        """
+-        B, C, D, H, W = z.shape
+-        # Create coordinate grid for the voxel space
+-        # Coordinates should be normalized to [-1, 1] or [0, 1] depending on framework convention
+-        # Assuming standard grid_sample convention: coordinates in [-1, 1]
+-        grid = torch.meshgrid(
+-            torch.linspace(-1, 1, D),
+-            torch.linspace(-1, 1, H),
+-            torch.linspace(-1, 1, W),
+-            indexing='ij'
+-        )
+-        grid = torch.stack(grid, dim=-1) # Shape (D, H, W, 3)
+-        grid = grid.unsqueeze(0).unsqueeze(0).expand(B, C, -1, -1, -1, -1) # Shape (B, C, D, H, W, 3)
+-        
+-        # Flatten spatial dimensions for rotation
+-        grid_flat = grid.view(B, C, -1, 3) # Shape (B, C, D*H*W, 3)
+-        
+-        # Apply rotation: new_coords = old_coords @ R^T
+-        # rotation_matrix is (3,3). We need to rotate the coordinates.
+-        # If R rotates the scene, the coordinates in the new frame are R^-1 * x.
+-        # For grid_sample, we provide the target grid in the source frame.
+-        # Inverse warping: sample from z at locations rotated by R^-1.
+-        # Let's assume rotation_matrix is R. We want to rotate the grid by R.
+-        # The coordinates in the rotated grid correspond to R * original_coords.
+-        # To sample, we need to map these back to original grid coordinates: R^-1 * rotated_coords.
+-        
+-        # Actually, standard inverse warping:
+-        # To get value at new location y, we look at x = R^-1 * y in the original image/grid.
+-        # Here y are the coordinates of the output grid (which are fixed).
+-        # So we compute source_coords = R^-1 * output_coords.
+-        
+-        R_inv = rotation_matrix.inverse() # Shape (3, 3)
+-        
+-        # Reshape grid for matrix multiplication
+-        grid_flat = grid_flat.permute(0, 1, 3, 2) # (B, C, 3, D*H*W)
+-        
+-        # Rotate coordinates
+-        # source_coords = R_inv @ grid_flat
+-        source_coords = torch.matmul(R_inv, grid_flat) # (B, C, 3, D*H*W)
+-        
+-        source_coords = source_coords.permute(0, 1, 3, 2) # (B, C, D*H*W, 3)
+-        
+-        # Reshape back to (B, C, D, H, W, 3)
+-        source_coords = source_coords.view(B, C, D, H, W, 3)
+-        
+-        # Use grid_sample or similar for trilinear interpolation
+-        # Note: grid_sample expects (N, C, H, W, 2) for 2D or (N, C, D, H, W, 3) for 3D
+-        # We need to permute to (B, C, D, H, W, 3) which is already the shape.
+-        # However, grid_sample usually works on the last dimensions.
+-        # Let's assume a helper function or direct call if supported.
+-        # PyTorch 3D grid_sample:
+-        rotated_z = F.grid_sample(
+-            z, 
+-            source_coords, 
+-            mode='trilinear', 
+-            padding_mode='border', 
+-            align_corners=True
+-        )
+-        return rotated_z
++    # Flatten spatial dimensions
++    coords_flat = coords.view(-1, 3)  # Shape (D*H*W, 3)
+ 
+-    def training_step(self, x1: torch.Tensor, x2: torch.Tensor, rotation_matrix: torch.Tensor) -> torch.Tensor:
+-        """
+-        Performs one training step.
+-        
+-        Args:
+-            x1: Image tensor (B, 3, 128, 128)
+-            x2: Image tensor (B, 3, 128, 128)
+-            rotation_matrix: 3x3 rotation matrix R_theta
+-            
+-        Returns:
+-            Loss scalar
+-        """
+-        # 1. Encoding
+-        z1 = self.f(x1) # (B, C_s, D_s, H_s, W_s)
+-        z2 = self.f(x2)
+-        
+-        # 2. Rotation
+-        # Rotate z1 by R_theta to align with x2's perspective
+-        z_tilde_1 = self.rotate_voxel_grid(z1, rotation_matrix)
+-        
+-        # Rotate z2 by R_theta^-1 to align with x1's perspective
+-        R_inv = rotation_matrix.inverse()
+-        z_tilde_2 = self.rotate_voxel_grid(z2, R_inv)
+-        
+-        # 3. Rendering
+-        x2_pred = self.g(z_tilde_1)
+-        x1_pred = self.g(z_tilde_2)
+-        
+-        # 4. Loss
+-        # Weighted sum of L1 and SSIM. Here simplified to L1 for demonstration.
+-        # In practice, use a combined loss function.
+-        loss = torch.mean(torch.abs(x2 - x2_pred)) + torch.mean(torch.abs(x1 - x1_pred))
+-        
+-        return loss
++    # Inverse warping: source coordinates = R^{-1} @ target coordinates
++    R_inv = R.inverse()
++    source_coords_flat = (R_inv @ coords_flat.T).T  # Shape (D*H*W, 3)
++
++    # Reshape back to grid format
++    source_grid = source_coords_flat.view(D, H, W, 3)
++
++    # Expand to batch dimension for grid_sample
++    source_grid = source_grid.unsqueeze(0).expand(B, -1, -1, -1, -1)  # Shape (B, D, H, W, 3)
++
++    # Trilinear interpolation
++    return F.grid_sample(z, source_grid, mode='trilinear', padding_mode='border', align_corners=True)
++
++def training_step(f, g, x1: torch.Tensor, x2: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
++    """
++    Performs one training step.
++    Args:
++        f: Inverse renderer (Image -> VoxelGrid)
++        g: Forward renderer (VoxelGrid -> Image)
++        x1: Image tensor (B, 3, 128, 128)
++        x2: Image tensor (B, 3, 128, 128)
++        R: 3x3 rotation matrix R_theta
++    Returns:
++        Loss scalar
++    """
++    # 1. Encoding
++    z1 = f(x1)
++    z2 = f(x2)
++    
++    # 2. Rotation
++    z_tilde_1 = rotate_voxel_grid(z1, R)
++    z_tilde_2 = rotate_voxel_grid(z2, R.inverse())
++    
++    # 3. Rendering
++    x2_pred = g(z_tilde_1)
++    x1_pred = g(z_tilde_2)
++    
++    # 4. Loss (L1 norm as base; weighted sum with SSIM is typical)
++    loss = torch.mean(torch.abs(x2 - x2_pred)) + torch.mean(torch.abs(x1 - x1_pred))
++    
++    return loss
+ ```
+ 
+ **Parameters:**
+-*   **Loss Function:** Weighted sum of L1 norm and SSIM. The model is not highly sensitive to the choice, but this combination works well [S1, unofficial].
++*   **Loss Function:** Weighted sum of L1 norm and SSIM [S1, unofficial]. The model is not highly sensitive to the choice, but this combination works well [S1, unofficial].
+ *   **Non-linearity:** LeakyReLU [S1, unofficial].
+ *   **Normalization:** GroupNorm [S1, unofficial].
+@@ -182,5 +128,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Rotation Interpolation:** Rotated voxel coordinates may not align with the grid. Trilinear interpolation is required to reconstruct values, which can introduce blurring or artifacts if the rotation is large or the grid resolution is low [S1, unofficial].
++*   **Rotation Interpolation:** Rotated voxel coordinates may not align with the grid [S1, unofficial]. Trilinear interpolation is required to reconstruct values, which can introduce blurring or artifacts if the rotation is large or the grid resolution is low [S1, unofficial].
+ *   **Inference Speed:** While inference is fast (22ms on Tesla V100), it is slower than explicit renderers but significantly faster than optimization-based methods like SRNs (2 minutes) [S1, unofficial].
+ 

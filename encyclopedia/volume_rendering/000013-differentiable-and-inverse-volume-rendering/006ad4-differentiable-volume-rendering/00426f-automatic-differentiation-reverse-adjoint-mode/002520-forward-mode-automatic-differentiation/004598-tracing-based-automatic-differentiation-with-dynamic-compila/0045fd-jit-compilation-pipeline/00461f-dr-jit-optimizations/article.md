@@ -1,0 +1,100 @@
+# Dr.Jit Optimizations
+
+Also called: Global optimizations, Polymorphism-aware optimizations
+
+## Overview
+Dr.Jit Optimizations are a set of global transformations applied during the tracing phase to improve code generation, specifically addressing the opaque boundary of dynamic dispatch that breaks interprocedural optimizations in backends like LLVM and OptiX [S1]. Unlike ML-centric IR and tensorial optimizations which are costly for rendering, Dr.Jit's optimizations are tailored for the large amount of arithmetic in PBDR workloads [S1].
+
+## How it works
+**Inputs:** Traced computation graph containing polymorphic calls and variable references [S1].
+**Outputs:** Optimized intermediate representation (IR) ready for backend compilation [S1].
+
+**Data Structures:**
+*   **Variable Reference Count:** Tracks the number of active references to each variable to identify dead code [S1].
+*   **Value Numbering Map:** Maps identical computational results to a single canonical ID to enable deduplication [S1].
+
+**Steps:**
+1.  **Constant Propagation:** Automatically performed during tracing to replace variables with their constant values where possible [S1].
+2.  **Dead Code Elimination:** Performed via variable reference counting; if a variable is unreferenced, it is removed [S1].
+3.  **Unreferenced Output Removal:** The system removes unreferenced outputs from function calls, which triggers a cascade effect removing unreferenced inputs and further reducing the surrounding program's computational load [S1].
+4.  **Devirtualization:** Computation that is identical in all sub-traces is devirtualized; if all sub-traces output a variable with the same ID, that variable is moved out of the call [S1].
+5.  **Trace and Merge:** The system traces every reachable instance of polymorphic functions (e.g., ubershader materials) without making assumptions about parameter subsets, then merges the resulting identical functions into a single subroutine [S1].
+6.  **Deduplication:** Built on value numbering; identical traces are collapsed into a single subroutine to handle scenes with thousands of objects of the same type [S1].
+
+**Pitfalls:**
+*   **Type Equivalence vs. Operation Sequence:** Type equivalence does not imply identical operation sequences for complex materials [S1]. For example, Disney’s Principled BSDF may have different active subsets of parameters, procedural textures, or derivative tracking requirements depending on the instance [S1]. Dr.Jit avoids assumptions and traces every instance to ensure correctness [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimize_traced_program(program):
+    # Step 1: Constant Propagation (automatic during tracing)
+    # Replace variables with constant values where possible
+    for node in program.nodes:
+        if is_constant(node):
+            node.value = evaluate(node)
+            
+    # Step 2: Dead Code Elimination via Reference Counting
+    # Track active references; remove variables with zero references
+    ref_counts = compute_reference_counts(program)
+    program.nodes = [n for n in program.nodes if ref_counts[n.id] > 0]
+    
+    # Step 3: Remove Unreferenced Outputs and Inputs
+    # Remove unreferenced outputs, cascading to remove dependent inputs
+    for call in program.calls:
+        if not is_referenced(call.outputs):
+            remove(call.outputs)
+            for inp in call.inputs:
+                if not is_referenced(inp):
+                    remove(inp)
+                    
+    # Step 4: Devirtualize Identical Sub-traces
+    # Move variables out of calls if all sub-traces output the same ID
+    for call in program.calls:
+        output_ids = {sub_trace.output_id for sub_trace in call.sub_traces}
+        if len(output_ids) == 1:
+            call.body = lift_identical_computation_out_of_call(call.body)
+            
+    # Step 5: Trace Polymorphic Instances
+    # Trace every reachable instance without assuming parameter subsets
+    traced_instances = []
+    for func in program.polymorphic_functions:
+        traced_instances.append(trace_instance(func))
+        
+    # Step 6: Deduplicate and Merge Identical Traces
+    # Collapse identical traces into single subroutines using value numbering
+    value_map = {}
+    for instance in traced_instances:
+        canonical_id = value_number(instance)
+        if canonical_id not in value_map:
+            value_map[canonical_id] = instance
+        else:
+            merge_subroutines(program, instance, value_map[canonical_id])
+            
+    return program
+
+# Standard helper operations defined inline for self-containment
+def is_constant(node): return node.type == CONSTANT
+def evaluate(node): return node.op(*[n.value for n in node.inputs])
+def compute_reference_counts(prog): return {v.id: count(v) for v in prog.variables}
+def is_referenced(var): return var.usage_count > 0
+def remove(var): var.active = False
+def lift_identical_computation_out_of_call(body): return body
+def trace_instance(func): return func.trace()
+def value_number(instance): return hash(instance.ir)
+def merge_subroutines(prog, inst1, inst2): return prog.replace(inst1, inst2)
+```
+
+## Operating characteristics
+*   **Performance Impact:** Removing unreferenced computation, arguments, and return values improves performance by an average factor of 2.5x in the OptiX backend [S1].
+*   **CPU Impact:** On the CPU, removing unreferenced computation has essentially no impact on performance, likely because modern superscalar CPUs can absorb redundant computation by issuing multiple instructions per clock cycle [S1].
+*   **Compilation Time:** Subroutine deduplication reverts growth in compilation time caused by other optimizations and provides a speed boost by reducing divergence under vectorized execution [S1].
+*   **Strengths:** Tailored for the large amount of arithmetic in PBDR workloads, avoiding the cost of ML-centric tensorial optimizations [S1]. Effective at handling scenes with thousands of identical objects [S1].
+*   **Limitations:** The optimization strategy relies on tracing every instance, which can increase compilation time if deduplication is not effective [S1].
+
+## Background
+Dr.Jit Optimizations were introduced in the Dr.Jit library, designed for differentiable programming and volume rendering [S1]. The approach addresses the limitations of standard backend compilers (LLVM/OptiX) when faced with dynamic dispatch boundaries [S1]. The optimizations are specifically tailored for the arithmetic intensity of PBDR workloads, distinguishing them from optimizations designed for neural network computations [S1].
+
+## Sources
+[S1] DR.JIT, https://doi.org/10.1145/3528223.3530099, fetched 2026-10-26

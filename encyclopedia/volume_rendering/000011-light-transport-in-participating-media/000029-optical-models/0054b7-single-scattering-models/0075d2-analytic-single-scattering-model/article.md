@@ -1,0 +1,128 @@
+# Analytic Single Scattering Model
+
+Also called: Practical Analytic Single Scattering Model, Sun et al. model
+
+## Overview
+The Analytic Single Scattering Model is a real-time rendering technique for participating media that captures light scattering effects, such as glows around light sources and diffuse shading changes, by using an explicit analytic integration of the single scattering light transport equations for an isotropic point light source in a homogeneous medium [S1]. It is implemented via lookup tables to maintain interactive performance [S1]. Unlike the basic OpenGL fog model, which only blends fog color with object color based on distance, this method adds volumetric glows (airlight), impacts surface shading by diffusing specular highlights, and supports complex lighting like environment maps [S1]. It builds on the [Single Scattering Models](15290-single-scattering-models.md) family but distinguishes itself by providing a closed-form solution for the scattering integrals, avoiding the numerical integration required by general single scattering approaches [S1].
+
+## How it works
+The method computes the final radiance by summing the attenuated surface radiance and the airlight contribution from the light source [S1]. It assumes single scattering (light scatters at most once), which is accurate for thin fog [S1]. The model explicitly excludes surface-to-viewer single scattering (where surface radiance is scattered before reaching the viewer) because it requires depth-dependent convolution [S1].
+
+### Inputs and Outputs
+**Inputs:**
+*   $\beta$: Scattering coefficient of the medium (density of fog) [S1].
+*   $\mathbf{p}$: Position of the surface point being shaded [S1].
+*   $\mathbf{v}$: View direction [S1].
+*   $\mathbf{l}$: Direction to the light source [S1].
+*   $d_{vp}$: Distance from viewer to surface point [S1].
+*   $d_{pl}$: Distance from surface point to light source [S1].
+*   $d_{vl}$: Distance from viewer to light source [S1] (derived from geometry).
+*   $L_p$: Exitant radiance at the surface in clear air (computed via BRDF) [S1].
+*   $L_e$: Radiance of the point light source [S1].
+
+**Outputs:**
+*   $L$: Final exitant radiance at the surface [S1].
+
+### Data Structures
+The implementation relies on precomputed 2D lookup tables stored as floating-point textures [S1].
+*   **Texture F**: Stores the special function $F$. Resolution: $64 \times 64$ [S1].
+*   **Texture G0**: Stores the special function $G_0$. Resolution: $64 \times 64$ [S1].
+*   **Texture Gn**: Stores the special function $G_n$. Resolution: $64 \times 64$ [S1].
+
+These functions are smooth, purely numerical, and independent of physical parameters [S1].
+
+### Formulas
+The final radiance is computed as [S1]:
+$$ L = e^{-\beta d_{vp}} L_p + L_a \quad (19) $$
+
+Where $L_a$ is the airlight. The airlight term is derived from the analytic integration of the single scattering equation. The paper defines special functions $F$, $G_0$, and $G_n$ to handle the complex integrals [S1]. The specific analytic forms of $F$, $G_0$, and $G_n$ are not provided in the text as they are tabulated [S1]. The implementation uses these functions to compute the airlight contribution [S1].
+
+The exitant radiance $L_p$ is computed using equations 17 and 18 from the source, which depend on the BRDF (e.g., Lambertian or Phong) and the incident airlight [S1].
+
+### Parameters
+*   $\beta$: Scattering coefficient. Primary user-specified parameter [S1].
+*   Texture Resolution: $64 \times 64$ floating point textures [S1].
+
+### Pseudocode
+The following pseudocode represents the fragment shader implementation described in the source [S1]. It assumes the special functions $F$, $G_0$, and $G_n$ are available as texture samplers. The exact arguments for the texture lookups are not specified in the text, but the source indicates 4 lookups are performed: two for $F$, one for $G_0$, and one for $G_n$ [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_analytic_single_scattering(p, v, l, beta, L_p, L_e, d_vp, d_pl, d_vl):
+    """
+    Computes the final radiance L for a point p in a participating medium.
+    
+    Args:
+        p: Surface position
+        v: View direction
+        l: Light direction
+        beta: Scattering coefficient
+        L_p: Exitant radiance at surface in clear air
+        L_e: Light source radiance
+        d_vp: Distance from viewer to surface
+        d_pl: Distance from surface to light
+        d_vl: Distance from viewer to light
+        
+    Returns:
+        L: Final radiance
+    """
+    # Calculate geometric terms
+    # Note: The exact arguments for F, G0, Gn are not specified in the source text.
+    # The source states: "two for special function F, and one each for G0 and Gn" [S1].
+    # We assume generic arguments based on the physical parameters involved.
+    
+    # Lookup special functions F
+    # Argument 1 for F
+    arg_F1 = ... # Not given in the sources.
+    # Argument 2 for F
+    arg_F2 = ... # Not given in the sources.
+    
+    val_F1 = texture_lookup(F_texture, arg_F1)
+    val_F2 = texture_lookup(F_texture, arg_F2)
+    
+    # Lookup special function G0
+    # Argument for G0
+    arg_G0 = ... # Not given in the sources.
+    val_G0 = texture_lookup(G0_texture, arg_G0)
+    
+    # Lookup special function Gn
+    # Argument for Gn
+    arg_Gn = ... # Not given in the sources.
+    val_Gn = texture_lookup(Gn_texture, arg_Gn)
+    
+    # Compute Airlight La
+    # The source provides equation 11 for La but does not explicitly write it out in the provided text.
+    # It states La is given by equation 11.
+    # We assume a standard form involving beta, distances, and the special functions.
+    # Since the exact formula is missing from the provided text, we mark it as such.
+    La = ... # Not given in the sources. Equation 11 is referenced but not expanded.
+    
+    # Compute Transmittance
+    transmittance = exp(-beta * d_vp)
+    
+    # Compute Final Radiance
+    L = transmittance * L_p + La
+    
+    return L
+```
+
+### Edge Cases and Pitfalls
+*   **Single Scattering Approximation**: The model is only accurate for thin fog. It does not account for multiple scattering [S1].
+*   **Shadows**: The model assumes no cast or volumetric shadows unless added via precomputed light transport methods [S1].
+*   **Surface-to-Viewer Scattering**: The model explicitly excludes the effect where surface radiance is single scattered before reaching the viewer [S1].
+
+## Operating characteristics
+*   **Time Complexity**: Rendering time is linear in the number of light sources [S1].
+*   **Memory Complexity**: Requires storage for three $64 \times 64$ floating-point textures [S1].
+*   **Performance**: Achieved ~20 fps for a scene with 39,999 vertices, 66,454 triangles, and 4 light sources on an NVIDIA GeForce 6800 [S1].
+*   **Strengths**: Real-time performance; captures glows around light sources; impacts surface shading (diffusing highlights); supports complex lighting (environment maps, precomputed radiance transfer) [S1].
+*   **Limitations**: Single scattering approximation only; no volumetric shadows by default; limited to isotropic point lights in homogeneous media [S1].
+*   **When to use**: Real-time applications requiring physically based volumetric effects in thin fog/mist where performance is critical [S1].
+*   **When not to use**: Scenes requiring multiple scattering, thick media, or accurate shadowing without precomputation [S1].
+
+## Background
+The method was introduced by Srinivasa G. Narasimhan and Shree K. Nayar [S1]. It addresses the limitations of existing real-time methods (like OpenGL fog) which exclude important qualitative effects like glows and surface shading changes, while being faster than high-quality but slow Monte Carlo or finite element simulation methods [S1]. The key contribution is the derivation of an explicit compact formula for single scattering from an isotropic point source in a homogeneous medium, allowing implementation in programmable graphics hardware using lookup tables [S1].
+
+## Sources
+[S1] A Practical Analytic Single Scattering Model for Real Time Rendering, https://cseweb.ucsd.edu/~ravir/papers/singlescat/scattering.pdf, fetched 2026-10-29

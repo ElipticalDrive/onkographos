@@ -1,0 +1,145 @@
+# Ray-Box Intersection for Interaction
+
+Also called: Mouse Interaction, Ray-Box Intersection for Voxel Editing, Raycasting for voxel selection, Smoke Injection
+
+## Overview
+This method determines the 3D location within a simulation volume where a user intends to inject smoke and velocity based on 2D mouse input [S1, unofficial]. It also determines if a camera ray intersects the voxel grid's bounding box to enable adding or removing voxels via mouse interaction [S2, unofficial]. It solves the problem of translating 2D screen-space mouse input into 3D voxel coordinates for editing [S1, unofficial]. Unlike [Voxel selection via pick ray intersection](893-voxel-selection-via-pick-ray-intersection.md), which computes a seed voxel for segmentation, this method focuses on the geometric intersection of a ray with a volume for fluid injection [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Mouse screen coordinates $(x_{screen}, y_{screen})$ in pixels [S1, unofficial].
+- Window dimensions $WIDTH$ and $HEIGHT$ [S1, unofficial].
+- Camera parameters: position, view vectors, aspect ratio, and field of view (FOV) [S1, unofficial].
+- Simulation volume bounding box defined by $box_{min}$ and $box_{max}$ [S1, S2, unofficial].
+
+**Outputs:**
+- A boolean indicating if the ray intersects the volume [S2, unofficial].
+- If intersected: the world position $p$ of the interaction point and the corresponding grid indices $(i_x, i_y, i_z)$ [S1, unofficial].
+
+**Data Structures:**
+- Ray defined by origin $r_{origin}$ and direction $r_{dir}$ (normalized) [S1, unofficial].
+- Bounding box defined by minimum and maximum vectors [S2, unofficial].
+- Grid resolution $N$ (assumed cubic for simplicity in source [S1, unofficial]).
+
+**Steps:**
+
+1. **Convert Screen to NDC:** Transform mouse coordinates to Normalized Device Coordinates (NDC) $[-1, 1]$ [S1, unofficial]:
+   $$x_{ndc} = \frac{2.0 \cdot x_{screen}}{WIDTH} - 1.0$$
+   $$y_{ndc} = 1.0 - \frac{2.0 \cdot y_{screen}}{HEIGHT}$$
+
+2. **Construct Ray:** Generate the ray origin and direction from the camera position and view vectors, scaled by aspect ratio and field of view [S1, unofficial].
+
+3. **Ray-Box Intersection:** Intersect the ray with the simulation bounding box to find $t_{near}$ and $t_{far}$ [S1, unofficial]. Initialize $t_{min}$ to $-\infty$ and $t_{max}$ to $+\infty$ [S2, unofficial]. The sources specify different bounding box extents: $[-0.5, 0.5]$ for fluid injection [S1, unofficial], or $[-1.0, 1.0]$ for voxel editing [S2, unofficial]. If the ray does not intersect the box, the function returns false [S2, unofficial].
+
+4. **Calculate Interaction Point:** Compute the midpoint of the intersection: $t_{mid} = (t_{near} + t_{far}) \cdot 0.5$ [S1, unofficial]. Calculate world position $p = r_{origin} + r_{dir} \cdot t_{mid}$ [S1, unofficial].
+
+5. **Convert to Grid Indices:** Transform the world position $p$ to grid space $[0, N]$ [S1, unofficial]:
+   $$p_{grid} = p + \begin{bmatrix} 0.5 \\ 0.5 \\ 0.5 \end{bmatrix}$$
+   $$i_x = \lfloor p_{grid, x} \cdot N \rfloor$$
+   $$i_y = \lfloor p_{grid, y} \cdot N \rfloor$$
+   $$i_z = \lfloor p_{grid, z} \cdot N \rfloor$$
+   The resulting indices $(i_x, i_y, i_z)$ identify the target voxel [S1, unofficial].
+
+6. **Interaction Logic:** If `hoverInfo.hasHit` is false after the ray-box intersection, the function returns false, meaning no voxel interaction occurs [S2, unofficial]. If adding a voxel (`forRemoval` is false), offset the hit position by `hitNormal * 0.01` to place the new voxel adjacent to the existing one [S2, unofficial]. If removing a voxel (`forRemoval` is true), return true only if `hoverInfo.node` exists and `hoverInfo.node->isActive` is true [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_box_interaction_for_editing(mouse_x, mouse_y, width, height, camera_origin, camera_forward, camera_up, camera_right, aspect_ratio, fov, box_min, box_max, grid_resolution, hover_info, for_removal):
+    # 1. Convert to NDC
+    x_ndc = (2.0 * mouse_x) / width - 1.0
+    y_ndc = 1.0 - (2.0 * mouse_y) / height
+
+    # 2. Construct Ray from Camera
+    fov_rad = fov * 3.14159265 / 180.0
+    half_fov = fov_rad / 2.0
+    ray_dir = (camera_right * (x_ndc * aspect_ratio * half_fov) + 
+               camera_up * (y_ndc * half_fov) + 
+               camera_forward).normalize()
+    ray_origin = camera_origin
+
+    # 3. Ray-Box Intersection (Slab Method)
+    t_min = -float('inf')
+    t_max = float('inf')
+
+    for i in range(3):
+        if abs(ray_dir[i]) < 1e-8:
+            if ray_origin[i] < box_min[i] or ray_origin[i] > box_max[i]:
+                return False, None, None
+        else:
+            inv_dir = 1.0 / ray_dir[i]
+            t1 = (box_min[i] - ray_origin[i]) * inv_dir
+            t2 = (box_max[i] - ray_origin[i]) * inv_dir
+            if t1 > t2:
+                t1, t2 = t2, t1
+            t_min = max(t_min, t1)
+            t_max = min(t_max, t2)
+            if t_min > t_max:
+                return False, None, None
+
+    if t_max < 0:
+        return False, None, None
+
+    # 4. Calculate Midpoint
+    t_mid = (t_min + t_max) * 0.5
+    p_world = ray_origin + ray_dir * t_mid
+
+    # 5. Convert to Grid Indices
+    p_grid = Vec3(p_world.x + 0.5, p_world.y + 0.5, p_world.z + 0.5)
+    ix = int(p_grid.x * grid_resolution)
+    iy = int(p_grid.y * grid_resolution)
+    iz = int(p_grid.z * grid_resolution)
+
+    # 6. Interaction Logic
+    if not hover_info.hasHit:
+        return False, None, None
+
+    hit_pos = hover_info.position if hover_info.hasHit else p_world
+    hit_normal = hover_info.normal if hover_info.hasHit else Vec3(0, 0, 0)
+
+    if for_removal:
+        if hover_info.node and hover_info.node.isActive:
+            return True, (ix, iy, iz), hit_pos
+        return False, None, None
+    else:
+        hit_pos = hit_pos + hit_normal * 0.01
+        return True, (ix, iy, iz), hit_pos
+
+class Vec3:
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+    def __add__(self, other): return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
+    def __sub__(self, other): return Vec3(self.x - other.x, self.y - other.y, self.z - other.z)
+    def __mul__(self, s): return Vec3(self.x * s, self.y * s, self.z * s)
+    def __rmul__(self, s): return self.__mul__(s)
+    def normalize(self):
+        mag = (self.x**2 + self.y**2 + self.z**2)**0.5
+        return Vec3(self.x/mag, self.y/mag, self.z/mag) if mag > 0 else Vec3(0,0,0)
+```
+
+**Parameters:**
+- $N$: Grid resolution. Not given in the sources.
+- Box Extents: $[-0.5, 0.5]$ for normalized simulation space [S1, unofficial]; $[-1.0, 1.0]$ or custom bounds for voxelizers [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Parallel Rays:** If the ray direction component is zero, the ray is parallel to the box face. If the origin is outside the slab, there is no intersection [S2, unofficial].
+- **Hover State:** If `hoverInfo.hasHit` is false after the ray-box intersection, the function returns false, meaning no voxel interaction occurs [S2, unofficial].
+- **Placement Offset:** When adding a voxel adjacent to an existing one, the position is offset by the normal multiplied by a small epsilon (e.g., $0.01$) to avoid self-intersection [S2, unofficial].
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for the ray-box intersection and coordinate transformation [S1, S2, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary memory [G].
+- **Strengths:** Fast, deterministic, and simple to implement [G].
+- **Limitations:** The midpoint approximation assumes a uniform volume [G].
+- **When to use:** Ideal for fluid injection, smoke placement, or simple voxel addition/removal where the exact surface intersection is less critical than the general region of interaction [G].
+
+## Background
+This method is a fundamental building block for interactive volume editing and fluid simulation interfaces [G]. It bridges the gap between 2D user input (mouse) and 3D simulation state [G]. The specific implementation details, such as the NDC conversion and midpoint calculation, are derived from practical implementations in fluid simulation repositories [S1, unofficial] and voxelization tools [S2, unofficial].
+
+## Sources
+[S1] tzhazuma/Fluid_simulation, https://github.com/tzhazuma/Fluid_simulation, fetched 2026-10-26 (unofficial)
+[S2] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)

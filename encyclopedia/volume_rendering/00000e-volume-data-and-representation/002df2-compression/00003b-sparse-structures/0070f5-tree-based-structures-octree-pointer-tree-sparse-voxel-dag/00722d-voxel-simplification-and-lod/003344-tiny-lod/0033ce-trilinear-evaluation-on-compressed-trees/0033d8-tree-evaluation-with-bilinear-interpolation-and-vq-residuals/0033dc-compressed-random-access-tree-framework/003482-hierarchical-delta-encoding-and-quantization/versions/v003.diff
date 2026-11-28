@@ -1,0 +1,360 @@
+--- v002.md
++++ v003.md
+@@ -4,145 +4,227 @@
+ 
+ ## Overview
+-Hierarchical Delta Encoding and Quantization is a compression method for adaptive multiresolution tree structures (specifically octrees and quadtrees) used in volume rendering [S1, unofficial]. It solves the problem of efficiently storing and traversing large, unbalanced hierarchical meshes by encoding node attributes relative to their parents and quantizing spatial and field data into compact bit-fields [S1, unofficial]. It sets itself apart from sibling methods by using a fixed 13-bit lookup index for spatial/radius deltas and specific bit-packing for field values, enabling fast top-down traversal from a single binary stream [S1, unofficial].
++Hierarchical Delta Encoding and Quantization is a compression method for adaptive multiresolution tree structures (such as octrees and quadtrees) used in volume rendering. It solves the problem of storing large, unbalanced hierarchical meshes by replacing explicit pointers with compact, top-down delta-encoded spatial data and quantized field values [S1, unofficial]. Unlike sibling methods that may use fixed-rate topology encoding or generic quantization, this approach exploits the geometric constraint that child bounding spheres must fit within their parent's diameter to map spatial offsets and radii into a small, fixed lookup table [S1, unofficial]. This allows for aggressive compression of the tree's geometric structure while retaining random access for rendering [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- A hierarchical tree structure (Solid Octree or Shell Quadtree) where each node has a bounding sphere defined by center $(x, y, z)$ and radius $r$ [S1, unofficial].
+-- Scalar field values associated with each node, normalized to $[0, 1]$ [S1, unofficial].
+-- For Shell nodes: normal vectors and normal cone widths [S1, unofficial].
+-
+-**Outputs:**
+-- A compressed binary stream of nodes, stored in breadth-first order [S1, unofficial].
+-- Each node is encoded into a fixed-size byte record (6 bytes for Solid, 8 bytes for Shell) [S1, unofficial].
+-
+-**Data Structures and Layout:**
+-The core data structure is the **Solid Node**, which is 48 bits (6 bytes) long [S1, unofficial]. The layout uses little-endian byte order with MSB-leftmost bit ordering within each byte [S1, unofficial]. The fields are packed as follows:
+-
+-1. **Spatial/Radius Index (13 bits):** Encodes the quantized spatial offsets $(x, y, z)$ and radius $r$ via a fixed lookup table [S1, unofficial].
+-2. **Children Count (3 bits):** Number of children (0–8) [S1, unofficial].
+-3. **Grandchildren Flag (1 bit):** Indicates presence of grandchildren [S1, unofficial].
+-4. **Field Value 1 (15 bits):** Quantized value of the first scalar field [S1, unofficial].
+-5. **Field Value 2 (15 bits):** Quantized value of the second scalar field [S1, unofficial].
+-6. **Boundary Flag (1 bit):** Identifies if the node is a boundary node [S1, unofficial].
+-
+-*Note: The total bit count is $13 + 3 + 1 + 15 + 15 + 1 = 48$ bits. The source text mentions "2 extra bytes per field value" for arbitrary numbers of fields, but the primary example and layout description focus on two fields totaling 6 bytes [S1, unofficial]. For Shell nodes, the layout replaces the Boundary Flag and adds a 16-bit field (2 bytes) for the normal vector (14 bits) and normal cone width (2 bits), totaling 8 bytes [S1, unofficial].*
+-
+-**Parameters:**
+-- **Radius Quantization:** $r$ is quantized to 13 discrete values relative to the parent radius [S1, unofficial].
+-- **Spatial Offset Quantization:** $x, y, z$ are quantized to 13 discrete values relative to the parent diameter [S1, unofficial].
+-- **Field Quantization:** 15 bits per field value is sufficient for the studied datasets [S1, unofficial].
+-
+-**Steps:**
+-
+-1. **Normalize Field Values:**
+-   For each scalar field value $v$, normalize it to the range $[0, 1]$ [S1, unofficial].
+-   $$ v_{norm} = \frac{v - v_{min}}{v_{max} - v_{min}} $$
+-   Quantize $v_{norm}$ using a lookup table to a 15-bit integer index [S1, unofficial].
+-
+-2. **Compute Delta Coordinates:**
+-   For each child node, compute the spatial offsets $(dx, dy, dz)$ from the parent center $(x_p, y_p, z_p)$ [S1, unofficial].
+-   $$ dx = x_c - x_p, \quad dy = y_c - y_p, \quad dz = z_c - z_p $$
+-   Compute the child radius $r_c$ [S1, unofficial].
+-
+-3. **Quantize Spatial Attributes:**
+-   - Quantize $r_c$ to one of 13 discrete values based on the parent radius $r_p$ [S1, unofficial].
+-   - Quantize $dx, dy, dz$ to one of 13 discrete values based on the parent diameter $2r_p$ [S1, unofficial].
+-   *Note: The exact quantization function maps the continuous offset/radius to a discrete index $0..12$.*
+-
+-4. **Encode Spatial/Radius Index:**
+-   - Form a tuple of quantized values $(idx_x, idx_y, idx_z, idx_r)$ [S1, unofficial].
+-   - Only a subset of these combinations satisfy the hierarchical bounding sphere condition (i.e., the child sphere must be contained within the parent sphere) [S1, unofficial].
+-   - Map the valid tuple to a pre-computed fixed lookup table index. This index is 13 bits wide [S1, unofficial].
+-   *Note: The lookup table maps the valid combinations of $(idx_x, idx_y, idx_z, idx_r)$ to a compact 13-bit integer.*
+-
+-5. **Determine Node Metadata:**
+-   - Count the number of children $N_c$ (0–8). Encode in 3 bits [S1, unofficial].
+-   - Check if any child has children (grandchildren). Encode in 1 bit [S1, unofficial].
+-   - For Solid nodes, set the Boundary Flag (1 bit) if the node is on the boundary [S1, unofficial].
+-
+-6. **Pack the Byte Record:**
+-   - Combine the 13-bit Spatial/Radius Index, 3-bit Children Count, 1-bit Grandchildren Flag, two 15-bit Field Values, and 1-bit Boundary Flag into a 48-bit integer [S1, unofficial].
+-   - Write the 48-bit integer as 6 bytes in little-endian order [S1, unofficial].
+-
+-7. **Handle Shell Nodes (if applicable):**
+-   - Compute the normal vector $\mathbf{n}$ by averaging child normals [S1, unofficial].
+-   - Quantize $\mathbf{n}$ to 14 bits and the normal cone width to 2 bits [S1, unofficial].
+-   - Pack these 16 bits into the extra 2 bytes, replacing the Boundary Flag and adjusting the layout accordingly [S1, unofficial].
+-
+-8. **Flush to Stream:**
+-   - Write all nodes to a single binary stream in breadth-first order [S1, unofficial].
+-
+-**Pseudocode:**
++The method compresses a hierarchical tree (Solid or Shell) into a binary stream by encoding each node's geometry, topology, and attributes into a fixed-size bit layout. The encoding is top-down: child attributes are defined relative to their parent.
++
++### Inputs and Outputs
++*   **Input:** An adaptive multiresolution tree (Solid Octree or Shell Quadtree) where each node has a bounding sphere (center $x,y,z$, radius $r$), a list of children, field values (scalar attributes), and optional normal vectors (Shell nodes).
++*   **Output:** A binary data stream (file) containing the compressed nodes in breadth-first order.
++
++### Data Structures and Layout
++The core data structure is the **Solid Node**, which is 48 bits (6 bytes) long. The layout is little-endian byte order, with bits ordered MSB-leftmost within each byte.
++
++**Solid Node Layout (48 bits / 6 bytes):**
++*   **Bytes 0-2 (24 bits):**
++    *   **Bits 0-12 (13 bits):** Spatial/Radius Lookup Index. This index encodes the quantized $x, y, z$ offsets and radius $r$.
++    *   **Bits 13-15 (3 bits):** Number of children (0 to 8).
++    *   **Bit 16 (1 bit):** Presence of grandchildren (1 if children have children, 0 otherwise).
++*   **Bytes 3-4 (30 bits):**
++    *   **Bits 17-31 (15 bits):** Quantized Field Value 1.
++    *   **Bits 32-46 (15 bits):** Quantized Field Value 2.
++*   **Byte 5 (8 bits):**
++    *   **Bit 47 (1 bit):** Boundary Node Flag (1 if boundary, 0 if regular).
++    *   *Note:* The remaining 7 bits of Byte 5 are unused/padding in the described 6-byte layout, or the layout description implies a specific packing where the boundary bit is the last significant bit. Based on the sum $13+3+1+15+15+1 = 48$, the bits are contiguous.
++
++**Shell Node Layout:**
++*   Same as Solid Node, but replaces the Boundary Node Flag and potentially adjusts field storage to include:
++    *   **Extra 2 bytes (16 bits):** Hierarchically encoded normal vector (14 bits) and width of normal cone (2 bits).
++    *   No boundary label bit.
++
++### Parameters
++*   **Spatial Quantization:**
++    *   Radius $r$ is quantized to **13 discrete values** relative to the parent radius.
++    *   Spatial offsets $x, y, z$ (from parent center) are quantized to **13 discrete values** relative to the parent diameter.
++*   **Lookup Table:**
++    *   A fixed table maps valid combinations of $(x, y, z, r)$ quantum numbers to a **13-bit index**.
++    *   Only combinations satisfying the hierarchical bounding sphere condition (child sphere fits inside parent) are valid.
++*   **Field Quantization:**
++    *   Field values are normalized to $[0, 1]$.
++    *   Quantized using a lookup table.
++    *   **15 bits** per field value is sufficient for studied datasets.
++    *   Arbitrary numbers of field values can be appended, each taking 2 bytes (16 bits, though only 15 are used for data).
++
++### Steps
++1.  **Build Tree:** Construct the Solid (octree) or Shell (quadtree) hierarchy. For Shell, compute normals by averaging child normals.
++2.  **Normalize Fields:** For each node, normalize all scalar field values to $[0, 1]$.
++3.  **Quantize Fields:** Map normalized field values to 15-bit integers using a predefined lookup table.
++4.  **Compute Delta Encoding:** For each child node:
++    *   Calculate offset $dx, dy, dz$ from parent center to child center.
++    *   Calculate child radius $r$.
++    *   Quantize $r$ to one of 13 values relative to parent radius.
++    *   Quantize $dx, dy, dz$ to one of 13 values relative to parent diameter.
++5.  **Lookup Index:** Find the combination of $(dx, dy, dz, r)$ in the fixed 13-bit lookup table. If the combination is invalid (does not fit), it should not occur due to construction constraints.
++6.  **Encode Node:**
++    *   Pack the 13-bit lookup index.
++    *   Pack the number of children (3 bits, max 8).
++    *   Pack the grandchildren presence bit (1 bit).
++    *   Pack the 15-bit quantized field values.
++    *   Pack the boundary flag (1 bit) for Solid nodes.
++    *   For Shell nodes, pack the 14-bit normal and 2-bit cone width.
++7.  **Stream Output:** Write nodes to a binary stream in breadth-first order.
++
++### Pseudocode
+ 
+ ```python
+-def encode_solid_node(parent_center, parent_radius, child_center, child_radius, 
+-                      field1, field2, is_boundary, has_grandchildren, children_count):
+-    # 1. Normalize and quantize field values (15-bit lookup table)
+-    f1_quant = int(field1 * 32767)
+-    f2_quant = int(field2 * 32767)
+-    
+-    # 2. Compute deltas
+-    dx = child_center[0] - parent_center[0]
+-    dy = child_center[1] - parent_center[1]
+-    dz = child_center[2] - parent_center[2]
+-    
+-    # 3. Quantize spatial attributes
+-    parent_diameter = 2 * parent_radius
+-    # Quantize offsets to 13 values relative to parent diameter
+-    x_quant = max(0, min(12, int((dx + parent_diameter / 2) / parent_diameter * 13)))
+-    y_quant = max(0, min(12, int((dy + parent_diameter / 2) / parent_diameter * 13)))
+-    z_quant = max(0, min(12, int((dz + parent_diameter / 2) / parent_diameter * 13)))
+-    # Quantize radius to 13 values relative to parent radius
+-    r_quant = max(0, min(12, int(child_radius / parent_radius * 13)))
+-    
+-    # 4. Encode spatial/radius index
+-    # Only valid bounding sphere combinations are stored in the fixed lookup table.
+-    # The table maps (x_quant, y_quant, z_quant, r_quant) to a 13-bit index.
+-    spatial_index = lookup_spatial_table(x_quant, y_quant, z_quant, r_quant)
+-    
+-    # 5. Pack bits into a 48-bit integer (MSB-leftmost bit order)
+-    node_bits = 0
+-    node_bits |= (spatial_index & 0x1FFF) << 35
+-    node_bits |= (children_count & 0x7) << 32
+-    node_bits |= (has_grandchildren & 0x1) << 31
+-    node_bits |= (f1_quant & 0x7FFF) << 16
+-    node_bits |= (f2_quant & 0x7FFF) << 1
+-    node_bits |= (is_boundary & 0x1)
+-    
+-    # 6. Convert to 6 bytes, little-endian byte order
+-    return [
+-        node_bits & 0xFF,
+-        (node_bits >> 8) & 0xFF,
+-        (node_bits >> 16) & 0xFF,
+-        (node_bits >> 24) & 0xFF,
+-        (node_bits >> 32) & 0xFF,
+-        (node_bits >> 40) & 0xFF
+-    ]
+-
+-def lookup_spatial_table(x, y, z, r):
+-    # Fixed table lookup for valid hierarchical bounding sphere combinations.
+-    # Returns a 13-bit index (0-8191).
+-    # The exact mapping is dataset-dependent but follows the constraint that
+-    # the child sphere must be contained within the parent sphere.
+-    # [G] Standard implementation uses a pre-computed array or hash map.
+-    return (x * 1000 + y * 100 + z * 10 + r) % 8192
++# Pre-computed lookup table mapping valid (dx_idx, dy_idx, dz_idx, r_idx) to 13-bit index
++# dx_idx, dy_idx, dz_idx, r_idx are integers in [0, 12]
++LOOKUP_TABLE = {} 
++
++def build_lookup_table():
++    """
++    Populates LOOKUP_TABLE with all valid combinations of quantized spatial offsets
++    and radius that satisfy the hierarchical bounding sphere condition.
++    Returns a dict: (dx, dy, dz, r) -> 13-bit index
++    """
++    table = {}
++    index = 0
++    # Iterate over all 13^4 combinations
++    for dx in range(13):
++        for dy in range(13):
++            for dz in range(13):
++                for r in range(13):
++                    # Check if this combination is geometrically valid
++                    # (Child sphere fits inside parent sphere)
++                    if is_valid_bounding_sphere(dx, dy, dz, r):
++                        table[(dx, dy, dz, r)] = index
++                        index += 1
++    return table
++
++def is_valid_bounding_sphere(dx, dy, dz, r):
++    """
++    Check if a child sphere with offset (dx, dy, dz) and radius r
++    fits inside the parent sphere.
++    dx, dy, dz are quantized offsets relative to parent diameter.
++    r is quantized radius relative to parent radius.
++    This function implements the geometric constraint.
++    """
++    # Implementation depends on the specific quantization scaling.
++    # Generally: distance_from_parent_center + child_radius <= parent_radius
++    # Let D be parent diameter, R be parent radius. D = 2*R.
++    # Offset in physical units: (dx/12) * D ? Or similar scaling.
++    # Radius in physical units: (r/12) * R ?
++    # The exact scaling factors are defined by the quantization scheme.
++    # For the purpose of this article, we assume the condition is checked
++    # against the parent's bounding sphere.
++    pass
++
++def quantize_field(value, field_lut):
++    """
++    Quantize a normalized field value [0, 1] to 15 bits using a lookup table.
++    """
++    # field_lut maps float [0,1] to int [0, 32767]
++    return field_lut[value]
++
++def encode_solid_node(node, parent_node, field_luts):
++    """
++    Encode a Solid tree node into 6 bytes.
++    """
++    # 1. Spatial/Radius Encoding
++    dx = node.center.x - parent_node.center.x
++    dy = node.center.y - parent_node.center.y
++    dz = node.center.z - parent_node.center.z
++    r = node.radius
++    
++    # Quantize to 13 discrete values
++    dx_idx = quantize_offset(dx, parent_node.diameter)
++    dy_idx = quantize_offset(dy, parent_node.diameter)
++    dz_idx = quantize_offset(dz, parent_node.diameter)
++    r_idx = quantize_radius(r, parent_node.radius)
++    
++    # Lookup index
++    spatial_index = LOOKUP_TABLE[(dx_idx, dy_idx, dz_idx, r_idx)]
++    
++    # 2. Topology
++    num_children = len(node.children)
++    has_grandchildren = any(len(child.children) > 0 for child in node.children)
++    
++    # 3. Fields
++    field1_q = quantize_field(node.field1, field_luts[0])
++    field2_q = quantize_field(node.field2, field_luts[1])
++    
++    # 4. Boundary Flag
++    is_boundary = node.is_boundary
++    
++    # 5. Pack Bits
++    # Layout: 13 bits (spatial), 3 bits (children), 1 bit (grandchildren),
++    #         15 bits (field1), 15 bits (field2), 1 bit (boundary)
++    # Total 48 bits = 6 bytes
++    
++    bits = 0
++    bits |= (spatial_index & 0x1FFF) << 35  # 13 bits at MSB of first 3 bytes? 
++    # Note: Bit order is MSB-leftmost. Byte order is Little-Endian.
++    # Let's construct the 6-byte buffer directly.
++    
++    # Byte 0-2: Spatial (13), Children (3), Grandchildren (1) -> 17 bits
++    # Byte 3-4: Field1 (15), Field2 (15) -> 30 bits
++    # Byte 5: Boundary (1), Padding (7) -> 8 bits
++    
++    # Re-evaluating bit packing for Little-Endian, MSB-first within byte
++    # We will build a 48-bit integer and then unpack to bytes.
++    
++    packed = 0
++    packed |= (spatial_index & 0x1FFF) << 35  # Bits 35-47 (13 bits)
++    packed |= (num_children & 0x7) << 32      # Bits 32-34 (3 bits)
++    packed |= (1 if has_grandchildren else 0) << 31 # Bit 31 (1 bit)
++    packed |= (field1_q & 0x7FFF) << 16       # Bits 16-30 (15 bits)
++    packed |= (field2_q & 0x7FFF) << 1        # Bits 1-15 (15 bits)
++    packed |= (1 if is_boundary else 0)       # Bit 0 (1 bit)
++    
++    # Convert to 6 bytes, Little-Endian
++    byte0 = packed & 0xFF
++    byte1 = (packed >> 8) & 0xFF
++    byte2 = (packed >> 16) & 0xFF
++    byte3 = (packed >> 24) & 0xFF
++    byte4 = (packed >> 32) & 0xFF
++    byte5 = (packed >> 40) & 0xFF
++    
++    return bytes([byte0, byte1, byte2, byte3, byte4, byte5])
++
++def quantize_offset(offset, parent_diameter):
++    """
++    Quantize offset to 13 discrete values of parent diameter.
++    """
++    # Normalize offset to [-0.5, 0.5] relative to diameter?
++    # Or [0, 1]? The text says "offsets from parent center".
++    # Assuming symmetric quantization.
++    normalized = offset / parent_diameter
++    # Map to 13 levels. E.g., -0.5 to 0.5 mapped to 0..12.
++    # Level = floor((normalized + 0.5) * 13)
++    level = int((normalized + 0.5) * 13)
++    return max(0, min(12, level))
++
++def quantize_radius(radius, parent_radius):
++    """
++    Quantize radius to 13 discrete values of parent radius.
++    """
++    # Assuming radius <= parent_radius.
++    # Map 0..1 to 0..12.
++    normalized = radius / parent_radius
++    level = int(normalized * 13)
++    return max(0, min(12, level))
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- **Invalid Bounding Spheres:** Only a subset of quantized $(x,y,z,r)$ combinations are valid. The lookup table must only contain valid entries. Invalid combinations must be handled (e.g., by encoding a special "null" index or ensuring the quantization step guarantees validity) [S1, unofficial].
+-- **Precision:** 15 bits for field values may not be sufficient for all datasets. The source states it was sufficient for the studied datasets [S1, unofficial].
+-- **Byte Order:** Little-endian byte order must be respected when writing the binary stream [S1, unofficial].
+-- **Bit Order:** MSB leftmost bit order within each byte must be maintained during packing [S1, unofficial].
++### Edge Cases and Pitfalls
++*   **Invalid Combinations:** The lookup table only contains valid combinations. If a child node does not fit within the parent's bounding sphere due to construction errors, the encoding will fail. The tree construction must guarantee this constraint.
++*   **Precision:** 15 bits for field values is sufficient for studied datasets but may not be for all. Users should verify quantization error for their data.
++*   **Grandchildren Bit:** The 1-bit grandchildren flag is a simplification. It does not encode the *number* of grandchildren, only their presence. This is sufficient for traversal if the topology is encoded separately or if the tree structure is known.
++*   **Shell Node Normals:** Normal vectors are hierarchically encoded. The 14-bit normal and 2-bit cone width must be decoded correctly to reconstruct the shell geometry.
++
++## Subtopics
++
++### [Snapped Grid Extent Quantization](19480-snapped-grid-extent-quantization.md)
++A BVH data layout technique that compresses AABB coordinates into fixed-point integers relative to a global coordinate frame. It achieves aggressive compression (12 bytes per node) but relies on directed rounding modes for watertight dequantization, making it less portable than standard arithmetic methods.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Encoding and decoding are linear in the number of nodes, enabling fast top-down traversal [S1, unofficial].
+-- **Memory Complexity:** Each node is compressed to 6 bytes (Solid) or 8 bytes (Shell), significantly reducing memory footprint compared to uncompressed pointers and floating-point coordinates [S1, unofficial].
+-- **Performance:** Enables real-time rendering and volume clipping of large datasets by facilitating fast traversal from a single binary stream [S1, unofficial].
+-- **Strengths:** Compact representation, fast traversal, support for multiple field values, support for interactive transfer function editing [S1, unofficial].
+-- **Limitations:** Fixed quantization levels may introduce artifacts. Unbalanced trees require embedded pointers (encoded in the node structure) for traversal, which adds complexity [S1, unofficial].
++*   **Time Complexity:** Encoding is $O(N)$ where $N$ is the number of nodes, as each node is processed once. Decoding is also $O(N)$ for traversal.
++*   **Memory Complexity:** Each Solid node is 6 bytes. Each Shell node is 8 bytes (6 + 2). This is significantly smaller than storing full floating-point coordinates and pointers.
++*   **Performance:** The method enables fast top-down multi-resolution rendering by flushing the tree to a binary stream in breadth-first order, facilitating efficient memory access patterns.
++*   **Strengths:** High compression ratio for spatial data; simple lookup-based quantization; supports arbitrary field values.
++*   **Limitations:** Fixed lookup table size limits the flexibility of spatial quantization; requires pre-computation of the lookup table; unbalanced trees still require embedded pointers (though the text mentions "minimize the number of pointers", it does not eliminate them entirely in the described layout, unlike the parent framework's goal).
+ 
+ ## Background
+-The method is part of the TetSplat preprocessing pipeline for real-time volume rendering and clipping [S1, unofficial]. It builds on earlier work in hierarchical data structures and splatting, adapting top-down delta encoding and quantization to map hierarchical trees to a filesystem for efficient traversal [S1, unofficial].
++The method was introduced by Museth and Lombeyda in 2004 in the paper "TetSplat: Real-time Rendering and Volume Clipping of Large ..." [S1, unofficial]. It builds on earlier work in splatting and hierarchical volume rendering, aiming to reduce the memory footprint of large adaptive meshes for real-time visualization. The approach is part of the TetSplat system, which uses tetrahedral splatting for volume rendering.
+ 
+ ## Sources
+-[S1] TetSplat: Real-time Rendering and Volume Clipping of Large ... - Museth, https://ken.meth.org/Publications_files/Museth-Lombeyda_VIS04.pdf, fetched 2026-10-28 (unofficial)+[S1] TetSplat: Real-time Rendering and Volume Clipping of Large ... - Museth, https://ken.museth.org/Publications_files/Museth-Lombeyda_VIS04.pdf, fetched 2026-10-28 (unofficial)

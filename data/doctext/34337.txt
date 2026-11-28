@@ -1,0 +1,2431 @@
+VG2GT: Voxel-Gaussian Splatting Visual Geometry Grounded
+Transformer
+Yibin Zhaoa , Yihan Panb , Jun Nana , WenLi Yanga , Liwei Chenc and Jianjun Yia,∗
+a East China University of Science and Technology, 130 Meilong Road, Shanghai, 200237, China
+b Shanghai Open University, 288 Guoshun Road, 200433, Shanghai, China
+arXiv:2606.01573v2 [cs.CV] 3 Jun 2026
+c Shanghai Xiaoyuan Innovation Center, 599 Xingmei Road, 200237, Shanghai, China
+ARTICLE INFO
+ABSTRACT
+Keywords:
+3D Gaussian Splatting
+Visual Foundation Models
+Novel View Synthesis
+Gaussian Splatting has shown strong potential for 3D reconstruction and novel view synthesis.
+However, most existing methods rely on accurate camera parameters and per-scene optimization.
+Feed-forward alternatives avoid this optimization, but pixel-aligned Gaussian primitives often lead
+to artifacts and non-uniform scene representations. We propose VG2 GT, a Voxel-Gaussian Splatting
+Visual Geometry-Grounded Transformer. VG2 GT builds on a frozen pretrained visual foundation
+model (VFM) and introduces a multi-scale differentiable voxel module to improve geometric reasoning. The module enhances patch tokens at the coarse level and splits voxel features at the fine level to
+regress Gaussian primitive parameters. During training, stochastic solid volume rendering supervises
+scene geometry, enabling accurate Gaussian scene reconstruction while keeping the VFM fully frozen.
+This design allows VG2 GT to be plugged into patch-feature-based VFMs and substantially reduces
+training cost. VG2 GT achieves state-of-the-art performance on the widely used DTU, Replica, TAT,
+and ScanNet datasets.
+1. Introduction
+to construct multi-view cost volumes for depth estimation.
+This requirement limits their applicability to unconstrained
+real-world inputs and keeps them vulnerable to errors introduced by SfM.
+The progress of visual foundation models has further enabled pose-free feed-forward 3DGS reconstruction [19, 12,
+51]. However, existing methods commonly use pixel-aligned
+Gaussian primitives, which impose a one-to-one correspondence between 2D pixels and 3D points. In real multi-view
+observations, the same 3D point can be visible from multiple
+pixels and viewpoints. Aggregating these observations is
+essential for building compact, coherent, and geometrically
+consistent scene representations. Pixel-aligned formulations
+instead tend to produce uneven Gaussian distributions and
+cross-view inconsistencies [18], which limit reconstruction
+quality and multi-view consistency.
+Here we propose VG2 GT, a feed-forward non-pixelaligned 3DGS reconstruction framework. Given an arbitrary
+number of pose-free images, VG2 GT directly regresses geometrically accurate Gaussian scenes and camera parameters.
+To reduce the uneven distribution of Gaussian primitives, we
+introduce a multi-scale differentiable voxel module that aggregates point-cloud features into structured voxel features.
+At the coarse scale, PointTransformer [47] and trilinear
+interpolation compute complementary geometric features,
+which are injected into patch tokens to enhance global scene
+understanding. At the fine scale, a DPT head extracts global
+point-cloud features and voxelizes them into a structured
+representation. The resulting voxel features are refined by
+PointMLP and decoded by a self-splitting Gaussian head to
+predict Gaussian primitive parameters.
+During training, we replace standard 3DGS rasterization
+[15] with stochastic solid volume rendering. This formulation models Gaussian primitives as continuous stochastic
+Recent visual foundation models [36, 19, 39] have shown
+strong potential for reconstructing 3D scenes from multiview 2D images. By consolidating multi-stage reconstruction pipelines into a unified large-scale visual Transformer,
+these models improve efficiency and reduce error accumulation from hand-crafted intermediate steps.
+Most visual foundation models represent reconstructed
+scenes as depth maps or point clouds, which provide strong
+geometric priors. However, point-cloud-based representations are less effective at preserving camera-level image details and view-dependent appearance. Radiance-field-based
+representations, including NeRF [24] and 3D Gaussian
+Splatting [15], have therefore become powerful alternatives
+for novel view synthesis (NVS) and 3D reconstruction.
+These methods usually require known camera intrinsics
+and extrinsics. In practice, they often depend on structurefrom-motion (SfM) to estimate camera parameters [31],
+followed by per-scene optimization to recover the final
+scene representation. This pipeline propagates SfM errors
+into reconstruction and makes radiance-field-based methods
+computationally expensive.
+Feed-forward 3D Gaussian Splatting (3DGS) reconstruction methods [3, 48, 40] offer a promising route to
+efficient and high-fidelity scene reconstruction. By avoiding
+per-scene optimization, they directly regress Gaussian scene
+representations from multi-view images and camera parameters. Nevertheless, these methods still require camera poses
+∗ Corresponding author
+Y20230063@mail.ecust.edu.cn (Y. Zhao); pyh1614273862@163.com
+(Y. Pan); Y20240039@mail.ecust.edu.cn (J. Nan); 18831321205@163.com (W.
+Yang); 18916309291@163.com (L. Chen); jjyi@ecust.edu.cn (J. Yi)
+ORCID (s): 0009-0006-2025-5555 (Y. Zhao); 0009-0005-5095-4739 (Y.
+Pan); 0000-0001-5938-983 (L. Chen)
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+Page 1 of 15
+Leveraging social media news
+Figure 1: VG2 GT, a non-pixel-aligned Gaussian Splatting [15] feed-forward model for fast 3D reconstruction and novel view
+synthesis. VG2 GT directly regresses geometrically accurate and spatially uniform Gaussian scenes from an arbitrary number of
+unposed and uncalibrated images within seconds.
+solids and renders them along camera rays [25]. It improves the quality of synthesized Gaussian depth maps and
+strengthens geometric reconstruction accuracy. Unlike existing feed-forward 3DGS methods that typically train the full
+network, our framework freezes the original visual foundation model, including the backbone, depth head, and camera
+head. Only the multi-scale voxel module and Gaussian primitive decoding head are optimized. This design substantially
+reduces training cost and allows our method to be plugged
+into patch-feature-based visual foundation models.
+1. We propose VG2 GT, a feed-forward, non-pixel-aligned
+3DGS reconstruction framework for geometrically
+accurate Gaussian scene reconstruction from an arbitrary number of unposed and uncalibrated images.
+2. We introduce a multi-scale voxel-based feature enhancement strategy that splits and regresses Gaussian primitives from fine voxel features. Combined
+with stochastic solid volume rendering supervision,
+this design reduces overlapping artifacts and geometric errors commonly observed in pixel-aligned feedforward 3DGS methods.
+3. Extensive experiments on multiple datasets show that
+VG2 GT achieves state-of-the-art geometric reconstruction accuracy and novel view synthesis quality
+compared with existing feed-forward 3DGS methods.
+4. VG2 GT substantially reduces the training cost, enabling high-quality 3DGS reconstruction on frozen
+visual foundation models using only academic-scale
+computational resources, while remaining plug-andplay to any visual foundation models.
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+2. Related Works
+2.1. Traditional Pipelines
+Traditional pipelines for geometric reconstruction and
+novel view synthesis (NVS) from RGB images typically
+consist of three stages: camera pose estimation, dense reconstruction, and per-scene optimization. Camera poses and
+sparse 3D points can be estimated using hand-crafted features [20], learned descriptors [6], and feature matching
+methods [30]. Given the estimated poses and dense image
+features, dense depth estimation can then be performed [32,
+50]. Plane sweeping has been widely adopted in this stage
+because it balances computational cost and reconstruction
+performance [7]. After dense point-cloud reconstruction,
+traditional pipelines usually refine the scene representation
+through per-scene optimization. Neural radiance fields [24]
+and 3D Gaussian Splatting [15] are representative examples
+for improving reconstruction quality and enabling NVS.
+Although each component has advanced substantially,
+the decoupled design of traditional pipelines can lead to error
+accumulation. Errors introduced during camera pose estimation may propagate to subsequent per-scene optimization
+and degrade NVS quality [54]. The separated stages also
+increase computational cost and reduce overall efficiency.
+2.2. Optimization-based Novel View Synthesis
+Common 3D scene representations include meshes,
+point clouds, voxel grids, multi-plane images, and neural
+implicit functions. In recent years, radiance-field methods
+have shown strong potential for NVS and 3D reconstruction.
+Neural Radiance Fields (NeRF) and its variants [24, 2] map
+3D positions and viewing directions to colors and densities
+using multi-layer perceptrons (MLPs), enabling high-quality
+Page 2 of 15
+Leveraging social media news
+NVS. To improve computational efficiency and transferability, 3D Gaussian Splatting (3DGS) [15] represents a
+scene as explicit Gaussian primitives and enables real-time
+NVS through differentiable rasterization. Subsequent works
+have improved rendering quality [21], geometric accuracy
+[10, 11, 52], and training efficiency [29].
+Most NeRF and 3DGS methods require accurate camera
+parameters, which are usually estimated by classical SfM
+methods [31] or improved variants [27, 38]. This dependency can introduce additional errors. Several recent works
+therefore jointly optimize camera parameters and scene representations. However, these methods either require sequential RGB-D frames with known intrinsics [13, 9], or are
+limited to restricted scene settings [23, 44]. They also require
+per-scene training. In contrast, our method directly regresses
+3DGS scenes through a feed-forward network, avoiding
+camera-parameter estimation and per-scene optimization.
+scene consistency through multi-scale voxel module. This
+design improves both novel view synthesis (NVS) quality
+and geometric reconstruction accuracy, as illustrated in Figure 2.
+2.3. Visual Foundation Models
+To enhance the scene representation and enable NVS,
+3DGS [15] represents a scene as a set of Gaussian primitives.
+Each primitive defines a 3D Gaussian distribution parameterized by a center 𝜇𝑔 ∈ ℝ3 , opacity 𝜎𝑔 ∈ ℝ+ , rotation
+quaternion 𝑟𝑔 ∈ ℝ4 , scale 𝑠𝑔 ∈ ℝ3 , and color represented
+With advances in parallel computing and large-scale
+neural networks, visual foundation models (VFMs) have
+shown strong potential for 3D vision. DUSt3R [39] performs end-to-end reconstruction from two unconstrained
+RGB images to point maps using self-attention and crossattention. VGGT [36] further introduces alternating attention to support joint reasoning over multi-view RGB images.
+Subsequent works have explored improved encoder designs
+[14], training strategies [19], and permutation equivariance
+across input views [41]. These models show that camera
+estimation, depth estimation, and point-map prediction can
+be learned jointly with a shared large-scale Transformer
+backbone.
+Existing VFMs commonly use ViT-based encoders, such
+as DINO [26], together with alternating attention backbones.
+Sparse outputs, including camera parameters, are typically
+predicted by MLP heads. Dense outputs, including depth
+maps and point maps, are commonly decoded by DPT [28].
+Through DPT, patch tokens that are usually downsampled
+by a factor of 14 can be progressively upsampled and aligned
+with image pixels, enabling full-resolution depth and pointcloud estimation.
+Several works have extended VFMs to Gaussian scene
+regression [49, 19]. However, most methods decode Gaussian scenes with DPT heads, producing pixel-aligned Gaussian primitives. This formulation often leads to non-uniform
+Gaussian distributions and multi-view inconsistencies [18].
+AnySplat [12] performs non-pixel-aligned Gaussian reasoning through differentiable voxelization. However, it still
+first regresses pixel-aligned Gaussian primitives and then
+aggregates them into a Gaussian scene. Our method directly
+decodes Gaussian primitives from structured voxel features,
+avoiding this intermediate pixel-aligned representation.
+3. Method
+We propose VG2 GT, a feed-forward framework for constructing 3DGS representations from unconstrained RGB
+images. Built on VGGT [36], our method improves global
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+3.1. Preliminaries and Bottlenecks
+3.1.1. Preliminaries
+Feed-forward 3D reconstruction methods, such as VGGT
+[36] and DUSt3R [39], recover 3D scene representations
+{ }𝑁
+from 𝑁 unposed images 𝐈𝑖 𝑖=1 . A large visual Transformer
+ jointly encodes and interprets the input images. With
+a shared alternating-attention backbone and independent
+prediction heads, it produces pixel-aligned point maps 𝐏𝑖 ∈
+ℝ𝐻×𝑊 ×3 , depth maps 𝐃𝑖 ∈ ℝ𝐻×𝑊 ×1 , and camera pose
+representations 𝐂𝑖 ∈ ℝ9 , as formulated in Equation 1.
+({ } ) {
+}𝑁
+𝑁
+𝜙 𝐈𝑖 𝑖=1 = 𝐏𝑖 , 𝐃𝑖 , 𝐂𝑖 𝑖=1
+(1)
+2
+by 𝑘-th order spherical harmonics 𝑐𝑔 ∈ ℝ3×(𝑘+1) . Given
+the target camera pose 𝐂𝑖 , 3DGS projects each 3D Gaussian
+onto the image plane as a 2D Gaussian. It then renders
+the image using depth-ordered 𝛼-blending, as shown in
+Equation 2. Here,(Π(⋅) denotes
+Gaussian projection under
+)
+(𝑖) (𝑖)
+the camera pose, 𝜇𝑔 , Σ𝑔 denote the projected pixel coordinate and covariance of the 𝑔-th Gaussian in the 𝑖-th view,
+and 𝑜(𝑖)
+𝑔 (𝐩) denotes its effective opacity at pixel 𝐩.
+)
+(
+)
+(
+= Π 𝐂𝑖 ; 𝜇𝑔 , 𝑟𝑔 , 𝑠𝑔
+𝜇𝑔(𝑖) , Σ(𝑖)
+𝑔
+)
+∏(
+∑
+(2)
+(𝑖)
+1
+−
+𝑜
+(𝐩)
+(𝐩)
+𝑐𝑔 𝑜(𝑖)
+𝐈𝑖 (𝐩) =
+𝑔
+𝑗
+𝑔∈(𝐩)
+𝑗<𝑔
+3.1.2. Bottlenecks
+VGGT obtains one token for each image patch, typically
+corresponding to a 14 × 14 pixel region. The resulting image
+features are therefore downsampled by a factor of 14. To
+recover dense depth maps, VGGT uses DPT [28] to progressively upsample image tokens into pixel-aligned features. To
+obtain feed-forward 3DGS scenes, representative methods
+such as Depth Anything 3 (DA3) [19] apply a DPT head
+on the backbone features. A lightweight MLP then regresses
+Gaussian attributes for each pixel.
+However, pixel-aligned features lack global consistency
+in feed-forward networks and can introduce excessive overlap, since the architecture enforces a one-to-one correspondence between pixels and Gaussian primitives. We instead
+construct a non-pixel-aligned feed-forward network 𝜃 that
+jointly predicts a 3DGS scene 𝐆 and camera parameters
+{ }𝑁
+{ }𝑁
+𝐂𝑖 𝑖=1 from 𝑁 unposed images 𝐈𝑖 𝑖=1 , as formulated in
+Equation 3.
+{ }𝑁
+{(
+)}𝐺
+{ }𝑁
+𝜃 ( 𝐈𝑖 𝑖=1 ) = 𝜇𝑔 , 𝜎𝑔 , 𝑟𝑔 , 𝑠𝑔 , 𝑐𝑔 𝑔=1 ∪ 𝐂𝑖 𝑖=1 (3)
+Page 3 of 15
+Leveraging social media news
+Figure 2: Overview of VG2 GT. The frozen VFM takes multi-view RGB images as input, computes patch tokens, and decodes
+depth maps and camera parameters. Multi-scale voxels decode the Gaussian scene: coarse voxels enhance patch tokens, while
+fine voxels split and decode Gaussian primitives. During training, differentiable stochastic solid volume rendering supervises scene
+geometry.
+Here, the 3DGS scene 𝐆 consists of 𝐺 non-pixel-aligned
+Gaussian primitives. The number of primitives is not tied
+one-to-one to pixels or views, and therefore grows much
+more slowly than in pixel-aligned methods.
+3.2. Differentiable Multi-scale Voxel Module
+Our network backbone follows VGGT [36]. It uses
+DINOv2 [26] to extract multi-view image features and
+an alternating-attention backbone for scene understanding.
+Camera parameters and depth maps are predicted jointly.
+3.2.1. Coarse-level Feature Enhancement
+On top of this backbone, we introduce multi-scale voxel
+features to build a compact spatial representation. Given
+{ }𝑁
+the predicted depth maps 𝐃𝑖 𝑖=1 and camera parameters
+{ }𝑁
+𝐂𝑖 𝑖=1 , each pixel is projected into 3D space to obtain
+{ }𝑁
+dense pixel-aligned global point clouds 𝐏𝑖 𝑖=1 . We also
+{ }𝑁
+extract the undecoded image patch features 𝐅𝑃𝑖 𝑖=1 from
+the backbone. Following related voxel-based designs [55,
+35], we align global point clouds with image patch features
+by interpolation and point-cloud downsampling, and then
+construct global voxel features 𝐅𝑣 . Each voxel feature 𝐟𝑚𝑣
+is computed as a confidence-weighted average over all 3D
+points Ω𝑚 inside the voxel, where the weights are given
+{ }𝑁
+by depth confidence 𝐍𝐷
+𝑖 𝑖=1 , as shown in Equation 4.
+The confidence of each voxel is defined as the minimum
+point confidence within the voxel, reducing the influence of
+unreliable points on reconstruction.
+∑
+𝑝∈Ω 𝐧(𝐩) 𝐟 (𝑝)
+𝑣
+𝐟𝑚 = ∑ 𝑚
+𝑝∈Ω𝑚 𝐧(𝑝)
+(4)
+𝑣
+𝐧𝑚 = min 𝐧(𝑝)
+𝑝∈Ω𝑚
+We then use PointTransformerV3 (PTv3) [47] to enhance each voxel feature. PTv3 jointly models spatial and
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+feature distributions with a permutation-invariant serialized
+point-cloud network. Specifically, we serialize the sparse
+voxel grid into a one-dimensional feature sequence with
+, enhance the sequence with PTv3 𝜓 , and deserialize
+the enhanced features back into voxel space, as shown in
+Equation 5.
+{ }𝑀
+(
+) ({ 𝑣 }𝑀 )
+=  −1 ◦𝜓 ◦
+𝐟𝑚 𝑚=1 ,
+𝐟̂𝑚𝑣
+𝑚=1
+(5)
+After obtaining the enhanced voxel features, we map
+them back to the 3D points in Ω𝑚 for subsequent processing.
+For each point 𝐩, we find its 16 nearest voxel centers with knearest neighbors (KNN). The enhanced voxel features are
+then interpolated back to the point by distance-weighted aggregation. This process produces enhanced features aligned
+with image patches. We fuse these features into backbone
+patch features using zero convolution, and then decode depth
+maps and camera parameters again. Although this design
+requires two decoding rounds, most VFM runtime lies in the
+backbone. The decoding heads add only marginal overhead,
+so the overall framework remains efficient.
+3.2.2. Fine-level Gaussian Scene Decoding
+Next, we repeat the computation in Equation 4 to obtain
+fine voxel features from the enhanced image patches. To
+capture scene geometry at a finer granularity, we no longer
+downsample the global point cloud. Instead, following the
+design of the depth head, we use a DPT head to upsample
+image features and align them with the global point cloud.
+After obtaining fine-grained voxel features 𝐟𝑚𝑑𝑣 , we use
+PointMLP [22] instead of PTv3 for feature enhancement.
+PTv3 has substantially higher memory consumption when
+processing million-point-scale point clouds, which can lead
+to GPU out-of-memory errors. In contrast, PointMLP is
+more memory efficient and stable for large-scale point
+clouds because of its MLP-based permutation-invariant
+architecture, as shown in Equation 6, where 𝜙 denotes
+Page 4 of 15
+Leveraging social media news
+the PointMLP network.
+{ }𝑀
+(
+) ({ 𝑑𝑣 }𝑀 )
+𝐟̂𝑚𝑑𝑣
+=  −1 ◦𝜙 ◦
+𝐟𝑚 𝑚=1 ,
+𝑚=1
+𝐯. Following [52], color rendering can be expressed as
+Equation 8.
+(6)
+{ }
+Given the dense voxel features 𝐟̂𝑚𝑑𝑣 and voxel cen{ 𝑑𝑣 }
+ters 𝐱𝑚
+, we decode the Gaussian scene 𝐆. To stabilize
+training, we use residual predictions for the Gaussian center
+𝜇𝑔 and color 𝑐𝑔 . The initial color of each voxel is computed
+as a weighted average of image colors. Spherical harmonic
+coefficients above order 0 are initialized to 0, and the initial
+Gaussian center is set to the voxel center. The network then
+predicts residual offsets for the Gaussian center and spherical
+harmonic coefficients. The Gaussian scale 𝑠𝑔 is obtained by
+applying a sigmoid activation with an upper bound of twice
+the voxel size. The rotation quaternion 𝑟𝑔 and opacity 𝜎𝑔 are
+directly regressed by MLPs.
+Voxel sparsity inevitably limits the recoverable scene
+detail. To improve fine-grained accuracy, we introduce a
+self-splitting design in which each voxel feature regresses
+multiple sets of Gaussian primitive parameters. Together
+with residual center prediction, this design allows Gaussian
+primitives within a single voxel to preserve local geometric
+complexity.
+3.3. Continuous Stochastic Solids Volume
+Rendering
+𝐈pix = 𝐜𝐺(𝑡∗ )
+(8)
+Here, 𝑡∗ denotes the location of the maximum Gaussian
+response along the ray. Combining Equation 7 and Equation 8 gives the vacancy formulation in Equation 9. This
+formulation makes volume rendering equivalent to rasterization while allowing transmittance to vary continuously along
+each ray. As shown in Figure 3, this continuous formulation
+improves depth synthesis quality.
+√
+(9)
+𝐯 = 1 − 𝐺(𝑡∗ )
+(a) Rasterized depth rendering of 3DGS
+To further improve the geometric accuracy of 3DGS, we
+replace standard 3DGS rasterization [15] with volume rendering. We treat Gaussian primitives as continuous stochastic solids and render them along camera rays [25], as shown
+in Equation 7.
+𝑡𝑓
+𝐈pix =
+∫𝑡𝑛
+(
+)
+𝑝(𝑡) 𝐜(𝐱(𝑡), 𝜔) 𝑑𝑡 = 𝐜 1 − 𝐯 (𝑡)2 ,
+𝑝(𝑡) = 𝑇 (𝑡) 𝜎(𝐱(𝑡), 𝜔),
+(
+𝑡
+𝑇 (𝑡) = exp −
+∫𝑡𝑛
+)
+(7)
+𝜎(𝐱(𝑠), 𝜔) 𝑑𝑠
+Here, 𝐱(𝑡) denotes the 3D position along the camera ray
+at depth 𝑡, 𝜔 denotes the viewing direction, 𝑇 (𝑡) denotes
+accumulated transmittance, and 𝐯 denotes the vacancy of the
+solid.
+Because our feed-forward process also predicts depth
+maps, the rendered depth of Gaussian primitives can be
+aligned with the VFM-regressed depth maps. Existing works
+improve the geometric quality of 3DGS scenes by adding
+regularization, constraining Gaussian shapes, or rendering
+depth maps with rasterization-based strategies [10, 11].
+However, 𝛼-blending-based depth rendering mixes foreground and background depths, which limits geometric
+accuracy. Median-depth rasterization avoids this averaging,
+but its gradients are propagated only to the selected median
+primitive, and it can also produce abrupt depth changes near
+primitive boundaries. We instead model Gaussian primitives
+as continuous entities. To make volume rendering equivalent
+to rasterization, we compute the corresponding vacancy
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+(b) Stochastic solid volume rendering of our method
+Figure 3: Comparison of different depth rendering strategies.
+Compared with rasterization-based median depth, our continuous volume rendering produces smoother and more accurate
+depth maps.
+During forward propagation, we define the depth map as
+the median depth, namely the location where accumulated
+transmittance reaches 0.5. The accumulated transmittance
+of multiple Gaussian primitives is computed by multiplicative composition. The median location is then solved with
+a fixed number of bisection iterations. During backward
+propagation, gradients are propagated with the closed-form
+derivative of depth with respect to Gaussian parameters, as
+shown in Equation 10.
+/
+𝜕𝑑
+𝜕𝑇 (𝑑; 𝜃) 𝜕𝑇 (𝑑; 𝜃)
+=−
+(10)
+𝜕𝜃
+𝜕𝜃
+𝜕𝑑
+Here, 𝑑 denotes the median depth location of a pixel, and 𝜃
+denotes the parameters of Gaussian primitives.
+Page 5 of 15
+Leveraging social media news
+Through this pipeline, we obtain a fully differentiable
+{ }𝑁
+process from unposed images 𝐈𝑖 𝑖=1 to the Gaussian scene
+{ }𝑁
+𝐆, and then to rendered images 𝐈𝐆
+𝑖 𝑖=1 and depth maps
+{ 𝐆 }𝑁
+𝐃𝑖 𝑖=1 .
+With enhance , the enhanced decoded outputs are explicitly
+encouraged to improve over the pre-enhancement outputs.
+This stabilizes the enhancement module while preserving
+knowledge from the original VFM.
+We then supervise the Gaussian scene generated through
+volume rendering, as shown in Equation 12. Following perscene 3DGS training, we compute the L1 loss 𝑐1 and SSIM
+loss [42] 𝑐SSIM on rendered RGB images. To strengthen
+geometric reconstruction, we additionally align rendered
+depth maps with the depth maps regressed by the feedforward network. We also apply an absolute loss between
+rendered depth maps and ground-truth depth. These terms
+jointly improve rendered-depth accuracy and consistency
+with decoded depth maps.
+𝐆 = 𝑐1 + 𝑐SSIM + 1 (𝐃, 𝐃𝐆 ) + 1 (𝐃gt , 𝐃𝐆 ) + 𝑛
+(12)
+Figure 4: RGB images and depth maps rendered by rasterization and volume rendering for the same Gaussian scene.
+As shown in Figure 4, we render the same Gaussian
+scene using vanilla rasterization and continuous stochastic
+solids volume rendering. The resulting RGB images are
+nearly identical, whereas the depth maps differ noticeably.
+Vanilla rasterization produces floating-depth artifacts, while
+volume rendering recovers more accurate depth details. The
+ablation studies and quantitative results further support the
+effectiveness of volume rendering for improving geometric
+reconstruction accuracy.
+3.4. Training
+We use DA3-GIANT [19] as the VFM for training.
+Throughout training, the DA3 backbone and all original
+decoders are kept frozen. We discard the original DA3
+Gaussian head and train only the proposed differentiable
+multi-scale voxel module. This design allows our method to
+be plugged into arbitrary feed-forward patch-feature-based
+VFMs while preserving the representation capability of the
+pretrained backbone.
+Datasets. Following prior works [17, 36], we train our
+model on a mixture of three datasets: the synthetic Infinigen
+dataset, the video-captured KITTI dataset [34, 8], and the
+RGB-D ScanNet dataset [4]. These datasets cover indoor
+and outdoor scenes under both synthetic and real-captured
+conditions. This diversity improves model generalization
+and transferability to unseen scenes.
+Loss Functions. We first adopt the same training losses
+as VGGT, supervising point maps with pointmap and depth
+maps with depth . To improve training stability, we also
+record the losses before image patch feature enhancement,
+including the point-map loss ̂ pointmap and depth loss ̂ depth .
+We introduce an additional supervision term that encourages
+loss reduction after enhancement:
+(
+)
+enhance
+= 𝜆enhance
+⋅ max 0, ̂ * − *
+*
+*
+(11)
+enhance = enhance
++ enhance
+pointmap
+depth
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+To encourage feed-forward Gaussian primitives to align
+with scene surfaces, we introduce a normal regularization
+loss following 2DGS [10]. Unlike 2DGS, which derives
+rendered normal maps from rendered depth maps, we render
+normal maps directly from Gaussian primitives. This decouples normal supervision from depth rendering. For each
+Gaussian primitive, we compute the tangent-plane normal of
+the density surface at the ray intersection under the current
+viewing direction. We then render the normal map using the
+same volume rendering formulation as RGB rendering. The
+normal loss 𝑛 is computed by cosine similarity between the
+rendered normal map and the normal map derived from the
+depth map.
+Implementation Details. We optimize the proposed
+objective with the AdamW optimizer for 420K iterations.
+The initial learning rate is set to 3 × 10−6 and decayed to
+1 × 10−8 using a cosine annealing schedule. Following prior
+work [12], we set the default voxel size to 0.002 meters,
+split each voxel feature into two Gaussian primitives, and
+use an image resolution of 224 × 448. At each iteration,
+we randomly sample 3-18 images. Training is conducted on
+two NVIDIA RTX PRO 6000 GPUs and takes 49.5 hours,
+corresponding to 99 GPU hours.
+4. Experiments
+4.1. Experimental Setup
+Metrics. Following prior works [36, 19, 12], we evaluate
+both the reconstruction quality and NVS performance of
+the Gaussian scenes produced by VG2 GT. For geometric
+reconstruction, we report RMSE (L2 error), ABS (L1 error),
+and 𝛿𝑛 accuracy for rendered depth maps, as defined in
+Equation 13.
+(
+)
+𝐷̂ 𝑖 𝐷𝑖
+,
+<𝑛
+(13)
+max
+𝐷𝑖 𝐷̂ 𝑖
+where 𝐷̂ 𝑖 and 𝐷𝑖 denote the predicted and ground-truth
+depths at pixel 𝑖. For rendered normal maps, we report mean
+Page 6 of 15
+Leveraging social media news
+Method
+RMSE↓
+Replica Dataset[33]
+0.547
+MVSplat[3]
+VolSplat[40]
+0.698
+DepthSplat[48]
+0.279
+FreeSplatter[49]
+0.797
+VGGT[36]
+0.973
+AnySplat[12]
+0.156
+0.285
+YoNoSplat[51]
+DA3[19]
+0.619
+VG2 GT(3DGS) 0.092
+VG2 GT
+0.069
+DTU Dataset[1]
+0.069
+MVSplat[3]
+VolSplat[40]
+0.033
+DepthSplat[48]
+0.022
+FreeSplatter[49]
+0.030
+VGGT[36]
+0.031
+AnySplat[12]
+0.016
+YoNoSplat[51]
+0.033
+0.029
+DA3[19]
+VG2 GT(3DGS) 0.014
+0.015
+VG2 GT
+TAT Dataset[16]
+MVSplat[3]
+0.839
+VolSplat[40]
+0.673
+DepthSplat[48]
+0.488
+FreeSplatter[49]
+0.536
+VGGT[36]
+0.629
+AnySplat[12]
+0.394
+YoNoSplat[51]
+0.570
+DA3[19]
+0.571
+VG2 GT(3DGS) 0.381
+VG2 GT
+0.389
+3 Views
+ABS↓
+𝛿1.25 ↑
+𝛿1.05 ↑
+RMSE↓
+10 Views
+ABS↓
+𝛿1.25 ↑
+𝛿1.05 ↑
+RMSE↓
+20 Views
+ABS↓
+𝛿1.25 ↑
+𝛿1.05 ↑
+0.143
+0.191
+0.059
+0.284
+0.263
+0.039
+0.080
+0.192
+0.011
+0.007
+0.790
+0.683
+0.942
+0.559
+0.458
+0.992
+0.947
+0.670
+0.995
+0.997
+0.272
+0.165
+0.707
+0.144
+0.111
+0.710
+0.434
+0.180
+0.940
+0.990
+0.501
+0.407
+0.279
+0.918
+0.972
+0.171
+0.237
+0.394
+0.109
+0.078
+0.114
+0.099
+0.053
+0.270
+0.244
+0.041
+0.059
+0.116
+0.014
+0.011
+0.872
+0.903
+0.954
+0.569
+0.500
+0.990
+0.972
+0.878
+0.996
+0.997
+0.474
+0.346
+0.744
+0.138
+0.122
+0.751
+0.632
+0.289
+0.980
+0.990
+0.780
+0.461
+0.180
+0.619
+0.792
+0.121
+0.155
+0.296
+0.100
+0.043
+0.251
+0.130
+0.040
+0.205
+0.219
+0.036
+0.047
+0.092
+0.022
+0.006
+0.715
+0.853
+0.969
+0.677
+0.563
+0.995
+0.985
+0.922
+0.980
+0.999
+0.336
+0.229
+0.818
+0.191
+0.142
+0.757
+0.674
+0.364
+0.966
+0.994
+0.663
+0.382
+0.284
+0.333
+0.338
+0.259
+0.441
+0.398
+0.237
+0.238
+0.163
+0.515
+0.748
+0.702
+0.555
+0.961
+0.433
+0.625
+0.962
+0.961
+0.037
+0.124
+0.261
+0.320
+0.141
+0.587
+0.105
+0.162
+0.759
+0.757
+0.092
+0.080
+0.070
+0.092
+0.123
+0.031
+0.124
+0.037
+0.026
+0.026
+0.093
+0.087
+0.089
+0.116
+0.149
+0.026
+0.164
+0.034
+0.020
+0.019
+0.905
+0.895
+0.928
+0.839
+0.778
+0.988
+0.696
+0.982
+0.988
+0.988
+0.430
+0.481
+0.388
+0.346
+0.179
+0.892
+0.205
+0.831
+0.935
+0.937
+0.140
+0.097
+0.105
+0.090
+0.118
+0.023
+0.143
+0.027
+0.021
+0.021
+0.129
+0.094
+0.103
+0.113
+0.143
+0.019
+0.196
+0.022
+0.016
+0.015
+0.836
+0.904
+0.924
+0.848
+0.781
+0.993
+0.615
+0.991
+0.992
+0.992
+0.398
+0.476
+0.386
+0.343
+0.209
+0.935
+0.170
+0.906
+0.950
+0.954
+0.483
+0.355
+0.295
+0.344
+0.292
+0.089
+0.221
+0.263
+0.077
+0.081
+0.291
+0.556
+0.723
+0.686
+0.477
+0.936
+0.721
+0.567
+0.947
+0.947
+0.065
+0.164
+0.351
+0.234
+0.113
+0.592
+0.236
+0.161
+0.740
+0.733
+1.003
+0.348
+0.431
+0.507
+0.400
+0.192
+0.327
+0.293
+0.145
+0.148
+0.776
+0.321
+0.291
+0.491
+0.284
+0.093
+0.266
+0.315
+0.057
+0.058
+0.109
+0.498
+0.655
+0.551
+0.514
+0.919
+0.612
+0.555
+0.950
+0.952
+0.024
+0.138
+0.229
+0.164
+0.118
+0.606
+0.201
+0.144
+0.777
+0.773
+0.835
+0.418
+0.413
+0.486
+0.611
+0.371
+0.452
+0.415
+0.264
+0.265
+0.436
+0.200
+0.179
+0.252
+0.290
+0.129
+0.315
+0.224
+0.075
+0.077
+0.353
+0.693
+0.733
+0.567
+0.494
+0.866
+0.574
+0.654
+0.921
+0.926
+0.106
+0.234
+0.354
+0.136
+0.101
+0.629
+0.145
+0.212
+0.741
+0.708
+Table 1
+Quantitative Gaussian-scene depth rendering results on Replica, DTU, and TAT under multiple input-view settings.
+Figure 5: Visual comparisons between VG2 GT and baselines for geometric reconstruction. Gaussian depth maps rendered by
+VG2 GT show higher accuracy, indicating improved geometric fidelity of the reconstructed Gaussian scenes.
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+Page 7 of 15
+Leveraging social media news
+Method
+PSNR↑
+Replica Dataset[33]
+MVSplat[3]
+25.70
+VolSplat[40]
+19.26
+DepthSplat[48]
+22.98
+FreeSplatter[49]
+18.19
+13.61
+VGGT[36]
+AnySplat[12]
+27.56
+28.48
+YoNoSplat[51]
+DA3[19]
+21.38
+VG2 GT(3DGS)
+29.87
+31.03
+VG2 GT
+TAT Dataset[16]
+19.83
+MVSplat[3]
+VolSplat[40]
+16.67
+DepthSplat[48]
+16.90
+FreeSplatter[49]
+15.30
+VGGT[36]
+14.89
+20.75
+AnySplat[12]
+YoNoSplat[51]
+20.44
+18.22
+DA3[19]
+VG2 GT(3DGS)
+21.68
+VG2 GT
+22.46
+3 Views
+SSIM↑
+LPIPS↓
+PSNR↑
+10 Views
+SSIM↑
+LPIPS↓
+PSNR↑
+20 Views
+SSIM↑
+LPIPS↓
+0.830
+0.681
+0.798
+0.707
+0.608
+0.877
+0.871
+0.747
+0.876
+0.898
+0.240
+0.453
+0.403
+0.510
+0.626
+0.151
+0.239
+0.257
+0.184
+0.169
+24.18
+28.66
+23.64
+16.78
+14.80
+25.76
+29.06
+23.83
+30.08
+30.87
+0.835
+0.876
+0.797
+0.653
+0.582
+0.843
+0.884
+0.804
+0.883
+0.898
+0.257
+0.180
+0.420
+0.540
+0.589
+0.208
+0.241
+0.243
+0.208
+0.191
+24.17
+22.17
+23.55
+16.85
+14.89
+25.40
+28.76
+25.00
+29.54
+30.41
+0.807
+0.747
+0.788
+0.699
+0.595
+0.837
+0.878
+0.812
+0.876
+0.894
+0.300
+0.400
+0.419
+0.530
+0.579
+0.205
+0.239
+0.213
+0.202
+0.184
+0.628
+0.527
+0.477
+0.455
+0.456
+0.676
+0.572
+0.483
+0.691
+0.716
+0.359
+0.474
+0.679
+0.608
+0.615
+0.285
+0.418
+0.379
+0.294
+0.272
+18.06
+17.78
+15.21
+12.92
+14.15
+17.60
+19.82
+18.98
+19.89
+20.22
+0.545
+0.519
+0.446
+0.419
+0.444
+0.590
+0.552
+0.519
+0.618
+0.650
+0.441
+0.485
+0.675
+0.693
+0.650
+0.347
+0.413
+0.348
+0.328
+0.321
+14.62
+16.77
+14.59
+12.49
+13.99
+16.90
+19.49
+18.89
+19.34
+20.01
+0.412
+0.454
+0.420
+0.408
+0.434
+0.547
+0.528
+0.504
+0.563
+0.588
+0.584
+0.537
+0.699
+0.715
+0.675
+0.392
+0.443
+0.355
+0.393
+0.383
+Table 2
+Quantitative NVS results on the Replica and TAT datasets under multiple input-view settings.
+Figure 6: Visual comparisons between VG2 GT and baselines for NVS. Multi-scale voxel-based Gaussian scenes suppress the
+overlapping artifacts commonly observed in pixel-aligned methods, improving scene geometry and NVS quality.
+angular error (Mean◦ ), median angular error (Median◦ ),
+thresholded angular accuracy (Acc@10◦ and Acc@30◦ ),
+and cosine similarity (Cos.). For novel view synthesis, we
+evaluate rendering fidelity using PSNR, SSIM [43], and
+LPIPS [53].
+We further evaluate the spatial uniformity of the reconstructed scene point cloud using the coefficient of variation
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+(CV). For each point, we identify its 𝑁 nearest neighbours
+with KNN and compute the mean neighbour distance. CV is
+defined as the ratio between the standard deviation and the
+mean of these per-point distances, as shown in Equation 14.
+Page 8 of 15
+Leveraging social media news
+A lower CV indicates a more uniform point-cloud distribution.
+√
+(
+)2
+1 ∑𝑁
+1 ∑𝑁
+𝑑
+−
+𝑑
+𝑖
+𝑖=1
+𝑖=1 𝑖
+𝑁
+𝑁
+CV =
+(14)
+1 ∑𝑁
+𝑑
+𝑖
+𝑖=1
+𝑁
+Datasets. We evaluate all methods on three datasets: Replica
+[33], which contains synthetic indoor scenes; DTU [1], a
+standard benchmark for geometry reconstruction from captured RGB images; and Tanks and Temples (TAT) [16],
+which contains real outdoor scenes. This protocol covers
+diverse scene types and allows robustness to be assessed
+across different environments. During evaluation, all input
+images are center-cropped and resized to 518 × 518.
+Baselines. We compare against state-of-the-art (SOTA)
+pose-free feed-forward 3DGS methods, including FreeSplatter [49], AnySplat [12], YoNoSplat [51], and DA3 [19].
+These methods predict pixel-aligned Gaussian scenes, while
+AnySplat further introduces a voxel module to re-voxelize
+and aggregate the predicted Gaussians. For a fair comparison, we use the same default voxel size as our method
+(0.002 m). We also include posed feed-forward 3DGS baselines, including MVSplat [3], VolSplat [40], and DepthSplat
+[48]. In addition, we compare with the standard 3DGS
+initialization strategy [15], where VGGT [36] generates
+colored point clouds for initializing the Gaussian scene.
+4.3. Evaluation of Novel View Synthesis
+We evaluate novel view synthesis on the Replica and
+TAT datasets. For each scene, we also select 3, 10, and
+20 input images and report PSNR, SSIM, and LPIPS. As
+shown in Table 2 and Figure 6, our method consistently
+outperforms state-of-the-art baselines across most inputview settings. By suppressing overlapping artifacts, VG2 GT
+improves scene geometry and thereby enhances novel view
+synthesis performance.
+4.4. Evaluation of Normal Map
+VG2 GT’s accurate Gaussian scene geometry also improves the quality of rendered normal maps. As shown in
+Table 3 and Figure 7, VG2 GT achieves clear advantages in
+normal-map rendering on the Replica and DTU datasets.
+Method
+Mean◦ ↓
+Replica Dataset[33]
+59.279
+YoNoSplat
+AnySplat
+25.035
+DA3
+52.797
+VG2 GT
+7.339
+DTU Dataset[1]
+44.400
+YoNoSplat
+AnySplat
+26.087
+60.484
+DA3
+VG2 GT
+18.607
+Median◦ ↓
+Acc@10◦ ↑
+Acc@30◦ ↑
+Cos.↑
+61.548
+14.958
+52.102
+3.636
+0.020
+0.360
+0.056
+0.839
+0.154
+0.724
+0.268
+0.955
+0.461
+0.831
+0.534
+0.972
+42.100
+20.837
+62.141
+14.077
+0.050
+0.193
+0.016
+0.337
+0.345
+0.691
+0.136
+0.842
+0.654
+0.850
+0.445
+0.914
+Table 3
+Quantitative normal-map accuracy on the Replica and DTU
+datasets.
+4.2. Evaluation of Reconstruction Geometry
+We evaluate geometric reconstruction on the DTU,
+Replica, and TAT datasets. To address the scale ambiguity
+of pose-free reconstruction, we follow prior works [35, 12]
+and first globally align each predicted depth map to the
+ground-truth depth map. RMSE, ABS, 𝛿1.25 , and 𝛿1.05 are
+then computed on the aligned depth maps. For DTU and
+TAT, the ground-truth depth maps are obtained by backprojecting scanned point clouds. We therefore apply valid
+depth masks before both alignment and evaluation.
+We evaluate geometric reconstruction under different
+numbers of input views. For each scene, we randomly select 3, 10, and 20 input images. During training, RGB
+images and depth maps are rendered from the Gaussian
+scene using stochastic solid volume rendering. During evaluation, the generated Gaussian scenes are rendered using
+both the vanilla 3DGS rasterizer [15] and stochastic solid
+volume rendering. As shown in Table 1 and Figure 5, the
+Gaussian scenes regressed by our method achieve higher
+geometric accuracy than state-of-the-art baselines across
+most datasets and input-view settings. Pixel-aligned Gaussian scene regression methods, represented by DA3, often
+produce overlapping artifacts when multi-view Gaussian
+primitives are misaligned by coupled depth and camera-pose
+errors. These artifacts degrade scene geometry. In contrast,
+the proposed differentiable multi-scale voxel module, combined with stochastic solid volume rendering supervision,
+suppresses these artifacts and improves geometric accuracy.
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+Figure 7: Visual comparisons of rendered normal maps. VG2 GT
+produces more accurate and spatially consistent normal maps
+than pixel-aligned baselines.
+4.5. Evaluation of Time Consumption
+The training and inference costs of VG2 GT remain well
+controlled. We evaluate the time consumption of VG2 GT
+using 10 input images.
+Inference. Although VG2 GT decodes depth maps and
+camera parameters twice, the additional decoding overhead
+is small relative to the backbone. It requires only 0.0852 s
+at a resolution of 224 × 448. Compared with the original
+DA3 (0.764 s), our method increases inference time by 0.358
+s, reaching 1.122 s in total. Most of the additional cost
+comes from fine-level Gaussian scene decoding (0.293 s).
+Page 9 of 15
+Leveraging social media news
+Training. Compared with other pixel-aligned 3DGS
+methods (AnySplat: 768 A800 GPU hours; DA3: 30,720
+H100 GPU hours) and VFMs (VGGT: 13,824 A100 GPU
+hours; MapAnything: 9,216 H200 GPU hours), our method
+requires substantially lower training cost, using only 99 RTX
+PRO 6000 GPU hours. This efficiency mainly comes from
+keeping the VFM fully frozen during training. As shown in
+Figure 8b and Table 5, using the time conversion of [5],
+our method reduces the required training time compared
+with backbone-finetuning strategies represented by AnySplat, while supporting plug-and-play adaptation to VFMs.
+(a) Inference time.
+Method
+(b) Training time.
+Figure 8: Time consumption comparisons for inference and
+training.
+Notably, owing to our voxel-based Gaussian scene decoding,
+when the image resolution increases to 518 × 518, the finevoxel decoding time remains almost unchanged. The total
+inference time is 2.440 s, only 0.260 s higher than DA3
+(2.180 s), as shown in Figure 8a.
+Figure 9: Number of Gaussian primitives and decoding-head
+time as the number of input images increases.
+Ours
+AnySplat
+DA3
+VGGT
+MapAnything
+CV↓
+YoNoSplat
+0.644
+AnySplat
+0.387
+DA3
+7.642
+VG2 GT
+0.353
+Table 4
+Point-cloud uniformity evaluation on the Replica dataset.
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+PRO 6000
+A800
+H100
+A100
+H200
+Training
+Time(h)
+99
+768
+30720
+13824
+9216
+Converted
+Time(h)
+99
+685.824
+57415.68
+12344.832
+24689.664
+Table 5
+Training-cost comparison across different methods.
+4.6. Evaluation of Coarse-level Feature
+Enhancement
+Coarse-level feature enhancement improves both subsequent fine-level Gaussian scene decoding and depth map
+decoding. Because the enhancement is applied only to image tokens and does not modify camera tokens, cameraparameter regression remains consistent with the backbone
+VFM. We evaluate DPT-based depth regression after imagetoken enhancement. As shown in Table 6, depth maps decoded from the enhanced tokens achieve consistent accuracy
+improvements on both ScanNet and TAT.
+Dataset
+Voxel-based alignment also controls both the number
+of Gaussian primitives and the decoding cost as the number of input views increases. As shown in Figure 9, the
+pixel-aligned baseline DA3 shows an approximately linear
+increase in both primitive count and decoding time. In contrast, VG2 GT uses multi-scale voxelization to fuse features
+in overlapping regions as additional views are introduced.
+With approximately 50 input images, the decoding time
+and primitive count are reduced to 24.83% and 56.2% of
+DA3 on DTU, and to 20.88% and 46.38% on Replica. In
+addition, Table 4 shows that the point cloud generated by
+VG2 GT achieves a much lower CV than DA3 and reaches
+a level comparable to AnySplat based on voxel-aggregation.
+These results indicate that voxel-based method significantly
+improves point-cloud uniformity.
+GPU
+ScanNet[4]
+TAT[16]
+Method
+VGGT[36]
+DA3[19]
+VG2 GT
+VGGT[36]
+DA3[19]
+VG2 GT
+ABS↓
+0.039
+0.036
+0.032
+0.019
+0.016
+0.013
+RMSE↓ 𝛿1.05 ↑
+0.014
+0.823
+0.014
+0.845
+0.013 0.871
+0.324
+0.917
+0.276
+0.954
+0.232 0.967
+𝛿1.03 ↑
+0.693
+0.739
+0.788
+0.849
+0.893
+0.927
+Table 6
+Quantitative depth evaluation of coarse-level feature enhancement.
+4.7. Ablation Study
+To evaluate the contribution of each component in
+VG2 GT, we conduct ablation studies on continuous stochastic solid volume rendering (3DGS), rendered depth supervision (w/o Depth), coarse-level feature enhancement (w/o
+Coarse), enhancement loss (w/o Enhance), and the selfsplitting Gaussian MLP (w/o Split). Following the same
+evaluation protocol, we report both NVS quality and geometric reconstruction accuracy for the reconstructed Gaussian
+scenes.
+As shown in Table 7, removing any component degrades
+both NVS performance and geometric accuracy, indicating
+Page 10 of 15
+Leveraging social media news
+Method
+3DGS
+w/o Depth
+w/o Coarse
+w/o Enhance
+w/o Split
+VG2 GT (full)
+PSNR
+29.59
+28.83
+29.11
+28.93
+28.19
+30.86
+NVS
+SSIM
+0.888
+0.876
+0.880
+0.878
+0.865
+0.898
+LPIPS
+0.211
+0.219
+0.209
+0.219
+0.219
+0.192
+Depth
+RMSE ABS
+𝛿1.25
+𝛿1.05
+1.2296 0.3005 0.7088 0.5940
+0.1014 0.0137 0.9944 0.9855
+0.0990 0.0130 0.9946 0.9863
+0.0994 0.0138 0.9946 0.9862
+0.1083 0.0147 0.9935 0.9825
+0.0786 0.0109 0.9968 0.9904
+Table 7
+Ablation study of VG2 GT. We report averaged NVS and depth
+metrics on the Replica dataset.
+that each module contributes to the final reconstruction
+quality. Ablating continuous stochastic solid volume rendering only slightly reduces NVS performance, but it causes
+severe geometric degradation. This result confirms its role
+in improving the geometric accuracy of Gaussian scenes and
+further shows that better geometry also benefits NVS.
+4.8. Parameter Tuning Experiment
+To validate the splitting number used in fine-level Gaussian scene decoding, we evaluate NVS performance and
+geometric reconstruction accuracy under different numbers
+of Gaussian splits. As shown in Table 8, the default splitting
+number is 2. Disabling splitting leads to a clear performance
+drop, whereas increasing the splitting number to 4 provides
+only marginal NVS gains and slightly degrades rendereddepth accuracy. Because the splitting number is directly
+proportional to the final number of Gaussian primitives, we
+use 2 as a practical trade-off among reconstruction quality,
+computational cost, and storage efficiency.
+Method
+w/o split
+split=2
+split=4
+PSNR
+28.191
+30.855
+30.954
+NVS
+SSIM
+0.865
+0.898
+0.899
+LPIPS
+0.219
+0.192
+0.183
+Depth
+RMSE
+ABS
+𝛿1.25
+𝛿1.05
+0.1083 0.0147 0.9935 0.9825
+0.0786 0.0109 0.9968 0.9904
+0.0803 0.0111 0.9966 0.9906
+Table 8
+Parameter tuning results for the splitting number in fine-level
+Gaussian scene decoding.
+that VG2 GT reconstructs geometrically accurate Gaussian
+scenes under different input settings, achieves state-of-theart RGB and depth NVS performance, and controls the otherwise linear growth of Gaussian primitives as the number
+of input views increases.
+5.2. Limitation and further work
+The current framework is primarily designed for static
+scenes. This limitation arises from the explicit representation
+used by Gaussian Splatting. Directly aggregating observations into a single static voxel-Gaussian representation can
+therefore introduce blurred geometry, inconsistent Gaussian
+distributions, or degraded NVS quality. Extending VG2 GT
+to dynamic scenes is an important direction for future work.
+Recent VFMs have shown increasing ability to reason over
+temporal image sequences [37], while dynamic Gaussian
+representations can model time-varying motion fields and
+deformable scene structures [45]. A natural extension is
+to regress dynamic Gaussian transformation fields directly
+from temporal VFM features, rather than predicting only
+static Gaussian parameters. Such a feed-forward formulation could preserve the efficiency of our frozen-backbone
+design while avoiding the per-scene optimization commonly
+required by dynamic 3D reconstruction and dynamic NVS
+methods.
+CRediT authorship contribution statement
+Yibin Zhao: Data curation, Writing, Methodology, Experiments. Yihan Pan: Validation, Methodology. Jun Nan:
+Investigation, Visualization. WenLi Yang: Software, Investigation. Liwei Chen: Investigation, Methodology. Jianjun
+Yi: Funding acquisition, Supervision, Validation.
+Appendix
+A.1. Experiment Details
+This section provides additional details on model
+training and evaluation.
+5. Conclusion and further work
+A.1.1. Model Training
+5.1. Conclusion
+For training initialization, we use DA3-GIANT-1.1
+(1.15B) [19] as the pretrained checkpoint. This model includes a DPT-based pixel-aligned Gaussian head but does
+not provide a metric-scale head. To recover the scale required by our differentiable multi-scale voxel module, we
+follow the official GitHub implementation and regress met𝑓 ⋅𝑑
+ric depth as 𝑑metric = 300net .
+During training, we follow a sampling strategy similar to
+the official VGGT implementation [36]. To avoid color shifts
+when training the Gaussian-scene head, we disable random
+color augmentation.
+For loss computation, metric-scale prediction errors in
+the VFM backbone can destabilize training. We therefore
+follow AMB3R [35] and align the rendered depth map 𝐷rend
+to the ground-truth depth map 𝐷gt with a scale factor 𝑠 =
+(
+)
+wmed 𝐷gt ∕𝐷rend , where wmed(⋅) denotes the weighted
+2
+We present VG GT, a voxel-Gaussian Splatting visual
+geometry grounded transformer. By introducing a coarse-tofine differentiable voxel module, VG2 GT mitigates the overlapping artifacts that commonly arise in pixel-aligned feedforward Gaussian Splatting methods. At the coarse level,
+the module enhances image patch tokens and re-decodes
+geometry-aware features. At the fine level, it splits highdimensional voxel features to predict geometrically accurate
+Gaussian scene parameters. During training, stochastic solid
+volume rendering supervises scene geometry and improves
+both geometric accuracy and NVS performance. By using
+the network as a lightweight add-on to a visual foundation
+model (VFM), our method substantially reduces training
+cost while remaining plug-and-play compatible with different VFMs. Experiments across multiple datasets show
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+Page 11 of 15
+Leveraging social media news
+median. The aligned depth map 𝐷̃ rend = 𝑠𝐷rend is then
+used to compute the depth loss depth and the point-map loss
+pointmap .
+A.1.2. Model Evaluation
+All datasets used in our evaluation, including Replica
+[33], DTU [1], Tanks and Temples [16], and ScanNet [4],
+consist of sequential frames. We therefore sample input
+views within a constrained range. Training and evaluation
+scenes are kept strictly disjoint. For the 3-view evaluation
+on DTU, we follow the commonly used sparse-view protocol
+(23, 24, and 33) [11, 46] for fair comparison.
+During evaluation, all VGGT-based feed-forward methods use the default resolution of 518 × 518 for scene regression and rendering. Because VolSplat, MVSplat, and
+DepthSplat provide pretrained checkpoints only at 256×256,
+we regress scenes at 256×256 and render images at 518×518
+for fair comparison. For completeness, we also report results
+when both scene regression and rendering are performed
+at 256 resolution. As shown in Table A1 and Table A2,
+our method consistently outperforms the baselines in both
+Gaussian-scene novel view synthesis and depth rendering
+across different resolution settings.
+For the ablation studies, we do not train each ablated
+variant from scratch, to reduce training cost. Instead, each
+variant is initialized from the full model and trained for an
+additional 30K iterations. For all modules except the selfsplitting Gaussian MLP, the network architecture remains
+unchanged after ablation. Thus, initialization from the full
+model does not introduce additional architectural or parameter differences. For the self-splitting Gaussian MLP ablation,
+the final prediction branch has a different output dimension and must be reinitialized. This branch contains only a
+lightweight two-layer MLP, while the preceding PointMLPbased feature extractor remains unchanged. In this setting,
+30K iterations are sufficient for the reinitialized branch to
+converge. As shown in Table 7, ablating any individual
+component degrades performance during continued training, further supporting the effectiveness of each proposed
+module.
+A.2. Continuous Stochastic Solids Volume
+Rendering
+We replace vanilla 3DGS rasterization with stochastic
+solid volume rendering to obtain more accurate scene geometry. Below, we provide the theoretical details.
+3DGS and its variants [15, 21] rely on differentiable
+rasterization to render RGB images and depth maps. As
+shown in Equation A1, the depth along each ray is computed
+using the same 𝛼-blending formulation as RGB rendering.
+Although this design preserves differentiability for Gaussian
+primitives along the entire ray, it also blends foreground and
+background depths, which can produce floating-depth artifacts and degrade geometric reconstruction accuracy [10].
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+𝑁
+∑
+𝐷expected =
+𝑑𝑖 ⋅ 𝛼𝑖 ⋅ 𝑇𝑖
+(A1)
+𝑖=1
+1 − 𝑇𝑁
+2DGS and its variants [10, 11] use per-pixel median
+depth as the final rendered depth. This depth corresponds to
+the Gaussian primitive for which the accumulated transmit∏
+tance 𝑇𝑖 = 𝑖−1
+𝑗=1 (1 − 𝛼𝑗 ) first falls below 0.5. This strategy
+improves geometric reconstruction accuracy. However, fixed
+median-depth selection can limit further gains in geometric
+precision. Boundary regions of Gaussian primitives can
+also introduce discontinuities in the rendered depth map.
+Moreover, median-depth rendering affects only a single median Gaussian primitive during backpropagation, which is
+unfavorable for optimizing generalizable foundation models.
+To address this issue, we replace vanilla rasterization
+with continuous stochastic solids volume rendering [52].
+Following [25], for a stochastic solid with vacancy 𝑣, the
+attenuation coefficient 𝜎 is defined as in Equation A2.
+𝜎(𝐱, 𝜔) = |𝜔 ⋅ ∇ log (𝑣(𝐱))| =
+|𝜔 ⋅ ∇𝑣(𝐱)|
+𝑣(𝐱)
+(A2)
+Here, 𝐱 denotes the 3D spatial position and 𝜔 denotes the ray
+direction. The volume rendering formulation for stochastic
+solids is shown in Equation 7.
+Following the derivation in [52], we treat each Gaussian
+primitive as a continuous stochastic solid. We interpret the
+per-pixel opacity 𝛼 as the maximum value of the Gaussian primitive along the pixel ray, as shown in Equation 8.
+This leads to the vacancy formulation in Equation 9, which
+establishes an equivalent conversion from a 3D Gaussian
+distribution to a Gaussian primitive and the corresponding
+volume rendering formulation.
+References
+[1] Aanaes, HenrikJensen, RamsbolVogiatzis, R., GeorgeTola, EnginDahl, Bjorholm, A., 2016. Large-scale data for multiple-view stereopsis. International Journal of Computer Vision 120.
+[2] Barron, J.T., Mildenhall, B., Verbin, D., Srinivasan, P.P., Hedman, P.,
+2022. Mip-nerf 360: Unbounded anti-aliased neural radiance fields,
+in: Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, pp. 5470–5479.
+[3] Chen, Y., Xu, H., Zheng, C., Zhuang, B., Pollefeys, M., Geiger, A.,
+Cham, T.J., Cai, J., 2024. Mvsplat: Efficient 3d gaussian splatting
+from sparse multi-view images. arXiv preprint arXiv:2403.14627 .
+[4] Dai, A., Chang, A.X., Savva, M., Halber, M., Funkhouser, T., Nießner,
+M., 2017. Scannet: Richly-annotated 3d reconstructions of indoor
+scenes, in: Proc. Computer Vision and Pattern Recognition (CVPR),
+IEEE.
+[5] Dao, T., 2024. FlashAttention-2: Faster attention with better parallelism and work partitioning, in: International Conference on Learning Representations (ICLR).
+[6] DeTone, D., Malisiewicz, T., Rabinovich, A., 2018. Superpoint: Selfsupervised interest point detection and description, in: Proceedings
+of the IEEE conference on computer vision and pattern recognition
+workshops, pp. 224–236.
+[7] Gallup, D., Frahm, J.M., Mordohai, P., Yang, Q., Pollefeys, M., 2007.
+Real-time plane-sweeping stereo with multiple sweeping directions,
+Page 12 of 15
+Leveraging social media news
+Method
+RMSE↓
+Replica Dataset[33]
+0.547
+MVSplat
+0.389
+MVSplat_256
+VolSplat
+0.698
+VolSplat_256
+0.265
+0.279
+DepthSplat
+DepthSplat_256 0.282
+Ours_3DGS
+0.092
+0.069
+Ours
+DTU Dataset[1]
+MVSplat
+0.069
+MVSplat_256
+0.067
+VolSplat
+0.033
+VolSplat_256
+0.032
+DepthSplat
+0.022
+DepthSplat_256 0.022
+Ours_3DGS
+0.014
+Ours
+0.015
+TAT Dataset[16]
+MVSplat
+0.839
+MVSplat_256
+0.747
+VolSplat
+0.673
+VolSplat_256
+0.557
+DepthSplat
+0.488
+DepthSplat_256 0.491
+Ours_3DGS
+0.381
+0.389
+Ours
+3 Views
+ABS↓
+𝛿1.25 ↑
+𝛿1.05 ↑
+RMSE↓
+10 Views
+ABS↓
+𝛿1.25 ↑
+𝛿1.05 ↑
+RMSE↓
+20 Views
+ABS↓
+𝛿1.25 ↑
+𝛿1.05 ↑
+0.143
+0.099
+0.191
+0.070
+0.059
+0.059
+0.011
+0.007
+0.790
+0.894
+0.683
+0.952
+0.942
+0.941
+0.995
+0.997
+0.272
+0.392
+0.165
+0.516
+0.707
+0.704
+0.940
+0.990
+0.501
+0.443
+0.407
+0.197
+0.279
+0.282
+0.109
+0.078
+0.114
+0.099
+0.099
+0.040
+0.053
+0.053
+0.014
+0.011
+0.872
+0.893
+0.903
+0.982
+0.954
+0.953
+0.996
+0.997
+0.474
+0.567
+0.346
+0.795
+0.744
+0.738
+0.980
+0.990
+0.780
+0.735
+0.461
+0.149
+0.180
+0.182
+0.100
+0.043
+0.251
+0.241
+0.130
+0.038
+0.040
+0.040
+0.022
+0.006
+0.715
+0.730
+0.853
+0.982
+0.969
+0.968
+0.980
+0.999
+0.336
+0.401
+0.229
+0.781
+0.818
+0.816
+0.966
+0.994
+0.663
+0.619
+0.382
+0.320
+0.284
+0.227
+0.237
+0.238
+0.163
+0.194
+0.515
+0.526
+0.748
+0.749
+0.962
+0.961
+0.037
+0.044
+0.124
+0.129
+0.261
+0.260
+0.759
+0.757
+0.092
+0.083
+0.080
+0.076
+0.070
+0.070
+0.026
+0.026
+0.093
+0.087
+0.087
+0.082
+0.089
+0.089
+0.020
+0.019
+0.905
+0.920
+0.895
+0.899
+0.928
+0.928
+0.988
+0.988
+0.430
+0.414
+0.481
+0.519
+0.388
+0.388
+0.935
+0.937
+0.140
+0.115
+0.097
+0.093
+0.105
+0.106
+0.021
+0.021
+0.129
+0.103
+0.094
+0.088
+0.103
+0.104
+0.016
+0.015
+0.836
+0.887
+0.904
+0.916
+0.924
+0.924
+0.992
+0.992
+0.398
+0.455
+0.476
+0.505
+0.386
+0.386
+0.950
+0.954
+0.483
+0.414
+0.355
+0.300
+0.295
+0.299
+0.077
+0.081
+0.291
+0.436
+0.556
+0.712
+0.723
+0.722
+0.947
+0.947
+0.065
+0.100
+0.164
+0.326
+0.351
+0.347
+0.740
+0.733
+1.003
+1.014
+0.348
+0.294
+0.431
+0.431
+0.145
+0.148
+0.776
+0.769
+0.321
+0.281
+0.291
+0.292
+0.057
+0.058
+0.109
+0.103
+0.498
+0.600
+0.655
+0.656
+0.950
+0.952
+0.024
+0.023
+0.138
+0.208
+0.229
+0.229
+0.777
+0.773
+0.835
+0.891
+0.418
+0.367
+0.413
+0.413
+0.264
+0.265
+0.436
+0.469
+0.200
+0.170
+0.179
+0.180
+0.075
+0.077
+0.353
+0.336
+0.693
+0.764
+0.733
+0.732
+0.921
+0.926
+0.106
+0.113
+0.234
+0.344
+0.354
+0.353
+0.741
+0.708
+Table A1
+Quantitative Gaussian-scene depth rendering results on the Replica, DTU, and TAT datasets, including the 256 × 256 variants.
+Method
+Replica Dataset[33]
+MVSplat
+MVSplat_256
+VolSplat
+VolSplat_256
+DepthSplat
+DepthSplat_256
+Ours_3DGS
+Ours
+TAT Dataset[16]
+MVSplat
+MVSplat_256
+VolSplat
+VolSplat_256
+DepthSplat
+DepthSplat_256
+Ours_3DGS
+Ours
+PSNR↑
+3 Views
+SSIM↑
+LPIPS↓
+PSNR↑
+10 Views
+SSIM↑
+LPIPS↓
+PSNR↑
+20 Views
+SSIM↑
+LPIPS↓
+25.70
+27.27
+19.26
+27.77
+22.98
+23.15
+29.87
+31.03
+0.830
+0.889
+0.681
+0.909
+0.798
+0.794
+0.876
+0.898
+0.240
+0.095
+0.453
+0.127
+0.403
+0.303
+0.184
+0.169
+24.18
+23.33
+28.66
+25.07
+23.64
+23.41
+30.08
+30.87
+0.835
+0.815
+0.876
+0.804
+0.797
+0.763
+0.883
+0.898
+0.257
+0.201
+0.180
+0.371
+0.420
+0.365
+0.208
+0.191
+24.17
+23.14
+22.17
+28.27
+23.55
+23.32
+29.54
+30.41
+0.807
+0.774
+0.747
+0.865
+0.788
+0.752
+0.876
+0.894
+0.300
+0.242
+0.400
+0.185
+0.419
+0.369
+0.202
+0.184
+19.83
+20.92
+16.67
+20.61
+16.90
+17.12
+21.68
+22.46
+0.628
+0.650
+0.527
+0.642
+0.477
+0.407
+0.691
+0.716
+0.359
+0.252
+0.474
+0.289
+0.679
+0.640
+0.294
+0.272
+18.06
+17.71
+17.78
+19.15
+15.21
+15.19
+19.89
+20.22
+0.545
+0.499
+0.519
+0.561
+0.446
+0.355
+0.618
+0.650
+0.441
+0.372
+0.485
+0.334
+0.675
+0.653
+0.328
+0.321
+14.62
+14.42
+16.77
+16.85
+14.59
+14.59
+19.34
+20.01
+0.412
+0.338
+0.454
+0.429
+0.420
+0.328
+0.563
+0.588
+0.584
+0.552
+0.537
+0.448
+0.699
+0.671
+0.393
+0.383
+Table A2
+Quantitative NVS results on the Replica and TAT datasets, including the 256 × 256 variants.
+in: 2007 IEEE conference on computer vision and pattern recognition,
+IEEE. pp. 1–8.
+[8] Geiger, A., Lenz, P., Stiller, C., Urtasun, R., 2013. Vision meets
+robotics: The kitti dataset. International Journal of Robotics Research
+(IJRR) .
+[9] Ha, S., Yeon, J., Yu, H., 2024. Rgbd gs-icp slam, in: European
+conference on computer vision, Springer. pp. 180–197.
+[10] Huang, B., Yu, Z., Chen, A., Geiger, A., Gao, S., 2024. 2d gaussian
+splatting for geometrically accurate radiance fields, in: SIGGRAPH
+2024 Conference Papers, Association for Computing Machinery.
+doi:10.1145/3641519.3657428.
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+[11] Huang, H., Wu, Y., Deng, C., Gao, G., Gu, M., Liu, Y.S., 2025.
+Fatesgs: Fast and accurate sparse-view surface reconstruction using
+gaussian splatting with depth-feature consistency, in: Proceedings of
+the AAAI Conference on Artificial Intelligence.
+[12] Jiang, L., Mao, Y., Xu, L., Lu, T., Ren, K., Jin, Y., Xu, X., Yu, M.,
+Pang, J., Zhao, F., et al., 2025. Anysplat: Feed-forward 3d gaussian
+splatting from unconstrained views. ACM Transactions on Graphics
+(TOG) 44, 1–16.
+[13] Keetha, N., Karhade, J., Jatavallabhula, K.M., Yang, G., Scherer,
+S., Ramanan, D., Luiten, J., 2024. Splatam: Splat track & map 3d
+gaussians for dense rgb-d slam, in: Proceedings of the IEEE/CVF
+Page 13 of 15
+Leveraging social media news
+conference on computer vision and pattern recognition, pp. 21357–
+21366.
+[14] Keetha, N., Müller, N., Schönberger, J., Porzi, L., Zhang, Y., Fischer,
+T., Knapitsch, A., Zauss, D., Weber, E., Antunes, N., Luiten, J.,
+Lopez-Antequera, M., Bulò, S.R., Richardt, C., Ramanan, D., Scherer,
+S., Kontschieder, P., 2026. MapAnything: Universal feed-forward
+metric 3D reconstruction, in: International Conference on 3D Vision
+(3DV), IEEE.
+[15] Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G., 2023. 3d
+gaussian splatting for real-time radiance field rendering. ACM Transactions on Graphics 42. URL: https://repo-sam.inria.fr/fungraph/
+3d-gaussian-splatting/.
+[16] Knapitsch, A., Park, J., Zhou, Q.Y., Koltun, V., 2017. Tanks and
+temples: Benchmarking large-scale scene reconstruction. ACM
+Transactions on Graphics 36.
+[17] Li, H., Zou, Z., Liu, F., Zhang, X., Hong, F., Cao, Y., Lan, Y.,
+Zhang, M., Yu, G., Zhang, D., et al., 2025. Iggt: Instance-grounded
+geometry transformer for semantic 3d reconstruction. arXiv preprint
+arXiv:2510.22706 .
+[18] Li, Y., Lv, C., Tang, Z., Yang, H., Huang, D., 2026. Tokensplat:
+Token-aligned 3d gaussian splatting for feed-forward pose-free reconstruction. arXiv preprint arXiv:2603.00697 .
+[19] Lin, H., Chen, S., Liew, J.H., Chen, D.Y., Li, Z., Shi, G., Feng, J.,
+Kang, B., 2025. Depth anything 3: Recovering the visual space from
+any views. arXiv preprint arXiv:2511.10647 .
+[20] Lindeberg, T., 2012. Scale invariant feature transform .
+[21] Lu, T., Yu, M., Xu, L., Xiangli, Y., Wang, L., Lin, D., Dai, B., 2024.
+Scaffold-gs: Structured 3d gaussians for view-adaptive rendering, in:
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pp. 20654–20664.
+[22] Ma, X., Qin, C., You, H., Ran, H., Fu, Y., 2022. Rethinking network
+design and local geometry in point cloud: A simple residual mlp
+framework. arXiv preprint arXiv:2202.07123 .
+[23] Meng, Q., Chen, A., Luo, H., Wu, M., Su, H., Xu, L., He, X., Yu,
+J., 2021. Gnerf: Gan-based neural radiance field without posed
+camera, in: Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pp. 6351–6361.
+[24] Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng, R., 2020. Nerf: Representing scenes as neural radiance
+fields for view synthesis, in: ECCV.
+[25] Miller, B., Chen, H., Lai, A., Gkioulekas, I., 2023. Objects as
+volumes: A stochastic geometry view of opaque solids. IEEE .
+[26] Oquab, M., Darcet, T., Moutakanni, T., Vo, H.V., Szafraniec, M.,
+Khalidov, V., Fernandez, P., Haziza, D., Massa, F., El-Nouby, A.,
+Howes, R., Huang, P.Y., Xu, H., Sharma, V., Li, S.W., Galuba, W.,
+Rabbat, M., Assran, M., Ballas, N., Synnaeve, G., Misra, I., Jegou,
+H., Mairal, J., Labatut, P., Joulin, A., Bojanowski, P., 2023. Dinov2:
+Learning robust visual features without supervision.
+[27] Pan, L., Baráth, D., Pollefeys, M., Schönberger, J.L., 2024. Global
+structure-from-motion revisited, in: European Conference on Computer Vision, Springer. pp. 58–77.
+[28] Ranftl, R., Bochkovskiy, A., Koltun, V., 2021. Vision transformers
+for dense prediction. ArXiv preprint .
+[29] Ren, S., Wen, T., Fang, Y., Lu, B., 2025. Fastgs: Training 3d gaussian
+splatting in 100 seconds. arXiv preprint arXiv:2511.04283 .
+[30] Sarlin, P.E., DeTone, D., Malisiewicz, T., Rabinovich, A., 2020.
+Superglue: Learning feature matching with graph neural networks,
+in: Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, pp. 4938–4947.
+[31] Schönberger, J.L., Frahm, J.M., 2016. Structure-from-motion revisited, in: Conference on Computer Vision and Pattern Recognition
+(CVPR).
+[32] Schönberger, J.L., Zheng, E., Pollefeys, M., Frahm, J.M., 2016. Pixelwise view selection for unstructured multi-view stereo, in: European
+Conference on Computer Vision (ECCV).
+[33] Straub, J., Whelan, T., Ma, L., Chen, Y., Wijmans, E., Green, S.,
+Engel, J.J., Mur-Artal, R., Ren, C., Verma, S., Clarkson, A., Yan, M.,
+Budge, B., Yan, Y., Pan, X., Yon, J., Zou, Y., Leon, K., Carter, N.,
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+Briales, J., Gillingham, T., Mueggler, E., Pesqueira, L., Savva, M.,
+Batra, D., Strasdat, H.M., Nardi, R.D., Goesele, M., Lovegrove, S.,
+Newcombe, R., 2019. The Replica dataset: A digital replica of indoor
+spaces. arXiv preprint arXiv:1906.05797 .
+[34] Uhrig, J., Schneider, N., Schneider, L., Franke, U., Brox, T., Geiger,
+A., 2017. Sparsity invariant cnns, in: International Conference on 3D
+Vision (3DV).
+[35] Wang, H., Agapito, L., 2025.
+Amb3r: Accurate feed-forward
+metric-scale 3d reconstruction with backend.
+arXiv preprint
+arXiv:2511.20343 .
+[36] Wang, J., Chen, M., Karaev, N., Vedaldi, A., Rupprecht, C., Novotny,
+D., 2025a. Vggt: Visual geometry grounded transformer, in: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition.
+[37] Wang, J., Chen, M., Zhang, S., Karaev, N., Schönberger, J., Labatut,
+P., Bojanowski, P., Novotny, D., Vedaldi, A., Rupprecht, C., 2026.
+Vggt-𝜔. URL: https://arxiv.org/abs/2605.15195, arXiv:2605.15195.
+[38] Wang, J., Karaev, N., Rupprecht, C., Novotny, D., 2024a. Vggsfm:
+Visual geometry grounded deep structure from motion, in: Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition, pp. 21686–21697.
+[39] Wang, S., Leroy, V., Cabon, Y., Chidlovskii, B., Revaud, J., 2024b.
+Dust3r: Geometric 3d vision made easy, in: CVPR.
+[40] Wang, W., Chen, Y., Zhang, Z., Liu, H., Wang, H., Feng, Z., Qin,
+W., Chen, F., Zhu, Z., Chen, D.Y., Zhuang, B., 2025b. Volsplat:
+Rethinking feed-forward 3d gaussian splatting with voxel-aligned
+prediction. arXiv preprint arXiv:2509.19297 .
+[41] Wang, Y., Zhou, J., Zhu, H., Chang, W., Zhou, Y., Li, Z., Chen, J.,
+Pang, J., Shen, C., He, T., 2025c. 𝜋 3 : Permutation-Equivariant Visual
+Geometry Learning. arXiv preprint arXiv:2507.13347 .
+[42] Wang, Z., Bovik, A.C., Sheikh, H.R., Simoncelli, E.P., 2004a. Image
+quality assessment: from error visibility to structural similarity. IEEE
+transactions on image processing 13, 600–612.
+[43] Wang, Z., Bovik, A.C., Sheikh, H.R., Simoncelli, E.P., 2004b. Image
+quality assessment: from error visibility to structural similarity. IEEE
+Trans Image Process 13.
+[44] Wang, Z., Wu, S., Xie, W., Chen, M., Prisacariu, V.A., 2021. Nerf–:
+Neural radiance fields without known camera parameters .
+[45] Wu, G., Yi, T., Fang, J., Xie, L., Zhang, X., Wei, W., Liu, W., Tian, Q.,
+Wang, X., 2024a. 4d gaussian splatting for real-time dynamic scene
+rendering, in: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pp. 20310–20320.
+[46] Wu, J., Li, R., Zhu, Y., Guo, R., Sun, J., Zhang, Y., 2025. Sparse2dgs:
+Geometry-prioritized gaussian splatting for surface reconstruction
+from sparse views. arXiv preprint arXiv:2504.20378 .
+[47] Wu, X., Jiang, L., Wang, P.S., Liu, Z., Liu, X., Qiao, Y., Ouyang,
+W., He, T., Zhao, H., 2024b. Point transformer v3: Simpler, faster,
+stronger, in: CVPR.
+[48] Xu, H., Peng, S., Wang, F., Blum, H., Barath, D., Geiger, A., Pollefeys,
+M., 2025. Depthsplat: Connecting gaussian splatting and depth, in:
+CVPR.
+[49] Xu, J., Gao, S., Shan, Y., 2024. Freesplatter: Pose-free gaussian splatting for sparse-view 3d reconstruction. arXiv preprint
+arXiv:2412.09573 .
+[50] Yao, Y., Luo, Z., Li, S., Fang, T., Quan, L., 2018. Mvsnet: Depth
+inference for unstructured multi-view stereo. European Conference
+on Computer Vision (ECCV) .
+[51] Ye, B., Chen, B., Xu, H., Barath, D., Pollefeys, M., 2025. Yonosplat:
+You only need one model for feedforward 3d gaussian splatting.
+arXiv:2511.07321.
+[52] Zhang, B., Jiang, C., Li, H., Shen, S., Tan, P., 2026. Geometrygrounded gaussian splatting. arXiv preprint arXiv:2601.17835 .
+[53] Zhang, R., Isola, P., Efros, A.A., Shechtman, E., Wang, O., 2018. The
+unreasonable effectiveness of deep features as a perceptual metric.
+IEEE .
+[54] Zhao, Y., Yi, J., Pan, Y., Chen, L., 2025. Robust geometric reconstruction of rgb-d data based on gaussian splatting. Applied Intelligence
+55, 1118.
+Page 14 of 15
+Leveraging social media news
+[55] Zhu, Z., Wang, S., Xie, J., Liu, J.j., Wang, J., Yang, J., 2025. Voxelsplat: Dynamic gaussian splatting as an effective loss for occupancy
+and flow prediction, in: Proceedings of the Computer Vision and
+Pattern Recognition Conference, pp. 6761–6771.
+interests include intelligent control System, mechatronics, smart sensing and intelligent recognition,
+artificial intelligence, embedded Control System
+and so on.
+Yibin Zhao is currently a Ph.D. student at East
+China University of Science and Technology at
+Shanghai. He received his bachelor degree from
+East China University of Science and Technology
+in 2023. His research interests include computer vision and 3D reconstruction. Now he mainly works
+on the area of NVS and dense 3D reconstruction.
+Yihan Pan is currently a Ph.D. student at East
+China University of Science and Technology at
+Shanghai. He received his bachelor degree from
+East China University of Science and Technology
+in 2021. His research interests include computer vision and 3D reconstruction. Now he mainly works
+on the area of point cloud registration.
+Jun Nan is currently a Ph.D. student at East China
+University of Science and Technology at Shanghai.
+He received his bachelor degree from East China
+University of Science and Technology in 2024. His
+research interests include robotics. Now he mainly
+works on the area of embodied intelligence.
+Wenli Yang is currently a Master’s student at East
+China University of Science and Technology at
+Shanghai. He received his bachelor degree from
+East China University of Science and Technology in 2026. His research interests include 3D
+reconstruction and semantic segmentation. Now he
+mainly works on the area of 3DCV and Stereo
+Vision.
+Liwei Chen is currently a Ph.D. student at East
+China University of Science and Technology at
+Shanghai. He received his bachelor degree from
+East China University of Science and Technology
+in 2019. His research interests include semantic
+segmentation and deep learning. Now he mainly
+works on the area of GAN and target identification.
+Jianjun Yi is a professor with the School of Mechanical and Power Engineering and Computer
+Science, East China University of Science and
+Technology, Shanghai, China. His main research
+J.K. Krishnan et al.: Preprint submitted to Elsevier
+Page 15 of 15

@@ -1,0 +1,113 @@
+# Adaptive Time Integration (Steady/Particle)
+
+Also called: Adaptive RK Integration, Adaptive Step Size Control for ODEs
+
+## Overview
+Adaptive Time Integration is a numerical method for particle tracing in vector fields that dynamically adjusts the integration step size to maintain a constant local truncation error [S1, unofficial]. It solves the problem of inefficient or inaccurate particle paths by shortening steps in regions of high field curvature and lengthening them in smooth regions. It sets itself apart from fixed-step methods by using an embedded error estimate to control step size, and from general adaptive step methods by its specific implementation using Runge-Kutta schemes with a conservative scaling factor [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Current particle position $P_n$, current step size $dt$, error tolerance $E$, velocity field function $velocity(P)$.
+- Output: Next particle position $P_{n+1}$, updated step size $dt$ for the next iteration.
+
+**Data Structures:**
+- $P_n$: 3D vector representing particle position at step $n$.
+- $dt$: Scalar float representing the time step size.
+- $E$: Scalar float representing the maximum allowable error.
+- $V$: 3D vector representing velocity.
+
+**Parameters:**
+- $SHRINK$: Exponent for reducing $dt$ when error exceeds $E$. Value is $1/2$ for second-order Runge-Kutta (RK), $1/4$ for fourth-order RK [S1, unofficial].
+- $GROW$: Exponent for increasing $dt$ when error is within $E$. Value is $1/3$ for second-order RK, $1/5$ for fourth-order RK [S1, unofficial].
+- Conservative Factor: $0.9$, applied to prevent aggressive step size changes [S1, unofficial].
+
+**Algorithm Steps:**
+1. Evaluate velocity at current position: $V = velocity(P_n)$.
+2. Compute a mid-point estimate using half step: $P_{n+1, mid} = RungeKutta(P_n, 0.5 \cdot dt)$.
+3. Compute a full-step estimate: $P_{n+1} = RungeKutta(P_n, dt)$.
+4. Evaluate velocity at the mid-point position: $V_{n+1, mid} = velocity(P_{n+1, mid})$.
+5. Refine the full-step estimate using the mid-point velocity: $P_{n+1} = RungeKutta(P_{n+1, mid}, 0.5 \cdot dt, V_{n+1, mid})$.
+   - Note: This step implies a specific embedded RK scheme (likely Heun or similar 2nd/3rd order pair) where the final position is corrected using the mid-velocity. The source describes this as requiring 11 function evaluations, suggesting a complex embedded pair or repeated evaluations not fully detailed in the pseudocode snippet [S1, unofficial].
+6. Calculate error: $error = |P_{n+1} - P_{n+1, mid}|$.
+7. Update step size:
+   - If $error > E$: $dt = 0.9 \cdot SHRINK \cdot dt \cdot (E / error)$
+   - Else: $dt = 0.9 \cdot GROW \cdot dt \cdot (error / E)$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_time_integration(Pn, dt, E, velocity, order):
+    # Determine exponents based on RK order
+    if order == 2:
+        SHRINK = 0.5
+        GROW = 1.0 / 3.0
+    elif order == 4:
+        SHRINK = 0.25
+        GROW = 0.2
+    else:
+        raise ValueError("Unsupported RK order")
+
+    # Step 1: Evaluate velocity at current position
+    V = velocity(Pn)
+
+    # Step 2: Mid-point estimate (half step)
+    # Note: RungeKutta function signature assumed to handle internal stages
+    Pn1_mid = runge_kutta_step(Pn, 0.5 * dt, V)
+
+    # Step 3: Full-step estimate
+    Pn1_full = runge_kutta_step(Pn, dt, V)
+
+    # Step 4: Evaluate velocity at mid-point position
+    Vn1_mid = velocity(Pn1_mid)
+
+    # Step 5: Refine full-step estimate using mid-point velocity
+    # This step corrects the position using the mid-velocity information
+    Pn1_final = runge_kutta_refine(Pn1_mid, 0.5 * dt, Vn1_mid)
+
+    # Step 6: Calculate error
+    error = abs(Pn1_final - Pn1_mid)
+
+    # Step 7: Update step size
+    if error > E:
+        dt = 0.9 * SHRINK * dt * (E / error)
+    else:
+        dt = 0.9 * GROW * dt * (error / E)
+
+    return Pn1_final, dt
+
+# Helper functions assumed to be standard RK implementations
+def runge_kutta_step(P, h, V):
+    # Placeholder for specific RK stage calculation
+    # In a standard 2nd order RK, this might be Euler or Midpoint
+    # The source implies 11 evaluations total, so this is a simplification
+    return P + h * V
+
+def runge_kutta_refine(P_mid, h, V_mid):
+    # Placeholder for refinement step
+    return P_mid + h * V_mid
+```
+*Note: The pseudocode above simplifies the "11 function evaluations" claim. The source text provides a specific sequence of calls that does not map directly to a standard 4-stage RK4. The implementation must follow the source's specific call sequence: `RungeKutta(Pn, 0.5 dt)`, `RungeKutta(Pn, dt)`, `velocity(Pn+1, mid)`, `RungeKutta(Pn+1, mid, 0.5 dt, Vn+1, mid)` [S1, unofficial].*
+
+**Edge Cases and Pitfalls:**
+- Precision: Floating-point errors in small $dt$ can accumulate. The conservative factor of 0.9 helps mitigate oscillation in $dt$ [S1, unofficial].
+- Boundaries: If $dt$ becomes too small, integration may stall. If too large, error tolerance $E$ is violated.
+- Degenerate Input: Zero velocity or singularities in the vector field may cause undefined behavior in $velocity(P)$ [S1, unofficial].
+
+## Subtopics
+
+### [Stability-constrained Integration Step](23807-stability-constrained-integration-step.md)
+Uses eigenvalues and grid geometry to bound step size for stability, unlike error-based adaptive methods. Choose when numerical stability is more critical than error tolerance.
+
+## Operating characteristics
+- Time Complexity: Depends on the number of function evaluations per step. The source specifies 11 evaluations per step, which is higher than the 8 evaluations of a standard RK4 without adaptation [S1, unofficial].
+- Memory Complexity: Low, requiring storage for current position, velocity, and intermediate estimates.
+- Performance: Improves efficiency by reducing steps in smooth regions and increasing accuracy in complex regions [S1, unofficial].
+- Strengths: Maintains constant error tolerance, adapts to local field complexity.
+- Limitations: Higher computational cost per step due to extra evaluations; requires careful tuning of $E$ and exponents [S1, unofficial].
+
+## Background
+This method is described in the context of unsteady flow volume rendering, specifically for particle tracing in smoke or flow volumes [S1, unofficial]. It references Press et al. [12] for the derivation of exponents and the adaptive scheme [S1, unofficial]. The technique is used to visualize flow fields by integrating particle paths, potentially combined with solid geometry rendering [S1, unofficial].
+
+## Sources
+[S1] Unsteady flow volumes, https://digital.library.unt.edu/ark:/67531/metadc628169/?q=flow visualization volume rendering, fetched 2026-10-29 (unofficial)

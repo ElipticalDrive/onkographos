@@ -1,0 +1,146 @@
+# Crosshairs Intersection Target Method
+
+
+## Overview
+The Crosshairs Intersection Target Method constructs a specific geometric mesh within each voxel to serve as an intersection target for curve voxelization algorithms. By intersecting a discretized curve (polyline) against these targets, the method ensures that the resulting voxel set maintains 26-connectivity for 1D input [S1]. It differs from standard box-based voxelization by using internal line segments rather than the voxel volume itself to determine occupancy, and from porous voxelization by providing a fixed, deterministic connectivity guarantee [S1].
+
+## How it works
+The method defines a "crosshair" mesh centered at the voxel's origin. This mesh consists of three orthogonal line segments (represented as thin quadrangular faces) aligned with the X, Y, and Z axes. When a 1D curve passes through the voxel, if it intersects any part of this crosshair mesh, the voxel is marked as occupied. This structure ensures that if a curve enters and exits a voxel, the intersection logic correctly links the voxel to its 26 neighbors, preserving topological continuity [S1].
+
+### Inputs and Outputs
+- **Input**:
+  - `voxel_point`: The center coordinates of the voxel being tested ($P_x, P_y, P_z$).
+  - `vSize`: The dimensions of the voxel ($vSize.X, vSize.Y, vSize.Z$).
+- **Output**:
+  - `IntersectionTarget`: A mesh object containing 12 vertices and 3 quadrangular faces (which may be triangulated into 24 triangles for standard intersection algorithms) [S1].
+
+### Data Structures
+The mesh consists of:
+1.  **Vertices**: An array of 12 3D points (`Point3d[12]`).
+2.  **Faces**: A list of 3 quadrangular faces, each defined by 4 vertex indices.
+
+### Steps
+1.  **Initialize**: Create an empty `IntersectionTarget` mesh and a vertex array of size 12.
+2.  **Compute Half-Dimensions**:
+    $$ u = vSize.X / 2 $$
+    $$ v = vSize.Y / 2 $$
+    $$ w = vSize.Z / 2 $$
+3.  **Define Vertices**: Calculate the 12 vertices relative to `voxel_point`. The vertices form the endpoints of the three orthogonal arms of the crosshair.
+    -   **XY Plane Arm (Z=0)**:
+        -   $V_0 = P + (u, v, 0)$
+        -   $V_1 = P + (-u, v, 0)$
+        -   $V_2 = P + (-u, -v, 0)$
+        -   $V_3 = P + (u, -v, 0)$
+    -   **YZ Plane Arm (X=0)**:
+        -   $V_4 = P + (0, v, w)$
+        -   $V_5 = P + (0, -v, w)$
+        -   $V_6 = P + (0, -v, -w)$
+        -   $V_7 = P + (0, v, -w)$
+    -   **ZX Plane Arm (Y=0)**:
+        -   $V_8 = P + (u, 0, w)$
+        -   $V_9 = P + (-u, 0, w)$
+        -   $V_{10} = P + (-u, 0, -w)$
+        -   $V_{11} = P + (u, 0, -w)$
+4.  **Define Faces**: Create three quadrangular faces connecting the vertices of each arm.
+    -   Face 1 (XY): Indices $[0, 1, 2, 3]$
+    -   Face 2 (YZ): Indices $[4, 5, 6, 7]$
+    -   Face 3 (ZX): Indices $[8, 9, 10, 11]$
+5.  **Assemble Mesh**: Add all vertices and faces to the `IntersectionTarget` mesh.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def create_crosshairs_intersection_target(voxel_point, v_size):
+    """
+    Creates a mesh object representing a 3D crosshair centered at voxel_point.
+    Used as an intersection target for 1D curve voxelization to ensure 26-connectivity.
+    
+    Args:
+        voxel_point: Tuple (x, y, z) representing the center of the voxel.
+        v_size: Tuple (width, height, depth) representing the voxel dimensions.
+        
+    Returns:
+        A mesh object containing vertices and faces.
+    """
+    # 1. Initialize
+    mesh = Mesh()
+    vertices = [None] * 12
+    
+    # 2. Compute half-dimensions
+    u = v_size[0] / 2.0
+    v = v_size[1] / 2.0
+    w = v_size[2] / 2.0
+    
+    # 3. Define Vertices
+    # XY Plane Arm (Z=0)
+    vertices[0] = voxel_point + (u, v, 0)
+    vertices[1] = voxel_point + (-u, v, 0)
+    vertices[2] = voxel_point + (-u, -v, 0)
+    vertices[3] = voxel_point + (u, -v, 0)
+    
+    # YZ Plane Arm (X=0)
+    vertices[4] = voxel_point + (0, v, w)
+    vertices[5] = voxel_point + (0, -v, w)
+    vertices[6] = voxel_point + (0, -v, -w)
+    vertices[7] = voxel_point + (0, v, -w)
+    
+    # ZX Plane Arm (Y=0)
+    vertices[8] = voxel_point + (u, 0, w)
+    vertices[9] = voxel_point + (-u, 0, w)
+    vertices[10] = voxel_point + (-u, 0, -w)
+    vertices[11] = voxel_point + (u, 0, -w)
+    
+    # 4. Define Faces
+    # Each face is a quadrangle defined by 4 vertex indices
+    faces = [
+        [0, 1, 2, 3],  # XY plane
+        [4, 5, 6, 7],  # YZ plane
+        [8, 9, 10, 11] # ZX plane
+    ]
+    
+    # 5. Assemble Mesh
+    mesh.vertices = vertices
+    mesh.faces = faces
+    
+    return mesh
+```
+
+### Parameters
+-   `voxel_point`: The center of the voxel. [S1]
+-   `vSize`: The physical dimensions of the voxel. [S1]
+
+### Edge Cases and Pitfalls
+-   **Triangulation**: The source algorithm produces 12 quadrangular faces, which typically need to be split into 24 triangles for standard triangle-line intersection routines (e.g., Möller–Trumbore) [S1].
+-   **Curve Approximation**: The method assumes the input curve is already approximated as a polyline. Conic sections or NURBS must be tessellated beforehand [S1].
+-   **Connectivity**: This specific target ensures 26-connectivity. Using a simpler target (like a single point or axis-aligned segment) may break connectivity for diagonal curves [S1].
+
+## Subtopics
+
+### [Alternating Diagonal Crosshairs](4789-alternating-diagonal-crosshairs.md)
+The Alternating Diagonal Crosshairs method modifies the standard 4-separating crosshairs intersection target by pushing connecting segments to pixel corners, resulting in a single diagonal line segment per pixel. It produces a 4-separating, 8-connected voxelization that forms a continuous 4-connected structure $C(\Pi)$ using only voxels in $\Pi$. Unlike the standard crosshairs target, it simplifies the intersection target to a single diagonal, trading aesthetic regularity for topological guarantees and sparsity.
+
+### Randomized Crosshairs Voxelization
+A variant of the 4-separating crosshairs target for 1D input in 2D where connections are made between random points on pixel edges to a random point within the pixel [S2, unofficial]. For each pixel, a random point is selected on the pixel edges and another random point within the pixel, and they are connected to form the intersection target [S2, unofficial]. This produces a much less regular structure, but retains connectivity and separability properties [S2, unofficial]. It may improve the spectral properties of the resulting voxelization if that is of interest in a given application [S2, unofficial].
+
+### Target Viewpoint
+Checks whether a ray from a viewpoint can reach a target, potentially adjusting the transformation [S3, unofficial]. It returns true if the target is reachable/viewable, false otherwise [S3, unofficial].
+-   **Parameters**:
+    -   `rayo`: Origin of the ray (`Eigen::Vector3f`) [S3, unofficial].
+    -   `target`: Destination point to observe (`Eigen::Vector3f`) [S3, unofficial].
+    -   `down`: A vector pointing to the bottom of the camera (`Eigen::Vector3f`) [S3, unofficial].
+    -   `transf`: Output transformation (`Eigen::Affine3f&`) [S3, unofficial].
+
+## Operating characteristics
+-   **Complexity**: The construction of the intersection target is $O(1)$ per voxel, involving a fixed number of arithmetic operations and vertex assignments [S1].
+-   **Performance**: The intersection test itself depends on the underlying line-triangle intersection algorithm (e.g., Dan Sunday's algorithm) [S1]. The source notes that producing 12 quadrangular faces (24 triangles) is less efficient than a more optimized implementation, suggesting that the number of intersection tests can be reduced by optimizing the mesh representation [S1].
+-   **Strengths**: Guarantees 26-connectivity for 1D curves, which is critical for topological correctness in geospatial and medical applications [S1].
+-   **Limitations**: The mesh is relatively dense (24 triangles per voxel) compared to simpler targets. It is specifically designed for 1D input; higher-dimensional inputs may require different targets (e.g., 6-separating for 2D in 3D) [S2, unofficial].
+
+## Background
+The method originates from research into voxelization algorithms for geospatial applications, specifically for ensuring topological correctness when converting continuous curves into discrete voxel grids [S1]. It is implemented using the Curve-Mesh intersection algorithm from Rhinocommon, which relies on standard line-triangle intersection logic [S1]. The approach is part of a broader family of "intersection target" methods that define specific geometric primitives within voxels to control connectivity and separability properties of the resulting voxelization [S2, unofficial].
+
+## Sources
+[S1] Voxelization algorithms for geospatial applications, https://www.sciencedirect.com/science/article/pii/S2215016116000029, fetched 2026-10-29
+[S2] A Topological Approach to Voxelization - NVIDIA, https://research.nvidia.com/sites/default/files/pubs/2013-06_A-Topological-Approach/laine2013egsr_paper.pdf, fetched 2026-10-29 (unofficial)
+[S3] RMonica/basic_next_best_view, https://github.com/RMonica/basic_next_best_view, fetched 2026-10-24 (unofficial)

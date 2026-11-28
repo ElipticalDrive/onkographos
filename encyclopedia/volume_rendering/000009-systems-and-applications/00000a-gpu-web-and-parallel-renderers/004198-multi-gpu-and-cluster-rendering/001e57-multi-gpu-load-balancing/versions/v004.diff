@@ -1,0 +1,158 @@
+--- v003.md
++++ v004.md
+@@ -4,83 +4,92 @@
+ 
+ ## Overview
+-Multi-GPU Load Balancing distributes volumetric rendering workloads across multiple graphics processing units (GPUs) on a single node to support large datasets and achieve near-optimal speedup [S1]. It solves the problem of memory and computational limits on single GPUs by splitting the data structure and compositing results via the CPU [S1]. It differs from [Single Node Multi-GPU/Server Architecture](5165-single-node-multi-gpu-server-architecture.md) by focusing specifically on the algorithmic splitting of sorted voxel arrays and the synchronization overhead of combining results, rather than general server topology or cluster networking.
++This method distributes the rendering workload of a single volume dataset across multiple GPUs on a single node by interleaving data partitions and switching rendering contexts per frame. It solves the problem of memory capacity limits and throughput bottlenecks in single-GPU rendering by leveraging multiple graphics cards to process disjoint subsets of the volume data simultaneously. It differs from general multi-GPU setups by enforcing a strict sequential context switching model combined with pixel-wise result combination, rather than independent frame rendering or complex inter-GPU communication protocols.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A sorted array of voxels (typically organized in a multiresolution pyramid with detail coefficients and histograms) and a volume dataset.
+-*   **Output:** A final composite image.
++**Inputs and Outputs**
++- Input: A large volumetric dataset represented as a multi-resolution pyramid (e.g., wavelet coefficients).
++- Input: Two or more NVIDIA graphics cards connected to a single X-server.
++- Output: A single composite image combining the results from all GPUs.
+ 
+-**Data Structures:**
+-*   **Voxel Array:** Sorted array of voxels. For multiresolution MIP, each voxel entry includes position (4 bytes) and intensity (2 bytes), with the pyramid level encoded in two bits of the position attribute, totaling 6 bytes per voxel [S1].
+-*   **Split Strategy:** The sorted array is split equally between GPUs by interleaving detail coefficients and histograms for each pyramid level, rather than splitting the array in the middle [S1].
++**Data Structures**
++The volume data is organized as a sorted array of voxels with associated detail coefficients for each pyramid level.
++- **Voxel Data**: Each voxel entry includes position and intensity attributes. For Streaming MIP variants, an extra attribute for the originating pyramid level is required, stored in two bits of the position attribute (4 bytes total for position) plus a short for intensity (2 bytes), totaling 6 bytes per voxel [S1].
++- **Partitioning**: The sorted array of voxels is split equally among the GPUs. The split is performed by **interleaving** the detail coefficients (and the histogram) for each pyramid level across the GPUs, rather than splitting the array in the middle [S1].
+ 
+-**Steps:**
+-1.  **Context Creation:** Create a separate OpenGL context for each GPU, mapped to distinct X-screens (if using NVIDIA drivers supporting multiple screens per X-server) [S1].
+-2.  **Data Distribution:** Distribute the interleaved detail coefficients and histograms to each GPU's context [S1].
+-3.  **Rendering Loop:**
+-    *   Render the volume using one GPU context.
+-    *   Switch to the second GPU context.
+-    *   Render the volume using the second GPU context.
+-    *   *Note:* Rendering is switched between contexts once per frame. Multi-threading the rendering loops does not yield performance gains because the algorithm is GPU-bound; CPU synchronization overhead outweighs the minimal load of queuing commands [S1].
+-4.  **Result Combination:**
+-    *   Read the intermediate result from the first GPU using `glReadPixels` [S1].
+-    *   Transfer this data through the CPU.
+-    *   Write the data to the second GPU context using `glDrawPixels` [S1].
+-    *   Combine the results using a pixel-wise maximum operator [S1].
+-    *   *Note:* The second GPU does not need to be connected to a monitor, as its result is combined with the first [S1].
++**Steps**
++1. **Context Creation**: Create a separate OpenGL context for each GPU, targeting distinct X-screens supported by the NVIDIA driver [S1].
++2. **Data Distribution**: Distribute the interleaved voxel data and histogram to the respective GPU memory. Ensure the histogram is also split appropriately to maintain statistical accuracy for transfer functions [S1].
++3. **Rendering Loop (Per Frame)**:
++   a. Activate the first GPU's context.
++   b. Render the volume subset assigned to the first GPU.
++   c. Read the resulting image back to system memory using `glReadPixels`. The preferred pixel format for this transfer is `GL_UNSIGNED_INT_8_8_8_8` [S1].
++   d. Activate the second GPU's context.
++   e. Write the intermediate result from the first GPU into the second GPU's framebuffer using `glDrawPixels` [S1].
++   f. Render the volume subset assigned to the second GPU, which now composites over the first GPU's result.
++   g. (Repeat for additional GPUs if applicable, chaining the read/write operations).
++4. **Result Combination**: The final image is obtained from the last GPU in the chain. The combination is achieved via a **pixel-wise maximum operator** (Maximum Intensity Projection) [S1].
+ 
+-**Parameters:**
+-*   **Pixel Format:** `GL_UNSIGNED_INT_8_8_8_8` is the preferred format for CPU transfer between contexts [S1].
++**Pseudocode**
++```python
++def render_multi_gpu(voxel_data, gpu_count):
++    # 1. Partition data by interleaving coefficients
++    partitions = []
++    for i in range(gpu_count):
++        # Interleave detail coefficients and histogram for each pyramid level
++        partitions.append(interleave_data(voxel_data, i, gpu_count))
+ 
+-**Pitfalls:**
+-*   **No Direct GPU-to-GPU Transfer:** There is no extension for direct data shuffling between cards; intermediate results must pass through the CPU [S1].
+-*   **CPU Bottleneck:** The CPU is only responsible for queuing commands and data. Spreading this tiny load over multiple CPUs via multi-threading does not outweigh synchronization overhead [S1].
+-*   **Splitting Strategy:** Splitting the array in the middle is inferior to interleaving coefficients, as interleaving better divides the load during progressive refinement [S1].
++    # 2. Initialize contexts and framebuffers
++    contexts = [create_gl_context(screen_id=i) for i in range(gpu_count)]
++    framebuffers = [create_framebuffer() for _ in range(gpu_count)]
+ 
+-**Pseudocode:**
+-```python
+-# Initialization
+-gpu_contexts = [create_gl_context(i) for i in range(num_gpus)]
+-# Data is interleaved: GPU 0 gets indices 0, 2, 4... GPU 1 gets 1, 3, 5...
+-# of the sorted voxel array's detail coefficients and histograms
++    # 3. Render and combine sequentially
++    # Load first partition
++    load_data(contexts[0], partitions[0])
++    bind_framebuffer(contexts[0], framebuffers[0])
++    execute_render(contexts[0])
+ 
+-def render_frame():
+-    # Render on GPU 0
+-    bind_context(gpu_contexts[0])
+-    render_volume(gpu_contexts[0].data)
+-    
+-    # Read result from GPU 0
+-    # Preferred format: GL_UNSIGNED_INT_8_8_8_8
+-    result_gpu0 = gl_read_pixels(format=GL_UNSIGNED_INT_8_8_8_8)
+-    
+-    # Render on GPU 1
+-    bind_context(gpu_contexts[1])
+-    render_volume(gpu_contexts[1].data)
+-    
+-    # Combine results via CPU
+-    # Note: glDrawPixels is used to transfer result_gpu0 to GPU 1 context
+-    # This step is necessary because no direct GPU-to-GPU shuffle exists
+-    bind_context(gpu_contexts[1])
+-    gl_draw_pixels(result_gpu0, format=GL_UNSIGNED_INT_8_8_8_8)
+-    
+-    # Final combination is pixel-wise maximum
+-    final_image = pixel_wise_max(result_gpu0, gpu_contexts[1].current_framebuffer)
+-    
++    # Chain subsequent GPUs
++    for i in range(1, gpu_count):
++        # Read result from previous GPU
++        prev_image = gl_read_pixels(framebuffers[i-1], format=GL_UNSIGNED_INT_8_8_8_8)
++        
++        # Switch to current GPU context
++        activate_context(contexts[i])
++        bind_framebuffer(contexts[i], framebuffers[i])
++        
++        # Draw previous result as background
++        gl_draw_pixels(prev_image)
++        
++        # Load and render current partition
++        load_data(contexts[i], partitions[i])
++        execute_render(contexts[i])
++
++    # 4. Final readout
++    final_image = gl_read_pixels(framebuffers[gpu_count-1], format=GL_UNSIGNED_INT_8_8_8_8)
+     return final_image
+ ```
+ 
++**Parameters**
++- **Pixel Format**: `GL_UNSIGNED_INT_8_8_8_8` is the preferred format for CPU transfers (`glReadPixels`/`glDrawPixels`) [S1].
++- **Split Strategy**: Interleaving coefficients is preferred over contiguous splitting to better divide the load during progressive refinement [S1].
++
++**Edge Cases and Pitfalls**
++- **No Direct Inter-GPU Transfer**: There is no extension for direct data shuffling between cards. Intermediate results must pass through the CPU. This introduces significant latency and bandwidth overhead [S1].
++- **Multi-threading Inefficiency**: Attempting to run rendering loops for multiple contexts in separate threads yields no performance gain. The algorithm is GPU-bound, and the CPU synchronization overhead outweighs the minimal CPU load of queuing commands [S1].
++- **Monitor Connection**: The second (and subsequent) cards do not need to be connected to a monitor, as their output is combined internally via the CPU-mediated transfer [S1].
++
+ ## Subtopics
+ 
+-### [Parallel streaming model with GPU-CPU matching](9376-parallel-streaming-model-with-gpu-cpu-matching.md)
+-Defines hardware mapping and concurrency for multi-GPU systems, enforcing 1:1 CPU-GPU affinity to prevent contention and enable true parallel streaming.
+-
+ ## Operating characteristics
+-*   **Performance:** Achieves "almost optimal speedup" for large volumes [S1].
+-*   **Limitations:** The method is GPU-bound. CPU synchronization overhead for multi-threading rendering loops negates any potential gains from parallelizing the command queueing [S1].
+-*   **Hardware Constraints:** Relies on specific driver capabilities (e.g., NVIDIA drivers supporting multiple screens for one X-server) to manage multiple contexts [S1].
+-*   **Data Transfer Overhead:** Significant overhead exists due to the requirement to pass intermediate results through the CPU (`glReadPixels`/`glDrawPixels`) as no direct GPU-to-GPU data shuffling extension exists [S1].
++- **Time Complexity**: The rendering time is dominated by the GPU computation, which is roughly halved per additional GPU (linear speedup in ideal conditions). However, the CPU-mediated data transfer (`glReadPixels`/`glDrawPixels`) adds a constant overhead per frame per GPU pair [S1].
++- **Memory Complexity**: Memory usage is distributed. Each GPU holds only a fraction (1/N) of the voxel data and histogram, allowing rendering of volumes larger than a single GPU's VRAM [S1].
++- **Performance**: The method achieves "almost optimal speedup" for large volumes, provided the transfer overhead is acceptable [S1].
++- **Strengths**: Simple implementation using standard OpenGL extensions; supports volumes exceeding single-GPU memory; effective for MIP rendering.
++- **Limitations**: High CPU bandwidth usage due to intermediate result transfers; no true parallelism in the final composition step (sequential chaining); limited to NVIDIA hardware with multi-screen X-server support [S1].
++- **When to use**: When rendering very large volumes on a single node with multiple NVIDIA GPUs and when the bottleneck is VRAM or single-GPU throughput, and inter-GPU latency is tolerable.
++- **When not to use**: When low latency is critical, or when using hardware that supports direct peer-to-peer GPU communication (e.g., NVLink) which would bypass the CPU bottleneck.
+ 
+ ## Background
+-This method originates from research on multiresolution MIP rendering of large volumetric data accelerated on graphics hardware [S1]. It addresses the limitations of single-GPU rendering by leveraging multiple cards within a single system, utilizing the X-server's ability to manage multiple screens for multiple graphics cards [S1].
++This method originates from research on multiresolution MIP rendering of large volumetric data accelerated on graphics hardware. It was developed to support datasets that exceed the memory capacity of a single graphics card. The approach leverages the NVIDIA driver's support for multiple screens within a single X-server to manage multiple OpenGL contexts [S1].
+ 
+ ## Sources

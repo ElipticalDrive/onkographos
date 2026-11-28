@@ -1,0 +1,139 @@
+napari: a fast, interactive, multi-dimensional image viewer for python - Fix sawtooth edges and depth of iso_categorical labels rendering by hinderling · Pull Request #9674 · napari/napari
+
+Fix sawtooth edges and depth of iso_categorical labels rendering by hinderling · Pull Request #9674 · napari/napari · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+hinderling
+commented
+Oct 9, 2026
+Copy link
+Copy Markdown
+Contributor
+References and relevant issues
+None that I could find.
+Description
+Fixes sawtooth edges when rendering labels in 3D.
+A staircase seen at a grazing angle, while moving the camera.
+main:
+video_old.mov
+this PR:
+video_new.mov
+Longer recording, switching between old and new, fast and smooth shaders:
+demo.mov
+The issue
+In 3D, labels layers are rendered with the iso_categorical method (or translucent_categorical when rendering='translucent'). Both march along each view ray in fixed steps (relative_step_size, 0.8 voxel by default) and only test the voxel at each sample. A ray that only clips the corner of a voxel, between two samples, misses it. Whether that happens depends on where the samples fall, which drifts from pixel to pixel, so straight edges seen at grazing angles render as a sawtooth that shifts as the camera moves. A smaller step makes the teeth finer but never removes them.
+The fix
+At the first unclipped sample, the shader now walks through every voxel the ray passes through, in order (Amanatides & Woo), and stops at the first one with a non-transparent label. No voxel can be skipped, so in volume depiction the result no longer depends on relative_step_size. Clipping planes are evaluated where the ray enters and leaves each voxel, so cut surfaces stay where they were. The ray is shortened by a tiny margin at both ends, as otherwise rounding reads the neighbouring voxels when a plane starts exactly on a voxel boundary.
+Both categorical methods share the new snippet, and the fast and smooth gradient modes only change how the hit voxel is shaded, so all combinations are fixed.
+Also fixed by this
+Depth across scales. The new code sets each pixel's depth to the point where the ray enters the hit voxel, in data coordinates. On main, the depth (frag_depth_point = iloc * u_shape) was shifted by half a voxel along each axis, in the layer's own voxels. Layers with different scale are shifted by different amounts, so where two surfaces are close, the one behind can be drawn in front. As the shift is along every axis, how much it matters depends on the viewing direction; the figure uses the direction where it is largest:
+Plane depiction. With depiction='plane', main's sub-stepping read the voxels just before the plane instead of those at it, so a plane at z = 5 showed the data at z = 4. The traversal reads the voxels within the plane's thickness:
+Performance
+The traversal visits every voxel along the ray. Each visit costs more than a sample of the old loop, and at oblique angles a ray crosses more voxels than it took samples. Frame times on an M1 Max (canvas about 2000 × 1800 px, iso_categorical, default step 0.8), main → this PR:
+data
+axis-aligned view
+oblique view
+empty, 256³ (worst case)
+3.6 → 4.3 ms (1.2×)
+3.7 → 6.3 ms (1.7×)
+300 nuclei, 256³
+3.1 → 3.4 ms (1.1×)
+3.7 → 4.6 ms (1.3×)
+1500 nuclei, 512³
+6.7 → 7.2 ms (1.1×)
+8.1 → 9.8 ms (1.2×)
+translucent_categorical is similar (1.1× to 1.8×). The old cost grows with 1/step while the new one does not depend on it: compared with main at step 0.4 (which still has the artifacts, only finer), this PR is as fast or faster in all of these cases (0.66× to 1.0×). Dense labels, where rays stop almost immediately, render in under 1 ms either way.
+What remains is the cost of reading every voxel along the ray. I have a prototype for a follow-up PR that skips empty space using a coarse map of which 8 × 8 × 8 blocks contain labels. In the same benchmark it renders identically and is faster than main everywhere (0.5× to 0.93×), but it needs a second texture and has to be kept up to date when the data changes or is painted, so I'd rather keep it separate from this fix.
+Tests
+Two tests in src/napari/_vispy/_tests/test_vispy_labels_layer.py, both failing on main:
+test_labels_iso_categorical_independent_of_step_size: a staircase at a grazing angle renders identically with step sizes 0.8 and 0.1.
+test_labels_iso_categorical_depth_across_scales: of two overlapping layers with different scales, the one in front is drawn in front.
+Not in this PR
+vispy's own iso, mip and minip methods, used for image layers, compute the depth in the same way and have the same half-voxel offset. Fixing that belongs in vispy.
+Fix sawtooth edges and depth of iso_categorical labels rendering
+…
+e968fa2
+```
+The categorical rendering methods (iso_categorical and
+translucent_categorical) only tested the voxel at each ray sample, so
+voxels clipped by the ray between two samples were missed, depending on
+the sample phase, giving sawtooth edges at grazing angles. They also
+wrote the depth half a voxel off, in voxel units, so layers with
+different scales could occlude each other wrongly.
+
+Walk through every voxel along the ray instead (Amanatides & Woo
+traversal), stopping at the first one with a non-transparent label,
+taking clipping planes into account within each voxel, and write the
+depth of where the ray enters it, in data coordinates.
+```
+github-actions
+Bot
+added
+the
+topic:vispy
+Vispy integration
+label
+Oct 9, 2026
+napari-pr-triage-bot
+Bot
+added this to napari PR triage
+Oct 9, 2026
+brisvag
+commented
+Oct 13, 2026
+Copy link
+Copy Markdown
+Contributor
+Hey @hinderling, sorry for the slow response, we're approaching release time and this is a bit big to look into at the moment for me.
+General thoughts after a first quick pass:
+This is awesome! And ooof, our shader is worse than I thought 🫠
+we should definitely consider doing a vispy PR first so we avoid the complications of napari and just check that the volume shader changes work there. Would you like to open a PR there?
+hinderling
+commented
+Oct 13, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Sure, no rush! LOVE the shader btw haha, I use it for everything! Even felt a little bad about removing the jagged edges, it has charmful aesthetic somehow.
+re: fixing in vispy first, sorry that comment is a bit misleading. If I understand correctly, while the same depth offset also exists in vispy's iso/mip/minip/attenuated_mip methods (which are used in napari for image layers), the labels layers don't use that code, iso_categorical and translucent_categorical are napari's own copy of the code. So for this PR a vispy fix wouldn't change anything.
+Or do I misunderstand, and your suggestion would be fixing iso/mip/etc. in vispy first to check the approach in general there? Anyways, will try to make a PR also in vispy!
+Affected lines in vispy v0.17.0 vispy/visuals/volume.py (used in napari image layers):
+iso, mip, attenuated_mip, minip
+affected lines in napari main, src/napari/_vispy/visuals/volume.py (used by labels layer, addresssed in this PR):
+iso_categorical, translucent_categorical
+Thanks for all the help, and wishing the best for the release!
+hinderling
+commented
+Oct 13, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Opened a PR for vispy here: vispy/vispy#2807
+brisvag
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Or do I misunderstand, and your suggestion would be fixing iso/mip/etc. in vispy first to check the approach in general there? Anyways, will try to make a PR also in vispy!
+Yep, this is what I meant! The it's easy to copy over the changes to our labels shader. Thanks for opening that PR, will followup soon there!
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+topic:vispy
+Vispy integration
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

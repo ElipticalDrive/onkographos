@@ -1,0 +1,103 @@
+# Neural Scene Graph Representation and Rendering
+
+
+## Overview
+This method renders dynamic scenes by decomposing them into a hierarchical graph of individual object nodes, separating static background from dynamic foreground elements without additional supervision [S1]. Unlike Single Representation Networks (SRNs) that optimize a single static representation for all frames, or Neural Radiance Fields (NeRF) which suffer from ghosting due to camera pose changes, this approach reconstructs each object individually to ensure temporal consistency [S1]. It builds on the [Neural Scene Graph](14682-neural-scene-graph.md) structure to manage scene hierarchy [G].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A sequence of images from a stereo camera setup (e.g., KITTI dataset), typically up to 90 time steps (9 seconds) at 1242×375 resolution from two perspectives [S1].
+*   **Output:** Rendered images of the full scene, isolated static components, isolated dynamic components, or novel compositions [S1].
+
+**Data Structures:**
+The scene is represented as a hierarchical graph [S1]. Key node types include a camera node defining viewing parameters [G], a background node representing static scene components [S1], and dynamic object nodes representing individual moving objects [S1]. Each dynamic node implicitly encodes the relationship between object location, viewing direction, and scene lighting, including shadows and specular highlights [S1]. Edges define the hierarchy and relationships between nodes [S1].
+
+**Algorithm Steps:**
+1.  **Graph Construction:** Initialize the scene graph with a camera node, a background node, and dynamic object nodes. The structure naturally decomposes the scene into dynamic and static components without additional supervision [S1].
+2.  **Shadow Assignment:** Assign the shadow of each object to its corresponding dynamic representation node so it is visible when rendering dynamic-only components [S1].
+3.  **Rendering Full Scene:** Render the complete image by traversing the graph and combining the background node with all dynamic object nodes according to the hierarchy defined by edges [S1].
+4.  **Rendering Isolated Static Components:** Remove all dynamic nodes and render the image from a scene graph containing only the camera and background node [S1].
+5.  **Rendering Isolated Dynamic Components:** Exclude the static node and render the remaining graph, which includes the camera and all dynamic object nodes with their assigned shadows [S1].
+6.  **Novel Composition:** Sample new transformations on object trajectories to generate novel scene compositions, leveraging the decomposed structure to handle occlusions and dynamic effects [S1].
+
+**Parameters and Edge Cases:**
+*   **Resolution:** Evaluated on 1242×375 images [S1].
+*   **Object Count:** Up to 12 unique dynamic objects per sequence [S1].
+*   **Pitfalls:** Edge cases and precision pitfalls are not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def render_scene_graph(scene_graph, camera_pose):
+    """
+    Renders the scene based on the graph structure.
+    scene_graph: Dict containing 'camera', 'background_node', and 'dynamic_nodes'.
+    camera_pose: 4x4 transformation matrix.
+    """
+    # Initialize output buffer
+    output_buffer = np.zeros((height, width, 3), dtype=np.float32)
+    
+    # 1. Render background (static)
+    # The source does not specify the internal neural field evaluation function [G]
+    bg_color = evaluate_neural_field(scene_graph['background_node'], camera_pose)
+    output_buffer = composite_alpha(output_buffer, bg_color)
+    
+    # 2. Render dynamic objects
+    for obj_node in scene_graph['dynamic_nodes']:
+        # Get object pose from graph structure or tracker
+        obj_pose = camera_pose @ obj_node['pose_offset'] # [G] Standard matrix multiplication
+        # The source does not specify the internal neural field evaluation function [G]
+        obj_color = evaluate_neural_field(obj_node, obj_pose)
+        output_buffer = composite_alpha(output_buffer, obj_color)
+        
+    return output_buffer
+
+def render_isolated_static(scene_graph, camera_pose):
+    """
+    Renders only the static background by excluding dynamic nodes.
+    """
+    static_graph = {
+        'camera': scene_graph['camera'],
+        'background_node': scene_graph['background_node']
+    }
+    return render_scene_graph(static_graph, camera_pose)
+
+def render_isolated_dynamic(scene_graph, camera_pose):
+    """
+    Renders only dynamic components by excluding the static background.
+    """
+    dynamic_graph = {
+        'camera': scene_graph['camera'],
+        'dynamic_nodes': scene_graph['dynamic_nodes']
+    }
+    return render_scene_graph(dynamic_graph, camera_pose)
+```
+
+## Subtopics
+
+### [Learning from Noisy Tracker Outputs](14704-learning-from-noisy-tracker-outputs.md)
+Enables training using automatically generated object trajectories from tracking algorithms instead of manual annotations, solving the cost of manual labeling.
+
+### [Scene Graph Manipulation and Illumination Preservation](14707-scene-graph-manipulation-and-illumination-preservation.md)
+Ensures geometric manipulations of object nodes preserve global illumination cues like specular highlights and shadows.
+
+### [Novel Scene Composition and View Synthesis](14710-novel-scene-composition-and-view-synthesis.md)
+Synthesizes novel views by leveraging the decomposed structure to handle occlusions and dynamic effects like shadows and reflections.
+
+### [DyNFL](21328-dynfl.md)
+Neural field-based approach for high-fidelity re-simulation of LiDAR scans in dynamic driving scenes. It processes LiDAR measurements and bounding boxes of moving objects to construct an editable neural field comprising separately reconstructed static background and dynamic objects, allowing modification of viewpoints, object positions, and addition/removal of objects.
+
+## Operating characteristics
+*   **Performance:** The method outperforms baseline methods (vanilla SRN, NeRF) on all metrics for dynamic scenes [S1].
+*   **Strengths:** Accurately reconstructs dynamic scenes without ghosting or blurring associated with NeRF or SRNs. It naturally decomposes scenes into static and dynamic components without additional supervision [S1].
+*   **Limitations:** Requires a stereo camera setup for training data [S1].
+*   **Scaling:** Evaluated on sequences with up to 12 unique dynamic objects. Scaling to more complex scenes is not given in the sources.
+
+## Background
+The method was introduced in "Neural Scene Graphs for Dynamic Scenes" [S1]. It addresses the limitations of existing neural rendering techniques for dynamic environments, specifically the inability of SRNs to handle temporal changes and the ghosting artifacts of NeRF when camera poses vary [S1]. The work demonstrates the flexibility of the neural scene graph representation by manipulating edges and nodes to preserve illumination cues and compose novel scenes [S1].
+
+## Sources
+[S1] Neural Scene Graphs for Dynamic Scenes, https://doi.org/10.1109/cvpr46437.2021.00288, fetched 2026-10-26

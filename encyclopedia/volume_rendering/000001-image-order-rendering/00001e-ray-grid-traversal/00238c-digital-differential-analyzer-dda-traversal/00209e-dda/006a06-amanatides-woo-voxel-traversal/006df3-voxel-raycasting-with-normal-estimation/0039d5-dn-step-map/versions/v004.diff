@@ -1,0 +1,426 @@
+--- v003.md
++++ v004.md
+@@ -4,167 +4,214 @@
+ 
+ ## Overview
+-DN_step_map is a Digital Differential Analyzer (DDA) algorithm for traversing a regular 3D voxel grid along a ray to find the first occupied voxel [S1, S6, S7, unofficial]. It determines the sequence of voxels intersected by the ray without performing explicit geometric intersection tests with voxel faces, instead using precomputed boundary crossing distances [S1, S6, unofficial]. It sets itself apart from fixed-step marchers by stepping only when the ray crosses a voxel boundary, making it efficient for sparse or large grids, and from time-based marchers by using a reach-based parameter $t$ and precomputing deltas for efficiency [S6, unofficial]. It builds on [Voxel Raycasting with Normal Estimation](3901-voxel-raycasting-with-normal-estimation.md) by providing the core traversal mechanism that identifies the hit voxel and entry face.
++DN_step_map is an algorithm for traversing a regular 3D voxel grid along a ray to determine the sequence of voxels intersected, without performing explicit geometric intersection tests for every voxel face [S1, S6, S7, unofficial]. It solves the problem of efficiently querying sparse or dense voxel structures for collision, occlusion, or surface detection by stepping through the grid cell-by-cell [S6, S7, unofficial]. Unlike fixed-step raymarching which samples at uniform intervals regardless of grid topology, DN_step_map uses a Digital Differential Analyzer (DDA) approach to jump directly to the next voxel boundary, ensuring that every intersected voxel is visited exactly once [S6, unofficial]. This makes it significantly more efficient than naive marching for high-resolution grids, as the step count is proportional to the number of voxels traversed rather than the physical distance [S6, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   Ray origin $P = (p_x, p_y, p_z)$ in world or volume coordinates [S1, S7, unofficial].
+-*   Ray direction $D = (d_x, d_y, d_z)$, a non-zero vector [S1, S7, unofficial].
+-*   Grid parameters: cell size (often 1.0 in voxel coordinates) or bounds [S2, S6, unofficial].
+-*   Maximum traversal distance $t_{max}$ or maximum step count [S1, S6, S7, unofficial].
+-*   Occupancy query function `isOccupied(i, j, k)` [S6, unofficial].
++*   `rayPos`: Ray origin $(p_x, p_y, p_z)$ in world or volume coordinates [S1, S7, unofficial].
++*   `rayDir`: Ray direction vector $(d_x, d_y, d_z)$ [S1, S7, unofficial]. Must be normalized or handled via inverse magnitude [S4, S7, unofficial].
++*   `tmax`: Maximum ray parameter (distance) to traverse [S1, unofficial].
++*   `voxelGrid`: The voxel data structure, assumed to be a regular grid with uniform cell size (typically 1.0 in local coordinates) [S1, S6, unofficial].
+ 
+ **Outputs:**
+-*   Hit voxel index $(i, j, k)$ [S6, S7, unofficial].
+-*   Entry face normal (e.g., `neg-x`, `pos-y`) [S6, S7, unofficial].
+-*   Previous empty voxel index (for block placement logic) [S6, unofficial].
+-*   Boolean success flag [S3, S7, unofficial].
++*   `hitVoxel`: The index/position of the first solid/occupied voxel [S3, S6, unofficial].
++*   `hitPos`: The 3D position of the hit [S3, unofficial].
++*   `hitNormal`: The surface normal at the hit location (derived from the entry face) [S3, S7, unofficial].
++*   `prevEmptyVoxel`: The voxel index immediately preceding the hit, useful for placement logic [S6, unofficial].
+ 
+ **Data Structures:**
+-*   Current voxel indices: $X, Y, Z$ (integers) [S1, S6, unofficial].
+-*   Step directions: $step_x, step_y, step_z \in \{-1, 0, 1\}$ [S1, S6, S7, unofficial].
+-*   Distance to next boundary: $t_{max\_x}, t_{max\_y}, t_{max\_z}$ (floats) [S1, S6, unofficial].
+-*   Distance increment per voxel: $t_{adv\_x}, t_{adv\_y}, t_{adv\_z}$ (floats) [S1, S6, unofficial].
+-*   Current traversal parameter $t$ (float) [S1, S6, unofficial].
++The algorithm maintains state variables for each axis $A \in \{x, y, z\}$:
++*   `current_A`: Integer voxel index along axis $A$ [S1, unofficial].
++*   `step_A`: Integer direction of increment ($1$, $-1$, or $0$) [S1, S6, unofficial].
++*   `t_max_A`: Floating-point distance to the next voxel boundary along axis $A$ [S1, S6, unofficial].
++*   `t_adv_A`: Floating-point distance between consecutive voxel boundaries along axis $A$ (delta) [S1, S6, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Validate Direction:** If $|D| \le \epsilon$ (e.g., $10^{-5}$ or `f32::EPSILON`), return failure/null [S4, S6, S7, unofficial].
+-2.  **Initialize Current Voxel:** Compute starting voxel indices $X = \lfloor p_x \rfloor, Y = \lfloor p_y \rfloor, Z = \lfloor p_z \rfloor$ [S1, S4, S7, unofficial].
+-3.  **Check Start Voxel:** If the grid allows starting inside a solid voxel, check `isOccupied(X, Y, Z)`. If occupied, return $(X, Y, Z)$ with face normal $(0,0,0)$ and previous voxel $(X, Y, Z)$ [S7, G, unofficial]. *Note: Some implementations step first; if the origin is inside an occupied voxel, a pre-loop check is required to return the start voxel as hit, as the stepping loop moves to adjacent voxels [S6, G, unofficial].*
+-4.  **Compute Step Directions:**
+-    $$
+-    step_x = \begin{cases} 1 & \text{if } d_x > 0 \\ -1 & \text{if } d_x < 0 \\ 0 & \text{if } d_x = 0 \end{cases}
+-    $$
+-    (Same for $step_y, step_z$) [S6, S7, unofficial].
+-5.  **Compute Inverse Directions:**
+-    $$
+-    inv_x = \begin{cases} 1.0 / |d_x| & \text{if } |d_x| > \epsilon \\ \infty & \text{otherwise} \end{cases}
+-    $$
+-    (Same for $inv_y, inv_z$) [S7, unofficial].
+-6.  **Initialize Boundary Distances:**
+-    Calculate the distance to the next voxel boundary along each axis.
+-    For axis $x$:
+-    $$
+-    \text{nextBoundary}_x = \begin{cases} (X + 1) & \text{if } step_x = 1 \\ X & \text{if } step_x = -1 \end{cases}
+-    $$
+-    $$
+-    t_{max\_x} = \begin{cases} (\text{nextBoundary}_x - p_x) \cdot inv_x & \text{if } step_x \neq 0 \\ \infty & \text{if } step_x = 0 \end{cases}
+-    $$
+-    (Same for $y, z$) [S6, S7, unofficial].
+-    *Note: If using world coordinates with cell size $C$, replace boundaries with grid bounds or $X \cdot C$ [S2, S6, unofficial].*
+-7.  **Initialize Increments:**
+-    $$
+-    t_{adv\_x} = \begin{cases} inv_x & \text{if } step_x \neq 0 \\ \infty & \text{otherwise} \end{cases}
+-    $$
+-    (Same for $y, z$) [S1, S6, unofficial].
+-8.  **Traversal Loop:**
+-    While $t < t_{max}$ and steps $< HARD\_STEP\_CAP$ (e.g., 1024) [S1, S6, unofficial]:
+-    a.  **Find Minimum Axis:** Identify axis $A \in \{x, y, z\}$ with the smallest $t_{max\_A}$.
+-    b.  **Check Bounds:** If $t_{max\_A} > t_{max}$, break (ray exited volume) [S6, S7, unofficial].
+-    c.  **Advance Ray:** Set $t = t_{max\_A}$ [S1, S6, unofficial].
+-    d.  **Step Voxel:** Update current voxel index: $A \leftarrow A + step_A$ [S1, S6, S7, unofficial].
+-    e.  **Update Boundary:** Update $t_{max\_A} \leftarrow t_{max\_A} + t_{adv\_A}$ [S1, S6, S7, unofficial].
+-    f.  **Check Occupancy:** Query `isOccupied(X, Y, Z)`.
+-    g.  **On Hit:** Return hit voxel $(X, Y, Z)$, entry face (determined by $A$ and $step_A$), and previous empty voxel (calculated by reversing the step on the hit face) [S6, S7, unofficial].
+-9.  **Return Failure:** If loop completes without hit, return null/failure [S2, S6, S7, unofficial].
++1.  **Validation and Initialization:**
++    *   Validate `rayDir`. If its magnitude is zero (or below a small epsilon like $10^{-5}$), return null/None immediately to prevent division by zero [S4, S6, S7, unofficial].
++    *   Normalize `rayDir` if it is not already normalized [S4, S7, unofficial].
++    *   Calculate the starting voxel indices:
++        $$ X = \lfloor p_x \rfloor, \quad Y = \lfloor p_y \rfloor, \quad Z = \lfloor p_z \rfloor $$
++        [S1, S4, S7, unofficial].
++    *   *Edge Case:* If the ray origin is inside a solid voxel, some implementations check this before stepping and return the starting voxel immediately [S6, S7, unofficial]. If not handled, the first step moves to an adjacent voxel, potentially missing the start voxel [S6, unofficial].
++
++2.  **Compute Axis Parameters:**
++    For each axis $A \in \{x, y, z\}$, compute `step_A`, `t_adv_A`, and `t_max_A` based on the sign of $d_A$:
++    
++    *   **Step Direction:**
++        $$ \text{step}_A = \begin{cases} 1 & \text{if } d_A > 0 \\ -1 & \text{if } d_A < 0 \\ 0 & \text{if } d_A = 0 \end{cases} $$
++        [S6, S7, unofficial].
++        
++    *   **Advancement Delta ($t\_adv_A$):**
++        $$ t\_adv_A = \begin{cases} \frac{1}{|d_A|} & \text{if } d_A \neq 0 \\ \infty & \text{if } d_A = 0 \end{cases} $$
++        [S1, S6, S7, unofficial]. Note: If the grid cell size is $S$, then $t\_adv_A = S / |d_A|$. For unit voxels, $S=1$.
++        
++    *   **Initial Boundary Distance ($t\_max_A$):**
++        Calculate the distance from the ray origin to the *next* voxel boundary in the direction of travel.
++        If $d_A > 0$:
++        $$ t\_max_A = \frac{(X + 1) - p_A}{d_A} $$
++        [S1, S7, unofficial].
++        If $d_A < 0$:
++        $$ t\_max_A = \frac{X - p_A}{d_A} $$
++        [S1, S7, unofficial].
++        If $d_A = 0$:
++        $$ t\_max_A = \infty $$
++        [S1, S7, unofficial].
++        
++        *Note:* Some implementations calculate this using bounding box intersections first [S2, unofficial], but the direct formula above is standard for unbounded or fully contained rays [S1, S6, unofficial].
++
++3.  **Traversal Loop:**
++    Iterate while the current traversal parameter $t$ is less than `tmax` and a hit has not been found:
++    
++    a.  **Find Minimum Axis:**
++        Identify the axis with the smallest `t_max_A`. Let this axis be $A_{min}$.
++        $$ A_{min} = \arg \min_{A \in \{x,y,z\}} (t\_max_A) $$
++        [S6, S7, unofficial].
++        
++    b.  **Check Bounds:**
++        If $t\_max_{A_{min}} > t_{max}$, the ray has exceeded the maximum distance. Return "No Hit" [S6, S7, unofficial].
++        
++    c.  **Advance Ray:**
++        Update the current ray parameter $t$ to $t\_max_{A_{min}}$ [S1, unofficial].
++        
++    d.  **Step Voxel Index:**
++        Increment the voxel index for axis $A_{min}$ by `step_{A_{min}}`:
++        $$ \text{current}_{A_{min}} \leftarrow \text{current}_{A_{min}} + \text{step}_{A_{min}} $$
++        [S1, S6, S7, unofficial].
++        
++    e.  **Update Boundary Distance:**
++        Update `t_max_{A_{min}}` for the next boundary crossing:
++        $$ t\_max_{A_{min}} \leftarrow t\_max_{A_{min}} + t\_adv_{A_{min}} $$
++        [S1, S6, S7, unofficial].
++        
++    f.  **Check Occupancy:**
++        Query the voxel at the new `(current_x, current_y, current_z)` position.
++        *   If the voxel is **solid/occupied**:
++            *   Record `hitVoxel` = `(current_x, current_y, current_z)` [S6, S7, unofficial].
++            *   Record `hitPos` = `rayPos + t * rayDir` [S3, unofficial].
++            *   Determine `hitNormal`: The normal points opposite to the entry direction. If $A_{min}=x$ and `step_x=1`, the ray entered from the negative X face, so normal is $(-1, 0, 0)$ [S6, S7, unofficial].
++            *   Determine `prevEmptyVoxel`: The voxel index before the step (i.e., subtract `step_{A_{min}}` from `current_{A_{min}}`) [S6, unofficial].
++            *   Return hit data [S3, S6, S7, unofficial].
++        *   If the voxel is **empty**:
++            *   Continue loop [S6, unofficial].
++            
++    g.  **Max Steps Guard:**
++        To prevent infinite loops in degenerate cases (e.g., floating point errors causing oscillation), enforce a hard step cap (e.g., 1024 steps) [S6, unofficial]. If the loop exceeds this cap, return "No Hit" [S6, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def dn_step_map(origin, direction, max_dist, is_occupied):
+-    # 1. Validate direction
+-    dir_len = sqrt(direction.x**2 + direction.y**2 + direction.z**2)
++def dn_step_map(ray_pos, ray_dir, tmax, voxel_grid):
++    # 1. Validation
++    dir_len = math.sqrt(ray_dir.x**2 + ray_dir.y**2 + ray_dir.z**2)
+     if dir_len < 1e-5:
+         return None
+-
++    
+     # Normalize direction
+-    dir = (direction.x / dir_len, direction.y / dir_len, direction.z / dir_len)
+-    
+-    # 2. Initialize current voxel
+-    curr_x = floor(origin.x)
+-    curr_y = floor(origin.y)
+-    curr_z = floor(origin.z)
+-    
+-    # 3. Check start voxel (if origin is inside a solid block)
+-    if is_occupied(curr_x, curr_y, curr_z):
+-        return {
+-            'hitVoxel': (curr_x, curr_y, curr_z),
+-            'hitFace': 'inside',
+-            'prevEmptyVoxel': (curr_x, curr_y, curr_z)
+-        }
+-
+-    # 4. Compute step directions
+-    step_x = 1 if dir.x > 0 else (-1 if dir.x < 0 else 0)
+-    step_y = 1 if dir.y > 0 else (-1 if dir.y < 0 else 0)
+-    step_z = 1 if dir.z > 0 else (-1 if dir.z < 0 else 0)
+-
+-    # 5. Compute inverse directions
+-    inv_x = 1.0 / abs(dir.x) if abs(dir.x) > 1e-5 else float('inf')
+-    inv_y = 1.0 / abs(dir.y) if abs(dir.y) > 1e-5 else float('inf')
+-    inv_z = 1.0 / abs(dir.z) if abs(dir.z) > 1e-5 else float('inf')
+-
+-    # 6. Initialize boundary distances
+-    # Next boundary coordinates
+-    next_x = (curr_x + 1) if step_x == 1 else curr_x
+-    next_y = (curr_y + 1) if step_y == 1 else curr_y
+-    next_z = (curr_z + 1) if step_z == 1 else curr_z
+-
+-    t_max_x = (next_x - origin.x) * inv_x if step_x != 0 else float('inf')
+-    t_max_y = (next_y - origin.y) * inv_y if step_y != 0 else float('inf')
+-    t_max_z = (next_z - origin.z) * inv_z if step_z != 0 else float('inf')
+-
+-    # 7. Initialize increments
+-    t_adv_x = inv_x if step_x != 0 else float('inf')
+-    t_adv_y = inv_y if step_y != 0 else float('inf')
+-    t_adv_z = inv_z if step_z != 0 else float('inf')
+-
+-    # 8. Traversal loop
+-    max_steps = 1024
++    dir_x = ray_dir.x / dir_len
++    dir_y = ray_dir.y / dir_len
++    dir_z = ray_dir.z / dir_len
++    
++    # 2. Initialization
++    curr_x = math.floor(ray_pos.x)
++    curr_y = math.floor(ray_pos.y)
++    curr_z = math.floor(ray_pos.z)
++    
++    # Check if starting voxel is solid (implementation dependent, see pitfalls)
++    # if voxel_grid.is_solid(curr_x, curr_y, curr_z):
++    #     return Hit(curr_x, curr_y, curr_z, ray_pos, (0,0,0))
++
++    # Compute steps and deltas
++    step_x = 1 if dir_x > 0 else (-1 if dir_x < 0 else 0)
++    step_y = 1 if dir_y > 0 else (-1 if dir_y < 0 else 0)
++    step_z = 1 if dir_z > 0 else (-1 if dir_z < 0 else 0)
++    
++    inv_dir_x = 1.0 / abs(dir_x) if dir_x != 0 else float('inf')
++    inv_dir_y = 1.0 / abs(dir_y) if dir_y != 0 else float('inf')
++    inv_dir_z = 1.0 / abs(dir_z) if dir_z != 0 else float('inf')
++    
++    # Compute initial t_max (distance to next boundary)
++    if dir_x > 0:
++        t_max_x = (curr_x + 1 - ray_pos.x) * inv_dir_x
++    elif dir_x < 0:
++        t_max_x = (curr_x - ray_pos.x) * inv_dir_x
++    else:
++        t_max_x = float('inf')
++        
++    if dir_y > 0:
++        t_max_y = (curr_y + 1 - ray_pos.y) * inv_dir_y
++    elif dir_y < 0:
++        t_max_y = (curr_y - ray_pos.y) * inv_dir_y
++    else:
++        t_max_y = float('inf')
++        
++    if dir_z > 0:
++        t_max_z = (curr_z + 1 - ray_pos.z) * inv_dir_z
++    elif dir_z < 0:
++        t_max_z = (curr_z - ray_pos.z) * inv_dir_z
++    else:
++        t_max_z = float('inf')
++        
++    t_adv_x = inv_dir_x
++    t_adv_y = inv_dir_y
++    t_adv_z = inv_dir_z
++    
++    current_t = 0.0
++    max_steps = 1024 # Hard cap
+     steps = 0
+-    t = 0.0
+-    
+-    while t < max_dist and steps < max_steps:
+-        # Find minimum axis
+-        if t_max_x <= t_max_y and t_max_x <= t_max_z:
+-            axis = 'x'
+-            t = t_max_x
+-        elif t_max_y <= t_max_z:
+-            axis = 'y'
+-            t = t_max_y
++    
++    # 3. Traversal Loop
++    while current_t < tmax and steps < max_steps:
++        # Find minimum t_max
++        if t_max_x < t_max_y:
++            if t_max_x < t_max_z:
++                # Step X
++                current_t = t_max_x
++                curr_x += step_x
++                t_max_x += t_adv_x
++                
++                # Check hit
++                if voxel_grid.is_solid(curr_x, curr_y, curr_z):
++                    hit_pos = ray_pos + current_t * ray_dir
++                    # Normal is opposite to step direction
++                    normal = (-step_x, 0, 0)
++                    prev_voxel = (curr_x - step_x, curr_y, curr_z)
++                    return Hit(curr_x, curr_y, curr_z, hit_pos, normal, prev_voxel)
++                    
++            else:
++                # Step Z
++                current_t = t_max_z
++                curr_z += step_z
++                t_max_z += t_adv_z
++                
++                if voxel_grid.is_solid(curr_x, curr_y, curr_z):
++                    hit_pos = ray_pos + current_t * ray_dir
++                    normal = (0, 0, -step_z)
++                    prev_voxel = (curr_x, curr_y, curr_z - step_z)
++                    return Hit(curr_x, curr_y, curr_z, hit_pos, normal, prev_voxel)
+         else:
+-            axis = 'z'
+-            t = t_max_z
+-            
+-        if t > max_dist:
+-            break
+-            
+-        # Step voxel
+-        if axis == 'x':
+-            curr_x += step_x
+-            t_max_x += t_adv_x
+-            face = 'neg-x' if step_x == -1 else 'pos-x'
+-        elif axis == 'y':
+-            curr_y += step_y
+-            t_max_y += t_adv_y
+-            face = 'neg-y' if step_y == -1 else 'pos-y'
+-        else:
+-            curr_z += step_z
+-            t_max_z += t_adv_z
+-            face = 'neg-z' if step_z == -1 else 'pos-z'
+-            
+-        # Check occupancy
+-        if is_occupied(curr_x, curr_y, curr_z):
+-            # Calculate previous empty voxel
+-            prev_x, prev_y, prev_z = curr_x, curr_y, curr_z
+-            if axis == 'x': prev_x -= step_x
+-            elif axis == 'y': prev_y -= step_y
+-            else: prev_z -= step_z
+-            
+-            return {
+-                'hitVoxel': (curr_x, curr_y, curr_z),
+-                'hitFace': face,
+-                'prevEmptyVoxel': (prev_x, prev_y, prev_z)
+-            }
+-            
++            if t_max_y < t_max_z:
++                # Step Y
++                current_t = t_max_y
++                curr_y += step_y
++                t_max_y += t_adv_y
++                
++                if voxel_grid.is_solid(curr_x, curr_y, curr_z):
++                    hit_pos = ray_pos + current_t * ray_dir
++                    normal = (0, -step_y, 0)
++                    prev_voxel = (curr_x, curr_y - step_y, curr_z)
++                    return Hit(curr_x, curr_y, curr_z, hit_pos, normal, prev_voxel)
++            else:
++                # Step Z
++                current_t = t_max_z
++                curr_z += step_z
++                t_max_z += t_adv_z
++                
++                if voxel_grid.is_solid(curr_x, curr_y, curr_z):
++                    hit_pos = ray_pos + current_t * ray_dir
++                    normal = (0, 0, -step_z)
++                    prev_voxel = (curr_x, curr_y, curr_z - step_z)
++                    return Hit(curr_x, curr_y, curr_z, hit_pos, normal, prev_voxel)
++                    
+         steps += 1
+         
+@@ -172,32 +219,38 @@
+ ```
+ 
+-**Parameters:**
+-*   `HARD_STEP_CAP`: 1024 steps (prevents infinite loops in degenerate cases) [S6, unofficial].
+-*   `step_size`: Not used in DDA; step size is implicit (1 voxel) [S4, S6, unofficial].
+-*   `max_dist`: Maximum traversal distance [S4, S7, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Zero Direction Components:** If $d_x=0$, $step_x=0$ and $t_{max\_x}=\infty$, effectively ignoring that axis in traversal decisions [S1, S2, S7, unofficial].
+-*   **Ray Parallel to Axis:** Handled by setting $t_{max}$ to infinity and step/adv to 0 [S1, unofficial].
+-*   **Origin Inside Solid Voxel:** The algorithm must check the starting voxel before stepping, or the first step will move to an adjacent voxel, potentially missing the hit [S6, G, unofficial].
+-*   **Zero-Length Direction:** Causes division by zero; handled by checking norm < $10^{-5}$ [S4, S6, unofficial].
+-*   **Bounds Checking:** The algorithm does not perform internal bounds checking against the grid dimensions; the caller must ensure the ray stays within valid voxel indices or handle out-of-bounds access [S3, G, unofficial].
+-
+ ## Subtopics
+ 
++### [Voxel DDA Raymarching with Adaptive Edge Smoothing](14664-voxel-dda-raymarching-with-adaptive-edge-smoothing.md)
++This method extends standard DDA raymarching by sampling corner and edge voxel occupancy to adaptively compute volume content, eliminating stepping artifacts and spikes caused by uniform voxel traversal. Unlike standard DN_step_map which steps uniformly through fixed voxels, this technique smooths terrain surfaces without increasing the step count or requiring geometry subdivision. It builds on DN_step_map by refining the surface normal and volume estimation at the hit voxel.
++
++### [Corner-based Voxel Volume Calculation](14665-corner-based-voxel-volume-calculation.md)
++A technique to compute voxel volume values at corners for smooth terrain rendering, replacing side-based volume storage with corner-based values to better represent surface geometry during raymarching. It sets apart from sibling methods by explicitly handling diagonal neighbors (NW, NE, SW, SE) and applying "surface block maxing" to clamp volumes at surface boundaries, whereas siblings like Midpoint UV Calculation focus on interpolation precision or Voxel DDA Raymarching with Adaptive Edge Smoothing focus on edge artifacts without the specific corner-maxing logic.
++
++### [Voxel DDA Raymarching with Neighbor-Averaged Entry Interpolation](14668-voxel-dda-raymarching-with-neighbor-averaged-entry-interpola.md)
++A voxel raymarching technique that calculates smooth surface entry heights by averaging adjacent voxel volume/height values and interpolating based on the ray's entry position within the cube. It improves upon simple linear interpolation between two voxels by using neighbor-averaged face heights, though it initially ignores the center voxel's influence, leading to sharp edges.
++
++### [Midpoint UV Calculation](14669-midpoint-uv-calculation.md)
++Midpoint UV Calculation computes the UV coordinates of the midpoint plane within a voxel traversal step to determine height and lighting variations for surface rendering. It sets apart from sibling methods by explicitly calculating a geometric midpoint between entry and exit UV states to drive height maps, whereas siblings like Corner-based Voxel Volume Calculation rely on corner interpolation and Voxel DDA Raymarching with Neighbor-Averaged Entry Interpolation focus on entry-point smoothing.
++
+ ### Voxel Raycast (Nonzero/Color Channel)
+-A variant that stops at the first voxel where a specific channel value is non-zero [S8, unofficial]. It uses a predicate struct holding a reference to VoxelData and a channel index, calling `data.get_voxel(rs.hit_position, channel, defval).i` and returning `v != 0` [S8, unofficial]. It is chosen when color or attribute data, not just occupancy, determines the hit [S8, unofficial].
++Performs a voxel raycast that stops at the first voxel where a specific channel value is non-zero [S8, unofficial]. It creates a predicate struct holding a reference to VoxelData and a channel index, calling the predicate's operator to check `v != 0` at the hit position [S8, unofficial]. On success, it instantiates a result object with position, previous position, distance, and normal derived from `hit_pos - prev_pos` [S8, unofficial].
++
++### Neighbor Voxel Volume Sampling
++Reads adjacent voxel volumes at ray entry and exit positions to adjust traversal behavior, preventing artifacts such as floating voxels, flat edges, and incorrect slope rendering [S9, unofficial]. When exiting/entering a voxel, it calculates the adjacent voxel's grid position using mask-based offsets and samples the volume value to modify ray behavior [S9, unofficial]. A pitfall is that reading adjacent voxels can impact performance, though it may be negligible on small maps [S9, unofficial].
++
++### Voxel DDA Face Entry/Exit UV Mapping
++Determines which face (X, Y, or Z) the ray enters the voxel based on the entry mask [S9, unofficial]. If entering from the left/back, it sets the start UV to the back face and interpolates toward the center; if from the right/front, it sets the start UV to the front face and interpolates toward the right/center [S9, unofficial]. A pitfall is that using integer division for UV coordinate calculations causes terrain vertices to fail to connect across voxel edges; all coordinate math must use floating-point types [S9, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(k)$ where $k$ is the number of voxels traversed until a hit is found or the max distance is reached. In the worst case (empty space), $k \approx \text{distance} / \text{cell\_size}$.
+-*   **Memory Complexity:** $O(1)$ auxiliary space, excluding the grid storage [S1, S6, unofficial].
+-*   **Performance:** Efficient for sparse grids and large distances compared to fixed-step marchers, as it skips empty space [S6, unofficial]. Performance degrades if the ray traverses many empty voxels before hitting a solid one, but remains better than fixed-step for large gaps [S6, unofficial].
+-*   **Strengths:** No explicit intersection tests; precomputed deltas; handles axis-parallel rays gracefully; low memory overhead [S1, S6, unofficial].
+-*   **Limitations:** Requires occupancy query; does not handle non-axis-aligned voxel shapes (e.g., spheres) without modification; precision issues may occur with very large coordinates or very small direction components [S1, S7, unofficial].
+-*   **When to Use:** Voxel grids with axis-aligned cubic voxels; collision detection; occlusion queries; sparse volumes [S1, S6, S7, unofficial].
+-*   **When Not to Use:** Non-voxel grids; need for precise intersection points within a voxel (requires additional barycentric calculation); very dense grids where fixed-step might be faster due to cache locality (though DDA is generally preferred) [S6, unofficial].
++*   **Time Complexity:** $O(k)$, where $k$ is the number of voxels intersected by the ray [S1, S6, unofficial]. This is optimal for grid traversal as it visits each intersected voxel exactly once.
++*   **Memory Complexity:** $O(1)$ auxiliary space, excluding the voxel grid storage itself [S1, S6, unofficial].
++*   **Performance:** Significantly faster than fixed-step raymarching for high-resolution grids because it skips empty space efficiently [S6, unofficial]. Performance is limited by memory access patterns to the voxel grid [S9, unofficial].
++*   **Strengths:** Exact boundary crossing; no sampling artifacts from fixed step sizes; handles arbitrary ray directions; efficient for sparse and dense grids [S1, S6, unofficial].
++*   **Limitations:** Does not handle continuous volume data (density) directly; requires discrete voxel occupancy checks [S1, unofficial]. Degenerate cases (ray parallel to axes) require careful handling of infinity values to avoid division by zero [S1, S7, unofficial].
++*   **When to use:** Collision detection, occlusion culling, and surface finding in voxel-based worlds [S6, S7, unofficial].
++*   **When not to use:** When smooth, continuous volume rendering is required without discretization artifacts; in such cases, raymarching with interpolation (e.g., [Voxel DDA Raymarching with Adaptive Edge Smoothing](14664-voxel-dda-raymarching-with-adaptive-edge-smoothing.md)) is preferred.
+ 
+ ## Background
+-The algorithm is based on the Amanatides & Woo method for ray tracing in voxel grids, published in 1986 [S1, S2, unofficial]. It is a classic DDA approach widely used in voxel engines, game development, and volume rendering for efficient traversal [S1, S6, S7, unofficial]. It is implemented in various libraries and engines, including Godot Voxel Tools [S5][S8, unofficial], DoonEngine [S3, unofficial], and custom implementations in research projects [S2, S4, S6, S7, unofficial].
++The algorithm is commonly known as the Amanatides & Woo algorithm, named after its authors who published it in 1986 [S1, S2, S6, unofficial]. It is a classic Digital Differential Analyzer (DDA) approach for ray traversal in 3D grids [S6, unofficial]. It is widely used in voxel engines, game development (e.g., Minecraft-like worlds), and scientific visualization for efficient ray-voxel intersection [S1, unofficial][S5][S7, unofficial]. Variants and implementations exist in various graphics libraries and game engines, including Godot's Voxel Tools [S5][S8, unofficial] and custom C++/Python implementations [S2, S3, S4, S6, S7, unofficial].
+ 
+ ## Sources
+@@ -209,3 +262,4 @@
+ [S6] stevekwon211/splatcarve, https://github.com/stevekwon211/splatcarve, fetched 2026-10-27 (unofficial)
+ [S7] BartoszOsiej/NV2_ENGINE, https://github.com/BartoszOsiej/NV2_ENGINE, fetched 2026-10-27 (unofficial)
+-[S8] Zylann/godot_voxel, https://github.com/Zylann/godot_voxel, fetched 2026-10-26 (unofficial)+[S8] Zylann/godot_voxel, https://github.com/Zylann/godot_voxel, fetched 2026-10-26 (unofficial)
++[S9] Smooth terrain with voxel DDA raymarching, https://www.youtube.com/watch?v=CxoC0E7inUg, fetched 2026-10-25 (unofficial)

@@ -1,0 +1,156 @@
+# Flying Edges Algorithm
+Also called: Fast-flying edges algorithm, Surface contour rendering
+
+## Overview
+The Flying Edges algorithm is an isosurface extraction method that generates a surface contour of constant intensity from a scalar volume dataset [S2]. It serves as an alternative to Marching Cubes, primarily distinguished by its design for high-performance parallel execution on multi-core systems using OpenMP [S1]. While Marching Cubes processes cells independently, Flying Edges optimizes memory access patterns and reduces redundant vertex generation by traversing the grid in a cache-friendly manner, making it suitable for large-scale 3D morphology visualization [S1, S2].
+
+## How it works
+The algorithm extracts the isosurface defined by a scalar threshold value $T$ from a 3D regular grid of scalar values. Unlike Marching Cubes, which evaluates all 256 topological cases per cell, Flying Edges focuses on the edges of the grid cells where the isosurface intersects, constructing triangles directly from these intersection points.
+
+**Inputs and Outputs:**
+- **Input:** A 3D scalar field $V$ of dimensions $N_x \times N_y \times N_z$, where $V[i,j,k]$ is the scalar value at grid index $(i,j,k)$. A scalar threshold $T$.
+- **Output:** A triangle mesh (list of vertices and indices) representing the isosurface $V(x,y,z) = T$.
+
+**Data Structures:**
+- **Scalar Grid:** A 1D or 3D array of floating-point values.
+- **Edge Intersection Table:** A lookup structure mapping edge indices to intersection points. Since the grid is regular, the position of an intersection on an edge between vertices $A$ and $B$ with values $V_A$ and $V_B$ is calculated via linear interpolation:
+  $$ P = A + \frac{T - V_A}{V_B - V_A} (B - A) $$
+- **Triangle Buffer:** A dynamic list or pre-allocated array to store generated triangles.
+
+**Steps:**
+1. **Initialize:** Set up OpenMP parallel regions. Initialize the triangle buffer.
+2. **Grid Traversal:** Iterate through the grid cells. To maximize parallelism and cache efficiency, the grid is often traversed in a specific order (e.g., by blocks or tiles) that minimizes false sharing and maximizes spatial locality [S1].
+3. **Edge Intersection Detection:** For each cell, identify which of the 12 edges intersect the isosurface. An edge between vertices $i$ and $j$ intersects if $(V_i - T)(V_j - T) < 0$.
+4. **Calculate Intersection Points:** For each intersecting edge, compute the exact 3D coordinate of the intersection point using linear interpolation [S2].
+5. **Triangle Construction:** Connect the intersection points to form triangles. Flying Edges typically generates triangles by connecting intersection points on adjacent edges of the cell. The specific connectivity rules ensure manifold output without the need for complex case tables like Marching Cubes [S1].
+6. **Parallel Aggregation:** Each thread generates triangles for its assigned subset of cells. These triangles are appended to a shared triangle buffer, protected by a lock or using thread-local buffers that are merged later [S1].
+7. **Post-processing:** (Optional) Cap faces if the volume is bounded and the user requests covering exposed faces [S1].
+
+**Parameters:**
+- **Threshold ($T$):** The scalar value defining the surface [S2].
+- **Cap Faces:** Boolean flag to cover the boundary faces of the volume data box where high values would be exposed [S1].
+- **Parallelism:** Number of OpenMP threads, typically equal to the number of physical cores for optimal performance [S1].
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Edges:** If $V_i = V_j = T$, the edge lies on the isosurface. Standard linear interpolation fails (division by zero). These cases must be handled explicitly, often by treating them as non-intersecting or using a small epsilon tolerance [G].
+- **Boundary Conditions:** The algorithm must handle the boundaries of the grid correctly. If `capFaces` is true, additional triangles are generated to seal the volume [S1].
+- **Precision:** Floating-point precision issues may cause gaps or overlaps in the mesh if the threshold is exactly equal to a vertex value. Using a consistent tie-breaking rule is essential [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from concurrent.futures import ThreadPoolExecutor
+
+def flying_edges(V, threshold, cap_faces=False):
+    """
+    Extract isosurface using Flying Edges algorithm.
+    V: 3D numpy array of scalar values.
+    threshold: Scalar value for the isosurface.
+    cap_faces: Boolean to cap the volume boundaries.
+    """
+    Nx, Ny, Nz = V.shape
+    triangles = []
+    
+    # Helper to interpolate edge intersection
+    def get_intersection(v1, v2, p1, p2, t):
+        if abs(v2 - v1) < 1e-9:
+            return None
+        alpha = (t - v1) / (v2 - v1)
+        return p1 + alpha * (p2 - p1)
+
+    # Helper to process a block of cells
+    def process_block(block_range):
+        local_triangles = []
+        for i in range(*block_range):
+            for j in range(Ny):
+                for k in range(Nz):
+                    # Get 8 vertices of the cell
+                    # Note: Simplified indexing for demonstration
+                    # In practice, handle boundaries and parallelization carefully
+                    v000 = V[i, j, k]
+                    v100 = V[i+1, j, k]
+                    v010 = V[i, j+1, k]
+                    v110 = V[i+1, j+1, k]
+                    v001 = V[i, j, k+1]
+                    v101 = V[i+1, j, k+1]
+                    v011 = V[i, j+1, k+1]
+                    v111 = V[i+1, j+1, k+1]
+                    
+                    # Define vertices positions
+                    verts = [
+                        (i, j, k), (i+1, j, k), (i, j+1, k), (i+1, j+1, k),
+                        (i, j, k+1), (i+1, j, k+1), (i, j+1, k+1), (i+1, j+1, k+1)
+                    ]
+                    vals = [v000, v100, v010, v110, v001, v101, v011, v111]
+                    
+                    # Identify intersecting edges
+                    # Edge indices: 0-1, 1-3, 3-2, 2-0 (bottom), 4-5, 5-7, 7-6, 6-4 (top), 0-4, 1-5, 2-6, 3-7 (vertical)
+                    edges = [
+                        (0, 1), (1, 3), (3, 2), (2, 0),
+                        (4, 5), (5, 7), (7, 6), (6, 4),
+                        (0, 4), (1, 5), (2, 6), (3, 7)
+                    ]
+                    
+                    intersections = []
+                    for e_idx, (v_idx1, v_idx2) in enumerate(edges):
+                        if (vals[v_idx1] - threshold) * (vals[v_idx2] - threshold) < 0:
+                            p1 = np.array(verts[v_idx1])
+                            p2 = np.array(verts[v_idx2])
+                            pt = get_intersection(vals[v_idx1], vals[v_idx2], p1, p2, threshold)
+                            if pt is not None:
+                                intersections.append((e_idx, pt))
+                    
+                    # Construct triangles based on intersection points
+                    # Flying edges logic: connect intersections on adjacent edges
+                    # This is a simplified representation; actual Flying Edges uses a more optimized connectivity table
+                    if len(intersections) >= 3:
+                        # Example triangle construction (simplified)
+                        # Real implementation uses specific connectivity rules to avoid duplicates
+                        pass 
+        return local_triangles
+
+    # Parallel execution
+    num_threads = 4 # Example
+    block_size = Nx // num_threads
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = []
+        for t in range(num_threads):
+            start = t * block_size
+            end = start + block_size if t < num_threads - 1 else Nx
+            futures.append(executor.submit(process_block, (start, end)))
+        
+        for future in futures:
+            triangles.extend(future.result())
+            
+    if cap_faces:
+        # Generate cap triangles for boundaries
+        pass
+        
+    return triangles
+```
+
+## Subtopics
+
+### Marching Cubes
+The traditional cell-based approach. Choose Flying Edges for better parallel performance on large grids; choose Marching Cubes for simpler implementation or when exact topological case handling is required [S1].
+
+### Marching Tetrahedra
+Decomposes cells into tetrahedra. Choose Flying Edges for regular grids and speed; choose Marching Tetrahedra for guaranteed manifold topology on irregular grids [S1].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of cells, but with a significantly lower constant factor than Marching Cubes due to reduced case handling and better cache locality. Parallel speedup is near-linear with the number of cores [S1].
+- **Memory Complexity:** $O(N)$ for the scalar grid. The output mesh size depends on the surface complexity. Flying Edges generates fewer duplicate vertices than Marching Cubes, reducing post-processing memory needs [S1].
+- **Measured Performance:** Significantly faster than Marching Cubes on multi-core systems. In tomviz, it enables interactive visualization of large 3D morphology datasets [S2].
+- **Strengths:** High parallel efficiency, cache-friendly memory access, reduced vertex duplication.
+- **Limitations:** Less flexible for unstructured grids compared to Marching Tetrahedra. Requires careful handling of boundary conditions if capping is desired [S1].
+- **When to Use:** Large regular scalar volumes where performance is critical and the grid is Cartesian [S1, S2].
+- **When Not to Use:** Unstructured grids or when exact topological guarantees of Marching Cubes are required without post-processing [S1].
+
+## Background
+The Flying Edges algorithm was introduced by Schroeder et al. in 2015 as an optimization for surface extraction on multi-core systems [S1]. It was designed to address the performance bottlenecks of Marching Cubes in parallel environments. It is used in visualization tools like tomviz for 3D morphology visualization, allowing users to interactively explore interior structures by adjusting opacity and threshold values [S2].
+
+## Sources
+[S1] Command: volume, https://www.rbvi.ucsf.edu/chimerax/docs/user/commands/volume.html, fetched 2026-10-27
+[S2] Tutorial on the Visualization of Volumetric Data Using tomviz, https://academic.oup.com/mt/article-abstract/26/1/12/6813505, fetched 2026-10-31

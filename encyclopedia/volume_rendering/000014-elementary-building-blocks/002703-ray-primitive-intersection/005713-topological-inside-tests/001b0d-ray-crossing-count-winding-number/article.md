@@ -1,0 +1,131 @@
+# Ray Crossing Count (Winding Number)
+
+Also called: Crossing Count Ray Query, Even-Odd Rule for Classification, Ray-Triangle Crossing Count, Winding Number Classification, Winding Number Rule for Classification, winding number via crossing count
+
+## Overview
+
+The Ray Crossing Count method determines whether a 3D point lies inside or outside a closed triangle mesh by casting a ray and counting surface intersections [S3, unofficial]. It solves the topological "inside/outside" ambiguity that plagues simpler depth-based tests, which can fail when a ray intersects the same triangle multiple times or hits edges/vertices, causing sign-flipping artifacts [S3, unofficial]. Builds on [Topological/Inside Tests](15868-topological-inside-tests.md). Unlike the [Region Nesting Merge](13991-region-nesting-merge.md) sibling, which relies on hierarchical containment logic, this method uses a direct parity or signed accumulation of ray-triangle hits [S1, unofficial][S3, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+- **Input**: A query point $P = (P_x, P_y, P_z)$ and a triangle mesh $\mathcal{M}$ consisting of $N$ triangles [S1, unofficial][S3, unofficial]. Each triangle $T_i$ is defined by vertices $\mathbf{v}_{i,0}, \mathbf{v}_{i,1}, \mathbf{v}_{i,2}$ and an outward-facing normal $\mathbf{n}_i$ [S3, unofficial].
+- **Output**: A boolean indicating if $P$ is inside the mesh, or an integer/float winding number [S1, unofficial][S3, unofficial].
+
+### Data Structures
+1. **Triangle List**: An array of $N$ triangles, where each triangle stores vertex positions and precomputed normals [S3, unofficial].
+2. **Bounding Volume Hierarchy (BVH)**: A tree structure where each node stores an Axis-Aligned Bounding Box (AABB) enclosing its child triangles, and leaves contain indices to the triangle list [S3, unofficial].
+3. **2D Grid (Optional Optimization)**: For axis-aligned ray casting, a 2D grid of size $W \times H$ stores lists of triangles intersecting each grid cell, along with their intersection $z$-values [S1, unofficial].
+
+### Numbered Steps
+1. Initialize `crossingCount = 0` and `totalCount = 0` [S3, unofficial].
+2. Cast a ray from $P$ along direction $\mathbf{d}$ [S1, unofficial][S3, unofficial].
+3. Traverse the BVH to find every triangle whose bounding box intersects the given ray [S3, unofficial].
+4. For each candidate triangle, compute the ray-triangle intersection [S4, unofficial].
+5. If the intersection occurs at a positive distance $t > 0$, increment `totalCount` [S3, unofficial].
+6. Update `crossingCount` by adding $+1$ if $\mathbf{n}_i \cdot \mathbf{d} > 0$, otherwise adding $-1$ [S3, unofficial].
+7. Classify the point: if using parity, odd `totalCount` means inside and even means outside [S1, unofficial][S3, unofficial]. If using signed winding, outside yields $0$ and inside yields $+1$ for a closed outward-oriented mesh [S3, unofficial].
+8. For degenerate cases, cast rays in six directions (±x, ±y, ±z) and take a majority vote of the inside/outside results [S3, unofficial].
+9. For open meshes or triangle soups, the signed crossing count provides a generalized value between $0$ and $1$ [S3, unofficial].
+
+### Formulas
+- **Signed Winding Update**: $\text{crossingCount} \leftarrow \text{crossingCount} + \begin{cases} +1 & \text{if } \mathbf{n}_i \cdot \mathbf{d} > 0 \\ -1 & \text{otherwise} \end{cases}$ [S3, unofficial].
+- **Parity Classification**: $\text{Inside} \iff \text{totalCount} \bmod 2 = 1$ [S1, unofficial].
+- **Signed Classification**: $\text{Inside} \iff \text{crossingCount} = 1$ (closed outward mesh) [S3, unofficial].
+- **Generalized Winding**: $\text{Value} \in [0, 1]$ for meshes with holes or soups [S3, unofficial].
+
+### Parameters
+- **Ray Direction**: Typically aligned with a principal axis (e.g., $+z$) for the 2D grid optimization, or arbitrary directions for robustness [S1, unofficial][S3, unofficial].
+- **Intersection Algorithm**: Müller-Trombose intersection algorithm [S4, unofficial].
+- **Grid Resolution**: Example given is $128 \times 128$ for the 2D projection optimization [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Edge/Vertex Hits**: Rays hitting triangle edges or vertices may double-count triangles, making the theoretical crossing count unreliable for single rays [S3, unofficial].
+- **Closed Mesh Requirement**: The parity method is only meaningful for closed meshes [S3, unofficial].
+- **Numerical Precision**: Floating-point errors near the surface can cause inconsistent results; a small epsilon guard is required for intersection checks [G].
+- **Performance Scaling**: Brute-force checking all triangles is $O(N)$ [S3, unofficial]. The 2D grid optimization reduces the query search space from checking $128^3$ points to $128^2$ points by pre-calculating intersections [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def cross(a, b):
+    return (a[1]*b[2] - a[2]*b[1],
+            a[2]*b[0] - a[0]*b[2],
+            a[0]*b[1] - a[1]*b[0])
+
+def ray_triangle_intersect(origin, direction, v0, v1, v2):
+    edge1 = (v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2])
+    edge2 = (v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2])
+    normal = cross(edge1, edge2)
+    denom = dot(normal, direction)
+    if abs(denom) < 1e-8:
+        return None
+    t = dot(normal, (v0[0]-origin[0], v0[1]-origin[1], v0[2]-origin[2])) / denom
+    if t <= 0:
+        return None
+    hit = (origin[0]+direction[0]*t, origin[1]+direction[1]*t, origin[2]+direction[2]*t)
+    v0v1 = (v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2])
+    v0v2 = (v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2])
+    v0p = (hit[0]-v0[0], hit[1]-v0[1], hit[2]-v0[2])
+    d00 = dot(v0v1, v0v1)
+    d01 = dot(v0v1, v0v2)
+    d02 = dot(v0v1, v0p)
+    d11 = dot(v0v2, v0v2)
+    d12 = dot(v0v2, v0p)
+    invDenom = 1.0 / (d00 * d11 - d01 * d01)
+    u = (d11 * d02 - d01 * d12) * invDenom
+    v = (d00 * d12 - d01 * d02) * invDenom
+    if u >= 0.0 and v >= 0.0 and (u + v) <= 1.0:
+        return (t, hit)
+    return None
+
+def traverse_bvh_candidates(bvh, origin, direction):
+    # Standard BVH traversal: check AABB intersection, recurse to children, collect leaf triangle indices [G]
+    # Returns list of triangle indices whose bounding boxes intersect the ray.
+    return []  # Placeholder for BVH traversal implementation [G]
+
+def ray_crossing_count(query_point, triangles, bvh, use_signed=True):
+    ray_origin = query_point
+    ray_direction = (0.0, 0.0, 1.0)
+    crossing_count = 0
+    total_count = 0
+    candidate_indices = traverse_bvh_candidates(bvh, ray_origin, ray_direction)
+    for idx in candidate_indices:
+        tri = triangles[idx]
+        hit = ray_triangle_intersect(ray_origin, ray_direction, tri.v0, tri.v1, tri.v2)
+        if hit is not None:
+            total_count += 1
+            if use_signed:
+                dot_product = dot(tri.normal, ray_direction)
+                crossing_count += 1 if dot_product > 0.0 else -1
+            else:
+                crossing_count += 1
+    if use_signed:
+        return crossing_count
+    else:
+        return (crossing_count % 2) == 1
+```
+
+## Operating characteristics
+
+- **Time Complexity**: $O(N)$ for brute-force ray-triangle intersection [S3, unofficial]. Traversing a BVH prunes non-intersecting triangles [S3, unofficial]. The 2D grid optimization reduces the query search space from $128^3$ points to $128^2$ points [S1, unofficial].
+- **Memory Complexity**: $O(N)$ for storing triangles [S3, unofficial]. $O(H \cdot W)$ for the 2D grid optimization [S1, unofficial].
+- **Measured Performance**: The overhead of the raycast step is small when performed simultaneously with Signed Distance Field (SDF) calculation [S4, unofficial].
+- **Strengths**: Robust against sign-flipping artifacts caused by depth-based tests [S3, unofficial]. Provides generalized winding numbers for non-closed meshes [S3, unofficial].
+- **Limitations**: Sensitive to degenerate ray hits (edges/vertices) without mitigation [S3, unofficial]. Requires closed meshes for simple parity interpretation [S3, unofficial].
+- **When to Use**: When topological correctness is critical, especially in Marching Cubes implementations where incorrect inside/outside tests cause artifacts [S3, unofficial]. When dealing with meshes that may have holes or non-manifold geometry, the signed winding number is preferred [S3, unofficial].
+
+## Background
+
+The Ray Crossing Count method is a fundamental technique in computational geometry for point-in-polyhedron tests [S3, unofficial]. It is widely used in volume rendering, particularly in Marching Cubes implementations, to correctly determine the interior of a mesh [S3, unofficial]. The specific implementation using signed crossing counts to fix artifacts in Marching Cubes 33 was detailed by Vega et al. in "A Fast and Memory-Saving Marching Cubes 33 Implementation with the Correct Interior Test" (JCGT 2019) [S3, unofficial]. The 2D grid optimization approach is discussed in community forums as a way to reduce computational complexity for voxel-based rendering [S1, unofficial].
+
+## Sources
+
+[S1] Checking if point is inside the mesh via raycasting - where to cast rays?, https://gamedev.stackexchange.com/questions/120869/checking-if-point-is-inside-the-mesh-via-raycasting-where-to-cast-rays, fetched 2026-10-26 (unofficial)
+[S2] ray casting, https://grokipedia.com/page/Ray_casting, fetched 2026-10-26
+[S3] GuangyanCai/isoext, https://github.com/GuangyanCai/isoext, fetched 2026-10-27 (unofficial)
+[S4] Signed Distance Field Rendering Journey pt.1 – kosmonaut's blog, https://kosmonautblog.wordpress.com/2017/05/01/signed-distance-field-rendering-journey-pt-1/, fetched 2026-10-29 (unofficial)

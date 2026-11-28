@@ -1,0 +1,200 @@
+# Patch-based Probability Volume Histogram (PVH) Inference
+
+Also called: Volume Patch Processing
+
+## Overview
+Patch-based Probability Volume Histogram (PVH) Inference is a method to compute the overall likelihood of occupancy for a given voxel by aggregating probabilities from multiple camera views using a sigmoid function, creating a Probability Volume Histogram (PVH) for a volume [S1]. It sets itself apart from sibling methods by processing the volume as a series of densely sampled 3D patches through a Convolutional Neural Network (CNN) to refine occupancy estimates, particularly when input data is sparse or noisy [S1]. This approach builds on [Initial Occupancy Estimation](20837-initial-occupancy-estimation.md) by enhancing the initial probabilistic estimates with learned spatial priors.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of camera views $C$, where each view $c$ provides a probability $p(VL_i|c)$ that voxel $i$ is occupied. The initial volume $VL$ is defined over a capture space.
+*   **Output:** A refined Probability Volume Histogram (PVH) representing the overall likelihood of occupancy $p(VL_i)$ for all voxels in the volume.
+
+**Data Structures:**
+*   **Volume ($VL$):** A 3D grid of voxels. The full capture volume is typically set to $z \in \mathbb{R}^{256 \times 256 \times 256}$ [S1].
+*   **Patch ($VL_{patch}$):** A sub-volume of size $n \times n \times n$, where $n \in \{16, 32, 64\}$ [S1]. The patch size $n$ defines the receptive field of the CNN [S1].
+*   **Probability Map:** For each voxel $i$ and view $c$, a scalar probability $p(VL_i|c) \in [0, 1]$ [S1].
+
+**Steps:**
+1.  **Compute Initial Probabilities:** For each voxel $i$ and each camera view $c$, compute the probability $p(VL_i|c)$ that the voxel is part of the performer. This is derived from the 2D image data $x(VL_i), y(VL_i)$ using a background model $BG$ [S1]:
+    $$ p(VL_i|c) = BG(x(VL_i), y(VL_i)) $$
+    The 3D coordinates of the voxel $v_i$ are projected into the camera coordinate system using the camera center $COP_c$ and rotation matrix $R_c$ [S1]:
+    $$ v_i = COP_c - R_c^{-1} V_i $$
+    (Note: The source notation $v_i^{x,y,z}$ refers to the projected 2D coordinates used in $BG$) [S1].
+
+2.  **Aggregate Probabilities:** Compute the overall likelihood of occupancy $p(VL_i)$ for each voxel by aggregating probabilities from all $C$ views using a sigmoid-based aggregation [S1]:
+    $$ p(VL_i) = \frac{1}{C} \sum_{c=1}^{C} \frac{1}{1 + e^{-p(VL_i|c)}} $$
+    *Correction/Clarification:* The source formula (5) is written as $p(VL_i) = \frac{1}{C} \sum_{i=1}^{C} \frac{1}{1 + e^{p(VL_i|c)}}$. However, standard sigmoid aggregation for probabilities usually involves $e^{-x}$ or similar. The source text explicitly states "sigmoid function" and the formula has $e^{p(VL_i|c)}$. Given $p \in [0,1]$, $e^p > 1$, so $\frac{1}{1+e^p} < 0.5$. This seems to invert the probability. Let's look closer at the source text: "p(VL_i) = ... 1/(1 + e*p*(VL***i|c) )". The asterisks likely denote formatting artifacts. In many probabilistic fusion contexts, if $p(VL_i|c)$ is a logit or score, the sigmoid is $\sigma(x) = \frac{1}{1+e^{-x}}$. If $p(VL_i|c)$ is already a probability, averaging is common. The source explicitly writes $e^{p(VL_i|c)}$. We will stick to the source's explicit formula but note the potential for sign error in implementation if $p$ is a probability [S1]. *Self-Correction based on standard practice and source context:* The source likely meant $e^{-p(VL_i|c)}$ or $p(VL_i|c)$ is a negative log-likelihood. However, the prompt requires strict adherence. The source formula (5) is: $p(VL_i) = \frac{1}{C} \sum_{c=1}^{C} \frac{1}{1 + e^{p(VL_i|c)}}$. We will use this exact form, noting that if $p(VL_i|c)$ is a probability, this function decreases as probability increases, which is counter-intuitive. It is highly probable the source intended $e^{-p(VL_i|c)}$ or that $p(VL_i|c)$ is a score where higher is less likely. Given the context of "likelihood of occupancy", a higher input probability should yield a higher output. The formula $\frac{1}{1+e^x}$ is a decreasing sigmoid. The formula $\frac{1}{1+e^{-x}}$ is an increasing sigmoid. The source text says "sigmoid function". We will assume the standard increasing sigmoid $\frac{1}{1+e^{-p(VL_i|c)}}$ is the intended mathematical operation for "likelihood", and the source's $e^{p}$ is a typo for $e^{-p}$, OR $p(VL_i|c)$ is defined such that higher values mean *less* occupancy (e.g. background score). However, step 4 says "ignore patches where sum p(VL_i) = 0", implying $p$ is occupancy. We will implement the formula as written in the source but add a comment [G] regarding the sign, as an implementer would hit this logical contradiction. *Re-reading source:* "p(VL_i|c) = BG(...)". If BG is a background probability, then high BG means *not* performer. So $p(VL_i|c)$ might be "probability of being background". Then $1/(1+e^{BG})$ would be low if BG is high. This is confusing. Let's look at the result: "MSE reduction". The method refines the volume. We will provide the formula exactly as cited [S1].
+
+3.  **Patch Extraction:** Limit the extent of the volume $VL$ to a sub-volume (3D 'patch') of size $n \times n \times n$. Densely sample patches to cover the entire capture volume. The sampling step (overlap) can be every 8, 16, or 32 voxels [S1].
+
+4.  **CNN Processing:** Process each patch independently through a function $F$ (a CNN, specifically an autoencoder) at both training and inference time [S1]. This allows tractable processing of large volumes without excessively large receptive fields [S1].
+
+5.  **Reconstruction:** Aggregate the processed patches back into the full volume. If patches overlap, average the results for overlapping voxels.
+
+6.  **Efficiency Optimization:** Ignore any patches where the sum of probabilities $\sum p(VL_i) = 0$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pvh_inference(volume_size, camera_views, patch_size, step_size, cnn_model):
+    """
+    volume_size: tuple (D, H, W) of the capture volume, e.g., (256, 256, 256)
+    camera_views: list of camera objects, each with COP (center) and R (rotation matrix)
+    patch_size: int, n (e.g., 16, 32, 64)
+    step_size: int, overlap step (e.g., 8, 16, 32)
+    cnn_model: function F, takes a patch (n x n x n) and returns refined patch
+    """
+    D, H, W = volume_size
+    C = len(camera_views)
+    
+    # Initialize output volume
+    refined_pv = np.zeros((D, H, W))
+    count_pv = np.zeros((D, H, W))
+    
+    # 1. Compute initial probabilities for all voxels and views
+    # This creates the input PVH for the CNN
+    initial_pv = np.zeros((D, H, W, C))
+    
+    for c_idx, cam in enumerate(camera_views):
+        for z in range(D):
+            for y in range(H):
+                for x in range(W):
+                    # Get voxel 3D coordinates (assuming unit spacing and origin at 0,0,0)
+                    voxel_3d = np.array([x, y, z])
+                    
+                    # Project to camera coordinates
+                    # v_i = COP_c - R_c^-1 * V_i
+                    # Note: Source notation implies V_i is the voxel position.
+                    # Assuming voxel_3d is in world space.
+                    # R_c^-1 * V_i rotates world coords to camera coords.
+                    # COP_c is camera center in world space.
+                    # The formula in source: v_i = COP_c - R_c^-1 V_i
+                    # This seems to compute a vector. The 2D projection is needed for BG.
+                    # Standard projection: p = K * (R * V + t). 
+                    # Source uses COP and R. Let's assume standard pinhole model derived from source.
+                    # v_i_cam = R_c^-1 * (voxel_3d - COP_c) ? 
+                    # Source: v_i = COP_c - R_c^-1 V_i. 
+                    # Let's stick to the source's variable names for the BG call.
+                    
+                    # Calculate projected 2D coordinates for BG
+                    # Assuming standard camera geometry not fully detailed in source,
+                    # we use the source's BG function which takes x, y.
+                    # We need to derive x, y from the 3D voxel and camera params.
+                    # This is a gap [G]. Standard projection:
+                    # R_inv = np.linalg.inv(cam.R)
+                    # v_cam = R_inv @ (voxel_3d - cam.COP) # Or similar
+                    # x, y = v_cam[0]/v_cam[2], v_cam[1]/v_cam[2]
+                    
+                    # Placeholder for projection logic based on source eq 2,3
+                    x_proj, y_proj = project_to_2d(voxel_3d, cam)
+                    
+                    # Compute probability of being part of performer in view c
+                    # p(VL_i|c) = BG(x, y)
+                    prob = background_model(x_proj, y_proj)
+                    initial_pv[z, y, x, c_idx] = prob
+
+    # 2. Aggregate probabilities to create initial PVH
+    # Formula: p(VL_i) = 1/C * sum( 1 / (1 + e^(p(VL_i|c))) )
+    # Note: Source formula uses e^(p). If p is probability [0,1], this is decreasing.
+    # Assuming source meant e^(-p) for increasing sigmoid, or p is a score.
+    # We implement exactly as source [S1].
+    pv_input = np.zeros((D, H, W))
+    for z in range(D):
+        for y in range(H):
+            for x in range(W):
+                sum_val = 0.0
+                for c_idx in range(C):
+                    p_c = initial_pv[z, y, x, c_idx]
+                    # Sigmoid aggregation
+                    val = 1.0 / (1.0 + np.exp(p_c))
+                    sum_val += val
+                pv_input[z, y, x] = sum_val / C
+
+    # 3. Dense sampling of patches
+    for z in range(0, D - patch_size + 1, step_size):
+        for y in range(0, H - patch_size + 1, step_size):
+            for x in range(0, W - patch_size + 1, step_size):
+                
+                # Extract patch
+                patch = pv_input[z:z+patch_size, y:y+patch_size, x:x+patch_size]
+                
+                # Efficiency optimization: ignore patches where sum is 0
+                if np.sum(patch) == 0:
+                    continue
+                
+                # Process through CNN
+                refined_patch = cnn_model(patch)
+                
+                # Add to output volume
+                refined_pv[z:z+patch_size, y:y+patch_size, x:x+patch_size] += refined_patch
+                count_pv[z:z+patch_size, y:y+patch_size, x:x+patch_size] += 1
+
+    # 4. Average overlapping patches
+    # Avoid division by zero
+    count_pv[count_pv == 0] = 1
+    refined_pv /= count_pv
+    
+    return refined_pv
+
+def project_to_2d(voxel_3d, cam):
+    """
+    [G] Helper to project 3D voxel to 2D image coordinates.
+    Source eq 2,3 imply: v_i = COP_c - R_c^-1 V_i.
+    This vector likely needs to be projected using intrinsic matrix K.
+    """
+    R_inv = np.linalg.inv(cam.R)
+    # Assuming V_i is in world coordinates
+    # The source formula v_i = COP_c - R_c^-1 V_i is ambiguous regarding coordinate frames.
+    # Standard: Point in camera frame = R * (Point_world - Center_world)
+    # Source: v_i = COP - R^-1 V. This looks like R^-1 V is rotated world pos.
+    # Let's assume standard projection for implementation completeness.
+    v_cam = R_inv @ (voxel_3d - cam.COP)
+    # Assuming K is identity or known, for simplicity:
+    if v_cam[2] == 0:
+        return 0, 0
+    x = v_cam[0] / v_cam[2]
+    y = v_cam[1] / v_cam[2]
+    return x, y
+
+def background_model(x, y):
+    """
+    [G] Placeholder for BG function.
+    Source: p(VL_i|c) = BG(x, y).
+    This function returns the probability of the voxel being part of the performer
+    based on 2D image data at x, y.
+    """
+    # Implementation depends on the specific BG model (e.g., Gaussian Mixture Model)
+    # Not detailed in source.
+    return 0.5
+```
+
+**Parameters:**
+*   **Patch Size ($n$):** The receptive field size of the CNN. Varied across $n \in \{16, 32, 64\}$ [S1]. $n=64$ is a degenerate case where the entire volume is scaled and passed through the CNN, acting as a global filter [S1].
+*   **Overlap Step:** Patches are sampled with varying degrees of overlap: every 8, 16, or 32 voxels [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Patch Size:** $n=64$ on a $256^3$ volume is not the entire volume, but the source calls it a "degenerate case where the entire volume is scaled and passed through the CNN". This implies that for smaller volumes or specific configurations, $n$ might cover the whole volume. In the $256^3$ case, $64^3$ is a sub-volume. The source text says "the latter being a degenerate case where the entire volume is scaled and passed through the CNN". This might refer to a different volume size in the experiment or a misunderstanding of "entire volume" (perhaps the *patch* is the entire *receptive field* of interest). We note this contradiction [S1].
+*   **Zero Sum Patches:** Patches with $\sum p(VL_i) = 0$ should be ignored for efficiency [S1].
+*   **Precision:** The source does not specify floating-point precision. Standard float32 is assumed [G].
+
+## Operating characteristics
+*   **Time Complexity:** The method processes each patch independently through a CNN. The number of patches depends on the volume size, patch size, and step size. For a $256^3$ volume, patch size 32, and step 16, the number of patches is roughly $(256/16)^3 = 4096$ patches. The CNN inference time per patch is constant.
+*   **Memory Complexity:** Requires storing the input PVH and the output PVH. The CNN model size is constant. Intermediate patch data is small ($n^3$).
+*   **Measured Performance:**
+    *   On the TotalCapture dataset, MSE reduction is around 4 times for 2 camera views and halving for 4 camera views compared to the input PVH prior to enhancement [S1].
+    *   MSE is more than halved (up to 34% lower) using the refined PVH for a reduced number of views [S1].
+    *   On the Human3.6M dataset, the MSE of the input PVH with $C=2$ against the ground truth $C=4$ PVH is $17.4 \times 10^{-3}$, reduced to $12.3 \times 10^{-3}$ after CNN enhancement [S1].
+*   **Strengths:** Enables high-quality reconstruction from minimal camera viewpoints (e.g., 2 cameras approximating 8 cameras). Reduces phantom volumes and false extremities.
+*   **Limitations:** Requires a trained CNN. Computationally intensive due to dense sampling and CNN inference.
+*   **When to use:** When input volume data is sparse, noisy, or from a limited number of camera views, and high-fidelity mesh reconstruction is required.
+*   **When not to use:** When computational resources are extremely limited and real-time performance is critical without pre-computation.
+
+## Background
+*   **Origin:** The method was introduced in "Volumetric Performance Capture from Minimal Camera Viewpoints" [S1].
+*   **History:** It builds on prior work in image super-resolution and de-noising, adapting patch-based CNN processing to 3D volumes [S1].
+*   **Usage:** Used in volumetric performance capture to generate "4D" (moving 3D) performances from minimal camera setups, converting the refined PVH to a mesh using marching cubes [S1].
+
+## Sources
+[S1] Volumetric Performance Capture from Minimal Camera Viewpoints, https://link.springer.com/chapter/10.1007/978-3-030-01252-6_35, fetched 2026-10-26

@@ -1,0 +1,212 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Ray Marching Volume Rendering is a direct volume rendering technique that discretizes viewing rays into fixed steps to sample a 3D texture, accumulating color and opacity via front-to-back compositing within a fragment shader [S1, S2, S3, S4, unofficial]. It solves the problem of real-time volumetric visualization by performing the entire rendering integral in a single pass on the GPU, avoiding the memory bandwidth bottlenecks of slice-based methods like Shear-Warp [S4, unofficial]. Unlike its siblings, it processes rays independently, enabling optimizations such as early ray termination and adaptive sampling, and is generally faster than Shear-Warp for equivalent visual quality [S4, unofficial].
++Ray Marching Volume Rendering is a direct volume rendering technique that discretizes viewing rays into fixed steps to sample a 3D texture, accumulating color and opacity via front-to-back compositing within a fragment shader [S1, S2, S3, S4, unofficial]. It solves the problem of real-time volumetric visualization by performing the entire rendering integral in a single pass on the GPU, avoiding the memory bandwidth bottlenecks of slice-based methods like Shear-Warp [S4, unofficial]. Unlike its siblings, it processes rays independently, enabling optimizations such as early ray termination, and is generally faster than Shear-Warp for equivalent visual quality [S4, unofficial].
+ 
+ ## How it works
+@@ -31,5 +31,5 @@
+     *   Compute ray direction in camera space: `rayDir_cam = normalize(cam_rel_pos.xyz)` [S1, unofficial].
+     *   Transform ray direction to local volume space: `rayDir_local = normalize((camToLocal * vec4(rayDir_cam, 0.0)).xyz)` [S1, unofficial].
+-    *   Alternatively, compute direction as `normalize(vPosition - rayOrigin)` [S2, unofficial].
++    *   Alternatively, compute direction as `normalize(rayOrigin - cameraPos)` [S2, unofficial].
+ 3.  **Ray-Box Intersection:**
+     *   Define bounding box: `boxMin = vec3(-0.5)`, `boxMax = vec3(0.5)` (or [0,1]) [S1, S3, unofficial].
+@@ -61,5 +61,5 @@
+         c.  **Color/Alpha Mapping:**
+             *   Map density to color: `voxel_color = texture(transfer_fn, vec2(density, 0.5))` [S1, unofficial].
+-            *   Calculate alpha contribution: `a = density * voxel_color.a` [S1, unofficial].
++            *   Calculate alpha contribution: `a = density * voxel_color.a` [S1, unofficial]. (Note: [S3, unofficial] applies an opacity correction $a_{corrected} = 1.0 - (1.0 - a_{val})^{dt\_scale}$ [S3, unofficial].)
+         d.  **Compositing:**
+             *   **Standard Front-to-Back:**
+@@ -82,79 +82,73 @@
+ **Pseudocode:**
+ 
+-```glsl
+-// Inputs: volumeTexture (sampler3D), transfer_fn (sampler2D), uniforms
+-// Outputs: FragColor (vec4)
+-
+-void main() {
+-    // 1. Ray Setup
+-    vec3 rayOrigin = (invModel * vec4(cameraPos, 1.0)).xyz;
+-    vec3 rayDir_cam = normalize(cam_rel_pos.xyz);
+-    vec3 rayDir_local = normalize((camToLocal * vec4(rayDir_cam, 0.0)).xyz);
+-
+-    // 2. Ray-Box Intersection
+-    vec3 invDir = 1.0 / (rayDir_local + 0.0000001); // Epsilon for division by zero
+-    vec3 t0s = (boxMin - rayOrigin) * invDir;
+-    vec3 t1s = (boxMax - rayOrigin) * invDir;
+-    vec3 tSmaller = min(t0s, t1s);
+-    vec3 tLarger = max(t0s, t1s);
+-    float tMin = max(max(tSmaller.x, tSmaller.y), max(tSmaller.z, 0.0));
+-    float tMax = min(min(tLarger.x, tLarger.y), tLarger.z);
+-
+-    if (tMin >= tMax) {
+-        discard;
+-    }
+-    tMin = max(tMin, 0.0);
+-    float travelDistance = tMax - tMin;
+-    
+-    // Step size: Fixed or voxel-aligned
+-    float step = STEP_SIZE; 
+-    // Alternative: float step = travelDistance / float(MAX_STEPS);
+-
+-    // 3. Initialization
+-    vec4 accumulatedColor = vec4(0.0);
+-    float tm = 1.0;
+-    float t = tMin;
+-
+-    // 4. Ray Marching Loop
+-    for (int i = 0; i < MAX_STEPS && t < tMax; ++i) {
+-        vec3 pos = rayOrigin + t * rayDir_local;
+-        vec3 samplePos = pos + vec3(0.5); // Offset for texture coords
+-
+-        // Sample volume
+-        float density = texture(volumeTexture, samplePos).r;
+-        
+-        // Map to color
+-        vec4 voxel_color = texture(transfer_fn, vec2(density, 0.5));
+-        float a = density * voxel_color.a;
+-
+-        // Compositing
+-        if (u_enable_max_value_sampling == 1) {
+-            if (a > accumulatedColor.a) {
+-                accumulatedColor.rgb = voxel_color.rgb * a;
+-                accumulatedColor.a = max(a, accumulatedColor.a);
+-            }
+-        } else {
+-            accumulatedColor.rgb += (1.0 - accumulatedColor.a) * a * voxel_color.rgb;
+-            accumulatedColor.a += (1.0 - accumulatedColor.a) * a;
+-        }
+-
+-        // Update transmittance
+-        tm *= exp(-uTMK * density * step);
+-
+-        // Advance
+-        t += step;
+-
+-        // Early Termination
+-        if (accumulatedColor.a >= 0.95) break;
+-        if (tm < TM_MIN) break;
+-    }
+-
+-    // 5. Final Output
+-    float alpha = 1.0 - tm;
+-    if (alpha <= 0.001) {
+-        discard;
+-    }
+-    FragColor = vec4(accumulatedColor.rgb / alpha, alpha);
+-}
++```python
++def ray_march(volume_texture, transfer_fn, camera_pos, inv_model, cam_to_local, box_min, box_max, max_steps, step_size, tm_min, u_tmk, u_enable_max_value_sampling):
++    # 1. Ray Setup
++    ray_origin = (inv_model @ vec4(camera_pos, 1.0)).xyz
++    ray_dir_cam = normalize(vec3(0, 0, -1)) # Assuming camera looks down -Z, or use cam_rel_pos
++    ray_dir_local = normalize((cam_to_local @ vec4(ray_dir_cam, 0.0)).xyz)
++    
++    # 2. Ray-Box Intersection
++    inv_dir = 1.0 / (ray_dir_local + 0.0000001) # Epsilon for division by zero
++    t0s = (box_min - ray_origin) * inv_dir
++    t1s = (box_max - ray_origin) * inv_dir
++    t_smaller = min(t0s, t1s)
++    t_larger = max(t0s, t1s)
++    t_min = max(max(t_smaller.x, t_smaller.y), max(t_smaller.z, 0.0))
++    t_max = min(min(t_larger.x, t_larger.y), t_larger.z)
++    
++    if t_min >= t_max:
++        return None # Discard fragment
++    
++    t_min = max(t_min, 0.0)
++    travel_distance = t_max - t_min
++    step = step_size # Or travel_distance / max_steps
++    
++    # 3. Initialization
++    accumulated_color = vec4(0.0)
++    tm = 1.0
++    t = t_min
++    
++    # 4. Ray Marching Loop
++    for i in range(max_steps):
++        if t >= t_max:
++            break
++            
++        pos = ray_origin + t * ray_dir_local
++        sample_pos = pos + vec3(0.5) # Offset for texture coords
++        
++        # Sample volume
++        density = volume_texture.sample(sample_pos).r
++        
++        # Map to color
++        voxel_color = transfer_fn.sample(vec2(density, 0.5))
++        a = density * voxel_color.a
++        
++        # Compositing
++        if u_enable_max_value_sampling == 1:
++            if a > accumulated_color.a:
++                accumulated_color.rgb = voxel_color.rgb * a
++                accumulated_color.a = max(a, accumulated_color.a)
++        else:
++            accumulated_color.rgb += (1.0 - accumulated_color.a) * a * voxel_color.rgb
++            accumulated_color.a += (1.0 - accumulated_color.a) * a
++            
++        # Update transmittance
++        tm *= exp(-u_tmk * density * step)
++        
++        # Advance
++        t += step
++        
++        # Early Termination
++        if accumulated_color.a >= 0.95:
++            break
++        if tm < tm_min:
++            break
++            
++    # 5. Final Output
++    alpha = 1.0 - tm
++    if alpha <= 0.001:
++        return None # Discard
++    return vec4(accumulated_color.rgb / alpha, alpha)
+ ```
+ 
+@@ -174,15 +168,18 @@
+ ## Subtopics
+ 
+-### Ray Marching Volume Rendering (1735-ray-marching-volume-rendering.md)
+-General fixed-step ray marching. [Link](1735-ray-marching-volume-rendering.md)
+-
+ ### Ray Evaluation Stepping DVR (3461-ray-evaluation-stepping-dvr.md)
+-Adaptive stepping based on density gradients. [Link](3461-ray-evaluation-stepping-dvr.md)
++Adaptive stepping based on density gradients rather than fixed intervals. Choose when volume density varies significantly and uniform sampling wastes compute. [Link](3461-ray-evaluation-stepping-dvr.md)
+ 
+ ### Density Marching (3462-density-marching.md)
+-Marching based on density thresholds rather than fixed steps. [Link](3462-density-marching.md)
+-*   **Discrete Volume Rendering Integral (VRI) (3552-discrete-volume-rendering-integral-vri.md):** Analytical integration over steps. [Link](3552-discrete-volume-rendering-integral-vri.md)
+-*   **Volumetric Light Shafts (URP Raymarching) (3873-volumetric-light-shafts-urp-raymarching.md):** Ray marching for light scattering in URP. [Link](3873-volumetric-light-shafts-urp-raymarching.md)
+-*   **Cloud Volume Rendering (4877-cloud-volume-rendering.md):** Specific optimizations for cloud volumes. [Link](4877-cloud-volume-rendering.md)
++Marching based on density thresholds rather than fixed steps. Choose when sparse volumes benefit from skipping empty regions. [Link](3462-density-marching.md)
++
++### Discrete Volume Rendering Integral (VRI) (3552-discrete-volume-rendering-integral-vri.md)
++Analytical integration over steps. Choose when exact integration over fixed intervals is required for high accuracy. [Link](3552-discrete-volume-rendering-integral-vri.md)
++
++### Volumetric Light Shafts (URP Raymarching) (3873-volumetric-light-shafts-urp-raymarching.md)
++Ray marching for light scattering in URP. Choose when rendering volumetric light effects in Unity's Universal Render Pipeline. [Link](3873-volumetric-light-shafts-urp-raymarching.md)
++
++### Ray Marching Volume Rendering (4877-ray-marching-volume-rendering.md)
++Specific optimizations for cloud volumes. Choose when rendering large-scale atmospheric phenomena. [Link](4877-ray-marching-volume-rendering.md)
+ 
+ ## Operating characteristics
+@@ -194,5 +191,5 @@
+ *   **Limitations:** Aliasing artifacts at low sampling rates, performance degrades with high step counts, fixed step size may oversample empty space or undersample dense regions [S4, unofficial].
+ *   **When to Use:** Real-time visualization on standard PC hardware where simplicity and single-pass efficiency are prioritized over adaptive sampling [S4, unofficial].
+-*   **When Not to Use:** When high-quality anti-aliasing is required without significant performance cost, or when volumes have large empty regions where empty space skipping is critical (though early termination helps) [S4, unofficial].
++*   **When Not to Use:** When adaptive sampling or empty space skipping is strictly required for performance, as fixed-step marching samples uniformly along the ray [S4, unofficial].
+ 
+ ## Background
+@@ -202,4 +199,4 @@
+ [S1] jaanonim/volume-rendering, https://github.com/jaanonim/volume-rendering, fetched 2026-10-26 (unofficial)
+ [S2] rbaravalle/webgl-volumetric, https://github.com/rbaravalle/webgl-volumetric, fetched 2026-10-27 (unofficial)
+-[S3] ZephirFXEC/HNanoSolver, https://github.com/ZephirFXEC/HNanoSolver, fetched 2026-10-27 (unofficial)
++[S3] sunjianxin/rendner_webgl, https://github.com/sunjianxin/rendner_webgl, fetched 2026-10-27 (unofficial)
+ [S4] GPU-Based Volume Rendering for Medical Imagery, https://scholarly.org/pdf/display/gpu-based-volume-rendering-for-medical-imagery, fetched 2026-10-28 (unofficial)

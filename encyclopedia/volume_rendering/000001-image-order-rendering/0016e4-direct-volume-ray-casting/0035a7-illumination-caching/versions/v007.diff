@@ -1,0 +1,119 @@
+--- v006.md
++++ v007.md
+@@ -4,38 +4,43 @@
+ 
+ ## Overview
+-Illumination caching is a direct volume ray casting technique that pre-computes the lighting distribution inside a volume and stores it in a texture, allowing for real-time rendering of complex lighting [S1, unofficial]. It relies on the assumption that volume material scatters light isotropically, meaning the lighting at any point depends only on its position and not on the viewing direction or the path taken to reach it [S1, unofficial]. This method is distinct from standard per-sample shading (e.g., [Direct Volume Rendering with Phong Shading](3686-direct-volume-rendering-with-phong-shading.md)) by replacing expensive per-sample shadow ray traversals with single-texture lookups of pre-aggregated illumination data, achieving significant performance speedups [S1, unofficial].
++Illumination Caching is a technique that pre-computes the lighting distribution inside a volume and stores it in a texture, allowing for real-time rendering by replacing expensive per-sample lighting calculations with texture lookups [S1, unofficial]. It relies on the assumption that volume material scatters light isotropically, meaning the lighting at any point depends only on its position and the light sources, not on the viewing direction [S1, unofficial]. This method sets itself apart from standard Phong shading [Direct Volume Rendering with Phong Shading](3686-direct-volume-rendering-with-phong-shading.md) by decoupling illumination from the ray-marching loop, and from [Image Plane Sweep Volume Illumination](10705-image-plane-sweep-volume-illumination.md) by storing the result in a 3D volume texture rather than computing it per-pixel in screen space.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A scalar volume dataset $V$ and a set of light sources (position, color, intensity).
+-*   **Output:** An illumination cache texture (3D texture) storing pre-computed lighting values, and the final rendered image.
++**Inputs:**
++*   Scalar volume dataset $V$.
++*   Light source definitions (position, color, intensity).
++*   Camera parameters (position, view direction).
++*   Optional: An illumination cache texture $I_{cache}$ with dimensions $D_x \times D_y \times D_z$.
++
++**Outputs:**
++*   Rendered image with pre-computed illumination applied.
+ 
+ **Data Structures:**
+-The core data structure is a "true" 3D volume texture [S1, unofficial].
+-*   **Layout:** The texture stores lighting values (e.g., ambient occlusion factors, shadow attenuation, or full illumination terms) at discrete voxel coordinates.
+-*   **Extents:** The cache does not necessarily need to have the same spatial extents as the input volume dataset [S1, unofficial]. It may be smaller or larger depending on the region of interest or lighting influence.
+-*   **Format:** Typically stored in floating-point or fixed-point formats suitable for interpolation, though specific bit-depths are not detailed in the primary sources [S1, unofficial].
++*   **Illumination Cache:** A "true" 3D volume texture (not a pseudo-volume texture) storing pre-computed lighting values [S1, unofficial]. The cache does not necessarily need to have the same extents as the volume dataset itself [S1, unofficial].
++*   **Volume Texture:** The input scalar field, typically stored in a format compatible with the rendering engine's volume texture implementation (e.g., 8-bit or 32-bit float, depending on precision requirements) [S1, unofficial].
+ 
+-**Algorithm Steps:**
+-1.  **Pre-computation (Cache Generation):**
+-    *   For each voxel $\mathbf{p}$ in the cache domain:
+-        *   Compute the illumination contribution from all light sources.
+-        *   Assuming isotropic scattering, calculate the attenuation of light reaching $\mathbf{p}$ from each light source. This typically involves marching rays from the light source to $\mathbf{p}$ or from $\mathbf{p}$ to the light source to estimate extinction/shadowing [S1, unofficial].
+-        *   Store the resulting illumination value $L_{cache}(\mathbf{p})$ in the 3D texture at index corresponding to $\mathbf{p}$ [S1, unofficial].
+-2.  **Rendering (Ray Casting):**
+-    *   For each pixel in the image, cast a ray through the volume [19-direct-volume-ray-casting.md].
++**Steps:**
++1.  **Pre-computation (Baking):**
++    *   For each voxel $\mathbf{p}$ in the illumination cache grid:
++        *   Estimate the local density or opacity using the scalar field $V(\mathbf{p})$ [G].
++        *   Compute the lighting contribution at $\mathbf{p}$ from all light sources. This typically involves casting shadow rays or performing a secondary ray march to determine attenuation [S1, unofficial].
++        *   Store the resulting illumination value (e.g., ambient occlusion factor, shadow intensity, or full lighting term) in the corresponding voxel of the illumination cache $I_{cache}(\mathbf{p})$ [S1, unofficial].
++    *   *Note:* The specific lighting model used during baking (e.g., Phong) is applied here, but the result is stored as a scalar or vector field representing the lighting intensity/attenuation [S1, unofficial].
++
++2.  **Rendering (Ray Marching):**
++    *   For each pixel in the image, cast a ray through the volume.
+     *   For each sample point $\mathbf{p}_i$ along the ray:
+-        *   Sample the illumination cache texture at $\mathbf{p}_i$ to retrieve $L_{cache}(\mathbf{p}_i)$ [S1, unofficial].
+-        *   Compute the base color $C_{base}$ from the scalar value $V(\mathbf{p}_i)$ using transfer functions [19-direct-volume-ray-casting.md].
+-        *   Compute the shaded color: $C_i = C_{base} \cdot L_{cache}(\mathbf{p}_i)$ [S1, unofficial].
+-        *   Accumulate $C_i$ using front-to-back alpha compositing [19-direct-volume-ray-casting.md].
++        *   Sample the scalar value $V(\mathbf{p}_i)$ to determine opacity $\alpha_i$ and base color $C_{base}$ [G].
++        *   Sample the illumination cache at $\mathbf{p}_i$ to retrieve the pre-computed lighting term $L(\mathbf{p}_i) = I_{cache}(\mathbf{p}_i)$ [S1, unofficial].
++        *   Compute the shaded color: $C_i = C_{base} \cdot L(\mathbf{p}_i)$ [G].
++        *   Accumulate $C_i$ using front-to-back alpha compositing [G].
+ 
+ **Parameters:**
+-*   **Cache Resolution:** The resolution of the 3D texture storing the illumination. Higher resolution yields more accurate lighting but increases memory usage and pre-computation time. Not given in the sources.
+-*   **Light Source Count:** The number of light sources contributing to the cache. Not given in the sources.
++*   **Cache Resolution:** The resolution of the illumination cache texture. Higher resolution yields more accurate lighting but increases memory usage and baking time [S1, unofficial].
++*   **Cache Extents:** The spatial bounds of the cache. It can be smaller or larger than the volume dataset [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Chunking Artifacts:** When the volume dataset exceeds the maximum texture dimensions (e.g., 2048 voxels per dimension in DirectX 11/12 [S1, unofficial]), the volume must be chunked into multiple sub-volumes. Each chunk is lit separately, ignoring occlusion from adjacent chunks. This results in incorrect lighting at chunk borders, making them appear incorrectly bright [S1, unofficial].
+-*   **Hardware Limitations:** The method relies on "true" volume textures. Features like DirectX 12 reserved resources (which allow managing very large, fragmented VRAM for textures up to 8 gigavoxels) are not supported by the primary implementation (TBRayMarcher), limiting the maximum usable texture size [S1, unofficial].
++*   **Chunking Artifacts:** If the volume dataset exceeds the maximum texture dimensions (e.g., 2048 voxels per dimension in DirectX 11/12), it must be chunked into multiple sub-volumes [S1, unofficial]. Each chunk is lit separately, leading to incorrect lighting at chunk borders where occlusion from adjacent chunks is ignored, resulting in borders that are incorrectly bright [S1, unofficial].
++*   **Hardware Limitations:** The technique relies on "true" volume textures. Features like DirectX 12 reserved resources, which allow for large fragmented VRAM management (up to 8 gigavoxels), are not supported by some implementations (e.g., TBRayMarcher), limiting the maximum usable texture size [S1, unofficial].
+ *   **Isotropic Assumption:** The method assumes isotropic scattering. If the volume exhibits strong anisotropic scattering, the pre-computed cache will be inaccurate [S1, unofficial].
+ 
+@@ -45,34 +50,25 @@
+ The Light Cache Rendering Pipeline is a direct volume ray-casting technique that pre-computes illumination attenuation factors (ambient occlusion and directional shadows) into a 3D texture, allowing for real-time rendering of complex lighting in volumetric data. It distinguishes itself from standard ray-casting by replacing per-sample shadow ray traversal with single-texture lookups of pre-aggregated extinction coefficients, achieving speedups of over 45 times while maintaining visual quality comparable to dense sampling.
+ 
++### [Indirect Illumination Modeling via Baking](14856-indirect-illumination-modeling-via-baking.md)
++This method models indirect illumination in 3D Gaussian Splatting (3DGS) by precomputing occlusion information and storing it in Spherical Harmonics (SH) coefficients within 3D volumes. It solves the difficulty of calculating occlusion in 3DGS, which uses differentiable forward mapping splatting rather than ray marching. It sets itself apart from sibling methods like the Light Cache Rendering Pipeline by explicitly baking geometric occlusion into SH coefficients to approximate indirect lighting, inspired by real-time rendering techniques such as Irradiance Volumes and Light Probes.
++
+ ### Radiance Caching (Jarosz et al.)
+-Radiance caching uses spherical harmonic functions to represent and store radiance distributions of certain sparse points and related gradient information [S2]. The illumination at a new position is interpolated from the existing distribution and gradient, thereby reducing the amount of calculation and providing a smoother result [S2]. Since the stored sample points are sparse, points to be calculated may be differently occluded compared to the stored points, resulting in different illumination; the authors did not consider visibility during interpolation [S2]. This problem was later addressed by Marco et al. [58] using a second-order Hessian error metric to determine interpolation acceptability, which considers visibility and produces higher quality results [S2].
++Uses spherical harmonic functions to represent and store radiance distributions of certain sparse points and related gradient information [S2]. The illumination at a new position is interpolated from the existing distribution and gradient, thereby reducing the amount of calculation and providing a smoother result [S2]. Since stored sample points are sparse, the points to be calculated may be differently occluded compared to the stored points, resulting in different illumination; the authors did not consider visibility during interpolation [S2]. This problem was later addressed by Marco et al. using a second-order Hessian error metric to determine whether the interpolation error is acceptable, considering visibility for higher quality [S2].
++
++### Global Illumination Caching
++A technique that pre-computes global illumination for each voxel using path tracing and stores it in a volume, which is then used during ray marching for real-time rendering [S3]. The global illumination of each voxel is computed with path tracing and stored in a global illumination volume [S3]. Both the global illumination volume and local illumination contribution are taken into account during the ray marching step when accumulating the illumination along the ray [S3].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Pre-computation:** The pre-computation phase is expensive, as it requires evaluating lighting for every voxel in the cache domain. The complexity is proportional to the number of voxels in the cache times the number of light sources and the cost of shadow ray marching [S1, unofficial].
+-*   **Rendering:** The rendering phase is significantly faster than standard per-sample shading because it replaces shadow ray marching with a single texture lookup per sample [S1, unofficial].
+-*   **Memory:** The method requires additional memory for the illumination cache texture. The size depends on the cache resolution and the number of channels stored (e.g., RGB or scalar) [S1, unofficial].
+-
+-**Measured Performance:**
+-*   Evaluated on an NVIDIA RTX 3500 Ada GPU with a chunked Kolumbo dataset (5.9 billion voxels, chunked into nine sub-volumes of 512x935x1501 voxels) [S1, unofficial].
+-*   The method achieves speedups of over 45 times compared to dense sampling methods [S2].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Enables real-time rendering of complex lighting in large volumes; reduces per-frame computational cost significantly [S1, unofficial].
+-*   **Limitations:** Requires pre-computation time; assumes isotropic scattering; suffers from lighting artifacts at chunk borders when large volumes are chunked; limited by maximum texture dimensions in some graphics APIs (e.g., DirectX 11/12 limit of 2048 voxels per dimension) [S1, unofficial].
+-
+-**When to Use:**
+-*   Use when real-time performance is critical and the volume exhibits approximately isotropic scattering.
+-*   Suitable for large datasets where per-sample shadow ray marching is too slow.
+-
+-**When Not to Use:**
+-*   Do not use if the volume exhibits strong anisotropic scattering.
+-*   Avoid if the volume cannot be chunked without unacceptable lighting artifacts at borders.
+-*   Avoid if the hardware does not support large "true" volume textures or if the required cache size exceeds available VRAM.
++*   **Time Complexity:** Pre-computation is $O(N_{cache} \cdot N_{samples})$, where $N_{cache}$ is the number of voxels in the cache and $N_{samples}$ is the number of samples per shadow ray or light path [S1, unofficial]. Rendering is $O(N_{pixels} \cdot N_{steps})$, with a constant-time lighting lookup per step, significantly faster than per-sample lighting [S1, unofficial].
++*   **Memory Complexity:** $O(N_{cache})$ for the illumination cache texture [S1, unofficial]. The cache size is independent of the number of light sources, unlike per-sample lighting which scales with light count [S1, unofficial].
++*   **Measured Performance:** Evaluated on an NVIDIA RTX 3500 Ada GPU with a chunked Kolumbo dataset (5.9 billion voxels, chunked into nine sub-volumes of 512x935x1501 voxels) [S1, unofficial]. The plugin allows for beautiful rendering with great performance on a single machine, though VRAM is a limiting factor [S1, unofficial].
++*   **Strengths:** Drastically improves rendering performance by eliminating per-sample lighting calculations [S1, unofficial]. Suitable for real-time rendering of large volume datasets [S1, unofficial].
++*   **Limitations:** Requires significant pre-computation time [S1, unofficial]. Chunking leads to lighting artifacts at boundaries [S1, unofficial]. Limited by maximum texture dimensions in some APIs (e.g., DirectX 11/12 limit of 2048 voxels per dimension) [S1, unofficial]. Not suitable for dynamic light sources or volumes that change frequently [S1, unofficial].
+ 
+ ## Background
+-The illumination caching technique described here is based on an implementation by Sundén and Ropinski [16], which is used in the TBRayMarcher plugin for Unreal Engine [S1, unofficial]. The plugin was evaluated in the context of rendering large volume datasets in Unreal Engine 5 [S1, unofficial]. The underlying assumption of isotropic scattering allows the lighting distribution to be pre-computed and stored, a concept related to radiance caching methods such as those by Jarosz et al. [S2].
++The technique is based on the implementation by Sundén and Ropinski [S1, unofficial]. It is used in the TBRayMarcher Plugin for Unreal Engine [S1, unofficial]. The method is particularly relevant for medical datasets and large volume datasets where real-time performance is required [S1, unofficial]. The approach is also related to radiance caching [S2] and global illumination caching [S3] in the context of participating media and combined volume/surface rendering.
+ 
+ ## Sources
+ [S1] Rendering Large Volume Datasets in Unreal Engine 5: A Survey, https://www.researchgate.net/publication/390671564_Rendering_Large_Volume_Datasets_in_Unreal_Engine_5_A_Survey, fetched 2026-10-28 (unofficial)
+-[S2] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26+[S2] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26
++[S3] Combined volume and surface rendering with global illumination caching, https://doi.org/10.1007/s00371-023-02932-9, fetched 2026-10-26

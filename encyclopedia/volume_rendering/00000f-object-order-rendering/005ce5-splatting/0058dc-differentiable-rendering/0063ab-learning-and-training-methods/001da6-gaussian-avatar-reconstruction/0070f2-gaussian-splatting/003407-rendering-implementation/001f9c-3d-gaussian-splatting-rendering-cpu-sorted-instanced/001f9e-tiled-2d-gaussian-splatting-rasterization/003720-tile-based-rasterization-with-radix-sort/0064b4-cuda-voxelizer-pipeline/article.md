@@ -1,0 +1,211 @@
+# CUDA Voxelizer Pipeline
+
+Also called: CudaVoxelizer Forward/Backward Pass, Tile-based 3D Gaussian Voxelization
+
+## Overview
+The CUDA Voxelizer Pipeline is a GPU-accelerated rendering and gradient computation method for 3D Gaussian Splatting that voxelizes 3D Gaussians into a 3D grid, sorts them per tile using radix sort, and renders/backpropagates gradients via tile-based blending [S1, unofficial]. It differs from standard tile-based rasterization by explicitly constructing a 3D voxel grid to manage Gaussian spatial distribution and using a dedicated preprocessing phase to compute norms, depths, and conic opacities before binning [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $P$: Number of 3D Gaussians to process [S1, unofficial].
+    *   Gaussian parameters: means, scales, rotations, opacities, 3D covariance matrices ($\Sigma_{3D}$) [S1, unofficial].
+    *   Voxel grid parameters: dimensions ($nVoxel_x, nVoxel_y, nVoxel_z$), physical spacing ($sVoxel_x, sVoxel_y, sVoxel_z$), and world-space center ($center_x, center_y, center_z$) [S1, unofficial].
+    *   Flags: `scale_modifier` (multiplicative factor applied to Gaussian scales during preprocessing), `prefiltered` (boolean flag passed to the preprocessing kernel to skip or apply pre-filtering logic) [S1, unofficial].
+*   **Outputs:**
+    *   Rendered volume/image.
+    *   Gradients for 3D mean position, conic matrix, opacity, scale, and rotation [S1, unofficial].
+
+**Data Structures:**
+*   **GeometryState:** `depths[P]`, `internal_radii_x[P]`, `internal_radii_y[P]`, `internal_radii_z[P]`, `means3D_norm[P]`, `cov3D[P*6]`, `conic_opacity[P*7]`, `tiles_touched[P]`, `scanning_space[dynamic]`, `scan_size[dynamic]`, `point_offsets[P]` [S1, unofficial].
+*   **ImageState:** `n_contrib[N]`, `ranges[N]` where $N = nVoxel_x \times nVoxel_y \times nVoxel_z$ [S1, unofficial].
+*   **BinningState:** `point_list[P]`, `point_list_unsorted[P]`, `point_list_keys[P]`, `point_list_keys_unsorted[P]`, `list_sorting_space[dynamic]`, `sorting_size[dynamic]` [S1, unofficial].
+
+**Steps:**
+1. Allocate geometry buffers and call `FORWARD::preprocess` with Gaussian parameters (means, scales, rotations, opacities, cov3D), voxel grid parameters, and output buffers for norms, depths, cov3D, conic_opacity, tile_grid, and tiles_touched [S1, unofficial].
+2. Compute an inclusive prefix sum over the full list of touched tile counts (`tiles_touched`) to generate `point_offsets`, which indicate cumulative counts per tile [S1, unofficial].
+3. Retrieve the total number of Gaussian instances to render by copying the last element of `point_offsets` to host: $num\_rendered = point\_offsets[P - 1]$ [S1, unofficial].
+4. Allocate binning buffers sized for $num\_rendered$ and reconstruct `BinningState` [S1, unofficial].
+5. Launch `duplicateWithKeys` kernel with $\lceil (P + 255) / 256 \rceil$ blocks of 256 threads. It generates `[tile | depth]` keys and duplicates Gaussian indices based on radii and tile grid [S1, unofficial].
+6. Calculate the number of radix bits needed: $bit = \text{getHigherMsb}(tile\_grid.x \times tile\_grid.y \times tile\_grid.z)$ [S1, unofficial].
+7. Sort the duplicated Gaussian indices by their generated keys using CUB radix sort over range $[0, 32 + bit)$ [S1, unofficial].
+8. Zero-initialize the `ranges` buffer for all tiles in the image state [S1, unofficial].
+9. If $num\_rendered > 0$, launch `identifyTileRanges` kernel with $\lceil (num\_rendered + 255) / 256 \rceil$ blocks of 256 threads to compute start/end indices per tile from the sorted keys [S1, unofficial].
+10. Launch `FORWARD::render` kernel with `tile_grid`, `block`, `ranges`, `point_list`, voxel dimensions, `means3D_norm`, `conic_opacity`, `n_contrib`, and `out_volume` to blend Gaussians per tile [S1, unofficial].
+11. Backward pass reconstructs `GeometryState`, `BinningState`, and `ImageState` from provided buffers [S1, unofficial].
+12. Launch `BACKWARD::render` kernel to compute loss gradients w.r.t. 3D mean position, conic matrix, and opacity [S1, unofficial].
+13. Select `cov3D` pointer: use `cov3D_precomp` if not null, otherwise fall back to `geomState.cov3D` [S1, unofficial].
+14. Launch `BACKWARD::preprocess` kernel to compute gradients for `mean3D`, `cov3D`, `scale`, and `rotation` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+from typing import List, Dict, Any
+
+def cuda_voxelizer_pipeline(P: int, voxel_params: Dict[str, Any], gaussians: Dict[str, Any], 
+                            geometry_state: Dict[str, List], binning_state: Dict[str, List], 
+                            image_state: Dict[str, List]) -> None:
+    # Parameters
+    nVoxel_x, nVoxel_y, nVoxel_z = voxel_params['dimensions']
+    sVoxel_x, sVoxel_y, sVoxel_z = voxel_params['spacing']
+    center_x, center_y, center_z = voxel_params['center']
+    scale_modifier = voxel_params['scale_modifier']
+    prefiltered = voxel_params['prefiltered']
+    tile_grid = voxel_params['tile_grid']
+
+    # Step 1: Preprocessing
+    geometry_state['depths'] = [0.0] * P
+    geometry_state['internal_radii_x'] = [0.0] * P
+    geometry_state['internal_radii_y'] = [0.0] * P
+    geometry_state['internal_radii_z'] = [0.0] * P
+    geometry_state['means3D_norm'] = [0.0] * P
+    geometry_state['cov3D'] = [0.0] * (P * 6)
+    geometry_state['conic_opacity'] = [0.0] * (P * 7)
+    geometry_state['tiles_touched'] = [0] * P
+
+    # Simulate FORWARD::preprocess kernel launch
+    preprocess_kernel(
+        gaussians['means'], gaussians['scales'], gaussians['rotations'],
+        gaussians['opacities'], gaussians['cov3D'],
+        nVoxel_x, nVoxel_y, nVoxel_z, sVoxel_x, sVoxel_y, sVoxel_z,
+        center_x, center_y, center_z, scale_modifier, prefiltered,
+        geometry_state['means3D_norm'], geometry_state['cov3D'],
+        geometry_state['conic_opacity'], geometry_state['tiles_touched'],
+        geometry_state['depths'], geometry_state['internal_radii_x'],
+        geometry_state['internal_radii_y'], geometry_state['internal_radii_z']
+    )
+
+    # Step 2: Prefix Sum
+    point_offsets = inclusive_prefix_sum(geometry_state['tiles_touched'])
+    num_rendered = point_offsets[P - 1]
+
+    # Step 3: Binning Buffer Allocation
+    binning_state['point_list'] = [0] * num_rendered
+    binning_state['point_list_unsorted'] = [0] * num_rendered
+    binning_state['point_list_keys'] = [0] * num_rendered
+    binning_state['point_list_keys_unsorted'] = [0] * num_rendered
+    binning_state['list_sorting_space'] = []
+    binning_state['sorting_size'] = 0
+
+    # Step 4: Key Generation and Duplication
+    num_blocks = (P + 255) // 256
+    threads_per_block = 256
+    duplicate_with_keys_kernel(
+        num_blocks, threads_per_block,
+        gaussians['indices'],
+        geometry_state['internal_radii_x'],
+        geometry_state['internal_radii_y'],
+        geometry_state['internal_radii_z'],
+        tile_grid,
+        geometry_state['depths'],
+        binning_state['point_list_unsorted'],
+        binning_state['point_list_keys_unsorted']
+    )
+
+    # Step 5: Radix Sort
+    tile_grid_volume = tile_grid['x'] * tile_grid['y'] * tile_grid['z']
+    bit = get_higher_msb(tile_grid_volume)
+    cub_radix_sort(
+        binning_state['point_list_keys_unsorted'],
+        binning_state['point_list_keys'],
+        binning_state['point_list_unsorted'],
+        binning_state['point_list'],
+        num_rendered,
+        32 + bit,
+        binning_state['list_sorting_space'],
+        binning_state['sorting_size']
+    )
+
+    # Step 6: Tile Range Identification
+    N = tile_grid['x'] * tile_grid['y'] * tile_grid['z']
+    image_state['ranges'] = [0] * N
+
+    if num_rendered > 0:
+        num_blocks = (num_rendered + 255) // 256
+        threads_per_block = 256
+        identify_tile_ranges_kernel(
+            num_blocks, threads_per_block,
+            binning_state['point_list_keys'],
+            tile_grid,
+            image_state['ranges']
+        )
+
+    # Step 7: Forward Rendering
+    forward_render_kernel(
+        tile_grid,
+        binning_state['point_list'],
+        geometry_state['means3D_norm'],
+        geometry_state['conic_opacity'],
+        image_state['n_contrib'],
+        image_state['ranges'],
+        voxel_params['voxel_dimensions'],
+        image_state['out_volume']
+    )
+
+    # Step 8: Backward Pass
+    backward_render_kernel(
+        tile_grid,
+        binning_state['point_list'],
+        geometry_state['means3D_norm'],
+        geometry_state['conic_opacity'],
+        image_state['n_contrib'],
+        image_state['ranges'],
+        voxel_params['voxel_dimensions'],
+        image_state['out_volume_grad'],
+        gaussians['grad_means'],
+        gaussians['grad_conic'],
+        gaussians['grad_opacity']
+    )
+
+    cov3D_ptr = gaussians['cov3D_precomp'] if gaussians['cov3D_precomp'] is not None else geometry_state['cov3D']
+    backward_preprocess_kernel(
+        gaussians['grad_means'],
+        cov3D_ptr,
+        gaussians['grad_scales'],
+        gaussians['grad_rotations'],
+        gaussians['grad_opacities']
+    )
+
+# Helper definitions to make pseudocode self-contained
+def preprocess_kernel(*args, **kwargs): pass
+def inclusive_prefix_sum(arr: List[int]) -> List[int]:
+    result = [0] * len(arr)
+    acc = 0
+    for i, val in enumerate(arr):
+        acc += val
+        result[i] = acc
+    return result
+def get_higher_msb(n: int) -> int:
+    return n.bit_length()
+def cub_radix_sort(keys_unsorted: List[int], keys_sorted: List[int], vals_unsorted: List[int], 
+                   vals_sorted: List[int], n: int, num_bits: int, space: List, size: int) -> None:
+    # Standard radix sort implementation over num_bits
+    for bit in range(num_bits):
+        # Counting sort logic for current bit
+        pass
+def duplicate_with_keys_kernel(*args, **kwargs): pass
+def identify_tile_ranges_kernel(*args, **kwargs): pass
+def forward_render_kernel(*args, **kwargs): pass
+def backward_render_kernel(*args, **kwargs): pass
+def backward_preprocess_kernel(*args, **kwargs): pass
+```
+
+**Edge Cases and Pitfalls:**
+*   If `radii_x/y/z` pointers are null, the pipeline falls back to `internal_radii` buffers to avoid segmentation faults during kernel launches [S1, unofficial].
+*   The `identifyTileRanges` kernel is guarded by a $num\_rendered > 0$ check to prevent launching with zero threads or invalid memory ranges [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths and Limitations:** Not given in the sources.
+*   **When to use / When not to use:** Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] yulunwu0108/Perturbed-Gaussian-Ensemble, https://github.com/yulunwu0108/Perturbed-Gaussian-Ensemble, fetched 2026-10-26 (unofficial)

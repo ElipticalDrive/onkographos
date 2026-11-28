@@ -1,0 +1,420 @@
+What a user cannot get. The six-face closed-box plane wave (add_tfsf_source(closed_box=True)) is the only plane-wave source that illuminates a finite body (the default slab source makes y and z periodic). With it, a user can compute the ...
+
+The closed-box plane wave refuses every JAX transform and accepts only normal incidence, so a finite body's scattered field has no gradient and no oblique illumination · Issue #1662 · bk-squared/rfx · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+The closed-box plane wave refuses every JAX transform and accepts only normal incidence, so a finite body's scattered field has no gradient and no oblique illumination #1662
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+The closed-box plane wave refuses every JAX transform and accepts only normal incidence, so a finite body's scattered field has no gradient and no oblique illumination#1662
+Copy link
+Labels
+lane:absorberCPML/UPML, pad continuation, boundary-touching smoothingCPML/UPML, pad continuation, boundary-touching smoothing
+Milestone
+v2.1 — distributed execution
+Description
+rfx-agent
+bot
+opened on Oct 12, 2026
+Issue body actions
+What a user cannot get. The six-face closed-box plane wave (add_tfsf_source(closed_box=True)) is the only plane-wave source that illuminates a finite body (the default slab source makes y and z periodic). With it, a user can compute the monostatic and bistatic RCS of a finite body by a plain forward()/run(), but:
+No gradient. forward() with closed_box=True refuses every external JAX transformation — jax.grad, value_and_grad, jvp, vmap, jit, checkpoint, scan — at entry (rfx/api/_execute.py _refuse_transformed_extended_tfsf, origin/main 23a6c27). So the gradient of any scattered-field observable of a finite body (RCS, NTFF data, flux) with respect to materials or a design density does not exist in rfx: the user receives a refusal, not a number.
+No oblique incidence. closed_box=True raises for angle_deg != 0. The oblique engines do not cover a finite 3-D body: method="bloch" is periodic and narrowband at f0; method="methodB" (1-D auxiliary grid along k̂, real fields) uses a four-edge box with z thin-periodic (2.5-D, z-invariant), Ez only. So the RCS of a finite body under oblique illumination is not available, broadband or not.
+Reproduction (plain forward runs; the gradient is refused). origin/main 23a6c27, Python 3.11, jax/jaxlib 0.10.2, CPU, seconds:
+```
+import jax, jax.numpy as jnp
+import rfx
+from rfx import Simulation
+dx = 2e-3
+sim = Simulation(freq_max=12e9, domain=(0.06,)*3, dx=dx, boundary='cpml', cpml_layers=8)
+sim.add_tfsf_source(f0=10e9, bandwidth=0.5, polarization='ez', direction='+x', margin=10, closed_box=True)
+sim.add_ntff_box((0.006,)*3, (0.054,)*3, freqs=[10e9])
+lo, hi = (0.026, 0.026, 0.026), (0.034, 0.034, 0.034)   # dielectric block, eps scaled by a design scalar
+def obs(a, n=40):
+    r = sim.forward(n_steps=n, checkpoint=False, design_box=(lo, hi),
+                    design_eps_override=a * jnp.ones((5, 5, 5)))
+    return jnp.real(jnp.sum(r.ntff_data.x_lo))
+print('rfx', rfx.__version__ if hasattr(rfx, '__version__') else '?', 'jax', jax.__version__)
+print('plain forward:', float(obs(2.0)))
+try:
+    print('grad:', float(jax.grad(obs)(2.0)))
+except Exception as e:
+    print('grad:', type(e).__name__, str(e)[:300])
+```
+Output:
+```
+plain forward: 1.4958798360154707e-13
+grad: NotImplementedError CustomWaveform and closed_box TFSF cannot be called under external JAX transformations (grad/value_and_grad/JVP/vmap/jit/checkpoint/scan): transformed scattered-field traces exceed the 9-ULP cross-trace contract. ...
+```
+For (2): the same scene with angle_deg=30 and closed_box=True raises NotImplementedError("CustomWaveform and closed_box require normal incidence (angle_deg=0)") (rfx/api/__init__.py, add_tfsf_source).
+The question for (1): which quantity exceeds which bar, and why. The refusal's own reason is that the traced per-step scattered-field values exceed the 9-ULP cross-trace bar. The cross-trace rule has two bars: 9 float32 ULP at the array's peak for a per-step quantity, and 1e-4 of its peak for a quantity summed over the record (a DFT accumulator, NTFF data, an objective, a gradient). A user-facing RCS and its gradient are summed quantities. So the measurement that decides whether this is a fix or a research question: traced against plain on the summed RCS / NTFF data (judged at 1e-4), and the gradient against central finite differences and a closed form (e.g. a dielectric sphere against Mie) — if the summed quantities meet 1e-4, the refusal is broader than the rule it cites.
+Related. #1422 (the oblique source cannot launch p-polarization) is the same source family but a different cause. Capability introduced in PR #1336 (ledger entry "Finite six-face normal TFSF admits real custom waveforms": "external JAX transformations … refuse").
+Witness of what it changes. Both items block gradient-based design of any finite scatterer under plane-wave illumination (coatings, metal patterns, shapes), and any oblique RCS of a finite body. No silently wrong value is involved; both are refusals.
+Activity
+rfx-agent
+added
+lane:absorberCPML/UPML, pad continuation, boundary-touching smoothingCPML/UPML, pad continuation, boundary-touching smoothing
+on Oct 12, 2026
+rfx-agent commented on Oct 12, 2026
+rfx-agentBot
+on Oct 12, 2026
+ContributorAuthor
+More actions
+Taken by absorber.
+Agreed by message between the filer and absorber (2026-10-12): for item (2) this is a missing capability — every route refuses or does not apply to a finite 3-D body; none returns a wrong number. Routes on origin/main 2df67eb, as absorber verified: closed_box=True refuses angle_deg != 0 (rfx/api/__init__.py add_tfsf_source, rfx/sources/tfsf.py:299); compute_rcs at oblique incidence selects method="methodB", 2.5-D with z thin-periodic, Ez only (rfx/rcs.py:369-473); method="bloch" is periodic with a single transverse wavenumber. Item (1), the gradient refusal, is scheduled first (traced vs plain on the summed RCS, gradient vs central FD and Mie on a dielectric sphere). The oblique design is absorber's, on this issue; it does not move ahead of the 2.0 structure work unless the PI ranks it.
+rfx-agent commented on Oct 12, 2026
+rfx-agentBot
+on Oct 12, 2026
+ContributorAuthor
+More actions
+Requirements for item (2), from one user (synthetic terms; the exact angle set is not yet fixed by that user):
+Body: a finite flat body about 5 λ × 5 λ at the centre frequency, grid-aligned (e.g. a 150 × 150 mm PEC plate with a 5 mm dielectric backing, cells 1.25 mm and finer), so rotating the body on the grid is not an option.
+Angles: incidence from 0° to 60° off the body normal, in steps of about 10°; in one plane of incidence first, both planes if possible.
+Polarizations: both — E perpendicular to the plane of incidence (s/TE) and E in the plane of incidence (p/TM). (The oblique plane-wave source cannot launch p-polarization (E in the plane of incidence), so r_TM of a surface is unavailable #1422 is the p-polarization gap on the periodic path.)
+Band: broadband from one pulsed run, 8–12 GHz (≈ 40 % fractional), so the k̂-aligned incident field must stay accurate over the band, not only at f0.
+Observables: NTFF far field — the monostatic return (back toward the source) and the bistatic pattern over the front half-space, normalised by the incident amplitude as compute_rcs does at normal incidence.
+Several plane waves at once: not needed; one run per (angle, polarization) is fine.
+Gradient: yes — the same observables differentiated with respect to a design density/material inside the box (item 1 at oblique incidence).
+rfx-agent commented on Oct 12, 2026
+rfx-agentBot
+on Oct 12, 2026
+ContributorAuthor
+More actions
+Requirements for item (2), from a second user. This user represents a nearby source's incident field on a finite body as a sum of plane waves and combines rfx's per-wave responses afterwards. Synthetic terms throughout.
+Why oblique incidence is needed.
+Synthetic case: a 0.30 m PEC plate at 3 GHz, lit by a short dipole on its normal at distance R; the reference is an independent solver.
+Replacing the dipole's incident field by one plane wave puts the echo off by 14° at R = 2a²/λ (1.8 m) and by 27° at 0.9 m.
+Within about 2a²/λ, 5–25 plane waves are needed to stay inside 1 dB / 10°.
+With the source 45° off the normal, 5 plane waves are needed out to 3.6 m.
+The extra waves arrive off-normal, so a normal-incidence closed box cannot supply them.
+Body: a finite 3-D body inside a six-face closed box. So far a grid-aligned PEC plate about 3λ × 3λ (node-thin sheet), and spheres. The body is not rotated on the grid.
+Angles: any direction on the illuminated side.
+In the cases above, the central direction is 0–45° off the body normal.
+The bundle spreads about ±35° around the central direction at the shortest range.
+So directions up to about 80° from a box face normal; a stated upper limit would be enough for us to plan around.
+Both azimuth planes are needed, because a bundle is a cone, not one plane of incidence.
+Polarizations: two orthogonal linear polarizations per direction (any pair, stated in the output). Weights are applied afterwards.
+Band:
+One frequency (a single DFT bin) is enough today.
+A broadband pulse is welcome if the incident field stays accurate at the bin read.
+Observable:
+The complex tangential E and H on a closed surface around the body at the DFT bin, as export_ntff_surface gives now.
+Normalised by the incident field at a stated phase origin (the box centre) for an arbitrary k̂, so that responses to different directions can be summed with complex weights.
+Not only the far field: the user evaluates the scattered field at finite distance from these surface currents.
+Several plane waves at once:
+Not needed; one run per (direction, polarization) is what we use, because the same per-wave responses are reused with different weights for every source position.
+Up to about 49 directions × 2 polarizations per body, so per-run cost matters more than simultaneity.
+Gradient: not needed now. Later, possibly with respect to body geometry; we will say so here before relying on it.
+rfx-agent commented on Oct 12, 2026
+rfx-agentBot
+on Oct 12, 2026
+ContributorAuthor
+More actions
+Item 1 measured: the refusal is broader than the rule it cites — issue fix. Taken by absorber.
+Decision rule written before the run. Synthetic fixtures, uniform mesh, closed-box Ez plane wave (+x), NTFF box in the scattered-field region, 9 bins 8–12 GHz, origin/main 23a6c27, CPU, float32:
+S: dielectric sphere eps_r 4, a = 6 mm, dx 1 mm (49³ cells), N = 1574 steps;
+P: PEC plate 18 × 18 mm with a 2-cell eps_r 3 coating;
+S-custom: S driven by a CustomWaveform equal to the default pulse.
+Each body's permittivity scales with one parameter p through design_eps_override. The refusal was bypassed in the measurement script only.
+check
+bar
+measured
+summed quantities, traced vs plain: six NTFF accumulators, monostatic σ at 9 bins, band-mean σ (max relative)
+1e-4
+grad 1.8e-6, vmap 2.6e-6, jit 3.9e-7 (NTFF bit-identical), jvp 0, checkpoint 0 — S, P and S-custom
+dJ/dp: AD vs central FD (two steps agree to 1.7e-3 / 9e-5)
+1e-2
+5.5e-4 (S), 2.2e-4 (P)
+dJ/dp and per-bin dσ/dp from a 1.5× longer record
+1e-2
+J 4.9e-5 / 3.3e-4; per bin at most 3.1e-3
+per-step probe Ez, traced vs plain, in float32 ULP of the incident field's peak
+9
+jit, jvp, checkpoint bit-identical; grad, vmap at most 7.75
+the same per-step difference in ULP of the scattered-field probe's own peak
+—
+up to 48 (S)
+The last row is what PR 1336 measured. A scattered-field probe reads total minus incident, so a last-bit difference between two compiled programs looks large against the small scattered peak.
+Independent reference: a dielectric-sphere Mie solution, first checked against the Rayleigh limit (4.6e-4) and the optical theorem (3e-16).
+At this mesh σ is 0.75–1.1 dB above Mie at 8–9.5 GHz, and the null near 10.5–11 GHz is shifted (2.9 dB at 10.5 GHz).
+dJ/dp has the same sign as Mie's but differs by 42 %.
+Plain forward shows the same offset, so it is a forward-model accuracy question, not a transform one.
+A mesh trend (dx 1.5 / 1.0 / 0.75 mm) runs before any text claims agreement with Mie.
+Next: a PR that lifts the refusal for grad/value_and_grad/jvp/jit/checkpoint/vmap on closed_box and CustomWaveform, with a contract test pinning the summed-quantity and AD-vs-FD rows on a smaller scene. scan was not measured; it is added to that test and stays refused if it fails. Item 2 (oblique) follows the run()/forward() contract PR.
+rfx-agent commented on Oct 12, 2026
+rfx-agentBot
+on Oct 12, 2026
+ContributorAuthor
+More actions
+Item 1 fix: PR 1675. forward() with the closed-box plane wave (or a CustomWaveform) accepts JAX transforms; run() keeps refusing them. The contract test pins traced vs plain summed quantities (1e-4), returned gradients under each transform vs plain grad (1e-4) and AD vs finite differences (1e-2).
+rfx-agent commented on Oct 12, 2026
+rfx-agentBot
+on Oct 12, 2026
+ContributorAuthor
+More actions
+Item 1, the accuracy question the measurement left open: how far are the closed-box σ and its gradient from the Mie closed form, and is the gap the staircase? Declared before the run (record below).
+Scene: a dielectric sphere, eps_r 4, a = 6 mm, inside a closed-box Ez plane wave (+x). One 42 mm domain serves every mesh, with the boxes at the same physical faces. Mie uses each mesh's realized volume-equivalent radius. The comparison reads the seven bins away from the backscatter null, 8–10 and 11.5–12 GHz.
+dx
+mean |σ_FDTD − σ_Mie| (dB)
+σ difference at 8 GHz
+σ difference at 12 GHz
+d(mean σ)/d eps_r: AD vs Mie
+1.5 mm
+1.30
++0.93 dB
+−1.58 dB
+40 % (same sign)
+1.0 mm
+1.07
++0.74 dB
+−1.27 dB
+36 %
+0.75 mm
+0.88
++0.61 dB
+−1.00 dB
+31 %
+Reading:
+Below the null the computed σ is above Mie; above the null it is below.
+So the computed sphere's backscatter null sits slightly off Mie's. The gap falls about in proportion to the cell size, which is the behaviour of a staircased sphere.
+The gradient's gap falls with it.
+Subpixel smoothing at dx 1.0 mm (through run(); forward() cannot request it yet, tracker 1373 A6) lowers the mean gap from 1.07 to 0.87 dB.
+The domain size matters little: 32 mm against 42 mm at dx 1.0 mm gives 1.12 against 1.07 dB.
+This is the forward model's accuracy on a sphere with 6–8 cells per radius, not the transforms: plain forward() shows the same numbers. Records: rfx-archive rfx/records/20261012-closedbox-transforms/ (f88c0078).
+rfx-agent commented on Oct 12, 2026
+rfx-agentBot
+on Oct 12, 2026
+ContributorAuthor
+More actions
+Item 1 (gradients through the closed-box plane wave) is on main: PR 1675 (43769ab). forward() with add_tfsf_source(closed_box=True) or a CustomWaveform accepts grad, value_and_grad, jvp, jit, checkpoint, vmap and lax.scan; run() still refuses external transforms with these sources. Pinned by tests/contracts/test_tfsf_closed_box_transforms.py. The mesh trend above is the accuracy of the forward model on a staircased sphere, not of the transform. Item 2 (oblique closed box) stays open here; its design is posted on this issue before any code.
+rfx-agent commented on Oct 12, 2026
+rfx-agentBot
+on Oct 12, 2026
+ContributorAuthor
+More actions
+Item 2 design: one closed-box plane wave for every direction, from an exact discrete plane wave. Posted before any code; comments from the two users welcome, especially on §8.
+Base: origin/main 43769ab (PR 1675 merged).
+Facts are marked with how they were checked; estimates are marked "estimate".
+1. What is asked (two users, #1662 comments of 2026-10-12)
+A finite 3-D body in a six-face closed box, not rotated on the grid. User A: a ~5 λ flat plate with a dielectric
+backing, 1.25 mm cells and finer; user B: a ~3 λ node-thin PEC plate and spheres.
+Directions: A 0–60° off the body normal in ~10° steps, one plane first; B any direction up to ~80° off a face normal,
+both azimuth planes (a cone of directions).
+Both linear polarizations (A: s and p; B: any orthogonal pair, stated).
+Band: A 8–12 GHz from one pulse; B one DFT bin, a pulse welcome.
+Observables: A NTFF far field (monostatic and bistatic), normalised by the incident amplitude; B the complex tangential
+E and H on a closed surface (export_ntff_surface), normalised by the complex incident field at a stated phase origin
+so per-direction responses can be summed with complex weights. One run per (direction, polarization); B up to 49 × 2
+runs per body, so cost per run matters.
+Gradient: A yes (item 1 at oblique incidence); B not now.
+2. Why the existing engines do not extend (leader read the code)
+closed_box=True refuses angle_deg != 0 (rfx/sources/tfsf.py:303). Its corrections are the sparse form of the
+mask commutator M·curl(F_inc) − curl(M·F_inc) for one direction and one polarization (_apply_closed_box_e/_h,
+rfx/sources/tfsf.py:837-891), fed by a 1-D line along x.
+method="bloch" (rfx/sources/tfsf_2d.py) fixes k_y at f0: periodic and narrowband by construction (its docstring:
+"broadband oblique would need a 1D-aux-along-k̂ method"; ledger trap "Oblique Bloch TFSF at fixed k_y always excites
+the fan's cutoff line").
+method="methodB" (rfx/sources/tfsf_oblique_open.py) is a 1-D line along k̂ whose cell is chosen so its phase
+velocity matches the 3-D grid's at f0, read by linear interpolation, on a four-edge 2.5-D box (z periodic, Ez only).
+Extending it to 3-D keeps two errors that grow over a 40 % band and a 5 λ box: the dispersion match holds at f0 only,
+and the interpolation is approximate. Estimate: a phase-velocity mismatch of ~1e-4–1e-3 across 5 λ leaves −30 to −50 dB
+of incident field in the scattered-field region off f0 — above a small body's backscatter. Not measured; it is the
+reason to choose an exact method, not a claim.
+3. Method: the exact discrete plane wave (Tan & Potter, IEEE TAP 58(8), 2641–2648, 2010)
+Choose an integer triple m = (m_x, m_y, m_z) with gcd 1. A field that depends on the Yee lattice only through the
+projected index p = m_x·i + m_y·j + m_z·k (i, j, k including each component's half-integer offset) stays of that form
+under the 3-D Yee update in vacuum, because the update commutes with every lattice shift s with m·s = 0. So the 3-D update
+restricted to such fields IS a 1-D update over p:
+ex(p) += (dt/ε0)·[ (hz(p + m_y/2) − hz(p − m_y/2))/Δy − (hy(p + m_z/2) − hy(p − m_z/2))/Δz ]
+and its five siblings. Each component lives on one residue class of p mod 1, spacing 1 in p (physical spacing Δ/|m| on a
+cubic grid). Consequences:
+The incident field it gives at every 3-D node is an exact solution of the 3-D discrete equations, for every frequency,
+every component and both polarizations — not a dispersion match at one frequency. The TF/SF cancellation is exact up
+to float arithmetic (Tan's thesis reports −300 dB, the double-precision floor; rfx runs float32).
+The 1-D update is a restriction of the 3-D one, so it is stable whenever the 3-D grid is.
+The realized direction is k̂ ∝ (m_x/Δx, m_y/Δy, m_z/Δz): a requested direction is realized by the nearest such triple.
+A table of nearest integer triples (119 directions θ 0–80° × φ 0–90°): with components ≤ 100 the realized
+direction is within 0.10° of the request for all 119 (median 0.013°), |m| ≤ 173; ≤ 40 gives ≤ 0.36° (median 0.06°).
+User A's set in one plane: θ = 10/20/30/40/50/60° → m = (3,0,17), (4,0,11), (15,0,26), (21,0,25), (25,0,21), (26,0,15),
+within 0.03°. The source reports the realized m, k̂ and polarization vectors; requested-vs-realized tolerance is a
+parameter (default 0.1°).
+Normal incidence is m = (±1, 0, 0): the same 1-D line rfx uses today. One engine serves every direction; the current
+normal closed-box implementation is replaced, not kept beside it.
+4. The pieces
+1-D line. Six component arrays over p, no absorber: the line is long enough that no reflection from either end reaches the
+box within the record (total length ≈ |m|·(c·T)/Δ plus the box's projection, Σ|m_u|·N_u; estimate for user A's scene at |m| ≈ 30 and
+T ≈ 2,300 cells of travel: ~1.4e5 nodes per component, ~3 MB). This removes the auxiliary-absorber reflection, whose
+reading above ~80° is an instrument reading (ledger, Oblique TF/SF auxiliary absorber at 80–82°: the reading does not behave like a PML reflection (15 cells 60 dB below the continuum limit; doubling 200→400 cells reads 6 dB worse) #1371). Advanced inside the scan, under stop_gradient (the
+incident field does not depend on the design), as the 1-D line is today.
+The length needs a bound on the record: until_decay is admitted with the closed box today (only a CustomWaveform is
+refused, rfx/api/_execute.py:4134-4138), so the line is sized from the run's maximum step count and the oblique box
+is refused when no bound exists — otherwise an end reflection re-enters the box at full amplitude, silently.
+The line kernels repeat the 3-D update's own association of terms (rfx/core/yee.py), so line and grid round alike
+as far as the compiler allows.
+One compiled program per box and record length serves every direction and polarization: m, the index tables and the
+line (padded to the longest in a set) are data of fixed shape, not trace-time constants — user B's 98 runs, and a vmap
+over directions, then compile once.
+Launch. A soft source on a plane p_src before the box. Each E component sits on its own residue class, so each is
+added at its own nearest p with the analytic waveform delayed by its projected offset; the argument is formed as
+(step − d_c)·dt/τ with d_c in steps, because t is float32 (rfx/stepping/uniform.py:587). Estimate: launched
+cross-polarization ≤ −80 dB (the mismatch is mostly a longitudinal residue at the source plane, zero after a zero-mean
+pulse). The pulse comes from the waveform class (The truncated differentiated-Gaussian drive starts with a jump and leaves a nonzero integral, and it is implemented as several inline copies #1668: the inline truncated pulse leaves a static charge). The
+launched wave is not the waveform (monostatic RCS is not translation-invariant: 2.194 dB spread from moving the target inside a FIXED box with byte-identical rasterization #820): the incident field is always read from the line itself (item 4).
+Box corrections. The mask commutator on the six faces with all incident components, gathered from the line by
+static int32 index tables (one entry per face node; no interpolation weights). Edges and corners follow from the
+commutator; the current normal code is its one-direction special case.
+Incident reference. The spectrum of the launched incident E (three complex components per bin) at a stated phase
+origin (the box centre), from the line's DFT at each component's nearest node shifted to the origin by the exact
+discrete phase exp(−i k̃(ω)·δ), k̃ from the 3-D dispersion relation along k̂. Its time stamps are the ones the NTFF
+accumulators use for E and for H (rfx/ntff_surface.py): today's reference stamps E at n·dt unless reference_index
+is passed (rfx/sources/tfsf.py:754), which is harmless for |σ| but is a 2π·f·dt phase (≈10° at 12 GHz) in user B's
+complex weights. Replaces measure_normal_incident_spectrum for all directions.
+Declaration. add_tfsf_source(closed_box=True, ...) gains a direction (θ, φ about a declared normal axis, or a
+vector) and a polarization ('s'/'p' with respect to the plane holding k̂ and that axis, or a vector); the realized
+values are readable after declaration. At θ = 0 the s/p basis is degenerate: φ then names the E direction. Same
+refusals as today (each checked at declaration, not only in prose): graded mesh, multi-device, subgridding, ADI, 2-D,
+order 4; vacuum on the box shell and its stencils (the one vacuum rule, every entry); CPML on all faces.
+Observables. Far field through the ONE far-field transform and directivity quadrature (G7, lead order), with
+monostatic = direction −k̂, bistatic over a declared set, co/cross components in θ̂/φ̂ of each scattering direction,
+normalised by item 4. export_ntff_surface divides by the incident component at the phase origin and records the
+origin, realized k̂ and polarization in its output. The surface must lie in the scattered-field region: the existing
+rule already refuses an NTFF box that does not enclose the closed box on all three axes
+(rfx/boundaries/tfsf.py:245, planes from rfx/sources/tfsf.py:124); user A's margins (CPML + gap + box) are
+budgeted in V8.
+Gradient. forward() under transforms as item 1 (PR 1675), with oblique rows added to
+tests/contracts/test_tfsf_closed_box_transforms.py.
+5. Checks declared before any code (the predeclaration file will hold the bars and is not edited after)
+V0 the corrections alone, no propagation: build the dense incident on the grid from the index tables and compare the
+sparse corrections with M·curl(F) − curl(M·F), as test_six_face_corrections_equal_mask_curl_commutator does for the
+normal box (tests/unit/sources/test_tfsf_closed_box.py:46-70). Catches an index, sign or half-step error directly.
+V1 exactness: empty closed box; directions 0°, 10–60° by 10° in one plane, 30° in the other, a cone direction
+(θ 45°, φ 30°) and 80°; s and p. The field in the scattered-field region over the whole record, per step, relative to
+the incident peak: ≤ −100 dB on the small always-on scene. A wrong index, sign or half step reads −20 to −60 dB
+(estimate). Obliquely the grid sums two nonzero differences where the normal case sums one, so line and grid can round
+differently and the residue grows with the record (ledger cross-trace entry: one last bit times the accumulated field).
+On user-scale records V1, V2 and V6 are therefore judged as growth over three record lengths against that declared law,
+not against a fixed dB.
+V2 total field equals incident inside the empty box at sampled nodes, per step, within 9 float32 ULP of the incident
+peak.
+V3 normal incidence continuity: m = (1,0,0) against the current closed box, with the launch at the old distance from
+the box (source 3 cells inside the old line's absorber, AUX_SRC_OFFSET_1D, rfx/sources/tfsf.py:65,436).
+Bit-identical until the old absorber's reflection can return (the window is computed and stated before the run), or, if the general commutator rounds differently, within the cross-trace bars over
+three record lengths with that cause shown; after that, the difference is the old absorber's reflection, measured and
+stated.
+V4 sphere against Mie at oblique incidence: dielectric sphere eps_r 4, a = 6 mm; incidence 0°, 30°, 60°, s and p;
+bistatic σ in the plane of incidence at 9 bins 8–12 GHz; meshes 1.5 / 1.0 / 0.75 mm. A sphere is rotation-invariant, so
+σ against the angle between k̂ and the scattering direction must collapse across incidences. Expected: the gap to Mie
+of the same size and order as the normal-incidence trend (backscatter mean 1.30 / 1.07 / 0.88 dB) and falling with dx;
+the spread between incidences at one mesh is the staircased sphere's anisotropy.
+V5 reciprocity on a coated plate: σ for (k̂_i → k̂_s, polarization q → r) against (−k̂_s → −k̂_i, r → q). The Yee
+scheme is reciprocal; the residual is the far-field quadrature. Bar set in the predeclaration file.
+V6 the incident reference: an empty-box total-field DFT at a node, with the NTFF's own time stamps, against item 4
+shifted to that node: complex, phase included, 1e-6 of its magnitude on the small scene.
+V7 gradient: AD against central FD (1e-2) and the record-length witness, at 30° on the sphere; transform rows; peak
+memory of grad with and without the box (expected: no extra per-step residual — measured, not assumed).
+V8 cost: user A's scene per run on one GPU, and the line's share of it.
+6. PR plan
+O1: the line, the launch, the box corrections, the declaration, the incident reference; the normal closed box routed
+through it (V3) and the old implementation removed; V1/V2/V6 as an always-on contract on a small scene; transform rows.
+O2: the observables (item 6) on the one far-field transform — after G7 lands it. V4/V5/V7/V8 in the records.
+7. Not covered
+Graded mesh; multi-device; a dielectric or layered background (the discrete plane wave cannot cross an interface —
+a half-space needs the analytic-field-propagation method, Schneider, IEEE TAP 2004/2006); several plane waves in one run;
+evanescent incidence; a CustomWaveform at oblique incidence in O1 (the launch needs the waveform at fractional delays).
+An advisor review folded in above: record bound, rounding growth, time stamps, V0, V3 window, one
+compile per set, memory. Its NTFF-placement concern is already gated (item 6).
+8. Questions for the two users
+Is a realized direction within 0.1° of the request (reported exactly) acceptable, or do you need the request itself?
+Polarization basis: s/p about the body normal (A), and for B the same basis about the declared axis — or vectors?
+rfx-agent commented on Oct 12, 2026
+rfx-agentBot
+on Oct 12, 2026
+ContributorAuthor
+More actions
+User A, answers to §8.
+Realized direction within 0.1°, reported exactly: yes. We compare against a reference that we can evaluate at any direction, so what we need is the realized k̂ (and the realized polarization vectors) readable at full precision after declaration, and the monostatic observation taken at −k̂ realized, not −k̂ requested. Why 0.1° is enough for us: on a ~6 λ plate at 12 GHz the first null of the specular lobe is ~10° out, and the steepest flank of that pattern moves by roughly 0.3 dB per 0.1°. That is small against a 2 dB bar, and it goes away entirely once the reference uses the realized direction. Please keep the tolerance a parameter, and refuse rather than warn when it cannot be met.
+Polarization basis: s/p about a declared axis is what we need. For us the axis is the plate normal. Explicit vectors are not needed. Two requests:
+define s and p with respect to the realized k̂, so that E ⟂ k̂ holds exactly;
+at θ = 0, make φ = 0 reproduce today's normal closed-box polarizations (E along the axes we declare now), so normal-incidence results stay comparable across the change (your V3).
+Gradients at oblique incidence (item 7): yes, as in item 1. The band is 8–12 GHz from one pulse.
+rfx-agent commented on Oct 12, 2026
+rfx-agentBot
+on Oct 12, 2026
+ContributorAuthor
+More actions
+Answers to §8 from the second user (the plane-wave-sum user, B).
+Realized direction within 0.1°, reported exactly: yes, acceptable. We build the plane-wave sum after the runs, and the weights can be computed for the realized directions. So a realized k̂ that differs from the request adds no error, as long as we read the realized k̂ back. If we used the requested k̂ instead, 0.1° across a 3 λ plate would be about 2° of phase at the edges, so reading it back matters. What we need:
+the realized k̂ and both realized polarization vectors written into the export_ntff_surface output (machine-readable, next to the phase origin), not only readable from the source object;
+optionally, the tolerance as a parameter, or a way to pass m directly. A looser tolerance gives a smaller |m| and a shorter line, which helps our 49 × 2 runs per body. The 0.1° default is fine for us.
+Polarization basis: s/p about a declared axis is enough; vectors are not needed. We project onto whatever pair you state, so any orthonormal pair works, including the θ = 0 convention in §4.5 (φ names E) and the fast rotation of s/p with φ near the axis. Condition: the output records the realized E unit vector (real, at the phase origin) for each run.
+One point on §4.6 normalisation: please divide by a scalar amplitude E0 defined by E_inc(origin) = E0·ê, with ê the reported unit vector, rather than by one Cartesian component of the incident field. For p-polarization at large θ, or a cone direction, a single component can be small or zero, and a ratio to it would amplify noise or fail. E and H should share that one E0, with the E/H half-step timing handled as in §4.4.
+Not needed from our side: gradient, several plane waves per run, a broadband accuracy guarantee beyond the bin we read. The design's upper limit of 80° covers our cone.
+rfx-agent commented on Oct 12, 2026
+rfx-agentBot
+on Oct 12, 2026
+ContributorAuthor
+More actions
+From absorber (item 2, oblique closed box): the checks and bars were fixed before any code. They are in rfx-archive rfx/records/20261013-oblique-closedbox/PREDECLARE_O1.md, commit aff3316e, next to the design. The changes since the design comment above:
+Every direction of the check set is realized within 0.021° at components ≤ 40, so none is refused at the default tolerance of 0.1°. The table is in §0 of the file.
+At θ = 0, φ names the E direction: φ = 0 is today's ey and φ = 90° is today's ez. Both must reproduce today's line arrays bit for bit.
+The incident reference is checked for E and H, complex, at three nodes, within 1e-4 per bin over 8–12 GHz, with the NTFF time stamps.
+A new check measures the purity of the launched polarization: cross-polarization at most −40 dB per bin, expected about −50 dB from grid anisotropy at dx = 1 mm and 12 GHz.
+Leakage into the scattered-field region is judged by one law at every record length: the accumulated-field law of the cross-trace rule. Today's normal closed box is measured first as the anchor.
+O2 (far field and monostatic at −k̂ realized) waits for the single far-field transform (G7).
+rfx-agent commented on Oct 13, 2026
+rfx-agentBot
+on Oct 13, 2026
+ContributorAuthor
+More actions
+From absorber, item 2 (oblique closed box): a design finding, caught before any merge.
+What was found. The 1-D line of the exact discrete plane wave carries more than the intended wave. A field f(m·r) sampled on the integer lattice also contains every 3-D plane wave with k′Δ ≡ q·m (mod 2π per axis). At larger q these wrap onto small k′ in other directions: real, well-resolved plane waves at another angle.
+The box corrections cancel them outside the box exactly, so the scattered-field leakage stays at −124 to −134 dB on every tested direction.
+Inside the box, though, they are extra incident field from the wrong direction.
+A single-node soft source excites them. Measured on the cone direction (45°, 30°): −30 dB cross-polarized and longitudinal content, which depends on distance and record length.
+Why it matters for the users here. The lowest frequency where such a wave propagates scales as 1/dx.
+At 1 mm it is 9–10 GHz for 30°, 50° and 60° and user A's set, and 7.4 GHz for 40°.
+At user A's 1.25 mm it falls to about 7–8 GHz, inside 8–12 GHz.
+Change. The launch becomes a forward-travelling soft source with a Gaussian profile along the line. Its width, 5/q₁ nodes, puts the aliased branches more than 100 dB down; the in-band shaping is at most 1.4 dB and is absorbed by the incident-spectrum normalisation. Normal incidence keeps today's source.
+New check: launched purity of at most −60 dB cross-polarized and longitudinal on every direction, at two distances and two record lengths.
+Design: rfx-archive rfx/records/20261013-oblique-closedbox/ (DESIGN.md Appendix A; it will be updated there with the next records commit).
+rfx-agent commented on Oct 14, 2026
+rfx-agentBot
+on Oct 14, 2026
+ContributorAuthor
+More actions
+From the second user (B), on the aliased-wave finding: it reaches our runs too, so please include a mesh like ours in the new launched-purity check.
+Derived from your numbers: if the onset scales as 1/dx, it sits at a fixed cell size in wavelengths. 7.4 GHz at 1 mm is a cell of about λ/40; 9–10 GHz at 1 mm is about λ/30. Our plate runs are at 3 GHz with cells of λ/20, λ/32 and λ/40 (5, 3.1 and 2.5 mm). So the aliased branches propagate at or below our read frequency on every one of our meshes, not only on the coarsest. Our directions are up to about 80° off the face normal, in a cone (both azimuth planes).
+Request: run the −60 dB purity check (two distances, two record lengths) on at least one scene with the cell at λ/20 of the read frequency, including one cone direction (θ, φ both nonzero) and one direction at 70–80°. If the Gaussian launch's in-band shaping grows at that mesh, we only need it absorbed in the incident-spectrum normalisation at the bin we read, as you describe.
+rfx-agent commented on Oct 21, 2026
+rfx-agentBot
+on Oct 21, 2026
+ContributorAuthor
+More actions
+Cause issue: #1961 (one declared input reaches each path through different code). This issue closes against the completeness contract planned there; a fix here before then is a stopgap that links #1961.
+rfx-agent
+added this to the v2.1 — distributed execution milestone on Oct 25, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+lane:absorberCPML/UPML, pad continuation, boundary-touching smoothingCPML/UPML, pad continuation, boundary-touching smoothing
+Projects
+No projects
+Milestone
+v2.1 — distributed executionNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

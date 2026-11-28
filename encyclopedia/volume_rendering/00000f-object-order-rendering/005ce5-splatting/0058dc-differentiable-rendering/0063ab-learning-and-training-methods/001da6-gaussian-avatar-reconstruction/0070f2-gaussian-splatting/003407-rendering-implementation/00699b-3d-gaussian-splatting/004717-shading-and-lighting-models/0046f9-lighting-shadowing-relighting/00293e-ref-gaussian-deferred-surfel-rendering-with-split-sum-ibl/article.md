@@ -1,0 +1,354 @@
+# Ref-Gaussian Deferred Surfel Rendering with Split-Sum IBL
+
+Also called: Ref-Gaussian, Ref-Gaussian on iOS
+
+## Overview
+Ref-Gaussian is a physically based rendering (PBR) method for novel view synthesis and relighting of reflective objects using 2D Gaussian primitives [S1, S2, unofficial]. It solves the problem of blurred reflective details and inaccurate material reconstruction in standard Gaussian Splatting by decoupling geometry optimization from shading via a deferred rendering pipeline [S1, unofficial]. Unlike sibling methods that use simplified shading functions or integrated diffuse lighting, Ref-Gaussian employs split-sum image-based lighting (IBL) with a BRDF LUT, allowing real-time relighting on mobile hardware while maintaining high-fidelity specular reflections [S1, S2, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   A `.ply` file containing 2D Gaussian primitives with attributes: mean position $\boldsymbol{\mu}$, covariance (scales and orientation), opacity $o$, and material attributes: normal $\mathbf{N}$, roughness $r$, reflectance (specular strength) $R$, and albedo (base color) $\mathbf{C}_{base}$ [S1, S2, unofficial].
+*   An HDR environment map (equirectangular or cubemap) representing the lighting [S2, unofficial].
+
+**Outputs:**
+*   A final pixel color $C_{final}$ for each screen pixel [S2, unofficial].
+
+### Data Structures
+The method relies on two parallel buffers aligned by splat index:
+1.  **Splat Buffer:** Contains geometric and opacity data ($\boldsymbol{\mu}, \boldsymbol{\Sigma}, o$) [S1, S2, unofficial].
+2.  **Material Buffer:** Contains per-splat PBR attributes ($\mathbf{N}, r, R, \mathbf{C}_{base}$) [S2, unofficial].
+    *   *Note:* The Material Buffer must be sorted using the exact same indices as the Splat Buffer to prevent normal misalignment and rainbow noise artifacts [S2, unofficial].
+
+### Pre-computation (IBL Setup)
+Before rendering, the environment map is processed into three textures using a pre-filtering kernel [S2, unofficial]:
+1.  **Prefiltered Environment Map:** A mipmapped texture where each level corresponds to a specific roughness value, storing specular reflection data [S2, unofficial].
+2.  **Irradiance Map:** A pre-integrated diffuse lighting map [S2, unofficial].
+3.  **BRDF LUT:** A 2D lookup table storing the Fresnel-Schlick approximation terms $fg.x$ and $fg.y$ as a function of dot product $(\mathbf{N} \cdot \mathbf{V})$ and roughness [S2, unofficial].
+
+### Rendering Pipeline
+The rendering consists of a deferred shading pass [S1, S2, unofficial]:
+
+1.  **Rasterization:** Project 2D Gaussians to screen space. Sort splats for cache locality (e.g., using Morton codes) [S2, unofficial].
+2.  **G-Buffer Pass:** For each splat, compute its contribution to the G-Buffer. This involves alpha-blending the material attributes (Normal, Roughness, Reflectance, Albedo) and depth into tile memory [S2, unofficial].
+3.  **Shading Pass:** For each pixel, retrieve the accumulated material attributes from the G-Buffer and compute the final color using the split-sum IBL formula [S2, unofficial]:
+
+    $$
+    F_0 = 0.04 \times (1 - R) + \mathbf{C}_{base} \times R
+    $$
+
+    $$
+    \text{specular} = \text{prefiltered}(\text{reflect}(\mathbf{V}, \mathbf{N}), r) \times (F_0 \cdot fg.x + fg.y)
+    $$
+
+    $$
+    C_{final} = (1 - R) \times \mathbf{C}_{base} + \text{specular}
+    $$
+
+    Where:
+    *   $F_0$ is the base specular reflectivity [S2, unofficial].
+    *   $\mathbf{V}$ is the view direction [S2, unofficial].
+    *   $\mathbf{N}$ is the surface normal [S2, unofficial].
+    *   $r$ is the roughness [S2, unofficial].
+    *   $\text{reflect}(\mathbf{V}, \mathbf{N})$ is the reflection vector [S2, unofficial].
+    *   $\text{prefiltered}(\dots, r)$ samples the prefiltered environment map at the mip level corresponding to roughness $r$ [S2, unofficial].
+    *   $fg.x, fg.y$ are values sampled from the BRDF LUT [S2, unofficial].
+    *   $\mathbf{C}_{base}$ is used directly for the diffuse term; it is **not** multiplied by the irradiance map [S2, unofficial].
+
+### Training Procedure
+Training occurs in two stages [S1, unofficial]:
+
+1.  **Initial Stage (18,000 steps):** Per-Gaussian rendering to establish geometry.
+2.  **Deferred Rendering Stage (40,000 steps):**
+    *   Reset all color and material attributes, retaining only geometry [S1, unofficial].
+    *   Optimize material attributes (metallic, roughness, albedo) and environment map [S1, unofficial].
+    *   Apply material-aware normal propagation for Gaussians with metallic $\ge 0.02$ and roughness $\le 0.1$ [S1, unofficial].
+    *   Periodically extract surface mesh (every 3,000 steps) [S1, unofficial].
+
+**Loss Function:**
+$$
+L = L_c + \lambda_n L_n + \lambda_{smooth} L_{smooth}
+$$
+Where:
+*   $L_c = (1 - \lambda)L_1 + \lambda L_{D-SSIM}$ is the RGB reconstruction loss [S1, unofficial].
+*   $L_n = 1 - \tilde{\mathbf{N}}^T \mathbf{N}$ is the normal consistency loss, aligning rendered normal $\mathbf{N}$ (via alpha-blending) with surface normal $\tilde{\mathbf{N}}$ (from depth map) [S1, unofficial].
+*   $L_{smooth} = \|\nabla \mathbf{N}\| \exp(-\|\nabla C_{gt}\|)$ is the edge-aware normal smoothness loss [S1, unofficial].
+
+### Parameters
+*   Learning rate for material attributes (metallic, roughness, albedo): 0.005 [S1, unofficial].
+*   Learning rate for environment map: 0.01 [S1, unofficial].
+*   Balancing weight $\lambda$ (RGB reconstruction): 0.2 [S1, unofficial].
+*   Weight $\lambda_n$ (normal consistency): 0.05 [S1, unofficial].
+*   Weight $\lambda_{smooth}$ (normal smoothness): 1.0 [S1, unofficial].
+*   Initial roughness: 0.1 [S1, unofficial].
+*   Initial metallic: Adopted from 3DGS-DR (exact value not specified) [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_ref_gaussian(splats, env_map, camera):
+    """
+    Renders a scene using Ref-Gaussian deferred surfel rendering with split-sum IBL.
+    
+    Args:
+        splats: List of Gaussian primitives with attributes:
+                - pos: (3,) mean position
+                - cov: (3,3) covariance matrix
+                - opacity: float
+                - normal: (3,) surface normal
+                - roughness: float
+                - reflectance: float
+                - albedo: (3,) base color
+        env_map: HDR environment map (equirectangular or cubemap)
+        camera: Camera object with view matrix and projection matrix
+    
+    Returns:
+        image: Rendered image (H, W, 3)
+    """
+    
+    # 1. Pre-compute IBL data (done once per environment map change)
+    prefiltered_env = prefilter_environment_map(env_map)
+    irradiance_map = compute_irradiance_map(env_map)
+    brdf_lut = compute_brdf_lut()
+    
+    # 2. Rasterization and Sorting
+    # Project splats to screen space and compute coverage
+    screen_splats = []
+    for s in splats:
+        # Project mean and covariance to 2D
+        # Compute 2D bounding box and coverage
+        screen_splats.append(project_splat(s, camera))
+    
+    # Sort splats for cache locality (e.g., Morton code)
+    # IMPORTANT: Sort both geometry and material buffers with the same indices
+    sorted_indices = sort_by_morton_code(screen_splats)
+    sorted_splats = [screen_splats[i] for i in sorted_indices]
+    
+    # 3. G-Buffer Pass (Deferred Shading Setup)
+    # Initialize G-Buffer with zeros
+    g_buffer_normals = np.zeros((H, W, 3))
+    g_buffer_roughness = np.zeros((H, W))
+    g_buffer_reflectance = np.zeros((H, W))
+    g_buffer_albedo = np.zeros((H, W, 3))
+    g_buffer_depth = np.full((H, W), np.inf)
+    
+    for s in sorted_splats:
+        # Rasterize the 2D Gaussian ellipse
+        # For each pixel covered by the splat:
+        #   Compute alpha = opacity * exp(-0.5 * x^T Sigma^-1 x)
+        #   Alpha-blend material attributes into G-Buffer
+        #   Update depth if closer
+        rasterize_splat_to_gbuffer(s, g_buffer_normals, g_buffer_roughness, 
+                                   g_buffer_reflectance, g_buffer_albedo, 
+                                   g_buffer_depth)
+    
+    # 4. Shading Pass
+    image = np.zeros((H, W, 3))
+    
+    for y in range(H):
+        for x in range(W):
+            if g_buffer_depth[y, x] == np.inf:
+                continue
+                
+            N = normalize(g_buffer_normals[y, x])
+            r = g_buffer_roughness[y, x]
+            R = g_buffer_reflectance[y, x]
+            C_base = g_buffer_albedo[y, x]
+            
+            # View direction (approximate from camera and pixel position)
+            V = compute_view_direction(camera, x, y)
+            
+            # Compute F0
+            F0 = 0.04 * (1 - R) + C_base * R
+            
+            # Compute specular term using split-sum IBL
+            # Reflect view direction around normal
+            R_vec = reflect(V, N)
+            
+            # Sample prefiltered environment map based on roughness
+            # The mip level corresponds to the roughness value
+            env_sample = sample_prefiltered_env(prefiltered_env, R_vec, r)
+            
+            # Sample BRDF LUT
+            # Inputs: dot(N, V) and roughness
+            cos_theta = np.dot(N, V)
+            fg = sample_brdf_lut(brdf_lut, cos_theta, r)
+            
+            specular = env_sample * (F0 * fg[0] + fg[1])
+            
+            # Compute final color
+            # Diffuse term uses base_color directly, NOT multiplied by irradiance
+            final_color = (1 - R) * C_base + specular
+            
+            image[y, x] = final_color
+            
+    return image
+
+def project_splat(splat, camera):
+    """
+    Projects a 3D Gaussian to 2D screen space.
+    Returns screen-space representation with 2D covariance.
+    """
+    # Transform mean to camera space
+    pos_cam = camera.view_matrix @ splat.pos
+    
+    # Transform covariance to camera space
+    J = camera.jacobian(pos_cam)
+    W = camera.world_to_camera_matrix
+    T = W @ J # Jacobian of projection
+    cov_2d = T @ splat.cov @ T.T
+    
+    # Add regularization to covariance determinant to prevent degenerate splats
+    # (Standard 3DGS practice, often 0.3*I added in screen space)
+    # Note: For shadowing passes, this expansion might be skipped [4487-3d-gaussian-splatting-self-shadowing-t-light.md]
+    cov_2d[0,0] += 0.3
+    cov_2d[1,1] += 0.3
+    
+    # Project to screen
+    pos_screen = camera.projection_matrix @ pos_cam
+    pos_screen /= pos_screen[2] # Perspective divide
+    
+    return {
+        'pos': pos_screen[:2],
+        'cov': cov_2d[:2, :2],
+        'opacity': splat.opacity,
+        'normal': splat.normal,
+        'roughness': splat.roughness,
+        'reflectance': splat.reflectance,
+        'albedo': splat.albedo,
+        'depth': pos_cam[2]
+    }
+
+def rasterize_splat_to_gbuffer(splat, g_normals, g_roughness, g_reflectance, g_albedo, g_depth):
+    """
+    Rasterizes a single 2D Gaussian splat into the G-Buffer.
+    Uses alpha blending for material attributes.
+    """
+    # Get bounding box of the 2D Gaussian
+    bbox = get_bounding_box(splat['cov'], splat['pos'])
+    
+    for y in range(bbox.y_min, bbox.y_max):
+        for x in range(bbox.x_min, bbox.x_max):
+            # Compute 2D distance from center
+            dx = x - splat['pos'][0]
+            dy = y - splat['pos'][1]
+            dist_sq = np.array([dx, dy]) @ np.linalg.inv(splat['cov']) @ np.array([dx, dy])
+            
+            # Compute alpha
+            alpha = splat['opacity'] * np.exp(-0.5 * dist_sq)
+            
+            if alpha < 0.001:
+                continue
+                
+            # Update depth
+            if splat['depth'] < g_depth[y, x]:
+                # Blend material attributes
+                # Simple alpha blending for normals might cause issues; 
+                # Ref-Gaussian uses alpha-blending to get rendered normal N [S1, unofficial]
+                # However, for deferred shading, we typically store the front-most or 
+                # accumulated attributes. The source implies alpha-blending for normal consistency loss [S1, unofficial]
+                
+                # For G-Buffer, we store the accumulated material properties
+                # Note: The exact blending order for normals in G-Buffer is critical.
+                # Standard approach: blend with current G-Buffer values
+                
+                old_alpha = 1.0 - g_depth[y, x] # Approximation, usually stored separately
+                # More robust: store accumulated alpha in G-Buffer
+                # Here we assume a simple front-to-back blend for demonstration
+                
+                # Update depth
+                g_depth[y, x] = splat['depth']
+                
+                # Blend normals (normalize after blending)
+                # This is a simplification; actual implementation may use weighted average
+                g_normals[y, x] = (g_normals[y, x] * (1 - alpha) + splat['normal'] * alpha)
+                g_normals[y, x] = normalize(g_normals[y, x])
+                
+                # Blend other attributes
+                g_roughness[y, x] = g_roughness[y, x] * (1 - alpha) + splat['roughness'] * alpha
+                g_reflectance[y, x] = g_reflectance[y, x] * (1 - alpha) + splat['reflectance'] * alpha
+                g_albedo[y, x] = g_albedo[y, x] * (1 - alpha) + splat['albedo'] * alpha
+
+def reflect(V, N):
+    """
+    Computes the reflection vector R = V - 2(V.N)N
+    """
+    return V - 2 * np.dot(V, N) * N
+
+def sample_prefiltered_env(prefiltered_env, R_vec, roughness):
+    """
+    Samples the prefiltered environment map at the direction R_vec.
+    The mip level is determined by the roughness.
+    """
+    # Map roughness to mip level
+    # Higher roughness -> higher mip level (more blurred)
+    mip_level = int(roughness * (num_mips - 1))
+    mip_level = np.clip(mip_level, 0, num_mips - 1)
+    
+    # Sample the cubemap or equirectangular map at the given mip level
+    return prefiltered_env.sample(R_vec, mip_level)
+
+def sample_brdf_lut(brdf_lut, cos_theta, roughness):
+    """
+    Samples the BRDF LUT.
+    """
+    # The LUT is typically indexed by (cos_theta, roughness)
+    # cos_theta = dot(N, V)
+    return brdf_lut.sample(cos_theta, roughness)
+```
+
+### Edge Cases and Pitfalls
+*   **Normal Map Noise:** If splats are sorted for cache locality (e.g., Morton code) but the Material Buffer is not sorted in parallel, normals become misaligned with positions, causing rainbow noise [S2, unofficial]. Fix: Apply the same sort indices to the material buffer [S2, unofficial].
+*   **Incorrect Diffuse Lighting:** Do not multiply albedo by the irradiance map for diffuse color. Ref-Gaussian uses `base_color` directly for diffuse. Only specular is computed from the environment map [S2, unofficial].
+*   **Coordinate System Mismatch:** If scene data is Z-up (e.g., Blender) but the viewer assumes Y-up, objects appear rotated 90 degrees. Fix: Apply a -90° rotation around the X-axis to the camera/view matrix and adjust environment map sampling directions [S2, unofficial].
+*   **Stale Binary on iOS:** If iOS build fails due to type errors (e.g., Float16 bitPattern type mismatch between arm64 and x86_64 simulator), the device may run an old binary. Always check build success for the target platform before debugging logic [S2, unofficial].
+*   **Geometric Collapse:** Smooth surfaces are prone to geometric collapse. Material-aware normal propagation addresses this [S1, unofficial].
+*   **Blurred Reflections:** Per-Gaussian rendering causes reflective details to become noticeably more blurred. Deferred rendering is used to mitigate this [S1, unofficial].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time Complexity:** The deferred shading pass is $O(N)$ where $N$ is the number of pixels, with constant-time texture lookups for IBL. The rasterization pass is $O(G)$ where $G$ is the number of Gaussians, with sorting taking $O(G \log G)$ or $O(G)$ with radix sort [S2, unofficial].
+*   **Memory Complexity:** Requires storage for the Splat Buffer, Material Buffer, G-Buffer, and IBL textures (prefiltered env map, irradiance map, BRDF LUT) [S2, unofficial].
+
+### Measured Performance
+*   On the Shiny Blender dataset, Ref-Gaussian achieves PSNR 30.33, SSIM 0.958, LPIPS 0.049 [S1, unofficial].
+*   MAE 2.15, Normal SSIM 0.954, Normal LPIPS 0.0511, Envmap LPIPS 0.4431 [S1, unofficial].
+*   Training time: 0.58 hours [S1, unofficial].
+*   FPS: 122 on a single NVIDIA A6000 GPU [S1, unofficial].
+
+### Scaling
+*   The method supports real-time rendering on mobile hardware (iPhone) using Metal [S2, unofficial].
+*   Performance scales with the number of Gaussians and resolution, but the deferred pipeline ensures efficient shading regardless of scene complexity [S2, unofficial].
+
+### Strengths and Limitations
+*   **Strengths:** High-fidelity specular reflections, real-time relighting, accurate material reconstruction, efficient deferred shading pipeline [S1, S2, unofficial].
+*   **Limitations:** Requires careful handling of coordinate systems and buffer synchronization. Per-Gaussian shading initialization can lead to blurred reflections if not deferred [S1, unofficial]. Smooth surfaces may suffer from geometric collapse without material-aware normal propagation [S1, unofficial].
+
+### When to Use
+*   Use for novel view synthesis of reflective objects where accurate material and lighting reconstruction is required [S1, unofficial].
+*   Use for real-time relighting applications on mobile devices [S2, unofficial].
+*   Do not use if simple diffuse lighting is sufficient, as the overhead of deferred shading and IBL pre-computation is unnecessary [S2, unofficial].
+
+## Background
+
+### Origin
+Ref-Gaussian was introduced in the paper "Reflective Gaussian Splatting" [S1, unofficial]. It builds on 2D Gaussian Splatting (2DGS) [S1, unofficial] and incorporates physically based rendering (PBR) techniques.
+
+### History and Development
+*   The method uses 2D Gaussian primitives for precise geometric representation, avoiding the conflict of 3D Gaussian volumetric radiance with the thin nature of surfaces [S1, unofficial].
+*   It replaces integrated diffuse lighting with spherical harmonics for better fitting capability [S1, unofficial].
+*   The deferred rendering approach was adopted to mitigate the blurring of reflective details observed in per-Gaussian shading [S1, unofficial].
+*   Implementation details for mobile devices (iOS/Metal) have been documented in unofficial sources, highlighting practical challenges such as buffer synchronization and coordinate system mismatches [S2, unofficial].
+
+### Usage
+*   Evaluated on Shiny Blender, Glossy Synthetic, and Ref-Real datasets [S1, unofficial].
+*   Experiments conducted on a single NVIDIA A6000 GPU [S1, unofficial].
+
+## Sources
+
+[S1] Reflective Gaussian Splatting, https://doi.org/10.48550/arxiv.2412.19282, fetched 2026-10-26 (unofficial)
+[S2] iPhoneで Gaussian Splatting モデルの反射をリアルタイムで更新する, https://qiita.com/john-rocky/items/3c452476e66bdc29c290, fetched 2026-10-29 (unofficial)

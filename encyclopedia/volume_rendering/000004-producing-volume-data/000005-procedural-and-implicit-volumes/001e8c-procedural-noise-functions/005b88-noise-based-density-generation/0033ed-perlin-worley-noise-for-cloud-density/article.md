@@ -1,0 +1,111 @@
+# Perlin-Worley Noise for Cloud Density
+
+Also called: Base Density Noise, Base Density Noise Calculation, Perlin Noise Density Mapping, Perlin-Worley Noise, Procedural 3D Worley and Perlin Noise
+
+## Overview
+This method generates the base volumetric density field for cloud rendering by combining the structural continuity of Perlin noise with the billowy, cellular detail of Worley noise [S4]. It differs from standard procedural noise by storing multiple frequency levels of Worley noise in separate texture channels to allow for high-frequency detail reconstruction during runtime remapping, rather than baking all detail into a single low-precision channel [S4].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D coordinate $\mathbf{P}$ and a packed RGBA32 noise texture.
+*   **Output:** A scalar density value for the cloud volume at $\mathbf{P}$.
+
+**Data Structures**
+The base density is stored in a 3D texture where each channel holds a distinct noise component [S4]. The layout is defined as follows [S4]:
+*   **Red (R) Channel:** Stores the low-frequency Perlin-Worley noise value.
+*   **Green (G) Channel:** Stores Worley noise at frequency level 1.
+*   **Blue (B) Channel:** Stores Worley noise at frequency level 2.
+*   **Alpha (A) Channel:** Stores Worley noise at frequency level 3.
+
+The texture must be tileable to allow sampling at varying frequencies without edge artifacts [S3, unofficial]. A typical implementation uses a $128 \times 128 \times 128$ texture, which is small enough for fast loading but large enough to contain 2–3 Fractal Brownian Motion (FBM) levels [S3, unofficial].
+
+**Algorithm Steps**
+1.  **Generate Perlin Fractal:** Compute a low-frequency Perlin fractal noise value, $PerlinFractal$, using standard FBM summation [S4].
+2.  **Generate Worley Fractals:** Compute three separate Worley fractal noise values at increasing frequencies: $Worley_1$, $Worley_2$, and $Worley_3$ [S4].
+3.  **Pack Noise:** Store $PerlinFractal$ in the Red channel and $Worley_1, Worley_2, Worley_3$ in the Green, Blue, and Alpha channels, respectively [S4].
+4.  **Unpack and Combine Worley:** Retrieve the G, B, and A channels from the texture. Compute the high-frequency Worley sum, $WorleyHighFrequencies$, using weighted summation [S4]:
+    $$ WorleyHighFrequencies = 0.625 \cdot Worley_1 + 0.25 \cdot Worley_2 + 0.125 \cdot Worley_3 $$
+5.  **Remap Perlin-Worley:** Retrieve the Red channel value, $PerlinWorley$. Add a configurable density offset, $\Delta$, to it [S4]. Remap this value from the range $[0, 1]$ to $[WorleyHighFrequencies, 1]$. This step brightens the noise where Worley noise is large, enhancing billowiness [S4].
+    $$ PerlinWorley_{remapped} = \text{Remap}(PerlinWorley + \Delta, 0, 1, WorleyHighFrequencies, 1) $$
+6.  **Compute Base Noise:** Remap the result from Step 5 such that its minimum becomes $WorleyHighFrequencies$ and its maximum becomes 1 [S4]:
+    $$ BaseNoise = \text{Remap}(PerlinWorley_{remapped}, WorleyHighFrequencies, 1, 0, 1) $$
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_cloud_density(texture, p, density_offset):
+    """
+    Computes cloud density using Perlin-Worley noise stored in an RGBA texture.
+    
+    Args:
+        texture: A 3D texture object with sample(x, y, z) returning (r, g, b, a).
+        p: 3D vector coordinate.
+        density_offset: Configurable float added to Perlin-Worley value.
+        
+    Returns:
+        float: The final base density value.
+    """
+    # 1. Sample the packed noise texture
+    r, g, b, a = texture.sample(p)
+    
+    # 2. Unpack Worley components
+    worley_1 = g
+    worley_2 = b
+    worley_3 = a
+    
+    # 3. Combine Worley frequencies
+    worley_high_freq = 0.625 * worley_1 + 0.25 * worley_2 + 0.125 * worley_3
+    
+    # 4. Get Perlin-Worley base value and add offset
+    perlin_worley = r + density_offset
+    
+    # 5. Remap Perlin-Worley to [WorleyHighFrequencies, 1]
+    perlin_worley_remapped = remap(perlin_worley, 0.0, 1.0, worley_high_freq, 1.0)
+    
+    # 6. Remap result to [0, 1] for final base density
+    base_noise = remap(perlin_worley_remapped, worley_high_freq, 1.0, 0.0, 1.0)
+    
+    return base_noise
+
+def remap(value, in_min, in_max, out_min, out_max):
+    """Linear remapping function."""
+    if in_max == in_min:
+        return out_min
+    t = (value - in_min) / (in_max - in_min)
+    t = max(0.0, min(1.0, t))
+    return out_min + t * (out_max - out_min)
+```
+
+**Parameters**
+*   **Texture Size:** $128 \times 128 \times 128$ is cited as a practical minimum for web performance, though larger sizes allow for more FBM levels [S3, unofficial].
+*   **Worley Weights:** $0.625$ for the lowest frequency, $0.25$ for the middle, and $0.125$ for the highest [S4].
+*   **Density Offset:** A configurable scalar added to the Perlin-Worley value before remapping [S4].
+
+**Edge Cases and Pitfalls**
+*   **Precision:** Storing noise in 8-bit channels limits detail. Using 32-bit floating-point textures (e.g., RFloat) is recommended to preserve the full range of $[0, 1]$ values and avoid banding [S4].
+*   **Tileability:** The texture must be tileable to support sampling at different frequencies without discontinuities [S3, unofficial].
+*   **Channel Usage:** The Alpha channel is used for Worley noise in the base density texture, whereas the detail density texture may leave the Alpha channel unused [S4].
+
+## Subtopics
+
+### Procedural Cloud Generation via Perlin Noise
+Generates a voxel grid of cloud density using 3D Perlin noise, modulated by distance from the grid center to create a fluffy, rounded cloud shape [S5, unofficial]. For each voxel, it calculates the Perlin noise value, computes the distance to the grid center, subtracts a scaled distance cover, clamps negatives to zero, multiplies by a base density, and applies a sharpness function to control edge fuzziness [S5, unofficial]. Parameters include a noise seed (default 188), base density multiplier (default 5), and sharpness control (default 0.5) [S5, unofficial].
+
+### Octave-based Noise Density
+A refinement that combines multiple noise evaluations at different scales to produce higher-frequency detail and more defined structures [S1, unofficial]. It selects multiple octave scales, evaluates Perlin noise at each scaled coordinate, sums the outputs, and uses the accumulated sum as the final density value [S1, unofficial].
+
+## Operating characteristics
+*   **Memory:** Requires storing a 3D texture. A $128 \times 128 \times 128$ texture is cited as a practical size for web performance [S3, unofficial].
+*   **Performance:** Sampling is efficient for real-time rendering, particularly on web platforms where texture load times are constrained [S3, unofficial].
+*   **Quality:** The combination of Perlin (connectedness) and Worley (billowiness) produces natural-looking cloud structures [S4].
+
+## Background
+This technique originates from the Nubis cloud rendering engine used by Guerrilla Games [S4]. It is implemented in the Volumetric Clouds Tutorial, which provides source code for generating and unpacking these noise textures [S4]. The approach is also discussed in the context of efficient volumetric clouds for WebGL and three.js [S3, unofficial].
+
+## Sources
+[S1] Volume Rendering Final Project (Longer), https://www.youtube.com/watch?v=j4tECzsy0CE, fetched 2026-10-27 (unofficial)
+[S2] Klark007/OpenGL-Cloud-Renderer, https://github.com/Klark007/OpenGL-Cloud-Renderer, fetched 2026-10-27 (unofficial)
+[S3] Efficient volumetric clouds - Resources - three.js forum, https://discourse.threejs.org/t/efficient-volumetric-clouds/66067, fetched 2026-10-29 (unofficial)
+[S4] Noise Textures, https://github.com/TylerDodds/VolumetricCloudsTutorial/blob/master/Assets/VolumetricCloudsTutorial/CloudDensity/NoiseTextures/NoiseTextures.md, fetched 2026-10-29
+[S5] dotcamdev/VolumetricClouds, https://github.com/dotcamdev/VolumetricClouds, fetched 2026-10-26 (unofficial)

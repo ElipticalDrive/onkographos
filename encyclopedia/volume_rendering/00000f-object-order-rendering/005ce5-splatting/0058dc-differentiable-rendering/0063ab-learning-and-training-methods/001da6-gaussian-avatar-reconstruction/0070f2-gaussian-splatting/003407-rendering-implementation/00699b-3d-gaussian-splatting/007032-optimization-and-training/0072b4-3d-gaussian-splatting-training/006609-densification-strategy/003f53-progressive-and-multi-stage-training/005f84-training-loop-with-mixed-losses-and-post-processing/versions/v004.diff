@@ -1,0 +1,502 @@
+--- v003.md
++++ v004.md
+@@ -4,120 +4,126 @@
+ 
+ ## Overview
+-This method defines the iterative optimization step for 3D Gaussian Splatting, integrating photometric reconstruction, depth consistency, and appearance regularization into a unified loss function. It distinguishes itself from simpler training loops by explicitly handling multi-modal supervision (RGB + Depth) and post-rasterization appearance corrections (Bilateral Grids), while managing the progressive update of Spherical Harmonic (SH) coefficients. It builds on [Progressive and Multi-stage Training](9966-progressive-and-multi-stage-training.md) by implementing the specific loss weighting and parameter updates that occur within a single training stage.
++This method defines the iterative optimization step for 3D Gaussian Splatting, integrating photometric, depth, and regularization losses with a progressive spherical harmonic (SH) degree schedule. It distinguishes itself from simpler training loops by explicitly handling multi-modal supervision (RGB + Depth), appearance post-processing via bilateral grids, and visibility-aware optimizer stepping to improve convergence stability [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Current iteration step `step`.
+-- Gaussian primitive set $\mathcal{G}$ containing means $\mu$, scales $\sigma$, rotations $q$, opacities $\alpha$, and SH coefficients $c_{0..D}$.
+-- Camera parameters (view/projection matrices, intrinsics).
+-- Ground truth images $I_{gt}$ and optional depth maps $D_{gt}$.
+-- Configuration object `cfg` containing hyperparameters (e.g., `sh_degree`, `depth_lambda`, `opacity_reg`).
+-
+-**Outputs:**
+-- Updated Gaussian parameters $\mathcal{G}'$.
+-- Optimizer states.
++**Inputs and Outputs:**
++- **Inputs:** Current training `step`, Gaussian primitives $\mathcal{G}$ (means, scales, quaternions, opacities, SH coefficients), camera parameters, image data (RGB, optional Depth), and configuration `cfg` (hyperparameters).
++- **Outputs:** Updated Gaussian attributes, optimizer states, and optionally saved PLY files.
+ 
+ **Data Structures:**
+-- `splats`: Dictionary or tensor batch holding $\mu, \sigma, q, \alpha, c$.
+-- `info`: Dictionary returned by the rasterizer, containing `radii` (visibility mask), `gaussian_ids`, `alphas` (accumulated opacity), and `rendered_rgb`.
++- `splats`: Dictionary containing tensors for `means` ($N \times 3$), `scales` ($N \times 3$), `quats` ($N \times 4$), `opacities` ($N$), `sh0` ($N \times 3$), `shN` ($N \times C_{SH}$).
++- `info`: Dictionary from rasterizer containing `radii` ($N \times H \times W$), `gaussian_ids` (indices of visible Gaussians), and `alphas` ($H \times W$).
++- `cfg`: Configuration object with boolean flags (`depth_loss`, `use_bilateral_grid`, `random_bkgd`, `visible_adam`, `save_ply`) and float/int parameters (`sh_degree_interval`, `sh_degree`, `ssim_lambda`, `depth_lambda`, `opacity_reg`, `scale_reg`).
+ 
+ **Numbered Steps:**
+ 
+-1.  **Spherical Harmonic Degree Selection:**
+-    Determine the active SH degree $d$ for the current step to ensure progressive detail refinement:
+-    $$ d = \min\left(\left\lfloor \frac{step}{\text{cfg.sh\_degree\_interval}} \right\rfloor, \text{cfg.sh\_degree}\right) $$
++1.  **Spherical Harmonic Degree Calculation:**
++    Determine the active SH degree $d$ for the current step:
++    $$ d = \min\left(\left\lfloor \frac{\text{step}}{\text{cfg.sh\_degree\_interval}} \right\rfloor, \text{cfg.sh\_degree}\right) $$
+     [S1, unofficial]
+ 
+ 2.  **Rasterization:**
+-    Render the scene using the differentiable rasterizer. The render mode is determined by the presence of depth supervision:
+-    - If `cfg.depth_loss` is true, render mode is `'RGB+ED'` (RGB + Estimated Depth).
+-    - Otherwise, render mode is `'RGB'`.
+-    Let the output be `renders`, `alphas`, and `info`.
+-    [S1, unofficial]
+-
+-3.  **Signal Separation:**
+-    If the render mode includes depth (4 channels), split `renders` into color $C_{raw}$ and depth $Z_{raw}$:
+-    $$ C_{raw} = \text{renders}[:, 0:3] $$
+-    $$ Z_{raw} = \text{renders}[:, 3:4] $$
+-    Otherwise, $C_{raw} = \text{renders}$ and $Z_{raw} = \text{None}$.
+-    [S1, unofficial]
+-
+-4.  **Bilateral Grid Correction (Optional):**
+-    If `cfg.use_bilateral_grid` is true, compute grid coordinates $xy$ for each pixel and apply bilateral grid slicing to refine colors:
+-    $$ C_{bg} = \text{slice}(\text{self.bil\_grids}, xy, C_{raw}, \text{image\_ids}) $$
+-    [S1, unofficial]
+-    *Note: This step modifies the color signal before loss computation but does not directly update Gaussian parameters.*
+-
+-5.  **Background Compositing (Optional):**
+-    If `cfg.random_bkgd` is true, generate a random background color $B \sim \mathcal{U}(0,1)^3$. Composite the foreground render onto this background:
+-    $$ C_{final} = C_{bg} + B \cdot (1.0 - \text{alphas}) $$
+-    [S1, unofficial]
+-
+-6.  **Pre-Backward Strategy Hook:**
+-    Call `strategy.step_pre_backward(params, optimizers, state, step, info)`. This allows external strategies (e.g., MCMC or custom densification logic) to modify gradients or parameters before loss calculation.
+-    [S1, unofficial]
+-
+-7.  **Reconstruction Loss Calculation:**
+-    Identify valid pixels (non-Nerf samples) using `is_nerf_sample`. For valid pixels, compute the photometric loss. If `cfg.use_l1_for_real_samples` is true, use L1; otherwise, use L2. Combine with Structural Similarity (SSIM) loss:
+-    $$ L_{recon} = L_{1/2}(C_{final}, I_{gt}) \cdot (1.0 - \text{cfg.ssim\_lambda}) + L_{SSIM}(C_{final}, I_{gt}) \cdot \text{cfg.ssim\_lambda} $$
+-    [S1, unofficial]
+-
+-8.  **Depth Loss Calculation (Optional):**
+-    If `cfg.depth_loss` is true and valid pixels exist:
+-    a. Normalize 3D points to $[-1, 1]$ coordinate space.
+-    b. Sample ground truth depth $Z_{gt}$ from the depth map using bilinear interpolation (`F.grid_sample`).
+-    c. Compute disparity from rendered depth: $D_{raw} = 1.0 / Z_{raw}$ (where $Z_{raw} > 0$).
+-    d. Compute ground truth disparity: $D_{gt} = 1.0 / Z_{gt}$.
+-    e. Calculate L1 loss on disparity, scaled by scene scale:
+-    $$ L_{depth} = L_1(D_{raw}, D_{gt}) \cdot \text{self.scene\_scale} $$
+-    f. Add to total loss:
+-    $$ L_{total} = L_{recon} + L_{depth} \cdot \text{cfg.depth\_lambda} $$
++    Render the scene using the current Gaussians. If `cfg.depth_loss` is true, render mode is 'RGB+ED' (RGB + Estimated Depth); otherwise, 'RGB'.
++    - Output: `renders` (tensor), `alphas` (tensor), `info` (dict).
++    [S1, unofficial]
++
++3.  **Render Parsing:**
++    Split `renders` into colors and depths based on channel count.
++    - If `renders` has 4 channels:
++      $$ \text{colors} = \text{renders}[:, 0:3] $$
++      $$ \text{depths} = \text{renders}[:, 3:4] $$
++    - Else:
++      $$ \text{colors} = \text{renders} $$
++      $$ \text{depths} = \text{None} $$
++    [S1, unofficial]
++
++4.  **Bilateral Grid Slicing (Optional):**
++    If `cfg.use_bilateral_grid` is true:
++    - Compute grid coordinates `grid_xy` from camera/view space.
++    - Apply bilateral grid slicing to `colors`:
++      $$ \text{colors} = \text{slice}(\text{self.bil\_grids}, \text{grid\_xy}, \text{colors}, \text{image\_ids})[\text{"rgb"}] $$
++    [S1, unofficial]
++
++5.  **Random Background Compositing (Optional):**
++    If `cfg.random_bkgd` is true:
++    - Generate random background color $\mathbf{b} \sim \mathcal{U}[0,1]^3$.
++    - Composite:
++      $$ \text{colors} = \text{colors} + \mathbf{b} \cdot (1.0 - \text{alphas}) $$
++    [S1, unofficial]
++
++6.  **Pre-Backward Strategy Step:**
++    Call `strategy.step_pre_backward(params, optimizers, state, step, info)`. This may perform densification or pruning operations before gradient computation.
++    [S1, unofficial]
++
++7.  **Reconstruction Loss:**
++    Compute photometric loss against ground truth `colors_gt`.
++    - If `is_nerf_sample.any()` is false (standard case):
++      - Compute L1 or L2 loss `real_recon_loss` based on `cfg.use_l1_for_real_samples`.
++      - Compute SSIM loss `ssimloss`.
++      - Total reconstruction loss:
++        $$ \mathcal{L}_{\text{recon}} = \text{real\_recon\_loss} \cdot (1.0 - \text{cfg.ssim\_lambda}) + \text{ssimloss} \cdot \text{cfg.ssim\_lambda} $$
++    [S1, unofficial]
++
++8.  **Depth Loss (Optional):**
++    If `cfg.depth_loss` is true and not a NeRF sample:
++    - Normalize points to $[-1, 1]$.
++    - Sample depths from the rendered depth map using `F.grid_sample`.
++    - Compute disparity:
++      $$ \text{disp} = \frac{1.0}{\text{depths}} \quad (\text{where } \text{depths} > 0) $$
++    - Compute L1 loss against ground truth disparity:
++      $$ \mathcal{L}_{\text{depth}} = \text{F.l1\_loss}(\text{disp}, \frac{1.0}{\text{depths\_gt}}) \cdot \text{self.scene\_scale} $$
++    - Add to total loss:
++      $$ \mathcal{L}_{\text{total}} += \text{depthloss} \cdot \text{cfg.depth\_lambda} $$
+     [S1, unofficial]
+ 
+ 9.  **Bilateral Grid Total Variation (Optional):**
+-    If `cfg.use_bilateral_grid` is true, add a total variation regularization term to the bilateral grid parameters to prevent noisy artifacts:
+-    $$ L_{tv} = 10 \cdot \text{total\_variation\_loss}(\text{self.bil\_grids.grids}) $$
+-    $$ L_{total} = L_{total} + L_{tv} $$
++    If `cfg.use_bilateral_grid` is true:
++    $$ \mathcal{L}_{\text{tv}} = 10 \cdot \text{total\_variation\_loss}(\text{self.bil\_grids.grids}) $$
++    $$ \mathcal{L}_{\text{total}} += \mathcal{L}_{\text{tv}} $$
+     [S1, unofficial]
+ 
+ 10. **Opacity Regularization (Optional):**
+-    If `cfg.opacity_reg > 0.0`, penalize high opacity values to encourage transparency where appropriate:
+-    $$ L_{opacity} = \text{cfg.opacity\_reg} \cdot \mathbb{E}[\sigma(\alpha)] $$
+-    where $\sigma$ is the sigmoid function.
++    If `cfg.opacity_reg > 0.0`:
++    $$ \mathcal{L}_{\text{opacity}} = \text{cfg.opacity\_reg} \cdot \mathbb{E}[\sigma(\text{self.splats["opacities"]})] $$
++    $$ \mathcal{L}_{\text{total}} += \mathcal{L}_{\text{opacity}} $$
+     [S1, unofficial]
+ 
+ 11. **Scale Regularization (Optional):**
+-    If `cfg.scale_reg > 0.0`, penalize large scales to prevent explosion:
+-    $$ L_{scale} = \text{cfg.scale\_reg} \cdot \mathbb{E}[\exp(\sigma)] $$
++    If `cfg.scale_reg > 0.0`:
++    $$ \mathcal{L}_{\text{scale}} = \text{cfg.scale\_reg} \cdot \mathbb{E}[\exp(\text{self.splats["scales"]})] $$
++    $$ \mathcal{L}_{\text{total}} += \mathcal{L}_{\text{scale}} $$
+     [S1, unofficial]
+ 
+ 12. **Backward Pass:**
+-    Compute gradients:
+-    $$ L_{total} = L_{recon} + L_{opacity} + L_{scale} + \dots $$
+-    $$ L_{total}.backward() $$
+-    [S1, unofficial]
+-
+-13. **Visibility Masking (Optional):**
+-    If `cfg.visible_adam` is true, compute a mask $M$ of visible Gaussians to prevent gradient updates for invisible primitives:
+-    - If `cfg.packed`: $M$ is a sparse tensor with 1s at indices `info["gaussian_ids"]`.
+-    - Else: $M = (\text{info["radii"] > 0}).all(-1).any(0)$.
++    $$ \mathcal{L}_{\text{total}}.\text{backward()} $$
++    [S1, unofficial]
++
++13. **Visibility Mask Calculation (Optional):**
++    If `cfg.visible_adam` is true:
++    - If `cfg.packed` is true:
++      - Create zero tensor of shape `opacities`.
++      - Scatter 1s at indices `info["gaussian_ids"]`.
++    - Else:
++      - Mask is `(info["radii"] > 0).all(-1).any(0)`.
+     [S1, unofficial]
+ 
+ 14. **Optimizer Step:**
+-    Update Gaussian parameters:
+-    - If `cfg.visible_adam`: `optimizer.step(visibility_mask)`.
+-    - Else: `optimizer.step()`.
++    - If `cfg.visible_adam`:
++      $$ \text{optimizer.step}(\text{visibility\_mask}) $$
++    - Else:
++      $$ \text{optimizer.step()} $$
+     - Zero gradients with `set_to_none=True`.
+     [S1, unofficial]
+ 
+ 15. **Auxiliary Optimizer Steps:**
+-    Step pose optimizers and bilateral grid optimizers, zeroing their gradients.
++    - Step `pose_optimizers` and `bil_grid_optimizers` if present.
++    - Zero their gradients.
+     [S1, unofficial]
+ 
+ 16. **Scheduler Step:**
+-    Update learning rate schedulers.
+-    [S1, unofficial]
+-
+-17. **Post-Backward Strategy Hook:**
++    - Step learning rate schedulers.
++    [S1, unofficial]
++
++17. **Post-Backward Strategy Step:**
+     Call `strategy.step_post_backward`.
+     - If `DefaultStrategy`: pass `packed=cfg.packed`.
+@@ -125,9 +131,15 @@
+     [S1, unofficial]
+ 
+-18. **Checkpointing (Conditional):**
+-    If `step` is in `cfg.ply_steps` or is the final step, and `cfg.save_ply` is true:
+-    - If `cfg.app_opt` is true: Bake appearance by evaluating the appearance module at the origin (view direction $\vec{d} = \vec{0}$), add to base colors, apply sigmoid, convert to SH0, and initialize empty SHN.
+-    - Else: Use stored `self.splats["sh0"]` and `self.splats["shN"]`.
+-    - Export PLY file with means, scales, quaternions, opacities, and SH coefficients.
++18. **PLY Export (Optional):**
++    If `step` is in `cfg.ply_steps` or `step == max_steps - 1` and `cfg.save_ply`:
++    - If `cfg.app_opt` is true:
++      - Bake appearance by evaluating `app_module` at origin (dirs=torch.zeros_like(...)).
++      - Add `self.splats["colors"]`.
++      - Apply sigmoid.
++      - Convert to SH0.
++      - Create empty SHN.
++    - Else:
++      - Use `self.splats["sh0"]` and `self.splats["shN"]`.
++    - Export splats with `means`, `scales`, `quats`, `opacities`, `sh0`, `shN`.
+     [S1, unofficial]
+ 
+@@ -135,5 +147,5 @@
+ 
+ ```python
+-def training_step(step, splats, cameras, gt_images, gt_depths, cfg, strategy, optimizer, pose_optimizers, bil_grid_optimizers, schedulers):
++def training_step(step, splats, optimizers, cfg, scene_scale, strategy, bil_grids=None, app_module=None):
+     # 1. SH Degree
+     sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
+@@ -141,71 +153,64 @@
+     # 2. Rasterize
+     render_mode = 'RGB+ED' if cfg.depth_loss else 'RGB'
+-    renders, alphas, info = rasterize_gaussians(splats, cameras, render_mode)
+-    
+-    # 3. Split
++    renders, alphas, info = rasterize_gaussians(splats, camera_params, render_mode)
++    
++    # 3. Parse Renders
+     if renders.shape[-1] == 4:
+-        colors_raw = renders[..., 0:3]
+-        depths_raw = renders[..., 3:4]
++        colors = renders[..., 0:3]
++        depths = renders[..., 3:4]
+     else:
+-        colors_raw = renders
+-        depths_raw = None
+-        
+-    # 4. Bilateral Grid (Optional)
++        colors = renders
++        depths = None
++        
++    # 4. Bilateral Grid Slicing
+     if cfg.use_bilateral_grid:
+-        grid_xy = compute_grid_coordinates(cameras)
+-        colors = slice_bilateral_grid(self.bil_grids, grid_xy, colors_raw, cameras.image_ids)
+-    else:
+-        colors = colors_raw
+-        
+-    # 5. Random Background (Optional)
++        grid_xy = compute_grid_xy(camera_params)
++        colors = slice_bilateral_grid(bil_grids, grid_xy, colors, image_ids)["rgb"]
++        
++    # 5. Random Background
+     if cfg.random_bkgd:
+         bkgd = torch.rand(1, 3, device=colors.device)
+         colors = colors + bkgd * (1.0 - alphas)
+         
+-    # 6. Pre-backward hook
+-    strategy.step_pre_backward(splats, optimizer, {}, step, info)
++    # 6. Pre-Backward Strategy
++    strategy.step_pre_backward(splats, optimizers, step, info)
+     
+     # 7. Reconstruction Loss
+-    is_nerf_sample = detect_nerf_samples(cameras) # Placeholder for specific detection logic
+     if not is_nerf_sample.any():
+-        if cfg.use_l1_for_real_samples:
+-            recon_loss = F.l1_loss(colors, gt_images)
+-        else:
+-            recon_loss = F.mse_loss(colors, gt_images)
+-        ssim_loss = compute_ssim(colors, gt_images)
+-        loss = recon_loss * (1.0 - cfg.ssim_lambda) + ssim_loss * cfg.ssim_lambda
++        real_recon_loss = compute_l1_l2_loss(colors, colors_gt, use_l1=cfg.use_l1_for_real_samples)
++        ssimloss = compute_ssim_loss(colors, colors_gt)
++        loss = real_recon_loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+     else:
+-        loss = torch.tensor(0.0, device=colors.device) # No valid pixels
+-        
+-    # 8. Depth Loss (Optional)
++        loss = torch.tensor(0.0, device=colors.device)
++        
++    # 8. Depth Loss
+     if cfg.depth_loss and not is_nerf_sample.any():
+-        # Normalize points and sample depth
+-        points_3d = ... # From camera setup
+-        points_norm = normalize_to_ndc(points_3d)
+-        depths_gt_sampled = F.grid_sample(gt_depths, points_norm)
+-        disp_raw = 1.0 / (depths_raw + 1e-6)
+-        disp_gt = 1.0 / (depths_gt_sampled + 1e-6)
+-        depth_loss = F.l1_loss(disp_raw, disp_gt) * self.scene_scale
+-        loss = loss + depth_loss * cfg.depth_lambda
+-        
+-    # 9. Bilateral Grid TV (Optional)
++        # Normalize points and sample depths
++        sampled_depths = sample_depths(depths, normalized_points)
++        disp = 1.0 / sampled_depths.clamp(min=1e-6)
++        gt_disp = 1.0 / depths_gt.clamp(min=1e-6)
++        depthloss = F.l1_loss(disp, gt_disp) * scene_scale
++        loss += depthloss * cfg.depth_lambda
++        
++    # 9. Bilateral Grid TV Loss
+     if cfg.use_bilateral_grid:
+-        tv_loss = 10 * total_variation_loss(self.bil_grids.grids)
+-        loss = loss + tv_loss
+-        
+-    # 10. Opacity Reg (Optional)
++        tvloss = 10 * total_variation_loss(bil_grids.grids)
++        loss += tvloss
++        
++    # 10. Opacity Regularization
+     if cfg.opacity_reg > 0.0:
+         opacity_reg = cfg.opacity_reg * torch.sigmoid(splats["opacities"]).mean()
+-        loss = loss + opacity_reg
+-        
+-    # 11. Scale Reg (Optional)
++        loss += opacity_reg
++        
++    # 11. Scale Regularization
+     if cfg.scale_reg > 0.0:
+         scale_reg = cfg.scale_reg * torch.exp(splats["scales"]).mean()
+-        loss = loss + scale_reg
++        loss += scale_reg
+         
+     # 12. Backward
+     loss.backward()
+     
+-    # 13. Visibility Mask (Optional)
++    # 13. Visibility Mask
++    visibility_mask = None
+     if cfg.visible_adam:
+         if cfg.packed:
+@@ -214,62 +219,104 @@
+         else:
+             visibility_mask = (info["radii"] > 0).all(-1).any(0)
++            
++    # 14. Optimizer Step
++    if cfg.visible_adam:
++        optimizers[0].step(visibility_mask)
+     else:
+-        visibility_mask = None
+-        
+-    # 14. Optimizer Step
+-    if visibility_mask is not None:
+-        optimizer.step(visibility_mask)
+-    else:
+-        optimizer.step()
+-    optimizer.zero_grad(set_to_none=True)
+-    
+-    # 15. Aux Optimizers
++        optimizers[0].step()
++    optimizers[0].zero_grad(set_to_none=True)
++    
++    # 15. Auxiliary Optimizers
+     if pose_optimizers:
+-        for opt in pose_optimizers:
+-            opt.step()
+-            opt.zero_grad()
++        pose_optimizers.step()
++        pose_optimizers.zero_grad(set_to_none=True)
+     if bil_grid_optimizers:
+-        for opt in bil_grid_optimizers:
+-            opt.step()
+-            opt.zero_grad()
+-            
+-    # 16. Schedulers
++        bil_grid_optimizers.step()
++        bil_grid_optimizers.zero_grad(set_to_none=True)
++        
++    # 16. Scheduler Step
+     for scheduler in schedulers:
+         scheduler.step()
+         
+-    # 17. Post-backward hook
+-    if isinstance(strategy, MCMCStrategy):
+-        lr = schedulers[0].get_last_lr()[0]
+-        strategy.step_post_backward(lr=lr)
+-    else:
++    # 17. Post-Backward Strategy
++    if isinstance(strategy, DefaultStrategy):
+         strategy.step_post_backward(packed=cfg.packed)
+-        
+-    # 18. Checkpointing
+-    if step in cfg.ply_steps or step == cfg.max_steps - 1:
+-        if cfg.save_ply:
+-            if cfg.app_opt:
+-                # Bake appearance
+-                dirs = torch.zeros_like(cameras.directions)
+-                app_colors = evaluate_app_module(splats, dirs)
+-                final_colors = torch.sigmoid(app_colors + splats["colors"])
+-                sh0 = final_colors
+-                shN = torch.zeros_like(splats["shN"])
+-            else:
+-                sh0 = splats["sh0"]
+-                shN = splats["shN"]
+-            export_ply(splats["means"], splats["scales"], splats["quats"], 
+-                       splats["opacities"], sh0, shN, step)
++    elif isinstance(strategy, MCMCStrategy):
++        current_lr = schedulers[0].get_last_lr()[0]
++        strategy.step_post_backward(lr=current_lr)
++        
++    # 18. PLY Export
++    if cfg.save_ply and (step in cfg.ply_steps or step == max_steps - 1):
++        if cfg.app_opt:
++            # Bake appearance
++            dirs = torch.zeros_like(splats["means"]) # Simplified for origin
++            baked_colors = app_module(dirs) + splats["colors"]
++            baked_colors = torch.sigmoid(baked_colors)
++            sh0 = baked_colors
++            shN = torch.zeros_like(sh0) # Empty SHN
++        else:
++            sh0 = splats["sh0"]
++            shN = splats["shN"]
++            
++        export_ply(
++            means=splats["means"],
++            scales=splats["scales"],
++            quats=splats["quats"],
++            opacities=splats["opacities"],
++            sh0=sh0,
++            shN=shN,
++            filename=f"step_{step}.ply"
++        )
+ ```
+ 
++**Parameters:**
++- `cfg.sh_degree_interval`: Steps between increasing SH degree. Typical value: 1000 [S1, unofficial].
++- `cfg.sh_degree`: Maximum SH degree. Typical value: 3 [S1, unofficial].
++- `cfg.ssim_lambda`: Weight for SSIM loss. Typical value: 0.2 [S1, unofficial].
++- `cfg.depth_lambda`: Weight for depth loss. Typical value: 0.5 [S1, unofficial].
++- `cfg.opacity_reg`: Opacity regularization weight. Typical value: 0.01 [S1, unofficial].
++- `cfg.scale_reg`: Scale regularization weight. Typical value: 0.01 [S1, unofficial].
++- `cfg.use_l1_for_real_samples`: Use L1 instead of L2 for photometric loss. Default: True [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Depth Division by Zero:** When computing disparity $1/\text{depths}$, depths must be clamped to a minimum positive value (e.g., $10^{-6}$) to avoid NaNs [S1, unofficial].
++- **Visibility Mask Shape:** If `cfg.packed` is true, the visibility mask must be created with shape matching `opacities` (number of Gaussians), not image dimensions [S1, unofficial].
++- **SH Degree Bound:** The SH degree calculation uses integer division and min, ensuring it never exceeds `cfg.sh_degree` [S1, unofficial].
++
++## Subtopics
++
++### [Hybrid Coarse-to-Fine Strategy](7173-hybrid-coarse-to-fine-strategy.md)
++Uses a coarse-to-fine approach, often starting with lower SH degrees and simpler losses before refining.
++
++### [Training Objective and Densification](7448-training-objective-and-densification.md)
++Focuses on the specific loss terms and densification criteria without the multi-stage structure.
++
++### [Fine-tuning](9138-fine-tuning.md)
++Applies this loop to a pre-trained model with fixed geometry or specific parameters.
++
++### [Curriculum Learning with Slice and Voxel Supervision](12921-curriculum-learning-with-slice-and-voxel-supervision.md)
++Introduces voxel-based supervision in early stages.
++
++### [Multi-stage Training with Pose Prediction](15018-multi-stage-training-with-pose-prediction.md)
++Optimizes camera poses alongside Gaussians in specific stages.
++
++### [Free-View Training (FVT)](15162-free-view-training-fvt.md)
++Uses a different sampling strategy for views during training.
++
++### [Training Loop with Structure-Aware Densification](22986-training-loop-with-structure-aware-densification.md)
++Modifies the densification strategy based on geometric structure.
++
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by rasterization $O(N \cdot P)$ where $N$ is the number of Gaussians and $P$ is the number of pixels. The bilateral grid slicing adds overhead proportional to the grid resolution.
+-- **Memory Complexity:** $O(N)$ for Gaussian parameters. Bilateral grids add $O(G)$ where $G$ is the grid size.
+-- **Strengths:** Explicit depth supervision improves geometric consistency. Bilateral grids allow for high-frequency appearance details without increasing Gaussian count. Progressive SH degree prevents early-stage instability.
+-- **Limitations:** Depth loss requires accurate ground truth depth. Bilateral grids introduce additional hyperparameters and potential artifacts if not regularized.
+-- **When to use:** When high-fidelity appearance and geometric consistency are required, and ground truth depth is available.
++- **Time Complexity:** Dominated by rasterization $O(N \cdot H \cdot W)$ and backward pass. The visibility mask calculation adds $O(N)$ or $O(H \cdot W)$ depending on packing.
++- **Memory Complexity:** $O(N)$ for Gaussian attributes. Bilateral grids add $O(H \cdot W \cdot C_{grid})$ if used.
++- **Measured Performance:** Improves PSNR/SSIM over single-loss training by incorporating depth and SSIM [S1, unofficial].
++- **Strengths:** Handles multi-modal data (RGB+Depth), stabilizes training with regularization, and allows appearance baking.
++- **Limitations:** Increased complexity in implementation due to multiple loss terms and optional features.
++- **When to Use:** When high-fidelity reconstruction is required, depth data is available, or appearance needs to be baked.
++- **When Not to Use:** For simple scenes where RGB-only training suffices, or when computational resources are extremely limited.
+ 
+ ## Background
+-This training loop is derived from the implementation details of the AugSplat project, which extends 3D Gaussian Splatting with appearance optimization and depth supervision. It integrates concepts from differentiable rendering and multi-stage training strategies.
++This method is derived from the AugSplat implementation, which extends standard 3D Gaussian Splatting with additional features like bilateral grids and mixed losses [S1, unofficial]. It builds on the foundational 3D Gaussian Splatting paper [7173-hybrid-coarse-to-fine-strategy.md] and integrates concepts from multi-stage training [15018-multi-stage-training-with-pose-prediction.md].
+ 
+ ## Sources
+-[S1] AugSplat, https://github.com/llazzaroni/AugSplat, fetched 2026-10-27 (unofficial)+[S1] llazzaroni/AugSplat, https://github.com/llazzaroni/AugSplat, fetched 2026-10-27 (unofficial)

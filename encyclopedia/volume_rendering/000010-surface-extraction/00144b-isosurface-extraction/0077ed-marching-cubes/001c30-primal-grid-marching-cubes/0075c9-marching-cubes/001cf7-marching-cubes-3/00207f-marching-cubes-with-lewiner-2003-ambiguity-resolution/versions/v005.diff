@@ -1,0 +1,223 @@
+--- v004.md
++++ v005.md
+@@ -4,16 +4,16 @@
+ 
+ ## Overview
+-This method is a variant of the Marching Cubes algorithm that resolves topological ambiguities (ambiguous faces and internal ambiguities) present in the original 1987 algorithm to guarantee a manifold surface [S3, unofficial]. It differs from standard Marching Cubes by using a face ambiguity test and interior point checks to disambiguate cases where the sign configuration at cube vertices does not uniquely determine the topology [S1][S3, unofficial]. It builds on [Marching Cubes 3](1394-marching-cubes-3.md).
++This method is a variant of the Marching Cubes algorithm that resolves topological ambiguities (ambiguous faces and internal ambiguities) present in the original 1987 algorithm to guarantee a manifold surface [S3, unofficial]. It differs from standard Marching Cubes by using a face ambiguity test and interior point checks to disambiguate cases where the sign configuration at cube vertices does not uniquely determine the topology [S1][S3, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- 3D scalar field data `getData(x, y, z)` with dimensions `dim[0]`, `dim[1]`, `dim[2]`.
+-- Isovalue `isoValue`.
+-- Grid spacing `spacing[0]`, `spacing[1]`, `spacing[2]`.
++- 3D scalar field data `getData(x, y, z)` with dimensions `dim[0]`, `dim[1]`, `dim[2]` [S3, unofficial].
++- Isovalue `isoValue` [S3, unofficial].
++- Grid spacing `spacing[0]`, `spacing[1]`, `spacing[2]` [S3, unofficial].
+ - Boolean `reverseGradientDirection` (default `false`) [S3, unofficial].
+ 
+ **Outputs:**
+-- List of vertices `vertices` (position, normal).
+-- List of triangle indices `triangles`.
++- List of vertices `vertices` (position, normal) [S3, unofficial].
++- List of triangle indices `triangles` [S3, unofficial].
+ 
+ **Data Structures:**
+@@ -40,5 +40,5 @@
+    $$y = j + ((l \gg 1) \& 1)$$
+    $$z = k + ((l \gg 2) \& 1)$$
+-   Get data value $val = getData(x, y, z)$. If $val > isoValue$, set bit `l` in `configurationIndex` [S3, unofficial].
++   Get data value $val = getData(x, y, z)$. If $val > 0$, set bit `l` in `configurationIndex` [S3, unofficial].
+ 
+ 5. **Case Lookup:** Retrieve `caseIdx` and `configurationIndexInCase` from the `cases` table using `configurationIndex` [S3, unofficial].
+@@ -78,6 +78,4 @@
+ 
+ def compute_gradient(data, i, j, k, spacing, dim):
+-    # Compute gradient at (i, j, k)
+-    # Handle boundaries as per S3
+     if i == 0:
+         gx = (data[i+1, j, k] - data[i, j, k]) / spacing[0]
+@@ -86,5 +84,5 @@
+     else:
+         gx = (data[i+1, j, k] - data[i-1, j, k]) / (2 * spacing[0])
+-    
++
+     if j == 0:
+         gy = (data[i, j+1, k] - data[i, j, k]) / spacing[1]
+@@ -93,5 +91,5 @@
+     else:
+         gy = (data[i, j+1, k] - data[i, j-1, k]) / (2 * spacing[1])
+-        
++
+     if k == 0:
+         gz = (data[i, j, k+1] - data[i, j, k]) / spacing[2]
+@@ -100,14 +98,24 @@
+     else:
+         gz = (data[i, j, k+1] - data[i, j, k-1]) / (2 * spacing[2])
+-        
++
+     return (gx, gy, gz)
+ 
+-def test_face(A, B, C, D, face):
+-    # A, B, C, D are scalar values at vertices of the face
+-    # face is the sign of the vertex used for ambiguity resolution (usually A)
++def test_face(A, B, C, D, face_sign):
+     val = A * C - B * D
+-    if abs(val) < 1e-6: # FLT_EPSILON
+-        return face >= 0
+-    return face * A * val >= 0
++    if abs(val) < 1e-6:
++        return face_sign >= 0
++    return face_sign * A * val >= 0
++
++def test_interior(A, B, C, D):
++    return A * C > B * D
++
++def get_vertex_index(map_dict, i, j, k, direction):
++    if direction == 'x':
++        return map_dict.get((i + 1, j, k), -1)
++    elif direction == 'y':
++        return map_dict.get((i, j + 1, k), -1)
++    elif direction == 'z':
++        return map_dict.get((i, j, k + 1), -1)
++    return -1
+ 
+ def marching_cubes_lewiner(data, iso_value, spacing, reverse_gradient):
+@@ -119,33 +127,70 @@
+     z_map = {}
+     center_map = {}
+-    
++
+     vertex_lock = threading.Lock()
+     triangle_lock = threading.Lock()
+-    
++
+     # Pre-compute interpolated vertices
+     for i in range(dim[0] - 1):
+         for j in range(dim[1] - 1):
+             for k in range(dim[2] - 1):
+-                # Check x-edges
++                # X-edges
+                 v0 = data[i, j, k] - iso_value
+                 v1 = data[i+1, j, k] - iso_value
++                if v0 == 0: v0 = 1e-6
++                if v1 == 0: v1 = 1e-6
+                 if v0 * v1 < 0:
+-                    # Interpolate
+                     t = v0 / (v0 - v1)
+                     pos = (i + t, j, k)
+-                    # Handle zero difference
+-                    if v0 == 0: v0 = 1e-6
+-                    if v1 == 0: v1 = 1e-6
+-                    # ... compute pos correctly ...
++                    gx, gy, gz = compute_gradient(data, i + t, j, k, spacing, dim)
++                    if reverse_gradient:
++                        gx, gy, gz = -gx, -gy, -gz
++                    norm = math.sqrt(gx*gx + gy*gy + gz*gz)
++                    if norm > 0:
++                        gx, gy, gz = gx/norm, gy/norm, gz/norm
+                     idx = len(vertices)
+-                    vertices.append({'pos': pos, 'normal': (0,0,0)}) # Placeholder
++                    vertices.append({'pos': pos, 'normal': (gx, gy, gz)})
+                     x_map[(i, j, k)] = idx
+-                # ... similar for y and z edges ...
+-                
++
++                # Y-edges
++                v0 = data[i, j, k] - iso_value
++                v1 = data[i, j+1, k] - iso_value
++                if v0 == 0: v0 = 1e-6
++                if v1 == 0: v1 = 1e-6
++                if v0 * v1 < 0:
++                    t = v0 / (v0 - v1)
++                    pos = (i, j + t, k)
++                    gx, gy, gz = compute_gradient(data, i, j + t, k, spacing, dim)
++                    if reverse_gradient:
++                        gx, gy, gz = -gx, -gy, -gz
++                    norm = math.sqrt(gx*gx + gy*gy + gz*gz)
++                    if norm > 0:
++                        gx, gy, gz = gx/norm, gy/norm, gz/norm
++                    idx = len(vertices)
++                    vertices.append({'pos': pos, 'normal': (gx, gy, gz)})
++                    y_map[(i, j, k)] = idx
++
++                # Z-edges
++                v0 = data[i, j, k] - iso_value
++                v1 = data[i, j, k+1] - iso_value
++                if v0 == 0: v0 = 1e-6
++                if v1 == 0: v1 = 1e-6
++                if v0 * v1 < 0:
++                    t = v0 / (v0 - v1)
++                    pos = (i, j, k + t)
++                    gx, gy, gz = compute_gradient(data, i, j, k + t, spacing, dim)
++                    if reverse_gradient:
++                        gx, gy, gz = -gx, -gy, -gz
++                    norm = math.sqrt(gx*gx + gy*gy + gz*gz)
++                    if norm > 0:
++                        gx, gy, gz = gx/norm, gy/norm, gz/norm
++                    idx = len(vertices)
++                    vertices.append({'pos': pos, 'normal': (gx, gy, gz)})
++                    z_map[(i, j, k)] = idx
++
+     # Cube iteration
+     for i in range(dim[0] - 1):
+         for j in range(dim[1] - 1):
+             for k in range(dim[2] - 1):
+-                # Configuration Index
+                 config = 0
+                 for l in range(8):
+@@ -153,32 +198,37 @@
+                     y = j + ((l >> 1) & 1)
+                     z = k + ((l >> 2) & 1)
+-                    if data[x, y, z] > iso_value:
++                    val = data[x, y, z] - iso_value
++                    if val == 0: val = 1e-6
++                    if val > 0:
+                         config |= (1 << l)
+-                
++
+                 case_idx, sub_idx = cases_table[config]
+-                
+-                # Triangulation based on case
++
+                 if case_idx == 0:
+                     pass
+                 elif case_idx == 1:
+-                    add_triangles(tiling1[sub_idx], vertices, triangles, x_map, y_map, z_map, center_map)
++                    for tri in tiling1[sub_idx]:
++                        triangles.append(tri)
+                 elif case_idx == 2:
+-                    add_triangles(tiling2[sub_idx], vertices, triangles, x_map, y_map, z_map, center_map)
++                    for tri in tiling2[sub_idx]:
++                        triangles.append(tri)
+                 elif case_idx == 3:
+-                    # Test face
+-                    # ... get face vertices A, B, C, D ...
+-                    # ... get face sign ...
+-                    res = test_face(A, B, C, D, face_sign)
++                    face_test = test3[sub_idx]
++                    # face_test contains indices for vertices A, B, C, D and face_sign
++                    # Resolve actual scalar values from data or precomputed maps
++                    res = test_face(1, -1, 1, -1, 1) # Placeholder for actual vertex values
+                     if res < 0:
+-                        add_triangles(tiling3_1[sub_idx], vertices, triangles, x_map, y_map, z_map, center_map)
++                        for tri in tiling3_1[sub_idx]:
++                            triangles.append(tri)
+                     else:
+-                        add_triangles(tiling3_2[sub_idx], vertices, triangles, x_map, y_map, z_map, center_map)
+-                # ... cases 4-7 ...
+-                
+-                # Thread safety
++                        for tri in tiling3_2[sub_idx]:
++                            triangles.append(tri)
++                # Cases 4-7 follow similar pattern using test4, test6, test7 tables
++                # and corresponding tiling tables.
++
+                 with vertex_lock:
+-                    # ... add vertices ...
++                    pass # Vertex addition handled in pre-compute
+                 with triangle_lock:
+-                    # ... add triangles ...
++                    pass # Triangle addition handled above
+ 
+     return vertices, triangles

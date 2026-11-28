@@ -1,0 +1,135 @@
+--- v028.md
++++ v029.md
+@@ -1,5 +1,5 @@
+ # Binary Radiance Fields
+ 
+-Also called: BRF, BiRF, Binarized Radiance Fields
++Also called: BRF, Binarized Radiance Fields (BiRF)
+ 
+ ## Overview
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of posed images with known camera parameters; a 3D coordinate $x = (x, y, z)$ and viewing direction $\mathbf{d} = (\theta, \phi)$ for ray marching.
+-*   **Output:** Volume density $\sigma$ and color $\mathbf{c} = (r, g, b)$ for the query point.
++*   **Input:** A set of posed images with known camera parameters; a 3D coordinate $x = (x, y, z)$ and viewing direction $\mathbf{d} = (\theta, \phi)$ for ray marching [S2].
++*   **Output:** Volume density $\sigma$ and color $\mathbf{c} = (r, g, b)$ for the query point [S2].
+ 
+ **Data Structures:**
+ The model uses a hybrid multi-resolution feature grid consisting of one 3D voxel grid and three orthogonal 2D plane grids, all implemented using hash encoding [S2].
+-1.  **3D Feature Grid ($\Phi_{\theta_{xyz}}$):** Stores binary parameters. It has $L$ resolution levels, ranging from $16^3$ to $1024^3$. Each level contains up to $T_{3D}$ feature vectors.
+-2.  **2D Feature Grids ($\Phi_{\theta_{xy}}, \Phi_{\theta_{xz}}, \Phi_{\theta_{yz}}$):** Store binary parameters for the XY, XZ, and YZ planes respectively. Each has $M$ resolution levels, ranging from $64^2$ to $512^2$. Each level contains up to $T_{2D}$ feature vectors.
++1.  **3D Feature Grid ($\Phi_{\theta_{xyz}}$):** Stores binary parameters [S2]. It has $L$ resolution levels, ranging from $16^3$ to $1024^3$ [S2]. Each level contains up to $T_{3D}$ feature vectors [S2].
++2.  **2D Feature Grids ($\Phi_{\theta_{xy}}, \Phi_{\theta_{xz}}, \Phi_{\theta_{yz}}$):** Store binary parameters for the XY, XZ, and YZ planes respectively [S2]. Each has $M$ resolution levels, ranging from $64^2$ to $512^2$ [S2]. Each level contains up to $T_{2D}$ feature vectors [S2].
+ 3.  **Parameter Constraint:** All grid parameters $\theta$ are constrained to $\{-1, +1\}$ via binarization [S2].
+ 
+@@ -29,10 +29,10 @@
+ 
+ **Feature Encoding:**
+-For a query 3D coordinate $x$, features are extracted from the hybrid grids:
++For a query 3D coordinate $x$, features are extracted from the hybrid grids [S2].
+ 1.  **3D Encoding:** Tri-linearly interpolate binary parameters across $L$ levels and concatenate:
+     $$
+     f_{xyz} = \{ \text{interp}(x, \text{sign}(\Phi^l_{\theta_{xyz}})) \}_{l=1}^L
+     $$
+-2.  **2D Encoding:** Project $x$ onto the three orthogonal planes: $x_{xy}=(x,y)$, $x_{xz}=(x,z)$, $x_{yz}=(y,z)$. Bi-linearly interpolate binary parameters across $M$ levels for each plane and concatenate:
++2.  **2D Encoding:** Project $x$ onto the three orthogonal planes: $x_{xy}=(x,y)$, $x_{xz}=(x,z)$, $x_{yz}=(y,z)$ [S2]. Bi-linearly interpolate binary parameters across $M$ levels for each plane and concatenate:
+     $$
+     f_{xy} = \{ \text{interp}(x_{xy}, \text{sign}(\Phi^m_{\theta_{xy}})) \}_{m=1}^M
+@@ -76,4 +76,27 @@
+ import torch.nn as nn
+ import torch.nn.functional as F
++
++def positional_encoding(x, num_frequencies=3):
++    """Standard NeRF sinusoidal positional encoding [G]."""
++    scales = torch.tensor([2**i for i in range(num_frequencies)], dtype=x.dtype, device=x.device)
++    scaled_x = x.unsqueeze(-1) * scales
++    return torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
++
++def directional_encoding(d, degree=4):
++    """Spherical harmonics directional encoding [G]."""
++    # Simplified to sinusoidal encoding for self-containment; standard SH uses associated Legendre polynomials
++    return positional_encoding(d, num_frequencies=degree)
++
++def trilinear_interp(grid, coords):
++    """Standard trilinear interpolation via grid_sample [G]."""
++    # grid: (C, H, W, D), coords: (N, 3) normalized to [-1, 1]
++    return F.grid_sample(grid.unsqueeze(0).unsqueeze(0), coords.unsqueeze(0).unsqueeze(0), 
++                         mode='trilinear', padding_mode='zeros').squeeze()
++
++def bilinear_interp(grid, coords):
++    """Standard bilinear interpolation via grid_sample [G]."""
++    # grid: (C, H, W), coords: (N, 2) normalized to [-1, 1]
++    return F.grid_sample(grid.unsqueeze(0).unsqueeze(0), coords.unsqueeze(0).unsqueeze(0), 
++                         mode='bilinear', padding_mode='zeros').squeeze()
+ 
+ class BinaryRadianceField:
+@@ -93,6 +116,4 @@
+         
+         # Initialize real-valued parameters for hash grids
+-        # Note: In practice, these are managed by a hash table implementation like Instant-NGP
+-        # Here we abstract the grid storage as a list of tensors for clarity
+         self.grid_3d = nn.ParameterList([
+             nn.Parameter(torch.randn(T_3D, F)) for _ in range(L)
+@@ -109,5 +130,4 @@
+         
+         # Density MLP: Input dim = L*F + M*3*F (concatenated features) + pos_enc_dim
+-        # Simplified: Assume pos_enc_dim is handled separately or included in input dim
+         input_dim_density = L * F + 3 * M * F + 6 # 6 for basic pos enc (sin/cos of x,y,z)
+         self.mlp_density = nn.Sequential(
+@@ -155,6 +175,5 @@
+         """
+         # 1. Positional Encoding for x
+-        # Assuming standard NeRF positional encoding
+-        gamma_x = positional_encoding(x, num_frequencies=3) # Returns (B, 6)
++        gamma_x = positional_encoding(x, num_frequencies=3)
+         
+         # 2. Feature Encoding
+@@ -181,6 +200,5 @@
+         
+         # 4. Color Prediction
+-        # Directional encoding (e.g., spherical harmonics or simple pos enc)
+-        gamma_d = directional_encoding(d) # Returns (B, 6)
++        gamma_d = directional_encoding(d)
+         color_input = torch.cat([e, gamma_d], dim=-1)
+         color = self.mlp_color(color_input)
+@@ -188,5 +206,5 @@
+         return sigma, color
+ 
+-    def loss(self, sigma, color, gt_color, gt_sigma=None):
++    def loss(self, sigma, color, gt_color):
+         """
+         Compute total loss.
+@@ -194,5 +212,4 @@
+         :param color: Predicted color
+         :param gt_color: Ground truth color
+-        :param gt_sigma: Ground truth density (optional, for sparsity loss if available)
+         :return: Total loss scalar
+         """
+@@ -201,6 +218,5 @@
+         
+         # Sparsity Loss (Cauchy loss on predicted density)
+-        # L_sparsity = sum(log(1 + 2 * sigma^2))
+-        l_sparsity = torch.log(1 + 2 * sigma**2).mean()
++        l_sparsity = torch.sum(torch.log(1 + 2 * sigma**2))
+         
+         lambda_sparsity = 2.0e-5
+@@ -211,14 +227,12 @@
+ 
+ ## Operating characteristics
+-*   **Storage Efficiency:** BiRF achieves extremely compact storage. The small model variant (Ours-S2) requires less than 0.5 MB, significantly outperforming baselines like TensoRF-CP (3.7 MB) and Instant-NGP (24.5 MB) on the "mic" scene while maintaining comparable or better PSNR [S2].
++*   **Storage Efficiency:** BiRF achieves extremely compact storage, with the small model variant (Ours-S2) requiring less than 0.5 MB, significantly outperforming baselines like TensoRF-CP (3.7 MB) and Instant-NGP (24.5 MB) on the "mic" scene while maintaining comparable or better PSNR [S2].
+ *   **Performance:** On Synthetic-NeRF scenes, BiRF achieves a PSNR of 32.03 dB; on Synthetic-NSVF, 34.48 dB; and on Tanks and Temples, 28.20 dB [S2].
+ *   **Training Time:** Training takes approximately 6, 9, and 14 minutes for Synthetic-NeRF scenes using Ours-B2 to Ours-B8 models on a single NVIDIA RTX A6000 GPU [S2].
+-*   **Strengths:** Dramatic reduction in storage overhead compared to real-valued floating-point grids; no post-optimization required; hybrid 2D-3D structure mitigates hash collisions in 3D grids [S2].
+-*   **Limitations:** Binary quantization may limit the expressiveness of the feature space compared to full-precision models, though the hybrid architecture compensates for this [S2]. Hash collisions in 3D grids at high resolutions can still impact performance if not supplemented by 2D grids [S2].
+-*   **When to Use:** Ideal for applications requiring extreme storage efficiency and fast deployment, such as mobile AR/VR or web-based 3D viewing, where model size is a critical constraint [S2].
+-*   **When Not to Use:** When maximum possible reconstruction quality is required regardless of storage size, full-precision NeRF or Instant-NGP may be preferable [S2].
++*   **Strengths:** The method provides a dramatic reduction in storage overhead compared to real-valued floating-point grids, requires no post-optimization, and uses a hybrid 2D-3D structure that mitigates hash collisions in 3D grids [S2].
++*   **When to Use:** The method is ideal for applications requiring extreme storage efficiency and fast deployment, such as mobile AR/VR or web-based 3D viewing, where model size is a critical constraint [S2].
+ 
+ ## Background
+-Binary Radiance Fields were proposed by Seungjoo Shin and Jaesik Park from POSTECH and Seoul National University, published in arXiv:2306.07581v2 on December 4, 2023 [S2]. The method builds upon the Instant-NGP architecture, utilizing its multi-resolution hash encoding and occupancy grid for efficient ray sampling [S2]. It addresses the storage burden imposed by implicit feature embeddings in modern NeRF variants by introducing binarization of feature embeddings to $\{-1, +1\}$ using a sign function and backpropagating through a straight-through estimator [S1]. The approach was implemented based on Instant-NGP using the occupancy grid from NerfAcc and trained on NVIDIA RTX A6000 GPUs [S2].
++Binary Radiance Fields were proposed by Seungjoo Shin and Jaesik Park from POSTECH and Seoul National University, published in arXiv:2306.07581v2 on December 4, 2023 [S2]. The method is implemented based on Instant-NGP, utilizing its multi-resolution hash encoding, and employs an occupancy grid from NerfAcc for efficient ray sampling [S2]. It addresses the storage burden imposed by implicit feature embeddings in modern NeRF variants by introducing binarization of feature embeddings to $\{-1, +1\}$ using a sign function and backpropagating through a straight-through estimator [S1]. The approach was implemented based on Instant-NGP using the occupancy grid from NerfAcc and trained on NVIDIA RTX A6000 GPUs [S2].
+ 
+ ## Sources

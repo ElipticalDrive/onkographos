@@ -1,0 +1,85 @@
+--- v005.md
++++ v006.md
+@@ -8,22 +8,22 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Camera pose (view/projection matrices), structured 3DGS model (anchors, MLP weights, anchor features), previous frame's cache state [S1, unofficial].
++*   **Input:** Camera pose (view/projection matrices), structured 3DGS model (anchors, MLP weights $\theta$, anchor features), previous frame's cache state [S1, unofficial].
+ *   **Output:** Rendered image (binocular 2K), updated cache state [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Cache:** Stores decoded Gaussian parameters (position, covariance, opacity, SH coefficients) indexed by anchor ID. The exact memory layout is not given in the sources, but it maps anchor indices to Gaussian parameters [S1, unofficial].
++*   **Cache:** Stores decoded Gaussian parameters indexed by anchor ID, mapping anchor indices to cache indices [S1, unofficial]. Exact memory layout, fields, sizes, and bit packing are Not given in the sources.
+ *   **Anchor Set ($X$):** The set of anchors required for decoding in the current frame [S1, unofficial].
+-*   **Newly Decoded Anchors ($X_k'$):** The subset of anchors from $X$ that were not found in the cache or required re-decoding from the previous $k$ frames [S1, unofficial].
++*   **Newly Decoded Anchors ($X_k'$):** The subset of anchors from $X$ that were newly decoded from the previous $k$ frames [S1, unofficial].
+ 
+ **Steps:**
+ 1.  **Binocular De-redundancy:** Process camera inputs to identify unique view frustums, reducing redundant anchor queries for binocular rendering [S1, unofficial].
+-2.  **Anchor Filtering:** Compute anchor indices from the camera input. Filter the global anchor set to identify $X$, the anchors necessary for the current frame [S1, unofficial].
++2.  **Anchor Filtering:** Compute anchor indices from the camera input to filter the global anchor set and identify $X$ [S1, unofficial].
+ 3.  **Index Mapping:** Translate anchor indices to cache indices to locate existing Gaussian parameters in the cache [S1, unofficial].
+-4.  **Cache Scheduling:** The cache scheduler loads necessary model parameters (MLP weights) for anchors not in the cache. It determines which anchors need decoding based on the cache hit/miss status [S1, unofficial].
++4.  **Cache Scheduling:** The cache scheduler loads necessary model parameters (MLP weights $\theta$) for anchors not in the cache based on the filtered anchors [S1, unofficial].
+ 5.  **Dynamic Cache Depth Scheduling:** Calculate the expected reuse depth using the heuristic function $H$ and the update rate [S1, unofficial]:
+     $$ \text{depth} = H\left(\frac{|X_k'|}{|X|}\right) $$
+     where $|X_k'|$ is the number of newly decoded anchors from the previous $k$ frames, and $|X|$ is the total anchor set for decoding in the current frame [S1, unofficial]. The function $H$ adjusts the depth of reuse and cached parameters according to the intensity of decoding calculations [S1, unofficial].
+-6.  **Anchor Decoding (Derivation Stage):** For anchors in the cache, retrieve cached Gaussian parameters. For anchors not in the cache, decode anchor features into neural Gaussian parameters using the MLP (weights $\theta$). Update the cache with newly decoded parameters. Flush cache entries that have exceeded the dynamic reuse depth to prevent significant rendering errors due to viewpoint changes [S1, unofficial].
+-7.  **Gaussian Rasterization (Rasterization Stage):** Project the decoded 3D Gaussians to 2D. Perform alpha compositing to generate the final image. This stage is **not** accelerated by caching because slight perspective changes significantly affect occlusion, and caching here would degrade visual quality [S1, unofficial].
++6.  **Anchor Decoding (Derivation Stage):** For anchors in the cache, retrieve cached Gaussian parameters [S1, unofficial]. For anchors not in the cache, decode anchor features into neural Gaussian parameters using the MLP with weights $\theta$ [S1, unofficial]. Update the cache with newly decoded parameters [S1, unofficial]. Flush cache entries that have exceeded the dynamic reuse depth to prevent significant rendering errors due to viewpoint changes [S1, unofficial].
++7.  **Gaussian Rasterization (Rasterization Stage):** Project the decoded 3D Gaussians to 2D and perform alpha compositing to generate the final image [S1, unofficial]. This stage is not accelerated by caching because slight perspective changes significantly affect occlusion, and caching here would degrade visual quality [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -31,19 +31,16 @@
+ def gs_cache_render(camera_pose, model, prev_cache, k, H_func):
+     # 1. Binocular De-redundancy and Anchor Filtering
+-    # Standard frustum culling to get unique view frustums for binocular rendering
+-    unique_view_frustums = [camera_pose.left_frustum, camera_pose.right_frustum]
+     # Compute anchor indices from camera input and filter global set to X
+-    anchor_indices = [a.id for a in model.anchors if frustum_contains(a, unique_view_frustums)]
++    anchor_indices = [a.id for a in model.anchors if in_view_frustum(a, camera_pose)] # [G] standard frustum culling (not given in sources)
+     X = set(anchor_indices)
+     
+     # 2. Index Mapping and Cache Lookup
+     # Translate anchor indices to cache indices
+-    cache_indices = {aid: aid for aid in X} # Direct mapping assumed per source
+-    cached_params = {aid: prev_cache.get(aid) for aid in X if prev_cache.has(aid)}
++    cache_indices = {aid: aid for aid in X} # [G] direct mapping per source (not given in sources)
++    cached_params = {aid: prev_cache.get(aid) for aid in X if aid in prev_cache}
+     
+     # 3. Identify Newly Decoded Anchors (from previous k frames logic)
+     # Track anchors decoded in the last k frames to compute |X_k'|
+-    # Implementation requires a sliding window counter maintained across frames
+-    num_recently_decoded = prev_cache.recently_decoded_count(k)
++    num_recently_decoded = prev_cache.count_recently_decoded(k) # [G] sliding window counter (not given in sources)
+     
+     # 4. Dynamic Cache Depth Scheduling
+@@ -52,5 +49,5 @@
+     
+     # 5. Cache Scheduling and Decoding
+-    mlp_weights = model.get_mlp_weights()
++    mlp_weights = model.get_mlp_weights() # weights theta
+     new_gaussians = {}
+     for anchor_id in X:
+@@ -62,5 +59,5 @@
+             anchor_feature = model.get_anchor_feature(anchor_id)
+             # MLP forward pass: gaussian = MLP(anchor_feature, mlp_weights)
+-            gaussian = model.anchors[anchor_id].feature @ mlp_weights
++            gaussian = anchor_feature @ mlp_weights
+             new_gaussians[anchor_id] = gaussian
+             
+@@ -74,9 +71,9 @@
+     # Combine cached and newly decoded Gaussians
+     all_gaussians = {**cached_params, **new_gaussians}
+-    # Project all Gaussians to 2D (standard perspective projection)
+-    projected_gaussians = [project_2d(g, camera_pose) for g in all_gaussians.values()]
+-    # Sort by depth and perform alpha compositing (standard rasterization)
+-    projected_gaussians.sort(key=lambda g: g.depth)
+-    image = alpha_composite(projected_gaussians)
++    # Project all Gaussians to 2D and perform alpha compositing
++    # [G] standard 3DGS rasterization pipeline (not given in sources)
++    projected = [project_to_2d(g, camera_pose) for g in all_gaussians.values()] # [G] standard perspective projection (not given in sources)
++    projected.sort(key=lambda g: g.depth) # [G] depth sorting (not given in sources)
++    image = alpha_composite(projected) # [G] standard alpha compositing (not given in sources)
+     
+     return image, prev_cache

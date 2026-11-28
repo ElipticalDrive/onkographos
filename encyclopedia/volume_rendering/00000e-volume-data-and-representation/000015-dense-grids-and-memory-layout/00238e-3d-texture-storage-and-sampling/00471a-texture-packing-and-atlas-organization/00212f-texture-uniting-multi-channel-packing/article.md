@@ -1,0 +1,141 @@
+# Texture Uniting (Multi-Channel Packing)
+
+Also called: Multi-Channel Packing, Multi-Channel Volume Texture Optimization, Texture Packing/Unpacking Scheme
+
+## Overview
+Texture Uniting is a technique that combines multiple separate 3D textures (e.g., noise, detail, light, mask) into a single multi-channel 3D texture (typically RGBA) to optimize GPU memory bandwidth and sampling performance [S1, unofficial]. It solves the problem of redundant texture unit bindings and poor cache locality when sampling multiple independent volumes that share the same spatial domain [S2, unofficial]. Unlike [3D Volume Atlas Packing](7158-3d-volume-atlas-packing.md), which maps distinct spatial regions into a larger texture, Texture Uniting assumes all channels are coincident in the same 3D box and voxel grid, aggregating data into a single physical texture coordinate space [S2, unofficial]. It differs from [Texture Packing Strategy](3196-texture-packing-strategy.md) by explicitly aggregating data into RGBA formats, which may transfer unused channels if not carefully managed, whereas the latter maps a single dataset to multiple separate scalar textures to avoid this overhead [S1, unofficial].
+
+## How it works
+**Inputs:** A set of $N$ source 3D textures $T_i$ with dimensions $D_i \times D_i \times D_i$ (where $i \in \{1, \dots, N\}$) and a target unified texture $U$ with dimension $D_u \times D_u \times D_u$. The source textures contain scalar data (e.g., density, velocity components, masks) that must be packed into the RGB(A) channels of $U$.
+
+**Outputs:** A single unified 3D texture $U$ where each voxel $(x, y, z)$ stores a vector $(R, G, B, A)$ containing the sampled values from the source textures.
+
+**Data Structures:**
+*   **Source Textures:** $T_i$ stored in standard 3D texture formats (e.g., `RGBA32`, `R32F`).
+*   **Unified Texture:** $U$ stored in `RGBA32` (8 bits per channel) or `RGBA16F` depending on precision requirements [S3].
+*   **Sampler State:** Linear clamping sampler (`sampler_linear_clamp`) to handle resolution differences and boundary conditions [S1, unofficial].
+
+**Steps:**
+1.  **Determine Unified Size:** Choose $D_u$, the dimension of the output unified texture. It is typically assumed to be cubic [S1, unofficial].
+2.  **Initialize Unified Texture:** Allocate $U$ with dimensions $D_u \times D_u \times D_u$ and format `RGBA32` [S3].
+3.  **Iterate Voxels:** For each voxel coordinate $(x, y, z)$ in $U$:
+    a.  **Normalize Coordinates:** Compute normalized coordinates $n = (x, y, z) / D_u$.
+    b.  **Sample Source Textures:** For each source texture $T_i$ assigned to a channel $c \in \{R, G, B, A\}$:
+        i.  Sample $T_i$ using the normalized coordinates: $v_i = T_i.\text{SampleLevel}(\text{sampler\_linear\_clamp}, n, 0)$.
+        ii. Extract the scalar value from the appropriate channel of $T_i$ (e.g., `.r` for red channel) [S1, unofficial].
+    c.  **Pack Channels:** Assign the sampled values to the corresponding channels of $U[x, y, z]$.
+        *   Example: $U[x, y, z].R = v_{\text{noise}}$, $U[x, y, z].G = v_{\text{detail}}$, $U[x, y, z].B = v_{\text{light}}$, $U[x, y, z].A = v_{\text{mask}} / 32.0$ [S1, unofficial].
+4.  **Finalize:** Write the packed texture to GPU memory.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def unite_textures(source_textures, unified_size):
+    """
+    Combines multiple 3D textures into a single RGBA 3D texture.
+    
+    Args:
+        source_textures: List of tuples (texture, channel_index, scale_factor).
+                         texture: The source 3D texture object.
+                         channel_index: 0 for R, 1 for G, 2 for B, 3 for A.
+                         scale_factor: Multiplier applied to the sampled value before packing.
+        unified_size: Integer dimension of the output unified texture (assumed cubic).
+        
+    Returns:
+        unified_texture: The packed RGBA 3D texture.
+    """
+    # Initialize unified texture with zeros
+    unified_texture = create_3d_texture(unified_size, unified_size, unified_size, format='RGBA32')
+    
+    # Iterate over all voxels in the unified texture
+    for z in range(unified_size):
+        for y in range(unified_size):
+            for x in range(unified_size):
+                # Normalize coordinates to [0, 1] range
+                nx = x / unified_size
+                ny = y / unified_size
+                nz = z / unified_size
+                coord = (nx, ny, nz)
+                
+                # Initialize RGBA vector
+                rgba = [0.0, 0.0, 0.0, 0.0]
+                
+                # Sample each source texture and pack into the appropriate channel
+                for texture, channel_idx, scale in source_textures:
+                    # Sample the texture using linear clamping
+                    # Note: SampleLevel returns a vector (R, G, B, A)
+                    sampled_vec = texture.sample_level(coord, mip_level=0, sampler='linear_clamp')
+                    
+                    # Extract the scalar value from the source texture's red channel (or specified channel)
+                    # In the reference implementation, the source textures are single-channel logical data
+                    # stored in the red channel of the texture object, or the sample is treated as scalar.
+                    # We assume sampled_vec.r contains the relevant data for this example.
+                    value = sampled_vec.r
+                    
+                    # Apply scale factor (e.g., normalization)
+                    value = value * scale
+                    
+                    # Pack into the unified texture's channel
+                    rgba[channel_idx] = value
+                
+                # Write the packed vector to the unified texture
+                unified_texture[x, y, z] = rgba
+                
+    return unified_texture
+```
+
+**Parameters:**
+*   `unified_size`: Integer dimension of the output unified texture. Assumed cubic [S1, unofficial].
+*   `source_texture_size`: Integer dimensions of the source textures. They may differ from `unified_size` [S1, unofficial].
+*   `Texture Format`: `RGBA32` (8 bits per channel) is used in the reference implementation [S3].
+*   `Sampler`: Linear clamping (`sampler_linear_clamp`) is used to handle resolution differences between source and unified textures [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **2-Channel Performance:** A 2-channel volume texture is usually much slower on multiple vendors' GPUs and should be avoided [S2, unofficial]. If only two channels are needed, pack them into a 3-channel texture with a zero-padded extra channel, or use two 1-channel textures if the padded channel requires too much texture RAM [S2, unofficial].
+*   **Resolution Mismatch:** Using normalized coordinates with linear filtering allows for bilinear filtering across resolution boundaries between source textures, which is preferred over integer indexing for smoothness [S1, unofficial].
+*   **Memory Usage:** Packing more than 4 channels requires splitting into multiple unified textures or using higher-bit formats, which increases memory consumption [S2, unofficial].
+
+## Subtopics
+
+### [Texture Packing Strategy](3196-texture-packing-strategy.md)
+This method reduces GPU memory consumption and bandwidth usage by mapping a single underlying volume dataset to multiple separate scalar textures rather than packing multiple cell attributes into a single multi-channel texture. It solves the problem of unnecessary memory bandwidth overhead when only a subset of volume attributes is required for a specific computation. It differs from [Texture Uniting (Multi-Channel Packing)](2470-texture-uniting-multi-channel-packing.md) by avoiding the aggregation of data into RGBA formats, thereby preventing the transfer of unused channels. Choose this method when memory bandwidth is the primary bottleneck and not all channels are accessed simultaneously.
+
+### PBR Material Channel Packing
+Packs PBR material properties into standard texture formats: BaseColor and Alpha into RGBA, Metallic and Roughness into RGB (R=0, G=Roughness, B=Metallic) [S4, unofficial]. This is a specific application of multi-channel packing for material definitions rather than volumetric data [S4, unofficial]. Choose this method when storing PBR material attributes in a compact texture format for rendering engines.
+
+## Operating characteristics
+**Time Complexity:** $O(D_u^3)$ for packing, where $D_u$ is the unified texture dimension. Sampling during rendering is $O(1)$ per voxel, but involves accessing a single texture instead of multiple [S2, unofficial].
+
+**Memory Complexity:** $O(D_u^3 \times C)$, where $C$ is the number of channels (typically 4 for RGBA) [S3]. This is more memory-efficient than storing $N$ separate textures if $N > 4$, but less efficient if only a subset of channels is used, as all channels are transferred [S1, unofficial].
+
+**Measured Performance:** Texture sampling a single multi-channel texture is faster than sampling multiple independent textures due to better cache locality [S2, unofficial]. However, 2-channel textures are significantly slower on many GPUs, making 3-channel or 4-channel packing preferable [S2, unofficial].
+
+**Strengths:**
+*   Improved cache locality due to single texture access [S2, unofficial].
+*   Reduced number of active texture units and state transitions [G].
+*   Simplified shader code for accessing multiple attributes at the same spatial location [S1, unofficial].
+
+**Limitations:**
+*   Fixed channel count (typically 4) limits the number of attributes that can be packed [S2, unofficial].
+*   Potential bandwidth waste if not all channels are used in every rendering pass [S1, unofficial].
+*   2-channel textures perform poorly on many hardware architectures [S2, unofficial].
+
+**When to Use:**
+*   When multiple volume attributes (e.g., density, velocity, temperature) are needed simultaneously at the same spatial location.
+*   When cache locality is more critical than bandwidth efficiency for unused channels.
+*   When the number of attributes is $\le 4$ and performance on 2-channel textures is a concern.
+
+**When Not to Use:**
+*   When only a subset of attributes is needed for a specific computation (use [Texture Packing Strategy](3196-texture-packing-strategy.md) instead) [S1, unofficial].
+*   When more than 4 channels are required (use [3D Volume Atlas Packing](7158-3d-volume-atlas-packing.md) or multiple unified textures) [S2, unofficial].
+*   When memory bandwidth is the primary bottleneck and many channels are unused [S1, unofficial].
+
+## Background
+Texture Uniting was developed as a practical optimization for volumetric rendering and simulation, particularly in real-time applications where GPU memory bandwidth is a limiting factor [S1, unofficial]. The technique is documented in various open-source projects, including volumetric smoke simulations [S1, unofficial], volume visualization libraries like Vispy [S2, unofficial], and procedural noise generation for volumetric clouds [S3]. The approach leverages the hardware support for multi-channel 3D textures to consolidate data access, a pattern that has become standard in modern GPU programming for volumetric data [S2, unofficial]. The specific implementation details, such as using normalized coordinates with linear filtering, were refined to handle resolution mismatches and ensure smooth sampling [S1, unofficial].
+
+## Sources
+[S1] furkanunsal42/VolumetricSmoke, https://github.com/furkanunsal42/VolumetricSmoke, fetched 2026-10-26 (unofficial)
+[S2] Showing multiple volumes in a single volume rendering, https://github.com/vispy/vispy/issues/1156, fetched 2026-10-26 (unofficial)
+[S3] Noise Textures, https://github.com/TylerDodds/VolumetricCloudsTutorial/blob/master/Assets/VolumetricCloudsTutorial/CloudDensity/NoiseTextures/NoiseTextures.md, fetched 2026-10-29
+[S4] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)

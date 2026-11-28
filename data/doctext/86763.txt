@@ -1,0 +1,1403 @@
+# rtnf
+
+Single-View Refractive Index Tomography using Neural Fields. 
+
+## Installation
+
+This code was built and tested on Ubuntu 22.04 and NVIDIA RTX A6000 GPU. 
+
+There are quite a few packages used in this project. Notably [jax](https://github.com/google/jax) requires a bit of care for installation. Otherwise, packages (output from pip freeze) are included in requirements.txt. After installing jax, you should be able to install these by running 
+
+    pip install -r requirements.txt
+
+However, package management with python can be finicky so you may have to fiddle around with the installation if you run into errors. 
+
+To run neural field recovery, you will have to download a series of simulated measurement files for each experiment. These include data such as camera settings, the true refractive field, simulated refracted image measurements, etc. These can be downloaded at [this link](http://users.cms.caltech.edu/~byzhao/exp.tar.gz) (~600MB). After downloading, move the archive into the `exp` directory: 
+
+    mkdir exp
+    mv /path/to/exp.tar.gz exp/exp.tar.gz
+    tar -xvzf exp/exp.tar.gz 
+
+## Running the code
+
+Included in this repository are a couple of tutorial notebooks for generating true refractive and intensity fields, as well as rendering refracted images, which can be found in the `tutorials` directory. 
+
+There are also three scripts included for neural field recovery, as well as the corresponding simulated measurements from our [paper](https://arxiv.org/abs/2309.04437). They can be run as follows: 
+
+    # Gas flow recovery (Fig. 4): 
+    python train_nf_gas.py -b gasflow -e test
+    # Recovery of Smooth Refractive Fields (Fig. 5): 
+    python train_nf.py -b matern_s2 -e test
+    python train_nf.py -b matern_s8 -e test
+    python train_nf.py -b matern_s9 -e test
+    # Sensitivity to Light Source Density (Fig. 6): 
+    python train_nf.py -b src_density_50 -e test
+    python train_nf.py -b src_density_100 -e test
+    python train_nf.py -b src_density_250 -e test
+    # Simulated Dark Matter Halo Recovery (Fig. 1): 
+    python train_nf_dm.py -b dark_matter -e test 
+
+These scripts include optional checkpointing functions and training visualization plots using tensorboard.
+
+### train_nf.py
+```
+import flax
+from flax import linen as nn
+from flax.training import train_state
+from flax.training.checkpoints import save_checkpoint
+
+import jax
+import jax.numpy as jnp
+
+import optax
+
+import os
+import time
+from datetime import datetime
+import pickle
+from tqdm import tqdm
+
+from rtnf.network import MLP_act
+from rtnf.truefield import interp_grid
+from rtnf.render import renderfn
+from rtnf.helpers import load_from_dir_np, shard_things, init_savedir
+from rtnf.optimization import train_pstep, lossfn, test_pstep_and_plot, get_X_bd
+from rtnf.plots import make_slice_plots
+
+import argparse
+
+from tensorboardX import SummaryWriter
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-b', type=str, default='debug', help='Base Directory')
+parser.add_argument('-e', type=str, default='debug', help='Experiment Directory')
+parser.add_argument('-d', type=str, default='0', help='GPU to use')
+args = parser.parse_args()
+
+base_dir, save_dir, exp_run = init_savedir(args.b, args.e)
+write_dir = './runs/' + exp_run + '.{}'.format(datetime.now().strftime('%Y-%m-%d.%H:%M:%S'))
+os.environ['CUDA_VISIBLE_DEVICES'] = args.d
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+
+# seed for MLP initialization
+seed = 0
+# Training parameters
+num_iters = 50000
+test_freq = 100
+save_freq = 100
+
+# Tensorboard writer
+writer = SummaryWriter(write_dir)
+
+# Load data from true generated field
+X_test, rays, s_vals, lum_field, ray_lum_target, eta_true = load_from_dir_np(save_dir)
+
+# Boundary points for regularization
+X_reg = get_X_bd(16)
+
+ray_lum_target_plot = ray_lum_target.sum(1) # This is for plots
+rand_key = jax.random.PRNGKey(seed)
+
+# Interpolate emission volume for emission predictor function
+predict_lum = interp_grid(lum_field, cval=0.)
+# Store emission grid as state in rendering function
+render_eta = jax.tree_util.Partial(renderfn, predict_lum=predict_lum, s_vals=s_vals)
+
+# Instantiate MLP
+eta_MLP = MLP_act(net_depth=4,
+                  net_width=256,
+                  activation=nn.elu,
+                  out_channel=1,
+                  do_skip=False,
+                  ior_den=400,
+                  deg_point=4)
+
+# Initialize parameters
+mlp_params_eta = eta_MLP.init(rand_key, jnp.ones([3]))['params']
+
+# Create optimizer
+lr_init = 1e-4
+lr_final = 5e-6
+tx = optax.adam(lambda x : jnp.exp(jnp.log(lr_init) * (1 - (x/num_iters)) + jnp.log(lr_final) * (x/num_iters)))
+opt_state = train_state.TrainState.create(apply_fn=eta_MLP.apply, params=mlp_params_eta, tx=tx)
+
+lossfn = jax.tree_util.Partial(lossfn, lam=1., bd_val=1.)
+
+# Parallelization
+opt_state = flax.jax_utils.replicate(opt_state)
+rand_key = jax.random.split(rand_key, jax.local_device_count())
+rays_shard, ray_lum_target_shard, X_reg_shard, X_test_shard = shard_things(rays, ray_lum_target, X_reg, X_test)
+
+# Plot ground truth eta field
+make_slice_plots(eta_true, writer, 0, 'True Eta')
+
+diff_vmax = None
+start = time.time()
+
+for i in tqdm(range(1, num_iters+1)):
+  if i==1 or i % test_freq == 0:
+    # Test step with recording & plots
+    start, diff_vmax, eta = test_pstep_and_plot(i, start, writer, diff_vmax, ray_lum_target_plot, rays_shard, ray_lum_target_shard, X_reg_shard, X_test_shard, opt_state, render_eta, eta_true, rand_key, lossfn)
+
+  if (i % save_freq == 0) or (i == 1): 
+    # save_checkpoint(save_dir + 'model_out/', opt_state, i, prefix='model_MLP', keep=1, overwrite=True)
+    pickle.dump(eta, open(save_dir+'eta_out/eta_out_%04d.p'%(i), 'wb'))
+
+  # Training
+  loss_train, loss2, opt_state, ray_trace, rendering, rand_key, grad = train_pstep(rays_shard, ray_lum_target_shard, X_reg_shard, opt_state, render_eta, lossfn, rand_key)
+```
+
+### train_nf_dm.py
+```
+from flax import linen as nn
+from flax.training import train_state
+from flax.training.checkpoints import save_checkpoint
+
+import jax
+import jax.numpy as jnp
+
+import optax
+
+from tqdm import tqdm
+
+import os
+from datetime import datetime
+import pickle
+import pdb
+
+import matplotlib.pyplot as plt
+
+from rtnf.network import *
+from rtnf.helpers import init_savedir
+from rtnf.dark_matter import load_from_dir_dm, MLP_act_dm
+from rtnf.optimization import get_X_bd, lossfn
+from rtnf.dark_matter import fwd_model_dm
+from rtnf.optimization import train_step, pred_eta_step
+from rtnf.plots_dm import make_slice_plots
+
+import pdb
+import argparse
+
+from tensorboardX import SummaryWriter
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-b', type=str, default='dark_matter')
+parser.add_argument('-e', type=str, default='debug')
+parser.add_argument('-d', type=str, default='0')
+                  
+args = parser.parse_args()
+
+from jax.config import config
+config.update("jax_enable_x64", True)
+
+base_dir, save_dir, exp_run = init_savedir(args.b, args.e)
+
+os.environ['CUDA_VISIBLE_DEVICES'] = args.d
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+
+# seed for MLP initialization
+seed = 0
+rand_key = jax.random.PRNGKey(seed)
+
+# Iteration schedule
+num_iters = 50000
+loss_freq = 100
+plot_freq = 100
+save_freq = 100
+
+# Hyperparameters
+batch_size = 4096
+lam = 1.
+bd_val = 1.
+
+write_dir = './runs/' + exp_run + '.{}'.format(datetime.now().strftime('%Y-%m-%d.%H:%M:%S'))
+writer = SummaryWriter(write_dir)
+
+X, eta_true, rays, s_vals, plane_locs, imgs_plane, target_imgs = load_from_dir_dm(save_dir)
+X_reg = get_X_bd(16)
+target_img = target_imgs.sum(0)
+
+eta_MLP = MLP_act_dm(net_depth=4,
+              net_width=256,
+              activation=nn.elu,
+              out_channel=1,
+              do_skip=False, 
+              ior_den = 4e5, 
+              deg_point = 4)
+
+lr_init = 1e-4
+lr_final = 5e-6
+tx = optax.adam(lambda x : jnp.exp(jnp.log(lr_init) * (1 - (x/num_iters)) + jnp.log(lr_final) * (x/num_iters)))
+
+# Initialize parameters
+mlp_params_eta = eta_MLP.init(rand_key, jnp.ones([3]))['params']
+opt_state = train_state.TrainState.create(apply_fn=eta_MLP.apply, params=mlp_params_eta, tx=tx)
+
+lossfn = jax.tree_util.Partial(lossfn, lam=lam, bd_val=bd_val)
+
+render_eta = jax.tree_util.Partial(fwd_model_dm, s_vals=s_vals, imgs_plane=imgs_plane, plane_locs=plane_locs)
+
+make_slice_plots(eta_true, writer, 0, 'True Eta Slice Plot')
+
+for i in (pbar := tqdm(range(1, num_iters+1))):
+  if i==1 or i % loss_freq == 0:
+    eta = pred_eta_step(X, opt_state).reshape(eta_true.shape)
+    eta_diff_norm = jnp.linalg.norm(eta - eta_true)
+    writer.add_scalar('Eta Diff', eta_diff_norm, i)
+
+  if (i==1 or i % plot_freq == 0):
+    make_slice_plots(eta, writer, i, 'Model Eta Slice Plot')
+    
+  # Batchify things
+  batch_ind = jax.random.choice(rand_key, rays.shape[0], shape=(batch_size,), replace=False)
+  rays_batch = jnp.take(rays, batch_ind, 0)
+  target_img_batch = jnp.take(target_img.flatten(), batch_ind, 0)
+  # Training Step
+  loss, _, opt_state, ray_trace, ray_lum, rand_key, grad = train_step(rays_batch, target_img_batch, X_reg, opt_state, render_eta, lossfn, rand_key)
+  log_loss = jnp.log10(loss)
+  writer.add_scalar('Log Loss', log_loss, i)
+
+  if i % save_freq == 0: 
+      save_checkpoint(save_dir, opt_state, i, prefix='model_MLP', keep=1, overwrite=True)
+      pickle.dump(eta, open(save_dir+'eta_out/eta_out_%04d.p'%(i//save_freq), 'wb'))
+```
+
+### train_nf_gas.py
+```
+import flax
+from flax import linen as nn
+from flax.training import train_state
+from flax.training.checkpoints import save_checkpoint
+
+import jax
+import jax.numpy as jnp
+
+import optax
+
+import os
+import time
+from datetime import datetime
+import pickle
+from tqdm import tqdm
+
+from rtnf.network import *
+from rtnf.truefield import interp_grid
+from rtnf.render import renderfn
+from rtnf.helpers import load_from_dir_np, shard_things, init_savedir
+from rtnf.optimization import train_pstep, lossfn, test_pstep_and_plot
+from rtnf.plots import make_slice_plots
+
+import argparse
+
+from tensorboardX import SummaryWriter
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-b', type=str, default='debug')
+parser.add_argument('-e', type=str, default='debug')
+parser.add_argument('-d', type=str, default='0')
+args = parser.parse_args()
+
+base_dir, save_dir, exp_run = init_savedir(args.b, args.e)
+write_dir = './runs/' + exp_run + '.{}'.format(datetime.now().strftime('%Y-%m-%d.%H:%M:%S'))
+os.environ['CUDA_VISIBLE_DEVICES'] = args.d
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+
+# seed for MLP initialization
+seed = 0
+# Training parameters
+num_iters = 50000
+test_freq = 100
+save_freq = 100
+
+# Tensorboard writer
+writer = SummaryWriter(write_dir, write_to_disk=True)
+
+# Load data from true generated field
+X_test, rays, s_vals, lum_field, ray_lum_target, eta_true = load_from_dir_np(save_dir)
+# Interpolate emission on a grid
+predict_lum = interp_grid(lum_field, cval=0.)
+
+# from rtnf_old.helpers import load_from_dir
+# from rtnf_old.truefield import fit_ls_to_grid
+
+# X_test, rays, s_vals, ls, ray_lum_target, eta_true = load_from_dir(save_dir, cache=False)
+# predict_lum = fit_ls_to_grid(ls, 64)
+
+# Boundary points for regularization
+from rtnf.optimization import get_X_bd
+X_reg = get_X_bd(16)
+
+ray_lum_target_plot = ray_lum_target.sum(1) 
+rand_key = jax.random.PRNGKey(seed)
+
+
+# Store emission grid as state in rendering function
+render_eta = jax.tree_util.Partial(renderfn, predict_lum=predict_lum, s_vals=s_vals)
+
+# Instantiate MLP
+eta_MLP = MLP_gas(net_depth=4,
+                  net_width=256,
+                  activation=nn.elu,
+                  out_channel=1,
+                  do_skip=False,
+                  deg_point=6)
+
+# Initialize parameters
+mlp_params_eta = eta_MLP.init(rand_key, jnp.ones([3]))['params']
+
+# Create optimizer
+lr_init = 1e-4
+lr_final = 5e-6
+tx = optax.adam(lambda x : jnp.exp(jnp.log(lr_init) * (1 - (x/num_iters)) + jnp.log(lr_final) * (x/num_iters)))
+opt_state = train_state.TrainState.create(apply_fn=eta_MLP.apply, params=mlp_params_eta, tx=tx)
+
+# Set loss function & weights
+from rtnf.optimization import lossfn
+lam = 0.1
+bd_val = 1.0003
+lossfn = jax.tree_util.Partial(lossfn, lam=lam, bd_val=bd_val)
+
+# Parallelization
+opt_state = flax.jax_utils.replicate(opt_state)
+rand_key = jax.random.split(rand_key, jax.local_device_count())
+rays_shard, ray_lum_target_shard, X_reg_shard, X_test_shard = shard_things(rays, ray_lum_target, X_reg, X_test)
+
+# Plot ground truth eta field
+make_slice_plots(eta_true, writer, 0, 'True Eta')
+
+diff_vmax = None
+start = time.time()
+
+for i in tqdm(range(1, num_iters+1)):
+  if i==1 or i % test_freq == 0:
+    # Test step with recording & plots
+    start, diff_vmax, eta = test_pstep_and_plot(i, start, writer, diff_vmax, ray_lum_target_plot, rays_shard, ray_lum_target_shard, X_reg_shard, X_test_shard, opt_state, render_eta, eta_true, rand_key, lossfn, plot_img=True)
+
+  if (i % save_freq == 0) or (i == 1): 
+    # save_checkpoint(save_dir + 'model_out/', opt_state, i, prefix='model_MLP', keep=1, overwrite=True)
+    pickle.dump(eta, open(save_dir+'eta_out/eta_out_%04d.p'%(i), 'wb'))
+
+  # Training
+  loss_train, loss2, opt_state, ray_trace, rendering, rand_key, grad = train_pstep(rays_shard, ray_lum_target_shard, X_reg_shard, opt_state, render_eta, lossfn, rand_key)
+```
+
+### rtnf/dark_matter.py
+```
+import jax
+from jax import numpy as jnp
+from flax import linen as nn
+
+from rtnf.render import render_path_dm
+from rtnf.network import Grid2, posenc
+from rtnf.helpers import makedir
+
+from typing import Any, Callable
+import functools
+
+import os
+import shutil
+
+# Network
+class MLP_act_dm(nn.Module):
+    net_depth: int = 4
+    net_width: int = 128
+    activation: Callable[..., Any] = nn.relu
+    out_channel: int = 1
+    do_skip: bool = True
+    ior_den: int = 400
+    deg_point: int = 4
+  
+    @nn.compact
+    def __call__(self, x):
+        #MLP with ior activation function builtin
+        #Also with posenc builtin
+        """A simple Multi-Layer Preceptron (MLP) network
+
+        Parameters
+        ----------
+        x: jnp.ndarray(float32), 
+            [batch_size * n_samples, feature], points.
+        net_depth: int, 
+            the depth of the first part of MLP.
+        net_width: int, 
+            the width of the first part of MLP.
+        activation: function, 
+            the activation function used in the MLP.
+        out_channel: 
+            int, the number of alpha_channels.
+        do_skip: boolean, 
+            whether or not to use a skip connection
+
+        Returns
+        -------
+        out: jnp.ndarray(float32), 
+            [batch_size * n_samples, out_channel].
+        """
+        dense_layer = functools.partial(
+            nn.Dense, kernel_init=jax.nn.initializers.he_uniform())
+
+        if self.do_skip:
+            skip_layer = self.net_depth // 2
+
+        x = posenc(x, self.deg_point)
+        inputs = x
+        for i in range(self.net_depth):
+            x = dense_layer(self.net_width)(x)
+            x = self.activation(x)
+            if self.do_skip:
+                if i % skip_layer == 0 and i > 0:
+                    x = jnp.concatenate([x, inputs], axis=-1)
+        out = dense_layer(self.out_channel)(x)
+        out = self.ior_act(out)
+
+        return out
+    
+    def ior_act(self, net_output): 
+        eta = nn.softplus(jnp.squeeze(net_output)-2)/self.ior_den + 1.
+        return eta
+
+# Image plane stuff
+def render_img(traced, img):
+    img_grid = Grid2(grid_vals = img, cval=0.)
+    return img_grid.interp4(traced)
+render_imgs = jax.vmap(render_img, in_axes=(1,0))
+
+def trace_to_plane_3d(ray_trace, zval):
+    return jnp.stack([jnp.interp(zval, ray_trace[2,:], ray_trace[0,:]), jnp.interp(zval, ray_trace[2,:], ray_trace[1,:])])
+
+ttp = jax.vmap(trace_to_plane_3d, in_axes=(None,0))
+trace_to_plane = jax.vmap(ttp, in_axes=(0, None))
+
+# Forward model
+def fwd_model_dm(rays, predict_eta, s_vals, imgs_plane, plane_locs): 
+    ray_trace2 = render_path_dm(rays, predict_eta, s_vals).reshape(-1, 6, 25)
+    traced2 = trace_to_plane(ray_trace2, plane_locs)
+    renders2 = render_imgs(traced2, imgs_plane)
+    # print('renders shape: ', renders2.shape)
+    return ray_trace2, renders2.sum(0)
+
+# Helpers for file management
+
+def load_from_dir_dm(save_dir): 
+    npzfile = jnp.load(save_dir + 'fwd_out.npz')
+    X = npzfile['true_X']
+    eta_true = npzfile['true_eta']
+    rays = npzfile['rays']
+    s_vals = npzfile['s_vals']
+    plane_locs = npzfile['plane_locs']
+    imgs_plane = npzfile['imgs_plane']
+    target_imgs = npzfile['target_imgs']
+    return X, eta_true, rays, s_vals, plane_locs, imgs_plane, target_imgs
+```
+
+### rtnf/helpers.py
+```
+import jax
+import os
+import shutil
+
+from jax import numpy as jnp
+
+def shard(xs):
+    """Split data into shards for multiple devices along the first dimension."""
+    return jax.tree_util.tree_map(lambda x: x.reshape((jax.local_device_count(), -1) + x.shape[1:]), xs)
+
+def shard_things(*args): 
+    return (shard(arg) for arg in args)
+
+def makedir(path): 
+	if not os.path.exists(path):
+		os.makedirs(path)                
+
+def init_savedir(b, e): 
+    base_dir = './exp/' + b + '/'
+    assert os.path.exists(base_dir), "base dir doesn't exist!"
+    exp_run = b + '_' + e
+    save_dir = './exp/' + exp_run + '/'
+    if not os.path.exists(save_dir): 
+        print('New Experiment run, copying base dir to new save dir')
+        shutil.copytree(base_dir, save_dir)
+    makedir(save_dir + 'eta_out/')
+    return base_dir, save_dir, exp_run
+
+def save_to_dir_np(save_dir, X_test, rays, s_vals, lum_field, ray_lum_target, eta_true):
+    jnp.save(save_dir + 'X_test.npy', X_test, allow_pickle=False)
+    jnp.save(save_dir + 'rays.npy', rays, allow_pickle=False)
+    jnp.save(save_dir + 's_vals.npy', s_vals, allow_pickle=False)
+    jnp.save(save_dir + 'lum_field.npy', lum_field, allow_pickle=False)
+    jnp.save(save_dir + 'ray_lum_target.npy', ray_lum_target, allow_pickle=False)
+    jnp.save(save_dir + 'eta_true.npy', eta_true, allow_pickle=False)
+
+def load_from_dir_np(base_dir):
+    X_test = jnp.load(base_dir + 'X_test.npy', allow_pickle=False)
+    rays = jnp.load(base_dir + 'rays.npy', allow_pickle=False)
+    s_vals = jnp.load(base_dir + 's_vals.npy', allow_pickle=False)
+    lum_field = jnp.load(base_dir + 'lum_field.npy', allow_pickle=False)
+    ray_lum_target = jnp.load(base_dir + 'ray_lum_target.npy', allow_pickle=False)
+    eta_true = jnp.load(base_dir + 'eta_true.npy', allow_pickle=False)
+
+    return X_test, rays, s_vals, lum_field, ray_lum_target, eta_true
+```
+
+### rtnf/network.py
+```
+import jax
+from flax import linen as nn
+from jax import numpy as jnp
+
+import numpy as np
+
+from typing import Any, Callable
+import functools
+
+safe_sin = lambda x: jnp.sin(x % (100 * jnp.pi))
+
+class Light_SourcesCov():
+    """
+    Class for evaluating scaled multivariate Gaussian pdf (used for 
+    simulating elliptical light sources). The PDF for multiple points 
+    is evaluated efficiently in a vectorized way. Much of the code was 
+    taken from StackOverflow, although I can't find the original post anymore. 
+
+    Parameters
+    ----------
+    source_locs: jnp.ndarray, 
+        the locations of the light sources
+    covs: jnp.ndarray, 
+        covariance matrix for each light source
+
+    """
+    def __init__(self, source_locs, covs): 
+        self.source_locs = source_locs
+        self.covs = covs
+        # Calculate these ahead of time to save time on forward
+        vals, vecs = jnp.linalg.eigh(self.covs)
+        valsinvs = 1./vals
+        self.Us = vecs * jnp.sqrt(valsinvs)[:, None]
+        self.logdets = jnp.sum(jnp.log(vals), axis=1)
+
+    def multiple_logpdfs_vec_input(self, xs):
+        devs = xs[:, None, :] - self.source_locs[None, :, :]
+        devUs = jnp.einsum('jnk,nki->jni', devs, self.Us)
+        mahas = jnp.sum(jnp.square(devUs), axis=2)
+        dim    = xs.shape[1]
+        log2pi = jnp.log(2 * jnp.pi)
+        out = -0.5 * (dim * log2pi + mahas + self.logdets[None, :])
+        return out.T
+
+    def predict_lum(self, ray_pos, damp=200.): 
+        """
+        Evaluates the emission function (sum of all the gaussian pdfs) at locations given by ray_pos. 
+
+        Parameters
+        ----------
+        ray_pos: jnp.ndarray, 
+            array of positions at which to evaluate the emission function
+        damp: float, 
+            optional scaling factor for the emission function
+        """
+        logpdf = self.multiple_logpdfs_vec_input(ray_pos)
+        return jnp.exp(logpdf) / damp
+    
+def posenc(x, deg):
+    """
+    Concatenate `x` with a positional encoding of `x` with degree `deg`.
+    Instead of computing [sin(x), cos(x)], we use the trig identity
+    cos(x) = sin(x + pi/2) and do one vectorized call to sin([x, x+pi/2]).
+
+    Parameters
+    ----------
+    x: jnp.ndarray, 
+        variables to be encoded. Note that x should be in [-pi, pi].
+    deg: int, 
+        the degree of the encoding.
+
+    Returns
+    -------
+    encoded: jnp.ndarray, 
+        encoded variables.
+    """
+    if deg == 0:
+        return x
+    scales = jnp.array([2**i for i in range(deg)])
+    xb = jnp.reshape((x[..., None, :] * scales[:, None]),
+                     list(x.shape[:-1]) + [-1])
+    four_feat = safe_sin(jnp.concatenate([xb, xb + 0.5 * jnp.pi], axis=-1))
+    return jnp.concatenate([x] + [four_feat], axis=-1)
+    
+class MLP_act(nn.Module):
+    net_depth: int = 4
+    net_width: int = 128
+    activation: Callable[..., Any] = nn.relu
+    out_channel: int = 1
+    do_skip: bool = True
+    ior_den: int = 400
+    deg_point: int = 4
+  
+    @nn.compact
+    def __call__(self, x):
+        """
+        A simple Multi-Layer Perceptron (MLP) network. Also includes
+        positional encoding (posenc) as well as a final activation function
+        (ior_act) to transform the output into a refractive index.
+
+        Parameters
+        ----------
+        x: jnp.ndarray(float32), 
+            [batch_size * n_samples, feature], points.
+        net_depth: int, 
+            the depth of the first part of MLP.
+        net_width: int, 
+            the width of the first part of MLP.
+        activation: function, 
+            the activation function used in the MLP.
+        out_channel: 
+            int, the number of alpha_channels.
+        do_skip: boolean, 
+            whether or not to use a skip connection
+
+        Returns
+        -------
+        out: jnp.ndarray(float32), 
+            [batch_size * n_samples, out_channel].
+        """
+        dense_layer = functools.partial(
+            nn.Dense, kernel_init=jax.nn.initializers.he_uniform())
+
+        if self.do_skip:
+            skip_layer = self.net_depth // 2
+
+        x = posenc(x, self.deg_point)
+        inputs = x
+        for i in range(self.net_depth):
+            x = dense_layer(self.net_width)(x)
+            x = self.activation(x)
+            if self.do_skip:
+                if i % skip_layer == 0 and i > 0:
+                    x = jnp.concatenate([x, inputs], axis=-1)
+        out = dense_layer(self.out_channel)(x)
+        out = self.ior_act(out)
+
+        return out
+    
+    def ior_act(self, net_output): 
+        eta = nn.sigmoid(jnp.squeeze(net_output)) / (0.5 * self.ior_den) + 1.
+        return eta
+    
+class MLP_gas(nn.Module):
+    net_depth: int = 4
+    net_width: int = 128
+    activation: Callable[..., Any] = nn.relu
+    out_channel: int = 1
+    do_skip: bool = True
+    deg_point: int = 4
+  
+    @nn.compact
+    def __call__(self, x):
+        """
+        A simple Multi-Layer Perceptron (MLP) network. Also includes
+        positional encoding (posenc) as well as a final activation function
+        (ior_act) to transform the output into a refractive index. The 
+        final activation function differs from MLP_act to match the 
+        parameters of the gas flow simulation.
+
+        Parameters
+        ----------
+        x: jnp.ndarray(float32), 
+            [batch_size * n_samples, feature], points.
+        net_depth: int, 
+            the depth of the first part of MLP.
+        net_width: int, 
+            the width of the first part of MLP.
+        activation: function, 
+            the activation function used in the MLP.
+        out_channel: 
+            int, the number of alpha_channels.
+        do_skip: boolean, 
+            whether or not to use a skip connection
+
+        Returns
+        -------
+        out: jnp.ndarray(float32), 
+            [batch_size * n_samples, out_channel].
+        """
+        dense_layer = functools.partial(
+            nn.Dense, kernel_init=jax.nn.initializers.he_uniform())
+
+        if self.do_skip:
+            skip_layer = self.net_depth // 2
+
+        x = posenc(x, self.deg_point)
+        inputs = x
+        for i in range(self.net_depth):
+            x = dense_layer(self.net_width)(x)
+            x = self.activation(x)
+            if self.do_skip:
+                if i % skip_layer == 0 and i > 0:
+                    x = jnp.concatenate([x, inputs], axis=-1)
+        out = dense_layer(self.out_channel)(x)
+        out = self.ior_act(out)
+
+        return out
+    
+    def ior_act(self, net_output): 
+        eta = 1.0003 - (nn.sigmoid(jnp.squeeze(net_output)) * 3e-4)
+        return eta
+
+class Grid2(): 
+    """
+    A linearly interpolated grid. Used for voxel interpolation (interp5), as well as 
+    image plane interpolation (interp4) for dark matter experiments. 
+
+    Parameters
+    ----------
+    grid_vals: jnp.ndarray
+        The voxel points to interpolate between. 
+    cval: 
+        The constant value to fill past the edges of the voxel grid. 
+    """
+    def __init__(self, grid_vals, cval=0.): 
+        self.grid_vals = grid_vals
+        self.grid_res = grid_vals.shape[0]
+        self.cval = cval
+    def interp4(self, x, order=1): 
+        # image-plane interpolation for [0,1] coordinates
+        coords = (x * self.grid_res) - 0.5
+        coords = jnp.flip(coords, axis=-1)
+        out = jax.scipy.ndimage.map_coordinates(self.grid_vals, coords.T, order=order, cval=self.cval)
+        return out
+    def interp5(self, x, order=1): 
+        # Fixing boundary conditions for true eta field
+        coords = (x * (self.grid_res+1)) - 1
+        #want to swap x and y
+        perm = jnp.array([[0., 1., 0.], [1., 0., 0.], [0., 0., 1.]])
+        coords = coords @ perm
+        out = jax.scipy.ndimage.map_coordinates(self.grid_vals, coords.T, order=order, cval=self.cval)
+        return out
+
+def get_X(res): 
+	low = 0.5 / res
+	high = 1 - (0.5 / res)
+    
+	linsp = np.linspace(low, high, res)
+	x, y, z = np.meshgrid(linsp, linsp, linsp, indexing='xy')
+	pts = np.stack([x, y, z], axis=-1)
+	X = pts.reshape((-1, 3))
+	return X
+```
+
+### rtnf/optimization.py
+```
+import jax
+import jax.numpy as jnp
+import jax.random as random
+
+import numpy as np
+
+import time
+from functools import partial
+
+from rtnf.plots import plots_regular, plots_eta
+
+def get_X_bd(res): 
+  # Get boundary points for regularization
+  # Evenly spaced points on the faces of a cube
+  lsp = jnp.linspace(0, 1, res)
+  x, y, z = jnp.meshgrid(lsp, lsp, lsp, indexing='xy')
+  pts = jnp.stack([x, y, z], axis=-1).reshape(-1, 3)
+  on_bd0 = jnp.any(pts==0, axis=1)
+  on_bd1 = jnp.any(pts==1, axis=1)
+  X_reg = pts[on_bd0 | on_bd1]
+  return X_reg
+
+def lossfn(apply_fn, params, render_eta, rays, ray_lum_target, X, lam, bd_val):
+  predict_eta = lambda x: apply_fn({'params': params}, x)
+  ray_trace, ray_lum = render_eta(rays, predict_eta)
+
+  loss = jnp.mean(jnp.square(ray_lum - ray_lum_target))
+  eta = predict_eta(X)
+  reg_term = jnp.sum(jnp.square(eta - bd_val)) * lam
+  loss_reg = loss + reg_term
+
+  return loss_reg, [ray_trace, ray_lum, loss]
+
+@partial(jax.jit, static_argnums=(4,5))
+def train_step(rays, ray_lum_target, x, opt_state, render_eta, lossfn, key):
+  key, new_key = random.split(key)
+  apply_fn = opt_state.apply_fn
+  params = opt_state.params
+  vals, grad = jax.value_and_grad(lossfn, argnums=(1), has_aux=True)(apply_fn, params, render_eta, rays, ray_lum_target, x)
+  #grad = jax.lax.pmean(grad, axis_name='batch')
+  loss, [ray_trace, rendering, loss2] = vals
+  opt_state = opt_state.apply_gradients(grads=grad)
+
+  return loss, loss2, opt_state, ray_trace, rendering, new_key, grad
+
+train_pstep = jax.pmap(train_step, axis_name='batch', in_axes=(0,0,0,0,None,None,0), static_broadcasted_argnums=(4,5))
+
+@partial(jax.jit, static_argnums=(4,5))
+def test_step(rays, ray_lum_target, x, opt_state, render_eta, lossfn, key):
+  key, new_key = random.split(key)
+  apply_fn = opt_state.apply_fn
+  params = opt_state.params
+  loss, [ray_trace, ray_lum, loss2] = lossfn(apply_fn, params, render_eta, rays, ray_lum_target, x)
+  # do not update opt_state
+  return loss, loss2, opt_state, ray_trace, ray_lum, new_key
+
+test_pstep = jax.pmap(test_step, axis_name='batch', in_axes=(0,0,0,0,None,None,0), static_broadcasted_argnums=(4,5))
+
+@jax.jit
+def pred_eta_step(x, opt_state): 
+  predict_eta = lambda x: opt_state.apply_fn({'params': opt_state.params}, x)
+  eta_out = predict_eta(x)
+  return eta_out
+
+pred_eta_pstep = jax.pmap(pred_eta_step, axis_name='batch', in_axes=0)
+
+def test_pstep_and_plot(i, start, writer, diff_vmax, ray_lum_target_plot, rays_shard, ray_lum_target_shard, X_reg_shard, X_test_shard, opt_state, render_eta, eta_true, rand_key, lossfn, plot_img=True): 
+  res = 64
+  
+  loss, loss2, opt_state, ray_trace, ray_lum, rand_key = test_pstep(rays_shard, ray_lum_target_shard, X_reg_shard, opt_state, render_eta, lossfn, rand_key)
+  eta = pred_eta_pstep(X_test_shard, opt_state)
+
+  ray_lum_plot = ray_lum.flatten()
+
+  eta_max = eta.max()
+  loss = np.mean(loss)
+  loss2 = np.mean(loss2)
+  log_loss = np.log(loss)
+  
+  eta = eta.reshape(eta_true.shape)
+  eta_diff_norm = jnp.linalg.norm(eta - eta_true)
+
+  if plot_img: 
+    plots_regular(res, ray_lum_plot, ray_lum_target_plot, eta, eta_true, writer, i)
+  else:
+    plots_eta(res, ray_lum_plot, ray_lum_target_plot, eta, eta_true, writer, i)
+  start = time.time()
+
+  writer.add_scalar('Log Loss', log_loss, i)
+  writer.add_scalar('Eta Diff', eta_diff_norm, i)
+  writer.add_scalar('MSE Loss', loss2, i)
+  writer.add_scalar('Reg Term', loss - loss2, i)
+
+  return start, diff_vmax, eta
+```
+
+### rtnf/plots.py
+```
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def make_slice_plots(eta_true, writer, i, title): 
+	res = eta_true.shape[0]
+	eta_slice = eta_true.reshape(res, res, 8, -1).mean(3)
+	fig, axes = plt.subplots(2, 4, figsize=(28., 10.))
+	for j in range(8): 
+		k = j % 4
+		l = j // 4
+		ax = axes[l, k]
+		ax.set_xlim([0, res-1])
+		ax.set_ylim([0, res-1])
+		ax.set_title(title+' Field Slice %d'%j)
+		heatmap_im = ax.imshow(eta_slice[:, :, j].T, vmin=1., vmax=eta_true.max())
+		plt.colorbar(heatmap_im, ax=ax)
+	if writer is not None:
+		writer.add_figure(title+' Slice Plot', fig, i)
+	else: 
+		plt.show()
+	plt.close()
+
+def make_slice_plots_lum(eta_true, writer, i, title, vmin=True): 
+	eta_slice = eta_true.reshape(64, 64, -1, 8).mean(3)
+	fig, axes = plt.subplots(2, 4, figsize=(28., 10.))
+	for j in range(8): 
+		k = j % 4
+		l = j // 4
+		ax = axes[l, k]
+		ax.set_xlim([0, 64])
+		ax.set_ylim([0, 64])
+		ax.set_title(title+' Field Slice %d'%j)
+		if vmin: 
+			heatmap_im = ax.imshow(eta_slice[:, :, j].T, vmin=1., vmax=eta_true.max())
+		else: 
+			heatmap_im = ax.imshow(eta_slice[:, :, j].T, vmin=eta_true.min(), vmax=eta_true.max())
+		plt.colorbar(heatmap_im, ax=ax)
+	# plt.savefig(save_dir + 'true_eta_slice.png')
+	if writer is not None:
+		writer.add_figure(title+' Slice Plot', fig, i)
+	else: 
+		plt.show()
+	plt.close()
+
+def heatmap_2d(image, title): 
+	fig, ax = plt.subplots()
+	res = image.shape[0]
+	plt.xlim([0, res-1])
+	plt.ylim([0, res-1])
+	heatmap_im = ax.imshow(image)
+	plt.colorbar(heatmap_im, ax=ax)
+	plt.title(title)
+
+	return fig
+
+def plots_regular(res, ray_lum_plot, ray_lum_target_plot, eta, eta_true, writer, i): 
+	fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(21., 5.))
+	# plot ray image
+	ax1.set_xlim([0, res-1])
+	ax1.set_ylim([0, res-1])
+	ax1.set_title('Model Luminance Image')
+	heatmap_im = ax1.imshow(ray_lum_plot.reshape(64, 64)[::-1, :].T, vmin=0., vmax=ray_lum_target_plot.max())
+	plt.colorbar(heatmap_im, ax=ax1)
+
+	# plot ray image target
+	ax2.set_xlim([0, res-1])
+	ax2.set_ylim([0, res-1])
+	ax2.set_title('Target Luminance Image')
+	heatmap_im = ax2.imshow(ray_lum_target_plot.reshape(64, 64)[::-1, :].T, vmin=0., vmax=ray_lum_target_plot.max())
+	plt.colorbar(heatmap_im, ax=ax2)
+
+	# plot image difference
+	ax3.set_xlim([0, res-1])
+	ax3.set_ylim([0, res-1])
+	ax3.set_title('Luminance Image Diff (Model - Target)')
+	heatmap_im = ax3.imshow((ray_lum_plot - ray_lum_target_plot).reshape(64, 64)[::-1, :].T)
+	plt.colorbar(heatmap_im, ax=ax3)
+	writer.add_figure('Image Plot', fig, i)
+	plt.close()
+
+	# plot eta field slices
+	# eta field should be 16 x 16 x 16
+	res_eta = eta_true.shape[0]
+	eta_slice = eta.reshape(res_eta, res_eta, 8, -1).mean(3)
+	fig, axes = plt.subplots(2, 4, figsize=(28., 10.))
+	for j in range(8): 
+		k = j % 4
+		l = j // 4
+		ax = axes[l, k]
+		ax.set_xlim([0, res_eta-1])
+		ax.set_ylim([0, res_eta-1])
+		ax.set_title('Eta Field Slice %d'%j)
+		heatmap_im = ax.imshow(eta_slice[:, :, j].T, vmin=1., vmax=eta_true.max())
+		plt.colorbar(heatmap_im, ax=ax)
+	writer.add_figure('Eta Slice Plot', fig, i)
+	plt.close()
+
+	# plot eta field slices (colorbar not fixed)
+	fig, axes = plt.subplots(2, 4, figsize=(28., 10.))
+	for j in range(8): 
+		k = j % 4
+		l = j // 4
+		ax = axes[l, k]
+		ax.set_xlim([0, res_eta-1])
+		ax.set_ylim([0, res_eta-1])
+		ax.set_title('Eta Field Slice %d'%j)
+		heatmap_im = ax.imshow(eta_slice[:, :, j].T, vmin=eta_slice.min(), vmax=eta_slice.max())
+		plt.colorbar(heatmap_im, ax=ax)
+	writer.add_figure('Eta Slice Plot Orig Scale', fig, i)
+	plt.close()
+
+def plots_eta(res, ray_lum_plot, ray_lum_target_plot, eta, eta_true, writer, i): 
+
+	# plot eta field slices
+	res_eta = eta_true.shape[0]
+	eta_slice = eta.reshape(res_eta, res_eta, 8, -1).mean(3)
+	fig, axes = plt.subplots(2, 4, figsize=(28., 10.))
+	for j in range(8): 
+		k = j % 4
+		l = j // 4
+		ax = axes[l, k]
+		ax.set_xlim([0, res_eta-1])
+		ax.set_ylim([0, res_eta-1])
+		ax.set_title('Eta Field Slice %d'%j)
+		heatmap_im = ax.imshow(eta_slice[:, :, j].T, vmin=1., vmax=eta_true.max())
+		plt.colorbar(heatmap_im, ax=ax)
+	writer.add_figure('Eta Slice Plot', fig, i)
+	plt.close()
+
+	# plot eta field slices (colorbar not fixed)
+	fig, axes = plt.subplots(2, 4, figsize=(28., 10.))
+	for j in range(8): 
+		k = j % 4
+		l = j // 4
+		ax = axes[l, k]
+		ax.set_xlim([0, res_eta-1])
+		ax.set_ylim([0, res_eta-1])
+		ax.set_title('Eta Field Slice %d'%j)
+		heatmap_im = ax.imshow(eta_slice[:, :, j].T, vmin=eta_slice.min(), vmax=eta_slice.max())
+		plt.colorbar(heatmap_im, ax=ax)
+	writer.add_figure('Eta Slice Plot Orig Scale', fig, i)
+	plt.close()
+
+def plots_img(eta, render_img, target_img, eta_true, writer, i):
+	res = 64 
+	fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(21., 5.))
+	# plot ray image
+	ax1.set_title('Model Image')
+	sns.heatmap(render_img.reshape(64, 64).reshape(res, res)[::-1, ::-1].T, ax=ax1)
+
+	# plot ray image target
+	ax2.set_title('Target Image')
+	sns.heatmap(target_img.reshape(64, 64).reshape(res, res)[::-1, ::-1].T, ax=ax2)
+
+	# plot image difference
+	ax3.set_title('Image Diff (Model - Target)')
+	sns.heatmap((render_img - target_img).reshape(64, 64).reshape(res, res)[::-1, ::-1].T, ax=ax3)
+	writer.add_figure('Image Plot', fig, i)
+	plt.close()
+
+	# plot eta field slices
+	# eta field should be 16 x 16 x 16
+	res_eta = eta_true.shape[0]
+	eta_slice = eta.reshape(res_eta, res_eta, 8, -1).mean(3)
+	fig, axes = plt.subplots(2, 4, figsize=(28., 10.))
+	for j in range(8): 
+		k = j % 4
+		l = j // 4
+		ax = axes[l, k]
+		ax.set_xlim([0, res_eta-1])
+		ax.set_ylim([0, res_eta-1])
+		ax.set_title('Eta Field Slice %d'%j)
+		heatmap_im = ax.imshow(eta_slice[:, :, j].T, vmin=1., vmax=eta_true.max())
+		plt.colorbar(heatmap_im, ax=ax)
+	writer.add_figure('Eta Slice Plot', fig, i)
+	plt.close()
+
+	# plot eta field slices (colorbar not fixed)
+	fig, axes = plt.subplots(2, 4, figsize=(28., 10.))
+	for j in range(8): 
+		k = j % 4
+		l = j // 4
+		ax = axes[l, k]
+		ax.set_xlim([0, res_eta-1])
+		ax.set_ylim([0, res_eta-1])
+		ax.set_title('Eta Field Slice %d'%j)
+		heatmap_im = ax.imshow(eta_slice[:, :, j].T, vmin=eta_slice.min(), vmax=eta_slice.max())
+		plt.colorbar(heatmap_im, ax=ax)
+	writer.add_figure('Eta Slice Plot Orig Scale', fig, i)
+	plt.close()
+```
+
+### rtnf/plots_dm.py
+```
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def make_slice_plots(eta_true, writer, i, title): 
+    res_xy = eta_true.shape[0]
+    eta_slice = eta_true.reshape(res_xy, res_xy, 16, -1).mean(3)
+    fig, axes = plt.subplots(4, 4, figsize=(18., 15.))
+    for j in range(16): 
+        k = j % 4
+        l = j // 4
+        ax = axes[l, k]
+        ax.set_xlim([res_xy-1, 0])
+        ax.set_ylim([0, res_xy-1])
+        ax.set_title('Eta Field Slice %d'%j)
+        heatmap_im = ax.imshow(eta_slice[:, :, j].T, vmin=1., vmax=eta_true.max())
+        plt.colorbar(heatmap_im, ax=ax)
+    writer.add_figure(title, fig, i)
+    plt.close()
+```
+
+### rtnf/render.py
+```
+import jax
+import jax.numpy as jnp
+from jax.experimental.ode import odeint
+
+def renderfn(rays, predict_eta, predict_lum, s_vals):
+	'''
+	Render an image measurement from initial conditions, eta and luminance fields
+	Combines Eikonal Ray-tracing with integration of known 3D luminance field predict_lum
+	Input: 
+	rays: Batched ray initial conditions. See rtnf.truefield.init_rays for how these are generated.
+	predict_eta: Function taking 3D coordinates as input and outputting scalar eta value for each coordinate
+	predict_lum: Function taking 3D coordinates as input and outputting scalar luminance/emission value for each coordinate. 
+	The function predict_lum is integrated over the ray-traced path. 
+	s_vals: path length s-values at which to evaluate the ray-traced path integral. 
+
+	Output: 
+	ray_trace: Ray-traced ray paths
+	ray_lum: Integrated luminance values at the end of the path
+    '''
+    
+	pred_eta_grad_fn = jax.vmap(jax.value_and_grad(predict_eta), in_axes=(0,))
+
+	def ode_fn_lum(y, s):
+		ray_pos = y[..., :3]
+		ray_dir = y[..., 3:6]
+
+		eta, eta_grad = pred_eta_grad_fn(jnp.reshape(ray_pos, [-1, 3]))
+		lum = predict_lum(jnp.reshape(ray_pos, [-1, 3]))
+		d_ds_ray_pos = ray_dir / eta[:, None]
+		d_ds_ray_dir = eta_grad
+		d_ds_ray_lum = lum[:, None]
+		out = jnp.concatenate([d_ds_ray_pos, d_ds_ray_dir, d_ds_ray_lum], axis=-1)
+		return out
+
+	ray_pos = rays[..., :3]
+	ray_dir = rays[..., 3:6]
+
+	n_init = predict_eta(ray_pos)
+	ray_dir = ray_dir * n_init[0] / jnp.linalg.norm(ray_dir, ord=2, axis=-1, keepdims=True)
+
+	y_0 = jnp.concatenate([ray_pos, ray_dir, rays[:, 2*3:]], axis=-1)
+
+	y = odeint(ode_fn_lum, y_0, s_vals)
+
+	ray_trace = jnp.moveaxis(y[..., :3], 0, -1)
+	# ray_trace = y[..., :6]
+	ray_lum = y[-1, :, 6:]
+
+	return ray_trace, ray_lum
+
+def renderfn_rad(rays, predict_eta, predict_lum, s_vals):
+	'''
+	Render an image measurement from initial conditions, eta and luminance fields. Uses RRTE to adjust the integrand (radiance) according to the index of refraction eta. 
+	See renderfn for input/output annotations. 
+    '''
+    
+	pred_eta_grad_fn = jax.vmap(jax.value_and_grad(predict_eta), in_axes=(0,))
+
+	def ode_fn_lum(y, s):
+		ray_pos = y[..., :3]
+		ray_dir = y[..., 3:3*2]
+
+		eta, eta_grad = pred_eta_grad_fn(jnp.reshape(ray_pos, [-1, 3]))
+		lum = predict_lum(jnp.reshape(ray_pos, [-1, 3]))
+		d_ds_ray_pos = ray_dir / eta[:, None]
+		d_ds_ray_dir = eta_grad
+		d_ds_ray_lum = lum[:, None] / (eta[:, None]**2)
+		out = jnp.concatenate([d_ds_ray_pos, d_ds_ray_dir, d_ds_ray_lum], axis=-1)
+		return out
+
+	ray_pos = rays[..., :3]
+	ray_dir = rays[..., 3:2*3]
+
+	n_init = predict_eta(ray_pos)
+	ray_dir = ray_dir * n_init[0] / jnp.linalg.norm(ray_dir, ord=2, axis=-1, keepdims=True)
+
+	y_0 = jnp.concatenate([ray_pos, ray_dir, rays[:, 2*3:]], axis=-1)
+
+	y = odeint(ode_fn_lum, y_0, s_vals)
+
+	ray_trace = jnp.moveaxis(y[..., :3], 0, -1)
+	ray_lum = y[-1, :, 2*3:]
+
+	return ray_trace, ray_lum
+
+def render_path(rays, predict_eta, s_vals): 
+	'''
+	Ray trace a path. 
+	Input: 
+	rays: batch_size * 6 array of ray initial conditions (3 position coordinates followed by 3 direction coordinates)
+	predict_eta: function that maps from 3D coordinates to an eta value at that coordinate
+	s_vals: s-values to evaluate the ray path at
+	'''
+
+	dd = 3
+
+	pred_eta_grad_fn = jax.vmap(jax.value_and_grad(predict_eta), in_axes=(0,))
+
+	def ode_fn_lum(y, s):
+		# Integrate ray path as well as accumulated light
+		ray_pos = y[..., :dd]
+		ray_dir = y[..., dd:dd*2]
+
+		eta, eta_grad = pred_eta_grad_fn(jnp.reshape(ray_pos, [-1, dd]))
+		d_ds_ray_pos = ray_dir / eta[:, None]
+		d_ds_ray_dir = eta_grad
+        
+		out = jnp.concatenate([d_ds_ray_pos, d_ds_ray_dir], axis=-1)
+		return out
+
+	ray_pos = rays[..., :dd]
+	ray_dir = rays[:, dd:2*dd]
+	# Initialize rays with correct starting direction magnitude (n); this allows specification of direction vector to be any magnitude
+	n_init = predict_eta(ray_pos)
+	ray_dir = ray_dir * n_init[0] / jnp.linalg.norm(ray_dir, ord=2, axis=-1, keepdims=True)
+
+	y_0 = jnp.concatenate([ray_pos, ray_dir], axis=-1)
+
+	y = odeint(ode_fn_lum, y_0, s_vals)
+	#y = odeint(ode_fn_lum, y_0, s_vals, rtol=1e-10, atol=1e-10)
+
+	# ray_trace = jnp.moveaxis(y, 0, -1)
+
+	return y
+
+def render_path_dm(rays, predict_eta, s_vals): 
+	'''
+	Ray trace a path. 
+	Input: 
+	rays: batch_size * 6 array of ray initial conditions (3 position coordinates followed by 3 direction coordinates)
+	predict_eta: function that maps from 3D coordinates to an eta value at that coordinate
+	s_vals: s-values to evaluate the ray path at
+	'''
+
+	dd = 3
+
+	pred_eta_grad_fn = jax.vmap(jax.value_and_grad(predict_eta), in_axes=(0,))
+
+	def ode_fn_lum(y, s):
+		# Integrate ray path as well as accumulated light
+		ray_pos = y[..., :dd]
+		ray_dir = y[..., dd:dd*2]
+
+		eta, eta_grad = pred_eta_grad_fn(jnp.reshape(ray_pos, [-1, dd]))
+		d_ds_ray_pos = ray_dir / eta[:, None]
+		d_ds_ray_dir = eta_grad
+        
+		out = jnp.concatenate([d_ds_ray_pos, d_ds_ray_dir], axis=-1)
+		return out
+
+	ray_pos = rays[..., :dd]
+	ray_dir = rays[:, dd:2*dd]
+	# Initialize rays with correct starting direction magnitude (n); this allows specification of direction vector to be any magnitude
+	n_init = predict_eta(ray_pos)
+	ray_dir = ray_dir * n_init[0] / jnp.linalg.norm(ray_dir, ord=2, axis=-1, keepdims=True)
+
+	y_0 = jnp.concatenate([ray_pos, ray_dir], axis=-1)
+
+	y = odeint(ode_fn_lum, y_0, s_vals, rtol=1e-10, atol=1e-10)
+
+	ray_trace = jnp.moveaxis(y, 0, -1)
+
+	return ray_trace
+```
+
+### rtnf/truefield.py
+```
+import jax
+import jax.numpy as jnp
+from jax import random
+
+from flax import linen as nn
+
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import Matern
+
+from scipy.stats import special_ortho_group, qmc
+
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from plotly import graph_objects as go
+
+from rtnf.network import Grid2, Light_SourcesCov
+
+def rotate_cov(cov, size, seed):
+    og = special_ortho_group(dim=3, seed=seed)
+    evecs = og.rvs(size=size)
+    return jnp.swapaxes(evecs, 1, 2) @ (cov @ evecs)
+
+def init_rays(fov_angle, res, num_aux=1): 
+	fov_angle = fov_angle * jnp.pi / 180
+	angle_y = 0.5 - jnp.tan(fov_angle / 2)
+	num_rays = res**2
+	lsx, lsy = jnp.meshgrid(jnp.linspace(0.5-angle_y, 0.5+angle_y, res),
+					jnp.linspace(0.5-angle_y, 0.5+angle_y, res), indexing='xy')
+	ap_pts = jnp.stack([lsx, lsy, jnp.zeros([res, res])], axis=-1)
+	lsbx, lsby = jnp.meshgrid(jnp.linspace(0., 1, res), jnp.linspace(0., 1, res), indexing='xy')
+	rays_b = jnp.stack([lsbx, lsby, jnp.ones([res, res])], axis=-1)
+	rays_d = rays_b - ap_pts
+	ap_pts = ap_pts.reshape([-1, 3])
+	rays_d = rays_d.reshape([-1, 3])
+
+	rays_l = jnp.zeros((num_rays, num_aux))
+
+	rays = jnp.concatenate([ap_pts, rays_d, rays_l], axis=-1)
+
+	return rays
+
+def sample_gaussian(seed, X_eta, length_scale=0.25):
+    kernel = Matern(length_scale=length_scale, nu=1.5)
+    gpc = GaussianProcessRegressor(kernel=kernel, random_state=0)
+    matern_out = gpc.sample_y(X_eta, random_state=seed)
+    matern_out = jnp.array(matern_out)
+
+    return matern_out
+
+def generate_field(ior_type, seed, X_eta, eta_shape, mag=1):
+	def ior_act(net_output, mag=1): 
+		eta = mag * nn.softplus(jnp.squeeze(net_output)-5)/50 + 1.
+		return eta
+	if ior_type == 'matern': 
+		matern_out = sample_gaussian(seed, X_eta)
+		matern_out = matern_out.reshape(eta_shape)
+		grid_out = ior_act(matern_out, mag=mag)
+		eta_Grid = Grid2(grid_vals = grid_out, cval=1.)
+		predict_eta = eta_Grid.interp5
+	else: 
+		raise Exception("Invalid IoR type")
+	return grid_out, predict_eta
+
+def interp_grid(grid, cval): 
+	grid_obj = Grid2(grid_vals = grid, cval=cval)
+	predict_interp = lambda x: grid_obj.interp5(x)
+	return predict_interp
+
+def field_and_pred(source_locs, covs, X_lum, lum_shape): 
+	ls = Light_SourcesCov(source_locs, covs)
+	lum_field = ls.predict_lum(X_lum).sum(0).reshape(lum_shape)
+	lum_Grid = Grid2(grid_vals = lum_field, cval=0.)
+	predict_lum_grid = lambda x: lum_Grid.interp5(x)
+
+	return lum_field, predict_lum_grid, ls
+
+def generate_emission(ls_type, seed, X_lum, lum_shape, **kwargs): 
+	# Sample Source Locations
+	if ls_type == 'poisson': 
+		rand_gen = np.random.default_rng(seed)
+		engine = qmc.PoissonDisk(d=3, radius=0.13, seed=rand_gen)
+		source_locs = engine.random(1000)
+		num_sources = source_locs.shape[0]	
+	elif ls_type == 'uniform': 
+		num_sources = kwargs['num_sources']
+		rand_key = jax.random.PRNGKey(seed)
+		sources = []
+		while len(sources) < 500: 
+			source_loc = random.uniform(rand_key, (1,3), minval=0., maxval=1.) * jnp.array([[1, 1, 1.]])
+			rand_key, _ = random.split(rand_key)
+			sources.append(jnp.squeeze(source_loc))
+		source_locs = jnp.stack(sources[:num_sources], axis=0)
+	else: 
+		raise Exception("Invalid Light Source type")
+	
+	# Generate Elliptical Covariances
+	cov = jnp.array([[[2, 0, 0], [0., 0.5, 0], [0, 0, 0.5]]]) * 1e-3
+	covs = rotate_cov(cov, num_sources, seed)
+
+	return field_and_pred(source_locs, covs, X_lum, lum_shape)
+
+def plot_3d(volume, res): 
+	X, Y, Z = np.mgrid[:res, :res, :res]
+
+	Z = res - 1 - Z
+	X = res - 1 - X
+
+	fig = go.Figure(data=go.Volume(
+		x=Z.flatten(), y=X.flatten(), z=Y.flatten(),
+		value=volume.flatten(),
+		opacity=0.05,
+		surface_count=10,
+		))
+	fig.update_layout(scene_xaxis_showticklabels=False,
+					scene_yaxis_showticklabels=False,
+					scene_zaxis_showticklabels=False)
+
+	fig.show()
+
+def plot_2d(image, title='', save=False, filename=''):
+	res = image.shape[0]
+	plt.xlim([0, res-1])
+	plt.ylim([0, res-1])
+	sns.heatmap(image)
+	plt.title(title)
+	if save:
+		plt.savefig(filename)
+	else:
+		plt.show()
+	plt.close()
+```

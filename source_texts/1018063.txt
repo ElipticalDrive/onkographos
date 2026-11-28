@@ -1,0 +1,260 @@
+OpenVDB - Sparse volume data structure and tools. Contribute to 8858hn92dc-bit/openvdb development by creating an account on GitHub.
+
+Add vdb_remesh tool with Windows CI workflow by Copilot · Pull Request #1 · 8858hn92dc-bit/openvdb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Copilot
+AI
+commented
+Apr 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Adds a standalone command-line tool that voxel-remeshes arbitrary OBJ meshes using OpenVDB — mimicking Blender's voxel remesh operator — and a Windows CI workflow to build and distribute it.
+New files
+vdb_remesh/vdb_remesh.cpp — Reads OBJ → meshToLevelSet → volumeToMesh → writes OBJ. Supports:
+--voxel-size (resolution), --isovalue (expand/shrink volume), --adaptivity (quad reduction 0–1)
+Quad winding reversal matching Blender's convention
+Robust OBJ face parsing for v, v/vt, v/vt/vn, v//vn formats with exception-safe numeric parsing
+vdb_remesh/CMakeLists.txt — Self-contained CMake project (find_package(OpenVDB)); works with vcpkg or manual installs. Post-build DLL copy on Windows.
+.github/workflows/vdb_remesh.yml — Windows-only CI (named to avoid conflict with existing build.yml):
+Caches C:\vcpkg\installed to skip ~10 min dependency install on cache hit
+Caches vdb_remesh/build for incremental MSVC compilation
+Uploads vdb_remesh.exe + runtime DLLs as artifact (14-day retention)
+Explicit permissions: contents: read
+Usage
+```
+vdb_remesh --in input.obj --out output.obj --voxel-size 0.05 --adaptivity 0.5
+```
+Original prompt
+Please create the following three files in the repository and open a pull request. Do NOT modify any existing files.
+File 1: vdb_remesh/vdb_remesh.cpp
+```
+// vdb_remesh.cpp
+// Usage:
+//   vdb_remesh --in input.obj --out output.obj [--voxel-size 0.05] [--isovalue 0.0] [--adaptivity 0.0]
+//
+// --voxel-size   : size of each voxel (default 0.05). Smaller = more detail, heavier.
+// --isovalue     : volume offset; negative = expand, positive = shrink (default 0.0).
+// --adaptivity   : 0.0 = uniform quads, 1.0 = max triangle reduction (default 0.0).
+
+#include <openvdb/openvdb.h>
+#include <openvdb/tools/MeshToVolume.h>
+#include <openvdb/tools/VolumeToMesh.h>
+
+#include <algorithm>
+#include <array>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+// ---------------------------------------------------------------------------
+// Minimal OBJ I/O
+// ---------------------------------------------------------------------------
+
+struct ObjMesh {
+    std::vector<std::array<float, 3>> verts;
+    std::vector<std::array<int, 3>>   tris;   // triangles  (0-based indices)
+    std::vector<std::array<int, 4>>   quads;  // quads      (0-based indices)
+};
+
+static bool load_obj(const std::string &path, ObjMesh &out)
+{
+    std::ifstream f(path);
+    if (!f) {
+        std::cerr << "Error: cannot open " << path << "\n";
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+
+        std::istringstream ss(line);
+        std::string token;
+        ss >> token;
+
+        if (token == "v") {
+            float x, y, z;
+            ss >> x >> y >> z;
+            out.verts.push_back({x, y, z});
+        }
+        else if (token == "f") {
+            // Support "f v", "f v/vt", "f v/vt/vn", "f v//vn"
+            std::vector<int> idx;
+            std::string elem;
+            while (ss >> elem) {
+                int v = std::stoi(elem);   // takes chars up to '/'
+                if (v < 0)
+                    v = (int)out.verts.size() + v;  // relative
+                else
+                    v -= 1;                          // 1-based -> 0-based
+                idx.push_back(v);
+            }
+            if (idx.size() == 3) {
+                out.tris.push_back({idx[0], idx[1], idx[2]});
+            } else if (idx.size() == 4) {
+                out.quads.push_back({idx[0], idx[1], idx[2], idx[3]});
+            } else if (idx.size() > 4) {
+                // fan-triangulate
+                for (int i = 1; i + 1 < (int)idx.size(); ++i)
+                    out.tris.push_back({idx[0], idx[i], idx[i + 1]});
+            }
+        }
+    }
+    return !out.verts.empty();
+}
+
+static bool save_obj(const std::string &path, const ObjMesh &mesh)
+{
+    std::ofstream f(path);
+    if (!f) {
+        std::cerr << "Error: cannot write " << path << "\n";
+        return false;
+    }
+
+    f << "# vdb_remesh output\n";
+    for (auto &v : mesh.verts)
+        f << "v " << v[0] << " " << v[1] << " " << v[2] << "\n";
+
+    for (auto &q : mesh.quads)
+        f << "f " << q[0]+1 << " " << q[1]+1 << " " << q[2]+1 << " " << q[3]+1 << "\n";
+
+    for (auto &t : mesh.tris)
+        f << "f " << t[0]+1 << " " << t[1]+1 << " " << t[2]+1 << "\n";
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Remesh
+// ---------------------------------------------------------------------------
+
+static ObjMesh remesh(const ObjMesh &in,
+                      float voxel_size,
+                      float isovalue,
+                      float adaptivity)
+{
+    // Build OpenVDB point / triangle lists
+    // Quads in input are split to triangles for meshToLevelSet
+    std::vector<openvdb::Vec3s> points;
+    points.reserve(in.verts.size());
+    for (auto &v : in.verts)
+        points.emplace_back(v[0], v[1], v[2]);
+
+    std::vector<openvdb::Vec3I> triangles;
+    triangles.reserve(in.tris.size() + in.quads.size() * 2);
+    for (auto &t : in.tris)
+        triangles.emplace_back(t[0], t[1], t[2]);
+    for (auto &q : in.quads) {
+        triangles.emplace_back(q[0], q[1], q[2]);
+        triangles.emplace_back(q[0], q[2], q[3]);
+    }
+
+    // Build level set  (mirrors Blender's remesh_voxel_level_set_create)
+    auto transform = openvdb::math::Transform::createLinearTransform(voxel_size);
+    openvdb::FloatGrid::Ptr grid =
+        openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(
+            *transform, points, triangles, 1.0f);
+
+    // Volume -> mesh  (mirrors Blender's remesh_voxel_volume_to_mesh)
+    std::vector<openvdb::Vec3s> out_verts;
+    std::vector<openvdb::Vec4I> out_quads;
+    std::vector<openvdb::Vec3I> out_tris;
+    openvdb::tools::volumeToMesh<openvdb::FloatGrid>(
+        *grid, out_verts, out_tris, out_quads,
+        isovalue, adaptivity,
+        /*relaxDisorientedTriangles=*/false);
+
+    // Convert back to ObjMesh
+    ObjMesh result;
+    resu...
+
+</details>
+
+
+
+<!-- START COPILOT CODING AGENT SUFFIX -->
+
+*This pull request was created from Copilot chat.*
+>
+```
+Initial plan
+5ddb6ab
+Copilot
+AI
+assigned
+Copilot and
+8858hn92dc-bit
+Apr 7, 2026
+Copilot started work on behalf of
+8858hn92dc-bit
+April 7, 2026 18:15
+View session
+Copilot
+AI
+and others
+added 3 commits
+April 7, 2026 18:17
+Add vdb_remesh tool with Windows CI workflow
+…
+853a1f0
+```
+Agent-Logs-Url: https://github.com/8858hn92dc-bit/openvdb/sessions/1d796a81-9551-42f7-ba05-25eacce66261
+
+Co-authored-by: 8858hn92dc-bit <271780700+8858hn92dc-bit@users.noreply.github.com>
+```
+Fix OBJ face parsing, stof error handling, and workflow permissions
+…
+c840792
+```
+Agent-Logs-Url: https://github.com/8858hn92dc-bit/openvdb/sessions/1d796a81-9551-42f7-ba05-25eacce66261
+
+Co-authored-by: 8858hn92dc-bit <271780700+8858hn92dc-bit@users.noreply.github.com>
+```
+Use consistent forward slashes in workflow paths
+…
+07bb5e8
+```
+Agent-Logs-Url: https://github.com/8858hn92dc-bit/openvdb/sessions/1d796a81-9551-42f7-ba05-25eacce66261
+
+Co-authored-by: 8858hn92dc-bit <271780700+8858hn92dc-bit@users.noreply.github.com>
+```
+Copilot
+AI
+changed the title
+[WIP] Add vdb_remesh.cpp file
+Add vdb_remesh tool with Windows CI workflow
+Apr 7, 2026
+Copilot finished work on behalf of
+8858hn92dc-bit
+April 7, 2026 18:21
+Copilot
+AI
+requested a review
+from 8858hn92dc-bit
+April 7, 2026 18:21
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

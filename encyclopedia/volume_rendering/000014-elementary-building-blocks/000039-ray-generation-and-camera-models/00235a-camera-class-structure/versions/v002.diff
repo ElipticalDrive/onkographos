@@ -1,0 +1,135 @@
+--- v001.md
++++ v002.md
+@@ -3,101 +3,51 @@
+ 
+ ## Overview
+-The Camera Class Structure defines the data layout and initialization protocol for storing camera state in ray marching and volume rendering applications. It serves as the primary interface for translating high-level camera parameters (position, orientation, clipping) into the geometric primitives required for ray generation. It differs from sibling methods like [Ray Origin and Direction Setup](1793-ray-origin-and-direction-setup.md) by encapsulating the state rather than just the computation, and from [Camera Matrix and Coordinate Transformation](6231-camera-matrix-and-coordinate-transformation.md) by often exposing raw vectors or quaternions instead of a pre-computed view matrix.
++The Camera Class Structure defines the geometric state and rendering parameters required to generate rays for volume rendering. It serves as the primary interface between the application's scene graph and the ray generation kernel, encapsulating position, orientation, field of view, and clipping boundaries. Unlike sibling methods that focus on specific sampling strategies or traversal setups, this structure provides the foundational data layout necessary to compute ray origins and directions for any camera model.
+ 
+ ## How it works
+-### Inputs and Outputs
+-**Inputs**: Field of view (FOV), eye position, orientation (quaternion or basis vectors), near and far clipping planes.
+-**Outputs**: A contiguous memory block (struct) containing the camera parameters, accessible by shaders or CPU-side ray generation code.
++The structure aggregates scalar and vector fields to define the camera's pose and frustum. Implementations vary in their internal representation of orientation (e.g., quaternion vs. basis vectors) and auxiliary data (e.g., view matrices, lighting directions).
+ 
+ ### Data Structures
+-Two distinct layouts are observed in the source literature. Implementers must choose based on the rendering API and mathematical preferences.
++Two distinct layouts are observed in source implementations.
+ 
+-**Layout A (WGPU/Rust Style)**
+-Defined in [S1, unofficial], this layout uses a fixed-size struct with explicit alignment.
+-*   `position`: `Vec3<f32>` (12 bytes)
+-*   `fov`: `f32` (4 bytes)
+-*   `orientation`: `Quat<f32>` (16 bytes)
+-*   `clip_near`: `f32` (4 bytes)
+-*   `clip_far`: `f32` (4 bytes)
+-*   **Total Size**: 40 bytes.
+-*   **Alignment**: 16 bytes (`#[repr(C, align(16))]`).
++**Layout A (Quaternion-based)**
++Defined in [S1, unofficial], this layout uses a `#[repr(C, align(16))]` struct with the following fields:
++1. `position`: `Vec3<f32>` (12 bytes). The camera eye position.
++2. `fov`: `f32` (4 bytes). Field of view angle.
++3. `orientation`: `Quat<f32>` (16 bytes). Rotation quaternion.
++4. `clip_near`: `f32` (4 bytes). Near clipping plane distance.
++5. `clip_far`: `f32` (4 bytes). Far clipping plane distance.
++Total size: 40 bytes.
+ 
+-**Layout B (WebGPU/TypeScript Style)**
+-Defined in [S2, unofficial], this layout includes additional metadata for volume rendering and lighting.
+-*   `_forward`: `vec3`
+-*   `_up`: `vec3`
+-*   `_position`: `vec3`
+-*   `_zoom`: `vec3`
+-*   `_view`: `mat4`
+-*   `_lightDir`: `vec3`
+-*   `volumeCentre`: `vec3`
+-*   `volumeScale`: `vec3`
++**Layout B (Basis/Matrix-based)**
++Defined in [S2, unofficial], this layout includes additional auxiliary fields:
++1. `_forward`: `vec3`. Forward vector.
++2. `_up`: `vec3`. Up vector.
++3. `_position`: `vec3`. Camera position.
++4. `_zoom`: `vec3`. Zoom parameters (interpretation varies; often scale factors).
++5. `_view`: `mat4`. View transformation matrix.
++6. `_lightDir`: `vec3`. Direction to the primary light source.
++7. `volumeCentre`: `vec3`. Center of the volume being rendered.
++8. `volumeScale`: `vec3`. Scale of the volume.
+ 
+ ### Initialization
+-The camera is initialized via a constructor that validates and stores these parameters.
+-
+-**Pseudocode (based on [S1, unofficial])**
+-```python
+-struct Camera:
+-    position: Vec3
+-    fov: f32
+-    orientation: Quat
+-    clip_near: f32
+-    clip_far: f32
+-
+-    def new(fov: f32, position: Vec3, orientation: Quat, clip_near: f32, clip_far: f32) -> Camera:
+-        # Validate clipping planes
+-        if clip_near >= clip_far:
+-            raise Error("Near plane must be less than far plane")
+-        
+-        # Normalize orientation if not already normalized
+-        orientation = normalize(orientation)
+-        
+-        return Camera(
+-            position=position,
+-            fov=fov,
+-            orientation=orientation,
+-            clip_near=clip_near,
+-            clip_far=clip_far
+-        )
+-```
+-
+-**Pseudocode (based on [S2, unofficial])**
+-```python
+-class Camera:
+-    def __init__(self):
+-        self._forward = vec3(0, 0, -1)
+-        self._up = vec3(0, 1, 0)
+-        self._position = vec3(0, 0, 0)
+-        self._zoom = vec3(1, 1, 1)
+-        self._view = mat4_identity()
+-        self._lightDir = vec3(0, 1, 0)
+-        self.volumeCentre = vec3(0, 0, 0)
+-        self.volumeScale = vec3(1, 1, 1)
+-
+-    def update_view_matrix(self):
+-        # Construct view matrix from position and orientation
+-        # Note: Exact formula depends on the specific math library used
+-        # Typically involves inverse of camera-to-world transform
+-        pass
+-```
++The camera is initialized with its core geometric parameters. For Layout A, the constructor is:
++`Camera::new(fov, position, orientation, clip_near, clip_far)` [S1, unofficial].
+ 
+ ### Ray Generation Integration
+-While the struct stores state, it feeds into the ray generation process described in [Ray generation and camera models](770-ray-generation-and-camera-models.md). The `orientation` (quat) or `_view` matrix is used to transform pixel coordinates into world-space ray directions. The `clip_near` and `clip_far` define the valid range for depth sampling along the ray.
++The camera structure feeds into the Ray Origin and Direction Setup method. The `position` field directly sets the ray origin $\mathbf{o}$. The `orientation` (or basis vectors) and `fov` are used to compute the ray direction $\mathbf{d}$ for each pixel. The `clip_near` and `clip_far` values define the integration interval $[t_{min}, t_{max}]$ for ray marching.
+ 
+ ### Edge Cases and Pitfalls
+-1.  **Orientation Normalization**: Quaternions must be normalized to prevent scaling artifacts in rotation [S1, unofficial].
+-2.  **Clipping Plane Order**: `clip_near` must be strictly less than `clip_far` to avoid division by zero or invalid depth ranges [S1, unofficial].
+-3.  **Alignment Padding**: In Layout A, the 16-byte alignment ensures efficient GPU memory access, but requires careful packing if combined with other uniform buffers [S1, unofficial].
+-4.  **Zoom Vector Interpretation**: In Layout B, `_zoom` is a `vec3`, suggesting anisotropic scaling or aspect ratio handling, which is non-standard for simple pinhole cameras [S2, unofficial].
++- **Alignment**: In Layout A, the struct is explicitly aligned to 16 bytes to ensure efficient GPU memory access [S1, unofficial].
++- **Redundancy**: Layout B stores both explicit vectors (`_forward`, `_up`) and a full matrix (`_view`), which may lead to synchronization issues if not updated atomically [S2, unofficial].
++- **Volume Context**: Layout B includes volume-specific data (`volumeCentre`, `volumeScale`), coupling the camera to the scene geometry, which may reduce reusability across different scenes [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Memory**: Layout A is compact (40 bytes), suitable for per-camera uniform buffers. Layout B is larger and includes redundant data (e.g., storing both basis vectors and a view matrix).
+-*   **Performance**: Initialization is $O(1)$. Ray generation cost is independent of the camera struct size, depending only on the subsequent matrix/vector operations.
+-*   **Strengths**: Explicit control over camera parameters; easy serialization.
+-*   **Limitations**: Layout B mixes camera state with volume metadata (`volumeCentre`, `volumeScale`), coupling the camera to specific rendering contexts [S2, unofficial].
++- **Memory**: Layout A is compact (40 bytes), suitable for uniform buffers. Layout B is larger due to the inclusion of matrices and auxiliary vectors.
++- **Performance**: Smaller structs reduce bandwidth when updating camera state per frame.
++- **Flexibility**: Layout A is more generic. Layout B is tailored for specific volume rendering pipelines where volume bounds are tightly coupled with camera setup.
+ 
+ ## Background
+-The concept of a camera struct is fundamental to computer graphics, originating from early ray tracers that required explicit eye position and direction vectors. The specific layouts cited here are from modern, unofficial implementations targeting WebGPU and Rust-based ray marching frameworks.
++The camera structure is a fundamental component in graphics programming, evolving from simple pinhole models to complex state containers. The specific layouts cited here are from modern GPU-based ray marching implementations.
+ 
+ ## Sources

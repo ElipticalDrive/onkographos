@@ -1,0 +1,84 @@
+# CUDA Rasterizer
+
+Also called: CUDA Rasterization Forward Kernel, Custom CUDA Rasterization
+
+## Overview
+The CUDA Rasterizer provides custom forward and backward CUDA kernels for rasterization and interpolation, supporting full-image rendering and batched pixel-query modes [S1]. It enables differentiable rendering by computing gradients of the rasterization loss with respect to input vertex positions, propagating gradients from the volume space back to the mesh representation [S1].
+
+## How it works
+### Inputs and Outputs
+Forward kernel inputs: 3D volume tensor, vertices array, faces array, and shape metadata [S2, unofficial].
+Forward kernel outputs: Updated volume tensor with interpolated values [S2, unofficial].
+Backward kernel inputs: `grad_vertices` tensor, volume tensor, `grad_volume` tensor, vertices, faces, and shape [S2, unofficial].
+Backward kernel outputs: Updated `grad_vertices` array [S2, unofficial].
+
+### Data Structures
+- Vertices: Tensor of 3D coordinates $(x, y, z)$ [S2, unofficial].
+- Faces: Tensor of triplets, each containing three integer indices referencing the `vertices` array [S2, unofficial].
+- Volume: 3D tensor storing scalar or vector values per voxel [S2, unofficial].
+- Grad Vertices: Tensor matching the `vertices` shape, storing partial derivatives $\frac{\partial L}{\partial V_i}$ [S2, unofficial].
+
+### Numbered Steps
+1. Kernel Launch Configuration: The kernel is launched with a grid dimension of $(\lceil W / 32.0 \rceil, \lceil H / 16.0 \rceil, \lceil D / 2.0 \rceil)$ and a block dimension of $(32, 16, 2)$ [S2, unofficial].
+2. Vertex Retrieval: For each face $i$, retrieve the 3D coordinates of its three vertices: $V_0$ from `vertices[faces[i][0]]`, $V_1$ from `vertices[faces[i][1]]`, and $V_2$ from `vertices[faces[i][2]]` [S2, unofficial].
+3. Gradient Computation: For each vertex $V_k$ (where $k \in \{0, 1, 2\}$), compute the gradient contribution by calling `compute_grad` [S2, unofficial]. This function takes the other two vertices of the face, the current vertex $V_k$, a location $P$, the voxel value, the gradient of the voxel, and a diagonal parameter [S2, unofficial]. The source code contains a TODO indicating `compute_grad` should take `volume` and `grad_volume` at location $P$ as input [S2, unofficial].
+4. Atomic Gradient Accumulation: The computed gradients $\text{grad}_{V_0}$, $\text{grad}_{V_1}$, and $\text{grad}_{V_2}$ are atomically added to the corresponding entries in the `grad_vertices` array using `atomicAdd` for each of the three coordinate components (0, 1, 2) [S2, unofficial].
+
+### Formulas
+Not given in the sources.
+
+### Parameters
+Grid dimensions scale with volume resolution $(W, H, D)$ [S2, unofficial]. Block dimensions are fixed at $(32, 16, 2)$ [S2, unofficial].
+
+### Edge Cases
+The surrounding system detects when the mesh becomes degenerate (e.g. due to vertices becoming colinear) and re-meshes, although this rarely occurs in practice [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cuda_rasterizer_backward(grad_vertices, volume, grad_volume, vertices, faces, shape):
+    # Grid: (ceil(W/32), ceil(H/16), ceil(D/2))
+    # Block: (32, 16, 2)
+    for i in range(len(faces)):
+        idx0, idx1, idx2 = faces[i]
+        V0 = vertices[idx0]
+        V1 = vertices[idx1]
+        V2 = vertices[idx2]
+        
+        # Location P calculation and voxel fetch logic not provided in sources [S2, unofficial]
+        P = None
+        voxel_val = 0.0
+        voxel_grad = 0.0
+        
+        # Gradient computation logic not provided in sources [S2, unofficial]
+        # compute_grad takes: other two vertices, current vertex, location P, voxel value, voxel gradient, and diagonal parameter
+        grad_V0 = [0.0, 0.0, 0.0]
+        grad_V1 = [0.0, 0.0, 0.0]
+        grad_V2 = [0.0, 0.0, 0.0]
+        
+        # Atomically add computed gradients to grad_vertices for each coordinate component (0, 1, 2)
+        # In CUDA, this requires atomicAdd; represented here as standard addition for Python syntax
+        grad_vertices[idx0] += grad_V0
+        grad_vertices[idx1] += grad_V1
+        grad_vertices[idx2] += grad_V2
+    return grad_vertices
+```
+
+## Subtopics
+
+### [CUDA Rasterization Backward Kernel](17147-cuda-rasterization-backward-kernel.md)
+Computes the gradients of the rasterization loss with respect to input vertex positions and geometric parameters, enabling end-to-end differentiable voxelization. It serves as the reverse-mode counterpart to the forward kernel, distributing gradients from the volume buffer to vertex attributes rather than accumulating color/opacity into a volume. Choose this variant when optimizing 3D structures from 2D projections or volume targets.
+
+## Operating characteristics
+- **Performance**: Training takes between 1-3 minutes on an RTX A6000 Ada [S1].
+- **Complexity**: Complexity scales with the number of faces and volume dimensions [G].
+- **Strengths**: Custom CUDA implementation allows for fine-grained control over memory access and parallelism, supporting both full-image rendering and batched pixel-query modes [S1].
+- **Limitations**: Atomic operations for gradient accumulation may introduce contention under high overlap [G]. The fixed grid/block configuration may not be optimal for all aspect ratios or resolutions [G].
+
+## Background
+The method originates from the Neural Harmonic Textures framework for primitive-based neural reconstruction [S1]. It was developed to enable differentiable rendering in neural reconstruction pipelines, allowing gradients to flow from the rendered voxel output back to the mesh vertices [S1].
+
+## Sources
+[S1] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26
+[S2] cvlab-epfl/voxel2mesh, https://github.com/cvlab-epfl/voxel2mesh, fetched 2026-10-27 (unofficial)

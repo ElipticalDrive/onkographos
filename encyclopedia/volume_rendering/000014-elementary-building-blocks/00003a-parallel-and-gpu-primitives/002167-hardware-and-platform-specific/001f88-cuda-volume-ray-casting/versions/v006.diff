@@ -1,0 +1,244 @@
+--- v005.md
++++ v006.md
+@@ -11,5 +11,5 @@
+ **Inputs:**
+ *   **Volume Data:** 3D scalar field stored as a 1D unsigned char array on the device, mapped to a CUDA 3D Array and bound to a 3D texture [S1].
+-*   **Transfer Function:** A 1D function mapping scalar values to RGBA. It is stored as a 2D texture (float4) [S5, unofficial]. The file format specifies `<num_points>` followed by lines of `<scalar_value> <r> <g> <b> <a>`, where scalar values are in [0, 255] and RGBA are normalized floats in [0.0f, 1.0f] [S5, unofficial].
++*   **Transfer Function:** A 1D function mapping scalar values to RGBA [S5, unofficial]. It is stored as a 2D texture (float4) [S5, unofficial]. The file format specifies `<num_points>` followed by lines of `<scalar_value> <r> <g> <b> <a>`, where scalar values are in [0, 255] and RGBA are normalized floats in [0.0f, 1.0f] [S5, unofficial].
+ *   **Camera Parameters:** Eye position, view direction, and inverse view matrix [S5, unofficial].
+ *   **Geometry:** Either a Ray-Box bounding box for dynamic intersection or pre-computed hit point textures (`texFirst`, `texLast`) [S3][S5, unofficial].
+@@ -19,12 +19,12 @@
+ 
+ ### Data Structures
+-*   **Volume Texture:** `texture<VolType, 3, cudaReadModeNormalizedFloat> volume`. Uses linear filtering and clamp addressing [S3][S5, unofficial].
+-*   **Transfer Function Texture:** `texture<float4, 2, cudaReadModeElementType> transFunc`. Uses linear filtering and clamp addressing [S3][S5, unofficial].
+-*   **Hit Point Textures (Optional):** `texture<float4, 2, cudaReadModeElementType> texFirst` and `texLast`. Store entry and exit points for each pixel to avoid dynamic ray-box intersection [S3].
+-*   **Output Surface:** `surface<void, cudaSurfaceType2D> surf`. Used because CUDA cannot write directly to a texture [S3].
++*   **Volume Texture:** `texture<VolType, 3, cudaReadModeNormalizedFloat> volume` [S5, unofficial]. Uses linear filtering and clamp addressing [S3][S5, unofficial].
++*   **Transfer Function Texture:** `texture<float4, 2, cudaReadModeElementType> transFunc` [S5, unofficial]. Uses linear filtering and clamp addressing [S3][S5, unofficial].
++*   **Hit Point Textures (Optional):** `texture<float4, 2, cudaReadModeElementType> texFirst` and `texLast` [S3][S5, unofficial].
++*   **Output Surface:** `surface<void, cudaSurfaceType2D> surf` [S3]. Used because CUDA cannot write directly to a texture [S3].
+ 
+ ### Parameters
+ *   **Ray Step Size (`constantH`):** Typically calculated as $1.0 / \text{diagonal of the volume bounding box}$ [S5, unofficial]. In some implementations, a fixed value like 0.01 AU is used for a 1x1x1 AU volume [S2].
+-*   **Opacity Threshold:** Threshold for early ray termination. Commonly set to 0.99 [S3][S5, unofficial] or 1.0 [S1].
++*   **Opacity Threshold:** Threshold for early ray termination [S3]. Commonly set to 0.99 [S3][S5, unofficial] or 1.0 [S1].
+ *   **Block Size:** Example: `dim3(8, 16)` [S7, unofficial] or `dim3(16, 16)` [S5, unofficial].
+ *   **Bounding Box:** Often defined as `boxMin = (0,0,0)` and `boxMax = (1,1,1)` in texture space [S7, unofficial], or `(-1,-1,-1)` to `(1,1,1)` in world space [S1].
+@@ -46,5 +46,5 @@
+ 
+ 4.  **Ray Initialization:**
+-    *   **Option A (Dynamic Ray-Box):** Calculate normalized screen coordinates $u, v \in [-1, 1]$. Compute eye ray direction using the inverse view matrix and camera parameters. Normalize the direction [S5, unofficial]. Calculate ray-box intersection to find entry ($t_{near}$) and exit ($t_{far}$) distances. Clamp $t_{near}$ to the near plane distance if necessary [S5, S7, unofficial].
++    *   **Option A (Dynamic Ray-Box):** Calculate normalized screen coordinates $u, v \in [-1, 1]$ [S5, unofficial]. Compute eye ray direction using the inverse view matrix and camera parameters [S7, unofficial]. Calculate ray-box intersection to find entry ($t_{near}$) and exit ($t_{far}$) distances [S1]. Clamp $t_{near}$ to the near plane distance if necessary [S5, S7, unofficial].
+     *   **Option B (Pre-computed):** Sample `first = tex2D(texFirst, x, y)` and `last = tex2D(texLast, x, y)` [S3]. Compute direction and length:
+         $$ \text{direction} = \text{normalize}(\text{last} - \text{first}) $$
+@@ -58,17 +58,21 @@
+     Iterate $t$ from 0 to $D$ (or $t_{far}$) with increment `constantH`:
+     
+-    a.  **Sample Volume:** Get scalar value:
+-        $$ \text{scalar} = \text{tex3D}(\text{volume}, \text{tr}.x, \text{tr}.y, \text{tr}.z) $$
+-        [S3]
+-        
+-    b.  **Sample Transfer Function:**
++    a.  **Coordinate Transformation:** Transform sample position to texture space $[0, 1]$. For a volume centered at $(0,0,0)$ with extent $[-0.5, 0.5]$:
++        $$ \text{tx} = \text{tr}.x + 0.5, \quad \text{ty} = \text{tr}.y + 0.5, \quad \text{tz} = 1.0 - (\text{tr}.z + 0.5) $$
++        [S5, unofficial]
++        
++    b.  **Sample Volume:** Get scalar value:
++        $$ \text{scalar} = \text{tex3D}(\text{volume}, \text{tx}, \text{ty}, \text{tz}) $$
++        [S3]
++        
++    c.  **Sample Transfer Function:**
+         $$ \text{samp} = \text{tex2D}(\text{transFunc}, \text{scalar}, 0.5f) $$
+         [S3]
+         
+-    c.  **Convert Alpha:** Convert transfer function alpha to optical depth-based opacity:
++    d.  **Convert Alpha:** Convert transfer function alpha to optical depth-based opacity:
+         $$ \text{samp}.w = 1.0f - \exp(-0.5f \times \text{samp}.w) $$
+         [S5, unofficial]
+         
+-    d.  **Pre-multiply Color:**
++    e.  **Pre-multiply Color:**
+         $$ \text{samp}.x = \text{samp}.x \times \text{samp}.w $$
+         $$ \text{samp}.y = \text{samp}.y \times \text{samp}.w $$
+@@ -76,14 +80,14 @@
+         [S3]
+         
+-    e.  **Composite (Under Operator):**
++    f.  **Composite (Under Operator):**
+         $$ \text{color}.x += \text{samp}.x \times \text{color}.w $$
+         $$ \text{color}.y += \text{samp}.y \times \text{color}.w $$
+         $$ \text{color}.z += \text{samp}.z \times \text{color}.w $$
+-        $$ \text{color}.w = 1.0f - \text{samp}.w $$
+-        [S3]
+-        
+-    f.  **Early Termination:** If accumulated opacity $(1.0f - \text{color}.w)$ exceeds `opacityThreshold`, break loop [S3][S5, unofficial].
+-        
+-    g.  **Increment Ray:**
++        $$ \text{color}.w = \text{color}.w \times (1.0f - \text{samp}.w) $$
++        [S3][S5, unofficial]
++        
++    g.  **Early Termination:** If accumulated opacity $(1.0f - \text{color}.w)$ exceeds `opacityThreshold`, break loop [S3][S5, unofficial].
++        
++    h.  **Increment Ray:**
+         $$ \text{tr} += \text{rayStep} $$
+         [S3]
+@@ -100,84 +104,63 @@
+ 
+ ```python
+-# Kernel Launch Configuration
+-# block_size = dim3(16, 16)
+-# grid_size = dim3(ceil(width / 16.0), ceil(height / 16.0))
+-
+-__global__ void volumeRenderingKernel(
+-    texture<float, 3, cudaReadModeNormalizedFloat> volume,
+-    texture<float4, 2, cudaReadModeElementType> transFunc,
+-    texture<float4, 2, cudaReadModeElementType> texFirst,
+-    texture<float4, 2, cudaReadModeElementType> texLast,
+-    surface<void, cudaSurfaceType2D> surf,
+-    int width,
+-    int height,
+-    float constantH,
+-    float opacityThreshold
+-) {
+-    // 1. Thread Indexing
+-    int x = blockIdx.x * blockDim.x + threadIdx.x;
+-    int y = blockIdx.y * blockDim.y + threadIdx.y;
+-
+-    // 2. Bounds Check
+-    if (x < width && y < height) {
+-        // 3. Ray Initialization (Using Pre-computed Hit Points)
+-        // Note: tex2D coordinates are typically pixel centers or normalized. 
+-        // Assuming texFirst/Last store world space positions or normalized coords.
+-        float4 first = tex2D(texFirst, x, y);
+-        float4 last = tex2D(texLast, x, y);
+-        
+-        float3 tr = make_float3(first.x, first.y, first.z);
+-        float3 direction = make_float3(last.x - first.x, last.y - first.y, last.z - first.z);
+-        float D = length(direction);
+-        direction = normalize(direction);
+-        
+-        // 4. Accumulator Initialization
+-        float4 color = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
+-        float3 rayStep = direction * constantH;
+-        
+-        // 5. Ray Traversal Loop
+-        for (float t = 0.0f; t <= D; t += constantH) {
+-            // Sample Volume
+-            float scalar = tex3D(volume, tr.x, tr.y, tr.z);
++def volume_rendering_kernel(width, height, volume, trans_func, first_points, last_points, constant_h, opacity_threshold):
++    # Simulated per-thread execution context
++    x = ...  # blockIdx.x * blockDim.x + threadIdx.x
++    y = ...  # blockIdx.y * blockDim.y + threadIdx.y
++    
++    if x >= width or y >= height:
++        return
++
++    # 1. Ray Initialization (Pre-computed hit points)
++    first = first_points[x, y]
++    last = last_points[x, y]
++    
++    direction = last - first
++    D = length(direction)
++    if D == 0:
++        return  # No intersection or degenerate ray
++    
++    direction = direction / D
++    tr = first
++    color = [0.0, 0.0, 0.0, 1.0]  # r, g, b, a
++    ray_step = direction * constant_h
++    
++    # 2. Ray Traversal Loop
++    t = 0.0
++    while t <= D:
++        # Coordinate transformation to texture space [0, 1]
++        tx = tr[0] + 0.5
++        ty = tr[1] + 0.5
++        tz = 1.0 - (tr[2] + 0.5)
++        
++        # Sample volume and transfer function
++        scalar = sample_volume(volume, tx, ty, tz)
++        samp = sample_trans_func(trans_func, scalar)
++        
++        # Convert alpha to optical depth opacity
++        alpha = 1.0 - exp(-0.5 * samp[3])
++        
++        # Pre-multiply color
++        samp_rgb = [samp[0] * alpha, samp[1] * alpha, samp[2] * alpha]
++        
++        # Composite using under operator
++        color[0] += samp_rgb[0] * color[3]
++        color[1] += samp_rgb[1] * color[3]
++        color[2] += samp_rgb[2] * color[3]
++        color[3] *= (1.0 - alpha)
++        
++        # Early termination
++        if 1.0 - color[3] > opacity_threshold:
++            break
+             
+-            // Sample Transfer Function
+-            float4 samp = tex2D(transFunc, scalar, 0.5f);
+-            
+-            // Convert Alpha (Optical Depth)
+-            samp.w = 1.0f - expf(-0.5f * samp.w);
+-            
+-            // Pre-multiply Color
+-            samp.x = samp.x * samp.w;
+-            samp.y = samp.y * samp.w;
+-            samp.z = samp.z * samp.w;
+-            
+-            // Composite (Under Operator)
+-            color.x += samp.x * color.w;
+-            color.y += samp.y * color.w;
+-            color.z += samp.z * color.w;
+-            color.w = 1.0f - samp.w;
+-            
+-            // Early Termination
+-            if (1.0f - color.w > opacityThreshold) {
+-                break;
+-            }
+-            
+-            // Increment Ray
+-            tr += rayStep;
+-        }
+-        
+-        // 6. Finalize Alpha
+-        color.w = 1.0f - color.w;
+-        
+-        // 7. Write Output
+-        uchar4 ucolor = make_uchar4(
+-            __float2uchar(color.x * 255.0f),
+-            __float2uchar(color.y * 255.0f),
+-            __float2uchar(color.z * 255.0f),
+-            __float2uchar(color.w * 255.0f)
+-        );
+-        surf2Dwrite(ucolor, surf, x * sizeof(uchar4), y, cudaBoundaryModeClamp);
+-    }
+-}
++        # Increment ray
++        tr += ray_step
++        t += constant_h
++        
++    # 3. Finalize alpha
++    color[3] = 1.0 - color[3]
++    
++    # 4. Write output
++    output[x, y] = [int(c * 255.0) for c in color]
+ ```
+ 
+@@ -192,6 +175,6 @@
+ 
+ ### Time and Memory Complexity
+-*   **Time Complexity:** $O(W \times H \times N)$, where $W, H$ are image dimensions and $N$ is the number of samples per ray. Early termination reduces the average $N$ [S2].
+-*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels. Additional memory for transfer function and hit point textures is minimal [S1].
++*   **Time Complexity:** $O(W \times H \times N)$, where $W, H$ are image dimensions and $N$ is the number of samples per ray [G]. Early termination reduces the average $N$ [S2].
++*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels [G].
+ 
+ ### Measured Performance
+@@ -201,5 +184,5 @@
+ 
+ ### Strengths and Limitations
+-*   **Strengths:** Direct memory control allows optimization of texture caching and memory coalescing. Early termination significantly reduces computation for opaque regions. Interoperability with OpenGL allows seamless integration into existing rendering pipelines [S1, S3].
++*   **Strengths:** Direct memory control allows optimization of texture caching and memory coalescing. Early termination significantly reduces computation for opaque regions [S4, unofficial]. Interoperability with OpenGL allows seamless integration into existing rendering pipelines [S1, S3].
+ *   **Limitations:** Performance is highly dependent on the transfer function and volume density. Dynamic ray-box intersection can be computationally expensive and prone to errors if not carefully implemented [S5, unofficial]. Requires NVIDIA hardware and CUDA SDK [S1].
+ 

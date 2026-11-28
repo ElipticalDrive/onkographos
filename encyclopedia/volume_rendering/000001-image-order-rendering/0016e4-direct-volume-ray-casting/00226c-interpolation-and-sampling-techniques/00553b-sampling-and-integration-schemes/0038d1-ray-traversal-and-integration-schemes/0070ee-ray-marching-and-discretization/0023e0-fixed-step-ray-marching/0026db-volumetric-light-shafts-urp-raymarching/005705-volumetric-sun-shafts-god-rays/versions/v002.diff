@@ -1,0 +1,201 @@
+--- v001.md
++++ v002.md
+@@ -8,15 +8,15 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Depth buffer, inverse projection matrix, inverse view matrix, sun shadow map (containing lit/shadowed status), sun color, sun direction, ground plane height, and a global intensity multiplier.
+-*   **Outputs:** A post-processing texture containing the accumulated sun shafts, composited over the scene.
++*   **Inputs:** Depth buffer, inverse projection matrix, inverse view matrix, sun shadow map, sun color, sun direction, ground plane height, global intensity multiplier, and camera position [S1, unofficial].
++*   **Outputs:** A post-processing texture containing the accumulated sun shafts, composited over the scene [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **VolumetricPass Target:** A render target (`WebGLRenderTarget`) with `HalfFloatType` precision, no depth buffer, sized at half the screen resolution (e.g., if screen is $W \times H$, target is $\frac{W}{2} \times \frac{H}{2}$) [S1, unofficial].
+-*   **Shadow Map:** A texture storing depth or binary lit/shadowed status for the sun light source.
++*   **VolumetricPass Target:** A render target with `HalfFloatType` precision, no depth buffer, sized at half the screen resolution [S1, unofficial].
++*   **Shadow Map:** A texture storing depth or binary lit/shadowed status for the sun light source [S1, unofficial].
+ 
+ **Parameters:**
+ *   `STEPS`: Number of march steps, set to 16 [S1, unofficial].
+ *   `uIntensity`: Global intensity multiplier, calculated as $0.07 \times \text{strength}$ [S1, unofficial].
+-*   `uGround`: Height of the ground plane for density calculation, passed as a uniform [S1, unofficial].
++*   `uGround`: Height of the ground plane for density calculation [S1, unofficial].
+ *   `MARCH_LENGTH`: The last 32 units of the ray are used for marching, or 0 if the ray is shorter than 32 units [S1, unofficial].
+ 
+@@ -24,6 +24,6 @@
+ 1.  **Resolution Reduction:** Render the effect at half resolution to quarter the per-pixel shadow-map sampling cost, relying on the soft nature of the haze effect to hide aliasing [S1, unofficial].
+ 2.  **Jittering:** To hide banding artifacts in the volumetric march, jitter the start position of the ray march using interleaved gradient noise [S1, unofficial].
+-3.  **Ray Reconstruction:** For each pixel, reconstruct the world position from the depth buffer using the inverse projection and view matrices.
+-4.  **Ray Definition:** Compute the view ray direction $\mathbf{rd}$ from the camera position to the reconstructed world position and its length $L$.
++3.  **Ray Reconstruction:** For each pixel, reconstruct the world position from the depth buffer using the inverse projection and view matrices [S1, unofficial].
++4.  **Ray Definition:** Compute the view ray direction $\mathbf{rd}$ from the camera position to the reconstructed world position and its length $L$ [S1, unofficial].
+ 5.  **March Setup:** Determine the march start distance as the last 32 units of the ray (or 0 if $L < 32$). Calculate the step length $\Delta s$ based on 16 steps over the march length:
+     $$ \Delta s = \frac{\text{MARCH\_LENGTH}}{\text{STEPS}} $$
+@@ -31,89 +31,79 @@
+     a.  Compute sample position $\mathbf{p}$ along the ray.
+     b.  Transform $\mathbf{p}$ to shadow map space.
+-    c.  Determine if the sample is lit by checking shadow map bounds and depth. Let $S \in \{0, 1\}$ be the shadow factor (1 if lit, 0 if shadowed).
++    c.  Determine if the sample is lit by checking shadow map bounds and depth. Let $S \in \{0, 1\}$ be the shadow factor (1 if lit, 0 if shadowed) [S1, unofficial].
+     d.  Calculate ground-hugging density $\rho$ using exponential falloff based on sample height $y$ relative to ground level $uGround$:
+         $$ \rho = e^{-k(y - uGround)} $$
+-        (Note: The exact constant $k$ is not specified in the sources [S1, unofficial].)
+-    e.  Apply forward scattering phase function $P(\theta)$, which is brighter when looking toward the sun.
+-    f.  Scale the contribution by distance attenuation and density.
+-    g.  Accumulate the result: $Accum += S \cdot \rho \cdot P(\theta) \cdot \text{attenuation}$.
++        (Note: The exact decay constant $k$ is not specified in the sources [G].)
++    e.  Apply forward scattering phase function $P(\theta)$, which is brighter when looking toward the sun [S1, unofficial].
++    f.  Scale the contribution by distance attenuation and density [S1, unofficial].
++    g.  Accumulate the result: $Accum += S \cdot \rho \cdot P(\theta) \cdot \text{attenuation}$ [S1, unofficial].
+ 7.  **Output:** Output final color as sun color multiplied by the accumulated amount, phase, and intensity `uIntensity` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def render_volumetric_sun_shafts(depth_buffer, inv_proj, inv_view, shadow_map, sun_color, sun_dir, u_ground, strength):
+-    # Parameters
++import math
++
++def render_volumetric_sun_shafts(depth_buffer, inv_proj, inv_view, shadow_map, shadow_matrix, sun_color, sun_dir, u_ground, strength, camera_pos):
+     STEPS = 16
+     MARCH_LENGTH = 32.0
+     u_intensity = 0.07 * strength
+-    
+-    # Output target is half resolution
+-    out_width = depth_buffer.width // 2
+-    out_height = depth_buffer.height // 2
+-    output = create_texture(out_width, out_height, type=HalfFloatType, depth=False)
+-    
+-    for y in range(out_height):
+-        for x in range(out_width):
+-            # 1. Reconstruct world position from depth
+-            # Note: Standard reconstruction from depth buffer using inv_proj and inv_view
+-            # This step assumes a helper function to unpack depth and apply matrices
+-            world_pos = reconstruct_world_pos(depth_buffer, x, y, inv_proj, inv_view)
+-            
+-            # 2. Compute ray
+-            camera_pos = get_camera_position()
+-            ray_dir = normalize(world_pos - camera_pos)
+-            ray_len = length(world_pos - camera_pos)
+-            
+-            # 3. Determine march length
+-            march_len = min(ray_len, MARCH_LENGTH)
+-            if march_len <= 0:
+-                output[x, y] = vec3(0.0)
++    out_w = depth_buffer.width // 2
++    out_h = depth_buffer.height // 2
++    output = [[(0.0, 0.0, 0.0) for _ in range(out_w)] for _ in range(out_h)]
++
++    for y in range(out_h):
++        for x in range(out_w):
++            depth_val = depth_buffer.get(x, y)
++            # Reconstruct world position from depth buffer using inverse projection and view matrices [S1, unofficial]
++            clip_z = depth_val * 2.0 - 1.0
++            world_pos = inv_proj @ inv_view @ (clip_z, clip_z, clip_z, 1.0)
++            ray_dir = normalize(world_pos[:3] - camera_pos)
++            ray_len = length(world_pos[:3] - camera_pos)
++
++            # March start distance as the last 32 units of the ray (or 0 if ray is shorter) [S1, unofficial]
++            start_dist = max(0.0, ray_len - MARCH_LENGTH)
++            step_len = MARCH_LENGTH / STEPS
++            if step_len <= 0.0:
+                 continue
+-                
+-            step_len = march_len / STEPS
+-            
+-            # 4. Jitter start position to hide banding
+-            # Interleaved gradient noise function
+-            jitter = interleaved_gradient_noise(x, y)
+-            start_offset = jitter * step_len
+-            
+-            accumulated_light = vec3(0.0)
+-            
+-            # 5. March loop
++
++            # Jitter start position using interleaved gradient noise to hide banding artifacts [S1, unofficial]
++            jitter = ((x * 12.9898 + y * 78.233) % 1) * 2.0 - 1.0
++            t = start_dist + jitter * step_len * 0.5
++
++            accumulated = [0.0, 0.0, 0.0]
+             for i in range(STEPS):
+-                # Sample position
+-                t = start_offset + i * step_len
+                 sample_pos = camera_pos + ray_dir * t
+-                
+                 # Transform to shadow map space
+-                shadow_uv = transform_to_shadow_space(sample_pos, shadow_map_matrix)
+-                
+-                # Check shadow
+-                # S is 1 if lit, 0 if shadowed
+-                S = sample_shadow(shadow_map, shadow_uv)
+-                
+-                # Ground-hugging density
+-                # Exponential falloff based on height relative to ground
+-                height_diff = sample_pos.y - u_ground
+-                # Assuming a decay constant k, not specified in sources [G]
+-                # Using a typical value for haze if k is missing, but strictly:
+-                # density = exp(-k * height_diff)
+-                # Since k is not given, we note it as a parameter [G]
+-                density = exp(-0.5 * max(0.0, height_diff)) 
+-                
+-                # Phase function (forward scattering)
+-                # Brighter when looking toward sun
+-                cos_theta = dot(ray_dir, sun_dir)
+-                phase = forward_scattering_phase(cos_theta)
+-                
+-                # Distance attenuation (simplified, exact formula not specified [G])
+-                attenuation = 1.0 / (t * t + 1.0) 
+-                
+-                accumulated_light += S * density * phase * attenuation * step_len
+-            
+-            # 6. Output
+-            output[x, y] = sun_color * accumulated_light * u_intensity
+-            
++                shadow_clip = shadow_matrix @ (sample_pos[0], sample_pos[1], sample_pos[2], 1.0)
++                shadow_uv = (shadow_clip[0] / shadow_clip[3], shadow_clip[1] / shadow_clip[3])
++                # Determine if lit by checking shadow map bounds and depth [S1, unofficial]
++                if 0.0 <= shadow_uv[0] <= 1.0 and 0.0 <= shadow_uv[1] <= 1.0:
++                    S = 1.0 if sample_pos[2] < shadow_map.get(shadow_uv) else 0.0
++                else:
++                    S = 0.0
++
++                # Calculate ground-hugging density using exponential falloff based on sample height relative to ground level [S1, unofficial]
++                height_diff = sample_pos[1] - u_ground
++                density = math.exp(-0.5 * max(0.0, height_diff)) # Decay constant 0.5 [G]
++
++                # Apply forward scattering phase function (brighter when looking toward sun) [S1, unofficial]
++                phase = max(0.0, dot(ray_dir, sun_dir))
++
++                # Scale by distance attenuation [S1, unofficial]
++                attenuation = 1.0 / (t * t + 1.0) # [G]
++
++                contrib = S * density * phase * attenuation * step_len
++                accumulated[0] += contrib * sun_color[0]
++                accumulated[1] += contrib * sun_color[1]
++                accumulated[2] += contrib * sun_color[2]
++
++            output[y][x] = (accumulated[0] * u_intensity, accumulated[1] * u_intensity, accumulated[2] * u_intensity)
+     return output
++
++def normalize(v):
++    l = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    return (v[0]/l, v[1]/l, v[2]/l) if l > 0 else (0,0,0)
++def length(v): return math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++def dot(v1, v2): return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+ ```
+ 
+@@ -124,12 +114,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(W \cdot H \cdot \text{STEPS})$, where $W$ and $H$ are the output resolution (half screen) and STEPS is 16. The cost is dominated by shadow map lookups.
+-*   **Memory Complexity:** $O(W \cdot H)$ for the output texture (half float, 3 channels) plus the shadow map size.
++*   **Time Complexity:** $O(W \cdot H \cdot \text{STEPS})$, where $W$ and $H$ are the output resolution (half screen) and STEPS is 16 [S1, unofficial]. The cost is dominated by shadow map lookups [S1, unofficial].
++*   **Memory Complexity:** $O(W \cdot H)$ for the output texture (half float, 3 channels) plus the shadow map size [S1, unofficial].
+ *   **Performance:** Runs at half resolution to reduce cost, relying on the soft nature of the haze effect [S1, unofficial].
+-*   **Strengths:** Accurate volumetric occlusion from shadow maps, allowing shafts to be cast by geometry outside the view frustum.
+-*   **Limitations:** Requires a dedicated shadow map and post-processing pass. Performance scales with resolution and step count.
++*   **Strengths:** Accurate volumetric occlusion from shadow maps, allowing shafts to be cast by geometry outside the view frustum [S1, unofficial].
++*   **Limitations:** Requires a dedicated shadow map and post-processing pass. Performance scales with resolution and step count [S1, unofficial].
+ 
+ ## Background
+-This technique is part of the volumetric rendering pipeline in a custom WebAssembly-based voxel engine, specifically implemented in `src/volumetric.ts` [S1, unofficial]. It is designed to render atmospheric lighting effects in a browser environment.
++This technique is part of the volumetric rendering pipeline in a custom WebAssembly-based voxel engine, specifically implemented in `src/volumetric.ts` [S1, unofficial]. It is designed to render atmospheric lighting effects in a browser environment [S1, unofficial].
+ 
+ ## Sources

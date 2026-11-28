@@ -1,0 +1,196 @@
+--- v001.md
++++ v002.md
+@@ -6,9 +6,9 @@
+ 
+ ## How it works
+-**Inputs:** Simulation data (e.g., gas density, number density) structured as an AMR octree; camera parameters (position, direction, field of view); rendering mode (e.g., emission, max intensity); compositing rules (e.g., front-to-back alpha blending).
+-**Outputs:** A 2D image (pixel colors and opacities).
++**Inputs:** Simulation data (e.g., gas density, number density) structured as an AMR octree; camera parameters (position, direction, field of view); rendering mode (e.g., emission, max intensity); compositing rules (e.g., front-to-back alpha blending) [S1, unofficial].
++**Outputs:** A 2D image (pixel colors and opacities) [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `amr_volume`: An object containing the AMR hierarchy.
++*   `amr_volume`: An object containing the AMR hierarchy and per-level leaf hashes [S1, unofficial].
+ *   `per_level_hash`: A hash map for each refinement level, mapping leaf coordinates to leaf nodes. Each leaf is stored exactly once [S1, unofficial].
+ *   `leaf_node`: Contains the local cell size, active planes (defining which of the 8 corner values are active), and a reference to the brick (data storage) [S2, unofficial].
+@@ -16,5 +16,5 @@
+ **Steps:**
+ 1.  **Construct Volume:** Create an `amr_volume` object from the simulation data. This builds the per-level hash of leaves [S1, unofficial].
+-2.  **Ray Casting:** For each pixel in the image, cast a ray from the camera through the scene.
++2.  **Ray Casting:** For each pixel in the image, cast a ray from the camera through the scene [S1, unofficial].
+ 3.  **Traversal:** Traverse the AMR octree. The ray is advanced by the **local cell size** of the current leaf node it intersects [S1, unofficial].
+ 4.  **Sampling:** Sample field values at the ray position.
+@@ -26,85 +26,107 @@
+ **Pseudocode:**
+ ```python
+-def render_amr_volume(amr_volume, camera, image_width, image_height, smooth=True, aa=True):
+-    """
+-    Renders an AMR volume by ray-marching the octree.
+-    """
+-    image = empty_image(image_width, image_height)
++def render_amr_volume(amr_volume, camera_origin, camera_dir, width, height, smooth=True, aa=True):
++    image = [[vec3(0.0) for _ in range(width)] for _ in range(height)]
+     
+-    # Pre-compute ray directions for all pixels
+-    rays = generate_rays(camera, image_width, image_height)
+-    
+-    for y in range(image_height):
+-        for x in range(image_width):
+-            ray = rays[y, x]
++    for y in range(height):
++        for x in range(width):
++            # Generate ray for pixel [G]
++            u = (2.0 * (x + 0.5) / width) - 1.0
++            v = (2.0 * (y + 0.5) / height) - 1.0
++            ray_dir = normalize(vec3(u, v, -1.0))
++            ray_origin = camera_origin
++            
+             color = vec3(0.0)
+             opacity = 0.0
++            t = 0.0
+             
+-            # Ray marching loop
+-            t = 0.0
+-            while t < ray.max_distance:
+-                # Find the leaf node containing the current ray position
+-                # The ray position is ray.origin + ray.direction * t
+-                leaf = amr_volume.find_leaf(ray.position(t))
++            while t < 1000.0: # Max distance placeholder [G]
++                pos = ray_origin + ray_dir * t
++                leaf = find_leaf_in_hash(amr_volume, pos)
+                 
+                 if leaf is None:
+-                    # Ray is outside the AMR data
+                     break
+                 
+-                # Step size is the local cell size of the current leaf
+-                step_size = leaf.local_cell_size
++                step = leaf.cell_size
+                 
+-                # Sample the field value at the current ray position
+-                # If smooth=True, use cross-level trilinear interpolation
+-                # If smooth=False, use nearest-leaf (piecewise-constant)
+                 if smooth:
+-                    value = sample_trilinear_cross_level(amr_volume, ray.position(t), leaf)
++                    # Cross-level trilinear interpolation [S1, unofficial]
++                    surrounding = get_surrounding_leaves(amr_volume, pos, leaf)
++                    vals = []
++                    for s_leaf in surrounding:
++                        # Active planes mask 8 corners [S2, unofficial]
++                        corners = get_active_corners(s_leaf.active_planes, s_leaf.brick, pos)
++                        vals.append(interpolate_brick(corners, pos))
++                    val = trilinear_interpolate(vals, pos)
+                 else:
+-                    value = sample_nearest_leaf(leaf, ray.position(t))
++                    # Nearest-leaf sampling [S1, unofficial]
++                    val = sample_nearest(leaf.brick, pos, leaf.active_planes)
+                 
+-                # Compute contribution based on rendering mode (e.g., emission)
+-                # This is a placeholder for specific compositing logic
+-                contribution = compute_contribution(value, step_size)
+-                
+-                # Front-to-back compositing
+-                alpha = contribution.alpha
+-                color = color * (1.0 - alpha) + contribution.color * alpha
++                # Accumulate color/opacity [S1, unofficial]
++                contrib = compute_emission(val, step)
++                alpha = contrib.alpha
++                color = color * (1.0 - alpha) + contrib.color * alpha
+                 opacity += alpha * (1.0 - opacity)
+                 
+-                # Advance ray
+-                t += step_size
+-                
+-                # Early exit if fully opaque
+                 if opacity >= 1.0:
+                     break
++                    
++                t += step
+             
+-            # Apply anti-aliasing if enabled
+             if aa:
+-                # Supersampling logic would go here
++                # Supersampling averages multiple rays per pixel [S1, unofficial]
+                 pass
+                 
+-            image[y, x] = color
+-            
++            image[y][x] = color
+     return image
+ 
+-def sample_trilinear_cross_level(amr_volume, position, current_leaf):
+-    """
+-    Interpolates values from 8 surrounding leaves at the local cell spacing.
+-    Looks up values from finest to coarsest.
+-    """
+-    # Determine the 8 surrounding leaf coordinates relative to the current leaf's grid
+-    # This requires mapping the continuous position to the discrete leaf grid
+-    surrounding_leaves = get_surrounding_leaves(amr_volume, position, current_leaf)
+-    
+-    # Retrieve values from bricks, respecting active planes
+-    values = []
+-    for leaf in surrounding_leaves:
+-        # Check active planes to determine which corners are valid
+-        # Fill from the brick stored in the leaf
+-        val = leaf.get_value_at_position(position)
+-        values.append(val)
+-        
+-    # Perform trilinear interpolation on the 8 values
+-    return trilinear_interpolate(values, position, surrounding_leaves)
++def find_leaf_in_hash(amr_volume, pos):
++    # Search per-level hash for leaf containing pos [S1, unofficial]
++    for level in amr_volume.levels:
++        key = floor(pos / level.cell_size)
++        if key in level.hash:
++            return level.hash[key]
++    return None
++
++def get_surrounding_leaves(amr_volume, pos, current_leaf):
++    # Return 8 neighbors at local spacing, finest to coarsest [S1, unofficial]
++    neighbors = []
++    for offset in [(0,0,0), (1,0,0), (0,1,0), (0,0,1), (1,1,0), (1,0,1), (0,1,1), (1,1,1)]:
++        key = floor(pos / current_leaf.cell_size) + offset
++        leaf = amr_volume.per_level_hash[current_leaf.level].get(key)
++        if leaf:
++            neighbors.append(leaf)
++        else:
++            # Fallback to coarser level [G]
++            coarser = find_leaf_in_hash(amr_volume, pos)
++            if coarser and coarser != current_leaf:
++                neighbors.append(coarser)
++    return neighbors
++
++def get_active_corners(active_planes, brick, pos):
++    # 6 active planes define valid 8 corners [S2, unofficial]
++    corners = []
++    for i in range(8):
++        if is_corner_active(i, active_planes):
++            corners.append(brick[i])
++        else:
++            corners.append(0.0)
++    return corners
++
++def interpolate_brick(corners, pos):
++    # Trilinear interpolation within a single brick [G]
++    return sum(c * w for c, w in zip(corners, compute_barycentric_weights(pos)))
++
++def trilinear_interpolate(vals, pos):
++    # Standard trilinear interpolation across 8 leaf values [G]
++    return sum(v * w for v, w in zip(vals, compute_barycentric_weights(pos)))
++
++def compute_emission(value, step):
++    # Simple emission model [G]
++    return {"color": vec3(value), "alpha": min(1.0, value * step)}
++
++def sample_nearest(brick, pos, active_planes):
++    # Return nearest valid corner [G]
++    return brick[0] # Placeholder for nearest valid corner lookup [G]
+ ```
+ 
+@@ -143,5 +165,5 @@
+ 
+ ## Background
+-AMR Volume Ray-Casting originated from the need to visualize large-scale scientific simulations without the prohibitive memory costs of uniform grid resampling [S1, unofficial]. The technique was implemented in the Mera.jl library, with a 3-D volume ray-caster added to the core in 2026 [S1, unofficial]. It was also integrated into the VTK/ParaView ecosystem via OSPRay, with `vtkAMRVolumeMapper` introduced in VTK 7.1 and ParaView 5.0 [S2, unofficial].
++AMR Volume Ray-Casting originated from the need to visualize large-scale scientific simulations without the prohibitive memory costs of uniform grid resampling [S1, unofficial]. The technique was implemented in the Mera.jl library, with a 3-D volume ray-caster added to the core [S1, unofficial]. It was also integrated into the VTK/ParaView ecosystem via OSPRay, with `vtkAMRVolumeMapper` introduced in VTK 7.1 and ParaView 5.0 [S2, unofficial].
+ 
+ ## Sources

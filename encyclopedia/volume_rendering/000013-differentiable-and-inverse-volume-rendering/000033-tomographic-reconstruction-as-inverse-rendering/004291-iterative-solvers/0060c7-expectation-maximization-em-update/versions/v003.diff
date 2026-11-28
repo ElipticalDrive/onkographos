@@ -1,0 +1,103 @@
+--- v002.md
++++ v003.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-The Expectation-Maximization (EM) Update is an iterative statistical reconstruction algorithm that finds the maximum likelihood estimate of a volume distribution from incomplete or missing projection data, specifically accounting for Poisson noise inherent in X-ray or emission tomography [S1, S2, unofficial]. Unlike algebraic methods such as [ART](6944-algebraic-reconstruction-technique-art.md) or [SIRT](3101-sirt-simultaneous-iterative-reconstruction-technique.md) which minimize least-squares errors, EM maximizes the likelihood function representing the probability that the reconstructed image generated the measured projections [S2, unofficial]. It is distinguished by its multiplicative update rule, which guarantees non-negativity and conservation of total events, but suffers from slow convergence and high-frequency noise amplification after many iterations [S1, S2, unofficial].
++The Expectation-Maximization (EM) Update is an iterative statistical reconstruction algorithm that finds the maximum likelihood estimate of a volume distribution from incomplete or missing projection data, specifically accounting for Poisson noise inherent in X-ray or emission tomography [S1, S2, unofficial]. Unlike algebraic methods such as [ART](6944-algebraic-reconstruction-technique-art.md) or [SIRT](3101-sirt-simultaneous-iterative-reconstruction-technique.md) which minimize least-squares errors, EM maximizes the likelihood function using a multiplicative update rule that guarantees non-negativity and event conservation, but suffers from slow convergence and noise amplification [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+ *   `projections`: 1D or 2D array of measured projection data (sinogram). Must be non-negative ($proj_i \ge 0$) [S3, unofficial].
+-*   `volume`: Initial guess of the reconstruction volume. Must be strictly positive ($vol_j > 0$) for all voxels to avoid division by zero or log(0) errors [S3, unofficial].
++*   `volume`: Initial guess of the reconstruction volume. Must be strictly positive ($vol_j > 0$) for all voxels [S3, unofficial].
+ *   `geometry`: Projection geometry object defining the forward projector $R$ and backprojector $R^*$ [S3, unofficial].
+ *   `iterations`: Integer number of EM updates [S3, unofficial].
+@@ -16,14 +16,26 @@
+ 
+ **Outputs:**
+-*   `volume`: The reconstructed volume array updated after `iterations` steps.
++*   `volume`: The reconstructed volume array updated after `iterations` steps [S3, unofficial].
+ 
+ **Data Structures:**
+ *   `volume`: Array of shape matching the initial guess, dtype float.
+ *   `residual`: Temporary array matching projection shape, used to store the ratio of measured to estimated projections.
++*   `s`: 1D or 3D array matching volume shape, storing the normalization factor $s_j = \sum_i R_{ij}$ [S2, unofficial].
++
++**Numbered Steps:**
++1. Validate inputs: ensure projections are non-negative and volume is strictly positive [S3, unofficial].
++2. Compute normalization factor $s_j = \sum_i R_{ij}$ by backprojecting a unity image [S2, unofficial].
++3. For each iteration $k$:
++   a. Forward project the current volume estimate to get $(Rf^{(k)})_i$ [S1, S2, unofficial].
++   b. Compute the ratio $proj_i / (Rf^{(k)})_i$, handling zero estimates to prevent division by zero [G].
++   c. Backproject the ratio and divide by $s_j$ to get the multiplicative update factor [S1, S2, unofficial].
++   d. Update volume element-wise: $f_j^{(k+1)} = f_j^{(k)} \times \text{factor}$ [S1, S2, unofficial].
++   e. Apply bounds clipping if specified [S3, unofficial].
++4. Return the final volume [S3, unofficial].
+ 
+ **Formulas:**
+ The goal is to minimize the log-likelihood function for Poisson data [S1, unofficial]:
+ $$ l(f) = \sum_i (proj_i \log (Rf)_i - (Rf)_i) $$
+-where $R$ is the forward projection operator and $f$ is the image vector [S1, unofficial].
++where $R$ is the forward projection operator, $f$ is the image vector, and $proj$ is the measured projection data [S1, unofficial].
+ 
+ The standard EM multiplicative update for iteration $k+1$ is [S2, unofficial]:
+@@ -40,11 +52,10 @@
+ 
+ **Pitfalls and Edge Cases:**
+-1.  **Negative Data:** If `projections.min() < 0`, the algorithm fails because the ratio $proj_i / (Rf)_i$ becomes negative or undefined in log-likelihood contexts. Check and reject or clip negative projections [S3, unofficial].
+-2.  **Zero Initial Guess:** If `volume.min() <= 0`, the forward projection $(Rf)_i$ may be zero, causing division by zero in the ratio step. Initialize with `numpy.ones_like(vol)` or a positive constant [S3, unofficial].
+-3.  **Noise Amplification:** EM produces images with excessive high-frequency details ("too many details") [S1, unofficial]. It is unstable after a large number of iterations. Solutions include early stopping (e.g., after 12 steps) or adding a penalty term $B(f)$ to minimize $l(f) - B(f)$, where $B(f) = (f - \bar{f})^T B (f - \bar{f})$ [S1, unofficial].
+-4.  **Conservation:** If initialized positively, all subsequent estimates remain positive. Voxels initialized to zero remain zero. Total number of events is conserved at each iteration [S2, unofficial].
++1.  **Negative Data:** If `projections.min() < 0`, the algorithm fails; sources require logging an error and rejecting negative projections [S3, unofficial].
++2.  **Zero Initial Guess:** If `volume.min() <= 0`, the algorithm fails; sources require logging an error and ensuring a strictly positive initial guess [S3, unofficial].
++3.  **Instability:** The method becomes unstable after a large number of iterations [S2, unofficial].
++4.  **Conservation:** If initialized positively, all subsequent estimates remain positive. Voxels initialized to zero remain zero. The total number of events is conserved at each iteration [S2, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import numpy as np
+@@ -65,32 +76,30 @@
+         volume: Reconstructed volume.
+     """
+-    # Validation from [S3, unofficial]
++    # Validation [S3, unofficial]
+     if np.any(projections < 0):
+-        raise ValueError("Projections must be non-negative.")
++        raise ValueError("Wrong projection data. Make sure that projections have no negative values.")
+     if np.any(volume <= 0):
+-        raise ValueError("Initial volume guess must be strictly positive.")
++        raise ValueError("Wrong initial guess. Make sure that initial guess for EM is positive.")
+ 
+     # Precompute normalization factor s_j = sum_i R_ij [S2, unofficial]
+-    # forward_project computes sum_j R_ij * f_j for each projection ray
+     unity_proj = np.ones_like(projections)
+-    s = geometry.back_project(unity_proj, volume.shape, geometry)
+-    # Guard against division by zero in unobservable voxels [G]
+-    s = np.where(s > 0, s, 1.0)
++    s = geometry.back_project(unity_proj)
++    s = np.where(s > 0, s, 1.0)  # Guard against division by zero in unobservable voxels [G]
+ 
+     for _ in range(iterations):
+         # Forward project current estimate: estimated = R * volume [S1, S2, unofficial]
+-        estimated = geometry.forward_project(volume, geometry)
++        estimated = geometry.forward_project(volume)
+         
+         # Compute ratio proj / estimated [S1, S2, unofficial]
+-        # Guard against zero estimates to prevent division by zero [G]
+         ratio = np.where(estimated > 0, projections / estimated, 0.0)
+         
+         # Backproject ratio and normalize: volume = volume * (R^*(ratio) / s) [S1, S2, unofficial]
+-        # back_project computes sum_i R_ij * r_i for each voxel
+-        volume = volume * (geometry.back_project(ratio, volume.shape, geometry) / s)
++        # Scale by subsets for OSEM acceleration [S1, unofficial]
++        scale = subsets if subsets > 1 else 1.0
++        volume = volume * (geometry.back_project(ratio) / s) * scale
+ 
+         # Apply bounds if specified [S3, unofficial]
+         if bounds is not None:
+-            volume = np.clip(volume, bounds[0], bounds[1])
++            np.clip(volume, bounds[0], bounds[1], out=volume)
+ 
+     return volume

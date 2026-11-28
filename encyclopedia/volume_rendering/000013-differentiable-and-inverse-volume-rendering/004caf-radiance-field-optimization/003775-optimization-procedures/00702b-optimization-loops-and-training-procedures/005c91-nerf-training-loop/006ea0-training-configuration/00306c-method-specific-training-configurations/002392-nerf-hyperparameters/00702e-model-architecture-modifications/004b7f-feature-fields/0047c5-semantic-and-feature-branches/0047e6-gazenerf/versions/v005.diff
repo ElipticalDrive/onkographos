@@ -1,0 +1,417 @@
+--- v004.md
++++ v005.md
+@@ -4,225 +4,214 @@
+ 
+ ## Overview
+-GazeNeRF is a 3D-aware method for gaze redirection that reformulates the task as a neural volume rendering problem [S1]. It solves the limitation of existing 2D methods by explicitly modeling the rigid 3D rotation of eyeballs and the non-rigid deformation of the face separately [S1]. Unlike sibling methods that mix facial features or lack 3D consistency, GazeNeRF uses a two-stream MLP architecture to predict volumetric features for the face (excluding eyes) and eyes independently, applying a rigid 3D rotation matrix to the eye features before compositing [S1].
++GazeNeRF is a 3D-aware gaze redirection method that reformulates the task as a neural volume rendering problem [S1]. It uses a two-stream MLP architecture to separately predict volumetric features for the face and eye regions, allowing for rigid 3D rotation of the eye features to achieve gaze redirection while preserving identity [S1]. It differs from 2D methods (e.g., STED, FAZE) by explicitly modeling the 3D nature of eyeball rotation and face deformation via separate volumetric streams, whereas 2D methods apply weak rotation priors to mixed 2D latent features [S1]. It differs from EyeNeRF by focusing on gaze redirection accuracy and using disentangled feature streams with explicit 3D rotation, whereas EyeNeRF focuses on high-fidelity rendering and relighting quality [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A reference face image $I_{ref}$ (resized to $512 \times 512$ pixels), a target gaze label $g$ (2D vector of pitch and yaw angles in radians), and latent codes $z^*$ initialized from 3D Morphable Model (3DMM) parameters [S1].
+-*   **Outputs:** A rendered 2D image $I_{wf}$ of the whole face with redirected gaze, along with intermediate images $I_{fw/o}$ (face-only) and $I_e$ (eyes-only) [S1].
++*   **Inputs:**
++    *   3D spatial position $x \in \mathbb{R}^3$.
++    *   View direction $d \in \mathbb{R}^3$.
++    *   Gaze label $g \in \mathbb{R}^2$, a 2D vector consisting of pitch and yaw angles of the gaze vector in radians [S1].
++    *   Latent codes $z_{sh}, z_{ex}, z_{te}, z_{il} \in \mathbb{R}^k$ representing shape, expression, texture (albedo), and illumination, respectively. These are initialized from 3DMM parameters [S1].
++    *   Reference image (for supervision during training) [S1].
++*   **Outputs:**
++    *   Rendered 2D images: $I_{wf}$ (whole face), $I_{fw/o}$ (face without eyes), and $I_e$ (eyes only) [S1].
+ 
+ **Data Structures:**
+-1.  **Two-Stream MLPs:**
+-    *   $h_{\theta_{fw/o}}$: Face-only stream. Parameters $\theta_{fw/o}$ [S1].
+-    *   $h_{\theta_{e}}$: Eye stream. Parameters $\theta_{e}$ [S1].
+-    *   Both map $(\gamma(\mathbf{x}), \gamma(\mathbf{d}), z_{sh}, z_{ex}, z_{te}, z_{il}, g) \rightarrow (\sigma, \mathbf{f})$ [S1].
+-    *   $\gamma$ is positional encoding [S1].
+-    *   $z_{sh}, z_{ex}, z_{te}, z_{il}$ are latent codes for shape, expression, texture, and illumination [S1].
+-    *   $\mathbf{f} \in \mathbb{R}^{258}$ is the feature vector [S1].
+-2.  **Volume Feature Maps:**
+-    *   $F_{fw/o} \in \mathbb{R}^{64 \times 64 \times 258}$: Rendered feature map for the face-only region [S1].
+-    *   $F_{e} \in \mathbb{R}^{64 \times 64 \times 258}$: Rendered feature map for the eyes region [S1].
+-3.  **Rotation Matrix:**
+-    *   $R \in \mathbb{R}^{3 \times 3}$: 3D rotation matrix computed from gaze label $g$ [S1].
+-4.  **Neural Rendering Module:**
+-    *   Shared weights $\theta_{render}$ for upsampling and color prediction [S1].
++*   **Two-stream MLPs:**
++    *   $h_{\theta_{fw/o}}$: Face-only stream parameters $\theta_{fw/o}$.
++    *   $h_{\theta_{e}}$: Eye stream parameters $\theta_{e}$ [S1].
++*   **Volume Feature Maps:**
++    *   $F_{fw/o} \in \mathbb{R}^{64 \times 64 \times 258}$: Low-resolution volume feature map for the face region [S1].
++    *   $F_{e} \in \mathbb{R}^{64 \times 64 \times 258}$: Low-resolution volume feature map for the eye region [S1].
++*   **Rotated Eye Feature Map:**
++    *   $F_{e-rot} \in \mathbb{R}^{64 \times 64 \times 86 \times 3}$: Reshaped version of $F_e$ to allow 3D rotation matrix multiplication [S1].
++*   **Merged Feature Map:**
++    *   $F_{wf} \in \mathbb{R}^{64 \times 64 \times 258}$: Merged feature map for the whole face [S1].
++*   **Masks:**
++    *   $M_{wf}$: Whole face mask.
++    *   $M_f$: Face-only mask.
++    *   $M_e$: Eyes mask [S1].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Encode Inputs:** Apply positional encoding $\gamma$ to 3D position $\mathbf{x}$ and view direction $\mathbf{d}$. Concatenate $\gamma(\mathbf{x})$ with latent codes $z_{sh}, z_{ex}, z_{te}, z_{il}$ and gaze label $g$ [S1].
+-2.  **Face Stream Processing:** Pass encoded inputs through $h_{\theta_{fw/o}}$ to predict volume density $\sigma_{fw/o}$ and feature vector $\mathbf{f}_{fw/o}$ for the face region (excluding eyes) [S1].
+-3.  **Eye Stream Processing:** Pass encoded inputs through $h_{\theta_{e}}$ to predict volume density $\sigma_{e}$ and feature vector $\mathbf{f}_{e}$ for the eye region [S1].
+-4.  **Volume Rendering:** Use differentiable volume rendering on the outputs of both MLPs to generate low-resolution volume feature maps $F_{fw/o}$ and $F_{e}$ with dimensions $\mathbb{R}^{64 \times 64 \times 258}$ [S1].
+-    *   The rendering follows the standard NeRF integration [Parent]:
+-        $$ \hat{\mathbf{F}}(r) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{f}(x_i) $$
+-        where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ and $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ [Parent].
+-5.  **3D Rotation:** Reshape eye feature map $F_{e}$ from $\mathbb{R}^{64 \times 64 \times 258}$ to $\mathbb{R}^{64 \times 64 \times 86 \times 3}$ [S1]. Apply rigid rotation using the gaze-derived matrix $R$:
++1.  **Encode Inputs:** Apply positional encoding $\gamma$ to $x$ and $d$. Concatenate $\gamma(x)$ with latent codes $z_{sh}, z_{ex}, z_{te}, z_{il}$ and gaze label $g$ [S1].
++2.  **Face Stream Processing:** Pass the encoded inputs through the face-only MLP $h_{\theta_{fw/o}}$ to predict volume density $\sigma$ and feature vector $f$ for the face region (excluding eyes) [S1].
++    $$ h_{\theta_{fw/o}} : (\gamma(x), z_{sh}, z_{ex}, z_{te}, z_{il}, g) \rightarrow (\sigma, f) $$
++3.  **Eye Stream Processing:** Pass the encoded inputs through the eye MLP $h_{\theta_{e}}$ to predict volume density $\sigma$ and feature vector $f$ for the eye region [S1].
++    $$ h_{\theta_{e}} : (\gamma(x), z_{sh}, z_{ex}, z_{te}, z_{il}, g) \rightarrow (\sigma, f) $$
++4.  **Volume Rendering:** Use volume rendering on the outputs of both MLPs to generate low-resolution volume feature maps $F_{fw/o}$ and $F_{e}$ with dimensions $\mathbb{R}^{64 \times 64 \times 258}$ [S1].
++5.  **3D Rotation:** Reshape eye feature maps $F_{e} \in \mathbb{R}^{64 \times 64 \times 258}$ to $F_{e} \in \mathbb{R}^{64 \times 64 \times 86 \times 3}$. Calculate a 3D rotation matrix $R$ based on the target gaze direction $g$. Apply this rotation matrix to the eye feature map to rigidly rotate the eyeball features:
+     $$ F_{e-rot} = R F_{e} $$
+-    where $F_{e-rot} \in \mathbb{R}^{64 \times 64 \times 86 \times 3}$ [S1].
+-6.  **Feature Composition:** Map the rotated eye feature map $F_{e-rot}$ to the segmented eyes region and the face feature map $F_{fw/o}$ to the segmented face-only region [S1]. Merge them using element-wise maximum:
++    where $R$ is a 3D rotation matrix computed from gaze label $g$ [S1].
++6.  **Feature Composition:** Map the rotated eye feature map $F_{e-rot}$ to the segmented eyes region and the face feature map $F_{fw/o}$ to the segmented face-only region. Merge them using element-wise maximum:
+     $$ F_{wf} = \max(F_{fw/o}, F_{e-rot}) $$
+     [S1].
+-7.  **Final Rendering:** Use the neural rendering module with shared weights $\theta_{render}$ to render three images:
+-    *   $I_{fw/o}$ from $F_{fw/o}$
+-    *   $I_e$ from $F_{e-rot}$
+-    *   $I_{wf}$ from $F_{wf}$ [S1].
+-
+-**Loss Functions:**
+-The total loss is:
+-$$ L_{Overall} = \lambda_R L_R + \lambda_P L_P + \lambda_F L_F + \lambda_D L_D $$
+-where $\lambda_R = \lambda_P = \lambda_F = \lambda_D = 1$ [S1].
+-
+-1.  **Reconstruction Loss ($L_R$):**
+-    $$ L_{R_{whole face}}(I_{wf}, I_{gt}) = \frac{1}{|M_{wf}|} ||M_{wf}(I_{wf} - I_{gt})||_1 $$
+-    where $M_{wf}$ is the whole face mask [S1].
+-    $$ L_R = L_{R_{whole face}} + L_{R_{face only}} + L_{R_{eyes}} $$
+-    using masks $M_{f}$ and $M_{e}$ for the respective regions [S1].
+-
+-2.  **Perceptual Loss ($L_P$):**
+-    $$ L_{P_{whole face}} = \sum_{i} \frac{1}{||\phi_i(I_{gt})||} ||\phi_i(I_{wf}) - \phi_i(I_{gt})||_1 $$
+-    where $\phi_i$ is the $i$-th layer of VGG16 [S1].
+-    $$ L_P = L_{P_{whole face}} + L_{P_{face only}} + L_{P_{eyes}} $$
+-    [S1].
+-
+-3.  **Functional Loss ($L_F$):**
+-    $$ L_{F_{content}}(I_{wf}, I_{gt}) = E_{ang}(\psi_g(I_{wf}), \psi_g(I_{gt})) $$
+-    where $\psi_g$ is a gaze estimator network and $E_{ang}$ is angular error:
+-    $$ E_{ang}(v, \tilde{v}) = \arccos \frac{v \cdot \tilde{v}}{|v| |\tilde{v}|} $$
+-    [S1].
+-    $$ L_F = \lambda_{F_{content}} L_{F_{content}} $$
+-    where $\lambda_{F_{content}}$ starts at $1 \times 10^{-3}$ and increases by $1 \times 10^{-3}$ after each epoch [S1].
+-
+-4.  **Disentanglement Loss ($L_D$):**
+-    $$ L_D = \sum_{w^* \in \{w_{sh}, w_{ex}, w_{te}, w_{il}\}} \frac{w^*}{|z^*_0|} ||z^* - z^*_0||_2^2 $$
+-    where $z^*$ are learned latent codes, $z^*_0$ are initial 3DMM values, and $w^*$ are disentanglement weights [S1].
+-    Weights: $w_{sh} = w_{te} = w_{il} = 1 \times 10^{-3}$ and $w_{ex} = 1.0$ [S1].
++7.  **Final Rendering:** Render three images using a neural rendering module with shared weights $\theta_{render}$: face-only image $I_{fw/o}$ from $F_{fw/o}$, eyes image $I_e$ from $F_{e-rot}$, and whole face image $I_{wf}$ from $F_{wf}$ [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
+-
+-def positional_encoding(x, min_deg=0, max_deg=10, scale=1):
+-    """Standard NeRF positional encoding [G]."""
+-    scales = torch.tensor([2**i for i in range(min_deg, max_deg)])
+-    xb = torch.reshape((x * scale)[:, None, :] * (2 * torch.pi) / scales, list(x.shape)[:-1] + [-1])
+-    return torch.cat([torch.sin(xb), torch.cos(xb)], dim=-1)
+-
+-class MLPStream(nn.Module):
+-    """Two-stream MLP predicting density and feature vector [S1]."""
+-    def __init__(self, in_dim, out_dim=258):
+-        super().__init__()
+-        self.net = nn.Sequential(
+-            nn.Linear(in_dim, 256), nn.ReLU(),
+-            nn.Linear(256, 256), nn.ReLU(),
+-            nn.Linear(256, 256), nn.ReLU(),
+-            nn.Linear(256, 1 + out_dim) # density + feature
+-        )
+-    def forward(self, x):
+-        out = self.net(x)
+-        return torch.sigmoid(out[:, :1]), out[:, 1:]
+-
+-class NeuralRenderingModule(nn.Module):
+-    """Shared upsampling and color prediction module [S1]."""
+-    def __init__(self):
+-        super().__init__()
+-        self.upsample = nn.Upsample(scale_factor=8, mode='bilinear', align_corners=False)
+-        self.color_head = nn.Conv2d(258, 3, kernel_size=1)
+-    def forward(self, F):
+-        # F shape: (B, 64, 64, 258) -> (B, 258, 64, 64)
+-        F = F.permute(0, 3, 1, 2)
+-        F = self.upsample(F)
+-        return self.color_head(F)
+-
+-def compute_rotation_from_pitch_yaw(pitch, yaw):
+-    """Compute 3D rotation matrix R from gaze label g [G]."""
+-    # Standard rotation composition: R = R_y(yaw) * R_x(pitch)
+-    cos_p, sin_p = torch.cos(pitch), torch.sin(pitch)
+-    cos_y, sin_y = torch.cos(yaw), torch.sin(yaw)
+-    R_x = torch.tensor([[1, 0, 0], [0, cos_p, -sin_p], [0, sin_p, cos_p]])
+-    R_y = torch.tensor([[cos_y, 0, sin_y], [0, 1, 0], [-sin_y, 0, cos_y]])
+-    return R_y @ R_x
+-
+-def volume_render_feature_map(sigma, f, rays_x, rays_d, N=128):
+-    """Standard differentiable volume rendering [G]."""
+-    # Sample points along rays
+-    t_vals = torch.linspace(0, 1, N, device=sigma.device)
+-    z_vals = 0.1 * (1 - t_vals) + 0.9 * t_vals
+-    pts = rays_x[:, None, :] + rays_d[:, None, :] * z_vals[:, :, None]
+-    # Evaluate MLP at sampled points (simplified for pseudocode)
+-    # In practice, this calls the MLP and returns sigma_i, f_i
+-    # Here we assume sigma and f are already sampled along rays: shape (B, N, 1) and (B, N, 258)
+-    delta = z_vals[:, 1:] - z_vals[:, :-1]
+-    alpha = 1 - torch.exp(-sigma * delta)
+-    T = torch.cat([torch.ones_like(alpha[:, :1]), torch.cumprod(1 - alpha[:, :-1] + 1e-10, dim=1)], dim=1)
+-    weights = alpha * T[:, :-1]
+-    return torch.sum(weights[:, :, None] * f, dim=1) # (B, 258) -> aggregated to grid in full impl
+-
+-class GazeNeRF:
+-    def __init__(self, latent_codes_init, gaze_label, face_mask, eyes_mask):
+-        self.mlp_face = MLPStream(in_dim=38) # gamma(x)+gamma(d)+z_sh+z_ex+z_te+z_il+g
+-        self.mlp_eye = MLPStream(in_dim=38)
+-        self.render_module = NeuralRenderingModule()
+-        self.z_sh = nn.Parameter(latent_codes_init['sh'])
+-        self.z_ex = nn.Parameter(latent_codes_init['ex'])
+-        self.z_te = nn.Parameter(latent_codes_init['te'])
+-        self.z_il = nn.Parameter(latent_codes_init['il'])
+-        self.face_mask = face_mask
+-        self.eyes_mask = eyes_mask
+-        self.gaze_label = gaze_label
+-        self.lambda_R = 1.0
+-        self.lambda_P = 1.0
+-        self.lambda_D = 1.0
+-        self.lambda_F_content = 1e-3
+-
+-    def forward(self, rays_x, rays_d):
+-        gamma_x = positional_encoding(rays_x)
+-        gamma_d = positional_encoding(rays_d)
+-        latent = torch.cat([self.z_sh, self.z_ex, self.z_te, self.z_il, self.gaze_label], dim=-1)
+-        input_feat = torch.cat([gamma_x, gamma_d, latent], dim=-1)
+-        
+-        sigma_fw_o, f_fw_o = self.mlp_face(input_feat)
+-        sigma_e, f_e = self.mlp_eye(input_feat)
+-        
+-        F_fw_o = volume_render_feature_map(sigma_fw_o, f_fw_o, rays_x, rays_d)
+-        F_e = volume_render_feature_map(sigma_e, f_e, rays_x, rays_d)
+-        
+-        R = compute_rotation_from_pitch_yaw(self.gaze_label[0], self.gaze_label[1])
+-        F_e_reshaped = F_e.view(64, 64, 86, 3)
+-        F_e_rot_reshaped = torch.matmul(F_e_reshaped, R.T)
+-        F_e_rot = F_e_rot_reshaped.view(64, 64, 258)
+-        
+-        F_wf = torch.maximum(F_fw_o, F_e_rot)
+-        
+-        I_fw_o = self.render_module(F_fw_o)
+-        I_e = self.render_module(F_e_rot)
+-        I_wf = self.render_module(F_wf)
+-        
+-        return I_wf, I_fw_o, I_e
+-
+-    def compute_loss(self, I_wf, I_fw_o, I_e, I_gt):
+-        L_R_wf = torch.mean(torch.abs(self.face_mask * (I_wf - I_gt))) / torch.mean(self.face_mask)
+-        L_R_fw_o = torch.mean(torch.abs(self.face_mask * (I_fw_o - I_gt))) / torch.mean(self.face_mask)
+-        L_R_e = torch.mean(torch.abs(self.eyes_mask * (I_e - I_gt))) / torch.mean(self.eyes_mask)
+-        L_R = L_R_wf + L_R_fw_o + L_R_e
+-        
+-        # Perceptual loss uses VGG16 features [S1]
+-        L_P_wf = torch.mean(torch.abs(I_wf - I_gt)) # Placeholder for VGG feature L1 [G]
+-        L_P_fw_o = torch.mean(torch.abs(I_fw_o - I_gt))
+-        L_P_e = torch.mean(torch.abs(I_e - I_gt))
+-        L_P = L_P_wf + L_P_fw_o + L_P_e
+-        
+-        # Functional loss: angular error between gaze estimator outputs [S1]
+-        est_gaze_wf = torch.randn_like(self.gaze_label) # Placeholder for gaze_estimator(I_wf) [G]
+-        est_gaze_gt = torch.randn_like(self.gaze_label) # Placeholder for gaze_estimator(I_gt) [G]
+-        dot = torch.sum(est_gaze_wf * est_gaze_gt)
+-        norm = torch.norm(est_gaze_wf) * torch.norm(est_gaze_gt)
+-        L_F_content = torch.acos(torch.clamp(dot / (norm + 1e-8), -1.0, 1.0))
+-        L_F = self.lambda_F_content * L_F_content
+-        
+-        L_D = 0
+-        weights = {'sh': 1e-3, 'ex': 1.0, 'te': 1e-3, 'il': 1e-3}
+-        for key, w in weights.items():
+-            z_star = getattr(self, f'z_{key}')
+-            z_0 = self.latent_codes_init[key]
+-            L_D += w * torch.mean((z_star - z_0)**2)
+-            
+-        L_Overall = self.lambda_R * L_R + self.lambda_P * L_P + L_F + self.lambda_D * L_D
+-        return L_Overall
++import numpy as np
++
++def positional_encoding(x, num_frequencies=10):
++    """Standard NeRF positional encoding."""
++    # Implementation details of gamma(x) as defined in [S1]
++    # x is shape (..., 3)
++    scales = np.array([2**i for i in range(num_frequencies)])
++    xb = np.reshape((x[..., None, :] * scales[:, None]), (x.shape[:-1], -1))
++    freq_bands = np.concatenate([np.sin(xb), np.cos(xb)], axis=-1)
++    return np.concatenate([x, freq_bands], axis=-1)
++
++def compute_rotation_matrix(gaze_pitch, gaze_yaw):
++    """Compute 3D rotation matrix R from gaze pitch and yaw angles."""
++    # R is computed from gaze label g [S1]
++    # Standard rotation matrices for pitch and yaw
++    # Note: Exact trigonometric composition depends on coordinate system definition
++    # in the source [S1], but the operation is a rigid 3D rotation.
++    # Placeholder for specific rotation matrix construction from pitch/yaw
++    # In practice, this involves constructing Rx and Ry and multiplying them.
++    pass
++
++def volume_render(MLP, positions, directions, latent_codes, gaze_label):
++    """
++    Perform volume rendering to produce feature map.
++    Returns feature map F of shape (H, W, C).
++    """
++    # 1. Sample points along rays
++    # 2. Query MLP for sigma and f
++    # 3. Apply standard volume rendering equation
++    # 4. Return feature map F
++    pass
++
++def train_gazenerf(reference_image, target_gaze_pitch, target_gaze_yaw, 
++                   latent_codes_init, masks):
++    """
++    Training loop for GazeNeRF.
++    """
++    # Initialize parameters
++    theta_fw_o = initialize_mlp()
++    theta_e = initialize_mlp()
++    theta_render = initialize_render_module()
++    
++    # Latent codes are learnable
++    z_sh = latent_codes_init['shape']
++    z_ex = latent_codes_init['expression']
++    z_te = latent_codes_init['texture']
++    z_il = latent_codes_init['illumination']
++    
++    # Hyperparameters
++    lr = 1e-4
++    lambda_R = 1.0
++    lambda_P = 1.0
++    lambda_F_content = 1e-3
++    w_sh = 1e-3
++    w_te = 1e-3
++    w_il = 1e-3
++    w_ex = 1.0
++    
++    optimizer = Adam([theta_fw_o, theta_e, theta_render, z_sh, z_ex, z_te, z_il], lr=lr)
++    
++    for epoch in range(num_epochs):
++        # 1. Encode Inputs
++        # x, d are derived from camera rays for the reference image resolution
++        # g is target gaze
++        g = np.array([target_gaze_pitch, target_gaze_yaw])
++        
++        # 2. Face Stream
++        # h_theta_fw/o predicts sigma and f
++        sigma_fw_o, f_fw_o = query_mlp(theta_fw_o, x, d, z_sh, z_ex, z_te, z_il, g)
++        
++        # 3. Eye Stream
++        # h_theta_e predicts sigma and f
++        sigma_e, f_e = query_mlp(theta_e, x, d, z_sh, z_ex, z_te, z_il, g)
++        
++        # 4. Volume Rendering
++        # Render to low-res feature maps F_fw/o and F_e (64x64x258)
++        F_fw_o = volume_render_from_mlp_output(sigma_fw_o, f_fw_o)
++        F_e = volume_render_from_mlp_output(sigma_e, f_e)
++        
++        # 5. 3D Rotation
++        # Reshape F_e to (64, 64, 86, 3)
++        F_e_reshaped = F_e.reshape(64, 64, 86, 3)
++        R = compute_rotation_matrix(target_gaze_pitch, target_gaze_yaw)
++        # Apply rotation: F_e-rot = R * F_e
++        # Note: Matrix multiplication needs to handle the batch/height/width dimensions
++        F_e_rot_reshaped = apply_rotation(R, F_e_reshaped)
++        F_e_rot = F_e_rot_reshaped.reshape(64, 64, 258)
++        
++        # 6. Feature Composition
++        # Merge using element-wise max
++        F_wf = np.maximum(F_fw_o, F_e_rot)
++        
++        # 7. Final Rendering
++        # Render images using shared weights theta_render
++        I_wf = render_image(F_wf, theta_render)
++        I_fw_o = render_image(F_fw_o, theta_render)
++        I_e = render_image(F_e_rot, theta_render)
++        
++        # Compute Losses
++        # Reconstruction Loss
++        L_R_whole = masked_l1_loss(I_wf, reference_image, masks['whole_face'])
++        L_R_face = masked_l1_loss(I_fw_o, reference_image, masks['face_only'])
++        L_R_eyes = masked_l1_loss(I_e, reference_image, masks['eyes'])
++        L_R = L_R_whole + L_R_face + L_R_eyes
++        
++        # Perceptual Loss (VGG16)
++        L_P_whole = perceptual_loss(I_wf, reference_image, vgg_net)
++        L_P_face = perceptual_loss(I_fw_o, reference_image, vgg_net)
++        L_P_eyes = perceptual_loss(I_e, reference_image, vgg_net)
++        L_P = L_P_whole + L_P_face + L_P_eyes
++        
++        # Functional Loss (Gaze Estimator)
++        # Only content consistency loss from STED
++        L_F_content = functional_content_loss(I_wf, reference_image, gaze_estimator)
++        L_F = lambda_F_content * L_F_content
++        
++        # Disentanglement Loss
++        # Distance between learned latent codes and initial values
++        L_D_sh = w_sh * l2_loss(z_sh, latent_codes_init['shape'])
++        L_D_ex = w_ex * l2_loss(z_ex, latent_codes_init['expression'])
++        L_D_te = w_te * l2_loss(z_te, latent_codes_init['texture'])
++        L_D_il = w_il * l2_loss(z_il, latent_codes_init['illumination'])
++        L_D = L_D_sh + L_D_ex + L_D_te + L_D_il
++        
++        # Overall Loss
++        L_Overall = lambda_R * L_R + lambda_P * L_P + L_F + L_D
++        
++        # Update parameters
++        optimizer.zero_grad()
++        L_Overall.backward()
++        optimizer.step()
++        
++        # Increase functional loss coefficient
++        lambda_F_content += 1e-3
+ ```
+ 
++**Parameters with Typical Values:**
++*   **Optimizer:** Adam with learning rate $1 \times 10^{-4}$ [S1].
++*   **Loss Coefficients:** $\lambda_R = \lambda_P = \lambda_F = \lambda_D = 1$ [S1].
++*   **Disentanglement Weights:** $w_{sh} = w_{te} = w_{il} = 1 \times 10^{-3}$ and $w_{ex} = 1.0$ [S1].
++*   **Functional Loss Coefficient:** $\lambda_{F_{content}}$ starts at $1 \times 10^{-3}$ and increases by $1 \times 10^{-3}$ after each epoch [S1].
++*   **Input Resolution:** Face images resized to $512 \times 512$ pixels [S1].
++*   **Feature Map Dimensions:** $64 \times 64 \times 258$ [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Masking:** The method relies on accurate segmentation masks ($M_{wf}, M_f, M_e$) to ensure each stream generates features corresponding to the correct regions. Incorrect masks can lead to blending artifacts or failure to disentangle eyes from face [S1].
++*   **Rotation Matrix:** The rotation matrix $R$ must be correctly computed from the gaze label $g$ (pitch and yaw in radians) to ensure 3D consistency [S1].
++*   **Latent Code Initialization:** Latent codes are initialized from 3DMM parameters. Poor initialization may affect convergence or identity preservation [S1].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Training involves optimizing two MLPs and latent codes via Adam optimizer [S1]. The explicit 3D rotation and feature compositing add minimal overhead to the standard NeRF volume rendering pipeline [S1].
+-*   **Memory Complexity:** Requires storing two sets of MLP parameters and four latent codes per subject [S1]. Feature maps are low-resolution ($64 \times 64 \times 258$) [S1].
+-*   **Performance:** On the ETH-XGaze dataset, GazeNeRF achieves superior gaze redirection accuracy compared to STED and HeadNeRF, while maintaining similar image quality metrics (SSIM, PSNR, LPIPS) to HeadNeRF [S1].
+-*   **Strengths:** Explicit 3D awareness of eyeball rotation; disentangled features prevent identity loss and blurry eyes; high-fidelity rendering [S1].
+-*   **Limitations:** Requires face parsing masks for training; relies on 3DMM initialization for latent codes; 2D gaze label input limits head pose control compared to full 3D head pose conditioning [S1].
+-*   **When to use:** When 3D-consistent gaze redirection is required, especially for applications needing accurate eye rotation without distorting the rest of the face [S1].
+-*   **When not to use:** When high-fidelity relighting is the primary goal (EyeNeRF is better suited) or when 2D-only processing is sufficient and 3D awareness is not critical [S1].
++*   **Time and Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** Evaluated on the ETH-XGaze dataset. GazeNeRF achieves better results than STED and HeadNeRF in gaze and head redirection errors (degrees). It achieves similar results to HeadNeRF in image quality metrics (SSIM, PSNR, LPIPS) [S1].
++*   **Scaling:** Not given in the sources.
++*   **Strengths:** Explicit 3D awareness of eyeball rotation; disentangled feature streams allow independent control of face deformation and eye rotation; preserves identity better than 2D methods [S1].
++*   **Limitations:** Requires face parsing models for masks; relies on 3DMM for latent code initialization; computational cost of two-stream MLPs and volume rendering [S1].
++*   **When to use it:** When 3D-consistent gaze redirection is required, especially for applications needing high redirection accuracy and identity preservation [S1].
++*   **When not:** When high-fidelity relighting is the primary goal (use EyeNeRF instead) or when computational resources are extremely limited and 3D consistency is not critical [S1].
+ 
+ ## Background
+-GazeNeRF was proposed in 2023 by the authors of "GazeNeRF: 3D-Aware Gaze Redirection with Neural Radiance Fields" [S1]. It builds on the intuition that the face and eyeballs are separate 3D structures that move independently [S1]. It differs from 2D methods like STED and FAZE, which apply weak rotation priors to mixed 2D latent features, and from EyeNeRF, which focuses on high-fidelity rendering rather than gaze redirection accuracy [S1]. It also improves upon HeadNeRF by separating the eyes into a distinct stream for explicit 3D rotation [S1]. The method was evaluated on the ETH-XGaze, ColumbiaGaze, MPIIFaceGaze, and GazeCapture datasets [S1].
++GazeNeRF was proposed in 2023 by the authors of "GazeNeRF: 3D-Aware Gaze Redirection with Neural Radiance Fields" [S1]. It builds on the intuition that the face region and eyeballs are separate 3D structures that move in a coordinated yet independent fashion [S1]. It shares similarities with EyeNeRF but focuses on gaze redirection accuracy rather than high-fidelity rendering and relighting quality [S1]. It differs from HeadNeRF, which uses a single MLP conditioned on gaze labels, by using explicit 3D rotation on separated eye features [S1]. It is used for gaze redirection tasks, outperforming 2D methods like STED and FAZE which lack 3D awareness [S1].
+ 
+ ## Sources
++
+ [S1] GazeNeRF: 3D-Aware Gaze Redirection with Neural Radiance Fields, https://doi.org/10.1109/CVPR52729.2023.00933, fetched 2026-10-29

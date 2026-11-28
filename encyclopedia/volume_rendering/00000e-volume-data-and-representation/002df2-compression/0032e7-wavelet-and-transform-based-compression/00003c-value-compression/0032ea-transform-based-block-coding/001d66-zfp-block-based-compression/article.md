@@ -1,0 +1,187 @@
+# ZFP Block-Based Compression
+
+Also called: Expert Mode, ZFP
+
+## Overview
+ZFP is a floating-point compression algorithm that encodes blocks of 4×4×4 values using fixed-rate, fixed-precision, or fixed-accuracy modes, serving as a de facto standard in the High-Performance Computing (HPC) community [S1, S2]. It achieves up to 2 gigabytes/second throughput and excellent rate-distortion performance without introducing visual artifacts, while maintaining random access at block granularity [S3]. Unlike learned transform coding, ZFP relies on deterministic tensor-product transforms and bit-plane encoding, making it highly predictable and efficient for cache-based decompression [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume of floating-point values, typically double-precision (64 bits/value) [S3].
+*   **Output:** A compressed bitstream. In fixed-rate mode, the output size is strictly determined by the block size and target bit count [S2].
+
+**Data Structures:**
+*   **Block:** A 4×4×4 array of floating-point values [S1, S2].
+*   **Transform Coefficients:** The result of applying a tensor-product transform to the block [S1].
+*   **Bit Planes:** Binary representations of the transform coefficients, encoded sequentially [S1].
+
+**Steps:**
+1.  **Block Partitioning:** Partition the 3D input array into non-overlapping 4×4×4 blocks [S1, S2].
+2.  **Normalization:** For each block, identify the largest exponent among all floating-point values and factor it out to normalize the values [S1].
+3.  **Fixed-Point Conversion:** Convert the normalized floating-point values into a two's complement fixed-point format [S1].
+4.  **Transform:** Apply a spatial decorrelation transform to the block using a tensor product of 1D transforms along each axis, such as the Discrete Wavelet Transform (DWT) or Discrete Cosine Transform (DCT) [S1].
+5.  **Bit-Plane Encoding:** Encode the resulting transform coefficients per bit plane [S1]. The bit planes are packed into a bitstream [G].
+
+**Parameters:**
+*   **Block Size:** Fixed at 4×4×4 [S1, S2].
+*   **minbits:** The minimum number of compressed bits used to represent a block. Usually equals one bit [S2]. If set equal to `maxbits`, it forces fixed-size blocks for random access [S2].
+*   **maxbits:** The maximum number of bits used to represent a block. Sets a hard upper bound on compressed block size and governs the rate in fixed-rate mode [S2].
+*   **maxprec:** The maximum number of bit planes encoded. Governs the number of most significant uncompressed bits encoded per transform coefficient and controls relative error [S2].
+*   **minexp:** The smallest absolute bit plane number encoded. Determines the place value of coefficients based on the common floating-point exponent $e$ [S2]. If the most significant coefficient bit has place value $2^e$, the number of bit planes encoded is $(1) + (e - \text{minexp})$ [S2].
+
+**Formulas:**
+*   **Rate:** $\text{rate} = \text{maxbits} / 4^d$, where $d$ is the dimension (3 for 3D volumes) [S2].
+*   **Uncompressed Bound:** $\text{maxbits} = 4^d \times \text{CHAR\_BIT} \times \text{sizeof(Type)}$, where Type is float or double, ensuring the compressed stream is not larger than the uncompressed one [S2].
+*   **Accuracy vs. PSNR:** Every PSNR increase of 20 dB corresponds to an additional decimal digit of accuracy [S3].
+*   **Error Reduction:** A 268 dB PSNR improvement represents an increase in accuracy (or reduction in RMS error) of more than $10^{12}$ times [S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def get_exponent(val):
+    """Extract the exponent from an IEEE 754 float."""
+    return math.frexp(val)[1]
+
+def float_to_fixed_point(val, max_exp, bits=16):
+    """Normalize by max_exp and convert to two's complement integer [G]."""
+    normalized = val / (2 ** max_exp)
+    return int(round(normalized * (2 ** (bits - 1))))
+
+def fixed_point_to_float(val, max_exp, bits=16):
+    """Convert two's complement integer back to normalized float [G]."""
+    normalized = val / (2 ** (bits - 1))
+    return normalized * (2 ** max_exp)
+
+def apply_1d_transform(signal):
+    """Apply a 1D DCT-II transform to a 1D signal [G]."""
+    N = len(signal)
+    result = [0.0] * N
+    for k in range(N):
+        s = 0.0
+        for n in range(N):
+            s += signal[n] * math.cos(math.pi * k * (2 * n + 1) / (2 * N))
+        result[k] = s * (math.sqrt(1.0 / N) if k == 0 else math.sqrt(2.0 / N))
+    return result
+
+def apply_tensor_transform(block):
+    """Apply tensor-product transform along X, Y, Z axes."""
+    # Transform along X
+    for y in range(4):
+        for z in range(4):
+            col = [block[x][y][z] for x in range(4)]
+            transformed = apply_1d_transform(col)
+            for x in range(4):
+                block[x][y][z] = transformed[x]
+    # Transform along Y
+    for x in range(4):
+        for z in range(4):
+            col = [block[x][y][z] for y in range(4)]
+            transformed = apply_1d_transform(col)
+            for y in range(4):
+                block[x][y][z] = transformed[y]
+    # Transform along Z
+    for x in range(4):
+        for y in range(4):
+            col = [block[x][y][z] for z in range(4)]
+            transformed = apply_1d_transform(col)
+            for z in range(4):
+                block[x][y][z] = transformed[z]
+    return block
+
+def apply_inverse_tensor_transform(block):
+    """Apply inverse tensor-product transform along Z, Y, X axes."""
+    for x in range(4):
+        for y in range(4):
+            col = [block[x][y][z] for z in range(4)]
+            transformed = apply_1d_transform(col)
+            for z in range(4):
+                block[x][y][z] = transformed[z]
+    for x in range(4):
+        for z in range(4):
+            col = [block[x][y][z] for y in range(4)]
+            transformed = apply_1d_transform(col)
+            for y in range(4):
+                block[x][y][z] = transformed[y]
+    for y in range(4):
+        for z in range(4):
+            col = [block[x][y][z] for x in range(4)]
+            transformed = apply_1d_transform(col)
+            for x in range(4):
+                block[x][y][z] = transformed[x]
+    return block
+
+def encode_bit_planes(coeffs, maxprec):
+    """Encode transform coefficients per bit plane up to maxprec [G]."""
+    bits = []
+    for plane_idx in range(maxprec - 1, -1, -1):
+        for x in range(4):
+            for y in range(4):
+                for z in range(4):
+                    val = int(round(coeffs[x][y][z]))
+                    bits.append((val >> plane_idx) & 1)
+    return bits
+
+def decode_bit_planes(bitstream, maxprec):
+    """Decode bit planes back to transform coefficients."""
+    coeffs = [[[0.0 for _ in range(4)] for _ in range(4)] for _ in range(4)]
+    idx = 0
+    for plane_idx in range(maxprec - 1, -1, -1):
+        for x in range(4):
+            for y in range(4):
+                for z in range(4):
+                    coeffs[x][y][z] += bitstream[idx] * (2 ** plane_idx)
+                    idx += 1
+    return coeffs
+
+def zfp_compress_block(block_4x4x4_floats, maxprec):
+    max_exp = -math.inf
+    for x in range(4):
+        for y in range(4):
+            for z in range(4):
+                exp = get_exponent(block_4x4x4_floats[x][y][z])
+                if exp > max_exp:
+                    max_exp = exp
+    fixed_block = [[[float_to_fixed_point(block_4x4x4_floats[x][y][z], max_exp) for z in range(4)] for y in range(4)] for x in range(4)]
+    coeffs = apply_tensor_transform(fixed_block)
+    return encode_bit_planes(coeffs, maxprec), max_exp
+
+def zfp_decompress_block(bitstream, max_exp, maxprec):
+    coeffs = decode_bit_planes(bitstream, maxprec)
+    fixed_block = apply_inverse_tensor_transform(coeffs)
+    block_4x4x4_floats = [[[fixed_point_to_float(fixed_block[x][y][z], max_exp) for z in range(4)] for y in range(4)] for x in range(4)]
+    return block_4x4x4_floats
+```
+
+**Edge Cases and Pitfalls:**
+*   **Cache Efficiency:** Decompression is only efficient when using caches [S1]. Incoherent memory access patterns, such as those in Monte Carlo rendering, require complex strategies like ray wavefronts, barrier synchronization, and sorting to amortize decompression costs [S1].
+*   **Error Magnification:** The inverse transform may magnify error, so `minexp` must be conservatively lowered to achieve a specific accuracy in decompressed values [S2].
+*   **Random Access:** Fixed-rate mode enables random access at block granularity, but this assumes the renderer can load and decompress individual blocks efficiently [S3].
+
+## Subtopics
+
+### Fixed-Rate Mode
+Compresses each 4×4×4 block to a fixed number of bits [S3]. Best for applications requiring predictable memory usage and random access [S2].
+
+### Fixed-Precision Mode
+Fixes the number of bits per value, resulting in bounded relative error [S3]. Suitable when relative error is the primary concern [S2].
+
+### Fixed-Accuracy Mode
+Guarantees an absolute error tolerance [S3]. Best for applications requiring strict error bounds and highest PSNR [S2].
+
+## Operating characteristics
+*   **Throughput:** ZFP achieves up to 2 gigabytes/second throughput for compression and decompression [S3].
+*   **Speed:** It compresses and decompresses data between 6 and 170 times faster than other compressors like ISABELA and fpzip [S3].
+*   **Quality:** ZFP exhibits excellent rate-distortion performance with no visible artifacts, even at high compression ratios [S3].
+*   **Memory Access:** Decompression efficiency is heavily dependent on cache coherence [S1]. Incoherent access patterns (e.g., ray tracing) can negate performance benefits without additional synchronization and sorting overhead [S1].
+*   **Accuracy:** Fixed-accuracy mode can achieve a 268 dB PSNR improvement over ISABELA, representing a reduction in RMS error of more than 10 trillion times [S3].
+
+## Background
+ZFP was introduced as a fast compressor and decompressor for floating-point data [S2]. It has become a de facto standard in the HPC community for compressing simulation data and volume rendering datasets [S1]. Recent work has ported ZFP to WebGPU for on-the-fly iso-surface extraction and progressive streaming [S1].
+
+## Sources
+[S1] GPU Volume Rendering with Hierarchical Compression Using VDB, https://arxiv.org/pdf/2504.04564, fetched 2026-10-26
+[S2] Compression Modes — zfp 0.5.4 documentation, https://zfp.readthedocs.io/en/release0.5.4/modes.html, fetched 2026-10-28
+[S3] zfp Compression Ratio and Quality - | Computing, https://computing.llnl.gov/projects/zfp/zfp-compression-ratio-and-quality, fetched 2026-10-29

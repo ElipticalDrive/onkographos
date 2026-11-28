@@ -1,0 +1,126 @@
+# Dynamic 3D Gaussians
+
+Also called: Persistent Dynamic View Synthesis, Tracking by Persistent Dynamic View Synthesis
+
+## Overview
+Dynamic 3D Gaussians is a method for dynamic scene novel-view synthesis and 6-DOF tracking that models a scene as a collection of 3D Gaussians which move and rotate over time while maintaining persistent color, opacity, and size [S2]. It performs tracking by persistent dynamic view synthesis, linking the motion of each Gaussian to the movement of a corresponding 3D point in the scene [S1, unofficial]. Unlike Eulerian representations or canonical-space deformation fields, this method uses a Lagrangian particle-based representation where Gaussians move through space, enabling natural long-term correspondence without explicit flow or canonical warping [S2]. It sets itself apart from siblings like [GaussianFlow](6149-gaussianflow.md) and [SWAGS](17376-swags.md) by fixing geometric attributes (scale, color, opacity) after the first timestep and optimizing only motion parameters with physical regularization losses [S2].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Synchronized multi-view video frames $I_{t,c}$ for timesteps $t=0 \dots T$ and cameras $c$. Camera intrinsics $K_c$ and extrinsics $E_{t,c}$. Optional sparse depth samples for initialization [S2].
+- **Outputs:** A sequence of scene representations $S_t$, each consisting of a set of Dynamic 3D Gaussians with time-varying positions $\boldsymbol{\mu}_{i,t}$ and rotations $q_{i,t}$, and static attributes (scale $S_i$, color $c_i$, opacity $o_i$, background logit $bg_i$) [S2].
+
+**Data Structures:**
+Each Gaussian $i$ stores:
+- Position: $\boldsymbol{\mu}_{i,t} \in \mathbb{R}^3$ (optimized per timestep)
+- Rotation: $q_{i,t} \in \mathbb{R}^4$ (unit quaternion, optimized per timestep)
+- Scale: $S_i = \text{diag}(s_{xi}, s_{yi}, s_{zi}) \in \mathbb{R}^{3 \times 3}$ (fixed after $t=0$)
+- Color: $c_i \in \mathbb{R}^3$ (fixed after $t=0$)
+- Opacity logit: $o_i \in \mathbb{R}$ (fixed after $t=0$)
+- Background logit: $bg_i \in \mathbb{R}$ (fixed after $t=0$)
+Total parameters per Gaussian: 7 time-varying (3 pos + 4 rot) + 8 static = 15 parameters [S2].
+
+**Number of Gaussians:** 200,000–300,000 per scene [S2].
+
+**Algorithm Steps:**
+
+1. **Initialization ($t=0$):**
+   - Initialize a sparse point cloud using available depth samples [S2].
+   - Optimize all Gaussian properties ($\boldsymbol{\mu}_{i,0}, q_{i,0}, S_i, c_i, o_i, bg_i$) using gradient-based optimization with a differentiable renderer $\mathcal{R}$ for 10,000 iterations [S2].
+   - Apply densification (from 3D Gaussian Splatting) to increase density [S2].
+   - Compute initial neighbor weights $w_{i,j}$ based on distance at $t=0$ (see Formula 3) [S2].
+
+2. **Subsequent Timesteps ($t > 0$):**
+   - **Initialization:** Estimate initial position and rotation for timestep $t$ using forward velocity from $t-1$:
+     $$ \boldsymbol{\mu}_{i,t}^{init} = \boldsymbol{\mu}_{i,t-1} + v_{i,t-1} $$
+     $$ q_{i,t}^{init} = \text{normalize}(q_{i,t-1} \otimes \Delta q) $$
+     where $v_{i,t-1} = \boldsymbol{\mu}_{i,t-1} - \boldsymbol{\mu}_{i,t-2}$ (or similar velocity estimate) and $\Delta q$ is the normalized quaternion difference [S2].
+   - **Reset Optimizer:** Reset Adam optimizer first and second order momentum parameters [S2].
+   - **Optimization:** Optimize only $\boldsymbol{\mu}_{i,t}$ and $q_{i,t}$ for 2,000 iterations. Fix $S_i, c_i, o_i, bg_i$ [S2].
+   - **Rendering:** Render scene $S_t$ into each training camera $c$:
+     $$ \hat{I}_{t,c} = \mathcal{R}(S_t, K_c, E_{t,c}) \quad \text{[Formula 1]} $$
+   - **Loss Calculation:** Compute losses (see Formulas 2-6) and update parameters via automatic differentiation [S2].
+
+**Formulas:**
+
+1. **Rendering:**
+   $$ \hat{I}_{t,c} = \mathcal{R}(S_t, K_c, E_{t,c}) $$
+   where $\mathcal{R}$ is the differentiable renderer, $S_t$ is the scene representation, $K_c$ is intrinsic matrix, $E_{t,c}$ is extrinsic matrix [S2].
+
+2. **3D Gaussian Influence:**
+   $$ f_{i,t}(p) = \text{sigm}(o_i) \exp \left( -\frac{1}{2} (p - \boldsymbol{\mu}_{i,t})^T \Sigma_{i,t}^{-1} (p - \boldsymbol{\mu}_{i,t}) \right) $$
+   where $\boldsymbol{\mu}_{i,t}$ is the center, $\Sigma_{i,t}$ is the covariance, $o_i$ is opacity logit [S2].
+
+3. **Covariance Construction:**
+   $$ \Sigma_{i,t} = R_{i,t} S_i S_i^T R_{i,t}^T $$
+   where $S_i = \text{diag}(s_{xi}, s_{yi}, s_{zi})$ and $R_{i,t}$ is the rotation matrix derived from quaternion $q_{i,t}$ [S2].
+
+4. **2D Splatting (Center):**
+   $$ \boldsymbol{\mu}_{2D} = K ((E\boldsymbol{\mu})/(E\boldsymbol{\mu})_z) $$
+   where $K$ is intrinsic matrix, $E$ is extrinsic matrix, $\boldsymbol{\mu}$ is 3D center, $(E\boldsymbol{\mu})_z$ is the z-component of the transformed center [S2].
+
+5. **2D Splatting (Covariance):**
+   $$ \Sigma_{2D} = J E \Sigma E^T J^T $$
+   where $J$ is the Jacobian of the point projection formula ($\partial \boldsymbol{\mu}_{2D} / \partial \boldsymbol{\mu}$) [S2].
+
+6. **Volume Rendering:**
+   $$ C_{pix} = \sum_{i \in S} c_i f_{2D}^{i,pix} \prod_{j=1}^{i-1} (1 - f_{2D}^{j,pix}) $$
+   where $c_i$ is color, $f_{2D}^{i,pix}$ is 2D influence, sorted by depth [S2].
+
+7. **Local Rigidity Loss:**
+   $$ L_{rigid}^{i,j} = w_{i,j} \| (\boldsymbol{\mu}_{j,t-1} - \boldsymbol{\mu}_{i,t-1}) - R_{i,t-1} R_{i,t}^{-1} (\boldsymbol{\mu}_{j,t} - \boldsymbol{\mu}_{i,t}) \|^2 $$
+   Enforces rigid body transform consistency between neighbors $i$ and $j$ [S2].
+
+8. **Total Local Rigidity Loss:**
+   $$ L_{rigid} = \frac{1}{k|S|} \sum_{i \in S} \sum_{j \in knn_{i;k}} L_{rigid}^{i,j} $$
+   where $k=20$ nearest neighbors [S2].
+
+9. **Local Rotation Similarity Loss:**
+   $$ L_{rot} = \frac{1}{k|S|} \sum_{i \in S} \sum_{j \in knn_{i;k}} w_{i,j} \| \hat{q}_{j,t} \hat{q}_{j,t-1}^{-1} - \hat{q}_{i,t} \hat{q}_{i,t-1}^{-1} \|^2 $$
+   where $\hat{q}$ is normalized quaternion [S2].
+
+10. **Long-term Local Isometry Loss:**
+    $$ L_{iso} = \frac{1}{k|S|} \sum_{i \in S} \sum_{j \in knn_{i;k}} w_{i,j} | \| \boldsymbol{\mu}_{j,0} - \boldsymbol{\mu}_{i,0} \|^2 - \| \boldsymbol{\mu}_{j,t} - \boldsymbol{\mu}_{i,t} \|^2 | $$
+    Enforces constant distance between neighbors over time [S2].
+
+11. **Neighbor Weighting:**
+    $$ w_{i,j} = \exp(-\lambda_w \| \boldsymbol{\mu}_{j,0} - \boldsymbol{\mu}_{i,0} \|^2_2) $$
+    with $\lambda_w = 2000$ (std dev ~2.2cm) [S2].
+
+**Parameters:**
+- Number of Gaussians: 200,000–300,000 [S2].
+- Training cameras: 27 [S2].
+- Optimization iterations: 10,000 for $t=0$; 2,000 for $t>0$ [S2].
+- Rigidity weight $\lambda_w$: 2000 [S2].
+- Spherical harmonics: Off [S2].
+- Densification: Only at $t=0$ [S2].
+
+**Edge Cases and Pitfalls:**
+- Requires synchronized multi-view video; does not support monocular video [S2].
+- Mis-tracking occurs for foreground objects with colors similar to background (e.g., grey shirt vs grey background) [S2].
+- Gaussians may move freely in uniform color areas without physical regularization [S2].
+- Drift of scene elements over long time horizons due to short-term loss enforcement [S2].
+- Background points should not move or rotate; losses are restricted to foreground points to avoid enforcing rigidity between foreground and static floor [S2].
+
+## Subtopics
+
+### 3D Warping
+A method to estimate the 3D position of a Gaussian primitive at a current frame $t$ from its position at a previous frame $t'$ using 2D point tracking and triangulation [S3]. It computes 2D projections across $N$ input views, runs 2D point tracking to obtain corresponding 2D pixel positions, and recovers 3D position by finding the closest point to the $N$ camera rays [S3]. Motion is propagated from sparse anchor points (selected via farthest point sampling) to the entire scene using an embedded deformation graph, connecting each splat to its $K$ nearest anchor points with blend weights based on spatial distances [S3]. It maintains primitives only from a set of past keyframes, smoothly adjusting contributions as older keyframes are replaced [S3].
+
+## Operating characteristics
+- **Time Complexity:** Optimization is performed per timestep. First timestep takes ~4 minutes (10,000 iterations); subsequent timesteps take ~50 seconds (2,000 iterations) [S2]. Total training time: 2 hours for 150 timesteps on a single RTX 3090 GPU [S2].
+- **Memory Complexity:** Stores 15 parameters per Gaussian. 200,000–300,000 Gaussians per scene [S2].
+- **Measured Performance:** Renders at 850 FPS [S2]. Achieves 28.7 PSNR on dynamic novel view rendering [S2]. Average L2 error of 2.21cm in 3D tracking over 150 timesteps [S2].
+- **Scaling:** Rendering speed is high due to graphics/CUDA optimizations [S2].
+- **Strengths:** Real-time rendering, accurate 6-DOF tracking, persistent color/opacity/size, Lagrangian representation avoids canonical warping [S2].
+- **Limitations:** Requires multi-view input, sensitive to color similarity between foreground/background, potential drift over long horizons [S2].
+- **When to use:** Dynamic scene reconstruction with synchronized multi-view video where persistent tracking and real-time rendering are needed [S2].
+- **When not to use:** Monocular video input, scenes with significant textureless uniform regions without physical priors [S2].
+
+## Background
+Dynamic 3D Gaussians was introduced in the paper "Dynamic 3D Gaussians: Tracking by Persistent Dynamic View Synthesis" [S2]. It follows an analysis-by-synthesis framework, inspired by 3D Gaussian Splatting [S1, unofficial]. The method falls into the category of Lagrangian representations, where an observer follows a particular particle through space and time, contrasting with Eulerian representations that track motion at fixed grid locations [S2]. It was evaluated on the CMU Panoptic Studio dataset [S2].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] Dynamic 3D Gaussians: Tracking by Persistent Dynamic View Synthesis, https://doi.org/10.1109/3dv62453.2024.00044, fetched 2026-10-26
+[S3] Learning Efficient Fuse-and-Refine for Feed-Forward 3D Gaussian Splatting, https://arxiv.org/abs/2503.14698v2, fetched 2026-10-27

@@ -1,0 +1,100 @@
+--- v002.md
++++ v003.md
+@@ -15,14 +15,14 @@
+ **Data Structures**
+ - Pixel coordinate grids $X_s, Y_s \in \mathbb{R}^{H \times W}$ containing the x and y coordinates of each pixel in the source frame [S1, unofficial].
+-- Arbitrary depth values $z_l$ (near) and $z_f$ (far) used to construct the epipolar line. Typical values are $z_l = 0.85$ and $z_f = 0.15$ [S1, unofficial].
++- Arbitrary depth values $z_l$ (near) and $z_f$ (far) used to construct the epipolar line [S1, unofficial]. Typical values are $z_l = 0.85$ and $z_f = 0.15$ [S1, unofficial].
+ 
+ **Steps**
+ 1. **Construct Source Pixel Grids**: Create grids of pixel coordinates $(x_s, y_s)$ for the source frame with dimensions $H \times W$ [S1, unofficial].
+-2. **Define Arbitrary Depths**: Select two arbitrary depth values, $z_l$ and $z_f$, to define the epipolar line. These values do not need to correspond to actual scene depths [S1, unofficial].
++2. **Define Arbitrary Depths**: Select two arbitrary depth values, $z_l$ and $z_f$, to define the epipolar line [S1, unofficial]. These values do not need to correspond to actual scene depths [S1, unofficial].
+ 3. **Reproject to Target Frame**: Reproject the pixel coordinates at both depths into frame $j$ using camera poses $(R_i, C_i, R_j, C_j)$ and intrinsics $(f_x, f_y, c_x, c_y)$ to obtain points $(u_1, v_1)$ and $(u_2, v_2)$ [S1, unofficial].
+-4. **Compute Line Geometry**: Calculate the line direction vector $(d_x, d_y) = (u_2 - u_1, v_2 - v_1)$ and its norm $\|\mathbf{d}\|$. Identify valid pixels where both projections are valid and $\|\mathbf{d}\| > \epsilon$ (e.g., $\epsilon = 10^{-3}$) to avoid epipole degeneracy [S1, unofficial].
++4. **Compute Line Geometry**: Calculate the line direction vector $(d_x, d_y) = (u_2 - u_1, v_2 - v_1)$ and its norm $\|\mathbf{d}\|$ [S1, unofficial]. Identify valid pixels where both projections are valid and $\|\mathbf{d}\| > \epsilon$ (e.g., $\epsilon = 10^{-3}$) to avoid epipole degeneracy [S1, unofficial].
+ 5. **Compute Line Normal**: For valid pixels, compute the unit normal vector $\mathbf{n} = (n_x, n_y)$ to the epipolar line using the valid mask and norm [S1, unofficial].
+ 6. **Determine Correspondence**: Calculate the measured correspondence in frame $j$ by adding the measured flow to the original pixel coordinates: $(x_c, y_c) = (x_s + F_x, y_s + F_y)$ [S1, unofficial].
+-7. **Compute Point-to-Line Distance**: Compute the point-to-line distance using the dot product of the normal and the vector from the line point to the correspondence, then reshape to image dimensions [S1, unofficial]. The distance is given by $D = |n_x(x_c - u_1) + n_y(y_c - v_1)|$.
++7. **Compute Point-to-Line Distance**: Compute the point-to-line distance using the dot product of the normal and the vector from the line point to the correspondence, then reshape to image dimensions [S1, unofficial]. The distance is given by $D = |n_x(x_c - u_1) + n_y(y_c - v_1)|$ [S1, unofficial].
+ 
+ **Pseudocode**
+@@ -32,22 +32,20 @@
+ def compute_epipolar_residual(
+     flow: np.ndarray,  # Shape (H, W, 2)
+-    pose_i: np.ndarray,  # 4x4 pose of source frame
+-    pose_j: np.ndarray,  # 4x4 pose of target frame
+-    intrinsics: np.ndarray,  # [fx, fy, cx, cy]
+-    z_near: float = 0.85,
+-    z_far: float = 0.15,
++    Ri: np.ndarray, Ci: np.ndarray,  # Source pose
++    Rj: np.ndarray, Cj: np.ndarray,  # Target pose
++    fx: float, fy: float, cx: float, cy: float,  # Intrinsics
++    zl: float = 0.85,  # Near arbitrary depth
++    zf: float = 0.15,  # Far arbitrary depth
+     eps: float = 1e-3
+ ) -> np.ndarray:
+     H, W = flow.shape[:2]
+-    fx, fy, cx, cy = intrinsics
+     
+-    # 1. Create pixel coordinate grids
++    # 1. Create pixel coordinate grids for the source frame
+     xs, ys = np.meshgrid(np.arange(W), np.arange(H))
+     
+-    # 2. Define arbitrary depths
+-    zl = z_near
+-    zf = z_far
++    # 2. Define arbitrary depths (source uses zl = _depth_to_z(0.85), zf = _depth_to_z(0.15)) [S1, unofficial]
++    # zl and zf represent Z coordinates in the source camera frame.
+     
+-    # 3. Reproject to target frame
++    # 3. Reproject to target frame j
+     # Convert to normalized coordinates in frame i
+     x_norm = (xs - cx) / fx
+@@ -58,16 +56,16 @@
+     pts_far_i = np.stack([x_norm * zf, y_norm * zf, zf, np.ones_like(xs)], axis=-1)
+     
+-    # Transform to world (assuming pose_i is world-to-camera, so inv(pose_i) is camera-to-world)
+-    inv_pose_i = np.linalg.inv(pose_i)
+-    pts_near_world = (inv_pose_i @ pts_near_i.T).T
+-    pts_far_world = (inv_pose_i @ pts_far_i.T).T
++    # Transform to world: P_w = Ri^T * (P_i - Ci)
++    pts_near_world = (Ri.T @ (pts_near_i[:, :, :3] - Ci).T).T
++    pts_far_world = (Ri.T @ (pts_far_i[:, :, :3] - Ci).T).T
+     
+-    # Transform to frame j
+-    pts_near_j = (pose_j @ pts_near_world.T).T
+-    pts_far_j = (pose_j @ pts_far_world.T).T
++    # Transform to frame j: P_j = Rj * P_w + Cj
++    pts_near_j = (Rj @ pts_near_world.T).T + Cj
++    pts_far_j = (Rj @ pts_far_world.T).T + Cj
+     
+     # Project to image plane j
+     z_near_j = pts_near_j[:, :, 2]
+     z_far_j = pts_far_j[:, :, 2]
++    
+     valid_z_near = np.abs(z_near_j) > eps
+     valid_z_far = np.abs(z_far_j) > eps
+@@ -75,11 +73,11 @@
+     u1 = np.zeros_like(z_near_j)
+     v1 = np.zeros_like(z_near_j)
+-    u1[valid_z_near] = (pts_near_j[valid_z_near, :, 0] / z_near_j[valid_z_near]) * fx + cx
+-    v1[valid_z_near] = (pts_near_j[valid_z_near, :, 1] / z_near_j[valid_z_near]) * fy + cy
++    u1[valid_z_near] = (pts_near_j[valid_z_near, 0] / z_near_j[valid_z_near]) * fx + cx
++    v1[valid_z_near] = (pts_near_j[valid_z_near, 1] / z_near_j[valid_z_near]) * fy + cy
+     
+     u2 = np.zeros_like(z_far_j)
+     v2 = np.zeros_like(z_far_j)
+-    u2[valid_z_far] = (pts_far_j[valid_z_far, :, 0] / z_far_j[valid_z_far]) * fx + cx
+-    v2[valid_z_far] = (pts_far_j[valid_z_far, :, 1] / z_far_j[valid_z_far]) * fy + cy
++    u2[valid_z_far] = (pts_far_j[valid_z_far, 0] / z_far_j[valid_z_far]) * fx + cx
++    v2[valid_z_far] = (pts_far_j[valid_z_far, 1] / z_far_j[valid_z_far]) * fy + cy
+     
+     # 4. Compute line geometry
+@@ -112,5 +110,5 @@
+ 
+ **Edge Cases and Pitfalls**
+-- **Epipole Degeneracy**: If the pixel is near the epipole, the direction vector norm approaches zero. The method checks for $\|\mathbf{d}\| > \epsilon$ to avoid epipole degeneracy [S1, unofficial].
++- **Epipole Degeneracy**: If the pixel is near the epipole, the direction vector norm approaches zero [S1, unofficial]. The method checks for $\|\mathbf{d}\| > \epsilon$ to avoid epipole degeneracy [S1, unofficial].
+ - **Noisy Monocular Depth**: The method survives noisy monocular depth that defeats rigid-flow residuals on casual captures because it needs no correct depth [S1, unofficial].
+ - **Invalid Projections**: Pixels where reprojected points have invalid or negative depth are masked out during the valid mask computation [S1, unofficial].

@@ -1,0 +1,166 @@
+# CompGS Training Loop
+
+Also called: CompGS Training
+
+## Overview
+The CompGS training loop is the optimization procedure for 3D Gaussian Splatting that incorporates auxiliary parameters and adaptive control mechanisms to refine Gaussian primitives [S1, unofficial]. It solves the problem of static Gaussian initialization by iteratively updating positions, scales, opacities, colors, and auxiliary features through a differentiable rendering pipeline [S1, unofficial]. It is distinguished from standard 3D Gaussian Splatting by the explicit management of auxiliary parameters (updated via a separate optimizer) and a specific adaptive control schedule for pruning and growing primitives based on view-dependent error metrics [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Dataset of training views, where each sample contains: image tensor, image dimensions ($H, W$), tangent half-FOV ($\tan(\text{fov}_x), \tan(\text{fov}_y)$), camera center, camera index, world-to-view matrix, and world-to-image projection matrix [S1, unofficial].
+*   Initial Gaussian model initialized from sparse point clouds (Structure-from-Motion) [S1, unofficial].
+*   Configuration parameters: `max_iterations`, `ssim_weight`, `stop_iteration`, `control_base_interval`, `num_training_views`, `aux_update_enable`, `control_start_base_interval`, `voxel_size`, `derive_factor`, and ref/res feature/hyper dimensions [S1, unofficial].
+
+**Outputs:**
+*   Optimized Gaussian model parameters (means, scales, opacities, colors, auxiliary features) [S1, unofficial].
+*   Evaluation metrics (per-view PSNR calculated via MSE) [S1, unofficial].
+
+### Data Structures
+*   **GaussianModel**: Stores parameters for $N$ Gaussians. Fields include means ($\mathbb{R}^3$), scales ($\mathbb{R}^3$), opacities ($\mathbb{R}$), colors ($\mathbb{R}^3$ or spherical harmonics coefficients), and auxiliary parameters (dimensions defined in config) [S1, unofficial].
+*   **RenderSettings**: Struct containing `cam_idx`, `image_height`, `image_width`, `tanfovx`, `tanfovy`, `campos`, `viewmatrix`, `projmatrix` [S1, unofficial].
+*   **RenderResults**: Struct containing `rendered_img` (tensor), `predict_time`, `render_time` [S1, unofficial].
+*   **Optimizers**: `WarpedAdam` instances for main Gaussian parameters and auxiliary parameters [S1, unofficial].
+
+### Steps
+
+1.  **Initialization**: Initialize dataset, Gaussian model (with `voxel_size`, `derive_factor`, ref/res feature/hyper dimensions), and optimizers (`WarpedAdam` for main and auxiliary params) [S1, unofficial].
+2.  **Model Initialization**: Initialize the Gaussian model from sparse SfM point clouds [S1, unofficial].
+3.  **Training Loop** (for iteration $i$ from 0 to `max_iterations`):
+    *   Select a random view sample [S1, unofficial].
+    *   Update learning rate [S1, unofficial].
+    *   Render the scene with specific camera settings (`cam_idx`, image dimensions, FOV, camera position, view/projection matrices) [S1, unofficial].
+    *   Retain gradients only if `iteration < stop_iteration` [S1, unofficial].
+    *   Compute rendering loss as weighted sum of L1 loss and SSIM loss: $L_{\text{render}} = (1 - \text{ssim\_weight}) L_{\text{L1}} + \text{ssim\_weight} L_{\text{SSIM}}$ [S1, unofficial].
+    *   Compute regularization loss as $0.01 \times \text{mean}(\prod \text{scales})$ (volume proxy) across all Gaussians [S1, unofficial].
+    *   Update auxiliary parameters if `aux_update_enable` is true and iteration is within range (`control_start_base_interval` to `stop_iteration`) [S1, unofficial].
+    *   Remove auxiliary parameters if `iteration == stop_iteration` [S1, unofficial].
+    *   Step and zero gradients for both `gaussian_optimizer` and `aux_optimizer` [S1, unofficial].
+    *   Perform adaptive control (pruning/growing) if enabled, iteration is within range, and `iteration % (control_base_interval * num_training_views) == 0` [S1, unofficial].
+4.  **Evaluation**: After training, evaluate by rendering all views, saving original and rendered images, and calculating per-view PSNR using MSE: $\text{PSNR} = 10 \log_{10}(1 / \text{MSE})$ [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+class RenderSettings:
+    def __init__(self, cam_idx, image_height, image_width, tanfovx, tanfovy, campos, viewmatrix, projmatrix):
+        self.cam_idx = cam_idx
+        self.image_height = image_height
+        self.image_width = image_width
+        self.tanfovx = tanfovx
+        self.tanfovy = tanfovy
+        self.campos = campos
+        self.viewmatrix = viewmatrix
+        self.projmatrix = projmatrix
+
+class WarpedAdam:
+    def __init__(self, params):
+        self.params = params
+    def step(self):
+        for p in self.params:
+            if p.grad is not None:
+                p.data -= p.grad
+    def zero_grad(self):
+        for p in self.params:
+            if p.grad is not None:
+                p.grad.zero_()
+
+def ssim(rendered, target, data_range=1.0):
+    # Computes structural similarity index; returns value in [0, 1]
+    return 1.0 - F.mse_loss(rendered, target)
+
+def update_lr_means(optimizer, lr_update_configs, max_iterations, iteration):
+    # Updates learning rates for Gaussian means based on schedule
+    pass
+
+def adaptive_control_step(model, iteration):
+    # Prunes low-opacity Gaussians and grows high-error Gaussians
+    pass
+
+def evaluate_and_save(dataset, model, config):
+    # Renders all views, saves images, calculates per-view PSNR
+    pass
+
+def train_compgs(dataset, gaussian_model, config):
+    gaussian_optimizer = WarpedAdam(gaussian_model.main_params)
+    aux_optimizer = WarpedAdam(gaussian_model.aux_params) if config.aux_update_enable else None
+
+    stop_iteration = config.adaptive_control.stop_iteration
+    ssim_weight = config.training.ssim_weight
+    num_training_views = dataset.num_training_views
+    control_base_interval = config.control_base_interval
+    control_start_base_interval = config.control_start_base_interval
+
+    for iteration in range(config.max_iterations):
+        sample = dataset.get_random_sample()
+        update_lr_means(gaussian_optimizer, gaussian_model.get_lr_configs(config), config.max_iterations, iteration)
+
+        render_settings = RenderSettings(
+            cam_idx=sample.cam_idx,
+            image_height=sample.image_height,
+            image_width=sample.image_width,
+            tanfovx=sample.tan_half_fov_x,
+            tanfovy=sample.tan_half_fov_y,
+            campos=sample.camera_center,
+            viewmatrix=sample.world_to_view_proj_mat,
+            projmatrix=sample.world_to_image_proj_mat
+        )
+
+        retain_grad = iteration < stop_iteration
+        render_results = gaussian_model.render(render_settings, retain_grad=retain_grad)
+
+        l1_loss = F.l1_loss(render_results.rendered_img, sample.img)
+        ssim_loss = 1.0 - ssim(render_results.rendered_img.unsqueeze(0), sample.img.unsqueeze(0), data_range=1.0)
+        rendering_loss = (1.0 - ssim_weight) * l1_loss + ssim_weight * ssim_loss
+
+        volume_proxy = torch.prod(gaussian_model.scales, dim=-1)
+        reg_loss = 0.01 * torch.mean(volume_proxy)
+        total_loss = rendering_loss + reg_loss
+
+        if aux_optimizer is not None and config.aux_update_enable and iteration >= control_start_base_interval and iteration < stop_iteration:
+            total_loss.backward(retain_graph=True)
+            aux_optimizer.step()
+            aux_optimizer.zero_grad()
+
+        total_loss.backward()
+        gaussian_optimizer.step()
+        gaussian_optimizer.zero_grad()
+
+        if config.adaptive_control.enabled and iteration < stop_iteration and iteration % (control_base_interval * num_training_views) == 0:
+            adaptive_control_step(gaussian_model, iteration)
+
+        if iteration == stop_iteration and aux_optimizer is not None:
+            gaussian_model.remove_aux_params()
+
+    evaluate_and_save(dataset, gaussian_model, config)
+```
+
+### Edge Cases and Pitfalls
+*   **Gradient Retention**: Gradients must not be retained after `stop_iteration` to save memory, but must be retained during the adaptive control phase if it occurs after the main optimization loop's gradient-free phase [S1, unofficial].
+*   **Auxiliary Parameter Timing**: Auxiliary parameters are only updated within a specific iteration range (`control_start_base_interval` to `stop_iteration`) [S1, unofficial].
+*   **Precision**: PSNR calculation involves $\log_{10}(1/\text{MSE})$. If MSE is zero (perfect reconstruction), this results in infinity. A small epsilon should be added to MSE in practice [G].
+
+## Subtopics
+
+### Stage separation and early release
+Separates backward stages and releases intermediate buffers early to reduce peak working set while retaining direct gradient accumulation [S2, unofficial]. Raster caches are released before projection backward while retaining 3DGS’s direct gradient accumulation [S2, unofficial]. Reduces mean working set to 7.64 GiB and warm-pass time from 12.19 to 11.35 seconds on the Bicycle 15K model [S2, unofficial]. Separates raster and later gradient peaks, unlike the Original method where they overlap, allowing coordinated buffer lifetime management [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: Dominated by the differentiable rendering step per iteration; adaptive control adds overhead proportional to the number of primitives [S1, unofficial].
+*   **Memory Complexity**: Scales with the number of Gaussians and auxiliary parameter dimensions [S1, unofficial].
+*   **Performance**: Uses `WarpedAdam` optimizer; stage separation variant reduces mean working set to 7.64 GiB and warm-pass time to 11.35 s on Bicycle 15K [S1, unofficial][S2, unofficial].
+*   **Strengths**: Adaptive control allows dynamic refinement of the Gaussian set; auxiliary parameters enable more complex feature representations [S1, unofficial].
+*   **Limitations**: Complexity of managing two optimizers and specific iteration schedules [S1, unofficial].
+
+## Background
+The CompGS training loop is part of the CompGS (Compressed Gaussian Splatting) framework, which extends 3D Gaussian Splatting with compression and auxiliary parameter handling [S1, unofficial]. It was introduced in the unofficial repository by Liu Xiangrui [S1, unofficial].
+
+## Sources
+[S1] LiuXiangrui/CompGS, https://github.com/LiuXiangrui/CompGS, fetched 2026-10-27 (unofficial)
+[S2] BoundedGS: Memory-Efficient High-Resolution Training for 3D Gaussian Splatting, https://arxiv.org/abs/2610.34233v1, fetched 2026-10-26 (unofficial)

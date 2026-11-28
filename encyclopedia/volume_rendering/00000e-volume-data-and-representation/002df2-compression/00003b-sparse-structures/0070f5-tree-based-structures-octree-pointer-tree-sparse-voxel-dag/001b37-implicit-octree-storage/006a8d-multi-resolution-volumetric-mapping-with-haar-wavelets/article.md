@@ -1,0 +1,243 @@
+# Multi-Resolution Volumetric Mapping with Haar Wavelets
+
+Also called: MRA volumetric mapping, MRA-based mapping, Wavelet-based hierarchical volumetric mapping, Wavelet-based volumetric mapping, wavemap
+
+## Overview
+Multi-Resolution Volumetric Mapping with Haar Wavelets is a method for maintaining a 3D occupancy map by performing sensor updates directly in a compressed wavelet domain, thereby avoiding the computational overhead of decompression and recompression cycles [S1, S2]. It solves the problem of efficient, consistent multi-resolution storage by leveraging the orthogonality of the Haar basis to ensure all resolution levels remain synchronized without manual maintenance passes [S2]. Unlike tree-based frameworks like Octomap or Supereight that require upward/downward propagation to synchronize hierarchy levels, this method implicitly synchronizes all levels at once through the linear properties of the wavelet transform [S2].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Current map state $m$, represented as wavelet coefficients $W(L_p(m|z_{1:t-1}))$.
+    *   Current sensor measurement $z_t$ (beam geometry and intensity/depth).
+    *   Sensor noise parameters $\sigma_r, \sigma_\theta$.
+*   **Outputs:**
+    *   Updated map state $m$, represented as wavelet coefficients $W(L_p(m|z_{1:t}))$.
+
+### Data Structures
+The method stores wavelet coefficients in a hierarchical data structure, specifically an octree (e.g., Supereight or OpenVDB) [S2].
+*   **Node Types:** Inner nodes and leaf nodes [S2].
+*   **Content:** Each node stores the Haar wavelet coefficients corresponding to the spatial partition defined by the Haar scaling functions [S2].
+*   **Layout:** Haar scaling functions partition space into non-overlapping cubes of varying sizes, identical to the hierarchical partitioning scheme of octrees [S2]. Coefficients are attached to both inner and leaf nodes [S2].
+
+### Formulas
+
+**1. Log-Odds Formulation**
+The occupancy probability $p$ is converted to log-odds $L_p$ to linearize the update:
+$$ L_p = \log \frac{p}{1-p} $$
+[S1, S2]
+
+**2. Inverse Measurement Model (Continuous)**
+The probability of occupancy $s(m_x|z)$ at point $x$ for beam $z$ is derived by correlating the true endpoint occupancy model $\bar{s}$ with the noisy endpoint distribution $o$:
+$$ s(m_x|z) = \int_S \bar{s}(m_x|\bar{z}) o(\bar{z}|z) d\bar{z} $$
+where $x, \bar{z}, z$ are in sensor coordinate space $S$, and the beam start is at the origin [S1, S2].
+
+**3. True Endpoint Occupancy Model**
+$$ \bar{s}(m_x|\bar{z}_r, \bar{z}_\theta) = \begin{cases} 0 & \text{if } x_r < \bar{z}_r \land |x_\theta - \bar{z}_\theta| \le \tau_\theta \\ 1 & \text{if } \bar{z}_r \le x_r \le \bar{z}_r + \tau_r \land |x_\theta - \bar{z}_\theta| \le \tau_\theta \\ 1/2 & \text{otherwise} \end{cases} $$
+where $\tau$ is the surface thickness parameter [S1, S2].
+
+**4. Noisy Endpoint Distribution Approximation**
+Using quadratic B-splines $q(t)$:
+$$ o(\bar{z}|z) = q\left(\frac{z_r - \bar{z}_r}{\sigma_r}\right) q\left(\frac{z_\theta - \bar{z}_\theta}{\sigma_\theta}\right) $$
+where $q(t)$ is:
+$$ q(t) = \begin{cases} \frac{1}{16}(3+t)^2 & -3 \le t \le -1 \\ \frac{1}{8}(3-t^2) & -1 < t < 1 \\ \frac{1}{16}(3-t)^2 & 1 \le t \le 3 \\ 0 & \text{otherwise} \end{cases} $$
+[S2]
+
+**5. Full Inverse Measurement Model**
+$$ s(m_x|z) = \frac{1}{2} + \frac{1}{2}Q(v) - \frac{1}{2}Q(v-3) - \frac{1}{2}Q(w+3) + \frac{1}{2}Q(w-3) $$
+where $Q(t)$ is the cumulative distribution of $q(t)$, $v = \frac{z_r - x_r}{\sigma_r}$, and $w = \frac{z_\theta - x_\theta}{\sigma_\theta}$ [S2].
+
+**6. Wavelet Space Update Equation**
+$$ W(L_p(m|z_{1:t})) = W(L_p(m|z_{1:t-1})) + W(L_s(m|z_t)) $$
+where $W$ is the wavelet transform, $L_p$ is the log-odds occupancy posterior, $L_s$ is the sensor inverse measurement model in log-odds, and $z_t$ is the current measurement [S1, S2].
+
+**7. Worst-Case Error Bound**
+Within a partition $V$, with $x$ as the partition's center:
+$$ \epsilon_{max}(L_s(m, z), V) = \max_{x' \in V} |L_s(m_{x'}, z) - L_s(m_x, z)| $$
+[S2]
+
+**8. Approximation Error Bounds by Update Type**
+*   $FullyUnobserved$: $\epsilon_{max} = 0$
+*   $PossiblyOccupied$: $\epsilon_{max} = \max\left(\frac{3Vh_\theta}{16\sigma_\theta}, \frac{3Vh_r}{8\sigma_r}\right)$
+*   $FreeOrUnobserved$: $\epsilon_{max} = \frac{3Vh_\theta}{16\sigma_\theta}$
+where $Vh$ is half the partition's diagonal [S2].
+
+### Parameters
+*   **Wavelet Basis:** Haar wavelet and scaling function. Chosen for orthogonality (unique coefficients, no redundancy) and because scaling functions correspond to box functions spanning regular grid cells [S1, S2].
+*   **Surface Thickness:** $\tau_r = 3\sigma_r$ and $\tau_\theta = 3\sigma_\theta$. Ensures continuity and convergence to 0 log-odds on surfaces [S2].
+*   **Depth Uncertainty $\sigma_r(x)$:**
+    *   Depth cameras: $\sigma_r(x) = \kappa_r x_r^2$
+    *   Laser sensors: $\sigma_r = \kappa_r$ (constant) [S2].
+
+### Steps
+
+1.  **Initialization:** Compute the orthogonal projection of the original signal onto the scaling functions at a pre-determined finest resolution using the Fast Wavelet Transform (FWT) [S1, S2].
+2.  **Compute Compressed Update:** Calculate $W(L_s(m|z_t))$ efficiently using the FWT [S2].
+3.  **Coarse-to-Fine Integration:**
+    *   Start at the octree root.
+    *   Recursively evaluate children.
+    *   Determine the update type for the current partition $V$ relative to $z_t$:
+        *   $FullyUnobserved$: $\forall x \in V, L_s(m_x|z_t) = 0$.
+        *   $PossiblyOccupied$: $\exists x \in V, L_s(m_x|z_t) > 0$.
+        *   $FreeOrUnobserved$: Otherwise [S2].
+    *   **Saturated Region Skipping:**
+        *   If $FullyUnobserved$, skip.
+        *   If saturated (posterior at lower bound for negative updates, or upper bound for positive updates), skip [S2].
+    *   **Error Check:**
+        *   If $PossiblyOccupied$ or $FreeOrUnobserved$ with acceptable error (calculated via Eq. 8), evaluate $s(m_{x'}|z_t)$ at the partition center $x'$ and integrate the update into the map coefficients [S2].
+        *   If error is unacceptable, recurse to the node's octants [S2].
+4.  **Update Map:** Apply the computed wavelet coefficients to the map structure [S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_map_wavemap(map_tree, measurement_z, sigma_r, sigma_theta, tau_r, tau_theta, max_error_threshold):
+    """
+    Updates the volumetric map using Haar wavelet compression.
+    
+    Args:
+        map_tree: Octree storing wavelet coefficients.
+        measurement_z: Sensor measurement (range, angle, etc.).
+        sigma_r: Range noise standard deviation.
+        sigma_theta: Angular noise standard deviation.
+        tau_r: Surface thickness in range (3 * sigma_r).
+        tau_theta: Surface thickness in angle (3 * sigma_theta).
+        max_error_threshold: Threshold for stopping recursion.
+    """
+    # 1. Compute the inverse measurement model in log-odds space
+    # This function computes L_s(m_x | z) for a given point x and measurement z
+    def compute_log_odds_update(x, z, sigma_r, sigma_theta):
+        # Calculate v and w for the continuous sensor model
+        v = (z.r - x.r) / sigma_r
+        w = (z.theta - x.theta) / sigma_theta
+        
+        # Compute s(m_x|z) using the cumulative distribution Q of the B-spline q
+        # Q(t) is the integral of q(u) from -inf to t
+        s_prob = 0.5 + 0.5 * Q(v) - 0.5 * Q(v - 3) - 0.5 * Q(w + 3) + 0.5 * Q(w - 3)
+        
+        # Convert probability to log-odds
+        # Guard against p=0 or p=1 to avoid log(0) or log(inf)
+        if s_prob <= 0:
+            return -infinity
+        elif s_prob >= 1:
+            return infinity
+        else:
+            return log(s_prob / (1 - s_prob))
+
+    # 2. Compute the wavelet transform of the measurement update
+    # Initialize FWT by projecting onto scaling functions at finest resolution
+    # Then compute W(L_s)
+    compressed_update = fast_wavelet_transform(compute_log_odds_update, measurement_z)
+    
+    # 3. Recursive integration
+    integrate_recursive(map_tree.root, measurement_z, sigma_r, sigma_theta, tau_r, tau_theta, max_error_threshold)
+
+def integrate_recursive(node, measurement_z, sigma_r, sigma_theta, tau_r, tau_theta, max_error_threshold):
+    """
+    Recursively integrates the measurement into the octree.
+    """
+    partition_V = node.get_partition()
+    
+    # Determine update type
+    # Check if any point in V has non-zero log-odds update
+    # Simplified check: evaluate at center or bounds
+    is_fully_unobserved = is_fully_unobserved_partition(partition_V, measurement_z)
+    
+    # Check saturation
+    is_saturated = is_saturated(node, measurement_z)
+    
+    if is_fully_unobserved or is_saturated:
+        return # Skip this branch
+    
+    # Calculate worst-case error bound for this partition
+    # Vh is half the diagonal of the partition
+    Vh = get_half_diagonal(partition_V)
+    
+    # Determine error bound based on update type
+    # If PossiblyOccupied: max(3*Vh_theta/(16*sigma_theta), 3*Vh_r/(8*sigma_r))
+    # If FreeOrUnobserved: 3*Vh_theta/(16*sigma_theta)
+    # If FullyUnobserved: 0 (already skipped)
+    
+    # For simplicity, assume we check if the partition is PossiblyOccupied
+    # by checking if the max possible log-odds > 0
+    if is_possibly_occupied(partition_V, measurement_z):
+        error_bound = max(
+            (3 * Vh.theta) / (16 * sigma_theta),
+            (3 * Vh.r) / (8 * sigma_r)
+        )
+    else:
+        error_bound = (3 * Vh.theta) / (16 * sigma_theta)
+        
+    if error_bound <= max_error_threshold:
+        # Integrate at current resolution
+        center = partition_V.get_center()
+        log_odds_val = compute_log_odds_update(center, measurement_z, sigma_r, sigma_theta)
+        node.integrate_wavelet_coefficient(log_odds_val)
+    else:
+        # Recurse to children
+        for child in node.get_children():
+            integrate_recursive(child, measurement_z, sigma_r, sigma_theta, tau_r, tau_theta, max_error_threshold)
+
+def Q(t):
+    """
+    Cumulative distribution function of the quadratic B-spline q(t).
+    q(t) is defined piecewise. Q(t) is the integral.
+    """
+    # Implementation of the cubic B-spline CDF
+    # This is a standard mathematical function derived from q(t)
+    # For t < -3: 0
+    # For -3 <= t <= -1: integral of 1/16*(3+u)^2
+    # For -1 < t < 1: integral of previous + integral of 1/8*(3-u^2)
+    # For 1 <= t <= 3: integral of previous + integral of 1/16*(3-u)^2
+    # For t > 3: 1
+    # [G] Standard cubic B-spline CDF implementation details omitted for brevity, 
+    # but must be implemented to compute s(m_x|z).
+    pass
+
+def is_fully_unobserved_partition(partition, z):
+    # Check if the inverse measurement model is 0 for all points in partition
+    # This is true if the partition is far from the beam endpoint
+    pass
+
+def is_saturated(node, z):
+    # Check if the posterior log-odds is at the lower bound (for free updates)
+    # or upper bound (for occupied updates)
+    pass
+
+def is_possibly_occupied(partition, z):
+    # Check if there exists any point in the partition with L_s > 0
+    pass
+```
+
+### Edge Cases and Pitfalls
+*   **Saturated Region Skipping Safety:** Skipping saturated regions in a coarse-to-fine manner is only safe if lower resolutions are always up to date. This property is guaranteed by the Haar basis orthogonality and the proposed integration scheme [S2].
+*   **Precision:** The wavelet transform is lossless, so reconstruction error is determined by the initial FWT projection approximation [S1].
+*   **Boundaries:** The method assumes the beam start point is at the origin of the sensor coordinate space [S1].
+
+## Operating characteristics
+
+*   **Time Complexity:** Updates are performed directly in wavelet space, avoiding the decompress-update-compress cycle [S2]. The Fast Wavelet Transform (FWT) is used for efficiency [S1].
+*   **Memory Complexity:** Memory efficient due to Haar wavelet compression, which stores only differences between resolution levels [S1, S2].
+*   **Strengths:**
+    *   Avoids costly decompress-update-compress cycles [S2].
+    *   Implicitly synchronizes all hierarchy levels at once, unlike Octomap or Supereight which require maintenance passes [S2].
+    *   Orthogonality guarantees unique coefficients, preventing redundancy [S1].
+*   **Limitations:**
+    *   Requires a hierarchical data structure that supports attaching data to both inner and leaf nodes (e.g., Supereight, OpenVDB) [S2].
+    *   Relies on the assumption that inverse sensor models are smooth, which may not hold for all sensor types or environments [S1].
+*   **When to Use:** Suitable for applications requiring real-time, multi-resolution volumetric mapping with continuous sensor models, especially where memory efficiency and update speed are critical [S2].
+*   **When Not to Use:** If the environment has highly discontinuous features that cannot be well-approximated by Haar wavelets, or if the hardware does not support efficient wavelet transforms [S1].
+
+## Background
+
+*   **Origin:** The method was introduced in "Efficient volumetric mapping of multi-scale environments using wavelet-based compression" [S2] and "Efficient volumetric mapping of multi-scale environments" [S1].
+*   **History:** It extends previous efforts in multi-resolution representations by approaching the problem from a formal signal processing and data compression perspective [S2]. It builds on the Multi-Resolution Analysis (MRA) conditions formalized by Mallat and Meyer [S2].
+*   **Usage:** Used in robotic mapping and 3D reconstruction applications where efficient, consistent multi-resolution maps are required [S1, S2].
+
+## Sources
+
+[S1] Efficient volumetric mapping of multi-scale environments ..., https://www.roboticsproceedings.org/rss19/p065.pdf, fetched 2026-10-26
+[S2] Efficient volumetric mapping of multi-scale environments using wavelet-based compression, https://zenodo.org/records/7993757, fetched 2026-10-27

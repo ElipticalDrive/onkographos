@@ -1,0 +1,129 @@
+# Block Face Mesh Generation
+Also called: addFace
+
+## Overview
+Block Face Mesh Generation generates vertex and index data for a single exposed face of a voxel block, applying block-specific geometric adjustments and packing vertex attributes for GPU consumption [S1, unofficial][S2, unofficial]. It differs from its sibling [Face Direction and Quad Geometry](4881-face-direction-and-quad-geometry.md) by handling block-specific geometry modifications (like cactus insets) and attribute packing, rather than just providing generic face normals and UVs [S1, unofficial][S2, unofficial]. It serves as the concrete implementation step within [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md) that populates the mesh buffer with the final vertex and index data for a specific block instance [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `face`: Integer index of the face to generate (0-5).
+- `faceX`, `faceY`, `faceZ`: Chunk-local coordinates of the block's minimum corner.
+- `blockID`: The identifier of the block type.
+- `texture_manager`: Accessor for texture layer information.
+- `cactus_inset`: Geometric offset for cactus blocks (typically 1/16 block unit) [S1, unofficial].
+
+**Outputs:**
+- Lists of vertex structures and index integers for a single quad mesh [S2, unofficial].
+
+**Data Structures:**
+- `PackedVertex`: Struct containing 9 fields packed for GPU consumption: `position` (3 floats), `normal_index` (uint32_t), `corner_index` (uint32_t), `texture_layer` (uint32_t), `sky_light_level` (float), `water_above` (bool), `block_light_level` (float), `normal` (3 floats), `tex_coords` (2 floats) [S1, unofficial][S2, unofficial].
+- `unit_vertices`: Array of 8 coordinate tuples for a unit cube: `[(0,0,0), (1,0,0), (1,1,0), (0,1,0), (0,0,1), (1,0,1), (1,1,1), (0,1,1)]` [S2, unofficial].
+- `face_vertices_map`: Dictionary mapping face indices to 4 vertex indices per face: `0: [3, 2, 6, 7]` (TOP), `1: [1, 0, 4, 5]` (BOTTOM), `2: [4, 0, 3, 7]` (LEFT), `3: [1, 5, 6, 2]` (RIGHT), `4: [0, 1, 2, 3]` (FRONT), `5: [5, 4, 7, 6]` (BACK) [S2, unofficial].
+- `face_normals_map`: Dictionary mapping face indices to normal vectors: `0: (0, 1, 0)`, `1: (0, -1, 0)`, `2: (0, 0, -1)`, `3: (0, 0, 1)`, `4: (1, 0, 0)`, `5: (-1, 0, 0)` [G].
+
+**Parameters:**
+- `CANVAS_SIZE = 16`: Defines the texture atlas grid dimension [S2, unofficial].
+- `CELL_SIZE = 1.0 / CANVAS_SIZE`: UV step size per texture tile [S2, unofficial].
+- `BLOCK_AIR = 255`: Block ID that skips mesh generation [S2, unofficial].
+- `CACTUS_ID`: Implementation-specific constant for cactus blocks [S1, unofficial].
+
+**Steps:**
+1. **Air Check**: If `blockID` equals `BLOCK_AIR` (255), return immediately without generating geometry [S2, unofficial].
+2. **UV Offset**: Determine texture offset based on face index: 0 for TOP (0), 1 for BOTTOM (1), else 2 for SIDE [S2, unofficial].
+3. **UV Calculation**: Calculate 4 UV coordinates for the face quad: $uv_0 = (offset + (0, CELL\_SIZE))$, $uv_1 = (offset + (CELL\_SIZE, CELL\_SIZE))$, $uv_2 = (offset + (CELL\_SIZE, 0))$, $uv_3 = (offset + (0, 0))$ [S2, unofficial].
+4. **Base Position & Cactus Inset**: Initialize base position to $(faceX, faceY, faceZ)$. If `blockID` is `CACTUS_ID` and `face` is not TOP (0) or BOTTOM (1), apply a 1/16 block inset to side faces: face 0 (Z+) sets $base\_pos.z = faceZ + 1.0 - cactus\_inset$, face 1 (Z-) sets $base\_pos.z = faceZ + cactus\_inset$, face 4 (X+) sets $base\_pos.x = faceX + 1.0 - cactus\_inset$, face 5 (X-) sets $base\_pos.x = faceX + cactus\_inset$ [S1, unofficial].
+5. **Vertex Generation**: For each of the 4 vertices ($v$ from 0 to 3) in the face quad: compute world position by adding $unit\_vertices[face\_vertices\_map[face][v]]$ to $base\_pos$; set vertex normal from $face\_normals\_map[face]$; set texture coordinates from the precomputed UV array; pack attributes into `PackedVertex`; append to vertex list [S2, unofficial].
+6. **Index Generation**: Record $index\_offset = len(vertices) - 4$; append 6 indices forming two triangles: $(index\_offset, index\_offset+1, index\_offset+2, index\_offset, index\_offset+2, index\_offset+3)$ [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class PackedVertex:
+    def __init__(self, position, normal_index, corner_index, texture_layer, sky_light_level, water_above, block_light_level, normal, tex_coords):
+        self.position = position
+        self.normal_index = normal_index
+        self.corner_index = corner_index
+        self.texture_layer = texture_layer
+        self.sky_light_level = sky_light_level
+        self.water_above = water_above
+        self.block_light_level = block_light_level
+        self.normal = normal
+        self.tex_coords = tex_coords
+
+def generate_block_face_mesh(face, faceX, faceY, faceZ, blockID, texture_manager, cactus_inset=1.0/16.0):
+    CACTUS_ID = 133  # Implementation-specific constant
+    BLOCK_AIR = 255
+    CANVAS_SIZE = 16
+    CELL_SIZE = 1.0 / CANVAS_SIZE
+
+    if blockID == BLOCK_AIR:
+        return [], []
+
+    unit_vertices = [
+        (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0), (1.0, 0.0, 1.0), (1.0, 1.0, 1.0), (0.0, 1.0, 1.0)
+    ]
+    face_vertices_map = {
+        0: [3, 2, 6, 7], 1: [1, 0, 4, 5], 2: [4, 0, 3, 7],
+        3: [1, 5, 6, 2], 4: [0, 1, 2, 3], 5: [5, 4, 7, 6]
+    }
+    face_normals_map = {
+        0: (0.0, 1.0, 0.0), 1: (0.0, -1.0, 0.0), 2: (0.0, 0.0, -1.0),
+        3: (0.0, 0.0, 1.0), 4: (1.0, 0.0, 0.0), 5: (-1.0, 0.0, 0.0)
+    }
+
+    uv_offset = 0 if face == 0 else (1 if face == 1 else 2)
+    uv_coords = [
+        (uv_offset + 0.0, CELL_SIZE), (uv_offset + CELL_SIZE, CELL_SIZE),
+        (uv_offset + CELL_SIZE, 0.0), (uv_offset + 0.0, 0.0)
+    ]
+
+    base_pos = [float(faceX), float(faceY), float(faceZ)]
+    if blockID == CACTUS_ID and face not in (0, 1):
+        if face == 0: base_pos[2] = faceZ + 1.0 - cactus_inset
+        elif face == 1: base_pos[2] = faceZ + cactus_inset
+        elif face == 4: base_pos[0] = faceX + 1.0 - cactus_inset
+        elif face == 5: base_pos[0] = faceX + cactus_inset
+
+    normal = face_normals_map[face]
+    tex_layer = texture_manager.get_layer(blockID)
+    vertices = []
+
+    for i in range(4):
+        v_idx = face_vertices_map[face][i]
+        pos = (base_pos[0] + unit_vertices[v_idx][0],
+               base_pos[1] + unit_vertices[v_idx][1],
+               base_pos[2] + unit_vertices[v_idx][2])
+        vertices.append(PackedVertex(
+            position=pos, normal_index=face, corner_index=i,
+            texture_layer=tex_layer, sky_light_level=0.0, water_above=False,
+            block_light_level=0.0, normal=normal, tex_coords=uv_coords[i]
+        ))
+
+    index_offset = len(vertices) - 4
+    indices = [index_offset, index_offset + 1, index_offset + 2,
+               index_offset, index_offset + 2, index_offset + 3]
+    return vertices, indices
+```
+
+## Subtopics
+
+### [Water Face Mesh Generation](10936-water-face-mesh-generation.md)
+Generates mesh vertices for water blocks using the same geometric layout as terrain faces but omits texture layer and block light to maintain a uniform vertex format while reducing shader workload. It solves the problem of efficiently rendering dynamic fluid surfaces by simplifying vertex data, unlike static terrain models which carry full lighting and texture metadata.
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per face, as it generates a fixed number of vertices (4) and indices (6) regardless of scene size [S1, unofficial][S2, unofficial].
+- **Memory Complexity**: $O(1)$ per face, storing a small, fixed-size vertex buffer and index buffer [S1, unofficial][S2, unofficial].
+- **Performance**: Highly efficient for static geometry; packing vertex attributes into a single struct reduces memory bandwidth usage during GPU upload [S1, unofficial].
+- **Strengths**: Simple to implement, low overhead, handles specific block types (cactus) efficiently [S1, unofficial][S2, unofficial].
+- **Limitations**: Does not handle complex block shapes or animations; the cactus inset logic is hardcoded and may not generalize to other non-cuboid blocks [S1, unofficial].
+- **When to use**: For static voxel terrain and simple block structures where performance is critical and block geometry is mostly cuboid [S2, unofficial].
+- **When not to use**: For dynamic, complex, or non-cuboid block types that require more sophisticated mesh generation [S2, unofficial].
+
+## Background
+Block Face Mesh Generation is a core component of voxel engine rendering pipelines, specifically those inspired by Minecraft-like games [S1, unofficial][S2, unofficial]. It originated from the need to efficiently render large voxel worlds by generating geometry on the fly or during chunk updates [S1, unofficial][S2, unofficial]. The method is implemented in various open-source voxel engines, such as `ft_minecraft` [S1, unofficial] and `VoxelEngine` [S2, unofficial]. The specific cactus inset logic is a well-known optimization in Minecraft-like games to reduce the visual "blockiness" of cactus blocks while maintaining performance [S1, unofficial].
+
+## Sources
+[S1] ldominiq/ft_minecraft, https://github.com/ldominiq/ft_minecraft, fetched 2026-10-27 (unofficial)
+[S2] GitHub Repo for VoxelEngine, https://github.com/TheSlabby/VoxelEngine, fetched 2026-10-29 (unofficial)

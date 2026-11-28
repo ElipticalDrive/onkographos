@@ -1,0 +1,217 @@
+# Dynamic Voxel World with Chunked Meshing
+
+Also called: Chunk-Based Voxel Meshing, VoxelWorldMeshing3DSystem
+
+## Overview
+This method manages a dynamic voxel world by dividing it into fixed-size 3D grids (chunks) that are meshed independently, handling adjacency updates with neighboring chunks when block changes occur at boundaries [S1, S2, unofficial]. It sets itself apart from static chunking by employing thread-safe dirty tracking (including diagonal neighbors), parallel meshing from padded snapshots to ensure correct border culling and ambient occlusion, and a per-update budget to maintain frame rates during high-frequency world modifications [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- A voxel world coordinate system.
+- Block modification requests (set/remove block at position).
+- A per-frame time budget for meshing operations.
+
+**Outputs:**
+- Updated `Mesh` and `MeshCollider` assets for each chunk.
+- A consistent visual representation of the voxel world with correct lighting/culling at chunk boundaries.
+
+### Data Structures
+The core unit is the `TerrainChunk` (or equivalent chunk entity). Its layout includes:
+
+1.  **`size`**: `Vector3Int` defining the chunk dimensions. Default is $(16, 16, 16)$ [S2, unofficial].
+2.  **`blocks`**: A 3D array `Block[size.x][size.y][size.z]` storing the voxel data. Each element is either `null` (air) or a `Block` instance [S2, unofficial].
+3.  **`meshRenderer`**, **`meshFilter`**, **`meshCollider`**: Graphics and physics components attached to the chunk entity [S2, unofficial].
+4.  **`isGenerated`**: Boolean flag indicating if the initial mesh has been built [S2, unofficial].
+5.  **`isUpdateRequired`**: Boolean flag indicating the chunk is dirty and needs remeshing [S2, unofficial].
+6.  **`isUpdating`**: Boolean flag indicating a mesh update is currently in progress [S2, unofficial].
+7.  **`neighbors`**: References to adjacent `TerrainChunk` objects in six directions: forward, back, right, left, up, down [S2, unofficial].
+
+### Numbered Steps
+
+1.  **Initialization**:
+    -   Create a chunk at a specific world position.
+    -   Allocate the `blocks` array of size `size.x * size.y * size.z` [S2, unofficial].
+    -   Initialize `isGenerated = false`, `isUpdateRequired = false`, `isUpdating = false` [S2, unofficial].
+    -   Assign the world's default material (e.g., `VoxelManager.Instance.CurrentWorld.SheetTexture`) to `meshRenderer.materials` [S2, unofficial].
+    -   Resolve neighbor references. If a neighbor chunk does not exist (world boundary), store `null` [S2, unofficial].
+
+2.  **Block Modification and Dirty Tracking**:
+    -   When a block is set or removed at `blockPosition`:
+        -   Update `blocks[blockPosition]` [S2, unofficial].
+        -   Check boundaries of `blockPosition` relative to `size`:
+            -   If `blockPosition.x == 0`, mark `neighbors.left` as `isUpdateRequired = true` [S2, unofficial].
+            -   If `blockPosition.x == size.x - 1`, mark `neighbors.right` as `isUpdateRequired = true` [S2, unofficial].
+            -   Apply similar logic for `y` (up/down) and `z` (forward/back) [S2, unofficial].
+        -   **Guard**: Before marking a neighbor, check if the neighbor reference is not `null` to avoid null reference errors [S2, unofficial].
+        -   If `immediateUpdate` is true, trigger `UpdateMesh()` on the affected chunks immediately [S2, unofficial].
+        -   **Note**: The system tracks "dirty" chunks including diagonal neighbors to ensure correct meshing at boundaries [S1, unofficial].
+
+3.  **Mesh Building (Per Chunk)**:
+    -   Create a `MeshData` structure with `subMeshCount` initialized [S2, unofficial].
+    -   Iterate through the chunk's voxel grid:
+        -   For `x` from 0 to `size.x - 1`
+        -   For `z` from 0 to `size.z - 1`
+        -   For `y` from 0 to `size.y - 1`
+        -   If `blocks[x, y, z]` is not `null`:
+            -   Call `blocks[x, y, z].Definition.AddMeshData(position, meshData, this, block)` [S2, unofficial].
+    -   **Padding**: To ensure correct culling and ambient occlusion across chunk borders, meshing must use a "padded snapshot" of the voxel data. This involves reading voxel data from neighboring chunks if the current voxel is on the chunk's edge [S1, unofficial].
+
+4.  **Parallel Meshing and Budgeting**:
+    -   Identify all chunks where `isUpdateRequired` is true [S1, unofficial].
+    -   Limit the number of chunks processed per frame to a **per-update budget** to maintain frame rate [S1, unofficial].
+    -   For each selected chunk, start an asynchronous mesh update:
+        -   Increment global `ThreadCount` [S2, unofficial].
+        -   Set `isUpdating = true` [S2, unofficial].
+        -   Execute `BuildMesh()` on a background thread [S2, unofficial].
+        -   Set `isDone = true` [S2, unofficial].
+        -   Decrement `ThreadCount` [S2, unofficial].
+
+5.  **Applying the Mesh**:
+    -   On the main thread, wait for the background thread to complete (`waitUntilDone` checks `isDone`) [S2, unofficial].
+    -   Yield `EndOfFrame` to ensure thread safety with the graphics API [S2, unofficial].
+    -   Clear previous mesh: Set `meshFilter.mesh = null` and `meshCollider.sharedMesh = null` [S2, unofficial].
+    -   Apply new mesh: `meshFilter.mesh = meshData.BuildMesh()` and `meshCollider.sharedMesh = meshFilter.mesh` [S2, unofficial].
+    -   Reset flags: `isUpdateRequired = false`, `isUpdating = false` [S2, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class TerrainChunk:
+    def __init__(self, position, size=(16, 16, 16)):
+        self.position = position
+        self.size = size
+        self.blocks = [[None for _ in range(size[2])] for _ in range(size[1]) for _ in range(size[0])]
+        self.neighbors = {
+            'left': None, 'right': None,
+            'up': None, 'down': None,
+            'forward': None, 'back': None
+        }
+        self.is_generated = False
+        self.is_update_required = False
+        self.is_updating = False
+        self.mesh_renderer = None
+        self.mesh_filter = None
+        self.mesh_collider = None
+
+    def set_block(self, x, y, z, block, immediate_update=False):
+        if 0 <= x < self.size[0] and 0 <= y < self.size[1] and 0 <= z < self.size[2]:
+            self.blocks[x][y][z] = block
+            
+            # Mark neighbors as dirty if on boundary
+            if x == 0 and self.neighbors['left']:
+                self.neighbors['left'].is_update_required = True
+            if x == self.size[0] - 1 and self.neighbors['right']:
+                self.neighbors['right'].is_update_required = True
+            if y == 0 and self.neighbors['down']:
+                self.neighbors['down'].is_update_required = True
+            if y == self.size[1] - 1 and self.neighbors['up']:
+                self.neighbors['up'].is_update_required = True
+            if z == 0 and self.neighbors['back']:
+                self.neighbors['back'].is_update_required = True
+            if z == self.size[2] - 1 and self.neighbors['forward']:
+                self.neighbors['forward'].is_update_required = True
+
+            if immediate_update:
+                self.update_mesh()
+
+    def build_mesh_data(self):
+        mesh_data = MeshData(sub_mesh_count=1)
+        for x in range(self.size[0]):
+            for y in range(self.size[1]):
+                for z in range(self.size[2]):
+                    block = self.blocks[x][y][z]
+                    if block is not None:
+                        # Get padded position for AO/Culling
+                        padded_pos = self.get_padded_voxel_position(x, y, z)
+                        block.definition.add_mesh_data(padded_pos, mesh_data, self, block)
+        return mesh_data
+
+    def get_padded_voxel_position(self, x, y, z):
+        # Returns world position or local position with padding logic
+        # Implementation depends on specific AO/Culling requirements
+        # [G] Placeholder for padding logic: if on edge, sample neighbor chunks
+        return (x, y, z)
+
+    def update_mesh_async(self, callback):
+        if self.is_updating:
+            return
+        
+        self.is_updating = True
+        self.is_update_required = False
+        
+        # Simulate background thread
+        def thread_task():
+            global_thread_count += 1
+            mesh_data = self.build_mesh_data()
+            mesh = mesh_data.build_mesh()
+            global_thread_count -= 1
+            callback(mesh)
+        
+        # In real implementation, spawn thread here
+        thread_task()
+
+    def apply_mesh(self, mesh):
+        if self.mesh_filter:
+            self.mesh_filter.mesh = None
+        if self.mesh_collider:
+            self.mesh_collider.shared_mesh = None
+        
+        if self.mesh_filter:
+            self.mesh_filter.mesh = mesh
+        if self.mesh_collider:
+            self.mesh_collider.shared_mesh = mesh
+            
+        self.is_updating = False
+        self.is_generated = True
+
+class VoxelWorldMeshingSystem:
+    def __init__(self, chunks, budget=5):
+        self.chunks = chunks
+        self.budget = budget  # Max chunks to mesh per frame
+
+    def update(self):
+        dirty_chunks = [c for c in self.chunks if c.is_update_required and not c.is_updating]
+        
+        # Limit work by budget
+        chunks_to_mesh = dirty_chunks[:self.budget]
+        
+        for chunk in chunks_to_mesh:
+            chunk.update_mesh_async(lambda mesh: self.apply_mesh_to_chunk(chunk, mesh))
+
+    def apply_mesh_to_chunk(self, chunk, mesh):
+        chunk.apply_mesh(mesh)
+```
+
+### Parameters
+-   **Chunk Size**: Default $(16, 16, 16)$ [S2, unofficial]. Configurable via serialization [S2, unofficial].
+-   **Meshing Budget**: Number of chunks processed per frame. Not given in the sources.
+
+### Edge Cases and Pitfalls
+-   **Boundary Correctness**: Padding is required during meshing to correctly handle culling and ambient occlusion for voxels on the edge of a chunk [S1, unofficial]. Without padding, artifacts appear at chunk borders.
+-   **Null Reference Errors**: When a block change occurs at a chunk boundary, the code must check if the neighbor chunk exists (`if (chunk != null)`) before marking it for update [S2, unofficial].
+-   **Thread Safety**: Voxel data access must be thread-safe. The sources mention `VoxelWorldStorage` is thread-safe [S1, unofficial].
+-   **Diagonal Neighbors**: Dirty tracking must include diagonal neighbors to ensure correct meshing at boundaries [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity**: $O(N)$ per chunk for meshing, where $N$ is the number of voxels in the chunk ($size^3$). Total time per frame is $O(B \cdot size^3)$, where $B$ is the budget (number of chunks meshed per frame).
+-   **Memory Complexity**: $O(W \cdot size^3)$ for the voxel data, where $W$ is the number of chunks in the world. Plus $O(W)$ for mesh data.
+-   **Measured Performance**: Not given in the sources.
+-   **Strengths**:
+    -   Maintains frame rate via per-update budgeting [S1, unofficial].
+    -   Correct lighting/culling at chunk boundaries via padding [S1, unofficial].
+    -   Thread-safe parallel meshing [S1, unofficial].
+-   **Limitations**:
+    -   Requires careful management of neighbor references and dirty flags [S2, unofficial].
+    -   Padding increases memory access complexity during meshing [S1, unofficial].
+-   **When to Use**: Dynamic voxel worlds with frequent block changes (e.g., Minecraft-like games) where performance stability is critical.
+-   **When Not to Use**: Static voxel worlds or worlds with very large continuous structures where chunk boundaries are rare or irrelevant.
+
+## Background
+This method is part of the Ada Engine's voxel graphics system, specifically introduced in ADR-0025 [S1, unofficial]. It was co-authored by Claude Sonnet 5.5 and implemented in the Ada Engine repository [S1, unofficial]. It builds on the concept of chunk-based voxel data structures [S2, unofficial] and manages them via a chunk-based world management system [Parent].
+
+## Sources
+[S1] Voxel graphics: MagicaVoxel import, animation, dynamic world and physics (ADR-0025), https://github.com/AdaEngine/Ada/pull/136, fetched 2026-10-26 (unofficial)
+[S2] BayatGames/VoxelFramework, https://github.com/BayatGames/VoxelFramework, fetched 2026-10-26 (unofficial)

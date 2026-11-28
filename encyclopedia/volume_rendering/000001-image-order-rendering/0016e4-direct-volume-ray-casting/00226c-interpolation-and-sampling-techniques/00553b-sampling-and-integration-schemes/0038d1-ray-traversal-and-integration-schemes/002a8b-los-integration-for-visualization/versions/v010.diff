@@ -1,0 +1,298 @@
+--- v009.md
++++ v010.md
+@@ -29,5 +29,5 @@
+ 
+ ### Data Structures
+-The method operates on PyTorch tensors. The core data structure for integration is the output accumulator, initialized to zeros for valid rays. The intermediate values are computed per sample point.
++The method operates on PyTorch tensors. The core data structure for integration is the output accumulator, initialized to zeros for valid rays. The intermediate values are computed per sample point [S1, unofficial].
+ 
+ ### Steps
+@@ -64,16 +64,17 @@
+         *   If `channels` is specified, select those channels from $\mathbf{ccoef}$ [S1, unofficial].
+         *   Sum over channels to get emissivity $\epsilon$ [S1, unofficial].
+-        *   Convert units:
++        *   **If `quantity == 'emission'`**:
++            *   $P_{ray} = \text{integ}(\epsilon)$ [S1, unofficial].
++        *   **If `quantity == 'ewt_temp'`**:
++            *   Numerator: $N = \text{integ}(10^{\log T} \times \epsilon)$ [S1, unofficial].
++            *   Denominator: $D = \text{integ}(\epsilon)$ [S1, unofficial].
++            *   $P_{ray} = N / \max(D, 10^{-30})$ [S1, unofficial].
++        *   *Alternative unit conversion path for physical intensity [S1, unofficial]*:
+             *   $sr2arcsec = (180/\pi)^2 \times 3600^2$ [S1, unofficial].
+             *   $ph2ergs = \frac{6.62607015 \times 10^{-27} \times 3 \times 10^{10}}{\lambda \times 10^{-8}}$ for each wavelength $\lambda$ [S1, unofficial].
+             *   Intensity per arcsec$^2$ per photon: $I_{eps} = \frac{\epsilon}{ph2ergs} / sr2arcsec$ [S1, unofficial].
+             *   Differential intensity: $dI = I_{eps} \times \Delta l$ [S1, unofficial].
+-        *   Apply radial mask: $dI = dI \times \text{keep\_w}$ [S1, unofficial].
+-        *   **If `quantity == 'emission'`**:
+-            *   $P_{ray} = \text{integ}(dI)$ [S1, unofficial].
+-        *   **If `quantity == 'ewt_temp'`**:
+-            *   Numerator: $N = \text{integ}(10^{\log T} \times dI)$ [S1, unofficial].
+-            *   Denominator: $D = \text{integ}(dI)$ [S1, unofficial].
+-            *   $P_{ray} = N / \max(D, 10^{-30})$ [S1, unofficial].
++            *   Apply radial mask: $dI = dI \times \text{keep\_w}$ [S1, unofficial].
++            *   Integrate along rays by adding $dI$ to the accumulator indexed by `ray_idx` [S1, unofficial].
+ 9.  **Finalization**:
+     *   Initialize `full` tensor of shape $(N, C)$ with NaN [S1, unofficial].
+@@ -82,5 +83,4 @@
+ 
+ ### Pseudocode
+-
+ ```python
+ import torch
+@@ -92,16 +92,13 @@
+                     ne_field=None, temp_field=None, ccoef_field=None,
+                     use_gt=False, clamp=False, clamp_bounds=None):
+-    """
+-    Performs Line-of-Sight integration for visualization.
+-    """
+     # 1. Ray Initialization
+     rays_o = rays_o.to(dtype=torch.float32, device=rays_o.device)
+     rays_d = rays_d.to(dtype=torch.float32, device=rays_d.device)
+     
+-    # 2. Sampling (Placeholder for specific sampling logic)
++    # 2. Sampling
++    # Not given in the sources.
+     if uniform_samples > 0:
+         # _sample_uniform_shell logic
+-        # Returns t_s, t_e, ray_idx, valid
+-        pass 
++        pass
+     else:
+         # _sample_points_along_rays logic
+@@ -110,12 +107,8 @@
+     # 3. Coordinate Computation
+     t_mid = 0.5 * (t_s + t_e)
+-    # Gather valid rays
+     valid_rays_o = rays_o[valid]
+     valid_rays_d = rays_d[valid]
+-    
+-    # Gather samples for valid rays
+     samples_o = valid_rays_o[ray_idx]
+     samples_d = valid_rays_d[ray_idx]
+-    
+     x_AABB = samples_o + t_mid.unsqueeze(-1) * samples_d
+     x_xyz = x_AABB * aabb_scale
+@@ -124,5 +117,4 @@
+     r_samp = torch.linalg.vector_norm(x_xyz, dim=-1)
+     keep_w = torch.ones_like(r_samp)
+-    
+     if r_min_rsun is not None:
+         keep_w = keep_w * (r_samp >= r_min_rsun)
+@@ -133,13 +125,8 @@
+     if use_gt and ne_field is not None:
+         log_ne = ne_field(x_xyz)
+-        if temp_field is not None:
+-            log_temp = temp_field(x_xyz)
+-        else:
+-            log_temp = None
++        log_temp = temp_field(x_xyz) if temp_field is not None else None
+     else:
+-        # _predict_learned_fields logic
+-        # Returns _, log_ne, log_temp
+-        log_ne = ... # Placeholder for prediction
+-        log_temp = ... # Placeholder for prediction
++        # Not given in the sources.
++        log_ne, log_temp = ccoef_field(x_AABB)
+         
+     if log_temp is None and temp_field is not None:
+@@ -148,5 +135,5 @@
+     if clamp:
+         if clamp_bounds is None:
+-            clamp_bounds = {'ne': (-10, 10), 'temp': (5, 8)} # Example bounds
++            clamp_bounds = {'ne': (-10, 10), 'temp': (5, 8)}
+         log_ne = torch.clamp(log_ne, clamp_bounds['ne'][0], clamp_bounds['ne'][1])
+         if log_temp is not None:
+@@ -158,11 +145,6 @@
+     # 7. Integration Helper
+     N_valid = valid.sum()
+-    
+     def integ(vals):
+         out = torch.zeros(N_valid, device=vals.device, dtype=vals.dtype)
+-        # vals shape: (M,) or (M, C)
+-        # ray_idx shape: (M,)
+-        # seg_len shape: (M,)
+-        # keep_w shape: (M,)
+         weighted_vals = vals * seg_len.unsqueeze(-1) * keep_w.unsqueeze(-1)
+         out.index_add_(0, ray_idx, weighted_vals)
+@@ -172,5 +154,4 @@
+     if quantity == 'column_ne':
+         per_ray = integ(torch.pow(10.0, log_ne))
+-        # per_ray shape: (N_valid,)
+         full = torch.full((rays_o.shape[0], 1), float('nan'), device=rays_o.device, dtype=torch.float32)
+         full[valid] = per_ray.unsqueeze(-1)
+@@ -180,11 +161,8 @@
+         log_r = torch.log10(r)
+         if clamp:
+-            log_r = torch.clamp(log_r, -10, 10) # Example clamp
+-            
+-        # Stack inputs: (M, 3)
++            log_r = torch.clamp(log_r, -10, 10)
++            
+         ntr = torch.stack([log_ne, log_temp, log_r], dim=-1)
+-        
+-        # Query ccoef_field
+-        ccoef_all = ccoef_field(ntr) # Shape: (M, C_total)
++        ccoef_all = ccoef_field(ntr)
+         
+         if channels is not None:
+@@ -193,128 +171,27 @@
+             ccoef = ccoef_all
+             
+-        # Sum over channels to get emissivity epsilon
+-        eps = torch.sum(ccoef, dim=-1) # Shape: (M,)
+-        
+-        # Unit conversions
+-        sr2arcsec = (180.0 / np.pi)**2 * 3600.0**2
+-        # wavelengths in Angstroms
+-        ph2ergs = (6.62607015e-27 * 3e10) / (torch.tensor(wavelengths, device=rays_o.device) * 1e-8)
+-        
+-        # epsI: (M, C_wavelengths)
+-        epsI = ccoef / ph2ergs.unsqueeze(0) / sr2arcsec
+-        
+-        # dI: (M, C_wavelengths)
+-        dI = epsI * seg_len.unsqueeze(-1)
+-        
+-        # Apply mask
+-        dI = dI * keep_w.unsqueeze(-1)
++        eps = torch.sum(ccoef, dim=-1)
++        
++        # Alternative unit conversion path for physical intensity [S1, unofficial]:
++        # sr2arcsec = (180.0 / np.pi)**2 * 3600.0**2
++        # ph2ergs = (6.62607015e-27 * 3e10) / (torch.tensor(wavelengths, device=rays_o.device) * 1e-8)
++        # epsI = ccoef / ph2ergs.unsqueeze(0) / sr2arcsec
++        # dI = epsI * seg_len.unsqueeze(-1) * keep_w.unsqueeze(-1)
++        # out = torch.zeros(N_valid, dI.shape[-1], device=rays_o.device, dtype=torch.float32)
++        # out.index_add_(0, ray_idx, dI)
++        # full = torch.full((rays_o.shape[0], dI.shape[-1]), float('nan'), device=rays_o.device, dtype=torch.float32)
++        # full[valid] = out
+         
+         if quantity == 'emission':
+-            per_ray = integ(dI) # Shape: (N_valid, C)
+-            full = torch.full((rays_o.shape[0], dI.shape[-1]), float('nan'), device=rays_o.device, dtype=torch.float32)
+-            full[valid] = per_ray
++            per_ray = integ(eps)
++            full = torch.full((rays_o.shape[0], 1), float('nan'), device=rays_o.device, dtype=torch.float32)
++            full[valid] = per_ray.unsqueeze(-1)
+             
+         elif quantity == 'ewt_temp':
+-            # Numerator: integ(10^log_temp * eps)
+-            # Note: eps here is the summed emissivity before unit conversion? 
+-            # The source says: num = integ(torch.pow(10.0, log_temp) * eps)
+-            # But eps was defined as summed ccoef. 
+-            # Let's follow the source strictly:
+-            # "Sum over channels to get eps (emissivity). For 'emission', per_ray = integ(eps). 
+-            # For 'ewt_temp', compute num = integ(torch.pow(10.0, log_temp) * eps), den = integ(eps)"
+-            # Wait, the source also defines dI using epsI. 
+-            # Let's re-read carefully:
+-            # "Stack ... Query ccoef_all ... Sum over channels to get eps ... 
+-            # For 'emission', per_ray = integ(eps). 
+-            # For 'ewt_temp', compute num = integ(torch.pow(10.0, log_temp) * eps), den = integ(eps)"
+-            # This implies 'eps' in the ewt_temp formula is the raw summed emissivity coefficient, 
+-            # not the converted intensity dI.
+-            
+-            # Re-evaluating based on source text:
+-            # "Sum over channels to get eps (emissivity)."
+-            # "For 'emission', per_ray = integ(eps)."
+-            # "For 'ewt_temp', compute num = integ(torch.pow(10.0, log_temp) * eps), den = integ(eps)"
+-            
+-            # However, earlier it says:
+-            # "Convert emissivity ccoef ... to intensity ... dI = epsI * seg_len_phys"
+-            # "If visualization mask ... zero out ... dI = dI * sample_keep"
+-            # "Integrate along rays by adding dI to out"
+-            
+-            # There is a contradiction or two different paths in the notes.
+-            # Note 1: "For 'emission', per_ray = integ(eps)."
+-            # Note 2: "Compute differential intensity dI = epsI * seg_len_phys ... Integrate ... dI"
+-            
+-            # Let's look at the "step" section again.
+-            # Step: "If quantity is 'emission' or 'ewt_temp': ... Sum over channels to get eps ... 
+-            # For 'emission', per_ray = integ(eps). For 'ewt_temp', compute num = integ(...), den = integ(eps)"
+-            # This step block seems to describe the core logic.
+-            # The later block about dI and ph2ergs seems to be a more detailed implementation or alternative path.
+-            # Given the instruction "rewrite in one clean common style", I must merge.
+-            # The 'dI' path includes unit conversion. The 'eps' path does not explicitly show unit conversion in the summary line, 
+-            # but the context is "visualization".
+-            # The source [S1, unofficial] code snippet shows:
+-            # "epsI = ccoef / ph2ergs ... / sr2arcsec"
+-            # "dI = epsI * seg_len_phys"
+-            # "out.index_add_(0, ray_idx, dI)"
+-            # This suggests the final integration is on dI.
+-            # The text "For 'emission', per_ray = integ(eps)" might be a simplification or referring to the pre-conversion value 
+-            # if the visualization doesn't require physical units, but the presence of ph2ergs suggests it does.
+-            # I will use the dI path for 'emission' and 'ewt_temp' as it is more complete in the code snippet.
+-            
+-            # For ewt_temp, the source says:
+-            # "num = integ(torch.pow(10.0, log_temp) * eps)"
+-            # "den = integ(eps)"
+-            # If we use dI, then:
+-            # num = integ(torch.pow(10.0, log_temp) * dI) ? No, dI is intensity.
+-            # The source text explicitly links eps to the integration for ewt_temp.
+-            # Let's stick to the explicit text for ewt_temp:
+-            # num = integ(torch.pow(10.0, log_temp) * eps)
+-            # den = integ(eps)
+-            # But what is eps? "Sum over channels to get eps".
+-            # And for emission: "per_ray = integ(eps)".
+-            # This contradicts the dI path.
+-            # However, the dI path is in the "step" list as well.
+-            # "Compute differential intensity dI = epsI * seg_len_phys."
+-            # "Integrate along rays by adding dI to out"
+-            
+-            # I will provide the implementation that follows the code snippet's logic for emission, 
+-            # and the text's logic for ewt_temp if they differ, but they likely don't.
+-            # Actually, the text "For 'emission', per_ray = integ(eps)" is likely a high-level summary.
+-            # The detailed steps show dI.
+-            # I will use dI for emission.
+-            # For ewt_temp, the text says "num = integ(torch.pow(10.0, log_temp) * eps)".
+-            # If eps is the summed ccoef, then this is integrating weighted temperature.
+-            # But dI is the intensity.
+-            # I will assume 'eps' in the text refers to the quantity being integrated, which is dI in the code.
+-            # But the code doesn't show ewt_temp integration explicitly in the snippet provided in the prompt's "step" section.
+-            # The "step" section has:
+-            # "For 'ewt_temp', compute num = integ(torch.pow(10.0, log_temp) * eps), den = integ(eps), and per_ray = num / den.clamp_min(1e-30)."
+-            # This is the definitive algorithm for ewt_temp.
+-            # So for ewt_temp, we integrate eps (summed ccoef), not dI.
+-            # For emission, the text says "per_ray = integ(eps)".
+-            # But the code snippet shows dI.
+-            # I will follow the text for the algorithm definition, as it is more explicit about the quantity.
+-            # However, the code snippet is the implementation.
+-            # I will use the text's definition for eps integration, but note that eps must be converted if physical units are needed.
+-            # Given the alias "LUT-based", it implies using the LUT (ccoef) directly.
+-            
+-            # Let's use the text's logic for both, as it is consistent in the "step" block.
+-            # eps = summed ccoef.
+-            
+-            eps_summed = torch.sum(ccoef, dim=-1) # (M,)
+-            
+-            if quantity == 'emission':
+-                # Integrate eps
+-                per_ray = integ(eps_summed) # (N_valid,)
+-                # Reshape for full
+-                full = torch.full((rays_o.shape[0], 1), float('nan'), device=rays_o.device, dtype=torch.float32)
+-                full[valid] = per_ray.unsqueeze(-1)
+-                
+-            elif quantity == 'ewt_temp':
+-                num = integ(torch.pow(10.0, log_temp) * eps_summed)
+-                den = integ(eps_summed)
+-                per_ray = num / den.clamp_min(1e-30)
+-                full = torch.full((rays_o.shape[0], 1), float('nan'), device=rays_o.device, dtype=torch.float32)
+-                full[valid] = per_ray.unsqueeze(-1)
++            num = integ(torch.pow(10.0, log_temp) * eps)
++            den = integ(eps)
++            per_ray = num / den.clamp_min(1e-30)
++            full = torch.full((rays_o.shape[0], 1), float('nan'), device=rays_o.device, dtype=torch.float32)
++            full[valid] = per_ray.unsqueeze(-1)
+ 
+     return full
+@@ -335,8 +212,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Linear with respect to the number of samples $M$ and rays $N$ [S1, unofficial].
+-*   **Memory Complexity**: Linear with respect to $N$ and $M$ for storing ray data and intermediate tensors [S1, unofficial].
++*   **Time Complexity**: Not given in the sources.
++*   **Memory Complexity**: Not given in the sources.
+ *   **Strengths**: Direct integration of physical quantities; avoids opacity/compositing artifacts; handles solar-specific constraints (radial masking) [S1, unofficial].
+ *   **Limitations**: Requires accurate field queries; sensitive to radial bounds [S1, unofficial].
++*   **When to use**: Solar corona visualization requiring physical scalar fields (density, temperature, emissivity) [S1, unofficial].
++*   **When not**: Standard color/opacity compositing or non-solar volume rendering [S1, unofficial].
+ 
+ ## Background

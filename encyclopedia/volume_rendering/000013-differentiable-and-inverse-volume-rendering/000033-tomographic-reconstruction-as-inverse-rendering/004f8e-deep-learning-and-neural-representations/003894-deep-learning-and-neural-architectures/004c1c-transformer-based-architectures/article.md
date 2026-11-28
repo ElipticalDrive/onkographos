@@ -1,0 +1,91 @@
+# Transformer-based Architectures
+
+
+## Overview
+Transformer-based architectures apply self-attention mechanisms to capture long-range dependencies in volumetric data, addressing the local receptive field limitations of convolutions in volume rendering [S1]. They enable direct feature aggregation, super-resolution, and denoising across spatial or ray-based token sequences without relying solely on iterative tomographic inversion or per-scene optimization [S1, S5].
+
+## Shared principles
+All methods in this family rely on the differentiability of the forward projection operator $\mathcal{P}$ and its adjoint (back-projection) $\mathcal{P}^T$ [G]. The core optimization problem is generally formulated as minimizing a loss function $\mathcal{L}$ between the measured sinogram $p$ and the rendered projection $\hat{p} = \mathcal{P}(x)$ of the current volume estimate $x$:
+
+$$
+\min_x \mathcal{L}(\mathcal{P}(x), p) + \lambda R(x)
+$$
+
+where $R(x)$ is a regularizer (e.g., Total Variation, neural prior) and $\lambda$ is a weighting factor [S1][S2, unofficial].
+
+The gradient of the loss with respect to the volume $x$ is computed via the chain rule:
+
+$$
+\frac{\partial \mathcal{L}}{\partial x} = \mathcal{P}^T \left( \frac{\partial \mathcal{L}}{\partial \hat{p}} \right)
+$$
+
+The term $\frac{\partial \mathcal{L}}{\partial \hat{p}}$ is the residual gradient in projection space (e.g., $p - \hat{p}$ for MSE), and $\mathcal{P}^T$ is the back-projection operator [G].
+
+Key shared components include:
+1.  **Forward Projection:** Ray marching through the volume representation (voxels, octrees, or neural fields) to compute line integrals of density/absorption coefficients [S1].
+2.  **Backward Projection (Adjoint):** Distributing the error from the 2D detector plane back into the 3D volume. This is mathematically the transpose of the forward operator, ensuring stable convergence in iterative methods [G].
+3.  **Optimization Loop:** An iterative process (e.g., SGD, Adam) that updates the volume parameters (voxel values, neural network weights, or Gaussian parameters) to reduce the projection error [G].
+
+## Subtopics
+
+### [DuDoTrans](1409-dudotrans.md)
+DuDoTrans is a dual-domain transformer architecture designed for sparse-view CT reconstruction, addressing the ill-posed nature of tomographic inversion when projection data is limited. It distinguishes itself from standard transformer-based reconstruction methods by explicitly operating in both the image domain (via Swin Transformer blocks) and the projection domain (via differentiable forward/back-projection), leveraging window-based multi-head self-attention to reduce computational complexity while maintaining global context.
+
+### [Generalizable Radiance Fields via Transformer Attention](8996-generalizable-radiance-fields-via-transformer-attention.md)
+A generalizable approach using a transformer-based attention module to aggregate source views information. It efficiently reconstructs Neural Radiance Fields (NeRFs) on the fly from source views without per-scene optimization. It sets itself apart from sibling methods by focusing on cross-view feature aggregation via attention mechanisms rather than iterative tomographic inversion.
+
+### [Transformers and Vision Transformers (ViT)](10441-transformers-and-vision-transformers-vit.md)
+Transformers compute pairwise attention over input tokens to capture long-range dependencies that convolutions miss. The Vision Transformer (ViT) adapts this architecture for images by treating fixed-size patches as tokens. Builds on [Transformer-based Architectures](13148-transformer-based-architectures.md) [G]. In volume rendering, ViT is used for super-resolution and denoising, where its ability to attend across the full spatial extent of a subvolume helps recover large-scale structures that local convolutions miss.
+
+### [Transformer-based Tomographic Reconstruction](11047-transformer-based-tomographic-reconstruction.md)
+Transformer-based Tomographic Reconstruction is a deep learning technique that reconstructs 3D single-photon emission computed tomography (SPECT) images using a slice-by-slice transformer network (SSTrans-3D). It addresses the considerable artifacts caused by incomplete projection data in image reconstruction. It differs from siblings like [DuDoTrans](1409-dudotrans.md) and [DIOR](1409-dudotrans.md) by relying on a pure transformer architecture rather than combining deep learning with iterative optimization.
+
+### [Line Segment-based Transformer (Lineformer)](19786-line-segment-based-transformer-lineformer.md)
+The Line Segment-based Transformer (Lineformer) is a neural architecture designed for sparse-view X-ray 3D reconstruction, specifically serving as the backbone for Structure-Aware X-ray Neural Radiodensity Fields (SAX-NeRF). It solves the problem of capturing internal 3D structural dependencies in X-ray projections by computing self-attention locally within line segments of an X-ray, rather than globally across all sampled points. Unlike vanilla Transformers which exhibit quadratic computational complexity relative to the number of input points, Lineformer achieves linear complexity, making it efficient enough to integrate into iterative volume rendering pipelines.
+
+### Depth-Encoded Ray Transformer (DERT)
+- **Definition:** A transformer architecture that infers volume density by incorporating relative depth differences as position encoding, rather than absolute positions [S1].
+- **Steps:** 1. Sample $M$ points $p_m$ on ray $r$ with depths $t_m$ [S1]. 2. Calculate relative depth encoding $E_m$ for each point using $\delta_m$ [S1]. 3. Element-wise add $E_m$ to point feature $f_m$ [S1]. 4. Pass through self-attention and feed-forward network to predict volume density $\sigma_m$ [S1].
+- **Parameters:** $K$: Length of the position encoding feature vector [S1].
+- **Details:** The relative depth $\delta_m$ is calculated as $\delta_m = \frac{t_m - d}{u(t_{far} - t_{near})}$, where $d$ is the estimated depth, $t_{near}$ and $t_{far}$ are the near and far plane depths, and $u$ is a hyperparameter controlling the range [S1]. The position encoding $E_m$ uses sinusoidal functions with frequencies $\omega_k = \frac{1}{10000^{2i/K}}$ for even/odd indices $k$ [S1].
+
+### Transformer Proposer Architecture
+- **Definition:** A proposer network constrained to reduce computational cost, using a single transformer block for encoder and decoder with a single attention head [S2, unofficial].
+- **Layout:** Features are projected to 16-D. A single transformer block is used for the encoder. A single transformer block is used for the decoder. A single attention head is used [S2, unofficial].
+- **Context:** This architecture is used in NeRF sampling to propose points for coarse and fine networks, reducing the overhead compared to fully connected layers while maintaining reasonable cost [S2, unofficial].
+
+### Masked Auto Encoder (MAE) for Generalizable NeRF
+- **Definition:** Using Masked Auto Encoder combined with a 3D transformer-based architecture to learn a generalized representation capable of reconstructing unseen scenes [S3].
+- **Context:** This approach scales self-supervised NeRF training by leveraging geometric cues from sparse inputs, enabling transfer learning and generalization to new scenes without per-scene optimization [S3].
+
+### X-ray Reconstruction Transformer
+- **Definition:** A large feedforward transformer model that encodes sparse-view X-ray projections into compact latent tokens and fuses them across views to reconstruct a 3D CT volume density field [S4, unofficial].
+- **Steps:** 1. Encode each X-ray projection $I_i$ independently using a feature extractor $F_{enc}$ (specifically DINO) to produce patch features $H_i$: $H_i = F_{enc}(I_i)$ for $i = 1, \dots, K$ [S4, unofficial]. 2. Inject camera geometry into the encoded features by applying ModLN with Plücker ray embeddings $R_i$: $\tilde{H}_i = ModLN(H_i, R_i)$ for $i = 1, \dots, K$ [S4, unofficial]. 3. Concatenate the modulated features from all $K$ views and process them through a 16-layer Fusion ViT (similar to ViT-B) using all-to-all self-attention $F_{fuse}$ to produce fused features $\{F_1, \dots, F_K\}$ [S4, unofficial].
+- **Parameters:** Fusion ViT depth: 16 layers, architecture similar to ViT-B. Encoder backbone: DINO transformer. Camera embedding: Plücker ray embedding $R_i$, derived from the cross product between camera location and ray direction, independent of scale, camera position, and focal length [S4, unofficial].
+
+### NeRFormer
+- **Definition:** A model using Transformers for volume rendering, processing ray-depth-ordered feature sequences from multiple source views [S5].
+- **Steps:** 1. Processes ray-depth-ordered feature sequences from multiple source views [S5]. 2. Uses alternating pooling and ray-wise attention layers [S5]. 3. Enables effective joint feature aggregation and ray marching [S5].
+- **Context:** NeRFormer is geometry-free and does not produce the scene's density function directly, nor does it rely on geometric inductive biases, distinguishing it from standard NeRF models [S5].
+
+### Ray Direction Masking
+- **Definition:** A technique to enable transformers to model volumetric rendering by implicitly encoding uni-directional ray information, preventing the model from rendering inaccurate surfaces due to bidirectional ray assumptions [S6].
+- **Steps:** Include masks in the transformer input to distinguish between frontal and rear points along a camera ray, ensuring the network mimics a volumetric rendering strategy [S6].
+- **Pitfall:** Without masking, a bidirectional ray is implied, causing the network to have difficulty rendering the object’s surface accurately [S6].
+- **Comparison:** Appending a volume’s position on a ray to introduce uni-directional ray information is ineffective compared to the original masking strategy [S6].
+
+### Volume Slot Attention
+- **Steps:** Update the slot features using a Gated Recurrent Unit (GRU) with the computed attention output and previous state: $GRU(U_t, S_{t-1})$ [S7, unofficial]. Repeat the attention computation and GRU update 3 times at each timestamp to obtain the final slot features $S_t$ [S7, unofficial].
+- **Parameters:** $D$: Fixed softmax temperature for the attention mechanism [S7, unofficial]. Repetition count: 3 iterations of attention/GRU per timestamp [S7, unofficial].
+
+## Background
+Transformer architectures have been adapted for volume rendering to overcome the local connectivity constraints of Convolutional Neural Networks (CNNs). The Vision Transformer (ViT) was originally proposed for image classification [S1]. In the context of Neural Radiance Fields (NeRF), transformers have been used for view aggregation [S5], sampling proposal [S2, unofficial], and generalizable reconstruction [S3]. The integration of transformers into tomographic reconstruction, such as in DuDoTrans and SSTrans-3D, addresses the ill-posed nature of sparse-view problems by leveraging global attention to recover missing information [S1][S2, unofficial].
+
+## Sources
+[S1] NeRF-SDP: Efficient Generalizable Neural Radiance Field with Scene Depth Perception, https://doi.org/10.1145/3595916.3626380, fetched 2026-10-30
+[S2] NeRF in detail: Learning to sample for view synthesis, https://doi.org/10.48550/arxiv.2106.05264, fetched 2026-10-27 (unofficial)
+[S3] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+[S4] X-GRM: Large Gaussian Reconstruction Model for Sparse-view X-rays to Computed Tomography, https://doi.org/10.48550/arXiv.2505.15235, fetched 2026-10-27 (unofficial)
+[S5] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S6] ABLE-NeRF: Attention-Based Rendering with Learnable Embeddings for Neural Radiance Field, https://doi.org/10.1109/cvpr52729.2023.01589, fetched 2026-10-26
+[S7] DynaVol: Unsupervised Learning for Dynamic Scenes through Object-Centric Voxelization, https://doi.org/10.48550/arxiv.2305.00393, fetched 2026-10-26 (unofficial)

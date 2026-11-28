@@ -1,0 +1,117 @@
+# Mesh Quality Maintenance via Edge Collapse/Split
+
+Also called: Dynamic Triangulation, Twinned Meshes Mechanical Update
+
+## Overview
+This method maintains mesh quality during dynamic simulation by dynamically modifying topology via edge collapse and split operations based on edge lengths, preventing excessive stretching or compression of triangular elements [S1]. It differs from mechanical criteria-based approaches by using geometric edge length checks for speed, and from static simplification methods by operating iteratively within a time-stepped simulation loop to maintain equilibrium [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: Current mesh vertex positions $x$, previous vertex positions $x_{t-1}$, desired rest edge length $\hat{e}$, stretching threshold multiplier $e_{max}$, compression threshold multiplier $e_{min}$, and oscillation guard $\epsilon_e$ [S1].
+*   Output: Modified mesh topology and vertex positions ready for the next integration step [S1].
+
+**Data Structures:**
+*   Mesh: Set of vertices $V$ and triangles $T$. Each triangle $j$ has vertices $v_1, v_2, v_3$.
+*   Edge List: Set of unique edges $E$. Each edge $e$ connects two vertices.
+*   Flags: Boolean flag `modifiable` for each edge, initialized to `true` [S1].
+
+**Formulas:**
+*   Rest shape: Equilateral triangle with edge length $\hat{e}$ [S1].
+*   Stiffness matrix $K$: Precomputed for the equilateral triangle element [S1].
+*   Rest position vector $x_0$: Vertices of the equilateral triangle [S1].
+*   Rotation matrix $R_j$: Aligns the local element $j$ with the global coordinate system [S1].
+*   Force on element $j$: $f_j(x) = R_j K (R_j^T x - x_0)$ [S1].
+*   Stretching condition: Split if $|e| > e_{max} \times \hat{e}$ AND $|e_t| - |e_{t-1}| > \epsilon_e \times \hat{e}$ [S1].
+*   Compression condition: Collapse if $|e| < e_{min} \times \hat{e}$ AND $|e_t| - |e_{t-1}| < -\epsilon_e \times \hat{e}$ [S1].
+
+**Parameters:**
+*   $e_{max}$: Maximal edge stretching threshold multiplier. Typical value: 1.2 to 2.0 [S1].
+*   $e_{min}$: Maximal edge compression threshold multiplier. Typical value: 0.6 to 1.0 [S1].
+*   $\epsilon_e$: Threshold for change in edge length to prevent oscillation. Not given in the sources.
+*   $\hat{e}$: Desired mechanical edge length (rest shape size). Not given in the sources.
+
+**Steps:**
+1.  Initialize all edge flags `modifiable` to `true` [S1].
+2.  Loop through all edges $e$ in the mesh [S1].
+3.  If `e.modifiable` is `false`, skip to next edge [S1].
+4.  Calculate current edge length $|e_t|$ and previous edge length $|e_{t-1}|$ [S1].
+5.  Check if stretching condition is met: $|e_t| > e_{max} \times \hat{e}$ AND $|e_t| - |e_{t-1}| > \epsilon_e \times \hat{e}$ [S1].
+    *   If true, perform Edge Split on $e$ [S1].
+    *   Flag all edges modified by the split as `modifiable = false` [S1].
+6.  Else, check if compression condition is met: $|e_t| < e_{min} \times \hat{e}$ AND $|e_t| - |e_{t-1}| < -\epsilon_e \times \hat{e}$ [S1].
+    *   If true, check if collapse would create a non-manifold mesh (edge shared by >2 triangles) [S1].
+    *   If non-manifold, forbid collapse and flag $e$ as `modifiable = false` [S1].
+    *   If manifold, perform Edge Collapse on $e$ [S1].
+    *   Flag all edges modified by the collapse as `modifiable = false` [S1].
+7.  Proceed to quasi-static integration step [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def maintain_mesh_quality(mesh, prev_positions, rest_length, e_max, e_min, epsilon_e):
+    # Initialize flags
+    for edge in mesh.edges:
+        edge.modifiable = True
+
+    # Collect operations to avoid modifying mesh during iteration
+    splits = []
+    collapses = []
+
+    for edge in mesh.edges:
+        if not edge.modifiable:
+            continue
+
+        # Get current and previous lengths
+        curr_len = edge.length()
+        prev_len = edge.length_at(prev_positions)
+
+        # Check stretching
+        if curr_len > e_max * rest_length and (curr_len - prev_len) > epsilon_e * rest_length:
+            splits.append(edge)
+            # Flag modified edges to prevent oscillation in this step
+            # Note: Implementation detail [G] - mark neighbors as unmodifiable
+            mark_edges_unmodifiable(mesh, edge)
+
+        # Check compression
+        elif curr_len < e_min * rest_length and (curr_len - prev_len) < -epsilon_e * rest_length:
+            # Check for non-manifold condition
+            if not is_non_manifold_collapse(mesh, edge):
+                collapses.append(edge)
+                mark_edges_unmodifiable(mesh, edge)
+
+    # Apply splits
+    for edge in splits:
+        split_edge(mesh, edge)
+
+    # Apply collapses
+    for edge in collapses:
+        collapse_edge(mesh, edge)
+
+    return mesh
+```
+
+**Edge Cases and Pitfalls:**
+*   Non-manifold mesh generation: Collapsing an edge can create a non-manifold mesh where an edge is shared by more than two triangles. This is handled by forbidding the collapse in such cases [S1].
+*   Oscillation: Flagging modified edges as unmodifiable for the next time step avoids oscillation during the search of equilibrium state [S1].
+
+## Subtopics
+
+### Edge Split
+Increases the number of vertices in regions where normal deviation is too large, adding flexibility for adapting the mesh to desired geometry [S2]. It is used in remeshing contexts (e.g., Botsch Remeshing) rather than pure dynamic triangulation [S2]. Choose it when isotropic refinement based on curvature/normal deviation is required [S2]. Steps: Search for triangles with normal deviation $\sigma(t) > \sigma_{max}$ [S2]. Consider the longest edge of such a triangle as a candidate [S2]. Locate the new vertex using vertex relocation (QEM) [S2]. Perform only a single batch of edge split operators; newly created edges are not considered for recursive splitting [S2]. Parameter: Optional minimum length parameter; if an edge is smaller than this, it is not refined to avoid resolving features not of interest [S2].
+
+## Operating characteristics
+*   Time Complexity: Linear in the number of edges $O(|E|)$ per time step, as it loops on all edges [S1].
+*   Memory Complexity: Linear in the number of vertices and edges for storing mesh and flags [S1].
+*   Performance: Faster than mechanical criteria-based methods because geometric edge length checks are faster to compute than deformation direction calculations [S1].
+*   Strengths: Maintains mesh quality dynamically during simulation; prevents excessive stretching/compression; ensures manifold mesh [S1].
+*   Limitations: Requires careful tuning of thresholds ($e_{max}, e_{min}$); may introduce topological changes that affect continuity if not handled properly [S1].
+*   When to use: Dynamic simulation of implicit surfaces or deformable meshes where quality maintenance is critical [S1].
+*   When not to use: Static mesh simplification or when non-manifold meshes are acceptable [S1].
+
+## Background
+Originated in the context of dynamic triangulation of implicit surfaces using "twinned meshes" [S1]. The method was developed to handle the deformation of meshes in real-time simulations, ensuring that elements do not become too distorted [S1]. It is used in computer graphics for animating deformable objects and implicit surfaces [S1].
+
+## Sources
+[S1] Twinned meshes for dynamic triangulation of implicit surfaces, https://doi.org/10.1145/1268517.1268521, fetched 2026-10-26
+[S2] Feature-Preserving Offset Mesh Generation from Topology-Adapted Octrees, https://doi.org/10.1111/cgf.14906, fetched 2026-10-26

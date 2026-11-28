@@ -1,0 +1,207 @@
+--- v002.md
++++ v003.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-AR-NeRF builds on the [Scene Representation and Architecture](11368-scene-representation-and-architecture.md) principles, specifically the use of coupled MLPs for density and color prediction, but modifies the ray generation and training loop to support aperture rendering.
++AR-NeRF builds on the [Scene Representation and Architecture](11368-scene-representation-and-architecture.md) principles, specifically the use of coupled MLPs for density and color prediction, but modifies the ray generation and training loop to support aperture rendering [S1].
+ 
+ ### Inputs and Outputs
+@@ -70,40 +70,10 @@
+ import numpy as np
+ 
+-def generate_aperture_rays(pixel_center, aperture_size_s, num_rays=5):
++def generate_aperture_rays(camera_center, pixel_direction, aperture_size_s, focus_distance, num_rays=5):
+     """
+     Generates a bundle of rays for a single pixel using stratified sampling.
+-    
+-    Args:
+-        pixel_center: 2D coordinates of the pixel center in camera space.
+-        aperture_size_s: Scalar radius of the aperture.
+-        num_rays: Number of rays to sample (default 5).
+-        
+-    Returns:
+-        origins: Array of shape (num_rays, 3) for ray origins.
+-        directions: Array of shape (num_rays, 3) for ray directions.
+     """
+-    # Note: Exact camera intrinsics and coordinate system details are not provided in [S1].
+-    # This implementation assumes a standard pinhole projection where direction is 
+-    # determined by pixel center and origin is offset by aperture vector u.
+-    
+     origins = []
+     directions = []
+-    
+-    # Ray 1: Center of aperture
+-    u_center = np.array([0.0, 0.0])
+-    origin = pixel_center + u_center
+-    # Direction is typically from origin through the focal plane. 
+-    # In AR-NeRF, rays converge at the focus plane. 
+-    # Assuming standard ray generation logic where d is fixed for the pixel 
+-    # and o varies, or d varies to converge. 
+-    # [S1] states rays converge at the focus plane. 
+-    # Standard implementation: origin = camera_center + u, direction = normalize(focus_point - origin)
+-    # However, [S1] simplifies this to "collection of rays... converge at the focus plane".
+-    # We assume the direction is computed based on the convergence point.
+-    
+-    # Placeholder for specific camera geometry calculation not detailed in [S1]
+-    # Typically: origin = o + u, direction = normalize(f - origin) where f is focus point
+-    # For the purpose of this pseudocode, we assume a helper function exists 
+-    # that computes the ray bundle given the aperture offset and focus distance.
+     
+     # Stratified sampling: 1 center, 4 circumference
+@@ -114,18 +84,14 @@
+             u = np.array([0.0, 0.0])
+         else:
+-            # Place on circumference with equal intervals
+-            # Radius is s. 
+             u = np.array([aperture_size_s * np.cos(angles[i]), 
+                           aperture_size_s * np.sin(angles[i])])
+         
+-        # Compute ray origin and direction based on camera model
+-        # [S1] does not provide the exact geometric formula for origin/direction 
+-        # from u and focus distance f. 
+-        # [G] Standard aperture camera model: 
+-        # Origin = CameraCenter + u (in camera coordinates)
+-        # Direction = normalize(FocusPoint - Origin)
+-        # This is a standard assumption for aperture rendering.
+-        origin = compute_origin(pixel_center, u) 
+-        direction = compute_direction(origin, focus_distance)
++        # [G] Standard aperture camera model: origin is offset by u in the camera's x-y plane.
++        origin = camera_center + u[0] * np.array([1.0, 0.0, 0.0]) + u[1] * np.array([0.0, 1.0, 0.0])
++        
++        # Rays converge at the focus plane. Focus point is along the base direction at distance f.
++        focus_point = camera_center + focus_distance * pixel_direction
++        direction = focus_point - origin
++        direction = direction / np.linalg.norm(direction)
+         
+         origins.append(origin)
+@@ -134,25 +100,8 @@
+     return np.array(origins), np.array(directions)
+ 
+-def render_pixel(nerf_mlp, pixel_center, aperture_size_s, focus_distance, latent_code_z, 
+-                 near_plane, far_plane, num_samples=128):
++def render_pixel(nerf_mlp, origins, directions, latent_code_z, near_plane, far_plane, num_samples=128):
+     """
+     Renders a single pixel using AR-NeRF's aperture rendering.
+-    
+-    Args:
+-        nerf_mlp: The trained NeRF MLP function.
+-        pixel_center: 2D pixel coordinates.
+-        aperture_size_s: Current aperture size.
+-        focus_distance: Current focus distance.
+-        latent_code_z: Latent code for the scene.
+-        near_plane, far_plane: Depth bounds.
+-        num_samples: Number of samples per ray.
+-        
+-    Returns:
+-        color: Rendered RGB color.
+-        depth: Rendered depth.
+     """
+-    # 1. Generate ray bundle
+-    origins, directions = generate_aperture_rays(pixel_center, aperture_size_s)
+-    
+     total_color = np.zeros(3)
+     total_depth = 0.0
+@@ -163,30 +112,28 @@
+         d = directions[i]
+         
+-        # 2. Sample points along the ray
++        # Sample points along the ray
+         t_vals = np.linspace(near_plane, far_plane, num_samples)
+         points = o + t_vals[:, np.newaxis] * d
+         
+-        # 3. Query MLP for density and color
+-        # [S1] MLP inputs: x, d, z
++        # Query MLP for density and color
+         # [G] Positional encoding is applied to x and d as per parent article
+         densities, colors = nerf_mlp(points, d, latent_code_z)
+         
+-        # 4. Volume rendering for this ray
+-        # Compute alpha and transmittance
++        # Fix: Clamp densities to prevent negative values from causing exponential underflow in T calculation.
++        sigma = np.maximum(densities, 1e-4)
++        
++        # Volume rendering
+         deltas = t_vals[1:] - t_vals[:-1]
+-        # Add a small epsilon to avoid division by zero or log(0)
+         deltas = np.append(deltas, 1e-10)
+         
+-        alpha = 1.0 - np.exp(-densities * deltas)
+-        T = np.cumprod(np.exp(-np.cumsum(densities * deltas)))
+-        T = np.concatenate(([1.0], T[:-1]))
++        sigma_deltas = sigma * deltas
++        alpha = 1.0 - np.exp(-sigma_deltas)
+         
+-        # Color integration
+-        # C(r) = sum(T_i * alpha_i * c_i)
++        # Transmittance T_i = exp(-sum_{j=0}^{i-1} sigma_j * delta_j)
++        T = np.exp(-np.cumsum(sigma_deltas))
++        T = np.concatenate([[1.0], T[:-1]])
++        
+         weights = alpha * T
+         color = np.sum(weights[:, np.newaxis] * colors, axis=0)
+-        
+-        # Depth integration
+-        # Z(r) = sum(T_i * alpha_i * t_i)
+         depth = np.sum(weights * t_vals)
+         
+@@ -194,36 +141,19 @@
+         total_depth += depth
+         
+-    # 5. Average over the ray bundle
+     final_color = total_color / num_rays
+     final_depth = total_depth / num_rays
+-    
+     return final_color, final_depth
+ 
+-def train_step(arnerf_model, discriminator, real_image, latent_code_z, aperture_size_s):
++def train_step(arnerf_model, discriminator, real_image, latent_code_z, aperture_size_s, optimizer_d, optimizer_g):
+     """
+     Performs one training step for AR-NeRF.
+-    
+-    Args:
+-        arnerf_model: The AR-NeRF generator (MLPs).
+-        discriminator: The GAN discriminator.
+-        real_image: Ground truth image from the dataset.
+-        latent_code_z: Sampled latent code.
+-        aperture_size_s: Sampled aperture size.
+-        
+-    Returns:
+-        loss: The computed loss value.
+     """
+-    # 1. Generate fake image using AR-NeRF
+-    # [S1] Focus distance f is predicted by an MLP taking z as input
++    # Predict focus distance from latent code
+     focus_distance = arnerf_model.predict_focus_distance(latent_code_z)
+     
+-    # Render the image (simplified: assumes full image rendering)
++    # Render image
+     fake_image = arnerf_model.render_image(latent_code_z, aperture_size_s, focus_distance)
+     
+-    # 2. Compute GAN Loss
+-    # L_AR-NeRF = E[log D(I^r)] + E[log(1 - D(G(z, s)))]
+-    # Note: In practice, this involves backpropagation through the discriminator
+-    # and the generator.
+-    
++    # Compute GAN Loss
+     pred_real = discriminator(real_image)
+     pred_fake = discriminator(fake_image)
+@@ -231,8 +161,14 @@
+     loss_d = -np.mean(np.log(pred_real + 1e-8)) - np.mean(np.log(1 - pred_fake + 1e-8))
+     
+-    # Update discriminator and generator
+-    # [G] Standard GAN update steps (e.g., Adam optimizer)
+-    update_discriminator(discriminator, loss_d)
+-    update_generator(arnerf_model, loss_d)
++    # Update discriminator parameters via gradient descent
++    optimizer_d.zero_grad()
++    loss_d.backward()
++    optimizer_d.step()
++    
++    # Update generator parameters via gradient descent
++    loss_g = -np.mean(np.log(pred_fake + 1e-8))
++    optimizer_g.zero_grad()
++    loss_g.backward()
++    optimizer_g.step()
+     
+     return loss_d

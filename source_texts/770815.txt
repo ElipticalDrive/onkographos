@@ -1,0 +1,112 @@
+Company or project name ClickHouse Use case Improving compression ratio, and, sometimes, speed. Describe the solution you'd like Most compression algorithms accumulate some context during their operation and allow for preparing this cont...
+
+Experiment: compression codecs with separate dictionaries. · Issue #110611 · ClickHouse/ClickHouse · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Experiment: compression codecs with separate dictionaries. #110611
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Experiment: compression codecs with separate dictionaries.#110611
+Copy link
+Labels
+comp-codecsCompression/encoding codecs (LZ4/ZSTD/etc.), archive formats (tar/zip/7z), codec selection and IO...Compression/encoding codecs (LZ4/ZSTD/etc.), archive formats (tar/zip/7z), codec selection and IO...featureresearch
+Description
+alexey-milovidov
+opened on Jul 15, 2026
+Issue body actions
+Company or project name
+ClickHouse
+Use case
+Improving compression ratio, and, sometimes, speed.
+Describe the solution you'd like
+Most compression algorithms accumulate some context during their operation and allow for preparing this context in advance and reusing it multiple times for multiple blocks. It is named compression with a dictionary, or sometimes, pretrained compression. For example, for LZ77, it is the contents of the sliding window plus the current state of the hash table for match search.
+We compress data in fully independent blocks in ClickHouse, which allows seeking inside the compressed file. Different compressed blocks do not reuse any information from each other.
+A natural idea is to reuse dictionaries between different blocks to improve the compression ratio. But there are implementation details - how to collect, store, and load these dictionaries.
+We already have the required building blocks for these implementation details. For example, LowCardinality, Dynamic, and JSON columns have a separate stream with the data, which has to be loaded in advance before loading other data streams with values. We can use a similar principle for compression with dictionaries.
+Let's say a compression CODEC will accept parameters to enable dictionaries. If a column is written with this compression codec, we will write additional files for each compressed binary file. For example, when the main file is Column.bin, the additional file will be Column.bin.dict. The dictionary is created from the first compressed block (so it is "trained" on a single block only) and written (or sent over the network) before the main file. When reading data, we locate the dictionary and read it before the main file.
+The ICompressionCodec interface will be changed to accept an additional ReadBuffer/WriteBuffer to read or write the dictionary. The dictionary will be read/written once and retained in memory during the processing of the whole data stream, containing multiple compressed blocks, reusing the same dictionary.
+Describe alternatives you've considered
+The benefits will be marginal, so the main goal is to research "what if".
+Additional context
+Custom codecs may use more interesting and specialized methods for constructing their dictionaries.
+We can also consider cross-column compression (co-compressed columns) - when the state after compressing a block for one column is reused for compressing another column. This improves compression of dependent columns, like domain and URL, or date and datetime.
+👍React with 👍2Reacted by Artem Zuikov and Raufs Dunamalijevs
+Activity
+alexey-milovidov
+added
+feature
+research
+on Jul 15, 2026
+4ertus2 commented on Jul 21, 2026
+4ertus2
+on Jul 21, 2026
+Last edited by 4ertus2
+Contributor
+More actions
+Dictionary itself could need a codec.
+I think it could be better to add additioanl DICT(dict_column) clause to column declration. Then multiple columns could link to the same dict. I.e.
+```
+CREATE TABLE t
+(
+  a String DICT(_d) CODEC(Delta, LZ4), -- integer codec for ids here
+  b String DICT(_d) CODEC(T64, LZ4), -- another integer codec for ids
+
+  DICT _d String CODEC(ZSTD) TO UInt32 -- special hidden column in INDEX-style syntax and result type specification
+)
+```
+P.S. In this syntax it's still not clear how to sort _d. It's possible to make a fully-sorted strings in dictionary or keep order from a and attach missing keys from b. So there should be an optional sorting options in the DICT declaration.
+P.P.S. One more sorting option for dictionary is to split common and own parts of _d to read only needed parts on seelects. In this case it will be (own-a, common, own-b) strings pack. And some logic to avod own-a part from reading for b and own-b for a.
+There's also no description how to set DICT for Array(String) or Tuple(String, <not-a-string>, String, ...).
+4ertus2 commented on Jul 21, 2026
+4ertus2
+on Jul 21, 2026
+Contributor
+More actions
+Extracting separate DICT column makes it possible to create one full-text-search index over multiple columns in table.
+CurtizJ commented on Aug 5, 2026
+CurtizJ
+on Aug 5, 2026
+Last edited by CurtizJ
+Member
+More actions
+I think this direction can enable something beyond a better ratio: reading and filtering large payload columns without decompressing whole blocks.
+The idea is to compress each row (or a small group of rows) independently with a shared dictionary, instead of compressing the stream in ~1 MB blocks. The motivating access pattern is a selective filter derived from an index over a table with large String payloads (kilobytes of text per row): with substring search over the text index, the index prunes the search to a small candidate set, but to verify the match and return the column, we currently decompress an entire compressed block for every candidate row. The same happens in vector search when the top-K rows are scattered across granules. If rows are compressed independently, we decode only the rows that survive the filter.
+Implementation-wise, it is somewhere between a codec and a serialization. ColumnCompressed could probably represent such lazily-decompressed data in memory. We can support different codecs: LZ77, ZSTD with a dictionary (ZSTD_createCDict, ZSTD_compress_usingCDict), FSST.
+rschu1ze commented on Aug 10, 2026
+rschu1ze
+on Aug 10, 2026
+Member
+More actions
+@rienath FYI ^^
+👍React with 👍1Reacted by Raufs Dunamalijevs
+clickhouse-gh
+added
+comp-codecsCompression/encoding codecs (LZ4/ZSTD/etc.), archive formats (tar/zip/7z), codec selection and IO...Compression/encoding codecs (LZ4/ZSTD/etc.), archive formats (tar/zip/7z), codec selection and IO...
+on Sep 4, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+comp-codecsCompression/encoding codecs (LZ4/ZSTD/etc.), archive formats (tar/zip/7z), codec selection and IO...Compression/encoding codecs (LZ4/ZSTD/etc.), archive formats (tar/zip/7z), codec selection and IO...featureresearch
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

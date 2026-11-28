@@ -1,0 +1,1135 @@
+# 3D Object Surface Voxelizer & Interactive Viewer
+
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?style=for-the-badge&logo=cplusplus&logoColor=white)](https://en.cppreference.com/w/cpp/17)
+[![CMake](https://img.shields.io/badge/CMake-3.20+-064F8C?style=for-the-badge&logo=cmake&logoColor=white)](https://cmake.org/)
+[![SFML](https://img.shields.io/badge/SFML-3.0.2-8CC445?style=for-the-badge&logo=sfml&logoColor=white)](https://www.sfml-dev.org/)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=for-the-badge)]()
+
+A high-performance C++17 engine that converts arbitrary 3D triangular surface meshes (`.obj`) into uniform voxel representations using recursive Octree spatial partitioning (Divide-and-Conquer). The pipeline leverages the Separating Axis Theorem (SAT) for exact triangle-box collision pruning and features an interactive real-time 3D software rasterizer built from scratch with SFML.
+
+<p align="center">
+  <img src="doc/voxel_preview.png" alt="Cow Voxelization in 3D Viewer" width="48%"/>
+  <img src="doc/voxel_preview_pumpkin.png" alt="Pumpkin Voxelization in 3D Viewer" width="48%"/>
+</p>
+
+---
+
+## Key Features
+
+- **Divide-and-Conquer Spatial Partitioning**: Hierarchical 3D spatial decomposition via Octree, recursively partitioning bounding volumes into 8 octants.
+- **Exact Triangle-AABB Collision (SAT)**: Full 13-axis Separating Axis Theorem testing (box faces, triangle normal, and edge cross products) to prevent geometric leakage and eliminate false positives.
+- **Aggressive Subtree Pruning**: Empty bounding boxes containing no geometry are culled early, minimizing computational overhead and memory footprint.
+- **Uniform Voxel Mesh Synthesis**: Leaf nodes at the target depth are reconstructed into solid cubic meshes (8 vertices, 12 outward-facing triangular faces) and exported to standard Wavefront `.obj`.
+- **Custom Software Rasterizer & 3D Viewer**: Standalone CPU-based rendering engine featuring barycentric triangle rasterization, depth buffering (Z-buffer), directional Lambertian shading, and an interactive orbital camera.
+- **Zero-Dependency Setup**: SFML is fetched and compiled automatically via CMake `FetchContent`—no manual library installations required.
+
+---
+
+## System Architecture & Algorithms
+
+```
+                          Input Wavefront OBJ Mesh
+                                     │
+                                     ▼
+                    ┌──────────────────────────────────┐
+                    │      Compute Root Cubic AABB     │
+                    └──────────────────────────────────┘
+                                     │
+                                     ▼
+             ┌────────────────────────────────────────────────┐
+             │       Recursive Octree Divide-and-Conquer      │
+             │                                                │
+             │   1. Divide parent AABB into 8 octants         │
+             │   2. Filter candidate intersecting triangles   │
+             │   3. Perform 13-Axis SAT Collision Test        │
+             │   4. Prune empty octants (No geometry)         │
+             │   5. Recurse until depth == max_depth          │
+             └────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+                    ┌──────────────────────────────────┐
+                    │      Extract Uniform Voxels      │
+                    └──────────────────────────────────┘
+                                     │
+                                     ▼
+                    ┌──────────────────────────────────┐
+                    │   Voxel Cube Mesh Generation     │
+                    │   (8 Vertices, 12 Faces / Box)   │
+                    └──────────────────────────────────┘
+                                     │
+                   ┌─────────────────┴─────────────────┐
+                   ▼                                   ▼
+        ┌──────────────────────┐            ┌──────────────────────┐
+        │ Export Voxelized OBJ │            │ Interactive SFML     │
+        │ File Output          │            │ 3D Software Viewer   │
+        └──────────────────────┘            └──────────────────────┘
+```
+
+### 1. Octree Divide-and-Conquer Spatial Partitioning
+The input triangular mesh is first analyzed to compute its Axis-Aligned Bounding Box (AABB):
+
+$$\mathbf{p}_{\min} = (\min x_i, \min y_i, \min z_i), \quad \mathbf{p}_{\max} = (\max x_i, \max y_i, \max z_i)$$
+
+To guarantee uniform isotropic cubic voxels, the root bounding box is expanded into a cube centered at the mesh centroid with side length:
+
+$$s_{\text{root}} = \max(\mathbf{p}_{\max}.x - \mathbf{p}_{\min}.x, \mathbf{p}_{\max}.y - \mathbf{p}_{\min}.y, \mathbf{p}_{\max}.z - \mathbf{p}_{\min}.z) \times 1.01$$
+
+The algorithm recursively subdivides the cubic volume into 8 octants along its midplanes. At any depth $d < d_{\max}$:
+- Sub-boxes are generated by splitting the parent box along the $(x, y, z)$ midpoint planes.
+- Geometry-free branches are pruned immediately if no candidate triangle intersects the child's bounding volume.
+- At depth $d = d_{\max}$, recursion halts, and all intersecting nodes are registered as uniform voxels of edge length $s_{\text{voxel}} = s_{\text{root}} / 2^{d_{\max}}$.
+
+### 2. Separating Axis Theorem (SAT) Collision Pruning
+To accurately determine whether a triangular surface element intersects an AABB without false positives or raster gaps, the engine implements Tomas Akenine-Möller's exact 3D triangle-box overlap algorithm across 13 potential separating axes:
+
+1. **3 Box Face Normals**:
+   $$\mathbf{u}_0 = (1, 0, 0), \quad \mathbf{u}_1 = (0, 1, 0), \quad \mathbf{u}_2 = (0, 0, 1)$$
+   Equivalent to testing overlap of the triangle's 1D projection against the AABB extents.
+2. **1 Triangle Face Normal**:
+   $$\mathbf{n} = (\mathbf{v}_1 - \mathbf{v}_0) \times (\mathbf{v}_2 - \mathbf{v}_0)$$
+   Testing whether the bounding box vertices lie entirely on one side of the triangle plane.
+3. **9 Edge Cross-Product Axes**:
+   $$\mathbf{a}_{i,j} = \mathbf{u}_i \times \mathbf{e}_j \quad \text{for } i \in \{0, 1, 2\}, \; j \in \{0, 1, 2\}$$
+   where $\mathbf{e}_0 = \mathbf{v}_1 - \mathbf{v}_0$, $\mathbf{e}_1 = \mathbf{v}_2 - \mathbf{v}_1$, and $\mathbf{e}_2 = \mathbf{v}_0 - \mathbf{v}_2$.
+
+If the projections of the triangle and the box do not overlap along any one of these 13 axes, the node is immediately rejected and pruned.
+
+### 3. Voxel Mesh Synthesis
+Each validated leaf voxel is converted into a standard 3D cube mesh:
+- Generates 8 unique corner vertices translated by the box's min and max coordinates.
+- Constructs 12 counter-clockwise triangular faces (2 triangles per cube face) ensuring outward-pointing surface normals.
+- Outputs clean, standard Wavefront `.obj` data compatible with external 3D software (Blender, Maya, MeshLab).
+
+### 4. Interactive 3D Software Rasterizer
+The built-in viewer runs a CPU-based rasterization pipeline that bypasses hardware graphics APIs for educational transparency:
+- **Matrix Transformations**: Constructs standard $4 \times 4$ Model-View-Projection (MVP) matrices with orbital spherical coordinates:
+  $$\mathbf{p}_{\text{cam}} = \mathbf{t} + r \begin{pmatrix} \sin\phi \cos\theta \\ \cos\phi \\ \sin\phi \sin\theta \end{pmatrix}$$
+- **Barycentric Rasterization**: Computes sub-pixel edge functions to interpolate screen-space coordinates $(x, y)$ within triangle bounds.
+- **Depth Buffering (Z-Buffer)**: Maintains a floating-point depth buffer per pixel to resolve occlusion and guarantee correct front-to-back ordering.
+- **Directional Shading**: Implements Lambertian diffuse reflection blended with an ambient baseline:
+  $$I = \min\left(1.0, \, I_{\text{ambient}} + (\mathbf{n} \cdot \mathbf{l}_{\text{dir}}) I_{\text{diffuse}}\right)$$
+- **Interactive Controls**: Real-time viewport rendering with mouse-drag orbit rotation, scroll zooming, and keyboard navigation.
+
+---
+
+## Project Structure
+
+```
+.
+├── src/
+│   ├── main.cpp         # CLI voxelizer entry point & benchmark harness
+│   ├── viewer.cpp       # Interactive 3D software rasterizer (SFML)
+│   ├── geometry.h       # Linear algebra (Vec3, Mat4, AABB) & 13-axis SAT collision
+│   ├── obj_parser.h     # Wavefront OBJ file parser and exporter
+│   └── octree.h         # Octree hierarchical data structure & mesh generation
+├── example/             # Benchmark 3D models (cow.obj, pumpkin.obj, teapot.obj)
+├── test/                # Pre-generated voxelized test outputs
+├── doc/                 # Technical documentation & visualization assets
+│   ├── voxel_preview.png
+│   └── voxel_preview_pumpkin.png
+├── CMakeLists.txt       # CMake build configuration with FetchContent
+├── Makefile             # Convenience build wrapper for Linux/macOS
+└── README.md
+```
+
+---
+
+## Requirements
+
+- **C++ Compiler**: C++17 standard compliant (`clang++` >= 10.0, `g++` >= 9.0, or MSVC 2019+)
+- **Build System**: CMake >= 3.20 and GNU Make
+- **Dependencies**: SFML 3.0.2 is automatically downloaded, built, and linked via CMake `FetchContent` when building the viewer. No manual library installation is required.
+
+---
+
+## Build Instructions
+
+### Using Make (macOS / Linux)
+
+```bash
+# Build the CLI voxelizer
+make
+
+# Build the interactive 3D viewer (downloads and compiles SFML automatically)
+make viewer
+
+# Clean build artifacts
+make clean
+```
+
+### Using CMake Directly
+
+```bash
+# Build CLI voxelizer only
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_VIEWER=OFF
+cmake --build build --config Release
+
+# Build both CLI voxelizer and interactive 3D viewer
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_VIEWER=ON
+cmake --build build --config Release
+```
+
+All compiled executables are placed in the `bin/` directory:
+- `bin/voxelizer`: Core voxelization CLI tool.
+- `bin/viewer`: Interactive 3D software-rendered model viewer.
+
+---
+
+## Usage Guide
+
+### CLI Voxelizer
+
+```bash
+./bin/voxelizer <input.obj> <max_depth> [output.obj]
+```
+
+#### CLI Arguments
+
+| Argument | Type | Description |
+| :--- | :--- | :--- |
+| `input.obj` | String (Path) | Path to the source 3D mesh file in Wavefront `.obj` format |
+| `max_depth` | Integer ($\ge 1$) | Maximum recursion depth of the octree (higher depth = finer resolution) |
+| `output.obj` | String (Path) | *(Optional)* Destination path for the voxelized mesh. Defaults to `<input>_voxelized.obj` |
+
+#### Example Commands
+
+```bash
+# Voxelize the cow model at depth 5
+./bin/voxelizer example/cow.obj 5
+
+# Voxelize teapot at depth 6 with a custom output path
+./bin/voxelizer example/teapot.obj 6 test/teapot_voxelized.obj
+
+# Voxelize pumpkin at depth 7 and inspect immediately in the 3D viewer
+./bin/voxelizer example/pumpkin.obj 7 pumpkin_v7.obj && ./bin/viewer pumpkin_v7.obj
+```
+
+#### Sample Execution Output
+
+```
+Loading OBJ file: example/cow.obj
+Loaded 4583 vertices and 5804 faces.
+
+========== Voxelization Results ==========
+Voxel count  : 1303
+Vertex count : 10424
+Face count   : 15636
+
+Octree node statistics:
+  1 : 8
+  2 : 64
+  3 : 160
+  4 : 688
+  5 : 2728
+
+Pruned node statistics (not explored):
+  1 : 0
+  2 : 44
+  3 : 74
+  4 : 349
+  5 : 1425
+
+Octree depth : 5
+Exec time    : 24.32 ms
+Output path  : example/cow_voxelized.obj
+==========================================
+```
+
+---
+
+### Interactive 3D Viewer
+
+```bash
+./bin/viewer <model.obj>
+```
+
+#### Navigation Controls
+
+| Input | Action |
+| :--- | :--- |
+| **Left Click + Drag** | Orbit camera around object |
+| **Mouse Scroll Wheel** | Zoom in / out |
+| **Arrow Keys ($\leftarrow$ $\rightarrow$ $\uparrow$ $\downarrow$)** | Rotate camera angle |
+| **`+` / `-` Keys** | Zoom camera in / out |
+| **Escape (`Esc`)** | Close viewer window |
+
+---
+
+## Input Wavefront OBJ Specification
+
+The parser strictly validates the input file:
+- **Vertices (`v x y z`)**: Floating-point spatial coordinates.
+- **Faces (`f i j k`)**: 1-indexed vertex references. Polygons with $> 3$ vertices are automatically triangulated using triangle fan partitioning ($f_0, f_i, f_{i+1}$).
+- Non-geometry lines (`vn`, `vt`, `#` comments, group tags) are safely ignored.
+
+---
+
+## Contributors
+
+| Name | NIM |
+| :--- | :--- |
+| Stevanus Agustaf Wongso | 13524020 |
+| Jonathan Kris Wicaksono | 13524023 |
+
+### src/geometry.h
+```
+#ifndef GEOMETRY_H
+#define GEOMETRY_H
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+
+struct Vec3 {
+  float x, y, z;
+
+  Vec3() : x(0), y(0), z(0) {}
+  Vec3(float x, float y, float z) : x(x), y(y), z(z) {}
+
+  Vec3 operator+(const Vec3 &o) const { return {x + o.x, y + o.y, z + o.z}; }
+  Vec3 operator-(const Vec3 &o) const { return {x - o.x, y - o.y, z - o.z}; }
+  Vec3 operator*(float s) const { return {x * s, y * s, z * s}; }
+  Vec3 operator/(float s) const { return {x / s, y / s, z / s}; }
+  Vec3 operator-() const { return {-x, -y, -z}; }
+
+  float dot(const Vec3 &o) const { return x * o.x + y * o.y + z * o.z; }
+  Vec3 cross(const Vec3 &o) const {
+    return {y * o.z - z * o.y, z * o.x - x * o.z, x * o.y - y * o.x};
+  }
+
+  float length() const { return std::sqrt(x * x + y * y + z * z); }
+  Vec3 normalized() const {
+    float l = length();
+    if (l < 1e-9f)
+      return {0, 0, 0};
+    return *this / l;
+  }
+
+  float &operator[](int i) { return i == 0 ? x : (i == 1 ? y : z); }
+  float operator[](int i) const { return i == 0 ? x : (i == 1 ? y : z); }
+};
+
+inline Vec3 operator*(float s, const Vec3 &v) { return v * s; }
+
+struct Triangle {
+  Vec3 v0, v1, v2;
+};
+
+struct AABB {
+  Vec3 min, max;
+
+  Vec3 center() const { return (min + max) * 0.5f; }
+  Vec3 halfSize() const { return (max - min) * 0.5f; }
+  float size() const { return max.x - min.x; }
+};
+
+inline bool triangleIntersectsAABB(const Triangle &tri, const AABB &box) {
+  Vec3 c = box.center();
+  Vec3 e = box.halfSize();
+
+  Vec3 v0 = tri.v0 - c;
+  Vec3 v1 = tri.v1 - c;
+  Vec3 v2 = tri.v2 - c;
+
+  Vec3 f0 = v1 - v0;
+  Vec3 f1 = v2 - v1;
+  Vec3 f2 = v0 - v2;
+
+  auto testAxis = [&](const Vec3 &axis) -> bool {
+    float p0 = v0.dot(axis);
+    float p1 = v1.dot(axis);
+    float p2 = v2.dot(axis);
+    float r = e.x * std::abs(axis.x) + e.y * std::abs(axis.y) +
+              e.z * std::abs(axis.z);
+    float minP = std::min({p0, p1, p2});
+    float maxP = std::max({p0, p1, p2});
+    return !(minP > r || maxP < -r);
+  };
+
+  if (!testAxis({0, -f0.z, f0.y}))
+    return false;
+  if (!testAxis({0, -f1.z, f1.y}))
+    return false;
+  if (!testAxis({0, -f2.z, f2.y}))
+    return false;
+  if (!testAxis({f0.z, 0, -f0.x}))
+    return false;
+  if (!testAxis({f1.z, 0, -f1.x}))
+    return false;
+  if (!testAxis({f2.z, 0, -f2.x}))
+    return false;
+  if (!testAxis({-f0.y, f0.x, 0}))
+    return false;
+  if (!testAxis({-f1.y, f1.x, 0}))
+    return false;
+  if (!testAxis({-f2.y, f2.x, 0}))
+    return false;
+
+  if (std::max({v0.x, v1.x, v2.x}) < -e.x || std::min({v0.x, v1.x, v2.x}) > e.x)
+    return false;
+  if (std::max({v0.y, v1.y, v2.y}) < -e.y || std::min({v0.y, v1.y, v2.y}) > e.y)
+    return false;
+  if (std::max({v0.z, v1.z, v2.z}) < -e.z || std::min({v0.z, v1.z, v2.z}) > e.z)
+    return false;
+
+  Vec3 normal = f0.cross(f1);
+  float d = normal.dot(v0);
+  float r = e.x * std::abs(normal.x) + e.y * std::abs(normal.y) +
+            e.z * std::abs(normal.z);
+  if (d > r || d < -r)
+    return false;
+
+  return true;
+}
+
+struct Mat4 {
+  float m[4][4] = {};
+
+  static Mat4 identity() {
+    Mat4 r;
+    r.m[0][0] = r.m[1][1] = r.m[2][2] = r.m[3][3] = 1.0f;
+    return r;
+  }
+
+  Mat4 operator*(const Mat4 &o) const {
+    Mat4 r;
+    for (int i = 0; i < 4; i++)
+      for (int j = 0; j < 4; j++)
+        for (int k = 0; k < 4; k++)
+          r.m[i][j] += m[i][k] * o.m[k][j];
+    return r;
+  }
+
+  Vec3 transformPoint(const Vec3 &v) const {
+    float w = m[3][0] * v.x + m[3][1] * v.y + m[3][2] * v.z + m[3][3];
+    if (std::abs(w) < 1e-9f)
+      w = 1e-9f;
+    return {(m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z + m[0][3]) / w,
+            (m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z + m[1][3]) / w,
+            (m[2][0] * v.x + m[2][1] * v.y + m[2][2] * v.z + m[2][3]) / w};
+  }
+
+  Vec3 transformDir(const Vec3 &v) const {
+    return {m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z,
+            m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z,
+            m[2][0] * v.x + m[2][1] * v.y + m[2][2] * v.z};
+  }
+
+  static Mat4 lookAt(const Vec3 &eye, const Vec3 &target, const Vec3 &up) {
+    Vec3 f = (target - eye).normalized();
+    Vec3 r = f.cross(up).normalized();
+    Vec3 u = r.cross(f);
+    Mat4 m = identity();
+    m.m[0][0] = r.x;
+    m.m[0][1] = r.y;
+    m.m[0][2] = r.z;
+    m.m[0][3] = -r.dot(eye);
+    m.m[1][0] = u.x;
+    m.m[1][1] = u.y;
+    m.m[1][2] = u.z;
+    m.m[1][3] = -u.dot(eye);
+    m.m[2][0] = -f.x;
+    m.m[2][1] = -f.y;
+    m.m[2][2] = -f.z;
+    m.m[2][3] = f.dot(eye);
+    m.m[3][3] = 1.0f;
+    return m;
+  }
+
+  static Mat4 perspective(float fovY, float aspect, float nearZ, float farZ) {
+    float tanHalf = std::tan(fovY * 0.5f);
+    Mat4 m;
+    m.m[0][0] = 1.0f / (aspect * tanHalf);
+    m.m[1][1] = 1.0f / tanHalf;
+    m.m[2][2] = -(farZ + nearZ) / (farZ - nearZ);
+    m.m[2][3] = -2.0f * farZ * nearZ / (farZ - nearZ);
+    m.m[3][2] = -1.0f;
+    return m;
+  }
+};
+
+#endif
+```
+
+### src/main.cpp
+```
+#include "obj_parser.h"
+#include "octree.h"
+#include <chrono>
+#include <iomanip>
+#include <iostream>
+#include <string>
+
+int main(int argc, char *argv[]) {
+  if (argc < 3) {
+    std::cerr << "Usage: " << argv[0] << " <input.obj> <max_depth> [output.obj]"
+              << std::endl;
+    return 1;
+  }
+
+  std::string inputPath = argv[1];
+  int maxDepth;
+  try {
+    maxDepth = std::stoi(argv[2]);
+  } catch (...) {
+    std::cerr << "Error: max_depth must be a positive integer." << std::endl;
+    return 1;
+  }
+  if (maxDepth < 1) {
+    std::cerr << "Error: max_depth must be at least 1." << std::endl;
+    return 1;
+  }
+
+  // Validate .obj extension
+  if (inputPath.size() < 4 || inputPath.substr(inputPath.size() - 4) != ".obj") {
+    std::cerr << "Error: Input file must have .obj extension." << std::endl;
+    return 1;
+  }
+
+  // Determine output path
+  std::string outputPath;
+  if (argc >= 4) {
+    outputPath = argv[3];
+  } else {
+    size_t dotPos = inputPath.rfind('.');
+    if (dotPos != std::string::npos) {
+      outputPath = inputPath.substr(0, dotPos) + "_voxelized.obj";
+    } else {
+      outputPath = inputPath + "_voxelized.obj";
+    }
+  }
+
+  // Parse input
+  std::cout << "Loading OBJ file: " << inputPath << std::endl;
+  ObjModel model;
+  try {
+    model = parseObj(inputPath);
+  } catch (const std::exception &e) {
+    std::cerr << "Error: " << e.what() << std::endl;
+    return 1;
+  }
+  std::cout << "Loaded " << model.vertices.size() << " vertices and "
+            << model.faces.size() << " faces." << std::endl;
+
+  auto startTime = std::chrono::high_resolution_clock::now();
+
+  // Compute bounding box and make it a cube
+  AABB bbox = model.boundingBox();
+  Vec3 bboxCenter = bbox.center();
+  float maxDim = std::max({bbox.max.x - bbox.min.x, bbox.max.y - bbox.min.y,
+                           bbox.max.z - bbox.min.z});
+  maxDim *= 1.01f;
+  float half = maxDim * 0.5f;
+
+  AABB rootBounds;
+  rootBounds.min = bboxCenter - Vec3(half, half, half);
+  rootBounds.max = bboxCenter + Vec3(half, half, half);
+
+  auto triangles = model.getTriangles();
+
+  // Build octree (root = depth 0, leaves at maxDepth)
+  OctreeNode root;
+  root.bounds = rootBounds;
+  root.depth = 0;
+
+  OctreeStats stats;
+  stats.maxDepth = maxDepth;
+  buildOctree(&root, triangles, maxDepth, stats);
+
+  // Collect voxels
+  std::vector<AABB> voxels;
+  collectVoxels(&root, voxels);
+
+  // Generate mesh
+  std::vector<Vec3> outVertices;
+  std::vector<std::array<int, 3>> outFaces;
+  generateVoxelMesh(voxels, outVertices, outFaces);
+
+  auto endTime = std::chrono::high_resolution_clock::now();
+  double elapsed =
+      std::chrono::duration<double, std::milli>(endTime - startTime).count();
+
+  try {
+    writeObj(outputPath, outVertices, outFaces);
+  } catch (const std::exception &e) {
+    std::cerr << "Error writing output: " << e.what() << std::endl;
+    return 1;
+  }
+
+  std::cout << "\n========== Voxelization Results ==========" << std::endl;
+  std::cout << "Voxel count  : " << voxels.size() << std::endl;
+  std::cout << "Vertex count : " << outVertices.size() << std::endl;
+  std::cout << "Face count   : " << outFaces.size() << std::endl;
+
+  std::cout << "\nOctree node statistics:" << std::endl;
+  for (int d = 1; d <= maxDepth; d++) {
+    int count = stats.nodesPerDepth.count(d) ? stats.nodesPerDepth[d] : 0;
+    std::cout << "  " << d << " : " << count << std::endl;
+  }
+
+  std::cout << "\nPruned node statistics (not explored):" << std::endl;
+  for (int d = 1; d <= maxDepth; d++) {
+    int count = stats.prunedPerDepth.count(d) ? stats.prunedPerDepth[d] : 0;
+    std::cout << "  " << d << " : " << count << std::endl;
+  }
+
+  std::cout << "\nOctree depth : " << maxDepth << std::endl;
+  std::cout << "Exec time    : " << std::fixed << std::setprecision(2)
+            << elapsed << " ms" << std::endl;
+  std::cout << "Output path  : " << outputPath << std::endl;
+  std::cout << "==========================================" << std::endl;
+
+  return 0;
+}
+```
+
+### src/obj_parser.h
+```
+#ifndef OBJ_PARSER_H
+#define OBJ_PARSER_H
+
+#include "geometry.h"
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+struct ObjModel {
+  std::vector<Vec3> vertices;
+  std::vector<std::array<int, 3>> faces;
+
+  AABB boundingBox() const {
+    if (vertices.empty())
+      return {{0, 0, 0}, {0, 0, 0}};
+    AABB box;
+    box.min = box.max = vertices[0];
+    for (const auto &v : vertices) {
+      box.min.x = std::min(box.min.x, v.x);
+      box.min.y = std::min(box.min.y, v.y);
+      box.min.z = std::min(box.min.z, v.z);
+      box.max.x = std::max(box.max.x, v.x);
+      box.max.y = std::max(box.max.y, v.y);
+      box.max.z = std::max(box.max.z, v.z);
+    }
+    return box;
+  }
+
+  std::vector<Triangle> getTriangles() const {
+    std::vector<Triangle> tris;
+    tris.reserve(faces.size());
+    for (const auto &f : faces) {
+      tris.push_back({vertices[f[0]], vertices[f[1]], vertices[f[2]]});
+    }
+    return tris;
+  }
+};
+
+inline ObjModel parseObj(const std::string &path) {
+  std::ifstream file(path);
+  if (!file.is_open()) {
+    throw std::runtime_error("Cannot open file: " + path);
+  }
+
+  ObjModel model;
+  std::string line;
+  int lineNum = 0;
+
+  while (std::getline(file, line)) {
+    lineNum++;
+    if (line.empty())
+      continue;
+
+    if (line[0] == '#')
+      continue;
+
+    std::istringstream iss(line);
+    std::string prefix;
+    iss >> prefix;
+
+    if (prefix == "v") {
+      float x, y, z;
+      if (!(iss >> x >> y >> z)) {
+        throw std::runtime_error("Invalid vertex at line " +
+                                 std::to_string(lineNum));
+      }
+      model.vertices.push_back({x, y, z});
+    } else if (prefix == "f") {
+      std::vector<int> indices;
+      std::string token;
+      while (iss >> token) {
+        size_t slashPos = token.find('/');
+        std::string idxStr =
+            (slashPos != std::string::npos) ? token.substr(0, slashPos) : token;
+        int idx;
+        try {
+          idx = std::stoi(idxStr);
+        } catch (...) {
+          throw std::runtime_error("Invalid face index at line " +
+                                   std::to_string(lineNum));
+        }
+        if (idx < 1 || idx > (int)model.vertices.size()) {
+          throw std::runtime_error("Face index out of range at line " +
+                                   std::to_string(lineNum));
+        }
+        indices.push_back(idx - 1);
+      }
+      if (indices.size() < 3) {
+        throw std::runtime_error("Face needs at least 3 vertices at line " +
+                                 std::to_string(lineNum));
+      }
+      for (size_t i = 1; i + 1 < indices.size(); i++) {
+        model.faces.push_back({indices[0], indices[i], indices[i + 1]});
+      }
+    }
+  }
+
+  if (model.vertices.empty() || model.faces.empty()) {
+    throw std::runtime_error(
+        "OBJ file has no valid geometry (need both vertices and faces)");
+  }
+
+  return model;
+}
+
+inline void writeObj(const std::string &path, const std::vector<Vec3> &vertices,
+                     const std::vector<std::array<int, 3>> &faces) {
+  std::ofstream file(path);
+  if (!file.is_open()) {
+    throw std::runtime_error("Cannot write to file: " + path);
+  }
+
+  file << "# Voxelized OBJ - generated by Tucil2 Voxelizer\n";
+  file << "# Vertices: " << vertices.size() << "\n";
+  file << "# Faces: " << faces.size() << "\n\n";
+
+  for (const auto &v : vertices) {
+    file << "v " << v.x << " " << v.y << " " << v.z << "\n";
+  }
+  file << "\n";
+  for (const auto &f : faces) {
+    file << "f " << (f[0] + 1) << " " << (f[1] + 1) << " " << (f[2] + 1)
+         << "\n";
+  }
+}
+
+#endif
+```
+
+### src/octree.h
+```
+#ifndef OCTREE_H
+#define OCTREE_H
+
+#include "geometry.h"
+#include <map>
+#include <vector>
+
+struct OctreeStats {
+  std::map<int, int> nodesPerDepth;
+  std::map<int, int> prunedPerDepth;
+  int maxDepth = 0;
+  int totalVoxels = 0;
+};
+
+struct OctreeNode {
+  AABB bounds;
+  OctreeNode *children[8] = {};
+  bool isLeaf = false;
+  bool hasGeometry = false;
+  int depth = 0;
+
+  ~OctreeNode() {
+    for (int i = 0; i < 8; i++) {
+      delete children[i];
+    }
+  }
+};
+
+inline AABB childBounds(const AABB &parent, int index) {
+  Vec3 c = parent.center();
+  Vec3 mn = parent.min;
+  Vec3 mx = parent.max;
+  AABB child;
+  child.min.x = (index & 1) ? c.x : mn.x;
+  child.min.y = (index & 2) ? c.y : mn.y;
+  child.min.z = (index & 4) ? c.z : mn.z;
+  child.max.x = (index & 1) ? mx.x : c.x;
+  child.max.y = (index & 2) ? mx.y : c.y;
+  child.max.z = (index & 4) ? mx.z : c.z;
+  return child;
+}
+
+inline void buildOctree(OctreeNode *node,
+                        const std::vector<Triangle> &triangles, int maxDepth,
+                        OctreeStats &stats) {
+  stats.nodesPerDepth[node->depth]++;
+
+  std::vector<Triangle> intersecting;
+  for (const auto &tri : triangles) {
+    if (triangleIntersectsAABB(tri, node->bounds)) {
+      intersecting.push_back(tri);
+    }
+  }
+
+  if (intersecting.empty()) {
+    stats.prunedPerDepth[node->depth]++;
+    return;
+  }
+
+  if (node->depth == maxDepth) {
+    node->isLeaf = true;
+    node->hasGeometry = true;
+    stats.totalVoxels++;
+    return;
+  }
+
+  for (int i = 0; i < 8; i++) {
+    AABB cBounds = childBounds(node->bounds, i);
+    bool hasIntersection = false;
+    for (const auto &tri : intersecting) {
+      if (triangleIntersectsAABB(tri, cBounds)) {
+        hasIntersection = true;
+        break;
+      }
+    }
+    if (!hasIntersection) {
+      stats.nodesPerDepth[node->depth + 1]++;
+      stats.prunedPerDepth[node->depth + 1]++;
+      continue;
+    }
+    node->children[i] = new OctreeNode();
+    node->children[i]->bounds = cBounds;
+    node->children[i]->depth = node->depth + 1;
+    buildOctree(node->children[i], intersecting, maxDepth, stats);
+  }
+}
+
+inline void collectVoxels(const OctreeNode *node, std::vector<AABB> &voxels) {
+  if (!node)
+    return;
+  if (node->isLeaf && node->hasGeometry) {
+    voxels.push_back(node->bounds);
+    return;
+  }
+  for (int i = 0; i < 8; i++) {
+    collectVoxels(node->children[i], voxels);
+  }
+}
+
+inline void generateVoxelMesh(const std::vector<AABB> &voxels,
+                              std::vector<Vec3> &outVertices,
+                              std::vector<std::array<int, 3>> &outFaces) {
+  outVertices.reserve(voxels.size() * 8);
+  outFaces.reserve(voxels.size() * 12);
+
+  for (const auto &box : voxels) {
+    int base = (int)outVertices.size();
+    float x0 = box.min.x, y0 = box.min.y, z0 = box.min.z;
+    float x1 = box.max.x, y1 = box.max.y, z1 = box.max.z;
+
+    outVertices.push_back({x0, y0, z0});
+    outVertices.push_back({x1, y0, z0});
+    outVertices.push_back({x1, y1, z0});
+    outVertices.push_back({x0, y1, z0});
+    outVertices.push_back({x0, y0, z1});
+    outVertices.push_back({x1, y0, z1});
+    outVertices.push_back({x1, y1, z1});
+    outVertices.push_back({x0, y1, z1});
+
+    outFaces.push_back({base + 4, base + 5, base + 6});
+    outFaces.push_back({base + 4, base + 6, base + 7});
+    outFaces.push_back({base + 1, base + 0, base + 3});
+    outFaces.push_back({base + 1, base + 3, base + 2});
+    outFaces.push_back({base + 5, base + 1, base + 2});
+    outFaces.push_back({base + 5, base + 2, base + 6});
+    outFaces.push_back({base + 0, base + 4, base + 7});
+    outFaces.push_back({base + 0, base + 7, base + 3});
+    outFaces.push_back({base + 3, base + 7, base + 6});
+    outFaces.push_back({base + 3, base + 6, base + 2});
+    outFaces.push_back({base + 0, base + 1, base + 5});
+    outFaces.push_back({base + 0, base + 5, base + 4});
+  }
+}
+
+#endif
+```
+
+### src/viewer.cpp
+```
+#include "geometry.h"
+#include "obj_parser.h"
+#include <SFML/Graphics.hpp>
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+#include <limits>
+#include <string>
+#include <vector>
+
+struct Camera {
+  float theta = 0.4f;
+  float phi = 0.6f;
+  float distance = 5.0f;
+  Vec3 target = {0, 0, 0};
+
+  Vec3 position() const {
+    return target + Vec3(distance * std::sin(phi) * std::cos(theta),
+                         distance * std::cos(phi),
+                         distance * std::sin(phi) * std::sin(theta));
+  }
+
+  Mat4 viewMatrix() const {
+    return Mat4::lookAt(position(), target, {0, 1, 0});
+  }
+};
+
+struct ScreenTri {
+  float x[3], y[3];
+  float z[3];
+  uint8_t r, g, b;
+};
+
+inline void computeColor(const Vec3 &n, const Vec3 &lightDir, uint8_t baseR,
+                         uint8_t baseG, uint8_t baseB, uint8_t &outR,
+                         uint8_t &outG, uint8_t &outB) {
+  float ambient = 0.25f;
+  float diffuse = std::max(0.0f, n.dot(lightDir));
+  float intensity = std::min(1.0f, ambient + diffuse * 0.75f);
+  outR = (uint8_t)(baseR * intensity);
+  outG = (uint8_t)(baseG * intensity);
+  outB = (uint8_t)(baseB * intensity);
+}
+
+inline void rasterizeTriangle(const ScreenTri &tri, int width, int height,
+                              std::vector<float> &zbuf,
+                              std::vector<uint8_t> &pixels) {
+  int minX =
+      std::max(0, (int)std::floor(std::min({tri.x[0], tri.x[1], tri.x[2]})));
+  int maxX = std::min(width - 1,
+                      (int)std::ceil(std::max({tri.x[0], tri.x[1], tri.x[2]})));
+  int minY =
+      std::max(0, (int)std::floor(std::min({tri.y[0], tri.y[1], tri.y[2]})));
+  int maxY = std::min(height - 1,
+                      (int)std::ceil(std::max({tri.y[0], tri.y[1], tri.y[2]})));
+
+  float x0 = tri.x[0], y0 = tri.y[0], z0 = tri.z[0];
+  float x1 = tri.x[1], y1 = tri.y[1], z1 = tri.z[1];
+  float x2 = tri.x[2], y2 = tri.y[2], z2 = tri.z[2];
+
+  float denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+  if (std::abs(denom) < 1e-6f)
+    return;
+  float invDenom = 1.0f / denom;
+
+  for (int py = minY; py <= maxY; py++) {
+    for (int px = minX; px <= maxX; px++) {
+      float fx = px + 0.5f;
+      float fy = py + 0.5f;
+
+      float w0 = ((y1 - y2) * (fx - x2) + (x2 - x1) * (fy - y2)) * invDenom;
+      float w1 = ((y2 - y0) * (fx - x2) + (x0 - x2) * (fy - y2)) * invDenom;
+      float w2 = 1.0f - w0 - w1;
+
+      if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
+        float z = w0 * z0 + w1 * z1 + w2 * z2;
+        int idx = py * width + px;
+        if (z < zbuf[idx]) {
+          zbuf[idx] = z;
+          pixels[idx * 4 + 0] = tri.r;
+          pixels[idx * 4 + 1] = tri.g;
+          pixels[idx * 4 + 2] = tri.b;
+          pixels[idx * 4 + 3] = 255;
+        }
+      }
+    }
+  }
+}
+
+void renderScene(const std::vector<Vec3> &vertices,
+                 const std::vector<std::array<int, 3>> &faces,
+                 const Camera &cam, int width, int height,
+                 std::vector<float> &zbuf, std::vector<uint8_t> &pixels) {
+  std::fill(zbuf.begin(), zbuf.end(), std::numeric_limits<float>::max());
+  for (int i = 0; i < width * height; i++) {
+    pixels[i * 4 + 0] = 30;
+    pixels[i * 4 + 1] = 30;
+    pixels[i * 4 + 2] = 35;
+    pixels[i * 4 + 3] = 255;
+  }
+
+  Mat4 view = cam.viewMatrix();
+  Mat4 proj = Mat4::perspective(0.785f, (float)width / height, 0.1f, 1000.0f);
+  Mat4 vp = proj * view;
+
+  Vec3 lightDir =
+      (cam.position() - cam.target).normalized();
+
+  for (const auto &face : faces) {
+    Vec3 v0 = vertices[face[0]];
+    Vec3 v1 = vertices[face[1]];
+    Vec3 v2 = vertices[face[2]];
+
+    Vec3 edge1 = v1 - v0;
+    Vec3 edge2 = v2 - v0;
+    Vec3 normal = edge1.cross(edge2).normalized();
+
+    Vec3 toCamera = (cam.position() - v0).normalized();
+    if (normal.dot(toCamera) < 0)
+      continue;
+
+    Vec3 p0 = vp.transformPoint(v0);
+    Vec3 p1 = vp.transformPoint(v1);
+    Vec3 p2 = vp.transformPoint(v2);
+
+    Vec3 vv0 = view.transformPoint(v0);
+    Vec3 vv1 = view.transformPoint(v1);
+    Vec3 vv2 = view.transformPoint(v2);
+
+    if (vv0.z > -0.1f && vv1.z > -0.1f && vv2.z > -0.1f)
+      continue;
+
+    ScreenTri st;
+    st.x[0] = (p0.x + 1.0f) * 0.5f * width;
+    st.y[0] = (1.0f - p0.y) * 0.5f * height;
+    st.z[0] = -vv0.z;
+    st.x[1] = (p1.x + 1.0f) * 0.5f * width;
+    st.y[1] = (1.0f - p1.y) * 0.5f * height;
+    st.z[1] = -vv1.z;
+    st.x[2] = (p2.x + 1.0f) * 0.5f * width;
+    st.y[2] = (1.0f - p2.y) * 0.5f * height;
+    st.z[2] = -vv2.z;
+
+    computeColor(normal, lightDir, 100, 180, 255, st.r, st.g, st.b);
+
+    rasterizeTriangle(st, width, height, zbuf, pixels);
+  }
+}
+
+int main(int argc, char *argv[]) {
+  if (argc < 2) {
+    std::cerr << "Usage: " << argv[0] << " <model.obj>" << std::endl;
+    return 1;
+  }
+
+  std::string path = argv[1];
+  ObjModel model;
+  try {
+    model = parseObj(path);
+  } catch (const std::exception &e) {
+    std::cerr << "Error: " << e.what() << std::endl;
+    return 1;
+  }
+
+  std::cout << "Loaded " << model.vertices.size() << " vertices, "
+            << model.faces.size() << " faces." << std::endl;
+
+  AABB bbox = model.boundingBox();
+  Vec3 center = bbox.center();
+  float maxDim = std::max({bbox.max.x - bbox.min.x, bbox.max.y - bbox.min.y,
+                           bbox.max.z - bbox.min.z});
+  float scale = 2.0f / maxDim;
+  for (auto &v : model.vertices) {
+    v = (v - center) * scale;
+  }
+
+  const int WIDTH = 900;
+  const int HEIGHT = 700;
+
+  sf::RenderWindow window(sf::VideoMode({(unsigned)WIDTH, (unsigned)HEIGHT}),
+                          "Voxel Viewer - Tucil2");
+  window.setFramerateLimit(60);
+
+  sf::Texture texture(sf::Vector2u((unsigned)WIDTH, (unsigned)HEIGHT));
+  sf::Sprite sprite(texture);
+
+  std::vector<float> zbuf(WIDTH * HEIGHT);
+  std::vector<uint8_t> pixels(WIDTH * HEIGHT * 4);
+
+  Camera cam;
+  cam.target = {0, 0, 0};
+  cam.distance = 3.5f;
+
+  bool dragging = false;
+  sf::Vector2i lastMouse;
+  bool needsRedraw = true;
+
+  while (window.isOpen()) {
+    while (auto event = window.pollEvent()) {
+      if (event->is<sf::Event::Closed>()) {
+        window.close();
+      } else if (auto *mousePressed =
+                     event->getIf<sf::Event::MouseButtonPressed>()) {
+        if (mousePressed->button == sf::Mouse::Button::Left) {
+          dragging = true;
+          lastMouse = sf::Mouse::getPosition(window);
+        }
+      } else if (event->is<sf::Event::MouseButtonReleased>()) {
+        dragging = false;
+      } else if (auto *mouseMoved = event->getIf<sf::Event::MouseMoved>()) {
+        if (dragging) {
+          sf::Vector2i current(mouseMoved->position.x, mouseMoved->position.y);
+          float dx = (float)(current.x - lastMouse.x);
+          float dy = (float)(current.y - lastMouse.y);
+          cam.theta -= dx * 0.008f;
+          cam.phi -= dy * 0.008f;
+          cam.phi = std::clamp(cam.phi, 0.1f, 3.04f);
+          lastMouse = current;
+          needsRedraw = true;
+        }
+      } else if (auto *scrolled =
+                     event->getIf<sf::Event::MouseWheelScrolled>()) {
+        cam.distance -= scrolled->delta * 0.3f;
+        cam.distance = std::clamp(cam.distance, 0.5f, 50.0f);
+        needsRedraw = true;
+      } else if (auto *keyPressed = event->getIf<sf::Event::KeyPressed>()) {
+        if (keyPressed->code == sf::Keyboard::Key::Escape) {
+          window.close();
+        }
+        if (keyPressed->code == sf::Keyboard::Key::Left) {
+          cam.theta += 0.1f;
+          needsRedraw = true;
+        }
+        if (keyPressed->code == sf::Keyboard::Key::Right) {
+          cam.theta -= 0.1f;
+          needsRedraw = true;
+        }
+        if (keyPressed->code == sf::Keyboard::Key::Up) {
+          cam.phi -= 0.1f;
+          cam.phi = std::clamp(cam.phi, 0.1f, 3.04f);
+          needsRedraw = true;
+        }
+        if (keyPressed->code == sf::Keyboard::Key::Down) {
+          cam.phi += 0.1f;
+          cam.phi = std::clamp(cam.phi, 0.1f, 3.04f);
+          needsRedraw = true;
+        }
+        if (keyPressed->code == sf::Keyboard::Key::Equal) {
+          cam.distance -= 0.3f;
+          cam.distance = std::clamp(cam.distance, 0.5f, 50.0f);
+          needsRedraw = true;
+        }
+        if (keyPressed->code == sf::Keyboard::Key::Hyphen) {
+          cam.distance += 0.3f;
+          cam.distance = std::clamp(cam.distance, 0.5f, 50.0f);
+          needsRedraw = true;
+        }
+      }
+    }
+
+    if (needsRedraw) {
+      renderScene(model.vertices, model.faces, cam, WIDTH, HEIGHT, zbuf,
+                  pixels);
+      texture.update(pixels.data());
+      needsRedraw = false;
+    }
+
+    window.clear();
+    window.draw(sprite);
+    window.display();
+  }
+
+  return 0;
+}
+```

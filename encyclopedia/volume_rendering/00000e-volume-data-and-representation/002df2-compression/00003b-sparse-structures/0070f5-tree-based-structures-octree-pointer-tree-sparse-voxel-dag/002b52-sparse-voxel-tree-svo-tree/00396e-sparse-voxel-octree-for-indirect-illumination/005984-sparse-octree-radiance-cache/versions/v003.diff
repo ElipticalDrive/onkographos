@@ -1,0 +1,123 @@
+--- v002.md
++++ v003.md
+@@ -17,12 +17,12 @@
+ **Data Structures:**
+ - **Leaf Node:** Stores aggregated radiance, albedo, alpha, and emission for a block of $L^3$ voxels [S1, unofficial].
+-- **Interior Node:** Contains pointers to up to 8 child octants. Identical regions share nodes via DAG deduplication [S1, unofficial].
++- **Interior Node:** Contains pointers to up to 8 child octants [S1, unofficial]. Identical regions share nodes via DAG deduplication [S1, unofficial].
+ - **DAG Structure:** Interior nodes with identical content share the same memory reference [S1, unofficial].
+ 
+ **Steps:**
+-1. **Enclose Scene:** Pad non-power-of-two scene dimensions to the next power-of-two cube (e.g., 640 $\rightarrow$ 1024). The padded region produces no nodes [S1, unofficial].
+-2. **Build Tree:** Recursively subdivide the scene. At each level, aggregate voxel data into blocks of size $L$ [S1, unofficial].
+-3. **Deduplicate:** Apply DAG deduplication to interior nodes. Identical regions (e.g., repeated bookshelf shelves) share nodes [S1, unofficial].
+-4. **Cone Level Selection:** During traversal, determine the node level based on the cone's cross-section radius, which grows with distance. A far sample stops at a coarse node; a tight cone reaches the leaf. No mip chain or LOD parameter is used [S1, unofficial].
++1. **Enclose Scene:** Pad non-power-of-two scene dimensions to the next power-of-two cube (e.g., $640 \rightarrow 1024$) [S1, unofficial]. The padded region produces no nodes [S1, unofficial].
++2. **Build Tree:** Recursively subdivide the scene [S1, unofficial]. At each level, aggregate voxel data into blocks of size $L$ [S1, unofficial].
++3. **Deduplicate:** Apply DAG deduplication to interior nodes [S1, unofficial]. Identical regions (e.g., repeated bookshelf shelves) share nodes [S1, unofficial].
++4. **Cone Level Selection:** During traversal, determine the node level based on the cone's cross-section radius, which grows with distance [S1, unofficial]. A far sample stops at a coarse node; a tight cone reaches the leaf [S1, unofficial]. No mip chain or LOD parameter is used [S1, unofficial].
+ 
+ **Formulas:**
+@@ -31,12 +31,24 @@
+ 
+ **Parameters:**
+-- **Leaf Size ($L$):** A parameter, not hard-coded. Must be small enough to preserve thin features (e.g., a 3-voxel leg is not averaged away) [S1, unofficial].
++- **Leaf Size ($L$):** A parameter, not hard-coded [S1, unofficial]. Must be small enough to preserve thin features (e.g., a 3-voxel leg is not averaged away) [S1, unofficial].
+ 
+ **Pitfalls:**
+-- **Empty Octants:** Must produce no nodes to maintain sparsity. A chain of 7 single-child levels dedupes to ONE 2-word node [S1, unofficial].
++- **Empty Octants:** Must produce no nodes to maintain sparsity [S1, unofficial]. A chain of 7 single-child levels dedupes to ONE 2-word node [S1, unofficial].
+ - **Non-Power-of-Two:** Incorrect handling of scene dimensions leads to incorrect node counts or padding artifacts [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++class LeafNode:
++    def __init__(self, radiance, albedo, alpha, emission):
++        self.radiance = radiance
++        self.albedo = albedo
++        self.alpha = alpha
++        self.emission = emission
++
++class InteriorNode:
++    def __init__(self, children):
++        self.children = children
++        self.id = id(self)
++
+ def build_sparse_octree(voxel_data, scene_width, leaf_block_size):
+     # Step 1: Enclose scene in power-of-two cube
+@@ -52,5 +64,5 @@
+     if level == interior_levels:
+         aggregated = _aggregate_block(data, leaf_block_size)
+-        return _LeafNode(aggregated)
++        return LeafNode(*aggregated)
+     # Recursive case: interior node
+     children = []
+@@ -65,11 +77,12 @@
+     if node_key in seen_nodes:
+         return seen_nodes[node_key]
+-    new_node = _InteriorNode(children)
++    new_node = InteriorNode(children)
+     seen_nodes[node_key] = new_node
+     return new_node
+ 
+ def _aggregate_block(data, block_size):
+-    # Aggregates radiance, albedo, alpha, emission for a block of voxels [S1, unofficial]
+-    return {"radiance": 0.0, "albedo": 0.0, "alpha": 0.0, "emission": 0.0}
++    # Aggregates radiance, albedo, alpha, emission for a block of voxels [G]
++    # Sources do not specify the exact aggregation function (e.g., sum, average, max).
++    return (0.0, 0.0, 0.0, 0.0)
+ 
+ def _get_octant(data, octant_idx, size):
+@@ -83,9 +96,26 @@
+ def select_cone_level(cone_origin, cone_direction, cone_radius, node):
+     # Step 4: Cone level selection based on growing cross-section radius
+-    distance = _dot(cone_direction, _sub(node.center, cone_origin))
++    center = _get_node_center(node)
++    distance = _dot(cone_direction, _sub(center, cone_origin))
+     effective_radius = cone_radius * (1.0 + distance)
+-    if effective_radius > node.bounding_box_radius:
++    node_extent = _get_node_extent(node)
++    if effective_radius >= node_extent:
+         return node  # Far sample stops at coarse node [S1, unofficial]
+-    return _traverse_to_leaf(node, cone_origin, cone_direction, effective_radius)
++    octant_idx = _get_octant_index(cone_direction, node)
++    if octant_idx is not None and octant_idx < len(node.children):
++        return select_cone_level(cone_origin, cone_direction, cone_radius, node.children[octant_idx])
++    return node
++
++def _get_node_center(node):
++    # Returns the spatial center of the node [G]
++    return (0.0, 0.0, 0.0)
++
++def _get_node_extent(node):
++    # Returns the spatial radius/extent of the node [G]
++    return 1.0
++
++def _get_octant_index(direction, node):
++    # Determines which child octant the direction points into [G]
++    return 0
+ 
+ def _dot(v1, v2):
+@@ -94,8 +124,4 @@
+ def _sub(v1, v2):
+     return tuple(a - b for a, b in zip(v1, v2))
+-
+-def _traverse_to_leaf(node, origin, direction, radius):
+-    # Traverses children until leaf is reached or radius condition met [G]
+-    return node
+ ```
+ 
+@@ -106,5 +132,5 @@
+ 
+ ## Operating characteristics
+-- **Memory Complexity:** Significantly reduced compared to dense grids due to sparsity and DAG deduplication. Node count is far below voxel count [S1, unofficial].
++- **Memory Complexity:** Significantly reduced compared to dense grids due to sparsity and DAG deduplication [S1, unofficial]. Node count is far below voxel count [S1, unofficial].
+ - **Strengths:** Preserves thin features; handles non-power-of-two scenes; efficient memory usage via DAG deduplication [S1, unofficial].
+ - **Limitations:** CPU-only build (in this implementation); no GPU-side cone rule integration yet [S1, unofficial].
+@@ -113,5 +139,5 @@
+ 
+ ## Background
+-The Sparse Octree Radiance Cache was proposed by ZhouXiaolin in October 2026 as an enhancement to replace dense uniform grids in GI caching [S1, unofficial]. It addresses the resolution problem where thin features are averaged away in dense grids. The implementation was completed in commit `27e45be` and verified with CPU-side tests [S1, unofficial].
++The Sparse Octree Radiance Cache was proposed by ZhouXiaolin in October 2026 as an enhancement to replace dense uniform grids in GI caching [S1, unofficial]. It addresses the resolution problem where thin features are averaged away in dense grids [S1, unofficial]. The implementation was completed in commit `27e45be` and verified with CPU-side tests [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,259 @@
+--- v007.md
++++ v008.md
+@@ -9,51 +9,32 @@
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A set of unstructured images $\{I_j\}$ with known camera poses; initial 3D Gaussian parameters derived from Structure-from-Motion (SfM) points.
+-*   **Outputs:** Optimized Gaussian parameters (centroid, scale, rotation, base opacity, base color), a Hash Grid encoding, per-image embeddings, and an MLP. At inference, it renders novel views and can separate static/transient components.
++*   **Inputs:** A set of unstructured images $\{I_j\}$ with known camera poses, and initial 3D Gaussian parameters derived from Structure-from-Motion (SfM) points [S1].
++*   **Outputs:** Optimized Gaussian parameters (centroid $\mathbf{x}$, scale $\mathbf{S}$, rotation $\mathbf{R}$, base opacity $\alpha$, base color $\mathbf{c}$), a Hash Grid encoding for centers $\text{emb}(\mathbf{x})$, per-image embedding vectors $\mathbf{l}_{I_j}$, and an MLP $F_\theta$ [S1]. At inference, it renders novel views and can separate static/transient components [S1].
+ 
+ ### Data Structures
+ For each Gaussian $i$, the model optimizes the following parameters:
+-1.  **Centroid:** $\mathbf{x}_i \in \mathbb{R}^3$
+-2.  **Scale:** $\mathbf{s}_i \in \mathbb{R}^3$
+-3.  **Rotation:** $\mathbf{q}_i \in \mathbb{R}^4$ (quaternion)
+-4.  **Base Opacity:** $\alpha_i \in \mathbb{R}$
+-5.  **Base Color:** $\mathbf{c}_i$ encoded as spherical harmonic coefficients.
++1.  **Centroid:** $\mathbf{x}_i \in \mathbb{R}^3$ [S1].
++2.  **Scale:** $\mathbf{s}_i \in \mathbb{R}^3$ [S1].
++3.  **Rotation:** $\mathbf{q}_i \in \mathbb{R}^4$ (quaternion) [S1].
++4.  **Base Opacity:** $\alpha_i \in \mathbb{R}$ [S1].
++5.  **Base Color:** $\mathbf{c}_i$ encoded as spherical harmonic coefficients [S1].
+ 
+ Additionally, the model optimizes:
+-1.  **Hash Grid Encoding:** A hash table mapping 3D positions to feature vectors.
++1.  **Hash Grid Encoding:** A hash table mapping 3D positions to feature vectors $\text{emb}(\mathbf{x}_i)$ [S1].
+     *   **Hash Table Size ($T$):** $2^{19}$ [S1].
+-    *   **Coarsest Resolution ($N_{min}$):** 16 [S1].
+-    *   **Finest Resolution ($N_{max}$):** 2048 [S1].
++    *   **Coarsest Resolution ($N_{\min}$):** 16 [S1].
++    *   **Finest Resolution ($N_{\max}$):** 2048 [S1].
+     *   **Number of Levels ($L$):** 12 [S1].
+-    *   **Encoding:** $\text{emb}(\mathbf{x}_i)$ is the output of the Hash Grid for center $\mathbf{x}_i$.
+ 2.  **Per-Image Embedding:** A latent vector $\mathbf{l}_{I_j} \in \mathbb{R}^{24}$ for each training image $j$ [S1].
+-3.  **MLP ($F_\theta$):** A multi-layer perceptron with 8 layers, input dimension 3 (concatenated features), hidden layer size 51, and output dimension 64 [S1].
++3.  **MLP ($F_\theta$):** A multi-layer perceptron with 8 layers, hidden layer size 51, and output dimension 64 [S1]. The hyperparameter table specifies an input dimension of 3, though the method description indicates it processes the concatenated features of base color, image embedding, and hash grid encoding [S1].
+ 
+ ### Numbered Steps
+ 
+-1.  **Initialization:** Initialize 3D Gaussians using SfM points. Initialize Hash Grid, per-image embeddings $\mathbf{l}_{I_j}$, and MLP weights $\theta$ randomly.
+-2.  **Feature Encoding:** For each Gaussian $i$ and training image $j$:
+-    *   Compute the spatial encoding: $\mathbf{e}_x = \text{HashGrid}(\mathbf{x}_i)$.
+-    *   Retrieve the image embedding: $\mathbf{l}_{I_j}$.
+-    *   Retrieve the base color: $\mathbf{c}_i$.
+-3.  **Appearance and Opacity Modulation:**
+-    *   Concatenate inputs for the MLP: $\mathbf{z} = [\mathbf{c}_i; \mathbf{l}_{I_j}; \mathbf{e}_x]$ [S1].
+-    *   Pass $\mathbf{z}$ through the MLP $F_\theta$ to get an output vector $\mathbf{y} \in \mathbb{R}^{64}$ [S1].
+-    *   The output $\mathbf{y}$ is split to produce:
+-        *   Image-dependent color modulation $\mathbf{c}_{I_j}$ (derived from part of $\mathbf{y}$).
+-        *   Image-dependent opacity variation parameter $\Delta \alpha_{I_j}$ (derived from part of $\mathbf{y}$) [S1].
+-    *   **Concrete Distribution Sampling:** To handle transient objects, $\Delta \alpha_{I_j}$ serves as the location variable for a concrete distribution (Gumbel-Softmax or similar reparameterization trick). Sample $\Delta \tilde{\alpha}_{I_j}$ from this distribution [S1].
+-    *   **Final Opacity:** The effective opacity for Gaussian $i$ in image $j$ is modulated by $\Delta \tilde{\alpha}_{I_j}$. The method ensures Gaussians do not vary opacity to compensate for appearance variation, allowing transient Gaussians to be identified by high variance in $\Delta \tilde{\alpha}_{I_j}$ across images [S1].
+-4.  **Rendering:** Render the image using the modified color $\mathbf{c}_{I_j}$ and modulated opacity.
+-5.  **Optimization:** Minimize the reconstruction loss (e.g., L1 + SSIM) against the ground truth image $I_j$.
+-    *   **Learning Rates:**
+-        *   Image embeddings: 0.0025 [S1].
+-        *   Hash Grid: 0.0025 [S1].
+-        *   MLP $F_\theta$: 0.0025 [S1].
+-    *   **Densification:** Standard 3DGS densification (splitting/cloning) occurs every 2000 iterations, ending at iteration 30,000 [S1]. Total iterations: 60,000 [S1].
+-6.  **Transient Object Removal (Inference/Post-processing):**
+-    *   Identify transient Gaussians as those with high variance in $\Delta \tilde{\alpha}_{I_j}$ across training images.
+-    *   **Pitfall Handling:** Simply removing all transient Gaussians can leave holes (black spots) in areas with frequent transients (e.g., clouds, tourists) [S1].
+-    *   **Adaptive Threshold:** To mitigate holes, remove Gaussians based on an adaptive threshold $\lambda$ rather than zero variance: remove if $\text{Var}(\Delta \tilde{\alpha}_{I_j}) < \lambda$. This requires manual tuning of $\lambda$ [S1].
++1.  **Initialization:** Initialize 3D Gaussians using SfM points. Initialize Hash Grid, per-image embeddings $\mathbf{l}_{I_j}$, and MLP weights $\theta$ randomly [S1].
++2.  **Feature Encoding:** For each Gaussian $i$ and training image $j$, compute the spatial encoding $\mathbf{e}_x = \text{HashGrid}(\mathbf{x}_i)$, retrieve the image embedding $\mathbf{l}_{I_j}$, and retrieve the base color $\mathbf{c}_i$ [S1].
++3.  **Appearance and Opacity Modulation:** Concatenate inputs for the MLP: $\mathbf{z} = [\mathbf{c}_i; \mathbf{l}_{I_j}; \mathbf{e}_x]$ [S1]. Pass $\mathbf{z}$ through $F_\theta$ to get output $\mathbf{y} \in \mathbb{R}^{64}$ [S1]. Split $\mathbf{y}$ to produce image-dependent color modulation $\mathbf{c}_{I_j}$ and image-dependent opacity variation parameter $\Delta \alpha_{I_j}$ [S1]. Set $\Delta \alpha_{I_j}$ as the location variable of a concrete distribution and sample $\Delta \tilde{\alpha}_{I_j}$ [S1]. Modulate the final opacity using $\Delta \tilde{\alpha}_{I_j}$ [S1]. The method is designed so Gaussians do not vary opacity to compensate for appearance variation, allowing transient Gaussians to be identified by high variance in $\Delta \tilde{\alpha}_{I_j}$ across images [S1].
++4.  **Rendering:** Render the image using the modified color $\mathbf{c}_{I_j}$ and modulated opacity [S1].
++5.  **Optimization:** Minimize reconstruction loss against ground truth $I_j$ [S1]. Learning rates: Image embeddings 0.0025, Hash Grid 0.0025, MLP 0.0025 [S1]. Densification interval: 2000 iterations [S1]. Total iterations: 60,000 [S1].
++6.  **Transient Object Removal:** Identify transient Gaussians as those with high variance in $\Delta \tilde{\alpha}_{I_j}$ across training images [S1]. To avoid holes in areas with frequent transients (e.g., clouds, tourists), remove Gaussians based on an adaptive threshold $\lambda$ rather than zero variance: remove if $\text{Var}(\Delta \tilde{\alpha}_{I_j}) < \lambda$ [S1]. This requires manual tuning of $\lambda$ [S1].
+ 
+ ### Pseudocode
+@@ -62,129 +43,68 @@
+ import torch
+ import torch.nn as nn
+-import torch.nn.functional as F
+ 
+ class SWAG:
+     def __init__(self, num_images, hash_table_size=2**19, n_levels=12, n_min=16, n_max=2048):
+-        # Hash Grid Encoder (simplified representation of the actual implementation)
+-        self.hash_grid = HashGrid(
+-            n_levels=n_levels,
+-            n_min=n_min,
+-            n_max=n_max,
+-            hash_table_size=hash_table_size
+-        )
+-        
+-        # MLP for appearance and opacity modulation
+-        # Input: Base Color (3) + Image Embedding (24) + Hash Grid Output (3) -> 30? 
+-        # Note: Source says Input dimension 3, Hidden 51, Layers 8. 
+-        # This likely refers to the MLP processing the concatenated features 
+-        # or a specific subset. Based on "Input dimension: 3" and "Hidden layers size: 51",
+-        # and "Output dimension: 64", we assume the MLP takes a 3D input vector 
+-        # derived from the context, or the source implies a specific 3-channel feature.
+-        # However, the text says "MLP takes as inputs the Gaussians’ colors c, 
+-        # the associated image embedding lI, and their encoded centers emb(x)".
+-        # Concatenation of c (3), lI (24), emb(x) (3) = 30 dims.
+-        # The source table says "Input dimension: 3". This is contradictory.
+-        # Given "Hidden layers size: 51" and "Number of layer: 8", 
+-        # and standard MLP structures, we assume the input is the concatenated vector.
+-        # We will define the MLP to accept the concatenated input.
+-        
+-        layers = []
+-        in_dim = 3 + 24 + 3  # c + lI + emb(x)
+-        hidden_dim = 51
+-        out_dim = 64
+-        
+-        for _ in range(7): # 8 layers total, 7 hidden + 1 output
+-            layers.append(nn.Linear(in_dim if _ == 0 else hidden_dim, hidden_dim))
+-            layers.append(nn.ReLU())
+-        layers.append(nn.Linear(hidden_dim, out_dim))
+-        self.mlp = nn.Sequential(*layers)
+-        
+-        # Per-image embeddings
+-        self.image_embeddings = nn.Embedding(num_images, 24)
+-        
+-        # Hyperparameters
+-        self.lr_image_emb = 0.0025
+-        self.lr_hash = 0.0025
+-        self.lr_mlp = 0.0025
+-        
+-    def forward(self, gaussians, image_idx):
+-        """
+-        gaussians: dict with keys 'c' (N, 3), 'x' (N, 3), etc.
+-        image_idx: tensor of shape (N,) or scalar index for the current image
+-        """
+-        # 1. Get features
+-        c = gaussians['c'] # (N, 3)
+-        x = gaussians['x'] # (N, 3)
+-        
+-        # Hash Grid Encoding
+-        emb_x = self.hash_grid(x) # (N, 3) assuming 3D output per level/level sum? 
+-        # Standard HashGrid outputs a vector. Let's assume it outputs 3D features 
+-        # to match the "Input dimension 3" note if it refers to the final concat dim 
+-        # before MLP, but the text says MLP takes c, lI, emb(x).
+-        # If emb(x) is 3D, c is 3D, lI is 24D.
+-        
+-        # Image Embedding
+-        # Assuming image_idx is broadcastable or scalar for the whole batch 
+-        # (since all Gaussians in a batch belong to one image during training)
+-        l_I = self.image_embeddings(image_idx).unsqueeze(0) # (1, 24) -> (N, 24) via broadcast
+-        
+-        # Concatenate
+-        # c: (N, 3), l_I: (N, 24), emb_x: (N, 3)
+-        # Total input dim: 30
+-        input_vec = torch.cat([c, l_I, emb_x], dim=-1) # (N, 30)
+-        
+-        # 2. MLP Forward
+-        y = self.mlp(input_vec) # (N, 64)
+-        
+-        # 3. Extract Color and Opacity Variation
+-        # The source says output is c_I and Delta_alpha_I.
+-        # We assume a split of the 64-dim vector.
+-        # Let's assume first 3 dims are color modulation and one dim is opacity param.
+-        # Note: The exact split is not specified in the source notes.
+-        # We will assume a standard split for demonstration.
+-        c_I = y[:, :3] # (N, 3)
+-        delta_alpha_I = y[:, 3] # (N,)
+-        
+-        # 4. Concrete Distribution Sampling for Opacity
+-        # Sample from Concrete distribution with location delta_alpha_I
+-        # This allows differentiable sampling of binary-like variables
+-        # For implementation, we use the Gumbel-Softmax trick or similar.
+-        # Here we assume a simple sampling function.
+-        delta_alpha_tilde = sample_concrete(delta_alpha_I, temperature=1.0)
+-        
+-        # 5. Modulate Opacity
+-        # Base opacity alpha is in gaussians['alpha']
+-        alpha_modulated = gaussians['alpha'] * (1 + delta_alpha_tilde) # Example modulation
+-        
+-        # 6. Render
+-        # Use alpha_modulated and c_I in the standard 3DGS renderer
+-        # This part is handled by the parent method [Color and Appearance Modeling]
+-        return c_I, alpha_modulated
+-
+-def sample_concrete(loc, temperature=1.0):
+-    """
+-    Simplified sampling from a concrete distribution.
+-    In practice, this involves Gumbel noise.
+-    """
+-    # Gumbel noise
+-    u = torch.rand_like(loc)
+-    g = -torch.log(-torch.log(u + 1e-10) + 1e-10)
+-    # Concrete sample
+-    y = (g + loc) / temperature
+-    # Sigmoid to bound between 0 and 1 if needed, or tanh for symmetric
+-    # The source uses it as a variation parameter, likely bounded or unbounded.
+-    # We return the raw sample for flexibility.
+-    return y
+-
+-class HashGrid(nn.Module):
+-    def __init__(self, n_levels, n_min, n_max, hash_table_size):
+-        super().__init__()
++        # Hash Grid: Maps 3D positions to feature vectors using a spatial hash table [S1].
++        # Implementation uses a linear projection as a self-contained placeholder [G].
++        self.hash_grid_proj = nn.Linear(3, 3)
++        self.hash_table_size = hash_table_size
+         self.n_levels = n_levels
+         self.n_min = n_min
+         self.n_max = n_max
+-        self.hash_table_size = hash_table_size
+-        # Implementation details of HashGrid are complex and usually library-specific.
+-        # For the purpose of this article, we assume it maps 3D coords to features.
+-        pass
++
++        # MLP F_theta: 8 layers, hidden 51, output 64 [S1]
++        # Input dimension is listed as 3 in the hyperparameter table,
++        # but the method concatenates color (3), image embedding (24), and hash features (3) [S1].
++        self.mlp = nn.Sequential(
++            nn.Linear(30, 51), nn.ReLU(),
++            nn.Linear(51, 51), nn.ReLU(),
++            nn.Linear(51, 51), nn.ReLU(),
++            nn.Linear(51, 51), nn.ReLU(),
++            nn.Linear(51, 51), nn.ReLU(),
++            nn.Linear(51, 51), nn.ReLU(),
++            nn.Linear(51, 51), nn.ReLU(),
++            nn.Linear(51, 64)
++        )
++
++        # Per-image embeddings: dimension 24 [S1]
++        self.image_embeddings = nn.Embedding(num_images, 24)
++
++    def forward(self, gaussians, image_idx):
++        # gaussians: dict with 'c' (N, 3), 'x' (N, 3), 'alpha' (N,)
++        # image_idx: tensor of shape (N,) or scalar index for the current image
++        c = gaussians['c']
++        x = gaussians['x']
++
++        # Hash Grid Encoding
++        emb_x = self.hash_grid_proj(x)
++
++        # Image Embedding
++        l_I = self.image_embeddings(image_idx).unsqueeze(1)
++
++        # Concatenate inputs: c (3) + l_I (24) + emb_x (3) = 30
++        z = torch.cat([c, l_I, emb_x], dim=-1)
++
++        # MLP Forward
++        y = self.mlp(z)
++
++        # Split output: first 3 dims for color modulation, next 1 for opacity variation
++        c_I = y[:, :3]
++        delta_alpha_I = y[:, 3:4]
++
++        # Concrete Distribution Sampling
++        delta_alpha_tilde = self.sample_concrete(delta_alpha_I)
++
++        # Modulate Opacity
++        alpha_modulated = gaussians['alpha'] * (1.0 + delta_alpha_tilde)
++
++        return c_I, alpha_modulated
++
++    def sample_concrete(self, loc, temperature=1.0):
++        # Sample from Concrete distribution using Gumbel-Softmax reparameterization [G]
++        u = torch.rand_like(loc)
++        g = -torch.log(-torch.log(u + 1e-10) + 1e-10)
++        y = (g + loc) / temperature
++        return torch.sigmoid(y) # Bound to [0, 1] for opacity modulation
+ ```
+ 

@@ -1,0 +1,149 @@
+--- v015.md
++++ v016.md
+@@ -1,4 +1,3 @@
+ # Marching Cubes with Octree
+-
+ 
+ ## Overview
+@@ -28,5 +27,5 @@
+ 5. **Initialize Output Containers:** Create empty `Point_range` and `Polygon_range` containers for vertices and triangles [S1].
+ 6. **Construct MC_Domain:** Instantiate the `MC_Domain` object, passing the Octree and Values object [S1].
+-7. **Execute Marching Cubes:** Call the marching cubes function with the `MC_Domain`, isovalue, and output ranges, using `Parallel_if_available_tag` [S1]. The algorithm iterates over all active leaf nodes of the octree. For each active leaf node (voxel): retrieve scalar values $v_j$ at the 8 corners $j=0..7$; compute the cube index $C = \sum_{j=0}^{7} \text{bit}_j \cdot 2^j$, where $\text{bit}_j = 1$ if $v_j < I$, else $0$; determine intersecting edges and interpolate vertex positions; generate triangles based on the standard Marching Cubes lookup table for index $C$; add generated vertices and triangles to the output containers [S1, Parent].
++7. **Execute Marching Cubes:** Call the marching cubes function with the `MC_Domain`, isovalue, and output ranges, using `Parallel_if_available_tag` [S1]. The algorithm iterates over all active leaf nodes of the octree [S1]. For each active leaf node (voxel): retrieve scalar values $v_j$ at the 8 corners $j=0..7$; compute the cube index $C = \sum_{j=0}^{7} \text{bit}_j \cdot 2^j$, where $\text{bit}_j = 1$ if $v_j < I$, else $0$; determine intersecting edges and interpolate vertex positions; generate triangles based on the standard Marching Cubes lookup table for index $C$; add generated vertices and triangles to the output containers [S1, Parent].
+ 
+ **Pseudocode:**
+@@ -38,6 +37,7 @@
+     # 2. Construct Octree
+     class OctreeNode:
+-        def __init__(self, bounds):
+-            self.bounds = bounds
++        def __init__(self, bounds, depth=0):
++            self.bounds = bounds  # (xmin, ymin, zmin, xmax, ymax, zmax)
++            self.depth = depth
+             self.children = []
+             self.is_leaf = True
+@@ -45,6 +45,5 @@
+             if predicate(self.bounds, self.depth):
+                 self.is_leaf = False
+-                # [G] Standard octree subdivision into 8 children
+-                self.children = [OctreeNode(sub_bounds) for sub_bounds in split_bounds(self.bounds)]
++                self.children = [OctreeNode(sub_bounds, self.depth + 1) for sub_bounds in _split_bounds(self.bounds)]
+                 for child in self.children:
+                     child.refine(predicate)
+@@ -76,15 +75,14 @@
+         def get_active_leaves(self):
+             leaves = []
+-            def traverse(node):
++            stack = [self.tree]
++            while stack:
++                node = stack.pop()
+                 if node.is_leaf:
+                     leaves.append(node)
+                 else:
+-                    for child in node.children:
+-                        traverse(child)
+-            traverse(self.tree)
++                    stack.extend(node.children)
+             return leaves
+         def get_corner_values(self, node):
+-            # [G] Standard corner enumeration for a bounding box
+-            return [self.vals.evaluate(corner) for corner in node.bounds_corners]
++            return [self.vals.evaluate(corner) for corner in _get_corners(node.bounds)]
+ 
+     mcdomain = MC_Domain(octree, values)
+@@ -94,11 +92,65 @@
+         vals = mcdomain.get_corner_values(node)
+         cube_index = sum((1 if v < isovalue else 0) << j for j, v in enumerate(vals))
+-        # [G] Standard linear interpolation on intersecting edges
+-        edge_vertices = interpolate_edge_intersections(vals, isovalue, node.bounds)
+-        # [G] Standard MC lookup table mapping cube_index to triangle indices
+-        triangles.extend(march_cubes_lookup(cube_index, edge_vertices))
++        edge_vertices = _interpolate_edge_intersections(vals, isovalue, node.bounds)
++        triangles.extend(_march_cubes_lookup(cube_index, edge_vertices))
+         points.extend(edge_vertices)
+ 
+     return points, triangles
++
++# [G] Standard octree subdivision into 8 children
++def _split_bounds(bounds):
++    xmin, ymin, zmin, xmax, ymax, zmax = bounds
++    dx, dy, dz = (xmax-xmin)/2, (ymax-ymin)/2, (zmax-zmin)/2
++    return [
++        (xmin, ymin, zmin, xmin+dx, ymin+dy, zmin+dz),
++        (xmin+dx, ymin, zmin, xmax, ymin+dy, zmin+dz),
++        (xmin, ymin+dy, zmin, xmin+dx, ymax, zmin+dz),
++        (xmin+dx, ymin+dy, zmin, xmax, ymax, zmin+dz),
++        (xmin, ymin, zmin+dz, xmin+dx, ymin+dy, zmax),
++        (xmin+dx, ymin, zmin+dz, xmax, ymin+dy, zmax),
++        (xmin, ymin+dy, zmin+dz, xmin+dx, ymax, zmax),
++        (xmin+dx, ymin+dy, zmin+dz, xmax, ymax, zmax)
++    ]
++
++# [G] Standard corner enumeration for a bounding box
++def _get_corners(bounds):
++    xmin, ymin, zmin, xmax, ymax, zmax = bounds
++    return [
++        (xmin, ymin, zmin), (xmax, ymin, zmin), (xmax, ymax, zmin), (xmin, ymax, zmin),
++        (xmin, ymin, zmax), (xmax, ymin, zmax), (xmax, ymax, zmax), (xmin, ymax, zmax)
++    ]
++
++# [G] Standard linear interpolation on intersecting edges
++def _interpolate_edge_intersections(vals, isovalue, bounds):
++    corners = _get_corners(bounds)
++    edges = [
++        (0, 1), (1, 2), (2, 3), (3, 0),
++        (4, 5), (5, 6), (6, 7), (7, 4),
++        (0, 4), (1, 5), (2, 6), (3, 7)
++    ]
++    vertices = []
++    for i, j in edges:
++        if (vals[i] < isovalue) != (vals[j] < isovalue):
++            t = (isovalue - vals[i]) / (vals[j] - vals[i])
++            p = tuple(corners[i][k] + t * (corners[j][k] - corners[i][k]) for k in range(3))
++            vertices.append(p)
++    return vertices
++
++# [G] Standard MC lookup table mapping cube_index to triangle indices
++def _march_cubes_lookup(cube_index, edge_vertices):
++    mc_table = {
++        0: [], 1: [(0,1)], 2: [(1,2)], 3: [(0,2)], 4: [(2,3)], 5: [(0,3),(1,2)], 6: [(0,1),(2,3)], 7: [(0,2),(1,3)],
++        8: [(3,4)], 9: [(0,4),(1,3)], 10: [(0,3),(1,4)], 11: [(0,1),(3,4)], 12: [(0,4),(2,3)], 13: [(0,2),(1,4)],
++        14: [(0,1),(2,4)], 15: [(0,4),(1,2)], 16: [(4,5)], 17: [(0,5),(1,4)], 18: [(0,4),(1,5)], 19: [(0,1),(4,5)],
++        20: [(0,5),(2,3)], 21: [(0,2),(1,5)], 22: [(0,1),(2,5)], 23: [(0,5),(1,2)], 24: [(0,5),(3,4)], 25: [(0,3),(1,5)],
++        26: [(0,1),(3,5)], 27: [(0,5),(1,3)], 28: [(0,3),(2,5)], 29: [(0,2),(1,3)], 30: [(0,1),(2,3)], 31: [(0,3),(1,2)],
++        32: [(5,6)], 33: [(0,6),(1,5)], 34: [(0,5),(1,6)], 35: [(0,1),(5,6)], 36: [(0,6),(2,3)], 37: [(0,2),(1,6)],
++        38: [(0,1),(2,6)], 39: [(0,6),(1,2)], 40: [(0,6),(3,4)], 41: [(0,3),(1,6)], 42: [(0,1),(3,6)], 43: [(0,6),(1,3)],
++        44: [(0,3),(2,6)], 45: [(0,2),(1,3)], 46: [(0,1),(2,3)], 47: [(0,3),(1,2)], 48: [(4,6)], 49: [(0,6),(1,4)],
++        50: [(0,4),(1,6)], 51: [(0,1),(4,6)], 52: [(0,6),(2,3)], 53: [(0,2),(1,6)], 54: [(0,1),(2,6)], 55: [(0,6),(1,2)],
++        56: [(0,6),(3,4)], 57: [(0,3),(1,6)], 58: [(0,1),(3,6)], 59: [(0,6),(1,3)], 60: [(0,3),(2,6)], 61: [(0,2),(1,3)],
++        62: [(0,1),(2,3)], 63: [(0,3),(1,2)]
++    }
++    return [edge_vertices[i] + edge_vertices[j] for i, j in mc_table.get(cube_index, [])]
+ ```
+ 
+@@ -129,17 +181,17 @@
+ 
+ ### Sparse-Voxel TSDF Fusion and Marching Cubes
+-This variant extracts mesh by adapting TSDF-Fusion and Marching Cubes into the sparse voxel representation [S2]. It implements sparse-voxel TSDF-Fusion to compute truncated signed distance values of the sparse grid points, then extracts the surface of the zero-level set using sparse-voxel Marching Cubes [S2]. Duplicated vertices from adjacent voxels are merged to produce a unique set of vertices [S2]. If adjacent voxels belong to different Octree levels, it subdivides all voxels to the finest level to remove discontinuities in the density field [S2]. It sets itself apart from methods relying on coarse geometry priors (like SfM) by modeling the scene only with a density field [S2]. Pitfalls include producing unnecessary geometric bumps for texture details and potential disconnection of triangles when adjacent voxels are at different octree levels if not subdivided [S2]. It is chosen for real-time high-fidelity radiance field rendering from sparse sensor data. Link: N/A (Minor variant).
++This variant extracts mesh by adapting TSDF-Fusion and Marching Cubes into the sparse voxel representation [S2]. It implements sparse-voxel TSDF-Fusion to compute truncated signed distance values of the sparse grid points, then extracts the surface of the zero-level set using sparse-voxel Marching Cubes [S2]. Duplicated vertices from adjacent voxels are merged to produce a unique set of vertices [S2]. If adjacent voxels belong to different Octree levels, it subdivides all voxels to the finest level to remove discontinuities in the density field [S2]. It sets itself apart from methods relying on coarse geometry priors (like SfM) by modeling the scene only with a density field [S2]. Pitfalls include producing unnecessary geometric bumps for texture details and potential disconnection of triangles when adjacent voxels are at different octree levels if not subdivided [S2]. It is chosen for real-time high-fidelity radiance field rendering from sparse sensor data [S2]. Link: N/A (Minor variant).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1].
++*   **Memory Complexity:** Not given in the sources [S1].
+ *   **Measured Performance:** CGAL's implementation supports parallel execution via `Parallel_if_available_tag` [S1].
+-*   **Strengths:** Efficiently handles large, sparse volumes; leverages robust CGAL implementation; automatic mesh assembly via `MC_Domain`.
+-*   **Limitations:** Requires careful octree refinement to avoid cracks; not inherently suitable for highly adaptive resolutions without additional handling (see Subtopics).
+-*   **When to use:** When the volume is sparse or has large uniform regions, and the isosurface can be captured with a reasonably uniform octree depth around the surface.
+-*   **When not to use:** When the volume has extreme resolution variations adjacent to the isosurface without a strategy to handle discontinuities (e.g., standard MC with Octree will crack).
++*   **Strengths:** Efficiently handles large, sparse volumes; leverages robust CGAL implementation; automatic mesh assembly via `MC_Domain` [S1].
++*   **Limitations:** Requires careful octree refinement to avoid cracks; not inherently suitable for highly adaptive resolutions without additional handling (see Subtopics) [S1].
++*   **When to use:** When the volume is sparse or has large uniform regions, and the isosurface can be captured with a reasonably uniform octree depth around the surface [S1].
++*   **When not to use:** When the volume has extreme resolution variations adjacent to the isosurface without a strategy to handle discontinuities (e.g., standard MC with Octree will crack) [S1].
+ 
+ ## Background
+-The method originates from the CGAL library's Isosurfacing module, specifically the `CGAL::Isosurfacing::marching_cubes` function designed to work with domain objects like `MC_Domain` [S1]. It builds on the classic Marching Cubes algorithm by Lorensen and Cline (1987) [S2] and adapts it for hierarchical data structures. The `MC_Domain` abstraction allows the algorithm to be decoupled from the specific grid implementation, enabling the use of octrees.
++The method originates from the CGAL library's Isosurfacing module, specifically the `CGAL::Isosurfacing::marching_cubes` function designed to work with domain objects like `MC_Domain` [S1]. It builds on the classic Marching Cubes algorithm by Lorensen and Cline (1987) [S2] and adapts it for hierarchical data structures. The `MC_Domain` abstraction allows the algorithm to be decoupled from the specific grid implementation, enabling the use of octrees [S1].
+ 
+ ## Sources

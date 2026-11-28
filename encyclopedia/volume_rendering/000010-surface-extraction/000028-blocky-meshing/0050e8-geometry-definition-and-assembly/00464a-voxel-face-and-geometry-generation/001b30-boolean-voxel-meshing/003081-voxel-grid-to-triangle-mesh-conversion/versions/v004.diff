@@ -1,0 +1,315 @@
+--- v003.md
++++ v004.md
+@@ -1,104 +1,234 @@
+ # Voxel Grid to Triangle Mesh Conversion
+ 
+-Also called: Open3D Voxel Grid to Triangle Mesh Conversion
++Also called: Exact Voxel-to-Mesh Triangulation, Open3D Voxel Grid to Triangle Mesh Conversion, Surface Voxel Face Extraction, Voxel Grid to Watertight Mesh Conversion
+ 
+ ## Overview
+-This method converts a boolean voxel occupancy grid into a triangular mesh by instantiating a box primitive for every occupied voxel [S1, unofficial]. It preserves the exact blocky geometry of the input grid without attempting to smooth or merge adjacent faces [S1, unofficial]. It is primarily used when the voxel structure itself is the desired output, such as for animation or when the input data is already voxelized and no underlying scalar field exists [S1, unofficial].
++This method converts a boolean voxel occupancy grid into a watertight triangular mesh that preserves the exact volume of the original grid by generating triangles for every exposed face of surface voxels [S1, unofficial]. It solves the problem of incorrect edge connectivity where edges might connect to 4 faces instead of exactly 2, which violates standard definitions of watertightness [S1, unofficial]. Unlike marching cubes or smooth surface extraction methods that interpolate boundaries, this approach explicitly generates cube faces per surface voxel, preserving the exact voxel geometry at the cost of a higher triangle count [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A voxel grid data structure (e.g., Open3D `VoxelGrid`) containing occupancy information and geometric metadata (voxel size, center coordinates) [S1, unofficial].
+-**Outputs:** A `TriangleMesh` object containing the triangular facets of the instantiated boxes [S1, unofficial].
++**Inputs:** A boolean voxel grid (encoding) with known spatial transform and pitch.
++**Outputs:** A `TriangleMesh` object containing vertices and faces representing the surface of the voxel grid.
+ 
+ **Data Structures:**
+-1.  **Voxel Grid:** A sparse or dense representation where each active entry stores:
+-    *   `voxel_center`: 3D coordinate $(x, y, z)$ of the voxel center [S1, unofficial].
+-    *   `voxel_size`: Scalar value $s$ representing the edge length of the cubic voxel [S1, unofficial].
+-2.  **TriangleMesh:** A container holding a list of vertices and a list of triangle indices [G].
++1.  **Voxel Grid Encoding:** A dense boolean array or sparse index list representing occupied voxels.
++2.  **Surface Indices:** A list of 3D integer coordinates $(i, j, k)$ for voxels that are occupied but have at least one unoccupied neighbor.
++3.  **Surface Centers:** A list of 3D floating-point coordinates corresponding to the center of each surface voxel.
++4.  **Face Mask:** A 6-element boolean array `[Right, Left, Front, Back, Top, Bottom]` for each surface voxel.
++5.  **Triangles:** A list of triplets of vertex coordinates.
++
++**Parameters:**
++*   `hpitch`: Half of the voxel grid pitch (spacing between voxel centers). Computed as `pitch[0] / 2` [S1, unofficial].
+ 
+ **Steps:**
+-1.  Initialize an empty `TriangleMesh` object [S1, unofficial].
+-2.  Retrieve the list of all active voxels from the grid [S1, unofficial].
+-3.  For each voxel in the list:
+-    a.  Determine the voxel's center coordinate $C = (c_x, c_y, c_z)$ [S1, unofficial].
+-    b.  Determine the voxel's edge length $s$ [S1, unofficial].
+-    c.  Generate a unit cube (box primitive) with vertices at $(\pm 0.5, \pm 0.5, \pm 0.5)$ [G].
+-    d.  Scale the unit cube by factor $s$ [S1, unofficial].
+-    e.  Translate the scaled cube so its center is at $C$ [S1, unofficial].
+-    f.  Add the resulting vertices and triangle indices to the `TriangleMesh` [S1, unofficial].
++1.  **Extract Surface Voxels:** Identify surface voxels from the original grid. A surface voxel is an occupied voxel that has at least one neighbor that is either out of bounds or unoccupied. This can be done using a morphology operation to create a "hollow" voxel grid containing only surface voxels [S1, unofficial].
++2.  **Compute Centers:** Calculate the 3D world coordinates of each surface voxel center from its sparse indices using the grid's transform and pitch [S1, unofficial].
++3.  **Initialize Mesh:** Create an empty `TriangleMesh` object [S2, unofficial].
++4.  **Detect Faces:** For each surface voxel:
++    a. Initialize a 6-element boolean mask to `False`.
++    b. Check each of the 6 neighboring voxel indices (Right: $+x$, Left: $-x$, Front: $+y$, Back: $-y$, Top: $+z$, Bottom: $-z$).
++    c. A face is marked `True` if the neighbor index is out of bounds or if the neighbor voxel is not present in the original dense encoding [S1, unofficial].
++5.  **Generate Triangles:** For each `True` entry in the face mask, generate two triangles by offsetting the voxel center by `hpitch` along the appropriate axes to form the four corners of the face, then triangulating into two triangles [S1, unofficial].
++6.  **Add to Mesh:** Add the generated triangles to the `TriangleMesh` object [S2, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def voxel_grid_to_mesh(voxel_grid):
+-    """Converts a voxel grid to a TriangleMesh by creating a box for each voxel."""
+-    class TriangleMesh:
+-        def __init__(self):
+-            self.vertices = []
+-            self.triangles = []
+-
+-    mesh = TriangleMesh()
+-    voxels = voxel_grid.get_voxels()
+-
+-    unit_cube_vertices = [
+-        [-0.5, -0.5, -0.5], [ 0.5, -0.5, -0.5], [ 0.5,  0.5, -0.5], [-0.5,  0.5, -0.5],
+-        [-0.5, -0.5,  0.5], [ 0.5, -0.5,  0.5], [ 0.5,  0.5,  0.5], [-0.5,  0.5,  0.5]
+-    ]
+-    unit_cube_triangles = [
+-        [0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6],
+-        [4, 5, 1], [4, 1, 0], [3, 7, 6], [3, 6, 2],
+-        [3, 4, 0], [3, 7, 4], [1, 5, 6], [1, 6, 2]
+-    ]
+-
+-    for voxel in voxels:
+-        voxel_size = voxel.size
+-        center = voxel.get_voxel_center_coordinate()
+-
+-        scaled_vertices = []
+-        for v in unit_cube_vertices:
+-            sv = [v[0] * voxel_size, v[1] * voxel_size, v[2] * voxel_size]
+-            final_v = [sv[0] + center[0], sv[1] + center[1], sv[2] + center[2]]
+-            scaled_vertices.append(final_v)
+-
+-        vertex_offset = len(mesh.vertices)
+-        for tri in unit_cube_triangles:
+-            mesh.triangles.append([
+-                tri[0] + vertex_offset,
+-                tri[1] + vertex_offset,
+-                tri[2] + vertex_offset
+-            ])
+-        mesh.vertices.extend(scaled_vertices)
+-
+-    return mesh
++import numpy as np
++
++def voxel_grid_to_triangle_mesh(voxel_grid):
++    """
++    Converts a voxel grid to a watertight triangle mesh.
++    
++    Args:
++        voxel_grid: An object containing:
++            - encoding: A dense boolean numpy array (True for occupied).
++            - pitch: A 3D vector (x, y, z) representing the spacing between voxel centers.
++            - transform: A 4x4 transformation matrix for the grid.
++            
++    Returns:
++        vertices: numpy array of shape (N, 3)
++        faces: numpy array of shape (M, 3)
++    """
++    # 1. Extract surface voxels
++    # Create a hollow voxel grid containing only surface voxels
++    # This assumes a morphology.surface function exists that returns a boolean grid
++    # of voxels that are occupied but have at least one empty neighbor.
++    hollow_encoding = morphology_surface(voxel_grid.encoding)
++    
++    # Get indices of surface voxels
++    surface_indices = np.argwhere(hollow_encoding)
++    
++    # 2. Compute centers
++    # Convert sparse indices to world coordinates
++    # Assuming indices_to_points handles the transform and pitch scaling
++    surface_centers = indices_to_points(surface_indices, voxel_grid.transform, voxel_grid.pitch)
++    
++    # 3. Initialize data structures
++    triangles = []
++    hpitch = voxel_grid.pitch[0] / 2.0
++    
++    # Helper functions
++    def index_in_bounds(index):
++        """Check if index is within the bounds of the dense encoding."""
++        return (np.all(index >= 0) and 
++                np.all(index < voxel_grid.encoding.shape))
++    
++    def actual_face(index):
++        """Check if a neighbor is out of bounds or unoccupied."""
++        if not index_in_bounds(index):
++            return True
++        return not voxel_grid.encoding[tuple(index)]
++    
++    # 4. Detect faces and generate triangles
++    for i in range(len(surface_indices)):
++        base_index = surface_indices[i]
++        base_center = surface_centers[i]
++        
++        # Initialize face mask: [Right, Left, Front, Back, Top, Bottom]
++        face_mask = [False] * 6
++        
++        # Right (+x)
++        target_index = base_index + np.array([1, 0, 0])
++        if actual_face(target_index):
++            face_mask[0] = True
++            
++        # Left (-x)
++        target_index = base_index + np.array([-1, 0, 0])
++        if actual_face(target_index):
++            face_mask[1] = True
++            
++        # Front (+y)
++        target_index = base_index + np.array([0, 1, 0])
++        if actual_face(target_index):
++            face_mask[2] = True
++            
++        # Back (-y)
++        target_index = base_index + np.array([0, -1, 0])
++        if actual_face(target_index):
++            face_mask[3] = True
++            
++        # Top (+z)
++        target_index = base_index + np.array([0, 0, 1])
++        if actual_face(target_index):
++            face_mask[4] = True
++            
++        # Bottom (-z)
++        target_index = base_index + np.array([0, 0, -1])
++        if actual_face(target_index):
++            face_mask[5] = True
++            
++        # 5. Generate triangles for exposed faces
++        # Right face (x + hpitch)
++        if face_mask[0]:
++            v0 = base_center + np.array([hpitch, hpitch, -hpitch])
++            v1 = base_center + np.array([hpitch, hpitch, hpitch])
++            v2 = base_center + np.array([hpitch, -hpitch, hpitch])
++            v3 = base_center + np.array([hpitch, -hpitch, -hpitch])
++            triangles.append([v0, v1, v2])
++            triangles.append([v0, v2, v3])
++            
++        # Left face (x - hpitch)
++        if face_mask[1]:
++            v0 = base_center + np.array([-hpitch, hpitch, hpitch])
++            v1 = base_center + np.array([-hpitch, hpitch, -hpitch])
++            v2 = base_center + np.array([-hpitch, -hpitch, -hpitch])
++            v3 = base_center + np.array([-hpitch, -hpitch, hpitch])
++            triangles.append([v0, v1, v2])
++            triangles.append([v0, v2, v3])
++            
++        # Front face (y + hpitch)
++        if face_mask[2]:
++            v0 = base_center + np.array([-hpitch, hpitch, hpitch])
++            v1 = base_center + np.array([hpitch, hpitch, hpitch])
++            v2 = base_center + np.array([hpitch, hpitch, -hpitch])
++            v3 = base_center + np.array([-hpitch, hpitch, -hpitch])
++            triangles.append([v0, v1, v2])
++            triangles.append([v0, v2, v3])
++            
++        # Back face (y - hpitch)
++        if face_mask[3]:
++            v0 = base_center + np.array([hpitch, -hpitch, -hpitch])
++            v1 = base_center + np.array([-hpitch, -hpitch, -hpitch])
++            v2 = base_center + np.array([-hpitch, -hpitch, hpitch])
++            v3 = base_center + np.array([hpitch, -hpitch, hpitch])
++            triangles.append([v0, v1, v2])
++            triangles.append([v0, v2, v3])
++            
++        # Top face (z + hpitch)
++        if face_mask[4]:
++            v0 = base_center + np.array([-hpitch, hpitch, hpitch])
++            v1 = base_center + np.array([hpitch, hpitch, hpitch])
++            v2 = base_center + np.array([hpitch, -hpitch, hpitch])
++            v3 = base_center + np.array([-hpitch, -hpitch, hpitch])
++            triangles.append([v0, v1, v2])
++            triangles.append([v0, v2, v3])
++            
++        # Bottom face (z - hpitch)
++        if face_mask[5]:
++            v0 = base_center + np.array([hpitch, -hpitch, -hpitch])
++            v1 = base_center + np.array([-hpitch, -hpitch, -hpitch])
++            v2 = base_center + np.array([-hpitch, hpitch, -hpitch])
++            v3 = base_center + np.array([hpitch, hpitch, -hpitch])
++            triangles.append([v0, v1, v2])
++            triangles.append([v0, v2, v3])
++            
++    # Convert list of triangles to numpy arrays
++    if len(triangles) == 0:
++        return np.empty((0, 3)), np.empty((0, 3))
++        
++    vertices = np.vstack(triangles).reshape(-1, 3)
++    # Create face indices
++    num_verts = len(vertices)
++    faces = np.arange(num_verts).reshape(-1, 3)
++    
++    return vertices, faces
++
++def morphology_surface(encoding):
++    """
++    [G] Placeholder for morphology operation.
++    Returns a boolean grid where True indicates a surface voxel.
++    A surface voxel is occupied and has at least one unoccupied neighbor.
++    """
++    # This is a standard morphological operation:
++    # surface = occupied AND NOT (dilated(occupied) == occupied)
++    # Or more directly: surface = occupied AND (occupied XOR dilated(occupied))
++    # Implementation depends on the specific library (e.g., scipy.ndimage)
++    # For the purpose of this article, we assume this function exists.
++    pass
++
++def indices_to_points(indices, transform, pitch):
++    """
++    [G] Placeholder for coordinate conversion.
++    Converts voxel indices to world coordinates.
++    """
++    # world_coords = indices * pitch + offset
++    # Then apply transform
++    pass
+ ```
+ 
+-**Parameters:**
+-*   **Voxel Size:** Determined by the input voxel grid [S1, unofficial].
+-*   **Box Primitive:** Standard cube with 8 vertices and 12 triangles [G].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Adjacency:** Adjacent occupied voxels will share vertices and edges, but the mesh will contain duplicate geometry (overlapping faces) if not merged [G]. This method does *not* merge coplanar faces [G].
+-*   **Precision:** Floating-point precision errors may occur when calculating center coordinates if the voxel grid has a large offset [G]. Ensure the voxel grid's coordinate system is consistent [G].
+-*   **Memory:** The number of triangles is $12 \times N$, where $N$ is the number of occupied voxels [G]. This can be significantly larger than a boundary-only mesh [G].
++*   **Watertightness Violation:** Vertex merging during mesh creation can cause edges to connect to 4 faces, violating watertightness (exactly 2 faces per edge) [S1, unofficial]. To prevent this, disable vertex merging/processing upon creation (e.g., `process=False` in Trimesh) [S1, unofficial]. Note that this may affect downstream boolean operations if processing is applied internally later [S1, unofficial].
++*   **Empty Grid:** If the input voxel grid is empty, the output mesh should be empty.
++*   **Fully Occupied Grid:** If the voxel grid is fully occupied (no surface voxels), the output mesh should be empty.
+ 
+ ## Subtopics
+ 
+-### Simple Conversion
+-Simple Conversion is a variant prioritizing speed over high-fidelity detail preservation, suitable when a mesh is needed ASAP or subtle details are not critical [S2]. It is implemented in tools like MeshInspector [S2].
+-*   **Workflow:** Upload voxel data (DICOM, RAW, TIFF) -> Apply noise reduction (e.g., 'Change ISO') to isolate ROI -> Select 'Simple Conversion' -> Convert [S2].
+-*   **Parameters:**
+-    *   **Preserve Voxel Object:** Optional setting to keep the original voxel object in the scene, resulting in the simple mesh overlaying the original voxel object [S2].
++### [Range Grid Triangulation](7146-range-grid-triangulation.md)
++Range Grid Triangulation converts a 2D range grid, where each grid cell stores an index to a 3D vertex or an invalid marker, into a triangular mesh. It differs from standard marching cubes by operating on pre-projected 2D grid data rather than 3D scalar fields, and handles invalid vertices by constructing triangles only from valid corners.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$, where $N$ is the number of occupied voxels [G]. Each voxel requires constant-time operations to generate its box geometry [G].
+-*   **Memory Complexity:** $O(N)$ for vertices and triangles [G]. Specifically, $8N$ vertices and $12N$ triangles [G].
+-*   **Performance:** Very fast for sparse grids [G]. For dense grids, the resulting mesh can be extremely large due to the lack of face merging [G].
+-*   **Strengths:** Exact preservation of voxel geometry; simple implementation; no need for scalar field interpolation [G].
+-*   **Limitations:** High triangle count; no smoothing; overlapping faces if voxels are adjacent (unless post-processed) [G].
+-*   **When to use:** When the blocky nature of the voxel grid is desired; for animation of voxel structures; when input is already voxelized and no underlying surface is known [G].
+-*   **When not to use:** When a smooth surface is required; when memory efficiency is critical for dense grids [G].
++*   **Time Complexity:** $O(N)$, where $N$ is the number of surface voxels. Each surface voxel is processed once, and the number of neighbors checked is constant (6).
++*   **Memory Complexity:** $O(N)$, where $N$ is the number of surface voxels. The output mesh size is proportional to the surface area of the voxel grid.
++*   **Performance:** The method is efficient for dense voxel grids with large surface areas. However, the triangle count can be significantly higher than smoothed surface extraction methods like Marching Cubes, which may impact rendering performance for very large models [S1, unofficial].
++*   **Strengths:** Preserves exact voxel volume and geometry; produces watertight meshes when vertex merging is disabled; simple to implement.
++*   **Limitations:** High triangle count; does not smooth the surface; sensitive to vertex merging issues if not handled correctly [S1, unofficial].
++*   **When to Use:** When exact volume preservation is required, or when working with boolean voxel meshes where smooth interpolation is not desired [S1, unofficial].
++*   **When Not to Use:** When rendering performance is critical and the voxel grid is very large, or when a smooth surface is desired.
+ 
+ ## Background
+-This method is often associated with the Open3D library, where it is used to visualize voxelized data as a mesh [S1, unofficial]. The approach is attributed to Florent Poux, Ph.D., as cited in the Open3D documentation [S1, unofficial]. It is a straightforward technique that leverages the geometric simplicity of voxels to create a mesh without complex surface extraction algorithms [S1, unofficial].
++This method is used in the `trimesh` library for the voxel module, specifically for rapid construction of unioned boxes from a `VoxelGrid` [S1, unofficial]. It addresses the specific issue of watertightness in voxel-to-mesh conversion, which is a common problem in 3D printing and geometric modeling where exact volume representation is crucial [S1, unofficial]. The approach is based on the principle of generating triangles for every exposed face of surface voxels, ensuring that the resulting mesh is a precise representation of the voxel grid's surface.
+ 
+ ## Sources
+-[S1] How to Voxelize Meshes and Point Clouds in Python - Medium, https://medium.com/data-science/how-to-voxelize-meshes-and-point-clouds-in-python-ca94d403f81d, fetched 2026-10-28 (unofficial)
+-[S2] How to convert voxel to mesh with MeshInspector, https://meshinspector.com/knowledge-base/voxel-ct/how-to-convert-voxel-to-mesh-with-meshinspector/, fetched 2026-10-30+[S1] Voxel to Mesh Watertightness Question, https://github.com/mikedh/trimesh/issues/2165, fetched 2026-10-28 (unofficial)
++[S2] How to Voxelize Meshes and Point Clouds in Python - Medium, https://medium.com/data-science/how-to-voxelize-meshes-and-point-clouds-in-python-ca94d403f81d, fetched 2026-10-28 (unofficial)
++[S3] How to convert voxel to mesh with MeshInspector, https://meshinspector.com/knowledge-base/voxel-ct/how-to-convert-voxel-to-mesh-with-meshinspector/, fetched 2026-10-30

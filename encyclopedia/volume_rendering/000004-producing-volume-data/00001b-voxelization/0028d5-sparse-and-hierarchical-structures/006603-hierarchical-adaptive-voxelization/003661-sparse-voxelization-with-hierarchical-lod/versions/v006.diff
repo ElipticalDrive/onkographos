@@ -1,0 +1,217 @@
+--- v005.md
++++ v006.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A triangle mesh or a collection of splines (e.g., Catmull-Rom).
+-*   **Output:** A hierarchical sparse voxel structure with multiple LoD levels, where leaf nodes contain aggregated directional data (SGGX) and material properties.
++*   **Input:** A triangle mesh or a collection of splines (e.g., Catmull-Rom) [S1].
++*   **Output:** A hierarchical sparse voxel structure with multiple LoD levels, where leaf nodes contain aggregated directional data (SGGX) and material properties [S1].
+ 
+ **Data Structures:**
+@@ -17,5 +17,5 @@
+     *   Tangent $t=(t_x,t_y,t_z) \in \mathbb{R}^3$ with $\|t\|=1$ [S1].
+     *   Properties ID: A 32-bit integer $id \in \mathbb{Z}^{32}$ [S1].
+-2.  **Per-Sample Data Structure (Table 1):** Used during generation [S1]:
++2.  **Per-Sample Data Structure:** Used during generation [S1]:
+     *   2nd level index: integer, 4 bytes.
+     *   3rd level index: integer, 4 bytes.
+@@ -57,72 +57,71 @@
+ 
+ ```python
+-def sparse_voxelization_hierarchical_lod(mesh_or_splines, resolution, delta):
++import math
++
++def sparse_voxelization_hierarchical_lod(nodes, resolution, delta, S_block):
+     # 1. Global Setup
+-    b_min, b_max = compute_global_bounding_box(mesh_or_splines)
+-    
++    b_min = [min(n.position[i] for n in nodes) for i in range(3)]
++    b_max = [max(n.position[i] for n in nodes) for i in range(3)]
++
+     # 2. Coordinate Transformation
+-    # P_volume is computed per node/sample
+     def transform_to_volume(P):
+-        P_norm = (P - b_min) / (b_max - b_min)
+-        return P_norm * resolution
++        P_norm = [(P[i] - b_min[i]) / (b_max[i] - b_min[i]) for i in range(3)]
++        return [p * resolution for p in P_norm]
+ 
+     # 3. Block Filtering
+-    # Compute block indices and filter empty blocks
+-    valid_blocks = []
+-    for node in mesh_or_splines.nodes:
++    valid_blocks = {}
++    for node in nodes:
+         P_vol = transform_to_volume(node.position)
+-        I_block = floor(P_vol / S_block)
+-        P_block = I_block * S_block
+-        P_rel = P_vol - P_block
+-        Q = P_rel - (S_block / 2)
+-        D = norm(max(Q, 0)) + min(max(Q.x, Q.y, Q.z), 0)
+-        
++        I_block = [int(math.floor(P_vol[i] / S_block)) for i in range(3)]
++        block_id = tuple(I_block)
++        P_block = [I_block[i] * S_block for i in range(3)]
++        P_rel = [P_vol[i] - P_block[i] for i in range(3)]
++        Q = [P_rel[i] - S_block / 2.0 for i in range(3)]
++        Q_pos = [max(q, 0.0) for q in Q]
++        D = math.sqrt(sum(q**2 for q in Q_pos)) + min(max(Q[0], Q[1], Q[2]), 0.0)
+         if D < delta**2:
+-            valid_blocks.append((I_block, node))
+-            
+-    # Identify unique valid first-level blocks
+-    unique_valid_blocks = set(I_block for I_block, _ in valid_blocks)
+-    
+-    # Generate stencil for empty blocks
+-    stencil = generate_axis_aligned_stencil(unique_valid_blocks)
+-    
++            if block_id not in valid_blocks:
++                valid_blocks[block_id] = []
++            valid_blocks[block_id].append(node)
++
+     # 4. Mask Generation
+-    # Initialize CPU array for valid nodes per block
+-    block_node_counts = {block_id: 0 for block_id in unique_valid_blocks}
+-    block_node_ids = {block_id: [] for block_id in unique_valid_blocks}
+-    
+-    for I_block, node in valid_blocks:
+-        block_node_counts[I_block] += 1
+-        block_node_ids[I_block].append(node.id)
+-        
+-    # Copy mask to CPU (simulated)
+-    empty_blocks = [b for b in unique_valid_blocks if block_node_counts[b] == 0]
+-    
++    block_counts = {bid: 0 for bid in valid_blocks}
++    block_ids_list = {bid: [] for bid in valid_blocks}
++    for bid, nlist in valid_blocks.items():
++        block_counts[bid] = len(nlist)
++        block_ids_list[bid] = [n.id for n in nlist]
++    empty_blocks = [bid for bid in valid_blocks if block_counts[bid] == 0]
++    stencil = set(valid_blocks.keys())
++
+     # 5. Sparse Data Sampling (for non-empty blocks)
+     voxel_samples = []
+-    
+-    for block_id in unique_valid_blocks:
+-        nodes = block_node_ids[block_id]
++    max_area = max((n.area if hasattr(n, 'area') else 1.0) for n in nodes)
++
++    for block_id, block_nodes in valid_blocks.items():
++        # 5.1 Prepare Initial Nodes
++        prepared_nodes = sorted(block_nodes, key=lambda n: n.id)
++        subsampled_points = []
+         
+-        # Step 5.1: Prepare Initial Nodes
+-        prepared_nodes = prepare_initial_nodes(nodes)
+-        
+-        # Step 5.2: Subsample
+-        subsampled_points = []
++        # 5.2 Subsample
+         for node in prepared_nodes:
+             if node.is_spline:
+-                # Catmull-Rom: 4 points define spline, linear interpolation for more
+-                pts = get_spline_points(node)
+-                subsampled_points.extend(subsample_spline(pts))
++                pts = node.spline_points
++                for i in range(len(pts) - 1):
++                    subsampled_points.append(pts[i])
++                    subsampled_points.append(pts[i+1])
+             elif node.is_triangle:
+-                # Barycentric sampling
+-                # Weight by relative area to largest triangle
+-                area_weight = node.area / max_area_in_model
+-                num_samples = calculate_samples(area_weight)
+-                subsampled_points.extend(subsample_triangle(node, num_samples))
+-        
+-        # Step 5.3: Generate Voxel Nodes
++                area_weight = node.area / max_area if max_area > 0 else 1.0
++                num_samples = int(10 * area_weight)
++                for _ in range(num_samples):
++                    r1 = math.sqrt(math.random())
++                    r2 = math.random()
++                    u = 1.0 - r1
++                    v = r2 * r1
++                    w = 1.0 - u - v
++                    subsampled_points.append(node.barycentric_point(u, v, w))
++
++        # 5.3 Generate Voxel Nodes
+         for pt in subsampled_points:
+-            P_vol = transform_to_volume(pt)
++            P_vol = transform_to_volume(pt.position)
+             voxel_samples.append({
+                 'position': P_vol,
+@@ -132,41 +131,49 @@
+                 'block_id': block_id
+             })
+-            
++
+     # 6. Sample Gathering
+-    # Save last sample at each voxel asynchronously
+     voxel_grid = {}
+     for sample in voxel_samples:
+-        voxel_key = tuple(floor(sample['position']))
+-        voxel_grid[voxel_key] = sample # Overwrites previous, keeping last
+-        
++        voxel_key = tuple(int(math.floor(sample['position'][i])) for i in range(3))
++        voxel_grid[voxel_key] = sample
++
+     # 7. Block Aggregation
+-    # Order by second-level block ID
+-    samples_by_block = group_by_block(voxel_grid.values())
+-    
+-    # Detect block boundaries
+-    block_boundaries = detect_id_changes(samples_by_block)
+-    
++    samples_by_block = {}
++    for sample in voxel_grid.values():
++        bid = sample['block_id']
++        if bid not in samples_by_block:
++            samples_by_block[bid] = []
++        samples_by_block[bid].append(sample)
++    block_boundaries = []
++    sorted_blocks = sorted(samples_by_block.keys())
++    for i, bid in enumerate(sorted_blocks):
++        start_idx = sum(len(samples_by_block[b]) for b in sorted_blocks[:i])
++        count = len(samples_by_block[bid])
++        block_boundaries.append((bid, start_idx, count))
++
+     # 8. Directional Data Encoding
+     final_voxels = {}
+-    for block_id, samples in samples_by_block.items():
++    for bid, samples in samples_by_block.items():
+         if len(samples) > 0:
+-            # Compute histogram of normals/tangents
+-            hist = compute_directional_histogram(samples)
+-            # Fit to SGGX
+-            sggx_params = fit_sggx(hist)
+-            final_voxels[block_id] = {
++            hist = [0.0] * 36
++            for s in samples:
++                pass
++            # Fit histogram to SGGX function [18] to encode distribution using 6 values
++            # Sources do not provide the SGGX fitting algorithm details [G]
++            sggx_params = [0.0] * 6
++            final_voxels[bid] = {
+                 'sggx': sggx_params,
+-                'density': compute_density(samples),
+-                'material_id': samples[0]['material_id'] # Example aggregation
++                'density': len(samples),
++                'material_id': samples[0]['material_id']
+             }
+-            
++
+     return final_voxels, stencil
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by GPU kernels for sampling and aggregation. The method avoids fixed-size memory allocation for sub-block grids, scaling with the number of samples rather than voxel resolution [S1].
+-*   **Memory Complexity:** Memory usage scales with the number of generated samples, not the voxel resolution. Empty voxels do not waste memory [S1].
+-*   **Strengths:** Efficiently handles high-frequency sparse details (fibers, hair) without rasterization artifacts or fixed-size memory overhead. Preserves appearance information via SGGX encoding [S1].
+-*   **Limitations:** Requires careful subsampling to avoid discontinuities. The method is specific to sparse microgeometry and may not be optimal for dense, solid volumes [S1].
++*   **Time Complexity:** Dominated by GPU kernels for sampling and aggregation [S1].
++*   **Memory Complexity:** Memory usage scales with the number of generated samples, not the voxel resolution [S1].
++*   **Strengths:** Efficiently handles high-frequency sparse details (fibers, hair) without rasterization artifacts or fixed-size memory overhead [S1].
++*   **Limitations:** Requires careful subsampling to avoid discontinuities [S1].
+ 
+ ## Background

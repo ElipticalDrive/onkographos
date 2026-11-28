@@ -1,0 +1,220 @@
+--- v001.md
++++ v002.md
+@@ -7,13 +7,12 @@
+ 
+ ## How it works
+-MS-NeRF modifies the canonical NeRF architecture by replacing the single density-color prediction with a multi-space feature prediction. The method operates by rendering multiple feature maps from parallel sub-spaces and decoding them into RGB images using a gating network [S2].
++MS-NeRF modifies the canonical NeRF architecture by replacing the single density-color prediction with a multi-space feature prediction [S2]. The method operates by rendering multiple feature maps from parallel sub-spaces and decoding them into RGB images using a gating network [S2].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Camera ray parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), scene images (for training supervision).
+-*   **Outputs:** Final rendered pixel color $\mathbf{C}(\mathbf{r})$.
++*   **Inputs:** Camera ray parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), scene images (for training supervision) [S1, S2].
++*   **Outputs:** Final rendered pixel color $\mathbf{C}(\mathbf{r})$ [S2].
+ 
+ ### Data Structures and Layouts
+-The core data structure is the set of $K$ sub-spaces. For each sub-space $k \in \{1, \dots, K\}$, the network outputs a density $\sigma_k$ and a feature vector $\mathbf{f}_k$.
+-
++The core data structure is the set of $K$ sub-spaces [S2]. For each sub-space $k \in \{1, \dots, K\}$, the network outputs a density $\sigma_k$ and a feature vector $\mathbf{f}_k$ [S2].
+ 1.  **Sub-space Feature Vector:** $\mathbf{f}_k \in \mathbb{R}^d$, where $d$ is the feature dimension [S1, S2].
+ 2.  **Density:** $\sigma_k \in \mathbb{R}$, scalar density for sub-space $k$ [S2].
+@@ -28,5 +27,5 @@
+ 
+ 1.  **Positional Encoding:** Encode the 3D position $\mathbf{x}$ along the ray using the standard NeRF positional encoding $\gamma(\mathbf{x})$ [Parent, S1].
+-2.  **Multi-Space Feature Extraction:** Pass $\gamma(\mathbf{x})$ through the modified density network. Instead of outputting a single density and color, the network outputs $K$ pairs of $(\sigma_k, \mathbf{f}_k)$ for $k=1 \dots K$. The density network consists of $L$ hidden layers with ReLU activations and skip connections [Parent, S1].
++2.  **Multi-Space Feature Extraction:** Pass $\gamma(\mathbf{x})$ through the modified density network. Instead of outputting a single density and color, the network outputs $K$ pairs of $(\sigma_k, \mathbf{f}_k)$ for $k=1 \dots K$ [S2]. The density network consists of $L$ hidden layers with ReLU activations and skip connections [Parent, S1].
+     *   *Note:* The feature vector $\mathbf{f}_k$ replaces the intermediate feature vector used for color prediction in standard NeRF [S2].
+ 3.  **Volumetric Rendering of Features:** Perform standard volumetric rendering for each sub-space independently to generate a feature map $\mathbf{F}_k$ and an accumulated transparency $T_{\infty, k}$ [S2].
+@@ -34,11 +33,10 @@
+     \mathbf{F}_k = \sum_{i=1}^{N} T_{i,k} \alpha_{i,k} \mathbf{f}_{i,k}, \quad T_{\infty, k} = \prod_{i=1}^{N} (1 - \alpha_{i,k})
+     $$
+-    where $\alpha_{i,k} = 1 - \exp(-\sigma_{i,k} \delta_i)$ and $T_{i,k} = \prod_{j=1}^{i-1} (1 - \alpha_{j,k})$.
+-4.  **Gating Weight Calculation:** Compute the gate weights $\mathbf{w}$ for the current pixel. This is done by passing the accumulated transparency $T_{\infty, k}$ (or potentially the ray direction and position, though sources specify using the rendered features/transparency context) through a Gate MLP [S2].
+-    *   *Clarification:* Source [S2] states "Gate MLP obtains pixel-level weights for the feature maps." In practice, this MLP takes the rendered feature maps or the accumulated transparency as input to determine the importance of each sub-space for the final color. Let $G(\cdot)$ be the Gate MLP with hidden dimension $h$.
++    where $\alpha_{i,k} = 1 - \exp(-\sigma_{i,k} \delta_i)$ and $T_{i,k} = \prod_{j=1}^{i-1} (1 - \alpha_{j,k})$ [S2].
++4.  **Gating Weight Calculation:** Compute the gate weights $\mathbf{w}$ for the current pixel. This is done by passing the accumulated transparency $T_{\infty, k}$ through a Gate MLP [S2]. Let $G(\cdot)$ be the Gate MLP with hidden dimension $h$ [S1].
+     $$
+     \mathbf{w} = \text{Softmax}(G(T_{\infty, 1}, \dots, T_{\infty, K}))
+     $$
+-    *Note:* The exact input to the Gate MLP is not explicitly detailed beyond "pixel-level weights for the feature maps." A common implementation assumes the Gate MLP takes the accumulated transparency or the rendered feature vectors as input. We assume the Gate MLP processes the set of accumulated transparencies or features to produce weights [S2, G].
++    *Note:* The exact input to the Gate MLP is not explicitly detailed beyond "pixel-level weights for the feature maps." We assume the Gate MLP processes the set of accumulated transparencies or features to produce weights [S2, G].
+ 5.  **Decoding and Integration:** For each sub-space, decode the rendered feature map $\mathbf{F}_k$ into an RGB color $\mathbf{C}_k$ using a Decoder MLP $D_k(\cdot)$ with hidden dimension $h$ [S2].
+     $$
+@@ -69,71 +67,39 @@
+         self.K = K
+         self.d = d
+-        
+-        # Main network: Input is encoded position. Output is K densities and K feature vectors.
+-        # We use a single MLP that branches at the end, or K parallel heads.
+-        # Based on [S2], the output module is modified to output density and features.
+-        # We assume a shared backbone for efficiency, or K separate heads. 
+-        # Source [S1] implies a simple module integration. We implement K heads for clarity.
+-        
++        self.freq_bands = freq_bands
++        
++        # Backbone: 256 hidden layers, ReLU, skip connections every 4 layers [Parent]
+         self.backbone = nn.Sequential(
+-            nn.Linear(2 * freq_bands + 1, 256), # Standard NeRF input dim
++            nn.Linear(2 * freq_bands + 1, 256),
+             nn.ReLU(),
+             *[nn.Sequential(nn.Linear(256, 256), nn.ReLU()) for _ in range(L-1)]
+         )
+         
+-        # Skip connections from input to every 4th layer are standard in NeRF [Parent].
+-        # For simplicity in this self-contained code, we assume the backbone handles the topology
+-        # or we explicitly add skip connections if L is large. 
+-        # Here we assume a standard MLP structure as per [Parent] for the backbone.
+-        
+         # Heads for each sub-space
+-        self.density_heads = nn.ModuleList([
+-            nn.Linear(256, 1) for _ in range(K)
+-        ])
+-        self.feature_heads = nn.ModuleList([
+-            nn.Linear(256, d) for _ in range(K)
+-        ])
++        self.density_heads = nn.ModuleList([nn.Linear(256, 1) for _ in range(K)])
++        self.feature_heads = nn.ModuleList([nn.Linear(256, d) for _ in range(K)])
+         
+         # Decoder MLPs for each sub-space
+         self.decoders = nn.ModuleList([
+-            nn.Sequential(
+-                nn.Linear(d, h),
+-                nn.ReLU(),
+-                nn.Linear(h, 3) # Output RGB
+-            ) for _ in range(K)
++            nn.Sequential(nn.Linear(d, h), nn.ReLU(), nn.Linear(h, 3)) for _ in range(K)
+         ])
+         
+         # Gate MLP
+-        # Input: Accumulated transparency from each sub-space (K scalars)
+-        self.gate_mlp = nn.Sequential(
+-            nn.Linear(K, h),
+-            nn.ReLU(),
+-            nn.Linear(h, K)
+-        )
++        self.gate_mlp = nn.Sequential(nn.Linear(K, h), nn.ReLU(), nn.Linear(h, K))
+ 
+     def forward(self, ray_origins, ray_directions, near, far, num_samples):
+-        """
+-        ray_origins: (B, 3)
+-        ray_directions: (B, 3)
+-        near: (B,)
+-        far: (B,)
+-        num_samples: int
+-        """
+         # 1. Sample points along the ray
+         t_vals = torch.linspace(0., 1., num_samples, device=ray_origins.device)
+-        z_vals = near.unsqueeze(1) * (1. - t_vals.unsqueeze(0)) + far.unsqueeze(1) * t_vals.unsqueeze(0)
+-        points = ray_origins.unsqueeze(1) + ray_directions.unsqueeze(1) * z_vals.unsqueeze(2)
++        z_vals = near.unsqueeze(1) * (1. - t_vals.unsqueeze(0)) + far.unsqueeze(1) * t_vals.unsqueeze(0) # (B, N)
++        points = ray_origins.unsqueeze(1) + ray_directions.unsqueeze(1) * z_vals.unsqueeze(2) # (B, N, 3)
+         
+         # 2. Positional Encoding
+-        # Standard NeRF PE: sin/cos at powers of 2
+-        # x is (B, N, 3). Encoded is (B, N, 2*L_freq+1)
+-        encoded_points = positional_encoding(points, freq_bands=10)
++        encoded_points = positional_encoding(points, self.freq_bands) # (B, N, 2*freq+1)
+         
+         # 3. Forward through backbone
+-        # Reshape for batch processing: (B*N, 2*L+1)
+         B, N, _ = points.shape
+-        encoded_points_flat = encoded_points.view(-1, encoded_points.shape[-1])
+-        backbone_out = self.backbone(encoded_points_flat)
+-        backbone_out = backbone_out.view(B, N, -1)
++        encoded_flat = encoded_points.view(-1, encoded_points.shape[-1])
++        backbone_out = self.backbone(encoded_flat) # (B*N, 256)
++        backbone_out = backbone_out.view(B, N, -1) # (B, N, 256)
+         
+         # 4. Get K densities and K feature vectors
+@@ -150,4 +116,8 @@
+         transparencies = []
+         
++        # Compute deltas between samples
++        dists = z_vals[:, 1:] - z_vals[:, :-1] # (B, N-1)
++        dists = torch.cat([dists, torch.full((B, 1), 1e10, device=z_vals.device)], dim=1) # (B, N)
++        
+         for k in range(self.K):
+             sigma_k = densities[k]
+@@ -155,19 +125,13 @@
+             
+             # Compute alpha
+-            # delta is distance between samples. For uniform sampling:
+-            delta = z_vals[:, 1, :] - z_vals[:, 0, :] # Approximation for uniform
+-            # More robust: compute delta from z_vals
+-            dists = z_vals[:, 1:, :] - z_vals[:, :-1, :]
+-            dists = torch.cat([dists, torch.tensor([1e10], device=points.device).expand_as(dists[:, :1, :])], dim=1)
+-            alpha = 1.0 - torch.exp(-sigma_k * dists)
++            alpha = 1.0 - torch.exp(-sigma_k.unsqueeze(-1) * dists) # (B, N)
+             
+             # Transmittance
+-            T = torch.cumprod(1.0 - alpha + 1e-10, dim=1)
+-            T = torch.cat([torch.ones_like(T[:, :1, :]), T[:, :-1, :]], dim=1)
++            T = torch.cumprod(1.0 - alpha + 1e-10, dim=1) # (B, N)
++            T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1) # (B, N)
+             
+             # Weighted sum for feature map
+-            # F_k = sum(T_i * alpha_i * f_i)
+-            weights = T * alpha.unsqueeze(-1) # (B, N, 1)
+-            F_k = torch.sum(weights * f_k, dim=1) # (B, d)
++            weights = T * alpha # (B, N)
++            F_k = torch.sum(weights.unsqueeze(-1) * f_k, dim=1) # (B, d)
+             
+             # Accumulated transparency
+@@ -178,6 +142,4 @@
+             
+         # 6. Gate MLP
+-        # Input: transparencies from all K sub-spaces
+-        # transparencies is a list of (B,) tensors
+         T_stack = torch.stack(transparencies, dim=1) # (B, K)
+         gate_weights = F.softmax(self.gate_mlp(T_stack), dim=1) # (B, K)
+@@ -192,5 +154,4 @@
+         
+         # Weighted sum
+-        # gate_weights: (B, K), final_colors: (B, K, 3)
+         output = torch.sum(gate_weights.unsqueeze(-1) * final_colors, dim=1) # (B, 3)
+         
+@@ -203,17 +164,8 @@
+     Returns: (..., 2*freq_bands + 1)
+     """
+-    B, N, C = x.shape
+-    # x is (B, N, 3)
+-    # We need to apply sin/cos at 2^0 to 2^(L-1)
++    x = torch.as_tensor(x, dtype=torch.float32) # Handle list/tensor input
+     scales = 2.0 ** torch.arange(freq_bands, device=x.device).float()
+-    # scales: (freq_bands,)
+-    
+-    # Reshape for broadcasting
+-    # x: (B, N, 3) -> (B, N, 1, 3)
+-    # scales: (freq_bands,) -> (1, 1, freq_bands, 1)
+-    
+-    xb = x[:, :, :, None, :] * scales[None, None, None, :, None] # (B, N, 3, freq_bands)
+-    xb = xb.reshape(B, N, 3 * freq_bands)
+-    
++    xb = x[..., None, :] * scales[None, None, :] # (..., 3, freq)
++    xb = xb.reshape(*x.shape[:-1], 3 * freq_bands)
+     pe = torch.cat([torch.sin(xb), torch.cos(xb)], dim=-1)
+     pe = torch.cat([x, pe], dim=-1) # Concatenate original x
+@@ -222,6 +174,6 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision:** The accumulation of transparencies and weights can suffer from numerical instability if not handled with care (e.g., using `1e-10` epsilon).
+-*   **Boundary Conditions:** The method assumes unbounded scenes. Proper near/far clipping is required to avoid sampling artifacts in empty space [S1].
++*   **Precision:** The accumulation of transparencies and weights can suffer from numerical instability if not handled with care (e.g., using `1e-10` epsilon) [G].
++*   **Boundary Conditions:** The method assumes unbounded scenes [S1].
+ *   **Degenerate Input:** If the scene has no reflective surfaces, the extra sub-spaces may learn redundant features, adding computational cost without benefit. The ablation study shows minimal parameter increase (0.5%) but non-zero overhead [S1].
+ 
+@@ -229,11 +181,11 @@
+ 
+ ### MS-Mip-NeRF
+-Integration of the MS module with Mip-NeRF. It improves PSNR by 4.15 dB on Mip-NeRF 360 baseline with minimal parameter increase. [Link](8585-specific-model-architectures.md)
++Extends the MS module to the Mip-NeRF baseline. Sets itself apart by enabling unbounded scene modeling with minimal parameter overhead. Choose when rendering unbounded scenes with reflections. [Link](8585-specific-model-architectures.md)
+ 
+ ### MS-Mip-NeRF 360
+-Integration with Mip-NeRF 360. Achieves PSNR 38.84, SSIM 0.977, LPIPS 0.054. Handles 360-degree scenes with mirrors without masks. [Link](8585-specific-model-architectures.md)
++Integrates the MS module with Mip-NeRF 360. Sets itself apart by achieving 4.15 dB PSNR improvement on 360-degree scenes with mirrors without masks. Choose for 360-degree reflective scenes. [Link](8585-specific-model-architectures.md)
+ 
+ ### MS-TensoRF
+-Hybrid grid-based integration. Compatible with TensoRF and iNGP, improving performance on reflective regions. [Link](8585-specific-model-architectures.md)
++Hybrid grid-based integration of the MS module. Sets itself apart by combining multi-space decomposition with grid-based representations for efficiency. Choose when balancing reflective surface handling with memory constraints. [Link](8585-specific-model-architectures.md)
+ 
+ ## Operating characteristics

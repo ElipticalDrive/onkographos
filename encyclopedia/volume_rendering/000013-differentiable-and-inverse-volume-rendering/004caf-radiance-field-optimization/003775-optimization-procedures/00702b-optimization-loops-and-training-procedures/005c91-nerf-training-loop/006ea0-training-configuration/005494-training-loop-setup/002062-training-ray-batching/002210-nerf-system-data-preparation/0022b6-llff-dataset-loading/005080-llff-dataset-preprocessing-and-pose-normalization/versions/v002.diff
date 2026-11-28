@@ -1,0 +1,150 @@
+--- v001.md
++++ v002.md
+@@ -4,98 +4,49 @@
+ 
+ ## Overview
+-This method prepares raw LLFF (Look at Light From) dataset scenes for differentiable volume rendering by loading images, parsing COLMAP-derived poses, correcting axis conventions, rescaling geometry, recentering the camera trajectory, and converting rays to Normalized Device Coordinates (NDC). It differs from generic NeRF data loaders by specifically handling the LLFF dataset's unique metadata structure (including temperature, exposure, and COC) and its forward-facing scene constraints, which enable the use of NDC normalization [S1, unofficial].
++This method prepares raw LLFF (Look at Light From) dataset scenes for differentiable volume rendering by loading images, parsing COLMAP-derived poses, correcting axis conventions, rescaling geometry, recentering the camera trajectory, and converting rays to Normalized Device Coordinates (NDC) [S1, unofficial]. It differs from generic NeRF data loaders by specifically handling the LLFF dataset's unique metadata structure (including temperature, exposure, and COC) and its forward-facing scene constraints, which enable the use of NDC normalization [S1, unofficial].
+ 
+ ## How it works
+ ### Inputs and Outputs
+ **Inputs:**
+-- Raw image files from an LLFF scene directory.
+-- `poses_bounds.npy`: A NumPy array containing camera poses and bounding box depths.
+-- Optional metadata files: `temperature.npy`, `exposure.npy`, `coc.npy`.
+-- Configuration object `config` with parameters: `factor` (downsampling), `llffhold` (test split frequency), `spherify` (camera path type).
++- Raw image files from an LLFF scene directory [S1, unofficial].
++- `poses_bounds.npy`: A NumPy array containing camera poses and bounding box depths [S1, unofficial].
++- Optional metadata files: `temperature.npy`, `exposure.npy`, `coc.npy` [S1, unofficial].
++- Configuration object `config` with parameters: `factor` (downsampling), `llffhold` (test split frequency), `spherify` (camera path type) [S1, unofficial].
+ 
+ **Outputs:**
+-- A `utils.Rays` object containing NDC origins, directions, view directions, pixel radii, near/far planes, and auxiliary metadata.
+-- Split arrays for training rays and render/test rays.
++- A `utils.Rays` object containing NDC origins, directions, view directions, pixel radii, near/far planes, and auxiliary metadata [S1, unofficial].
++- Split arrays for training rays and render/test rays [S1, unofficial].
+ 
+ ### Data Structures
+ **`utils.Rays` Object:**
+-- `origins`: Float32 array of shape `(num_rays, 3)`. NDC coordinates.
+-- `directions`: Float32 array of shape `(num_rays, 3)`. Normalized direction vectors.
+-- `viewdirs`: Float32 array of shape `(num_rays, 3)`. Same as directions if `use_viewdirs` is enabled.
+-- `radii`: Float32 array of shape `(num_rays,)`. Pixel radius for cone sampling.
+-- `loss_mult`: Float32 array of shape `(num_rays,)`. Usually ones.
+-- `near`: Float32 array of shape `(num_rays,)`. Near plane distances.
+-- `far`: Float32 array of shape `(num_rays,)`. Far plane distances.
+-- `temperature`: Float32 array of shape `(num_rays,)` or `(num_rays, channels)`. Normalized temperature.
+-- `exposure`: Float32 array of shape `(num_rays,)` or `(num_rays, channels)`. Normalized exposure.
+-- `coc`: Float32 array of shape `(num_rays,)` or `(num_rays, channels)`. Circle of confusion.
++- `origins`: Float32 array of shape `(num_rays, 3)`. NDC coordinates [S1, unofficial].
++- `directions`: Float32 array of shape `(num_rays, 3)`. Normalized direction vectors [S1, unofficial].
++- `viewdirs`: Float32 array of shape `(num_rays, 3)`. Same as directions if `use_viewdirs` is enabled [S1, unofficial].
++- `radii`: Float32 array of shape `(num_rays,)`. Pixel radius for cone sampling [S1, unofficial].
++- `loss_mult`: Float32 array of shape `(num_rays,)`. Usually ones [S1, unofficial].
++- `near`: Float32 array of shape `(num_rays,)`. Near plane distances [S1, unofficial].
++- `far`: Float32 array of shape `(num_rays,)`. Far plane distances [S1, unofficial].
++- `temperature`: Float32 array of shape `(num_rays,)` or `(num_rays, channels)`. Normalized temperature [S1, unofficial].
++- `exposure`: Float32 array of shape `(num_rays,)` or `(num_rays, channels)`. Normalized exposure [S1, unofficial].
++- `coc`: Float32 array of shape `(num_rays,)` or `(num_rays, channels)`. Circle of confusion [S1, unofficial].
+ 
+ **`poses_bounds.npy` Layout:**
+-- Raw shape: `(-1, 3, 5)`.
+-- Reshaped to `[3, 5, N]` where `N` is the number of images.
+-- The last two columns of the original array (before reshaping) correspond to bounding box depths `bds` (min and max depth along the viewing ray).
++- Raw shape: `(-1, 3, 5)` [S1, unofficial].
++- Reshaped to `[3, 5, N]` where `N` is the number of images [S1, unofficial].
++- The last two columns of the original array (before reshaping) correspond to bounding box depths `bds` (min and max depth along the viewing ray) [S1, unofficial].
+ 
+ ### Steps
+-1. **Load Images:**
+-   - Determine image directory. If `config.factor > 0`, append `_factor` to the directory name.
+-   - Load images as float32, normalized to `[0, 1]`.
+-   - Check for mismatch between number of images and poses. If `poses.shape[-1] != images.shape[-1]`, raise `RuntimeError` [S1, unofficial].
+-
+-2. **Load Metadata:**
+-   - Load `poses_bounds.npy`, `temperature.npy`, `exposure.npy`, and `coc.npy`.
+-   - Reshape temperature, exposure, and coc arrays to match the image channel dimension: `temperature.reshape(images.shape[3], -1)` [S1, unofficial].
+-   - Normalize metadata:
+-     - Temperature: `temperature.astype(np.float32) / 10000` [S1, unofficial].
+-     - Exposure: `(exposure.astype(np.float32) + 3) / 6` [S1, unofficial].
+-
+-3. **Parse Poses:**
+-   - Reshape `poses_arr` from `[-1, 3, 5]` to `[3, 5, N]` using `poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1, 2, 0])` [S1, unofficial].
+-   - Extract bounding box depths `bds` from the last two columns: `bds = poses_arr[:, -2:].transpose([1, 0])` [S1, unofficial].
+-
+-4. **Update Intrinsics for Downsampling:**
+-   - If `config.factor > 1`, update intrinsic parameters.
+-   - Set `poses[:2, 4, :]` to the downsampled image height and width.
+-   - Scale `poses[2, 4, :]` (focal length component) by `1. / factor` [S1, unofficial].
+-
+-5. **Correct Rotation and Axis Convention:**
+-   - The LLFF dataset uses a specific axis convention that requires correction.
+-   - Concatenate columns: `[poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]]` [S1, unofficial].
+-   - Move the variable dimension (images) to axis 0: `poses = np.moveaxis(poses, -1, 0)` [S1, unofficial].
+-
+-6. **Rescale Scene Geometry:**
+-   - Calculate scale factor: `scale = 1. / (bds.min() * 0.75)` [S1, unofficial].
+-   - Apply scale to pose translation vectors: `poses[:, :3, 3] *= scale` [S1, unofficial].
+-   - Apply scale to bounding depths: `bds *= scale` [S1, unofficial].
+-
+-7. **Recenter Poses:**
+-   - Compute the average pose `c2w` using `_poses_avg` (see Formula below).
+-   - Construct identity bottom row `[0, 0, 0, 1]`.
+-   - Invert the average pose: `inv_c2w = np.linalg.inv(c2w)` [S1, unofficial].
+-   - Transform all poses: `poses = inv_c2w @ poses` [S1, unofficial].
+-
+-8. **Generate Camera Path (Optional):**
+-   - If `config.spherify` is true or rendering test paths, generate a spiral or spherical path.
+-   - For spiral/spherical: Compute average pose, up vector, close/inf depths, mean focal length, and radii.
+-   - Generate `n_views=30` poses using rotation angles `theta` (see Formula below) [S1, unofficial].
+-
+-9. **Split Dataset:**
+-   - Test indices: `i_test = np.arange(images.shape[0])[::config.llffhold]` [S1, unofficial].
+-   - Train indices: All indices not in `i_test`.
+-   - Select images, poses, and metadata based on the split [S1, unofficial].
+-
+-10. **Convert to NDC:**
+-    - For non-spherified data, convert ray origins and directions to NDC using `convert_to_ndc` [S1, unofficial].
+-    - Calculate pixel radii for mip-NeRF:
+-      - Compute `dx` and `dy` distances between adjacent ray origins.
+-      - Average them.
+-      - Scale by `2 / sqrt(12)` [S1, unofficial].
+-
+-11. **Construct Rays Object:**
+-    - Create `utils.Rays` with NDC origins, directions, viewdirs, radii, loss multipliers (ones), near/far planes, and auxiliary metadata [S1, unofficial].
+-
+-12. **Separate Render Rays:**
+-    - If in test split, separate render rays from dataset rays at `n_render_poses`.
+-    - Assign `self.render_rays` and `self.rays`.
+-    - Update `camtoworlds` to exclude render poses [S1, unofficial].
++1. **Load Images:** Determine image directory. If `config.factor > 0`, append `_factor` to the directory name. Load images as float32, normalized to `[0, 1]`. Check for mismatch between number of images and poses. If `poses.shape[-1] != images.shape[-1]`, raise `RuntimeError` [S1, unofficial].
++2. **Load Metadata:** Load `poses_bounds.npy`, `temperature.npy`, `exposure.npy`, and `coc.npy`. Reshape temperature, exposure, and coc arrays to match the image channel dimension: `temperature.reshape(images.shape[3], -1)`. Normalize metadata: Temperature: `temperature.astype(np.float32) / 10000`. Exposure: `(exposure.astype(np.float32) + 3) / 6` [S1, unofficial].
++3. **Parse Poses:** Reshape `poses_arr` from `[-1, 3, 5]` to `[3, 5, N]` using `poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1, 2, 0])`. Extract bounding box depths `bds` from the last two columns: `bds = poses_arr[:, -2:].transpose([1, 0])` [S1, unofficial].
++4. **Update Intrinsics for Downsampling:** If `config.factor > 1`, update intrinsic parameters. Set `poses[:2, 4, :]` to the downsampled image height and width. Scale `poses[2, 4, :]` (focal length component) by `1. / factor` [S1, unofficial].
++5. **Correct Rotation and Axis Convention:** The LLFF dataset uses a specific axis convention that requires correction. Concatenate columns: `[poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]]`. Move the variable dimension (images) to axis 0: `poses = np.moveaxis(poses, -1, 0)` [S1, unofficial].
++6. **Rescale Scene Geometry:** Calculate scale factor: `scale = 1. / (bds.min() * 0.75)`. Apply scale to pose translation vectors: `poses[:, :3, 3] *= scale`. Apply scale to bounding depths: `bds *= scale` [S1, unofficial].
++7. **Recenter Poses:** Compute the average pose `c2w` using `_poses_avg` (see Formula below). Construct identity bottom row `[0, 0, 0, 1]`. Invert the average pose: `inv_c2w = np.linalg.inv(c2w)`. Transform all poses: `poses = inv_c2w @ poses` [S1, unofficial].
++8. **Generate Camera Path (Optional):** If `config.spherify` is true or rendering test paths, generate a spiral or spherical path. For spiral/spherical: Compute average pose, up vector, close/inf depths, mean focal length, and radii. Generate `n_views=30` poses using rotation angles `theta` (see Formula below) [S1, unofficial].
++9. **Split Dataset:** Test indices: `i_test = np.arange(images.shape[0])[::config.llffhold]`. Train indices: All indices not in `i_test`. Select images, poses, and metadata based on the split [S1, unofficial].
++10. **Convert to NDC:** For non-spherified data, convert ray origins and directions to NDC using `convert_to_ndc`. Calculate pixel radii for mip-NeRF: Compute `dx` and `dy` distances between adjacent ray origins. Average them. Scale by `2 / sqrt(12)` [S1, unofficial].
++11. **Construct Rays Object:** Create `utils.Rays` with NDC origins, directions, viewdirs, radii, loss multipliers (ones), near/far planes, and auxiliary metadata [S1, unofficial].
++12. **Separate Render Rays:** If in test split, separate render rays from dataset rays at `n_render_poses`. Assign `self.render_rays` and `self.rays`. Update `camtoworlds` to exclude render poses [S1, unofficial].
+ 
+ ### Formulas
+@@ -127,10 +78,10 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of images and pixels for loading and preprocessing. Pose recentering and NDC conversion are $O(N)$ where $N$ is the number of rays.
+-- **Memory Complexity:** Proportional to the number of rays and auxiliary metadata. The `utils.Rays` object stores all ray data in memory.
+-- **Strengths:** Handles the specific quirks of the LLFF dataset, including axis correction and metadata normalization. Enables efficient training via NDC and mip-NeRF radii.
+-- **Limitations:** Only suitable for forward-facing scenes (due to NDC). Requires careful handling of metadata normalization.
+-- **When to Use:** When training NeRF on the LLFF dataset.
+-- **When Not to Use:** For non-forward-facing scenes or datasets without the specific LLFF metadata structure.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Strengths:** Handles the specific quirks of the LLFF dataset, including axis correction and metadata normalization. Enables efficient training via NDC and mip-NeRF radii [S1, unofficial].
++- **Limitations:** Only suitable for forward-facing scenes (due to NDC). Requires careful handling of metadata normalization [S1, unofficial].
++- **When to Use:** When training NeRF on the LLFF dataset [S1, unofficial].
++- **When Not to Use:** For non-forward-facing scenes or datasets without the specific LLFF metadata structure [S1, unofficial].
+ 
+ ## Background

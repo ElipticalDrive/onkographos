@@ -1,0 +1,221 @@
+--- v001.md
++++ v002.md
+@@ -2,19 +2,19 @@
+ Also called: Denoising and Completion, Point Cloud Geometry Optimization, Sparse Opacity Optimization
+ ## Overview
+-Sparse regularization for point cloud opacity is a geometric constraint strategy applied during the optimization of point-based radiance fields to prevent the point cloud from collapsing into local minima and to enforce manifold structure [S1]. It addresses the lack of inherent connectivity in point clouds by combining a denoising stage, which optimizes point geometry and opacity via volume rendering, and a completion stage, which fills gaps in the point cloud [S1]. Unlike mesh-based regularization, it operates directly on unstructured points using weighted Principal Component Analysis (PCA) to estimate local geometry [S1]. It sets itself apart from sibling methods by explicitly managing point density through an iterative add/remove cycle driven by a specific sparsity-inducing loss function.
++Sparse regularization for point cloud opacity is an optimization strategy applied during the training of point-based radiance fields to manage point density and geometry [S1]. It operates through an alternating loop of denoising and completion stages [S1]. Unlike sibling methods that focus on smoothness, it explicitly manages opacity parameters via a sparsity-inducing loss function and iteratively adds points to fill rendering gaps [S1].
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D points $P = \{p_i\}$, each with an associated optimizable opacity parameter $\alpha_i$, and a set of training views with ground truth images.
+-*   **Output:** An optimized point cloud with refined geometry and opacity values, where low-opacity points are removed based on a threshold $\mu$.
++*   **Input:** A set of 3D points $P = \{p_i\}$, each with an associated optimizable opacity parameter $\alpha_i$, and a set of training views with ground truth images [S1].
++*   **Output:** An optimized point cloud with refined geometry and opacity values, where low-opacity points are removed based on a threshold $\mu$ [S1].
+ 
+ **Data Structures:**
+-*   **Point Cloud:** A list of points $p_i$. Each point has an opacity parameter $\alpha_i$.
+-*   **Depth Buffer:** For each pixel, a buffer storing the depths of the $k$ nearest points along the ray, rather than just the single nearest point [S1].
+-*   **Rectified Coordinates:** Computed from the depth buffer values using a transformation defined in the source (Eqn. 1 in [S1]), which maps points to a deformed space suitable for radiance mapping.
++*   **Point Cloud:** A list of points $p_i$. Each point has an opacity parameter $\alpha_i$ [S1].
++*   **Depth Buffer:** For each pixel, a buffer storing the depths of $k$ points along the ray, explicitly not restricted to the single nearest point [S1].
++*   **Rectified Coordinates:** Computed from the depth buffer values using a transformation defined in the source (Eqn. 1 in [S1]), which maps points to a deformed space suitable for radiance mapping [S1].
+ 
+ **Parameters:**
+ *   $k$: Number of points maintained in the depth buffer per pixel [S1].
+ *   $\mu$: Threshold used to remove low-opacity points after training convergence [S1].
+-*   Typical values for $k$ and $\mu$ are not given in the sources.
++*   Typical values for $k$ and $\mu$ are not given in the sources [S1].
+ 
+ **Steps:**
+@@ -22,8 +22,8 @@
+ 
+ 1.  **Denoising:**
+-    1.  **Rasterization:** For each training view, rasterize the point cloud. Maintain a depth buffer of the $k$ nearest points for each pixel [S1].
++    1.  **Rasterization:** For each training view, rasterize the point cloud. Maintain a depth buffer of $k$ points for each pixel [S1].
+     2.  **Coordinate Transformation:** Compute rectified coordinates for the points in the depth buffer using the depth values and the transformation equation (Eqn. 1 in [S1]) [S1].
+     3.  **Radiance Mapping:** Feed the rectified coordinates and the ray directions into a Multi-Layer Perceptron (MLP) to estimate colors [S1].
+-    4.  **Volume Rendering:** Assign an optimizable opacity parameter $\alpha_i$ to each point $p_i$. Compute the pixel RGB values using the standard volume rendering equation [S1].
++    4.  **Volume Rendering:** Assign an optimizable opacity parameter $\alpha_i$ to each point $p_i$. Compute the pixel RGB values using the volume rendering equation [S1].
+     5.  **Loss Computation:** Compute the sparse regularization loss $\mathcal{L}_{\text{sparse}}$ [S1]:
+         $$ \mathcal{L}_{\text{sparse}} = \frac{1}{N} \sum_{i=1}^N [\log(\alpha_i) + \log(1 - \alpha_i)] $$
+@@ -43,4 +43,7 @@
+ **Pseudocode:**
+ ```python
++import math
++import numpy as np
++
+ def sparse_regularization_optimization(points, training_views, threshold_mu, k):
+     """
+@@ -48,6 +51,6 @@
+     
+     Args:
+-        points: List of Point objects, each with position and opacity alpha.
+-        training_views: List of training view data (camera pose, ground truth image).
++        points: List of dicts with 'pos' (3D array) and 'alpha' (float).
++        training_views: List of dicts with 'camera' (dict with pose) and 'gt_image' (HxWx3 array).
+         threshold_mu: Threshold for removing low-opacity points.
+         k: Number of points to keep in the depth buffer per pixel.
+@@ -56,75 +59,122 @@
+         Optimized list of points.
+     """
++    converged = False
+     while not converged:
+         # --- Denoising Step ---
+         for view in training_views:
+             # 1. Rasterize and maintain depth buffer of k points
+-            depth_buffer = rasterize_with_k_nearest(points, view.camera, k)
++            depth_buffer = {}
++            for p in points:
++                u, v, z = project_point(p['pos'], view['camera'])
++                pixel = (int(u), int(v))
++                if pixel not in depth_buffer: depth_buffer[pixel] = []
++                depth_buffer[pixel].append(z)
++                depth_buffer[pixel].sort()
++                if len(depth_buffer[pixel]) > k:
++                    depth_buffer[pixel] = depth_buffer[pixel][:k]
+             
+             # 2. Compute rectified coordinates using depth buffer (Eqn 1 in [S1])
+-            # Note: Exact transformation formula is in [S1] Eqn 1
+-            rectified_coords = compute_rectified_coordinates(depth_buffer, view.camera)
++            rectified_coords = {pix: apply_rectification_formula(depths, view['camera']) for pix, depths in depth_buffer.items()}
+             
+             # 3. Estimate colors using MLP
+-            # Note: MLP takes rectified coords and ray directions
+-            ray_directions = compute_ray_directions(view.camera, depth_buffer)
+-            colors = mlp_predict(rectified_coords, ray_directions)
++            ray_dirs = {pix: normalize(compute_ray_direction(pix, view['camera'])) for pix in rectified_coords}
++            colors = {pix: mlp_forward(rectified_coords[pix], ray_dirs[pix]) for pix in rectified_coords}
+             
+             # 4. Compute pixel RGB using volume rendering equation
+-            # Note: Standard volume rendering equation
+-            rendered_images = volume_render(points, colors, view.camera)
++            rendered_images = volume_render_equation(points, colors, view['camera'])
+             
+             # 5. Compute sparse regularization loss
+-            # L_sparse = (1/N) * sum(log(alpha_i) + log(1 - alpha_i))
+             loss_sparse = compute_sparse_loss(points)
+             
+             # 6. Optimize points and opacities
+-            optimize(points, loss_sparse)
++            points = optimize_parameters(points, loss_sparse)
+             
+         # --- Completion Step ---
+         for view in training_views:
+             # 1. Rasterize to get mask
+-            mask = rasterize_mask(points, view.camera)
+-            gt_image = view.gt_image
++            mask = rasterize_occupancy(points, view['camera'])
++            gt_image = view['gt_image']
+             
+             # 2. Identify empty pixels where GT is occupied
+-            # Note: "occupied" implies non-background in GT
+-            empty_occupied_pixels = find_empty_pixels_in_occupied_regions(mask, gt_image)
++            empty_occupied_pixels = []
++            for y in range(gt_image.shape[0]):
++                for x in range(gt_image.shape[1]):
++                    if mask[y, x] == 0 and np.linalg.norm(gt_image[y, x]) > 0.0:
++                        empty_occupied_pixels.append((x, y))
+             
+             # 3. Add points for empty pixels
+             for pixel in empty_occupied_pixels:
+                 # Determine depth range from adjacent pixels
+-                depth_range = get_depth_range_from_adjacent_pixels(pixel, depth_buffer)
++                depth_range = get_adjacent_depth_range(pixel, depth_buffer)
+                 
+                 # Add points along the ray within the depth range
+-                new_points = add_points_along_ray(pixel, view.camera, depth_range)
++                new_points = add_points_along_ray(pixel, view['camera'], depth_range)
+                 points.extend(new_points)
+                 
+         # Check convergence criteria (e.g., loss change, max iterations)
+-        if check_convergence():
++        if check_convergence(points):
+             break
+             
+     # --- Post-processing ---
+     # Remove low-opacity points
+-    final_points = [p for p in points if p.alpha >= threshold_mu]
++    final_points = [p for p in points if p['alpha'] >= threshold_mu]
+     return final_points
+ 
++def apply_rectification_formula(depths, camera):
++    # Applies coordinate transformation defined in source Eqn. 1 [S1]
++    return [transform_depth(d, camera) for d in depths]
++
++def compute_ray_direction(pixel, camera):
++    # Computes ray direction from camera pose and pixel coordinates
++    return camera['direction'][:, pixel[1], pixel[0]]
++
++def mlp_forward(coords, dirs):
++    # Standard MLP forward pass
++    return np.tanh(coords + dirs) # [G] Simplified activation for pseudocode
++
++def volume_render_equation(points, colors, camera):
++    # Standard alpha compositing: C = sum(w_i * c_i), w_i = T_i * (1 - exp(-sigma_i * delta_i))
++    pass # Standard implementation per volume rendering framework
++
+ def compute_sparse_loss(points):
+-    """
+-    Computes the sparse regularization loss.
+-    L_sparse = (1/N) * sum(log(alpha_i) + log(1 - alpha_i))
+-    """
+     N = len(points)
+-    if N == 0:
+-        return 0.0
+-    total_loss = 0.0
++    if N == 0: return 0.0
++    total = 0.0
+     for p in points:
+-        alpha = p.alpha
+-        # Guard against log(0)
+-        if alpha <= 0 or alpha >= 1:
+-            # [G] Clamp alpha to a small epsilon range to avoid log(0)
+-            alpha = max(min(alpha, 1.0 - 1e-6), 1e-6)
+-        total_loss += math.log(alpha) + math.log(1 - alpha)
+-    return total_loss / N
++        a = p['alpha']
++        a = max(min(a, 1.0 - 1e-6), 1e-6) # [G] Guard against log(0)
++        total += math.log(a) + math.log(1 - a)
++    return total / N
++
++def optimize_parameters(points, loss):
++    # Standard gradient descent update
++    return [update_point(p, loss) for p in points]
++
++def rasterize_occupancy(points, camera):
++    mask = np.zeros((camera['height'], camera['width']), dtype=bool)
++    for p in points:
++        u, v, z = project_point(p['pos'], camera)
++        if 0 <= u < camera['width'] and 0 <= v < camera['height']:
++            mask[int(v), int(u)] = True
++    return mask
++
++def get_adjacent_depth_range(pixel, depth_buffer):
++    x, y = pixel
++    neighbors = [(x-1, y), (x+1, y), (x, y-1), (x, y+1)]
++    depths = [d for nx, ny in neighbors if (nx, ny) in depth_buffer for d in depth_buffer[(nx, ny)]]
++    return (min(depths) if depths else 0.0, max(depths) if depths else 1.0)
++
++def add_points_along_ray(pixel, camera, depth_range):
++    x, y = pixel
++    ray_o = camera['origin']
++    ray_d = normalize(camera['direction'][:, y, x])
++    new_pts = []
++    for z in np.linspace(depth_range[0], depth_range[1], 5):
++        new_pts.append({'pos': ray_o + z * ray_d, 'alpha': 0.5})
++    return new_pts
++
++def check_convergence(points):
++    # Checks if training has stabilized
++    return False # Placeholder for convergence logic
+ ```
+ 
+@@ -136,4 +186,8 @@
+ 
+ ## Subtopics
++
++### [Surface Regularization](18866-surface-regularization.md)
++Surface Regularization is a geometric constraint strategy applied during the optimization of point-based radiance fields to prevent the point cloud from collapsing into local minima and to enforce manifold structure. It addresses the lack of inherent connectivity in point clouds by combining a repulsion term, which encourages uniform point distribution on local tangent planes, and a projection term, which forces points to lie on those planes. Unlike mesh-based regularization, it operates directly on unstructured points using weighted Principal Component Analysis (PCA) to estimate local geometry.
++
+ ## Operating characteristics
+ *   **Time Complexity:** Not given in the sources.

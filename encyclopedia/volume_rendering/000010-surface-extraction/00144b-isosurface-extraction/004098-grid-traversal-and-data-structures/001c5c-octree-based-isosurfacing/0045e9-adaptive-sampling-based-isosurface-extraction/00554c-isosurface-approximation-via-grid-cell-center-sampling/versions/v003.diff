@@ -1,0 +1,126 @@
+--- v002.md
++++ v003.md
+@@ -4,33 +4,31 @@
+ 
+ ## Overview
+-This method approximates an isosurface $S$ for a given isovalue $v$ by generating exactly one sample point per 3D grid cell that intersects the surface, replacing exact analytic extraction (such as Marching Cubes) to accelerate distance field computation [S1]. It differs from its siblings in the [Adaptive Sampling-based Isosurface Extraction](11618-adaptive-sampling-based-isosurface-extraction.md) family by using a fixed grid cell topology and a simple center-point heuristic rather than adaptive octree leaf refinement or complex primitive construction, prioritizing computational speed and GPU parallelism over geometric precision [S1].
++This method approximates an isosurface $S$ for a given isovalue $v$ by generating exactly one sample point per 3D grid cell that intersects the surface, replacing exact analytic extraction to accelerate distance field computation [S1]. It differs from its siblings in the [Adaptive Sampling-based Isosurface Extraction](11618-adaptive-sampling-based-isosurface-extraction.md) family by using a fixed grid cell topology and a simple center-point heuristic rather than adaptive octree leaf refinement or complex primitive construction, prioritizing computational speed and GPU parallelism over geometric precision [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- A scalar field $V$ defined on a regular 3D grid.
+-- An isovalue $v$.
+-- Grid dimensions $(N_x, N_y, N_z)$.
++- A scalar field $V$ defined on a regular 3D grid [S1].
++- An isovalue $v$ [S1].
++- Grid dimensions $(N_x, N_y, N_z)$ [S1].
+ 
+ **Outputs:**
+-- An array of 3D point coordinates representing the approximate isosurface. The points are listed in scanline order [S1].
++- An array of 3D point coordinates representing the approximate isosurface, listed in scanline order [S1].
+ 
+ **Data Structures:**
+-1.  **Binary Volume:** A 3D array of booleans (or integers) with the same dimensions as the input grid. Each element corresponds to a grid cell.
+-2.  **Point Array:** A dynamic array or compacted buffer storing the $(x, y, z)$ coordinates of the centers of active grid cells.
++1. **Binary Volume:** A 3D array of booleans (or integers) with the same dimensions as the input grid, where each element corresponds to a grid cell [S1].
++2. **Point Array:** A dynamic array or compacted buffer storing the $(x, y, z)$ coordinates of the centers of active grid cells [S1].
+ 
+ **Grid Cell Definition:**
+-A grid cell is defined as a $1 \times 1 \times 1$ cube. Its vertices correspond to the eight voxels in a $2 \times 2 \times 2$ spatial region of the input scalar field [S1]. Specifically, for a grid cell at integer indices $(i, j, k)$, the eight associated voxel values are $V(x, y, z)$ for $x \in \{i, i+1\}$, $y \in \{j, j+1\}$, and $z \in \{k, k+1\}$ [S1].
++A grid cell is defined as a $1 \times 1 \times 1$ cube whose vertices correspond to the eight voxels in a $2 \times 2 \times 2$ spatial region of the input scalar field [S1]. Specifically, for a grid cell at integer indices $(i, j, k)$, the eight associated voxel values are $V(x, y, z)$ for $x \in \{i, i+1\}$, $y \in \{j, j+1\}$, and $z \in \{k, k+1\}$ [S1].
+ 
+ **Algorithm Steps:**
+-1.  **Parallel Cell Evaluation:** Launch a GPU kernel where each thread is responsible for one grid cell $(i, j, k)$.
+-2.  **Intersection Check:** The thread reads the eight scalar values at the vertices of the grid cell. If at least one value is strictly greater than $v$ and at least one value is strictly less than $v$, the grid cell contains part of the isosurface $S$ [S1].
+-    *   *Note:* If all values are equal to $v$, the cell is on the surface but does not cross it; the source implies this case is ignored or treated as non-intersecting for the purpose of generating a single representative point via the "larger/smaller" logic [S1].
+-3.  **Binary Volume Update:** If the intersection condition is met, write `1` (or `true`) to the corresponding location in the binary volume. Otherwise, write `0` (or `false`) [S1].
+-4.  **Compaction:** Apply a GPU compaction scheme (e.g., prefix sum followed by scatter) to the binary volume. This converts the sparse binary volume into a dense array containing only the coordinates of the centers of the active grid cells [S1].
+-5.  **Coordinate Generation:** For each active cell identified in step 4, compute the center coordinates. If the grid cell spans indices $[i, i+1] \times [j, j+1] \times [k, k+1]$, the center is $(i + 0.5, j + 0.5, k + 0.5)$ [S1].
++1. **Parallel Cell Evaluation:** Launch a GPU kernel where each thread is responsible for one grid cell $(i, j, k)$ [S1].
++2. **Intersection Check:** The thread reads the eight scalar values at the vertices of the grid cell. If at least one value is strictly greater than $v$ and at least one value is strictly less than $v$, the grid cell contains part of the isosurface $S$ [S1].
++3. **Binary Volume Update:** If the intersection condition is met, write `1` (or `true`) to the corresponding location in the binary volume. Otherwise, write `0` (or `false`) [S1].
++4. **Compaction:** Apply a GPU compaction scheme to convert the binary volume into a dense array containing only the coordinates of the centers of the active grid cells [S1].
++5. **Coordinate Generation:** For each active cell identified in step 4, compute the center coordinates. If the grid cell spans indices $[i, i+1] \times [j, j+1] \times [k, k+1]$, the center is $(i + 0.5, j + 0.5, k + 0.5)$ [S1].
+ 
+ **Pseudocode:**
+ ```python
+-# Kernel: Evaluate Grid Cells
+ def evaluate_grid_cell(cell_id, grid_dims, scalar_field, isovalue, binary_volume):
+     # Decode 1D thread ID to 3D cell indices
+@@ -39,10 +37,9 @@
+     k = cell_id % grid_dims.z
+     
+-    # Check bounds (assuming grid cells are defined for i < Nx-1, etc.)
++    # Check bounds: grid cells are defined for i < Nx-1, etc.
+     if i >= grid_dims.x - 1 or j >= grid_dims.y - 1 or k >= grid_dims.z - 1:
+         return
+ 
+     # Read 8 voxel values at the corners of the grid cell
+-    # Voxel indices correspond to cell indices directly
+     v000 = scalar_field[i, j, k]
+     v100 = scalar_field[i+1, j, k]
+@@ -65,13 +62,19 @@
+         binary_volume[i, j, k] = 0
+ 
+-# Host Code: Compaction and Output
++def prefix_sum(arr):
++    # Standard inclusive prefix sum [G]
++    result = [0] * len(arr)
++    total = 0
++    for idx, val in enumerate(arr):
++        total += val
++        result[idx] = total
++    return result
++
+ def compact_and_output(binary_volume, grid_dims):
+-    # 1. Compute prefix sum of binary volume to determine output indices
+-    # This step depends on the specific GPU library or algorithm used for compaction.
+-    # Let's assume a function `prefix_sum` that returns an array of the same size
+-    # where each element is the sum of all preceding elements (inclusive).
+-    prefix = prefix_sum(binary_volume)
++    # The sources do not specify the exact compaction algorithm [S1].
++    # A standard inclusive prefix sum followed by scatter is implemented here [G].
++    flat_binary = [binary_volume[i, j, k] for k in range(grid_dims.z) for j in range(grid_dims.y) for i in range(grid_dims.x - 1)]
++    prefix = prefix_sum(flat_binary)
+     
+-    # 2. Scatter active points into output array
+     output_points = []
+     for k in range(grid_dims.z):
+@@ -79,15 +82,10 @@
+             for i in range(grid_dims.x - 1):
+                 if binary_volume[i, j, k] == 1:
+-                    # Calculate center of the grid cell
+-                    cx = i + 0.5
+-                    cy = j + 0.5
+-                    cz = k + 0.5
+-                    output_points.append((cx, cy, cz))
+-                    
++                    output_points.append((i + 0.5, j + 0.5, k + 0.5))
+     return output_points
+ ```
+ 
+ **Parameters:**
+-- **Isovalue $v$:** The scalar threshold defining the surface.
++- **Isovalue $v$:** The scalar threshold defining the surface [S1].
+ - **Grid Cell Size:** Fixed at $1 \times 1 \times 1$ units in the coordinate space of the voxel grid [S1].
+ 
+@@ -98,14 +96,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N_x N_y N_z)$ for the parallel evaluation phase, plus $O(N_x N_y N_z)$ for the compaction phase (assuming linear-time compaction algorithms like parallel prefix sum).
+-- **Memory Complexity:** Requires storage for the input scalar field, the binary volume (same size as input grid), and the output point array (size $\le N_x N_y N_z$).
++- **Time Complexity:** Not given in the sources. Standard GPU compaction using parallel prefix sum is $O(N)$ [G].
++- **Memory Complexity:** Requires storage for the input scalar field, the binary volume (same size as input grid), and the output point array (size $\le N_x N_y N_z$) [G].
+ - **Performance:** Highly parallelizable on GPU. Each thread operates independently on a grid cell, minimizing synchronization overhead until the compaction step [S1].
+-- **Strengths:** Extremely fast computation; avoids the complexity of connectivity analysis required by Marching Cubes; suitable for generating distance fields where exact geometry is less critical than speed [S1].
++- **Strengths:** Extremely fast computation; avoids the complexity of connectivity analysis required by exact extraction methods; suitable for generating distance fields where exact geometry is less critical than speed [S1].
+ - **Limitations:** Low geometric accuracy (error bound $\frac{\sqrt{3}}{2}$); no connectivity information; points are not located at actual intersections but at cell centers [S1].
+ - **When to use:** When a rough approximation of the isosurface is sufficient for downstream tasks like similarity map computation or distance field generation, and performance is paramount [S1].
+-- **When not to use:** When precise surface geometry, connectivity, or mesh topology is required.
++- **When not to use:** When precise surface geometry, connectivity, or mesh topology is required [G].
+ 
+ ## Background
+-This method was introduced in the context of efficient GPU-accelerated computation of isosurfaces, specifically for applications like similarity map generation where exact surface extraction is computationally expensive and potentially unnecessary [S1]. It serves as a lightweight alternative to the Marching Cubes algorithm, which computes multiple points per voxel and connects them to form a mesh [S1]. The approach leverages the parallelism of modern GPUs to scan grid cells simultaneously, using a binary volume and compaction scheme to efficiently collect the resulting points [S1].
++This method was introduced in the context of efficient GPU-accelerated computation of isosurfaces, specifically for applications like similarity map generation where exact surface extraction is computationally expensive and potentially unnecessary [S1]. It serves as a lightweight alternative to exact extraction methods like Marching Cubes, which compute multiple points per voxel and connect them to form a mesh [S1]. The approach leverages the parallelism of modern GPUs to scan grid cells simultaneously, using a binary volume and compaction scheme to efficiently collect the resulting points [S1].
+ 
+ ## Sources

@@ -1,0 +1,124 @@
+--- v010.md
++++ v011.md
+@@ -1,66 +1,77 @@
+ # NeRF-SR Training Configuration
+ 
+-Also called: NeRF-SR, NeRF Super-Resolution
++Also called: NeRF-SR training setup, NeRF+SR augmentation, NeRF-SR hyperparameters
+ 
+ ## Overview
+-NeRF-SR is a training configuration designed to synthesize high-resolution (HR) novel views from low-resolution (LR) inputs by optimizing the neural radiance field directly at the target resolution, rather than upsampling the output image [S1]. It distinguishes itself from standard NeRF by employing a supersampling strategy that leverages 3D consistency to recover high-frequency details, and from post-processing methods like NeRF-Bi by avoiding the blurring artifacts inherent to 2D upsampling [S1]. It builds on [Method-Specific Training Configurations](6267-method-specific-training-configurations.md) by utilizing hierarchical sampling and photometric loss but adapts the training loop to handle independent resolution scales [S1].
++NeRF-SR is a training configuration designed to enhance the resolution of Neural Radiance Fields (NeRF) by integrating a super-resolution (SR) module into the rendering pipeline, allowing high-quality novel view synthesis from low-resolution (LR) inputs without requiring high-resolution ground truth [S1]. It distinguishes itself from standard NeRF training by employing a hierarchical sampling strategy coupled with specific data augmentation techniques, such as random patch sampling, to improve the generalization of the SR module [S2]. Unlike Super-NeRF, which uses a GAN-based backbone and latent codes, NeRF-SR relies on a direct pipeline where the SR module refines the rendered output, often followed by a post-inference refinement network for real-world scenes [S1, S2].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ LR images (typically 100 for training) with known camera poses and intrinsics.
+-*   **Outputs:** A trained MLP representing the radiance field $\mathbf{F}$ parameterized by weights $\theta$, capable of rendering HR images.
++The method extends the standard NeRF training loop by incorporating super-resolution mechanisms during both the training of the radiance field and the inference phase.
+ 
+-**Data Structures:**
+-The method uses the standard NeRF MLP structure [S1].
+-*   **Coarse MLP:** Takes position $\mathbf{x}$ and viewing direction $\mathbf{d}$, outputs density $\sigma$ and color $\mathbf{c}$.
+-*   **Fine MLP:** Takes position $\mathbf{x}$, viewing direction $\mathbf{d}$, and intermediate features from the coarse network, outputs color $\mathbf{c}$.
+-*   **Sampling Points:** For each ray, $N_c = 64$ coarse samples and $N_f = 64$ fine samples are generated [S1].
++**Inputs and Outputs**
++*   **Inputs:** Low-resolution (LR) training images, camera poses (extrinsics and intrinsics), and scene bounds.
++*   **Outputs:** A trained NeRF model (MLPs for density $\sigma$ and color $\mathbf{c}$) and an associated SR module (typically a CNN like EDSR) that maps LR rendered features to HR details [S1, S2].
+ 
+-**Training Steps:**
+-1.  **Initialization:** Initialize the coarse and fine MLPs. Set optimizer to Adam with $\beta_1 = 0.9, \beta_2 = 0.999$ [S1].
+-2.  **Sampling:** For each batch of rays:
+-    *   Generate $N_c$ samples uniformly along the ray for the coarse network.
+-    *   Use the coarse network's density estimates to guide importance sampling for $N_f$ fine samples [S1].
+-3.  **Rendering:** Compute the rendered color $\hat{C}(\mathbf{r})$ using the differentiable volume rendering integral defined in the parent article [Parent].
+-4.  **Loss Calculation:** Compute the photometric loss between the rendered HR image and the ground truth HR image. The primary metric is Mean Squared Error (MSE), though PSNR, SSIM, and LPIPS are reported for evaluation [S1].
+-5.  **Optimization:** Update weights $\theta$ using the Adam optimizer.
+-6.  **Learning Rate Schedule:** Decay the learning rate exponentially from $5 \cdot 10^{-4}$ to $5 \cdot 10^{-6}$ over the course of training [S1].
+-7.  **Iteration:** Repeat for the specified number of epochs.
++**Data Structures**
++*   **Ray Batch:** A set of $N$ rays sampled from the training views.
++*   **Patches:** For augmentation, patches are defined in ray space. A patch $P_{LR}$ in LR ray space corresponds to a region of rays. Its HR counterpart $R_{HR}$ represents the high-resolution ground truth or target for that region [S2].
++*   **Reference Patches:** For the refinement stage, a set of $K$ reference patches $\{P^{REF}_k\}_{k=1}^K$ are stored from training images [S1].
+ 
+-**Parameters:**
++**Numbered Steps**
++1.  **Ray Sampling:** For each training batch, sample $N$ rays $\mathbf{r}$ from the LR training images.
++2.  **Hierarchical Sampling:**
++    *   Sample $N_c = 64$ points along each ray using a proposal network (coarse MLP) to estimate density [S1].
++    *   Compute transmittance $T_i$ and opacity $\alpha_i$ for coarse samples [Parent].
++    *   Use the coarse density to guide the sampling of $N_f = 64$ additional points in high-density regions for the fine MLP [S1].
++3.  **Volume Rendering (Coarse/Fine):**
++    *   Render the coarse color $\hat{C}_{coarse}(\mathbf{r})$ and fine color $\hat{C}_{fine}(\mathbf{r})$ using the differentiable volume rendering integral [Parent].
++    *   The fine rendering $\hat{C}_{fine}(\mathbf{r})$ serves as the input to the SR module [S1].
++4.  **Super-Resolution Integration:**
++    *   Pass the rendered LR image (composed of $\hat{C}_{fine}$) through the SR module to produce the final HR prediction $\hat{C}_{SR}$ [S1].
++    *   *Augmentation Step:* To train the SR module effectively, sample a patch $P_{LR}$ from the LR ray space and its HR counterpart $R_{HR}$ [S2].
++    *   Apply a transformation $\mathcal{A}$ (e.g., rotation, flip) to these patches to yield $R_{LR}^{P'}$ and $R_{HR}^{P'}$ [S2]:
++        $$ R_{LR}^{P'} = \mathcal{A}(R_{LR}^{P}), \quad R_{HR}^{P'} = \mathcal{A}(R_{HR}^{P}) $$
++    *   Integrate these transformed patches into the training loss (Equation 3 in [S2]) to update the SR module and NeRF parameters [S2].
++5.  **Loss Computation:**
++    *   Compute the photometric loss (MSE or Charbonnier) between the SR-enhanced prediction $\hat{C}_{SR}$ and the ground truth HR image $C_{GT}$ [Parent][S1].
++    *   Optionally include a perceptual loss (LPIPS) [S1].
++6.  **Optimization:**
++    *   Update NeRF MLP weights and SR module weights using the Adam optimizer [S1].
++
++**Parameters**
++*   **Optimizer:** Adam [S1].
++*   **Learning Rate:** Exponentially decayed from $5 \cdot 10^{-4}$ to $5 \cdot 10^{-6}$ [S1].
+ *   **Batch Size:** 2048 rays per batch [S1].
+-*   **Coarse Samples ($N_c$):** 64 [S1].
+-*   **Fine Samples ($N_f$):** 64 [S1].
+-*   **Initial Learning Rate:** $5 \cdot 10^{-4}$ [S1].
+-*   **Final Learning Rate:** $5 \cdot 10^{-6}$ [S1].
+-*   **Optimizer Hyperparameters:** $\beta_1 = 0.9, \beta_2 = 0.999$ [S1].
++*   **Samples:** 64 coarse samples and 64 fine samples per ray [S1].
++*   **Optimizer Hyperparameters:** $\beta_1 = 0.9$, $\beta_2 = 0.999$ [S1].
++*   **Epochs:** 20 epochs for Blender dataset, 30 epochs for LLFF dataset [S1].
++*   **Augmentation Probabilities:**
++    *   Synthetic datasets: Max rotation angle 10 degrees, horizontal flip probability 10% [S2].
++    *   LLFF dataset: Max rotation angle 5 degrees, horizontal flip omitted [S2].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Resolution Independence:** The method trains independently for different image resolutions. It does not support arbitrary-scale super-resolution natively; specific models are trained for specific scale factors (e.g., $\times 2, \times 4$) [S1].
+-*   **Real-world Detail Loss:** For real-world datasets like LLFF, supersampling alone may not recover sufficient texture details at high magnification factors (e.g., $\times 4$), necessitating a refinement step [S1].
++**Edge Cases and Pitfalls**
++*   **Forward-Facing Scenes:** Random horizontal flipping is inappropriate for forward-facing scenes (like LLFF) and should be omitted to avoid geometric inconsistency [S2].
++*   **Arbitrary Scale:** NeRF-SR does not support arbitrary-scale super-resolution; the SR module is typically trained for specific integer scale factors (e.g., 2x, 4x, 8x) [S1].
++*   **Real-World Complexity:** For real-world datasets with complex structures (LLFF), supersampling alone may be insufficient for photorealism, necessitating the additional refinement network [S1].
+ 
+ ## Subtopics
+ 
++### [Super-NeRF](16427-super-nerf.md)
++Super-NeRF is a method for NeRF super-resolution that generates plausible, 3D-consistent high-resolution (HR) details using only low-resolution (LR) observations, without requiring HR ground truth. It distinguishes itself from NeRF-SR by coupling the NeRF with a GAN-based 2D super-resolution backbone and per-view latent codes to explicitly search the latent space of a powerful SR prior, rather than relying on simple linear formulations or HR refinement via per-patch warping. The method employs a Consistency Controlling Super Resolution (CCSR) module and mutual learning between a fixed LR NeRF and a learnable HR NeRF to ensure view consistency.
++
+ ### Refinement Network (Ours-Refine)
+-A post-processing module applied to NeRF-SR outputs to boost texture details and edge sharpness, specifically for real-world scenes (LLFF) where supersampling is insufficient [S1]. It uses a fixed number of reference patches ($K=8$) of size $64 \times 64$ [S1]. During inference, input images are divided into non-overlapping patches, refined using reference information, and stitched together [S1]. It improves LPIPS and PSNR, particularly at scale $\times 4$, where supersampling derives fewer details [S1].
++A network that boosts NeRF-SR outputs with texture details and edge sharpness, particularly for real-world LLFF dataset where supersampling alone is insufficient [S1]. During inference, input images are divided into non-overlapping patches and stitched together after refinement [S1]. It uses a fixed number of reference patches ($K=8$) with dimensions $64 \times 64$ [S1]. Inference time is negligible compared to volumetric rendering (~1.3 seconds for refinement vs ~48 seconds for rendering on a single 1080Ti) [S1]. For LLFF ×2, it yields PSNR 27.34, SSIM 0.842, LPIPS 0.103; for LLFF ×4, PSNR 25.59, SSIM 0.759, LPIPS 0.165 [S1]. Refinement is more critical for scale 4 than scale 2, as supersampling derives fewer details at higher magnifications [S1].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Training Time:** The method requires training separate models for each resolution scale. For the Blender dataset, training takes 20 epochs; for LLFF, 30 epochs [S1].
+-*   **Inference Time:** The refinement stage adds negligible overhead. For a $1008 \times 756$ image on a single 1080Ti GPU, NeRF rendering takes ~48 seconds, while refinement takes ~1.3 seconds [S1].
+-
+-**Measured Performance:**
+-*   **Blender Dataset:** Trained on 100 views, tested on 200 held-out images [S1].
+-*   **LLFF Dataset ($\times 2$):** PSNR 27.34, SSIM 0.842, LPIPS 0.103 (with refinement) [S1].
+-*   **LLFF Dataset ($\times 4$):** PSNR 25.59, SSIM 0.759, LPIPS 0.165 (with refinement) [S1].
+-*   **Comparison:** Outperforms NeRF-Bi (bicubic upsampling) and NeRF-Liif in PSNR and SSIM on LLFF [S1].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Achieves photorealistic renderings without external data or HR ground truth. Leverages 3D consistency for better detail recovery than 2D upsampling [S1].
+-*   **Limitations:** Does not support arbitrary-scale super-resolution. Introduces extra computational cost compared to standard NeRF, though it consumes no more time than training a full HR NeRF [S1].
++*   **Time Complexity:** Training time is comparable to training a high-resolution NeRF, as the SR module adds minimal overhead during the backward pass [S1]. Inference time for the SR module is negligible compared to the volumetric rendering step (e.g., 1.3s vs 48s on 1080Ti) [S1].
++*   **Memory Complexity:** Requires storing the NeRF MLPs, the SR module (e.g., EDSR), and potentially reference patches for refinement [S1, S2].
++*   **Performance:** On the LLFF dataset at 4x scale, the refined method achieves PSNR 25.59 and SSIM 0.759 [S1]. Random patch sampling yields higher PSNR than grid-based patch sampling [S2]. Adding rotation and horizontal flip augmentations causes marginal PSNR degradation compared to random patch sampling alone [S2].
++*   **Strengths:** Improves visual quality (LPIPS) and PSNR over vanilla NeRF and bicubic upsampling, especially for real-world scenes [S1]. Efficient on consumer devices [S2].
++*   **Limitations:** Lacks arbitrary-scale support [S1]. Transformation-based augmentations (rotation/flip) may slightly degrade PSNR compared to random patch sampling alone [S2].
+ 
+ ## Background
+-NeRF-SR was introduced by Wang et al. in the paper "NeRF-SR: High-Quality Neural Radiance Fields using Supersampling" [S1]. It is the first pipeline to achieve high-resolution novel view synthesis using mostly low-resolution inputs without external data. The method exploits 3D consistency through a supersampling strategy and, for real-world data, a patch-based refinement network [S1].
++NeRF-SR was introduced to address the limitation of standard NeRF in synthesizing high-quality novel views from low-resolution inputs without requiring high-resolution training data [S1]. The method builds on the differentiable volume rendering framework of NeRF [Parent] and integrates established 2D super-resolution techniques (like EDSR) into the 3D pipeline [S1, S2]. It was developed to enable photorealistic renderings on consumer devices by leveraging the 3D consistency of NeRF while enhancing details through super-resolution [S1, S2].
+ 
+ ## Sources
+-[S1] NeRF-SR: High-Quality Neural Radiance Fields using Supersampling, https://arxiv.org/abs/2112.01759v3, fetched 2026-10-26+[S1] NeRF-SR: High-Quality Neural Radiance Fields using Supersampling, https://arxiv.org/abs/2112.01759v3, fetched 2026-10-26
++[S2] FastSR-NeRF: Improving NeRF Efficiency on Consumer Devices with A Simple Super-Resolution Pipeline, https://doi.org/10.1109/wacv57701.2024.00593, fetched 2026-10-26

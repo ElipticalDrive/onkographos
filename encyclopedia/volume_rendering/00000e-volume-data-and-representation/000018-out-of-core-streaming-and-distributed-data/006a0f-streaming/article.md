@@ -1,0 +1,79 @@
+# Streaming
+Also called: Data Streaming, On-the-fly Processing
+
+## Overview
+Streaming is a technique where volume data is processed as it becomes available, circumventing the need for the entire dataset to be resident in memory or fully loaded before visualization begins [S1]. It enables the rendering of incomplete data and supports interactive visualization of extreme-scale datasets [S1]. Unlike pure on-demand processing which typically relies on a pull model, streaming supports both pull and push dataflow models [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A stream of data chunks or tiles from storage/network; a rendering pipeline configuration [G].
+*   **Output:** Partial or complete rendered images; updated visualization state [G].
+
+**Data Structures:**
+*   **Stream Buffer:** A temporary storage structure holding the current chunk of data being processed [G]. The layout depends on the underlying data representation (e.g., bricked, grid-based) [G].
+*   **Ghost Data:** Boundary voxels or cells generated on-the-fly for bricked representations [S1].
+
+**Steps:**
+1.  **Data Acquisition:** Retrieve the next chunk of data from the source. This can be initiated by the renderer requesting data (pull model) or by the source pushing data to the renderer (push model) [S1].
+2.  **Preprocessing (Optional):** Perform on-the-fly operations such as segmentation, registration, or multi-resolution hierarchy computation if required by the visualization task [S1].
+3.  **Boundary Handling:** Create on-the-fly ghost data for bricked representations [S1].
+4.  **Rendering:** Render the current chunk. If using composite volume rendering, this produces a partial image or a set of depth-sorted primitives [G].
+5.  **Compositing:** Combine the result of the current chunk with the accumulated image state [G].
+6.  **Repeat:** Continue to step 1 until the dataset is exhausted or the user interaction stops the stream [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def streaming_render(stream_source, renderer, compositor):
+    """Renders a volume by streaming data chunks."""
+    while True:
+        chunk = stream_source.next_chunk()
+        if chunk is None:
+            break
+        # Step 2: Preprocessing (Optional)
+        # chunk = preprocess(chunk)
+        # Step 3: Boundary Handling
+        # Create on-the-fly ghost data for bricked representations [S1]
+        ghost_data = None  # Implementation details not given in the sources.
+        # Step 4: Rendering
+        partial_image = renderer.render_chunk(chunk, ghost_data)
+        # Step 5: Compositing
+        compositor.add_result(partial_image)
+```
+
+**Parameters:**
+*   **Chunk Size:** Not given in the sources. Determined by memory constraints and I/O bandwidth [G].
+*   **Model Type:** Pull or push [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Artifacts:** Incorrect generation of ghost data leads to visual discontinuities at chunk boundaries [S1].
+*   **Compositing Order:** For correct alpha compositing, the order in which chunks are rendered and composited must respect the view-dependent depth order [G].
+
+## Subtopics
+
+### [Hardware-Assisted Volume Streaming](2119-hardware-assisted-volume-streaming.md)
+Hardware-Assisted Volume Streaming (HAVS) is an irregular volume rendering technique that streams volumetric data to the GPU to perform rendering, addressing the memory limitations of storing entire large-scale volumes in GPU memory. It distinguishes itself from sibling methods like HAPT by performing more accurate visibility sorting, while maintaining a flexible pipeline that does not require multiple rendering passes.
+
+### [Bandwidth-based Streaming Interval Calculation](3128-bandwidth-based-streaming-interval-calculation.md)
+Bandwidth-based Streaming Interval Calculation determines the minimum time interval between data fetches and the number of simulation slices to skip based on system bandwidth limits to ensure real-time streaming from HDD to GPU. It solves the problem of loading large volumetric datasets that exceed available GPU and RAM capacity by calculating a safe skip count that guarantees data arrives before it is needed. Unlike [Sectioning](1636-sectioning.md) which partitions spatial data, or [Hardware-Assisted Volume Streaming](2119-hardware-assisted-volume-streaming.md) which relies on specific hardware features, this method is purely bandwidth-driven and operates on a multi-layered ring buffer architecture to hide transfer latency.
+
+### [Tide: Trajectory-Adaptive Differential Streaming](10150-tide-trajectory-adaptive-differential-streaming.md)
+Tide is a residency-aware data transfer policy for out-of-core volume rendering that reuses resident blocks across iterations, transferring only incoming resident deltas to reduce PCIe volume under smooth camera motion. It explicitly maintains a capacity-bounded resident set and uses a scoring function to select which blocks to keep in VRAM, rather than streaming all visible blocks or using a fixed eviction policy.
+
+### Uncompressed NIfTI Byte-Range Streaming
+Streaming 3D volume data via HTTP byte-range requests without downloading the full file, optimized for specific access patterns [S2]. Request contiguous byte ranges corresponding to image planes based on volume dimensions (nx, ny, nz) and bytes per voxel (bpv) [S2]. Axial (k) slice cost: one contiguous range of `nx * ny * bpv` bytes [S2]. Coronal (j) plane cost: `nz` ranges of `nx * bpv` each [S2]. Sagittal (i) plane cost: `ny * nz` ranges of `bytesPerVoxel` each [S2]. Sagittal access requires `ny * nz` separate range requests, which is impractical due to server multipart range count caps [S2]. Reduced-resolution volumes cannot be fetched via byte ranges without reading the entire file [S2].
+
+### Out-Of-Core Techniques
+Techniques that partition data and/or computation to process subsets of data independently, lowering in-core memory requirements by using out-of-core, in-situ or distributed processing strategies [S1]. Access and prefetch data [S1]. Create on-the-fly ghost data for bricked representations [S1]. Compute multi-resolution hierarchies or other processing tasks such as segmentation, PDE solvers, image registration, or level set computation [S1].
+
+## Operating characteristics
+*   **Memory Usage:** Significantly lower than in-core methods, as only a subset of the data resides in memory at any time [S1].
+*   **Strengths:** Enables visualization of datasets larger than available memory; supports interactive exploration of extreme-scale data [S1].
+
+## Background
+Streaming approaches have been used to analyze connectivity in large-scale electron microscopy volumes, such as in the ConnectomeExplorer framework [S1]. Hadwiger et al. described a system for streaming extreme-scale electron microscopy data for interactive visualization, later extended to include on-the-fly registration and multi-volume visualization of segmented data [S1]. Vo et al. presented a dataflow visualization system built on VTK that implements push and pull models for streaming [S1]. Silva et al. provided a comprehensive overview of out-of-core methods for visualization and graphics, including streaming techniques [S1].
+
+## Sources
+[S1] State-of-the-Art in GPU-Based Large-Scale Volume Visualization, https://vcg.seas.harvard.edu/publications/20150513-stateof-the-art-in-gpu-based-large-scale-volume-visualization/paper, fetched 2026-10-24
+[S2] docs(volume3d): analysis of the three Volume3D render paths and an improvement plan, https://github.com/cornerstonejs/cornerstone3D/pull/2853, fetched 2026-10-26

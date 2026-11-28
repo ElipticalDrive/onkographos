@@ -1,0 +1,83 @@
+--- v002.md
++++ v003.md
+@@ -11,4 +11,5 @@
+ - Set of target views, each with depth image $D_t$ and image $I_t$ [S1, unofficial].
+ - Camera poses for source and target views [G].
++- Intrinsic matrices $K_s, K_t$ for source and target views [G].
+ - Threshold $\tau$ for outlier identification [S1, unofficial].
+ 
+@@ -24,5 +25,5 @@
+ 
+ **Steps:**
+-1. **Reprojection:** For each pixel $X_s = (x_s, y_s, d_s)$ in the source depth image $D_s$, project it into the coordinate system of each adjacent target view using the known camera poses [S1, unofficial]. This yields the projected pixel coordinates $X_t = (x_t, y_t)$ and the reprojected depth $d_t$ [S1, unofficial]. Implementers must use standard perspective projection: $X_t = K_t (R_t R_s^T (X_s - t_s) + t_t)$, where $K$ is the intrinsic matrix, and $R$ and $t$ are rotation and translation [G].
++1. **Reprojection:** For each pixel $X_s = (x_s, y_s, d_s)$ in the source depth image $D_s$, project it into the coordinate system of each adjacent target view using the known camera poses and intrinsics [S1, unofficial]. This yields the projected pixel coordinates $X_t = (x_t, y_t)$ and the reprojected depth $d_t$ [S1, unofficial]. Implementers must use standard perspective projection: $X_t = K_t (R_t R_s^T (X_s - t_s) + t_t)$, where $K$ is the intrinsic matrix, and $R$ and $t$ are rotation and translation [G].
+ 2. **Optical Flow Computation:** Compute the pixel motion (optical flow) from the source image to the adjacent target views, denoted as $f_{s \to t}(x_s, y_s)$, using an optical flow method [S1, unofficial].
+ 3. **Depth Consistency Calculation:** Compute the depth consistency $C_{depth}$ for each pixel by comparing the reprojected depth $d_t$ with the original target view's depth $\hat{d}_t = D_t(x_t, y_t)$ [S1, unofficial]. The error is normalized by the source depth $d_s$ [S1, unofficial].
+@@ -52,5 +53,7 @@
+ **Pseudocode:**
+ ```python
+-def compute_geometry_confidence(Ds, Is, Dts, Its, poses, tau, flow_fn):
++import numpy as np
++
++def compute_geometry_confidence(Ds, Is, Dts, Its, poses, Ks, Kt, tau, flow_fn):
+     """
+     Ds: (H, W) source depth
+@@ -59,4 +62,5 @@
+     Its: list of (H, W, 3) target images
+     poses: list of (4, 4) target camera matrices in source camera space
++    Ks, Kt: (3, 3) intrinsic matrices for source and target views
+     tau: float, outlier threshold
+     flow_fn: function taking (Is, It) -> (H, W, 2) flow
+@@ -73,9 +77,12 @@
+         Xs = np.stack([xs, ys, Ds], axis=-1).astype(np.float32)
+         Xs_hom = np.concatenate([Xs, np.ones_like(Xs[..., :1])], axis=-1)
+-        Xt_hom = (pose @ Xs_hom.transpose(3, 0, 1, 2)).transpose(1, 2, 3, 0)
+-        xt = Xt_hom[..., 0] / (Xt_hom[..., 2] + 1e-6)
+-        yt = Xt_hom[..., 1] / (Xt_hom[..., 2] + 1e-6)
++        Xs_hom_t = Xs_hom.transpose(3, 0, 1, 2) # (4, H, W)
++        Xt_hom = (pose @ Xs_hom_t).transpose(1, 2, 3, 0) # (H, W, 4)
+         
+-        # Interpolate reprojected depth dt from source depth using target poses
++        # Convert to pixel coordinates using intrinsics
++        xt = (Kt[0, 0] * Xt_hom[..., 0] / (Xt_hom[..., 2] + 1e-6)) + Kt[0, 2]
++        yt = (Kt[1, 1] * Xt_hom[..., 1] / (Xt_hom[..., 2] + 1e-6)) + Kt[1, 2]
++        
++        # Interpolate reprojected depth dt from source depth
+         dt = interpolate(Ds, xt, yt)
+         # Get target view depth at projected location
+@@ -108,4 +115,22 @@
+     C_combined = weights[3] * C_depth + weights[4] * C_flow
+     return C_depth, C_flow, C_combined
++
++def interpolate(grid, x, y):
++    """Bilinear interpolation for (H, W) grid at (H, W) float coordinates."""
++    x0 = np.floor(x).astype(np.int32)
++    y0 = np.floor(y).astype(np.int32)
++    x1 = x0 + 1
++    y1 = y0 + 1
++    x0 = np.clip(x0, 0, grid.shape[1] - 1)
++    y0 = np.clip(y0, 0, grid.shape[0] - 1)
++    x1 = np.clip(x1, 0, grid.shape[1] - 1)
++    y1 = np.clip(y1, 0, grid.shape[0] - 1)
++    wa = (x - x0)
++    wb = (y - y0)
++    val = (grid[y0, x0] * (1 - wa) * (1 - wb) +
++           grid[y0, x1] * wa * (1 - wb) +
++           grid[y1, x0] * (1 - wa) * wb +
++           grid[y1, x1] * wa * wb)
++    return val
+ ```
+ 
+@@ -118,8 +143,11 @@
+ A method to detect motion without requiring correct depth, by measuring the distance of measured correspondences to their epipolar lines in the target frame. It measures motion evidence by calculating the distance from each measured correspondence to its epipolar line in pixels, using no correct depth, only camera pose, making it robust against noisy monocular depth that defeats rigid-flow residuals. This approach serves as a geometry confidence metric within the broader framework of [Geometry Confidence Measurement](15151-geometry-confidence-measurement.md), distinguishing true motion from depth estimation errors by leveraging the geometric constraint that static points must lie on their epipolar lines regardless of depth.
+ 
++### View Consistency Verification
++A property where an opaque position viewed from one direction must be opaque from all directions, with depth lower-bounded by the known surface position [S2]. It ensures geometric consistency between different viewing rays intersecting the same surface point [S2]. Given two oriented points $(p_1, v_1)$ and $(p_2, v_2)$, assume $(p_1, v_1)$ is visible such that $q_1 = p_1 + d(p_1, v_1)v_1 \in S$ [S2]. Assume there exists $t > 0$ such that the line $\ell_{p_2,v_2}(t) = p_2 + tv_2$ intersects the surface point $q_1$ [S2]. In this case, $(p_2, v_2)$ is visible ($\xi(p_2, v_2) = 1$) and $d(p_2, v_2) \le \|p_2 - q_1\|_2 = t$ [S2].
++
+ ## Operating characteristics
+ - **Time Complexity:** Depends on the number of target views and the cost of the optical flow method. Optical flow is typically $O(W \cdot H)$ per view pair [G].
+ - **Memory Complexity:** Requires storing depth maps, flow fields, and confidence maps for all views [G].
+-- **Strengths:** Explicitly models geometric and photometric consistency, robust to outliers through the $\gamma$ function. The learnable weights $\omega$ adapt the model to automatically focus on correct confidence metrics [S1, unofficial].
++- **Strengths:** Explicitly models geometric and photometric consistency, robust to outliers through the $\gamma$ function [S1, unofficial]. The learnable weights $\omega$ adapt the model to automatically focus on correct confidence metrics [S1, unofficial].
+ - **Limitations:** Requires accurate camera poses and reliable optical flow. Sensitive to the threshold $\tau$. Does not account for textureless regions where flow is unreliable [G].
+ - **When to Use:** Multi-view stereo, neural rendering, and depth estimation pipelines where outlier removal is critical [S1, unofficial].

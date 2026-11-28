@@ -1,0 +1,93 @@
+# Improved Scene Parameterization Function
+Also called: Bounded scene parameterization
+
+## Overview
+The Improved Scene Parameterization Function constrains long-range street view sequences into a bounded range before position encoding, avoiding the heavy range compression of close objects inherent in Normalized Device Coordinates (NDC) [S1, unofficial]. It sets apart from its parent [Scene Parameterization Radius](15160-scene-parameterization-radius.md) by explicitly defining a piecewise contraction function with derivative continuity constraints, tailored for handling complicated ego-car motions and challenging camera settings where standard NDC fails [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: 3D point coordinates $\mathbf{x} \in \mathbb{R}^3$ and a radius parameter $r$.
+- Output: Transformed coordinates $\mathbf{x}' \in \mathbb{R}^3$.
+
+**Data Structures:**
+- No specific data structures; operates on individual point coordinates.
+
+**Parameters:**
+- $r$: Radius parameter deciding the mapping boundary. Typical value: 3, used for background street scenes [S1, unofficial].
+
+**Steps:**
+1. Calculate the Euclidean norm of the input point: $\|\mathbf{x}\|$.
+2. Apply the piecewise mapping function $f(\mathbf{x})$ based on the threshold $r$:
+   - If $\|\mathbf{x}\| \le r$, the point is mapped linearly: $\mathbf{x}' = \frac{\mathbf{x}}{r}$.
+   - If $\|\mathbf{x}\| > r$, the point is mapped inversely proportional to its distance: $\mathbf{x}' = \frac{(2-r)\mathbf{x}}{\|\mathbf{x}\|}$.
+3. The resulting $\mathbf{x}'$ is used for position encoding.
+
+**Formula:**
+The transformation function is defined as [S1, unofficial]:
+
+$$
+f(\mathbf{x}) = 
+\begin{cases} 
+\frac{\mathbf{x}}{r}, & \text{if } \|\mathbf{x}\| \le r \\
+\frac{(2-r)\mathbf{x}}{\|\mathbf{x}\|}, & \text{otherwise}
+\end{cases}
+$$
+
+**Edge Cases and Pitfalls:**
+- The mapping is independent of far bounds, which avoids heavy range compression of close objects [S1, unofficial].
+- Standard NDC fails in scenes with complicated ego-car motions and challenging camera settings [S1, unofficial].
+- To complement this parameterization, frustum sampling from Mip-NeRF is used, sampling along rays evenly in a log scale to get more points close to the near plane [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def improved_scene_parameterization(x, r):
+    """
+    Applies the improved scene parameterization function.
+    
+    Args:
+        x: List or tuple of 3 floats [x, y, z] representing the 3D point.
+        r: Float, radius parameter for the mapping boundary.
+        
+    Returns:
+        List of 3 floats representing the transformed point x'.
+    """
+    # Calculate Euclidean norm ||x||
+    norm_x = math.sqrt(x[0]**2 + x[1]**2 + x[2]**2)
+    
+    # Handle potential division by zero if x is at origin, though typically 
+    # points are sampled away from origin in rendering contexts.
+    if norm_x == 0:
+        return [0.0, 0.0, 0.0]
+
+    if norm_x <= r:
+        # Linear mapping for close objects
+        inv_r = 1.0 / r
+        return [x[0] * inv_r, x[1] * inv_r, x[2] * inv_r]
+    else:
+        # Inverse mapping for far objects
+        # Formula: (2 - r) * x / ||x||
+        factor = (2.0 - r) / norm_x
+        return [x[0] * factor, x[1] * factor, x[2] * factor]
+```
+
+## Subtopics
+
+### [Parameterized Occupancy Fields](21203-parameterized-occupancy-fields.md)
+A coordinate transformation method contracting infinite 3D space into a bounded occupancy field for LiDAR-free 3D occupancy prediction. It differs by explicitly defining piecewise contraction with adjustable ROI proportions and derivative continuity constraints for 3D voxel grid generation, rather than just position encoding for neural fields.
+
+## Operating characteristics
+- **Strengths:** Avoids heavy range compression of close objects, providing more details in rendering close objects controlled by $r$ [S1, unofficial]. It is robust against complicated ego-car motions and challenging camera settings where NDC fails [S1, unofficial].
+- **Limitations:** Not given in the sources.
+- **When to use:** Suitable for unbounded street view sequences with significant ego-motion and varying camera settings [S1, unofficial].
+- **When not to use:** Not given in the sources.
+
+## Background
+The method was introduced in S-NeRF: Neural Radiance Fields for Street Views [S1, unofficial]. It improves upon the scene parameterization function used in Barron et al. (2022) and addresses the failures of Normalized Device Coordinates (NDC) [Mildenhall et al., 2020] in specific street view contexts [S1, unofficial].
+
+## Sources
+[S1] S-NeRF: Neural Radiance Fields for Street Views, https://doi.org/10.48550/arxiv.2303.00749, fetched 2026-10-29 (unofficial)

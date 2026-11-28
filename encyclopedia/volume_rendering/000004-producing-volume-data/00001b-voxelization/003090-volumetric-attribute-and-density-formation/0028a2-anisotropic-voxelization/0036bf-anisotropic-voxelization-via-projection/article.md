@@ -1,0 +1,88 @@
+# Anisotropic Voxelization via Projection
+
+
+## Overview
+Anisotropic Voxelization via Projection addresses the inaccuracy of storing single density values without view direction consideration, which fails to represent correlated media accurately [S1]. It computes view-direction-dependent probabilities of events by projecting 3D voxel block grids onto 2D grids (XY, XZ, YZ planes) to produce anisotropic voxels [S1]. It sets itself apart from isotropic methods by storing directional data per axis via GPU shared memory projection, and from other anisotropic variants by explicitly managing the projection of sample positions to derive axis-specific values rather than simple averaging [S1].
+
+## How it works
+**Inputs:**
+- A 3D voxel grid at a fine resolution (Level 3) [S1].
+- A coarser voxel grid structure (Level 2) composed of blocks containing Level 3 voxels [S1].
+
+**Outputs:**
+- Anisotropic voxels at Level 2, containing directional density/probability information [S1].
+
+**Data Structures:**
+- **Level 3 Voxel:** Contains an identifier and hit status [S1].
+- **Level 2 Block:** Contains a collection of Level 3 voxels [S1].
+- **Projected Grid:** 2D grid (XY, XZ, or YZ) storing projected sample positions and accumulated values per axis [S1].
+
+**Steps:**
+1. Project the 3D voxel block grid to 2D grids (XY, XZ, and YZ planes) using GPU shared memory [S1].
+2. Store the projected position of every sample by block to obtain a value per axis, producing an anisotropic voxel [S1].
+3. Compute occupancy $O$ for second-level voxels by analyzing third-level data: divide the number of different identifiers by the amount of voxels in the third level of voxelization [S1].
+4. Extract eigenvectors and eigenvalues from the covariance matrix of projected areas to define the SGGX matrix $S$ for the distribution [S1].
+
+**Formulas:**
+Occupancy for a second-level voxel:
+$$ O = \frac{\sum_{v \in \text{block}_3} \text{hit}(v)}{\text{Resolution}_3} $$
+Where $\text{hit}(v)$ is 1 if the Level 3 voxel $v$ is occupied, and 0 otherwise, and $\text{Resolution}_3$ is the total number of voxels in the Level 3 block [S1].
+
+Eigenvalues equivalent to projected areas on eigenvector directions:
+$$ \lambda_1 = \sigma(\omega_1), \quad \lambda_2 = \sigma(\omega_2), \quad \lambda_3 = \sigma(\omega_3) $$
+Where $\omega_i$ are eigenvectors and $\lambda_i$ are eigenvalues [S1].
+
+**Parameters:**
+- Voxelization levels: Level 2 (coarse/anisotropic) and Level 3 (fine/occupancy) [S1].
+- Projection planes: XY, XZ, YZ [S1].
+- Typical values not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Empty blocks result in $O=0$ [G].
+- GPU shared memory capacity limits may restrict the maximum block size that can be processed in parallel [G].
+- Samples near block boundaries must be consistently assigned to avoid double-counting or gaps [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def anisotropic_voxelization(level3_voxels, level2_blocks):
+    # Simulate GPU shared memory buffers for XY, XZ, YZ projections
+    projections = {'XY': [], 'XZ': [], 'YZ': []}
+    
+    # Step 1 & 2: Project samples to 2D planes and store by block
+    for block in level2_blocks:
+        for voxel in block.level3_voxels:
+            if voxel.is_hit():
+                pos = voxel.position
+                projections['XY'].append((block.id, pos.x, pos.y, voxel.value))
+                projections['XZ'].append((block.id, pos.x, pos.z, voxel.value))
+                projections['YZ'].append((block.id, pos.y, pos.z, voxel.value))
+                
+    # Step 3: Compute occupancy O for second-level voxels
+    for block in level2_blocks:
+        hit_count = sum(1 for v in block.level3_voxels if v.is_hit())
+        total_voxels = len(block.level3_voxels)
+        block.occupancy = hit_count / total_voxels if total_voxels > 0 else 0.0
+        
+    # Step 4: Derive anisotropic distribution
+    # Note: The exact algorithm to combine projections into the SGGX matrix S 
+    # from eigenvalues is not detailed in the sources [S1].
+    for block in level2_blocks:
+        block.anisotropic_data = {'occupancy': block.occupancy, 'projections': projections}
+        
+    return level2_blocks
+```
+
+## Subtopics
+
+### [COM Repeat Projection](13913-com-repeat-projection.md)
+[COM Repeat Projection](13913-com-repeat-projection.md): Projects volumetric data onto a 2D grid while accounting for shifts caused by non-nadir viewing angles. It sets itself apart by repeating the data array to handle spatial extent expansion induced by the Viewing Zenith Angle, then interpolating back to the original coordinate system. Choose it when single-view projections cause geometric distortion in thin or angled structures.
+
+## Operating characteristics
+
+## Background
+Originated in the context of fast voxelization for microgeometry rendering, specifically addressing the limitations of single-value density storage [S1]. It builds on concepts from Crassin et al. regarding 3D to 2D projection of voxel grids [S1]. The method is part of a broader effort to improve volumetric rendering accuracy for correlated media [S1].
+
+## Sources
+[S1] Fast Voxelization and Level of Detail for Microgeometry Rendering, https://doi.org/10.48550/arxiv.2604.13191, fetched 2026-10-26

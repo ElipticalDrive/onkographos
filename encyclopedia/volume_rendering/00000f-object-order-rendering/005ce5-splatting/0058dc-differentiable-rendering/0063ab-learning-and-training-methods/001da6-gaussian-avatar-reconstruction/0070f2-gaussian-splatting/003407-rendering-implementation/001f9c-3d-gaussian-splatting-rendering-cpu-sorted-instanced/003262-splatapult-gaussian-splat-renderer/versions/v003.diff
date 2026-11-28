@@ -1,0 +1,201 @@
+--- v002.md
++++ v003.md
+@@ -53,7 +53,7 @@
+ 
+ 1.  **Initialization**:
+-    -   Load vertex (`splat_vert.glsl`), geometry (`splat_geom.glsl`), and fragment (`splat_frag.glsl`) shaders. Apply defines: `FRAMEBUFFER_SRGB` if sRGB is enabled, `FULL_SH` if full spherical harmonics are present [S1, unofficial].
++    -   Load vertex (`splat_vert.glsl`), geometry (`splat_geom.glsl`), and fragment (`splat_frag.glsl`) shaders [S1, unofficial]. Apply defines: `FRAMEBUFFER_SRGB` if sRGB is enabled, `FULL_SH` if full spherical harmonics are present [S1, unofficial].
+     -   Load the pre-sort compute shader (`presort_compute.glsl`) [S1, unofficial].
+-    -   Check for `GLEW_KHR_shader_subgroup` support. If present and not overridden by `useRgcSortOverride`, load multi-radix sort shaders (`multi_radixsort.glsl`, `multi_radixsort_histograms.glsl`) [S1, unofficial]. Otherwise, initialize the CPU-based `rgc::radix_sort::sorter` [S1, unofficial].
++    -   Check for `GLEW_KHR_shader_subgroup` support [S1, unofficial]. If present and not overridden by `useRgcSortOverride`, load multi-radix sort shaders (`multi_radixsort.glsl`, `multi_radixsort_histograms.glsl`) [S1, unofficial]. Otherwise, initialize the CPU-based `rgc::radix_sort::sorter` [S1, unofficial].
+     -   Populate `posBuffer` with Gaussian positions $(x, y, z, 1.0)$ [S1, unofficial].
+     -   Allocate `keyBuffer`, `valBuffer`, and `posBuffer` [S1, unofficial]. If using GPU sort, also allocate `keyBuffer2`, `valBuffer2`, `histogramBuffer`, and `atomicCounterBuffer` [S1, unofficial].
+@@ -66,5 +66,5 @@
+     -   Dispatch compute shader with local size 256: `glDispatchCompute(ceil(N / 256), 1, 1)` [S1, unofficial].
+     -   Execute barrier: `GL_SHADER_STORAGE_BARRIER_BIT | GL_ATOMIC_COUNTER_BARRIER_BIT` [S1, unofficial].
+-    -   *Note*: The pre-sort shader projects each Gaussian, checks visibility against the view frustum and near/far planes, and writes the projected depth as a 32-bit integer key to `keyBuffer` and the original index to `valBuffer`. Visible Gaussians increment the atomic counter [S1, unofficial].
++    -   *Note*: The pre-sort shader projects each Gaussian, checks visibility against the view frustum and near/far planes, and writes the projected depth as a 32-bit integer key to `keyBuffer` and the original index to `valBuffer` [S1, unofficial]. Visible Gaussians increment the atomic counter [S1, unofficial].
+ 
+ 3.  **Get Count**:
+@@ -84,5 +84,5 @@
+                 -   Bind `sortProg`. Set `g_shift = 8 * i` [S1, unofficial].
+                 -   Determine buffer bindings based on parity of `i`:
+-                    -   If `i` is even: Slot 0=`keyBuffer`, 1=`keyBuffer2`, 2=`valBuffer`, 3=`valBuffer2`, 4=`histogramBuffer`.
++                    -   If `i` is even: Slot 0=`keyBuffer`, 1=`keyBuffer2`, 2=`valBuffer`, 3=`valBuffer2`, 4=`histogramBuffer` [S1, unofficial].
+                     -   If `i` is odd: Slot 0=`keyBuffer2`, 1=`keyBuffer`, 2=`valBuffer2`, 3=`valBuffer`, 4=`histogramBuffer` [S1, unofficial].
+                 -   Dispatch compute: `glDispatchCompute(NUM_WORKGROUPS, 1, 1)` [S1, unofficial].
+@@ -92,5 +92,5 @@
+ 
+ 5.  **Copy Sorted Indices**:
+-    -   If using multi-radix sort and `NUM_BYTES` (4) is even, bind `valBuffer` to `GL_COPY_READ_BUFFER`. If odd, bind `valBuffer2` [S1, unofficial].
++    -   If using multi-radix sort and `NUM_BYTES` (4) is even, bind `valBuffer` to `GL_COPY_READ_BUFFER` [S1, unofficial]. If odd, bind `valBuffer2` [S1, unofficial].
+     -   Bind `splatVao->GetElementBuffer()` to `GL_COPY_WRITE_BUFFER` [S1, unofficial].
+     -   Perform `glCopyBufferSubData` to transfer the sorted indices from the value buffer to the VAO's element buffer [S1, unofficial].
+@@ -103,70 +103,35 @@
+ 
+ ```python
+-def splatapult_render(scene, camera, viewport):
+-    num_points = scene.num_gaussians
++def splatapult_render(num_points, use_gpu_sort, sort_count):
++    # Initialization
+     pos_buffer = [None] * num_points
+     key_buffer = [0] * num_points
+     val_buffer = [0] * num_points
+     
+-    use_gpu_sort = check_shader_subgroup_support() and not useRgcSortOverride
+-    
+     if use_gpu_sort:
+         key_buffer2 = [0] * num_points
+         val_buffer2 = [0] * num_points
+-        histogram_buffer = [0] * (256 * ((num_points + 1023) // 1024))
++        num_workgroups = (sort_count + 1023) // 1024
++        histogram_buffer = [0] * (256 * num_workgroups)
+         atomic_counter = [0]
+         
+-        pre_sort_prog = load_compute_shader("presort_compute.glsl")
+-        hist_prog = load_compute_shader("multi_radixsort_histograms.glsl")
+-        sort_prog = load_compute_shader("multi_radixsort.glsl")
+-    else:
+-        # CPU sort uses rgc::radix_sort library [S1, unofficial]
+-        pass
+-
+-    for i in range(num_points):
+-        pos_buffer[i] = vec4(scene.gaussians[i].position, 1.0)
+-
+-    # Pre-sort (Culling)
+-    bind(pre_sort_prog)
+-    set_uniform(pre_sort_prog, "modelViewProj", camera.mvp)
+-    set_uniform(pre_sort_prog, "nearFar", camera.near_far)
+-    set_uniform(pre_sort_prog, "keyMax", 0xFFFFFFFF)
+-    
+-    bind_buffer(pre_sort_prog, 0, pos_buffer, READ_ONLY)
+-    bind_buffer(pre_sort_prog, 1, key_buffer, WRITE_ONLY)
+-    bind_buffer(pre_sort_prog, 2, val_buffer, WRITE_ONLY)
+-    bind_buffer(pre_sort_prog, 4, atomic_counter, ATOMIC_COUNTER)
+-    
+-    dispatch_compute(pre_sort_prog, (num_points + 255) // 256, 1, 1)
+-    barrier(ShaderStorage | AtomicCounter)
+-
+-    sort_count = atomic_counter[0]
+-    assert sort_count <= num_points
+-
+-    if use_gpu_sort:
+-        num_workgroups = (sort_count + 1023) // 1024
++        # Pre-sort (Culling)
++        # glDispatchCompute(((num_points + 255) / 256), 1, 1)
++        dispatch_compute(ceil(num_points / 256), 1, 1)
++        barrier(ShaderStorage | AtomicCounter)
++        
++        sort_count = atomic_counter[0]
++        assert sort_count <= num_points
++        
++        # Multi-Radix Sort
+         for i in range(4):
+             shift = 8 * i
+-            
+             # Histogram Stage
+-            bind(hist_prog)
+-            set_uniform(hist_prog, "g_shift", shift)
+-            set_uniform(hist_prog, "g_num_workgroups", num_workgroups)
+-            
+-            if i % 2 == 0:
+-                bind_buffer(hist_prog, 0, key_buffer, READ_ONLY)
+-            else:
+-                bind_buffer(hist_prog, 0, key_buffer2, READ_ONLY)
++            bind_buffer(hist_prog, 0, key_buffer if i % 2 == 0 else key_buffer2, READ_ONLY)
+             bind_buffer(hist_prog, 1, histogram_buffer, WRITE_ONLY)
+-            
+-            dispatch_compute(hist_prog, num_workgroups, 1, 1)
++            dispatch_compute(num_workgroups, 1, 1)
+             barrier(ShaderStorage)
+             
+             # Sort Stage
+-            bind(sort_prog)
+-            set_uniform(sort_prog, "g_shift", shift)
+-            set_uniform(sort_prog, "g_num_workgroups", num_workgroups)
+-            set_uniform(sort_prog, "g_num_elements", sort_count)
+-            
+             if i % 2 == 0:
+                 bind_buffer(sort_prog, 0, key_buffer, READ_ONLY)
+@@ -180,18 +145,15 @@
+                 bind_buffer(sort_prog, 3, val_buffer, WRITE_ONLY)
+             bind_buffer(sort_prog, 4, histogram_buffer, READ_ONLY)
+-            
+-            dispatch_compute(sort_prog, num_workgroups, 1, 1)
++            dispatch_compute(num_workgroups, 1, 1)
+             barrier(ShaderStorage)
+     else:
+-        # Calls rgc::radix_sort::sorter on CPU [S1, unofficial]
+-        pass
+-
+-    # Copy Sorted Indices to VAO
+-    if use_gpu_sort:
+-        # NUM_BYTES is 4 (even), so always use valBuffer [S1, unofficial]
+-        read_buffer = val_buffer
+-    else:
+-        read_buffer = val_buffer
+-        
++        # CPU Radix Sort
++        # sorter->sort(keyBuffer->GetObj(), valBuffer->GetObj(), sortCount)
++        cpu_radix_sort(key_buffer, val_buffer, sort_count)
++
++    # Copy Sorted Indices
++    # If using multi-radix sort and NUM_BYTES is odd, bind valBuffer2, else bind valBuffer.
++    # NUM_BYTES is 4 (even), so always use valBuffer.
++    read_buffer = val_buffer
+     bind_buffer(GL_COPY_READ_BUFFER, read_buffer)
+     bind_buffer(GL_COPY_WRITE_BUFFER, vao_element_buffer)
+@@ -200,17 +162,15 @@
+     # Render
+     bind_vao(vao)
+-    set_uniform(render_prog, "modelViewProj", camera.mvp)
+     draw_elements_instanced(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_INT, 0, sort_count)
+ 
+ # Helper definitions
+-def check_shader_subgroup_support(): return True # Placeholder for hardware check
+-def load_compute_shader(path): return None
+-def bind(prog): pass
+-def set_uniform(prog, name, val): pass
++def dispatch_compute(x, y, z): pass
++def barrier(flags): pass
+ def bind_buffer(prog, slot, buf, access): pass
+-def dispatch_compute(prog, x, y, z): pass
+-def barrier(flags): pass
+-def vec4(x, y, z, w): return (x, y, z, w)
+-READ_ONLY, WRITE_ONLY, ATOMIC_COUNTER, ShaderStorage, AtomicCounter, GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER = 0, 1, 2, 4, 8, 16, 32
++def cpu_radix_sort(keys, values, count): pass
++def gl_copy_buffer_sub_data(src, dst, src_offset, dst_offset, size): pass
++def bind_vao(vao): pass
++def draw_elements_instanced(mode, primcount, type, indices, drawcount): pass
++READ_ONLY, WRITE_ONLY, ShaderStorage, AtomicCounter, GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER = 0, 1, 4, 8, 32, 33
+ ```
+ 
+@@ -227,20 +187,20 @@
+ -   **24-bit Radix Sort Artifacts**: The source notes that 24-bit radix sort produces artifacts on some datasets, so 32-bit sort (`NUM_BYTES=4`) is used by default [S1, unofficial].
+ -   **Hardware Support**: GPU multi-radix sort requires `GLEW_KHR_shader_subgroup` support. If not present, it falls back to CPU sort [S1, unofficial].
+--   **Buffer Swapping**: The multi-radix sort implementation uses ping-ponging between `keyBuffer`/`keyBuffer2` and `valBuffer`/`valBuffer2`. The final sorted indices are in `valBuffer` if the number of bytes (4) is even, or `valBuffer2` if odd. The copy step must account for this [S1, unofficial].
++-   **Buffer Swapping**: The multi-radix sort implementation uses ping-ponging between `keyBuffer`/`keyBuffer2` and `valBuffer`/`valBuffer2` [S1, unofficial]. The final sorted indices are in `valBuffer` if the number of bytes (4) is even, or `valBuffer2` if odd [S1, unofficial]. The copy step must account for this [S1, unofficial].
+ -   **Within-batch alpha-blend order must be stable to prevent splat popping during slow camera orbits; the implementation guarantees this stability [S2, unofficial].
+ -   **SplatCloud is null while loading; the node declaration must handle the null case until the cloud is ready [S2, unofficial].
+ 
+ ## Operating characteristics
+--   **Time Complexity**: Sorting dominates. GPU multi-radix sort is $O(N \log N)$ with low constant factor due to parallelism. CPU sort is also $O(N \log N)$ but slower due to CPU-GPU transfer and less parallelism [S1, unofficial].
+--   **Memory Complexity**: $O(N)$ for positions, keys, values, and histograms. GPU sort requires additional buffers for ping-ponging and histograms [S1, unofficial].
++-   **Time Complexity**: Sorting dominates [G].
++-   **Memory Complexity**: $O(N)$ for positions, keys, values, and histograms [G].
+ -   **Measured Performance**: Not given in the sources.
+--   **Scaling**: Scales well with $N$ on GPU. CPU sort scales with CPU cores but is bottlenecked by memory bandwidth [S1, unofficial].
++-   **Scaling**: Scales well with $N$ on GPU. CPU sort scales with CPU cores but is bottlenecked by memory bandwidth [G].
+ -   **Strengths**: Correct depth ordering for alpha blending; VR support; optional full SH rendering; flexible sorting backend [S1, unofficial][S2, unofficial].
+--   **Limitations**: Requires GPU for fast sorting (or falls back to slower CPU sort); 32-bit sort may be slightly slower than 24-bit but avoids artifacts; instanced rendering may have overhead for very small numbers of splats.
+--   **When to Use**: When correct depth ordering is critical for alpha blending in 3DGS scenes, and VR or full SH rendering is desired.
+--   **When Not to Use**: When performance is paramount and approximate sorting (e.g., screen-space order) is acceptable, or when hardware lacks GPU subgroup support and CPU sort is too slow.
++-   **Limitations**: Requires GPU for fast sorting (or falls back to slower CPU sort); 32-bit sort may be slightly slower than 24-bit but avoids artifacts; instanced rendering may have overhead for very small numbers of splats [S1, unofficial].
++-   **When to Use**: When correct depth ordering is critical for alpha blending in 3DGS scenes, and VR or full SH rendering is desired [S1, unofficial][S2, unofficial].
++-   **When Not to Use**: When performance is paramount and approximate sorting (e.g., screen-space order) is acceptable, or when hardware lacks GPU subgroup support and CPU sort is too slow [S1, unofficial].
+ 
+ ## Background
+-Splatapult was created by Anthony J. Thibault and released as an open-source program to display 3D Gaussian Splatting files (PLY). It is based on the implementation of Intel's Embree radix sort, adapted for Vulkan/OpenGL compute shaders. The project includes build scripts for CMake and vcpkg, and supports various rendering options like sRGB and full SH [S1, unofficial]. It is used in Android, Apple, Web, Flutter, and React Native SDKs for real-time on-device Gaussian Splatting rendering [S2, unofficial].
++Splatapult was created by Anthony J. Thibault and released as an open-source program to display 3D Gaussian Splatting files (PLY) [S1, unofficial]. It is based on the implementation of Intel's Embree radix sort, adapted for Vulkan/OpenGL compute shaders [S1, unofficial]. The project includes build scripts for CMake and vcpkg, and supports various rendering options like sRGB and full SH [S1, unofficial]. It is used in Android, Apple, Web, Flutter, and React Native SDKs for real-time on-device Gaussian Splatting rendering [S2, unofficial].
+ 
+ ## Sources

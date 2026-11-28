@@ -1,0 +1,811 @@
+A physically-based path tracer in safe Rust, USD-native, capable of rendering production datasets like Moana and ALab. - MaterialX volume materials, Typhoon's way by doubleailes · Pull Request #192 · doubleailes/Crust
+
+MaterialX volume materials, Typhoon's way by doubleailes · Pull Request #192 · doubleailes/Crust · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+doubleailes
+commented
+Oct 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+A USD Material's volume terminal is now the medium inside the geometry it is bound to — the approach of NVIDIA's Typhoon (hdEmbree, typhoon/main of NVIDIA-Omniverse/OpenUSD), which has no UsdVolVolume support and renders every volume this way.
+MaterialX volume terminals (crust-mtlx). volume, volumematerial, mix of volume shaders, and the VDF tree (anisotropic_vdf, absorption_vdf, mix / add / multiply) with Typhoon's combinators — coefficients linear, anisotropy weighted by each branch's scattering — built as program ops, so textured VDFs work and the JIT needs nothing new. compile_terminals builds a material from its surface and volume terminals (taking the Host, and reading a surfacematerial's displacement as compile does).
+Volume + surface: the volume is the interior a ray refracting into a thick transmissive surface carries, replacing the one the surface's transmission_* inputs describe (ApplyVolumeToSurfaceClosure).
+Volume alone: a medium boundary (Material::is_medium_boundary / boundary_medium, World::has_medium_boundaries). The integrator crosses it without a vertex or depth, travels in its medium inside (Typhoon's single-owner MediumState; every ray the path traces carries it), runs NEE + MIS at scatters there (PrevVertex::Phase pairing, LPE-routed like a region scatter, with the vertex's light-sample count as main's multi-sample NEE gives a region scatter), and shadow rays cross boundaries paying Beer–Lambert (through_boundaries, which also handles cutouts and thin walls; the light cache sees a boundary as clear).
+Inline MaterialX in USD. ND_* shader networks (outputs:mtlx:surface / outputs:mtlx:volume) are translated node for node into crust-mtlx documents (scene/usd_import/mtlx_network.rs), literals read through the same parse_literal as .mtlx files, connections followed through NodeGraph outputs and interface inputs. mtlx is the last surface context, so a stage that renders through its preview surface is unchanged.
+Fix: volume-region tracking read the ray parameter as a distance. Camera rays are not unit (length = focus distance, 10 by default), so crust:volume fog seen from the camera was ~10× too thin and the image depended on focusDistance. fog, smoke and aovs_lpe now render denser (aovs_lpe is bit-identical to main with its region removed); every other sample is bit-identical.
+Sample samples/materialx_volume.usda: a volume-only fog cube with a ball inside, a glass sphere with a volume interior, an inline OpenPBR copper.
+Rebased as a single commit onto main at ab9a84b (multi-sample NEE, the LastCrossing re-hit guard, the openusd workaround retirement); the earlier merge commits of main into this branch are folded in.
+Performance
+The integrator is monomorphised on a MEDIA const (advance_pixel / trace_path / shadow_transmittance / volume_nee), chosen per render from World::has_medium_boundaries, so a world without boundaries runs a copy with none of their branches: cornellbox +0.04% instructions (callgrind, 2 spp, 4,235.8M → 4,237.6M), bit-identical. Run-time guards instead cost +0.7%.
+Testing
+tests/volume_materials.rs: Beer–Lambert through an absorbing boundary exact to the 0.001 restart epsilon, for unit and ×10 directions; white furnaces at 1 within 0.025 under power MIS, light-only and BSDF-only, and with a white Lambertian ball inside the fog; inline surface, preview-surface precedence, surface + volume interior. usd_scene.rs::loads_materialx_volume_usda; crust-mtlx VDF unit tests; nodedef-name parse tests; tracking_measures_distance_not_the_ray_parameter.
+Mesh boundary vs the same medium as a crust:volume region: agree within 0.3% (the restart epsilon); difference falls like noise across spp.
+Every sample without a boundary or region is bit-identical to main at 16 spp (re-checked on this rebase: 32 of 36 samples identical; fog, smoke, aovs_lpe and the new materialx_volume differ, as expected).
+cargo fmt --check, cargo clippy --workspace --all-targets -D warnings and cargo test --workspace on the pinned toolchain; zola build (0.21) checks internal links; openspec validate add-mtlx-volume-materials --strict passes.
+Known gaps (documented)
+One medium owner at a time (no nesting), a camera starting inside a boundary does not see it, boundaries must be closed with outward normals, the medium is homogeneous per entry, volume's edf is ignored, and light path expressions don't record pass-throughs before a boundary crossing (beauty unaffected). Pre-existing and documented, not fixed: under streaming import (≥ 4 top-level prims) a Material that is itself a top-level sibling of its geometry does not resolve.
+Records: openspec change add-mtlx-volume-materials; materials, rendering and usd-scene-import design records; docs/architecture.md invariant; README; site usd/materials.md, usd/volumes.md, architecture/limitations.md.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01VVLQEQJVw3y1YseWz4CH4k
+qodo-code-review
+Bot
+commented
+Oct 2, 2026
+Copy link
+Copy Markdown
+Contributor
+PR Summary by Qodo
+Render MaterialX volume materials and inline USD networks
+✨ Enhancement 🐞 Bug fix 🧪 Tests 📝 Documentation 🕐 40+ Minutes
+AI Description
+```
+• Interpret MaterialX volume terminals as interiors or transparent medium boundaries, enabling
+ volumetric rendering inside bound geometry.
+• Import inline USD MaterialX networks while preserving preview-surface precedence.
+• Correct volume-region attenuation for non-unit camera rays; add rendering tests, a sample, and
+ documentation.
+```
+Diagram
+```
+graph TD
+  U["USD terminals"] --> I["Network translator"] --> C["MaterialX compiler"] --> M["Material closures"] --> D{"Volume only?"}
+  D -->|Yes| B["Medium boundary"] --> P["Path tracer"] --> S["Shadow transmittance"]
+  D -->|No| P
+```
+Loading
+High-Level Assessment
+The following are alternative approaches to this PR:
+1. Represent volume-only materials as existing volume regions
+➕ Reuses region sampling and transmittance code.
+➖ Existing regions do not provide arbitrary closed-mesh boundaries or the same surface-interior behavior.
+2. Track a priority-ordered stack of interior media
+➕ Could model nested and overlapping volume materials.
+➖ Substantially expands transport and visibility complexity beyond the intended Typhoon-compatible behavior.
+Recommendation: Keep the shared MaterialX compiler and dedicated boundary transport: they support inline and file-backed networks without duplicating shading semantics. The single-owner model is a reasonable scoped choice, with nesting and cameras starting inside boundaries documented as limitations.
+Files changed (32) +2805 / -108
+Enhancement (15) +1764 / -93
+list.rsPreserve light-selection inlining +5/-1
+Preserve light-selection inlining
+```
+• Forces inlining of light-index selection to limit the cost of the expanded integrator.
+```
+crates/crust-core/src/light/list.rs
+light_cache.rsTreat medium boundaries as visible during cache training +11/-10
+Treat medium boundaries as visible during cache training
+```
+• Routes visibility checks through boundary-aware traversal instead of treating every boundary hit as opaque.
+```
+crates/crust-core/src/light_cache.rs
+mod.rsShare interior-medium evaluation +21/-8
+Share interior-medium evaluation
+```
+• Extracts coefficient sanitization and anisotropy clamping for both transmitting surfaces and volume-only boundaries.
+```
+crates/crust-core/src/material/closure/mod.rs
+material.rsAdd medium-boundary material interface +22/-0
+Add medium-boundary material interface
+```
+• Adds methods to identify transparent medium boundaries and evaluate their interior medium at a hit.
+```
+crates/crust-core/src/material/material.rs
+materialx.rsBuild volume-only MaterialX materials +24/-2
+Build volume-only MaterialX materials
+```
+• Exposes boundary media from compiled volume networks and accepts already-compiled inline MaterialX graphs.
+```
+crates/crust-core/src/material/materialx.rs
+ray.rsAllow a ray's carried medium to be replaced +7/-0
+Allow a ray's carried medium to be replaced
+```
+• Adds a builder method used when boundary crossings or enclosing media change a ray's medium.
+```
+crates/crust-core/src/ray.rs
+rt_world.rsRecord whether the world contains medium boundaries +14/-0
+Record whether the world contains medium boundaries
+```
+• Computes a boundary flag at commit so scenes without boundaries retain fast visibility and tracing paths.
+```
+crates/crust-core/src/rt_world.rs
+materials.rsResolve inline MaterialX surface and volume terminals +115/-18
+Resolve inline MaterialX surface and volume terminals
+```
+• Imports compatible volume and surface networks through the shared compiler. Keeps universal and preview surfaces ahead of the MaterialX surface context.
+```
+crates/crust-core/src/scene/usd_import/materials.rs
+mod.rsRegister the inline MaterialX importer +2/-0
+Register the inline MaterialX importer
+```
+• Adds the network-translation module to the USD import pipeline.
+```
+crates/crust-core/src/scene/usd_import/mod.rs
+mtlx_network.rsTranslate USD Shader networks into MaterialX documents +474/-0
+Translate USD Shader networks into MaterialX documents
+```
+• Maps nodedef IDs and USD literals to MaterialX nodes, follows graph and interface connections, and resolves asset paths. Adds nodedef and type-mapping tests.
+```
+crates/crust-core/src/scene/usd_import/mtlx_network.rs
+path.rsTrace paths and shadows through medium boundaries +423/-27
+Trace paths and shadows through medium boundaries
+```
+• Tracks a single owning enclosure across boundary crossings without spending path depth. Adds medium attenuation, scatter NEE/MIS, and boundary-aware shadow traversal.
+```
+crates/crust-core/src/tracer/path.rs
+bsdf.rsCompile volume shaders and VDF combinations +359/-18
+Compile volume shaders and VDF combinations
+```
+• Adds volume-shader traversal and mix, add, and multiply operations with scattering-weighted anisotropy. Tests vacuum, combined VDFs, and replacement of a surface interior.
+```
+crates/crust-mtlx/src/bsdf.rs
+lib.rsCompile paired MaterialX terminals +56/-9
+Compile paired MaterialX terminals
+```
+• Adds an entry point for separate surface and volume terminals, supports volumematerial roots, and marks volume-only results.
+```
+crates/crust-mtlx/src/lib.rs
+parse.rsConstruct MaterialX documents from translated nodes +16/-0
+Construct MaterialX documents from translated nodes
+```
+• Indexes externally built nodes the same way as nodes parsed from MaterialX XML.
+```
+crates/crust-mtlx/src/parse.rs
+materialx_volume.usdaAdd an inline MaterialX volume scene +215/-0
+Add an inline MaterialX volume scene
+```
+• Provides a fog cube containing a ball, glass with a scattering interior, and an inline copper surface.
+```
+samples/materialx_volume.usda
+Bug fix (1) +66 / -3
+volume.rsMeasure volume-region tracking in physical distance +66/-3
+Measure volume-region tracking in physical distance
+```
+• Scales free flights and transmittance by ray-direction length, correcting fog density for non-unit camera rays. Adds regression coverage.
+```
+crates/crust-core/src/volume.rs
+Tests (2) +435 / -0
+usd_scene.rsVerify the MaterialX volume sample imports +43/-0
+Verify the MaterialX volume sample imports
+```
+• Checks the sample's fog boundary, mixed medium coefficients, glass interior, and inline copper surface.
+```
+crates/crust-core/tests/usd_scene.rs
+volume_materials.rsExercise volume-boundary transport and USD precedence +392/-0
+Exercise volume-boundary transport and USD precedence
+```
+• Tests Beer–Lambert attenuation, scattering energy conservation under three sampling strategies, surfaces inside fog, glass interiors, inline surfaces, and preview precedence.
+```
+crates/crust-core/tests/volume_materials.rs
+Documentation (14) +540 / -12
+README.mdDescribe volume materials and inline MaterialX +21/-3
+Describe volume materials and inline MaterialX
+```
+• Documents inline USD networks, volume terminals, medium-boundary behavior, and their nesting and camera limitations.
+```
+README.md
+architecture.mdRecord boundary transport pairing invariant +7/-0
+Record boundary transport pairing invariant
+```
+• Documents why path crossings, shadow crossings, and scatter MIS must agree on the medium.
+```
+docs/architecture.md
+design.mdRecord volume-material design decisions +34/-0
+Record volume-material design decisions
+```
+• Summarizes the Typhoon-compatible medium model, compiler strategy, transport rules, and inline-network precedence.
+```
+openspec/changes/add-mtlx-volume-materials/design.md
+proposal.mdPropose MaterialX volume-material support +58/-0
+Propose MaterialX volume-material support
+```
+• States the unsupported USD use cases, intended behavior, capabilities, and affected components.
+```
+openspec/changes/add-mtlx-volume-materials/proposal.md
+spec.mdSpecify MaterialX volumes and inline networks +63/-0
+Specify MaterialX volumes and inline networks
+```
+• Defines volume composition, surface-interior replacement, boundary behavior, and inline-network requirements.
+```
+openspec/changes/add-mtlx-volume-materials/specs/materials/spec.md
+spec.mdSpecify boundary transport and distance tracking +39/-0
+Specify boundary transport and distance tracking
+```
+• Defines crossing, scattering, shadow, and non-unit-ray behavior with absorption and furnace scenarios.
+```
+openspec/changes/add-mtlx-volume-materials/specs/rendering/spec.md
+spec.mdSpecify USD volume-terminal import +15/-0
+Specify USD volume-terminal import
+```
+• Defines MaterialX volume pairing, fallback when a surface is incompatible, and volume-only bindings.
+```
+openspec/changes/add-mtlx-volume-materials/specs/usd-scene-import/spec.md
+tasks.mdTrack implementation and verification +22/-0
+Track implementation and verification
+```
+• Records completed compiler, transport, importer, testing, sample, and documentation work.
+```
+openspec/changes/add-mtlx-volume-materials/tasks.md
+design.mdDocument MaterialX volume compilation and import +80/-0
+Document MaterialX volume compilation and import
+```
+• Explains VDF composition, surface and boundary semantics, inline nodedef translation, precedence, and supported limits.
+```
+openspec/specs/materials/design.md
+design.mdDocument boundary transport and tracking correction +88/-3
+Document boundary transport and tracking correction
+```
+• Details enclosure state, path and shadow accounting, MIS, performance gating, limitations, and the camera-ray distance fix.
+```
+openspec/specs/rendering/design.md
+design.mdNote streaming-import binding limitation +8/-0
+Note streaming-import binding limitation
+```
+• Explains why bindings to materials in sibling masked chunks may not resolve and outlines a possible future fix.
+```
+openspec/specs/usd-scene-import/design.md
+limitations.mdList medium-boundary limitations +6/-2
+List medium-boundary limitations
+```
+• Documents the single-medium model, closed-mesh requirement, and behavior when a camera starts inside.
+```
+site/content/docs/architecture/limitations.md
+materials.mdExplain inline and volume MaterialX authoring +95/-1
+Explain inline and volume MaterialX authoring
+```
+• Adds USD examples, supported VDF nodes, boundary and glass behavior, and geometry requirements.
+```
+site/content/docs/usd/materials.md
+volumes.mdDistinguish volume regions from volume materials +4/-3
+Distinguish volume regions from volume materials
+```
+• Links existing region documentation to the new closed-mesh volume-material workflow.
+```
+site/content/docs/usd/volumes.md
+qodo-code-review
+Bot
+commented
+Oct 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Code Review by Qodo
+🐞 Bugs (0) 📘 Rule violations (0) 🔗 Cross-repo conflicts (0) 📜 Skill insights (0)
+1. Fogged lights train as unobstructed ✗ Dismissed
+Description
+```
+light_cache::train sends shadow rays that cross medium boundaries through cutout_through, which
+accounts for cutout opacity but not attenuation inside the boundary. When a receiver’s shadow ray
+crosses absorbing fog, training can record a light behind it as fully visible even though the
+integrator attenuates that connection.
+```
+Code
+crates/crust-core/src/light_cache.rs[R248-249]
+```
++                                        if world.has_cutouts() || world.has_medium_boundaries() {
++                                            crate::tracer::cutout_through(
+```
+Relevance
+●●● Strong
+```
+Recent precedent explicitly accepted missing volume attenuation in shadow transmittance and unified
+lighting visibility.
+```
+PR-#191
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The added boundary condition routes light-cache training visibility through cutout_through, which
+crosses the boundary without applying transmittance for its interior medium. The integrator’s
+medium_shadow instead attenuates interior segments, establishing why the training contribution
+differs for a ray through absorbing fog.
+```
+Rule 2285949: Shadow rays must use unified shadow_transmittance for surfaces and volumes
+crates/crust-core/src/light_cache.rs[245-264]
+crates/crust-core/src/tracer/path.rs[720-734]
+crates/crust-core/src/light_cache.rs[244-266]
+crates/crust-core/src/tracer/path.rs[669-702]
+crates/crust-core/src/tracer/path.rs[720-730]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Light-cache training treats medium boundaries as transparent cutouts and omits attenuation inside absorbing media.
+
+## Fix Focus Areas
+- crates/crust-core/src/light_cache.rs[244-266]
+- crates/crust-core/src/tracer/path.rs[517-549]
+- crates/crust-core/src/tracer/path.rs[656-702]
+- crates/crust-core/src/tracer/path.rs[720-730]
+
+## Recommended Fix
+Use the integrator’s shared volume-aware shadow-transmittance logic for training visibility so each crossed boundary medium attenuates the training contribution, rather than relying on cutout-only visibility. Test light selection with a receiver and light on opposite sides of absorbing fog.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+2. Deep boundary stacks lose lighting ✓ Resolved
+Description
+```
+medium_shadow and pass_boundaries stop at the 256-crossing cutout limit, while the forward path
+permits 4096 medium-boundary crossings. When a light lies beyond the 256th boundary, shadow
+visibility becomes zero and depth-exhausted emission lookup drops the hit even though a normal path
+can reach it.
+```
+Code
+crates/crust-core/src/tracer/path.rs[670]
+```
++    for crossing in 0..=MAX_CUTOUT_CROSSINGS {
+```
+Relevance
+●●● Strong
+```
+Recent maintainability precedents accept correcting stale or duplicated implementation documentation
+and comments.
+```
+PR-#190
+PR-#147
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The forward walker uses MAX_PATH_CROSSINGS, but each new lighting traversal uses
+MAX_CUTOUT_CROSSINGS and explicitly returns zero or clears the hit on exhaustion.
+```
+crates/crust-core/src/tracer/path.rs[560-564]
+crates/crust-core/src/tracer/path.rs[670-684]
+crates/crust-core/src/tracer/path.rs[1324-1337]
+crates/crust-core/src/tracer/path.rs[1742-1766]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Shadow and depth-exhausted traversal reject medium-boundary paths that the forward walker permits.
+## Fix Focus Areas
+- crates/crust-core/src/tracer/path.rs[670-684]
+- crates/crust-core/src/tracer/path.rs[1742-1766]
+- crates/crust-core/src/tracer/path.rs[560-564]
+## Recommended Fix
+Allow both helpers to cross up to the path's medium-boundary limit, retaining a separate cutout limit if needed. Test lighting beyond 256 boundaries.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+3. Light-cache training stops at fog boundaries ✓ Resolved
+Description
+```
+light_cache::train treats each closest hit as a shading vertex without checking
+is_medium_boundary(), even though its shadow test now crosses medium boundaries. When a training
+ray hits a volume-only fog boundary, it records an all-zero receiver because the empty closure’s
+eval returns None, then scatter_importance returns None and ends the path before receivers
+inside or behind the volume can train the cache.
+```
+Code
+crates/crust-core/src/light_cache.rs[R247-254]
+```
++                                    through =
++                                        if world.has_cutouts() || world.has_medium_boundaries() {
++                                            crate::tracer::cutout_through(
++                                                world,
++                                                &shadow,
++                                                ls.distance - 0.001,
++                                                &mut crate::stats::RayStats::default(),
++                                            )
+```
+Relevance
+●●● Strong
+```
+Accepted shadow-boundary fixes show the team addresses medium-boundary traversal consistency in
+lighting paths.
+```
+PR-#191
+PR-#161
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The training loop intersects a ray, builds a ShadingPoint, evaluates lights, and calls
+scatter_importance without first checking whether the hit is a medium boundary. A volume-only
+MaterialX material has no surface closure leaves, so evaluation and scattering return None; the
+training loop then breaks, whereas the main integrator’s trace_path crosses boundaries and
+continues.
+```
+crates/crust-core/src/light_cache.rs[200-206]
+crates/crust-core/src/light_cache.rs[227-229]
+crates/crust-core/src/light_cache.rs[267-270]
+crates/crust-core/src/tracer/path.rs[1324-1338]
+crates/crust-core/src/light_cache.rs[199-213]
+crates/crust-core/src/light_cache.rs[268-283]
+crates/crust-core/src/material/materialx.rs[241-252]
+crates/crust-core/src/material/closure/mod.rs[551-560]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Light-cache training treats a volume-only medium boundary as a surface, records a zero-contribution receiver there, and stops before sampling receivers inside or behind the volume.
+
+## Fix Focus Areas
+- crates/crust-core/src/light_cache.rs[199-213]
+- crates/crust-core/src/light_cache.rs[267-283]
+- crates/crust-core/src/material/materialx.rs[241-252]
+
+## Recommended Fix
+After `world.intersect`, when `world.has_medium_boundaries() && hit.mat.is_medium_boundary()`, restart the ray just past the hit as `restarted_past` does in `tracer/path.rs`, then intersect again without recording a receiver or consuming a training bounce. Cap the number of crossings as the tracer does, and test receiver sampling behind a volume-only fog mesh.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+View medium (1)
+4. A valid surface loses its volume ✓ Resolved
+Description
+```
+resolve_material_uncached tries the universal surface only when the mtlx surface is absent, then
+checks whether the selected shader is MaterialX. If an unsupported mtlx surface exists alongside a
+valid universal MaterialX surface and a MaterialX volume, the valid surface is never tried and the
+volume is ignored.
+```
+Code
+crates/crust-core/src/scene/usd_import/materials.rs[R226-228]
+```
++        let surface = terminal_shader(mat.compute_surface_source(&["mtlx"]))
++            .or_else(|| terminal_shader(mat.compute_surface_source(&[""])))
++            .filter(|s| shader_info_id(s).is_some_and(|id| super::mtlx_network::is_mtlx_id(&id)));
+```
+Relevance
+●●● Strong
+```
+The fallback is filtered too late, causing a valid MaterialX surface and volume to be skipped in a
+concrete precedence case.
+```
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The or_else runs before the MaterialX-ID filter, so an existing unsupported mtlx source prevents
+universal fallback; the following branch ignores the volume when no usable surface remains.
+```
+crates/crust-core/src/scene/usd_import/materials.rs[223-243]
+crates/crust-core/src/scene/usd_import/materials.rs[301-312]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+An unsupported `mtlx` surface prevents a valid universal MaterialX surface from pairing with its volume.
+## Fix Focus Areas
+- crates/crust-core/src/scene/usd_import/materials.rs[223-243]
+## Recommended Fix
+Check each context's shader ID before falling back to the next context. Add a test with an unsupported `mtlx` surface, a valid universal MaterialX surface, and a MaterialX volume.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+5. Sanitize helper's doc moved onto another function ✓ Resolved
+Description
+```
+volume_medium was inserted between the existing /// Finite and non-negative, per channel. line
+and fn sanitize. That one-line doc now opens the doc comment of volume_medium, and sanitize is
+left with no doc. The rendered docs for volume_medium start with a sentence that describes the
+other function.
+```
+Code
+crates/crust-core/src/material/closure/mod.rs[R667-671]
+```
++/// The interior medium `closures.volume` describes at the evaluated `slots`:
++/// coefficients sanitised to finite and non-negative, anisotropy clamped
++/// inside (−1, 1), and `None` for vacuum. The one mapping, for a thick
++/// surface's interior and a volume-only boundary alike.
++pub(crate) fn volume_medium(closures: &Closures, slots: &[Val]) -> Option<Medium> {
+```
+Relevance
+●●● Strong
+```
+This is a deterministic documentation-placement error leaving sanitize undocumented and
+misdocumenting volume_medium.
+```
+PR-#190
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+Line 666 (context) holds sanitize's doc, lines 667-670 continue the doc for volume_medium, and `fn
+sanitize` at line 687 now has no doc comment.
+```
+crates/crust-core/src/material/closure/mod.rs[664-690]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The doc for `sanitize` became the first line of `volume_medium`'s doc.
+
+## Fix Focus Areas
+- crates/crust-core/src/material/closure/mod.rs[666-687]
+
+## Recommended Fix
+Move `/// Finite and non-negative, per channel.` so it sits directly above `fn sanitize`, and start `volume_medium`'s doc with its own first sentence.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+6. Bad inline numeric literals silently become zero ✓ Resolved
+Description
+```
+Builder::input stores parse_literal(&text, mtype).unwrap_or(Val::ZERO), so when a value does not
+parse as its MaterialX type the input is set to zero rather than left unset. For example, a string
+or token authored on a numeric input produces a zero, with no entry in reported. The input then
+neither keeps its nodedef default (which the module's docs promise for untranslatable inputs) nor
+appears in the per-material warning.
+```
+Code
+crates/crust-core/src/scene/usd_import/mtlx_network.rs[R175-178]
+```
++                let text = self.literal_text(&owner, mtype)?;
++                let source = Source::Value(
++                    crust_mtlx::value::parse_literal(&text, mtype).unwrap_or(Val::ZERO),
++                );
+```
+Relevance
+●●● Strong
+```
+Recent tracer precedents accepted incorrect crossing-limit behavior affecting visibility and
+lighting beyond deep boundary stacks.
+```
+PR-#191
+PR-#175
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+literal_text returns String and Token values as-is whatever mtype is. parse_literal returns
+None on a numeric parse failure, and the unwrap_or(Val::ZERO) turns that into an explicit zero
+value without reporting it. Other untranslatable values, by contrast, return None, so the input
+stays unset and takes its default.
+```
+crates/crust-core/src/scene/usd_import/mtlx_network.rs[167-191]
+crates/crust-core/src/scene/usd_import/mtlx_network.rs[262-277]
+crates/crust-mtlx/src/value.rs[164-185]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Inline MaterialX literals that fail to parse are silently replaced with zero.
+
+## Fix Focus Areas
+- crates/crust-core/src/scene/usd_import/mtlx_network.rs[175-178]
+
+## Recommended Fix
+Match on `parse_literal(&text, mtype)`. On `None`, push a message to `self.reported` naming the attribute and its type, then return `None` so the input is left unset and takes its nodedef default.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+7. Integrator state comment is pasted twice ✓ Resolved
+Description
+```
+The comment above let boundaries = world.has_medium_boundaries(); in trace_path appears twice in
+slightly different forms, and the first copy refers to a crossings counter that does not exist
+(the variable is crossed). A later reader has to work out which copy is current, and the stale one
+gives the wrong name.
+```
+Code
+crates/crust-core/src/tracer/path.rs[R994-999]
+```
++    // The medium boundary's interior the path is in (see `Enclosure`), and
++    // what the stretches crossed since the last vertex carried: their
++    // transmittance and their (already weighted) volume emission, folded
++    // into whatever the segment reaches next. `crossings` counts the
++    // boundaries crossed before vertex `.0`, so each stretch draws from its
++    // own domain. All three stay at rest in a world without boundaries.
+```
+Relevance
+●● Moderate
+```
+Recommendation generated with fallback mode.
+```
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+Lines 994-999 and 1000-1005 both describe enclosure, carry and the crossing counter. Only
+crossed is declared, at line 1009.
+```
+crates/crust-core/src/tracer/path.rs[994-1009]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Two near-identical comment blocks come before the boundary state variables in `trace_path`, and one names a variable that does not exist.
+
+## Fix Focus Areas
+- crates/crust-core/src/tracer/path.rs[994-999]
+
+## Recommended Fix
+Delete lines 994-999 and keep the second block, which matches the code.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Context sources
+✅ Compliance rules (platform): 127 rules
+✅ Cross-repo context — repo relationships
+Explored: repo: doubleailes/openqmc-rs (sha: f695f95b) — View relationship
+Review mode: 🧠 Deep: This is a large, bug-dense behavioral change spanning volume transport, MaterialX/USD parsing, media boundaries, lighting/MIS, and many independent code paths, making an independent second review materially valuable.
+Tip of the day
+```
+💡 Did you know, you can keep summaries lean with Findings visible per group, which tucks the rest behind a View link
+```
+More tips ↗ | Customize Qodo ↗ | Qodo docs ↗
+qodo-code-review
+Bot
+reviewed
+Oct 2, 2026
+View reviewed changes
+Comment thread
+crates/crust-core/src/light_cache.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/tracer/path.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/scene/usd_import/materials.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/light_cache.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/scene/usd_import/mtlx_network.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/tracer/path.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/crust-core/src/material/closure/mod.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+doubleailes
+force-pushed
+the
+add-mtlx-volume-materials
+branch
+from
+2d78f5f to
+dab891d
+Compare
+October 6, 2026 20:16
+MaterialX volume materials, Typhoon's way
+…
+37774ac
+```
+A Material's `volume` terminal is now the medium inside the geometry it is
+bound to, as in NVIDIA's Typhoon (hdEmbree), which has no UsdVolVolume
+support and renders every volume this way:
+
+- crust-mtlx reads `volume`, `volumematerial`, `mix` of volume shaders and
+  the VDF tree (`anisotropic_vdf`, `absorption_vdf`, `mix` / `add` /
+  `multiply`) with Typhoon's combinators, and `compile_terminals` builds a
+  material from its surface and volume terminals.
+- Under a thick transmitting surface the volume replaces the interior the
+  surface's transmission inputs describe. With no surface the material is a
+  medium boundary (`Material::is_medium_boundary` / `boundary_medium`): the
+  integrator crosses it without a vertex, travels in its medium inside (one
+  owner at a time), runs NEE + MIS at scatters there, and shadow rays cross
+  boundaries paying Beer-Lambert.
+- Inline MaterialX networks (`ND_*` shaders) in USD are translated into
+  crust-mtlx documents; `mtlx` is the last surface context, so stages that
+  render through a preview surface are unchanged.
+- Fix: volume-region tracking read the ray parameter as a distance, so fog
+  seen from the camera was thinned by the focus distance (10x by default).
+  `fog`, `smoke` and `aovs_lpe` render denser; every other sample is
+  bit-identical.
+
+New sample `samples/materialx_volume.usda`, tests in
+`tests/volume_materials.rs` (Beer-Lambert, white furnaces), openspec change
+`add-mtlx-volume-materials`, design records and site docs. The integrator
+is monomorphised on `MEDIA`, so a world without medium boundaries runs
+an instantiation with none of their branches: cornellbox +0.002%
+instructions, bit-identical.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VVLQEQJVw3y1YseWz4CH4k
+```
+doubleailes
+force-pushed
+the
+add-mtlx-volume-materials
+branch
+from
+4c2cda6 to
+37774ac
+Compare
+October 7, 2026 20:47
+claude
+and others
+added 2 commits
+October 8, 2026 05:58
+Address review: boundary budgets, light-cache training, surface context
+…
+fbd74c1
+```
+- Shadow rays (`through_boundaries`) and the depth-exhausted lookup
+  (`pass_boundaries`) count medium boundaries against the path's own
+  4096-crossing budget, cutouts and walls against the 256 one: a light
+  behind 150 fog slabs was blocked to every shadow ray.
+- Light-cache training crosses medium boundaries instead of shading them
+  as receivers, so surfaces inside and behind fog are trained.
+- A MaterialX volume finds a universal MaterialX surface past an `mtlx`
+  surface that is not MaterialX: each context is filtered on its own.
+- An inline numeric literal that is not a number is reported and left at
+  its nodedef default instead of becoming zero.
+- `sanitize` gets its doc line back from `volume_medium`.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VVLQEQJVw3y1YseWz4CH4k
+```
+Merge branch 'main' into add-mtlx-volume-materials
+eb4683a
+Hide details
+View details
+doubleailes
+merged commit ea010b5
+into
+main
+Oct 8, 2026
+15 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+doubleailes
+deleted the
+add-mtlx-volume-materials
+branch
+October 8, 2026 06:27
+This was referenced Oct 15, 2026
+Import UsdGeomNurbsCurves as round curves
+#311
+Merged
+Layer crust-core: move the lobe vocabulary and split the light caches
+#315
+Merged
+Stamp the camera lens and layer stack; list every stamp difference in diff
+#367
+Merged
+Render passes: matte holdouts and camera visibility from UsdRenderPass
+#369
+Merged
+This was referenced Oct 22, 2026
+Read UsdLuxMeshLightAPI: emissive meshes as sampled lights
+#374
+Open
+Read custom MaterialX nodedefs from PXR_MTLX_PLUGIN_SEARCH_PATHS (mtlx-custom-nodedefs)
+#383
+Merged
+This was referenced Oct 30, 2026
+crust-core: the delegate asks its host only for .mtlx references (host-facts-mtlx-only)
+#432
+Merged
+Expose resolved camera views for host viewport navigation
+#433
+Draft
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

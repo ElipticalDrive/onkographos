@@ -1,0 +1,40 @@
+# Surface-based rendering
+
+Also called: Surface detection and geometric primitive fitting
+
+## Overview
+Surface-based rendering creates an intermediate geometric representation by applying a surface detector to sample data, fitting geometric primitives to the detected surfaces, and rendering those primitives [S1, unofficial]. It differs from volume rendering by converting scalar fields into explicit meshes, and from direct voxel rendering by using compact geometric primitives rather than opaque cubes [S1, unofficial]. It builds on [Surface extraction](29-surface-extraction.md) and contrasts with sibling methods like [Optimized Mesh Reference](1888-optimized-mesh-reference.md), [Triangular Mesh Scene Rendering](4644-triangular-mesh-scene-rendering.md), [Isosurface Display via Opacity Mapping](6053-isosurface-display-via-opacity-mapping.md), [Isosurface Rendering](7669-isosurface-rendering.md), and [Multi-Isosurface Rendering](8745-multi-isosurface-rendering.md) [S1, unofficial].
+
+## How it works
+**Inputs:** A 3D sample array (volume data) [S1, unofficial].
+**Outputs:** A mesh of geometric primitives (polygons) representing the surface [S1, unofficial].
+**Data Structures:**
+*   **Input Volume:** A 3D array of scalar values [S1, unofficial]. Exact layout, fields, sizes, and bit packing are Not given in the sources [S1, unofficial].
+*   **Contours:** A set of 2D curves or line segments defined on data slices [S1, unofficial].
+*   **Mesh:** A collection of polygons (typically triangles or quadrilaterals) connecting contours across slices or fitting within voxels [S1, unofficial].
+**Steps:**
+1.  **Surface Detection:** Apply a surface detector to the sample array [S1, unofficial]. This often involves edge tracking on each data slice to yield a set of contours defining features of interest [S1, unofficial].
+2.  **Primitive Fitting:** Fit geometric primitives to the detected surfaces [S1, unofficial]. Two common approaches are:
+    *   **Slice-based:** Construct a mesh of polygons connecting the contours on adjacent slices [S1, unofficial].
+    *   **Voxel-based:** Fit polygons to an approximation of the original anatomy within each voxel, yielding a large set of voxel-sized polygons [S1, unofficial].
+3.  **Rendering:** Render the resulting geometric representation using standard graphics primitives [S1, unofficial].
+**Formulas:** Not given in the sources.
+**Parameters:**
+*   **Threshold:** A value used to classify data as surface or non-surface. The method requires binary classification of incoming data [S1, unofficial].
+*   **Primitive Type:** The choice of geometric primitive (e.g., polygons) and the scale at which they are defined [S1, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Binary Classification Error:** The method requires binary classification (surface passes through voxel or not) [S1, unofficial]. For small or poorly defined features, error-free classification is often impossible [S1, unofficial].
+*   **Artifacts:** Errors in classification manifest as visual artifacts: spurious surfaces (false positives) or erroneous holes in surfaces (false negatives) [S1, unofficial].
+*   **Algorithmic Failure:** Contour following algorithms may go astray in complicated scenes, requiring user intervention [S1, unofficial].
+
+## Operating characteristics
+*   **Storage:** Geometric primitives are compact, making storage and transmission inexpensive [S1, unofficial].
+*   **Rendering Efficiency:** Primitives have a high degree of spatial coherence, making rendering efficient [S1, unofficial].
+*   **Limitations:** Automatic fitting of geometric primitives to sample data is seldom entirely successful [S1, unofficial].
+*   **Use Case:** Suitable for data with well-defined features where compact representation and efficient rendering are prioritized over handling small or poorly defined features [S1, unofficial].
+
+## Background
+Surface-based rendering is one of three broad categories of techniques for displaying three-dimensional medical data, alongside binary voxel techniques and volume rendering [S1, unofficial]. It relies on techniques such as edge tracking and polygon mesh construction [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA214792: Interactive Visualization of 3D Medical Data. Revision, https://archive.org/details/DTIC_ADA214792, fetched 2026-10-26 (unofficial)

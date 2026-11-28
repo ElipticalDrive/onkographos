@@ -1,0 +1,91 @@
+--- v005.md
++++ v006.md
+@@ -21,10 +21,10 @@
+ 
+ ### Data Structures
+-*   **Pruning Score Buffer:** For each Gaussian $G_i$, maintain an accumulator $PS_i$ initialized to 0 [S2, unofficial].
++*   **Pruning Score Buffer:** For each Gaussian $G_i$, maintain an accumulator $PS_i$ initialized to $0$ [S2, unofficial].
+ *   **Gradient Accumulation:** During the backward pass, compute the per-pixel opacity gradient $\frac{\partial L(P)}{\partial \alpha(P)}$ for all pixels $P$ covered by $G_i$ [S2, unofficial].
+ 
+ ### Steps
+ 1.  **Check Schedule:** If the current iteration $t$ is not a multiple of the pruning interval (typically aligned with densification intervals, e.g., every 100 iterations), skip pruning [G].
+-2.  **Compute Pixel-wise Score:** For each Gaussian $G_i$, iterate over all pixels $P$ in its coverage region $\Omega_i$. Compute the pixel-wise score $r(P)$:
++2.  **Compute Pixel-wise Score:** For each Gaussian $G_i$, iterate over all pixels $P$ in its coverage region $\Omega_i$ [S2, unofficial]. Compute the pixel-wise score $r(P)$:
+     $$ r(P) = \frac{1}{\alpha(P)} \left| \frac{\partial L(P)}{\partial \alpha(P)} \right| $$
+     where $\alpha(P)$ is the opacity contribution of $G_i$ at pixel $P$, and $\frac{\partial L(P)}{\partial \alpha(P)}$ is the gradient of the loss at pixel $P$ with respect to that opacity [S2, unofficial].
+@@ -42,4 +42,6 @@
+ ### Pseudocode
+ ```python
++from collections import deque
++
+ def adaptive_density_control_pruning(gaussians, current_iteration, training_loss,
+                                      pruning_interval, k_window, tau_opac, tau_ps):
+@@ -54,6 +56,5 @@
+                    - 'opacity_at_pixel': Dict mapping pixel index to alpha value
+                    - 'opacity_gradient_at_pixel': Dict mapping pixel index to dL/dalpha
+-                   - 'loss_score_sum': Rolling sum of L_t * R_t over the last K iterations
+-                   - 'window_count': Number of iterations accumulated so far
++                   - 'score_window': deque storing the last K terms of L_t * R_t
+         current_iteration: int, current training step
+         training_loss: float, current global loss L_t
+@@ -69,10 +70,10 @@
+         return gaussians
+ 
+-    gaussians_to_remove = []
++    gaussians_to_remove = set()
+     
+     for g in gaussians:
+         # 1. Opacity Pruning
+         if g['alpha'] < tau_opac:
+-            gaussians_to_remove.append(g['id'])
++            gaussians_to_remove.add(g['id'])
+             continue
+             
+@@ -90,19 +91,13 @@
+         # 3. Accumulate Pruning Score: PS = (1/K) * sum(L_t * R_t)
+         current_term = training_loss * view_level_score
+-        g['loss_score_sum'] += current_term
+-        g['window_count'] += 1
++        if 'score_window' not in g:
++            g['score_window'] = deque(maxlen=k_window)
++        g['score_window'].append(current_term)
+         
+-        # Maintain a sliding window of size K
+-        if g['window_count'] > k_window:
+-            # In a full implementation, a deque would store the last K terms.
+-            # Here we approximate by dividing the rolling sum by K,
+-            # which matches the formula PS = (1/K) * Σ(L_t * R_t).
+-            pass
+-            
+-        current_ps = g['loss_score_sum'] / k_window
++        current_ps = sum(g['score_window']) / k_window
+         
+         # 4. Gradient Pruning
+         if current_ps > tau_ps:
+-            gaussians_to_remove.append(g['id'])
++            gaussians_to_remove.add(g['id'])
+             
+     return [g for g in gaussians if g['id'] not in gaussians_to_remove]
+@@ -116,6 +111,6 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Division by Zero:** If $\alpha(P) = 0$, the score $r(P)$ is undefined. A small epsilon guard is required [G].
+-*   **Pruning Frequency:** Extreme values impact $N_{GS}$ and rendering quality. Too low (e.g., interval 1000) removes useful Gaussians; too high (e.g., interval 5000) results in higher $N_{GS}$ [S2, unofficial].
++*   **Division by Zero:** If $\alpha(P) = 0$, the score $r(P)$ is undefined [G].
++*   **Pruning Frequency:** Extreme values impact $N_{GS}$ and rendering quality [S2, unofficial].
+ *   **Gradient Cancellation:** Gradients are accumulated by magnitude (absolute value) to prevent cancellation from opposite directions across views [S2, unofficial].
+ 
+@@ -135,5 +130,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The pruning step adds overhead to the backward pass due to the computation of opacity gradients and aggregation. However, by reducing $N_{GS}$, it significantly reduces the forward pass rasterization time and subsequent backward pass memory traffic [S2, unofficial].
++*   **Time Complexity:** The pruning step adds overhead to the backward pass due to the computation of opacity gradients and aggregation [S2, unofficial]. However, by reducing $N_{GS}$, it significantly reduces the forward pass rasterization time and subsequent backward pass memory traffic [S2, unofficial].
+ *   **Memory Complexity:** Reduces the memory footprint of the scene representation by removing redundant Gaussians [S2, unofficial].
+ *   **Measured Performance:** On the Mip-NeRF 360 bicycle scene, pruning reduced $N_{GS}$ from 947,135 to 744,225, with training time increasing slightly to 211.7 seconds (from unspecified base time), while maintaining SSIM at 0.751 and PSNR at 25.142 (vs 25.153 base) [S2, unofficial]. On Mip-NeRF 360 overall, pruning reduces $N_{GS}$ from 0.77M to 0.63M and training time from 245.7s to 233.7s compared to Base [S2, unofficial].
+@@ -142,5 +137,5 @@
+ 
+ ## Background
+-The method originates from research into compact Gaussian Splatting, specifically the "Loss-Guided Density Control and Efficient Backward Optimisation for Compact Gaussian Splatting" paper [S2, unofficial]. It was developed to address the issue of redundant Gaussian primitives that accumulate during the densification process, which increase training time and memory usage without improving rendering quality. The approach combines opacity gradients with training loss to create a more robust pruning metric than simple opacity thresholds [S2, unofficial].
++The method originates from research into compact Gaussian Splatting, specifically the "Loss-Guided Density Control and Efficient Backward Optimisation for Compact Gaussian Splatting" paper [S2, unofficial]. It was developed to address the issue of redundant Gaussian primitives that accumulate during the densification process, which increase training time and memory usage without improving rendering quality [S2, unofficial]. The approach combines opacity gradients with training loss to create a more robust pruning metric than simple opacity thresholds [S2, unofficial].
+ 
+ ## Sources

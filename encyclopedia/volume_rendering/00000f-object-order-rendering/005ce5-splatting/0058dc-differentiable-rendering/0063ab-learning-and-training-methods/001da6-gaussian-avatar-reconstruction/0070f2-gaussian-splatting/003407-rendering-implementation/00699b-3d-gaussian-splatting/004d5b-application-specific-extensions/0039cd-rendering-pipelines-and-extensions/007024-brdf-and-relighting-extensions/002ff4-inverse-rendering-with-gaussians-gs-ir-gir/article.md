@@ -1,0 +1,57 @@
+# Inverse Rendering with Gaussians (GS-IR / GIR)
+
+Also called: GIR (Gaussian Inverse Rendering), GS-IR / GIR, Gaussian Inverse Rendering
+
+## Overview
+Inverse Rendering with Gaussians (GS-IR / GIR) is a method employing 3D Gaussian Splatting (3DGS) inverse rendering techniques to accurately estimate details such as material properties and lighting conditions [S1]. It solves the problem of recovering physically plausible scene parameters (geometry, BRDF, illumination) from images by jointly optimizing Gaussian geometry and an environment light probe [S2, unofficial]. What sets it apart from its siblings is its use of a split-sum approximation to handle indirect light, allowing it to model inter-reflections more accurately than methods relying solely on simplified direct-light equations or learned light approximations [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of multi-view images of a static scene.
+*   **Outputs:** Optimized 3D Gaussian attributes (position, covariance, opacity, color/BRDF parameters) and an environment light probe (e.g., spherical harmonics coefficients).
+
+**Data Structures:**
+*   **Gaussians:** Standard 3DGS representation. Each Gaussian $i$ is defined by mean $\mu_i$, covariance $\Sigma_i$ (or quaternion $q_i$ and scale $s_i$), opacity $\alpha_i$, and appearance coefficients. For inverse rendering, appearance coefficients must encode BRDF properties (e.g., albedo, roughness) rather than just view-dependent color [S2, unofficial].
+*   **Light Probe:** Typically represented as Spherical Harmonics (SH) coefficients or a pre-filtered environment map to support the split-sum approximation [S2, unofficial].
+
+**Method Steps:**
+1.  **Initialization:** Initialize 3D Gaussians from SfM points (position, scale, orientation, opacity). Initialize BRDF parameters (albedo, roughness) and environment light SH coefficients. [G] Roughness and albedo are often initialized to neutral values (e.g., albedo=0.5, roughness=0.5) or derived from initial color estimates.
+2.  **Differentiable Rasterization:** Render the scene to 2D images using the differentiable 3DGS rasterizer. This step computes the pixel color $C$ by blending Gaussians.
+3.  **Lighting Integration (Split-Sum):** To handle indirect lighting and inter-reflections, GIR employs a split-sum approximation [S2, unofficial]. The rendering equation is split into direct and indirect components. The indirect component is approximated by convolving the environment map with the BRDF's specular lobe (pre-filtered environment map) or by computing incident radiance on the fly [S2, unofficial].
+    *   Formula: $C = C_{direct} + C_{indirect}$
+    *   $C_{indirect}$ is computed using the split-sum approximation, integrating the product of the BRDF and the incident radiance.
+4.  **Gradient Backpropagation:** Compute the loss between the rendered image and the input image (e.g., L1, SSIM, or perceptual loss). Backpropagate gradients through the differentiable rasterizer and the lighting integration step to update Gaussian attributes and light probe coefficients [S1].
+5.  **Optimization Loop:** Iterate steps 2-4 until convergence. The coupled optimization of geometry, material, and lighting is prone to ill-posed solutions [S1].
+
+**Parameters:**
+*   **Learning Rate:** Typically requires careful tuning due to the ill-posed nature of coupled optimization [S1].
+*   **Regularization:** Regularization terms are often added to stabilize normals and prevent noise in geometry, material, and lighting [S3].
+
+**Edge Cases and Pitfalls:**
+*   **Ill-posed Solutions:** Coupled optimization of geometry, material, and lighting can lead to ambiguous solutions [S1].
+*   **Noise:** Methods can introduce substantial noise in geometry, material, and lighting estimates [S3].
+*   **Static Scene:** The method assumes a static scene, limiting dynamic editing capabilities [S1].
+*   **Performance:** Anisotropic reflection modeling can reduce real-time rendering frame rates [S1]. Optimization-based layout generation requires hours of pre-computation [S1].
+
+## Subtopics
+
+### Inverse Rendering with 3DGS
+Methods adapting inverse rendering techniques to 3DGS to handle specular reflections by simplifying the classical rendering equation [S3]. These approaches rely on accurate normal estimation, which can be derived from computed depth maps [LZF* 24] or using the shortest direction axis of Gaussians [JTL* 24, YHZ24]. The different lighting conditions are then encoded via integrated shading functions [S3]. While these 3DGS-based methods achieve rapid convergence, they still introduce substantial noise in geometry, material, and lighting, which remains a limitation for high-fidelity rendering [S3].
+
+## Operating characteristics
+*   **Time Complexity:** Optimization-based layout generation requires hours of pre-computation [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Suitable for applications with extremely high demands on visual quality, such as film production or high-end VR experiences [S1]. However, anisotropic reflection modeling reduces real-time rendering frame rates [S1].
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Allows precise control over lighting and material appearance, making results more photorealistic [S1]. Handles indirect light via split-sum approximation [S2, unofficial].
+*   **Limitations:** Static scene assumption limits dynamic editing capabilities [S1]. Coupled optimization suffers from ill-posed solution problems [S1]. Introduces substantial noise in geometry, material, and lighting [S3].
+*   **When to use:** When high fidelity and complex lighting effects are required, and computational time is not a primary constraint [S1].
+*   **When not to use:** For dynamic scenes or real-time applications requiring fast rendering [S1].
+
+## Background
+GIR [61] employs 3DGS inverse rendering techniques to accurately estimate details such as material properties and lighting conditions [S1]. This method allows precise control over lighting and material appearance, making results more photorealistic. It is especially suitable for applications with extremely high demands on visual quality, such as film production or high-end VR experiences [S1].
+
+## Sources
+[S1] Implicit vs. explicit a comparative survey on NeRF and 3DGS for large-scale aerial scene editing, https://link.springer.com/article/10.1007/s10791-026-10029-9, fetched 2026-10-26
+[S2] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S3] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26

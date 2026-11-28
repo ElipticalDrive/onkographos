@@ -1,0 +1,260 @@
+--- v003.md
++++ v004.md
+@@ -1,129 +1,172 @@
+ # Voxel Polygon Rendering
++
++
+ ## Overview
+-Voxel Polygon Rendering is a real-time technique that projects a 2D voxel height map onto the screen as vertical bars, solving the problem of rendering high-detail terrain at constant speed without traditional 6DOF polygon operations [S1, unofficial]. It differs from its sibling [Voxel Raycasting with DDA and Vertical Stripe Rendering](2206-voxel-raycasting-with-dda-and-vertical-stripe-rendering.md) by using "voxel polygons" for local detail variation and an s-buffer (vertical c-buffer) to handle floating geometry, whereas the sibling relies on a simpler per-column depth buffer for stacking [S1, unofficial].
++Voxel Polygon Rendering is a hybrid rendering technique that fills the screen with vertical bars representing heights from a voxel map, effectively projecting a 2D heightfield onto the screen as a flat landscape [S1, unofficial]. It solves the problem of rendering high-detail terrain at constant speed by avoiding traditional 6DOF polygon operations like rotation matrices and clipping [S1, unofficial]. Unlike its siblings, which rely on pure software span rendering or hardware acceleration via triangle strips, Voxel Polygon Rendering uses a specific "vertical c-buffer" (s-buffer) to handle floating bars and bilinear filtering to smooth blockiness, while strictly limiting camera rotation to the Y-axis [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A voxel map (2D array storing height and color per location), camera parameters (limited to Y-axis rotation and small X-axis tilt), and a set of voxel polygons defining local geometry variations [S1, unofficial].
+-- **Output:** A rasterized screen image composed of vertical bars representing terrain heights, smoothed via bilinear filtering [S1, unofficial].
++*   **Input:** A voxel map (2D array of height and color values), camera position, and Y-axis rotation angle.
++*   **Output:** A rasterized screen image with vertical bars representing terrain height.
+ 
+ **Data Structures:**
+-1. **Voxel Map:** A 2D array where each cell stores a height value and a color value [S1, unofficial].
+-2. **Column Height Array (S-Buffer):** An array indexed by screen column, storing the current maximum height of the drawn bar in that column to clip subsequent bars and prevent overdraw [S1, unofficial].
+-3. **Voxel Polygon:** A data structure representing a "more or less" horizontal surface, storing a base height, a local height offset, and a depth value for floating polygons (top and bottom sides) [S1, unofficial].
++1.  **Voxel Map:** A 2D array where each cell contains a `height` (float/int) and `color` (RGB).
++2.  **Column Height Buffer (C-Buffer):** An array of size $W$ (screen width), storing the current drawn height for each screen column. Initialized to the bottom of the screen (or 0, depending on coordinate system).
++3.  **Floating Bar Buffer (S-Buffer):** A structure or array used to store "floating" voxel bars that do not start at the bottom of the screen, allowing them to be clipped against existing geometry [S1, unofficial].
+ 
+ **Steps:**
+-1. **Map Pixels to Voxel Space:** For each screen pixel, determine its corresponding location on the voxel map based on the camera's Y-axis rotation and distance [S1, unofficial].
+-2. **Determine Height:** Retrieve the height from the voxel map at the mapped location and apply perspective correction so distant "mountains" appear smaller [S1, unofficial].
+-3. **Bilinear Filtering (Height):** Retrieve four adjacent voxels (texels) from the map and calculate the height of the single pixel-wide span by taking a weighted average of their heights [S1, unofficial].
+-4. **Bilinear Filtering (Color):** Average the colors of the four fetched voxels to smooth the terrain appearance [S1, unofficial].
+-5. **Render Close to Far:** Draw the screen from the bottom line (closest) up to the horizon (approximately halfway the screen) [S1, unofficial].
+-6. **Clip and Draw:** For each span, compare the calculated height against the value stored in the Column Height Array for that screen column; if the span is lower, clip it; if visible, draw the vertical bar and update the Column Height Array with the new height [S1, unofficial].
+-7. **Handle Floating Polygons:** For polygons not starting at the bottom screen line, use the s-buffer (vertical c-buffer) to manage their top and bottom boundaries, preventing overdraw and correctly stacking floating bars [S1, unofficial].
+-8. **Fill Horizon:** Fill the screen space above the horizon with a backdrop [S1, unofficial].
+-9. **Voxel Polygon Integration:** Cover the map with a blanket of polygons for the ground, add extra polygons for details (hills, structures), add the local polygon height to the base voxel height to reuse details at different elevations, and interpolate polygon heights fluently (similar to Gouraud shading) to construct smooth shapes like round hills with few polygons [S1, unofficial].
++
++1.  **Map Screen to Voxel Space:**
++    For each pixel column $x$ on the screen, determine the corresponding location on the voxel map based on camera position and rotation. Calculate the distance $d$ of the pixel from the camera [S1, unofficial].
++
++2.  **Fetch Voxels (Bilinear Filtering):**
++    To reduce blockiness, retrieve four adjacent voxels (texels) from the voxel map surrounding the calculated map location [S1, unofficial].
++    *   Let the four voxels be $V_{00}, V_{01}, V_{10}, V_{11}$ with heights $h_{ij}$ and colors $c_{ij}$.
++    *   Calculate the weighted average height $H$ for the span:
++        $$ H = \frac{\sum w_{ij} h_{ij}}{\sum w_{ij}} $$
++    *   Calculate the weighted average color $C$:
++        $$ C = \frac{\sum w_{ij} c_{ij}}{\sum w_{ij}} $$
++    *   Where $w_{ij}$ are interpolation weights based on the sub-pixel offset [S1, unofficial].
++
++3.  **Perspective Correction:**
++    Adjust the calculated height $H$ based on the distance $d$ to ensure distant "mountains" appear smaller and perspective is maintained [S1, unofficial].
++
++4.  **Render Close to Far:**
++    Iterate through screen rows from the bottom (closest) to the horizon (approximately halfway up the screen) [S1, unofficial].
++    *   For each row $y$ and column $x$:
++        *   Determine the voxel height $H_{voxel}$ at this screen position.
++        *   Compare $H_{voxel}$ with the current height stored in the Column Height Buffer $H_{col}[x]$.
++        *   If $H_{voxel} > H_{col}[x]$:
++            *   Draw the vertical bar segment from $H_{col}[x]$ to $H_{voxel}$ using color $C$.
++            *   Update $H_{col}[x] = H_{voxel}$.
++        *   If $H_{voxel} \le H_{col}[x]$:
++            *   The bar is occluded by a closer bar; do not draw.
++
++5.  **Handle Floating Bars (S-Buffer):**
++    For voxels that represent floating structures (e.g., bridges, ceilings), store a `depth` value in addition to height [S1, unofficial].
++    *   Use a vertical c-buffer (s-buffer) to manage these bars.
++    *   Clip floating bars against the height buffer to prevent overdraw, similar to solid terrain but allowing gaps at the bottom [S1, unofficial].
++
++6.  **Render Horizon and Backdrop:**
++    Fill the screen space above the horizon with a backdrop color or texture [S1, unofficial].
++
++7.  **Voxel Polygons (Optional Detail):**
++    To vary detail locally, use "voxel polygons" (horizontally oriented polygons) to define hills or structures.
++    *   Add the local height of the polygon to the base voxel height.
++    *   Interpolate polygon heights fluently (similar to Gouraud shading) to create smooth shapes like round hills using few polygons [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def render_voxel_polygons(voxel_map, screen_width, screen_height, camera_y_rotation, camera_x_tilt, backdrop_color):
+-    # Initialize the vertical c-buffer (s-buffer) with minimum height
+-    # Screen coordinates: y=0 is bottom, y=screen_height is top
+-    column_heights = [0.0] * screen_width
++def render_voxel_polygon_screen(voxel_map, camera, screen_width, screen_height):
++    # Initialize buffers
++    # col_heights[x] stores the highest y-coordinate drawn in column x
++    col_heights = [0] * screen_width
+     
+-    # Define horizon line (approx halfway)
++    # S-buffer for floating bars: list of (x, y_bottom, y_top, color)
++    s_buffer = []
++
++    # 1. Determine horizon and iteration range
++    # Horizon is approximately halfway up the screen
+     horizon_y = screen_height // 2
+     
+-    # Iterate from bottom (close) to horizon (far)
++    # 2. Iterate from bottom (closest) to horizon (farthest)
+     for y in range(screen_height - 1, horizon_y - 1, -1):
+         for x in range(screen_width):
+-            # 1. Map screen pixel to voxel map location
+-            # [Comment] Standard inverse perspective projection for Y-rotation and small X-tilt
+-            # Returns floating-point coordinates (vx, vy) in the voxel map space
+-            vx, vy = map_screen_to_voxel(x, y, camera_y_rotation, camera_x_tilt)
++            # Map screen pixel (x, y) to voxel map coordinates
++            map_u, map_v, distance = screen_to_voxel_map(x, y, camera)
+             
+-            # 2. Retrieve 4 adjacent voxels for bilinear filtering
+-            # Clamp coordinates to map bounds
+-            vx0, vx1 = int(vx), min(int(vx) + 1, voxel_map.width - 1)
+-            vy0, vy1 = int(vy), min(int(vy) + 1, voxel_map.height - 1)
++            # 3. Fetch 4 adjacent voxels for bilinear filtering
++            u0, v0 = floor(map_u), floor(map_v)
++            u1, v1 = u0 + 1, v0 + 1
+             
+-            h00, c00 = voxel_map.get(vx0, vy0)
+-            h10, c10 = voxel_map.get(vx1, vy0)
+-            h01, c01 = voxel_map.get(vx0, vy1)
+-            h11, c11 = voxel_map.get(vx1, vy1)
++            # Get heights and colors (handle boundaries by clamping or wrapping)
++            h00, c00 = voxel_map.get(u0, v0)
++            h01, c01 = voxel_map.get(u0, v1)
++            h10, c10 = voxel_map.get(u1, v0)
++            h11, c11 = voxel_map.get(u1, v1)
+             
+-            # 3. Bilinear filter height
+-            fx = vx - vx0
+-            fy = vy - vy0
++            # Calculate weights based on fractional part of map_u, map_v
++            frac_u = map_u - u0
++            frac_v = map_v - v0
+             
+-            height = lerp(lerp(h00, h10, fx), lerp(h01, h11, fx), fy)
++            # Bilinear interpolation for height
++            h_top = lerp(h00, h10, frac_u)
++            h_bottom = lerp(h01, h11, frac_u)
++            height = lerp(h_top, h_bottom, frac_v)
+             
+-            # 4. Perspective correction: scale height by distance so far mountains look smaller
+-            distance_factor = (screen_height - y) / screen_height
+-            perspective_height = height * distance_factor
++            # Bilinear interpolation for color
++            c_top = lerp(c00, c10, frac_u)
++            c_bottom = lerp(c01, c11, frac_u)
++            color = lerp(c_top, c_bottom, frac_v)
+             
+-            # 5. Bilinear filter color
+-            color = lerp(lerp(c00, c10, fx), lerp(c01, c11, fx), fy)
++            # 4. Perspective correction
++            corrected_height = apply_perspective_correction(height, distance)
+             
+-            # 6. Clip against column height
+-            current_col_height = column_heights[x]
++            # 5. Clip against column height buffer
++            current_col_height = col_heights[x]
+             
+-            # If the new height is lower than what's already drawn, skip
+-            if perspective_height <= current_col_height:
+-                continue
++            if corrected_height > current_col_height:
++                # Draw vertical bar segment
++                draw_vertical_bar(x, current_col_height, corrected_height, color)
++                
++                # Update column height
++                col_heights[x] = corrected_height
++                
++                # If this is a floating bar (has depth info), add to s-buffer
++                if voxel_map.has_depth(u0, v0):
++                    depth = voxel_map.get_depth(u0, v0)
++                    s_buffer.append((x, current_col_height, corrected_height, color, depth))
++    
++    # 6. Handle floating bars from s-buffer
++    # This step is simplified; in practice, s-buffer clips against col_heights
++    for bar in s_buffer:
++        x, y_bottom, y_top, color, depth = bar
++        # Clip against existing col_heights
++        effective_bottom = max(y_bottom, col_heights[x])
++        if y_top > effective_bottom:
++            draw_vertical_bar(x, effective_bottom, y_top, color)
++            # Update col_heights if necessary (depends on specific s-buffer implementation)
+             
+-            # 7. Draw the vertical bar (span)
+-            # [Comment] Standard rasterization step to write color to the frame buffer at (x, span_y)
+-            for span_y in range(int(current_col_height), int(perspective_height) + 1):
+-                draw_pixel(x, span_y, color)
+-            
+-            # Update column height buffer
+-            column_heights[x] = perspective_height
+-
+-    # 8. Fill horizon with backdrop
+-    for y in range(horizon_y - 1, -1, -1):
+-        for x in range(screen_width):
+-            draw_pixel(x, y, backdrop_color)
++    # 7. Fill backdrop above horizon
++    draw_backdrop(screen_width, horizon_y, screen_height)
+ 
+ def lerp(a, b, t):
+     return a + t * (b - a)
+ 
+-# [Comment] The sources do not provide the exact projection or rasterization routines.
+-# map_screen_to_voxel(x, y, rot_y, tilt_x) computes (vx, vy) in voxel space.
+-# draw_pixel(x, y, color) writes the color to the frame buffer.
++def screen_to_voxel_map(x, y, camera):
++    # Placeholder for camera projection logic
++    # Returns map coordinates (u, v) and distance
++    pass
++
++def apply_perspective_correction(height, distance):
++    # Adjust height based on distance to simulate perspective
++    pass
+ ```
+ 
+ **Parameters:**
+-- **Rotation Constraint:** Y-axis rotation is allowed [S1, unofficial]. X-axis (up/down) tilt is limited to approximately 10 degrees; looking down by 45 degrees is not supported as voxel bars must remain perfectly vertical [S1, unofficial].
+-- **Tiling:** Pre-built tiles of voxels can be used to reduce memory usage, though square tiles may not be ideal for all terrain types [S1, unofficial].
++*   **Rotation Constraint:** The scene can only be rotated around the Y-axis. X-axis rotation (looking up/down) is limited to approximately 10 degrees [S1, unofficial]. Looking down by 45 degrees wastes the picture because voxel bars must be perfectly vertical [S1, unofficial].
++*   **Bilinear Filtering:** Always enabled to overcome blockiness [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Flat Floor Performance:** The worst-case performance occurs on a completely flat floor, where every column's height increases with each processed line, leading to significant clipping and update overhead per pixel [S1, unofficial].
+-- **Blockiness:** Without bilinear filtering, voxels appear blocky. Small details may flicker during camera movement [S1, unofficial].
+-- **Single Height Limitation:** Standard voxel maps store only one height per location [S1, unofficial]. Voxel polygons are required to handle floating geometry and multiple heights at the same map location [S1, unofficial].
++*   **Flat Floor Performance:** Worst-case performance occurs on a completely flat floor. Every column of the screen becomes one height unit higher every time a new line is processed. For each single pixel drawn, significant work is done: comparing to current column height, clipping, drawing, and updating column height. This is likely more expensive than drawing a single perspective-correct texture map [S1, unofficial].
++*   **Flickering:** Small details tend to flicker when the camera moves, though bilinear filtering reduces this [S1, unofficial].
++*   **Vertical Bars:** The technique requires voxel bars to be perfectly vertical. Any significant X-axis rotation breaks the rendering model [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Voxel Raycasting with DDA and Vertical Stripe Rendering
+-Renders voxels as vertical stripes using DDA, handling depth via a per-column depth buffer [S1, unofficial]. Simpler than Voxel Polygons but lacks support for floating geometry and local detail variation via polygons [S1, unofficial]. Use when constant speed is needed without floating geometry [S1, unofficial]. [Link](2206-voxel-raycasting-with-dda-and-vertical-stripe-rendering.md)
+-
+-### Dual-Layer DDA Raycasting
+-Uses two layers of DDA traversal. Not given in the sources [S1, unofficial]. [Link](2212-dual-layer-dda-raycasting.md)
+-
+-### Classic (Column Voxel Space)
+-Not given in the sources [S1, unofficial]. [Link](5024-classic-column-voxel-space.md)
+-
+-### Screen-Space Ray Casting with Layer Traversal
+-Not given in the sources [S1, unofficial]. [Link](5221-screen-space-ray-casting-with-layer-traversal.md)
++### [Triangle Strip Voxel Projection](15933-triangle-strip-voxel-projection.md)
++A hardware-accelerated rendering method for voxel landscapes that replaces software span rendering with triangle strips. It projects voxels onto the screen in columns and constructs geometry based on the visibility of adjacent columns to minimize polygon count and utilize hardware interpolation. Unlike Voxel Polygon Rendering, which uses a vertical c-buffer for software span rendering, this method buffers column projections to construct triangle strips, reducing draw calls and leveraging hardware interpolation for texture coordinates, lightmap colors, and heights.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Virtually constant speed regardless of scene detail, as it processes each screen pixel once [S1, unofficial]. However, worst-case performance degrades on flat surfaces due to frequent clipping and buffer updates [S1, unofficial].
+-- **Memory Complexity:** High memory usage for the voxel map [S1, unofficial]. Tiling can mitigate this, but large maps require significant RAM (e.g., 4MB for early implementations) [S1, unofficial].
+-- **Strengths:** Constant rendering speed, no need for 6DOF rotation matrices or clipping, high detail potential, smooth appearance via bilinear filtering [S1, unofficial].
+-- **Limitations:** Limited to Y-axis rotation (small X-axis tilt only), blocky appearance without filtering, flickering details, high memory requirements, difficulty handling floating geometry without an s-buffer [S1, unofficial].
+-- **When to Use:** Real-time terrain rendering where constant speed is critical and camera movement is restricted to horizontal rotation [S1, unofficial].
+-- **When Not to Use:** Scenes requiring full 6DOF camera movement, significant vertical viewing angles, or complex floating structures without the overhead of an s-buffer [S1, unofficial].
++*   **Time Complexity:** Virtually constant speed regardless of scene detail, as it processes each screen pixel/column once [S1, unofficial]. However, worst-case performance (flat floor) involves significant per-pixel overhead for clipping and updating the column height buffer [S1, unofficial].
++*   **Memory Complexity:** High memory usage for the voxel map. "Huge map problem" requires tiling or voxel polygons to manage memory efficiently [S1, unofficial].
++*   **Strengths:** Constant rendering speed; no 6DOF rotation matrix calculations or clipping required; high detail possible; smooth terrain via bilinear filtering and polygon interpolation [S1, unofficial].
++*   **Limitations:** Limited to Y-axis rotation (approx. ±10 degrees); blocky appearance without filtering; flickering details; high memory usage for large maps; vertical bars only [S1, unofficial].
++*   **When to Use:** Real-time terrain rendering where Y-axis rotation is sufficient and high detail is needed without complex 3D geometry.
++*   **When Not to Use:** Scenes requiring full 6DOF camera movement, significant up/down viewing angles, or where memory is severely constrained.
+ 
+ ## Background
+-Voxel Polygon Rendering was introduced by Jacco Bikker (a.k.a. "THE PHANTOM") in a 1999 article on Flipcode [S1, unofficial]. It was developed as part of the "Focus engine" to allow for high-detail graphics with a natural look, leveraging voxel techniques to avoid traditional 3D polygon operations [S1, unofficial]. The technique addresses issues like blockiness and memory usage through bilinear filtering and tiling/polygons [S1, unofficial].
++Voxel Polygon Rendering was introduced by Jacco Bikker (a.k.a. "THE PHANTOM") in 1999 on Flipcode [S1, unofficial]. It was developed as part of the "Focus engine" to allow graphics with much more detail than any 3D accelerator could handle at the time, with a great natural look [S1, unofficial]. The technique was influenced by earlier voxel engines like "Comanche Total Overkill," which required 4MB of memory for its voxel map [S1, unofficial]. The method combines traditional voxel heightfield rendering with polygon-based detail (voxel polygons) and bilinear filtering to smooth the appearance.
+ 
+ ## Sources

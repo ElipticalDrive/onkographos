@@ -1,0 +1,160 @@
+--- v003.md
++++ v004.md
+@@ -7,60 +7,94 @@
+ 
+ ## How it works
+-**Inputs and Outputs**:
+-- Input: Volume data $V$, threshold $T$, camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$, image size), implicit function definition (optional, for smooth surfaces) [S1, S2, unofficial].
+-- Output: Rendered image (color buffer) [S1, S2, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A 3D volume dataset (scalar field), a threshold value, a camera configuration (position, orientation, image size), and a transfer function (mapping scalar values to color/opacity).
++*   **Output:** A 2D image (color buffer).
+ 
+-**Data Structures**:
+-- `RayBundle`: Contains origins, directions, sample points, and sample lengths [S2, unofficial].
+-- `BaseModel`: Contains `implicit_fn`, `sampler`, and `renderer` modules initialized from config dictionaries [S2, unofficial].
++**Data Structures:**
++*   **Volume Data:** Stored as a 3D texture on the GPU [S2, unofficial].
++*   **Camera:** Contains projection matrices and view parameters.
++*   **Ray Bundle:** A structure containing origins, directions, and sample points for each pixel [S2, unofficial].
+ 
+-**Steps**:
+-1. **Ray Generation**: For each pixel, generate a ray $r(t) = \mathbf{o} + t\mathbf{d}$ intersecting the volume domain [S2, unofficial].
+-2. **Sampling**: Sample the volume along the ray. If using an implicit function, evaluate the function at sample points [S2, unofficial].
+-3. **Classification**: Identify the first sample point where the volume value exceeds the threshold $T$ [S1, unofficial].
+-4. **Normal Estimation**: Compute the surface normal $\mathbf{n}$ at the hit point using the value gradient $\nabla V$ [S1, unofficial].
+-5. **Shading**: Shade the hit point using the normal and lighting information [S1, unofficial].
+-6. **Compositing**: Since it stops at the first hit, no front-to-back compositing is needed for the surface itself, but the hit color is written to the image buffer [S1, unofficial].
++**Method Steps:**
++1.  **Initialization:** Initialize the rendering model with an implicit function (representing the volume), a sampler (for ray marching or point sampling), and a renderer (for shading and compositing) [S2, unofficial].
++2.  **Ray Generation:** For each camera, generate normalized image plane coordinates $xy\_grid$ based on the image size $W \times H$ [S2, unofficial].
++    $$ x = \text{linspace}(-1, 1, W) $$
++    $$ y = \text{linspace}(-1, 1, H) $$
++    $$ xy\_grid = \text{meshgrid}(y, x) $$
++    Convert these to ray origins and directions using the camera's unprojection matrix [S2, unofficial].
++3.  **Ray Marching / Sampling:** Cast rays from the camera through the volume. For surface rendering, the ray is marched until the first voxel value exceeds the specified threshold [S1, unofficial].
++4.  **Normal Estimation:** At the hit point (the first voxel inside the threshold), compute the surface normal using the gradient of the scalar field [S1, unofficial]. This can be done in scene space, object space, or view space [S3].
++5.  **Shading:** Shade the hit point using the computed normal and a lighting model (e.g., Phong or Lambertian) [S2, unofficial].
++6.  **Compositing:** Since surface rendering stops at the first hit, no alpha blending is required for depth compositing in the traditional sense, though the result is a single-color per pixel image [S1, unofficial].
+ 
+-**Formulas**:
+-- Ray: $r(t) = \mathbf{o} + t\mathbf{d}$ [S2, unofficial]
+-- Threshold Check: $V(\mathbf{p}) > T$ [S1, unofficial]
+-- Normal: $\mathbf{n} = \frac{\nabla V(\mathbf{p})}{\|\nabla V(\mathbf{p})\|}$ [S1, unofficial]
++**Pseudocode:**
++```python
++import torch
++import torch.nn.functional as F
+ 
+-**Pseudocode**:
+-```python
+-def surface_render_pipeline(volume, threshold, camera, image_size):
++def get_normalized_image_plane_coordinates(image_size):
++    W, H = image_size
++    x = torch.linspace(-1, 1, steps=W)
++    y = torch.linspace(-1, 1, steps=H)
++    grid_y, grid_x = torch.meshgrid(y, x)
++    xy_grid = torch.stack((grid_x, grid_y), dim=-1).view(W * H, 2)
++    return -xy_grid
++
++def get_rays_from_pixels(xy_grid, camera):
++    N = xy_grid.shape[0]
++    xy_grid_copy = xy_grid.clone().to(camera.device)
++    ndc_pts_ip = torch.cat([xy_grid_copy, torch.ones([N, 1], device=camera.device)], dim=-1)
++    # Unproject to world space to get ray origins and directions
++    # Note: Implementation details depend on specific camera library (e.g., PyTorch3D)
++    origins = camera.unproject_points(ndc_pts_ip, from_ndc=True)[:, :3]
++    directions = camera.unproject_points(ndc_pts_ip, from_ndc=True)[:, 3:] # Simplified
++    return origins, directions
++
++def surface_render(volume_data, threshold, camera, image_size):
+     # 1. Generate rays
+     xy_grid = get_normalized_image_plane_coordinates(image_size)
+-    ray_bundle = get_rays_from_pixels(xy_grid, camera)
++    origins, directions = get_rays_from_pixels(xy_grid, camera)
+     
+-    # 2. Sample volume along rays
+-    # Assuming a simple voxel grid for this example
+-    sample_points = ray_bundle.sample_points
+-    values = sample_volume(volume, sample_points)
++    # 2. Ray Marching to find first hit
++    # In a real implementation, this involves marching along directions
++    # and sampling volume_data. Here we assume a simplified hit detection.
++    hit_points = []
++    normals = []
+     
+-    # 3. Find first hit
+-    hit_mask = values > threshold
+-    hit_indices = find_first_true(hit_mask)
+-    
+-    # 4. Compute normals for hits
+-    hit_points = gather(sample_points, hit_indices)
+-    normals = compute_gradient_normal(volume, hit_points)
+-    
+-    # 5. Shade
+-    colors = shade(normals, light_dir)
+-    
+-    # 6. Write to image
+-    image = create_image_from_colors(colors, hit_indices, image_size)
++    for i in range(origins.shape[0]):
++        # Simplified: Assume we find the first voxel index where value > threshold
++        # This requires mapping ray to voxel coordinates
++        voxel_idx = find_first_voxel_inside_threshold(origins[i], directions[i], volume_data, threshold)
++        if voxel_idx is not None:
++            hit_points.append(voxel_to_world(voxel_idx, volume_data))
++            # Compute gradient for normal
++            grad = compute_gradient(voxel_idx, volume_data)
++            normals.append(grad / torch.norm(grad))
++            
++    # 3. Shade
++    # If no hit, background color
++    # If hit, use normal for lighting
++    colors = []
++    for i, hit in enumerate(hit_points):
++        normal = normals[i]
++        # Simple diffuse shading
++        light_dir = torch.tensor([0.0, 0.0, 1.0], device=volume_data.device)
++        diffuse = max(0, torch.dot(normal, light_dir))
++        color = volume_data[hit] * diffuse
++        colors.append(color)
++        
++    # Reshape to image
++    image = torch.stack(colors).view(image_size[1], image_size[0], 3)
+     return image
+ ```
+ 
+-**Parameters**:
+-- Threshold $T$: Typical value depends on data, e.g., 390 HU for body exposure [S1, unofficial].
+-- Image Size: e.g., 390x844 [S1, unofficial].
++**Parameters:**
++*   **Threshold:** The scalar value below which voxels are considered background and above which they are part of the surface. Typical values depend on the data (e.g., 390 HU for soft tissue in CT) [S1, unofficial].
++*   **Slice Spacing:** The distance between voxels along the depth axis. This directly affects the visibility of terracing artifacts [S1, unofficial].
+ 
+-**Edge Cases**:
+-- No hit: If no voxel exceeds the threshold, the pixel is background [S1, unofficial].
+-- Terracing: Visible at 3 mm slice spacing in surface mode [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Terracing:** The discrete nature of voxel sampling can lead to visible "stair-step" artifacts, especially with large slice spacing [S1, unofficial].
++*   **Threshold Selection:** Incorrect thresholding can lead to incomplete surfaces or inclusion of noise [S1, unofficial].
++*   **Gradient Noise:** The gradient computation can be noisy if the volume data is not smoothed, leading to jagged normals [S1, unofficial].
+ 
+ ## Subtopics
+@@ -70,12 +104,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Linear with respect to the number of pixels and samples per ray [S2, unofficial].
+-- **Memory Complexity**: Linear with respect to the volume size and image size [S2, unofficial].
+-- **Performance**: Measured at 390x844 on a synthetic 700 HU sphere: Volume lights 9.3% of the canvas at peak 238, Surface 9.8% at 255, Both 9.8% at 245 [S1, unofficial].
+-- **Strengths**: No mesh generation, avoids invented shapes between voxels [S1, unofficial].
+-- **Limitations**: Terracing artifacts due to slice spacing [S1, unofficial].
++*   **Time Complexity:** Linear with respect to the number of pixels and the average ray length until hit. Faster than full volume integration as it stops at the first hit [S1, unofficial].
++*   **Memory Complexity:** Requires storage for the 3D volume texture and intermediate ray data [S2, unofficial].
++*   **Performance:** Measured at 390x844 on a synthetic 700 HU sphere, surface rendering exposed 9.8% of the canvas at peak intensity 255, compared to volume rendering's 9.3% at 238 [S1, unofficial].
++*   **Strengths:** No mesh generation overhead; avoids shape invention between voxels; fast for opaque surfaces [S1, unofficial].
++*   **Limitations:** Terracing artifacts due to discrete sampling; sensitive to threshold selection; no internal structure visibility [S1, unofficial].
+ 
+ ## Background
+-Surface rendering is a method for rendering surfaces from volume data. It is classified as scene space, object space, or view space depending on the normal estimation technique used [S3]. The method combines an implicit function, a sampler, and a renderer to compute color from rays [S2, unofficial].
++Surface rendering is a fundamental technique in volume visualization, often used in medical imaging to highlight specific structures [S3]. It is classified as a scene space, object space, or view space operation depending on the normal estimation technique [S3]. The method has been discussed in the context of imaging transforms for visualizing surfaces and volumes [S3].
+ 
+ ## Sources

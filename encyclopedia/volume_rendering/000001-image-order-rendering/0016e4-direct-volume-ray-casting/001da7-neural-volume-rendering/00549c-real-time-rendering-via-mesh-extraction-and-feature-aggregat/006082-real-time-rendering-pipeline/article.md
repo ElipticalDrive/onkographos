@@ -1,0 +1,80 @@
+# Real-Time Rendering Pipeline
+
+Also called: WebGL Real-Time Renderer, CNN-based Feature Aggregation Pipeline
+
+## Overview
+This pipeline renders Neural Duplex Radiance Fields in real-time by replacing neural volume ray casting with hardware rasterization of pre-computed mesh features followed by a lightweight convolutional neural network (CNN) [S1]. It solves the performance bottleneck of iterative neural volume rendering by decoupling geometry representation (meshes with per-vertex features) from appearance synthesis (shallow CNN) [S1]. Unlike its parent method which relies on CUDA-based neural volume rendering, this approach uses WebGL GLSL shaders to achieve cross-platform compatibility without requiring a GPU with CUDA support, trading some peak performance for broader accessibility [S1].
+
+## How it works
+The method renders a novel view in two main stages: feature buffer generation and neural aggregation.
+
+**Inputs:**
+- Two trained meshes (inner and outer) representing the neural duplex radiance field.
+- Per-vertex radiance features attached to each mesh.
+- Camera parameters (view direction, projection).
+
+**Outputs:**
+- Final RGB image at the output resolution.
+
+**Data Structures:**
+- **Feature Buffer:** A 2D texture at the output image resolution. Each pixel stores interpolated per-vertex features from the rasterized mesh. The feature dimension is typically 20 in the CUDA version, but reduced to 8 in the WebGL version for efficiency [S1].
+- **View Direction Buffer:** A 2D texture storing the per-pixel view direction vector.
+
+**Steps:**
+1. **Rasterization:** Use hardware rasterization to render the inner and outer meshes. Interpolate the per-vertex radiance features across the screen space to fill the feature buffer at the output image resolution [S1].
+2. **View Direction Calculation:** Compute the per-pixel view direction vector for each pixel in the output image [S1].
+3. **CNN Aggregation:** Send the feature buffer and view direction buffer into a shallow CNN implemented as GLSL shaders. The CNN aggregates local radiance features to produce view-dependent RGB colors [S1].
+   - The CNN is implemented in two rendering passes, one for each layer, to maximize efficiency [S1].
+   - The convolution kernels are small enough to be executed in a pixel-parallel manner [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Step 1: Rasterization
+feature_buffer = rasterize_meshes(inner_mesh, outer_mesh, camera)
+# Interpolates per-vertex features to screen-space pixels
+
+# Step 2: View Direction
+view_direction_buffer = compute_view_directions(camera, image_resolution)
+
+# Step 3: CNN Aggregation (Implemented as GLSL Shaders)
+# Pass 1: First convolution layer
+intermediate_features = convolve_layer_1(feature_buffer, view_direction_buffer)
+
+# Pass 2: Second convolution layer (and subsequent layers if any)
+rgb_image = convolve_layer_2(intermediate_features)
+
+# Note: In the WebGL version, the final convolution layer is removed
+# and feature dimension is reduced to 8.
+```
+
+**Parameters:**
+- **Feature Dimension:** 20 (CUDA version), 8 (WebGL version) [S1].
+- **Optimizer:** Adam with $\beta_1 = 0.9$ and $\beta_2 = 0.999$ [S1].
+- **Training Iterations:** 200,000 total; first half on distillation views, second half on original training images [S1].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Reducing feature dimension from 20 to 8 in the WebGL version results in performance degradation on datasets compared to the CUDA version [S1].
+- **Compatibility:** The WebGL implementation sacrifices some performance for cross-platform compatibility and no CUDA requirement [S1].
+
+## Subtopics
+
+### Keyword-Gated Feature System
+A feature management system used in the Unity-based implementation of the real-time rendering pipeline. All shared features (directional light, ambient, color ramp, spot lights, shadow casting) use `shader_feature_local` for zero GPU cost when disabled [S2, unofficial]. This allows toggling features on/off and confirms that keyword gating produces no visual artifacts when disabled [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Real-time frame generation is achieved through hardware rasterization and pixel-parallel CNN execution [S1].
+- **Memory Complexity:** Depends on the feature buffer size (image resolution $\times$ feature dimension) and the CNN model size [S1].
+- **Performance:** The WebGL version achieves higher FPS than the CUDA version on some metrics but lower than desktop CUDA on others due to the removal of the final conv layer and reduced feature dimension [S1].
+- **Strengths:** Cross-platform compatibility, no CUDA requirement, real-time performance [S1].
+- **Limitations:** Reduced accuracy compared to the CUDA version due to architectural simplifications [S1].
+- **When to Use:** When cross-platform compatibility is required and CUDA is not available [S1].
+- **When Not to Use:** When peak performance and highest visual fidelity are required, and CUDA is available [S1].
+
+## Background
+The method is based on "Learning Neural Duplex Radiance Fields for Real-Time View Synthesis" [S1]. The real-time renderer was implemented in WebGL using GLSL shaders for cross-platform compatibility [S1]. The training is built on top of PyTorch [S1]. The Unity-based implementation includes additional features like HDRP shader compatibility, occupancy grid empty-space skipping, adaptive stepping, temporal jitter, Henyey-Greenstein phase function, and multi-scatter approximation [S2, unofficial].
+
+## Sources
+[S1] Learning Neural Duplex Radiance Fields for Real-Time View Synthesis, https://doi.org/10.1109/cvpr52729.2023.00803, fetched 2026-10-26
+[S2] Unify volume rendering architecture with cross-pipeline spotlight support, https://github.com/llcheesell/OpenVDBForUnity/pull/3, fetched 2026-10-26 (unofficial)

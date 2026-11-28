@@ -1,0 +1,122 @@
+# Photon Marching
+
+Also called: Discrete Photon Beam Generation
+
+## Overview
+Photon Marching is a photon shooting method that deposits energy at uniform intervals along rays originating from light sources, creating a "discrete photon beam" [S1]. It differs from standard photon tracing (Markov random-walk) by distributing the power of a single photon among multiple photons deposited at fixed steps, analogous to the difference between random-walk volumetric path tracing and ray marching [S1].
+
+## How it works
+**Inputs:**
+*   Light source position $\mathbf{x}_b$ and direction $\tilde{\omega}_b$ [S1].
+*   Beam power $\Phi_b$ (power of the photon beam entering the medium) [S1].
+*   Medium scattering coefficient $\sigma_s$ and extinction coefficient $\sigma_t$ [S1].
+*   Uniform step size $\Delta t$ [S1].
+*   Random offset $\xi$ for the beam [S1].
+*   Medium extent along the ray (distance the ray travels through the participating medium) [G].
+
+**Outputs:**
+*   A set of deposited photons forming a discrete beam [S1].
+*   For each step $k \in [0, N-1]$, a photon position $\mathbf{x}_t$ and power $\Phi_{p_b}$ [S1].
+
+**Data Structures:**
+*   **Discrete Photon Beam:** A list of photon deposits [S1]. Each deposit contains:
+    *   Position $\mathbf{x}_t \in \mathbb{R}^3$ [S1].
+    *   Power $\Phi_{p_b} \in \mathbb{R}$ [S1].
+    *   (Implicit) Step index or distance $t$ [S1].
+
+**Steps:**
+1.  Choose a uniform step size $\Delta t$ [S1].
+2.  Propagate a ray from the light source through the medium [S1].
+3.  Determine the number of steps $N$ based on the step size and the extent of the beam through the medium [S1].
+4.  For each step $k = 0, \dots, N-1$:
+    a. Calculate the distance along the ray: $t = (\xi + k)\Delta t$ [S1].
+    b. Calculate the photon position: $\mathbf{x}_t = \mathbf{x}_b + t\tilde{\omega}_b$ [S1].
+    c. Calculate the transmittance from the ray origin to $\mathbf{x}_t$: $T = e^{-\sigma_t t}$ [S1].
+    d. Calculate the distance between the beam origin and current photon: $\|\mathbf{x}_b - \mathbf{x}_t\|$ [S1].
+    e. Calculate the power of the deposited photon using Equation 15:
+       $$ \Phi_{p_b} = \sigma_s e^{-\sigma_t t} \|\mathbf{x}_b - \mathbf{x}_t\| \Phi_b \Delta t $$
+       where $\Phi_{p_b}$ is the power of each deposited photon, $\sigma_s$ is the scattering coefficient, $e^{-\sigma_t t}$ is the transmittance, $\|\mathbf{x}_b - \mathbf{x}_t\|$ is the distance, $\Phi_b$ is the power of the photon beam entering the medium, and $\Delta t$ is the uniform step size [S1].
+    f. Store the photon at $\mathbf{x}_t$ with power $\Phi_{p_b}$ [S1].
+5.  Use a different random offset $\xi$ for each beam to avoid aliasing [S1]. The specific value of $\xi$ is inconsequential for derivations [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def photon_march(x_b, omega_b, Phi_b, sigma_s, sigma_t, delta_t, xi, extent):
+    """
+    Generate a discrete photon beam using photon marching.
+    
+    Args:
+        x_b: Ray origin (light position).
+        omega_b: Ray direction (unit vector).
+        Phi_b: Power of the photon beam entering the medium.
+        sigma_s: Scattering coefficient.
+        sigma_t: Extinction coefficient.
+        delta_t: Uniform step size.
+        xi: Random offset for the beam.
+        extent: Distance the ray travels through the participating medium.
+        
+    Returns:
+        List of tuples (position, power).
+    """
+    photons = []
+    # Calculate number of steps based on extent and step size [G]
+    N = math.ceil(extent / delta_t)
+    
+    for k in range(N):
+        # Calculate distance along the ray
+        t = (xi + k) * delta_t
+        
+        # Check if the step is within the medium extent
+        if t > extent:
+            break
+            
+        # Calculate photon position
+        x_t = x_b + t * omega_b
+        
+        # Calculate transmittance from ray origin to current photon
+        transmittance = math.exp(-sigma_t * t)
+        
+        # Calculate distance between beam origin and current photon
+        # For a unit direction vector, this equals t
+        distance = t
+        
+        # Calculate photon power using Equation 15
+        Phi_pb = sigma_s * transmittance * distance * Phi_b * delta_t
+        
+        # Store the photon
+        photons.append((x_t, Phi_pb))
+        
+    return photons
+```
+
+**Edge Cases and Pitfalls:**
+*   **Medium Extent:** The method assumes the medium has finite extent to determine $N$ [S1].
+*   **Step Size:** A uniform step size $\Delta t$ is assumed for simplicity [S1].
+*   **Aliasing:** A random offset $\xi$ is required per beam to avoid aliasing [S1].
+*   **Precision:** The transmittance term $e^{-\sigma_t t}$ can underflow for large $t$ or high $\sigma_t$ [G].
+
+## Subtopics
+
+### [Transient Photon Beams](3296-transient-photon-beams.md)
+Handles time-dependent light transport by tracking photon arrival times, differing from static photon marching. Choose when simulating transient effects.
+
+### [Photon Beam Diffusion](3768-photon-beam-diffusion.md)
+Approximates multiple scattering using diffusion, differing from the deterministic step-wise deposition of photon marching. Choose when computational budget limits explicit multiple scattering sampling.
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of steps $N$, which depends on the medium extent and step size $\Delta t$ [S1].
+*   **Memory Complexity:** Linear in the number of deposited photons $N$ [S1].
+*   **Strengths:** Provides a deterministic discretization of the light transport integral along the ray, analogous to ray marching [S1].
+*   **Limitations:** Requires uniform step size and finite medium extent [S1]. Not inherently handling multiple scattering without combination with random-walk sampling [S1].
+*   **When to use:** When a deterministic, grid-like deposition of photon energy along light paths is desired, or as a basis for deriving photon beam definitions [S1].
+*   **When not to use:** When the medium extent is unknown or infinite [S1].
+
+## Background
+Photon Marching was introduced in "A comprehensive theory of volumetric radiance estimation using photon points and beams" [S1]. It is used to derive a mathematical definition of photon beams, although in practice, photon beams are still often created using a random-walk process [S1].
+
+## Sources
+[S1] A comprehensive theory of volumetric radiance estimation using photon points and beams, https://doi.org/10.1145/1899404.1899409, fetched 2026-10-26

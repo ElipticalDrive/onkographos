@@ -1,0 +1,87 @@
+--- v001.md
++++ v002.md
+@@ -4,16 +4,20 @@
+ 
+ ## Overview
+-Median Normalization scales a scalar field by dividing each valid value by the median of the valid values and multiplying by a configurable multiplier [S1, unofficial]. It solves the problem of intensity range inconsistency in volume data by using the median, which is robust to outliers compared to mean-based methods [S1, unofficial]. It differs from [Weighted Percentile Computation](7031-weighted-percentile-computation.md) by using a single central point (the median) rather than a weighted distribution, and from [Intensity-to-Grayscale Mapping](11937-intensity-to-grayscale-mapping.md) by preserving the relative magnitude of values rather than mapping them to a fixed output range [S1, unofficial].
++Median Normalization scales a scalar field by dividing each valid value by the median of the valid values and multiplying by a configurable multiplier [S1, unofficial]. It handles NaNs and non-positive values by replacing NaNs with zero and excluding non-positive values from the median calculation [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `value_tensor`: A tensor of scalar values representing the volume data.
+-- `config_value`: A floating-point multiplier applied after normalization.
++- `value_tensor`: The input tensor of scalar values [S1, unofficial].
++- `config_value`: The multiplier to apply after normalization [S1, unofficial].
+ 
+ **Outputs:**
+-- `ret_value`: A tensor of the same shape and dtype as `value_tensor` (converted to float32), containing the normalized values.
++- `ret_value`: A tensor of the same shape as `value_tensor` with dtype `torch.float32`, containing the normalized values [S1, unofficial].
+ 
+ **Data Structures:**
+-- The input and output are dense tensors. No auxiliary structures are required beyond temporary masks and slices.
++- The input and output are dense tensors [G].
++- Temporary boolean masks and index arrays are used to identify valid values [G].
++
++**Formulas:**
++The normalized value $y_i$ for each valid index $i$ is computed as $y_i = \mu \cdot \frac{x_i}{m}$ [S1, unofficial], where $x_i$ is the input value at index $i$, $\mu$ is `config_value`, and $m = \text{median}(\{x_j \mid x_j > 0\})$ is the median of all positive values in `value_tensor` [S1, unofficial]. All values at indices not in the valid set are set to $0$ [S1, unofficial].
+ 
+ **Steps:**
+@@ -21,8 +25,8 @@
+ 2. Replace all `NaN` values in `value_tensor` with `0` [S1, unofficial].
+ 3. Identify `valid_indices` where `value_tensor > 0` [S1, unofficial].
+-4. Extract `valid_value` from `value_tensor` at `valid_indices`, cast to `torch.float32` [S1, unofficial].
++4. Extract `valid_value` from `value_tensor` at `valid_indices` and cast to `torch.float32` [S1, unofficial].
+ 5. Compute `median_val` as the median of `valid_value` [S1, unofficial].
+-6. If `median_val` is zero or `valid_value` is empty, return `ret_value` (all zeros) [G].
+-7. For each index in `valid_indices`, set `ret_value[index] = config_value * (valid_value / median_val)` [S1, unofficial].
++6. If `valid_value` is empty or `median_val` is zero, return `ret_value` (all zeros) [G].
++7. Set `ret_value[valid_indices] = config_value * (valid_value / median_val)` [S1, unofficial].
+ 8. Return `ret_value` [S1, unofficial].
+ 
+@@ -57,6 +61,5 @@
+         
+     # Step 6 & 7: Normalize and assign
+-    normalized_valid = config_value * (valid_value / median_val)
+-    ret_value[valid_indices] = normalized_valid
++    ret_value[valid_indices] = config_value * (valid_value / median_val)
+     
+     # Step 8: Return result
+@@ -65,29 +68,23 @@
+ 
+ **Parameters:**
+-- `config_value`: The multiplier to apply after normalization. Typical values depend on the downstream application; [S1, unofficial] uses it as a configuration parameter without specifying a default.
+-- `value_tensor`: The input tensor. Must support boolean indexing and median computation.
++- `config_value`: The multiplier to apply after normalization. Typical values are not given in the sources [S1, unofficial].
++- `value_tensor`: The input tensor to normalize [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Zero Median:** If all valid values are identical and non-zero, the median is non-zero, and normalization is valid. If all valid values are zero (impossible by definition of `valid_indices` where `>0`), or if the median calculation returns zero due to numerical issues, division by zero occurs. The pseudocode guards against this [G].
+-- **NaN Handling:** NaNs are replaced with 0 before masking, ensuring they are excluded from the median calculation and the output [S1, unofficial].
+-- **Negative Values:** Values $\le 0$ are ignored and remain 0 in the output [S1, unofficial].
++- **Zero Median:** If all valid values are identical and non-zero, the median is non-zero and normalization proceeds [S1, unofficial]. If the median calculation returns zero due to numerical issues or if no valid values exist, division by zero is avoided by returning the zero-initialized output tensor [G].
++- **NaN Handling:** NaNs are replaced with `0` before masking, ensuring they are excluded from the median calculation and remain `0` in the output [S1, unofficial].
++- **Negative Values:** Values $\le 0$ are excluded by the `valid_indices` mask and remain `0` in the output tensor [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Statistical Normalization (Z-Score)
+-Data is normalized to have zero mean and a standard deviation of one before training to allow consistent hyperparameters and initial parameters across models [S2, unofficial]. When all data is available, statistics are computed from the data itself, considering each dimension individually [S2, unofficial]. When data is not available, it is assumed that the variable is uniformly distributed $x \sim U(r_{min}, r_{max})$, and the normalized value $\hat{x}$ is calculated as $\hat{x} = \frac{x - E[x]}{\sqrt{Var[x]}}$, where $E[x]$ is the expected value and $Var[x]$ is the variance of the uniform distribution [S2, unofficial]. Ranges for normalization parameters are specified in Table 4 of [S2, unofficial]: for 2D spatial ($s_i$): [0, 64]; for 2D color ($c_i$): [0, 255]; for 3D spatial ($s_i$): [-1, 1] (Objects) or [-5, 5] (Rooms); for 3D color ($c_i$): [0, 255] [S2, unofficial].
++### [Statistical Normalization (Z-Score)](17944-statistical-normalization-z-score.md)
++Statistical Normalization transforms a scalar field so that the resulting data has a zero mean and a standard deviation of one. This process ensures consistent hyperparameters and initial parameters across different models or rendering pipelines. Unlike Median Normalization, which scales by the median, this method relies on the first and second statistical moments (mean and variance) of the distribution.
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(N)$, where $N$ is the number of elements in `value_tensor`, due to the linear scan for valid indices and the median computation (which is typically $O(N)$ for selection algorithms) [S1, unofficial].
+-**Memory Complexity:** $O(N)$ for the output tensor and temporary masks [S1, unofficial].
+-**Strengths:** Robust to outliers in the data due to the use of the median [S1, unofficial]. Simple to implement [S1, unofficial].
+-**Limitations:** Only scales positive values; negative and zero values are discarded or set to zero [S1, unofficial]. Sensitive to the distribution of positive values; if the median is very small, scaling factors can become large [G].
+-**When to use:** When the data contains significant outliers and the primary interest is in the central tendency of positive values [S1, unofficial].
+-**When not to use:** When negative values are meaningful or when a zero-mean normalization is required [S2, unofficial].
++Not given in the sources.
+ 
+ ## Background
+-Median Normalization is used in the context of Gaussian Splatting and volume rendering preprocessing, specifically in the FastGS implementation [S1, unofficial]. It is part of a broader set of data normalization techniques used to prepare input data for machine learning models, such as the Z-Score normalization described in Variational Bayes Gaussian Splatting [S2, unofficial].
++Median Normalization is used in the context of Gaussian Splatting and volume rendering preprocessing, specifically in the FastGS implementation [S1, unofficial].
+ 
+ ## Sources
+-[S1] fastgs/FastGS, https://github.com/fastgs/FastGS, fetched 2026-10-27 (unofficial)
+-[S2] Variational Bayes Gaussian Splatting, https://arxiv.org/abs/2410.03592v2, fetched 2026-10-26 (unofficial)+[S1] fastgs/FastGS, https://github.com/fastgs/FastGS, fetched 2026-10-27 (unofficial)

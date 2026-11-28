@@ -1,0 +1,159 @@
+# Occupancy Grid Update
+
+Also called: Density-Based Grid Update, Grid Density Thresholding, Occupancy Grid Update from Density
+
+## Overview
+Occupancy Grid Update is a method to periodically refresh a 3D occupancy grid by querying a Neural Radiance Field (NeRF) model for density at grid voxel centers and marking voxels as occupied if the density exceeds a specified threshold [S2, unofficial]. It solves the problem of accelerating ray marching by skipping empty space during training and rendering [S2, unofficial]. It sets itself apart from its sibling, [Occupancy Map Generation via Ray Casting](8136-occupancy-map-generation-via-ray-casting.md), by directly evaluating the neural network's output on a regular lattice rather than casting rays through the scene to infer occupancy [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** A trained NeRF model, the 3D grid resolution, the axis-aligned bounding box (AABB) defining the scene bounds, and a density threshold [S2, unofficial].
+- **Outputs:** A 3D boolean occupancy grid indicating which voxels are occupied [S2, unofficial].
+
+**Data Structures:**
+- **Grid:** A 3D array of shape `(resolution, resolution, resolution)` containing boolean values (`True`/`False` or `1`/`0`) [S2, unofficial].
+- **AABB:** Defined by `aabb_min` and `aabb_max` (3D vectors) [S2, unofficial].
+
+**Steps:**
+1. **Generate Grid Coordinates:** Create a 3D meshgrid of integer indices from `0` to `resolution - 1` for x, y, and z dimensions [S2, unofficial].
+   $$ \text{grid\_coords} = \text{meshgrid}(0, \dots, \text{res}-1, \text{indexing}='ij').\text{reshape}(-1, 3) $$
+2. **Convert to World Positions:** Map the grid indices to world coordinates using the AABB [S2, unofficial]:
+   $$ \text{positions} = \text{aabb\_min} + \left( \frac{\text{grid\_indices.float()} + 0.5}{\text{resolution}} \right) \times (\text{aabb\_max} - \text{aabb\_min}) $$
+3. **Query Densities:** Pass the world positions to the NeRF model to retrieve volume density $\sigma$ [S2, unofficial].
+   - If the model supports `forward_with_density_only`, use it.
+   - Otherwise, call the model with dummy view directions and extract the density component [S2, unofficial].
+4. **Update Grid:** Compare the queried densities against the threshold [S2, unofficial]:
+   $$ \text{occupied} = \sigma > \text{threshold} $$
+   Reshape the result back to `(resolution, resolution, resolution)` [S2, unofficial].
+
+**Parameters:**
+- **resolution:** Integer, default 128 [S2, unofficial].
+- **density_threshold:** Float, default 0.01 [S2, unofficial].
+- **update_grid_every:** Integer, iteration interval for updates, default 500 [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_occupancy_grid(model, aabb_min, aabb_max, resolution, threshold, update_every, step):
+    """
+    Updates the occupancy grid based on NeRF density predictions.
+    
+    Args:
+        model: NeRF model with a forward method.
+        aabb_min: List/Tensor (3,), minimum bounds of the scene.
+        aabb_max: List/Tensor (3,), maximum bounds of the scene.
+        resolution: int, grid resolution.
+        threshold: float, density threshold for occupancy.
+        update_every: int, frequency of updates.
+        step: int, current training step.
+        
+    Returns:
+        grid: 3D list/array (resolution, resolution, resolution), boolean occupancy grid.
+    """
+    # Only update periodically
+    if step % update_every != 0:
+        return None
+
+    # 1. Generate grid coordinates
+    grid_coords = []
+    for x in range(resolution):
+        for y in range(resolution):
+            for z in range(resolution):
+                grid_coords.append([x, y, z])
+
+    # 2. Convert to world positions
+    positions = []
+    for coord in grid_coords:
+        pos = [0.0, 0.0, 0.0]
+        for d in range(3):
+            pos[d] = aabb_min[d] + ((coord[d] + 0.5) / resolution) * (aabb_max[d] - aabb_min[d])
+        positions.append(pos)
+
+    # 3. Query densities
+    batch_size = 4096
+    densities = []
+    for i in range(0, len(positions), batch_size):
+        batch_pos = positions[i:i+batch_size]
+        if hasattr(model, 'forward_with_density_only'):
+            batch_dens = model.forward_with_density_only(batch_pos)
+        else:
+            dummy_dirs = [[0.0, 0.0, 0.0] for _ in batch_pos]
+            out = model(batch_pos, dummy_dirs)
+            # Extract density; assumes model returns a tuple/list where density is at index 1
+            batch_dens = out[1] if isinstance(out, (list, tuple)) and len(out) > 1 else out
+        densities.extend(batch_dens)
+
+    # 4. Update grid
+    occupied = [d > threshold for d in densities]
+    # Reshape flat list to 3D array
+    grid = [[[occupied[i * resolution * resolution + j * resolution + k] for k in range(resolution)] for j in range(resolution)] for i in range(resolution)]
+    return grid
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Floating-point comparisons at the threshold boundary may cause flickering if the grid is updated frequently with noisy density estimates [S2, unofficial].
+- **Boundaries:** Voxels outside the AABB must be handled explicitly (e.g., marked as empty) [S2, unofficial].
+- **Degenerate Input:** If the NeRF model is not trained, densities may be uniform, leading to an all-occupied or all-empty grid [S2, unofficial].
+
+## Subtopics
+
+### [Density Grid Update with EMA](3884-density-grid-update-with-ema.md)
+This method periodically refreshes a 3D hierarchical density grid using an Exponential Moving Average (EMA) of newly queried densities to stabilize training and refine the representation of occupied space. It builds on [Occupancy Grid Update](2916-occupancy-grid-update.md) by maintaining continuous density values per voxel alongside binary occupancy.
+
+### [Occupancy Grid Transition and Update](7522-occupancy-grid-transition-and-update.md)
+This method adapts the occupancy grid for efficient point sampling in dynamic Neural Radiance Fields (NeRFs) by treating voxel occupancy as a time-varying probability rather than a static binary state. It solves the problem of maintaining sampling efficiency in on-the-fly training where scene geometry changes, by applying a transition function to predict motion and a Bayesian update to incorporate new density observations. Unlike static NeRFs that cache grids or 4D space-time grids that fail to accelerate per-frame training, this method transitions the 3D grid between frames to preserve occupancy information relevant to the current time step.
+
+### [MERF Baking](10179-merf-baking.md)
+MERF Baking is a post-training procedure that converts a trained neural field representation into a block-sparse, texture-based format optimized for real-time web rendering. It solves the problem of storing and transmitting large-scale neural scenes by evaluating the MLP outputs on discrete grids and using a binary occupancy grid to cull empty or occluded voxels. It sets itself apart from its siblings, such as [Density Grid Update with EMA](3884-density-grid-update-with-ema.md) and [Occupancy Grid Transition and Update](7522-occupancy-grid-transition-and-update.md), by explicitly targeting web-based delivery through texture compression and block-sparse storage, trading higher frame rates for neural field reconstruction capabilities compared to mesh rasterization methods. Unlike existing baking pipelines that do not consider the proposal-MLP and use uniformly-spaced sample points (causing fog-like artifacts and floating blobs), this method uses proposal-MLP sampling and real-time renderer step sizes for visibility culling, resulting in a lossless pipeline.
+
+### [Occupancy Grid and Importance Sampling Fusion](17155-occupancy-grid-and-importance-sampling-fusion.md)
+A ray sampling method that fuses occupancy grid-based sparse sampling with importance sampling to generate ray samples efficiently for neural radiance fields, specifically designed for autonomous driving scenes. It builds on [Occupancy Grid Update](2916-occupancy-grid-update.md) by using the grid to perform an initial coarse pass, then redistributing samples based on the resulting density weights to concentrate computation on opaque regions.
+
+### Proposal Network Baking
+Render all training rays to bake the proposal network into a $1024^3$ binary occupancy grid [S4]. Mark a voxel as occupied if there exists at least one sampled point $x_i$ such that $\max(w_i, \sigma_i) > 0.005$ [S4]. The threshold for marking a voxel as occupied is 0.005 [S4]. The baked proposal network is stored in a $1024^3$ binary occupancy grid [S4].
+
+### Occupancy Grid Update with Geometry Priors
+A strategy to combine an initialized occupancy grid (from geometry priors) with continuously updated grids to address sparsity and errors in the geometry prior, preventing reliance on the initial grid throughout training [S5]. Start with an initialized occupancy grid obtained from geometry priors [S5]. Always mark cells that were initially occupied as positive (true), assuming initial priors are sparse but accurate (low-recall, high-precision) [S5]. Add new cells to the occupancy grid if their estimated volume density is larger than a threshold [S5]. The density threshold value is not explicitly specified [S5]. The strategy effectively addresses the missing point issue [S5].
+
+### Mask-based Occupancy Grid Update
+Generate `cache_grid_xyz` using `meshgrid` of `linspace` from `xyz_min` to `xyz_max` for dimensions of `mask_cache.mask.shape` [S6, unofficial]. Calculate `cache_grid_density = density(cache_grid_xyz)[None,None]` [S6, unofficial]. Calculate `cache_grid_alpha = activate_density(cache_grid_density)` [S6, unofficial]. Apply max pooling: `cache_grid_alpha = max_pool3d(cache_grid_alpha, kernel_size=3, padding=1, stride=1)[0,0]` [S6, unofficial]. Update `mask_cache.mask`: `mask_cache.mask &= (cache_grid_alpha > fast_color_thres)` [S6, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- **Time:** $O(\text{resolution}^3)$ for the grid update step, as each voxel is queried once [S2, unofficial]. The cost depends on the NeRF model's inference time per voxel [S2, unofficial].
+- **Memory:** $O(\text{resolution}^3)$ for the occupancy grid [S2, unofficial].
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Not given in the sources.
+
+**Strengths and Limitations:**
+- **Strengths:** Simple to implement; effective for accelerating ray marching in static scenes [S2, unofficial].
+- **Limitations:** Requires periodic re-evaluation of the NeRF [S2, unofficial].
+
+**When to Use:**
+- Use for static NeRF training where empty space skipping is beneficial [S2, unofficial].
+
+**When Not to Use:**
+- Do not use for highly dynamic scenes without adaptation (see [Occupancy Grid Transition and Update](7522-occupancy-grid-transition-and-update.md)) [S2, unofficial].
+
+## Background
+**Origin:**
+The method is commonly used in efficient NeRF implementations such as Instant-NGP and NerfAcc [S1][S2, unofficial].
+
+**History and Development:**
+It was developed to address the computational bottleneck of ray marching through empty space in large scenes [S2, unofficial].
+
+**Where it is Used:**
+Used in training pipelines for NeRFs to accelerate convergence [S2, unofficial].
+
+## Sources
+[S1] NeRFshop, https://doi.org/10.1145/3585499, fetched 2026-10-26
+[S2] InanXR/FLASH, https://github.com/InanXR/FLASH, fetched 2026-10-27 (unofficial)
+[S3] AlanHsu314/CoroNeRF_public, https://github.com/AlanHsu314/CoroNeRF_public, fetched 2026-10-27 (unofficial)
+[S4] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26
+[S5] INGeo: Accelerating Instant Neural Scene Reconstruction with Noisy Geometry Priors, https://doi.org/10.1007/978-3-031-25066-8_40, fetched 2026-10-26
+[S6] Jumpat/SegmentAnythingin3D, https://github.com/Jumpat/SegmentAnythingin3D, fetched 2026-10-26 (unofficial)

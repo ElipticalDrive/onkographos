@@ -1,0 +1,191 @@
+--- v001.md
++++ v002.md
+@@ -1,22 +1,22 @@
+ # View Coherence Optimization
+ 
+-Also called: Exploiting view coherence, Order checking, Resorting with previous view data
++Also called: Exploiting view coherence, Neo, Order checking, Resorting with previous view data
+ 
+ ## Overview
+-View Coherence Optimization accelerates the visibility sorting of volume rendering cells by leveraging the similarity between consecutive camera viewpoints [S1, S2, unofficial]. Instead of sorting the cell list from scratch for every frame, it uses the sorted order from the previous view as a starting point, significantly reducing the number of swaps required when viewpoint changes are small [S1, unofficial]. It further optimizes the sorting loop by employing a fast, parallel order-checking mechanism to exit early if the data is already sorted [S2, unofficial]. This method builds on [Customized Quicksort for Visibility Sorting](14497-customized-quicksort-for-visibility-sorting.md) by reducing the workload that the quicksort must perform.
++View Coherence Optimization accelerates the visibility sorting of volume rendering cells by leveraging the similarity between consecutive camera viewpoints [S1, unofficial]. Instead of sorting the cell list from scratch for every frame, it uses the sorted order from the previous view as a starting point, significantly reducing the number of swaps required when viewpoint changes are small [S1, unofficial]. It further optimizes the sorting loop by employing a fast, parallel order-checking mechanism to exit early if the data is already sorted [S2, unofficial]. This method builds on [Customized Quicksort for Visibility Sorting](14497-customized-quicksort-for-visibility-sorting.md) by reducing the workload that the quicksort must perform [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- A list of cells sorted by depth from the previous view.
+-- The current camera view parameters.
+-- The set of cells to be rendered for the current view.
++- A list of cells sorted by depth from the previous view [S1, unofficial].
++- The current camera view parameters [S1, unofficial].
++- The set of cells to be rendered for the current view [S1, unofficial].
+ 
+ **Outputs:**
+-- A list of cells sorted by depth for the current view.
++- A list of cells sorted by depth for the current view [S1, unofficial].
+ 
+ **Data Structures:**
+ - **Cell List:** An array of structures. Each element contains:
+-    - `tangential_squared_distance`: A `float` representing the squared distance from the camera plane or a similar depth metric used for sorting [S1, unofficial].
+-    - `tetrahedral_index`: An integer identifier for the cell/tetrahedron [S1, unofficial].
++    - `tangential_squared_distance`: A `float` representing a depth metric used during sorting [S1, unofficial].
++    - `tetrahedral_index`: An integer identifier for the cell or tetrahedron [S1, unofficial].
+ - **Comparison Array:** A temporary array of integers (0 or 1) used during the order check [S2, unofficial].
+ - **Shared Memory (GPU):** Used for coalesced reading and partial reduction [S2, unofficial].
+@@ -27,42 +27,29 @@
+ **Steps:**
+ 
+-1.  **Prepare for Small Viewpoint Changes:** Ensure the application generates small, incremental changes in the viewpoint between frames to maximize coherence [S1, unofficial].
+-2.  **Initialize Sort with Previous Order:** Pass the sorted list from the previous frame as the input to the sorting algorithm (e.g., Customized Quicksort) for the current frame [S1, unofficial].
+-3.  **Parallel Order Checking (GPU Implementation):**
+-    To avoid full sorting when the list is already sorted or nearly sorted, perform the following check during the sorting iterations [S2, unofficial]:
+-    1.  **Coalesced Read:** Each thread reads only one element from the current cell list into shared memory. This allows for coalesced memory access and cuts read operations in half compared to reading two consecutive elements [S2, unofficial].
+-    2.  **Parallel Comparison:** Each thread compares its element with the next element in the sequence.
+-        - If `element[i]` is in the correct order relative to `element[i+1]` (based on the current view's depth metric), write `0` to the comparison array.
++1. **Prepare for Small Viewpoint Changes:** Ensure the application generates small, incremental changes in the viewpoint between frames to maximize coherence [S1, unofficial]. The original implementation modified the program to use smaller viewpoint changes, improving run times by an additional 18% [S1, unofficial].
++2. **Initialize Sort with Previous Order:** Pass the sorted list from the previous frame as the input to the sorting algorithm (e.g., Customized Quicksort) for the current frame [S1, unofficial].
++3. **Parallel Order Checking (GPU Implementation):** To avoid full sorting when the list is already sorted or nearly sorted, perform the following check during the sorting iterations [S2, unofficial]:
++    1. **Coalesced Read:** Each thread reads only one element from the current cell list into shared memory [S2, unofficial]. This allows for coalesced memory access and cuts read operations in half compared to reading two consecutive elements [S2, unofficial].
++    2. **Parallel Comparison:** Each thread compares its element with the next element in the sequence [S2, unofficial].
++        - If `element[i]` is in the correct order relative to `element[i+1]` (based on the current view's depth metric), write `0` to the comparison array [S2, unofficial].
+         - Otherwise, write `1` [S2, unofficial].
+-    3.  **Partial Reduction:** Perform a parallel reduction sum on the comparison array within shared memory. Only the single sum for the block is written to global memory [S2, unofficial].
+-    4.  **Quick Test on Subset:** Perform the above comparison and reduction on the first `n0` elements of the array [S2, unofficial].
++    3. **Partial Reduction:** Perform a parallel reduction sum on the comparison array within shared memory [S2, unofficial]. Only the single sum for the block is written to global memory [S2, unofficial].
++    4. **Quick Test on Subset:** Perform the above comparison and reduction on the first `n0` elements of the array [S2, unofficial].
+         - If the sum is non-zero (out of order detected), proceed to the next sorting step (e.g., quicksort partitioning) and skip the full test [S2, unofficial].
+         - If the sum is zero (sorted), perform a check on the remaining `1 + n - n0` elements, including the last element of the `n0` set, to ensure global order [S2, unofficial].
+-    5.  **Early Exit:** If the final reduction sum is 0, the input data is in order, and the sorting loop can exit early [S2, unofficial].
++    5. **Early Exit:** If the final reduction sum is 0, the input data is in order, and the sorting loop can exit early [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def view_coherence_sort(cell_list, previous_sorted_list, camera_view, n0):
++def view_coherence_sort(cell_list, previous_sorted_list, n0):
+     """
+-    Sorts cell_list for the current camera_view, using previous_sorted_list
++    Sorts cell_list for the current view, using previous_sorted_list
+     to exploit view coherence.
+     """
+-    # Step 1: Use previous sorted list as initial state
+-    # The quicksort algorithm will start with this nearly-sorted array
+     current_list = previous_sorted_list.copy()
+-    
+-    # Step 2: Perform sorting with integrated order checking
+-    # The quicksort implementation must support early exit via order checking
+-    
+-    sorted_list = customized_quicksort_with_order_check(
+-        current_list, 
+-        camera_view, 
+-        n0
+-    )
+-    
+-    return sorted_list
++    return customized_quicksort_with_order_check(current_list, n0)
+ 
+-def customized_quicksort_with_order_check(cell_list, camera_view, n0):
++def customized_quicksort_with_order_check(cell_list, n0):
+     """
+     A quicksort variant that checks for sorted order during execution.
+@@ -70,65 +57,60 @@
+     if len(cell_list) <= 1:
+         return cell_list
+-    
+-    # Check if already sorted using parallel order checking
+-    if is_sorted_parallel(cell_list, camera_view, n0):
++
++    # Check if already sorted using parallel order checking logic
++    if is_sorted_parallel(cell_list, n0):
+         return cell_list
+-    
++
+     # Standard quicksort partitioning and recursion
+-    pivot = select_pivot(cell_list)
+-    less = [c for c in cell_list if c.depth < pivot.depth]
+-    equal = [c for c in cell_list if c.depth == pivot.depth]
+-    greater = [c for c in cell_list if c.depth > pivot.depth]
+-    
+-    return (customized_quicksort_with_order_check(less, camera_view, n0) + 
+-            equal + 
+-            customized_quicksort_with_order_check(greater, camera_view, n0))
++    pivot = cell_list[len(cell_list) // 2]  # [G] Standard middle-element pivot selection; sources do not specify pivot strategy
++    less = [c for c in cell_list if c.tangential_squared_distance < pivot.tangential_squared_distance]
++    equal = [c for c in cell_list if c.tangential_squared_distance == pivot.tangential_squared_distance]
++    greater = [c for c in cell_list if c.tangential_squared_distance > pivot.tangential_squared_distance]
+ 
+-def is_sorted_parallel(cell_list, camera_view, n0):
++    return (customized_quicksort_with_order_check(less, n0) +
++            equal +
++            customized_quicksort_with_order_check(greater, n0))
++
++def is_sorted_parallel(cell_list, n0):
+     """
+-    GPU-accelerated order check.
++    Simulates GPU-accelerated order check.
+     Returns True if the list is sorted, False otherwise.
+     """
+     n = len(cell_list)
+-    
++    if n <= 1:
++        return True
++
+     # Step 3.1: Quick test on first n0 elements
+-    # In a real GPU implementation, this is done in parallel threads
+-    # Here we simulate the logic for clarity
+-    
+-    # Check first n0 elements
+     quick_test_failed = False
+     for i in range(min(n0, n - 1)):
+-        if cell_list[i].depth > cell_list[i+1].depth:
++        if cell_list[i].tangential_squared_distance > cell_list[i + 1].tangential_squared_distance:
+             quick_test_failed = True
+             break
+-            
++
+     if quick_test_failed:
+         return False
+-        
+-    # If quick test passed, check remaining elements
+-    # Check remaining 1 + n - n0 elements including the last of n0 set
++
++    # If quick test passed, check remaining 1 + n - n0 elements
++    # This covers indices n0 to n-1 (n - n0 elements) plus the last element of the n0 set (index n0-1)
+     start_index = n0
+     if start_index >= n:
+-        return True # All checked in quick test
+-        
++        return True
++
+     for i in range(start_index, n - 1):
+-        if cell_list[i].depth > cell_list[i+1].depth:
++        if cell_list[i].tangential_squared_distance > cell_list[i + 1].tangential_squared_distance:
+             return False
+-            
+-    # Check the boundary between n0 and the rest if not already covered
+-    # The source says "including the last element of the n0 set"
+-    # This implies checking the transition or ensuring the last of n0 
+-    # is compared with the first of the rest if n0 < n-1
++
++    # Check the boundary between n0 and the rest
+     if n0 < n - 1:
+-        if cell_list[n0-1].depth > cell_list[n0].depth:
++        if cell_list[n0 - 1].tangential_squared_distance > cell_list[n0].tangential_squared_distance:
+             return False
+-            
++
+     return True
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Large Viewpoint Changes:** If the viewpoint changes significantly, the previous order is no longer coherent, and the optimization provides little benefit or may even add overhead due to the order checking [S1, unofficial].
++- **Large Viewpoint Changes:** The method assumes small viewpoint changes between frames; the original implementation modified the program to use smaller viewpoint changes, improving run times by an additional 18% [S1, unofficial].
+ - **Cache Coherency:** Reordering tetrahedra for view sorting eliminates cache stalls during rendering but slows down the sorting routine due to increased data movement [S1, unofficial]. This trade-off requires careful tuning [S1, unofficial].
+-- **Precision:** The tangential squared distance is a `float`, which may introduce precision issues in edge cases where depths are very close [S1, unofficial].
++- **Precision:** The `tangential_squared_distance` is a `float`, which may introduce precision issues in edge cases where depths are very close [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -146,3 +128,4 @@
+ ## Sources
+ [S1] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)
+-[S2] Fast 4-way parallel radix sorting on GPUs, https://www.sci.utah.edu/~csilva/papers/cgf.pdf, fetched 2026-10-29 (unofficial)+[S2] Fast 4-way parallel radix sorting on GPUs, https://www.sci.utah.edu/~csilva/papers/cgf.pdf, fetched 2026-10-29 (unofficial)
++[S3] From Splats to Silicon: Rethinking Computational Efficiency of 3DGS, https://arxiv.org/abs/2609.06157, fetched 2026-10-29 (unofficial)

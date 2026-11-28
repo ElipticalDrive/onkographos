@@ -1,0 +1,107 @@
+--- v004.md
++++ v005.md
+@@ -4,88 +4,44 @@
+ 
+ ## Overview
+-This family of methods manages the dynamic growth, pruning, and optimization trajectory of 3D Gaussian primitives during training to balance reconstruction fidelity, training speed, and memory usage. Unlike standard 3D Gaussian Splatting (3DGS) which applies fixed densification thresholds and static learning rates, these methods introduce adaptive schedules for resolution, primitive budgets, and gradient accumulation. They solve the problem of inefficient spatial spread, redundant primitive clustering, and slow convergence by decoupling global spread from local refinement or by learning densification policies.
++This family of methods addresses the inefficiency and instability of standard 3D Gaussian Splatting (3DGS) optimization by controlling the rate of primitive creation (densification) and the resolution at which the scene is rendered during training. Standard 3DGS uses a fixed schedule for splitting and cloning Gaussians, which often leads to redundant primitives, poor convergence in late stages, or excessive computational cost. These methods distinguish themselves by decoupling densification from fixed iteration counts, using dynamic resolution scaling, or employing learned networks to determine when and where to add primitives. They solve the problem of balancing rendering fidelity against training time and memory usage.
+ 
+ ## Shared principles
+-The core mechanism across these methods is the modification of the standard 3DGS optimization loop, which typically consists of rendering, loss computation, gradient backpropagation, and periodic densification (split/clone) and pruning.
+-
+-1.  **Dynamic Primitive Budgeting:** Instead of a fixed maximum primitive count, many methods estimate a dynamic budget $P_{max}(t)$ or $P_{fin}^{(i)}$ based on optimization progress, momentum, or resolution requirements.
+-2.  **Resolution-Primitive Coupling:** Optimization complexity is defined by the product of rendering resolution and primitive count. Methods modulate rendering resolution (e.g., via anti-aliasing downsampling) to control the frequency components fitted, synchronizing primitive growth with the effective resolution [S5].
+-3.  **Decoupled Densification:** Standard 3DGS performs split and clone operations simultaneously. Advanced methods decouple these: split is used for global spread (low resolution/early stage), while clone is reserved for local refinement (high resolution/late stage) [S4, unofficial].
+-4.  **Gradient Accumulation and Weighting:** Some methods accumulate gradients over multiple steps before updating parameters or reweight gradients based on visibility factors to improve density control [S1][S2, unofficial].
++The core mechanism shared by these methods is the modification of the standard 3DGS optimization loop, specifically the densification phase. In standard 3DGS, densification occurs at fixed intervals (e.g., every 100 iterations) based on gradient magnitude thresholds. These methods introduce:
++1.  **Dynamic Resolution:** Rendering at a lower resolution for early iterations to fit low-frequency structures, then increasing resolution to fit high-frequency details. This reduces the computational load during the initial, most expensive phase of optimization.
++2.  **Adaptive Primitive Budgeting:** Instead of a fixed maximum number of Gaussians, the budget is determined dynamically based on scene complexity, momentum of previous growth, or specific scheduling functions (e.g., concave-up growth curves).
++3.  **Decoupled Densification Operations:** Separating the "split" operation (global spread) from the "clone" operation (local refinement) and applying them at different stages or resolutions to prevent premature clustering.
++4.  **Learned or Heuristic Densification:** Using neural networks or specific gradient-based criteria (e.g., normal gradients) to decide densification, rather than simple view-space gradient thresholds.
+ 
+ ## Subtopics
+ 
+ ### [Error-Driven 2D Gaussian Training](13985-error-driven-2d-gaussian-training.md)
+-A densification strategy that initializes new 3D Gaussians by first optimizing 2D Gaussian kernels in image space. It solves the problem of initializing view-dependent specular radiance and complex geometry by leveraging high-fidelity 2D image-space gradients. Unlike standard 3DGS densification which splits/clones based on 3D gradient magnitude, this method decouples optimization into an image-space phase where 2D Gaussians are optimized against a fixed pre-rendered background, allowing for more precise initialization of new primitives in high-error regions.
++A densification strategy that initializes supplementary 3D Gaussians by first optimizing 2D Gaussian kernels in image space. It solves the problem of initializing view-dependent Gaussian kernels for complex specular radiance by leveraging pre-rendered images as fixed backgrounds, distinguishing it from standard 3DGS densification which operates directly in 3D space. It allocates kernels proportional to rendering loss and back-projects optimized 2D primitives to 3D using WPCA.
+ 
+ ### [DashGaussian](15742-dashgaussian.md)
+-A scheduling scheme that accelerates optimization by reformulating the process as a frequency component fitting task. It cooperatively allocates rendering resolution and primitive count to strip redundant complexity. Unlike standard 3DGS which applies densification simultaneously based on static thresholds, DashGaussian decouples these operations via a dynamic resolution schedule and a momentum-based primitive budgeting method, yielding fewer primitives and faster convergence without trading off rendering quality.
++A scheduling scheme that accelerates training by reformulating optimization as progressive fitting of higher frequency components via dynamic rendering resolution. It produces a concave-up primitive growth curve that spans the entire optimization process, synchronizing primitive growth with dynamically increasing rendering resolution. Unlike methods that peak in primitive count at half-iteration, it uses momentum-based budgeting to adapt to scene complexity.
+ 
+ ### [Training Configuration and Hyperparameters](16385-training-configuration-and-hyperparameters.md)
+-Defines standardized hyperparameter configurations and optimization schedules for downstream tasks (classification, segmentation, GANs). It addresses the problem of transferring pre-trained Gaussian representations to specific domains by specifying primitive counts, grouping strategies, and optimizer settings. It differs from general radiance-field optimization by focusing on fixed-epoch fine-tuning protocols for discrete Gaussian inputs rather than continuous densification schedules.
++Defines standardized hyperparameters for downstream tasks (classification, segmentation, GAN integration). It differs by focusing on fixed-attribute Gaussian encodings and specific dataset protocols rather than dynamic densification schedules. It complements this family by providing static configuration values when densification is disabled or handled via decoder-specific constraints.
+ 
+ ### QuickSplat Optimization Process
+-An optimization framework for 3D Gaussian Splatting that uses learned networks for initialization, densification, and parameter updates to accelerate surface reconstruction [S1].
+-*   **Definition:** Uses an initializer network $f_I$, a densifier network $f_D$, and an optimizer network $f_O$ [S1].
+-*   **Steps:**
+-    1.  Initialize Gaussians $G_0 \leftarrow f_I(P)$ from SfM points $P$ [S1].
+-    2.  Iterate $t = 0$ to $T-1$:
+-        *   Reset gradient accumulator $\nabla G_t \leftarrow 0$ [S1].
+-        *   For all images, compute rendering loss $L$, compute gradient $\delta G_t$, and accumulate: $\nabla G_t \leftarrow \nabla G_t + \delta G_t$ [S1].
+-        *   Generate new Gaussians $\hat{G}_t \leftarrow f_D(G_t, \nabla G_t, t)$ [S1].
+-        *   Concatenate: $\bar{G}_t \leftarrow G_t \cup \hat{G}_t$ [S1].
+-        *   Compute update $\Delta \bar{G}_t \leftarrow f_O(\bar{G}_t, \nabla \bar{G}_t, t)$ [S1].
+-        *   Update: $G_{t+1} \leftarrow \bar{G}_t + \Delta \bar{G}_t$ [S1].
++An optimization framework that uses learned networks for initialization, densification, and parameter updates to accelerate surface reconstruction [S1]. It iterates for $t = 0$ to $T-1$, accumulating gradients $\nabla G_t$ over all images. It generates new Gaussians $\hat{G}_t$ using a densifier network $f_D$ on current Gaussians $G_t$, accumulated gradients $\nabla G_t$, and time step $t$: $\hat{G}_t \leftarrow f_D(G_t, \nabla G_t, t)$ [S1].
+ 
+ ### BlitzGS Optimization Schedule
+-A schedule designed to reduce active workload during density control in large-scale scenes [S2, unofficial].
+-*   **Steps:**
+-    1.  Disable the Level-of-Detail (LOD) gate during the density-control window (iterations 2,000–32,000) [S2, unofficial].
+-    2.  Engage the LOD gate after the first importance-scoring pass ($T_1$) [S2, unofficial].
+-    3.  After the importance-scoring pass, reweight density-control gradients using the per-Gaussian visibility factor $\phi_i$ for the remainder of the density-control window [S2, unofficial].
+-*   **Parameters:** Density control runs every 1,000 steps from iteration 2,000 up to 32,000 (last event at 31,000) [S2, unofficial].
+-*   **Comparison:** Extending training iterations (e.g., 500k–1000k) does not significantly improve quality on aerial scenes (e.g., Building 19.27→19.50 dB), indicating deficits stem from representation structure rather than insufficient budget [S2, unofficial].
++Disables the Level-of-Detail (LOD) gate during the density-control window (iterations 2,000–32,000) and engages it after the first importance-scoring pass ($T_1$) [S2, unofficial]. After $T_1$, it reweights density-control gradients using the per-Gaussian visibility factor $\phi_i$ for the remainder of the window [S2, unofficial]. Density control runs every 1,000 steps from iteration 2,000 up to 32,000 [S2, unofficial]. Extending training iterations (e.g., 500k–1000k) does not significantly improve quality on aerial scenes, indicating deficits stem from representation structure rather than insufficient budget [S2, unofficial].
+ 
+ ### Normal Gradient Based Densification
+-A densification criterion to improve normal recovery in thin regions [S3].
+-*   **Definition:** Introduces an additional densification criterion on the gradient of normals, beyond the vanilla 3DGS gradient of view space points [S3].
+-*   **Steps:** Densify Gaussians whose normal gradient exceeds a threshold $T_n$ [S3].
+-*   **Parameters:** $T_n$ (threshold for normal gradient magnitude) is typically set to $2 \times 10^{-9}$ [S3].
++A densification criterion to improve normal recovery in thin regions by introducing an additional criterion on the gradient of normals, beyond the vanilla 3DGS gradient of view space points [S3]. It densifies Gaussians whose normal gradient exceeds a threshold $T_n$ [S3]. The typical value for $T_n$ is $2 \times 10^{-9}$ [S3].
+ 
+ ### Global-to-local densification
+-A strategy that decouples split and clone operations across densification phases to accelerate optimization [S4, unofficial].
+-*   **Definition:** Uses split for global spread at low resolution and suppresses clone, then reintroduces clone for local refinement at full resolution [S4, unofficial].
+-*   **Steps:**
+-    1.  Calculate the norm of the average position gradient of each Gaussian primitive every 100 iterations [S4, unofficial].
+-    2.  If the gradient norm exceeds a predefined threshold, check the maximum scale of the Gaussian primitive [S4, unofficial].
+-    3.  If the maximum scale exceeds a given scale threshold, split the Gaussian into smaller components [S4, unofficial].
+-    4.  Otherwise, clone the Gaussian with the same parameters [S4, unofficial].
+-    5.  During low-resolution training, promote global spread with split and suppress clone to prevent premature local clustering [S4, unofficial].
+-    6.  When transitioning to full-resolution training, reintroduce clone operations to refine high-frequency details [S4, unofficial].
+-*   **Parameters:** Gradient calculation frequency is 100 iterations [S4, unofficial].
+-*   **Comparison:** Unlike standard 3DGS which applies split and clone simultaneously, this method decouples them across phases (global vs local) to address inefficient spatial spread and redundant primitives [S4, unofficial].
++A strategy that decouples split and clone operations across densification phases to accelerate optimization. It uses split for global spread at low resolution and suppresses clone, then reintroduces clone for local refinement at full resolution [S4, unofficial]. It calculates the norm of the average position gradient of each Gaussian primitive every 100 iterations [S4, unofficial]. If the gradient norm exceeds a threshold, it checks the maximum scale: if the scale exceeds a threshold, it splits; otherwise, it clones [S4, unofficial]. This prevents premature local clustering and redundant primitives [S4, unofficial].
+ 
+ ### Resolution Guided Primitive Scheduler
+-A scheduler that uses momentum-based budgeting to control primitive growth [S5].
+-*   **Formula:** $P_{fin}^{(i)} = \max(P_{fin}^{(i-1)}, \gamma \cdot P_{fin}^{(i-1)} + \eta \cdot P_{add})$, where $P_{add}$ is the number of primitives densified in step $i$. $P_{fin}^{(0)}$ is initialized as $5 \cdot P_{init}$ [S5].
+-*   **Parameters:**
+-    *   Power factor in primitive growth: Starts at 2 and gradually decreases to 1 along the optimization process to suppress early growth and encourage mid-stage growth [S5].
+-    *   Hyperparameter $\gamma$ (momentum decay factor): Default 0.98 [S5].
+-    *   Hyperparameter $\eta$ (force scaling factor): Default 1 [S5].
+-    *   Resolution modulation: The continuous scalar $r(i)$ is modulated to $\lfloor r(i) \rfloor$ in practice to encourage faster primitive growth [S5].
+-*   **Pitfall:** Too much primitive growth at the end of optimization results in poor convergence. Mitigated by the concave-up scheduling function and momentum-based budgeting [S5].
++Uses a momentum-based budgeting scheme where the final primitive count $P_{fin}^{(i)}$ is calculated as $\max(P_{fin}^{(i-1)}, \gamma \cdot P_{fin}^{(i-1)} + \eta \cdot P_{add})$, where $P_{add}$ is the number of primitives densified in step $i$ [S5]. $P_{fin}^{(0)}$ is initialized as $5 \cdot P_{init}$ [S5]. The power factor in primitive growth starts at 2 and gradually decreases to 1 to suppress early growth and encourage mid-stage growth [S5]. Hyperparameters are $\gamma = 0.98$ and $\eta = 1$ [S5]. Resolution modulation uses $\lfloor r(i) \rfloor$ to encourage faster growth [S5]. Too much growth at the end results in poor convergence, mitigated by this scheduling [S5].
+ 
+ ### 3D Refinement View Sampling Strategy
+-A staged sampling schedule for supervising 3D refinement that balances fitting the current refined view with preserving rendering ability in original and previously refined views [S6].
+-*   **Steps:**
+-    1.  Divide the total 3D refinement steps into three equal phases (first third, subsequent third, final third) [S6].
+-    2.  In the first third, designate every 3 steps as 'current-refine steps' to optimize using the current refined image $\hat{I}^{i,e,f}_{ie}$ [S6].
+-    3.  In the subsequent third, designate every 5 steps as 'current-refine steps' [S6].
+-    4.  In the final third, designate every 8 steps as 'current-refine steps' [S6].
+-    5.  For all non-current-refine steps, randomly sample views from the training set $S_{train}$ and the previous refined set $F_{i-1}$ [S6].
+-*   **Parameters:** Selection weight for $F_{i-1}$ is lower than for $S_{train}$ to prioritize original training data over previously refined views [S6].
++A staged sampling schedule for supervising 3D refinement that balances fitting the current refined view with preserving rendering ability in original and previously refined views [S6]. It divides total 3D refinement steps into three equal phases: in the first third, every 3 steps are 'current-refine steps'; in the subsequent third, every 5 steps; in the final third, every 8 steps [S6]. For non-current-refine steps, views are randomly sampled from the training set $S_{train}$ and previous refined set $F_{i-1}$, with lower selection weight for $F_{i-1}$ [S6].
+ 
+ ## Background
+-3D Gaussian Splatting (3DGS) introduced a novel explicit scene representation using 3D Gaussians, optimized via differentiable rasterization [26]. The original method used a fixed schedule for densification (splitting and cloning based on gradient magnitude thresholds) and pruning. Subsequent research identified inefficiencies in this static approach, such as redundant primitive clustering and slow convergence in complex scenes. Methods like QuickSplat [S1] introduced learned networks for densification, while DashGaussian [S5] and Global-to-local densification [S4, unofficial] focused on decoupling resolution and primitive growth to accelerate training. BlitzGS [S2, unofficial] addressed large-scale scene optimization by managing density control windows and visibility-based gradient weighting. Normal Gradient Based Densification [S3] extended the densification criteria to include normal gradients for better geometric recovery. These methods collectively form the family of optimization schedules and densification strategies that enhance the efficiency and quality of 3D Gaussian Splatting training.
++3D Gaussian Splatting (3DGS) [G] introduced a novel explicit scene representation using 3D Gaussians, enabling real-time novel view synthesis. However, the original training procedure involves a fixed densification schedule that can be inefficient, leading to either under-representation of complex scenes or excessive memory usage. Subsequent works have focused on optimizing this schedule. DashGaussian [S5] demonstrated that dynamic resolution and concave-up primitive growth could significantly reduce training time. BlitzGS [S2, unofficial] addressed city-scale rendering by managing density control windows and LOD gates. QuickSplat [S1] proposed learned networks for densification. Other works like Global-to-local [S4, unofficial] and Normal Gradient [S3] refined the criteria for when to split or clone primitives. These methods collectively form the "Optimization Schedule and Densification" family, aiming to make 3DGS training faster, more stable, and more memory-efficient.
+ 
+ ## Sources

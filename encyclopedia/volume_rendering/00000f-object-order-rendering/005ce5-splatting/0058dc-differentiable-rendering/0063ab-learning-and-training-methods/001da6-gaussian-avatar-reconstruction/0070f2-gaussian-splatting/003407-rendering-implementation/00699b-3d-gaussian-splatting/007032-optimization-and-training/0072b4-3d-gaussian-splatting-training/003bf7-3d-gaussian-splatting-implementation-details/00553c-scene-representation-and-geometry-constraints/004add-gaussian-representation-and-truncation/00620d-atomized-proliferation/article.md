@@ -1,0 +1,262 @@
+# Atomized Proliferation
+
+Also called: Atom Gaussian Densification, AtomGS, Atomizing Gaussian Splatting for High-Fidelity Radiance Field
+
+## Overview
+Atomized Proliferation (AtomGS) is a training strategy for 3D Gaussian Splatting that enhances geometric precision by constraining fine-detail Gaussians into uniformly-sized "Atom Gaussians" and prioritizing their proliferation to align with scene geometry [S2, unofficial]. It distinguishes itself from standard 3DGS densification by replacing free-form splitting with a structured atomization process and an Edge-Aware Normal Loss, which guides gradients to better align with underlying geometric structures rather than just visual appearance [S1][S2, unofficial].
+
+## How it works
+Atomized Proliferation operates as an iterative densification and refinement loop applied to the standard 3D Gaussian Splatting representation. It introduces two main components: **Atomized Proliferation** (a modified densification/pruning schedule) and **Geometry-Guided Optimization** (a specialized loss function).
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Initial set of 3D Gaussians $\{G_i\}$ derived from Structure-from-Motion (SfM) points.
+    *   Training images and camera poses.
+    *   SfM point cloud distances $d$.
+*   **Outputs:**
+    *   Optimized set of Gaussians with refined means, covariances, opacities, and colors.
+    *   Improved geometric alignment and reduced noise on flat surfaces.
+
+### Data Structures
+The method maintains the standard Gaussian attributes for each primitive $i$:
+*   Mean position: $\boldsymbol{\mu}_i$
+*   Covariance matrix: $\boldsymbol{\Sigma}_i$ (parameterized by rotation $\mathbf{R}_i$ and scale $\mathbf{S}_i$)
+*   Opacity: $\alpha_i$
+*   Color coefficients: $\mathbf{c}_i$ (view-dependent SH coefficients)
+
+Additionally, it tracks:
+*   Atom Scale threshold: $S$
+*   Current iteration: $i$
+*   Total atomization iterations: $t_a$
+*   Warm-up iterations: $t_w$
+
+### Parameters
+*   **Clone Threshold ($\tau_c$):** Threshold for cloning based on loss gradient. Typical value: $0.002$ [S2, unofficial].
+*   **Split Threshold ($\tau_s$):** Base threshold for splitting. Typical value: $0.002$ [S2, unofficial].
+*   **Prune Threshold ($\epsilon$):** Opacity threshold for pruning. Typical value: $0.005$ (or $0.5$ for DTU dataset) [S2, unofficial].
+*   **Atom Scale ($S$):** Maximum allowed minimum covariance norm for atomization. Defined as the $i$-th percentile of ordered distances from input SfM points: $S = P_i(d)$. Typical setting: $P_1(d)$ (1st percentile) [S2, unofficial].
+*   **Atomized Proliferation Duration ($t_a$):** Iteration limit for atomization. Typical value: $7000$ [S2, unofficial].
+*   **Warm-Up Duration ($t_w$):** Iteration limit for the warm-up phase. Typical value: $7000$ [S2, unofficial].
+*   **Loss Weights:** $\lambda_{ms-ssim} = 0.1$, $\lambda_{normal} = 0.1$ [S2, unofficial].
+
+### Algorithm Steps
+
+1.  **Initialization:**
+    *   Calculate Atom Scale $S$ from SfM point distances. Let $d$ be the sorted distances of SfM points. $S = P_1(d)$ [S2, unofficial].
+    *   Set iteration counter $i = 0$.
+    *   Initialize Gaussian set with SfM points.
+
+2.  **Iteration Loop (for $i = 0$ to $t_{total}$):**
+    *   **Geometry-Guided Optimization:**
+        *   Render current Gaussians to obtain predicted images and normal maps.
+        *   Compute Edge-Aware Normal Loss (see Formula below).
+        *   Compute Multi-Scale SSIM loss.
+        *   Update Gaussian parameters ($\boldsymbol{\mu}, \boldsymbol{\Sigma}, \alpha, \mathbf{c}$) using gradient descent. Note: Atom Gaussian scales are fixed during backpropagation [S2, unofficial].
+    
+    *   **Atomized Proliferation (Densification & Pruning):**
+        *   If $i < t_a$:
+            *   Iterate through all Gaussians.
+            *   **Atomization:** If $\|\boldsymbol{\Sigma}\|_{\min} \le S$, designate the Gaussian as an Atom Gaussian.
+                *   Set its size to $s = \sqrt[3]{S}$ (isotropic).
+                *   Fix its scale for backpropagation.
+                *   Update its scale via geometric progression: $S_n = S_{n-1} \cdot r^{n-1}$, where $r = \sqrt[t_a]{p}$ and $p$ is the final proportion to initial $S$ [S2, unofficial]. *Note: The exact value of $p$ is not specified in the sources, but the progression ensures scale decreases over iterations.*
+        *   **Pruning:**
+            *   If $\alpha_i < \epsilon$ OR $\|\boldsymbol{\Sigma}\|_{\max}$ is excessively large (IsTooLarge), prune the Gaussian.
+            *   Increase frequency of opacity resetting to encourage merging of large, simple surfaces [S2, unofficial].
+        *   **Cloning:**
+            *   If loss gradient $\nabla_p L \ge \tau_c$, clone the Gaussian. This allows larger Gaussians to be cloned to bridge geometry gaps [S2, unofficial].
+        *   **Splitting:**
+            *   If $\nabla_p L \ge \min\left(\frac{i}{t_w}\tau_s, \tau_s\right)$ AND $\|\boldsymbol{\Sigma}\|_{\max} > S$:
+                *   Split the Gaussian.
+                *   The threshold uses a linear warm-up: $\tau_{split}(i) = \min\left(\frac{i}{t_w}\tau_s, \tau_s\right)$. This enhances the probability of division into smaller Atom Gaussians during the initial phase [S2, unofficial].
+
+3.  **Post-Atomization:**
+    *   After $t_a$, standard densification/pruning may continue, but Atom Gaussians remain isotropic and uniformly sized [S2, unofficial].
+    *   Larger anisotropic Gaussians are retained for background or low-feature areas [S2, unofficial].
+
+### Formulas
+
+**Atom Scale:**
+$$ S = P_1(d) $$
+where $d$ is the ordered distances of SfM points and $P_1$ is the 1st percentile [S2, unofficial].
+
+**Atom Gaussian Size:**
+$$ s = \sqrt[3]{S} $$
+Atom Gaussians are isotropic spheroids with uniform size $s$ [S2, unofficial].
+
+**Scale Progression for Atom Gaussians:**
+$$ S_n = S_{n-1} \cdot r^{n-1} $$
+where $r = \sqrt[t_a]{p}$, $t_a$ is total atomization iterations, and $p$ is the final proportion to initial $S$ [S2, unofficial].
+
+**Edge-Aware Normal Loss:**
+$$ \mathcal{L}_{normal} = \text{normal\_map} \odot \text{edge\_map} $$
+where $\text{normal\_map}$ is derived from the pre-optimized 3DGS (via depth rendering and median filtering) and $\text{edge\_map}$ is derived from the gradient magnitude of the ground truth RGB image [S1][S2, unofficial].
+
+**Split Threshold (Warm-up):**
+$$ \tau_{split}(i) = \min\left(\frac{i}{t_w}\tau_s, \tau_s\right) $$
+for $i < t_w$ [S2, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def atomized_proliferation(gaussians, sfm_points, training_data, iterations):
+    """
+    Implements Atomized Proliferation for 3D Gaussian Splatting.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes (mu, Sigma, alpha, c)
+        sfm_points: List of 3D points from SfM
+        training_data: List of (image, camera_pose) tuples
+        iterations: Total number of training iterations
+        
+    Returns:
+        Optimized list of Gaussians
+    """
+    # 1. Calculate Atom Scale S from SfM points
+    distances = compute_distances(sfm_points)
+    S = percentile(distances, 1)  # P1(d)
+    
+    # 2. Define thresholds
+    tau_c = 0.002  # Clone Threshold
+    tau_s = 0.002  # Split Threshold
+    epsilon = 0.005  # Prune Threshold (use 0.5 for DTU)
+    t_a = 7000  # Atomized Proliferation Duration
+    t_w = 7000  # Warm-Up Duration
+    lambda_ms_ssim = 0.1
+    lambda_normal = 0.1
+    
+    # 3. Training Loop
+    for i in range(iterations):
+        # --- Geometry-Guided Optimization ---
+        total_loss = 0
+        for image, camera in training_data:
+            # Render current Gaussians
+            rendered_image, rendered_depth, rendered_normal = render(gaussians, camera)
+            
+            # Compute MS-SSIM Loss
+            ms_ssim_loss = compute_ms_ssim(rendered_image, image)
+            
+            # Compute Edge-Aware Normal Loss
+            # Edge map from ground truth RGB gradient
+            edge_map = compute_edge_gradient(image)
+            # Normal map from rendered depth (median filtering)
+            normal_map = compute_normal_from_depth(rendered_depth)
+            normal_loss = sum(normal_map * edge_map)  # Element-wise product and sum
+            
+            # Combine losses
+            loss = (1 - lambda_ms_ssim) * ms_ssim_loss + lambda_normal * normal_loss
+            total_loss += loss
+            
+        # Backpropagate to update Gaussians
+        # Note: Atom Gaussian scales are fixed during this step
+        update_gaussians(gaussians, total_loss)
+        
+        # --- Atomized Proliferation ---
+        if i < t_a:
+            new_gaussians = []
+            for g in gaussians:
+                # Pruning
+                if g.alpha < epsilon or is_too_large(g.Sigma):
+                    continue  # Prune
+                
+                # Atomization
+                if norm_min(g.Sigma) <= S:
+                    # Designate as Atom Gaussian
+                    g.is_atom = True
+                    g.size = cbrt(S)  # Isotropic size
+                    g.scale_requires_grad = False  # Fix scale
+                    
+                    # Update scale via geometric progression
+                    # S_n = S_{n-1} * r^(n-1)
+                    # r = p^(1/t_a)
+                    # Note: p is final proportion to initial S. 
+                    # Implementation detail: p is not explicitly given, 
+                    # but the progression reduces scale over time.
+                    # We assume a simple decay factor based on iteration.
+                    r = 0.9  # Placeholder for p^(1/t_a) if p not specified
+                    g.size *= r ** i 
+                
+                # Cloning
+                if g.loss_gradient >= tau_c:
+                    clone_gaussian(g)
+                
+                # Splitting
+                # Threshold with linear warm-up
+                if i < t_w:
+                    split_threshold = min((i / t_w) * tau_s, tau_s)
+                else:
+                    split_threshold = tau_s
+                    
+                if g.loss_gradient >= split_threshold and norm_max(g.Sigma) > S:
+                    split_gaussian(g)
+                
+                new_gaussians.append(g)
+            
+            gaussians = new_gaussians
+        else:
+            # Standard pruning after atomization phase
+            gaussians = [g for g in gaussians if g.alpha >= epsilon and not is_too_large(g.Sigma)]
+            
+    return gaussians
+
+def compute_distances(points):
+    """Compute pairwise distances or distances to nearest neighbor."""
+    # Simplified: assume SfM points provide a representative distance metric
+    # In practice, this might be the median distance to nearest neighbor
+    return [compute_nearest_neighbor_distance(p, points) for p in points]
+
+def percentile(values, p):
+    """Return the p-th percentile of the sorted values."""
+    sorted_vals = sorted(values)
+    index = int(len(sorted_vals) * p / 100)
+    return sorted_vals[index]
+
+def norm_min(Sigma):
+    """Return the minimum eigenvalue of the covariance matrix."""
+    return min(eigvals(Sigma))
+
+def norm_max(Sigma):
+    """Return the maximum eigenvalue of the covariance matrix."""
+    return max(eigvals(Sigma))
+
+def is_too_large(Sigma):
+    """Check if covariance is excessively large."""
+    # Not given in sources. [G] Assume a threshold based on scene scale.
+    return norm_max(Sigma) > 10.0  # Placeholder threshold
+
+def cbrt(x):
+    """Cube root."""
+    return x ** (1/3)
+```
+
+### Edge Cases and Pitfalls
+*   **Atom Scale Selection:** If $S$ is too large, too many Gaussians become Atom Gaussians, potentially over-densifying smooth areas. If $S$ is too small, fine details may not be captured. The 1st percentile of SfM distances is recommended [S2, unofficial].
+*   **Scale Fixing:** Atom Gaussian scales are fixed during backpropagation. If the learning rate for other parameters is too high, the fixed scale may lead to suboptimal alignment. Setting scale learning rate $\eta_s = 0$ is advised for object-centered datasets [S2, unofficial].
+*   **Warm-up Phase:** The linear warm-up for the split threshold is critical. If the threshold is too high initially, no splitting occurs; if too low, excessive splitting occurs. The duration $t_w$ should match the initial convergence phase [S2, unofficial].
+*   **Pruning Frequency:** Increasing the frequency of opacity resetting helps merge large surfaces. If not done frequently enough, redundant Gaussians may persist [S2, unofficial].
+
+## Subtopics
+
+### Edge-Aware Normal Loss
+A loss function that combines normal map accuracy with edge detection to preserve geometric details while smoothing flat surfaces. It sets itself apart by incorporating 2D edge information into 3D normal optimization. Choose it when geometric accuracy is prioritized over pure photometric fidelity. [Link to Edge-Aware Normal Loss](12856-edge-aware-normal-loss.md)
+
+### Atom Gaussian
+An isotropic, uniformly-sized Gaussian primitive used to represent fine details. It differs from standard anisotropic Gaussians by having a fixed, uniform scale. Choose it for high-frequency geometric features. [Link to Atom Gaussian](12857-atom-gaussian.md)
+
+## Operating characteristics
+*   **Time Complexity:** Similar to 3DGS, but with additional overhead for atomization checks and edge-aware loss computation. Training time is reported as 0.28 hours vs 0.40 hours for 3DGS on Mip-NeRF360, indicating faster convergence [S2, unofficial].
+*   **Memory Complexity:** Model size is 749MB vs 869MB for 3DGS on Mip-NeRF360, indicating reduced memory usage due to merging of large Gaussians [S2, unofficial].
+*   **Scaling:** The method scales well with scene complexity due to the merging of large, smooth surfaces. The Gaussian count declines and stabilizes, unlike standard 3DGS which may struggle to stabilize [S2, unofficial].
+*   **Strengths:** Improved geometric accuracy, reduced noise on flat surfaces, faster training, smaller model size.
+*   **Limitations:** Requires careful tuning of Atom Scale $S$ and warm-up duration $t_w$. May not perform as well on scenes with very sparse SfM points if $S$ is not adjusted.
+*   **When to Use:** When geometric accuracy is critical (e.g., mesh extraction) and the scene has a mix of fine details and smooth surfaces.
+*   **When Not to Use:** When pure photometric quality is the only goal and geometric fidelity is not required.
+
+## Background
+Atomized Proliferation (AtomGS) was introduced by Liu et al. in 2024 [S2, unofficial]. It addresses the issue of standard 3DGS densification freely drifting and splitting, which can lead to noisy 3D meshes and blurry artifacts. The method builds on the original 3DGS densification strategy but introduces structured atomization and geometry-guided optimization. It is used in high-fidelity radiance field reconstruction, particularly for scenes requiring precise geometric representation [S1][S2, unofficial].
+
+## Sources
+[S1] 3DGS.zip: A survey on 3D Gaussian Splatting Compression Methods, https://arxiv.org/abs/2407.09510v5, fetched 2026-10-26
+[S2] AtomGS: Atomizing Gaussian Splatting for High-Fidelity Radiance Field, https://core.ac.uk/works/391753628, fetched 2026-10-30 (unofficial)

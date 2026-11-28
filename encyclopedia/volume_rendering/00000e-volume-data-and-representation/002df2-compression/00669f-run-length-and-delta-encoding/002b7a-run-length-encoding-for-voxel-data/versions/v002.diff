@@ -1,0 +1,267 @@
+--- v001.md
++++ v002.md
+@@ -1,208 +1,76 @@
+ # Run-Length Encoding for Voxel Data
+ 
+-Also called: CompressBooleanArray, CompressByteArray, CompressIntArray, CompressShortArray, RLE Voxel Compression, Run-Length Encoding, Run-Length Encoding (RLE) Compression
++Also called: Run-Length Encoding, 行程编码, RLE Voxel Compression
+ 
+ ## Overview
+-Run-Length Encoding (RLE) is a lossless compression technique that represents consecutive uniform voxels—particularly empty or transparent runs—as compact lists of start positions, lengths, and values, enabling rays to skip entire homogeneous regions in a single operation [S1]. Unlike [Sparse structures](5-sparse-structures.md) which use complex tree or hash indices to locate non-empty data, RLE relies on linear scanline or block traversal, making it exceptionally fast for hardware acceleration and simple ray-marching pipelines [S1, S3]. It excels in datasets with long empty stretches, such as simulated fluid dynamics or terrain blocks, where it achieves compression ratios exceeding 10:1 and reduces rendering times by 5–15 times relative to naive traversal [S1].
++Run-Length Encoding (RLE) is a lossless compression technique that represents consecutive uniform voxels—particularly empty or homogeneous runs—as compact lists of start positions, lengths, and values, enabling rays to skip entire homogeneous regions in a single operation [S1]. It solves the problem of high memory bandwidth and traversal overhead in sparse or structured volumetric data by replacing redundant voxel samples with short metadata pairs [S1]. Unlike [Sparse structures](5-sparse-structures.md) which use hierarchical tree indices for arbitrary sparsity, RLE relies on linear or block-linear redundancy, making it significantly faster to decode but less effective on noisy or unstructured data [S1, S8].
+ 
+ ## How it works
+-### Inputs and Outputs
+-*   **Input:** A voxel data array `voxel_data` (e.g., `Uint8Array` for values 0–255, `int[]`, `short[]`, or `boolean[]`) and its size `N` (number of voxels) [S2, S5, S6, unofficial].
+-*   **Output:** A compressed array `compressed_data` containing alternating pairs of `(count, value)` [S2, S6, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A 3D voxel grid (typically stored as a 1D array or chunked structure) containing discrete values (e.g., density, material ID, color).
++*   **Output:** A compressed bitstream or array consisting of alternating (count, value) pairs.
+ 
+-### Data Structures and Layout
+-The compressed data is stored as a linear array of alternating elements: `[count_0, value_0, count_1, value_1, ...]` [S2, S6, unofficial].
+-*   **Standard Types (Byte, Short, Int):** Both `count` and `value` are stored as elements of the same type [S2, unofficial].
+-    *   **Byte RLE:** Count is limited to `Byte.MAX_VALUE` (127) [S2, unofficial].
++**Data Structures and Layout:**
++The compressed data is stored as a sequence of pairs. The layout depends on the data type:
++1.  **Numeric Types (Byte/Short/Int):** The compressed array consists of alternating elements: `[count_0, value_0, count_1, value_1, ...]`. The `count` and `value` fields are stored as separate elements of the same type [S2, unofficial].
+     *   **Short RLE:** Count is limited to `Short.MAX_VALUE` (32767) [S2, unofficial].
+     *   **Int RLE:** Count is limited to `Integer.MAX_VALUE` [S2, unofficial].
+-*   **Boolean RLE:** A specialized optimization where the `count` is stored as a signed byte. The sign bit indicates the boolean value: a negative count implies `true` (with the magnitude being the run length), and a positive count implies `false` [S2, unofficial]. This allows a single byte to store both the count and the boolean value for a run [S2, unofficial].
++2.  **Boolean Types:** A single signed byte is used per run. The sign bit indicates the boolean value (negative for `true`, positive for `false`), and the magnitude indicates the count [S2, S6, unofficial]. This reduces storage to one element per run instead of two [S2, unofficial].
+ 
+-### Algorithm Steps
+-1.  **Initialization:** Create a temporary output array. To prevent overflow during the worst-case scenario (no compression, e.g., alternating values), allocate an array twice the size of the input [S2, unofficial]. Initialize a `count` variable to 1 and a `current_value` to the first voxel [S2, S6, unofficial].
+-2.  **Scan and Count:** Iterate through the input `voxel_data` starting from the second element (index 1) [S2, S6, unofficial].
+-    *   If the current voxel equals `current_value`, increment `count` [S2, S6, unofficial].
+-    *   If the current voxel differs from `current_value`:
+-        *   Store the pair `(count, current_value)` in the compressed array [S2, S6, unofficial].
+-        *   Reset `count` to 1.
+-        *   Update `current_value` to the current voxel [S2, S6, unofficial].
+-    *   **Boundary Check:** If `count` reaches the type-specific maximum limit (e.g., 127 for Byte), store the current run and reset `count` to 1 to start a new run for the same value [S2, unofficial].
+-3.  **Finalize:** After the loop, store the final `(count, current_value)` pair [S6, unofficial].
+-4.  **Resize:** Resize the temporary array to the actual number of written elements (index) and return it [S2, unofficial].
++**Algorithm (Encoding):**
++1.  Initialize an empty output buffer.
++2.  Iterate through the input voxel data stream.
++3.  For each new value, initialize a `count` to 1.
++4.  While the `count` limit is not reached, the address is within bounds, and the next value is identical to the current value:
++    *   Increment `count`.
++    *   Advance address.
++5.  Store the pair `(count, current_value)` in the compressed array.
++6.  Repeat until the end of the input data.
++7.  Resize the temporary array to the actual compressed size and return it [S2, S6, unofficial].
+ 
+-### Pseudocode
+-```python
+-def rle_encode_byte(voxel_data: list[int]) -> list[int]:
+-    """
+-    Encodes a byte array (0-255) using Run-Length Encoding.
+-    Returns a list of alternating [count, value] pairs.
+-    Count is capped at 127 (Byte.MAX_VALUE).
+-    """
+-    if not voxel_data:
+-        return []
++**Algorithm (Decoding):**
++1.  Initialize an empty output buffer of size `sz` (the expected uncompressed size).
++2.  Iterate through the encoded array in steps of 2 (for numeric types) or 1 (for boolean types).
++3.  For each pair `(count, value)`:
++    *   **Numeric:** Write the `value` to the destination array `count` times.
++    *   **Boolean:** If the count byte is negative, invert the count to positive and set the boolean value to `true`; otherwise, the value is `false`. Write this boolean value `abs(count)` times [S2, unofficial].
++4.  Return the reconstructed voxel array [S2, S6, unofficial].
+ 
+-    compressed = []
+-    # Pre-allocate with double size to avoid bounds checks during write
+-    # In practice, append to a dynamic list or track index
+-    temp_buffer = [0] * (len(voxel_data) * 2)
+-    idx = 0
+-    
+-    count = 1
+-    current_value = voxel_data[0]
+-    
+-    for i in range(1, len(voxel_data)):
+-        next_value = voxel_data[i]
+-        
+-        if next_value == current_value:
+-            count += 1
+-            # Cap count at 127 for byte RLE
+-            if count == 127:
+-                temp_buffer[idx] = count
+-                temp_buffer[idx + 1] = current_value
+-                idx += 2
+-                count = 1
+-                # current_value remains the same
+-        else:
+-            # Store the completed run
+-            temp_buffer[idx] = count
+-            temp_buffer[idx + 1] = current_value
+-            idx += 2
+-            
+-            # Start new run
+-            count = 1
+-            current_value = next_value
+-            
+-    # Store the final run
+-    temp_buffer[idx] = count
+-    temp_buffer[idx + 1] = current_value
+-    idx += 2
+-    
+-    # Return only the used portion
+-    return temp_buffer[:idx]
++**Ray Marching Integration:**
++In RLE-accelerated ray casting, the volume is encoded into one-dimensional runs along scanlines or hierarchical blocks [S1]. Traversal proceeds by decoding runs intersected by the ray to jump over transparent sequences until an opaque run is encountered [S1]. This allows the ray to skip entire homogeneous regions in a single operation, avoiding per-voxel sampling for empty space [S1].
+ 
+-def rle_decode_byte(compressed: list[int]) -> list[int]:
+-    """
+-    Decodes a byte RLE array back to the original voxel data.
+-    """
+-    if not compressed:
+-        return []
+-        
+-    output = []
+-    # Estimate size to pre-allocate if needed, or append
+-    for i in range(0, len(compressed), 2):
+-        count = compressed[i]
+-        value = compressed[i + 1]
+-        # Extend output with 'count' copies of 'value'
+-        output.extend([value] * count)
+-        
+-    return output
+-
+-def rle_encode_boolean(voxel_data: list[bool]) -> list[int]:
+-    """
+-    Encodes a boolean array using specialized signed-byte RLE.
+-    Negative count means True, positive count means False.
+-    """
+-    if not voxel_data:
+-        return []
+-
+-    compressed = []
+-    temp_buffer = [0] * (len(voxel_data) * 2) # Max 1 byte per run in worst case? 
+-    # Actually, boolean RLE stores count in signed byte. 
+-    # If count > 127, we must split. 
+-    # Simplified: assume runs fit in 127 or handle splitting.
+-    
+-    idx = 0
+-    count = 1
+-    current_value = voxel_data[0]
+-    
+-    for i in range(1, len(voxel_data)):
+-        next_value = voxel_data[i]
+-        
+-        if next_value == current_value:
+-            count += 1
+-            if count == 127:
+-                # Store run
+-                if current_value:
+-                    temp_buffer[idx] = -127
+-                else:
+-                    temp_buffer[idx] = 127
+-                temp_buffer[idx + 1] = 0 # Value is implicit in sign, but layout says count/value. 
+-                # Note: S2 says "count is stored as a signed byte... value is false/true".
+-                # It implies the value is not stored separately, or stored implicitly.
+-                # However, standard layout is (count, value). 
+-                # Let's follow S2 strictly: "count byte... sign indicates boolean value".
+-                # This implies the 'value' slot might be unused or redundant.
+-                # We will store 0 in value slot for consistency with pair structure, 
+-                # or omit it if the decoder only reads count.
+-                # Given "alternating pairs", we keep the pair structure.
+-                idx += 2
+-                count = 1
+-        else:
+-            # Store run
+-            if current_value:
+-                temp_buffer[idx] = -count
+-            else:
+-                temp_buffer[idx] = count
+-            temp_buffer[idx + 1] = 0 # Value implicit
+-            idx += 2
+-            
+-            count = 1
+-            current_value = next_value
+-            
+-    # Final run
+-    if current_value:
+-        temp_buffer[idx] = -count
+-    else:
+-        temp_buffer[idx] = count
+-    temp_buffer[idx + 1] = 0
+-    idx += 2
+-    
+-    return temp_buffer[:idx]
+-
+-def rle_decode_boolean(compressed: list[int]) -> list[bool]:
+-    """
+-    Decodes boolean RLE.
+-    """
+-    output = []
+-    for i in range(0, len(compressed), 2):
+-        count_byte = compressed[i]
+-        # value = compressed[i+1] # Ignored, derived from sign
+-        
+-        is_true = count_byte < 0
+-        count = abs(count_byte)
+-        
+-        output.extend([is_true] * count)
+-        
+-    return output
+-```
+-
+-### Parameters and Edge Cases
+-*   **Run Length Limit:** For Byte RLE, the maximum run length is 127. If a homogeneous region exceeds 127 voxels, the encoder must split it into multiple runs (e.g., 127, 127, 3) [S2, unofficial].
+-*   **Precision:** RLE is lossless [S2, unofficial][S3][S4].
+-*   **Degenerate Input:** If the input has no consecutive identical values (e.g., alternating 0, 1, 0, 1), the compressed size will be exactly double the input size (plus overhead if headers are used). The temporary buffer allocation strategy handles this [S2, unofficial].
+-*   **Ray Traversal:** During rendering, the ray traverses the compressed runs. If a run's value is transparent (e.g., 0), the ray advances by the run's length without sampling individual voxels [S1].
++**Parameters and Edge Cases:**
++*   **Count Limits:** Implementations must enforce maximum run lengths (e.g., 32767 for Short RLE) to prevent overflow [S2, unofficial].
++*   **Boundary Markers:** In column-based variants, explicit boundary markers (e.g., air blocks at the top of a column) are required to prevent decompression table overflows or infinite loops [S9, unofficial].
++*   **Data Differencing:** Data differencing (predicting the next value) does not improve the compression effect of RLE and may degrade it [S7, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Chunk Serialization with RLE](5162-chunk-serialization-with-rle.md)
+-Uses RLE to serialize voxel chunks, likely optimizing for block-based access patterns common in voxel engines. It applies RLE within the boundaries of fixed-size chunks, allowing for efficient random access to chunk headers while compressing the interior data.
++Chunk serialization with RLE compresses voxel chunk data by storing it in Run-Length Encoded format when idle, decompressing it on first write access, and freeing memory if the chunk becomes empty. It achieves a 58x size reduction compared to raw storage (39.06 MB to 0.67 MB). This method is distinct from static RLE storage by introducing lazy decompression and memory management based on access patterns.
+ 
+ ### [VOXLAP RLE Voxel Storage](5172-voxlap-rle-voxel-storage.md)
+-An in-memory compressed voxel storage format using RLE, organized as a 2D array of columns. This structure supports batched edits, allowing multiple voxel changes to be processed efficiently before re-encoding or updating the RLE runs. It optimizes for scenarios with frequent localized updates rather than static volumes.
++VOXLAP RLE Voxel Storage is an in-memory compressed voxel data structure used by the VOXLAP engine for CPU-based volume rendering. It solves the problem of efficiently storing and editing sparse voxel grids using a Run-Length Encoding (RLE) scheme organized as a 2D array of columns. It sets itself apart from generic RLE methods by its specific column-oriented arena allocation and batched edit support, tailored for the constraints of the original VOXLAP engine.
+ 
+-### Window-Length Encoding
+-A variant of RLE applied to intermediate rendered images (e.g., 500x500 pixels) in distributed rendering pipelines to reduce network transfer time. It encodes contiguous color runs in the image data. Encoding and decoding take ~1 ms each. It is highly efficient for distant views with large uniform color areas but inefficient for complex internal views. Compared to uncompressed transfer (~10 ms over Gigabit Ethernet), it reduces propagation time to <1 ms [S7].
++### [Window-Length Encoding](6788-window-length-encoding.md)
++Window-Length Encoding is a compression technique applied to intermediate images in distributed volume rendering to reduce network transfer time. It differs from sibling methods by specifically targeting the pixel data of rendered intermediate images rather than raw voxel data, leveraging the spatial coherence of distant views to achieve significant bandwidth savings.
++
++### Run-length and palette-compressed bricks
++Voxlap's VXL format stores each 1024×1024 column as spans and keeps colour only for "surface voxels" (solid voxels with an air neighbour), making interior solid implicit [S8]. Minecraft stores each 16×16×16 section as a palette plus packed indices of at least 4 bits (up to 12); a section with one block state stores no index array at all [S8]. This is the standard, easy way to compress materials, but RLE does not suit GPU random access and arbitrary 3D edits [S8].
++
++### Y-axis Voxel Column Compression
++This variant compresses voxel chunk data by storing only the lowest Y coordinate for each contiguous block ID along each X-Z column, reducing bandwidth for transmission [S9, unofficial]. It iterates over X and Z coordinates, looping through Y to store a color only when it differs from the previous block, marking the top of the column with an air block (0) to prevent overflow [S9, unofficial]. It reduces a 16x32x16 voxel chunk from 16.25KB (JSON encoded) to under 2KB [S9, unofficial]. Pitfalls include using non-deterministic iteration (e.g., Lua's `pairs()`) which causes voids, and missing boundary markers causing infinite loops [S9, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Encoding is $O(N)$, where $N$ is the number of voxels, as it requires a single linear scan [S2, S6, unofficial]. Decoding is also $O(N)$ [S6, unofficial].
+-*   **Memory Complexity:** The compressed size ranges from $N/2$ (best case, all identical) to $2N$ (worst case, alternating values) elements [S2, unofficial].
+-*   **Performance:** In simulated fluid dynamics volumes, RLE achieves compression ratios exceeding 10:1 and reduces rendering times by 5–15 times relative to naive traversal [S1]. Hardware implementations, such as the VolumePro ASIC, integrate RLE directly into the ray-casting pipeline for real-time performance on 512^3 grids [S1].
+-*   **Strengths:** Extremely fast decoding; simple hardware implementation; effective for sparse volumes with large empty regions [S1, S3].
+-*   **Limitations:** Poor compression ratio for noisy or high-frequency data (e.g., alternating patterns); run-length limits require splitting for very long homogeneous regions [S2, unofficial].
+-*   **When to Use:** Sparse volumes, terrain blocks, fluid simulations with large empty spaces, or when hardware acceleration is available [S1][S2, unofficial].
+-*   **When Not to Use:** Dense, noisy volumes with little redundancy; scenarios requiring random access to arbitrary voxels without decoding the entire stream (unless combined with chunking) [S3].
++*   **Time Complexity:** Encoding is $O(N)$ where $N$ is the number of voxels. Decoding is also $O(N)$ but with a very low constant factor, making it extremely fast compared to entropy coders like Huffman or Arithmetic Encoding [S3, S4].
++*   **Memory Complexity:** The compressed size is proportional to the number of runs, not the total voxels. In highly sparse or homogeneous data, this is significantly less than $N$.
++*   **Measured Performance:** In simulated fluid dynamics volumes, compression ratios exceed 10:1, and rendering times are reduced by 5-15 times relative to naive traversal [S1]. Hardware implementations, such as the VolumePro ASIC, integrate RLE directly into the ray-casting pipeline for real-time performance on commodity systems [S1].
++*   **Strengths:** Extremely fast decoding; simple implementation; effective for data with long homogeneous stretches (e.g., empty space, uniform materials) [S1, S3].
++*   **Limitations:** Poor compression ratio for noisy, unstructured, or high-frequency data; does not support efficient random access to arbitrary 3D locations without decompression or additional indexing [S8].
++*   **When to Use:** Ideal for sparse volumes with large empty regions, heightfield-like terrain, or when combined with entropy coding for disk storage (where decoding is done once before rendering) [S3, S4].
++*   **When Not to Use:** Unsuitable for GPU random access scenarios requiring arbitrary 3D edits or non-linear access patterns [S8].
+ 
+ ## Background
+-Run-Length Encoding was widely used in early compressed Direct Volume Rendering (DVR) applications, dating back to the early 1990s [S3][S4]. It is often combined with entropy encoders (like Huffman or Arithmetic coding) to further compress the run-length counts and values, although this adds decoding complexity [S3][S4]. The method forms the basis for many GPU-accelerated ray casters and was integrated into specialized hardware like the VolumePro ASIC [S1].
++RLE was widely used in compressed Direct Volume Rendering (DVR) since the early applications of the technique [S3, S4]. It is often combined with entropy encoders (Huffman or Arithmetic) to reduce on-disk storage, with entropy decoding performed before rendering time to produce a GPU-friendly RLE representation [S3, S4]. The method exploits the spatial coherence of voxel data, where adjacent voxels frequently share the same value [S7, unofficial].
+ 
+ ## Sources
+@@ -213,3 +81,5 @@
+ [S5] kosshi-net/voxplat, https://github.com/kosshi-net/voxplat, fetched 2026-10-27 (unofficial)
+ [S6] andrewbloese-00/web_voxel_terrain, https://github.com/andrewbloese-00/web_voxel_terrain, fetched 2026-10-27 (unofficial)
+-[S7] "A Distributed-Data Implementation of the Perspective Shear-Warp Volume Rendering Algorithm for Visualisation of Large Astronomical Cubes", http://web.eng.ucsd.edu/~jschulze/projects/Beeson2003.pdf, fetched 2026-10-29+[S7] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)
++[S8] https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, fetched 2026-10-28
++[S9] Voxel Data Compression - Scripting Support, https://devforum.roblox.com/t/voxel-data-compression/1875040, fetched 2026-10-27 (unofficial)

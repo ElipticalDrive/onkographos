@@ -1,0 +1,42 @@
+# Ray Tracing and Ray Intersection Methods
+
+Also called: Ray Casting, Ray-Surface Intersection
+
+## Overview
+Ray Tracing and Ray Intersection Methods determine the first object intersected by a camera ray by analytically computing intersection distances for simple geometries [S1, unofficial]. The core problem is finding the closest intersection point along a ray to render opaque surfaces correctly. This family is distinguished from [Ray-marching](link-to-marching) by its reliance on exact analytical solutions for primitive shapes, whereas marching uses fixed steps [S1, unofficial]. It differs from [Ray-box intersection](776-ray-box-intersection.md) and [Ray-Triangle Intersection](909-general-ray-triangle-intersection-pl-cker-coordinates.md) by encompassing the broader algorithmic strategies (such as packetization and hybrid implicit tracing) used to accelerate these primitive tests in volume rendering contexts.
+
+## Shared principles
+The shared principles of this family are the geometric definition of rays and the parallel execution model.
+
+**Ray Definition**
+Rays are defined by an origin $\mathbf{o}$ and a direction $\mathbf{d}$. The direction is typically normalized. The origin is often the camera eye position, but can vary based the camera model.
+
+**Parallel Execution**
+Computations are mapped to parallel threads. Each thread typically processes one or more pixels or samples. Memory access patterns are optimized for coalescing. Synchronization is used to manage data dependencies between threads.
+
+## Subtopics
+
+### [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md)
+Approximates isosurface position via iterative bisection. Choose when analytical solutions are unstable or when discrete texture sampling is preferred.
+
+### [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md)
+Analytically solves for intersections with trilinearly interpolated planes. Choose for exact intersection points within grid cells.
+
+### [Hybrid Implicit Isosurface Ray Tracing](3832-hybrid-implicit-isosurface-ray-tracing.md)
+Combines BVH traversal over active voxels with implicit intersection. Choose for crack-free rendering of adaptive or rectilinear grids.
+
+### [Neubauer Iso-surface Ray Casting](7024-neubauer-iso-surface-ray-casting.md)
+Uses spatial subdivision and projection-based culling. Choose for accelerating iso-surface extraction in large volumes.
+
+### [Hybrid Packetization Strategy](7606-hybrid-packetization-strategy.md)
+Dynamically switches between warp-level and shared-memory processing. Choose when SIMD utilization is lost due to divergent traversal paths.
+
+### Packet Ray List Merging
+An optimization where lists of adjacent pixels (typically 2x2 groups) are combined into a single list to exploit spatial coherence [S2, unofficial]. Phase I traverses the acceleration structure (e.g., BONO tree) creating lists for each packet of rays instead of individual pixels [S2, unofficial]. If a group of pixels overlaps with the projection of the current node, the group's list is processed [S2, unofficial]. The upper bound $k$ on the list size is increased compared to single pixels; best performance is achieved when $k$ is around 20 for packets, compared to 12 for single pixels [S2, unofficial].
+
+## Background
+The method originates from early surface rendering techniques where the goal was to find which object a ray intersects first [S1, unofficial]. Ray-casting is considered one of the most efficient techniques when object geometry is simple enough for analytical intersection computation [S1, unofficial]. When geometry is too complex for analytical solutions, ray-marching is used instead [S1, unofficial]. The technique fails when object geometry is too complex for analytical intersection solutions [S1, unofficial].
+
+## Sources
+[S1] Sculpting procedural noise: real-time rendering of interstellar dust clouds and solar flares, https://openalex.org/W4293584834, fetched 2026-10-26 (unofficial)
+[S2] PDF Interactive High Resolution Isosurface Ray Tracing on Multi-Core ... - UMD, https://www.umiacs.umd.edu/~joseph/isosurface-paper.pdf, fetched 2026-10-26 (unofficial)

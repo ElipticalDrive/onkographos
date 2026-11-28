@@ -1,0 +1,238 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method renders the outer boundary of the Minkowski sum of two 2-manifold triangular meshes, $A$ and $B$, by generating a superset of surface primitives (triangles and quadrilaterals) and culling invalid ones using geometric propositions, without computing a complete boundary representation (B-rep) [S1]. It differs from B-rep based algorithms by avoiding complex 3D Boolean operations and high combinatorial complexity, instead leveraging GPU rasterization and parallel culling to generate the volumetric representation [S1]. It builds on [Blocky meshing](31-blocky-meshing.md) by providing a geometric culling mechanism for Minkowski sum boundaries.
++This method renders the outer boundary of the Minkowski sum of two 2-manifold triangular meshes, $A$ and $B$, by generating a superset of surface primitives (triangles and quadrilaterals) and culling invalid ones using geometric propositions, without computing a complete boundary representation (B-rep) [S1]. It differs from B-rep based algorithms by avoiding complex 3D Boolean operations and high combinatorial complexity, instead leveraging GPU rasterization and parallel culling to generate the volumetric representation [S1]. It builds on [Blocky meshing](31-blocky-meshing.md) by providing a geometric culling mechanism for Minkowski sum boundaries [S1].
+ 
+ ## How it works
+@@ -20,5 +20,5 @@
+ **Definitions:**
+ *   **Valid Surface Primitive:** A primitive is valid if its intersection with the Minkowski sum boundary has a non-zero area. Primitives sharing only an edge or vertex with the boundary are invalid (area zero) [S1].
+-*   **Concave Edge/Vertex:** An edge or vertex is concave if the interior angle is greater than 180 degrees (or equivalently, the outward normals of incident faces point inwards relative to the edge/vertex geometry). [G] Implementation typically involves checking the dot product of the edge direction with the cross product of incident face normals, or checking if the vertex lies inside the convex hull of its neighbors.
++*   **Concave Edge/Vertex:** An edge or vertex is concave if the interior angle is greater than 180 degrees [G]. Implementation typically involves checking the dot product of the edge direction with the cross product of incident face normals, or checking if the vertex lies inside the convex hull of its neighbors [G].
+ 
+ **Numbered Steps:**
+@@ -27,5 +27,5 @@
+ 2.  **Generate Quadrilateral Primitives:** For each edge $e_A \in E_A$ and each edge $e_B \in E_B$, compute the quadrilateral primitive $e_A \oplus e_B$. The vertices are $\{u_A + u_B, u_A + v_B, v_A + u_B, v_A + v_B\}$ where $e_A = (u_A, v_A)$ and $e_B = (u_B, v_B)$ [S1].
+ 3.  **Parallel Culling Test:** For each generated primitive, determine validity using the following propositions. Perform this in parallel on the GPU [S1].
+-    *   **Proposition 1 (Triangle Culling):** Given $f_A \in F_A$ with outward normal $n_A$, and $e_i$ the $i$-th incident edge of $f_A$ pointing away from $v_B$. If $f_A \oplus v_B$ is valid, then $n_A \cdot e_i \le 0$ for all $e_i$. If $n_A \cdot e_i > 0$ for any $e_i$, the primitive is invalid [S1].
++    *   **Proposition 1 (Triangle Culling):** Given $f_A \in F_A$ with outward normal $n_A$, and $e_i$ the $i$-th incident edge of $f_A$. If $f_A \oplus v_B$ is valid, then $n_A \cdot e_i \le 0$ for all $e_i$. If $n_A \cdot e_i > 0$ for any $e_i$, the primitive is invalid [S1].
+     *   **Proposition 2 (Quadrilateral Culling):** Given $e_A \in E_A$ with incident triangles $f_0, f_1$ and edges $e_0, e_1$ pointing away from $e_A$; and $e_B \in E_B$ with incident triangles $f_2, f_3$ and edges $e_2, e_3$ pointing away from $e_B$. If $e_A \oplus e_B$ is valid, then either $(e_A \times e_B) \cdot e_i \le 0$ for all $i \in \{0,1,2,3\}$ OR $(e_A \times e_B) \cdot e_i \ge 0$ for all $i \in \{0,1,2,3\}$. If the signs of $(e_A \times e_B) \cdot e_i$ differ among the four edges, the primitive is invalid [S1].
+     *   **Proposition 3 (Quadrilateral Culling):** If either $e_A$ or $e_B$ is a concave edge, then $e_A \oplus e_B$ cannot be a valid quadrilateral primitive [S1].
+@@ -47,151 +47,80 @@
+     valid_primitives = []
+     
+-    # Precompute concavity flags for vertices and edges of B
+-    # [G] Concavity check: A vertex is concave if it is not convex. 
+-    # An edge is concave if the dihedral angle is > 180 degrees (interior).
+-    # This requires access to incident faces.
+-    is_vertex_concave_B = compute_vertex_concavity(mesh_B)
+-    is_edge_concave_B = compute_edge_concavity(mesh_B)
+-    is_edge_concave_A = compute_edge_concavity(mesh_A)
++    # Precompute concavity flags [G]
++    is_edge_concave_A = {e.id: is_edge_concave(e, mesh_A) for e in mesh_A.edges}
++    is_edge_concave_B = {e.id: is_edge_concave(e, mesh_B) for e in mesh_B.edges}
++    is_vertex_concave_B = {v.id: is_vertex_concave(v, mesh_B) for v in mesh_B.vertices}
+ 
+-    # Process Triangle Primitives: f_A + v_B
++    # 1. Generate and cull triangle primitives: f_A + v_B
+     for f_A in mesh_A.triangles:
+-        n_A = f_A.outward_normal
+-        v_A_list = f_A.vertices # [v0, v1, v2]
+-        
++        n_A = f_A.normal
+         for v_B in mesh_B.vertices:
+             if is_vertex_concave_B[v_B.id]:
+                 continue # Prop 4
+             
+-            # Generate primitive vertices
+-            prim_verts = [v_A + v_B for v_A in v_A_list]
+-            
+-            # Prop 1 Check
++            # Prop 1: Check n_A . e_i <= 0 for all edges e_i of f_A
+             valid = True
+-            for v_A in v_A_list:
+-                # Incident edges of f_A pointing away from v_A (current vertex in loop context? 
+-                # Note: Prop 1 says "incident edge of fA pointing away from vB". 
+-                # The text implies ei are edges of fA. The condition is nA . ei <= 0.
+-                # The proof considers ei pointing away from vB? 
+-                # Re-reading Prop 1: "ei the i-th incident edge of fA pointing away from vB".
+-                # This phrasing is slightly ambiguous. Usually, edges are defined by vertices.
+-                # In the proof, it considers a point P inside fA. 
+-                # Standard interpretation: Check if any edge of f_A points "outward" relative to the translation direction?
+-                # Actually, the proposition states: nA . ei <= 0.
+-                # Let's assume ei are the three edges of f_A.
+-                pass 
+-            
+-            # Correction on Prop 1 interpretation based on proof:
+-            # The proof considers ei as edges of fA. The condition nA . ei <= 0 must hold for ALL edges.
+-            # If nA . ei > 0 for ANY edge, it is invalid.
+-            for edge in f_A.edges:
+-                if dot(n_A, edge.vector) > 0:
++            for e in f_A.edges:
++                if dot(n_A, e.vector) > 0:
+                     valid = False
+                     break
+-            
+             if valid:
+-                valid_primitives.append({
+-                    'type': 'triangle',
+-                    'verts': prim_verts,
+-                    'normal': n_A,
+-                    'flag': 1
+-                })
++                verts = [v_A + v_B for v_A in f_A.vertices]
++                valid_primitives.append({'type': 'triangle', 'verts': verts, 'normal': n_A, 'flag': 1})
+ 
+-    # Process Quadrilateral Primitives: e_A + e_B
++    # 2. Generate and cull quadrilateral primitives: e_A + e_B
+     for e_A in mesh_A.edges:
+         if is_edge_concave_A[e_A.id]:
+-            continue # Prop 3 (partial)
+-            
++            continue # Prop 3
+         for e_B in mesh_B.edges:
+             if is_edge_concave_B[e_B.id]:
+-                continue # Prop 3 (partial)
++                continue # Prop 3
++                
++            cross_prod = cross(e_A.vector, e_B.vector)
++            # Get incident edges pointing away from e_A and e_B
++            e_inc_A = get_incident_edges_away(e_A, mesh_A)
++            e_inc_B = get_incident_edges_away(e_B, mesh_B)
++            all_e = e_inc_A + e_inc_B
+             
+-            # Generate primitive vertices
+-            # e_A = (u_A, v_A), e_B = (u_B, v_B)
++            # Prop 2: Check sign consistency of (e_A x e_B) . e_i
++            signs = [1 if dot(cross_prod, e.vector) > 0 else -1 for e in all_e if dot(cross_prod, e.vector) != 0]
++            if len(set(signs)) > 1:
++                continue # Prop 2 violated
++            
++            # Determine normal and flag based on Prop 2 condition
++            if all(dot(cross_prod, e.vector) <= 0 for e in all_e):
++                normal = cross_prod
++                flag = 1
++            else:
++                normal = -cross_prod
++                flag = -1
++                
+             u_A, v_A = e_A.vertices
+             u_B, v_B = e_B.vertices
+-            prim_verts = [u_A + u_B, u_A + v_B, v_A + u_B, v_A + v_B]
++            verts = [u_A+u_B, u_A+v_B, v_A+u_B, v_A+v_B]
++            valid_primitives.append({'type': 'quad', 'verts': verts, 'normal': normal, 'flag': flag})
+             
+-            # Prop 2 Check
+-            cross_prod = cross(e_A.vector, e_B.vector)
+-            valid_sign = None
+-            is_valid_prop2 = True
+-            
+-            # Get incident edges for e_A and e_B pointing away from the edge
+-            # [G] Need to retrieve the 4 incident edges e0, e1 from f0, f1 of e_A
+-            # and e2, e3 from f2, f3 of e_B.
+-            incident_edges_A = get_incident_edges_away_from_edge(e_A, mesh_A)
+-            incident_edges_B = get_incident_edges_away_from_edge(e_B, mesh_B)
+-            all_incident = incident_edges_A + incident_edges_B
+-            
+-            for e_i in all_incident:
+-                dot_val = dot(cross_prod, e_i.vector)
+-                if dot_val == 0:
+-                    continue # Zero dot product doesn't violate sign consistency
+-                
+-                if valid_sign is None:
+-                    valid_sign = 1 if dot_val > 0 else -1
+-                else:
+-                    current_sign = 1 if dot_val > 0 else -1
+-                    if current_sign != valid_sign:
+-                        is_valid_prop2 = False
+-                        break
+-            
+-            if is_valid_prop2:
+-                # Determine normal direction
+-                # If (eA x eB) . ei <= 0 for all, normal is eA x eB
+-                # If (eA x eB) . ei >= 0 for all, normal is -eA x eB
+-                # We need to check the sign of the dot products again to set the flag
+-                all_non_pos = True
+-                all_non_neg = True
+-                for e_i in all_incident:
+-                    dot_val = dot(cross_prod, e_i.vector)
+-                    if dot_val > 0:
+-                        all_non_pos = False
+-                    if dot_val < 0:
+-                        all_non_neg = False
+-                
+-                if all_non_pos:
+-                    normal = cross_prod
+-                    flag = 1
+-                elif all_non_neg:
+-                    normal = -cross_prod
+-                    flag = -1
+-                else:
+-                    # Should have been caught by Prop 2 check, but for safety
+-                    continue 
+-                
+-                valid_primitives.append({
+-                    'type': 'quadrilateral',
+-                    'verts': prim_verts,
+-                    'normal': normal,
+-                    'flag': flag
+-                })
+-
+     return valid_primitives
+ 
+-def compute_vertex_concavity(mesh):
+-    # [G] Simple heuristic: A vertex is concave if it is not convex.
+-    # For a manifold mesh, this often requires checking the solid angle or 
+-    # if the vertex lies inside the convex hull of its neighbors.
+-    # This is a placeholder for the specific geometric test.
+-    return {v.id: False for v in mesh.vertices}
++# [G] Standard geometric predicates for concavity checks
++def is_edge_concave(e, mesh):
++    """Returns True if edge e is concave (dihedral angle > 180 degrees)."""
++    f0, f1 = e.incident_faces
++    # Outward normals cross product dotted with edge direction indicates concavity
++    return dot(cross(f0.normal, f1.normal), e.vector) < 0
+ 
+-def compute_edge_concavity(mesh):
+-    # [G] An edge is concave if the dihedral angle between incident faces is > 180.
+-    # Normal check: If the angle between the normals of the two incident faces 
+-    # and the edge vector indicates an "inward" fold.
+-    return {e.id: False for e in mesh.edges}
++def is_vertex_concave(v, mesh):
++    """Returns True if vertex v is concave (not convex)."""
++    # [G] A vertex is concave if it lies inside the convex hull of its neighbors.
++    neighbors = v.neighbors
++    return point_in_convex_hull(v.position, neighbors)
+ 
+-def get_incident_edges_away_from_edge(edge, mesh):
+-    # [G] Retrieve the two faces incident to the edge.
+-    # For each face, retrieve the edge opposite to the edge's vertices?
+-    # No, the proposition says "edges of f0/f1 pointing away from eA".
+-    # This likely refers to the other two edges of the triangle that share a vertex with eA?
+-    # Or the edges of the triangle that do not include eA?
+-    # In a triangle, if eA is one edge, the other two edges share vertices with eA.
+-    # "Pointing away" usually means oriented such that they diverge from the edge.
+-    # This function needs to return the specific vectors e0, e1, e2, e3.
+-    return []
++def get_incident_edges_away(e, mesh):
++    """Returns the edges of the incident triangles that share a vertex with e and point away from it."""
++    f0, f1 = e.incident_faces
++    # For each triangle, the edges pointing away from e are the other two edges
++    e1, e2 = [edge for edge in f0.edges if edge != e]
++    e3, e4 = [edge for edge in f1.edges if edge != e]
++    return [e1, e2, e3, e4]
+ ```
+ 
+@@ -202,7 +131,7 @@
+ 
+ ## Operating characteristics
+-**Time Complexity:** The algorithm generates $O(|F_A||V_B| + |E_A||E_B|)$ primitives. The culling step is parallelized on the GPU, with each primitive processed independently. The number of primitives is drastically reduced by culling [S1].
++**Time Complexity:** Not given in the sources.
+ 
+-**Memory Complexity:** Requires storing the input meshes and the generated primitives. Memory optimization is achieved by using coalesced global memory access (SoA layout) and shared memory for block-local data (16 triangles/vertices or 32 edges) [S1].
++**Memory Complexity:** Not given in the sources.
+ 
+ **Performance:** On a Quadro FX 5800 GPU (30 multiprocessors, compute capacity 1.3), the CUDA implementation achieves a 25-30x speedup over a sequential CPU implementation on a Pentium 4 at 3 GHz [S1]. Using coalesced global memory and shared memory provides an additional 3x speedup over an unoptimized GPU version [S1].

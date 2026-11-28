@@ -1,0 +1,119 @@
+--- v003.md
++++ v004.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D vector field grid (e.g., OpenVDB or texture), a fixed scalar coordinate $x$ defining the 2D slice plane, and rendering parameters (`glyphLength`, `magnitudeCtfNormalizeMult`) [S2, unofficial].
++*   **Input:** A 3D vector field grid (stored as a CUDA texture or OpenVDB volume), a fixed scalar coordinate $x$ defining the 2D slice plane, and rendering parameters (`glyphLength`, `magnitudeCtfNormalizeMult`) [S2, unofficial].
+ *   **Output:** A set of line primitives (start and end vertices with associated colors) representing the vector field on the slice [S2, unofficial].
+ 
+@@ -17,4 +17,15 @@
+ *   **Index Buffer:** Indices for `GL_LINES` primitive type. Size: $2 \times \text{voxelCount}$ indices [S1, unofficial].
+ 
++**Numbered Steps:**
++1.  **Topology Preparation (CPU/OpenVDB variant):** Create a boolean mask tree from the grid's topology using `mask->topologyUnion(tree)` and voxelize active tiles using `mask->voxelizeActiveTiles()` [S1, unofficial].
++2.  **Global Maximum Calculation (CPU/OpenVDB variant):** Calculate the maximum vector length in the tree using `openvdb::tools::minMax(tree).max().length()` and store it in `length` [S1, unofficial].
++3.  **Thread Execution (GPU Kernel variant):** Calculate global thread ID `id`. Calculate total count `totalCount = glyphsCount.x * glyphsCount.y`. If `id >= totalCount`, return. Calculate grid coordinates: `col = id % glyphsCount.x`, `row = id / glyphsCount.x`. Calculate position: `position = make_float3(x, col * (worldSize.x / glyphsCount.x), row * (worldSize.y / glyphsCount.y))`. Sample vector field: `vector = tex3D(vectorFieldTex, position.x * volumeCoordSpaceMult.x, position.y * volumeCoordSpaceMult.y, position.z * volumeCoordSpaceMult.z)`. Set start vertex: `outputPts[id] = position`. Set end vertex: `outputPts[id + 1] = position + normalize(make_float3(vector.x, vector.y, vector.z)) * glyphLength * vector.w * magnitudeCtfNormalizeMult * 0.5`. Sample color: `color = tex1D(vectorMagnitudeCtfTex, vector.w * magnitudeCtfNormalizeMult)`. Set colors: `outVertexColors[id]` and `outVertexColors[id + 1]` to `make_float3(color.x, color.y, color.z)` [S2, unofficial].
++4.  **CPU/Alternative Iteration (OpenVDB specific):** Allocate buffers for `pointCount * 2` points (start and end of each arrow), colors, and indices. `pointCount` is `voxelCount * 2`. Iterate over all active voxels in the mask's leaf nodes. For each voxel at coordinate `ijk`: Get the world position `pos` via `grid->indexToWorld(ijk)`. Store `pos` as the start point. Get the vector value `vec` from the grid. Calculate weight $w = \text{vec.length()} / \text{length}$. Normalize `vec`. Calculate end position `pos += grid->voxelSize()[0] * 0.9 * vec`. Store end position. Calculate color using interpolation. Multiply final RGB values by 0.3 for the start point and 1.0 for the end point [S1, unofficial].
++5.  **Buffer Generation:** Generate GPU buffers for vertices, colors, and indices using `mVectorBuffer->genVertexBuffer`, `genColorBuffer`, and `genIndexBuffer(indices, GL_LINES)` [S1, unofficial].
++
++**Formulas:**
++*   Color interpolation (OpenVDB variant): $color = w \times (0.9, 0.3, 0.3) + (1.0 - w) \times (0.3, 0.3, 0.9)$, where $w$ is the normalized vector length [S1, unofficial].
++*   End vertex position (GPU variant): $P_{end} = P_{start} + \frac{\vec{v}}{\|\vec{v}\|} \times \text{glyphLength} \times v_w \times \text{magnitudeCtfNormalizeMult} \times 0.5$, where $\vec{v}$ is the sampled vector and $v_w$ is its magnitude component [S2, unofficial].
++
+ **Parameters:**
+ *   $x$: The fixed x-coordinate for the 2D grid of glyphs [S2, unofficial].
+@@ -24,35 +35,10 @@
+ *   `glyphsCount`: The number of samples in the x and y dimensions of the 2D grid [S2, unofficial].
+ 
+-**Steps:**
+-
+-1.  **Topology Preparation (CPU/OpenVDB variant):** Create a boolean mask tree from the grid's topology using `mask->topologyUnion(tree)` and voxelize active tiles using `mask->voxelizeActiveTiles()` [S1, unofficial].
+-2.  **Global Maximum Calculation (CPU/OpenVDB variant):** Calculate the maximum vector length in the tree using `openvdb::tools::minMax(tree).max().length()` and store it in `length` [S1, unofficial].
+-3.  **Thread Execution (GPU Kernel):**
+-    *   Calculate global thread ID `id`.
+-    *   Calculate total count `totalCount = glyphsCount.x * glyphsCount.y`.
+-    *   If `id >= totalCount`, return [S2, unofficial].
+-    *   Calculate grid coordinates: `col = id % glyphsCount.x`, `row = id / glyphsCount.x` [S2, unofficial].
+-    *   Calculate position: `position = make_float3(x, col * (worldSize.x / glyphsCount.x), row * (worldSize.y / glyphsCount.y))` [S2, unofficial].
+-    *   Sample vector field: `vector = tex3D(vectorFieldTex, position.x * volumeCoordSpaceMult.x, position.y * volumeCoordSpaceMult.y, position.z * volumeCoordSpaceMult.z)` [S2, unofficial].
+-    *   Set start vertex: `outputPts[id] = position` [S2, unofficial].
+-    *   Set end vertex: `outputPts[id + 1] = position + normalize(make_float3(vector.x, vector.y, vector.z)) * glyphLength * vector.w * magnitudeCtfNormalizeMult * 0.5` [S2, unofficial].
+-    *   Sample color: `color = tex1D(vectorMagnitudeCtfTex, vector.w * magnitudeCtfNormalizeMult)` [S2, unofficial].
+-    *   Set colors: `outVertexColors[id]` and `outVertexColors[id + 1]` to `make_float3(color.x, color.y, color.z)` [S2, unofficial].
+-4.  **CPU/Alternative Iteration (OpenVDB specific):**
+-    *   Allocate buffers for `pointCount * 2` points (start and end of each arrow), colors, and indices. `pointCount` is `voxelCount * 2` [S1, unofficial].
+-    *   Iterate over all active voxels in the mask's leaf nodes. For each voxel at coordinate `ijk`:
+-        1.  Get the world position `pos` via `grid->indexToWorld(ijk)` [S1, unofficial].
+-        2.  Store `pos` as the start point [S1, unofficial].
+-        3.  Get the vector value `vec` from the grid [S1, unofficial].
+-        4.  Calculate weight $w = \text{vec.length()} / \text{length}$ [S1, unofficial].
+-        5.  Normalize `vec` [S1, unofficial].
+-        6.  Calculate end position `pos += grid->voxelSize()[0] * 0.9 * vec` [S1, unofficial].
+-        7.  Store end position [S1, unofficial].
+-        8.  Calculate color using interpolation: $color = w \times (0.9, 0.3, 0.3) + (1.0 - w) \times (0.3, 0.3, 0.9)$ [S1, unofficial].
+-        9.  Multiply final RGB values by 0.3 for the start point and 1.0 for the end point [S1, unofficial].
+-5.  **Buffer Generation:** Generate GPU buffers for vertices, colors, and indices using `mVectorBuffer->genVertexBuffer`, `genColorBuffer`, and `genIndexBuffer(indices, GL_LINES)` [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Zero Magnitude:** If the vector magnitude is zero, the direction is undefined. The sources do not explicitly define a guard for zero vectors, but a standard implementation should check for zero length before normalizing to avoid NaN or arbitrary directions [G].
++*   **Precision:** The use of `float3` and texture sampling may introduce precision errors in position calculation, especially for large volumes [S2, unofficial].
++*   **Boundary Conditions:** The fixed x-coordinate must be within the volume bounds. If it is outside, the texture sampling may return zero or undefined values [G].
+ 
+ **Pseudocode:**
+-
+ ```python
+ def render_glyph_lines(vector_field_tex, world_size, glyphs_count, glyph_length, magnitude_ctf_normalize_mult, fixed_x):
+@@ -64,5 +50,5 @@
+     out_vertex_colors = [None] * (total_count * 2)
+     
+-    # Precompute scaling factors for texture coordinates [0,1]
++    # Precompute scaling factors for texture coordinates [0,1] [G]
+     volume_coord_space_mult = (1.0 / world_size.x, 1.0 / world_size.y, 1.0 / world_size.z)
+ 
+@@ -78,5 +64,6 @@
+                       position[1] * volume_coord_space_mult[1], 
+                       position[2] * volume_coord_space_mult[2])
+-        vector = sample_3d_vector_field(vector_field_tex, tex_coords)
++        # vector = (x, y, z, magnitude) fetched from texture [G]
++        vector = (0.0, 0.0, 0.0, 0.0) 
+         
+         # Set start vertex
+@@ -91,5 +78,5 @@
+             
+         # Calculate end vertex
+-        # vector.w holds the magnitude in this implementation
++        # vector[3] holds the magnitude in this implementation
+         scale = glyph_length * vector[3] * magnitude_ctf_normalize_mult * 0.5
+         output_pts[id + 1] = (
+@@ -101,5 +88,6 @@
+         # Sample color based on magnitude
+         color_t = vector[3] * magnitude_ctf_normalize_mult
+-        color_sample = sample_1d_color_texture(vector_field_tex, color_t)
++        # color_sample = (r, g, b) fetched from 1D color transfer function texture [G]
++        color_sample = (0.5, 0.5, 0.5)
+         
+         # Set colors for both start and end vertices
+@@ -108,22 +96,8 @@
+         
+     return output_pts, out_vertex_colors
+-
+-def sample_3d_vector_field(tex, coords):
+-    # Standard 3D trilinear texture sampling [G]
+-    # Returns (x, y, z, magnitude)
+-    return (0.0, 0.0, 0.0, 0.0)
+-
+-def sample_1d_color_texture(tex, t):
+-    # Standard 1D texture sampling for color transfer function [G]
+-    return (0.0, 0.0, 0.0)
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Zero Magnitude:** If the vector magnitude is zero, the direction is undefined. The sources do not explicitly define a guard for zero vectors, but a standard implementation should check for zero length before normalizing to avoid NaN or arbitrary directions [G].
+-*   **Precision:** The use of `float3` and texture sampling may introduce precision errors in position calculation, especially for large volumes [S2, unofficial].
+-*   **Boundary Conditions:** The fixed x-coordinate must be within the volume bounds. If it is outside, the texture sampling may return zero or undefined values [S2, unofficial].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of active voxels or grid samples. The GPU kernel runs in parallel for each glyph [S2, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of active voxels or grid samples. The GPU kernel runs in parallel for each glyph [G].
+ *   **Memory Complexity:** $O(N)$ for vertex, color, and index buffers [S1, unofficial].
+ *   **Performance:** Performance depends on the number of active voxels and the efficiency of the texture sampling and GPU kernel execution [S2, unofficial].

@@ -1,0 +1,154 @@
+# Coarse-to-Fine Octree Update Strategy
+
+Also called: Down-sampled projection update, Multi-scale octree update
+
+## Overview
+This strategy accelerates sparse voxel octree (SVO) updating and reduces noise sensitivity by decoupling structural changes from density optimization. It initially updates the octree topology using low-resolution (down-sampled) projections to mitigate high-frequency noise, then fixes the tree structure to optimize only the density grids using original high-resolution projections. It differs from [Priority Queue Based Field Update](7430-priority-queue-based-field-update.md) by using resolution scaling rather than priority metrics to guide updates, and from [Wavemap Recursive Update](18498-wavemap-recursive-update.md) by explicitly separating topology convergence from density refinement.
+
+## How it works
+**Inputs:**
+*   Initial octree structure (typically empty or coarse).
+*   Down-sampled projection images (low resolution).
+*   Original projection images (high resolution).
+*   Number of coarse epochs ($N_{coarse}$).
+
+**Outputs:**
+*   Final octree structure.
+*   Optimized density grids for all leaf nodes.
+
+**Data Structures:**
+*   **Octree Node:** Contains a pointer to children (if internal) and a density grid (if leaf).
+*   **Density Grid:** A 3D array of scalar values (e.g., density/opacity) associated with a leaf node. The grid size is fixed per node level (e.g., $8 \times 8 \times 8$).
+*   **Projection Buffer:** Stores 2D intensity values for each view angle.
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    Initialize the octree structure. The initial topology can be empty or a single root node. Initialize density grids for all existing leaf nodes to zero or a small constant.
+
+2.  **Coarse Update Phase (Topology & Density):**
+    For $i = 1$ to $N_{coarse}$:
+    a. **Compute Loss:** Calculate the difference between the rendered image from the current octree (using down-sampled projections) and the target down-sampled projections. Use the standard deviation (SD) of the residuals as the loss metric for noise-robustness [S1].
+    b. **Backpropagate:** Compute gradients of the loss with respect to the octree structure (node existence/position) and the density grid values.
+    c. **Update Structure:** Adjust the octree topology (split/merge nodes) based on the structural gradients. This step determines which regions require higher resolution.
+    d. **Update Density:** Optimize the density grid values within each leaf node using the density gradients.
+    e. **Render:** Render the current octree using down-sampled projections to verify convergence.
+
+3.  **Fine Update Phase (Density Only):**
+    a. **Fix Structure:** Lock the octree topology. No further splits or merges are performed.
+    b. **Initialize Densities:** Copy the optimized density grid values from the end of the coarse phase to the final optimization step [S1].
+    c. **Optimize Densities:** For $j = 1$ to $N_{fine}$:
+        i. Compute the difference between the rendered image (using original high-resolution projections) and the target original projections.
+        ii. Compute gradients with respect to the density grid values only.
+        iii. Update the density grid values for all leaf nodes.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def coarse_to_fine_update(octree, downsampled_projections, original_projections, N_coarse, N_fine):
+    """
+    octree: Sparse Voxel Octree structure
+    downsampled_projections: List of low-res target images
+    original_projections: List of high-res target images
+    N_coarse: Number of epochs for coarse update
+    N_fine: Number of epochs for fine update
+    """
+    
+    # Step 1: Initialize octree and density grids
+    octree.initialize()
+    
+    # Step 2: Coarse Update Phase
+    for i in range(N_coarse):
+        # Render using down-sampled projections
+        rendered_coarse = render_octree(octree, downsampled_projections)
+        
+        # Compute loss using Standard Deviation of residuals for noise robustness [S1]
+        residuals = rendered_coarse - downsampled_projections
+        loss = compute_standard_deviation(residuals)
+        
+        # Backpropagate to get gradients for structure and density
+        grad_structure, grad_density = backpropagate_loss(loss, octree, downsampled_projections)
+        
+        # Update octree structure (split/merge)
+        octree.update_structure(grad_structure)
+        
+        # Update density grids in leaf nodes
+        octree.update_density_grids(grad_density)
+        
+    # Step 3: Fine Update Phase
+    # Fix the octree structure
+    octree.lock_structure()
+    
+    # Initialize final density grids from the coarse phase result [S1]
+    # (Implicitly carried over from the last iteration of Step 2)
+    
+    for j in range(N_fine):
+        # Render using original high-resolution projections
+        rendered_fine = render_octree(octree, original_projections)
+        
+        # Compute loss using original projections
+        residuals_fine = rendered_fine - original_projections
+        loss_fine = compute_mean_squared_error(residuals_fine)
+        
+        # Backpropagate to get gradients for density only
+        grad_density_fine = backpropagate_density_only(loss_fine, octree, original_projections)
+        
+        # Update density grids
+        octree.update_density_grids(grad_density_fine)
+        
+    return octree
+
+def render_octree(octree, projections):
+    """
+    Renders the octree using volume rendering (e.g., ray marching)
+    and compares against the provided projections.
+    """
+    # Implementation depends on the specific renderer
+    # Returns rendered image buffer
+    pass
+
+def backpropagate_loss(loss, octree, projections):
+    """
+    Computes gradients for both octree structure and density grids.
+    """
+    # Implementation depends on the differentiable rendering framework
+    pass
+
+def backpropagate_density_only(loss, octree, projections):
+    """
+    Computes gradients for density grids only, ignoring structure.
+    """
+    # Implementation depends on the differentiable rendering framework
+    pass
+```
+
+**Parameters:**
+*   $N_{coarse}$: Number of epochs for the coarse phase. Not given in the sources.
+*   $N_{fine}$: Number of epochs for the fine phase. Not given in the sources.
+*   Loss Metric: Standard Deviation (SD) of residuals is recommended for high-noise datasets like cryo-ET [S1].
+
+**Edge Cases and Pitfalls:**
+*   **High Noise:** Using original projections in the coarse phase can lead to instability due to high-frequency noise. The coarse-to-fine strategy specifically addresses this by using down-sampled projections first [S1].
+*   **Structure Locking:** Once the structure is fixed, it cannot be refined further. If the coarse phase fails to capture the correct topology, the fine phase cannot correct it.
+*   **Initialization:** Density grids must be initialized from the down-sampled version to ensure continuity between phases [S1].
+
+## Subtopics
+
+### Deferred Refining and Coarsening
+A multi-step strategy to ease the expense of painting deep octrees by deferring tree adjustments [S2, unofficial]. It operates in two steps: (1) Paint on the existing tree without adjustment and update on GPU for immediate visual feedback; (2) Tree-adjustment stage where cells are marked for refinement/coarsening and one-level refinement or coarsening is performed per frame. GPU textures are split into sub-blocks, marked dirty when CPU modifies them, and only dirty blocks are updated [S2, unofficial]. This approach is designed for interactive VR painting interfaces rather than reconstruction from projections.
+
+## Operating characteristics
+*   **Time Complexity:** The coarse phase reduces the effective search space for topology changes, accelerating convergence compared to direct high-resolution updates. The fine phase is computationally cheaper as it only updates densities.
+*   **Memory Complexity:** Requires storing both down-sampled and original projection buffers. The octree structure is determined during the coarse phase and remains static during the fine phase.
+*   **Strengths:** Robust to high noise in projection data (e.g., cryo-ET) [S1]. Accelerates octree updating by avoiding premature high-resolution structural changes.
+*   **Limitations:** Requires two sets of projections (down-sampled and original). The fixed structure in the fine phase may not adapt to new information if the coarse phase was insufficient.
+*   **When to Use:** Suitable for reconstructing volumes from noisy projection data where topology convergence is critical. Not suitable for interactive painting where immediate visual feedback is required (use Deferred Refining and Coarsening instead) [S2, unofficial].
+
+## Background
+The coarse-to-fine octree update strategy was introduced in the context of cryo-electron tomography (cryo-ET) reconstruction and denoising [S1]. It addresses the challenge of high noise in cryo-ET projections, which can destabilize standard differentiable rendering updates. By using down-sampled projections for initial topology optimization, the method achieves more stable and accurate reconstructions [S1].
+
+## Sources
+[S1] Adaptive differentiable grids for cryo-electron tomography reconstruction and denoising, https://doi.org/10.1093/bioadv/vbad131, fetched 2026-10-27
+[S2] CanvoX: High-resolution VR Painting in Large Volumetric Canvas, https://archive.org/details/arxiv-1704.02724, fetched 2026-10-29 (unofficial)

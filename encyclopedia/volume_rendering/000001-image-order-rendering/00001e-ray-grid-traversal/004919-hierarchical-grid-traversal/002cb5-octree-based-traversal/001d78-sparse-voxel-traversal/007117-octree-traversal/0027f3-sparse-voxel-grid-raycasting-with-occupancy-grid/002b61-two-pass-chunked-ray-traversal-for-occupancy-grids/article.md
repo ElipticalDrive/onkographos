@@ -1,0 +1,109 @@
+# Two-pass chunked ray traversal for occupancy grids
+
+Also called: Chunked ray traversal with occupancy grid, Two-pass occupancy grid traversal
+
+## Overview
+This method accelerates sparse voxel grid raycasting using a two-pass CUDA kernel launch that first counts the number of traversal steps per ray to allocate exact sample buffers, then fills those buffers with sample intervals and ray indices [S1, unofficial]. It solves the problem of variable-length sample buffers per ray in a batched kernel by computing the exact number of occupied intervals each ray intersects, allocating a contiguous buffer, and then populating it with precise sample intervals [S1, unofficial].
+
+## How it works
+The method consists of two sequential CUDA kernel launches [S1, unofficial]. The first pass counts the number of occupied voxel intervals (chunks) each ray traverses to determine buffer sizes [S1, unofficial]. The second pass writes the actual sample data into pre-allocated tensors using the computed offsets [S1, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+- `grids`: `int64` array of pointers to `nanovdb::MaskGrid**` (device memory) [S1, unofficial].
+- `rays_o`: `float` array of shape `[n_rays, 3]`, ray origins [S1, unofficial].
+- `rays_d`: `float` array of shape `[n_rays, 3]`, ray directions [S1, unofficial].
+- `resolution`: `int32` array of shape `[3]`, grid resolution per axis [S1, unofficial].
+- `aabbs`: `float` array of shape `[n_grids, 6]`, axis-aligned bounding boxes for each grid [S1, unofficial].
+- `hits`: `bool` array of shape `[n_rays, n_grids]`, pre-computed ray-grid intersection flags [S1, unofficial].
+- `t_sorted`: `float` array of shape `[n_rays, n_grids*2]`, sorted entry/exit distances per grid [S1, unofficial].
+- `t_indices`: `int64` array of shape `[n_rays, n_grids*2]`, indices into `t_sorted` [S1, unofficial].
+- `near_planes`: `float` array of shape `[n_rays]` [S1, unofficial].
+- `far_planes`: `float` array of shape `[n_rays]` [S1, unofficial].
+
+**Outputs (allocated before launch):**
+- `chunk_counts`: `int64` array of shape `[n_rays]`, number of occupied chunks per ray [S1, unofficial].
+- `chunk_indices`: `int64` array of shape `[n_rays]`, starting index in the sample buffer for each ray [S1, unofficial].
+- `ray_indices`: `int64` array of shape `[n_samples]`, maps each sample to its originating ray [S1, unofficial].
+- `t_left`: `float` array of shape `[n_samples]`, entry distance of each sample interval [S1, unofficial].
+- `t_right`: `float` array of shape `[n_samples]`, exit distance of each sample interval [S1, unofficial].
+
+### Data Structures and Layout
+The core data structure is the occupancy grid (`nanovdb::MaskGrid`), accessed via pointers in `grids` [S1, unofficial]. The traversal relies on sorted entry/exit distances (`t_sorted`) and their corresponding grid indices (`t_indices`) to efficiently skip empty regions [G]. The output buffers are flattened 1D arrays where samples from all rays are concatenated [G]. `chunk_indices` acts as an exclusive prefix sum of `chunk_counts` to determine write offsets [G].
+
+### Parameters
+- `step_size`: `float`, fixed step length for traversal [S1, unofficial].
+- `cone_angle`: `float`, cone angle for frustum traversal [S1, unofficial].
+- `threads`: `int`, threads per block. Typical value: 256 [S1, unofficial].
+- `n`: `int`, grid update frequency. Default: 16 [S1, unofficial].
+
+### Numbered Steps
+1. **First Pass (Counting):** Launch `traverse_kernel` with `first_pass=true` to compute `n_trav` per ray and store in `chunk_counts` [S1, unofficial].
+2. **Prefix Sum:** Compute the cumulative sum of `chunk_counts` to get total sample count `n_samples` and starting indices for each ray's chunk [S1, unofficial].
+3. **Second Pass (Filling):** Launch `traverse_kernel` with `first_pass=false` to write `chunk_indices`, `ray_indices`, `t_left`, and `t_right` into pre-allocated tensors [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Self-contained kernel logic for traverse_kernel
+def traverse_kernel(rays_o, rays_d, resolution, aabbs, hits, t_sorted, t_indices,
+                    near_planes, far_planes, chunk_counts, chunk_indices,
+                    ray_indices, t_left, t_right, first_pass, n_rays, n_grids):
+    # Standard CUDA thread indexing
+    thread_idx = (blockIdx.x * blockDim.x) + threadIdx.x
+    if thread_idx >= n_rays:
+        return
+
+    ray_id = thread_idx
+    count = 0
+    offset = 0
+    if not first_pass:
+        offset = chunk_indices[ray_id]
+
+    # Iterate through pre-sorted grid intervals for this ray
+    # The exact occupancy check logic over t_sorted/t_indices is implementation-specific
+    for i in range(0, n_grids * 2, 2):
+        t_entry = t_sorted[ray_id, i]
+        t_exit = t_sorted[ray_id, i + 1]
+        grid_id = t_indices[ray_id, i]
+
+        # Skip grids the ray does not hit
+        if not hits[ray_id, grid_id]:
+            continue
+
+        # Clamp interval to camera near/far planes
+        t_l = max(t_entry, near_planes[ray_id])
+        t_r = min(t_exit, far_planes[ray_id])
+
+        if t_l < t_r:
+            if first_pass:
+                count += 1
+            else:
+                t_left[offset] = t_l
+                t_right[offset] = t_r
+                ray_indices[offset] = ray_id
+                offset += 1
+
+    if first_pass:
+        chunk_counts[ray_id] = count
+```
+
+### Edge Cases and Pitfalls
+- **Pre-allocation:** The second pass requires pre-allocated output tensors for `t_left`, `t_right`, and `ray_indices` [S1, unofficial]. Passing `nullptr` for these pointers in the first pass avoids overwriting or invalid memory access [S1, unofficial].
+- **Precision:** Floating-point precision in `t_sorted` and `t_left`/`t_right` can cause gaps or overlaps if not handled carefully [G]. Ensure consistent clamping to `near_planes` and `far_planes` [G].
+- **Empty Rays:** Rays with no hits should result in `chunk_counts[ray_id] = 0` and no writes in the second pass [G].
+- **Degenerate Input:** If `n_rays` is 0 or `n_grids` is 0, the kernel should handle this gracefully without launching [G].
+
+## Operating characteristics
+- **Time Complexity:** $O(N_{rays} \cdot N_{grids})$ for the first pass (counting) and $O(N_{samples})$ for the second pass (filling), where $N_{samples}$ is the total number of occupied intervals [G]. The prefix sum is $O(N_{rays})$ [G].
+- **Memory Complexity:** $O(N_{rays} \cdot N_{grids})$ for `t_sorted` and `t_indices`, plus $O(N_{samples})$ for the output buffers [G]. This is more memory-efficient than fixed-step methods if occupancy is sparse [G].
+- **Performance:** Measured performance depends on hardware and scene density [G]. The two-pass approach adds overhead for the counting pass but reduces memory bandwidth usage in the second pass by avoiding redundant writes [G]. It is most beneficial when occupancy is highly variable across rays [G].
+- **Strengths:** Exact buffer allocation, reduced memory waste, coalesced memory accesses in the second pass [G].
+- **Limitations:** Requires two kernel launches and a prefix sum operation [G]. Not suitable for real-time applications with strict latency constraints where the overhead of the first pass is prohibitive [G].
+
+## Background
+This method is derived from implementations in the `faster-occgrid` repository, which adapts techniques from neural radiance field (NeRF) rendering to sparse occupancy grids [S1, unofficial]. It addresses the inefficiency of fixed-step ray marching in sparse environments by dynamically allocating memory based on actual occupancy [S1, unofficial].
+
+## Sources
+[S1] Yosshi999/faster-occgrid, https://github.com/Yosshi999/faster-occgrid, fetched 2026-10-24 (unofficial)

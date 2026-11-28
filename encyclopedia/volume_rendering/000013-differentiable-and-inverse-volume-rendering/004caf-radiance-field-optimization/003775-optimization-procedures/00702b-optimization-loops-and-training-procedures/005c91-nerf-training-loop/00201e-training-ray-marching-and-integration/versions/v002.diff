@@ -1,0 +1,228 @@
+--- v001.md
++++ v002.md
+@@ -36,5 +36,5 @@
+ ### Data Structures
+ *   **Occupancy Grid**: A sparse grid used to prune empty space. If `grid_prune` is enabled, it is initialized with `roi_aabb` (scene bounding box), `resolution` (e.g., 128 or 256), and `contraction_type` (e.g., AABB or UN_BOUNDED_SPHERE) [S5, unofficial].
+-*   **Step Counter**: An array of size 16 (or 64) used to track the number of valid samples generated per ray in the CUDA kernel [S6, unofficial][S8, unofficial].
++*   **Step Counter**: An array of size 16 used to track valid samples, with `local_step` modulo 64 selecting the active slot [S6, unofficial][S8, unofficial].
+ 
+ ### Numbered Steps
+@@ -81,5 +81,4 @@
+ ```python
+ import torch
+-import torch.nn.functional as F
+ 
+ def cumprod_exclusive(tensor):
+@@ -93,46 +92,20 @@
+     """
+     Differentiable volume rendering.
+-    rbg_field: (width, height, num_samples, 4) or (N, 3)
+-    density_field: (width, height, num_samples) or (N, 1)
+-    ray_origins: (width, height, 3) or (N, 3)
+-    depth_values: (num_samples,) or (N,)
+-    """
+-    # Compute distances between samples
++    rbg_field: (width, height, num_samples, 3)
++    density_field: (width, height, num_samples)
++    ray_origins: (width, height, 3)
++    depth_values: (num_samples,)
++    """
+     one_e_10 = torch.tensor([1e10], dtype=ray_origins.dtype, device=ray_origins.device)
+-    
+-    # Handle shape differences for chunked vs full ray bundle
+-    if depth_values.dim() == 1:
+-        dists = torch.cat((depth_values[1:] - depth_values[:-1], one_e_10.expand(depth_values[:1].shape)), dim=-1)
+-        dists = dists.unsqueeze(0).expand(ray_origins.shape[:-1] + (-1,))
+-    else:
+-        dists = torch.cat((depth_values[..., 1:] - depth_values[..., :-1], 
+-                           one_e_10.expand(depth_values[..., :1].shape)), dim=-1)
+-
+-    # Compute opacity alpha
++    dists = torch.cat((depth_values[1:] - depth_values[:-1], 
++                       one_e_10.expand(depth_values[:1].shape)), dim=-1)
++    dists = dists.unsqueeze(0).expand(ray_origins.shape[:-1] + (-1,))
++    
+     alpha = 1. - torch.exp(-density_field * dists)
+-    
+-    # Compute weights
+-    # T_i = product_{j=0}^{i-1} (1 - alpha_j)
+-    # weights_i = T_i * alpha_i
+-    # Using cumprod_exclusive on (1 - alpha + epsilon)
+-    alpha_safe = alpha + 1e-10
+-    transmittance_prev = cumprod_exclusive(1. - alpha_safe)
+-    weights = transmittance_prev * alpha
+-    
+-    # Aggregate RGB
+-    # rbg_field shape: (..., 3)
+-    rgb_map = torch.sum(weights[..., None] * rbg_field, dim=-2)
+-    
+-    # Aggregate Depth
+-    # depth_values needs to be broadcasted correctly
+-    if depth_values.dim() == 1:
+-        depth_vals_expanded = depth_values.unsqueeze(0).expand(ray_origins.shape[:-1] + (-1,))
+-    else:
+-        depth_vals_expanded = depth_values
+-        
+-    depth_map = torch.sum(weights * depth_vals_expanded, dim=-1)
+-    
+-    # Accumulated Opacity
+-    acc_map = torch.sum(weights, dim=-1)
++    weights = alpha * cumprod_exclusive(1. - alpha + 1e-10)
++    
++    rgb_map = (weights[..., None] * rbg_field).sum(dim=-2)
++    depth_map = (weights * depth_values).sum(dim=-1)
++    acc_map = weights.sum(-1)
+     
+     return rgb_map, depth_map, acc_map
+@@ -145,21 +118,21 @@
+     Full training forward pass.
+     """
+-    # 1. Ray Marching (CUDA Kernel Simulation)
+-    # In practice, this calls: xyzs, dirs, deltas, rays = raymarching.march_rays_train(...)
+-    # For pseudocode, we assume these are generated.
+-    # xyzs: [M, 3], dirs: [M, 3], deltas: [M, 2], rays: [N, 3]
+-    xyzs, dirs, deltas, rays = simulate_cuda_march_rays_train(
+-        rays_o, rays_d, bound, density_bitfield, cascade, grid_size,
+-        nears, fars, mean_count, perturb, dt_gamma, max_steps
+-    )
+-    
+-    # 2. Neural Network Query
+-    # Query model for sigma and RGB
+-    # Handle chunking if necessary
+-    N_samples = xyzs.shape[0]
++    # 1. Ray Marching (CUDA Kernel)
++    # CUDA kernel call: xyzs, dirs, deltas, rays = raymarching.march_rays_train(...)
++    # For pseudocode completeness, we assume these are generated.
++    N = rays_o.shape[0]
++    M = N * max_steps
++    xyzs = torch.rand(M, 3) * bound
++    dirs = torch.rand(M, 3)
++    deltas = torch.rand(M, 2)
++    rays = torch.zeros(N, 3, dtype=torch.int32)
++    rays[:, 0] = torch.arange(N)
++    rays[:, 1] = torch.arange(0, M, N)
++    rays[:, 2] = max_steps
++    
++    # 2. Neural Network Query (Chunked)
+     all_rgb = []
+     all_sigma = []
+-    
+-    for i in range(0, N_samples, chunk_size):
++    for i in range(0, xyzs.shape[0], chunk_size):
+         chunk_pts = xyzs[i:i+chunk_size]
+         chunk_dirs = dirs[i:i+chunk_size]
+@@ -172,27 +145,11 @@
+     
+     # 3. Alpha Compositing
+-    # Compute dists from deltas
+-    # deltas shape [M, 2], first is delta_t
+     dists = deltas[:, 0]
+-    
+-    # Reshape for rendering function if needed
+-    # Assuming rays structure maps M points back to N rays
+-    # For simplicity, we assume the rendering function handles the ray indices 'rays'
+-    # or we aggregate manually. Here we use the formulaic approach.
+-    
+-    # Compute alpha
+     alpha = 1. - torch.exp(-sigmas * dists)
+-    
+-    # Compute weights
+     alpha_safe = alpha + 1e-10
+     transmittance_prev = cumprod_exclusive(1. - alpha_safe)
+     weights = transmittance_prev * alpha
+     
+-    # Aggregate
+-    # We need to map weights back to rays. 
+-    # In CUDA implementation, this is done via atomic adds or scatter ops using 'rays' indices.
+-    # Here we simulate the aggregation per ray.
+-    
+-    # Initialize accumulators for N rays
++    # 4. Aggregation per ray
+     N_rays = rays_o.shape[0]
+     rgb_accum = torch.zeros(N_rays, 3, device=rgbs.device)
+@@ -200,12 +157,8 @@
+     opacity_accum = torch.zeros(N_rays, device=rgbs.device)
+     
+-    # Get ray indices, offsets, counts from 'rays' tensor [N, 3]
+     ray_indices = rays[:, 0]
+     ray_offsets = rays[:, 1]
+     ray_counts = rays[:, 2]
+     
+-    # Scatter add operations
+-    # rgb_accum[ray_indices] += weights * rgbs
+-    # This requires gathering weights and rgbs per ray
+     for r in range(N_rays):
+         idx = ray_indices[r]
+@@ -215,12 +168,5 @@
+             w = weights[offset:offset+count]
+             c = rgbs[offset:offset+count]
+-            d = xyzs[offset:offset+count] # Use xyzs for depth if z_vals not available
+-            
+-            # Depth is usually derived from z-values, here approximating with distance along ray or xyzs
+-            # Assuming we have z_vals or can compute depth from xyzs and ray origin
+-            # For simplicity, using norm of xyzs or a provided depth field
+-            # Let's assume we have a depth value for each sample
+-            # In standard NeRF, depth is often just the z-coordinate or distance
+-            sample_depth = torch.norm(d - rays_o[idx], dim=1) 
++            sample_depth = torch.norm(xyzs[offset:offset+count] - rays_o[idx], dim=1)
+             
+             rgb_accum[idx] += torch.sum(w[:, None] * c, dim=0)
+@@ -228,27 +174,8 @@
+             opacity_accum[idx] += torch.sum(w, dim=0)
+             
+-    # Add background
+-    # bg_color is typically white or black
+     bg_color = torch.tensor([1.0, 1.0, 1.0], device=rgbs.device)
+     final_rgb = rgb_accum + bg_color * (1.0 - opacity_accum[:, None])
+     
+     return final_rgb, depth_accum, opacity_accum
+-
+-def simulate_cuda_march_rays_train(rays_o, rays_d, bound, density_bitfield, cascade, grid_size,
+-                                   nears, fars, mean_count, perturb, dt_gamma, max_steps):
+-    """
+-    Placeholder for CUDA kernel. Returns dummy data for pseudocode completeness.
+-    """
+-    N = rays_o.shape[0]
+-    # Estimate M based on mean_count or max_steps
+-    M = N * max_steps
+-    xyzs = torch.rand(M, 3) * bound
+-    dirs = torch.rand(M, 3)
+-    deltas = torch.rand(M, 2)
+-    rays = torch.zeros(N, 3, dtype=torch.int32)
+-    rays[:, 0] = torch.arange(N)
+-    rays[:, 1] = torch.arange(0, M, N)
+-    rays[:, 2] = max_steps
+-    return xyzs, dirs, deltas, rays
+ ```
+ 
+@@ -272,12 +199,15 @@
+ ## Subtopics
+ 
+-### Chunked Network Evaluation
+-Evaluates the NeRF network on batched points in chunks to avoid out-of-memory errors during training or rendering [S9, unofficial]. It flattens points and view directions, iterates over chunks of size `netchunk`, calls the model on each chunk, and concatenates results [S9, unofficial].
+-
+-### CUDA Ray Marching (Training)
+-A rendering function that uses an occupancy grid estimator to skip empty space during volume rendering, optimizing performance [S10, unofficial]. It handles ray generation, adaptive marching with occupancy grid pruning, neural network evaluation, and alpha compositing [S7, unofficial].
+-
+-### Differentiable Volume Rendering Pipeline
+-Orchestrates rendering by instantiating an implicit volume, a sampling scheme, and a renderer [S11, unofficial]. It loops over cameras, generates NDC grids, creates ray bundles, passes them through the sampler to generate sample points, then calls the model to evaluate the implicit volume and aggregate results [S11, unofficial].
++### [NeRF Evaluation and Metric Calculation](3079-nerf-evaluation-and-metric-calculation.md)
++NeRF Evaluation and Metric Calculation renders a single image from a given camera pose using trained coarse and fine NeRF models, returning RGB, depth, and disparity maps. It differs from the parent method by operating in inference mode (no gradient computation for backpropagation) and by computing quantitative quality metrics (PSNR, SSIM, LPIPS) against ground truth images. It sets itself apart from sibling [NeRF Rendering (Alpha Compositing)](5124-nerf-rendering-alpha-compositing.md) by handling the full pipeline of ray generation, coordinate transformation (including NDC), batched rendering, and metric aggregation.
++
++### [NeRF Network Query with Hashed Embeddings](3107-nerf-network-query-with-hashed-embeddings.md)
++This method performs the neural network evaluation step within the NeRF training loop, mapping 3D spatial coordinates and viewing directions to density and color features using embedding functions and a network function. It replaces expensive high-dimensional coordinate embeddings with a structured lookup process that applies position and direction embeddings before batching the concatenated features through a network function.
++
++### [NeRF Rendering (Alpha Compositing)](5124-nerf-rendering-alpha-compositing.md)
++Generates RGB images and depth maps from neural network predictions by performing volume rendering along camera rays using alpha compositing. It integrates the predicted volume density and color of sampled points into a final pixel value, accounting for occlusion via transmittance. Unlike sibling methods that focus on evaluation metrics or network query structures, this method specifically handles the mathematical integration of radiance and opacity into observable quantities.
++
++### [NeRF-style Volume Rendering Integrator](5964-nerf-style-volume-rendering-integrator.md)
++A simplified NeRF-style integrator that accumulates emission along a ray through a medium, backed by a dense grid instead of a neural network, with no direction-dependent emission. It differs from standard NeRF implementations by using a dense grid for density/emission storage and explicitly handling primal/dual modes for gradient computation in inverse rendering contexts.
+ 
+ ## Operating characteristics
+@@ -286,5 +216,5 @@
+ *   **Measured Performance**: Benchmarks on NeRF-synthetic dataset show PSNR scores around 33.09 at 33.7k steps using JAX/CUDA implementation [S7, unofficial].
+ *   **Strengths**: Differentiable, allowing gradient-based optimization of scene parameters from image supervision [S2, unofficial]. Efficient via occupancy grid pruning and adaptive step sizing [S10, unofficial].
+-*   **Limitations**: Memory intensive for high-resolution scenes without chunking [S9, unofficial]. Sensitive to hyperparameters like `near_plane`, `far_plane`, and `render_step_size` [S10, unofficial].
++*   **Limitations**: Memory intensive for high-resolution scenes without chunking [S9, unofficial].
+ *   **When to Use**: Training NeRFs and other neural radiance fields where gradient computation is required [S2, unofficial][S4, unofficial].
+ *   **When Not to Use**: Inference-only scenarios where speed is critical and gradients are not needed; use [NeRF Evaluation and Metric Calculation](3079-nerf-evaluation-and-metric-calculation.md) or [NeRF Rendering (Alpha Compositing)](5124-nerf-rendering-alpha-compositing.md) instead [S1, unofficial][S2, unofficial].

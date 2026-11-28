@@ -1,0 +1,171 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method partitions hierarchical Adaptive Mesh Refinement (AMR) data into uniform, rectilinear blocks suitable for parallel rendering by overlaying the domain with an octree aligned to the finest grid resolution [S1, unofficial]. It sets itself apart from sibling methods by generating a static, view-independent octree structure that maps directly to uniform blocks, enabling straightforward hardware-accelerated texture uploads [S1, unofficial].
++This method partitions hierarchical Adaptive Mesh Refinement (AMR) data into uniform, rectilinear blocks suitable for parallel rendering by overlaying the domain with an octree aligned to the finest grid cells [S1, unofficial]. It sets itself apart from sibling methods by generating a static, view-independent octree structure that maps directly to uniform blocks, enabling straightforward hardware-accelerated texture uploads [S1, unofficial].
+ 
+ ## How it works
+@@ -16,5 +16,5 @@
+ **Steps:**
+ 1.  **Overlay:** Define an octree structure over the entire data domain, aligned such that its finest possible resolution matches the finest grid cells in the AMR hierarchy [S1, unofficial].
+-2.  **Recursive Splitting:** For each octree node, determine if it is completely overlaid by a single AMR grid level. If the node's bounding box is fully contained within a single grid level and all data values within that box are defined by that grid, it becomes a leaf node. Otherwise, split it into 8 children by subdividing the bounding box equally in all three dimensions and recurse [S1, unofficial].
++2.  **Recursive Splitting:** For each octree node, determine if it is completely overlaid by a single AMR grid level [S1, unofficial]. If the node's bounding box is fully contained within a single grid level and all data values within that box are defined by that grid, it becomes a leaf node [S1, unofficial]. Otherwise, split it into 8 children by subdividing the bounding box equally in all three dimensions and recurse [S1, unofficial].
+ 3.  **Leaf Extraction:** For every leaf node in the resulting octree, generate a uniform 3D volume block containing the scalar values from the underlying AMR grid that fall within the leaf's bounds [S1, unofficial].
+ 
+@@ -23,5 +23,5 @@
+ class OctreeNode:
+     def __init__(self, bounds, depth=0):
+-        self.bounds = bounds
++        self.bounds = bounds  # (min_x, min_y, min_z, max_x, max_y, max_z)
+         self.depth = depth
+         self.is_leaf = False
+@@ -29,16 +29,16 @@
+         self.data = None
+ 
+-def split_amr_to_octree(amr_data, finest_resolution):
++def split_amr_to_octree(amr_data, finest_cell_size):
+     root = OctreeNode(bounds=amr_data.domain_bounds, depth=0)
+-    build_octree(root, amr_data, finest_resolution)
++    build_octree(root, amr_data, finest_cell_size)
+     uniform_blocks = []
+     collect_leaves(root, uniform_blocks)
+     return uniform_blocks
+ 
+-def build_octree(node, amr_data, finest_resolution):
+-    overlaid_grid = check_single_grid_overlay(node.bounds, amr_data)
++def build_octree(node, amr_data, finest_cell_size):
++    overlaid_grid = find_single_overlaid_grid(node.bounds, amr_data)
+     if overlaid_grid is not None:
+         node.is_leaf = True
+-        node.data = extract_uniform_data(overlaid_grid, node.bounds, finest_resolution)
++        node.data = extract_uniform_block(overlaid_grid, node.bounds, finest_cell_size)
+     else:
+         node.is_leaf = False
+@@ -47,27 +47,16 @@
+             child = OctreeNode(bounds=cb, depth=node.depth + 1)
+             node.children.append(child)
+-            build_octree(child, amr_data, finest_resolution)
++            build_octree(child, amr_data, finest_cell_size)
+ 
+-def check_single_grid_overlay(bounds, amr_data):
+-    for level in amr_data.levels:
+-        if bounds_contained_in(level.bounds, bounds) and cells_intersect(level, bounds):
+-            return level
++def find_single_overlaid_grid(node_bounds, amr_data):
++    for grid in amr_data.grids:
++        if bounds_contained_in(grid.bounds, node_bounds):
++            return grid
+     return None
+ 
+-def extract_uniform_data(grid_level, bounds, finest_resolution):
+-    dims = calculate_dims(bounds, finest_resolution)
+-    data_array = [[[0] * dims[2] for _ in range(dims[1])] for _ in range(dims[0])]
+-    for i, j, k in grid_level.cells_within(bounds):
+-        u, v, w = map_to_uniform(i, j, k, finest_resolution)
+-        if 0 <= u < dims[0] and 0 <= v < dims[1] and 0 <= w < dims[2]:
+-            data_array[u][v][w] = grid_level.values[i, j, k]
+-    return data_array
+-
+-def collect_leaves(node, blocks):
+-    if node.is_leaf:
+-        blocks.append(node.data)
+-    else:
+-        for child in node.children:
+-            collect_leaves(child, blocks)
++def bounds_contained_in(grid_bounds, node_bounds):
++    return (grid_bounds[0] <= node_bounds[0] and grid_bounds[3] >= node_bounds[3] and
++            grid_bounds[1] <= node_bounds[1] and grid_bounds[4] >= node_bounds[4] and
++            grid_bounds[2] <= node_bounds[2] and grid_bounds[5] >= node_bounds[5])
+ 
+ def split_bounds(bounds):
+@@ -85,27 +74,35 @@
+     ]
+ 
+-def bounds_contained_in(grid_bounds, node_bounds):
+-    return (grid_bounds[0] <= node_bounds[0] and grid_bounds[3] >= node_bounds[3] and
+-            grid_bounds[1] <= node_bounds[1] and grid_bounds[4] >= node_bounds[4] and
+-            grid_bounds[2] <= node_bounds[2] and grid_bounds[5] >= node_bounds[5])
++def extract_uniform_block(grid, node_bounds, finest_cell_size):
++    min_x, min_y, min_z, max_x, max_y, max_z = node_bounds
++    dims = (int((max_x - min_x) / finest_cell_size),
++            int((max_y - min_y) / finest_cell_size),
++            int((max_z - min_z) / finest_cell_size))
++    data = [[[0.0] * dims[2] for _ in range(dims[1])] for _ in range(dims[0])]
++    grid_min_x, grid_min_y, grid_min_z = grid.origin
++    for i in range(grid.dims[0]):
++        for j in range(grid.dims[1]):
++            for k in range(grid.dims[2]):
++                cell_x = grid_min_x + i * finest_cell_size
++                cell_y = grid_min_y + j * finest_cell_size
++                cell_z = grid_min_z + k * finest_cell_size
++                if (min_x <= cell_x < max_x and min_y <= cell_y < max_y and min_z <= cell_z < max_z):
++                    u = int((cell_x - min_x) / finest_cell_size)
++                    v = int((cell_y - min_y) / finest_cell_size)
++                    w = int((cell_z - min_z) / finest_cell_size)
++                    if 0 <= u < dims[0] and 0 <= v < dims[1] and 0 <= w < dims[2]:
++                        data[u][v][w] = grid.values[i, j, k]
++    return data
+ 
+-def cells_intersect(grid_level, bounds):
+-    return (grid_level.bounds[0] <= bounds[3] and grid_level.bounds[3] >= bounds[0] and
+-            grid_level.bounds[1] <= bounds[4] and grid_level.bounds[4] >= bounds[1] and
+-            grid_level.bounds[2] <= bounds[5] and grid_level.bounds[5] >= bounds[2])
+-
+-def calculate_dims(bounds, finest_resolution):
+-    min_x, min_y, min_z, max_x, max_y, max_z = bounds
+-    return (int((max_x - min_x) * finest_resolution),
+-            int((max_y - min_y) * finest_resolution),
+-            int((max_z - min_z) * finest_resolution))
+-
+-def map_to_uniform(i, j, k, finest_resolution):
+-    # Standard coordinate-to-index mapping based on grid origin and resolution [G]
+-    return (i, j, k)
++def collect_leaves(node, blocks):
++    if node.is_leaf:
++        blocks.append(node.data)
++    else:
++        for child in node.children:
++            collect_leaves(child, blocks)
+ ```
+ 
+ **Parameters:**
+-*   **Finest Resolution:** The maximum grid resolution in the AMR hierarchy. Typical value: Not given in the sources.
++*   **Finest Grid Cells:** The smallest cells in the AMR hierarchy, used to align the octree [S1, unofficial]. Typical value: Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+@@ -119,7 +116,7 @@
+ 
+ **Steps:**
+-1.  Break octree leaves down to the cell level.
+-2.  Traverse the resulting octree in viewing direction and number leaves on-the-fly.
+-3.  In a second traversal, assign each processing node $i$ a range of leaves to render.
++1. Break octree leaves down to the cell level [S1, unofficial].
++2. Traverse the resulting octree in viewing direction and number leaves on-the-fly [S1, unofficial].
++3. In a second traversal, assign each processing node $i$ a range of leaves to render [S1, unofficial].
+ 
+ **Formula:**
+@@ -133,14 +130,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** The method is described as "very simple and efficient" [S1, unofficial]. Hardware acceleration is used for rendering uniform blocks by uploading them as stacks of axis-aligned 2D textures [S1, unofficial].
+-*   **Strengths:** Converts unstructured AMR data into uniform blocks, which are easy to handle in parallel rendering pipelines [S1, unofficial].
+-*   **Limitations:** The uniform blocks may not perfectly match the underlying AMR structure, potentially leading to some data duplication [S1, unofficial].
+-*   **When to use:** When rendering AMR data on parallel hardware that benefits from uniform data blocks, such as GPUs using texture-based rendering [S1, unofficial].
+-*   **When not to use:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
++*   **Measured Performance:** The method is described as "very simple and efficient" [S1, unofficial]. Uniform blocks are uploaded to graphics hardware as stacks of axis-aligned 2D textures and rendered back-to-front using the OpenGL compositing operator [S1, unofficial].
++*   **Strengths:** Converts unstructured AMR data into uniform blocks for parallel rendering [S1, unofficial].
++*   **Limitations:** Not given in the sources [S1, unofficial].
++*   **When to use:** When rendering AMR data on parallel hardware that benefits from uniform data blocks [S1, unofficial].
++*   **When not to use:** Not given in the sources [S1, unofficial].
+ 
+ ## Background
+-The method was developed in the context of volume visualization of AMR data, specifically for parallel rendering on graphics workstations. It is part of the AMRVis project, which investigates efficient methods for visualizing adaptive mesh refinement data [S1, unofficial]. The approach leverages the simplicity of uniform grids to facilitate hardware-accelerated rendering while maintaining the adaptive resolution benefits of AMR [S1, unofficial].
++The method was developed in the context of volume visualization of AMR data, specifically for parallel rendering on graphics workstations [S1, unofficial]. It is part of the AMRVis project, which investigates efficient methods for visualizing adaptive mesh refinement data [S1, unofficial]. The approach leverages the simplicity of uniform grids to facilitate hardware-accelerated rendering while maintaining the adaptive resolution benefits of AMR [S1, unofficial].
+ 
+ ## Sources

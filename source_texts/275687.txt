@@ -1,0 +1,91 @@
+Severity: LOW (subordinate to #928 — moot if the whole pass is gated off) Source audit: docs/audits/AUDIT_PERFORMANCE_2026-05-10.md (Dim 1) Blocked by: #928 (close that first; this is only relevant once volumetrics is re-enabled by M-LIG...
+
+PERF-GP-04: Volumetrics integration has no early-out on saturated transmittance (subordinate to #928) · Issue #933 · matiaszanolli/ByroRedux · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+PERF-GP-04: Volumetrics integration has no early-out on saturated transmittance (subordinate to #928) #933
+New issue
+Copy link
+New issue
+Copy link
+Closed as not planned
+Closed as not planned
+PERF-GP-04: Volumetrics integration has no early-out on saturated transmittance (subordinate to #928)#933
+Copy link
+Labels
+lowLow severityLow severityperformancePerformance optimizationPerformance optimizationrendererVulkan rendererVulkan renderervulkanVulkan APIVulkan API
+Description
+matiaszanolli
+opened on May 10, 2026
+Issue body actions
+Severity: LOW (subordinate to #928 — moot if the whole pass is gated off)
+Source audit: docs/audits/AUDIT_PERFORMANCE_2026-05-10.md (Dim 1)
+Blocked by: #928 (close that first; this is only relevant once volumetrics is re-enabled by M-LIGHT v2)
+Location
+crates/renderer/src/vulkan/volumetrics.rs:851-855 — dispatch shape
+crates/renderer/shaders/volumetrics_integrate.comp:29 — Z-march loop
+Why it's a bug
+Integration dispatch is (FROXEL_WIDTH/8) × (FROXEL_HEIGHT/8) × 1 = 18×12×1 = 216 workgroups, each thread Z-marching all 128 slices unconditionally. No early-out when T_cum < ~1e-5.
+Standard optimization (Wronski, Frostbite SIGGRAPH 2014 talk): break out of the column when transmittance saturates. On dense interior fog ~30% of columns saturate by slice 64.
+Estimated impact
+~14 400 threads × 128 slices = 1.84M serial slice operations
+Saved with early-out: ~0.5–1 ms on dense-fog scenes
+Subordinate to PERF-GP-01: Volumetrics dispatch wasted — composite multiplies result by 0.0 #928 — if volumetrics dispatch is gated off entirely, this is moot
+Fix (~3 LOC)
+Add early-out near the bottom of the per-slice loop:
+```
+// In volumetrics_integrate.comp, inside the slice loop after T_cum update
+if (T_cum < 1e-5) break;
+```
+Completeness Checks
+UNSAFE: N/A
+SIBLING: Per-froxel-column early-out is standard; no other compute pass has the same pattern
+DROP: N/A
+LOCK_ORDER: N/A
+FFI: N/A
+TESTS: Should produce bit-identical output for non-saturated columns; saturated columns differ only after the saturation point (which contributes zero anyway). Cube-demo golden test won't trigger this code path (no fog in cube demo)
+DEFER: Don't ship until PERF-GP-01: Volumetrics dispatch wasted — composite multiplies result by 0.0 #928 is closed and volumetrics is back on the critical path
+Disprove attempt
+GPU thread divergence inside a workgroup means saturated columns may still wait for unsaturated neighbors — granted, but a workgroup is 8×8=64 threads and adjacent froxel columns saturate together (same volumetric density). Divergence loss is small.
+Activity
+matiaszanolli
+added
+rendererVulkan rendererVulkan renderer
+lowLow severityLow severity
+vulkanVulkan APIVulkan API
+performancePerformance optimizationPerformance optimization
+on May 10, 2026
+matiaszanolli commented on May 11, 2026
+matiaszanolli
+on May 11, 2026
+OwnerAuthor
+More actions
+Deferred per the issue's own DEFER directive. #928 is closed but volumetrics is still gated off (VOLUMETRIC_OUTPUT_CONSUMED = false in volumetrics.rs:115 — the M-LIGHT v2 re-enable hasn't landed), so this optimization is moot today. Re-open when the flag flips.
+When this is picked up: the audit's 3-LOC break sketch is incorrect. The integrated volume isn't cleared per frame (see volumetrics_integrate.comp + the inj_to_int / pre_int_write barriers in volumetrics.rs:837 — only read/write barriers, no clear). A bare break would leave stale data from previous frames in past-saturation slices, which composite samples at worldDist / VOLUME_FAR. The TESTS bullet's claim that 'saturated columns differ only after the saturation point (which contributes zero anyway)' is wrong — uncleared slices return last-frame garbage, not zero.
+Correct shapes when re-implementing:
+(a) Skip-math (~6 LOC): keep the for-loop running 0..size.z but if (trans_cumulative < 1e-5) skip the imageLoad + exp() and just imageStore the (already-saturated) state. Smaller savings, no shader-host coordination.
+(b) Break + per-frame clear (~15 LOC): add a cmd_clear_color_image in the dispatch path before stage E, then the simple break is safe. Bigger savings but +1 Vulkan call per frame.
+(a) is the closer match to the audit's intent; (b) matches Wronski/Frostbite 2014.
+matiaszanolli
+closed this as not plannedon May 11, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+lowLow severityLow severityperformancePerformance optimizationPerformance optimizationrendererVulkan rendererVulkan renderervulkanVulkan APIVulkan API
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

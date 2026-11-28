@@ -1,0 +1,152 @@
+--- v001.md
++++ v002.md
+@@ -1,95 +1,77 @@
+ # Multi-stage Training with Pose Prediction
+ 
+-Also called: FineSplat training phases, RLSplat two-stage training
++Also called: FineSplat training phases
+ 
+ ## Overview
+-Multi-stage training with pose prediction addresses the instability of jointly optimizing camera poses and 3D Gaussian parameters in feed-forward novel view synthesis. It separates the problem into distinct phases: first learning a robust geometric representation with pose supervision, then refining the Gaussian allocation or rendering pipeline with ground-truth poses, and finally fine-tuning the entire system in a fully pose-free setting [S2, unofficial]. This approach isolates pose errors from geometry errors, preventing the optimizer from getting stuck in local minima where incorrect poses prevent accurate Gaussian placement [S1, unofficial][S2, unofficial].
++Multi-stage training with pose prediction is a curriculum learning strategy for feed-forward 3D Gaussian Splatting that decouples geometry optimization from pose estimation to stabilize training [S1, unofficial]. It addresses the error coupling between inaccurate initial camera poses and Gaussian geometry by first training a pose-predicting backbone, then refining geometry with ground-truth poses, and finally fine-tuning the entire system in a fully pose-free setting [S1, unofficial]. This approach sets itself apart from siblings like [Hybrid Coarse-to-Fine Strategy](7173-hybrid-coarse-to-fine-strategy.md) by explicitly freezing the pose estimator during the geometric refinement phase to prevent pose errors from corrupting the Gaussian distribution [S1, unofficial].
+ 
+ ## How it works
+-The method employs a sequential training schedule. While [S1, unofficial] describes a two-stage process for RLSplat and [S2, unofficial] describes a three-stage process for FineSplat, both rely on progressive refinement of the pose-geometry coupling.
++The method structures optimization into three distinct stages, progressively unfreezing parameters and changing supervision signals [S1, unofficial].
+ 
+-### Inputs and Outputs
+-*   **Inputs:** A set of uncalibrated context views $V_c$ with unknown poses, and target views $V_t$ with known poses (for supervision in early stages).
+-*   **Outputs:** A set of 3D Gaussians $\mathcal{G}$ and, in the final stage, predicted camera poses for the context views.
++**Inputs and Outputs:**
++*   **Input:** A set of context views $\{I_c\}$ with associated camera poses (initially predicted, then ground-truth, then predicted again).
++*   **Output:** A set of 3D Gaussians $\mathcal{G}$ and predicted target view images.
+ 
+-### Data Structures
+-The method operates on the standard 3D Gaussian primitives $\mathcal{G} = \{g_1, \dots, g_N\}$ [Parent].
+-*   **Pose Parameters:** For each context view, a translation vector $t \in \mathbb{R}^3$, a rotation matrix $R \in SO(3)$ (or quaternion $q \in \mathbb{R}^4$), and field-of-view (FOV) parameters are predicted by a pose encoder [S1, unofficial].
+-*   **Gaussian Parameters:** Mean $\mu_k$, covariance $\Sigma_k$ (scale $s_k$, rotation $q_k$), opacity $\alpha_k$, and spherical harmonic coefficients $\mathbf{c}_k$ [Parent].
+-*   **Policy/Allocation (RLSplat):** A policy head outputs probabilities for Gaussian allocation per anchor [S1, unofficial].
++**Data Structures:**
++The model consists of a pose estimator (camera head) and a Gaussian decoder (geometry head). The Gaussian decoder may transition from a pixel-aligned to a patch-aligned architecture during Stage 1 [S1, unofficial].
+ 
+-### Training Stages
++**Parameters:**
++*   Optimizer: AdamW with $\beta_1=0.9, \beta_2=0.95$, weight decay $0.05$ (multi-dimensional params only), gradient clipping max norm $1.0$ [S1, unofficial].
++*   Precision: bfloat16 mixed precision [S1, unofficial].
++*   Loss weight: $\lambda = 0.2$ for perceptual loss [S1, unofficial].
++*   Scene Scale: Origin at first context camera; translations divided by max pairwise distance between context camera centers [S1, unofficial].
+ 
+-#### Stage 1: Base Geometry and Pose Learning
+-**Goal:** Learn a coarse geometric backbone and predict initial camera poses.
++**Numbered Steps:**
+ 
+-1.  **Initialization:** Initialize the geometry backbone and Gaussian decoder. For RLSplat, use random Gaussian allocations [S1, unofficial]. For FineSplat, start with a pixel-aligned Gaussian prediction decoder [S2, unofficial].
+-2.  **Forward Pass:**
+-    *   Encode context views to predict camera poses $(R_v, t_v, \text{FOV}_v)$ for all context views $v$ [S1, unofficial][S2, unofficial].
+-    *   Generate 3D Gaussians $\mathcal{G}$ from the context views using the decoder [S1, unofficial][S2, unofficial].
+-    *   Render target views from $\mathcal{G}$ using the predicted poses [S1, unofficial][S2, unofficial].
+-3.  **Loss Computation:**
+-    *   **Reconstruction Loss ($L_{recon}$):** Pixelwise MSE and LPIPS between rendered and ground-truth target views [S1, unofficial].
+-    *   **Camera Loss ($L_{cam}$):** Supervises the predicted context camera poses against ground-truth poses (translation, rotation, FOV) [S1, unofficial][S2, unofficial].
+-    *   **Projection Loss ($L_{proj}$):** (RLSplat) Reprojects anchor Gaussians toward their source image patch with a cheirality penalty to prevent Gaussians behind the camera [S1, unofficial].
+-    *   **Locality Regularizers:** $L_{vor}$ and $L_{offset}$ to enforce spatial coherence [S1, unofficial].
+-    *   **Perceptual Loss:** VGG-19 perceptual loss $L_{perc}$ with weight $\lambda = 0.2$ [S2, unofficial].
+-4.  **Optimization:**
+-    *   **RLSplat:** Train for 40,000 steps with random allocations [S1, unofficial].
+-    *   **FineSplat:** Train pixel-aligned decoder for 120K iterations, then replace with patch-aligned decoder and fine-tune for 80K iterations [S2, unofficial].
+-    *   **Optimizer:** AdamW ($\beta_1=0.9, \beta_2=0.95$), weight decay 0.05 (multi-dim params only), gradient clipping max norm 1.0, bfloat16 mixed precision [S2, unofficial].
+-    *   **Learning Rate (FineSplat Stage 1):** $2 \times 10^{-5}$, no warm-up, cosine decay to zero [S2, unofficial].
++1.  **Stage 1: Pose and Geometry Initialization**
++    *   Train the pixel-aligned Gaussian prediction network for 120,000 iterations [S1, unofficial].
++    *   Replace the pixel-aligned decoder with a patch-aligned Gaussian decoder [S1, unofficial].
++    *   Fine-tune the model for an additional 80,000 iterations using 8 GPUs [S1, unofficial].
++    *   **Loss:** Includes camera losses on predicted poses and intrinsics, following Jeong et al. (2026) [S1, unofficial].
++    *   **Learning Rate:** $2 \times 10^{-5}$, no warm-up, cosine decay to zero [S1, unofficial].
+ 
+-#### Stage 2: Pose-Free Refinement (or Policy Training)
+-**Goal:** Refine the Gaussian representation or allocation policy, decoupled from pose errors.
++2.  **Stage 2: Geometric Refinement with Ground-Truth Poses**
++    *   Freeze all parameters from Stage 1 [S1, unofficial].
++    *   Train Stage 2 using ground-truth camera poses and intrinsics to allow the model to learn geometry corrections independent of pose errors [S1, unofficial].
++    *   Supervise the output at every step $i$ where $T=4$ steps are processed per sample [S1, unofficial].
++    *   **Loss:** Average over $T$ steps:
++        $$ L = \frac{1}{T} \sum_{i=1}^{T} \left( \mathcal{L}_2(\hat{I}^{(i)}, I) + \lambda \mathcal{L}_{perc}(\hat{I}^{(i)}, I) \right) $$
++        where $\hat{I}^{(i)}$ is the rendered image after step $i$, $I$ is the ground-truth image, $\mathcal{L}_2$ is MSE, and $\mathcal{L}_{perc}$ is VGG-19 perceptual loss [S1, unofficial].
++    *   **Implementation Detail:** Tokens are detached between steps so each step learns to improve the state it receives without backpropagating through previous steps [S1, unofficial].
++    *   **Learning Rate:** $1 \times 10^{-4}$, 200-iteration linear warm-up, constant until 80% of training, cosine decay to zero over remaining 20% [S1, unofficial].
++    *   **Duration:** 20,000 iterations on 4 GPUs [S1, unofficial].
+ 
+-*   **Option A: FineSplat (Ground-Truth Pose Supervision)**
+-    1.  **Freeze Stage 1:** Freeze the pose encoder and initial Gaussian decoder [S2, unofficial].
+-    2.  **Ground-Truth Poses:** Use ground-truth camera poses for rendering [S2, unofficial].
+-    3.  **Iterative Refinement:** Train a Stage 2 module (e.g., iterative Gaussian correction) for $T=4$ steps [S2, unofficial].
+-    4.  **Loss:** Average loss over all $T$ steps:
+-        $$ L = \frac{1}{T} \sum_{i=1}^{T} \left( L_2(\hat{I}^{(i)}, I) + \lambda L_{perc}(\hat{I}^{(i)}, I) \right) $$
+-        where $\hat{I}^{(i)}$ is the rendered image after step $i$, and $I$ is the ground truth [S2, unofficial].
+-    5.  **Token Detachment:** Detach tokens between steps to prevent gradient flow across refinement steps [S2, unofficial].
+-    6.  **Optimization:** 20K iterations (FineSplat) or 5,000 steps (RLSplat) [S1, unofficial][S2, unofficial].
+-    7.  **Learning Rate (FineSplat Stage 2):** $1 \times 10^{-4}$, 200-iteration linear warm-up, constant until 80%, cosine decay to zero [S2, unofficial].
+-    8.  **RLSplat Specifics:** Add policy head initialized to uniform probabilities. Fine-tune with policy loss $L_{policy} = -J_{policy}$ (GSPO) [S1, unofficial]. Sample budgets skewed toward lower end [S1, unofficial].
++3.  **Stage 3: End-to-End Fine-Tuning**
++    *   Unfreeze all parameters, including the camera pose estimator and Gaussian head [S1, unofficial].
++    *   Operate in a fully pose-free setting: both context and target cameras are predicted, and no camera loss is used [S1, unofficial].
++    *   Supervise Stage-1 Gaussians.
++    *   **Loss:** Average Eq. 6 over steps $i=0, \dots, T$ [S1, unofficial].
++    *   **Learning Rate:** $2 \times 10^{-5}$ for all parameters, 200-iteration linear warm-up, cosine decay to zero [S1, unofficial].
++    *   **Duration:** 10,000 iterations on 8 GPUs [S1, unofficial].
+ 
+-*   **Option B: RLSplat (Policy Training)**
+-    1.  **Add Policy Head:** Initialize to uniform probabilities [S1, unofficial].
+-    2.  **Fine-tune:** Optimize entire model with $L_{policy}$ [S1, unofficial].
+-    3.  **No KL Penalty:** Unlike typical RL, no KL penalty is applied as there is no reference policy [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Scene Scale Normalization:** Feed-forward methods predict geometry in a world frame with undefined origin/scale. The method fixes this by placing the origin at the first context camera and normalizing translations by the maximum pairwise distance between context camera centers [S1, unofficial].
++*   **Token Detachment:** In Stage 2, failing to detach tokens between steps will cause incorrect gradient flow, as the model would attempt to optimize previous steps based on later improvements [S1, unofficial].
+ 
+-#### Stage 3: End-to-End Fine-Tuning (FineSplat)
+-**Goal:** Jointly optimize poses and Gaussians in a fully pose-free setting.
++## Subtopics
+ 
+-1.  **Unfreeze:** Unfreeze all parameters, including the camera pose estimator and Gaussian head [S2, unofficial].
+-2.  **Pose-Free Setting:** Predict both context and target cameras. No camera loss is used [S2, unofficial].
+-3.  **Supervision:** Supervise Stage-1 Gaussians. Loss is averaged over steps $i=0, \dots, T$ [S2, unofficial].
+-4.  **Optimization:** 10K iterations on 8 GPUs [S2, unofficial].
+-5.  **Learning Rate:** $2 \times 10^{-5}$ for all parameters, 200-iteration linear warm-up, cosine decay to zero [S2, unofficial].
+-
+-### Parameters
+-*   **Gaussian Budget:** Sampled from $[2048, 16384V]$ where $V$ is the number of input views [S1, unofficial].
+-*   **Kanc, Kgs:** 16 for Gaussian decoding [S1, unofficial].
+-*   **Lambda ($\lambda$):** 0.2 for perceptual loss weight [S2, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Cheirality:** Without the cheirality penalty in $L_{proj}$, Gaussians may be placed behind the camera, causing rendering artifacts [S1, unofficial].
+-*   **Pose-Geometry Coupling:** Jointly optimizing poses and Gaussians from scratch often leads to degenerate solutions where poses drift to compensate for poor geometry [S2, unofficial].
+-*   **Policy Regularization:** In RLSplat, the absence of a KL penalty during policy training requires careful budget sampling to ensure the policy learns meaningful allocations [S1, unofficial].
++### RLSplat Training
++RLSplat uses a two-stage training process to introduce a Gaussian allocation policy [S2, unofficial].
++*   **Stage 1 (Base Training):** Train the geometry backbone and decoder with random allocations for 40,000 steps. The Gaussian budget is sampled from $[2048, 16384V]$ where $V$ is the number of input views. This exposes the decoder to diverse allocations [S2, unofficial].
++*   **Stage 2 (Policy Training):** Add a policy head initialized to uniform probabilities. Fine-tune the entire model with policy loss $L_{policy} = -J_{policy}$ for 5,000 steps. Budgets are sampled with a skew toward the lower end of the range [S2, unofficial].
++*   **Losses:** Combines reconstruction loss $L_{recon}$ (MSE + LPIPS), camera loss $L_{cam}$ (translation, rotation, FOV), projection loss $L_{proj}$ (reprojection with cheirality penalty), locality regularizers ($L_{vor}, L_{offset}$), and policy loss [S2, unofficial].
++*   **Parameters:** $K_{anc} = K_{gs} = 16$ [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Multi-stage training significantly increases total training time compared to single-stage methods. FineSplat requires 120K + 80K + 20K + 10K = 230K iterations [S2, unofficial]. RLSplat requires 40K + 5K = 45K steps [S1, unofficial].
+-*   **Memory Complexity:** Standard 3D Gaussian memory requirements [Parent]. RLSplat's policy head adds minimal overhead [S1, unofficial].
+-*   **Performance:** RLSplat achieves superior LPIPS, SSIM, and PSNR at low Gaussian budgets (1K-4K per view) compared to fixed-budget methods [S1, unofficial]. FineSplat's multi-stage approach improves detail recovery in complex scenes [S2, unofficial].
+-*   **Strengths:** Robustness to uncalibrated input views; ability to control Gaussian budget efficiently (RLSplat); high-fidelity reconstruction (FineSplat).
+-*   **Limitations:** High training time; complex implementation due to multiple stages and loss functions; sensitivity to hyperparameters (learning rates, warm-up schedules) [S2, unofficial].
++*   **Time Complexity:** The method requires significant training time due to multiple stages. Stage 1 takes 200K iterations, Stage 2 takes 20K, and Stage 3 takes 10K [S1, unofficial]. RLSplat takes 45K steps total [S2, unofficial].
++*   **Memory Complexity:** Depends on the Gaussian budget. RLSplat samples budgets up to $16384V$ Gaussians [S2, unofficial].
++*   **Performance:** Multi-stage training with pose prediction stabilizes convergence in feed-forward 3DGS, allowing for detailed splats via patch-aligned decoders [S1, unofficial]. RLSplat shows increasing PSNR advantages over other methods as the Gaussian budget decreases (e.g., 1.22 dB advantage at 1K Gaussians per view with 8 context views) [S2, unofficial].
++*   **Strengths:** Decoupling pose and geometry prevents error propagation. The final end-to-end stage recovers performance lost by freezing poses in Stage 2 [S1, unofficial].
++*   **Limitations:** Requires careful tuning of learning rates and warm-up schedules for each stage. The patch-aligned decoder in Stage 1 adds architectural complexity [S1, unofficial].
+ 
+ ## Background
+-*   **RLSplat:** Introduced in "RLSplat: Resource-Linear Budget Control for Feed-forward 3D Gaussian Splatting" (2026) [S1, unofficial]. It addresses the need for variable Gaussian budgets in feed-forward 3DGS.
+-*   **FineSplat:** Introduced in "FineSplat: Fine Patches, Local Groups, Detailed Splats" (2026) [S2, unofficial]. It builds on iterative refinement techniques for 3DGS, adapting them to a multi-stage pose-geometry training framework.
++This method originates from FineSplat, a feed-forward 3D Gaussian Splatting approach that emphasizes fine patches and local groups for detailed rendering [S1, unofficial]. The multi-stage strategy was developed to handle the instability of jointly optimizing camera poses and Gaussian geometry in a single pass, a common issue in differentiable inverse rendering [S1, unofficial]. It builds on the principle that initial pose estimates are often poor, and optimizing them alongside geometry leads to local minima [S1, unofficial].
+ 
+ ## Sources
+-[S1] RLSplat: Resource-Linear Budget Control for Feed-forward 3D Gaussian Splatting, https://arxiv.org/abs/2610.27712, fetched 2026-10-26 (unofficial)
+-[S2] FineSplat: Fine Patches, Local Groups, Detailed Splats, https://arxiv.org/abs/2610.25011, fetched 2026-10-29 (unofficial)+[S1] FineSplat: Fine Patches, Local Groups, Detailed Splats, https://arxiv.org/abs/2610.25011, fetched 2026-10-29 (unofficial)
++[S2] RLSplat: Resource-Linear Budget Control for Feed-forward 3D Gaussian Splatting, https://arxiv.org/abs/2610.27712, fetched 2026-10-26 (unofficial)

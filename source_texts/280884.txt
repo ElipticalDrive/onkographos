@@ -1,0 +1,544 @@
+A physically-based path tracer in safe Rust, USD-native, capable of rendering production datasets like Moana and ALab. - Choose the BVH node width per tree: 8 wide for trees too large for the cache by doubleailes · Pull Request #334 · doubleailes/Crust
+
+Choose the BVH node width per tree: 8 wide for trees too large for the cache by doubleailes · Pull Request #334 · doubleailes/Crust · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+doubleailes
+commented
+Oct 20, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+This started as a look at replacing the BVH with tinybvh-rs. Its BVH8_CPU layout traced 1.8–2.4× faster than crust-rt on a triangle soup, but the crate isn't usable here:
+it's a beta cxx binding that segfaults when that BVH is dropped;
+its build script hardcodes -march=native;
+it supports triangles and closest-hit only: no occlusion query, t_min, masks, instancing, curves or motion blur;
+it would put C++ behind unsafe on the hot path.
+Its plain and HQ (SBVH) binary BVHs were no faster than crust-rt. The speed comes from 8-wide nodes, so this PR takes that idea instead of the library.
+docs/simd.md already concluded that the width should be chosen per tree by size, with both widths compiled in. This PR does that on stable, in safe code:
+WideNode<W>, collapse::<W> and both traversals are generic over a Width trait (W4, W8). A tree stores enum Tree { Four, Eight }, matched once per query. The binary SBVH, the leaves and the Tri4 packets are the same at either width; only the collapse differs.
+On stable, an 8-wide node is two Vec4 halves: 256 bytes, 32-byte aligned, no new dependency, still forbid(unsafe_code). Outside the cache the gain comes from fetching fewer nodes, not from wider arithmetic. The nightly bvh8 feature now only swaps the halves for one f32x8.
+crust_rt::NodeWidth (Four | Eight | Auto) is a new field on CommitOptions. Auto, the default, goes 8-wide from 2^18 primitives. Each instanced scene chooses for itself, so an instance field gets an 8-wide top level over 4-wide prototypes.
+CRUST_BVH_WIDTH=four|eight|auto forces the width in the renderer; four is the old behaviour. ray_throughput gains --width.
+Capability
+intersection-kernel (design record: new section "BVH8 per tree" with its trap, plus a spec requirement) and cli (the CRUST_BVH_WIDTH requirement). The change record is archived at openspec/changes/archive/2026-10-20-bvh8-per-tree/. docs/simd.md has the full measurements.
+Image impact
+Bit-identical under the default (auto). Every sample scene is below 2^18 primitives per tree, so it stays 4-wide exactly as before. I checked with crust diff against a main build at -s 16 on 10 scenes: cornellbox, instancing, nested_instancing, curves, hair, subdivision, materialx_teapot, motionblur, implicit_shapes, displacement. All identical. I did not run the full check_images.sh golden set.
+Forcing eight is not fully bit-identical. Seven of those scenes match, but subdivision, implicit_shapes and hair change a handful of pixels (trimmed relmse ≤ 5e-7). A debug build that traced every query at both widths showed every mismatch was an exact tie: two different primitives hit at bitwise-equal t, at coplanar contact faces where meshes sit on the ground quad. The first leaf visited wins a tie, and the widths visit in different orders. Either answer is the same point of degenerate geometry, the same thing a rebuilt BVH does to ties. This is documented in the spec, the design record and CLAUDE.md, not fixed: an order-independent tie-break would need an id compare in every primitive test and would move the 4-wide images too. On 2.2M random primary and secondary rays, and in the new bitwise unit test, the two widths agree to the bit.
+Performance
+ray_throughput --large MTRIS --width four|eight|auto. Single-threaded traversal, 2^18 incoherent rays, three rounds with the widths interleaved, 4-core Xeon with a 33 MiB L3, stable, baseline x86-64. Min ms, change vs four:
+scene
+four
+eight
+auto
+soup 0.25M intersect / occluded
+1538 / 1287
++10% / +6%
+4-wide
+soup 0.5M
+2923 / 2377
+−13% / −19%
+−15% / −14%
+soup 1M
+4328 / 3889
+−7% / −21%
+−10% / −16%
+soup 4M
+8621 / 7487
+−4% / −6%
+−9% / −6%
+instance field 250k
+2323 / 1715
+−12% / −15%
+−14% / −14%
+instance field 1M
+4109 / 3365
++2% / −12%
+−7% / −13%
+Run-to-run noise on this VM reached 15% between identical runs, so treat the individual percentages as rough. The sign was consistent across rounds from 0.5M up. The threshold sits at the crossover for a 33 MiB cache; a much larger last-level cache would move it up (documented, with CRUST_BVH_WIDTH=four as the escape hatch). In cache, the 43k-triangle scenes measured within ±5% between widths.
+Default path: callgrind on cornellbox at -s 2 gives 4.257e9 instructions vs 4.264e9 on main (−0.16%). I did not run bench_ab.sh end to end, since the sample scenes' trees are unchanged.
+Checklist
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings (also -p crust-rt --features traversal-stats, and the pinned nightly bvh8 leg at x86-64-v3)
+cargo test --workspace --no-fail-fast (also cargo +nightly-2026-09-26 test -p crust-rt --features bvh8)
+Both halves of any pair in docs/architecture.md § Invariants changed together: the new 8-wide ↔ 4-wide pair is pinned by eight_wide_hits_are_bitwise_the_four_wide_hits, with the exact-tie caveat recorded
+No new unsafe, no new RNG outside openqmc, no asset decoding in crust-core
+Logging levels follow the rules (no new logging)
+User documentation in site/ updated (CRUST_BVH_WIDTH, design choices); zola build 0.21 passes its link check
+The new CRUST_BVH_WIDTH switch has a Config field and a row in docs/architecture.md, and its "off" side (four) is the old behaviour
+Not run: the nightly clippy over the whole workspace (only the crust-rt bvh8 leg), and cargo deny (no dependency changes).
+Generated by Claude Code
+qodo-code-review
+Bot
+commented
+Oct 20, 2026
+Copy link
+Copy Markdown
+Contributor
+PR Summary by Qodo
+Choose BVH4 or BVH8 nodes per tree on stable Rust
+✨ Enhancement 🧪 Tests 📝 Documentation 🕐 40+ Minutes
+AI Description
+```
+• Choose 8-wide BVH nodes for large trees while preserving 4-wide nodes for smaller trees.
+• Expose width controls in scene commits, renderer configuration, and throughput benchmarks.
+• Test traversal equivalence and document the performance crossover and exact-hit tie exception.
+```
+Diagram
+```
+graph TD
+  Config["Renderer config"] --> Commit["Commit options"] --> Select{"Width choice"} --> Binary["Binary SBVH"] -->|four| Four["BVH4 collapse"] --> Tree["Tree variant"] --> Query["Hit traversal"]
+  Binary -->|eight| Eight["BVH8 collapse"] --> Tree
+```
+Loading
+High-Level Assessment
+The following are alternative approaches to this PR:
+1. Cache-aware automatic selection
+➕ Could adapt the crossover to machines with substantially larger last-level caches.
+➖ Portable cache discovery and workload-dependent sizing add complexity; primitive count is already available and an explicit override covers exceptions.
+Recommendation: Keep the per-tree, fixed-threshold selection with an override: it preserves small-tree behavior and avoids per-node dispatch. Revisit cache-aware selection only if measurements across hardware show a material regression. Replacing the kernel with tinybvh-rs is not presently suitable because its binding and query capabilities do not meet the renderer's requirements.
+Files changed (29) +1047 / -219
+Enhancement (7) +469 / -130
+config.rsParse the renderer BVH-width override +68/-0
+Parse the renderer BVH-width override
+```
+• Adds BvhWidth parsing, defaulting, display, and conversion to the kernel option. Tests accepted spellings and invalid-value fallback.
+```
+crates/crust-core/src/config.rs
+lib.rsForward renderer width choices to scene commits +5/-4
+Forward renderer width choices to scene commits
+```
+• Exports BvhWidth and includes the configured width in shared kernel commit options.
+```
+crates/crust-core/src/lib.rs
+ray_throughput.rsAdd width selection to throughput probes +33/-19
+Add width selection to throughput probes
+```
+• Accepts --width alongside --layout and commits benchmark scenes with both selected options.
+```
+crates/crust-rt/examples/ray_throughput.rs
+lanes8.rsProvide stable and nightly 8-wide slab tests +146/-45
+Provide stable and nightly 8-wide slab tests
+```
+• Adds a safe, two-Vec4 implementation for stable Rust. The nightly feature substitutes f32x8 without changing width-selection policy.
+```
+crates/crust-rt/src/bvh/lanes8.rs
+mod.rsSelect and traverse BVH node widths per tree +185/-51
+Select and traverse BVH node widths per tree
+```
+• Introduces Width, generic nodes and traversals, and a tree variant dispatched once per query. Auto selects 8-wide nodes from 2^18 primitives, and footprint accounting handles either representation.
+```
+crates/crust-rt/src/bvh/mod.rs
+lib.rsExport the public node-width option +1/-1
+Export the public node-width option
+```
+• Re-exports NodeWidth for kernel callers configuring scene commits.
+```
+crates/crust-rt/src/lib.rs
+mod.rsAdd per-scene width selection to CommitOptions +31/-10
+Add per-scene width selection to CommitOptions
+```
+• Defines Four, Eight, and default Auto choices. Resolves Auto from each scene's primitive count before building its BVH.
+```
+crates/crust-rt/src/scene/mod.rs
+Refactor (2) +53 / -38
+collapse.rsCollapse binary trees at either node width +12/-11
+Collapse binary trees at either node width
+```
+• Makes collapse generic over Width while retaining the existing leaf and triangle-packet construction.
+```
+crates/crust-rt/src/bvh/collapse.rs
+lanes4.rsImplement the 4-wide Width specialization +41/-27
+Implement the 4-wide Width specialization
+```
+• Moves the existing Vec4 slab test and ray broadcasts behind the width interface.
+```
+crates/crust-rt/src/bvh/lanes4.rs
+Tests (2) +147 / -22
+tests.rsVerify both BVH layouts and hit behavior +143/-21
+Verify both BVH layouts and hit behavior
+```
+• Pins node sizes and collapse properties at both widths. Compares closest hits bitwise and occlusion verdicts across multiple ray sweeps.
+```
+crates/crust-rt/src/bvh/tests.rs
+kernel.rsAdapt packet-layout test to expanded commit options +4/-1
+Adapt packet-layout test to expanded commit options
+```
+• Preserves the packet-layout test's explicit choice while defaulting the new width field.
+```
+crates/crust-rt/tests/kernel.rs
+Documentation (18) +378 / -29
+nightly.ymlClarify nightly SIMD coverage +4/-4
+Clarify nightly SIMD coverage
+```
+• Updates workflow comments to distinguish nightly f32x8 storage from width selection, which now also works on stable.
+```
+.github/workflows/nightly.yml
+CLAUDE.mdRecord per-tree BVH widths in contributor guidance +2/-1
+Record per-tree BVH widths in contributor guidance
+```
+• Updates kernel ownership and bit-identity guidance, including the exact-tie exception.
+```
+CLAUDE.md
+README.mdDescribe BVH4 and BVH8 kernel support +2/-2
+Describe BVH4 and BVH8 kernel support
+```
+• Updates the geometry and crate summaries to mention 8-wide nodes for large trees.
+```
+README.md
+Cargo.tomlClarify the forwarded bvh8 feature +1/-1
+Clarify the forwarded bvh8 feature
+```
+• Documents that the nightly feature selects std::simd storage, not whether a tree is 8-wide.
+```
+crates/crust-core/Cargo.toml
+Cargo.tomlClarify renderer nightly feature forwarding +1/-1
+Clarify renderer nightly feature forwarding
+```
+• Rewords the bvh8 feature comment to describe its std::simd implementation.
+```
+crates/crust-render/Cargo.toml
+Cargo.tomlDocument per-tree widths and nightly SIMD storage +4/-3
+Document per-tree widths and nightly SIMD storage
+```
+• Updates crate metadata and feature guidance to reflect stable BVH8 support.
+```
+crates/crust-rt/Cargo.toml
+architecture.mdDocument width configuration and kernel invariants +5/-2
+Document width configuration and kernel invariants
+```
+• Adds per-tree BVH8 behavior, the renderer environment switch, and the exact-tie limit on bit identity.
+```
+docs/architecture.md
+simd.mdRecord stable BVH8 design and measurements +95/-8
+Record stable BVH8 design and measurements
+```
+• Explains the width implementations, selection threshold, tie behavior, and throughput results across tree sizes and instance fields.
+```
+docs/simd.md
+design.mdArchive per-tree BVH design decisions +26/-0
+Archive per-tree BVH design decisions
+```
+• Records the generic-width design, stable Vec4 representation, threshold choice, and exact-tie trade-off.
+```
+openspec/changes/archive/2026-10-20-bvh8-per-tree/design.md
+proposal.mdArchive the BVH-width proposal +43/-0
+Archive the BVH-width proposal
+```
+• Documents why the existing kernel gains selectable wide nodes rather than being replaced by tinybvh-rs.
+```
+openspec/changes/archive/2026-10-20-bvh8-per-tree/proposal.md
+spec.mdArchive the CLI width-switch requirement +15/-0
+Archive the CLI width-switch requirement
+```
+• Specifies accepted environment values, default behavior, and invalid-value handling.
+```
+openspec/changes/archive/2026-10-20-bvh8-per-tree/specs/cli/spec.md
+spec.mdArchive per-tree width requirements +36/-0
+Archive per-tree width requirements
+```
+• Specifies layout sizes, stable support, hit equivalence, the Auto threshold, and instancing behavior.
+```
+openspec/changes/archive/2026-10-20-bvh8-per-tree/specs/intersection-kernel/spec.md
+tasks.mdArchive implementation and verification tasks +29/-0
+Archive implementation and verification tasks
+```
+• Records completed kernel, renderer, documentation, formatting, lint, and test checks.
+```
+openspec/changes/archive/2026-10-20-bvh8-per-tree/tasks.md
+spec.mdSpecify the CRUST_BVH_WIDTH switch +12/-0
+Specify the CRUST_BVH_WIDTH switch
+```
+• Adds the canonical CLI requirement for width values, defaulting, warnings, and documentation.
+```
+openspec/specs/cli/spec.md
+design.mdRecord the kernel's per-tree BVH8 design +43/-4
+Record the kernel's per-tree BVH8 design
+```
+• Describes generic traversal, stable node storage, measured trade-offs, and the exact-tie exception.
+```
+openspec/specs/intersection-kernel/design.md
+spec.mdSpecify width selection and traversal equivalence +33/-0
+Specify width selection and traversal equivalence
+```
+• Adds normative requirements and scenarios for forced widths, small scenes, and mixed-width instance fields.
+```
+openspec/specs/intersection-kernel/spec.md
+design-choices.mdExplain stable wide-node design to readers +7/-3
+Explain stable wide-node design to readers
+```
+• Clarifies that large trees use two 4-wide halves to reduce node fetches without requiring wider SIMD instructions.
+```
+site/content/docs/architecture/design-choices.md
+environment-variables.mdDocument the BVH-width environment setting +20/-0
+Document the BVH-width environment setting
+```
+• Lists Auto, four, and eight behavior, aliases, the threshold, cache-size caveat, and exact-hit tie exception.
+```
+site/content/docs/reference/environment-variables.md
+qodo-code-review
+Bot
+commented
+Oct 20, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Code Review by Qodo
+🐞 Bugs (1) 📘 Rule violations (0) 🔗 Cross-repo conflicts (0) 📜 Skill insights (0)
+1. Benchmarks silently ignore a late width 🐞 Bug ≡ Correctness
+Description
+```
+The argument loop stops at --large, and the subsequent large-scene branch never processes a
+trailing --width option. With --large 4 --width eight, the benchmark runs using the default
+Auto width instead of the requested width, so a width comparison can measure the wrong
+configuration without an error.
+```
+Code
+crates/crust-rt/examples/ray_throughput.rs[201]
+```
++            _ => break,
+```
+Relevance
+●●● Strong
+```
+Clear deterministic CLI parsing bug; trailing --width silently changes benchmark configuration.
+```
+ⓘ Recommendations generated based on similar findings in past PRs
+Evidence
+```
+The new parser breaks on the first argument other than --layout or --width and sets the commit
+options before probing. The later --large branch consumes only its size and does not check
+remaining arguments, so a trailing width cannot affect any scene.
+```
+crates/crust-rt/examples/ray_throughput.rs[180-215]
+crates/crust-rt/examples/ray_throughput.rs[169-174]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The throughput example silently ignores `--width` when it follows `--large` and its size, producing misleading benchmark results.
+
+## Fix Focus Areas
+- crates/crust-rt/examples/ray_throughput.rs[180-215]
+
+## Recommended Fix
+Parse `--large`, its optional size, and the width and layout options in one argument pass before setting `OPTIONS` or building any scenes. Reject unconsumed or unknown arguments rather than silently running with defaults.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Dismiss ↗ | View ↗
+Context sources
+✅ Compliance rules (platform): 127 rules
+✅ Cross-repo context — repo relationships
+Review mode: Auto: 🧠 Deep: Substantial BVH, traversal, instancing, configuration, and nightly-path changes create multiple defect opportunities.
+Tip of the day
+```
+💡 Did you know, you can start a comment with 'qodo' or '@qodo' to chat about any finding
+```
+More tips ↗ | Customize Qodo ↗ | Qodo docs ↗
+qodo-code-review
+Bot
+reviewed
+Oct 20, 2026
+View reviewed changes
+Comment thread
+crates/crust-rt/examples/ray_throughput.rs
+other => panic!("--width wants four|eight|auto, got {other:?}"),
+};
+}
+_ => break,
+qodo-code-review
+Bot
+Oct 20, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+1. Benchmarks silently ignore a late width 🐞 Bug ≡ Correctness
+```
+The argument loop stops at --large, and the subsequent large-scene branch never processes a
+trailing --width option. With --large 4 --width eight, the benchmark runs using the default
+Auto width instead of the requested width, so a width comparison can measure the wrong
+configuration without an error.
+```
+Agent Prompt
+```
+## Issue description
+The throughput example silently ignores `--width` when it follows `--large` and its size, producing misleading benchmark results.
+
+## Fix Focus Areas
+- crates/crust-rt/examples/ray_throughput.rs[180-215]
+
+## Recommended Fix
+Parse `--large`, its optional size, and the width and layout options in one argument pass before setting `OPTIONS` or building any scenes. Reject unconsumed or unknown arguments rather than silently running with defaults.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Dismiss ↗ | View ↗
+claude
+Bot
+reviewed
+Oct 20, 2026
+View reviewed changes
+claude
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Nothing blocking. The comments below are optional suggestions. There is no need to push a fix for them before merging.
+Comment thread
+crates/crust-rt/src/bvh/mod.rs
+/// wide, and the gain holds to 4 M. 2^18 primitives is about 35 MiB of a
+/// triangle tree. A larger last-level cache moves the crossover up; the
+/// cost of being early is the few percent the 250 k soup shows.
+pub(crate) const AUTO_EIGHT_FROM: usize = 1 << 18;
+claude
+Bot
+Oct 20, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 (optional) Under the default auto, the two Kitchen_set golden scenes switch to an 8-wide top-level tree. Their images can now differ from the base, and the PR describes the default as bit-identical. The design record gives Kitchen_set 414 599 top-level triangles, which is above AUTO_EIGHT_FROM = 2^18 (262 144). scripts/check_images.sh renders both kitchen and kitchen_instanced. Fix: run check_images.sh check on both Kitchen_set variants. Then record any tie-induced change, and drop the claim that every golden-set tree is under 2^18 from the PR description.
+Why this was flagged
+scripts/check_images.sh (scene_paths, lines 47-54) renders every samples/*.usda plus samples/Kitchen_set/Kitchen_set.usd and Kitchen_set_instanced.usd. openspec/specs/intersection-kernel/design.md:355-356 records the baked Kitchen_set top level at 414 599 triangles. SceneBuilder::commit_with (scene/mod.rs) resolves NodeWidth::Auto with crate::bvh::NodeWidth::auto(sink.input.len()), which returns Eight once the count reaches AUTO_EIGHT_FROM (1 << 18, bvh/mod.rs:130). rt_world.rs:919 commits that world through crate::commit_options(), so the default render is 8-wide there, while on the base branch every tree was 4-wide. The PR's own spec says 8-wide and 4-wide disagree on exact ties at coplanar contact. A kitchen full of objects resting on counters and floors is that case, so check_images.sh check against goldens recorded on the base can fail for kitchen and kitchen_instanced under the default. The PR description says every sample scene stays below 2^18 per tree and that auto is bit-identical.
+Verification: NodeWidth::auto returns Eight when primitives >= AUTO_EIGHT_FROM (1 << 18 = 262 144, bvh/mod.rs), and the default is BvhWidth::Auto. openspec/specs/intersection-kernel/design.md:355-356 records Kitchen_set's baked top level at 414 599 top-level triangles, which is above the threshold. scripts/check_images.sh scene_paths includes kitchen and kitchen_instanced.
+Choose the BVH node width per tree: 8 wide for trees too large for th…
+…
+3563194
+```
+…e cache
+
+Both node widths are now compiled into the stable build. WideNode, the
+collapse and both traversals are generic over a Width trait (W4, W8); a
+tree stores `enum Tree { Four, Eight }` and is matched once per query. On
+stable an 8-wide node is two Vec4 halves (safe code, 256 bytes); the
+nightly `bvh8` feature now only swaps them for one f32x8.
+
+crust_rt::NodeWidth (Four | Eight | Auto) on CommitOptions picks the
+width; Auto collapses a tree of 2^18 or more primitives 8 wide, so an
+instance field gets an 8-wide top level over 4-wide prototypes, the split
+docs/simd.md's BVH8 verdict asked for. CRUST_BVH_WIDTH forces it in the
+renderer; `four` is the behaviour before. ray_throughput gains --width.
+
+Measured with ray_throughput --large on a 33 MiB L3 (best of three,
+interleaved): 8 wide is 6-10% slower on a 250 k-triangle soup and 4-21%
+faster from 500 k to 4 M; auto is 7-14% faster on 250 k-1 M instance
+fields. Every sample scene stays 4 wide under auto and renders
+bit-identically to before; cornellbox runs 0.16% fewer instructions.
+The widths agree on every hit except exact ties (two primitives at the
+same t, e.g. coplanar contact faces), which go to the leaf visited first.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QsTEW41CA6kHjmY2UuMT9j
+```
+doubleailes
+force-pushed
+the
+claude/sharp-thompson-cwpddp
+branch
+from
+0a77d00 to
+3563194
+Compare
+October 21, 2026 08:31
+doubleailes
+commented
+Oct 21, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Production A/B: Moana and ALab
+Moana and ALab both have trees above the 2^18 primitive threshold, so these are the first production renders that go through the 8-wide path. The result is mixed and not conclusive yet: ALab gets a little faster, Moana about 5% slower.
+Method. The machine is the 72-vCPU VM: Xeon E5-2699 v4 @ 2.2 GHz, 16 MiB L3, all threads. Both binaries are baseline x86-64 release builds.
+main is c09cb48, built in its own worktree with its own target dir.
+The PR is 3563194. four / auto are that one binary behind CRUST_BVH_WIDTH=four|auto wrappers.
+Timings come from scripts/bench_ab.sh -n 3 -p Render at the default 128 spp, 3 interleaved reps per pair. Per-query costs and memory come from one --profile --stats -l debug run per width.
+Moana: -i island/usd/island.usda --camera /island/cam/shotCam
+ALab: -i ALab/entry.usda -f 1004 --camera /root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam
+Render time (seconds, min / mean; negative = B faster)
+scene
+four → auto
+main → auto
+ALab
+24.10 / 24.23 → 23.68 / 23.80: −1.7% / −1.8%
+24.01 / 24.23 → 23.13 / 23.32: −3.7% / −3.7%
+Moana
+29.84 / 31.17 → 31.49 / 31.70: +5.5% / +1.7%
+29.87 / 30.06 → 31.35 / 31.65: +5.0% / +5.3%
+Traversal and memory (one profiled run per width, PR binary)
+scene
+width
+Trace µs / query
+Occlusion µs / ray
+BVH nodes
+kernel memory
+peak RSS
+ALab
+four
+5.65
+2.76
+541.6 MiB
+–
+11.37 GiB
+ALab
+auto
+5.12 (−9%)
+2.86 (+4%)
+652.6 MiB (+20%)
+–
+11.37 GiB
+Moana
+four
+17.06
+7.94
+2.45 GiB
+13.54 GiB
+24.08 GiB
+Moana
+auto
+18.57 (+9%)
+8.00 (+1%)
+2.98 GiB (+22%)
+14.07 GiB
+24.83 GiB (+0.75 GiB)
+Moana's commit time is unchanged (16.8 s → 16.3 s).
+Reading
+Moana gets slower under auto, consistently. Both pairs gave about +5% on min, and the profiled closest-hit cost rose 9%. It also costs about 0.5 GiB of BVH and 0.75 GiB of peak RSS.
+ALab's gain is small, −2 to −4% on Render time with Trace −9%, and 3 reps cannot resolve it from noise. The first Moana four arm also spread widely (min 29.8 s against mean 31.2 s).
+A reference count above 2^18 does not predict which width wins. Both scenes cross the threshold, and they go opposite ways. This repeats the quantised-BVH8 production A/B (b17aeb4): the random-soup sweep in ray_throughput was measured single-threaded with a 33 MiB L3, and it did not predict production trees rendered on all threads with a 16 MiB L3.
+There is no log of which trees went 8-wide, so these runs cannot say whether Moana's loss comes from the 21.7 M-reference top level or from the large prototypes. A -l debug per-tree width census, like node_format_census on the quantised branch, would settle that.
+Still running
+6-rep four vs auto and four vs eight on both scenes. eight forces every tree to 8 wide. If it loses on Moana by more than auto, the smaller trees can't take 8 wide either. If it loses by about the same, the loss is in the large trees auto already sends to 8 wide.
+crust diff of four against auto at -s 16 --indirect-clamp 0 on both scenes, to check that the only image differences are exact ties.
+I'll add those results here when they're done. Tentative suggestion: if Moana's ~5% loss holds at 6 reps, ship the generic Width machinery with Auto resolving to four-wide, keep CRUST_BVH_WIDTH=eight as an opt-in, and add the per-tree census before the threshold is tuned on production scenes.
+🤖 Generated with Claude Code
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

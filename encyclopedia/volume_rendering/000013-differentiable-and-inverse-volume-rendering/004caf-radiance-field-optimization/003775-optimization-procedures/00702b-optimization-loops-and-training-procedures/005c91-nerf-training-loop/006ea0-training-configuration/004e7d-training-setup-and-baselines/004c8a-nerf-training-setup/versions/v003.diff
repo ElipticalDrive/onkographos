@@ -1,0 +1,234 @@
+--- v002.md
++++ v003.md
+@@ -4,149 +4,103 @@
+ 
+ ## Overview
+-This training setup defines the configuration for optimizing radiance fields using editable feature volumes, specifically as implemented in Control-NeRF. It addresses the problem of rendering scenes from multi-view images by replacing the standard positional encoding of 3D coordinates with pre-computed feature vectors sampled from a volume. It differs from the standard NeRF baseline [11349-nerf-gt-baseline-training-setup.md] by omitting positional encoding for spatial positions and instead utilizing a 64-dimensional feature vector as the primary spatial input, while retaining positional encoding for view directions.
++This article defines the training configuration for the Control-NeRF method, which optimizes a radiance field conditioned on disentangled 3D feature volumes rather than raw 3D coordinates. It solves the problem of enabling explicit scene manipulation by replacing the standard positional encoding of 3D positions with sampled feature vectors. It differs from the standard NeRF baseline [11349-nerf-gt-baseline-training-setup.md] by using a 64-dimensional feature vector as the primary spatial input and omitting positional encoding on that vector, while retaining positional encoding for the viewing direction.
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:** Multi-view images (e.g., LLFF dataset) scaled to $504 \times 378$ resolution; camera poses; a pre-computed volume $V_s$ containing 64-dimensional feature vectors.
+-*   **Outputs:** Rendered images; optimized network parameters for coarse and fine radiance functions.
+ 
+-**Data Structures**
+-*   **Volume $V_s$:** A 3D volume where each point $\mathbf{p} \in \mathbb{R}^3$ stores a 64-dimensional feature vector $\mathbf{v}_s$.
+-*   **Feature Vector $\mathbf{v}_s$:** Obtained via trilinear sampling $S(V_s, \mathbf{p})$. No positional encoding is applied to $\mathbf{v}_s$ [S1].
+-*   **Direction Vector $\mathbf{d}$:** A 3D vector representing the ray direction.
++### Inputs and Outputs
++*   **Input:** A batch of rays $\mathbf{r}$ sampled from multi-view images. Each ray is defined by an origin and a direction vector $\mathbf{d} \in \mathbb{R}^3$.
++*   **Output:** Predicted color $\mathbf{c}$ and volume density $\sigma$ for sampled points along the ray, used to render images via volume rendering.
++*   **Supervision:** Pixel-wise color loss against ground truth images from the LLFF dataset.
+ 
+-**Positional Encoding**
+-Positional encoding is applied only to the direction vector $\mathbf{d}$. For each dimension $p$ of $\mathbf{d}$, the encoding $\gamma(p)$ is defined as [S1]:
+-$$
+-\gamma(p) = [\sin(2^0\pi p), \cos(2^0\pi p), \dots, \sin(2^{L-1}\pi p), \cos(2^{L-1}\pi p)]
+-$$
+-where $L=4$ is the encoding depth [S1]. The encoded direction $\gamma(\mathbf{d})$ is concatenated with $\mathbf{v}_s$ to form the input to the radiance function $F_\Theta$.
++### Data Structures
++*   **Feature Volume ($V_s$):** A 3D grid storing 64-dimensional feature vectors for scene $s$.
++*   **Sampled Feature Vector ($\mathbf{v}_s$):** A 64-dimensional vector obtained by trilinearly sampling $V_s$ at a point $\mathbf{p} \in \mathbb{R}^3$.
++*   **Direction Encoding:** A high-dimensional vector derived from the ray direction $\mathbf{d}$.
+ 
+-**Rendering Formula**
+-The color $C(\mathbf{r})$ for a ray $\mathbf{r}$ is computed using the discretized volume rendering integral [S1]:
+-$$
+-C(\mathbf{r}) = \sum_{i=1}^{N} T_i \sigma_i c_i
+-$$
+-where:
+-*   $N$ is the number of samples per ray.
+-*   $\sigma_i$ is the density predicted by the network at sample $i$.
+-*   $c_i$ is the color predicted by the network at sample $i$.
+-*   $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the accumulated transmittance, with $\delta_j$ being the distance between samples $j$ and $j+1$.
++### Numbered Steps
+ 
+-**Training Procedure**
+-The training uses a two-stage coarse-to-fine sampling strategy [S1]:
+-1.  **Coarse Network ($\hat{C}_c$):** Samples $N_c = 64$ points from evenly spaced bins along the ray length.
+-2.  **Fine Network ($\hat{C}_f$):** Uses the opacity results from the coarse network to sample $N_f = 64$ additional points, focusing on relevant portions of the scene volume (importance sampling) [S1].
+-3.  **Optimization:** The networks are optimized using gradient descent. The batch size is 1024 rays [S1].
++1.  **Ray Sampling:** Sample 1024 rays per batch from the LLFF multi-view image datasets. The images are scaled to a resolution of $504 \times 378$ [S1].
++2.  **Direction Encoding:** For each ray with direction $\mathbf{d}$, compute the positional encoding $\gamma(\mathbf{d})$.
++    *   Let $\mathbf{p}$ be each dimension of $\mathbf{d}$.
++    *   Apply the encoding function with depth $L=4$:
++        $$ \gamma(\mathbf{p}) = [\sin(2^0\pi\mathbf{p}), \cos(2^0\pi\mathbf{p}), \dots, \sin(2^{L-1}\pi\mathbf{p}), \cos(2^{L-1}\pi\mathbf{p})] $$
++    *   Concatenate the encoded dimensions for all 3 dimensions of $\mathbf{d}$ to form the full direction input [S1].
++3.  **Coarse Network Optimization ($\hat{C}_c$):**
++    *   Sample 64 points from evenly spaced bins along the ray length [S1].
++    *   For each point $\mathbf{p}$, retrieve the feature vector $\mathbf{v}_s = S(V_s, \mathbf{p})$ via trilinear sampling [S1].
++    *   Input $(\mathbf{v}_s, \gamma(\mathbf{d}))$ into the coarse network $F_{\Theta_c}$ to predict density $\sigma$ and color $\mathbf{c}$.
++    *   Note: No positional encoding is applied to $\mathbf{v}_s$ [S1].
++4.  **Fine Network Sampling:**
++    *   Use the opacity results (density $\sigma$) from the coarse network to determine the probability of ray termination at each sampled point [S1].
++    *   Sample 64 additional points for the fine network $\hat{C}_f$ from these more relevant portions of the scene volume, following the hierarchical sampling strategy of [23] [S1].
++5.  **Fine Network Optimization ($\hat{C}_f$):**
++    *   For each of the 64 fine points $\mathbf{p}$, retrieve $\mathbf{v}_s = S(V_s, \mathbf{p})$ [S1].
++    *   Input $(\mathbf{v}_s, \gamma(\mathbf{d}))$ into the fine network $F_{\Theta_f}$ to predict density and color [S1].
++6.  **Volume Rendering:**
++    *   Compute the final color $C(\mathbf{r})$ for the ray using the discretized approximation of the volume rendering integral [S1]:
++        $$ C(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
++        where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance, $\sigma_i$ is the density, $\mathbf{c}_i$ is the color, and $\delta_i$ is the distance between samples [S1, G].
++7.  **Loss Calculation:** Compute the loss between the rendered image and the ground truth image. The baseline includes multiscale loss and Total Variation (TV) regularization on the feature volume, as ablation studies show their removal degrades performance significantly (e.g., Avg. PSNR drops from 26.131 to 20.745 without them) [S1].
+ 
+-**Pseudocode**
+-```python
+-def compute_direction_encoding(d, L=4):
+-    """
+-    Computes positional encoding for direction vector d.
+-    d: numpy array of shape (3,)
+-    Returns: numpy array of shape (2 * L * 3,)
+-    """
+-    encodings = []
+-    for dim in d:
+-        for l in range(L):
+-            freq = 2**l * np.pi
+-            encodings.append(np.sin(freq * dim))
+-            encodings.append(np.cos(freq * dim))
+-    return np.array(encodings)
++### Formulas
++*   **Direction Positional Encoding:**
++    $$ \gamma(\mathbf{p}) = [\sin(2^0\pi\mathbf{p}), \cos(2^0\pi\mathbf{p}), \dots, \sin(2^{L-1}\pi\mathbf{p}), \cos(2^{L-1}\pi\mathbf{p})] $$
++    where $\mathbf{p}$ is a dimension of the direction vector $\mathbf{d}$ and $L=4$ [S1].
++*   **Feature Sampling:**
++    $$ \mathbf{v}_s = S(V_s, \mathbf{p}) $$
++    where $S$ is trilinear sampling from volume $V_s$ at point $\mathbf{p}$ [S1].
+ 
+-def render_ray(ray_origin, ray_direction, volume, coarse_net, fine_net, num_coarse=64, num_fine=64):
+-    """
+-    Renders a single ray using coarse-to-fine sampling.
+-    """
+-    # 1. Coarse Sampling
+-    t_coarse = np.linspace(ray_origin.t_near, ray_origin.t_far, num_coarse)
+-    points_coarse = ray_origin + ray_direction * t_coarse
+-    
+-    # Sample features from volume
+-    features_coarse = trilinear_sample(volume, points_coarse) # Shape: (num_coarse, 64)
+-    
+-    # Encode direction
+-    d_enc = compute_direction_encoding(ray_direction)
+-    
+-    # Predict density and color for coarse network
+-    # Input to net: [features_coarse[i], d_enc]
+-    sigma_coarse, color_coarse = coarse_net.predict(features_coarse, d_enc)
+-    
+-    # 2. Fine Sampling (Importance Sampling based on coarse opacity)
+-    # Note: Specific importance sampling algorithm details are referenced from [23]
+-    # Here we assume a placeholder for the sampling logic derived from coarse sigma
+-    t_fine = importance_sample(t_coarse, sigma_coarse, num_fine)
+-    points_fine = ray_origin + ray_direction * t_fine
+-    
+-    features_fine = trilinear_sample(volume, points_fine)
+-    sigma_fine, color_fine = fine_net.predict(features_fine, d_enc)
+-    
+-    # 3. Volume Rendering
+-    # Combine coarse and fine samples
+-    t_all = np.concatenate([t_coarse, t_fine])
+-    sigma_all = np.concatenate([sigma_coarse, sigma_fine])
+-    color_all = np.concatenate([color_coarse, color_fine])
+-    
+-    # Sort by depth
+-    sort_idx = np.argsort(t_all)
+-    t_all = t_all[sort_idx]
+-    sigma_all = sigma_all[sort_idx]
+-    color_all = color_all[sort_idx]
+-    
+-    # Compute transmittance and final color
+-    deltas = np.diff(t_all, prepend=ray_origin.t_near)
+-    alpha = 1.0 - np.exp(-sigma_all * deltas)
+-    transmittance = np.cumprod(np.exp(-sigma_all * deltas), axis=0)
+-    transmittance = np.concatenate([[1.0], transmittance[:-1]])
+-    
+-    contribution = alpha * transmittance * color_all
+-    final_color = np.sum(contribution, axis=0)
+-    
+-    return final_color
+-
+-def train_step(batch_rays, volume, coarse_net, fine_net, optimizer):
+-    """
+-    Performs one training step.
+-    """
+-    optimizer.zero_grad()
+-    
+-    rendered_colors = []
+-    for ray in batch_rays:
+-        color = render_ray(ray, volume, coarse_net, fine_net)
+-        rendered_colors.append(color)
+-    
+-    rendered_colors = np.stack(rendered_colors)
+-    
+-    # Compute photometric loss against ground truth images
+-    loss = mse_loss(rendered_colors, batch_rays.gt_colors)
+-    
+-    loss.backward()
+-    optimizer.step()
+-    
+-    return loss.item()
+-```
+-
+-**Parameters**
+-*   **Encoding Depth ($L$):** 4 [S1].
++### Parameters
++*   **Positional Encoding Depth ($L$):** 4, applied to each dimension of the direction vector $\mathbf{d}$ [S1].
+ *   **Feature Vector Dimension:** 64 [S1].
+-*   **Coarse Samples:** 64 [S1].
+-*   **Fine Samples:** 64 [S1].
+ *   **Batch Size:** 1024 rays [S1].
+ *   **Image Resolution:** $504 \times 378$ [S1].
++*   **Coarse Samples:** 64 points per ray [S1].
++*   **Fine Samples:** 64 points per ray [S1].
++*   **Total Direction Input Size:** $3 \times 2 \times 4 = 24$ parameters (derived from $L=4$ and 3 dimensions) [S1, G].
+ 
+-**Edge Cases and Pitfalls**
+-*   **Volume Sampling:** Trilinear sampling requires the volume to be defined on a grid. Degenerate cases where points fall outside the volume bounds must be handled (e.g., by clamping or returning zero density) [G].
+-*   **Precision:** Mixed-precision training is not explicitly detailed in the source for this specific setup, but is a common practice in similar radiance field optimizations [12972-stylegan2-training-configuration.md].
++### Edge Cases and Pitfalls
++*   **Feature Volume Initialization:** The feature volume $V_s$ must be initialized appropriately (e.g., zeros or small random values) before training begins. [G]
++*   **Trilinear Sampling:** Ensure that the feature volume is padded or handled correctly at boundaries to avoid out-of-bounds access during trilinear sampling. [G]
++*   **Density Bias:** The density values sampled from the network are used to determine ray termination probabilities. Ensure that the network output is appropriately scaled or biased to avoid early ray termination or excessive computation. [G]
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Determined by the number of samples per ray ($N_c + N_f = 128$) and the batch size (1024). The directional encoding adds a constant overhead per ray.
+-*   **Memory Complexity:** Depends on the size of the feature volume $V_s$ and the network parameters. The feature volume is pre-computed, reducing the need to predict spatial features from coordinates.
+-*   **Strengths:** Replaces high-dimensional positional encoding of 3D positions (60 parameters for $L=10$ in standard NeRF) with a fixed 64-dimensional feature vector, potentially simplifying the network's spatial learning task [S1].
+-*   **Limitations:** Requires a pre-computed feature volume, which adds a preprocessing step. The source does not provide specific scaling metrics or hardware benchmarks for this setup.
++
++### Time and Memory Complexity
++*   **Memory:** Dominated by the storage of the 64-dimensional feature volume $V_s$. The size depends on the scene resolution and the 64-channel depth. The networks themselves are relatively small compared to the volume storage.
++*   **Time:** Two-stage sampling (coarse + fine) doubles the number of network evaluations per ray compared to a single-stage approach, but allows for more efficient sampling by focusing on relevant volumes. The directional encoding is computed once per ray.
++
++### Measured Performance
++*   **Dataset:** LLFF multi-view image datasets [S1].
++*   **Metrics:**
++    *   **PSNR:** Average 26.131 (Fern: 25.752, T-Rex: 26.510) [S1].
++    *   **SSIM:** Average 0.864 (Fern: 0.820, T-Rex: 0.907) [S1].
++    *   **LPIPS:** Average 0.195 (Fern: 0.236, T-Rex: 0.153) [S1].
++*   **Ablation Impact:** Removing multiscale loss and TV regularization causes a significant drop in performance (Avg. PSNR: 20.745, Avg. SSIM: 0.698, Avg. LPIPS: 0.345) [S1].
++
++### Strengths and Limitations
++*   **Strengths:** Enables explicit scene manipulation via feature volume editing. Uses a compact 64-dimensional feature vector instead of high-dimensional positional encodings for position, potentially reducing network complexity for the spatial input.
++*   **Limitations:** Requires storing and sampling from a 3D feature volume, which may have higher memory overhead than implicit coordinate-based representations for very large scenes. Performance is sensitive to the inclusion of multiscale loss and TV regularization.
++
++### When to Use
++*   Use this setup when the goal is to train a NeRF-based model that supports explicit 3D feature manipulation and editing, rather than just novel view synthesis.
++*   Use when working with LLFF-style datasets or similar multi-view setups.
++
++### When Not to Use
++*   Do not use if the primary goal is maximum rendering quality without the need for feature manipulation, as standard NeRF with positional encoding on positions may offer a different trade-off.
++*   Do not use if memory constraints are extremely tight and the feature volume size becomes prohibitive.
+ 
+ ## Background
+-This setup is derived from Control-NeRF, which introduces editable feature volumes for scene rendering and manipulation. It modifies the standard NeRF architecture by substituting the positionally encoded 3D position input with a sampled feature vector from a volume, while maintaining positional encoding for view directions [S1]. The training follows the coarse-to-fine sampling strategy popularized by NeRF [23].
++
++### Origin
++Control-NeRF was introduced in the paper "Control-NeRF: Editable Feature Volumes for Scene Rendering and Manipulation" [S1]. The method builds upon the original NeRF architecture [23] and the Visual Object Networks (VON) [S1] by integrating disentangled 3D feature volumes into the radiance field optimization process.
++
++### History and Development
++The method adapts the VON approach, which uses feature volumes for image generation, to the context of neural radiance fields. It replaces the standard positional encoding of 3D positions with sampled feature vectors, allowing for direct manipulation of the scene's appearance and geometry through the feature volume. The training setup follows the hierarchical sampling strategy of the original NeRF [23] but modifies the network input to accommodate the feature vectors.
++
++### Where it is Used
++Control-NeRF is used in applications requiring editable 3D scenes, such as 3D content creation, scene editing, and potentially in virtual/augmented reality where dynamic scene manipulation is needed.
+ 
+ ## Sources
++
+ [S1] Control-NeRF: Editable Feature Volumes for Scene Rendering and Manipulation, https://arxiv.org/abs/2204.10850, fetched 2026-10-26

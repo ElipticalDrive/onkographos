@@ -1,0 +1,87 @@
+--- v013.md
++++ v014.md
+@@ -7,7 +7,7 @@
+ 
+ ## How it works
+-**Inputs and Outputs:** Inputs are rendered images, ground-truth images, scene parameters (density $\sigma$, color $\mathbf{c}$, geometry), and camera poses. Outputs are scalar loss values for backpropagation through the differentiable rendering pipeline [G].
++**Inputs and Outputs:** Inputs are rendered images, ground-truth images, scene parameters (density $\sigma$, color $\mathbf{c}$, geometry), and camera poses [G]. Outputs are scalar loss values for backpropagation through the differentiable rendering pipeline [G].
+ 
+-**Data Structures:** Scene parameters are typically stored in learnable tensors or explicit structures (e.g., voxel grids, point clouds, Gaussian attributes). Camera poses are 4×4 transformation matrices. Intermediate rendering states (transmittance, accumulated weights) are stored per ray for gradient computation [G].
++**Data Structures:** Scene parameters are typically stored in learnable tensors or explicit structures (e.g., voxel grids, point clouds, Gaussian attributes) [G]. Camera poses are 4×4 transformation matrices [G]. Intermediate rendering states (transmittance, accumulated weights) are stored per ray for gradient computation [G].
+ 
+ **Numbered Steps:**
+@@ -34,25 +34,38 @@
+ 
+ ```python
+-def compute_consistency_loss(rendered_img, gt_img, scene_params, camera_poses, 
+-                             depth_map, gt_depth, consensus_target, K=64):
+-    # 1. Render and compute basic photometric residual
+-    residual = rendered_img - gt_img
+-    loss_2d = torch.mean(residual ** 2)
++def compute_consistency_loss(rendered_img, gt_img, radiance_field, consensus_target, K=64):
++    # 1. Baseline 2D photometric loss (MSE)
++    residual_2d = rendered_img - gt_img
++    loss_2d = torch.mean(residual_2d ** 2)
+     
+-    # 2. View-direction regularization (approximate expectation)
++    # 2. View-direction dependence regularization
++    # Approximate inner expectation E_{d'}[c(x, d')] by sampling K directions
+     direction_loss = 0.0
+     for _ in range(K):
+-        d_sample = sample_direction(scene_params)
+-        c_sample = radiance_field(scene_params, d_sample)
++        d_sample = sample_direction()  # [G] Uniform spherical sampling
++        c_sample = radiance_field(d_sample)
+         direction_loss += torch.mean((c_sample - torch.mean(c_sample, dim=0, keepdim=True)) ** 2)
+     direction_loss /= K
+     
+-    # 3. Consensus consistency with stop-gradient
++    # 3. VTC appearance-consistency loss with stop-gradient
++    # Huber penalty on difference between current estimate and fixed consensus target
+     consensus_residual = rendered_img - torch.stop_gradient(consensus_target)
+     loss_consensus = torch.mean(huber_penalty(consensus_residual))
+     
+-    # 4. Aggregate with weights
++    # 4. Aggregate losses
+     total_loss = loss_2d + direction_loss + loss_consensus
+     return total_loss
++
++def huber_penalty(residual, delta=1.0):
++    abs_residual = torch.abs(residual)
++    return torch.where(abs_residual <= delta, 0.5 * residual ** 2, delta * (abs_residual - 0.5 * delta))
++
++def sample_direction():
++    # [G] Standard uniform direction generation on unit sphere
++    u = torch.rand(1)
++    v = torch.rand(1)
++    theta = 2 * torch.pi * u
++    phi = torch.acos(2 * v - 1)
++    return torch.tensor([torch.sin(phi) * torch.cos(theta), torch.sin(phi) * torch.sin(theta), torch.cos(phi)])
+ ```
+ 
+@@ -90,14 +103,14 @@
+ 
+ ### Consistency Filter Function
+-A filtering function applied during training to maintain consistency, removed in ablation experiments [S3]. It sets itself apart by acting as a dynamic quality gate that discards inconsistent samples before loss computation. Choose it when training point-based or coarse-to-fine radiance fields to stabilize early optimization stages.
++A filtering function applied during training to maintain consistency, removed in ablation experiments [S3]. It sets itself apart by acting as a dynamic quality gate that discards inconsistent samples before loss computation [G]. Choose it when training point-based or coarse-to-fine radiance fields to stabilize early optimization stages [G].
+ 
+ ### View Direction Dependence Regularization
+-Regularization to address color inconsistency across rendered views when training on only one view per instance [S4]. It sets itself apart by explicitly penalizing directional variance in the radiance field. Choose it for single-view or limited-view training scenarios where view-dependent appearance artifacts are prominent.
++Regularization to address color inconsistency across rendered views when training on only one view per instance [S4]. It sets itself apart by explicitly penalizing directional variance in the radiance field [G]. Choose it for single-view or limited-view training scenarios where view-dependent appearance artifacts are prominent [G].
+ 
+ ### Photometric Consistency Loss (LNCC)
+-A loss term constraining photometric consistency of surface patches across different views using Normalized Cross Correlation (NCC), considering occlusion by selecting top NCC scores [S5]. It sets itself apart from pixel-wise L1/MSE losses by operating on surface patches and using rank-based occlusion handling. Choose it for SDF-based reconstruction where surface patch constraints are available.
++A loss term constraining photometric consistency of surface patches across different views using Normalized Cross Correlation (NCC), considering occlusion by selecting top NCC scores [S5]. It sets itself apart from pixel-wise L1/MSE losses by operating on surface patches and using rank-based occlusion handling [G]. Choose it for SDF-based reconstruction where surface patch constraints are available [G].
+ 
+ ### VTC Appearance-Consistency Loss
+-Enforces appearance consistency using a precomputed consensus target and a stop-gradient operator to prevent gradient feedback loops [S6, unofficial]. It sets itself apart by separating stable color statistics from instantaneous photometric residuals. Choose it for Gaussian reconstruction in texture-degraded scenes where consensus priors can be reliably estimated.
++Enforces appearance consistency using a precomputed consensus target and a stop-gradient operator to prevent gradient feedback loops [S6, unofficial]. It sets itself apart by separating stable color statistics from instantaneous photometric residuals [G]. Choose it for Gaussian reconstruction in texture-degraded scenes where consensus priors can be reliably estimated [G].
+ 
+ ## Operating characteristics
+@@ -110,5 +123,5 @@
+ **Strengths and Limitations:** Directly minimizes radiance discrepancy, providing strong supervision for color and texture [S1, S4]. Handles occlusion via depth thresholds or NCC ranking [S1, S5]. Resolves density-color ambiguity via opacity normalization or closed-form estimation [S1]. Fails on textureless surfaces, strong specularities, or non-Lambertian materials where photometric assumptions break down [S1, S5].
+ 
+-**When to Use:** Use for standard novel view synthesis, explicit radiance field training, and surface reconstruction where ground-truth images are available. Use visibility-based or adaptive variants for SLAM or ambiguous density fields. Avoid when training on highly dynamic lighting or non-diffuse scenes without appropriate priors.
++**When to Use:** Use for standard novel view synthesis, explicit radiance field training, and surface reconstruction where ground-truth images are available [G]. Use visibility-based or adaptive variants for SLAM or ambiguous density fields [G]. Avoid when training on highly dynamic lighting or non-diffuse scenes without appropriate priors [G].
+ 
+ ## Background

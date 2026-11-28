@@ -1,0 +1,1583 @@
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+1
+MCGS: Multiview Consistency Enhancement for
+Sparse-View 3D Gaussian Radiance Fields
+arXiv:2410.11394v2 [cs.CV] 26 Aug 2025
+Yuru Xiao, Deming Zhai Member, IEEE,, Wenbo Zhao Member, IEEE,, Kui Jiang, Member, IEEE, Junjun
+Jiang, Senior Member, IEEE, Xianming Liu, Member, IEEE
+Abstract—Radiance fields represented by 3D Gaussians excel
+at synthesizing novel views, offering both high training efficiency
+and fast rendering. However, with sparse input views, the lack
+of multi-view consistency constraints results in poorly initialized
+Gaussians and unreliable heuristics for optimization, leading
+to suboptimal performance. Existing methods often incorporate
+depth priors from dense estimation networks but overlook the inherent multi-view consistency in input images. Additionally, they
+rely on dense initialization, which limits the efficiency of scene
+representation. To overcome these challenges, we propose a view
+synthesis framework based on 3D Gaussian Splatting, named
+MCGS, enabling photorealistic scene reconstruction from sparse
+views. The key innovations of MCGS in enhancing multi-view
+consistency are as follows: i) We leverage matching priors from
+a sparse matcher to initialize Gaussians primarily on textured
+regions, while low-texture areas are populated with randomly
+distributed Gaussians. This yields a compact yet sufficient set
+of initial Gaussians. ii) We propose a multi-view consistencyguided progressive pruning strategy to dynamically eliminate
+inconsistent Gaussians. This approach confines their optimization
+to a consistency-constrained space, which ensures robust and
+coherent scene reconstruction. These strategies enhance robustness to sparse views, accelerate rendering, and reduce memory
+consumption, making MCGS a practical framework for 3D
+Gaussian Splatting.
+Index Terms—3DGS, Novel View Synthesis, Sparse-View.
+I. I NTRODUCTION
+N
+OVEL view synthesis (NVS) plays a pivotal role in a
+wide range of real-world applications, such as VR/AR,
+robotics, and autonomous driving. Neural Radiance Fields
+(NeRFs) [1] achieve realistic novel view synthesis from a set
+of dense input views. However, their performance significantly
+drops when only sparse views are available, a challenge known
+as the few-shot neural rendering problem [2]–[4]. Recent
+studies have made significant strides in addressing this issue,
+achieving photorealistic novel view synthesis through various
+techniques such as depth regularization [5], depth distillation
+[6], semantic consistency regularization [7], and frequency
+annealing [3]. Nonetheless, these methods still face challenges,
+including costly training and slow rendering speeds due to
+the limitations of implicit representation. While recent gridbased methods [8], [9] have substantially accelerated training,
+rendering speeds remain a bottleneck.
+3D Gaussian Splatting (3DGS) [10] has employed 3D
+Gaussian primitives to model the radiance field, achieving
+Y. Xiao, D. Zhai, W. Zhao, K. Jiang, J. Jiang, and X. Liu are with the
+School of Computer Science and Technology, Harbin Institute of Technology, Harbin, China, E-mail: xiaoyuru.30@gmail.com; {zhaideming, wbzhao,
+jiangkui, jiangjunjun, csxm}@hit.edu.cn.
+success in high-fidelity and real-time novel view synthesis
+with high training efficiency. However, it still suffers from
+a performance decline when only sparse input views are
+available [11]–[13]. This drop is primarily due to its reliance
+on sufficient initial point cloud and multi-view constraintbased optimization, which are less effective under sparse view
+conditions. The weakened multi-view consistency constraints
+result in unstable training, especially when the initialized point
+cloud is extremely sparse.
+Existing methods to address this limitation rely on strong
+geometric priors, such as depth distillation [12] or depth
+regularization [11], derived from pre-trained dense estimation
+networks. These methods are heavily dependent on the accuracy of the depth estimations and often fail to fully exploit
+the multi-view consistency present in the input images. Furthermore, their use of a dense initialization from a multi-view
+stereo (MVS) algorithm results in inefficient scene representation and high memory costs. Consequently, the potential for
+fully leveraging multi-view consistency and developing a more
+efficient Gaussian initialization and optimization architecture
+remains an open area of research.
+Several approaches have focused on improving Gaussian
+field consistency, particularly in sparse-view conditions. CoRGS [13] introduced a co-pruning strategy to address inconsistencies in Gaussian representations that cannot be resolved
+through standard optimization methods. This approach establishes paired Gaussian fields to identify Gaussians that are
+inaccurately positioned. However, training two parallel fields
+significantly doubles the training time. CoherentGS [14] uses
+optical flow and monodepth priors to create a consistent,
+dense initialization of structured Gaussians, and an implicit
+decoder for smooth reconstruction. However, this pixel-aligned
+representation and dense initialization are inefficient for both
+training and storage, especially with sparse input views. While
+generalizable methods such as PixelSplat [15] and MVSplat
+[16] learn geometry from aggregated multi-view features,
+their performance often struggles with out-of-domain samples.
+Therefore, there’s a strong need for a more efficient and
+robust method that can effectively solve the initialization and
+optimization challenges posed by sparse-view inputs.
+In this paper, we propose novel strategies for initialization
+and optimization to improve multi-view consistency, ensuring
+high rendering speed, short training duration, and low memory
+consumption. We first introduce a sparse initializer that uses
+a sparse matcher and a random filling strategy to efficiently
+create a sufficient scene representation without causing significant disturbances. During optimization, we implement a
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+2
+multi-view consistency-guided progressive pruning strategy.
+This process begins by using a visual foundation model to
+extract general visual features for each Gaussian across all
+input views. We simplify the Gaussians to their central points,
+a technique that has proven effective for both efficient feature
+extraction and precise inconsistency detection. During the
+initial training stage, we compute a prune mask using highlevel general visual features and gradually integrate low-level
+features in subsequent iterations. Our progressive pruning
+strategy targets Gaussians where the fine-grained color consistency constraint is weak and cannot be optimized or pruned
+effectively. This approach shifts the training focus toward the
+geometric entities while mitigating perturbations caused by
+randomly filled Gaussians in empty space, thereby reducing
+“floater” artifacts common in sparse-view scenarios. Together,
+the sparse initializer and pruning strategy enhance geometric
+consistency, contributing to both memory and rendering efficiency. Extensive experiments with the LLFF, Blender, DTU,
+and MipNeRF360 datasets reveal that our method significantly
+improves performance over the vanilla 3DGS architecture in
+sparse-view scenarios, with fewer Gaussian primitives and
+higher rendering speed, making it a practical pipeline for
+sparse-view 3D Gaussian radiance fields.
+Our main contributions are summarized as follows:
+• We propose a novel sparse initializer that generates a
+sufficient yet compact set of initial points. This approach
+enhances the efficiency of Gaussian representations while
+incorporating a robust geometric prior.
+• We propose a multi-view consistency-guided progressive
+pruning strategy to shift the training focus to the geometric entity, leading to enhanced overall consistency.
+• We explore the potential of a visual foundation model
+to enhance Gaussian consistency and develop an efficient pipeline for consistency checking using a simplified
+Gaussian representation.
+• The proposed MCGS serves as a plug-and-play module
+for 3DGS-based architectures that enhances their robustness to view sparsity, while also improving memory and
+rendering efficiency.
+3DGS relies on dense input views. Sparse input views pose
+challenges, as they result in insufficient Gaussian initialization
+from structure-from-motion (SFM) and reduce multi-view
+consistency, leading to geometry distortion and degraded novel
+view quality. Improving 3DGS performance under sparse-view
+conditions remains an open research problem.
+II. R ELATED W ORK
+Radiance Fields. Neural Radiance Fields (NeRFs) [1] have
+emerged as outstanding 3D representation methods for novel
+view synthesis. NeRF employs a large Multi-Layer Perceptron
+(MLP) network to map 3D coordinates to object attributes,
+such as radiance and color. Coupled with volume rendering,
+it produces remarkably photo-realistic novel views. Recent research has focused on improving rendering quality [17], [18],
+enhancing efficiency [19], and increasing robustness to sparse
+views [3]. However, NeRF’s ray-marching process requires
+querying the MLP network for numerous sampling points,
+limiting its rendering speed. A recent alternative, 3D Gaussian
+Splatting (3DGS) [10], represents radiance fields using explicit
+Gaussian primitives and renders scenes through differentiable
+rasterization. This approach offers high-quality reconstruction,
+efficient training, and real-time rendering, making it wellsuited for practical applications. Despite these advantages,
+Novel View Synthesis Using Sparse Views. Many methods
+have been proposed for NeRF to achieve realistic novel view
+synthesis from sparse input views. Some methods integrate
+additional 3D supervision, such as sparse point clouds [5] or
+estimated depth maps [6], [20], to regularize the geometry. In
+addition to utilizing extra 3D information, some approaches
+apply random patch-based semantic consistency constraints
+[7], [21] or geometry regularization [2]. Depth distillation
+[6] is a skillful technique for extracting depth priors from a
+depth estimation network, though it suffers from smoothness
+inherited from imprecisely estimated depth. GeCoNeRF [22]
+introduces multi-view consistency regularization for few-shot
+novel view synthesis. Generative methods [15], [16], [23]–
+[26] learn geometric priors from large multi-view datasets.
+These generalizable approaches aim to learn common patterns
+in scene geometry. While such methods have achieved strong
+performance on various multi-view datasets (e.g., DTU [27]
+or indoor datasets like RealEstate10K [28]), their generalization to complex real-world scenes—such as LLFF [29]
+or MipNeRF360 [18]—remains limited. When applied to
+new data domains, they typically require costly adaptation to
+maintain performance. In this work, we focus on developing
+a robust approach to address underfitted geometry in sparseview settings—without relying on costly adaptation.
+Another set of methods [30], [31] performs geometry regularization on estimated correspondences extracted from dense
+matchers. However, the training efficiency and rendering speed
+of these methods are still limited by their slow backbones.
+Although recent methods have shifted focus to designing
+strategies for grid-based backbones [8], they still face challenges with low rendering speed and a trade-off between
+training efficiency and rendering quality.
+Recent methods [11]–[14] have been developed to enhance
+the performance of 3DGS when using sparse view input.
+FSGS [12] leverages depth distillation to refine the geometry
+of a densely initialized Gaussian field derived from MVS,
+achieving notable improvements in sparse-view scenarios. CoherentGS [14] introduces a structured Gaussian representation
+that enables regularization directly in the 2D image space.
+CoR-GS [13] proposes a co-pruning strategy to remove inconsistent Gaussians and a co-regularization mechanism to correct
+geometric errors, establishing a new paradigm for pruning
+and refinement in sparse-view 3DGS. Distinct from previous
+methods, our approach is the first to leverage robust general
+visual features from a large visual foundation model to enhance multi-view consistency. Instead of relying on inefficient
+dense initialization or time-consuming parallel training, our
+method improves robustness to view sparsity while achieving
+fast training and efficient scene representation.
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+3
+Initialization
+MVC-guided
+Progressive
+DINO V2
+Gradient Flow
+Control
+Pruning
+Visual
+Features
+Sparse
+Matcher
+Sparse
+Initializer
+Outlier
+Filter
+Operation Flow
+Adaptive Density
+d
+Differentiable Tile
+Projection
+ˆ
+Rasterizer
+c
+Correspondences
+Gaussians
+ˆ
+Cameras
+MVC-guided Progressive Pruning
+Sparse Initializer
+Random Fill
+Ray1
+Matcher Initialized
+Random Filled
+Pruned
+Occupied
+Prune
+Ray2
+Correspondence
+( Bmax − Bmin ) / r
+Bmax − Bmin
+fi
+fj
+fiμ f μj M (t )
+fˆiμ fˆ μj
+Sim(fˆiμ , fˆ jμ )   (t )
+Prune
+Mask
+Sim(fˆiμ , fˆ jμ )   (t )
+(μ, )
+t
+Surface
+Fig. 1: An Overview of The Complete Framework. Our proposed pipeline includes a sparse initializer to provide a sparse
+yet sufficient initial point cloud and a multi-view consistency-guided progressive pruning strategy to exclude noisy points from
+the initializer and enhance the overall multi-view consistency during training.
+III. M ETHOD
+A. Preliminaries: 3D Gaussian Splatting
+B. Sparse Initializer
+Representation and Rendering. 3D Gaussian Splatting
+(3DGS) [32] represents a 3D scene as a set of anisotropic
+Gaussian primitives. Each primitive is defined by differentiable
+parameters: a position vector µ ∈ R3 , a rotation quaternion
+q ∈ R4 , and a scaling vector s ∈ R3 . These parameters
+collectively define the primitive’s distribution in 3D space:
+1
+−1
+T
+G(x) = e− 2 (x−µ) Σ
+(x−µ)
+,
+(1)
+3×3
+where the covariance matrix Σ ∈ R
+can be computed
+from the scale vector s and the rotation quaternion q. These
+Gaussians are then rendered with their differentiable attributes,
+such as opacity α ∈ R and color, which is represented by
+spherical harmonic coefficients.
+3DGS utilizes the volume rendering function to render the
+Gaussians in order of their depth as
+c(p) =
+X
+ci α̂i
+i−1
+Y
+(1 − α̂j ),
+(2)
+j=1
+i∈N
+where p is the overlapped pixel, ci is the color of the i-th
+Gaussian Gi (x) computed from spherical harmonic coefficients, and α̂i can be evaluated from the projected 2D Gaussian
+G2D
+i (p):
+α̂i = αi G2D
+(3)
+i (p).
+The pixel-wise depth d can also be computed using the volume
+rendering function:
+d(p) =
+X
+i∈N
+di α̂i
+i−1
+Y
+(1 − α̂j ),
+(4)
+j=1
+where di = ||µi − o||2 is the depth of the i-th Gaussian to the
+camera center o.
+Current 3DGS techniques [10] typically use point clouds
+derived from COLMAP for initializing 3D Gaussian representations. However, the point clouds generated by COLMAP
+are often sparse, leading to suboptimal performance, especially
+in scenarios with limited input views. To address this, some
+approaches incorporate multi-view stereo (MVS) methods to
+produce a denser point cloud during initialization [12], [13].
+Despite this, the initial Gaussian primitives tend to exhibit
+high-frequency characteristics, introducing high-frequency artifacts [3] and resulting in inefficient scene representation.
+In contrast, we utilize the end-to-end sparse matching network LightGlue [33], pre-trained on large-scale multi-view
+datasets, to obtain initial correspondences ⟨rs , rt ⟩N for each
+image Is and its paired view It , where ri = (oi , di ), i ∈
+{s, t}, represents the ray with origin oi and direction di . We
+employ a widely-adopted triangulation method to reconstruct
+a sparse point cloud from 2D correspondences, following
+the approach similar to CorresNeRF [30]. We compute the
+midpoint pmid and its color cmid for each correspondence
+t
+t
+pair ⟨rs , rt ⟩ as: pmid = xs +x
+and cmid = cs +c
+2
+2 , where xs
+and xt are the nearest points on the two rays, and cs and ct
+are their respective colors. This results in an initialized point
+cloud ⟨pmid , cmid ⟩N . Optionally, for datasets with significant
+symmetry that may cause visual ambiguity, we apply an outlier
+filter following CorresNeRF [30].
+Random Filling. The sparse feature matching process encounters substantial challenges in low-texture areas or regions with repetitive structures [33], [34], often resulting
+in insufficiently initialized Gaussians. CorresNeRF [30] enhances correspondence quality through image augmentation
+and subsequently applies an interpolation-based expansion
+strategy to extend the spatial support of each correspondence.
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+4
+However, it still struggles to generate sufficient initial points
+in low-texture regions. To mitigate this issue, we propose a
+random filling strategy. Initially, we randomly initialize N
+points within the bounding box defined by (Bmin , Bmax ).
+To prevent interference with points initialized by the sparse
+matching process, we exclude any randomly generated points
+that fall within voxels already occupied by the points derived
+from the sparse matcher. The voxel size is calculated as
+Bmax −Bmin
+, where r represents the predefined resolution. This
+r
+random filling approach enhances the overall completeness
+of the initialized geometry while minimizing disruption to
+points containing multi-view consistency priors. Following the
+methodology proposed in 3DGS [10], we transform the fully
+initialized point cloud—including both matcher-initialized and
+randomly filled points—into a set of initial 3D Gaussians.
+However, some randomly filled points may reside in empty
+spaces with minimal contribution to geometric reconstruction,
+which can result in suboptimal artifacts. These extraneous
+points are subsequently addressed through a newly designed
+pruning strategy.
+where z is the distance to the camera origin along the z
+axis in the camera coordinate system. We query the feature
+fij ∈ RK at position µji from the feature map fi using
+bilinear interpolation. For each Gaussian, we compute the
+j
+cosine similarity s between features ⟨fm
+, fnj ⟩ queried from
+f j ·f j
+j
+pairs of images, with m ̸= n, as smn = ||f j ||m ||fnj || . We
+m 2
+n 2
+apply the mask M to prune Gaussians as
+(
+1, if sjmn < τ, ∀m, n ∈ [N ], m ̸= n
+,
+(6)
+Mj =
+0, otherwise
+C. Multi-view Consistency Guided Progressive Pruning
+Current 3DGS methods [10], [35] often utilize multi-view
+consistency constraints based on color to optimize and densify
+Gaussians. Such fine-grained constraints struggle with inconsistent Gaussians, particularly in low-texture regions where
+spatial similarity in color leads to ambiguity, especially when
+input views are sparse. Recently, general features extracted
+from DINOv2 [36], embedded with global context, have
+demonstrated robust performance in identifying slightly inconsistent structures. Despite this, integrating these visual features
+effectively into the 3DGS to handle inconsistent Gaussians
+remains a challenge. The recent NeRF-based method, NeRFOn-the-Go [37], leverages priors from DINO to distinguish
+transient object features across different views. However, it
+relies on strong contrastive loss patterns between dynamic
+distractors and the static background in the training views. In
+sparse-view settings, such high-contrast patterns rarely emerge
+due to overfitting to the limited training data.
+To overcome these challenges, we propose a multi-view
+consistency-guided (MVC-guided) progressive pruning strategy, utilizing the powerful DINOv2 visual encoder to exclude
+inconsistent Gaussians. We begin by extracting visual features
+{fi , i = 1, ..., N } from N input images {Ii , i = 1, ..., N }.
+Each feature fi ∈ RK×H×W contains K-dimensional representations, concatenated from components of dimensions
+{Kl , l = 1, ..., L} extracted from various levels l of DINOv2.
+We upsample the features to the pixel scale and then extract
+per-view features using projected Gaussians. To improve the
+efficiency and precision of this process, we simplify the
+Gaussians to their central points. This simplification is crucial
+for our multi-view consistency assessment, and we provide a
+detailed analysis of its impact in Sec. IV-G. For Gaussians with
+central positions {µj , j = 1, ..., M }, we project the 3D points
+onto the input images using intrinsic and extrinsic parameters
+Ki and (Ri , Ti ):
+1
+(5)
+µji = Ki (Ri µj + Ti ),
+z
+where [N ] represents the set of integers from 1 to the number
+of input views N , and Mj is the j-th element in M and the
+j-th Gaussian. Directly applying fixed levels of features and
+a threshold τ leads to insufficient Gaussians during the initial
+training phase. As a result, we relax the constraint and design a
+progressive pruning strategy by applying masks to the features
+to exclude low-level features and gradually incorporate these
+low-level features during training. Additionally, we increase
+the threshold τ from a small initial value. The mask represented by Eq. 6 can be adapted as
+(
+1, if sjmn (t) < τ (t), ∀m, n ∈ [N ], m ̸= n
+Mj =
+. (7)
+0, otherwise
+We apply the mask M̂(t) to the features to compute similarity
+with a progressively increased pruning step t ∈ [T ]:
+sjmn (t) =
+with
+j
+) · (M̂(t)fnj )
+(M̂(t)fm
+j
+||M̂(t)fm
+||2 ||M̂(t)fnj ||2
+
+PL−t
+
+1, k > l=1 Kl , t < L
+M̂k (t) = 1, t ≥ L
+,
+
+
+0, otherwise
+(8)
+(9)
+where M̂k (t) is the k-th element in the mask M̂(t), and
+τ (t) is set as a hyperparameter. The progressive pruning
+strategy excludes Gaussians in empty space that have low
+contributions to the rendered results, thereby focusing training
+and densification more on Gaussians on the surface.
+D. Edge-Aware Depth Regularization
+The proposed method improves the multi-view consistency
+of Gaussian representations by utilizing general visual features. However, the newly introduced pruning strategy encounters challenges with geometric voids (see Fig. 2). These voids
+arise from either an insufficient number of initial Gaussians
+or pruning errors based on opacity, especially in low-texture
+regions. To address these issues, we build on the techniques
+presented in [38], [39], incorporating edge-aware depth regularization (EADR) to correct geometric distortions. After
+the final MVC-guided progressive pruning step T , we apply
+EADR to enhance depth continuity and minimize artifacts
+along object boundaries.
+
+X
+1
+Ld = ωd
+|∂x Di,j |e−β|∂x Ii,j | + |∂y Di,j |e−β|∂y Ii,j | ,
+N
+i,j
+(10)
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+5
+and align with community standards, we report PSNR, SSIM,
+and LPIPS metrics, with results averaged across all scenes.
+To comprehensively evaluate our method against alternative generalizable approaches (e.g., MVSplat [16]), we
+implemented our model on three additional complex, realworld datasets: RealEstate10K (RE10K) [28], ACID [40], and
+DL3DV [41]. We conducted these experiments at a resolution
+of 256x256, following MVSplat’s original settings.
+Fig. 2: We present the RGB and depth results generated by
+our method, comparing scenarios with and without edge-aware
+depth regularization (EADR). Geometric voids that cannot
+be resolved by our pruning strategy are effectively addressed
+using the EADR approach.
+where Di,j represents the (i, j)-th pixel of the depth map D,
+and Ii,j denotes the corresponding pixel in the input image.
+The parameter N is the total number of pixels, and β—fixed
+at 2 throughout all experiments—acts as a hyperparameter
+controlling edge sharpness in the depth map. During the initial
+training phase, the weight ωd is set to 0. After the final pruning
+step, it is increased to 1.
+(
+0, i < (T − 1)istep
+,
+(11)
+ωd =
+1, otherwise
+where i is the current iteration count, T denotes the total
+number of pruning steps, and istep specifies the number of
+iterations between consecutive pruning steps. The refinement
+process aims to minimize geometry errors in low-texture
+regions while smoothing the previously established geometry.
+IV. E XPERIMENTS
+A. Setups
+Datasets and Metrics. We evaluate our method on four
+benchmark datasets: the synthetic Blender dataset [1], the
+forward-facing LLFF dataset [29], the DTU dataset [27],
+and the MipNeRF360 dataset [18]. For the Blender dataset,
+we follow the protocols established by FreeNeRF [3] and
+DietNeRF [7]. We train our model on a small subset of views
+(e.g., 4 or 8 views, with specific IDs: 26, 86, 2, 55, 75, 93, 16,
+and 73) and evaluate its performance on 25 test images that
+are uniformly sampled from the test set, all downsampled by a
+factor of 2. On the LLFF dataset, we adhere to the procedure
+outlined in FreeNeRF. We evaluate on every eighth image
+and train our model using the first N images (e.g., 3 or 6)
+from the remaining views. All images in this experiment are
+downsampled by a factor of 8. For the MipNeRF360 dataset,
+we select either 12 or 24 training views by following the same
+training split procedure used for the LLFF dataset. Finally,
+for the DTU dataset, we again follow the experimental setup
+of FreeNeRF. We conduct experiments with 3 and 6 input
+views and apply an 8× downsampling rate. Evaluations are
+performed on images masked with ground truth object masks
+to focus on the object of interest. To ensure a fair comparison
+Implementation Details. We implement MCGS using the
+3DGS base architecture [10]. The initialized point cloud is
+obtained through our sparse initializer, which relies solely on
+the training views. We utilize calibrated ground truth poses
+in the datasets, adhering to community standards. We set the
+total number of iterations to 10,000, with the position learning
+rate decreasing from 0.0016 to 0.000016. The densification
+interval and the opacity reset interval are set to 300 and
+1,000, respectively. The density gradient threshold is fixed
+at 0.0005. For our proposed method, we configure the total
+pruning steps T to 4, with the pruning step increasing by
+1 every 3,000 iterations for the LLFF or Blender dataset,
+respectively. For feature similarity computation, we extract
+features from DINO-ResNet-50 [36] with feature dimensions
+Kl ∈ {64, 64, 128, 256}. The pruning threshold τ (t) is represented by the lists [0.7, 0.75, 0.8, 0.85] and [0.6, 0.65, 0.7, 0.8]
+for the LLFF and Blender datasets, respectively. For the
+Blender dataset, we apply an outlier filter to remove inconsistent correspondences according to CorresNeRF [30] and use
+background occlusion regularization following FreeNeRF [3].
+All experiments are conducted on a single NVIDIA 3090 GPU.
+B. Evaluation on the LLFF Dataset
+We present comprehensive qualitative and quantitative evaluations on the LLFF dataset, as illustrated in Fig. 3 and Tab. I.
+Qualitatively, our method significantly outperforms the 3DGS
+baseline [10]. While the base 3DGS architecture suffers from
+noticeable distortion, our approach produces highly realistic
+renderings with fine-grained details. Compared to DNGaussian
+[11]—a few-shot novel view synthesis (NVS) baseline derived
+from 3DGS—our method avoids the blurred outputs caused
+by its coarse-grained depth regularization (which relies on
+monocular depth estimation). Crucially, we preserve highfrequency details without dependence on pre-trained depth
+networks. Even against the recent CoR-GS [13], our renderings
+exhibit superior accuracy and visual fidelity.
+TABLE I: Quantitative Comparison on LLFF. The best and
+second-best quantitative results are marked in red and grey,
+respectively.
+3 Views
+6 Views
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+RegNeRF [2]
+19.08 0.587
+0.336
+23.10 0.760
+0.206
+FreeNeRF [3]
+19.63 0.612
+0.308
+23.73 0.779
+0.195
+SparseNeRF [6]
+19.86 0.624
+0.328
+SPARF [31]
+20.20 0.630
+0.327
+23.35 0.740
+0.200
+3DGS [10]
+19.09 0.645
+0.242
+23.89 0.815
+0.148
+DNGaussian [11] 20.02 0.682
+0.229
+22.83 0.777
+0.182
+FSGS [12]
+20.37 0.696
+0.205
+24.10 0.818
+0.127
+Ours
+20.33 0.699
+0.226
+24.28 0.823
+0.139
+Method
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+6
+Fig. 3: Qualitative Comparison on LLFF. We present novel views of the scenes “room” and “fern” (first and second rows)
+rendered by our method as well as the baselines: 3DGS, DNGaussian, and CoR-GS. Our method achieves the most realistic
+novel views, especially in the areas highlighted by red boxes. Please enlarge the PDF to see more details.
+The quantitative results further verify the effectiveness of
+our method. Our method surpasses the base 3DGS by 1.2
+dB with our setting. Both qualitative and quantitative results
+indicate that our method significantly enhances the multi-view
+consistency of 3D Gaussians.
+C. Evaluation on the Blender Dataset
+Fig. 4 and Tab. II show the qualitative and quantitative
+results, respectively. For qualitative results, we compare our
+method with the base 3DGS [10], the well-known baseline
+FreeNeRF [3], and DNGaussian [11]. Our method shows
+comparable results to FreeNeRF and DNGaussian, while
+performing better in areas highlighted by red boxes. For
+quantitative results, our method surpasses the base architecture
+3DGS by 1.3 dB and DNGaussian by 0.1 dB in PSNR when
+using 8 input views. For extremely sparse settings with only
+4 input views, our method achieves an even more significant
+improvement of over 2 dB. These qualitative and quantitative
+results further verify the effectiveness of our method on the
+panoramic dataset.
+TABLE II: Quantitative Comparison on Blender. The best
+and second-best quantitative results are marked in red and grey,
+respectively.
+8 Views
+4 Views
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+DietNeRF [7]
+23.15 0.866
+0.109
+15.42 0.730
+0.314
+InfoNeRF [4]
+22.01 0.852
+0.133
+18.44 0.792
+0.223
+MixNeRF [21]
+23.84 0.878
+0.103
+18.99 0.807
+0.199
+FreeNeRF [3]
+24.26 0.883
+0.098
+3DGS [10]
+22.77 0.865
+0.112
+17.68 0.772
+0.201
+DNGaussian [11] 23.90 0.880
+0.089
+17.78 0.770
+0.186
+Ours
+24.06 0.887
+0.089
+19.85 0.823
+0.147
+Method
+Fig. 4: Qualitative Comparison on Blender Using 8 Input Views. We present novel views and zoomed-in areas
+(highlighted by red boxes) rendered by our method and the
+baselines.
+D. Evaluation on the DTU Dataset
+Fig. 5 and Tab. III present the qualitative and quantitative
+results on the DTU dataset, respectively. For quantitative
+results, our method shows significant improvement compared
+to the base 3DGS architecture [10] (surpassing 3DGS by 3
+dB in terms of PSNR). Moreover, our method outperforms
+the recent 3DGS-based few-shot novel view synthesis method,
+DNGaussian [11], in a 3-view setting. It achieves a more
+significant improvement of nearly 1.5 dB over DNGaussian
+in a 6-view setting. The qualitative results further confirm
+the improvement, with our method producing more detailed
+rendered results with less distortion, as highlighted in the blue
+box in Fig. 5.
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+Fig. 5: Qualitative Comparison on DTU. We show novel
+views rendered by our method and baseline methods in a 3view setting. The detailed results, highlighted in blue boxes,
+demonstrate significant improvement.
+TABLE III: Quantitative Comparison on DTU. The best and
+second-best quantitative results are marked in red and grey,
+respectively.
+3 Views
+6 Views
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+PixelNeRF ft [23] 18.95 0.710
+0.269
+20.56 0.753
+0.223
+MVSNeRF ft [42] 18.54 0.769
+0.197
+20.49 0.822
+0.155
+DietNeRF [7]
+11.85 0.633
+0.314
+20.63 0.778
+0.201
+18.89 0.745
+0.190
+22.20 0.841
+0.117
+RegNeRF [2]
+FreeNeRF [3]
+19.92 0.787
+0.182
+23.25 0.844
+0.137
+3DGS [10]
+14.92 0.698
+0.248
+21.05 0.844
+0.141
+DNGaussian [11]
+18.91 0.790
+0.176
+22.93 0.872
+0.129
+19.02 0.810
+0.154
+24.25 0.917
+0.084
+Ours
+Method
+E. Evaluation on the MipNeRF360 Dataset
+To further assess the effectiveness of our approach in largescale, real-world scenarios, we conducted additional experiments on the MipNeRF360 dataset [18]. The quantitative
+results are summarized in Tab. IV, while the qualitative comparison is illustrated in Fig. 6. These quantitative evaluations
+show that our method delivers substantial improvements over
+the original 3DGS baseline [10]. Moreover, our performance
+is comparable to that of the recent FSGS method [12]. As
+shown in Fig. 6, the qualitative results further demonstrate the
+advantages of our method, particularly in zoomed-in regions
+where finer details are more accurately preserved.
+TABLE IV: Quantitative Comparison on MipNeRF360. The
+best and second-best quantitative results are marked in red and
+grey, respectively.
+12 views
+24 views
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+3DGS [10] 18.52 0.523
+0.415
+22.77 0.696
+0.290
+FSGS [12] 19.18 0.552
+0.367
+23.38 0.732
+0.238
+Ours
+19.36 0.554
+0.389
+23.39 0.735
+0.278
+Method
+F. Comparison with Generalizable Methods
+Generalizable methods [15], [16], [23]–[26] for 3D reconstruction and novel view synthesis, which rely on feedforward pipelines, have shown impressive performance on indomain datasets. These approaches learn common geometric and appearance patterns from extensive datasets. While
+recent methods like PixelSplat [15] and MVSplat [16] use
+cross-view-aware features to simplify geometry learning, their
+7
+performance suffers significantly when applied to data with a
+substantial domain gap from the training data. This limitation
+restricts their use in real-world applications. To address this,
+we propose a more robust, regularization-based method designed for under-constrained, per-scene optimization of 3DGS
+with sparse input views. We demonstrate our method’s stability
+and robustness by comparing it against the state-of-the-art
+generalizable method, MVSplat, across four diverse datasets:
+• RealEstate10K (RE10K) and ACID: We utilized small
+subsets of these in-domain datasets, which consisted of
+38 and 13 scenes, respectively. These subsets were split
+by MVSplat, and we followed its protocols for selecting
+input and novel views.
+• DL3DV: We performed experiments on a subset of 11
+calibrated scenes, which were split by the official DL3DV.
+For training, we used the first and last frames from the
+initial 40 frames. Three test views were then uniformly
+sampled from the frames in between.
+• LLFF: We selected one sample every four frames from
+the LLFF dataset. The start and end frames were designated as the training views, and the three intermediate
+frames were used for testing.
+Tab. V and Fig. 7 present the quantitative and qualitative
+comparisons of our method with the generalizable method,
+MVSplat, and the 3DGS baseline. The quantitative results
+show that while MVSplat surpasses our method on its specifically trained in-domain datasets (RE10K and ACID), our
+approach yields more stable results on out-of-domain datasets,
+such as DL3DV and LLFF. Specifically, our method demonstrates a 2 dB PSNR improvement on the DL3DV dataset and
+a 4 dB improvement on the LLFF dataset over MVSplat. These
+findings are supported by the qualitative results, which underscore the stability and robustness of our method. Notably, the
+feed-forward MVSplat method introduces significant distortion
+and blur on the LLFF and DL3DV datasets, whereas our
+method produces significantly more accurate reconstructions
+and realistic renderings.
+TABLE V: Quantitative Comparison with Generalizable
+Methods. We conduct experiments on two in-domain datasets
+and two out-of-domain datasets.
+In Domain
+RE10k
+ACID
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+3DGS [10]
+20.14 0.683 0.234
+22.96 0.701 0.210
+MVSplat [16] 26.02 0.874 0.119
+27.83 0.871 0.123
+Ours
+23.64 0.829 0.170
+25.78 0.834 0.185
+Out of Domain
+DL3DV
+LLFF
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+3DGS [10]
+15.34 0.399 0.403
+16.18 0.444 0.349
+MVSplat [16] 18.03 0.499 0.365
+16.70 0.462 0.391
+Ours
+20.08 0.667 0.259
+20.73 0.690 0.251
+G. Method Analysis & Ablation Study
+1) Efficiency Assessment: In this study, we propose a novel
+sparse initializer and a pruning strategy to enhance multiview consistency during initialization and optimization. Our
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+8
+Fig. 6: Qualitative Comparison on MipNeRF360. Our proposed method demonstrates superior rendering performance
+compared to the baseline approaches (3DGS and FSGS), as evidenced by the novel view synthesis results in large-scale
+real-world scenarios. The comparative visualization clearly validates the effectiveness of our approach.
+method not only significantly improves the overall consistency
+of the field but also represents the scene more efficiently with
+fewer Gaussians, leading to higher memory efficiency and
+faster rendering speeds. Tab. VI presents the assessment of
+training time (Time), FPS, number of Gaussians (#GS(k)),
+and visual quantitative results (PSNR, SSIM, LPIPS). The
+results indicate that our method achieves the best visual
+performance with far fewer Gaussians and offers faster training
+(7× faster than FSGS [12]) and rendering speeds compared
+to the FSGS method. Notably, our method surpasses the base
+3DGS architecture [10], implemented with our setting, by 1.2
+dB in PSNR and achieves nearly 1.5× faster rendering speed
+with minimal training efficiency loss (less than 20 s), which
+is due to the additional pruning step.
+TABLE VI: Efficiency Comparison. Our method achieves
+efficient training, real-time rendering, and optimal results with
+a minimal number of Gaussian primitives. The best and
+second-best quantitative results are marked in red and grey,
+respectively.
+Method
+FreeNeRF [3]
+3DGS [10]
+FSGS [12]
+CoRGS [13]
+DNGaussian [11]
+Ours
+Time↓ FPS↑ #GS(k) PSNR↑ SSIM↑ LPIPS↓
+3h
+0.11
+19.63 0.612 0.308
+1.4 min 183
+47
+19.09 0.645 0.242
+12 min 228
+194
+20.37 0.696 0.205
+5 min
+81
+20.24 0.705 0.201
+3.5 min 240
+78
+20.02 0.682 0.229
+1.7 min 277
+36
+20.33 0.699 0.226
+TABLE VII: Ablation of Various Initialization Methods.
+The best and second-best quantitative results are marked in
+red and grey, respectively.
+Method
+3DGS w/Random
+MCGS w/Random
+3DGS w/SFM
+MCGS w/SFM
+3DGS w/MVS
+MCGS w/MVS
+3DGS w/SI
+MCGS w/SI
+FPS↑
+250
+260
+183
+194
+165
+246
+232
+277
+#GS(k)
+65
+33
+47
+39
+50
+47
+43
+36
+PSNR↑
+16.41
+19.29
+19.09
+20.07
+20.04
+20.42
+19.88
+20.33
+SSIM↑
+0.471
+0.638
+0.645
+0.691
+0.694
+0.708
+0.677
+0.699
+LPIPS↓
+0.361
+0.279
+0.242
+0.230
+0.209
+0.216
+0.221
+0.226
+2) Ablation of Different Initializer: To thoroughly assess
+the effectiveness of our sparse initializer (SI) and the pruning
+strategy, we replace the initializer with the commonly used
+SFM and MVS algorithms performed by COLMAP software
+for extremely sparse and dense initialization. We then evaluate
+our method (MCGS) compared to the base 3DGS architecture using these various initializers. The evaluation results
+are shown in Tab. VII. We found that our sparse initializer
+significantly outperforms the COLMAP-based sparse SFM
+initializer on both 3DGS and our method (surpassing 0.8 dB
+and 0.25 dB in terms of PSNR, respectively), highlighting
+the advantages of our initializer. Notably, while COLMAPbased MVS initialization shows only slightly higher quantitative results, it suffers from memory inefficiency and slower
+rendering speeds. In contrast, the sparse initializer proposed
+by our method achieves a good balance between performance
+and efficiency. We further perform experiments with random
+initialization following DNGaussian [11], without relying on
+any geometric prior. This study demonstrates that our method
+maintains significant effectiveness even under extremely poor
+initial conditions, outperforming 3DGS by 3 dB in terms
+of PSNR. Additionally, the quantitative results demonstrate
+the effectiveness of our MVC-guided pruning strategy across
+various initialization methods, with improvements of 3 dB, 0.9
+dB, 0.4 dB, and 0.5 dB in PSNR compared to 3DGS alone.
+3) Considering the Volume Assumption: In this paper, we
+sample features from the visual foundation model by simply
+projecting the centers of Gaussians onto the image. This
+approach disregards the volume assumption of 3D Gaussians
+and primarily discriminates against Gaussians with positional
+inconsistencies. Intuitively, incorporating the volume assumption—accounting for inconsistencies in position, orientation,
+and scale—should yield more accurate discrimination. However, we find that enforcing the volume assumption during
+optimization, particularly in the early training stages, actually
+reduces discrimination ability and introduces inefficiencies.
+We conduct experiments to validate this observation and
+demonstrate the rationale behind our simplified approach.
+In addition to projecting the center of each Gaussian onto
+the imaging plane, as shown in Eq. 5, we also compute the
+corresponding 2D covariance matrix Σ2D in the image plane,
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+9
+Fig. 7: Qualitative Comparison with Generalizable Methods.
+as defined by the following equation:
+Σ2D = JWΣ3D WT JT ,
+(12)
+3D
+Fig. 8: We present the calculation process of the feature
+similarity extraction considering the volume assumption.
+where W denotes the view transformation matrix, Σ
+represents the covariance matrix of a 3D Gaussian in Euclidean
+space, and J is the Jacobian matrix of the affine approximation
+of the projective transformation. Given the projected mean µji
+and the 2D covariance matrix Σji of the j-th Gaussian, we can
+compute the corresponding 2D Gaussian map as follows:
+j T
+j −1
+j
+1
+1
+q
+gij (x) =
+e− 2 (x−µi ) (Σi ) (x−µi ) ,
+(13)
+2π |Σji |
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+10
+where x ∈ Z2 denote the pixel coordinates. Instead of directly
+using the sampled feature fij ∈ RK (where i ∈ {m, n}) from
+Eq. 8, we replace it with an accumulated feature representation
+f̃ij ∈ RK , defined as:
+TABLE VIII: Quantitative Evaluation With or Without
+Considering Volume Assumption (VA).
+f̃ij =
+Σx∈A gij (x) · fi (x)
+Σx∈A gij (x)
+,
+(b) it = 3000 & w/t VA.
+(c) it = 6000 & w/o VA.
+(d) it = 6000 & w/t VA.
+(e) it = 9000 & w/o VA.
+Train↓
+5h
+1.7 min
+PSNR↑
+20.28
+20.33
+SSIM↑
+0.696
+0.699
+LPIPS↓
+0.220
+0.226
+(14)
+where fi (x) denote the feature map of the ith image. Since
+performing feature accumulation over the entire image would
+be computationally inefficient and redundant, we instead
+compute the radius rij of the projected 2D Gaussian and
+perform accumulation only
+√ within this region A. The radius
+is determined as rij = λmax , where λmax is the largest
+eigenvalue of the 2D covariance matrix Σji .
+To validate the effectiveness of our method under the
+volume assumption, we compute features using Eq. 14, which
+incorporates volumetric information. The complete computational procedure is illustrated in Fig. 8. Nevertheless, for
+practical implementation, we adopt the simplified approach
+presented in Eq. 8, motivated by two key considerations:
+(a) it = 3000 & w/o VA.
+Method
+Ours w/t VA
+Ours w/o VA
+(f) it = 9000 & w/t VA.
+Fig. 9: We show the maximum feature similarity distribution
+in each iteration step it with or without considering volume
+assumption (VA).
+Discrimination Ability. In the initial training phase, where
+both positional and volumetric parameters of the Gaussians
+remain suboptimal, incorporating volumetric considerations
+can impair the discriminative power of similarity metrics. This
+degradation arises because large Gaussian volumes, prevalent
+at this early stage, yield excessively broad projections onto the
+image plane, thereby causing significant blurring of distinctive
+features. Under these conditions, the Gaussian integral behaves
+analogously to a pooling operation applied to the feature map,
+effectively averaging out fine-grained details. Consequently,
+features that should exhibit clear distinctions based on their
+unique projection positions become excessively homogenized,
+diminishing their discriminability due to this smoothing effect.
+We analyze the distribution of maximum similarity scores
+for Gaussians projected onto image pairs across different
+pruning steps (denoted by iteration counts it), comparing
+results with and without the volume assumption (VA). As
+illustrated in Fig. 9, incorporating volumetric considerations
+leads to two notable effects: (1) an increase in the overall
+average similarity E and (2) a concentration of the distribution.
+These effects collectively reduce the discriminative power
+of the similarity metric, making optimal threshold selection
+more challenging for pruning. Consequently, this reduced
+discrimination capability may lead to the erroneous pruning
+of useful Gaussians, ultimately degrading model performance.
+Our comprehensive evaluation includes both qualitative and
+quantitative assessments (Fig. 10 and Tab. VIII, respectively).
+The quantitative analysis reveals that similarity computation
+using integrated features (Eq. 14) results in marginal decreases
+in both PSNR and SSIM metrics. Qualitative results corroborate these findings, demonstrating that early-stage incorporation of the volume assumption can introduce distortions in
+novel view synthesis.
+Fig. 10: Qualitative Evaluation With or Without Considering Volume Assumption (VA).
+Instead, as shown in Fig. 9 (a), (c), and (e), focusing solely
+on positional inconsistency results in a broader distribution of
+similarity values, indicating a stronger discriminative capability. Notably, when only position inconsistency is considered,
+the distribution of maximum similarity values exhibits a clear
+watershed. We observe that the average similarity E across all
+Gaussians lies near the bottom of this valley, which facilitates
+threshold selection. As training progresses, this watershed
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+11
+Fig. 11: Visualization of Correspondences Extracted by Different Methods.
+gradually shifts upward, suggesting that the Gaussian representations become increasingly consistent through optimization.
+Efficiency. During early training stages, under-optimized
+Gaussians with large ellipsoid scales impose significant computational overhead when performing the integration in Eq. 14.
+As training progresses, the growing number of Gaussian points
+further exacerbates the processing burden. We quantitatively
+compare training times with and without the volume assumption in Tab. VIII. Our results demonstrate that incorporating
+the volume assumption leads to substantially longer training
+times while paradoxically yielding inferior performance—an
+observation that further justifies our simplified approach.
+4) Analysis of τ (t): In this work, we formulate the pruning
+threshold τ (t) as a dynamic parameter that evolves with
+the pruning step t. While this threshold could be treated as
+a fixed dataset-specific hyperparameter, we propose a more
+robust adaptive selection strategy motivated by our analysis
+of the maximum similarity distribution in Fig. 9. Our key
+observation reveals a distinct bimodal distribution when considering only positional inconsistency, with the local minimum
+(valley) between modes approximately coinciding with the
+mean of maximum similarity values. Based on this finding,
+we implement an adaptive thresholding scheme where τ (t) is
+set to the average similarity value at each pruning step:
+τ = Ej (maxmn (sjmn )).
+TABLE IX: Quantitative Analysis of the Threshold Parameter τ Selection.
+Strategy
+Constant
+Various
+Adaptive
+τ (t)
+[0.65, 0.65, 0.65, 0.65]
+[0.70, 0.70, 0.70, 0.70]
+[0.75, 0.75, 0.75, 0.75]
+[0.80, 0.80, 0.80, 0.80]
+[0.85, 0.85, 0.85, 0.85]
+[0.90, 0.90, 0.90, 0.90]
+[0.70, 0.75, 0.80, 0.85]
+-
+PSNR↑
+19.99
+20.03
+20.19
+20.12
+20.18
+19.55
+20.33
+20.26
+SSIM↑
+0.687
+0.692
+0.694
+0.695
+0.692
+0.634
+0.699
+0.699
+LPIPS↓
+0.221
+0.219
+0.218
+0.222
+0.234
+0.304
+0.226
+0.223
+(15)
+Furthermore, to account for the increasing scene consistency
+during optimization, we design the pruning threshold τ (t) to
+grow monotonically with the pruning step t. We systematically
+evaluate three thresholding strategies: (1) a constant threshold,
+(2) manually scheduled values, and (3) our adaptive approach
+based on statistical analysis (Tab. IX and Fig. 12). Our
+experiments reveal that excessively large constant thresholds
+(e.g., τ = 0.9) produce overly smoothed renderings due
+to excessive pruning of detail-preserving Gaussians, while
+overly conservative thresholds fail to effectively eliminate
+floaters in empty regions. Notably, our adaptive thresholding
+scheme (Eq. 15) achieves comparable performance to carefully
+tuned manual schedules, while offering significant practical
+advantages: it eliminates the need for laborious parameter
+tuning with only marginal performance trade-offs, making it
+particularly suitable for real-world deployment.
+Fig. 12: Qualitative Analysis of the Threshold Parameter
+τ Selection.
+5) Analysis of r: In Sec. III-B, we introduce a constrained
+random filling strategy for low-texture regions. To prevent
+interference with matcher-initialized points, we partition the
+space into voxels of fixed resolution r and only populate
+unoccupied voxels. This resolution parameter balances two
+competing factors: (1) minimizing perturbation to existing
+points and (2) maximizing filled point density. Through ablation studies (Tab. X), we evaluate grid resolutions ranging
+from r = 16 to r = 128. Our results demonstrate a clear
+optimal range for r, with performance metrics peaking at
+intermediate values and gradually degrading as r deviates from
+this optimum. Based on these findings, we fix r = 32 for all
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+12
+TABLE X: Quantitative Analysis of the Resolution Parameter r Selection.
+r
+4
+8
+16
+32
+64
+128
+nrandom
+730
+780
+916
+970
+994
+1000
+PSNR↑
+20.26
+20.26
+20.22
+20.33
+20.36
+20.25
+SSIM↑
+0.701
+0.702
+0.697
+0.699
+0.703
+0.699
+LPIPS↓
+0.223
+0.223
+0.225
+0.226
+0.223
+0.224
+TABLE XI: Quantitative Comparison of Our Method and
+3DGS Using Different Feature Matching Strategies.
+Method
+3DGS w/t Dust3R [43]
+3DGS w/t RoMa [44]
+3DGS w/t LightGlue [33]
+Ours w/t Dust3R [43]
+Ours w/t RoMa [44]
+Ours w/t LightGlue [33]
+FPS↑
+275
+210
+219
+248
+263
+277
+#GS(k)↓
+129
+54
+44
+46
+40
+36
+PSNR↑
+17.62
+20.51
+19.61
+19.43
+20.62
+20.33
+SSIM↑
+0.569
+0.726
+0.667
+0.658
+0.728
+0.699
+experiments, as this value consistently achieves good trade-off
+between scene coverage and reconstruction quality.
+6) Ablation of Various Matchers: In this paper, we introduce a sparse initializer that combines a sparse matching
+network with a random filling strategy, designed to strike
+a balance between rendering efficiency and reconstruction
+quality. Although our framework employs a specific matching
+network, it remains flexible and can be adapted to other methods—including both sparse and dense approaches—such as
+DUST3R [43] and RoMa [44]. To thoroughly assess the generalizability and effectiveness of our approach, we conducted
+experiments using multiple matching techniques. Quantitative
+results are reported in Tab. XI, with visualizations of the
+extracted correspondences shown in Figure 11. Our analysis
+indicates that correspondences derived from DUST3R’s opensource implementation are often incomplete, especially when
+compared to those generated by networks explicitly trained for
+correspondence learning—such as the sparse matcher LightGlue [33] and the dense matcher RoMa [44]. This incompleteness results in weak geometric priors across many regions,
+significantly degrading Gaussian reconstruction quality during
+3DGS initialization, as evidenced in the first row of Tab. XI.
+In contrast, our method’s random filling strategy, coupled
+with MVC-guided progressive pruning, effectively mitigates
+this issue, yielding a 2 dB improvement in PSNR. This
+demonstrates the robustness and effectiveness of our approach.
+Additionally, we performed experiments using the state-ofthe-art dense matcher RoMa [44]. While integrating RoMa
+yields the highest qualitative performance due to its rich and
+dense geometric priors, this improvement comes at the expense
+of slower rendering speeds and a significantly larger number
+of Gaussians—compared to sparse matchers that operate with
+a more compact set of initial Gaussians.
+H. Input Sparsity Analysis
+To comprehensively analyze our method’s dependency on
+input sparsity, we conducted additional experiments on the
+LLFF dataset. We varied the number of input views, using
+3, 6, 9, 12, and 20 views, and compared our method against
+Fig. 13: Qualitative Analysis of Input Sparsity’s Impact
+the baseline 3DGS and FSGS approaches. As shown in Fig.
+14, our method consistently outperforms 3DGS. While our
+performance is comparable to FSGS in sparse-view settings (3
+to 12 views), our method achieves superior results with denser
+input (20 views). This demonstrates our method’s robustness
+across various input conditions. The qualitative analysis in Fig.
+13 further shows that our method outperforms 3DGS in all
+settings, producing more accurate renderings with fewer visual
+artifacts. With more input views, the artifacts significantly
+decreased. This confirms that a sparse number of views has a
+significant negative impact.
+(a) PSNR
+(b) SSIM
+Fig. 14: We assess the performance of our method, 3DGS, and
+FSGS across varying numbers of input views to evaluate their
+robustness to view sparsity.
+1) Ablation Study: We apply our method on the LLFF
+dataset using three input views. The qualitative and quantitative results of the ablation study are presented in Fig.
+15 and Tab. XII. The quantitative analysis shows that each
+component of our method—sparse initializer (A), random
+filling (B), multi-view consistency-guided progressive pruning
+(C), and edge-aware depth regularization (D)—contributes to
+improved performance. Specifically, the sparse initializer (A)
+enhances the PSNR by 0.6 dB compared to the baseline 3DGS
+with the COLMAP initializer. The random filling strategy (B)
+further refines the initial geometry, yielding an additional 0.2
+dB improvement. Multi-view consistency-guided progressive
+pruning (C) removes inconsistent Gaussians, resulting in a 0.4
+dB increase. The photometric and depth results in Fig. 15
+visually demonstrate the impact of each component. Although
+the edge-aware depth regularization (D) provides only minor
+quantitative gains, it smooths depth maps, fills geometric
+voids, and stabilizes the overall pipeline.
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+Fig. 15: Qualitative Ablation on LLFF. We present a qualitative ablation on the LLFF dataset with 3 input views.
+TABLE XII: Quantitative Ablation on LLFF.
+3DGS [10]
+Ours
+A
+×
+✓
+✓
+✓
+✓
+B
+×
+×
+✓
+✓
+✓
+C
+×
+×
+×
+✓
+✓
+D
+×
+×
+×
+×
+✓
+PSNR↑
+19.09
+19.61
+19.88
+20.29
+20.33
+SSIM↑
+0.645
+0.667
+0.677
+0.699
+0.699
+LPIPS↓
+0.242
+0.228
+0.221
+0.226
+0.226
+V. C ONCLUSION
+In this paper, we propose two novel strategies for incorporating multi-view consistency priors into 3DGS during both the
+initialization and optimization processes. For initialization, we
+introduce a sparse initializer that combines a pre-trained sparse
+matching network with a random filling strategy to provide
+sparse yet sufficient initial Gaussians. For optimization, we
+propose a multi-view consistency-guided progressive pruning
+strategy to enhance the consistency of the Gaussian field and
+eliminate Gaussians in empty spaces. Our method achieves
+state-of-the-art performance while offering faster rendering
+speeds and minimal memory costs.
+R EFERENCES
+[1] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
+and R. Ng, “Nerf: Representing scenes as neural radiance fields for view
+synthesis,” Communications of the ACM, vol. 65, no. 1, pp. 99–106,
+2021.
+[2] M. Niemeyer, J. T. Barron, B. Mildenhall, M. S. Sajjadi, A. Geiger,
+and N. Radwan, “Regnerf: Regularizing neural radiance fields for
+view synthesis from sparse inputs,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2022, pp.
+5480–5490.
+[3] J. Yang, M. Pavone, and Y. Wang, “Freenerf: Improving few-shot neural
+rendering with free frequency regularization,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2023, pp. 8254–8263.
+[4] M. Kim, S. Seo, and B. Han, “Infonerf: Ray entropy minimization for
+few-shot neural volume rendering,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2022, pp.
+12 912–12 921.
+[5] K. Deng, A. Liu, J.-Y. Zhu, and D. Ramanan, “Depth-supervised
+nerf: Fewer views and faster training for free,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2022, pp. 12 882–12 891.
+[6] G. Wang, Z. Chen, C. C. Loy, and Z. Liu, “Sparsenerf: Distilling
+depth ranking for few-shot novel view synthesis,” in Proceedings of
+the IEEE/CVF International Conference on Computer Vision, 2023, pp.
+9065–9076.
+[7] A. Jain, M. Tancik, and P. Abbeel, “Putting nerf on a diet: Semantically
+consistent few-shot view synthesis,” in Proceedings of the IEEE/CVF
+International Conference on Computer Vision, 2021, pp. 5885–5894.
+13
+[8] J. Sun, Z. Zhang, J. Chen, G. Li, B. Ji, L. Zhao, and W. Xing,
+“Vgos: voxel grid optimization for view synthesis from sparse inputs,”
+in Proceedings of the Thirty-Second International Joint Conference on
+Artificial Intelligence, 2023, pp. 1414–1422.
+[9] Y. Xiao, D. Zhai, W. Zhao, K. Jiang, J. Jiang, and X. Liu, “Spatial
+annealing for efficient few-shot neural rendering,” in Proceedings of the
+AAAI Conference on Artificial Intelligence, vol. 39, no. 8, 2025, pp.
+8691–8699.
+[10] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3d gaussian
+splatting for real-time radiance field rendering,” ACM Transactions on
+Graphics, vol. 42, no. 4, pp. 1–14, 2023.
+[11] J. Li, J. Zhang, X. Bai, J. Zheng, X. Ning, J. Zhou, and L. Gu,
+“Dngaussian: Optimizing sparse-view 3d gaussian radiance fields with
+global-local depth normalization,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2024, pp.
+20 775–20 785.
+[12] Z. Zhu, Z. Fan, Y. Jiang, and Z. Wang, “Fsgs: Real-time few-shot view
+synthesis using gaussian splatting,” in European conference on computer
+vision. Springer, 2024, pp. 145–163.
+[13] J. Zhang, J. Li, X. Yu, L. Huang, L. Gu, J. Zheng, and X. Bai, “Cor-gs:
+Sparse-view 3d gaussian splatting via co-regularization,” arXiv preprint
+arXiv:2405.12110, 2024.
+[14] A. Paliwal, W. Ye, J. Xiong, D. Kotovenko, R. Ranjan, V. Chandra, and
+N. K. Kalantari, “Coherentgs: Sparse novel view synthesis with coherent
+3d gaussians,” in European Conference on Computer Vision. Springer,
+2024, pp. 19–37.
+[15] D. Charatan, S. L. Li, A. Tagliasacchi, and V. Sitzmann, “pixelsplat:
+3d gaussian splats from image pairs for scalable generalizable 3d reconstruction,” in Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, 2024, pp. 19 457–19 467.
+[16] Y. Chen, H. Xu, C. Zheng, B. Zhuang, M. Pollefeys, A. Geiger, T.J. Cham, and J. Cai, “Mvsplat: Efficient 3d gaussian splatting from
+sparse multi-view images,” in European Conference on Computer Vision.
+Springer, 2024, pp. 370–386.
+[17] J. T. Barron, B. Mildenhall, M. Tancik, P. Hedman, R. Martin-Brualla,
+and P. P. Srinivasan, “Mip-nerf: A multiscale representation for antialiasing neural radiance fields,” in Proceedings of the IEEE/CVF International Conference on Computer Vision, 2021, pp. 5855–5864.
+[18] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman,
+“Mip-nerf 360: Unbounded anti-aliased neural radiance fields,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 2022, pp. 5470–5479.
+[19] T. Müller, A. Evans, C. Schied, and A. Keller, “Instant neural graphics
+primitives with a multiresolution hash encoding,” ACM transactions on
+graphics (TOG), vol. 41, no. 4, pp. 1–15, 2022.
+[20] B. Roessle, J. T. Barron, B. Mildenhall, P. P. Srinivasan, and M. Nießner,
+“Dense depth priors for neural radiance fields from sparse input views,”
+in Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2022, pp. 12 892–12 901.
+[21] S. Seo, D. Han, Y. Chang, and N. Kwak, “Mixnerf: Modeling a ray
+with mixture density for novel view synthesis from sparse inputs,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2023, pp. 20 659–20 668.
+[22] M.-S. Kwak, J. Song, and S. Kim, “Geconerf: few-shot neural radiance
+fields via geometric consistency,” in Proceedings of the 40th International Conference on Machine Learning, 2023, pp. 18 023–18 036.
+[23] A. Yu, V. Ye, M. Tancik, and A. Kanazawa, “pixelnerf: Neural radiance
+fields from one or few images,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2021, pp.
+4578–4587.
+[24] A. Chen, Z. Xu, F. Zhao, X. Zhang, F. Xiang, J. Yu, and H. Su, “Mvsnerf:
+Fast generalizable radiance field reconstruction from multi-view stereo,”
+in Proceedings of the IEEE/CVF international conference on computer
+vision, 2021, pp. 14 124–14 133.
+[25] X. Fei, W. Zheng, Y. Duan, W. Zhan, M. Tomizuka, K. Keutzer, and
+J. Lu, “Pixelgaussian: Generalizable 3d gaussian reconstruction from
+arbitrary views,” arXiv preprint arXiv:2410.18979, 2024.
+[26] T. Liu, G. Wang, S. Hu, L. Shen, X. Ye, Y. Zang, Z. Cao, W. Li,
+and Z. Liu, “Mvsgaussian: Fast generalizable gaussian splatting reconstruction from multi-view stereo,” in European Conference on Computer
+Vision. Springer, 2024, pp. 37–53.
+[27] R. Jensen, A. Dahl, G. Vogiatzis, E. Tola, and H. Aanæs, “Large scale
+multi-view stereopsis evaluation,” in Proceedings of the IEEE conference
+on computer vision and pattern recognition, 2014, pp. 406–413.
+[28] T. Zhou, R. Tucker, J. Flynn, G. Fyffe, and N. Snavely, “Stereo
+magnification: Learning view synthesis using multiplane images,” arXiv
+preprint arXiv:1805.09817, 2018.
+IEEE TRANSACTIONS ON PATTERN ANALYSIS AND MACHINE INTELLIGENCE
+14
+[29] B. Mildenhall, P. P. Srinivasan, R. Ortiz-Cayon, N. K. Kalantari, R. Ramamoorthi, R. Ng, and A. Kar, “Local light field fusion: Practical view
+synthesis with prescriptive sampling guidelines,” ACM Transactions on
+Graphics (TOG), vol. 38, no. 4, pp. 1–14, 2019.
+[30] Y. Lao, X. Xu, X. Liu, H. Zhao et al., “Corresnerf: Image correspondence priors for neural radiance fields,” Advances in Neural Information
+Processing Systems, vol. 36, 2024.
+[31] P. Truong, M.-J. Rakotosaona, F. Manhardt, and F. Tombari, “Sparf:
+Neural radiance fields from sparse and noisy poses,” in Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2023, pp. 4190–4200.
+[32] J. R. Shue, E. R. Chan, R. Po, Z. Ankner, J. Wu, and G. Wetzstein,
+“3d neural field generation using triplane diffusion,” in Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2023, pp. 20 875–20 886.
+[33] P. Lindenberger, P.-E. Sarlin, and M. Pollefeys, “Lightglue: Local feature
+matching at light speed,” in Proceedings of the IEEE/CVF International
+Conference on Computer Vision, 2023, pp. 17 627–17 638.
+[34] P.-E. Sarlin, D. DeTone, T. Malisiewicz, and A. Rabinovich, “Superglue:
+Learning feature matching with graph neural networks,” in Proceedings
+of the IEEE/CVF conference on computer vision and pattern recognition,
+2020, pp. 4938–4947.
+[35] Z. Yu, A. Chen, B. Huang, T. Sattler, and A. Geiger, “Mip-splatting:
+Alias-free 3d gaussian splatting,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2024, pp.
+19 447–19 456.
+[36] M. Oquab, T. Darcet, T. Moutakanni, H. Vo, M. Szafraniec, V. Khalidov,
+P. Fernandez, D. Haziza, F. Massa, A. El-Nouby et al., “Dinov2:
+Learning robust visual features without supervision,” arXiv preprint
+arXiv:2304.07193, 2023.
+[37] W. Ren, Z. Zhu, B. Sun, J. Chen, M. Pollefeys, and S. Peng, “Nerf
+on-the-go: Exploiting uncertainty for distractor-free nerfs in the wild,”
+in Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2024, pp. 8931–8940.
+[38] P. Heise, S. Klose, B. Jensen, and A. Knoll, “Pm-huber: Patchmatch with
+huber regularization for stereo matching,” in Proceedings of the IEEE
+International Conference on Computer Vision, 2013, pp. 2360–2367.
+[39] M. Comi, A. Tonioni, M. Yang, J. Tremblay, V. Blukis, Y. Lin, N. F.
+Lepora, and L. Aitchison, “Snap-it, tap-it, splat-it: Tactile-informed
+3d gaussian splatting for reconstructing challenging surfaces,” arXiv
+preprint arXiv:2403.20275, 2024.
+[40] A. Liu, R. Tucker, V. Jampani, A. Makadia, N. Snavely, and
+A. Kanazawa, “Infinite nature: Perpetual view generation of natural
+scenes from a single image,” in Proceedings of the IEEE/CVF International Conference on Computer Vision, 2021, pp. 14 458–14 467.
+[41] L. Ling, Y. Sheng, Z. Tu, W. Zhao, C. Xin, K. Wan, L. Yu, Q. Guo,
+Z. Yu, Y. Lu et al., “Dl3dv-10k: A large-scale scene dataset for deep
+learning-based 3d vision,” in Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, 2024, pp. 22 160–22 169.
+[42] A. Chen, Z. Xu, F. Zhao, X. Zhang, F. Xiang, J. Yu, and H. Su, “Mvsnerf:
+Fast generalizable radiance field reconstruction from multi-view stereo,”
+in Proceedings of the IEEE/CVF International Conference on Computer
+Vision, 2021, pp. 14 124–14 133.
+[43] S. Wang, V. Leroy, Y. Cabon, B. Chidlovskii, and J. Revaud, “Dust3r:
+Geometric 3d vision made easy,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2024, pp.
+20 697–20 709.
+[44] J. Edstedt, Q. Sun, G. Bökman, M. Wadenbäck, and M. Felsberg, “Roma:
+Robust dense feature matching,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2024, pp.
+19 790–19 800.
+conference and journal publications, including top IEEE journals, such as
+IEEE Transactions on Image Processing, IEEE Transactions on Circuits and
+Systems for Video Technology, IEEE Transactions on Information Forensics
+and Security, IEEE Transactions on Multimedia, IEEE Transactions on Geoscience and Remote Sensing; and top conferences, such as CVPR, IJCAI and
+DCC. He is the receipt of IEEE ICME 2016 Best Student Paper Award.
+Yuru Xiao received M.Eng. degree in 2022 from
+Harbin Institute of Technology, China. He is now
+pursuing a Ph.D. degree at the School of Computer
+Science and Technology, Harbin Institute of Technology. His current research focuses on 3D vision,
+computer graphics and neural rendering.
+B IOGRAPHY S ECTION
+Xianming Liu (Member, IEEE) received the BS,
+MS, and PhD degrees in computer science from
+HIT, in 2006, 2008 and 2012, respectively. He is a
+professor with the School of Computer Science and
+Technology, Harbin Institute of Technology (HIT),
+Harbin, China. In 2011, he spent half a year with the
+Department of Electrical and Computer Engineering,
+McMaster University, Canada, as a visiting student,
+where he then worked as a post-doctoral fellow from
+2012 to 2013. He worked as a project researcher with
+the National Institute of Informatics (NII), Tokyo,
+Japan, from 2014 to 2017. He has published more than 60 international
+Deming Zhai (Member, IEEE) received the B.S.,
+M.S., and Ph.D. (Hons.) degrees in computer science from the Harbin Institute of Technology (HIT),
+Harbin, China, in 2007, 2009, and 2014, respectively. She is currently an Associate Professor with
+the Department of Computer Science, HIT. In 2011,
+she was with The Hong Kong University of Science
+and Technology, as a Visiting Student. In 2012,
+she was with the GRASP Laboratory, University
+of Pennsylvania, PA, USA, as a Visiting Scholar.
+From August 2014 to April 2016, she was a Project
+Researcher with the National Institute of Informatics (NII), Tokyo, Japan.
+Wenbo Zhao received the B.S., M.S., and Ph.D.
+degrees from Harbin Institute of Technology (HIT),
+Harbin, China, in 2012, 2014, and 2020, respectively. He is currently a Post-Doctor at Peng Cheng
+Laboratory, Shenzhen, China. His current research
+interests are mesh denoising, point cloud compression, and deep learning.
+Kui Jiang (Member, IEEE) received the Ph.D. degree from the School of Computer Science, Wuhan
+University, Wuhan, China, in 2022. He is currently
+an Associate Professor with the School of Computer Science and Technology, Harbin Institute of
+Technology, Harbin, China. His research interests include image/video processing and computer vision.
+He was the recipient of the 2023 CSIG Excellent
+Doctoral Dissertation Award and 2022 ACM Wuhan
+Doctoral Dissertation Award.
+Junjun Jiang (Senior Member, IEEE) received the
+B.S. degree in Information and Computing Science
+from Huaqiao University, Quanzhou, China, in 2009,
+and the Ph.D. degree in Computer Science and
+Technology from Wuhan University, Wuhan, China,
+in 2014. He is currently a Professor with the School
+of Computer Science and Technology, Harbin Institute of Technology, Harbin, China. He received the
+2016 China Computer Federation (CCF) Outstanding Doctoral Dissertation Award and 2015 ACM
+Wuhan Doctoral Dissertation Award, His research
+interests include image processing and computer vision.

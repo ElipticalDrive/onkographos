@@ -1,0 +1,170 @@
+# Bilateral Grid Optimization
+
+Also called: Bilagrid, Bilateral Grid Processing, Bilateral Grid Training, Learnable Bilateral Grid
+
+## Overview
+Bilateral Grid Optimization is a post-processing technique that refines rendered images or depth maps by optimizing a learnable bilateral grid [S1, S2, unofficial]. It operates by lifting the 2D image into a higher-dimensional space, applying a linear filter, and projecting back, allowing for spatially-adaptive smoothing and feature enhancement [S1, S2, unofficial]. It is distinguished from sibling methods like [PlenOctree Optimization](1291-plenoctree-optimization.md) and [Sparse Voxel Grid Optimization](2568-sparse-voxel-grid-optimization.md) by its reliance on a differentiable, grid-based parameterization of the refinement operator rather than direct optimization of scene geometry or radiance fields [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A rendered image or depth map $\mathbf{I}$ (or $\mathbf{D}$), and a bilateral grid $\mathbf{G}$ of dimensions $H \times W \times D_f$ (spatial height/width and feature dimension) [S1, S2, unofficial].
+- **Output:** A refined image $\hat{\mathbf{I}}$ and the optimized grid parameters $\mathbf{G}$ [S1, S2, unofficial].
+
+**Data Structures:**
+The bilateral grid $\mathbf{G}$ is a 3D tensor. The spatial dimensions correspond to the image resolution, and the feature dimension(s) correspond to auxiliary data such as depth or normal vectors [S1, S2, unofficial]. The grid is typically initialized with identity or zeros and optimized via gradient descent [S1, S2, unofficial].
+
+**Numbered Steps:**
+1. **Initialization:** Initialize the bilateral grid $\mathbf{G}$ with shape $(grid\_X, grid\_Y, grid\_W)$ [S1, S2, unofficial].
+2. **Lifting:** For each pixel $(u, v)$ in the input image with feature value $f$ (e.g., depth), map the pixel coordinates and feature value to a location in the bilateral grid [S1, S2, unofficial].
+3. **Slicing:** Extract the relevant weights from the grid $\mathbf{G}$ at the mapped location [S1, S2, unofficial].
+4. **Filtering:** Apply a linear combination of the grid weights to the input pixel value to produce the refined output [S1, S2, unofficial].
+5. **Loss Computation:** Compute the total variation (TV) loss on the grid $\mathbf{G}$ to enforce smoothness [S1, unofficial].
+6. **Optimization:** Update the grid parameters $\mathbf{G}$ using an optimizer (e.g., Adam) with a specific learning rate schedule [S1, S2, unofficial].
+
+**Formulas:**
+The refined color $\hat{C}$ for a pixel is computed by slicing the bilateral grid [S1, S2, unofficial]:
+$$
+\hat{C} = \text{Slice}(\mathbf{G}, u, v, f)
+$$
+where $u, v$ are spatial coordinates and $f$ is the feature value (e.g., depth) [S1, S2, unofficial].
+
+The total variation loss is defined as [S1, unofficial]:
+$$
+\mathcal{L}_{TV} = \sum_{i,j,k} \left( |G_{i+1,j,k} - G_{i,j,k}| + |G_{i,j+1,k} - G_{i,j,k}| + |G_{i,j,k+1} - G_{i,j,k}| \right)
+$$
+The total loss is [S1, unofficial]:
+$$
+\mathcal{L} = \mathcal{L}_{TV} \times \text{tv\_loss\_weight}
+$$
+
+**Parameters:**
+- $grid\_X, grid\_Y$: Spatial dimensions, default 16 [S1, unofficial].
+- $grid\_W$: Feature dimension, default 8 [S1, unofficial].
+- $lr\_init$: Initial learning rate, default $2 \times 10^{-3}$ [S1, unofficial].
+- $lr\_final\_factor$: Final LR factor, default 0.01 [S1, unofficial].
+- $max\_steps$: Maximum optimization steps, default 30,000 [S1, unofficial].
+- $tv\_loss\_weight$: TV loss weight, default 10 [S1, unofficial].
+- $fused$: Boolean flag for CUDA kernel usage [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Use fused CUDA kernels for performance if available [S1, unofficial].
+- **Boundaries:** Handle grid boundaries carefully during slicing [S1, S2, unofficial].
+- **Degenerate Input:** Ensure feature values (e.g., depth) are normalized to fit within the grid's feature dimension range [S1, S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class BilateralGridOptimizer:
+    def __init__(self, grid_shape, lr_init, max_steps, tv_loss_weight, fused):
+        self.grid_shape = grid_shape
+        self.lr_init = lr_init
+        self.max_steps = max_steps
+        self.tv_loss_weight = tv_loss_weight
+        self.fused = fused
+        
+        # Initialize grid parameters [G]
+        self.grid = nn.Parameter(torch.zeros(grid_shape))
+        
+        # Setup optimizer [S1, S2, unofficial]
+        self.optimizer = torch.optim.Adam([self.grid], lr=lr_init)
+        
+        # Setup learning rate scheduler [S2, unofficial]
+        self.scheduler = torch.optim.lr_scheduler.ChainedScheduler([
+            torch.optim.lr_scheduler.LinearLR(
+                self.optimizer, start_factor=0.01, total_iters=1000
+            ),
+            torch.optim.lr_scheduler.ExponentialLR(
+                self.optimizer, gamma=0.01 ** (1.0 / max_steps)
+            )
+        ])
+
+    def slice(self, u, v, f):
+        """
+        Slice the bilateral grid at spatial coordinates (u, v) and feature value f.
+        Uses fused kernel if available, else internal Python implementation [S1, unofficial].
+        """
+        if self.fused:
+            from fused_bilagrid import slice
+            return slice(self.grid, u, v, f)
+        else:
+            from internal.utils.lib_bilagrid import slice
+            return slice(self.grid, u, v, f)
+
+    def total_variation_loss(self):
+        """Compute total variation loss on the grid [S1, unofficial]."""
+        if self.fused:
+            from fused_bilagrid import total_variation_loss
+            return total_variation_loss(self.grid)
+        else:
+            # Internal implementation [S1, unofficial]
+            from internal.utils.lib_bilagrid import total_variation_loss
+            return total_variation_loss(self.grid)
+
+    def optimize_step(self, u, v, f, target):
+        """
+        Perform one optimization step.
+        u, v: Spatial coordinates (H, W)
+        f: Feature values (H, W)
+        target: Target values (H, W) for reconstruction loss (if any) [G]
+        """
+        self.optimizer.zero_grad()
+        
+        # Slice grid to get refined output [S1, S2, unofficial]
+        refined = self.slice(u, v, f)
+        
+        # Compute reconstruction loss [G]
+        # Note: Sources mention TV loss primarily, but reconstruction is implied for refinement
+        loss_recon = torch.mean((refined - target) ** 2)
+        
+        # Compute TV loss [S1, unofficial]
+        loss_tv = self.total_variation_loss()
+        
+        # Total loss [S1, unofficial]
+        loss = loss_recon + self.tv_loss_weight * loss_tv
+        
+        loss.backward()
+        self.optimizer.step()
+        self.scheduler.step()
+
+    def get_refined_image(self, u, v, f):
+        """Get the refined image after optimization."""
+        return self.slice(u, v, f)
+```
+
+## Subtopics
+
+### PlenOctree Optimization
+Optimizes octree structures for radiance fields. Choose when hierarchical spatial representation is needed for large scenes [1291-plenoctree-optimization.md].
+
+### Sparse Voxel Grid Optimization
+Optimizes sparse voxel grids for efficient memory usage. Choose when memory is a constraint [2568-sparse-voxel-grid-optimization.md].
+
+### Multi-scale Neural Field Reconstruction
+Uses neural fields at multiple scales. Choose when high-frequency details are critical [7437-multi-scale-neural-field-reconstruction.md].
+
+### Plenoxels
+Uses spherical harmonics in voxel grids. Choose when compact representation with view-dependent effects is needed [7440-plenoxels.md].
+
+### PlenOctree Compression with Modified Training and Sparsity
+Compresses PlenOctrees. Choose when storage efficiency is paramount [11443-plenoctree-compression-with-modified-training-and-sparsity.md].
+
+## Operating characteristics
+- **Time Complexity:** Depends on grid size and number of optimization steps. Typically $O(H \cdot W \cdot D_f \cdot \text{steps})$ [S1, S2, unofficial].
+- **Memory Complexity:** $O(H \cdot W \cdot D_f)$ for the grid [S1, S2, unofficial].
+- **Measured Performance:** Optimized for 30,000 steps with a batch size-dependent learning rate [S1, S2, unofficial].
+- **Scaling:** Scales with grid dimensions; larger grids allow for more complex refinements but increase memory and compute [S1, S2, unofficial].
+- **Strengths:** Differentiable, allows for spatially-adaptive refinement, efficient post-processing [S1, S2, unofficial].
+- **Limitations:** Requires careful tuning of grid dimensions and learning rate schedule [S1, S2, unofficial].
+- **When to Use:** When refining rendered images or depth maps with spatially-adaptive smoothing [S1, S2, unofficial].
+- **When Not to Use:** When real-time performance is critical and grid optimization is too slow [S1, S2, unofficial].
+
+## Background
+Bilateral Grid Optimization was introduced as a post-processing technique for refining rendered features [S1, S2, unofficial]. It has been used in conjunction with Gaussian Splatting variants to improve visual quality [S1, S2, unofficial]. The method leverages the differentiability of the bilateral grid operation to optimize the grid parameters directly [S1, S2, unofficial].
+
+## Sources
+[S1] yzslab/gaussian-splatting-lightning, https://github.com/yzslab/gaussian-splatting-lightning, fetched 2026-10-27 (unofficial)
+[S2] llazzaroni/AugSplat, https://github.com/llazzaroni/AugSplat, fetched 2026-10-27 (unofficial)

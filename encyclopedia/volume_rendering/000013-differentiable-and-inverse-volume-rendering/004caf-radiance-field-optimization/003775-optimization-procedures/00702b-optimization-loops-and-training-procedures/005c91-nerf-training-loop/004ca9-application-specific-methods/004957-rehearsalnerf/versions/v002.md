@@ -1,0 +1,82 @@
+# RehearsalNeRF
+
+Also called: Rehearsal prior-based Neural Radiance Fields
+
+## Overview
+RehearsalNeRF is a method for learning disentangled neural fields under severe illumination changes by leveraging scenes captured under stable lighting (rehearsal stages) to enforce geometric consistency between different lighting conditions [S1]. It jointly optimizes five neural fields to decouple dynamic lighting from moving and static objects, addressing the "illumination-radiance ambiguity" where dynamic illumination radiance is entangled with object radiance [S1]. Unlike siblings that assume stable light sources or only handle subject motion, RehearsalNeRF explicitly handles varying illuminations and enables applications such as controlling lighting while stopping motion [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** RehearsalNeRF takes two video inputs: the "rehearsal stage" video ($\hat{C}_{reh}$), captured under stable lighting, and the "main stage" video ($\hat{C}_{main}$), captured under dynamic, time-variant illuminations [S1]. It also requires binary masks for moving objects in both stages ($M_{reh}$ and $M_{main}$), obtained via off-the-shelf interactive segmentation [S1].
+*   **Outputs:** The method outputs five decoupled neural fields: static objects ($\psi_S$), dynamic objects ($\psi_D$), lighting effects ($\psi_L$), appearance ($\psi_A$), and a probability field for illumination vectors ($P_H$) [S1]. These fields allow independent rendering of static geometry, dynamic geometry, and dynamic illumination [S1].
+
+**Data Structures and Neural Fields:**
+The architecture consists of five Multi-Layer Perceptrons (MLPs) [S1]:
+1.  **Static Objects ($\psi_S$):** Inputs are location $x \in \mathbb{R}^3$ and viewing direction $d$. Outputs density $\sigma_S$ and radiance $c_S$. It does not take time $\tau$ as input [S1].
+2.  **Dynamic Objects ($\psi_D$):** Inputs are location $x$, viewing direction $d$, and time-stamp $\tau \in \mathbb{R}$. Outputs density $\sigma_D$ and radiance $c_D$ [S1].
+3.  **Lighting Effects ($\psi_L$):** Inputs are location $x$, viewing direction $d$, and time-stamp $\tau$. Outputs saturation $S$, value $V$, probability vector $P_H \in \mathbb{R}^k$, and density $\sigma_L$ [S1].
+4.  **Intensity ($\psi_I$):** Inputs are location $x$, viewing direction $d$, and time-stamp $\tau$. Outputs intensity $i \in \mathbb{R}$ [S1].
+5.  **Appearance ($\psi_A$):** Inputs are static radiance $c_S$ and lighting radiance $c_L$. Outputs brightness coefficients $\alpha_S \in \mathbb{R}^3$ and $\alpha_D \in \mathbb{R}^3$ [S1].
+
+**Learnable Illumination Vector:**
+A learnable illumination vector $v_h \in \mathbb{R}^{k \times 3}$ is introduced to disentangle time-variant global and local illuminations [S1]. It is an explicit representation with editable capability [S1].
+*   **Initialization:** $v_h$ is initialized by taking the centroids of $k$-means clustering of hue values that differ between the rehearsal and main stage scenes [S1].
+*   **Parameter:** $k$ is the number of hue candidates, set to 5 based on the number of light sources in the experiment [S1].
+
+**Rendering Formulas:**
+The dynamic illumination color $c_L$ is computed from HSV components and intensity [S1]:
+$$ H = \sum_{j=1}^{k} P_{H,j} v_{h,j}(\tau) $$
+$$ c_L = f_{rgb}(H, S, V) \times i $$
+where $f_{rgb}$ converts HSV to RGB, $v_{h,j}(\tau)$ is the hue candidate at time $\tau$ and index $j$, and $P_{H,j}$ is the probability from $\psi_L$ [S1].
+
+The total main stage color is the sum of static and dynamic components [S1]:
+$$ C_{main}(r, \tau) = C_{S}^{main}(r, \tau) + C_{D}^{main}(r, \tau) $$
+where $C_{S}^{main}$ and $C_{D}^{main}$ are rendered using volume rendering with densities $\sigma_S, \sigma_D$ and radiances modulated by appearance coefficients $\alpha_S, \alpha_D$ and illumination $c_L$ [S1]. Specifically:
+$$ C_{L}^{main}(r, \tau) = \int_{t_n}^{t_f} T(t) \sigma_L(t) \beta(\alpha_D \odot c_L) dt + \int_{t_n}^{t_f} T'(t) \sigma_D(t) \beta(\alpha_D \odot c_L) dt $$
+(Note: The source provides the integral form for $C_L^{main}$ involving $\sigma_L$ and $\sigma_D$ modulated by $\alpha_D$ and $c_L$, implying the illumination affects the dynamic object's appearance [S1]. The static component $C_S^{main}$ is rendered similarly using $\sigma_S, c_S, \alpha_S$ [S1].)
+
+The color of static objects $\tilde{C}_S$ and dynamic objects $\tilde{C}_D$ without dynamic illumination is rendered using their respective density and radiance fields from $\psi_S$ and $\psi_D$ [S1].
+
+**Optimization Steps:**
+1.  **Optical Flow Estimation:** Compute dense correspondences between the main stage and rehearsal stage using optical flow estimation $G_{reh \to main}$ to account for color information of dynamic objects [S1]. Also compute temporal optical flow $G_{\tau+i \to \tau}^{dynamic}$ between rendered dynamic objects at adjacent times [S1].
+2.  **Loss Computation:** Compute the following loss terms:
+    *   **Reconstruction Loss ($L_{recon}$):**
+        $$ L_{recon}(r, \tau) = \| \hat{C}_{main}(r, \tau) - C_{main}(r, \tau) \|_2^2 $$
+        where $\hat{C}_{main}$ is the ground-truth color of the main stage [S1].
+    *   **Dynamic Object Regularization ($L_{dyn}$):**
+        $$ L_{dyn}(r, \tau) = M_{main} \| E_{reh \to main} \{ G_{reh \to main} (M_{reh} \odot \hat{C}_{reh}) - \tilde{C}_D \} \|_2^2 + \sum_{i=-2}^{2} \| E_{\tau+i \to \tau}^{dynamic} \{ G_{\tau+i \to \tau} (\tilde{C}_D(r, \tau+i)) - \tilde{C}_D(r, \tau) \} \|_2^2 $$
+        where $E$ refers to the confidence of the optical flow prediction, and $\tilde{C}_D$ is the rendered dynamic object color without illumination [S1].
+    *   **Rehearsal Prior Loss ($L_{reh}$):**
+        $$ L_{reh}(r, \tau) = (1 - M_{reh})\|\hat{C}_{reh}(r, \tau) - \tilde{C}_S(r, \tau)\|_2^2 + (1 - M_{main})\|\hat{C}_{main}(r, \tau) - C_{S}^{main}(r, \tau)\|_2^2 + (1 - M_{main})\|\tilde{C}_S(r, \tau) - (\tilde{C}_S(r, \tau) + \tilde{C}_D(r, \tau))\|_2^2 $$
+        The first two terms decouple illuminations and static objects using the rehearsal prior. The third term provides self-supervision for regions where masks do not overlap [S1].
+    *   **Static/Dynamic Separation Loss ($L_p$):**
+        $$ L_p(r, \tau) = M_{main} \frac{\sigma_S(r, \tau)}{\sigma_D(r, \tau)} + (1 - M_{main}) \frac{\sigma_D(r, \tau)}{\sigma_S(r, \tau) + \sigma_D(r, \tau)} $$
+        This penalizes static objects in dynamic regions and vice versa [S1].
+3.  **Total Loss:**
+    $$ L(r, \tau) = L_{recon}(r, \tau) + \lambda_{dyn} L_{dyn}(r, \tau) + \lambda_{reh} L_{reh}(r, \tau) + \lambda_p L_p(r, \tau) $$
+4.  **Update:** Minimize $L(r, \tau)$ using gradient descent to update all five neural fields and the illumination vector $v_h$ [S1].
+
+**Parameters:**
+*   $\lambda_{dyn} = 0.01$
+*   $\lambda_{reh} = 0.5$
+*   $\lambda_p = 0.01$
+*   $k = 5$ (number of k-means centroids) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Non-overlapping Regions:** Neural fields may not learn in regions where rehearsal and main stage masks do not overlap. This is mitigated by the third term in $L_{reh}$, which provides self-supervision for these regions [S1].
+*   **Optical Flow Errors:** Optical flow estimation can be erroneous due to illumination differences between rehearsal and main stages. This is addressed by the temporal consistency regularizer in $L_{dyn}$ [S1].
+*   **Absence of Dynamic Objects in Rehearsal:** The method works even if dynamic objects are absent in the rehearsal stage, avoiding motion alignment issues [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training requires approximately one day for 120,000 iterations with a batch size of 3,072 on a single RTX 3090 GPU [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** RehearsalNeRF distinguishes details better than the baseline D2NeRF and renders colors well decoupled from scene lights [S1]. It enables video editing applications such as controlling lighting while stopping motion and vice versa [S1].
+*   **Limitations:** The method requires synchronized multi-view videos of both rehearsal and main stages, which may be difficult to capture in uncontrolled environments [S1]. It relies on off-the-shelf segmentation and optical flow, which may introduce errors if these tools fail [S1].
+*   **When to use:** Use when scenes have severe, time-variant dynamic illuminations and rehearsal footage under stable lighting is available.
+*   **When not to use:** Use when illumination is stable or when rehearsal footage is unavailable.
+
+## Background
+RehearsalNeRF was introduced to address the lack of methods that explicitly handle varying illuminations in Neural Radiance Fields (NeRFs) [S1]. Previous works assumed stable light sources or relied on priors like lighting directions or segmentation masks, but could not resolve the "illumination-radiance ambiguity" where dynamic illumination radiance is entangled with object radiance [S1]. The method leverages the observation that dynamic illuminations are often artificial and created in controlled situations, allowing for the capture of rehearsal stages with stable lighting [S1]. It builds on the D2NeRF baseline [S1].
+
+## Sources
+[S1] RehearsalNeRF: Decoupling Intrinsic Neural Fields of Dynamic Illuminations for Scene Editing, https://link.springer.com/article/10.1007/s11263-026-02816-0, fetched 2026-10-27

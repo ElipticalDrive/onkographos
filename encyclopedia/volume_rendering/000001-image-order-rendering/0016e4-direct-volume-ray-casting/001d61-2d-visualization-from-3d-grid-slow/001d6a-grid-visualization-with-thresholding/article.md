@@ -1,0 +1,106 @@
+# Grid Visualization with Thresholding
+
+Also called: 3D Scatter Plot Visualization, Thresholded Grid Visualization
+
+## Overview
+Grid Visualization with Thresholding filters a 3D grid tensor based on opacity and gradient magnitude thresholds, then plots the surviving cells as a 3D scatter plot [S1, unofficial]. It provides a direct visualization path for volumetric data by bypassing ray casting and volume integration, making it suitable for rapid inspection of sparse structures [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `grid_cells`: A tensor containing density/opacity values and RGB color channels [S1, unofficial].
+- `gradients`: (Optional) A tensor containing the gradient vector for each cell [S1, unofficial].
+- `threshold`: Float. Opacity threshold for visualization. Default: $0.0$ [S1, unofficial].
+- `do_threshold`: Boolean. Whether to apply the opacity threshold. Default: `True` [S1, unofficial].
+- `clean_strays`: Boolean. Whether to apply noise cleaning. Default: `False` [S1, unofficial].
+
+**Outputs:**
+- A list of 3D coordinates $(x, y, z)$ and corresponding RGB colors $(r, g, b)$ for all cells where the final alpha value is greater than $0$ [S1, unofficial].
+
+**Data Structures:**
+- The grid is stored as a dense tensor. Sparsity is achieved by filtering rather than explicit sparse structures [G].
+
+**Steps:**
+1. Load the `grid_cells` tensor onto the target device [S1, unofficial].
+2. If gradient data exists and thresholding is enabled, zero out cells where the gradient norm is below $3.0 \times 10^{-6}$ [S1, unofficial].
+   - Formula: If $||\nabla f_{i,j,k}|| < 3.0 \times 10^{-6}$, then $\text{grid\_cells}_{i,j,k} = 0$.
+3. Clip all values in `grid_cells` to the range $[0, 1]$ [S1, unofficial].
+4. If `do_threshold` is `True`, zero out alpha values below the `threshold` and set all non-zero alpha values to $1.0$ [S1, unofficial].
+   - Formula: If $\alpha_{i,j,k} < \text{threshold}$, then $\alpha_{i,j,k} = 0$; else $\alpha_{i,j,k} = 1$.
+5. If `clean_strays` is `True`, apply `convolve_grid_to_remove_noise` twice with different parameters: kernel size $3$ with radius $1$, followed by kernel size $7$ with radius $3$ [S1, unofficial].
+6. Extract coordinates $(x, y, z)$ and RGB values for all cells where the final alpha value is $> 0$ [S1, unofficial].
+7. Plot the extracted points using a 3D plotting library such as Plotly or Matplotlib [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def grid_visualization_with_thresholding(grid_cells, gradients=None, threshold=0.0, do_threshold=True, clean_strays=False):
+    # 1. Load grid cells tensor (assumed already on device)
+    # 2. Gradient filtering
+    if gradients is not None and do_threshold:
+        grad_norm = torch.norm(gradients, dim=-1)
+        mask = grad_norm < 3.0e-06
+        grid_cells[mask] = 0
+    # 3. Clip values to [0, 1]
+    grid_cells = torch.clamp(grid_cells, 0.0, 1.0)
+    # 4. Opacity thresholding
+    if do_threshold:
+        opacity = grid_cells[..., 0]
+        opacity[opacity < threshold] = 0.0
+        opacity[opacity > 0] = 1.0
+        grid_cells[..., 0] = opacity
+    # 5. Noise cleaning
+    if clean_strays:
+        # convolve_grid_to_remove_noise is not defined in the sources [G]
+        pass
+    # 6. Extract coordinates and RGB values for cells with alpha > 0
+    alpha = grid_cells[..., 0]
+    valid_mask = alpha > 0
+    indices = torch.nonzero(valid_mask, as_tuple=False)
+    # Assumes tensor layout (depth, height, width, channels) [G]
+    x = indices[:, 2].float()
+    y = indices[:, 1].float()
+    z = indices[:, 0].float()
+    # Assumes RGBA channel layout [G]
+    r = grid_cells[valid_mask, 1]
+    g = grid_cells[valid_mask, 2]
+    b = grid_cells[valid_mask, 3]
+    # 7. Plot using Plotly or Matplotlib (external step)
+    return x, y, z, r, g, b
+```
+
+**Parameters:**
+- `threshold`: Opacity threshold for visualization. Default: $0.0$ [S1, unofficial].
+- `do_threshold`: Whether to apply the opacity threshold. Default: `True` [S1, unofficial].
+- `clean_strays`: Whether to remove stray voxels. Default: `False` [S1, unofficial].
+
+**Pitfalls:**
+- Gradient-based thresholding uses a fixed threshold of $3.0 \times 10^{-6}$ for gradient norm [S1, unofficial].
+- Visualization thresholding uses a configurable opacity threshold, which is distinct from the gradient threshold [S1, unofficial].
+- The noise cleaning step relies on `convolve_grid_to_remove_noise`, which is not defined in the sources [G].
+
+## Subtopics
+
+### [Density Range Windowing](1571-density-range-windowing.md)
+Density Range Windowing restricts rendering to voxels whose density falls within a specified $[min, max]$ range, allowing selective visualization of specific structures within a volume. It sets itself apart from its parent method, Grid Visualization with Thresholding, by operating on a continuous density interval rather than a single binary opacity threshold or gradient magnitude, enabling finer control over semi-transparent vs. dense core separation. It is chosen when volumetric opacity integration is required rather than geometric abstraction.
+
+### [Glyph Lines](8934-glyph-lines.md)
+Glyph Lines is a sparse visualization technique for 3D vector fields that samples the field on a 2D grid at a fixed coordinate and renders each sample as a line segment. It solves the problem of visualizing flow direction and magnitude in a specific slice of a volumetric dataset without the computational cost of full volume ray casting. It differs from its parent method, Grid Visualization with Thresholding, by explicitly encoding vector direction and magnitude into geometric primitives (lines) rather than plotting scalar grid cells as points. It is chosen when vector field topology and flow visualization are required.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Measured Performance:** Not given in the sources [S1, unofficial].
+- **Scaling:** Not given in the sources [S1, unofficial].
+- **Strengths:** Not given in the sources [S1, unofficial].
+- **Limitations:** Not given in the sources [S1, unofficial].
+- **When to use:** Not given in the sources [S1, unofficial].
+- **When not to use:** Not given in the sources [S1, unofficial].
+
+## Background
+Origin: The method is described in the unofficial source [S1, unofficial]. The specific origin date and author are not provided in the source [S1, unofficial].
+
+## Sources
+[S1] DanJbk/Plenoxels, https://github.com/DanJbk/Plenoxels, fetched 2026-10-27 (unofficial)

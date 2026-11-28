@@ -1,0 +1,148 @@
+--- v003.md
++++ v004.md
+@@ -1,65 +1,98 @@
+ # Adaptive sampling and reconstruction
+ Also called: Weiss et al
++
+ ## Overview
+-An end-to-end pipeline that uses neural networks to predict where high sample density is needed, convert importance values to adaptive sample positions, and reconstruct full-resolution images from sparse samples [S1, unofficial]. It differs from sibling methods by replacing heuristic error metrics with a learned importance network and a differentiable sampler, followed by a reconstruction network rather than direct ray casting [S1, unofficial].
++Adaptive sampling and reconstruction is an end-to-end neural pipeline that predicts high-density sampling locations using an importance network, converts these predictions into sparse sample positions via a differentiable sampler, and reconstructs full-resolution images from the sparse data using a reconstruction network [S1, unofficial]. It addresses the inefficiency of uniform sampling by allocating computational resources only to visually important regions, achieving high fidelity with significantly fewer volume queries [S1, unofficial]. Unlike sibling methods that rely on heuristic metrics or fixed subdivision rules, this method learns the sampling distribution and reconstruction jointly through image-level loss optimization [S1, unofficial].
++
+ ## How it works
+-**Inputs and outputs:**
+-*   Input: A 128×128 low-resolution view of the volume [S1, unofficial].
+-*   Output: A full-resolution rendered image [S1, unofficial].
++The method consists of three jointly trained neural components: an importance network, a differentiable sampler, and a reconstruction network.
+ 
+-**Data structures:**
+-1.  **Importance Network:** A neural network predicting a scalar importance value $I(x,y)$ for each pixel [S1, unofficial].
+-2.  **Differentiable Sampler:** Converts importance values $I$ into a set of sample positions $\{p_i\}$ and weights [S1, unofficial].
+-3.  **Reconstruction Network:** A neural network combining pull-push inpainting with a residual CNN to generate the final image from sparse samples [S1, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A low-resolution view (typically $128 \times 128$) or view parameters.
++*   **Output:** A full-resolution rendered image.
++*   **Intermediate:** Sparse set of sample positions and their corresponding volume values.
+ 
+-**Numbered steps:**
+-1.  Train an importance network to predict where high sample density is needed from a 128×128 input [S1, unofficial].
+-2.  Use a differentiable sampler to convert importance values to adaptive sample positions via soft-max approximation [S1, unofficial].
+-3.  Use a reconstruction network combining pull-push inpainting with a residual CNN to reconstruct full-resolution images from the sparse samples [S1, unofficial].
+-
+-**Formulas:**
+-*   Soft-max approximation for sample weight distribution: $w_i = \frac{\exp(\alpha \cdot I_i)}{\sum_j \exp(\alpha \cdot I_j)}$, where $I_i$ is the importance value at pixel $i$ and $\alpha$ controls the sharpness of the distribution [S1, unofficial].
++**Data Structures:**
++*   **Importance Map:** A scalar field predicted by the importance network, representing the probability density for sampling at each pixel location.
++*   **Sample Positions:** A set of 2D coordinates $(u, v)$ and associated 3D ray parameters derived from the importance map.
++*   **Sparse Samples:** A list of tuples $(ray\_id, t, value)$, where $ray\_id$ is the pixel index, $t$ is the sample position along the ray, and $value$ is the accumulated color/opacity or scalar value at that point.
+ 
+ **Parameters:**
+-*   Soft-max approximation parameter $\alpha \approx 50$ [S1, unofficial].
+-*   Sample density: 5–10% for isosurfaces, 10% for DVR [S1, unofficial].
++*   **Soft-max approximation parameter ($\alpha$):** Controls the sharpness of the sampling distribution. Typical value: $\alpha \approx 50$ [S1, unofficial].
++*   **Sample Density:** The fraction of total possible samples used. Typical values: 5–10% for isosurface rendering, 10% for Direct Volume Rendering (DVR) [S1, unofficial].
+ 
+-**Edge cases and pitfalls:**
+-*   Reconstruction network overhead is approximately 90ms regardless of volume size, making it slower than optimized ray casting for volumes smaller than $1024^3$ or images smaller than $1024^2$ [S1, unofficial].
+-*   Quality degrades when test transfer functions use color ranges absent from training [S1, unofficial].
+-*   Networks struggle with small-scale color variations from complex transfer functions, leading to uniform sampling and poor reconstruction in textured regions [S1, unofficial].
++**Steps:**
++1.  **Importance Prediction:** The importance network takes a low-resolution input (e.g., $128 \times 128$) and outputs an importance map $I(x, y)$ for each pixel. This network learns to identify silhouettes and high-curvature regions without explicit feature descriptors [S1, unofficial].
++2.  **Differentiable Sampling:** The importance map $I(x, y)$ is converted into a probability distribution. Sample positions are drawn from this distribution using a soft-max approximation with parameter $\alpha$. This process is differentiable, allowing gradients to flow back to the importance network during training [S1, unofficial].
++3.  **Volume Query:** For each selected sample position, a ray is cast into the volume, and the value is queried. This results in a sparse set of samples, significantly reducing the number of volume queries compared to uniform sampling [S1, unofficial].
++4.  **Reconstruction:** The reconstruction network takes the sparse samples and the original low-resolution view as input. It combines pull-push inpainting with a residual CNN to predict the missing pixel values and reconstruct the full-resolution image [S1, unofficial].
++5.  **Training:** The entire pipeline is trained end-to-end using image losses (PSNR, SSIM, LPIPS) computed on the final reconstructed image. The goal is to minimize the difference between the reconstructed image and the ground truth rendered at high sample density [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def adaptive_sampling_and_reconstruction(volume_data, view_params):
+-    # 1. Render 128x128 low-resolution view
+-    low_res_view = render_to_resolution(volume_data, view_params, 128)
+-
+-    # 2. Predict importance map I(x,y) using trained importance network
+-    # Source does not specify network architecture details beyond "trained network"
+-    importance_map = low_res_view  # Forward pass through trained importance network
+-
+-    # 3. Differentiable sampling: convert importance to positions via soft-max (α ≈ 50)
+-    alpha = 50
+-    sample_positions = compute_sample_grid(importance_map)
+-    sample_weights = softmax(importance_map, alpha)
+-
+-    # 4. Query volume at adaptive positions to get sparse samples
+-    sparse_samples = interpolate_volume(volume_data, sample_positions)
+-
+-    # 5. Reconstruct full-resolution image using pull-push inpainting + residual CNN
+-    # Source does not specify exact CNN layers or inpainting algorithm
+-    full_res_image = apply_pull_push_inpainting(sparse_samples, sample_weights)
+-    full_res_image = apply_residual_cnn(full_res_image, low_res_view)
+-
++def adaptive_sampling_and_reconstruction(volume, view_params, importance_net, reconstruction_net, alpha=50, density=0.1):
++    """
++    Performs adaptive sampling and reconstruction for volume rendering.
++    
++    Args:
++        volume: The volume dataset (e.g., 3D texture or grid).
++        view_params: Camera parameters (position, orientation, FOV).
++        importance_net: Neural network predicting importance map from low-res view.
++        reconstruction_net: Neural network reconstructing full-res image from sparse samples.
++        alpha: Soft-max approximation parameter for sampling.
++        density: Fraction of samples to use (e.g., 0.1 for 10%).
++        
++    Returns:
++        full_res_image: Reconstructed full-resolution image.
++    """
++    # Step 1: Generate low-resolution view for importance prediction
++    # Note: In practice, this might be a coarse render or a learned feature map.
++    low_res_view = generate_low_res_view(volume, view_params, resolution=(128, 128))
++    
++    # Step 2: Predict importance map
++    importance_map = importance_net(low_res_view)
++    
++    # Step 3: Convert importance map to sample positions
++    # The differentiable sampler draws samples based on the importance distribution.
++    # The number of samples is determined by the density parameter.
++    # For a 128x128 image, total pixels = 16384.
++    # Number of samples = int(16384 * density).
++    num_samples = int(128 * 128 * density)
++    
++    # Sample positions are drawn from the importance map using soft-max approximation.
++    # This is a differentiable operation.
++    sample_positions = differentiable_sampler(importance_map, num_samples, alpha)
++    
++    # Step 4: Query volume at sample positions
++    # For each sample position, cast a ray and query the volume.
++    sparse_samples = []
++    for pos in sample_positions:
++        ray = cast_ray(view_params, pos)
++        value = query_volume(volume, ray)
++        sparse_samples.append((pos, value))
++        
++    # Step 5: Reconstruct full-resolution image
++    full_res_image = reconstruction_net(low_res_view, sparse_samples)
++    
+     return full_res_image
+ ```
++
++**Edge Cases and Pitfalls:**
++*   **Reconstruction Overhead:** The reconstruction network has a fixed overhead of approximately 90ms, regardless of volume size. This makes the method slower than optimized ray casting for volumes smaller than $1024^3$ or images smaller than $1024^2$ [S1, unofficial].
++*   **Transfer Function Mismatch:** Quality degrades significantly when test transfer functions use color ranges that were absent during training. The network struggles to reconstruct textures if the color distribution is out-of-distribution [S1, unofficial].
++*   **Complex Transfer Functions:** Networks struggle with small-scale color variations from complex transfer functions, often defaulting to uniform sampling and resulting in poor reconstruction in textured regions [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Performance:** Achieves PSNR > 30 dB and SSIM > 0.95 with only 5–10% of samples [S1, unofficial].
+-*   **Speedup:** 1.5–2× speedup for large volumes ($2048^3$) at high resolutions ($\ge 1536^2$) [S1, unofficial].
+-*   **Limitations:** Slower than optimized ray casting for small volumes ($< 1024^3$) or small images ($< 1024^2$) due to fixed reconstruction overhead [S1, unofficial].
+-*   **Generalization:** Poor generalization to unseen transfer functions or complex small-scale color variations [S1, unofficial].
++*   **Performance:** Achieves PSNR > 30 dB and SSIM > 0.95 with only 5–10% of the samples used in uniform sampling [S1, unofficial].
++*   **Speedup:** Demonstrates a 1.5–2× speedup for large volumes ($2048^3$) at high resolutions ($\ge 1536^2$) [S1, unofficial].
++*   **Memory:** The method requires memory for the neural networks (importance and reconstruction) and the sparse sample storage. The reconstruction network overhead is constant (~90ms), independent of volume size [S1, unofficial].
++*   **Strengths:** Reduces computational cost by focusing samples on important regions; learns sampling strategy without explicit feature engineering; high visual fidelity with sparse samples.
++*   **Limitations:** High reconstruction overhead for small volumes/images; sensitive to transfer function changes; struggles with complex, small-scale textures; requires training data and joint optimization.
++*   **When to Use:** Large volumes ($\ge 1024^3$) and high resolutions ($\ge 1024^2$) where the reconstruction overhead is amortized; scenarios where transfer functions are stable and known during training.
++*   **When Not to Use:** Small volumes or low resolutions; dynamic or unknown transfer functions; scenes with highly complex, small-scale textures that were not present in training data.
++
+ ## Background
+-Weiss et al. [156] proposed this method to address the inefficiency of uniform sampling, which allocates equal computational resources to all image regions regardless of visual importance [S1, unofficial]. The approach uses an end-to-end pipeline trained with image losses (PSNR, SSIM, LPIPS) on final reconstruction quality [S1, unofficial].
++The method was proposed by Weiss et al. [156] as a learned optimization for volume visualization, addressing the inefficiency of uniform sampling [S1, unofficial]. It represents a shift from heuristic-based adaptive sampling to data-driven, neural network-based approaches. The approach is part of a broader trend in scientific visualization and computer graphics to leverage deep learning for rendering acceleration and quality improvement [S1, unofficial].
++
+ ## Sources
+-[S1] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)+[S1] Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

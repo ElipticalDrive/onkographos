@@ -1,0 +1,137 @@
+# Material ID Assignment & Caching
+
+Also called: Material ID Disambiguation, Terrain Material ID Assignment & Caching, TerrainMatManager
+
+## Overview
+This method maps block material IDs to unique terrain material IDs to enable mesh merging, creating materials on demand and caching results to avoid redundant GPU allocations [S1, unofficial]. It differs from sibling methods by handling material reference disambiguation and caching rather than geometric mesh assembly [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A block material ID (integer), and optionally a custom render material object, a texture URL string, and an alpha value (float).
+*   **Output:** A unique terrain material ID (integer) and the corresponding material object reference.
+
+**Data Structures**
+The method maintains the following state maps and counters:
+1.  `_idCounter`: An integer initialized to 1000, used to generate unique terrain IDs [S1, unofficial].
+2.  `_blockMatIDtoTerrainID`: A map from block material IDs to terrain material IDs [S1, unofficial].
+3.  `_terrainIDtoMatObject`: A map from terrain material IDs to material objects [S1, unofficial].
+4.  `_texURLtoTerrainID`: A map from texture URLs to terrain material IDs [S1, unofficial].
+5.  `_renderMatToTerrainID`: A map from material objects to terrain material IDs [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Lookup Cache:** Check `_blockMatIDtoTerrainID` for the input block material ID [S1, unofficial].
+2.  **Assign Terrain ID:** If the lookup misses, call `decideTerrainMatID` to assign a unique terrain ID [S1, unofficial].
+3.  **Create Material:** If the assigned terrain ID is not in `_terrainIDtoMatObject`, call `createTerrainMat`, add the result to `allMaterials`, cache the mapping, and return the ID [S1, unofficial].
+4.  **Return:** Return the terrain ID and material object [S1, unofficial].
+
+**Decision Logic (`decideTerrainMatID`)**
+The terrain ID is determined by the following priority rules [S1, unofficial]:
+1.  **Custom Render Material:** If a custom render material object exists, assign a unique ID per material object [S1, unofficial].
+2.  **Texture URL:** If a texture URL exists, assign a unique ID per URL [S1, unofficial].
+3.  **Alpha Transparency:** If the alpha value is strictly between 0 and 1, return `10 + Math.round(alpha * 100)` [S1, unofficial].
+4.  **Default:** Otherwise, return `1` [S1, unofficial].
+
+**Material Creation (`createTerrainMat`)**
+1.  If a custom render material exists, return it [S1, unofficial].
+2.  If no texture is provided:
+    *   If alpha is required, create a flat material with alpha support [S1, unofficial].
+    *   Otherwise, return a default material [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global state
+_idCounter = 1000
+_blockMatIDtoTerrainID = {}
+_terrainIDtoMatObject = {}
+_texURLtoTerrainID = {}
+_renderMatToTerrainID = {}
+allMaterials = []
+
+def get_terrain_material(block_mat_id, custom_mat=None, texture_url=None, alpha=1.0):
+    # Step 1: Lookup cache
+    if block_mat_id in _blockMatIDtoTerrainID:
+        terrain_id = _blockMatIDtoTerrainID[block_mat_id]
+        return terrain_id, _terrainIDtoMatObject[terrain_id]
+
+    # Step 2: Assign Terrain ID
+    terrain_id = decide_terrain_mat_id(custom_mat, texture_url, alpha)
+
+    # Step 3: Create Material if not cached
+    if terrain_id not in _terrainIDtoMatObject:
+        mat_obj = create_terrain_mat(custom_mat, texture_url, alpha)
+        _terrainIDtoMatObject[terrain_id] = mat_obj
+        allMaterials.append(mat_obj)
+        _renderMatToTerrainID[mat_obj] = terrain_id
+        if texture_url is not None:
+            _texURLtoTerrainID[texture_url] = terrain_id
+
+    # Cache block mapping
+    _blockMatIDtoTerrainID[block_mat_id] = terrain_id
+
+    return terrain_id, _terrainIDtoMatObject[terrain_id]
+
+def decide_terrain_mat_id(custom_mat, texture_url, alpha):
+    # Priority 1: Custom Render Material
+    if custom_mat is not None:
+        if custom_mat in _renderMatToTerrainID:
+            return _renderMatToTerrainID[custom_mat]
+        # Assign unique ID per material object
+        terrain_id = _idCounter
+        _idCounter += 1
+        return terrain_id
+
+    # Priority 2: Texture URL
+    if texture_url is not None:
+        if texture_url in _texURLtoTerrainID:
+            return _texURLtoTerrainID[texture_url]
+        terrain_id = _idCounter
+        _idCounter += 1
+        return terrain_id
+
+    # Priority 3: Alpha Discretization
+    if 0 < alpha < 1:
+        # Discretize into 100 buckets: 10 to 109
+        terrain_id = 10 + round(alpha * 100)
+        return terrain_id
+
+    # Priority 4: Default
+    return 1
+
+def create_terrain_mat(custom_mat, texture_url, alpha):
+    # If custom render material exists, return it
+    if custom_mat is not None:
+        return custom_mat
+
+    # Create new material object
+    # [G] Standard material instantiation placeholder for engine-specific code
+    mat_obj = {}
+
+    # If no texture, if alpha needed, create flat material with alpha, else return default
+    if texture_url is None:
+        if alpha != 1.0:
+            mat_obj["alpha"] = alpha
+            mat_obj["type"] = "flat_alpha"
+        else:
+            mat_obj["type"] = "default"
+
+    return mat_obj
+```
+
+**Edge Cases and Pitfalls**
+*   **Alpha Precision:** Alpha values are discretized into 100 buckets (IDs 10–109) to group materials with similar transparency, avoiding unique IDs for visually identical alpha levels [S1, unofficial].
+
+## Subtopics
+
+### Material-Based Mesh Sectioning
+Splits a decoded mesh into separate sections (arrays of triangles) based on the material ID associated with each triangle's vertices. Choose this when you need to separate geometry by material for efficient rendering or culling [G]. [Material-Based Mesh Sectioning](8778-material-based-mesh-sectioning.md)
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] fenomas/noa, https://github.com/fenomas/noa, fetched 2026-10-26 (unofficial)

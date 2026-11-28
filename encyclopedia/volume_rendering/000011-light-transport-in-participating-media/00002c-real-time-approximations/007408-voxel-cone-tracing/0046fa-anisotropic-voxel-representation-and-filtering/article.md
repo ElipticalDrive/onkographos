@@ -1,0 +1,112 @@
+# Anisotropic Voxel Representation and Filtering
+
+Also called: Anisotropic Pre-Integration
+
+## Overview
+Anisotropic Voxel Representation and Filtering is a family of techniques that store directional pre-integration values to approximate the volume rendering integral more accurately than isotropic averaging [S1, unofficial]. It replaces the single scalar value per non-leaf voxel with six directional values along the major axes, reconstructing values at runtime by linearly interpolating the three closest directions [S1, unofficial]. Unlike its siblings, it explicitly preserves directional visibility information during mipmap generation to mitigate artifacts inherent in standard isotropic pre-integration [Voxel Cone Tracing Anisotropic Filtering](2552-voxel-cone-tracing-anisotropic-filtering.md).
+
+## Shared principles
+The core mechanism replaces the single scalar value per non-leaf octree node with an array of six directional values corresponding to the major axes: $+X, -X, +Y, -Y, +Z, -Z$ [S1, unofficial]. This representation prevents color mixing and opacity under-estimation during MIP-mapping by integrating values along specific axes, allowing for accurate interpolation of lighting at render time [Anisotropic Voxel Representation](4963-anisotropic-voxel-representation.md).
+
+**Mipmap Generation (Pre-Integration):**
+For each non-leaf voxel, the six directional values are computed by performing a step of volumetric integration in depth for each direction [S1, unofficial]. This involves compositing the 8 child voxels front-to-back along the specific axis [Voxel Cone Tracing Anisotropic Filtering](2552-voxel-cone-tracing-anisotropic-filtering.md). The results are averaged to produce the final directional value for the parent voxel [S1, unofficial].
+
+**Runtime Sampling:**
+During cone tracing, the voxel value is retrieved by linearly interpolating the values from the three closest directions with respect to the trace direction $\vec{d}$ [S1, unofficial]. The 3 axis-matching directional textures are blended weighted by the squared dot product of the trace direction and the axis direction:
+$$ weight = \text{dot}(\text{direction}, \text{axis})^2 $$
+[Voxel Cone Tracing Anisotropic Filtering](2552-voxel-cone-tracing-anisotropic-filtering.md).
+
+**Memory and Scope:**
+Directional values are only computed and used for voxels not located in the last octree level (not at full resolution) [S1, unofficial]. Leaf nodes store only the standard single value [Anisotropic Voxel Representation](4963-anisotropic-voxel-representation.md). Storing directional values for all properties increases memory consumption by 1.5x compared to isotropic [Voxel Cone Tracing Anisotropic Filtering](2552-voxel-cone-tracing-anisotropic-filtering.md). The base level of the mipmap is identical for all directions and can be shared, reducing the cost from 6x to 1.5x [Voxel Cone Tracing Anisotropic Filtering](2552-voxel-cone-tracing-anisotropic-filtering.md). The total storage overhead is cited as 1.75x in some contexts [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Compute shader equivalent for anisotropic mipmap generation
+# Processes a 2x2x2 block of child voxels to produce 6 directional parent voxels
+# source_data and dest_data are 3D arrays representing the texture mip levels
+def generate_aniso_mip(source_data, dest_data, resolution, mip_level):
+    # Voxel offsets for the 8 corners of a 2x2x2 block relative to block origin
+    voxel_offsets = [
+        (1,1,1), (1,1,0), (1,0,1), (1,0,0),
+        (0,1,1), (0,1,0), (0,0,1), (0,0,0)
+    ]
+
+    def alpha_blend(v0, v1):
+        # Standard alpha compositing: v0 is behind v1
+        return v0 + ((1.0 - v0.a) * v1)
+
+    # Iterate over all parent voxel positions
+    for x in range(resolution):
+        for y in range(resolution):
+            for z in range(resolution):
+                write_pos = (x, y, z)
+                block_pos = (x * 2, y * 2, z * 2)
+
+                # Fetch 8 child texels from the source texture at the given mip level
+                children = []
+                for i in range(8):
+                    children.append(source_data[block_pos[0] + voxel_offsets[i][0],
+                                               block_pos[1] + voxel_offsets[i][1],
+                                               block_pos[2] + voxel_offsets[i][2]])
+
+                # Direction 0: -X (composite from +X to -X)
+                res_x_neg = (alpha_blend(children[0], children[4]) +
+                             alpha_blend(children[1], children[5]) +
+                             alpha_blend(children[2], children[6]) +
+                             alpha_blend(children[3], children[7])) / 4.0
+                dest_data[write_pos, 0] = res_x_neg
+
+                # Direction 1: +X (composite from -X to +X)
+                res_x_pos = (alpha_blend(children[4], children[0]) +
+                             alpha_blend(children[5], children[1]) +
+                             alpha_blend(children[6], children[2]) +
+                             alpha_blend(children[7], children[3])) / 4.0
+                dest_data[write_pos, 1] = res_x_pos
+
+                # Direction 2: -Y (composite from +Y to -Y)
+                res_y_neg = (alpha_blend(children[0], children[2]) +
+                             alpha_blend(children[1], children[3]) +
+                             alpha_blend(children[5], children[7]) +
+                             alpha_blend(children[4], children[6])) / 4.0
+                dest_data[write_pos, 2] = res_y_neg
+
+                # Direction 3: +Y (composite from -Y to +Y)
+                res_y_pos = (alpha_blend(children[2], children[0]) +
+                             alpha_blend(children[3], children[1]) +
+                             alpha_blend(children[7], children[5]) +
+                             alpha_blend(children[6], children[4])) / 4.0
+                dest_data[write_pos, 3] = res_y_pos
+
+                # Direction 4: -Z (composite from +Z to -Z)
+                res_z_neg = (alpha_blend(children[0], children[1]) +
+                             alpha_blend(children[2], children[3]) +
+                             alpha_blend(children[4], children[5]) +
+                             alpha_blend(children[6], children[7])) / 4.0
+                dest_data[write_pos, 4] = res_z_neg
+
+                # Direction 5: +Z (composite from -Z to +Z)
+                res_z_pos = (alpha_blend(children[1], children[0]) +
+                             alpha_blend(children[3], children[2]) +
+                             alpha_blend(children[5], children[4]) +
+                             alpha_blend(children[7], children[6])) / 4.0
+                dest_data[write_pos, 5] = res_z_pos
+```
+
+## Subtopics
+
+### [Voxel Cone Tracing Anisotropic Filtering](2552-voxel-cone-tracing-anisotropic-filtering.md)
+Addresses the "two red-green wall problem" in voxel cone tracing, where isotropic averaging of opaque voxels with different colors or opacities in upper octree levels causes light leaking by mixing materials as if they were semi-transparent [Voxel Cone Tracing Anisotropic Filtering](2552-voxel-cone-tracing-anisotropic-filtering.md). It stores six directional copies of color and alpha (along ±X, ±Y, ±Z axes) instead of a single isotropic average, allowing the cone tracer to detect directional occlusion (e.g., thin walls) and preventing light leaks through thin geometry [Voxel Cone Tracing Anisotropic Filtering](2552-voxel-cone-tracing-anisotropic-filtering.md). Choose this variant when directional occlusion detection is critical for preventing light leaks through thin geometry [Voxel Cone Tracing Anisotropic Filtering](2552-voxel-cone-tracing-anisotropic-filtering.md).
+
+### [Anisotropic Voxel Representation](4963-anisotropic-voxel-representation.md)
+A data storage format for voxel cone tracing that stores directional pre-integration values to prevent color mixing and opacity under-estimation during MIP-mapping [Anisotropic Voxel Representation](4963-anisotropic-voxel-representation.md). It solves the "two red-green wall problem" and light leaking artifacts that occur when averaging opaque voxels with different colors or mixed opacity in upper octree levels [Anisotropic Voxel Representation](4963-anisotropic-voxel-representation.md). Unlike standard isotropic MIP-mapping which averages all neighbors uniformly, this method preserves directional coherence by integrating values along specific axes, allowing for accurate interpolation of lighting at render time [Anisotropic Voxel Representation](4963-anisotropic-voxel-representation.md). Choose this variant when memory-efficient storage of directional visibility is prioritized over explicit cone tracing filtering [Anisotropic Voxel Representation](4963-anisotropic-voxel-representation.md).
+
+### Anisotropic Pre-Integration
+Uses the 6 main directions and reconstructs values by linear interpolation of the 3 closest directions [S1, unofficial]. Provides a better approximation of the volume rendering integral compared to isotropic methods, but costs 1.75x the storage requirement and slightly slower sampling [S1, unofficial].
+
+## Background
+The method was proposed to compute glossy reflections and provide a better approximation of the volume rendering integral [S1, unofficial]. It relies on an anisotropic pre-integration of voxel values stored in a direction-dependent way in the structure [S1, unofficial]. The approach builds on the foundational work of Gigavoxels, which introduced ray-guided streaming for efficient and detailed voxel rendering [S1, unofficial].
+
+## Sources
+[S1] Interactive Indirect Illumination Using Voxel Cone Tracing: An Insight, https://openalex.org/W4296123939, fetched 2026-10-26 (unofficial)

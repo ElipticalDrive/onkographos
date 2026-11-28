@@ -1,0 +1,29 @@
+# GPU and Shader-Based Extraction
+
+Also called: GPU-accelerated isosurfacing, shader-based surface extraction
+
+## Overview
+This family encompasses methods that perform isosurface extraction primarily on the GPU using shader programs, often leveraging parallel processing architectures to accelerate the evaluation of implicit functions and the generation of geometric primitives. Unlike traditional CPU-based approaches that may suffer from memory transfer bottlenecks or limited parallelism, these methods utilize the GPU's massive parallelism for tasks such as distance evaluation, voxel traversal, and mesh generation. They differ from their siblings by explicitly offloading the computational heavy lifting to the graphics pipeline, often using render-to-vertex-array techniques or specialized compute shaders to bypass the CPU-GPU data transfer latency [3818-gpu-accelerated-marching-cubes-with-distance-extraction.md], [6862-gpu-isosurface-extraction-from-molecular-orbital-densities.md], [7507-fragment-shader-isosurface-extraction-with-mrts.md].
+
+## Shared principles
+All methods in this family operate on the discretized domain defined in [Isosurface extraction](30-isosurface-extraction.md), but shift the execution context to the GPU. The core mechanism involves:
+1.  **Shader-Based Evaluation**: Implicit functions (e.g., Signed Distance Functions, Molecular Orbital densities) are evaluated within fragment or compute shaders. This allows for parallel evaluation of scalar values at grid vertices or sample points without CPU intervention [3818-gpu-accelerated-marching-cubes-with-distance-extraction.md], [6862-gpu-isosurface-extraction-from-molecular-orbital-densities.md].
+2.  **Parallel Data Handling**: Large volumes of scalar data (distances or densities) are stored in GPU textures or buffers. Techniques such as render-to-texture or direct buffer access are used to read back or process these values, minimizing host-device synchronization [3818-gpu-accelerated-marching-cubes-with-distance-extraction.md], [7507-fragment-shader-isosurface-extraction-with-mrts.md].
+3.  **Hybrid or Pure GPU Processing**: Some methods use the GPU solely for fast data extraction (e.g., distances) and perform topology generation (like Marching Cubes) on the CPU to avoid the cost of transferring large triangle lists [3818-gpu-accelerated-marching-cubes-with-distance-extraction.md]. Others perform the entire extraction pipeline, including mesh generation and projection, on the GPU using compute shaders or fragment shaders with render-to-vertex arrays [6862-gpu-isosurface-extraction-from-molecular-orbital-densities.md], [7507-fragment-shader-isosurface-extraction-with-mrts.md].
+4.  **Spatial Culling and Optimization**: To manage computational load, these methods often employ spatial data structures (like octrees) or culling techniques (such as flood approximation or occupancy checks) to identify only the relevant regions of the volume for detailed extraction [6862-gpu-isosurface-extraction-from-molecular-orbital-densities.md].
+
+## Subtopics
+
+### [GPU-accelerated Marching Cubes with Distance Extraction](3818-gpu-accelerated-marching-cubes-with-distance-extraction.md)
+Extracts STL meshes from Signed Distance Functions (SDFs) by using the GPU to render vertex distances to a texture, then processing this data on the CPU with standard Marching Cubes. It is chosen when CPU-based meshing algorithms are preferred for robustness or when GPU-to-CPU transfer of triangle data is more expensive than the extraction itself.
+
+### [GPU Isosurface Extraction from Molecular Orbital Densities](6862-gpu-isosurface-extraction-from-molecular-orbital-densities.md)
+Extracts isosurfaces from molecular orbital densities using Gaussian Type Orbitals (GTOs) on the GPU with an octree for culling and Newton projection for accuracy. It is chosen for scientific visualization of quantum chemistry data where high precision and non-blocking execution are required.
+
+### [Fragment Shader Isosurface Extraction with MRTs](7507-fragment-shader-isosurface-extraction-with-mrts.md)
+Uses fragment shaders and Multiple Render Targets (MRTs) to compute isosurfaces, allowing results to be reused via render-to-vertex-arrays. It is chosen for real-time visualization pipelines where shader-based extraction integrates directly with the rendering engine.
+
+## Background
+The shift towards GPU-based extraction originated from the need to handle increasingly large volumetric datasets and complex implicit functions that were computationally prohibitive for CPU-only methods. Early implementations focused on accelerating the scalar field evaluation and the initial mesh generation steps using the parallel architecture of GPUs. The development of compute shaders and advanced texture handling in OpenGL and DirectX enabled more sophisticated pipelines, including hybrid CPU-GPU approaches and fully GPU-based extraction with post-processing steps like Newton projection. These methods have become standard in scientific visualization, particularly in fields like computational chemistry and medical imaging, where real-time or near-real-time feedback is valuable.
+
+## Sources

@@ -1,0 +1,169 @@
+# 2D Positional Embedding
+
+Also called: 2D Positional Encoding for Defocus Network, 2D Sine-Cosine Positional Embedding Generation, Fourier Features, Sinusoidal Positional Embedding
+
+## Overview
+2D Positional Embedding maps 2D spatial coordinates to a higher-dimensional feature space using sine and cosine functions [S2, unofficial]. It solves the problem of MLPs struggling to represent high-frequency details by providing a deterministic basis for the network [S1, unofficial]. It builds on [Fourier Positional Encoding](1267-fourier-positional-encoding.md) by specifically handling 2D grid or batched coordinate inputs common in vision tasks [G].
+
+## How it works
+**Inputs:**
+1. Coordinates tensor `xy` of shape $(B, N, 2)$, where $B$ is batch size, $N$ is number of points, and the last dimension contains $(x, y)$ [S2, unofficial].
+2. Alternatively, a grid size `grid_size` (integer) and `embed_dim` (integer, must be even) for generating a full 2D grid embedding [S1, unofficial].
+3. Optional parameters: `n_cls_token` (number of class tokens to prepend zeros for) [S1, unofficial], `cat_coords` (boolean flag to concatenate original coordinates) [S2, unofficial].
+
+**Outputs:**
+A tensor of shape $(B, N, C)$ or $(N_{grid}, C)$ containing the positional embeddings, where $C$ is the embedding dimension [S1, S2, unofficial].
+
+**Data Structures:**
+* `div_term`: A 1D tensor of shape $(1, 1, C/2)$ containing the frequency scaling factors [S2, unofficial].
+* `omega`: A 1D array of shape $(embed\_dim // 2)$ containing the base frequencies [S1, unofficial].
+
+**Steps:**
+
+1. **Frequency Generation:**
+   * *Method A (Batched Coordinates, PyTorch-style):* Compute `div_term` as:
+     $$ \text{div\_term}_i = \frac{1000.0}{C} \cdot i \quad \text{for } i \in \{0, \dots, C/2 - 1\} $$
+     Reshape to $(1, 1, C/2)$ [S2, unofficial].
+   * *Method B (Grid-based, NumPy-style):* Split `embed_dim` in half [S1, unofficial]. Compute base frequencies:
+     $$ \omega_j = \frac{1}{10000^{j / (embed\_dim / 2)}} \quad \text{for } j \in \{0, \dots, embed\_dim/2 - 1\} $$
+     [S1, unofficial].
+
+2. **Coordinate Processing:**
+   * *If using `xy` (Batched):* Extract $x$ and $y$ from `xy` [S2, unofficial].
+   * *If using `grid_size`:* Create 1D grids for height and width using `np.arange(grid_size)` [S1, unofficial]. Use `meshgrid` to create 2D coordinate grids $X$ and $Y$ [S1, unofficial]. Reshape to $[2, 1, \text{grid\_size}, \text{grid\_size}]$ [S1, unofficial].
+
+3. **Sine-Cosine Computation:**
+   * *Method A:* Initialize output tensors `pe_x` and `pe_y` of shape $(B, N, C)$ with zeros [S2, unofficial].
+     $$ \text{pe\_x}[:, :, 0::2] = \sin(x \cdot \text{div\_term}) $$
+     $$ \text{pe\_x}[:, :, 1::2] = \cos(x \cdot \text{div\_term}) $$
+     $$ \text{pe\_y}[:, :, 0::2] = \sin(y \cdot \text{div\_term}) $$
+     $$ \text{pe\_y}[:, :, 1::2] = \cos(y \cdot \text{div\_term}) $$
+     Combine $x$ and $y$ embeddings into a 2D grid: `emb[:, :, : out_ch] = emb_x` and `emb[:, :, out_ch : 2 * out_ch] = emb_y` [S2, unofficial].
+   * *Method B:* Compute the product of position and frequencies:
+     $$ \text{out}_{m,j} = \text{pos}_m \cdot \omega_j $$
+     where $\text{pos}$ is the flattened coordinate grid [S1, unofficial].
+     $$ \text{emb} = \text{concat}(\sin(\text{out}), \cos(\text{out})) $$
+     [S1, unofficial].
+
+4. **Post-processing:**
+   * If `cat_coords` is true, concatenate the original coordinates $(x, y)$ to the embedding [S2, unofficial].
+   * If `n_cls_token > 0`, prepend $n\_cls\_token$ rows of zeros of shape $(n\_cls\_token, C)$ to the embedding [S1, unofficial].
+   * If the embedding size needs to match a specific checkpoint resolution (e.g., for interpolation), use bilinear or nearest neighbor interpolation to resize the grid embedding [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import torch
+
+def get_2d_sincos_pos_embed_grid(embed_dim, grid_size, n_cls_token=0):
+    """
+    Generates 2D sine-cosine positional embeddings for a grid using exponential frequencies.
+    """
+    assert embed_dim % 2 == 0, "Embed dimension must be even"
+    h, w = grid_size, grid_size
+    
+    # Step 1: Create 1D grids
+    pos_h = np.arange(h, dtype=np.float32)
+    pos_w = np.arange(w, dtype=np.float32)
+    grid_h, grid_w = np.meshgrid(pos_h, pos_w, indexing='ij')
+    
+    # Step 2: Compute frequencies
+    half_dim = embed_dim // 2
+    omega = np.exp(np.arange(half_dim, dtype=np.float32) * (-np.log(10000.0) / half_dim))
+    
+    # Step 3: Compute embeddings for height and width
+    out_h = np.einsum('m,d->md', grid_h.flatten(), omega)
+    emb_h = np.concatenate([np.sin(out_h), np.cos(out_h)], axis=1)
+    
+    out_w = np.einsum('m,d->md', grid_w.flatten(), omega)
+    emb_w = np.concatenate([np.sin(out_w), np.cos(out_w)], axis=1)
+    
+    # Step 4: Combine H and W embeddings
+    pos_embed = np.zeros((h * w, embed_dim), dtype=np.float32)
+    pos_embed[:, :half_dim] = emb_h
+    pos_embed[:, half_dim:] = emb_w
+    
+    # Step 5: Reshape to grid
+    pos_embed = pos_embed.reshape(h, w, embed_dim)
+    pos_embed = np.expand_dims(pos_embed, axis=0)  # (1, H, W, C)
+    
+    # Step 6: Prepend class tokens
+    if n_cls_token > 0:
+        cls_tokens = np.zeros((1, n_cls_token, embed_dim), dtype=np.float32)
+        pos_embed = np.concatenate([cls_tokens, pos_embed], axis=1)
+        
+    return pos_embed
+
+def get_2d_sincos_pos_embed_batched(xy, embed_dim, cat_coords=False):
+    """
+    Generates embeddings for batched coordinates (B, N, 2) using linear frequency spacing.
+    """
+    assert embed_dim % 2 == 0
+    B, N, _ = xy.shape
+    half_dim = embed_dim // 2
+    
+    # Compute div_term: (1, 1, half_dim)
+    div_term = torch.arange(0, half_dim, dtype=torch.float32) * (1000.0 / embed_dim)
+    div_term = div_term.view(1, 1, -1)
+    
+    x = xy[:, :, 0:1]  # (B, N, 1)
+    y = xy[:, :, 1:2]  # (B, N, 1)
+    
+    pe_x = torch.zeros(B, N, embed_dim, dtype=torch.float32)
+    pe_y = torch.zeros(B, N, embed_dim, dtype=torch.float32)
+    
+    # Even indices: sin, Odd indices: cos
+    pe_x[:, :, 0::2] = torch.sin(x * div_term)
+    pe_x[:, :, 1::2] = torch.cos(x * div_term)
+    
+    pe_y[:, :, 0::2] = torch.sin(y * div_term)
+    pe_y[:, :, 1::2] = torch.cos(y * div_term)
+    
+    pos_embed = torch.cat([pe_x, pe_y], dim=-1)
+    
+    if cat_coords:
+        pos_embed = torch.cat([pos_embed, xy], dim=-1)
+        
+    return pos_embed
+```
+
+**Parameters:**
+* `embed_dim`: Output dimension for each position. Must be even [S1, unofficial].
+* `grid_size`: Height and width of the grid (integer) [S1, unofficial].
+* `xy`: Coordinates tensor of shape $(B, N, 2)$ [S2, unofficial].
+* `C`: Embedding dimension (alias for `embed_dim`) [S2, unofficial].
+* `n_cls_token`: Number of class tokens to prepend zeros for (default 0) [S1, unofficial].
+* `cat_coords`: Flag to concatenate original coordinates (default False) [S2, unofficial].
+
+**Edge Cases:**
+* `embed_dim` must be even. If odd, the sine/cosine pairing is incomplete [S1, unofficial].
+* Precision issues may arise with very large coordinates or very high frequencies due to floating-point limitations in trigonometric functions [G].
+
+## Subtopics
+
+### [Expected Sine/Cosine Encoding](12852-expected-sine-cosine-encoding.md)
+Expected Sine/Cosine Encoding computes the expected value of sine and cosine functions for input coordinates treated as Gaussian random variables with a specified mean and variance. It serves as an integrated positional encoding that accounts for uncertainty or scale in the input domain, distinguishing it from standard Fourier positional encoding which assumes deterministic inputs. This method is particularly useful in neural fields where inputs represent volumes or regions rather than points, ensuring the encoded features remain statistically consistent with the underlying distribution.
+
+#### One-blob Encoding
+One-blob Encoding is a continuous variant of the one-hot encoding based on rasterizing a kernel [S4, unofficial]. It achieves more accurate results than frequency encodings in bounded domains but is single-scale [S4, unofficial].
+
+## Operating characteristics
+* **Time Complexity:** $O(N \cdot C)$ for $N$ points and embedding dimension $C$ [G].
+* **Memory Complexity:** $O(N \cdot C)$ to store the embeddings [G].
+* Computation is dominated by trigonometric functions [G].
+* **Strengths:** Deterministic, no training required for the encoder itself, effective at helping MLPs learn high-frequency details [S1, S2, unofficial].
+* **Limitations:** Fixed frequencies may not be optimal for all datasets; linear spacing (as in [S2, unofficial]) vs exponential spacing (as in [S1, unofficial]) can lead to different performance characteristics [S1, S2, unofficial]. Single-scale nature of variants like One-blob limits multi-resolution capability [S4, unofficial].
+* **When to use:** When using MLPs for coordinate-based representations (e.g., NeRF, SIREN) and computational overhead of learning frequencies is undesirable [S1, S2, unofficial].
+* **When not to use:** When input uncertainty is significant (use Expected Sine/Cosine) or when multi-scale features are required without additional network depth [S4, unofficial].
+
+## Background
+The method originates from the use of sinusoidal functions for positional encoding in sequence modeling and vision transformers, later adapted for coordinate-based neural networks [G]. The specific implementation details for 2D grids are found in various open-source repositories [S1, S2, unofficial]. The theoretical basis for using frequency encodings in computer graphics, such as approximating visibility functions, dates back to Annen et al. [2007] and Jansen and Bavoil [2010] [S4, unofficial]. Müller et al. [2019, 2020] introduced continuous variants like One-blob encoding [S4, unofficial].
+
+## Sources
+[S1] cvg/NoPoSplat, https://github.com/cvg/NoPoSplat, fetched 2026-10-27 (unofficial)
+[S2] InternRobotics/AnySplat, https://github.com/InternRobotics/AnySplat, fetched 2026-10-27 (unofficial)
+[S3] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
+[S4] Instant Neural Graphics Primitives with a Multiresolution ..., https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Mueller22.pdf, fetched 2026-10-28 (unofficial)

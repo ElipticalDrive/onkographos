@@ -1,0 +1,346 @@
+# Plane Parallel Radiance Transport for Vegetation
+
+Also called: PPRT for Vegetation, Runge-Kutta Radiative Transfer for Vegetation
+
+## Overview
+A method to compute global illumination in dense vegetation by assuming radiance depends positionally only on height $z$ (not $x, y$) and angularly on direction. This reduces partial differential equations (PDEs) for radiance transport to ordinary differential equations (ODEs) in $z$, allowing direct solution via Runge-Kutta instead of iterative methods [S1, book]. It builds on [Riccati Equation for Boundary Conditions](20199-riccati-equation-for-boundary-conditions.md) to handle the two-point boundary value problem.
+
+## How it works
+**Inputs:**
+- Vegetation layer height $h$.
+- Leaf area density and surface normal distribution as functions of height $z$.
+- Optical properties: albedo $\alpha$, extinction coefficient $K$, and scattering phase function $\Gamma$ for leaves, trunks, branches, stems, and twigs.
+- Boundary conditions: Sky radiance angular distribution at $z=h$ and ground BRDF at $z=0$.
+
+**Outputs:**
+- Radiance distribution $I(z, \omega)$ as a function of height and direction.
+- Precomputed diffuse and specular "ambient" shading tables as a function of height and surface normal [S1, book].
+
+**Data Structures:**
+1.  **Direction Bins:** The unit sphere is divided into discrete direction bins.
+    -   $2m$ bins in polar angle $\theta$ (measured from vertical $z$ axis).
+    -   $n$ bins in azimuthal angle $\phi$ (measured from $x$ axis in $x-y$ plane).
+    -   The first and last $\theta$ bins (polar caps) are not subdivided by $\phi$; they remain as single bins.
+    -   Total number of bins $N_{bins} = (2m - 2)n + 2$.
+    -   Bins are chosen such that no bin straddles the equator ($\theta = \pi/2$).
+    -   Intensity vector $I(z)$ is a row vector of size $N_{bins}$, separated into two row vectors: $I_u(z)$ for upwards flow (upper hemisphere) and $I_d(z)$ for downwards flow (lower hemisphere).
+    -   $\mu_i$ is the cosine of the representative $\theta$ for bin $i$.
+
+2.  **Scattering Matrices:** Square matrices of size $N_{bins} \times N_{bins}$, precomputed for each orientation of the normal to an opaque surface and each wavelength band.
+    -   Separate matrices are made for diffuse reflection, diffuse transmission, and specular reflection.
+    -   Entries are computed by averaging the volume scattering phase function $\Gamma$ over sampled pairs of rays (one from bin $i$, one from bin $j$) and over the range of $\phi_N$ angles for the surface normal.
+    -   Due to isotropy assumptions in the coordinate system aligned with the surface normal, many entries are identical.
+
+3.  **Tabulated Densities:** For each height $z$, tabulate the density of surface area per unit volume with normals in each $\theta$ bin (collecting all $\phi$). Leaf surface density is tabulated separately from trunk/branch/stem/twig polygons.
+
+**Steps:**
+
+1.  **Precompute Scattering Matrices:**
+    For each surface normal orientation and wavelength band:
+    -   Compute the bin-to-bin scattering matrix $\tau_{ij}(z)$, which represents the product $K(X, \omega) \alpha \Gamma(X, \omega, \omega')$.
+    -   Modify $\tau_{ij}(z)$ to include the extinction term $-K(X, \omega)$ in the diagonal entries (or as a separate term in the ODE system).
+    -   Compute the extinction coefficient $K(X, \omega)$, representing geometric occlusion from polygon surface area projected normal to $\omega$ per unit volume. This depends on the distribution of polygon normals.
+
+2.  **Tabulate Area Densities:**
+    For each height $z$:
+    -   Determine the density of surface area per unit volume for each $\theta$ bin for leaves and for woody parts (trunks, branches, etc.).
+    -   Combine precomputed quantities or matrices weighted by these tabulated area densities and albedos for each color band to approximate $K(X, \omega)$ and $K(X, \omega) \alpha \Gamma(X, \omega, \omega')$ at any position.
+
+3.  **Formulate ODE System:**
+    The integral-differential equation of radiance transport reduces to a linear system of ODEs:
+    $$ \frac{dI}{dz} = I(z) T(z) $$
+    where $I$ is a row vector of intensities $I_i(z)$, $\mu_i$ is the cosine of the representative $\theta$ for bin $i$, and $T_{ij}(z)$ is the bin-to-bin scattering matrix modified with the extinction term $-K$.
+
+    It is convenient to separate the vector of intensities into two smaller row vectors, $I_u(z)$ (upwards flow) and $I_d(z)$ (downwards flow). This yields two coupled vector differential equations:
+    $$ \frac{dI_u}{dz} = I_u(z) T_{uu}(z) + I_d(z) P_{du}(z) $$
+    $$ \frac{dI_d}{dz} = - (I_u(z) P_{ud}(z) + I_d(z) T_{dd}(z)) $$
+    where $T_{uu}, T_{dd}$ are the scattering matrices within the upper and lower hemispheres, and $P_{du}, P_{ud}$ are matrices representing scattering from lower to upper and upper to lower hemispheres, respectively. The entries in $P_{du}$ are terms $\tau_{ji} / \mu_j$ for directions $j$ in the lower hemisphere and $i$ in the upper. Note that signs on derivatives are reversed if $z$ measures downwards from a water surface [S1, book].
+
+4.  **Apply Boundary Conditions:**
+    -   **Top ($z=h$):** $I_u(h)$ is determined by illumination from the sun and sky.
+        -   Use the semi-empirical model of Harrison and Coombes for sky radiance angular distribution.
+        -   Use the clear-sky irradiance model of Gregg and Carder for direct and diffuse spectral irradiances.
+        -   Use the model of Kasten and Czeplak to adjust irradiances when cloud fraction $> 0.25$.
+    -   **Bottom ($z=0$):** Given by the BRDF of the ground.
+        -   Let $F$ be the bin-to-bin matrix approximation to the ground BRDF.
+        -   Boundary condition: $I_u(0) = I_d(0) F$.
+
+5.  **Solve the Two-Point Boundary Value Problem:**
+    The system has boundary conditions at both $z=h$ and $z=0$. This is solved by converting it into an initial value problem using the Riccati equation approach (see [Riccati Equation for Boundary Conditions](20199-riccati-equation-for-boundary-conditions.md)).
+    -   Determine $I_u(h)$ by solving an auxiliary differential equation.
+    -   Solve the coupled ODEs (3) as an initial value problem from $z=h$ down to $z=0$ (or vice versa, depending on formulation) using the Runge-Kutta method.
+
+6.  **Rendering:**
+    -   Subtract the attenuated direct solar illumination from the ODE solution to avoid double-counting [S1, book].
+    -   Use a z-buffer shadow algorithm for direct solar illumination.
+    -   Use the resulting radiance distribution to precompute diffuse and specular "ambient" shading tables as a function of height and surface normal, used in rendering together with the z-buffer shadow algorithm [S1, book].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def plane_parallel_radiance_transport(vegetation_layer, sky_model, ground_brdf):
+    """
+    Computes radiance transport in vegetation using plane parallel assumption.
+    
+    Args:
+        vegetation_layer: Object containing height h, leaf area density, normal distribution, 
+                          optical properties (albedo, extinction, phase function).
+        sky_model: Model for sky radiance angular distribution (e.g., Harrison and Coombes).
+        ground_brdf: BRDF of the ground (e.g., fallen-leaf texture map).
+        
+    Returns:
+        shading_tables: Precomputed diffuse and specular shading tables.
+    """
+    # 1. Discretize direction space
+    m = 16  # Example value, number of theta bins / 2
+    n = 8   # Example value, number of phi bins
+    num_theta_bins = 2 * m
+    num_phi_bins = n
+    
+    # Total bins: (2m - 2) * n + 2
+    # First and last theta bins are polar caps, not subdivided by phi
+    total_bins = (2 * m - 2) * n + 2
+    
+    # Create direction bins
+    # Theta bins: 0 to pi, excluding equator straddling
+    # Phi bins: 0 to 2pi
+    direction_bins = create_direction_bins(num_theta_bins, num_phi_bins)
+    
+    # 2. Precompute scattering matrices
+    # For each surface normal orientation and wavelength band
+    scattering_matrices = {}
+    for normal_orientation in vegetation_layer.normal_orientations:
+        for wavelength in vegetation_layer.wavelengths:
+            # Compute bin-to-bin scattering matrix tau_ij
+            # Average phase function over sampled ray pairs and phi_N angles
+            tau = compute_scattering_matrix(direction_bins, vegetation_layer.phase_function, 
+                                            normal_orientation, wavelength)
+            
+            # Compute extinction coefficient K
+            K = compute_extinction_coefficient(direction_bins, vegetation_layer.normal_distribution, 
+                                               wavelength)
+            
+            # Modify tau to include extinction term -K
+            tau_modified = tau - K
+            
+            # Store separate matrices for diffuse reflection, diffuse transmission, specular reflection
+            scattering_matrices[(normal_orientation, wavelength)] = tau_modified
+            
+    # 3. Tabulate area densities
+    area_densities = {}
+    for z in vegetation_layer.heights:
+        area_densities[z] = {
+            'leaves': vegetation_layer.leaf_area_density(z),
+            'woody': vegetation_layer.woody_area_density(z)
+        }
+        
+    # 4. Formulate ODE system
+    # Separate intensity vector into I_u (upwards) and I_d (downwards)
+    # I_u: upper hemisphere bins
+    # I_d: lower hemisphere bins
+    
+    # Define matrices T_uu, T_dd, P_du, P_ud
+    # T_uu: scattering within upper hemisphere
+    # T_dd: scattering within lower hemisphere
+    # P_du: scattering from lower to upper hemisphere
+    # P_ud: scattering from upper to lower hemisphere
+    
+    T_uu, T_dd, P_du, P_ud = decompose_scattering_matrices(scattering_matrices, direction_bins)
+    
+    # 5. Apply boundary conditions
+    # Top boundary: z = h
+    I_u_h = compute_sky_radiance(direction_bins, sky_model, vegetation_layer.heights[-1])
+    
+    # Bottom boundary: z = 0
+    # I_u(0) = I_d(0) * F, where F is the ground BRDF matrix
+    F = compute_ground_brdf_matrix(ground_brdf, direction_bins)
+    
+    # 6. Solve ODE system using Riccati equation approach
+    # Convert two-point boundary value problem to initial value problem
+    # Determine I_u(h) by solving auxiliary differential equation
+    # Then solve coupled ODEs using Runge-Kutta
+    
+    # Initialize I_d at z = h (unknown, to be determined)
+    # Use shooting method or Riccati transformation to find I_u(h) and I_d(h)
+    
+    # Solve dI_u/dz = I_u * T_uu + I_d * P_du
+    # Solve dI_d/dz = -(I_u * P_ud + I_d * T_dd)
+    
+    I_u, I_d = solve_ode_system(T_uu, T_dd, P_du, P_ud, I_u_h, F, vegetation_layer.heights)
+    
+    # 7. Compute shading tables
+    shading_tables = compute_shading_tables(I_u, I_d, vegetation_layer.heights, direction_bins)
+    
+    return shading_tables
+
+def create_direction_bins(num_theta_bins, num_phi_bins):
+    """
+    Creates direction bins for the unit sphere.
+    First and last theta bins are polar caps.
+    """
+    bins = []
+    theta_step = pi / num_theta_bins
+    phi_step = 2 * pi / num_phi_bins
+    
+    # Polar caps
+    bins.append({'theta': 0, 'phi': None, 'mu': 1.0}) # North pole
+    bins.append({'theta': pi, 'phi': None, 'mu': -1.0}) # South pole
+    
+    # Equatorial bins
+    for i in range(1, num_theta_bins - 1):
+        theta = i * theta_step
+        mu = cos(theta)
+        for j in range(num_phi_bins):
+            phi = j * phi_step
+            bins.append({'theta': theta, 'phi': phi, 'mu': mu})
+            
+    return bins
+
+def compute_scattering_matrix(direction_bins, phase_function, normal_orientation, wavelength):
+    """
+    Computes bin-to-bin scattering matrix by averaging phase function.
+    """
+    num_bins = len(direction_bins)
+    tau = zeros((num_bins, num_bins))
+    
+    for i, bin_i in enumerate(direction_bins):
+        for j, bin_j in enumerate(direction_bins):
+            # Average phase function over sampled ray pairs and phi_N angles
+            # This involves integrating over the range of phi_N angles for the surface normal
+            tau[i, j] = average_phase_function(phase_function, bin_i, bin_j, normal_orientation, wavelength)
+            
+    return tau
+
+def compute_extinction_coefficient(direction_bins, normal_distribution, wavelength):
+    """
+    Computes extinction coefficient K representing geometric occlusion.
+    """
+    K = zeros(len(direction_bins))
+    
+    for i, bin_i in enumerate(direction_bins):
+        # K depends on the distribution of polygon normals
+        # Projected surface area normal to direction per unit volume
+        K[i] = integrate_normal_distribution(normal_distribution, bin_i['theta'], bin_i['phi'], wavelength)
+        
+    return K
+
+def decompose_scattering_matrices(scattering_matrices, direction_bins):
+    """
+    Decomposes scattering matrices into T_uu, T_dd, P_du, P_ud.
+    """
+    # Identify upper and lower hemisphere bins
+    upper_bins = [i for i, bin in enumerate(direction_bins) if bin['mu'] > 0]
+    lower_bins = [i for i, bin in enumerate(direction_bins) if bin['mu'] < 0]
+    
+    # Extract submatrices
+    # T_uu: scattering within upper hemisphere
+    # T_dd: scattering within lower hemisphere
+    # P_du: scattering from lower to upper hemisphere
+    # P_ud: scattering from upper to lower hemisphere
+    
+    # Note: Entries in P_du are terms tau_ji / mu_j for directions j in lower hemisphere and i in upper
+    # This accounts for the change in dz vs ds
+    
+    return T_uu, T_dd, P_du, P_ud
+
+def compute_sky_radiance(direction_bins, sky_model, height):
+    """
+    Computes sky radiance at the top of the vegetation layer.
+    """
+    I_u = zeros(len([i for i, bin in enumerate(direction_bins) if bin['mu'] > 0]))
+    
+    for i, bin in enumerate(direction_bins):
+        if bin['mu'] > 0:
+            # Use semi-empirical model of Harrison and Coombes
+            radiance = sky_model.get_sky_radiance(bin['theta'], bin['phi'])
+            I_u[i] = radiance
+            
+    return I_u
+
+def compute_ground_brdf_matrix(ground_brdf, direction_bins):
+    """
+    Computes bin-to-bin matrix F approximation to the ground BRDF.
+    """
+    num_bins = len(direction_bins)
+    F = zeros((num_bins, num_bins))
+    
+    # Use fallen-leaf texture map or other method to determine BRDF
+    for i, bin_i in enumerate(direction_bins):
+        for j, bin_j in enumerate(direction_bins):
+            # Compute BRDF for direction bin i to bin j
+            F[i, j] = ground_brdf.get_brdf(bin_i, bin_j)
+            
+    return F
+
+def solve_ode_system(T_uu, T_dd, P_du, P_ud, I_u_h, F, heights):
+    """
+    Solves the coupled ODE system using Runge-Kutta method.
+    Uses Riccati equation approach to handle two-point boundary conditions.
+    """
+    # Initialize I_u and I_d
+    # I_u_h is known at z = h
+    # I_d_h is unknown, to be determined by Riccati equation
+    
+    # Solve auxiliary differential equation to find I_u(h) and I_d(h)
+    # Then solve coupled ODEs from z = h to z = 0
+    
+    # Runge-Kutta integration
+    I_u, I_d = runge_kutta_integration(T_uu, T_dd, P_du, P_ud, I_u_h, F, heights)
+    
+    return I_u, I_d
+
+def runge_kutta_integration(T_uu, T_dd, P_du, P_ud, I_u_h, F, heights):
+    """
+    Performs Runge-Kutta integration of the coupled ODEs.
+    """
+    # Implement 4th order Runge-Kutta method
+    # dI_u/dz = I_u * T_uu + I_d * P_du
+    # dI_d/dz = -(I_u * P_ud + I_d * T_dd)
+    
+    # Note: Signs on derivatives are reversed if z measures downwards
+    # Here z measures upwards from ground, so signs are as given
+    
+    # Initialize I_u and I_d at z = h
+    # I_u(h) is known from sky radiance
+    # I_d(h) is determined by Riccati equation solution
+    
+    # Integrate from z = h to z = 0
+    # ... (implementation details of Runge-Kutta)
+    
+    return I_u, I_d
+
+def compute_shading_tables(I_u, I_d, heights, direction_bins):
+    """
+    Computes diffuse and specular shading tables as a function of height and surface normal.
+    """
+    shading_tables = {}
+    
+    for z, I_u_z, I_d_z in zip(heights, I_u, I_d):
+        # Combine I_u and I_d to get full radiance distribution
+        I = combine_up_down_radiance(I_u_z, I_d_z, direction_bins)
+        
+        # Compute shading tables for different surface normals
+        for normal in vegetation_layer.normal_orientations:
+            # Use radiance distribution to compute diffuse and specular shading
+            shading_tables[(z, normal)] = compute_shading_for_normal(I, normal)
+            
+    return shading_tables
+```
+
+## Operating characteristics
+-   **Time Complexity:** Depends on the number of direction bins ($N_{bins}$) and height samples. The ODE solution is direct (Runge-Kutta), avoiding iterative convergence, but requires precomputation of scattering matrices.
+-   **Memory Complexity:** Proportional to $N_{bins}^2$ for scattering matrices and $N_{bins}$ for intensity vectors.
+-   **Strengths:** Direct solution avoids iterative methods; efficient for dense vegetation where plane-parallel assumption holds; precomputed shading tables enable fast rendering.
+-   **Limitations:** Cannot model isolated trees; cannot correctly model the "hot spot" effect (viewing direction near solar illumination direction) due to infinitesimal scatterer assumption; requires z-buffer shadow algorithm for direct solar illumination.
+-   **When to Use:** Dense vegetation canopies where global illumination is important and computational efficiency is desired.
+-   **When Not to Use:** Scenes with isolated trees, strong directional shadows (hot spot), or where high-fidelity direct solar illumination is critical without post-processing.
+
+## Background
+-   **Origin:** Developed for global illumination in vegetation rendering, building on radiosity and radiance methods. The plane-parallel assumption reduces PDEs to ODEs, allowing direct solution via Runge-Kutta.
+-   **History:** Based on radiation transport studies in leaf canopies for photosynthesis and remote sensing. The method uses techniques from Hydrolight code (Mobley) and applies them to vegetation rendering.
+-   **Usage:** Used to precompute diffuse and specular "ambient" shading tables for rendering, combined with z-buffer shadow algorithms for direct solar illumination.
+
+## Sources
+[S1] Plane parallel radiance transport for global illumination in vegetation, https://www.osti.gov/biblio/649229, fetched 2026-10-26 (book)

@@ -1,0 +1,140 @@
+# SparSplat
+
+Also called: Generalizable 2D Gaussian Splatting, SparSplat Model, SparSplat: Fast Multi-View Reconstruction with Generalizable 2D Gaussian Splatting
+
+## Overview
+SparSplat is a generalizable, feed-forward model that maps a set of sparse input images (typically 3) to a pixel-aligned map of 2D Gaussian Splatting (2DGS) parameters for a target view, enabling both 3D shape reconstruction and novel view synthesis in a single forward pass [S1, unofficial]. It differs from its sibling [Generalizable Pixel-Wise 3D Gaussian Splatting](17059-generalizable-pixel-wise-3d-gaussian-splatting.md) and [FineSplat](15257-finesplat.md) by explicitly using 2D Gaussian primitives rather than 3D Gaussians, which ensures multi-view depth consistency required for coherent TSDF mesh fusion, whereas prior 3DGS-based generalizable methods fail to produce coherent surfaces when fused [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ color images $\{I_i\}_{i=1}^N$ (where $N=3$ in training) with known camera poses $\{P_i\}_{i=1}^N$, and a target view pose $P_t$.
+*   **Outputs:** A Gaussian parameter map $O_t \in \mathbb{R}^{H \times W \times 13}$ for the target view, containing scale ($s$), rotation quaternion ($q$), centroid ($p$), opacity ($\alpha$), and color ($c$). The layout is $\{s, q, p, \alpha, c\}$ with channel dimensions $2+4+3+1+3$. From this, a 3D triangle mesh $S$ is extracted via TSDF fusion of splatted depths [S1, unofficial].
+
+**Data Structures:**
+The core data structure is the parameter map $O_t$. Each pixel $(u,v)$ holds a 13-dimensional vector:
+1.  $s \in \mathbb{R}^2$: Scale parameters (typically log-scale or direct scale, mapped to anisotropic 2D covariance).
+2.  $q \in \mathbb{R}^4$: Rotation quaternion.
+3.  $p \in \mathbb{R}^3$: 3D centroid position.
+4.  $\alpha \in \mathbb{R}$: Opacity.
+5.  $c \in \mathbb{R}^3$: RGB color.
+
+**Algorithm Steps:**
+1.  **Feature Encoding:** Encode each input image $I_i$ using a Feature Pyramid Network (FPN) to obtain 2D feature maps $f_i$. Enhance these with monocular semantic features from DINOv2 and pairwise dense correspondence features from MASt3R [S1, unofficial].
+2.  **Homography Warping:** Warp the feature maps $f_i$ to the target view coordinate system using the relative poses $P_t / P_i$ to obtain warped features $f_{t,i}$ [S1, unofficial].
+3.  **Cost Volume Construction:** Merge the warped features $f_{t,i}$ into a 3D cost volume.
+4.  **Depth Prediction (DeepMVS Branch):** Process the cost volume with a 3D convolutional network to produce a probability volume, yielding a depth prediction $D_{pred}$ [S1, unofficial].
+    *   *Implementation Note:* Sample 64 depth planes for the coarse stage and 8 for the fine stage [S1, unofficial].
+5.  **Feature Pooling:** Pool the warped features $f_{t,i}$ into a single target feature map $f_t$ [S1, unofficial].
+6.  **Gaussian Attribute Prediction:** Pass $f_t$ through a 2D convolutional network and an MLP to predict the Gaussian attributes $\{s, q, \alpha, c\}$ [S1, unofficial].
+7.  **Centroid Unprojection:** Unproject the predicted depth $D_{pred}$ using the target camera intrinsics $K$ and pose $P_t$ to compute the 3D centroids $p$. Combine $p$ with $\{s, q, \alpha, c\}$ to form the full parameter map $O_t$ [S1, unofficial].
+8.  **Rendering:** Render the scene using perspective-accurate 2D Gaussian Splatting rasterization [S1, unofficial].
+9.  **Mesh Extraction (Optional):** For 3D reconstruction, render mean depth maps for all input views $P_i$ using their respective parameter maps $O_i = \Phi(P_i | I_1, ..., I_N)$. Fuse these depth maps using Truncated Signed Distance Function (TSDF) fusion with a voxel size of 1.5 to generate the mesh $S$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sparsplat_forward(input_images, input_poses, target_pose, camera_intrinsics):
+    """
+    input_images: List[N, H, W, 3]
+    input_poses: List[N, 4, 4]
+    target_pose: 4, 4
+    camera_intrinsics: 3, 3
+    Returns: parameter_map (H, W, 13), depth_map (H, W)
+    """
+    N = len(input_images)
+    
+    # Step 1: Feature Encoding
+    # f_i: List[N, C, H, W]
+    f_i = [fpn(img) for img in input_images]
+    
+    # Enhance with foundation models (DINOv2, MASt3R)
+    # This step is implicit in the architecture description; 
+    # in implementation, features are concatenated or fused here.
+    f_i_enhanced = enhance_with_foundation_models(f_i)
+
+    # Step 2: Homography Warping
+    # f_t_i: List[N, C, H, W]
+    f_t_i = []
+    for i in range(N):
+        # Warp features from source i to target view
+        # H_rel is the homography derived from target_pose / input_poses[i]
+        H_rel = compute_homography(target_pose, input_poses[i], camera_intrinsics)
+        f_t_i.append(warp_features(f_i_enhanced[i], H_rel))
+
+    # Step 3 & 4: DeepMVS Branch for Depth
+    # cost_volume: (H, W, D, C) where D is number of depth planes
+    cost_volume = build_cost_volume(f_t_i)
+    
+    # probability_volume: (H, W, D)
+    probability_volume = conv3d_network(cost_volume)
+    
+    # depth_pred: (H, W)
+    depth_pred = soft_argmax(probability_volume)
+    
+    # Step 5: Feature Pooling
+    # f_t: (C, H, W)
+    f_t = pool_features(f_t_i)
+
+    # Step 6: Gaussian Attribute Prediction
+    # s: (H, W, 2), q: (H, W, 4), alpha: (H, W, 1), c: (H, W, 3)
+    s, q, alpha, c = gaussian_attribute_mlp(f_t)
+
+    # Step 7: Centroid Unprojection
+    # p: (H, W, 3)
+    # Unproject depth_pred using camera_intrinsics and target_pose
+    p = unproject_depth(depth_pred, target_pose, camera_intrinsics)
+
+    # Combine into parameter map
+    # Layout: s(2) + q(4) + p(3) + alpha(1) + c(3) = 13
+    parameter_map = concatenate([s, q, p, alpha, c], axis=-1)
+    
+    return parameter_map, depth_pred
+
+def extract_mesh(parameter_maps, poses, intrinsics, voxel_size=1.5):
+    """
+    parameter_maps: List[N, H, W, 13]
+    poses: List[N, 4, 4]
+    intrinsics: 3, 3
+    Returns: Mesh S
+    """
+    depth_maps = []
+    for i in range(len(parameter_maps)):
+        # Render depth from 2DGS parameters for view i
+        # This involves splatting the Gaussians defined by parameter_maps[i]
+        # projected to the camera defined by poses[i]
+        depth_map = render_2dgs_depth(parameter_maps[i], poses[i], intrinsics)
+        depth_maps.append(depth_map)
+    
+    # TSDF Fusion
+    mesh = tsdf_fusion(depth_maps, poses, intrinsics, voxel_size)
+    return mesh
+```
+
+**Parameters:**
+*   **Training Resolution:** $640 \times 512$ [S1, unofficial].
+*   **Number of Source Images ($N$):** 3 [S1, unofficial].
+*   **Optimizer:** Adam, initial learning rate $5 \times 10^{-4}$ [S1, unofficial].
+*   **Training Steps:** 300,000 [S1, unofficial].
+*   **Hardware:** Single RTX A6000 GPU [S1, unofficial].
+*   **TSDF Voxel Size:** 1.5 [S1, unofficial].
+*   **Loss Weights:** $\lambda_s = 0.1, \lambda_p = 0.05, \lambda_\alpha = 0.05, \lambda_\beta = 0.05, \lambda_\gamma = 0.05, \lambda_1 = 0.5, \lambda_2 = 1$ [S1, unofficial].
+*   **Depth Planes:** 64 (coarse), 8 (fine) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **3DGS vs 2DGS:** Using 3D Gaussian Splatting (3DGS) instead of 2DGS leads to depth inconsistencies across views, causing TSDF fusion to produce warped or disconnected surfaces [S1, unofficial].
+*   **Feature Selection:** Using only image features or DINOv2 features yields inferior results compared to using MASt3R features. MASt3R provides an 11.11% boost in Chamfer Distance over image-only features, while DINOv2 provides only a 0.85% boost [S1, unofficial].
+*   **Depth Loss:** Omitting the depth loss $L_{depth}$ significantly degrades reconstruction quality. Adding it improves mean Chamfer Distance by 71.8% (from 4.37 to 1.04) [S1, unofficial].
+
+## Operating characteristics
+*   **Inference Speed:** Approximately 0.8–0.88 seconds on an RTX A6000 GPU [S1, unofficial]. This is nearly 2 orders of magnitude faster than prior state-of-the-art feed-forward sparse-view reconstruction methods based on implicit volume rendering (e.g., UfoRecon at 66s, GeoTransfer at 32s) [S1, unofficial].
+*   **Reconstruction Accuracy:** On the DTU test set, SparSplat achieves a mean Chamfer Distance of 1.04 (with MASt3R features and depth loss) [S1, unofficial].
+*   **Novel View Synthesis (NVS):** On the DTU test set, SparSplat achieves PSNR 28.33, SSIM 0.938, and LPIPS 0.073 [S1, unofficial]. It outperforms MVSGaussian, particularly in regions with low input view overlap [S1, unofficial].
+*   **Strengths:** Fast inference, coherent 3D mesh reconstruction via TSDF, strong generalization on sparse views (3 images), and high-quality NVS.
+*   **Limitations:** Relies on external foundation models (DINOv2, MASt3R) for feature extraction, which may increase memory footprint during inference if not cached. Performance is tied to the quality of the 2DGS representation for surface consistency.
+
+## Background
+SparSplat was introduced by Shubhendu Jena et al. in 2025 [S1, unofficial]. It builds upon the MVSGaussian framework [48] but replaces 3D Gaussians with 2D Gaussians to address the lack of surface coherence in generalizable Gaussian splatting methods. It leverages advances in foundation models, specifically DINOv2 for monocular semantic features and MASt3R for dense pairwise correspondences, to enhance multi-view consistency. The method is designed for sparse-view 3D reconstruction and novel view synthesis, targeting applications in robotics, AR/VR, and autonomous systems where fast, generalizable reconstruction from few images is critical [S1, unofficial].
+
+## Sources
+[S1] SparSplat: Fast Multi-View Reconstruction with Generalizable 2D Gaussian Splatting, https://doi.org/10.48550/arXiv.2505.02175, fetched 2026-10-26 (unofficial)

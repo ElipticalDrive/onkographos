@@ -1,0 +1,45 @@
+# 3D Representation Formulation
+Also called: Queryable Model, Unified 3D Representation
+
+## Overview
+The 3D Representation Formulation provides a unified mathematical framework for defining scene functions $F_\Theta: \mathbb{R}^d \rightarrow \mathbb{R}^k$ by categorizing them into explicit and implicit types based on whether the mapping is structurally explicit or implicit and whether its domain is discrete or continuous [S1]. It bridges the gap between discrete coefficient-based storage (e.g., meshes, voxels) and continuous neural fields, establishing the foundational distinction for all neural and primitive-based representations [S1]. The method builds on [Neural and primitive-based representations](10-neural-and-primitive-based-representations.md).
+
+## How it works
+The formulation defines a mapping function $f$ that associates points in a domain $\mathbf{D}$ with geometric and appearance properties [S1]. The core distinction lies in the nature of the domain $\mathbf{D}$ and the structure of the mapping $f$ [S1].
+
+**Inputs and Outputs:**
+*   **Input:** A point $\mathbf{s} \in \mathbf{D}$, where $\mathbf{D}$ is the domain (discrete or continuous) [S1].
+*   **Output:** A 3D coordinate $\mathbf{p} \in \mathbf{G} = \mathbb{R}^3$ and potentially appearance attributes $\mathbf{A}$ [S1].
+
+**Data Structures:**
+1.  **Explicit/Discrete:** Stores coefficients (vertices, voxel densities) in a finite set, accessed via lookup and interpolation [S1].
+2.  **Explicit/Continuous:** Compact, resolution-agnostic functions that theoretically represent objects at arbitrary detail, but are typically limited to objects of fixed topology, usually of low genus [S1].
+3.  **Implicit/Discrete:** Regular structures (e.g., volumetric occupancy grids, signed distance fields) that represent objects of arbitrary topology and support convolutional operations, but are computationally expensive due to high memory requirements [S1].
+4.  **Implicit/Continuous (Queryable Models):** Neural fields that parameterize a function (e.g., MLP) to regress properties continuously, emerging from discrete implicit forms to address memory constraints while maintaining infinite resolution [S1].
+
+**Formulas:**
+The explicit mapping is defined as:
+$$ f : \mathbf{D} \rightarrow \mathbb{R}^3 \times \mathbf{A} $$
+where $\mathbf{s} \in \mathbf{D}$ maps to $\mathbf{p} \in \mathbb{R}^3$ [S1].
+
+**Pitfalls and Edge Cases:**
+*   **Discrete Irregularity:** Discrete representations (meshes, point clouds) lack a regular, grid-aligned structure, rendering standard convolution and pooling operations inapplicable [S1].
+*   **Permutation Invariance:** Methods must account for highly variable, non-uniform, and unordered structures [S1].
+*   **Transformation Sensitivity:** Raw 3D Cartesian coordinates are highly sensitive to rotation and translation; networks trained purely on raw coordinates fail under transformation without specialized invariant backbones [S1].
+
+## Subtopics
+
+### [Explicit Surface Representation](18590-explicit-surface-representation.md)
+Defines a 3D surface as the graph of a function mapping a 2D domain directly to 3D Euclidean space. It solves the problem of defining geometry where the surface position is uniquely determined by input parameters, avoiding the ambiguity of implicit zero-level sets. Unlike implicit representations that define volume occupancy or density, explicit representations directly output coordinates, making them suitable for surfaces that can be parameterized without self-intersection in the chosen domain.
+
+## Operating characteristics
+*   **Explicit/Discrete:** Efficient for rendering but challenging for neural integration due to irregularity and lack of grid alignment [S1].
+*   **Explicit/Continuous:** Resolution-agnostic but typically limited to objects of fixed topology, usually of low genus [S1].
+*   **Implicit/Discrete:** Supports arbitrary topology and convolution but is computationally expensive due to high memory requirements [S1].
+*   **Implicit/Continuous:** Emerges from discrete implicit forms to address memory constraints, providing constant memory usage relative to spatial resolution and infinite resolution reconstruction [S1].
+
+## Background
+The formulation originates from the classification of learning-based 3D representations, distinguishing between explicit (direct parameterization of surface locations) and implicit (occupancy/SDF) methods [S1]. It highlights the evolution from discrete structures to continuous queryable models to overcome memory and topological limitations [S1].
+
+## Sources
+[S1] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26

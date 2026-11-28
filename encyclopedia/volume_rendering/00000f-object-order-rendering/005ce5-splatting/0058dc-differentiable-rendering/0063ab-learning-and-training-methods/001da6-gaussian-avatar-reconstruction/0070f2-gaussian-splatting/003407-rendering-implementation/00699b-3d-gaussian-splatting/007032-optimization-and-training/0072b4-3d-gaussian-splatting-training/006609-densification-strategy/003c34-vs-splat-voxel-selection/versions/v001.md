@@ -1,0 +1,53 @@
+# VS-Splat Voxel Selection
+Also called: Ours, VS-Splat selection
+
+## Overview
+VS-Splat Voxel Selection is a learnable, differentiable mechanism for selecting relevant voxels in sparse-view 3D object reconstruction, designed to replace heuristic opacity thresholding [S1, unofficial]. It distinguishes itself by predicting confidence scores via a Gumbel-Sigmoid distribution and using these scores to refine opacity values, thereby enabling gradient-based optimization of voxel relevance [S1, unofficial]. Unlike static thresholding methods, it adapts to the scene content, selecting object-centric voxels more effectively while reducing the total number of primitives required [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A voxel grid (resolution $H=W=D=48$ in standard implementation) and per-voxel confidence scores predicted by a network [S1, unofficial].
+*   **Output:** A binary mask or refined opacity values indicating which voxels are active and contribute to rendering [S1, unofficial].
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D grid where each cell may contain fine-grained primitives (e.g., $M=16$ primitives per selected voxel) [S1, unofficial].
+*   **Confidence Scores:** A scalar value per voxel, predicted by the Selective Feature Refinement (SFR) module [S1, unofficial].
+
+**Steps:**
+1.  **Feature Extraction:** Extract 2D feature maps from input images using a pre-trained encoder (e.g., DINOv1) [S1, unofficial].
+2.  **Compression:** Compress features using a 3D convolutional compressor $C$, reducing channels from $2C=1,536$ to $\tilde{C}=128$ [S1, unofficial].
+3.  **Confidence Prediction:** Pass compressed features through the SFR module (containing $R=2$ residual convolutional blocks) to predict confidence scores for each voxel [S1, unofficial].
+4.  **Gumbel-Sigmoid Sampling:** Apply the Gumbel-Sigmoid function to the predicted confidence scores to produce differentiable binary-like selections [S1, unofficial].
+    *   Formula: $s = \sigma(\frac{z + \log(\tau) - \log(1-\tau)}{\tau})$, where $z$ is the logit, $\tau$ is the temperature, and $\sigma$ is the sigmoid function [S1, unofficial]. *Note: The exact Gumbel noise addition is implied by the "Gumbel-Sigmoid" name and standard practice for differentiable sampling, though the source text explicitly names the function.*
+5.  **Opacity Refinement:** Use the sampled scores to refine the opacity values of the voxels/primitives [S1, unofficial].
+6.  **Rendering:** Render the scene using only the selected voxels/primitives [S1, unofficial].
+
+**Parameters:**
+*   **Gumbel-Sigmoid Temperature ($\tau$):** Linearly annealed from 1.0 to 0.1 over the first 50,000 training iterations, then fixed at 0.1 for the remainder of training and inference [S1, unofficial].
+*   **Voxel Grid Resolution:** $H=W=D=48$ [S1, unofficial].
+*   **Primitives per Voxel:** $M=16$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Standard Sigmoid Failure:** Using a deterministic Sigmoid function instead of Gumbel-Sigmoid fails to properly select object-centric voxels, leading to significant quality drops (PSNR 18.01 vs 21.31) [S1, unofficial].
+*   **STE Limitation:** Applying a Straight-Through Estimator (STE) directly to confidence scores results in selecting an extremely limited number of voxels (121 voxels), degrading performance (PSNR 14.71) [S1, unofficial].
+*   **Threshold Sensitivity:** Heuristic opacity thresholding (OBT) requires manual tuning; excessive generation of primitives in background regions degrades quality [S1, unofficial].
+
+## Subtopics
+
+### Deterministic Sigmoid selection
+A variant replacing the Gumbel-Sigmoid with the deterministic Sigmoid function. It fails to select object-centric voxels properly, leading to significant rendering quality drops (PSNR 18.01, SSIM 0.835, LPIPS 0.288) and using 2,223 voxels on the CO3D dataset [S1, unofficial].
+
+### Straight-Through Estimator (STE) for Confidence Scores
+A variant that predicts confidence scores and applies STE to enable gradient flow. It results in selecting an extremely limited number of voxels (121 voxels), causing poor performance (PSNR 14.71, SSIM 0.814, LPIPS 0.317) on the CO3D dataset [S1, unofficial].
+
+## Operating characteristics
+*   **Performance:** On the CO3D dataset, VS-Splat achieves PSNR 21.31, SSIM 0.863, and LPIPS 0.213 [S1, unofficial].
+*   **Efficiency:** Uses 19,587 voxels, which is approximately 15% fewer than the Opacity-Based Thresholding (OBT) method (22,867 voxels) while outperforming it in all metrics [S1, unofficial].
+*   **Comparison:** Outperforms OBT in selecting object-centric voxels, avoiding the generation of fine-grained primitives in non-object background regions [S1, unofficial].
+*   **Speed:** Compared with LaRa, inference speed measurements were conducted on GObjaverse, GSO, and CO3D datasets, but specific speed numbers are not provided in the source [S1, unofficial].
+
+## Background
+VS-Splat was proposed in the paper "VS-Splat: Voxel-Selective feed-forward Gaussian Splatting for end-to-end 3D object reconstruction from sparse-views" [S1, unofficial]. It addresses the limitations of heuristic voxel selection methods like Opacity-Based Thresholding (OBT), which rely on manually tuned thresholds and often select irrelevant background voxels [S1, unofficial]. The method integrates a learnable selection mechanism into the Gaussian Splatting framework, using Gumbel-Sigmoid for differentiable voxel selection [S1, unofficial].
+
+## Sources
+[S1] VS-Splat: Voxel-Selective feed-forward Gaussian Splatting for end-to-end 3D object reconstruction from sparse-views, https://doi.org/10.48550/arxiv.2609.12343, fetched 2026-10-26 (unofficial)

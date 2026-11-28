@@ -1,0 +1,286 @@
+# JPEG 2000 9x7 Wavelet Kernel
+
+Also called: CDF 9/7, CDF9/7 Wavelet Transform, Lossy Wavelet, biorthogonal Cohen–Daubechies–Feauveau 9/7 wavelet, lifting steps wavelet transform
+
+## Overview
+The JPEG 2000 9x7 Wavelet Kernel is a biorthogonal wavelet transform used for lossy compression of volumetric data. It is a variation of the Cohen–Daubechies–Feauveau (CDF) biorthogonal cubic B-spline construction, selected by the JPEG committee for lossy compression in the JPEG 2000 standard [S1]. It offers improved energy compaction performance for lossy compression compared to the 5x3 kernel due to its higher factorization order and near-orthogonality [S1].
+
+## How it works
+### Inputs and Outputs
+*   **Input:** A 3D scalar field array $f$ of dimensions $n_x \times n_y \times n_z$.
+*   **Output:** A transformed array $F$ of the same dimensions containing approximation and detail coefficients. The transform is performed in-place, meaning the output array shares memory with the input array [S2].
+
+### Data Structures
+The 1D transform operates on an array of size $m$. The output array layout is:
+*   First $\lfloor m/2 \rfloor$ elements: Approximation coefficients $s_j$.
+*   Last $\lfloor m/2 \rfloor$ elements: Detail coefficients $d_j$ [S2].
+
+### Parameters
+*   **Lifting Coefficients:**
+    *   $\alpha = -1.5861343420693648$
+    *   $\beta = -0.0529801185718856$
+    *   $\gamma = 0.8829110755411875$
+    *   $\delta = 0.4435068520511142$
+    *   $\zeta = 1.1496043988602418$ [S2]
+*   **Transform Levels ($L$):** Set to 4. This reduces approximation coefficients to $1/4096$ of the total elements. This requires $n_x, n_y, n_z \geq 15$ [S2].
+
+### Algorithm Steps
+
+#### 1. Forward 1D Transform
+The 1D transform is applied to an array $g$ of size $m$. It uses lifting steps to compute approximation coefficients $s_j$ and detail coefficients $d_j$ for $j = 1, \dots, \lceil m/2 \rceil$ [S2].
+
+**Boundary Handling:**
+*   Coefficients $s_{\lfloor m/2 \rfloor + 1}^{(0)}$, $s_{\lfloor m/2 \rfloor + 1}^{(1)}$, $d_0^{(1)}$, and $d_0^{(2)}$ are defined and set to zero [S2].
+*   If $m$ is odd, the missing element $d_{\lfloor m/2 \rfloor}^{(0)}$ is determined by extrapolation:
+    $$ d_{\lfloor m/2 \rfloor}^{(0)} = -\frac{2}{1+2\beta\gamma} \left( \alpha\beta\gamma s_{\lfloor m/2 \rfloor - 1}^{(0)} + \beta\gamma d_{\lfloor m/2 \rfloor - 1}^{(0)} + (\alpha + \gamma + 3\alpha\beta\gamma) s_{\lfloor m/2 \rfloor}^{(0)} \right) $$ [S2]
+
+**Lifting Steps:**
+For $j = 1, \dots, \lceil m/2 \rceil$:
+1.  $s_j^{(0)} = g_{2j-1}$
+2.  $d_j^{(0)} = g_{2j}$
+3.  $d_j^{(1)} = d_j^{(0)} + \alpha (s_j^{(0)} + s_{j+1}^{(0)})$
+4.  $s_j^{(1)} = s_j^{(0)} + \beta (d_j^{(1)} + d_{j-1}^{(1)})$
+5.  $d_j^{(2)} = d_j^{(1)} + \gamma (s_j^{(1)} + s_{j+1}^{(1)})$
+6.  $s_j^{(2)} = s_j^{(1)} + \delta (d_j^{(2)} + d_{j-1}^{(2)})$
+7.  $s_j = \zeta s_j^{(2)}$
+8.  $d_j = d_j^{(2)} / \zeta$ [S2]
+
+#### 2. 3D Construction
+The 3D transform is constructed by applying the 1D transform sequentially in the three directions ($x, y, z$) of the 3D data array [S2].
+
+#### 3. Inverse 1D Transform
+The inverse transform takes approximation coefficients $s_j$ and detail coefficients $d_j$ as input and resolves the lifting steps in reverse order to produce the original values $g_j$ [S2].
+
+**Reverse Lifting Steps:**
+For $j = 1, \dots, \lceil m/2 \rceil$:
+1.  $s_j^{(2)} = s_j / \zeta$
+2.  $d_j^{(2)} = d_j \zeta$
+3.  $s_j^{(1)} = s_j^{(2)} - \delta (d_j^{(2)} + d_{j-1}^{(2)})$
+4.  $d_j^{(1)} = d_j^{(2)} - \gamma (s_j^{(1)} + s_{j+1}^{(1)})$
+5.  $s_j^{(0)} = s_j^{(1)} - \beta (d_j^{(1)} + d_{j-1}^{(1)})$
+6.  $d_j^{(0)} = d_j^{(1)} - \alpha (s_j^{(0)} + s_{j+1}^{(0)})$
+7.  $g_{2j-1} = s_j^{(0)}$
+8.  $g_{2j} = d_j^{(0)}$ [S2]
+
+#### 4. 3D Inverse Construction
+The inverse 3D transform repeats $L$ iterations, adding one extra level of details in each direction on each iteration, resolving lifting steps in reverse order [S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+# Lifting coefficients
+ALPHA = -1.5861343420693648
+BETA = -0.0529801185718856
+GAMMA = 0.8829110755411875
+DELTA = 0.4435068520511142
+ZETA = 1.1496043988602418
+
+def forward_1d(g):
+    """
+    Forward 1D CDF 9/7 wavelet transform using lifting steps.
+    Input: g - list of floats, size m
+    Output: list of floats, size m, where first floor(m/2) are approx coeffs,
+            last floor(m/2) are detail coeffs.
+    """
+    m = len(g)
+    half_m = m // 2
+    
+    # Initialize arrays for lifting steps
+    # s and d arrays need to be large enough to handle boundary conditions
+    # We use 1-based indexing for logic, but 0-based for storage
+    # s_j corresponds to index j-1 in 0-based, but we need s_{j+1} and s_{j-1}
+    # Let's use arrays of size half_m + 2 to handle boundaries easily
+    s = [0.0] * (half_m + 2)
+    d = [0.0] * (half_m + 2)
+    
+    # Step 1: Split into even and odd
+    for j in range(1, half_m + 1):
+        s[j] = g[2 * j - 2]  # g_{2j-1}
+        d[j] = g[2 * j - 1]  # g_{2j}
+        
+    # Handle odd length m
+    if m % 2 == 1:
+        # Missing element d_{floor(m/2)}^{(0)}
+        # Formula: d_{[m/2]}^{(0)} = -2/(1+2*beta*gamma) * (alpha*beta*gamma*s_{[m/2]-1}^{(0)} + beta*gamma*d_{[m/2]-1}^{(0)} + (alpha + gamma + 3*alpha*beta*gamma)*s_{[m/2]}^{(0)})
+        idx = half_m
+        term1 = ALPHA * BETA * GAMMA * s[idx - 1]
+        term2 = BETA * GAMMA * d[idx - 1]
+        term3 = (ALPHA + GAMMA + 3 * ALPHA * BETA * GAMMA) * s[idx]
+        d[idx] = -2.0 / (1.0 + 2.0 * BETA * GAMMA) * (term1 + term2 + term3)
+        
+    # Boundary conditions: s_{half_m+1}^{(0)}, s_{half_m+1}^{(1)}, d_0^{(1)}, d_0^{(2)} are 0
+    # s[half_m+1] is already 0.0
+    # d[0] is already 0.0
+    
+    # Step 2: Lifting
+    for j in range(1, half_m + 1):
+        # d_j^{(1)} = d_j^{(0)} + alpha * (s_j^{(0)} + s_{j+1}^{(0)})
+        d[j] = d[j] + ALPHA * (s[j] + s[j + 1])
+        
+    for j in range(1, half_m + 1):
+        # s_j^{(1)} = s_j^{(0)} + beta * (d_j^{(1)} + d_{j-1}^{(1)})
+        s[j] = s[j] + BETA * (d[j] + d[j - 1])
+        
+    for j in range(1, half_m + 1):
+        # d_j^{(2)} = d_j^{(1)} + gamma * (s_j^{(1)} + s_{j+1}^{(1)})
+        d[j] = d[j] + GAMMA * (s[j] + s[j + 1])
+        
+    for j in range(1, half_m + 1):
+        # s_j^{(2)} = s_j^{(1)} + delta * (d_j^{(2)} + d_{j-1}^{(2)})
+        s[j] = s[j] + DELTA * (d[j] + d[j - 1])
+        
+    # Step 3: Normalization
+    for j in range(1, half_m + 1):
+        s[j] = ZETA * s[j]
+        d[j] = d[j] / ZETA
+        
+    # Step 4: Pack output
+    # First floor(m/2) elements are s_j
+    # Last floor(m/2) elements are d_j
+    result = [0.0] * m
+    for j in range(1, half_m + 1):
+        result[j - 1] = s[j]
+        result[half_m + j - 1] = d[j]
+        
+    return result
+
+def inverse_1d(coeffs):
+    """
+    Inverse 1D CDF 9/7 wavelet transform.
+    Input: coeffs - list of floats, size m
+    Output: list of floats, size m, reconstructed signal g.
+    """
+    m = len(coeffs)
+    half_m = m // 2
+    
+    # Unpack coefficients
+    s = [0.0] * (half_m + 2)
+    d = [0.0] * (half_m + 2)
+    
+    for j in range(1, half_m + 1):
+        s[j] = coeffs[j - 1]
+        d[j] = coeffs[half_m + j - 1]
+        
+    # Boundary conditions: s_{half_m+1}^{(2)}, s_{half_m+1}^{(1)}, d_0^{(1)}, d_0^{(2)} are 0
+    # s[half_m+1] is already 0.0
+    # d[0] is already 0.0
+    
+    # Reverse Lifting Steps
+    # 1. s_j^{(2)} = s_j / ZETA
+    # 2. d_j^{(2)} = d_j * ZETA
+    for j in range(1, half_m + 1):
+        s[j] = s[j] / ZETA
+        d[j] = d[j] * ZETA
+        
+    # 3. s_j^{(1)} = s_j^{(2)} - delta * (d_j^{(2)} + d_{j-1}^{(2)})
+    for j in range(1, half_m + 1):
+        s[j] = s[j] - DELTA * (d[j] + d[j - 1])
+        
+    # 4. d_j^{(1)} = d_j^{(2)} - gamma * (s_j^{(1)} + s_{j+1}^{(1)})
+    for j in range(1, half_m + 1):
+        d[j] = d[j] - GAMMA * (s[j] + s[j + 1])
+        
+    # 5. s_j^{(0)} = s_j^{(1)} - beta * (d_j^{(1)} + d_{j-1}^{(1)})
+    for j in range(1, half_m + 1):
+        s[j] = s[j] - BETA * (d[j] + d[j - 1])
+        
+    # 6. d_j^{(0)} = d_j^{(1)} - alpha * (s_j^{(0)} + s_{j+1}^{(0)})
+    for j in range(1, half_m + 1):
+        d[j] = d[j] - ALPHA * (s[j] + s[j + 1])
+        
+    # 7. g_{2j-1} = s_j^{(0)}
+    # 8. g_{2j} = d_j^{(0)}
+    g = [0.0] * m
+    for j in range(1, half_m + 1):
+        g[2 * j - 2] = s[j]
+        g[2 * j - 1] = d[j]
+        
+    return g
+
+def forward_3d(f):
+    """
+    Forward 3D CDF 9/7 wavelet transform.
+    Input: f - 3D list of floats, dimensions nx, ny, nz
+    Output: 3D list of floats, same dimensions, transformed in-place logic.
+    """
+    nx, ny, nz = len(f), len(f[0]), len(f[0][0])
+    
+    # Apply 1D transform sequentially in x, y, z directions
+    # For each line in x direction
+    for y in range(ny):
+        for z in range(nz):
+            line = [f[x][y][z] for x in range(nx)]
+            transformed_line = forward_1d(line)
+            for x in range(nx):
+                f[x][y][z] = transformed_line[x]
+                
+    # For each line in y direction
+    for x in range(nx):
+        for z in range(nz):
+            line = [f[x][y][z] for y in range(ny)]
+            transformed_line = forward_1d(line)
+            for y in range(ny):
+                f[x][y][z] = transformed_line[y]
+                
+    # For each line in z direction
+    for x in range(nx):
+        for y in range(ny):
+            line = [f[x][y][z] for z in range(nz)]
+            transformed_line = forward_1d(line)
+            for z in range(nz):
+                f[x][y][z] = transformed_line[z]
+                
+    return f
+
+def inverse_3d(F):
+    """
+    Inverse 3D CDF 9/7 wavelet transform.
+    Input: F - 3D list of floats, dimensions nx, ny, nz
+    Output: 3D list of floats, same dimensions, reconstructed signal.
+    """
+    nx, ny, nz = len(F), len(F[0]), len(F[0][0])
+    
+    # Apply inverse 1D transform sequentially in z, y, x directions (reverse order of forward)
+    # For each line in z direction
+    for x in range(nx):
+        for y in range(ny):
+            line = [F[x][y][z] for z in range(nz)]
+            reconstructed_line = inverse_1d(line)
+            for z in range(nz):
+                F[x][y][z] = reconstructed_line[z]
+                
+    # For each line in y direction
+    for x in range(nx):
+        for z in range(nz):
+            line = [F[x][y][z] for y in range(ny)]
+            reconstructed_line = inverse_1d(line)
+            for y in range(ny):
+                F[x][y][z] = reconstructed_line[y]
+                
+    # For each line in x direction
+    for y in range(ny):
+        for z in range(nz):
+            line = [F[x][y][z] for x in range(nx)]
+            reconstructed_line = inverse_1d(line)
+            for x in range(nx):
+                F[x][y][z] = reconstructed_line[x]
+                
+    return F
+```
+
+## Operating characteristics
+*   **Time Complexity:** The transform is applied sequentially in three directions. Each 1D transform is $O(m)$ where $m$ is the dimension size. For a 3D volume of size $N = n_x n_y n_z$, the total complexity is $O(N)$.
+*   **Memory Complexity:** The transform is in-place, requiring $O(1)$ additional memory beyond the input/output array [S2].
+*   **Performance:** The 9x7 kernel offers improved energy compaction performance for lossy compression compared to the 5x3 kernel [S1]. Numerical experiments with sample CFD velocity data confirmed that this transform yields higher compression ratio than using lower-order biorthogonal wavelets or orthogonal wavelets such as Haar, Daubechies (D4...D20) and Symlets (Sym4...Sym10) [S2].
+*   **Limitations:** Requires $n_x, n_y, n_z \geq 15$ to achieve the standard 4 levels of transform [S2].
+
+## Background
+The 9x7 kernel is a variation on the CDF biorthogonal cubic B-spline construction, using the shortest scaling of order four. It is a variation, because the vanishing moments (6 and 2) are divided up equally on both analysis and synthesis sides in a way that makes the resulting basis functions almost orthogonal [S1]. As such, the 9x7 kernel has four vanishing moments per wavelet filter. Moreover, this kernel is nearly orthogonal and has a higher factorization-order that the 5x3 kernel [S1]. An exhaustive study on the performance of various types of wavelet kernels drove the JPEG committee to select the 5x3 kernel for lossless and the 9x7 kernel for lossy compression for JPEG 2000 [S1].
+
+## Sources
+[S1] Wavelet based volumetric medical image compression, https://doi.org/10.1016/j.image.2014.12.007, fetched 2026-10-26
+[S2] WaveRange: wavelet-based data compression for three-dimensional numerical simulations on regular grids, https://doi.org/10.1007/s12650-021-00813-8, fetched 2026-10-29

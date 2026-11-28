@@ -1,0 +1,167 @@
+# Web MRI Volume Renderer
+
+Also called: GPU-accelerated 3D MRI volume renderer, WebGL ray marching volume renderer
+
+## Overview
+A client-server architecture for interactive 3D volume rendering of dense MRI volumes (up to $512^3$) in a web browser [S1, unofficial]. It solves the problem of visualizing extremely large medical datasets (~8GB per sample) that are impractical for standard 2D cross-section viewers or heavy desktop applications [S1, unofficial]. It sets itself apart by compiling the client entirely to WebAssembly (WASM) using Rust, enabling high-performance WebGL ray marching directly in the browser while serving raw HDF5 data from a lightweight Rust server [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Dense MRI volume data stored in HDF5 (`.h5`) format [S1, unofficial].
+*   **Output:** Interactive 3D visualization rendered via WebGL in the browser [S1, unofficial].
+
+**Data Structures:**
+*   **Volume Data:** Raw MRI samples loaded from HDF5 files [S1, unofficial]. The source notes that a single sample can be approximately 8GB [S1, unofficial]. The exact memory layout within the HDF5 file is not specified beyond being a standard HDF5 dataset [S1, unofficial].
+*   **Occupancy Grid:** A data structure used to optimize ray marching by skipping empty regions [S1, unofficial]. The specific resolution, bit-depth, or construction algorithm for this grid is not given in the sources [S1, unofficial].
+*   **Transform State:** Maintained using quaternions to represent camera orientation, avoiding gimbal lock [S1, unofficial].
+
+**Parameters:**
+*   **Volume Resolution:** Supports extremely dense volumes up to $512^3$ (e.g., knee and brain MRI) [S1, unofficial].
+*   **Step Size:** Controlled by a "quality slider" in the UI [S1, unofficial]. Lower step sizes increase rendering quality but decrease performance; higher step sizes improve performance but reduce quality [S1, unofficial].
+*   **Opacity:** User-adjustable opacity control for the volume rendering [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Server Setup:** The server, written in Rust using `axum`, serves the HDF5 volume files from disk [S1, unofficial]. The naive implementation serves the entire HDF5 volume at once [S1, unofficial].
+2.  **Client Initialization:** The client, written in Rust using `egui`/`eframe` for the GUI and `glow` for rendering, compiles to WASM via `trunk` [S1, unofficial].
+3.  **Data Loading:** The client loads MRI samples from the HDF5 (`.h5`) files using Rust bindings to the `hdf5` library [S1, unofficial].
+4.  **Rendering Loop:**
+    *   The core renderer uses OpenGL shaders targeting WebGL [S1, unofficial].
+    *   A ray marching approach is implemented in the shaders [S1, unofficial].
+    *   An occupancy grid optimization is applied during ray marching to skip empty regions [S1, unofficial].
+5.  **Interaction:**
+    *   **Rotation:** Trackball rotation is handled using quaternions to avoid gimbal lock [S1, unofficial].
+    *   **Opacity:** The user adjusts opacity via the UI [S1, unofficial].
+    *   **Quality:** The user adjusts the step size via a quality slider [S1, unofficial].
+    *   **Hover Info:** A hover info card displays the voxel coordinates, value, and intensity of the cursor position [S1, unofficial].
+    *   **Axes:** XYZ axes are visualized in the 3D view [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def identity_quaternion():
+    return [1.0, 0.0, 0.0, 0.0]  # w, x, y, z
+
+def load_hdf5(url):
+    # Open network connection, read binary stream, parse HDF5 dataset structure [G]
+    raw_bytes = download_bytes(url)
+    return parse_hdf5_dataset(raw_bytes)
+
+def build_occupancy_grid(volume, grid_res):
+    # Downsample volume to grid_res^3; mark cell occupied if any voxel > 0 [G]
+    stride = volume.shape[0] // grid_res
+    grid = zeros(grid_res, grid_res, grid_res)
+    for i in range(grid_res):
+        for j in range(grid_res):
+            for k in range(grid_res):
+                if max(volume[i*stride:(i+1)*stride, j*stride:(j+1)*stride, k*stride:(k+1)*stride]) > 0:
+                    grid[i, j, k] = 1
+    return grid
+
+def quaternion_multiply(q1, q2):
+    # Hamilton product for composing rotations [G]
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return [w1*w2 - x1*x2 - y1*y2 - z1*z2,
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2]
+
+def map_quality_to_step_size(quality):
+    # Linear mapping: quality 0.0 -> 2.0, 1.0 -> 0.1 [G]
+    return 0.1 + 1.9 * (1.0 - quality)
+
+def unproject_screen_to_ray(sx, sy, view_proj_inv):
+    # Multiply inverse projection-view matrix by screen coordinates to get ray [G]
+    return transform_matrix_vector(view_proj_inv, [sx, sy, 0.0, 1.0])
+
+def ray_march(ray_origin, ray_dir, step_size, occupancy_grid, volume):
+    # March along ray, skip empty grid cells, sample volume until hit or exit [G]
+    t = 0.0
+    while t < 1000.0:
+        pos = ray_origin + ray_dir * t
+        grid_idx = world_to_grid_indices(pos, occupancy_grid)
+        if occupancy_grid[grid_idx] == 0:
+            t += step_size * 10.0
+            continue
+        val = trilinear_interpolate(volume, pos)
+        if val == 0:
+            t += step_size
+            continue
+        return pos, val
+    return None, 0.0
+
+class WebMRIRenderer:
+    def __init__(self, server_url, volume_path):
+        self.server_url = server_url
+        self.volume_path = volume_path
+        self.data = None
+        self.occupancy_grid = None
+        self.quaternion = identity_quaternion()
+        self.step_size = 1.0
+        self.opacity = 0.5
+        self.view_proj_inv = None
+
+    def load_volume(self):
+        self.data = load_hdf5(self.server_url + self.volume_path)
+        self.occupancy_grid = build_occupancy_grid(self.data, grid_res=64)
+
+    def render_frame(self, camera_pos, camera_dir, view_proj_inv):
+        # Create WebGL context, compile vertex/fragment shaders, bind attributes [G]
+        create_webgl_context()
+        compile_shaders()
+        bind_shader_uniforms(step_size=self.step_size, opacity=self.opacity,
+                             volume_data=self.data, occupancy_grid=self.occupancy_grid,
+                             camera_pos=camera_pos, camera_dir=camera_dir)
+        # Draw full-screen triangle strip to trigger fragment shader ray marching [G]
+        draw_fullscreen_triangle_strip()
+        # Draw 3D lines for X, Y, Z axes [G]
+        draw_3d_axes()
+
+    def update_rotation(self, delta_x, delta_y):
+        delta_q = compute_trackball_rotation_delta(delta_x, delta_y)
+        self.quaternion = quaternion_multiply(self.quaternion, delta_q)
+
+    def update_quality(self, quality_value):
+        self.step_size = map_quality_to_step_size(quality_value)
+
+    def update_opacity(self, opacity_value):
+        self.opacity = opacity_value
+
+    def get_hover_info(self, screen_x, screen_y):
+        ray = unproject_screen_to_ray(screen_x, screen_y, self.view_proj_inv)
+        pos, val = ray_march(ray.origin, ray.direction, self.step_size, self.occupancy_grid, self.data)
+        return pos, val, compute_display_intensity(val, self.opacity)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Memory:** Raw MRI samples can be ~8GB. The naive server implementation serves the entire HDF5 volume at once [S1, unofficial].
+*   **Compatibility:** Initial attempts using WebGPU failed due to compatibility issues; OpenGL/WebGL was chosen as a fallback [S1, unofficial].
+*   **Precision:** The source does not specify floating-point precision (e.g., float32 vs float16) for the volume data or calculations [S1, unofficial].
+
+## Subtopics
+
+### Web-Based Volume Rendering
+Focuses on solutions to network latency and web performance for volumetric data [5039-web-based-volume-rendering.md] [G]. Choose when minimizing data transfer and optimizing browser rendering pipelines is required [G].
+
+### GPU-Accelerated Volume Rendering
+General techniques for offloading ray marching to the GPU [5040-gpu-accelerated-volume-rendering.md] [G]. Choose when hardware acceleration is available and CPU-only rendering is too slow [G].
+
+### WebAssembly Graphics
+Techniques for running high-performance graphics code in the browser via WASM [5041-webassembly-graphics.md] [G]. Choose when native-speed execution is needed in web environments without plugins [G].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given [S1, unofficial]. Performance is traded off against quality via the step size parameter [S1, unofficial].
+*   **Memory Complexity:** Depends on the volume size [S1, unofficial]. A $512^3$ volume can be ~8GB [S1, unofficial]. The naive server implementation loads the entire volume into memory [S1, unofficial].
+*   **Measured Performance:** Not given in the sources [S1, unofficial].
+*   **Scaling:** The architecture is designed for future expansion, such as loading volumes from a database or implementing advanced chunking for massive volumes [S1, unofficial].
+*   **Strengths:** Interactive 3D visualization in the browser; quaternion-based rotation avoids gimbal lock; occupancy grid optimization skips empty regions; Rust provides performance and safety [S1, unofficial].
+*   **Limitations:** Naive server implementation serves the entire volume at once, which is inefficient for large datasets; WebGL compatibility issues with WebGPU [S1, unofficial].
+*   **When to use:** When interactive 3D visualization of dense MRI volumes is needed in a web environment without requiring heavy desktop software [S1, unofficial].
+*   **When not to use:** When network latency is high and the entire volume cannot be loaded efficiently; when WebGPU features are required for specific optimizations [S1, unofficial].
+
+## Background
+The method was developed by Armeet Singh Jatyani as a personal project to address the difficulty of visualizing extremely dense MRI volumes (up to $512^3$) during research in AI models for 3D medical imaging [S1, unofficial]. Previous tools like Matplotlib lacked interactive 3D support, and Plotly was unsuitable for the use case [S1, unofficial]. The project was written over a weekend using Rust, `egui`, `glow`, and `axum`, compiling to WASM via `trunk` [S1, unofficial]. It was deployed on Fly.io [S1, unofficial].
+
+## Sources
+[S1] Web MRI Volume Renderer in Rust, https://blog.armeet.ca/web-mri-volume-renderer-in-rust/, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,121 @@
+--- v003.md
++++ v004.md
+@@ -24,5 +24,5 @@
+ 
+ ### Parameters
+-*   $r$: Base dropping rate. Represents the fraction of Gaussians to remove. Typical value: $0.1$ (10%) [S1].
++*   $r$: Base dropping rate. Represents the fraction of Gaussians to remove [S1].
+ *   $\gamma$: Scaling factor for the progressive dropping rate. Values: $0$ or $1$ [S1].
+ *   $t$: Current training iteration index [S1].
+@@ -57,5 +57,5 @@
+ ### Steps
+ 1.  **Calculate Dropping Rate:** Compute the current dropping rate $r_t$ using the formula $r_t = \gamma \cdot \frac{t}{t_{\text{total}}}$ [S1].
+-2.  **Select Gaussians to Drop:** Randomly select a subset of Gaussians to be dropped. The selection probability for each Gaussian corresponds to $r_t$ [S1].
++2.  **Select Gaussians to Drop:** Randomly select a subset of Gaussians to be dropped [S1].
+ 3.  **Compute Modified Opacity:** For each Gaussian $i$:
+     *   If $i$ is selected to be dropped, set its effective opacity contribution to 0 (effectively removing it from rendering) [S1].
+@@ -63,6 +63,6 @@
+ 4.  **Render:** Perform differentiable rasterization using the modified opacities $\tilde{o}_i$ to render the image $I_{\text{rendered}}$ from the current camera viewpoint [S1].
+ 5.  **Compute Loss:** Calculate the loss $\mathcal{L}$ (typically L1 + SSIM) between $I_{\text{rendered}}$ and the target training view $I_{\text{target}}$ [S1].
+-6.  **Backpropagate:** Compute gradients of $\mathcal{L}$ with respect to the Gaussian parameters. Gradients are only backpropagated to the non-dropped Gaussians (those with $M(i) \neq 0$) [S1].
+-7.  **Update:** Update the parameters of the non-dropped Gaussians using the optimizer (e.g., Adam) [S1].
++6.  **Backpropagate:** Compute gradients of $\mathcal{L}$ with respect to the Gaussian parameters [S1].
++7.  **Update:** Update the parameters of the non-dropped Gaussians using the optimizer [S1].
+ 8.  **Evaluation:** During the test/evaluation phase, render using all Gaussians without dropping any (i.e., $r_t = 0$ effectively, or no masking) to generate high-quality novel view images [S1].
+ 
+@@ -75,15 +75,5 @@
+ 
+ ```python
+-def copy_gaussian(g):
+-    """Shallow copy of a Gaussian primitive."""
+-    new_g = type(g)()
+-    new_g.position = g.position
+-    new_g.scale = g.scale
+-    new_g.rotation = g.rotation
+-    new_g.opacity = g.opacity
+-    new_g.sh_coeffs = g.sh_coeffs
+-    return new_g
+-
+-def drop_gaussian_forward_pass(gaussians, t, t_total, r_base, gamma):
++def drop_gaussian_forward(gaussians, t, t_total, r_base, gamma):
+     """
+     Performs one forward pass of DropGaussian.
+@@ -103,8 +93,12 @@
+     # Step 1: Calculate current dropping rate
+     r_t = gamma * (t / t_total)
++    if r_t >= 1.0:
++        r_t = 0.999  # Prevent division by zero in compensation factor
++        
++    compensation_factor = 1.0 / (1.0 - r_t)
++    num_gaussians = len(gaussians)
++    num_to_drop = int(num_gaussians * r_t)
+     
+     # Step 2: Randomly select Gaussians to drop
+-    num_gaussians = len(gaussians)
+-    num_to_drop = int(num_gaussians * r_t)
+     indices = list(range(num_gaussians))
+     import random
+@@ -113,20 +107,20 @@
+     
+     # Step 3: Compute modified opacity
+-    compensation_factor = 1.0 / (1.0 - r_t) if r_t < 1.0 else float('inf')
+     modified_gaussians = []
+-    
+     for i, g in enumerate(gaussians):
+-        new_g = copy_gaussian(g)
++        new_g = type(g)()
++        new_g.position = g.position
++        new_g.scale = g.scale
++        new_g.rotation = g.rotation
++        new_g.sh_coeffs = g.sh_coeffs
+         if i in dropped_indices:
+             new_g.opacity = 0.0
+-            new_g.is_dropped = True
+         else:
+             new_g.opacity = g.opacity * compensation_factor
+-            new_g.is_dropped = False
+         modified_gaussians.append(new_g)
+         
+     return modified_gaussians
+ 
+-def drop_gaussian_backward_pass(modified_gaussians, loss, optimizer):
++def drop_gaussian_backward(modified_gaussians, loss, learning_rate):
+     """
+     Performs backward pass and optimization step.
+@@ -135,13 +129,19 @@
+         modified_gaussians: List of Gaussian objects from forward pass
+         loss: Scalar loss value (L1 + SSIM)
+-        optimizer: Optimizer object (e.g., Adam)
++        learning_rate: float, optimizer step size
+     """
+     # Step 5 & 6: Compute gradients and backpropagate
+     # Gradients are only computed for non-dropped Gaussians
+     # This is handled by the differentiable rasterizer which ignores dropped Gaussians (opacity=0)
++    loss.backward()
+     
+-    # Step 7: Update parameters
+-    optimizer.step()
+-    optimizer.zero_grad()
++    # Step 7: Update parameters explicitly
++    for g in modified_gaussians:
++        if g.opacity > 0:  # Only update non-dropped Gaussians
++            g.position -= learning_rate * g.position.grad
++            g.scale -= learning_rate * g.scale.grad
++            g.rotation -= learning_rate * g.rotation.grad
++            g.sh_coeffs -= learning_rate * g.sh_coeffs.grad
++            g.opacity -= learning_rate * g.opacity.grad
+ ```
+ 
+@@ -155,9 +155,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The method adds negligible computational overhead. It involves a simple random selection and opacity scaling, which are $O(N)$ operations where $N$ is the number of Gaussians. The core rasterization and gradient computation remain unchanged in complexity [S1].
+-*   **Memory Complexity**: No additional memory is required beyond the standard 3DGS representation. The opacity values are modified in-place or copied temporarily during the forward pass [S1].
++*   **Time Complexity**: The method adds negligible computational overhead [S1]. It involves a simple random selection and opacity scaling, which are $O(N)$ operations where $N$ is the number of Gaussians [G]. The core rasterization and gradient computation remain unchanged in complexity [S1].
++*   **Memory Complexity**: No additional memory is required beyond the standard 3DGS representation [S1]. The opacity values are modified in-place or copied temporarily during the forward pass [S1].
+ *   **Performance**: DropGaussian achieves competitive performance in sparse-view settings (e.g., 3-view, 6-view, 9-view) on benchmarks like LLFF, Mip-NeRF360, and Blender, often surpassing prior-based methods in PSNR without increasing computational complexity [S1].
+ *   **Strengths**: Prior-free, no external data required, simple implementation, effective against overfitting in sparse views [S1].
+-*   **Limitations**: Requires careful tuning of the progressive schedule (though the linear schedule is effective). May not be as effective in dense-view settings where overfitting is less of an issue [G].
++*   **Limitations**: Requires careful tuning of the progressive schedule (though the linear schedule is effective) [G]. May not be as effective in dense-view settings where overfitting is less of an issue [G].
+ *   **When to use**: Sparse-view novel view synthesis where overfitting to training views is a concern [S1].
+ *   **When not to use**: Dense-view settings where standard 3DGS performs well, or when external priors are available and preferred [G].

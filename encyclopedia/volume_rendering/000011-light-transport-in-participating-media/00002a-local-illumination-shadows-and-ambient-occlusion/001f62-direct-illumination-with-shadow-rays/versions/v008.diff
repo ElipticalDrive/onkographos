@@ -1,0 +1,130 @@
+--- v007.md
++++ v008.md
+@@ -4,12 +4,13 @@
+ 
+ ## Overview
+-Direct Illumination with Shadow Rays computes the direct lighting contribution at a surface point within or on the boundary of a volume, accounting for attenuation by heterogeneous participating media between the surface and the light source [S1, S2, unofficial]. It builds on [Local illumination, shadows and ambient occlusion](34-local-illumination-shadows-and-ambient-occlusion.md) by explicitly evaluating directional light sources through volumetric transmittance rather than approximating indirect hemispherical illumination.
++Direct Illumination with Shadow Rays computes the direct lighting contribution at a surface point within or on the boundary of a volume, accounting for attenuation by heterogeneous participating media between the surface and the light source [S1, S2, unofficial]. It builds on [Local illumination, shadows and ambient occlusion](34-local-illumination-shadows-and-ambient-occlusion.md) by explicitly evaluating directional light sources through volumetric transmittance rather than approximating indirect hemispherical illumination [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+ *   Surface point $\mathbf{p}$ and surface normal $\mathbf{n}$ [S2, S3, unofficial].
+-*   List of light sources, each defined by position $\mathbf{l}_i$, color $C_{light, i}$, enabled flag, and optionally area $A_i$ [S1, S2, unofficial].
++*   List of light sources, each defined by position $\mathbf{l}_i$, color $C_{light, i}$, enabled flag, area $A_i$, and optionally light normal $\mathbf{l}_n$ [S1, S2, unofficial].
+ *   Volume extinction coefficient $\sigma_t$ accessible via a volume integrator or sampler [S1, S4, unofficial].
+-*   Surface material properties (diffuse color, specular parameters, roughness) [S2, S4, unofficial].
++*   Surface material properties (diffuse color $C_{diffuse}$, specular parameters, roughness) [S2, S4, unofficial].
++*   View direction $\mathbf{V}$ for specular calculations [S3, unofficial].
+ 
+ **Outputs:**
+@@ -17,8 +18,8 @@
+ 
+ **Data Structures:**
+-*   **Light:** Struct containing `position` (vec3), `color` (vec3), `enabled` (bool/uint), and `area` (float, for PDF calculation) [S1, S2, unofficial].
++*   **Light:** Struct containing `position` (vec3), `color` (vec3), `enabled` (bool/uint), `area` (float), and `normal` (vec3) [S1, S2, unofficial].
+ *   **HitSurface:** Struct containing `hit_point` (vec3), `normal` (vec3), and `material` properties [S3, unofficial].
+ *   **Ray:** Struct containing `origin` (vec3) and `direction` (vec3) [S3, S4, unofficial].
+-*   **IntersectionResult:** Struct containing `t` (distance to hit, -1 if none) and `d` (distance to light source for comparison) [S3, unofficial].
++*   **IntersectionResult:** Struct containing `t` (distance to hit, $-1$ if none) and `d` (distance to light source for comparison) [S3, unofficial].
+ 
+ **Steps:**
+@@ -28,5 +29,5 @@
+     b.  **Compute Light Vector:** Calculate vector $\mathbf{L} = \mathbf{l}_i - \mathbf{p}$ and distance $d_{light} = \|\mathbf{L}\|$ [S2, S3, unofficial].
+     c.  **Normalize Direction:** $\mathbf{w}_i = \mathbf{L} / d_{light}$ [S1, unofficial].
+-    d.  **Cast Shadow Ray:** Create a shadow ray originating at $\mathbf{p}_{shadow} = \mathbf{p} + \epsilon \mathbf{n}$ (where $\epsilon$ is a small offset, e.g., $0.01 \times \|\mathbf{n}\|$) in direction $\mathbf{w}_i$ [S3, unofficial].
++    d.  **Cast Shadow Ray:** Create a shadow ray originating at $\mathbf{p}_{shadow} = \mathbf{p} + \epsilon \mathbf{n}$ (where $\epsilon = 0.01$) in direction $\mathbf{w}_i$ [S3, unofficial].
+     e.  **March Shadow Ray:** Evaluate transmittance or occlusion along the shadow ray up to distance $d_{light}$ [S1, S3, S4, unofficial].
+         *   **Binary Occlusion:** If an opaque object intersects the ray at distance $t < d_{light}$, visibility $V = 0$, else $V = 1$ [S1, S3, unofficial].
+@@ -52,5 +53,7 @@
+     def dot(self, other): return self.x*other.x + self.y*other.y + self.z*other.z
+     def length(self): return math.sqrt(self.x**2 + self.y**2 + self.z**2)
+-    def normalized(self): l = self.length(); return Vec3(self.x/l, self.y/l, self.z/l) if l > 1e-6 else Vec3(0,0,0)
++    def normalized(self):
++        l = self.length()
++        return Vec3(self.x/l, self.y/l, self.z/l) if l > 1e-6 else Vec3(0,0,0)
+ 
+ class Ray:
+@@ -59,5 +62,5 @@
+         self.direction = direction
+ 
+-def direct_illumination_with_shadow_rays(p, normal, lights, volume_sampler, view_dir):
++def direct_illumination_with_shadow_rays(p, normal, lights, volume_sampler, view_dir, material):
+     """
+     Computes direct lighting at point p considering volume shadows.
+@@ -68,4 +71,5 @@
+         volume_sampler: object with method extinction_at(pos) returning sigma_t
+         view_dir: Vec3, view direction (for specular)
++        material: object with diffuse (vec3) and specular (float) attributes
+     Returns:
+         Vec3, direct lighting contribution
+@@ -85,34 +89,40 @@
+         w_i = delta.normalized()
+         
+-        # 2. Cast shadow ray
+-        epsilon = 0.01 * normal.length()
++        # 2. Cast shadow ray with offset to prevent self-intersection [S3, unofficial]
++        epsilon = 0.01
+         shadow_origin = p + epsilon * normal
+         shadow_ray = Ray(shadow_origin, w_i)
+         
+-        # 3. Evaluate transmittance via discrete integration (16 steps)
++        # 3. Evaluate transmittance via discrete integration (16 steps) [S1, unofficial]
+         num_samples = 16
+-        delta_s = l_dist / num_samples
++        step_size = l_dist / num_samples
+         optical_depth = 0.0
++        occluded = False
+         
+         for i in range(num_samples):
+-            pos = shadow_ray.origin + shadow_ray.direction * (i * delta_s)
++            pos = shadow_ray.origin + shadow_ray.direction * ((i + 0.5) * step_size)
+             sigma_t = volume_sampler.extinction_at(pos)
+-            optical_depth += sigma_t * delta_s
+-            
++            optical_depth += sigma_t * step_size
++            if sigma_t > 10.0:
++                occluded = True
++                
+         T_light = math.exp(-optical_depth)
++        V = 0.0 if occluded else 1.0
+         
+-        # 4. Compute geometric term
++        # 4. Compute geometric term [S1, unofficial]
+         n_dot_l = max(0.0, normal.dot(w_i))
++        light_n_dot_wi = abs(w_i.dot(light.normal)) if light.normal.length() > 0 else 1.0
++        p_y = 1.0 / light.area if light.area > 0 else 1.0
++        geometric_term = n_dot_l * light_n_dot_wi / (l_dist * l_dist * p_y)
+         
+         # 5. Compute BRDF contribution (diffuse + specular)
+-        p_y = 1.0 / light.area if light.area > 0 else 1.0
+-        diffuse_term = light.color * n_dot_l * T_light / (l_dist * l_dist * p_y)
++        diffuse_term = light.color * material.diffuse * geometric_term * V * T_light
+         
+         h = (w_i + view_dir.normalized()).normalized()
+         n_dot_h = max(0.0, normal.dot(h))
+         shininess = 32.0
+-        specular_term = light.color * T_light * (n_dot_h ** shininess)
++        specular_term = light.color * material.specular * T_light * (n_dot_h ** shininess)
+         
+-        # Accumulate
++        # 6. Accumulate [S2, unofficial]
+         direct_light = direct_light + diffuse_term + specular_term
+         
+@@ -122,5 +132,5 @@
+ **Parameters:**
+ *   `num_samples`: Number of steps for shadow ray integration. Typical value: 16 [S1, unofficial].
+-*   `epsilon`: Offset for shadow ray origin. Typical value: $0.01 \times \|\mathbf{n}\|$ [S3, unofficial].
++*   `epsilon`: Offset for shadow ray origin. Typical value: $0.01$ [S3, unofficial].
+ *   `MAX_LIGHTS`: Maximum number of lights to process. Value: 8 [S2, unofficial].
+ 
+@@ -140,8 +150,8 @@
+ 
+ ### Transparent Shadows
+-A shadowing technique where shadow rays cross smooth glass in a straight line, and paths refracted to a light already reached that way do not count as reaching the light [S5, unofficial]. This is a variant of shadow ray casting used in stylized voxel rendering to handle transparent materials without complex refraction tracing. Choose this for stylized rendering with transparent objects.
++A shadowing technique where shadow rays cross smooth glass in a straight line, and paths refracted to a light already reached that way do not count as reaching the light [S5, unofficial]. This is a variant of shadow ray casting used in stylized voxel rendering to handle transparent materials without complex refraction tracing [S5, unofficial]. Choose this for stylized rendering with transparent objects [S5, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** Not given in the sources.
++*   **Time and Memory Complexity:** Not given in the sources [G].
+ *   **Scaling:** Performance scales linearly with the number of lights and shadow ray samples [S1, S2, unofficial].
+ *   **Strengths:** Simple to implement; provides accurate volumetric shadows for direct lighting; works with any volume representation accessible via sampling [S1, S4, unofficial].

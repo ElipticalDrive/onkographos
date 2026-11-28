@@ -1,0 +1,181 @@
+# Connected Component Filtering
+
+Also called: Largest Connected Component Extraction, Mesh Cleaning via Connected Components, Mesh Dust Removal, Mesh Dust Removal and Filtering, Mesh Post-Processing via Connected Component Filtering, zmesh.dust
+
+## Overview
+Connected Component Filtering removes small, isolated geometric artifacts (often called "dust" or "floaters") from a triangle mesh by retaining only the largest connected components of faces or vertices [S1, S2, S3, unofficial]. It solves the problem of discretization noise and segmentation errors that produce disconnected fragments in volumetric surface extraction [S1, S2, unofficial]. Unlike [Geometry Cleaning](12700-geometry-cleaning.md), which fixes topological invalidity (non-manifold edges, degenerate triangles), Connected Component Filtering operates on graph connectivity to eliminate spatially isolated clusters [S1, S2, S3, unofficial].
+
+## How it works
+**Inputs:** A triangle mesh $M$ with vertex positions $V$, face indices $F$, and optionally vertex colors or normals [S2, unofficial].
+**Outputs:** A filtered mesh $M'$ containing only the selected connected components [S3, unofficial].
+
+**Data Structures:**
+1.  **Adjacency Graph:** An undirected graph where nodes represent faces (or vertices) and edges represent adjacency [S2, unofficial]. Face adjacency is defined by shared edges [G].
+2.  **Component Labels:** An array $L$ of size $N_f$ (number of faces) or $N_v$ (number of vertices), storing an integer ID for each connected component [S2, unofficial].
+3.  **Component Statistics:** An array or map storing the count of faces or vertices for each component ID [S2, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Compute Connectivity:** Build the adjacency graph by iterating over all edges of all faces and mapping each edge to the faces that share it [S2, unofficial]. If two faces share an edge, add an undirected edge between them in the graph [S2, unofficial].
+2.  **Label Connected Components:** Assign a unique label $c_i$ to each face $i$ using graph traversal [S2, unofficial]. Initialize labels to unvisited, then for each unvisited face, start a traversal and assign a new component ID to all reachable faces [S2, unofficial].
+3.  **Aggregate Component Sizes:** Count the number of faces (or vertices) for each component ID [S2, unofficial]. Compute $S_k = \sum_{i=0}^{N_f-1} \mathbb{I}(L[i] == k)$, where $\mathbb{I}$ is the indicator function [G].
+4.  **Select Components to Retain:** Determine the set of component IDs $K_{keep}$ based on the chosen metric and parameters [S1, unofficial]. For largest component filtering, find $k_{max}$ such that $S_{k_{max}} = \max_k S_k$ [S2, unofficial]. For largest $k$ filtering, sort component IDs by size descending and select the top $k$ IDs [S1, unofficial]. For threshold filtering, exclude components where $S_k < T$ [S1, unofficial]. Enforce a minimum threshold guard if specified, e.g., $T = \max(T, 50)$ triangles [S4, unofficial].
+5.  **Filter Faces:** Create a boolean mask $M_f$ of size $N_f$ where $M_f[i] = \mathbb{I}(L[i] \in K_{keep})$ [S2, unofficial]. Retain only faces $F[i]$ where $M_f[i]$ is true [S2, unofficial].
+6.  **Filter Vertices:** Create a boolean vertex mask $M_v$ of size $N_v$ by marking vertices present in the filtered faces [S2, unofficial]. Retain only vertices $V[v]$ where $M_v[v]$ is true [S2, unofficial].
+7.  **Cleanup:** Remove unreferenced vertices and degenerate triangles to compact the mesh [S4, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def connected_component_filter(mesh, k=1, metric='faces', threshold=0, invert=False):
+    """
+    Filter mesh to retain largest connected components.
+    
+    Args:
+        mesh: Object with .faces (list of tuples) and .vertices (list of tuples).
+        k: Number of largest components to keep.
+        metric: 'faces' or 'vertices'.
+        threshold: Minimum size for a component to be kept (if invert=False).
+        invert: If True, retains components larger than threshold (dust mode) 
+                or the smallest k components (largest_k mode) [S1, unofficial].
+    """
+    faces = mesh.faces
+    vertices = mesh.vertices
+    n_faces = len(faces)
+    
+    # Step 1: Compute Face Adjacency
+    edge_to_faces = {}
+    for i, f in enumerate(faces):
+        edges = [
+            tuple(sorted((f[0], f[1]))),
+            tuple(sorted((f[1], f[2]))),
+            tuple(sorted((f[2], f[0])))
+        ]
+        for edge in edges:
+            if edge not in edge_to_faces:
+                edge_to_faces[edge] = []
+            edge_to_faces[edge].append(i)
+            
+    adj = [[] for _ in range(n_faces)]
+    for edge, face_indices in edge_to_faces.items():
+        for idx_a in range(len(face_indices)):
+            for idx_b in range(idx_a + 1, len(face_indices)):
+                fa = face_indices[idx_a]
+                fb = face_indices[idx_b]
+                adj[fa].append(fb)
+                adj[fb].append(fa)
+
+    # Step 2: Label Connected Components
+    labels = [-1] * n_faces
+    component_sizes = {}
+    component_id = 0
+    
+    for i in range(n_faces):
+        if labels[i] == -1:
+            queue = [i]
+            labels[i] = component_id
+            size = 0
+            while queue:
+                curr = queue.pop(0)
+                size += 1
+                for neighbor in adj[curr]:
+                    if labels[neighbor] == -1:
+                        labels[neighbor] = component_id
+                        queue.append(neighbor)
+            component_sizes[component_id] = size
+            component_id += 1
+
+    # Step 3: Select Components
+    sorted_components = sorted(component_sizes.items(), key=lambda x: x[1], reverse=True)
+    keep_ids = set()
+    
+    if invert:
+        if k > 0:
+            # Keep smallest k components [S1, unofficial]
+            smallest_k = sorted_components[-k:] if k < len(sorted_components) else sorted_components
+            for cid, _ in smallest_k:
+                keep_ids.add(cid)
+        else:
+            # Keep components larger than threshold [S1, unofficial]
+            effective_threshold = max(threshold, 50) if threshold > 0 else threshold
+            for cid, size in component_sizes.items():
+                if size > effective_threshold:
+                    keep_ids.add(cid)
+    else:
+        if k > 0:
+            # Keep largest k components [S1, unofficial]
+            largest_k = sorted_components[:k]
+            for cid, _ in largest_k:
+                keep_ids.add(cid)
+        else:
+            # Keep components larger than threshold [S1, unofficial]
+            effective_threshold = max(threshold, 50) if threshold > 0 else threshold
+            for cid, size in component_sizes.items():
+                if size > effective_threshold:
+                    keep_ids.add(cid)
+
+    # Step 4: Filter Faces
+    mask = [labels[i] in keep_ids for i in range(n_faces)]
+    filtered_faces = [faces[i] for i, m in enumerate(mask) if m]
+    
+    # Step 5: Filter Vertices
+    if filtered_faces:
+        unique_verts = sorted(set(v for f in filtered_faces for v in f))
+        vert_map = {old: new for new, old in enumerate(unique_verts)}
+        remapped_faces = [[vert_map[v] for v in f] for f in filtered_faces]
+        new_vertices = [vertices[v] for v in unique_verts]
+    else:
+        remapped_faces = []
+        new_vertices = vertices
+
+    return Mesh(vertices=new_vertices, faces=remapped_faces)
+
+class Mesh:
+    def __init__(self, vertices, faces):
+        self.vertices = vertices
+        self.faces = faces
+```
+
+**Parameters:**
+*   `k`: Integer. Number of largest components to retain. Default 1 [S1, unofficial].
+*   `threshold`: Integer. Size threshold (faces or vertices). Components below this are removed unless `invert=True` [S1, unofficial].
+*   `metric`: String. 'faces' or 'vertices'. Specifies whether component size is measured in faces or vertices [S1, unofficial].
+*   `invert`: Boolean. If True, retains components larger than the threshold for dust filtering, or the smallest $k$ components for largest_k filtering [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Segmentation Failure:** If component segmentation fails, the operation is skipped with an error message [S3, unofficial].
+*   **Degenerate Input:** Meshes with no faces or vertices require immediate return [G].
+*   **Precision:** Face adjacency relies on exact vertex index matching. Duplicate vertices at identical positions but different indices are not connected [G].
+*   **Small Valid Structures:** Aggressive filtering may remove small but valid geometric features. Parameters must be tuned carefully [S1, unofficial].
+
+## Subtopics
+
+### [Geometry Cleaning](12700-geometry-cleaning.md)
+Geometry Cleaning is a post-processing step for polygonal meshes extracted from volumetric data, specifically designed to remove artifacts introduced by discretization and snapping processes. It solves the problem of non-manifold geometry, duplicate vertices, and degenerate cells that arise when converting voxel grids to triangle meshes. Unlike Connected Component Filtering, which removes isolated fragments based on connectivity, Geometry Cleaning focuses on topological validity by eliminating redundant and invalid geometric primitives to produce a clean, watertight manifold mesh.
+
+### Connected Components Analysis
+Identifies connected components in a mesh, either based on face adjacency or vertex adjacency. This is the foundational step for filtering but can also be used for analysis. Face-based analysis uses `ccls = zmesh.face_connected_components(mesh)` [S1, unofficial]. Vertex-based analysis uses `ccls = zmesh.vertex_connected_components(mesh)` [S1, unofficial].
+
+### Ontology-Based Topological Correction
+A post-processing step that uses anatomical ontology to identify which surface components should be connected or merged, eliminating topological waste caused by segmentation proximity errors [S5]. The method groups all surface components bounding a functional unit (e.g., left ventricle) into a single component, excluding specific boundaries like valves [S5]. It processes other structures (e.g., left atrium, ascending aorta), grouping meshes and leaving inner boundaries as separate components [S5]. A known pitfall is that boundary meshes between distinct complexes (e.g., left and right heart sides) are duplicated and represented independently in both structures [S5].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Efficient for meshes with millions of faces, though adjacency graph construction can be a bottleneck [S1, S3, unofficial].
+*   **Strengths:** Simple, effective at removing noise ("dust") from surface extractions. Preserves the largest structural object.
+*   **Limitations:** Does not fix topological errors (holes, non-manifold edges). May remove small valid objects if parameters are not tuned. Relies on connectivity, so spatially close but disconnected fragments are treated separately [S1, S2, unofficial].
+*   **When to Use:** After surface extraction from noisy volumes or segmented data where isolated fragments are expected [S1, S2, unofficial].
+*   **When Not to Use:** When small objects are significant, or when the mesh has topological defects that require cleaning rather than filtering [S1, 12700-geometry-cleaning.md, unofficial].
+
+## Background
+Connected Component Filtering is a standard technique in mesh post-processing, particularly in computer graphics and medical imaging. It is implemented in libraries such as `zmesh` [S1, unofficial] and `trimesh` [S2, unofficial]. In medical imaging, ontology-based variants are used to correct topological errors in heart models [S5].
+
+## Sources
+[S1] seung-lab/zmesh, https://github.com/seung-lab/zmesh, fetched 2026-10-26 (unofficial)
+[S2] VladimirYugay/Gaussian-SLAM, https://github.com/VladimirYugay/Gaussian-SLAM, fetched 2026-10-27 (unofficial)
+[S3] leonhardrobin/svraster-win10, https://github.com/leonhardrobin/svraster-win10, fetched 2026-10-27 (unofficial)
+[S4] Zhaoyibinn/VGVGGT, https://github.com/Zhaoyibinn/VGVGGT, fetched 2026-10-27 (unofficial)
+[S5] Non-manifold Mesh Extraction from Time-varying Segmented Volumes used for Modeling a Human Heart, https://doi.org/10.2312/vissym/eurovis05/199-206, fetched 2026-10-26

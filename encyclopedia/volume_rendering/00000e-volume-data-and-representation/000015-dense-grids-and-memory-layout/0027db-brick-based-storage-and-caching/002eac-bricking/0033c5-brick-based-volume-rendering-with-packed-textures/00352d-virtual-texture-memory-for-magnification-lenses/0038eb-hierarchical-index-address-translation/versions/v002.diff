@@ -1,0 +1,133 @@
+--- v001.md
++++ v002.md
+@@ -4,95 +4,53 @@
+ 
+ ## Overview
+-Hierarchical Index/Address Translation is a method that maps virtual volume coordinates to physical texture coordinates, supporting multi-resolution rendering and memory management [S1, unofficial]. It solves the problem of addressing anisotropic down-sampled volume data by packing multiple resolution levels into a single 3D texture, enabling efficient memory management for petascale microscopy data streams [S1, unofficial]. It builds on [Virtual Texture Memory for Magnification Lenses](7444-virtual-texture-memory-for-magnification-lenses.md) by providing the specific translation logic and data layout for multi-resolution page directories.
++Hierarchical Index/Address Translation is a method for mapping virtual volume coordinates to physical texture coordinates in GPU-based volume rendering, supporting multi-resolution rendering and memory management [S1, unofficial][S2]. It enables arbitrary coordinate transformations, such as magnification, in the fragment shader without rebinding textures by locating bricks within a single memory pool [Parent]. It sets itself apart from flat index textures by using a page table hierarchy to handle multi-resolution data and anisotropic down-sampling, which prevents storage as a regular mipmap [S2].
+ 
+ ## How it works
+-The method uses an index texture (also called a layout or address translation texture) to store metadata for bricks, allowing the renderer to locate physical data in a packed 3D texture buffer based on virtual coordinates.
++**Inputs and Outputs:**
++*   **Input:** Virtual volume coordinates (normalized $p$ and resolution level $l$).
++*   **Output:** Physical texture coordinates or block cache indices.
+ 
+-**Inputs and Outputs**
+-*   **Input:** Virtual volume coordinates $(v_x, v_y, v_z)$, typically derived from ray-casting or sampling logic.
+-*   **Output:** Physical texture coordinates $(p_x, p_y, p_z)$ and brick identifiers within the packed 3D texture.
++**Data Structures:**
++1.  **Index/Address Translation Texture (Flat/Hierarchical):** Stores metadata for bricks. Fields include:
++    *   Number of bricks.
++    *   Texture size of brick.
++    *   Physical extent of brick [S1, unofficial].
++2.  **Multi-resolution Page Directory (`texPageDir`):** A single 3D texture storing the page directory for all resolution levels $l \in [0, l_{max}]$. The origin of each level is retrieved from a small array `pageDirBase` [S2].
++3.  **Page Table Cache:** Implemented as a 3D texture, managed by CPU using LRU/MRU scheme [S2].
++4.  **Block Cache:** Implemented as a 3D texture, managed by CPU using LRU/MRU scheme [S2].
+ 
+-**Data Structures**
+-The index texture stores metadata for each brick. The specific fields defined in the source are:
+-1.  Number of bricks
+-2.  Texture size of brick
+-3.  Physical extent of brick
++**Parameters:**
++*   $r_{pd}(l)$: Total number of entries in the page directory for resolution level $l$ [S2].
++*   $r_{pt}(l)$: Total number of entries in the virtualized page table of level $l$ [S2].
++*   $r_v(l)$: Total number of voxels in the virtualized volume of level $l$ [S2].
++*   $b_{pt}$: Number of entries per page table block [S2].
++*   $b_{vox}$: Number of voxels per voxel block [S2].
+ 
+-The exact bit-packing, field sizes, and total layout of this metadata structure are not given in the sources.
++**Steps:**
++1.  **Compute Lookup Indexes:** Calculate lookup indexes from normalized coordinates $p$ using constants $r_{pd}(l)$, $r_{pt}(l)$, and $r_v(l)$ [S2].
++2.  **Access Page Directory:** Retrieve the base address for resolution level $l$ from `pageDirBase` and sample `texPageDir` to find the page table location [S2].
++3.  **Page Table Lookup:** Use the computed index to access the page table cache. If a cache miss occurs, report it to the CPU [S2].
++4.  **Cache Management (CPU):** Upon cache miss, the CPU checks if the required block is resident in the CPU block cache. If yes, download it to the GPU block cache [S2].
++5.  **Physical Address Translation:** Translate the virtual multi-resolution address $(l, p)$ to a physical address in the block cache using the page table hierarchy [S2].
+ 
+-**Steps**
+-1.  **Sample Index Texture:** At the current virtual coordinate, sample the index texture to retrieve the metadata for the corresponding brick.
+-2.  **Retrieve Metadata:** Extract the "Number of bricks", "Texture size of brick", and "Physical extent of brick" from the sampled data [S1, unofficial].
+-3.  **Calculate Offset:** Use the metadata to calculate the offset within the packed 3D texture. The "Physical extent of brick" defines the spatial bounds, while the "Texture size of brick" defines the sampling resolution [S1, unofficial].
+-4.  **Map Coordinates:** Transform the virtual coordinate into the local coordinate space of the physical brick using the retrieved extent and size information.
+-5.  **Sample Data:** Sample the packed 3D texture at the calculated physical coordinate to retrieve the voxel data [S1, unofficial].
+-
+-**Formulas**
+-Not given in the sources. The specific mathematical relationship between the virtual coordinates, the metadata fields, and the final physical texture coordinates is not provided.
+-
+-**Parameters**
+-*   **Brick Packing:** Bricks are packed into a single 3D texture. For filtering, neighbor voxels are duplicated, resulting in an overhead of 10% with $32^3$ bricks (storing $(n+1)^3$ bricks instead of $n^3$) [S1, unofficial].
+-*   **Resolution Levels:** The method supports hierarchical levels (e.g., Level 0 to Level 3) for adaptive volume sampling [S1, unofficial].
+-
+-**Edge Cases and Pitfalls**
+-*   **Boundary Conditions:** The source mentions duplicate neighbor voxels for filtering, implying boundary handling is managed by this duplication strategy [S1, unofficial].
+-*   **Precision:** Not given in the sources.
+-
+-**Pseudocode**
+-```python
+-# Pseudocode for Hierarchical Index/Address Translation
+-# Note: Specific formulas and data structure layouts are not given in the sources.
+-
+-def translate_address(virtual_coord, index_texture, packed_volume):
+-    """
+-    Maps virtual volume coordinates to physical texture coordinates.
+-    
+-    Args:
+-        virtual_coord: Tuple (vx, vy, vz) representing the virtual coordinate.
+-        index_texture: The layout/index texture containing brick metadata.
+-        packed_volume: The 3D texture containing packed brick data.
+-        
+-    Returns:
+-        Tuple (physical_coord, brick_id)
+-    """
+-    # Step 1: Sample the index texture at the virtual coordinate
+-    # The source does not specify if this is a direct lookup or a hierarchical traversal.
+-    metadata = sample_3d_texture(index_texture, virtual_coord)
+-    
+-    # Step 2: Extract metadata fields
+-    # Fields defined in source: Number of bricks, Texture size of brick, Physical extent of brick
+-    num_bricks = metadata.number_of_bricks
+-    brick_tex_size = metadata.texture_size_of_brick
+-    brick_phys_extent = metadata.physical_extent_of_brick
+-    
+-    # Step 3: Calculate physical coordinates
+-    # The source does not provide the specific formula for this calculation.
+-    # It implies using the physical extent and texture size to map virtual to physical.
+-    physical_coord = calculate_physical_coordinate(virtual_coord, brick_phys_extent, brick_tex_size)
+-    
+-    # Step 4: Sample the packed volume
+-    # Duplicate neighbor voxels are used for filtering, handled by the renderer's sampling mode.
+-    data = sample_3d_texture(packed_volume, physical_coord)
+-    
+-    return physical_coord, data
+-```
++**Pitfalls:**
++*   **Anisotropic Down-sampling:** Prevents the multi-resolution page directory from being stored as a regular mipmap, requiring custom packing into `texPageDir` [S2].
+ 
+ ## Subtopics
+ 
+-### [Virtual Multi-Resolution Volume Address Translation](16088-virtual-multi-resolution-volume-address-translation.md)
+-Virtual Multi-Resolution Volume Address Translation is a method that maps virtual multi-resolution volume coordinates to physical addresses in a GPU block cache using a page table hierarchy. It solves the problem of addressing anisotropic down-sampled volume data by packing multiple resolution levels into a single 3D texture, enabling efficient memory management for petascale microscopy data streams. It builds on [Hierarchical Index/Address Translation](8371-hierarchical-index-address-translation.md) by providing the specific translation logic and data layout for multi-resolution page directories.
++### Virtual Multi-Resolution Volume Address Translation
++A method to translate a virtual multi-resolution address $(l, p)$ to a physical address in the block cache using a page table hierarchy [S2]. It handles anisotropic down-sampling by packing resolution levels into a single 3D texture `texPageDir` [S2]. Choose this when rendering multi-resolution volumes with anisotropic down-sampling where regular mipmaps are insufficient [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** The method packs bricks into a single 3D texture. There is a 10% overhead for filtering with $32^3$ bricks due to duplicate neighbor voxels [S1, unofficial].
+-*   **Measured Performance:** Adaptive volume sampling using this method achieved a speed-up of 2.6-2.8x compared to full density rendering [S1, unofficial].
+-*   **Strengths:** Supports multi-resolution rendering; allows arbitrary coordinate transformations without rebinding textures; efficient memory management for large datasets.
+-*   **Limitations:** Requires an additional index texture; specific performance characteristics depend on the hardware and resolution.
+-*   **When to use:** When rendering large, multi-resolution volume datasets (e.g., petascale microscopy) where memory efficiency and adaptive sampling are critical.
+-*   **When not to use:** For simple, single-resolution volumes where the overhead of the index texture is not justified.
++*   **Time Complexity:** Lookup is $O(1)$ per level in the hierarchy, but cache misses incur CPU-GPU transfer latency [S2].
++*   **Memory Complexity:** Requires storage for the page directory, page table cache, and block cache, all implemented as 3D textures [S2].
++*   **Performance:** Adaptive volume sampling using this method achieved a speed-up of 2.6-2.8x compared to full density rendering [S1, unofficial].
++*   **Strengths:** Supports multi-resolution rendering and arbitrary coordinate transformations without rebinding textures [Parent, S1]. Efficiently handles empty space skipping [S2].
++*   **Limitations:** Complex implementation due to custom packing of the page directory and CPU-GPU synchronization for cache management [S2].
+ 
+ ## Background
+-The method is described in the context of GPU-based volume ray-casting with advanced illumination techniques [S1, unofficial]. It is part of a broader effort to make volume rendering more flexible and efficient on GPUs, particularly for large-scale scientific data. The approach is linked to adaptive volume sampling strategies that utilize hierarchical levels to optimize rendering speed [S1, unofficial].
++The concept of using a layout/index texture for address translation was introduced in "GPU-Based Volume Ray-Casting with Advanced Illumination" [S1, unofficial]. The hierarchical multi-resolution variant was developed for "Interactive Volume Exploration of Petascale Microscopy Data Streams" to handle large datasets [S2].
+ 
+ ## Sources
+-[S1] GPU-Based Volume Ray-Casting with Advanced Illumination, https://doi.org/10.2312/egt.20091069, fetched 2026-10-26 (unofficial)+[S1] GPU-Based Volume Ray-Casting with Advanced Illumination, https://doi.org/10.2312/egt.20091069, fetched 2026-10-26 (unofficial)
++[S2] PDF Interactive Volume Exploration of Petascale Microscopy Data Streams ..., https://vccvisualization.org/publications/2012_hadwiger_petascale.pdf, fetched 2026-10-28

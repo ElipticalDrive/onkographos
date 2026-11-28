@@ -1,0 +1,243 @@
+# Eigenvector Computation via Cross-Product Averaging
+
+Also called: Cross-Product Averaging Eigenvector, Eigenvector Calculation via Cross Products, Robust Eigenvector via Cross-Products, cross-product eigenvector method
+
+## Overview
+This method computes the eigenvectors of a $3 \times 3$ symmetric matrix $\mathbf{D}$ given its eigenvalues, specifically designed to handle numerical instability when eigenvalues have multiplicity greater than one. It sets itself apart from standard null-space solvers (like SVD or QR decomposition) by using pairwise cross-products of the matrix columns to estimate the eigenvector direction, then averaging these estimates to mitigate floating-point errors. It is primarily used in diffusion tensor visualization where robust eigenvector extraction is critical for glyph orientation [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A $3 \times 3$ symmetric matrix $\mathbf{D}$ (represented in a specific coordinate frame, e.g., laboratory frame).
+- The three eigenvalues $\lambda_1, \lambda_2, \lambda_3$ of $\mathbf{D}$.
+
+**Outputs:**
+- Three orthonormal eigenvectors $\mathbf{e}_1, \mathbf{e}_2, \mathbf{e}_3$ corresponding to $\lambda_1, \lambda_2, \lambda_3$.
+
+**Data Structures:**
+- Vectors $\mathbf{l}_i$ (columns of $\mathbf{D} - \lambda I$).
+- Vectors $\mathbf{c}_i$ (cross products).
+- Vector $\mathbf{e}$ (final eigenvector).
+
+**Steps:**
+
+1. **Identify Eigenvalue Multiplicity:** Determine the multiplicity of each eigenvalue. Let the distinct eigenvalues be $\lambda^{(k)}$ with multiplicities $m_k$.
+
+2. **Case: Multiplicity One ($m=1$):**
+   For an eigenvalue $\lambda$ with multiplicity one:
+   a. Construct the matrix $\mathbf{M} = \mathbf{D} - \lambda \mathbf{I}$.
+   b. Extract the column vectors $\mathbf{l}_1, \mathbf{l}_2, \mathbf{l}_3$ from $\mathbf{M}$.
+   c. Compute the three pairwise cross vectors:
+      $$ \mathbf{c}_1 = \mathbf{l}_1 \times \mathbf{l}_2 $$
+      $$ \mathbf{c}_2 = \mathbf{l}_1 \times \mathbf{l}_3 $$
+      $$ \mathbf{c}_3 = \mathbf{l}_2 \times \mathbf{l}_3 $$
+   d. Identify the longest cross vector $\mathbf{c}_m$ among $\{\mathbf{c}_1, \mathbf{c}_2, \mathbf{c}_3\}$ (i.e., the one with the largest norm).
+   e. Adjust the signs of the other two cross vectors $\mathbf{c}_i$ such that their dot product with $\mathbf{c}_m$ is non-negative:
+      $$ \text{if } \mathbf{c}_i \cdot \mathbf{c}_m < 0, \text{ then } \mathbf{c}_i \leftarrow -\mathbf{c}_i $$
+   f. Compute the final eigenvector $\mathbf{e}$ by averaging the sign-adjusted cross vectors and normalizing:
+      $$ \mathbf{e} = \frac{\mathbf{c}_1 + \mathbf{c}_2 + \mathbf{c}_3}{\|\mathbf{c}_1 + \mathbf{c}_2 + \mathbf{c}_3\|} $$
+
+3. **Case: Multiplicity Two ($m=2$):**
+   Suppose $\lambda_1 = \lambda_2$ (multiplicity two) and $\lambda_3$ is distinct.
+   a. The rank of $\mathbf{D} - \lambda_1 \mathbf{I}$ is one. The column vectors $\mathbf{l}_i$ of this matrix are parallel to the eigenvector $\mathbf{e}_3$ associated with the distinct eigenvalue $\lambda_3$.
+   b. Perform sign adjustment on $\mathbf{l}_i$ similar to step 2e: find the longest $\mathbf{l}_m$ and flip signs of others so $\mathbf{l}_i \cdot \mathbf{l}_m \geq 0$.
+   c. Compute $\mathbf{e}_3$ by averaging the sign-adjusted $\mathbf{l}_i$ and normalizing.
+   d. Choose any two mutually orthogonal unit vectors $\mathbf{e}_1, \mathbf{e}_2$ that are also orthogonal to $\mathbf{e}_3$ to span the eigenspace for $\lambda_1, \lambda_2$. [G] A robust way to find these is to pick an arbitrary vector $\mathbf{v}$ not parallel to $\mathbf{e}_3$, compute $\mathbf{e}_1 = \frac{\mathbf{v} - (\mathbf{v} \cdot \mathbf{e}_3)\mathbf{e}_3}{\|\mathbf{v} - (\mathbf{v} \cdot \mathbf{e}_3)\mathbf{e}_3\|}$, and $\mathbf{e}_2 = \mathbf{e}_3 \times \mathbf{e}_1$.
+
+4. **Case: Multiplicity Three ($m=3$):**
+   If all eigenvalues are equal ($\lambda_1 = \lambda_2 = \lambda_3$), the matrix is a scalar multiple of the identity. Any three mutually orthogonal unit vectors may be chosen as eigenvectors. [G] The standard basis vectors $\mathbf{x}=(1,0,0), \mathbf{y}=(0,1,0), \mathbf{z}=(0,0,1)$ are a valid choice.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def cross_product(a, b):
+    return [
+        a[1]*b[2] - a[2]*b[1],
+        a[2]*b[0] - a[0]*b[2],
+        a[0]*b[1] - a[1]*b[0]
+    ]
+
+def dot_product(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def vector_norm(v):
+    return math.sqrt(dot_product(v, v))
+
+def normalize(v):
+    n = vector_norm(v)
+    if n == 0:
+        return [0, 0, 0]
+    return [v[0]/n, v[1]/n, v[2]/n]
+
+def vector_add(a, b):
+    return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]
+
+def compute_eigenvectors(D, eigenvalues):
+    # D is 3x3 symmetric matrix, eigenvalues is list of 3 floats
+    # Returns list of 3 eigenvectors [e1, e2, e3]
+    
+    # Sort eigenvalues to handle multiplicity easily? 
+    # The method relies on identifying which lambda has which multiplicity.
+    # For simplicity, we assume eigenvalues are passed in order or we check equality.
+    
+    # Check for multiplicity 3
+    if abs(eigenvalues[0] - eigenvalues[1]) < 1e-9 and abs(eigenvalues[1] - eigenvalues[2]) < 1e-9:
+        # All equal
+        return [[1,0,0], [0,1,0], [0,0,1]]
+    
+    # Check for multiplicity 2
+    # We need to find the distinct eigenvalue and the repeated one
+    repeated_lambda = None
+    distinct_lambda = None
+    
+    if abs(eigenvalues[0] - eigenvalues[1]) < 1e-9:
+        repeated_lambda = eigenvalues[0]
+        distinct_lambda = eigenvalues[2]
+    elif abs(eigenvalues[1] - eigenvalues[2]) < 1e-9:
+        repeated_lambda = eigenvalues[1]
+        distinct_lambda = eigenvalues[0]
+    elif abs(eigenvalues[0] - eigenvalues[2]) < 1e-9:
+        repeated_lambda = eigenvalues[0]
+        distinct_lambda = eigenvalues[1]
+    else:
+        # All distinct, multiplicity 1 for all
+        pass
+
+    eigenvectors = [None, None, None]
+    
+    # Helper to compute eigenvector for a specific lambda with multiplicity 1
+    def get_eigenvector_multiplicity_1(D, lam):
+        # M = D - lam * I
+        M = [
+            [D[0][0]-lam, D[0][1], D[0][2]],
+            [D[1][0], D[1][1]-lam, D[1][2]],
+            [D[2][0], D[2][1], D[2][2]-lam]
+        ]
+        # Columns l1, l2, l3
+        l1 = [M[0][0], M[1][0], M[2][0]]
+        l2 = [M[0][1], M[1][1], M[2][1]]
+        l3 = [M[0][2], M[1][2], M[2][2]]
+        
+        c1 = cross_product(l1, l2)
+        c2 = cross_product(l1, l3)
+        c3 = cross_product(l2, l3)
+        
+        # Find longest
+        norms = [vector_norm(c1), vector_norm(c2), vector_norm(c3)]
+        max_idx = 0
+        if norms[1] > norms[max_idx]: max_idx = 1
+        if norms[2] > norms[max_idx]: max_idx = 2
+        
+        cm = [c1, c2, c3][max_idx]
+        
+        # Adjust signs
+        adjusted = [c1, c2, c3]
+        for i in range(3):
+            if i != max_idx:
+                if dot_product(adjusted[i], cm) < 0:
+                    adjusted[i] = [-x for x in adjusted[i]]
+        
+        # Average
+        avg = vector_add(vector_add(adjusted[0], adjusted[1]), adjusted[2])
+        return normalize(avg)
+
+    # Helper to compute eigenvector for distinct lambda when multiplicity is 2
+    def get_eigenvector_distinct_from_repeated(D, repeated_lam):
+        # M = D - repeated_lam * I
+        # Rank is 1. Columns are parallel to eigenvector of distinct lambda
+        M = [
+            [D[0][0]-repeated_lam, D[0][1], D[0][2]],
+            [D[1][0], D[1][1]-repeated_lam, D[1][2]],
+            [D[2][0], D[2][1], D[2][2]-repeated_lam]
+        ]
+        l1 = [M[0][0], M[1][0], M[2][0]]
+        l2 = [M[0][1], M[1][1], M[2][1]]
+        l3 = [M[0][2], M[1][2], M[2][2]]
+        
+        norms = [vector_norm(l1), vector_norm(l2), vector_norm(l3)]
+        max_idx = 0
+        if norms[1] > norms[max_idx]: max_idx = 1
+        if norms[2] > norms[max_idx]: max_idx = 2
+        
+        lm = [l1, l2, l3][max_idx]
+        
+        adjusted = [l1, l2, l3]
+        for i in range(3):
+            if i != max_idx:
+                if dot_product(adjusted[i], lm) < 0:
+                    adjusted[i] = [-x for x in adjusted[i]]
+        
+        avg = vector_add(vector_add(adjusted[0], adjusted[1]), adjusted[2])
+        return normalize(avg)
+
+    if repeated_lambda is not None:
+        # Multiplicity 2 case
+        e_distinct = get_eigenvector_distinct_from_repeated(D, repeated_lambda)
+        
+        # Assign e_distinct to the correct position
+        if abs(eigenvalues[0] - distinct_lambda) < 1e-9:
+            eigenvectors[0] = e_distinct
+            # e1, e2 span the space of repeated_lambda
+            # Find e2 orthogonal to e_distinct
+            # Pick arbitrary vector not parallel to e_distinct
+            v = [1, 0, 0]
+            if abs(dot_product(v, e_distinct)) > 0.9:
+                v = [0, 1, 0]
+            # Gram-Schmidt
+            proj = dot_product(v, e_distinct) * e_distinct
+            e2_raw = [v[0]-proj[0], v[1]-proj[1], v[2]-proj[2]]
+            e2 = normalize(e2_raw)
+            e1 = cross_product(e_distinct, e2)
+            
+            eigenvectors[1] = e1
+            eigenvectors[2] = e2
+        elif abs(eigenvalues[1] - distinct_lambda) < 1e-9:
+            eigenvectors[1] = e_distinct
+            v = [1, 0, 0]
+            if abs(dot_product(v, e_distinct)) > 0.9:
+                v = [0, 1, 0]
+            proj = dot_product(v, e_distinct) * e_distinct
+            e2_raw = [v[0]-proj[0], v[1]-proj[1], v[2]-proj[2]]
+            e2 = normalize(e2_raw)
+            e1 = cross_product(e_distinct, e2)
+            
+            eigenvectors[0] = e1
+            eigenvectors[2] = e2
+        else:
+            eigenvectors[2] = e_distinct
+            v = [1, 0, 0]
+            if abs(dot_product(v, e_distinct)) > 0.9:
+                v = [0, 1, 0]
+            proj = dot_product(v, e_distinct) * e_distinct
+            e2_raw = [v[0]-proj[0], v[1]-proj[1], v[2]-proj[2]]
+            e2 = normalize(e2_raw)
+            e1 = cross_product(e_distinct, e2)
+            
+            eigenvectors[0] = e1
+            eigenvectors[1] = e2
+            
+    else:
+        # All distinct, multiplicity 1
+        eigenvectors[0] = get_eigenvector_multiplicity_1(D, eigenvalues[0])
+        eigenvectors[1] = get_eigenvector_multiplicity_1(D, eigenvalues[1])
+        eigenvectors[2] = get_eigenvector_multiplicity_1(D, eigenvalues[2])
+        
+    return eigenvectors
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for a single $3 \times 3$ matrix. It involves a constant number of arithmetic operations.
+- **Memory Complexity:** $O(1)$.
+- **Strengths:** Numerically robust for symmetric matrices, especially when eigenvalues are close or have multiplicity. It avoids the instability of solving linear systems directly when the matrix is near-singular (rank-deficient).
+- **Limitations:** Only applicable to $3 \times 3$ symmetric matrices. Requires eigenvalues to be known beforehand.
+- **When to use:** Diffusion tensor visualization, where robust orientation of glyphs is required even in regions of isotropy or near-isotropy.
+- **When not to use:** For non-symmetric matrices or matrices larger than $3 \times 3$.
+
+## Background
+This method was described by Gordon Kindlmann in his 2004 PhD thesis "Visualization and Analysis of Diffusion Tensor Fields" [S1, unofficial]. It is used in the context of tensor field visualization, specifically for computing the orientation of glyphs (icons) that represent the shape and orientation of the tensor. The method addresses the numerical precision issues inherent in floating-point arithmetic when computing eigenvectors for matrices with repeated eigenvalues.
+
+## Sources
+[S1] Visualization and Analysis of Diffusion Tensor Fields Abstract, http://people.cs.uchicago.edu/~glk/pubs/pdf/Kindlmann-VisualizationAndAnalysisOfDiffusionTensorFields-PhD-2004.pdf, fetched 2026-10-30 (unofficial)

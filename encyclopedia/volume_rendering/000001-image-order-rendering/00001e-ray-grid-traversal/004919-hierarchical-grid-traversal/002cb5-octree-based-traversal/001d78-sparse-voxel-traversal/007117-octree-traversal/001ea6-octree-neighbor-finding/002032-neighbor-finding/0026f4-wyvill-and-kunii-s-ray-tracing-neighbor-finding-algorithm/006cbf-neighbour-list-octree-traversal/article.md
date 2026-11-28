@@ -1,0 +1,79 @@
+# Neighbour List Octree Traversal
+
+Also called: Neighbour List Traversal, Neighbour list search, Neighbour-based traversal, Samet method
+
+## Overview
+Neighbour List Octree Traversal is a ray-tracing method for sparse voxel octrees that determines the next intersected cell by consulting precomputed lists of adjacent cells, rather than performing geometric intersection tests or restarting a search from the root [S1]. It sets itself apart from the parent [Wyvill and Kunii's Ray Tracing / Neighbor Finding Algorithm](3876-wyvill-and-kunii-s-ray-tracing-neighbor-finding-algorithm.md) by replacing the calculation of a guaranteed interior point with a direct lookup of potential neighbours, and from the [Top-down Method](52-top-down-method.md) by avoiding the $O(depth)$ traversal cost for every cell crossing [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An octree structure where each node has associated neighbour lists; the current cell index; the exit face (wall) of the current cell through which the ray exits.
+*   **Output:** The index of the next cell entered by the ray.
+
+**Data Structures:**
+Each cell in the octree stores six pointer lists, one for each of the six faces (walls) of the cubic cell [S1].
+*   **Structure:** `Cell`
+    *   `neighbours[6]`: An array of six lists.
+    *   `neighbours[i]`: A list of pointers to neighbouring cells adjacent to face `i`.
+    *   **Ordering:** The pointers in each list are sorted by decreasing overlap surface area between the current cell and the neighbour [S1].
+
+**Steps:**
+1.  **Identify Exit Face:** Determine which of the six faces of the current cell the ray crosses to exit [S1]. Let this face index be $f \in \{0, \dots, 5\}$.
+2.  **Retrieve List:** Access the precomputed neighbour list `neighbours[f]` associated with the current cell [S1].
+3.  **Search Neighbours:** Iterate through the pointers in `neighbours[f]` in order [S1].
+4.  **Validation:** For each candidate neighbour in the list, verify if the ray actually enters that cell (i.e., the ray origin after crossing the boundary lies within the neighbour's bounds) [S1].
+5.  **Return:** Return the first valid neighbour found as the next cell [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_to_next_cell(current_cell, exit_face_index, ray_origin_after_exit):
+    """
+    Finds the next octree cell using precomputed neighbour lists.
+    
+    Args:
+        current_cell: The current octree node.
+        exit_face_index: Integer 0-5 indicating the face crossed.
+        ray_origin_after_exit: The 3D point where the ray enters the next cell.
+        
+    Returns:
+        The next octree node.
+    """
+    # Retrieve the list of neighbours for the specific exit face
+    # The list is ordered by decreasing overlap area [S1]
+    neighbour_list = current_cell.neighbours[exit_face_index]
+    
+    # Iterate through neighbours in order of decreasing overlap area [S1]
+    for candidate in neighbour_list:
+        # Check if the ray actually enters this candidate cell
+        # This involves verifying that ray_origin_after_exit is inside candidate
+        # and that the ray direction points into candidate [S1]
+        if is_point_in_cell(ray_origin_after_exit, candidate) and \
+           is_ray_entering_candidate(ray_origin_after_exit, candidate):
+            return candidate
+            
+    # If no neighbour is found in the list, the ray has exited the octree
+    # or the neighbour list is incomplete.
+    return None
+```
+
+**Parameters and Edge Cases:**
+*   **Memory Overhead:** Six pointer lists per cell [S1]. This is considered negligible for simulations storing many properties per cell [S1].
+*   **Construction Overhead:** Creating neighbour lists during octree construction takes less than 1% of simulation time [S1].
+*   **Degenerate Input:** If the neighbour list is empty or the ray exits the domain, the algorithm must handle the null case [S1].
+*   **Precision:** The validation step (checking if the ray enters the candidate) is critical because the neighbour list only provides candidates, not the exact entry point [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The search time is proportional to the number of neighbouring cells tested before finding the correct one [S1]. Due to the ordering by decreasing overlap area, the correct neighbour is typically found very early in the list [S1].
+*   **Memory Complexity:** $O(N)$ where $N$ is the number of cells, with a constant factor of 6 pointers per cell [S1].
+*   **Performance:** The method is approximately 20% faster than the top-down and bookkeeping methods [S1]. It cuts down grid traversal time by 20% compared to the traditional top-down method [S1].
+*   **Strengths:** Simple to implement; applicable to both regular and barycentric octree grids; very low computational overhead for list construction [S1].
+*   **Limitations:** Requires additional memory for neighbour pointers (though negligible in most contexts) [S1]. Performance depends on the accuracy of the neighbour list construction [S1].
+*   **When to use:** Preferred for 3D radiative transfer simulations and Monte Carlo ray tracing where traversal speed is critical and memory is not severely constrained [S1].
+
+## Background
+The method was first advocated by Hanan Samet in 1989 and 1990 in the context of computer graphics ray-tracing [S1]. It has been widely adopted in Monte Carlo radiative transfer codes for astrophysical simulations, such as those by Kurosawa & Hillier (2001) and Bianchi (2008) [S1].
+
+## Sources
+[S1] Using hierarchical octrees in Monte Carlo radiative transfer simulations, https://doi.org/10.1051/0004-6361/201220854, fetched 2026-10-24

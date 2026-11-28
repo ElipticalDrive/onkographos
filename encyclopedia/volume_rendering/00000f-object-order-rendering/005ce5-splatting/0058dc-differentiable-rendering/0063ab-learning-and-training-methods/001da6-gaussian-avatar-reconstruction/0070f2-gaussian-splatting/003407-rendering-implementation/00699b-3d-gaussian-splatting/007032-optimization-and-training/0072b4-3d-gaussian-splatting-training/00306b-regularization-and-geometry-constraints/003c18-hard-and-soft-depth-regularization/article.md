@@ -1,0 +1,196 @@
+# Hard and Soft Depth Regularization
+
+
+## Overview
+Hard and Soft Depth Regularization is a training constraint for 3D Gaussian Splatting that prevents the degradation of high-frequency color details caused by forcing anisotropic Gaussian primitives to conform to smooth monocular depth estimates [S1]. It sets itself apart from standard depth regularization methods by decoupling the optimization of Gaussian geometry (center positions) from their shape (scale and rotation), allowing the primitives to "reshuffle" spatially rather than deform, thereby balancing coarse depth fitting with fine appearance [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Current set of 3D Gaussians (defined by centers $\mu$, scales $s$, rotations $q$, opacities $\alpha$, and colors), monocular depth map $D_{mono}$, and camera parameters.
+*   **Outputs:** Gradient updates for Gaussian centers $\mu$ and opacities $\alpha$.
+
+**Data Structures:**
+*   **Gaussian State:** Each Gaussian $i$ is defined by:
+    *   Center position $\mu_i \in \mathbb{R}^3$
+    *   Scale $s_i \in \mathbb{R}^3$ (log-space or linear)
+    *   Rotation quaternion $q_i \in \mathbb{R}^4$
+    *   Opacity $\alpha_i \in [0, 1]$
+    *   Color coefficients (SH or RGB)
+*   **Depth Maps:** Two distinct depth maps are rendered from the current Gaussian state:
+    1.  **Hard Depth ($D_{hard}$):** Weighted average depth used for center position updates.
+    2.  **Soft Depth ($D_{soft}$):** Used for opacity updates (often derived from the same rendering pass but differentiated in gradient flow).
+
+**Numbered Steps:**
+1.  **Freeze Shape Parameters:** During the depth regularization step, freeze the scale parameters $s$ and rotation quaternions $q$ of all Gaussians. This prevents the Gaussian shapes from deforming to fit the smooth depth surface [S1].
+2.  **Render Depth Maps:** Render two depth maps from the current Gaussian state.
+    *   The first depth map is used to compute gradients for updating center positions $\mu$.
+    *   The second depth map is used to compute gradients for updating opacities $\alpha$.
+    *   *Note:* The specific distinction between "hard" and "soft" depth in the source implies using different weighting or aggregation strategies in the rendering equation to isolate geometric vs. opacity signals [S1].
+3.  **Compute Loss:** Calculate the depth regularization loss $\mathcal{L}_{depth}$ by comparing the rendered depth maps against the monocular depth estimate $D_{mono}$. Common choices include scale-invariant depth loss or L1 loss, though the source emphasizes the *method* of application (freezing shape) over a specific loss function formula [S1].
+4.  **Compute Gradients:**
+    *   Compute $\nabla_{\mu} \mathcal{L}_{depth}$ using the first depth map.
+    *   Compute $\nabla_{\alpha} \mathcal{L}_{depth}$ using the second depth map.
+5.  **Update Parameters:** Apply the gradients independently:
+    *   Update $\mu \leftarrow \mu - \eta \nabla_{\mu} \mathcal{L}_{depth}$
+    *   Update $\alpha \leftarrow \alpha - \eta \nabla_{\alpha} \mathcal{L}_{depth}$
+    *   Do **not** update $s$ or $q$ in this step [S1].
+
+**Formulas:**
+The total loss includes the photometric loss and the depth regularization term:
+$$ \mathcal{L}_{total} = \mathcal{L}_{photo} + \lambda_{depth} \mathcal{L}_{depth} $$
+Where $\mathcal{L}_{depth}$ is computed on the rendered depth maps. The source does not provide a single closed-form formula for $\mathcal{L}_{depth}$ itself, but describes the mechanism of applying it via independent gradient paths for $\mu$ and $\alpha$ [S1].
+
+**Parameters:**
+*   $\lambda_{depth}$: Weight for depth regularization. Not given in the sources.
+*   $\eta$: Learning rate. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Detail Loss:** Applying depth regularization directly to NeRF-style MLPs or un-frozen Gaussian shapes forces the primitive geometry to conform to smooth monocular depth estimates, which conflicts with complex color appearance and causes detail loss and blurred appearance [S1].
+*   **Sensitivity:** Gaussian radiance fields are more sensitive to small depth errors than NeRFs, which may result in noisy distribution of primitives and failures in regions with complex textures [S1].
+*   **Scale Invariance:** Existing scale-invariant depth losses often align depth maps to a fixed scale, which can overlook minor depth variations. This method mitigates this by allowing spatial reshaping [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hard_and_soft_depth_regularization(gaussians, monocular_depth, camera, lambda_depth):
+    """
+    Performs one step of Hard and Soft Depth Regularization.
+    
+    Args:
+        gaussians: Object containing parameters mu, s, q, alpha, colors.
+        monocular_depth: 2D tensor of monocular depth estimates.
+        camera: Camera parameters for projection.
+        lambda_depth: Weight for the depth loss.
+        
+    Returns:
+        Updated gaussians object.
+    """
+    # Step 1: Freeze shape parameters for this step
+    # In an autograd framework, this is achieved by detaching s and q from the computation graph
+    # or by zeroing out their gradients after the backward pass.
+    frozen_s = gaussians.s.detach()
+    frozen_q = gaussians.q.detach()
+    
+    # Step 2: Render two depth maps
+    # Render 1: For center position update (Hard Depth)
+    # Render 2: For opacity update (Soft Depth)
+    # The source implies two distinct depth maps are rendered. 
+    # Implementation detail: This might involve different weighting in the alpha-blending 
+    # or separate rendering passes with different gradient stops.
+    
+    # Pass 1: Compute gradients for mu
+    # We need to compute the loss and backpropagate only to mu.
+    with torch.enable_grad():
+        # Detach shape parameters to prevent gradient flow to s and q
+        current_gaussians = gaussians.clone()
+        current_gaussians.s = frozen_s.detach().requires_grad_(False)
+        current_gaussians.q = frozen_q.detach().requires_grad_(False)
+        
+        # Render depth map D_hard
+        # Assuming a render function that returns depth and color
+        depth_hard, _ = render_gaussians(current_gaussians, camera)
+        
+        # Compute depth loss
+        loss_hard = compute_depth_loss(depth_hard, monocular_depth)
+        
+        # Backpropagate only to mu
+        loss_hard.backward(retain_graph=True)
+        grad_mu = gaussians.mu.grad.clone()
+        
+    # Pass 2: Compute gradients for alpha
+    with torch.enable_grad():
+        # Detach shape parameters again
+        current_gaussians.alpha = gaussians.alpha.detach().requires_grad_(True)
+        current_gaussians.s = frozen_s.detach().requires_grad_(False)
+        current_gaussians.q = frozen_q.detach().requires_grad_(False)
+        
+        # Render depth map D_soft
+        # Note: The source says "Render two distinct depth maps". 
+        # If the rendering function is deterministic, D_soft might be the same as D_hard 
+        # but differentiated differently. Or it might use a different aggregation.
+        # For implementation, we assume a separate render call or a modified render mode.
+        depth_soft, _ = render_gaussians(current_gaussians, camera)
+        
+        # Compute depth loss
+        loss_soft = compute_depth_loss(depth_soft, monocular_depth)
+        
+        # Backpropagate only to alpha
+        loss_soft.backward()
+        grad_alpha = gaussians.alpha.grad.clone()
+        
+    # Step 5: Update parameters
+    # Apply gradients to mu and alpha
+    gaussians.mu = gaussians.mu - learning_rate * grad_mu
+    gaussians.alpha = gaussians.alpha - learning_rate * grad_alpha
+    
+    # Reset gradients for next step
+    gaussians.zero_grad()
+    
+    return gaussians
+
+def compute_depth_loss(rendered_depth, target_depth):
+    """
+    Computes the depth regularization loss.
+    Common choices: L1, Scale-Invariant Log Loss.
+    Source does not specify the exact loss function, only the mechanism.
+    """
+    # Example: L1 Loss
+    return torch.mean(torch.abs(rendered_depth - target_depth))
+```
+
+## Subtopics
+
+### [Global-Local Depth Normalization](9179-global-local-depth-normalization.md)
+Global-Local Depth Normalization is a depth regularization technique for 3D Gaussian Splatting that prevents scale-invariant losses from overlooking minor depth variations, thereby improving detailed geometry reshaping in texture-rich regions. It sets itself apart from standard scale-invariant losses by combining global scale preservation with local scale amplification, addressing the issue where existing methods align depth maps to a fixed global scale and ignore small local errors. It builds on [Hard and Soft Depth Regularization](9178-hard-and-soft-depth-regularization.md) and differs from siblings [Depth Reinitialization](9233-depth-reinitialization.md), [Position Regularization](11049-position-regularization.md), and [Coherent 3D Gaussian Optimization](14045-coherent-3d-gaussian-optimization.md) by explicitly decoupling absolute scale maintenance from local error amplification during gradient computation.
+
+### [Depth Reinitialization](9233-depth-reinitialization.md)
+Depth Reinitialization is a regularization strategy that alleviates 'overlapping' and 'under-reconstruction' artifacts in 3D Gaussian Splatting by leveraging dense depth information to reorganize the spatial distribution of Gaussians. It sets itself apart from sibling methods by rejecting standard alpha-blended depth maps in favor of geometric mid-point depths to generate clean, artifact-free point clouds for reinitialization.
+
+### [Isotropic Regularization](10092-isotropic-regularization.md)
+Isotropic Regularization is a geometric constraint used in continuous SLAM-based Gaussian Splatting to prevent the formation of highly elongated Gaussian primitives along the viewing ray direction. While standard differentiable rendering imposes no constraint on Gaussian scaling along the viewing ray, this lack of constraint causes artifacts and tracking instability in continuous SLAM scenarios where viewpoints are not carefully selected. It sets itself apart from its parent [Hard and Soft Depth Regularization](9178-hard-and-soft-depth-regularization.md) by explicitly penalizing anisotropy (stretching) rather than just enforcing depth consistency, and from [Global-Local Depth Normalization](9179-global-local-depth-normalization.md) by operating on the scale parameters directly rather than depth values.
+
+### [Position Regularization](11049-position-regularization.md)
+Position Regularization prevents floating artifacts and dramatic geometry shifts in 3D Gaussian Splatting by constraining Gaussian centers to remain close to a reference surface or their initial positions. It operates as a geometric prior constraint, distinct from depth-consistency methods in its parent category [9178-hard-and-soft-depth-regularization.md].
+
+### [Coherent 3D Gaussian Optimization](14045-coherent-3d-gaussian-optimization.md)
+Coherent 3D Gaussian Optimization is a regularization strategy for 3D Gaussian Splatting that enforces spatial coherence in Gaussian positions and opacities during training, specifically addressing artifacts in sparse-view novel view synthesis. It sets itself apart from standard 3DGS by replacing independent per-pixel residual updates with a learned implicit decoder that produces smooth, coherent residual fields for depth and opacity, supplemented by multiview total variation and optical flow constraints. This prevents the "semi-transparent" artifacts and detail loss common when optimizing Gaussians against sparse input views.
+
+### Geometric Regularization via Bilateral Filter
+A regularization loss that enforces coherent motion by grouping Gaussians in image space using a bilateral filter approach, avoiding the dampening of independent motion caused by spatial KNN [S2]. For a training image $I$ at time $t_I$, sample another time $t'$. Compute the 6D screw-axis representation of the transformation between $t_I$ and $t'$ for each Gaussian. Compute the geometric loss $\mathcal{L}_{geo}$ as the weighted sum of squared distances between screw-axis representations of neighboring pixels. The geometric loss is $\mathcal{L}_{\text{geo}} = \sum_{p' \in \mathcal{N}(p)} k_{c,c'} k_{d,d'} k_{p,p'} \|s_p - s_{p'}\|^2$, where $k_{c,c'}$ is color similarity, $k_{d,d'}$ is depth similarity, $k_{p,p'}$ is spatial distance weight, and $s_p, s_{p'}$ are screw-axis representations [S2]. Unlike standard bilateral filters, the loss is not divided by the sum of weights because the goal is comparison, not energy conservation [S2].
+
+### Near-Far Regularization
+A regularization term applied alongside depth distortion to constrain Gaussians to aggregate at object surfaces, ensuring robust 3D structure reconstruction [S3]. It narrows the distance between the weighted depth of the nearest and farthest $M$ Gaussians on each ray [S3]. Extract subset $N$ (nearest $M$ Gaussians) and $F$ (farthest $M$ Gaussians, where blending weight approaches 1) on each ray. Render depth maps $d_N, d_F$ and blending weight maps $T_N, T_F$ for subsets $N$ and $F$. The regularization term is $R_{nf} = T_N \cdot T_F \cdot |d_N - d_F|$, where $T$ is the sum of blending weights $\omega_i$ [S3]. Used in LE3D to improve structural reconstruction quality for downstream tasks [S3].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The method adds two rendering passes (or one pass with two gradient paths) per regularization step. The complexity is dominated by the rasterization of Gaussians, which is $O(N \cdot R)$ where $N$ is the number of Gaussians and $R$ is the number of rays (pixels). The memory overhead is minimal, requiring storage for two depth maps and their gradients.
+
+**Measured Performance:**
+Not given in the sources.
+
+**Scaling:**
+Not given in the sources.
+
+**Strengths and Limitations:**
+*   **Strengths:** Prevents detail loss and blurred appearance caused by forcing anisotropic Gaussians to fit smooth monocular depth [S1]. Balances coarse depth fitting with fine color appearance [S1].
+*   **Limitations:** Gaussian radiance fields are sensitive to small depth errors, which may result in noisy distribution of primitives in complex texture regions [S1]. Requires careful tuning of the regularization weight.
+
+**When to use it and when not:**
+*   **Use:** When training 3D Gaussian Splatting with monocular depth supervision and observing blurring or loss of high-frequency detail.
+*   **Do not use:** When the depth estimates are highly inaccurate or noisy, as this may lead to noisy Gaussian distributions [S1].
+
+## Background
+**Origin:**
+The method was introduced in the paper "DNGaussian: Optimizing Sparse-View 3D Gaussian Radiance Fields with Global-Local Depth Normalization" [S1].
+
+**History and Development:**
+The method addresses the conflict between smooth monocular depth estimates and complex color appearance in Gaussian radiance fields. It builds on the observation that NeRF-style depth regularization forces primitive geometry to conform to smooth depth, which is detrimental to Gaussian splatting where shape deformation is less desirable than spatial reshaping [S1].
+
+**Where it is used:**
+Used in DNGaussian for sparse-view 3D Gaussian Splatting optimization [S1].
+
+## Sources
+[S1] DNGaussian: Optimizing Sparse-View 3D Gaussian Radiance Fields with Global-Local Depth Normalization, https://doi.org/10.1109/cvpr52733.2024.01963, fetched 2026-10-26
+[S2] Adaptive Spatio‐Temporal 3D Gaussian Splatting for Scenes with Oscillatory Motion, https://doi.org/10.1111/cgf.70410, fetched 2026-10-26
+[S3] Lighting Every Darkness with 3DGS: Fast Training and Real-Time Rendering for HDR View Synthesis, https://doi.org/10.52202/079017-2549, fetched 2026-10-26

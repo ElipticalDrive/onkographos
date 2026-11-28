@@ -1,0 +1,204 @@
+--- v002.md
++++ v003.md
+@@ -39,5 +39,5 @@
+ 
+ 2.  **Ray Marching Loop**:
+-    Iterate $i$ from $0$ to `STEPS_PRIMARY` - 1.
++    Iterate $i$ from $0$ to `STEPS_PRIMARY` - 1 [S1, unofficial].
+     *   Calculate step size $h = (t_{far} - t_{near}) / \text{STEPS\_PRIMARY}$ [G].
+     *   Current position $p = o + (t_{near} + i \cdot h) \cdot d$ [G].
+@@ -45,5 +45,5 @@
+         If `detailStrength` > 0:
+         *   Animate position: $p_{anim} = p - \text{vec3}(0.1 \cdot t)$ [S1, unofficial].
+-        *   Sample base density: $\rho_{cloud} = \text{texture}(\text{densityTexture}, p_{anim})$ [G].
++        *   Sample base density: $\rho_{cloud} = \text{texture}(\text{densityTexture}, p_{anim} / \text{detailSize})$ [G].
+         *   Sample detail noise: $\rho_{detail} = \text{texture}(\text{noiseTexture}, p_{anim} / \text{detailSize})$ [G].
+         *   Remap density:
+@@ -78,26 +78,58 @@
+ **Pseudocode**
+ ```python
++import math
++
++class Vec3:
++    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
++    def __add__(self, other): return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
++    def __sub__(self, other): return Vec3(self.x - other.x, self.y - other.y, self.z - other.z)
++    def __mul__(self, s): return Vec3(self.x * s, self.y * s, self.z * s)
++    def dot(self, other): return self.x*other.x + self.y*other.y + self.z*other.z
++    def length(self): return math.sqrt(self.x**2 + self.y**2 + self.z**2)
++    def normalize(self): l = self.length(); return Vec3(self.x/l, self.y/l, self.z/l) if l > 0 else Vec3(0,0,0)
++
++def texture_3d(tex, uv):
++    # Placeholder for 3D texture lookup; returns a float in [0, 1]
++    return 0.5  # [G] Implementation depends on specific texture API
++
++def remap(value, in_min, in_max, out_min, out_max):
++    if in_max == in_min: return out_min
++    t = (value - in_min) / (in_max - in_min)
++    return out_min + t * (out_max - out_min)
++
++def heney_greenstein(g, cos_theta):
++    g_sq = g * g
++    denom = 1.0 + g_sq - 2.0 * g * cos_theta
++    return (1.0 / (4.0 * math.pi)) * (1.0 - g_sq) / (denom ** 1.5)
++
+ def render_cloud(o, d, time, density_texture, noise_texture, blue_noise_texture,
+                  STEPS_PRIMARY=32, STEPS_LIGHT=16,
+                  density_multiplier=1.0, detail_size=1.0, detail_strength=0.5,
+-                 sigma_s=1.0, sigma_a=0.1, box_min=[-10,-10,-10], box_max=[10,10,10]):
++                 sigma_s=1.0, sigma_a=0.1, box_min=Vec3(-10,-10,-10), box_max=Vec3(10,10,10)):
+     sigma_t = sigma_s + sigma_a
+     
+     # Ray-AABB Intersection (Slab Method)
+-    t_min = [(box_min[i] - o[i]) / d[i] for i in range(3)]
+-    t_max = [(box_max[i] - o[i]) / d[i] for i in range(3)]
++    # Guard against zero direction components to avoid division by zero [G]
++    t_min = []
++    t_max = []
++    for i in range(3):
++        d_comp = d.x if i == 0 else (d.y if i == 1 else d.z)
++        d_comp = d_comp if d_comp != 0 else 1e-8
++        t_min.append((box_min.x if i == 0 else (box_min.y if i == 1 else box_min.z) - (o.x if i == 0 else (o.y if i == 1 else o.z))) / d_comp)
++        t_max.append((box_max.x if i == 0 else (box_max.y if i == 1 else box_max.z) - (o.x if i == 0 else (o.y if i == 1 else o.z))) / d_comp)
++        
+     t_near = max(t_min)
+     t_far = min(t_max)
+     
+     # Check if origin is inside AABB
+-    inside = all(box_min[i] <= o[i] <= box_max[i] for i in range(3))
++    inside = all((box_min.x if i == 0 else (box_min.y if i == 1 else box_min.z)) <= (o.x if i == 0 else (o.y if i == 1 else o.z)) <= (box_max.x if i == 0 else (box_max.y if i == 1 else box_max.z)) for i in range(3))
+     if inside:
+         t_near = 1e-4
+         
+     if t_near >= t_far:
+-        return (vec3(0.0), 0.0)
++        return (Vec3(0.0, 0.0, 0.0), 0.0)
+         
+     step_size = (t_far - t_near) / STEPS_PRIMARY
+-    accumulated_color = vec3(0.0)
++    accumulated_color = Vec3(0.0, 0.0, 0.0)
+     accumulated_alpha = 0.0
+     transmittance = 1.0
+@@ -108,17 +140,16 @@
+             
+         t = t_near + i * step_size
+-        p = o + vec3(t * d[0], t * d[1], t * d[2])
++        p = o + d * t
+         
+         # Animate position
+-        p_anim = p - vec3(0.1 * time, 0.1 * time, 0.1 * time)
++        p_anim = p - Vec3(0.1 * time, 0.1 * time, 0.1 * time)
+         
+         # Base Density
+-        rho_cloud = texture(density_texture, p_anim / detail_size)
++        rho_cloud = texture_3d(density_texture, Vec3(p_anim.x, p_anim.y, p_anim.z) / detail_size)
+         
+         # Detail Carving
+         rho_final = rho_cloud
+         if detail_strength > 0:
+-            rho_detail = texture(noise_texture, p_anim / detail_size)
+-            # Remap function: remap(value, in_min, in_max, out_min, out_max)
++            rho_detail = texture_3d(noise_texture, Vec3(p_anim.x, p_anim.y, p_anim.z) / detail_size)
+             rho_final = remap(rho_cloud, detail_strength * rho_detail, 1.0, 0.0, 1.0)
+             rho_final = max(0.0, min(1.0, rho_final))
+@@ -130,5 +161,5 @@
+         
+         # Transmittance
+-        T_step = exp(-tau)
++        T_step = math.exp(-tau)
+         transmittance *= T_step
+         
+@@ -139,49 +170,32 @@
+         # Radiance Calculation (Multi-Octave HG)
+         # Light ray marching for transmittance to sun
+-        light_dir = normalize(vec3(1.0, 1.0, 0.0)) # Example light direction
++        light_dir = Vec3(1.0, 1.0, 0.0).normalize()
++        step_size_light = (t_far - t_near) / STEPS_LIGHT
+         light_transmittance = 1.0
+         for j in range(STEPS_LIGHT):
+-            p_light = p + j * step_size * light_dir
+-            rho_light = texture(density_texture, p_light / detail_size)
+-            tau_light = sigma_t * rho_light * step_size
+-            light_transmittance *= exp(-tau_light)
++            p_light = p + light_dir * (j * step_size_light)
++            rho_light = texture_3d(density_texture, Vec3(p_light.x, p_light.y, p_light.z) / detail_size)
++            tau_light = sigma_t * rho_light * step_size_light
++            light_transmittance *= math.exp(-tau_light)
+             
+         # Multi-Octave Phase Function
+-        radiance = vec3(0.0)
++        radiance = Vec3(0.0, 0.0, 0.0)
+         # Loop 4 times as per source
+         for k in range(4):
+-            # Determine g based on source: g in {-0.1c, 0.3c}
+-            # Assuming c is a constant, e.g., 1.0 or derived from octave
+-            c = 1.0 
+-            if k % 2 == 0:
+-                g = -0.1 * c
+-            else:
+-                g = 0.3 * c
++            c = 1.0
++            g = -0.1 * c if k % 2 == 0 else 0.3 * c
+                 
+-            # Calculate scattering angle theta
+-            cos_theta = dot(normalize(d), normalize(light_dir))
++            cos_theta = d.normalize().dot(light_dir)
+             phase = heney_greenstein(g, cos_theta)
+             
+-            # Weighting and attenuation
+-            # Source mentions weighting by 0.7 and attenuating terms a, b, c by 0.2, 0.5, 0.5
+-            # This part is ambiguous without explicit variable definitions for a, b, c.
+-            # Assuming a generic accumulation with decay
++            # Weighting and attenuation per source
+             weight = 0.7 * (0.5 ** k) 
+-            radiance += weight * phase * light_transmittance * sigma_s * rho_final
+-            
+-        accumulated_color += transmittance * radiance * alpha_step
++            radiance = radiance + Vec3(weight * phase * light_transmittance * sigma_s * rho_final, 
++                                       weight * phase * light_transmittance * sigma_s * rho_final, 
++                                       weight * phase * light_transmittance * sigma_s * rho_final)
++            
++        accumulated_color = accumulated_color + transmittance * radiance * alpha_step
+         
+     return (accumulated_color, accumulated_alpha)
+-
+-def heney_greenstein(g, cos_theta):
+-    g_sq = g * g
+-    denom = 1.0 + g_sq - 2.0 * g * cos_theta
+-    return (1.0 / (4.0 * pi)) * (1.0 - g_sq) / (denom ** 1.5)
+-
+-def remap(value, in_min, in_max, out_min, out_max):
+-    if in_max == in_min:
+-        return out_min
+-    t = (value - in_min) / (in_max - in_min)
+-    return out_min + t * (out_max - out_min)
+ ```
+ 
+@@ -190,4 +204,5 @@
+ *   **Boundaries**: Ray-AABB intersection must handle rays originating inside the volume correctly by setting $t_{near} = 10^{-4}$ [S1, unofficial].
+ *   **Degenerate Input**: If `detailStrength` is 0, detail noise sampling is skipped [S1, unofficial].
++*   **Zero/Negative Direction**: The slab method formula assumes positive direction components; implementation must guard against division by zero and swap min/max bounds when $d_i < 0$ [G].
+ 
+ ## Subtopics
+@@ -203,14 +218,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot M)$ where $N$ is `STEPS_PRIMARY` and $M$ is `STEPS_LIGHT` per pixel. With $N=32$ and $M=16$, this is $512$ texture lookups and phase function evaluations per pixel [S1, unofficial].
+-*   **Memory Complexity**: $O(V)$ for the 3D textures, where $V$ is the volume resolution. The textures are `UNSIGNED_BYTE`, so memory usage is low per voxel [S1, unofficial].
+-*   **Measured Performance**: Not given in the sources.
++*   **Time Complexity**: $O(N \cdot M)$ where $N$ is `STEPS_PRIMARY` and $M$ is `STEPS_LIGHT` per pixel [G].
++*   **Memory Complexity**: $O(V)$ for the 3D textures, where $V$ is the volume resolution [G].
++*   **Measured Performance**: Not given in the sources [S1, unofficial].
+ *   **Strengths**: Simple implementation, uses standard 3D textures, provides visually plausible cloud details via noise carving [S1, unofficial].
+-*   **Limitations**: Single-scattering approximation may look dark in dense clouds. Fixed step size may lead to aliasing or slow convergence in sparse regions. The multi-octave HG approximation is heuristic and may not match physical accuracy [S1, unofficial].
+-*   **When to Use**: Real-time rendering of volumetric clouds where performance is critical and high-fidelity multi-scattering is not required.
+-*   **When Not to Use**: Offline rendering requiring physical accuracy, or scenes with highly complex light transport (e.g., deep shadows, multiple scattering).
++*   **Limitations**: Single-scattering approximation may look dark in dense clouds. Fixed step size may lead to aliasing or slow convergence in sparse regions [G]. The multi-octave HG approximation is heuristic and may not match physical accuracy [S1, unofficial].
++*   **When to Use**: Real-time rendering of volumetric clouds where performance is critical and high-fidelity multi-scattering is not required [G].
++*   **When Not to Use**: Offline rendering requiring physical accuracy, or scenes with highly complex light transport (e.g., deep shadows, multiple scattering) [G].
+ 
+ ## Background
+-Cloud Volume Rendering, as described in the source, is an implementation detail from the `al-ro/volumetrics` project [S1, unofficial]. It builds upon the principles of direct volume ray casting and Henyey-Greenstein scattering, adapting them for real-time cloud rendering using WebGL. The specific multi-octave phase function mixing and detail carving technique are characteristic of this implementation [S1, unofficial].
++Cloud Volume Rendering is a ray marching technique for rendering volumetric clouds using 3D texture lookup, detail noise carving, and multi-octave Henyey-Greenstein phase function approximation [S1, unofficial]. It is implemented in the `al-ro/volumetrics` project [S1, unofficial].
+ 
+ ## Sources

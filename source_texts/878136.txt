@@ -1,0 +1,246 @@
+Spherical Harmonics are a type of Spherical Radial Basis Function that can be used to encode signals defined on a sphere in a compact way. This makes them an excellent fit for encoding a variety of datasets commonly used in real time graphics.
+
+Irradiance, Spherical Harmonics Skip to content
+Introduction
+Spherical Harmonics (SH) are a type of Spherical Radial Basis Function (SRBF) that can be used to encode signals defined on a sphere in a compact way. This makes them an excellent fit for encoding a variety of datasets commonly used in real time graphics. One such dataset is irradiance maps.
+They are the spherical analogue of the Fourier basis. Where a Fourier series decomposes a periodic signal on a line into sines and cosines of rising frequency, an SH projection decomposes a signal living on the surface of a sphere into functions of rising angular frequency. Truncating that series is what makes the encoding compact, and most of what is interesting about the technique follows from what the truncation throws away.
+The Basis
+The basis functions are distributed across an infinite series of 0-indexed bands. Band \(l\) contributes \(2l+1\) functions, written \(Y_l^m\) and indexed by \(m\) running from \(-l\) to \(l\). Keeping every band up to and including \(n\) is called an order \(n\) projection, and it stores
+\[\sum_{l=0}^{n} (2l+1) = (n+1)^2\]
+coefficients per color channel. Order 1 is 4 of them, order 2 is 9. The two demos further down are labelled L1 and L2 after those two orders. Higher bands add more granularity by encoding progressively higher frequencies, but also increase the computational cost of reconstructing the signal.
+The functions for the first three bands are listed below. These formulas assume a normalized direction vector \(d = (x, y, z)\)[12].
+l = 0l = 1l = 2
+m = -2 \(\frac{1}{2}\sqrt{\frac{15}{\pi}}yx\)
+m = -1 \(\frac{1}{2}\sqrt{\frac{3}{\pi}}y\)\(\frac{1}{2}\sqrt{\frac{15}{\pi}}yz\)
+m = 0\(\frac{1}{2} \sqrt{\frac{1}{\pi}}\)\(\frac{1}{2}\sqrt{\frac{3}{\pi}}z\)\(\frac{1}{4}\sqrt{\frac{5}{\pi}}(2z^2 - x^2 - y^2)\)
+m = 1 \(\frac{1}{2}\sqrt{\frac{3}{\pi}}x\)\(\frac{1}{2}\sqrt{\frac{15}{\pi}}zx\)
+m = 2 \(\frac{1}{4}\sqrt{\frac{15}{\pi}}(x^2-y^2)\)
+What “rising angular frequency” actually means is easier to see than to state. Each function divides the sphere into regions of alternating sign, and the band index is the number of times it does so.
+The nine basis functions of bands 0 to 2, each unwrapped into the same lat-long projection: longitude left to right, colatitude top to bottom. Warm is positive, cool is negative, and the thin lines are the zero crossings. Band 0 is constant, band 1 splits the sphere once, band 2 splits it twice. Indices match the array order used in the code samples below.
+Projection and Reconstruction
+The process of encoding a spherical signal using Spherical Harmonics is called projection. For a signal \(f\) defined over the sphere \(S\), the coefficient belonging to each basis function is the integral of the signal against that function.
+\[c_l^m = \int_S f(\omega) \, Y_l^m(\omega) \, d\omega\]
+Here \(\omega\) is a direction on the unit sphere, \(d\omega\) the differential solid angle around it, and \(c_l^m\) the single number that band \(l\), index \(m\) contributes to the encoding.
+Reconstruction runs the other way. Each coefficient scales its basis function and the results are summed.
+\[\tilde{f}(\omega) = \sum_{l=0}^{n} \sum_{m=-l}^{l} c_l^m \, Y_l^m(\omega)\]
+\(\tilde{f}\) is the reconstruction of \(f\) from an order \(n\) projection, and it is an approximation rather than an identity precisely because the sum stops at \(n\).
+Both directions rest on a single property. The SH basis is orthonormal over the sphere,
+\[\int_S Y_i(\omega) \, Y_j(\omega) \, d\omega = \delta_{ij}\]
+where \(i\) and \(j\) index the basis functions in flattened form, one number per \((l, m)\) pair, and \(\delta_{ij}\) is the Kronecker delta. Which is to say that each basis function integrates against itself to 1 and against every other basis function to 0. That is what makes projection a per coefficient integral rather than a fit, what makes reconstruction a plain weighted sum, and, further down, what collapses convolution into a dot product. Most of the rest of this post is a consequence of it.
+In practice the projection integral is estimated by sampling. With \(N\) directions drawn uniformly over the sphere,
+\[c_l^m \approx \frac{4\pi}{N} \sum_{k=1}^{N} f(\omega_k) \, Y_l^m(\omega_k)\]
+where \(\omega_k\) is the \(k\)-th sample direction and the \(4\pi\) is the area of the unit sphere, which corrects for the density of the samples.
+Everything below runs on one environment: Paul Debevec’s light probe of Grace Cathedral, the same measurement the shadertoy demos at the end of this post are built from[15]. Unwrapped, it looks like this.
+The Grace Cathedral light probe, unwrapped to a lat-long projection. The window at the left is several hundred times brighter than the nave, which is what makes it a demanding test for any compact encoding.
+Projecting it is the sampled sum above, run once per basis function. The demo below does exactly that: raise the sample count and the coefficients settle, then drop the order and watch what the truncation throws away.
+Loading
+Linearity
+Projection is a linear operator, which in practice matters at least as much as the compression does.
+Two coefficient sets can be added term by term, and the result is the projection of the sum of the two signals. A set can be scaled by a constant, which is how a light is dimmed without re-projecting anything. Two sets can be interpolated, which is how a probe grid gets sampled: fetch the eight surrounding probes, trilerp their coefficient vectors, reconstruct once. Doing the equivalent with stored cubemaps means blending eight textures per shaded pixel.
+A set can also be rotated. Rotation cannot change angular frequency, so it never mixes one band into another, and rotating an encoded signal reduces to applying one \((2l+1) \times (2l+1)\) matrix per band.
+Convolution
+In a conventional rendering pipeline, incoming radiance is stored in a cubemap which is then used to generate the respective irradiance map. For a surface normal \(n\), irradiance is the cosine weighted integral of incoming radiance over the sphere.
+\[E(n) = \int_{S} L(\omega) \max(0, n \cdot \omega) \, d\omega\]
+\(E\) is the irradiance arriving at a surface with normal \(n\), \(L(\omega)\) the radiance incoming from direction \(\omega\), and \(\max(0, n \cdot \omega)\) the cosine term that weights each direction by its projected area and discards the hemisphere below the surface. The symbol \(n\) is the normal here, not the projection order from the previous section.
+Evaluating that directly is a relatively slow process that requires iterating through all pixels, multiple times. Due to run-time constraints for real time applications, irradiance is typically pre-calculated and stored in a separate cubemap. That cubemap is then sampled at runtime to determine the respective irradiance value for a given direction. The downside of this approach is that it has a significant impact on storage and bandwidth requirements.
+Alternatively, incoming radiance can be projected to Spherical Harmonics, reducing the larger cubemap dataset to 4 or 9 coefficients per color channel.
+The cosine lobe as a Zonal Harmonic
+The clamped cosine \(\max(0, n \cdot \omega)\) is rotationally symmetric about \(n\). A function with that symmetry has nothing to encode in the azimuthal direction, so in a frame whose pole is aligned with \(n\) every coefficient with \(m \neq 0\) vanishes and one number per band is enough. Such a function is called a Zonal Harmonic, and its per band coefficients are written \(z_l\).
+Convolving a signal against a zonal kernel then amounts to scaling each of its bands by a single constant[02],
+\[E(n) = \sum_{l=0}^{\infty} \hat{A}_l \sum_{m=-l}^{l} L_l^m \, Y_l^m(n)\] \[\hat{A}_l = \sqrt{\frac{4\pi}{2l+1}} \; z_l\]
+where \(L_l^m\) are the coefficients of the radiance signal, \(z_l\) the zonal coefficients of the clamped cosine, and \(\hat{A}_l\) the resulting per band scale factor. Ramamoorthi and Hanrahan evaluated \(\hat{A}_l\) analytically for the clamped cosine[01].
+The clamped cosine lobe expressed in zonal harmonics. Band 3 vanishes exactly and band 4 contributes about four percent of band 0 with the opposite sign, which is why an order 2 projection loses almost nothing.
+The series collapses almost immediately. Band 3 disappears outright, as does every odd band above 1, and band 4 comes back with the opposite sign at a little over four percent of band 0. Ramamoorthi and Hanrahan showed that truncating at order 2 reproduces irradiance under any illumination with an average error below one percent[01]. Nine coefficients per color channel is not a compromise here, it is very nearly exact, and it is the result the whole technique rests on.
+That leaves the question of how the lobe gets oriented. Aligning a zonal function with an arbitrary direction \(d\) does not need a general rotation. Because only the \(m = 0\) coefficients are non zero to begin with, the rotation collapses to
+\[c_l^m = \sqrt{\frac{4\pi}{2l+1}} \; z_l \; Y_l^m(d) = \hat{A}_l \, Y_l^m(d)\]
+which is nothing more than the band constants multiplied by the basis functions evaluated in the direction \(d\). There is no rotation to perform at run time. Evaluating the basis at the normal is the rotation.
+Put together, the entire run time cost of shading a point is the following.
+```
+float3 L[9];      // Radiance coefficients, one float3 per (l,m)
+float  c[9];      // Cosine lobe, rotated to the normal
+float3 E = 0;     // Irradiance
+
+Foreach(band l in 0..2)
+    Foreach(m in -l..l)
+        i    = l*(l+1) + m;                    // Flattened (l,m) index
+        c[i] = Ahat[l] * EvalSHBasis(l, m, normal);
+
+Foreach(i in 0..8)
+    E += L[i] * c[i];   // Convolution collapses to a dot product
+
+float3 diffuse = albedo * max(E, 0) / PI;
+```
+SymbolDescription
+L[i]The radiance signal, already projected to SH. The
+projection itself is covered in the next section.
+Ahat[l]The per band constant for the clamped cosine lobe,
+PI, 2*PI/3 and PI/4 for bands 0, 1 and 2.
+EvalSHBasis(l, m, n)Evaluates the basis function of band l and index m in
+the direction n.
+There is no integral left at run time, no cubemap fetch and no rotation matrix. Nine multiply adds per color channel, against a lobe that is rebuilt from the normal with a handful of polynomial terms.
+The demo below is that loop made visible. Drag the normal across the radiance sphere: the cosine lobe swings to follow it, the nine products rise and fall, and their sum is the irradiance on the right.
+Loading
+The following code sample from Matt Pettineo implements exactly this[09]. Read against the identity above, CosineA0 through CosineA2 are the \(\hat{A}_l\) values and the remaining constants are the basis functions from the table.
+```
+static const float Pi = 3.141592654f;
+
+/* Zonal Harmonics coefficients for cosine Lobe */
+static const float CosineA0 = Pi;
+static const float CosineA1 = (2.0f * Pi) / 3.0f;
+static const float CosineA2 = Pi * 0.25f;
+
+struct SH9      { float  c[9]; };
+struct SH9Color { float3 c[9]; };
+
+    // Compute the cosine lobe in SH, oriented about the normal direction
+SH9 SHCosineLobe(in float3 dir)
+{
+    SH9 sh;
+    sh.c[0] = CosineA0 * 0.282095f;                   /* Band 0 */
+    sh.c[1] = CosineA1 * 0.488603f * dir.y;           /* Band 1 */
+    sh.c[2] = CosineA1 * 0.488603f * dir.z;
+    sh.c[3] = CosineA1 * 0.488603f * dir.x;
+    sh.c[4] = CosineA2 * 1.092548f * dir.x * dir.y;   /* Band 2 */
+    sh.c[5] = CosineA2 * 1.092548f * dir.y * dir.z;
+    sh.c[6] = CosineA2 * 0.315392f * (3.0f * dir.z * dir.z - 1.0f);
+    sh.c[7] = CosineA2 * 1.092548f * dir.x * dir.z;
+    sh.c[8] = CosineA2 * 0.546274f * (dir.x * dir.x - dir.y * dir.y);
+    return sh;
+}
+
+/* Convolution */
+float3 SHIrradiance(in float3 normal, in SH9Color radiance)
+{
+    SH9 shCosine = SHCosineLobe(normal);
+    /* Compute the SH dot product to get irradiance */
+    float3 irradiance = 0.0f;
+    for (uint i = 0; i < 9; ++i) {
+        irradiance += radiance.c[i] * shCosine.c[i];
+    }
+    return irradiance;
+}
+
+/* Lambertian BRDF */
+float3 SHDiffuse(in float3 normal, in SH9Color radiance
+               , in float3 albedo)
+{
+    return SHIrradiance(normal, radiance) * albedo * (1.0f / Pi);
+}
+```
+This code assumes that the initial radiance cubemap is already projected to Spherical Harmonics and the coefficient values are available.
+A truncated reconstruction is not guaranteed to be non negative. SHIrradiance can and does return values below zero for some normals, depending on the radiance being encoded, and feeding those straight into a shading equation produces black rims or subtracts light from other terms. Clamping the result to zero before use costs nothing and is not optional. The Ringing section below covers where the negative values come from.
+Cubemap Projection to SH Basis
+Computing the convolution at run time using Spherical Harmonics is relatively cheap. However, for embedded devices with limited resources where every single cycle counts, the convolution can be computed offline by using cubemaps and importance sampling. The produced irradiance map can then be projected to Spherical Harmonics. This greatly reduces the number of ALU operations required to reconstruct the signal at run-time.
+In either of these methods, the projection of the cubemap to Spherical Harmonics is a relatively simple process.
+Each cubemap sample has a color value and a direction. To project the cubemap into SH, the SH basis functions are evaluated in the direction of each texel’s center, and then weighted by the differential solid angle for that texel. This is the sampled form of the projection integral from earlier, with the texels standing in for the sample directions and the solid angle standing in for the sample density. The following pseudocode from Peter-Pike Sloan’s “Stupid Spherical Harmonics (SH) Tricks”[03] describes the process.
+```
+float f[];      // The final SH coefficient values
+float s[];      // SH basis
+float fWtSum=0; // Sum of weights
+
+Foreach(cube map face)
+    Foreach(texel)
+        float fTmp = 1 + u^2+v^2;
+        float fWt = 4/(sqrt(fTmp)*fTmp);
+        EvalSHBasis(texel,s);
+        f += t(texel)*fWt*s; // vector
+        fWtSum += fWt;
+f *= 4*PI/fWtSum; // area of sphere
+```
+SymbolDescription
+u, vThe two coordinates on the given face that are not +/- 1
+(ie: on the +X face, it would be y/z, etc.)
+t(texel)The texel color value.
+EvalSHBasis(texel,s)Normalizes the input coordinate (on a cube face), and
+evaluates the SH basis functions in that direction.
+The last normalization would typically not be required, since the normalized sum of the differential solid angles is equal to \(4 * \pi\). Note that the calculation is likely to suffer from varying degrees of error depending on the resolution of the cubemap[03].
+A more precise calculation of the per texel solid angle is described in the following code sample. The code snippet is found in AMD’s cubemapgen source code[13] and its mathematical background is explained in detail in a relevant blog post by Rory Driscoll[07].
+```
+static float32 AreaElement( float32 x, float32 y )
+{
+    return atan2(x * y, sqrt(x * x + y * y + 1));
+}
+
+float32 TexelCoordSolidAngle(int32 a_FaceIdx, float32 a_U
+                           , float32 a_V, int32 a_Size)
+{
+   // scale up to [-1, 1] range (inclusive)
+   // offset by 0.5 to point to texel center
+   float32 U = (2.f * ((float32)a_U + .5f) / (float32)a_Size ) - 1.f;
+   float32 V = (2.f * ((float32)a_V + .5f) / (float32)a_Size ) - 1.f;
+
+   float32 InvResolution = 1.0f / a_Size;
+
+    // U and V are the -1..1 texture coordinate on the current face.
+    // Get projected area for this texel
+    float32 x0 = U - InvResolution;
+    float32 y0 = V - InvResolution;
+    float32 x1 = U + InvResolution;
+    float32 y1 = V + InvResolution;
+    float32 SolidAngle = AreaElement(x0, y0)
+                       - AreaElement(x0, y1)
+                       - AreaElement(x1, y0)
+                       + AreaElement(x1, y1);
+
+    return SolidAngle;
+}
+```
+Switch the weighting from exact to approximate to none and watch the reported error: the solid angle is not a refinement, it is the difference between a projection and a wrong answer. Raising the resolution never rescues the unweighted case, which is the part worth internalizing.
+Loading
+Demos
+The following shadertoy projects implement evaluation of L1 and L2 Spherical Harmonics using the preconvolved ‘Grace Cathedral’ irradiance map.
+Loading
+Order 1 keeps a constant and three linear terms, which is exactly enough to encode one bright direction and an average. It behaves like a single soft directional light plus ambient, and no amount of structure in the source environment will survive beyond that.
+Loading
+Order 2 adds the five quadratic terms. Watch the sides of the sphere rather than the lit cap: the extra band is what lets the encoding hold two light sources of different colors at once, and what separates a broad falloff from a gradient that reverses. Going from 4 to 9 coefficients is the last meaningful step for irradiance, which is what the \(\hat{A}_l\) plot above predicted.
+Ringing
+Truncating the series is not free. Detail above the cut off does not simply disappear, it comes back as oscillation around the true value: the spherical equivalent of the Gibbs phenomenon in a truncated Fourier series.
+A hard edged cap, one inside 45 degrees and zero outside, projected and reconstructed at three orders. None of them reproduce the edge. Each rounds it, overshoots on the bright side and rings on the dark side, and the shaded region is where the order 2 reconstruction falls below zero.
+Raising the order sharpens the edge but does not remove the oscillation, it only moves it closer in and makes the overshoot taller. This is the mechanism behind the negative values the shading code has to clamp away.
+The same experiment, interactive. The cross-section is where the overshoot and the negative lobe are measurable rather than merely visible, and the window slider is the trade the next paragraphs describe.
+Loading
+HDR lighting makes it considerably worse. A small, very bright source forces the low bands to carry a large amplitude in order to reach the peak, and the oscillation that comes with it scales by the same amount. Because the dynamic range is wide, an excursion that is a modest fraction of the peak is still an enormous negative number in absolute terms, and it is spread across the whole sphere rather than confined to the neighbourhood of the source.
+The standard mitigation is windowing: scale each band by a factor that decays with \(l\) before reconstruction, trading sharpness for the removal of the oscillation[03][04]. A Lanczos window is a common choice,
+\[\sigma_l = \frac{\sin(\pi l / (n+1))}{\pi l / (n+1)}, \qquad \sigma_0 = 1\]
+where \(\sigma_l\) is the attenuation applied to band \(l\) and \(n\) is the order of the projection, so that the factor falls to zero at the first band past the truncation. It is applied as \(c_l^m \leftarrow \sigma_l \, c_l^m\). Because the factor is per band and the encoding is linear, this can be folded into the stored coefficients once, offline, and costs nothing at run time.
+A fixed window is blunt: it removes detail from signals that were never going to ring. Sloan’s later work instead solves for the smallest amount of windowing that eliminates the negative values for the particular signal being encoded[14].
+Considerations
+A higher frequency signal requires higher bands to achieve a good approximation, however, this also increases the computational cost of reconstruction. For irradiance that trade is already settled by \(\hat{A}_l\), since the cosine lobe is smooth enough that there is nothing above band 2 worth keeping. For sharper signals, radiance itself, visibility, or a specular lobe, SH runs out quickly and other representations become more attractive.
+EncodingFloats per probeReconstruction
+Ambient cube183 madds and a sign test
+Spherical Harmonics, L1124 madds per channel
+Spherical Harmonics, L2279 madds per channel
+Irradiance cubemap, 32x3218432one texture fetch
+The ambient cube encoding, covered separately in Irradiance, Ambient Cube, sits at the cheap end of that table. It cannot ring at all, because reconstruction is a convex combination of six stored values, but it also cannot hold a signal much sharper than L1 can. Ringing is the price SH pays for being a real frequency decomposition, and windowing is how that price gets negotiated back down.
+References / Further Reading
+[01]
+Ravi Ramamoorthi and Pat Hanrahan. 2001. An efficient representation for irradiance environment maps. In Proceedings of the 28th annual conference on Computer graphics and interactive techniques (SIGGRAPH ’01). Association for Computing Machinery, New York, NY, USA, 497-500. DOI:https://doi.org/10.1145/383259.383317
+[02]
+Ramamoorthi, Ravi & Hanrahan, Pat. (2001). On the relationship between Radiance and Irradiance: Determining the illumination from images of a convex Lambertian object. Journal of the Optical Society of America. A, Optics, image science, and vision. 18. 2448-59. 10.1364/JOSAA.18.002448.
+[03]
+Sloan, Peter-Pike. (2008). Stupid Spherical Harmonics (SH) Tricks. Game Developers Conference.
+[04]
+Green, Robin. (2003). Spherical Harmonic Lighting: The Gritty Details. Game Developers Conference.
+[05]
+Spherical Harmonics, Wikipedia
+[06]
+Spherical Harmonic Lighting, Simon's Tech Blog
+[07]
+Cubemap Texel Solid Angle, Rory Driscoll
+[08]
+Spherical Harmonics, PataBlog
+[09]
+Gamedev.net, Spherical Harmonics Cubemap. Comments by MJP
+[10]
+Lambert's Cosine Law, Wikipedia
+[11]
+PI or not to PI in game lighting equation, Sébastien Lagarde
+[12]
+Table of Spherical Harmonics
+[13]
+cubemapgen repository, Google code
+[14]
+Peter-Pike Sloan. 2017. Deringing spherical harmonics. In SIGGRAPH Asia 2017 Technical Briefs (SA ’17). Association for Computing Machinery, New York, NY, USA, Article 11, 1-4. DOI:https://doi.org/10.1145/3145749.3149438
+[15]
+Paul Debevec. 1998. Rendering synthetic objects into real scenes: bridging traditional and image-based graphics with global illumination and high dynamic range photography. In Proceedings of the 25th annual conference on Computer graphics and interactive techniques (SIGGRAPH ’98). Light Probe Image Gallery, Grace Cathedral.
+Comments

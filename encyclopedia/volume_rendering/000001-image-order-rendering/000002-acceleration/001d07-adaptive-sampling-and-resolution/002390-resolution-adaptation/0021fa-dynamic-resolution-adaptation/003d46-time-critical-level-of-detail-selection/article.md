@@ -1,0 +1,92 @@
+# Time-critical level-of-detail selection
+
+Also called: automatic level-of-detail selection
+
+## Overview
+Time-critical level-of-detail selection is an adaptive rendering technique that dynamically adjusts the visual fidelity of a volume rendering to maintain a target frame rate [S1, unofficial]. It solves the problem of unpredictable rendering times in complex scenes by predicting the cost of the next frame and selecting an appropriate level-of-detail (LOD) beforehand [S1, unofficial]. Unlike static LOD schemes, this method is driven by real-time performance statistics, allowing it to react to scene complexity changes or hardware load variations [S1, unofficial]. It differs from [Dynamic Resolution Adaptation](2683-dynamic-resolution-adaptation.md) by adjusting the geometric or shader complexity of the volume representation rather than the pixel resolution of the output viewport [G].
+
+## How it works
+The method operates in a feedback loop per frame [G].
+
+**Inputs:**
+*   Current frame render time ($T_{current}$) [G].
+*   Desired frame rate ($R_{target}$), which defines the time budget $T_{budget} = 1/R_{target}$ [S1, unofficial].
+*   Performance statistics history (used for prediction) [S1, unofficial].
+
+**Outputs:**
+*   Selected Level-of-Detail ($LOD_{next}$) for the subsequent frame [S1, unofficial].
+
+**Data Structures:**
+*   **Performance Buffer:** A circular buffer or moving average window storing recent frame times ($T_i$). The size is not specified in the sources [G].
+*   **LOD Map:** A mapping from predicted time budgets to discrete LOD levels (e.g., voxel spacing, transfer function complexity, or proxy geometry type) [G].
+
+**Steps:**
+1.  **Collect Statistics:** Measure the actual rendering time $T_{current}$ of the current frame [S1, unofficial].
+2.  **Predict Time:** Estimate the rendering time for the next frame, $T_{pred}$, using the collected performance statistics [S1, unofficial]. The sources do not specify the exact prediction algorithm [G]. A common implementation is an exponential moving average: $T_{pred} = \alpha T_{current} + (1-\alpha) T_{pred}$, where $\alpha$ is a smoothing factor [G].
+3.  **Select LOD:** Compare $T_{pred}$ against $T_{budget}$ [S1, unofficial]. If $T_{pred} > T_{budget}$, select a lower LOD (simpler representation) to reduce future render time. If $T_{pred} \le T_{budget}$, select a higher LOD (more detailed representation) to improve visual quality, provided it does not exceed the budget significantly [G].
+4.  **Apply LOD:** Configure the renderer for the next frame with the selected $LOD_{next}$ [S1, unofficial].
+
+**Parameters:**
+*   **Desired Frame Rate ($R_{target}$):** The target frames per second [S1, unofficial].
+*   **Prediction Smoothing Factor ($\alpha$):** Controls the responsiveness to sudden changes. Not given in the sources [G].
+
+**Edge Cases and Pitfalls:**
+*   **Oscillation:** Rapid switching between LOD levels if $T_{pred}$ hovers near $T_{budget}$. Mitigation requires hysteresis or a minimum dwell time at each LOD level [G].
+*   **Artifacts:** Switching LODs can cause visual discontinuities. The sources note that using different proxy geometries other than planes can avoid artifacts but incurs a computational price [S1, unofficial]. Alternatively, modifying transfer functions in lower-resolution nodes can limit artifacts [S1, unofficial].
+*   **Prediction Error:** If the prediction model is inaccurate, the selected LOD may be inappropriate [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def time_critical_lod_selection(frame_time, target_fps, history, lod_thresholds):
+    """
+    frame_time: float, time taken to render the current frame in seconds.
+    target_fps: float, desired frames per second.
+    history: list of floats, recent frame times.
+    lod_thresholds: list of floats, sorted ascending time thresholds for each LOD level.
+    
+    Returns:
+    int, the selected LOD index for the next frame.
+    """
+    # Update history with current frame time
+    history.append(frame_time)
+    
+    # Predict next frame time using moving average [G]
+    k = 5  # Window size, typical value [G]
+    recent_times = history[-k:]
+    predicted_time = sum(recent_times) / len(recent_times)
+
+    # Calculate time budget
+    time_budget = 1.0 / target_fps
+
+    # Select LOD based on predicted time vs budget
+    # LOD index 0 is highest detail, higher indices are lower detail
+    selected_lod = 0
+    for i, threshold in enumerate(lod_thresholds):
+        if predicted_time > threshold:
+            selected_lod = i + 1
+        else:
+            break
+    return selected_lod
+```
+
+## Subtopics
+
+### [Automatic Shader Level-of-Detail](19335-automatic-shader-level-of-detail.md)
+A method for automatic shader simplification that dynamically adjusts the complexity of procedural texture evaluations to match performance constraints. It is distinguished from sibling methods by its focus on algorithmic simplification of the shader code itself rather than pre-filtering or geometric reduction.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Maintains target frame rate in dynamic scenes; allows user-defined quality preferences via parameters [S1, unofficial].
+*   **Limitations:** Potential for visual artifacts during LOD transitions [S1, unofficial].
+*   **When to Use:** Interactive volume visualization where frame rate stability is critical [S1, unofficial].
+*   **When Not to Use:** Not given in the sources.
+
+## Background
+The algorithm was developed by Li et al. as part of adaptive volume rendering schemes [S1, unofficial]. It is also known as automatic level-of-detail selection [S1, unofficial].
+
+## Sources
+[S1] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)

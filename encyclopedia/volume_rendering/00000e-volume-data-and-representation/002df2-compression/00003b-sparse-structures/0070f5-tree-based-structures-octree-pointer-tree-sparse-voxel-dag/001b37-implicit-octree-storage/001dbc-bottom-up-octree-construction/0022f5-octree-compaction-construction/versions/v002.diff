@@ -1,0 +1,299 @@
+--- v001.md
++++ v002.md
+@@ -4,163 +4,138 @@
+ 
+ ## Overview
+-This method converts a dynamically allocated, pointer-heavy octree (typically built from a voxel grid) into a dense, cache-friendly contiguous memory layout. It solves the problem of poor spatial locality and high memory overhead associated with traditional pointer-based tree structures by computing relative offsets for children and siblings. It sets itself apart from sibling methods like [Min/Max Tree Construction](1623-min-max-tree-construction.md) by focusing specifically on the binary encoding of validity/filled masks and the compact storage of child pointers, rather than just hierarchical aggregation.
++This method converts a dynamically allocated, pointer-heavy octree into a dense, cache-friendly contiguous memory layout [S1, unofficial]. It solves the problem of poor spatial locality and high memory overhead associated with traditional pointer-based tree structures by computing relative offsets for children and siblings [S1, unofficial]. It sets itself apart from sibling methods like [Min/Max Tree Construction](1623-min-max-tree-construction.md) by focusing specifically on the binary encoding of validity/filled masks and the compact storage of child pointers, rather than just hierarchical aggregation [S1, unofficial].
+ 
+ ## How it works
+-The method operates in two phases: a top-down pass to compute the required memory size and pointer offsets, and a bottom-up pass to write the compacted nodes into the allocated buffer.
++The method operates in two phases: a top-down pass to compute the required memory size and pointer offsets, and a bottom-up pass to write the compacted nodes into the allocated buffer [S1, unofficial].
+ 
+ ### Inputs and Outputs
+-- **Input**: A root node of a dynamically allocated octree where each node contains an array of 8 child pointers and a type enum (`NT_PARTIAL` or `NT_FILLED`).
+-- **Output**: A contiguous array of `CNode` structures.
++- **Input**: A root node of a dynamically allocated octree where each node contains an array of 8 child pointers and a type enum (`NT_PARTIAL` or `NT_FILLED`) [S1, unofficial].
++- **Output**: A contiguous array of `CNode` structures and a parallel far-pointer table [S1, unofficial].
+ 
+ ### Data Structures
+-The compacted node `CNode` layout is not explicitly defined in terms of byte offsets in the sources, but the fields are:
+-- `valid_mask`: 8-bit integer (or bitfield). Bit $i$ is set if child $i$ exists.
+-- `leaf_mask`: 8-bit integer (or bitfield). Bit $i$ is set if child $i$ is a filled leaf (`NT_FILLED`).
+-- `child_ptr`: A pointer or offset. If the child is close, it stores a relative offset. If far, it stores a flag bit (bit 15) and a far pointer index.
+-- `far_ptr`: (Implicitly stored in a separate structure or array when `child_ptr` indicates a far reference) Stores the absolute or larger relative offset.
+-
+-The sources imply a 16-bit or 32-bit integer for `child_ptr` where bit 15 distinguishes short vs. far pointers.
++The compacted node `CNode` layout is not explicitly defined in terms of byte offsets in the sources, but the fields are [S1, unofficial]:
++- `valid_mask`: 8-bit integer. Bit $i$ is set if child $i$ exists.
++- `leaf_mask`: 8-bit integer. Bit $i$ is set if child $i$ is a filled leaf (`NT_FILLED`).
++- `child_ptr`: Integer storing either a short relative offset or a far pointer index. The sources imply a 16-bit or 32-bit integer where bit 15 distinguishes short vs. far pointers [S1, unofficial].
++- `far_ptr_table`: Array storing the absolute or larger relative offsets for far references [S1, unofficial].
+ 
+ ### Parameters
+-- `_shortPtrTop`: Threshold for short vs. far pointer encoding. If the relative offset exceeds this value, a far pointer is allocated. Exact numeric value not specified in the sources [S1, unofficial].
+-- `NT_PARTIAL`: Enum value indicating a node has children.
+-- `NT_FILLED`: Enum value indicating a solid leaf node.
++- `_shortPtrTop`: Threshold for short vs. far pointer encoding. Exact numeric value not specified in the sources [S1, unofficial].
++- `NT_PARTIAL`: Enum value indicating a node has children [S1, unofficial].
++- `NT_FILLED`: Enum value indicating a solid leaf node [S1, unofficial].
+ 
+ ### Algorithm Steps
+ 
+-1. **Initialization**: Set `rootNode->farAdr = 0` and `rootNode->childAdr = 0`.
+-2. **Size Calculation**: Call `compactAllocate(rootNode, 1)` to compute the total `dataSize` required.
+-3. **Allocation**: Allocate `data = (CNode*)malloc(dataSize * sizeof(CNode))`.
+-4. **Compaction**: Call `compactNode(rootNode, dataSize)` to fill the `data` array.
++1. **Initialization**: Set `rootNode->farAdr = 0` and `rootNode->childAdr = 0` [S1, unofficial].
++2. **Size Calculation**: Call `compactAllocate(rootNode, 1)` to compute the total `dataSize` required [S1, unofficial].
++3. **Allocation**: Allocate `data = (CNode*)malloc(dataSize * sizeof(CNode))` and a `far_ptr_table` of the same size [S1, unofficial].
++4. **Compaction**: Call `compactNode(rootNode, data, far_ptr_table, pos_ref)` to fill the `data` array [S1, unofficial].
+ 
+ #### `compactAllocate(node, pos)`
+-This function computes the memory footprint and sets up far pointer addresses.
+-1. Initialize `pos` (current memory position).
+-2. Iterate $i$ from 0 to 7 (children):
++This function computes the memory footprint and sets up far pointer addresses [S1, unofficial].
++1. Iterate $i$ from 0 to 7 (children):
+    - Reset `node->children[i]->farAdr = 0` and `node->children[i]->childAdr = 0`.
+-   - If `node->children[i]` exists and `node->children[i]->type == NT_PARTIAL`:
++   - If `node->children[i]` exists and `node->children[i].type == NT_PARTIAL`:
+      - Recursively call `pos = compactAllocate(node->children[i], pos)`.
+-3. **Far Pointer Check**: Iterate $i$ from 0 to 7:
+-   - If `node->children[i]` exists and `node->children[i]->childAdr` is set:
+-     - Compute `gchildAdrMax = pos - node->children[i]->childAdr + 16`.
++2. **Far Pointer Check**: Iterate $i$ from 0 to 7:
++   - If `node->children[i]` exists and `node->children[i].childAdr` is non-zero:
++     - Compute `gchildAdrMax = pos - node->children[i].childAdr + 16`.
+      - If `gchildAdrMax > _shortPtrTop`:
+-       - Set `node->children[i]->farAdr = pos`.
++       - Set `node->children[i].farAdr = pos`.
+        - Increment `pos` (allocate space for the far pointer entry).
+-4. **Child Address Assignment**: Iterate $i$ from 0 to 7:
+-   - If `node->children[i]` exists and `node->children[i]->type == NT_PARTIAL`:
++3. **Child Address Assignment**: Iterate $i$ from 0 to 7:
++   - If `node->children[i]` exists and `node->children[i].type == NT_PARTIAL`:
+      - Set `node->childAdr = pos`.
+      - Increment `pos`.
+-5. Return `pos`.
++4. Return `pos`.
+ 
+-#### `compactNode(node, dataSize)`
+-This function writes the compacted nodes into the `data` array.
++#### `compactNode(node, data, far_ptr_table, pos_ref)`
++This function writes the compacted nodes into the `data` array [S1, unofficial].
+ 1. Iterate $i$ from 0 to 7 (children):
+-   - If `node->children[i]` exists and `node->children[i]->type == NT_PARTIAL`:
+-     - Recursively call `compactNode(node->children[i], childAdr)`.
+-     - Decrement `childAdr` (tracking the position in the output buffer).
+-2. Assert `pos <= dataSize`.
+-3. Set `cnode = &data[dataSize - pos]`.
+-4. Initialize `cnode->valid_mask = 0` and `cnode->leaf_mask = 0`.
++   - If `node->children[i]` exists and `node->children[i].type == NT_PARTIAL`:
++     - Recursively call `compactNode(node->children[i], data, far_ptr_table, pos_ref)`.
++     - Decrement `pos_ref[0]` (tracking the position in the output buffer).
++2. Assert `pos_ref[0] <= len(data)`.
++3. Set `cnode = data[len(data) - pos_ref[0]]`.
++4. Initialize `cnode.valid_mask = 0` and `cnode.leaf_mask = 0`.
+ 5. Iterate $i$ from 0 to 7:
+-   - If `node->children[i]` exists:
+-     - Set `cnode->valid_mask |= (1 << i)`.
+-   - If `node->children[i]` exists and `node->children[i]->type == NT_FILLED`:
+-     - Set `cnode->leaf_mask |= (1 << i)`.
+-6. Compute `childPtr = pos - node->childAdr`.
+-7. If `node->farAdr` is set:
+-   - Compute `farPtr = pos - node->farAdr`.
++   - If `node.children[i]` exists:
++     - Set `cnode.valid_mask |= (1 << i)`.
++   - If `node.children[i]` exists and `node.children[i].type == NT_FILLED`:
++     - Set `cnode.leaf_mask |= (1 << i)`.
++6. Compute `childPtr = pos_ref[0] - node.childAdr`.
++7. If `node.farAdr` is non-zero:
++   - Compute `farPtr = pos_ref[0] - node.farAdr`.
+    - Assert `farPtr < _shortPtrTop`.
+-   - Set `farPtrEntry->far_ptr = childPtr`.
+-   - Set `cnode->child_ptr = (1 << 15) | farPtr`.
++   - Set `far_ptr_table[farPtr] = childPtr`.
++   - Set `cnode.child_ptr = (1 << 15) | farPtr`.
+ 8. Else:
+-   - Set `cnode->child_ptr = childPtr`.
++   - Set `cnode.child_ptr = childPtr`.
+ 
+ ### Pseudocode
+ 
+ ```python
+-# Assuming a Node class with children[8], type, farAdr, childAdr
+-# And a CNode class with valid_mask, leaf_mask, child_ptr
++class Node:
++    def __init__(self):
++        self.children = [None] * 8
++        self.type = 0  # NT_PARTIAL or NT_FILLED
++        self.farAdr = 0
++        self.childAdr = 0
++
++class CNode:
++    def __init__(self):
++        self.valid_mask = 0
++        self.leaf_mask = 0
++        self.child_ptr = 0
++
++NT_PARTIAL = 1
++NT_FILLED = 2
++_shortPtrTop = 32768  # Exact value not given in the sources [S1, unofficial]
+ 
+ def compact_tree(root_node):
+-    # Step 1: Initialize root
+     root_node.farAdr = 0
+     root_node.childAdr = 0
+-    
+-    # Step 2: Calculate size
+     pos = compact_allocate(root_node, 1)
+     dataSize = pos
+-    
+-    # Step 3: Allocate memory
+-    data = [None] * dataSize
+-    
+-    # Step 4: Compact
+-    compact_node(root_node, data, dataSize)
+-    return data
++    data = [CNode() for _ in range(dataSize)]
++    far_ptr_table = [0] * dataSize
++    pos_ref = [dataSize]
++    compact_node(root_node, data, far_ptr_table, pos_ref)
++    return data, far_ptr_table
+ 
+ def compact_allocate(node, pos):
+-    # Iterate children to reset and recurse
+     for i in range(8):
+-        if node.children[i] is not None:
+-            node.children[i].farAdr = 0
+-            node.children[i].childAdr = 0
+-            if node.children[i].type == NT_PARTIAL:
+-                pos = compact_allocate(node.children[i], pos)
+-    
+-    # Check for far pointers
++        child = node.children[i]
++        if child is not None:
++            child.farAdr = 0
++            child.childAdr = 0
++            if child.type == NT_PARTIAL:
++                pos = compact_allocate(child, pos)
+     for i in range(8):
+-        if node.children[i] is not None and node.children[i].childAdr != 0:
+-            gchildAdrMax = pos - node.children[i].childAdr + 16
++        child = node.children[i]
++        if child is not None and child.childAdr != 0:
++            gchildAdrMax = pos - child.childAdr + 16
+             if gchildAdrMax > _shortPtrTop:
+-                node.children[i].farAdr = pos
+-                pos += 1 # Allocate space for far pointer entry
+-                
+-    # Assign childAdr
++                child.farAdr = pos
++                pos += 1
+     for i in range(8):
+-        if node.children[i] is not None and node.children[i].type == NT_PARTIAL:
++        child = node.children[i]
++        if child is not None and child.type == NT_PARTIAL:
+             node.childAdr = pos
+             pos += 1
+-            
+     return pos
+ 
+-def compact_node(node, data, dataSize):
+-    # Recurse first
++def compact_node(node, data, far_ptr_table, pos_ref):
++    pos = pos_ref[0]
+     for i in range(8):
+-        if node.children[i] is not None and node.children[i].type == NT_PARTIAL:
+-            # Note: childAdr logic from source implies tracking position
+-            # The source uses 'childAdr' as a decrementing counter in recursion
+-            # We adapt to standard post-order traversal
+-            compact_node(node.children[i], data, dataSize)
+-            
+-    # Assert bounds
+-    assert pos <= dataSize
+-    
+-    # Get current node position in compacted array
+-    # The source uses 'pos' as a global or passed-by-reference counter
+-    # Here we assume 'pos' is managed externally or passed
+-    # Based on source: cnode = &data[dataSize - pos]
+-    # We need to track 'pos' carefully. Let's assume 'pos' is the current write index from the end.
+-    
+-    # Re-reading source: compactNode iterates, recurses, then writes.
+-    # The 'pos' variable in source seems to be a global or passed reference that decrements.
+-    # Let's rewrite to be self-contained with a mutable pos container.
+-    pass # See implementation below
+-
+-# Self-contained implementation using a mutable list for pos
+-def compact_node_impl(node, data, dataSize, pos_container):
+-    pos = pos_container[0]
+-    
+-    # Recurse
+-    for i in range(8):
+-        if node.children[i] is not None and node.children[i].type == NT_PARTIAL:
+-            compact_node_impl(node.children[i], data, dataSize, pos_container)
+-            
+-    pos = pos_container[0]
+-    assert pos <= dataSize
+-    
+-    cnode_idx = dataSize - pos
+-    cnode = CNode()
++        child = node.children[i]
++        if child is not None and child.type == NT_PARTIAL:
++            compact_node(child, data, far_ptr_table, pos_ref)
++            pos_ref[0] -= 1
++    pos = pos_ref[0]
++    assert pos <= len(data)
++    cnode = data[len(data) - pos]
+     cnode.valid_mask = 0
+     cnode.leaf_mask = 0
+-    
+     for i in range(8):
+         if node.children[i] is not None:
+@@ -168,36 +143,27 @@
+             if node.children[i].type == NT_FILLED:
+                 cnode.leaf_mask |= (1 << i)
+-                
+     childPtr = pos - node.childAdr
+-    
+     if node.farAdr != 0:
+         farPtr = pos - node.farAdr
+         assert farPtr < _shortPtrTop
+-        # Assuming farPtrEntry is stored elsewhere or cnode.child_ptr encodes it
+-        # Source: farPtrEntry->far_ptr = childPtr, cnode->child_ptr = (1<<15) | farPtr
++        far_ptr_table[farPtr] = childPtr
+         cnode.child_ptr = (1 << 15) | farPtr
+-        # Note: The source implies farPtrEntry is a separate structure. 
+-        # In a pure compact layout, this might be an array of far pointers.
+-        # For this article, we store the flag in child_ptr.
+     else:
+         cnode.child_ptr = childPtr
+-        
+-    data[cnode_idx] = cnode
+-    pos_container[0] = pos - 1
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-- **Precision**: The assertion `farPtr < _shortPtrTop` requires careful management of `_shortPtrTop`. If the tree is very deep or sparse, far pointers may be needed frequently.
+-- **Boundaries**: The `pos` variable must be carefully managed to avoid buffer overflows. The source uses `dataSize - pos` to index backwards, ensuring that children are written before parents in the contiguous array (if `pos` decrements).
+-- **Degenerate Input**: If the input tree is empty, `dataSize` will be small, and the algorithm should handle it gracefully.
++- **Precision**: The assertion `farPtr < _shortPtrTop` requires careful management of `_shortPtrTop` [S1, unofficial]. If the tree is very deep or sparse, far pointers may be needed frequently [S1, unofficial].
++- **Boundaries**: The `pos` variable must be carefully managed to avoid buffer overflows [S1, unofficial]. The source uses `dataSize - pos` to index backwards, ensuring that children are written before parents in the contiguous array [S1, unofficial].
++- **Degenerate Input**: If the input tree is empty, `dataSize` will be small, and the algorithm should handle it gracefully [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N)$ where $N$ is the number of nodes in the octree. Two passes are made: one for allocation/offset calculation and one for writing.
+-- **Memory Complexity**: $O(N)$ for the compacted array. The original pointer-based tree is typically freed after compaction.
+-- **Strengths**: High spatial locality, reduced memory overhead (no pointers per node, just offsets), cache-friendly traversal.
+-- **Limitations**: Static structure; inserting or deleting nodes requires full or partial recompaction. The `_shortPtrTop` parameter may lead to inefficient far pointer usage if not tuned.
++- **Time Complexity**: $O(N)$ where $N$ is the number of nodes in the octree [G]. Two passes are made: one for allocation/offset calculation and one for writing [S1, unofficial].
++- **Memory Complexity**: $O(N)$ for the compacted array [G]. The original pointer-based tree is typically freed after compaction [S1, unofficial].
++- **Strengths**: High spatial locality, reduced memory overhead (no pointers per node, just offsets), cache-friendly traversal [S1, unofficial].
++- **Limitations**: Static structure; inserting or deleting nodes requires full or partial recompaction [G]. The `_shortPtrTop` parameter may lead to inefficient far pointer usage if not tuned [S1, unofficial].
+ 
+ ## Background
+-This method is derived from the "Binvox" format and related sparse voxel octree implementations, specifically as seen in the `svo-workbench` repository [S1, unofficial]. It is commonly used in real-time volume rendering and ray tracing where memory bandwidth and cache efficiency are critical.
++The implementation follows the compact octree layout and allocation routines found in the `svo-workbench` repository, which also includes a `readFromBinvox_rec` function for loading voxel data [S1, unofficial]. It is commonly used in real-time volume rendering and ray tracing where memory bandwidth and cache efficiency are critical [S1, unofficial].
+ 
+ ## Sources

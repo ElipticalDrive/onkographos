@@ -1,0 +1,60 @@
+--- v004.md
++++ v005.md
+@@ -52,5 +52,4 @@
+     # 1. Initialization: Pass each low-res input through the SISR backbone network [S1]
+     I_sr = [apply_sisr_network(img) for img in I_gt]  # [G] standard SISR forward pass
+-
+     # Initialize radiance field MLP mapping (x,y,z,theta,phi) -> (sigma, c) [S1]
+     nerf_mlp = NeuralRadianceFieldMLP()
+@@ -63,7 +62,8 @@
+             points, directions = sample_along_rays(rays, N)  # [G] standard ray marching
+             sigma, color = nerf_mlp.query(points, directions)
+-            # Volume rendering: C_hat(r) = sum_{i=1}^N T_i alpha_i c_i [S1]
+-            transmittance = compute_transmittance(sigma, points, directions)
+-            alpha = 1.0 - torch.exp(-sigma * torch.diff(points, dim=-1, prepend=points[:1]))
++            deltas = torch.diff(points, dim=-1, prepend=points[:1])
++            transmittance = torch.cumprod(torch.exp(-sigma * deltas), dim=-1)
++            transmittance = torch.cat([torch.ones_like(transmittance[:, :1]), transmittance[:, :-1]], dim=-1)
++            alpha = 1.0 - torch.exp(-sigma * deltas)
+             image = torch.sum(transmittance * alpha * color, dim=1)
+             S_tv.append(image)
+@@ -76,18 +76,14 @@
+         # 3. Uncertainty Field Generation: Calculate integrated error for voxel grid V^{(unc)} [S1]
+         V_unc = torch.zeros((1, Nx, Ny, Nz))
+-        for voxel_idx in all_voxels:
+-            # Identify sampled ray points P_i^{tv} inside neighborhood voxels of voxel_idx [S1]
+-            P_tv = get_points_in_neighborhood(voxel_idx, points)
++        # [S1] The sources do not specify the exact voxelization or neighborhood aggregation algorithm.
++        for voxel_idx in range(Nx * Ny * Nz):
++            P_tv = [p for p in points if voxel_contains(voxel_idx, p)]
+             if not P_tv: continue
+-            R_tv = get_rays_for_points(P_tv)
+-            # Get rendered RGB values C from S_tv and SR values C_hat from I_sr [S1]
+-            C = render_colors_at_points(S_tv, R_tv)
+-            C_sr = get_colors_from_images(I_sr, R_tv)
+-
+-            # Calculate point-wise error e_{ij}^{tv} = T_{ij} alpha_{ij} ||c_{ij} - c_hat_{ij}||_1 [S1]
++            C = [render_color_at_point(S_tv, p) for p in P_tv]
++            C_sr = [get_color_from_image(I_sr, p) for p in P_tv]
+             errors = []
+             for j, p in enumerate(P_tv):
+-                T_ij = transmittance_at_point(p, nerf_mlp)
+-                alpha_ij = 1.0 - torch.exp(-nerf_mlp.density(p) * ray_step_size)
++                T_ij = compute_transmittance_at_point(p, sigma, deltas)
++                alpha_ij = 1.0 - torch.exp(-nerf_mlp.density(p) * deltas[j])
+                 err = T_ij * alpha_ij * torch.norm(C[j] - C_sr[j], p=1)
+                 errors.append(err)
+@@ -97,5 +93,5 @@
+         U = []
+         for i in range(K):
+-            # Aggregate from neighborhood voxels of sampled ray points P_i^{tv} [S1]
++            # [S1] The sources do not specify the exact aggregation method for U_i.
+             U_i = aggregate_voxel_uncertainty(V_unc, points_for_view_i)
+             U.append(U_i)
+@@ -105,5 +101,5 @@
+         I_sr_new = []
+         for i in range(K):
+-            # SUM fuses S_i^{tv}, U_i, and F_i^{SISR} [S1]
++            # [S1] The sources do not specify the internal architecture of the SR Update Module (SUM).
+             I_sr_new.append(SR_Update_Module(S_tv[i], U[i], F_sisr[i]))
+         I_sr = I_sr_new

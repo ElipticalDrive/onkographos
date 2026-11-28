@@ -1,0 +1,127 @@
+Learn from my mistakes as I implement a GPU voxel octree path tracer based on my current CPU implementation in Avoyd. I cover the C++ to C conversion, buffer upload issues and data visualisation, enhancing the shader error logging along with a basic comparison of the performance on CPU and GPU.
+
+Implementing a GPU Voxel Octree Path Tracer
+en
+fr
+Learn from my mistakes as I implement a GPU voxel octree path tracer based on my current CPU implementation in Avoyd. I cover the C++ to C conversion, buffer upload issues and data visualisation, enhancing the shader error logging along with a basic comparison of the performance on CPU and GPU.
+One can program modern GPUs in a variety of languages. However only a few of those languages work well on all the main vendors' GPUs and operating systems: essentially the C like HLSL and GLSL shader languages. Since I use OpenGL with GLSL shaders in Avoyd I choose to write the path tracer in GLSL. (Avoyd runs only on Windows currently but I intend to support other operating systems eventually.)
+This blog post doesn't describe the inner workings of implementing path tracing. For this I recommend you first check out Ray Tracing in One Weekend along with the seminal Physically Based Rendering: From Theory To Implementation.
+Conversion Steps
+My first step in the conversion of the path tracer to the GPU is to rewrite the CPU code in C. (This also allows me to easily debug the implementation.) I am able to rewrite most of the code in C without any change to performance, so these parts can stay in Avoyd's codebase. Because some of the code uses C++ templates for optimised variants, I keep the templates in C++ and write duplicates in C. I can switch to the C duplicates for testing.
+Avoyd uses a sparse voxel octree directed acyclic graph (SVO-DAG). The DAG part means that multiple nodes can have links to the same child. This allows deduplication of parts of the octree, lowering the memory requirements by around 4x (for the data sets I've tested), whilst keeping the read code unchanged. To write to the octree I use reference counting and copy-on-modify.
+With the C implementation working, the octree ray casting is the first part of the code I move to GLSL. To do this I need to move the data to the GPU, which means allocating one shader storage buffer to store the nodes, and another to store the node types (a 16bit set of 8 x 2 bit bit-fields denoting empty, child or leaf). The size of these buffers is limited to 2GB due to indexing, though one can use multiple buffers for more data. Both the node buffer and node type buffers are simple arrays of 32bit unsigned integers, with the nodetypes using bit manipulation to extract the correct 16bit data from a 32bit one.
+Whilst I'm likely to implement the final path tracer as a compute shader, for simplicity I decide to initially use a fragment shader (pixel shader in DX terminology). This requires a vertex shader to draw a full screen triangle. Embarrassingly my Euclidean geometry fails me on my first attempt at fitting a triangle to cover the screen. If you're wondering why I don't use a quadrangle which exactly covers the scene, this is because these are rendered with two triangles with an intersection down the middle. The GPU processes fragments in 2x2 quads and on the triangle boundary many of the fragments would be discarded. There's a good blog post about this called Optimizing Triangles for a Full-screen Pass by Chris Wallis.
+A red fullscreen (well, not quite) triangle is the first step in implementing a fullscreen fragment shading pass
+Next up I add a simple fragment shader, passing camera data in a uniform buffer, and check that I can correctly calculate the ray direction from camera matrices.
+Image of the ray direction computed from fragment position. Since this is the basic input to path tracing the imnage I thought it was a good first step to check.
+Buffer Problems
+With ray direction and camera position I can start ray casting. As expected, nothing works. I fire up RenderDoc, which hints that the shader buffer data is incorrect. I then write a quick visualizer for both the CPU and GPU octree data, which confirms that the buffer data on the CPU is different to the data on the GPU. In addition to visualizating the octree structure by iterating through each node on a plane through the world (images below) I also added a visualizer using raw flat indexing (not shown), to confirm that the octree code itself is not an issue.
+Cross section of an octree showing with colour corresponding to a combination of the depth of current octree node and it's node number (a 0 to 7 index). Calculated by taking x and y coordinates from the fragment position with the z coordinate manually set to the middle of the octree, and using the octree code to find the node at this position. Using this code on both CPU and GPU confirmed there was a problem.
+Cross section of an octree produced on the CPU. Note: this is not the same octree as the above image.
+visualisation of the octree buffers on the GPU when using layout=std140. The left pattern is the node type (grey=empty, blue=childnode, green=leafnode), and right pattern is the node contents with binary display showing red for 1 grey for 0. The horizontal axis is node number and vertical is position in the buffer. In this case I know there should be one leaf node and at least 17 rows, so something is wrong.
+visualisation of the octree buffers on the GPU when using layout=std430. This looks correct, and the same code run on the CPU gives the same result.
+visualisation of the octree buffers on the GPU when using layout=std430 with a much larger octree.
+Re-reading the spec for GLSL interface block memory layout I realise that I incorrectly use the std140 qualifier and require std430, the difference being that std430 buffers are no longer rounded up to a multiple of 16 bytes. So a buffer of floats matches with a C++ array of floats. Since all my previous buffers had used >16 byte structs I'd not noticed this, but with 4 byte integers it is essential to use this qualifier rather than std140.
+With this change, the code starts to work. Only sometimes it doesn't. Since it's late in the day and I have a success under the belt, I do what every programmer does to debug. I stop for the day.
+That night, in my dreams, I have a revelation. 'copysign(1.0f, var)' and 'sign(var)' are not the same. When 'var = +0.0f' or '-0.0f', copysign returns +-1.0f whereas 'sign' returns 0.0f. I need the copysign behaviour: I need to handle the 0.0f case, so I replace the sign function with:
+```
+vec3 signDir = mix( vec3(1.0), vec3(-1.0), lessThan( ray_.dir, vec3(0.0) ) );
+```
+With this done, raycasting works. Believe in your dreams folks: they're right sometimes.
+Ray cast normals using the GPU.
+Whilst implementing the raycasting I add a visualisation of the number of octree nodes a ray traverses, which looks pretty cool.
+Debug visualisation of the number of nodes traversed during ray casting, with more nodes traversed being brighter. You can see that space close to surfaces are expensive, as the octree nodes are more finely divided.
+If you like this you might also be interested in this video of the octree visualisation debug tool in Avoyd:
+Avoyd octree visualisation debug tool
+At this point I decide to first implement a more conventional shaded render with the raycasting to check I can sample materials, atmosphere and lighting values correctly before moving on to path tracing. This works well, confirming that these component parts all worked well.
+Greenfield v0.5.4 Minecraft map loaded in Avoyd and rendered using GPU ray casting, displaying the material albedo.
+Greenfield v0.5.4 Minecraft map loaded in Avoyd and rendered using GPU ray casting, using basic lighting and ray cast shadows.
+The addition of shadow cast rays increases the frame time by ~3.5x. I'll come back to performance later on in this post.
+On my recently acquired NVIDIA RTX 4070 the raycasting is fast enough for realtime use. However in motion the lack of level of detail results in a lot of aliasing as the voxel resolution in the distance is sub pixel. There are a number of solutions for this, but for an offline (i.e. not realtime) path tracing renderer the Monte Carlo accumulation of jittered sample start positions within the pixel will do.
+Converting the Path Tracing Code
+The main path tracing code in Avoyd is split into two main functions:
+A first function which performs the core path tracing loop.
+A second function which samples the direct light contribution from the sun, taking into account transparencies and atmospheric absorption in the path. This sunlight contribution path trace ignores both refraction and reflection. As a result it ray traces along a straight line path.
+Path Traced Shadows
+The sunlight sampling code is the simplest of the two main functions, so I implement this first. With this working I can now generate coloured shadows.
+Path traced shadows with four transparent Enkisoftware Logos floating above a Martian heightmap landscape. Since the primary rays only return the first intersection the logos do not appear transparent. However the path traced shadows cast red shadowing thorugh the red logo, and there are no shadows cast by the other three logos as their materials are set up to not absorb any light.
+The path tracing loop uses a few supporting functions to calculate probability distribution functions, reflection and refraction, generate random vectors and perform shading. To keep code navigation manageable I now have several GLSL files, and whilst converting these functions from C to GLSL I become frustrated with an ongoing problem in my shader loading - the line numbers emitted for errors do not match with the line in the original shader code.
+Improving the Shader Error Logging
+The OpenGL shader compilation system isn't a build system. In order to create a shader program I need to compile a set of source strings into a shader, then link the shaders for each stage together.
+To compile a shader in Avoyd I go through the following steps:
+Load the primary shader file into a source string (an array of characters).
+Parse the source string looking for #include "file" lines.
+Load the included file and insert into the source string removing the #include "file" line.
+Continue parsing from the insertion point (back to step 2).
+When parsing is complete, compile the shader.
+My shader library handles file system monitoring for recompiling shaders when a file changes. It also handles decoding the various errors drivers produce which I get hold of by using glGetShaderInfoLog. My code reformats the error line number into a format Visual Studio recognises, so double-clicking on the output window error line jumps to the file and line number. However, up to now I've not calculated the correct line number when multiple files exist.
+Adding this is relatively easy but takes a bit of time to get right. I add an array of the following struct:
+```
+struct IncludePositionDebugInfo
+{
+    FileSystemUtils::Path path;
+    size_t posStart;
+    size_t posEnd;
+    size_t includeSize; // size of the line '#include "ahsjdh"' which is removed
+};
+```
+I process the errors to make them easier to deal with by:
+When I detect a compile error I process the shader info log to extract the line number.
+I look through the concatenated source string I passed as shader source counting lines until I get to this error line, at which point I have the character index of the line in the source.
+I go through the array of IncludePositionDebugInfo
+Find if it belongs to an included file or the primary source file.
+Find the character position of the line in the original source.
+I load and count line numbers until I hit that character position.
+Result: I have the line and file of the error.
+Except I don't. It's always off by a few lines.
+After a puzzling few moments and some debugging I recall that I insert defines into the source, and that this is done after the includes are processed. So all of the posStart and posEnd values need to be offset by this amount. Fixing this up gives me the correct error line.
+This becomes a great help as during the conversion I get a large number of simple compile errors such as:
+```
+error C7531: global type int32_t requires "#extension GL_NV_gpu_shader5 : enable" before use
+```
+Being able to go straight to the line number makes sorting these out fairly trivial.
+Working Path Tracer
+Now that I have properly indexed error messages, moving the path tracer core function and supporting functions over from C to GLSL is a somewhat tedious but simple task. It takes me a couple of hours to convert 600 lines of code. Initially the GPU path traced scene looks the same, so I post a couple of images of both the CPU and GPU path tracing with 1 sample per-pixel (SPP).
+Path traced everything - CPU
+Path traced everything - GPU
+After taking these I notice that one material is bright red in the GPU render but transparent in the CPU one. This material is minecraft:barrier, an invisible block used to create solid boundaries in Minecraft. Checking the material index I find it is material 1159 of 1159 materials - aha! Turning to the material upload code I note that the transparent material properties are only uploaded using the material max as the size and not the material size. Fixing this along with seeding the random numbers the same way gives me similar results on both.
+Performance Results
+Here are some performance results from my system at a resolution of 1280x720.
+The CPU path tracing uses the Intel Core i9-7980XE processor with 35 active threads used for path tracing (1 thread left for UI etc.) using my permissively licensed C and C++ Task Scheduler enkiTS with 1 ray traced per thread at a time using SSE2 SIMD for math functions and bit manipulation.
+The GPU I use is an NVIDIA RTX 4070 Founders Edition.
+Performance comparison of path tracing on the CPU (Intel Core i9-7980XE) and GPU (NVIDIA RTX 4070) at 1280x720 resolution.
+Technique
+CPU (ms)
+GPU (ms)
+Ray cast no shadows
+105
+13
+Ray cast shadow
+161
+25
+Path traced shadows
+175
+72
+Path traced everything
+370
+447
+Ray cast no shadows - CPU
+Ray cast no shadows - GPU
+Ray cast shadows - CPU
+Ray cast shadows - GPU
+Path traced shadows - CPU
+Path traced shadows - GPU
+Path traced everything - CPU
+Path traced everything - GPU
+The GPU version starts off at ~8x faster than the CPU, but ends up ~0.8x the speed. It's worth noting that I have invested a lot of time optimizing the performance of the CPU version, whereas the GPU code is a straight port with no optimizations as yet.
+The likely reason for this performance drop off on the GPU vs the CPU path tracing is that on the GPU the SIMD lanes are all performing the same computations, but with different data (in this case different pixels being calculated). When encountering a conditional execution such as an if statement, all SIMD lanes may need to calculate both sides of the computation. Furthermore, for iterative computations some lanes might process more iterations than others, with the other lanes not contributing to forward progress of the computation. As a consequence, all lanes progress at the rate of the slowest computation.
+The CPU code however processes one pixel at a time per thread and so does not suffer this issue. Indeed, unlike the GPU's SIMD lanes, CPU threads can perform different computations. It's worth noting that similar problems can affect CPU code when using the same programming style such as with ISPC.
+Wavefront Tracing or Persistent Threads?
+There are two popular approaches to improving performance for GPU path tracers: persistent threads and wavefront path tracing.
+Wavefront path tracing is considered the state of art technique. Here the stages of path tracing are broken down into kernels which perform the same amount of work per lane. For example:
+first a kernel traces all paths to their first intersection with geometry
+a logic kernel classifies the intersection shading
+several kernels perform intersection shading and generation of the next rays to be traced
+Whilst this approach uses several kernels which could be considered bad for performance, each kernel can optimally use the hardware.
+I intend to switch from the current 'mega kernel' approach to wavefront path tracing. If you'd like to follow my progress you can find me on Mastodon @dougbinks, subscribe to our RSS feed or if you'd like to support more articles like this along with our open source work join our Patreon.
+[Edit 26 Apr 2024: We released the GPU path tracer in Avoyd version 0.21. See the post "Voxel GPU Rendering in Avoyd 0.21" for a short overview of development and more performance information.]

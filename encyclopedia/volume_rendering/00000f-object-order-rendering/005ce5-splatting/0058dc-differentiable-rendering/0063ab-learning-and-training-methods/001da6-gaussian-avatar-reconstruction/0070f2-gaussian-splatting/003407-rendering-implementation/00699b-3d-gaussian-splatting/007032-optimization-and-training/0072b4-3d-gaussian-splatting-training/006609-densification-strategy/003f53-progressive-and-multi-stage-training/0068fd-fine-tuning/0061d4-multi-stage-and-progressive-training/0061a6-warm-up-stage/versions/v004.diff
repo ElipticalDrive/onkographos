@@ -1,0 +1,159 @@
+--- v003.md
++++ v004.md
+@@ -1,78 +1,95 @@
+ # Warm-up stage
++## Overview
++The warm-up stage is a training adaptation designed to stabilize the optimization of 3D Gaussian Splatting (3DGS) representations, particularly in dynamic or complex scenarios where direct initialization is difficult. It serves as a preliminary optimization phase that improves convergence stability and distractor suppression [S1, S2]. Unlike standard single-stage training, it decouples the initial geometry learning from complex deformation or appearance modeling, preventing the model from getting stuck in poor local minima [S2]. It is distinct from [Two-stage Optimization](14857-two-stage-optimization.md) by focusing specifically on the initialization phase before the main training loop, and from [On-the-Fly GS Progressive Training](17502-on-the-fly-gs-progressive-training.md) by being a fixed pre-training step rather than a dynamic densification process.
++## How it works
++The warm-up stage operates differently depending on the specific variant (static distractor suppression vs. dynamic 4D initialization).
+ 
+-Also called: 3D Gaussian Initialization (Warm-up)
++### Inputs and Outputs
++*   **Inputs:** Initial 3D Gaussian parameters (position $\mathbf{p}$, covariance $\mathbf{\Sigma}$, opacity $\alpha$, spherical harmonics coefficients $\mathbf{c}$), camera poses, and training images. For dynamic variants, initial 3D Gaussians are derived from Structure-from-Motion (SfM) points or a sparse cloud [S2].
++*   **Outputs:** Optimized 3D Gaussian parameters that serve as the initialization for the subsequent main training stage (e.g., 4D-GS optimization or full dynamic training) [S2].
+ 
+-## Overview
+-A training adaptation that improves convergence stability and distractor suppression in 3D Gaussian Splatting (3DGS) by decoupling the initialization of static geometry from dynamic deformation learning [S1, S2]. It sets apart from single-stage optimization by preventing the gradient conflict between coarse geometric fitting and complex temporal deformation, particularly in dynamic scenes or when SfM initialization is absent [S2].
++### Data Structures
++The data structure remains the standard 3D Gaussian representation:
++*   $\mathcal{G} = \{ \mathbf{p}_i, \mathbf{R}_i, \mathbf{s}_i, \alpha_i, \mathbf{c}_{i,0}^{SH}, \dots, \mathbf{c}_{i,D}^{SH} \}_{i=1}^N$
++    *   $\mathbf{p}_i \in \mathbb{R}^3$: Mean position.
++    *   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix.
++    *   $\mathbf{s}_i \in \mathbb{R}^3$: Scaling factors.
++    *   $\alpha_i \in [0, 1]$: Opacity.
++    *   $\mathbf{c}_{i,d}^{SH}$: Spherical harmonics coefficients for degree $d$.
+ 
+-## How it works
+-The warm-up stage serves as a preliminary optimization phase before engaging the full dynamic model (e.g., 4D-GS). It addresses convergence difficulties that arise when training 4D-Gaussian representations directly without prior geometric grounding [S2].
++### Steps
++1.  **Initialization:** Initialize 3D Gaussians from SfM points or a sparse point cloud [S2]. If SfM points are absent, a coarse clustering or random initialization may be used, though this risks convergence difficulty [S2].
++2.  **Forward Pass:** Render the scene using the current 3D Gaussians via differentiable rasterization [S2].
++3.  **Loss Computation:** Compute the reconstruction loss (e.g., L1 loss + D-SSIM) between the rendered image and the ground truth image [S2]. For distractor suppression variants, additional masking losses may be applied [S1].
++4.  **Backpropagation and Update:** Update the Gaussian parameters using an optimizer (typically Adam) [S2].
++    *   In dynamic variants, the warm-up may involve optimizing a subset of 3D Gaussians in the dynamic part to release pressure on large deformation learning [S2].
++    *   This step helps the model learn proper 3D Gaussians $\Gamma$ and suggests deformation fields that pay attention to the dynamic part [S2].
++5.  **Stabilization:** The warm-up phase avoids numeric errors in optimizing complex deformation networks (e.g., Gaussian deformation network $\Delta$) by providing a stable base [S2].
++6.  **Transition:** The optimized parameters from this stage are passed to the next training stage (e.g., 4D-GS training) [S2].
+ 
+-**Inputs and Outputs:**
+-*   **Input:** Raw image sequence; optionally sparse SfM points (if available). If SfM points are absent, random or heuristic initialization is used [S2].
+-*   **Output:** Optimized static 3D Gaussian parameters ($\Gamma$) and initial deformation field estimates, which serve as the starting state for the subsequent dynamic training stage [S2].
++### Pseudocode
++```python
++def warm_up_stage(gaussians, images, poses, num_iterations):
++    """
++    Performs a warm-up optimization of 3D Gaussians.
++    
++    Args:
++        gaussians: Initial 3D Gaussian parameters (from SfM or sparse cloud).
++        images: List of training images.
++        poses: List of camera poses.
++        num_iterations: Number of warm-up iterations.
++        
++    Returns:
++        Optimized 3D Gaussian parameters.
++    """
++    optimizer = Adam(gaussians.parameters(), lr=0.001)
++    
++    for i in range(num_iterations):
++        # Sample a random image and pose
++        idx = random.randint(0, len(images) - 1)
++        image = images[idx]
++        pose = poses[idx]
++        
++        # Render the scene
++        rendered_image = render(gaussians, pose)
++        
++        # Compute loss
++        # For dynamic variants, this might include deformation consistency terms
++        loss = compute_loss(rendered_image, image)
++        
++        # Backpropagate and update
++        optimizer.zero_grad()
++        loss.backward()
++        optimizer.step()
++        
++    return gaussians
++```
+ 
+-**Data Structures:**
+-*   **3D Gaussians ($\Gamma$):** Defined by position $\mathbf{p}$, scale $\mathbf{s}$, rotation $\mathbf{q}$, opacity $\alpha$, and color $\mathbf{c}$ [S2].
+-*   **Deformation Network ($\Delta$):** An MLP or structure (e.g., HexPlane) that predicts deformation offsets based on spatial-temporal features [S2].
++### Parameters
++*   **Learning Rate:** Typically lower than the main training phase to ensure stable convergence [S2].
++*   **Iterations:** Not given in the sources.
++*   **Optimizer:** Adam [S2].
+ 
+-**Steps:**
+-1.  **Static Initialization:** Initialize 3D Gaussians. If SfM points are missing, use a coarse initialization strategy to avoid convergence failure [S2].
+-2.  **Warm-up Optimization:** Optimize the static 3D Gaussian parameters ($\Gamma$) using standard 3DGS rendering loss (L1/SSIM) for a fixed number of iterations. During this phase, the deformation network $\Delta$ is either frozen or trained with minimal influence to suggest initial deformation directions [S2].
+-3.  **Dynamic Transition:** Transition to the full 4D-GS training. The optimized $\Gamma$ from the warm-up stage is retained, while the deformation network $\Delta$ is activated to model temporal changes [S2].
+-
+-**Formulas:**
+-The rendering of a deformed Gaussian $\mathcal{G}'$ at time $t$ is given by:
+-$$ \mathcal{G}'_i = \mathcal{D}(\mathcal{H}(\mathbf{p}_i, t)) $$
+-where $\mathcal{H}$ is the spatial-temporal structure encoder and $\mathcal{D}$ is the Gaussian deformation decoder, consisting of separate MLPs $\{\phi_x, \phi_r, \phi_s\}$ for position, rotation, and scale changes [S2].
+-
+-**Parameters:**
+-*   **Warm-up Iterations:** Not given in the sources.
+-*   **Loss Function:** Standard 3DGS photometric and structural similarity losses [S2].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Absence of SfM Points:** Direct 4D-GS training without a warm-up stage leads to convergence difficulty [S2].
+-*   **Numeric Errors:** Skipping the warm-up stage can cause numeric errors in optimizing the Gaussian deformation network $\Delta$ [S2].
+-
+-**Pseudocode:**
+-```python
+-def warm_up_stage(images, initial_gaussians, num_iterations):
+-    """
+-    Optimizes static 3D Gaussians before dynamic training.
+-    """
+-    gaussians = initial_gaussians
+-    deformation_network = initialize_deformation_network()
+-    
+-    for step in range(num_iterations):
+-        # Sample a random view from the image sequence
+-        view = sample_view(images)
+-        
+-        # Render current static Gaussians
+-        rendered_image = render_3d_gaussians(gaussians, view)
+-        
+-        # Compute loss against ground truth
+-        loss = compute_loss(rendered_image, view.gt_image)
+-        
+-        # Backpropagate to update static Gaussians
+-        # Note: Deformation network gradients are minimized or frozen
+-        # to focus on geometric initialization [S2]
+-        update_parameters(gaussians, loss)
+-        
+-    return gaussians, deformation_network
+-```
++### Edge Cases and Pitfalls
++*   **Absence of SfM Points:** Training 4D-GS directly without SfM points initialization may cause convergence difficulty [S2]. The warm-up stage is crucial in these cases to establish a valid geometric prior [S2].
++*   **Numeric Errors:** Skipping the warm-up stage can lead to numeric errors when optimizing complex deformation networks, as the initial state may be too far from the optimal manifold [S2].
++*   **Distractor Suppression:** In static scenes, the warm-up stage can help in identifying and suppressing transient distractors by allowing the model to learn robust semantic features before final optimization [S1].
+ 
+ ## Subtopics
+ 
+ ### 3D Gaussian Initialization (Warm-up)
+-A specific variant used in 4D-GS when SfM points initialization is absent. It prevents convergence difficulty by optimizing 3D Gaussians first. It keeps some 3D Gaussians in the dynamic part to release pressure on large deformation learning, learns proper 3D Gaussians $\Gamma$, and suggests deformation fields to focus on dynamic parts, avoiding numeric errors in the deformation network $\Delta$ [S2].
++A specific variant of the warm-up stage used in 4D Gaussian Splatting for dynamic scenes. It optimizes 3D Gaussians before training 4D-GS directly, primarily used when SfM points initialization is absent to prevent convergence difficulty [S2]. It keeps some 3D Gaussians in the dynamic part to release the pressure of large deformation learning by 4D Gaussians, learns proper 3D Gaussians $\Gamma$, and suggests deformation fields to pay more attention to the dynamic part [S2]. This avoids numeric errors in optimizing the Gaussian deformation network $\Delta$ and keeps training stable [S2]. Without this warm-up coarse stage, performance metrics degrade: PSNR drops to 31.91 dB, SSIM to 0.97, LPIPS to 0.03, training time is 7.5 mins, FPS is 79, and storage is 18 MB [S2].
+ 
+ ## Operating characteristics
+-*   **Performance Impact:** Training without the warm-up coarse stage yields PSNR 31.91 dB, SSIM 0.97, LPIPS 0.03, training time 7.5 mins, 79 FPS, and 18 MB storage [S2].
+-*   **Complexity:** Adds an initial optimization phase, increasing total training time but improving final convergence quality and stability [S2].
+-*   **Strengths:** Prevents convergence failure in dynamic scenes without SfM; stabilizes deformation network training [S2].
+-*   **Limitations:** Requires additional training iterations for the warm-up phase [S2].
++*   **Time Complexity:** Adds an initial overhead to the training pipeline. The duration depends on the number of warm-up iterations, which is not specified in the sources.
++*   **Memory Complexity:** No additional memory overhead compared to standard 3DGS, as it uses the same Gaussian representation [S2].
++*   **Performance:** The warm-up stage improves convergence stability and final rendering quality. In dynamic scenes, it prevents the degradation in PSNR, SSIM, and LPIPS that occurs without it [S2].
++*   **Strengths:** Stabilizes training in complex or dynamic scenes; prevents convergence issues when SfM points are sparse or absent; improves distractor suppression in static scenes [S1, S2].
++*   **Limitations:** Adds training time; requires careful tuning of warm-up iterations and learning rates [S2].
++*   **When to Use:** Use when initializing 4D-GS without reliable SfM points; use when training dynamic scenes to stabilize deformation learning; use when distractor suppression is a priority [S1, S2].
++*   **When Not to Use:** Not necessary if high-quality SfM points are available and the scene is static, though it may still provide marginal benefits [S2].
+ 
+ ## Background
+-The warm-up stage is a training adaptation introduced in the context of 4D Gaussian Splatting for real-time dynamic scene rendering [S2]. It addresses the challenge of initializing dynamic Gaussian representations when sparse SfM points are unavailable, ensuring that the deformation network does not start from a degenerate state [S2]. It is also noted as an adaptation in distractor suppression methods like SpotLessSplats, where it contributes to improved distractor suppression [S1].
++The warm-up stage was introduced as part of adaptations for 3D Gaussian Splatting to handle transient distractors and dynamic scenes. In the context of distractor suppression, it is one of several adaptations (along with GLO and Bernoulli sampling) that show improvements in suppressing leaked distractors [S1]. In the context of dynamic scenes, it was proposed in 4D Gaussian Splatting to address convergence difficulties when SfM points are absent, by optimizing 3D Gaussians before introducing 4D deformation [S2].
+ 
+ ## Sources

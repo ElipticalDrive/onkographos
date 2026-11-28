@@ -1,0 +1,158 @@
+# SDF Scaling and Early Ray Termination for Fast Sphere Tracing
+
+Also called: SDF Scaling, Two-pass SDF Scaling
+
+## Overview
+This method accelerates sphere tracing by decoupling the distance estimation from the final high-resolution rendering into a two-pass pipeline: a low-resolution pre-processing pass and a full-resolution main pass [S1]. It solves the performance bottleneck of standard sphere tracing by using a single low-resolution buffer to provide a "head start" for full-resolution rays, positioning them closer to surfaces, while applying SDF scaling to ensure small features are not missed at low resolution [S1]. Unlike Inverse Pyramid Rendering (IPR) which uses a pyramidal render target hierarchy and filtering, this method uses a single low-resolution buffer, reducing memory cost and complexity while offering similar quality [S1].
+
+## How it works
+The method operates in two distinct passes [S1]. The first pass renders primary and shadow rays at a reduced resolution to generate an approximate distance field [S1]. The second pass uses this approximation to initialize rays closer to the geometry, significantly reducing the number of steps required for convergence [S1].
+
+### Inputs and Outputs
+*   **Inputs:** Camera parameters (origin $\mathbf{o}_{cam}$, direction $\mathbf{d}$), SDF scene definition, target output resolution $R_{out}$, low-resolution buffer resolution $R_{low}$, and shadow hardness $k$ [S1]. The exact scaling factor and early termination epsilon values are not explicitly given in the sources.
+*   **Outputs:** Final rendered image at $R_{out}$ and distance buffer at $R_{low}$ [S1].
+
+### Data Structures
+1.  **Low-Resolution Buffer:** A 2D array storing the accumulated distance $t_{approx}$ for each pixel. Size is $R_{low} \times R_{low}$ [S1].
+2.  **Ray Bundle:** In the main pass, each pixel in the low-resolution buffer corresponds to a $4 \times 4$ block of pixels (16 rays) in the full-resolution pass [S1].
+
+### Algorithm Steps
+
+#### Pass 1: Pre-processing (Low Resolution)
+1.  **Initialize Buffer:** Create a low-resolution buffer with dimensions $R_{low} = R_{out} / 4$ (e.g., 960x540 for 4K output) [S1].
+2.  **Ray Casting:** For each pixel in the low-resolution buffer, cast a ray from the camera origin $\mathbf{o}_{cam}$ with direction $\mathbf{d}$ [S1].
+3.  **SDF Scaling Logic:** Before evaluating the SDF $f(\mathbf{p})$ at the current position $\mathbf{p}$, determine the sign of the distance to the nearest surface [S1].
+    *   If the camera is in front/outside ($f(\mathbf{p}) > 0$), scale up (inflate) the SDF volume [S1].
+    *   If the camera is behind/inside ($f(\mathbf{p}) < 0$), scale down (deflate) the SDF volume [S1].
+    *   *Hole Handling:* For objects with holes (generated via subtraction), decrease the volume size of the SDF generating the hole to improve approximation when the camera is in front of the implicit surfaces. If the camera is behind, scale up the SDF [S1].
+4.  **Sphere Tracing with Early Termination:** Perform sphere tracing using the scaled SDF [S1]. Step size follows standard sphere tracing. Termination Condition: Stop when the distance between the ray and the surface is smaller than a modified, larger epsilon value than normally used [S1]. This avoids surface overlaps with smaller SDFs and provides a fast distance approximation [S1].
+5.  **Store Distance:** Store the accumulated distance $t_{approx}$ in the low-resolution buffer [S1].
+6.  **Shadow Rays:** Shadow rays can also be traced in this pass using the scaled SDFs to generate initial shadow data [S1].
+
+#### Pass 2: Main Pass (Full Resolution)
+1.  **Ray Origin Reconstruction:** For each pixel in the full-resolution output, determine its corresponding low-resolution pixel (e.g., by dividing coordinates by 4). Retrieve the approximate distance $t_{approx}$ from the low-resolution buffer [S1].
+2.  **Reconstruct Ray Origin:** Instead of starting from the camera origin $\mathbf{o}_{cam}$, set the new ray origin $\mathbf{o}_{new}$ to:
+    $$ \mathbf{o}_{new} = \mathbf{o}_{cam} + \mathbf{d} \cdot t_{approx} $$
+    This positions the ray closer to the surface, reducing the remaining distance to trace [S1].
+3.  **Sphere Tracing:** Perform standard sphere tracing from $\mathbf{o}_{new}$ using the original, unscaled SDF $f(\mathbf{p})$ [S1].
+4.  **Shadow Tracing:** For shadow rays, use the approximated distance $t_{approx}$ to trace shadows. Set shadow hardness $k$ to control the penumbra size (higher $k$ results in harder shadows) [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sphere_tracing_with_scaling_and_early_term(camera_origin, camera_direction, sdf_func, resolution, low_res_factor, epsilon_early, epsilon_hit, shadow_hardness_k):
+    """
+    Two-pass sphere tracing with SDF scaling and early termination.
+    """
+    low_res_w = resolution[0] // low_res_factor
+    low_res_h = resolution[1] // low_res_factor
+    # Initialize low-res buffer to store approximate distances
+    low_res_buffer = [[0.0] * low_res_w for _ in range(low_res_h)]
+
+    # Pass 1: Low Resolution Pre-processing
+    for y in range(low_res_h):
+        for x in range(low_res_w):
+            ray_dir = normalize(camera_direction)
+            t_approx = 0.0
+            p = camera_origin
+
+            for _ in range(100):
+                dist = sdf_func(p)
+                # SDF Scaling Logic: exact formula not given, volume is inflated/deflated based on sign [S1]
+                if dist > 0:
+                    scaled_dist = dist * 1.5  # Example inflation factor
+                else:
+                    scaled_dist = dist / 1.5  # Example deflation factor
+                
+                # Hole handling would reverse scaling for subtracted SDFs when camera is in front [S1]
+
+                if scaled_dist < epsilon_early:
+                    break
+                t_approx += scaled_dist
+                p = camera_origin + ray_dir * t_approx
+
+            low_res_buffer[y][x] = t_approx
+
+    # Pass 2: Full Resolution Main Pass
+    final_color = [0.0, 0.0, 0.0]
+    for y in range(resolution[1]):
+        for x in range(resolution[0]):
+            lr_x = x // low_res_factor
+            lr_y = y // low_res_factor
+            t_approx = low_res_buffer[lr_y][lr_x]
+            
+            new_origin = camera_origin + camera_direction * t_approx
+            t_final = t_approx
+            p_final = new_origin
+
+            for _ in range(100):
+                dist = sdf_func(p_final)
+                if abs(dist) < epsilon_hit:
+                    break
+                t_final += dist
+                p_final = new_origin + camera_direction * dist
+
+            # Shading and shadow
+            normal = estimate_normal(p_final, sdf_func)
+            light_dir = normalize(vec3(1.0, 1.0, 1.0))
+            diffuse = max(dot(normal, light_dir), 0.0)
+            
+            shadow_factor = 1.0
+            shadow_origin = p_final + normal * 0.001
+            shadow_dist = t_approx
+            if shadow_dist > 0.001:
+                shadow_p = shadow_origin
+                for _ in range(10):
+                    d_light = sdf_func(shadow_p)
+                    if d_light < 0.0:
+                        shadow_factor = 0.0
+                        break
+                    shadow_p += normalize(light_dir) * d_light
+                    if length(shadow_p - vec3(0.0, 10.0, 0.0)) > shadow_dist + shadow_hardness_k:
+                        break
+            final_color[0] += diffuse * shadow_factor
+            final_color[1] += diffuse * shadow_factor
+            final_color[2] += diffuse * shadow_factor
+
+    return [c / (low_res_factor ** 2) for c in final_color], t_final
+
+def normalize(v):
+    l = sqrt(v.x**2 + v.y**2 + v.z**2)
+    return vec3(v.x/l, v.y/l, v.z/l)
+
+def estimate_normal(p, sdf_func):
+    eps = 0.001
+    dx = vec3(eps, 0.0, 0.0)
+    dy = vec3(0.0, eps, 0.0)
+    dz = vec3(0.0, 0.0, eps)
+    nx = sdf_func(p + dx) - sdf_func(p - dx)
+    ny = sdf_func(p + dy) - sdf_func(p - dy)
+    nz = sdf_func(p + dz) - sdf_func(p - dz)
+    return normalize(vec3(nx, ny, nz))
+```
+
+### Parameters
+*   **Low-resolution buffer size:** Typically $1/4$ of the output resolution in each axis (e.g., 960x540 for 4K) [S1].
+*   **Ray Batching:** Each low-resolution pixel serves 16 full-resolution pixels ($4 \times 4$ block) [S1].
+*   **Scaling Factor:** Not given in the sources.
+*   **Epsilon Early ($\epsilon_{early}$):** Larger than standard epsilon to terminate early and avoid overlaps from scaled SDFs [S1].
+*   **Shadow Hardness ($k$):** Controls shadow penumbra; higher values yield harder shadows [S1].
+
+### Pitfalls
+*   **Rounded Edges:** High values of $\epsilon_{early}$ cause shapes with edges to become rounded, eliminating sharp features and providing an inaccurate approximation [S1].
+*   **SDF Overlaps:** Scaling SDFs can cause them to overlap incorrectly. Early termination avoids surface overlaps with smaller SDFs and provides a fast distance approximation by stopping when the distance is smaller than a modified, larger epsilon [S1].
+*   **Hole Approximation:** Incorrect scaling logic for holes (subtracted SDFs) can lead to visual artifacts if the camera position relative to the hole is not correctly detected [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method reduces the average number of sphere tracing steps significantly. In the 'Primitives' scene, it achieved a 3x speedup in frame time compared to state-of-the-art methods without anti-aliasing on an NVIDIA RTX-3070Ti [S1].
+*   **Shadow Ray Performance:** Shadow rays often finish after 1 step in simple scenes, achieving a 2.1x performance improvement over ground truth in the 'Primitives' scene [S1]. In complex scenes like 'Sponza atrium', performance improved by 1.5x despite increased complexity (shadows taking up to 20 ms) [S1].
+*   **Memory Complexity:** Uses a single low-resolution buffer, which is significantly smaller than the pyramidal hierarchy used in Inverse Pyramid Rendering (IPR), reducing memory cost [S1].
+*   **Strengths:** Reduces rendering time significantly, allows for anti-aliasing without increasing frame time cost, and handles small features better than standard low-res methods due to SDF scaling [S1].
+*   **Limitations:** Introduces artifacts such as rounded edges if $\epsilon_{early}$ is too high. Accuracy depends on the quality of the low-resolution approximation [S1].
+
+## Background
+The method was proposed in the paper "Skipping Spheres: SDF Scaling & Early Ray Termination for Fast Sphere Tracing" [S1]. It draws inspiration from prior techniques aimed at reducing ray steps by adjusting step size and generating lower resolution renders [PKM23]. The authors note that while low-resolution buffers can speed up rendering, they often lead to artifacts in small features, necessitating filtering. This method minimizes artifacts while cutting down steps compared to previous methods by using a single low-resolution buffer and a novel tracing optimization [S1].
+
+## Sources
+[S1] Skipping Spheres: SDF Scaling & Early Ray Termination for Fast Sphere ..., https://diglib.eg.org/items/7f21e58c-639e-4359-bf94-414738612006, fetched 2026-10-27

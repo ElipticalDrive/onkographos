@@ -1,0 +1,83 @@
+# Visual Conventions
+
+Also called: Boxes, Arrows, Fans
+
+## Overview
+Visual Conventions are auxiliary geometric primitives overlaid on volume renderings to clarify the relationship between a **Selection** (the object of interest) and its **Ghost** (the original position) within the [Ghosting and Cutaway Techniques](8497-ghosting-and-cutaway-techniques.md) framework [S1]. They explicitly depict translation, orientation, or alternative states using distinct shapes: Boxes for orientation, Arrows for movement, and Fans for alternative depictions [S1].
+
+## How it works
+### Inputs and Outputs
+- **Inputs**: 3D bounding boxes or centroids of the Selection and Ghost objects; camera view-projection matrix.
+- **Outputs**: Rasterized geometric primitives (boxes, arrows, fans) composited over the volume rendering.
+
+### Data Structures
+- `Selection_BBox`: Axis-aligned or oriented bounding box of the selected object in world space.
+- `Ghost_BBox`: Axis-aligned or oriented bounding box of the original object in world space.
+- `Camera`: View-projection matrix to transform world coordinates to screen coordinates.
+
+### Steps
+1. **Project Bounding Boxes**: Transform the vertices of `Selection_BBox` and `Ghost_BBox` from world space to screen space using the camera matrix.
+2. **Compute Screen-Space Bounds**: Determine the 2D bounding rectangles for both the Selection and Ghost in screen space.
+3. **Render Conventions**:
+   - **Boxes**: Render the 3D `Selection_BBox` to provide position and orientation cues.
+   - **Arrows**: Construct a curved path from the Ghost position to the Selection position.
+   - **Fans**: Connect the screen-space bounding rectangle of the Ghost to that of the Selection.
+4. **Compositing**: Render these primitives with depth testing and blending to overlay the volume rendering.
+
+### Formulas and Parameters
+#### Arrow Curvature Control
+To avoid very short arrows when the Selection and Ghost project to nearby screen positions, the screen-space depth difference controls the arrow curvature [S1].
+
+Let $d_{screen}$ be the difference in depth (z-buffer value) between the projected centers of the Selection and Ghost in screen space.
+The curvature $C$ is a function of $d_{screen}$:
+$$ C = f(d_{screen}) $$
+A smaller $d_{screen}$ increases curvature, creating the bent arrows typical in illustrations [S1].
+
+#### Fan Construction
+A Fan is a connected pair of shapes (rectangles or circles) indicating a detailed or alternative depiction [S1].
+Let $R_G$ be the screen-space bounding rectangle of the Ghost.
+Let $R_S$ be the screen-space bounding rectangle of the Selection.
+The Fan geometry consists of $R_G$, $R_S$, and the connecting edges between their corresponding corners [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_visual_conventions(selection_bbox, ghost_bbox, camera_matrix):
+    # Project 3D bounding boxes to screen space
+    selection_screen_rect = compute_screen_bounds(selection_bbox, camera_matrix) [G]
+    ghost_screen_rect = compute_screen_bounds(ghost_bbox, camera_matrix) [G]
+    
+    # Render Boxes for orientation cues
+    render_3d_bbox(selection_bbox, style="wireframe") [G]
+    
+    # Render Arrows with curvature control
+    depth_diff = abs(selection_screen_rect.center.z - ghost_screen_rect.center.z) [G]
+    curvature = map_depth_to_curvature(depth_diff) [G]
+    render_curved_arrow(ghost_bbox.center, selection_bbox.center, curvature) [G]
+    
+    # Render Fans connecting screen-space bounds
+    render_fan(ghost_screen_rect, selection_screen_rect) [G]
+```
+
+### Edge Cases and Pitfalls
+- **Short Arrows**: If the Selection and Ghost are close in screen space, a straight arrow may be visually insignificant. The depth-difference curvature control mitigates this [S1].
+- **Occlusion**: Boxes can occlude important details of the volume data. They are recommended for design/interaction phases but may be distracting during final presentation [S1].
+
+## Subtopics
+
+### [Marker Placement](16841-marker-placement.md)
+Marker Placement is an illustrative volume rendering technique that overlays cone-shaped geometric primitives into the 3D data space to aid feature location and facilitate discussion during parameter adjustments. It is used to help locate features again after changes of visualization parameters.
+
+## Operating characteristics
+- **Performance**: Rendering uses static geometric overlays, avoiding per-voxel computation. The cost is dominated by rasterization of the overlay geometry [S1].
+- **Strengths**: Provides clear semantic cues about object movement (Arrows), orientation (Boxes), and alternative states (Fans) [S1].
+- **Limitations**: Boxes can clutter the view and occlude data. Arrows and Fans rely on screen-space projection, which may distort if the camera angle changes drastically without updating the conventions [S1].
+- **When to use**: Interactive design tools and parameter adjustment phases where explaining object relationships is critical [S1].
+- **When not to use**: Final presentations where visual clutter must be minimized, as boxes can be distracting [S1].
+
+## Background
+Visual Conventions were introduced in the VolumeShop system, an interactive environment for direct volume illustration [S1]. The approach draws inspiration from traditional illustrators' techniques to clarify the role of objects in complex scenes [S1]. The system allows users to manipulate objects and visualize their movement or alternative states using these conventions, enhancing the communicative power of volume rendering [S1].
+
+## Sources
+[S1] VolumeShop: An Interactive System for Direct Volume Illustration, https://doi.org/10.1109/vis.2005.135, fetched 2026-10-26

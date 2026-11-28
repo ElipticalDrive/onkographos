@@ -1,0 +1,58 @@
+# SCADE
+
+Also called: Space Carving with Ambiguity-Aware Depth Estimates
+
+## Overview
+SCADE is a NeRF reconstruction approach that regularizes optimization with multimodal depth estimates from an ambiguity-aware prior, resolving ambiguities via a space carving loss that fuses estimates across views to achieve globally consistent 3D reconstruction [S1]. Unlike Dense Depth Prior (DDP) which uses a unimodal Gaussian prior and 2D supervision on moments, SCADE uses a multimodal prior and 3D supervision on the full distribution [S1]. This allows it to clear "dust" in space by supervising the full distribution of ray termination distances rather than just moments [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ images with known camera poses (obtained via SfM [S1]), and a pretrained ambiguity-aware depth estimation prior.
+*   **Outputs:** A NeRF model predicting volume density $\sigma$ and RGB color $c$, optimized to minimize the space carving loss and photometric error.
+
+**Data Structures:**
+*   **Ambiguity-Aware Prior:** A neural network that outputs $M$ depth estimates for a given input image. The prior is trained on the Taskonomy dataset [S1] using cIMLE to model multimodal distributions from inconsistently labeled data [S1].
+*   **Depth Estimates:** A set of $M$ depth values $\{d_1, d_2, \dots, d_M\}$ for each pixel, representing possible depth modes (e.g., through glass, on glass) [S1].
+*   **Ray Samples:** Standard NeRF ray sampling along the ray $r$, producing positions $x_k$ and distances $\lambda_k$ [S1].
+
+**Parameters:**
+*   $M$: Number of depth estimates used in the prior, set to 20 in experiments [S1].
+*   Initialization: Weights initialized with the pretrained LeReS model [S1].
+
+**Algorithm:**
+The method integrates the ambiguity-aware prior into the NeRF training loop. For each ray $r$ cast from a camera view:
+
+1.  **Depth Estimation:** Pass the input image through the ambiguity-aware prior to obtain $M$ depth estimates $\{d_1, \dots, d_M\}$ for the corresponding pixel [S1].
+2.  **Ray Sampling:** Sample points $x_k$ along the ray $r$ at distances $\lambda_k$ from the camera origin [S1].
+3.  **Space Carving Loss Calculation:**
+    The core innovation is the space carving loss, which supervises the full distribution of ray termination distances. For each depth estimate $d_m$ from the prior, the method computes a loss that encourages the NeRF's predicted depth distribution to align with $d_m$ while carving out space in front of it [S1].
+    
+    Let $T(\lambda)$ be the accumulated transmission at distance $\lambda$ along the ray, defined as $T(\lambda) = \exp(-\int_0^\lambda \sigma(s) ds)$ [S1]. The probability density of ray termination at $\lambda$ is $p(\lambda) = \sigma(\lambda) T(\lambda)$ [S1].
+    
+    The space carving loss for a single depth estimate $d$ is designed such that to move a sample from the ray termination distance distribution farther in depth, the loss decreases the probability density of all points in front of it [S1]. This effectively clears "dust" (incorrect density predictions) in space [S1].
+    
+    The total loss combines the space carving loss over all $M$ depth estimates and the standard photometric rendering loss [S1].
+    
+    $$ \mathcal{L} = \mathcal{L}_{photo} + \lambda_{sc} \sum_{m=1}^M \mathcal{L}_{sc}(d_m) $$
+    
+    Where $\mathcal{L}_{photo}$ is the mean squared error between rendered and ground truth colors, and $\mathcal{L}_{sc}$ is the space carving loss for depth estimate $d_m$ [S1]. The specific formulation of $\mathcal{L}_{sc}$ ensures 3D supervision by operating on the distribution rather than moments [S1].
+
+4.  **Optimization:** Update NeRF parameters using gradient descent to minimize $\mathcal{L}$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Non-opaque Surfaces:** Reflective or transparent surfaces (e.g., glass, mirrors) create ambiguous depth estimates with multiple modes [S1]. The ambiguity-aware prior handles this by modeling multimodal distributions [S1].
+*   **Sparsity:** The method is robust to sparse views, outperforming DDP even with as few as 18 views [S1].
+*   **Domain Gap:** The prior is trained on Taskonomy, which may differ from the target domain (e.g., ScanNet, in-the-wild), but SCADE remains robust [S1].
+
+## Operating characteristics
+*   **Performance:** On ScanNet, SCADE achieves PSNR 21.54, SSIM 0.732, LPIPS 0.292, outperforming Vanilla NeRF (19.03, 0.670, 0.398) and DDP (19.29, 0.695, 0.368) [S1]. On in-the-wild iPhoneX data, SCADE achieves PSNR 22.82, SSIM 0.743, LPIPS 0.347, outperforming Vanilla NeRF (20.46, 0.713, 0.398) and DDP (21.28, 0.727, 0.366) [S1].
+*   **Ablation:** MonoSDF supervision yields PSNR 20.13; DDP prior single sample yields 20.85; DDP prior multiple samples yields 21.00; SCADE prior single sample yields 21.22; SCADE (Ours) yields 21.54 [S1].
+*   **Sparsity:** With 18 views (1.87 avg visible), DDP/SCADE PSNR is 19.35/21.66. With 24 views (2.2 avg visible), DDP/SCADE PSNR is 23.56/24.84 [S1].
+*   **Strengths:** Handles non-opaque surfaces better than baselines; robust to sparse views; resolves ambiguities via 3D supervision [S1].
+*   **Limitations:** Requires a pretrained depth prior; computational overhead from evaluating $M$ depth estimates and the space carving loss [S1].
+
+## Background
+SCADE was introduced in the paper "SCADE: NeRFs from Space Carving with Ambiguity-Aware Depth Estimates" [S1]. It addresses the underconstrained nature of NeRF reconstruction with modest numbers of in-the-wild views by regularizing optimization with multimodal depth estimates [S1]. The method builds on the concept of using depth priors but extends it to handle ambiguity via multimodal modeling and 3D supervision [S1].
+
+## Sources
+[S1] SCADE: NeRFs from Space Carving with Ambiguity-Aware Depth Estimates, https://doi.org/10.1109/cvpr52729.2023.01585, fetched 2026-10-29

@@ -1,0 +1,213 @@
+# Image-based Transfer Function Optimization via Automatic Differentiation
+
+Also called: DiffDVR, DiffDVR optimization, Gradient-based Transfer Function Optimization, Image-based Transfer Function Optimization via DiffDVR, Image-based solution
+
+## Overview
+This method optimizes a transfer function $T_o$ for an optimization volume field $F_o$ such that rendered images of $F_o$ visually match rendered images of a reference volume field $F_r$ [S1, unofficial]. It solves the problem of finding a transfer function mapping that minimizes the pixel-wise difference between two volume renderings, enabling comparative analysis of scalar fields [S1, unofficial]. Unlike voxel-based least-squares approaches that operate on per-voxel residuals, this method operates directly on the final image space, prioritizing differences that have a larger effect on the rendered output [S1, unofficial]. It is distinguished from other radiance-field optimizations by focusing specifically on the transfer function parameters of existing volume fields rather than learning the field representation itself [S1, unofficial].
+
+## How it works
+The method formulates transfer function optimization as a least-squares problem solved via automatic differentiation of the differentiable direct volume rendering (DiffDVR) pipeline [S1, unofficial]. It builds on [Radiance-field optimization](44-radiance-field-optimization.md) principles but applies them to the post-shading stage of volume rendering [S1, unofficial].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Reference volume field $F_r$ (scalar voxel data) [S1, unofficial].
+    *   Optimization volume field $F_o$ (scalar voxel data) [S1, unofficial].
+    *   Initial transfer function $T_o$ (mapping density values to color and opacity) [S1, unofficial].
+    *   Reference transfer function $T_r$ (used to render the reference images) [S1, unofficial].
+    *   Camera poses (sampled randomly per iteration) [S1, unofficial].
+*   **Outputs:**
+    *   Optimized transfer function $T_o$ that minimizes the difference between rendered images $I_o$ and $I_r$ [S1, unofficial].
+
+### Data Structures
+The transfer function $T$ is represented as a lookup table or parametric function mapping density values to color $\mathbf{C}$ and opacity $\alpha$ [S1, unofficial]. The optimization adjusts the stored color entries of the transfer function [S1, unofficial]. The volume fields $F_r$ and $F_o$ are accessed via trilinear interpolation during ray marching [G].
+
+### Rendering Equation
+Direct volume rendering composites samples along a view ray [G]. For a ray with $N$ samples, the final pixel color $C_{pixel}$ is computed as [S1, unofficial]:
+
+$$
+C_{pixel} = \sum_{i=1}^{N} C_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)
+$$
+
+where:
+*   $C_i$ is the color of the $i$-th sample, determined by applying the transfer function to the density value $D_i$ of the volume field [S1, unofficial].
+*   $\alpha_i$ is the opacity of the $i$-th sample, determined by the transfer function [S1, unofficial].
+*   The term $\prod_{j=1}^{i-1} (1 - \alpha_j)$ represents the transmittance from previous samples [S1, unofficial].
+
+### Algorithm Steps
+1.  **Forward Pass (Rendering):**
+    *   Sample random camera poses [S1, unofficial].
+    *   For each camera pose, render an image $I_r$ from the reference field $F_r$ using the reference transfer function $T_r$ [S1, unofficial].
+    *   Render an image $I_o$ from the optimization field $F_o$ using the current transfer function $T_o$ [S1, unofficial].
+    *   Resolution is fixed at $512 \times 512$ pixels per image per iteration [S1, unofficial].
+    *   Store intermediate compositing results (transmittance and accumulated color) for the backward pass [S1, unofficial].
+
+2.  **Loss Computation:**
+    *   Compute the loss $L$ as the difference between $I_o$ and $I_r$ [S1, unofficial]. The optimization minimizes the pixel-wise difference [S1, unofficial]. Common metrics include Mean Squared Error (MSE), though the source notes that various image-based difference measures like RMSE, PSNR, SSIM, or LPIPS can be used for evaluation [S1, unofficial].
+
+3.  **Backward Pass (Gradient Propagation):**
+    *   Use automatic differentiation in reverse mode to compute the gradient of the loss with respect to the transfer function parameters (the color/opacity entries in $T_o$) [S1, unofficial].
+    *   **Inversion Trick:** To overcome the memory scalability limitations of standard reverse-mode AD, the method exploits the invertibility of the compositing operation [S1, unofficial].
+        *   The forward pass stores intermediate colors and transmittance values [S1, unofficial].
+        *   The backward pass traverses the samples along the view rays in the **opposite order** (from back to front) [S1, unofficial].
+        *   Derivatives are propagated by reusing the intermediate values stored in the forward pass, significantly reducing memory requirements compared to storing the entire computation graph [S1, unofficial].
+    *   The chain rule is applied to obtain the final derivative from the individual derivatives of each compositing operation along the view ray [S1, unofficial].
+
+4.  **Optimization Step:**
+    *   Update the transfer function $T_o$ using the computed gradients (e.g., via SGD or Adam) to minimize the loss [G].
+    *   Repeat until convergence [G].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimize_transfer_function(F_r, F_o, T_o, T_r, num_iterations, learning_rate):
+    # T_o is a lookup table mapping density values to (color, opacity)
+    for iteration in range(num_iterations):
+        # 1. Sample random camera poses
+        camera_poses = [generate_random_pose() for _ in range(4)]
+        
+        total_loss = 0.0
+        grad_T_o = create_zero_array_like(T_o)
+        
+        for pose in camera_poses:
+            # 2. Forward Pass: Render Reference Image I_r
+            I_r = render_volume(F_r, T_r, pose, resolution=512)
+            
+            # Render Optimization Image I_o with current T_o
+            # Stores intermediate compositing states for the inversion trick
+            I_o, intermediates = render_volume_diff(F_o, T_o, pose, resolution=512)
+            
+            # 3. Compute Loss
+            loss = compute_mse(I_o, I_r)
+            total_loss += loss
+            
+            # 4. Backward Pass: Compute Gradients w.r.t T_o
+            # Uses reverse-mode AD with the inversion trick
+            grad_T_o = accumulate_gradients(loss, intermediates, T_o, grad_T_o)
+            
+        # 5. Update Transfer Function
+        T_o = apply_gradient_descent(T_o, grad_T_o, learning_rate, len(camera_poses))
+        
+    return T_o
+
+def generate_random_pose():
+    # Returns a camera pose (position and orientation)
+    return {"position": [0.0, 0.0, 0.0], "orientation": [0.0, 0.0, 0.0]}
+
+def create_zero_array_like(T):
+    # Returns an array of zeros with the same shape as T
+    return [0.0] * len(T)
+
+def render_volume(V, T, pose, resolution):
+    # Standard non-differentiable render for reference
+    image = [[0.0, 0.0, 0.0] for _ in range(resolution * resolution)]
+    for y in range(resolution):
+        for x in range(resolution):
+            ray = cast_ray(pose, x, y, resolution)
+            image[y * resolution + x] = composite_ray(V, T, ray)
+    return image
+
+def render_volume_diff(V, T, pose, resolution):
+    # Differentiable render storing intermediates
+    image = [[0.0, 0.0, 0.0] for _ in range(resolution * resolution)]
+    intermediates = []
+    for y in range(resolution):
+        for x in range(resolution):
+            ray = cast_ray(pose, x, y, resolution)
+            acc_color = [0.0, 0.0, 0.0]
+            acc_trans = 1.0
+            sample_data = []
+            for i in range(len(ray.samples)):
+                D_i = ray.samples[i].density
+                C_i, alpha_i = T.lookup(D_i)
+                acc_color = [acc_color[c] * (1.0 - alpha_i) + C_i[c] * alpha_i for c in range(3)]
+                acc_trans *= (1.0 - alpha_i)
+                sample_data.append({"C_i": C_i, "alpha_i": alpha_i, "acc_color_before": acc_color})
+            image[y * resolution + x] = acc_color
+            intermediates.append({"samples": sample_data, "acc_trans": acc_trans})
+    return image, intermediates
+
+def compute_mse(I_o, I_r):
+    # Mean squared error between two images
+    total = 0.0
+    count = 0
+    for p_o, p_r in zip(I_o, I_r):
+        for c in range(3):
+            total += (p_o[c] - p_r[c]) ** 2
+            count += 1
+    return total / count
+
+def accumulate_gradients(loss, intermediates, T_o, grad_T_o):
+    # Initialize gradient of loss w.r.t final pixel colors
+    dL_dC_final = [2.0 / len(intermediates) * (I_o[p] - I_r[p]) for p in range(len(intermediates))]
+    
+    for ray_idx, inter in enumerate(intermediates):
+        dL_dC = dL_dC_final[ray_idx]
+        # Traverse samples in reverse order (back to front)
+        for i in range(len(inter["samples"]) - 1, -1, -1):
+            s = inter["samples"][i]
+            C_i = s["C_i"]
+            alpha_i = s["alpha_i"]
+            acc_color_before = s["acc_color_before"]
+            
+            # Derivative propagation using stored intermediates
+            dL_dC_prev = [dL_dC[c] * (1.0 - alpha_i) for c in range(3)]
+            dL_dalpha = sum(dL_dC[c] * C_i[c] - dL_dC_prev[c] * alpha_i for c in range(3))
+            dL_dC_i = [dL_dC[c] * alpha_i for c in range(3)]
+            
+            # Accumulate gradients into transfer function entries
+            # Assuming density is quantized to bins for the lookup table
+            density_bin = int(s["D_i"] * 100) % len(T_o)
+            grad_T_o[density_bin] += dL_dalpha + sum(dL_dC_i)
+            
+    return grad_T_o
+
+def apply_gradient_descent(T, grad_T, lr, num_samples):
+    for i in range(len(T)):
+        T[i] -= lr * grad_T[i] / num_samples
+    return T
+
+def cast_ray(pose, x, y, resolution):
+    # Returns a ray object with samples
+    return {"samples": [{"density": 0.5} for _ in range(10)]}
+
+def composite_ray(V, T, ray):
+    acc_color = [0.0, 0.0, 0.0]
+    acc_trans = 1.0
+    for s in ray.samples:
+        D_i = s.density
+        C_i, alpha_i = T.lookup(D_i)
+        acc_color = [acc_color[c] * (1.0 - alpha_i) + C_i[c] * alpha_i for c in range(3)]
+        acc_trans *= (1.0 - alpha_i)
+    return acc_color
+```
+
+### Parameters
+*   **Rendering Resolution:** $512 \times 512$ pixels per image per iteration [S1, unofficial].
+*   **Learning Rate:** Not given in the sources [G].
+*   **Optimizer:** Not given in the sources [G].
+
+### Edge Cases and Pitfalls
+*   **Structural Differences:** If the two fields $F_r$ and $F_o$ have fundamentally different structural distributions, an optimized transfer function may not exist that produces visually similar images, or the result may be misleading [S1, unofficial].
+*   **Memory Usage:** Standard reverse-mode AD requires storing all intermediate operations, which is memory-intensive for volume rendering. The "inversion trick" overcomes scalability limitations and significantly reduces memory requirements by reusing intermediate values [S1, unofficial].
+*   **Local Minima:** The optimization is non-convex; the initial choice of $T_o$ and the complexity of the fields may lead to local minima [G].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of iterations, camera poses, and ray marching steps [G]. Each iteration requires rendering two images ($I_r$ and $I_o$) and a backward pass [S1, unofficial].
+*   **Memory Complexity:** Reduced significantly by the "inversion trick" compared to standard reverse-mode AD, as it avoids storing the full computation graph and reuses intermediate values [S1, unofficial].
+*   **Strengths:**
+    *   Directly optimizes for visual similarity in image space [S1, unofficial].
+    *   Prioritizes differences that affect the final rendered image more than voxel-based methods [S1, unofficial].
+    *   Applicable to comparing different correlation measures or physical parameters in ensemble simulations [S1, unofficial].
+*   **Limitations:**
+    *   Requires differentiable volume rendering implementation [S1, unofficial].
+    *   May fail to find a matching transfer function if fields are structurally dissimilar [S1, unofficial].
+    *   Computationally expensive due to iterative rendering and AD [S1, unofficial].
+*   **When to Use:** When comparing two volume fields and wanting to find a transfer function for one that makes it visually match the other, or when analyzing the impact of transfer function changes on image similarity [S1, unofficial].
+*   **When Not to Use:** When the goal is to optimize the volume field representation itself (use [Neural Radiance Fields](4972-neural-radiance-fields.md) or similar) or when voxel-level accuracy is required rather than image-level similarity [S1, unofficial].
+
+## Background
+The method is built upon DiffDVR, introduced by Weiss and Westermann [WW22], which uses automatic differentiation to optimize external parameters of the rendering process, such as viewpoint, transfer function, and integration stepsize [S1, unofficial]. The specific application to optimizing a transfer function for a single field to reproduce reference images was demonstrated by Weiss and Westermann [WW22]. The approach described here extends this to optimize a transfer function for an optimization field $F_o$ to match images of a reference field $F_r$ [S1, unofficial]. It is applied in the context of comparative volume rendering for numerical fluid simulation, where it helps compare different correlation measures in ensemble simulations or different physical parameters from a single simulation run [S1, unofficial].
+
+## Sources
+[S1] Transfer Function Optimization for Comparative Volume Rendering, https://doi.org/10.48550/arxiv.2306.05885, fetched 2026-10-26 (unofficial)

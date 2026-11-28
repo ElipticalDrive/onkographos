@@ -1,0 +1,140 @@
+--- v002.md
++++ v003.md
+@@ -4,98 +4,57 @@
+ 
+ ## Overview
+-The PSNR Evaluation Pipeline computes the Peak Signal-to-Noise Ratio (PSNR) on held-out test or validation splits to quantify the rendering quality of a trained NeRF model [S1, unofficial]. It differs from training metrics by using inference-optimized rendering paths and explicitly handling background compositing to ensure fair comparison against ground truth images [S2, unofficial].
++The PSNR Evaluation Pipeline computes the Peak Signal-to-Noise Ratio (PSNR) on held-out test or validation splits to quantitatively assess the rendering quality of a trained Neural Radiance Field (NeRF) [S1, unofficial]. It differs from training loops by disabling gradient computation, replacing active raymarching with inference-optimized variants, and aggregating pixel-wise Mean Squared Error (MSE) into a global mean score [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Trained NeRF model state (coarse and/or fine networks) [S1, unofficial].
+-- Dataset split identifier: `"test"` or `"val"` [S1, unofficial].
+-- Scene metadata (camera intrinsics, near/far planes) [S1, unofficial].
+-- Ground truth images and poses for the specified split [S1, unofficial].
+-
+-**Outputs:**
+-- Per-frame PSNR values.
+-- Mean PSNR and standard deviation across the split [S1, unofficial].
+-- Optional composite visualization of ground truth, rendered RGB, and depth [S2, unofficial].
++**Inputs and Outputs:**
++*   **Inputs:** A trained NeRF model (coarse and/or fine), dataset metadata (camera poses, intrinsics, resolution), and a dataset split identifier ("test" or "val") [S1, unofficial].
++*   **Outputs:** A scalar mean PSNR value, per-view PSNR scores, and optionally side-by-side visual comparisons of ground truth and rendered images [S1, unofficial][S2, unofficial].
+ 
+ **Data Structures:**
+-- `state_eval`: Evaluation state object containing inference variants of raymarching and rendering functions [S2, unofficial].
+-- `rendered_image`: Tuple or object containing `bg` (background color), `rgb` (rendered color), and `depth` [S2, unofficial].
+-- `gt_rgbs_f32`: Ground truth RGB images converted to float32 and composited with the rendered background [S2, unofficial].
++*   **State:** An evaluation state object containing inference-specific raymarching and rendering functions, distinct from the training state [S2, unofficial].
++*   **Images:** Ground truth (GT) and rendered images are stored as arrays with shape `(Height, Width, Channels)` or `(Channel, Height, Width)`, normalized to $[0, 1]$ [S1, unofficial][S2, unofficial].
+ 
+ **Steps:**
+-1. **Load Data:** Load ground truth images and camera poses for the specified split [S1, unofficial]. If `half_res=True`, images are loaded at half resolution (e.g., 200x200 for Blender scenes) [S1, unofficial].
+-2. **Initialize Evaluation State:** Replace the training raymarching and rendering functions with their inference counterparts to optimize performance [S2, unofficial].
+-3. **Iterate Views:** For each validation/test view:
+-   a. Extract camera transforms [S2, unofficial].
+-   b. Render the image using chunked rendering to manage memory [S1, unofficial]. The inference function returns `bg`, `rgb`, `depth`, and other metadata [S2, unofficial].
+-   c. Composite the ground truth RGBA image with the rendered background [S2, unofficial]. This step is critical because NeRFs often render transparent backgrounds, while ground truth images may have alpha channels or require a white background assumption [S1, unofficial][S2, unofficial].
+-4. **Compute Metrics:**
+-   a. Calculate Mean Squared Error (MSE) between the composited ground truth RGB and the rendered RGB [S1, unofficial].
+-   b. Compute PSNR for the frame [S1, unofficial]. Some implementations convert images to uint8 before comparison [S2, unofficial].
+-5. **Aggregate:** Accumulate PSNRs across all frames [S1, unofficial]. Print per-frame PSNR and the mean ± standard deviation [S1, unofficial].
+-6. **Visualization (Optional):** Create side-by-side comparisons of ground truth, rendered RGB, and depth maps for qualitative inspection [S2, unofficial].
+-
+-**Pseudocode:**
+-```python
+-import numpy as np
+-
+-def evaluate_psnr(model_state, split, data_dir, half_res=True):
+-    # 1. Load Data
+-    images, poses, H, W, focal, near, far = load_blender_data(data_dir, split, half_res=half_res)
+-    
+-    # 2. Initialize Evaluation State
+-    state_eval = model_state.replace(raymarch=inference_raymarch, render=inference_render)
+-    
+-    psnr_values = []
+-    visualizations = []
+-    
+-    for i, (transform_cw, gt_rgba_u8) in enumerate(zip(poses, images)):
+-        # 3. Render
+-        rendered = render_image_inference(key=i, transform_cw=transform_cw, state=state_eval)
+-        bg, rgb, depth = rendered.bg, rendered.rgb, rendered.depth
+-        
+-        # 4. Composite GT
+-        gt_rgba_f32 = gt_rgba_u8.astype(np.float32) / 255.0
+-        gt_rgbs_f32 = blend_rgba_image_array(gt_rgba_f32, bg)
+-        
+-        # 5. Compute Metrics
+-        mse = np.mean((gt_rgbs_f32 - rgb) ** 2)
+-        psnr = 10.0 * np.log10(1.0 / mse)
+-        psnr_values.append(psnr)
+-        
+-        # 6. Visualization
+-        viz = concatenate_side_by_side(gt_rgba_u8, rgb, depth_to_rgb(depth))
+-        visualizations.append(viz)
+-        
+-    # 7. Aggregate
+-    mean_psnr = np.mean(psnr_values)
+-    std_psnr = np.std(psnr_values)
+-    print(f"Per-frame PSNR: {psnr_values}")
+-    print(f"Mean ± Std: {mean_psnr} ± {std_psnr}")
+-    
+-    return mean_psnr, std_psnr, visualizations
+-```
++1.  **Load Data:** Load the scene metadata and images for the specified split. Images are typically loaded at half resolution for faster evaluation [S1, unofficial].
++    *   `data = load_blender_data(scene, split="test", half_res=True)`
++2.  **Initialize Evaluation State:** Replace the training raymarching and rendering functions with their inference counterparts to disable gradients and optimize for speed [S2, unofficial].
++    *   `state_eval = state.replace(raymarch=args.raymarch_eval, render=args.render_eval)`
++3.  **Prepare Ground Truth:** Composite ground truth RGBA images with a white background to ensure consistent comparison against rendered RGB images [S1, unofficial].
++    *   `test_imgs = composite_white(test_imgs)`
++4.  **Iterate and Render:** For each view in the validation/test set:
++    *   Extract camera transforms [S2, unofficial].
++    *   Render the image using chunked ray marching to manage memory [S1, unofficial].
++    *   `bg, rgb, depth, _ = render_image_inference(key, val_transform, state_eval)`
++5.  **Blend and Align:** Blend the ground truth RGBA image with the rendered background to handle transparency and ensure pixel alignment [S2, unofficial].
++    *   `gt_rgbs_f32 = blend_rgba_image_array(gt_rgba_u8 / 255.0, rendered_bg)`
++6.  **Compute Metrics:**
++    *   Calculate MSE between the aligned ground truth RGB and rendered RGB [S1, unofficial][S2, unofficial].
++        $$ \text{MSE} = \frac{1}{N} \sum_{i=1}^{N} (P_i - G_i)^2 $$
++        Where $P_i$ is the predicted pixel value and $G_i$ is the ground truth pixel value.
++    *   Compute PSNR from MSE [S1, unofficial].
++        $$ \text{PSNR} = 10 \cdot \log_{10}\left(\frac{1}{\text{MSE}}\right) $$
++        *Note: If MSE is 0, PSNR is infinite. In practice, a small epsilon or clamping is applied to avoid NaN/Inf [S1, unofficial].*
++7.  **Aggregate:** Accumulate PSNR scores across all views. Compute the mean and standard deviation [S1, unofficial].
++    *   `mean_psnr = sum(psnr_scores) / len(psnr_scores)`
++8.  **Visualize (Optional):** Create side-by-side comparisons of GT, rendered RGB, and depth maps for qualitative inspection [S2, unofficial].
+ 
+ **Parameters:**
+-- `split`: Dataset split to evaluate (`"test"` or `"val"`) [S1, unofficial].
+-- `half_res`: Boolean flag to load images at half resolution (commonly used for Blender synthetic datasets) [S1, unofficial].
++*   `split`: Dataset split to evaluate ("test" or "val") [S1, unofficial].
++*   `half_res`: Boolean flag to load images at half resolution for faster evaluation [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Background Mismatch:** Failing to composite the ground truth with the rendered background (or vice versa) leads to incorrect PSNR if the NeRF renders transparency [S2, unofficial].
+-- **Resolution:** Using `half_res` speeds up evaluation but may underestimate quality for high-resolution scenes [S1, unofficial].
+-- **Chunking:** Rendering large images without chunking can cause out-of-memory errors [S1, unofficial].
++*   **Zero MSE:** If a rendered image perfectly matches the ground truth, MSE is 0, leading to infinite PSNR. Implementation must handle this by capping PSNR or adding a small epsilon to MSE [S1, unofficial].
++*   **Resolution Mismatch:** Ensure GT and rendered images have identical dimensions before computing MSE [S1, unofficial].
++*   **Background Handling:** GT images may have alpha channels; rendered images are typically RGB. Blending GT with a white background is required for fair comparison [S1, unofficial][S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of test views and pixels per view [S1, unofficial].
+-- **Memory Complexity:** Proportional to the image resolution and chunk size used during rendering [S1, unofficial].
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** Not given in the sources.
+-- **Strengths:** Standard metric for NeRF quality; provides both quantitative (PSNR) and qualitative (visualizations) feedback [S1, unofficial][S2, unofficial].
+-- **Limitations:** PSNR is sensitive to pixel-wise errors and may not correlate perfectly with perceptual quality [S1, unofficial].
+-- **When to use:** During validation loops to monitor convergence and after training to report final model quality [S1, unofficial].
+-- **When not to use:** Not given in the sources.
++*   **Time Complexity:** Linear with respect to the number of pixels and views. Chunked rendering helps manage memory but adds overhead. Half-resolution evaluation reduces time by ~4x compared to full resolution [S1, unofficial].
++*   **Memory Complexity:** Proportional to the number of pixels per view and the number of views. Chunking limits peak memory usage during rendering [S1, unofficial].
++*   **Strengths:** Standard, interpretable metric for image quality. Fast to compute once rendering is done.
++*   **Limitations:** PSNR correlates poorly with perceptual quality compared to SSIM or LPIPS. It is sensitive to pixel misalignment and does not account for structural similarity [S1, unofficial].
++*   **When to Use:** Standard benchmarking for NeRF variants. Not sufficient alone for perceptual quality assessment.
+ 
+ ## Background
+-The PSNR evaluation pipeline is a standard component of Neural Radiance Field (NeRF) training and evaluation workflows, originating from the original NeRF paper and popularized by implementations like the NerfStudio and synthetic Blender dataset benchmarks [S1, unofficial].
++The PSNR evaluation pipeline is a standard component in NeRF research, originating from the original NeRF paper [S1, unofficial]. It is widely used in the NeRF-Synthetic (Blender) dataset benchmarks to compare different NeRF architectures and training strategies [S1, unofficial]. The use of half-resolution evaluation is a common optimization in implementations like the one described in [S1, unofficial].
+ 
+ ## Sources

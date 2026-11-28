@@ -1,0 +1,137 @@
+--- v005.md
++++ v006.md
+@@ -1,40 +1,58 @@
+ # Normal Ray Alignment Loss
+ Also called: Normal Alignment Loss, Normal-Ray Dot Product Loss
++
+ ## Overview
+-A regularization loss that encourages predicted surface normals at sample points to align or anti-align with the viewing ray direction, promoting smooth surface orientations and preventing flipped normal vectors [S1, unofficial]. It is particularly effective in few-shot novel view synthesis scenarios where accurate normal estimation is critical for reconstructing fine geometry [S2]. Unlike general smoothness priors, it specifically targets the geometric consistency between the predicted normal field and the camera ray direction [S1, unofficial].
++Normal Ray Alignment Loss is a geometric regularization term used in differentiable volume rendering to enforce consistency between predicted surface normals and camera ray directions [S1, unofficial]. It solves the problem of ambiguous or flipped normal orientations in sparse-view or ill-posed reconstruction scenarios by encouraging normals to align (point away from the camera) or anti-align (point toward the camera) with the viewing ray [S1, unofficial]. Unlike [Predicted Normal Loss](7713-predicted-normal-loss.md), which typically enforces smoothness or consistency with ground-truth normals, this method specifically targets the geometric relationship between the normal field and the ray direction [S1, unofficial].
++
+ ## How it works
+ **Inputs and Outputs**
+-- Input: Predicted normal vector $\mathbf{n}_p$ at a sample point, viewing ray direction $\mathbf{d}$, boolean flag `prefer_same_direction`, and scalar weight $w$.
+-- Output: Scalar loss value $L$.
++- **Inputs**:
++  - $\mathbf{n}_p$: Predicted normal vector at a sample point (normalized).
++  - $\mathbf{d}$: Ray direction vector from the camera origin to the sample point (normalized).
++  - $w$: Scalar weight for the loss term.
++  - `prefer_same_direction`: Boolean flag determining alignment preference.
++- **Output**:
++  - $L$: Scalar loss value.
+ 
+ **Data Structures**
+-- $\mathbf{n}_p$: Unit vector $(n_x, n_y, n_z)$.
+-- $\mathbf{d}$: Unit vector $(d_x, d_y, d_z)$.
++- Vectors $\mathbf{n}_p$ and $\mathbf{d}$ are 3D unit vectors.
++- The loss is computed per sample point along a ray and aggregated (typically mean or sum) over all samples or pixels.
+ 
+ **Steps**
+-1. Compute the dot product between the predicted normal and the ray direction: $dot = \mathbf{n}_p \cdot \mathbf{d}$.
+-2. Determine the sign factor $s$:
+-   - If `prefer_same_direction` is True, set $s = 1$.
+-   - If `prefer_same_direction` is False, set $s = -1$.
+-3. Compute the alignment term: $term = s \cdot dot$.
+-4. Compute the loss: $L = w \cdot (1 - term)$.
++1. Compute the dot product between the predicted normal $\mathbf{n}_p$ and the ray direction $\mathbf{d}$:
++   $$
++   \text{dot} = \mathbf{n}_p \cdot \mathbf{d}
++   $$
++2. Determine the sign factor $s$ based on the `prefer_same_direction` flag:
++   - If `prefer_same_direction` is True, $s = 1$.
++   - If `prefer_same_direction` is False, $s = -1$.
++3. Compute the alignment error as the deviation from the target alignment ($1$ if $s=1$, $-1$ if $s=-1$):
++   $$
++   \text{error} = 1 - s \cdot \text{dot}
++   $$
++4. Scale by the weight $w$:
++   $$
++   L = w \cdot \text{error}
++   $$
+ 
+ **Formula**
+-$$L = w \cdot (1 - s \cdot (\mathbf{n}_p \cdot \mathbf{d}))$$
+-
++$$
++L = w \cdot (1 - s \cdot (\mathbf{n}_p \cdot \mathbf{d}))
++$$
+ Where:
+ - $L$ is the loss value.
+-- $w$ is the weight scalar.
++- $w$ is the loss weight (default 1.0).
++- $s$ is the sign factor ($1$ or $-1$).
+ - $\mathbf{n}_p$ is the predicted normal vector.
+ - $\mathbf{d}$ is the ray direction vector.
+-- $s$ is the sign factor ($1$ or $-1$).
+ 
+ **Parameters**
+-- `prefer_same_direction`: Boolean flag. If True, encourages normals to point in the same direction as the ray (away from camera). If False, encourages anti-alignment (toward camera). Default: False [S1, unofficial].
+-- `weight`: Float scalar multiplying the loss term. Default/typical value: 1.0 [S1, unofficial].
++- `prefer_same_direction` (Boolean): If True, encourages normals to point in the same direction as the ray (away from camera). If False, encourages anti-alignment (toward camera). Default: False [S1, unofficial].
++- `weight` (Float): Scalar multiplier for the loss term. Default/typical value: 1.0 [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls**
+-- If $\mathbf{n}_p$ or $\mathbf{d}$ are not normalized, the dot product will not represent the cosine of the angle, leading to incorrect alignment penalties. Ensure inputs are unit vectors [G].
+-- The loss is minimized when $s \cdot (\mathbf{n}_p \cdot \mathbf{d}) = 1$, i.e., when the normal is perfectly aligned (or anti-aligned) with the ray.
++- **Degenerate Normals**: If $\mathbf{n}_p$ is not normalized, the dot product magnitude exceeds 1, leading to incorrect loss values. Ensure $\mathbf{n}_p$ is normalized before computation [G].
++- **Zero-Length Rays**: If $\mathbf{d}$ is a zero vector, the dot product is undefined. Ensure rays are normalized [G].
++- **Ambiguity**: The loss alone does not resolve the "front-back" ambiguity in single-view reconstruction without additional constraints or multi-view consistency [S1, unofficial].
+ 
+ **Pseudocode**
+@@ -42,21 +60,21 @@
+ def normal_ray_alignment_loss(n_p, d, prefer_same_direction=True, weight=1.0):
+     """
+-    Compute the Normal Ray Alignment Loss.
++    Compute Normal Ray Alignment Loss.
+     
+     Args:
+-        n_p: Predicted normal vector (tensor or array-like), shape (3,) or (N, 3).
+-        d: Ray direction vector (tensor or array-like), shape (3,) or (N, 3).
+-        prefer_same_direction: Boolean, if True aligns with ray, else anti-aligns.
+-        weight: Scalar weight for the loss.
++        n_p: Predicted normal vector (3D, normalized).
++        d: Ray direction vector (3D, normalized).
++        prefer_same_direction: If True, aligns n_p with d. If False, anti-aligns.
++        weight: Loss weight.
+         
+     Returns:
+         Scalar loss value.
+     """
+-    # Ensure unit vectors
+-    n_p = n_p / torch.norm(n_p, dim=-1, keepdim=True)
+-    d = d / torch.norm(d, dim=-1, keepdim=True)
++    # Ensure vectors are normalized (guard against non-unit inputs)
++    n_p = n_p / (torch.norm(n_p) + 1e-8)
++    d = d / (torch.norm(d) + 1e-8)
+     
+     # Compute dot product
+-    dot_product = torch.sum(n_p * d, dim=-1)
++    dot_product = torch.dot(n_p, d)
+     
+     # Determine sign factor
+@@ -66,6 +84,7 @@
+     loss = weight * (1.0 - s * dot_product)
+     
+-    return loss.mean()
++    return loss
+ ```
++
+ ## Subtopics
+ 
+@@ -74,7 +93,14 @@
+ 
+ ## Operating characteristics
+-Not given in the sources.
++- **Time Complexity**: $O(1)$ per sample point for the dot product and arithmetic operations. Aggregation over $N$ samples is $O(N)$.
++- **Memory Complexity**: $O(1)$ additional memory per sample point.
++- **Strengths**: Simple to implement and differentiate; effective in few-shot novel view synthesis for stabilizing normal orientation [S2].
++- **Limitations**: Does not enforce smoothness between adjacent normals; requires careful tuning of the `prefer_same_direction` flag based on the desired normal convention [S1, unofficial].
++- **When to Use**: Sparse-view reconstruction, few-shot novel view synthesis, or when normal orientation ambiguity is a primary issue [S2].
++- **When Not to Use**: Dense-view scenarios with sufficient geometric constraints, or when smoothness is more critical than absolute orientation [S2].
++
+ ## Background
+-Origin: Borrowed from Ref-NeRF [S2].
++The Normal Ray Alignment Loss is a component of the regularization strategy in differentiable volume rendering, particularly in frameworks like TLIR [S1, unofficial]. It is closely related to the Orientation Loss used in Ref-NeRF [S2]. The method leverages the differentiability of the rendering pipeline to backpropagate gradients through the normal prediction and alignment loss, optimizing the scene representation to produce geometrically consistent normals [44-radiance-field-optimization.md].
++
+ ## Sources
+ [S1] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)

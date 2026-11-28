@@ -1,0 +1,175 @@
+--- v001.md
++++ v002.md
+@@ -20,111 +20,71 @@
+ 
+ **Steps:**
+-1.  **Initialization:** The `merger` process initializes a quit counter (`nr.of.quits`) to 0 and sets `running` to TRUE [S1, unofficial].
+-2.  **Wait for Input:** The `merger` waits on either `in.0` or `in.1` for a tag [S1, unofficial].
+-3.  **Invoke Respond:**
+-    - If `in.0` receives a tag, `respond` is called with `normal.order = TRUE` [S1, unofficial].
+-    - If `in.1` receives a tag, `respond` is called with `normal.order = FALSE` [S1, unofficial].
+-4.  **Process Tag (in `respond`):**
+-    - **Data/Message/Quit:** If the tag is `slice.data`, `message`, or `quit`, the expected packet is received and forwarded to `output`. If `quit`, the quit counter increments; if it reaches 2, `running` becomes FALSE [S1, unofficial].
+-    - **Command:** If the tag is `command`, the process synchronizes inputs to receive merge parameters from both channels [S1, unofficial].
+-5.  **Synchronize Inputs (for Command):**
+-    - Receive `render.mode` and `forward.merge` flags from the channel that already provided the tag (referred to as `input.0` in the source logic) [S1, unofficial].
+-    - Receive `render.mode` and `forward.merge` flags from the other channel (`input.1`) [S1, unofficial].
+-    - Send a `command` tag followed by the merge type (`merge.image` or `merge.histogram`) and the received parameters to `output` [S1, unofficial].
+-6.  **Determine Obscuration Order (for `merge.image`):**
+-    - Calculate priority based on `forward.merge` and `normal.order` [S1, unofficial]:
+-      - If `(forward.merge.0 AND normal.order) OR (NOT forward.merge.0 AND NOT normal.order)`, then `result.1` obscures `result.0` [S1, unofficial].
+-      - Otherwise, `result.0` obscures `result.1` [S1, unofficial].
+-    - **Obscuration:** For view/layer/z-shade modes, use block move instructions to overwrite pixels from the higher-priority result onto the lower-priority result where the higher-priority pixels are non-zero [S1, unofficial].
+-7.  **Accumulate (for `merge.histogram`):**
+-    - For integrate/histogram modes, perform element-wise addition of partial results instead of obscuration [S1, unofficial].
++1. **Initialization:** The `merger` process initializes a quit counter (`nr.of.quits`) to 0 and sets `running` to TRUE [S1, unofficial].
++2. **Wait for Input:** The `merger` waits on either `in.0` or `in.1` for a tag [S1, unofficial].
++3. **Invoke Respond:** If `in.0` receives a tag, `respond` is called with `normal.order = TRUE` [S1, unofficial]. If `in.1` receives a tag, `respond` is called with `normal.order = FALSE` [S1, unofficial].
++4. **Process Tag (in `respond`):** If the tag is `slice.data`, `message`, or `quit`, the expected packet is received and forwarded to `output` [S1, unofficial]. If `quit`, the quit counter increments; if it reaches 2, `running` becomes FALSE [S1, unofficial].
++5. **Synchronize Inputs (for Command):** If the tag is `command`, the process synchronizes inputs to receive merge parameters from both channels [S1, unofficial]. It receives `render.mode` and `forward.merge` flags from the channel that already provided the tag [S1, unofficial]. It receives `render.mode` and `forward.merge` flags from the other channel [S1, unofficial]. It sends a `command` tag followed by the merge type (`merge.image` or `merge.histogram`) and the received parameters to `output` [S1, unofficial].
++6. **Determine Obscuration Order (for `merge.image`):** Calculate priority based on `forward.merge` and `normal.order` [S1, unofficial]. If `(forward.merge.0 AND normal.order) OR (NOT forward.merge.0 AND NOT normal.order)`, then `result.1` obscures `result.0` [S1, unofficial]. Otherwise, `result.0` obscures `result.1` [S1, unofficial]. For view/layer/z-shade modes, use block move instructions to overwrite pixels from the higher-priority result onto the lower-priority result where the higher-priority pixels are non-zero [S1, unofficial].
++7. **Accumulate (for `merge.histogram`):** For integrate/histogram modes, perform element-wise addition of partial results instead of obscuration [S1, unofficial].
++
++**Formula:**
++The obscuration priority is determined by:
++$$ \text{result.1 obscures result.0} \iff (\text{forward.merge.0} \land \text{normal.order}) \lor (\neg \text{forward.merge.0} \land \neg \text{normal.order}) $$
++where `forward.merge.0` is the view direction flag from the first-arriving channel, and `normal.order` is TRUE if that channel carries lower slice numbers [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode based on Transputer Occam-like logic [S1, unofficial]
++# Valid Python representation of Transputer Occam logic [S1, unofficial]
++# Module state shared between processes
++_state = {'nr_of_quits': 0, 'running': True}
+ 
+-PROC merger(node_nr, in_0, in_1, out):
+-    nr_of_quits = 0
+-    running = TRUE
+-    
+-    WHILE running:
+-        # ALT construct: wait for tag on either channel
+-        IF in_0 HAS TAG:
+-            tag = in_0.GET_TAG()
+-            respond(in_0, in_1, out, TRUE, tag)
+-        ELSE IF in_1 HAS TAG:
+-            tag = in_1.GET_TAG()
+-            respond(in_1, in_0, out, FALSE, tag)
+-            
+-        # Check for quit condition handled inside respond or here?
+-        # Source says respond handles quit counter. 
+-        # Assuming respond updates a shared state or returns status.
+-        # For strict self-containedness, we assume respond manages the quit logic 
+-        # via the 'running' flag passed by reference or global state in the original context.
+-        # Here, we assume 'respond' sets a global 'running' or we check a status.
+-        # Given the source structure, 'running' is checked in the WHILE loop.
+-        # We assume respond updates 'nr_of_quits' and 'running' in the caller's scope 
+-        # or we pass them by reference. Let's assume a simple state check.
+-        
+-        IF nr_of_quits >= 2:
+-            running = FALSE
++def merger(node_nr, in_0, in_1, out):
++    while _state['running']:
++        # ALT construct: block until a tag arrives on either channel
++        tag, channel = in_0.receive_tag() if in_0.has_tag() else in_1.receive_tag()
++        if channel == in_0:
++            respond(in_0, in_1, out, True, tag)
++        else:
++            respond(in_1, in_0, out, False, tag)
++        if _state['nr_of_quits'] >= 2:
++            _state['running'] = False
+ 
+-PROC respond(input_0, input_1, output, normal_order, tag):
+-    IF tag == 'command':
+-        # Synchronize inputs
+-        # input_0 already has the tag, so we need to receive the payload
+-        render_mode_0, forward_merge_0 = input_0.GET_PAYLOAD()
+-        
+-        # input_1 needs to provide its payload
+-        dummy_tag_1 = input_1.GET_TAG() # Should be 'command'
+-        render_mode_1, forward_merge_1 = input_1.GET_PAYLOAD()
+-        
++def respond(input_0, input_1, output, normal_order, tag):
++    if tag == 'command':
++        # input_0 already received the tag, receive its payload
++        render_mode_0, forward_merge_0 = input_0.receive_payload()
++        # input_1 needs to provide its payload (source receives dummy tags first)
++        input_1.receive_tag()
++        input_1.receive_tag()
++        render_mode_1, forward_merge_1 = input_1.receive_payload()
++        # Forward merge command with parameters from first channel
++        output.send('command', 'merge.image', render_mode_0, forward_merge_0)
+         # Determine obscuration order
+-        # Note: forward_merge_0 corresponds to the channel that sent the first tag
+-        # normal_order is TRUE if that channel was input_0 (lower slices)
+-        
+-        IF (forward_merge_0 AND normal_order) OR (NOT forward_merge_0 AND NOT normal_order):
+-            # result_1 obscures result_0
+-            obscures_higher = 1
+-        ELSE:
+-            # result_0 obscures result_1
+-            obscures_higher = 0
+-            
+-        # Forward merge command
+-        output.SEND('command', 'merge.image', render_mode_0, forward_merge_0)
+-        
+-        # Perform merge
+-        IF render_mode_0 IN ['view', 'layer', 'z-shade']:
+-            # Block move obscuration
+-            result = BLOCK_MOVE_OBSCURE(input_0.GET_DATA(), input_1.GET_DATA(), obscures_higher)
+-        ELSE IF render_mode_0 == 'integrate' OR render_mode_0 == 'histogram':
+-            # Element-wise addition
+-            result = ELEMENTWISE_ADD(input_0.GET_DATA(), input_1.GET_DATA())
+-            
+-        output.SEND('data', result)
+-        
+-    ELSE IF tag == 'data':
+-        # Forward slice data
+-        slice_data = input_0.GET_PAYLOAD()
+-        output.SEND('data', slice_data)
+-        
+-    ELSE IF tag == 'message':
+-        # Forward message
+-        msg = input_0.GET_PAYLOAD()
+-        output.SEND('message', msg)
+-        
+-    ELSE IF tag == 'quit':
+-        # Handle quit
+-        # In the original code, nr_of_quits is incremented.
+-        # We assume access to the merger's state.
+-        global nr_of_quits
+-        global running
+-        nr_of_quits += 1
+-        IF nr_of_quits == 2:
+-            running = FALSE
+-        output.SEND('quit')
+-        
+-    ELSE:
+-        ERROR("Unknown tag")
++        if (forward_merge_0 and normal_order) or (not forward_merge_0 and not normal_order):
++            obscures_higher = 1  # result.1 obscures result.0
++        else:
++            obscures_higher = 0  # result.0 obscures result.1
++        # Perform merge based on render mode
++        if render_mode_0 in ('view', 'layer', 'z-shade'):
++            # Hardware block move obscuration: overwrite higher-priority pixels [S1, unofficial]
++            # In practice, this uses Transputer Block move instructions to copy non-zero pixels
++            pass
++        elif render_mode_0 in ('integrate', 'histogram'):
++            # Element-wise addition per entry [S1, unofficial]
++            result = [a + b for a, b in zip(input_0.get_data(), input_1.get_data())]
++        output.send('data', result)
++    elif tag == 'data':
++        slice_data = input_0.receive_payload()
++        output.send('data', slice_data)
++    elif tag == 'message':
++        msg = input_0.receive_payload()
++        output.send('message', msg)
++    elif tag == 'quit':
++        _state['nr_of_quits'] += 1
++        if _state['nr_of_quits'] == 2:
++            _state['running'] = False
++        output.send('quit')
++    else:
++        raise ValueError("Unknown tag")
+ ```
+ 

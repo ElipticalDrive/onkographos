@@ -1,0 +1,398 @@
+Hello! I've been working on a voxel engine in Unity using your instancing library for the rendering of the voxels, and after stress testing, concluded that I desperately needed LOD models for distant voxels in the case of larger-scale ma...
+
+Edit2: Getting instance's position in shadowmap for uniform shading shader · Issue #8 · mkrebser/GPUInstance · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Edit2: Getting instance's position in shadowmap for uniform shading shader #8
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Edit2: Getting instance's position in shadowmap for uniform shading shader#8
+Copy link
+Description
+projectBreakableAccAPI
+opened on Jun 30, 2023
+Issue body actions
+Hello! I've been working on a voxel engine in Unity using your instancing library for the rendering of the voxels, and after stress testing, concluded that I desperately needed LOD models for distant voxels in the case of larger-scale maps. After setting up the LOD settings I got much better performance, but because of the shape of my LOD models, had very obvious shading differences in the distant lower detail models than I did with the full-resolution voxels. This led me to try to make a shader that would either make the whole voxel model shaded or unshaded (uniform shading). I'm very new to shaders but was able to throw together an unlit one after some trial and error, only to realize it wasn't what I was looking for. I began trying to use a typical v2f shader with the instancing to have more control over the shadows and shading but quickly found that the voxels would now no longer instance correctly, instead instancing as white with their position all as 0,0,0. This happened a few times previously, during the creation of my unlit shader when I was missing any of the instancing-specific keywords or something, but in this case, I can't use the typical instancing keywords because I'm no longer using the standard surface shader. So I guess my question is;
+(TLDR;) What parts are required to get the shader working right on instancing or do you have a workaround for uniform shading? Thank you so much for reading my ramblings in advance, and I hope this isn't too much to ask!
+-Max
+My current shader attempt:
+```
+        Shader "Instanced/instancemesh_distantVoxel"
+	{
+		Properties
+		{
+			_MainTex("Albedo (RGB)", 2D) = "white" {}
+			//_LightingAdjustment("LightingAdjustment", Range(0, 3)) = 1.5
+		}
+		
+		SubShader
+		{
+			Tags{ "RenderType" = "Opaque" }
+			LOD 200
+
+			CGPROGRAM
+			// Upgrade NOTE: excluded shader from OpenGL ES 2.0 because it uses non-square matrices
+			#pragma exclude_renderers gles
+			// Physically based Standard lighting model
+			#pragma surface surf Standard noforwardadd vertex:vert finalcolor:colorOverride
+			#pragma instancing_options procedural:setup
+			#pragma target 5.0
+			#pragma multi_compile_instancing
+			#include "AutoLight.cginc"
+			#include "Lighting.cginc"
+
+			sampler2D _MainTex;
+			half4 colorSample;
+			int sampledColor = 0;
+			float shadowAtten = 0;
+			//float _LightingAdjustment;
+
+			#include "gpuinstance_includes.cginc"
+
+			struct Input
+			{
+				float2 uv_MainTex;
+				fixed4 color;
+			};
+
+			void setup()
+			{
+				do_instance_setup();
+			}
+
+			void vert(inout appdata_full v, out Input o)
+			{
+				UNITY_INITIALIZE_OUTPUT(Input, o);
+				if (sampledColor < 1)
+				{
+					shadowAtten = SHADOW_ATTENUATION(v);
+				}
+				int id = get_instance_id();
+				o.color = get_instance_color(id);
+			}
+
+			void surf(Input IN, inout SurfaceOutputStandard o)
+			{
+				if (sampledColor < 1)
+				{
+					fixed4 c = tex2D(_MainTex, IN.uv_MainTex) * IN.color;
+					o.Albedo = c.rgb;
+					o.Alpha = c.a;
+					//o.Normal = 1;
+					o.Occlusion = 0;
+					o.Metallic = 0;
+					o.Smoothness = 0;
+					//o.Emission = c.rgb / (fixed4(1, 0.9568627f, 0.8392157f, 1) * 0.8f);
+					colorSample = half4(c.r, c.g, c.b, 1);
+					sampledColor++;
+				}
+				o.Albedo = colorSample;
+				o.Alpha = 1;
+				//o.Normal = 1;
+				o.Occlusion = 0;
+				o.Metallic = 0;
+				o.Smoothness = 0;
+			}
+
+			void colorOverride(Input IN, SurfaceOutputStandard o, inout fixed4 color)
+			{
+				color = colorSample / (1 + shadowAtten);
+			}
+
+			ENDCG
+		}
+		FallBack "Diffuse"
+	}
+```
+Activity
+projectBreakableAccAPI commented on Jul 1, 2023
+projectBreakableAccAPI
+on Jul 1, 2023
+Author
+More actions
+Ok, so since I've left this problem I've grown much wiser and solved this misplaced position somewhat. My new problem is: how would I go about addressing each instance's position individually in the shader? I need to be able to get the voxel's shadow position in order to get accurate shading because right now they all share the exact same shade. Here's my new and improved, and yet still non-functional shader:
+```
+Shader "Instanced/distantVoxel"
+{
+	Properties
+	{
+		_MainTex("Albedo (RGB)", 2D) = "white" {}
+	}
+	SubShader
+	{
+		Tags{ "RenderType" = "Opaque" }
+		LOD 200
+
+		CGPROGRAM
+		// Upgrade NOTE: excluded shader from OpenGL ES 2.0 because it uses non-square matrices
+		#pragma exclude_renderers gles
+		// Physically based Standard lighting model
+		#pragma surface surf Standard addshadow vertex:vert finalcolor:colorOverride
+		#pragma instancing_options procedural:setup
+		#pragma target 5.0
+		#pragma multi_compile_instancing
+		//#pragma multi_compile _ _MAIN_LIGHT_SHADOWS
+		//#pragma multi_compile _ _MAIN_LIGHT_SHADOWS_CASCADE
+
+		sampler2D _MainTex;
+		int sampledColor = 0;
+		half4 colorSample;
+		half shadow;
+
+		#include "HLSLSupport.cginc"
+		#include "UnityShadowLibrary.cginc"
+		#include "AutoLight.cginc"
+		#include "gpuinstance_includes.cginc"
+
+		struct Input
+		{
+			float2 uv_MainTex;
+			fixed4 color;
+			float4 screenPos;
+		};
+
+		void setup()
+		{
+			do_instance_setup();
+		}
+
+		void vert(inout appdata_full v, out Input o)
+		{
+			UNITY_INITIALIZE_OUTPUT(Input, o);
+			int id = get_instance_id();
+			o.color = get_instance_color(id);
+			#if defined (SHADOWS_SCREEN) && !defined(UNITY_NO_SCREENSPACE_SHADOWS) 
+			{
+				o.screenPos = mul(unity_WorldToShadow[0], mul(unity_ObjectToWorld, v.vertex));
+			}
+			#endif
+		}
+
+		half _DummyZero;
+
+		void surf(Input IN, inout SurfaceOutputStandard o)
+		{
+			if (sampledColor < 1)
+			{
+				o.Emission = IN.screenPos.x * _DummyZero * shadow;
+				o.Albedo = tex2D(_MainTex, IN.uv_MainTex);
+				o.Alpha = 1;
+				colorSample = tex2D(_MainTex, IN.uv_MainTex) * IN.color;
+				shadow = 1;
+				#if defined (SHADOWS_SCREEN) && !defined(UNITY_NO_SCREENSPACE_SHADOWS) 
+				{
+					shadow = unitySampleShadow(IN.screenPos);
+				}
+				#endif
+			}
+		}
+
+		void colorOverride(Input IN, SurfaceOutputStandard o, inout fixed4 color)
+		{
+			color = colorSample / (1 + shadow);
+		}
+
+		ENDCG
+	}
+	FallBack "Diffuse"
+}
+```
+projectBreakableAccAPI
+changed the title [-]Custom Shaders Invisible[/-] [+]Edit: Getting position of instance within shader[/+] on Jul 1, 2023
+projectBreakableAccAPI commented on Jul 1, 2023
+projectBreakableAccAPI
+on Jul 1, 2023
+Last edited by projectBreakableAccAPI
+Author
+More actions
+Okay, I've basically abandoned that idea and am now just trying to make a shader that smooth transitions into the lower LOD by getting dimmer and diminishing its shadows based on distance. I thought this would be easy and I would be able to wrap up for the day but nope. When I try to get the distance of the camera from the instance's vertex I get 0s across the board. It seems that the vertex position cannot be converted to world space at all or something. Is there a solution I'm missing here? All I need is an accurate world position of the individual instance or at the very least, the distance between it and the camera.
+My current, still nonfunctional code:
+```
+Shader "Instanced/voxelFade"
+{
+	Properties
+	{
+		_MainTex("Albedo (RGB)", 2D) = "white" {}
+		_FadeEnd("Fade End", Color) = (1, 1, 1, 1)
+		_FadeRate("Rate of Fade", float) = 0
+		_BegDist("Beginning Distance", float) = 0
+	}
+		SubShader{
+		Tags{ "RenderType" = "Opaque" }
+		LOD 200
+
+		CGPROGRAM
+			// Upgrade NOTE: excluded shader from OpenGL ES 2.0 because it uses non-square matrices
+	#pragma exclude_renderers gles
+			// Physically based Standard lighting model
+	#pragma surface surf Standard addshadow vertex:vert finalcolor:colorOverride
+	#pragma instancing_options procedural:setup
+	#pragma target 5.0
+	#pragma multi_compile_instancing
+
+		sampler2D _MainTex;
+		float4 _FadeEnd;
+		float _FadeRate;
+		float _BegDist;
+		float endDistance;
+
+	#include "gpuinstance_includes.cginc"
+
+		struct Input
+		{
+			float2 uv_MainTex;
+			fixed4 color;
+		};
+
+		void setup()
+		{
+		do_instance_setup();
+		}
+
+		void vert(inout appdata_full v, out Input o)
+		{
+		UNITY_INITIALIZE_OUTPUT(Input, o);
+		int id = get_instance_id();
+		o.color = get_instance_color(id);
+		endDistance = distance(_WorldSpaceCameraPos, mul(unity_ObjectToWorld, v.vertex));
+		}
+
+		void surf(Input IN, inout SurfaceOutputStandard o)
+		{
+			fixed4 c = tex2D(_MainTex, IN.uv_MainTex) * IN.color;
+			o.Albedo = c.rgb;
+			o.Alpha = c.a;
+		}
+
+		void colorOverride(Input IN, SurfaceOutputStandard o, inout fixed4 color)
+		{
+			endDistance = clamp((endDistance - _BegDist) * _FadeRate, 0, 1);
+			color = color * (1 - endDistance) + (IN.color * endDistance) * _FadeEnd;
+		}
+
+		ENDCG
+		}
+			FallBack "Diffuse"
+}
+```
+projectBreakableAccAPI commented on Jul 1, 2023
+projectBreakableAccAPI
+on Jul 1, 2023
+Author
+More actions
+Well it seems that I've done it, here it is for anyone else who needs this weird, oddly specific shader or at least one for reference:
+```
+Shader "Instanced/voxelFade"
+{
+	Properties
+	{
+		_MainTex("Albedo (RGB)", 2D) = "white" {}
+		_FadeEnd("Fade End", Color) = (1, 1, 1, 1)
+		_FadeRate("Rate of Fade", float) = 0
+		_BegDist("Beginning Distance", float) = 0
+	}
+		SubShader{
+		Tags{ "RenderType" = "Opaque" }
+		LOD 200
+
+		CGPROGRAM
+		// Upgrade NOTE: excluded shader from OpenGL ES 2.0 because it uses non-square matrices
+		#pragma exclude_renderers gles
+		// Physically based Standard lighting model
+		#pragma surface surf Standard addshadow vertex:vert finalcolor:colorOverride
+		#pragma instancing_options procedural:setup
+		#pragma target 5.0
+		#pragma multi_compile_instancing
+
+		sampler2D _MainTex;
+		float4 _FadeEnd;
+		float _FadeRate;
+		float _BegDist;
+
+		#include "gpuinstance_includes.cginc"
+
+		struct Input
+		{
+			float2 uv_MainTex;
+			fixed4 color;
+			float3 worldPos;
+		};
+
+		void setup()
+		{
+			do_instance_setup();
+		}
+
+		void vert(inout appdata_full v, out Input o)
+		{
+			UNITY_INITIALIZE_OUTPUT(Input, o);
+			int id = get_instance_id();
+			o.color = get_instance_color(id);
+		}
+
+		void surf(Input IN, inout SurfaceOutputStandard o)
+		{
+			fixed4 c = tex2D(_MainTex, IN.uv_MainTex) * IN.color;
+			o.Albedo = c.rgb;
+			o.Alpha = c.a;
+		}
+
+		void colorOverride(Input IN, SurfaceOutputStandard o, inout fixed4 color)
+		{
+			float endDistance = distance(IN.worldPos, _WorldSpaceCameraPos);
+			endDistance = clamp((endDistance - _BegDist) * _FadeRate, 0, 1);
+			color = color * (1 - endDistance) + (IN.color * endDistance) * _FadeEnd;
+		}
+
+		ENDCG
+		}
+			FallBack "Diffuse"
+}
+```
+I still want to come up with a solution for the shadow thing, now that I know how to get the voxel's position, but unfortunately, I still can't quite figure it out, let me know if you have any luck, and thanks in advance for reading this incoherency :)
+projectBreakableAccAPI
+changed the title [-]Edit: Getting position of instance within shader[/-] [+]Edit2: Getting instance's position in shadowmap for uniform shading shader[/+] on Jul 1, 2023
+mkrebser commented on Jul 2, 2023
+mkrebser
+on Jul 2, 2023
+Owner
+More actions
+You are trying to blend out shadows based on distance?
+Don't know very much about unity's shadow/lighting model .It will probably depend on your lighting as well. Perhaps look into custom lighting models: https://docs.unity3d.com/Manual/SL-SurfaceShaderLighting.html
+I think I wrote a shader once for a voxel type game using a custom lighting model
+I believe you can also just turn off shadows for different mesh for each LOD in the mesh settings. I typically only enable shadows for like the first 2 lods
+projectBreakableAccAPI commented on Jul 7, 2023
+projectBreakableAccAPI
+on Jul 7, 2023
+Last edited by projectBreakableAccAPI
+Author
+More actions
+Thank you for the insight, my solution to the voxel's world position was the surface shader function float3 worldPos. This returns an accurate world position for the instance. I also made another shader for 3 sided cubes that always have their sides facing the camera, which was surprisingly hard, but I got it working. This question can be closed now, but I'm going to open another one because I have another question :/
+projectBreakableAccAPI
+closed this as completedon Jul 7, 2023
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

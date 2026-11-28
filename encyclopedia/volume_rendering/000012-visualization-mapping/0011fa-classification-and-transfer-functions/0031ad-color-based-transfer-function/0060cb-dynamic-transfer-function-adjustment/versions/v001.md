@@ -1,0 +1,125 @@
+# Dynamic Transfer Function Adjustment
+
+Also called: RGB Transfer Function Update
+
+## Overview
+Dynamic Transfer Function Adjustment encompasses techniques that modify volume rendering transfer functions (TFs) in response to user interaction, data statistics, or display capabilities, rather than relying on static, pre-defined mappings. It solves the problem of static TFs failing to reveal features due to mismatched ranges, poor contrast on specific hardware, or the need for intuitive, image-based editing. Unlike [Color-Based Transfer Function](6581-color-based-transfer-function.md) which defines the static mapping, this method dynamically updates the color and opacity values. It differs from [Windowing](6611-windowing.md) by often involving complex blending or perceptual remapping (e.g., JND spaces) rather than simple linear scaling, and from [Iterative Color Matching](12841-iterative-color-matching.md) by focusing on real-time feedback loops and visibility-based inference rather than optimization against a target image.
+
+## How it works
+The methods vary significantly in trigger and mechanism. They generally fall into three categories: event-driven updates, visibility-based editing, and perceptual context generation.
+
+### Inputs and Outputs
+*   **Inputs:** User selection (color picker, ROI click), data statistics (histograms, gradient magnitudes), display capabilities (JND steps), or current transfer function state.
+*   **Outputs:** Updated transfer function (color and opacity arrays), re-rendered volume image.
+
+### Data Structures
+*   **Transfer Function (TF):** Typically represented as a set of control points or a lookup table mapping data intensity $i$ to color $C_i$ and opacity $A_i$.
+*   **Relative Visibility Histogram ($H_G$):** A histogram where each bin $i$ contains the relative visibility weight of intensity $i$ within a selected Region of Interest (ROI) [S4].
+*   **JND Space:** A perceptually uniform space where steps correspond to Just Noticeable Differences in intensity [S2].
+
+### Steps and Formulas
+
+#### 1. Event-Driven RGB Update [S1, unofficial]
+This method updates the TF based on direct user input from a color selector.
+1.  Listen for input events on the color selector element.
+2.  Convert the selected hex color value to an RGBA array.
+3.  Extract numeric components $R, G, B, A$.
+4.  Add a new RGB point to the color transfer function using the alpha value $A$ as the position (intensity) and normalized $R, G, B$ as the color components.
+5.  Set the updated transfer function on the volume opacity value object.
+6.  Trigger a re-render of the WebGL scene.
+
+#### 2. Output-Driven Editing via Relative Visibility Histogram [S4]
+This method allows users to edit TFs by selecting regions in the 2D rendered image.
+1.  User selects a Region of Interest (ROI) on the rendered image.
+2.  Compute the global visibility histogram for the volume and the local visibility histogram for the ROI.
+3.  Calculate the Relative Visibility Histogram $H_G(i)$ for the selected ROI. $H_G(i)$ represents the relative visibility of intensity $i$ within the ROI.
+4.  Update the color $C_i$ and opacity $A_i$ for each intensity $i$ in the transfer function using the following blending formulas:
+
+    $$
+    C_i = \begin{cases} 
+    C_i + H_G(i)(C_s - C_i) & \text{if } H_G(i) > 0 \\
+    C_i & \text{otherwise}
+    \end{cases}
+    $$
+
+    $$
+    A_i = \begin{cases} 
+    A_i + H_G(i)(1 - A_i) & \text{if } H_G(i) > 0 \\
+    A_i - H_G(i)(0 - A_i) & \text{otherwise}
+    \end{cases}
+    $$
+
+    Where:
+    *   $C_s$ is the user-selected target color.
+    *   $C_i$ is the original color of intensity $i$.
+    *   $A_i$ is the original alpha (opacity) of intensity $i$.
+    *   $H_G(i)$ is the relative visibility at intensity $i$.
+
+    *Note: Color and alpha blending can be applied separately [S4].*
+
+#### 3. JND Space Context Generation [S2]
+This method reserves JND steps for spatial context (background) and focus (selected data) to enhance contrast on HDR displays.
+1.  Take a user-provided transfer function that segments the object of interest (non-zero) and sets other regions to 0.
+2.  Linearly map all non-zero entries of the old transfer function to JND steps reserved for focus (e.g., range 400...962).
+3.  Replace the previously zeroed-out regions with piecewise linear segments that map gradient magnitude values to the range reserved for context (e.g., 0...400).
+4.  Render using the adjusted TF.
+
+#### 4. Dynamic Projections [S3]
+This method transitions between subspace views (e.g., PCA) and updates the TF dynamically to highlight features captured by the current subspace.
+1.  Transition dynamically between different subspace views.
+2.  Update the transfer function during transitions to highlight features specific to the current subspace.
+3.  Render the volume.
+
+#### 5. Sampler Re-initialization [S5, unofficial]
+In some frameworks (e.g., yt), updating the transfer function requires re-triggering the sampler creation machinery.
+1.  Assign the new transfer function to the source's hidden attribute: `source._transfer_function = mv`.
+2.  Call `source.set_sampler(cam)` to trigger sampler creation and update the internal transfer function reference.
+
+### Parameters
+*   **Context Threshold (JND):** The number of JND steps reserved for context. For a projector-based HDR display, 400 JNDs were used for context (0...400) and 562 for focus (400...962) [S2].
+*   **Target Color ($C_s$):** The color selected by the user for blending [S4].
+*   **Transition Points:** The number of points used for smooth animated transitions in dynamic projections, constrained by hardware [S3].
+
+### Edge Cases and Pitfalls
+*   **Display Dependency:** The threshold for context (e.g., 400 JNDs) depends on the specific display's contrast and intensity range [S2].
+*   **Hardware Limits:** Hardware capacities limit the size of raw volumetric data and the number of points for smooth animated transitions [S3].
+*   **Blending Order:** Color and alpha blending operations can be applied separately, allowing independent control but requiring careful management of visual artifacts [S4].
+*   **Implementation Specifics:** In some libraries, simply assigning the TF is insufficient; the sampler must be explicitly re-initialized [S5, unofficial].
+
+## Subtopics
+
+### [Color Transfer Function Rescaling](22490-color-transfer-function-rescaling.md)
+Color Transfer Function Rescaling adjusts the color and opacity transfer functions to match the range of values present in the visible data elements (cells or points). This operation maps the full spectrum of available colors to the currently visible data, which can reveal patterns that were previously obscured by a mismatched transfer function range. It differs from static transfer function editing by dynamically adapting the mapping to the data's statistical extent rather than relying on fixed user-defined bounds.
+
+### JND Space Context Generation
+A technique to reserve a portion of the displayable JND steps for spatial context (background/unselected data) while reserving the remaining steps for the focus (selected data), using gradient magnitude to define context boundaries [S2]. It is chosen when rendering on High Dynamic Range (HDR) displays to enhance the perception of depth and detail in selected features while maintaining navigational context. It relies on perceptually uniform spaces (JNDs) rather than linear intensity mappings.
+
+### Dynamic Projections
+A method to transition dynamically between different subspace views (e.g., PCA to subspace, or subspace to subspace) and update the transfer function dynamically during transitions to highlight features captured by the current subspace [S3]. It is chosen for multivariate volume visualization where different features are best revealed in different projected subspaces. It requires sufficient hardware capacity to handle the number of points for smooth animated transitions.
+
+### Output-driven Transfer Function Editing
+A low-level, iterative editing technique where users apply color and alpha changes to specific intensity ranges in the transfer function, analogous to a paintbrush tool. It relies on the speed of the blending process and allows users to change opacity and colors without directly manipulating the TF controls [S4]. It is chosen for intuitive, real-time editing of volume visualizations.
+
+### Output-Driven Color and Alpha Editing
+A technique to modify transfer function colors and opacities based on user selection in the 2D rendered image, using the Relative Visibility Histogram (HG) as a weighting function to blend target values with original TF values [S4]. Unlike direct TF manipulation, this method allows users to edit features by selecting them in the 2D image, inferring the 3D selection via visibility weighting, making it more intuitive. It is chosen when users prefer image-based interaction over parameter-space manipulation.
+
+### Sampler Re-initialization for Modified Transfer Functions
+A procedural step required in certain volume rendering frameworks (e.g., yt) to apply a modified transfer function. It involves assigning the new transfer function to the source's hidden attribute and calling the sampler creation machinery to update the internal reference [S5, unofficial]. It is chosen when the rendering engine does not automatically detect changes to the transfer function object.
+
+## Operating characteristics
+*   **Time Complexity:** Output-driven editing using visibility histograms requires computing global and local visibility histograms, which can be expensive if done naively, but GPU implementations (CUDA) achieve real-time performance (30-40 fps) [S4]. Dynamic projections involve subspace clustering which incurs $O(m^2 d)$ time and $O(m^2)$ memory for the affinity matrix, where $m$ is the number of samples and $d$ is the data dimension [S3].
+*   **Memory Complexity:** Depends on the resolution of the visibility histograms and the size of the transfer function. Subspace clustering requires significant memory for the affinity matrix [S3].
+*   **Performance:** Real-time performance (30-40 fps) has been achieved on hardware such as Intel Xeon E3-1246 v3 CPU and NVIDIA Quadro K4200 GPU using CUDA implementations [S4].
+*   **Strengths:** Intuitive user interaction (image-based editing), enhanced perceptual quality on HDR displays (JND context), dynamic feature highlighting (subspace projections).
+*   **Limitations:** Hardware constraints on data size and transition smoothness [S3], display-dependent parameters for JND context [S2], potential for visual artifacts if blending is not managed carefully [S4].
+*   **When to Use:** When static TFs fail to reveal features, when using HDR displays, or when users prefer direct manipulation of the rendered image rather than abstract parameter controls.
+
+## Background
+Dynamic Transfer Function Adjustment has evolved from static TF definition methods to interactive and adaptive techniques. Early work focused on static mappings, but the need for real-time interaction led to methods like Output-driven Editing [S4]. The use of perceptually uniform spaces (JNDs) for HDR displays was introduced by Ghosh et al. [S2]. Dynamic Projections for multivariate data were explored to handle complex subspace relationships [S3]. Framework-specific implementations, such as those in yt, highlight the need for proper sampler re-initialization [S5, unofficial].
+
+## Sources
+[S1] mohammed-abo-arab/3D_WebGL_VolumeRendering, https://github.com/mohammed-abo-arab/3D_WebGL_VolumeRendering, fetched 2026-10-27 (unofficial)
+[S2] Volume Rendering for High Dynamic Range Displays, https://vccimaging.org/Publications/Ghosh2005VRH/Ghosh2005VRH.pdf, fetched 2026-10-27
+[S3] Multivariate volume visualization through dynamic projections, https://doi.org/10.1109/ldav.2014.7013202, fetched 2026-10-26
+[S4] Intuitive Transfer Function Editing Using Relative Visibility Histograms, https://doi.org/10.24132/jwscg.2018.26.1.6, fetched 2026-10-26
+[S5] Volume rendering colormap is not directly exposed, https://github.com/yt-project/yt/issues/2804, fetched 2026-10-27 (unofficial)

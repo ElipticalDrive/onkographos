@@ -1,0 +1,167 @@
+--- v004.md
++++ v005.md
+@@ -1,79 +1,80 @@
+ # Text Embedding Generation with Directional Views
++
++
+ ## Overview
+-This method generates text embeddings for 3D Gaussian Splatting by encoding language prompts into latent vectors using a frozen CLIP text encoder [S1, unofficial]. It distinguishes itself from standard text embedding by appending directional view descriptors (e.g., "front", "side") to the prompt, allowing the system to associate specific semantic concepts with specific camera viewpoints [S1, unofficial][S2]. This enables directional-dependent rendering and open-vocabulary queries that respect spatial orientation, contrasting with sibling methods like [3D Gaussian Splatting with Feature Vectors](8060-3d-gaussian-splatting-with-feature-vectors.md) and [LSeg Feature Encoding](12078-lseg-feature-encoding.md) that focus on spatial feature maps rather than language-conditioned directional prompts [S1, unofficial][S2].
++This method generates semantic text embeddings conditioned on specific camera viewpoints to enable view-dependent semantic understanding in 3D Gaussian Splatting. It solves the problem of static semantic representations by appending directional view descriptors to text prompts before encoding, allowing the system to distinguish between different perspectives of the same object [S1, unofficial][S2]. Unlike standard text encoding which produces a single static embedding per prompt, this approach generates a set of directional embeddings (e.g., front, side, back) that can be used to modulate features or guide optimization based on the current camera position [S1, unofficial][S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A base text prompt string (e.g., "a red car") and a set of directional view identifiers.
+-*   **Output:** A dictionary of tensors mapping keys (`'pos'`, `'neg'`, `'front'`, `'side'`, `'back'`) to embedding tensors of shape `[1, 77, 768]` (batch size 1, sequence length 77, embedding dimension 768) [S1, unofficial].
++*   **Input:** A base text prompt string (e.g., "a chair"), a list of directional view descriptors, and a pre-trained frozen CLIP text encoder.
++*   **Output:** A dictionary mapping directional keys to tensor embeddings of shape `[1, 77, 768]` (batch size 1, sequence length 77, embedding dimension 768) [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `self.embeddings`: A dictionary storing the pre-computed embeddings.
+-*   `self.tokenizer`: The CLIP tokenizer instance.
+-*   `self.text_encoder`: The frozen CLIP text encoder instance.
++*   `self.embeddings`: A dictionary where keys are strings (`'pos'`, `'neg'`, `'front'`, `'side'`, `'back'`) and values are PyTorch tensors of shape `[1, 77, 768]` [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Base Encoding:** Tokenize the base prompt with padding to the maximum sequence length (`model_max_length`, typically 77 for CLIP) [S1, unofficial].
+-2.  **Encode Base:** Pass the token IDs through the frozen text encoder to obtain the base embedding [S1, unofficial].
+-3.  **Directional Encoding:** For each directional view $d$ in the set $\{'front', 'side', 'back'\}$:
+-    a. Construct the directional prompt by appending `', {d} view'` to the base prompt [S1, unofficial].
+-    b. Tokenize and encode this new prompt.
+-    c. Store the result in `self.embeddings` under the key $d$ [S1, unofficial].
+-4.  **Storage:** Store all resulting tensors in `self.embeddings` [S1, unofficial].
++1.  **Initialize Tokenizer and Encoder:** Load a pre-trained CLIP text tokenizer and text encoder. The encoder is frozen (no gradients computed) [S1, unofficial].
++2.  **Define Directional Suffixes:** Identify the set of directional views to encode. Common views include `'front'`, `'side'`, `'back'` [S1, unofficial]. For forward-facing scenes (e.g., LLFF dataset), `'top-down'` may be excluded [S2].
++3.  **Construct Prompts:** For each directional view $d$ in the set of views, construct a new prompt string by appending the view descriptor to the base prompt. The format is typically `"{base_prompt}, {d} view"` [S1, unofficial][S2].
++    *   Example: If base prompt is "a chair" and $d$ is "front", the prompt becomes "a chair, front view" [S1, unofficial].
++4.  **Tokenize:** Tokenize each constructed prompt using the CLIP tokenizer.
++    *   Apply padding to `max_length` (typically 77 for CLIP) [S1, unofficial].
++    *   Return tensors in PyTorch format [S1, unofficial].
++5.  **Encode:** Pass the token IDs through the frozen CLIP text encoder.
++    *   Extract the last hidden state or pooled output as the embedding [S1, unofficial].
++    *   Store the resulting tensor in `self.embeddings` under the key corresponding to the view $d$ [S1, unofficial].
++6.  **Store Embeddings:** Save the computed embeddings in `self.embeddings` for later retrieval during rendering or optimization [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def generate_directional_embeddings(self, base_prompt: str):
+-    """
+-    Generates text embeddings for a base prompt and its directional variants.
+-    """
+-    # 1. Tokenize base prompt
+-    inputs = self.tokenizer(
+-        base_prompt,
+-        padding="max_length",
+-        max_length=self.tokenizer.model_max_length,
+-        return_tensors="pt"
+-    )
+-    
+-    # 2. Encode base prompt
+-    base_embeddings = self.text_encoder(inputs.input_ids.to(self.device))[0]
+-    
+-    # Store base embeddings under 'pos' (positive) key
+-    self.embeddings['pos'] = base_embeddings
+-    
+-    # Initialize negative prompt embeddings to zeros [G]
+-    self.embeddings['neg'] = torch.zeros_like(base_embeddings)
+-    
+-    # Define directional views
+-    directions = ['front', 'side', 'back']
+-    
+-    # 3. Encode directional variants
+-    for d in directions:
+-        # Construct directional prompt
+-        directional_prompt = f"{base_prompt}, {d} view"
+-        
+-        # Tokenize
+-        dir_inputs = self.tokenizer(
+-            directional_prompt,
+-            padding="max_length",
+-            max_length=self.tokenizer.model_max_length,
+-            return_tensors="pt"
+-        )
+-        
+-        # Encode
+-        dir_embeddings = self.text_encoder(dir_inputs.input_ids.to(self.device))[0]
+-        
+-        # Store
+-        self.embeddings[d] = dir_embeddings
++import torch
++from transformers import CLIPTextModel, CLIPTokenizer
++
++class DirectionalTextEmbedder:
++    def __init__(self, base_prompt, device="cuda"):
++        self.base_prompt = base_prompt
++        self.device = device
++        self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
++        self.text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14").to(device)
++        self.text_encoder.eval() # Freeze encoder
++        self.embeddings = {}
++        self.directions = ['front', 'side', 'back'] # Default directions [S1, unofficial]
++
++    def encode(self):
++        """Encode base prompt and all directional variants."""
++        # Encode base prompt (optional, often used as 'pos' or default)
++        base_inputs = self.tokenizer(self.base_prompt, padding="max_length", max_length=77, return_tensors="pt")
++        with torch.no_grad():
++            base_embeds = self.text_encoder(base_inputs.input_ids.to(self.device))[0]
++        self.embeddings['pos'] = base_embeds
++
++        # Encode directional views
++        for direction in self.directions:
++            # Construct prompt: "{base_prompt}, {direction} view" [S1, unofficial][S2]
++            prompt = f"{self.base_prompt}, {direction} view"
++            inputs = self.tokenizer(prompt, padding="max_length", max_length=77, return_tensors="pt")
++            
++            with torch.no_grad():
++                # Get embeddings [S1, unofficial]
++                embeddings = self.text_encoder(inputs.input_ids.to(self.device))[0]
++            
++            self.embeddings[direction] = embeddings
++
++    def get_embedding(self, direction):
++        """Retrieve embedding for a specific direction."""
++        if direction in self.embeddings:
++            return self.embeddings[direction]
++        else:
++            raise ValueError(f"Direction {direction} not encoded. Available: {list(self.embeddings.keys())}")
+ ```
+ 
+ **Parameters:**
+-*   `model_max_length`: 77 (standard for CLIP) [S1, unofficial].
+-*   `embedding_dimension`: 768 (standard for CLIP ViT-L/14) [S1, unofficial].
+-*   `directions`: `['front', 'side', 'back']` [S1, unofficial].
++*   `max_length`: Sequence length for tokenization. Default is 77 for CLIP [S1, unofficial].
++*   `directions`: List of view descriptors. Default `['front', 'side', 'back']` [S1, unofficial]. For forward-facing scenes, use `['top-down', 'front', 'side']` [S2].
+ 
+-**Edge Cases:**
+-*   **Forward-facing scenes:** For datasets like LLFF, the "back" view may be invalid or irrelevant. In such cases, the "back" prompt is omitted, and only `['top-down', 'front', 'side']` are used [S2].
+-*   **Device Mismatch:** Ensure `input_ids` are moved to the same device as the text encoder to avoid runtime errors [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Precision:** Use `torch.no_grad()` during encoding to save memory and prevent unnecessary gradient computation through the frozen encoder [S1, unofficial].
++*   **Boundaries:** Ensure the tokenizer's `max_length` matches the encoder's expected input sequence length (77 for standard CLIP) [S1, unofficial].
++*   **Degenerate Input:** If the base prompt is empty, the resulting embeddings may be semantically meaningless. Validate input prompts [G].
+ 
+ ## Subtopics
+@@ -83,14 +84,16 @@
+ 
+ ### Directional Dependent Prompts
+-This variant concatenates a text prompt to the input caption depending on the camera location in the scene at each iteration [S2]. The prompts used are: `', top-down view'`, `', front view'`, `', side view'`, and `', back view'` [S2]. For forward-facing scenes like the LLFF dataset, only the first three captions (`top-down`, `front`, `side`) are used [S2]. This allows the model to adapt its semantic understanding based on the current viewing angle during training or rendering [S2].
++This variant concatenates a text prompt to the input caption depending on the camera location in the scene at each iteration [S2]. It uses specific direction prompts such as `", top-down view"`, `", front view"`, `", side view"`, and `", back view"` [S2]. For forward-facing scenes like the LLFF dataset, only the first three captions (`top-down`, `front`, `side`) are used [S2]. This allows the semantic representation to adapt dynamically to the viewing angle during optimization [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of directional views $N_d$ [G]. Encoding is performed once per prompt update or initialization [G].
+-*   **Memory Complexity:** $O(N_d \cdot L \cdot D)$, where $N_d$ is the number of directions, $L$ is sequence length (77), and $D$ is embedding dimension (768) [G]. For 4 directions, this is negligible compared to Gaussian attributes [G].
+-*   **Strengths:** Enables spatially aware text queries; simple to implement using existing CLIP libraries [G].
+-*   **Limitations:** Requires pre-defining view directions; does not inherently handle arbitrary continuous viewpoints without interpolation or additional training [G].
++*   **Time Complexity:** Encoding is performed once per prompt/direction set. The cost is dominated by the CLIP text encoder inference, which is negligible compared to 3DGS rendering but scales linearly with the number of directional views [S1, unofficial][S2].
++*   **Memory Complexity:** Stores one embedding tensor per direction. For CLIP, this is $N_{views} \times 1 \times 77 \times 768 \times 4$ bytes (float32). For 4 views, this is approximately 96 KB, which is minimal [S1, unofficial].
++*   **Strengths:** Enables view-dependent semantic queries and optimization. Simple to implement using standard CLIP libraries [S1, unofficial][S2].
++*   **Limitations:** Relies on the semantic quality of the underlying CLIP model. Does not handle occlusion or partial visibility explicitly; it assumes the directional view is visible [G].
++*   **When to use:** When view-dependent semantics are required, such as in open-vocabulary segmentation or view-specific style transfer [S1, unofficial][S2].
++*   **When not to use:** When computational resources are extremely constrained and semantic conditioning is not needed [G].
+ 
+ ## Background
+-Developed in the context of Blended-NeRF [S2] and implemented in repositories such as dreamgaussian [S1, unofficial], this method leverages the pre-trained CLIP model to bridge 3D geometry and natural language. It was developed to support zero-shot object generation and blending in neural radiance fields and Gaussian splatting contexts, allowing users to query 3D scenes using text that respects camera orientation [S1, unofficial][S2].
++The method originates from the integration of CLIP-based text embeddings into 3D Gaussian Splatting frameworks. DreamGaussian introduced the basic mechanism of encoding text prompts into latent embeddings for 3D generation [S1, unofficial]. Blended-NeRF extended this by introducing directional-dependent prompts to improve view consistency and semantic alignment in NeRF-based generation [S2]. The technique has since been adapted for Gaussian Splatting to support open-vocabulary queries and view-dependent feature modulation [S1, unofficial][S2].
+ 
+ ## Sources

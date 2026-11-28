@@ -1,0 +1,99 @@
+# Load Balancing Strategy for Multicomputer Volume Rendering
+
+Also called: Dynamic tile assignments, Preferred tile-node pairing
+
+## Overview
+This method minimizes the maximum completion time (makespan) of distributed volume rendering tasks across identical nodes by using predicted rendering times to guide task assignment [S1, unofficial]. It distinguishes itself from static distribution methods by dynamically assigning tasks based on computational cost estimates [S1, unofficial], while explicitly optimizing for data locality through preferred tile-node pairing and constrained view positions [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs**: A set of visualization tasks $V$, where each task $v$ is defined by volume data, camera pose, and transfer function [S1, unofficial]. A set of $N$ identical computing nodes [S1, unofficial]. Predicted rendering times $t(v)$ for each task [S1, unofficial].
+*   **Outputs**: An assignment map $A: N \rightarrow V$ mapping nodes to tasks, and the resulting rendered images [S1, unofficial].
+
+**Data Structures**
+*   **Task List**: A list of tasks $V$, each containing metadata (volume ID, pose ID, transfer function ID) and a predicted time $t(v)$ [S1, unofficial].
+*   **Node State**: For each node $n \in N$, a current load accumulator $L_n$ initialized to $0$ [G].
+
+**Numbered Steps**
+1.  **Estimate Rendering Time**: Calculate the predicted rendering time $t(v)$ for every task $v \in V$ using a learning-based model or historical data [S1, unofficial].
+2.  **Sort Tasks**: Sort the set of tasks $V$ in descending order of their estimated rendering times $t(v)$ [S1, unofficial].
+3.  **Initialize Nodes**: Initialize the load $L_n = 0$ for all nodes $n \in N$ [G].
+4.  **Assign Tasks**: Iterate through the sorted tasks [S1, unofficial]. For each task $v$:
+    a. Identify the node $n^*$ with the currently minimum total load $L_{n^*} = \min_{n \in N} L_n$ [S1, unofficial].
+    b. Assign task $v$ to node $n^*$, updating the load: $L_{n^*} \leftarrow L_{n^*} + t(v)$ [S1, unofficial].
+    c. Apply **Preferred Tile-Node Pairing**: Constrain the assignment to nodes that already hold the relevant volume data or tiles to optimize data locality [S2, unofficial].
+5.  **Constrain View Positions**: Ensure that the sequence of camera poses assigned to a node maintains effective load balancing, potentially restricting view positions to avoid clustering high-cost poses on single nodes [S2, unofficial].
+
+**Formulas**
+The objective is to minimize the maximum load across all nodes:
+$$ \min_{A: N \rightarrow V} \left( \max_{n \in N} \sum_{v \in A(n)} t(v) \right) $$
+Where:
+*   $N$ is the set of nodes [S1, unofficial].
+*   $V$ is the set of visualization tasks [S1, unofficial].
+*   $t(v)$ is the predicted rendering time for task $v$ [S1, unofficial].
+*   $A(n)$ is the set of tasks assigned to node $n$ [S1, unofficial].
+
+**Parameters**
+*   $N$: Number of identical machines (nodes). Typical values in experiments range from small clusters to large-scale systems [S1, unofficial].
+*   $V$: Set of tasks. In the reference experiment, $V$ consisted of 384 tasks (6 time steps $\times$ 64 camera poses) [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Prediction Accuracy**: If $t(v)$ is inaccurate, the load balance degrades [S1, unofficial].
+*   **NP-Hardness**: The optimal assignment problem is NP-hard even for identical machines, necessitating a greedy approach [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def load_balance_volume_rendering(tasks, nodes):
+    """
+    tasks: List of dicts with keys 'id', 'volume', 'pose', 'tf', 'predicted_time'
+    nodes: List of node objects with attribute 'current_load'
+    Returns: List of assignments (node_index, task_id)
+    """
+    # Step 1 & 2: Sort tasks by predicted time descending
+    sorted_tasks = sorted(tasks, key=lambda t: t['predicted_time'], reverse=True)
+    
+    assignments = []
+    
+    # Step 3: Initialize loads (assumed done in node objects)
+    
+    for task in sorted_tasks:
+        # Step 4a: Find node with minimum load
+        min_node_idx = min(range(len(nodes)), key=lambda i: nodes[i].current_load)
+        target_node = nodes[min_node_idx]
+        
+        # Step 4b: Assign and update load
+        target_node.current_load += task['predicted_time']
+        assignments.append((min_node_idx, task['id']))
+        
+        # Step 4c & 5: Preferred tile-node pairing and view position constraints 
+        # are applied during assignment if data locality or pose clustering must be enforced [S2, unofficial].
+        
+    return assignments
+```
+
+## Subtopics
+
+### Dynamic Tile Assignments
+A technique where screen tiles are dynamically mapped to nodes based on current load and data availability, preventing static bottlenecks [S2, unofficial]. It sets itself apart from static tile mapping by adapting to runtime workload variations [S2, unofficial]. Choose it when rendering costs vary significantly across the image plane [S2, unofficial]. See [Scalable Distributed Volume Rendering (SDVR)](863-scalable-distributed-volume-rendering-sdvr.md).
+
+### Preferred Tile-Node Pairing
+A strategy that binds specific spatial tiles to specific nodes to minimize data redistribution, enhancing data locality at the potential cost of perfect computational balance [S2, unofficial]. It sets itself apart from round-robin or uniform distribution by prioritizing data placement over pure compute balance [S2, unofficial]. Choose it when network bandwidth is limited or data replication is expensive [S2, unofficial]. See [MPI Volume Rendering (1D/2D Decomposition)](2249-mpi-volume-rendering-1d-2d-decomposition.md).
+
+## Operating characteristics
+*   **Time Complexity**: Not given in the sources.
+*   **Memory Complexity**: Not given in the sources.
+*   **Measured Performance**: In experiments with 384 tasks, ENTIRE-based prediction incurred less than 4% additional cost compared to Ground Truth (GT) predictions for large $N$, whereas Uniform assignment suffered nearly 20% overhead [S1, unofficial].
+*   **Scaling**: As $N$ increases, load imbalance grows for both ENTIRE and Uniform relative to the GT baseline, and the relative difference from GT increases with $N$ for both methods [S1, unofficial].
+*   **Strengths**: High accuracy in balancing load when predictions are good; reduces idle time significantly compared to uniform distribution [S1, unofficial].
+*   **Limitations**: Relies heavily on the accuracy of $t(v)$; prediction errors can lead to imbalance [S1, unofficial].
+*   **When to Use**: Large-scale distributed rendering with variable-cost tasks (e.g., varying camera poses or transfer functions) where prediction models are available [S1, unofficial].
+*   **When Not to Use**: Not given in the sources.
+
+## Background
+This strategy is based on the ENTIRE method, which uses learning-based volume rendering time prediction to guide load balancing [S1, unofficial]. It builds on the general taxonomy of volume rendering algorithms for multicomputers, which emphasizes dynamic tile assignments and preferred tile-node pairing for effective load balancing [S2, unofficial]. The approach addresses the NP-hard nature of optimal task assignment by using the Longest Processing Time First (LPT) greedy algorithm [S1, unofficial].
+
+## Sources
+[S1] ENTIRE: Learning-based Volume Rendering Time Prediction, https://doi.org/10.48550/arxiv.2501.12119, fetched 2026-10-26 (unofficial)
+[S2] DTIC ADA236632: Taxonomy and Algorithms for Volume Rendering on Multicomputers, https://archive.org/details/DTIC_ADA236632, fetched 2026-10-26 (unofficial)

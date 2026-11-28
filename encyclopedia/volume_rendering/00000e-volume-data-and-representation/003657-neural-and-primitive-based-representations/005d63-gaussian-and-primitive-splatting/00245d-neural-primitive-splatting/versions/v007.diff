@@ -1,0 +1,153 @@
+--- v006.md
++++ v007.md
+@@ -14,10 +14,10 @@
+ Each primitive $P_i$ is defined by [S1, unofficial]:
+ 1.  **Geometry:** An ellipsoid bounding volume $B$ specified by:
+-    *   Center $\mathbf{x}_B \in \mathbb{R}^3$
+-    *   Scaling vector $\mathbf{s}_B \in \mathbb{R}^3$ along principal axes
+-    *   Rotation quaternion $\mathbf{q}_B \in \mathbb{R}^4$
++    *   Center $\mathbf{x}_B \in \mathbb{R}^3$ [S1, unofficial].
++    *   Scaling vector $\mathbf{s}_B \in \mathbb{R}^3$ along principal axes [S1, unofficial].
++    *   Rotation quaternion $\mathbf{q}_B \in \mathbb{R}^4$ [S1, unofficial].
+ 2.  **Neural Density Field:** A shallow neural network $f_\sigma$ with one hidden layer of width $N_\sigma$ [S1, unofficial].
+-    *   Weights $W_1 \in \mathbb{R}^{N_\sigma \times 3}$, $W_2 \in \mathbb{R}^{1 \times N_\sigma}$
+-    *   Biases $\mathbf{b}_1 \in \mathbb{R}^{N_\sigma}$, $b_2 \in \mathbb{R}$
++    *   Weights $W_1 \in \mathbb{R}^{N_\sigma \times 3}$, $W_2 \in \mathbb{R}^{1 \times N_\sigma}$ [S1, unofficial].
++    *   Biases $\mathbf{b}_1 \in \mathbb{R}^{N_\sigma}$, $b_2 \in \mathbb{R}$ [S1, unofficial].
+     *   Total parameters per primitive: 99 (with $N_\sigma=8$) [S1, unofficial].
+ 
+@@ -43,5 +43,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Division by Zero:** In the antiderivative formula, $W_1(\mathbf{d})$ could be zero. The sources do not specify a guard for this division [G]. Implementers should add a small epsilon or check for zero vectors in $W_1(\mathbf{d})$ to prevent NaNs.
++*   **Division by Zero:** In the antiderivative formula, $W_1(\mathbf{d})$ could be zero. The sources do not specify a guard for this division [G]. Implementers should add a small epsilon or check for zero vectors in $W_1(\mathbf{d})$ to prevent NaNs [G].
+ *   **Normalization:** The source text writes $\|\mathbf{x}_B\|_\infty$ in the denominator of Eq. 5, but explicitly states normalization is by $\mathbf{x}_B$ and $\mathbf{s}_B$ to ensure a centered and uniformly scaled domain [S1, unofficial]. Implementers should normalize the input coordinate by the ellipsoid's scale $\mathbf{s}_B$ (element-wise division) [G].
+ 
+@@ -50,43 +50,22 @@
+ ```python
+ import torch
+-import math
+ 
+-def compute_antiderivative(t, o, d, W1, W2, b1, b2, omega0):
++def compute_antiderivative(t, o_norm, d_norm, W1, W2, b1, b2, omega0):
+     """
+-    Computes the closed-form antiderivative S(t; o, d) for the neural density field.
+-    
+-    Args:
+-        t: torch.Tensor, scalar or array of t values.
+-        o: torch.Tensor, ray origin (3,).
+-        d: torch.Tensor, ray direction (3,).
+-        W1: torch.Tensor, weight matrix (N_sigma, 3).
+-        W2: torch.Tensor, weight vector (N_sigma,).
+-        b1: torch.Tensor, bias vector (N_sigma,).
+-        b2: torch.Tensor, scalar bias.
+-        omega0: float, frequency multiplier.
+-        
+-    Returns:
+-        torch.Tensor, scalar antiderivative value.
++    Computes the closed-form antiderivative S(t; o, d) for the normalized neural density field.
++    o_norm and d_norm are the ray origin and direction in the primitive's normalized space.
+     """
+-    # Compute linear term inside sin: omega0 * (t * W1(d) + W1(o) + b1)
+-    W1_d = torch.matmul(W1, d)
+-    W1_o = torch.matmul(W1, o)
++    W1_d = torch.matmul(W1, d_norm)
++    W1_o = torch.matmul(W1, o_norm)
+     
+     linear_term = omega0 * (t * W1_d + W1_o + b1)
+-    
+-    # Compute sine
+     sin_term = torch.sin(linear_term)
+     
+-    # Compute coefficient: W2 / (omega0 * W1(d))
+-    # Elementwise division. Guard against zero in denominator.
+     denom = omega0 * W1_d
+-    # [G] Add epsilon to prevent division by zero
++    # [G] Guard against division by zero
+     denom = torch.where(denom == 0, torch.tensor(1e-8, device=denom.device), denom)
+-    coeff = W2 / denom
+     
+-    # Result: dot(W2, sin_term / denom) + t * b2
+-    # The source formula implies elementwise division followed by summation/dot product to yield a scalar.
++    # Elementwise division followed by dot product with W2 to yield a scalar
+     result = torch.dot(W2, sin_term / denom) + t * b2
+-    
+     return result
+ 
+@@ -94,31 +73,13 @@
+     """
+     Renders a single neural primitive for a given ray.
+-    
+-    Args:
+-        ray_o: torch.Tensor, ray origin (3,).
+-        ray_d: torch.Tensor, ray direction (3,).
+-        prim_center: torch.Tensor, ellipsoid center (3,).
+-        prim_scale: torch.Tensor, ellipsoid scale (3,).
+-        prim_quat: torch.Tensor, ellipsoid rotation quaternion (4,).
+-        W1, W2, b1, b2: torch.Tensor, network weights.
+-        omega0: float, frequency multiplier.
+-        
+-    Returns:
+-        alpha: float, opacity contribution.
+     """
+-    # 1. Analytic line-ellipsoid intersection
+-    # Transform ray to ellipsoid local space
++    # 1. Transform ray to ellipsoid local space for intersection
+     R = quat_to_rot_matrix(prim_quat)
+-    
+-    # Ray in local space
+     o_local = R.T @ (ray_o - prim_center)
+     d_local = R.T @ ray_d
+     
+-    # Ellipsoid equation: (x/sx)^2 + (y/sy)^2 + (z/sz)^2 = 1
+-    # Ray: o_local + t * d_local
+-    # Solve quadratic for t
++    # 2. Analytic line-ellipsoid intersection in local space
+     S_inv = 1.0 / prim_scale
+     S_inv2 = S_inv * S_inv
+-    
+     a = torch.dot(d_local, S_inv2 * d_local)
+     b = 2.0 * torch.dot(o_local, S_inv2 * d_local)
+@@ -126,5 +87,4 @@
+     
+     discriminant = b*b - 4*a*c
+-    
+     if discriminant < 0:
+         return 0.0
+@@ -134,19 +94,21 @@
+     t_out = (-b + sqrt_disc) / (2*a)
+     
+-    # Ensure t_in and t_out are positive (ray direction)
+     if t_out < 0:
+         return 0.0
+     if t_in < 0:
+-        t_in = t_out # Ray starts inside
++        t_in = t_out
+         
+-    # 2. Compute density integral using antiderivative
+-    # S(t_out) - S(t_in)
+-    S_out = compute_antiderivative(t_out, ray_o, ray_d, W1, W2, b1, b2, omega0)
+-    S_in = compute_antiderivative(t_in, ray_o, ray_d, W1, W2, b1, b2, omega0)
++    # 3. Transform ray to normalized space for neural field evaluation
++    # Normalization by center and scale as per Eq. 5
++    o_norm = (ray_o - prim_center) / prim_scale
++    d_norm = ray_d / prim_scale
++    
++    # 4. Compute density integral using antiderivative
++    S_out = compute_antiderivative(t_out, o_norm, d_norm, W1, W2, b1, b2, omega0)
++    S_in = compute_antiderivative(t_in, o_norm, d_norm, W1, W2, b1, b2, omega0)
+     
+     alpha_hat = S_out - S_in
+     
+-    # 3. Compute splatting kernel alpha
+-    # alpha = 1 - exp(-max(0, alpha_hat))
++    # 5. Compute splatting kernel alpha
+     alpha_hat_clamped = torch.clamp(alpha_hat, min=0.0)
+     alpha = 1.0 - torch.exp(-alpha_hat_clamped)
+@@ -171,5 +133,5 @@
+ *   **Limitations:** Slower training convergence than Gaussian-based methods due to the complex optimization landscape of neural fields, requiring 100k training iterations [S1, unofficial].
+ *   **When to use:** Novel-view synthesis on synthetic (Synthetic NeRF) and real datasets (Mip-NeRF360, Tanks & Temples, Deep Blending) where compactness and accuracy are prioritized [S1, unofficial].
+-*   **When not to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources [S1, unofficial].
+ 
+ ## Background

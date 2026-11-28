@@ -1,0 +1,71 @@
+# Environment Rendering Setup
+
+Also called: Daytime Lighting System, Sky and Fog Configuration
+
+## Overview
+Configures the global lighting, atmospheric fog, and shadow parameters for a bright, saturated daytime look, typically targeting mobile-specific quality adjustments [S1, unofficial]. It sets up the sky dome, directional sun, hemisphere light, and fog density, distinct from sibling methods like [SkyboxRendering](2619-skyboxrendering.md) which use pre-rendered cubemaps, or [Background Rendering](5042-background-rendering.md) which handles static backdrops without volumetric interaction.
+
+## How it works
+**Inputs:** Scene object, camera object, platform type (mobile/desktop), and optional anisotropy parameters for fog.
+**Outputs:** Configured scene with sky dome, lights, fog, and shadow settings.
+
+**Data Structures:**
+*   `Color`: 24-bit integer (0xRRGGBB) or RGB tuple.
+*   `Vector3`: Normalized direction vector $(x, y, z)$.
+*   `ShadowCamera`: Defines frustum bounds $[-H, H]$ for left/right/top/bottom, near plane $n=1$, far plane $f=260$.
+*   `Fog`: Linear or exponential height fog with near distance $d_{near}$ and far distance $d_{far}$.
+
+**Parameters:**
+*   Zenith Color: `0x2a78e0` [S1, unofficial].
+*   Horizon Color: `0xb6daf5` [S1, unofficial].
+*   Ground Color: `0xb9cfdc` [S1, unofficial].
+*   Sun Color: `0xfff2dc` [S1, unofficial].
+*   Sun Direction: $(0.36, 0.7, 0.6)$ normalized [S1, unofficial].
+*   Hemisphere Sky Color: `0xcfe4ff` [S1, unofficial].
+*   Hemisphere Ground Color: `0x8d7a5c` [S1, unofficial].
+*   Hemisphere Intensity: $1.35$ [S1, unofficial].
+*   Sun Intensity: $3.2$ [S1, unofficial].
+*   Shadow Map Size: $2048 \times 2048$ (mobile), $4096 \times 4096$ (desktop) [S1, unofficial].
+*   Shadow Camera Half-Size $H$: $32$ (mobile), $48$ (desktop) [S1, unofficial].
+*   Shadow Bias: $-0.0004$ [S1, unofficial].
+*   Shadow Normal Bias: $0.04$ [S1, unofficial].
+*   Shadow Radius (Softness): $2$ [S1, unofficial].
+*   Tone Mapping: ACES Filmic [S1, unofficial].
+*   Exposure: $1.1$ [S1, unofficial].
+*   Pixel Ratio Cap: $1.25$ (mobile), $1.5$ (desktop) [S1, unofficial].
+
+**Steps:**
+1.  **Background:** Set the scene background color to the Horizon Color (`0xb6daf5`) [S1, unofficial].
+2.  **Fog:** Configure scene fog using the Horizon Color. Set near distance $d_{near} = 70$ and far distance $d_{far} = 330$ [S1, unofficial].
+3.  **Hemisphere Light:** Create a hemisphere light with sky color `0xcfe4ff`, ground color `0x8d7a5c`, and intensity $1.35$. Add to scene [S1, unofficial].
+4.  **Sun Light:**
+    a. Create a directional light with color `0xfff2dc` and intensity $3.2$ [S1, unofficial].
+    b. Enable shadows.
+    c. Set shadow map size based on platform: $2048^2$ for mobile, $4096^2$ for desktop [S1, unofficial].
+    d. Configure shadow camera frustum: bounds $[-H, H]$ for left/right/top/bottom, near $1$, far $260$, where $H$ is $32$ (mobile) or $48$ (desktop) [S1, unofficial].
+    e. Set shadow bias parameters: bias $-0.0004$, normal bias $0.04$, radius $2$ [S1, unofficial].
+    f. Add sun light and its target to the scene [S1, unofficial].
+5.  **Sky Dome:** Create the sky dome using the `_sky()` method (which interpolates between Zenith and Horizon colors based on ray vertical component, building on [Sky Gradient](1262-sky-gradient.md)) [S1, unofficial]. Add to scene.
+6.  **Post-Processing:** Apply ACES Filmic tone mapping with exposure $1.1$ [S1, unofficial].
+7.  **Pixel Ratio:** Cap pixel ratio to $1.25$ (mobile) or $1.5$ (desktop) [S1, unofficial].
+
+**Pitfalls:**
+*   **Shadow Camera Snapping:** The shadow camera position must be snapped to whole shadow texels to prevent shadow edges from "crawling" or jittering as the camera moves. This is achieved by aligning the camera bounds to the shadow map grid [S1, unofficial].
+
+## Subtopics
+
+### Sun Radial Scattering Setup
+A configuration for controlling global fog density and color via Anisotropy and Radial blend parameters in the Environment Editor [S2]. It distinguishes between atmospheric fog (isotropic, low anisotropy) and sun radial scattering (anisotropic, high anisotropy) [S2]. The `Radial blend factor` (range 0–1) blends these components: 0.0 shows atmosphere only, 1.0 shows radial only [S2]. Anisotropy controls the directionality of light scattering [S2].
+
+## Operating characteristics
+*   **Performance:** Mobile targets $2048^2$ shadow maps and lower pixel ratios ($1.25$) for real-time performance on constrained hardware [S1, unofficial]. Desktop targets $4096^2$ maps and higher ratios ($1.5$) for quality [S1, unofficial].
+*   **Memory:** Shadow map memory scales with resolution ($2048^2$ vs $4096^2$) [S1, unofficial].
+*   **Strengths:** Provides a consistent, bright daytime look with integrated volumetric fog and shadowing [S1, unofficial].
+*   **Limitations:** Specific to mobile/desktop presets; not a general-purpose lighting solver [S1, unofficial].
+
+## Background
+Originated in the Voxel Wars project, an unofficial voxel-based game engine, providing a standardized daytime lighting setup [S1, unofficial]. The volumetric fog aspects are documented in CRYENGINE 5 documentation, linking the setup to analytical and ray-marched volumetric fog techniques [S2].
+
+## Sources
+[S1] sh1ftmaker/voxel-wars, https://github.com/sh1ftmaker/voxel-wars, fetched 2026-10-28 (unofficial)
+[S2] CRYENGINE | Documentation - Volumetric Fog, https://www.cryengine.com/docs/static/engines/cryengine-5/categories/23756816/pages/26215326, fetched 2026-10-29

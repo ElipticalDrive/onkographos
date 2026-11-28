@@ -1,0 +1,53 @@
+# SOAR-based Adaptive Refinement
+
+Also called: Lindstrom and Pascucci's SOAR algorithm adaptation
+
+## Overview
+SOAR-based Adaptive Refinement is a crack-free mesh generation scheme for adaptive subdivision of tetrahedral meshes [S1]. It solves the problem of maintaining geometric consistency during incremental refinement by storing object-space error terms and bounding spheres for "diamonds" (pairs of cousin patches) [S1]. It sets itself apart from [Mesh Refinement via Vertex Optimization](989-mesh-refinement-via-vertex-optimization.md), [Topology Change Handling](21508-topology-change-handling.md), and [Adaptive Tensor Field Segmentation via Edge-Weighted Refinement](22287-adaptive-tensor-field-segmentation-via-edge-weighted-refinem.md) by enforcing a strict nesting hierarchy where parent error/sphere values dominate children and cousins agree on shared values, ensuring globally consistent refinement decisions without full mesh reconstruction [S1].
+
+## How it works
+**Inputs:** A multiresolution volume dataset organized as a diamond hierarchy; a screenspace error tolerance threshold [S1].
+**Outputs:** A conforming tetrahedral mesh $\Sigma$ with adaptive refinement levels [S1].
+
+**Data Structures:**
+The core unit is the **diamond**, defined as two cousin patches sharing a hypotenuse [S1]. Each diamond stores an object-space error term ($E$) and a bounding sphere ($B$) [S1].
+
+**Numbered Steps:**
+1. Precompute error and sphere data for each patch during encoding [S1].
+2. For each patch, compute the initial error $E$ and bounding sphere $B$ [S1].
+3. Iterate through the hierarchy from leaves to root to inflate errors and spheres so that each parent's error/sphere is at least as large as its children's [S1].
+4. For any pair of cousin diamonds, enforce a single shared $E$ and $B$ to ensure they refine together, extending the nesting relationship to cousins [S1].
+5. Traverse the diamond hierarchy [S1].
+6. For each diamond, compare its stored object-space error $E$ against the projected screenspace error tolerance [S1].
+7. If $E$ exceeds the tolerance, mark the diamond for refinement [S1].
+8. Due to the precomputed inflation and cousin agreement, refining a diamond automatically implies the necessary refinement of its ancestors and cousins to maintain a crack-free mesh [S1].
+
+**Formulas:**
+Each patch has $V = (n + 1)(n + 2)/2$ vertices and $T = n^2$ triangles, limiting terrain dimensions to $(2mn + 1)^2$ for some non-negative integer $m$ [S1].
+
+**Parameters:**
+Screenspace error tolerance determines the threshold for refinement [S1]. Not given in the sources for typical values. Patch size parameter ($n$) defines patch geometry [S1]. Not given in the sources for typical $n$ values.
+
+**Edge Cases and Pitfalls:**
+Precision: Object-space error terms must be computed with sufficient precision to avoid false negatives in refinement decisions [G]. Boundary Conditions: The hierarchy structure imposes limits on terrain dimensions based on $n$ and $m$ [S1].
+
+## Subtopics
+
+### [Selective Refinement with Active Front](18965-selective-refinement-with-active-front.md)
+Maintains a dynamic "cut" of the refinement DAG for incremental updates. It sets itself apart from static mesh representations by separating applied modifications from those not yet applied, allowing for efficient traversal without full mesh reconstruction. Choose it when incremental extraction of partial multiresolution datasets is required.
+
+## Operating characteristics
+*   **Time Complexity:** Precomputation of error/sphere inflation is linear in the number of diamonds. Refinement traversal is proportional to the number of diamonds exceeding the threshold. Not given in the sources for exact complexity classes.
+*   **Memory Complexity:** Requires storing $E$ and $B$ for each diamond. Not given in the sources for exact memory bounds.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Guarantees crack-free meshes; efficient incremental updates; precomputed data allows fast runtime decisions [S1].
+*   **Limitations:** Precomputation overhead; limited terrain dimensions based on patch size [S1].
+*   **When to use:** When crack-free adaptive refinement is required for multiresolution volume data [S1].
+*   **When not to use:** When dynamic mesh topology changes are frequent and precomputation is prohibitive. Not given in the sources.
+
+## Background
+The method is based on Lindstrom and Pascucci's SOAR algorithm [S1]. It is used in the context of on-the-fly decompression and rendering of multiresolution terrain [S1].
+
+## Sources
+[S1] On-the-fly decompression and rendering of multiresolution terrain, https://doi.org/10.1145/1730804.1730815, fetched 2026-11-01

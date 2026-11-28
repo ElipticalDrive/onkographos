@@ -1,0 +1,103 @@
+# Closest Point Propagation
+
+Also called: Distance Transform via FIFO Queue
+
+## Overview
+Closest Point Propagation is a heuristic-based algorithm for computing a Signed Distance Field (SDF) and the position of the closest surface point for a voxel grid. It solves the problem of filling the distance volume by propagating geometric information from an initialized "zero set" (samples known to be on or near the surface) to the rest of the volume. Unlike [Naive Jumping Farthest Away (JFA)](7621-naive-jumping-farthest-away-jfa.md), which uses a multi-pass approach with halving search radii, this method uses a single-pass FIFO queue traversal. It differs from [Breadth-First Distance Field Expansion](9703-breadth-first-distance-field-expansion.md) by explicitly tracking the 3D coordinate of the closest point ($CP$) rather than just the scalar distance, allowing for more accurate surface reconstruction at the cost of higher memory per sample.
+
+## How it works
+**Inputs:** A 3D voxel grid of samples $s$. A pre-computed "zero set" of samples identified as being on the isosurface (see [Naive Jumping Farthest Away (JFA)](7621-naive-jumping-farthest-away-jfa.md) for zero set initialization context).
+**Outputs:** A regular volume where each sample $s$ contains:
+- $d(s)$: The signed distance value.
+- $CP(s)$: The 3D coordinate of the closest point on the surface.
+- $sn(s)$: The sign (inside/outside).
+- $amb(s)$: An ambiguity flag.
+
+**Data Structures:**
+Each distance sample $s$ stores the following fields:
+- $d(s)$: Floating-point distance value.
+- $CP(s)$: 3D vector $(x, y, z)$ representing the closest point.
+- $sn(s)$: Integer or boolean sign value.
+- $amb(s)$: Boolean ambiguity flag.
+
+**Algorithm Steps:**
+1.  **Initialization:** For all distance samples $s$ in the volume, set $d(s) = \text{maxfloat}$.
+2.  **Zero Set Setup:** Identify the zero set samples (samples lying on the isosurface). For these samples, compute the initial $CP(s)$, $d(s)$, $sn(s)$, and $amb(s)$ based on local gradient estimates or surface intersection [S1].
+3.  **Queue Initialization:** Create a FIFO queue $Q$. Place all zero set samples into $Q$.
+4.  **Propagation Loop:** While $Q$ is not empty:
+    a.  Let $s = \text{front}(Q)$. Dequeue $s$.
+    b.  For each of the 26 neighbors $t$ of $s$:
+        i.  Calculate the distance from the neighbor to the current sample's closest point: $dist = \| CP(s) - t \|$.
+        ii. If $dist < d(t)$:
+            -   Update $CP(t) = CP(s)$.
+            -   Update $d(t) = \| t - CP(t) \|$.
+            -   Enqueue $t$ onto the back of $Q$.
+        iii. If $amb(s) = \text{false}$, then set $sn(t) = sn(s)$. [G: Note that the sign propagation only occurs if the source sample is not ambiguous; this prevents propagating uncertain signs into the volume.]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def closest_point_propagation(volume_samples, zero_set_indices):
+    # Initialize all samples
+    for s in volume_samples:
+        s.d = MAX_FLOAT
+        s.CP = None
+        s.sn = 0
+        s.amb = False
+
+    # Initialize Zero Set
+    for idx in zero_set_indices:
+        s = volume_samples[idx]
+        # Compute initial closest point and distance based on local gradient/isosurface intersection
+        s.CP = compute_closest_point_from_gradient(s)
+        s.d = distance(s, s.CP)
+        s.sn = compute_sign(s)
+        s.amb = False
+        enqueue(queue, s)
+
+    # Propagation
+    while not is_empty(queue):
+        s = dequeue(queue)
+        
+        # Iterate over 26 neighbors
+        for t in get_26_neighbors(s):
+            # Check if current sample's closest point is closer to neighbor t
+            # than t's currently recorded closest point
+            dist_to_cp = distance(t, s.CP)
+            
+            if dist_to_cp < t.d:
+                t.CP = s.CP
+                t.d = distance(t, t.CP)
+                enqueue(queue, t)
+                
+            # Propagate sign if source is not ambiguous
+            if not s.amb:
+                t.sn = s.sn
+```
+
+**Parameters:**
+-   **Neighbor Connectivity:** 26-connectivity (all adjacent voxels in 3D).
+-   **Queue Type:** FIFO (First-In-First-Out).
+
+**Edge Cases and Pitfalls:**
+-   **Multiple Updates:** Unlike priority-queue methods that guarantee a single visit per sample, this method may update a sample's distance multiple times. However, experiments show the average number of updates per sample tends toward 1.1 as resolution increases [S1].
+-   **Ambiguity:** The sign propagation is conditional on $amb(s) = \text{false}$. If a sample is marked ambiguous, its sign is not propagated to neighbors, potentially leaving some regions with undefined signs if not handled by a separate topology pass.
+
+## Subtopics
+
+### [Hierarchical Flood-Filling](22345-hierarchical-flood-filling.md)
+A bottom-up algorithm that assigns correct signed distance values to inactive voxels outside the narrow band by propagating signs from active voxels within the narrow band. It solves the problem of determining the inside/outside topology for voxels not explicitly computed during the narrow-band construction. Unlike methods that propagate signs between nodes at the same level, this approach uses the hierarchical structure to ensure strict bottom-up propagation, avoiding cross-node propagation at the same level and reducing overhead.
+
+## Operating characteristics
+-   **Time Complexity:** The algorithm runs in $O(n)$ time on tested surfaces, where $n$ is the number of samples in the distance volume. This is because the average number of updates per sample tends toward one as resolution increases [S1]. In contrast, Breen et al.'s priority-queue method has $O(n \log n)$ time complexity but visits each sample only once [S1].
+-   **Memory Complexity:** Requires storage for $d(s)$, $CP(s)$, $sn(s)$, and $amb(s)$ per sample. The $CP(s)$ vector adds significant memory overhead compared to scalar-only distance fields.
+-   **Measured Performance:** In experiments, each distance sample was updated 1.1 times on average [S1].
+-   **Strengths:** Simple implementation using a standard FIFO queue; constant time access per operation; efficient for high-resolution volumes where update counts converge to 1.
+-   **Limitations:** May require multiple passes over a sample (though rare); relies on the heuristic that neighbors share similar closest points, which may fail in highly complex or noisy geometries without sufficient resolution.
+
+## Background
+The algorithm was introduced in the context of multiresolution distance volumes for progressive surface compression. It was developed as an alternative to priority-queue based distance transforms to achieve linear time complexity on typical surface data. The method relies on the heuristic that the closest point of a sample will, in most cases, be geometrically close to the closest points of its neighbors.
+
+## Sources
+[S1] Multiresolution Distance Volumes for Progressive Surface Compression, https://digital.library.unt.edu/ark:/67531/metadc1409942/?q=volume data compression rendering, fetched 2026-10-28

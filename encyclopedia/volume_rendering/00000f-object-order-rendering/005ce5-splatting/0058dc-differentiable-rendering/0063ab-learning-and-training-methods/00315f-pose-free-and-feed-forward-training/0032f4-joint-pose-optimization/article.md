@@ -1,0 +1,23 @@
+# Joint Pose Optimization
+
+Also called: BARF, Unposed images methods
+
+## Overview
+Joint Pose Optimization (JPO) refers to methods that simultaneously optimize camera poses and the scene representation (neural fields or Gaussian splats) to eliminate the dependency on pre-computed Structure-from-Motion (SfM) pipelines [S1]. This approach relaxes the strict requirement for known camera parameters, allowing novel-view synthesis from unposed images and known intrinsic parameters using only photometric loss [S1]. These methods still require rough pose initialization and are limited to small motions [S1].
+
+## Shared principles
+
+## Subtopics
+
+### [1D Signal Alignment for Joint Optimization Analysis](8423-1d-signal-alignment-for-joint-optimization-analysis.md)
+1D Signal Alignment is a simplified analytical model used to investigate the local convergence behavior of joint camera pose and scene reconstruction optimization. It reduces the complex 3D joint optimization problem into a 1D signal alignment task to analyze how the signal spectrum affects gradient stability. Unlike full 3D joint optimization methods which suffer from high-frequency spectral noise causing local optima, this method demonstrates that applying a Gaussian filter to the signal spectrum stabilizes gradients and ensures convergence to the global optimum within a specific initial range.
+
+### Iterative Pose Optimization Network (IPO-Net)
+IPO-Net is a generalizable 3D Gaussian Splatting network trained in a self-supervised manner without relying on pre-acquired camera poses or depth [S2]. It extracts features $F_r$ and $F_t$ from reference images $I_r$ and target image $I_t$ using a Shared Image Encoder (ResNet backbone pre-trained with DINO augmented with FPN) [S2]. It iteratively updates pose and depth for $K$ iterations using a Conv-GRU module: $\mathbf{T}_{r\rightarrow t}^{(k)}=\mathbf{T}_{r\rightarrow t}^{(k-1)}+\Delta \mathbf{T}_{r\rightarrow t}$ and $\mathbf{D}_{t}^{(k)}=\mathbf{D}_t^{(k-1)}+\Delta \mathbf{D}_t$, where $\Delta \mathbf{T}$ and $\Delta \mathbf{D}$ are predicted differences [S2]. It transfers pre-estimated relative poses $\mathbf{T}_{r\rightarrow t}$ between reference views and target view to relative poses $\mathbf{T}_{r\rightarrow r+1}$ between nearby reference views for Gaussians prediction [S2].
+
+## Background
+Joint pose optimization emerged to address the limitations of traditional pipelines that depend on off-the-shelf pose estimation methods, which increase inference time and fail in texture-less regions or when images lack overlap [S1]. Early works proposed joint optimization for both static and dynamic settings [S1]. However, these methods still require rough pose initialization and are limited to small motions [S1]. Alternative solutions followed incremental approaches, leveraging mono-depth prior or temporal continuity to optimize camera parameters [S1]. More recent extensions enable generalizable representations, enabling joint pose prediction and representation learning from sparse image collections [S1]. Ye et al. demonstrated efficient pose estimation and novel-view synthesis from unposed images and intrinsic camera parameters using only photometric loss, though limited to static scenes [S1].
+
+## Sources
+[S1] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+[S2] GGRt: Towards Pose-Free Generalizable 3D Gaussian Splatting in Real-Time, https://doi.org/10.1007/978-3-031-73209-6_19, fetched 2026-10-29

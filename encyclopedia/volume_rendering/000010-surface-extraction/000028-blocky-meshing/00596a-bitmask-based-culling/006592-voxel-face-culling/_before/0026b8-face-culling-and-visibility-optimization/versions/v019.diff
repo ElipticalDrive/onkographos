@@ -1,0 +1,71 @@
+--- v018.md
++++ v019.md
+@@ -4,26 +4,35 @@
+ 
+ ## Overview
+-Face Culling and Visibility Optimization reduces the rendering load of voxel-based volume rendering by reconstructing cubes from triangles and removing sides that are adjacent to solid neighbors, thereby avoiding the rendering of 12 triangles (6 sides) when only 2 triangles (1 side) are visible [S1, unofficial]. It sets itself apart from its siblings by focusing on immediate geometric adjacency checks during mesh construction rather than post-generation visibility tests or coverage masks.
++Face Culling and Visibility Optimization is a family of techniques that reduce the rendering load of voxel-based volume rendering by identifying and discarding geometric primitives (faces, vertices, or entire blocks) that are occluded by neighbors, oriented away from the camera, or otherwise invisible. It solves the problem of naive mesh generation, which typically produces 12 triangles (6 sides) per voxel even when only 2 triangles (1 side) are visible, leading to excessive overdraw and GPU bandwidth waste [S1, unofficial]. This family is distinguished from general surface extraction methods by its focus on immediate geometric adjacency checks, camera-space orientation tests, or precomputed visibility masks to prune geometry before or during mesh assembly.
+ 
+ ## Shared principles
+-The core mechanism involves iterating through the voxel grid and determining the visibility of each of the six potential faces of a voxel based on the occupancy state of its immediate neighbors [S1, unofficial].
++All methods in this family operate on the principle that a voxel or blocky mesh primitive has a finite set of potential faces (typically 6 for a cube) and that visibility is determined by the state of adjacent voxels, the viewing direction, or external depth information.
+ 
+-1.  **Initialization**: For each voxel at position $P$, initialize all 6 potential faces with a render flag set to `true`.
+-2.  **Neighbor Check**: For each face with normal $N_{face}$, calculate the neighbor position $P_{neighbor} = P + N_{face}$.
+-3.  **Culling Decision**: If a solid voxel exists at $P_{neighbor}$, the face is internal and the render flag is set to `false`. If no neighbor exists, the face is potentially exposed.
+-4.  **Mesh Generation**: Iterate through all voxels and their faces; if the render flag is `true`, add the face's vertices to the vertex buffer.
++**Adjacency and Occlusion:**
++The most common mechanism is checking immediate neighbors. For a voxel at position $P$ with a face normal $N_{face}$, the neighbor position is calculated as $P_{neighbor} = P + N_{face}$. If the neighbor at $P_{neighbor}$ is solid (opaque), the face at $P$ in direction $N_{face}$ is internal and culled [S1, unofficial]. This reduces the primitive count from $6 \times N_{voxels}$ to approximately $2 \times N_{voxels}$ for dense structures.
+ 
+-This optimization replaces the brute-force approach of instantiating full cube models, which would render 12 triangles (6 sides) per cube even when only 2 triangles (1 side) are visible, by reconstructing cubes from triangles and removing sides adjacent to solid neighbors [S1, unofficial]. To further optimize, meshes of all cubes are often combined into a single big mesh called a 'chunk' [S1, unofficial].
++**Camera Orientation:**
++Many methods incorporate backface culling. A face is culled if its normal $\mathbf{n}$ and the view direction $\mathbf{v}$ satisfy $\mathbf{n} \cdot \mathbf{v} > 0$ (assuming $\mathbf{v}$ points from the camera to the scene) or similar conventions, indicating the face is oriented away from the viewer [S1, unofficial].
++
++**Granularity:**
++Culling can occur at different granularities:
++1.  **Block Level:** Entire blocks are skipped if they are buried or outside the view frustum [S2, unofficial][S1, unofficial].
++2.  **Face Level:** Individual faces of a voxel are discarded based on neighbor occupancy [S1, unofficial].
++3.  **Sub-Face Level:** Partial shapes (e.g., stairs) use bitmasks to cull specific portions of a face [S1, unofficial].
++4.  **Mesh Level:** Post-generation filtering removes faces based on opacity or multi-view depth consistency [S1, unofficial][S2, unofficial].
++
++**Data Structures:**
++Common structures include:
++*   **Occupancy Grids:** Hash sets or dense arrays storing voxel states [S1, unofficial].
++*   **Visibility Masks:** Bitmasks (e.g., 6-bit integers) tracking which faces of a voxel are visible [S1, unofficial].
++*   **Vertex Packed Buffers:** Compact storage (e.g., two 32-bit integers per vertex) to minimize memory overhead during incremental updates [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Voxel Block Placement with Face Culling](923-voxel-block-placement-with-face-culling.md)
+-A dynamic meshing technique that updates voxel chunk geometry incrementally when individual blocks are placed or removed, rather than regenerating the entire mesh. It solves the performance bottleneck of brute-force mesh reconstruction by using neighbor checks to toggle the visibility of shared faces on adjacent blocks. Unlike [Static Mesh Caching](1138-static-mesh-caching.md), which rebuilds full geometry for all visible voxels, this method maintains a local state per block to track which faces are exposed, enabling $O(1)$ updates per block change.
+-
+ ### [Face Coverage Mask Culling](3397-face-coverage-mask-culling.md)
+-A method for removing hidden faces of partial voxel shapes (such as stairs, slabs, or custom geometries) by representing face coverage as a bit mask. It solves the problem where a boolean "solid/empty" flag is insufficient because partial shapes have mixed visible and hidden areas on a single face. Unlike sibling methods that rely on coarse block visibility or vertex packing, this method operates at the sub-face granularity, allowing precise culling of geometry that is occluded by neighbors while preserving exposed portions of the same face.
++Face Coverage Mask Culling removes hidden faces of partial voxel shapes (such as stairs, slabs, or custom geometries) by representing face coverage as a bit mask. It solves the problem where a boolean "solid/empty" flag is insufficient because partial shapes have mixed visible and hidden areas on a single face. Unlike sibling methods that rely on coarse block visibility or vertex packing, this method operates at the sub-face granularity, allowing precise culling of geometry that is occluded by neighbors while preserving exposed portions of the same face.
+ 
+ ### [ChunkMesh Vertex Packing and Management](3566-chunkmesh-vertex-packing-and-management.md)
+-A dynamic mesh generation and update technique for voxel terrain that combines face culling with compact vertex storage and incremental buffer updates. It solves the problem of high memory overhead and frequent GPU buffer uploads in voxel worlds by packing vertex attributes into two 32-bit integers and reusing vertex slots via a free-list allocator. Unlike static meshing methods, it supports incremental addition and removal of blocks, updating only the affected faces and their neighbors.
++ChunkMesh Vertex Packing and Management is a dynamic mesh generation and update technique for voxel terrain that combines face culling with compact vertex storage and incremental buffer updates. It solves the problem of high memory overhead and frequent GPU buffer uploads in voxel worlds by packing vertex attributes into two 32-bit integers and reusing vertex slots via a free-list allocator. Unlike static meshing methods, it supports incremental addition and removal of blocks, updating only the affected faces and their neighbors.
+ 
+ ### [Voxel Backface Culling and Internal Face Masking](4569-voxel-backface-culling-and-internal-face-masking.md)
+@@ -52,8 +61,8 @@
+ 
+ ### Buried Bitmask Optimization
+-A bitmask used to track which blocks in a chunk are 'buried' (fully surrounded by opaque blocks), allowing the renderer to skip mesh generation for those blocks [S2, unofficial]. The implementation resets the buried bitmask for the chunk, creates `MappedAdjacentChunks` for the current chunk position to access neighboring chunks, and iterates through all blocks in the chunk (0 to `CHUNK_SIZE`). For each block, it determines if it is buried by calling `block->isBuried(...)` and sets the corresponding flag in the bitmask. If all blocks in the chunk are buried (checked via `buriedBitmask->AreAllBlocksSet()`), the mesh is marked as empty and mesh generation is skipped. When generating the mesh, any block that is air or has its buried flag set in the bitmask is skipped [S2, unofficial].
++A bitmask used to track which blocks in a chunk are 'buried' (fully surrounded by opaque blocks), allowing the renderer to skip mesh generation for those blocks [S2, unofficial]. The process involves resetting the buried bitmask for the chunk, creating mapped adjacent chunks for neighbor access, and iterating through all blocks to determine if they are buried. If all blocks in a chunk are buried, the mesh is marked as empty and generation is skipped. During mesh generation, any block that is air or has its buried flag set in the bitmask is skipped [S2, unofficial].
+ 
+ ### Two-pass transparent meshing with opaque separation
+-A meshing strategy that separates opaque and transparent geometry into two passes to ensure correct rendering order and reduce overdraw, by generating opaque faces between air/transparent blocks and transparent faces only for blocks touching air [S3, unofficial]. The first pass (opaque) generates faces for opaque blocks. If the chunk contains transparent blocks, it tests for opaque blocks (ignoring transparent and air), generating opaque faces between air and transparent blocks. Otherwise, it tests for non-air blocks. The second pass (transparent) tests for non-air blocks to mark only transparent blocks, generating faces for all transparent blocks touching air, but does not add faces between transparent and solid blocks (since solid blocks already have those faces). To filter out solid block types during the transparent pass, before constructing the AO value and adding the block type to the hashmap, the code checks if it is in the transparent pass and ignores any block types that are not transparent [S3, unofficial].
++A meshing strategy that separates opaque and transparent geometry into two passes to ensure correct rendering order and reduce overdraw, by generating opaque faces between air/transparent blocks and transparent faces only for blocks touching air [S3, unofficial]. The first pass generates opaque faces by testing for opaque blocks (ignoring transparent and air if transparent blocks exist in the chunk), ensuring opaque faces are generated between air and transparent blocks. The second pass tests for non-air blocks to mark only transparent blocks, generating faces for all transparent blocks touching air but not adding faces between transparent and solid blocks. Solid block types are filtered out during the transparent pass to prevent incorrect face addition [S3, unofficial].
+ 
+ ### Smart Leaf Rendering
+@@ -61,8 +70,7 @@
+ 
+ ## Background
+-The concept of removing interior polygons to improve rendering performance originated in early voxel engine implementations, such as those described in procedural terrain generation literature [S1, unofficial]. The initial optimization involved replacing the brute-force approach of instantiating models of cubes with a class that creates cubes from triangles, allowing each cube to check for solid neighbors and determine which sides to render [S1, unofficial]. This led to the combination of cube meshes into a single big mesh called a 'chunk' to further optimize implementation, although this introduced restrictions such as vertex count limits (e.g., ~65000 vertices in Unity) [S1, unofficial].
++The concept of removing interior polygons was introduced in early voxel terrain generation systems to address the performance bottleneck of rendering full cube models. In these systems, a brute-force approach would instantiate a model for every voxel, resulting in 12 triangles per cube even when only one side was visible. The optimization involved reconstructing cubes from triangles and checking for solid neighbors; if a neighbor existed, the adjacent side was not rendered [S1, unofficial]. To further optimize, meshes of all cubes were combined into a single big mesh called a 'chunk', although this introduced vertex count limits (e.g., ~65,000 vertices in Unity) [S1, unofficial]. This technique is foundational to modern voxel engines like Minecraft, where face culling is a primary optimization for rendering large worlds [S1, unofficial].
+ 
+ ## Sources
+-
+ [S1] Voxel-Based Procedural Terrain Generation | PDF | Voxel | Rendering ..., https://www.scribd.com/document/840779393/Procedural-Terrain-Generation-Using-Voxels, fetched 2026-10-29 (unofficial)
+ [S2] gabkhanfig/Cube, https://github.com/gabkhanfig/Cube, fetched 2026-10-27 (unofficial)

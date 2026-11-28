@@ -1,0 +1,119 @@
+# Trajectory Arrow Rendering
+
+Also called: speed lines
+
+## Overview
+Trajectory Arrow Rendering is an illustrative technique that overlays directional arrows on volume renderings of time-varying particle systems to visualize feature movement and provide temporal context within a single static image [S1, unofficial]. Unlike viewing sequential volume renderings, which makes it difficult to track features visually, this method integrates pathline geometry into the volumetric depth buffer to highlight flow properties such as separation, convergence, and recirculation [S1, unofficial]. It sets itself apart from standard volume rendering by explicitly decoupling the representation of particle trajectories from the scalar field density, using a multi-pass approach to ensure arrows are correctly occluded by and blended with the volume interior [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Time-varying particle system data (positions at current time step and previous time step, or velocity vectors) [S1, unofficial].
+*   Arrow width parameter [S1, unofficial].
+*   Minimum pathline length threshold and minimum cluster size [S1, unofficial].
+*   Volume rendering parameters, camera matrices, and final composite image layout: Not given in the sources [S1, unofficial].
+
+**Outputs:**
+*   Final composite image containing the volume rendering with trajectory arrows blended at correct depths [S1, unofficial].
+
+**Data Structures:**
+*   Pathlines representing particle trajectories [S1, unofficial].
+*   Arrow geometry rendered as triangle strips [S1, unofficial].
+*   Frame buffers for arrow color and depth [S1, unofficial].
+
+**Steps:**
+
+1.  **Pathline Filtering:**
+    *   Compute pathlines from temporal particle data [S1, unofficial].
+    *   Discard pathlines shorter than a preset threshold [S1, unofficial].
+    *   Discard clusters with fewer than a preset minimum number of pathlines [S1, unofficial].
+
+2.  **Pass 1 (Arrow Geometry):**
+    *   Render arrow geometry to a frame buffer as triangle strips [S1, unofficial].
+    *   In the vertex shader, expand the arrow width to ensure it always faces the viewer by rotating the line corresponding to the particle trajectory by the viewing matrix and adding the arrow width to the rotated line [S1, unofficial].
+
+3.  **Pass 2 (Background Composition):**
+    *   Render a full-screen quad containing the image of the arrows to a background buffer [S1, unofficial].
+
+4.  **Pass 3 (Raycaster):**
+    *   Pass the depth texture of the arrow geometry into the raycaster [S1, unofficial].
+    *   Change the ray termination condition to check if the current depth of the sample position along the ray is behind the arrow depth [S1, unofficial].
+    *   If the sample is behind the arrow depth, stop the ray and blend the current color with the background image of the arrows [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_trajectory_arrows(particles, view_matrix, arrow_width, min_length, min_cluster_size):
+    # Step 1: Filter Pathlines
+    pathlines = integrate_particles(particles)  # [G] Standard temporal integration
+    valid_pathlines = [p for p in pathlines if length(p) >= min_length]
+    clusters = group_spatially(valid_pathlines)  # [G] Standard spatial clustering
+    valid_pathlines = [p for c in clusters if len(c) >= min_cluster_size for p in c]
+
+    # Step 2: Pass 1 - Render Arrow Geometry to Frame Buffer
+    arrow_color_buffer = allocate_buffer()
+    arrow_depth_buffer = allocate_depth_buffer()
+    for pathline in valid_pathlines:
+        start = pathline[0]
+        end = pathline[-1]
+        direction = end - start
+        # Rotate trajectory line by viewing matrix
+        view_dir = transform_view(direction, view_matrix)
+        # Compute perpendicular vector in view plane for billboarding
+        up = vec3(0.0, 1.0, 0.0)
+        if abs(dot(view_dir, up)) > 0.999:
+            up = vec3(1.0, 0.0, 0.0)
+        perp = normalize(cross(view_dir, up))
+        half_w = arrow_width / 2.0
+        # Generate triangle strip vertices by expanding width along perpendicular
+        vertices = []
+        for i in range(len(pathline) - 1):
+            p1 = pathline[i]
+            p2 = pathline[i+1]
+            vertices.append(p1 + perp * half_w)
+            vertices.append(p1 - perp * half_w)
+            vertices.append(p2 + perp * half_w)
+            vertices.append(p2 - perp * half_w)
+        draw_triangle_strip(vertices, arrow_color_buffer, arrow_depth_buffer)
+
+    # Step 3: Pass 2 - Render Full Screen Quad
+    background_image = draw_fullscreen_quad(arrow_color_buffer)
+
+    # Step 4: Pass 3 - Volume Raycasting with Depth-Aware Blending
+    final_image = allocate_buffer()
+    for pixel in final_image:
+        ray_origin = camera_position
+        ray_direction = compute_ray_direction(pixel, view_matrix)
+        accumulated_color = vec3(0.0)
+        accumulated_alpha = 0.0
+        for t in range(0, max_depth, step_size):
+            sample_pos = ray_origin + ray_direction * t
+            depth_sample = length(sample_pos - ray_origin)
+            depth_arrow = read_depth(arrow_depth_buffer, pixel)
+            if depth_sample > depth_arrow:
+                arrow_color = read_color(background_image, pixel)
+                accumulated_color = accumulated_color * (1.0 - accumulated_alpha) + arrow_color * accumulated_alpha
+                break
+            density = read_volume(sample_pos)
+            color = apply_tf(density)
+            alpha = density * step_size
+            accumulated_color = accumulated_color * (1.0 - alpha) + color * alpha
+            accumulated_alpha += alpha
+        final_image[pixel] = accumulated_color
+    return final_image
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+*   **Strengths:** Provides immediate temporal context in a single image; effectively visualizes flow features without requiring animation [S1, unofficial].
+*   **Limitations:** Requires pre-computed or real-time pathline generation; filtering parameters are critical and may require tuning to avoid visual clutter or loss of detail [S1, unofficial].
+*   **When to use:** When analyzing time-varying particle systems or flow fields where static visualization of motion is needed [S1, unofficial].
+*   **When not to use:** When precise quantitative tracking of individual particles over time is required, or when the volume density itself is the primary focus without need for motion cues [S1, unofficial].
+
+## Background
+Trajectory Arrow Rendering was introduced by J. Chandler, H. Obermaier, and K. I. Joy in 2013 as part of their work on illustrative rendering of particle systems [S1, unofficial]. It addresses the limitation of standard volume rendering, which only provides information about a single time step, making it difficult to track features in time-varying data [S1, unofficial]. The method was applied to datasets such as the von Karman vortex street and jet flow fields to demonstrate its ability to reveal internal flow structures [S1, unofficial].
+
+## Sources
+[S1] Illustrative Rendering of Particle Systems, https://doi.org/10.2312/pe.vmv.vmv13.177-185, fetched 2026-10-26 (unofficial)

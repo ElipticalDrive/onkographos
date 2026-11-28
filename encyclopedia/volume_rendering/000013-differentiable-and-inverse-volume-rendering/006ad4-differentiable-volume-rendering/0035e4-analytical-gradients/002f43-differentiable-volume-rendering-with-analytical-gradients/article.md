@@ -1,0 +1,111 @@
+# Differentiable Volume Rendering with Analytical Gradients
+
+Also called: Analytical Differentiable Rendering, DiffRenderer
+
+## Overview
+A rendering technique that computes radiance and its analytical derivatives with respect to volume density directly, avoiding the overhead of propagating gradients through long computational graphs inherent in automatic differentiation [S1]. It solves the problem of inefficient optimization for dynamic volumetric densities, such as in fluid reconstruction, by providing a closed-form gradient calculation [S1]. Unlike [Differentiable Volume Rendering via Box Splines](2449-differentiable-volume-rendering-via-box-splines.md), which relies on basis function smoothness, this method operates on the standard emission-absorption model with explicit step-wise differentiation [S1].
+
+## How it works
+**Inputs:** Ray origin $\mathbf{x}_a$, ray direction $\boldsymbol{u}$, volume density field $\sigma(\mathbf{x})$, step size $\triangle d$, and ray exit boundary $\mathbf{x}_b$ [G].
+**Outputs:** Radiance $L$ and its analytical gradient with respect to density parameters [G].
+
+**Data Structures:**
+*   Ray state: Current position $x_u$, accumulated transmittance $T$, accumulated radiance $L$ [G].
+*   Step history: Lists storing $\sigma_i$, $\alpha_i$, $\mathbf{c}_i$, and $T_i$ for each sampled step [G].
+
+**Steps:**
+1.  Initialize $L \leftarrow 0$, $T \leftarrow 1$, $x_u \leftarrow \mathbf{x}_a$ [G].
+2.  Iterate along the ray from $x_a$ to $x_b$ with step size $\triangle d$:
+    a.  Sample density $\sigma_i$ and color $\mathbf{c}_i$ at $x_u$ [G].
+    b.  Compute step transmittance attenuation: $\alpha_i = 1 - \exp(-\sigma_i \triangle d)$ [G].
+    c.  Compute emitted radiance contribution: $C_i = T \cdot \alpha_i \cdot \mathbf{c}_i$ [G].
+    d.  Update accumulated radiance: $L \leftarrow L + C_i$ [G].
+    e.  Update transmittance: $T \leftarrow T \cdot (1 - \alpha_i)$ [G].
+    f.  Store step data $(\sigma_i, \alpha_i, \mathbf{c}_i, T_i)$ for gradient computation [G].
+    g.  Advance ray position: $x_u \rightarrow x_u + \boldsymbol{u} \triangle d$ [S1].
+3.  Compute analytical gradient $\frac{\partial L}{\partial \sigma_k}$ for each step $k$ using a backward pass:
+    a.  Initialize backward accumulator $B \leftarrow 0$ [G].
+    b.  Iterate steps $k$ from $N$ down to $1$:
+        i.  Direct term: $D_k = T_k \triangle d \exp(-\sigma_k \triangle d) \mathbf{c}_k$ [G].
+        ii. Indirect term: $I_k = \triangle d \cdot B$ [G].
+        iii. Gradient: $\frac{\partial L}{\partial \sigma_k} = D_k - I_k$ [G].
+        iv. Update accumulator: $B \leftarrow B (1 - \alpha_k) + T_k \alpha_k \mathbf{c}_k$ [G].
+
+**Formulas:**
+The standard emission-absorption model computes color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as:
+$$
+\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+$$
+where $\sigma_i$ is density, $\delta_i$ is step size, $\mathbf{c}_i$ is color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is transmittance [G].
+
+The analytical gradient with respect to density $\sigma_k$ is derived by differentiating the sum term-by-term [G].
+$$
+\frac{\partial \hat{C}}{\partial \sigma_k} = T_k \triangle d \exp(-\sigma_k \triangle d) \mathbf{c}_k - \triangle d \sum_{j=k+1}^N T_j (1 - \exp(-\sigma_j \triangle d)) \mathbf{c}_j
+$$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def analytical_gradient_rendering(ray_origin, ray_dir, density_field, step_size, ray_exit):
+    x_u = ray_origin.copy()
+    T = 1.0
+    L = 0.0
+    steps = []
+    
+    # Forward pass: sample and accumulate radiance
+    while True:
+        # Guard: check if current position is within volume bounds [G]
+        t_min = max((ray_origin - x_u) / (ray_dir + 1e-8))
+        t_max = min((ray_exit - x_u) / (ray_dir + 1e-8))
+        if t_min > t_max:
+            break
+            
+        sigma_i = density_field.sample(x_u)
+        c_i = density_field.color(x_u)
+        alpha_i = 1.0 - math.exp(-sigma_i * step_size)
+        
+        T_k = T
+        contribution = T_k * alpha_i * c_i
+        L += contribution
+        T *= (1.0 - alpha_i)
+        
+        # Store history for backward gradient pass
+        steps.append({'sigma': sigma_i, 'alpha': alpha_i, 'color': c_i, 'T': T_k})
+        
+        # Advance ray position
+        x_u = x_u + ray_dir * step_size
+        
+    # Backward pass: compute analytical gradients
+    grads = []
+    B = 0.0
+    for k in range(len(steps) - 1, -1, -1):
+        s = steps[k]
+        direct = s['T'] * step_size * math.exp(-s['sigma'] * step_size) * s['color']
+        indirect = step_size * B
+        grad = direct - indirect
+        grads.append(grad)
+        B = B * (1.0 - s['alpha']) + s['T'] * s['alpha'] * s['color']
+        
+    return L, list(reversed(grads))
+```
+
+## Subtopics
+
+### [Differentiable Moment Bounds](8855-differentiable-moment-bounds.md)
+Computes continuously differentiable upper and lower bounds on cumulative mass consistent with power moments. It solves the truncated Hamburger moment problem. It is distinguished from standard visibility functions by generalizing to arbitrary moment sequences ($2n+1$ moments) for tighter bounds, and from its parent method by providing a robust, numerically stable implementation that handles singularities. Choose it when differentiable rendering requires guaranteed bounds on scene parameters rather than point estimates.
+
+## Operating characteristics
+*   **Complexity:** $O(N)$ time and memory per ray, where $N$ is the number of steps, as it avoids storing a full computational graph [G].
+*   **Performance:** Improves optimization speed for dynamic volumetric densities like fluid reconstruction by eliminating gradient tracking overhead [S1].
+*   **Strengths:** Constant memory overhead relative to parameters; enables single-pass or tightly coupled backward passes [G].
+*   **Limitations:** Requires explicit analytical derivation of the rendering equation; less flexible than automatic differentiation for arbitrary, non-differentiable operations [G].
+*   **Usage:** Use for differentiable inverse rendering and optimization tasks where density gradients are needed; avoid when the scene contains hard, non-differentiable visibility changes or complex discrete selection logic [G].
+
+## Background
+Originated in physics-based differentiable rendering for fluid modeling from monocular video [S1]. The work builds upon insights that automatic differentiation fundamentally relies on propagating gradients through long computational graphs, which carries inherent overhead compared to direct analytical derivatives [S1]. It is applied in dynamic volumetric reconstruction and fluid simulation pipelines [S1].
+
+## Sources
+[S1] Physics-Based Differentiable Rendering for Efficient and Plausible Fluid Modeling from Monocular Video, https://doi.org/10.3390/e25091348, fetched 2026-10-26

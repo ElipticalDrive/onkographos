@@ -1,0 +1,57 @@
+# PIFu (SDF variant)
+Also called: SDF variant of PIFu, PIFu-SDF
+
+## Overview
+PIFu (SDF variant) adapts the original PIFu architecture by replacing the volume occupancy field with a Signed Distance Function (SDF) to describe human shape, providing more informative geometric priors than binary occupancy [S1]. It additionally predicts an RGB field for texture and estimates ambient light and surface reflectivity parameters to enable relighting in novel scenes [S1]. It differs from its siblings (NeuS, VolSDF) by operating in a single-view implicit setting using pixel alignment rather than multi-view volume rendering optimization, and from the original PIFu by using SDFs instead of occupancy fields [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A single RGB image of a human.
+*   **Output:** A 3D implicit SDF field $f(\mathbf{x})$ representing the signed distance to the surface, an RGB field for texture, and parameters for ambient light and surface reflectivity [S1].
+
+**Data Structures:**
+*   **SDF Network:** A neural network mapping 3D coordinates $\mathbf{x}$ to a scalar SDF value $f(\mathbf{x})$.
+*   **RGB Field:** A neural network mapping 3D coordinates $\mathbf{x}$ to an RGB color vector [S1].
+*   **Lighting Parameters:** Scalars/vectors for ambient light intensity and surface reflectivity coefficients for lit and unlit conditions [S1].
+
+**Method Steps:**
+1.  **Image Encoding:** The input RGB image is encoded by an encoder to obtain a feature map [S1].
+2.  **Pixel Alignment (Feature Fusion):** For a query 3D point $\mathbf{x}$, its weak perspective camera projection is mapped to 2D image coordinates. The corresponding pixel features from the encoded feature map are extracted and fused with the 3D position $\mathbf{x}$ (and potentially a 2D encoding vector) as input to the implicit function [S1].
+3.  **SDF Prediction:** The implicit function predicts the SDF value $f(\mathbf{x})$ for the query point. The surface is defined at the zero-level set $f(\mathbf{x}) = 0$ [S1].
+4.  **Texture Prediction:** The RGB field predicts the albedo/texture color at $\mathbf{x}$ [S1].
+5.  **Lighting Estimation:** The network estimates ambient light and surface reflectivity color for both lit and unlit conditions to allow relighting [S1].
+6.  **Supervision:** The network is supervised using the 2D image pixels and the corresponding 3D vertices' positions [S1].
+
+**Formulas:**
+*   Surface Normal: $\mathbf{n} = \nabla f(\mathbf{x}) / \|\nabla f(\mathbf{x})\|$ [Derived from Parent principles].
+*   SDF Condition: $f(\mathbf{x}) < 0$ (inside), $f(\mathbf{x}) > 0$ (outside) [Standard SDF definition, implied by [S1]].
+
+**Parameters:**
+*   Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Memory Limits:** The original PIFu suffered from low input resolution due to hardware memory limits, leading to loss of geometric details [S1]. The SDF variant inherits this constraint unless mitigated by multi-level strategies (see PIFuHD).
+*   **Single View Ambiguity:** Reconstruction quality for areas not visible in the single input view relies heavily on the generalization capability of the image encoder and the SDF prior [S1].
+
+## Subtopics
+
+### Geo-PIFu
+A geometry-aligned variant that improves upon PIFu by fusing 3D geometry with 2D pixels as feature vectors, performing better for areas not visible in a single view [S1]. It uses 3D U-Nets to promote pixel features to voxel features, then feeds the weak perspective camera projection of a 3D point to the 2D image and a 2D encoding vector into an implicit function to describe the contour [S1]. It has an order of magnitude lower parameter count than PIFuHD [S1].
+
+### PIFuHD
+A multi-level representation strategy based on PIFu that produces more detailed results by using a coarse network for global information and a fine network for local details, solving memory limit problems [S1]. The coarse PIFu uses a normal graph of pre-estimated front-side and back-side as additional input. The fine PIFu calculates occupancy using 3D embedding features extracted from the coarse-level network rather than absolute depth values. The fine network is trained by clipping the image to solve the memory limit problem [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Limited by hardware memory, particularly for high-resolution inputs. PIFuHD addresses this via image clipping and multi-level processing [S1].
+*   **Performance:** PIFuHD produces more detailed results than PIFu [S1]. Geo-PIFu achieves comparable or better results for occluded areas with significantly fewer parameters than PIFuHD [S1].
+*   **Strengths:** Enables relighting via estimated lighting parameters; SDF provides better geometric continuity than occupancy [S1].
+*   **Limitations:** Single-view input limits geometric fidelity for occluded regions; original PIFu resolution is constrained by memory [S1].
+*   **When to use:** When single-view human reconstruction with relighting capability is required and computational resources allow for the specific variant (e.g., PIFuHD for detail, Geo-PIFu for efficiency).
+*   **When not to use:** When multi-view consistency is critical or when high-fidelity geometry is required for heavily occluded views without additional priors.
+
+## Background
+PIFu was originally proposed by Alldieck et al. [S1]. The SDF variant was introduced by Alldieck et al. [3] (cited in [S1]), who argued that SDF is more informative than the occupancy field and remade PIFu to use SDF for shape description. The survey [S1] notes that four SDF networks are used for describing the body, left hand, right hand, and facial expressions respectively [S1].
+
+## Sources
+[S1] Human 3D Avatar Modeling with Implicit Neural Representation: A Brief Survey, https://doi.org/10.1109/icsps58776.2022.00148, fetched 2026-10-26

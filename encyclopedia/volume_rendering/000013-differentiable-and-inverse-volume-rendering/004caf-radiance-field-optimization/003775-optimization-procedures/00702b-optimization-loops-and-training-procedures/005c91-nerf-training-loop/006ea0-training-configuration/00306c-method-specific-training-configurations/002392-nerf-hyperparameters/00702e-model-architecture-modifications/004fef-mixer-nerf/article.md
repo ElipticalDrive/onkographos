@@ -1,0 +1,183 @@
+# Mixer-NeRF
+
+Also called: Hybrid Spatial Feature NeRF
+
+## Overview
+Mixer-NeRF is a modification to the standard Neural Radiance Field (NeRF) architecture that addresses the loss of local detail and blurry reconstructions caused by the MLP's lack of explicit local information capture [S1]. It introduces a hybrid spatial feature learning module (MLCA) to mix spatial and channel features before the main MLP, and a Squeeze-and-Excitation (SE) network module to dynamically weight features between sampling and inference [S1]. Unlike the baseline NeRF [Parent](3065-nerf-hyperparameters.md), which relies solely on positional encoding and MLP layers, Mixer-NeRF explicitly models spatial correlations and channel dependencies to improve performance in high-texture and complex lighting scenarios [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D spatial position $\mathbf{x} \in \mathbb{R}^3$ and viewing direction $\mathbf{d} \in \mathbb{R}^3$.
+*   **Output:** Volume density $\sigma$ and view-dependent color $\mathbf{c} \in \mathbb{R}^3$.
+
+**Data Structures:**
+The network consists of three main components:
+1.  **Positional Encoder:** Maps $\mathbf{x}$ and $\mathbf{d}$ to high-dimensional vectors using sine/cosine functions.
+2.  **Hybrid Spatial Feature Learning Module (MLCA):** Placed after positional encoding and before the MLP. It contains two fully connected (FC) layers with GELU activations.
+3.  **Squeeze-and-Excitation (SE) Module:** Placed between the sampling layer and the inference layer of the feature extraction network. It filters high-weight information and dynamically weights features.
+
+**Positional Encoding:**
+The inputs $\mathbf{x}$ and $\mathbf{d}$ are encoded using the standard NeRF positional encoding scheme [S1]. For a dimensionality $L$, the encoding is:
+$$ PE(\mathbf{v}) = [\sin(2^i \pi \mathbf{v}), \cos(2^i \pi \mathbf{v})]_{i=0}^{L} $$
+where $\mathbf{v}$ is either $\mathbf{x}$ or $\mathbf{d}$ [S1]. Note: The source text contains a typo in the formula for $PE(\mathbf{d})$, writing $\mathbf{x}$ instead of $\mathbf{d}$ inside the trigonometric functions; the implementation must use $\mathbf{d}$ [S1].
+
+**Parameters:**
+*   $L_{\mathbf{x}} = 10$: Number of encoding layers for 3D location $\mathbf{x}$ [S1].
+*   $L_{\mathbf{d}} = 4$: Number of encoding layers for camera orientation $\mathbf{d}$ [S1].
+
+**Algorithm Steps:**
+
+1.  **Positional Encoding:**
+    Compute $PE(\mathbf{x})$ with $L=10$ and $PE(\mathbf{d})$ with $L=4$.
+    Concatenate them:
+    $$ X_{input} = Concat(PE(\mathbf{x}), PE(\mathbf{d})) $$
+    [S1]
+
+2.  **Spatial Feature Capture (MLCA Part 1):**
+    Pass $X_{input}$ through a fully connected layer with GELU activation to mix spatial features:
+    $$ X_{token} = GELU(W_{token} X_{input} + b_{token}) $$
+    where $W_{token}$ and $b_{token}$ are learnable weights and biases [S1].
+
+3.  **Hybrid Feature Channel Mixing (MLCA Part 2):**
+    Pass $X_{token}$ through a second fully connected layer with GELU activation to mix feature channels:
+    $$ X_{channel} = GELU(W_{channel} X_{token} + b_{channel}) $$
+    where $W_{channel}$ and $b_{channel}$ are learnable weights and biases [S1].
+
+4.  **MLP Processing:**
+    Pass $X_{channel}$ through the standard NeRF MLP backbone to produce intermediate features. The exact structure of the MLP is not detailed beyond being the "improved backbone" [S1].
+
+5.  **Squeeze-and-Excitation (SE) Filtering:**
+    Apply the SE module to the features between the sampling and inference layers. The source describes this as filtering out high-weight information and dynamically weighting features to help with detail restoration and light color in complex scenes [S1]. The specific internal convolutional structure of the SE module is referenced as "shown in Figure 4" in the source, but standard SE blocks typically involve global average pooling, two FC layers (with reduction and expansion), and sigmoid gating. The source does not provide the explicit formulas for the SE internal operations, only its placement and purpose [S1].
+
+6.  **Inference:**
+    The weighted features are used to predict density $\sigma$ and color $\mathbf{c}$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MixerNeRF(nn.Module):
+    def __init__(self, dim_in, dim_hidden, dim_out):
+        super().__init__()
+        # Positional encoding parameters
+        self.L_x = 10
+        self.L_d = 4
+        
+        # Calculate PE output dimensions
+        # PE(v) = [sin(2^i pi v), cos(2^i pi v)] for i in 0..L-1
+        # This results in 2 * L dimensions per vector
+        self.dim_pe_x = 2 * self.L_x
+        self.dim_pe_d = 2 * self.L_d
+        self.dim_pe_total = self.dim_pe_x + self.dim_pe_d
+        
+        # MLCA Module
+        # Spatial feature capture layer
+        self.fc_token = nn.Linear(self.dim_pe_total, dim_hidden)
+        # Hybrid feature channel layer
+        self.fc_channel = nn.Linear(dim_hidden, dim_hidden)
+        
+        # Standard NeRF MLP backbone (simplified structure)
+        # Note: Source does not specify exact MLP depth/width, 
+        # assuming a standard multi-layer structure for density and color
+        self.mlp = nn.Sequential(
+            nn.Linear(dim_hidden, dim_hidden),
+            nn.ReLU(),
+            nn.Linear(dim_hidden, dim_hidden),
+            nn.ReLU(),
+            nn.Linear(dim_hidden, dim_hidden),
+            nn.ReLU()
+        )
+        
+        # SE Module placeholder
+        # Source places SE between sampling and inference.
+        # Implementation details of SE internal convolutions are not provided in text.
+        # [G] Assuming a standard SE block structure for feature gating.
+        self.se_module = SEBlock(dim_hidden)
+        
+        # Output layers
+        self.sigma_layer = nn.Linear(dim_hidden, 1)
+        self.color_layer = nn.Linear(dim_hidden, 3)
+
+    def positional_encoding(self, v, L):
+        """
+        Standard NeRF positional encoding.
+        v: (..., 3) tensor
+        L: number of frequency bands
+        Returns: (..., 2*L) tensor
+        """
+        # v shape: (..., 3)
+        # freq_bands shape: (L,)
+        freq_bands = 2.0 ** torch.arange(L, device=v.device).float()
+        # Expand v to (..., 1, 3) and freq_bands to (1, L, 1)
+        # Resulting shape: (..., L, 3)
+        scaled_v = v.unsqueeze(-2) * freq_bands.unsqueeze(-1)
+        # Apply sin and cos
+        # Output shape: (..., L, 6) -> (..., 2*L)
+        pe = torch.cat([torch.sin(scaled_v), torch.cos(scaled_v)], dim=-1)
+        return pe.flatten(start_dim=-2)
+
+    def forward(self, x, d):
+        # 1. Positional Encoding
+        pe_x = self.positional_encoding(x, self.L_x)
+        pe_d = self.positional_encoding(d, self.L_d)
+        
+        # 2. Concatenate
+        X_input = torch.cat([pe_x, pe_d], dim=-1)
+        
+        # 3. Spatial Feature Capture
+        X_token = F.gelu(self.fc_token(X_input))
+        
+        # 4. Hybrid Feature Channel Mixing
+        X_channel = F.gelu(self.fc_channel(X_token))
+        
+        # 5. MLP Backbone
+        features = self.mlp(X_channel)
+        
+        # 6. SE Module (Between sampling and inference)
+        # [G] Applying SE to the feature vector before final prediction
+        features = self.se_module(features)
+        
+        # 7. Output
+        sigma = self.sigma_layer(features)
+        color = self.color_layer(features)
+        
+        return sigma, color
+
+class SEBlock(nn.Module):
+    """
+    [G] Generic Squeeze-and-Excitation block implementation.
+    Source [S1] mentions SE-net but does not provide internal formulas.
+    This is a standard implementation to satisfy the "self-contained" requirement.
+    """
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.fc1 = nn.Linear(channels, channels // reduction)
+        self.fc2 = nn.Linear(channels // reduction, channels)
+        
+    def forward(self, x):
+        # Squeeze: Global Average Pooling
+        # x shape: (batch, channels)
+        z = torch.mean(x, dim=-1, keepdim=True) # (batch, 1)
+        # Excitation
+        z = F.relu(self.fc1(z))
+        z = torch.sigmoid(self.fc2(z))
+        # Scale
+        return x * z
+```
+
+## Operating characteristics
+*   **Performance:** Mixer-NeRF improves the learning of perceptual image block similarity by more than 30% compared to standard NeRF [S1].
+*   **Strengths:** It is particularly effective in complex, real, multi-view scenarios, showing the best performance under high-texture and complex lighting conditions [S1]. The MLCA module helps capture local information that standard MLPs miss, reducing blurriness [S1].
+*   **Limitations:** The source does not provide specific computational complexity or memory usage metrics compared to baseline NeRF. The addition of the MLCA and SE modules increases the number of parameters and operations slightly [S1].
+*   **When to use:** Use when standard NeRF produces blurry details in high-texture scenes or complex lighting [S1].
+
+## Background
+Mixer-NeRF was proposed to address the issue that simple multi-layer perceptron (MLP) models in NeRF often result in blurry details due to a lack of necessary local information capture during the sampling process [S1]. The method was introduced in a paper titled "Mixer-NeRF: Research on 3D Reconstruction Methods of Neural Radiance Fields Based on Hybrid Spatial Feature Information" [S1].
+
+## Sources
+[S1] Mixer-NeRF: Research on 3D Reconstruction Methods of Neural Radiance Fields Based on Hybrid Spatial Feature Information, https://doi.org/10.54097/0ek2xd53, fetched 2026-10-27

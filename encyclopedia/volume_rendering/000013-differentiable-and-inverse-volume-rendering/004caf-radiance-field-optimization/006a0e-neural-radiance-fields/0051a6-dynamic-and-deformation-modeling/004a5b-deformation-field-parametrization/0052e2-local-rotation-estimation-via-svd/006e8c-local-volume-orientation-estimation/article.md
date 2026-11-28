@@ -1,0 +1,106 @@
+# Local Volume Orientation Estimation
+
+Also called: Local Rotation Estimation via Heuristic
+
+## Overview
+Local Volume Orientation Estimation is a heuristic method for computing the local rotation matrix of a point in a dynamic volume by analyzing its two nearest neighbors. It solves the problem of view-dependent rendering artifacts caused by large rotations in non-rigid deformation fields by ensuring that the estimated orientation transforms equivariantly with the input points. It differs from [Local Rotation Estimation via SVD](14864-local-rotation-estimation-via-svd.md) by using a direct geometric construction (cross products) rather than singular value decomposition, offering a computationally lighter alternative for establishing local coordinate frames.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The positions of a central point $i$ and its two closest neighbors $j$ and $k$ at a specific time step $t$. Let these positions be denoted as $\mathbf{p}_1, \mathbf{p}_2, \mathbf{p}_3$ respectively, where $\mathbf{p}_1$ corresponds to point $i$.
+*   **Output:** A $3 \times 3$ rotation matrix $\mathbf{T}$, where each row $\mathbf{T}_{m,\cdot}$ represents a basis vector of the local orientation frame.
+
+**Data Structures:**
+*   Point positions: 3D vectors ($\mathbb{R}^3$).
+*   Orientation Matrix: $3 \times 3$ matrix where rows are orthonormal basis vectors.
+
+**Steps:**
+1.  **Neighbor Selection:** Identify the central point $i$ and its two closest neighbors $j$ and $k$ in the spatial neighborhood at the current time step. Assign $\mathbf{p}_1 = \text{pos}(i)$, $\mathbf{p}_2 = \text{pos}(j)$, $\mathbf{p}_3 = \text{pos}(k)$.
+2.  **First Basis Vector ($\mathbf{T}_{1,\cdot}$):** Compute the normalized cross product of the vectors formed by the edges of the triangle defined by the three points. This vector represents the normal to the triangle plane.
+    $$ \mathbf{T}_{1,\cdot} = \frac{\mathbf{p}_2 - \mathbf{p}_1}{\|\mathbf{p}_2 - \mathbf{p}_1\|_2} \times \frac{\mathbf{p}_3 - \mathbf{p}_1}{\|\mathbf{p}_3 - \mathbf{p}_1\|_2} $$
+3.  **Second Basis Vector ($\mathbf{T}_{2,\cdot}$):** Compute the vector from the central point $\mathbf{p}_1$ to the centroid of the triangle formed by $\mathbf{p}_1, \mathbf{p}_2, \mathbf{p}_3$, then normalize it.
+    $$ \mathbf{T}_{2,\cdot} = \frac{\frac{\mathbf{p}_1 + \mathbf{p}_2 + \mathbf{p}_3}{3} - \mathbf{p}_1}{\left\| \frac{\mathbf{p}_1 + \mathbf{p}_2 + \mathbf{p}_3}{3} - \mathbf{p}_1 \right\|_2} $$
+4.  **Third Basis Vector ($\mathbf{T}_{3,\cdot}$):** Compute the cross product of the first two basis vectors to complete the orthonormal frame.
+    $$ \mathbf{T}_{3,\cdot} = \mathbf{T}_{1,\cdot} \times \mathbf{T}_{2,\cdot} $$
+5.  **Matrix Assembly:** Construct the rotation matrix $\mathbf{T}$ by stacking the basis vectors as rows:
+    $$ \mathbf{T} = \begin{bmatrix} \mathbf{T}_{1,\cdot} \\ \mathbf{T}_{2,\cdot} \\ \mathbf{T}_{3,\cdot} \end{bmatrix} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_local_orientation(p1: np.ndarray, p2: np.ndarray, p3: np.ndarray) -> np.ndarray:
+    """
+    Compute the local orientation rotation matrix for a point p1 given neighbors p2 and p3.
+    
+    Args:
+        p1: Position of the central point (3,)
+        p2: Position of the first neighbor (3,)
+        p3: Position of the second neighbor (3,)
+        
+    Returns:
+        T: 3x3 rotation matrix where rows are the basis vectors T1, T2, T3.
+    """
+    # Step 1: Compute edge vectors
+    vec_12 = p2 - p1
+    vec_13 = p3 - p1
+    
+    # Step 2: Compute T1 (Normal to the triangle)
+    # Note: The source normalizes the edge vectors before cross product.
+    # This is equivalent to normalizing the result of the cross product of unnormalized vectors
+    # scaled by the product of their lengths, but the source explicitly normalizes inputs.
+    norm_12 = np.linalg.norm(vec_12)
+    norm_13 = np.linalg.norm(vec_13)
+    
+    # Guard against division by zero if points coincide
+    if norm_12 < 1e-8 or norm_13 < 1e-8:
+        # Fallback to identity or handle degenerate case [G]
+        return np.eye(3)
+        
+    unit_12 = vec_12 / norm_12
+    unit_13 = vec_13 / norm_13
+    
+    T1 = np.cross(unit_12, unit_13)
+    
+    # Step 3: Compute T2 (Vector from p1 to centroid)
+    centroid = (p1 + p2 + p3) / 3.0
+    vec_to_centroid = centroid - p1
+    norm_centroid = np.linalg.norm(vec_to_centroid)
+    
+    if norm_centroid < 1e-8:
+        # Degenerate case: points are coincident
+        return np.eye(3)
+        
+    T2 = vec_to_centroid / norm_centroid
+    
+    # Step 4: Compute T3 (Cross product of T1 and T2)
+    T3 = np.cross(T1, T2)
+    
+    # Step 5: Assemble matrix
+    T = np.stack([T1, T2, T3], axis=0)
+    
+    return T
+```
+
+**Parameters:**
+*   Neighbor count: Fixed at 2 neighbors.
+*   Distance metric: Euclidean distance ($L_2$ norm) is implied by the normalization steps.
+
+**Edge Cases and Pitfalls:**
+*   **Degeneracy:** If points $p_1, p_2, p_3$ are collinear or coincident, the cross products in Step 2 or Step 3 may yield zero vectors, leading to undefined orientations. The source notes that degenerate cases are not explicitly handled in the formulas, relying on the heuristic of finding "closest neighbors" which implies distinct points in typical usage [S1]. Implementers must add guards for zero-length vectors.
+*   **Equivariance:** The method guarantees equivariance: if the input points are rotated by a matrix $R$, the resulting orientation matrix $\mathbf{T}$ rotates by $R$ as well ($\mathbf{T}' = R\mathbf{T}$) [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per point, assuming neighbor lookup is pre-computed or provided. The calculation involves a constant number of vector operations (subtractions, norms, cross products).
+*   **Memory Complexity:** $O(1)$ auxiliary memory per point.
+*   **Strengths:** Computationally efficient compared to SVD-based methods. It provides a robust local frame that respects the geometric structure of the point cloud neighborhood.
+*   **Limitations:** Sensitive to the quality of neighbor selection. If neighbors are not well-distributed or if the local geometry is flat (collinear points), the orientation estimate may be unstable. It does not enforce a specific global consistency, relying on local geometry.
+*   **When to use:** Suitable for real-time or resource-constrained dynamic volume rendering where full SVD decomposition is too expensive, and the local geometry is sufficiently non-degenerate.
+
+## Background
+The method was introduced in the context of Neural Parametric Gaussians for Monocular Non-Rigid Object Reconstruction [S1]. It serves as a deformation basis component to handle non-rigid motion, specifically addressing artifacts arising from large rotations in dynamic scenes. The heuristic approach was chosen to provide an equivariant local coordinate frame without the computational overhead of more complex decomposition techniques.
+
+## Sources
+[S1] Neural Parametric Gaussians for Monocular Non-Rigid Object Reconstruction, https://doi.org/10.1109/cvpr52733.2024.01019, fetched 2026-10-26

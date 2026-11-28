@@ -1,0 +1,57 @@
+# Semantic and Language Embeddings
+
+Also called: SAM-guided Gaussian Grouping
+
+## Overview
+This family extends 3D Gaussian Splatting by attaching high-dimensional feature vectors (semantic, language, or latent) to Gaussian primitives, enabling real-time open-vocabulary semantic segmentation and phrase grounding [S1, unofficial][S2, unofficial]. It differs from standard rendering by accumulating these feature vectors via differentiable alpha-blending [Parent] rather than just color, and from sibling methods by leveraging 2D vision-language models (like CLIP or LSeg) to distill or guide these features without explicit 2D-to-3D lifting networks during inference [S1, unofficial][S2, unofficial].
+
+## Shared principles
+All methods in this family rely on the differentiable alpha-blending accumulation of feature vectors during the rasterization step. For a pixel $p$, the rendered feature vector $\mathbf{F}(p)$ is computed by sorting overlapping Gaussians $\mathcal{O}_p$ front-to-back and applying the following formula:
+
+$$
+\mathbf{F}(p) = \sum_{i \in \mathcal{O}_p} \mathbf{f}_i \cdot \alpha_i \cdot \prod_{j=1}^{i-1} (1 - \alpha_j)
+$$
+
+where:
+*   $\mathbf{f}_i \in \mathbb{R}^d$ is the feature vector (semantic, language, or latent) of the $i$-th Gaussian.
+*   $\alpha_i$ is the opacity of the $i$-th Gaussian.
+*   $\prod_{j=1}^{i-1} (1 - \alpha_j)$ is the transmittance from all preceding Gaussians $j < i$.
+*   If $\mathcal{O}_p$ is empty, $\mathbf{F}(p) = \mathbf{0}$.
+
+The feature dimension $d$ varies by method (e.g., 512 for CLIP, 768 for LSeg/CLIP text, or compressed latent dimensions). The rendering pipeline produces a 2D feature map $\mathbf{F} \in \mathbb{R}^{H \times W \times d}$, which is subsequently compared against text embeddings or decoded to produce segmentation masks.
+
+For structural extensions, all methods share a canonical space representation where 3D Gaussians are initialized in a reference pose (e.g., T-pose or neutral expression). Deformation is achieved by mapping these canonical Gaussians to a target pose defined by parameters (e.g., skeleton joints, expression coefficients). The rendering pipeline remains differentiable, allowing optimization of Gaussian attributes and deformation parameters via photometric loss.
+
+## Subtopics
+
+### [3D Gaussian Splatting with Feature Vectors](8060-3d-gaussian-splatting-with-feature-vectors.md)
+This method extends 3D Gaussian Splatting by attaching a high-dimensional feature vector $\mathbf{f}_i$ to each Gaussian primitive, enabling the rendering of semantic, language, or latent feature maps alongside color. It solves the problem of integrating 2D vision-language models (such as CLIP) into 3D representations, allowing for real-time open-vocabulary semantic segmentation and phrase grounding. It differs from standard 3D Gaussian Splatting [3D Gaussian Splatting Rendering (Software)](52-3d-gaussian-splatting-rendering-software.md) by accumulating feature vectors instead of just color, and from sibling methods like [LSeg Feature Encoding](12078-lseg-feature-encoding.md) by relying on the direct differentiable alpha-blending of learned or distilled features without explicit 2D-to-3D lifting networks during inference.
+
+### [LangSplat](8104-langsplat.md)
+LangSplat pioneers real-time open-vocabulary semantic segmentation by rendering high-dimensional feature maps from 3D Gaussians and comparing them against text embeddings from CLIP. It differs from sibling methods by explicitly leveraging the speed of the 3DGS rasterizer to distill 2D vision-model features into a 3D representation, enabling direct comparison with text queries without intermediate decoding heads for segmentation.
+
+### [Text Embedding Generation with Directional Views](8239-text-embedding-generation-with-directional-views.md)
+This method generates semantic text embeddings conditioned on specific camera viewing directions to enable view-dependent semantic understanding in 3D Gaussian Splatting. It solves the problem of static semantic representations by appending directional descriptors to text prompts before encoding, allowing the system to distinguish between different viewpoints of the same object. It differs from standard text encoding by injecting explicit spatial context into the latent space, and from feature vector methods by operating at the prompt level rather than the Gaussian attribute level.
+
+### [LSeg Feature Encoding](12078-lseg-feature-encoding.md)
+LSeg Feature Encoding is a method for generating semantic feature maps from 3D Gaussian Splatting scenes by distilling knowledge from a pretrained 2D vision-and-language model (LSeg) into the scene's feature fields. It solves the problem of enabling zero-shot semantic segmentation and text-guided editing in 3D by leveraging the strong generalization capabilities of CLIP-based models. It differs from sibling methods by using a specific 2D teacher network (LSeg) to provide dense pixel-level semantic supervision during the distillation process, rather than relying solely on ray-based CLIP gradients or directional view embeddings.
+
+### [VLM-Augmented Segmentation](15758-vlm-augmented-segmentation.md)
+This method enables open-vocabulary 3D segmentation by augmenting 3D Gaussians with compact language features distilled from a Vision-Language Model (VLM). It solves the problem of explicit high-dimensional memory explosion in semantic 3D Gaussian Splatting by using a scene-specific autoencoder to compress VLM embeddings into latent attributes, which are then aggregated via differentiable splatting and decoded for alignment. It differs from [3D Gaussian Splatting with Feature Vectors](8060-3d-gaussian-splatting-with-feature-vectors.md) by specifically targeting language/semantic alignment via VLM distillation rather than generic feature learning, and from [Text Embedding Generation with Directional Views](8239-text-embedding-generation-with-directional-views.md) by operating on per-Gaussian latent attributes rather than view-dependent directional embeddings.
+
+### Language Embedded 3D Gaussians
+Expands feature blending to full scene understanding, encoding object-level embeddings for phrase grounding in addition to pixel-level features [S2, unofficial].
+
+### 3D Vision-Language GS
+Projects vision-language models into the 3DGS framework, training a joint embedding space where rendered feature maps can be queried with natural language [S2, unofficial]. It enables tasks like 3D visual question answering and zero-shot semantic reasoning [S2, unofficial].
+
+### CLIP-Based 3D Model Search
+Searches a database of 3D models (3D-FUTURE) to find assets matching segmented objects in an input image using CLIP embeddings [S3]. It encodes all renderings from the 3D-FUTURE database using CLIP into normalized 768-dimensional vectors, crops target images around object masks, and selects nearest neighbors in CLIP space using cosine distance [S3]. The database contains 10,000+ artist-made models [S3].
+
+## Background
+The concept of attaching semantic features to 3D primitives has evolved from simple per-Gaussian instance IDs supervised by SAM (Segment Anything Model) or video tracking [S1, unofficial] to complex vision-language integration. Early work focused on 2D promptable segmentation lifted to 3D (e.g., SAGA, SegAnyGaussians) [S1, unofficial]. The integration of CLIP and LSeg allowed for open-vocabulary segmentation, with methods like LangSplat and Feature-3DGS demonstrating real-time performance [S1, unofficial]. Recent developments include view-dependent semantic understanding [S1, unofficial][S2, unofficial], compact latent feature storage to reduce memory usage [S1, unofficial], and applications in robotics simulation and digital plant assets [S2, unofficial].
+
+## Sources
+[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S2] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S3] PSDR-Room: Single Photo to Scene using Differentiable Rendering, https://doi.org/10.1145/3610548.3618165, fetched 2026-11-08

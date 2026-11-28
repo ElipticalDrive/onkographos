@@ -1,0 +1,142 @@
+# NeRF-DS
+Also called: Surface-aware Dynamic NeRF
+
+## Overview
+NeRF-DS is a surface-aware dynamic Neural Radiance Field designed to reconstruct and render images of objects undergoing rigid and non-rigid motions, specifically addressing the challenge of changing reflections on moving specular surfaces [S1][S3, unofficial]. It distinguishes itself from standard dynamic NeRFs by conditioning the radiance field on surface position and orientation in the observation space, allowing it to maintain distinct reflected colors for specular surfaces even when mapped to a common canonical space [S2][S3, unofficial]. Unlike siblings such as [ViiNeuS](18109-viineus.md) which may focus on volumetric surface extraction, NeRF-DS explicitly models view-dependent appearance and reflection behavior through a specularity-aware radiance field [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A sequence of images $I_t$ of a dynamic object captured from a moving camera; corresponding camera poses $P_t$; and a moving object mask $M_t$ for each frame [S1, S2][S3, unofficial].
+*   **Outputs:** A synthesized image for a target viewpoint and time, or a 3D representation of the dynamic scene [S1].
+
+**Data Structures:**
+The method employs a dual-network architecture [S2]:
+1.  **Deformation Field Network ($\mathcal{D}$):** Maps time-varying 3D coordinates to a canonical space. It is guided by the object mask [S1][S3, unofficial].
+2.  **Specularity-Aware Radiance Field Network ($\mathcal{R}$):** Predicts volume density $\sigma$ and view-dependent color $c$. It conditions radiance on surface position and orientation [S1][S3, unofficial].
+
+**Numbered Steps:**
+
+1.  **Input Sampling:** For a target pixel at time $t$, sample points $x$ along the viewing ray at uniform intervals [G].
+2.  **Deformation to Canonical Space:**
+    *   Compute the deformation $\Delta x$ using the deformation field network $\mathcal{D}$, conditioned on the input position $x$ and the object mask $M_t$ [S1][S3, unofficial].
+    *   The mask guides the deformation to handle large deformations and occlusions, providing a stable reference despite color variations [S3, unofficial].
+    *   Map the point to canonical space: $x_c = x + \Delta(x, M_t)$ [S2][S3, unofficial].
+3.  **Surface Orientation Estimation:**
+    *   Estimate the surface normal $n$ at the canonical position $x_c$ [G].
+    *   The surface orientation $n$ and the canonical position $x_c$ are used as conditioning factors [S1][S3, unofficial].
+4.  **Radiance Prediction:**
+    *   Query the specularity-aware radiance field $\mathcal{R}$ with the canonical position $x_c$, the view direction $v$, and the surface orientation $n$ [S2][S3, unofficial].
+    *   $\mathcal{R}(x_c, v, n) \rightarrow (\sigma, c)$, where $\sigma$ is volume density and $c$ is the view-dependent color [S2].
+    *   The conditioning on $n$ allows the model to capture complex reflectance properties of specular surfaces [S1].
+5.  **Volume Rendering:**
+    *   Render the final color $C$ using standard differentiable volume rendering integration along the ray [S1, S2].
+    *   $$C = \sum_{i=1}^{N} T_i \alpha_i c_i$$
+    *   Where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance, $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the opacity, and $\delta_i$ is the distance between samples [G].
+
+**Parameters:**
+*   **Mask Weight:** The influence of the object mask $M_t$ on the deformation field is a hyperparameter [G].
+*   **Network Depth/Width:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Specular Variations:** Without surface orientation conditioning, dynamic specular surfaces may exhibit flickering or incorrect colors in the canonical space [S3, unofficial].
+*   **Occlusions:** Large deformations and self-occlusions are handled by the mask-guided deformation field, but accurate masks are critical [S1][S3, unofficial].
+*   **Texture-less Surfaces:** The method may struggle with smooth, texture-less surfaces without additional priors (e.g., depth smoothness), though NeRF-DS itself focuses on reflectance [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nerf_ds_render(ray_origin, ray_direction, time_t, mask_t, step_size):
+    """
+    Renders a single ray for NeRF-DS.
+    
+    Args:
+        ray_origin: (3,) float, origin of the ray in world space.
+        ray_direction: (3,) float, normalized direction of the ray.
+        time_t: float, timestamp of the frame.
+        mask_t: float, binary mask value for the moving object at the current pixel.
+        step_size: float, distance between consecutive samples along the ray.
+        
+    Returns:
+        color: (3,) float, rendered color.
+        depth: float, rendered depth.
+    """
+    # 1. Sample points along the viewing ray
+    points = []
+    dists = []
+    t_vals = []
+    t = 0.0
+    while t < 100.0:
+        points.append(ray_origin + ray_direction * t)
+        dists.append(step_size)
+        t_vals.append(t)
+        t += step_size
+
+    # 2. Deform points to canonical space
+    canonical_points = []
+    for p in points:
+        # Deformation field D(x, M_t) [S1][S3, unofficial]
+        # Architecture not specified in sources [G]
+        delta = deformation_net(p, mask_t)
+        canonical_points.append(p + delta)
+
+    # 3. Estimate surface normals
+    normals = []
+    for pc in canonical_points:
+        # Estimate normal from density gradient [G]
+        # Architecture not specified in sources [G]
+        n = compute_normals_from_density(pc)
+        normals.append(n)
+
+    # 4. Query radiance field
+    sigmas = []
+    colors = []
+    for i, pc in enumerate(canonical_points):
+        v = ray_direction
+        n = normals[i]
+        # Specularity-aware radiance field R(x_c, v, n) [S2]
+        # Architecture not specified in sources [G]
+        sigma, c = radiance_field(pc, v, n)
+        sigmas.append(sigma)
+        colors.append(c)
+
+    # 5. Volume Rendering
+    alpha = [1.0 - exp(-sigmas[i] * dists[i]) for i in range(len(points))]
+    T = 1.0
+    color = [0.0, 0.0, 0.0]
+    depth = 0.0
+    for i in range(len(points)):
+        a = alpha[i]
+        T_i = T
+        T *= (1.0 - a)
+        weight = T_i * a
+        color = [color[j] + weight * colors[i][j] for j in range(3)]
+        depth += weight * t_vals[i]
+    return color, depth
+```
+
+## Subtopics
+
+### Mask-Guided Deformation
+A technique where the deformation field is conditioned on a binary mask of the moving object to stabilize deformation in regions with high specular variation or occlusion [S1][S3, unofficial].
+
+### Specularity-Aware Radiance Field
+A radiance field that takes surface orientation as an additional input to model view-dependent reflections on dynamic surfaces [S2][S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Effectively handles dynamic specular surfaces; maintains temporal consistency using object masks; improves representation of complex reflectance [S1, S2][S3, unofficial].
+*   **Limitations:** Requires accurate object masks; may struggle with texture-less surfaces without additional priors [S1].
+*   **When to use:** When reconstructing dynamic scenes with specular objects and changing reflections [S1][S3, unofficial].
+*   **When not to use:** For static scenes or scenes with only diffuse materials where standard NeRF suffices [S2].
+
+## Background
+NeRF-DS was introduced by Yan et al. in March 2023 [S2]. It extends the original NeRF framework to the dynamic domain, specifically targeting the reconstruction of objects undergoing rigid and non-rigid motions [S1]. The method was developed to address the limitations of existing dynamic NeRFs in handling specular reflections, which often cause flickering and inconsistency in rendered images [S3, unofficial]. It builds on the dual-network design of D-NeRF [S2].
+
+## Sources
+[S1] A Critical Analysis of NeRF-Based 3D Reconstruction, https://doi.org/10.3390/rs15143585, fetched 2026-10-26
+[S2] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S3] Dynamic Scene Reconstruction: Recent Advance in Real-time Rendering and Streaming, https://doi.org/10.48550/arXiv.2503.08166, fetched 2026-10-29 (unofficial)

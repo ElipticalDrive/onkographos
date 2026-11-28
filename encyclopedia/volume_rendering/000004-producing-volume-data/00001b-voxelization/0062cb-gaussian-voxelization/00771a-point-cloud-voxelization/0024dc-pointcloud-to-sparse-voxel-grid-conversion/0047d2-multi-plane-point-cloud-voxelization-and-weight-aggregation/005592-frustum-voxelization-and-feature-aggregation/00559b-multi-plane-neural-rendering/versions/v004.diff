@@ -1,0 +1,162 @@
+--- v003.md
++++ v004.md
+@@ -27,8 +27,8 @@
+ **Steps**
+ 
+-1.  **Feature Initialization:** For each 3D point, initialize an 11-dimensional feature vector. The first 8 dimensions are learnable appearance features (initialized to 0.5), and the last 3 dimensions are the normalized view direction from the camera to the point [S1].
++1.  **Feature Initialization:** For each 3D point, initialize an 11-dimensional feature vector [S1]. The first 8 dimensions are learnable appearance features (initialized to 0.5), and the last 3 dimensions are the normalized view direction from the camera to the point [S1].
+ 2.  **Frustum Definition:** Using the camera projection matrix, lift each pixel to 3D space to form a frustum defined by the minimum and maximum depth of the projected point cloud [S1].
+ 3.  **Voxelization:** Divide the frustum into voxels with respect to image dimensions $H \times W$ and $P$ depth planes along the z-axis, resulting in $P \times H \times W$ frustum voxels [S1].
+-4.  **Feature Aggregation:** Aggregate features of points inside each frustum voxel using geometric rules. Points closer to the camera or pixel center are assigned larger weights [S1].
++4.  **Feature Aggregation:** Aggregate features of points inside each frustum voxel using geometric rules [S1]. Points closer to the camera or pixel center are assigned larger weights [S1].
+ 5.  **Network Input Preparation:** Concatenate the aggregated 3D feature volume ($P \times H \times W$) with the normalized view direction vector [S1].
+ 6.  **3D CNN Encoding:** Pass the input through a U-Net-like 3D CNN encoder:
+@@ -44,5 +44,5 @@
+     *   Conv5: 3x3 kernel, 128 filters, LReLU [S2, unofficial].
+     *   Pool5: 2x2x2, stride 2 [S2, unofficial].
+-7.  **Bottleneck:** Conv6: 1x3x3 kernel, 128 filters, LReLU. If `use_dilation` is True, use dilation rate [1,2,2]; otherwise [1,1,1] [S2, unofficial].
++7.  **Bottleneck:** Conv6: 1x3x3 kernel, 128 filters, LReLU [S2, unofficial]. If `use_dilation` is True, use dilation rate [1,2,2]; otherwise [1,1,1] [S2, unofficial].
+ 8.  **3D CNN Decoding (U-Net Skip Connections):**
+     *   Up1: Upsample Conv6 (2x2x2) and concatenate with Conv5 (128 channels) [S2, unofficial].
+@@ -61,5 +61,5 @@
+ 10. **Volume Rendering:** Accumulate color using discrete volume rendering formula over $d$ samples (default 32) [S2, unofficial]:
+     $$ C = \frac{1}{N} \text{ or } \sum T_i \times (1 - \exp(-\rho_i \times \delta_i)) \times c_i $$
+-11. **Multi-plane Blending:** Alternatively, the network predicts RGB images $I_p$ and blending weights $\alpha_p$ for each plane $p$. The final output image $I$ is obtained by blending:
++11. **Multi-plane Blending:** The network predicts RGB images $I_p$ and blending weights $\alpha_p$ for each plane $p$ [S1]. The final output image $I$ is obtained by blending:
+     $$ I = \sum_p I_p \cdot \alpha_p $$
+     [S1].
+@@ -68,5 +68,4 @@
+ 
+ ```python
+-import numpy as np
+ import torch
+ import torch.nn.functional as F
+@@ -81,11 +80,8 @@
+     return F.interpolate(x, scale_factor=scale_factor, mode='trilinear', align_corners=False)
+ 
+-def concat(a, b, dim=-1):
++def concat(a, b, dim=1):
+     return torch.cat([a, b], dim=dim)
+ 
+-def linear(x, out_channels):
+-    return F.linear(x.flatten(1), weight=None, bias=None).reshape(x.shape[:-1] + (out_channels,))
+-
+-def multi_plane_neural_rendering(point_cloud, camera_intrinsics, camera_extrinsics, H, W, P):
++def multi_plane_neural_rendering(point_cloud, camera_intrinsics, camera_extrinsics, H, W, P, use_dilation=True):
+     """
+     Renders an image from a point cloud using multi-plane neural rendering.
+@@ -98,4 +94,5 @@
+         W: Width of the output image.
+         P: Number of depth planes.
++        use_dilation: Boolean flag for dilated convolution in Conv6.
+         
+     Returns:
+@@ -105,16 +102,16 @@
+     num_points = point_cloud.shape[0]
+     
+-    # Step 1: Initialize Point Features
++    # Step 1: Feature Initialization
+     point_features = torch.zeros((num_points, 11), device=device)
+-    point_features[:, :8] = 0.5
+-    
+-    # Step 2: Compute View Directions
++    point_features[:, :8] = 0.5  # Learnable appearance features [S1]
++    
++    # Compute view directions (camera to point)
+     points_homogeneous = torch.cat([point_cloud, torch.ones((num_points, 1), device=device)], dim=1)
+     points_cam = (camera_extrinsics @ points_homogeneous.T).T[:, :3]
+     norms = torch.norm(points_cam, dim=1, keepdim=True) + 1e-8
+     view_directions = points_cam / norms
+-    point_features[:, 8:] = view_directions
+-    
+-    # Step 3: Define Frustum and Voxelize
++    point_features[:, 8:] = view_directions  # Normalized view direction [S1]
++    
++    # Step 2 & 3: Frustum Definition and Voxelization
+     points_cam_homogeneous = torch.cat([points_cam, torch.ones((num_points, 1), device=device)], dim=1)
+     points_img = (camera_intrinsics @ points_cam_homogeneous[:, :3].T).T
+@@ -135,4 +132,5 @@
+     depth_range = max_depth - min_depth + 1e-8
+     
++    # Initialize voxel grid (P, H, W, 11)
+     voxel_grid = torch.zeros((P, H, W, 11), device=device)
+     
+@@ -144,41 +142,46 @@
+         
+         dist_cam = torch.norm(valid_points[i])
+-        weight = 1.0 / (dist_cam + 1e-8)
++        weight = 1.0 / (dist_cam + 1e-8)  # Geometric rule: closer points get larger weights [S1]
+         
+         voxel_grid[p, v, u] += valid_features[i] * weight
+         
+     # Step 5: Network Input Preparation
+-    view_dir_expanded = view_directions[0].unsqueeze(0).unsqueeze(0).unsqueeze(0)
++    # View direction for the current camera pose (normalized forward vector) [G]
++    view_dir = torch.tensor([0.0, 0.0, 1.0], device=device)
++    view_dir_expanded = view_dir.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(0) # (1, 1, 1, 1, 3)
++    # Permute voxel_grid to (1, 11, P, H, W) and concat view_dir
+     network_input = concat(voxel_grid.permute(0, 3, 1, 2).unsqueeze(0), 
+-                           view_dir_expanded.expand(P, 3, H, W).unsqueeze(0), dim=1)
+-    
+-    # Step 6-9: 3D CNN Forward Pass
++                           view_dir_expanded.expand(1, 3, P, H, W), dim=1)
++    
++    # Step 6: 3D CNN Encoding
+     x = conv3d(network_input, 16, 1) # Conv0
+     x = F.leaky_relu(x)
+     x = conv3d(x, 32, 3) # Conv1
+     x = F.leaky_relu(x)
++    conv1_out = x
+     x = pool3d(x, 2) # Pool1
+     x = conv3d(x, 32, 3) # Conv2
+     x = F.leaky_relu(x)
++    conv2_out = x
+     x = pool3d(x, (2,1,1), (2,1,1)) # Pool2
+-    conv2_out = x
+     x = conv3d(x, 64, 3) # Conv3
+     x = F.leaky_relu(x)
++    conv3_out = x
+     x = pool3d(x, 2) # Pool3
+     x = conv3d(x, 64, 3) # Conv4
+     x = F.leaky_relu(x)
++    conv4_out = x
+     x = pool3d(x, (2,1,1), (2,1,1)) # Pool4
+-    conv4_out = x
+     x = conv3d(x, 128, 3) # Conv5
+     x = F.leaky_relu(x)
++    conv5_out = x
+     x = pool3d(x, 2) # Pool5
+-    conv5_out = x
+     
+     # Step 7: Bottleneck
+-    dilation = (1,2,2) if True else (1,1,1)
++    dilation = (1,2,2) if use_dilation else (1,1,1)
+     x = conv3d(x, 128, (1,3,3), dilation=dilation) # Conv6
+     x = F.leaky_relu(x)
+     
+-    # Step 8: Decoder
++    # Step 8: 3D CNN Decoding
+     x = upsample3d(x, 2) # Up1
+     x = concat(x, conv5_out, dim=1)
+@@ -207,14 +210,12 @@
+     
+     # Step 9: Output Prediction
+-    color = conv3d(x, 3, 1) # Conv12
+-    density = conv3d(x, 1, 1) # Conv12_1
+-    
+-    # Step 10 & 11: Rendering / Blending
+-    # S1 predicts blending weights instead of density for final output
++    color = conv3d(x, 4, 1) # Conv12 predicts RGB + blend weight [S1]
++    # Note: [S2, unofficial] splits this into Conv12 (3 filters) and Conv12_1 (1 filter) for density [S2, unofficial]
++    
++    # Step 10 & 11: Multi-plane Blending
++    rgb_images = color[:, :3, :, :]
+     blend_weights = F.softmax(color[:, 3:4, :, :], dim=1)
+-    rgb_images = color[:, :3, :, :]
+-    
+-    rendered_image = torch.sum(rgb_images * blend_weights, dim=1)
+-    return rendered_image.permute(1, 2, 0)
++    rendered_image = torch.sum(rgb_images * blend_weights, dim=1) # Sum over P dimension
++    return rendered_image.permute(1, 2, 0) # (H, W, 3)
+ ```
+ 

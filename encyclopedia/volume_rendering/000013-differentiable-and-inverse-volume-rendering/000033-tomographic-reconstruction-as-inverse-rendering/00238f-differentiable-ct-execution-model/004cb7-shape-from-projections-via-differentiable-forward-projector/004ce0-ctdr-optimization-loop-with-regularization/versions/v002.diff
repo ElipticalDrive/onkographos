@@ -1,0 +1,142 @@
+--- v001.md
++++ v002.md
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A differentiable forward projector model (derived from [Shape from Projections via Differentiable Forward Projector](13333-shape-from-projections-via-differentiable-forward-projector.md)), initial mesh parameters (vertex positions, material densities $\mu$), 2D projection images $p_{batch}$, angular indices $idx\_angles$, and a wedge mask $args.wedge$ defining valid pixel regions.
+-*   **Outputs:** Optimized mesh geometry and material values.
++*   **Inputs:** A differentiable forward projector model (derived from [Shape from Projections via Differentiable Forward Projector](13333-shape-from-projections-via-differentiable-forward-projector.md)), initial mesh parameters (vertex positions, material densities $\mu$), 2D projection images $p_{batch}$, angular indices $idx\_angles$, and a wedge mask $args.wedge$ defining valid pixel regions [S1, unofficial].
++*   **Outputs:** Optimized mesh geometry and material values [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `model`: Contains differentiable mesh representation. Attributes include `mus` (material densities, size $N$), and internal CUDA tensors for forward/backward passes (e.g., `points2d_bxfx6`, `grad_points2d_bxfx6`).
+-*   `optimizer`: Adam or SGD instance.
+-*   `args`: Configuration object containing weights `wedge`, `wlap`, `wflat`, and flags like `silhouette_mode`.
++*   `model`: Contains differentiable mesh representation. Attributes include `mus` (material densities, size $N$), and internal CUDA tensors for forward/backward passes (e.g., `points2d_bxfx6`, `grad_points2d_bxfx6`) [S1, unofficial].
++*   `optimizer`: Adam or SGD instance [S1, unofficial].
++*   `args`: Configuration object containing weights `wedge`, `wlap`, `wflat`, and flags like `silhouette_mode` [S1, unofficial].
+ 
+ **Numbered Steps:**
+@@ -45,15 +45,51 @@
+     *   Detect self-intersections or invalid topology.
+     *   Revert displacements using `keep_topology(model, search_tree, displace_prev)` [S1, unofficial].
+-9.  **Convergence Check:** If the change in loss $|L_{\text{prev}} - L_{\text{curr}}| < 10^{-11}$ and $L_{\text{curr}} > 0$, terminate [S1, unofficial].
++9.  **Convergence Check:** If the change in loss $d_{\text{loss}} < 10^{-11}$ and $d_{\text{loss}} > 0$, terminate [S1, unofficial].
+ 10. **Learning Rate Decay:** If `epoch + 100 == niter` and `niter > 400`, halve the learning rate [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Initialization
++# Initialization of parameters and flags
++lr = 1e-3  # Not given in the sources. [G]
++niter = 1000  # Not given in the sources. [G]
++use_student_t = False  # Not given in the sources. [G]
++silhouette_mode = False  # Not given in the sources. [G]
++use_collision = False  # Not given in the sources. [G]
++idx_bg = []  # Not given in the sources. [G]
++search_tree = []  # Not given in the sources. [G]
++displace_prev = []  # Not given in the sources. [G]
++
++# Standard optimizer definitions
++def Adam(params, lr, betas):
++    state = {p: {'m': 0.0, 'v': 0.0} for p in params}
++    def step():
++        for p in params:
++            m, v = state[p]['m'], state[p]['v']
++            beta1, beta2 = betas
++            state[p]['m'] = beta1 * m + (1 - beta1) * p.grad
++            state[p]['v'] = beta2 * v + (1 - beta2) * p.grad**2
++            m_hat = state[p]['m'] / (1 - beta1)
++            v_hat = state[p]['v'] / (1 - beta2)
++            p.data -= lr * m_hat / (v_hat**0.5 + 1e-8)
++    return step
++
++def SGD(params, lr, momentum, nesterov):
++    state = {p: 0.0 for p in params}
++    def step():
++        for p in params:
++            buf = state[p]
++            buf = momentum * buf + p.grad
++            if nesterov:
++                p.data -= lr * (p.grad + momentum * buf)
++            else:
++                p.data -= lr * buf
++            state[p] = buf
++    return step
++
+ optimizer = Adam(model.parameters(), lr=lr, betas=(0.9, 0.99))
+-# or: optimizer = SGD(model.parameters(), lr=lr, momentum=0.9, nesterov=True)
++loss_prev = float('inf')
+ 
+ for epoch in range(niter):
+-    # 1. Forward pass
++    # 1. Forward projection
+     phat, mask_valid, edge_loss, lap_loss, flat_loss = model(idx_angles, args.wedge)
+     
+@@ -62,14 +98,12 @@
+     valid_diff = diff[mask_valid]
+     
+-    # Choose loss type (L2 or Student-t)
+     if use_student_t:
+         sigma = 1.0
+-        data_loss = torch.log(1 + (valid_diff / sigma)**2).mean()
++        data_loss = sum(log(1 + (d / sigma)**2) for d in valid_diff) / len(valid_diff)
+     else:
+-        data_loss = valid_diff.pow(2).mean()
++        data_loss = sum(d**2 for d in valid_diff) / len(valid_diff)
+         
+-    # Optional background loss
+     if silhouette_mode:
+-        bg_loss = phat[idx_bg].pow(2).mean()
++        bg_loss = sum(p**2 for p in phat[idx_bg]) / len(idx_bg)
+         data_loss += bg_loss
+         
+@@ -80,17 +114,15 @@
+     loss.backward()
+     optimizer.step()
+-    optimizer.zero_grad() # Clear gradients for next iteration
++    optimizer.zero_grad()
+     
+     # 5. Post-processing
+     loss_now = loss.item()
+-    
+-    # Clamp material densities to non-negative
+     model.mus.data.clamp_(min=0.0)
+     
+-    # Topology preservation
++    # 6. Topology preservation
+     if use_collision:
+         keep_topology(model, search_tree, displace_prev)
+         
+-    # 6. Convergence check
++    # 7. Convergence check
+     if epoch > 0:
+         dloss = abs(loss_prev - loss_now)
+@@ -99,5 +131,5 @@
+     loss_prev = loss_now
+     
+-    # 7. Learning rate decay
++    # 8. Learning rate decay
+     if niter > 400 and (epoch + 100) == niter:
+         for param_group in optimizer.param_groups:
+@@ -117,13 +149,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the forward projection and its CUDA-based backward pass, which scales with the number of pixels, triangles, and rays. The optimization loop adds $O(N_{iter})$ overhead.
+-*   **Memory Complexity:** Requires storing gradients for all mesh parameters and intermediate CUDA tensors (e.g., `grad_points2d_bxfx6`, `grad_mus_n`) [S1, unofficial].
+-*   **Strengths:** Handles missing data via Student-t loss and masks; enforces smoothness and flatness via regularization; preserves topology during deformation.
+-*   **Limitations:** Computationally expensive due to differentiable ray-marching and backpropagation through CUDA kernels; sensitive to regularization weights; requires careful initialization to avoid local minima.
+-*   **When to use:** When reconstructing 3D shapes from sparse or noisy tomographic projections where mesh topology must be preserved.
+-*   **When not to use:** For real-time rendering or when volumetric (voxel) representation is sufficient and topology is not a concern.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
++*   **When to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-The method originates from the "ShapeFromProjections" project by Jake Young, which implements differentiable rendering for tomographic reconstruction [S1, unofficial]. It builds upon differentiable forward projectors that compute gradients of projection data with respect to mesh vertices and material densities [S1, unofficial]. The approach integrates concepts from inverse rendering and geometric regularization to solve the ill-posed problem of shape recovery from 2D projections.
++Not given in the sources.
+ 
+ ## Sources

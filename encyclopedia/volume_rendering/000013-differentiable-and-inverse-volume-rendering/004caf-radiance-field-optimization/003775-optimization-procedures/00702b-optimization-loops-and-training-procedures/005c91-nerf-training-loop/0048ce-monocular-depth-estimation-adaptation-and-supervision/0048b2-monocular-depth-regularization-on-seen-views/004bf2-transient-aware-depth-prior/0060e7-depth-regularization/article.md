@@ -1,0 +1,147 @@
+# Depth Regularization
+
+Also called: DPT Depth Regularization, Depth Supervised Regularization, Monocular Depth Regularization
+
+## Overview
+Depth Regularization incorporates geometric priors from a monocular depth estimator (typically DPT) into the training of radiance fields or 3D Gaussian Splatting to enforce geometric consistency and suppress artifacts like floaters or geometry collapse [S1, S3]. It distinguishes itself from sibling methods by explicitly aligning the scale and offset of the monocular depth map using sparse Structure-from-Motion (SfM) points, rather than relying on scale-invariant losses or generalizable priors [S2]. Unlike [Edge-Aware Disparity Regularization](9140-edge-aware-disparity-regularization.md) which preserves edges via image gradients, or [DNGaussian](7399-dngaussian.md) which uses hard/soft regularization stages, this method focuses on per-frame SfM-based scaling and exponential decay weighting [S2].
+
+## How it works
+**Inputs:**
+- Rendered depth map $\hat{D}$ from the scene representation (Gaussians or spheres) [S2].
+- Monocular depth estimate $D$ from a pre-trained network (e.g., DPT) [S2].
+- Sparse SfM points (inverse depth $D^{SFM}$) from COLMAP for the current view [S2].
+- Camera intrinsics and extrinsics [S2].
+
+**Outputs:**
+- Depth regularization loss $L_D$ and its gradients propagated to the scene representation parameters (Gaussian means, opacities, etc.) [S2].
+
+**Data Structures:**
+- **Monocular Depth Map $D$**: 2D array of inverse depth values predicted by DPT [S2].
+- **SfM Inverse Depth $D^{SFM}$**: Sparse set of inverse depth values at known 3D point locations projected to the image plane [S2].
+- **Rendered Depth $\hat{D}$**: Computed via alpha-compositing of Gaussian depths along each ray [S2].
+
+**Steps:**
+
+1. **Compute Scale and Offset for Monocular Depth:**
+   Calculate the temporal median $t(D)$ and scale $s(D)$ for the monocular inverse depth map $D$ using the SfM points [S2]:
+   $$
+   t(D) = \text{median}(D)
+   $$
+   $$
+   s(D) = \frac{1}{M} \sum_{i \in \text{SFM}} |D_i - t(D)|
+   $$
+   where $M$ is the number of SfM points in the image, and $i \in \text{SFM}$ are the indices of the SfM points [S2].
+
+2. **Align Monocular Depth to Dataset Scale:**
+   Transform the monocular inverse depth $D$ to the dataset scale $D^*$ using the SfM inverse depth statistics $t(D^{SFM})$ and $s(D^{SFM})$ [S2]:
+   $$
+   D^* = \frac{D + t(D^{SFM}) - t(D)}{s(D)} \cdot s(D^{SFM})
+   $$
+   This aligns the relative scale and offset of the monocular estimate with the sparse but metrically accurate SfM points [S2].
+
+3. **Render Scene Depth:**
+   Compute the rendered depth $\hat{D}$ for each pixel by alpha-compositing the depths of the primitives along the ray [S2]. For a ray with $N$ primitives, where $T_i$ is the transmittance, $\alpha_i$ is the opacity of the $i$-th primitive, and $d_i$ is its depth:
+   $$
+   \hat{D} = \sum_{i=1}^{N} T_i \alpha_i d_i
+   $$
+   where $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ [S2].
+
+4. **Compute Depth Loss:**
+   Calculate the difference between the rendered depth $\hat{D}$ and the aligned monocular depth $D^*$ [S2]:
+   $$
+   L_{raw} = \hat{D} - D^*
+   $$
+   The source specifies this subtraction directly, and implementations typically apply an $L_1$ or $L_2$ norm [G].
+
+5. **Apply Exponential Decay Weighting:**
+   Weight the depth loss with an exponential decay factor $w(t)$ throughout the optimization, starting at 1 and ending at 0.01 for per-chunk optimization [S2]:
+   $$
+   L_D = w(t) \cdot L_{raw}
+   $$
+   where $t$ is the current training step [S2].
+
+6. **Backpropagation:**
+   Propagate gradients from $L_D$ to the scene representation parameters [S2]. Specifically, gradients flow to each Gaussian's depth (mean position) and to the rendering $\alpha$ (opacity), which affects the Gaussian's contribution to the final depth and its screen-space position [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_depth_regularization_loss(rendered_depth, mono_depth, sfm_depth, sfm_indices, M, decay_weight):
+    # Step 1: Compute scale and offset for monocular depth
+    t_mono = median(mono_depth)
+    s_mono = sum(abs(mono_depth[i] - t_mono) for i in sfm_indices) / M
+    
+    # Step 2: Align monocular depth to dataset scale
+    t_sfm = median(sfm_depth)
+    s_sfm = sum(abs(sfm_depth[i] - t_sfm) for i in sfm_indices) / M
+    aligned_depth = (mono_depth + t_sfm - t_mono) / s_mono * s_sfm
+    
+    # Step 3 & 4: Compute raw loss (rendered depth already computed via alpha-compositing)
+    raw_loss = rendered_depth - aligned_depth
+    
+    # Step 5: Apply exponential decay weighting
+    depth_loss = decay_weight * raw_loss
+    
+    # Step 6: Backpropagation handled automatically by autograd framework
+    return depth_loss
+```
+
+**Parameters:**
+- **Monocular Depth Estimator:** DPT [Ranftl et al. 2021] [S2].
+- **Decay Start/End:** 1.0 to 0.01 [S2].
+- **SfM Points:** Provided by COLMAP [S2].
+- **Regularization Weight $\lambda_{DS}$:** 1000 (used in SatGeo-NeRF variant for the first 25% of iterations) [S1].
+
+**Edge Cases and Pitfalls:**
+Not given in the sources.
+
+## Subtopics
+
+### Opacity-Depth Regularization
+A regularization term applied during novel-view synthesis optimization to encourage spheres to move to the correct scene depth [S3]. It sets itself apart by using an energy function based on opacity and depth rather than direct depth matching [S3].
+- **Definition:** Encourages spheres to move to correct depth [S3].
+- **Step:** Thresholding: Apply a threshold to spheres with low opacity to remove them [S3].
+- **Formula:** Energy = $-z_i \cdot O_i$, where $z_i$ is the depth of sphere $i$ and $O_i$ is its opacity [S3].
+
+### Sparse Input Reconstruction via Regularization
+Methods that introduce additional constraints such as depth information to enhance detail and global consistency when observational data is sparse [S4]. It distinguishes itself by focusing on the trade-off between strong geometric constraints and computational cost in sparse-view scenarios [S4].
+- **Definition:** Enhances detail and global consistency with sparse data [S4].
+- **Pitfall:** Efficacy diminishes with very limited views (e.g., one view) [S4].
+- **Comparison:** Relies on strong constraints and per-scene optimization, favoring geometric quality but incurring higher computation compared to generalizability-based methods [S4].
+- **Usage:** DNGaussian uses a depth-regularized scheme [S4]. FSGS uses Gaussian Unpooling and depth regularization [S4]. MVSplat uses cost volume for geometry cues [S4].
+
+### 2DGS + $\tilde{L}_d$ variant
+A variant of 2D Gaussian Splatting (2DGS) that incorporates a depth regularization strategy by enabling supervision and gradient flow to depths within the CUDA backend rasterizer, supervised with sensor or monocular depth estimates [S5]. It sets itself apart by integrating depth supervision directly into the rasterizer's gradient flow [S5].
+- **Definition:** 2DGS with depth regularization in CUDA rasterizer [S5].
+- **Formula:** The overall optimization loss is defined as $L = L_{rgb} + \lambda_d \tilde{L}_d$, where $L_{rgb}$ is the original loss from 2DGS and $\tilde{L}_d$ is the depth regularization term [S5].
+- **Parameter:** $\lambda_d = 0.2$ [S5].
+
+### Frustum Constraint Loss
+A regularization term preventing Gaussians from drifting to unsupported regions of space by penalizing continuous violations of image bounds and valid depth ranges across input views [S6]. It distinguishes itself by using a soft penalty based on the minimum frustum violation across all input views [S6].
+- **Definition:** Prevents Gaussians from drifting to unsupported regions [S6].
+- **Step:** For each Gaussian $n$ with center $\mu_n$, transform to camera coordinates, project to image coordinates, and measure continuous violations of image bounds and valid depth range for each input view [S6]. If a Gaussian lies inside at least one input-view frustum, its penalty is zero [S6]. Otherwise, it receives a smooth positive penalty based on the minimum violation $v_n$ [S6].
+- **Formula:** Compute frustum loss: $L_{fru} = \frac{1}{N} \sum_{n=1}^{N} \log(1 + v_n/\tau)$, where $v_n$ is the minimum frustum violation of Gaussian $n$ across input views, and $\tau$ controls softness [S6].
+- **Parameter:** $\tau$: Parameter controlling the softness of the penalty [S6].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the monocular depth estimation inference time (DPT) and the additional gradient computation for depth alignment [S2].
+- **Memory Complexity:** Requires storing the monocular depth map and SfM points per view [S2].
+- **Measured Performance:** Not given in the sources [G].
+- **Scaling:** The method scales with the number of training views and the density of SfM points [S2].
+- **Strengths:** Improves geometric consistency and reduces floaters by leveraging strong monocular priors aligned with sparse SfM data [S1, S3].
+- **Limitations:** Efficacy diminishes with very sparse input views (e.g., single view) [S4]. Relies on the accuracy of the monocular depth estimator and SfM reconstruction [S2].
+- **When to Use:** When geometric consistency is critical and sparse SfM points are available to align the monocular depth scale [S2].
+- **When Not to Use:** When input views are extremely sparse (e.g., single view) or when SfM reconstruction is unreliable [S4].
+
+## Background
+Depth Regularization using monocular depth estimators like DPT was introduced in the context of 3D Gaussian Splatting optimization to address geometry degradation in large datasets [S2]. The method builds on the observation that monocular depth estimates, while scale-ambiguous, provide strong geometric cues that can be aligned with sparse SfM points to provide metric supervision [S2]. It is used in training loops for radiance fields and Gaussian Splatting to improve novel view synthesis quality [S2].
+
+## Sources
+[S1] SatGeo-NeRF: Geometrically Regularized NeRF for Satellite Imagery, https://doi.org/10.5194/isprs-annals-xi-2-2026-367-2026, fetched 2026-10-27
+[S2] A Hierarchical 3D Gaussian Representation for Real-Time Rendering of Very Large Datasets, https://www.youtube.com/watch?v=p-mb2TzVJZk, fetched 2026-10-31
+[S3] Pulsar: Efficient Sphere-based Neural Rendering, https://doi.org/10.1109/cvpr46437.2021.00149, fetched 2026-10-26
+[S4] A Survey on 3D Gaussian Splatting, https://doi.org/10.1145/3807511, fetched 2026-10-27
+[S5] DN-Splatter: Depth and Normal Priors for Gaussian Splatting and Meshing, https://doi.org/10.1109/wacv61041.2025.00241, fetched 2026-10-26
+[S6] GlobalSplat: Efficient Feed-Forward 3D Gaussian Splatting via Global Scene Tokens, https://doi.org/10.1007/978-3-032-37595-7_10, fetched 2026-10-29
+[S7] Dynamic View Synthesis From Small Camera Motion Videos, https://doi.org/10.1109/tvcg.2025.3565642, fetched 2026-10-27

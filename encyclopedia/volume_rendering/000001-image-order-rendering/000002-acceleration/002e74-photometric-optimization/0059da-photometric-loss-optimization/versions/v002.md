@@ -1,0 +1,67 @@
+# Photometric Loss Optimization
+
+## Overview
+Photometric Loss Optimization is a differentiable inverse rendering technique that refines scene parameters, camera poses, or geometry by minimizing the pixel-wise difference between rendered images and ground-truth observations. It sets itself apart from joint optimization methods by isolating specific variables (e.g., poses or rigid transformations) while keeping the radiance field fixed, or by employing specialized regularization to handle dynamic or sparse representations, as detailed in its variants [7526-gradient-based-se-3-optimization.md][12699-test-time-photometric-optimization.md][16983-point-cloud-optimization-via-pointersect.md][19691-ray-based-photometric-loss-for-heat-kernel-textures.md].
+
+## Shared principles
+The core mechanism involves defining a differentiable rendering function $I(r; \theta)$ that maps camera parameters and scene representation $\theta$ to pixel colors for a set of rays $R$ [G]. The optimization objective is a photometric loss $\mathcal{L}_{photo}$, typically the Mean Squared Error (MSE) or L1 norm between the rendered color $I(r)$ and the target color $\hat{C}(r)$ [S1]:
+
+$$
+\mathcal{L}_{photo} = \frac{1}{|R|} \sum_{r \in R} \| I(r) - \hat{C}(r) \|^2
+$$
+
+Gradients $\nabla_\theta \mathcal{L}_{photo}$ are computed via backpropagation through the differentiable renderer [G]. The parameters $\theta$ (e.g., camera pose $v$ or transformation $T$) are updated using gradient descent:
+
+$$
+\theta_{t+1} = \theta_t - \eta \nabla_\theta \mathcal{L}_{photo}
+$$
+
+where $\eta$ is the learning rate [G]. The method often restricts ray sampling to high-confidence regions or uses masks to avoid artifacts from scene inaccuracies or occlusions [7526-gradient-based-se-3-optimization.md][12699-test-time-photometric-optimization.md].
+
+## Subtopics
+
+### [Gradient-Based SE(3) Optimization](7526-gradient-based-se-3-optimization.md)
+A method for rigidly registering two radiance fields by minimizing photometric error between them. It differs from single-image alignment methods by optimizing over a set of novel views from the source scene, and uses viewshed masks to restrict ray sampling to high-confidence regions, avoiding artifacts from NeRF inaccuracies. Choose it when aligning two scenes with known initial poses and reliable viewshed masks.
+
+### [Test-Time Photometric Optimization](12699-test-time-photometric-optimization.md)
+A post-processing refinement step applied to trained NeRF models to isolate view synthesis quality from camera pose estimation errors. It compensates for pose inaccuracies by optimizing evaluation camera poses during validation while keeping NeRF weights fixed. Choose it when evaluating novel-view synthesis metrics and needing to decouple rendering fidelity from pose misalignment.
+
+### [Point Cloud Optimization via Pointersect](16983-point-cloud-optimization-via-pointersect.md)
+Optimizes the position and color of a noisy point cloud to minimize photometric difference between Pointersect-rendered images and ground-truth RGB images with foreground masks. It distinguishes itself by jointly optimizing geometry and appearance, utilizing Pointersect’s cloud-ray intersection mechanism for dense, differentiable surface normal and hit estimates. Choose it when reconstructing or refining explicit point cloud representations from multi-view images.
+
+### [Ray-based Photometric Loss for Heat Kernel Textures](19691-ray-based-photometric-loss-for-heat-kernel-textures.md)
+Defines the differentiable rendering objective for training Heat Kernel Textures (HKTex) in a multi-view setting. It minimizes the difference between predicted and target ray colors to reconstruct diffuse albedo. It is distinguished by exclusively using synthetic rendered images as ground truth to prevent baking scene lighting, shadows, and view-dependent reflections into the diffuse albedo. Choose it when training HKTex representations and needing to isolate diffuse material properties.
+
+### DaReNeRF Training Strategy
+Integrates photometric loss into a direction-aware representation for dynamic scenes, employing total variation regularization and emptiness voxel skipping [S1].
+*   **Definition:** The training process uses photometric loss, total variation regularization, coarse-to-fine resolution scheduling, and emptiness voxel skipping [S1].
+*   **Steps:**
+    1.  Compute photometric loss between rendered colors $C(r)$ and ground-truth colors $\hat{C}(r)$ [S1].
+    2.  Compute total variation (TV) loss on the direction-aware representation to enforce spatio-temporal continuity [S1].
+    3.  Compute mask sparsity loss $L_m$ as the sum of all mask values [S1].
+    4.  Combine losses: $L = L_{photo} + \lambda_{reg} L_{reg} + \lambda_m L_m$ [S1].
+    5.  Use coarse-to-fine training strategy, progressively increasing grid resolution [S1].
+    6.  Generate emptiness voxel by evaluating opacities across time steps and aggregating via maximum operation [S1].
+    7.  Skip points in empty regions using the emptiness voxel during rendering [S1].
+*   **Parameters:** Regularization weight $\lambda_{reg}$ [S1].
+
+### Spatially-Varying Illumination Estimation
+A method to estimate illumination at the specific position of virtual volume data rather than the camera position, allowing volumetric structures to be relocated in the world coordinate system while maintaining correct spatially-varying lighting [S2].
+*   **Steps:**
+    1.  Determine the relative position between the virtual volume model and the light sources in the world coordinate system [S2].
+    2.  Estimate the illumination specifically from the position of the volume data using the HDR environment map [S2].
+
+### Deep Direct Volume Rendering
+An AI-driven approach enabling adaptive, data-driven illumination that outperforms manual designs in efficiency and perceptual quality for large datasets [S3, unofficial].
+
+### RFP
+Uses a bidirectional photometric loss for unsupervised partitioning of a scene into distinct, salient regions corresponding to object instances [S4].
+
+## Background
+Originating from the broader field of differentiable rendering and inverse graphics, photometric optimization has been adapted for Neural Radiance Fields (NeRF) and volume rendering to handle pose estimation and dynamic scene reconstruction [G]. The DaReNeRF application leverages a direction-aware representation using wavelet coefficients to model 3D volumes, optimizing them through a photometric loss function that measures the difference between rendered and target images [S1]. It builds on earlier work in masked wavelet NeRF and coarse-to-fine training strategies [S1].
+
+## Sources
+[S1] DaReNeRF: Direction-aware Representation for Dynamic Scenes, https://doi.org/10.1109/cvpr52733.2024.00481, fetched 2026-10-27
+[S2] PDF A Mixed Reality Framework for Interactive Realistic Volume Rendering ..., https://aplusx.github.io/files/VRW.pdf, fetched 2026-10-29
+[S3] volume rendering, https://grokipedia.com/page/Volume_rendering, fetched 2026-10-26 (unofficial)
+[S4] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27

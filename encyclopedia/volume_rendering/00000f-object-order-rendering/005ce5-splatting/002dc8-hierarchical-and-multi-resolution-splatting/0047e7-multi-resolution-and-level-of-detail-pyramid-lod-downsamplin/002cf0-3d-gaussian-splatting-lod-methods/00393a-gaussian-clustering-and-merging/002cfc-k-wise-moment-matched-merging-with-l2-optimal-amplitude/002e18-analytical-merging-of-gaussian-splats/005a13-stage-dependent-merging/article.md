@@ -1,0 +1,115 @@
+# Stage-dependent merging
+
+Also called: Grouped merging, Soft-weighted merging
+
+## Overview
+Stage-dependent merging is a technique for progressively refining Gaussian representations by partitioning candidate Gaussians into groups and merging them using geometry-conditioned soft weights, exposing only coarse representations at early training stages [S1]. It sets itself apart from its sibling [Analytical Merging of Gaussian Splats](5681-analytical-merging-of-gaussian-splats.md) by using a learned, soft-weighted aggregation rather than a closed-form L2-optimal geometric merge, allowing for a smooth transition from coarse to fine detail during training [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of 16 candidate Gaussians per token, partitioned into groups. Each candidate $i$ has attributes $\mathbf{z}_{p,g,i}$ (e.g., position, covariance, SH coefficients) and a gate logit $\ell_{p,g,i}$.
+*   **Outputs:** A merged set of Gaussians $\bar{\mathbf{z}}_{p,g}$ for each group, which are then interpolated to form the final representation for the current stage.
+
+**Data Structures:**
+*   Candidates are stored in groups of size $b_s$.
+*   Gate logits $\ell_{p,g,i}$ are scalar values per candidate.
+*   Attributes $\mathbf{z}$ are vectors/matrices depending on the specific Gaussian property.
+
+**Steps:**
+1.  **Partitioning:** At stage $s$, partition the 16 candidates into $G = 2^s$ groups, where each group has size $b_s = 16 / G$ [S1].
+2.  **Gate Weight Calculation:** For each group $g$, calculate normalized gate weights using a softmax function conditioned on the gate logits and a temperature parameter $\tau$ [S1]:
+    $$
+    w_{p,g,i} = \frac {\exp (\ell _{p,g,i}/\tau )} {\sum _{j=1}^{b_s}\exp (\ell _{p,g,j}/\tau )}
+    $$
+    where $\ell_{p,g,i}$ is the gate logit for the $i$-th candidate in group $g$, and $\tau$ is the temperature parameter [S1].
+3.  **Merging:** Compute the merged output for attribute $\mathbf{z}$ in group $g$ by taking the weighted sum of the candidates' attributes [S1]:
+    $$
+    \bar {\mathbf {z}}_{p,g} = \sum _{i=1}^{b_s} w_{p,g,i}\,\mathbf {z}_{p,g,i}
+    $$
+4.  **Smooth Stage Transition:** To avoid abrupt transitions between stages, linearly interpolate between the previous coarser representation $\mathbf{z}^{(s-1)}$ and the current less-merged representation $\bar{\mathbf{z}}^{(s)}$ using a transition coefficient $\lambda \in [0, 1]$ [S1]:
+    $$
+    \mathbf {z}^{(s)} = (1-\lambda )\,\mathbf {z}^{(s-1)} + \lambda \,\bar {\mathbf {z}}^{(s)}
+    $$
+    This procedure does not introduce new candidates but progressively relaxes the merging applied to the same underlying set of predictions [S1].
+
+**Parameters:**
+*   $\tau$: Temperature parameter for the softmax gate [S1].
+*   $\lambda$: Transition coefficient for stage interpolation [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def stage_dependent_merge(candidates, gate_logits, stage_s, tau, lambda_val, prev_stage_repr):
+    """
+    candidates: List of 16 Gaussian objects, each with attributes z (vector/matrix)
+    gate_logits: List of 16 floats (l_p,g,i)
+    stage_s: Integer, current training stage
+    tau: Float, temperature parameter
+    lambda_val: Float, transition coefficient [0, 1]
+    prev_stage_repr: List of merged Gaussian objects from stage s-1
+    """
+    num_candidates = 16
+    num_groups = 2 ** stage_s
+    group_size = num_candidates // num_groups
+    
+    current_stage_repr = []
+    
+    for g in range(num_groups):
+        group_candidates = candidates[g * group_size : (g + 1) * group_size]
+        group_logits = gate_logits[g * group_size : (g + 1) * group_size]
+        
+        # Calculate softmax weights
+        exp_logits = [math.exp(l / tau) for l in group_logits]
+        sum_exp = sum(exp_logits)
+        weights = [e / sum_exp for e in exp_logits]
+        
+        # Merge attributes
+        merged_z = None
+        for i, z in enumerate(group_candidates):
+            if merged_z is None:
+                merged_z = z.copy()
+                merged_z.attributes = {}
+            for attr_name, attr_val in z.attributes.items():
+                if attr_name not in merged_z.attributes:
+                    merged_z.attributes[attr_name] = 0.0
+                merged_z.attributes[attr_name] += weights[i] * attr_val
+        
+        current_stage_repr.append(merged_z)
+        
+    # Smooth stage transition
+    final_repr = []
+    for i, merged_z in enumerate(current_stage_repr):
+        if prev_stage_repr and i < len(prev_stage_repr):
+            prev_z = prev_stage_repr[i]
+            # Interpolate attributes
+            interpolated_z = merged_z.copy()
+            interpolated_z.attributes = {}
+            for attr_name in merged_z.attributes:
+                val_curr = merged_z.attributes[attr_name]
+                val_prev = prev_z.attributes.get(attr_name, 0.0)
+                interpolated_z.attributes[attr_name] = (1 - lambda_val) * val_prev + lambda_val * val_curr
+            final_repr.append(interpolated_z)
+        else:
+            final_repr.append(merged_z)
+            
+    return final_repr
+```
+
+## Subtopics
+
+### Seamless Merging
+A variant used in large-scale reconstruction where cells are optimized independently and then merged. After optimization, 3D Gaussians outside the original region (before boundary expansion) are deleted for each cell to prevent floaters in other cells. The non-overlapping cells are then merged. The merged scene is seamless in appearance and geometry without obvious border artifacts because some training views are common between adjacent cells, eliminating the need for further appearance adjustment [S2].
+
+## Operating characteristics
+*   **Complexity:** The merging operation is linear with respect to the number of candidates per group ($b_s$) and the number of groups ($G$). Since $b_s \times G = 16$, the complexity per token is constant $O(1)$ with respect to the total number of candidates, but depends on the dimensionality of the attributes $\mathbf{z}$ [S1].
+*   **Performance:** Exposes only coarse representations at early stages, potentially reducing computational load during initial training phases [S1].
+*   **Strengths:** Allows for progressive refinement and smooth transitions between levels of detail [S1].
+*   **Limitations:** Requires learning gate logits and managing stage transitions [S1].
+
+## Background
+Stage-dependent merging was introduced in GlobalSplat: Efficient Feed-Forward 3D Gaussian Splatting via Global Scene Tokens [S1]. It is designed to enable efficient feed-forward rendering by managing the complexity of Gaussian representations through a staged merging process.
+
+## Sources
+[S1] GlobalSplat: Efficient Feed-Forward 3D Gaussian Splatting via Global Scene Tokens, https://doi.org/10.1007/978-3-032-37595-7_10, fetched 2026-10-29
+[S2] VastGaussian: Vast 3D Gaussians for Large Scene Reconstruction, https://doi.org/10.1109/cvpr52733.2024.00494, fetched 2026-10-26

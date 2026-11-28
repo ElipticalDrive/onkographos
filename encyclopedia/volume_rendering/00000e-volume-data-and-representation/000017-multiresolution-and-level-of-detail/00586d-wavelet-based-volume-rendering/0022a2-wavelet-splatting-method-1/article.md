@@ -1,0 +1,59 @@
+# Wavelet Splatting Method 1
+
+Also called: Op1
+
+## Overview
+Wavelet Splatting Method 1 is a volume rendering technique that decomposes volume data into a wavelet pyramid representation to compute splats via an orthogonal projection operator [S1]. It is distinguished from its sibling [Wavelet Splatting Method 2](2849-wavelet-splatting-method-2.md) by its slower complexity decay rate, making it less efficient for large-scale rendering but potentially suitable for scenarios requiring specific interpolation qualities or adaptive resolution control [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Volume data represented in a wavelet pyramid; rendering screen size $N$; wavelet scale $j$; maximum resolution $M$; step size $h$.
+*   **Output:** Rendered image; number of operations required for the current scale.
+
+**Data Structures:**
+The method operates on a hierarchical wavelet representation. The specific bit-packing or memory layout of the wavelet coefficients is not detailed in the sources, but the method assumes access to coefficients at scale $j$ [S1].
+
+**Algorithm Steps:**
+1.  **Decomposition:** The volume data is decomposed into a wavelet pyramid. The complexity of the representation at scale $j$ is governed by the decay of the number of significant coefficients.
+2.  **Splatting:** For each scale $j$, splats are computed. The number of operations, denoted as $Op1$, depends on the scale $j$ and the resolution parameters.
+3.  **Projection:** An orthogonal projection operator is used to map the wavelet coefficients to the screen space [S1].
+4.  **Accumulation:** The splats are accumulated to form the final image.
+
+**Formulas:**
+The time complexity for Method 1, denoted as $Op1$, decays with a factor of $2^j$ per scale $j$ [S1].
+$$ Op1 \propto 2^{-j} $$
+In contrast, Method 2 decays with up to $2^{3j}$ [S1]. The total number of operations for Method 2 is given by:
+$$ Op2 = k_3 2^{-j} M^3 + k_7 N^2 $$
+where $k_3$ and $k_7$ are constants, $M$ is the maximum resolution, and $N$ is the screen size [S1]. For Method 1, the decay is slower:
+$$ Op1 \propto 2^{-j} $$
+The factor $8^j$ per scale $j$ is noted as the theoretical limit, as complexity cannot decrease faster than the number of voxels decreases per scale [S1].
+
+**Parameters:**
+*   $N$: Rendering screen size.
+*   $M$: Maximum resolution (e.g., 16, 32, 64, 128, 256, 512, 1024, 2048).
+*   $j$: Wavelet scale.
+*   $h$: Step size (assumed to be 1 in comparisons) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method relies on the accuracy of the wavelet decomposition and the orthogonal projection. Degenerate inputs where the wavelet coefficients do not decay sufficiently may lead to higher computational costs [S1].
+*   **Boundaries:** The method assumes a constant complexity depending only on the rendering screen size $N^2$ at the finest scale [S1].
+
+## Subtopics
+
+### [High-Quality Wavelet Splatting](23803-high-quality-wavelet-splatting.md)
+A variant that decays complexity rapidly ($2^{-3j}$) at small scales, offering significant speedups for large volumes while maintaining higher quality, particularly for data with significant high-frequency content.
+
+## Operating characteristics
+*   **Time Complexity:** The complexity $Op1$ decays with a factor of $2^j$ per scale $j$ [S1]. This is slower than Method 2, which decays with up to $2^{3j}$ [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** In comparisons with $N=M$ and $h=1$, Method 1 (dashed line) shows higher operation counts than Method 2 (solid line) as scale $j$ increases [S1].
+*   **Strengths:** Allows full control over approximation error and can adapt $N$ or $j$ to user behavior, reducing resolution or zooming into areas of interest [S1].
+*   **Limitations:** Slower complexity decay compared to Method 2, making it less efficient for large-scale rendering [S1].
+*   **When to Use:** Suitable for scenarios where the high quality of interpolation is prioritized over raw speed, or when adaptive resolution control is needed [S1].
+*   **When Not to Use:** When rendering large volumes where computational efficiency is critical, Method 2 is preferred due to its faster decay rate [S1].
+
+## Background
+The method is part of the wavelet-based volume rendering techniques developed in the late 1990s. It is described in the paper "Wavelet Projections for Volume Rendering" by Horbelt et al. [S1]. The work builds upon earlier hierarchical splatting techniques  and wavelet theory [S1]. The specific comparison between Method 1 and Method 2 is detailed in the same source [S1].
+
+## Sources
+[S1] Wavelet Projections for Volume Rendering, https://bigwww.epfl.ch/publications/horbelt9901.pdf, fetched 2026-10-28

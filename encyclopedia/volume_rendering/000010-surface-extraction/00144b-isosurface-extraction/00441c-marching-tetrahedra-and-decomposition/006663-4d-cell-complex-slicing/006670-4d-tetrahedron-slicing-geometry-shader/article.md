@@ -1,0 +1,147 @@
+# 4D Tetrahedron Slicing (Geometry Shader)
+
+Also called: Adjacency Primitive Slicing, gl4d Method
+
+## Overview
+A GPU-based method to compute the 3D cross-section of a 4D tetrahedron against a slicing hyperplane using the Geometry Shader [S1, unofficial]. It outputs 0, 1, or 2 triangles representing the intersection [S1, unofficial]. It sets itself apart from its sibling [4D Tetrahedron Slicing (Vertex Shader)](19631-4d-tetrahedron-slicing-vertex-shader.md) by avoiding adjacency primitives and data replication, instead replicating vertex data four times to drive parallel computation in the Vertex Shader, at the cost of increased conditional branching [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 4D tetrahedron defined by four vertices $V_0, V_1, V_2, V_3$ in 4D space $(x, y, z, w)$. The slicing hyperplane is defined by a normal vector $\mathbf{n}$ and a distance $d$ from the origin, such that a point $\mathbf{p}$ is on the plane if $\mathbf{p} \cdot \mathbf{n} = d$. The input primitive type is an adjacency primitive (e.g., `gl_lines_adjacency` or equivalent) that allows passing all four vertices to the Geometry Shader in one invocation [S1, unofficial].
+*   **Output:** A stream of 3D triangles (0, 1, or 2 triangles) representing the intersection of the tetrahedron with the slicing hyperplane [S1, unofficial].
+
+**Data Structures:**
+*   **Vertex Data:** Each vertex is a 4D vector. In the context of the adjacency primitive, the geometry shader receives an array of four 4D vertices.
+*   **Slicing Plane:** Defined by a 4D normal vector $\mathbf{n} = (n_x, n_y, n_z, n_w)$ and scalar $d$.
+
+**Steps:**
+1.  **Receive Vertices:** The Geometry Shader receives the four vertices of the tetrahedron via the adjacency primitive input [S1, unofficial].
+2.  **Evaluate Plane Side:** For each vertex $V_i$ ($i \in \{0, 1, 2, 3\}$), compute the signed distance to the slicing hyperplane:
+    $$
+    h_i = V_i \cdot \mathbf{n} - d
+    $$
+    Determine the side of the plane for each vertex: positive ($h_i > 0$), negative ($h_i < 0$), or on the plane ($h_i = 0$) [S1, unofficial].
+3.  **Determine Intersection Type:** Count the number of vertices on each side of the plane.
+    *   If all vertices are on the same side (or on the plane), the intersection is empty (0 triangles) [S1, unofficial].
+    *   If exactly one vertex is on one side and three are on the other, the intersection is a triangle [S1, unofficial].
+    *   If exactly two vertices are on one side and two are on the other, the intersection is a quadrilateral, which is decomposed into two triangles [S1, unofficial].
+4.  **Compute Intersection Points:** For each edge of the tetrahedron connecting vertices $V_i$ and $V_j$ where $h_i$ and $h_j$ have opposite signs (or one is zero), compute the intersection point $P_{ij}$ on the slicing hyperplane. The intersection point lies on the line segment between $V_i$ and $V_j$:
+    $$
+    P_{ij} = V_i + \frac{0 - h_i}{h_j - h_i} (V_j - V_i)
+    $$
+    Note: Since the slicing hyperplane is 4D, the resulting point $P_{ij}$ is a 4D point. However, the cross-section is a 3D object embedded in 4D space. To render it, the 4D coordinates must be projected or interpreted as 3D coordinates (typically by dropping the $w$ component or projecting to a 3D subspace, depending on the specific 4D rendering pipeline's conventions). The source notes imply the output is 3D vertices [S1, unofficial].
+5.  **Output Triangles:**
+    *   **Triangle Case:** Output the three intersection points as a single triangle.
+    *   **Quadrilateral Case:** Output the four intersection points as two triangles. The quadrilateral is formed by the four intersection points on the edges. To ensure correct winding and back-face culling, the vertices must be ordered consistently (e.g., counter-clockwise when viewed from the normal direction) [S1, unofficial].
+    *   **Empty Case:** Output nothing [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Geometry Shader Pseudocode
+# Input: gl_in[4] - array of 4 vertices, each with position vec4
+# Uniform: plane_normal (vec4), plane_dist (float)
+
+void main() {
+    // Step 1: Evaluate signed distances
+    float h[4];
+    for (int i = 0; i < 4; i++) {
+        h[i] = dot(gl_in[i].position, plane_normal) - plane_dist;
+    }
+
+    // Step 2: Determine intersection points
+    vec4 intersections[4];
+    int num_intersections = 0;
+
+    // Check all 6 edges of the tetrahedron
+    int edges[6][2] = {
+        {0, 1}, {0, 2}, {0, 3},
+        {1, 2}, {1, 3},
+        {2, 3}
+    };
+
+    for (int e = 0; e < 6; e++) {
+        int i = edges[e][0];
+        int j = edges[e][1];
+        
+        // If vertices are on opposite sides or one is on the plane
+        if ((h[i] > 0 && h[j] < 0) || (h[i] < 0 && h[j] > 0) || 
+            (abs(h[i]) < epsilon && abs(h[j]) > epsilon) || 
+            (abs(h[j]) < epsilon && abs(h[i]) > epsilon) ||
+            (abs(h[i]) < epsilon && abs(h[j]) < epsilon)) {
+            
+            // Compute intersection point
+            float t = -h[i] / (h[j] - h[i]);
+            vec4 p = mix(gl_in[i].position, gl_in[j].position, t);
+            
+            // Store intersection point
+            // Note: In a real implementation, we need to handle the case where 
+            // multiple edges intersect at the same point (vertex on plane).
+            // For simplicity, we assume general position or handle duplicates later.
+            intersections[num_intersections] = p;
+            num_intersections++;
+        }
+    }
+
+    // Step 3: Output based on intersection type
+    // The number of intersections should be 3 (triangle) or 4 (quadrilateral)
+    // if the tetrahedron is not entirely on one side.
+    
+    if (num_intersections == 3) {
+        // Triangle case
+        EmitVertex(intersections[0]);
+        EmitVertex(intersections[1]);
+        EmitVertex(intersections[2]);
+        EndPrimitive();
+    } else if (num_intersections == 4) {
+        // Quadrilateral case: split into two triangles
+        // The order of intersections depends on the edge traversal.
+        // A robust implementation would sort the points to form a convex quad.
+        // Assuming the points are in order around the quad:
+        EmitVertex(intersections[0]);
+        EmitVertex(intersections[1]);
+        EmitVertex(intersections[2]);
+        EndPrimitive();
+        
+        EmitVertex(intersections[0]);
+        EmitVertex(intersections[2]);
+        EmitVertex(intersections[3]);
+        EndPrimitive();
+    }
+    // If num_intersections == 0, output nothing
+}
+```
+
+**Parameters:**
+*   `plane_normal`: The normal vector of the slicing hyperplane.
+*   `plane_dist`: The distance of the hyperplane from the origin.
+*   `epsilon`: A small value for floating-point comparisons to handle vertices on the plane [G].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point errors may cause vertices to be incorrectly classified as being on one side or the other, leading to incorrect intersection points or missing intersections. Use a small epsilon for comparisons [G].
+*   **Degenerate Input:** If the tetrahedron is degenerate (e.g., all vertices are coplanar or coincident), the intersection may be degenerate (a line or point). The method should handle these cases gracefully, potentially outputting no triangles or handling them as special cases [G].
+*   **Back-face Culling:** The Geometry Shader can perform back-face culling based on vertex order. Ensure the output triangles have consistent winding (e.g., counter-clockwise) to support this [S1, unofficial].
+
+## Subtopics
+
+### [4D Tetrahedron Slicing (Vertex Shader)](19631-4d-tetrahedron-slicing-vertex-shader.md)
+A GPU-based method to compute the 3D cross-section of a 4D tetrahedron against a slicing hyperplane using the Vertex Shader. It outputs 0, 1, or 2 triangles representing the intersection. It sets itself apart from its sibling [4D Tetrahedron Slicing (Geometry Shader)](19630-4d-tetrahedron-slicing-geometry-shader.md) by avoiding adjacency primitives and data replication, instead replicating vertex data four times to drive parallel computation in the Vertex Shader, at the cost of increased conditional branching.
+
+### 4D Tetrahedron Slicing (Compute Shader)
+A method using Compute Shaders to calculate 4D tetrahedron cross-sections in parallel, writing results to a large buffer. It is used by the Tesserxel engine and supported by WebGPU [S1, unofficial]. Unlike the Geometry Shader method, this approach does not require Geometry Shader support and works on WebGPU, but requires managing a large buffer and atomic operations [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The computation per tetrahedron is constant time, as it involves a fixed number of arithmetic operations and comparisons [S1, unofficial].
+*   **Memory Complexity:** Minimal additional memory is required per tetrahedron, as the Geometry Shader processes vertices in place [S1, unofficial].
+*   **Performance:** Performance depends on the GPU's Geometry Shader support and efficiency. On desktop GPUs, Geometry Shaders are generally efficient. However, on mobile GPUs, Geometry Shaders may have low performance or be unsupported [S1, unofficial].
+*   **Strengths:** Avoids data replication of vertex data, which can reduce memory bandwidth usage compared to the Vertex Shader method [S1, unofficial].
+*   **Limitations:** Not supported on all mobile GPUs, WebGL, or WebGPU [S1, unofficial].
+*   **When to Use:** When running on desktop GPUs with robust Geometry Shader support and when memory bandwidth is a concern [S1, unofficial].
+*   **When Not to Use:** When targeting mobile devices, WebGL, or WebGPU, or when Geometry Shader performance is known to be poor on the target hardware [S1, unofficial].
+
+## Background
+This method was developed as part of the gl4d four-dimensional graphics rendering library [S1, unofficial]. It leverages the Geometry Shader stage of the GPU pipeline, which was designed to allow programmers to output arbitrary primitives, making it suitable for computing cross-sections of 4D objects [S1, unofficial].
+
+## Sources
+[S1] 四维计算机图形学：渲染篇, https://wxyhly.github.io/archives/cg4d/, fetched 2026-10-30 (unofficial)

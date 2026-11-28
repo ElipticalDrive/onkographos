@@ -1,0 +1,161 @@
+--- v008.md
++++ v009.md
+@@ -4,68 +4,80 @@
+ 
+ ## Overview
+-Structural and Geometric Compression refers to methods that compress volume data by exploiting the spatial structure, connectivity, and geometric properties of the underlying scene representation, rather than treating the volume as a uniform grid of scalar values. Unlike [Value compression](6-value-compression.md) which focuses on transform-based redundancy reduction of scalar fields, this approach targets the explicit geometric structures (such as isosurfaces, depth layers, or feature-based maps) extracted from or inherent in the volume. It sets itself apart by storing connectivity, normals, and depth relationships directly, often enabling efficient on-the-fly rendering or selective reconstruction of specific features.
++Structural and Geometric Compression encompasses methods that encode volume-derived geometric primitives—such as isosurfaces, depth layers, and feature maps—by exploiting their spatial connectivity and structural properties rather than treating the volume as a uniform scalar grid [S1, S2, S3]. Unlike [Value compression](6-value-compression.md), which applies linear transforms to scalar fields, these techniques store explicit geometric relationships (e.g., mesh connectivity, surface links, or PCA-based feature descriptors) to enable efficient on-the-fly rendering or selective feature reconstruction [S1, S2, S3].
+ 
+ ## How it works
+-The implementation of Structural and Geometric Compression varies significantly depending on the target representation (isosurfaces, depth layers, or feature maps). The following sections detail the specific algorithms found in the source literature.
++**Inputs and Outputs:** 
++- *BLIC:* Input is an isosurface mesh (connectivity and geometry) extracted from a scalar volume grid; output is a compressed bitstream containing connectivity, geometry, and optional normals [S3].
++- *Selective Feature-Based:* Input is a compressed voxel map with descriptors and a set of model descriptors representing features of interest; output is a set of expanded voxel blocks for regions matching the models [S2].
++- *Depth/Link Structure:* Input is voxelized particle data; output is parallel arrays of depth, surface links, and normals per voxel column [S1].
+ 
+-### General Data Structures and Storage
+-For depth-layer based representations (e.g., particle data), the data structure stores multiple layers of depth, surface links, and normals per voxel column [S1].
+-*   **Depth Values:** Stored in 32-bit floating-point format [S1].
+-*   **Surface Links:** Links to the four direct neighbors of each depth value are stored in one byte each, totaling a 32-bit word [S1].
+-*   **Normals:** Compressed to a 32-bit word using octahedron normal encoding with two 16-bit normalized integers [S1].
+-*   **Parallel Storage:** Normals are stored in parallel to surface depth values to allow easy access during rendering [S1].
++**Data Structures:**
++- *Depth Values:* Stored in 32-bit floating-point format [S1].
++- *Surface Links:* Links to the four direct neighbors of each depth value are stored in one byte each, packed into a 32-bit word [S1].
++- *Normals:* Compressed to a 32-bit word using octahedron normal encoding with two 16-bit normalized integers [S1].
++- *Layout:* Normals are stored in parallel to surface depth values to allow easy access during rendering, reusing surface link storage logic for on-the-fly connectivity computation [S1].
+ 
+-### BLIC (Bi-Level Isosurface Compression)
+-BLIC is a simple algorithm to compress isosurface data extracted by isosurface algorithms from scalar functions defined on volume grids [S3].
++**Numbered Steps:**
++1. **Connectivity & Geometry Encoding (BLIC):** Encode mesh topology using a context-based arithmetic coder closely related to the JBIG binary image compression standard [S3]. Encode a substantial proportion of geometric information to a fraction of a bit per marching cubes vertex using the same mechanism [S3].
++2. **Refined Geometry Encoding (BLIC):** Efficiently encode remaining optional geometric information, which specifies the location of each marching cubes vertex more precisely along its supporting intersecting grid edge, in scan-order using the same mechanism [S3].
++3. **Normal Handling (BLIC):** Optionally compute vertex normals as normalized gradient vectors $\mathbf{n} = \frac{\nabla f}{\|\nabla f\|}$, quantize them, and include them in the bitstream after entropy encoding, or omit them for the decoder to compute in a post-processing smoothing step [S3].
++4. **Model Creation (Selective):** Create descriptor-based models for geometries of interest by encoding TSDFs over a range of transformations (e.g., 15 different offsets for horizontal planes, generating one 64-element vector each) [S2].
++5. **Similarity Matching (Selective):** Compare each compressed map descriptor $\mathbf{v}_b$ to the model descriptors $\mathbf{v}_m$ by computing the squared norm of their differences: $d = \|\mathbf{v}_b - \mathbf{v}_m\|^2 = \sum_i (v_{b,i} - v_{m,i})^2$ [S2].
++6. **Selective Decompression (Selective):** Decompress only those blocks whose similarity distance $d$ is beneath a specified threshold $\tau$ [S2].
++7. **Dimensionality Matching (Selective):** Leverage PCA's ordered linear subspace to match feature vectors of different dimensionality (e.g., match a 32-dimensional feature descriptor against the first half of a 64-dimensional feature descriptor) [S2].
+ 
+-**Inputs:** Isosurface mesh (connectivity and geometry) derived from a scalar volume grid.
+-**Outputs:** Compressed bitstream containing connectivity, geometry, and optional normals.
++**Parameters:**
++- *Normal Computation Mode:* Encoder-computed vs. decoder-computed vertex normals, determined by trade-offs between bitstream size and in-core vs. out-of-core decoder memory constraints [S3].
++- *Similarity Threshold $\tau$:* Controls the fidelity of selective reconstruction [S2].
++- *Descriptor Dimensionality:* Typically 64 elements per vector, generated from TSDF sampling [S2].
+ 
+-**Steps:**
+-1.  **Connectivity Encoding:** Encode mesh connectivity using a context-based arithmetic coder closely related to the JBIG binary image compression standard [S3].
+-2.  **Primary Geometry Encoding:** Encode a substantial proportion of geometric information (e.g., vertex positions along grid edges) to a fraction of a bit per marching cubes vertex using the same arithmetic coding mechanism [S3].
+-3.  **Refined Geometry Encoding:** Efficiently encode remaining optional geometric information, which specifies the location of each marching cubes vertex more precisely along its supporting intersecting grid edge, in scan-order using the same mechanism [S3].
+-4.  **Normal Handling (Optional):**
+-    *   *Encoder-computed:* Compute vertex normals as normalized gradient vectors, quantize, and include them in the bitstream after entropy encoding [S3].
+-    *   *Decoder-computed:* Omit normals from the bitstream; the decoder computes them in a post-processing smoothing step [S3].
+-    *   *Decision:* The choice is determined by trade-offs associated with an in-core vs. out-of-core decoder structure [S3].
++**Edge Cases and Pitfalls:**
++- Descriptors are not invariant to affine transformations; if they were, decompression would not reproduce the field in the correct location or orientation [S2].
++- Not given in the sources for precision limits, boundary conditions, or degenerate input handling.
+ 
+-**Pseudocode for BLIC Encoding:**
++**Pseudocode:**
+ ```python
+-def blic_encode(mesh):
+-    # Step 1: Encode connectivity
+-    connectivity_bits = arithmetic_encode_connectivity(mesh.topology)
+-    
++def blic_encode(mesh, encoder_computes_normals):
++    # Step 1: Encode connectivity with context-based arithmetic coder (JBIG-related)
++    connectivity_bits = arithmetic_encode(mesh.topology, context='jbig')
+     # Step 2: Encode primary geometry (fraction of bits per vertex)
+-    primary_geom_bits = arithmetic_encode_geometry(mesh.vertices, precision='low')
+-    
++    primary_geom_bits = arithmetic_encode(mesh.vertices, precision='low')
+     # Step 3: Encode refined geometry in scan-order
+-    refined_geom_bits = arithmetic_encode_scan_order(mesh.vertices, precision='high')
+-    
+-    # Step 4: Handle normals based on decoder constraint
+-    if decoder_supports_encoder_normals:
+-        normals = compute_normalized_gradients(mesh)
+-        normal_bits = arithmetic_encode_quantized(normals)
++    refined_geom_bits = arithmetic_encode(mesh.vertices, precision='high', order='scan')
++    # Step 4: Handle normals
++    if encoder_computes_normals:
++        normals = normalize_gradient_vectors(mesh)
++        normal_bits = arithmetic_encode(normals, quantize=True)
+     else:
+         normal_bits = []
+-        
+-    return concatenate(connectivity_bits, primary_geom_bits, refined_geom_bits, normal_bits)
++    return connectivity_bits + primary_geom_bits + refined_geom_bits + normal_bits
++
++def selective_feature_expand(compressed_map, model_descriptors, threshold):
++    expanded_blocks = []
++    for block in compressed_map:
++        # Compare descriptor to models via squared norm of differences
++        distances = [squared_norm(block.descriptor - model) for model in model_descriptors]
++        min_dist = min(distances)
++        # Decompress only if similarity distance is beneath threshold
++        if min_dist < threshold:
++            expanded_blocks.append(decompress_block(block))
++    return expanded_blocks
++
++# Helper definitions
++def arithmetic_encode(data, context='jbig', precision='low', order='none', quantize=False):
++    # Standard arithmetic encoding implementation
++    return encode_to_bitstream(data, context=context, precision=precision, order=order, quantize=quantize)
++
++def squared_norm(vec):
++    return sum(x**2 for x in vec)
++
++def normalize_gradient_vectors(mesh):
++    # Compute normalized gradient vectors for each vertex
++    return [normalize(cross(edge1, edge2)) for edge1, edge2 in mesh.faces]
++
++def decompress_block(block):
++    # Standard decompression routine
++    return decode_from_bitstream(block.data)
+ ```
+-
+-### Selective Feature-Based Map Expansion
+-This method uses descriptor-based models to selectively decompress parts of a compressed voxel map (e.g., TSDF maps) based on geometric similarity [S2].
+-
+-**Inputs:** Compressed voxel map with descriptors; a set of model descriptors representing features of interest (e.g., floors).
+-**Outputs:** Expanded voxel blocks for regions matching the models.
+-
+-**Steps:**
+-1.  **Model Creation:** Create descriptor-based models for geometries of interest by encoding TSDFs over a range of transformations. For example, encode TSDFs of horizontal planes at 15 different offsets, generating one 64-element vector for each [S2].
+-2.  **Similarity Comparison:** Compare each compressed map descriptor to the model descriptors by computing the squared norm of their differences [S2].
+-3.  **Selective Decompression:** Decompress only those blocks whose similarity distance is beneath a specified threshold [S2].
+-4.  **Dimensionality Matching:** Leverage PCA's ordered linear subspace to match feature vectors of different dimensionality. For instance, match a 32-dimensional feature descriptor against the first half of a 64-dimensional feature descriptor [S2].
+-
+-**Pitfalls:**
+-*   Descriptors are not invariant to affine transformations. If they were, decompression would not reproduce the field in the correct location or orientation [S2].
+-*   Models must be created by sampling TSDFs over the range of transformations to which the model should be invariant [S2].
+ 
+ ## Subtopics
+@@ -84,16 +96,16 @@
+ 
+ ## Operating characteristics
+-*   **BLIC:** Achieves high compression rates with extreme simplicity [S3]. The choice of normal computation affects memory usage: encoder-computed normals increase bitstream size but reduce decoder complexity, while decoder-computed normals save bits but require post-processing [S3].
+-*   **Selective Feature-Based Expansion:** Allows for adaptive resolution rendering where only relevant features are decompressed [S2]. The use of PCA allows for flexible dimensionality matching, supporting multi-level compression schemes [S2].
+-*   **Depth/Link Structure:** Provides efficient on-the-fly rendering by storing depth and normals in parallel, allowing ray casting to access surface properties directly from the compressed structure [S1].
+-*   **Fractal Compression:** Offers high compression ratios but suffers from extreme encoding complexity and iterative reconstruction costs [S1].
+-*   **Parallel Edgebreaker:** Reduces transmission and processing time significantly through parallelism, at the cost of a ~10% increase in file size compared to sequential methods [S1].
++- **BLIC:** Achieves high compression rates with extreme simplicity [S3]. The choice of normal computation affects memory usage: encoder-computed normals increase bitstream size but reduce decoder complexity, while decoder-computed normals save bits but require post-processing [S3].
++- **Selective Feature-Based Expansion:** Allows for adaptive resolution rendering where only relevant features are decompressed [S2]. The use of PCA allows for flexible dimensionality matching, supporting multi-level compression schemes [S2].
++- **Depth/Link Structure:** Provides efficient on-the-fly rendering by storing depth and normals in parallel, allowing ray casting to access surface properties directly from the compressed structure [S1].
++- **Fractal Compression:** Offers high compression ratios but suffers from extreme encoding complexity and iterative reconstruction costs. Not given in the sources for measured performance or scaling.
++- **Parallel Edgebreaker:** Reduces transmission and processing time significantly through parallelism, at the cost of a ~10% increase in file size compared to sequential methods. Not given in the sources for measured performance or scaling.
+ 
+ ## Background
+-*   **BLIC:** Introduced in "BLIC: Bi-Level Isosurface Compression" [S3].
+-*   **Selective Feature-Based Map Expansion:** Described in "Compressed Voxel-Based Mapping Using Unsupervised Learning" [S2].
+-*   **Depth/Link Compression:** Described in "Memory-Efficient On-The-Fly Voxelization of Particle Data" [S1].
+-*   **Fractal Compression:** Referenced in [S1] as a method exploiting self-similarity.
+-*   **Parallel Edgebreaker:** Referenced in [S1] as a parallel variant of the Edgebreaker algorithm.
++- **BLIC:** Introduced in "BLIC: Bi-Level Isosurface Compression" [S3].
++- **Selective Feature-Based Map Expansion:** Described in "Compressed Voxel-Based Mapping Using Unsupervised Learning" [S2].
++- **Depth/Link Compression:** Described in "Memory-Efficient On-The-Fly Voxelization of Particle Data" [S1].
++- **Fractal Compression:** Described as a lossy method exploiting self-similarity. Not given in the sources for origin or specific paper references.
++- **Parallel Edgebreaker:** Described as a parallel variant of the Edgebreaker algorithm. Not given in the sources for origin or specific paper references.
+ 
+ ## Sources

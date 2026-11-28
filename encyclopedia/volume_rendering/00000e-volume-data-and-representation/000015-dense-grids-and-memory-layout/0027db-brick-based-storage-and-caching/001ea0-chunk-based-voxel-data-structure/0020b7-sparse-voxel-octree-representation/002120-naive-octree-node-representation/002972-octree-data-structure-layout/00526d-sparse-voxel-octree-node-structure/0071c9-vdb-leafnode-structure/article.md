@@ -1,0 +1,132 @@
+# VDB LeafNode Structure
+Also called: LeafNode, VDB LeafNode
+
+## Overview
+The VDB LeafNode is the lowest-level block of a VDB grid, residing at a fixed tree depth and tiling index space into nonoverlapping subdomains [S1, unofficial]. It serves as the fundamental unit for storing voxel data, encoding both the active voxel topology and the numerical values in a self-contained manner [S1, unofficial]. Unlike internal nodes, LeafNodes do not require references to parent nodes to determine global coordinates, as the global origin is embedded directly within the node's flags [S1, unofficial]. This design minimizes memory overhead and simplifies coordinate derivation for volume rendering and simulation [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+*   **Input:** None (LeafNodes are constructed based on grid parameters and data population).
+*   **Output:** A `LeafNode` instance containing the value data, active mask, and metadata flags.
+
+### Data Structures
+The `LeafNode` is a template class parameterized by `Log2X`, `Log2Y`, and `Log2Z` [S1, unofficial].
+
+**Fields:**
+1.  **`sSize`**: Static constant representing the total number of voxels in the leaf. Calculated as $1 \ll (\text{Log2X} + \text{Log2Y} + \text{Log2Z})$ [S1, unofficial].
+2.  **`sLog2X`, `sLog2Y`, `sLog2Z`**: Static constants for the logarithmic dimensions [S1, unofficial].
+3.  **`mLeafDAT`**: A union acting as a Direct Access Table (DAT) for voxel values [S1, unofficial].
+    *   `Value* values`: Pointer to an array of temporal buffers for in-core data [S1, unofficial].
+    *   `streamoff offset`: File stream offset for out-of-core data [S1, unofficial].
+4.  **`mValueMask`**: A `BitMask` of fixed size equal to `sSize`, encoding the active voxel topology [S1, unofficial].
+5.  **`mInsideMask`**: (Optional) A `BitMask` used for level set applications to encode inside/outside topology [S1, unofficial].
+6.  **`mFlags`**: A 64-bit integer encoding metadata [S1, unofficial].
+
+**`mFlags` Layout (64-bit):**
+*   **Bits 0-1**: Buffer count.
+    *   `0`: Out-of-core (values stored via `offset`).
+    *   `1`: In-core, single buffer (no temporal integration).
+    *   `2`: In-core, two buffers (first/second-order temporal integration).
+    *   `3`: In-core, three buffers (third-order temporal integration, e.g., TVD-Runge-Kutta) [S1, unofficial].
+*   **Bit 2**: Compression flag (1 if compressed) [S1, unofficial].
+*   **Bit 3**: Bit-quantization flag (1 if quantized) [S1, unofficial].
+*   **Bits 4-63**: Global origin of the node in the virtual grid, encoded as three 20-bit integers ($3 \times 20$ bits) representing the X, Y, and Z coordinates [S1, unofficial].
+
+### Parameters
+*   **`Log2w`**: The logarithm base 2 of the leaf dimension per axis. Dimensions are restricted to powers of two to enable fast bit operations [S1, unofficial].
+*   **Typical Value**: `Log2w = 3`, resulting in an $8 \times 8 \times 8$ block ($512$ voxels) [S1, unofficial].
+
+### Algorithm: Coordinate Derivation
+Global voxel coordinates are derived without parent references by combining the local topology from `mValueMask` with the global origin from `mFlags` [S1, unofficial].
+
+1.  Extract global origin $(O_x, O_y, O_z)$ from bits 4-63 of `mFlags`. Each component is a 20-bit integer.
+2.  Determine local active voxels from `mValueMask`.
+3.  For a local index $i$ in the leaf, the global coordinate $G$ is calculated as:
+    $$ G = O + i $$
+    where $O$ is the origin component and $i$ is the local index within the leaf's dimension [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class LeafNode:
+    # Compile-time constants
+    sSize = 1 << (Log2X + Log2Y + Log2Z)
+    sLog2X = Log2X
+    sLog2Y = Log2Y
+    sLog2Z = Log2Z
+
+    def __init__(self, origin_x, origin_y, origin_z, buffer_count, is_compressed, is_quantized):
+        # Initialize mFlags
+        # Bits 0-1: buffer_count
+        # Bit 2: is_compressed
+        # Bit 3: is_quantized
+        # Bits 4-63: origin (3x20 bits)
+        self.mFlags = (origin_x & 0xFFFFF) | \
+                      ((origin_y & 0xFFFFF) << 20) | \
+                      ((origin_z & 0xFFFFF) << 40) | \
+                      ((buffer_count & 0x3) << 0) | \
+                      ((1 if is_compressed else 0) << 2) | \
+                      ((1 if is_quantized else 0) << 3)
+
+        self.mValueMask = BitMask(size=self.sSize)
+        self.mInsideMask = BitMask(size=self.sSize) # Optional
+
+        # mLeafDAT is a union; initialized based on buffer_count
+        if buffer_count == 0:
+            self.mLeafDAT.offset = 0 # Placeholder for out-of-core offset
+            self.mLeafDAT.values = None
+        else:
+            # Allocate buffer_count arrays of size sSize
+            self.mLeafDAT.values = [ValueArray(size=self.sSize) for _ in range(buffer_count)]
+            self.mLeafDAT.offset = 0
+
+    def get_global_origin(self):
+        ox = self.mFlags & 0xFFFFF
+        oy = (self.mFlags >> 20) & 0xFFFFF
+        oz = (self.mFlags >> 40) & 0xFFFFF
+        return (ox, oy, oz)
+
+    def get_buffer_count(self):
+        return self.mFlags & 0x3
+
+    def is_compressed(self):
+        return (self.mFlags >> 2) & 0x1
+
+    def is_quantized(self):
+        return (self.mFlags >> 3) & 0x1
+
+    def get_value(self, local_index, buffer_idx=0):
+        # Assumes in-core storage
+        if self.get_buffer_count() == 0:
+            raise Exception("Out-of-core access not implemented in this snippet")
+        return self.mLeafDAT.values[buffer_idx][local_index]
+
+    def set_value(self, local_index, value, buffer_idx=0):
+        if self.get_buffer_count() == 0:
+            raise Exception("Out-of-core access not implemented in this snippet")
+        self.mLeafDAT.values[buffer_idx][local_index] = value
+
+    def mark_active(self, local_index):
+        self.mValueMask.set_bit(local_index)
+
+    def is_active(self, local_index):
+        return self.mValueMask.get_bit(local_index)
+```
+
+### Edge Cases and Pitfalls
+*   **Precision**: The global origin is limited to 20 bits per axis, restricting the maximum grid extent to $2^{20}$ voxels per dimension [S1, unofficial].
+*   **Out-of-Core**: When `buffer_count` is 0, `mLeafDAT.values` is null, and data must be accessed via `mLeafDAT.offset` into a file stream [S1, unofficial].
+*   **Compression**: If `is_compressed` is true, `mLeafDAT.values` does not point to raw voxel data but to compressed data requiring a codec [S1, unofficial].
+
+## Operating characteristics
+*   **Memory Complexity**: The `LeafNode` header size is fixed (64-bit flags + mask + union pointer/offset). The value data size is dynamic, depending on `buffer_count` and compression [S1, unofficial].
+*   **Performance**: Power-of-two dimensions allow for fast bit operations during tree traversals and coordinate calculations [S1, unofficial].
+*   **Strengths**: Self-contained design eliminates parent pointer overhead; flexible support for temporal integration and out-of-core storage [S1, unofficial].
+*   **Limitations**: Fixed leaf size limits adaptability; 20-bit origin limit restricts global grid size [S1, unofficial].
+
+## Background
+The VDB LeafNode was introduced in the VDB (Volume Dynamic Blocks) system by Ken Museth, presented in the paper "VDB: High-Resolution Sparse Volumes with Dynamic Topology" (TOG 2013) [S1, unofficial]. The system was developed to support dynamic sparse data structures for fluids, narrow-band level sets, and volumetric modeling, earning an Academy Award [S1, unofficial].
+
+## Sources
+[S1] VDB: High-Resolution Sparse Volumes with Dynamic Topology (Academy Award Winner) [pdf], http://www.museth.org/Ken/Publications_files/Museth_TOG13.pdf, fetched 2026-10-26 (unofficial)

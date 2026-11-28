@@ -1,0 +1,238 @@
+# ObjectNet Training
+
+Also called: ObjectNet, Object-Level Priors, category-specific object priors
+
+## Overview
+ObjectNet Training introduces a category-specific prior by inserting a dedicated network (ObjectNet) before the PatchNet to regress patch latent codes and extrinsics from a shared object latent code [S1]. This architecture increases network capacity and establishes coarse geometric correspondences across different instances of the same category [S1]. It is distinct from standard PatchNet training by decoupling the object-level identity from patch-level details via a two-stage latent regression process [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Object latent code $z_{obj} \in \mathbb{R}^{256}$ [S1].
+    *   Pretrained PatchNet parameters (fixed) [S1].
+    *   Category-specific initialization data (extrinsics of an arbitrary object) [S1].
+*   **Outputs**:
+    *   Patch latent codes for all patches [S1].
+    *   Extrinsics (position and scale) for all patches [S1].
+
+### Data Structures
+*   **ObjectNet**: A Multi-Layer Perceptron (MLP) consisting of 4 fully connected layers [S1].
+    *   Hidden dimension: 1024 [S1].
+    *   Activation: ReLU [S1].
+    *   Input size: 256 (size of $z_{obj}$) [S1].
+    *   Output size: Depends on PatchNet requirements (patch latent codes + extrinsics) [S1].
+*   **Object Latent Codes**: Vector of size 256 [S1].
+*   **Patch Extrinsics**: Regressed position and scale parameters [S1].
+
+### Parameters
+*   $\omega_{var}$: Regularization weight for object latent codes. Value: 5 [S1].
+*   $\omega_{scl}$: Scale regularization weight.
+    *   Phase I: 2 [S1].
+    *   Phase III: 0.02 [S1].
+*   Scale Multiplier (Phase II): 1.3 [S1].
+*   L2 Loss Weights (Phase II):
+    *   Reconstruction ($L_{recon}$): 1 [S1].
+    *   Position consistency: 3 [S1].
+    *   Scale consistency: 30 [S1].
+*   Batch Size: 128 [S1].
+*   Epochs per Phase: 1000 [S1].
+*   Learning Rate: Same as PatchNet initial rate, reduced by factor 5 in Phase III [S1].
+
+### Initialization
+1.  Initialize all object latent codes $z_{obj}$ with zeros [S1].
+2.  Initialize ObjectNet’s last layer weights with very small numbers [S1].
+3.  Initialize ObjectNet’s last layer bias:
+    *   For patch latent codes: zeros [S1].
+    *   For extrinsics: extrinsics of an arbitrary object from the target category (computed via the method in Section 3.2 of the source) [S1].
+4.  Pretrain PatchNet on ShapeNet and keep it fixed for the duration of ObjectNet training [S1].
+5.  Remove the rotation loss term $L_{rot}$ completely [S1].
+6.  Apply L2 regularization only to the object latent codes [S1].
+
+### Training Phases
+Training proceeds in three sequential phases, each lasting 1000 epochs [S1].
+
+**Phase I: Pretrain for Extrinsics**
+*   **Goal**: Ensure good initial patch extrinsics [S1].
+*   **Loss**: Extrinsic loss $L_{ext}$ (Eq. 3 in source) plus regularization [S1].
+*   **Parameter**: $\omega_{scl} = 2$ [S1].
+
+**Phase II: Regress Patch Latent Codes**
+*   **Goal**: Learn to regress patch latent codes while maintaining consistency with initial extrinsics [S1].
+*   **Preparation**:
+    1.  Add a layer that multiplies the regressed scales by 1.3 [S1].
+    2.  Store these modified extrinsics as a target reference [S1].
+*   **Loss**:
+    *   Reconstruction loss $L_{recon}$ (weight 1) [S1].
+    *   L2 loss on position (weight 3) [S1].
+    *   L2 loss on scale (weight 30) [S1].
+*   **Note**: The L2 losses keep the current regressed position and scale close to the stored extrinsics from the preparation step [S1].
+
+**Phase III: Final Refinement**
+*   **Goal**: Optimize the complete model [S1].
+*   **Loss**: Complete loss $L$ (Eq. 1 in source) [S1].
+*   **Parameter**: $\omega_{scl} = 0.02$ [S1].
+*   **Learning Rate**: Reduced by a factor of 5 compared to previous phases [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_object_net(patch_net, category_data, category_init_extrinsics):
+    """
+    Trains ObjectNet in three phases to regress patch latents and extrinsics
+    from object latents, using a fixed PatchNet.
+    """
+    # 1. Initialization
+    # ObjectNet: 4 FC layers, hidden 1024, ReLU
+    object_net = ObjectNet(input_dim=256, hidden_dim=1024, num_layers=4)
+    
+    # Initialize object latents with zeros
+    object_latents = torch.zeros(len(category_data), 256)
+    
+    # Initialize ObjectNet last layer weights with very small numbers
+    object_net.init_last_layer_small_weights()
+    
+    # Initialize ObjectNet last layer bias
+    # For patch latent codes: zeros
+    # For extrinsics: category_init_extrinsics (from Sec 3.2)
+    object_net.init_last_layer_bias(patch_latent_zeros=True, 
+                                    extrinsics_bias=category_init_extrinsics)
+    
+    # Pretrain PatchNet on ShapeNet and keep fixed
+    patch_net.freeze()
+    
+    # Hyperparameters
+    batch_size = 128
+    epochs_per_phase = 1000
+    omega_var = 5
+    lr_base = get_patch_net_initial_lr() # Assumed available
+    
+    # Phase I: Pretrain for Extrinsics
+    print("Phase I: Pretrain Extrinsics")
+    optimizer = torch.optim.Adam(object_net.parameters(), lr=lr_base)
+    for epoch in range(epochs_per_phase):
+        batch = sample_batch(category_data, batch_size)
+        z_obj = object_latents[batch.indices]
+        
+        # Forward pass through ObjectNet
+        patch_latents, extrinsics = object_net(z_obj)
+        
+        # Loss: L_ext (Eq. 3) + regularization
+        # Note: L_ext computes error between regressed extrinsics and ground truth
+        loss_ext = compute_extrinsic_loss(extrinsics, batch.ground_truth_extrinsics)
+        
+        # L2 regularization on object latent codes only
+        loss_reg = omega_var * torch.norm(object_latents[batch.indices], p=2)
+        
+        loss = loss_ext + loss_reg
+        
+        # Scale regularization weight for Phase I
+        # Note: Source says "use extrinsic loss L_ext ... and regularizer. Set omega_scl = 2"
+        # This implies omega_scl might be part of L_ext or a separate scale term.
+        # Based on context, L_ext likely incorporates scale consistency.
+        # We assume L_ext handles the scale aspect with weight omega_scl=2 internally or as a multiplier.
+        # If L_ext is purely positional, a separate scale loss would be needed.
+        # Given "L_ext in Eq. 3", we assume Eq. 3 contains the scale term weighted by omega_scl.
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # Phase II: Regress Patch Latent Codes
+    print("Phase II: Regress Patch Latents")
+    optimizer = torch.optim.Adam(object_net.parameters(), lr=lr_base)
+    
+    # Step 1: Add layer multiplying regressed scales by 1.3
+    # This is implemented by modifying the output processing or a specific layer in ObjectNet
+    object_net.add_scale_multiplier(1.3)
+    
+    # Step 2: Store these extrinsics as targets
+    # We need to run a forward pass to get the "stored" extrinsics
+    # Using the current object latents (zeros) and ObjectNet
+    with torch.no_grad():
+        stored_latents, stored_extrinsics = object_net(object_latents)
+        
+    for epoch in range(epochs_per_phase):
+        batch = sample_batch(category_data, batch_size)
+        z_obj = object_latents[batch.indices]
+        
+        patch_latents, extrinsics = object_net(z_obj)
+        
+        # Loss components
+        # 1. Reconstruction loss L_recon (weight 1)
+        loss_recon = compute_reconstruction_loss(patch_net, patch_latents, batch.geometry)
+        
+        # 2. L2 loss on position (weight 3)
+        # Keep regressed position close to stored extrinsics position
+        loss_pos = 3 * torch.norm(extrinsics.position - stored_extrinsics.position[batch.indices], p=2)
+        
+        # 3. L2 loss on scale (weight 30)
+        # Keep regressed scale close to stored extrinsics scale
+        loss_scale = 30 * torch.norm(extrinsics.scale - stored_extrinsics.scale[batch.indices], p=2)
+        
+        loss = loss_recon + loss_pos + loss_scale
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # Phase III: Final Refinement
+    print("Phase III: Final Refinement")
+    # Reduce learning rate by factor 5
+    lr_phase3 = lr_base / 5
+    optimizer = torch.optim.Adam(object_net.parameters(), lr=lr_phase3)
+    
+    # Remove the scale multiplier layer if it was a separate module, 
+    # or simply stop applying the 1.3 factor if it was hardcoded.
+    # The source says "The complete loss L in Eq. 1... yields final refinements"
+    # implying standard training without the specific consistency constraints of Phase II.
+    
+    for epoch in range(epochs_per_phase):
+        batch = sample_batch(category_data, batch_size)
+        z_obj = object_latents[batch.indices]
+        
+        patch_latents, extrinsics = object_net(z_obj)
+        
+        # Loss: Complete loss L (Eq. 1)
+        # Note: omega_scl = 0.02 for this phase
+        loss = compute_complete_loss(patch_net, patch_latents, extrinsics, batch, omega_scl=0.02)
+        
+        # L2 regularization on object latent codes (omega_var = 5)
+        loss_reg = omega_var * torch.norm(object_latents[batch.indices], p=2)
+        loss += loss_reg
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    return object_net, object_latents
+```
+
+### Edge Cases and Pitfalls
+*   **Rotation Loss**: $L_{rot}$ must be removed completely; keeping it significantly lowers quality [S1].
+*   **Regularization Scope**: L2 regularization is applied *only* to object latent codes, not to network weights or patch latents [S1].
+*   **PatchNet Fixation**: PatchNet must be pretrained on ShapeNet and kept fixed; training it jointly is not described [S1].
+*   **Initialization Sensitivity**: The bias initialization for extrinsics uses a specific arbitrary object from the category; incorrect initialization may hinder convergence [S1].
+
+## Operating characteristics
+
+*   **Time Complexity**: Training is divided into three phases of 1000 epochs each, totaling 3000 epochs. This is longer than standard PatchNet training [S1].
+*   **Memory Complexity**: Requires storage for object latent codes (256 dimensions per object) and the ObjectNet parameters [S1].
+*   **Strengths**:
+    *   Enables coarse correspondences across objects within a category [S1].
+    *   Allows interpolation of latent codes to generate smooth morphs between shapes [S1].
+    *   Can be turned into a generative model [S1].
+*   **Limitations**:
+    *   Higher training time compared to baselines [S1].
+    *   Requires a full training split of the target category [S1].
+*   **When to Use**: When category-specific priors and inter-object correspondence are required, and training time is not a critical constraint [S1].
+
+## Background
+
+ObjectNet Training was introduced by E. Tretschk et al. in the paper "PatchNets: Patch-Based Generalizable Deep Implicit 3D Shape Representations" (2020) [S1]. It extends the PatchNet architecture by adding object-level priors to improve generalization and consistency across instances of the same shape category [S1].
+
+## Sources
+
+[S1] PatchNets: Patch-Based Generalizable Deep Implicit 3D Shape Representations, https://doi.org/10.1007/978-3-030-58517-4_18, fetched 2026-10-27

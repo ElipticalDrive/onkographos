@@ -1,0 +1,216 @@
+--- v002.md
++++ v003.md
+@@ -4,30 +4,24 @@
+ 
+ ## Overview
+-Vertex-level pruning is a refinement mechanism for mixed-primitive Gaussian Splatting (MP-GS) that removes redundant vertices from Gaussian triangles and lines during training to reduce storage and simplify the representation [S1, unofficial]. Unlike standard 3D Gaussian Splatting which only performs primitive-level opacity culling, this method dynamically downgrades primitives to lower-dimensional forms (e.g., triangle to line, line to ellipse) based on geometric proximity and collinearity of their constituent vertices [S1, unofficial]. It complements the densification mechanisms of [Atomized Proliferation](12924-atomized-proliferation.md) by ensuring the representation remains compact without sacrificing surface fidelity [S1, unofficial].
++Vertex-level pruning is a refinement mechanism for mixed-primitive 3D Gaussian Splatting that removes redundant vertices from Gaussian triangles and lines during training, converting them into lower-order primitives (ellipses or lines) to reduce storage and representation complexity [S1, unofficial]. It complements standard primitive-level opacity pruning by addressing geometric redundancy within individual splats, ensuring that primitives do not retain unnecessary vertices when their spatial extent collapses [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A set of mixed-primitive Gaussians (ellipses, lines, triangles) with vertex positions $\mu_i$, covariances, opacities, and colors.
+-- **Output:** The same set with redundant vertices removed and primitives converted to simpler forms where appropriate.
++- **Input:** A set of mixed-primitive Gaussians, including Gaussian triangles (3 vertices) and Gaussian lines (2 vertices), along with their current vertex positions $\mu$.
++- **Output:** The same set of primitives, with some vertices removed and primitives converted to simpler forms (Gaussian ellipses or lines).
+ 
+ **Data Structures:**
+-The method operates on the vertex coordinates $\mu$ of each primitive.
+-- **Gaussian Ellipse:** 1 vertex $\mu_1$.
+-- **Gaussian Line:** 2 vertices $\mu_1, \mu_2$.
+-- **Gaussian Triangle:** 3 vertices $\mu_1, \mu_2, \mu_3$.
++The method operates on the vertex coordinates $\mu$ of the primitives. A Gaussian triangle is defined by three vertices $\mu_1, \mu_2, \mu_3$. A Gaussian line is defined by two vertices $\mu_1, \mu_2$. A Gaussian ellipse is defined by a single center vertex $\mu_1$ and a covariance matrix.
+ 
+ **Parameters:**
+-- $\omega_{dist}$: Threshold for vertex proximity. Default: $0.5$ [S1, unofficial].
+-- $\omega_{pear}$: Threshold for collinearity. Default: $0.9$ [S1, unofficial].
++- $\omega_{dist}$: The threshold for determining if vertices are "close". Default value: 0.5 [S1, unofficial].
++- $\omega_{pear}$: The threshold for determining if Gaussian triangle vertices are collinear. Default value: 0.9 [S1, unofficial].
+ 
+-**Algorithm:**
+-Vertex-level pruning is triggered concurrently with primitive-level pruning (opacity-based culling) [S1, unofficial]. The process evaluates each primitive based on its current vertex configuration:
++**Steps:**
++Vertex-level pruning is triggered whenever primitive-level pruning is performed [S1, unofficial]. The process involves three checks:
+ 
+-1.  **Gaussian Triangle Pruning:**
+-    -   **Case A (Collapse to Ellipse):** Calculate the maximum pairwise L2 distance among the three vertices $\mu_1, \mu_2, \mu_3$. If $\max(\|\mu_i - \mu_j\|_2) < \omega_{dist}$, the vertices are considered "close." Prune $\mu_2$ and $\mu_3$, converting the primitive into a Gaussian ellipse centered at $\mu_1$ [S1, unofficial].
+-    -   **Case B (Collapse to Line):** If the vertices are not close (Case A fails), check for collinearity. Compute the Pearson correlation coefficient $r$ from the coordinates of the three vertices. If $|r| > \omega_{pear}$, the vertices are nearly collinear. Convert the Gaussian triangle into a Gaussian line [S1, unofficial].
+-
+-2.  **Gaussian Line Pruning:**
+-    -   **Case C (Collapse to Ellipse):** Calculate the L2 distance between the two vertices $\mu_1$ and $\mu_2$. If $\|\mu_1 - \mu_2\|_2 < \omega_{dist}$, the vertices are considered "close." Prune $\mu_2$, reducing the primitive to a Gaussian ellipse centered at $\mu_1$ [S1, unofficial].
++1.  **Triangle Collapse to Ellipse:** For a Gaussian triangle primitive, calculate the maximum pairwise L2 distance between its three vertices $\mu_1, \mu_2, \mu_3$. If this distance is below $\omega_{dist}$, the vertices are considered close. Prune vertices $\mu_2$ and $\mu_3$, and convert the primitive into a Gaussian ellipse centered at $\mu_1$ [S1, unofficial].
++2.  **Triangle Collapse to Line:** For a Gaussian triangle primitive, if the vertices are not close (step 1 fails), check for collinearity. Compute the Pearson correlation coefficient from the three vertices. If the absolute value of this coefficient exceeds $\omega_{pear}$, the vertices are nearly collinear. Convert the primitive into a Gaussian line [S1, unofficial].
++3.  **Line Collapse to Ellipse:** For a Gaussian line primitive, calculate the L2 distance between its two vertices $\mu_1, \mu_2$. If this distance is below $\omega_{dist}$, the vertices are considered close. Prune vertex $\mu_2$ and reduce the primitive to a Gaussian ellipse centered at $\mu_1$ [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -35,61 +29,56 @@
+ def vertex_level_pruning(primitive, omega_dist=0.5, omega_pear=0.9):
+     """
+-    Prunes vertices from a mixed-primitive Gaussian based on geometry.
++    Performs vertex-level pruning on a mixed-primitive Gaussian.
+     
+     Args:
+-        primitive: Object with type ('ellipse', 'line', 'triangle') 
+-                   and vertices list [mu1, mu2, mu3] (mu2, mu3 may be None).
+-        omega_dist: Distance threshold for proximity.
+-        omega_pear: Correlation threshold for collinearity.
++        primitive: An object representing a Gaussian primitive.
++                   It has a 'type' attribute ('triangle', 'line', 'ellipse')
++                   and a 'vertices' list of positions (numpy arrays).
++                   For triangle: vertices = [mu1, mu2, mu3]
++                   For line: vertices = [mu1, mu2]
++                   For ellipse: vertices = [mu1]
++    Returns:
++        The modified primitive object.
++    """
++    if primitive.type == 'triangle':
++        mu1, mu2, mu3 = primitive.vertices
+         
+-    Returns:
+-        Updated primitive.
+-    """
+-    p_type = primitive.type
+-    
+-    if p_type == 'triangle':
+-        mu1, mu2, mu3 = primitive.vertices
+-        # Case A: Check if all vertices are close
+-        d12 = l2_distance(mu1, mu2)
+-        d13 = l2_distance(mu1, mu3)
+-        d23 = l2_distance(mu2, mu3)
+-        max_dist = max(d12, d13, d23)
++        # Check if vertices are close
++        dist_12 = l2_distance(mu1, mu2)
++        dist_13 = l2_distance(mu1, mu3)
++        dist_23 = l2_distance(mu2, mu3)
++        max_pairwise_dist = max(dist_12, dist_13, dist_23)
+         
+-        if max_dist < omega_dist:
+-            # Collapse to ellipse centered at mu1
++        if max_pairwise_dist < omega_dist:
++            # Convert to ellipse centered at mu1
+             primitive.type = 'ellipse'
+             primitive.vertices = [mu1]
++            # Covariance matrix is retained or recomputed based on mu1
+             return primitive
+             
+-        # Case B: Check if vertices are collinear
+-        # Compute Pearson correlation coefficient from vertex coordinates
+-        # Vertices are 3D points; flatten to 1D arrays for correlation
+-        coords = np.array([mu1, mu2, mu3])
+-        # Pearson correlation is computed across dimensions or via covariance matrix eigenvalues?
+-        # Source specifies "Pearson correlation coefficient computed from these vertices".
+-        # Standard interpretation for 3 points in 3D: Fit a line and check fit, 
+-        # or compute correlation of coordinates. Given the text, we assume a scalar metric 
+-        # derived from the set. A robust implementation for 3 points is checking if they lie on a line.
+-        # However, strictly following "Pearson correlation coefficient":
+-        # We treat the x, y, z coordinates of the 3 points as samples.
+-        # But Pearson requires at least 2 variables. 
+-        # Likely interpretation: The source implies a specific metric. 
+-        # Without explicit formula, we note the check. 
+-        # [G] Implementation note: For 3 points, collinearity is often checked via cross product magnitude.
+-        # If the source insists on Pearson, it may refer to the correlation of the projection 
+-        # onto the principal component. We implement a standard collinearity check 
+-        # as the functional equivalent intended by "nearly collinear".
+-        if is_collinear(mu1, mu2, mu3, threshold=omega_pear):
+-            # Collapse to line
++        # Check for collinearity if not close
++        # Compute Pearson correlation coefficient from the three vertices
++        # Vertices are 3D points. To compute Pearson correlation, we typically
++        # project them or use a multivariate correlation metric.
++        # The source specifies "absolute value of the Pearson correlation coefficient
++        # computed from these vertices". This implies a scalar metric derived from
++        # the set of points. A common interpretation for collinearity of 3 points
++        # in 3D space using correlation is checking if the points lie on a line.
++        # We assume a helper function that returns a scalar correlation value.
++        pearson_val = compute_pearson_collinearity([mu1, mu2, mu3])
++        
++        if abs(pearson_val) > omega_pear:
++            # Convert to line
+             primitive.type = 'line'
+-            primitive.vertices = [mu1, mu2] # Keep first two
++            primitive.vertices = [mu1, mu2]
++            # Covariance matrix is adjusted for line representation
+             return primitive
+             
+-    elif p_type == 'line':
++    elif primitive.type == 'line':
+         mu1, mu2 = primitive.vertices
+-        # Case C: Check if vertices are close
+         dist = l2_distance(mu1, mu2)
++        
+         if dist < omega_dist:
+-            # Collapse to ellipse centered at mu1
++            # Convert to ellipse centered at mu1
+             primitive.type = 'ellipse'
+             primitive.vertices = [mu1]
+@@ -98,42 +87,42 @@
+     return primitive
+ 
+-def is_collinear(p1, p2, p3, threshold):
++def l2_distance(p1, p2):
++    return numpy.sqrt(numpy.sum((p1 - p2) ** 2))
++
++def compute_pearson_collinearity(points):
+     """
+-    Checks if three points are collinear.
+-    Note: The source specifies Pearson correlation > threshold.
+-    [G] Since Pearson correlation is not directly defined for 3 3D points in the text,
+-    we use the standard geometric definition of collinearity (cross product of vectors).
+-    If the source meant correlation of coordinates, the logic would differ, but 
+-    geometric collinearity is the standard interpretation for "almost lie on the same line".
++    Computes a scalar metric for collinearity of 3 points.
++    Note: The exact formula for "Pearson correlation coefficient computed from
++    vertices" in 3D is not explicitly detailed in the source.
++    [G] A standard approach for 3 points is to fit a line and check the
++    coefficient of determination (R^2), or compute the correlation between
++    coordinates. For 3 points, the Pearson correlation between x, y, z
++    coordinates is not directly applicable as a single scalar for collinearity
++    without projection.
++    [G] Assuming the source refers to the correlation of the projections
++    onto the principal component, or a simplified 2D projection.
++    For implementation, one might use the normalized area of the triangle
++    formed by the points (0 for collinear) or the R^2 of a linear fit.
++    Given the ambiguity, this function is a placeholder for the specific
++    metric defined in the original paper's supplementary material.
+     """
+-    v1 = p2 - p1
+-    v2 = p3 - p1
+-    cross = np.cross(v1, v2)
+-    # Normalize by lengths to get sine of angle
+-    norm = np.linalg.norm(v1) * np.linalg.norm(v2)
+-    if norm == 0:
+-        return True
+-    sin_theta = np.linalg.norm(cross) / norm
+-    # If sin_theta is small, points are collinear.
+-    # Mapping to Pearson-like threshold: 
+-    # High correlation (close to 1) implies low angle.
+-    # We check if the deviation from collinearity is below a tolerance derived from threshold.
+-    # However, to strictly follow "Pearson > 0.9", we might need a specific metric.
+-    # Given the ambiguity, we return True if the points are geometrically collinear.
+-    return sin_theta < (1 - threshold) # Approximation
++    # Placeholder for the specific Pearson correlation calculation
++    # In practice, this might involve PCA or linear regression R^2
++    return 0.0
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+--   **Precision:** Distance calculations must use consistent units with $\omega_{dist}$.
+--   **Degenerate Input:** If vertices are identical, distance is 0, triggering collapse to ellipse.
+--   **Collinearity Metric:** The source specifies Pearson correlation but does not define the vector space for the correlation. In practice, geometric collinearity checks (cross product) are used [G].
++- The method does not reduce the representation to only point-centered ellipses because densification (cloning/splitting) is integrated alongside pruning [S1, unofficial].
++- Precision issues may arise when vertices are extremely close, potentially causing numerical instability in distance calculations.
++- The definition of "Pearson correlation coefficient computed from vertices" for 3D points is not explicitly detailed in the provided text, requiring interpretation or reference to supplementary materials for exact implementation [S1, unofficial].
+ 
+ ## Operating characteristics
+--   **Storage Reduction:** The vertex pruning mechanism reduces the average storage size required to store vertex coordinates by 24% compared to the variant without pruning [S1, unofficial].
+--   **Performance:** By converting triangles and lines to ellipses, the rendering pipeline processes fewer vertices per primitive, potentially improving rasterization speed [S1, unofficial].
+--   **Limitations:** The method relies on heuristic thresholds ($\omega_{dist}, \omega_{pear}$) which may require tuning for different scene scales [S1, unofficial].
++- **Storage Reduction:** The vertex pruning mechanism reduces the average storage size required to store vertex coordinates by 24% compared to the variant without pruning [S1, unofficial].
++- **Performance:** The method adds a computational overhead during the pruning step, but this is triggered only during primitive-level pruning events, which are relatively infrequent compared to rendering steps.
++- **Strengths:** Refines the Gaussian Splatting representation by removing unnecessary vertices, leading to less "messy" representations and better surface reconstruction metrics (e.g., Chamfer distance) [S1, unofficial].
++- **Limitations:** The effectiveness depends on the thresholds $\omega_{dist}$ and $\omega_{pear}$. Incorrect values may lead to over-pruning (loss of detail) or under-pruning (inefficiency).
+ 
+ ## Background
+-Vertex-level pruning was introduced in the context of Mixed-Primitive Gaussian Splatting (MP-GS) for surface reconstruction [S1, unofficial]. It addresses the inefficiency of retaining high-dimensional primitives (triangles/lines) in regions where lower-dimensional primitives (ellipses) suffice, refining the representation learned during training [S1, unofficial].
++Vertex-level pruning was introduced in the context of Mixed-Primitive Gaussian Splatting (MP-GS), a method that extends standard 3D Gaussian Splatting by using Gaussian triangles and lines in addition to ellipses [S1, unofficial]. The method was proposed to address the need for refining the representation during learning, particularly in sub-areas where simpler primitives suffice [S1, unofficial].
+ 
+ ## Sources

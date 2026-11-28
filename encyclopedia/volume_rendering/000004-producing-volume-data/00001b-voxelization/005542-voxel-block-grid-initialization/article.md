@@ -1,0 +1,271 @@
+# Voxel Block Grid Initialization
+
+Also called: Light Injection Pipeline Initialization, VoxelBlockGrid Setup, Voxelization Setup, VoxelizeController Initialization
+
+## Overview
+Voxel Block Grid Initialization establishes the foundational data structures and GPU resources required for voxel-based volume rendering and light injection. It differs from sibling methods like [Voxel Grid Data Generation Pipeline](1208-voxel-grid-data-generation-pipeline.md) or [Voxel Carving](1213-voxel-carving.md) by focusing exclusively on the allocation and configuration of the underlying spatial structure (`VoxModel`) and memory constraints before any geometry processing or voxel filling occurs [S1, unofficial]. It prepares the system for subsequent steps by defining the voxel dimensions, attribute channels, and associated light injection buffers [S1, unofficial].
+
+## How it works
+The method initializes a voxelization controller that manages 3D voxel textures for scene data, depth buffers for directional and point light injection, and compute shaders for light injection and anisotropic mipmap generation [S2, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+- `voxel_size`: The physical size of a single voxel [S1, unofficial].
+- `block_resolution`: The resolution of each voxel block (number of voxels per side) [S1, unofficial].
+- `block_count`: The maximum number of blocks that can be allocated in the grid [S1, unofficial].
+- `voxel_dim`: Dimension of the cubic voxel grid, used as width, height, and depth for all 3D voxel textures [S2, unofficial].
+- `light_injection_res`: Resolution for directional light depth maps [S2, unofficial].
+- `center`: Center position of the voxel volume (`glm::vec3`) [S2, unofficial].
+- `extent`: Spatial extent (size) of the voxel volume (`glm::vec3`) [S2, unofficial].
+- `s_DirLightMaxNum`: Maximum number of directional lights [S2, unofficial].
+- `s_PointLightMaxNum`: Maximum number of point lights [S2, unofficial].
+
+**Outputs:**
+- A configured `VoxelBlockGrid` instance with attributes 'tsdf', 'weight', and 'color' [S1, unofficial].
+- 3D textures for voxel channels (Albedo, Normal, Radiance) [S2, unofficial].
+- Uniform buffers for light view matrices [S2, unofficial].
+- Depth framebuffers for directional and point lights [S2, unofficial].
+- Compute shaders for light injection and mipmap generation [S2, unofficial].
+
+### Data Structures and Layouts
+
+**1. Voxel Block Grid Attributes**
+The grid is initialized with three attributes, all using `float32` type [S1, unofficial]:
+- `tsdf`: 1 channel [S1, unofficial].
+- `weight`: 1 channel [S1, unofficial].
+- `color`: 3 channels [S1, unofficial].
+
+**2. Voxel Textures (`m_VoxelizeTex`)**
+An array of three 3D textures (`VoxelChannel::Count`) [S2, unofficial]:
+- **Albedo (`TexVoxelAlbedo`)**: Format `GL_R32UI` (internal), `GL_RED_INTEGER` (type), `GL_UNSIGNED_INT` (data type), point filtering [S2, unofficial].
+- **Normal (`TexVoxelNormal`)**: Format `GL_R32UI` (internal), `GL_RED_INTEGER` (type), `GL_UNSIGNED_INT` (data type), point filtering [S2, unofficial].
+- **Radiance (`TexVoxelRadiance`)**: Format `GL_RGBA8` (internal), `GL_RGBA` (type), `GL_UNSIGNED_BYTE` (data type), bilinear filtering [S2, unofficial].
+
+**3. Directional Light Depth Maps (`m_DirectionalDepthMap`)**
+An array of `LightManager::s_DirLightMaxNum` 2D textures [S2, unofficial]:
+- Format: `GL_DEPTH_COMPONENT` [S2, unofficial].
+- Resolution: `m_DirLightInjectionRes` x `m_DirLightInjectionRes` [S2, unofficial].
+- Filter: `GL_NEAREST` [S2, unofficial].
+- Wrap: `GL_REPEAT` [S2, unofficial].
+
+**4. Point Light Cube Depth Maps (`m_CubeDepthMap`)**
+An array of `LightManager::s_PointLightMaxNum` cube maps [S2, unofficial]. Each cube map has 6 faces [S2, unofficial]:
+- Format: `GL_DEPTH_COMPONENT24` [S2, unofficial].
+- Resolution: `m_PointLightInjectionRes` x `m_PointLightInjectionRes` per face [S2, unofficial].
+- Filter: `GL_NEAREST` [S2, unofficial].
+- Wrap: `GL_CLAMP_TO_EDGE` [S2, unofficial].
+
+**5. Uniform Buffers**
+- `m_DirLightViewUBuffer`: Stores directional light view matrices [S2, unofficial].
+- `m_PointLightCaptureUBuffer`: Stores point light capture data [S2, unofficial].
+- `m_LightUBuffer`: General light uniform buffer containing `DirLight` structs, `PointLight` structs, ambient color, point light attenuation, and active light counts [S2, unofficial].
+
+### Steps
+
+1. **Initialize Voxel Block Grid**: Create an `o3d.t.geometry.VoxelBlockGrid` instance [S1, unofficial]. Set the voxel size to half of `self.voxel_size` [S1, unofficial]. Configure the grid with attributes 'tsdf', 'weight', and 'color' [S1, unofficial]. Set `block_resolution` and `block_count` [S1, unofficial].
+
+2. **Create Voxel Textures**: Create 3D textures for the voxel channels [S2, unofficial].
+   - For Albedo and Normal: Use 32-bit unsigned integer formats with point filtering [S2, unofficial].
+   - For Radiance: Use 8-bit RGBA format with bilinear filtering [S2, unofficial].
+   - Set dimensions to `voxel_dim` for width, height, and depth [S2, unofficial].
+
+3. **Create Uniform Buffers**: Create uniform buffers for directional light view matrices (`m_DirLightViewUBuffer`) and point light capture (`m_PointLightCaptureUBuffer`) using `Camera::GetUBufferSize()` and `GetPointLightCaptureUBufferSize()` [S2, unofficial].
+
+4. **Create Depth Framebuffer**: Create a depth framebuffer (`m_DepthFBO`) for rendering depth passes [S2, unofficial].
+
+5. **Initialize Directional Light Depth Maps**: Loop `i` from 0 to `LightManager::s_DirLightMaxNum - 1` [S2, unofficial]:
+   - Bind 2D texture [S2, unofficial].
+   - Allocate `GL_DEPTH_COMPONENT` buffer [S2, unofficial].
+   - Set nearest filter and repeat wrap [S2, unofficial].
+
+6. **Initialize Point Light Cube Depth Maps**: Loop `i` from 0 to `LightManager::s_PointLightMaxNum - 1` [S2, unofficial]:
+   - Bind cube map [S2, unofficial].
+   - Loop `j` from 0 to 5 (for each face) [S2, unofficial]:
+     - Allocate `GL_DEPTH_COMPONENT24` for each face [S2, unofficial].
+     - Set nearest filter and clamp-to-edge wrap [S2, unofficial].
+
+7. **Create and Link Compute Shaders**:
+   - Create and link directional light injection compute shader from `src/shaders/dirlight_injection_comp.glsl` [S2, unofficial].
+   - Create and link point light injection compute shader from `src/shaders/pointlight_injection_comp.glsl` [S2, unofficial].
+   - Create and link anisotropic mipmap compute shaders:
+     - Leaf shader from `anisotropic_mipmap_start_comp.glsl` [S2, unofficial].
+     - 6 interior shaders (`m_AnisotropicMipmapShaderInterior[i]`) from `anisotropic_mipmap_xpos_comp.glsl`, `anisotropic_mipmap_xneg_comp.glsl`, `anisotropic_mipmap_ypos_comp.glsl`, `anisotropic_mipmap_yneg_comp.glsl`, `anisotropic_mipmap_zpos_comp.glsl`, `anisotropic_mipmap_zneg_comp.glsl` [S2, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initialize_voxel_block_grid(voxel_size, block_resolution, block_count, voxel_dim, light_injection_res, center, extent, s_dir_light_max_num, s_point_light_max_num):
+    """
+    Initializes the voxel block grid and associated GPU resources.
+    """
+    # Step 1: Initialize Voxel Block Grid
+    # Create an o3d.t.geometry.VoxelBlockGrid instance
+    voxel_grid = create_voxel_block_grid()
+    
+    # Set voxel size to half of self.voxel_size
+    voxel_grid.set_voxel_size(voxel_size / 2.0)
+    
+    # Configure attributes: 'tsdf' (1 channel, float32), 'weight' (1 channel, float32), 'color' (3 channels, float32)
+    voxel_grid.add_attribute('tsdf', channels=1, dtype='float32')
+    voxel_grid.add_attribute('weight', channels=1, dtype='float32')
+    voxel_grid.add_attribute('color', channels=3, dtype='float32')
+    
+    # Set block resolution and block count
+    voxel_grid.set_block_resolution(block_resolution)
+    voxel_grid.set_max_block_count(block_count)
+    
+    # Step 2: Create Voxel Textures
+    # Array of three 3D textures
+    voxel_textures = []
+    
+    # Albedo: GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, point filter
+    tex_albedo = create_3d_texture(
+        internal_format='GL_R32UI',
+        format='GL_RED_INTEGER',
+        type='GL_UNSIGNED_INT',
+        filter='GL_NEAREST',
+        dimensions=(voxel_dim, voxel_dim, voxel_dim)
+    )
+    voxel_textures.append(tex_albedo)
+    
+    # Normal: GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, point filter
+    tex_normal = create_3d_texture(
+        internal_format='GL_R32UI',
+        format='GL_RED_INTEGER',
+        type='GL_UNSIGNED_INT',
+        filter='GL_NEAREST',
+        dimensions=(voxel_dim, voxel_dim, voxel_dim)
+    )
+    voxel_textures.append(tex_normal)
+    
+    # Radiance: GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, bilinear filter
+    tex_radiance = create_3d_texture(
+        internal_format='GL_RGBA8',
+        format='GL_RGBA',
+        type='GL_UNSIGNED_BYTE',
+        filter='GL_LINEAR',
+        dimensions=(voxel_dim, voxel_dim, voxel_dim)
+    )
+    voxel_textures.append(tex_radiance)
+    
+    # Step 3: Create Uniform Buffers
+    # Create uniform buffers for directional light view matrices and point light capture
+    dir_light_view_buffer = create_uniform_buffer(camera_get_u_buffer_size())
+    point_light_capture_buffer = create_uniform_buffer(get_point_light_capture_u_buffer_size())
+    
+    # Step 4: Create Depth Framebuffer
+    depth_fbo = create_depth_framebuffer()
+    
+    # Step 5: Initialize Directional Light Depth Maps
+    directional_depth_maps = []
+    for i in range(s_dir_light_max_num):
+        # Bind 2D texture
+        tex = create_2d_texture()
+        # Allocate GL_DEPTH_COMPONENT buffer
+        allocate_depth_buffer(tex, format='GL_DEPTH_COMPONENT')
+        # Set nearest filter and repeat wrap
+        set_texture_filter(tex, 'GL_NEAREST')
+        set_texture_wrap(tex, 'GL_REPEAT')
+        # Set resolution
+        set_texture_dimensions(tex, light_injection_res, light_injection_res)
+        directional_depth_maps.append(tex)
+    
+    # Step 6: Initialize Point Light Cube Depth Maps
+    cube_depth_maps = []
+    for i in range(s_point_light_max_num):
+        # Bind cube map
+        cube_tex = create_cube_map_texture()
+        for j in range(6):
+            # Allocate GL_DEPTH_COMPONENT24 for each face
+            allocate_depth_buffer(cube_tex, face=j, format='GL_DEPTH_COMPONENT24')
+            # Set nearest filter and clamp-to-edge wrap
+            set_texture_filter(cube_tex, 'GL_NEAREST')
+            set_texture_wrap(cube_tex, 'GL_CLAMP_TO_EDGE')
+            # Set resolution
+            set_texture_dimensions(cube_tex, light_injection_res, light_injection_res)
+        cube_depth_maps.append(cube_tex)
+    
+    # Step 7: Create and Link Compute Shaders
+    # Directional light injection compute shader
+    dir_light_injection_shader = create_compute_shader('src/shaders/dirlight_injection_comp.glsl')
+    link_shader_program(dir_light_injection_shader)
+    
+    # Point light injection compute shader
+    point_light_injection_shader = create_compute_shader('src/shaders/pointlight_injection_comp.glsl')
+    link_shader_program(point_light_injection_shader)
+    
+    # Anisotropic mipmap compute shaders
+    # Leaf shader
+    anisotropic_mipmap_leaf_shader = create_compute_shader('anisotropic_mipmap_start_comp.glsl')
+    link_shader_program(anisotropic_mipmap_leaf_shader)
+    
+    # 6 interior shaders
+    anisotropic_mipmap_interior_shaders = []
+    interior_shader_files = [
+        'anisotropic_mipmap_xpos_comp.glsl',
+        'anisotropic_mipmap_xneg_comp.glsl',
+        'anisotropic_mipmap_ypos_comp.glsl',
+        'anisotropic_mipmap_yneg_comp.glsl',
+        'anisotropic_mipmap_zpos_comp.glsl',
+        'anisotropic_mipmap_zneg_comp.glsl'
+    ]
+    for shader_file in interior_shader_files:
+        shader = create_compute_shader(shader_file)
+        link_shader_program(shader)
+        anisotropic_mipmap_interior_shaders.append(shader)
+    
+    # Return initialized structures
+    return {
+        'voxel_grid': voxel_grid,
+        'voxel_textures': voxel_textures,
+        'dir_light_view_buffer': dir_light_view_buffer,
+        'point_light_capture_buffer': point_light_capture_buffer,
+        'depth_fbo': depth_fbo,
+        'directional_depth_maps': directional_depth_maps,
+        'cube_depth_maps': cube_depth_maps,
+        'dir_light_injection_shader': dir_light_injection_shader,
+        'point_light_injection_shader': point_light_injection_shader,
+        'anisotropic_mipmap_leaf_shader': anisotropic_mipmap_leaf_shader,
+        'anisotropic_mipmap_interior_shaders': anisotropic_mipmap_interior_shaders
+    }
+```
+
+### Parameters and Typical Values
+- `voxel_size`: Physical size of a single voxel. Typical value: Half of `self.voxel_size` [S1, unofficial].
+- `block_resolution`: Resolution of each voxel block. Not given in the sources.
+- `block_count`: Maximum number of blocks. Not given in the sources.
+- `voxel_dim`: Dimension of the cubic voxel grid. Not given in the sources.
+- `light_injection_res`: Resolution for directional light depth maps. Not given in the sources.
+- `center`: Center position of the voxel volume. Not given in the sources.
+- `extent`: Spatial extent of the voxel volume. Not given in the sources.
+- `s_DirLightMaxNum`: Maximum number of directional lights. Not given in the sources.
+- `s_PointLightMaxNum`: Maximum number of point lights. Not given in the sources.
+
+### Edge Cases and Pitfalls
+- **Precision**: The use of `float32` for attributes and `GL_DEPTH_COMPONENT24` for depth buffers suggests a balance between precision and memory usage. Precision issues may arise if the voxel size is too small relative to the scene scale [S1, unofficial][S2, unofficial].
+- **Boundaries**: The wrap modes (`GL_REPEAT` for directional lights, `GL_CLAMP_TO_EDGE` for point lights) must be correctly set to avoid artifacts at the boundaries of the depth maps [S2, unofficial].
+- **Degenerate Input**: If `voxel_dim` is zero or negative, texture creation will fail. If `block_count` is zero, no blocks can be allocated [S1, unofficial][S2, unofficial].
+
+## Subtopics
+
+### [Voxelizer Initialization](19368-voxelizer-initialization.md)
+Creates a `Voxelizer` instance, either empty or with dimensions derived from a mesh's AABB. It serves as the foundational step in producing volume data by establishing the spatial structure (`VoxModel`) and memory constraints before any geometry is processed. It differs from subsequent voxelization steps by focusing solely on the allocation and configuration of the underlying data structures.
+
+## Operating characteristics
+- **Time Complexity**: Initialization time is proportional to the number of lights and the size of the voxel grid. Specifically, it involves creating textures and shaders, which is generally fast but depends on the number of lights and the resolution of the depth maps [S1, unofficial][S2, unofficial].
+- **Memory Complexity**: Memory usage is dominated by the voxel textures, depth maps, and uniform buffers. The voxel textures use `GL_R32UI` for Albedo and Normal, and `GL_RGBA8` for Radiance. Depth maps use `GL_DEPTH_COMPONENT` and `GL_DEPTH_COMPONENT24` [S1, unofficial][S2, unofficial].
+- **Measured Performance**: Not given in the sources.
+- **Scaling**: Performance scales with the number of lights and the resolution of the voxel grid and depth maps. Larger voxel grids and higher resolutions will increase memory usage and initialization time [S1, unofficial][S2, unofficial].
+- **Strengths**: Provides a structured and efficient way to manage voxel data and light injection resources. The use of compute shaders allows for parallel processing of light injection and mipmap generation [S1, unofficial][S2, unofficial].
+- **Limitations**: Requires careful management of GPU resources, especially for large scenes with many lights. The fixed resolution of depth maps may limit the quality of light injection for very large or very small scenes [S1, unofficial][S2, unofficial].
+- **When to Use**: Use this method when setting up a voxel-based volume rendering pipeline that requires light injection and anisotropic mipmap generation. It is suitable for scenes with a moderate number of lights and a fixed voxel grid resolution [S1, unofficial][S2, unofficial].
+- **When Not to Use**: Avoid this method if the scene requires dynamic voxel grid resizing or if the number of lights exceeds the maximum limits (`s_DirLightMaxNum`, `s_PointLightMaxNum`) [S1, unofficial][S2, unofficial].
+
+## Background
+The method originates from implementations of voxel-based volume rendering and light injection pipelines, such as those found in the NeRF-SLAM and HarshLight projects [S1, unofficial][S2, unofficial]. It is used in applications that require efficient voxelization and light injection for real-time or near-real-time rendering [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] ToniRV/NeRF-SLAM, https://github.com/ToniRV/NeRF-SLAM, fetched 2026-10-26 (unofficial)
+[S2] MangoSister/HarshLight, https://github.com/MangoSister/HarshLight, fetched 2026-10-26 (unofficial)

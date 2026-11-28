@@ -1,0 +1,69 @@
+# Semi-transparent Iso-surfaces
+
+
+## Overview
+Semi-transparent iso-surfaces is an image-order rendering method that visualizes scalar field features by detecting ray intersections with specific iso-values and blending multiple surfaces based on defined opacities [S1, unofficial]. It distinguishes itself from opaque isosurface raycasting by allowing depth perception through layered transparency, and from Direct Volume Rendering (DVR) by explicitly extracting geometric surfaces rather than compositing voxel contributions, offering a balance between structural clarity and volumetric context [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar field dataset $V$, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ for each pixel, and a set of surface definitions. Each surface $i$ is defined by an iso-value $\tau_i$, a color $\mathbf{c}_i$, and an opacity $\alpha_i$ [S1, unofficial].
+*   **Output:** A final pixel color $\mathbf{C}_{final}$ [S1, unofficial].
+
+**Data Structures:**
+*   **Surface Definition:** A list of structures, each containing:
+    *   `iso_value`: float, the threshold $\tau$ for the scalar field.
+    *   `color`: vec3, the RGB color $\mathbf{c}$ of the surface.
+    *   `opacity`: float, the alpha $\alpha$ value ($0.0 \le \alpha \le 1.0$).
+*   **Ray State:**
+    *   `current_pos`: vec3, current position along the ray.
+    *   `prev_pos`: vec3, position at the previous sample step.
+    *   `current_val`: float, scalar value $f(\mathbf{p}_{current})$ at the current position.
+    *   `prev_val`: float, scalar value $f(\mathbf{p}_{prev})$ at the previous position.
+
+**Algorithm Steps:**
+1.  **Initialization:** For each pixel, initialize the ray origin $\mathbf{o}$ and direction $\mathbf{d}$. Initialize `prev_pos` to the ray origin, `prev_val` to the scalar value at `prev_pos`, and the accumulated color $\mathbf{C}_{accum} = (0,0,0,0)$ [G].
+2.  **Ray Marching:** Advance along the ray by a fixed step size $s$. Let the new position be $\mathbf{p}_{curr} = \mathbf{p}_{prev} + s \cdot \mathbf{d}$. Sample the scalar field at $\mathbf{p}_{curr}$ to get $v_{curr} = f(\mathbf{p}_{curr})$ [S1, unofficial].
+3.  **Intersection Detection:** For each surface $i$ with iso-value $\tau_i$, check if the ray crosses the iso-surface between `prev_pos` and `curr_pos`. A crossing is detected if:
+    $$ (v_{prev} - \tau_i) \cdot (v_{curr} - \tau_i) < 0 $$
+    This indicates a sign change relative to the threshold [S1, unofficial].
+4.  **Hitpoint Refinement:** If a crossing is detected for surface $i$, calculate the exact intersection parameter $t_{hit}$ using linear interpolation between the previous and current ray positions [S1, unofficial]:
+    $$ t_{hit} = \frac{\tau_i - v_{prev}}{v_{curr} - v_{prev}} $$
+    The intersection point $\mathbf{p}_{hit}$ is:
+    $$ \mathbf{p}_{hit} = \mathbf{p}_{prev} + t_{hit} (\mathbf{p}_{curr} - \mathbf{p}_{prev}) $$
+    [S1, unofficial].
+5.  **Shading and Color Computation:** Compute the surface normal $\mathbf{n}$ at $\mathbf{p}_{hit}$ using the gradient of the scalar field $\nabla f(\mathbf{p}_{hit})$, typically via finite differences or tri-linear/tri-cubic interpolation [G]. Apply a local lighting model (e.g., Phong) to compute the diffuse and specular components, resulting in a shaded color $\mathbf{c}_{shaded}$ [G].
+6.  **Compositing:** Blend the shaded surface color into the accumulated result using the surface's opacity $\alpha_i$. Assuming back-to-front or front-to-back compositing is not strictly required for single-surface hits but multiple surfaces may be hit, standard alpha compositing is used:
+    $$ \mathbf{C}_{accum} = \mathbf{C}_{accum} + (1 - \mathbf{C}_{accum}.a) \cdot \alpha_i \cdot \mathbf{c}_{shaded} $$
+    Update the accumulated alpha:
+    $$ \mathbf{C}_{accum}.a = \mathbf{C}_{accum}.a + (1 - \mathbf{C}_{accum}.a) \cdot \alpha_i $$
+    [G].
+7.  **Termination:** If the accumulated alpha reaches 1.0 or the ray exits the volume, stop. Otherwise, update `prev_pos` = `curr_pos`, `prev_val` = `v_curr`, and repeat from Step 2.
+
+**Parameters:**
+*   **Step Size:** Not given in the sources. [G] Typical values depend on voxel resolution; small enough to avoid missing thin surfaces.
+*   **Iso-values, Colors, Opacities:** Adjusted via a Transfer Function window [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Linear interpolation assumes the scalar field varies linearly between samples. If the step size is too large, the intersection point may be inaccurate or missed entirely [S1, unofficial].
+*   **Multiple Hits:** If multiple surfaces are hit along the same ray, the order of processing affects the final color. The sources do not specify a strict ordering rule, but typically surfaces are processed in order of increasing $t$ (front-to-back) or based on user-defined priority [G].
+*   **Visual Clutter:** Rendering too many semi-transparent surfaces leads to incorrect color interpretation and visual clutter [S2, unofficial].
+
+## Subtopics
+
+### Isosurface-Triplet
+A specific configuration of semi-transparent iso-surfaces using 3 or 5 surfaces to depict feature structures, such as velocity in joining flows or Degree of Interest (DOI) functions [S2, unofficial]. The main surface is defined by a specific iso-value and opacity. Additional surfaces are determined by their relative distance from the main surface and their relative opacity compared to the main surface [S2, unofficial]. Colors are defined separately for each surface [S2, unofficial]. Optimal numbers are 3 or 5 surfaces; rendering more than 5 leads to incorrect color interpretation, and more than 7 can hide the feature behind redundant context [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of ray steps and the number of surfaces checked per step. Performance is higher than DVR because it avoids compositing all voxels, but lower than opaque isosurface raycasting due to the overhead of handling multiple surfaces and transparency blending [S1, unofficial].
+*   **Memory Complexity:** Low, as it does not require storing pre-computed color/opacity volumes or large auxiliary textures [S1, unofficial].
+*   **Strengths:** High-quality surface visualization with depth cues from transparency; intuitive representation of feature intensity (e.g., DOI levels) [S2, unofficial].
+*   **Limitations:** Visual clutter increases rapidly with the number of surfaces; requires careful tuning of iso-values and opacities [S2, unofficial].
+*   **When to Use:** When structural clarity of specific features is needed, but some context about surrounding intensity levels is also desired (e.g., medical imaging, scientific simulation data) [S2, unofficial].
+*   **When Not to Use:** When real-time performance is critical and the scene is complex, or when the user prefers fully opaque surfaces or full volumetric integration [S1, unofficial].
+
+## Background
+The method was described in the context of GPU-implementation aspects of ray casting techniques [S1, unofficial]. It is used in scientific visualization to depict features in simulation data, such as velocity fields in automotive industry simulations and Degree of Interest (DOI) functions in complex spatial coordinates [S2, unofficial]. The concept of using multiple iso-surfaces for medical data was previously explored by Gerstner using multiresolution techniques [S2, unofficial].
+
+## Sources
+[S1] GENERAL IMPLEMENTATION ASPECTS OF THE GPU- ..., http://sv-journal.org/2011-1/02/, fetched 2026-10-30 (unofficial)
+[S2] Feature-based Volume Rendering of Simulation Data, https://old.cescg.org/CESCG-2003/MMlejnek/index.html, fetched 2026-10-27 (unofficial)

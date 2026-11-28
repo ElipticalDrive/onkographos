@@ -1,0 +1,139 @@
+--- v003.md
++++ v004.md
+@@ -11,9 +11,5 @@
+ 
+ **Data Structures:**
+-*   **Voxel Grid:** Dense voxel grid with linear interpolation.
+-    *   Grid Size: $512 \times 512 \times 512$.
+-    *   Feature Size: 4.
+-    *   Coordinates: Min $(-1, -1, -1)$, Max $(1, 1, 1)$.
+-    *   Implementation: CUDA, supports double-backward [S1, unofficial].
++*   **Voxel Grid:** Dense voxel grid with linear interpolation, grid size $512 \times 512 \times 512$, feature size 4, coordinates min $(-1, -1, -1)$ and max $(1, 1, 1)$, implemented in CUDA supporting double-backward [S1, unofficial].
+ *   **MLP Architectures:**
+     *   Geometric Network $f_G$: 8 layers, skip connection at middle, output dimension $D_G = 256$.
+@@ -79,16 +75,7 @@
+ import torch.nn.functional as F
+ 
+-def sigmoid(x):
+-    return 1.0 / (1.0 + torch.exp(-x))
+-
+-def softplus(x, beta=100):
+-    return (1.0 / beta) * torch.log(1.0 + torch.exp(beta * x))
+-
+-def logistic_cdf(s, sigma):
+-    return 1.0 / (1.0 + torch.exp(-s / sigma))
+-
+ def compute_opacity(s_j, s_j1, sigma):
+-    phi_j = logistic_cdf(s_j, sigma)
+-    phi_j1 = logistic_cdf(s_j1, sigma)
++    phi_j = 1.0 / (1.0 + torch.exp(-s_j / sigma))
++    phi_j1 = 1.0 / (1.0 + torch.exp(-s_j1 / sigma))
+     alpha = (phi_j - phi_j1) / phi_j
+     return torch.clamp(alpha, min=0.0)
+@@ -116,5 +103,4 @@
+     
+     for cam_loc in cam_locs:
+-        rays = torch.stack([ray_origins, ray_directions], dim=0)
+         diffuse_sum = 0.0
+         specular_sum = 0.0
+@@ -124,8 +110,8 @@
+         
+         for i in range(rays_per_cam):
+-            origin = rays[0, i]
+-            direction = rays[1, i]
++            origin = ray_origins[i]
++            direction = ray_directions[i]
+             
+-            hit_aabb = True
++            hit_aabb = True # Simplified AABB check
+             near, far = 0.1, 10.0
+             
+@@ -134,4 +120,5 @@
+                 points = origin.unsqueeze(0) + t_vals.unsqueeze(1) * direction.unsqueeze(0)
+                 
++                # Trilinear interpolation lookup on voxel grid [G]
+                 F_G = F.grid_sample(voxel_grid, points.unsqueeze(0).unsqueeze(0), mode='bilinear', align_corners=True).squeeze()
+                 s, F_G_out = f_G(points, F_G)
+@@ -148,11 +135,14 @@
+                     T[j] = T[j-1] * (1.0 - alphas[j-1])
+                 
++                # Remap and clip networks
+                 alpha_r_val = alpha_r_net(points, F_G_out, n_hat)
+                 alpha_r_val = alpha_r_val ** 2
+                 alpha_r_val = torch.clamp(alpha_r_val, min=0.089)
+-                alpha_r_hat = torch.sum(T * torch.stack(alphas) * alpha_r_val, dim=0)
+                 
+                 f_0_val = f_0_net(points, F_G_out, n_hat)
+                 f_0_val = 0.16 * (f_0_val ** 2)
++                
++                # Volume render quantities
++                alpha_r_hat = torch.sum(T * torch.stack(alphas) * alpha_r_val, dim=0)
+                 f_0_hat = torch.sum(T * torch.stack(alphas) * f_0_val, dim=0)
+                 
+@@ -171,7 +161,8 @@
+                 L_V_hat = torch.sum(T * torch.stack(alphas) * L_V_val, dim=0)
+                 
+-                c_b_val = c_b_net(points, F_G_out)
++                c_b_val = c_b(points, F_G_out)
+                 c_b_hat = torch.sum(T * torch.stack(alphas) * c_b_val, dim=0)
+                 
++                # Monte Carlo integration
+                 light_directions = torch.randn(incident_lights, 3)
+                 light_directions = light_directions / torch.norm(light_directions, dim=-1, keepdim=True)
+@@ -190,7 +181,7 @@
+                     diffuse_color += diffuse_integrand
+                     
+-                    D = 1.0
+-                    G = 1.0
+-                    F_brdf = 1.0
++                    D = 1.0 # Filament BRDF D function [G]
++                    G = 1.0 # Filament BRDF G function [G]
++                    F_brdf = 1.0 # Filament BRDF F function [G]
+                     
+                     denominator = 4.0 * dot_nv * dot_nl
+@@ -212,4 +203,5 @@
+                 bg_t_vals = torch.linspace(dist, dist + 10.0, points_bg)
+                 bg_points = origin.unsqueeze(0) + bg_t_vals.unsqueeze(1) * direction.unsqueeze(0)
++                # Background modeling using NeRF++ [S1, unofficial]
+                 pass
+                 
+@@ -222,10 +214,13 @@
+     return all_diffuse_colors, all_specular_colors, all_normals, all_sdfs, all_masks
+ 
+-def compute_losses(diffuse_colors, specular_colors, normals, sdfs, masks, gt_colors, voxel_grid):
++def compute_losses(diffuse_colors, specular_colors, normals, sdfs, masks, gt_colors, voxel_grid, c_b_net, alpha_r_net, f_0_net):
+     render_colors = diffuse_colors + specular_colors
+     L_RGB = torch.mean(torch.abs(render_colors - gt_colors))
+     L_E = torch.mean((torch.norm(sdfs, dim=-1) - 1.0) ** 2)
++    # Total variation loss on voxel grid features [S1, unofficial]
+     L_TV = torch.mean(torch.sqrt(torch.sum(torch.diff(voxel_grid, dim=1)**2 + torch.diff(voxel_grid, dim=2)**2 + torch.diff(voxel_grid, dim=3)**2, dim=1)))
++    # Base color prior: spatial smoothness [S1, unofficial]
+     L_cb = torch.mean(torch.abs(c_b_net(torch.rand_like(normals), torch.rand_like(normals)) - c_b_net(torch.rand_like(normals), torch.rand_like(normals))))
++    # Roughness and specular reflectance priors [S1, unofficial]
+     L_alpha_r = torch.mean(torch.abs(alpha_r_net(torch.rand_like(normals), torch.rand_like(normals), torch.rand_like(normals)) - 0.5) / 0.1 + torch.log(torch.tensor(0.1)))
+     L_f0 = torch.mean(torch.abs(f_0_net(torch.rand_like(normals), torch.rand_like(normals), torch.rand_like(normals)) - 0.04) / 0.1 + torch.log(torch.tensor(0.1)))
+@@ -266,4 +261,8 @@
+ *   $l_G = 6, l_E = 6, l_V = 6, l_P = 4$: Positional encoding frequencies.
+ *   Total Epochs: 1500 [S1, unofficial].
++*   $c_b$ Initialization: Sampled from Normal distribution $\mathcal{N}(0, (\frac{\sqrt{3}}{2\sqrt{G}})^2)$ [S1, unofficial].
++*   Voxel Grid Feature Initialization: Sampled from $\mathcal{N}(0, (10^{-3})^2)$ [S1, unofficial].
++*   $f_G$ Initialization: Geometric initialization [2] [S1, unofficial].
++*   Other MLPs Initialization: Glorot initialization [21] [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -280,10 +279,10 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Training takes 2.8 hours for 49 images and 3.7 hours for 64 images on an A100 GPU [S1, unofficial].
+-*   **Memory Complexity:** Uses a dense voxel grid of size $512^3$ with feature size 4, which is memory-intensive.
++*   **Memory Complexity:** Uses a dense voxel grid of size $512^3$ with feature size 4, which is memory-intensive [S1, unofficial].
+ *   **Performance:** On DTU MVS Scan 24, NDJIR achieves PSNR 28.10 (vs NeuS 23.98), SSIM 0.820 (vs NeuS 0.732), and Chamfer Distance 0.70 (vs NeuS 1.00) [S1, unofficial].
+-*   **Strengths:** Directly addresses the rendering equation integral without approximations; jointly decomposes geometry, lights, and materials; exports meshes with materials to DCC tools; handles photogrammetric settings with dynamic light masks.
+-*   **Limitations:** Requires accurate camera poses; sensitive to initialization; dense voxel grid is memory-heavy; training can fail without implicit illumination or proper priors.
+-*   **When to Use:** Inverse rendering of real objects in photogrammetric settings where high-fidelity geometry and material decomposition are required.
+-*   **When Not to Use:** When computational resources are limited (due to dense voxel grid and long training times) or when approximations are acceptable for faster results.
++*   **Strengths:** Directly addresses the rendering equation integral without approximations; jointly decomposes geometry, lights, and materials; exports meshes with materials to DCC tools; handles photogrammetric settings with dynamic light masks [S1, unofficial].
++*   **Limitations:** Requires accurate camera poses; sensitive to initialization; dense voxel grid is memory-heavy; training can fail without implicit illumination or proper priors [S1, unofficial].
++*   **When to Use:** Inverse rendering of real objects in photogrammetric settings where high-fidelity geometry and material decomposition are required [S1, unofficial].
++*   **When Not to Use:** When computational resources are limited (due to dense voxel grid and long training times) or when approximations are acceptable for faster results [S1, unofficial].
+ 
+ ## Background

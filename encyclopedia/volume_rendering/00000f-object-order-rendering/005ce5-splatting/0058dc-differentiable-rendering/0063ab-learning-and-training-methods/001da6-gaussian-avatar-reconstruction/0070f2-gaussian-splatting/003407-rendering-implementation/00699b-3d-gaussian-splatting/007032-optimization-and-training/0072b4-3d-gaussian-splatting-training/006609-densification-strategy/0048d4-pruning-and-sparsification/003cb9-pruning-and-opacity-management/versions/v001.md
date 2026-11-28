@@ -1,0 +1,72 @@
+# Pruning and Opacity Management
+
+Also called: Component Recycling, Scooping, Adaptive Triangle Pruning, Temporal Sensitivity Pruning
+
+## Overview
+Pruning and Opacity Management are mechanisms within 3D Gaussian Splatting training that remove redundant or low-contribution primitives to prevent unbounded memory growth, reduce rendering latency, and mitigate overfitting (floaters). Unlike sibling methods that focus on densification (splitting/cloning) to increase density, this family focuses on reduction and stability. It differs from standard 3DGS opacity reset by employing specific criteria such as temporal sensitivity scores [S1, unofficial], component resampling (scooping) [S2], or view-consistency checks on triangle splats [S3].
+
+## Shared principles
+The core mechanism involves periodically evaluating a metric for each primitive $\mathcal{G}_i$ to determine if it should be removed or modified. This process is typically triggered at fixed intervals (e.g., every $N$ training steps) rather than every step, to allow the optimizer to stabilize [Parent].
+
+Key shared components include:
+1.  **Trigger Condition:** Pruning is not continuous. It occurs every `pruneEvery` steps, often aligned with densification intervals [Parent].
+2.  **Metric Computation:** A score is computed for each primitive based on its contribution to the reconstruction error or stability. Common metrics include:
+    *   **Opacity:** Primitives with low opacity are candidates for pruning or reset [Parent].
+    *   **Gradient Sensitivity:** The magnitude of the gradient of the loss with respect to the primitive's parameters, aggregated over time or views [S1, unofficial].
+    *   **Visibility/Weight:** The maximum blending weight ($T \cdot o$) or pixel coverage across training views [S3].
+3.  **Execution:**
+    *   **Pruning:** Primitives failing the metric threshold are removed from the active set [Parent].
+    *   **Recycling:** In some variants, low-opacity components are not deleted but resampled into high-opacity slots to maintain buffer efficiency [S2].
+4.  **Opacity Management:** To prevent over-densification and stabilize training, opacities are often reset or decayed. Standard 3DGS resets opacities of newly split primitives to a low value (e.g., logit -1.386) and periodically clamps high opacities [Parent].
+5.  **Data Structure Management:** The set of Gaussians is stored in GPU buffers. Pruning requires managing buffer capacity (often pre-allocated to be 3x the initial count) and performing compaction to remove pruned primitives [Parent].
+
+## Subtopics
+
+### [GES Optimization Strategy](4697-ges-optimization-strategy.md)
+The GES Optimization Strategy controls shape density by selectively pruning splats based on shape attributes, eliminating the need for a variable density mechanism [4697-ges-optimization-strategy.md]. It differs from standard 3DGS by optimizing the shape parameter $\beta$ alongside position, opacity, and covariance, using a frequency-modulated loss to enhance high-frequency detail reconstruction [4697-ges-optimization-strategy.md]. Pruning occurs every 100 iterations based on a density gradient threshold of 0.0003 and a pruning threshold of 0.5 [4697-ges-optimization-strategy.md].
+
+### Temporal Sensitivity Pruning
+#### definition
+TSP is a pruning method that removes low-impact Gaussians by calculating a temporal sensitivity score approximating the second-order sensitivity to the L2 loss across all training views [S1, unofficial].
+
+#### step
+- [S1, unofficial] For each Gaussian $\mathcal{G}_i$, calculate the gradient of the rendered image $I_{\mathcal{G}_t}(\phi)$ with respect to the projected Gaussian value $g_i$ for all training poses $\phi$ and timesteps $t$ in $\mathcal{P}_{gt}$.
+- [S1, unofficial] Square these gradients and sum them over all poses and timesteps to compute the cumulative sensitivity score $\tilde{U}_{\mathcal{G}_i}$.
+- [S1, unofficial] Periodically prune Gaussians with low sensitivity scores during training to reduce neural inference load.
+
+#### formula
+- [S1, unofficial] $\tilde{U}_{\mathcal{G}_i} \approx \nabla_{g_i}^2 L_2 \approx \sum_{\phi, t \in \mathcal{P}_{gt}} \left( \nabla_{g_i} I_{\mathcal{G}_t}(\phi) \right)^2$, where $\tilde{U}_{\mathcal{G}_i}$ is the TSP score for Gaussian $\mathcal{G}_i$, $g_i$ is the value of $\mathcal{G}_i$ projected onto image space, $\mathcal{P}_{gt}$ is the set of training poses and timesteps, and $I_{\mathcal{G}_t}(\phi)$ is the rendered image at pose $\phi$ and timestep $t$.
+
+#### parameter
+- [S1, unofficial] $\mathcal{P}_{gt}$: The set of training poses and timesteps used for sensitivity aggregation.
+
+### Component Recycling (Scooping)
+#### definition
+- [S2] A training-time component management strategy that replaces vanilla 3DGS densification/pruning by resampling low-opacity components into high-opacity ones to maintain efficiency without unbounded growth.
+
+#### step
+- [S2] Every n training iterations: 1) Compute opacity values for all active components. 2) Construct a Multinomial distribution from these opacity values. 3) Sample components with relatively high probability to replace low-opacity ones.
+
+#### parameter
+- [S2] n: iteration interval for recycling. Value not specified in this section; detailed recycling formulae are deferred to Sec. 5.
+
+#### pitfall
+- [S2] Recycling must not significantly alter the rendered image. The operation is only valid when the change to the current state (rendering result) after recycling is minimal.
+
+### Adaptive Pruning
+#### definition
+- [S3] A routine to reduce floaters and overfitting by removing triangles that explain small amounts of data within a single view.
+
+#### step
+- [S3] During rasterization, calculate the maximum volume rendering blending weight $T \cdot o$ (transmittance times opacity) for each triangle across all training views. Prune triangles if their maximum weight is less than threshold $\tau_{prune}$. Additionally, prune triangles not rendered at least twice with more than one pixel of coverage.
+
+#### parameter
+- [S3] $\tau_{prune}$: A user-defined threshold for the maximum volume rendering blending weight below which a triangle is pruned.
+
+## Background
+Pruning strategies in Gaussian Splatting originated from the need to manage the exponential growth of primitives during densification. Standard 3DGS uses opacity reset and gradient-based pruning [Parent]. Variants like SpeeDe3DGS introduced temporal sensitivity for dynamic scenes [S1, unofficial]. Component recycling (Scooping) was proposed to handle memory constraints in large-scale scenes [S2]. Triangle-based pruning was adapted for convex splatting to remove overfitted geometry [S3].
+
+## Sources
+[S1] SpeeDe3DGS: Speedy Deformable 3D Gaussian Splatting with Temporal Pruning and Motion Grouping, https://speede3dgs.github.io/, fetched 2026-10-29 (unofficial)
+[S2] 3D Student Splatting and Scooping, https://doi.org/10.1109/cvpr52734.2025.01960, fetched 2026-10-29
+[S3] Triangle Splatting for Real-Time Radiance Field Rendering, https://doi.org/10.1109/3DV69130.2026.00123, fetched 2026-10-27

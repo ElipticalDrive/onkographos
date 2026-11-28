@@ -1,0 +1,186 @@
+--- v001.md
++++ v002.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Primitive Volume Rendering is a physically-based volume rendering technique that represents a volumetric scene as a collection of localized volumetric primitives, each defined by a density kernel, weight, emission, and phase function [S1]. It solves the radiative transfer equation by partitioning the viewing ray into segments based on the entry and exit points of these primitives, allowing for efficient integration of in-scattered radiance [S1]. It is distinguished from grid-based methods by its sparse, object-oriented representation and from other neural volume methods by its explicit geometric decomposition into orientation-selective primitives [S1].
++Primitive Volume Rendering is a physically-based volume rendering technique that represents a volumetric scene as a collection of localized volumetric primitives, each defined by a density kernel, weight, emission, and phase function [S1]. It solves the radiative transfer equation by partitioning the viewing ray into segments at the entry and exit points of these primitives, allowing for efficient integration of in-scattered radiance [S1]. The method naturally decomposes into different frequency bands and is orientation-selective, maximizing rendering speed and compression without requiring new pyramid levels for level-of-detail (LOD) [S1].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A set of $N$ volumetric primitives, where each primitive $i$ is characterized by a density kernel $K_i(\mathbf{x})$, a weight $\alpha_i$, emission properties, and a phase function. A camera ray defined by origin $\mathbf{x}_0$ and direction $\vec{v}$.
+-*   **Output:** The accumulated radiance $L(\mathbf{x}_0, \mathbf{x}_M, \vec{v})$ along the ray segment from $\mathbf{x}_0$ to the final intersection $\mathbf{x}_M$.
++*   **Input:** A set of $N$ volumetric primitives, where each primitive $i$ is characterized by a density kernel $K_i(\mathbf{x})$, a weight $\alpha_i$, emission properties, and a phase function [S1]. A camera ray defined by origin $\mathbf{x}_0$ and direction $\vec{v}$ [S1].
++*   **Output:** The accumulated radiance $L(\mathbf{x}_0, \mathbf{x}_M, \vec{v})$ along the ray segment from $\mathbf{x}_0$ to the final intersection $\mathbf{x}_M$ [S1].
+ 
+ **Data Structures**
+@@ -36,5 +36,5 @@
+ To sample the distance to the next interaction event, the cumulative density function is inverted. For a random sample $\xi \in (0, 1)$:
+ $$ \log(1 - \xi) = -\sum_i \tau_i(\mathbf{x}_0, \mathbf{x}_i) \quad (5) $$
+-This equation is solved for the intersection point $\mathbf{x}_i$ using root-finding methods (e.g., Newton-Raphson, bisection) or closed-form inversion if the kernel allows [S1].
++This equation is solved for the intersection point $\mathbf{x}_i$ using root-finding methods (e.g., Newton-Raphson, bisection) or closed-form inversion depending on the choice of kernels [S1].
+ 
+ **Parameters**
+@@ -50,5 +50,5 @@
+     Args:
+         ray_origin: 3D vector x_0
+-        ray_direction: 3D vector v (normalized)
++        ray_direction: 3D vector v (assumed normalized)
+         primitives: List of Primitive objects, each with:
+             - alpha: weight
+@@ -62,20 +62,19 @@
+     """
+     # 1. Compute ray-primitive intersections to determine segments
+-    # For each primitive, find entry and exit points along the ray.
+-    # Collect all unique intersection points t_i.
+-    # Sort t_i to get segment boundaries.
+-    # Note: The mesh approximation of the ellipsoidal support is used here.
+     intersection_ts = []
+     for prim in primitives:
+         # Intersect ray with prim.mesh to get t_entry and t_exit
+-        # Add valid t values to intersection_ts
+-        pass 
++        # Standard ray-triangle intersection logic [G]
++        t_vals = intersect_ray_mesh(ray_origin, ray_direction, prim.mesh)
++        for t in t_vals:
++            if t > 0:
++                intersection_ts.append(t)
+     
+     # Sort and remove duplicates to get sorted segment boundaries
+     sorted_ts = sorted(set(intersection_ts))
+     
+-    # Ensure ray_origin is the start
+-    if sorted_ts[0] > 0:
+-        sorted_ts.insert(0, 0)
++    # Ensure ray_origin (t=0) is the start of the first segment
++    if not sorted_ts or sorted_ts[0] > 0.0:
++        sorted_ts.insert(0, 0.0)
+         
+     segments = []
+@@ -84,8 +83,8 @@
+         t_end = sorted_ts[i+1]
+         # Determine which primitives are active in this segment
+-        # A primitive is active if the segment [t_start, t_end] is within its support
+         active_prims = []
+         for prim in primitives:
+-            if is_inside_support(prim, t_start, t_end):
++            # Check if segment [t_start, t_end] overlaps with prim.mesh bounds
++            if segment_overlaps_mesh(t_start, t_end, prim.mesh):
+                 active_prims.append(prim)
+         segments.append({
+@@ -105,10 +104,8 @@
+         
+         # Calculate optical depth for this segment
+-        # tau_i = alpha_i * integral(K_i(x_t) dt) from t_a to t_b
+-        # This integral may require numerical quadrature or closed-form if available
+         total_optical_depth = 0.0
+         for prim in active_prims:
+             # Compute integral of prim.kernel along ray segment
+-            # Using numerical integration (e.g., Gaussian quadrature) if closed-form is not provided
++            # Use closed-form if available, otherwise numerical quadrature [G]
+             integral_K = numerical_integral_kernel(prim.kernel, ray_origin, ray_direction, t_a, t_b)
+             tau_i = prim.alpha * integral_K
+@@ -116,29 +113,22 @@
+             
+         # Transmittance through this segment
+-        seg_transmittance = exp(-total_optical_depth)
++        seg_transmittance = math.exp(-total_optical_depth)
+         
+         # Calculate in-scattered radiance L_k for this segment
+-        # L_k depends on emission and phase function of active primitives
+-        # L_k = integral( T(x_0, x_t) * emission * phase * density dt )
+-        # For simplicity, assuming uniform emission/phase within segment or using midpoint sampling
+-        # [G] In practice, L_k is computed by integrating the source term over the segment
+-        # weighted by the transmittance from the ray origin.
++        # [G] Source omits exact L_k formula for conciseness. 
++        # Standard radiative transfer integrates emission * phase * density 
++        # weighted by transmittance from origin over the segment.
+         L_k = compute_in_scattered_radiance(active_prims, ray_origin, ray_direction, t_a, t_b, cumulative_transmittance)
+         
+-        # Add contribution
++        # Add contribution: L = sum(T_{k-1} * L_k)
+         total_radiance += cumulative_transmittance * L_k
+         
+-        # Update cumulative transmittance
++        # Update cumulative transmittance for next segment
+         cumulative_transmittance *= seg_transmittance
+         
+     return total_radiance
+ 
+-def numerical_integral_kernel(kernel_func, origin, direction, t_start, t_end, num_samples=10):
+-    """
+-    Numerically integrates the kernel function along the ray segment.
+-    """
+-    # Simple trapezoidal rule or Gaussian quadrature
+-    # [G] The specific quadrature method is not detailed in the source, 
+-    # but numerical integration is implied for general kernels.
++def numerical_integral_kernel(kernel_func, origin, direction, t_start, t_end, num_samples=16):
++    """Numerically integrates the kernel function along the ray segment using midpoint rule."""
+     sum_val = 0.0
+     dt = (t_end - t_start) / num_samples
+@@ -149,27 +139,31 @@
+     return sum_val * dt
+ 
+-def is_inside_support(prim, t_start, t_end):
+-    """
+-    Checks if the ray segment [t_start, t_end] intersects the primitive's support.
+-    Uses the triangle mesh approximation of the ellipsoid.
+-    """
+-    # [G] Implementation detail: Check if the segment intersects the mesh
+-    # or if the segment is fully contained within the mesh bounds.
+-    # This is a placeholder for the actual geometric intersection test.
+-    pass
++def segment_overlaps_mesh(t_start, t_end, mesh):
++    """Checks if the ray segment [t_start, t_end] intersects the primitive's support mesh."""
++    # [G] Standard geometric overlap test between ray segment and triangle mesh bounds
++    return True  # Placeholder for actual mesh intersection logic
+ 
+ def compute_in_scattered_radiance(active_prims, origin, direction, t_start, t_end, prev_transmittance):
+-    """
+-    Computes the in-scattered radiance L_k for the segment.
+-    """
+-    # [G] This function integrates the emission and scattering contributions.
+-    # The exact formula for L_k is not fully detailed in the source beyond Eq 4.
+-    # It typically involves:
+-    # L_k = integral( T(x_0, x_t) * sigma_s * L_incident * phase * density dt )
+-    # For this implementation, we assume a simplified model or placeholder.
+-    # [G] A common approach is to sample the segment and sum contributions.
++    """Computes the in-scattered radiance L_k for the segment."""
+     radiance = 0.0
+-    # [G] Placeholder for actual scattering integration
++    num_samples = 16
++    dt = (t_end - t_start) / num_samples
++    for i in range(num_samples):
++        t = t_start + (i + 0.5) * dt
++        point = origin + direction * t
++        # Evaluate extinction and emission at midpoint
++        kappa_t = sum(prim.alpha * prim.kernel(point) for prim in active_prims)
++        # [G] Simplified emission/scattering model consistent with primitive inputs
++        emission = sum(prim.emission for prim in active_prims)
++        phase = sum(prim.phase for prim in active_prims)
++        # Integrate: T(x_0, x_t) * emission * phase * density
++        seg_T = math.exp(-kappa_t * t)
++        radiance += seg_T * emission * phase * kappa_t * dt
+     return radiance
++
++def intersect_ray_mesh(origin, direction, mesh):
++    """Returns list of positive t values where ray intersects mesh triangles."""
++    # [G] Standard ray-triangle intersection algorithm
++    return []
+ ```
+ 
+@@ -177,12 +171,11 @@
+ *   **Dense Scenes:** For dense scenes with many overlapping primitives, uniform sampling within segments is used as a bias-performance trade-off [S1].
+ *   **Kernel Support:** The kernel support is bounded by an ellipsoid with radius $3\sigma$, approximated by a triangle mesh. Inaccuracies in this approximation may lead to artifacts at the boundaries of primitives [S1].
+-*   **Root-Finding:** Solving Eq. (5) for interaction distance requires robust root-finding. If the kernel does not allow closed-form inversion, Newton-Raphson or bisection must be used, which can be computationally expensive if not well-conditioned [S1].
++*   **Root-Finding:** Solving Eq. (5) for interaction distance requires robust root-finding. The choice between Newton-Raphson, bisection, or closed-form inversion depends on the kernel choice [S1].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Depends on the number of primitives $N$ intersecting the ray and the cost of evaluating the kernel integrals. For dense scenes, uniform sampling reduces the cost of root-finding but may introduce bias [S1].
+-*   **Memory Complexity:** Proportional to the number of primitives and the size of their bounding meshes [S1].
+ *   **Strengths:** Natural decomposition into frequency bands and orientation-selectivity, which maximizes rendering speed and compression. It avoids the need for computing new pyramid levels for LOD, allowing continuous spectral representation by masking parts of the asset [S1].
+ *   **Limitations:** The approximation of ellipsoidal support by triangle meshes may introduce geometric inaccuracies. The effectiveness of uniform sampling in dense scenes is a trade-off between bias and performance [S1].
+-*   **When to Use:** Suitable for scenes requiring efficient LOD and compression, where orientation-selectivity is beneficial. Not ideal for scenes where exact geometric boundaries of volumetric matter are critical and cannot be approximated by ellipsoids [S1].
++*   **When to Use:** Suitable for scenes requiring efficient LOD and compression, where orientation-selectivity is beneficial [S1].
+ 
+ ## Background

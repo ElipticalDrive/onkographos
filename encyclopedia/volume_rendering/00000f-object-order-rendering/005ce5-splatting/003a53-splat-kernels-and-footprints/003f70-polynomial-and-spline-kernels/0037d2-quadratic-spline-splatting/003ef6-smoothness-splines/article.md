@@ -1,0 +1,159 @@
+# Smoothness Splines
+## Overview
+Smoothness Splines (SS) is a scattered data approximation method for recovering volume rendered images from sparse pixel measurements by finding a smooth solution in a shift-invariant spline space [S1][S2, unofficial]. It minimizes a least-squares norm that penalizes non-smooth solutions using the second-order Beppo-Levi seminorm, distinguishing it from compressed sensing methods that rely on sparsity in wavelet or gradient domains [S1]. SS is more resilient to missing information and computationally less expensive than compressed sensing pursuit strategies [S1].
+
+## How it works
+**Inputs:**
+*   $y \in \mathbb{R}^M$: Vector of measured pixel values at locations $k_1, \dots, k_M$ [S1][S2, unofficial].
+*   $N$: Total number of pixels in the image grid [S1][S2, unofficial].
+*   $j_1, \dots, j_N$: Pixel locations corresponding to the full image grid (used for the basis functions) [S1][S2, unofficial].
+
+**Outputs:**
+*   $x \in \mathbb{R}^N$: Recovered image coefficients, which correspond to pixel values since the kernel is interpolating [S1][S2, unofficial].
+
+**Data Structures:**
+*   **Measurement Mask / Sampling Matrix:** A boolean array or list of indices indicating which of the $N$ grid locations $j_n$ correspond to the measured values $y_m$. Let $S$ be the $M \times N$ sampling matrix where $S_{m,n} = 1$ if $j_n = k_m$ and $0$ otherwise [S1][S2, unofficial].
+*   **Kernel:** The bivariate kernel $\phi(t_1, t_2) = \beta_I^3(t_1)\beta_I^3(t_2)$, where $\beta_I^3$ is the optimal interpolating cubic B-spline [S1][S2, unofficial].
+
+**Parameters:**
+*   $\lambda$: Regularization parameter. Typical value: $10^{-2}$ [S1][S2, unofficial].
+
+**Steps:**
+1.  **Define the Kernel:** Use the optimal interpolating cubic B-spline kernel [S1][S2, unofficial]. The univariate kernel is defined as [S1][S2, unofficial]:
+    $$ \beta_I^3(t) := \beta^3(t) - \frac{1}{6} \frac{d^2}{dt^2} \beta^3(t) $$
+    where $\beta^3(t)$ is the univariate uniform centered cubic B-spline [S1][S2, unofficial]. The bivariate kernel is the tensor product $\phi(t_1, t_2) = \beta_I^3(t_1)\beta_I^3(t_2)$ [S1][S2, unofficial].
+2.  **Formulate the Optimization Problem:** The goal is to find coefficients $c$ such that $f(t) = \sum_{n=1}^N c_n \phi(t - j_n)$ fits the data while minimizing smoothness energy [S1][S2, unofficial]. Because $\beta_I^3$ is interpolating, $c = x$ [S1][S2, unofficial]. The problem is formulated as [S1][S2, unofficial]:
+    $$ \min_x \|Sx - y\|_2^2 + \lambda x^T H x $$
+    where $H$ is an $N \times N$ matrix with entries [S1][S2, unofficial]:
+    $$ H_{p,q} = \langle \phi(\cdot - j_p), \phi(\cdot - j_q) \rangle_{BL_2} $$
+3.  **Define the Beppo-Levi Inner Product:** The smoothness penalty uses the second-order Beppo-Levi inner product [S1][S2, unofficial]:
+    $$ \langle g, h \rangle_{BL_2} := \langle \partial_{t_1 t_1} g, \partial_{t_1 t_1} h \rangle + 2 \langle \partial_{t_1 t_2} g, \partial_{t_1 t_2} h \rangle + \langle \partial_{t_2 t_2} g, \partial_{t_2 t_2} h \rangle $$
+    where $\langle \cdot, \cdot \rangle$ is the standard $L^2$ inner product [S1][S2, unofficial].
+4.  **Derive the Linear System:** Differentiating the objective function with respect to $x$ yields the normal equations [S1][S2, unofficial]:
+    $$ (S^T S + \lambda H) x = S^T y $$
+    The matrix $S^T S + \lambda H$ is symmetric and positive definite [S2, unofficial].
+5.  **Solve the System:** Solve for $x$ using the Conjugate Gradient (CG) method [S1][S2, unofficial].
+
+**Pitfalls and Edge Cases:**
+*   **Matrix Storage:** The matrix $H$ does not need to be explicitly computed or stored; its action on a vector $x$ is equivalent to a filtering operation where filter weights are obtained via the BL2 inner product definition [S1][S2, unofficial]. Implementers must implement the matrix-vector product $Hx$ as a convolution/filtering step rather than forming $H$ [S1][S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def cubic_b_spline(t):
+    """Univariate uniform centered cubic B-spline beta^3(t)."""
+    t = np.abs(t)
+    result = np.zeros_like(t)
+    mask_1 = t < 1
+    mask_2 = (t >= 1) & (t < 2)
+    result[mask_1] = 2.0/3.0 - t[mask_1]**2 + t[mask_1]**3 / 2.0
+    result[mask_2] = 4.0/3.0 - 2.0*t[mask_2] + t[mask_2]**3 / 2.0
+    return result
+
+def d2_cubic_b_spline(t):
+    """Second derivative of the univariate uniform centered cubic B-spline."""
+    t = np.abs(t)
+    result = np.zeros_like(t)
+    mask_1 = t < 1
+    mask_2 = (t >= 1) & (t < 2)
+    # beta''(t) = -2 + 3t for |t|<1, and 1.5 for 1<=|t|<2
+    result[mask_1] = -2.0 + 3.0 * t[mask_1]
+    result[mask_2] = 1.5
+    return result
+
+def optimal_interpolating_cubic_b_spline(t):
+    """beta_I^3(t) = beta^3(t) - 1/6 * d^2/dt^2 beta^3(t)"""
+    return cubic_b_spline(t) - (1.0/6.0) * d2_cubic_b_spline(t)
+
+def compute_bl2_filter_weights():
+    """
+    Computes 1D filter weights w_k = <phi, phi(.-k)>_BL2 numerically.
+    The BL2 inner product in 1D reduces to the integral of the product 
+    of second derivatives. This is a standard numerical integration step [G].
+    """
+    t_vals = np.linspace(-4, 4, 2000)
+    d2_phi = d2_cubic_b_spline(t_vals)
+    weights = []
+    for k in range(-4, 5):
+        d2_phi_shifted = d2_cubic_b_spline(t_vals - k)
+        w = np.trapz(d2_phi * d2_phi_shifted, t_vals)
+        weights.append(w)
+    return np.array(weights)
+
+def apply_h_filter(x_2d, weights_1d):
+    """
+    Applies the H operator to a 2D image x_2d via separable convolution.
+    Hx is equivalent to convolving with the BL2 inner product weights [S1][S2, unofficial].
+    This implements the filtering operation mentioned in the sources [G].
+    """
+    padded_rows = np.pad(x_2d, 2, mode='edge')
+    conv_rows = np.zeros_like(padded_rows)
+    for i in range(padded_rows.shape[0]):
+        conv_rows[i, :] = np.convolve(padded_rows[i, :], weights_1d, mode='same')
+    padded_cols = np.pad(conv_rows, ((2, 2), (0, 0)), mode='edge')
+    conv_cols = np.zeros_like(padded_cols)
+    for j in range(padded_cols.shape[1]):
+        conv_cols[:, j] = np.convolve(padded_cols[:, j], weights_1d, mode='same')
+    return conv_cols[2:-2, 2:-2]
+
+def solve_smoothness_splines(y, measurement_indices, N):
+    """
+    Solves (S^T S + lambda H) x = S^T y using Conjugate Gradient.
+    """
+    lambda_reg = 1e-2
+    Sy = np.zeros(N)
+    Sy[measurement_indices] = y
+    
+    weights_1d = compute_bl2_filter_weights()
+    
+    def mat_vec_mult(v):
+        v_masked = np.zeros(N)
+        v_masked[measurement_indices] = v[measurement_indices]
+        Hv = apply_h_filter(v.reshape((int(np.sqrt(N)), int(np.sqrt(N)))), weights_1d).flatten()
+        return v_masked + lambda_reg * Hv
+
+    x = np.zeros(N)
+    b = Sy
+    tol = 1e-6
+    max_iter = 1000
+    
+    r = b - mat_vec_mult(x)
+    p = r.copy()
+    rs_old = np.dot(r, r)
+    
+    for i in range(max_iter):
+        Ap = mat_vec_mult(p)
+        pAp = np.dot(p, Ap)
+        if pAp == 0:
+            break
+        alpha = rs_old / pAp
+        x = x + alpha * p
+        r = r - alpha * Ap
+        rs_new = np.dot(r, r)
+        if np.sqrt(rs_new) < tol:
+            break
+        p = r + (rs_new / rs_old) * p
+        rs_old = rs_new
+        
+    return x
+```
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Not given in the sources [S1][S2, unofficial].
+*   **Measured Performance:** SS is computationally less expensive than compressed sensing methods that require iterative pursuit strategies [S1].
+*   **Scaling:** Not given in the sources [S1][S2, unofficial].
+*   **Strengths:** More resilient to missing information than compressed sensing methods [S1]. Can achieve high quality recovery with as little as 20% of pixels distributed uniformly [S1].
+*   **Limitations:** Not given in the sources [S1][S2, unofficial].
+*   **When to use:** Not given in the sources [S1][S2, unofficial].
+*   **When not to use:** Not given in the sources [S1][S2, unofficial].
+
+## Background
+Smoothness Splines was proposed by Xu et al. [XAE12] and applied to volume rendering by Liu and Alim [S1][S2, unofficial]. It is based on the theory of scattered data approximation using shift-invariant spline spaces [S1][S2, unofficial]. The method uses the optimal interpolating cubic B-spline kernel proposed by Blu et al. [BTU01] [S1][S2, unofficial]. It is categorized as a smoothness-based recovery method, contrasting with compressed sensing methods that exploit sparsity in wavelet or gradient domains [S1].
+
+## Sources
+[S1] Compressive Volume Rendering, https://doi.org/10.1111/cgf.12622, fetched 2026-10-26
+[S2] Compressive Volume Rendering, https://doi.org/10.11575/prism/25391, fetched 2026-10-27 (unofficial)

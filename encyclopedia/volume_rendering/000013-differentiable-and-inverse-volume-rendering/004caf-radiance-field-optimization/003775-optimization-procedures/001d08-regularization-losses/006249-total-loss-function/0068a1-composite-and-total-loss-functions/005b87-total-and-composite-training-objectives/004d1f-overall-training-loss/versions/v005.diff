@@ -1,0 +1,246 @@
+--- v004.md
++++ v005.md
+@@ -4,86 +4,183 @@
+ 
+ ## Overview
+-The overall training loss combines rendering, masking, and geometry codebook losses for end-to-end training of radiance fields and Gaussian splatting models [S3]. It aggregates photometric reconstruction, geometric consistency, and regularization terms to guide network parameters [S1, S2, S4]. The specific formulation depends on the underlying representation and training protocol [S1, S3, S4][S7, unofficial].
++The Overall Training Loss is the composite objective function used to optimize radiance field models (such as NeRFs, 3D Gaussians, or voxel-based fields) by combining heterogeneous loss terms into a single scalar value. It solves the problem of jointly optimizing geometry, appearance, and semantic priors from multi-view observations. It sets itself apart from sibling methods by explicitly aggregating rendering, geometric, and regularization terms, often with stage-specific weighting or masking strategies to handle background ambiguity and multi-scale refinement [S1, S2, S3, S4, S5].
+ 
+ ## How it works
++The method constructs the total loss $L_{tot}$ as a weighted sum of individual loss components $\mathcal{L}_k$, following the shared principle of the parent family [Parent](16924-total-and-composite-training-objectives.md):
++$$ L_{tot} = \sum_{k} w_k \mathcal{L}_k $$
++
+ ### Inputs and Outputs
+-*   **Inputs:** Rendered images/volumes $\hat{I}$ or $\hat{V}$, ground truth images/volumes $I$ or $V_{gt}$, auxiliary predictions (depth maps $\hat{D}$, normals, masks $M$, point clouds), and model parameters (Gaussian attributes $p, \tilde{o}, \tilde{r}, \tilde{s}, c$, neural field weights, or voxel features) [S1, S2, S3, S4, S6][S7, unofficial].
+-*   **Outputs:** Scalar loss value $L_{tot}$ used for backpropagation [S1, S2, S3, S4][S7, unofficial].
++*   **Inputs:** Rendered images/volumes $\hat{I}$ or $\hat{V}$, ground truth images/volumes $I$ or $V_{gt}$, predicted depth maps $\hat{D}$, ground truth depth $D_{gt}$ (if available), masks $M$, and model parameters (e.g., Gaussian attributes, voxel densities, neural field weights).
++*   **Outputs:** A scalar loss value $L_{tot}$ used for backpropagation.
+ 
+ ### Data Structures
+-*   **Masks:** Tensors $M$ where $M_{ij} = -1$ indicates background/masked-out pixels, and $M_{ij} = 1$ indicates foreground [S6].
+-*   **Sub-volumes:** During training, sub-volumes $\tilde{V} \in \mathbb{R}^{M/4 \times N/4 \times K/4}$ are randomly sampled from the original volume $V$ to reduce GPU memory usage for gradients [S7, unofficial].
++*   **Masks ($M$):** Binary or float tensors indicating foreground/background regions. In some implementations, background pixels are marked as $-1$ [S6].
++*   **Codebooks ($Z$):** Used in compact representations (e.g., 3DGS) to quantize rotation and scale attributes [S3].
+ 
+-### Formulas and Steps
+-#### 1. Photometric and Rendering Losses
+-The primary term measures the difference between rendered and ground truth images [S1, S3, S4][S7, unofficial].
+-*   **L1 + Perceptual/SSIM:** $\mathcal{L}_{render}(\hat{I}, I) = \mathcal{L}_1(\hat{I}, I) + \lambda \cdot \mathcal{L}_{percept}(\hat{I}, I)$, where $\mathcal{L}_{percept}$ measures distance in VGG feature space [S4].
+-*   **L1 + D-SSIM:** $\mathcal{L}_{render}(I, I_{gt}) = \lambda_{L1}\mathcal{L}_1(I, I_{gt}) + \lambda_{ssim}\mathcal{L}_{ssim}(I, I_{gt})$ [S7, unofficial].
+-*   **L1 + SSIM (Weighted Sum):** $L_{ren}$ is the weighted sum of L1 and SSIM loss [S3].
+-*   **MSE (Volume):** $\mathcal{L}_{volume}(V, V_{gt}) = \sum_{x,y,z} (V(x, y, z) - V_{gt}(x, y, z))^2$ [S7, unofficial].
+-*   **Photometric (PDRF):** $\mathcal{L}_{photo} = \| \hat{C}^* - \tilde{C} \|_2^2 + \| \hat{C} - \tilde{C} \|_2^2$ for coarse and fine renderers [S1].
++### Formulas and Components
++The specific composition of $L_{tot}$ varies by method. Key components include:
+ 
+-#### 2. Geometric and Regularization Losses
+-*   **Depth Smoothness:** $\mathcal{L}_{smooth}(I, \hat{D}) = |\partial_x \hat{D}| e^{-|\partial_x I|} + |\partial_y \hat{D}| e^{-|\partial_y I|}$, encouraging depth gradients to align with image gradients [S4].
+-*   **Total Variation (TV):** Applied to explicit feature volumes to enforce smoothness [S1].
+-*   **Self-Supervised Depth:** $\mathcal{L}_{self-depth}$ [S2].
+-*   **Gaussian Point Constraint (GPC):** Uses a Gaussian kernel function to measure distance between inter-frame point clouds, reducing sensitivity to depth noise compared to Chamfer distance [S2].
+-*   **Reprojection Loss:** $\mathcal{L}_{reproj}$ [S2].
+-*   **Codebook Losses (3DGS):** For rotation $\tilde{r}$ and scale $\tilde{s}$, using stop-gradient ($sg$) and codebook $Z$: $L_r = \sum_{n=1}^N \| sg[\tilde{r}_n - \hat{r}_{n}^{k-1}] - Z^k[i_n^k] \|_2^2$ [S3].
++1.  **Rendering Loss ($L_{render}$ or $L_{ren}$):**
++    Typically a combination of L1 and SSIM losses between rendered and ground truth images [S3][S7, unofficial].
++    $$ L_{render}(\hat{I}, I) = \mathcal{L}_1(\hat{I}, I) + \lambda \mathcal{L}_{ssim}(\hat{I}, I) $$
++    Some methods use perceptual loss (VGG features) instead of or alongside SSIM [S4].
++    $$ L_{render}(\hat{I}, I) = \ell_1(\hat{I}, I) + \lambda \ell_{percept}(\hat{I}, I) \quad [S4] $$
++    For volume-based methods, an MSE loss on the volume itself may be added [S7, unofficial]:
++    $$ \mathcal{L}_{volume}(V, V_{gt}) = \sum_{x,y,z} (V(x,y,z) - V_{gt}(x,y,z))^2 \quad [S7, unofficial] $$
+ 
+-#### 3. Loss Masking
+-To prevent background pixels from contributing to the loss:
+-1. Identify pixels where mask $M = -1$ (background) [S6].
+-2. Multiply loss terms (normals, ambient occlusion, color) by $M$ (or a binary version) so masked pixels contribute 0 [S6].
++2.  **Geometric/Depth Losses:**
++    *   **Self-Supervised Depth:** Encourages depth gradients to match image gradients [S4].
++        $$ \ell_{smooth}(I, \hat{D}) = |\partial_x \hat{D}| e^{-|\partial_x I|} + |\partial_y \hat{D}| e^{-|\partial_y I|} \quad [S4] $$
++    *   **Gaussian Point Constraint (GPC):** Uses a Gaussian kernel to constrain point clouds derived from depth [S2].
++    *   **Reprojection Loss ($L_{reproj}$):** Ensures consistency across views [S2].
+ 
+-#### 4. Multi-Stage Training Objectives
+-*   **Stage 1 (Initial Reconstruction):** $L_{1st} = \sum_{v=1}^V \mathcal{L}_{render}(\hat{I}_v, I_v) + \alpha \cdot \sum_{i=1}^N \mathcal{L}_{smooth}(I_i, \hat{D}_i)$ [S4].
+-*   **Stage 2 (Recurrent/End-to-End):** Freeze initial model. Train recurrent model with exponentially weighted rendering loss: $L_{2nd} = \sum_{t=0}^{T-1} \gamma^{T-1-t} \sum_{v=1}^V \mathcal{L}_{render}(\hat{I}_v^t, I_v)$ [S4].
+-*   **Compact 3DGS Total Loss:** $L = L_{ren} + \lambda_m L_m + L_r + L_s$, where $L_m$ is masking loss, $L_r$ is rotation codebook loss, $L_s$ is scale codebook loss [S3].
+-*   **TD-NeRF Total Loss:** $L = L_{rgb} + \lambda_1 L_{self-depth} + \lambda_2 L_{GPC} + \lambda_3 L_{reproj}$ [S2].
+-*   **PDRF Total Loss:** $L_{tot} = L_{CRR\_photo} + L_{FVR\_photo} + \lambda(L_{TV\_coar} + L_{TV\_fine})$ [S1].
+-*   **Semantic Field Training:** Stage I uses $L_{Total} = L_{color} + L_{feat} + L_{dino} + L_{RSR}$ for $T$ iterations. Stage II replaces $L_{RSR}$ with $L_{CSE}$ for cross-view semantic enhancement [S5].
++3.  **Regularization Losses:**
++    *   **Total Variation (TV):** Enforces smoothness on feature volumes [S1].
++    *   **Codebook Losses ($L_r, L_s$):** Quantization losses for rotation and scale in compact 3D Gaussian representations [S3].
++        $$ L_r = \sum_{n=1}^N \| \text{sg}[r_n - \hat{r}_n^{k-1}] - Z_k[i_n^k] \|_2^2 \quad [S3] $$
++    *   **Semantic Losses:** Including color, feature, DINO, and region semantic ranking (RSR) or cross-view self-enhancement (CSE) losses [S5].
+ 
+-### Parameters and Typical Values
+-*   $\alpha$ (Depth smoothness weight): 0.01 [S4].
+-*   $\lambda$ (Perceptual weight): 0.5 [S4].
+-*   $\lambda_m$ (Masking regularization): Hyperparameter to regularize the number of Gaussians [S3].
+-*   $\lambda_1, \lambda_2, \lambda_3$ (TD-NeRF weights): 0.04, 1.0, 1.0 [S2].
+-*   $\gamma$ (Exponential decay for recurrent steps): 0.9 [S4].
+-*   $\lambda_{L1}, \lambda_{ssim}$: Weights for L1 and SSIM [S7, unofficial].
+-*   Batch size: 1024 rays [S1].
+-*   Gamma correction: 2.2 (camera response function) [S1].
+-*   Sub-volume sampling factor: 1/4 in each dimension [S7, unofficial].
+-*   Codebook training duration: Last 1K iterations with K-means initialization; $L_r, L_s$ set to zero otherwise [S3].
+-*   Semantic field iterations $T$: 10,000 [S5].
++4.  **Masking Loss ($L_m$):**
++    Regularizes the number of Gaussians or handles background regions [S3].
++
++### Numbered Steps
++1.  **Render:** Compute rendered images $\hat{I}$ or volumes $\hat{V}$ from the current model parameters using positions, opacities, colors, etc. [S3][S7, unofficial].
++2.  **Compute Rendering Loss:** Calculate photometric differences (L1, SSIM, Perceptual) between $\hat{I}$ and $I$ [S3, S4][S7, unofficial].
++3.  **Compute Geometric/Regularization Losses:** Calculate depth smoothness, TV, codebook, or semantic losses based on the specific method variant [S1, S2, S3, S4, S5].
++4.  **Apply Masking:** Modulate loss terms (especially normals, AO, or background-sensitive terms) by the mask $M$ to ignore background pixels [S6].
++5.  **Aggregate:** Sum the weighted loss terms to form $L_{tot}$ [S1, S2, S3, S4, S5][S7, unofficial].
++6.  **Backpropagate:** Update model parameters using gradients of $L_{tot}$ [S3, S4, S5].
++
++### Parameters
++*   **$\lambda$ (Rendering Weight):** Balances L1 and SSIM/Perceptual. Typical value: 0.5 [S4].
++*   **$\alpha$ (Depth Smoothness Weight):** Typical value: 0.01 [S4].
++*   **$\lambda_m$ (Masking Regularization):** Regularizes Gaussian count. Value: Not given in the sources.
++*   **$\lambda_1, \lambda_2, \lambda_3$ (Geometric Weights):** Typical values: 0.04, 1.0, 1.0 respectively [S2].
++*   **$\gamma$ (Exponential Decay):** Used in recurrent training stages. Typical value: 0.9 [S4].
++*   **Batch Size:** 1024 rays [S1].
++*   **Gamma Correction:** 2.2 used as camera response function [S1].
++*   **Iterations $T$:** Number of iterations before switching strategies (e.g., RSR to CSE). Typical value: 10,000 [S5].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Background Matching:** Without loss masking, the network must match default ground truth values in empty regions, complicating training [S6].
+-*   **Memory Constraints:** Rendering with full volume resolution ($256^3$) requires exhaustive GPU memory for gradients [S7, unofficial].
+-*   **Codebook Training Cost:** R-VQ and codebook learning are computationally heavy [S3].
+-*   **Chamfer Sensitivity:** Standard Chamfer distance for point cloud constraints is sensitive to depth noise [S2].
++*   **Background Ambiguity:** Without masking, networks must match default ground truth values in empty regions, complicating training [S6].
++*   **Memory Usage:** Training with full volume resolution requires exhaustive GPU memory for gradients; sub-volume sampling is used to mitigate this [S7, unofficial].
++*   **Codebook Training:** Codebook losses ($L_r, L_s$) are often applied only for the last 1K iterations to avoid heavy computation [S3].
++
++### Pseudocode
++```python
++def compute_overall_loss(rendered_image, gt_image, rendered_depth, gt_image_grad, mask, model_params, method_variant):
++    """
++    Computes the total training loss based on the specified variant.
++    """
++    # 1. Rendering Loss (Common to most variants)
++    # L1 Loss
++    l1_loss = mean_absolute_error(rendered_image, gt_image)
++    
++    # SSIM Loss (assuming D-SSIM implementation)
++    ssim_loss = compute_dssim(rendered_image, gt_image)
++    
++    # Perceptual Loss (optional, e.g., in ReSplat)
++    # perceptual_loss = compute_vgg_perceptual(rendered_image, gt_image)
++    
++    # Combine rendering losses
++    lambda_render = 0.5 # [S4]
++    lambda_ssim = 1.0   # [S7, unofficial]
++    l_render = l1_loss + lambda_render * ssim_loss
++    
++    # 2. Masking (Common to variants using masks)
++    # If mask M is -1 for background, multiply loss by M (or binary mask)
++    # Note: In some implementations, mask is binary 0/1. Here we assume M=1 for foreground, M=0 for background.
++    # If M=-1 for background, convert to binary: binary_mask = (M != -1).float()
++    binary_mask = (mask != -1).float() if mask.min() == -1 else mask
++    l_render_masked = l_render * binary_mask.mean() # Apply mask to pixel-wise loss before reduction
++    
++    # 3. Variant-Specific Losses
++    l_total = l_render_masked
++    
++    if method_variant == "PDRF":
++        # PDRF: Coarse and Fine Voxel Renderers with TV regularization [S1]
++        # L_tot = L_CRR_photo + L_FVR_photo + lambda * (L_TV_coar + L_TV_fine)
++        # Assuming l_render_masked covers both CRR and FVR photometric losses
++        lambda_tv = 1.0 # Not given in sources, placeholder for implementation
++        l_tv_coar = compute_total_variation(model_params.coar_voxels)
++        l_tv_fine = compute_total_variation(model_params.fine_voxels)
++        l_total += lambda_tv * (l_tv_coar + l_tv_fine)
++        
++    elif method_variant == "TD-NeRF":
++        # TD-NeRF: Self-depth, GPC, Reprojection [S2]
++        lambda1 = 0.04
++        lambda2 = 1.0
++        lambda3 = 1.0
++        l_self_depth = compute_self_supervised_depth_loss(rendered_depth, gt_image_grad)
++        l_gpc = compute_gaussian_point_constraint(rendered_depth, gt_point_clouds)
++        l_reproj = compute_reprojection_loss(rendered_image, gt_image, camera_poses)
++        l_total += lambda1 * l_self_depth + lambda2 * l_gpc + lambda3 * l_reproj
++        
++    elif method_variant == "Compact 3DGS":
++        # Compact 3DGS: Masking, Rotation/Scale Codebook losses [S3]
++        lambda_m = 1.0 # Not given in sources
++        l_masking = compute_masking_regularization(model_params.gaussians)
++        l_rotation_codebook = compute_codebook_loss(model_params.rotations, model_params.codebook_rot)
++        l_scale_codebook = compute_codebook_loss(model_params.scales, model_params.codebook_scale)
++        l_total += lambda_m * l_masking + l_rotation_codebook + l_scale_codebook
++        
++    elif method_variant == "ReSplat":
++        # ReSplat: Depth smoothness, Recurrent weighting [S4]
++        alpha = 0.01
++        l_smooth = compute_depth_smoothness(rendered_depth, gt_image)
++        l_total += alpha * l_smooth
++        # Note: Recurrent weighting (gamma) is applied during training loop over time steps t
++        # L_2nd = sum_{t=0}^{T-1} gamma^{T-1-t} * sum_v L_render(I_v^t, I_v)
++        
++    elif method_variant == "OV-NeRF":
++        # OV-NeRF: Semantic losses (Color, Feature, DINO, RSR/CSE) [S5]
++        # L_Total = L_color + L_feat + L_dino + L_RSR (Stage I) or L_CSE (Stage II)
++        l_color = compute_color_semantic_loss(rendered_image, semantic_labels)
++        l_feat = compute_feature_loss(rendered_features, semantic_features)
++        l_dino = compute_dino_loss(rendered_image, semantic_embeddings)
++        
++        if current_iteration < 10000: # T = 10,000 [S5]
++            l_rsr = compute_region_semantic_ranking_loss(rendered_semantics)
++            l_total += l_rsr
++        else:
++            l_cse = compute_cross_view_self_enhancement_loss(rendered_semantics)
++            l_total += l_cse
++            
++    elif method_variant == "X-GRM":
++        # X-GRM: Volume MSE + Rendering L1/SSIM [S7, unofficial]
++        # Note: Sub-volume sampling is handled in data loading, not loss function itself
++        l_volume = compute_mse_volume(model_params.volume, gt_volume)
++        l_render_vol = lambda_ssim * ssim_loss + l1_loss # Reusing rendering components
++        l_total += l_volume + l_render_vol
++        
++    return l_total
++```
+ 
+ ## Subtopics
+ 
+ ### Loss Masking
+-A technique to modulate loss terms for normals, ambient occlusion, and colors with the output mask [S6]. Pixels where the mask $M$ is -1 (background) are excluded from the loss calculation [S6]. This simplifies the network's task by preventing it from trying to match default background values in empty regions [S6].
++A technique to modulate loss terms for normals, ambient occlusion, and colors with the output mask, so that masked-out pixels (background) do not contribute to the loss function [S6]. It simplifies the network's task by ignoring areas where ground truth images have arbitrary default values [S6].
+ 
+ ### X-GRM Training Objectives
+-Specific to X-ray Gaussian Reconstruction Models [S7, unofficial]. Uses volume MSE loss and rendering L1+SSIM loss [S7, unofficial]. To manage GPU memory, sub-volumes of size $M/4 \times N/4 \times K/4$ are randomly sampled from the original volume $V$ during training, while the full volume is used at inference [S7, unofficial].
++A variant that uses sub-volume sampling to reduce GPU memory usage during training. It randomly samples sub-volumes $\tilde{V} \in R^{M/4 \times N/4 \times K/4}$ from the original volume $V$ [S7, unofficial]. The loss combines volume MSE and rendering L1/SSIM losses [S7, unofficial].
+ 
+ ## Operating characteristics
+-*   **Complexity:** Training is memory-intensive, particularly for explicit volumes or large Gaussian counts. Sub-volume sampling reduces memory usage by a factor of 64 ($4^3$) [S7, unofficial].
+-*   **Scalability:** Codebook-based approaches (e.g., Compact 3DGS) reduce parameter count (48 params for SH vs 59) but add complexity to the loss function [S3].
+-*   **Strengths:** Combines photometric accuracy with geometric priors (depth, smoothness) for robust reconstruction [S1, S2, S4].
+-*   **Limitations:** Requires careful tuning of multiple hyperparameters ($\lambda$ weights). Some terms (like codebook losses) are computationally expensive and may need to be disabled for most of training [S3].
++*   **Time Complexity:** Depends on the number of rays/voxels and the complexity of the loss terms (e.g., SSIM is more expensive than L1). PDRF uses importance sampling to reduce samples [S1].
++*   **Memory Complexity:** Full volume training requires significant GPU memory; sub-volume sampling reduces this [S7, unofficial]. Codebook training is limited to the last 1K iterations to save memory/time [S3].
++*   **Performance:** PDRF achieves fast scene reconstruction from blurry images [S1]. OV-NeRF takes ~3.8 seconds to render a 640x480 image [S5].
++*   **Strengths:** Handles multi-modal data (RGB, depth, semantics), robust to background ambiguity via masking, supports compact representations.
++*   **Limitations:** Requires careful tuning of multiple hyperparameters ($\lambda$ weights). Some losses (e.g., DINO, TV) are computationally expensive.
++*   **When to Use:** When optimizing radiance fields with multiple constraints (geometry, appearance, semantics) or when dealing with blurry/incomplete data.
++*   **When Not to Use:** For simple, well-lit, static scenes with high-quality ground truth where a single photometric loss suffices.
+ 
+ ## Background
+-The concept of composite training losses in radiance fields evolved from early NeRF works combining L1 and SSIM [S1, S3] to more complex multi-stage and multi-modal objectives.
+-*   **PDRF:** Introduced progressive deblurring with coarse/fine photometric losses and TV regularization [S1].
+-*   **TD-NeRF:** Added depth priors and Gaussian point constraints for joint pose and field optimization [S2].
+-*   **Compact 3DGS:** Adapted 3DGS with codebook regularization for compact representation [S3].
+-*   **ReSplat:** Introduced two-stage training with recurrent updates and depth smoothness [S4].
+-*   **X-GRM:** Applied volume and rendering losses to sparse-view X-ray CT reconstruction [S7, unofficial].
+-*   **Volumetric Isosurface:** Introduced loss masking for deep learning-based super-resolution [S6].
++The concept of composite training losses in radiance fields evolved from early NeRF works that used simple L1/SSIM losses [S1]. Later methods introduced geometric priors (depth smoothness [S4], point cloud constraints [S2]), semantic priors (DINO, CLIP [S5]), and compact representations (codebooks [S3]). The specific formulations cited here originate from:
++*   PDRF (2023): Deblurring radiance fields [S1].
++*   TD-NeRF (2024): Joint pose and NeRF optimization [S2].
++*   Compact 3DGS (2024): Compact 3D Gaussian representation [S3].
++*   ReSplat (2025): Recurrent Gaussian Splatting [S4].
++*   OV-NeRF (2024): Open-vocabulary NeRFs [S5].
++*   Volumetric Isosurface Rendering (2020): Loss masking for isosurface networks [S6].
++*   X-GRM (2025): Large Gaussian Reconstruction Model for X-rays [S7, unofficial].
+ 
+ ## Sources

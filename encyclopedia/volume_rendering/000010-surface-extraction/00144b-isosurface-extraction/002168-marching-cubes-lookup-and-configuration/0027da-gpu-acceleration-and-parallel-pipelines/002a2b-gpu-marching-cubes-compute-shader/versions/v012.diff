@@ -1,0 +1,233 @@
+--- v011.md
++++ v012.md
+@@ -11,9 +11,9 @@
+ 
+ **Data Structures:**
+-1.  **`appendVertexBuffer`**: A `ComputeBuffer` of type `Append`.
++1.  **`appendVertexBuffer`**: A `ComputeBuffer` of type `Append` [S1, unofficial].
+     *   Capacity: $(R-1)^3 \times 5$ elements [S1, unofficial].
+     *   Element size: 18 bytes (3 vertices $\times$ 6 floats per vertex) [S1, unofficial].
+     *   Layout: Each element is a `Triangle` struct containing 3 `Vertex` structs. Each `Vertex` contains `float3 vPosition` and `float3 vNormal` [S1, unofficial].
+-2.  **`argBuffer`**: A `ComputeBuffer` of type `IndirectArguments`.
++2.  **`argBuffer`**: A `ComputeBuffer` of type `IndirectArguments` [S1, unofficial].
+     *   Size: 4 integers (16 bytes) [S1, unofficial].
+     *   Layout: `[vertexCount, instanceCount, startVertex, startInstance]` [S1, unofficial].
+@@ -35,5 +35,5 @@
+     *   Calculate thread group dimensions: $(R/8, R/8, R/8)$ [S1, unofficial].
+     *   Dispatch the kernel: `shader.Dispatch(kernelID, R/8, R/8, R/8)` [S1, unofficial].
+-    *   *Note*: This assumes $R$ is divisible by 8. Each thread group processes a block of voxels.
++    *   *Note*: This assumes $R$ is divisible by 8 [S1, unofficial]. Each thread group processes a block of voxels [S1, unofficial].
+ 
+ 4.  **Compute Shader Kernel Execution (Per Voxel)**:
+@@ -48,5 +48,5 @@
+         *   Normal calculation: Use gradient-based normals (e.g., central differences) or vertex normals interpolated to $P$ [S1, unofficial].
+     *   **Append Triangles**: For each triangle triplet $(e_a, e_b, e_c)$ in the case configuration:
+-        *   Create 3 vertices from the interpolated edge points.
++        *   Create 3 vertices from the interpolated edge points [S1, unofficial].
+         *   Append the `Triangle` struct to `triangleRW` (the append buffer) [S1, unofficial].
+ 
+@@ -57,5 +57,5 @@
+ 
+ 6.  **Adjust Draw Arguments**:
+-    *   Let $N$ be the vertex count read from `argBuffer`.
++    *   Let $N$ be the vertex count read from `argBuffer` [S1, unofficial].
+     *   Calculate total indices: $N_{indices} = N \times 3$ [S1, unofficial].
+     *   Update `argBuffer` with `{N_{indices}, 1, 0, 0}` [S1, unofficial].
+@@ -69,115 +69,70 @@
+ 
+ ```python
+-# Pseudocode for the compute shader kernel "MarchingCubes"
+-# Assumes standard Marching Cubes lookup tables are available as static constants
++def cross_product(a, b):
++    return [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]]
+ 
+-[numthreads(8, 8, 8)]
+-void MarchingCubes (uint3 id : SV_DispatchThreadID)
+-{
+-    // 1. Determine voxel coordinates
+-    uint x = id.x;
+-    uint y = id.y;
+-    uint z = id.z;
++def normalize(v):
++    length = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++    if length == 0: return [0.0, 0.0, 1.0]
++    return [v[0]/length, v[1]/length, v[2]/length]
+ 
+-    // 2. Check bounds (grid is R-1 cubes for R vertices)
+-    if (x >= gridSize - 1 || y >= gridSize - 1 || z >= gridSize - 1)
+-        return;
++def intersect_edge(edge_idx, v, x, y, z, iso_level):
++    edges = [
++        [(x, y, z), (x+1, y, z), v[0], v[1]],
++        [(x+1, y, z), (x+1, y+1, z), v[1], v[2]],
++        [(x+1, y+1, z), (x, y+1, z), v[2], v[3]],
++        [(x, y+1, z), (x, y, z), v[3], v[0]],
++        [(x, y, z+1), (x+1, y, z+1), v[4], v[5]],
++        [(x+1, y, z+1), (x+1, y+1, z+1), v[5], v[6]],
++        [(x+1, y+1, z+1), (x, y+1, z+1), v[6], v[7]],
++        [(x, y+1, z+1), (x, y, z+1), v[7], v[4]],
++        [(x, y, z), (x, y, z+1), v[0], v[4]],
++        [(x+1, y, z), (x+1, y, z+1), v[1], v[5]],
++        [(x+1, y+1, z), (x+1, y+1, z+1), v[2], v[6]],
++        [(x, y+1, z), (x, y+1, z+1), v[3], v[7]]
++    ]
++    p1, p2, val1, val2 = edges[edge_idx]
++    denom = val2 - val1
++    if abs(denom) < 1e-6:
++        t = 0.5
++    else:
++        t = (iso_level - val1) / denom
++    return [p1[j] + t * (p2[j] - p1[j]) for j in range(3)]
+ 
+-    // 3. Sample the 8 vertices of the current cube
+-    // Vertex ordering must match the standard MC convention
+-    float v0 = tex3D(_densityTexture, float3(x, y, z)).r;
+-    float v1 = tex3D(_densityTexture, float3(x + 1, y, z)).r;
+-    float v2 = tex3D(_densityTexture, float3(x + 1, y + 1, z)).r;
+-    float v3 = tex3D(_densityTexture, float3(x, y + 1, z)).r;
+-    float v4 = tex3D(_densityTexture, float3(x, y, z + 1)).r;
+-    float v5 = tex3D(_densityTexture, float3(x + 1, y, z + 1)).r;
+-    float v6 = tex3D(_densityTexture, float3(x + 1, y + 1, z + 1)).r;
+-    float v7 = tex3D(_densityTexture, float3(x, y + 1, z + 1)).r;
++def process_voxel(x, y, z, grid_size, iso_level, density_texture, edge_table, triangle_table, triangle_rw):
++    if x >= grid_size - 1 or y >= grid_size - 1 or z >= grid_size - 1:
++        return
+ 
+-    // 4. Calculate case index C
+-    uint cubeIndex = 0;
+-    if (v0 < isoLevel) cubeIndex |= 1;
+-    if (v1 < isoLevel) cubeIndex |= 2;
+-    if (v2 < isoLevel) cubeIndex |= 4;
+-    if (v3 < isoLevel) cubeIndex |= 8;
+-    if (v4 < isoLevel) cubeIndex |= 16;
+-    if (v5 < isoLevel) cubeIndex |= 32;
+-    if (v6 < isoLevel) cubeIndex |= 64;
+-    if (v7 < isoLevel) cubeIndex |= 128;
++    v = [
++        density_texture[x, y, z], density_texture[x+1, y, z],
++        density_texture[x+1, y+1, z], density_texture[x, y+1, z],
++        density_texture[x, y, z+1], density_texture[x+1, y, z+1],
++        density_texture[x+1, y+1, z+1], density_texture[x, y+1, z+1]
++    ]
+ 
+-    // 5. Handle ambiguous cases (46, 47, 98, 99, 210, 213, 214, 215)
+-    // Standard LUT uses fixed triangulation; implementation may need specific handling
+-    // [G] For simplicity, we assume the standard LUT handles this or the user accepts potential cracks.
++    cube_index = 0
++    for i in range(8):
++        if v[i] < iso_level:
++            cube_index |= (1 << i)
+ 
+-    // 6. Get edge intersections
+-    // edgeTable[cubeIndex] gives the bitmask of intersected edges
+-    uint edgeMask = edgeTable[cubeIndex];
+-    
+-    // If no edges intersect, skip
+-    if (edgeMask == 0)
+-        return;
++    edge_mask = edge_table[cube_index]
++    if edge_mask == 0:
++        return
+ 
+-    // 7. Intersect edges and store points
+-    // Edge indices 0-11 correspond to the standard MC edge numbering
+-    float3 points[12];
+-    for (int i = 0; i < 12; i++) {
+-        if ((edgeMask & (1 << i)) != 0) {
+-            points[i] = IntersectEdge(i, v0, v1, v2, v3, v4, v5, v6, v7, x, y, z);
+-        }
+-    }
++    points = [None] * 12
++    for i in range(12):
++        if (edge_mask >> i) & 1:
++            points[i] = intersect_edge(i, v, x, y, z, iso_level)
+ 
+-    // 8. Generate triangles from triangleTable
+-    // triangleTable[cubeIndex] contains triplets of edge indices, terminated by -1
+-    int* triIndices = triangleTable[cubeIndex];
+-    int idx = 0;
+-    while (triIndices[idx] != -1) {
+-        int e1 = triIndices[idx];
+-        int e2 = triIndices[idx + 1];
+-        int e3 = triIndices[idx + 2];
+-        
+-        // Create triangle from the 3 intersection points
+-        Triangle tri;
+-        tri.v0 = points[e1];
+-        tri.v1 = points[e2];
+-        tri.v2 = points[e3];
+-        
+-        // Calculate normal (e.g., cross product of two edges)
+-        float3 edgeA = tri.v1 - tri.v0;
+-        float3 edgeB = tri.v2 - tri.v0;
+-        tri.n = normalize(cross(edgeA, edgeB));
+-        
+-        // Append to buffer
+-        triangleRW.Append(tri);
+-        
+-        idx += 3;
+-    }
+-}
+-
+-// Helper to interpolate intersection point on an edge
+-float3 IntersectEdge(int edgeIndex, float v0, float v1, float v2, float v3, float v4, float v5, float v6, float v7, uint x, uint y, uint z) {
+-    float3 p1, p2;
+-    float val1, val2;
+-    
+-    // Map edge index to vertices
+-    switch (edgeIndex) {
+-        case 0: p1 = float3(x, y, z); p2 = float3(x+1, y, z); val1 = v0; val2 = v1; break;
+-        case 1: p1 = float3(x+1, y, z); p2 = float3(x+1, y+1, z); val1 = v1; val2 = v2; break;
+-        case 2: p1 = float3(x+1, y+1, z); p2 = float3(x, y+1, z); val1 = v2; val2 = v3; break;
+-        case 3: p1 = float3(x, y+1, z); p2 = float3(x, y, z); val1 = v3; val2 = v0; break;
+-        case 4: p1 = float3(x, y, z+1); p2 = float3(x+1, y, z+1); val1 = v4; val2 = v5; break;
+-        case 5: p1 = float3(x+1, y, z+1); p2 = float3(x+1, y+1, z+1); val1 = v5; val2 = v6; break;
+-        case 6: p1 = float3(x+1, y+1, z+1); p2 = float3(x, y+1, z+1); val1 = v6; val2 = v7; break;
+-        case 7: p1 = float3(x, y+1, z+1); p2 = float3(x, y, z+1); val1 = v7; val2 = v4; break;
+-        case 8: p1 = float3(x, y, z); p2 = float3(x, y, z+1); val1 = v0; val2 = v4; break;
+-        case 9: p1 = float3(x+1, y, z); p2 = float3(x+1, y, z+1); val1 = v1; val2 = v5; break;
+-        case 10: p1 = float3(x+1, y+1, z); p2 = float3(x+1, y+1, z+1); val1 = v2; val2 = v6; break;
+-        case 11: p1 = float3(x, y+1, z); p2 = float3(x, y+1, z+1); val1 = v3; val2 = v7; break;
+-        default: return float3(0,0,0);
+-    }
+-    
+-    // Linear interpolation
+-    float t = (isoLevel - val1) / (val2 - val1);
+-    return lerp(p1, p2, t);
+-}
++    tri_row = triangle_table[cube_index]
++    idx = 0
++    while tri_row[idx] != -1:
++        e1, e2, e3 = tri_row[idx], tri_row[idx+1], tri_row[idx+2]
++        p1, p2, p3 = points[e1], points[e2], points[e3]
++        edge_a = [p2[j] - p1[j] for j in range(3)]
++        edge_b = [p3[j] - p1[j] for j in range(3)]
++        normal = normalize(cross_product(edge_a, edge_b))
++        triangle_rw.append({'v0': p1, 'v1': p2, 'v2': p3, 'n': normal})
++        idx += 3
+ ```
+ 
+@@ -187,15 +142,15 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Hardware Dependency**: Requires DX11 hardware. Mobile support is uncertain [S1, unofficial].
+-*   **Density Field Generation**: The example generates the density field on the CPU, which is a bottleneck. For real applications, use a `RenderTexture` instead of `Texture3D` [S1, unofficial].
+-*   **Ambiguity**: Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points. The standard LUT uses fixed triangulation, which can cause cracks if adjacent voxels resolve ambiguities differently [S1, unofficial].
+-*   **Lighting**: The default shader uses a barebone diffuse lighting model. Custom shaders are recommended for better visuals [S1, unofficial].
++*   **Hardware Dependency**: Requires DX11 hardware [S1, unofficial].
++*   **Density Field Generation**: The example generates the density field on the CPU, which is a bottleneck [S1, unofficial].
++*   **Ambiguity**: Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points where the topology is ambiguous [10327-lookup-table-and-ambiguity-handling].
++*   **Lighting**: The default shader uses a barebone diffuse lighting model [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N)$ where $N$ is the number of voxels $(R-1)^3$. Each voxel is processed in parallel by a thread group.
++*   **Time Complexity**: $O(N)$ where $N$ is the number of voxels $(R-1)^3$ [S1, unofficial].
+ *   **Memory Complexity**: $O(N)$ for the append buffer, with capacity $(R-1)^3 \times 5$ triangles [S1, unofficial].
+-*   **Performance**: Parallelizes the extraction process, significantly faster than CPU-based methods for high resolutions.
+-*   **Strengths**: Dynamic output size handled via append buffers and indirect draw calls; leverages GPU parallelism.
+-*   **Limitations**: Requires DX11; CPU density generation is a bottleneck in the reference implementation; potential topological artifacts in ambiguous cases.
++*   **Performance**: Parallelizes the extraction process, significantly faster than CPU-based methods for high resolutions [S1, unofficial].
++*   **Strengths**: Dynamic output size handled via append buffers and indirect draw calls; leverages GPU parallelism [S1, unofficial].
++*   **Limitations**: Requires DX11; CPU density generation is a bottleneck in the reference implementation; potential topological artifacts in ambiguous cases [S1, unofficial].
+ 
+ ## Background

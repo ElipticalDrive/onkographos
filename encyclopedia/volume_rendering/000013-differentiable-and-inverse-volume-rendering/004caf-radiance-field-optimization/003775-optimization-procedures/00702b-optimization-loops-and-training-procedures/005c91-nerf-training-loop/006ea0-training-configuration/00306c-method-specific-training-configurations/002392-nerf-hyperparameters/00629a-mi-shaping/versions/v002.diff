@@ -1,0 +1,193 @@
+--- v001.md
++++ v002.md
+@@ -7,10 +7,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A pre-trained NeRF model (trained for color reconstruction only), a set of training images, and corresponding DINO feature embeddings for each pixel/region.
+-*   **Output:** A shaped NeRF model with modified weights in the RGB linear layer.
++*   **Input:** A pre-trained NeRF model (trained for color reconstruction only), a set of training images, and corresponding DINO feature embeddings for each pixel/region [S1].
++*   **Output:** A shaped NeRF model with modified weights in the RGB linear layer [S1].
+ 
+ **Data Structures:**
+-*   **NeRF Weights:** The method targets the parameters of the RGB linear layer. In the reference implementation, this is a $3 \times 128$-dimensional weight matrix [S1].
+-*   **Ray Batch:** A batch of 64 rays sampled across all training views [S1].
++*   **NeRF Weights:** The method targets the parameters of the RGB linear layer, which is a $3 \times 128$-dimensional weight matrix in the reference implementation [S1].
++*   **Ray Batch:** A batch of 64 rays sampled across all training views per epoch [S1].
+ *   **DINO Features:** Semantic feature vectors associated with each ray/pixel, used to compute similarity [S1].
+ 
+@@ -19,15 +19,7 @@
+ 2.  **Ray Sampling:** For each epoch, randomly sample a batch of 64 rays across all training views [S1].
+ 3.  **Gradient Computation:** For each ray in the batch, compute the gradient of the pixel gray value with respect to the NeRF's RGB linear layer weights [S1]. The pixel gray value is defined as the mean of the 3 RGB channels [S1].
+-4.  **Sample Selection:** For each sampled ray $i$, identify positive and negative samples from the other rays in the batch based on DINO feature similarity [S1]:
+-    *   **Positive Sample:** A ray $j$ is a positive sample if its DINO feature similarity with ray $i$ is higher than a dynamic threshold $\tau$ [S1].
+-    *   **Negative Sample:** A ray $j$ is a negative sample if its DINO feature similarity with ray $i$ is lower than $\tau$ [S1].
+-    *   The total number of samples considered for the contrastive loss for a specific ray is 64 [S1].
+-5.  **Threshold Adaptation:** Adjust the similarity threshold $\tau$ dynamically during training [S1]:
+-    *   Initialize $\tau$ within the interval $[0.5, 0.8]$ [S1].
+-    *   Calculate the ratio of positive samples in the current batch [S1].
+-    *   If the ratio of positive samples is lower than 5%, subtract 0.001 from $\tau$ [S1].
+-    *   If the ratio of positive samples is larger than 15%, add 0.001 to $\tau$ [S1].
+-    *   Clamp $\tau$ to remain within $[0.5, 0.8]$ [S1].
+-6.  **Loss Calculation:** Compute the MI-shaping loss. The loss is derived from the mutual information between pixel gradients under perturbation [S1]. The implementation uses a contrastive formulation where the loss encourages high similarity between gradients of rays with high DINO similarity and low similarity otherwise [S1]. The loss parameters are $\lambda = 0.01$ and $\gamma = 0.01$ [S1].
++4.  **Sample Selection:** For each sampled ray $i$, identify positive and negative samples from the other rays in the batch based on DINO feature similarity [S1]. A ray $j$ is a positive sample if its DINO feature similarity with ray $i$ is higher than a dynamic threshold $\tau$, and a negative sample if the similarity is lower than $\tau$ [S1]. The total number of samples considered for the contrastive loss for a specific ray is 64 [S1].
++5.  **Threshold Adaptation:** Adjust the similarity threshold $\tau$ dynamically during training [S1]. Initialize $\tau$ within the interval $[0.5, 0.8]$ [S1]. Calculate the ratio of positive samples in the current batch [S1]. If the ratio of positive samples is lower than 5%, subtract 0.001 from $\tau$ [S1]. If the ratio of positive samples is larger than 15%, add 0.001 to $\tau$ [S1]. Clamp $\tau$ to remain within $[0.5, 0.8]$ [S1].
++6.  **Loss Calculation:** Compute the MI-shaping loss using a contrastive formulation that correlates gradient cosine similarity with DINO feature similarity [S1]. The loss parameters are $\lambda = 0.01$ and $\gamma = 0.01$ [S1].
+ 7.  **Optimization:** Update the NeRF weights using the Adam optimizer with an initial learning rate of $5 \times 10^{-4}$ for 10,000 epochs [S1]. This phase takes approximately 8 hours [S1].
+ 
+@@ -39,14 +31,9 @@
+ import torch.optim as optim
+ 
+-def compute_gray_value(rgb_output):
+-    """Compute gray value as mean of RGB channels."""
+-    return torch.mean(rgb_output, dim=-1)
+-
+-def compute_dino_similarity(feature_a, feature_b):
+-    """Compute cosine similarity between DINO features."""
+-    # Normalize features
+-    norm_a = torch.nn.functional.normalize(feature_a, p=2, dim=-1)
+-    norm_b = torch.nn.functional.normalize(feature_b, p=2, dim=-1)
+-    return torch.sum(norm_a * norm_b, dim=-1)
++def cosine_similarity(a, b):
++    """Compute cosine similarity between two vectors."""
++    a_norm = torch.nn.functional.normalize(a, p=2, dim=-1)
++    b_norm = torch.nn.functional.normalize(b, p=2, dim=-1)
++    return torch.sum(a_norm * b_norm, dim=-1)
+ 
+ def adaptive_threshold_update(threshold, pos_ratio):
+@@ -56,7 +43,5 @@
+     elif pos_ratio > 0.15:
+         threshold += 0.001
+-    # Clamp to [0.5, 0.8]
+-    threshold = torch.clamp(threshold, min=0.5, max=0.8)
+-    return threshold
++    return torch.clamp(threshold, min=0.5, max=0.8)
+ 
+ def mi_shaping_step(nerf_model, batch_rays, dino_features, threshold, optimizer):
+@@ -77,88 +62,59 @@
+     
+     # 1. Forward pass to get RGB outputs
+-    # Note: Implementation details for ray marching are assumed from parent articles
+     rgb_outputs = nerf_model(batch_rays) # Shape: (64, 3)
+     
+-    # 2. Compute gray values
+-    gray_values = compute_gray_value(rgb_outputs) # Shape: (64,)
++    # 2. Compute gray values (mean of RGB channels)
++    gray_values = torch.mean(rgb_outputs, dim=-1) # Shape: (64,)
+     
+     # 3. Compute gradients of gray values w.r.t. RGB linear layer weights
+-    # The RGB linear layer weights are shape (3, 128)
+     rgb_linear_weights = nerf_model.rgb_linear.weight # Shape: (3, 128)
+     
+-    # Compute gradient of gray value for each ray w.r.t. the weights
+-    # grad_i = d(gray_value_i) / d(weights)
+-    # This requires computing gradients for each ray separately or using vector-Jacobian products
+-    # For clarity, we assume a function that returns gradients for the batch
+-    gradients = compute_gradients(gray_values, rgb_linear_weights) # Shape: (64, 3, 128)
++    gradients_per_ray = []
++    for i in range(64):
++        # Compute gradient of scalar gray_value[i] w.r.t. weights
++        grad_i = torch.autograd.grad(
++            gray_values[i], rgb_linear_weights,
++            grad_outputs=torch.tensor(1.0, device=gray_values.device),
++            create_graph=True, retain_graph=True
++        )[0]
++        gradients_per_ray.append(grad_i.flatten()) # Shape: (384,)
++    gradients_per_ray = torch.stack(gradients_per_ray) # Shape: (64, 384)
+     
+-    # 4. Compute DINO similarities between all pairs in the batch
+-    # Similarity matrix S of shape (64, 64)
+-    similarities = torch.zeros(64, 64, device=gray_values.device)
++    # 4. Compute DINO similarity matrix
++    dino_sim = torch.zeros(64, 64, device=gray_values.device)
+     for i in range(64):
+         for j in range(64):
+-            if i != j:
+-                similarities[i, j] = compute_dino_similarity(dino_features[i], dino_features[j])
++            dino_sim[i, j] = cosine_similarity(dino_features[i], dino_features[j])
+     
+-    # 5. Identify positive and negative samples for each ray
+-    # Positive: similarity > threshold
+-    # Negative: similarity < threshold
+-    # The loss is a contrastive loss over these pairs
+-    
+-    pos_mask = similarities > threshold
+-    neg_mask = similarities < threshold
+-    
+-    # 6. Compute Contrastive Loss
+-    # The MI-shaping loss encourages gradients of positive pairs to be similar
+-    # and gradients of negative pairs to be dissimilar.
+-    # Based on Eq. 8 and 20 in [S1], the loss relates to the cosine similarity of gradients.
+-    
+-    loss = 0.0
+-    count = 0
++    # 5. Contrastive loss on gradients
++    loss = torch.tensor(0.0, device=gray_values.device)
++    pos_count = 0
++    neg_count = 0
+     
+     for i in range(64):
+-        # Get gradients for ray i
+-        grad_i = gradients[i] # Shape: (3, 128)
+-        
+-        # Flatten gradient for similarity computation
+-        grad_i_flat = grad_i.flatten()
+-        
+-        # Iterate over other rays
+         for j in range(64):
+             if i == j:
+                 continue
++            grad_sim = cosine_similarity(gradients_per_ray[i], gradients_per_ray[j])
++            if dino_sim[i, j] > threshold:
++                loss -= grad_sim
++                pos_count += 1
++            else:
++                loss += grad_sim
++                neg_count += 1
+                 
+-            grad_j = gradients[j]
+-            grad_j_flat = grad_j.flatten()
+-            
+-            sim = compute_dino_similarity(grad_i_flat, grad_j_flat)
+-            
+-            if pos_mask[i, j]:
+-                # Positive pair: minimize distance (maximize similarity)
+-                # Loss term: -sim or similar
+-                loss -= sim
+-                count += 1
+-            elif neg_mask[i, j]:
+-                # Negative pair: maximize distance (minimize similarity)
+-                # Loss term: +sim or similar
+-                loss += sim
+-                count += 1
+-                
+-    if count > 0:
+-        loss = loss / count
++    if pos_count + neg_count > 0:
++        loss = loss / (pos_count + neg_count)
+         
+-    # Apply loss parameters lambda and gamma if defined in specific formulation
+-    # [S1] mentions lambda=0.01, gamma=0.01. Assuming these scale the loss or are part of a combined loss.
+-    # For this implementation, we assume the computed loss is the MI-shaping loss.
++    # Apply loss parameters λ and γ as scaling factors [S1]
++    loss = loss * 0.01
+     
+     loss.backward()
+     optimizer.step()
+     
+-    # 7. Update threshold
+-    # Calculate ratio of positive samples in the batch
++    # 6. Update threshold
+     total_pairs = 64 * 63
+-    num_pos = torch.sum(pos_mask).item()
++    num_pos = torch.sum(dino_sim > threshold).item()
+     pos_ratio = num_pos / total_pairs
+-    
+     new_threshold = adaptive_threshold_update(threshold, pos_ratio)
+     
+@@ -174,5 +130,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Threshold Clamping:** The threshold must be strictly clamped to $[0.5, 0.8]$ to prevent divergence [S1].
++*   **Threshold Clamping:** The threshold must be strictly clamped to $[0.5, 0.8]$ after each adjustment to prevent divergence [S1].
+ *   **Gradient Precision:** Computing gradients of pixel gray values with respect to the RGB linear layer weights requires careful handling of the backpropagation through the volume rendering process [S1].
+ *   **Memory Usage:** The MI-shaping phase consumes approximately 1350 MB of memory [S1].

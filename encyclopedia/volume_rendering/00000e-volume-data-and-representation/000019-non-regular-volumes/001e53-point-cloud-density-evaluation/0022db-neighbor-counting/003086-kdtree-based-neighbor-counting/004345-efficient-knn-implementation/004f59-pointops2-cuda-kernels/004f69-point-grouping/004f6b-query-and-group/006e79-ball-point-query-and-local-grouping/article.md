@@ -1,0 +1,100 @@
+# Ball Point Query and Local Grouping
+Also called: Ball Query, PointNet Local Feature Extraction, Radius Neighbor Search
+
+## Overview
+Ball Point Query and Local Grouping identifies all points within a specified radius around each query point and groups them into fixed-size tensors for local feature aggregation [S1, unofficial]. It differs from standard k-Nearest Neighbors (kNN) by using a distance threshold rather than a fixed count, ensuring that only spatially relevant neighbors are included, while handling sparse neighborhoods by padding with the first valid neighbor to maintain tensor shape consistency [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `xyz`: Tensor of all points in the cloud, shape `[B, N, 3]` (Batch, Number of Points, Coordinates).
+- `new_xyz`: Tensor of query points, shape `[B, S, 3]`.
+- `radius`: Float, maximum Euclidean distance for neighbor inclusion.
+- `nsample`: Integer, maximum number of neighbors to return per query point.
+
+**Outputs:**
+- `group_idx`: Tensor of indices, shape `[B, S, nsample]`, containing indices into `xyz` for each query point's neighborhood.
+- `group_xyz`: (Implicitly derived) Coordinates of the grouped points, used for relative coordinate computation.
+
+**Data Structures:**
+- Indices are stored as integers. The padding strategy ensures `group_idx` always has shape `[B, S, nsample]`.
+
+**Steps:**
+1. Compute the squared Euclidean distance between every query point in `new_xyz` and every point in `xyz`. Let $D_{ij} = \| \mathbf{q}_i - \mathbf{p}_j \|^2$, where $\mathbf{q}_i$ is the $i$-th query point and $\mathbf{p}_j$ is the $j$-th point in the cloud.
+2. Create a mask for indices where the squared distance exceeds $radius^2$. Assign a sentinel value $N$ (the total number of points in the cloud) to these invalid indices.
+3. Sort the indices along the last dimension (point index) in ascending order of distance.
+4. Select the top `nsample` indices for each query point.
+5. Identify any remaining slots in the selected indices that still hold the sentinel value $N$ (indicating fewer than `nsample` valid neighbors were found).
+6. For each query point, identify the first valid neighbor index (the first index in the sorted list that is not $N$).
+7. Replace all sentinel values $N$ in the selected indices with the first valid neighbor index for that query point.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def ball_point_query_and_local_grouping(xyz, new_xyz, radius, nsample):
+    """
+    xyz: [B, N, 3]
+    new_xyz: [B, S, 3]
+    radius: float
+    nsample: int
+    Returns:
+    group_idx: [B, S, nsample]
+    """
+    B, N, _ = xyz.shape
+    B2, S, _ = new_xyz.shape
+    
+    # Compute squared distances: [B, S, N]
+    # Using broadcasting: new_xyz[:, :, None, :] - xyz[:, None, :, :]
+    diff = new_xyz[:, :, None, :] - xyz[:, None, :, :]
+    sqrdists = torch.sum(diff ** 2, dim=3)
+    
+    # Mask indices where distance > radius^2 with N
+    group_idx = torch.arange(N, device=xyz.device).unsqueeze(0).unsqueeze(0).expand(B, S, N)
+    group_idx[sqrdists > radius ** 2] = N
+    
+    # Sort indices along the last dimension
+    # group_idx is now sorted by distance, with Ns at the end
+    group_idx, _ = torch.sort(group_idx, dim=-1)
+    
+    # Keep top nsample
+    group_idx = group_idx[:, :, :nsample]
+    
+    # Find the first valid neighbor for each query point
+    # The first column is the closest neighbor. If it is N, all are N (edge case).
+    group_first = group_idx[:, :, 0].view(B, S, 1).repeat([1, 1, nsample])
+    
+    # Create mask for invalid indices (still N)
+    mask = group_idx == N
+    
+    # Replace invalid indices with the first valid neighbor
+    group_idx[mask] = group_first[mask]
+    
+    return group_idx
+```
+
+**Parameters:**
+- `radius`: Typical values depend on the scale of the point cloud. Must be positive.
+- `nsample`: Typical values are powers of 2 (e.g., 16, 32, 64) for efficient memory access.
+
+**Edge Cases and Pitfalls:**
+- If a query point has no neighbors within the radius, all `nsample` slots will be filled with the index of the closest point (which is outside the radius). This preserves tensor shape but may introduce noise if the closest point is far away [S1, unofficial].
+- Precision issues in squared distance computation can cause points exactly at the boundary to be incorrectly excluded or included. Using `clamp_min(0.0)` on squared distances before comparison is recommended [S1, unofficial].
+
+## Subtopics
+
+### [PointNetSetAbstraction](21603-pointnetsetabstraction.md)
+Extends local grouping by adding sampling and learnable aggregation.
+
+## Operating characteristics
+- **Time Complexity:** $O(B \cdot S \cdot N \log N)$ due to sorting, or $O(B \cdot S \cdot N)$ if using a bucket-based approach. The dominant cost is computing all pairwise distances and sorting.
+- **Memory Complexity:** $O(B \cdot S \cdot N)$ for storing the distance matrix and indices.
+- **Strengths:** Ensures fixed-size output for downstream layers; handles variable density by using a radius.
+- **Limitations:** Computationally expensive for large $N$; padding with the first neighbor can distort feature aggregation if the neighborhood is very sparse.
+
+## Background
+The method is a core component of PointNet++ and subsequent point cloud processing architectures, providing a way to extract local geometric features [S1, unofficial]. It is widely used in 3D deep learning for tasks like classification, segmentation, and completion.
+
+## Sources
+[S1] Amazingren/Gaussian-JEPA, https://github.com/Amazingren/Gaussian-JEPA, fetched 2026-10-27 (unofficial)

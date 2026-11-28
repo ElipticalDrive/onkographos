@@ -1,0 +1,159 @@
+Header-only dependency-free BVH construction and traversal library. - Improve ``BVH8_CPU`` performance for incoherent rays by wjakob · Pull Request #294 · jbikker/tinybvh
+
+Improve ``BVH8_CPU`` performance for incoherent rays by wjakob · Pull Request #294 · jbikker/tinybvh · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+wjakob
+commented
+Sep 12, 2026
+Copy link
+Copy Markdown
+Contributor
+This commit bundles four changes that accelerate the AVX2 path of BVH8_CPU in particular for incoherent rays.
+The kernel now sorts intersected children by the true tmin distance and no longer uses the precomputed per-octant order perm. This involves a bitonic sort on integer keys formed from the tmin bits with the lane index in the lower three bits. The previous permutation approach was quite inaccurate: on the Sponza benchmark, the first traversed child is only the closest one in 19% of the node visits. Sorting per ray reduces the number of traversal steps on Sponza by 8%. Sorting mainly benefits closest-hit queries, so the any-hit path in IsOccluded stays as-is. I also tried on BVH4, and the same change is harmful there.
+The kernel already had a specialized path for steps with a single intersected child. This commit adds a second one for two intersected children, which skips the sorting network. The highest and lowest set bits of the mask identify the two lanes, and one comparison orders them. This covers about a quarter of all node visits and shortens the path to the next node address. Since this path pushes onto the stack as well, the debug overflow check now follows the branch chain instead of sitting in the multi-child branch.
+The nearest child can already be extracted after the first three sort stages, when the lower half is ascending and the upper half descending. That way, the descent into this node can overlap with the remaining sorting steps.
+The traversal now prefetches the cache lines of every intersected child in a loop right after the slab test, before branching on the child count. Incoherent rays otherwise stall on each node they descend into and again on the nodes they pop later.
+Performance on the Sponza speedtest on a Ryzen 9 7950X, in MRays/s. Shadow rays use IsOccluded, which is unchanged.
+```
+             primary    shadow    diffuse
+  before        11.3      31.3        5.3
+  after         12.9      31.3        6.4
+```
+Improve BVH8_CPU performance for incoherent rays
+…
+59704f0
+```
+This commit bundles four changes that accelerate the AVX2 path of
+``BVH8_CPU`` in particular for incoherent rays.
+
+- The kernel now sorts intersected children by the true ``tmin``
+  distance and no longer uses the precomputed per-octant order ``perm``.
+  This involves a bitonic sort on integer keys formed from the ``tmin``
+  bits with the lane index in the lower three bits. The previous
+  permutation approach was quite inaccurate: on the Sponza benchmark,
+  the first traversed child is only the closest one in 19% of the node
+  visits. Sorting per ray reduces the number of traversal steps on
+  Sponza by 8%. Sorting mainly benefits closest-hit queries, so the
+  any-hit path in ``IsOccluded`` stays as-is. I also tried on BVH4, and
+  the same change is harmful there.
+
+- The kernel already had a specialized path for steps with a single
+  intersected child. This commit adds a second one for *two* intersected
+  children, which skips the sorting network. The highest and lowest set
+  bits of the mask identify the two lanes, and one comparison orders
+  them. This covers about a quarter of all node visits and shortens the
+  path to the next node address. Since this path pushes onto the stack
+  as well, the debug overflow check now follows the branch chain instead
+  of sitting in the multi-child branch.
+
+- The nearest child can already be extracted after the first three sort
+  stages, when the lower half is ascending and the upper half
+  descending. That way, the descent into this node can overlap with the
+  remaining sorting steps.
+
+- The traversal now prefetches the cache lines of every intersected
+  child in a loop right after the slab test, before branching on the
+  child count. Incoherent rays otherwise stall on each node they descend
+  into and again on the nodes they pop later.
+
+Performance on the Sponza speedtest on a Ryzen 9 7950X, in MRays/s.
+Shadow rays use ``IsOccluded``, which is unchanged.
+
+```
+             primary    shadow    diffuse
+  before        11.3      31.3        5.3
+  after         12.9      31.3        6.4
+```
+```
+Hide details
+View details
+jbikker
+merged commit ca4a8f0
+into
+jbikker:dev_split
+Sep 14, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+jbikker
+commented
+Sep 14, 2026
+Copy link
+Copy Markdown
+Owner
+Interesting. BVH8_CPU is state-of-the-art and directly based on the paper by Fuetterling; when I implemented it I did test full sorting but didn't see an improvement. Looks like 'ideal code' is a bit of a moving target with different optima for each architecture.. Perhaps it's worthwhile to template the code and test variations on different CPUs.
+But for now, such a large improvement is great news. :)
+wjakob
+deleted the
+bvh8_sorted_traversal
+branch
+September 14, 2026 10:18
+wjakob
+commented
+Sep 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Do you have access to an Intel CPU? It would be interesting to also test there since its OoO pipeline may skew these results. I worry that these kinds of tweaks may overfit on the particular combination of processor and benchmark.
+wjakob
+commented
+Sep 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+I also forgot to add in the original message: the agressive prefetching helps improve performance on diffuse rays but actually harms primary/shadow rays. My assumption was that primary/shadow rays are already plenty fast, and that diffuse rays are the important thing to optimize for.
+jbikker
+commented
+Sep 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+I added some toggles to tiny_bvh.h to test the individual optimizations:
+BVH8_USE_PREFETCHING for the two prefetching blocks;
+BVH8_SORTING_NETWORK to run the sorting network instead of the method from the paper;
+BVH8_2VALIDNODES to include the special handling of the '2 valud nodes' case.
+The last two are clearly a win, in all scenarios. But for the prefetching I can't reproduce the gains on my CPU (AMD Ryzen AI 9 HX 370). Your CPU seems similar; can you verify prefetching is a win by itself?
+wjakob
+commented
+Sep 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+I'm seeing a +3–7% speedup for prefetching on diffuse rays for all combinations. But in turn primary rays get −2.5–3.6% slower.
+wjakob
+commented
+Sep 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Actually the OS and compiler may play a role too. I tested on Linux with GCC (13.3). Clang 15 shows similar results.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,155 @@
+--- v012.md
++++ v013.md
+@@ -38,9 +38,9 @@
+     
+     Args:
+-        bbox_min: Point (x, y, z) defining the minimum corner of the bounding box.
+-        bbox_max: Point (x, y, z) defining the maximum corner of the bounding box.
+-        split_predicate: Function taking a bounding box and returning True if it should be subdivided.
+-        value_func: Function taking a Point and returning a scalar value.
+-        gradient_func: Function taking a Point and returning a Vector (gradient).
++        bbox_min: Tuple (x, y, z) defining the minimum corner of the bounding box.
++        bbox_max: Tuple (x, y, z) defining the maximum corner of the bounding box.
++        split_predicate: Function taking min and max tuples, returning True if the node should be subdivided.
++        value_func: Function taking a point tuple and returning a scalar value.
++        gradient_func: Function taking a point tuple and returning a gradient tuple.
+         isovalue: The scalar threshold for the isosurface.
+         algorithm: String specifying the extraction method ("dual_contouring" or "marching_cubes").
+@@ -51,24 +51,25 @@
+     """
+     # Step 1: Initialize Octree
+-    class Octree:
+-        def __init__(self, bbox):
+-            self.bbox = bbox
++    class OctreeNode:
++        def __init__(self, min_pt, max_pt):
++            self.min_pt = min_pt
++            self.max_pt = max_pt
+             self.children = []
+             self.is_leaf = True
+-            
++
+         def refine(self, predicate):
+-            if not self.is_leaf or not predicate(self.bbox):
++            if not self.is_leaf or not predicate(self.min_pt, self.max_pt):
+                 return
+             self.is_leaf = False
+-            dx, dy, dz = (self.bbox[1][0]-self.bbox[0][0])/2, (self.bbox[1][1]-self.bbox[0][1])/2, (self.bbox[1][2]-self.bbox[0][2])/2
++            dx, dy, dz = (self.max_pt[0]-self.min_pt[0])/2, (self.max_pt[1]-self.min_pt[1])/2, (self.max_pt[2]-self.min_pt[2])/2
+             for i in range(2):
+                 for j in range(2):
+                     for k in range(2):
+-                        child_min = [self.bbox[0][0]+i*dx, self.bbox[0][1]+j*dy, self.bbox[0][2]+k*dz]
+-                        child_max = [child_min[0]+dx, child_min[1]+dy, child_min[2]+dz]
+-                        self.children.append(Octree([child_min, child_max]))
++                        child_min = (self.min_pt[0]+i*dx, self.min_pt[1]+j*dy, self.min_pt[2]+k*dz)
++                        child_max = (child_min[0]+dx, child_min[1]+dy, child_min[2]+dz)
++                        self.children.append(OctreeNode(child_min, child_max))
+             for child in self.children:
+                 child.refine(predicate)
+-                
++
+         def traverse_leaves(self):
+             if self.is_leaf:
+@@ -78,5 +79,5 @@
+                     yield from child.traverse_leaves()
+ 
+-    octree = Octree([bbox_min, bbox_max])
++    octree = OctreeNode(bbox_min, bbox_max)
+     octree.refine(split_predicate)
+ 
+@@ -85,20 +86,6 @@
+ 
+     # Step 4: Bind Functions
+-    class ValueFunction:
+-        def __init__(self, func, octree):
+-            self.func = func
+-            self.octree = octree
+-        def evaluate(self, point):
+-            return self.func(point)
+-            
+-    class GradientFunction:
+-        def __init__(self, func, octree):
+-            self.func = func
+-            self.octree = octree
+-        def evaluate(self, point):
+-            return self.func(point)
+-
+-    values = ValueFunction(value_func, octree)
+-    gradients = GradientFunction(gradient_func, octree)
++    values = value_func
++    gradients = gradient_func
+ 
+     # Step 5: Create Domain
+@@ -117,16 +104,14 @@
+         do_not_triangulate_faces = True
+         constrain_to_cell = False
+-        # Standard dual contouring processes domain leaves to find isovertices and build polygons
+         for leaf in domain.octree.traverse_leaves():
+-            # Evaluate scalar values at cell corners
+-            corner_values = [domain.values.evaluate(corner) for corner in leaf.bbox_corners()]
+-            # Find edges crossing the isovalue
+-            crossing_edges = [i for i in range(12) if (corner_values[i] - isovalue) * (corner_values[(i+1)%8] - isovalue) < 0]
+-            # Compute isovertex positions and build mesh primitives
+-            build_dual_contour_mesh(leaf, crossing_edges, isovalue, points, triangles, do_not_triangulate_faces, constrain_to_cell)
++            corners = get_corners(leaf.min_pt, leaf.max_pt)
++            corner_values = [domain.values(corner) for corner in corners]
++            crossing_edges = find_crossing_edges(corners, corner_values, isovalue)
++            # Standard dual contouring logic (QEF projection and polygonization) is applied here. Not given in the sources. [G]
+     elif algorithm == "marching_cubes":
+         for leaf in domain.octree.traverse_leaves():
+-            corner_values = [domain.values.evaluate(corner) for corner in leaf.bbox_corners()]
+-            build_marching_cubes_mesh(leaf, corner_values, isovalue, points, triangles)
++            corners = get_corners(leaf.min_pt, leaf.max_pt)
++            corner_values = [domain.values(corner) for corner in corners]
++            # Standard marching cubes logic (table lookup and interpolation) is applied here. Not given in the sources. [G]
+     else:
+         raise ValueError("Unsupported algorithm")
+@@ -134,13 +119,12 @@
+     return points, triangles
+ 
+-def build_dual_contour_mesh(leaf, crossing_edges, isovalue, points, triangles, do_not_triangulate, constrain):
+-    # Standard operation: projects gradients to a plane, solves a Quadratic Error Function (QEF) for the isovertex, and triangulates the resulting polygon.
+-    # Implementation details omitted; standard QEF polygonization [G]
+-    pass
++def get_corners(min_pt, max_pt):
++    return [(min_pt[0]+i*(max_pt[0]-min_pt[0]), min_pt[1]+j*(max_pt[1]-min_pt[1]), min_pt[2]+k*(max_pt[2]-min_pt[2]))
++            for i in (0,1) for j in (0,1) for k in (0,1)]
+ 
+-def build_marching_cubes_mesh(leaf, values, isovalue, points, triangles):
+-    # Standard operation: looks up the cube configuration case, interpolates vertex positions along crossing edges, and outputs triangles.
+-    # Implementation details omitted; standard table lookup [G]
+-    pass
++def find_crossing_edges(corners, values, isovalue):
++    # Standard edge traversal for a cube. Edges connect specific corner indices.
++    edges = [(0,1), (1,3), (3,2), (2,0), (4,5), (5,7), (7,6), (6,4), (0,4), (1,5), (3,7), (2,6)]
++    return [i for i in range(12) if (values[edges[i][0]] - isovalue) * (values[edges[i][1]] - isovalue) < 0]
+ ```
+ 
+@@ -156,11 +140,11 @@
+ 
+ ### [Standard Interval Tree for Isosurface Extraction](1230-standard-interval-tree-for-isosurface-extraction.md)
+-A spatial indexing method that organizes cells by scalar value intervals for efficient query, distinct from the spatial subdivision of octrees. Choose when output-sensitive query complexity $O(\log n + k)$ is required, accepting higher memory overhead.
++Organizes cells by scalar value intervals for output-sensitive queries, distinct from spatial subdivision. Choose when $O(\log n + k)$ query complexity is required, accepting higher memory overhead.
+ 
+ ### [IsoOctree](1744-isooctree.md)
+-An unconstrained method operating on arbitrary octrees by computing the Euclidean Distance Transform, enabling mesh simplification. Choose when working with distance fields or requiring direct mesh simplification without topological constraints.
++Operates on arbitrary octrees by computing the Euclidean Distance Transform, enabling mesh simplification. Choose when working with distance fields or requiring direct mesh simplification without topological constraints.
+ 
+ ### [Wilhelms and Van Gelder Octree](2107-wilhelms-and-van-gelder-octree.md)
+-A hierarchical method that prunes octree branches based on value intervals to accelerate extraction. Choose when static value-range pruning is sufficient and strict octree hierarchy is preferred over general interval trees.
++Prunes octree branches based on value intervals to accelerate extraction. Choose when static value-range pruning is sufficient and strict octree hierarchy is preferred over general interval trees.
+ 
+ ### [Ashida and Badla Octree Contouring](2117-ashida-and-badla-octree-contouring.md)
+@@ -189,10 +173,5 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
+-- **Strengths:** Adaptive resolution allows for high detail where needed and coarse representation elsewhere [S1].
+-- **Limitations:** Loss of topological guarantees compared to uniform grid methods. Cracks may occur if the octree refinement is not aligned with the surface features [S1].
+-- **When to use:** Not given in the sources.
+-- **When not to use:** Not given in the sources.
++Time complexity, memory complexity, and specific usage guidelines are not given in the sources.
+ 
+ ## Background

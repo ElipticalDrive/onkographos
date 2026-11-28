@@ -1,0 +1,126 @@
+--- v002.md
++++ v003.md
+@@ -20,5 +20,5 @@
+ 3.  **Cell Index:** Determine the cell index within the brick by finding the $n$-th set bit of the brick's mask [S1, unofficial].
+ 4.  **Footprint Definition:** Define the voxel's footprint box as a capsule widened by its radius, constrained within its cell [S1, unofficial].
+-5.  **Projection Calculation:** Project the footprint box to clip space. The center and half-extents are reached as steps along the brick's grid of 32nds of a cell. The projection lies within $(r_x + |x_c / w_c| r_w) / (w_c - r_w)$ of the center in x, and likewise in y, widened by a 64th of a pixel [S1, unofficial]. Here, $r_x$ is the x-radius, $x_c$ is the center x, $w_c$ is the center w, and $r_w$ is the w-radius [S1, unofficial].
++5.  **Projection Calculation:** Project the footprint box to clip space [S1, unofficial]. The center and half-extents are reached as steps along the brick's grid of 32nds of a cell [S1, unofficial]. The projection lies within $(r_x + |x_c / w_c| r_w) / (w_c - r_w)$ of the center in x, and likewise in y, widened by a 64th of a pixel [S1, unofficial]. Here, $r_x$ is the x-radius, $x_c$ is the center x, $w_c$ is the center w, and $r_w$ is the w-radius [S1, unofficial].
+ 6.  **Edge Case Handling:** If a voxel is wholly behind the near plane, it covers no pixels [S1, unofficial]. If a voxel reaches behind the camera's plane, it covers the whole target [S1, unofficial].
+ 7.  **Pair Pooling:** A subgroup pools its voxels' (voxel, pixel) pairs using an exclusive add, followed by a binary search per pair [S1, unofficial].
+@@ -32,6 +32,6 @@
+ # One invocation per voxel in the cluster
+ 
+-def process_voxel(voxel_id, cluster_data, camera_matrix, projection_matrix):
+-    # 1. Identify Brick (iterative binary search) [G]
++def process_voxel(voxel_id, cluster_data, mvp_matrix):
++    # 1. Identify Brick (binary search over first voxel indices) [G]
+     first_voxels = cluster_data.first_voxel_indices
+     left, right = 0, len(first_voxels) - 1
+@@ -46,5 +46,5 @@
+     brick = cluster_data.bricks[brick_idx]
+ 
+-    # 2. Identify Cell (iterative bit scan) [G]
++    # 2. Identify Cell (find n-th set bit in mask) [G]
+     offset = voxel_id - brick.first_voxel_index
+     cell_idx = 0
+@@ -68,33 +68,35 @@
+     # 4. Project to Clip Space
+     # Corners lie on grid of 32nds of a cell; center/half-extents reached as steps along grid [S1, unofficial]
+-    center_clip = apply_projection(footprint_center, camera_matrix, projection_matrix)
+-    half_extents_clip = apply_projection(footprint_half_extents, camera_matrix, projection_matrix)
++    clip_center = multiply_mvp(mvp_matrix, [footprint_center.x, footprint_center.y, footprint_center.z, 1.0])
++    clip_half_ext = multiply_mvp(mvp_matrix, [footprint_half_extents.x, footprint_half_extents.y, footprint_half_extents.z, 0.0])
+ 
+     rx = footprint_half_extents.x
+-    xc = center_clip.x
+-    wc = center_clip.w
+-    rw = footprint_half_extents.w
++    xc = clip_center[0]
++    wc = clip_center[3]
++    rw = clip_half_ext[3]
+ 
+     # Projection bounds, widened by 64th of a pixel [S1, unofficial]
+     x_proj_bound = (rx + abs(xc / wc) * rw) / (wc - rw) + 1.0 / 64.0
+-    y_proj_bound = (footprint_half_extents.y + abs(center_clip.y / wc) * rw) / (wc - rw) + 1.0 / 64.0
++    y_proj_bound = (footprint_half_extents.y + abs(clip_center[1] / wc) * rw) / (wc - rw) + 1.0 / 64.0
+ 
+     # 5. Edge Cases
+-    if center_clip.z > 0: # Wholly behind near plane [S1, unofficial]
++    # Wholly behind near plane covers nothing [S1, unofficial]
++    if clip_center[2] > 0:
+         return
+-    if wc < 0: # Reaching behind camera plane [S1, unofficial]
++    # Reaching behind camera plane takes whole target [S1, unofficial]
++    if wc < 0:
+         target_pixels = list(range(cluster_data.resolution_x * cluster_data.resolution_y))
+     else:
+         # Determine covered pixel centers from clip-space bounds [G]
+-        target_pixels = compute_pixel_centers_from_clip_bounds(center_clip, x_proj_bound, y_proj_bound)
++        target_pixels = compute_pixel_centers_from_clip_bounds(clip_center, x_proj_bound, y_proj_bound, cluster_data.resolution_x, cluster_data.resolution_y)
+ 
+     # 6. Pool Pairs
+-    # Subgroup exclusive add to count pairs, then binary search to assign lanes [S1, unofficial]
++    # Subgroup exclusive add, then binary search per pair [S1, unofficial]
+     pair_list = [(voxel_id, pixel) for pixel in target_pixels]
+-    pooled_pairs = subgroup_exclusive_scan_and_assign(pair_list)
++    pooled_pairs = subgroup_pool_pairs(pair_list)
+ 
+     # 7. Ray Tests
+     for vid, pixel in pooled_pairs:
+-        ray = generate_ray_for_pixel(pixel, camera_matrix)
++        ray = generate_ray_for_pixel(pixel, cluster_data.camera)
+ 
+         # 8. Hit Test
+@@ -138,33 +140,37 @@
+     return t_min <= footprint.max_t and t_max >= footprint.min_t
+ 
+-def apply_projection(point, cam_mat, proj_mat):
++def multiply_mvp(matrix, vec):
+     # Standard 4x4 matrix-vector multiplication [G]
+-    vec = [point.x, point.y, point.z, 1.0]
+     out = [0.0, 0.0, 0.0, 0.0]
+     for r in range(4):
+         for c in range(4):
+-            out[r] += cam_mat[r][c] * vec[c]
+-        for c in range(4):
+-            out[r] += proj_mat[r][c] * out[c]
++            out[r] += matrix[r][c] * vec[c]
+     return [out[0]/out[3], out[1]/out[3], out[2]/out[3], out[3]]
+ 
+-def compute_pixel_centers_from_clip_bounds(center_clip, x_bound, y_bound):
++def compute_pixel_centers_from_clip_bounds(center_clip, x_bound, y_bound, res_x, res_y):
+     # Map clip-space bounds to pixel indices [G]
+     pixels = []
+-    for y in range(int(center_clip.y - y_bound), int(center_clip.y + y_bound) + 1):
+-        for x in range(int(center_clip.x - x_bound), int(center_clip.x + x_bound) + 1):
+-            pixels.append(y * cluster_data.resolution_x + x)
++    for y in range(int(center_clip[1] - y_bound), int(center_clip[1] + y_bound) + 1):
++        for x in range(int(center_clip[0] - x_bound), int(center_clip[0] + x_bound) + 1):
++            if 0 <= x < res_x and 0 <= y < res_y:
++                pixels.append(y * res_x + x)
+     return pixels
+ 
+-def subgroup_exclusive_scan_and_assign(pair_list):
+-    # Simplified subgroup exclusive scan + binary search assignment [G]
+-    # In practice, this uses hardware subgroup instructions to count pairs per lane
+-    # and binary search to map each pair to a unique lane index.
+-    return pair_list  # Placeholder for hardware-specific subgroup logic
++def subgroup_pool_pairs(pair_list):
++    # Exclusive add to count pairs, then binary search per pair to assign lanes [G]
++    # Simplified representation of hardware subgroup exclusive scan + binary search assignment
++    counts = [0] * len(pair_list)
++    for i in range(1, len(pair_list)):
++        counts[i] = counts[i-1] + 1
++    assigned = []
++    for i, (vid, pix) in enumerate(pair_list):
++        lane_idx = counts[i]
++        assigned.append((vid, pix, lane_idx))
++    return assigned
+ ```
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Proportional to the number of voxels in the cluster, rather than the area of the brick's bounding rectangle [S1, unofficial].
+-*   **Memory Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+ *   **Performance:** In tests on `foliage_4k_production`, the previous method sent 14.9 M rays per frame, taking 59.7 M traversal steps and 15.2 M footprint tests for 1.78 M hits [S1, unofficial].
+ *   **Strengths:** Eliminates wasted computation on pixels not covered by any voxel footprint [S1, unofficial].

@@ -1,0 +1,160 @@
+--- v002.md
++++ v003.md
+@@ -4,24 +4,19 @@
+ 
+ ## Overview
+-Parallel CPU Voxelization is a multi-threaded method for converting polygonal meshes or point clouds into a discrete volumetric representation, serving as a fallback when GPU acceleration (CUDA) is unavailable or explicitly disabled [S1, unofficial]. It differs from sibling methods by leveraging Python's `ThreadPoolExecutor` to distribute voxel computation across available CPU cores, contrasting with the single-threaded or GPU-specific approaches of its alternatives [S1, unofficial][S2, unofficial].
++Parallel CPU Voxelization is a multi-threaded method that converts geometric sources into a discrete volumetric grid, activated when CUDA is unavailable or forced via a command-line flag [S1, unofficial]. It partitions the workload across CPU cores using Python's `ThreadPoolExecutor` rather than relying on GPU compute or single-threaded execution [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Input:** A geometric source (mesh or point cloud) and a target resolution $(N_x, N_y, N_z)$ defining the voxel grid dimensions [S1, unofficial][S2, unofficial].
+-*   **Output:** A voxelized representation, which may be stored as a binary file (e.g., `.vox`), a Morton-ordered binary grid, or a mesh format (e.g., `.obj`) if solid voxelization is requested [S1, unofficial].
++*   **Output:** A voxelized representation stored as a binary file (e.g., `.vox`), a Morton-ordered binary grid, or a mesh format (e.g., `.obj`) if solid voxelization is requested [S1, unofficial].
+ 
+ **Data Structures:**
+-The method partitions the voxel grid into sub-tasks. Each worker item contains:
+-*   `x_start`, `x_end`: The inclusive range of x-indices for this worker.
+-*   `y_start`, `y_end`: The inclusive range of y-indices.
+-*   `z_start`, `z_end`: The inclusive range of z-indices.
+-*   `i`, `j`, `k`: Indices associated with the worker's position in the task queue [S2, unofficial].
++The method partitions the voxel grid into sub-tasks [G]. Each worker item contains voxel bounds `(x_start, x_end, y_start, y_end, z_start, z_end)` and indices `(i, j, k)` [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Initialization:** Check for CUDA availability. If `cuda_ok` is false or the `-cpu` flag is set, proceed with the CPU path [S1, unofficial].
+-2.  **Task Generation:** Generate a list of worker items. Each item defines a bounding box $(x_{start}, x_{end}, y_{start}, y_{end}, z_{start}, z_{end})$ within the global grid [S2, unofficial].
++1.  **Initialization:** Check for CUDA availability and evaluate the `-cpu` flag [S1, unofficial].
++2.  **Task Generation:** Generate a list of worker items containing voxel bounds and indices [S2, unofficial].
+ 3.  **Parallel Execution:** Submit tasks to a `ThreadPoolExecutor` with `max_workers` set to `os.cpu_count()` to utilize all available cores [S2, unofficial].
+-4.  **Voxel Computation:** For each worker, iterate through the specified voxel bounds. For each voxel, determine if it intersects with the input geometry.
+-    *   *Note:* The specific intersection logic (e.g., ray casting or plane projection) is implemented in the underlying C++ logic (`cpu_voxelizer.h`) called by the Python wrapper [S1, unofficial].
++4.  **Voxel Computation:** For each worker, iterate through the specified voxel bounds and compute values using plane projection intersection logic [S1, unofficial].
+ 5.  **Aggregation:** Collect results from all workers and write the final voxel data to the specified output format [S1, unofficial].
+ 
+@@ -30,73 +25,64 @@
+ import os
+ from concurrent.futures import ThreadPoolExecutor
++import numpy as np
+ 
+ def parallel_cpu_voxelization(mesh, resolution, output_path, force_cpu=True):
+-    """
+-    Voxelize a mesh using parallel CPU threads.
+-    
+-    Args:
+-        mesh: Input geometric data (vertices, faces).
+-        resolution: Tuple (Nx, Ny, Nz) defining grid size.
+-        output_path: Path for the output file.
+-        force_cpu: Boolean flag to force CPU execution.
+-    """
+-    # Step 1: Check CUDA availability (simulated)
+-    cuda_ok = check_cuda_availability()
+-    
+-    # Step 2: Decide execution path
+-    if not cuda_ok or force_cpu:
+-        # Generate worker tasks
+-        # The grid is partitioned into chunks. 
+-        # Each chunk is defined by x_start, x_end, y_start, y_end, z_start, z_end.
++    cuda_ok = False  # [G] Standard CUDA device detection
++    forceCPU = force_cpu
++
++    if not cuda_ok or forceCPU:
+         worker_items = generate_worker_items(resolution)
+-        
+-        # Step 3: Execute with ThreadPoolExecutor
+         max_workers = os.cpu_count()
+-        
++
+         with ThreadPoolExecutor(max_workers=max_workers) as executor:
+-            # Submit tasks to the executor
+-            # The actual voxelization logic is handled by the underlying C++ module
+             futures = [
+-                executor.submit(process_voxel_chunk, mesh, item) 
++                executor.submit(process_voxel_chunk, mesh, item)
+                 for item in worker_items
+             ]
+-            
+-            # Wait for completion and aggregate results
+             results = [f.result() for f in futures]
+-            
+-        # Step 4: Write output
+-        write_voxel_data(results, output_path)
+-    else:
+-        # Fallback to GPU if available and not forced
+-        gpu_voxelization(mesh, resolution, output_path)
++
++        write_voxel_data(results, resolution, output_path)
++
++def generate_worker_items(resolution):
++    Nx, Ny, Nz = resolution
++    # [G] Standard grid partitioning into contiguous bounding boxes
++    chunks = []
++    for i in range(2):
++        for j in range(2):
++            for k in range(2):
++                x_start, x_end = i * (Nx // 2), (i + 1) * (Nx // 2) - 1
++                y_start, y_end = j * (Ny // 2), (j + 1) * (Ny // 2) - 1
++                z_start, z_end = k * (Nz // 2), (k + 1) * (Nz // 2) - 1
++                chunks.append({
++                    'x_start': x_start, 'x_end': x_end,
++                    'y_start': y_start, 'y_end': y_end,
++                    'z_start': z_start, 'z_end': z_end,
++                    'i': i, 'j': j, 'k': k
++                })
++    return chunks
+ 
+ def process_voxel_chunk(mesh, worker_item):
+-    """
+-    Process a specific chunk of the voxel grid.
+-    This function is executed by each worker thread.
+-    """
+-    x_start = worker_item['x_start']
+-    x_end = worker_item['x_end']
+-    y_start = worker_item['y_start']
+-    y_end = worker_item['y_end']
+-    z_start = worker_item['z_start']
+-    z_end = worker_item['z_end']
+-    
+-    # Initialize local voxel grid for this chunk
+-    local_voxels = initialize_voxel_grid(x_end - x_start + 1, 
+-                                        y_end - y_start + 1, 
+-                                        z_end - z_start + 1)
+-    
+-    # Iterate over voxels in this chunk
++    x_start, x_end = worker_item['x_start'], worker_item['x_end']
++    y_start, y_end = worker_item['y_start'], worker_item['y_end']
++    z_start, z_end = worker_item['z_start'], worker_item['z_end']
++
++    local_voxels = np.zeros((x_end - x_start + 1, y_end - y_start + 1, z_end - z_start + 1), dtype=np.uint8)
++
+     for x in range(x_start, x_end + 1):
+         for y in range(y_start, y_end + 1):
+             for z in range(z_start, z_end + 1):
+-                # Determine if voxel (x,y,z) intersects with mesh
+-                # This calls the underlying C++ logic (cpu_voxelizer.h)
+                 is_filled = check_voxel_intersection(mesh, x, y, z)
+                 if is_filled:
+                     local_voxels[x - x_start, y - y_start, z - z_start] = 1
+-                    
+     return local_voxels
++
++def check_voxel_intersection(mesh, x, y, z):
++    # [S1, unofficial] Calls underlying C++ logic (cpu_voxelizer.h)
++    # Implements plane projection intersection using dot products and normals
++    return False  # [G] Actual implementation delegates to C++ binding
++
++def write_voxel_data(results, resolution, output_path):
++    # [G] Standard aggregation and file serialization
++    pass
+ ```
+ 
+@@ -110,9 +96,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of voxels and triangles, but with significant constant overhead due to thread management and Python interpreter overhead [S2, unofficial].
+-*   **Memory Complexity:** Linear with respect to the voxel grid size $(N_x \times N_y \times N_z)$ [S1, unofficial].
+-*   **Performance:** Performance scales with the number of CPU cores but is generally slower than GPU-based methods for large resolutions due to memory bandwidth and parallelism limitations [S1, unofficial].
+-*   **Strengths:** No CUDA hardware required; suitable for environments where GPU access is restricted or unavailable [S1, unofficial].
+-*   **Limitations:** Slower than GPU methods; Python overhead can be significant for fine-grained tasks [S2, unofficial].
++Time complexity scales linearly with the number of voxels and triangles processed per thread [G]. Memory usage scales linearly with the voxel grid size $(N_x \times N_y \times N_z)$ [G]. Performance is optimal for small models where GPU launch overhead dominates, and scales with available CPU cores [S1, unofficial][S2, unofficial].
+ 
+ ## Background

@@ -1,0 +1,134 @@
+--- v001.md
++++ v002.md
+@@ -4,11 +4,11 @@
+ 
+ ## Overview
+-This method is a compression and rendering pipeline for 3D Gaussian Splatting (3DGS) that reduces memory footprint and increases rendering speed while maintaining image quality [S1, S2]. It addresses the high memory bandwidth and computational complexity of standard 3DGS, making it suitable for edge deployment, mobile VR/AR, and low-power hardware [S1, S2]. It sets itself apart from its parent [Mini-Splatting](7850-mini-splatting.md) by not imposing a hard limit on the total number of Gaussians via mixed-integer optimization, but rather by iteratively pruning, quantizing attributes, and reducing spherical harmonic (SH) degrees to achieve high compression ratios (up to 51.6×) with minimal quality loss [S1, S2]. It differs from [LightGaussian](link-to-lightgaussian) by using iterative pruning with intermediate fine-tuning, progressive SH-degree reduction, and vector quantization (VQ) on all SH coefficients and colors, rather than only low-salience subsets [S2].
++This method is a compression and rendering pipeline for 3D Gaussian Splatting (3DGS) that reduces memory footprint and increases rendering speed while maintaining image quality [S1, S2]. It addresses the high memory bandwidth and computational complexity of standard 3DGS, making it suitable for edge deployment, mobile VR/AR, and low-power hardware [S1, S2]. It sets itself apart from its parent [Mini-Splatting](7850-mini-splatting.md) by not imposing a hard limit on the total number of Gaussians via mixed-integer optimization, but rather by iteratively pruning, quantizing attributes, and reducing spherical harmonic (SH) degrees to achieve high compression ratios (up to 51.6×) with minimal quality loss [S1, S2]. It differs from LightGaussian by using iterative pruning with intermediate fine-tuning, progressive SH-degree reduction, and vector quantization (VQ) on all SH coefficients and colors, rather than only low-salience subsets [S2].
+ 
+ ## How it works
+ The pipeline consists of four main stages: Sensitivity Calculation, Clustering, QA Fine-tuning, and Encoding [S1]. It combines Gaussian pruning, SH distillation, VQ for SH coefficients and colors, and FP16 quantization [S2].
+ 
+-**Inputs:** Trained 3D Gaussian model (positions $\mathbf{p}$, opacities $\alpha$, colors $\mathbf{c}$, covariances $\mathbf{\Sigma}$, SH coefficients $\mathbf{C}$).
+-**Outputs:** Compressed scene representation (pruned Gaussians, codebook indices, quantized parameters).
++**Inputs:** Trained 3D Gaussian model (positions $\mathbf{p}$, opacities $\alpha$, colors $\mathbf{c}$, covariances $\mathbf{\Sigma}$, SH coefficients $\mathbf{C}$) [S1, S2].
++**Outputs:** Compressed scene representation (pruned Gaussians, codebook indices, quantized parameters) [S1, S2].
+ 
+ **Data Structures:**
+@@ -64,45 +64,75 @@
+ ```python
+ def compress_3dgs(model):
+-    # model contains positions, opacities, covariances, SH coefficients, colors
+-    
++    # Inputs: model with positions, opacities, covariances, SH coefficients, colors
+     # Step 1: Sensitivity Calculation
+-    beta_c = calculate_sensitivity(model.sh_coeffs)
+-    beta_g = calculate_sensitivity(model.shape_params)
+-    
+-    # Step 2: Iterative Pruning
+-    current_gaussians = model.gaussians
+-    while current_gaussians.count > target_count:
+-        # Prune low-contribution Gaussians
+-        current_gaussians = prune_gaussians(current_gaussians, threshold=beta_c)
+-        # Fine-tune to recover quality
+-        current_gaussians = fine_tune(current_gaussians, model.train_data, lr=0.001)
+-        
+-    # Step 3: Progressive SH Reduction
++    beta_c = compute_sensitivity(model.sh_coeffs)
++    beta_g = compute_sensitivity(model.shape_params)
++
++    # Step 2: Iterative Pruning with Intermediate Fine-tuning
++    gaussians = model.gaussians
++    while gaussians.count > target_count:
++        gaussians = prune_by_contribution(gaussians, threshold=beta_c)
++        gaussians = fine_tune(gaussians, model.train_data, lr=0.001)
++
++    # Step 3: Progressive SH-Degree Reduction via Iterative Distillation
+     current_sh_degree = model.sh_degree
+     while current_sh_degree > target_sh_degree:
+-        # Distill from current_sh_degree to current_sh_degree - 1
+-        current_gaussians = distill_sh(current_gaussians, current_sh_degree, current_sh_degree - 1)
++        gaussians = distill_sh_degree(gaussians, current_sh_degree, current_sh_degree - 1)
+         current_sh_degree -= 1
+-        # Fine-tune after distillation
+-        current_gaussians = fine_tune(current_gaussians, model.train_data, lr=0.001)
+-        
+-    # Step 4: Clustering and VQ
+-    # Cluster SH coefficients and colors
+-    color_codebook, color_indices = cluster_and_quantize(current_gaussians.sh_coeffs, current_gaussians.colors, codebook_size=color_codebook_size)
+-    
+-    # Cluster shape parameters
+-    shape_codebook, shape_indices = cluster_and_quantize(current_gaussians.shape_params, codebook_size=shape_codebook_size)
+-    
+-    # Update Gaussians with indices
+-    current_gaussians.sh_indices = color_indices
+-    current_gaussians.shape_indices = shape_indices
+-    
++        gaussians = fine_tune(gaussians, model.train_data, lr=0.001)
++
++    # Step 4: Clustering and Vector Quantization (VQ)
++    color_codebook, color_indices = kmeans_cluster(model.sh_coeffs + model.colors, size=color_codebook_size)
++    shape_codebook, shape_indices = kmeans_cluster(model.shape_params, size=shape_codebook_size)
++    gaussians.sh_indices = color_indices
++    gaussians.shape_indices = shape_indices
++
+     # Step 5: QA Fine-tuning
+-    current_gaussians = qa_fine_tune(current_gaussians, model.train_data, codebooks=[color_codebook, shape_codebook])
+-    
++    gaussians = qa_fine_tune(gaussians, model.train_data, codebooks=[color_codebook, shape_codebook])
++
+     # Step 6: Encoding
+-    compressed_data = encode(current_gaussians, color_codebook, shape_codebook, encoding='entropy_run_length_morton')
+-    
++    compressed_data = encode_morton_rle(gaussians, color_codebook, shape_codebook)
++    compressed_data = quantize_fp16(compressed_data)
+     return compressed_data
++
++def compute_sensitivity(params):
++    # [S1] Calculate sensitivity thresholds beta_c and beta_g
++    # [G] Standard metric: variance of rendering contribution or gradient magnitude
++    return threshold_value
++
++def prune_by_contribution(gaussians, threshold):
++    # [G] Remove Gaussians with opacity/contribution below threshold
++    return [g for g in gaussians if g.contribution > threshold]
++
++def fine_tune(gaussians, train_data, lr):
++    # [G] Standard differentiable rendering optimization loop
++    for epoch in range(num_epochs):
++        # Render scene, compute loss against train_data, backpropagate
++        pass
++    return gaussians
++
++def distill_sh_degree(gaussians, high_deg, low_deg):
++    # [S2] Distill representation from high_deg to low_deg
++    # [G] Train low-degree SH coefficients to match high-degree rendering output
++    return gaussians
++
++def kmeans_cluster(data, size):
++    # [G] Standard K-Means clustering to build codebook
++    centroids, indices = standard_kmeans(data, size)
++    return centroids, indices
++
++def qa_fine_tune(gaussians, train_data, codebooks):
++    # [S1] Regain information lost during quantization
++    # [G] Fine-tune with quantization-aware training (simulate quantization during forward pass)
++    return fine_tune(gaussians, train_data, lr=0.001)
++
++def encode_morton_rle(gaussians, color_codebook, shape_codebook):
++    # [S1] Apply entropy and run-length encoding combined with Morton order layout
++    # [G] Sort indices by Morton order, apply run-length and entropy encoding
++    return compressed_data
++
++def quantize_fp16(data):
++    # [S2] Quantize remaining parameters to FP16
++    return data.astype(np.float16)
+ ```
+ 
+@@ -149,5 +179,5 @@
+ **Performance on Intel UHD Graphics 11 (1080p):**
+ *   Bicycle: Baseline 9/16/23 FPS, Compressed 23 FPS [S1].
+-*   Bonsai: Baseline 28/28/28 FPS, Compressed 28 FPS [S1].
++*   Bonsai (1.2M Gaussians): Baseline 9/16/23 FPS, Compressed 28/28/28 FPS [S1].
+ 
+ **Performance on AMD Radeon R9 380 (1080p):**

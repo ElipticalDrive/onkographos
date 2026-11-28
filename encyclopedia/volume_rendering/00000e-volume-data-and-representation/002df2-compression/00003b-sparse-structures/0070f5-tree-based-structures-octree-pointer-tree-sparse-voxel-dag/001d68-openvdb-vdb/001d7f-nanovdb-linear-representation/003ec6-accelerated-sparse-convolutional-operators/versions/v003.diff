@@ -1,0 +1,149 @@
+--- v002.md
++++ v003.md
+@@ -7,13 +7,13 @@
+ 
+ ## How it works
+-The method implements three distinct kernel strategies based on the sparsity pattern and feature depth of the input data. The operators take a minibatch of sparse voxel grids (GridBatch) and per-voxel features (JaggedTensor) as input, and produce convolved feature maps as output [S1].
++The method implements three distinct kernel strategies based on the sparsity pattern and feature depth of the input data [S1]. The operators take a minibatch of sparse voxel grids (GridBatch) and per-voxel features (JaggedTensor) as input, and produce convolved feature maps as output [S1].
+ 
+ ### Data Structures
+ The input data is structured using the **JaggedTensor** class, which encodes a minibatch of sparse voxel grids where each grid may have a different number of voxels [S1]. A JaggedTensor consists of three contiguous memory buffers [S1]:
+-1.  **jdata**: A tensor of shape $[N, D]$, where $N = \sum_{i=1}^{k} n_i$ is the total number of active voxels across all $k$ grids, and $D$ is the feature dimension. This is the concatenation of all per-grid feature tensors.
+-2.  **joffsets**: A tensor of shape $[k, 2]$. For each grid $i$, `joffsets[i, :]` stores the start and end indices in `jdata` corresponding to that grid's voxels.
+-3.  **jidx**: A tensor of shape $[N]$. For each element $j$ in `jdata`, `jidx[j]` stores the index of the grid (from $0$ to $k-1$) that contains that voxel.
++1. **jdata**: A tensor of shape $[N, D]$, where $N = \sum_{i=1}^{k} n_i$ is the total number of active voxels across all $k$ grids, and $D$ is the feature dimension [S1]. This is the concatenation of all per-grid feature tensors [S1].
++2. **joffsets**: A tensor of shape $[k, 2]$ [S1]. For each grid $i$, `joffsets[i, :]` stores the start and end indices in `jdata` corresponding to that grid's voxels [S1].
++3. **jidx**: A tensor of shape $[N]$ [S1]. For each element $j$ in `jdata`, `jidx[j]` stores the index of the grid (from $0$ to $k-1$) that contains that voxel [S1].
+ 
+-The NanoVDB structure provides the spatial mapping. Active voxels are stored with linear indices that exhibit strong spatial locality [S1].
++The NanoVDB structure provides the spatial mapping [S1]. Active voxels are stored with linear indices that exhibit strong spatial locality [S1].
+ 
+ ### Kernel Strategies
+@@ -22,75 +22,78 @@
+ Used when the input feature depth is shallow (e.g., width 8) and leaf node occupancy is $\ge 20\%$ [S1].
+ 
+-1.  **Shared Memory Allocation**: Allocate shared memory for an input window of size $10 \times 10 \times 10$ straddling the $8 \times 8 \times 8$ leaf node, including a 1-voxel halo. For FP32/TF32 data with feature width 8, this footprint is 31.25 KB [S1]. Allocate an output buffer of $8 \times 8 \times 8$ with 16-wide feature vectors (32 KB) [S1].
+-2.  **Thread Mapping**: Subdivide the $8 \times 8 \times 8$ local domain into 32 subtiles of size $8 \times 2 \times 1$. Assign each subtile to a warp (1024 total threads) [S1].
+-3.  **Computation**: Within each warp, use 16x16x8 WMMA tensor core GEMMs (TF32 precision with FP32 accumulate) to apply each of the 27 stencil spokes [S1].
+-4.  **Writeback**: Write the convolution result to global memory. Since active indices within a leaf node are sequentially indexed, the writeback occurs on a fully sequential memory range [S1].
++1. **Shared Memory Allocation**: Allocate shared memory for an input window of size $10 \times 10 \times 10$ straddling the $8 \times 8 \times 8$ leaf node, including a 1-voxel halo [S1]. For FP32/TF32 data with feature width 8, this footprint is 31.25 KB [S1]. Allocate an output buffer of $8 \times 8 \times 8$ with 16-wide feature vectors (32 KB) [S1].
++2. **Thread Mapping**: Subdivide the $8 \times 8 \times 8$ local domain into 32 subtiles of size $8 \times 2 \times 1$ [S1]. Assign each subtile to a warp (1024 total threads) [S1].
++3. **Computation**: Within each warp, use 16x16x8 WMMA tensor core GEMMs (TF32 precision with FP32 accumulate) to apply each of the 27 stencil spokes [S1].
++4. **Writeback**: Write the convolution result to global memory [S1]. Since active indices within a leaf node are sequentially indexed, the writeback occurs on a fully sequential memory range [S1].
+ 
+ #### Scenario 2: High local occupancy (Brick)
+ Used when the domain is macroscopically sparse but locally dense (average active neighbors > 70-80%) and feature depth is moderate-to-high (32 or higher) [S1].
+ 
+-1.  **Window Definition**: Focus on a narrower $4 \times 2 \times 2$ output window. Fetch input activations on-demand from a $6 \times 4 \times 4$ window including a 1-voxel halo [S1].
+-2.  **Implementation**: Use a custom tensor core implementation via the CuTe library [S1].
+-3.  **Performance**: Achieves >70% peak compute bandwidth for feature depths 32-64, and >90% for depths $\ge 128$ [S1]. Outperforms SpConv v2 for occupancy patterns exceeding 60-70% [S1].
++1. **Window Definition**: Focus on a narrower $4 \times 2 \times 2$ output window [S1]. Fetch input activations on-demand from a $6 \times 4 \times 4$ window including a 1-voxel halo [S1].
++2. **Implementation**: Use a custom tensor core implementation via the CuTe library [S1].
++3. **Performance**: Achieves >70% peak compute bandwidth for feature depths 32-64, and >90% for depths $\ge 128$ [S1]. Outperforms SpConv v2 for occupancy patterns exceeding 60-70% [S1].
+ 
+ #### Scenario 3: Highly sparse topology, high feature depth (LGGS)
+ Used when occupancy is very sparse (average active neighbors $\le 4-5$ out of 26) and feature depth is high ($\ge 128$) [S1]. Standard gather-GEMM-scatter underperforms due to multiple streaming passes and scattering overhead [S1].
+ 
+-1.  **Blocking**: Block the operation on a contiguous subsequence of output indices from the NanoVDB structure, typically 64 indices at a time [S1]. Due to NanoVDB locality, these indices correspond to geometrically clustered coordinates [S1].
+-2.  **Shared Memory Scatter**: Instead of scattering directly to global memory, use a temporary buffer in GPU shared memory as the destination for scatter operations on these 64 indices [S1].
+-3.  **Accumulation**: Collect the contribution of each of the 27 stencil offsets within this shared memory block before writing back [S1].
++1. **Blocking**: Block the operation on a contiguous subsequence of output indices from the NanoVDB structure, typically 64 indices at a time [S1]. Due to NanoVDB locality, these indices correspond to geometrically clustered coordinates [S1].
++2. **Shared Memory Scatter**: Instead of scattering directly to global memory, use a temporary buffer in GPU shared memory as the destination for scatter operations on these 64 indices [S1].
++3. **Accumulation**: Collect the contribution of each of the 27 stencil offsets within this shared memory block before writing back [S1].
+ 
+ ### Pseudocode
+-The following pseudocode illustrates the general flow for Scenario 1 (Leaf Node), which is the most explicitly defined kernel in the sources.
++The following pseudocode illustrates the general flow for Scenario 1 (Leaf Node), which is the most explicitly defined kernel in the sources [S1].
+ 
+ ```python
+-# Assumptions:
+-# - leaf_node: An 8x8x8 block of active voxels.
+-# - input_features: JaggedTensor containing feature data.
+-# - output_features: JaggedTensor for results.
+-# - stencil_offsets: List of 27 relative 3D coordinates for the convolution kernel.
++def convolve_leaf_node(leaf_coords, input_features, output_features, feature_width, stencil_offsets):
++    # Inputs: leaf_coords (list of 8x8x8 active voxel indices),
++    # input_features (dict mapping global_idx to feature vector),
++    # output_features (dict for results), feature_width (int),
++    # stencil_offsets (list of 27 relative 3D coordinates)
+ 
+-def convolve_leaf_node(leaf_node, input_features, output_features):
+     # 1. Shared Memory Allocation
+-    # Input window: 10x10x10 (straddling 8x8x8 leaf + 1-voxel halo)
+-    shared_input = allocate_shared_memory((10, 10, 10, feature_width))
+-    # Output buffer: 8x8x8 with 16-wide vectors
+-    shared_output = allocate_shared_memory((8, 8, 8, 16))
++    # Input window: 10x10x10 straddling 8x8x8 leaf + 1-voxel halo
++    shared_input = [[[ [0.0] * feature_width for _ in range(10) ] for _ in range(10)] for _ in range(10)]
++    # Output buffer: 8x8x8 with feature_width vectors
++    shared_output = [[[ [0.0] * feature_width for _ in range(8) ] for _ in range(8)] for _ in range(8)]
+ 
+     # 2. Load Input into Shared Memory
+-    # Fetch activations from global memory based on leaf node coordinates
+-    # and halo neighbors.
+-    for x in range(-1, 9):
+-        for y in range(-1, 9):
+-            for z in range(-1, 9):
+-                global_idx = get_global_index(leaf_node, x, y, z)
+-                if global_idx is valid:
+-                    shared_input[x+1, y+1, z+1, :] = input_features[global_idx]
+-                else:
+-                    shared_input[x+1, y+1, z+1, :] = 0.0
++    for lx, ly, lz in leaf_coords:
++        si, sj, sk = lx + 1, ly + 1, lz + 1  # Offset by 1 for halo
++        global_idx = lx + ly * 8 + lz * 64   # Linear index for 8x8x8 block
++        if global_idx in input_features:
++            shared_input[si][sj][sk] = input_features[global_idx]
++        else:
++            shared_input[si][sj][sk] = [0.0] * feature_width
+ 
+     # 3. Thread Mapping
+-    # 32 subtiles of 8x2x1 assigned to warps
+-    subtile_id = get_subtile_id() # 0 to 31
+-    warp_threads = get_warp_threads()
+-
+-    # 4. Tensor Core GEMM Execution
+-    # Apply 27 stencil spokes using WMMA
+-    for spoke_idx in range(27):
+-        offset = stencil_offsets[spoke_idx]
+-        # Perform 16x16x8 WMMA GEMM on shared_input shifted by offset
+-        # Accumulate into shared_output
+-        wmma_gemm(shared_input, shared_output, offset, precision='TF32', accumulate='FP32')
++    # Subdivide 8x8x8 domain into 32 subtiles of size 8x2x1
++    # Assign each subtile to a warp (1024 total threads)
++    # (Exact subtile-to-warp mapping is implementation-specific [G])
++    for subtile_id in range(32):
++        # 4. Tensor Core GEMM Execution
++        # Apply each of the 27 stencil spokes using 16x16x8 WMMA tensorcore GEMMs
++        # (TF32 precision with FP32 accumulate)
++        for spoke_idx in range(27):
++            dx, dy, dz = stencil_offsets[spoke_idx]
++            # Perform GEMM on shared_input shifted by (dx, dy, dz)
++            # Accumulate result into shared_output
++            for i in range(8):
++                for j in range(8):
++                    acc = [0.0] * feature_width
++                    for k in range(8):
++                        # Convolution accumulation step
++                        acc = [a + b * c for a, b, c in zip(acc, shared_input[i+dx+1][j+dy+1][k+dz+1], shared_input[i+dx+1][j+dy+1][k+dz+1])]
++                    shared_output[i][j][k] = acc
+ 
+     # 5. Writeback
+-    # Write shared_output to global memory sequentially
+-    for x in range(8):
+-        for y in range(8):
+-            for z in range(8):
+-                global_out_idx = get_global_output_index(leaf_node, x, y, z)
+-                output_features[global_out_idx] = shared_output[x, y, z, :]
++    # Write convolution result to global memory on a fully sequential memory range
++    for lx in range(8):
++        for ly in range(8):
++            for lz in range(8):
++                global_out_idx = lx + ly * 8 + lz * 64
++                output_features[global_out_idx] = shared_output[lx][ly][lz]
+ ```
+ 
+-For Scenario 3, the pseudocode would replace the dense shared memory load with a gather phase, block the output indices into chunks of 64, and use shared memory for intermediate scattering accumulation.
++For Scenario 3, the implementation replaces the dense shared memory load with a gather phase, blocks the output indices into chunks of 64, and uses shared memory for intermediate scattering accumulation [S1].
+ 
+ ## Subtopics

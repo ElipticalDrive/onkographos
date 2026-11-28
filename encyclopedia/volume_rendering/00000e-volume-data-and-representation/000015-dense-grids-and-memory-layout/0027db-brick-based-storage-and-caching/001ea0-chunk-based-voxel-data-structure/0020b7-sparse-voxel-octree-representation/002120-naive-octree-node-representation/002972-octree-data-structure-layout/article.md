@@ -1,0 +1,119 @@
+# Octree Data Structure Layout
+
+Also called: Octree Class Layout
+
+## Overview
+This article defines the memory layout and class structure for a naive octree representation, organizing hierarchical volumetric data in contiguous memory while maintaining bounding box metadata and voxel attributes [S1, unofficial]. It differs from its parent [Naive Octree Node Representation](2445-naive-octree-node-representation.md) by explicitly defining the container class fields (`min`, `max`, `size`, `gridlength`) and the storage mechanism (`std::vector<Node>`), and it differs from its sibling [Bitmask Leaf Compression](3603-bitmask-leaf-compression.md) by storing full node structures rather than compressing leaf status into bitmasks [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+*   **Input**: None (structural definition).
+*   **Output**: An in-memory representation of the octree hierarchy and associated voxel data.
+
+### Data Structures
+The `Octree` class maintains the following fields [S1, unofficial]:
+
+1.  **Bounding Box and Grid Metadata**:
+    *   `vec3 min`: The minimum coordinate of the root bounding box.
+    *   `vec3 max`: The maximum coordinate of the root bounding box.
+    *   `vec3 size`: The dimensions of the root bounding box (`max - min`).
+    *   `size_t gridlength`: The resolution of the finest level (number of voxels per side).
+2.  **Statistics**:
+    *   `size_t n_nodes`: Count of allocated nodes.
+    *   `size_t n_data`: Count of allocated voxel data elements.
+3.  **Data Storage**:
+    *   `VoxelData* data`: A pointer to a contiguous array storing voxel attributes (e.g., color, density).
+    *   `std::vector<Node> nodes`: A contiguous vector storing the octree nodes.
+
+**Node Layout**:
+The `Node` structure contains pointers or indices to 8 children, a pointer to `VoxelData` for leaf nodes, and a traversal state flag `nextchild` [G].
+
+### Initialization
+The default constructor initializes the class fields: `min` to $(0, 0, 0)$, `max` to $(1, 1, 1)$, `size` to $(1, 1, 1)$, and `gridlength` to 128 [S1, unofficial].
+
+### Accessing the Root
+The root node is stored at the end of the `nodes` vector. `getRootNode()` returns `&nodes.back()` [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Vec3:
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+
+class VoxelData:
+    """Placeholder for voxel attributes (e.g., color, density)."""
+    pass
+
+class Node:
+    def __init__(self):
+        self.children = [None] * 8  # 8 children for an octree
+        self.data = None            # Pointer to VoxelData if leaf
+        self.nextchild = 0          # Traversal state: which child to visit next
+
+class Octree:
+    def __init__(self):
+        # Bounding box and grid metadata
+        self.min = Vec3(0, 0, 0)
+        self.max = Vec3(1, 1, 1)
+        self.size = Vec3(1, 1, 1)
+        self.gridlength = 128
+        
+        # Statistics
+        self.n_nodes = 0
+        self.n_data = 0
+        
+        # Data storage
+        self.data = None  # Pointer to voxel data array
+        self.nodes = []   # Vector of Node objects
+        
+        # Initialize root node
+        root = Node()
+        self.nodes.append(root)
+        self.n_nodes = 1
+
+    def get_root_node(self):
+        """Returns the root node, stored at the back of the nodes vector."""
+        return self.nodes[-1]
+```
+
+### Edge Cases and Pitfalls
+*   **Memory Contiguity**: Storing nodes in a `std::vector` provides cache locality but requires reallocation if the vector grows. Pointers to nodes must be managed carefully during reallocation (e.g., using indices instead of raw pointers, or ensuring the vector is reserved) [G].
+*   **Root Position**: The root is at the end of the vector, accessed via `back()` rather than `front()` [S1, unofficial].
+*   **Precision**: When calculating bounding box subdivisions, floating-point precision errors can accumulate, especially at high depths [G].
+
+## Subtopics
+
+### [Octree Voxel Storage](6922-octree-voxel-storage.md)
+Octree Voxel Storage is a hierarchical data structure used to store voxel data efficiently by grouping adjacent voxels of the same type into larger cells, reducing memory usage for sparse or uniform regions compared to flat arrays. It differs from flat arrays by trading $O(1)$ direct access for logarithmic traversal time to save space, and differs from instancing by allowing the culling of hidden faces and merging of coplanar geometry rather than rendering all cubes regardless of occlusion.
+
+### [Octree Memory Size Calculation](11035-octree-memory-size-calculation.md)
+Calculates the maximum memory footprint of a 100% dense octree by summing the number of nodes at every level up to the maximum depth and multiplying by the size of a single octant. It serves as an upper bound for buffer allocation in naive octree implementations where the tree is guaranteed to be fully populated. Unlike sparse counting methods, this method assumes every possible node exists, ignoring sparsity.
+
+### [Sparse Voxel Octree Memory Management](11151-sparse-voxel-octree-memory-management.md)
+This method manages the memory of a Sparse Voxel Octree (SVO) using a flat array and free lists to handle dynamic allocation and deallocation of branch nodes and attributes. It solves the problem of efficient memory reuse in dynamic octrees where nodes are frequently created and destroyed during refinement and coarsening operations. Unlike pointer-based trees, this approach minimizes fragmentation and cache misses by reusing contiguous memory blocks, distinguishing it from pointer-free index-based layouts.
+
+### [OctreeVoxelGrid](14633-octreevoxelgrid.md)
+OctreeVoxelGrid is a sparse, multi-resolution voxel data structure that implements the `VoxelGrid` protocol, allowing it to replace uniform grids in existing engine code without modification. It solves the memory inefficiency of dense grids for sparse scenes by storing only active regions, achieving $O(\text{active cells} \times \text{layers})$ memory complexity instead of $O(\text{grid}^3)$. It distinguishes itself from sibling structures by supporting dynamic refinement/coarsening policies and inheriting parent values to children upon split to avoid interpolation artifacts at refinement boundaries.
+
+### [Sparse Voxel Octree Node Structure](14721-sparse-voxel-octree-node-structure.md)
+The Sparse Voxel Octree (SVO) node structure defines the memory layout, connectivity, and state management for individual nodes within a sparse voxel octree. It solves the problem of efficiently representing volumetric data by storing only occupied regions, using spatial bounds, parent/child links, and directional neighbor pointers to enable fast traversal and ray casting. Unlike static octrees, this implementation dynamically splits leaves when a minimum dimension threshold is reached and merges identical children via simplification, reducing memory overhead for uniform regions. It builds on the general [Octree Data Structure Layout](4518-octree-data-structure-layout.md) by specifying concrete field types and operational semantics for node mutation.
+
+## Operating characteristics
+*   **Memory Complexity**: The memory usage scales with the number of active nodes. In the worst case (100% dense), the footprint is proportional to the sum of powers of 8 up to the maximum depth. For sparse data, memory usage is significantly lower, proportional to the number of allocated nodes [S1, unofficial].
+*   **Access Time**: Accessing a specific voxel requires traversing the octree from the root to the leaf, resulting in $O(d)$ time complexity, where $d$ is the tree depth [G].
+*   **Strengths**: Contiguous `std::vector` storage improves cache locality during traversal. Hierarchical structure enables efficient spatial culling and level-of-detail rendering.
+*   **Limitations**: Traversal overhead exceeds flat arrays. Vector reallocation can invalidate pointers if not managed via indices or reservation. Floating-point precision limits subdivision accuracy at extreme depths [G].
+*   **When to use**: Ideal for sparse volumetric scenes where memory savings outweigh traversal costs and dynamic refinement is required.
+*   **When not to use**: Unsuitable for fully dense, uniformly sampled volumes where flat arrays provide $O(1)$ access and better cache throughput.
+
+## Background
+The octree data structure layout described here is based on implementations found in open-source projects for CPU-based voxel raycasting and sparse voxel octree generation. The specific layout with the root node at the end of the vector is documented in the `cpu_voxel_raycaster` project [S1, unofficial].
+
+## Sources
+[S1] Forceflow/cpu_voxel_raycaster, https://github.com/Forceflow/cpu_voxel_raycaster, fetched 2026-10-24 (unofficial)
+[S2] Procedural approach to volumetric terrain generation, https://zenodo.org/records/18429902, fetched 2026-10-27
+[S3] Adaptive-resolution octree-based volumetric SLAM, https://www.doc.ic.ac.uk/~sleutene/publications/Vespa_3DV19.pdf, fetched 2026-10-29

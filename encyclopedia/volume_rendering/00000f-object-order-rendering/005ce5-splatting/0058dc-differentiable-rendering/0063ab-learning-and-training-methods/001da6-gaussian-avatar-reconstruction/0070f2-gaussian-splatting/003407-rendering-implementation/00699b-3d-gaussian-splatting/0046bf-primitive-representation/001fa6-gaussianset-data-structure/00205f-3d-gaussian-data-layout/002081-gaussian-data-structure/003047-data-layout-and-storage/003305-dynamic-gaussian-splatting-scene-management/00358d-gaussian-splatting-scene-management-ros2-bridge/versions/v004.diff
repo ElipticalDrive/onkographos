@@ -1,0 +1,219 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method manages the dynamic lifecycle of 3D Gaussian splats within a rendering pipeline, bridging incoming data to the GPU renderer. It solves the problem of real-time scene updates by queuing incoming Gaussian batches and efficiently draining them to the renderer state. It differs from static loading by enabling continuous, batched updates without full re-initialization [S1, unofficial].
++This method manages the dynamic lifecycle of 3D Gaussian splats within a rendering pipeline, bridging incoming data to the GPU renderer [S1, unofficial]. It solves the problem of real-time scene updates by queuing incoming Gaussian batches and efficiently draining them to the renderer state [S1, unofficial]. It differs from static loading by enabling continuous, batched updates without full re-initialization [S1, unofficial].
+ 
+ ## How it works
+@@ -35,5 +35,5 @@
+ 1. **ROS Message Conversion:**
+    - If input is `SingleGaussian`: Extract `xyz` (1x3), `rotation` (1x4), `scale` (1x3), `opacity` (1x1, normalized by dividing by 255.0), and `spherical_harmonics` (1xN) [S1, unofficial].
+-   - If input is `GaussianArray`: Validate all messages have identical SH dimension `sh_dim`. If `sh_dim == 0`, raise `ValueError`. Allocate arrays of shape `(count, 3)`, `(count, 4)`, `(count, 3)`, `(count, 1)`, `(count, sh_dim)`. Fill arrays by iterating messages [S1, unofficial].
++   - If input is `GaussianArray`: Validate all messages have identical SH dimension `sh_dim` [S1, unofficial]. If `sh_dim == 0`, raise `ValueError`. Allocate arrays of shape `(count, 3)`, `(count, 4)`, `(count, 3)`, `(count, 1)`, `(count, sh_dim)` [S1, unofficial]. Fill arrays by iterating messages [S1, unofficial].
+    - Pack data into a `batch` structure compatible with `append_gaussians` [S1, unofficial].
+ 
+@@ -41,9 +41,9 @@
+    - Acquire `_pending_lock` [S1, unofficial].
+    - If `refresh` flag is true: Clear `_pending_batches`, set `_gaussian_count` to `batch_count`, and assign `batch` to `gaussian_set` [S1, unofficial].
+-   - Else (append mode): Calculate `available = MAX_GAUSSIANS - _gaussian_count`. If `available <= 0`, return (drop batch). If `batch_count > available`, truncate `batch` to `available` elements across all fields. Increment `_gaussian_count` by `batch_count`. Append `(batch, refresh)` to `_pending_batches`. Set `_full_scene_dirty = False` and `have_new_gaussians = True` [S1, unofficial].
++   - Else (append mode): Calculate `available = MAX_GAUSSIANS - _gaussian_count`. If `available <= 0`, return (drop batch) [S1, unofficial]. If `batch_count > available`, truncate `batch` to `available` elements across all fields [S1, unofficial]. Increment `_gaussian_count` by `batch_count` [S1, unofficial]. Append `(batch, refresh)` to `_pending_batches` [S1, unofficial]. Set `_full_scene_dirty = False` and `have_new_gaussians = True` [S1, unofficial].
+ 
+ 3. **Renderer State Update (`_drain_pending`):**
+    - Get list of pending batches and clear deque [S1, unofficial].
+-   - For each `(batch, refresh)` pair: If `batch` is `None` and `refresh` is true, call `gauss_renderer.reset_gaussians()`. Otherwise, call `gauss_renderer.append_gaussians(batch, refresh=refresh)` [S1, unofficial].
++   - For each `(batch, refresh)` pair: If `batch` is `None` and `refresh` is true, call `gauss_renderer.reset_gaussians()` [S1, unofficial]. Otherwise, call `gauss_renderer.append_gaussians(batch, refresh=refresh)` [S1, unofficial].
+    - If no pending batches but `full_update` or `_full_scene_dirty` is true: If `gaussian_set` is `None` or empty, call `reset_gaussians()`, else call `update_gaussian_data(gaussian_set, full_update=True)` [S1, unofficial].
+    - Apply `scale_modifier`, `render_output`, `sh_degree`, `model_transform`, `camera_pose`, `camera_intrin`, and `render_resolution` to the renderer [S1, unofficial].
+@@ -88,15 +88,9 @@
+     shape: List[int]
+ 
+-@dataclass
+-class SingleGaussian:
+-    xyz: List[float]
+-    rotation: List[float]
+-    scale: List[float]
+-    opacity: float
+-    spherical_harmonics: List[float]
+-
+-@dataclass
+-class GaussianArray:
+-    messages: List[SingleGaussian]
++def view_1d(pointer: int, count: int, channels: int) -> TorchTensorView:
++    return TorchTensorView(pointer, 4, [count, channels])
++
++def view_2d(pointer: int, rows: int, columns: int, channels: int) -> TorchTensorView:
++    return TorchTensorView(pointer, 4, [rows, columns, channels])
+ 
+ class GaussianSceneManager:
+@@ -109,5 +103,4 @@
+         self.gaussian_set: Optional[Dict[str, Any]] = None
+         self.lock = threading.Lock()
+-        self.renderer = None
+         self.scale_modifier = 1.0
+         self.render_output = 0
+@@ -120,29 +113,31 @@
+         self.output_mode = 0
+         self.requested_sh_degree = -1
++        self.width = 0
++        self.height = 0
++        self.camera_ready = False
++        self.engine_state = type('obj', (object,), {
++            'cur_num_splats': 0, 'max_num_splats': 0, 'num_sh': 0, 'sh_degree': 0,
++            'world': type('obj', (object,), {'means': None, 'quats': None, 'scales': None,
++                                             'opacities': None, 'features_dc': None, 'features_sh': None,
++                                             'initialized': False})()
++        })()
+ 
+     def process_ros_message(self, message: Any) -> Optional[Dict[str, Any]]:
+         if isinstance(message, SingleGaussian):
+             return {
+-                'means': [message.xyz],
+-                'quats': [message.rotation],
+-                'scales': [message.scale],
+-                'opacities': [message.opacity / 255.0],
+-                'features_sh': [message.spherical_harmonics]
++                'means': [message.xyz], 'quats': [message.rotation], 'scales': [message.scale],
++                'opacities': [message.opacity / 255.0], 'features_sh': [message.spherical_harmonics]
+             }
+         elif isinstance(message, GaussianArray):
+-            if not message.messages:
+-                return None
++            if not message.messages: return None
+             sh_dim = len(message.messages[0].spherical_harmonics)
+-            if sh_dim == 0:
+-                raise ValueError("SH dimension cannot be 0")
++            if sh_dim == 0: raise ValueError("SH dimension cannot be 0")
+             count = len(message.messages)
+-            means = [msg.xyz for msg in message.messages]
+-            quats = [msg.rotation for msg in message.messages]
+-            scales = [msg.scale for msg in message.messages]
+-            opacities = [msg.opacity / 255.0 for msg in message.messages]
+-            features_sh = [msg.spherical_harmonics for msg in message.messages]
+             return {
+-                'means': means, 'quats': quats, 'scales': scales,
+-                'opacities': opacities, 'features_sh': features_sh
++                'means': [msg.xyz for msg in message.messages],
++                'quats': [msg.rotation for msg in message.messages],
++                'scales': [msg.scale for msg in message.messages],
++                'opacities': [msg.opacity / 255.0 for msg in message.messages],
++                'features_sh': [msg.spherical_harmonics for msg in message.messages]
+             }
+         return None
+@@ -156,6 +151,5 @@
+             else:
+                 available = self.max_gaussians - self.gaussian_count
+-                if available <= 0:
+-                    return
++                if available <= 0: return
+                 batch_count = len(batch['means'])
+                 if batch_count > available:
+@@ -174,41 +168,40 @@
+         for batch, refresh in batches:
+             if batch is None and refresh:
+-                self.renderer.reset_gaussians()
++                # Renderer-specific: gauss_renderer.reset_gaussians()
++                pass
+             else:
+-                self.renderer.append_gaussians(batch, refresh=refresh)
++                # Renderer-specific: gauss_renderer.append_gaussians(batch, refresh=refresh)
++                pass
+         if not batches and (self.full_scene_dirty or self.full_update):
+             if self.gaussian_set is None or len(self.gaussian_set['means']) == 0:
+-                self.renderer.reset_gaussians()
++                # Renderer-specific: reset_gaussians()
++                pass
+             else:
+-                self.renderer.update_gaussian_data(self.gaussian_set, full_update=True)
+-        self.renderer.apply_settings(
+-            scale_modifier=self.scale_modifier,
+-            render_output=self.render_output,
+-            sh_degree=self.sh_degree,
+-            model_transform=self.model_transform,
+-            camera_pose=self.camera_pose,
+-            camera_intrin=self.camera_intrin,
+-            render_resolution=self.render_resolution
+-        )
++                # Renderer-specific: update_gaussian_data(gaussian_set, full_update=True)
++                pass
++        # Renderer-specific: apply_settings(scale_modifier, render_output, sh_degree, model_transform, camera_pose, camera_intrin, render_resolution)
+         self.full_scene_dirty = False
+         self.have_new_gaussians = bool(self.pending_batches)
+ 
+     def bind_scene(self, scene: Dict[str, Any]) -> None:
+-        self.engine.state.cur_num_splats = scene['count']
+-        self.engine.state.max_num_splats = scene['capacity']
+-        self.engine.state.num_sh = scene['num_sh']
+-        self.engine.state.sh_degree = scene['sh_degree']
+-        self.engine.state.world.means = view_1d(scene['means'], scene['capacity'], 3)
+-        self.engine.state.world.quats = view_1d(scene['quats'], scene['capacity'], 4)
+-        self.engine.state.world.scales = view_1d(scene['scales'], scene['capacity'], 3)
+-        self.engine.state.world.opacities = view_1d(scene['opacities'], scene['capacity'], 1)
+-        self.engine.state.world.features_dc = view_1d(scene['features_dc'], scene['capacity'], 3)
++        self.engine_state.cur_num_splats = scene['count']
++        self.engine_state.max_num_splats = scene['capacity']
++        self.engine_state.num_sh = scene['num_sh']
++        self.engine_state.sh_degree = scene['sh_degree']
++        self.engine_state.world.means = view_1d(scene['means'], scene['capacity'], 3)
++        self.engine_state.world.quats = view_1d(scene['quats'], scene['capacity'], 4)
++        self.engine_state.world.scales = view_1d(scene['scales'], scene['capacity'], 3)
++        self.engine_state.world.opacities = view_1d(scene['opacities'], scene['capacity'], 1)
++        self.engine_state.world.features_dc = view_1d(scene['features_dc'], scene['capacity'], 3)
+         if scene['num_sh'] > 0:
+-            self.engine.state.world.features_sh = view_2d(scene['features_sh'], scene['capacity'], scene['num_sh'], 3)
++            self.engine_state.world.features_sh = view_2d(scene['features_sh'], scene['capacity'], scene['num_sh'], 3)
+         else:
+-            self.engine.state.world.features_sh = TorchTensorView(0, 4, [])
+-        self.engine.state.world.initialized = scene['capacity'] > 0
++            self.engine_state.world.features_sh = TorchTensorView(0, 4, [])
++        self.engine_state.world.initialized = scene['capacity'] > 0
+ 
+     def render(self, width: int, height: int, output_buffer: List[int]) -> None:
++        self.width = width
++        self.height = height
++        self.camera_ready = True
+         pixel_count = width * height
+         if len(output_buffer) < pixel_count * 4:
+@@ -222,11 +215,13 @@
+             return
+         render_sh_degree = self.sh_degree if self.requested_sh_degree < 0 else min(self.requested_sh_degree, self.sh_degree)
+-        self.renderer.forward_3dgs("3dgs", render_sh_degree, True)
+-        if self.output_mode == 0:
++        # Renderer-specific: forward_3dgs("3dgs", render_sh_degree, true)
++        pass
++        if self.output_mode == 0: # Color
+             pass
+-        elif self.output_mode == 1:
++        elif self.output_mode == 1: # Depth
+             pass
+-        elif self.output_mode == 2:
+-            transmittance = self.renderer.get_transmittance()
++        elif self.output_mode == 2: # Opacity
++            # Renderer-specific: get_transmittance()
++            transmittance = [0.0] * pixel_count
+             for i in range(pixel_count):
+                 opacity = 1.0 - transmittance[i]
+@@ -235,10 +230,4 @@
+                 output_buffer[i*4+2] = int(opacity * 255)
+                 output_buffer[i*4+3] = 255
+-
+-def view_1d(pointer: int, count: int, channels: int) -> TorchTensorView:
+-    return TorchTensorView(pointer, 4, [count, channels])
+-
+-def view_2d(pointer: int, rows: int, columns: int, channels: int) -> TorchTensorView:
+-    return TorchTensorView(pointer, 4, [rows, columns, channels])
+ ```
+ 
+@@ -249,8 +238,8 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Batch queuing is O(1) amortized. Draining pending batches is O(N) where N is the number of pending batches. Rendering is O(P * G) where P is pixel count and G is Gaussian count, dominated by rasterization [G].
+-- **Memory Complexity:** O(MAX_GAUSSIANS * (3 + 4 + 3 + 1 + 3 + 3*SH_coeffs)) floats. With MAX_GAUSSIANS=50M and SH degree 0, this is ~50M * 14 * 4 bytes ≈ 2.8 GB. Higher SH degrees increase memory linearly [G].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Measured Performance:** Not given in the sources.
+-- **Scaling:** Scales linearly with Gaussian count for memory. Rendering performance depends on rasterization backend efficiency [G].
++- **Scaling:** Not given in the sources.
+ - **Strengths:** Real-time updates via batch queuing; efficient batch processing; flexible SH degree support [S1, unofficial].
+ - **Limitations:** Fixed maximum capacity (50M); potential truncation if queue overflows; requires careful memory management for large scenes [S1, unofficial].

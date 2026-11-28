@@ -1,0 +1,131 @@
+Build a Minecraft-style voxel engine in the browser: chunk-based world, greedy meshing, face culling, and render as a smooth terrain or blocky build.
+
+﻿
+Build a 3D Voxel Engine in WebGL | Tutorials
+Tutorial · Advanced · ~90 min
+Three.js · BufferGeometry · Face Culling
+Build a 3D Voxel Engine in WebGL
+Voxel worlds trace their DNA to Minecraft. This tutorial builds a
+chunk-based voxel engine from scratch: world data model, greedy meshing
+to reduce triangle count by 10×, face-culling so internal faces are
+never drawn, and a Perlin-driven world generator.
+1Chunk data structure
+Divide the infinite world into fixed-size chunks. Each chunk owns a
+flat Uint8Array of voxel IDs (0 = air, 1+ = solid block
+type). Using 16×256×16 (x, y, z) chunks like
+Minecraft keeps data small and re-meshing fast:
+const CX = 16, CY = 256, CZ = 16; // chunk dimensions class Chunk {
+constructor(cx, cz) { this.cx = cx; this.cz = cz; // chunk coordinates
+(world / CX, world / CZ) this.data = new Uint8Array(CX * CY * CZ); //
+all air initially this.mesh = null; } get(x, y, z) { if (x < 0||x >=
+CX||y < 0||y >= CY||z < 0||z >= CZ) return 0; return this.data[y * CX
+* CZ + z * CX + x]; } set(x, y, z, id) { this.data[y * CX * CZ + z *
+CX + x] = id; } } // World maps "cx,cz" strings → Chunk const world =
+new Map();
+2Face culling — only draw visible faces
+A voxel cube has 6 faces. If the adjacent voxel in a given direction
+is solid, that face is completely hidden and should not be emitted:
+const FACES = [ { dir: [1,0,0], corners:
+[[1,0,0],[1,1,0],[1,1,1],[1,0,1]], normal: [ 1,0,0] }, { dir:
+[-1,0,0], corners: [[0,0,1],[0,1,1],[0,1,0],[0,0,0]], normal: [-1,0,0]
+}, { dir: [0,1,0], corners: [[0,1,0],[0,1,1],[1,1,1],[1,1,0]], normal:
+[ 0,1,0] }, { dir: [0,-1,0], corners:
+[[1,0,0],[1,0,1],[0,0,1],[0,0,0]], normal: [ 0,-1,0] }, { dir:
+[0,0,1], corners: [[1,0,1],[1,1,1],[0,1,1],[0,0,1]], normal: [ 0,0,1]
+}, { dir: [0,0,-1], corners: [[0,0,0],[0,1,0],[1,1,0],[1,0,0]],
+normal: [ 0,0,-1] }, ]; function isSolid(chunk, world, x, y, z) { //
+check own chunk then neighbour chunks for border voxels if (x >= 0 &&
+x < CX && z >= 0 && z < CZ) return chunk.get(x, y, z) !== 0; const ncx
+= chunk.cx + (x < 0 ? -1 : x >= CX ? 1 : 0); const ncz = chunk.cz + (z
+< 0 ? -1 : z >= CZ ? 1 : 0); const neighbour =
+world.get(`${ncx},${ncz}`); if (!neighbour) return true; // treat
+missing chunks as solid (prevents gaps) return neighbour.get(((x % CX)
++ CX) % CX, y, ((z % CZ) + CZ) % CZ) !== 0; }
+3Greedy meshing
+Naive meshing emits one quad per visible face — up to 6 quads per
+voxel. Greedy meshing merges adjacent same-type faces
+into a single lager quad, reducing triangle count by 5–15× for typical
+terrain. The algorithm sweeps each axis slice-by-slice:
+// Simplified greedy mesher for the +Y (top) face only function
+greedyMeshTopFaces(chunk, world) { const quads = []; for (let y = 0; y
+< CY; y++) { // Build a 2D mask of top-visible faces at this Y level
+const mask = new Int16Array(CX * CZ); // +voxelID if face visible,
+else 0 for (let z = 0; z < CZ; z++) for (let x = 0; x < CX; x++) {
+const voxel = chunk.get(x, y, z); if (voxel !== 0 && !isSolid(chunk,
+world, x, y+1, z)) mask[z * CX + x] = voxel; } // Greedily merge runs
+for (let z = 0; z < CZ; z++) for (let x = 0; x < CX; ) { const id =
+mask[z * CX + x]; if (!id) { x++; continue; } // Extend in x direction
+let w = 1; while (x + w < CX && mask[z * CX + x + w] === id) w++; //
+Extend in z direction let h = 1; outer: while (z + h < CZ) { for (let
+dx = 0; dx < w; dx++) if (mask[(z+h) * CX + x + dx] !== id) break
+outer; h++; } quads.push({ x, y, z, w, h, id }); // Clear merged area
+for (let dz = 0; dz < h; dz++) for (let dx = 0; dx < w; dx++)
+mask[(z+dz) * CX + x + dx] = 0; x += w; } } return quads; }
+Apply greedy meshing independently for each of the 6 face directions.
+The key invariant: two adjacent faces can be merged only if they have
+the same voxel type, the same face direction, and are both visible.
+4Build BufferGeometry from mesh data
+function buildChunkMesh(chunk, world) { const positions = [], normals
+= [], indices = [], uvs = []; let vertexIndex = 0; for (const { dir,
+corners, normal } of FACES) { for (let y = 0; y < CY; y++) for (let z
+= 0; z < CZ; z++) for (let x = 0; x < CX; x++) { if (!chunk.get(x, y,
+z)) continue; const nx = x + dir[0], ny = y + dir[1], nz = z + dir[2];
+if (isSolid(chunk, world, nx, ny, nz)) continue; // face hidden //
+Emit 4 vertices for (const [cx, cy, cz] of corners) {
+positions.push(x+cx, y+cy, z+cz); normals.push(...normal); }
+uvs.push(0,0, 0,1, 1,1, 1,0); // Two triangles (CW winding)
+indices.push( vertexIndex, vertexIndex+1, vertexIndex+2, vertexIndex,
+vertexIndex+2, vertexIndex+3); vertexIndex += 4; } } const geo = new
+THREE.BufferGeometry(); geo.setAttribute('position', new
+THREE.Float32BufferAttribute(positions, 3));
+geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals,
+3)); geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+geo.setIndex(indices); return new THREE.Mesh(geo, new
+THREE.MeshLambertMaterial({ color: 0x88aa55 })); }
+5Procedural world generation
+// Simple 2D fBm height generator function generateChunk(chunk) { for
+(let z = 0; z < CZ; z++) for (let x = 0; x < CX; x++) { const wx =
+chunk.cx * CX + x; // world X const wz = chunk.cz * CZ + z; // world Z
+const h = Math.floor(fbm(wx / 80, wz / 80) * 60) + 60; for (let y = 0;
+y <= h; y++) { if (y === h) chunk.set(x, y, z, 1); // grass else if (y
+> h - 4) chunk.set(x, y, z, 2); // dirt else chunk.set(x, y, z, 3); //
+stone } // Fill water below y=70 for (let y = h + 1; y <= 70; y++)
+chunk.set(x, y, z, 4); } } function loadChunk(cx, cz) { const key =
+`${cx},${cz}`; if (world.has(key)) return world.get(key); const chunk
+= new Chunk(cx, cz); generateChunk(chunk); world.set(key, chunk); //
+Schedule re-mesh on next frame to avoid frame drops
+dirtyChunks.add(key); return chunk; }
+6Chunk management and streaming
+Only load and render chunks within a configurable render distance of
+the player. Re-mesh dirty chunks one per frame to avoid hitches:
+Render distance: Load chunks within ±8 chunks on X
+and Z. Unload chunks farther than 12.
+Dirty set: When a voxel is edited, add its chunk
+and all 4 face-adjacent chunks to a dirtyChunks Set.
+Process one dirty chunk per frame tick from the set.
+Web Workers: Move generateChunk and
+buildChunkMesh to a worker. Transfer the raw arrays
+back with transferables and call
+geo.setAttribute on the main thread.
+Object pooling: Instead of creating and destroying
+THREE.Mesh objects, maintain a pool and swap
+geometry/materials when a chunk slot is reused.
+A 17×17 chunk render radius (16-chunk view distance) means at most 289
+active chunks. With greedy meshing each chunk averages ~2,000
+triangles — around 578k triangles total, well within desktop GPU
+limits.
+Frequently Asked Questions
+What will I learn in this tutorial?
+Build a Minecraft-style voxel engine in the browser: chunk-based world, greedy meshing, face culling, and render as a smooth terrain or blocky build.
+What topics are covered in this tutorial?
+This tutorial covers: Chunk data structure, Face culling — only draw visible faces, Greedy meshing, Build BufferGeometry from mesh data, Procedural world generation, Chunk management and streaming.
+What tools and technologies does this tutorial use?
+This tutorial uses Three.js, BufferGeometry, Face Culling.
+How long does this tutorial take?
+This tutorial takes approximately 90 minutes to complete.
+What prerequisites do I need before starting?
+This is a Advanced-level tutorial — no special preparation beyond basic JavaScript is assumed.
+Related Tutorials
+Debugging WebGL — DevTools, Spector.js & Profiling
+GPU Game of Life in 50 Lines of GLSL
+RenderTarget & Post-processing in Three.js

@@ -1,0 +1,118 @@
+# NURBS Spline Representation for Measurement Coordinates
+
+Also called: NURBS Spline Representation, NURBS surface for measurement coordinates, NURBS surface optimization for measurement coordinates, Rational B-spline optimization for view angles
+
+## Overview
+This method represents uncertain measurement coordinates (such as view angles, tilt angles, and detector locations) as a NURBS surface whose control points and weights are optimized alongside the volume reconstruction [S1, unofficial]. It differs from implicit neural representations by using fixed-degree spline basis functions with optimized control points, which allows for differentiable coordinate mapping that can be trained end-together with the reconstruction network [S1, unofficial]. It is typically paired with a U-Net reconstruction network $G_\mu(\cdot)$ that maps the NURBS-interpolated coordinates to image space [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Measurement coordinate vector $\mathbf{m} = [\theta', t']^T$ (e.g., view angle and detector location) [S1, unofficial].
+*   Knot vectors for each dimension (non-learnable) [S1, unofficial].
+*   Control point vectors $Q_{u,v}$ (learnable) [S1, unofficial].
+*   Weights $w_{u,v}$ (learnable) [S1, unofficial].
+*   Degrees $d_\Theta, d_T \in \mathbb{Z}^+$ for each dimension [S1, unofficial].
+*   Segment counts $J, K$ per dimension [S1, unofficial].
+
+**Outputs:**
+*   Rational basis function value $b_{j,k}(\mathbf{m})$ used to interpolate control points for coordinate mapping [S1, unofficial].
+
+**Data Structures:**
+*   **Knot Vector:** For a dimension with $J$ segments and degree $d$, the knot vector has $J + d + 1$ elements [S1, unofficial].
+    *   Elements $k_u$ for $0 \le u < d + 1$ are set to 0 [S1, unofficial].
+    *   Elements $k_u$ for $d + 1 \le u \le J$ are uniformly spaced between 0 and 1 [S1, unofficial].
+    *   Elements $k_u$ for $J < u \le J + d$ are set to 1 [S1, unofficial].
+*   **Control Points:** A grid of vectors $Q_{u,v}$ of size $J \times K$ [S1, unofficial].
+*   **Weights:** A grid of scalars $w_{u,v}$ of size $J \times K$ [S1, unofficial].
+
+**Steps:**
+1.  **Construct Knot Vectors:** Create the knot vector for the view angle dimension with $J + d_\Theta + 1$ elements and the detector location dimension with $K + d_T + 1$ elements using the ascending order rule [S1, unofficial].
+2.  **Compute 1D Basis Functions:** Calculate the B-spline basis functions $Q_{u,d_\Theta}(\theta')$ and $Q_{v,d_T}(t')$ using the Cox-de Boor recursion [S1, unofficial].
+3.  **Form Tensor Product:** Compute the rational basis functions $b_{j,k}$ by taking the tensor product of the 1D basis functions weighted by $w_{u,v}$ and normalized by the sum of unweighted basis functions [S1, unofficial].
+4.  **Evaluate Surface:** Compute the rational basis function value $b_{j,k}$ to weight the control points for coordinate interpolation [S1, unofficial].
+
+**Formulas:**
+The rational basis function is defined as [S1, unofficial]:
+$$ b_{j,k}([\theta', t']^T) = \frac{\sum_{u=0}^{J-1} \sum_{v=0}^{K-1} w_{u,v} Q_{u,d_\Theta}(\theta') Q_{v,d_T}(t')}{\sum_{u=0}^{J-1} \sum_{v=0}^{K-1} Q_{u,d_\Theta}(\theta') Q_{v,d_T}(t')} $$
+where $w_{u,v}$ are learnable weights, $Q$ are B-spline basis functions, $d_\Theta, d_T$ are degrees, and $J, K$ are segment counts per dimension [S1, unofficial].
+
+The B-spline basis function $Q_{u,d}(\cdot)$ is obtained using the Cox-de Boor recursion [S1, unofficial]:
+$$ Q_{u,0}(k) = \begin{cases} 1 & \text{if } k_u \le k < k_{u+1} \\ 0 & \text{otherwise} \end{cases} $$
+$$ Q_{u,d}(k) = \frac{k - k_u}{k_{u+d} - k_u} Q_{u,d-1}(k) + \frac{k_{u+d+1} - k}{k_{u+d+1} - k_{u+1}} Q_{u+1,d-1}(k) $$
+where $k_u$ is the $u$-th element of the knot vector [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_knot_vector(num_segments, degree):
+    """Constructs a clamped uniform knot vector per [S1, unofficial]."""
+    total_length = num_segments + degree + 1
+    knot_vector = [0.0] * total_length
+    for u in range(total_length):
+        if u < degree + 1:
+            knot_vector[u] = 0.0
+        elif u > num_segments:
+            knot_vector[u] = 1.0
+        else:
+            knot_vector[u] = (u - degree) / (num_segments - degree)
+    return knot_vector
+
+def cox_de_boor(u, val, degree, knot_vector):
+    """Computes B-spline basis function Q_{u,d}(val) per [S1, unofficial]."""
+    if degree == 0:
+        k_u = knot_vector[u]
+        k_u1 = knot_vector[u + 1]
+        return 1.0 if k_u <= val < k_u1 else 0.0
+    
+    denom1 = knot_vector[u + degree] - knot_vector[u]
+    term1 = 0.0
+    if denom1 != 0:
+        term1 = ((val - knot_vector[u]) / denom1) * cox_de_boor(u, val, degree - 1, knot_vector)
+        
+    denom2 = knot_vector[u + degree + 1] - knot_vector[u + 1]
+    term2 = 0.0
+    if denom2 != 0:
+        term2 = ((knot_vector[u + degree + 1] - val) / denom2) * cox_de_boor(u + 1, val, degree - 1, knot_vector)
+        
+    return term1 + term2
+
+def nurbs_rational_basis(theta_prime, t_prime, J, K, d_theta, d_t, weights, knots_theta, knots_t):
+    """Evaluates the rational basis function b_{j,k} per [S1, unofficial]."""
+    numerator = 0.0
+    denominator = 0.0
+    for u in range(J):
+        for v in range(K):
+            q_u = cox_de_boor(u, theta_prime, d_theta, knots_theta)
+            q_v = cox_de_boor(v, t_prime, d_t, knots_t)
+            w_uv = weights[u][v]
+            numerator += w_uv * q_u * q_v
+            denominator += q_u * q_v
+    return numerator / denominator if denominator != 0.0 else 0.0
+```
+
+**Parameters:**
+*   $d_\Theta, d_T$: Degrees of the spline for view angle and detector location [S1, unofficial].
+*   $J, K$: Segment counts per dimension [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Zero Denominators in Cox-de Boor:** If the denominator in any term of the Cox-de Boor recursion is zero, that term is taken to be zero [S1, unofficial].
+*   **Boundary Conditions:** The knot vector construction ensures clamped boundaries at 0 and 1 [S1, unofficial].
+
+## Subtopics
+
+### [NURBS-based Uncalibrated Imaging Reconstruction](16412-nurbs-based-uncalibrated-imaging-reconstruction.md)
+NURBS-based Uncalibrated Imaging Reconstruction is a method for reconstructing volumetric data (specifically CT) from projections with uncertain or uncalibrated measurement coordinates (view angles, tilt angles, detector positions) by modeling these coordinates as a NURBS surface. It differs from implicit neural representations by using fixed-degree spline basis functions with optimized control points, which allows for differentiable coordinate mapping that can be trained alongside the reconstruction network. It is typically paired with a U-Net reconstruction network $G_\mu(\cdot)$ that maps the NURBS-interpolated coordinates to image space.
+
+## Operating characteristics
+*   **Time Complexity:** Evaluation of the NURBS surface requires computing $J \times K$ basis functions [G]. Each basis function evaluation via Cox-de Boor recursion is $O(d^2)$ or $O(d)$ depending on implementation [G]. Thus, evaluation is $O(J \cdot K \cdot d^2)$ [G].
+*   **Memory Complexity:** Storage of control points ($J \times K \times \text{dim}$) and weights ($J \times K$) [G].
+*   **Performance:** The method reduces angle error as optimization progresses, demonstrating that it learns more accurate tilt angles than assumed ones [S1, unofficial]. In experiments with 120 view angles, it showed competitive SNR compared to pseudoinverse, baseline, and implicit neural methods under measurement noise [S1, unofficial].
+*   **Strengths:** Differentiable; fixed-degree basis functions provide stability compared to neural networks [G].
+*   **Limitations:** Requires optimization of control points and weights; less flexible than neural networks for highly irregular errors [G].
+
+## Background
+The method originates from "Differentiable Uncalibrated Imaging" (2022) [S1, unofficial]. It builds on the principles of NURBS (Non-Uniform Rational B-Splines) and extends the PyTorch source code from the NURBS-Diff module [S1, unofficial]. It is used in the context of CT reconstruction with uncalibrated measurement coordinates [S1, unofficial].
+
+## Sources
+[S1] Differentiable Uncalibrated Imaging, https://doi.org/10.48550/arXiv.2211.10525, fetched 2026-10-26 (unofficial)

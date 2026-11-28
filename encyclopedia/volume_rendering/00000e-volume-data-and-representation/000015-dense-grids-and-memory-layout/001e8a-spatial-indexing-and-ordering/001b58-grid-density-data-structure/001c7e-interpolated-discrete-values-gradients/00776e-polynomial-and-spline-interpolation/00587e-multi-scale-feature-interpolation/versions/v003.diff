@@ -1,0 +1,106 @@
+--- v002.md
++++ v003.md
+@@ -17,8 +17,8 @@
+ 
+ **Data Structures:**
+-- The method operates on a list of grid tensors. The specific HexPlane decomposition into six 2D planes is not detailed in the provided source text. [S1, unofficial] The implementation relies on a per-scale interpolation step that maps query coordinates to grid indices and evaluates basis functions.
++- The method operates on a list of grid tensors. [S1, unofficial] The specific HexPlane decomposition into six 2D planes is not detailed in the provided source text. [S1, unofficial] The implementation relies on a per-scale interpolation step that maps query coordinates to grid indices and evaluates basis functions.
+ 
+ **Steps:**
+-1. Initialize an empty list `multi_scale_interp` to store results from each scale.
++1. Initialize an empty list `multi_scale_interp` to store results from each scale. [S1, unofficial]
+ 2. Iterate through each scale level $l$ from $0$ to `num_levels` - 1:
+    a. Generate all combinations of coordinates of size `grid_dimensions` from the input point dimensions (`range(pts.shape[-1])`). [S1, unofficial]
+@@ -32,5 +32,5 @@
+ **Formulas:**
+ - Accumulation (when `concat_features` is `False`): $I_{\text{acc}} = \sum_{l=0}^{L-1} I_l$
+-- Concatenation (when `concat_features` is `True`): $I_{\text{out}} = \text{concat}(I_0, I_1, \dots, I_{L-1}, \text{dim}=-1)$
++- Concatenation (when `concat_features` is `True`): $I_{\text{out}} = \text{concat}(I_0, I_1, \dots, I_{L-1}, \text{dim}=-1)$ [S1, unofficial]
+ 
+ **Parameters:**
+@@ -41,4 +41,5 @@
+ - **Grid Resolution:** Coarse grids may lack high-frequency detail, while fine grids may be noisy. [G]
+ - **Coordinate Normalization:** Query coordinates must be normalized to the grid's indexing space consistent with grid construction. [G]
++- **Boundary Clamping:** Query points outside the grid bounds must be clamped to the nearest valid voxel indices to prevent out-of-bounds memory access. [G]
+ 
+ **Pseudocode:**
+@@ -49,6 +50,6 @@
+     
+     Args:
+-        pts: Tensor of query coordinates.
+-        ms_grids: List of grid tensors, one per scale level.
++        pts: Tensor of query coordinates. Shape (N, 3).
++        ms_grids: List of grid tensors, one per scale level. Shape (Dx, Dy, Dz, C).
+         num_levels: Integer, number of scales.
+         concat_features: Boolean, whether to concatenate or sum features.
+@@ -62,14 +63,49 @@
+     for l in range(num_levels):
+         grid = ms_grids[l]
++        # Generate coordinate combinations for interpolation [S1, unofficial]
++        # Initialize interpolation space [S1, unofficial]
++        interp_space = [1.0] * grid.shape[-1]
+         
+-        # Generate coordinate combinations from input point dimensions [S1, unofficial]
+-        # Initialize interpolation space [S1, unofficial]
+-        interp_space = 1.0
++        # Perform standard trilinear interpolation on the grid [G]
++        # Map continuous query points to grid indices
++        coords = pts * grid.shape[:3]
++        ix, iy, iz = coords[:, 0], coords[:, 1], coords[:, 2]
+         
+-        # Compute interpolated features for query points using the grid [G]
+-        # The specific interpolation kernel is not detailed in the sources [G]
+-        # Standard implementation maps pts to grid indices and evaluates basis functions
+-        interp_space = interp_space  # Placeholder for actual kernel application [G]
++        # Get corner indices
++        x0, y0, z0 = floor(ix), floor(iy), floor(iz)
++        x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
+         
++        # Clamp indices to grid bounds
++        x0 = clamp(x0, 0, grid.shape[0] - 2)
++        y0 = clamp(y0, 0, grid.shape[1] - 2)
++        z0 = clamp(z0, 0, grid.shape[2] - 2)
++        x1 = clamp(x1, 1, grid.shape[0] - 1)
++        y1 = clamp(y1, 1, grid.shape[1] - 1)
++        z1 = clamp(z1, 1, grid.shape[2] - 1)
++        
++        # Compute fractional weights
++        fx, fy, fz = ix - x0, iy - y0, iz - z0
++        
++        # Fetch corner values and compute weighted sum
++        v000 = grid[x0, y0, z0]
++        v100 = grid[x1, y0, z0]
++        v010 = grid[x0, y1, z0]
++        v110 = grid[x1, y1, z0]
++        v001 = grid[x0, y0, z1]
++        v101 = grid[x1, y0, z1]
++        v011 = grid[x0, y1, z1]
++        v111 = grid[x1, y1, z1]
++        
++        # Trilinear interpolation
++        interp_space = (v000 * (1 - fx) * (1 - fy) * (1 - fz) +
++                        v100 * fx * (1 - fy) * (1 - fz) +
++                        v010 * (1 - fx) * fy * (1 - fz) +
++                        v110 * fx * fy * (1 - fz) +
++                        v001 * (1 - fx) * (1 - fy) * fz +
++                        v101 * fx * (1 - fy) * fz +
++                        v011 * (1 - fx) * fy * fz +
++                        v111 * fx * fy * fz)
++                        
++        # Combine scales [S1, unofficial]
+         if concat_features:
+             multi_scale_interp.append(interp_space)
+@@ -92,5 +128,5 @@
+ 
+ ### 3D Gaussian Feature Interpolation
+-This variant interpolates features using pre-computed 3D Gaussian parameters rather than a dense grid. It computes Gaussian weights based on the distance between query points and Gaussian centers, weighted by the inverse covariance matrix, and performs a weighted sum of features. [S2, unofficial] The data structure includes feature tensors `feats` of shape $(B, C, K)$, offsets `offsets` of shape $(B, K, 3)$, determinants `det` of shape $(B, K)$, and inverse covariance matrices `inv` of shape $(B, K, 3, 3)$. [S2, unofficial] It is chosen when explicit geometric primitives are preferred over voxel-based representations. [G]
++This variant interpolates features using pre-computed 3D Gaussian parameters rather than a dense grid. [S2, unofficial] It computes Gaussian weights based on the distance between query points and Gaussian centers, weighted by the inverse covariance matrix, and performs a weighted sum of features. [S2, unofficial] The data structure includes feature tensors `feats` of shape $(B, C, K)$, offsets `offsets` of shape $(B, K, 3)$, determinants `det` of shape $(B, K)$, and inverse covariance matrices `inv` of shape $(B, K, 3, 3)$. [S2, unofficial] It is chosen when explicit geometric primitives are preferred over voxel-based representations. [G]
+ 
+ ## Operating characteristics
+@@ -102,5 +138,5 @@
+ 
+ ## Background
+-Multi-scale feature interpolation using HexPlane grids was introduced in the context of 4D Gaussian Splatting for dynamic scene representation. The method was part of the 4DGaussians framework, accepted at CVPR 2024. [S1, unofficial]
++Multi-scale feature interpolation using HexPlane grids was introduced in the context of 4D Gaussian Splatting for dynamic scene representation. [S1, unofficial] The method was part of the 4DGaussians framework, accepted at CVPR 2024. [S1, unofficial]
+ 
+ ## Sources

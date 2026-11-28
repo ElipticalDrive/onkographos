@@ -1,0 +1,375 @@
+--- v008.md
++++ v009.md
+@@ -1,99 +1,101 @@
+ # HashGrid Encoding
+ 
+-Also called: Hash Grid, Hash Encodings, GridEncoding, Instant NGP encoding, Instant Neural Graphics Primitives Encoding
++Also called: GridEncoding, Hash Encodings, Hash Grid Feature Interpolation, Instant NGP encoding, Instant Neural Graphics Primitives Encoding
+ 
+ ## Overview
+-HashGrid Encoding maps continuous spatial coordinates to high-dimensional feature vectors using a hierarchy of sparse hash tables at multiple resolutions [S3, unofficial][S13]. It solves the computational bottleneck of vanilla Neural Radiance Fields (NeRF), which rely on deep Multi-Layer Perceptrons (MLPs) that are slow to train and render [S3, S10, unofficial]. By replacing heavy MLP inference with fast hash table lookups and trilinear interpolation, it accelerates training by 1000–10,000× and rendering by >3000× compared to vanilla NeRF, while maintaining comparable visual quality [S3, S10, unofficial]. It sets itself apart from frequency-based encodings (like Fourier features) by learning spatially adaptive features directly in the grid, allowing it to capture both global shape and fine local textures more effectively [S7, unofficial]. Unlike tree-based encodings (e.g., ACORN), it avoids serial pointer-chasing and execution divergence, mapping well to GPUs [S3, unofficial][S13].
++HashGrid Encoding maps continuous spatial coordinates to high-dimensional feature vectors using a multi-resolution hierarchy of spatial hash tables, enabling efficient training and rendering of neural graphics primitives [S3, unofficial][S13]. It solves the problem of high computational cost and memory usage in traditional implicit neural representations by replacing expensive positional encodings and large MLPs with a compact, trainable feature grid [S3, unofficial][S13]. Unlike dense grid encodings, it avoids wasting memory on empty space by using hash collisions to automatically prioritize relevant areas via gradient averaging, and unlike tree-based encodings, it avoids execution divergence by using O(1) hash lookups [S3, unofficial][S13].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A tensor of input coordinates $\mathbf{x} \in \mathbb{R}^{B \times D}$, where $B$ is the batch size and $D$ is the spatial dimensionality (typically 3 for 3D space, or 2 for 2D images) [S9, S12, unofficial]. Values are expected to be normalized to the range $[0, 1]$ [S9, S12, unofficial].
+-*   **Output:** A tensor of encoded features $\mathbf{y} \in \mathbb{R}^{B \times (L \cdot C)}$, where $L$ is the number of resolution levels and $C$ is the number of feature channels per level [S9, S12, unofficial]. Optionally, the gradient of the output with respect to the input, $\frac{\partial \mathbf{y}}{\partial \mathbf{x}} \in \mathbb{R}^{B \times L \times D \times C}$, is computed for backpropagation [S9, S12, unofficial].
++*   **Input:** A batch of $B$ input coordinate vectors $\mathbf{x} \in \mathbb{R}^{B \times D}$, where $D$ is the spatial dimensionality (typically 2 or 3). Values are expected in the normalized range $[0, 1]$ [S9, S12, unofficial].
++*   **Output:** A concatenated feature vector $\mathbf{y} \in \mathbb{R}^{B \times (L \cdot C)}$, where $L$ is the number of resolution levels and $C$ is the number of feature channels per level [S9, unofficial][S13].
++*   **Backward Output:** Gradient of the output with respect to the input, $\frac{\partial \mathbf{y}}{\partial \mathbf{x}} \in \mathbb{R}^{B \times L \times D \times C}$ [S9, S12, unofficial].
+ 
+ **Data Structures:**
+-The encoding consists of $L$ hash tables (grids). Each level $l \in \{0, \dots, L-1\}$ has a hash table of size $T_l$ (number of entries) and stores feature vectors of dimension $C$ [S3, S12, unofficial].
+-*   **Embeddings:** A flattened 1D array `embeddings` of shape $[\sum_{l=0}^{L-1} T_l, C]$ [S9, S12, unofficial]. Entries are typically stored at half precision (2 bytes) for memory efficiency, with a master copy in full precision for stable mixed-precision updates [S3, unofficial][S13].
+-*   **Offsets:** An integer array `offsets` of size $L+1$, where `offsets[l]` is the starting index in `embeddings` for level $l$ [S9, S12, unofficial]. The hash table size for level $l$ is $T_l = \text{offsets}[l+1] - \text{offsets}[l]$ [S12, unofficial].
+-*   **Parameters:**
+-    *   $L$: Number of resolution levels. Typical value: 16 [S3, unofficial][S13].
+-    *   $C$: Number of feature channels per level. Supported values: 1, 2, 4, 8. $C=2$ provides the best cost-quality trade-off on modern GPUs [S3, S9, S12, unofficial].
+-    *   $H$: Base resolution (grid size at level 0) [S9, S12, unofficial].
+-    *   $S$: Scaling factor exponent. Controls exponential resolution growth [S9, S12, unofficial].
+-    *   $T$: Max entries per level (hash table size). Tunable hyper-parameter trading parameters for quality. Typical range: $[2^{14}, 2^{24}]$ [S3, unofficial][S13].
+-    *   $N_{\min}$: Coarsest resolution. Typical value: 16 [S13].
+-    *   $N_{\max}$: Finest resolution. Tunable to match finest detail in training data. Typical range: $[512, 524288]$ [S13].
+-
+-**Algorithm:**
+-The encoding is computed level by level to optimize GPU cache usage [S3, unofficial][S13]. For each level $l$, the input coordinates are scaled to the resolution of that level, mapped to integer grid coordinates, hashed to table indices, and trilinearly interpolated.
+-
+-1.  **Calculate Resolution and Scale:**
+-    For each level $l$, compute the scale factor and the integer grid resolution:
+-    $$ \text{scale}_l = 2^{l \cdot S} \cdot H - 1 $$
++The encoding consists of $L$ hash tables. Each level $l \in \{0, \dots, L-1\}$ has a hash table of size $T_l$ (entries) and stores feature vectors of dimension $C$.
++*   **Embeddings:** A flattened tensor `embeddings` of shape $[sO, C]$, where $sO = \sum_{l=0}^{L-1} T_l$ is the total number of entries across all levels [S9, S12, unofficial].
++*   **Offsets:** An integer array `offsets` of shape $[L+1]$. `offsets[l]` is the starting index in `embeddings` for level $l$. The size of level $l$ is $T_l = \text{offsets}[l+1] - \text{offsets}[l]$ [S9, S12, unofficial].
++*   **Precision:** Entries are stored at half precision (2 bytes) for memory efficiency, with a master copy in full precision for stable mixed-precision updates [S3, unofficial][S13].
++
++**Parameters:**
++*   $L$: Number of resolution levels. Typical value: 16 [S3, unofficial][S13].
++*   $C$: Number of feature channels per level. Supported values: 1, 2, 4, 8. Optimal trade-off is $C=2$ [S9, S12, S3, unofficial].
++*   $T$: Max entries per level (hash table size). Tunable hyper-parameter trading parameters for quality. Typical range: $[2^{14}, 2^{24}]$ [S3, unofficial][S13].
++*   $N_{\min}$: Coarsest resolution. Typical value: 16 [S3, unofficial][S13].
++*   $N_{\max}$: Finest resolution. Tunable to match finest detail. Typical range: $[512, 524288]$ [S3, unofficial][S13].
++*   $S$: Scale factor exponent determining resolution growth per level [S4, S9, unofficial].
++*   $H$: Base resolution (grid size at level 0) [S9, S12, unofficial].
++*   $\text{gridtype}$: Hashing strategy. 0 = Hash (uses fast_hash), 1 = Tiled (linear indexing) [S4, S9, unofficial].
++*   $\text{align\_corners}$: Boolean flag. If true, coordinate mapping adds 0.0 offset; if false, adds 0.5 offset for center-aligned sampling [S9, S4, unofficial].
++*   $\text{interp}$: Interpolation type. 0 = linear, 1 = smoothstep [S9, unofficial].
++
++**Formulas:**
++1.  **Resolution Scale:** For level $l$, the scale factor is:
++    $$ \text{scale}_l = \exp_2(l \cdot S) \cdot H - 1.0 $$
++    Alternatively, using geometric progression between $N_{\min}$ and $N_{\max}$:
++    $$ N_l = \lfloor N_{\min} \cdot b^l \rfloor, \quad b = \exp\left(\frac{\ln(N_{\max}) - \ln(N_{\min})}{L - 1}\right) $$
++    [S4, S9, unofficial][S13]
++
++2.  **Grid Resolution:** The integer grid resolution for level $l$ is:
+     $$ \text{resolution}_l = \lceil \text{scale}_l \rceil + 1 $$
++    [S9, S12, unofficial]
++
++3.  **Coordinate Mapping:** Input coordinates $\mathbf{x}$ are mapped to continuous grid coordinates $\mathbf{pos}$:
++    $$ \text{pos}[d] = \mathbf{x}[d] \cdot \text{scale}_l + (\text{align\_corners} ? 0.0 : 0.5) $$
++    [S4, S9, S12, unofficial]
++
++4.  **Integer and Fractional Coordinates:**
++    $$ \text{pos\_grid}[d] = \lfloor \text{pos}[d] \rfloor $$
++    $$ \text{pos}[d] \leftarrow \text{pos}[d] - \text{pos\_grid}[d] $$
++    [S4, S9, S12, unofficial]
++
++5.  **Hash Function:** Maps integer grid coordinates $\text{pos\_grid}$ to a hash table index. Using unique large primes $\pi_i$ (where $\pi_1=1$ for cache coherence):
++    $$ h(\text{pos\_grid}) = \left( \bigoplus_{i=0}^{D-1} (\text{pos\_grid}[i] \cdot \pi_i) \right) \pmod{T_l} $$
++    [S13][S4, unofficial]
++    Specific primes for $D \le 7$: $\pi = [1, 2654435761, 805459861, 3674653429, 2097192037, 1434869437, 2165219737]$ [S4, unofficial].
++
++6.  **Trilinear Interpolation:** For each of the $2^D$ corners of the voxel defined by $\text{pos\_grid}$, indexed by $idx \in [0, 2^D-1]$:
++    *   Local grid coordinate: $\text{pos\_grid\_local}[d] = \text{pos\_grid}[d] + ((idx \gg d) \& 1)$
++    *   Weight: $w = \prod_{d=0}^{D-1} (\text{pos}[d] \text{ if } ((idx \gg d) \& 1) \text{ else } 1 - \text{pos}[d])$
++    *   Feature contribution: $\mathbf{f}_{idx} = w \cdot \text{embeddings}[\text{index}_{idx} + \text{offsets}[l]]$
++    *   Where $\text{index}_{idx} = h(\text{pos\_grid\_local}) \cdot C + \text{channel}$
+     [S4, S9, S12, unofficial][S13]
+ 
+-2.  **Normalize and Scale Coordinates:**
+-    For each input coordinate $\mathbf{x}_b$ (batch element $b$), normalize to $[0, 1]$ if not already, then scale to grid space:
+-    $$ \mathbf{pos}_b = \mathbf{x}_b \cdot \text{scale}_l + \mathbf{offset} $$
+-    where $\mathbf{offset}$ is $0.0$ if `align_corners` is true, and $0.5$ if false (center-aligned sampling) [S4, S9, S12, unofficial].
+-
+-3.  **Compute Integer Grid Coordinates:**
+-    Compute the integer grid position and the fractional part for interpolation:
+-    $$ \mathbf{pos\_grid}_b = \lfloor \mathbf{pos}_b \rfloor $$
+-    $$ \mathbf{frac}_b = \mathbf{pos}_b - \mathbf{pos\_grid}_b $$
+-    [S4, S9, S12, unofficial]
+-
+-4.  **Hash Lookup:**
+-    For each of the $2^D$ corner vertices of the voxel defined by $\mathbf{pos\_grid}_b$:
+-    *   Determine the local grid coordinate $\mathbf{pos\_grid\_local}$ for the corner. For dimension $d$, if the corner bit is 0, use $\mathbf{pos\_grid}_b[d]$; if 1, use $\mathbf{pos\_grid}_b[d] + 1$ [S4, S12, unofficial].
+-    *   Compute the hash index using a spatial hash function. A common implementation uses XOR with large primes:
+-        $$ \text{hash\_val} = \bigoplus_{d=0}^{D-1} (\mathbf{pos\_grid\_local}[d] \times \pi_d) $$
+-        where $\pi_d$ are unique large primes (e.g., $\pi_0=1, \pi_1=2654435761, \pi_2=805459861$ for $D=3$) [S4, S9, S12, unofficial][S13].
+-    *   Map the hash value to the table index:
+-        $$ \text{index} = (\text{hash\_val} \pmod{T_l}) \cdot C + c $$
+-        for each channel $c \in \{0, \dots, C-1\}$ [S4, S9, S12, unofficial].
+-    *   *Note:* If the stride (calculated as $\sum_{d=0}^{D-1} \mathbf{pos\_grid\_local}[d] \times \prod_{k=0}^{d-1} (\text{resolution}_l+1)$) exceeds $T_l$, the hash function is used; otherwise, linear indexing may be used [S4, S12, unofficial].
+-
+-5.  **Trilinear Interpolation:**
+-    Compute the interpolation weight $w$ for the corner based on the fractional coordinates:
+-    $$ w = \prod_{d=0}^{D-1} \begin{cases} \mathbf{frac}_b[d] & \text{if corner bit } d \text{ is 1} \\ 1 - \mathbf{frac}_b[d] & \text{if corner bit } d \text{ is 0} \end{cases} $$
+-    [S4, S9, S12, unofficial][S13]
+-    Accumulate the weighted feature vectors from the hash table into the output feature vector for level $l$:
+-    $$ \mathbf{y}_{b,l} += w \cdot \text{embeddings}[\text{index}] $$
+-    [S4, S9, S12, unofficial]
+-
+-6.  **Concatenation:**
+-    Concatenate the feature vectors from all $L$ levels to form the final encoded input $\mathbf{y}_b \in \mathbb{R}^{L \cdot C}$ [S3, unofficial][S13].
+-
+-**Backpropagation:**
+-Gradients are computed with respect to the embeddings and the input coordinates $\mathbf{x}$.
+-*   **Embedding Gradients:** For each corner, the gradient of the loss $\mathcal{L}$ with respect to the embedding is accumulated using atomic addition:
+-    $$ \frac{\partial \mathcal{L}}{\partial \text{embeddings}[\text{index}]} += w \cdot \frac{\partial \mathcal{L}}{\partial \mathbf{y}_{b,l}} $$
+-    [S4, S9, S12, unofficial]
+-    *Optimization:* Use `__half2` vectorization for $C=2$ to speed up atomic additions [S4, S9, S12, unofficial]. Skip Adam steps for entries with zero gradient to save ~10% performance [S3, unofficial].
+-*   **Input Gradients:** Compute $\frac{\partial \mathbf{y}}{\partial \mathbf{x}}$ by summing contributions from all levels. For each dimension $d$, compute the partial derivative by considering the left and right neighbors along $d$ and using the derivative of the interpolation function (e.g., $1.0$ for linear, $6x(1-x)$ for smoothstep) [S9, S12, unofficial].
++**Algorithm Steps:**
++1.  **Input Validation:** Check if any coordinate in $\mathbf{x}$ is outside $[0, 1]$. If so, set output features and gradients to 0 and return [S4, S9, unofficial].
++2.  **Level Iteration:** Iterate through each level $l$ from 0 to $L-1$. This order optimizes GPU cache usage by keeping one level's hash table in cache at a time [S3, unofficial].
++3.  **Scale Calculation:** Compute $\text{scale}_l$ and $\text{resolution}_l$ using the parameters [S4, S9, S12, unofficial].
++4.  **Coordinate Transformation:** For each input point $\mathbf{x}_b$, compute $\text{pos}[d]$ and $\text{pos\_grid}[d]$ for all dimensions $d$ [S4, S9, S12, unofficial].
++5.  **Hash Lookup and Interpolation:**
++    *   For each of the $2^D$ corners:
++        *   Compute $\text{pos\_grid\_local}$ and weight $w$ [S4, S9, S12, unofficial].
++        *   Compute hash index $\text{index} = h(\text{pos\_grid\_local})$ [S4, S9, S12, unofficial].
++        *   Fetch feature vector from `embeddings` at `offsets[l] + index * C` [S4, S9, S12, unofficial].
++        *   Accumulate weighted features into the output buffer for level $l$ [S4, S9, S12, unofficial].
++6.  **Concatenation:** Concatenate the feature vectors from all levels $l$ to form the final encoded input $\mathbf{y}$ [S5, S13].
++7.  **Backward Pass (Gradients):**
++    *   **Embedding Gradients:** For each corner, compute the gradient of the loss w.r.t. the fetched features, weighted by $w$, and accumulate into the embedding table using `atomicAdd` [S4, S9, S12, unofficial]. Note: `atomicAdd` on half-precision is slow; use `__half2` vectorization if $C$ is even [S4, S9, S12, unofficial].
++    *   **Input Gradients:** Compute $\frac{\partial \mathbf{y}}{\partial \mathbf{x}}$. For each dimension $gd$, initialize gradient accumulator. Loop over $2^{D-1}$ neighbors fixing $gd$. Compute weight $w$ for other dimensions. Fetch left/right grid values at $\text{pos\_grid}[gd]$ and $\text{pos\_grid}[gd]+1$. Accumulate: $\text{results\_grad} += w \cdot (\text{grid}_{\text{right}} - \text{grid}_{\text{left}}) \cdot \text{scale}_l \cdot \text{pos\_deriv}[gd]$ [S4, S9, S12, unofficial]. If $\text{interp}=1$ (smoothstep), $\text{pos\_deriv}[d] = 6 \cdot \text{pos}[d] \cdot (1 - \text{pos}[d])$ [S9, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import math
+ 
+-def hash_grid_encode(inputs, offsets, embeddings, L, C, H, S, align_corners=True):
++def hash_grid_encode(x, offsets, embeddings, L, C, H, S, align_corners=True, interp=0):
+     """
+-    inputs: [B, D] float tensor, values in [0, 1]
+-    offsets: [L+1] int array, cumulative hash table sizes
+-    embeddings: [sum(offsets), C] float tensor
++    x: [B, D] float tensor, values in [0, 1]
++    offsets: [L+1] int array
++    embeddings: [total_size, C] float tensor
+     L: int, number of levels
+     C: int, channels per level
+     H: float, base resolution
+-    S: float, scaling factor exponent
+-    align_corners: bool, if True offset is 0.0, else 0.5
++    S: float, scale exponent
+     """
+-    B, D = inputs.shape
+-    outputs = torch.zeros(L, B, C, dtype=inputs.dtype, device=inputs.device)
+-    dy_dx = torch.zeros(B, L, D, C, dtype=inputs.dtype, device=inputs.device)
++    B, D = x.shape
++    outputs = torch.zeros(L, B, C, dtype=x.dtype, device=x.device)
++    dy_dx = torch.zeros(B, L, D, C, dtype=x.dtype, device=x.device)
+     
+-    # Primes for hashing (example for D=3)
+-    primes = [1, 2654435761, 805459861]
++    # Primes for hashing (up to 7 dimensions)
++    primes = [1, 2654435761, 805459861, 3674653429, 2097192037, 1434869437, 2165219737]
+     
+     for l in range(L):
+@@ -103,74 +105,86 @@
+         hashmap_size = offsets[l+1] - offsets[l]
+         
+-        # 2. Scale coordinates
+-        offset_val = 0.0 if align_corners else 0.5
+-        pos = inputs * scale + offset_val
+-        
+-        # 3. Compute integer grid coords and fractional parts
++        # 2. Map coordinates to grid space
++        # pos[d] = x[d] * scale + (0.5 if not align_corners else 0.0)
++        pos = x * scale + (0.5 if not align_corners else 0.0)
+         pos_grid = torch.floor(pos).long()
+-        frac = pos - pos_grid.float()
+-        
+-        # 4. Iterate over 2^D corners
+-        level_output = torch.zeros(B, C, dtype=inputs.dtype, device=inputs.device)
+-        level_grad_input = torch.zeros(B, D, C, dtype=inputs.dtype, device=inputs.device)
+-        
+-        for idx in range(1 << D):
++        pos_frac = pos - pos_grid.float()
++        
++        # 3. Interpolate over 2^D corners
++        num_corners = 1 << D
++        local_features = torch.zeros(B, C, dtype=x.dtype, device=x.device)
++        local_grads = torch.zeros(B, D, C, dtype=x.dtype, device=x.device)
++        
++        for idx in range(num_corners):
+             # Determine local grid coords and weight
+-            w = 1.0
+-            pos_grid_local = torch.zeros(D, dtype=torch.long, device=inputs.device)
++            w = torch.ones(B, dtype=x.dtype, device=x.device)
++            pos_grid_local = torch.zeros(B, D, dtype=torch.long, device=x.device)
+             
+             for d in range(D):
+-                if (idx >> d) & 1:
+-                    w *= frac[:, d]
+-                    pos_grid_local[d] = pos_grid[:, d] + 1
++                bit = (idx >> d) & 1
++                if bit == 0:
++                    w *= (1.0 - pos_frac[:, d])
++                    pos_grid_local[:, d] = pos_grid[:, d]
+                 else:
+-                    w *= 1.0 - frac[:, d]
+-                    pos_grid_local[d] = pos_grid[:, d]
+-            
+-            # 5. Hash lookup
+-            # Compute hash value
+-            hash_val = torch.zeros(B, dtype=torch.int32, device=inputs.device)
++                    w *= pos_frac[:, d]
++                    pos_grid_local[:, d] = pos_grid[:, d] + 1
++            
++            # Hash function
++            hash_val = 0
+             for d in range(D):
+-                hash_val = torch.bitwise_xor(hash_val, (pos_grid_local[d].int() * primes[d]))
+-            
+-            # Map to index
++                hash_val ^= pos_grid_local[:, d] * primes[d]
+             indices = (hash_val % hashmap_size) * C
+             
+-            # Fetch embeddings and accumulate
+-            # Note: In practice, this is done in a fused CUDA kernel for performance
+-            # Here we simulate the accumulation for clarity
++            # Fetch features
++            # embeddings is [total_size, C]. We need to gather from offsets[l] + indices
++            # Note: In practice, this is done in CUDA for performance. 
++            # Here we simulate the logic.
++            base_idx = offsets[l]
++            # Gather features for all channels
++            # This loop is conceptual; actual implementation uses vectorized loads
+             for c in range(C):
+-                emb = embeddings[indices + c]
+-                level_output[:, c] += w * emb[:, c]
+-                
+-                # Gradient w.r.t embeddings would be accumulated here via atomicAdd in CUDA
+-                # For dy_dx, we need the derivative w.r.t input
+-                # This is simplified; full dy_dx requires partial derivatives along each dim
++                feat = embeddings[base_idx + indices + c]
++                local_features[:, c] += w * feat
++                
++                # Input gradient calculation
++                # dy/dx = sum( dw/dx * feat + w * dfeat/dx )
++                # dfeat/dx is handled by backward pass of embeddings
++                # dw/dx involves scale and pos_deriv
++                
++                if interp == 1: # smoothstep
++                    pos_deriv = 6.0 * pos_frac[:, d] * (1.0 - pos_frac[:, d])
++                else:
++                    pos_deriv = torch.ones_like(pos_frac[:, d])
++                
++                # Partial derivative w.r.t x[d]
++                # w depends on pos_frac[d], which depends on x[d]
++                # dw/dx[d] = w * (1 if bit=1 else -1) * pos_deriv[d] / scale ? 
++                # Actually, pos[d] = x[d]*scale + offset. d(pos)/d(x) = scale.
++                # d(pos_frac)/d(x) = scale (since pos_grid is constant locally)
++                # So dw/dx[d] = dw/d(pos_frac[d]) * scale
++                
++                # Simplified: accumulate gradient for input x
++                # grad_input[d] += grad_output * w * (d_pos_frac/d_x) * (d_w/d_pos_frac)
++                # d_w/d_pos_frac[d] = (1 if bit=1 else -1) * (w / pos_frac[d] if bit=1 else w / (1-pos_frac[d]))
++                # This is complex; standard approach:
++                # For each dimension gd, compute gradient by finite difference or analytic derivative
++                
++                pass # Gradient accumulation is complex in pure Python pseudocode; see backward kernel logic
++            
++        outputs[l] = local_features
++        
++        # Compute dy_dx for this level
++        # For each dimension gd, compute gradient
++        for gd in range(D):
++            grad_input = torch.zeros(B, C, dtype=x.dtype, device=x.device)
++            # Iterate over 2^(D-1) neighbors fixing gd
++            for idx in range(1 << (D-1)):
++                # Construct full idx by inserting bit at gd
++                # This is a simplified conceptual step for the gradient
++                # In CUDA: loop over 2^(D-1) masks, compute w for other dims
++                # Fetch left/right grid values, accumulate difference
+                 pass
+-        
+-        # 6. Compute dy_dx (simplified linear interpolation derivative)
+-        # For each dimension d, compute gradient by looking at left/right neighbors
+-        for d in range(D):
+-            # Left neighbor index
+-            pos_grid_left = pos_grid.clone()
+-            pos_grid_left[:, d] -= 1
+-            # Right neighbor index
+-            pos_grid_right = pos_grid.clone()
+-            pos_grid_right[:, d] += 1
+-            
+-            # Compute hashes for left and right
+-            # ... (similar to above) ...
+-            
+-            # Compute weight product for other dimensions
+-            # w_other = product of frac or 1-frac for dims != d
+-            # ...
+-            
+-            # Gradient contribution
+-            # dy_dx[:, l, d, :] = scale * w_other * (emb_right - emb_left)
+-            pass
+-            
+-        outputs[l] = level_output
+-        dy_dx[:, l, :, :] = level_grad_input
+-        
++            dy_dx[:, l, gd, :] = grad_input
++
+     return outputs, dy_dx
+ ```
+@@ -188,5 +202,5 @@
+ 
+ ### [Multi-resolution Hash Encoding](10200-multi-resolution-hash-encoding.md)
+-Multi-resolution Hash Encoding (MHE) is a coordinate-based feature encoding method that maps 3D spatial coordinates to learnable feature vectors using a hierarchy of sparse hash tables at increasing resolutions. It solves the computational bottleneck of vanilla Neural Radiance Fields (NeRF), which rely on deep Multi-Layer Perceptrons (MLPs) that are slow to train and render. By replacing the heavy MLP inference with fast hash table lookups and trilinear interpolation, MHE accelerates training by 1000–10,000× and rendering by >3000× compared to vanilla NeRF, while maintaining comparable visual quality. It sets itself apart from frequency-based encodings (like Fourier features) by learning spatially adaptive features directly in the grid, allowing it to capture both global shape and fine local textures more effectively.
++Multi-resolution Hash Encoding (MHE) is a feature encoding method that maps 3D spatial coordinates to a high-dimensional feature vector using a set of trainable, sparse hash grids at multiple resolutions, enabling efficient neural rendering by replacing expensive positional encoding and large MLPs with a compact, trainable representation. It solves the problem of slow training times and high memory consumption associated with traditional NeRF models by allowing the encoding itself to be trained alongside a shallow network, achieving faster convergence and reduced parameter counts. Unlike its siblings, it relies on a fixed-size hash table structure with trilinear interpolation and a specific hash function, whereas alternatives may use simplex structures, tetrahedron querying, or global preconditioners.
+ 
+ ### [RHINO](10245-rhino.md)
+@@ -196,25 +210,19 @@
+ HollowNeRF Saliency Grid Weighting is a collision mitigation technique for hash grid-based neural radiance fields that learns a 3D probability distribution of feature presence to weight feature vectors fetched from a multi-level hashgrid. Unlike Instant-NGP, which distributes hash collisions evenly across voxels, this method learns to "shuffle" collisions by assigning higher saliency weights to important features, allowing them to dominate shared hash buckets during gradient updates while pruning less significant features.
+ 
++### [TetraHashGridEncode](13232-tetrahashgridencode.md)
++TetraHashGridEncode is a differentiable hash grid encoding method for 3D coordinates that utilizes tetrahedral decomposition for interpolation, implemented via CUDA extensions for forward and backward passes. It builds on [HashGrid Encoding](3866-hashgrid-encoding.md) by replacing standard trilinear interpolation within hash-grid cells with barycentric interpolation over a fixed tetrahedral decomposition, allowing for efficient training of neural radiance fields (NeRF) on consumer GPUs.
++
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Forward Pass:** $O(B \cdot L \cdot 2^D \cdot C)$ operations per batch element [S9, unofficial].
+-*   **Backward Pass:** $O(B \cdot L \cdot 2^D \cdot N_C)$ with atomic addition overhead, where $N_C = \min(2, C)$ [S9, S12, unofficial].
+-*   **Memory:** $O(\sum_{l=0}^{L-1} T_l \cdot C)$ for the embedding table, where $T_l$ is the hash table size for level $l$ [S12, unofficial][S13]. The total number of trainable parameters is $O(T \cdot L \cdot F)$, where $T$ is the max entries per level and $F$ is the feature dimension [S13].
+-
+-**Measured Performance:**
+-*   Training speed is over 8× faster than frequency encoding with similar parameter counts, achieving state-of-the-art quality in seconds [S3, unofficial][S13].
+-*   Rendering performance is in the tens of milliseconds at 1920×1080 resolution [S3, unofficial][S13].
+-*   Performance drops significantly if the hash table size exceeds the L2 cache limit (e.g., $2 \cdot T \cdot F > 6 \text{ MB}$ on RTX 3090) [S3, unofficial][S13].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** High training and rendering speed; memory efficient for sparse scenes; adaptive to training data distribution; no structural updates needed during training [S3, unofficial][S13].
+-*   **Limitations:** Hash collisions can cause artifacts (e.g., surface roughness in SDFs) if the table size is too small [S3, S7, unofficial][S13]; performance sensitive to hash table size relative to GPU cache; input coordinates must be in $[0, 1]$ [S9, S12, unofficial].
+-
+-**When to Use:**
+-*   Use for real-time or near-real-time neural graphics primitives (NeRF, SDF, radiance caching) where training speed and rendering latency are critical [S3, unofficial][S13].
+-*   Avoid if exact collision-free interpolation is required without relying on gradient averaging, or if the scene is extremely dense and uniform (dense grids may be more efficient) [S3, unofficial][S13].
++*   **Time Complexity:** Forward pass is $O(B \cdot L \cdot 2^D \cdot C)$ operations per batch element [S9, unofficial]. Backward grid pass is $O(B \cdot L \cdot 2^D \cdot N_C)$ with atomicAdd overhead [S9, unofficial].
++*   **Memory Complexity:** $O(\sum_{l=0}^{L-1} \text{hashmap\_size}_l \times C)$ for the embedding table [S12, unofficial]. Total parameters are $O(T \cdot L \cdot F)$ [S13].
++*   **Performance:** Training is over 8x faster than frequency encoding with similar parameter counts, achieving state-of-the-art quality in seconds [S3, unofficial][S13]. Rendering takes tens of milliseconds at 1920x1080 resolution [S3, unofficial][S13].
++*   **Scaling:** Performance remains constant as long as hash table size $T \le 2^{19}$ on RTX 3090. Beyond this, L2 cache oversubscription causes significant performance drops [S3, unofficial][S13].
++*   **Strengths:** High training speed, low memory footprint compared to dense grids, adaptive to training data distribution, no structural updates needed [S3, unofficial][S13].
++*   **Limitations:** Hash collisions can cause surface roughness in SDFs [S3, unofficial]. Performance sensitive to hash table size relative to GPU cache [S3, unofficial]. Half-precision atomicAdd is slow for scalar features ($C=1$) [S3, S12, unofficial].
++*   **When to Use:** When fast training and rendering of neural graphics primitives (NeRF, SDF, images) are required on consumer GPUs [S3, unofficial].
++*   **When Not to Use:** When exact geometric continuity (C1/C2) is required without post-processing, or when hash collisions cause unacceptable artifacts in specific applications like SDFs [S3, unofficial].
+ 
+ ## Background
+-HashGrid Encoding was introduced by Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller in the paper "Instant Neural Graphics Primitives with a Multiresolution Hash Encoding" (2022) [S3, unofficial]. It was developed to address the high computational cost of training and evaluating neural graphics primitives, which traditionally relied on deep MLPs or complex tree-based structures [S3, unofficial]. The method combines multi-resolution decomposition with spatial hashing to reduce parameter count while maintaining reconstruction quality [S3, unofficial][S13]. It has become a standard component in many modern neural rendering frameworks, including Instant-NGP [S3, unofficial][S13].
++HashGrid Encoding was introduced by Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller in 2022 in the paper "Instant Neural Graphics Primitives with a Multiresolution Hash Encoding" [S3, unofficial]. It was developed to address the high computational cost and slow training times of previous neural graphics primitives, such as those using frequency encodings or tree-based structures like ACORN [S3, unofficial][S13]. The method leverages spatial hashing to create a compact, trainable feature representation that can be optimized using stochastic gradient descent, enabling training in seconds rather than hours [S3, unofficial][S13]. It has become a standard component in many modern neural rendering frameworks, including Instant-NGP [S3, unofficial][S13].
+ 
+ ## Sources
+@@ -231,3 +239,4 @@
+ [S11] YihangChen-ee/CNC, https://github.com/YihangChen-ee/CNC, fetched 2026-10-27 (unofficial)
+ [S12] DESY-FS-PETRA/HoloINR, https://github.com/DESY-FS-PETRA/HoloINR, fetched 2026-10-27 (unofficial)
+-[S13] Instant Neural Graphics Primitives with a Multiresolution ..., https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Mueller22.pdf, fetched 2026-10-28+[S13] Instant Neural Graphics Primitives with a Multiresolution ..., https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Mueller22.pdf, fetched 2026-10-28
++[S14] GauStudio: A Modular Framework for 3D Gaussian Splatting and Beyond, https://doi.org/10.48550/arXiv.2403.19632, fetched 2026-10-30 (unofficial)

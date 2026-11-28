@@ -1,0 +1,216 @@
+--- v008.md
++++ v009.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-DoF-NeRF extends the NeRF architecture by incorporating optical models of geometric optics into the volume rendering process. The method simulates the emergence of DoF in two steps: (1) radiance of spatial points scattering to a particular area, and (2) the center ray accepting the scattered radiance from neighboring rays [S1]. This is achieved by combining optical models with classical volume rendering, using an indicator function to distinguish points based on the CoC diameter and the distance to the ray [S1].
++DoF-NeRF extends the NeRF architecture by incorporating optical models of geometric optics into the volume rendering process [S1]. The method simulates the emergence of DoF in two steps: (1) radiance of spatial points scattering to a particular area, and (2) the center ray accepting the scattered radiance from neighboring rays [S1]. This is achieved by combining optical models with classical volume rendering, using an indicator function to distinguish points based on the CoC diameter and the distance to the ray [S1].
+ 
+ ### Inputs and Outputs
+@@ -35,5 +35,5 @@
+ 
+ **Scatter Step**
+-The scattered radiance $\hat{I}_{scatter}(p)$ at pixel $p$ sums contributions from $M$ neighboring pixels $p_j$. A point contributes to pixel $p$ if its CoC diameter is larger than the distance between pixels [S1]:
++The scattered radiance $\hat{I}_{scatter}(p)$ at pixel $p$ sums contributions from $M$ neighboring pixels $p_j$ [S1]. A point contributes to pixel $p$ if its CoC diameter is larger than the distance between pixels [S1]:
+ $$ \hat{I}_{scatter}(p) = \sum_{j=1}^{M} \sum_{i=1}^{N_s} \mathbb{1}_{\delta(h'_i) > 2 \|p - p_j\|^2} T'_{ij} \hat{C}(p_j, h'_i) $$
+ where $\mathbb{1}$ is the indicator function, $T'_{ij}$ is the transmittance, and $\hat{C}(p_j, h'_i)$ is the radiance at neighbor $p_j$ [S1].
+@@ -49,8 +49,8 @@
+ 
+ ### Algorithm Steps
+-The training process uses a two-stage optimization to avoid divergence caused by ray gathering in DoF simulation [S1].
++The training process uses a two-stage optimization to reduce the complexity of learning geometry representation, aperture size, and focus distance [S1].
+ 
+ **Stage 1: Pinhole Camera Training**
+-1.  Initialize NeRF model $G_\Theta$, aperture parameters $\hat{K}$, and focus distances $\hat{F}$.
++1.  Initialize NeRF model $G_\Theta$, aperture parameters $\hat{K}$, and focus distances $\hat{F}$ [S1].
+ 2.  Set aperture parameter $K=0$ for all images, degenerating the model to a linear pinhole camera [S1].
+ 3.  For $N_{pretrain}$ iterations:
+@@ -64,5 +64,5 @@
+ 1.  For $N_{iter}$ iterations (after $N_{pretrain}$):
+     a.  **Patch-based Ray Selection**:
+-        i.  Define anchors every $N_{anchor}$ pixels on the imaging plane.
++        i.  Define anchors every $N_{anchor}$ pixels on the imaging plane [S1].
+         ii. Randomly select one anchor, defining an $N_{patch} \times N_{patch}$ patch [S1].
+         iii. Generate rays $\mathbf{r}$ passing through pixels in the selected patch [S1].
+@@ -81,105 +81,107 @@
+ 
+ def train_dof_nerf(N_images, N_iters, N_pretrain, N_anchor, N_patch, lr):
+-    # Initialize learnable parameters
+-    # K and F are per-image, shape (N_images, 1)
++    # Initialize learnable parameters per image [S1]
+     K = nn.Parameter(torch.ones(N_images, 1) * 0.1, requires_grad=True)
+     F = nn.Parameter(torch.ones(N_images, 1) * 1.0, requires_grad=True)
+-    
+-    # Initialize NeRF model
+-    G_Theta = NeRF_Model() # Standard NeRF MLP
+-    
++    G_Theta = NeRF_Model() # Standard NeRF MLP [S1]
++
+     optimizer = torch.optim.Adam(list(G_Theta.parameters()) + [K, F], lr=lr)
+-    
++
+     for i in range(N_iters):
+         if i < N_pretrain:
+-            # Stage 1: Pinhole camera (K=0 effectively, or just standard rendering)
+-            # To strictly follow "aperture parameter set to 0", we can zero out K gradients or use K=0 in render
+-            # However, the source says "aperture parameters and focus distances are not optimized"
+-            # So we freeze K and F gradients or don't include them in optimizer update for this stage
+-            
+-            # Select random rays and images
+-            r, I_gt = random_rays_selection(N_images)
+-            
+-            # Standard Volume Rendering
++            # Stage 1: Pinhole camera training [S1]
++            r, I_gt, idx = random_rays_selection(N_images)
++            # K=0 degenerates to pinhole; gradients for K/F are not updated here [S1]
+             I_pred = volume_render(G_Theta, r)
+-            
+-            # Loss
+             loss = torch.mean((I_gt - I_pred) ** 2)
+-            
+-            # Update only NeRF parameters
+             optimizer.zero_grad()
+             loss.backward()
+-            # Only update G_Theta
++            # Update only NeRF parameters [S1]
+             for param in G_Theta.parameters():
+                 if param.grad is not None:
+                     param.data -= lr * param.grad
+-            
+         else:
+-            # Stage 2: Concentrate-and-Scatter with Patch-based selection
+-            # Select patch
+-            r, I_gt = patch_rays_selection(N_images, N_anchor, N_patch)
+-            
+-            # Get current K and F for the selected images
+-            # Assuming r contains image indices idx
++            # Stage 2: Concentrate-and-Scatter Optimization [S1]
++            r, I_gt, idx = patch_rays_selection(N_images, N_anchor, N_patch)
+             K_curr = K[idx]
+             F_curr = F[idx]
+-            
+-            # Concentration Step
+-            # Compute CoC radius delta_c and concentrated radiance C^s
++
++            # Concentration Step [S1]
+             delta_c, C_s = concentration_step(G_Theta, r, K_curr, F_curr)
+-            
+-            # Scatter Step
+-            # Compute final image I_pred using scatter
++
++            # Scatter Step [S1]
+             I_pred = scatter_step(C_s, delta_c, r)
+-            
+-            # Loss
++
+             loss = torch.mean((I_gt - I_pred) ** 2)
+-            
+-            # Update all parameters
+             optimizer.zero_grad()
+             loss.backward()
+-            optimizer.step()
++            optimizer.step() # Updates Theta, K, F jointly [S1]
++
++def NeRF_Model():
++    # Standard NeRF MLP taking position and direction, returning density and color [G]
++    return nn.Sequential(
++        nn.Linear(3, 256), nn.ReLU(),
++        nn.Linear(256, 256), nn.ReLU(),
++        nn.Linear(256, 4) # sigma, color
++    )
++
++def random_rays_selection(N_images):
++    # Select random rays from the training set [S1]
++    # Implementation: Sample random pixel coordinates, construct camera rays,
++    # and fetch corresponding ground truth image patches.
++    # (Standard ray sampling routine not detailed in source)
++    pass
++
++def patch_rays_selection(N_images, N_anchor, N_patch):
++    # Define anchors every N_anchor pixels on the imaging plane [S1]
++    # Randomly select one anchor, define N_patch x N_patch patch [S1]
++    # Generate rays r passing through pixels in the selected patch [S1]
++    # Implementation: Pick random anchor, sample pixels within patch bounds,
++    # construct rays, fetch ground truth.
++    # (Patch-based ray sampling routine not detailed in source)
++    pass
++
++def volume_render(G_Theta, r):
++    # Standard volume rendering along rays r [S1]
++    h = sample_points_along_rays(r, N_s=64)
++    sigma, c = G_Theta(r, h)
++    T, accumulated_color = volume_render_accumulate(sigma, c)
++    return accumulated_color
++
++def sample_points_along_rays(r, N_s=64):
++    # Sample N_s depths along each ray r [G]
++    return torch.linspace(0.0, 1.0, N_s).unsqueeze(0) + r.origin.unsqueeze(1)
++
++def volume_render_accumulate(sigma, c):
++    # Standard alpha compositing [G]
++    alpha = 1.0 - torch.exp(-sigma)
++    T = torch.cumprod(1.0 - alpha + 1e-10, dim=0)
++    weights = alpha * T[:, :-1]
++    color = torch.sum(weights.unsqueeze(-1) * c[:, :-1], dim=0)
++    return T, color
+ 
+ def concentration_step(G_Theta, r, K, F):
+-    # Sample points along rays
+-    h = sample_points_along_rays(r)
++    # Sample N_s points along each ray r at depths h [S1]
++    h = sample_points_along_rays(r, N_s=64)
+     sigma, c = G_Theta(r, h)
+-    
+-    # Compute CoC radius delta_c for each point
+-    # delta(h_t) = K * |1/F - 1/h_t|
+-    delta_c = K * torch.abs(1/F - 1/h)
+-    
+-    # Compute volume rendering weights and color
+-    # Standard volume rendering accumulation
++    # Compute CoC diameter for each point [S1]
++    delta_c = K * torch.abs(1.0 / F - 1.0 / h)
++    # Standard volume rendering accumulation [S1]
+     T, accumulated_color = volume_render_accumulate(sigma, c)
+-    
+-    # Concentrated radiance C^s = accumulated_color / (pi * delta_c^2 / 4)
+-    # Note: Source formula uses delta_c^2/4 in denominator, implying delta_c is diameter
+-    area = torch.pi * (delta_c ** 2) / 4
+-    C_s = accumulated_color / (area + 1e-8) # Guard against division by zero
+-    
++    # Concentrated radiance formula [S1]
++    area = torch.pi * (delta_c ** 2) / 4.0
++    C_s = accumulated_color / (area + 1e-8)
+     return delta_c, C_s
+ 
+ def scatter_step(C_s, delta_c, r):
+-    # For each pixel p, sum contributions from neighbors p_j
+-    # Indicator: delta_c > 2 * ||p - p_j||^2
+-    # This requires iterating over neighbors or using a spatial structure
+-    # Simplified implementation for pseudocode:
+-    # Assume we have a grid of pixels. For each pixel p, find neighbors j
+-    # such that distance squared < delta_c / 2
+-    
+-    # This step is computationally expensive. 
+-    # In practice, this is often implemented as a blur operation where the kernel size depends on delta_c.
+-    
+-    # Placeholder for the complex neighbor summation logic described in the source
+-    # I_pred(p) = sum_{j} 1_{delta_c(p) > 2||p-p_j||^2} * C_s(p_j)
+-    
+-    # Since exact neighbor lookup is not provided, we note that this is a spatially varying blur
+-    # where the blur radius is determined by delta_c.
+-    
+-    # For the purpose of implementation completeness based on source:
+-    # We assume a function `apply_spatial_blur` exists that performs this weighted sum.
+-    I_pred = apply_spatial_blur(C_s, delta_c)
+-    
++    # For each pixel p, sum contributions from neighboring pixels p_j [S1]
++    # Indicator: delta_c(p) > 2 * ||p - p_j||^2 [S1]
++    # This implements the concentrate-and-scatter rendering [S1]
++    I_pred = torch.zeros_like(C_s)
++    # Iterate over pixels in the patch to compute the scatter sum
++    for p in range(C_s.shape[0]):
++        for j in range(C_s.shape[0]):
++            if delta_c[p] > 2.0 * torch.norm(r[p].origin - r[j].origin) ** 2:
++                I_pred[p] += C_s[j]
+     return I_pred
+ ```

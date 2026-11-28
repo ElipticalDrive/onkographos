@@ -1,0 +1,200 @@
+--- v001.md
++++ v002.md
+@@ -4,104 +4,108 @@
+ 
+ ## Overview
+-This method defines the input vector for the depth oracle network in DONeRF, which predicts sample locations for the subsequent shading network. It solves the problem of providing sufficient geometric context to a lightweight MLP to accurately classify depth ranges. It is distinguished from standard single-depth prediction by using a classification head over discretized depth bins and by explicitly injecting 3D spatial coordinates of potential sample points as direct network inputs, rather than relying solely on positional encoding.
++This method defines the input vector construction for the depth oracle network in DONeRF, which predicts sample locations for the subsequent shading network. It solves the problem of providing sufficient spatial context to the oracle so it can accurately classify depth ranges, thereby improving the quality of the final rendered image. It sets itself apart from standard NeRF training by explicitly feeding discretized 3D positions and applying a logarithmic transformation to align with the shading network's sampling strategy, rather than relying on positional encoding or single-depth predictions [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of $I$ 3D positions $\mathbf{p}_i \in \mathbb{R}^3$ along the ray, and the ray parameters (origin $\mathbf{o}$, direction $\mathbf{d}$).
+-*   **Output:** The input tensor passed to the first layer of the depth oracle network.
++*   **Input:** A set of $I$ 3D positions along the ray.
++*   **Output:** The input vector passed to the first layer of the depth oracle network.
+ 
+ **Data Structures:**
+-The oracle input consists of the raw 3D coordinates of $I$ points. No positional or Fourier encoding is applied to these inputs [S1].
++*   **Positions:** A list or array of $I$ 3D coordinates. Each coordinate corresponds to the center of a discretized depth range.
++*   **Encoding:** No positional or Fourier encoding is applied to these inputs [S1].
+ 
+ **Steps:**
+-1.  **Discretize Depth Range:** Define $N$ discretized depth ranges (bins) along the ray. Let the boundaries of these bins be $z_0, z_1, \dots, z_N$.
+-2.  **Compute Sample Centers:** For each bin $j \in \{0, \dots, N-1\}$, calculate the center depth $c_j = \frac{z_j + z_{j+1}}{2}$.
+-3.  **Logarithmic Transformation:** Apply a logarithmic transformation to the center depths to match the shading network's sampling strategy. The transformed depth is $l_j = \log(c_j)$ [S1].
+-4.  **Compute 3D Positions:** For each transformed depth $l_j$, compute the corresponding 3D position $\mathbf{p}_j$ along the ray:
+-    $$ \mathbf{p}_j = \mathbf{o} + \exp(l_j) \cdot \mathbf{d} $$
+-    *Note: The source states positions are placed at the centers of the discretized depth ranges and transformed logarithmically to work in unison with the shading network [S1].*
+-5.  **Select Input Points:** Select $I$ points from the computed set of positions. The source specifies using $I$ positions provided to the oracle [S1].
+-6.  **Construct Input Tensor:** Concatenate the $I$ 3D positions into a single input vector/tensor. The order corresponds to the discretized depth ranges [S1].
++1.  **Discretize Depth Ranges:** Divide the ray's depth interval into $N$ discrete bins (classification steps).
++2.  **Calculate Centers:** For each bin $i$ (where $i \in [0, N-1]$), calculate the 3D position $p_i$ at the center of the bin.
++3.  **Logarithmic Transformation:** Apply a logarithmic transformation to the depth values of these centers. This aligns the input distribution with the logarithmic sampling strategy used by the shading network [S1].
++    *   Let $d_i$ be the depth of the center of bin $i$.
++    *   The transformed depth is $d'_i = \log(d_i)$ (or equivalent logarithmic scaling consistent with the shading network's implementation) [S1].
++    *   The 3D position $p_i$ is constructed using $d'_i$ and the ray direction.
++4.  **Construct Input Vector:** Concatenate the $I$ transformed 3D positions into a single input vector.
++    *   The number of positions $I$ is a hyperparameter. The final configuration uses $I=128$ [S1].
++    *   The input vector size is $I \times 3$ (assuming 3D coordinates) [S1].
+ 
+ **Parameters:**
+-*   $I$: The number of 3D input positions provided to the oracle. Tested values: $1$ to $128$. The final configuration uses $I=128$ [S1].
+-*   $N$: The number of discretized depth ranges (classification steps). The source varies $N$ in ablation studies but does not specify a fixed default for the input construction itself, other than implying it matches the shading network's sampling [S1].
++*   **$I$ (Number of input positions):** Tested values range from 1 to 128. The optimal value used in the final model is 128 [S1].
++*   **$N$ (Number of samples per ray):** Used for discretization. Tested values: 2, 4, 8, 16 [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Encoding:** Do not use positional or Fourier encoding for these depth oracle inputs. Experiments showed it did not improve results [S1].
+-*   **Ray Unification:** If ray unification is employed, the ray origin and direction should be transformed such that the ray starts from a canonical position (e.g., the origin of a circumscribed sphere) before computing $\mathbf{p}_j$ [S1].
++*   **Positional Encoding:** Experiments showed that using positional or Fourier encoding for depth oracle inputs did not improve results and was therefore omitted [S1].
++*   **Filter Size:** While not part of the input construction itself, note that using an excessively large filter size for neighborhood smoothing can reduce quality by placing samples in empty space [S1].
+ 
+ **Pseudocode:**
+ ```python
+-import numpy as np
+-
+-def construct_oracle_inputs(ray_origin, ray_direction, num_bins, num_inputs):
++def construct_oracle_inputs(ray_origin, ray_direction, near, far, num_bins, num_inputs):
+     """
+     Constructs the input vector for the DONeRF depth oracle.
+     
+     Args:
+-        ray_origin: (3,) array, origin of the ray.
+-        ray_direction: (3,) array, normalized direction of the ray.
++        ray_origin: 3D vector, origin of the ray.
++        ray_direction: 3D vector, direction of the ray (normalized).
++        near: float, near plane distance.
++        far: float, far plane distance.
+         num_bins: int, number of discretized depth ranges (N).
+         num_inputs: int, number of 3D positions to provide (I).
+         
+     Returns:
+-        input_tensor: (I, 3) array, the 3D positions to feed into the oracle.
++        numpy array of shape (num_inputs, 3), the input vector.
+     """
+-    # 1. Define depth boundaries. 
+-    # Note: The source does not specify the exact depth range [z_min, z_max].
+-    # This is a placeholder for the scene-specific depth bounds.
+-    z_min = 0.0 # Not given in the sources.
+-    z_max = 10.0 # Not given in the sources.
++    # Step 1: Discretize depth ranges
++    # Create num_bins evenly spaced depth values in log space to match shading network
++    # Note: The source mentions logarithmic transformation on classification steps.
++    # We assume the bins are defined in log-depth space for uniformity with the shading network.
+     
+-    z_boundaries = np.linspace(z_min, z_max, num_bins + 1)
++    # Calculate log-depth bounds
++    log_near = np.log(near)
++    log_far = np.log(far)
+     
+-    # 2. Compute centers of discretized depth ranges
+-    centers = (z_boundaries[:-1] + z_boundaries[1:]) / 2.0
++    # Create num_bins intervals in log space
++    log_depths = np.linspace(log_near, log_far, num_bins + 1)
+     
+-    # 3. Logarithmic transformation
+-    # The source states: "perform the same logarithmic transformation on the classification steps"
+-    # to work in unison with the shading network's logarithmic sampling.
+-    log_centers = np.log(centers)
++    # Step 2: Calculate centers of discretized depth ranges
++    # Centers are the midpoints of the log-depth intervals
++    log_centers = (log_depths[:-1] + log_depths[1:]) / 2.0
+     
+-    # 4. Compute 3D positions
+-    # p_j = o + exp(l_j) * d
+-    # We need to select num_inputs points. 
+-    # The source says "Supply 3D positions along the ray... Place those at the centers".
+-    # It does not explicitly state how to select I points from N bins if I != N.
+-    # However, it tests I in [1, 128] and N in [2, 4, 8, 16].
+-    # Assuming we use the first I bins or sample uniformly if I < N.
+-    # Given the ablation "providing multiple samples... adds 1 dB", it implies using distinct points.
+-    # We will assume we use the first min(I, N) points, or if I > N, we might repeat or interpolate.
+-    # The source does not specify the selection strategy when I != N.
+-    # We assume I <= N for simplicity, or that I is the number of bins used.
+-    # Actually, the source says "number of 3D input positions (I = [1,128])".
+-    # And "vary the number of samples per ray N = [2,4,8,16]".
+-    # It is likely I corresponds to the number of bins N, or I is a subset.
+-    # Let's assume we use the first I points if I <= N, or all N if I > N?
+-    # The most logical interpretation for "input construction" is that the oracle receives I points.
+-    # If I < N, we subsample. If I > N, we might need more points.
+-    # The source does not give a formula for subsampling.
+-    # We will assume we use the first I points if I <= N.
++    # Convert log-depths back to linear depth for 3D position calculation
++    # Assuming exponential mapping: depth = exp(log_depth)
++    centers_depth = np.exp(log_centers)
+     
+-    num_points_to_use = min(num_inputs, num_bins)
+-    selected_log_centers = log_centers[:num_points_to_use]
++    # Step 3: Calculate 3D positions
++    # p_i = ray_origin + ray_direction * centers_depth[i]
++    # We need to select num_inputs positions from these centers.
++    # The source implies providing multiple samples along the ray.
++    # If num_inputs > num_bins, we might repeat or interpolate, but typically num_inputs <= num_bins or 
++    # the source implies using the centers directly. 
++    # Given I=128 and N tested up to 16, there is a discrepancy. 
++    # Re-reading: "vary the number of samples per ray N = [2,4,8,16]" and "number of 3D input positions (I = [1,128])".
++    # It is likely that the oracle inputs are a subset or specific selection of the ray, 
++    # or the "classification steps" refer to the output bins, while inputs are specific query points.
++    # However, the text says: "Place those at the centers of the discretized depth ranges".
++    # If I > N, we must have more inputs than bins. 
++    # Let's assume the standard case where inputs are drawn from the discretized ranges.
++    # If I > N, we might use finer discretization for inputs or repeat. 
++    # Given the ambiguity, we will assume the inputs are the centers of the bins used for classification.
++    # If I != N, we adjust the discretization for the input construction specifically.
+     
+-    # Compute 3D positions
+-    # exp(log_centers) gives the depth distance along the ray
+-    depths = np.exp(selected_log_centers)
++    # Let's assume the input construction uses its own discretization if I != N, 
++    # or simply selects I points from the N bins. 
++    # The most robust interpretation: The oracle predicts N bins. The input provides I context points.
++    # The text says "Place those at the centers of the discretized depth ranges".
++    # This implies the input points ARE the centers of the ranges.
++    # Therefore, I should likely equal N, or the "discretized depth ranges" for input are different from output bins.
++    # However, the ablation varies I and N independently.
++    # Let's assume the input positions are calculated based on I points, logarithmically spaced.
+     
+-    # p = o + depth * d
+-    input_tensor = ray_origin[np.newaxis, :] + depths[:, np.newaxis] * ray_direction[np.newaxis, :]
++    # Recalculate centers for I points
++    log_input_depths = np.linspace(log_near, log_far, num_inputs + 1)
++    log_input_centers = (log_input_depths[:-1] + log_input_depths[1:]) / 2.0
++    input_depths = np.exp(log_input_centers)
+     
+-    # If num_inputs > num_bins, we need to handle the remaining inputs.
+-    # The source does not specify. We pad with zeros or repeat?
+-    # Given "Not given in the sources", we leave this as a comment.
+-    if num_inputs > num_bins:
+-        # Placeholder: The source does not specify how to handle I > N.
+-        # We assume this case is not used or handled by the caller.
+-        pass
+-        
+-    return input_tensor
++    # Calculate 3D positions
++    positions = ray_origin + ray_direction * input_depths[:, np.newaxis]
++    
++    # Step 4: Return the positions as the input vector
++    # No encoding is applied [S1]
++    return positions
+ ```
+ 
+@@ -109,13 +113,12 @@
+ 
+ ## Operating characteristics
+-*   **Performance Gain:** Providing multiple samples along the ray as input adds 1 dB to PSNR compared to single-point input [S1].
+-*   **Comparison:** Using a classification network (oracle) with these inputs adds 0.6 dB–1.5 dB to PSNR compared to predicting a single depth value [S1].
+-*   **Complexity:** The input construction is computationally negligible. The source states these additions come at "virtually no inference cost" [S1].
+-*   **Memory:** The input size is $I \times 3$ floats. With $I=128$, this is 384 floats per ray.
++*   **Performance Gain:** Providing multiple samples along the ray as input adds approximately 1 dB to PSNR [S1].
++*   **Comparison:** Using this classification-based oracle input (instead of predicting a single depth value) adds 0.6 dB–1.5 dB to PSNR [S1].
++*   **Cost:** These improvements come at no inference cost for filtering or virtually no inference cost for ray unification and multi-input [S1].
++*   **Limitations:** Using an even larger filter size (related to context, not directly input construction) may reduce overall quality as samples are placed in empty space [S1].
+ 
+ ## Background
+-*   **Origin:** This method is part of the DONeRF paper by [S1] (2021).
+-*   **Development:** The authors conducted an ablation study (Section 5.3) to determine the optimal filter sizes and depth oracle inputs. They found that ray unification, classification, and multi-point input all contributed to quality improvements [S1].
+-*   **Usage:** Used in the DONeRF architecture for real-time neural rendering [S1].
++*   **Origin:** This method is part of the DONeRF architecture, introduced in "DONeRF: Towards Real‐Time Rendering of Compact Neural Radiance Fields using Depth Oracle Networks" [S1].
++*   **Development:** It was developed to ease the task of the oracle network by supplying 3D positions along the ray, placed at the centers of discretized depth ranges, and aligning them with the shading network's logarithmic sampling [S1].
+ 
+ ## Sources

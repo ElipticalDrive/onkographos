@@ -1,0 +1,2627 @@
+Neural Field Thermal Tomography: A Differentiable
+Physics Framework for Non-Destructive Evaluation
+arXiv:2603.11045v2 [cs.LG] 13 May 2026
+Tao Zhong1 , Yixun Hu1 , Dongzhe Zheng1 , Aditya Sood1 , Christine Allen-Blanchette1
+1
+Princeton University
+{tzhong, ca15}@princeton.edu
+Abstract
+Inverse problems for stiff parabolic partial differential equations (PDEs), such as
+the inverse heat conduction problem (IHCP), are severely ill-posed: the forward
+map rapidly damps high-frequency interior structure before it reaches the boundary.
+Soft-constrained physics-informed neural networks (PINNs), which embed the
+PDE as a residual penalty, suffer from gradient pathology in this regime and
+tend to fit boundary measurements while leaving the interior field essentially
+untouched. We propose Neural Field Thermal Tomography (NeFTY), a hardconstrained neural field framework for label-free three-dimensional inverse heat
+conduction. NeFTY represents the unknown diffusivity as a continuous coordinatebased neural network, and at every optimization step passes the candidate field
+through a differentiable implicit-Euler heat solver with harmonic-mean interface
+flux, so that the governing PDE holds exactly on the discretization rather than as
+a soft penalty. Adjoint gradients propagate the surface reconstruction error back
+to the network weights at solver-level memory cost, making test-time inversion
+tractable on a single GPU. Across synthetic 3D benchmarks, NeFTY substantially
+outperforms soft-constrained PINN variants and a voxel-grid baseline on label-free
+volumetric recovery, and it transfers to real thermography data, surpassing classical
+signal-processing baselines in both defect segmentation and depth estimation.
+Additional details at cab-lab-princeton.github.io/nefty.
+1
+Introduction
+Inverse problems for stiff parabolic partial differential equations (PDEs) are central to scientific
+machine learning, yet they remain among the hardest to solve from observations alone. The forward
+heat operator is compact and strongly smoothing: high spatial frequencies in the interior are damped
+before they reach the boundary, so the map from internal material properties to surface measurements
+destroys much of the information needed to invert it [16, 19]. Soft physics-informed losses can
+fit boundary data without recovering the underlying field, because their gradients become poorly
+conditioned and dominated by the surface signal in this stiff regime [44, 55]. A complementary line
+of work in differentiable physics builds the discretized solver directly into the optimization loop, so
+that the governing equations hold as a hard constraint at every step rather than as a residual penalty in
+the objective [11, 23, 24, 37]. We apply this paradigm to the canonical case of the three-dimensional
+inverse heat conduction problem (IHCP).
+Non-destructive testing (NDT) by pulsed thermography is the working example throughout (Figure 1).
+A pulsed laser deposits energy on the specimen surface, and a high-speed camera records the
+subsequent surface temperature decay; subsurface delaminations, voids, and inclusions perturb
+the diffusive flux and leave faint thermal contrast on the boundary [28, 41, 46]. Reconstructing the
+volumetric thermal diffusivity field α(x, y, z) from these surface signals is the inverse heat conduction
+problem. Unlike hyperbolic ultrasonic or radar imaging [4, 54], the parabolic forward map damps
+Preprint.
+internal features rapidly with depth, so small surface
+perturbations can correspond to large interior variations
+and the inverse map becomes severely ill-posed [29, 43].
+Existing approaches do not address this volumetric inversion well. Classical thermography pipelines, including
+Thermographic Signal Reconstruction (TSR) [49, 50],
+Pulsed Phase Thermography (PPT) [32], and the Virtual Wave Concept (VWC) [1, 3], transform the temporal data into domains where defect contrast is enhanced, but they reduce to 1D pixel-wise inversions that
+ignore lateral diffusion and bias estimates for shallow or
+low-aspect-ratio defects [42]. Soft-constrained physicsinformed neural networks (PINNs) target the volumetric
+problem in principle, yet they inherit the gradient pathology that limits these methods in stiff transient diffusion:
+the PDE residual is high and rugged, so the optimizer
+makes progress on the surface-data term while the diffusivity network saturates at a near-trivial field that explains the boundary measurements without recovering
+the bulk [55]. Supervised volumetric learning sidesteps
+these issues but requires 3D ground-truth labels that are
+unavailable in real NDT.
+Figure 1: IHCP setup. A high-speed
+camera measures the transient surface temperature following pulsed laser heating;
+NeFTY reconstructs the 3D subsurface diffusivity field from these measurements.
+To this end, we introduce Neural Field Thermal Tomography (NeFTY), a hard-constrained neural field
+framework for label-free 3D inverse heat conduction. NeFTY represents the unknown diffusivity as a
+continuous coordinate-based neural network [34, 52] with positional encoding, frequency annealing,
+and a bounded output. At every optimization step, the candidate field is passed through a differentiable
+implicit-Euler heat solver with harmonic-mean interface flux, so the heat equation holds exactly on
+the discretization rather than as a soft penalty. Adjoint gradients propagate the surface reconstruction
+error back to the network weights at solver-level memory cost, making test-time inversion tractable
+on a single GPU. On synthetic homogeneous and layered settings, NeFTY reaches volumetric IoU
+of 0.45 and 0.37, while soft-constrained PINN variants and a voxel-grid baseline remain at or near
+zero, and it outperforms classical thermography baselines on real PVC thermal data in both 2D defect
+segmentation and 2.5D depth recovery.
+We summarize our contributions as follows:
+• We propose a hard-constrained neural field formulation for label-free 3D inverse heat conduction
+from surface-only thermal sequences, combining a continuous coordinate-based prior with a
+differentiable implicit heat solver and adjoint gradients.
+• We give an empirical and theoretical account of why soft-constrained PINNs fail on stiff parabolic
+inverse problems, demonstrating across several modern PINN variants that low surface error does
+not imply correct volumetric recovery.
+• We carry out a comprehensive evaluation that pairs synthetic 3D label-free reconstruction with
+real PVC thermal data, soft-constrained PINN baselines, frequency- and edge-domain diagnostics,
+component ablations, and a wall-clock and memory analysis of the adjoint solver.
+2
+Related Work
+Thermographic Non-Destructive Testing traditionally extracts subsurface defect information
+through signal-processing transforms applied to surface temperature decays. Thermographic Signal
+Reconstruction (TSR) [49, 50] fits log-time polynomials to enhance defect contrast, Pulsed Phase
+Thermography (PPT) [9, 32] maps the decays into a frequency phase domain that suppresses noise
+and emissivity variations, and the Virtual Wave Concept (VWC) [1, 3, 48] deconvolves the diffusive forward map into a pseudo-wave for depth estimation. Quantitative-thermography refinements
+push these heuristics further with calibrated depth correlations [31, 42], but the underlying inverse
+mappings remain pixel-wise and amplify high-frequency measurement noise. In parallel, supervised
+convolutional pipelines based on U-Net [15, 36, 45, 51] learn defect masks directly from thermal
+sequences, and several recent surveys [28, 41, 46] catalogue this growing detection-only literature.
+Both lines stop short of the volumetric inverse problem: signal-processing transforms ignore lateral
+2
+heat flux, and supervised models require 3D diffusivity labels that are unavailable in real NDT.
+NeFTY recovers a full 3D diffusivity field directly from the surface sequence, without volumetric
+labels and without 1D pixel-wise approximations.
+Physics-Informed Neural Networks embed governing equations as soft penalties alongside data
+terms in scientific machine learning. Standard PINNs [5, 29, 44] jointly minimize boundary fit and
+a PDE residual, and a series of variants attack the resulting optimization pathologies: separable
+architectures in SPINN [8] scale up collocation throughput, temporal-causality weighting in CausalPINN [56] stabilizes long-horizon transients, and dual-cone gradient descent in DCGD [25] resolves
+residual-versus-data gradient conflicts. Diagnostic studies [20, 55] nonetheless trace recurring
+failures to the soft-penalty formulation itself, where stiff PDE residuals dominate the data signal
+and induce spectral bias against deep high-frequency features even with adaptive loss balancing
+such as GradNorm [7]. A complementary line replaces the penalty with a differentiable solver:
+discretize-then-optimize [37], differentiable PDE engines [2, 23, 24], and end-to-end differentiable
+physics for control and robotics [11, 12, 53, 61] all enforce the governing equations exactly at every
+optimization step. This solver-in-the-loop paradigm has yet to be applied to thermal IHCP. NeFTY
+closes the gap by composing a coordinate-based diffusivity field with a differentiable implicit-Euler
+heat solver, so the heat equation holds as a hard constraint at every iteration and gradients propagate
+through a numerically stable adjoint.
+Coordinate-based Neural Fields parameterize a continuous signal as a multilayer perceptron (MLP)
+over spatial coordinates, typically combined with positional encoding or sinusoidal activations.
+SIREN [52] and NeRF [34] established neural fields as a high-frequency representation prior for
+visual signals, and deformable extensions such as Nerfies [38] broadened the class of recoverable
+scenes. Scientific imaging has begun to adopt the same representation for tomographic and fieldreconstruction problems, including X-ray computed tomography [60, 62], dynamic medical imaging
+via ProxNF [30], and fluid scalar fields with FluidNeRF [27]. These works contribute a continuous,
+mesh-free function space, but the representation alone is agnostic to physics: nothing in the parameterization enforces that the reconstructed field obeys a governing PDE. NeFTY treats the neural
+field strictly as the diffusivity prior and couples it with a differentiable heat solver, so the scientific
+contribution rests on hard physics constraints rather than on the representation itself.
+3
+Forward Model, Ill-Posedness, and Soft-Constraint Pathology
+3.1
+Forward model and effective-diffusivity parameterization
+The conservation form of transient heat conduction in an isotropic medium is posed on a bounded
+Lipschitz domain Ω ⊂ R3 , with boundary ∂Ω and observation window Γobs ⊆ ∂Ω, as follows:
+
+ρ(x)Cp (x) ∂t T = ∇ · k(x) ∇T + Q(x, t),
+x ∈ Ω, t ∈ (0, tend ],
+(1)
+with mass density ρ, specific heat capacity Cp , thermal conductivity k, and source Q (Q ≡ 0 post
+flash). Dividing (1) by ρCp and applying the product rule gives the equivalent diffusivity form
+
+
+k(x)
+∂t T = ∇ · α(x)∇T − k(x) ∇T · ∇ ρC1 p ,
+α(x) :=
+,
+(2)
+ρ(x)Cp (x)
+valid when ρ, Cp ∈ C 1 (Ω) are strictly positive (Appendix A.1). When ρCp is piecewise-constant
+with bulk and defect phases separated by an interface set Σ, the second term in (2) vanishes a.e. on
+Ω \ Σ and concentrates as a singular flux jump on Σ that a finite-volume grid cannot represent [40].
+NeFTY therefore parameterizes a single effective field α(x) obeying ∂t T = ∇ · (α∇T ) on Ω \ Σ
+and recovers continuity of the reduced α-flux at cell faces through the harmonic mean.
+Proposition 1 (Harmonic mean as discrete interface continuity for the effective-α flux). For a onedimensional cell pair with constant cell-centered diffusivities αi , αi+1 , cell spacing ∆x, cell-centered
+temperatures Ti , Ti+1 , and effective α-flux jα := −α∂x T , the unique flux satisfying continuity across
+the cell face xi+1/2 is jα = −ᾱi+1/2 (Ti+1 − Ti )/∆x with ᾱi+1/2 = 2αi αi+1 /(αi + αi+1 ).
+The proof, multi-dimensional consequence, and high-contrast behavior are in Appendix A; synthetic
+and real-PVC initial and boundary condition settings are specified in Appendix A.5.
+3.2
+The inverse problem and its ill-posedness
+The IHCP recovers α from noisy surface measurements T̂ (x, ti ), x ∈ Γobs , ti ∈ {t1 , . . . , tM } ⊂
+(0, tend ]. Let K(α) := Tα |Γobs ×(0,tend ) denote the parameter-to-observation operator (with Tα the
+3
+Homo. α (3D)
+1
+10
+0
+α∗ = arg min J (α),
+J (α) =
+X5
+5
+Z
+80
+Y
+60
+10 0
+Defective α (3D) Init. Surf. Temp Final Surf. Temp
+α∈A
+M
+X
+Init. Surf. Temp Final Surf. Temp
+2
+K(α)(·, ti ) − T̂ (·, ti ) Γ
+obs
++ λR(α),
+1
+10
+0
+i=1
+X5
+5
+Z
+40
+Temperature
+solution of (2) under fixed initial and lateral boundary
+conditions) acting on the admissible set A ⊂ H 1 (Ω) ∩
+L∞ (Ω). The reconstruction objective is
+20
+Y
+0
+10 0
+(3)
+with ∥ · ∥Γobs the L2 norm over Γobs , R a regularization Figure 2: Empirical ill-posedness. Disfunctional, and λ > 0. The IHCP is widely recognized as tinct interiors yield nearly indistinguishone of the most severely ill-posed problems in mathemat- able surface profiles, illustrating Prop. 2.
+ical physics [14, 19, 33]; we make the failure quantitative.
+Proposition 2 (Compactness and algebraic singular-value decay). Let α0 > 0 be a constant background diffusivity with ∇Tα0 ∈ L∞ (Ω × (0, tend )). The Fréchet derivative dKα0 : H 1 (Ω) →
+L2 (Γobs × (0, tend )) is bounded and compact, with singular values σn ≤ C (1 + λn )−1/2 , where
+{λj }j≥0 are the Laplacian eigenvalues on Ω under the imposed boundary conditions; on the slab,
+Weyl’s law gives σn ≲ n−1/3 .
+†
+Corollary 1 (Hadamard ill-posedness). The pseudo-inverse dKα
+is unbounded, with σn−1 ≥ C −1 (1+
+0
+1/2
+λn )
+amplifying noise along the n-th left singular vector.
+Proof in Appendix B; Figure 2 visualizes the smoothing. NeFTY counters this with a neural-field
+prior plus frequency annealing (Section 4) and a total-variation penalty R(α).
+3.3
+Soft-constraint pathology in stiff parabolic inversion
+A standard PINN approximates the inverse map by jointly optimizing two networks: a temperature
+surrogate Tϕ (x, t) with parameters ϕ and a diffusivity surrogate αθ (x) with parameters θ, against
+LPINN = ∥Tϕ − T̂ ∥2Γobs +λPDE ∥∂t Tϕ − ∇ · (αθ ∇Tϕ )∥2Ω +λIC ∥Tϕ (·, 0) − T0 ∥2Ω ,
+|
+{z
+}
+{z
+}
+|
+|
+{z
+}
+LPDE
+Ldata
+(4)
+LIC
+with weights λPDE , λIC > 0 and T0 the prescribed initial temperature field. Because Tϕ
+is parameterized by ϕ alone, ∇θ Ldata = ∇θ LIC = 0, so the diffusivity update reduces to
+∇θ LPINN = λPDE ∇θ LPDE , with magnitude controlled pointwise by the Laplacian ∆Tϕ of the
+under-fitted temperature surrogate. Appendix C gives the full derivation and shows that adaptive
+loss balancing (GradNorm), separable temperature parameterizations (SPINN), causal weighting
+(Causal-PINN), and gradient-conflict resolution (DCGD) all preserve this decoupling.
+The decoupling is structural: surface observations cannot reach θ except indirectly through the
+residual penalty. Combined with the unbounded amplification in Corollary 1, this gives a plausible
+mechanism for the well-documented PINN training pathology in which LPDE shrinks while αθ
+remains near a trivial constant [20, 55], which we confirm empirically across all four PINN variants in
+Section 5. NeFTY removes the soft constraint at its source, so surface data propagates to αθ through
+the adjoint of the discretized heat operator.
+4
+Method
+NeFTY recovers the diffusivity field by directly minimizing the reconstruction objective J of
+equation (3), with the heat equation enforced as a hard constraint at every optimization step rather
+than as a soft residual penalty. The framework couples three components, illustrated in Figure 3: (i) a
+continuous coordinate-based parameterization αθ (x) that supplies a low-dimensional differentiable
+prior, (ii) a finite-volume implicit-Euler discretization of the bulk equation (2) whose interface flux is
+restored by the harmonic-mean stencil of Proposition 1, and (iii) a discrete adjoint that propagates
+the surface-fidelity gradient back to θ through the same sparse system used in the forward pass. By
+construction, the discrete temperature at each step is the solution of the discretized PDE driven by αθ ,
+so the gradient decoupling of Section 3.3 cannot occur.
+4
+Gradient Update
+𝑡!
+𝑡"
+Forward
+Pass
+𝑡$
+𝑡"
+𝑡$
+Adjoint
+Gradient
+(𝑥, 𝑦, 𝑧)
+Grid Query
+𝑡#
+MLP Network
+Diffusivity Field
+Gaussian
+Heat Input
+NEURAL FIELD
+Predicted Sequence
+DIFFERENTIABLE PHYSICS SOLVER
+Ground Truth Sequence
+OPTIMIZATION
+Figure 3: NeFTY pipeline. A coordinate MLP fθ maps each grid node x through a frequencyannealed positional encoding γ(·) into a bounded diffusivity αθ (x) (§4.1). A differentiable implicitEuler solver with harmonic-mean coefficients evolves the temperature Tn on a Cartesian grid (§4.2).
+Surface frames are compared to measurements; the adjoint state µn is propagated backward through
+the same sparse system to assemble the gradient on θ at constant memory in time (§4.3).
+4.1
+Neural diffusivity field
+NeFTY parameterizes the unknown effective diffusivity αθ : Ω → R>0 as a coordinate multilayer
+perceptron (MLP) fθ : Rdγ → R whose input is lifted through a Fourier feature map γ : R3 → Rdγ :
+
+γ(x) = sin(20 πx), cos(20 πx), . . . , sin(2N −1 πx), cos(2N −1 πx) ,
+(5)
+of bandwidth N . The encoding combats the spectral bias of plain MLPs and lets the network represent
+the sharp interfaces characteristic of subsurface defects [34, 52]. To stabilize the high-frequency
+components against the algebraic noise amplification of Corollary 1, we adopt the cosine frequencyannealing schedule of Park et al. [38], gradually unmasking encoding bands during training. The
+network output is hard-bracketed to the physically admissible range
+
+αθ (x) = αmin + (αmax − αmin ) σ fθ (γ(x)) ,
+(6)
+with σ(·) the logistic sigmoid; the bounds αmin , αmax > 0 are chosen to span the bulk-to-defect
+contrast of the application without inducing ill-conditioning in the R
+discrete system below. We
+instantiate the regularizer in (3) as the isotropic total variation R(αθ ) = Ω ∥∇αθ ∥ [47], consistent
+with the piecewise-constant defect structure of the effective-diffusivity model in Appendix A. The
+full architecture, the cosine annealing schedule, and the discrete TV form are given in Appendix D.1.
+4.2
+Hard-constrained differentiable physics
+We discretize the bulk equation ∂t T = ∇ · (α∇T ) on a uniform Cartesian grid covering Ω with
+spacings ∆x, ∆y, ∆z along the three axes and Nt time steps of size ∆t aligned with the camera
+frame rate. Let Tn ∈ RNg denote the discrete temperature at step n on the Ng grid nodes, and let
+ᾱi+1/2 denote the harmonic-mean face-centered diffusivity from Proposition 1. The second-order
+finite-volume diffusion operator L(αθ ) ∈ RNg ×Ng acts at an interior node by
+
+1 
+[L(αθ )T]i,j,k =
+ᾱi+1/2 (Ti+1,j,k − Ti,j,k ) − ᾱi−1/2 (Ti,j,k − Ti−1,j,k ) + (y-, z-terms),
+2
+∆x
+(7)
+with lateral periodic and through-thickness adiabatic conditions (Appendix A.5) closing the stencil
+at the boundary. The harmonic-mean coefficient is the unique discrete realization of effectiveflux continuity at interior faces for the single-α model (Proposition 1); an arithmetic mean would
+spuriously allow heat to leak across the interface [40]. All discrete temperatures here are interpreted
+as deviations from the ambient temperature (Appendix A.5), so the implicit-Euler step is affine-free.
+To decouple the time step from the diffusivity contrast, we integrate in time with the unconditionally
+stable implicit Euler scheme [10], advancing Tn to Tn+1 through the sparse linear system
+A(αθ ) Tn+1 = Tn ,
+A(αθ ) := I − ∆t L(αθ ).
+(8)
+The matrix A(αθ ) is sparse, symmetric positive-definite for our boundary conditions, and depends
+on θ only through αθ . We solve (8) on the GPU through a fixed number K of unrolled Jacobi
+iterations [22], expressed as stencil convolutions to fit seamlessly into autodiff frameworks [39].
+The full discretization, choice of K, and Jacobi update rule are given in Appendix D.2. At every
+optimization iteration, the temperature Tn+1 produced by (8) satisfies the discrete heat equation up
+to the iterative solver tolerance.
+5
+4.3
+Adjoint optimization
+Composing the implicit Euler recurrence (8) from T0 defines Tn = Tn (αθ ) implicitly, hence the
+discrete analogue Kdisc of the parameter-to-observation map. Let ni ∈ {1, . . . , Nt } be chosen so that
+tni = ti for each measurement time ti , and let ΠΓ : RNg → RNΓ denote the row-selector matrix
+that extracts the NΓ surface samples on Γobs . NeFTY minimizes the discrete reconstruction objective
+min Jdisc (θ) =
+θ
+M
+X
+ΠΓ Tni (αθ ) − T̂i
+2
++ λ R(αθ ),
+(9)
+i=1
+the discretization of (3) with ∥ · ∥ the standard Euclidean norm on RNΓ (equal to the discrete
+L2 (Γobs ) norm up to the lateral quadrature weight ∆x∆y, which we absorb into the regularization
+weight λ > 0), and R instantiated as the discrete total-variation regularizer of Appendix D.1; we
+keep the symbol λ from (3) now in its TV-weight role. Because Tn is defined implicitly by the
+state equation (8), gradients dJdisc /dθ obtained by storing the full forward trajectory and applying
+backpropagation through time cost O(Ng Nt ) memory, which is prohibitive for the Ng ≈ 105 ,
+Nt ≈ 102 regime of pulsed thermography. We use the discrete adjoint method instead [6, 37].
+Treat (8) as the constraint Fn (Tn , Tn−1 , αθ ) := A(αθ )Tn − Tn−1 = 0 for n = 1, . . . , Nt , and
+introduce adjoint variables µn as Lagrange multipliers for each step. Setting the total derivative of
+the augmented Lagrangian with respect to Tn to zero yields the backward-in-time recurrence
+⊤
+A(αθ )⊤ µn = µn+1 + ∂ℓn /∂Tn ,
+µNt +1 = 0,
+(10)
+where ℓn collects the data-fidelity terms in (9) that depend on Tn (nonzero only at measurement
+frames n ∈ {n1 , . . . , nM }). The adjoint at step n uses the transpose of the same sparse A that drives
+the forward solve, so a single backward sweep with the same Jacobi inner loop yields all µn at the
+cost of one forward pass. The parameter gradient is then assembled by
+N
+t
+X
+∂(λR)
+∂(L(αθ )Tn ) ∂αθ
+dJdisc
+(µn )⊤
+=
++ ∆t
+,
+dθ
+∂θ
+∂αθ
+∂θ
+n=1
+(11)
+where ∂αθ /∂θ is the standard MLP Jacobian. Because (10) requires only µn+1 and Tn , the backward
+sweep has constant memory in Nt . The full Lagrangian construction, the derivation of (10)–(11),
+and the consistency with the continuous adjoint of the bulk equation are given in Appendix D.3; the
+implementation hyperparameters (depth, width, encoding bandwidth N , grid resolution, Jacobi count
+K, and optimizer schedule) are catalogued in Appendix D.4. Crucially, the data-side gradient on θ
+is non-vanishing precisely because ΠΓ Tni is now a function of θ, restoring the dependency chain
+θ → αθ → Tn → Jdisc that the soft-PINN formulation of Section 3.3 broke.
+5
+Experiments
+5.1
+Setup
+Datasets. Synthetic data are generated with PhiFlow [23], a finite-volume engine independent of
+the implicit-Euler Jacobi solver of Section 4.2, so reconstruction is not subject to inverse crime; the
+real PVC datasets [58, 59] provide only 2D defect masks and discrete defect depths from CAD, so
+real-world evaluation uses projected 2D masks and 2.5D depth annotations rather than 3D volumetric
+labels. The synthetic benchmark contains 1,000 samples on the unitless slab Ω = [0, 10]2 × [0, 1] at
+64 × 64 × 16 resolution, 100 frames at ∆t = 0.05, and one to four subsurface defects per sample,
+split into a homogeneous and a layered configuration. Full data-generation procedure, dimensional
+analysis, and compute resources are in Appendix E.
+Baselines. On synthetic data we compare to direct grid optimization (Grid Opt.), PINN [44] with
+GradNorm [7], SPINN [8], Causal-PINN [56], DCGD [25], and a Sound-Only U-Net [45] that trains
+on only defect-free samples and probes data-driven generalization to out-of-distribution defects.
+On real PVC data we additionally compare to the classical thermography heuristics PPT [26, 32]
+and TSR [49, 50] and to a Swin-UNETR [21] trained on the synthetic benchmark and transferred
+zero-shot. Implementation details for every baseline are in Appendix F.
+Metrics. Synthetic 3D reconstruction is evaluated by Mean Squared Error (MSE), Peak Signal-toNoise Ratio (PSNR), Structural Similarity (SSIM) [57], and volumetric Intersection over Union (IoU;
+6
+Table 1: Label-free 3D thermal diffusivity reconstruction on synthetic 1,000-sample benchmark
+(mean ± 95% CI). ↑ higher is better, ↓ lower is better. Best label-free entry per metric in bold.
+PINN [44], Causal-PINN [56], and DCGD [25] αθ rows coincide because all three collapse to the
+same near-trivial constant; see Section 5.2 and Appendix C.
+H OMOGENEOUS
+L AYERED
+M ETHOD
+MSE (10−4 ) ↓
+PSNR ↑
+SSIM ↑
+IOU ↑
+MSE (10−4 ) ↓
+PSNR ↑
+SSIM ↑
+IOU ↑
+Data-driven (zero-shot)
+U-N ET (S OUND -O NLY ) [45]
+14.73 ± 3.83
+14.83 ± 0.71
+0.83 ± 0.02
+0.00 ± 0.00
+10.17 ± 2.21
+15.42 ± 0.98
+0.88 ± 0.02
+0.00 ± 0.00
+Label-free
+PINN [7, 44]
+SPINN [8]
+C AUSAL -PINN [56]
+DCGD [25]
+G RID O PT.
+N E FTY (O URS )
+208.4 ± 26.2
+32.71 ± 10.02
+208.4 ± 26.2
+208.4 ± 26.2
+12.61 ± 4.20
+3.66 ± 1.31
+−0.24 ± 0.06
+9.12 ± 0.93
+−0.24 ± 0.06
+−0.24 ± 0.06
+13.99 ± 1.18
+18.48 ± 0.53
+0.04 ± 0.00
+0.45 ± 0.06
+0.04 ± 0.00
+0.04 ± 0.00
+0.56 ± 0.04
+0.77 ± 0.02
+0.015 ± 0.003
+0.001 ± 0.001
+0.015 ± 0.003
+0.015 ± 0.003
+0.04 ± 0.02
+0.45 ± 0.04
+200.4 ± 17.8
+33.84 ± 8.57
+200.4 ± 17.8
+200.4 ± 17.8
+15.01 ± 2.97
+9.26 ± 2.81
+1.42 ± 0.27
+9.71 ± 0.77
+1.42 ± 0.27
+1.42 ± 0.27
+13.27 ± 0.88
+15.88 ± 0.79
+0.04 ± 0.00
+0.53 ± 0.07
+0.04 ± 0.00
+0.04 ± 0.00
+0.57 ± 0.04
+0.74 ± 0.03
+0.018 ± 0.004
+0.000 ± 0.000
+0.018 ± 0.004
+0.018 ± 0.004
+0.03 ± 0.01
+0.37 ± 0.06
+Figure 4: Homogeneous-setting reconstructions: depth-wise z-slices show NeFTY isolating defect
+outlines at the correct depth while Grid Opt. yields a noisy field and PINN variants converge to
+near-uniform diffusivity.
+defect mask αθ < 0.03). Real PVC results are evaluated by 2D IoU and Dice for defect segmentation
+and by Absolute Relative error (Abs Rel), Root Mean Squared Error (RMSE), and the standard
+depth thresholds δ < 1.25k (k = 1, 2, 3) [13]. Defect Edge F1 and the radial power spectrum of the
+recovered field, both targeting frequency-domain fidelity, are reported as diagnostics in Appendix G.
+Precise definitions for all metrics are catalogued in Appendix E.
+5.2 Synthetic 3D reconstruction
+Table 1 reports the full benchmark; Figures 4 and 5 show representative qualitative reconstructions in
+the homogeneous and layered settings (per-defect-count and per-layer breakdowns are in Appendix G).
+Grid Opt. inverts the same hard PDE constraint as NeFTY but lacks a coordinate-based regularizer:
+it lowers the diffusivity MSE by an order of magnitude relative to the PINN family yet caps IoU
+at 0.04/0.03 with ringing artifacts at defect interfaces. The four soft-constrained PINN variants of
+Section 3.3 fit the surface temperature observations through their Tϕ network but fail volumetrically:
+their αθ networks all saturate to a near-trivial constant with IoU ≤ 0.018, in line with the structural
+decoupling ∇θ Ldata = 0 proven in Appendix C (the bit-identical PINN, Causal-PINN, and DCGD
+αθ rows in Table 1 reflect this same collapse despite differing Tϕ surrogates). NeFTY balances the
+physical consistency of the hard solver with the prior of a continuous neural field, reaching IoU
+0.45/0.37 and PSNR 18.48/15.88 dB.
+7
+Figure 5: Layered-setting reconstructions: NeFTY recovers defects against the stratified bulk,
+whereas Grid Opt. exhibits ringing artifacts and PINN variants again collapse to featureless fields.
+Table 2: Real PVC evaluation:
+NeFTY is the best label-free method
+on every metric for both 2D segmentation [59] and 2.5D depth [58].
+2D SEGM .
+2.5D DEPTH
+M ETHOD
+IOU ↑
+D ICE ↑
+A BS R EL ↓
+δ < 1.25 ↑
+S WIN -UNETR [21]
+PPT [32]
+TSR [50]
+SPINN [8]
+G RID O PT.
+N E FTY (O URS )
+0.085
+0.419
+0.346
+0.050
+0.395
+0.431
+0.151
+0.563
+0.464
+0.086
+0.557
+0.597
+3.131
+3.416
+13.366
+6.737
+0.941
+0.465
+0.052
+0.005
+0.002
+0.002
+0.104
+0.385
+Figure 6: Real PVC reconstruction: NeFTY recovers both
+the defect layout (Row 1) and the depth ordering (Row 2)
+from a single surface IR sequence, while PPT/TSR yield
+coarse depth and SPINN collapses to a near-uniform field.
+Data-fit paradox. The PINN failures co-exist with surface-data fits that are only modestly worse than
+NeFTY’s: vanilla PINN attains a surface PSNR of ∼ 63 dB on Tϕ while its volumetric IoU is 0.01,
+SPINN reaches ∼ 61 dB at IoU 0.000, and NeFTY ∼ 82 dB at IoU 0.45. Under the soft-constraint
+formulation of Eq. (4), low surface error does not translate into correct volumetric structure because
+surface fitting and diffusivity recovery are not coupled through the residual term in the stiff parabolic
+regime (Appendix C.2). Frequency-domain diagnostics in Appendix G (Edge F1 0.470 ± 0.137 for
+NeFTY versus 0.000 for every PINN variant; full radial power spectrum) confirm that NeFTY is the
+only label-free method whose recovered field carries detectable defect-scale gradients.
+5.3
+Real-world PVC validation
+The same NeFTY solver is applied to the PVC datasets after the three physical adaptations of
+Appendix A.5 (near-uniform front-face flash initial condition, centimeter and second-scale Fouriernumber rescaling, convective Robin back-face boundary), with the projection from α̂θ to 2D masks
+and 2.5D depth documented in Appendix H. As reported in Table 2, NeFTY is the best label-free
+method on every metric, with 0.431 IoU and 0.597 Dice for 2D segmentation and 0.465 Abs Rel and
+0.385 δ < 1.25 accuracy for 2.5D depth. The classical heuristics PPT and TSR are competitive on
+segmentation but degrade sharply on depth, since their inversion formulas assume a semi-infinite
+one-dimensional geometry that does not hold on the finite PVC slab (Appendix F.4). The supervised
+Swin-UNETR collapses under the synthetic-to-real domain shift, in contrast to NeFTY’s per-specimen
+8
+Table 3: Ablation of NeFTY: each Table 4: Solver-level efficiency benchmark: our discrete
+row adds one component (H/L = ho- adjoint method (AM) matches the simulation accuracy of aumogeneous/Layered).
+tograd (AD) while reducing peak GPU memory by orders of
+magnitude on a single 64×64×16 sample over 50 time steps.
+VARIANT
+PSNR (H/L) ↑
+I O U (H/L) ↑
+BASE
++ PE
++ PE, FA
++ PE, FA, σ
++ PE, FA, σ, HM
+F ULL ( + TV)
+0.47 / 2.89
+4.17 / 6.15
+8.33 / 8.81
+9.19 / 9.27
+10.95 / 11.26
+18.48 / 15.88
+0.03 / 0.02
+0.09 / 0.09
+0.14 / 0.14
+0.18 / 0.14
+0.24 / 0.22
+0.45 / 0.37
+F WD T IME ( S ) ↓
+B WD T IME ( S ) ↓
+P EAK M EM ↓
+S IM . E RROR ↓
+P HI F LOW (E X )
+P HI F LOW (I M )
+26.36 ± 0.10
+3.26 ± 0.40
+0.87 ± 0.01
+0.76 ± 0.01
+3.26 GB
+275.5 MB
+7.91 × 10−4
+8.47 × 10−4
+O URS (AD)
+O URS (AM)
+1.43 ± 0.04
+0.46 ± 0.00
+1.30 ± 0.02
+0.50 ± 0.00
+18.63 GB
+21.9 MB
+3.73 × 10−8
+3.73 × 10−8
+M ETHOD
+test-time optimization which adapts to the observed data without training labels (Figure 6; full depthmetric breakdown in Appendix H.4).
+5.4
+Ablations
+Table 3 traces the contribution of each NeFTY component: positional encoding (PE) and frequency
+annealing (FA) push IoU from 0.03 to 0.14 by stabilizing high-frequency optimization against
+the noise amplification of Corollary 1; the bounded sigmoid output (σ) prevents drift into the
+ill-conditioned regime αθ → 0; the harmonic-mean coefficient (HM, Proposition 1) restores effectiveflux continuity at high-contrast interfaces; and the TV regularizer doubles IoU again to 0.45/0.37 by
+aligning the prior with the piecewise-constant defect structure of the effective-diffusivity model. The
+full ablation with 95% CIs and a per-difficulty breakdown is in Appendix G.
+5.5
+Computational efficiency
+Table 4 reports a per-step solver benchmark on a single specimen. The discrete adjoint method
+(AM) of Section 4.3 matches the simulation accuracy of standard Autograd (AD) bit-for-bit while
+reducing peak GPU memory by three orders of magnitude (from 18.63 GB to 21.9 MB) and halving
+the backward time, in agreement with the O(Ng ) versus O(KNg Nt ) analysis of Appendix D.3.
+The same AM forward pass is also ∼ 7× faster than PhiFlow’s implicit solver. The training-level
+wall-clock comparison across all baselines (NeFTY converges in 9.6 min versus 18.2-58.3 min for
+the soft-PINN family on the same hardware) is in Table 9 of Appendix G.
+6
+Conclusion
+We presented NeFTY, a hard-constrained neural field framework for three-dimensional inverse heat
+conduction. NeFTY parameterizes the unknown thermal diffusivity as a continuous coordinate-based
+field, enforces the governing PDE through a differentiable implicit-Euler solver with harmonic-mean
+interface flux, and inverts the resulting forward map with adjoint gradients at solver-level memory
+cost. On synthetic homogeneous and layered settings it reaches IoU 0.45 and 0.37, while four modern
+soft-constrained PINN variants and a voxel-grid baseline remain at or near zero, and on real PVC
+pulsed-thermography data it segments defects at IoU 0.431 and recovers depth at Abs Rel 0.465
+from surface measurements alone. More broadly, our findings are consistent with a recurring pattern
+in scientific machine learning: when the forward operator is strongly smoothing, embedding the
+discretized physics as a hard constraint inside the optimization loop tends to be more reliable than
+penalizing its residual in the loss.
+Limitations and Broader Impact. NeFTY shares the limitations common to test-time inverseproblem solvers: per-specimen optimization at higher latency than supervised feedforward inversion,
+attenuated quantitative recovery inside very high-contrast voids, and evaluation against projected 2D
+and 2.5D supervision because public NDT benchmarks do not yet provide 3D volumetric ground truth.
+Each is addressable with established tooling, including amortized initialization through meta-learning
+or hypernetworks, preconditioned solvers in the differentiable loop, and paired computed-tomography
+labels for full volumetric evaluation; we discuss them in detail in Appendix J. The intended use of
+NeFTY is non-destructive evaluation, where it can support safer infrastructure inspection and earlier
+defect detection without destructive testing or ionizing X-ray exposure. As with any automated
+inspection pipeline, its outputs are best treated as decision support rather than a substitute for human
+qualification of safety-critical components, and reconstructions in regions of low surface sensitivity
+should be reported with uncertainty alongside the recovered field.
+9
+References
+[1] Zain Ali, Sri Addepalli, and Yifan Zhao. Effective thermal diffusivity measurement using throughtransmission pulsed thermography: Extending the current practice by incorporating multi-parameter
+optimisation. Sensors, 25(4):1139, 2025.
+[2] Nacime Bouziani, David A Ham, and Ado Farsi. Differentiable programming across the pde and machine
+learning barrier. arXiv preprint arXiv:2409.06085, 2024.
+[3] Peter Burgholzer, Michael Thor, Jürgen Gruber, and Günther Mayr. Three-dimensional thermographic
+imaging using a virtual wave concept. Journal of Applied Physics, 121(10), 2017.
+[4] Peter Burgholzer, Gregor Stockner, and Guenther Mayr. Acoustic reconstruction for photothermal imaging.
+Bioengineering, 5(3):70, 2018.
+[5] Shengze Cai, Zhicheng Wang, Sifan Wang, Paris Perdikaris, and George Em Karniadakis. Physics-informed
+neural networks for heat transfer problems. Journal of Heat Transfer, 143(6):060801, 2021.
+[6] Jean Céa. Conception optimale ou identification de formes, calcul rapide de la dérivée directionnelle de la
+fonction coût. ESAIM: Modélisation mathématique et analyse numérique, 20(3):371–402, 1986.
+[7] Zhao Chen, Vijay Badrinarayanan, Chen-Yu Lee, and Andrew Rabinovich. Gradnorm: Gradient normalization for adaptive loss balancing in deep multitask networks. In International conference on machine
+learning, pages 794–803. PMLR, 2018.
+[8] Junwoo Cho, Seungtae Nam, Hyunmo Yang, Seok-Bae Yun, Youngjoon Hong, and Eunbyung Park.
+Separable physics-informed neural networks. Advances in Neural Information Processing Systems, 36:
+23761–23788, 2023.
+[9] Yoonjae Chung, Seungju Lee, and Wontae Kim. Latest advances in common signal processing of pulsed
+thermography for enhanced detectability: A review. Applied Sciences, 11(24):12168, 2021.
+[10] Richard Courant, Kurt Friedrichs, and Hans Lewy. Über die partiellen differenzengleichungen der
+mathematischen physik. Mathematische annalen, 100(1):32–74, 1928.
+[11] Filipe de Avila Belbute-Peres, Kevin Smith, Kelsey Allen, Josh Tenenbaum, and J Zico Kolter. End-to-end
+differentiable physics for learning and control. Advances in neural information processing systems, 31,
+2018.
+[12] Jonas Degrave, Michiel Hermans, Joni Dambre, and Francis Wyffels. A differentiable physics engine for
+deep learning in robotics. Frontiers in neurorobotics, 13:6, 2019.
+[13] David Eigen, Christian Puhrsch, and Rob Fergus. Depth map prediction from a single image using a
+multi-scale deep network. Advances in neural information processing systems, 27, 2014.
+[14] Heinz Werner Engl, Martin Hanke, and Andreas Neubauer. Regularization of inverse problems, volume
+375. Springer Science & Business Media, 1996.
+[15] Qiang Fang, Clemente Ibarra-Castanedo, Iván Garrido, Yuxia Duan, and Xavier Maldague. Automatic
+detection and identification of defects by deep learning algorithms from pulsed thermography data. Sensors,
+23(9):4444, 2023.
+[16] Lukas Gahleitner, Gregor Thummerer, Bernhard Plank, Johannes Wiedemann, Günther Mayr, Christian
+Hühne, Peter Burgholzer, and Umut Cakmak. Photothermal defect imaging in hybrid fiber metal laminates
+using the virtual wave concept. Journal of Applied Physics, 135(7), 2024.
+[17] Serafina C Garcea, Ying Wang, and Philip J Withers. X-ray computed tomography of polymer composites.
+Composites Science and Technology, 156:305–319, 2018.
+[18] Xavier Glorot and Yoshua Bengio. Understanding the difficulty of training deep feedforward neural
+networks. In Proceedings of the thirteenth international conference on artificial intelligence and statistics,
+pages 249–256. JMLR Workshop and Conference Proceedings, 2010.
+[19] Jacques Hadamard. Sur les problèmes aux dérivées partielles et leur signification physique. Princeton
+university bulletin, pages 49–52, 1902.
+[20] Baoli Hao, Ulisses Braga-Neto, Chun Liu, Lifan Wang, and Ming Zhong. Training pinns with hard
+constraints and adaptive weights: An ablation study. arXiv preprint arXiv:2404.16189, 2024.
+[21] Ali Hatamizadeh, Vishwesh Nath, Yucheng Tang, Dong Yang, Holger R Roth, and Daguang Xu. Swin
+unetr: Swin transformers for semantic segmentation of brain tumors in mri images. In International
+MICCAI brainlesion workshop, pages 272–284. Springer, 2021.
+[22] Magnus R Hestenes, Eduard Stiefel, et al. Methods of conjugate gradients for solving linear systems.
+Journal of research of the National Bureau of Standards, 49(6):409–436, 1952.
+[23] Philipp Holl and Nils Thuerey. ϕ-flow: Differentiable simulations for pytorch, tensorflow and jax. In
+Proceedings of the Forty-first International Conference on Machine Learning, 2024.
+10
+[24] Philipp Holl, Vladlen Koltun, and Nils Thuerey. Learning to control pdes with differentiable physics. arXiv
+preprint arXiv:2001.07457, 2020.
+[25] Youngsik Hwang and Dong-Young Lim. Dual cone gradient descent for training physics-informed neural
+networks. Advances in Neural Information Processing Systems, 37:98563–98595, 2024.
+[26] Clemente Ibarra-Castanedo and Xavier Maldague. Pulsed phase thermography reviewed. Quantitative
+Infrared Thermography Journal, 1(1):47–70, 2004.
+[27] Dustin L Kelly and Brian S Thurow. Fluidnerf: A scalar-field reconstruction technique for flow diagnostics
+using neural radiance fields. In AIAA SciTech 2023 Forum, page 0412, 2023.
+[28] Péter Kovács, Bernhard Lehner, Gregor Thummerer, Günther Mayr, Peter Burgholzer, and Mario Huemer.
+Deep learning approaches for thermographic imaging. Journal of Applied Physics, 128(15), 2020.
+[29] Theodoros Leontiou, Anna Frixou, Marios Charalambides, Efstathios Stiliaris, Costas N Papanicolas, Sofia
+Nikolaidou, and Antonis Papadakis. Three-dimensional thermal tomography with physics-informed neural
+networks. Tomography, 10(12):1930, 2024.
+[30] Luke Lozenski, Refik Mert Cam, Mark D Pagel, Mark A Anastasio, and Umberto Villa. Proxnf: neural
+field proximal training for high-resolution 4d dynamic image reconstruction. IEEE Transactions on
+Computational Imaging, 2024.
+[31] Botao Ma, Shupeng Sun, and Lin Zhang. Quantitative depth estimation in lock-in thermography: Modeling
+and correction of lateral heat conduction effects. Materials, 18(22):5247, 2025.
+[32] Xavier Maldague, François Galmiche, and Adel Ziadi. Advances in pulsed phase thermography. Infrared
+physics & technology, 43(3-5):175–181, 2002.
+[33] Andrea Carolina Martinez Mundarain. Artificial neural networks as the solution of inverse heat conduction
+problems in multidimensional domains. 2024.
+[34] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng.
+Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65
+(1):99–106, 2021.
+[35] Vinod Nair and Geoffrey E Hinton. Rectified linear units improve restricted boltzmann machines. In
+Proceedings of the 27th international conference on machine learning (ICML-10), pages 807–814, 2010.
+[36] BCF Oliveira, AA Seibert, VK Borges, A Albertazzi, and RH Schmitt. Employing a u-net convolutional
+neural network for segmenting impact damages in optical lock-in thermography images of cfrp plates.
+Nondestructive Testing and Evaluation, 36(4):440–458, 2021.
+[37] Derek Onken and Lars Ruthotto. Discretize-optimize vs. optimize-discretize for time-series regression and
+continuous normalizing flows. arXiv preprint arXiv:2005.13420, 2020.
+[38] Keunhong Park, Utkarsh Sinha, Jonathan T Barron, Sofien Bouaziz, Dan B Goldman, Steven M Seitz, and
+Ricardo Martin-Brualla. Nerfies: Deformable neural radiance fields. In Proceedings of the IEEE/CVF
+international conference on computer vision, pages 5865–5874, 2021.
+[39] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen,
+Zeming Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An imperative style, high-performance deep
+learning library. Advances in neural information processing systems, 32, 2019.
+[40] S. Patankar. Numerical Heat Transfer and Fluid Flow. Series in computational methods in mechanics and
+thermal sciences. Taylor & Francis, 1980. ISBN 9780891165224.
+[41] Shaoyang Peng, Sri Addepalli, and Maryam Farsi. Machine learning in thermography non-destructive
+testing: a systematic review. Applied Sciences, 15(17):9624, 2025.
+[42] Eduardo Pérez, Cemil Emre Ardıç, Ozan Çakıroğlu, Kevin Jacob, Sayako Kodera, Luca Pompa, Mohamad
+Rachid, Han Wang, Yiming Zhou, Cyril Zimmer, et al. Integrating ai in nde: techniques, trends, and further
+directions. NDT & E International, 156:103442, 2025.
+[43] Weijia Qian, Xin Hui, Bosen Wang, Zongwei Zhang, Yuzhen Lin, and Siheng Yang. Physics-informed
+neural network for inverse heat conduction problem. Heat Transfer Research, 54(4), 2023.
+[44] Maziar Raissi, Paris Perdikaris, and George E Karniadakis. Physics-informed neural networks: A deep
+learning framework for solving forward and inverse problems involving nonlinear partial differential
+equations. Journal of Computational physics, 378:686–707, 2019.
+[45] Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U-net: Convolutional networks for biomedical
+image segmentation. In International Conference on Medical image computing and computer-assisted
+intervention, pages 234–241. Springer, 2015.
+[46] Renan Garcia Rosa, Bruno Pereira Barella, Iago Garcia Vargas, José Ricardo Tarpani, Hans-Georg
+Herrmann, and Henrique Fernandes. Advanced thermal imaging processing and deep learning integration
+for enhanced defect detection in carbon fiber-reinforced polymer laminates. Materials, 18(7):1448, 2025.
+11
+[47] Leonid I Rudin, Stanley Osher, and Emad Fatemi. Nonlinear total variation based noise removal algorithms.
+Physica D: nonlinear phenomena, 60(1-4):259–268, 1992.
+[48] Alexander Schager, Gerald Zauner, Günther Mayr, and Peter Burgholzer. Extension of the thermographic
+signal reconstruction technique for an automated segmentation and depth estimation of subsurface defects.
+Journal of Imaging, 6(9):96, 2020.
+[49] Steven M Shepard and Maria Frendberg Beemer. Advances in thermographic signal reconstruction. In
+Thermosense: thermal infrared applications XXXVII, volume 9485, pages 204–210. SPIE, 2015.
+[50] Steven M Shepard, D Wang, James R Lhota, Bruce A Rubadeux, and Tasdiq Ahmed. Reconstruction and
+enhancement of thermographic sequence data. In Nondestructive evaluation and health monitoring of
+aerospace materials and civil infrastructures, volume 4704, pages 74–77. SPIE, 2002.
+[51] Xijin Shi and Sheng-Jen Hsieh. Infrared imaging and machine learning techniques for plant root location
+and depth prediction. In Thermosense: Thermal Infrared Applications XLIII, volume 11743, page 1174303.
+SPIE, 2021.
+[52] Vincent Sitzmann, Julien Martel, Alexander Bergman, David Lindell, and Gordon Wetzstein. Implicit
+neural representations with periodic activation functions. Advances in neural information processing
+systems, 33:7462–7473, 2020.
+[53] Dylan Turpin, Tao Zhong, Shutong Zhang, Guanglei Zhu, Eric Heiden, Miles Macklin, Stavros Tsogkas,
+Sven Dickinson, and Animesh Garg. Fast-grasp’d: Dexterous multi-finger grasp generation through
+differentiable simulation. In 2023 IEEE International Conference on Robotics and Automation (ICRA),
+2023.
+[54] V Vavilov, Xavier Maldague, J Picard, RL Thomas, and LD Favro. Dynamic thermal tomography: new nde
+technique to reconstruct inner solids structure using multiple ir image processing. In Review of progress in
+quantitative nondestructive evaluation, pages 425–432. Springer, 1992.
+[55] Sifan Wang, Xinling Yu, and Paris Perdikaris. When and why pinns fail to train: A neural tangent kernel
+perspective. Journal of Computational Physics, 449:110768, 2022.
+[56] Sifan Wang, Shyam Sankaran, and Paris Perdikaris. Respecting causality for training physics-informed
+neural networks. Computer Methods in Applied Mechanics and Engineering, 421:116813, 2024.
+[57] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: from error
+visibility to structural similarity. IEEE transactions on image processing, 13(4):600–612, 2004.
+[58] Ziang Wei, Ahmad Osman, Bernd Valeske, and Xavier Maldague. A dataset of pulsed thermography for
+automated defect depth estimation. Applied Sciences, 13(24):13093, 2023.
+[59] Ziang Wei, Ahmad Osman, Bernd Valeske, and Xavier Maldague. Pulsed thermography dataset for training
+deep learning models. Applied Sciences, 13(5):2901, 2023.
+[60] Di Xu, Yang Yang, Hengjie Liu, Qihui Lyu, Martina Descovich, Dan Ruan, and Ke Sheng. Tomograf: An
+x-ray physics-driven generative radiance field framework for extremely sparse view ct reconstruction. Plos
+one, 20(8):e0330463, 2025.
+[61] Tao Zhong and Christine Allen-Blanchette. Gagrasp: Geometric algebra diffusion for dexterous grasping.
+In 2025 IEEE International Conference on Robotics and Automation (ICRA), pages 6771–6778, 2025. doi:
+10.1109/ICRA55743.2025.11127957.
+[62] Li Zhou, Changsheng Fang, Bahareh Morovati, Yongtong Liu, Shuo Han, Yongshun Xu, and Hengyong Yu.
+ρ-nerf: leveraging attenuation priors in neural radiance field for 3d computed tomography reconstruction.
+In 2025 IEEE International Conference on Image Processing (ICIP), pages 1636–1641. IEEE, 2025.
+Appendix
+A
+Effective Diffusivity Model and Interface Flux
+A.1
+Derivation of the diffusivity form
+Let ρ, Cp ∈ C 1 (Ω) with ρCp > 0 on Ω̄, and let T ∈ C 2,1 (Ω × (0, tend ]) satisfy the conservation
+form (1) with Q ≡ 0:
+ρCp ∂t T = ∇ · (k∇T ).
+12
+Dividing both sides by the strictly positive function ρCp and applying the product rule ∇ · (γv) =
+γ∇ · v + ∇γ · v with γ = 1/(ρCp ) and v = k∇T gives
+
+
+
+
+k
+1
+1
+∂t T =
+∇ · (k∇T ) = ∇ ·
+∇T − ∇
+· (k∇T )
+ρCp
+ρCp
+ρCp
+
+
+1
+= ∇ · (α∇T ) − k∇T · ∇
+,
+ρCp
+with α := k/(ρCp ). The reduction is reversible by multiplying through by ρCp , so the conservation
+form (1) (under Q ≡ 0) and the diffusivity form (2) are equivalent on Ω × (0, tend ] whenever
+ρCp ∈ C 1 .
+A.2
+Distributional treatment of the heat-capacity correction
+When ρCp is piecewise-constant with values cb > 0 on a bulk subdomain Ωb and cd > 0 on a defect
+subdomain Ωd , separated by a smooth interface Σ = ∂Ωb ∩ ∂Ωd , the gradient ∇(1/(ρCp )) is a
+vector-valued distribution supported on Σ:
+
+
+
+
+1
+1
+1
+∇
+=
+−
+nΣ δΣ ,
+(12)
+ρCp
+cd
+cb
+where nΣ is the unit normal to Σ pointing from Ωb to Ωd and δΣ is the surface measure on Σ. The
+correction term in (2) reads
+
+
+
+
+1
+1
+1
+− k∇T · ∇
+= −
+−
+(k∇T · nΣ ) δΣ ,
+ρCp
+cd
+cb
+which is identically zero on Ω \ Σ and concentrates as a jump in the normal physical Fourier flux
+q := −k ∂n T across Σ. A finite-volume discretization on a uniform Cartesian grid of spacing ∆x
+cannot resolve a Dirac measure on a measure-zero interface [40]; dropping this distributional term
+yields the bulk equation ∂t T = ∇ · (α∇T ) on Ω \ Σ, which is the model NeFTY actually solves.
+The single-α effective model has its own interface conservation law: across a face where α jumps,
+the effective α-flux jα := −α∂n T must be continuous, since otherwise temperature would lose mass
+at that face. The remainder of this appendix shows that the harmonic-mean stencil enforces this
+jα -continuity exactly. We do not claim that the harmonic mean reproduces the dropped distributional
+term of the full ρCp model; rather, the harmonic-mean stencil is the unique discrete analogue of the
+jump condition appropriate to the single-α model that NeFTY parameterizes.
+A.3
+Proof of Proposition 1 (Harmonic mean as discrete interface continuity)
+Consider two adjacent one-dimensional cells with center coordinates xi and xi+1 = xi + ∆x,
+cell-centered diffusivities αi and αi+1 , and cell-centered temperatures Ti and Ti+1 . Assume each
+cell has constant diffusivity, with the discontinuity located at the cell face xi+1/2 = xi + ∆x/2. Let
+Ti+1/2 denote the (a priori unknown) face temperature.
+Within the left half-cell [xi , xi+1/2 ], Fourier’s law for the effective α-flux jα = −α∂x T gives a
+constant flux and a linear temperature profile, so
+jα = −αi ·
+Ti+1/2 − Ti
+.
+∆x/2
+(13)
+Within the right half-cell [xi+1/2 , xi+1 ], by the same argument,
+jα = −αi+1 ·
+Ti+1 − Ti+1/2
+.
+∆x/2
+(14)
+Continuity of the effective flux at xi+1/2 in the single-α model imposes the same value of jα in (13)
+and (14). From (13), Ti+1/2 = Ti − jα ∆x/(2αi ). From (14), Ti+1/2 = Ti+1 + jα ∆x/(2αi+1 ).
+Equating and rearranging,
+
+
+∆x 1
+1
+∆x (αi + αi+1 )
+Ti − Ti+1 = jα
++
+= jα
+.
+2 αi
+αi+1
+2αi αi+1
+13
+Solving for jα ,
+jα = −
+2αi αi+1 Ti+1 − Ti
+Ti+1 − Ti
+·
+=: −ᾱi+1/2 ·
+.
+αi + αi+1
+∆x
+∆x
+The expression ᾱi+1/2 = 2αi αi+1 /(αi + αi+1 ) is the harmonic mean. Uniqueness follows from the
+linearity of the two-equation system in (jα , Ti+1/2 ) with non-degenerate coefficient matrix.
+□
+A.4
+Multi-dimensional consequence and physical interpretation
+In ambient spatial dimension D ∈ {2, 3} on a uniform Cartesian grid, the same argument applied
+along each principal direction gives the second-order finite-volume diffusion operator L(α) used by
+NeFTY, defined by its action on a discrete temperature field T at grid node (i, j, k):
+
+1 
+[L(α)T]i,j,k :=
+ᾱi+1/2 (Ti+1,j,k − Ti,j,k ) − ᾱi−1/2 (Ti,j,k − Ti−1,j,k ) + (y-, z-terms).
+2
+∆x
+The harmonic mean has two physically important properties for thermal NDT. First, ᾱi+1/2 is
+dominated by the smaller of αi , αi+1 when the two are well separated, so an insulating defect cell
+αi+1 ≪ αi throttles flux at its boundary as physical thermal resistance does. Second, ᾱ is exact
+for piecewise-constant α at cell faces and second-order accurate for smooth α; using the arithmetic
+mean instead is first-order accurate and overestimates flux across high-contrast interfaces, leading to
+systematic underestimation of defect depth in inverse reconstruction [40]. NeFTY’s adoption of the
+harmonic mean is therefore the unique discrete analogue of the effective-flux continuity condition for
+the single-α bulk equation in (2).
+A.5
+Initial and boundary conditions: synthetic and real PVC datasets
+The bulk diffusivity equation ∂t T = ∇ · (α∇T ) is closed by an initial condition and by lateral and
+through-thickness boundary conditions. The synthetic dataset and the real PVC datasets [58, 59]
+require different choices, all consistent with the same underlying physics but adapted to the specimen
+scale, the heating modality, and the dominant non-dimensional groups.
+Synthetic dataset. The synthetic data are generated on a unitless slab Ω = [0, L]2 × [0, H] with
+L = 10, H = 1, grid resolution 64 × 64 × 16 and 100 transient frames, on micron-scale specimens
+at microsecond timescales for which the Biot number is small and convective dissipation is negligible.
+We accordingly impose:
+• Initial condition. A spatially Gaussian post-flash temperature distribution localized near the front
+face,
+
+
+2
+T0 (x) = Tamb + A exp − ((x − xc )2 + (y − yc )2 )/(2wxy
+) exp − z 2 /(2wz2 ) ,
+where Tamb is the ambient temperature, A is the deposited pulse amplitude, (xc , yc ) is the lateral
+footprint center, wxy is the lateral pulse width, and wz ≪ H is the absorption depth set by the
+focused-laser pulse profile.
+• Lateral boundaries (∂Ωxy ). Periodic conditions on ∂Ωxy := [0, L]2 × {0, L}x × {0, L}y (the
+x = 0/L and y = 0/L faces), modeling a semi-infinite slab and removing reflections from the
+truncated simulation grid.
+• Through-thickness boundaries (∂Ωz ). Adiabatic conditions n · (α∇T ) = 0 on ∂Ωz (the front z = 0
+and back z = H faces), modeling negligible convective loss during the short inspection window.
+Real PVC dataset. The PVC-Infrared [59] and PVC-Depth [58] benchmarks consist of pulsed
+thermography sequences on 100 × 100 × 5 mm PVC specimens with cylindrical flat-bottom holes of
+varying size and depth, recorded over second-scale dynamics. Three physical adaptations are required
+so that the same NeFTY solver applies without retraining the ground-truth simulator:
+• Initial condition. The Gaussian pulse is replaced by a near-uniform front-face flash T0 (x) =
+Tamb + A exp(−z 2 /(2wz2 )), matching the broad flash-lamp excitation used in the benchmark
+setups (lateral profile uniform over the inspection footprint, absorption depth wz small relative to
+specimen thickness).
+• Centimeter and second-scale Fourier-number rescaling. The PVC specimens are centimeter-scale
+at second-scale dynamics rather than the synthetic micron / microsecond regime; the unitless solver
+is rescaled through the Fourier number Fo = αphys ttotal /L20 (full scaling below).
+14
+• Convective Robin back-face boundary. The centimeter-scale specimen and second-scale dynamics
+make convective dissipation non-negligible; on the back face we therefore impose a Robin condition
+n · (α∇T ) = −h (T − Tamb ) with h > 0 a calibrated convective coefficient, recovering the
+asymptotic Biot regime appropriate for the PVC scale. The front face retains the adiabatic Neumann
+condition; lateral conditions remain periodic on interior crops or are replaced by adiabatic Neumann
+depending on the recording.
+The unitless and dimensional scales are aligned through the Fourier number Fo = αphys ttotal /L20 ,
+with αphys the physical diffusivity (in m2 /s), ttotal the physical experiment duration (in s), and L0 a
+characteristic specimen length scale (in m); the unitless solver evolves in (t/ttotal , x/L0 ) coordinates
+with effective diffusivity α = αphys ttotal /L20 . A single set of unitless solver parameters represents
+widely different material classes by reinterpreting L0 and ttotal , so the synthetic and real PVC settings
+differ in their initial-condition shape and back-face Robin coefficient but share the same forward
+operator K and the same harmonic-mean stencil derived above. Full physical scaling, calibrated h
+values, and projection from a reconstructed 3D α field to the 2D defect masks and 2.5D depth labels
+supplied by the benchmarks are documented in Appendix H.
+B
+Ill-Posedness of the Inverse Heat Conduction Problem
+This appendix establishes the compactness and algebraic singular-value decay claimed in Proposition 2. The argument is consistent with the standard treatment of parameter identification in parabolic
+inverse problems [14, 19, 33]; we present a self-contained derivation on the slab geometry used in
+our experiments. The proof factorizes dKα0 = B ◦ J, where B : L2 (Ω) → L2 (Γobs × (0, tend ))
+is bounded by an energy estimate plus a parabolic boundary trace, and J : H 1 (Ω) ,→ L2 (Ω) is
+the compact Rellich–Kondrachov embedding whose approximation numbers along the Laplacian
+eigenbasis decay as (1 + λn )−1/2 . Truncating the parameter side via J rather than the source side
+avoids the mode-mixing introduced by multiplication with ∇Tα0 .
+B.1
+Linearization of the parameter-to-observation map
+Let α0 > 0 be a constant background diffusivity and let Tα0 (x, t) solve the bulk heat equation
+∂t T = α0 ∆T with the prescribed initial condition T0 and boundary conditions on the slab Ω =
+[0, L]2 × [0, H]. Throughout the proof we assume the background satisfies ∇Tα0 ∈ L∞ (Q) with
+Q := Ω × (0, tend ). Consider a perturbation α = α0 + ε δα with δα ∈ H 1 (Ω) and ε > 0 small. To
+first order in ε, the perturbation δT = (Tα − Tα0 )/ε solves the linearized PDE in the weak sense
+Z
+
+⟨∂t (δT ), v⟩ + α0 ∇(δT ), ∇v L2 (Ω) = − δα ∇Tα0 (·, t) · ∇v dx,
+(15)
+Ω
+for all v ∈ H 1 (Ω) compatible with the imposed boundary conditions, with vanishing initial
+condition
+δT (·, 0) = 0. We define the source distribution Fδα (t) ∈ H −1 (Ω) by ⟨Fδα (t), v⟩ =
+R
+− Ω δα ∇Tα0 (·, t) · ∇v dx, satisfying
+∥Fδα (t)∥H −1 (Ω) ≤ ∥∇Tα0 (·, t)∥L∞ (Ω) ∥δα∥L2 (Ω) .
+(16)
+The Fréchet derivative is the linear map dKα0 : H 1 (Ω) → L2 (Γobs × (0, tend )) defined by
+dKα0 (δα) = δT |Γobs ×(0,tend ) .
+B.2
+Proof of Proposition 2 (Compactness and algebraic singular-value decay)
+The proof has four steps: (i) an energy estimate in L2 (0, tend ; H 1 (Ω)) for δT ; (ii) a parabolic trace
+inequality giving boundedness of the auxiliary map B; (iii) a finite-rank approximation through the
+Rellich–Kondrachov embedding J; (iv) Weyl asymptotics on the slab.
+Step 1: energy estimate. Existence and uniqueness of a weak solution δT ∈ L2 (0, tend ; H 1 (Ω)) ∩
+H 1 (0, tend ; H −1 (Ω)) to (15) with vanishing initial data and source Fδα ∈ L2 (0, tend ; H −1 (Ω)) follow from standard Galerkin / Lions–Magenes parabolic theory [14]. With this regularity, testing (15)
+with v = δT (·, t) is permissible and gives
+Z
+2
+2
+1 d
+∥δT
+(·,
+t)∥
++
+α
+∥∇δT
+(·,
+t)∥
+=
+−
+δα ∇Tα0 (·, t) · ∇(δT )(·, t) dx.
+0
+L2 (Ω)
+L2 (Ω)
+2 dt
+Ω
+15
+Applying Young’s inequality |ab| ≤ 2α1 0 a2 + α20 b2 to the right-hand side and integrating over (0, tend )
+with the vanishing initial condition,
+Z tend
+Z tend
+2
+2
+α0
+1
+1
++
+∥δT
+(·,
+t
+)∥
+∥∇δT
+∥
+dt
+≤
+∥δα ∇Tα0 (·, t)∥2L2 (Ω) dt.
+end L2 (Ω)
+L2 (Ω)
+2
+2
+2α0
+0
+0
+With ∥δα ∇Tα0 (·, t)∥L2 (Ω) ≤ ∥∇Tα0 (·, t)∥L∞ (Ω) ∥δα∥L2 (Ω) , this yields
+∥δT ∥L2 (0,tend ;H 1 (Ω)) ≤ CE (Ω, tend , α0 ) ∥∇Tα0 ∥L∞ (Q) ∥δα∥L2 (Ω) ,
+(17)
+with CE an absolute constant depending only on Ω, tend , α0 (a Poincaré-type constant absorbed into
+the bound).
+Step 2: boundary trace and the auxiliary operator B. The Sobolev trace inequality
+∥u|∂Ω ∥L2 (∂Ω) ≤ CΓ ∥u∥H 1 (Ω) on a Lipschitz domain combined with (17) gives
+2
+∥δT |Γobs ×(0,tend ) ∥2L2 (Γobs ×(0,tend )) ≤ CΓ2 ∥δT ∥2L2 (0,tend ;H 1 (Ω)) ≤ CB
+∥δα∥2L2 (Ω) ,
+with CB := CΓ CE ∥∇Tα0 ∥L∞ (Q) . The map
+B : L2 (Ω) → L2 (Γobs × (0, tend )),
+B(δα) = δT |Γobs ×(0,tend ) ,
+is therefore bounded, ∥B∥op ≤ CB . The Fréchet derivative is dKα0 = B ◦ J, where J : H 1 (Ω) ,→
+L2 (Ω) is the inclusion.
+Step 3: compactness and singular-value decay via Rellich–Kondrachov. The embedding J is
+1
+compact by the Rellich–Kondrachov
+theorem on bounded Lipschitz
+P
+P domains. Equipping H (Ω) with
+2
+2
+the spectral norm ∥δα∥H 1 = j≥0 (1 + λj )|aj | where δα = j aj ϕj , the approximation numbers
+of J along the Laplacian eigenbasis are exactly (1 + λn )−1/2 : for the L2 -orthogonal projector PN
+onto span(ϕ0 , . . . , ϕN −1 ),
+X
+X
+∥(I − PN )δα∥2L2 (Ω) =
+a2j ≤ (1 + λN )−1
+(1 + λj )a2j ≤ (1 + λN )−1 ∥δα∥2H 1 (Ω) .
+j≥N
+j≥N
+Define the rank-N operator AN := B ◦ PN ◦ J. For ∥δα∥H 1 ≤ 1,
+∥(dKα0 − AN )(δα)∥L2 (Γobs ×(0,tend )) ≤ ∥B∥op ∥(I − PN )(Jδα)∥L2 (Ω) ≤ CB (1 + λN )−1/2 .
+Since approximation numbers and singular values coincide for compact operators between Hilbert
+spaces [14], this yields
+σN +1 (dKα0 ) ≤ CB (1 + λN )−1/2 ,
+N ≥ 0.
+(18)
+Compactness of dKα0 follows from σn → 0, equivalently the convergence AN → dKα0 in operator
+norm. The mode-mixing introduced by multiplication with ∇Tα0 in the source Fδα does not affect
+this argument: the truncation PN acts on the parameter δα before it enters the linearized PDE, and
+the small-L2 -tail of δα for δα ∈ H 1 -unit-ball produces a small output in L2 (Γobs × (0, tend )) via
+the L2 -bounded map B.
+Step 4: slab Weyl asymptotics. For Ω = [0, L]2 × [0, H] with periodic conditions on the lateral faces
+and Neumann conditions on the top/bottom, the eigenfunctions are tensor products ϕm,ℓ,p (x, y, z) =
+e2πi(mx/L+ℓy/L) cos(pπz/H) with eigenvalues λm,ℓ,p = (2πm/L)2 + (2πℓ/L)2 + (pπ/H)2 , indexed by (m, ℓ, p) ∈ Z2 × Z≥0 . By Weyl’s law in three dimensions, enumerated in increasing order
+λn ≍ n2/3 , so (18) reads σn ≲ n−1/3 on the slab.
+□
+Remark 1. The constant Laplacian eigenmode ϕ0 ≡ |Ω|−1/2 has λ0 = 0, and adding a constant to
+α only rescales time without changing the inverse problem. Restricting to mean-zero perturbations
+R
+−1/2
+δα ∈ {a ∈ H 1 (Ω) : Ω a dx = 0} with norm ∥∇δα∥L2 replaces the bound by σn ≤ C λn
+for
+n ≥ 1, recovering exactly the algebraic rate ν = 1/2.
+B.3
+Proof of Corollary 1 (Hadamard ill-posedness)
+By Proposition 2, the singular values of dKα0 tend to zero, so the Moore–Penrose pseudo-inverse
+†
+dKα
+is unbounded on the closure of the range. Concretely, the singular value decomposition
+0
+16
+P
+dKα0 (δα) = n:σn >0 σn ⟨δα, vn ⟩un has right singular vectors vn ∈ H 1 (Ω) in the parameter space
+†
+and left singular vectors un ∈ L2 (Γobs × (0, tend )) in the data space, with dKα
+u = σn−1 vn for the
+0 n
+†
+∗
+indices n with σn > 0 and dKα
+u = 0 on the kernel of dKα
+. A measurement perturbation aligned
+0 n
+0
+with a non-degenerate n-th left singular vector un therefore produces an H 1 -norm perturbation
+−1
+in the recovered diffusivity of magnitude σn−1 ≥ CB
+(1 + λn )1/2 . The forward problem is wellposed (existence, uniqueness, continuous dependence in the forward direction follow from standard
+parabolic theory), but inversion fails the continuous-dependence criterion in the sense of Hadamard.
+□
+B.4
+Discussion: pointwise damping versus operator decay
+Two distinct smoothing rates appear in this analysis and should not be conflated. Pointwise in time, the
+free-space heat kernel Gt (x) = (4πα0 t)−3/2 exp(−|x|2 /(4α0 t)) governs the impulse response: a
+localized defect at depth z contributes a surface temperature signal whose amplitude decays Gaussianfast in z, suppressed by exp(−z 2 /(4α0 t)) at observation time t > 0. Equivalently in the spectral
+picture, the heat semigroup S(t) = eα0 ∆t damps the j-th Laplacian eigenmode by e−α0 λj t , so a
+defect supported at frequency λj is exponentially attenuated at any fixed time. These pointwise
+statements are the depth- and frequency-decay heuristics that motivate the original ill-posedness
+intuition for IHCP.
+The operator decay of dKα0 , in contrast, integrates the boundary trace against the entire time
+interval (0, tend ), and the bound (18) is only algebraic in λn . The two rates coincide in the degenerate observation model where the trace is taken at a single final time t = tend , in which case
+σn (S(tend )) = e−α0 λn tend recovers the exponential rate; integrating over (0, tend ) averages out this
+exponential factor and yields the algebraic bound proven above.
+The practical consequences for IHCP follow from the algebraic operator-rate. Longer observation
+windows tend and higher-conductivity bulk materials improve early-time signal-to-noise ratio but
+preserve the algebraic singular-value rate; regularization remains mandatory at any rate, since any
+consistent reconstruction method must implicitly or explicitly bound the high-frequency content of
+admissible α. NeFTY combines two such regularizers, namely a continuous neural-field
+prior with
+R
+frequency annealing (Section 4) and an isotropic total-variation penalty R(α) = Ω ∥∇α∥ aligned
+with the piecewise-constant defect structure assumed by the effective-diffusivity model of Section 3.1.
+C
+Soft-Constraint Gradient Pathology in PINNs
+C.1
+Derivation of the gradient decoupling
+Write LPINN = Ldata (Tϕ ) + λPDE LPDE (Tϕ , αθ ) + λIC LIC (Tϕ ) as in equation (4). The data term
+Ldata (Tϕ ) = ∥Tϕ − T̂ ∥2Γobs depends on θ only if Tϕ does. Because Tϕ is parameterized by ϕ alone,
+∂Tϕ /∂θ ≡ 0, hence ∇θ Ldata = 0. The same argument applied to LIC (Tϕ ) gives ∇θ LIC = 0.
+Therefore
+∇θ LPINN = λPDE ∇θ LPDE (Tϕ , αθ ),
+which establishes the gradient decoupling. To bound the residual-gradient magnitude, expand LPDE
+pointwise:
+N
+LPDE (Tϕ , αθ ) =
+c
+2
+1 X
+ri (Tϕ , αθ ) ,
+Nc i=1
+ri = ∂t Tϕ (xi , τi ) − ∇ · (αθ ∇Tϕ )(xi , τi ),
+c
+where {(xi , τi )}N
+i=1 are the PINN collocation points (using τi for collocation times to distinguish
+them from the measurement times ti of Section 3.2). Differentiating with respect to θ and applying
+the product rule to the divergence,
+∇ · (αθ ∇Tϕ ) = αθ ∆Tϕ + ∇αθ · ∇Tϕ ,
+so
+∇θ ri = −∆Tϕ (xi , τi ) ∇θ αθ (xi ) − ∇Tϕ (xi , τi ) · ∇θ ∇αθ (xi ).
+(19)
+P
+2
+The Cauchy–Schwarz bound ∥∇θ LPDE ∥ ≤ Nc i |ri | ∥∇θ ri ∥ combined with (19) gives a residualgradient magnitude controlled by the spatial derivatives ∆Tϕ and ∇Tϕ of the temperature surrogate
+at the collocation points, dominated by ∥∆Tϕ ∥ when ∇αθ is bounded. Empirically and analytically,
+17
+∥∆Tϕ ∥ is large whenever Tϕ has not yet converged, because second-order spatial derivatives of an
+under-fitted neural temperature field are noisy and large in magnitude.
+The decoupling does not by itself prove that αθ collapses to a constant. It does prove that surface
+observations cannot reach θ except indirectly through the residual term, so the only avenue for T̂ to
+influence αθ is via residual gradients that scale with the under-fitted Laplacian of Tϕ . The empirical
+PINN failure mode reported in Section 5 and observed across PINN training analyses [20, 55] is
+consistent with this structural channel and is the experimental complement to the present derivation.
+C.2
+Coupling with the ill-posedness of Section 3.2
+Even if the gradient decoupling derived in Appendix C.1 were absent, recovering αθ through any
+chain that begins at the surface data would require inverting the parameter-to-observation map
+K. By Corollary 1, this inverse algebraically amplifies the n-th left singular vector by σn−1 ≥
+−1
+CB
+(1 + λn )1/2 . In the soft-PINN, the surface data influences αθ only second-hand, by first
+updating Tϕ through Ldata and then propagating to αθ through the residual term: the high-frequency
+information needed to localize defects is already attenuated by the smoothing of the forward map
+before the residual gradient sees it, and must then be re-amplified by an unbounded pseudo-inverse.
+The result is the experimentally observed pattern in which Ldata converges (the temperature net fits
+the surface) but αθ remains near a trivial constant; this is the soft-constraint analogue of the data-fit
+paradox documented in our experimental study (Section 5) and in independent analyses of PINN
+training [20, 55].
+C.3
+Why standard remedies do not resolve the decoupling
+Several SciML methods have been proposed to address PINN training pathologies. We argue that
+none of them creates a path from T̂ to θ that bypasses the residual term, so the gradient decoupling
+continues to apply.
+GradNorm [7]. GradNorm rescales the loss weights λPDE , λIC to balance gradient magnitudes
+during training. Because the rescaling acts on λPDE and not on the parameterization, the identity
+∇θ LPINN = λPDE ∇θ LPDE is unchanged. GradNorm changes the relative size of the residual
+gradient but cannot manufacture a data-side gradient on θ.
+SPINN [8]. SPINN replaces the joint Tϕ (x, t) network with a separable product Tϕ (x, t) =
+P (1)
+(2)
+(3)
+(4)
+k Tϕ (x) Tϕ (y) Tϕ (z) Tϕ (t), accelerating collocation and reducing the variance of the residual term. The diffusivity network αθ remains independent of ϕ; the gradient decoupling is unchanged.
+Causal-PINN [56]. Causal-PINN reweights the residual integrand by a causal weight that emphasizes
+early times before late times. The weight enters LPDE through a non-negative pointwise factor and
+again does not change the parameterization. The decoupling result holds.
+DCGD [25]. Dual-cone gradient descent projects the data and residual gradients onto a common
+acceptable cone to avoid destructive interference. By construction it operates on already-computed
+gradients of Ldata and LPDE separately. Because ∇θ Ldata = 0 identically, the only gradient applied
+to θ remains the (projected) residual gradient.
+In each case, the structural decoupling persists. NeFTY removes it at the source: the temperature is
+no longer an independent neural surrogate, but the implicit solution of a discretized PDE driven by αθ ,
+so the chain of dependencies is θ → αθ → T → Ldata and the surface data provides a non-vanishing
+gradient on θ through the adjoint of the discrete heat operator (Section 4).
+D
+Method Details: Neural-Field Architecture, Forward Solver, and Adjoint
+Gradients
+This appendix records the implementation of the three components introduced in Section 4: the
+neural diffusivity field of Section 4.1, the discrete forward solver of Section 4.2, and the discrete
+adjoint of Section 4.3. The harmonic-mean stencil derived in Appendix A (Proposition 1) and the
+boundary conditions described in Appendix A.5 are reused without further comment. Notation
+matches Section 4 throughout: θ denotes the MLP parameter set, µn the discrete adjoint variable at
+step n (kept distinct from the Laplacian eigenvalues λn of Proposition 2 and from the regularization
+weight λ in (9)), ΠΓ the observation projector onto Γobs , and A(αθ ) := I − ∆t L(αθ ) the implicitEuler system matrix. The boldface discrete diffusion operator L(αθ ) is distinct from the italic lateral
+18
+side length L of Appendix A.5, the boldface Jacobi diagonal D and off-diagonal R of Appendix D.2
+are distinct from the italic spatial dimension D and the calligraphic regularizer R of (9), and the
+boldface state residual Fn is distinct from the italic source Fδα of Appendix B.1.
+D.1
+Neural diffusivity-field architecture
+Coordinate MLP. The diffusivity field is modeled as a fully connected network fθ : Rdγ → R
+with depth LMLP , hidden width WMLP , ReLU activations [35], and a single skip connection that
+re-injects the encoded coordinate γ(x) at the middle layer to preserve gradient flow [34]. Weights are
+initialized with Xavier scaling [18]. Concrete values for LMLP , WMLP , and the skip-layer index are
+tabulated in Appendix D.4.
+Positional encoding. Each input coordinate x ∈ Ω ⊂ RD is normalized to [−1, 1]D and mapped to
+
+γ(x) = sin(20 πx), cos(20 πx), . . . , sin(2N −1 πx), cos(2N −1 πx) ∈ R2DN ,
+(20)
+yielding dγ = 2DN . The bandwidth N controls the maximum spatial frequency the network can
+express; raising N improves the network’s ability to resolve sharp interfaces but exposes it to the
+algebraic noise amplification of Corollary 1 along high-eigenmode left singular vectors.
+Frequency annealing. To suppress this amplification during the early phase of optimization, we
+apply the cosine schedule of Park et al. [38] to the encoding bands. Let β(t) ∈ [0, N ] be a trainingstep-dependent annealing parameter; the k-th band (k = 0, . . . , N − 1) of γ(x) is multiplied by
+
+
+wk (β) = 12 1 − cos π clamp(β − k, 0, 1) ,
+(21)
+so that wk = 0 before the schedule reaches band k, ramps smoothly to wk = 1 over a unit-width
+interval in β, and remains at one thereafter. We linearly increase β from 0 to N over the first TFA
+optimization steps (frequency-annealing horizon, value in Appendix D.4), after which all bands are
+fully unmasked. Compared with binary masking, the cosine schedule avoids abrupt gradient bursts
+when a new band becomes active and lets the network grow high-frequency detail only after the
+low-frequency reconstruction has stabilized.
+Bounded output. The MLP output is hard-bracketed to a physically admissible range,
+
+αθ (x) = αmin + (αmax − αmin ) σ fθ (γ(x)) ,
+with σ(·) the logistic sigmoid and bounds 0 < αmin < αmax . The bracketing serves three purposes:
+(i) it enforces αθ (x) > 0 identically, satisfying the positivity required by the diffusivity form (2);
+(ii) it bounds the diffusivity contrast so that the system matrix A(αθ ) remains well-conditioned for
+the Jacobi inner solver of Appendix D.2; (iii) it prevents the early-training optimizer from probing
+extreme values that would yield zero gradients through the saturation of the sigmoid or through stiff
+numerical regimes. Concrete numerical values for αmin , αmax are calibrated once per dataset using
+the bulk-to-defect contrast described in Appendix A.5, and are reported in Appendix D.4.
+R
+Discrete total-variation regularizer. The continuous regularizer R(αθ ) = Ω ∥∇αθ (x)∥ dx is
+implemented on the same Cartesian grid used by the forward solver, with per-axis dimensions
+Nx , Ny , Nz and spacings ∆x, ∆y, ∆z formally defined in Appendix D.2. With αi,j,k := αθ (xi,j,k )
+at grid node (i, j, k), we use the isotropic forward-difference discretization
+"
+Nx −1, Ny −1, Nz −1
+X
+2
+R(αθ ) = ∆x ∆y ∆z
+δx αi,j,k /∆x
+i,j,k=0
+#1/2
++ δy αi,j,k /∆y
+2
++ δz αi,j,k /∆z
+2
+2
++ ϵTV
+, (22)
+where the per-axis forward differences are δx αi,j,k := α(i+1) mod Nx ,j,k − αi,j,k , δy αi,j,k :=
+αi,(j+1) mod Ny ,k − αi,j,k (lateral periodic wrap, matching the lateral periodic BCs of Appendix A.5),
+and δz αi,j,k := αi,j,k+1 − αi,j,k for k < Nz − 1 with δz αi,j,Nz −1 := 0 (the adiabatic and Robin
+BCs do not constrain α at the front/back faces, so the through-thickness forward difference at the
+top slice vanishes; the lateral δx , δy contributions on that slice are retained). The smoothing constant
+ϵTV > 0 has dimension [α]/[length] and ensures differentiability at vanishing gradients (concrete
+value in Appendix D.4, distinct from the perturbation parameter ε used in Appendix B.1). The penalty
+promotes piecewise-constant αθ aligned with the model assumed in Appendix A.2 and supplements
+the high-eigenmode suppression provided by frequency annealing.
+19
+D.2
+Discrete forward solver
+Ambient shift. Throughout this appendix and Section 4, the discrete temperature field Tn denotes
+the deviation from the ambient temperature Tamb defined in Appendix A.5. Under this convention
+the synthetic post-flash and PVC near-uniform initial conditions of Appendix A.5 have ambient floor
+zero and the convective Robin condition n · (α∇T ) = −h(T − Tamb ) becomes the homogeneous
+form n · (α∇T) = −h T. All measured frames T̂i in Section 4.3 are likewise interpreted as ambientshifted observations T̂i − Tamb . The state equation (8) therefore retains the homogeneous form
+A(αθ )Tn+1 = Tn across both datasets, with no affine right-hand side.
+Spatial discretization. The bulk equation ∂t T = ∇ · (α∇T ) on the slab Ω = [0, L]2 × [0, H]
+is discretized on a uniform Cartesian grid with Nx × Ny × Nz nodes and spacings ∆x, ∆y, ∆z
+aligned with the lateral and through-thickness axes. Continuing the one-dimensional argument of
+Proposition 1, the second-order finite-volume diffusion operator L(αθ ) ∈ RNg ×Ng acts at an interior
+node (i, j, k) by
+
+
+1
+[L(αθ )T]i,j,k = ∆x
+2 ᾱi+1/2,j,k (Ti+1,j,k − Ti,j,k ) − ᾱi−1/2,j,k (Ti,j,k − Ti−1,j,k )
+
+
+1
++ ∆y
+2 ᾱi,j+1/2,k (Ti,j+1,k − Ti,j,k ) − ᾱi,j−1/2,k (Ti,j,k − Ti,j−1,k )
+
+
+1
++ ∆z
+2 ᾱi,j,k+1/2 (Ti,j,k+1 − Ti,j,k ) − ᾱi,j,k−1/2 (Ti,j,k − Ti,j,k−1 ) ,
+with each face-centered coefficient ᾱ computed as the harmonic mean of its two neighbouring cellcentered values. By Proposition 1 this is the unique discrete realization of effective-flux continuity
+for the single-α model.
+Boundary conditions. Lateral periodicity is implemented by circular padding so that the stencil at
+i = 0 wraps to i = Nx − 1 and similarly for j. Through-thickness adiabatic conditions (zero-flux
+Neumann) are implemented by replicate padding on the front z = 0 and back z = H faces, which
+enforces ᾱi,j,−1/2 (Ti,j,0 − Ti,j,−1 ) = 0 at the boundary face by zeroing the cross-face temperature
+increment. The PVC convective Robin condition described in Appendix A.5 replaces the back-face
+replicate padding by a ghost-cell update consistent with n · (α∇T ) = −h(T − Tamb ).
+Implicit-Euler step. The state at frame n + 1 is the solution of the sparse linear system
+A(αθ ) Tn+1 = Tn ,
+A(αθ ) := I − ∆t L(αθ ),
+(23)
+which is unconditionally stable [10] so that ∆t is set by the camera frame rate rather than the CFL
+bound ∆t ≤ ∆x2 /(2D αmax ).
+Symmetry, sign, and diagonal dominance. Under the homogeneous boundary conditions enforced
+by the ambient shift above (lateral periodic, adiabatic through-thickness, and the homogeneous
+Robin form n · (α∇T) = −h T on the PVC back face), the harmonic-mean construction makes
+L(αθ ) symmetric: each interior face conductance apq := ᾱpq /∆x2d (d ∈ {x, y, z} the axis joining
+grid nodes p, q) appears symmetrically in row p and row q, lateral periodic wrapping preserves this
+symmetry, and a finite-volume back-face flux balance n · (α∇T) · ∆x∆y = −h Tp · ∆x∆y divided
+by the nodal volume ∆x∆y∆z yields a strictly positive diagonal sink βp := h/∆z on each back-face
+Robin row. Writing q ∼ p for the set of interior-face neighbours of node p and βp ≥ 0 for the per-row
+Robin sink (zero for non-Robin rows), the entries of L(αθ ) are
+X
+[L(αθ )]pp = −βp −
+apq ,
+[L(αθ )]pq = apq ≥ 0 for q ∼ p,
+q∼p
+X
+[L(αθ )]pq = −βp ≤ 0,
+q
+so the constant-temperature mode is annihilated on rows without a Robin sink and damped at rate
+βp on Robin boundary rows. Therefore L(αθ ) is symmetric and negative semi-definite under purely
+periodic/adiabatic BCs, and negative definite once at least one βp > 0. Strict diagonal dominance of
+A(αθ ) follows from the identity term and the (non-negative) Robin sink:
+X
+X
+X
+
+[A(αθ )]pp −
+[A(αθ )]pq = 1 + ∆tβp + ∆t apq − ∆t apq = 1 + ∆tβp ≥ 1 > 0,
+q̸=p
+q∼p
+q∼p
+holding strictly on every row independently of the conductance pattern, so A(αθ ) is symmetric
+positive-definite and the Jacobi iteration below converges geometrically.
+20
+Jacobi inner solver. For autodiff compatibility on the GPU we avoid sparse-matrix factorizations
+and solve (23) by a fixed unrolled number K of Jacobi iterations. With the splitting A(αθ ) = D + R
+where D is the diagonal of A and R the off-diagonal remainder, the iteration with right-hand side
+b := Tn is
+
+
+T(κ+1) = D−1 b − R T(κ) ,
+κ = 0, 1, . . . , K − 1,
+(24)
+initialized from T(0) := Tn (warm-started by the previous frame’s solution). Equation (24) reduces to
+a 7-point stencil convolution, expressible as a single fused kernel in standard autodiff frameworks [39]
+and accelerated with torch.compile just-in-time autotuning. The iteration count K is chosen large
+enough that the residual ∥AT(K) − b∥ falls below the noise floor of the camera measurements
+(Appendix D.4); empirically K = 50 suffices for our grid resolution and ∆t. Because the Jacobi
+iteration converges to the unique exact solution of (23) under the strict diagonal dominance established
+above, we treat T(K) as the (numerical) exact state Tn+1 , and the discrete adjoint of Appendix D.3
+below is derived for this exact linear solve. The resulting parameter gradients are exact for the
+converged objective up to the same iterative tolerance.
+D.3
+Adjoint recurrence and gradient assembly
+Constraint and augmented Lagrangian. Set T0 from the prescribed initial condition (Appendix A.5) and define the state residual at step n by
+Fn (Tn , Tn−1 , αθ ) := A(αθ ) Tn − Tn−1 = 0,
+n = 1, . . . , Nt .
+(25)
+Define the per-step data term
+(
+2
+ΠΓ Tn − T̂i
+if n = ni ∈ {n1 , . . . , nM },
+n
+n
+ℓ (T ) :=
+0
+otherwise,
+PNt n n
+so the data part of the objective is n=1 ℓ (T ) and matches the data-fidelity sum in (9). We
+introduce adjoint variables µn ∈ RNg for n = 1, . . . , Nt as Lagrange multipliers of the state
+residuals, giving the augmented functional
+e {Tn }, {µn }) =
+L(θ;
+N
+t
+X
+ℓn (Tn ) + λR(αθ ) −
+n=1
+N
+t
+X
+(µn )⊤ Fn (Tn , Tn−1 , αθ ).
+n=1
+n
+For any {T } that satisfy the state equation (25), Le = Jdisc (θ) regardless of the multipliers µn .
+Stationarity and adjoint recurrence. Computing dJdisc /dθ via the chain rule and discarding terms
+e
+that are eliminated by the state equation, it suffices to compute dL/dθ
+in the way that does not require
+n
+the implicit derivatives dT /dθ. To eliminate them, we choose the multipliers so that the partial
+derivative of Le with respect to each Tn vanishes. Differentiating,
+n
+n+1
+∂ℓn
+∂ Le
+n ⊤ ∂F
+n+1 ⊤ ∂F
+=
+−
+(µ
+)
+−
+(µ
+)
+= 0,
+∂Tn
+∂Tn
+∂Tn
+∂Tn
+where we set µNt +1 = 0 because no constraint FNt +1 exists. Reading off the partials from (25),
+∂Fn
+= A(αθ ),
+∂Tn
+the stationarity condition becomes
+∂Fn+1
+= −I,
+∂Tn
+⊤
+A(αθ )⊤ µn = ∂ℓn /∂Tn + µn+1 ,
+µNt +1 = 0,
+(26)
+which is (10). The recurrence is integrated backwards in time from n = Nt down to n = 1. The same
+Jacobi inner solver of Appendix D.2 applies because the finite-volume discretization with diagonal
+Robin sink βp := h/∆z makes A(αθ )⊤ = A(αθ ) on every dataset (lateral periodic, adiabatic
+through-thickness, and homogeneous Robin), so the forward and backward sweeps share the same
+SPD system matrix.
+n
+e
+Gradient assembly. With µn chosen so that ∂ L/∂T
+= 0 for n = 1, . . . , Nt , the total derivative of
+Jdisc with respect to θ is the partial derivative of Le with respect to θ at fixed {Tn }:
+Nt
+dJdisc
+∂ Le
+∂(λR) X
+∂Fn ∂αθ
+=
+=
+−
+(µn )⊤
+.
+dθ
+∂θ
+∂θ
+∂αθ ∂θ
+n=1
+21
+Because Fn = A(αθ )Tn − Tn−1 and A(αθ ) = I − ∆t L(αθ ) depends on αθ only through the
+diffusion operator,
+∂Fn
+∂(L(αθ )Tn )
+= −∆t
+,
+∂αθ
+∂αθ
+so the assembled gradient becomes
+Nt
+X
+∂(λR)
+dJdisc
+∂(L(αθ )Tn ) ∂αθ
+=
++ ∆t
+(µn )⊤
+,
+dθ
+∂θ
+∂αθ
+∂θ
+n=1
+(27)
+which is (11). The Jacobian ∂αθ /∂θ is obtained by ordinary backpropagation through the MLP
+at each grid node, and the term ∂(L(αθ )Tn )/∂αθ is a sparse local stencil whose nonzeros are
+2
+determined by the harmonic-mean derivatives ∂ ᾱi+1/2 /∂αi = 2αi+1
+/(αi + αi+1 )2 and similarly
+for ∂/∂αi+1 .
+Memory cost. The forward sweep produces T1 , . . . , TNt , which the gradient assembly (27) consumes one frame at a time during the backward sweep that produces µn . Because (26) requires
+only µn+1 and Tn at any given step, only one current and one trailing temperature slice plus the
+running gradient accumulator need to reside in memory beyond the cost of a single forward solve.
+The naive backpropagation-through-time alternative would store the entire computational graph
+of the K unrolled Jacobi iterations at every one of the Nt time steps, with peak memory scaling
+as O(KNg Nt ); the adjoint replaces this with O(Ng ) at the cost of one backward solve, an exact
+restatement of the implicit-function-theorem trick in a sequential setting [6].
+Sensitivity to initial conditions. If the initial temperature T0 is itself uncertain
+P or learnable, the
+same calculation under the augmented Lagrangian above (which carries a − n (µn )⊤ Fn term)
+gives
+1
+dJdisc
+1 ⊤ ∂F
+=
+−
+(µ
+)
+= − (µ1 )⊤ (−I) = + µ1 ,
+dT0
+∂T0
+where only F1 = AT1 − T0 depends on T0 . The sign is consistent with the adjoint recurrence (26)
+and the gradient assembly (27) under the same Lagrangian convention. We do not exercise this
+option in the experiments of Section 5, where the post-flash initial profile is calibrated externally per
+Appendix A.5.
+Consistency with the continuous adjoint. The recurrence (26) is the implicit-Euler discretization,
+applied backwards in time, of the continuous adjoint problem associated with the bulk equation
+P
+∂t T = ∇ · (α∇T ) and the cumulative observation functional i ∥ΠΓ T (·, ti ) − T̂i ∥2 : namely,
+P
+−∂t p = ∇ · (α∇p) + i 2Π∗Γ (ΠΓ T (·, ti ) − T̂i ) δ(t − ti ) with terminal condition p(·, tend ) = 0.
+The discretize-then-optimize formulation we use thus inherits the same backward-parabolic structure
+as the continuous setting [37], while delivering exact gradients of the discrete objective Jdisc rather
+than discretized gradients of the continuous one.
+D.4
+Implementation hyperparameters
+The hyperparameters used in the synthetic experiments of Section 5 are listed in Table 5. Adam is
+used with the listed learning rate and step decay; gradients are accumulated through a single forward
+and a single backward solver sweep per iteration. Compute resources, including the GPUs used for
+benchmarking, are documented in Appendix E.
+E
+Experimental Details
+E.1
+Synthetic dataset generation
+Inverse-crime mitigation. To avoid evaluating the reconstruction against data generated by its own
+discretization, we use PhiFlow [23], an independent finite-volume engine, for ground-truth generation.
+PhiFlow integrates the bulk equation (2) with an explicit scheme; to overcome the explicit stability
+constraint at fine grid resolution, we apply an adaptive substepping routine. The maximum stable
+step size is
+∆x2
+∆tstable ≈
+,
+2D αmax
+22
+Table 5: Hyperparameter configuration for NeFTY on the synthetic benchmark.
+Category
+Parameter
+Network architecture
+MLP depth LMLP
+MLP hidden width WMLP
+Encoding bandwidth N
+Skip-connection layer
+Output activation
+Value
+Domain and grid
+Domain size (L, L, H)
+Grid resolution (Nx , Ny , Nz )
+Lateral spacing ∆x = ∆y
+Through-thickness spacing ∆z
+10.0 × 10.0 × 1.0
+64 × 64 × 16
+0.156
+0.0625
+Forward solver
+Time step ∆t
+Number of frames Nt
+Time integrator
+Inner solver
+Jacobi iterations K
+Face coefficient
+Diffusivity bounds (αmin , αmax )
+0.05
+100
+implicit Euler
+Jacobi unrolling
+50
+harmonic mean (Prop. 1)
+(0.003, 0.25)
+Optimization
+Optimizer
+Learning rate
+Step decay γ
+Total iterations
+Frequency-annealing horizon TFA
+Adam
+5 × 10−5
+0.1 per 1000 steps
+10,000
+2,500
+Regularization
+TV weight λ
+TV smoothing ϵ
+10
+512
+12
+4
+scaled sigmoid
+1 × 10−3
+1 × 10−6
+with D ∈ {2, 3} the spatial dimension and αmax the per-batch maximum diffusivity, and the number
+of solver substeps per recorded frame is set to
+
+
+Nsub = max 10,
+∆t
+× 2.0
+∆tstable
+
+,
+so that the forward simulation often executes dozens of substeps per recorded frame.
+Simulation configuration. All synthetic samples are generated on the unitless slab Ω = [0, 10]2 ×
+[0, 1] at 64 × 64 × 16 grid resolution. The lateral (x, y) faces use periodic boundary conditions and the
+through-thickness (z) faces use adiabatic Neumann conditions, both consistent with Appendix A.5.
+The transient is recorded over 100 frames with ∆t = 0.05. Material properties are sampled from uniform distributions: bulk diffusivity αbase ∼ U(0.1, 0.2), defect diffusivity αdefect ∼ U(0.005, 0.015).
+Each sample contains one to four ellipsoidal, cylindrical, or box-shaped subsurface defects buried
+at varying depth. The dataset of 1,000 samples is split into a homogeneous configuration (constant
+αbase ) and a layered configuration (three to four bulk strata along z), and we evaluate every method
+on the full 1,000-sample benchmark per configuration.
+Dimensional analysis. The unitless solver evolves in (t/ttotal , x/L0 ) coordinates with effective
+diffusivity αsim = αphys ttotal /L20 , the Fourier-number scaling of Appendix A.5. A simulation
+with αsim ≈ 0.1 corresponds to highly conductive silicon (αphys ≈ 10−4 m2 /s) on a microsecond
+timescale at L0 = 10 µm, or to a resistive polymer (αphys ≈ 10−7 m2 /s) on a millisecond timescale
+at the same length scale; a single set of unitless parameters thus represents widely different material
+classes by reinterpreting L0 and ttotal .
+Defect contrast scaling. The defect-to-bulk diffusivity ratio is set to roughly 1 : 20. We choose
+this contrast over the realistic air-to-solid ratio of > 1 : 1000 for numerical stability: at 1 : 1000
+the linear system A(αθ ) = I − ∆t L(αθ ) becomes severely ill-conditioned and the iterative solver
+stalls. At 1 : 20 the surface-temperature signature already saturates against the perfect-insulator
+limit (further reductions in αdefect leave the boundary thermograms unchanged), while the condition
+number remains compatible with efficient gradient-based optimization.
+23
+E.2
+Metrics
+Synthetic 3D reconstruction. For each test sample, let α⋆ denote the ground-truth diffusivity field
+on the Ng = Nx Ny Nz grid and α̂ the recovered field. We report:
+• MSE = N1g ∥α̂ − α⋆ ∥22 .
+
+• PSNR = 10 log10 (αmax − αmin )2 /MSE .
+• SSIM [57] computed slice-by-slice along z and averaged.
+• IoU = | (α̂ < τ ) ∩ (α⋆ < τ ) |/| (α̂ < τ ) ∪ (α⋆ < τ ) | with defect threshold τ = 0.03, chosen as
+twice the upper end of the defect distribution to provide a clean binary defect mask.
+The metrics are computed per sample and averaged over the full 1,000-sample benchmark per
+configuration.
+Real PVC: 2D segmentation. Following the convention of the PVC-Infrared benchmark [59], the
+recovered 3D α̂θ is projected onto a 2D defect mask through the depth-averaged anomaly contrast
+described in Appendix H, and IoU and Dice are computed against the 2D ground-truth annotation.
+Real PVC: 2.5D depth. For each pixel p assigned to a defect, let d⋆p denote the ground-truth depth (in
+mm) supplied by the PVC-Depth benchmark [58] and dˆp the predicted depth from the spatial-median
+anomaly contrast along z (Appendix H). Let P denote the set of pixels assigned to a defect by the 2D
+mask above and δp := max(dˆp /d⋆p , d⋆p /dˆp ) the per-pixel depth ratio. We report the standard depth
+P
+metrics of Eigen et al. [13]: Absolute Relative error Abs Rel = |P1 | p∈P |dˆp − d⋆p |/d⋆p , RMSE
+1/2
+P
+= 1
+, and the threshold accuracies δ < 1.25k := 1 |{p ∈ P : δp < 1.25k }|
+(dˆp − d⋆ )2
+|P |
+p∈P
+p
+|P |
+for k ∈ {1, 2, 3}.
+Frequency-domain diagnostics. Defect Edge F1 thresholds the gradient magnitude ∥∇α∥ at 50%
+of the ground-truth maximum, restricts to a dilated defect-boundary mask, and reports the harmonic
+mean of precision and recall. Radial power spectrum extracts a tight 16 × 16 × 8 crop centered on the
+defect cluster, computes the 3D Fourier transform, and radially averages the power, with frequencies
+normalized so that the through-thickness Nyquist limit equals ∼ 8 cycles per unit length.
+E.3
+Hyperparameters and compute resources
+The full NeFTY hyperparameter table (architecture, solver, optimization, regularization) is given
+in Table 5 of Appendix D.4. Our experimental framework was executed on a hybrid infrastructure
+comprising local workstations for controlled benchmarking and a high-performance computing (HPC)
+cluster for large-scale training. The local development environment consists of servers equipped
+with a 32-core CPU and two NVIDIA RTX PRO 6000 Blackwell GPUs (96 GB VRAM each). To
+ensure rigorous consistency in our efficiency analysis, all hardware-sensitive metrics, specifically the
+wall-clock times and peak GPU memory usage detailed in Table 4 of the main body and Table 9 of
+this appendix, were benchmarked exclusively on this local server with reconstruction confined to a
+single GPU per specimen. For the large-scale synthetic dataset generation under PhiFlow, we utilized
+a compute cluster where each node is provisioned with dual 26-core CPUs and eight NVIDIA L40
+GPUs.
+F
+Baseline Implementations
+This appendix gives the configuration of every baseline used in Section 5. Unless otherwise stated, all
+baselines are tuned with the same compute budget as NeFTY on the same hardware (Appendix E.3).
+F.1
+Soft-constrained PINN family
+PINN with GradNorm. The vanilla PINN baseline instantiates two networks, a temperature surrogate
+Tϕ (x, t) and a diffusivity surrogate αθ (x), and minimizes the composite loss of equation (4). The
+PDE residual is evaluated through automatic differentiation at Nc space-time collocation points
+sampled uniformly per iteration, and the initial-condition penalty matches Tϕ (x, 0) to the prescribed
+Gaussian post-flash profile of Appendix A.5. The two physics weights λPDE and λIC are dynamically
+balanced through GradNorm [7], which normalizes per-loss gradient magnitudes to a common scale.
+We use Tϕ depth 5 and width 128 (4.91 M total parameters across both networks), Nc = 24,576
+24
+collocation points per iteration, Adam with learning rate 10−3 , and 22,000 iterations: 2.2× more
+iterations and 2× more parameters than NeFTY. Despite this advantage, the recovered αθ saturates at
+a near-trivial constant (Section 5.2), in line with the structural decoupling proven in Appendix C.
+SPINN, Causal-PINN, DCGD. For the three modern PINN variants we follow the official implementations and hyperparameter settings released by the original authors [8, 25, 56], paired with the same
+diffusivity-network αθ and the same 24,576 collocation points and 22,000 iterations as the vanilla
+PINN above so that compute is matched across the family.
+F.2
+Voxel-grid optimization
+The Grid Opt. baseline replaces the neural diffusivity field αθ of Section 4.1 by a learnable tensor
+α ∈ RNx ×Ny ×Nz (initialized at the bulk mean) and optimizes it through the same differentiable
+solver and adjoint of Section 4. This isolates the contribution of the continuous coordinate-based
+prior. Grid Opt. uses the same Adam learning-rate schedule, the same number of iterations (10,000),
+and the same TV regularizer as NeFTY; without the neural prior it converges to a noisy field with
+ringing artifacts (Section 5.2).
+F.3
+Supervised U-Net baselines
+U-Net (Full). A 3D U-Net [45] adapted for spatiotemporal regression. The input temperature
+sequence of shape (B, 1, 100, 64, 64) is interpolated along the temporal axis from 100 to 16 depth
+slices and treated as a (B, 1, 16, 64, 64) volume. The architecture follows a four-level encoderdecoder with channel sizes {32, 64, 128, 256}, double 3D convolutions and max-pooling on the
+contracting path, and trilinear upsampling with skip connections on the expansive path; the output
+passes through a sigmoid scaled to [αmin , αmax ]. Training uses MSE between predicted and groundtruth α on the full synthetic dataset (defects included), which represents an upper bound consuming
+the volumetric labels that the label-free baselines never see.
+U-Net (Sound-Only). The same architecture trained exclusively on defect-free samples. This
+baseline probes the susceptibility of purely data-driven inversion to out-of-distribution defects, and is
+included in the main Table 1 as a data-driven zero-shot reference.
+F.4
+Classical thermography heuristics
+PPT. Pulsed Phase Thermography [26, 32] computes the per-pixel discrete Fourier transform of the
+surface-temperature decay, identifies the dominant
+p phase peak at frequency fpeak , and inverts depth
+through the diffusion-length formula d = 1.82 αphys /(πfpeak ). We use the implementation of the
+original authors with six target frequencies spanning 0.01-0.5 Hz, matching the PVC-Depth recording
+rate.
+TSR. Thermographic Signal Reconstruction [49, 50] fits a polynomial in log t to each pixel’s temperature decay,
+√ identifies the time tpeak at which the second log-derivative peaks, and inverts depth
+as d = 1.8 αphys tpeak . We use the standard fifth-order polynomial fit and the per-pixel tpeak
+extraction.
+F.5
+Swin-UNETR (real PVC, zero-shot transfer)
+The supervised Swin-UNETR baseline of Hatamizadeh et al. [21] is trained on the synthetic dataset
+of Appendix E.1 for 500 epochs under MSE supervision (loss converges to 4 × 10−6 ) and transferred
+zero-shot to the real PVC datasets. Inputs are temporally resampled from the PVC frame rate to the
+synthetic 100-frame format and amplitude-normalized to the synthetic peak-temperature scale; the
+predicted 3D α̂ is projected to 2D masks and 2.5D depth through the same procedure used for NeFTY
+(Appendix H).
+G
+Additional Results
+This appendix collects the supporting evidence referenced from Section 5: the per-difficulty robustness breakdown including the supervised U-Net (Full) upper bound (Table 6), the surface-fidelity
+decomposition that quantifies the data-fit paradox of Section 5.2 (Table 7 and Figure 7), the cumulative ablation in full (Table 8), the training-level wall-clock comparison referenced from Section 5.5
+(Table 9), the frequency-domain diagnostics (Edge F1 and radial power spectrum), additional perdefect-count and per-layer-count qualitative reconstructions (Figures 10–13), and a representative
+failure mode (Figure 14).
+25
+G.1
+Robustness across defect count and layer count
+Table 6: Robustness breakdown of Table 1. PSNR↑ and IoU↑ stratified by defect count (Homogeneous, 1 to 4 defects) and layer count (Layered Composite, 3 and 4 layers, each with 1 to 4 defects).
+The supervised U-Net (Full) upper bound is included here, as it consumes the volumetric labels the
+label-free baselines never see. Best label-free entry per column in bold.
+H OMOGENEOUS
+2 D EFECTS
+3 D EFECTS
+1 D EFECT
+L AYERED C OMPOSITE
+3 L AYERS
+4 L AYERS
+4 D EFECTS
+M ETHOD
+PSNR
+IOU
+PSNR
+IOU
+PSNR
+IOU
+PSNR
+IOU
+PSNR
+IOU
+PSNR
+IOU
+Supervised
+U-N ET (F ULL )
+U-N ET (S OUND -O NLY )
+27.98
+18.96
+0.72
+0.00
+24.99
+15.95
+0.72
+0.00
+22.97
+13.19
+0.69
+0.00
+20.84
+11.23
+0.66
+0.00
+20.81
+15.62
+0.67
+0.00
+19.26
+15.22
+0.68
+0.00
+Label-free
+G RID O PT.
+PINN
+SPINN
+N E FTY (O URS )
+17.41
+−0.37
+10.48
+19.99
+0.03
+0.01
+0.000
+0.40
+14.01
+−0.30
+9.42
+19.36
+0.01
+0.01
+0.000
+0.51
+13.04
+−0.18
+9.53
+17.55
+0.06
+0.02
+0.000
+0.43
+11.51
+−0.13
+7.04
+17.04
+0.07
+0.02
+0.004
+0.44
+13.15
+1.19
+9.59
+16.69
+0.04
+0.02
+0.000
+0.41
+13.40
+1.64
+9.84
+15.07
+0.02
+0.02
+0.000
+0.34
+NeFTY’s IoU stays in the 0.34-0.51 band across defect-count and layer-count slices, while Grid Opt.
+collapses below 0.07 and PINN stays at ∼ 0.02. SPINN, the strongest of the four PINN variants on
+the aggregate SSIM (Table 1), still recovers IoU ≤ 0.004 in every slice and its PSNR drifts down
+with defect density (from 10.48 at one defect to 7.04 at four defects), confirming that the soft-PINN
+pathology is invariant to scene complexity. The supervised U-Net (Full) peaks at IoU 0.72 on the
+simplest setting and degrades only mildly with complexity, providing the upper bound referenced
+from Section 5.2. NeFTY closes a substantial portion of the gap between unsupervised baselines and
+the supervised upper bound while requiring no labels.
+G.2
+Surface fidelity and the data-fit paradox
+Table 7: Surface-temperature reconstruction error. For each method we re-simulate the temperature with the recovered αθ (or directly read off Tϕ for the soft-PINN family) and compare to the
+ground-truth surface frames. Comparing with the volumetric IoU of Table 6 surfaces the data-fit
+paradox of Section 5.2: PINN attains a surface PSNR above 62 dB while its IoU stays at ∼ 0.01.
+MSE is scaled by 10−4 .
+H OMOGENEOUS
+2 D EFECTS
+3 D EFECTS
+1 D EFECT
+L AYERED C OMPOSITE
+3 L AYERS
+4 L AYERS
+4 D EFECTS
+M ETHOD
+MSE↓
+PSNR↑
+MSE↓
+PSNR↑
+MSE↓
+PSNR↑
+MSE↓
+PSNR↑
+MSE↓
+PSNR↑
+MSE↓
+PSNR↑
+G RID O PT.
+PINN
+N E FTY (O URS )
+4.82
+43.89
+0.50
+75.51
+63.04
+82.33
+7.02
+45.10
+0.52
+71.56
+62.82
+82.26
+9.14
+52.12
+0.73
+71.03
+62.20
+81.34
+29.84
+52.65
+0.56
+67.36
+62.19
+82.17
+15.94
+54.28
+0.54
+71.14
+62.05
+82.10
+6.61
+55.39
+0.50
+71.95
+61.95
+82.42
+The PINN baseline attains a surface MSE of 43.89 × 10−4 and a PSNR of 63.04 dB on the singledefect setting yet a volumetric IoU of 0.01, the data-fit paradox anticipated by Appendix C.2: the
+soft-constraint formulation can fit the boundary thermograms with a non-physical interior. NeFTY is
+forced through the hard solver to keep its interior consistent with the boundary, and consequently
+attains the lowest surface MSE (0.50 × 10−4 ) and the highest PSNR (82.33 dB) while also recovering
+the correct internal structure.
+G.3
+Cumulative ablation, complete
+Table 8: Cumulative ablation in full. Each row adds one component to the previous configuration,
+mean ± 95% CI across the 1,000-sample synthetic benchmark. The compact summary version is
+Table 3 in the main body.
+H OMOGENEOUS
+L AYERED
+VARIANT
+MSE (10−4 )↓
+PSNR↑
+SSIM↑
+I O U↑
+MSE (10−4 )↓
+PSNR↑
+SSIM↑
+I O U↑
+BASE
++ PE
++ PE, FA
++ PE, FA, σ
++ PE, FA, σ, HM
+F ULL ( + TV)
+127.4 ± 92.2
+126.1 ± 59.4
+29.80 ± 4.78
+31.43 ± 8.58
+21.01 ± 5.67
+3.66 ± 1.31
+0.47 ± 3.17
+4.17 ± 1.36
+8.33 ± 0.59
+9.19 ± 0.94
+10.95 ± 0.94
+18.48 ± 0.53
+0.28 ± 0.05
+0.12 ± 0.02
+0.16 ± 0.02
+0.26 ± 0.03
+0.36 ± 0.03
+0.77 ± 0.02
+0.03 ± 0.02
+0.09 ± 0.03
+0.14 ± 0.03
+0.18 ± 0.04
+0.24 ± 0.05
+0.45 ± 0.04
+221.6 ± 130.5
+87.16 ± 29.71
+44.33 ± 15.94
+35.60 ± 6.07
+23.09 ± 4.77
+9.26 ± 2.81
+2.89 ± 1.88
+6.15 ± 1.11
+8.81 ± 0.87
+9.27 ± 0.82
+11.26 ± 0.84
+15.88 ± 0.79
+0.24 ± 0.05
+0.13 ± 0.02
+0.18 ± 0.03
+0.24 ± 0.04
+0.33 ± 0.05
+0.74 ± 0.03
+0.02 ± 0.02
+0.09 ± 0.03
+0.14 ± 0.03
+0.14 ± 0.04
+0.22 ± 0.06
+0.37 ± 0.06
+26
+Ground Truth
+3D Diffusivity
+t=0.50s
+t=1.50s
+t=2.50s
+t=3.50s
+t=4.50s
+60
+50
+0
+2
+4
+X
+6
+8
+2
+10
+4
+6
+8
+1
+0
+10
+Z
+40
+30
+Y
+20
+10
+0
+L1 Error: PINN
+L1 Error: Grid Opt.
+L1 Error: Ours
+0
+0.125
+0
+2
+4
+X
+6
+8
+2
+10
+4
+6
+8
+1
+0
+10
+0.100
+Z
+0.075
+0.050
+Y
+0.025
+0
+0.000
+0.4
+0
+2
+4
+X
+6
+8
+2
+10
+4
+6
+8
+1
+0
+10
+Z
+0.3
+0.2
+Y
+0.1
+0
+0.0
+0.8
+0
+2
+4
+X
+6
+8
+2
+10
+4
+6
+8
+1
+0
+10
+0.6
+Z
+0.4
+Y
+0.2
+0
+0.0
+Figure 7: Surface-temperature error maps over time for a representative three-defect specimen.
+NeFTY (Row 2) attains the lowest residual error throughout the decay; Grid Opt. (Row 3) and PINN
+(Row 4) exhibit structured residuals that persist and diffuse outward, signaling that their reconstructed
+interiors are inconsistent with the observed boundary thermograms.
+Figure 8: Training dynamics of the four PINN variants compared to NeFTY (representative
+homogeneous specimen, identical y-axis scale across panels). Solid blue: PINN data loss; red: PDE
+residual; dashed blue: NeFTY data loss. Across all four variants the PDE residual is orders of
+magnitude larger than the data term and highly noisy; the optimizer drives the data loss down while
+the diffusivity network saturates at a near-trivial solution. NeFTY’s data loss (dashed) reaches orders
+of magnitude below all PINN data losses, since the hard solver couples surface fitting and diffusivity
+recovery directly.
+Table 8 expands the compact ablation of Table 3: each row reports MSE, PSNR, SSIM, and IoU
+as mean ± 95% CI across the 1,000-sample synthetic benchmark, separately for the homogeneous
+and layered configurations. The variance is highest at the Base and +PE configurations, where the
+optimizer regularly converges to qualitatively different fields across samples; subsequent additions
+(FA, σ, HM, TV) progressively tighten the CI as they constrain the optimization landscape. The
+single largest jump is the final TV regularizer, which more than halves the diffusivity MSE and
+nearly doubles IoU on both configurations by suppressing the residual high-frequency noise that the
+previous ablation rows still admit.
+G.4
+Training-level efficiency benchmark
+NeFTY converges in 9.6 minutes per specimen, comparable to Grid Opt. (8.0 minutes) and 1.9×
+to 6.1× faster than the four PINN variants (18.2-58.3 minutes), even though the PINN baselines
+27
+Table 9: Training-level wall-clock and memory per specimen on a single NVIDIA RTX PRO
+6000 (96 GB), the training-level companion to the solver-level Table 4 in the main body. Wall-clock
+includes the one-time torch.compile overhead (Grid Opt. ∼ 6 s, NeFTY ∼ 11 s). Iterations are
+reported at convergence or at the saturation plateau; collocation columns apply only to the PINN
+family.
+M ETHOD
+PARAMS
+C OLLOC .
+I TERS
+MS / ITER
+WALL - CLOCK
+P EAK GPU
+PINN [44]
+C AUSAL -PINN [56]
+DCGD [25]
+SPINN [8]
+G RID O PT.
+N E FTY (O URS )
+4.91 M
+4.91 M
+4.91 M
+2.64 M
+0.07 M
+2.44 M
+24,576
+24,576
+24,576
+24,576
+—
+—
+22,000
+22,000
+22,000
+22,000
+10,000
+10,000
+128
+144
+159
+49.5
+47.8
+57.5
+47.0 MIN
+52.7 MIN
+58.3 MIN
+18.2 MIN
+8.0 MIN
+9.6 MIN
+10.4 GB
+10.4 GB
+11.7 GB
+3.9 GB
+1.2 GB
+4.3 GB
+were given 2.2× more iterations and 2× the parameter count. The peak GPU memory of NeFTY
+(4.3 GB) is dominated by the unrolled Jacobi iterations of the forward solve; the discrete adjoint of
+Section 4.3 keeps the backward sweep at constant memory in Nt , in contrast to the O(KNg Nt ) of
+standard backpropagation through time (Table 4).
+G.5
+Frequency-domain diagnostics: Edge F1 and radial power spectrum
+To quantify whether each method recovers sharp defect boundaries (Section 5.2), we threshold
+the gradient magnitude ∥∇α∥ at 50% of the ground-truth maximum, restrict to a dilated boundary
+mask, and compute Edge F1. Averaged across the 1,000-sample homogeneous benchmark we obtain
+0.470 ± 0.137 for NeFTY, 0.029 ± 0.036 for Grid Opt., and 0.000 for vanilla PINN, SPINN, CausalPINN, and DCGD. NeFTY is the only label-free method whose recovered field carries detectable
+defect-scale gradients; the four PINN variants produce featureless interiors. Figure 9 plots the radial
+power spectrum, computed over a 16 × 16 × 8 defect crop and radially averaged across the same
+1,000-sample benchmark. NeFTY tracks the ground-truth spectrum from the lowest wavenumbers
+up to the Nyquist limit (∼ 8 cycles per unit length in the z-direction), while all four PINN variants
+collapse to near-zero power across the spectrum and Grid Opt. falls off above the mid frequencies.
+This is the operator-theoretic counterpart of Corollary 1: a method must inject high-frequency content
+actively to recover the volumetric structure that the parameter-to-observation map filters away.
+Figure 9: Mean radial power spectrum of the recovered diffusivity field, averaged across the
+1,000-sample homogeneous benchmark. NeFTY (green) tracks the ground-truth spectrum (black)
+across all spatial frequencies up to the Nyquist limit; Grid Opt. tracks at low frequencies but drops
+off above the mid range; the four PINN variants collapse to near-zero power.
+28
+G.6
+Additional qualitative reconstructions
+To complement the headline qualitative reconstructions of Figures 4 and 5 in the main body, we
+provide a stratified qualitative comparison across defect density and layer count. Figures 10–12
+show single-, two-, and four-defect reconstructions in the homogeneous setting, illustrating that
+NeFTY’s defect-localization quality is preserved as the number of subsurface scatterers grows
+from one to four; in particular, NeFTY separates two laterally adjacent defects (Figure 11) without
+merging their thermal signatures, a regime in which the unregularized voxel grid blurs both defects
+together. Figure 13 extends the comparison to a four-layer composite where the bulk diffusivity steps
+with depth (visible as changing background intensity in the ground-truth row); NeFTY isolates the
+embedded defects against the layered background, confirming the layered-setting trend of Table 1 at
+the per-specimen level.
+Figure 10: Single-defect reconstruction (homogeneous bulk). NeFTY recovers a clean defect
+outline at the correct depth; Grid Opt. exhibits ringing artifacts; the four PINN variants converge to
+featureless fields.
+29
+Figure 11: Two-defect reconstruction. NeFTY separates two laterally adjacent defects without
+merging their thermal signatures, while Grid Opt. blurs them together.
+30
+Figure 12: Four-defect reconstruction. NeFTY isolates each of four defects at the highest density
+of the synthetic benchmark; the Sound-Only U-Net ghosts all defects, in line with its zero IoU in
+Table 6.
+31
+Figure 13: Four-layer composite reconstruction. The bulk diffusivity steps with depth (visible as
+changing background intensity in the ground-truth row); NeFTY correctly localizes the embedded
+defects against this stratified background.
+32
+G.7
+Failure mode
+We identify one consistent failure mode of NeFTY: when defects are placed shallow and close
+to the laser-illuminated front surface, the surface-only data become weakly sensitive to the backface diffusivity, and the optimizer occasionally introduces a spurious low-α artifact along the back
+boundary that is consistent with the surface decay but not with the ground truth (Figure 14). The defect
+itself is still recovered at the correct lateral position, so the artifact does not affect 2D segmentation,
+but it propagates into the depth metric of Table 2 for shallow defects. Stronger back-face priors,
+a multi-side acquisition that adds back-face thermograms, or a depth-adaptive TV weight that
+suppresses high-curvature solutions far from observed pixels would all reduce this failure mode; we
+leave a quantitative ablation of these remedies to future work.
+Ours
+Ground Truth
+3D View
+z=0.031
+1
+0
+10
+Z
+1
+0
+10
+Z
+z=0.156
+z=0.281
+z=0.406
+z=0.531
+z=0.656
+z=0.781
+z=0.906
+8
+0
+6
+2
+4
+X
+4
+6
+8
+Y
+2
+10
+0
+8
+0
+6
+2
+4
+X
+4
+6
+8
+Y
+2
+10
+0
+Figure 14: Failure mode: shallow defects close to the heat source. NeFTY correctly localizes the
+central defects but introduces a low-diffusivity artifact along the back-face boundary of the lateral
+plane.
+H
+Real PVC Data Details
+H.1
+Datasets
+The PVC-Infrared [59] and PVC-Depth [58] benchmarks consist of 19 and 38 pulsed-thermography
+sequences respectively on 100 × 100 × 5 mm PVC specimens with cylindrical flat-bottom holes of
+varying diameter and depth, recorded with a long-wave-infrared camera at second-scale dynamics
+under flash-lamp excitation. PVC-Infrared annotates each specimen with a 2D binary defect mask
+derived from CAD drawings and bottom-view inspection; PVC-Depth additionally annotates discrete
+defect depths. Neither benchmark provides a 3D volumetric diffusivity ground truth, since obtaining
+such labels requires destructive sectioning or X-ray CT (5-96 hours per specimen [17]). Thermal
+sequences are temporally resampled and amplitude-normalized as documented in Appendix F.5 for
+compatibility across baselines.
+H.2
+Physical adaptations
+The synthetic benchmark of Appendix E.1 is set on micron-scale specimens at microsecond timescales
+with negligible convective dissipation, while the PVC specimens are centimeter-scale at second-scale
+dynamics; three physical adaptations of Appendix A.5 are required for NeFTY to apply without
+re-training the ground-truth simulator.
+Initial condition. The Gaussian post-flash profile is replaced by a near-uniform front-face flash
+T0 (x) = Tamb + A exp(−z 2 /(2wz2 )), with wz the absorption depth and A calibrated against the first
+measured frame; this matches the broad flash-lamp excitation used by Wei et al. [58, 59].
+Convective Robin boundary. On the back face we replace the synthetic adiabatic Neumann boundary
+by a Robin condition n·(α∇T ) = −h (T −Tamb ), with h > 0 a calibrated convective coefficient. The
+unitless h is set to match the asymptotic Biot regime of natural convection on PVC over the relevant
+second-scale window. After the ambient shift of Section 4.2, this becomes n · (α∇T ) = −h T ,
+so the discrete implicit-Euler step remains affine-free and the diagonal-dominance argument of
+Appendix D.2 carries over without change.
+Dimensional rescaling. The unitless solver evolves in (t/ttotal , x/L0 ) coordinates with effective
+diffusivity αsim = αphys ttotal /L20 (Appendix A.5). For PVC we set L0 = 100 mm (lateral specimen
+size) and ttotal to the recording window of the benchmark, so the unitless diffusivity ranges of
+the synthetic benchmark map onto the physical PVC diffusivity range. Lateral boundaries remain
+periodic when the camera footprint is far from the specimen edge; on cropped specimens we replace
+lateral periodicity by adiabatic Neumann boundaries.
+33
+H.3
+Projection from 3D diffusivity to 2D and 2.5D labels
+The reconstructed 3D field α̂θ (x, y, z) is reduced to the labels supplied by the benchmarks through
+two complementary projections.
+2D defect
+P mask. For each lateral pixel (x, y), we compute the depth-averaged diffusivity ᾱ(x, y) =
+Nz−1 z α̂θ (x, y, z) and the normalized one-sided diffusivity deficit d(x, y) = [1 − ᾱ(x, y)/αbase ]+ .
+Because sound pixels should have ᾱ(x, y) ≈ αbase , we estimate the reconstruction noise floor by
+σ̂ = 1.4826 MAD{d(x, y)}(x,y) and define the mask to be 1{d(x, y) > 2σ̂}. The same fixed postprocessing rule is applied to NeFTY, Grid Opt., Swin-UNETR, and SPINN; PPT/TSR follow their
+publication-default segmentation rules.
+2.5D defect depth. For each pixel p inside the predicted 2D mask we extract the through-thickness
+depth dˆp as the spatial median of the depths of the z-voxels whose α̂θ falls below the bulk by more
+than the noise floor of the defect-free region. PPT and TSR use their published depth formulas
+with the calibrated PVC diffusivity; Swin-UNETR uses the same spatial-median rule applied to its
+supervised prediction.
+H.4
+Real PVC depth, full metric breakdown
+We provide the full table and an additional qualitative example in Table 10 and Figure 15.
+Table 10: Real PVC 2.5D depth recovery, full metric breakdown. Companion to Table 2 in
+the main body, reporting RMSE in millimetres and the full δ < 1.25k threshold accuracies for
+k ∈ {1, 2, 3} alongside Abs Rel. NeFTY is best label-free on every metric.
+M ETHOD
+S WIN -UNETR [21]
+PPT [32]
+TSR [50]
+SPINN [8]
+G RID O PT.
+N E FTY (O URS )
+A BS R EL ↓
+RMSE ( MM ) ↓
+δ < 1.25 ↑
+δ < 1.252 ↑
+δ < 1.253 ↑
+3.131
+3.416
+13.366
+6.737
+0.941
+0.465
+1.983
+2.075
+7.655
+3.913
+0.983
+0.541
+0.052
+0.005
+0.002
+0.002
+0.104
+0.385
+0.126
+0.006
+0.002
+0.002
+0.399
+0.621
+0.190
+0.073
+0.002
+0.004
+0.614
+0.743
+Figure 15: Real PVC reconstruction on a second held-out specimen (companion to Figure 6).
+Row 1: defect masks; Row 2: predicted depth (greyscale, darker is deeper). NeFTY recovers both the
+defect layout and the depth ordering from the surface IR sequence, in contrast to PPT/TSR which
+produce coarse depth and SPINN which collapses to a near-uniform field.
+I
+Validation of the Differentiable Heat Diffusion Simulator
+We validate the correctness of our differentiable heat diffusion simulator, implemented using an
+implicit Euler time discretization solved via a Jacobi iterative scheme, through both analytical
+consistency checks and numerical experiments.
+I.1
+Governing Equation and Analytical Behavior
+To validate our simulator, we fix α as a constant, set the source term Q in Eq. (1) to zero, and prescribe
+a Gaussian initial temperature distribution. Under these settings the simulator reduces to
+∂T (x, t)
+= α∇2 T (x, t),
+∂t
+34
+(28)
+where T (x, t) denotes temperature and α is a constant, isotropic thermal diffusivity.
+For an initial Gaussian temperature distribution
+
+
+∥x − x0 ∥2
+,
+(29)
+T (x, 0) = A exp −
+2σ02
+where A > 0 is the peak amplitude, x0 ∈ R3 the source center, and σ0 > 0 the initial standard
+deviation along each axis. The analytical solution of Eq. (28) remains Gaussian for all t > 0. In
+particular, the variance along each spatial dimension evolves as
+σ 2 (t) = σ02 + 2αt,
+(30)
+which implies a linear growth rate
+dσ 2
+= 2α.
+(31)
+dt
+This property provides a quantitative criterion for validating the physical fidelity of a numerical
+diffusion solver.
+I.2
+Numerical Setup
+We discretize the spatial domain using a uniform Cartesian grid and advance Eq. (28) in time using
+an implicit Euler scheme. The resulting linear system at each time step is solved using a fixed number
+of Jacobi iterations, yielding a fully differentiable simulation pipeline.
+Periodic boundary conditions are used in the x and y directions, and zero-flux (Neumann) boundary
+conditions are applied along the z axis. Temperature observations are taken from the top surface of
+the domain to match the sensing configuration used in thermal imaging.
+I.3
+Gaussian Diffusion Rate Verification
+Figure 16: Gaussian Diffusion Rate Validation. (Left) Temporal evolution of the temperature
+variance σ 2 along the x and y directions, measured on the surface for a diffusing Gaussian heat source
+with constant diffusivity α = 0.1. Both σx2 (t) and σy2 (t) grow linearly over time and closely follow
+the analytical prediction σ 2 (t) = σ02 + 2αt. (Right) Comparison between the measured average slope
+dσ 2 /dt and the theoretical value 2α, showing a relative error of 0.16%. This result quantitatively
+confirms that the proposed simulator reproduces the correct diffusion rate of the heat equation.
+To verify the analytical variance growth in Eq. (30), we simulate the diffusion of a 3D Gaussian
+heat source with constant diffusivity α = 0.1 in a large domain. At each time step, we compute the
+temperature-weighted second moments on the surface,
+P
+P
+(x − x̄)2 T (x, y, t)
+(y − ȳ)2 T (x, y, t)
+P
+P
+σx2 (t) =
+, σy2 (t) =
+,
+(32)
+T (x, y, t)
+T (x, y, t)
+P
+P
+with x̄ =
+x T (x, y, t)/ T (x, y, t) and ȳ defined analogously, the temperature-weighted lateral
+centroids on the observed top surface.
+Linear regression is performed on σx2 (t) and σy2 (t) after an initial transient period. As shown in
+Fig. 16, both measured variances exhibit a linear increase over time, with an average slope of 0.1997,
+compared to the theoretical value 2α = 0.2000. The resulting relative error is 0.16%, demonstrating
+excellent agreement with the analytical solution.
+35
+I.4
+Qualitative Validation: Constant and Variable Diffusivity
+We further validate the simulator through qualitative visualization of the temperature evolution.
+Figure 17: Effect of Diffusivity Magnitude on Surface Heat Diffusion. Surface temperature
+evolution for a defect-free domain under high diffusivity (α = 1.0, top row) and low diffusivity (α =
+0.1, bottom row), shown at matched time steps. With identical spatial and temporal discretization,
+the high-diffusivity case exhibits substantially faster spatial spreading and a more rapid decay of peak
+temperature, while the low-diffusivity case retains a localized, high-contrast heat profile. These results
+qualitatively illustrate the expected dependence of diffusion dynamics on the thermal diffusivity
+parameter α.
+Constant diffusivity. Figure 17 shows the surface temperature evolution under uniform diffusivity
+(α = 0.1 and α = 1.0). The initially localized heat source spreads isotropically over time, preserving
+Gaussian symmetry as expected from Eq. (28).
+Figure 18: Surface Temperature Evolution under Constant and Spatially Varying Diffusivity.
+Surface temperature maps at selected time steps for heat diffusion with constant diffusivity (α = 0.1,
+top row) and spatially varying diffusivity with an embedded low-diffusivity defect (bottom row). In
+the homogeneous case, the heat source spreads isotropically and preserves Gaussian symmetry over
+time. In contrast, the presence of a defect locally impedes heat propagation, leading to asymmetric
+temperature distributions and delayed diffusion in the defect region (outlined by the dashed circle).
+These results demonstrate that the simulator correctly captures both uniform and heterogeneous
+diffusion behavior.
+Variable diffusivity with defect. To test spatially varying material properties, we introduce a
+low-diffusivity spherical defect embedded in a homogeneous background. As illustrated in Fig. 18
+(bottom row), the heat propagation is locally impeded near the defect region, resulting in a clearly
+36
+asymmetric temperature field. This behavior is consistent with the physical interpretation of reduced
+thermal diffusivity.
+I.5
+Effect of Diffusivity Magnitude
+Figure 19: Surface Temperature Profiles under Different Diffusivities. One-dimensional crosssections of the surface temperature along the x direction at the midline (y = middle), comparing
+high diffusivity (α = 1.0) and low diffusivity (α = 0.1). (Left) At the initial time step, both cases
+exhibit identical Gaussian profiles, confirming consistent initialization. (Right) At the final time
+step, the high-diffusivity case shows a significantly broader and lower-amplitude profile, reflecting
+faster spatial spreading of heat, while the low-diffusivity case retains a sharper peak. These results
+qualitatively validate the expected dependence of diffusion dynamics on the thermal diffusivity
+parameter α.
+We also compare diffusion dynamics under different diffusivity values in a defect-free setting.
+Figure 19 contrasts α = 1.0 (high diffusivity) with α = 0.1 (low diffusivity) using identical spatial
+and temporal resolutions. As expected, higher diffusivity leads to significantly faster spreading and
+lower peak temperatures, while preserving the overall Gaussian structure.
+J
+Limitations and Future Work
+Test-time optimization cost. Unlike supervised feedforward inversion (e.g., U-Net) that runs in
+milliseconds, NeFTY relies on per-specimen test-time optimization. Recovering one specimen
+takes ∼ 10 minutes on a single high-end GPU (Table 9). This cost is acceptable for offline NDE
+inspection where accuracy is paramount but limits applicability in high-throughput manufacturing
+lines. Amortized-inference strategies, for example meta-learning or hypernetworks that predict a
+good initialization for the neural field, could substantially reduce the number of optimization steps
+and are a natural follow-up.
+Quantitative diffusivity under high contrast. As discussed in Appendix E.1, we operate at a
+defect-to-bulk diffusivity contrast of ∼ 1 : 20. At realistic air-to-solid ratios (> 1 : 1000), the linear
+system A(αθ ) becomes severely ill-conditioned and the iterative solver stalls. NeFTY recovers defect
+geometry reliably in this regime (Section 5.2, Section 5.3) but recovering the precise quantitative
+magnitude of α inside high-contrast voids remains hard because the diffusion time inside an insulator
+scales as L2 /α and saturates for α → 0. Preconditioned or multi-grid solvers within the differentiable
+loop could extend NeFTY to the regime of stiff air voids.
+Lack of 3D real labels. The real PVC datasets used in Section 5.3 provide only 2D defect masks
+and discrete defect depths from CAD; full 3D volumetric diffusivity ground truth is not available for
+any public NDT dataset, and obtaining it requires destructive testing or X-ray CT [17]. We therefore
+evaluate real-world performance through projected 2D and 2.5D labels rather than direct volumetric
+error. Building a benchmark that pairs surface thermograms with volumetric diffusivity ground
+truth would constitute a significant standalone materials-science contribution and remains a future
+direction.
+37

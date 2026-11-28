@@ -1,0 +1,159 @@
+--- v001.md
++++ v002.md
+@@ -7,16 +7,16 @@
+ 
+ ## How it works
+-**Inputs:** A triangle mesh $\mathcal{T}$ (set of triangles with vertices $a,b,c$ and normals $\mathbf{n}$) or an oriented point cloud; a global voxel grid definition (origin, resolution, truncation band $\tau$).
+-**Outputs:** A TSDF volume where each voxel stores a truncated signed distance value and a validity flag.
++**Inputs:** A triangle mesh $\mathcal{T}$ (set of triangles with vertices $a,b,c$ and normals $\mathbf{n}$) or an oriented point cloud; a global voxel grid definition (origin, resolution, truncation band $\tau$) [S1].
++**Outputs:** A TSDF volume where each voxel stores a truncated signed distance value and a validity flag [S1].
+ 
+ **Data Structures:**
+ *   **Voxel Grid:** A sparse or dense array of blocks. Each block contains $N \times N \times N$ voxels (e.g., $8 \times 8 \times 8$) [S1].
+-*   **Voxel Entry:** Contains a float value (signed distance) and a boolean valid flag.
++*   **Voxel Entry:** Contains a float value (signed distance) and a boolean valid flag [S1].
+ *   **Triangle:** Defined by vertices $a, b, c \in \mathbb{R}^3$ and unit normal $\mathbf{n}$.
+ 
+ **Steps:**
+-1.  **Iterate Voxels:** For each voxel center $\mathbf{p}$ in the global grid:
++1.  **Iterate Voxels:** For each voxel center $\mathbf{p}$ in the global grid [S1].
+ 2.  **Find Closest Surface:** Compute the closest point $\Pi_{\tau\star}(\mathbf{p})$ on the surface $\mathcal{T}$ to $\mathbf{p}$ [S1].
+-    *   For a mesh, $\Pi_{\tau\star}(\mathbf{p})$ is the closest point on the closest triangle $\tau\star$.
++    *   For a mesh, $\Pi_{\tau\star}(\mathbf{p})$ is the closest point on the closest triangle $\tau\star$ [S1].
+     *   To find the closest point on a triangle, check if the orthogonal projection of $\mathbf{p}$ lies inside the triangle. If so, that projection is the closest point. Otherwise, project $\mathbf{p}$ onto the three edge segments and take the nearest point [S1].
+     *   The barycentric form of a point on a triangle is $q(v, w) = a + v(b-a) + w(c-a)$, subject to $v \geq 0, w \geq 0, v + w \leq 1$ [S1].
+@@ -33,5 +33,5 @@
+ **Pseudocode:**
+ ```python
+-def convert_mesh_to_tsdf(mesh, voxel_grid, truncation_band):
++def convert_mesh_to_tsdf(mesh, voxel_grid, truncation_band, is_watertight):
+     """
+     Converts a mesh to a TSDF volume.
+@@ -39,26 +39,18 @@
+     voxel_grid: Object providing voxel centers and storage.
+     truncation_band: Float, the truncation threshold tau.
++    is_watertight: Boolean, whether the mesh is watertight with consistent orientation.
+     """
+     for voxel_center in voxel_grid.centers():
+-        # 1. Find closest triangle and closest point on it
+         closest_triangle, closest_point = find_closest_triangle_and_point(mesh, voxel_center)
++        dist = sqrt(dot(voxel_center - closest_point, voxel_center - closest_point))
+         
+-        # 2. Compute unsigned distance
+-        dist = vector_length(voxel_center - closest_point)
+-        
+-        # 3. Determine sign
+-        # Check if mesh is watertight or normals are reliable. 
+-        # If not, fallback to offset.
+-        if is_watertight_and_oriented(mesh):
++        if is_watertight:
+             normal = closest_triangle.normal
+-            # Local point-to-plane test
+             sign_val = dot(voxel_center - closest_point, normal)
+-            signed_dist = sign(sign_val) * dist
++            signed_dist = (1.0 if sign_val >= 0 else -1.0) * dist
+         else:
+-            # Unsigned-distance offset fallback
+-            delta = 1.5 * voxel_grid.resolution # Typical delta ~ 1-2 voxel sizes
++            delta = 1.5 * voxel_grid.resolution
+             signed_dist = dist - delta
+             
+-        # 4. Truncate and store
+         if abs(signed_dist) <= truncation_band:
+             voxel_grid.set_value(voxel_center, signed_dist, valid=True)
+@@ -67,38 +59,21 @@
+ 
+ def find_closest_triangle_and_point(mesh, p):
+-    """
+-    Finds the closest triangle and the closest point on that triangle to p.
+-    """
+-    min_dist = infinity
++    min_dist = float('inf')
+     best_triangle = None
+     best_point = None
+-    
+     for triangle in mesh:
+         a, b, c, n = triangle
+-        # Project p onto the triangle plane
+-        # Check if projection is inside the triangle
+-        # If inside, closest_point is the projection
+-        # If outside, closest_point is on one of the edges (a,b), (b,c), or (c,a)
+         closest_point_on_tri = closest_point_on_triangle(p, a, b, c)
+-        
+-        dist = vector_length(p - closest_point_on_tri)
++        dist = sqrt(dot(p - closest_point_on_tri, p - closest_point_on_tri))
+         if dist < min_dist:
+             min_dist = dist
+             best_triangle = triangle
+             best_point = closest_point_on_tri
+-            
+     return best_triangle, best_point
+ 
+ def closest_point_on_triangle(p, a, b, c):
+-    """
+-    Computes the closest point on triangle abc to point p.
+-    Uses barycentric coordinates.
+-    """
+-    # Vector from a to p
+     ap = p - a
+     ab = b - a
+     ac = c - a
+-    
+-    # Dot products
+     ab_ab = dot(ab, ab)
+     ac_ac = dot(ac, ac)
+@@ -106,39 +81,24 @@
+     ap_ab = dot(ap, ab)
+     ap_ac = dot(ap, ac)
+-    
+-    # Barycentric coordinates of projection
+     denom = ab_ab * ac_ac - ab_ac * ab_ac
+     if denom == 0:
+-        # Degenerate triangle, return a
+         return a
+-        
+     v = (ac_ac * ap_ab - ab_ac * ap_ac) / denom
+     w = (ab_ab * ap_ac - ab_ac * ap_ab) / denom
+-    
+-    # Check if projection is inside the triangle
+     if v >= 0 and w >= 0 and (v + w) <= 1:
+         return a + v * ab + w * ac
+-    
+-    # Projection is outside, find closest point on edges
+-    # Edge ab
+-    t = clamp(dot(ap, ab) / ab_ab, 0, 1)
++    t = max(0.0, min(1.0, dot(ap, ab) / ab_ab))
+     closest_ab = a + t * ab
+-    dist_ab = vector_length(p - closest_ab)
+-    
+-    # Edge bc
++    dist_ab = sqrt(dot(p - closest_ab, p - closest_ab))
+     bp = p - b
+     bc = c - b
+-    t = clamp(dot(bp, bc) / dot(bc, bc), 0, 1)
++    t = max(0.0, min(1.0, dot(bp, bc) / dot(bc, bc)))
+     closest_bc = b + t * bc
+-    dist_bc = vector_length(p - closest_bc)
+-    
+-    # Edge ca
++    dist_bc = sqrt(dot(p - closest_bc, p - closest_bc))
+     cp = p - c
+     ca = a - c
+-    t = clamp(dot(cp, ca) / dot(ca, ca), 0, 1)
++    t = max(0.0, min(1.0, dot(cp, ca) / dot(ca, ca)))
+     closest_ca = c + t * ca
+-    dist_ca = vector_length(p - closest_ca)
+-    
+-    # Return the closest of the three edge points
++    dist_ca = sqrt(dot(p - closest_ca, p - closest_ca))
+     if dist_ab <= dist_bc and dist_ab <= dist_ca:
+         return closest_ab
+@@ -176,6 +136,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(V \cdot T)$ for a mesh with $T$ triangles and $V$ voxels, assuming brute-force search. Spatial acceleration structures (BVH, grid) can reduce this to $O(V \log T)$ or better [S1].
+-*   **Memory Complexity:** $O(V)$ for the TSDF volume, where $V$ is the number of voxels. Sparse representations can reduce this significantly [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Strengths:** Directly handles explicit geometry; robust to non-watertight surfaces with the offset fallback; compatible with compression pipelines designed for TSDF [S1].
+ *   **Limitations:** Computationally expensive for high-resolution meshes without acceleration; sign ambiguity for non-watertight surfaces requires fallback [S1].

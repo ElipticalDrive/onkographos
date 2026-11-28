@@ -1,0 +1,74 @@
+--- v002.md
++++ v003.md
+@@ -45,4 +45,18 @@
+ 4.  **Gradient Saving:** Save relevant tensors for the backward pass using `ctx.save_for_backward`: `colors_precomp`, `means3D`, `scales`, `rotations`, `cov3Ds_precomp`, `radii`, `sh`, `geomBuffer`, `binningBuffer`, `imgBuffer` [S1, unofficial].
+ 5.  **Return:** Return the rendered `color` image and `radii` of visible Gaussians [S1, unofficial].
++6.  **Internal CUDA Pipeline (executed inside `_C.rasterize_gaussians`):**
++    *   Allocate `GeometryState`, `ImageState`, and `BinningState` buffers via callbacks [S3, unofficial].
++    *   Compute tile grid dimensions: `tile_grid.x = (width + BLOCK_X - 1) / BLOCK_X`, `tile_grid.y = (height + BLOCK_Y - 1) / BLOCK_Y` [S3, unofficial].
++    *   Call `FORWARD::preprocess` to transform Gaussians, compute 2D means, depths, covariances, colors, conic matrices, and radii [S3, unofficial].
++    *   Compute inclusive prefix sum over `tiles_touched` to get `point_offsets` using `geomState.scanning_space` [S3, unofficial].
++    *   Retrieve `num_rendered` from the last element of `point_offsets` (`point_offsets[P-1]`) [S3, unofficial].
++    *   Allocate `BinningState` buffers with size `num_rendered` [S3, unofficial].
++    *   Launch `duplicateWithKeys` kernel to create sorting keys and duplicated Gaussian indices from `means2D`, `depths`, `point_offsets`, `radii`, and `tile_grid` [S3, unofficial].
++    *   Calculate bit depth for radix sort: `bit = getHigherMsb(tile_grid.x * tile_grid.y)` [S3, unofficial].
++    *   Sort pairs using `cub::DeviceRadixSort::SortPairs` over range `0` to `32+bit` [S3, unofficial].
++    *   Zero out `imgState.ranges` array [S3, unofficial].
++    *   If `num_rendered > 0`, launch `identifyTileRanges` kernel to compute start/end indices in the sorted `point_list` for each tile [S3, unofficial].
++    *   Determine feature pointer: use `colors_precomp` if not null, otherwise use `geomState.rgb` [S3, unofficial].
++    *   Launch `FORWARD::render` kernel to compute `out_color` and `out_feature_map` [S3, unofficial].
+ 
+ **Pseudocode:**
+@@ -110,25 +124,12 @@
+ 
+     # The C++/CUDA routine handles the full pipeline:
+-    # color, radii, geomBuffer, binningBuffer, imgBuffer = _C.rasterize_gaussians(
+-    #     bg, means3D, colors_precomp, opacities, scales, rotations, sm,
+-    #     cov3D_precomp, raster_settings.viewmatrix, raster_settings.projmatrix,
+-    #     raster_settings.tanfovx, raster_settings.tanfovy,
+-    #     raster_settings.image_height, raster_settings.image_width,
+-    #     sh, sh_degree, raster_settings.campos, raster_settings.prefiltered,
+-    #     raster_settings.debug
+-    # )
+-    # Internal pipeline steps (from [S3, unofficial]):
+-    # - Allocate GeometryState, ImageState, BinningState buffers
+-    # - Compute tile grid: tile_grid.x = (width + BLOCK_X - 1) / BLOCK_X, tile_grid.y = (height + BLOCK_Y - 1) / BLOCK_Y
+-    # - FORWARD::preprocess: transform Gaussians, compute 2D means, depths, covariances, colors, conic matrices, radii
+-    # - Compute inclusive prefix sum over tiles_touched to get point_offsets
+-    # - num_rendered = point_offsets[P-1]
+-    # - Launch duplicateWithKeys kernel to create sorting keys and duplicated Gaussian indices
+-    # - Calculate bit depth: bit = getHigherMsb(tile_grid.x * tile_grid.y)
+-    # - Sort pairs using cub::DeviceRadixSort::SortPairs
+-    # - Zero out imgState.ranges array
+-    # - Launch identifyTileRanges kernel to compute start/end indices for each tile
+-    # - Determine feature pointer: colors_precomp if not null, else geomState.rgb
+-    # - Launch FORWARD::render kernel to compute out_color and out_feature_map
++    color, radii, geomBuffer, binningBuffer, imgBuffer = _C.rasterize_gaussians(
++        bg, means3D, colors_precomp, opacities, scales, rotations, sm,
++        cov3D_precomp, raster_settings.viewmatrix, raster_settings.projmatrix,
++        raster_settings.tanfovx, raster_settings.tanfovy,
++        raster_settings.image_height, raster_settings.image_width,
++        sh, sh_degree, raster_settings.campos, raster_settings.prefiltered,
++        raster_settings.debug
++    )
+ 
+     return color, radii
+@@ -141,7 +142,8 @@
+ *   `width`, `height`: Image dimensions in pixels [S3, unofficial].
+ *   `tan_fovx`, `tan_fovy`: Tangent of horizontal and vertical field of view angles [S3, unofficial].
++*   Focal lengths are derived as `focal_y = height / (2.0f * tan_fovy)` and `focal_x = width / (2.0f * tan_fovx)` [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Ensure `scales` and `rotations` are properly normalized if used. Quaternions must be unit length.
++*   **Precision:** Ensure `scales` and `rotations` are properly normalized if used. Quaternions must be unit length [G].
+ *   **Boundaries:** If `raster_settings.debug` is true, arguments are deep-copied to CPU before calling the C++ routine to allow saving a snapshot for debugging if an exception occurs [S1, unofficial].
+ *   **Degenerate Input:** If `scales` or `rotations` are `None`, they must be initialized as empty tensors (`torch.Tensor([])`) before passing to the C++ backend to avoid type errors [S2, unofficial].
+@@ -168,6 +170,6 @@
+ *   **Strengths:** Differentiable rasterization suitable for training and rendering pipelines. Supports both precomputed covariances and scale/rotation parameterizations [S2, unofficial].
+ *   **Limitations:** Requires careful handling of input consistency (covariance vs. scale/rotation). Debug mode impacts performance due to CPU transfers [S1, unofficial].
+-*   **When to Use:** When training 3D Gaussian Splatting models or rendering 3D Gaussians in a differentiable pipeline.
+-*   **When Not to Use:** When non-differentiable rendering is sufficient and performance is critical without the overhead of gradient tracking.
++*   **When to Use:** When training 3D Gaussian Splatting models or rendering 3D Gaussians in a differentiable pipeline [G].
++*   **When Not to Use:** When non-differentiable rendering is sufficient and performance is critical without the overhead of gradient tracking [G].
+ 
+ ## Background

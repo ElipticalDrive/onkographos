@@ -1,0 +1,166 @@
+# Neural Emission Field
+
+Also called: GlossyNEF
+
+## Overview
+Neural Emission Field (NEF) is a precomputed neural representation that eliminates runtime integration for direct illumination from complex, non-trivial emitters by absorbing the receiver-side shading integral into an offline training phase [S1, unofficial]. Unlike proxy methods that require runtime integration against precomputed radiance or sampling-based approaches like ReSTIR that incur per-frame sampling costs, NEF reduces shading to a single neural network evaluation per pixel with a cost independent of emitter geometric complexity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** World-space receiver position $x$, surface normal $n$, outgoing view direction $\omega_o$, and material roughness parameter $\alpha$.
+*   **Output:** Pre-integrated direct illumination $L_o$ (radiance) at the shading point.
+
+**Data Structures:**
+*   **Neural Network $D_\theta$:** A feedforward network (specifically a two-headed architecture for diffuse and glossy variants) parameterized by weights $\theta$.
+*   **Storage:** The trained network weights are stored as a portable asset.
+    *   Diffuse variant size: 15 MB per emitter [S1, unofficial].
+    *   Glossy variant (GlossyNEF) size: 30 MB per emitter [S1, unofficial].
+
+**Coordinate Transformation:**
+The method relies on the emitter being in a fixed configuration relative to its local frame. Inputs are transformed from world space to the emitter's local coordinate frame:
+$$ (\tilde{x}, \tilde{n}, \tilde{\omega}_o) = \text{TransformToWorldToLocal}(x, n, \omega_o) $$
+where $\tilde{x}$ is the local position, $\tilde{n}$ is the local normal, and $\tilde{\omega}_o$ is the local outgoing direction [S1, unofficial].
+
+**Network Evaluation:**
+The neural network $D_\theta$ is queried with the local inputs and material parameter:
+$$ L_o = D_\theta(\tilde{x}, \tilde{n}, \tilde{\omega}_o, \alpha) $$
+This output approximates the pre-integrated direct illumination [S1, unofficial].
+
+**Training Process:**
+The network is trained offline to approximate the following integral:
+$$ L_o (x, \omega_o ) \approx D_\theta (\tilde{x}, \tilde{n}, \tilde{\omega}_o , \alpha) $$
+where the target value is derived from:
+$$ L_o (x, \omega_o ) = \int_{\Omega} \int_{\text{Pre-integrated Emitters}} P(t(x, \omega_i ), -\omega_i ) f_r (x, \omega_i , \omega_o ) (\omega_i \cdot n) d\omega_i $$
+*   $\Omega$: Hemispherical integration domain.
+*   $P$: Pre-computed internal transport/radiance of the emitter (reference or proxy).
+*   $t(x, \omega_i)$: Intersection point of the ray from $x$ in direction $\omega_i$ with the emitter's proxy surface.
+*   $f_r$: Bidirectional Reflectance Distribution Function (BRDF).
+*   $\alpha$: Material roughness parameter.
+
+**Training Steps:**
+1.  **Generate Training Targets:**
+    *   For direct illumination: Path trace the emitter assembly using next-event estimation to sample the integral [S1, unofficial].
+    *   For higher-order effects (multi-bounce): Replace direct light-source sampling with full path tracing during training to integrate internal interreflections [S1, unofficial].
+2.  **Handle Sparse Signals:** For heavily enclosing geometry where most paths fail to reach the emitter, use light tracing [Arv86] or adaptive sampling of the training loss [DPD22] to mitigate zero-radiance contributions [S1, unofficial].
+3.  **Optimize:** Train $D_\theta$ to minimize the difference between the network output and the generated training targets [S1, unofficial].
+
+**Inference Steps:**
+1.  Receive shading point $(x, n, \omega_o)$ and material parameter $\alpha$.
+2.  Transform $(x, n, \omega_o)$ to the emitter's local frame $(\tilde{x}, \tilde{n}, \tilde{\omega}_o)$ [S1, unofficial].
+3.  Evaluate $L_o = D_\theta(\tilde{x}, \tilde{n}, \tilde{\omega}_o, \alpha)$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+# Standard math operations assumed available
+# Vector operations: dot, normalize, transform
+
+class NeuralEmissionField:
+    def __init__(self, network_weights):
+        """
+        Initialize NEF with pre-trained network weights.
+        network_weights: Parameters for the neural network D_theta.
+        """
+        self.weights = network_weights
+
+    def transform_to_local(self, x, n, omega_o, emitter_transform):
+        """
+        Transform world-space coordinates to the emitter's local frame.
+        x: World-space position (vec3)
+        n: World-space normal (vec3)
+        omega_o: World-space outgoing direction (vec3)
+        emitter_transform: Inverse transformation matrix from world to emitter local space.
+        Returns:
+            local_x: Local position (vec3)
+            local_n: Local normal (vec3)
+            local_omega_o: Local outgoing direction (vec3)
+        """
+        # Apply inverse transform to position
+        local_x = emitter_transform.transform_point(x)
+        
+        # Apply inverse transform (rotation part only) to normal and direction
+        # Normals and directions are vectors, not points
+        local_n = emitter_transform.transform_vector(n)
+        local_omega_o = emitter_transform.transform_vector(omega_o)
+        
+        # Normalize to handle potential scaling artifacts if any
+        local_n = normalize(local_n)
+        local_omega_o = normalize(local_omega_o)
+        
+        return local_x, local_n, local_omega_o
+
+    def evaluate(self, x, n, omega_o, alpha, emitter_transform):
+        """
+        Evaluate the pre-integrated direct illumination.
+        
+        Args:
+            x: World-space position (vec3)
+            n: World-space normal (vec3)
+            omega_o: World-space outgoing direction (vec3)
+            alpha: Material roughness parameter (float), typically in [0.1, 1.0] for GGX.
+            emitter_transform: Inverse transformation matrix from world to emitter local space.
+            
+        Returns:
+            L_o: Pre-integrated direct illumination (vec3)
+        """
+        # Step 1: Transform to local frame
+        local_x, local_n, local_omega_o = self.transform_to_local(x, n, omega_o, emitter_transform)
+        
+        # Step 2: Query the neural network
+        # D_theta takes local position, local normal, local outgoing direction, and roughness
+        L_o = self.neural_network_forward(local_x, local_n, local_omega_o, alpha, self.weights)
+        
+        return L_o
+
+    def neural_network_forward(self, x, n, omega_o, alpha, weights):
+        """
+        Forward pass of the neural network D_theta.
+        This is a placeholder for the actual network implementation defined during training.
+        In a real implementation, this would call the specific neural network architecture
+        (e.g., MLP) with the given weights.
+        """
+        # Concatenate inputs
+        input_vector = concatenate([x, n, omega_o, [alpha]])
+        
+        # Pass through network layers defined by weights
+        # Example structure (simplified):
+        # h = ReLU(W1 * input + b1)
+        # h = ReLU(W2 * h + b2)
+        # L_o = W3 * h + b3
+        # Note: The actual architecture (two-headed diffuse/glossy) is determined by training.
+        # Here we assume a single output vector L_o.
+        L_o = apply_network(input_vector, weights)
+        
+        return L_o
+```
+
+**Parameters:**
+*   **Material Roughness $\alpha$:** Input to the network representing the BRDF roughness. Instantiated using the GGX microfacet model over a range of $\alpha \in [0.1, 1]$ [S1, unofficial].
+*   **Time Parameter $t$:** For dynamic or deformable emitters, a time parameter $t$ can be added to the network inputs to support time-varying emission states [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **BRDF Dependency:** The pre-integrated quantity depends on the receiver's BRDF. Different receivers observe different values at the same position/normal. The approach is generic but currently restricted to GGX in the source work [S1, unofficial].
+*   **Near-Mirror Regime:** Roughness $\alpha \to 0$ remains challenging for finite neural representation, showing increased error at lower roughness [S1, unofficial].
+*   **Sparse Training Signal:** For heavily enclosing geometry, most paths fail to reach the emitter. Mitigation requires light tracing or adaptive sampling during training [S1, unofficial].
+*   **Fixed Configuration:** NEF requires the emitter configuration to be fixed at training time. Arbitrary per-light motion at runtime requires retraining, though rigid transforms and pre-arranged relative motion (via time parameter) are supported [S1, unofficial].
+*   **Visibility:** NEF only captures unoccluded emission field. It must be combined with standard real-time visibility pipelines (e.g., depth testing, shadow maps) to handle occlusion [S1, unofficial].
+
+## Operating characteristics
+*   **Inference Cost:** Decoupled from emitter geometry; determined by network size. Querying in full-HD takes 1.2 ms for tested scenes [S1, unofficial].
+*   **Training Time:** Ranges from approximately one minute for simple planar emitters to three hours for emitters with internal interreflections [S1, unofficial].
+*   **Storage:** 15 MB per emitter for diffuse, 30 MB for glossy [S1, unofficial].
+*   **Strengths:** Noise-free unoccluded direct illumination from a single network evaluation; handles complex emitters with occluding housing, high-polygon meshes, spatially varying emission, and internal interreflections; portable lighting asset reusable across scenes under rigid transforms [S1, unofficial].
+*   **Limitations:** Requires offline training; emitter configuration must be fixed at training time (no arbitrary per-light motion); restricted to GGX BRDF in current implementation; near-mirror regime has higher error; only captures unoccluded emission [S1, unofficial].
+*   **When to Use:** Complex emitters with occluding housing, high-polygon emissive meshes, spatially varying emission, or deformable assemblies where runtime integration is too expensive [S1, unofficial].
+*   **When Not to Use:** Scenes with arbitrary per-light motion at runtime; emitters with near-mirror roughness ($\alpha \approx 0$) where high fidelity is critical; scenes where offline training time is prohibitive [S1, unofficial].
+
+## Background
+Neural Emission Field (NEF) was introduced in the paper "Real-time Rendering of Pre-integrated Neural Emitters" [S1, unofficial]. It builds on the concept of proxy emitters [HKSS98, VADWG15, ZBX*21] which precompute internal transport into a function $P$ defined on a bounding surface, but extends this by absorbing the receiver's shading integral into the learned field $D_\theta$. This eliminates the need for runtime integration against the proxy, which was a bottleneck in previous methods. The method amortizes the computational cost into a one-time training phase, allowing for constant-time per-pixel inference [S1, unofficial].
+
+## Sources
+
+[S1] Real-time Rendering of Pre-integrated Neural Emitters, https://arxiv.org/abs/2610.06762, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,101 @@
+# Error-Guided Adaptive Sampling (Bubbling)
+
+Also called: Bubbling method
+
+## Overview
+Error-Guided Adaptive Sampling is a training-phase importance sampling strategy that dynamically adjusts ray sampling density based on per-pixel reconstruction error, specifically targeting missing or thin geometry during the "bubble" step of neural scene reconstruction. It sets itself apart from its parent [Loss-based Adaptive Sampling](6928-loss-based-adaptive-sampling.md) by maintaining a continuous Probability Density Function (PDF) map updated iteratively per image, rather than partitioning the image into static grids, and by explicitly pruning low-error pixels to focus computational resources on high-frequency details like thin poles.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Current batch of training images, neural radiance/SDF fields, reconstruction error metric $E$ (specifically depth loss) for each pixel $p$ in the batch.
+*   **Outputs:** Updated PDF map for the next iteration, set of rays to sample for the current batch.
+
+**Data Structures:**
+*   **PDF Map:** A 2D array (or tensor) matching the resolution of the training images. Each element $PDF(p)$ stores the sampling probability for pixel $p$. Initialized to uniform or based on initial error at the start of the bubble step (50k iterations).
+
+**Parameters:**
+*   $P_{min}$: Pruning threshold for low-error pixels. Value: $0.05$ [S1].
+*   $E(p)$: Reconstruction error at pixel $p$. In the source, depth loss is adopted [S1].
+
+**Steps:**
+1.  **Initialization:** At the start of the bubble step (50k iterations), initialize the PDF map for each training image based on the current reconstruction error [S1].
+2.  **Error Calculation:** For the current training batch, calculate the error metric $E(p)$ for every pixel $p$ [S1].
+3.  **PDF Update:** Update the PDF values for pixels in the current batch to be proportional to their error $E(p)$ [S1]. The relationship is defined as:
+    $$ PDF(x(p; D)) \propto E(p) $$
+    where $x(p; D)$ represents the ray or point associated with pixel $p$ [S1].
+4.  **Pruning:** Filter out pixels where the error is sufficiently low. Specifically, pixels with $E(p) < P_{min}$ are pruned from the sampling distribution, meaning their PDF is effectively set to 0 or they are excluded from ray generation [S1].
+5.  **Ray Generation:** Generate outgoing rays using importance sampling based on the updated PDF map [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Assume PDF_map is a 2D array of shape (H, W) initialized at start of bubble step
+# Assume error_map is a 2D array of shape (H, W) containing depth loss E(p) for current batch
+# P_min is a constant threshold (0.05)
+
+def update_pdf_and_sample(PDF_map, error_map, P_min):
+    """
+    Updates the PDF map based on current reconstruction error and prunes low-error pixels.
+    Returns a list of pixel coordinates to sample.
+    """
+    # Step 3: Update PDF values proportional to error
+    # Note: In practice, this requires normalization to ensure sum(PDF) = 1
+    # The source states PDF(x(p; D)) ∝ E(p)
+    
+    # Create a mask for pixels with error >= P_min
+    # Pixels with E(p) < P_min are pruned (ignored)
+    valid_mask = error_map >= P_min
+    
+    # Zero out PDF for pruned pixels
+    PDF_map[~valid_mask] = 0.0
+    
+    # Update PDF for valid pixels proportional to error
+    # PDF_map[valid_mask] = error_map[valid_mask]
+    
+    # Normalize the PDF map so it sums to 1 for importance sampling
+    pdf_sum = np.sum(PDF_map)
+    if pdf_sum > 0:
+        PDF_map = PDF_map / pdf_sum
+    else:
+        # Fallback: uniform sampling if all pixels are pruned or error is zero
+        # [G] Guard against division by zero; reset to uniform if no valid pixels
+        PDF_map = np.ones_like(PDF_map) / PDF_map.size
+        
+    # Step 5: Sample pixels based on the updated PDF
+    # Flatten the PDF map for sampling
+    flat_pdf = PDF_map.flatten()
+    
+    # Get indices of all pixels
+    all_indices = np.arange(PDF_map.size)
+    
+    # Sample indices according to flat_pdf
+    # [G] Assuming a standard multinomial sampling function is available
+    sampled_indices = np.random.choice(all_indices, size=N_rays, p=flat_pdf, replace=False)
+    
+    # Convert flat indices back to 2D coordinates
+    sampled_pixels = np.unravel_index(sampled_indices, PDF_map.shape)
+    
+    return sampled_pixels, PDF_map
+```
+
+**Edge Cases and Pitfalls:**
+*   **Zero Error:** If all pixels have error $< P_{min}$, the PDF becomes all zeros. The implementation must handle this by resetting to uniform sampling or maintaining a minimum probability [G].
+*   **Light Sources:** Light intensity from emitters is often underestimated, causing over-dark re-renders. This is resolved by introducing a neural emitter semantic field $F_e$ to optimize radiance, which indirectly affects the error metric $E(p)$ for those regions [S1].
+*   **Thin Geometry:** Thin components (e.g., poles) grow slowly and maintain high error for many iterations, requiring sustained high PDF values [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the cost of calculating the error metric $E(p)$ for all pixels and the normalization of the PDF map. Updating the PDF map is $O(H \times W)$ per batch.
+*   **Memory Complexity:** Requires storing a PDF map of size $H \times W$ per training image [S1].
+*   **Performance:** The method accelerates convergence by focusing on erroneous areas. In the source example, light balls (large objects) are reconstructed rapidly (55k iterations), while thin poles (high error, high frequency) are sampled more aggressively and reconstructed later (70k-150k iterations) [S1].
+*   **Strengths:** Effectively preserves small-object areas (high frequency) while ignoring large planar areas (low frequency) [S1].
+*   **Limitations:** Requires maintaining and updating a PDF map per image. The pruning threshold $P_{min}$ must be tuned; too high, and useful pixels are ignored; too low, and the benefit of pruning is lost.
+
+## Background
+*   **Origin:** The method is described in "I²-SDF: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs" [S1].
+*   **History:** It is used in the "bubble" step of a three-stage training process (50k, 100k, 50k iterations) for neural SDF reconstruction [S1]. The bubble step specifically addresses the reconstruction of missing objects, starting with the chandelier example where the object is initially missing at 50k iterations [S1].
+*   **Usage:** Applied in neural radiance field/SDF training for indoor scene reconstruction, particularly for handling complex geometries with thin structures and light sources [S1].
+
+## Sources
+[S1] I²-SDF: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs, https://doi.org/10.1109/cvpr52729.2023.01202, fetched 2026-11-01

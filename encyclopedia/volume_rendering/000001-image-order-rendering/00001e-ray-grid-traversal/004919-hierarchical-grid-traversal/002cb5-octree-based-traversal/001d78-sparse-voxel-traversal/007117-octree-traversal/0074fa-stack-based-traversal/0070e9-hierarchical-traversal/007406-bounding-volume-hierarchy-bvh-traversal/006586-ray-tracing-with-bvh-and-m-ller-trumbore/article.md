@@ -1,0 +1,147 @@
+# Ray Tracing with BVH and Möller–Trumbore
+
+Also called: Pure ray tracing, Wald BVH Traversal (Occlusion/Shadow), occluded
+
+## Overview
+A rendering method using a PackedBVH over triangles, traversed with ray-box slab tests for pruning, and Möller–Trumbore tests for triangle intersections [S1, unofficial]. It determines if a ray is occluded by any triangle (shadow ray), returning true on the first hit [S2, unofficial]. Unlike sphere tracing, it requires no distance function and is exact for sharp CSG operations by walking primitive crossings along the ray [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: Ray $r$ (origin $\mathbf{o}$, direction $\mathbf{d}$, max distance $t_{far}$), PackedBVH (Wald-ordered, leaves contain `TriangleSoA`).
+*   Output: Boolean indicating occlusion (true if hit), or hit distance/normal if extended.
+
+**Data Structures:**
+*   `PackedBVH`: Array of nodes. Each node has a bounding box (`box`) and children.
+*   `TriangleSoA`: Structure of Arrays for triangles at leaf nodes. Fields: vertex positions $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$, normals $\mathbf{n}_0, \mathbf{n}_1, \mathbf{n}_2$.
+*   `Stack`: Array of node pointers for traversal.
+
+**Steps:**
+1.  **Initialize:** Compute reciprocal direction $\mathbf{rdir} = 1/\mathbf{d}$. Initialize stack with root: `stack[0] = root`, `stacksz = 1`.
+2.  **Loop:** While `stacksz > 0`:
+    a. Pop node: `node = stack[--stacksz]`.
+    b. **Pruning:** Perform slab intersection test against `node->box` using $\mathbf{rdir}$ and $t_{far}$. If no intersection (`!res.isec`), break loop.
+    c. **Non-Leaf:** If `node` is internal:
+        i. Identify near and far children based on entry distance along ray.
+        ii. Push far child to stack: `stack[stacksz++] = far_child`.
+        iii. Process near child: `node = near_child` (continue loop).
+    d. **Sub-BVH Leaf:** If `node` is a sub-BVH leaf, traverse the sub-BVH recursively.
+    e. **Triangle Leaf:** If `node` is a triangle leaf:
+        i. Iterate triangles $i$ from $0$ to $n-1$.
+        ii. Call Möller–Trumbore test `raytriangle(tris[i], r.org, r.dir)`.
+        iii. If hit returns true, return true immediately.
+
+**Möller–Trumbore Formula:**
+For triangle vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$ and ray $\mathbf{o}, \mathbf{d}$:
+$$ \mathbf{E}_1 = \mathbf{v}_1 - \mathbf{v}_0 $$
+$$ \mathbf{E}_2 = \mathbf{v}_2 - \mathbf{v}_0 $$
+$$ \mathbf{P} = \mathbf{d} \times \mathbf{E}_2 $$
+$$ \text{det} = \mathbf{E}_1 \cdot \mathbf{P} $$
+If $|\text{det}| < \epsilon$, triangle is parallel to ray.
+$$ \mathbf{T} = \mathbf{o} - \mathbf{v}_0 $$
+$$ u = \mathbf{T} \cdot \mathbf{P} $$
+If $u < 0$ or $u > \text{det}$, no hit.
+$$ \mathbf{Q} = \mathbf{T} \times \mathbf{E}_1 $$
+$$ v = \mathbf{d} \cdot \mathbf{Q} $$
+If $v < 0$ or $u + v > \text{det}$, no hit.
+$$ t = \mathbf{E}_2 \cdot \mathbf{Q} $$
+If $t > \epsilon$ and $t < t_{far}$, hit at $t$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_trace_bvh_occlusion(ray, bvh_root):
+    # ray: {org: Vec3, dir: Vec3, tfar: float}
+    # bvh_root: Node object with box, children, is_leaf, triangles
+    
+    rdir = 1.0 / ray.dir
+    stack = [bvh_root]
+    stacksz = 1
+    
+    while stacksz > 0:
+        node = stack.pop()
+        stacksz -= 1
+        
+        # Slab test
+        if not slab_intersect(node.box, ray.org, rdir, ray.tfar):
+            continue
+            
+        if node.is_leaf:
+            # Triangle leaf
+            for tri in node.triangles:
+                if ray_triangle_moller_trumbore(tri, ray.org, ray.dir, ray.tfar):
+                    return True
+        else:
+            # Non-leaf: push far child, process near child
+            # Determine near/far based on slab entry times
+            t_near_child, t_far_child = get_child_intervals(node, ray.org, rdir)
+            if t_near_child < t_far_child:
+                stack.append(node.far_child)
+                stack.append(node.near_child)
+            else:
+                stack.append(node.near_child)
+                stack.append(node.far_child)
+                
+    return False
+
+def ray_triangle_moller_trumbore(tri, org, dir, tfar):
+    v0, v1, v2 = tri.v0, tri.v1, tri.v2
+    E1 = v1 - v0
+    E2 = v2 - v0
+    P = cross(dir, E2)
+    det = dot(E1, P)
+    
+    if abs(det) < 1e-8:
+        return False
+        
+    T = org - v0
+    u = dot(T, P)
+    if u < 0.0 or u > det:
+        return False
+        
+    Q = cross(T, E1)
+    v = dot(dir, Q)
+    if v < 0.0 or u + v > det:
+        return False
+        
+    t = dot(E2, Q)
+    if t > 1e-8 and t < tfar:
+        return True
+        
+    return False
+
+def slab_intersect(box, org, rdir, tfar):
+    # Standard AABB slab test
+    tmin = (box.min - org) * rdir
+    tmax = (box.max - org) * rdir
+    t1 = min(tmin, tmax)
+    t2 = max(tmin, tmax)
+    t_enter = max(t1)
+    t_exit = min(t2)
+    return t_enter <= t_exit and t_exit > 0.0
+```
+
+**Parameters:**
+*   $t_{far}$: Max ray distance. Typical: scene bounds [S1, unofficial].
+*   $\epsilon$: Epsilon for parallel check. Typical: $10^{-8}$ [G].
+
+**Edge Cases:**
+*   Ray parallel to triangle: `det` near zero.
+*   Ray origin inside triangle: handled by $t > \epsilon$ check.
+*   Degenerate triangles: `det` near zero.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \log M)$ average case for $N$ rays and $M$ triangles, dependent on BVH quality [S1, unofficial].
+*   **Memory Complexity:** $O(M)$ for BVH storage [S1, unofficial].
+*   **Performance:** ~1.1 billion primary rays/s and ~1.3 billion rays/s with shadows/AO on RTX 3080 Ti [S1, unofficial].
+*   **Strengths:** Exact for sharp CSG, no distance function needed, efficient pruning [S1, unofficial].
+*   **Limitations:** Slower than sphere tracing for smooth shapes, requires BVH construction [S1, unofficial].
+*   **When to use:** Sharp geometry, CSG operations, shadow rays [S1, unofficial].
+*   **When not to use:** Smooth organic shapes, real-time sphere tracing preferred [S1, unofficial].
+
+## Background
+Originated in the context of sphere-traced rendering of shapes and tapes, specifically for "Pure ray tracing" mode in EBGeometry [S1, unofficial]. It leverages existing packed BVHs for mesh SDFs, avoiding new acceleration structure construction [S1, unofficial]. Used in interactive viewers for sharp CSG scenes like the "Tunnel" and "Rod" examples [S1, unofficial].
+
+## Sources
+[S1] Visualization: sphere-traced rendering of shapes and tapes, https://github.com/rmrsk/EBGeometry/issues/93, fetched 2026-10-26 (unofficial)
+[S2] bsegovia/mini.q, https://github.com/bsegovia/mini.q, fetched 2026-10-26 (unofficial)

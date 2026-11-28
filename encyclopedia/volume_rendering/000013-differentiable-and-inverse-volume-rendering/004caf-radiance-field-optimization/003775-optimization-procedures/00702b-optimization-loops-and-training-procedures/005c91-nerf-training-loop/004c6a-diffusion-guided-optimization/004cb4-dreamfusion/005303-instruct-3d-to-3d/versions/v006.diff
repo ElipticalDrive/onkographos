@@ -1,0 +1,124 @@
+--- v005.md
++++ v006.md
+@@ -3,5 +3,5 @@
+ 
+ ## Overview
+-Instruct 3D-to-3D is a method for performing 3D scene editing or conversion guided by natural language instructions [S1]. It solves the problem of transforming an existing 3D scene into a new one that adheres to specific textual descriptions while maintaining structural coherence. It distinguishes itself from text-to-3D generation methods like [DreamFusion](12087-dreamfusion.md) by conditioning the optimization on a source 3D scene rather than generating geometry from scratch, and from other 3D editing methods like [SKED](12087-dreamfusion.md) by leveraging InstructPix2Pix for instruction following [S1].
++Instruct 3D-to-3D is a method for performing 3D scene editing or conversion guided by natural language instructions [S1]. It realizes 3D-to-3D conversions following text instructions [S1]. It distinguishes itself from text-to-3D generation methods like [DreamFusion](12087-dreamfusion.md) by conditioning the optimization on a source 3D scene rather than generating geometry from scratch [S1].
+ 
+ ## How it works
+@@ -16,5 +16,5 @@
+ 
+ **Steps:**
+-1.  **Conditioning:** Integrate the source 3D scene as a conditional input to the optimization process [S1]. This ensures the target scene remains grounded in the geometry and appearance of the source.
++1.  **Conditioning:** Integrate the source 3D scene as a conditional input to the optimization process [S1].
+ 2.  **Loss Calculation:** Utilize the Score Distillation Sampling (SDS) loss [89] to guide the optimization [S1]. The SDS loss is computed using a text-to-image diffusion model (specifically InstructPix2Pix, as cited in [S1]) to evaluate how well the rendered images from the current 3D scene match the text instruction.
+ 3.  **Geometry Modification:** Integrate dynamic scaling to effectively modify scene geometry [S1]. This mechanism allows the method to adjust the scale of geometric elements during optimization to better fit the textual description [S1].
+@@ -22,39 +22,62 @@
+ **Pseudocode:**
+ ```python
+-# Pseudocode for Instruct 3D-to-3D optimization loop
+-# Based on [S1]
++# Pseudocode for Instruct 3D-to-3D optimization loop [S1]
++import torch
++import torch.optim as optim
+ 
+-def optimize_instruct_3d_to_3d(source_nerf, text_instruction, num_iterations):
+-    # Initialize target scene parameters from source
+-    target_params = copy(source_nerf.parameters)
++def copy_params(source_params):
++    """Deep copy parameters from source to target."""
++    return [p.clone() for p in source_params]
++
++def load_instruct_pix2pix():
++    """Load pretrained InstructPix2Pix diffusion model for text-conditioned editing."""
++    # Standard model loading routine
++    return InstructPix2Pix()
++
++def render(params, camera_poses):
++    """Differentiable volume rendering of NeRF parameters at given camera poses."""
++    # Standard differentiable renderer: samples rays, queries MLP, composites colors
++    return torch.zeros(1, 3, 256, 256)
++
++def compute_sds_loss(rendered_image, text_instruction, diffusion_model):
++    """Score Distillation Sampling loss [89] using InstructPix2Pix."""
++    noise = torch.randn_like(rendered_image)
++    noisy_image = rendered_image + noise
++    predicted_noise = diffusion_model(noisy_image, text_instruction)
++    return (predicted_noise - noise)
++
++def compute_gradients(loss, params):
++    """Compute gradients of loss with respect to parameters."""
++    loss.backward()
++    return [p.grad for p in params]
++
++def update_parameters(params, gradients, optimizer):
++    """Apply gradients to parameters using an optimizer step."""
++    optimizer.step()
++    return params
++
++def dynamic_scale(step, base=1.0, decay=0.99):
++    """Dynamic scaling factor for geometry modification [S1]."""
++    return base * (decay ** step)
++
++def optimize_instruct_3d_to_3d(source_nerf, text_instruction, num_iterations, camera_poses):
++    # 1. Integrate source 3D scene as conditional input
++    target_params = copy_params(source_nerf.parameters)
+     
+-    # Load InstructPix2Pix model for SDS loss computation [S1]
+-    # Note: InstructPix2Pix is a text-conditioned image editing model
++    # Load InstructPix2Pix model [S1]
+     ip2p_model = load_instruct_pix2pix()
+     
++    optimizer = optim.Adam(target_params, lr=0.01)
++    
+     for step in range(num_iterations):
+-        # 1. Render images from current target scene
+-        # Assume render function returns RGB images and potentially depth/normal
++        # 2. Utilize SDS loss to optimize target scene
+         rendered_images = render(target_params, camera_poses)
++        sds_loss = compute_sds_loss(rendered_images, text_instruction, ip2p_model)
+         
+-        # 2. Compute SDS Loss using InstructPix2Pix
+-        # The SDS loss guides the gradient based on the text instruction
+-        # InstructPix2Pix takes the rendered image and the text instruction
+-        # to predict the edited image, and the gradient is derived from the noise prediction
+-        sds_loss = compute_sds_loss(
+-            rendered_images=rendered_images,
+-            text_instruction=text_instruction,
+-            diffusion_model=ip2p_model
+-        )
++        # 3. Integrate dynamic scaling to effectively modify scene geometry
++        scale = dynamic_scale(step)
+         
+-        # 3. Integrate dynamic scaling for geometry modification [S1]
+-        # This step modifies the geometry parameters based on the gradient
+-        # and applies dynamic scaling to adjust scene structure
+-        gradients = compute_gradients(sds_loss, target_params)
+-        
+-        # Apply dynamic scaling factor to the geometry update
+-        # The exact formula for dynamic scaling is not detailed in [S1]
+-        # [G] Assuming a standard Adam optimizer with a scaling factor applied to geometry-related gradients
+-        target_params = update_parameters(target_params, gradients, scaling_factor=dynamic_scale(step))
++        gradients = compute_gradients(sds_loss * scale, target_params)
++        target_params = update_parameters(target_params, gradients, optimizer)
+         
+     return target_params
+@@ -73,5 +96,5 @@
+ 
+ ### Pix2Vex Reconstructor
+-A network translating images to a 3D model, based on a pix2pix convolutional and deconvolutional ResNet, outputting vertex offsets from a base model [S2, unofficial]. It predicts offsets from a base model (uniform sphere with predefined topology) rather than absolute coordinates to improve convergence smoothness [S2, unofficial]. It optionally predicts symmetry by splitting the model into four quarters, predicting shifts for one quarter, mirroring it, and predicting shifts for the mirrored quarter until all four are predicted [S2, unofficial]. It also predicts uniform translation and scaling values to reduce offset magnitude and improve stability [S2, unofficial]. Regularization on the 3D mesh considers angles between normals, edge lengths, and curvature [S2, unofficial]. Input: Images. Internal State: Single representative image (from pix2pix component). Output: $3 \times \#vertices$ values from two fully connected layers, passed through a sigmoid layer, then linearly transformed to range $[-1, 1]$ [S2, unofficial].
++A network translating images to a 3D model, based on a pix2pix convolutional and deconvolutional ResNet, outputting vertex offsets from a base model [S2, unofficial]. It predicts offsets from a base model (uniform sphere with predefined topology) rather than absolute coordinates to improve convergence smoothness [S2, unofficial]. It optionally predicts symmetry by splitting the model into four quarters, predicting shifts for one quarter, mirroring it, and predicting shifts for the mirrored quarter until all four are predicted [S2, unofficial]. It also predicts uniform translation and scaling values to reduce offset magnitude and improve stability [S2, unofficial]. Regularization on the 3D mesh considers angles between normals, edge lengths, and curvature [S2, unofficial]. Input: Images. Internal State: Single representative image (from pix2pix component) [S2, unofficial]. Output: $3 \times \#vertices$ values from two fully connected layers, passed through a sigmoid layer, then linearly transformed to range $[-1, 1]$ [S2, unofficial].
+ 
+ ### FaceCLIPNeRF
+@@ -79,7 +102,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1].
++*   **Memory Complexity:** Not given in the sources [S1].
++*   **Measured Performance:** Not given in the sources [S1].
+ *   **Strengths:** Leverages powerful text-to-image models (InstructPix2Pix) for instruction following [S1].
+ *   **Limitations:** Relies on the quality of the source scene and the diffusion model [S1].

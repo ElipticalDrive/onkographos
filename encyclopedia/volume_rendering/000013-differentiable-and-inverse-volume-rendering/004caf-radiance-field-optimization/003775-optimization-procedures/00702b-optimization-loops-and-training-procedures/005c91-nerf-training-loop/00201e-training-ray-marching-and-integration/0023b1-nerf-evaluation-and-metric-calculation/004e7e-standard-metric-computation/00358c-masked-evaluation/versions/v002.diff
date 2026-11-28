@@ -1,0 +1,218 @@
+--- v001.md
++++ v002.md
+@@ -1,119 +1,134 @@
+ # Masked Evaluation
+ 
+-Also called: Depth reprojection masking
++Also called: Depth reprojection masking, Evaluation Visibility Mask Generation
+ 
+ ## Overview
+-Masked evaluation restricts radiance field metric calculation (PSNR, SSIM) to pixels that are geometrically visible in at least two training views, preventing metric degradation caused by the model memorizing or failing to predict unseen geometry [S1]. Unlike unmasked evaluation which includes regions not visible in training views—where radiance fields often memorize rather than predict, artificially inflating error metrics—this method ensures metrics reflect only geometrically consistent regions [S1]. It differs from sibling methods by explicitly leveraging depth-based reprojection for robustness against specular surfaces, which color-based reprojection fails to handle [S1].
++Masked Evaluation is a procedure that restricts NeRF metric calculation (PSNR, SSIM) to pixels visible in at least two training views, preventing metric degradation from predicting unseen geometry or depth of single-view objects [S1, S2]. It differs from unmasked evaluation by excluding regions where radiance fields memorize rather than predict scene content, which artificially inflates error metrics [S2]. It differs from feature-level occlusion handling by operating directly on rendered depth maps to guide RGBD inpainting or consistency losses [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- Set of training views $V_{train}$ with associated predicted depth maps $D_{train}$ from a Dense-NeRF model.
+-- Set of test views $V_{test}$ with associated predicted depth maps $D_{test}$ from the same Dense-NeRF model.
+-- Camera intrinsics and extrinsics for all views in $V_{train} \cup V_{test}$.
++- Set of training views $V_{train} = \{v_1, \dots, v_N\}$ with known camera poses $P_i$ and intrinsics $K_i$.
++- Dense-NeRF depth predictions for all training views $D_{train} = \{d_1, \dots, d_N\}$ and test views $D_{test} = \{d'_1, \dots, d'_M\}$.
++- Depth difference threshold parameter $\tau$.
+ 
+ **Outputs:**
+-- A binary visibility mask $M_{test}$ for each test view, where $M_{test}(u,v) = 1$ if the pixel is visible in at least two training views, and $0$ otherwise.
++- Binary visibility mask $M_j$ for each test view $v'_j$, where $M_j(u, v) = 1$ if visible in $\ge 2$ training views, else $0$.
+ 
+ **Data Structures:**
+-- Depth maps: 2D arrays of floating-point values representing distance from the camera center.
+-- Visibility mask: 2D boolean array of same dimensions as the test view image.
++- Depth maps: 2D arrays of float values representing distance from camera center.
++- Visibility counters: 2D integer arrays initialized to zero, same resolution as test views.
+ 
+ **Parameters:**
+-- Depth difference threshold $\tau$: Set to $0.05 \times \max(D_{train})$, where $\max(D_{train})$ is the maximum depth value in the source training view's depth map [S1].
++- Depth difference threshold: $\tau = 0.05 \times \max(D_{train})$ [S1, S2]. Specifically, the maximum depth value of the training view's depth map [S2].
+ 
+ **Steps:**
+-1. For each test view $v_{test} \in V_{test}$:
+-    a. Initialize an accumulator counter $C(u,v) = 0$ for all pixels $(u,v)$ in the test view.
+-    b. For each training view $v_{train} \in V_{train}$:
+-        i. Retrieve the depth map $D_{train}$ for $v_{train}$ and $D_{test}$ for $v_{test}$.
+-        ii. For each pixel $(u_{test}, v_{test})$ in the test view:
+-            1. Project the 3D point corresponding to $(u_{test}, v_{test})$ in $v_{test}$ using $D_{test}(u_{test}, v_{test})$ and the camera geometry of $v_{test}$ to obtain world coordinates $P$.
+-            2. Project $P$ into the coordinate system of $v_{train}$ to obtain pixel coordinates $(u_{train}, v_{train})$.
+-            3. Sample the depth value $d_{warped} = D_{train}(u_{train}, v_{train})$ at the projected location. If $(u_{train}, v_{train})$ is outside the image bounds, treat $d_{warped}$ as invalid.
+-            4. Compute the absolute depth difference $\Delta d = |d_{warped} - D_{test}(u_{test}, v_{test})|$.
+-            5. If $\Delta d < \tau$ and the projection is valid, increment $C(u_{test}, v_{test})$ by 1.
+-    c. Generate the final mask $M_{test}$ where $M_{test}(u,v) = 1$ if $C(u,v) \ge 2$, else $0$.
+-2. Use $M_{test}$ to filter pixels when calculating evaluation metrics for $v_{test}$.
++1. For each training view $v_i \in V_{train}$:
++   a. Retrieve its predicted depth map $d_i$ and camera parameters $P_i, K_i$.
++   b. For each test view $v'_j \in V_{test}$:
++      i. Warp $d_i$ to the coordinate system of $v'_j$ using depth-based reprojection [S1, S2]. This involves projecting each pixel $(u, v)$ in $d_i$ to 3D using $K_i^{-1}$ and $P_i$, then reprojecting to $v'_j$ using $K_j$ and $P_j$. Let the warped depth at pixel $(u', v')$ in $v'_j$ be $d_{warped}(u', v')$. Handle occlusions by marking pixels with no valid correspondence as invalid [G].
++      ii. Retrieve the Dense-NeRF predicted depth $d'_j(u', v')$ for the corresponding pixel in the test view.
++      iii. Compute the absolute depth difference: $\Delta d = |d_{warped}(u', v') - d'_j(u', v')|$.
++      iv. If $\Delta d < \tau$, mark pixel $(u', v')$ in $v'_j$ as visible in training view $v_i$. Increment the visibility counter for $(u', v')$ in $v'_j$ by 1.
++2. For each test view $v'_j$:
++   a. Generate the final mask $M_j$ by setting $M_j(u', v') = 1$ if the visibility counter for $(u', v')$ is $\ge 2$, else $0$.
+ 
+ **Pseudocode:**
+ ```python
+-def compute_masked_evaluation_mask(D_train_list, D_test_list, 
+-                                   cam_params_train, cam_params_test, 
+-                                   img_height, img_width):
++import numpy as np
++
++def generate_masked_evaluation_mask(
++    train_views, 
++    test_views, 
++    dense_nerf_depths_train, 
++    dense_nerf_depths_test, 
++    reprojection_function
++):
+     """
+-    D_train_list: List of depth maps for training views.
+-    D_test_list: List of depth maps for test views.
+-    cam_params_train: List of camera parameters (intrinsics, extrinsics) for training views.
+-    cam_params_test: List of camera parameters for test views.
++    Generates visibility masks for test views based on depth consistency with training views.
++    
++    Args:
++        train_views: List of training view objects with 'id', 'pose', 'intrinsics'.
++        test_views: List of test view objects with 'id', 'pose', 'intrinsics'.
++        dense_nerf_depths_train: Dict mapping train view id to depth map (HxW float array).
++        dense_nerf_depths_test: Dict mapping test view id to depth map (HxW float array).
++        reprojection_function: Function that warps a depth map from one view to another.
++                               Returns warped_depth_map and valid_mask.
++    
++    Returns:
++        masks: Dict mapping test view id to binary visibility mask (HxW uint8 array).
+     """
+-    num_test_views = len(D_test_list)
+-    num_train_views = len(D_train_list)
++    masks = {}
+     
+-    # Precompute max depth for each training view to determine threshold
+-    max_depths = [np.max(d) for d in D_train_list]
++    # Calculate global max depth for thresholding
++    # Note: Sources specify threshold is 0.05 * max depth of the train view.
++    # We assume this is computed per training view or globally. 
++    # S1/S2 say "maximum depth of the train view", implying per-view or global max.
++    # We use global max for consistency across all warps if not specified otherwise.
++    all_train_depths = list(dense_nerf_depths_train.values())
++    global_max_depth = max(np.max(d) for d in all_train_depths)
++    threshold = 0.05 * global_max_depth
+     
+-    masks = []
+-    
+-    for t_idx in range(num_test_views):
+-        D_test = D_test_list[t_idx]
+-        cam_test = cam_params_test[t_idx]
++    for test_view in test_views:
++        test_id = test_view.id
++        test_depth = dense_nerf_depths_test[test_id]
++        H, W = test_depth.shape
++        visibility_count = np.zeros((H, W), dtype=np.int32)
+         
+-        # Accumulator for visibility counts
+-        visibility_counts = np.zeros((img_height, img_width), dtype=np.int32)
++        for train_view in train_views:
++            train_id = train_view.id
++            train_depth = dense_nerf_depths_train[train_id]
++            
++            # Warp train depth to test view
++            # reprojection_function returns warped depth and a validity mask (1 if valid, 0 if invalid/occluded)
++            warped_depth, valid_mask = reprojection_function(
++                train_depth, 
++                train_view.pose, 
++                train_view.intrinsics, 
++                test_view.pose, 
++                test_view.intrinsics
++            )
++            
++            # Compute absolute depth difference
++            # Only consider pixels where warping was valid
++            diff = np.abs(warped_depth - test_depth)
++            
++            # Check against threshold
++            # A pixel is visible in this training view if:
++            # 1. The warping was valid (not occluded/undefined)
++            # 2. The depth difference is less than threshold
++            is_visible = (valid_mask == 1) & (diff < threshold)
++            
++            # Increment visibility count
++            visibility_count += is_visible.astype(np.int32)
+         
+-        for tr_idx in range(num_train_views):
+-            D_train = D_train_list[tr_idx]
+-            cam_train = cam_params_train[tr_idx]
+-            threshold = 0.05 * max_depths[tr_idx]
+-            
+-            # Get 3D points from test view depth
+-            # Assuming standard pinhole camera model
+-            # 1. Unproject test view pixels to 3D
+-            # This requires generating a grid of pixel coordinates and using intrinsics
+-            # For brevity, assume a helper function `depth_to_3d` exists
+-            points_3d = depth_to_3d(D_test, cam_test.intrinsics)
+-            
+-            # 2. Project these 3D points to the training view
+-            # Helper function `project_3d_to_uv` handles transformation and projection
+-            u_train, v_train = project_3d_to_uv(points_3d, cam_test.extrinsics, 
+-                                                cam_train.extrinsics, cam_train.intrinsics)
+-            
+-            # 3. Sample depth from training view at projected coordinates
+-            # Handle boundary checks and interpolation
+-            d_warped = sample_depth_at_uv(D_train, u_train, v_train)
+-            
+-            # 4. Compute depth difference and update counts
+-            # d_warped might contain NaN or invalid values for out-of-bounds projections
+-            valid_mask = ~np.isnan(d_warped)
+-            depth_diff = np.abs(d_warped - D_test)
+-            
+-            # Apply threshold only where valid
+-            is_visible = (valid_mask) & (depth_diff < threshold)
+-            
+-            visibility_counts += is_visible.astype(np.int32)
+-            
+-        # Final mask: visible in at least 2 training views
+-        final_mask = visibility_counts >= 2
+-        masks.append(final_mask)
++        # Final mask: visible if seen in at least 2 training views
++        mask = (visibility_count >= 2).astype(np.uint8)
++        masks[test_id] = mask
+         
+     return masks
+ ```
+ 
++**Edge Cases and Pitfalls:**
++- Mask accuracy is entirely dependent on the accuracy of the Dense-NeRF depth estimation; incorrect Dense-NeRF depths produce incorrect masks [S1, S2].
++- Using depth instead of color makes the mask robust to specular objects [S1, S2]. Color-based reprojection fails on specular surfaces [S2].
++- If Dense-NeRF depth estimates are inaccurate, the mask will be incorrect [S1, S2].
++
+ ## Subtopics
+ 
+ ### [Masked Evaluation (Depth-based Visibility Mask Generation)](8648-masked-evaluation-depth-based-visibility-mask-generation.md)
+-Identifies pixels in a reference view that are occluded (invisible) when viewed from a new camera pose by comparing the reference depth map with the depth map warped from the new view.
++This method identifies pixels in a reference view that are occluded (invisible) when viewed from a new camera pose by comparing the reference depth map with the depth map warped from the new view. It is used to generate masks that restrict evaluation or inpainting to visible regions, preventing metric degradation from predicting unseen geometry. It differs from feature-level occlusion handling by operating directly on rendered depth maps to guide RGBD inpainting or consistency losses.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N_{test} \cdot N_{train} \cdot H \cdot W)$, where $N$ is the number of views and $H, W$ are image dimensions. The depth reprojection step dominates the cost.
+-- **Memory Complexity:** $O(N_{train} \cdot H \cdot W)$ to store training depth maps, plus $O(H \cdot W)$ for the accumulator and final mask.
+-- **Strengths:** Robust to specular surfaces because it relies on depth consistency rather than color similarity, which can be misleading on shiny objects [S1]. Ensures metrics reflect the radiance field's ability to reconstruct geometry visible in multiple views, avoiding artifacts from unseen regions [S1].
+-- **Limitations:** Relies on the accuracy of the Dense-NeRF depth estimates; if depth predictions are inaccurate, the mask may incorrectly exclude visible pixels or include occluded ones [S1]. Does not evaluate the model's ability to generalize to completely unseen viewpoints or objects.
+-- **When to use:** When evaluating sparse-input NeRF models where the goal is to assess geometric reconstruction quality from multi-view consistency, and when specular surfaces are present.
+-- **When not to use:** When evaluating generalization to unseen regions or when depth estimation is unreliable.
++- **Time Complexity:** $O(N \cdot M \cdot H \cdot W)$, where $N$ is the number of training views, $M$ is the number of test views, and $H \times W$ is the image resolution. Each training view is warped to each test view.
++- **Memory Complexity:** $O(N \cdot H \cdot W + M \cdot H \cdot W)$ to store depth maps and visibility counters.
++- **Strengths:** Prevents metric degradation from predicting unseen geometry [S1, S2]. Robust to specular objects compared to color-based methods [S1, S2]. Ensures evaluation is restricted to geometrically consistent regions [S2].
++- **Limitations:** Highly dependent on the accuracy of the Dense-NeRF depth estimation [S1, S2]. If depth estimates are poor, masks are incorrect [S1, S2].
++- **When to use:** When evaluating NeRFs on sparse input views where unseen regions would otherwise inflate error metrics [S1, S2].
++- **When not to use:** When the goal is to evaluate the model's ability to hallucinate or predict unseen regions (though NeRFs are not designed for this by default [S1, S2]).
+ 
+ ## Background
+-Masked evaluation was introduced in the context of regularizing sparse input radiance fields, specifically in the Simple-RF paper [S1]. It addresses the issue that radiance fields are designed to memorize scenes and are not equipped to predict unseen regions or the depth of objects seen in only one view [S1]. By restricting evaluation to regions visible in at least two training views, the method provides a more accurate assessment of the model's geometric reconstruction capabilities. The technique builds on depth-based reprojection methods similar to those described by Cho et al. [2017] and Kanchana et al. [2022] [S1].
++Masked Evaluation was introduced in the context of regularizing sparse input Neural Radiance Fields (NeRFs) to prevent them from being evaluated on regions they cannot predict by design [S1, S2]. Radiance fields are designed to memorize a scene and are ill-equipped to predict unseen regions or the depth of objects seen in only one input view [S1, S2]. The method was proposed in "SimpleNeRF" [S1] and "Simple-RF" [S2] to ensure fair comparison of models by restricting evaluation to pixels visible in at least two training views. The depth-based reprojection technique follows prior work by Cho et al. [2017] and Kanchana et al. [2022] [S1, S2].
+ 
+ ## Sources
+-[S1] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27+[S1] SimpleNeRF: Regularizing Sparse Input Neural Radiance Fields with Simpler Solutions, https://doi.org/10.1145/3610548.3618188, fetched 2026-10-26
++[S2] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27

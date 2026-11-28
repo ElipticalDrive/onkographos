@@ -1,0 +1,125 @@
+# Regions of Emphasis (Opacity Modulation)
+Also called: Focus + context opacity modulation
+
+## Overview
+Regions of Emphasis is a focus+context technique that uses opacity modulation to highlight specific density ranges within a volume while preserving the surrounding context [S1, unofficial]. It differs from geometric deformation methods by altering visual transparency rather than spatial geometry, allowing users to select a region of interest based on data values [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Volume dataset $V$ containing density values $d$ [S1, unofficial].
+*   User-defined region of emphasis $R_{emph}$, specified as a range of density values [S1, unofficial].
+*   Base transfer function mapping density to color and opacity [S1, unofficial].
+
+**Outputs:**
+*   Rendered image where features within $R_{emph}$ are emphasized and features outside are suppressed [S1, unofficial].
+
+**Data Structures:**
+*   The region of emphasis is stored as a density range $[d_{min}, d_{max}]$ [S1, unofficial].
+*   Opacity modulation is applied per sample along the ray [S1, unofficial].
+
+**Steps:**
+1.  **Selection:** The user defines the region of emphasis $R_{emph} = [d_{min}, d_{max}]$ by selecting a range of density values [S1, unofficial].
+2.  **Ray Casting:** For each pixel, cast a ray through the volume and sample density values $d_i$ [S1, unofficial].
+3.  **Opacity Modulation:** For each sample $i$, compare $d_i$ against $R_{emph}$ [S1, unofficial].
+    *   If $d_{min} \le d_i \le d_{max}$, the sample retains its base opacity $\alpha_{base}$ [S1, unofficial].
+    *   If $d_i < d_{min}$ or $d_i > d_{max}$, the opacity is decreased to $\alpha_{mod} < \alpha_{base}$ [S1, unofficial].
+4.  **Compositing:** Composite the samples using standard front-to-back alpha blending with the modulated opacities [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_regions_of_emphasis(volume, camera, region_emphasis, step_size=0.5):
+    """
+    volume: 3D array of density values with methods contains(pos) and sample(pos)
+    camera: defines ray origins and directions
+    region_emphasis: tuple (d_min, d_max)
+    step_size: distance between samples along the ray
+    """
+    d_min, d_max = region_emphasis
+    width, height = camera.resolution
+    # Initialize image buffer to zero
+    image = [[(0.0, 0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)]
+
+    for y in range(height):
+        for x in range(width):
+            ray_origin, ray_direction = camera.get_ray(x, y)
+            # Normalize direction vector
+            length = (ray_direction[0]**2 + ray_direction[1]**2 + ray_direction[2]**2)**0.5
+            if length > 0:
+                ray_direction = (ray_direction[0]/length, ray_direction[1]/length, ray_direction[2]/length)
+
+            accumulated_color = (0.0, 0.0, 0.0, 0.0)
+            accumulated_alpha = 0.0
+            t = 0.0
+
+            # Ray marching loop
+            while t < 1.0:
+                pos = (ray_origin[0] + t * ray_direction[0],
+                       ray_origin[1] + t * ray_direction[1],
+                       ray_origin[2] + t * ray_direction[2])
+
+                # Boundary check
+                if not volume.contains(pos):
+                    break
+
+                density, base_color, base_opacity = volume.sample(pos)
+
+                # Opacity modulation based on region of emphasis
+                if d_min <= density <= d_max:
+                    modulated_opacity = base_opacity
+                else:
+                    # Decrease opacity for values outside the region
+                    # Exact reduction factor not specified in sources [G]
+                    modulated_opacity = base_opacity * 0.5 
+
+                # Standard front-to-back compositing
+                alpha = modulated_opacity * (1.0 - accumulated_alpha)
+                accumulated_color = (
+                    accumulated_color[0] + base_color[0] * alpha,
+                    accumulated_color[1] + base_color[1] * alpha,
+                    accumulated_color[2] + base_color[2] * alpha,
+                    accumulated_color[3] + alpha
+                )
+
+                t += step_size
+                if accumulated_alpha >= 1.0:
+                    break
+
+            image[y][x] = accumulated_color
+    return image
+```
+
+**Parameters:**
+*   $d_{min}, d_{max}$: The density bounds of the region of emphasis [S1, unofficial].
+*   Opacity reduction factor: Not given in the sources [G].
+
+**Edge Cases:**
+*   If the region of emphasis covers the entire density range, no modulation is required [G].
+*   Precision issues may arise if density values are very close to $d_{min}$ or $d_{max}$ [G].
+
+## Subtopics
+
+### [ClearView](14255-clearview.md)
+ClearView is a focus + context technique that enhances the perception of specific volumetric features by modulating the opacity of segmented layers based on their importance relative to a user-defined focus region. It solves the problem of occlusion in dense volumes by rendering layers in a first pass and then adjusting their transparency in a second pass, distinguishing itself from single-pass methods by explicitly separating layer rendering from opacity modulation.
+
+### [Feature Isolation](17578-feature-isolation.md)
+A technique to emphasize a feature of interest by reducing the color saturation or opacity of nearby features.
+
+### Temporal Opacity Modulation
+A technique to view the approximate time-history of a feature in a single image by presenting instances from previous time-steps with transparency and blurriness increasing backwards in time [S2, unofficial]. It visualizes time-varying data by presenting multiple time-instances of a feature at once, with older instances indicated by reduced color saturation, increased transparency, or line rendering [S2, unofficial]. The implementation identifies instances of features from previous time-steps, presents them at corresponding locations, and increases transparency and blurriness for instances further back in time [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of samples per pixel, matching standard volume rendering [G].
+*   **Memory Complexity:** Requires storage for the volume data and the region of emphasis parameters [G].
+*   **Strengths:** Simple to implement; preserves the spatial structure of the volume; effective for highlighting specific density ranges [S1, unofficial].
+*   **Limitations:** Relies on user knowledge of density values to define the region; may not be effective for features defined by spatial structure rather than density [S1, unofficial].
+*   **When to use:** When the region of interest is defined by specific data values (e.g., temperature, density) [S1, unofficial].
+*   **When not to use:** When the region of interest is defined by spatial location or complex geometric features not correlated with density [S1, unofficial].
+
+## Background
+The technique was introduced in the context of illustrative rendering of particle systems, where it was used to focus the viewer on regions of emphasis while maintaining overall volume context [S1, unofficial]. It is categorized as a focus+context technique [S1, unofficial].
+
+## Sources
+[S1] Illustrative Rendering of Particle Systems, https://doi.org/10.2312/pe.vmv.vmv13.177-185, fetched 2026-10-26 (unofficial)
+[S2] Generalized Framework and Algorithms for Illustrative Visualization of Time-Varying Data on Unstructured Meshes, https://digital.library.unt.edu/ark:/67531/metadc838861/?q=illustrative volume rendering, fetched 2026-10-28 (unofficial)

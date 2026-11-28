@@ -1,0 +1,157 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Neural Dual Contouring
+ 
+-Also called: NDC, SDC, UNDC, Self-Supervised Dual Contouring, Unoriented Neural Dual Contouring
++Also called: NDC, SDC, Self-Supervised Dual Contouring, Unoriented Neural Dual Contouring, Unsigned Neural Dual Contouring (UNDC)
+ 
+ ## Overview
+@@ -33,6 +33,13 @@
+     *   **Masking:** Apply a mask to select only grid cells that bear node SDF values of opposite signs for vertex prediction [S1].
+ 
+-4.  **Mesh Construction:**
+-    *   Construct quadrilateral faces in cells incident on every edge $e_{ij}$ connecting grid nodes of different signs [S1].
++4.  **Zero-Crossing Interpolation:**
++    *   For each intersected edge $e_{ij}$ connecting nodes $g_i, g_j$ of opposite signs, estimate the zero-crossing point $p$ using linear interpolation [S1].
++    *   Compute the interpolation parameter $t = \frac{f(g_i)}{f(g_i) - f(g_j)}$ [S1].
++    *   Compute the point $p = (1 - t)g_i + t g_j$ [S1].
++
++5.  **Mesh Construction:**
++    *   For each cell with intersected edges, collect the interpolated points $p$.
++    *   Sort the points by edge index to ensure consistent winding.
++    *   Form triangles by connecting the predicted cell vertex $v_c$ to consecutive sorted points (fan triangulation) [G].
+     *   Triangulate the resulting quadrilaterals by joining the top-left and bottom-right vertices as a convention [S1].
+ 
+@@ -64,65 +71,73 @@
+ 
+ ```python
+-def neural_dual_contouring_inference(input_tensor, grid, network_V, network_S):
++def neural_dual_contouring_inference(sdf_grid, grid_nodes, grid_cells, grid_edges, network_V, network_S):
+     """
+     Reconstructs a mesh from an implicit input using Neural Dual Contouring.
+     
+     Args:
+-        input_tensor: Tensor of SDF values, voxel occupancy, or point cloud features.
+-        grid: Regular 3D grid structure defining node positions.
+-        network_V: Neural network predicting vertex positions.
+-        network_S: Neural network predicting signs/crossings.
++        sdf_grid: Tensor of SDF values at grid nodes.
++        grid_nodes: List of 3D coordinates for each grid node.
++        grid_cells: List of cell objects, each containing a list of edge indices.
++        grid_edges: List of edge objects, each containing node_i, node_j, and coordinates.
++        network_V: Neural network predicting vertex positions per cell.
++        network_S: Neural network predicting signs/crossings (optional for SDF inputs).
+         
+     Returns:
+         vertices: List of 3D coordinates.
+-        faces: List of vertex indices forming triangles.
++        faces: List of triangle vertex indices.
+     """
+-    # 1. Predict Signs for Connectivity
+-    # Predicts binary signs for each grid node or edge crossing
+-    predicted_signs = network_S(input_tensor, grid)
+-    
+-    # 2. Predict Vertex Positions
+-    # Outputs one vertex per grid cell
+-    predicted_vertices = network_V(input_tensor, grid)
+-    
+-    # 3. Construct Faces based on Sign Changes
++    # 1. Determine signs for connectivity
++    # For SDF inputs, signs are derived directly from SDF values [S3]
++    signs = [1.0 if sdf_grid[node] > 0 else -1.0 for node in range(len(grid_nodes))]
++
++    # 2. Predict vertex positions for each cell
++    # Network outputs one 3D point per cell, clamped to cell bounds via scaled-sigmoid [S1]
++    cell_vertices = network_V(sdf_grid, grid_cells)
++
++    vertices = []
+     faces = []
+-    vertices = []
+-    
+-    # Iterate over all grid cells
+-    for cell in grid.cells:
+-        # Check edges of the cell for sign changes
++
++    # 3. Process each cell to build mesh
++    for cell in grid_cells:
++        # Find intersected edges: endpoints have opposite signs
+         intersected_edges = []
+-        for edge in cell.edges:
+-            sign_i = predicted_signs[edge.node_i]
+-            sign_j = predicted_signs[edge.node_j]
+-            
+-            # If signs are opposite, the edge intersects the isosurface
+-            if sign_i != sign_j:
+-                intersected_edges.append(edge)
+-        
+-        # If the cell has intersected edges, construct a quad face
+-        if len(intersected_edges) > 0:
+-            # Get the predicted vertex for this cell
+-            cell_vertex = predicted_vertices[cell.id]
+-            
+-            # Add vertex to list
+-            vertices.append(cell_vertex)
+-            
+-            # Construct the quad face using the intersected edges
+-            # The specific topology depends on the number of intersected edges
+-            # Classical DC logic applies here, mapped to the predicted vertex
+-            face_indices = construct_quad_face(intersected_edges, len(vertices) - 1)
+-            faces.append(face_indices)
+-            
+-    # 4. Triangulate Quads
+-    # Convention: Join top-left and bottom-right vertices
+-    triangulated_faces = []
+-    for face in faces:
+-        # face is a list of 4 vertex indices
+-        triangulated_faces.append([face[0], face[1], face[2]])
+-        triangulated_faces.append([face[0], face[2], face[3]])
+-        
+-    return vertices, triangulated_faces
++        for edge_idx in cell.edges:
++            edge = grid_edges[edge_idx]
++            if signs[edge.node_i] != signs[edge.node_j]:
++                intersected_edges.append(edge_idx)
++
++        if not intersected_edges:
++            continue
++
++        # Get predicted vertex for this cell
++        v_c = cell_vertices[cell.id]
++
++        # Compute zero-crossing points on intersected edges
++        intersection_points = []
++        for edge_idx in intersected_edges:
++            edge = grid_edges[edge_idx]
++            gi = grid_nodes[edge.node_i]
++            gj = grid_nodes[edge.node_j]
++            fi = sdf_grid[edge.node_i]
++            fj = sdf_grid[edge.node_j]
++            # Linear interpolation parameter [S1]
++            t = fi / (fi - fj)
++            # Interpolated point [S1]
++            p = (1.0 - t) * gi + t * gj
++            intersection_points.append((edge_idx, p))
++
++        # Sort intersection points by edge index to ensure consistent winding
++        intersection_points.sort(key=lambda x: x[0])
++        points = [p for _, p in intersection_points]
++
++        # Form triangles from cell vertex to sorted intersection points (fan triangulation)
++        # For exactly two intersected edges, this forms a quad triangulated by a diagonal [S1]
++        for i in range(len(points) - 1):
++            faces.append([len(vertices), len(vertices) + 1, len(vertices) + 2])
++            vertices.append(v_c)
++            vertices.append(points[i])
++            vertices.append(points[i + 1])
++
++    return vertices, faces
+ ```
+ 
+@@ -131,4 +146,6 @@
+ *   **Self-Intersections:** NDC avoids self-intersections along sharp edges because it does not rely on QEF minimization [S2].
+ *   **No Gradients Required:** Unlike classical DC, NDC does not require surface gradients as input [S3].
++*   **Thin Structures:** Methods relying on sign differences cannot reconstruct object parts thinner than one voxel. UNDC can produce thin sheet faces in these regions [S3].
++*   **Noisy SDFs:** Using normal loss $\mathcal{L}_N$ during training causes instability when the evaluated SDF is noisy [S2].
+ 
+ ## Subtopics

@@ -1,0 +1,122 @@
+# Load Balancing with Replication and Thresholds
+
+Also called: Block assignment algorithm, Block/Tile Transfer Load Balancing, Load balancing algorithm, Parallel partitioning strategy, Replication-based Load Balancing
+
+## Overview
+A distributed load balancing strategy for parallel ray casting that uses block replication factors and load balance thresholds to decide between transferring volume data (blocks) and projected image data (tiles) [S1]. It minimizes communication overhead during the global gather operation by prioritizing composition locality over perfect computational balance [S1]. Unlike methods that strictly maximize load balance, this approach allows intentional imbalance to avoid tile transfers, leveraging high replication factors to trade excess load balance for reduced communication [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Volume dataset partitioned into blocks; current node assignments; estimated cost of blocks based on the previous frame; replication factor ($repl$); load balance threshold ($lb$) [S1].
+*   **Output:** New assignment of volume blocks to processing nodes [S1].
+
+**Data Structures:**
+*   **Block Cost Estimate:** A scalar value representing the projected rendering time for a specific volume block, derived from the previous frame's execution time [S1].
+*   **Node Load:** The sum of cost estimates for all blocks currently assigned to a node [S1].
+*   **Composition Responsibility:** A mapping of screen tiles (or quadrants) to the node responsible for compositing them [S1].
+
+**Parameters:**
+*   **Replication Factor ($repl$):** The number of copies of each volume block available across the cluster [S1]. Typical values: 1, 2, 4 [S1].
+*   **Load Balance Threshold ($lb$):** The minimum acceptable estimated load balance [S1]. Typical values: 0.65, 0.80, 0.90, 0.95 [S1].
+
+**Algorithm Steps:**
+The algorithm attempts to satisfy three competing goals in the following priority order [S1]:
+1.  Ensure the estimated load balance is above the threshold $lb$ [S1].
+2.  Minimize block transfers (moving volume data) [S1].
+3.  Minimize tile transfers (moving image data) by assigning blocks for projection to the node that requires them for composition [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def assign_blocks(blocks, nodes, repl, lb, prev_frame_costs):
+    """
+    Assign volume blocks to nodes to balance load and minimize communication.
+    """
+    # Calculate initial node loads
+    node_loads = {n.id: sum(prev_frame_costs[b.id] for b in n.assigned_blocks) for n in nodes}
+    mean_load = sum(node_loads.values()) / len(nodes)
+    max_load = max(node_loads.values())
+    current_balance = mean_load / max_load if max_load > 0 else 1.0
+
+    if current_balance >= lb:
+        # Priority 3: Minimize tile transfers by assigning blocks to composing nodes
+        # Allow intentional imbalance to avoid tile transfer communication
+        for block in blocks:
+            # Find node responsible for compositing this block's tile
+            composing_node = None
+            for n in nodes:
+                if block.tile_id in n.required_tiles:
+                    composing_node = n
+                    break
+            if composing_node is None:
+                continue
+            current_node = block.current_node
+            if current_node != composing_node:
+                # Count current copies to respect replication factor
+                current_copies = sum(1 for n in nodes if block.id in n.assigned_blocks)
+                if current_copies < repl:
+                    # Move block to composing node to avoid tile transfer
+                    current_node.assigned_blocks.remove(block)
+                    composing_node.assigned_blocks.append(block)
+    else:
+        # Priority 1: Restore load balance above threshold
+        # Move blocks from overloaded to underloaded nodes
+        while current_balance < lb:
+            overloaded = [n for n in nodes if node_loads[n.id] > mean_load]
+            if not overloaded:
+                break
+            src = overloaded[0]
+            block_to_move = src.assigned_blocks[0]
+            # Find most underloaded node
+            dst = min(nodes, key=lambda n: node_loads[n.id])
+            if src == dst:
+                break
+            # Move block to rectify balance
+            src.assigned_blocks.remove(block_to_move)
+            dst.assigned_blocks.append(block_to_move)
+            # Update loads and balance metric
+            node_loads = {n.id: sum(prev_frame_costs[b.id] for b in n.assigned_blocks) for n in nodes}
+            mean_load = sum(node_loads.values()) / len(nodes)
+            max_load = max(node_loads.values())
+            current_balance = mean_load / max_load if max_load > 0 else 1.0
+    return nodes
+```
+
+**Edge Cases and Pitfalls:**
+*   **Load Balance Thrashing:** If the load balance threshold is set too high, the algorithm may transfer blocks without reaping a corresponding improvement in load balance [S1]. This occurs because cost estimates based on the last frame are imperfect [S1].
+*   **Thrashing with Low Replication:** Thrashing is exacerbated at low replication factors and with lower granularity datasets (e.g., male dataset), where stochastic load balance is poorer [S1]. Estimates may not yield better load balance than 0.92 or 0.93, causing thrashing if the threshold is higher [S1].
+*   **Granularity Effects:** High granularity datasets (e.g., female) may show worse load balance with high replication factors because the algorithm allows intentional imbalance for composition locality [S1]. Low granularity datasets (e.g., male) may show worse load balance with low replication factors due to poor stochastic balance [S1].
+
+## Subtopics
+
+### Tile Transfer Avoidance via Composition Locality
+A strategy to avoid tile transfer communication by assigning volume blocks for projection to the same node that is responsible for composing the corresponding screen tile [S1]. With a replication factor of 4, only tiles straddling a boundary between nodes required communication, as most tiles in a quadrant were projected by the node composing them [S1]. With a replication factor of 1, each block was projected by the single node holding it, which may not be the composing node, requiring communication for all non-boundary tiles [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Time Complexity:** The algorithm runs per frame, with complexity dependent on the number of blocks and nodes [S1]. The cost of estimating load balance and moving blocks is generally low compared to rendering [S1].
+*   **Memory Complexity:** Memory usage increases with the replication factor [S1]. A factor of 4 requires 4x the storage for volume blocks compared to a factor of 1 [S1].
+
+**Measured Performance:**
+*   **Hardware:** Power Challenge Array (4 nodes, 8 processors each, 32 processors total) [S1].
+*   **Dataset:** 7.1 GB female dataset, 800x600 resolution [S1].
+*   **Speedup:** On 4 nodes, speedup over single node was 2.66 (repl=4), 2.60 (repl=2), 2.49 (repl=1) for the female dataset [S1]. For the male dataset, speedup was 2.30 (repl=4), 2.25 (repl=2), 2.24 (repl=1) [S1].
+*   **Large Scale:** Rendering the 7.1 GB female dataset on 8 virtual nodes (64 processors) at 800x600 resolution took 3.4 seconds/frame without optimizations, and 2.1 seconds/frame with opacity clipping and discarding empty blocks [S1].
+*   **Network Bandwidth:** HIPPI network effective bandwidth under heavy contention was 9.6 MB/sec per node for block transfers and 8.7 MB/sec for tile transfers, well below the peak rate of 91 MB/sec [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Minimizes communication overhead by leveraging replication to avoid tile transfers [S1]. Effective for high granularity datasets where stochastic balance is good [S1].
+*   **Limitations:** Requires additional memory for replication [S1]. Performance can degrade due to thrashing if thresholds are set too high or replication is too low for low granularity datasets [S1]. Not indefinitely scalable due to increasing communication costs with more processors [S1].
+
+**When to Use:**
+*   Use when communication cost is significant and replication memory is available [S1].
+*   Use for high granularity datasets where stochastic load balance is good [S1].
+*   Avoid for low granularity datasets with low replication factors and high thresholds due to thrashing [S1].
+
+## Background
+Derived from earlier conclusions about lower-level memory hierarchy effects on volume rendering performance, specifically the suitability of roughly equilateral blocks between 0.5 and 1.0 times the size of the L2 cache [S1]. The algorithm was applied in parallel ray casting volume rendering on distributed/shared-memory architectures such as the Power Challenge Array and Origin 2000 [S1]. It is based on the finding that for typical image resolutions, moving image tiles is cheaper than moving volume blocks, dictating the priority order of the algorithm [S1].
+
+## Sources
+[S1] Exploiting deep parallel memory hierarchies for ray casting volume rendering, https://doi.org/10.1145/266638.266645, fetched 2026-10-26

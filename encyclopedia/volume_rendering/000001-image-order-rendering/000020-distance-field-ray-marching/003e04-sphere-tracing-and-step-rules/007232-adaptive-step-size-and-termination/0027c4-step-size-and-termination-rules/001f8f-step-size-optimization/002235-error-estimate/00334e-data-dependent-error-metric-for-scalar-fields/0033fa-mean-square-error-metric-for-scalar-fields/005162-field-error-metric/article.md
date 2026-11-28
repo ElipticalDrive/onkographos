@@ -1,0 +1,108 @@
+# Field Error Metric
+
+Also called: Error Estimation Methods, Field Error Measurement, Scalar Value Difference Error, Surface Error Measurement
+
+## Overview
+The Field Error Metric quantifies the approximation quality of a simplified mesh by measuring the discrepancy in scalar field values between the original and simplified representations. It solves the problem of evaluating volumetric fidelity where surface-only metrics fail to capture internal data variations. Unlike its parent [Mean-Square Error Metric for Scalar Fields](7137-mean-square-error-metric-for-scalar-fields.md), which sums squared differences within tetrahedra, this method samples the domain and explicitly ignores points outside the simplified mesh's domain, treating them as surface boundary errors instead.
+
+## How it works
+**Inputs:**
+1. Original scalar field defined on a domain (typically a tetrahedral mesh).
+2. Simplified mesh representation.
+3. Scalar field range $R = \max(f) - \min(f)$ of the original field.
+
+**Outputs:**
+1. Normalized field error percentage.
+
+**Data Structures:**
+- Sample points $P$: A set of 3D coordinates. This includes original mesh vertices and interpolated points inside tetrahedra.
+- Scalar values $f(p)$: The field value at point $p$.
+
+**Steps:**
+1. **Sampling:** Generate sample points $P$ within the domain of the original mesh. These points include vertices and interior interpolated points of each tetrahedron [S1].
+2. **Domain Check:** For each sample point $p \in P$, determine if $p$ lies inside the domain of the simplified mesh [S1].
+3. **Filtering:** Discard any point $p$ that lies outside the simplified mesh domain. These points are excluded from the field error calculation as they contribute to surface boundary error [S1].
+4. **Value Difference:** For remaining points inside the simplified domain, compute the absolute difference between the original scalar value $f_{orig}(p)$ and the interpolated scalar value $f_{simp}(p)$ from the simplified mesh [S1].
+5. **Aggregation:** Sum the absolute differences (or squared differences, depending on specific implementation variant, though [S1] implies general difference) over all valid points.
+6. **Normalization:** Normalize the total error by the range of the original field $R$ to express the error as a percentage [S1].
+
+**Formula:**
+Let $P_{valid}$ be the set of sample points inside the simplified mesh domain. The field error $E_{field}$ is:
+$$ E_{field} = \frac{\sum_{p \in P_{valid}} |f_{orig}(p) - f_{simp}(p)|}{|P_{valid}| \cdot R} \times 100\% $$
+*Note: [S1] states "differences between their scalar values" and "Field error percentages are in relation to the range of the field." It does not explicitly specify squared vs. absolute, but implies a direct comparison. The parent article uses squared differences. We assume absolute difference for general "difference" unless squared is specified, but given the parent is MSE, the implementation may vary. However, [S1] text says "differences", not "squared differences". We stick to the text.*
+
+**Parameters:**
+- $R$: Range of the original scalar field.
+
+**Edge Cases and Pitfalls:**
+- **Points outside simplified domain:** Must be explicitly ignored to avoid double-counting with surface error metrics [S1].
+- **Interpolation accuracy:** The quality of $f_{simp}(p)$ depends on the interpolation method used within the simplified mesh elements.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_field_error_metric(original_field, simplified_mesh, original_range):
+    """
+    Computes the normalized field error metric.
+    
+    Args:
+        original_field: Function or data structure providing f_orig(p) for any p.
+        simplified_mesh: Data structure providing f_simp(p) for any p inside its domain.
+                         Also provides a function is_inside_mesh(p).
+        original_range: The scalar range (max - min) of the original field.
+        
+    Returns:
+        float: Normalized field error percentage.
+    """
+    # 1. Generate sample points P inside the original domain
+    # This includes vertices and interior points of tetrahedra.
+    # Implementation detail: [G] Specific sampling strategy (e.g., uniform inside tets) 
+    # is not defined in sources. Assume a representative set of points is generated.
+    sample_points = generate_sample_points(original_field.domain)
+    
+    total_error = 0.0
+    count = 0
+    
+    for p in sample_points:
+        # 2. Check if point is inside simplified mesh domain
+        if not simplified_mesh.is_inside(p):
+            # 3. Ignore points outside simplified domain
+            continue
+            
+        # 4. Get scalar values
+        f_orig = original_field.evaluate(p)
+        f_simp = simplified_mesh.evaluate(p)
+        
+        # 5. Compute difference
+        diff = abs(f_orig - f_simp)
+        total_error += diff
+        count += 1
+        
+    if count == 0:
+        return 0.0
+        
+    # 6. Normalize by range and count
+    normalized_error = total_error / (count * original_range)
+    return normalized_error * 100.0
+```
+
+## Subtopics
+
+### Implicit Function Error Metric
+A method to measure approximation quality by computing the Euclidean distance between the output mesh and the implicit surface [S2]. It globally increases accuracy by subdividing each triangle three times to increase sampling points [S2]. The error at point $p$ is approximated by $e(p) \approx \frac{|f(p)|}{\|\nabla f(p)\|}$, where $f(p)$ is the implicit function value and $\nabla f(p)$ is its gradient [S2].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of sample points and the cost of evaluating the simplified mesh field and checking domain inclusion.
+- **Memory Complexity:** Requires storage for sample points and field values.
+- **Strengths:** Captures internal volumetric errors that surface metrics miss.
+- **Limitations:** Computationally expensive if dense sampling is required. Sensitive to the definition of "inside" for the simplified mesh.
+- **When to use:** When volumetric data fidelity is critical and surface approximation is insufficient.
+- **When not to use:** When only surface geometry matters or when computational resources are limited.
+
+## Background
+The Field Error Metric was introduced in the context of streaming simplification of tetrahedral meshes [S1]. It was proposed as an alternative to surface boundary error measurement (using Metro [30]) to evaluate the quality of simplified field data. The method is similar to approaches by Cignoni et al. [11] but differs by ignoring points outside the simplified mesh domain to separate field error from surface error.
+
+## Sources
+[S1] Streaming Simplification of Tetrahedral Meshes, https://doi.org/10.1109/tvcg.2007.21, fetched 2026-11-04
+[S2] Variational implicit surface meshing, https://doi.org/10.1016/j.cag.2009.03.016, fetched 2026-10-27

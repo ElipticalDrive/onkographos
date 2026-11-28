@@ -1,0 +1,155 @@
+# HQ Upsample Combine Blur
+Also called: MQ Upsample Combine Blur, fragBlurUpsampleCombineHQ, fragBlurUpsampleCombineMQ
+
+## Overview
+HQ Upsample Combine Blur combines a high-resolution small-scale blur with a low-resolution large-scale blur using alpha-based blending to achieve depth of field effects [S1, unofficial]. It distinguishes itself from its siblings by using a larger disc kernel and specific blending thresholds compared to the Medium Quality (MQ) variant, while providing higher fidelity than the Cheap variant [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `_MainTex`: High-resolution source texture (float4).
+    *   `_LowRez`: Low-resolution pre-blurred texture (float4).
+    *   `_Offsets.w`: A scalar parameter controlling the blur scale.
+    *   `centerTap`: The sample from `_MainTex` at the current pixel.
+    *   `bigBlur`: The sample from `_LowRez` at the corresponding pixel.
+*   **Outputs:**
+    *   `float4`: The final blended color and alpha.
+
+**Data Structures:**
+*   `DiscKernel`: An array of structures containing `xy` (float2 offset) and `z` (float radius/weight factor). The size is `NumDiscSamples`.
+*   `PoissonScale`: A `float4` used to scale the kernel offsets.
+
+**Steps:**
+1.  **Sample Base Textures:**
+    *   Retrieve `bigBlur` from `_LowRez`.
+    *   Retrieve `centerTap` from `_MainTex`.
+
+2.  **Calculate Scale and Initial Count:**
+    *   Compute `poissonScale`:
+        $$ \text{poissonScale} = \text{_MainTex\_TexelSize}.xyxy \times \text{centerTap}.a \times \text{_Offsets}.w $$
+        Where `_MainTex_TexelSize.xy` is the inverse of the texture dimensions (pixel width/height).
+    *   Compute initial `sampleCount`:
+        $$ \text{sampleCount} = \max(\text{centerTap}.a \times 0.25, 0.1) $$
+
+3.  **Accumulate Small Blur:**
+    *   Initialize `smallBlur` to zero.
+    *   Loop `i` from `0` to `NumDiscSamples - 1`:
+        *   Calculate sample UV:
+            $$ \text{sampleUV} = \text{centerTap}.uv + \text{DiscKernel}[i].xy \times \text{poissonScale}.xy $$
+        *   Sample high-res texture:
+            $$ \text{sample0} = \text{tex2D}(\text{_MainTex}, \text{sampleUV}) $$
+        *   Calculate weight:
+            $$ \text{weight0} = \text{BokehWeightDisc}(\text{sample0}, \text{DiscKernel}[i].z, \text{centerTap}) $$
+        *   Accumulate:
+            $$ \text{smallBlur} += \text{sample0} \times \text{weight0} $$
+            $$ \text{sampleCount} += \text{weight0} $$
+
+4.  **Normalize Small Blur:**
+    $$ \text{smallBlur} = \frac{\text{smallBlur}}{\text{sampleCount} + 10^{-5}} $$
+
+5.  **Blend Low and High Resolution:**
+    *   Apply `BlendLowWithHighHQ` using `centerTap.a`, `smallBlur`, and `bigBlur`.
+    *   *Note: The exact implementation of `BlendLowWithHighHQ` is not provided in the sources, but it is distinct from `BlendLowWithHighMQ` used in the MQ variant.*
+
+6.  **Final Output:**
+    *   If `centerTap.a < 10^{-2}`:
+        $$ \text{return centerTap} $$
+    *   Else:
+        $$ \text{return float4}(\text{smallBlur}.rgb, \text{centerTap}.a) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def HQ_Upsample_Combine_Blur(center_uv, center_tap, big_blur, offsets_w, main_tex, low_rez, disc_kernel, num_disc_samples):
+    # 1. Calculate Poisson Scale
+    # Assuming main_tex_texel_size is (1/width, 1/height)
+    texel_size = main_tex.texel_size 
+    poisson_scale = float4(texel_size.x, texel_size.y, texel_size.x, texel_size.y) * center_tap.a * offsets_w
+    
+    # 2. Initial Sample Count
+    sample_count = max(center_tap.a * 0.25, 0.1)
+    
+    # 3. Accumulate Small Blur
+    small_blur = float4(0.0, 0.0, 0.0, 0.0)
+    
+    for i in range(num_disc_samples):
+        # Calculate sample UV
+        sample_uv = center_uv + disc_kernel[i].xy * poisson_scale.xy
+        
+        # Sample Main Texture
+        sample0 = main_tex.sample(sample_uv)
+        
+        # Calculate Weight
+        # BokehWeightDisc is a helper function defined elsewhere in the source context
+        weight0 = BokehWeightDisc(sample0, disc_kernel[i].z, center_tap)
+        
+        # Accumulate
+        small_blur += sample0 * weight0
+        sample_count += weight0
+        
+    # 4. Normalize
+    small_blur = small_blur / (sample_count + 1e-5)
+    
+    # 5. Blend
+    # BlendLowWithHighHQ is a helper function defined elsewhere
+    blended = BlendLowWithHighHQ(center_tap.a, small_blur, big_blur)
+    
+    # 6. Return
+    if center_tap.a < 1e-2:
+        return center_tap
+    else:
+        return float4(blended.rgb, center_tap.a)
+```
+
+**Parameters:**
+*   `NumDiscSamples`: Number of samples in the disc kernel. Not given in the sources.
+*   `Offsets.w`: Scalar multiplier for blur radius. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Low Alpha:** If `centerTap.a` is negligible (< 1e-2), the function returns the original `centerTap` to avoid unnecessary blending artifacts [S1, unofficial].
+*   **Division by Zero:** A small epsilon (`1e-5`) is added to the denominator during normalization to prevent division by zero [S1, unofficial].
+
+## Subtopics
+
+### Cheap Upsample Combine Blur
+A low-cost blur variant that linearly interpolates between the center tap and the big blur based on alpha and foreground overlap [S1, unofficial]. It differs from HQ by using a simple `lerp` instead of a disc kernel accumulation and blending function [S1, unofficial].
+
+**Steps:**
+1.  **Sample Textures:**
+    *   `centerTap`: From `_MainTex`.
+    *   `bigBlur`: From `_LowRez`.
+    *   `fgCoc`: Foreground overlap alpha from `_FgOverlap` texture.
+2.  **Interpolate:**
+    *   Calculate blend factor:
+        $$ \text{factor} = \text{saturate}(\max(\text{centerTap}.a, \text{fgCoc}) \times 8.0) $$
+    *   Compute result:
+        $$ \text{smallBlur} = \text{lerp}(\text{centerTap}, \text{bigBlur}, \text{factor}) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def Cheap_Upsample_Combine_Blur(center_tap, big_blur, fg_coc):
+    # Calculate blend factor
+    max_alpha = max(center_tap.a, fg_coc)
+    factor = saturate(max_alpha * 8.0)
+    
+    # Linear interpolation
+    small_blur = lerp(center_tap, big_blur, factor)
+    
+    return small_blur
+```
+
+## Operating characteristics
+*   **Time Complexity:** Proportional to `NumDiscSamples` for HQ, constant for Cheap.
+*   **Memory Complexity:** Requires storage for `_MainTex`, `_LowRez`, and optionally `_FgOverlap`.
+*   **Performance:** HQ is more expensive due to multiple texture samples and kernel accumulation. Cheap is significantly faster but lower quality.
+*   **Strengths:** HQ provides high-quality depth of field with proper bokeh shape. Cheap is suitable for performance-constrained scenarios.
+*   **Limitations:** HQ requires careful tuning of `NumDiscSamples` and kernel data. Cheap may exhibit visible artifacts in complex scenes due to linear interpolation.
+
+## Background
+This method is part of a post-processing pipeline for depth of field, specifically within the context of Unity's built-in post-processing stack or similar implementations [S1, unofficial]. The HQ variant is designed to balance quality and performance for high-end rendering, while the Cheap variant serves as a fallback for lower-end hardware.
+
+## Sources
+[S1] dario-zubovic/metaballs, https://github.com/dario-zubovic/metaballs, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,133 @@
+# Curriculum Sampling Strategy for Structured Supervision
+Also called: Planar sampling, Slice-based supervision
+
+## Overview
+This method provides structured spatial supervision for neural volumetric representations by blending sparse voxel-based Monte Carlo estimation with planar slice-based constraints [S1]. It solves the issue of isolated voxel samples lacking spatial coherence by enforcing consistency along 2D planes, which directly improves the fidelity of slices used in shear-warp rendering [S1]. It sets itself apart from pure voxel supervision by introducing geometric structure through random plane orientations, and from dense image supervision by maintaining sparsity and memory efficiency through selective pixel sampling on those planes [S1].
+
+## How it works
+The method optimizes a set of Gaussian kernels $\Theta = \{\mu_i, \Sigma_i, C_i, \alpha_i\}_{i=1}^m$ representing a volumetric field $f_\Theta(x)$ [S1]. It combines two loss terms: the Monte Carlo volumetric loss $\hat L_{MC}$ (from the parent method) and a slice-based loss $L_{slice}$ [S1].
+
+**Inputs:**
+- Training iteration $t$ [S1].
+- Gaussian parameters $\Theta$ [S1].
+- Ground-truth voxel colors $y(x)$ [S1].
+- Hyperparameters: $\lambda_{s,\max}$, $\gamma_s$, $\beta_s$ [S1].
+
+**Outputs:**
+- Gradients $\nabla_\Theta \mathcal{L}(t)$ for updating $\Theta$ [S1].
+
+**Data Structures:**
+- **Gaussian Set $G$**: A list of $m$ Gaussians [S1]. Each Gaussian $G_i$ contains:
+  - $\mu_i \in \mathbb{R}^3$: Mean (spatial location) [S1].
+  - $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (spread and orientation) [S1].
+  - $C_i \in \mathbb{R}^3$: RGB color [S1].
+  - $\alpha_i \in \mathbb{R}$: Opacity [S1].
+- **Sample Set $S$**: A set of 2D pixel coordinates on a sampled plane [S1]. Each pixel maps to a 3D coordinate $x$ in the volume [S1].
+
+**Numbered Steps:**
+1. **Sample Plane**: In each iteration $t$, sample a plane with an arbitrary orientation in 3D space [S1].
+2. **Select Pixels**: Select a sparse set of 2D pixel locations $S$ on that plane [S1]. Each pixel corresponds to a specific 3D coordinate $x$ within the volume [S1].
+3. **Compute Slice Loss**: Calculate the mean squared error between the predicted color $f_\Theta(x)$ and the ground-truth color $y(x)$ for all pixels in $S$ [S1]:
+   $$ L_{slice} = \frac{1}{|S|} \sum_{x \in S} \| f_\Theta(x) - y(x) \|_2^2 $$
+   where $|S|$ is the number of sampled pixels [S1].
+4. **Calculate Weights**: Compute time-varying weights $\lambda_s(t)$ and $\lambda_v(t)$ based on the current iteration $t$ [S1]:
+   $$ \lambda_s(t) = \lambda_{s,\max} \sigma \left( \frac{t - \gamma_s}{\beta_s} \right) $$
+   $$ \lambda_v(t) = 1 - \lambda_s(t) $$
+   where $\sigma(\cdot)$ is the sigmoid function [S1].
+5. **Combine Losses**: Compute the total loss $\mathcal{L}(t)$ by blending the Monte Carlo loss $\hat L_{MC}$ and the slice loss $L_{slice}$ [S1]:
+   $$ \mathcal{L}(t) = \lambda_v(t) \hat L_{MC} + \lambda_s(t) L_{slice} $$
+   [S1].
+6. **Update Parameters**: Perform gradient descent on $\Theta$ using $\nabla_\Theta \mathcal{L}(t)$ [S1].
+
+**Parameters:**
+- $\lambda_{s,\max}$: Maximum weight assigned to the slice loss [S1].
+- $\gamma_s$: Iteration at which slice supervision becomes significant [S1].
+- $\beta_s$: Controls the smoothness of the transition [S1].
+
+**Edge Cases and Pitfalls:**
+- **Abrupt Switching**: Switching supervision abruptly between voxel and slice modes can be detrimental to training stability [S1]. This is handled by using the sigmoid schedule to gradually introduce slice supervision [S1].
+- **Precision**: The method relies on the accuracy of mapping 2D pixel coordinates to 3D voxel locations [G]. If the plane orientation or pixel sampling is imprecise, the structured constraint may not align with the ground truth geometry [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def sigmoid(x):
+    """Standard sigmoid function."""
+    return 1.0 / (1.0 + math.exp(-x))
+
+def sample_plane_and_pixels():
+    """Sample a plane with arbitrary orientation and select sparse 2D pixel locations [G]."""
+    # Generate random plane normal and origin
+    n = [random.uniform(-1, 1), random.uniform(-1, 1), random.uniform(-1, 1)]
+    norm = math.sqrt(sum(c**2 for c in n))
+    n = [c / norm for c in n]
+    o = [random.uniform(-10, 10), random.uniform(-10, 10), random.uniform(-10, 10)]
+    # Select sparse 2D pixel locations on that plane
+    pixels = []
+    for _ in range(100):
+        u, v = random.uniform(-1, 1), random.uniform(-1, 1)
+        # Map to 3D coordinate x on the plane
+        x = o[0] + u * n[1] + v * n[2]
+        y = o[1] - u * n[0] + v * n[2]
+        z = o[2]
+        pixels.append((x, y, z))
+    return pixels
+
+def compute_slice_loss(pixels_S, evaluate_field, ground_truth_voxels):
+    """Compute L_slice = (1/|S|) sum ||f(x) - y(x)||^2_2."""
+    total_error = 0.0
+    count = len(pixels_S)
+    for x in pixels_S:
+        predicted_color = evaluate_field(x)
+        true_color = ground_truth_voxels.get_color(x)
+        diff = [predicted_color[i] - true_color[i] for i in range(3)]
+        total_error += sum(d**2 for d in diff)
+    return total_error / count if count > 0 else 0.0
+
+def compute_weights(t, gamma_s, beta_s, lambda_s_max):
+    """Compute lambda_s(t) and lambda_v(t)."""
+    lambda_s = lambda_s_max * sigmoid((t - gamma_s) / beta_s)
+    lambda_v = 1.0 - lambda_s
+    return lambda_v, lambda_s
+
+def train_step(Gaussians, t, gamma_s, beta_s, lambda_s_max, L_MC, ground_truth_voxels):
+    # 1. Sample plane and pixels
+    pixels_S = sample_plane_and_pixels()
+
+    # 2. Compute Slice Loss
+    L_slice = compute_slice_loss(pixels_S, Gaussians.evaluate, ground_truth_voxels)
+
+    # 3. Calculate Weights
+    lambda_v, lambda_s = compute_weights(t, gamma_s, beta_s, lambda_s_max)
+
+    # 4. Combine Losses
+    L_total = lambda_v * L_MC + lambda_s * L_slice
+
+    # 5. Update Parameters
+    gradients = compute_gradients(L_total, Gaussians)
+    Gaussians.apply_gradients(gradients)
+    return L_total
+```
+
+## Subtopics
+
+### Monte Carlo Volumetric Estimation
+The parent method [12926-monte-carlo-volumetric-estimation.md] provides the voxel-based loss component $\hat L_{MC}$ [S1]. It estimates the volume rendering integral using sparse voxel samples and importance weights [12926-monte-carlo-volumetric-estimation.md]. Choose this when memory efficiency for large volumes is critical and global energy conservation is prioritized over local spatial coherence [12926-monte-carlo-volumetric-estimation.md].
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources [S1].
+- **Memory Complexity**: Not given in the sources [S1].
+- **Strengths**: Improves spatial coherence of the rendered slices, which is crucial for shear-warp rendering [S1]. Maintains sparsity of the input data [S1].
+- **Limitations**: Not given in the sources [S1].
+- **When to use**: Not given in the sources [S1].
+- **When not to use**: Not given in the sources [S1].
+
+## Background
+The method was introduced in "Gaussian Volumetric Representation for Efficient Shear-Warp Visualization" [S1]. It addresses the limitations of sparse voxel supervision by incorporating planar constraints to better support the shear-warp rendering pipeline, which composites stacks of 2D slices [S1]. The curriculum learning aspect, using a sigmoid schedule to blend losses, is adapted from general curriculum learning practices [37] to ensure stable training [S1].
+
+## Sources
+[S1] Gaussian Volumetric Representation for Efficient Shear-Warp Visualization, https://doi.org/10.1007/978-3-032-37461-5_35, fetched 2026-10-26

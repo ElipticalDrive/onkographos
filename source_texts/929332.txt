@@ -1,0 +1,504 @@
+Fast N-dimensional interpolation package for Julia - perf(core): rebuild range-grid cell edges from a 32-bit integer on Float32 grids by mgyoo86 · Pull Request #226 · ProjectTorreyPines/FastInterpolations.jl
+
+perf(core): rebuild range-grid cell edges from a 32-bit integer on Float32 grids by mgyoo86 · Pull Request #226 · ProjectTorreyPines/FastInterpolations.jl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mgyoo86
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Member
+Follow-up to #224.
+Summary
+Problem: on Metal, linear interpolation on a Float32 range grid ran at 74 % of copy bandwidth (a hand-written kernel reaches 100 %).
+Cause: the cell's left edge lo + (idx − 1)·h is rebuilt from an Int64 index, and 64-bit integer ↔ float conversions are costly on Metal. In isolation, an Int64 round trip measured 10× an Int32 one.
+Fix: on Float32/Float16 grids the left edge is rebuilt from (idx − 1) % Int32. The index itself, the clamps, the loads and the returned Int are unchanged, and results are bit-identical to master.
+Metal (M1 Pro), 1D range grid, 1e8 Float32 queries, share of copy
+master
+this PR
+InBounds(), ClampExtrap()
+74 %
+99 %
+FillExtrap, ExtendExtrap(), NoExtrap()
+74 %
+100 %
+inside a KernelAbstractions kernel
+69 %
+97 %
+Changes
+_idx_type(T): Int32 for Float32/Float16 grids, Int otherwise. It is used at the 8 left-edge rebuild sites of the range searches: muladd((idx - 1) % _idx_type(T), h, lo).
+Float32/Float16 range grids are limited to typemax(Int32) ÷ 2 (≈ 1.07e9) points (ArgumentError), so the narrowing is always exact.
+Performance
+CUDA (V100S): no difference observed. Master, this PR and an all-Int32 index all reach 85 % of copy.
+CPU (M1 Pro, Julia 1.13.2):
+Float64: LLVM IR identical to master.
+Float32: native code identical apart from the 32-bit conversion operand.
+ABAB against master: within noise (±0.8 %).
+Not covered
+The float → Int64 truncation stays 64-bit. It is hidden by memory latency here; revisit when compute-heavier families reach the GPU.
+Tests
+test/test_range_cell_index.jl:
+32-bit conversion in the IR, and the length guard (both fail on master);
+bit identity with the all-Int chain (Float32/Float16 grids, Float64/Dual queries, at the length limit);
+end cells for far out-of-domain queries.
+The JLArrays GPU tests and the real-GPU suite on Metal pass.
+perf(core): rebuild range-grid cell edges from a 32-bit integer on Fl…
+…
+02923b0
+```
+…oat32 grids
+
+The range search rebuilds the cell's left edge `lo + (idx - 1)*h` from an
+Int64 index; on Metal the Int64 -> float conversion is emulated, which held a
+Float32 range lookup at 74 % of copy bandwidth. On Float32/Float16 grids the
+offset is now converted from `(idx - 1) % _idx_type(T)` (Int32), so Metal
+reaches ~100 % for every extrapolation. The index, clamps, loads and returned
+Int are unchanged and results are bit-identical; Float64 IR and Float32
+native opcodes match master on the CPU.
+
+Float32/Float16 range grids are limited to typemax(Int32) ÷ 2 points so the
+narrowing is always exact (Int grids skip the check at compile time).
+```
+github-actions
+Bot
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Contributor
+FastInterpolations.jl Benchmarks
+🚨 Regression baseline is a different CPU
+CPU
+This PR run
+`znver5
+Master baseline (latest commit)
+`znver3
+The Previous / Imm. Ratio / Grad. Ratio columns compare against master history, but master's most recent commit was benchmarked on a different CPU — so a naive comparison is cross-CPU and unreliable. The ratios below use only same-znver5|4c history and are blank if master has none on this CPU yet.
+All benchmarks (71 total, click to expand)
+Benchmark
+Current: 02923b0
+Previous
+Imm. Ratio
+Grad. Ratio
+10_nd_construct/bicubic_2d
+23655 ns
+25138.0 ns
+0.941
+0.935
+10_nd_construct/bilinear_2d
+228.94 ns
+271.4 ns
+0.843
+0.926
+10_nd_construct/phs_2d
+680786.6 ns
+660962.5 ns
+1.03
+1.067
+10_nd_construct/phs_3d
+10172485.9 ns
+10901033.3 ns
+0.933
+0.902
+10_nd_construct/tricubic_3d
+187613 ns
+194822.0 ns
+0.963
+0.903
+10_nd_construct/trilinear_3d
+575.66 ns
+652.8 ns
+0.882
+0.91
+11_nd_eval/bicubic_2d_batch
+973.5 ns
+1063.6 ns
+0.915
+0.941
+11_nd_eval/bicubic_2d_scalar
+12.91 ns
+13.7 ns
+0.941
+0.969
+11_nd_eval/bilinear_2d_scalar
+5.5 ns
+5.9 ns
+0.932
+0.971
+11_nd_eval/phs_2d_batch
+20072.3 ns
+19812.7 ns
+1.013
+0.957
+11_nd_eval/phs_2d_scalar
+149.42 ns
+154.4 ns
+0.967
+0.909
+11_nd_eval/phs_3d_batch
+103017.3 ns
+104308.6 ns
+0.988
+0.962
+11_nd_eval/phs_3d_scalar
+938.42 ns
+972.5 ns
+0.965
+0.975
+11_nd_eval/tricubic_3d_batch
+1981 ns
+2103.2 ns
+0.942
+0.954
+11_nd_eval/tricubic_3d_scalar
+20.13 ns
+21.2 ns
+0.948
+0.919
+11_nd_eval/trilinear_3d_scalar
+8.91 ns
+9.5 ns
+0.937
+0.937
+12_cubic_eval_gridquery/range_random
+1817.54 ns
+1967.1 ns
+0.924
+0.707
+12_cubic_eval_gridquery/range_sorted
+1812.74 ns
+1947.9 ns
+0.931
+0.707
+12_cubic_eval_gridquery/vec_random
+2946.86 ns
+3203.0 ns
+0.92
+0.837
+12_cubic_eval_gridquery/vec_sorted
+1453.18 ns
+1602.8 ns
+0.907
+0.812
+13_nd_oneshot_gridquery/bicubic_2d_rand_rand
+36204.6 ns
+36808.3 ns
+0.984
+0.913
+13_nd_oneshot_gridquery/bicubic_2d_sort_rand
+34819.5 ns
+35405.2 ns
+0.983
+0.925
+13_nd_oneshot_gridquery/bicubic_2d_sort_sort
+34153.5 ns
+35279.9 ns
+0.968
+0.922
+13_nd_oneshot_gridquery/bilinear_2d_rand_rand
+6107.2 ns
+6404.6 ns
+0.954
+0.999
+13_nd_oneshot_gridquery/bilinear_2d_sort_rand
+3958.76 ns
+4268.8 ns
+0.927
+0.999
+13_nd_oneshot_gridquery/bilinear_2d_sort_sort
+3080.24 ns
+3415.9 ns
+0.902
+0.975
+14_series_oneshot_batch/constant_inplace_vec_k8_q1000_rand
+5582.4 ns
+5878.8 ns
+0.95
+0.782
+14_series_oneshot_batch/linear_inplace_vec_k8_q1000_rand
+6380.6 ns
+7229.8 ns
+0.883
+0.868
+15_gridded_query/cubic_oneshot_2d_40x32
+27151 ns
+27955.0 ns
+0.971
+0.933
+15_gridded_query/cubic_persistent_2d_40x32
+4243.4 ns
+4381.6 ns
+0.968
+0.923
+15_gridded_query/linear_oneshot_2d_40x32
+828.86 ns
+860.5 ns
+0.963
+0.923
+15_gridded_query/linear_oneshot_3d_12x10x8
+980.48 ns
+992.5 ns
+0.988
+0.922
+15_gridded_query/linear_persistent_2d_40x32
+813.22 ns
+827.3 ns
+0.983
+0.924
+15_gridded_query/linear_persistent_3d_12x10x8
+961.26 ns
+989.1 ns
+0.972
+0.921
+16_phs/construct_g0100
+21000.68 ns
+24034.5 ns
+0.874
+0.94
+16_phs/construct_g1000
+20992.7 ns
+23845.8 ns
+0.88
+0.95
+16_phs/eval_q00001
+53.78 ns
+54.4 ns
+0.989
+0.928
+16_phs/eval_q00100
+5569.8 ns
+5846.8 ns
+0.953
+0.923
+16_phs/eval_q10000
+543125.6 ns
+557251.5 ns
+0.975
+0.906
+16_phs/oneshot_q00001
+21517.22 ns
+24148.7 ns
+0.891
+0.952
+16_phs/oneshot_q10000
+874791.2 ns
+877198.8 ns
+0.997
+0.888
+1_cubic_oneshot/q00001
+312.26 ns
+316.9 ns
+0.985
+0.917
+1_cubic_oneshot/q10000
+18760.3 ns
+19522.3 ns
+0.961
+0.666
+2_cubic_construct/g0100
+823.64 ns
+899.7 ns
+0.915
+0.888
+2_cubic_construct/g1000
+7986.1 ns
+9259.9 ns
+0.862
+0.921
+3_cubic_eval/q00001
+4.8 ns
+5.0 ns
+0.96
+0.568
+3_cubic_eval/q00100
+200.3 ns
+213.5 ns
+0.938
+0.755
+3_cubic_eval/q10000
+18235.5 ns
+19421.2 ns
+0.939
+0.711
+4_linear_oneshot/q00001
+13.42 ns
+14.1 ns
+0.95
+0.993
+4_linear_oneshot/q10000
+11543.4 ns
+12369.5 ns
+0.933
+0.984
+5_linear_construct/g0100
+17.93 ns
+19.2 ns
+0.932
+0.661
+5_linear_construct/g1000
+128.19 ns
+154.6 ns
+0.829
+0.896
+6_linear_eval/q00001
+4.1 ns
+4.4 ns
+0.932
+0.854
+6_linear_eval/q00100
+138.4 ns
+143.2 ns
+0.966
+1.058
+6_linear_eval/q10000
+11416.2 ns
+12518.8 ns
+0.912
+0.985
+7_cubic_range/scalar_query
+3.5 ns
+3.7 ns
+0.946
+0.648
+7_cubic_vec/scalar_query
+5.1 ns
+5.0 ns
+1.018
+0.927
+8_cubic_multi/construct_s001_q100
+333.1 ns
+353.9 ns
+0.941
+0.894
+8_cubic_multi/construct_s010_q100
+2816.46 ns
+3165.8 ns
+0.89
+0.94
+8_cubic_multi/construct_s100_q100
+26680.3 ns
+29990.0 ns
+0.89
+0.952
+8_cubic_multi/eval_s001_q100
+234.14 ns
+244.4 ns
+0.958
+0.655
+8_cubic_multi/eval_s010_q100
+738.5 ns
+767.6 ns
+0.962
+0.799
+8_cubic_multi/eval_s010_q100_scalar_loop
+1663.9 ns
+1695.3 ns
+0.981
+0.996
+8_cubic_multi/eval_s100_q100
+5774.7 ns
+6069.2 ns
+0.951
+0.881
+8_cubic_multi/eval_s100_q100_scalar_loop
+2127.2 ns
+2251.3 ns
+0.945
+0.892
+9_nd_oneshot/bicubic_2d
+23817.9 ns
+24432.7 ns
+0.975
+0.863
+9_nd_oneshot/bilinear_2d
+300.64 ns
+319.1 ns
+0.942
+1.04
+9_nd_oneshot/phs_2d
+805489.8 ns
+795733.0 ns
+1.012
+0.977
+9_nd_oneshot/phs_3d
+11444296.7 ns
+12385423.6 ns
+0.924
+0.896
+9_nd_oneshot/tricubic_3d
+186919.9 ns
+187544.6 ns
+0.997
+0.849
+9_nd_oneshot/trilinear_3d
+490.7 ns
+527.8 ns
+0.93
+0.949
+✅ No regressions detected
+Runner: znver5|4c — AMD EPYC 9V45 96-Core Processor, julia 1.13.2. Times are min-merged and compared only against this same machine's history.
+This comment was automatically generated by Benchmark workflow.
+codecov
+Bot
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Codecov Report
+✅ All modified and coverable lines are covered by tests.
+✅ Project coverage is 96.38%. Comparing base (920df35) to head (02923b0).
+⚠️ Report is 1 commits behind head on master.
+Additional details and impacted files
+```
+@@           Coverage Diff           @@
+##           master     #226   +/-   ##
+=======================================
+  Coverage   96.38%   96.38%           
+=======================================
+  Files         176      176           
+  Lines       15810    15816    +6     
+=======================================
++ Hits        15239    15245    +6     
+  Misses        571      571           
+```
+Files with missing lines
+Coverage Δ
+src/core/axis_types.jl
+92.45% <100.00%> (+0.96%)
+⬆️
+src/core/search.jl
+98.58% <100.00%> (ø)
+🚀 New features to boost your workflow:
+❄️ Test Analytics: Detect flaky tests, report on failures, and find test suite problems.
+Hide details
+View details
+mgyoo86
+merged commit 6b0da6f
+into
+master
+Oct 23, 2026
+27 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+henry2004y
+mentioned this pull request
+Oct 23, 2026
+GPU support
+#214
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,203 @@
+--- v001.md
++++ v002.md
+@@ -1,33 +1,31 @@
+ # Texture Map Coding (TMC)
+ 
+-Also called: Image-based Compression, SLF Coefficient Compression via Texture Map Coding
++Also called: Image-based Compression, SLF Coefficient Compression via Texture Map Coding, SLF Reconstruction from Compressed Coefficients
+ 
+ ## Overview
+-Texture Map Coding (TMC) is a lossy compression method for Surface Light Field (SLF) coefficients that maps 3D surface points to 2D texture coordinates, allowing the use of standard image codecs [S1]. It treats each coefficient channel as an independent image, leveraging spatial redundancy in the 2D plane to achieve higher Rate-Distortion (RD) performance than hierarchical methods like RAHT, at the cost of higher computational complexity [S1].
++Texture Map Coding (TMC) is a lossy compression method for Surface Light Field (SLF) coefficients that maps 3D surface points to 2D texture coordinates, allowing the use of standard image codecs [S1]. It treats each coefficient channel as an independent image, leveraging spatial redundancy in the 2D plane to achieve higher Rate-Distortion (RD) performance than hierarchical methods like RAHT, at the cost of higher computational complexity [S1]. It builds on [Texture Format Compression](5623-texture-format-compression.md) and differs from siblings such as [BC5 Compression](5013-bc5-compression.md) and [Texture Format Optimization for Rendering](17133-texture-format-optimization-for-rendering.md) by explicitly mapping 3D point cloud attributes to 2D images for codec compression [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   A set of 3D surface points $P$.
++*   A set of 3D surface points $P$ [S1].
+ *   For each point $p \in P$, an $N$-dimensional vector of SLF coefficients $\alpha(p) = [\alpha_0(p), \dots, \alpha_{N-1}(p)]$ [S1].
+ *   A 3D-to-2D mapping function that assigns a 2D texture coordinate $u(p)$ to each point $p$ [S1].
+ 
+ **Outputs:**
+-*   A compressed bitstream containing:
+-    1.  The 3D-to-2D mapping parameters [S1].
+-    2.  Compressed images for each of the $N$ coefficient channels [S1].
++*   A compressed bitstream containing the 3D-to-2D mapping parameters and $N$ compressed coefficient images [S1].
+ 
+ **Data Structures:**
+-*   **Mapping Parameters:** Not specified in the sources. Must encode the geometric unwrapping or projection logic used to generate $u(p)$ [S1].
+-*   **Coefficient Images:** $N$ separate 2D images. Each image corresponds to one coefficient index $i \in [0, N-1]$. The pixel values are integers in the range $[0, 255]$ (8-bit representation) [S1].
++*   **Mapping Parameters:** Not given in the sources. Must encode the geometric unwrapping or projection logic used to generate $u(p)$ [S1].
++*   **Coefficient Images:** $N$ separate 2D images [S1]. Each image corresponds to one coefficient index $i \in [0, N-1]$ [S1]. The pixel values are integers in the range $[0, 255]$ (8-bit representation) [S1].
+ 
+ **Steps:**
+-1.  **Mapping:** Map each 3D point $p$ to a 2D texture coordinate $u(p)$. This creates a 2D grid where neighboring positions in the 2D plane correspond to neighboring positions in 3D space [S1].
++1.  **Mapping:** Map each 3D point $p$ to a 2D texture coordinate $u(p)$ [S1]. This creates a 2D grid where neighboring positions in the 2D plane correspond to neighboring positions in 3D space [S1].
+ 2.  **Channel Separation:** Decompose the $N$-dimensional coefficient vectors $\alpha(p)$ into $N$ separate 2D images, one for each coefficient index $i$ [S1]. Because B-Spline wavelet basis functions are orthogonal, each coefficient plane can be compressed independently [S1].
+-3.  **Rescaling and Quantization:** Uniformly rescale the coefficients for each channel to constrain values to the range $[0, 255]$. Round the rescaled values to integers [S1].
+-4.  **Image Compression:** Compress each resulting 2D image independently using an image codec. The reference implementation uses High Efficiency Video Coding (HEVC) [S1].
++3.  **Rescaling and Quantization:** Uniformly rescale the coefficients for each channel to constrain values to the range $[0, 255]$ [S1]. Round the rescaled values to integers [S1].
++4.  **Image Compression:** Compress each resulting 2D image independently using an image codec [S1]. The reference implementation uses High Efficiency Video Coding (HEVC) [S1].
+ 5.  **Encoding Mapping:** Encode the 3D-to-2D mapping parameters so the decoder can reconstruct the texture maps from the compressed images [S1].
+ 
+ **Reconstruction:**
+-On the decoder side, coefficients are recovered via entropy decoding, inverse quantization, and inverse image decoding. The recovered SLF coefficients $\hat{\alpha}$ are used to reconstruct the view maps as [S1]:
++On the decoder side, coefficients are recovered via entropy decoding, inverse quantization, and inverse image decoding [S1]. The recovered SLF coefficients $\hat{\alpha}$ are used to reconstruct the view maps as [S1]:
+ 
+ $$
+@@ -40,5 +38,5 @@
+ 
+ ```python
+-def tmc_compress(points, coefficients_3d, mapping_function, codec):
++def tmc_compress(points, coefficients_3d, mapping_function, codec, grid_width, grid_height):
+     """
+     Compress SLF coefficients using Texture Map Coding.
+@@ -47,61 +45,60 @@
+         points: List of 3D points p.
+         coefficients_3d: List of N-dimensional vectors alpha(p) for each point.
+-        mapping_function: Function mapping p -> (u, v) 2D coordinates.
++        mapping_function: Function mapping p -> (u, v) integer grid coordinates.
+         codec: Image compression function (e.g., HEVC encoder).
++        grid_width, grid_height: Dimensions of the 2D coefficient images.
+         
+     Returns:
+-        compressed_mapping: Encoded 3D-to-2D mapping parameters.
++        mapping_metadata: Dict containing mapping parameters for reconstruction.
+         compressed_images: List of compressed bitstreams for each coefficient channel.
+     """
++    N = len(coefficients_3d[0])
++    # Initialize N empty 2D grids
++    images = [[[0] * grid_width for _ in range(grid_height)] for _ in range(N)]
++    
+     # Step 1 & 2: Map points to 2D and separate channels
+-    # Initialize N empty 2D grids (images)
+-    N = len(coefficients_3d[0])
+-    images = [create_empty_2d_grid() for _ in range(N)]
+-    
+     for p in points:
+         u, v = mapping_function(p)
+         alpha = coefficients_3d[p]
+-        
+-        # Assign coefficients to respective channel images
+         for i in range(N):
+-            images[i][u][v] = alpha[i]
++            images[i][v][u] = alpha[i]
+             
+     # Step 3: Rescale and Quantize
++    metadata = {}
+     for i in range(N):
+-        min_val = min(images[i].flatten())
+-        max_val = max(images[i].flatten())
++        flat_vals = [images[i][v][u] for v in range(grid_height) for u in range(grid_width)]
++        min_val = min(flat_vals)
++        max_val = max(flat_vals)
+         
+-        # Uniform rescaling to [0, 255]
+         if max_val != min_val:
+             scale = 255.0 / (max_val - min_val)
+             offset = -min_val * scale
+         else:
+-            scale = 0.0
++            scale = 1.0
+             offset = 0.0
+             
+-        for u in range(width):
+-            for v in range(height):
+-                val = images[i][u][v]
+-                # Rescale and round to integer
+-                images[i][u][v] = int(val * scale + offset)
++        metadata[f'channel_{i}'] = {'scale': scale, 'offset': offset}
++        
++        for v in range(grid_height):
++            for u in range(grid_width):
++                images[i][v][u] = int(images[i][v][u] * scale + offset)
+                 
+     # Step 4: Compress each image
+     compressed_images = []
+     for i in range(N):
+-        # Compress the 2D integer grid using the codec
+-        bitstream = codec.encode(images[i])
+-        compressed_images.append(bitstream)
++        compressed_images.append(codec.encode(images[i]))
+         
+-    # Step 5: Encode mapping
+-    compressed_mapping = encode_mapping_parameters(mapping_function)
++    # Step 5: Encode mapping parameters
++    # The exact serialization format for the 3D-to-2D mapping is not specified in the sources [G]
++    mapping_metadata = {'mapping_params': mapping_function, 'metadata': metadata}
+     
+-    return compressed_mapping, compressed_images
++    return mapping_metadata, compressed_images
+ 
+-def tmc_reconstruct(compressed_mapping, compressed_images, codec, basis_functions):
++def tmc_reconstruct(mapping_metadata, compressed_images, codec, basis_functions):
+     """
+     Reconstruct SLF from TMC compressed data.
+     
+     Args:
+-        compressed_mapping: Encoded mapping parameters.
++        mapping_metadata: Dict containing mapping parameters and scale/offset metadata.
+         compressed_images: List of compressed bitstreams.
+         codec: Image decompression function.
+@@ -111,36 +108,33 @@
+         reconstruction_function: Function returning f_hat(omega|p)
+     """
+-    # Decode mapping
+-    mapping_function = decode_mapping_parameters(compressed_mapping)
++    mapping_function = mapping_metadata['mapping_params']
++    metadata = mapping_metadata['metadata']
+     
+-    # Decode images and inverse quantize
+     N = len(compressed_images)
+-    recovered_coefficients = {} # Map p -> alpha_hat(p)
++    recovered_coefficients = {}
+     
+     for i in range(N):
+-        # Decode image
+         image = codec.decode(compressed_images[i])
++        scale = metadata[f'channel_{i}']['scale']
++        offset = metadata[f'channel_{i}']['offset']
+         
+-        # Inverse quantize (assuming same scale/offset logic or stored parameters)
+-        # Note: Sources do not specify if scale/offset are stored; 
+-        # assuming codec or metadata handles this or it is fixed [G]
+-        for u, v in image.coordinates():
+-            # Map back to 3D point p
+-            p = mapping_function.inverse(u, v)
+-            val = image[u][v]
+-            
+-            # Reconstruct alpha_i(p)
+-            # Note: Exact inverse scaling formula depends on encoder side storage [G]
+-            alpha_hat_i = val / scale - offset 
+-            
+-            if p not in recovered_coefficients:
+-                recovered_coefficients[p] = [0] * N
+-            recovered_coefficients[p][i] = alpha_hat_i
+-            
++        for v in range(len(image)):
++            for u in range(len(image[0])):
++                val = image[v][u]
++                # Inverse quantization
++                alpha_hat_i = (val - offset) / scale
++                
++                # Map back to 3D point p
++                # The exact inverse mapping logic is not specified in the sources [G]
++                p = mapping_function.inverse(u, v) if hasattr(mapping_function, 'inverse') else None
++                if p is not None:
++                    if p not in recovered_coefficients:
++                        recovered_coefficients[p] = [0] * N
++                    recovered_coefficients[p][i] = alpha_hat_i
++                    
+     def reconstruct_view(p, omega):
+         if p not in recovered_coefficients:
+             return 0
+         alpha_hat = recovered_coefficients[p]
+-        # Sum over N coefficients
+         result = 0
+         for i in range(N):
+@@ -168,5 +162,5 @@
+ *   **Limitations:** Higher computational cost; requires a valid 3D-to-2D mapping that preserves spatial locality [S1].
+ *   **When to use:** When RD performance is prioritized over computational efficiency [S1].
+-*   **When not to use:** When computational resources are limited or when RAHT's scalability is required [S1].
++*   **When not to use:** When computational efficiency is prioritized over RD performance [S1].
+ 
+ ## Background

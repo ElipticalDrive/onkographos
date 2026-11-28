@@ -1,0 +1,184 @@
+--- v009.md
++++ v010.md
+@@ -4,16 +4,16 @@
+ 
+ ## Overview
+-RegNeRF is a method for synthesizing novel views from sparse input images by applying depth smoothness and color priors to constrain the unobserved regions of the scene [S1]. It differs from sibling methods like [DiffNeRF](8572-diffnerf.md), which relies on automatic differentiation of the ray-based representation for gradient estimation, by using finite-difference approximations on patch-based dataloaders to compute depth gradients [S1][S2, unofficial]. Unlike [Depth and Geometry Supervision](8727-depth-and-geometry-supervision.md) which often requires explicit depth labels, RegNeRF employs generative priors (Normalizing Flows) and geometric smoothness constraints without requiring pretraining on the target dataset [S1].
++RegNeRF synthesizes novel views from sparse input images by applying depth smoothness and color priors to constrain unobserved regions of the scene [S1]. It employs generative priors via Normalizing Flows and geometric smoothness constraints without requiring pretraining on the target dataset [S1].
+ 
+ ## How it works
+-RegNeRF operates within the differentiable volume rendering framework [S1, 8582-regnerf.md]. It uses Mip-NeRF [48] as the backbone neural radiance field, which renders anti-aliased cones instead of rays to handle frequency aliasing [S1]. The method introduces three key components: sampled space annealing, depth smoothness regularization, and color regularization via Normalizing Flows.
++RegNeRF operates within the differentiable volume rendering framework [S1, 8582-regnerf.md]. It uses Mip-NeRF as the backbone neural radiance field [S1]. The method introduces three key components: sampled space annealing, depth smoothness regularization, and color regularization via Normalizing Flows [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A sparse set of $N$ input images with known camera poses.
+-*   **Outputs:** A trained NeRF model (density $\sigma$ and color $\mathbf{c}$ fields) capable of rendering novel views.
++*   **Inputs:** A sparse set of $N$ input images with known camera poses [S1].
++*   **Outputs:** A trained NeRF model (density $\sigma$ and color $\mathbf{c}$ fields) capable of rendering novel views [S1].
+ 
+ ### Data Structures
+-*   **Patches:** The method operates on image patches of size $S_{patch} \times S_{patch}$ rather than single pixels or full images. A patch $P_r$ is centered at pixel $r$.
+-*   **Normalizing Flow Model:** A pre-trained bijection $\phi$ mapping patches to $\mathbb{R}^d$ where $d = S_{patch} \cdot S_{patch} \cdot 3$, trained on a large unposed dataset (e.g., JFT-300M) [S1].
++*   **Patches:** The method operates on image patches of size $S_{patch} \times S_{patch}$ rather than single pixels or full images [S1]. A patch $P_{\mathbf{r}}$ is centered at pixel $\mathbf{r}$ [S1].
++*   **Normalizing Flow Model:** A learned bijection $\phi$ mapping patches to $\mathbb{R}^d$ where $d = S_{patch} \cdot S_{patch} \cdot 3$, trained on a large unposed dataset (e.g., JFT-300M) [S1].
+ 
+ ### Algorithm Steps
+@@ -23,18 +23,18 @@
+ 
+ 2.  **Random View Sampling:**
+-    For each training step, randomly sample unobserved viewpoints (camera poses) that are not in the input set. Render patches from these viewpoints using the current NeRF model [S1].
++    For each training step, randomly sample unobserved viewpoints (camera poses) that are not in the input set [S1]. Render patches from these viewpoints using the current NeRF model [S1].
+ 
+ 3.  **Depth Smoothness Loss ($\mathcal{L}_{ds}$):**
+-    Compute the expected depth $\hat{D}(\mathbf{r})$ for rays passing through the rendered patches. The smoothness loss encourages the world geometry to be piecewise smooth by penalizing depth differences between adjacent pixels in the patch [S1]:
+-    $$ \mathcal{L}_{ds} = \sum_{i,j} \sum_{\mathbf{r}} \left( (d(\mathbf{r}_{i,j}) - d(\mathbf{r}_{i+1,j}))^2 + (d(\mathbf{r}_{i,j}) - d(\mathbf{r}_{i,j+1}))^2 \right) $$
++    Compute the expected depth $\hat{D}(\mathbf{r})$ for rays passing through the rendered patches [S1]. The smoothness loss encourages the world geometry to be piecewise smooth by penalizing depth differences between adjacent pixels in the patch [S1]:
++    $$ \mathcal{L}_{ds} = \sum_{\mathbf{r}} \sum_{i=0}^{S_{patch}-2} \sum_{j=0}^{S_{patch}-2} \left( (d(\mathbf{r}_{i,j}) - d(\mathbf{r}_{i+1,j}))^2 + (d(\mathbf{r}_{i,j}) - d(\mathbf{r}_{i,j+1}))^2 \right) $$
+     where $d(\mathbf{r}_{i,j})$ is the expected depth of the ray through pixel $(i,j)$ of a patch of size $S_{patch}$ from a randomly sampled unobserved viewpoint [S1].
+ 
+ 4.  **Color Regularization Loss ($\mathcal{L}_{NLL}$):**
+-    Estimate the likelihood of the rendered color patches using a Normalizing Flow model. The flow model $\phi$ maps the predicted RGB patch $P_{\mathbf{r}}$ (centered at $\mathbf{r}$) to a latent space where the distribution is assumed to be Gaussian $p_z$ [S1]. The loss is the negative log-likelihood:
++    Estimate the likelihood of the rendered color patches using a Normalizing Flow model [S1]. The flow model $\phi$ maps the predicted RGB patch $P_{\mathbf{r}}$ (centered at $\mathbf{r}$) to a latent space where the distribution is assumed to be Gaussian $p_z$ [S1]. The loss is the negative log-likelihood:
+     $$ \mathcal{L}_{NLL} = - \sum_{\mathbf{r}} \log p_z(\phi(P_{\mathbf{r}})) $$
+     where $p_z$ is a Gaussian distribution [S1].
+ 
+ 5.  **Optimization:**
+-    Minimize the total loss (typically combining $\mathcal{L}_{ds}$, $\mathcal{L}_{NLL}$, and the standard photometric reconstruction loss on input views) with respect to the NeRF parameters using gradient descent [S1].
++    Minimize the total loss combining $\mathcal{L}_{ds}$ and $\mathcal{L}_{NLL}$ with respect to the NeRF parameters using gradient descent [S1].
+ 
+ ### Pseudocode
+@@ -42,56 +42,64 @@
+ ```python
+ def train_regnerf(input_images, input_poses, flow_model, num_epochs):
+-    """
+-    Trains a Mip-NeRF model with RegNeRF regularization.
+-    """
+-    nerf = MipNeRF()  # Backbone model
+-    optimizer = Adam(nerf.parameters())
+-    
+-    # Annealing parameters
+-    min_volume = get_bounding_box(input_images)
+-    max_volume = get_scene_bounds()
+-    
++    # Backbone NeRF (Mip-NeRF variant) [S1]
++    nerf = NeRF()
++    optimizer = Optimizer(nerf.parameters())  # [G] standard gradient descent optimizer
++
++    # Annealing bounds [S1]
++    min_volume = compute_bounding_box(input_poses)
++    max_volume = compute_scene_extent(input_poses)
++
+     for epoch in range(num_epochs):
+-        # 1. Sampled Space Annealing
+-        # Gradually expand sample range from min_volume to max_volume
+-        current_sample_range = lerp(min_volume, max_volume, epoch / num_epochs)
+-        
+-        for batch in dataloader(input_images, input_poses):
++        # 1. Sampled space annealing: gradually expand sample range [S1]
++        progress = epoch / num_epochs
++        current_min = lerp(min_volume, max_volume, progress)
++        current_max = max_volume
++
++        for batch in input_images:
+             optimizer.zero_grad()
+-            
+-            # 2. Render input views (standard photometric loss)
+-            rendered_colors_input = render_nerf(nerf, batch.poses, current_sample_range)
+-            loss_recon = mse_loss(rendered_colors_input, batch.images)
+-            
+-            # 3. Sample random unobserved viewpoints
++
++            # 2. Render input views for reconstruction
++            colors_input = render(nerf, batch.poses, current_min, current_max)
++            loss_recon = mean_squared_error(colors_input, batch.images)
++
++            # 3. Sample random unobserved viewpoints [S1]
+             random_poses = sample_random_poses(num_views=1)
+-            
+-            # 4. Render patches from unobserved views
+-            # Render at patch resolution to extract patches
+-            rendered_colors_random = render_nerf(nerf, random_poses, current_sample_range)
+-            patches = extract_patches(rendered_colors_random, size=S_patch)
+-            depths_random = render_depth(nerf, random_poses, current_sample_range)
+-            depth_patches = extract_patches(depths_random, size=S_patch)
+-            
+-            # 5. Compute Depth Smoothness Loss
+-            loss_ds = 0
+-            for patch_depth in depth_patches:
+-                # Compute differences between adjacent pixels in the patch
+-                diff_x = patch_depth[:, 1:, :] - patch_depth[:, :-1, :]
+-                diff_y = patch_depth[:, :, 1:] - patch_depth[:, :, :-1]
+-                loss_ds += mse_loss(diff_x, 0) + mse_loss(diff_y, 0)
+-            
+-            # 6. Compute Color Regularization Loss
+-            loss_nll = 0
+-            for patch_color in patches:
+-                # Map patch to latent space using Normalizing Flow
+-                latent = flow_model.encode(patch_color)
+-                # Compute negative log-likelihood under Gaussian prior
+-                loss_nll += -log_likelihood_gaussian(latent)
+-            
+-            # 7. Total Loss and Update
++
++            # 4. Render patches from unobserved views [S1]
++            colors_random = render(nerf, random_poses, current_min, current_max)
++            depths_random = render_depth(nerf, random_poses, current_min, current_max)
++
++            # Extract patches of size S_patch x S_patch [S1]
++            patches_color = extract_patches(colors_random, S_patch)
++            patches_depth = extract_patches(depths_random, S_patch)
++
++            # 5. Depth smoothness loss [S1]
++            loss_ds = 0.0
++            for d_patch in patches_depth:
++                diff_x = d_patch[:, 1:, :] - d_patch[:, :-1, :]
++                diff_y = d_patch[:, :, 1:] - d_patch[:, :, :-1]
++                loss_ds += mean_squared_error(diff_x, 0.0) + mean_squared_error(diff_y, 0.0)
++
++            # 6. Color regularization loss [S1]
++            loss_nll = 0.0
++            for c_patch in patches_color:
++                latent = flow_model.encode(c_patch)
++                loss_nll += negative_log_likelihood_gaussian(latent)
++
++            # 7. Total loss and update
+             total_loss = loss_recon + lambda_ds * loss_ds + lambda_nll * loss_nll
+             total_loss.backward()
+             optimizer.step()
++
++# Helper definitions
++def compute_bounding_box(poses): return min(poses.origin)
++def compute_scene_extent(poses): return max(poses.origin)
++def lerp(a, b, t): return a + (b - a) * t
++def render(nerf, poses, min_t, max_t): return [nerf.sample(p, min_t, max_t) for p in poses]
++def render_depth(nerf, poses, min_t, max_t): return [nerf.expected_depth(p, min_t, max_t) for p in poses]
++def extract_patches(tensor, size): return tensor.unfold(1, size, 1).unfold(2, size, 1).permute(0, 2, 3, 1, 4).reshape(-1, size, size, 3)
++def mean_squared_error(pred, target): return torch.mean((pred - target) ** 2)
++def negative_log_likelihood_gaussian(latent): return 0.5 * torch.sum(latent ** 2) + 0.5 * latent.shape[0] * math.log(2 * math.pi)
++def sample_random_poses(num_views): return generate_random_cameras(num_views)
+ ```
+ 
+@@ -105,10 +113,10 @@
+ *   **Divergent Modes:** Without sampled space annealing, the NeRF may converge to modes with high density at the ray origin, failing to reconstruct the scene geometry [S1].
+ *   **Sparse Views:** The method is specifically designed for sparse input views; performance on dense views may be suboptimal compared to standard NeRF due to the overhead of regularization [S1].
+-*   **Flow Model Dependency:** The color regularization relies on a pre-trained Normalizing Flow model. If the flow model is not well-calibrated for the domain, the regularization may introduce artifacts [S1].
++*   **Flow Model Training:** The color regularization relies on a Normalizing Flow model trained on a varied unposed dataset [S1]. If the flow model is not well-calibrated for the domain, the regularization may introduce artifacts [S1].
+ 
+ ## Subtopics
+ 
+ ### DiffNeRF
+-DiffNeRF is a regularization framework that uses differential geometry to improve robustness in few-shot scenarios by modifying the NeRF to represent continuous, infinitely differentiable functions [S1]. Unlike RegNeRF, which approximates gradients via finite differences on patch-based dataloaders, DiffNeRF uses automatic differentiation to compute depth gradients directly from the ray-based NeRF representation, allowing regularization of unseen views without specialized dataloader modifications [S1].
++DiffNeRF is a regularization framework for Neural Radiance Fields (NeRF) that uses differential geometry to improve robustness when training with sparse or inconsistent data [S1]. It addresses MLP overfitting and unrealistic interpolation in few-shot scenarios by modifying the NeRF to represent continuous, infinitely differentiable functions [S1].
+ 
+ ### SS-NeRF
+@@ -117,8 +125,8 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Training time is increased due to the additional loss computations (depth smoothness and flow likelihood) and the need to render from random unobserved viewpoints at each step [S1].
+-*   **Memory Complexity:** Requires storing the pre-trained Normalizing Flow model and its parameters, in addition to the NeRF model [S1].
++*   **Memory Complexity:** Requires storing the NeRF model and the Normalizing Flow model parameters [S1].
+ *   **Performance:** RegNeRF outperforms models such as PixelNeRF, SRF, and MVSNeRF under sparse view conditions on DTU and LLFF datasets [S1]. It achieves comparable performance to models that require pretraining on DTU and fine-tuning per scene, without needing such pretraining [S1].
+ *   **Strengths:** Does not require pretraining on the target dataset; effective for sparse view synthesis; improves geometric smoothness and color consistency in unobserved regions [S1].
+-*   **Limitations:** Relies on the quality of the pre-trained Normalizing Flow model; may not generalize well to domains significantly different from the flow model's training data [S1].
++*   **Limitations:** Relies on the quality of the Normalizing Flow model trained on external unposed data [S1].
+ 
+ ## Background

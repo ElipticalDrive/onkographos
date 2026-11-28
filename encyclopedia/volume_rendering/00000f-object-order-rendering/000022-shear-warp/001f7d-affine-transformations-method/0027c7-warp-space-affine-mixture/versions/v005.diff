@@ -1,0 +1,138 @@
+--- v004.md
++++ v005.md
+@@ -7,16 +7,16 @@
+ 
+ ## How it works
+-The method constructs an inverse warp field $\mathbf{W}^{-1}(\mathbf{x})$ as a spatial mixture of affine transformations.
++The method constructs an inverse warp field $\mathbf{W}^{-1}(\mathbf{x})$ as a spatial mixture of affine transformations [S1].
+ 
+ **Inputs and Outputs:**
+-- Input: A point $\mathbf{x}$ in the target (warped) space.
+-- Output: The corresponding point in the source (original) space, $\mathbf{W}^{-1}(\mathbf{x})$.
++- Input: A point $\mathbf{x}$ in the target (warped) space [S1].
++- Output: The corresponding point in the source (original) space, $\mathbf{W}^{-1}(\mathbf{x})$ [S1].
+ 
+ **Data Structures:**
+-- **Affine Parameters:** For each warp $i$, parameters $\{R_i, s_i, t_i\}$ define rotation, scaling, and translation.
+-    - $R_i$: Rotation matrix derived from a normalized quaternion vector.
+-    - $s_i$: Scaling vector.
+-    - $t_i$: Translation vector.
+-- **Weighting Volume:** A 3D voxel grid $w_i(\mathbf{x})$ representing the weight for warp $i$.
++- **Affine Parameters:** For each warp $i$, parameters $\{R_i, s_i, t_i\}$ define rotation, scaling, and translation [S1].
++    - $R_i$: Rotation matrix derived from a normalized quaternion vector [S1].
++    - $s_i$: Scaling vector [S1].
++    - $t_i$: Translation vector [S1].
++- **Weighting Volume:** A 3D voxel grid $w_i(\mathbf{x})$ representing the weight for warp $i$ [S1].
+     - Resolution: $32^3$ voxels [S1].
+     - Values: Non-negative, ensured by applying $\exp(\cdot)$ to the output of fully-connected layers [S1].
+@@ -35,14 +35,14 @@
+ 
+ **Steps:**
+-1.  **Encode:** Use an encoder to produce a latent vector $\mathbf{z}$ [S1].
+-2.  **Compute Parameters:** Use 2 fully-connected layers after encoding $\mathbf{z}$ to produce transformation parameters $\{R_i, s_i, t_i\}$ and raw weight values for each warp $i$ [S1].
+-3.  **Normalize Rotation:** Produce a rotation quaternion vector from the fully-connected layers, normalize it, and transform it into a rotation matrix $R_i$ [S1].
+-4.  **Ensure Non-Negative Weights:** Apply $\exp(\cdot)$ to the output of the fully-connected layers for the weighting volume $w_i$ to ensure non-negative weights [S1].
+-5.  **Global Warp (Optional):** Learn an additional global warp $\{R_g, s_g, t_g\}$ produced by an MLP. Apply this to $\mathbf{x}$ *before* the warping field [S1].
+-6.  **Evaluate Warp:** For a given point $\mathbf{x}$:
+-    a. Compute $\mathbf{A}_i(\mathbf{x})$ for all $i$.
+-    b. Sample $w_i(\mathbf{A}_i(\mathbf{x}))$. If $\mathbf{A}_i(\mathbf{x})$ is outside the weighting volume grid, clamp the sample to the surface value [S1].
+-    c. Compute normalized weights $a_i(\mathbf{x})$.
+-    d. Compute $\mathbf{W}^{-1}(\mathbf{x}) = \sum_i \mathbf{A}_i(\mathbf{x}) a_i(\mathbf{x})$.
++1. **Encode:** Use an encoder to produce a latent vector $\mathbf{z}$ [S1].
++2. **Compute Parameters:** Use 2 fully-connected layers after encoding $\mathbf{z}$ to produce transformation parameters $\{R_i, s_i, t_i\}$ and raw weight values for each warp $i$ [S1].
++3. **Normalize Rotation:** Produce a rotation quaternion vector from the fully-connected layers, normalize it, and transform it into a rotation matrix $R_i$ [S1].
++4. **Ensure Non-Negative Weights:** Apply $\exp(\cdot)$ to the output of the fully-connected layers for the weighting volume $w_i$ to ensure non-negative weights [S1].
++5. **Global Warp:** Learn an additional global warp $\{R_g, s_g, t_g\}$ produced by an MLP and apply it to $\mathbf{x}$ before the warping field [S1].
++6. **Evaluate Warp:** For a given point $\mathbf{x}$:
++    a. Compute $\mathbf{A}_i(\mathbf{x})$ for all $i$ [S1].
++    b. Sample $w_i(\mathbf{A}_i(\mathbf{x}))$ [S1].
++    c. Compute normalized weights $a_i(\mathbf{x})$ [S1].
++    d. Compute $\mathbf{W}^{-1}(\mathbf{x}) = \sum_i \mathbf{A}_i(\mathbf{x}) a_i(\mathbf{x})$ [S1].
+ 
+ **Parameters:**
+@@ -66,5 +66,22 @@
+     ])
+ 
+-def warp_space_affine_mixture(x, warps, weight_volumes, clamp_surface_value=0.0):
++def sample_weight_volume(grid, point, clamp_value):
++    """[G] Standard trilinear interpolation with boundary clamping."""
++    x, y, z = point
++    D, H, W = grid.shape
++    if x < 0 or x >= D or y < 0 or y >= H or z < 0 or z >= W:
++        return clamp_value
++    x0, y0, z0 = np.floor([x, y, z]).astype(int)
++    x1, y1, z1 = min(x0 + 1, D - 1), min(y0 + 1, H - 1), min(z0 + 1, W - 1)
++    dx, dy, dz = x - x0, y - y0, z - z0
++    v00 = grid[x0, y0, z0] * (1 - dx) + grid[x1, y0, z0] * dx
++    v10 = grid[x0, y1, z0] * (1 - dx) + grid[x1, y1, z0] * dx
++    v01 = grid[x0, y0, z1] * (1 - dx) + grid[x1, y0, z1] * dx
++    v11 = grid[x0, y1, z1] * (1 - dx) + grid[x1, y1, z1] * dx
++    v0 = v00 * (1 - dy) + v10 * dy
++    v1 = v01 * (1 - dy) + v11 * dy
++    return v0 * (1 - dz) + v1 * dz
++
++def warp_space_affine_mixture(x, warps, weight_volumes, global_warp_params=None, clamp_value=0.0):
+     """
+     Compute the inverse warp W^-1(x) using warp-space affine mixture.
+@@ -74,9 +91,15 @@
+         warps: List of dicts, each containing 'R' (3x3 matrix), 's' (3D vector), 't' (3D vector).
+         weight_volumes: List of 3D numpy arrays (voxel grids) for each warp's weight volume w_i.
+-        clamp_surface_value: Value to use if sample is outside weight volume bounds.
++        global_warp_params: Optional dict with 'R', 's', 't' for the global warp.
++        clamp_value: Value to use if sample is outside weight volume bounds.
+         
+     Returns:
+         The warped point W^-1(x).
+     """
++    # Apply global warp first if provided
++    if global_warp_params is not None:
++        Rg, sg, tg = global_warp_params['R'], global_warp_params['s'], global_warp_params['t']
++        x = Rg @ (sg * (x - tg))
++        
+     num_warps = len(warps)
+     result = np.zeros_like(x)
+@@ -90,17 +113,12 @@
+         
+         # Compute affine transformation A_i(x)
+-        # A_i(x) = R_i * (s_i * (x - t_i))
+         diff = x - t_i
+-        scaled = s_i * diff  # Element-wise multiplication
+-        transformed = R_i @ scaled  # Matrix-vector multiplication
++        scaled = s_i * diff
++        transformed = R_i @ scaled
+         
+         # Sample weight volume w_i at transformed point
+-        # Note: In practice, this requires trilinear interpolation and boundary clamping
+-        weight = sample_weight_volume(w_i_grid, transformed, clamp_surface_value)
++        weight = sample_weight_volume(w_i_grid, transformed, clamp_value)
+         
+-        # Accumulate weighted affine transform
+-        # Note: The formula is sum(A_i(x) * a_i(x)). 
+-        # a_i(x) = w_i(A_i(x)) / sum_j(w_j(A_j(x)))
+-        # So we accumulate A_i(x) * w_i(A_i(x)) and divide by total weight later.
++        # Accumulate weighted affine transform: sum(A_i(x) * w_i(A_i(x)))
+         result += transformed * weight
+         total_weight += weight
+@@ -110,16 +128,4 @@
+         
+     return result
+-
+-def sample_weight_volume(grid, point, clamp_value):
+-    """
+-    Sample a 3D voxel grid at a continuous point using trilinear interpolation.
+-    Clamp to clamp_value if point is outside bounds.
+-    """
+-    # Implementation details for trilinear interpolation and boundary check
+-    # This is a placeholder for the actual interpolation logic
+-    # [G] Standard trilinear interpolation is assumed here.
+-    # Check bounds: if point < 0 or point >= grid.shape, return clamp_value
+-    # Otherwise, interpolate.
+-    pass
+ ```
+ 
+@@ -137,5 +143,4 @@
+ - **Limitations:** Requires learning additional parameters for warps and weights; convolutional warps fail on certain datasets [S1].
+ - **When to use:** When modeling dynamic volumes with non-linear bending and view-dependent appearance, especially when convolutional warps fail [S1].
+-- **When not:** When computational resources are extremely limited and simple affine transforms suffice, or when the scene does not exhibit significant non-linear deformation [S1].
+ 
+ ## Background

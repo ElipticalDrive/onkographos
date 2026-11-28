@@ -1,0 +1,128 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method accelerates direct volume rendering by using a hierarchical min/max acceleration structure to skip transparent regions of the volume data [S1][S2, unofficial]. It reduces the number of samples taken per ray by jumping over blocks that contain no visible data, distinct from sibling methods that may use sparse voxel grids or hierarchical bounding box trees [S1][S2, unofficial].
++This method accelerates direct volume rendering by using a hierarchical min/max acceleration structure to skip transparent regions of the volume data [S2, unofficial]. It reduces the number of samples taken per ray by jumping over blocks that contain no visible data, distinct from sibling methods that may use sparse voxel grids or hierarchical bounding box trees [S1][S2, unofficial].
+ 
+ ## How it works
+@@ -19,44 +19,67 @@
+ 
+ **Algorithm Steps:**
+-1.  For each ray, determine the intersection with the acceleration structure grid.
+-2.  Traverse the acceleration structure cells along the ray path.
++1.  For each ray, determine the intersection with the acceleration structure grid [S2, unofficial].
++2.  Traverse the acceleration structure cells along the ray path using a 3D grid traversal algorithm [G].
+ 3.  For each cell, retrieve the stored minimum and maximum values [S2, unofficial].
+-4.  Check if the space corresponding to the cell is transparent. This is determined by comparing the min/max values against the transfer function's opacity threshold or visibility criteria [S2, unofficial].
+-5.  If the cell is transparent (i.e., contains no visible data), skip the entire $32 \times 32 \times 32$ block and advance the ray to the next cell [S2, unofficial].
++4.  Check if the space corresponding to the cell is transparent by comparing the maximum value against a visibility threshold [S2, unofficial].
++5.  If the cell is transparent, skip the entire $32 \times 32 \times 32$ block and advance the ray to the next cell boundary [S2, unofficial].
+ 6.  If the cell is not transparent, sample the source data within that block and perform standard front-to-back compositing [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def render_ray(ray_origin, ray_direction, volume_data, accel_structure):
+-    # Determine initial entry point into the acceleration structure grid
+-    t_min, t_max = intersect_accel_grid(ray_origin, ray_direction)
+-    
+-    # Traverse acceleration structure cells
+-    while t_min < t_max:
+-        # Get current cell coordinates in the 16x16x16 structure
+-        cell_coords = get_cell_coords(ray_origin, ray_direction, t_min)
+-        
+-        # Retrieve min/max values for this cell
+-        min_val, max_val = accel_structure[cell_coords]
+-        
+-        # Check if the block is transparent
+-        if is_transparent(min_val, max_val):
+-            # Skip this 32x32x32 block
+-            t_min += step_size_accel_cell(ray_direction)
+-        else:
+-            # Process the block in the source volume
+-            block_origin = get_block_origin(cell_coords)
+-            block_samples = sample_block(block_origin, ray_origin, ray_direction, volume_data)
+-            composite(block_samples)
+-            
+-            # Advance ray past this block
+-            t_min += step_size_accel_cell(ray_direction)
+-            
+-    return accumulated_color
++def render_ray(o, d, V, A, step=0.5, threshold=0.0):
++    B = 32  # Block size in voxels
++    N = 16  # Acceleration structure dimensions
++    C_acc = [0.0, 0.0, 0.0]
++    alpha_acc = 0.0
+ 
+-def is_transparent(min_val, max_val):
+-    # Implementation depends on transfer function; 
+-    # typically true if max_val < opacity_threshold
+-    return max_val < OPACITY_THRESHOLD
++    # Initialize DDA for the 16x16x16 acceleration grid
++    ix, iy, iz = int(o[0] // B), int(o[1] // B), int(o[2] // B)
++    if not (0 <= ix < N and 0 <= iy < N and 0 <= iz < N):
++        return C_acc
++
++    t_max_x = ((ix + 1) * B - o[0]) / d[0] if d[0] != 0 else float('inf')
++    t_max_y = ((iy + 1) * B - o[1]) / d[1] if d[1] != 0 else float('inf')
++    t_max_z = ((iz + 1) * B - o[2]) / d[2] if d[2] != 0 else float('inf')
++    t_delta_x = B / abs(d[0]) if d[0] != 0 else float('inf')
++    t_delta_y = B / abs(d[1]) if d[1] != 0 else float('inf')
++    t_delta_z = B / abs(d[2]) if d[2] != 0 else float('inf')
++    step_x = 1 if d[0] > 0 else -1
++    step_y = 1 if d[1] > 0 else -1
++    step_z = 1 if d[2] > 0 else -1
++
++    t_min = 0.0
++    while 0 <= ix < N and 0 <= iy < N and 0 <= iz < N:
++        t_next = min(t_max_x, t_max_y, t_max_z)
++        if t_next < t_min:
++            t_next = t_min
++
++        min_val, max_val = A[ix, iy, iz]
++        if max_val < threshold:
++            t_min = t_next
++            if t_next == t_max_x: ix += step_x; t_max_x += t_delta_x
++            if t_next == t_max_y: iy += step_y; t_max_y += t_delta_y
++            if t_next == t_max_z: iz += step_z; t_max_z += t_delta_z
++            continue
++
++        # Process volume block
++        t_sample = t_min
++        while t_sample < t_next and alpha_acc < 1.0:
++            pos = [o[0] + d[0] * t_sample, o[1] + d[1] * t_sample, o[2] + d[2] * t_sample]
++            # Standard volume lookup (e.g., trilinear interpolation or nearest-neighbor) [G]
++            c_sample, a_sample = V[pos[0]], V[pos[1]], V[pos[2]]
++            alpha_acc += a_sample * (1.0 - alpha_acc)
++            C_acc[0] += c_sample[0] * a_sample * (1.0 - alpha_acc)
++            C_acc[1] += c_sample[1] * a_sample * (1.0 - alpha_acc)
++            C_acc[2] += c_sample[2] * a_sample * (1.0 - alpha_acc)
++            t_sample += step
++            if alpha_acc >= 1.0:
++                break
++        t_min = t_next
++        if t_next == t_max_x: ix += step_x; t_max_x += t_delta_x
++        if t_next == t_max_y: iy += step_y; t_max_y += t_delta_y
++        if t_next == t_max_z: iz += step_z; t_max_z += t_delta_z
++
++    return C_acc
+ ```
+ 
+@@ -88,8 +111,8 @@
+ 
+ ## Operating characteristics
+-*   **Performance:** Accelerates visualization by 1.5-2 times compared to non-skipping methods [S2, unofficial].
+-*   **Complexity:** Time complexity is reduced proportional to the fraction of empty space skipped [S2, unofficial]. Memory complexity is dominated by the acceleration structure, which is significantly smaller than the source volume ($16^3$ vs $512^3$) [S2, unofficial].
++*   **Performance:** Accelerates visualization by 1.5–2× compared to non-skipping methods [S3, unofficial].
++*   **Complexity:** Time complexity scales with the number of non-empty cells traversed; measured speedup is 1.5–2× [S3, unofficial]. Memory complexity is dominated by the acceleration structure, which is significantly smaller than the source volume ($16^3$ vs $512^3$) [S2, unofficial].
+ *   **Strengths:** Simple to implement on GPU; effective for volumes with large transparent regions [S2, unofficial].
+-*   **Limitations:** Requires pre-computation of the acceleration structure; less effective for dense volumes [S2, unofficial].
++*   **Limitations:** Requires pre-computation of the acceleration structure [S2, unofficial].
+ 
+ ## Background
+@@ -98,3 +121,4 @@
+ ## Sources
+ [S1] Direct-volume raycasting, https://met3d.readthedocs.io/en/latest/05_developer_manual/03_actors/algorithms/direct_volume_rendering.html, fetched 2026-10-27
+-[S2] GENERAL IMPLEMENTATION ASPECTS OF THE GPU- ..., http://sv-journal.org/2011-1/02/, fetched 2026-10-30 (unofficial)+[S2] Volume Rendering, https://docslib.org/doc/4315965/volume-rendering, fetched 2026-10-28 (unofficial)
++[S3] GENERAL IMPLEMENTATION ASPECTS OF THE GPU- ..., http://sv-journal.org/2011-1/02/, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,213 @@
+# Asynchronous GPU Runtime Simulator
+
+A CPU-backed simulator of a small asynchronous GPU driver runtime. It models
+buffer handles, command submission, worker scheduling, job deadlines, result
+retrieval, fault injection, and concurrent callers without requiring a GPU API.
+
+It demonstrates control-plane concepts that also appear in CUDA, Metal, and
+other accelerator runtimes, but its kernels execute on CPU worker threads and
+its buffers are ordinary host memory. It does **not** measure or simulate real
+GPU performance.
+
+## Capabilities
+
+- Asynchronous job submission through a bounded, thread-safe queue.
+- Configurable worker pool for concurrent execution.
+- Stable opaque buffer handles with safe allocation, transfer, and invalidation.
+- Per-buffer synchronization for concurrent callers.
+- Observable job states, errors, checksum results, and runtime statistics.
+- Submission-to-completion deadlines and independent caller wait timeouts.
+- Deterministic timeout, corruption, drop, and device-reset fault injection.
+- JSON CLI, native API tests, pytest integration tests, and matrix reports.
+
+## Architecture
+
+```text
+pytest / run_matrix.py / run_case.py
+                  │
+                  │ starts a process and parses JSON
+                  ▼
+          gpu_runtime_cli
+                  │
+                  │ public C API
+                  ▼
+          gpu_runtime.cpp
+       lifecycle + API validation
+                  │
+        ┌─────────┼───────────┐
+        ▼         ▼           ▼
+   scheduler   buffers      faults
+  queue/map    handle map   seeded RNG
+  workers      shared data  reset/drop/etc.
+        │         │
+        └────┬────┘
+             ▼
+           kernels
+    FILL / ADD / CHECKSUM / SLOW
+             │
+             ▼
+      job result + statistics
+```
+
+`gpu_runtime_demo` calls the same C API directly and prints every stage. The
+Python layer never reaches into C++ memory; it treats the JSON CLI as a stable
+process boundary.
+
+## Execution flow
+
+1. `gpu_init` validates configuration, seeds fault injection, initializes the
+   buffer registry, and starts the worker pool.
+2. `gpu_alloc` creates a zero-initialized buffer and returns an opaque handle.
+3. `gpu_write_buffer` uploads input bytes into the simulated device buffer.
+4. `gpu_submit` validates the kernel request, creates a reference-counted job,
+   stores it in the result map, and pushes it into the bounded queue.
+5. A worker changes the job from `QUEUED` to `RUNNING`.
+6. The worker evaluates reset, drop, deadline, and timeout-injection conditions.
+7. It acquires the target buffer, rechecks validity and bounds, executes the CPU
+   kernel, and records a terminal result.
+8. `gpu_wait` waits for a terminal state; `gpu_get_job_result` exposes state,
+   error, and checksum separately.
+9. `gpu_read_buffer` downloads output bytes so callers can verify computation.
+10. `gpu_release_job` removes completed result history. `gpu_free` invalidates a
+    buffer without freeing memory still owned by a worker.
+11. `gpu_shutdown` stops new submissions, drains queued work, joins all workers,
+    and releases remaining jobs and buffers.
+
+## Ownership and synchronization
+
+| Resource | Owner | Synchronization rule |
+|---|---|---|
+| Runtime lifecycle | Process-wide singleton | Shared lifecycle lock for API calls; exclusive lock for init/shutdown |
+| Job queue | Scheduler | Mutex + condition variable |
+| Job objects | Queue, result map, or worker through `shared_ptr` | Per-job mutex protects state/error/checksum |
+| Buffer registry | Buffer manager | Registry mutex maps stable handles to `shared_ptr` records |
+| Buffer contents | Buffer record | Per-buffer mutex serializes kernels, reads, writes, free, and reset |
+| Statistics | Scheduler | Atomic counters |
+| Fault configuration | Fault module | Configuration mutex |
+| Random generator | Fault module | RNG mutex; seed makes the random sequence reproducible |
+| Last API error | Calling thread | Thread-local storage |
+
+Jobs operating on different buffers can execute concurrently. Jobs targeting
+the same buffer are serialized, preventing C++ data races and lost updates.
+
+## Kernel behavior
+
+| Kernel | Operation | Validation | Result |
+|---|---|---|---|
+| `FILL` | Fill `size` bytes with `pattern` | One valid buffer; nonzero in-bounds size | Data read through `gpu_read_buffer` |
+| `ADD` | Add `add_const` to each native-endian `uint32_t` value | One valid buffer; size divisible by four | Data read through `gpu_read_buffer` |
+| `CHECKSUM` | Sum input bytes modulo 2^32 | One valid buffer; nonzero in-bounds size | `gpu_job_result_t.checksum` |
+| `SLOW` | Sleep to model a long-running command | Nonzero `slow_ms`; no buffers | Completion or timeout result |
+
+All kernels currently use one buffer. The submission structure retains an array
+of handles so multi-buffer kernels can be added later without replacing the job
+representation.
+
+## Timeout semantics
+
+There are two intentionally separate timeouts:
+
+- `gpu_job_params_t.timeout_ms` is the job deadline measured from submission.
+  It covers time spent in the queue and execution of `SLOW`. A value of zero
+  disables the job deadline.
+- `gpu_wait(job, timeout_ms)` limits how long that caller waits. A wait timeout
+  does not modify or cancel the job.
+
+When a job reaches its own deadline it ends as `JOB_STATE_TIMED_OUT` with
+`GPU_ERROR_TIMEOUT`. `gpu_wait` returns `GPU_SUCCESS` once any terminal state is
+observable; callers then use `gpu_get_job_result` to distinguish successful,
+failed, and timed-out execution.
+
+The fast data kernels recheck the deadline immediately before and after their
+operation. They are not preempted in the middle of a CPU loop. `SLOW` uses its
+deadline to stop waiting early.
+
+## Fault injection
+
+Fault injection is configured during initialization or through
+`gpu_set_fault_config`. Each dequeued job evaluates faults in this order:
+
+1. Periodic device reset.
+2. Random job drop.
+3. Natural submission deadline.
+4. Random forced timeout.
+5. Kernel execution and possible output corruption.
+
+| Fault | Observable behavior |
+|---|---|
+| Timeout | Job becomes `TIMED_OUT` with `GPU_ERROR_TIMEOUT` |
+| Drop | Job becomes `FAILED` with `GPU_ERROR_DEVICE_ERROR` |
+| Corruption | Job completes, but downloaded data or checksum differs |
+| Device reset | All current buffer handles are invalidated; the reset job and affected later work fail |
+
+Probabilities must be in `[0.0, 1.0]`. A fixed seed produces a fixed sequence of
+random decisions when execution order is controlled, such as a one-worker test.
+
+## Public API
+
+The API is declared in `runtime/include/gpu_runtime.h` and has C linkage.
+
+```c
+// Lifecycle
+gpu_error_code_t gpu_init(const gpu_config_t* config);
+gpu_error_code_t gpu_shutdown(void);
+
+// Buffer allocation and observable data transfer
+gpu_error_code_t gpu_alloc(uint32_t size, gpu_buffer_handle_t* handle);
+gpu_error_code_t gpu_free(gpu_buffer_handle_t handle);
+gpu_error_code_t gpu_write_buffer(gpu_buffer_handle_t handle, uint32_t offset,
+                                  const void* data, uint32_t size);
+gpu_error_code_t gpu_read_buffer(gpu_buffer_handle_t handle, uint32_t offset,
+                                 void* data, uint32_t size);
+
+// Asynchronous jobs
+gpu_error_code_t gpu_submit(const gpu_job_params_t* params,
+                            gpu_job_id_t* job_id);
+gpu_error_code_t gpu_wait(gpu_job_id_t job_id, uint32_t timeout_ms);
+gpu_error_code_t gpu_get_job_status(gpu_job_id_t job_id, job_state_t* state);
+gpu_error_code_t gpu_get_job_result(gpu_job_id_t job_id,
+                                    gpu_job_result_t* result);
+gpu_error_code_t gpu_release_job(gpu_job_id_t job_id);
+
+// Runtime configuration and statistics
+gpu_error_code_t gpu_set_fault_config(const gpu_fault_config_t* config);
+gpu_error_code_t gpu_set_log_level(log_level_t level);
+gpu_error_code_t gpu_get_stats(gpu_stats_t* stats);
+gpu_error_code_t gpu_reset_stats(void);
+```
+
+Completed jobs remain queryable until `gpu_release_job` or shutdown. This makes
+result lifetime explicit and prevents an unbounded result map in long-running
+callers that release their jobs.
+
+## Build
+
+Requirements:
+
+- CMake 3.13 or newer
+- A C++17 compiler
+- A platform supported by CMake's `Threads` package
+- Python 3.9 or newer for the current pytest toolchain
+
+```bash
+cmake -S . -B build
+cmake --build build -j
+```
+
+Build outputs:
+
+- `build/libgpu_runtime.a`
+- `build/gpu_runtime_cli`
+- `build/gpu_runtime_demo`
+- `build/gpu_runtime_api_tests` when `BUILD_TESTING=ON` (the default)
+
+Run the educational demo:
+
+```bash
+./build/gpu_runtime_demo
+```
+
+The demo uploads and downloads data, verifies FILL and ADD, retrieves a
+checksum, and demonstrates a running job reaching its deadline.
+
+## Testing

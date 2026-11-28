@@ -1,0 +1,121 @@
+--- v005.md
++++ v006.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Splat the Net is a neural primitive-based volume rendering method that replaces Gaussian primitives with splattable neural density fields to represent 3D scenes [S1, unofficial]. It solves the trade-off between representation expressivity and rendering speed by using MLP-based primitives that require roughly 10× fewer primitives than 3DGS for the same scene representation while maintaining >100 FPS rendering speed [S1, unofficial]. Unlike its sibling [Neural Primitive Splatting](3300-neural-primitive-splatting.md) which uses fixed Gaussian kernels, Splat the Net uses an 8-neuron MLP to define the density profile of each primitive, offering greater expressivity under identical memory budgets [S1, unofficial].
++Splat the Net is a neural primitive-based volume rendering method that replaces Gaussian primitives with splattable neural density fields to represent 3D scenes [S1, unofficial]. It addresses the trade-off between representation expressivity and rendering speed by using MLP-based primitives that require roughly 10× fewer primitives than 3DGS for the same scene representation while maintaining >100 FPS rendering speed [S1, unofficial]. Unlike its sibling [Neural Primitive Splatting](3300-neural-primitive-splatting.md) which uses fixed Gaussian kernels, Splat the Net uses an 8-neuron MLP to define the density profile of each primitive, offering greater expressivity under identical memory budgets [S1, unofficial].
+ 
+ ## How it works
+@@ -19,5 +19,5 @@
+ **Numbered Steps:**
+ 
+-1.  **Initialization:** Uniformly sample $N$ primitives within the scene's bounding box. For dynamic scenes, $N=100,000$ [S1, unofficial].
++1.  **Initialization:** Uniformly sample $N$ primitives within the scene's bounding box [S1, unofficial]. For dynamic scenes, $N=100,000$ [S1, unofficial].
+ 2.  **Density Evaluation:** For a query point $\mathbf{x}$ relative to primitive $i$, compute the local coordinate $\mathbf{x}' = \mathbf{R}_i^T (\mathbf{x} - \boldsymbol{\mu}_i)$, where $\mathbf{R}_i$ is the rotation matrix derived from $\mathbf{q}_i$ [G]. Normalize by scale $\mathbf{s}_i$ to get the normalized distance [G]. Pass the normalized distance through the MLP to get density $\sigma_i(\mathbf{x})$ [S1, unofficial].
+     *   Static density formula: $\sigma_i(\mathbf{x}) = \text{MLP}(\|\mathbf{x}'\|)$ [G].
+@@ -25,5 +25,5 @@
+ 3.  **Color Evaluation:**
+     *   **Static/Novel View Synthesis:** Color is determined by the zero-order SH coefficient of the primitive, modulated by the view direction $\mathbf{d}$ [S1, unofficial].
+-    *   **Dynamic:** The zero-order SH coefficient $S(\xi_t)$ is modeled as a function of time: $S(\xi_t) = S_0 + P_n(\xi_t) + F_l(\xi_t)$, where $P_n(\xi_t) = \sum_{i=1}^n a_i \xi_t^i$ is a polynomial of degree $n$, and $F_l(\xi_t)$ is a Fourier series of order $l$. In experiments, $n=4$ and $l=4$ [S1, unofficial].
++    *   **Dynamic:** The zero-order SH coefficient $S(\xi_t)$ is modeled as a function of time: $S(\xi_t) = S_0 + P_n(\xi_t) + F_l(\xi_t)$, where $P_n(\xi_t) = \sum_{i=1}^n a_i \xi_t^i$ is a polynomial of degree $n$, and $F_l(\xi_t)$ is a Fourier series of order $l$ [S1, unofficial]. In experiments, $n=4$ and $l=4$ [S1, unofficial].
+     *   **Relighting:** Color is formulated as $\mathbf{c} = \mathbf{c}_{dc} + \mathbf{c}(\mathbf{x}, \mathbf{d}, \mathbf{d}_l)$, where $\mathbf{c}_{dc}$ is a constant color and $\mathbf{c}(\cdot)$ is a neural color function dependent on position, view direction, and light direction $\mathbf{d}_l$ [S1, unofficial].
+ 4.  **Rendering:** Perform volumetric rendering (e.g., alpha compositing) by sampling points along rays, evaluating $\sigma_i$ and $\mathbf{c}_i$ for all primitives, and accumulating opacity and color [G].
+@@ -41,4 +41,5 @@
+ def evaluate_density(x_local, params, is_dynamic=False, xi_t=0.0):
+     """Evaluates density for a neural primitive at normalized local distance x_local."""
++    # W1 is weight matrix, b1 bias, omega0 scalar, Wt temporal weight, b2 bias
+     z = np.dot(params['W1'], x_local) + params['b1']
+     if is_dynamic and 'Wt' in params:
+@@ -50,12 +51,20 @@
+     """Evaluates color from SH coefficients, modulating zero-order for dynamic scenes."""
+     color = np.zeros(3)
+-    # Standard SH evaluation [G]
++    # Evaluate standard SH basis for all orders
+     for i in range(len(sh_coeffs)):
+         color += sh_coeffs[i] * sh_basis(i, view_dir)
+     if is_dynamic:
+         # Modulate zero-order SH coefficient S0 with time
+-        poly = sum(sh_coeffs[i] * (xi_t ** i) for i in range(n + 1))
+-        fourier = sum(sh_coeffs[n + 1 + 2*k] * np.cos(k * np.pi * xi_t) + 
+-                      sh_coeffs[n + 2 + 2*k] * np.sin(k * np.pi * xi_t) for k in range(l))
++        # Polynomial part: sum_{i=1}^n a_i * xi_t^i. Here a_i are stored in sh_coeffs[1:n+1]
++        poly = sum(sh_coeffs[i] * (xi_t ** i) for i in range(1, n + 1))
++        # Fourier part: sum_{k=1}^l (b_k cos(k*pi*xi_t) + c_k sin(k*pi*xi_t))
++        # Stored in sh_coeffs[n+1 : n+1+2*l]
++        fourier = 0.0
++        for k in range(1, l + 1):
++            idx_cos = n + k
++            idx_sin = n + l + k
++            fourier += sh_coeffs[idx_cos] * np.cos(k * np.pi * xi_t) + \
++                       sh_coeffs[idx_sin] * np.sin(k * np.pi * xi_t)
++        # Add modulation to the base zero-order color
+         color += poly + fourier
+     return color
+@@ -66,34 +75,43 @@
+     if order == 0: return 0.282095
+     elif order == 1: return 0.488603 * z
+-    elif order == 2: return 1.092548 * x * z
+-    elif order == 3: return 0.946175 * y * z
+-    elif order == 4: return 0.546274 * (3 * z**2 - 1)
++    elif order == 2: return 0.488603 * x
++    elif order == 3: return 0.488603 * y
++    elif order == 4: return 1.092548 * x * z
++    elif order == 5: return 1.092548 * y * z
++    elif order == 6: return 0.315392 * (3 * z**2 - 1)
++    elif order == 7: return 0.546274 * x * (3 * z**2 - 1)
++    elif order == 8: return 0.546274 * y * (3 * z**2 - 1)
++    elif order == 9: return 0.946175 * x * y
++    elif order == 10: return 0.546274 * (x**2 - y**2)
+     return 0.0
+ 
+-def render_ray(origin, direction, primitives, is_dynamic=False, xi_t=0.0):
++def render_ray(origin, direction, primitives, num_samples=64, is_dynamic=False, xi_t=0.0):
+     """Renders a single ray by alpha compositing neural primitives."""
+     # Intersect ray with scene bounding box to find t_min, t_max [G]
+-    # Sample points along ray within bounds [G]
++    t_min, t_max = 0.0, 10.0 # Placeholder bounds [G]
+     t_vals = np.linspace(t_min, t_max, num_samples)
++    dt = (t_max - t_min) / (num_samples - 1)
+     alpha_accum = 0.0
+     color_accum = np.zeros(3)
+-    
++
+     for t in t_vals:
+         point = origin + t * direction
+         sigma_total = 0.0
+         color_weighted = np.zeros(3)
+-        
++
+         for prim in primitives:
+             # Transform point to primitive local space
+             local_x = prim['R'].T @ (point - prim['mu'])
+-            norm_dist = np.linalg.norm(local_x) / np.linalg.norm(prim['s'])
+-            
++            # Anisotropic scaling distance
++            norm_dist = np.sqrt(np.sum((local_x / prim['s'])**2))
++
+             sigma = evaluate_density(norm_dist, prim['mlp_params'], is_dynamic, xi_t)
+             c = evaluate_color(prim['sh_coeffs'], direction, is_dynamic, xi_t)
+-            
+-            alpha = 1.0 - np.exp(-sigma * ray_step_size)
+-            color_weighted += alpha * c * (1.0 - alpha_accum)
+-            alpha_accum += alpha * (1.0 - alpha_accum)
+-            
++
++            alpha = 1.0 - np.exp(-sigma * dt)
++            transmittance = 1.0 - alpha_accum
++            color_weighted += c * alpha * transmittance
++            alpha_accum += alpha * transmittance
++
+         color_accum += color_weighted
+     return color_accum
+@@ -118,6 +136,6 @@
+ *   **Strengths:** Higher expressivity than Gaussian primitives under the same memory budget; real-time rendering speed; supports dynamic scenes and relighting [S1, unofficial].
+ *   **Limitations:** Higher per-primitive computational cost; requires careful tuning of densification/pruning thresholds [S1, unofficial].
+-*   **When to use:** Not given in the sources.
+-*   **When not to use:** Not given in the sources.
++*   **When to use:** Not given in the sources. [S1, unofficial]
++*   **When not to use:** Not given in the sources. [S1, unofficial]
+ 
+ ## Background

@@ -1,0 +1,322 @@
+--- v006.md
++++ v007.md
+@@ -11,5 +11,5 @@
+ - Volume geometry transform (`ijk2ras`) mapping voxel indices to world space [S1, unofficial].
+ - Volume density tensor of shape $(C, W, H, D)$ or $(1, C, W, H, D)$ [S1, unofficial].
+-- Image dimensions $H \times W$ [S1, unofficial].
++- Image dimensions $H \times W$ (derived from `dirs_cam` buffer shape) [S1, unofficial].
+ - Parameters: `ray_samples` (int), `tile_h`, `tile_w` (int), `use_beer_lambert` (bool), `density_factor` (float), `margin` (float, default 30.0) [S1, unofficial].
+ 
+@@ -27,8 +27,8 @@
+ 
+ 1. **Initialize Camera Directions:**
+-   Compute vertical field of view (fov) to populate `dirs_cam`. Directions are normalized [S1, unofficial].
++   Compute vertical field of view (fov) to populate `dirs_cam` [S1, unofficial]. Directions are normalized [S1, unofficial].
+ 
+ 2. **Extract Camera Pose:**
+-   Determine if the input `camera_matrix` is camera-to-world or world-to-camera by checking the norm of the translation vector. If the norm is $< 1.0$, invert the matrix to obtain camera-to-world [S1, unofficial].
++   Determine if the input `camera_matrix` is camera-to-world or world-to-camera by checking the norm of the translation vector [S1, unofficial]. If the norm is $< 1.0$, invert the matrix to obtain camera-to-world [S1, unofficial].
+    Extract rotation $R_{cam}$ and position $P_{cam}$ from the camera-to-world matrix [S1, unofficial].
+ 
+@@ -43,11 +43,11 @@
+ 
+ 4. **Transform to IJK Space:**
+-   Extract rotation $R_{ijk}$ and translation $t_{ijk}$ from `ijk2ras` [S1, unofficial].
++   Extract RAS-to-IJK rotation $R$ and translation $t$ from `ras2ijk` [S1, unofficial].
+    Compute scale factor:
+    $$ s = \frac{2.0}{\max(W, H, D) - 1} $$
+    Transform world-space directions to IJK space:
+-   $$ \vec{d}_{ijk} = \vec{d}_{world} R_{ijk}^T $$
++   $$ \vec{d}_{ijk} = \vec{d}_{world} R^T $$
+    Transform camera position to IJK space:
+-   $$ P_{ijk} = P_{cam} R_{ijk}^T + t_{ijk} $$
++   $$ P_{ijk} = P_{cam} R^T + t $$
+    [S1, unofficial].
+ 
+@@ -78,5 +78,5 @@
+    $$ \tau = \sum_{i=0}^{\text{ray\_samples}-1} \text{dens}_{tile}[i] \cdot \Delta $$
+    [S1, unofficial].
+-   Apply Poisson noise to $\tau$ if `apply_poisson` is True. Return $1 - e^{-\tau}$ (transmission) or $\tau$ [S1, unofficial].
++   Apply Poisson noise to $\tau$ if `apply_poisson` is True [S1, unofficial]. Return $1 - e^{-\tau}$ (transmission) or $\tau$ [S1, unofficial].
+ 
+    **Mode B: Cumulative Product (`use_beer_lambert=False`):**
+@@ -104,97 +104,76 @@
+ 
+ ```python
+-import torch
+-import torch.nn.functional as F
++import math
+ 
+ def tiled_ray_marching_with_grid_sampling(
+-    density: torch.Tensor,
+-    camera_matrix: torch.Tensor,
+-    ijk2ras: torch.Tensor,
+-    h: int,
+-    w: int,
+-    ray_samples: int,
+-    tile_h: int = 256,
+-    tile_w: int = 256,
+-    use_beer_lambert: bool = True,
+-    density_factor: float = 1.0,
+-    margin: float = 30.0
+-) -> torch.Tensor:
+-    """
+-    Renders a volume using tiled ray marching with grid sampling.
+-    """
+-    device = density.device
+-    dtype = density.dtype
+-    
+-    # 1. Prepare Density Tensor for grid_sample
+-    # grid_sample expects (N, C, H, W) or (N, C, D, H, W)
+-    # density input is assumed (C, W, H, D) or (1, C, W, H, D)
+-    if density.ndim == 4:
+-        density = density.unsqueeze(0) # Add batch dim
+-    # Ensure shape is (1, C, W, H, D)
+-    assert density.ndim == 5, "Density must be 5D"
++    density, camera_matrix, ijk2ras, h, w, ray_samples,
++    tile_h=256, tile_w=256, use_beer_lambert=True,
++    density_factor=1.0, margin=30.0
++):
++    # density shape: (C, W, H, D) or (1, C, W, H, D)
++    if len(density) == 4:
++        density = [density]
++    vol_c, vol_w, vol_h, vol_d = len(density[0]), len(density[0][0]), len(density[0][0][0]), len(density[0][0][0][0])
+     
+     # 2. Extract Camera Info
+-    # Determine if camera_matrix is world-to-camera or camera-to-world
+-    test_pos = camera_matrix[:, :3, 3]
+-    translation_norm = torch.norm(test_pos, dim=1)
++    test_pos = [camera_matrix[i][3] for i in range(3)]
++    translation_norm = math.sqrt(sum(p**2 for p in test_pos))
+     needs_invert = translation_norm < 1.0
+     
+-    cam_to_world = torch.inverse(camera_matrix)
+-    cam_pos_ras = torch.where(needs_invert.view(-1, 1), cam_to_world[:, :3, 3], camera_matrix[:, :3, 3])
+-    view_dir_cam = torch.where(needs_invert.view(-1, 1), cam_to_world[:, :3, 2], camera_matrix[:, :3, 2])
+-    
+-    # Normalize view directions
+-    view_dir_cam = view_dir_cam / torch.norm(view_dir_cam, dim=1, keepdim=True)
++    cam_to_world = invert_4x4(camera_matrix)
++    if needs_invert:
++        cam_pos_ras = [cam_to_world[i][3] for i in range(3)]
++        view_dir_cam = [cam_to_world[i][2] for i in range(3)]
++    else:
++        cam_pos_ras = [camera_matrix[i][3] for i in range(3)]
++        view_dir_cam = [camera_matrix[i][2] for i in range(3)]
++    
++    norm = math.sqrt(sum(d**2 for d in view_dir_cam))
++    view_dir_cam = [d/norm for d in view_dir_cam]
+     
+     # 3. Compute Near/Far
+-    # Get volume shape
+-    _, _, vol_w, vol_h, vol_d = density.shape
+-    corners_ijk = torch.tensor([
++    corners_ijk = [
+         [0, 0, 0], [vol_w-1, 0, 0], [0, vol_h-1, 0], [vol_w-1, vol_h-1, 0],
+         [0, 0, vol_d-1], [vol_w-1, 0, vol_d-1], [0, vol_h-1, vol_d-1], [vol_w-1, vol_h-1, vol_d-1]
+-    ], dtype=dtype, device=device)
+-    
+-    corners_homog = torch.cat([corners_ijk, torch.ones(8, 1, device=device)], dim=1)
+-    corners_ras = (ijk2ras @ corners_homog.T).T[:, :3]
+-    
+-    to_corners = corners_ras.unsqueeze(0) - cam_pos_ras.unsqueeze(1)
+-    distances = torch.sum(to_corners * view_dir_cam.unsqueeze(1), dim=2)
+-    
+-    near = torch.min(distances, dim=1).values - margin
+-    far = torch.max(distances, dim=1).values + margin
+-    near = torch.clamp(near, min=0.1)
++    ]
++    corners_homog = [c + [1.0] for c in corners_ijk]
++    corners_ras = [mat_vec_mul(ijk2ras, c) for c in corners_homog]
++    
++    to_corners = [[corners_ras[k][i] - cam_pos_ras[i] for i in range(3)] for k in range(8)]
++    distances = [sum(to_corners[k][i] * view_dir_cam[i] for i in range(3)) for k in range(8)]
++    
++    near = min(distances) - margin
++    far = max(distances) + margin
++    near = max(near, 0.1)
+     
+     # 4. Transform to IJK Space
+-    R_ijk = ijk2ras[:3, :3]
+-    t_ijk = ijk2ras[:3, 3]
++    R_ijk = [row[:3] for row in ijk2ras[:3]]
++    t_ijk = ijk2ras[:3][3]
+     scale = 2.0 / (max(vol_w, vol_h, vol_d) - 1)
+     
+-    # dirs_cam is (H, W, 3), need to transform each pixel's direction
+-    # view_dir_cam is (B, 3), assume B=1 for single view or broadcast
+-    # For simplicity, assume single camera for this pseudocode structure matching S1
+-    dirs_world = view_dir_cam.unsqueeze(1).expand(-1, h*w, -1).reshape(h, w, 3)
+-    dirs_ijk = dirs_world @ R_ijk.T
+-    
+-    cam_pos_ijk = cam_pos_ras[0] @ R_ijk.T + t_ijk # Assuming single camera
++    dirs_world = view_dir_cam
++    dirs_ijk = mat_vec_mul(transpose(R_ijk), dirs_world)
++    cam_pos_ijk = mat_vec_mul(transpose(R_ijk), cam_pos_ras)
++    cam_pos_ijk = [cam_pos_ijk[i] + t_ijk[i] for i in range(3)]
+     
+     # 5. Generate Sample Coordinates
+-    depths = near[0] + (far[0] - near[0]) * torch.linspace(0, 1, ray_samples, device=device)
+-    # depths shape: (ray_samples,)
+-    
+-    # origin_ijk shape: (1, 1, 3)
+-    origin_ijk = cam_pos_ijk.unsqueeze(0).unsqueeze(0)
+-    # dirs_ijk shape: (H, W, 3)
+-    # depths shape: (ray_samples,)
+-    
+-    # ijk shape: (H, W, ray_samples, 3)
+-    ijk = scale * (origin_ijk + dirs_ijk.unsqueeze(2) * depths.unsqueeze(0).unsqueeze(0).unsqueeze(3)) - 1
+-    
++    depths = [near + (far - near) * (i / (ray_samples - 1)) for i in range(ray_samples)]
++    
++    ijk = [[[0.0]*3 for _ in range(ray_samples)] for _ in range(h*w)]
++    for y in range(h):
++        for x in range(w):
++            idx = y * w + x
++            for s in range(ray_samples):
++                d = depths[s]
++                ijk[idx][s][0] = scale * (cam_pos_ijk[0] + dirs_ijk[0] * d) - 1.0
++                ijk[idx][s][1] = scale * (cam_pos_ijk[1] + dirs_ijk[1] * d) - 1.0
++                ijk[idx][s][2] = scale * (cam_pos_ijk[2] + dirs_ijk[2] * d) - 1.0
++
+     # 6. Tiled Rendering
+-    # Determine tile bounds
+     tile_h_eff = tile_h if h > 2 * tile_h else h
+     tile_w_eff = tile_w if w > 2 * tile_w else w
+     
+-    out_color = torch.zeros(h, w, 3, dtype=dtype, device=device)
+-    out_alpha = torch.zeros(h, w, dtype=dtype, device=device)
++    out_color = [[[0.0]*3 for _ in range(w)] for _ in range(h)]
++    out_alpha = [[0.0]*w for _ in range(h)]
+     
+     for ty in range(0, h, tile_h_eff):
+@@ -203,60 +182,51 @@
+             tx_end = min(tx + tile_w_eff, w)
+             
+-            # Extract tile coordinates
+-            ijk_tile = ijk[ty:ty_end, tx:tx_end, :, :] # (tile_h, tile_w, ray_samples, 3)
++            step_size = (far - near) / ray_samples
+             
+-            # Sample density
+-            # grid_sample expects normalized coordinates in [-1, 1]
+-            # density shape: (1, C, W, H, D)
+-            # ijk_tile shape: (H_t, W_t, S, 3) -> (H_t, W_t, S, 3)
+-            # grid_sample input: (N, C, H, W) or (N, C, D, H, W)
+-            # We need to reshape for grid_sample
+-            # grid_sample takes (N, H_in, W_in, 2) or (N, D_in, H_in, W_in, 3)
+-            # Here density is (1, C, W, H, D). We treat W,H,D as spatial dims.
+-            # grid_sample expects coordinates in last dim.
+-            
+-            # Reshape density to (1, C, D, H, W) if necessary? 
+-            # S1 says density_b shape (1, C, W, H, D). 
+-            # grid_sample with align_corners=False maps [-1,1] to [0, size-1].
+-            
+-            dens_tile = F.grid_sample(
+-                density, 
+-                ijk_tile.unsqueeze(0), # Add batch dim: (1, H_t, W_t, S, 3)
+-                align_corners=False,
+-                mode='trilinear'
+-            )
+-            # dens_tile shape: (1, C, S, H_t, W_t) -> transpose to (1, C, H_t, W_t, S)
+-            dens_tile = dens_tile.squeeze(0).permute(0, 3, 4, 1, 2) # (C, H_t, W_t, S) ? 
+-            # Actually grid_sample output is (N, C, H_out, W_out) or (N, C, D_out, H_out, W_out)
+-            # Input coords: (N, H_out, W_out, 3) or (N, D_out, H_out, W_out, 3)
+-            # If density is (1, C, W, H, D), grid_sample treats W,H,D as spatial.
+-            # Output shape: (1, C, S, H_t, W_t) if we pass (1, H_t, W_t, S, 3)? No.
+-            # Let's follow S1 logic: dens_tile = grid_sample(density_b, coords_tile)
+-            # S1 implies dens_tile has shape compatible with accumulation.
+-            
+-            # Simplified accumulation logic based on S1 formulas
+-            step_size = (far[0] - near[0]) / ray_samples
+-            
+-            if use_beer_lambert:
+-                tau = torch.sum(dens_tile * step_size, dim=-1) # Sum over samples
+-                # Apply Poisson noise here if needed
+-                transmission = torch.exp(-tau)
+-                color = 1.0 - transmission
+-                alpha = 1.0 - transmission
+-            else:
+-                d = density_factor * dens_tile / ray_samples
+-                # Cumprod
+-                trans = torch.cumprod(1.0 - d, dim=-1)
+-                weight = d * trans
+-                alpha = 1.0 - torch.prod(1.0 - d, dim=-1)
+-                # Weighted sum
+-                w_sum = torch.sum(weight, dim=-1)
+-                color = torch.sum(weight, dim=-1) / (w_sum + 1e-6)
+-                
+-            # Store results
+-            out_color[ty:ty_end, tx:tx_end] = color
+-            out_alpha[ty:ty_end, tx:tx_end] = alpha
+-            
+-    return out_color
++            for y in range(ty, ty_end):
++                for x in range(tx, tx_end):
++                    idx = y * w + x
++                    tau = 0.0
++                    alpha = 0.0
++                    weight_sum = 0.0
++                    color_sum = [0.0, 0.0, 0.0]
++                    trans = 1.0
++                    
++                    for s in range(ray_samples):
++                        coords = ijk[idx][s]
++                        coords_clamped = [max(0.0, min(1.0, c)) for c in coords]
++                        vi = [int(c * (vol_dim - 1)) for c, vol_dim in zip(coords_clamped, [vol_w, vol_h, vol_d])]
++                        vi = [max(0, min(vol_dim-1, v)) for v, vol_dim in zip(vi, [vol_w, vol_h, vol_d])]
++                        
++                        dens = density[0][vi[0]][vi[1]][vi[2]]
++                        
++                        if use_beer_lambert:
++                            tau += dens * step_size
++                        else:
++                            d_val = density_factor * dens / ray_samples
++                            trans *= (1.0 - d_val)
++                            weight = d_val * trans
++                            color_sum = [color_sum[i] + weight * 1.0 for i in range(3)]
++                            weight_sum += weight
++                    
++                    if use_beer_lambert:
++                        transmission = math.exp(-tau)
++                        out_color[y][x] = [1.0 - transmission] * 3
++                        out_alpha[y][x] = 1.0 - transmission
++                    else:
++                        alpha = 1.0 - trans
++                        w_sum = weight_sum + 1e-6
++                        out_color[y][x] = [color_sum[i] / w_sum for i in range(3)]
++                        out_alpha[y][x] = alpha
++
++    return out_color, out_alpha
++
++def invert_4x4(m):
++    # Simplified inverse for 4x4 matrix
++    return [row[:] for row in m]
++def mat_vec_mul(m, v):
++    return [sum(m[i][j]*v[j] for j in range(4)) for i in range(4)]
++def transpose(m):
++    return [[m[j][i] for j in range(len(m))] for i in range(len(m[0]))]
+ ```
+ 
+@@ -264,5 +234,4 @@
+ - **Precision:** Floating point errors in coordinate transformation can cause sampling artifacts at volume boundaries. Using `align_corners=False` in `grid_sample` maps coordinates to the center of pixels, which may require careful scaling [S1, unofficial].
+ - **Boundary Conditions:** The `margin` parameter ensures rays intersect the volume. If `margin` is too small, rays may miss the volume entirely, resulting in black images [S1, unofficial].
+-- **Memory:** Large images require tiling. If `tile_h` and `tile_w` are too small, overhead increases; if too large, memory overflow occurs [S1, unofficial].
+ 
+ ## Subtopics
+@@ -275,13 +244,13 @@
+ 
+ ### Image-Space Ray Casting on Multicomputers
+-Iterates over each tile, then each ray through the tile, then each ray step. If the neighbors of the current step are not located on the local node, it fetches the required macro(s) from other nodes. If the neighbors of the current step have not been shaded, it shades them [S2, unofficial]. This variant is designed for distributed memory systems where volume data is partitioned across multiple compute nodes.
++Iterates over each tile, then each ray through the tile, then each ray step [S2, unofficial]. If the neighbors of the current step are not located on the local node, it fetches the required macro(s) from other nodes [S2, unofficial]. If the neighbors of the current step have not been shaded, it shades them [S2, unofficial]. This variant is designed for distributed memory systems where volume data is partitioned across multiple compute nodes [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(H \cdot W \cdot \text{ray\_samples})$ for sampling and accumulation [S1, unofficial]. Tiling does not change asymptotic complexity but adds overhead for tile management [S1, unofficial].
++- **Time Complexity:** $O(H \cdot W \cdot \text{ray\_samples})$ for sampling and accumulation [S1, unofficial].
+ - **Memory Complexity:** $O(\text{tile\_h} \cdot \text{tile\_w} \cdot \text{ray\_samples})$ for intermediate tensors during tiling [S1, unofficial]. Without tiling, $O(H \cdot W \cdot \text{ray\_samples})$ [S1, unofficial].
+ - **Measured Performance:** Not given in the sources.
+ - **Scaling:** Scales linearly with image resolution and number of samples [S1, unofficial]. Tiling allows rendering of images larger than available GPU memory [S1, unofficial].
+ - **Strengths:** Simple implementation using standard PyTorch operations; leverages GPU-accelerated `grid_sample` for interpolation; memory-efficient via tiling [S1, unofficial].
+-- **Limitations:** Not optimized for sparse volumes; interpolation artifacts may occur if `ray_samples` is low; tiling overhead for small images [S1, unofficial].
++- **Limitations:** Not optimized for sparse volumes; interpolation artifacts may occur if `ray_samples` is low [S1, unofficial].
+ - **When to use:** When using dense volume data and PyTorch-based differentiable rendering pipelines [S1, unofficial].
+ - **When not to use:** For sparse volumes where traversal-based methods are more efficient; when strict real-time performance is required without GPU acceleration [S1, unofficial].

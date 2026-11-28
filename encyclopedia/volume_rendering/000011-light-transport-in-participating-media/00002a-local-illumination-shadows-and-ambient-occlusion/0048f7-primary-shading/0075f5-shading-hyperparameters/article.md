@@ -1,0 +1,167 @@
+# Shading Hyperparameters
+
+
+## Overview
+Shading Hyperparameters are configuration values used to control the appearance of volumetric materials during the shading phase of volume rendering. They primarily govern the balance between ambient and diffuse lighting, as well as the intensity of gradient-based shading. This method is a sub-component of [Primary Shading](12386-primary-shading.md), which handles the evaluation of direct and indirect lighting for traced voxel materials. It differs from [Ray Casting and Fragment Shading](12415-ray-casting-and-fragment-shading.md) by focusing specifically on the lighting coefficients rather than the traversal or rasterization logic, and from [Basic Gas Rendering Algorithm](12423-basic-gas-rendering-algorithm.md) by providing tunable parameters for visual fidelity rather than a fixed physical model.
+
+## How it works
+The method consists of two distinct configurations: optimization-time shading schedules (used in neural implicit representations) and runtime gradient shading constants.
+
+### Inputs and Outputs
+- **Inputs**: Optimization step count (for schedule), `darkness` parameter (for gradient shading), random seed (for probabilistic switching).
+- **Outputs**: Ambient light color vector $\mathbf{l}_a$, diffuse light color vector $\mathbf{l}_\rho$, and shading scale/shift constants.
+
+### Data Structures
+No persistent data structures are required. The parameters are transient values computed per shading evaluation or per optimization step.
+
+### Steps
+
+#### 1. Optimization-Time Shading Schedule
+Used during the training of neural radiance fields to stabilize convergence.
+
+1.  **Check Step Count**: Determine if the current optimization step $k$ is within the first 1,000 steps.
+2.  **Disable Diffuse (Early Steps)**: If $k \le 1000$:
+    -   Set ambient light color $\mathbf{l}_a = [1, 1, 1]$.
+    -   Set diffuse light color $\mathbf{l}_\rho = [0, 0, 0]$.
+    -   This effectively disables diffuse shading [S1, unofficial].
+3.  **Probabilistic Switching (Later Steps)**: If $k > 1000$:
+    -   Generate a random number $r \in [0, 1]$.
+    -   If $r < 0.75$:
+        -   Set $\mathbf{l}_a = [0.1, 0.1, 0.1]$.
+        -   Set $\mathbf{l}_\rho = [0.9, 0.9, 0.9]$.
+    -   Else:
+        -   Set $\mathbf{l}_a = [1, 1, 1]$.
+        -   Set $\mathbf{l}_\rho = [0, 0, 0]$.
+    -   This enables diffuse shading 75% of the time [S1, unofficial].
+4.  **Textureless Shading Selection**: If diffuse shading is active ($\mathbf{l}_\rho > 0$):
+    -   Generate a random number $r' \in [0, 1]$.
+    -   If $r' < 0.5$:
+        -   Set albedo $\rho = 1$ (textureless shading).
+    -   Else:
+        -   Use the material's texture-based albedo $\rho$.
+    -   This choice is made with probability 0.5 [S1, unofficial].
+
+#### 2. Gradient Shading Constants Setup
+Used in CUDA-based volume mappers to control shading intensity based on a darkness parameter.
+
+1.  **Input**: Receive `darkness` parameter $d$, where $d \in [0.0, 1.0]$.
+2.  **Calculate Scale**: Set `gradShadeScale` $S = d$.
+3.  **Calculate Shift**: Set `gradShadeShift` $T = 1.0 - d$.
+
+### Formulas
+-   **Ambient/Diffuse Switch**:
+    $$
+    (\mathbf{l}_a, \mathbf{l}_\rho) = \begin{cases} 
+    ([1,1,1], [0,0,0]) & \text{if } k \le 1000 \\
+    ([0.1,0.1,0.1], [0.9,0.9,0.9]) & \text{if } k > 1000 \land r < 0.75 \\
+    ([1,1,1], [0,0,0]) & \text{if } k > 1000 \land r \ge 0.75
+    \end{cases}
+    $$
+    Where $r \sim U[0,1]$ [S1, unofficial].
+
+-   **Textureless Probability**:
+    $$
+    \rho = \begin{cases} 
+    1 & \text{if } \mathbf{l}_\rho > 0 \land r' < 0.5 \\
+    \rho_{\text{texture}} & \text{otherwise}
+    \end{cases}
+    $$
+    Where $r' \sim U[0,1]$ [S1, unofficial].
+
+-   **Gradient Constants**:
+    $$
+    S = d, \quad T = 1.0 - d
+    $$
+    Where $d$ is the `darkness` parameter [S2, unofficial].
+
+### Parameters
+-   **`darkness`**: A float value between 0.0 and 1.0 controlling shading intensity and bias. Default value is 0.605f [S2, unofficial].
+-   **`gradShadeScale`**: Output scale factor for gradient shading.
+-   **`gradShadeShift`**: Output shift factor for gradient shading.
+
+### Edge Cases and Pitfalls
+-   **Precision**: The probabilistic switching relies on uniform random number generation. Inconsistent RNG states across parallel threads may lead to visual flickering if not synchronized, though the sources do not specify synchronization mechanisms [S1, unofficial].
+-   **Boundary Conditions**: The `darkness` parameter is strictly bounded to $[0.0, 1.0]$. Values outside this range are not defined in the sources [S2, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_shading_hyperparameters_optimization(step_count, rng):
+    """
+    Computes lighting coefficients for neural radiance field optimization.
+    
+    Args:
+        step_count (int): Current optimization step.
+        rng (Random): Random number generator instance.
+        
+    Returns:
+        tuple: (l_a, l_rho, use_textureless)
+            l_a: list[float] Ambient light color [R, G, B]
+            l_rho: list[float] Diffuse light color [R, G, B]
+            use_textureless: bool
+    """
+    # Step 1-3: Ambient/Diffuse switching
+    if step_count <= 1000:
+        l_a = [1.0, 1.0, 1.0]
+        l_rho = [0.0, 0.0, 0.0]
+        use_textureless = False # Diffuse is off, so textureless choice is irrelevant
+    else:
+        r = rng.random()
+        if r < 0.75:
+            l_a = [0.1, 0.1, 0.1]
+            l_rho = [0.9, 0.9, 0.9]
+        else:
+            l_a = [1.0, 1.0, 1.0]
+            l_rho = [0.0, 0.0, 0.0]
+        
+        # Step 4: Textureless shading selection
+        if l_rho[0] > 0: # Check if diffuse is active (any channel > 0)
+            r_prime = rng.random()
+            use_textureless = (r_prime < 0.5)
+        else:
+            use_textureless = False
+            
+    return l_a, l_rho, use_textureless
+
+def compute_gradient_shading_constants(darkness):
+    """
+    Computes gradient shading scale and shift based on darkness parameter.
+    
+    Args:
+        darkness (float): Value between 0.0 and 1.0.
+        
+    Returns:
+        tuple: (gradShadeScale, gradShadeShift)
+    """
+    # Validate input range [G]
+    if not (0.0 <= darkness <= 1.0):
+        raise ValueError("darkness must be between 0.0 and 1.0")
+        
+    gradShadeScale = darkness
+    gradShadeShift = 1.0 - darkness
+    
+    return gradShadeScale, gradShadeShift
+```
+
+## Subtopics
+
+### Gradient Shading Constants Setup
+A specific configuration variant used in CUDA volume rendering implementations. It maps a single `darkness` parameter (default 0.605f) into two constants: `gradShadeScale` (equal to `darkness`) and `gradShadeShift` (equal to `1.0 - darkness`). This linear mapping controls the bias and intensity of gradient-based shading effects. It is chosen when a simple, tunable shading intensity control is needed without complex lighting models [S2, unofficial].
+
+## Operating characteristics
+-   **Time Complexity**: $O(1)$ per shading evaluation. The calculations involve simple comparisons, random number generation, and arithmetic operations.
+-   **Memory Complexity**: $O(1)$. No additional memory is required beyond storing the current parameter values.
+-   **Performance**: Negligible overhead. The probabilistic switching in optimization adds minimal computational cost but significantly impacts training stability and final visual quality [S1, unofficial].
+-   **Strengths**: Simple to implement; provides effective control over visual appearance during training (preventing mode collapse or early convergence to bad local minima) and runtime shading intensity.
+-   **Limitations**: The optimization schedule is specific to neural implicit representations (NeRF-like) and may not apply to traditional voxel-based rendering. The probabilistic nature can introduce noise if not averaged over multiple samples [S1, unofficial].
+-   **When to use**: Use during the training phase of neural radiance fields to stabilize learning. Use gradient shading constants in real-time volume mappers requiring adjustable shading bias.
+-   **When not to use**: Do not use for final offline rendering where deterministic results are required (disable probabilistic switching). Do not use for physically based rendering where lighting coefficients are derived from material properties rather than hyperparameters.
+
+## Background
+The concept of shading hyperparameters in the context of optimization schedules originates from **DreamFusion: Text-to-3D using 2D Diffusion** (Poole et al., 2022), which introduced the strategy of disabling diffuse shading in early training steps and probabilistically switching ambient/diffuse weights to improve the quality of text-to-3D generation [S1, unofficial]. The gradient shading constants variant appears in the **CUDAVolumeRendering** library by finetjul, where they are used to control shading intensity in CUDA-accelerated volume rendering [S2, unofficial].
+
+## Sources
+[S1] DreamFusion: Text-to-3D using 2D Diffusion, https://doi.org/10.48550/arxiv.2209.14988, fetched 2026-10-27 (unofficial)
+[S2] finetjul/CUDAVolumeRendering, https://github.com/finetjul/CUDAVolumeRendering, fetched 2026-10-27 (unofficial)

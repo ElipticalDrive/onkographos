@@ -1,0 +1,102 @@
+--- v006.md
++++ v007.md
+@@ -1,21 +1,68 @@
+ # Density Control and Densification
+-
+-
+ ## Overview
+ Density Control and Densification is the mechanism in 3D Gaussian Splatting that dynamically adjusts the number, position, and scale of Gaussian primitives during optimization to improve reconstruction quality [S1, unofficial][S2]. It addresses the limitation of standard gradient descent, which can only move, stretch, or fade existing Gaussians but cannot create new ones in empty regions or cleanly remove useless ones [S1, unofficial]. It differs from its siblings by relying on a simple threshold-based heuristic on accumulated positional gradients and spatial extent, whereas alternatives like [OTS+SAtn Densification](1488-ots-satn-densification.md) use attention mechanisms, and [Loss Accumulation Guided (LAG) Densification](3298-loss-accumulation-guided-lag-densification.md) uses loss accumulation [S1, unofficial][S2].
+-
+ ## Shared principles
+ The core mechanism involves a periodic densification step, typically executed every 100 iterations, starting from iteration 100 up to the maximum iteration count [S1, unofficial][S2]. During this step, the algorithm evaluates each Gaussian $G_i$ based on two primary criteria: the accumulated view-space positional gradient magnitude $|\nabla_{\mathbf{p}} \mathcal{L}|_i$ and the spatial extent (scale/volume) of the Gaussian [S1, unofficial][S2].
+ 
+-1.  **Gradient Accumulation:** During the training loop, gradients for the mean position $\mathbf{p}_i$ are accumulated [S1, unofficial][S2]. To prevent gradient cancellation from different camera views, these are often accumulated as magnitudes or absolute values [S3].
+-2.  **Thresholding:** Two thresholds are used:
+-    *   $\tau_{grad}$: The minimum average gradient magnitude required to consider a Gaussian for densification [S1, unofficial][S2].
+-    *   $\theta$: The size threshold, typically defined as a fraction of the scene's body diagonal length, distinguishing "small" from "large" Gaussians [S1, unofficial][S2].
+-3.  **Actions:**
+-    *   **Cloning:** If $|\nabla_{\mathbf{p}} \mathcal{L}|_i \ge \tau_{grad}$ and the Gaussian is "small" (scale $< \theta$), it is cloned [S1, unofficial][S2]. The clone is placed at the same position, and its intensity/opacity is halved to preserve total energy [S1, unofficial][S2].
+-    *   **Splitting:** If $|\nabla_{\mathbf{p}} \mathcal{L}|_i \ge \tau_{grad}$ and the Gaussian is "large" (scale $\ge \theta$), it is split into two new Gaussians [S1, unofficial][S2]. The new positions are sampled from the original Gaussian's distribution, and scales are reduced by a constant factor [S1, unofficial][S2].
+-    *   **Pruning:** Gaussians with opacity $\alpha_i$ below a threshold or excessive size are removed [S1, unofficial][S2].
+-4.  **Budget Control:** The total number of Gaussians $N$ is capped at $N_{max}$ [S1, unofficial][S2]. If $N$ reaches $N_{max}$, densification may be skipped or constrained [S1, unofficial][S2].
++1. **Gradient Accumulation:** During the training loop, gradients for the mean position $\mathbf{p}_i$ are accumulated [S1, unofficial][S2]. To prevent gradient cancellation from different camera views, these are accumulated as magnitudes or absolute values [S3].
++2. **Thresholding:** Two thresholds are used:
++   * $\tau_{grad}$: The minimum average gradient magnitude required to consider a Gaussian for densification [S1, unofficial][S2].
++   * $\theta$: The size threshold, typically defined as a fraction of the scene's body diagonal length, distinguishing "small" from "large" Gaussians [S1, unofficial][S2].
++3. **Actions:**
++   * **Cloning:** If $|\nabla_{\mathbf{p}} \mathcal{L}|_i \ge \tau_{grad}$ and the Gaussian is "small" (scale $< \theta$), it is cloned [S1, unofficial][S2]. The clone is placed at the same position, and its intensity/opacity is halved to preserve total energy [S1, unofficial][S2].
++   * **Splitting:** If $|\nabla_{\mathbf{p}} \mathcal{L}|_i \ge \tau_{grad}$ and the Gaussian is "large" (scale $\ge \theta$), it is split into two new Gaussians [S1, unofficial][S2]. The new positions are sampled from the original Gaussian's distribution, and scales are reduced by a constant factor [S1, unofficial][S2].
++   * **Pruning:** Gaussians with opacity $\alpha_i$ below a threshold or excessive size are removed [S1, unofficial][S2].
++4. **Budget Control:** The total number of Gaussians $N$ is capped at $N_{max}$ [S1, unofficial][S2]. If $N$ reaches $N_{max}$, densification may be skipped or constrained [S1, unofficial][S2].
+ 
++```python
++def density_control(gaussians, gradients, iteration, n_max, tau_grad, theta, tau_opac, size_thresh):
++    # Step 4: Budget Control & Periodic Check
++    if iteration % 100 != 0 or len(gaussians) >= n_max:
++        return gaussians
++
++    to_prune = []
++    to_clone = []
++    to_split = []
++
++    # Step 2 & 3: Thresholding & Actions
++    for i, g in enumerate(gaussians):
++        # Pruning: low opacity or excessive size
++        if g.opacity < tau_opac or g.scale_norm > size_thresh:
++            to_prune.append(i)
++            continue
++        # Densification criteria
++        if gradients[i] >= tau_grad:
++            if g.scale_norm < theta:
++                to_clone.append(i)
++            else:
++                to_split.append(i)
++
++    # Execute Pruning
++    kept = [g for i, g in enumerate(gaussians) if i not in to_prune]
++
++    # Execute Cloning
++    for i in to_clone:
++        g = kept[i]
++        clone = Gaussian(pos=g.pos, scale=g.scale, rotation=g.rotation, opacity=g.opacity / 2.0, sh=g.sh)
++        kept.append(clone)
++
++    # Execute Splitting
++    final = []
++    split_set = set(to_split)
++    for i, g in enumerate(gaussians):
++        if i in to_prune:
++            continue
++        if i in to_clone:
++            final.append(g)
++            final.append(Gaussian(pos=g.pos, scale=g.scale, rotation=g.rotation, opacity=g.opacity / 2.0, sh=g.sh))
++        elif i in split_set:
++            # Sample new positions from original Gaussian's distribution [G]
++            p1, p2 = sample_from_covariance(g.covariance, g.pos)
++            final.append(Gaussian(pos=p1, scale=g.scale * 0.8, rotation=g.rotation, opacity=g.opacity / 2.0, sh=g.sh))
++            final.append(Gaussian(pos=p2, scale=g.scale * 0.8, rotation=g.rotation, opacity=g.opacity / 2.0, sh=g.sh))
++        else:
++            final.append(g)
++    return final
++```
+ ## Subtopics
+ 
+@@ -45,9 +92,9 @@
+ *   **Resurrection:** Use `σ_t` resurrection instead of `reset_opacity`. Since opacity is an analytic quantity under `σ_t` parameterization, standard reset is replaced [S1, unofficial].
+ *   **Densification:** Use adaptive densification threshold based on the top-K% gradient quantile [S1, unofficial].
+-*   **Maintenance Loop:** The cycle of resurrect→prune→reset runs **only during the densify phase**. The gate closes immediately after densification ends to prevent net destruction during the settle phase [S1, unofficial].
++*   **Maintenance Loop:** The cycle of resurrect→prune→reset runs **only during the densify phase** [S1, unofficial]. The gate closes immediately after densification ends to prevent net destruction during the settle phase [S1, unofficial].
+ 
+ ### Cell Position Reset
+ *   **Definition:** A procedure to decouple existing cells from newly introduced ones during adaptive density control by resetting offsets of significant Gaussians [S2].
+-*   **Step:** 1. Grow new cells at Gaussians with high view-space positional gradients. 2. Reset the offsets of the significant Gaussians to zero, reinitializing their positions to the centers of the corresponding cells [S2].
++*   **Step:** 1. Grow new cells at Gaussians with high view-space positional gradients [S2]. 2. Reset the offsets of the significant Gaussians to zero, reinitializing their positions to the centers of the corresponding cells [S2].
+ 
+ ### Predictable Model Growth
+@@ -57,5 +104,5 @@
+ 
+ ## Background
+-The concept of adaptive density control was introduced in the original 3D Gaussian Splatting paper by Kerbl et al. (2023) [S1, unofficial]. The method was designed to handle the trade-off between reconstruction fidelity and computational efficiency by dynamically adjusting the number of primitives. Since then, numerous variants have been proposed to address specific issues such as uncontrolled growth [S1, unofficial], blurry backgrounds [S1, unofficial], and unpredictable model size [S3].
++The concept of adaptive density control was introduced in the original 3D Gaussian Splatting paper by Kerbl et al. (2023) [S1, unofficial]. Since then, numerous variants have been proposed to address specific issues such as uncontrolled growth [S1, unofficial], blurry backgrounds [S1, unofficial], and unpredictable model size [S3].
+ 
+ ## Sources

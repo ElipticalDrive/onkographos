@@ -1,0 +1,179 @@
+# Multi-Mode Volume Ray Casting
+
+Also called: Composite Volume Ray Casting, Custom Volume Ray Casting with Shading and Multiple Modes, MyVolumeRayCastCompositeFunction, Volume Ray Casting Composite, vtkVolumeRayCastCompositeFunction
+
+## Overview
+Multi-Mode Volume Ray Casting is a custom direct volume ray casting implementation that extends standard compositing to support three distinct rendering modes: Full (compositing with shading), Maximum Intensity Projection (MIP), and XRay (average intensity projection) [S2, unofficial]. It differs from standard compositing by explicitly calculating shaded color contributions and blending them with the background using a specific accumulation formula, while supporting nearest-neighbor interpolation and Phong shading [S2, unofficial]. It is implemented as a custom ray cast function within the VTK framework [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar volume dataset. The implementation supports only `VTK_UNSIGNED_CHAR` (8-bit) and `VTK_UNSIGNED_SHORT` (16-bit) data types; other types trigger a warning and do not render [S2, unofficial].
+*   **Input:** Per-ray runtime data (`vtkVolumeRayCastDynamicInfo`) containing `NumberOfStepsToTake` (int), `TransformedStart` (float[3]), `TransformedIncrement` (float[3]), `Color` (float[4]), and `NumberOfStepsTaken` (int) [S2, unofficial].
+*   **Input:** Per-volume static data (`vtkVolumeRayCastStaticInfo`) containing `ScalarDataPointer` (void*), `ScalarDataType` (enum), shading tables (`RedDiffuseShadingTable`, `GreenDiffuseShadingTable`, `BlueDiffuseShadingTable`, `RedSpecularShadingTable`, `GreenSpecularShadingTable`, `BlueSpecularShadingTable` as float*), `EncodedNormals` (unsigned short*), `DataIncrement` (int[3]), and a reference to `Volume` containing transfer functions [S2, unofficial].
+*   **Output:** Final pixel color $(R, G, B)$ and accumulated opacity $\alpha$ written to `dynamicInfo->Color[0..3]` [S2, unofficial].
+
+**Data Structures:**
+The method operates on two primary information structures passed to the ray casting function:
+1.  **`vtkVolumeRayCastDynamicInfo`**: Contains per-ray runtime data.
+    *   `NumberOfStepsToTake` (int): Total steps to iterate.
+    *   `TransformedStart` (float[3]): Ray origin in voxel space.
+    *   `TransformedIncrement` (float[3]): Step vector in voxel space.
+    *   `Color` (float[4]): Output color $(R, G, B, \alpha)$.
+    *   `NumberOfStepsTaken` (int): Actual steps executed (for early termination).
+2.  **`vtkVolumeRayCastStaticInfo`**: Contains per-volume static data.
+    *   `ScalarDataPointer` (void*): Pointer to the raw voxel data.
+    *   `ScalarDataType` (enum): Data type identifier.
+    *   `RedDiffuseShadingTable`, `GreenDiffuseShadingTable`, `BlueDiffuseShadingTable` (float*): Lookup tables for diffuse shading.
+    *   `RedSpecularShadingTable`, `GreenSpecularShadingTable`, `BlueSpecularShadingTable` (float*): Lookup tables for specular shading.
+    *   `EncodedNormals` (unsigned short*): Pre-computed normal vectors.
+    *   `DataIncrement` (int[3]): Strides for x, y, z dimensions to calculate linear memory offset.
+    *   `Volume` (vtkVolume*): Reference to the volume object containing transfer functions.
+
+**Algorithm Steps:**
+1.  **Initialization**: Retrieve `data_ptr` from `staticInfo->ScalarDataPointer` [S2, unofficial]. Fetch `num_steps`, `ray_start`, and `ray_increment` from `dynamicInfo` [S2, unofficial]. Fetch transfer functions `ScalarToOpacityTF` and `ScalarToColorTF` from `staticInfo->Volume` [S2, unofficial]. Fetch `xinc`, `yinc`, `zinc` from `staticInfo->DataIncrement` [S2, unofficial]. Initialize ray position in voxel space: $\mathbf{p} = \mathbf{ray\_start}$ [S2, unofficial]. Initialize accumulators: $C_R = C_G = C_B = 0.0$, $\alpha_{acc} = 0.0$ [S2, unofficial]. Initialize MIP variables: $\alpha_{max} = 0.0$, $V_{max} = 0.0$ [S2, unofficial]. Initialize global maximum scalar value $V_{global\_max} = 0.0$ [S2, unofficial].
+2.  **Ray Loop**: Iterate for $i$ from $0$ to $num\_steps - 1$:
+    *   **Early Termination**: If $\alpha_{acc} \ge 1.0$, break the loop [S2, unofficial].
+    *   **Voxel Coordinate Calculation**: Round the current ray position to the nearest integer to get voxel coordinates: $v_x = \text{round}(p_x)$, $v_y = \text{round}(p_y)$, $v_z = \text{round}(p_z)$ [S2, unofficial].
+    *   **Data Access**: Calculate linear offset: $\text{offset} = v_z \cdot \text{zinc} + v_y \cdot \text{yinc} + v_x \cdot \text{xinc}$ [S2, unofficial]. Retrieve scalar value: $V = \text{data\_ptr}[\text{offset}]$ [S2, unofficial].
+    *   **Global Maximum Update**: If $V > V_{global\_max}$, set $V_{global\_max} = V$ [S2, unofficial].
+    *   **Mode-Specific Processing**: Let $\mathbf{c}_{raw} = (r, g, b)$ be the color from `ScalarToColorTF[V]` and $\alpha$ be the opacity from `ScalarToOpacityTF[V]` [S2, unofficial].
+        *   **Mode MIP (`currentRenderMode == 0`)**: If $V > V_{max}$, set $V_{max} = V$, set $C_R = \alpha \cdot r$, $C_G = \alpha \cdot g$, $C_B = \alpha \cdot b$, and set $\alpha_{acc} = 1.0 - \alpha$ [S2, unofficial].
+        *   **Mode XRay (`currentRenderMode == 1`)**: Accumulate scalar values into all color channels: $C_R \leftarrow C_R + V$, $C_G \leftarrow C_G + V$, $C_B \leftarrow C_B + V$ [S2, unofficial].
+        *   **Mode Full (`currentRenderMode == 2`)**: Compute shaded values: $r_{shaded} = \alpha \cdot r$, $g_{shaded} = \alpha \cdot g$, $b_{shaded} = \alpha \cdot b$ [S2, unofficial]. Accumulate color: $C_R \leftarrow r_{shaded} \cdot (1.0 - \alpha_{acc}) + C_R$, $C_G \leftarrow g_{shaded} \cdot (1.0 - \alpha_{acc}) + C_G$, $C_B \leftarrow b_{shaded} \cdot (1.0 - \alpha_{acc}) + C_B$ [S2, unofficial]. Accumulate opacity: $\alpha_{acc} \leftarrow \alpha \cdot (1.0 - \alpha_{acc}) + \alpha_{acc}$ [S2, unofficial].
+    *   **Ray Advancement**: $\mathbf{p} \leftarrow \mathbf{p} + \mathbf{ray\_increment}$ [S2, unofficial].
+3.  **Finalization**: Cap all accumulated color intensities $C_R, C_G, C_B$ at $1.0$ [S2, unofficial]. Write final color $(C_R, C_G, C_B)$ and opacity $\alpha_{acc}$ to `dynamicInfo->Color[0..3]` [S2, unofficial]. Write steps taken to `dynamicInfo->NumberOfStepsTaken` [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cast_ray(data_ptr, scalar_data_type, dynamic_info, static_info, current_render_mode):
+    # 1. Initialization
+    num_steps = dynamic_info.NumberOfStepsToTake
+    ray_start = dynamic_info.TransformedStart
+    ray_increment = dynamic_info.TransformedIncrement
+    xinc, yinc, zinc = static_info.DataIncrement
+    scalar_to_color_tf = static_info.Volume.ScalarToColorTF
+    scalar_to_opacity_tf = static_info.Volume.ScalarToOpacityTF
+
+    # Accumulators
+    accum_r = 0.0
+    accum_g = 0.0
+    accum_b = 0.0
+    accum_alpha = 0.0
+
+    # MIP variables
+    max_val = 0.0
+    max_color_r = 0.0
+    max_color_g = 0.0
+    max_color_b = 0.0
+
+    # Global max for dataset tracking
+    global_max_val = 0.0
+
+    # Ray position
+    pos_x = ray_start[0]
+    pos_y = ray_start[1]
+    pos_z = ray_start[2]
+
+    # 2. Loop
+    steps_taken = 0
+    for i in range(num_steps):
+        # Early termination
+        if accum_alpha >= 1.0:
+            break
+
+        # Voxel coordinates (nearest neighbor)
+        voxel_x = round(pos_x)
+        voxel_y = round(pos_y)
+        voxel_z = round(pos_z)
+
+        # Data access
+        offset = voxel_z * zinc + voxel_y * yinc + voxel_x * xinc
+        scalar_val = data_ptr[offset]
+
+        # Update global max
+        if scalar_val > global_max_val:
+            global_max_val = scalar_val
+
+        # Get transfer function values
+        color_rgb = scalar_to_color_tf(scalar_val)
+        r_raw, g_raw, b_raw = color_rgb
+        alpha = scalar_to_opacity_tf(scalar_val)
+
+        # Mode processing
+        if current_render_mode == 0: # MIP
+            if scalar_val > max_val:
+                max_val = scalar_val
+                max_color_r = r_raw
+                max_color_g = g_raw
+                max_color_b = b_raw
+                accum_alpha = 1.0 - alpha
+                accum_r = alpha * r_raw
+                accum_g = alpha * g_raw
+                accum_b = alpha * b_raw
+
+        elif current_render_mode == 1: # XRay
+            accum_r += scalar_val
+            accum_g += scalar_val
+            accum_b += scalar_val
+
+        elif current_render_mode == 2: # Full
+            # Shading simplification per source: multiply raw color by opacity
+            r_shaded = alpha * r_raw
+            g_shaded = alpha * g_raw
+            b_shaded = alpha * b_raw
+
+            accum_r = r_shaded * (1.0 - accum_alpha) + accum_r
+            accum_g = g_shaded * (1.0 - accum_alpha) + accum_g
+            accum_b = b_shaded * (1.0 - accum_alpha) + accum_b
+
+            accum_alpha = alpha * (1.0 - accum_alpha) + accum_alpha
+
+        # Advance ray
+        pos_x += ray_increment[0]
+        pos_y += ray_increment[1]
+        pos_z += ray_increment[2]
+
+        steps_taken += 1
+
+    # 3. Finalization
+    # Cap colors
+    accum_r = min(accum_r, 1.0)
+    accum_g = min(accum_g, 1.0)
+    accum_b = min(accum_b, 1.0)
+
+    dynamic_info.Color[0] = accum_r
+    dynamic_info.Color[1] = accum_g
+    dynamic_info.Color[2] = accum_b
+    dynamic_info.Color[3] = accum_alpha
+    dynamic_info.NumberOfStepsTaken = steps_taken
+```
+
+**Parameters:**
+*   `currentRenderMode`: Integer constant determining rendering mode. Values: `0` (mode_MIP), `1` (mode_XRay), `2` (mode_Full). Default is `2` (mode_Full) [S2, unofficial].
+*   `globalMaximumScalarValue`: Static float used to track the maximum scalar value encountered in the dataset. Initialized to `0.0`, updated during ray casting [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Data Type Support**: Only `VTK_UNSIGNED_CHAR` and `VTK_UNSIGNED_SHORT` are supported. Other types trigger a warning and do not render [S2, unofficial].
+*   **Early Termination**: The loop breaks if `accum_opacity >= 1.0`. This optimization must be handled correctly in MIP mode where opacity does not accumulate traditionally [S2, unofficial].
+*   **Shading Tables**: The source mentions shading tables but the pseudocode simplifies shading to `opacity * color`. In a full implementation, the shading tables (diffuse/specular) must be applied to the raw color values before accumulation in Full mode [S2, unofficial].
+
+## Subtopics
+
+### Volume Ray Casting with Interactive Cropping
+Extends the composite ray casting function with interactive cropping functionality using a `vtkBoxWidget` [S1, unofficial]. The implementation enables cropping on the mapper, parses six double values for region planes (xmin, xmax, ymin, ymax, zmin, zmax), sets the cropping region flags to `0x0002000`, and places a widget with a placement factor of 1.25 to manipulate the volume interactively [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(N)$ per ray, where $N$ is `NumberOfStepsToTake` [S2, unofficial]. Early termination reduces steps in opaque regions [S2, unofficial].
+*   **Memory Complexity**: $O(1)$ per ray, storing only accumulators and position [S2, unofficial].
+*   **Performance**: Fast due to nearest-neighbor interpolation and direct memory access, but aliasing may occur [S2, unofficial].
+*   **Strengths**: Single-pass multi-mode support, explicit shading control, early termination [S2, unofficial].
+*   **Limitations**: Restricted to `VTK_UNSIGNED_CHAR` and `VTK_UNSIGNED_SHORT` data types, nearest-neighbor interpolation artifacts, requires global maximum tracking for XRay normalization [S2, unofficial].
+
+## Background
+Developed as a custom extension of `vtkVolumeRayCastCompositeFunction` within the VTK framework to support multiple rendering modes and Phong shading [S2, unofficial]. Documented in unofficial VTK examples and tutorials [S2, unofficial].
+
+## Sources
+[S1] researchxr/3DMR, https://github.com/researchxr/3DMR, fetched 2026-10-27 (unofficial)
+[S2] TotteKarlsson/vtkExamples, https://github.com/TotteKarlsson/vtkExamples, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,48 @@
+# Parallel Rendering (Hybrid Systems)
+Also called: Hybrid Parallel Rendering, Shared-Distributed Memory Hybrid Rendering
+
+## Overview
+Parallel Rendering (Hybrid Systems) is a sort-middle parallel rendering approach that combines shared-memory and distributed-memory parallelism to render volume data on clusters of multicore processors or heterogeneous systems [S1, unofficial][S2]. It solves the scalability and communication overhead limitations of pure distributed-memory systems by reducing the number of distributed compositing nodes while leveraging high-concurrency shared-memory threads [S2]. Unlike pure shared-memory systems, which are limited by single-node memory capacity, or pure distributed-memory systems, which suffer from high communication traffic, hybrid systems balance these by partitioning both data and image space to maintain work coherence [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Volume dataset, camera parameters, rendering resolution.
+- Output: Composite image.
+
+**Data Structures:**
+- The system partitions the image space (pixels) and potentially the data space (voxels) across nodes [S1, unofficial].
+- Each node manages a local shared-memory pool (e.g., GPU memory or CPU cache) and communicates with other nodes via distributed memory interfaces (e.g., MPI) [S1, unofficial][S2].
+
+**Steps:**
+1. **Partitioning:** Distribute the image space across the available nodes using an image-space partitioning scheme [S1, unofficial]. Optionally, partition the data space as well to keep the distribution of work coherent [S1, unofficial].
+2. **Raycasting (Shared Memory):** Within each node, perform raycasting using dynamically-scheduled, image-based decomposition [S2]. This phase utilizes shared-memory parallelism (e.g., CUDA threads, pthreads, or OpenMP) to scale to high concurrencies per node (thousands of threads) [S2].
+3. **Compositing (Distributed Memory):** Composite the partial results from the raycasting phase. The number of compositing tasks (nodes) is kept relatively low compared to the total number of rendering threads to reduce communication overhead [S2].
+4. **Cache Coherence:** Maintain cache coherence throughout execution to prevent performance deterioration [S1, unofficial].
+
+**Parameters and Optimization:**
+- **Concurrency:** The number of compositing tasks (nodes) should be optimized. Peterka et al. observed that 1,000 to 2,000 compositors were optimal for up to 32,768 total tasks in strong scaling studies [S2].
+- **Weak Scaling:** In weak scaling scenarios, using a larger subset of compositing tasks (2,000 to 30,000) is optimal, as smaller subsets lead to overallocation of temporary data structures and MPI buffers [S2].
+- **Hardware:** The method benefits from high core-to-node ratios, such as multi-core CPUs or many-core GPUs [S2].
+
+**Pitfalls:**
+- Failing to maintain cache coherence throughout execution progressively deteriorates overall system performance [S1, unofficial].
+- Setting the number of compositing tasks too small in weak scaling studies leads to overallocation from temporary data structures and MPI buffers, as additional data is concentrated in fewer compositors [S2].
+
+## Subtopics
+
+### Hybrid Parallelism Architecture
+A parallelism strategy combining distributed memory (MPI) and shared memory (pthreads/OpenMP/CUDA) to enable performance gains and reduced resource usage compared to distributed-memory-only implementations on large supercomputers [S2]. Advantages include reduced memory footprint, reduced MPI overhead, and reduced communication traffic [S2]. It uses dynamically-scheduled, image-based decomposition in the raycasting phase to scale well to high concurrencies per node (thousands of threads in CUDA) [S2]. Peterka et al. first observed that the reduced number of compositors at higher concurrencies increased overall performance, concluding 1,000 to 2,000 compositors were optimal for up to 32,768 total tasks [S2].
+
+## Operating characteristics
+- **Time Complexity:** The raycasting phase scales well with the number of shared-memory threads per node [S2]. The compositing phase performance is influenced by the number of nodes; decreasing the absolute number of nodes improves communication performance during compositing [S2].
+- **Memory Complexity:** Reduced memory footprint compared to pure distributed-memory implementations [S2].
+- **Performance:** Hybrid parallelism enables performance gains and uses less resources than distributed-memory implementations on large supercomputers [S2]. For example, hybrid/CUDA runs showed compositing times half that of hybrid-memory runs at high concurrency [S2].
+- **Strengths:** Reduced MPI overhead, reduced communication traffic, and ability to leverage high-concurrency shared-memory resources [S2].
+- **Limitations:** Scalability is limited by the need to maintain cache coherence [S1, unofficial]. Pure shared-memory systems are prohibitively expensive to build with large amounts of memory and cannot easily be extended [S1, unofficial].
+
+## Background
+Hybrid systems were developed to address the limitations of pure shared-memory and pure distributed-memory rendering systems. Shared-memory systems offer faster communication but are limited by scalability and memory capacity [S1, unofficial]. Distributed-memory systems scale better but suffer from high communication overhead [S1, unofficial]. Hybrid approaches mix features of both, using clusters of multicore processors [S1, unofficial]. Peterka et al. [4] were among the first to observe the performance benefits of reducing the number of compositors at higher concurrencies [S2]. The approach is particularly relevant for multi-core CPU systems with increasing core counts and heterogeneous systems with many-core GPUs [S2].
+
+## Sources
+[S1] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
+[S2] Hybrid Parallelism for Volume Rendering on Large, Multi- and Many-core Systems, https://digital.library.unt.edu/ark:/67531/metadc840908/?q=out-of-core volume rendering, fetched 2026-10-28

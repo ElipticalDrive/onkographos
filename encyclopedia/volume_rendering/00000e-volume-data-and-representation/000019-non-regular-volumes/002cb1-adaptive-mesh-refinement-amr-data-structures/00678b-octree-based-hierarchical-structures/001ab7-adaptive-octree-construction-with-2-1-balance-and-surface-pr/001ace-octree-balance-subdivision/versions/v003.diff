@@ -1,0 +1,281 @@
+--- v002.md
++++ v003.md
+@@ -1,149 +1,162 @@
+ # Octree Balance Subdivision
+ 
++Also called: Octree Subdivision, Cell Splitting, Node Refinement
+ 
+ ## Overview
+-Octree Balance Subdivision is the recursive refinement step in adaptive octree construction for volume rendering and isosurface extraction [S1, unofficial]. It splits a parent node into eight child octants, evaluates the implicit function at the children's corners, and classifies each child as Empty, Full, or Leaf based on sign changes relative to an isosurface [S1, unofficial]. It ensures tree integrity by preventing orphaning of existing children and maintaining the 2:1 balance constraint required by the parent algorithm [Adaptive Octree Construction with 2:1 Balance and Surface Propagation](830-adaptive-octree-construction-with-2-1-balance-and-surface-pr.md) [S1, unofficial].
++Octree Balance Subdivision is the fundamental geometric refinement operation in adaptive octree construction. It splits a single octree node into eight child nodes by halving the bounding box along each axis, preparing the structure for further topological analysis or data redistribution [S1, unofficial]. It serves as the atomic step for increasing spatial resolution in sparse voxel representations [S1, unofficial]. Unlike higher-level strategies that manage global balance or parallel load distribution, this method focuses strictly on the local geometric decomposition of a cell and the initialization of its child data structures [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `parent_grid_coords`: $(gx, gy, gz)$, integer coordinates of the parent cell in the global grid [S1, unofficial].
+-- `child_scale`: The side length of a child cell in grid units, typically half the parent's side length [S1, unofficial].
+-- `iso_value`: The scalar threshold for sign change detection [S1, unofficial].
+-- `eval_cache`: A lookup structure mapping grid corner coordinates to $(value, gradient)$ pairs [S1, unofficial].
+-- `octree_node`: Reference to the current octree node being subdivided [S1, unofficial].
++- `parent_cell`: The current octree node to be subdivided. Contains bounding box coordinates $(x, y, z)$ and size $s$.
++- `iso_value`: The scalar threshold for isosurface extraction.
++- `eval_func`: A function evaluating the implicit field $F(x,y,z)$ and optionally its gradient $\nabla F$ at a given point.
++- `cache`: An evaluation cache storing previously computed values and gradients.
+ 
+ **Outputs:**
+-- Updated `octree_node`: Now a Branch with 8 children [S1, unofficial].
+-- Classification of each child node as Empty, Full, or Leaf [S1, unofficial].
++- A new `Branch` node containing an array of 8 child nodes (leaves or further branches).
++- The `parent_cell` is replaced in the tree structure by this new `Branch`.
+ 
+ **Data Structures:**
+-- `LeafData`: Contains `corner_values` (array of 8 floats), `iso_value` (float), and optionally `corner_gradients` (array of 8 vectors) [S1, unofficial].
+-- `CellType`: Enum with values `Empty`, `Full`, `Leaf` [S1, unofficial].
++- **OctreeNode**: Can be a `Leaf` or `Branch`.
++  - `Leaf`: Stores `CornerData` (8 corners, each with value $v$ and optional gradient $\vec{g}$) and `cell_type` (Empty, Full, Leaf).
++  - `Branch`: Stores `children`, a vector/array of 8 pointers to `OctreeNode`s.
++- **CornerData**:
++  - `value`: float, $F(x,y,z)$.
++  - `gradient`: tuple of 3 floats, $\nabla F(x,y,z)$, or `None`.
+ 
+ **Steps:**
++1. **Compute Child Coordinates**:
++   For each of the 8 octants $i \in \{0, \dots, 7\}$:
++   - Determine the child's base grid coordinates $(cx, cy, cz)$ by adding `child_scale` to the parent's base coordinates if the corresponding bit in $i$ is set.
++   - `child_scale` = $s / 2$.
++   - For each of the 8 corners of the child cell, compute the world grid position $(gx, gy, gz)$ by adding `child_scale` to the child cell's base coordinates if the corresponding corner bit is set [S1, unofficial].
+ 
+-1. **Compute Child Grid Coordinates:** For each of the 8 octants $i \in \{0, \dots, 7\}$, extract bits $b_x, b_y, b_z$. Compute the child's base grid coordinates $(cx, cy, cz)$ by adding `child_scale` to the parent coordinates if the corresponding octant bit is set: $cx = gx + (b_x \cdot s)$, $cy = gy + (b_y \cdot s)$, $cz = gz + (b_z \cdot s)$ [S1, unofficial].
+-2. **Compute Child Corner Positions:** For each of the 8 corners of the child cell, extract corner bits $c_x, c_y, c_z$. Compute the grid position $(gx_c, gy_c, gz_c)$ by adding `child_scale` to the child cell's base coordinates if the corresponding corner bit is set: $gx_c = cx + (c_x \cdot s)$, $gy_c = cy + (c_y \cdot s)$, $gz_c = cz + (c_z \cdot s)$ [S1, unofficial].
+-3. **Retrieve Scalar Values and Gradients:** For each corner $(gx_c, gy_c, gz_c)$ of child $i$, retrieve $(v_c, g_c)$ from `eval_cache` [S1, unofficial]. If any gradient $g_c$ is missing, set a flag `has_grads = false` for that child [S1, unofficial].
+-4. **Construct LeafData:** Create a `LeafData` object for child $i$ containing the 8 corner values $v_c$ and `iso_value` [S1, unofficial]. If `has_grads` is true, attach the 8 corner gradients to the `LeafData` [S1, unofficial].
+-5. **Determine Cell Type:** Compute a `corner_mask` where bit $k$ is 1 if corner $k$ value $> iso\_value$ [S1, unofficial]. If `corner_mask` is 0, type is `Empty`; if 255, type is `Full`; if there is a sign change (mask is neither 0 nor 255), type is `Leaf` [S1, unofficial].
+-6. **Navigate and Update Octree:** Compute the path to the current cell in the octree structure [S1, unofficial]. Navigate to the cell and return immediately if it is already a Branch to avoid orphaning existing children [S1, unofficial]. Push the new child cells array to the octree's children vector and update the current cell to be a Branch pointing to this new index [S1, unofficial]. This order prevents use-after-free bugs caused by vector reallocation invalidating pointers [S1, unofficial].
++2. **Evaluate Field**:
++   - For each of the 8 corners of the child cell:
++     - Retrieve $F(gx, gy, gz)$ and $\nabla F(gx, gy, gz)$ from `cache`.
++     - If the gradient is missing, set a flag `has_grads = false` [S1, unofficial].
++     - If not in cache, call `eval_func` and store in `cache`.
++
++3. **Construct Leaf Data**:
++   - Create a `LeafData` object containing the 8 corner values and `iso_value`.
++   - If `has_grads` is true for all 8 corners, attach the gradients to the leaf. Otherwise, gradients are null [S1, unofficial].
++
++4. **Determine Cell Type**:
++   - Check for sign changes among the 8 corner values relative to `iso_value`.
++   - If a sign change exists, `cell_type = Leaf` (potential surface intersection).
++   - If the corner mask is 0 (all values on one side of iso-value), `cell_type = Empty`.
++   - Otherwise, `cell_type = Full` (all values on one side, but potentially complex internal structure requiring further subdivision or specific handling) [S1, unofficial].
++
++5. **Update Tree Structure**:
++   - Compute the path to the `parent_cell` in the octree.
++   - Navigate to the cell. If it is already a `Branch`, return immediately to avoid orphaning existing children [S1, unofficial].
++   - Create a new `Branch` node.
++   - Push the new array of 8 child cells to the octree's children vector.
++   - Update the `parent_cell` pointer to point to this new `Branch` index.
++   - **Critical Implementation Detail**: The new children array must be pushed to the vector *before* updating the parent pointer to prevent use-after-free bugs caused by vector reallocation invalidating pointers [S1, unofficial].
+ 
+ **Pseudocode:**
++```python
++def subdivide_octree_node(parent_node, iso_value, eval_func, cache):
++    """
++    Subdivides a single octree node into 8 children.
++    """
++    # 1. Check if already a branch
++    if isinstance(parent_node, Branch):
++        return parent_node  # Avoid orphaning existing children
+ 
+-```python
+-class OctreeNode:
+-    def __init__(self):
+-        self.is_branch = False
+-        self.children = []
+-        self.leaf_data = None
+-        self.cell_type = None
++    # 2. Prepare new branch
++    new_children = []
++    parent_bbox = parent_node.bbox
++    child_size = parent_bbox.size / 2.0
++    
++    # 3. Iterate over 8 octants
++    for octant_idx in range(8):
++        child_leaf_data = LeafData()
++        has_grads = True
++        
++        # 4. Evaluate 8 corners for this octant
++        for corner_idx in range(8):
++            # Compute world position of the corner
++            # Base coordinates of the octant + offset for specific corner
++            pos = compute_corner_position(parent_bbox, octant_idx, corner_idx, child_size)
++            
++            # Retrieve or compute value and gradient
++            val, grad = cache.get_or_compute(pos, eval_func)
++            
++            child_leaf_data.corners[corner_idx].value = val
++            if grad is None:
++                has_grads = False
++            else:
++                child_leaf_data.corners[corner_idx].gradient = grad
++        
++        # 5. Determine cell type
++        if has_grads:
++            child_leaf_data.gradients_available = True
++        else:
++            child_leaf_data.gradients_available = False
++            
++        if has_sign_change(child_leaf_data.corners, iso_value):
++            child_leaf_data.cell_type = CellType.LEAF
++        elif is_empty_mask(child_leaf_data.corners, iso_value):
++            child_leaf_data.cell_type = CellType.EMPTY
++        else:
++            child_leaf_data.cell_type = CellType.FULL
++            
++        new_children.append(child_leaf_data)
+ 
+-class LeafData:
+-    def __init__(self, corner_values, iso_value, corner_gradients=None):
+-        self.corner_values = corner_values
+-        self.iso_value = iso_value
+-        self.corner_gradients = corner_gradients
+-
+-def octree_balance_subdivision(parent_grid_coords, child_scale, iso_value, eval_cache, octree_node):
+-    gx, gy, gz = parent_grid_coords
+-
+-    # Navigate to the cell. If it is already a Branch, return immediately to avoid orphaning existing children.
+-    if octree_node.is_branch:
+-        return
+-
+-    children = []
+-
+-    for i in range(8):
+-        bx = (i >> 2) & 1
+-        by = (i >> 1) & 1
+-        bz = i & 1
+-
+-        # Compute child grid coordinates by adding child_scale to parent coordinates if octant bit is set
+-        cx = gx + (bx * child_scale)
+-        cy = gy + (by * child_scale)
+-        cz = gz + (bz * child_scale)
+-
+-        corner_values = []
+-        corner_gradients = []
+-        has_grads = True
+-
+-        for corner_idx in range(8):
+-            cbx = (corner_idx >> 2) & 1
+-            cby = (corner_idx >> 1) & 1
+-            cbz = corner_idx & 1
+-
+-            # Compute corner grid position by adding child_scale to child base coordinates if corner bit is set
+-            corner_gx = cx + (cbx * child_scale)
+-            corner_gy = cy + (cby * child_scale)
+-            corner_gz = cz + (cbz * child_scale)
+-
+-            key = (corner_gx, corner_gy, corner_gz)
+-            if key in eval_cache:
+-                val, grad = eval_cache[key]
+-                corner_values.append(val)
+-                if grad is None:
+-                    has_grads = False
+-                else:
+-                    corner_gradients.append(grad)
+-            else:
+-                # [G] Fallback: evaluate implicit function if cache miss occurs
+-                pass
+-
+-        # Construct LeafData with corner values and iso_value
+-        leaf_data = LeafData(corner_values, iso_value)
+-
+-        # If gradients are available for all corners, attach them to the leaf
+-        if has_grads:
+-            leaf_data.corner_gradients = corner_gradients
+-
+-        # Determine cell type
+-        corner_mask = 0
+-        for idx, val in enumerate(corner_values):
+-            if val > iso_value:
+-                corner_mask |= (1 << idx)
+-
+-        if corner_mask == 0:
+-            cell_type = "Empty"
+-        elif corner_mask == 255:
+-            cell_type = "Full"
+-        else:
+-            cell_type = "Leaf"
+-
+-        child_node = OctreeNode()
+-        child_node.is_branch = False
+-        child_node.leaf_data = leaf_data
+-        child_node.cell_type = cell_type
+-        children.append(child_node)
+-
+-    # Push the new child cells array to the octree's children vector and update the current cell to be a Branch
+-    # This order prevents use-after-free bugs caused by vector reallocation invalidating pointers
+-    octree_node.children.extend(children)
+-    octree_node.is_branch = True
++    # 6. Update tree structure safely
++    # Push new children to the vector first to prevent reallocation issues
++    octree.children_vector.append(new_children)
++    
++    # Create new branch pointing to these children
++    new_branch = Branch(children=new_children)
++    
++    # Update parent node to be this branch
++    parent_node.replace_with(new_branch)
++    
++    return new_branch
+ ```
+ 
+ **Parameters:**
+-- `min_depth`, `max_depth`: Define the range of subdivision [S1, unofficial]. Typical values are `min_depth=3` and `max_depth=7` [S1, unofficial].
+-- `iso_value`: The isosurface level threshold [S1, unofficial]. Typical value is `0.0` [S1, unofficial].
+-- `child_scale`: Determined by the current depth level relative to the root [S1, unofficial].
++- `iso_value`: Typical value 0.0 for signed distance fields.
++- `min_depth`, `max_depth`: Depth limits for recursion (not part of single subdivision step, but context for when to stop).
++- `child_scale`: Derived as $s/2$.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Vector Reallocation:** Pushing children to a vector before updating the branch pointer is critical to avoid invalidating pointers due to reallocation [S1, unofficial].
+-- **Missing Gradients:** If gradients are missing for any corner, `has_grads` is set to false and gradients are not attached to the leaf [S1, unofficial].
+-- **Non-Cubic Bounding Box:** If the bounding box is non-cubic, it is expanded to the smallest enclosing cube centered on the original bounding box center [S1, unofficial].
++- **Vector Reallocation**: Pushing children to a dynamic array before updating parent pointers is critical to avoid dangling pointers if the vector reallocates memory [S1, unofficial].
++- **Missing Gradients**: If gradients are not available for all corners, they must be explicitly marked as null to prevent downstream manifold reconstruction errors [S1, unofficial].
++- **Non-Cubic Bounding Boxes**: If the initial bounding box is not cubic, it is expanded to the smallest enclosing cube centered on the original bbox center. This affects the initial coordinate scaling [S1, unofficial].
+ 
+ ## Subtopics
+ 
++### [Octree Subdivision](4029-octree-subdivision.md)
++Octree Subdivision splits an octree node into eight children by halving its bounding box along each axis and redistributing associated data elements like surfels. It provides the local geometric refinement step required for adaptive sparse voxel representations. This is the core geometric operation described in the main method.
++
++### [Graph-based Load Balancing for Parallel Subdivision](8380-graph-based-load-balancing-for-parallel-subdivision.md)
++This method balances parallel workloads for isosurface extraction by distributing volumetric blocks such that each process holds an equal number of active cells for any isovalue. It differs from spatial-only partitioning by analyzing the topological connectivity of active cells via graph partitioning, ensuring uniform computational load across parallel processes regardless of the specific isosurface threshold. It operates on the results of subdivision to manage parallelism.
++
+ ### Local Refinement and Manifold Verification
+-Algorithm to resolve non-manifold configurations caused by local application of subdivision rules [S2]. It extracts information about $\partial V$ shape in face-adjacent cells over faces of compact cells and recursively refines them if complex faces or edges are detected [S2]. Steps: (1) For every compact cell $c$, get adjacent cells at the same octree level [S2]. (2) For every adjacent cell through a face $f$, extract all leaf cells $S$ face-adjacent with $c$ [S2]. (3) Build a quadtree with faces of cells in $S$ adjacent to $c$, containing $F(x,y,z)$ values at vertices to represent the intersection between $V$ and $f$ [S2]. (4) Apply complex face and complex edge tests [S2]. (5) If a face is complex, divide the adjacent compact cell and add its sub-cells to the compact cells list [S2]. (6) Recursively repeat the test until all compact cells having complex faces or edges have been eliminated by subdivision [S2]. Unlike Westermann et al. [19], which limits fixing to neighboring cells with at most one level of difference, this approach has no such limitation and is guided purely by topological complexity [S2].
++This algorithm solves non-manifold configurations caused by the local application of subdivision rules. It extracts information about the shape of the isosurface $\partial V$ in face-adjacent cells over the faces of compact cells and recursively refines them if complex faces or edges are detected [S2].
++**Steps:**
++1. For every compact cell $c$, get adjacent cells at the same octree level.
++2. For every adjacent cell through a face $f$, extract all leaf cells $S$ that are face-adjacent with $c$.
++3. Build a quadtree with faces of cells in $S$ adjacent to $c$. This quadtree contains $F(x,y,z)$ values at vertices and represents the intersection between $V$ and $f$ [S2].
++4. Apply complex face and complex edge tests.
++5. If a face is complex, divide the adjacent compact cell and add its sub-cells to the compact cells list [S2].
++6. Recursively repeat the test until all compact cells having complex faces or edges have been eliminated by subdivision [S2].
++Unlike Westermann et al. [19], who limit fixing to neighboring cells with at most one level of difference, this approach has no such limitation and is guided by topological complexity [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per node subdivision, with total time proportional to the number of visited nodes [G].
+-- **Memory Complexity:** $O(N)$ where $N$ is the number of leaf nodes, each storing 8 values and optionally 8 gradients [G].
+-- **Strengths:** Efficiently adapts resolution to geometric features, reducing memory usage compared to uniform grids [G].
+-- **Limitations:** Requires careful memory management to avoid use-after-free bugs, and performance degrades if the isosurface is highly complex or if the depth range is too large [G].
++- **Time Complexity**: $O(1)$ per node subdivided, assuming constant-time evaluation and cache lookup. However, the total time depends on the number of nodes visited, which is determined by the implicit function's complexity and depth limits.
++- **Memory Complexity**: Each subdivision increases the number of nodes by a factor of 8. Memory usage scales with the number of leaf nodes in the octree.
++- **Performance**: Performance is heavily dependent on the efficiency of the evaluation cache and the sparsity of the isosurface. Dense regions cause rapid memory growth.
++- **Strengths**: Simple, deterministic, and provides the necessary resolution for accurate isosurface extraction.
++- **Limitations**: Does not inherently ensure manifold connectivity or balance; requires additional steps (like Local Refinement) to fix topological artifacts.
++- **When to use**: When adaptive resolution is needed to capture fine geometric details of an implicit surface.
++- **When not to use**: When global load balancing or strict topological manifold guarantees are required without post-processing.
+ 
+ ## Background
+-The method is part of the `isomesh` library, an implementation of fast isosurface extraction via adaptive octree and Manifold Dual Contouring [S1, unofficial]. The algorithm builds on the principles of adaptive octree construction with 2:1 balance and surface propagation [Adaptive Octree Construction with 2:1 Balance and Surface Propagation](830-adaptive-octree-construction-with-2-1-balance-and-surface-pr.md) [S1, unofficial].
++The method is part of the adaptive octree construction pipeline for isosurface extraction, specifically within the context of Manifold Dual Contouring (DMC). The specific implementation details regarding vector reallocation safety and cache integration are derived from the `isomesh` library [S1, unofficial]. The topological refinement aspect (Local Refinement and Manifold Verification) is described in the work on adaptive surface extraction from anisotropic volumetric data, which addresses non-manifold configurations that can arise from local subdivision [S2].
+ 
+ ## Sources

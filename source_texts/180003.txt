@@ -1,0 +1,1211 @@
+Exploring Execution Coherency in Hardware Ray Tracing
+Systems
+Joshua You
+Electrical Engineering and Computer Sciences
+University of California, Berkeley
+Technical Report No. UCB/EECS-2026-204
+http://www2.eecs.berkeley.edu/Pubs/TechRpts/2026/EECS-2026-204.html
+May 16, 2026
+Copyright © 2026, by the author(s).
+All rights reserved.
+Permission to make digital or hard copies of all or part of this work for
+personal or classroom use is granted without fee provided that copies
+are not made or distributed for profit or commercial advantage and that
+copies bear this notice and the full citation on the first page. To copy
+otherwise, to republish, to post on servers or to redistribute to lists,
+requires prior specific permission.
+Acknowledgement
+Exploring Execution Coherency in Hardware Ray Tracing Systems
+by Joshua You
+Research Project
+Submitted to the Department of Electrical Engineering and Computer Sciences, University of
+California at Berkeley, in partial satisfaction of the requirements for the degree of Master of
+Science, Plan II.
+Approval for the Report and Comprehensive Examination:
+Committee:
+Professor Yakun Sophia Shao
+Research Advisor
+5/15/2026
+(Date)
+*******
+Professor Ren Ng
+Second Reader
+(Date)
+Exploring Execution Coherency in Hardware Ray Tracing Systems
+by
+Joshua You
+A thesis submitted in partial satisfaction of the requirements for the degree of
+Master of Science
+in
+Electrical Engineering and Computer Sciences
+in the Graduate Division of the University of California, Berkeley
+Committee in charge:
+Professor Yakun Sophia Shao, Research Advisor
+Professor Ren Ng, Second Reader
+Spring 2026
+1
+Abstract
+Hardware ray tracing has become a foundational tool for photorealistic rendering across games,
+film, architectural visualization, and scientific computing. However, the performance of these
+systems is fundamentally limited by the divergence inherent to ray tracing workloads. This
+thesis examines how contemporary GPU ray tracing architectures address divergence. Through
+targeted microbenchmarking of modern NVIDIA RTX devices, the shader scheduling system
+that underpins Vulkan ray tracing and OptiX is reverse-engineered. Ray tracing pipelines are
+compiled into stackless, asymmetric coroutines that are cooperatively scheduled at runtime,
+reducing divergence from nested shader execution. Shader Execution Reordering (SER) extends
+this system to support sorting of suspended work items and global work redistribution. Adding
+SER to an existing academic path tracer yields up to 30% speedups on standard test scenes. The
+emerging work graph programming model is evaluated as an alternative scheduling substrate for
+GPU path tracing, with mixed results. Finally, open directions for academic research on hardware
+ray tracing are outlined.
+i
+Contents
+Abstract
+1
+Contents
+i
+List of Figures
+ii
+List of Tables
+iv
+Acknowledgements
+v
+1 Introduction
+1
+2 Background
+3
+2.1 Ray tracing . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 3
+2.2 GPU Architecture . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+2.3 Ray tracing on the GPU . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 5
+2.4 LuisaRender . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 8
+3 Scheduling Hardware Ray Tracing
+9
+3.1 Methodology . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 9
+3.2 Experiments . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 10
+3.3 Shader Execution Reordering . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 22
+3.4 Summary . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+4 Work Graphs for Path Tracing
+25
+4.1 Adding Work Graphs to LuisaCompute . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+4.2 Integrator Design . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27
+4.3 Results . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+4.4 Discussion . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 29
+4.5 Summary . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 30
+5 Future Work
+31
+5.1 Radiance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 31
+5.2 Async on GPU . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+Appendix
+33
+References
+35
+ii
+List of Figures
+Figure 2.1 Example of path tracing. Image by Qutorial, via Wikimedia Commons, licensed
+under CC BY-SA 4.0. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠4
+Figure 2.2 Visualization of the ray tracing pipeline. Built-in functionality highlighted in blue.
+Adapted from the OptiX programming guide [1] . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠7
+Figure 2.3 A high-level overview of the LuisaRender system. From the original paper [2] . . . . ⁠8
+Figure 3.1 Visualization of launch mapping. Left plot visualizes SM identity. Right plot
+visualizes warp identity . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠10
+Figure 3.2 Visual representation of experimental setup . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠11
+Figure 3.3 Visualization of the execution flow of a single warp in the Vulkan ray tracing
+pipeline. Different colors correspond to different targets. Squares of different colors
+represent SIMT threads executing different shaders . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠12
+Figure 3.4 Example of coroutine lowering of ray tracing program. Live state across a schedule
+point (TraceRay) is spilled to a coroutine frame, along with the continuation after
+the call to TraceRay . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠14
+Figure 3.5
+Histogram of active threads per cohort (exec_marker group) within closest-hit and
+miss shaders for OptiX. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠16
+Figure 3.6 An example of Shader Execution Reordering reducing execution divergence. Color
+represents the shader a thread will execute after TraceRay; threads sharing a color
+are repacked into the same warp after reordering. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠17
+Figure 3.7 Histogram of active threads per cohort at l1 and l2 after applying ReorderThread.
+The peak at 32 in l1 panel shows that reordering successfully repacks divergent
+threads into full warps. The distribution in l2 panel mirrors Figure 3.5 since
+reordering can only be invoked in the ray-generation shader. . . . . . . . . . . . . . . . . . . . . . ⁠18
+Figure 3.8 Per-launch-index visualization of ReorderThread for 1024 × 1024 launch on RTX
+PRO 6000. Left: timestamp measured just before entering ReorderThread, reveals
+Z-order over launch indices. Right: time spent in ReorderThread. Purple represents
+smaller values, Yellow represents larger values. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠19
+Figure 3.9 Distribution of post-reorder destination SMs, averaged across source SMs. For each
+source SM, the number of threads sent to each destination SM is counted and
+sorted in decreasing order; these rank-ordered counts are then averaged across all
+source SMs. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠21
+iii
+Figure 3.10 Wall-clock time required for rendering different scenes in RGB and spectrally with
+wavefront, megakernel, and SER+megakernel integrators. Scenes from the original
+paper [2]. Results from RTX PRO 6000 with a sample count of 8192. . . . . . . . . . . . . . . ⁠23
+Listing 4.1 Example usage of work graphs feature within Luisa DSL . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠26
+Figure 4.1 Diagram of work graph used in work graph integrators. Solid edges represent
+edges present in work graph, dashed edges represent data-flow through global
+buffer. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠27
+Figure 4.2 Render comparison of bathroom scene [3] between work graph and reference
+megakernel path traced image. The renderings are perceptually identical, with
+only small numerical differences. (SSIM = 0.992170) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠28
+Figure 4.3 NSight Graphics capture for work graph renderer . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠29
+Listing 6.1 To generate exec_marker, one thread in a warp can increment an atomic counter
+to get a unique “marker” that is then broadcasted to the other threads in a warp.
+The CUDA / OptiX version is given above, and Slang (generating SPIR-V shader
+code for Vulkan) is given below. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠33
+iv
+List of Tables
+Table 3.1 Table of reordering efficacy versus delay strategy. All values measured for a 1024 ×
+1024 launch size. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠20
+Table 3.2 Estimated reorder window of Shader Execution Reordering on RTX PRO 6000 and
+L4. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ⁠22
+Table 4.1 Comparison between megakernel scheduling and work graph-based scheduling . . . ⁠28
+v
+Acknowledgements
+I owe a great debt to Professor Sophia Shao for her mentorship and support during my time at
+Berkeley. I am also grateful to Apple for funding my studies in computer architecture. Finally, I’d
+like to express infinite gratitude and love to my family, who have supported me at every step of
+my journey.
+1
+Chapter 1
+Introduction
+Hardware ray tracing has played an increasingly large role in modern computer graphics.
+Previously relegated to cinematic productions, with individual frames requiring days to render,
+advances in hardware ray tracing have enabled high-fidelity, physically-accurate rendering on
+consumer hardware. In addition to enabling more photorealistic graphics, wider adoption of ray
+tracing has benefited game developers, reducing the amount of time needed to bake lighting,
+and making it easier to convincingly light dynamic worlds in their games. Outside of games, ray
+tracing has also found usage in accelerating film production, architectural visualization, scientific
+computations, and audio rendering.
+Despite the growing adoption of this technology, the underlying mechanisms for how these
+systems work are still not widely understood. Academic works have largely neglected the actual
+engineering behind these hardware ray tracing systems. This disconnect between academic study
+and industry practice makes it difficult to propose and evaluate new hardware designs for ray
+tracing.
+The fundamental performance bottleneck in ray tracing is divergence. This thesis studies the
+problem from two angles:
+1. Reverse-engineering scheduling techniques in a contemporary implementation of hardware
+ray tracing
+2. Evaluating the fine-grained scheduling abilities of work graphs for path tracing applications
+Specifically, this thesis is organized as follows:
+• Chapter 2 provides an overview of ray tracing, GPU architectures, challenges with mapping
+ray tracing workloads to GPUs, and the current landscape of hardware acceleration for GPU
+ray tracing.
+• Chapter 3 covers a series of experiments that aim to reverse-engineer the shader scheduling
+and work reordering mechanisms of ray tracing pipelines on contemporary NVIDIA devices.
+‣ Experimental results reveal that a stackless, asymmetric coroutine execution model is used
+to schedule ray tracing workloads.
+‣ Shader Execution Reordering [4] is characterized through microbenchmarking, which shows
+that it is able to reorder batches of ~12,000 rays across the entire GPU.
+CHAPTER 1: INTRODUCTION
+2
+‣ We add Shader Execution Reordering support to an existing path tracer, with up to 30%
+speedups in some conditions.
+• Chapter 4 details an alternative approach to combatting divergence through the emerging
+technology of work graphs.
+‣ Work graphs are slower than a baseline path tracer implementation, but exhibit dynamic
+scheduling behavior not possible in traditional compute pipelines.
+• Chapter 5 outlines future work, with a particular emphasis on advancing academic ray tracing
+designs.
+3
+Chapter 2
+Background
+2.1 Ray tracing
+Ray tracing refers to a broad class of techniques used for modeling light transport.
+One particular technique, known as path tracing, is regarded as creating the most visually
+accurate images. It aims to solve the “rendering equation” of light transport [5] through Monte
+Carlo integration. In practice, a very simple path tracer first casts rays into the scene from the
+camera, which then bounce around the scene according to the material properties of objects that
+they intersect. When a ray connects to a light source, the contribution from that light along the
+path the ray traveled is accumulated into the final image. Russian roulette is a commonly used
+method to avoid tracing infinitely long paths. Each bounce can probabilistically terminate the
+path, especially if its contribution to the final image after a certain depth would be negligible.
+Previously limited to offline renderers and movies, ray tracing and path tracing techniques
+are increasingly being adopted by games and other interactive applications to enhance the visual
+fidelity and photorealism of their graphics. Many visual phenomena are naturally captured by
+path tracing, including refraction, reflections, global illumination, soft shadows, and caustics
+— see Figure 2.1 for an example. Most of these effects are possible to achieve with traditional
+rasterization-based approaches as well, but require screen-space approximations.
+For more details about path tracing and physically-based rendering, the reader is referred to
+the excellent PBRT textbook [6].
+CHAPTER 2: BACKGROUND
+4
+Figure 2.1: Example of path tracing. Image by Qutorial, via Wikimedia Commons, licensed under
+CC BY-SA 4.0.
+2.2 GPU Architecture
+Though initially designed specifically for hardware acceleration of 2D and 3D rendering through
+rasterization, GPUs are now the preeminent platform for highly parallel computation involving
+millions of threads at once.
+GPUs organize these threads into groups called warps or wavefronts (the terminology differs
+by hardware vendor), where each thread in the warp must execute the same instruction. This
+is sometimes referred to as single-instruction, multiple-thread (SIMT) execution. When a warp
+encounters non-uniform control flow, like a conditional where the threads in the warp don’t
+all take the same branch, the hardware will execute both branches and deactivate some of the
+threads in each branch to maintain correctness.
+Each GPU core (SM in NVIDIA’s terminology) can time-multiplex multiple warps to help hide
+the latency from long-latency instructions. However, this is limited by the maximum number of
+live registers that a warp uses, which is determined statically from the instruction binary. For a
+given program, the number of warps which can be resident on a GPU core without overflowing
+its register file is known as the occupancy.
+CHAPTER 2: BACKGROUND
+5
+In addition, an important memory optimization is the use of memory access coalescing to
+reduce required memory bandwidth. Conceptually, it is possible for every thread within a warp
+to access any location in memory. However, threads in the same warp will usually read adjacent
+locations in memory. To optimize this common case, special hardware is used to detect and
+opportunistically coalesce these memory accesses.
+There are a few key consequences from this architecture:
+• Execution divergence from irregular control flow incurs large performance penalties. Threads
+in a warp which are masked off are not doing useful work.
+• Suboptimal occupancy incurs large performance penalties. “Hot spots” in kernels which
+require large numbers of live values can degrade the performance of the kernel as a whole,
+since the number of warps which can be scheduled is determined statically.
+• Divergent memory accesses incur large performance penalties. Non-regular memory access
+patterns are uncoalesced and create large amounts of traffic.
+For more details about the topic, the reader is referred to Hennessy and Patterson [7].
+2.3 Ray tracing on the GPU
+The embarrassingly parallel nature of ray tracing algorithms means they are amenable to being
+run on the GPU. However, the irregularity inherent in ray tracing makes building a performant
+implementation challenging.
+In rasterization workloads, the spatial locality of rasterized fragments generated in a single
+draw call generally results in good locality for texture accesses. In addition, a single draw
+call is associated with one fragment shader and one vertex shader, so execution divergence is
+manageable.
+In contrast, for ray tracing workloads:
+• A single ray may require invoking many different kinds of shaders and sampling many different
+textures as it encounters objects with varying material properties while bouncing around the
+scene.
+• Even worse, the probabilistic, data-dependent nature of Russian roulette sampling can lead to
+heavy work imbalance and execution divergence as some paths extend longer than others.
+• PBR shaders can result in high register pressure, decreasing occupancy or introducing stack
+spills. If they are combined into a single program, the occupancy will be limited by the most
+register-intensive shader.
+Megakernels and Wavefronts
+There are two common approaches to architecting a ray tracing system on the GPU: megakernel
+and wavefront.
+CHAPTER 2: BACKGROUND
+6
+Megakernel renderers work by merging all of the ray tracing logic into a single, monolithic
+kernel that handles ray generation, ray-scene intersection, light sampling, and material evalua­
+tion. Generally, the logic for material evaluation looks like a large switch statement over different
+material types. This leads to large amounts of execution divergence: in the worst case, all 32
+threads in the warp must execute different shaders, and compute throughput is reduced by that
+factor as well.
+The wavefront approach was first proposed in Laine et al. [8]. The primary trait of wavefront
+renderers is that they decouple traversal from shading by separating them into separate kernels.
+Separate kernels can also be used for evaluating different materials, performing light sampling,
+generating camera rays, etc. This approach can increase occupancy by allowing kernels which
+need relatively few registers to saturate the hardware with more warps. In addition, by separating
+different materials into their own kernels, a large source of divergence is removed.
+However, the main downside of this approach is memory bandwidth. Rather than keeping
+accumulated path state (throughput, radiance, etc.) in registers, these values must be loaded
+from and spilled to global memory to persist between different kernel launches. Nonetheless, the
+savings from increased coherence can outweigh the loss of efficiency caused by the increased
+cost of working in global memory, the synchronization needed between different stages, and the
+overhead of requiring more kernel launches.
+Hardware Acceleration for Ray Tracing
+Since the Turing generation of GPUs, NVIDIA has included dedicated hardware for accelerating
+ray queries directly into their devices. Other major hardware vendors have followed suit.
+At a high level, such systems can be categorized into distinct “levels” [9] that each define a set
+of operations within a ray tracing pipeline that are offloaded to hardware. Some of these levels
+are described below:
+1. Intersection hardware: At this level, fixed function units offload the floating-point opera­
+tions needed to test if a ray intersects with a bounding box, triangle, or other simple primitive.
+SIMT units are still required to traverse the acceleration structure (typically a bounding
+volume hierarchy) in software.
+2. BVH traversal hardware: At this level, additional hardware (usually referred to as a RT
+Unit or RT Core) offloads the traversal of the BVH from SIMT units. These RT units handle
+scheduling of intersection tests and memory accesses into BVH data structures.
+3. BVH traversal hardware with Coherency: At this level, more work is done to extract
+coherency out of the rays processed by hardware; incoherent rays are sorted based on the
+objects they intersect before shading occurs.
+Though there are “levels” beyond the ones listed here, the second and third levels represent the
+state of most contemporary graphics hardware. The rest of this thesis will consider systems of
+this type.
+CHAPTER 2: BACKGROUND
+7
+Raytracing APIs
+Similarly to fixed-function raster-operation hardware, the usage of dedicated ray tracing hard­
+ware is mostly done through graphics APIs that aim to be standardized across vendors and
+provide a common target for game engine developers. All three major modern APIs (Vulkan,
+DX12, and Metal) have native support for ray tracing.
+However, there are also vendor-specific APIs that align more closely to general-purpose
+compute frameworks. In particular, the OptiX [10] API builds off of NVIDIA’s CUDA compute
+stack, allowing for hardware acceleration of ray tracing tasks alongside normal CUDA kernels.
+These APIs (OptiX, HIPrt, Embree) generally emphasize visualization and photorealistic renders
+more than real-time rendering capabilities, but still provide access to the same underlying
+functionality.
+Figure 2.2: Visualization of the ray tracing pipeline. Built-in functionality highlighted in blue.
+Adapted from the OptiX programming guide [1]
+Vulkan, DX12, and OptiX expose a state machine programming model for individual rays called
+the ray tracing pipeline. A launch spawns a grid of ray generation shader invocations, with
+each invocation being assigned a launch index. Each invocation can call a TraceRay primitive to
+intersect a ray against an acceleration structure.
+Depending on the outcome, a miss program or a closest-hit program associated with the
+intersected geometry is invoked. References to these shaders are placed into the “shader binding
+table” (SBT), providing a way to do per-geometry dynamic dispatch. Both miss and closest-hit
+programs can recursively call TraceRay as well.
+Prior Work
+Outside of vague marketing claims, relatively little is known about commercial implementations
+of hardware ray tracing. The most comprehensive source is from Intel [11], [12], who provide a
+CHAPTER 2: BACKGROUND
+8
+high-level functional overview of their system. Previous studies [13] have also performed some
+coarse analysis on NVIDIA’s RTX implementation.
+In the academic space, Vulkan-Sim [14] augmented GPGPU-Sim [15] with a functional simu­
+lation of a ray tracing traversal / intersection accelerator and a matching timing model to study
+the performance characteristics of hardware-accelerated ray tracing. Arches [16] implemented
+a performant cycle-level simulation which could exploit more concurrency during simulation.
+Kim et al. [17] quantified the effect of data and execution divergence on the performance of ray
+tracing systems through analysis of microarchitectural performance counters.
+2.4 LuisaRender
+LuisaRender [2] is an academic path tracer which aims to maximize portability. The LuisaCom­
+pute framework it is built on exposes an embedded DSL within C++ for parallel computation
+on GPUs, a just-in-time compiler for code generation, and a runtime abstraction for multiple
+different platforms (CUDA, DirectX, Metal). DSL code is written against a set of common resource
+abstractions (buffers, textures, acceleration structures), which are allocated and managed by
+platform-specific code when using a specific backend. The same DSL source code can then
+be lowered to the specific shading language (CUDA C++, HLSL, Metal Shading Language) the
+backend expects before being compiled and shipped off to the device.
+Figure 2.3: A high-level overview of the LuisaRender system. From the original paper [2]
+Using LuisaRender allows for the same sampling and material evaluation routines to run on
+multiple devices with little to no modification. In addition, its modular architecture means
+the integrator, which is responsible for scheduling computation, is easily swapped, enabling
+smoother comparisons between different scheduling strategies.
+9
+Chapter 3
+Scheduling Hardware Ray Tracing
+This chapter presents a set of microbenchmarks to uncover implementation details of Vulkan
+and OptiX ray tracing pipelines on NVIDIA devices. The experiments reveal that ray tracing
+pipelines are compiled into stackless, asymmetric coroutines which are cooperatively scheduled
+at runtime, and that Shader Execution Reordering extends this system to support cross-SM work
+scheduling.
+3.1 Methodology
+The goal of these microbenchmarks is to investigate how ray tracing workloads are mapped and
+scheduled onto hardware.
+In order to characterize the divergence of ray tracing shaders, it is necessary to track
+which hardware threads actively executed together within a single warp. To do this, a marker
+(exec_marker) is generated using a global atomic counter and platform-specific intrinsics (List­
+ing 6.1). Additional intrinsics1 can be used to query the identity of the physical hardware units
+that a given thread is executing on. These are referred to as smid, warpid, and laneid in the
+following results.
+Each experiment stores measurements of smid, warpid, laneid, and timers to global memory
+at each launch index. Python scripts are used to interactively visualize the results for further
+analysis.
+All six combinations of (optix, vulkan) × (RTX 3060, L4, RTX PRO 6000) were tested.
+The three GPUs tested represent three different generations of GPU architecture (Ampere, Ada,
+and Blackwell). Unless noted otherwise, the results below apply to all six combinations.
+The full source of the experiments is available on Github2
+1 %smid, %warpid, %laneid PTX special registers
+SubgroupLocalInvocationId SPIR-V builtins for Vulkan.
+2https://github.com/buggy213/optix-experiments
+for
+CUDA
+/
+OptiX.
+WarpIDNV,
+SMIDNV,
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+10
+3.2 Experiments
+Launch index mapping
+The first experiment establishes how launch indices are mapped onto threads at the entry point of
+the ray tracing pipeline. Specifically, each thread generated by the ray-generation stage records
+its position in the grid of launch indices and the (smid, warpid) corresponding to the physical
+hardware units it executed on.
+Figure 3.1 shows a visualization of the result, for a 32 × 32 sized ray tracing launch. The
+launch indices are colored according to the recorded values of smid and warpid. These results
+show that a warp operates on an 8 × 4 rectangle of launch indices, with each of the 32 threads
+in the warp executing the ray-generation shader for one launch index. exec_marker verifies that
+each rectangle is executed as a single cohort. (smid, warpid) alone cannot establish this because
+warp slots are recycled as work completes. 4 warps are grouped together to form a single thread­
+block which executes on an SM. The same scheme for mapping launch indices to threadblocks
+and warps also extends to larger launch sizes as well.
+Figure 3.1: Visualization of launch mapping. Left plot visualizes SM identity. Right plot visualizes
+warp identity
+Shader Scheduling within the Ray Tracing Pipeline
+The second experiment builds on the first by introducing additional stages of the ray tracing
+pipeline, and tracking how smid, warpid, and exec_marker evolve as a ray moves through those
+different stages. Specifically, an acceleration structure is built over three triangles. Two of the
+three triangles invoke the same shader (ch1) when intersected, but have separate entries in
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+11
+the SBT. The third triangle invokes a different shader (ch2) entirely, and any rays that miss all
+triangles invoke the miss shader (ms).
+Each launch index picks uniformly randomly between four targets (one for each triangle, one
+for miss) and traces a ray towards it; this causes the associated shader to be executed. Within all
+three shaders, a secondary recursive ray is also launched, again picking a target at random.
+Figure 3.2: Visual representation of experimental setup
+There are three shaders executed during the lifetime of a single launch index.
+1. The shader executed to generate a ray (rg)
+2. The shader executed by the primary ray (l1)
+3. The shader executed by the secondary ray (l2)
+For each one, an exec_marker is generated so that later analysis can cluster threads that executed
+together. exec_marker, smid, warpid, and laneid are all recorded into a buffer in global memory,
+which is copied back to the host and saved to disk for analysis.
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+12
+Figure 3.3: Visualization of the execution flow of a single warp in the Vulkan ray tracing
+pipeline. Different colors correspond to different targets. Squares of different colors represent
+SIMT threads executing different shaders
+Figure 3.3 visualizes how a single 8 × 4 rectangle of launch indices traverses the pipeline3. The
+four target colors correspond to the two ch1 triangles (orange and teal), the ch2 triangle (blue),
+and the miss shader (green). exec_marker reveals that shader invocation is serialized into one
+cohort per target at both l1 and l2, first executing orange ch1 threads, then teal ch1, blue ch2, and
+finally green ms. The smid and warpid associated with a given launch index remain unchanged
+during all ray tracing stages.
+Several conclusions can be drawn from this:
+1. The mapping between launch indices and hardware threads is static.
+A single launch index is handled by one hardware SIMT thread for its entire lifetime,
+rather than being passed around and scheduled on multiple SIMT threads. This contrasts with
+Intel’s implementation [11], where threads are destroyed upon calling into TraceRay, and new
+threads are launched to handle the continuation (miss or closest-hit shader) after the RT core
+finishes traversal.
+3An interactive version can be downloaded from here
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+13
+Intel’s implementation might improve utilization by freeing up the registers of a thread
+waiting on RT core traversal to finish, allowing shading work to be scheduled in the meantime.
+However, it also requires additional memory bandwidth to spill live state to memory and
+rematerialize it once the traversal finishes; a static assignment avoids this cost.
+2. Some cooperative scheduling mechanism exists to increase RT core utilization.
+In particular, the recursive calls to TraceRay from within the shader invocations of l1
+don’t fan out to 42 = 16 exec_markers per warp in the l2 data. Reconvergence occurs before
+shader invocations at l2, preventing the execution divergence created by TraceRay from
+compounding due to recursive calls.
+The original OptiX paper [10] provides some hints. It describes a set of program transfor­
+mations to split shaders at calls to builtin functions (like TraceRay), with these split points
+returning control to internal scheduling code. Profiling the experiment binary confirms that
+the ray generation, miss, and closest-hit shaders are all split into multiple subroutines around
+TraceRay calls; though OptiX predates hardware ray tracing by almost a decade, its scheduling
+system still persists.
+This leads to the following insight: OptiX and Vulkan are transforming a program into
+a set of asymmetric, stackless coroutines4, with a software-managed stack of coroutine
+frames in addition to a normal call stack.
+4This distinction follows the taxonomy of Moura and Ierusalimschy [18]. Asymmetric coroutines yield only
+to their caller rather than to peer coroutines. Stackless coroutines cannot suspend from within (non-inlined)
+function calls
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+14
+rg:
+...
+a ← 3
+b ← 5
+TraceRay()
+MaterialFn(a, b)
+...
+// gets transformed to
+rg_pre:
+...
+a ← 3
+b ← 5
+alloca frame
+frame.a ← a
+frame.b ← b
+frame.next ← rg_post
+push frame
+yield to scheduler
+rg_post:
+retrieve frame
+a ← frame.a
+b ← frame.b
+MaterialFn(a, b)
+...
+Code Transformation
+Figure 3.4: Example of coroutine lowering of ray tracing program. Live state across a schedule
+point (TraceRay) is spilled to a coroutine frame, along with the continuation after the call
+to TraceRay
+An illustrative example is given in Figure 3.4. The values of a and b must remain live across
+the call to TraceRay, as they are required for material evaluation. The coroutine frame gets
+pushed onto a stack. Once the call to TraceRay ends, the scheduler can peek at the next field
+within the coroutine frame to determine that it needs to run the rg_post continuation, which
+can read out the values of a and b before performing material evaluation.
+A careful reading of the OptiX and Vulkan RT specifications supports this idea:
+• “Direct callables”, which can be called indirectly through a function table, are not allowed to
+call optixTrace (the equivalent to TraceRay). “OptiX-enabled” functions are also not able
+to call optixTrace. OptiX forcibly inlines every other function which is not a direct callable
+or OptiX-enabled function. Thus, only these two categories of functions which make use of
+the normal call stack are unable to suspend their execution. This kind of function coloring
+limitation [19] implies that the coroutines must be stackless.
+• The coroutine scheduler must support (possibly transitively) recursion between multiple
+coroutines. In the absence of recursion, it is possible to statically analyze the call tree
+of a given asynchronous function and create a minimally sized structure that allows for
+resumption from any suspension point within that function or its (transitive) callees.
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+15
+Extending this to support recursion, such a structure would need to contain itself; in
+many coroutine systems, this is handled by requiring heap allocation to create the necessary
+level of indirection5.
+Dynamic heap allocation on the GPU is usually not preferable. Instead, both Vulkan and
+OptiX require the programmer to specify a maximum ray trace depth and an upper bound
+on the depth of the call tree for schedulable shaders. This clearly points towards a worstcase allocation strategy, with a stack of coroutine frames being allocated up-front to every
+launch index.
+The original OptiX paper also describes how the scheduler decides which coroutine to run
+next if multiple are available, stating that “… one simple scheme that works well determines
+a schedule by assigning a static prioritization over states.” Exact details are not provided,
+but a reasonable guess is that the simpler a coroutine is, the higher a prioritization it gets.
+SIMT efficiency during these simple coroutines is lower, but if they schedule more expensive
+continuations, the overall efficiency is improved, since expensive operations are made more
+coherent.
+For instance, the trivial closest-hit and miss shaders of the microbenchmark would receive
+higher priority than the internal TraceRay coroutine. All four are thus scheduled before any
+secondary ray is launched, leading to a full warp’s worth of rays being traced, which is
+maximally efficient. This ability to defer expensive coroutines to increase coherency while
+running them can be useful for user code as well (e.g. complex shading networks).
+In prior works, there has been little discussion about the usage of cooperative scheduling
+and coroutines on GPU. The primary work in this area is LuisaCompute’s coroutine system
+[20] and some work to port Rust’s async/await onto GPU [21]. Furthermore, this area is also
+relatively unexplored in the ray tracing hardware architecture community. Vulkan-Sim [14]
+models only the SIMT scheduling for control flow built into the core itself, and would thus
+suffer from compounding divergence in a recursive ray tracing setup.
+However, for many practical ray tracing applications, this coroutine scheduling logic can
+be avoided or minimized. Specifically, all hardware ray tracing APIs have user-accessible
+intrinsics (TraceRayInline) that bypass the ray tracing pipeline entirely. Even for applications
+using the ray tracing pipeline, restructuring to remove recursion is usually possible.
+3. OptiX coalesces by shader, while Vulkan does not.
+OptiX serializes execution into only 3 cohorts. In particular, OptiX was able to combine
+the execution of rays that hit both ch1 triangles. A histogram of the SIMT efficiency for all
+warps when executing closest-hit and miss shaders is shown in Figure 3.5. The primary mode
+at 8 active threads represents uniform target assignment between the ch2 triangle and ms
+5For example, C++ heap-allocates coroutine frames by default, relying on compiler optimization to elide the
+allocation. Rust requires manual indirection, usually through Pin<Box<T>>
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+16
+miss, both of which have a 1 in 4 chance of being selected. The mode at 16 active threads is
+attributable to the combined cohorts. This coalescing leads to a higher average SIMT efficiency
+for OptiX.
+Figure 3.5: Histogram of active threads per cohort (exec_marker group) within closest-hit and
+miss shaders for OptiX.
+Characterizing Shader Execution Reordering
+The third experiment extends the second experiment by introducing the shader execution
+reordering (SER) feature available in both Vulkan and OptiX. When using this feature, the
+single call to TraceRay is split into separate calls for acceleration structure traversal and shader
+invocation. Between these two points, a special ReorderThread intrinsic can be called to perform
+shader execution reordering.
+Reordering reduces divergence when working on a set of rays by sorting them using some
+key, and repacking rays with similar sort keys into the same warp to continue execution after
+ReorderThread. The sort key incorporates, in order from most to least significant, the shader ID
+of intersected geometry, a user-supplied hint, and spatial information from intersection testing.
+Therefore, threads that need to execute the same closest-hit or miss shader after acceleration
+structure traversal are repacked into the same warp following a reorder, reducing divergence.
+The user-supplied hint can be used to incorporate information about material properties (e.g.
+surface roughness), reducing execution divergence within a shader. The lowest spatial coherence
+bits can improve the locality of texture samples during shading.
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+17
+Figure 3.6: An example of Shader Execution Reordering reducing execution divergence. Color
+represents the shader a thread will execute after TraceRay; threads sharing a color are repacked
+into the same warp after reordering.
+To test this feature, the previous experiment was augmented with a call to ReorderThread
+supplying no additional coherence hint. As expected, no changes were recorded on the Ampere
+card; it is documented that attempting to invoke a reorder on older architectures will result in a
+no-op. No reordering was observed at small launch sizes of 128 × 128 and below either.
+The SIMT efficiency measured at l1 during this experiment was greatly improved by reorder­
+ing (Figure 3.7). Reordering can only be applied in the ray-generation shader, so the divergence
+from shader execution still appears in l2, with the same execution serialization observed as in
+the previous experiment.
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+18
+Figure 3.7: Histogram of active threads per cohort at l1 and l2 after applying ReorderThread.
+The peak at 32 in l1 panel shows that reordering successfully repacks divergent threads into full
+warps. The distribution in l2 panel mirrors Figure 3.5 since reordering can only be invoked in
+the ray-generation shader.
+The following analysis uses a simplified variant of the experiment which isolates the reordering
+mechanism from the rest of the ray tracing pipeline. This version of the experiment excludes the
+acceleration structure, SBT, and TraceRay calls. It is OptiX-only due to issues in Slang’s SPIR-V
+backend.
+Each launch index still randomly chooses a 2-bit “target”, which is used as the coherence
+hint; the shader ID and spatial components of the sort key are unused. By adding calls to query
+the global timer6 before and after reordering, it is possible to characterize the temporal aspect of
+reordering as well. A visualization of results is shown in Figure 3.87.
+6 %globaltimer is used to get the device-wide monotonic clock value so comparisons between values from
+different SMs are valid. Its resolution is worse than the core-local %clock64, which unfortunately leads to
+noticeable quantization within the recorded timestamps.
+7Interactive version can be downloaded from here
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+19
+Pre-reorder %globaltimer
+ReorderThread duration
+Figure 3.8: Per-launch-index visualization of ReorderThread for 1024 × 1024 launch on RTX
+PRO 6000. Left: timestamp measured just before entering ReorderThread, reveals Z-order over
+launch indices. Right: time spent in ReorderThread. Purple represents smaller values, Yellow
+represents larger values.
+1. Reordering is optional. Large patches of the launch grid are not reordered in Figure 3.8.
+These correspond to the purple areas in the ReorderThread duration plot. If a rectangle is not
+reordered, the duration is small, roughly ~700 cycles. If a rectangle is reordered, the duration
+is on the order of ~20,000 cycles. The granularity of reordering is at the level of a rectangle;
+either all the work in a rectangle is reordered or no work is reordered, with zero recorded
+counterexamples.
+Most rectangles which did not undergo reordering stayed on the same SM, meaning the
+recorded smids before and after ReorderThread were equal. However, a small number of them
+moved onto a new SM post-reorder. Thus, rectangles can be classified into three groups:
+1. The rectangle is reordered, and its constituent launch indices continue execution on many
+different SMs (“reordered rectangles”)
+2. The rectangle is not reordered, and it stays on the same warp on the same SM (“stationary
+rectangles”)
+3. The rectangle is not reordered, but it moves onto a different SM (“mobile rectangles”)
+As evidenced by the pre-reorder %globaltimer measurement, the launch grid is swizzled into
+a Z-order space filling curve, which increases spatial locality compared to a raster scan. The
+stationary rectangles and reordered rectangles form long, Z-order adjacent streaks, while the
+mobile rectangles are mostly clustered towards the end of the ray tracing launch.
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+20
+Injecting artificial delays before the call to ReorderThread causes the proportions of these
+three groups to change drastically.
+Delay Strategy % stationary rectangles % reordered rectangles % mobile rectangles
+No delay
+48.6
+50.4
+1.0
+Fixed delay
+29.7
+69.1
+1.2
+(for 128μs)
+Variable delay
+0.6
+98.4
+1.0
+(up to 128μs)
+Busy waiting
+49.5
+50.4
+0.1
+(up to 128μs)
+Table 3.1: Table of reordering efficacy versus delay strategy. All values measured for a 1024 ×
+1024 launch size.
+With no delay, only around half of the rectangles are reordered. With a fixed delay of 128μs,
+more rectangles are reordered. A variable delay leads to the largest proportion of reordered
+rectangles, even though the actual rate of rays reaching ReorderThread is higher over the
+course of the experiment. This suggests that the low reordering efficiency is an artifact of
+microbenchmarking, as realistic workloads would have more variable delays due to BVH
+traversal. Indeed, this effect is much weaker when the simple three-triangle geometry is
+reintroduced.
+Interestingly, when the ray-generation shader is instead busy-waiting before a reorder
+operation, the reordering efficiency again drops significantly. This suggests that Shader Exe­
+cution Reordering requires SM execution resources, and the busy-waiting steals cycles from
+reordering work.
+2. Reordering is global. Excluding stationary rectangles, the distribution of where the threads
+from one SM land after reordering is close to uniform. The average sorted distribution is
+plotted in Figure 3.9. There is no top-𝑘 behavior, suggesting that the work is not confined to
+any cluster of SMs. It is known that modern NVIDIA devices are hierarchically clustered into
+“GPC”s (Graphics Processing Clusters), clusters of SMs that share raster hardware and have
+the ability to communicate through a shared memory interconnect, but there is no indication
+that the reordering occurs at this level or any level smaller than the whole device. Instead,
+the distribution matches quite closely with a simple “balls and bins” model of scheduling (a
+uniform multinomial distribution over all possible target SMs).
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+21
+Figure 3.9: Distribution of post-reorder destination SMs, averaged across source SMs. For
+each source SM, the number of threads sent to each destination SM is counted and sorted in
+decreasing order; these rank-ordered counts are then averaged across all source SMs.
+3. Reordering is batched. Even though reordering can distribute work across the device,
+there is a clear temporal limit to reordering. For example, it was never observed that the
+last launch index to reach ReorderThread was repacked alongside the first thread to reach
+ReorderThread, even if their coherence keys were identical. In fact, the launch indices
+repacked into a single post-reorder warp (as witnessed by exec_marker) come from prereorder warps that reached ReorderThread within ~5μs of each other, compared to the whole
+launch taking nearly ~600μs.
+To quantify this effect, the coherence hints were modified to be a random permutation of
+the natural numbers from 1 to 220 . A basic statistical model of SER is that it picks out chunks
+of 𝑚 launch indices and reorders them. Warps then pick a sorted 32-length subsequence out
+of one of these chunks. Using order statistics (see Appendix B), it is possible to show that
+220 +1
+− 1 provides a good estimator for 𝑚, where 𝑔 is the average gap between the sorted
+𝑔
+coherence hints in a single post-reorder warp.
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+Device
+Launch size
+RTX PRO 6000
+512 × 512
+RTX PRO 6000 1024 × 1024
+L4
+512 × 512
+L4
+1024 × 1024
+22
+Averaged 𝑚
+̂
+12288.9
+12287.1
+11783.5
+11775.6
+Table 3.2: Estimated reorder window of Shader Execution Reordering on RTX PRO 6000 and
+L4.
+Table 3.2 summarizes the results. Under this model, SER is able to reorder around ~12,000
+launch indices on both tested devices (RTX PRO 6000 and NVIDIA L4), and this value is
+independent of launch size. This value also agrees with the temporal analysis above: 220 work
+items over 600μs is a rate of ~1750 items/μs, meaning the reorder window would fill up in
+~6.8μs, which is reasonably close to the 5μs window for a single warp.
+The implementation of ReorderThread is not documented, but a reasonable conjecture is that
+it is based on the cooperative scheduling mechanisms described earlier for TraceRay. In this
+interpretation, ReorderThread functions as a coroutine suspension point (like TraceRay), and the
+state that must live across the suspension gets packed into a coroutine frame. However, rather
+than spilling this state into the per-launch-index stack, the frame is placed into a global reorder
+queue, where it can then be sorted and dequeued by a different SM.
+The existence of this queue would explain why mobile rectangles and stationary rectangles
+exist: mobile rectangles represent the queue draining at the end of the ray tracing launch, and
+stationary rectangles represent warps reaching ReorderThread when the queue is full. The size
+of this queue would also correspond to the figure of 12,000 found earlier.
+3.3 Shader Execution Reordering
+The previous section establishes a possible mechanism for SER, but doesn’t provide insight into
+how it generates a performance uplift in a realistic workload. To study this, support for shader
+execution reordering was added to LuisaRender’s default megakernel integrator. In order of
+priority, the coherence hint passed into ReorderThread incorporates:
+• Hit info: A ray can miss all the geometry in the scene, hit a light source, or hit a regular object.
+These represent different control flow paths through the integrator. When a ray misses all
+geometry, the path is terminated. When it hits a light source, the MIS weight combining the
+emission from the light with the previous bounce’s direct lighting must be resolved.
+• Material info: LuisaRender assigns each material in the scene a tag, which is used for shader
+dispatch after a call to TraceRayInline. Since LuisaRender relies on TraceRayInline for all
+ray queries, its SBT contains no information about the materials of different geometry in the
+scene. Thus, the tag must be incorporated into the coherence hint to affect reordering.
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+23
+• Russian roulette info: Russian roulette probabilistically terminates paths with low throughput,
+creating divergence when some threads in a warp survive and others do not. Making an edu­
+cated guess about which threads are likely to be terminated by Russian roulette so reordering
+packs them together can thus reduce divergence.
+All test scenes were rendered using a wavefront integrator, the unmodified megakernel integra­
+tor, and the SER-enabled megakernel integrator. Furthermore, each component of the coherence
+hint was tested individually. Both spectral and non-spectral renders were included to test how
+the overhead from SER changes with different per-sample shading cost.
+Figure 3.10: Wall-clock time required for rendering different scenes in RGB and spectrally with
+wavefront, megakernel, and SER+megakernel integrators. Scenes from the original paper [2].
+Results from RTX PRO 6000 with a sample count of 8192.
+Several observations follow from Figure 3.10:
+• In every scene except bathroom, the wavefront integrator is outperformed by the megakernel
+integrator. Luisa’s default wavefront integrator does not bucket surface interactions by material
+type, so the material evaluation kernel suffers from relatively high divergence.
+• The combined hint consistently matches or outperforms any individual hint.
+• The material info hint is the most impactful, yielding up to 30% speedups in some scenes.
+• SER is more helpful during spectral rendering. The overhead introduced by SER is similar for
+both spectral and sRGB renders, so the additional computation for dispersion and spectral
+integration during spectral rendering better amortizes that cost.
+CHAPTER 3: SCHEDULING HARDWARE RAY TRACING
+24
+3.4 Summary
+Together, the experiments above establish a baseline for the analysis of NVIDIA’s hardware ray
+tracing platform on all of its modern compute architectures. Each ray tracing launch index is
+statically mapped onto a hardware thread, and a cooperative, coroutine-based scheduler is used
+to manage divergence from recursive calls to TraceRay. This scheduling strategy is recognizably
+descended from the original OptiX runtime [10].
+Shader Execution Reordering builds on this system by introducing the ability to spill corou­
+tine state to a global reorder queue rather than the per-launch-index coroutine stack. The queue
+entries can be sorted in batches of ~12,000 elements each into coherent groups. The post-reorder
+continuations can be dispatched to SMs across the whole device. Queue overflow leads to in-place
+continuation; draining the queue causes reordering to be skipped. In practice, Shader Execution
+Reordering can decrease render times by up to 30%.
+25
+Chapter 4
+Work Graphs for Path Tracing
+Despite being a widely adopted architecture for GPU path tracers, wavefront renderers have
+serious weaknesses. Path state which would otherwise live in registers must be spilled to global
+memory between kernels, and with millions of in-flight rays, this consumes valuable memory
+bandwidth. Dispatch sizing also presents a challenge for implementations, as dispatches are
+launched from the CPU, which cannot know how much work must be done at each wavefront
+stage a priori. For instance, the number of rays which exit the scene without intersecting any
+geometry dictates the optimal dispatch size for the miss shader. Reading back this information
+from GPU to CPU requires costly synchronization, so renderers often dispatch the worst-case
+size and exit early from threads that have no work to do, leading to many wasted warp launches.
+Analogous issues arise in GPU-driven rendering pipelines, where modern game engines
+preprocess scene information (e.g. culling, LOD selection, virtual geometry [22]) on the GPU
+itself. These irregular workloads similarly force either expensive roundtrips to CPU or subop­
+timal hardware utilization. ExecuteIndirect and CUDA Dynamic Parallelism (CDP) aim to solve
+this by exposing dispatch machinery to device-side kernels, but these come with their own
+drawbacks. A common workaround is to use persistent threads [23], however, this approach is
+brittle, hardware-specific, and difficult to debug.
+Work graphs [24] aim to address these issues by introducing a dataflow-like execution model
+to the GPU. Different nodes are arranged into a graph and can execute downstream nodes by
+outputting “records” along the edges of the graph. Industry adoption has been limited, but work
+graphs have seen success in accelerating Sparse Matrix-Vector multiplication [25] and procedural
+generation tasks [26], [27].
+Work graphs are an appealing choice for path tracing, since the different stages within a
+wavefront renderer are naturally mapped onto nodes of a work graph. Passing data through
+records replaces intermediate buffers, and the work graph runtime can automatically compact
+records into SIMT warps for efficient execution, sidestepping the difficulty of dispatch sizing.
+Essentially, a renderer built on work graphs aims to achieve the same occupancy benefits and
+divergence reduction of a wavefront renderer, but without the memory bandwidth and dispatch
+overheads. The following sections evaluate how work graphs compare to existing megakernel
+and wavefront integrators.
+CHAPTER 4: WORK GRAPHS FOR PATH TRACING
+26
+4.1 Adding Work Graphs to LuisaCompute
+This section describes the augmentations to runtime and DSL components of LuisaCompute
+needed for work graph support.
+Work graphs are defined using a builder pattern. The output of a node can be connected to the
+input of a different node using an overload of the << operator. C++ templates are used to ensure
+compile-time type safety along the different edges of the work graph. The builder also validates
+that the graph is acyclic. An example of how work graphs are defined is given in Listing 4.1.
+cpp
+1 WorkGraphBuilder work_graph;
+2
+3 // add producer node
+4 auto producer = work_graph.add_node<BROADCASTING, EmptyRecord>();
+5 ...
+6
+7 // define producer output, use it in body of node
+8 auto producer_output = producer.output<ConsumerRecord>(1);
+9 WorkGraphNodeKernel producer_kernel = [&]() {
+10
+Var<ConsumerRecord> out;
+11
+...
+12
+producer_output.write(out, true);
+13 };
+14
+15 // associate function with node
+16 producer.define(producer_kernel);
+17
+18 // create consumer node
+19 auto consumer = work_graph.add_node<THREAD, ConsumerRecord>();
+20 WorkGraphNodeKernel consumer_kernel = [&](Var<ConsumerRecord> input) {
+21
+...
+22 };
+23 consumer.define(consumer_kernel);
+24
+25 // add edge from producer to consumer
+26 consumer << producer_output;
+27
+28 // validate work graph
+29 return work_graph.build();
+Listing 4.1: Example usage of work graphs feature within Luisa DSL
+The builder creates a backend-agnostic representation of the work graph which can then be
+compiled and executed on a particular backend. Currently, work graphs are DirectX-only, but
+support for a future Vulkan extension is straightforward to add. The DirectX backend lowers
+CHAPTER 4: WORK GRAPHS FOR PATH TRACING
+27
+work graph nodes to HLSL functions decorated with the appropriate work graph annotations. It
+also handles compiling the work graph, allocating backing memory, and resolving data hazards
+on application-managed resources against other commands in the same command stream before
+dispatch.
+4.2 Integrator Design
+Two integrators were added to LuisaRender using the newly added work graph feature.
+The work graph integrator maps the processes of ray intersection, material shading, and light
+sampling onto different nodes within a work graph (Figure 4.1). Records contain state that needs
+to be passed from one stage to another. For example, the world-space ray origin and direction
+are needed by all nodes following the entry node. As such, the record definition for each edge
+contains these fields.
+Unfortunately, it is not possible to map the bounce and sample accumulation loops onto the
+work graph programming model due to the inability to create back-edges. For simplicity, the
+implementation does one dispatch per bounce. By keeping a path state buffer which contains the
+information of a next bounce, paths which are not terminated by Russian roulette can be updated
+in the path state buffer and extended in the following work-graph dispatch. It may be possible to
+avoid this by unrolling the work graph to the maximum depth of a ray.
+Figure 4.1: Diagram of work graph used in work graph integrators. Solid edges represent edges
+present in work graph, dashed edges represent data-flow through global buffer.
+The hybrid work graph integrator passes data through memory, and only uses work graph
+records to perform work compaction. It uses the existing SOA (struct-of-arrays) data structures
+CHAPTER 4: WORK GRAPHS FOR PATH TRACING
+28
+from LuisaRender’s wavefront integrator rather than using work graph records for data move­
+ment. The records only contain an index into the SOA.
+Both integrators incorporate path regeneration [28] to increase utilization of the GPU when
+it would otherwise be operating on only a small subset of paths that survived Russian roulette.
+4.3 Results
+All experiments were performed on an RTX 3060 with driver revision 590. Figure 4.2 shows that
+work graph integrators correctly reproduce the output of existing integrators at high sample
+counts.
+Work graph
+Megakernel
+Figure 4.2: Render comparison of bathroom scene [3] between work graph and reference megak­
+ernel path traced image. The renderings are perceptually identical, with only small numerical
+differences. (SSIM = 0.992170)
+Megakernel Work graph Hybrid Megakernel Work graph Hybrid
+(spectral)
+(spectral) (spectral)
+Render time
+6.88s
+19.06s
+12.28s
+10.49s
+20.34s
+15.26s
+SIMT efficiency
+32.2%
+40.5%
+41.1%
+33.8%
+37.5%
+48.0%
+(coherence)
+Occupancy
+26.0%
+10.3%
+36.5%
+26.2%
+11.9%
+30.3%
+Table 4.1: Comparison between megakernel scheduling and work graph-based scheduling
+CHAPTER 4: WORK GRAPHS FOR PATH TRACING
+29
+4.4 Discussion
+One limitation of the existing work-graph API is that calls to write an output record must
+be threadgroup-uniform. This makes building an implementation cumbersome, as shader code
+needs to be structured to hoist these calls out of conditional statements and loop bodies.
+The “direct” implementation using work graphs is 2.8× slower than the megakernel integrator
+when rendering in sRGB. Interestingly, the intermediate buffers that are allocated by the work
+graph runtime don’t scale with the size of the record. The hybrid work graph integrator only
+passes a single index (4 bytes) in its records, while the direct implementation has 128 bytes within
+a single record, but both request the same amount of backing memory from the driver.
+This experiment clearly demonstrates that occupancy and coherence do not always lead
+to faster renders. Despite the hybrid renderer having higher coherence and occupancy, it still
+underperforms compared to the megakernel.
+Although the performance of the work graph integrators are worse than the megakernel,
+they do exhibit interesting behavior at runtime.
+Figure 4.3: NSight Graphics capture for work graph renderer
+Generally, compute shaders are unable to have heterogeneous threadblock sizes, as the register
+usage and shared memory usage is pessimized over the whole kernel. However, when using
+work graphs, different work graph nodes are actually scheduled as separate threadgroups with
+varying sizes and register file usages. This is more similar to rasterization workloads, where
+fragment shaders and vertex shaders from different draw calls are opportunistically scheduled
+by the hardware to maximize usage. The dynamic behavior of the hybrid work-graph integrator
+resembles many small wavefronts in series with each other, and a periodic behavior of different
+hardware pipes being utilized is clearly visible in Figure 4.3. However, while the peak utilization
+of RT cores and SM resources is higher than the megakernel, sustained throughput remains lower.
+Ampere is the first generation to support work graphs, and it is likely that the hardware
+was not designed for work graphs. If future implementations are able to use shared memory for
+transferring records between nodes and remove the restriction on acyclic graph structure, work
+graphs could be a more viable alternative.
+CHAPTER 4: WORK GRAPHS FOR PATH TRACING
+30
+4.5 Summary
+Work graph support was added to LuisaCompute, and two integrators were built on top of
+this feature: a direct integrator which uses work graph records to transfer state, and a work
+graph-wavefront hybrid that passes state through global memory buffers. Both integrators
+underperformed the megakernel baseline. However, the work graph runtime demonstrates
+heterogeneous, dynamically-scheduled threadgroups not seen in traditional compute workloads.
+31
+Chapter 5
+Future Work
+This thesis explored the issue of divergence in hardware ray tracing, using microbenchmarks
+to expose existing approaches deployed in contemporary NVIDIA GPUs and evaluating work
+graphs as an alternative scheduling substrate for path tracing. The next steps are to translate the
+insights from this work into an academic ray tracing accelerator design.
+5.1 Radiance
+The Radiance project [29] is an academic GPU architecture being developed at Berkeley, with an
+emphasis on neural graphics applications. An early revision of the SIMT core was taped out at
+the beginning of April 2026. A key goal of Radiance is to serve as a testbed for GPU architecture
+research in the academic space, and its design is well-suited to integration of a custom ray tracing
+accelerator. The design space is very large; a few key points are outlined below.
+Traversal and Intersection Accelerator
+Like other contemporary GPU architectures, ray intersection and ray traversal will both be
+offloaded to this accelerator. Existing datapaths [30] for ray-triangle intersection can be leveraged
+to reduce development effort.
+BVH Encoding and Traversal Stack
+Two choices arise within the traversal hardware itself: how to encode BVH nodes, and how to
+track traversal state. A wider BVH reduces tree depth and increases opportunities for parallel
+intersection testing, but requires more intersection tests per node visited. Compressed or quan­
+tized BVH formats reduce memory traffic at the cost of decode logic. A short-stack representation
+reduces the per-ray memory footprint at the cost of occasional traversal restarts. A BVH node
+cache helps reduce memory traffic. A treelet-based prefetching scheme [31] can reduce the
+latency of pointer-chasing through nodes in the BVH.
+CHAPTER 5: FUTURE WORK
+32
+Coherency Mechanism
+The experiments in Chapter 3 examined Shader Execution Reordering, showing that it utilizes
+a global producer-consumer queue where large batches are sorted according to a coherence
+key. Replicating this in hardware would be a substantial undertaking. However, the results from
+Chapter 3 suggest that the sorting can be done by the SIMT units. A purely software scheduler
+using persistent threads to schedule reordering, shading, and intersection tasks is a flexible option
+for an initial design.
+5.2 Async on GPU
+The program transformations described in Section 3.2 are also generally applicable outside of
+ray tracing. In particular, Zheng et al. [20] discusses how an annotated GPU kernel can be split
+into coroutines scheduled by different runtime strategies, namely wavefront, persistent threads,
+and state machine. This framework could be extended with a work graph scheduler, although
+the inability to resolve cyclic dependencies in work graphs makes this challenging. In the other
+direction, automated transformation from work graph nodes into coroutines is straightforward,
+and would allow for emulation of work graphs on LuisaCompute’s other backends.
+More generally, in light of increasing asynchrony exposed by GPU instruction sets
+(cp.async.bulk, tcgen05.mma), it is worth investigating whether suspendable coroutines could
+form the basis of a highly decoupled GPU architecture. Currently, asynchronous accelerator
+operations require manual insertion of mbarrier-style primitives for synchronization, leaving
+the programmer to find useful work while waiting on the accelerator’s results. Borrowing the
+async programming model from CPUs could solve both issues, but running the scheduler on
+SIMT cores is a performance bottleneck. The Neutrino coprocessor being designed for Radiance
+would function as an async runtime in hardware, tracking dependencies between accelerator
+operations and SIMT threads.
+Taken together, these directions trace a realistic path towards a GPU ray tracing architecture
+where divergence and asynchrony are addressed at the hardware design level.
+33
+Appendix
+Appendix A
+cpp
+1 static __forceinline__ __device__ uint32_t generate_exec_marker(
+2
+uint32_t laneid,
+3
+uint32_t* counter
+4 ) {
+5
+const unsigned int mask = __activemask();
+6
+const int leader_lane = __ffs(static_cast<int>(mask)) - 1;
+7
+uint32_t marker = 0;
+8
+if (static_cast<int>(laneid) == leader_lane) {
+9
+marker = atomicAdd(counter, 1u);
+10
+}
+11
+return __shfl_sync(mask, marker, leader_lane);
+12 }
+13
+14 uint generate_exec_marker(uint* counter) {
+15
+uint marker = 0;
+16
+bool leader = WaveIsFirstLane();
+17
+if (leader) {
+18
+InterlockedAdd(counter[0], 1u, marker);
+19
+}
+20
+return WaveReadLaneFirst(marker);
+21 }
+Listing 6.1: To generate exec_marker, one thread in a warp can increment an atomic counter to
+get a unique “marker” that is then broadcasted to the other threads in a warp. The CUDA / OptiX
+version is given above, and Slang (generating SPIR-V shader code for Vulkan) is given below.
+Appendix B
+First, consider the case of a single chunk in isolation. This single chunk is a sample of 𝑚 items
+drawn from a total of 𝑛 items without replacement. It is known [32] that the order statistics of
+(𝑛−𝑚)(𝑛+1)
+𝑛+1
+such a sample satisfy 𝔼[𝑋(𝑖) ] = 𝑖 ⋅ 𝑚+1
+and Var[𝑋(𝑖) ] = 𝑖(𝑚 + 1 − 𝑖) ⋅ (𝑚+1)
+2 (𝑚+2) . Linearity
+𝑛+1
+of expectation shows that the gap between any two consecutive elements is 𝑚+1 .
+It can be shown that the variance of the gap between two consective elements is not too large
+(specifically, it is 𝑂(𝑛2 ))
+Var[𝑋(𝑖+1) − 𝑋(𝑖) ] = Var[𝑋(𝑖+1) ] + Var[𝑋(𝑖) ] − 2 Cov(𝑋(𝑖+1) , 𝑋(𝑖) )
+= Var[𝑋(𝑖+1) ] + Var[𝑋(𝑖) ] − 2(𝔼[𝑋(𝑖+1) 𝑋(𝑖) ] − 𝔼[𝑋(𝑖+1) ]𝔼[𝑋(𝑖) ])
+34
+The only term that is unknown is 𝔼[𝑋(𝑖+1) 𝑋(𝑖) ], which can be calculated using a basic extension
+of the counting argument in [32] to be
+𝑛−𝑚
+𝑛−𝑚
+𝔼[(−(𝑖 + 1) + ∑ 𝑌(𝑖+1)𝑗 )(−𝑖 + ∑ 𝑌𝑖𝑘 )]
+𝑗=0
+𝑘=0
+Again, the only tricky term is the sum of cross terms. The probability that 𝑌(𝑖+1)𝑗 𝑌𝑖𝑘 = 1 is
+𝑖(𝑖+2)
+(𝑚+2)(𝑚+1) (independent of 𝑗 and 𝑘).
+𝑛−𝑚
+𝑛−𝑚
+𝑛−𝑚 𝑛−𝑚
+𝔼[( ∑ 𝑌(𝑖+1)𝑗 )( ∑ 𝑌𝑖𝑘 )] = ∑ ∑ 𝔼[𝑌(𝑖+1)𝑗 𝑌𝑖𝑘 ] = (𝑛 − 𝑚)2
+𝑗=0
+𝑘=0
+𝑗=0 𝑘=0
+𝑖(𝑖 + 2)
+(𝑚 + 2)(𝑚 + 1)
+All the other terms in the variance can be pretty easily shown to be 𝑂(𝑛2 ) as well. Then, when
+averaging together the gaps, the covariance between different gaps is negative (if one gap is
+larger than average, that makes the remaining “space” for other gaps smaller), so the variance
+will decrease as more gaps are averaged.
+Finally, inverting the average should give an estimate of 𝑚+1
+𝑛+1 , which allows solving for 𝑚.
+1
+−1
+Note that this is a biased estimator, as 𝔼[ 𝑋 ] ≠ 𝔼[𝑋] . By Jensen’s inequality (gaps are always
+1
+positive, and 𝑥1 is convex over the positive reals), 𝔼[ 𝑋
+] ≥ 𝔼[𝑋]−1 . However, the bias is roughly
+linearly in variance, and the experimental setup lets large numbers of samples be taken. The
+variance in the final results (Table 3.2) is almost totally negligible.
+35
+References
+[1]
+“NVIDIA OptiX 9.1 Programming Guide.” Nov. 2025.
+[2]
+S. Zheng et al., “LuisaRender: A High-Performance Rendering Framework with Layered and
+Unified Interfaces on Stream Architectures,” ACM Trans. Graph., vol. 41, no. 6, Nov. 2022,
+doi: 10.1145/3550454.3555463.
+[3]
+B. Bitterli, “Rendering resources.” 2016.
+[4]
+“Shader Execution Reordering.” [Online]. Available: https://d29g4g2dyqv443.cloudfront.
+net/sites/default/files/akamai/gameworks%2Fser-whitepaper.pdf
+[5]
+J. T. Kajiya, “The rendering equation,” SIGGRAPH Comput. Graph., vol. 20, no. 4, pp. 143–
+150, Aug. 1986, doi: 10.1145/15886.15902.
+[6]
+M. Pharr, W. Jakob, and G. Humphreys, Physically based rendering: from theory to implemen­
+tation, Fourth edition. Cambridge, Massachusetts London, England: The MIT Press, 2023.
+[7]
+J. Hennessy and D. Patterson, Computer Architecture: A Quantitative Approach. in The
+Morgan Kaufmann Series in Computer Architecture and Design. Morgan Kaufmann, 2017.
+[8]
+S. Laine, T. Karras, and T. Aila, “Megakernels considered harmful: wavefront path tracing
+on GPUs,” in Proceedings of the 5th High-Performance Graphics Conference, in HPG '13.
+Anaheim, California: Association for Computing Machinery, 2013, pp. 137–143. doi:
+10.1145/2492045.2492060.
+[9]
+K. Beets, “What's Your Level? The six levels of ray tracing acceleration,” technical report,
+Sept. 2020.
+[10] S. G. Parker et al., “OptiX: a general purpose ray tracing engine,” ACM Trans. Graph., vol.
+29, no. 4, July 2010, doi: 10.1145/1778765.1778803.
+[11] J. Barczak and H. Gruen, “Intel® Arc™ Graphics Developer Guide for Real-time Ray Tracing
+in Games,” technical report, Sept. 2022.
+[12] J. Ekstrand, “Ray-tracing in Vulkan pt. 2.” 2021.
+[13] V. V. Sanzharov, V. A. Frolov, and V. A. Galaktionov, “Survey of Nvidia RTX Tech­
+nology,” Program. Comput. Softw., vol. 46, no. 4, pp. 297–304, July 2020, doi: 10.1134/
+S0361768820030068.
+[14] M. Saed, Y. H. Chou, L. Liu, T. Nowicki, and T. M. Aamodt, “Vulkan-Sim: A GPU Architec­
+ture Simulator for Ray Tracing,” in Proceedings of the 55th Annual IEEE/ACM International
+Symposium on Microarchitecture, in MICRO '22. Chicago, Illinois, USA: IEEE Press, 2023,
+pp. 263–281. doi: 10.1109/MICRO56248.2022.00027.
+[15] A. Bakhoda, G. L. Yuan, W. W. L. Fung, H. Wong, and T. M. Aamodt, “Analyzing
+CUDA workloads using a detailed GPU simulator,” in 2009 IEEE International Symposium
+36
+on Performance Analysis of Systems and Software,
+ISPASS.2009.4919648.
+2009, pp. 163–174. doi: 10.1109/
+[16] J. Haydel et al., “Arches: A Cycle Level Simulator for Exploring Massively Parallel Ray
+Tracing Architectures,” Computer Graphics Forum (Proceedings of HPG 2025), vol. 44, no. 8,
+2025, doi: 10.1111/cgf.70212.
+[17] H. Kim, A. Wang, S. Zhang, and S. Shao, “Cost of Divergence in Ray Tracing: Performance
+Characterization on CPU and GPU,” in Fifth International Workshop on Domain Specific
+System Architectures, 2023.
+[18] A. L. D. Moura and R. Ierusalimschy, “Revisiting coroutines,” ACM Trans. Program. Lang.
+Syst., vol. 31, no. 2, Feb. 2009, doi: 10.1145/1462166.1462167.
+[19] B. Nystrom, “What Color is Your Function?.” Feb. 2015.
+[20] S. Zheng, X. Chen, Z. Shi, L.-Q. Yan, and K. Xu, “GPU Coroutines for Flexible Splitting
+and Scheduling of Rendering Tasks,” ACM Trans. Graph., vol. 43, no. 6, Nov. 2024, doi:
+10.1145/3687766.
+[21] C. Legnitto, “Async/await on the GPU.” Feb. 2026.
+[22] B. Karis, R. Stubbe, and G. Wihlidal, “A deep dive into Nanite Virtualized Geometry.” Aug.
+2021.
+[23] K. Gupta, J. A. Stuart, and J. D. Owens, “A study of Persistent Threads style GPU program­
+ming for GPGPU workloads,” in 2012 Innovative Parallel Computing (InPar), 2012, pp. 1–14.
+doi: 10.1109/InPar.2012.6339596.
+[24] “D3D12 Work Graphs.” [Online]. Available: https://microsoft.github.io/DirectX-Specs/d3d/
+WorkGraphs.html
+[25] F. Wildgrube et al., “GPUs All Grown-Up: Fully Device-Driven SpMV Using GPU Work
+Graphs,” in Proceedings of the 52nd Annual International Symposium on Computer Archi­
+tecture, in ISCA '25. Association for Computing Machinery, 2025, pp. 1777–1791. doi:
+10.1145/3695053.3731060.
+[26] B. Kuth, M. Oberberger, C. Faber, D. Baumeister, M. Chajdas, and Q. Meyer, “Real-Time
+Procedural Generation with GPU Work Graphs,” Proc. ACM Comput. Graph. Interact. Tech.,
+vol. 7, no. 3, Aug. 2024, doi: 10.1145/3675376.
+[27] B. Kuth et al., “Real-Time GPU Tree Generation,” in High-Performance Graphics - Symposium
+Papers, A. Knoll and C. Peters, Eds., The Eurographics Association, 2025. doi: 10.2312/
+hpg.20251168.
+[28] J. Novák, V. Havran, and C. Daschbacher, “Path Regeneration for Interactive Path Tracing,”
+Eurographics Association, 2010, pp. 61–64.
+37
+[29] “Radiance.” [Online]. Available: https://github.com/ucb-bar/radiance
+[30] F. Shen, A. Barnes, A. Nallathambi, and T. G. Rogers, “RayFlex: An Open-Source RTL
+Implementation of the Hardware Ray Tracer Datapath.” [Online]. Available: https://arxiv.
+org/abs/2409.06000
+[31] Y. H. Chou, T. Nowicki, and T. M. Aamodt, “Treelet Prefetching For Ray Tracing,” in
+Proceedings of the 56th Annual IEEE/ACM International Symposium on Microarchitecture, in
+MICRO '23. Toronto, ON, Canada: Association for Computing Machinery, 2023, pp. 742–
+755. doi: 10.1145/3613424.3614288.
+[32] joriki (https://math.stackexchange.com/users/6622/joriki), “Mean and variance of the order
+statistics of a discrete uniform sample without replacement.” [Online]. Available: https://
+math.stackexchange.com/q/1850005

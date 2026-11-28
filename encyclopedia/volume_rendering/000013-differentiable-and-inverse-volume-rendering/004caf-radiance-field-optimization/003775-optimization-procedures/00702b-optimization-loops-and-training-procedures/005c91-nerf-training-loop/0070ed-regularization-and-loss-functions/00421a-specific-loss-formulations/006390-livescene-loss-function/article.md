@@ -1,0 +1,180 @@
+# LiveScene Loss Function
+
+Also called: LiveScene Loss
+
+## Overview
+The LiveScene Loss Function is the composite objective used to train the LiveScene model, a differentiable radiance field framework for interactive physical scene rendering and control [S1, unofficial]. It extends the standard NeRF rendering loss by incorporating specific regularization terms designed to handle dynamic, interactive scenes: a Focal Loss for foreground focus, a Repulsion Loss to separate deformable object features, an Interaction Variable MSE for state supervision, a Language Embedding L2 Loss for semantic grounding, and a Smoothness Loss to reduce feature oscillations [S1, unofficial]. Unlike static scene optimizers, this formulation explicitly manages the ambiguity between background and interactive foreground elements through mask-aware losses and constant-parameter scalability [S1, unofficial].
+
+## How it works
+The total loss $\mathcal{L}_{total}$ is a weighted sum of five components:
+$$ \mathcal{L}_{total} = \mathcal{L}_{MSE} + \lambda_1 \mathcal{L}_{focus} + \lambda_2 \mathcal{L}_{repuls} + \lambda_3 \mathcal{L}_{var} + \lambda_4 \mathcal{L}_{lang} + \lambda_5 \mathcal{L}_{smooth} $$
+[S1, unofficial]
+
+**Inputs and Outputs:**
+*   **Inputs:** Rendered color $\hat{\mathbf{C}}_i$, rendered depth $\hat{D}_i$, ground truth color $\mathbf{C}_i$, ground truth depth $D_i$, ground truth interaction masks $M_i$, last-layer interaction features $F_i$, predicted interaction probabilities $\hat{P}_i$, predicted interaction variables $\kappa_i$, ground truth variables $\tilde{\kappa}_i$, predicted language embeddings $\phi(p)$, ground truth language embeddings $\tilde{\phi}(p)$, and feature plane values $p_{l,i,k}$ [S1, unofficial].
+*   **Outputs:** Scalar loss value $\mathcal{L}_{total}$ and gradients for network parameters [S1, unofficial].
+
+**Data Structures:**
+*   **Feature Planes:** Multi-scale feature planes with resolutions $512 \times 256 \times 128$ and feature dimension 32 [S1, unofficial].
+*   **Interaction Variables:** For the InterReal dataset, learnable variables are represented by a plane with resolution typically half the frame number and feature dimension 4 [S1, unofficial].
+*   **Masks:** Binary ground truth ray masks $M_i$ indicating interactive regions [S1, unofficial].
+
+**Parameters:**
+*   $\lambda_1 = 10^{-3}$ (Focus weight) [S1, unofficial]
+*   $\lambda_2 = 10^{-2}$ (Repulsion weight) [S1, unofficial]
+*   $\lambda_3 = 10^{-3}$ (Variable weight) [S1, unofficial]
+*   $\lambda_4 = 1.0$ (Language weight) [S1, unofficial]
+*   $\lambda_5 = 10^{-3}$ (Smoothness weight) [S1, unofficial]
+*   $\alpha = 0.5$ (Focal loss balancing factor) [S1, unofficial]
+*   $\gamma = 1.5$ (Focal loss focusing parameter) [S1, unofficial]
+*   $\delta = 1.0$ (Huber loss threshold) [S1, unofficial]
+*   $K$ (Repulsion constant, value not specified in sources) [S1, unofficial]
+
+**Step-by-Step Computation:**
+
+1.  **Rendering Loss ($\mathcal{L}_{MSE}$):** Compute the mean squared error between rendered and ground truth color and depth [S1, unofficial].
+    $$ \mathcal{L}_{MSE} = \frac{1}{N} \sum_{i=1}^N \left( \|\mathbf{C}_i - \hat{\mathbf{C}}_i\|^2 + \|D_i - \hat{D}_i\|^2 \right) $$
+    where $N$ is the number of pixels [S1, unofficial].
+
+2.  **Focal Loss ($\mathcal{L}_{focus}$):** Enhance focus on interactive foreground regions using ground truth masks $M_i$ and predicted probabilities $\hat{P}_i$ [S1, unofficial].
+    $$ \mathcal{L}_{focus} = \frac{1}{N} \sum_{i=1}^N M_i \cdot \alpha \cdot (1 - \hat{P}_i)^\gamma \cdot \log(\hat{P}_i) $$
+    where $\alpha=0.5$ and $\gamma=1.5$ [S1, unofficial].
+
+3.  **Repulsion Loss ($\mathcal{L}_{repuls}$):** Amplify feature differences between distinct deformable scenes to avoid sampling conflicts [S1, unofficial]. Randomly select ray pairs $(i, j)$ per training iteration [S1, unofficial].
+    $$ \mathcal{L}_{repuls} = \text{ELU}(K - \|(M_i \odot M_j)(F_i - F_j)\|) $$
+    where $\odot$ denotes element-wise multiplication, $M_i, M_j$ are ground truth masks, and $F_i, F_j$ are last-layer features of the interaction probability decoder [S1, unofficial].
+
+4.  **Interaction Variable MSE ($\mathcal{L}_{var}$):** Supervise the interaction values $\kappa$ [S1, unofficial].
+    $$ \mathcal{L}_{var} = \frac{1}{N} \sum_{i=1}^N \|\kappa_i - \tilde{\kappa}_i\|^2 $$
+    where $\kappa_i$ is the predicted variable and $\tilde{\kappa}_i$ is the ground truth [S1, unofficial].
+
+5.  **Language Embedding L2 Loss ($\mathcal{L}_{lang}$):** Huber loss between predicted $\phi(p)$ and ground truth $\tilde{\phi}(p)$ embeddings [S1, unofficial].
+    $$ \mathcal{L}_{lang}(\phi(p), \tilde{\phi}(p)) = \begin{cases} \frac{1}{2}(\phi(p) - \tilde{\phi}(p))^2 & \text{if } |\phi(p) - \tilde{\phi}(p)| \le \delta \\ \delta(|\phi(p) - \tilde{\phi}(p)| - \frac{1}{2}\delta) & \text{otherwise} \end{cases} $$
+    with $\delta = 1.0$ [S1, unofficial].
+
+6.  **Smoothness Loss ($\mathcal{L}_{smooth}$):** Apply 1D Laplacian filter to feature planes to reduce noise [S1, unofficial].
+    $$ \mathcal{L}_{smooth}(p) = \frac{1}{2|L|n} \sum_{l=1}^{|L|} \sum_{i=1}^{n} \sum_{k=1}^{n} (p_{l,i,k-1} + p_{l,i,k+1} - 2p_{l,i,k})^2 $$
+    where $|L|$ is the number of feature planes, $n$ is the plane resolution, and indices $i, k$ are on the plane [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def mean(values):
+    return sum(values) / len(values)
+
+def mean_squared_error(a, b):
+    return mean([(x - y) ** 2 for x, y in zip(a, b)])
+
+def clip(tensor, min_val, max_val=None):
+    if max_val is None:
+        return [max(x, min_val) for x in tensor]
+    return [max(min_val, min(x, max_val)) for x in tensor]
+
+def elu(x, alpha=1.0):
+    return x if x > 0 else alpha * (math.exp(x) - 1)
+
+def l2_norm(vec):
+    return math.sqrt(sum(x ** 2 for x in vec))
+
+def livescene_loss(rendered_color, rendered_depth, gt_color, gt_depth,
+                   gt_masks, pred_probs, last_layer_features,
+                   pred_vars, gt_vars, pred_lang, gt_lang,
+                   feature_planes, lambda1, lambda2, lambda3, lambda4, lambda5,
+                   alpha, gamma, delta, K, num_pairs=1):
+    """
+    Compute the total LiveScene loss.
+    Args:
+        rendered_color, gt_color: List of RGB vectors (N, 3)
+        rendered_depth, gt_depth: List of depth scalars (N, 1)
+        gt_masks: List of binary masks (N,)
+        pred_probs: List of predicted probabilities (N,)
+        last_layer_features: List of feature vectors (N, D)
+        pred_vars, gt_vars: List of variable vectors (N, V)
+        pred_lang, gt_lang: List of language embedding vectors (N, L)
+        feature_planes: 3D list of shape (|L|, n, n)
+        lambda1-5: Loss weights
+        alpha, gamma: Focal loss parameters
+        delta: Huber loss threshold
+        K: Repulsion constant
+        num_pairs: Number of ray pairs to sample for repulsion loss
+    Returns:
+        total_loss: Scalar loss value
+    """
+    N = len(rendered_color)
+
+    # 1. Rendering Loss (MSE)
+    l_mse = mean_squared_error(rendered_color, gt_color) + mean_squared_error(rendered_depth, gt_depth)
+
+    # 2. Focal Loss
+    safe_probs = clip(pred_probs, min_val=1e-7)
+    focal_terms = [m * alpha * ((1 - p) ** gamma) * math.log(p) for m, p in zip(gt_masks, safe_probs)]
+    l_focus = mean(focal_terms)
+
+    # 3. Repulsion Loss
+    # Randomly select ray pairs per iteration [S1, unofficial]
+    l_repuls_sum = 0.0
+    for _ in range(num_pairs):
+        i, j = random.sample(range(N), 2)
+        mask_prod = gt_masks[i] * gt_masks[j]
+        feat_diff = [fi - fj for fi, fj in zip(last_layer_features[i], last_layer_features[j])]
+        weighted_diff = [mask_prod * d for d in feat_diff]
+        norm_diff = l2_norm(weighted_diff)
+        l_repuls_sum += elu(K - norm_diff)
+    l_repuls = l_repuls_sum / num_pairs
+
+    # 4. Interaction Variable MSE
+    l_var = mean_squared_error(pred_vars, gt_vars)
+
+    # 5. Language Embedding L2 Loss (Huber)
+    l_lang_terms = []
+    for p, g in zip(pred_lang, gt_lang):
+        diff = p - g
+        abs_diff = abs(diff)
+        if abs_diff <= delta:
+            l_lang_terms.append(0.5 * diff ** 2)
+        else:
+            l_lang_terms.append(delta * (abs_diff - 0.5 * delta))
+    l_lang = mean(l_lang_terms)
+
+    # 6. Smoothness Loss
+    # Boundary handling for k-1 and k+1 indices [G]
+    n = len(feature_planes[0][0])
+    l_smooth_sum = 0.0
+    for l in range(len(feature_planes)):
+        for i in range(n):
+            for k in range(n):
+                k_prev = max(0, k - 1)
+                k_next = min(n - 1, k + 1)
+                laplacian = feature_planes[l][i][k_prev] + feature_planes[l][i][k_next] - 2 * feature_planes[l][i][k]
+                l_smooth_sum += laplacian ** 2
+    l_smooth = l_smooth_sum / (2 * len(feature_planes) * n)
+
+    # Total Loss
+    total_loss = l_mse + lambda1 * l_focus + lambda2 * l_repuls + lambda3 * l_var + lambda4 * l_lang + lambda5 * l_smooth
+    return total_loss
+```
+
+**Edge Cases and Pitfalls:**
+*   **Probability Rejection:** The source mentions a probability rejection operation where low-probability samples ($< s$) are truncated and background features are selected [S1, unofficial]. This is a preprocessing step for sampling, not part of the loss formula itself, but affects which samples contribute to the loss [S1, unofficial].
+*   **Repulsion Pair Selection:** The repulsion loss requires random selection of ray pairs per training iteration [S1, unofficial].
+*   **Boundary Conditions:** The smoothness loss uses a 1D Laplacian. Boundary handling for indices $k-1$ and $k+1$ is not specified in the sources and must be implemented (e.g., zero-padding or clamping) [G].
+
+## Operating characteristics
+*   **Time Complexity:** Training requires 80k steps on OmniSim and 100k steps on InterReal [S1, unofficial].
+*   **Memory Complexity:** Requires approximately 40GB of GPU memory [S1, unofficial].
+*   **Hardware:** Tested on NVIDIA A100 GPU [S1, unofficial].
+*   **Training Time:** Approximately 4 hours per dataset run [S1, unofficial].
+*   **Scalability:** LiveScene maintains a constant number of parameters regardless of the number of interactive objects, unlike CoGS (linear increase) and MK-Planes (quadratic increase) [S1, unofficial].
+*   **Strengths:** Effective handling of dynamic interactive scenes, semantic grounding via language embeddings, and parameter efficiency for multiple objects [S1, unofficial].
+*   **Limitations:** Requires ground truth masks and language embeddings for supervision [S1, unofficial]. The repulsion loss introduces complexity in pair sampling [S1, unofficial].
+
+## Background
+LiveScene was introduced in the paper "LiveScene: Language Embedding Interactive Radiance Fields for Physical Scene Rendering and Control" [S1, unofficial]. It builds upon differentiable volume rendering frameworks [S1, unofficial]. The method is implemented in Nerfstudio [S1, unofficial]. It addresses the challenge of rendering and controlling interactive physical scenes with language guidance, extending static NeRF methods to handle dynamic interactions and semantic information [S1, unofficial].
+
+## Sources
+[S1] LiveScene: Language Embedding Interactive Radiance Fields for Physical Scene Rendering and Control, https://doi.org/10.48550/arXiv.2406.16038, fetched 2026-10-29 (unofficial)

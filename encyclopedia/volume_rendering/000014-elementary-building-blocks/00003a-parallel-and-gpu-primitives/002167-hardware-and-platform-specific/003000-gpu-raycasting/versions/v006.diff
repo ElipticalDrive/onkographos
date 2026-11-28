@@ -1,0 +1,148 @@
+--- v005.md
++++ v006.md
+@@ -3,14 +3,14 @@
+ 
+ ## Overview
+-GPU Raycasting is a direct volume rendering technique that generates 2D images from 3D data fields by casting rays through the volume, where the computation of resampling and image synthesis is processed by the GPU fragment shader for parallel calculation [S2][S3, unofficial]. It approximates the volume rendering integral by sampling at a finite number of positions along each ray [S1, unofficial]. It differs from its siblings [GPU-based Ray-casting for Unstructured Grids](1118-gpu-based-ray-casting-for-unstructured-grids.md) and [CUDA Volume Ray Casting](2048-cuda-volume-ray-casting.md) by typically relying on regular 3D textures and fixed-function pipeline optimizations (such as early ray termination) rather than complex unstructured grid traversal or explicit CUDA kernel management, though it shares the core principle of mapping rays to parallel execution units [G].
++GPU Raycasting is a direct volume rendering technique that generates 2D images from 3D data fields by casting rays through the volume, where the computation of resampling and image synthesis is processed by the GPU fragment shader for parallel calculation [S2][S3, unofficial]. It approximates the volume rendering integral by sampling at a finite number of positions along each ray [S1, unofficial]. It differs from its siblings [GPU-based Ray-casting for Unstructured Grids](1118-gpu-based-ray-casting-for-unstructured-grids.md) and [CUDA Volume Ray Casting](2048-cuda-volume-ray-casting.md) by typically relying on regular 3D textures and fixed-function pipeline optimizations rather than complex unstructured grid traversal or explicit CUDA kernel management, though it shares the core principle of mapping rays to parallel execution units [G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Inputs:** 3D volume data (loaded as a 3D texture), transfer function (loaded as a 1D texture), ray entry point ($p_{in}$), ray exit point ($p_{out}$), and ray direction step size ($rayDir$) [S2].
+-*   **Outputs:** Final color ($destColor$) and opacity ($remainOpacity$) for each pixel/fragment [S2].
++*   **Outputs:** Final color ($destColor$) and accumulated transparency ($remainOpacity$) for each pixel/fragment [S2].
+ 
+ **Data Structures:**
+-*   **3D Texture:** Stores the scalar volume data. Access is performed via `texture3D(dataSetTexture, pos)` [S2].
+-*   **1D Texture:** Stores the transfer function mapping scalar values to color and opacity. Access is performed via `texture1D(opacityTexture, scalar)` [S2].
++*   **3D Texture:** Stores the scalar volume data [S2].
++*   **1D Texture:** Stores the transfer function mapping scalar values to color and opacity [S2].
+ *   **Fragment State:** Per-fragment variables include `destColor` (accumulated color), `remainOpacity` (accumulated transparency), `pos` (current sampling position), and `inside` (boolean flag for volume containment) [S2].
+ 
+@@ -27,5 +27,5 @@
+     $$pos = p_{in} + i \cdot rayDir \cdot \text{normalize}(p_{out} - p_{in})$$
+     [S2]
+-3.  **Containment Check:** If $pos - p_{in} > p_{out} - p_{in}$, the resampling point is out of volume data. Set `inside` to false [S2].
++3.  **Containment Check:** If the scalar distance along the ray satisfies $pos - p_{in} > p_{out} - p_{in}$, the resampling point is out of volume data. Set `inside` to false [S2].
+ 4.  **Sampling Loop:** While `inside` is true:
+     a.  Sample the volume texture at `pos`:
+@@ -67,46 +67,75 @@
+ def trace(pin, pout, rayDir, tMax):
+     # 1. Initialization
+-    destColor = vec4(0.0, 0.0, 0.0, 0.0)
+-    remainOpacity = 1.0 - destColor.a
+-    
+-    # Calculate normalized direction
++    destColor = [0.0, 0.0, 0.0, 0.0]  # RGBA
++    remainOpacity = 1.0 - destColor[3]
+     dir = normalize(pout - pin)
+     pos = pin
+     t = 0
+     inside = True
+-    
++
+     # 2. Ray Marching Loop
+     while inside:
+-        # Check if out of bounds
+-        if (pos - pin) > (pout - pin):
++        # Check if out of bounds (scalar distance along ray direction)
++        dist_in = dot(pos - pin, dir)
++        dist_out = dot(pout - pin, dir)
++        if dist_in > dist_out:
+             inside = False
+             break
+-            
++
+         # Sample volume
+-        value = texture3D(dataSetTexture, pos)
+-        
++        value = sample_volume(pos)
++
+         # Map to transfer function
+-        scalar = scalarFromValue(value)
+-        opacity = texture1D(opacityTexture, scalar)
+-        
++        scalar = map_to_scalar(value)
++        opacity = get_opacity(scalar)
++
+         if opacity > 0.0:
+             # Shade and accumulate
+-            color = shade(value) * opacity
+-            destColor = destColor + color * remainOpacity
++            color = compute_shading(value) * opacity
++            destColor = [destColor[0] + color[0] * remainOpacity,
++                         destColor[1] + color[1] * remainOpacity,
++                         destColor[2] + color[2] * remainOpacity,
++                         destColor[3]]
+             remainOpacity = remainOpacity * (1.0 - opacity)
+-            
++
+         # Advance
+-        pos = pos + rayDir
++        pos = pos + rayDir * dir
+         t = t + 1
+-        
++
+         # Termination check
+         if t >= tMax or remainOpacity < 0.0039:
+             inside = False
+-            
++
+     return destColor, remainOpacity
++
++# Helper definitions (standard operations)
++def normalize(v):
++    return v / magnitude(v)
++
++def dot(a, b):
++    return sum(x * y for x, y in zip(a, b))
++
++def magnitude(v):
++    return sum(x * x for x in v) ** 0.5
++
++def sample_volume(pos):
++    # Standard 3D texture lookup at normalized coordinates
++    return texture3D(dataSetTexture, pos)
++
++def map_to_scalar(value):
++    # Extract scalar component from volume sample
++    return value[0]
++
++def get_opacity(scalar):
++    # Standard 1D texture lookup for transfer function
++    return texture1D(opacityTexture, scalar)
++
++def compute_shading(value):
++    # Standard lighting model (e.g., Phong or gradient-based)
++    return [0.8, 0.8, 0.8]  # Placeholder for shading model
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Out of Bounds:** If $pos - p_{in} > p_{out} - p_{in}$, the point is outside the volume data [S2].
++*   **Out of Bounds:** If the scalar distance along the ray satisfies $pos - p_{in} > p_{out} - p_{in}$, the point is outside the volume data [S2].
+ *   **Early Termination:** The loop terminates if $remainOpacity < 0.0039$ (equivalent to $1/255$) or $t \ge t_{Max}$ [S2].
+ *   **Accuracy Limitations:** Ray-triangle intersections (if used for boundary detection) have accuracy limitations that can lower image quality [S5, unofficial].
+@@ -131,5 +160,5 @@
+ 
+ ### [Single Scattering Illumination](9628-single-scattering-illumination.md)
+-Single Scattering Illumination is a volumetric lighting model that computes the radiance contribution of light undergoing exactly one scattering event within a participating medium. It solves the problem of realistic volumetric lighting by distinguishing between light scattered along the view ray (Direct Single Scattering, DSS) and light scattered along illumination rays from scene points (Indirect Single Scattering, ISS). Unlike basic volume rendering which often ignores volumetric shadows or uses approximations, this method provides an analytic formulation for both direct and indirect contributions, including occlusion handling via shadow volumes, enabling real-time hardware rendering of complex volumetric lighting effects.
++Single Scattering Illumination is a volumetric lighting model that computes the radiance contribution of light undergoing exactly one scattering event within a participating medium. It distinguishes between light scattered along the view ray (Direct Single Scattering, DSS) and light scattered along illumination rays from scene points (Indirect Single Scattering, ISS). Unlike basic volume rendering that often ignores volumetric shadows, this method provides an analytic formulation for both contributions, including occlusion handling via shadow volumes, enabling real-time hardware rendering.
+ 
+ ### [Distributed Volume Raycasting with Bricks](9869-distributed-volume-raycasting-with-bricks.md)
+@@ -140,11 +169,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of samples per ray and the number of pixels. The loop runs $t_{Max}$ times or until early termination [S2].
++*   **Time Complexity:** Not given in the sources.
+ *   **Memory Complexity:** Requires storage for the 3D volume texture and 1D transfer function texture in GPU memory [S2][S5, unofficial].
+-*   **Measured Performance:** Performance is heavily dependent on the efficiency of the fragment shader and the texture memory bandwidth. Early ray termination (checking $remainOpacity < 0.0039$) significantly reduces average computation time for sparse volumes [S2].
+-*   **Scaling:** Scaling is close to linear with multi-core CPUs if ray tracing is implemented there, but on GPUs, it scales with the number of parallel fragments processed [S1, unofficial].
+-*   **Strengths:** Leverages the extremely parallel architecture of GPUs; avoids complex visibility order computations required by other methods [S3, S5, unofficial].
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Scaling is close to linear with multi-core CPUs if ray tracing is implemented there [S1, unofficial].
++*   **Strengths:** Leverages the extremely parallel architecture of GPUs [S3, unofficial]; avoids complex visibility order computations required by other methods [S5, unofficial].
+ *   **Limitations:** Requires all data to be in GPU memory, limiting dataset size [S5, unofficial]. Accuracy limitations of ray-triangle intersections can lower image quality [S5, unofficial].
+-*   **When to use:** Suitable for real-time visualization of moderate-sized volumetric datasets where hardware acceleration is available [S4, S5, unofficial].
++*   **When to use:** Not given in the sources.
+ *   **When not to use:** Unsuitable for extremely large datasets that exceed GPU memory capacity unless streaming techniques are employed [S5, unofficial].
+ 

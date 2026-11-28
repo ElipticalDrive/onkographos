@@ -1,0 +1,141 @@
+--- v005.md
++++ v006.md
+@@ -1,8 +1,7 @@
+ # Projecting Detail Coefficients
+ 
+-Also called: Multi-level Detail Coefficient Projection, Wavelet MIP Projection
+ 
+ ## Overview
+-Projecting Detail Coefficients is a rendering technique that accelerates Maximum Intensity Projection (MIP) by decomposing volumetric data into a wavelet-based multiresolution hierarchy and projecting the resulting detail coefficients directly to the screen [S1]. It solves the problem of high memory bandwidth consumption and rendering latency in large volumes by separating high-frequency details from low-frequency approximations, allowing the renderer to skip empty or low-intensity regions efficiently [S1]. Unlike standard ray-casting MIP which processes every voxel along the ray, this method projects discrete point primitives representing coefficient magnitudes, leveraging graphics hardware for parallel projection [S1]. It differs from sibling methods like the [Wavelet Tree](5390-wavelet-tree.md) by explicitly utilizing the spatial projection of detail levels $d_0 \dots d_{L-1}$ and approximation $f_L$ rather than traversing a tree structure for traversal-based culling [S1].
++Projecting Detail Coefficients is a rendering technique that accelerates Maximum Intensity Projection (MIP) by decomposing volumetric data into a wavelet-based multiresolution hierarchy and projecting the resulting detail coefficients directly to the screen [S1]. It addresses the memory bandwidth bottleneck in large volumes by separating high-frequency details from low-frequency approximations, allowing the renderer to skip empty or low-intensity regions efficiently [S1]. Unlike standard ray-casting MIP which processes every voxel along the ray, this method projects discrete point primitives representing coefficient magnitudes, leveraging graphics hardware for parallel projection [S1]. It differs from sibling methods like the [Wavelet Tree](5390-wavelet-tree.md) by explicitly utilizing the spatial projection of detail levels $d_0 \dots d_{L-1}$ and approximation $f_L$ rather than traversing a tree structure for traversal-based culling [S1].
+ 
+ ## How it works
+@@ -20,17 +19,17 @@
+ 
+ **Steps:**
+-1.  **Matrix Construction:** Construct the model-view matrix from the volume orientation quaternion and zoom factor. Combine with the projection matrix to form the MVP matrix. Pass this to the vertex shader [S1].
++1.  **Matrix Construction:** Construct the model-view matrix from the volume orientation quaternion and zoom factor [S1]. Combine with the projection matrix to form the MVP matrix [S1]. Pass this to the vertex shader [S1].
+ 2.  **Intensity Iteration:** Iterate through the unique intensity values present in the volume, starting from the lowest intensity (or user-defined lower threshold) up to the highest [S1].
+-3.  **Upper Threshold Optimization:** If an upper intensity threshold is defined, identify all voxels with intensity above this threshold. Project these voxels in a single draw call using point primitives via `glDrawArrays` [S1].
+-4.  **Level Rendering:** Render each level of the multiresolution hierarchy to a quad of specific size:
++3.  **Upper Threshold Optimization:** If an upper intensity threshold is defined, identify all voxels with intensity above this threshold [S1]. Project these voxels in a single draw call using point primitives without rounding or anti-aliasing [S1].
++4.  **Level Rendering:** Render each level of the multiresolution hierarchy to a quad of specific size [S1]:
+     *   Level 0 (finest detail) is rendered to a quad with dimensions equal to the viewport [S1].
+     *   Level 1 is rendered to a quad with half the viewport dimensions [S1].
+     *   Level $k$ is rendered to a quad with dimensions scaled by $1/2^k$ relative to the viewport [S1].
+-5.  **Projection:** The vertex shader projects the voxel positions from each level volume onto the corresponding sized quad using the MVP matrix. The fragment shader computes the maximum intensity for each pixel [S1].
++5.  **Projection:** The vertex shader projects the voxel positions from each level volume onto the corresponding sized quad using the MVP matrix [S1].
+ 
+ **Pseudocode:**
+ ```python
+ def project_detail_coefficients(volume_levels, orientation_quaternion, zoom_factor, 
+-                                lower_threshold, upper_threshold, viewport_size):
++                                lower_threshold, upper_threshold, viewport_width, viewport_height):
+     """
+     volume_levels: List of 3D arrays [d0, d1, ..., dL-1, fL]
+@@ -39,35 +38,63 @@
+     lower_threshold: Intensity value below which voxels are ignored
+     upper_threshold: Intensity value above which voxels are drawn as max intensity
+-    viewport_size: Tuple (width, height)
++    viewport_width, viewport_height: Dimensions of the output viewport
+     """
+-    # Step 1: Construct MVP Matrix
+-    model_view_matrix = build_model_view_matrix(orientation_quaternion, zoom_factor)
+-    projection_matrix = build_projection_matrix()
+-    mvp_matrix = multiply_matrices(projection_matrix, model_view_matrix)
+-    
+-    # Pass mvp_matrix to vertex shader context
+-    
+-    # Step 3: Handle upper threshold optimization
++    # Step 1: Construct MVP matrix
++    mv_matrix = quaternion_to_rotation_matrix(orientation_quaternion) * zoom_factor
++    proj_matrix = orthographic_projection_matrix(viewport_width, viewport_height)
++    mvp_matrix = multiply_matrices(proj_matrix, mv_matrix)
++
++    # Step 3: Upper threshold optimization
+     if upper_threshold is not None:
+-        max_intensity_voxels = get_voxels_above_threshold(volume_levels, upper_threshold)
+-        if max_intensity_voxels:
+-            draw_point_primitives(max_intensity_voxels, mvp_matrix, viewport_size)
+-            
+-    # Step 2 & 4: Iterate levels and render
+-    for level_index in range(len(volume_levels)):
+-        level_data = volume_levels[level_index]
+-        
+-        # Determine quad size: Level 0 is viewport size, Level 1 is half, etc.
+-        scale_factor = 1.0 / (2 ** level_index)
+-        quad_width = int(viewport_size[0] * scale_factor)
+-        quad_height = int(viewport_size[1] * scale_factor)
+-        quad_size = (quad_width, quad_height)
+-        
+-        # Filter voxels based on lower threshold
+-        active_voxels = get_voxels_above_threshold(level_data, lower_threshold)
+-        
+-        if active_voxels:
+-            # Render level to specific sized quad
+-            render_level_to_quad(active_voxels, mvp_matrix, quad_size, level_index)
++        max_voxels = [v for level in volume_levels for v in level if v.intensity > upper_threshold]
++        if max_voxels:
++            # Project all max-intensity voxels as point primitives without rounding or anti-aliasing
++            for voxel in max_voxels:
++                screen_pos = transform_point(mvp_matrix, voxel.position)
++                rasterize_point(screen_pos.x, screen_pos.y)
++
++    # Step 2 & 4: Iterate intensities and render levels
++    intensities = sorted(set(v.intensity for level in volume_levels for v in level))
++    for intensity in intensities:
++        if intensity < lower_threshold:
++            continue
++        for level_idx, level_data in enumerate(volume_levels):
++            active_voxels = [v for v in level_data if v.intensity >= lower_threshold]
++            if not active_voxels:
++                continue
++
++            # Determine quad size: Level 0 = viewport, Level 1 = half, Level k = 1/2^k
++            scale = 1.0 / (2 ** level_idx)
++            quad_w = int(viewport_width * scale)
++            quad_h = int(viewport_height * scale)
++
++            # Project voxels to corresponding quad
++            for voxel in active_voxels:
++                screen_pos = transform_point(mvp_matrix, voxel.position)
++                rasterize_point_on_quad(screen_pos.x, screen_pos.y, quad_w, quad_h)
++
++def quaternion_to_rotation_matrix(q):
++    # Standard conversion from quaternion to 3x3 rotation matrix [G]
++    return [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
++
++def orthographic_projection_matrix(width, height):
++    # Standard 4x4 orthographic projection matrix construction [G]
++    return [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
++
++def multiply_matrices(A, B):
++    # Standard 4x4 matrix multiplication
++    return [[sum(A[i][k] * B[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
++
++def transform_point(matrix, point):
++    # Standard 4x4 matrix-vector multiplication for projection
++    return [sum(matrix[i][j] * point[j] for j in range(3)) for i in range(3)]
++
++def rasterize_point(x, y):
++    # Rasterize point primitive at screen coordinates
++    pass
++
++def rasterize_point_on_quad(x, y, width, height):
++    # Rasterize point primitive within quad bounds
++    pass
+ ```
+ 
+@@ -91,10 +118,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of non-zero voxels across all levels, $O(N_{non-zero})$, as only active voxels are projected [S1].
++*   **Time Complexity:** Not given in the sources.
+ *   **Memory Complexity:** Requires storage for $L+1$ volumes, increasing memory usage compared to single-resolution rendering [S1].
+ *   **Performance:** Offers significant gain in the ratio of memory bandwidth to voxel count by reducing the number of processed voxels [S1].
+ *   **Scalability:** Supports load balancing across multiple graphics cards by splitting the dataset and rendering to separate screens, then combining results [S1].
+ *   **Strengths:** High speed for large volumes due to hardware acceleration of point projection and multiresolution culling [S1].
+-*   **Limitations:** Requires pre-computation of wavelet decomposition; orthogonal projection assumption in basic examples may limit perspective accuracy without modification [S1].
++*   **Limitations:** Requires pre-computation of wavelet decomposition [S1].
+ 
+ ## Background

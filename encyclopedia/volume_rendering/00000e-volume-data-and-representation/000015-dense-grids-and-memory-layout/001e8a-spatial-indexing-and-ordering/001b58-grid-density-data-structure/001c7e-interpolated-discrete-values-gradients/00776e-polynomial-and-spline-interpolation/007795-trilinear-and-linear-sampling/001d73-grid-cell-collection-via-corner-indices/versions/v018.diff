@@ -1,0 +1,76 @@
+--- v017.md
++++ v018.md
+@@ -19,5 +19,5 @@
+     $$ i_{floor} = \lfloor \tilde{x} \rfloor, \quad i_{ceil} = \lceil \tilde{x} \rceil $$
+     Generate all 8 combinations of $(i_{floor}, i_{ceil})$ for $x, y, z$ to form the corner indices [S2, unofficial].
+-3.  **Boundary Handling:** Fix out-of-bounds indices using periodic boundary conditions (wrapping indices modulo grid dimensions) or clamping to the nearest valid index [S2, S4, unofficial].
++3.  **Boundary Handling:** Fix out-of-bounds indices using periodic boundary conditions (wrapping indices modulo grid dimensions) or clamping to the nearest valid index [S2, S1, unofficial].
+ 4.  **Gathering:** Index into the grid tensor $\mathbf{G}$ using the fixed corner indices to retrieve the values $w_{i,j,k}$ [S2, S3, unofficial].
+ 
+@@ -65,9 +65,9 @@
+         z1 = torch.clamp(z1, 0, Dz - 1)
+ 
+-    # Generate all 8 combinations of (floor/ceil) x (floor/ceil) x (floor/ceil)
+-    # Order matches binary counting: 000, 001, 010, 011, 100, 101, 110, 111
+-    ix = torch.cat([x0, x0, x0, x0, x1, x1, x1, x1], dim=1)
+-    iy = torch.cat([y0, y0, y1, y1, y0, y0, y1, y1], dim=1)
+-    iz = torch.cat([z0, z1, z0, z1, z0, z1, z0, z1], dim=1)
++    # Generate all 8 combinations matching S4 layout: 
++    # 0-3: lowest Z-plane (sw, se, ne, nw), 4-7: highest Z-plane
++    ix = torch.cat([x0, x0, x1, x1, x0, x0, x1, x1], dim=1)
++    iy = torch.cat([y0, y1, y0, y1, y0, y1, y0, y1], dim=1)
++    iz = torch.cat([z0, z0, z0, z0, z1, z1, z1, z1], dim=1)
+ 
+     corner_indices = torch.stack([ix, iy, iz], dim=2).long() # Shape (N, 8, 3)
+@@ -77,8 +77,9 @@
+ 
+     # Handle NaN/Infinity in gathered values per [S1, unofficial]
+-    if torch.isnan(sampled_values).any() or torch.isinf(sampled_values).any():
+-        return torch.full((sampled_values.shape[0], 8, C), outside_value, device=device)
++    # If any neighbor is NaN/Inf, return outside_value for that point
++    valid_mask = torch.isfinite(sampled_values).all(dim=1, keepdim=True) # (N, 1, C)
++    result = torch.where(valid_mask, sampled_values, torch.full_like(sampled_values, outside_value))
+ 
+-    return sampled_values
++    return result
+ ```
+ 
+@@ -86,12 +87,12 @@
+ *   `grid`: The dense 3D grid tensor.
+ *   `points`: The continuous coordinates to sample.
+-*   `boundary_mode`: Strategy for out-of-bounds indices (e.g., 'periodic', 'clamp') [S2, S4, unofficial].
++*   `boundary_mode`: Strategy for out-of-bounds indices (e.g., 'periodic', 'clamp') [S2, S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Floating-point inaccuracies in coordinate mapping can lead to incorrect corner selection at boundaries.
++*   **Precision:** Floating-point inaccuracies in coordinate mapping can lead to incorrect corner selection at boundaries. [G]
+ *   **Boundaries:** Queries outside the grid bounds require explicit handling (clamping, wrapping, or error) [S1, S4, unofficial].
+ *   **NaN/Infinity Contamination:** If a neighbor value is NaN or Infinity, the entire interpolation result is discarded and replaced with `outsideValue` to prevent contamination [S1, unofficial].
+ *   **Zero Weights:** If the interpolation weight is exactly 0 (e.g., at integer coordinates), the corresponding neighbor is skipped to avoid multiplying by NaN [S1, unofficial].
+-*   **Degenerate Input:** If a query point lies exactly on a grid vertex, floor and ceil indices are identical, resulting in duplicate corner indices. This is handled correctly by the gathering step [S2, unofficial].
++*   **Degenerate Input:** If a query point lies exactly on a grid vertex, floor and ceil indices are identical, resulting in duplicate corner indices. This is handled correctly by the gathering step [G].
+ 
+ ## Subtopics
+@@ -121,6 +122,6 @@
+ *   **Steps:**
+     1.  `interp4`: Map coordinates $x \in [0,1]$ to grid indices: `coords = (x * grid_res) - 0.5`. Flip coords along last axis. Use `jax.scipy.ndimage.map_coordinates` with `order=1` and `cval` [S5, unofficial].
+-    2.  `interp5`: Map coordinates $x$ to grid indices: `coords = (x * (grid_res+1)) - 1`. Permute x and y axes using matrix `[[0,1,0],[1,0,0],[0,0,1]]`. Use `jax.scipy.ndimage.map_coordinates` with `order=1` and `cval` [S5, unofficial].
+-    3.  Initialize a grid wrapper with `grid_vals` and `cval`. Return a lambda function that applies `interp4` or `interp5` depending on the requested order [S5, unofficial].
++    2.  `interp5`: Map coordinates $x$ to grid indices: `coords = (x * (grid_res+1)) - 1`. Permute x and y axes using matrix `[[0,1,0],[1,0,0],[0,0,1]]` [S5, unofficial]. Use `jax.scipy.ndimage.map_coordinates` with `order=1` and `cval` [S5, unofficial].
++    3.  Initialize a grid wrapper with `grid_vals` and `cval` [S5, unofficial]. Return a lambda function that applies `interp4` or `interp5` depending on the requested order [S5, unofficial].
+ *   **Parameters:** `grid_vals`: `jnp.ndarray`, the voxel points to interpolate between. `cval`: `float`, constant value to fill past edges, default 0 [S5, unofficial].
+ *   **Code:**
+@@ -138,5 +139,5 @@
+                 coords = (x * (grid_res + 1)) - 1
+                 coords = jnp.einsum('ij,...j->...i', [[0,1,0],[1,0,0],[0,0,1]], coords) # Permute axes
+-            return jsp.ndimage.map_coordinates(grid_vals, coords, order=1, cval=cval)
++            return jsp.ndimage.map_coordinates(grid_vals, coords, order=1, cval=cval) # [S5, unofficial]
+         return interp_fn
+     ```
+@@ -163,5 +164,5 @@
+ *   **Strengths:** Simple to implement, differentiable, and compatible with standard grid layouts.
+ *   **Limitations:** Only provides $C^0$ continuity. Accuracy is limited by grid resolution. Boundary handling can introduce artifacts if not carefully managed [S1, S4, unofficial].
+-*   **When to use:** When high-frequency details are not required, or when used as a base for higher-order interpolation. Suitable for neural rendering where grid resolution is high enough to approximate continuous fields [S2, unofficial].
++*   **When to use:** When high-frequency details are not required, or when used as a base for higher-order interpolation. Suitable for neural rendering where grid resolution is high enough to approximate continuous fields [G].
+ *   **When not to use:** When smooth gradients ($C^1$ or higher) are critical and grid resolution is low. When memory bandwidth is the primary bottleneck and $C$ is very large, consider sparse representations or lower channel counts [G].
+ 

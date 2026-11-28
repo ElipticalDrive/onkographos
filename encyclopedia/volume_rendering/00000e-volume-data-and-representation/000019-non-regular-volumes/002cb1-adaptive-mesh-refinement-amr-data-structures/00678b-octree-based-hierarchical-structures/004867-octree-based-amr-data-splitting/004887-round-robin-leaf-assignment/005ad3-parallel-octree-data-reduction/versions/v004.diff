@@ -1,0 +1,220 @@
+--- v003.md
++++ v004.md
+@@ -4,13 +4,10 @@
+ 
+ ## Overview
+-Parallel Octree Data Reduction is a technique for the interactive visualization of large scientific datasets by combining hierarchical data reduction with parallel computing [S1, unofficial]. It distributes data across Massively Parallel Processing (MPP) processors to build a distributed-memory octree, allowing users to interactively adapt resolution (refine or prune) on a local graphics workstation while retaining access to full-resolution data [S1, unofficial]. Unlike uniform grid subsampling, which uses a fixed grid and allows more grid points but higher approximation error in complex regions, this method places more points where data changes rapidly to minimize approximation error [S2]. It builds on [Round-robin Leaf Assignment](12287-round-robin-leaf-assignment.md) by providing the data structure and reduction logic that precedes or accompanies the distribution strategy.
++Parallel Octree Data Reduction is a technique for the interactive visualization of large scientific datasets by combining hierarchical data reduction with parallel computing [S1, unofficial]. It distributes data across Massively Parallel Processing (MPP) processors to build a distributed-memory octree, allowing users to interactively adapt resolution (refine or prune) on a local graphics workstation while retaining access to full-resolution data [S1, unofficial]. Unlike uniform grid subsampling, which uses a fixed grid and allows more grid points but higher approximation error in complex regions, this method places more points where data changes rapidly to minimize approximation error [S2]. It builds on [Round-robin Leaf Assignment](12287-round-robin-leaf-assignment.md) by providing the underlying hierarchical data structure and reduction logic that precedes the distribution strategy.
+ 
+ ## How it works
+ **Inputs and Outputs**
+ *   **Input:** File-based scalar field data requiring only spatial coordinate information; no connectivity information is necessary [S2]. The input format supports unstructured tetrahedral and hexahedral, block adaptive, and uniform meshes [S2].
+-*   **Output:** A reduced multiresolution dataset represented by a distributed octree. For each leaf octant, the output includes:
+-    *   The agglomerated field data value (typically the mean) [S1, unofficial].
+-    *   Statistical error indicators: normalized standard deviation ($a_n$) and normalized maximum deviation from the mean ($e_n$) [S1, unofficial].
+-    *   Spatial information for interoctant links [S1, unofficial].
++*   **Output:** A reduced multiresolution dataset represented by a distributed octree. For each leaf octant, the output includes the agglomerated field data value (typically the mean) [S1, unofficial], statistical error indicators (normalized standard deviation $a_n$ and normalized maximum deviation $e_n$) [S1, unofficial], and spatial information for interoctant links [S1, unofficial].
+ 
+ **Data Structures**
+@@ -29,8 +26,5 @@
+ 3.  **Splitting and Reassignment:** If the criterion indicates refinement is necessary, split the leaf octant and reassign its associated data points to the new child leaf octants [S2].
+ 4.  **Aggregation and Statistics:** After insertion (and any subsequent reassignments), aggregate the field data values within each leaf octant [S1, unofficial]. Typically, this involves averaging the values [S1, unofficial].
+-5.  **Error Computation:** For each leaf octant, compute statistical values:
+-    *   Standard deviation ($\sigma$) [S1, unofficial].
+-    *   Maximum deviation from the mean ($\epsilon$) [S1, unofficial].
+-    *   Mean ($\mu$) [S1, unofficial].
++5.  **Error Computation:** For each leaf octant, compute statistical values: standard deviation ($\sigma$) [S1, unofficial], maximum deviation from the mean ($\epsilon$) [S1, unofficial], and mean ($\mu$) [S1, unofficial].
+ 6.  **Normalization:** Normalize the standard deviation and maximum deviation by the mean to yield normalized error indicators:
+     $$ a_n = \sigma / \mu $$
+@@ -38,65 +32,131 @@
+     These values are included as additional scalar fields alongside the reduced data [S1, unofficial].
+ 7.  **Distribution:** Distribute the octree across the processors of the MPP using an octree partitioning algorithm and arbitrary octant migration for load balancing [S1, unofficial].
+-8.  **Traversal and Output Generation:** Form the reduced data set by traversing each local octree and computing the values on each leaf. This is done on each processor in linear time with respect to the local number of data points [S1, unofficial].
++8.  **Traversal and Output Generation:** Form the reduced data set by traversing each local octree and computing the values on each leaf [S1, unofficial].
+ 
+ **Pseudocode**
+ ```python
+-def parallel_octree_reduction(field_data, max_elements_per_octant=None, target_leaf_count=None):
++class OctreeNode:
++    def __init__(self, bounds, depth=0):
++        self.bounds = bounds  # (min_x, min_y, min_z, max_x, max_y, max_z)
++        self.depth = depth
++        self.children = [None] * 8
++        self.values = []
++        self.is_leaf = True
++        self.mean = 0.0
++        self.std_dev = 0.0
++        self.max_dev = 0.0
++        self.norm_std = 0.0
++        self.norm_max = 0.0
++
++    def insert(self, point, value):
++        if not self.contains(point):
++            raise ValueError("Point outside bounds")
++        if self.is_leaf:
++            self.values.append((point, value))
++        else:
++            idx = self._child_index(point)
++            self.children[idx].insert(point, value)
++
++    def contains(self, point):
++        return all(min_c <= p <= max_c for p, min_c, max_c in zip(point, self.bounds[:3], self.bounds[3:]))
++
++    def _child_index(self, point):
++        idx = 0
++        for i in range(3):
++            mid = (self.bounds[i] + self.bounds[i+3]) / 2
++            if point[i] > mid:
++                idx |= (1 << i)
++        return idx
++
++    def split(self):
++        if not self.is_leaf:
++            return
++        self.is_leaf = False
++        cx, cy, cz = (self.bounds[0]+self.bounds[3])/2, (self.bounds[1]+self.bounds[4])/2, (self.bounds[2]+self.bounds[5])/2
++        for i in range(8):
++            min_x = cx if i&1 else self.bounds[0]
++            max_x = self.bounds[3] if i&1 else cx
++            min_y = cy if i&2 else self.bounds[1]
++            max_y = self.bounds[4] if i&2 else cy
++            min_z = cz if i&4 else self.bounds[2]
++            max_z = self.bounds[5] if i&4 else cz
++            self.children[i] = OctreeNode((min_x, min_y, min_z, max_x, max_y, max_z), self.depth+1)
++        for point, val in self.values:
++            self.children[self._child_index(point)].insert(point, val)
++        self.values = []
++
++    def compute_statistics(self):
++        if not self.values:
++            self.mean = 0.0
++            self.std_dev = 0.0
++            self.max_dev = 0.0
++            self.norm_std = 0.0
++            self.norm_max = 0.0
++            return
++        vals = [v[1] for v in self.values]
++        self.mean = sum(vals) / len(vals)
++        variance = sum((v - self.mean)**2 for v in vals) / len(vals)
++        self.std_dev = variance ** 0.5
++        self.max_dev = max(abs(v - self.mean) for v in vals)
++        if self.mean != 0:
++            self.norm_std = self.std_dev / self.mean
++            self.norm_max = self.max_dev / self.mean
++        else:
++            self.norm_std = 0.0
++            self.norm_max = 0.0
++
++def parallel_octree_reduction(field_data, bounds, max_elements_per_octant=None, target_leaf_count=None):
+     """
+     field_data: List of tuples (x, y, z, value)
+-    max_elements_per_octant: Threshold for subdivision based on element count
+-    target_leaf_count: Threshold for subdivision based on total leaf count
++    bounds: (min_x, min_y, min_z, max_x, max_y, max_z)
+     """
+-    octree = DistributedOctree()
+-    
+-    # Step 1 & 2: Insertion and Refinement
++    octree = OctreeNode(bounds)
++
++    # Step 1: Insertion
+     for x, y, z, value in field_data:
+-        leaf = octree.find_leaf(x, y, z)
+-        leaf.insert(value)
+-        
+-        # Evaluate criterion
+-        should_refine = False
++        octree.insert((x, y, z), value)
++
++    # Step 2 & 3: Refinement Criterion Evaluation and Splitting
++    def criterion_func(node):
+         if max_elements_per_octant is not None:
+-            if leaf.element_count > max_elements_per_octant:
+-                should_refine = True
+-        elif target_leaf_count is not None:
+-            # Check if total leaves exceed target (requires global state or communication)
+-            if octree.total_leaves > target_leaf_count:
+-                should_refine = True
++            return len(node.values) > max_elements_per_octant
++        # Placeholder for target_leaf_count or custom criteria as per [S2]
++        return False
++    # Simplified iterative refinement traversal
++    leaves = [octree]
++    while leaves:
++        current = leaves.pop(0)
++        if current.is_leaf:
++            if criterion_func(current):
++                current.split()
++                leaves.extend(current.children)
+         else:
+-            # Default or custom criterion
+-            should_refine = leaf.evaluate_criterion()
+-            
+-        if should_refine:
+-            octree.split_leaf(leaf)
+-            # Reassign points from the old leaf to new children
+-            octree.reassign_points(leaf)
+-            
++            leaves.extend([c for c in current.children if c is not None])
++
+     # Step 4, 5, 6: Aggregation, Statistics, Normalization
+-    for leaf in octree.all_leaves():
+-        leaf.compute_statistics()
+-        mu = leaf.mean
+-        sigma = leaf.std_dev
+-        epsilon = leaf.max_deviation
+-        
+-        # Avoid division by zero
+-        if mu == 0:
+-            leaf.normalized_std_dev = 0
+-            leaf.normalized_max_dev = 0
++    leaves = [octree]
++    while leaves:
++        current = leaves.pop(0)
++        if current.is_leaf:
++            current.compute_statistics()
+         else:
+-            leaf.normalized_std_dev = sigma / mu
+-            leaf.normalized_max_dev = epsilon / mu
+-            
+-    # Step 7: Distribution is handled by the DistributedOctree infrastructure
+-    # Step 8: Traversal
++            leaves.extend([c for c in current.children if c is not None])
++
++    # Step 8: Traversal and Output Generation
+     reduced_data = []
+-    for leaf in octree.local_leaves():
+-        reduced_data.append({
+-            'center': leaf.center,
+-            'value': leaf.mean,
+-            'error_std': leaf.normalized_std_dev,
+-            'error_max': leaf.normalized_max_dev
+-        })
+-        
++    leaves = [octree]
++    while leaves:
++        current = leaves.pop(0)
++        if current.is_leaf:
++            reduced_data.append({
++                'center': ((current.bounds[0]+current.bounds[3])/2,
++                           (current.bounds[1]+current.bounds[4])/2,
++                           (current.bounds[2]+current.bounds[5])/2),
++                'value': current.mean,
++                'error_std': current.norm_std,
++                'error_max': current.norm_max
++            })
++        else:
++            leaves.extend([c for c in current.children if c is not None])
+     return reduced_data
+ ```
+@@ -115,8 +175,8 @@
+ 
+ ### [AMR Structure-Preserving Parallel Volume Rendering](17552-amr-structure-preserving-parallel-volume-rendering.md)
+-A parallel volume rendering method that preserves the Adaptive Mesh Refinement (AMR) block structure, distributing leaves of the octree among processors and using raycasting with adaptive sampling. It differs from uniform resampling methods by avoiding the overhead of converting hierarchical data to a single uniform grid, instead maintaining the native AMR hierarchy to optimize memory and computation for regions of varying resolution.
++A parallel volume rendering method that preserves the Adaptive Mesh Refinement (AMR) block structure, distributing leaves of the octree among processors and using raycasting with adaptive sampling. It sets itself apart from its parent method [Parallel Octree Data Reduction](16751-parallel-octree-data-reduction.md) by explicitly maintaining the hierarchical block topology for rendering rather than reducing data for interactive preview, and from its child [VisIt Data Parallel Volume Rendering](17553-visit-data-parallel-volume-rendering.md) by not treating patches as atomic units with ghost-cell filtering, but rather distributing individual octree leaves. Choose this variant when preserving native AMR hierarchy for rendering is required over interactive preview reduction.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The reduced data set is formed by traversing each local octree and computing the values on each leaf. This is done on each processor in linear time with respect to the local number of data points [S1, unofficial].
++*   **Time Complexity:** The reduced data set is formed by traversing each local octree and computing the values on each leaf [S1, unofficial].
+ *   **Memory Complexity:** The maximum resolution of the reduced data set is limited by the memory size and speed of the local graphics workstation [S2].
+ *   **Performance:** Used for interactive remote exploration of large terabyte/petabyte scalar field datasets on desktop workstations connected via high-speed networks [S2].

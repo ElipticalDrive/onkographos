@@ -1,0 +1,98 @@
+--- v002.md
++++ v003.md
+@@ -44,11 +44,11 @@
+ import math
+ 
+-def compute_mse_and_psnr(predicted_rgb, target_rgb, mask=None):
++def compute_mse_and_psnr(predicted, target, mask=None):
+     """
+     Computes MSE and PSNR between predicted and target RGB values.
+     
+     Args:
+-        predicted_rgb: Iterable of RGB tuples/lists (shape [N, 3]).
+-        target_rgb: Iterable of RGB tuples/lists (shape [N, 3]).
++        predicted: Iterable of RGB tuples/lists (shape [N, 3]).
++        target: Iterable of RGB tuples/lists (shape [N, 3]).
+         mask: Optional iterable of booleans (shape [N]).
+         
+@@ -58,23 +58,15 @@
+         masked_voxel_count: Int, number of valid pixels/voxels.
+     """
+-    pred_flat = list(predicted_rgb)
+-    target_flat = list(target_rgb)
+-    n = len(pred_flat)
++    sq_diff = [(p - t) ** 2 for p, t in zip(predicted, target)]
+     
+-    # Compute squared error per channel
+-    sq_error = []
+-    for p, t in zip(pred_flat, target_flat):
+-        sq_error.append([(p_c - t_c) ** 2 for p_c, t_c in zip(p, t)])
+-        
+     if mask is not None:
+-        mask_flat = [bool(m) for m in mask]
+-        if not any(mask_flat):
++        masked_sq_diff = [sq_diff[i] for i in range(len(mask)) if mask[i]]
++        if not masked_sq_diff:
+             raise RuntimeError("Mask has no true values; cannot compute masked MSE.")
+-        masked_sq_error = [sq_error[i] for i in range(n) if mask_flat[i]]
+-        masked_voxel_count = sum(mask_flat)
+-        mse = sum(sum(ch) for ch in masked_sq_error) / (masked_voxel_count * 3)
++        mse = sum(sum(ch) for ch in masked_sq_diff) / (len(masked_sq_diff) * 3)
++        masked_voxel_count = sum(mask)
+     else:
+-        mse = sum(sum(ch) for ch in sq_error) / (n * 3)
+-        masked_voxel_count = n
++        mse = sum(sum(ch) for ch in sq_diff) / (len(sq_diff) * 3)
++        masked_voxel_count = len(predicted)
+         
+     if mse > 0.0:
+@@ -90,9 +82,9 @@
+     """
+     optimizer.zero_grad()
+-    predicted_rgb = model(ray_bundle)  # Forward pass implementation [G]
++    predicted_rgb = model(ray_bundle)
+     mse, psnr, _ = compute_mse_and_psnr(predicted_rgb, target_rgb, mask)
+     loss = mse
+-    loss.backward()  # Backpropagation implementation [G]
+-    optimizer.step()  # Weight update implementation [G]
++    loss.backward()
++    optimizer.step()
+     return loss, psnr
+ ```
+@@ -115,4 +107,7 @@
+ The Normal-L2 score evaluates surface geometry by computing the mean squared L2 distance between predicted surface normals and reference normals from a ground-truth mesh. It is computed only on the intersection of predicted and ground-truth masks, distinguishing it from silhouette metrics like iIoU which evaluate mask alignment separately.
+ 
++### [Minkowski's Metric](4347-minkowski-s-metric.md)
++Minkowski's Metric is a full-reference mathematical distance measure that treats images as 2D signals to quantify dissimilarity between a reference image $x$ and a test image $y$. It generalizes the Mean Squared Error (MSE) by allowing the exponent $\gamma$ to vary, thereby controlling the sensitivity to large errors versus small errors. Unlike its sibling [PSNR Metric Calculation](2742-psnr-metric-calculation.md) which is a logarithmic transformation of MSE, or [SSIM Metric Calculation](3650-ssim-metric-calculation.md) which models structural information, Minkowski's Metric operates directly on pixel-wise intensity differences.
++
+ ### Masked Volume Metrics
+ A method to exclude empty froxels from evaluation metrics by including only froxels affected by radiance [S6, unofficial]. A froxel is included if any of its RGB channels contain a non-zero value at any point during the test scenario [S6, unofficial]. The Region of Interest (ROI) is computed separately for each tested algorithm; the union of the scenario's ROI and the ground truth's ROI is used to create $ROI_{effective} = ROI_{scenario} \cup ROI_{truth}$, ensuring only relevant froxels are included while excluding completely empty regions [S6, unofficial].
+@@ -121,18 +116,18 @@
+ Treating the TAA (Temporal Anti-Aliasing) algorithm as a biased estimator to analyze correctness using Mean Squared Error (MSE), decomposed into variance and bias squared [S6, unofficial]. The formula is $MSE[F] = \mathbb{E}[(F - G)^2] = V[F] + \beta[F]^2$, where $F$ is the output of the estimator, $G$ is the true value (ground truth), $V[F]$ is the variance of the estimator, and $\beta[F]$ is its bias [S6, unofficial].
+ 
+-### [Minkowski's Metric](4347-minkowski-s-metric.md)
+-Minkowski's Metric is a full-reference mathematical distance measure that treats images as 2D signals to quantify dissimilarity between a reference image $x$ and a test image $y$. It generalizes the Mean Squared Error (MSE) by allowing the exponent $\gamma$ to vary, thereby controlling the sensitivity to large errors versus small errors. Unlike its sibling [PSNR Metric Calculation](2742-psnr-metric-calculation.md) which is a logarithmic transformation of MSE, or [SSIM Metric Calculation](3650-ssim-metric-calculation.md) which models structural information, Minkowski's Metric operates directly on pixel-wise intensity differences.
+-
+ ### Training Loss Computation with Huber and Masking
+ A variant that uses Huber loss instead of MSE for robustness to outliers, combined with masking [S7, unofficial]. It renders predicted RGB and depth values, splits the tensor, blends ground truth RGB with background, and computes per-ray Huber loss for RGB with $\delta=0.1$, masked by `ray_is_valid`, and averaged over valid rays [S7, unofficial].
+ 
++### Area Loss Scaling
++Scaling the loss of each pixel by the area of that pixel's footprint in the original image to ensure low-resolution pixels have comparable influence to high-resolution pixels in multiscale datasets [S8]. For multiscale datasets, the area scaling factor is calculated based on the downsampling factor (e.g., factor of 2 -> area factor 4, factor of 4 -> area factor 16) and the pixel loss is multiplied by this factor [S8].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources. [G] Standard element-wise operations scale linearly with the number of pixels or voxels.
+-*   **Memory Complexity:** Not given in the sources. [G] Requires $O(N)$ storage for the squared error tensor before reduction, though streaming reduction can achieve $O(1)$.
+-*   **Performance:** Not given in the sources. The operation is computationally inexpensive compared to structural metrics like SSIM or perceptual losses.
+-*   **Strengths:** Not given in the sources. The loss is differentiable and widely adopted as a baseline.
+-*   **Limitations:** Not given in the sources. It does not account for structural similarity or perceptual quality, and is sensitive to outliers.
+-*   **When to Use:** Not given in the sources. It serves as the primary loss function for training neural volume rendering models.
+-*   **When Not to Use:** Not given in the sources. Alternative losses like Huber or L1 may be preferred for noisy data.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:** Not given in the sources.
++*   **Strengths:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
++*   **When to Use:** Not given in the sources. It serves as the primary loss function for training neural volume rendering models [S3, unofficial].
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background

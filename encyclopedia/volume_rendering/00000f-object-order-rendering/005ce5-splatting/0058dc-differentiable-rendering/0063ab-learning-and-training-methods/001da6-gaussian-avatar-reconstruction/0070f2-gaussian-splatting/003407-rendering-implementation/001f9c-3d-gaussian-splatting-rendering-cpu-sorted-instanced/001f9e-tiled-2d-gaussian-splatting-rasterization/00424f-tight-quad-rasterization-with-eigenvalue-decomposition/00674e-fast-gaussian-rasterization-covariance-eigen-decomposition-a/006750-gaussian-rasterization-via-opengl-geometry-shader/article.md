@@ -1,0 +1,179 @@
+# Gaussian Rasterization via OpenGL Geometry Shader
+
+Also called: OpenGL Geometry Shader Rasterization for 3D Gaussians, dsplat pipeline, fast-gauss rasterization
+
+## Overview
+This method renders 3D Gaussian splats as screen-space quads by leveraging the fixed-function OpenGL rasterizer via a vertex-geometry-fragment shader pipeline, offloading clipping, interpolation, and blending from software to hardware [S1, unofficial]. It differs from CUDA-based software rasterization by reducing CPU/GPU synchronization overhead and explicit sorting stalls, achieving 5-10x speedup over the original software CUDA rasterizer for high pixel-to-point ratios [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** 3D Gaussian attributes including position (mean), covariance matrix (or scales/rotations), and opacity/color (RGBA or spherical harmonics).
+- **Outputs:** A rendered image texture (framebuffer) with alpha blending.
+
+**Data Structures:**
+- **Vertex Buffer Object (VBO):** Contains attributes per Gaussian point. The layout consists of 4 attributes with sizes [3, 3, 3, 4] floats per vertex, representing:
+    1. Position (3 floats)
+    2. Covariance matrix elements (6 floats, packed as two `vec3`s) [S1, unofficial]
+    3. Opacity and Color/SH coefficients (4 floats) [S1, unofficial]
+- **Attribute Data Type:** `gl.GL_FLOAT` or `gl.GL_HALF_FLOAT`, determined by the `dtype` parameter (e.g., `torch.float` or `torch.half`) [S1, unofficial].
+- **Output Texture Format:** `gl.GL_RGBA16F` for half precision, `gl.GL_RGBA32F` for float, or `gl.GL_RGBA8` for uint8, determined by `tex_dtype` [S1, unofficial].
+
+**Numbered Steps:**
+1. **Upload Attributes:** Upload Gaussian attributes (position, covariance, RGBA) to a vertex buffer object (VBO) on the GPU [S1, unofficial].
+2. **Vertex Shader Processing:** The vertex shader processes each Gaussian point, passing attributes to the geometry shader [S1, unofficial].
+3. **Geometry Shader Emission:** The geometry shader emits a quad (4 vertices) per Gaussian. Crucially, it computes the 3D-to-2D covariance projection **once per Gaussian** rather than per vertex, optimizing performance [S1, unofficial].
+4. **Fragment Shader Shading:** The fragment shader shades the emitted quad using the interpolated Gaussian alpha and color [S1, unofficial].
+5. **Fixed-Function Rasterization:** The OpenGL rasterizer handles clipping, interpolation of vertex attributes across the quad, and alpha blending into the framebuffer [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Shader Pipeline Compilation and Execution Logic
+# Note: This is a high-level representation of the Python-side setup and shader logic.
+# Actual GLSL shader code is not provided in the source, but the logic is described.
+
+def compile_shaders():
+    # Vertex Shader: Passes position, covariance, and color to geometry shader
+    vertex_shader_source = """
+    #version 430 core
+    layout(location = 0) in vec3 position;
+    layout(location = 1) in vec3 cov1;
+    layout(location = 2) in vec3 cov2;
+    layout(location = 3) in vec4 color;
+    
+    out vec3 v_cov1;
+    out vec3 v_cov2;
+    out vec4 v_color;
+    
+    void main() {
+        v_cov1 = cov1;
+        v_cov2 = cov2;
+        v_color = color;
+        gl_Position = vec4(position, 1.0); // Simplified; actual projection happens in GS
+    }
+    """
+    
+    # Geometry Shader: Emits quad, computes 2D covariance once
+    geometry_shader_source = """
+    #version 430 core
+    layout(points) in;
+    layout(triangle_strip, max_vertices = 4) out;
+    
+    in vec3 v_cov1[];
+    in vec3 v_cov2[];
+    in vec4 v_color[];
+    
+    out vec2 v_uv;
+    out vec4 v_color_out;
+    out float v_depth;
+    
+    uniform mat4 projection_matrix;
+    uniform mat4 view_matrix;
+    
+    void main() {
+        // 1. Compute 3D-to-2D covariance projection ONCE per Gaussian
+        // This involves projecting the 3D covariance matrix to 2D screen space
+        // using the view and projection matrices.
+        // Let C_3D be the 3x3 covariance matrix from v_cov1 and v_cov2.
+        // Let J be the Jacobian of the projection.
+        // C_2D = J * C_3D * J^T
+        
+        // 2. Compute basis vectors (eigenvectors of C_2D) and scale factors
+        // to form the quad vertices in screen space.
+        // This step is performed once per input point.
+        
+        // 3. Emit 4 vertices forming a quad
+        // Vertex 0: Center - u - v
+        // Vertex 1: Center + u - v
+        // Vertex 2: Center - u + v
+        // Vertex 3: Center + u + v
+        // where u and v are the scaled eigenvectors.
+        
+        // For each vertex, set gl_Position and pass UV coordinates and color
+        gl_Position = projection_matrix * view_matrix * vec4(center, 1.0);
+        v_uv = vec2(0.0); // Placeholder for UV
+        v_color_out = v_color[0];
+        EmitVertex();
+        
+        gl_Position = projection_matrix * view_matrix * vec4(center + u - v, 1.0);
+        v_uv = vec2(0.0, 0.0);
+        EmitVertex();
+        
+        gl_Position = projection_matrix * view_matrix * vec4(center + u + v, 1.0);
+        v_uv = vec2(1.0, 0.0);
+        EmitVertex();
+        
+        gl_Position = projection_matrix * view_matrix * vec4(center - u + v, 1.0);
+        v_uv = vec2(0.0, 1.0);
+        EmitVertex();
+        
+        EndPrimitive();
+    }
+    """
+    
+    # Fragment Shader: Shading with Gaussian alpha/color
+    fragment_shader_source = """
+    #version 430 core
+    in vec2 v_uv;
+    in vec4 v_color_out;
+    out vec4 frag_color;
+    
+    uniform sampler2D gaussian_texture; // If using texture-based approach, otherwise direct
+    
+    void main() {
+        // Evaluate Gaussian PDF at UV coordinates
+        // alpha = exp(-0.5 * dot(uv, uv)) * opacity
+        // frag_color = vec4(color * alpha, alpha)
+        frag_color = v_color_out; // Simplified; actual shading requires PDF evaluation
+    }
+    """
+    return vertex_shader_source, geometry_shader_source, fragment_shader_source
+
+def render_gaussians(gaussians, context):
+    """
+    Renders 3D Gaussians using the OpenGL Geometry Shader pipeline.
+    """
+    # 1. Upload Gaussian attributes to VBO
+    vbo = context.create_vbo(gaussians.attributes)
+    
+    # 2. Set up shader program
+    vs, gs, fs = compile_shaders()
+    shader_program = context.create_shader_program(vs, gs, fs)
+    
+    # 3. Bind VBO and execute draw call
+    context.bind_vbo(vbo)
+    context.use_shader(shader_program)
+    
+    # 4. Draw points which are expanded to quads by GS
+    # glDrawArrays(GL_POINTS, 0, num_gaussians)
+    context.draw_arrays(GL_POINTS, 0, gaussians.count)
+    
+    # 5. Read back or use framebuffer texture
+    return context.get_framebuffer_texture()
+```
+
+**Parameters:**
+- `dtype`: Data type for attributes (`torch.float` or `torch.half`) [S1, unofficial].
+- `tex_dtype`: Output texture format (`gl.GL_RGBA16F`, `gl.GL_RGBA32F`, or `gl.GL_RGBA8`) [S1, unofficial].
+- `init_buffer_size`: Initial size for buffer allocation [S1, unofficial].
+- `init_texture_size`: Initial size for texture allocation [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Small Triangles:** Modern graphics hardware rasterization pipelines are not well-optimized for small triangles, which can cause performance drops during high-resolution rendering with large Gaussians [S1, unofficial].
+- **Covariance Computation:** The source notes that a fast 3D covariance computation (from scales and rotations) in the shader is not yet implemented; only a PyTorch implementation is available for precomputation [S1, unofficial]. Caching persistent results (e.g., the 6 elements of the covariance matrix) is recommended for best performance [S1, unofficial].
+- **Backward Pass:** No backward pass is supported yet [S1, unofficial].
+
+## Operating characteristics
+- **Performance:** Can be 5-10x faster than the original software CUDA rasterizer ([diff-gaussian-rasterization](https://github.com/graphdeco-inria/diff-gaussian-rasterization)) [S1, unofficial]. Can be 2-3x faster if using offline rendering, though bottlenecked by copying rendered images [S1, unofficial].
+- **Scaling:** Speedup is most visible with high pixel-to-point ratio (large Gaussians, small point count, high-res rendering) [S1, unofficial]. For extremely dense point clouds (> 1 million points), the CUDA implementation might be faster due to hardware rasterization inefficiencies with small triangles [S1, unofficial].
+- **Strengths:** Offloads clipping, interpolation, and blending to the fixed-function OpenGL pipeline, reducing CPU/GPU synchronization overhead and explicit sorting stalls [S1, unofficial]. Uses non-blocking data passing and GPU sorting to minimize stalls [S1, unofficial].
+- **Limitations:** No backward pass support [S1, unofficial]. Performance degrades with small triangles in high-resolution rendering [S1, unofficial]. Requires precomputation of covariance in PyTorch as shader-side computation is not yet optimized [S1, unofficial].
+- **When to Use:** Real-time and offline 3D Gaussian Splatting rendering where speed is critical and backward pass is not needed [S1, unofficial]. Best for high pixel-to-point ratios.
+- **When Not to Use:** Extremely dense point clouds (> 1 million points) where CUDA software rasterization may be faster [S1, unofficial]. When backward pass is required [S1, unofficial].
+
+## Background
+This method is part of the `fast_gauss` library, developed by dendenxu, for real-time and offline 3D Gaussian Splatting rendering [S1, unofficial]. It builds on the principles of differentiable rendering and Gaussian Splatting, aiming to optimize the rasterization step by leveraging standard graphics APIs instead of custom CUDA kernels [S1, unofficial].
+
+## Sources
+[S1] dendenxu/fast-gaussian-rasterization, https://github.com/dendenxu/fast-gaussian-rasterization, fetched 2026-10-26 (unofficial)

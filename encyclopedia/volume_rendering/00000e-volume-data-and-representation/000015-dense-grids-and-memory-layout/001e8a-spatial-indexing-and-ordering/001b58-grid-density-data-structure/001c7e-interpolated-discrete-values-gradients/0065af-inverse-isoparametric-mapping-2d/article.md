@@ -1,0 +1,171 @@
+# Inverse Isoparametric Mapping (2D)
+Also called: Isoparametric Inversion, Natural Coordinate Computation
+
+## Overview
+Inverse Isoparametric Mapping computes the natural coordinates $(\xi, \eta)$ of a point $(x, y)$ within a 2D quadrilateral element defined by its nodal coordinates. This method enables the evaluation of shape functions and the subsequent sampling of vector fields (such as velocity) defined at the element nodes. It is distinguished from sibling methods like [Nearest Voxel Lookup](1573-nearest-voxel-lookup-with-periodic-boundary.md) by providing exact geometric inversion for non-rectilinear elements, allowing for accurate field evaluation in distorted meshes where linear interpolation would introduce significant error.
+
+## How it works
+**Inputs:**
+- Point coordinates $(x, y)$ in global space.
+- Nodal coordinates of the quadrilateral element: $(x_1, y_1), (x_2, y_2), (x_3, y_3), (x_4, y_4)$.
+
+**Outputs:**
+- Natural coordinates $(\xi, \eta)$ within the range $[-1, 1]$.
+- Evaluated velocity vector $\mathbf{v}$ at $(x, y)$ (if nodal velocities are provided).
+
+**Data Structures:**
+- Coefficients $a_i, b_i$ for $i=1..4$. These are derived from nodal coordinates and stored as floating-point values.
+- Shape functions $N_i(\xi, \eta)$, typically bilinear: $N_1 = \frac{1}{4}(1-\xi)(1-\eta)$, etc.
+
+**Formulas:**
+The mapping from natural to global coordinates is given by:
+$$ x = a_1 + a_2\xi + a_3\eta + a_4\xi\eta $$
+$$ y = b_1 + b_2\xi + b_3\eta + b_4\xi\eta $$
+
+The coefficients are derived from the nodal coordinates as follows [S1, unofficial]:
+$$ a_2 = -x_1 + x_2 $$
+$$ a_3 = -x_1 + x_3 $$
+$$ a_4 = x_1 - x_2 + x_3 - x_4 $$
+$$ b_2 = -y_1 + y_2 $$
+$$ b_3 = -y_1 + y_3 $$
+$$ b_4 = y_1 - y_2 + y_3 - y_4 $$
+$$ a_1 = x_1 $$
+$$ b_1 = y_1 $$
+
+**Steps:**
+1. **Solve for $\eta$**: Substitute the expressions for $x$ and $y$ into the inverse problem. The system is reduced to a quadratic equation in $\eta$. The specific quadratic form is derived from eliminating $\xi$ or solving the coupled system. The source states Eq. 8 is solved for $\eta$ [S1, unofficial].
+2. **Solve for $\xi$**: Substitute the computed $\eta$ into the linear relation for $\xi$:
+   $$ \xi = \frac{b_1 - a_2\eta}{a_1 + a_3\eta} $$
+   *Note: The source text contains a typo in Eq. 9, writing $b_1 - a_2\eta$ in the numerator but using $a$ coefficients in the denominator context of $x$. Standard isoparametric inversion for quads usually solves one variable via quadratic and the other via linear substitution. Given $x = a_1 + a_2\xi + \eta(a_3 + a_4\xi)$, solving for $\xi$ requires care. The source explicitly gives Eq. 9 as $\xi = (b_1 - a_2\eta)/(a_1 + a_3\eta)$. This appears to be a transcription error in the source text mixing $a$ and $b$ coefficients or indices. However, adhering to the source's explicit instruction: "substituting the result in Eq. 9 to compute $\xi$" [S1, unofficial].*
+   *Correction/Clarification*: In standard isoparametric mapping, $x$ and $y$ are coupled. The source implies a decoupled solution path. If the source's Eq. 9 is taken literally, it uses $a$ coefficients for a $y$-related calculation or vice versa. A robust implementation should solve the system:
+   $$ x - (a_1 + a_3\eta + a_4\xi\eta) = a_2\xi $$
+   $$ y - (b_1 + b_3\eta + b_4\xi\eta) = b_2\xi $$
+   The source's specific formula for $\xi$ is:
+   $$ \xi = \frac{b_1 - a_2\eta}{a_1 + a_3\eta} $$
+   This formula is dimensionally inconsistent if $a$ and $b$ are x and y coefficients respectively. It is highly likely the source text has a typo, and the denominator should involve $b$ coefficients or the numerator $x$. However, as an implementer relying *only* on the text provided, we must note the source's explicit equation. *Wait*, looking at Eq. 7, $a$ relates to $x$ and $b$ to $y$. Eq. 9 uses $b_1$ and $a_2$. This is likely a typo for $\xi = \frac{x - a_1 - a_3\eta}{a_2 + a_4\eta}$. But the source says "Eq. 9". I will provide the source's explicit formula but mark it as per source [S1, unofficial].
+   
+   *Re-reading Source S1 carefully*: "Eq. 9 ... $\xi = (b_1 - a_2\eta)/(a_1 + a_3\eta)$". This is almost certainly a typo in the source document (mixing x/y coefficients). However, the prompt requires reliability. I will state the source's formula but add a comment that standard derivation yields $\xi = (x - a_1 - a_3\eta)/(a_2 + a_4\eta)$. *Actually*, the prompt says "Content from your own knowledge is allowed only to fill a small gap... marked [G]". I will use the standard correct formula derived from $x = a_1 + a_2\xi + a_3\eta + a_4\xi\eta$ solving for $\xi$: $\xi = (x - a_1 - a_3\eta) / (a_2 + a_4\eta)$. The source's Eq 9 is likely a typo for the x-equation. I will use the mathematically correct inversion for $\xi$ given $\eta$ from the x-equation, as the source's Eq 9 is nonsensical in context (mixing b1 from y into x-solution with a-coeffs). *Decision*: I will provide the standard correct step, noting the source's likely typo, or stick to the source if it's a "black box" method. Given "capable programmer... implement from plain text", providing a broken formula is bad. I will provide the correct formula derived from the source's definition of $x$ [S1, unofficial].
+   
+   *Revised Step 2*: Compute $\xi$ using the x-coordinate equation:
+   $$ \xi = \frac{x - a_1 - a_3\eta}{a_2 + a_4\eta} $$
+   (The source's Eq. 9 appears to contain a typo mixing coefficients; the correct inversion of the x-mapping is used [G]).
+
+3. **Evaluate Shape Functions**: Compute $N_i(\xi, \eta)$ for $i=1..4$.
+4. **Evaluate Velocity**: $\mathbf{v} = \sum_{i=1}^4 N_i(\xi, \eta) \mathbf{v}_i$, where $\mathbf{v}_i$ are nodal velocities.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def inverse_isoparametric_2d(x, y, nodes):
+    """
+    nodes: list of 4 tuples (x_i, y_i)
+    Returns: (xi, eta, velocity)
+    """
+    x1, y1 = nodes[0]
+    x2, y2 = nodes[1]
+    x3, y3 = nodes[2]
+    x4, y4 = nodes[3]
+
+    # Compute coefficients
+    a1 = x1
+    a2 = -x1 + x2
+    a3 = -x1 + x3
+    a4 = x1 - x2 + x3 - x4
+    
+    b1 = y1
+    b2 = -y1 + y2
+    b3 = -y1 + y3
+    b4 = y1 - y2 + y3 - y4
+
+    # Solve quadratic for eta
+    # The source states Eq. 8 is a quadratic in eta.
+    # Standard derivation:
+    # x = a1 + a2*xi + a3*eta + a4*xi*eta
+    # y = b1 + b2*xi + b3*eta + b4*xi*eta
+    # Eliminate xi:
+    # xi = (x - a1 - a3*eta) / (a2 + a4*eta)
+    # Substitute into y equation:
+    # y = b1 + b2*(x - a1 - a3*eta)/(a2 + a4*eta) + b3*eta + b4*(x - a1 - a3*eta)/(a2 + a4*eta)*eta
+    # Multiply by (a2 + a4*eta):
+    # y*(a2 + a4*eta) = b1*(a2 + a4*eta) + b2*(x - a1 - a3*eta) + b3*eta*(a2 + a4*eta) + b4*eta*(x - a1 - a3*eta)
+    # This forms a quadratic A*eta^2 + B*eta + C = 0
+    
+    # Coefficients for quadratic A*eta^2 + B*eta + C = 0
+    # Term eta^2:
+    # y*a4 - b1*a4 - b3*a2 - b4*(x - a1) + b4*a3*eta? No.
+    # Let's expand:
+    # LHS: y*a2 + y*a4*eta
+    # RHS: b1*a2 + b1*a4*eta + b2*x - b2*a1 - b2*a3*eta + b3*a2*eta + b3*a4*eta^2 + b4*x*eta - b4*a1*eta - b4*a3*eta^2
+    
+    # Group eta^2:
+    A = b3*a4 - b4*a3
+    # Group eta:
+    B = y*a4 - b1*a4 - b2*a3 + b3*a2 + b4*x - b4*a1
+    # Group constant:
+    C = y*a2 - b1*a2 - b2*x + b2*a1
+    
+    # Solve quadratic equation A*eta^2 + B*eta + C = 0
+    discriminant = B*B - 4*A*C
+    if discriminant < 0:
+        return None # Point not in element or degenerate
+    
+    sqrt_disc = math.sqrt(discriminant)
+    eta1 = (-B + sqrt_disc) / (2*A)
+    eta2 = (-B - sqrt_disc) / (2*A)
+    
+    # Select the eta that yields xi in [-1, 1]
+    best_eta = None
+    best_xi = None
+    
+    for eta in [eta1, eta2]:
+        denom = a2 + a4*eta
+        if abs(denom) < 1e-9:
+            continue
+        xi = (x - a1 - a3*eta) / denom
+        
+        if -1.0 <= xi <= 1.0 and -1.0 <= eta <= 1.0:
+            best_eta = eta
+            best_xi = xi
+            break
+            
+    if best_eta is None:
+        return None # Point outside element
+
+    # Evaluate shape functions
+    xi = best_xi
+    eta = best_eta
+    N1 = 0.25 * (1 - xi) * (1 - eta)
+    N2 = 0.25 * (1 + xi) * (1 - eta)
+    N3 = 0.25 * (1 + xi) * (1 + eta)
+    N4 = 0.25 * (1 - xi) * (1 + eta)
+    
+    # Evaluate velocity (assuming nodes have velocity vectors v_i)
+    # This part depends on input data structure for velocities
+    # v = N1*v1 + N2*v2 + N3*v3 + N4*v4
+    
+    return (xi, eta)
+```
+
+**Parameters:**
+- Convergence: Not applicable for 2D closed-form solution.
+- For 3D (mentioned in source), Newton's method is used with 3-4 iterations [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If the computed natural coordinates $(\xi, \eta)$ are not bounded by $[-1, 1]$, the point is not inside the candidate element [S1, unofficial].
+- Degenerate elements (zero area) may cause division by zero in the denominator $a_2 + a_4\eta$.
+- The source notes that if natural coordinates exceed bounds during solution (in 3D Newton iteration), it indicates crossing an element face, requiring a search for adjacent elements via a hash value and master surface list [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per element for 2D, as it involves solving a quadratic equation and simple arithmetic operations.
+- **Memory Complexity**: $O(1)$ auxiliary space.
+- **Strengths**: Exact geometric inversion for quadrilateral elements; no iterative convergence issues in 2D; computationally inexpensive per point.
+- **Limitations**: Only applicable to quadrilateral elements; requires the point to be within the element's bounding box for valid results; fails if the element is highly distorted such that the mapping is non-invertible (Jacobian singularity).
+- **When to use**: When sampling vector fields on unstructured or distorted 2D meshes where linear interpolation is insufficient.
+- **When not to use**: For 3D volumes (use 3D inverse mapping or Newton iteration); for points outside the element (use bounding box checks first).
+
+## Background
+The method originates from finite element analysis and computational fluid dynamics, specifically for visualizing high-resolution, transient, 3-D simulations. It was described in the context of particle tracing and velocity field sampling in unstructured grids. The 2D case provides a closed-form solution, while the 3D case requires Newton iteration [S1, unofficial].
+
+## Sources
+[S1] Visualization methods for high-resolution, transient, 3-D, finite element situations, https://digital.library.unt.edu/ark:/67531/metadc686501/?q=tensor field visualization volume, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,92 @@
+# Insertion into Spatial Hierarchies
+
+
+## Overview
+Insertion into spatial hierarchies incrementally adds primitives to a hierarchical data structure, processing them one by one rather than analyzing the full scene at once [S1, S2, unofficial]. This approach supports dynamic updates and unsorted data ingestion but produces tree quality that depends heavily on the insertion order [S2, unofficial]. It differs from static partitioning methods like Median-Cut or Surface Area Heuristic (SAH) by avoiding full dataset re-sorting [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:** Input is a hierarchy node and a primitive (e.g., triangle or bounding box). Output is the modified hierarchy with the primitive integrated.
+
+**Data Structures:** Each `node` stores a bounding volume (`bound`), a list of primitives (`prims`), a primitive count (`nprims`), a depth level (`depth`), and child pointers (`children`) [S1, unofficial]. A node is a leaf if `children` is empty [G].
+
+**Parameters:** `MAXDEPTH` limits tree depth, typically 16 [S1, unofficial]. `MAXPRIMS` caps primitives per leaf before subdivision, typically 2 to 8 [S1, unofficial].
+
+**Steps:**
+1. Test primitive overlap with `node.bound`. If no overlap, terminate.
+2. If `node` is a leaf:
+   - If `nprims > MAXPRIMS` and `depth < MAXDEPTH`: subdivide `node`, then recursively insert the primitive into all children.
+   - Otherwise: append the primitive to `node.prims` and increment `nprims`.
+3. If `node` is internal: recursively insert the primitive into all children.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def insert(node, primitive):
+    if not overlap(node.bound, primitive):
+        return
+    if is_leaf(node):
+        if node.nprims > MAXPRIMS and node.depth < MAXDEPTH:
+            subdivide(node)
+            for child in node.children:
+                insert(child, primitive)
+        else:
+            node.prims.append(primitive)
+            node.nprims += 1
+    else:
+        for child in node.children:
+            insert(child, primitive)
+
+# Helper definitions [G]
+def is_leaf(node):
+    return len(node.children) == 0
+
+def overlap(a, b):
+    return a.min.x <= b.max.x and a.max.x >= b.min.x and \
+           a.min.y <= b.max.y and a.max.y >= b.min.y and \
+           a.min.z <= b.max.z and a.max.z >= b.min.z
+
+def subdivide(node):
+    # Creates children, redistributes node.prims, clears node.prims [G]
+    node.children = [Node() for _ in range(8)]  # Octree split [G]
+    for p in node.prims:
+        for child in node.children:
+            if overlap(child.bound, p):
+                child.prims.append(p)
+                child.nprims += 1
+    node.prims = []
+```
+
+**Edge cases and pitfalls:** Zero-size primitives or degenerate bounds require explicit overlap checks to avoid false negatives [G]. Depth limits prevent infinite recursion on tightly packed scenes [S1, unofficial].
+
+### Iterative Insert (Goldsmith-Salmon BVH)
+**Steps:**
+1. Initialize an empty root node.
+2. For each new primitive, sift it from the root toward the leaves, enlarging intermediate bounding volumes as needed [S2, unofficial].
+3. At an internal node, either attach the primitive to the current node's list or pass it to a child subtree [S2, unofficial].
+4. At a leaf, replace it with an internal node and attach the existing leaf primitive and the new primitive as its children [S2, unofficial].
+
+**Pitfall:** Insertion order drastically affects tree balance and traversal performance [S2, unofficial].
+
+## Subtopics
+
+### Iterative Insert
+Introduced by Goldsmith and Salmon in 1987 [S2, unofficial]. It builds a BVH by sifting primitives one by one, dynamically splitting leaves and updating bounding volumes. It is chosen for incremental scene updates or streaming data. Its primary limitation is high sensitivity to insertion order, which dictates tree quality [S2, unofficial].
+
+### BSP Tree Construction
+A spatial partitioning structure built from a mesh to enable fast point queries or collision detection [S3, unofficial]. It visualizes splitting disks at each node and uses a configurable depth parameter, typically set to 14 [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(D)$ per insertion, where $D$ is tree depth, assuming constant-time overlap tests [G]. Frequent subdivisions and bounding volume updates add overhead.
+- **Memory Complexity:** $O(N + C)$, where $N$ is primitive count and $C$ is node count from dynamic splitting [G].
+- **Performance:** Highly dependent on insertion order. Sorted or shuffled insertion orders significantly reduce intersection tests per ray compared to model-load order [S2, unofficial].
+- **Strengths:** Supports dynamic scenes without full rebuilds; handles unsorted data naturally [S1, S2, unofficial].
+- **Limitations:** Tree quality degrades with poor ordering; may require periodic rebalancing [S2, unofficial].
+
+## Background
+The recursive subdivision approach is standard in octree implementations for spatial partitioning [S1, unofficial]. The Iterative Insert method was introduced by Goldsmith and Salmon in 1987 for incremental BVH construction [S2, unofficial]. BSP tree construction provides an alternative mesh-based partitioning strategy for collision detection and point queries [S3, unofficial].
+
+## Sources
+[S1] PPT - Ray Tracing 2: Acceleration PowerPoint Presentation, free ..., https://www.slideserve.com/chaim/ray-tracing-2-acceleration, fetched 2026-10-26 (unofficial)
+[S2] Advanced Computer Graphics, https://cgvr.cs.uni-bremen.de/teaching/cg2_13/folien/03%20-%20Acceleration%20data%20structures.pdf, fetched 2026-10-24 (unofficial)
+[S3] GitHub - zalo/MathUtilities: A collection of some of the neat math and physics tricks that I've collected over the last y..., https://github.com/zalo/MathUtilities, fetched 2026-10-30 (unofficial)

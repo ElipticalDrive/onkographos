@@ -1,0 +1,174 @@
+实时体积云渲染的光照细节
+
+实时体积云渲染的光照细节 | 月光下的旅行。
+去年十月份我打算在引擎里加入体积云，折腾两个月后弄了一个大概的效果，基本看得过去，匆忙录了一个视频：
+https://www.bilibili.com/video/BV18e4y1L7bv
+但把体积云作为天空的默认启动效果，放在场景中，360°频繁观看时，总会觉得辣眼睛。我又花了好多时间来细调这个效果，大概是3个月的闲暇时间吧 :D，快魔怔了之后终于得到了一个还算自然的效果（再也不改动体积云相关的Shader了）。
+体积云渲染使用Volumetric Raymarching技术，渲染前我们确定星球的半径，体积云层的开始高度和终止高度，使用一些简单的数学运算，很容易就能得到RayMarching的起始点和终止点 a 和 b ：
+大家都知道光线在经过水/烟/雾等体积时会被吸收掉一部分能量，因此，在a到b的路上，我们也要知道天空的光线有多少被吸收掉了？
+使用transmittance来表示天空被云遮挡的程度（透射率），那么体积云的渲染公式如下：
+```
+vec3 finalColor = transmittance * skyBakgroundColor; // skyBakgroundColor为天空的颜色
+```
+然后云本身也会被照亮，用scattering表示被照亮后的亮度，那么光线 b-> a的过程中，也要加入这个scattering, 此时为：
+```
+vec3 finalColor = transmittance * skyBakgroundColor + scattering; 
+```
+我们仅需计算transmittance和scattering就可以实现体积云的渲染了，XD。
+transmittance可以使用Beer定律来计算得到，由于体积云位于大气中，可以使用大气散射的简化Beer公式。
+```
+// density为云的密度， a/b为大气层两个交点，距离单位为米
+float transmittance = exp(-cloudDensity * distance(a, b)); 
+```
+从上面的示意图就能看出来，b->a之间的云是随机散布的，这里的cloudDensity很难用一个函数表示，所以我们要在b->a之间切段离散化来求解（Ray marching），
+此时，transmittance的计算伪代码如下：
+```
+float transmittance = 1.0f;
+vec3 scattering = vec3(0.0f);
+
+vec3 stepPosition = a;
+while(a->b)
+{
+    float stepCloudDensity = sampleCloud(stepPosition); // 采样体积云的密度
+    float stepTransmittance = exp(-stepCloudDensity * dt);
+    
+    stepPosition += dt * dir;
+    transmittance *= stepTransmittance;
+}
+
+vec3 finalColor = transmittance * skyBakgroundColor + scattering; 
+```
+此时忽略云的scattering， 直接输出会得到如下结果：
+接下来计算云的scattering，刚刚求解transmittance时，已经切段RayMarching了，我们只需在Marching途中，计算一下步进点的Scattering并累加起来即可。
+```
+float transmittance = 1.0f;
+vec3 scattering = vec3(0.0f);
+
+vec3 stepPosition = a;
+while(a->b)
+{
+    float stepCloudDensity = sampleCloud(stepPosition); // 采样体积云的密度
+    float stepTransmittance = exp(-stepCloudDensity * dt);
+    
+    vec3 stepScattering = ???
+    
+    vec3 sigmaS = vec3(stepCloudDensity);
+
+    // b->P transmittance` in step.
+    // NOTE: need * (sigmaS * dt) optical depth.
+    scattering += stepScattering * transmittance * (sigmaS * dt);
+    
+    stepPosition += dt * dir;
+    transmittance *= stepTransmittance;
+}
+
+// transmittance b->a
+
+vec3 finalColor = transmittance * skyBakgroundColor + scattering; 
+```
+寒霜引擎在2017年的slices中给出了更好看的scattering积分公式，如下：
+```
+vec3 sigmaS = vec3(stepCloudDensity);
+const float sigmaA = 0.0;
+vec3 sigmaE = max(vec3(1e-8f), sigmaA + sigmaS);
+
+vec3 sactterLitStep = stepScattering * sigmaS;
+sactterLitStep = transmittance * (sactterLitStep - sactterLitStep * stepTransmittance);
+sactterLitStep /= sigmaE;
+scattering += sactterLitStep; 
+```
+积分公式有了之后, 只需搞定步进点的光照即可。
+体积云位于天空中，会受到太阳的直接光照，很直接的，光照公式可表示为：
+```
+vec3 stepScattering = sunColor * sunAtmosphereTransmittance * sunPhase * sunVisibility;
+```
+sun atmosphere transmittance为天空大气模型中计算得到的步进点太阳透射率。
+sun phase一般使用两次hg公式拟合，可以得到体积云的"银边效果"：
+```
+// See http://www.pbr-book.org/3ed-2018/Volume_Scattering/Phase_Functions.html
+float hgPhase(float g, float cosTheta)
+{
+	float numer = 1.0f - g * g;
+	float denom = 1.0f + g * g + 2.0f * g * cosTheta;
+	return numer / (4.0f * kPI * denom * sqrt(denom));
+}
+
+float dualLobPhase(float g0, float g1, float w, float cosTheta)
+{
+	return mix(hgPhase(g0, cosTheta), hgPhase(g1, cosTheta), w);
+}
+
+ sunPhase = dualLobPhase(0.5, -0.5, 0.2, -VoL);
+```
+Sun Visibility项则需要从步进点开始，向太阳方向做RayMarching，计算透射率作为SunVisibility：
+```
+vec3 sunVisStep = stepPosition;
+
+float sunVisibility = 1.0f;
+for(uint j = 0; j < kStepLight; j++)
+{
+	float stepLitDensity = sampleDensity(sunVisStep);
+	sunVisibility *= exp(-stepLitDensity * dStepLight);
+	sunVisStep += dStepLight * sunDirection;
+}
+```
+完成这个之后，我们的云效果如下：
+我们需要为体积云增加大气透视效果。
+在前面Marching时，我们同时增加一个Transmittance加权的坐标，便于得到云实体在天空中的位置：
+```
+float transmittance = 1.0f;
+
+vec3 rayHitPos = vec3(0.0);
+float rayHitPosWeight = 0.0;
+
+vec3 stepPosition = a;
+while(a->b)
+{
+    float stepCloudDensity = sampleCloud(stepPosition); // 采样体积云的密度
+    float stepTransmittance = exp(-stepCloudDensity * dt);
+    
+    rayHitPos += samplePos * transmittance;
+    rayHitPosWeight += transmittance;
+    
+    stepPosition += dt * dir;
+    transmittance *= stepTransmittance;
+}
+
+rayHitPos /= rayHitPosWeight;
+```
+接下来，用这个位置来计算大气透视并叠加即可：
+体积云背光现在一片黑色，这是因为我们仅计算了太阳的直接光照。这里我们可以用天空球计算一个球谐光，作为着色时的环境光：
+此时如果我们调高云的密度，会发现背光处没有任何细节：
+此时，可以增加一个额外向上方向的Ambient Trace来增加背光部细节：
+寒霜引擎在17年的slice中还提到了多重散射近似，基本就是额外再计算一次折半衰减的Scattering Light，感觉不是特别的符合物理规律。
+使用多重散射近似时，对于没有Visibility Trace的Ambient Light, 寒霜仅会在第一次散射时叠加，多次叠加将会抹平体积云的细节。
+地平线提出过一个Powder Effect，可以为体积云增加自定义着色细节的功能，我修改调整后如下：
+```
+float powderEffectNew(float depth, float height, float VoL)
+{
+    float r = VoL * 0.5 + 0.5;
+    r = r * r;
+    height = height * (1.0 - r) + r;
+    return depth * height;
+}
+
+float powderEffect;
+{
+    float depthProbability = pow(
+        clamp(stepCloudDensity * 10.0, 0.0, 1.0), 
+        remap(normalizeHeight, 0.3, 0.85, 0.5, 2.0));
+    depthProbability += 0.05;
+    
+    float verticalProbability = pow(remap(normalizeHeight, 0.07, 0.22, 0.1, 1.0), 0.8);
+    powderEffect =  powderEffectNew(depthProbability, verticalProbability, VoL);
+}
+```
+我们可以用这个强调银边效果，得到一个火烧云的图：
+如果把VoL输入修改成-abs(VoL)，则可以得到卡通风格的体积云：
+直接在云海中也是效果不错的：
+把密度调低后我们可以得到一个软绵绵的体积云https://www.bilibili.com/video/BV1HA411C7DG：
+全部的代码开源：
+https://github.com/qiutang98/flower
+© - 2024 ·
+月光下的旅行。
+禁止转载

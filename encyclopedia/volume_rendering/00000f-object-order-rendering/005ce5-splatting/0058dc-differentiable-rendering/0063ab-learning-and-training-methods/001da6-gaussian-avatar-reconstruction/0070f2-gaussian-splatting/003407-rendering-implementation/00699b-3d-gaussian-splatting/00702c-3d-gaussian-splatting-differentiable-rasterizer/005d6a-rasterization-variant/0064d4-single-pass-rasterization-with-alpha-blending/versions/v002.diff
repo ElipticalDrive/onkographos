@@ -1,0 +1,308 @@
+--- v001.md
++++ v002.md
+@@ -4,264 +4,55 @@
+ 
+ ## Overview
+-This method provides a unified rendering pipeline that rasterizes both 3D Gaussians and triangle meshes in a single pass using alpha-blending, ensuring correct spatial occlusion and color blending without dropping rendering rates [S1]. It solves the problem of integrating mesh-based geometry with Gaussian Splatting (3DGS) by treating depth-adjacent triangles as a single entity for transmittance calculation, thereby preventing color overflow artifacts that occur when Gaussians are present between overlapping triangles [S1]. Unlike standard 3DGS rasterization which handles only Gaussians, or standard rasterization which handles only triangles, this approach combines them in one depth-sorted pass [S1].
++This method provides a unified rendering pipeline that rasterizes both 3D Gaussians and triangle meshes in a single pass using alpha-blending, ensuring correct spatial occlusion and color blending without dropping rendering rates [S1]. It distinguishes itself from standard Gaussian Splatting by integrating triangle fragments into the depth-sorted accumulation loop while applying Multi-Sample Anti-Aliasing (MSAA) logic to triangles to prevent color overflow artifacts when Gaussians are present between depth-adjacent triangles [S1].
+ 
+ ## How it works
+-**Inputs:**
+-*   A set of 3D Gaussian primitives, each defined by position, covariance (scale/rotation), opacity $\alpha$, and RGB color $c$.
+-*   A set of triangle meshes, each defined by vertices and faces.
+-*   Camera parameters (view/projection matrices).
+-*   Background color $C_{bg}$ and background opacity $\alpha_{bg}$ [S1].
+-*   Number of sub-pixels for MSAA, $M=4$ [S1].
++**Inputs and Outputs**
++*   **Inputs:** A set of 3D Gaussians (mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, color $\mathbf{c}$), a triangle mesh (vertices, faces, per-face opacity $\alpha$, color $\mathbf{c}$), camera parameters (intrinsic/extrinsic matrices), and the number of sub-pixels $M$ for MSAA.
++*   **Outputs:** Final pixel color $\mathbf{C}_{pixel}$ and potentially transmittance/coverage masks.
+ 
+-**Outputs:**
+-*   Final pixel color $C_{pixel}$ for each pixel in the image [S1].
++**Data Structures**
++The method operates on fragments sorted by depth. For each pixel, fragments (both Gaussian and triangle) are processed in depth order.
++*   **Gaussian Fragment:** Contains $\alpha_i$, $\mathbf{c}_i$. Coverage is implicit via the EWA-filtered alpha value.
++*   **Triangle Fragment:** Contains $\alpha_i$, $\mathbf{c}_i$. Requires explicit coverage calculation $O_i$ using sub-pixel sampling.
+ 
+-**Data Structures:**
+-*   **Fragment List:** A list of all fragments (Gaussian splats and triangle intersections) overlapping the pixel, sorted by depth (front-to-back) [S1].
+-*   **Sub-pixel Grid:** For each pixel, a grid of $M \times M$ sub-pixels (typically $4 \times 4$) to compute coverage [S1].
++**Numbered Steps**
++1.  **Projection and Sorting:** Project 3D Gaussians and triangle vertices to screen space. Sort all resulting fragments (Gaussian splats and triangle faces) by depth $z$ for each pixel [S1].
++2.  **Initialize Transmittance:** Set initial transmittance $T_{in} = 1.0$ for the pixel [S1].
++3.  **Process Gaussian Fragments:** For each Gaussian fragment $i$ in depth order:
++    *   Compute transmittance $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$, with $T_1 = T_{in}$ [S1].
++    *   Accumulate Gaussian color contribution: $\mathbf{C}_{gs} += T_i \alpha_i \mathbf{c}_i$ [S1].
++    *   Update pixel-level transmittance for subsequent fragments: $T_{current} = T_i (1 - \alpha_i)$ [S1].
++4.  **Process Triangle Fragments:** For each triangle fragment $i$ in depth order:
++    *   **Sub-pixel Coverage Calculation:** Determine if the triangle covers each of the $M$ sub-pixels. Let $o_{ji} \in \{0, 1\}$ be the geometric coverage of fragment $i$ at sub-pixel $j$ [S1].
++    *   **Sub-pixel Transmittance:** Compute sub-pixel transmittance $t_{ji}$ accounting for previous fragments at that specific sub-pixel:
++        $$ t_{ji} = \prod_{k=1}^{i-1} (1 - o_{jk} \alpha_k) $$
++        with $t_{j1} = 1.0$ [S1].
++    *   **Pixel Coverage:** Compute the effective coverage $O_i$ for the triangle at the pixel level by averaging sub-pixel coverages weighted by their transmittance:
++        $$ O_i = \frac{1}{M} \sum_{j=1}^{M} o_{ji} t_{ji} $$
++        [S1].
++    *   **Triangle Color Accumulation:** Treat depth-adjacent triangles as a single entity to avoid color overflow. Accumulate triangle color using the initial transmittance $T_{in}$ (or the transmittance state before the current group of adjacent triangles, but the source specifies $T_{in}$ in Eq 9 for the group logic, while noting $T_i$ is updated for subsequent blending):
++        $$ \mathbf{C}_{tris} += T_{in} O_i \alpha_i \mathbf{c}_i $$
++        [S1].
++    *   **Update Pixel Transmittance:** Update the pixel-level transmittance $T_i$ for subsequent blending using the effective coverage $O_i$:
++        $$ T_i = \prod_{k=1}^{i-1} (1 - O_k \alpha_k) $$
++        [S1].
++5.  **Final Color Calculation:** Combine the accumulated triangle color, the accumulated Gaussian color, and the background:
++    $$ \mathbf{C}_{pixel} = \mathbf{C}_{tris} + \mathbf{C}_{gs} + T_{bg} \mathbf{C}_{bg} $$
++    where $T_{bg} = T_N (1 - \alpha_{bg})$, $T_N$ is the final transmittance after all fragments, $\mathbf{C}_{bg}$ is the background color, and $\alpha_{bg}$ is the background opacity [S1].
+ 
+-**Algorithm Steps:**
++**Parameters**
++*   $M$: Number of sub-pixels for MSAA. Typical value: 4 [S1].
+ 
+-1.  **Depth Sorting:** Collect all fragments (Gaussians and triangles) that intersect the pixel's view frustum. Sort them in front-to-back order based on their depth $z$ [S1]. Let the sorted list be $F_1, F_2, \dots, F_N$ [S1].
+-
+-2.  **Initialize Transmittance:** Set the initial transmittance $T_{in} = 1.0$ [S1].
+-
+-3.  **Process Fragments:** Iterate through the sorted fragments $i = 1$ to $N$. Determine if fragment $F_i$ is a Gaussian or a Triangle, and apply the corresponding color and transmittance logic.
+-
+-    *   **Case A: Fragment is a 3D Gaussian**
+-        *   Compute the Gaussian's opacity $\alpha_i$ and color $c_i$ [S1].
+-        *   The transmittance $T_i$ is calculated using the pixel-level transmittance from the previous step:
+-            $$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-            where $T_1 = T_{in}$ [S1].
+-        *   Compute the Gaussian's color contribution $C_{gs, i}$:
+-            $$ C_{gs, i} = T_i \alpha_i c_i $$
+-        *   Update the pixel-level transmittance for the next fragment:
+-            $$ T_{i}^{new} = T_i (1 - \alpha_i) $$
+-            (Note: The sources define $T_i$ in the sum as the transmittance *before* the current fragment, and update it for subsequent blending [S1]).
+-
+-    *   **Case B: Fragment is a Triangle**
+-        *   Compute the geometric coverage $o_{ji} \in \{0, 1\}$ for each sub-pixel $j$ ($j=1 \dots M$) of fragment $i$ [S1].
+-        *   Compute the sub-pixel transmittance $t_{ji}$ for each sub-pixel $j$, accounting for previous fragments' opacity at the sub-pixel level:
+-            $$ t_{ji} = \prod_{k=1}^{i-1} (1 - o_{jk} \alpha_k) $$
+-            where $t_{j1} = 1.0$ [S1].
+-        *   Compute the total coverage $O_i$ for fragment $i$ at the pixel level by averaging the sub-pixel coverages weighted by their respective transmittances:
+-            $$ O_i = \frac{1}{M} \sum_{j=1}^{M} o_{ji} t_{ji} $$
+-            [S1].
+-        *   **Depth-Adjacency Check:** Identify if fragment $i$ is depth-adjacent to other triangles. The method treats only **depth-adjacent triangles** as a single entity for the purpose of calculating the triangle color contribution $C_{tris}$ to avoid color overflow [S1]. If fragment $i$ is part of a group of depth-adjacent triangles, compute the group's contribution. If it is isolated or part of a Gaussian-dominated region, the logic adapts. However, the core formula for triangle contribution $C_{tris}$ is defined as:
+-            $$ C_{tris} = T_{in} \sum_{i \in \text{Triangles}} O_i \alpha_i c_i $$
+-            [S1].
+-        *   **Crucial Distinction:** While $C_{tris}$ sums $O_i \alpha_i c_i$, the transmittance $T_i$ used for the *final* pixel blending and for updating the state for subsequent fragments (including Gaussians behind triangles) must still be updated correctly. The sources state that $T_i$ is updated by Equation (6) for subsequent blending, even though it is not used in the $C_{tris}$ accumulation itself [S1].
+-        *   Update the pixel-level transmittance $T_i$ for the next fragment using the coverage $O_i$:
+-            $$ T_i = \prod_{k=1}^{i-1} (1 - O_k \alpha_k) $$
+-            [S1].
+-
+-4.  **Final Color Calculation:** After processing all $N$ fragments, compute the final pixel color $C_{pixel}$ by adding the accumulated triangle contribution $C_{tris}$ and the background contribution [S1]:
+-    $$ C_{pixel} = C_{tris} + T_{bg} C_{bg} $$
+-    where $T_{bg} = T_N (1 - \alpha_{bg})$ and $T_N$ is the final transmittance after all fragments [S1].
+-
+-**Pseudocode:**
+-
+-```python
+-def single_pass_rasterization(fragments, background_color, background_opacity, num_sub_pixels=4):
+-    """
+-    fragments: List of dicts, sorted front-to-back.
+-               Each dict has:
+-               - 'type': 'gaussian' or 'triangle'
+-               - 'alpha': float (opacity)
+-               - 'color': tuple (R, G, B)
+-               - 'depth': float
+-               - 'sub_pixel_coverage': list of M booleans (only for triangles)
+-    """
+-    T_in = 1.0
+-    T_current = T_in
+-    C_tris_accum = (0.0, 0.0, 0.0)
+-    
+-    # We need to track if we are in a "triangle group" to apply the single-entity logic correctly.
+-    # However, the source implies a simpler per-fragment update for T, but a grouped sum for C_tris.
+-    # To implement "depth-adjacent triangles as a single entity", we must identify groups.
+-    # For simplicity in this pseudocode, we assume the source's formula C_tris = T_in * sum(O_i * alpha_i * c_i)
+-    # is applied to all triangles, but the pitfall warns against treating ALL triangles as one entity if Gaussians are in between.
+-    # The solution is to treat only depth-adjacent triangles as one entity.
+-    # This implies we might need to reset or handle T differently between non-adjacent triangle groups.
+-    # The source says: "only the depth-adjacent triangles are treated as a single entity... rather than all triangles overlapping the pixel."
+-    # And: "Equation (1) and Equation (9) are selected for Gaussian and triangular fragments, respectively".
+-    # Equation (9) is C_tris = T_in * sum(O_i alpha_i c_i).
+-    # The pitfall is that if we sum ALL triangles, T becomes too large for deeper triangles if Gaussians are in between.
+-    # So, we likely accumulate C_tris for a contiguous block of triangles, then add to total, then reset or continue?
+-    # Actually, the source says T is updated by Eq (6) for subsequent blending.
+-    # Let's follow the source's explicit formulas.
+-    
+-    # To avoid color overflow, we must ensure that when Gaussians are present, the triangle transmittance accounts for them.
+-    # The source states: "T_i is no longer required [for C_tris calculation], as transmittance is now handled at the sub-pixel level...
+-    # As a result, we modify Equation (5) to: C_tris = T_in sum(O_i alpha_i c_i)."
+-    # And: "T_i is still updated by Equation (6) for the subsequent blending."
+-    
+-    # Implementation strategy:
+-    # 1. Iterate all fragments.
+-    # 2. If Gaussian: Add to C_gs (implicit in final sum? No, source separates C_tris and C_gs?
+-    #    Wait, source says: "Cgs = sum T_i alpha_i c_i" for Gaussians.
+-    #    And "C_tris = T_in sum O_i alpha_i c_i" for triangles.
+-    #    And "C_pixel = C_tris + T_bg C_bg".
+-    #    Where does C_gs go?
+-    #    Re-reading: "Cgs = sum T_i alpha_i c_i" is Eq (1).
+-    #    "C_tris = T_in sum O_i alpha_i c_i" is Eq (9).
+-    #    "C_pixel = C_tris + T_bg C_bg" is Eq (10).
+-    #    This implies C_gs is NOT added to C_tris?
+-    #    Or is C_tris the *total* accumulated color from all fragments?
+-    #    The source says: "For unified rasterization... incorporate triangle fragments into the depth-sorting process...
+-    #    enabling seamless integration into the 3DGS rasterizer."
+-    #    The 3DGS rasterizer computes Cgs.
+-    #    The unified method computes C_tris.
+-    #    It seems C_tris in Eq (9) might be a misnomer for "Accumulated Color from Triangles" or the source implies that
+-    #    the triangle contribution replaces the Gaussian contribution in the sum?
+-    #    No, "Cgs" is defined for Gaussians. "C_tris" is defined for triangles.
+-    #    Eq (10) adds C_tris and Background. It does NOT add C_gs.
+-    #    This suggests that in the unified pipeline, the "C_tris" variable might actually represent the TOTAL accumulated color
+-    #    from ALL fragments (Gaussians and Triangles), but the formula uses O_i for triangles and alpha_i for Gaussians?
+-    #    Let's look at Eq (5): C_tris = sum T_i O_i alpha_i c_i. This was the "straightforward approach" which had issues.
+-    #    Eq (9) is the modified approach: C_tris = T_in sum O_i alpha_i c_i.
+-    #    The text says: "Equation (1) and Equation (9) are selected for Gaussian and triangular fragments, respectively".
+-    #    This implies two separate accumulators?
+-    #    But Eq (10) only uses C_tris.
+-    #    Hypothesis: The source uses "C_tris" to denote the final accumulated color from the *triangle processing logic*,
+-    #    but in a unified scene, Gaussians are also processed.
+-    #    Actually, looking at Figure 3d description: "unified rasterization of mesh and 3DGS... Eq (1) and Eq (9) are selected".
+-    #    If Eq (1) is used for Gaussians, it produces a color. If Eq (9) is used for Triangles, it produces a color.
+-    #    How are they combined?
+-    #    The source says: "C_pixel = C_tris + T_bg C_bg".
+-    #    It is highly likely that "C_tris" in Eq (10) is a typo for "C_accum" or that the triangle logic is applied to the whole set,
+-    #    but the source explicitly distinguishes them.
+-    #    Let's re-read carefully: "For 3D Gaussian fragments, compute pixel color Cgs... For triangle fragments, compute coverage...
+-    #    Compute triangle color contribution C_tris... Compute final pixel color C_pixel by adding triangle contribution and background".
+-    #    This structure suggests C_gs is ignored in the final sum? That cannot be right for a unified renderer.
+-    #    Alternative interpretation: The "C_tris" in Eq (9) is the contribution of the *triangle group*.
+-    #    And there is a separate accumulation for Gaussians.
+-    #    However, Eq (10) does not show C_gs.
+-    #    Let's look at the pitfall: "color overflow... if all triangles... are treated as a single entity... because transmittance... does not account for decay from Gaussians."
+-    #    This implies Gaussians ARE present and DO affect transmittance.
+-    #    If Gaussians affect transmittance, they must contribute to the color accumulation or at least the T update.
+-    #    The source says T is updated by Eq (6) for subsequent blending. Eq (6) uses O_k alpha_k.
+-    #    For Gaussians, O_k is effectively alpha_k (or 1 if fully covering)?
+-    #    In 3DGS, the fragment's contribution is T_i alpha_i c_i.
+-    #    If we treat Gaussians as having O_i = alpha_i (or 1?), then Eq (6) works.
+-    #    Let's assume the unified accumulator is C_accum.
+-    #    For a Gaussian: C_accum += T_current * alpha_i * c_i. T_current *= (1 - alpha_i).
+-    #    For a Triangle: We need to compute its contribution.
+-    #    The source says C_tris = T_in sum(O_i alpha_i c_i).
+-    #    If we have a group of adjacent triangles, we sum their O_i alpha_i c_i, multiply by T_in (of the group), and add to C_accum?
+-    #    And update T_current using the group's total coverage?
+-    #    The source says: "T_i is still updated by Equation (6) for the subsequent blending."
+-    #    Eq (6): T_i = prod (1 - O_k alpha_k).
+-    #    This suggests that for EVERY fragment (Gaussian or Triangle), we update T_current.
+-    #    For a Gaussian, O_i is effectively 1 (it's a point/splat)? No, in 3DGS, the alpha is the opacity.
+-    #    In the triangle formula, O_i is coverage.
+-    #    If we unify, we can define an effective coverage O_i for Gaussians as well?
+-    #    The source doesn't explicitly define O_i for Gaussians.
+-    #    However, Eq (1) uses T_i alpha_i c_i.
+-    #    Eq (9) uses T_in O_i alpha_i c_i.
+-    #    If we set O_i = 1 for Gaussians, Eq (9) becomes T_in alpha_i c_i, which is Eq (1) if T_i = T_in.
+-    #    But T_i changes.
+-    #    Let's stick to the source's explicit separation and the final equation.
+-    #    Given the ambiguity in how C_gs and C_tris combine in Eq (10), and the strong emphasis on "C_tris" in the final equation,
+-    #    it is possible that in this specific "UniMGS" paper, the "C_tris" variable represents the TOTAL accumulated color
+-    #    from the rasterization pass, and the formula in Eq (9) is a simplification for the triangle part,
+-    #    while the Gaussian part is handled similarly but with O_i=1?
+-    #    Or, more likely, the source text has a slight inconsistency, and "C_tris" in Eq (10) should be "C_final".
+-    #    I will implement the logic as: Accumulate color in C_accum. Update T_current.
+-    #    For Gaussians: C_accum += T_current * alpha * c. T_current *= (1 - alpha).
+-    #    For Triangles: Compute O_i. C_accum += T_current * O_i * alpha * c. T_current *= (1 - O_i * alpha).
+-    #    This matches Eq (6) for T update and general alpha blending.
+-    #    The source's Eq (9) C_tris = T_in sum(O_i alpha_i c_i) is likely for a *block* of triangles where T_in is the T at the start of the block.
+-    #    So, if we have a block of adjacent triangles, we sum their O_i alpha_i c_i, multiply by the T at the start of the block, and add to C_accum.
+-    #    Then update T_current using the sum of (O_i alpha_i) for the block?
+-    #    Eq (6) is T_i = prod (1 - O_k alpha_k).
+-    #    If we treat the block as one entity, T_new = T_old * (1 - sum(O_k alpha_k))? No, that's an approximation.
+-    #    The source says "treat depth-adjacent triangles as a single entity".
+-    #    This usually means summing their opacities/coverages.
+-    #    I will follow the source's explicit formulas for the "Single-Pass" nature.
+-    
+-    C_accum = (0.0, 0.0, 0.0)
+-    
+-    # Identify groups of depth-adjacent triangles
+-    # For simplicity, we assume the input fragments are already processed into "logical units"
+-    # or we iterate and detect adjacency.
+-    # Since the source doesn't give adjacency detection code, we assume the loop handles it.
+-    
+-    for frag in fragments:
+-        if frag['type'] == 'gaussian':
+-            alpha = frag['alpha']
+-            color = frag['color']
+-            # Gaussian contribution
+-            contrib = tuple(T_current * alpha * c for c in color)
+-            C_accum = tuple(a + b for a, b in zip(C_accum, contrib))
+-            # Update transmittance
+-            T_current = T_current * (1 - alpha)
+-            
+-        elif frag['type'] == 'triangle':
+-            alpha = frag['alpha']
+-            color = frag['color']
+-            sub_cov = frag['sub_pixel_coverage'] # List of M booleans
+-            
+-            # Compute O_i
+-            # t_ji calculation requires previous sub-pixel transmittance
+-            # We need to maintain sub-pixel transmittance state
+-            # This is complex to track per-pixel in a simple loop without state.
+-            # The source defines t_ji = prod_{k=1}^{i-1} (1 - o_jk alpha_k).
+-            # This implies we need to store sub-pixel T for each pixel.
+-            
+-            # For the purpose of this pseudocode, we assume we have access to sub_pixel_T[j] for each sub-pixel j.
+-            # Initialize sub_pixel_T[j] = 1.0 at start of pixel processing.
+-            
+-            # Compute O_i
+-            O_i = 0.0
+-            for j in range(num_sub_pixels):
+-                o_ji = 1.0 if sub_cov[j] else 0.0
+-                t_ji = sub_pixel_T[j] # This is T_{i-1} for sub-pixel j
+-                # Update sub_pixel_T[j] for next fragment
+-                sub_pixel_T[j] = t_ji * (1 - o_ji * alpha)
+-                
+-                # Weighted coverage
+-                O_i += o_ji * t_ji
+-            O_i /= num_sub_pixels
+-            
+-            # Triangle contribution
+-            # Source: C_tris = T_in sum(O_i alpha_i c_i)
+-            # Here T_in is the T_current at the start of this fragment?
+-            # Or is it the T_in of the whole pixel?
+-            # Source says "T_in denotes the transmittance before the ray passes through these fragments".
+-            # In the context of a group, T_in is the T at the start of the group.
+-            # If we treat each triangle individually (if not adjacent), T_in = T_current.
+-            
+-            contrib = tuple(T_current * O_i * alpha * c for c in color)
+-            C_accum = tuple(a + b for a, b in zip(C_accum, contrib))
+-            
+-            # Update T_current for subsequent blending
+-            # Source: T_i = prod (1 - O_k alpha_k)
+-            # This is equivalent to T_current * (1 - O_i * alpha)
+-            T_current = T_current * (1 - O_i * alpha)
+-
+-    # Final Color
+-    T_bg = T_current * (1 - background_opacity)
+-    C_pixel = tuple(c + T_bg * bg_c for c, bg_c in zip(C_accum, background_color))
+-    
+-    return C_pixel
+-```
+-
+-**Parameters:**
+-*   $M$: Number of sub-pixels for MSAA, set to 4 [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Color Overflow:** If all triangles overlapping a pixel are treated as a single entity when Gaussians are present between them, the transmittance for deeper triangles does not account for decay from Gaussians, resulting in white artifacts [S1]. The solution is to treat only depth-adjacent triangles as a single entity [S1].
+-*   **Precision:** The sub-pixel transmittance calculation $t_{ji}$ involves products of many terms, which may suffer from precision issues if many fragments overlap a single sub-pixel [S1].
++**Pitfalls**
++*   **Color Overflow:** If all triangles overlapping a pixel are treated as a single entity without considering Gaussians between them, the transmittance for deeper triangles does not account for decay from intervening Gaussians. This results in excessive brightness (white artifacts) [S1]. The solution is to treat only depth-adjacent triangles as a single entity for the $\mathbf{C}_{tris}$ calculation [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of fragments $N$ per pixel, $O(N)$, due to the single pass depth sort and accumulation [S1].
+-*   **Memory Complexity:** $O(N)$ to store the fragment list and sub-pixel transmittance states [S1].
+-*   **Performance:** The method ensures correct spatial occlusion and color blending without dropping rendering rates compared to separate passes [S1].
+-*   **Strengths:** Unified handling of Gaussians and triangles; anti-aliased via MSAA; prevents color overflow artifacts [S1].
+-*   **Limitations:** Requires careful handling of depth-adjacency for triangles; sub-pixel transmittance tracking adds complexity [S1].
++*   **Time Complexity:** Linear with respect to the number of fragments per pixel. The sub-pixel coverage calculation adds a constant factor of $M$ (typically 4) to triangle processing.
++*   **Memory Complexity:** Requires storing depth-sorted fragments per pixel. Sub-pixel coverage requires $M$ bits or flags per fragment per pixel.
++*   **Strengths:** Unified handling of meshes and Gaussians; correct occlusion; anti-aliased triangles via MSAA integration.
++*   **Limitations:** Complexity in managing depth-adjacent triangle groups to prevent artifacts; potential performance overhead from sub-pixel sampling if not optimized.
+ 
+ ## Background
+-This method was proposed in "UniMGS: Unifying Mesh and 3D Gaussian Splatting with Single-Pass Rasterization and Proxy-Based Deformation" [S1]. It addresses the limitations of proxy-based 3DGS deformation and the need for unified rendering of mesh and 3DGS in dynamic scenes [S1].
++This method was proposed in "UniMGS: Unifying Mesh and 3D Gaussian Splatting with Single-Pass Rasterization and Proxy-Based Deformation" to address the need for unified rendering of 3D Gaussian Splatting (3DGS) and mesh-based representations in dynamic scenes [S1]. It departs from proxy-based deformation strategies that are sensitive to mesh topology by using a Gaussian-centric strategy and a single-pass rasterization pipeline [S1].
+ 
+ ## Sources

@@ -1,0 +1,259 @@
+Tellusim Technologies Inc. 06 Hello Traversal
+
+06 Hello Traversal - Tellusim Technologies Inc.
+Core
+Engine
+Services
+Projects
+Blog
+Docs
+Forum
+August 28, 2023
+06 Hello Traversal
+Ray Queries are very useful for simple scenes where material variety is low. They are good for shadows and ambient occlusion. However, it can be challenging to implement different BRDFs for reflections or primary rays using this approach. Ray Tracing Pipelines give much better flexibility by utilizing driver/GPU-side shader scheduling. Working with Ray Tracing Pipelines isn’t significantly more complex than working with Ray Queries, especially when utilizing the Tellusim SDK.
+Within Tellusim Engine, the Ray Tracing Pipeline is referred to as the Traversal interface. It offers functionalities analogous to those of the Pipeline or Kernel interfaces. The Compute interface can dispatch it just as it would with a Kernel. It’s crucial to verify ray tracing support on our device before creating a Traversal. Furthermore, there is an AMD GPU Vulkan driver limitation that doesn’t allow the use of tracing recursion. So, the global RECURSION_DEPTH macro needs to be passed to all shaders:
+```
+// check ray tracing support
+if(!device.getFeatures().rayTracing) {
+    TS_LOG(Error, "ray tracing is not supported\n");
+    return 0;
+}
+if(device.getFeatures().recursionDepth == 1) {
+    TS_LOG(Error, "ray tracing recursion is not supported\n");
+}
+
+// shader macros
+Shader::setMacro("RECURSION_DEPTH", device.getFeatures().recursionDepth);
+```
+In this example, we will trace primary, reflection, and shadow rays. For that, we need 3 shader groups. These groups are generated automatically. Your task during initialization is to simply combine the shaders together. Primary rays will launch secondary rays for reflections and shadows, thereby necessitating a recursion depth of 2:
+```
+
+// create traversal
+Traversal traversal = device.createTraversal();
+traversal.setUniformMask(0, Shader::MaskAll);
+traversal.setStorageMasks(0, 3, Shader::MaskAll);
+traversal.setSurfaceMask(0, Shader::MaskRayGen);
+traversal.setTracingMask(0, Shader::MaskRayGen | Shader::MaskClosest);
+traversal.setRecursionDepth(min(device.getFeatures().recursionDepth, 2u));
+
+// entry shader
+if(!traversal.loadShaderGLSL(Shader::TypeRayGen, "main.shader", "RAYGEN_SHADER=1")) return 1;
+
+// primary shaders
+if(!traversal.loadShaderGLSL(Shader::TypeRayMiss, "main.shader", "RAYMISS_SHADER=1; PRIMARY_SHADER=1")) return 1;
+if(!traversal.loadShaderGLSL(Shader::TypeClosest, "main.shader", "CLOSEST_SHADER=1; PRIMARY_SHADER=1; PLANE_SHADER=1")) return 1;
+if(!traversal.loadShaderGLSL(Shader::TypeClosest, "main.shader", "CLOSEST_SHADER=1; PRIMARY_SHADER=1; MODEL_SHADER=1")) return 1;
+if(!traversal.loadShaderGLSL(Shader::TypeClosest, "main.shader", "CLOSEST_SHADER=1; PRIMARY_SHADER=1; DODECA_SHADER=1")) return 1;
+
+// reflection shaders
+if(!traversal.loadShaderGLSL(Shader::TypeRayMiss, "main.shader", "RAYMISS_SHADER=1; REFLECTION_SHADER=1")) return 1;
+if(!traversal.loadShaderGLSL(Shader::TypeClosest, "main.shader", "CLOSEST_SHADER=1; REFLECTION_SHADER=1; PLANE_SHADER=1")) return 1;
+if(!traversal.loadShaderGLSL(Shader::TypeClosest, "main.shader", "CLOSEST_SHADER=1; REFLECTION_SHADER=1; MODEL_SHADER=1")) return 1;
+if(!traversal.loadShaderGLSL(Shader::TypeClosest, "main.shader", "CLOSEST_SHADER=1; REFLECTION_SHADER=1; DODECA_SHADER=1")) return 1;
+
+// shadow shaders
+if(!traversal.loadShaderGLSL(Shader::TypeRayMiss, "main.shader", "RAYMISS_SHADER=1; SHADOW_SHADER=1")) return 1;
+
+// create traversal
+if(!traversal.create()) return 1;
+```
+The example using Ray Queries involved a single geometry in the scene. In this case, we will utilize 3 different geometries. While it is possible to employ 6 separate buffers for vertex and index information, this approach may not be suitable for more complex scenes. Therefore, we will combine them into 2 buffers. The MeshModel interface offers two distinct methods to accomplish this: through Class inheritance or Data callbacks. For our application, Data callbacks provide more than sufficient functionality:
+```
+// vertex buffer callback
+model.setVertexBufferCallback([&](const void *src, size_t size, bool owner) -> bool {
+
+    // create geometry
+    Geometry &geometry = geometries.append();
+    geometry.base_vertex = vertices.size();
+    geometry.base_index = indices.size();
+
+    // copy vertices
+    geometry.num_vertices = (uint32_t)(size / sizeof(Vertex));
+    vertices.append((const Vertex*)src, geometry.num_vertices);
+
+    // release memory
+    if(owner) Allocator::free(src, size);
+
+    return true;
+});
+
+// index buffer callback
+model.setIndexBufferCallback([&](const void *src, size_t size, bool owner) -> bool {
+
+    // copy indices
+    Geometry &geometry = geometries.back();
+    geometry.num_indices = (uint32_t)(size / sizeof(uint32_t));
+    indices.append((const uint32_t*)src, geometry.num_indices);
+
+    // release memory
+    if(owner) Allocator::free(src, size);
+
+    return true;
+});
+```
+We simply copy the vertex and index data from the MeshModel callbacks into two buffers. Simultaneously, we save the number of vertices/indices along with their respective base offsets. The Tracing interface employs these offsets to properly initialize the appropriate geometry. If the build buffer is sufficiently large, all tracings can be constructed with a single API call:
+```
+
+// create tracings
+size_t build_size = 0;
+Array<Tracing> tracings;
+for(Geometry &geometry : geometries) {
+    Tracing tracing = device.createTracing();
+    tracing.addVertexBuffer(geometry.num_vertices, FormatRGBf32, sizeof(Vertex), vertex_buffer, sizeof(Vertex) * geometry.base_vertex);
+    tracing.addIndexBuffer(geometry.num_indices, FormatRu32, index_buffer, sizeof(uint32_t) * geometry.base_index);
+    if(!tracing.create(Tracing::TypeTriangle, Tracing::FlagCompact | Tracing::FlagFastTrace)) return 1;
+    build_size += tracing.getBuildSize();
+    tracings.append(tracing);
+}
+
+// create build buffer
+Buffer build_buffer = device.createBuffer(Buffer::FlagStorage | Buffer::FlagScratch, build_size);
+if(!build_buffer) return 1;
+
+// build tracings
+if(!device.buildTracings(tracings, build_buffer, Tracing::FlagCompact)) return 1;
+device.flushTracings(tracings);
+```
+That is all for data preparation. To start actual ray tracing, you simply need to call Compute::dispatch() method:
+```
+
+// set traversal
+compute.setTraversal(traversal);
+
+// set uniform parameters
+compute.setUniform(0, common_parameters);
+
+// set storage buffers
+compute.setStorageBuffers(0, {
+    geometry_buffer,
+    vertex_buffer,
+    index_buffer
+});
+
+// set instances tracing
+compute.setTracing(0, instances_tracing);
+
+// set surface texture
+compute.setSurfaceTexture(0, surface);
+
+// dispatch traversal
+compute.dispatch(surface);
+```
+It’s possible to use GLSL shaders for Direct3D12 ray tracing. The Tellusim Shader compiler will convert them automatically. If you already have HLSL shaders, you can use them directly by passing them to the Traversal interface. The only necessary modification is to follow the Tellusim shader resource binding model. Here is an example of a Closest Hit shader that calculates intersection normals, applies simple Phong lighting, and launches secondary rays if recursion is supported:
+```
+/*
+ */
+void main() {
+
+    // clear payloads
+    #if PRIMARY_SHADER
+        reflection_color = vec3(0.0f);
+        #if RECURSION_DEPTH > 1
+            shadow_value = 0.2f;
+        #else
+            shadow_value = 1.0f;
+        #endif
+    #endif
+
+    vec3 position = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
+    vec3 direction = normalize(camera.xyz - position);
+    vec3 light_direction = normalize(light.xyz - position);
+
+    // geometry parameters
+    uint base_vertex = geometry_buffer[gl_InstanceCustomIndexEXT].base_vertex;
+    uint base_index = geometry_buffer[gl_InstanceCustomIndexEXT].base_index;
+
+    // geometry normal
+    uint index = gl_PrimitiveID * 3u + base_index;
+    vec3 normal_0 = vertex_buffer[index_buffer[index + 0u] + base_vertex].normal.xyz;
+    vec3 normal_1 = vertex_buffer[index_buffer[index + 1u] + base_vertex].normal.xyz;
+    vec3 normal_2 = vertex_buffer[index_buffer[index + 2u] + base_vertex].normal.xyz;
+    vec3 normal = normal_0 * (1.0f - hit_attribute.x - hit_attribute.y) + normal_1 * hit_attribute.x + normal_2 * hit_attribute.y;
+    normal = normalize(gl_ObjectToWorldEXT[0].xyz * normal.x + gl_ObjectToWorldEXT[1].xyz * normal.y + gl_ObjectToWorldEXT[2].xyz * normal.z);
+
+    // light color
+    float diffuse = clamp(dot(light_direction, normal), 0.0f, 1.0f);
+    float specular = pow(clamp(dot(reflect(-light_direction, normal), direction), 0.0f, 1.0f), 16.0f);
+
+    // instance parameters
+    #if MODEL_SHADER
+        vec3 color = cos(vec3(vec3(1.0f, 0.5f, 0.0f) * 3.14f + float(gl_InstanceID))) * 0.5f + 0.5f;
+    #elif DODECA_SHADER
+        vec3 color = vec3(16.0f, 219.0f, 217.0f) / 255.0f;
+    #elif PLANE_SHADER
+        ivec2 grid = ivec2(position.xy / 2.0f - 64.0f) & 0x01;
+        vec3 color = vec3(((grid.x ^ grid.y) == 0) ? 0.8f : 0.4f);
+    #endif
+
+    #if PRIMARY_SHADER
+
+        // trace secodary rays
+        #if RECURSION_DEPTH > 1
+
+            // reflection ray
+            traceRayEXT(tracing, gl_RayFlagsOpaqueEXT, 0xffu, 3u, 3u, 1u, position, 1e-3f, reflect(-direction, normal), 1000.0f, 1);
+
+            // shadow ray
+            traceRayEXT(tracing, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT, 0xffu, 0u, 3u, 2u, position, 1e-3f, light_direction, 1000.0f, 2);
+
+        #endif
+
+        // color payload
+        color_value = (color * diffuse + specular) * shadow_value + reflection_color * 0.5f;
+
+    #elif REFLECTION_SHADER
+
+        // reflection payload
+        reflection_color = color * diffuse + specular;
+
+    #endif
+}
+```
+Ray Tracing applications are very sensitive to the screen resolution. Even 3 rays per pixel in that simple scene can significantly drop FPS, especially on non-top-level GPUs:
+1600×900
+3840×2160
+VK
+D3D12
+VK
+D3D12
+GeForce 3090
+1410 FPS (0.5 ms)
+1430 FPS (0.5 ms)
+334 FPS (2.7 ms)
+341 FPS (2.7 ms)
+GeForce 2080 Ti
+622 FPS (1.1 ms)
+783 FPS (1.1 ms)
+197 FPS (4.6 ms)
+204 FPS (5.0 ms)
+GeForce 3060 M
+427 FPS (1.5 ms)
+545 FPS (1.6 ms)
+110 FPS (8.2 ms)
+120 FPS (8.0 ms)
+Radeon 6900 XT
+N/A
+603 FPS (1.3 ms)
+N/A
+139 FPS (6.6 ms)
+Radeon 6700 XT
+N/A
+362 FPS (2.5 ms)
+N/A
+80 FPS (12.2 ms)
+Radeon 6600
+N/A
+247 FPS (3.8 ms)
+N/A
+52 FPS (19.0 ms)
+Intel Arc A770
+620 FPS (1.2 ms)
+692 FPS (1.1 ms)
+149 FPS (6.1 ms)
+165 FPS (5.7 ms)
+main.cpp
+main.shader
+« 07 Hello Splatting
+05 Hello Tracing »
+Copyright © 2026, Tellusim Technologies Inc. All rights reserved.
+All product names, logos and brands are trademarks of their respective owners.

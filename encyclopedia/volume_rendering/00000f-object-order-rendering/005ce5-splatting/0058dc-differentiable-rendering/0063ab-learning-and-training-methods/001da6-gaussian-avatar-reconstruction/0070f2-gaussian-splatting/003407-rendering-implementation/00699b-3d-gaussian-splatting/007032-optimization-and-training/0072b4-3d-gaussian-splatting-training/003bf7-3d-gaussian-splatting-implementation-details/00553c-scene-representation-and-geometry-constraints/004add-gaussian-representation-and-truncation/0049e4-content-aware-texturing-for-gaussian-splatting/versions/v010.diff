@@ -1,0 +1,552 @@
+--- v009.md
++++ v010.md
+@@ -4,218 +4,369 @@
+ 
+ ## Overview
+-Content-Aware Texturing augments 2D Gaussian primitives with spatially varying texture maps that add an offset to the base spherical harmonic color, allowing the representation to capture high-frequency details without relying on a large number of primitives [S1]. It distinguishes itself from sibling methods by dynamically allocating texture resolution based on local image content and error, using splitting (rather than cloning) for densification to avoid convergence issues associated with superimposed textured primitives [S1].
++This method augments 2D Gaussian primitives with spatially varying texture maps to capture high-frequency appearance details that spherical harmonics alone cannot represent, while dynamically managing texture resolution based on scene content [S1]. Unlike fixed-budget texturing methods, it adapts texel density to local error and frequency, avoiding the convergence issues of cloning-based densification by using splitting [S1].
+ 
+ ## How it works
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A set of $N$ 2D Gaussian primitives $\{G_i\}_{i=1}^N$, each defined by mean $\boldsymbol{\mu}_i$, scale $\boldsymbol{\sigma}_i$, rotation $\mathbf{R}_i$, opacity $\alpha_i$, and base spherical harmonic coefficients. Input views $\Pi$ with ground truth images.
+-*   **Outputs:** Rendered images $C(\mathbf{r})$ and optimized primitive parameters including dynamic texture maps $\mathcal{T}_i$.
++**Inputs:**
++*   A set of $N$ 2D Gaussian primitives $\{G_i\}_{i=1}^N$, where each primitive $i$ is defined by mean $\boldsymbol{\mu}_i$, scale $\mathbf{S}_i$, rotation $\mathbf{R}_i$, opacity $\alpha_i$, and spherical harmonic coefficients for color [S1].
++*   A set of input views $\Pi$ with corresponding ground truth images [S1].
++*   Hyperparameters: $\lambda_{SSIM}=0.2$, $\lambda_{opacity}$, $\lambda_{texture}$, threshold $\tau_{ds}$, threshold $\tau_{tr}$, and minimum pixel size $k_{min}$ [S1].
++
++**Outputs:**
++*   Optimized primitive parameters (position, scale, rotation, opacity, SH coefficients, texel size $k_i$) [S1].
++*   Texture maps $T_i$ for each primitive, stored in a jagged tensor structure [S1].
++*   Rendered images and metrics (SSIM, PSNR, LPIPS) [S1].
+ 
+ ### Data Structures
+-Each primitive $i$ stores 59 parameters [S1]:
+-1.  **Geometry:** 3D position $\boldsymbol{\mu}_i$ (3 floats), 2D scale $\boldsymbol{\sigma}_i$ (2 floats), 4D rotation quaternion (4 floats), opacity $\alpha_i$ (1 float).
+-2.  **Appearance:** 48 spherical harmonic coefficients (48 floats).
+-3.  **Texture Management:** 1 float for texel size ratio parameter $t2pr_i$ (1 float).
+-4.  **Texture Data:** A "jagged" tensor storing RGB offsets for each texel. Each texel is 3 floats (RGB). The resolution of $\mathcal{T}_i$ is dynamic [S1].
++**Primitive Parameters:**
++Each primitive stores 59 parameters, each as a 4-byte float [S1]:
++1.  Position: 3 floats ($\boldsymbol{\mu}_x, \boldsymbol{\mu}_y, \boldsymbol{\mu}_z$) [S1].
++2.  Scale: 2 floats (log-scale factors for the 2D plane) [S1].
++3.  Rotation: 4 floats (quaternion) [S1].
++4.  Opacity: 1 float ($\alpha_i$) [S1].
++5.  Color: 48 floats (Spherical Harmonics coefficients) [S1].
++6.  Texel Size: 1 float ($k_i$) [S1].
++
++**Texture Storage:**
++*   Texture maps $T_i$ are stored in a custom "jagged" tensor data structure to handle varying resolutions per primitive [S1].
++*   Each texel stores 3 floats (RGB offsets) [S1].
++*   Texel values are constrained to $[-1, 1]$ via a sigmoid activation on unactivated features $c'_{Ti}$: $c_{Ti} = 2\sigma(c'_{Ti}) - 1$ [S1].
+ 
+ ### Coordinate Systems
+-To facilitate texture sampling and Gaussian evaluation, the method uses four coordinate systems [S1]:
+-1.  **World Space ($\mathbf{p}_w$):** Intersection point in world coordinates.
+-2.  **World-Centered ($\mathbf{p}_{w0}$):** $\mathbf{p}_{w0} = \mathbf{p}_w - \boldsymbol{\mu}_i$.
+-3.  **Local Axis-Aligned ($\mathbf{p}_l$):** $\mathbf{p}_l = \mathbf{R}_i^{-1} \mathbf{p}_{w0}$. This is a 2D vector since the ray intersection lies on the primitive plane.
+-4.  **Canonical/Normalized ($\mathbf{p}_c$):** $\mathbf{p}_c = \mathbf{S}_i^{-1} \mathbf{p}_l$, where $\mathbf{S}_i = \text{diag}(\boldsymbol{\sigma}_i)$.
+-
+-### Rendering Formula
+-The color $C(\mathbf{r})$ for a ray $\mathbf{r}$ is computed via alpha blending [S1]:
+-
+-$$ C(\mathbf{r}) = \sum_i w_i(\mathbf{p}_i) \mathbf{c}_i(\mathbf{d}) = \sum_i \mathcal{T}_i \alpha_i G_i(\mathbf{p}_i) \mathbf{c}_i(\mathbf{d}) $$
+-
+-Where:
+-*   $G_i(\mathbf{p}_i) = \exp\left(-\frac{1}{2} \mathbf{p}_{c,i}^\top \mathbf{p}_{c,i}\right)$ is the Gaussian falloff evaluated in canonical space.
+-*   $\mathcal{T}_i = \prod_{j<i} (1 - \alpha_j G_j(\mathbf{p}_j))$ is the transmittance from previous primitives.
+-*   $\mathbf{c}_i(\mathbf{d}) = \text{SH}_i(\mathbf{d}) + \text{bilerp}(\mathcal{T}_i, \mathbf{u}_i)$ is the final color, combining spherical harmonics and the texture offset.
+-*   $\mathbf{u}_i$ is the UV coordinate in the texture map.
++To facilitate operations, the method uses four coordinate systems [S1]:
++1.  **World Space ($p_w$):** Intersection point in world coordinates.
++2.  **World Space Centered ($p_{w0}$):** $p_{w0} = p_w - \boldsymbol{\mu}$ [S1].
++3.  **Local Axis-Aligned ($p_l$):** $p_l = \mathbf{R}^{-1} p_{w0}$. Since the primitive is 2D, the last component is 0, so $p_l \in \mathbb{R}^2$ [S1].
++4.  **Local Normalized/Canonical ($p_c$):** $p_c = \mathbf{S}^{-1} p_l$, where $\mathbf{S} = \text{diag}(\sigma)$ [S1].
++
++### Rendering
++The color of a ray $\mathbf{r}$ is computed by alpha blending primitives sorted by depth [S1]:
++$$ C(\mathbf{r}) = \sum_i w_i(p_i) \mathbf{c}_i(\mathbf{d}) = \sum_i T_i \alpha_i G_i(p_i) \mathbf{c}_i(\mathbf{d}) $$
++where $T_i = \prod_{j<i} (1 - \alpha_j G_j(p_j))$ is the transmittance, and $G(\mathbf{x}) = e^{-\frac{1}{2}(\mathbf{x}^\top \mathbf{x})}$ [S1].
++
++The color $\mathbf{c}_i$ of primitive $i$ is the sum of the spherical harmonic color and a texture offset [S1]:
++$$ \mathbf{c}_i = \text{SH}(\mathbf{d}) + \text{bilerp}(T_i, \mathbf{u}) $$
++where $\mathbf{u}$ are the UV coordinates in texture space [S1].
+ 
+ ### Texture Coordinate Calculation
+-To prevent texture stretching during optimization, the texel size is fixed in world space [S1]. The UV coordinate $\mathbf{u}_i$ is calculated as:
+-
+-$$ \mathbf{u}_i = \frac{\mathbf{p}_l}{k_i} + \mathbf{T}_{\text{offset}, i} $$
+-
+-Where:
+-*   $\mathbf{p}_l$ is the local axis-aligned intersection point.
+-*   $k_i$ is the texel size in world units.
+-*   $\mathbf{T}_{\text{offset}, i}$ centers the texture map.
+-
+-The texel size $k_i$ is derived from the minimum pixel size $k_{\min}$ and the primitive-specific ratio $t2pr_i$:
+-
+-$$ k_i = k_{\min} \cdot t2pr_i $$
+-
+-$t2pr_i$ takes values that are powers of two, with a lower bound of 1 [S1].
++To avoid texture stretching during optimization, the texel size $k_i$ is fixed in world space, decoupling texture parameters from primitive shape parameters [S1]. The UV coordinate $\mathbf{u}$ is calculated as [S1]:
++$$ \mathbf{u} = \frac{p_l}{k_i} + \mathbf{T}_{\text{offset}} $$
++where $k_i$ is the texel size in world space units (same units as primitive scales $\sigma$), and $\mathbf{T}_{\text{offset}}$ centers the texture map [S1].
++
++The texel size $k$ is derived from the minimum pixel size $k_{min}$ and a texel size-to-pixel size ratio $t2_{pr}$ [S1]:
++$$ k = k_{min} \cdot t2_{pr} $$
++$t2_{pr}$ takes values that are powers of two, with a lower bound of 1 [S1].
+ 
+ ### Training Loss
+-The total loss $\mathcal{L}$ is the sum of RGB, texture sparsity, and opacity regularization terms [S1]:
+-
+-$$ \mathcal{L} = \mathcal{L}_{\text{RGB}} + \mathcal{L}_{\text{texture}} + \mathcal{L}_{\text{opacity}} $$
+-
+-1.  **RGB Loss:** Weighted sum of L1 and SSIM [S1]:
+-    $$ \mathcal{L}_{\text{RGB}} = (1 - \lambda_{\text{SSIM}}) \mathcal{L}_1 + \lambda_{\text{SSIM}} \mathcal{L}_{\text{SSIM}} $$
+-    Typical value: $\lambda_{\text{SSIM}} = 0.2$ [S1].
+-
+-2.  **Texture Sparsity Loss:** Encourages texels to be zero to allow downsampling [S1]:
+-    $$ \mathcal{L}_{\text{texture}} = \lambda_{\text{texture}} \sum_i \sum_{t \in \mathcal{T}_i} |c^T_{i,t}| $$
+-    Texel values $c^T_{i,t}$ are constrained to $[-1, 1]$ using a sigmoid activation on unactivated features $c'^T_{i,t}$:
+-    $$ c^T_{i,t} = 2\sigma(c'^T_{i,t}) - 1 $$
+-
+-3.  **Opacity Regularization:** Incentivizes low-contribution primitives to disappear [S1]:
+-    $$ \mathcal{L}_{\text{opacity}} = \lambda_{\text{opacity}} \frac{1}{N} \sum_i \alpha_i $$
++The total loss $\mathcal{L}$ is the sum of RGB loss, texture sparsity loss, and opacity regularization [S1]:
++$$ \mathcal{L} = \mathcal{L}_{RGB} + \mathcal{L}_{texture} + \mathcal{L}_{opacity} $$
++
++1.  **RGB Loss:** Weighted sum of L1 and SSIM losses [S1]:
++    $$ \mathcal{L}_{RGB} = (1 - \lambda_{SSIM}) \mathcal{L}_1 + \lambda_{SSIM} \mathcal{L}_{SSIM} $$
++    with $\lambda_{SSIM} = 0.2$ [S1].
++
++2.  **Texture Sparsity Loss:** Pushes texel values towards zero to allow downsampling [S1]:
++    $$ \mathcal{L}_{texture} = \lambda_{texture} \sum_i |c_{Ti}| $$
++    where $c_{Ti}$ are the constrained texel values [S1].
++
++3.  **Opacity Regularization:** Encourages low-contribution primitives to disappear [S1]:
++    $$ \mathcal{L}_{opacity} = \lambda_{opacity} \frac{1}{N} \sum_i \alpha_i $$
+ 
+ ### Primitive Management and Densification
+-The method avoids cloning to prevent superimposition issues [S1]. It uses splitting and dynamic texture resolution adjustment [S1].
+-
+-#### Error Calculation
+-Per-primitive error $E_i$ is computed as a weighted sum of per-view errors [S1]:
+-
++The method uses splitting instead of cloning to avoid superimposition issues [S1].
++
++**Error Calculation:**
++For a primitive $i$, the error $E_i$ is a weighted sum of per-view errors [S1]:
+ $$ E_i = \frac{\sum_{\pi \in \Pi} E_i^\pi w_i^\pi}{\sum_{\pi \in \Pi} w_i^\pi} $$
+-
+-Where $w_i^\pi$ is the total contribution of primitive $i$ in view $\pi$, and $E_i^\pi$ is the weighted pixel error in view $\pi$ [S1].
+-
+-#### Upscaling (Appearance Error)
+-If $E_i$ is high, the texture resolution is increased [S1]:
+-1.  Select top 10% of primitives by error.
+-2.  If $t2pr_i \ge 2$, halve $t2pr_i$ (quadrupling texel count).
+-3.  This allows finer details to be captured [S1].
+-
+-#### Downscaling (Low Frequency)
+-To reduce parameters, textures are downsampled if they contain low-frequency content [S1]:
+-1.  Compute error $E_d$ between original texture $\mathcal{T}_{\text{orig}}$ and a low-pass filtered version $\mathcal{T}_{\text{lowpass}}$, weighted by Gaussian falloff:
+-    $$ E_d = \frac{\sum_{\mathbf{p}} G(\mathbf{p}) (\mathcal{T}_{\text{orig}}(\mathbf{p}) - \mathcal{T}_{\text{lowpass}}(\mathbf{p}))}{\sum_{\mathbf{p}} G(\mathbf{p})} $$
+-2.  If $E_d < \tau_{ds}$, double $t2pr_i$ (halving texel count) [S1].
+-
+-#### Splitting (Geometry Error)
+-If a primitive has high error $E_i$ AND its texture resolution exceeds a threshold $\tau_{tr}$, the error is attributed to geometry [S1]:
+-1.  Replace primitive $i$ with two new primitives.
+-2.  Displace new means by $\pm 1$ standard deviation along the axis of largest scale.
+-3.  New primitives have half the scale in that axis, half the texture resolution, and opacity scaled by $G(1)$ [S1].
+-4.  Initialize new texture maps by sampling the original primitive's texture at the new locations [S1].
++where $w_i^\pi = \sum_{\mathbf{r} \in P_i} w_i^\pi(\mathbf{r})$ is the total contribution of primitive $i$ in view $\pi$, and $E_i^\pi$ is the error in view $\pi$ [S1]. This differs from taking the maximum error over views [S1].
++
++**Upscaling (Appearance Error):**
++If a primitive is in the top 10% of highest error, and its texture resolution exceeds $\tau_{tr}$, it is upscaled by halving $t2_{pr}$ (increasing resolution by factor of 4) [S1]. Upscaling is only allowed if $t2_{pr} \ge 2$ [S1].
++
++**Downscaling (Low Frequency):**
++To reduce parameters, the method checks if a texture can be reconstructed with lower resolution. It computes the error $E_d$ between the original texture $T_{orig}$ and a low-pass filtered version $T_{lowpass}$, weighted by Gaussian falloff [S1]:
++$$ E_d = \frac{\sum_p G(p) (T_{orig}(p) - T_{lowpass}(p))}{\sum_p G(p)} $$
++If $E_d < \tau_{ds}$, $t2_{pr}$ is doubled (resolution halved) [S1].
++
++**Splitting (Geometric Error):**
++If a primitive in the top 10% of highest error has a texture resolution exceeding $\tau_{tr}$, it is split into two new primitives [S1].
++1.  **Action:** Replace primitive $i$ with two new primitives.
++2.  **Displacement:** Each new primitive is displaced by $\pm 1$ standard deviation of the Gaussian along the axis [S1].
++3.  **Properties:**
++    *   Scale: Half the scale in the corresponding axis [S1].
++    *   Texture Resolution: Half the texture resolution [S1].
++    *   Opacity: $G(1)$ times the original opacity [S1].
++    *   Texture Initialization: The new texture maps are created by sampling the original point at the respective locations [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def render_ray(ray, primitives, camera_params):
++def train_gaussian_splatting_with_texturing(primitives, views, hyperparams):
+     """
+-    Renders a single ray using content-aware textured 2D Gaussians.
++    primitives: List of Gaussian primitives. Each has:
++        - pos (3), scale (2), rot (4), opacity (1), sh_coeffs (48), texel_size_k (1)
++        - texture_map: Jagged tensor of RGB offsets
++    views: List of camera poses and ground truth images
++    hyperparams: {lambda_ssim, lambda_opacity, lambda_texture, tau_ds, tau_tr, k_min}
+     """
+-    color = [0.0, 0.0, 0.0]
+-    transmittance = 1.0
+-    
+-    # Sort primitives by distance along ray
+-    sorted_prims = sort_by_distance(primitives, ray.origin, ray.direction)
+-    
+-    for prim in sorted_prims:
+-        # 1. Intersection in Camera Space
+-        # Note: Implementation uses Eq 1 directly in camera space [S1]
+-        p_w = intersect_ray_prim(ray, prim)
+-        if p_w is None:
+-            continue
++    for iteration in range(max_iterations):
++        # 1. Render
++        rendered_images = []
++        for view in views:
++            # Sort primitives by depth
++            sorted_prims = sort_by_depth(primitives, view.camera)
++            image = zeros(view.resolution)
++            transmittance = 1.0
+             
+-        # 2. Transform to Local Canonical Space
+-        p_w0 = p_w - prim.mu
+-        p_l = inv(prim.R) @ p_w0[:2] # 2D local axis-aligned
+-        p_c = inv(prim.S) @ p_l       # 2D canonical
+-        
+-        # 3. Evaluate Gaussian
+-        g_val = exp(-0.5 * dot(p_c, p_c))
+-        weight = transmittance * prim.alpha * g_val
+-        
+-        if weight < epsilon:
+-            continue
++            for prim in sorted_prims:
++                # Compute intersection in camera space
++                # Unlike 2DGS, use Eq 1 directly in camera space [S1]
++                p_w = ray_primitive_intersection(view.ray, prim)
++                if p_w is None: continue
++                
++                # Transform to local space
++                p_w0 = p_w - prim.pos
++                p_l = inverse(prim.rot) @ p_w0
++                # p_l is 2D (ignore z)
++                
++                # Compute Gaussian weight
++                # Canonical space for Gaussian evaluation
++                p_c = inverse(prim.scale) @ p_l
++                g_val = exp(-0.5 * dot(p_c, p_c))
++                
++                # Compute UV coordinates for texture
++                # k is derived from t2_pr and k_min
++                k = hyperparams.k_min * prim.t2_pr
++                u = (p_l / k) + prim.t_offset
++                
++                # Sample texture
++                # Clamp u to texture bounds; if out of bounds, use zero-padding (DC color) [S1]
++                texel_offset = bilerp(prim.texture_map, u)
++                
++                # Compute color
++                sh_color = spherical_harmonics(prim.sh_coeffs, view.direction)
++                c_i = sh_color + texel_offset
++                
++                # Alpha blend
++                alpha = prim.opacity * g_val
++                color_contrib = alpha * transmittance * c_i
++                image += color_contrib
++                transmittance *= (1.0 - alpha)
+             
+-        # 4. Compute Texture Coordinate
+-        # k_min is derived from camera intrinsics and current iteration
+-        k = k_min * prim.t2pr
+-        u = (p_l / k) + prim.t_offset
+-        
+-        # 5. Sample Texture Offset
+-        # bilerp handles boundary conditions (zero-padding if outside)
+-        tex_offset = bilerp(prim.texture_map, u)
+-        
+-        # 6. Compute Final Color
+-        sh_color = eval_sh(prim.sh_coeffs, ray.direction)
+-        prim_color = sh_color + tex_offset
+-        
+-        # 7. Alpha Blend
+-        color = color + weight * prim_color
+-        transmittance = transmittance * (1.0 - weight)
+-        
+-        if transmittance < epsilon:
+-            break
++            rendered_images.append(image)
++        
++        # 2. Compute Loss
++        loss_rgb = compute_l1_ssim_loss(rendered_images, views.gt_images, hyperparams.lambda_ssim)
++        loss_texture = hyperparams.lambda_texture * sum(abs(texel) for prim in primitives for texel in prim.texture_map)
++        loss_opacity = hyperparams.lambda_opacity * mean([prim.opacity for prim in primitives])
++        total_loss = loss_rgb + loss_texture + loss_opacity
++        
++        # 3. Backpropagate
++        gradients = compute_gradients(total_loss)
++        update_parameters(primitives, gradients)
++        
++        # 4. Primitive Management (every 100 iterations) [S1]
++        if iteration % 100 == 0:
++            manage_primitives(primitives, views, hyperparams)
++
++def manage_primitives(primitives, views, hyperparams):
++    # Compute per-primitive error
++    errors = []
++    for prim in primitives:
++        # Weighted sum of per-view errors [S1]
++        total_weight = 0
++        weighted_error = 0
++        for view in views:
++            # Project primitive to view
++            pixels_covered = get_pixels_covered(prim, view)
++            if not pixels_covered: continue
+             
+-    return color
+-
+-def update_primitives(primitives, errors, iteration):
+-    """
+-    Manages texture resolution and primitive count based on error.
+-    """
+-    # 1. Upscaling: High appearance error
+-    top_10_percent = get_top_k_by_error(primitives, 0.1)
+-    for prim in top_10_percent:
+-        if prim.t2pr >= 2:
+-            prim.t2pr /= 2.0  # Halve ratio -> 4x texels
++            # Compute error contribution
++            # E_i^pi = sum(E_pi(r) * w_i^pi(r)) for r in P_i [S1]
++            view_error = 0
++            view_weight = 0
++            for pixel in pixels_covered:
++                # Get rendered error and weight for this pixel
++                err, weight = get_pixel_error_and_weight(prim, pixel, view)
++                view_error += err * weight
++                view_weight += weight
+             
+-    # 2. Downscaling: Low frequency content
++            weighted_error += view_error
++            total_weight += view_weight
++        
++        if total_weight > 0:
++            error = weighted_error / total_weight
++        else:
++            error = 0
++        errors.append((prim, error))
++    
++    # Sort by error descending
++    errors.sort(key=lambda x: x[1], reverse=True)
++    
++    # Select top 10%
++    top_10_count = int(len(errors) * 0.1)
++    top_prims = errors[:top_10_count]
++    
++    for prim, error in top_prims:
++        # Check if texture resolution exceeds threshold
++        # Texture resolution is related to t2_pr. 
++        # If t2_pr is small, resolution is high.
++        # The paper says: "check which of these exceed a threshold tau_tr for texture resolution" [S1]
++        # Assuming high resolution means small t2_pr.
++        # Let's define resolution metric R = 1/t2_pr. If R > tau_tr, split.
++        # Or simply check if t2_pr is below a threshold corresponding to tau_tr.
++        # The text says: "If the error is still high despite upscaling, we interpret the remaining error as geometric."
++        # And: "check which of these exceed a threshold tau_tr for texture resolution."
++        # This implies if the primitive is already at high texture resolution (small t2_pr) and still has error, split.
++        
++        if prim.t2_pr <= threshold_from_tau_tr(hyperparams.tau_tr):
++            # Split primitive
++            split_primitive(prim)
++        else:
++            # Upscale texture
++            if prim.t2_pr >= 2: # Only upscale if t2_pr >= 2 [S1]
++                prim.t2_pr /= 2
++                # Reallocate texture map with higher resolution
++                # Initialize new texels by sampling original point [S1]
++                upscale_texture(prim)
++    
++    # Downscaling pass for all primitives
+     for prim in primitives:
++        # Compute E_d
++        # Sample original texture and low-pass filtered texture
+         t_orig = prim.texture_map
+-        t_low = lowpass_filter(t_orig)
+-        e_d = weighted_error(t_orig, t_low, prim.gaussian_falloff)
+-        
+-        if e_d < tau_ds:
+-            prim.t2pr *= 2.0  # Double ratio -> 1/4 texels
+-            resize_texture(prim, new_t2pr=prim.t2pr)
+-            
+-    # 3. Splitting: High error + High texture resolution (Geometric error)
+-    for prim in top_10_percent:
+-        if prim.t2pr < tau_tr: # Check if texture resolution is fine enough
+-            continue
+-            
+-        # Split into two
+-        new_prims = split_primitive(prim)
+-        # Initialize textures by sampling
+-        for new_p in new_prims:
+-            new_p.texture_map = sample_texture(prim.texture_map, new_p.local_offset)
+-            
+-        # Replace in list
+-        remove(primitives, prim)
+-        add(primitives, new_prims)
++        t_lowpass = lowpass_filter(t_orig)
++        
++        # Compute weighted error E_d [S1]
++        # E_d = sum(G(p) * (T_orig(p) - T_lowpass(p))) / sum(G(p))
++        # This requires iterating over pixels covered by the primitive
++        numerator = 0
++        denominator = 0
++        for view in views:
++            pixels_covered = get_pixels_covered(prim, view)
++            for pixel in pixels_covered:
++                p_w = ray_pixel_intersection(view.ray, pixel)
++                if p_w is None: continue
++                
++                # Compute Gaussian weight G(p)
++                p_w0 = p_w - prim.pos
++                p_l = inverse(prim.rot) @ p_w0
++                p_c = inverse(prim.scale) @ p_l
++                g_val = exp(-0.5 * dot(p_c, p_c))
++                
++                # Get texture values at this pixel
++                k = hyperparams.k_min * prim.t2_pr
++                u = (p_l / k) + prim.t_offset
++                t_val = bilerp(t_orig, u)
++                t_lp_val = bilerp(t_lowpass, u)
++                
++                diff = t_val - t_lp_val
++                numerator += g_val * diff
++                denominator += g_val
++        
++        if denominator > 0:
++            e_d = numerator / denominator
++            if e_d < hyperparams.tau_ds:
++                # Downscale
++                prim.t2_pr *= 2
++                # Reallocate texture map with lower resolution
++                downscale_texture(prim)
++
++def split_primitive(prim):
++    # Create two new primitives
++    # Displaced by +/- 1 standard deviation along the axis
++    # The axis is determined by the scale with the largest extent? 
++    # The text says: "performed separately for each axis" [S1]
++    # "If a primitive... happens to have a texture resolution greater than tau_tr in both axes"
++    # This implies splitting can happen along X or Y or both.
++    # For simplicity, we split along the axis with the largest scale.
++    
++    axis = argmax(prim.scale)
++    std_dev = prim.scale[axis]
++    
++    # New positions
++    pos1 = prim.pos + std_dev * get_axis_vector(axis)
++    pos2 = prim.pos - std_dev * get_axis_vector(axis)
++    
++    # New scales: half the scale in the corresponding axis
++    scale1 = prim.scale.copy()
++    scale1[axis] /= 2
++    scale2 = prim.scale.copy()
++    scale2[axis] /= 2
++    
++    # New opacity: G(1) times original opacity
++    # G(1) = exp(-0.5)
++    g1 = exp(-0.5)
++    alpha1 = prim.opacity * g1
++    alpha2 = prim.opacity * g1
++    
++    # New rotation: same as original
++    rot1 = prim.rot
++    rot2 = prim.rot
++    
++    # New texture: sample original point at respective locations
++    # This requires sampling the original texture map at the new local coordinates
++    # Since the new primitives are displaced, their local coordinates relative to the old center are different.
++    # However, the texture is attached to the primitive.
++    # "The texture map of the newly added primitives is created by sampling the original point at the respective locations." [S1]
++    # This likely means sampling the *original primitive's texture* at the offset corresponding to the displacement.
++    
++    # For prim1: displacement is +std_dev along axis.
++    # In local space, this is +1 standard deviation.
++    # So we sample the original texture at u_offset = (std_dev / k) along the axis.
++    
++    k = prim.t2_pr * hyperparams.k_min
++    offset = std_dev / k
++    u1 = get_uv_offset(axis, offset)
++    u2 = get_uv_offset(axis, -offset)
++    
++    tex1 = sample_texture_at_offset(prim.texture_map, u1)
++    tex2 = sample_texture_at_offset(prim.texture_map, u2)
++    
++    # Create new primitives
++    new_prim1 = Primitive(pos1, scale1, rot1, alpha1, prim.sh_coeffs, prim.t2_pr, tex1)
++    new_prim2 = Primitive(pos2, scale2, rot2, alpha2, prim.sh_coeffs, prim.t2_pr, tex2)
++    
++    # Replace original with new ones
++    remove_primitive(prim)
++    add_primitive(new_prim1)
++    add_primitive(new_prim2)
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Texture Stretching:** Naive mapping of canonical space to UV space causes stretching when primitives scale/rotate. Fixed by defining texel size $k_i$ in world space [S1].
+-*   **Cloning Incompatibility:** Cloning creates superimposed textured primitives, leading to convergence difficulties and excessive parameters. Splitting is used instead [S1].
+-*   **Primitive Growth:** If a primitive grows outside its allocated texture grid (due to hitting the 256 max resolution limit or lack of allocation), zero-padding is used. This reduces the color to the DC component (SH color) since texels are offsets [S1].
+-*   **Sub-texel Details:** Upscaling is restricted to $t2pr \ge 2$ to avoid excessive memory, relying on alpha blending to recover sub-texel details [S1].
+-
+ ## Operating characteristics
+ 
+-### Time and Memory Complexity
+-*   **Memory:** Each primitive stores 59 base parameters plus dynamic texture data. Texture storage uses a "jagged" tensor structure. Total parameters depend on the number of texels, which is dynamically allocated [S1].
+-*   **Training Time:** 1.5–2× slower than 2DGS due to per-ray texture querying overhead [S1].
+-*   **Rendering Time:** ~25% slower than 2DGS due to texture lookups [S1].
+-
+-### Measured Performance
+-*   **DeepBlending:** SSIM 0.907, PSNR 30.03, LPIPS 0.303. 222K points, 21.6M texels, 78.1M params, 70 FPS [S1].
+-*   **Mip-Nerf-360:** SSIM 0.795, PSNR 27.00, LPIPS 0.263. 218K points, 46.6M texels, 152.6M params, 67 FPS [S1].
+-*   **Tanks&Temples:** SSIM 0.835, PSNR 23.43, LPIPS 0.225. 164K points, 10.4M texels, 41.1M params, 121 FPS [S1].
+-
+-### Strengths and Limitations
+-*   **Strengths:** Significantly fewer parameters than BBSplat and GSTex due to dynamic texel allocation. Captures high-frequency details better than fixed-resolution methods [S1].
+-*   **Limitations:** Slower training and rendering than base 2DGS. Requires careful tuning of thresholds ($\tau_{ds}, \tau_{tr}$) [S1].
++**Time and Memory Complexity:**
++*   **Memory:** Each primitive has 59 parameters (4 bytes each) plus texture storage. Texture storage is jagged, with 3 floats per texel. The number of texels is dynamic [S1].
++*   **Training Time:** 1.5-2x slower than 2DGS due to per-ray texture querying overhead [S1].
++*   **Rendering Time:** 25% slower than 2DGS due to the same overhead [S1].
++
++**Measured Performance:**
++*   **DeepBlending:** SSIM 0.907, PSNR 30.03, LPIPS 0.303, 222K points, 21.6M texels, 78.1M params, 70 FPS [S1].
++*   **Mip-Nerf-360:** SSIM 0.795, PSNR 27.00, LPIPS 0.263, 218K points, 46.6M texels, 152.6M params, 67 FPS [S1].
++*   **Tanks&Temples:** SSIM 0.835, PSNR 23.43, LPIPS 0.225, 164K points, 10.4M texels, 41.1M params, 121 FPS [S1].
++
++**Strengths and Limitations:**
++*   **Strengths:** Captures high-frequency details with fewer parameters than fixed-budget methods (e.g., GSTex, BBSplat) [S1]. Avoids texture stretching by decoupling texel size from primitive shape [S1].
++*   **Limitations:** Slower training and rendering than 2DGS [S1]. Cloning-based densification is incompatible [S1].
++
++**When to Use:**
++*   When high-frequency appearance details are required and fixed-budget texturing is insufficient [S1].
++*   When memory efficiency is important compared to methods like GSTex [S1].
++
++**When Not to Use:**
++*   When training speed is critical, as it is 1.5-2x slower than 2DGS [S1].
++*   When using cloning-based densification strategies [S1].
+ 
+ ## Background
+ 
+-### Origin
+-Content-Aware Texturing was introduced by Papantonakis, Kopanas, Durand, and Drettakis in 2025 [S1]. It builds upon the 2D Gaussian Splatting (2DGS) representation [S1].
+-
+-### History and Development
+-The method addresses limitations in fixed-resolution texturing (e.g., GSTex) and fixed texel-to-primitive ratios (e.g., BBSplat) by introducing dynamic, content-aware texture resolution management [S1]. It replaces cloning-based densification with splitting to maintain convergence stability in textured primitives [S1].
++**Origin:**
++The method was introduced by Panagiotis Papantonakis, Georgios Kopanas, Frédo Durand, and George Drettakis in the paper "Content-Aware Texturing for Gaussian Splatting" [S1].
++
++**History and Development:**
++The method builds on 2D Gaussian Splatting (2DGS) [S1]. It addresses limitations in existing texturing methods like GSTex (which uses a fixed texel budget on a pretrained point cloud) and BBSplat (which uses a fixed texel-to-primitive ratio) [S1]. It also avoids the convergence issues of cloning-based densification used in other methods [S1].
++
++**Usage:**
++Implemented using the 3DGS codebase, introducing 2D primitives as in 2DGS [S1].
+ 
+ ## Sources

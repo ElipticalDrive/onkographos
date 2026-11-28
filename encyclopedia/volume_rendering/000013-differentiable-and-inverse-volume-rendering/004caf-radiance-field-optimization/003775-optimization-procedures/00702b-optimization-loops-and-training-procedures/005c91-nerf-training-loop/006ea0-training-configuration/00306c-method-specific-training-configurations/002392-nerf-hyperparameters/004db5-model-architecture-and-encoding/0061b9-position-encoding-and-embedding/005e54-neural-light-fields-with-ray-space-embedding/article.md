@@ -1,0 +1,46 @@
+# Neural Light Fields with Ray-Space Embedding
+
+Also called: Neural Light Fields, Ray-Space Embedding Networks
+
+## Overview
+Neural Light Fields with Ray-Space Embedding is a view synthesis method that represents a scene as a function mapping 4D ray parameters directly to integrated radiance, enabling rendering with a single network evaluation per pixel [S1, unofficial]. Unlike NeRF, which models a 5D radiance field and requires hundreds of samples per ray, this method assumes radiance is constant along rays (valid when the convex hull of the scene does not contain viewpoints), allowing it to bypass volumetric integration [S1, unofficial]. It distinguishes itself from standard coordinate-based MLPs by using a ray-space embedding network to map input rays into an intermediate latent space, facilitating the registration of rays observing the same 3D points and improving interpolation quality for unobserved views [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A ray parameterized by its origin $o$ and direction $d$, or equivalently by 4D ray-space coordinates [S1, unofficial].
+*   **Output:** Integrated radiance (color) $\mathbf{c}$ for the ray [S1, unofficial].
+
+**Data Structures**
+*   **Ray-Space Embedding Network:** A neural network (MLP) that takes 4D ray coordinates as input and outputs a latent feature vector [S1, unofficial]. The exact architecture details (layer sizes, activation functions, bit packing, latent dimensionality) are not given in the sources.
+*   **Local Light Fields:** For sparse input sequences, the scene is partitioned into a set of local light fields [S1, unofficial]. Each local light field has its own embedding network [S1, unofficial].
+
+**Steps**
+1.  **Ray Parameterization:** Define the ray using 4D coordinates [S1, unofficial].
+2.  **Ray-Space Embedding:** Pass the 4D ray coordinates through the Ray-Space Embedding Network [S1, unofficial]. This network re-maps the input ray-space into an embedded latent space [S1, unofficial].
+3.  **Radiance Prediction:** The output of the embedding network is used to predict the integrated radiance [S1, unofficial]. In the dense regime, the embedding network alone provides the final color [S1, unofficial]. In the sparse regime with local light fields, the process may involve additional evaluations or subdivisions to handle larger depth and texture changes [S1, unofficial].
+4.  **Rendering:** For each pixel, generate the corresponding ray, compute its 4D coordinates, pass it through the embedding network, and output the predicted color [S1, unofficial]. This requires only one network evaluation per pixel for small baseline light fields [S1, unofficial].
+
+**Parameters**
+*   **Dense vs. Sparse Regime:** Dense datasets (e.g., Stanford Light Fields) use the ray-space embedding network alone [S1, unofficial]. Sparse datasets (e.g., Real Forward-Facing) use a set of local light fields [S1, unofficial].
+*   **Subdivisions:** Not required for dense datasets; used for sparse datasets to improve interpolation [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Poor Interpolation with Standard MLPs:** Using the same neural network architecture as NeRF (a 5D radiance field MLP) to parameterize a light field (4D ray-space) leads to poor interpolation quality for view synthesis [S1, unofficial]. This is because learning a function on 4D ray space from partial 2D slices is significantly more challenging than learning 3D density [S1, unofficial].
+*   **Convex Hull Assumption:** The method assumes radiance is constant along rays [S1, unofficial]. This holds when the convex hull of the scene geometry does not contain any viewpoints used for rendering [S1, unofficial]. If this assumption is violated, the single-evaluation-per-pixel model may produce artifacts.
+*   **Sparse Input Interpolation:** The embedding network alone does not interpolate well in sparser input sequences [S1, unofficial]. Local light fields are required to mitigate large depth and texture changes [S1, unofficial].
+
+## Operating characteristics
+*   **Speed:** Supports rendering with a single network evaluation per pixel for small baseline light fields, and only a few evaluations per pixel for larger baselines [S1, unofficial]. This is significantly faster than NeRF, which requires hundreds of evaluations per ray [S1, unofficial].
+*   **Memory:** Maintains a small memory footprint compared to volumetric representations [S1, unofficial].
+*   **Quality:** Achieves state-of-the-art view synthesis quality on dense forward-facing datasets (e.g., Stanford Light Fields) [S1, unofficial]. For sparse inputs, it achieves results competitive with NeRF-based approaches [S1, unofficial].
+*   **Strengths:** Fast, memory efficient, excels at modeling complicated view-dependent effects (e.g., distorted reflections and refractions) [S1, unofficial].
+*   **Limitations:** Relies on the assumption that radiance is constant along rays [S1, unofficial]. Performance on sparse inputs requires the complexity of local light fields [S1, unofficial].
+*   **Comparison to AutoInt:** Unlike AutoInt, which predicts integrated radiance along ray segments and uses subdivision but has lower accuracy than NeRF due to approximation of the nested volume rendering integral, this approach leads to comparable performance to NeRF [S1, unofficial].
+
+## Background
+*   **Origin:** The method was introduced in the paper "Learning Neural Light Fields with Ray-Space Embedding Networks" by Benjamin et al. [S1, unofficial].
+*   **History:** The work was done while the first author was an intern at Meta [S1, unofficial]. It addresses the limitations of prior volumetric representations, which often have large memory footprints and struggle with view-dependent effects, and the challenges of learning light fields directly from 2D slices using standard coordinate-based MLPs [S1, unofficial].
+*   **Usage:** Used for view synthesis on forward-facing scenes, both dense (Stanford Light Fields) and sparse (Real Forward-Facing) [S1, unofficial].
+
+## Sources
+[S1] Learning Neural Light Fields with Ray-Space Embedding Networks, https://doi.org/10.48550/arxiv.2112.01523, fetched 2026-10-26 (unofficial)

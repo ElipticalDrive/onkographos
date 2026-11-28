@@ -1,0 +1,216 @@
+--- v001.md
++++ v002.md
+@@ -7,6 +7,6 @@
+ 
+ ## How it works
+-**Inputs:** A set of 3D points (point cloud) or primitives, each defined by a mean position $\mathbf{c}_i$, a covariance matrix $\Sigma_i$, and color attributes.
+-**Outputs:** A 2D image with pixel colors and alpha values.
++**Inputs:** A set of 3D points (point cloud) or primitives, each defined by a mean position $\mathbf{c}_i$, a covariance matrix $\Sigma_i$, and color attributes [S2, unofficial].
++**Outputs:** A 2D image with pixel colors and alpha values [S2, unofficial].
+ 
+ **Data Structures:**
+@@ -14,8 +14,8 @@
+ - $\mathbf{c}_i \in \mathbb{R}^3$: Mean position (XYZ).
+ - $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix defining shape and orientation.
+-- Color attributes (e.g., RGB or spherical harmonics coefficients).
++- Color attributes (e.g., RGB) [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Parameterization:** Each point in the input point cloud is parameterized as a Gaussian kernel defined by its mean, covariance, and color [S2, unofficial]. The normalized Gaussian kernel function is:
++1. **Parameterization:** Each point in the input point cloud is parameterized as a Gaussian kernel defined by its mean, covariance, and color [S2, unofficial]. The normalized Gaussian kernel function is:
+     $$
+     g_i(\mathbf{x}) = \frac{1}{(2\pi)^{3/2} |\Sigma_i|^{1/2}} e^{-\frac{1}{2} (\mathbf{x}-\mathbf{c}_i)^T \Sigma_i^{-1} (\mathbf{x}-\mathbf{c}_i)}
+@@ -23,9 +23,9 @@
+     where $\mathbf{c}_i$ is the center and $\Sigma_i$ is the covariance matrix [S1, unofficial].
+ 
+-2.  **Projection:** Each 3D Gaussian is projected from 3D space onto the 2D screen space to determine its influence range and size [S2, unofficial].
++2. **Projection:** Each 3D Gaussian is projected from 3D space onto the 2D screen space to determine its influence range and size [S2, unofficial].
+ 
+-3.  **Transmittance and Sampling:** For ray tracing, transmittance is computed using the error function ($\text{erf}$) for a closed-form solution [S1, unofficial]. Free-flight distance for a single Gaussian primitive is sampled using the inverse error function ($\text{erf}^{-1}$) for a closed-form solution [S1, unofficial].
++3. **Transmittance and Sampling:** For ray tracing, transmittance is computed using the error function ($\text{erf}$) for a closed-form solution [S1, unofficial]. Free-flight distance for a single Gaussian primitive is sampled using the inverse error function ($\text{erf}^{-1}$) for a closed-form solution [S1, unofficial].
+ 
+-4.  **Blending:** The contributions of all Gaussians are combined using alpha blending to generate the final pixel color [S2, unofficial]. Alpha blending allows multiple Gaussian points to combine smoothly, handling complex lighting and reflections [S2, unofficial].
++4. **Blending:** The contributions of all Gaussians are combined using alpha blending to generate the final pixel color [S2, unofficial]. Alpha blending allows multiple Gaussian points to combine smoothly, handling complex lighting and reflections [S2, unofficial].
+ 
+ **Pitfalls:**
+@@ -34,97 +34,82 @@
+ **Pseudocode:**
+ ```python
++import math
++
++def compute_alpha_gaussian(gaussian, ray_direction):
++    # Computes alpha using closed-form erf solution for transmittance along a ray [S1, unofficial]
++    # Projects 3D Gaussian to 2D and integrates density along ray [G]
++    cov_2d = gaussian['cov_2d']
++    # Simplified 1D Gaussian integral along ray direction
++    # alpha = 1 - exp(-integral) relates to erf for Gaussian profiles [S1, unofficial]
++    variance = ray_direction[0]**2 * cov_2d[0][0] + ray_direction[1]**2 * cov_2d[1][1]
++    if variance == 0:
++        return 0.0
++    alpha = math.erf(1.0 / math.sqrt(2 * variance))
++    return min(alpha, 1.0)
++
++def get_bounding_box_2d(cov_2d, center_2d, scale=3.0):
++    # Returns (y_min, y_max, x_min, x_max) for a 2D Gaussian bounding box
++    eigenvalues = [cov_2d[0][0], cov_2d[1][1]] # Simplified diagonal approximation [G]
++    radii = [scale * math.sqrt(e) for e in eigenvalues]
++    y_min = center_2d[0] - radii[0]
++    y_max = center_2d[0] + radii[0]
++    x_min = center_2d[1] - radii[1]
++    x_max = center_2d[1] + radii[1]
++    return (y_min, y_max, x_min, x_max)
++
++def clip_to_image(bbox, width, height):
++    y_min, y_max, x_min, x_max = bbox
++    y_min = max(0, int(math.floor(y_min)))
++    y_max = min(height, int(math.ceil(y_max)))
++    x_min = max(0, int(math.floor(x_min)))
++    x_max = min(width, int(math.ceil(x_max)))
++    if y_max <= y_min or x_max <= x_min:
++        return None
++    return (y_min, y_max, x_min, x_max)
++
+ def render_gaussian_volumetric(scene_gaussians, camera, image_width, image_height):
+-    """
+-    Renders a scene represented by 3D Gaussian primitives.
+-    
+-    Args:
+-        scene_gaussians: List of Gaussian primitives. Each primitive is a dict/object with:
+-            - mean: (3,) array, position c_i
+-            - cov: (3,3) array, covariance matrix Sigma_i
+-            - color: (3,) array or SH coefficients
+-        camera: Camera object with projection matrix and view matrix.
+-        image_width: int
+-        image_height: int
+-        
+-    Returns:
+-        color_image: (H, W, 3) array
+-        alpha_image: (H, W, 1) array
+-    """
+-    color_image = np.zeros((image_height, image_width, 3))
+-    alpha_image = np.zeros((image_height, image_width, 1))
+-    
+-    # Initialize transmittance for each pixel
+-    transmittance = np.ones((image_height, image_width, 1))
+-    
+-    # Sort Gaussians by depth or process in screen-space order
+-    # Note: Exact sorting strategy depends on implementation details not fully specified in sources [G]
+-    
++    color_image = [[0.0, 0.0, 0.0] for _ in range(image_height * image_width)]
++    alpha_image = [0.0 for _ in range(image_height * image_width)]
++    transmittance = [1.0 for _ in range(image_height * image_width)]
++
+     for gaussian in scene_gaussians:
+         c_i = gaussian['mean']
+         Sigma_i = gaussian['cov']
+         color = gaussian['color']
+-        
+-        # Project 3D Gaussian to 2D screen space
+-        # Determine influence range and size [S2, unofficial]
+-        # This involves projecting the covariance matrix and finding the bounding box
+-        # 2D Covariance Sigma_2D is derived from 3D Sigma_i and camera projection [G]
+-        
+-        # Get bounding box of the projected Gaussian
+-        bbox = get_bounding_box_2d(Sigma_i, c_i, camera)
+-        
+-        # Clip to image bounds
++
++        # Project 3D Gaussian to 2D screen space to determine influence range and size [S2, unofficial]
++        # Simplified projection: assume camera projects to 2D center and 2D covariance
++        center_2d = [c_i[1], c_i[0]] # Placeholder for actual projection math [G]
++        cov_2d = [[Sigma_i[0][0], Sigma_i[0][1]], [Sigma_i[1][0], Sigma_i[1][1]]] # Simplified 2D covariance extraction [G]
++
++        bbox = get_bounding_box_2d(cov_2d, center_2d)
+         bbox = clip_to_image(bbox, image_width, image_height)
+-        
+-        if not bbox:
++        if bbox is None:
+             continue
+-            
++
+         y_min, y_max, x_min, x_max = bbox
+-        
+-        # Iterate over pixels in the bounding box
++
+         for y in range(y_min, y_max):
+             for x in range(x_min, x_max):
+-                # Get pixel center in screen space
+-                pixel_center = get_pixel_center(x, y, camera)
+-                
+-                # Evaluate Gaussian contribution at this pixel
+-                # g_i(x) is the density/value of the Gaussian at the ray intersection or pixel center
+-                # For volume rendering, we often use the error function for closed-form transmittance [S1, unofficial]
+-                
+-                # Calculate density/value
+-                # Using the normalized Gaussian kernel formula [S1, unofficial]
+-                # dist_sq = (pixel_center - c_i)^T * Sigma_i^-1 * (pixel_center - c_i)
+-                # value = exp(-0.5 * dist_sq) / sqrt(det(Sigma_i))
+-                
+-                # For volume rendering with alpha blending:
+-                # Alpha is derived from the integral of the density along the ray
+-                # Closed-form solution uses erf [S1, unofficial]
+-                
+-                alpha = compute_alpha_gaussian(gaussian, pixel_center, camera)
+-                
+-                # Alpha blending
+-                # C_out = C_in * (1 - alpha) + C_gauss * alpha
+-                # A_out = A_in * (1 - alpha) + alpha
+-                
+-                current_alpha = alpha_image[y, x, 0]
+-                current_color = color_image[y, x, :]
+-                
+-                # Blend
+-                blend_factor = alpha * transmittance[y, x, 0]
+-                color_image[y, x, :] += color * blend_factor
+-                alpha_image[y, x, 0] += alpha * transmittance[y, x, 0]
+-                transmittance[y, x, 0] *= (1 - alpha)
+-                
++                pixel_idx = y * image_width + x
++                pixel_center = [y, x]
++                # Compute alpha using erf-based closed-form solution [S1, unofficial]
++                alpha = compute_alpha_gaussian(gaussian, [0.0, 0.0, 1.0])
++
++                # Alpha blending: C_out = C_in * T + C_gauss * (1 - T), T_out = T_in * (1 - alpha)
++                current_alpha = alpha_image[pixel_idx]
++                current_color = color_image[pixel_idx]
++                T = transmittance[pixel_idx]
++
++                blend_factor = alpha * T
++                color_image[pixel_idx] = [
++                    current_color[0] * T + color[0] * blend_factor,
++                    current_color[1] * T + color[1] * blend_factor,
++                    current_color[2] * T + color[2] * blend_factor
++                ]
++                alpha_image[pixel_idx] += alpha * T
++                transmittance[pixel_idx] *= (1 - alpha)
++
+     return color_image, alpha_image
+-
+-def compute_alpha_gaussian(gaussian, pixel_center, camera):
+-    """
+-    Computes the alpha value for a Gaussian primitive at a specific pixel.
+-    Uses closed-form solution involving error function [S1, unofficial].
+-    """
+-    # Implementation details for erf-based alpha calculation are not fully specified in sources [G]
+-    # Typically involves projecting the 3D Gaussian to 2D and integrating along the ray
+-    # alpha = 1 - exp(-integral_of_density)
+-    # For Gaussian, integral relates to erf
+-    pass
+ ```
+ 
+@@ -141,6 +126,6 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Rendering is efficient, achieving real-time performance.
+-- **Memory Complexity:** Depends on the number of Gaussians $N$.
++- **Time Complexity:** Rendering is efficient, achieving real-time performance [S2, unofficial].
++- **Memory Complexity:** Depends on the number of Gaussians $N$ [S2, unofficial].
+ - **Performance:** Achieves high-quality real-time view synthesis at 1080p resolution with a frame rate of ≥ 100 fps (or ≥ 30 fps in other cited contexts) for unbounded, complete scenes [S2, unofficial].
+ - **Strengths:** Faster training and rendering speeds compared to NeRF [S2, unofficial]. Does not require meshing [S2, unofficial]. Integrates with physical-based rendering engines (scattering, emissive media) [S1, unofficial].
+@@ -148,5 +133,5 @@
+ 
+ ## Background
+-3D Gaussian Splatting is a method for 3D reconstruction and rendering that represents a point cloud as a set of 3D Gaussian distributions [S2, unofficial]. It was introduced as a way to efficiently simulate 3D structure details without meshing [S2, unofficial]. The method allows for efficient simulation of 3D structure details without meshing [S2, unofficial]. It is used in 3D reconstruction and rendering [S2, unofficial]. The approach is part of the Gaussian Splatting family, which aims to provide faster alternatives to Neural Radiance Fields (NeRF) [S2, unofficial].
++3D Gaussian Splatting is a method for 3D reconstruction and rendering that represents a point cloud as a set of 3D Gaussian distributions [S2, unofficial]. It efficiently simulates 3D structure details without meshing [S2, unofficial]. The approach is used in 3D reconstruction and rendering [S2, unofficial]. It is part of the Gaussian Splatting family, which aims to provide faster alternatives to Neural Radiance Fields (NeRF) [S2, unofficial].
+ 
+ ## Sources

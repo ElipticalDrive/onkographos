@@ -1,0 +1,315 @@
+# Distributed CT Reconstruction with TIGRE
+
+Also called: Distributed Ax/Atb, Distributed Full-Data Operator, Distributed TIGRE, DistributedFullDataTigrePool, TomoAnchor-V3
+
+## Overview
+Distributed CT Reconstruction with TIGRE is a multiprocessing framework that parallelizes the forward projection ($Ax$) and backprojection ($A^Tb$) operators of the TIGRE library across multiple GPUs using shared memory and process pools [S1, unofficial]. It solves the computational bottleneck of large-scale tomographic reconstruction by partitioning projection angles across worker processes, allowing independent GPU execution while maintaining a consistent global data view through shared memory buffers [S1, unofficial]. Unlike spatial decomposition methods that partition the volume, this method partitions the measurement space (angles), making it suitable for iterative reconstruction algorithms that require repeated forward and backprojection operations [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `volume`: 3D numpy array of shape `(nz, ny, nx)` and dtype `float32` [S1, unofficial].
+    *   `projections`: 3D numpy array of shape `(num_angles, det_rows, det_cols)` and dtype `float32` [S1, unofficial].
+    *   `angles`: 1D numpy array of projection angles in radians [S1, unofficial].
+    *   `geometry_params`: Parameters defining the CT geometry (source-detector distance, detector pixels, voxel size, etc.) [S1, unofficial].
+    *   `gpu_ids`: List of GPU indices to use [S1, unofficial].
+*   **Outputs**:
+    *   `projections`: Result of forward projection ($Ax$) [S1, unofficial].
+    *   `volume`: Result of backprojection ($A^Tb$) [S1, unofficial].
+    *   `residual`: Scalar value for residual squared norm [S1, unofficial].
+
+### Data Structures
+
+**`_WorkerShard`**
+A dataclass defining the assignment of angles to a specific worker/GPU [S1, unofficial].
+*   `worker_id` (int): Unique identifier for the worker process.
+*   `gpu_id` (int): CUDA device ID assigned to this worker.
+*   `start` (int): Start index (inclusive) in the `angles` array.
+*   `stop` (int): Stop index (exclusive) in the `angles` array.
+*   `angles` (np.ndarray): Subset of projection angles assigned to this shard.
+
+**`_SharedArraySpec`**
+Specification for shared memory buffers [S1, unofficial].
+*   `name` (str): Unique name for the shared memory segment.
+*   `shape` (tuple): Shape of the numpy array.
+*   `dtype` (np.dtype): Data type (e.g., `np.float32`).
+
+**Shared Memory Buffers**
+*   `_volume_shared`: Single shared array of shape `volume_shape` (`nz, ny, nx`), dtype `float32`. Used to store the global volume accessible by all workers [S1, unofficial].
+*   `_projection_buffers`: Dictionary mapping `worker_id` to a shared array. Shape: `(shard.count, det_rows, det_cols)`. Each worker writes its partial projection results here [S1, unofficial].
+*   `_partial_volume_buffers`: Dictionary mapping `worker_id` to a shared array. Shape: `volume_shape` (`nz, ny, nx`). Each worker accumulates its partial backprojection result here [S1, unofficial].
+
+### Numbered Steps
+
+1.  **Initialization**:
+    *   Validate inputs: Ensure `len(gpu_ids) > 1` and `len(angles) > 0` [S1, unofficial].
+    *   Partition `angles` into shards using `_partition_angle_shards`. Each shard is assigned to a unique GPU from `gpu_ids` [S1, unofficial].
+    *   Create shared memory buffers (`_volume_shared`, `_projection_buffers`, `_partial_volume_buffers`) using `multiprocessing.shared_memory.SharedMemory` with `create=True` [S1, unofficial].
+    *   Spawn worker processes using `mp.get_context("spawn")` to ensure clean state isolation [S1, unofficial].
+    *   For each shard, create a worker process with arguments: shard metadata, geometry params, subset of angles, shared array specs, and command/result queues [S1, unofficial].
+    *   Start all worker processes [S1, unofficial].
+
+2.  **Forward Projection ($Ax$)**:
+    *   Copy input `volume` to `_volume_shared` using `np.copyto` [S1, unofficial].
+    *   Dispatch 'forward' command to all workers via their command queues [S1, unofficial].
+    *   Wait for all workers to respond via result queues with timeout `_QUEUE_POLL_SECONDS` [S1, unofficial].
+    *   Gather results: For each shard, copy `self._projection_buffers[shard.worker_id]` to `output[shard.start : shard.stop]` [S1, unofficial].
+
+3.  **Backprojection ($A^Tb$)**:
+    *   Validate input `projections` shape matches `self.projection_shape` [S1, unofficial].
+    *   For each shard, copy `projection_array[shard.start : shard.stop]` to `self._projection_buffers[shard.worker_id]` [S1, unofficial].
+    *   Dispatch 'backproject' command to all workers [S1, unofficial].
+    *   Wait for all workers to respond [S1, unofficial].
+    *   Reduce results: Initialize `volume = zeros(volume_shape, dtype=float32)` [S1, unofficial]. For each shard, add `self._partial_volume_buffers[shard.worker_id]` to `volume` [S1, unofficial].
+
+4.  **Normal Operator ($A^T A$)**:
+    *   Copy `volume` to `_volume_shared` [S1, unofficial].
+    *   Dispatch 'normal' command to workers [S1, unofficial].
+    *   Workers call `tigre.Ax` to compute a local projection, then `tigre.Atb` on that local projection with `backprojection_type='matched'` [S1, unofficial].
+    *   Reduce results: Initialize `result = zeros(volume_shape, dtype=float32)` [S1, unofficial]. For each shard, add `self._partial_volume_buffers[shard.worker_id]` to `result` [S1, unofficial].
+
+5.  **Residual Squared**:
+    *   Copy `volume` to `_volume_shared` and `projections` to `_projection_buffers` as in Backprojection [S1, unofficial].
+    *   Dispatch 'residual_squared' command [S1, unofficial].
+    *   Workers compute local residual squared norm: `value = sum((local_projection - projection_buffer)^2)` using float64 accumulation [S1, unofficial].
+    *   Reduce results: Sum `response.get('value', 0.0)` from all workers to get `total_value` [S1, unofficial].
+
+### Formulas
+
+*   **Forward Projection**: $y = Ax$ [S1, unofficial].
+*   **Backprojection**: $x = A^T b$ [S1, unofficial].
+*   **Normal Operator**: $z = A^T A x$ [S1, unofficial].
+*   **Residual Squared**: $R = \sum_{i} ( (Ax)_i - b_i )^2$ [S1, unofficial].
+
+### Parameters
+
+*   `_QUEUE_POLL_SECONDS`: Timeout in seconds for `result_queue.get()` in the master wait loop [S1, unofficial].
+*   `_PROCESS_JOIN_TIMEOUT_SECONDS`: Timeout in seconds for `process.join()` during shutdown [S1, unofficial].
+*   `backprojection_type`: String parameter passed to `tigre.Atb`, set to `'matched'` for backproject and normal operations [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import multiprocessing as mp
+from multiprocessing import shared_memory
+import tigre
+from tigre.utilities import gpu
+
+_QUEUE_POLL_SECONDS = 30.0  # Not given in sources
+_PROCESS_JOIN_TIMEOUT_SECONDS = 10.0  # Not given in sources
+
+class _WorkerShard:
+    def __init__(self, worker_id, gpu_id, start, stop, angles):
+        self.worker_id = worker_id
+        self.gpu_id = gpu_id
+        self.start = start
+        self.stop = stop
+        self.angles = angles
+
+class DistributedTigrePool:
+    def __init__(self, gpu_ids, angles, geometry_params, volume_shape, det_pixels):
+        self.gpu_ids = gpu_ids
+        self.angles = angles
+        self.geometry_params = geometry_params
+        self.volume_shape = volume_shape
+        self.det_pixels = det_pixels
+        self.projection_shape = (len(angles), det_pixels[0], det_pixels[1])
+        
+        if len(gpu_ids) <= 1:
+            raise ValueError("Requires at least two GPUs")
+        if len(angles) == 0:
+            raise ValueError("Requires at least one projection angle")
+            
+        self.shards = self._partition_angle_shards(angles, gpu_ids)
+        
+        self._volume_shared = self._create_shared_array("vol", volume_shape, np.float32)
+        self._projection_buffers = {}
+        self._partial_volume_buffers = {}
+        
+        for shard in self.shards:
+            proj_shape = (shard.stop - shard.start, det_pixels[0], det_pixels[1])
+            self._projection_buffers[shard.worker_id] = self._create_shared_array(
+                f"proj_{shard.worker_id}", proj_shape, np.float32
+            )
+            self._partial_volume_buffers[shard.worker_id] = self._create_shared_array(
+                f"pvol_{shard.worker_id}", volume_shape, np.float32
+            )
+            
+        self.workers = []
+        self.command_queues = {}
+        self.result_queues = {}
+        
+        for shard in self.shards:
+            cmd_q, res_q = mp.Queue(), mp.Queue()
+            self.command_queues[shard.worker_id] = cmd_q
+            self.result_queues[shard.worker_id] = res_q
+            
+            p = mp.Process(
+                target=_distributed_tigre_worker,
+                args=(shard, geometry_params, self._volume_shared, 
+                      self._projection_buffers, self._partial_volume_buffers,
+                      cmd_q, res_q)
+            )
+            p.start()
+            self.workers.append(p)
+
+    def _create_shared_array(self, name, shape, dtype):
+        shm = shared_memory.SharedMemory(create=True, size=np.prod(shape) * dtype.itemsize)
+        return np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+
+    def _partition_angle_shards(self, angles, gpu_ids):
+        shards = []
+        num_angles = len(angles)
+        num_gpus = len(gpu_ids)
+        angles_per_gpu = num_angles // num_gpus
+        remainder = num_angles % num_gpus
+        
+        start_idx = 0
+        for i, gpu_id in enumerate(gpu_ids):
+            count = angles_per_gpu + (1 if i < remainder else 0)
+            shards.append(_WorkerShard(
+                worker_id=i,
+                gpu_id=gpu_id,
+                start=start_idx,
+                stop=start_idx + count,
+                angles=angles[start_idx:start_idx + count]
+            ))
+            start_idx += count
+        return shards
+
+    def forward(self, volume):
+        np.copyto(self._volume_shared, np.ascontiguousarray(volume, dtype=np.float32), casting='no')
+        for shard in self.shards:
+            self.command_queues[shard.worker_id].put({'op': 'forward'})
+        self._wait_for_responses()
+        output = np.zeros(self.projection_shape, dtype=np.float32)
+        for shard in self.shards:
+            np.copyto(output[shard.start:shard.stop], 
+                      self._projection_buffers[shard.worker_id], 
+                      casting='no')
+        return output
+
+    def backproject(self, projections):
+        for shard in self.shards:
+            np.copyto(self._projection_buffers[shard.worker_id],
+                      np.ascontiguousarray(projections[shard.start:shard.stop], dtype=np.float32),
+                      casting='no')
+        for shard in self.shards:
+            self.command_queues[shard.worker_id].put({'op': 'backproject'})
+        self._wait_for_responses()
+        volume = np.zeros(self.volume_shape, dtype=np.float32)
+        for shard in self.shards:
+            volume += self._partial_volume_buffers[shard.worker_id]
+        return volume
+
+    def normal(self, volume):
+        np.copyto(self._volume_shared, np.ascontiguousarray(volume, dtype=np.float32), casting='no')
+        for shard in self.shards:
+            self.command_queues[shard.worker_id].put({'op': 'normal'})
+        self._wait_for_responses()
+        result = np.zeros(self.volume_shape, dtype=np.float32)
+        for shard in self.shards:
+            result += self._partial_volume_buffers[shard.worker_id]
+        return result
+
+    def residual_squared(self, volume, projections):
+        np.copyto(self._volume_shared, np.ascontiguousarray(volume, dtype=np.float32), casting='no')
+        for shard in self.shards:
+            np.copyto(self._projection_buffers[shard.worker_id],
+                      np.ascontiguousarray(projections[shard.start:shard.stop], dtype=np.float32),
+                      casting='no')
+        for shard in self.shards:
+            self.command_queues[shard.worker_id].put({'op': 'residual_squared'})
+        total_value = 0.0
+        for shard in self.shards:
+            res = self.result_queues[shard.worker_id].get(timeout=_QUEUE_POLL_SECONDS)
+            total_value += float(res.get('value', 0.0))
+        return total_value
+
+    def _wait_for_responses(self):
+        for shard in self.shards:
+            try:
+                res = self.result_queues[shard.worker_id].get(timeout=_QUEUE_POLL_SECONDS)
+                if not isinstance(res, dict) or res.get('status') != 'ok':
+                    raise RuntimeError(f"Invalid response from worker {shard.worker_id}")
+            except mp.queues.Empty:
+                if not self.workers[shard.worker_id].is_alive():
+                    raise RuntimeError(f"Worker {shard.worker_id} died unexpectedly")
+
+def _distributed_tigre_worker(shard, geo_params, vol_shm, proj_buffers, pvol_buffers, cmd_q, res_q):
+    vol_arr = np.ndarray(vol_shm.shape, dtype=np.float32, buffer=vol_shm.buf)
+    proj_arr = proj_buffers[shard.worker_id]
+    pvol_arr = pvol_buffers[shard.worker_id]
+    
+    gpuids = gpu.GpuIds()
+    gpuids.devices = [int(shard.gpu_id)]
+    geo = _build_tigre_geometry(geo_params)
+    
+    while True:
+        command = cmd_q.get()
+        operation = str(command.get('op', '')).strip().lower()
+        
+        if operation == 'close':
+            break
+            
+        elif operation == 'forward':
+            result = tigre.Ax(np.ascontiguousarray(vol_arr, dtype=np.float32), geo, shard.angles, gpuids=gpuids)
+            np.copyto(proj_arr, np.asarray(result, dtype=np.float32), casting='no')
+            
+        elif operation == 'backproject':
+            result = tigre.Atb(np.ascontiguousarray(proj_arr, dtype=np.float32), geo, shard.angles, backprojection_type='matched', gpuids=gpuids)
+            np.copyto(pvol_arr, np.asarray(result, dtype=np.float32), casting='no')
+            
+        elif operation == 'normal':
+            local_proj = tigre.Ax(np.ascontiguousarray(vol_arr, dtype=np.float32), geo, shard.angles, gpuids=gpuids)
+            result = tigre.Atb(np.ascontiguousarray(local_proj, dtype=np.float32), geo, shard.angles, backprojection_type='matched', gpuids=gpuids)
+            np.copyto(pvol_arr, np.asarray(result, dtype=np.float32), casting='no')
+            
+        elif operation == 'residual_squared':
+            local_proj = tigre.Ax(np.ascontiguousarray(vol_arr, dtype=np.float32), geo, shard.angles, gpuids=gpuids)
+            residual = np.asarray(local_proj, dtype=np.float32) - np.asarray(proj_arr, dtype=np.float32)
+            value = float(np.sum(np.asarray(residual, dtype=np.float64) ** 2))
+            res_q.put({'status': 'ok', 'value': value})
+            continue
+            
+        res_q.put({'status': 'ok', 'worker_id': shard.worker_id, 'gpu_id': shard.gpu_id})
+
+def _build_tigre_geometry(params):
+    # Constructs TIGRE geometry object from parameters [S1, unofficial].
+    # Implementation details not provided in sources.
+    pass
+```
+
+### Edge Cases and Pitfalls
+
+*   **Process Context**: Uses `spawn` context, which does not inherit open file descriptors or GPU contexts from the parent, ensuring clean state isolation [S1, unofficial].
+*   **Shared Memory Cleanup**: Shared memory segments must be explicitly closed and unlinked to prevent OS resource leaks [S1, unofficial].
+*   **Worker Death**: If a worker process exits unexpectedly, the master detects this via `Empty` exception from `result_queue.get()` and checks `process.is_alive()` [S1, unofficial]. A `RuntimeError` is raised with the dead PIDs [S1, unofficial].
+*   **Invalid Response**: If the response from a worker is not a dictionary or has `status != 'ok'`, a `RuntimeError` is raised [S1, unofficial].
+*   **Shape Mismatch**: Volume and projection arrays must match `self.volume_shape` and `self.projection_shape` respectively [S1, unofficial]. A `ValueError` is raised if they do not [S1, unofficial].
+*   **Non-Contiguous Arrays**: Input arrays are converted to contiguous `float32` arrays before passing to TIGRE or shared memory copy [S1, unofficial].
+*   **Cancellation**: Cancellation is checked only during the wait loop. `OperationCancelled` is raised only after the current GPU call completes [S1, unofficial].
+
+## Operating characteristics
+
+*   **Time Complexity**: Not given in the sources [S1, unofficial].
+*   **Memory Complexity**: Not given in the sources [S1, unofficial].
+*   **Communication Overhead**: Data exchange uses shared memory buffers (`_volume_shared`, `_projection_buffers`, `_partial_volume_buffers`) to avoid network overhead in single-node multi-GPU setups [S1, unofficial].
+*   **Strengths**: Simple load balancing by partitioning angles across GPUs [S1, unofficial]. Leverages TIGRE's optimized CUDA kernels [S1, unofficial].
+*   **Limitations**: Requires at least two GPUs and at least one projection angle [S1, unofficial]. Volume and projection arrays must match specified shapes [S1, unofficial].
+*   **When to Use**: Single-node multi-GPU systems where the volume fits in shared memory and the bottleneck is projection/backprojection speed [S1, unofficial].
+*   **When Not to Use**: Multi-node distributed setups without shared memory support [S1, unofficial].
+
+## Background
+
+*   **Origin**: This method is part of the TomoAnchor-V3 framework [S1, unofficial].
+*   **History**: It was introduced as a distributed computing framework for tomographic forward and backprojection operators using multiple GPUs via shared memory and multiprocessing [S1, unofficial].
+*   **Usage**: Used in computed tomography (CT) reconstruction, particularly for iterative algorithms like MBIR (Model-Based Iterative Reconstruction) that require repeated forward and backprojection operations [S1, unofficial].
+
+## Sources
+
+[S1] alidarbandi/TomoAnchor-V3, https://github.com/alidarbandi/TomoAnchor-V3, fetched 2026-10-27 (unofficial)

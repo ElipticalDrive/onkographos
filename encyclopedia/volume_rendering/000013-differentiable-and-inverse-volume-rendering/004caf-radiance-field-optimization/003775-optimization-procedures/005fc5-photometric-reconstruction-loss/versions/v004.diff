@@ -1,0 +1,103 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Photometric Reconstruction Loss minimizes the error between rendered pixel colors and input training images during joint optimization of scene representation and camera parameters [S3, unofficial]. It distinguishes itself from standard pixel-wise losses by explicitly mapping 3D sample coordinates from a canonical ray to camera-specific rays via rigid transformations, ensuring geometric consistency across views [S3, unofficial]. Unlike sibling methods that may rely solely on intensity matching without explicit 3D warping, this method enforces that the radiance field evaluated at the transformed 3D position matches the observed image color [S3, unofficial].
++Photometric Reconstruction Loss minimizes the error between rendered pixel colors and input training images during joint optimization of scene representation and camera parameters [S3, unofficial]. It distinguishes itself from standard pixel-wise losses by explicitly mapping 3D sample coordinates from a canonical ray to camera-specific rays via rigid transformations, ensuring geometric consistency across views [S3, unofficial]. Unlike sibling methods such as [Color Volume Optimization and Density Initialization](842-color-volume-optimization-and-density-initialization.md) or [Regularization losses](1413-regularization-losses.md) that may rely solely on intensity matching or explicit 3D constraints, this method enforces that the radiance field evaluated at the transformed 3D position matches the observed image color [S3, unofficial]. It builds on the differentiability of the forward rendering operator and gradient propagation through integration steps described in [Optimization Procedures](7150-optimization-procedures.md) [44-radiance-field-optimization.md].
+ 
+ ## How it works
+@@ -14,9 +14,10 @@
+     *   $F_\sigma, F_c$: Radiance field functions representing density and color, respectively [S3, unofficial].
+     *   $U$: Set of all possible 2D coordinates in the input images [S3, unofficial].
++    *   $K$: Camera intrinsic matrix [G].
+ *   **Outputs:**
+     *   Scalar loss value $L_{rec}$ representing the photometric error [S3, unofficial].
+ 
+ **Data Structures:**
+-*   **Camera Pose ($P_i$):** Represented as a vector in $se(3)$ Lie algebra [S3, unofficial].
++*   **Camera Pose ($P_i$):** Represented as a 6D vector in $se(3)$ Lie algebra (rotation vector + translation) [S3, unofficial].
+ *   **Sample Coordinate ($s(\vec{0}, \vec{d_u})$):** A 3D point on the canonical ray (origin $\vec{0}$, direction $\vec{d_u}$) corresponding to pixel $u$ [S3, unofficial].
+ *   **Warping Function ($W_{3d}$):** A function $W_{3d}: \mathbb{R}^3 \to \mathbb{R}^3$ that performs rigid 3D transformation parameterized by $P \in se(3)$ [S3, unofficial].
+@@ -47,5 +48,5 @@
+ **Parameters:**
+ *   $P_i$: Camera pose parameterized in $se(3)$ Lie algebra [S3, unofficial].
+-*   Typical values: Not given in the sources.
++*   Typical values: Not given in the sources [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -64,6 +65,6 @@
+         F_c: Color field query function.
+         images: List of L images, where images[i][u] is the RGB value of pixel u in image i.
+-        poses: List of L camera poses, where poses[i] is the se(3) parameter for image i.
+-        intrinsics: Camera intrinsic matrix K.
++        poses: List of L camera poses, where poses[i] is a 6D se(3) vector [omega_x, omega_y, omega_z, t_x, t_y, t_z].
++        intrinsics: Camera intrinsic matrix K (3x3).
+         U: List of 2D pixel coordinates (u, v) to evaluate.
+         
+@@ -115,7 +116,14 @@
+ 
+ def apply_se3_transform(se3_params, point):
+-    # Applies rigid transformation from se(3) parameterization [S3, unofficial]
+-    R = se3_params['R']
+-    t = se3_params['t']
++    # Converts se(3) 6D vector to SE(3) rotation matrix and translation, then applies transform [G]
++    omega = se3_params[:3]
++    t = se3_params[3:]
++    theta = norm(omega)
++    if theta < 1e-6:
++        R = identity_matrix(3)
++    else:
++        k = omega / theta
++        # Rodrigues' rotation formula [G]
++        R = identity_matrix(3) + skew_symmetric(k) * sin(theta) + skew_symmetric(k) @ skew_symmetric(k) * (1 - cos(theta))
+     x, y, z = point
+     return [
+@@ -129,5 +137,5 @@
+     sigma = F_sigma(point)
+     color = F_c(point)
+-    # Simplified single-sample rendering for demonstration
++    # Simplified single-sample rendering for demonstration; in practice V integrates samples along the ray [G]
+     return color
+ 
+@@ -138,4 +146,13 @@
+     mag = (vec[0]**2 + vec[1]**2 + vec[2]**2)**0.5
+     return [v/mag for v in vec]
++
++def identity_matrix(n):
++    return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
++
++def skew_symmetric(v):
++    return [[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]]
++
++def norm(v):
++    return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+ ```
+ 
+@@ -143,19 +160,19 @@
+ 
+ ### [Photometric Loss (RawNeRF Variant)](9563-photometric-loss-rawnerf-variant.md)
+-Specialized for NeRFs using a "gradient trick" to reduce bias in Monte Carlo estimators.
++Specialized for NeRFs using a "gradient trick" that treats the radiance estimator as a constant during backpropagation to reduce bias in Monte Carlo estimators. Choose it when supervising cache-based predictions against physically-based models or when training requires reduced gradient bias.
+ 
+ ### [Photometric Loss](11090-photometric-loss.md)
+-Combines $\ell_1$ reconstruction with D-SSIM for perceptual structure.
++Minimizes the difference between rendered pixels and input training images during joint optimization. It distinguishes itself by combining an $\ell_1$ reconstruction term with a differentiable Structural Similarity (D-SSIM) term to balance pixel-wise accuracy and perceptual structure. Choose it when perceptual quality and structural fidelity are prioritized over strict pixel-wise alignment.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S3, unofficial].
++*   **Memory Complexity:** Not given in the sources [S3, unofficial].
+ *   **Strengths:** Enforces geometric consistency across views by explicitly warping 3D points [S3, unofficial].
+ *   **Limitations:** The problem is ill-posed and suffers from shape-radiance ambiguity [S3, unofficial]. Joint optimization is highly ill-defined without additional constraints [S3, unofficial].
+-*   **When to use:** Not given in the sources.
+-*   **When not to use:** Not given in the sources.
++*   **When to use:** Not given in the sources [S3, unofficial].
++*   **When not to use:** Not given in the sources [S3, unofficial].
+ 
+ ## Background
+-The method originates from the need to jointly optimize camera poses and neural radiance fields [S3, unofficial]. The use of $se(3)$ Lie algebra for camera pose parameterization is a common technique in robotics [S3, unofficial]. The formulation addresses the ill-posed nature of shape-radiance ambiguity [S3, unofficial].
++The method originates from the need to jointly optimize camera poses and neural radiance fields [S3, unofficial]. The use of $se(3)$ Lie algebra for camera pose parameterization is a common technique in robotics [S3, unofficial]. The formulation addresses the ill-posed nature of shape-radiance ambiguity [S3, unofficial]. It is widely used in end-to-end training pipelines that rely solely on 2D re-rendering supervision without requiring explicit 3D ground truth [S4, unofficial].
+ 
+ ## Sources

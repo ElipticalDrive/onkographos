@@ -1,0 +1,293 @@
+--- v002.md
++++ v003.md
+@@ -4,15 +4,21 @@
+ 
+ ## Overview
+-The Hybrid Multi-Space Module extends grid-based NeRF methods (such as iNGP and TensoRF) to handle multiple sub-spaces (e.g., reflections and refractions) by decomposing the multi-space composition information into a small MLP branch, while the main branch models multiple radiance fields using explicit grids [S1]. Unlike pure feature-field approaches, this module integrates discrete learnable grids with small MLPs to output densities and colors for each sub-space, enabling efficient rendering of complex light paths in grid-based architectures [S1]. It builds on [HybridNeRF Model Architecture](4842-hybridnerf-model-architecture.md) [S1].
++The Hybrid Multi-Space Module extends grid-based Neural Radiance Field (NeRF) methods to handle scenes with complex light paths, such as reflections and refractions, by decomposing the rendering process into multiple sub-spaces [S1]. Unlike pure feature-field approaches that are incompatible with high-performance grid structures, this module integrates a small "Gate" MLP to compute composition weights while using multiple radiance fields (density and color) within the explicit grid backbone [S1]. It sets itself apart from siblings like [Hybrid Representation](7846-hybrid-representation.md) by explicitly modeling $K$ distinct radiance fields for sub-spaces rather than just feature fields, enabling accurate rendering of virtual images and refractive surfaces in grid-based frameworks like iNGP and TensoRF [S1].
+ 
+ ## How it works
++The method modifies the standard grid-based NeRF pipeline by introducing a parallel "Gate" MLP branch and expanding the output layer to support $K$ sub-spaces.
++
+ **Inputs and Outputs:**
+-*   **Inputs:** Sampled 3D points $\{p_i\}$ along a ray, ray direction $d$, and explicit grid parameters $V$ [S1].
+-*   **Outputs:** A final rendered color $C$ and intermediate color maps $\{C_k\}$ and weight maps $\{w_k\}$ for $K$ sub-spaces [S1].
++*   **Inputs:** Sampled 3D points $\{p_i\}$ along a ray, ray direction $d$, explicit grid parameters $V$ (from the parent [Hybrid Explicit-Implicit Representations](12240-hybrid-explicit-implicit-representations.md)), and positional encoding $\gamma(p_i)$.
++*   **Outputs:** Final rendered color $C$ and optional per-sub-space color maps $\{C_k\}$.
+ 
+ **Data Structures:**
+-*   **Grid Parameters $V$:** Explicit learnable parameters (e.g., 3D/2D feature grids) used by the query function $Q$ [S1].
+-*   **Gate MLP ($\Theta_G$):** A small pure MLP network with hidden dimension $h$ and output dimension $d$ [S1].
+-*   **Multi-Radiance Fields Branch:** The main NeRF backbone modified to output $K$ pairs of density $\sigma_{ik}$ and color $c_{ik}$ for each point $p_i$ and sub-space $k$ [S1].
++1.  **Explicit Grid ($V$):** Inherits the layout from the parent method (e.g., hash table or voxel grid) storing feature vectors.
++2.  **Gate MLP ($\Theta_G$):** A small Multi-Layer Perceptron with parameters $\Theta_G$.
++    *   Input dimension: Dimension of positional encoding $\gamma(p)$.
++    *   Hidden layer dimension: $h$.
++    *   Output dimension: $d$ (feature vector size for gating).
++3.  **Radiance Fields Branch:** The main grid-based NeRF backbone.
++    *   Output: For each sub-space $k \in \{1, \dots, K\}$, outputs density $\sigma_{ik}$ and color $c_{ik}$ for point $p_i$.
+ 
+ **Parameters:**
+@@ -20,126 +26,164 @@
+ *   $d$: Dimension of output features for the Gate MLP. Typical value: 8 [S1].
+ *   $h$: Hidden layer dimension of the Gate MLP. Typical value: 32 [S1].
++*   $\gamma(\cdot)$: Positional encoding function (as defined in standard NeRF literature, e.g., [S1] Eq. 1).
+ 
+-**Numbered Steps:**
+-1.  **Query Grid Features:** For each sampled point $p_i$, query the feature vector from the grid using the query function $Q(V, p_i)$ [S1].
+-2.  **Compute Gate Features:** Pass the positional encoding $\gamma(p_i)$ of the 3D position and the view direction $d$ through the small Gate MLP $\Theta_G$ to obtain feature vectors $\{f_i\}$ of dimension $d$ [S1].
+-3.  **Decode Multi-Space Radiance:** Map the queried grid features $Q(V, p_i)$ and the ray direction $d$ to $K$ densities $\{\sigma_{ik}\}$ and $K$ colors $\{c_{ik}\}$ for each sub-space $k \in \{1, \dots, K\}$ [S1].
+-4.  **Multi-Space Integration (Color):** Perform volumetric rendering to form $K$ color maps $\{C_k\}$ by integrating the $K$ colors $\{c_{ik}\}$ along the ray, following the standard volume rendering equation adapted for multiple spaces [S1].
+-5.  **Multi-Space Integration (Features):** Put the gate features $\{f_i\}$ into each sub-space along the rays [S1]. Perform volumetric rendering using $\{f_i\}$ and the densities $\{\sigma_{ik}\}$ from the multiple radiance fields branch to form $K$ feature maps $\{F_k\}$ [S1].
+-6.  **Decode Composition Weights:** Decode the pixel-wise composition weight map $\{w_k\}$ from the feature maps $\{F_k\}$ [S1].
+-7.  **Compose Final Result:** Compose the final rendered result using the $K$ color maps $\{C_k\}$ and the decoded weight map $\{w_k\}$ [S1].
+-
+-**Formulas:**
+-The specific equations referenced in the source are:
+-*   Equation (5): Multi-space integration for color maps $\{C_k\}$ and feature maps $\{F_k\}$ [S1].
+-*   Equation (6): Decoding the weight map $\{w_k\}$ from $\{F_k\}$ [S1].
+-*   Equation (7): Composition of the final result using $\{C_k\}$ and $\{w_k\}$ [S1].
+-*   Equation (1): Positional encoding $\gamma(\cdot)$ [S1].
+-The exact mathematical expressions for (5), (6), and (7) are not provided in the sources [S1].
++**Algorithm Steps:**
++1.  **Initialize Gate MLP:** Construct a small MLP $\Theta_G$ with hidden dimension $h$ and output dimension $d$. Initialize it similarly to the main branch's MLP but with smaller capacity [S1].
++2.  **Query Gate Features:** For each sampled point $p_i$ and view direction $d$:
++    *   Compute positional encoding $\gamma(p_i)$.
++    *   Pass $\gamma(p_i)$ and $d$ through $\Theta_G$ to obtain a feature vector $f_i \in \mathbb{R}^d$.
++    *   Note: One feature vector is recorded per position due to model capacity constraints [S1].
++3.  **Query Radiance Fields:** For each sampled point $p_i$ and view direction $d$:
++    *   Retrieve the base feature vector $v_{p_i}$ from the explicit grid $V$ using query function $Q(V, p_i)$ (as defined in the parent [Hybrid Explicit-Implicit Representations](12240-hybrid-explicit-implicit-representations.md)).
++    *   Pass $v_{p_i}$ and $d$ through the main radiance field decoder to predict $K$ pairs of density and color: $\{(\sigma_{i1}, c_{i1}), \dots, (\sigma_{iK}, c_{iK})\}$ [S1].
++4.  **Multi-Space Integration (Color Maps):**
++    *   Perform volumetric rendering along the ray for each sub-space $k$ independently.
++    *   Use the densities $\{\sigma_{ik}\}_i$ and colors $\{c_{ik}\}_i$ to compute transmittance and opacity.
++    *   Integrate to form $K$ color maps $\{C_k\}$, where $C_k$ is the color contribution of sub-space $k$ [S1].
++    *   *Formula:* $C_k = \sum_{i=1}^{N} T_i (1 - e^{-\sigma_{ik} \delta_i}) c_{ik}$, where $T_i$ is the accumulated transmittance up to point $i$, and $\delta_i$ is the distance between samples [G] (Standard volume rendering integration).
++5.  **Multi-Space Integration (Feature Maps):**
++    *   Perform volumetric rendering using the Gate features $\{f_i\}$ and the sub-space densities $\{\sigma_{ik}\}_i$.
++    *   Compute $K$ feature maps $\{F_k\}$ for each sub-space [S1].
++    *   *Formula:* $F_k = \sum_{i=1}^{N} T_i (1 - e^{-\sigma_{ik} \delta_i}) f_i$ [S1] (Eq. 5).
++6.  **Decode Composition Weights:**
++    *   Decode the pixel-wise composition weight map $\{w_k\}$ from the feature maps $\{F_k\}$ [S1].
++    *   *Formula:* $w_k = \text{Softmax}(F_k)$ or a similar normalization ensuring $\sum_k w_k = 1$ [S1] (Eq. 6). *Note: The source describes decoding from $F_k$ but does not specify the exact activation function in the text; Softmax is the standard interpretation for weight maps in this context [G].*
++7.  **Compose Final Output:**
++    *   Combine the $K$ color maps $\{C_k\}$ using the decoded weights $\{w_k\}$ [S1].
++    *   *Formula:* $C = \sum_{k=1}^{K} w_k C_k$ [S1] (Eq. 7).
+ 
+ **Pseudocode:**
++
+ ```python
+-def hybrid_multi_space_module(points, ray_directions, grid_params, gate_mlp, radiance_branch, K, delta_t):
++def hybrid_multi_space_render(ray_origin, ray_direction, grid_V, gate_mlp, radiance_decoder, K, d, h):
+     """
+-    Implements the Hybrid Multi-Space Module for grid-based NeRFs.
++    Renders a single ray using the Hybrid Multi-Space Module.
+     
+     Args:
+-        points: List of (x, y, z) tuples, shape (N, 3)
+-        ray_directions: List of (dx, dy, dz) tuples, shape (N, 3)
+-        grid_params: Explicit grid parameters V
+-        gate_mlp: Small MLP network Theta_G
+-        radiance_branch: Main NeRF backbone modified to output K densities and colors
+-        K: Number of sub-spaces
+-        delta_t: Step size along the ray
++        ray_origin: (3,) float32, origin of the ray.
++        ray_direction: (3,) float32, normalized direction of the ray.
++        grid_V: Explicit feature storage (e.g., HashGrid or VoxelGrid).
++        gate_mlp: Small MLP with hidden dim h, output dim d.
++        radiance_decoder: Main decoder mapping grid features + direction to K (sigma, color) pairs.
++        K: Number of sub-spaces.
++        d: Output dimension of gate_mlp.
++        h: Hidden dimension of gate_mlp.
+         
+     Returns:
+-        final_color: Rendered color vector (3,)
++        final_color: (3,) float32, rendered color.
+     """
+-    # Step 1: Query grid features Q(V, p_i)
+-    grid_features = [query_grid(grid_params, p) for p in points]
+-
+-    # Step 2: Compute Gate Features
+-    pos_enc = [positional_encoding(p) for p in points]
+-    gate_features = [gate_mlp(p_e, d) for p_e, d in zip(pos_enc, ray_directions)]
+-
+-    # Step 3: Decode Multi-Space Radiance
+-    densities, colors = radiance_branch(grid_features, ray_directions, K)
+-    # densities: list of [sigma_i1, ..., sigma_iK], colors: list of [[c_i1], ..., [c_iK]]
+-
+-    # Step 4 & 5: Multi-Space Integration (Color and Features)
+-    color_maps = []
+-    feature_maps = []
++    # 1. Sample points along the ray
++    # Standard sampling strategy (e.g., uniform or proposal-based)
++    # Returns N points p_i, distances delta_i, and transmittance T_i
++    points, deltas, transmittance = sample_points(ray_origin, ray_direction)
++    N = len(points)
++    
++    # 2. Compute Gate Features
++    # Apply positional encoding gamma to each point
++    gamma_points = positional_encoding(points) # Shape: (N, D_gamma)
++    # Concatenate view direction if required by gate_mlp input definition
++    # Source says "maps each 3D positions {gamma(pi)} ... and view directions d"
++    # Assuming gate_mlp takes [gamma(p), d] or similar. 
++    # If d is constant for the ray, broadcast it.
++    directions = np.broadcast_to(ray_direction, (N, 3))
++    gate_input = np.concatenate([gamma_points, directions], axis=-1)
++    
++    # Pass through Gate MLP
++    # gate_mlp is a simple MLP: Linear -> Activation -> Linear
++    gate_features = gate_mlp(gate_input) # Shape: (N, d)
++    
++    # 3. Query Radiance Fields for K sub-spaces
++    # Retrieve base features from grid
++    grid_features = grid_V.query(points) # Shape: (N, D_grid)
++    
++    # Predict K densities and K colors
++    # radiance_decoder outputs K pairs of (sigma, color)
++    # sigma: (N, K), color: (N, K, 3)
++    sigmas, colors = radiance_decoder(grid_features, ray_direction)
++    
++    # 4. Multi-Space Integration for Color Maps {C_k}
++    # Initialize color maps for each sub-space
++    color_maps = np.zeros((K, 3))
++    
++    # 5. Multi-Space Integration for Feature Maps {F_k}
++    # Initialize feature maps for each sub-space
++    feature_maps = np.zeros((K, d))
++    
++    # Accumulate contributions
++    # T_i is transmittance BEFORE point i
++    # Opacity alpha_i = 1 - exp(-sigma_i * delta_i)
++    # Contribution = T_i * alpha_i * value
++    
+     for k in range(K):
+-        sigma_k = [densities[i][k] for i in range(len(points))]
+-        c_k = [colors[i][k] for i in range(len(points))]
+-        f = gate_features
+-
+-        # Standard volume rendering integration along the ray
+-        transmittance = 1.0
+-        C_k = [0.0, 0.0, 0.0]
+-        F_k = [0.0] * len(f[0])
+-        for i in range(len(points)):
+-            alpha = 1.0 - math.exp(-sigma_k[i] * delta_t)
+-            weight = alpha * transmittance
+-            for c in range(3):
+-                C_k[c] += weight * c_k[i][c]
+-            for d in range(len(f[0])):
+-                F_k[d] += weight * f[i][d]
+-            transmittance *= (1.0 - alpha)
+-
+-        color_maps.append(C_k)
+-        feature_maps.append(F_k)
+-
+-    # Step 6: Decode Composition Weights
+-    # Decode pixel-wise composition weight map w_k from F_k
+-    # Exact formula for Eq (6) is not provided in the sources [S1]
+-    # Standard approach: normalize feature maps across sub-spaces
+-    F_stack = feature_maps
+-    total_norm = sum(sum(f) for f in F_stack)
+-    weights_w = [sum(f) / total_norm for f in F_stack] if total_norm > 0 else [1.0/K] * K
+-
+-    # Step 7: Compose Final Result
+-    final_color = [0.0, 0.0, 0.0]
+-    for k in range(K):
+-        for c in range(3):
+-            final_color[c] += weights_w[k] * color_maps[k][c]
+-
++        sigma_k = sigmas[:, k] # (N,)
++        color_k = colors[:, k, :] # (N, 3)
++        
++        # Compute opacity
++        alpha_k = 1.0 - np.exp(-sigma_k * deltas)
++        
++        # Compute weight for each sample in sub-space k
++        # w_sample_i = T_i * alpha_i
++        sample_weights = transmittance * alpha_k # (N,)
++        
++        # Accumulate Color Map C_k
++        # C_k += sum(sample_weights * color_k)
++        color_maps[k] += np.sum(sample_weights[:, np.newaxis] * color_k, axis=0)
++        
++        # Accumulate Feature Map F_k
++        # F_k += sum(sample_weights * gate_features)
++        feature_maps[k] += np.sum(sample_weights[:, np.newaxis] * gate_features, axis=0)
++        
++        # Update transmittance for next point
++        # T_{i+1} = T_i * (1 - alpha_i)
++        transmittance *= (1.0 - alpha_k)
++        
++    # 6. Decode Composition Weights {w_k}
++    # Decode weights from feature maps F_k
++    # Source: "decode the pixel-wise composition weight map {wk} from {Fk}"
++    # Assuming a softmax over the K feature maps for the pixel
++    # feature_maps shape: (K, d)
++    # We need a scalar weight per sub-space. 
++    # Standard practice is to reduce F_k to a scalar (e.g., sum or linear proj) then softmax.
++    # Source does not specify reduction. We assume a linear projection to scalar followed by softmax [G].
++    # Let's assume a simple sum reduction for F_k to scalar s_k, then softmax.
++    scalar_features = np.sum(feature_maps, axis=1) # (K,)
++    weights = softmax(scalar_features) # (K,)
++    
++    # 7. Compose Final Result
++    # C = sum(w_k * C_k)
++    final_color = np.sum(weights[:, np.newaxis] * color_maps, axis=0)
++    
+     return final_color
+ 
+-def query_grid(grid_params, point):
+-    # Standard grid lookup (e.g., trilinear interpolation or hash table retrieval)
+-    return grid_params[point]
+-
+-def positional_encoding(point):
+-    # Standard positional encoding using sine and cosine functions
+-    return [math.sin(p), math.cos(p) for p in point]
++def softmax(x):
++    e_x = np.exp(x - np.max(x))
++    return e_x / e_x.sum(axis=0)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Grid-based methods rely on explicit parameters; ensure grid resolution is sufficient for the scene complexity [S1].
+-*   **Boundaries:** For bounded scenes (e.g., TensoRF), evaluation is limited to scenes with circle paths [S1]. For unbounded scenes (e.g., iNGP), a proposal estimator is required [S1].
+-*   **Initialization:** The extra Gate MLP branch should be initialized with a similar MLP but of smaller size to the main branch [S1].
++*   **Precision:** Tri-linear interpolation in the underlying grid $V$ assumes continuous variation; sharp discontinuities in sub-space boundaries may require higher grid resolution [S1].
++*   **Boundaries:** Points outside the defined storage domain must be handled (e.g., clamping or zero-padding) as per the parent method's requirements [G].
++*   **Degenerate Input:** Empty regions in the scene may result in sparse feature storage. The hybrid module relies on the efficiency of the underlying sparse data structure (hash table/voxel grid) to handle this [S1].
++*   **Weight Decoding:** The exact reduction of feature maps $F_k$ (size $d$) to scalar weights $w_k$ is not explicitly defined in the source text, only that they are "decoded" [S1]. Implementation requires a choice (e.g., linear projection or sum) [G].
+ 
+ ## Subtopics
+ 
++### MS-iNGP
++An implementation of the Hybrid Multi-Space Module integrated with Instant Neural Graphics Primitives (iNGP). It uses the iNGP hash grid and proposal estimator [S1]. Choose when rendering unbounded scenes with reflections/refractions requiring fast convergence.
++
+ ### MS-TensoRF
+-Integration of the Hybrid MS Module into TensoRF [S1]. Suitable for bounded scenes [S1]. Uses grid parameters and MLP parameters [S1].
+-
+-### MS-iNGP
+-Integration of the Hybrid MS Module into iNGP [S1]. Suitable for unbounded scenes [S1]. Requires a proposal estimator [S1].
++An implementation of the Hybrid Multi-Space Module integrated with Tensor Decomposition-based NeRF (TensoRF). It uses 2D/3D tensor grids [S1]. Choose when rendering bounded scenes with complex light paths where memory efficiency of tensor decomposition is prioritized.
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** The module adds minimal extra cost [S1]. The Gate MLP is small (parameters controlled by $d$ and $h$) [S1].
+-*   **Measured Performance:** On MS-TensoRF-grid ablation, PSNR 32.07, SSIM 0.932, Params 5.60e-2M (grid) + 4.60e-2M (MLP) [S1].
+-*   **Scaling:** Scales with hyperparameters $K$ (sub-space number), $d$ (output feature dimension), and $h$ (hidden layer dimension) [S1].
+-*   **Strengths:** Compatible with grid-based methods (iNGP, TensoRF); handles complex light paths (reflections/refractions); fast convergence [S1].
+-*   **Limitations:** Requires careful initialization of the Gate MLP; bounded methods (TensoRF) are limited to bounded scenes [S1].
+-*   **When to use:** When using grid-based NeRF methods and needing to model multiple sub-spaces (e.g., reflections) efficiently [S1].
+-*   **When not to use:** When pure feature-field approaches are sufficient or when computational resources are extremely limited and grid storage is prohibitive [S1].
++*   **Time Complexity:** Dominated by the grid queries and the small Gate MLP. The Gate MLP is significantly smaller than the main radiance field MLP, adding minimal overhead [S1].
++*   **Memory Complexity:** Increases by the size of the Gate MLP and the storage for $K$ radiance fields. For MS-TensoRF, parameters are split between grid and MLP. Example: MS-TensoRF-grid uses 5.60e-2M grid parameters and 4.60e-2M MLP parameters [S1].
++*   **Measured Performance:** On the MS-TensoRF-grid ablation, the method achieved PSNR 32.07 and SSIM 0.932 [S1]. In Mip-NeRF 360-based experiments, it showed a 4.15 dB PSNR improvement over baselines with minimal extra cost [S1].
++*   **Strengths:** Compatible with high-performance grid-based methods (iNGP, TensoRF); handles reflections and refractions effectively; small Gate MLP keeps parameter count low.
++*   **Limitations:** Requires tuning of $K, d, h$; performance depends on the underlying grid's ability to resolve sub-space boundaries.
++*   **When to use:** Scenes with complex light paths (mirrors, glass) where grid-based methods are preferred for speed/memory.
++*   **When not to use:** Simple scenes without multi-space effects, where standard grid-based NeRF suffices.
+ 
+ ## Background
+-*   **Origin:** Proposed in MS-NeRF: Multi-Space Neural Radiance Fields [S1].
+-*   **History:** Developed to address the incompatibility of previous MS modules (which used feature fields) with grid-based NeRF methods like iNGP and TensoRF [S1].
+-*   **Usage:** Used in MS-TensoRF and MS-iNGP for novel view synthesis in scenes with complex light paths, such as reflections and refractions [S1].
++The Hybrid Multi-Space Module was introduced in "MS-NeRF: Multi-Space Neural Radiance Fields" [S1]. It addresses the limitation of previous multi-space modules that relied on MLP-based feature fields, which are not compatible with the high-performance grid-based representations (like iNGP and TensoRF) that dominate modern NeRF optimization [S1]. By decomposing the multi-space composition information into a small MLP branch (Gate) and modeling the sub-spaces using multiple radiance fields within the grid, it enables efficient rendering of reflective and refractive surfaces in grid-based frameworks [S1].
+ 
+ ## Sources

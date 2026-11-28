@@ -1,0 +1,319 @@
+--- v002.md
++++ v003.md
+@@ -4,78 +4,230 @@
+ 
+ ## Overview
+-Adversarial Training integrates a discriminator network trained in parallel with a generator (e.g., a radiance field or super-resolution network) to classify rendered images as real or fake [S1]. It distinguishes itself from standard differentiable rendering pipelines by adding a game-theoretic loss term that encourages photorealism and high-frequency detail, addressing the blurriness often associated with pure pixel-wise reconstruction losses [S1].
++Adversarial Training integrates a discriminator network into the optimization loop of a generative volume rendering model to distinguish between real ground-truth images and synthesized renders, using the discriminator's feedback to refine the generator's output [S1, S2]. Unlike standard supervised training that relies solely on pixel-wise reconstruction losses, this method enforces perceptual realism and reduces artifacts by learning the distribution of real data, making it distinct from sibling methods like [StyleNeRF](8659-stylenerf.md) which focus on style transfer, or [HyperNeRFGAN](8765-hypernerfgan.md) which may use different generative priors [S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Generator Input ($z$):** A latent vector, low-resolution image, or scene representation passed through the generator network to produce a predicted image $G(z)$ [S1], [S2].
+-*   **Discriminator Input:** Pairs of images consisting of real ground truth images $x$ and generated fake images $G(z)$ [S1].
+-*   **Outputs:** The generator outputs a rendered image; the discriminator outputs a scalar score $D(\cdot) \in [0, 1]$ indicating the probability that the input is real [S1].
++*   **Inputs:** Real ground-truth images $I_{gt}$, generated/fake images $G(z)$ (or $R_\theta(\cdot)$), camera parameters $\theta$, and latent codes $z$.
++*   **Outputs:** Updated network parameters for the generator (synthesizer) $\theta$ and discriminator $\phi$.
+ 
+ **Data Structures:**
+-*   **Generator Network ($G$):** The existing radiance field, super-resolution, or synthesizer network (e.g., $R_\theta$) that maps inputs to images [S1], [S2].
+-*   **Discriminator Network ($D$):** A neural network (typically fully convolutional or CNN-based) that takes an image as input and outputs a single scalar value [S1], [S3].
++*   **Generator/Synthesizer ($G$ or $R_\theta$):** A neural network (e.g., MLP or point-based synthesizer) that maps inputs to rendered images.
++*   **Discriminator ($D$ or $D_\phi$):** A neural network that outputs a scalar score indicating the likelihood of an image being real. It may include multi-scale branches [S2] or a pose estimation branch [S3].
++
++**Numbered Steps:**
++1.  **Initialization:** Initialize generator parameters $\theta$ and discriminator parameters $\phi$. If using multi-scale discrimination, initialize $N_s$ branches [S2].
++2.  **Forward Pass (Generator):** Sample latent codes $z$ and camera parameters $\theta$. Compute the generated image $I_{fake} = G(z, \theta)$ (or $R_\theta(S_t^{(i)})$) [S2, S3].
++3.  **Discriminator Update:**
++    *   Compute discriminator scores for real images: $D(I_{gt})$ [S1, S2].
++    *   Compute discriminator scores for fake images: $D(I_{fake})$ [S1, S2].
++    *   Calculate Discriminator Loss $L_{GAN,D}$ based on the specific GAN variant (e.g., LSGAN or non-saturating with R1) [S1, S2, S3].
++    *   Update $\phi$ by minimizing $L_{GAN,D}$ [S1, S2].
++4.  **Generator Update:**
++    *   Compute discriminator scores for fake images again: $D(I_{fake})$ [S1, S2].
++    *   Calculate Generator Loss $L_{GAN,G}$ [S1, S2].
++    *   If using contrastive pose learning, compute pose embeddings $p_I$ from $I_{fake}$ and $p_\theta$ from $\theta$, then calculate $L_{pose}$ [S3].
++    *   If using 3D Gaussian regularization, compute $L_{center}$ and $L_{knn}$ based on anchor Gaussian positions $\mu^0_A$ [S3].
++    *   Calculate total Generator Loss $L_G = L_{GAN,G} + \lambda_{pose} L_{pose} + \lambda_{center} L_{center} + \lambda_{knn} L_{knn}$ (weights vary by implementation) [S1, S3].
++    *   Update $\theta$ by minimizing $L_G$ [S1, S2, S3].
++5.  **Iteration:** Repeat steps 2-4 for the desired number of epochs.
++6.  **Inference:** Remove the discriminator $D_\phi$ to avoid inference overhead; use only $R_\theta$ [S2].
+ 
+ **Formulas:**
+-The standard adversarial losses minimize the error in distinguishing real from fake data [S1]:
+-$$
+-L_{GAN,D} = - \log(D(x)) - \log(1 - D(G(z)))
+-$$
+-$$
+-L_{GAN,G} = - \log(D(G(z)))
+-$$
+-where $x$ is the ground truth image and $G(z)$ is the generated image [S1].
+-
+-The Least-Squares GAN (LSGAN) variant replaces the log terms with squared errors to improve training stability [S2]:
+-$$
+-L_{adv} = \sum_{i=1}^{N_s} \sum_{t=1}^{T} \left[ D_\phi(R_\theta(S_t^{(i)}))^2 + (D_\phi(I_{gt}^{(i)}) - 1)^2 \right]
+-$$
+-where $N_s$ is the total number of discriminator scales (typically 5), $I_{gt}^{(i)}$ is the scale-adjusted ground-truth image, and $S_t^{(i)}$ is the rasterized raw image at resolution level $t$ and scale $i$ [S2].
++
++*   **LSGAN Adversarial Loss (Synthesizer/Discriminator Joint):**
++    $$
++    L_{adv}^\phi = \sum_{i=1}^{N_s} \left[ \sum_{t=1}^{T} D_\phi(R_\theta(S_t^{(i)}))^2 + (D_\phi(I_{gt}^{(i)}) - 1)^2 \right]
++    $$
++    Where $N_s$ is the total number of discriminator scales, $I_{gt}^{(i)}$ is the scale-adjusted ground-truth image, and $S_t^{(i)}$ is the rasterized raw image at resolution level $t$ and scale $i$ [S2].
++
++*   **Non-Saturating Adversarial Loss with R1 Regularization:**
++    $$
++    L_{adv} = \mathbb{E}_{z \sim P_z, \theta \sim P_\theta} [f(d(g(z, \theta)))] + \mathbb{E}_{I_r \sim P_{I_r}} [f(-d(I_r)) + \lambda \|\nabla d(I_r)\|^2]
++    $$
++    Where $f(t) = -\log(1 + \exp(-t))$ is the softplus function, $d(\cdot)$ is the discriminator, $g(\cdot)$ is the generator, and $\lambda$ is the R1 regularization strength [S3].
++
++*   **Standard Log-Loss (Alternative Formulation):**
++    $$
++    L_{GAN,D} = - \frac{1}{2} \left[ \frac{1}{N} \bigoplus_{i=1}^N \log(D(x_i)) + \log(1 - D(G(z_i))) \right]
++    $$
++    $$
++    L_{GAN,G} = - \log(D(G(z)))
++    $$
++    Where $x$ is real data, $G(z)$ is generated data, and $D(\cdot)$ is the discriminator score [S1]. Note: Some sources define $L_{GAN,D} = - \log(D(x)) - \log(1 - D(G(z)))$ [S1].
++
++*   **Contrastive Pose Loss:**
++    $$
++    L_{pose} = -\log \left( \frac{\exp(\text{sim}(p_I, p_\theta^+) / \tau)}{\sum_{b=1}^{B} \exp(\text{sim}(p_I, p_\theta^{(b)}) / \tau)} \right)
++    $$
++    Where $\text{sim}(\cdot, \cdot)$ is cosine similarity, $\tau$ is temperature, $p_I$ is the pose embedding from the image, $p_\theta^+$ is the positive pose embedding from parameters, and $B$ is batch size [S3].
++
++*   **3D Gaussian Regularization Losses:**
++    $$
++    L_{center} = \frac{1}{N} \sum_{j=1}^N \|\mu^0_{A,j}\|^2
++    $$
++    $$
++    L_{knn} = \frac{1}{NK} \sum_{j=1}^N \sum_{k=1}^K \|\mu^0_{A,j} - \text{KNN}(\mu^0_{A,j}, k)\|^2
++    $$
++    Where $\mu^0_{A,j}$ is the position of the $j$-th anchor Gaussian at the coarsest level, and $\text{KNN}(\cdot, k)$ returns the position of the $k$-th nearest neighbor [S3].
++
++*   **Total Loss:**
++    $$
++    L = L_{adv} + \lambda_{pose} L_{pose} + \lambda_{center} L_{center} + \lambda_{knn} L_{knn}
++    $$
++    [S3]
+ 
+ **Parameters:**
+-*   $\lambda_G$: Weight for the adversarial generator loss in the total objective function [S1].
+-*   $\lambda_{M}, \lambda_{AO}, \lambda_{N}$, etc.: Weights for auxiliary reconstruction losses (e.g., L1 losses on masks, albedo, normals) summed with the GAN loss [S1].
+-*   $\lambda$: R1 regularization strength applied to discriminator gradients [S4].
+-*   $\tau$: Temperature scaling parameter in contrastive pose losses [S4].
+-
+-**Steps:**
+-1.  **Generate:** Pass input $z$ through the generator to produce $G(z)$ [S1], [S2].
+-2.  **Discriminator Update:**
+-    a. Evaluate discriminator on real images $D(x)$ [S1].
+-    b. Evaluate discriminator on generated images $D(G(z))$ [S1].
+-    c. Compute $L_{GAN,D}$ or $L_{adv}$ [S1], [S2].
+-    d. Update discriminator weights to minimize the loss [S1].
+-3.  **Generator Update:**
+-    a. Evaluate discriminator on generated images $D(G(z))$ [S1].
+-    b. Compute $L_{GAN,G}$ [S1].
+-    c. Update generator weights to minimize the adversarial loss combined with reconstruction losses [S1].
++*   $N_s$: Total number of discriminator scales. Typical value: 5 [S2].
++*   $\lambda$: R1 regularization strength [S3].
++*   $\tau$: Temperature scaling parameter in contrastive loss [S3].
++*   $K$: Number of nearest neighbors for $L_{knn}$ [S3].
++*   $\lambda_{pose}, \lambda_{center}, \lambda_{knn}$: Strengths of corresponding objectives [S3].
++*   $L$: Number of frequency bands in positional encoding (inherited from parent) [G].
++*   $T$: Number of resolution levels in the synthesizer [S2].
++
++**Edge Cases and Pitfalls:**
++*   **Training Instability:** GANs are prone to mode collapse and oscillation. R1 regularization [S3] and LSGAN [S2] are used to stabilize training compared to standard minimax games.
++*   **Inference Overhead:** The discriminator must be removed at test time to avoid adding computational complexity [S2].
++*   **Precision:** The softplus function $f(t)$ is used to avoid saturation in the non-saturating loss formulation [S3].
++*   **Data Augmentation:** Adaptive data augmentation is recommended for limited datasets (e.g., AFHQ-Cat) to prevent overfitting [S3].
+ 
+ **Pseudocode:**
++
+ ```python
+-def train_adversarial(generator, discriminator, real_batch, latent_batch, optimizer_G, optimizer_D, lambda_adv):
+-    # Discriminator step
+-    optimizer_D.zero_grad()
+-    real_scores = discriminator(real_batch)
+-    fake_images = generator(latent_batch)
+-    fake_scores = discriminator(fake_images.detach())
++def train_adversarial_volume_rendering(generator, discriminator, real_images, latent_sampler, pose_encoder, config):
++    """
++    Trains a volume rendering generator with adversarial supervision.
+     
+-    # Standard log loss (LSGAN variant replaces these terms with squared errors)
+-    loss_D = -torch.mean(torch.log(real_scores + 1e-8)) - torch.mean(torch.log(1.0 - fake_scores + 1e-8))
+-    loss_D.backward()
+-    optimizer_D.step()
++    Args:
++        generator: Synthesizer network R_theta.
++        discriminator: Discriminator network D_phi.
++        real_images: Iterator of ground-truth image batches.
++        latent_sampler: Sampler for latent codes z and camera parameters theta.
++        pose_encoder: MLP encoding camera parameters theta to pose embeddings.
++        config: Dictionary containing hyperparameters (lambda, Ns, etc.).
++    """
++    optimizer_G = Adam(generator.parameters())
++    optimizer_D = Adam(discriminator.parameters())
+     
+-    # Generator step
+-    optimizer_G.zero_grad()
+-    fake_images = generator(latent_batch)
+-    fake_scores = discriminator(fake_images)
+-    loss_G_adv = -torch.mean(torch.log(fake_scores + 1e-8))
+-    loss_G_total = lambda_adv * loss_G_adv + reconstruction_loss(fake_images, real_batch)
+-    loss_G_total.backward()
+-    optimizer_G.step()
++    # Hyperparameters
++    lambda_r1 = config.get('lambda_r1', 10.0)
++    lambda_pose = config.get('lambda_pose', 1.0)
++    lambda_center = config.get('lambda_center', 1.0)
++    lambda_knn = config.get('lambda_knn', 1.0)
++    tau = config.get('tau', 0.07)
++    Ns = config.get('Ns', 5)
++    K = config.get('K', 5)
++    
++    for epoch in range(config.epochs):
++        for real_batch in real_images:
++            # 1. Sample latent codes and camera parameters
++            z, theta = latent_sampler.sample(batch_size=len(real_batch))
++            
++            # 2. Generate fake images
++            fake_batch = generator(z, theta)
++            
++            # 3. Discriminator Update
++            optimizer_D.zero_grad()
++            
++            # Compute discriminator scores
++            # Assuming discriminator supports multi-scale if Ns > 1
++            if Ns > 1:
++                # LSGAN style loss for multi-scale
++                d_real_scales = discriminator.multi_scale(real_batch)
++                d_fake_scales = discriminator.multi_scale(fake_batch)
++                
++                loss_d = 0
++                for i in range(Ns):
++                    # L_adv^phi = sum [ D(fake)^2 + (D(real) - 1)^2 ]
++                    loss_d += torch.sum(d_fake_scales[i]**2) + torch.sum((d_real_scales[i] - 1)**2)
++            else:
++                # Non-saturating with R1 regularization
++                d_real = discriminator(real_batch)
++                d_fake = discriminator(fake_batch)
++                
++                # Softplus function f(t) = -log(1 + exp(-t))
++                def softplus(t):
++                    return -torch.log(1 + torch.exp(-t))
++                
++                # R1 Regularization: lambda * ||grad D(real)||^2
++                grad_real = torch.autograd.grad(
++                    outputs=d_real.sum(), 
++                    inputs=real_batch, 
++                    create_graph=True, 
++                    retain_graph=True, 
++                    only_inputs=True
++                )[0]
++                r1_reg = lambda_r1 * 0.5 * torch.sum(grad_real**2)
++                
++                loss_d = torch.mean(softplus(-d_real)) + torch.mean(softplus(d_fake)) + r1_reg
++            
++            loss_d.backward()
++            optimizer_D.step()
++            
++            # 4. Generator Update
++            optimizer_G.zero_grad()
++            
++            # Regenerate fake images (or reuse)
++            fake_batch = generator(z, theta)
++            d_fake = discriminator(fake_batch)
++            
++            # Generator Adversarial Loss
++            # L_adv = E[f(D(G(z)))]
++            def softplus(t):
++                return -torch.log(1 + torch.exp(-t))
++            
++            loss_g_adv = torch.mean(softplus(d_fake))
++            
++            # Total Generator Loss initialization
++            loss_g = loss_g_adv
++            
++            # 5. Add Contrastive Pose Loss (if applicable)
++            if config.get('use_pose_contrast', False):
++                # Encode camera parameters
++                p_theta = pose_encoder(theta)
++                
++                # Get pose embedding from discriminator's pose branch
++                # Assuming discriminator has a method get_pose_embedding
++                p_I_fake = discriminator.get_pose_embedding(fake_batch)
++                p_I_real = discriminator.get_pose_embedding(real_batch)
++                
++                # Contrastive Loss for Generator (using fake data)
++                # L_pose = -log( exp(sim(p_I, p_theta+)/sum(exp(sim(p_I, p_theta)))) )
++                # Simplified batch contrastive loss
++                sim_matrix = cosine_similarity(p_I_fake.unsqueeze(1), p_theta.unsqueeze(0)) / tau
++                # Positive samples are on the diagonal
++                pos_sim = torch.diag(sim_matrix)
++                neg_sim = sim_matrix - torch.eye(len(theta)) * 1e9 # Mask diagonal
++                loss_pose = -torch.mean(torch.log(torch.exp(pos_sim) / torch.sum(torch.exp(neg_sim), dim=1)))
++                
++                loss_g += lambda_pose * loss_pose
++                
++            # 6. Add 3D Gaussian Regularization (if applicable)
++            if config.get('use_gaussian_reg', False):
++                # Get anchor Gaussian positions from generator's internal state
++                mu_A = generator.get_coarsest_anchor_positions()
++                
++                # L_center
++                loss_center = torch.mean(torch.norm(mu_A, dim=1)**2)
++                
++                # L_knn
++                # Compute K nearest neighbors for each anchor
++                # Note: KNN computation is expensive; usually approximated
++                dists = pairwise_distances(mu_A)
++                knn_dists, _ = torch.topk(dists, K+1, dim=1, largest=False) # Exclude self
++                knn_dists = knn_dists[:, 1:] # Remove self-distance
++                loss_knn = torch.mean(knn_dists**2)
++                
++                loss_g += lambda_center * loss_center + lambda_knn * loss_knn
++            
++            loss_g.backward()
++            optimizer_G.step()
++            
++            # Log losses
++            print(f"Epoch {epoch}, D Loss: {loss_d.item():.4f}, G Loss: {loss_g.item():.4f}")
++
++    # Remove discriminator for inference
++    del discriminator
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Discriminator Reuse:** Reusing a pre-trained discriminator yields inferior results; it must be retrained alongside each new reconstruction to provide feedback for different aspects of the solution [S3].
+-*   **Batch & Resolution Handling:** The relativistic GAN 'average' formulation allows different resolutions and batch sizes for real and fake samples, while the least-squares variant gives empirically better results [S3].
+-*   **Loss Balancing:** The relative weights ($\lambda$) of the adversarial loss versus reconstruction losses must be carefully tuned to prevent the discriminator from overpowering the generator [S1].
+ 
+ ## Subtopics
+@@ -84,20 +236,16 @@
+ A training strategy for predicting lighting conditions in street scenes that addresses depth rendering ambiguity and encourages photorealism through adversarial supervision. It distinguishes itself from standard differentiable rendering pipelines by combining a multi-term hybrid loss (including sky regression, reconstruction, and regularization) with a PatchGAN discriminator, trained in a two-stage process (pre-training followed by joint adversarial training) to stabilize convergence.
+ 
+-### Adversarial and Contrastive Losses
+-A variant that integrates pose-aware contrastive learning with adversarial training for 3D Gaussian splat generation [S4]. The discriminator includes a pose branch $d_p$ estimating a pose embedding $p_I$ from input images, while a pose encoder maps camera parameters $\theta$ to $p_\theta$ [S4]. The adversarial loss uses a softplus function with R1 regularization: $L_{adv} = \mathbb{E}_{z,\theta}[f(d(g(z,\theta)))] + \mathbb{E}_{I_r}[f(-d(I_r)) + \lambda||\nabla d(I_r)||^2]$ where $f(t) = -\log(1 + \exp(-t))$ [S4]. Contrastive pose loss $L_{pose}$ maximizes cosine similarity between $p_I$ and $p_\theta$ at temperature $\tau$ [S4]. Positional regularization uses $L_{center}$ to anchor coarsest-level Gaussians to the origin and $L_{knn}$ to minimize distances between $K$ nearest neighbors [S4]. The total objective is $L = L_{adv} + \lambda_{pose} L_{pose} + \lambda_{center} L_{center} + \lambda_{knn} L_{knn}$ [S4].
+-
+ ## Operating characteristics
+-*   **Complexity:** Adds the forward and backward pass of the discriminator network to each training step [S1], [S3]. The discriminator architecture typically uses 14 convolutional layers with $4 \times 4$ filters and LReLU activations [S3].
+-*   **Performance:** Improves perceptual quality and high-frequency details compared to MSE/L1-only training [S1], [S2].
+-*   **Strengths:** Produces sharper, more realistic textures; reduces smearing and streak artifacts common in single-view reconstruction [S2], [S3].
+-*   **Limitations:** Requires careful hyperparameter tuning for loss weights; necessitates per-reconstruction discriminator retraining [S3].
+-*   **When to use:** When photorealism and high-frequency detail are prioritized over strict pixel-wise accuracy [S1].
++*   **Time Complexity:** Training is slower than supervised methods due to the alternating optimization of two networks (generator and discriminator) [S1, S2]. The multi-scale discriminator adds computational overhead proportional to $N_s$ [S2].
++*   **Memory Complexity:** Requires memory for both generator and discriminator networks. The discriminator is removed at test time, so inference memory matches the generator alone [S2].
++*   **Performance:** Produces more realistic textures and fewer artifacts than pure L1/L2 loss methods, particularly in high-frequency details [S2]. FID scores are commonly used to evaluate quality [S3].
++*   **Strengths:** Improves generalization on unseen inputs and handles insufficient point cloud information better than non-adversarial methods [S2].
++*   **Limitations:** Training instability is a risk; requires careful tuning of hyperparameters like $\lambda$ and learning rates [S3]. Not given in the sources: specific hardware scaling factors.
+ 
+ ## Background
+-Originated from Generative Adversarial Networks (GANs) introduced by Goodfellow et al. [S1]. In volumetric rendering and super-resolution, it was first employed to train a discriminator network in parallel with a super-resolution generator to classify images as ground truth or not, using the discriminator's output as a loss term [S1]. The methodology was subsequently adapted for point-based graphics with multi-scale discriminators [S2], fluid reconstruction with fully convolutional discriminators [S3], and hierarchical 3D Gaussian splats with pose-aware contrastive objectives [S4].
++Adversarial training in volume rendering and novel view synthesis was introduced to address the blurriness and artifacts common in supervised learning approaches [S1, S2]. The method draws from Generative Adversarial Networks (GANs) proposed by Goodfellow et al. [S1]. It has been applied to super-resolution of volumetric data [S1], point-based graphics [S2], and 3D Gaussian splatting [S3].
+ 
+ ## Sources
+ [S1] Volumetric Isosurface Rendering with Deep Learning-Based Super ..., https://ieeexplore.ieee.org/abstract/document/8918030, fetched 2026-10-31
+ [S2] CE-NPBG: Connectivity Enhanced Neural Point-Based Graphics for Novel View Synthesis in Autonomous Driving Scenes, https://doi.org/10.1109/cvprw67362.2025.00240, fetched 2026-10-29
+-[S3] Global Transport for Fluid Reconstruction with Learned Self-Supervision, https://doi.org/10.1109/cvpr46437.2021.00168, fetched 2026-10-30
+-[S4] GSGAN: Adversarial Learning for Hierarchical Generation of 3D Gaussian Splats, https://doi.org/10.52202/079017-2171, fetched 2026-10-29+[S3] GSGAN: Adversarial Learning for Hierarchical Generation of 3D Gaussian Splats, https://doi.org/10.52202/079017-2171, fetched 2026-10-29

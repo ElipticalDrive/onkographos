@@ -1,0 +1,269 @@
+--- v001.md
++++ v002.md
+@@ -4,188 +4,130 @@
+ 
+ ## Overview
+-The Oscillating Swept Volume Display (OSVD) is a volumetric display method that replaces continuous rotation or linear translation with an undulating (back-and-forth) mechanical motion to reduce mechanical jerk at the sweep endpoints [S1, unofficial]. It builds on [Rotational Swept-Screen Projection](8589-rotational-swept-screen-projection.md) by maintaining synchronous projection but altering the kinematic profile to a sinusoidal oscillation, allowing for smoother acceleration/deceleration compared to constant-velocity rotation or linear reciprocation with hard stops.
++The Oscillating Swept Volume Display (OSVD) is a volumetric display method that replaces linear or continuous rotation with an undulating (back-and-forth) motion to reduce mechanical jerk at the sweep endpoints [S1, unofficial]. It builds on [Rotational Swept-Screen Projection](8589-rotational-swept-screen-projection.md) by maintaining synchronous projection but altering the kinematic profile to a sinusoidal oscillation, allowing for smoother acceleration/deceleration compared to constant-velocity rotation or linear reciprocation with hard stops [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A 3D voxel buffer and a hardware synchronization signal (SPIN_SYNC) from the motion controller.
+-- **Output:** Pixel data sent to an LED matrix or projector, synchronized to the instantaneous angle of the oscillating screen.
++- **Input:** A 3D voxel buffer and a hardware synchronization signal (SPIN_SYNC) from the motion controller [S1, unofficial].
++- **Output:** Pixel data sent to an LED matrix or projector, synchronized to the instantaneous angle of the oscillating screen [S1, unofficial].
+ 
+ **Data Structures:**
+-The voxel buffer is a 3D array of `pixel_t` (8-bit RGB332) with dimensions $X=64, Y=64, Z=32$.
++The voxel buffer is a 3D array of `pixel_t` (8-bit RGB332) with dimensions $X=64, Y=64, Z=32$ [S1, unofficial].
+ - **Memory Layout:** Row-major.
+   - `VOXEL_X_STRIDE = 1`
+   - `VOXEL_Z_STRIDE = 64`
+   - `VOXEL_Y_STRIDE = 2048`
+-  - Index formula: `VOXEL_INDEX(x, y, z) = x + y * 2048 + z * 64`
+-- **Total Voxels:** 262,144.
++  - Index formula: `VOXEL_INDEX(x, y, z) = x + y * 2048 + z * 64` [S1, unofficial].
++- **Total Voxels:** 262,144 [S1, unofficial].
+ - **Double Buffer:** The shared memory buffer is sized at `2 * 262,144 * sizeof(pixel_t)` to allow frame swapping without tearing [S1, unofficial].
+ 
+ **Parameters:**
+-- **Pixel Format:** RGB332 (8-bit).
+-  - Red: 3 bits (mask `0xE0`), Green: 3 bits (mask `0x1C`), Blue: 2 bits (mask `0x03`).
++- **Pixel Format:** RGB332 (8-bit) [S1, unofficial].
++  - Red: 3 bits (mask `0xE0`), Green: 3 bits (mask `0x1C`), Blue: 2 bits (mask `0x03`) [S1, unofficial].
+   - Conversion macros:
+     - `R332(p) = (((p) >> 5) & 7) * 36`
+     - `G332(p) = (((p) >> 2) & 7) * 36`
+-    - `B332(p) = ((p) & 3) * 85`
++    - `B332(p) = ((p) & 3) * 85` [S1, unofficial].
+ - **Fixed-Point Precision:**
+-  - `REVOLUTION_PRECISION = 20` (bits for frequency/period scaling)
+-  - `ANGLE_PRECISION = 10` (bits for angle index)
+-  - `SINCOS_PRECISION = 12` (bits for sine/cosine table values)
+-- **Sine/Cosine Table:** 1024 entries (`1 << 10`). Values are fixed-point integers scaled by $2^{12}$.
++  - `REVOLUTION_PRECISION = 20` (bits for frequency/period scaling) [S1, unofficial].
++  - `ANGLE_PRECISION = 10` (bits for angle index) [S1, unofficial].
++  - `SINCOS_PRECISION = 12` (bits for sine/cosine table values) [S1, unofficial].
++- **Sine/Cosine Table:** 1024 entries (`1 << 10`) [S1, unofficial]. Values are fixed-point integers scaled by $2^{12}$ [S1, unofficial].
+ - **GPIO Mapping (Raspberry Pi BCM2711):**
+-  - RGB Data: Pins 12, 9, 6, 5, 8, 7, 21, 13, 20, 26, 19, 16.
+-  - Row Select (A-E): Pins 4, 15, 18, 17, 14.
++  - RGB Data: Pins 12, 9, 6, 5, 8, 7, 21, 13, 20, 26, 19, 16 [S1, unofficial].
++  - Row Select (A-E): Pins 4, 15, 18, 17, 14 [S1, unofficial].
+   - Control: `RGB_BLANK`=11, `RGB_CLOCK`=0, `RGB_STROBE`=3, `SPIN_SYNC`=1 [S1, unofficial].
+ 
+ **Algorithm Steps:**
++1. **Initialize Sine/Cosine Table:** Iterate $i$ from 0 to 1023. Compute angle $a = i \cdot \frac{2\pi}{1023}$. Store `round(cos(a) * 4096)` in `sincosfixed[i][0]` and `round(sin(a) * 4096)` in `sincosfixed[i][1]` [S1, unofficial].
++2. **Initialize Span Offsets (Partial):** Compute pitch $ef / 64$. Set $vx = -ef/2$. Set $vy = de + \sqrt{bd^2 - ac^2}$. Set $vsh = 1/(pitch \cdot 0.8)$. Set $vsv = 1/(pitch \cdot 0.8)$. Loop $i$ from 0 to 1023: $\theta = i \cdot \frac{2\pi}{1023}$. Compute $bx = \cos(\theta) \cdot ab - ac$. Compute $by = \sin(\theta) \cdot ab$. Compute $ddy = \sqrt{bd^2 - bx^2}$ [S1, unofficial].
++3. **Angle Tracking Loop (Real-time):** Read the hardware timer (`current_tick`) and the sync pin state. On a rising edge of the sync pin: Measure the period: $T = \text{current\_tick} - \text{sync\_prev\_tick}$. Clamp period: $T = \max(2^{10}, T)$ to prevent division by zero or overflow [S1, unofficial]. Compute revolution frequency: $f = \frac{2^{20}}{T}$. Update current angle: $\theta = (\text{current\_tick} - \text{sync\_prev\_tick}) \cdot f$. Update `sync_prev_tick = current_tick` [S1, unofficial].
++4. **Projection:** Map the current 3D voxel coordinates to 2D screen coordinates based on the instantaneous angle $\theta$ derived from the oscillating motion. Project the corresponding slice onto the LED matrix. Synchronize the image update with the screen's position to ensure temporal integration blends the slices into a continuous volume [G].
+ 
+-1. **Initialize Sine/Cosine Table:**
+-   Iterate $i$ from 0 to 1023.
+-   - Compute angle $a = i \cdot \frac{2\pi}{1023}$.
+-   - Store `round(cos(a) * 4096)` in `sincosfixed[i][0]`.
+-   - Store `round(sin(a) * 4096)` in `sincosfixed[i][1]`.
+-
+-2. **Initialize Span Offsets (Partial):**
+-   - Compute pitch $ef / 64$.
+-   - Set $vx = -ef/2$.
+-   - Set $vy = de + \sqrt{bd^2 - ac^2}$.
+-   - Set $vsh = 1/(pitch \cdot 0.8)$.
+-   - Set $vsv = 1/(pitch \cdot 0.8)$.
+-   - Loop $i$ from 0 to 1023:
+-     - $\theta = i \cdot \frac{2\pi}{1023}$.
+-     - $bx = \cos(\theta) \cdot ab - ac$.
+-     - $by = \sin(\theta) \cdot ab$.
+-     - $ddy = \sqrt{bd^2 - bx^2}$.
+-   *(Note: The specific geometric meaning of variables $ef, de, bd, ac, ab$ is not fully defined in the source, but these constants are computed once at startup [S1, unofficial].)*
+-
+-3. **Angle Tracking Loop (Real-time):**
+-   - Read the hardware timer (`current_tick`) and the sync pin state.
+-   - On a rising edge of the sync pin:
+-     - Measure the period: $T = \text{current\_tick} - \text{sync\_prev\_tick}$.
+-     - **Clamp Period:** $T = \max(2^{10}, T)$ to prevent division by zero or overflow [S1, unofficial].
+-     - Compute revolution frequency: $f = \frac{2^{20}}{T}$.
+-     - Update current angle: $\theta = (\text{current\_tick} - \text{sync\_prev\_tick}) \cdot f$.
+-     - Update `sync_prev_tick = current_tick`.
+-
+-4. **Projection:**
+-   - Map the current 3D voxel coordinates to 2D screen coordinates based on the instantaneous angle $\theta$ derived from the oscillating motion.
+-   - Project the corresponding slice onto the LED matrix.
+-   - Synchronize the image update with the screen's position to ensure temporal integration blends the slices into a continuous volume [G].
++**Pitfalls:**
++- Revolution period measurement can be zero or extremely small on startup or noise, causing division by zero or frequency overflow. Handled by clamping `revolution_period = max(1<<10, revolution_period)` [S1, unofficial].
++- File loading loop uses `do-while(frames > 1)` but `frames` is calculated as `file_size / volume_size`. If `frames` is 0 or 1, the loop still runs once. The `rtot` accumulator wraps at `volume_size` but the loop condition doesn't check `rtot` against `volume_size` for termination, relying on `frames` [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import math
++import time
+ 
+-# Constants from source
++# Constants from source [S1, unofficial]
+ REVOLUTION_PRECISION = 20
+ ANGLE_PRECISION = 10
+ SINCOS_PRECISION = 12
+-TABLE_SIZE = 1024
++TABLE_SIZE = 1 << 10  # 1024
+ SINCOS_SCALE = 1 << SINCOS_PRECISION  # 4096
+ 
+ def init_sincos_table():
+-    """Initialize the sine/cosine lookup table."""
++    """Initialize the sine/cosine lookup table [S1, unofficial]."""
+     sincosfixed = [[0, 0] for _ in range(TABLE_SIZE)]
+     for i in range(TABLE_SIZE):
+-        # Angle calculation: i * 2pi / 1023
+-        # Note: Source uses 1023 as divisor for 1024 points, likely to close the loop
+         angle = (i * 2 * math.pi) / 1023.0
+-        cos_val = round(math.cos(angle) * SINCOS_SCALE)
+-        sin_val = round(math.sin(angle) * SINCOS_SCALE)
+-        sincosfixed[i][0] = cos_val
+-        sincosfixed[i][1] = sin_val
++        sincosfixed[i][0] = round(math.cos(angle) * SINCOS_SCALE)
++        sincosfixed[i][1] = round(math.sin(angle) * SINCOS_SCALE)
+     return sincosfixed
+ 
+-def get_current_angle(timer_uS, gpio_get_pin, sync_prev_tick, revolution_period, revolution_frequency):
+-    """
+-    Calculate current angle based on timer and sync pulses.
+-    Returns: (new_angle, new_sync_prev_tick, new_period, new_frequency)
+-    """
++def init_span_offsets(ef, de, bd, ac, ab):
++    """Initialize span offset constants [S1, unofficial]."""
++    pitch = ef / 64.0
++    vx = -ef / 2.0
++    vy = de + math.sqrt(max(0, bd**2 - ac**2))
++    vsh = 1.0 / (pitch * 0.8)
++    vsv = 1.0 / (pitch * 0.8)
++    offsets = []
++    for i in range(TABLE_SIZE):
++        theta = (i * 2 * math.pi) / 1023.0
++        bx = math.cos(theta) * ab - ac
++        by = math.sin(theta) * ab
++        ddy = math.sqrt(max(0, bd**2 - bx**2))
++        offsets.append((bx, by, ddy))
++    return vx, vy, vsh, vsv, offsets
++
++def angle_tracking_loop(timer_uS, gpio_get_pin, sync_prev_tick, revolution_period, revolution_frequency):
++    """Angle tracking loop [S1, unofficial]."""
+     tick_curr = timer_uS()
+-    sync_level = 1  # Assuming active high sync for this example
+-    
+-    # Read sync pin (simplified hardware access)
+-    sync = gpio_get_pin(1)  # SPIN_SYNC pin 1
+-    
++    sync = gpio_get_pin(1)  # SPIN_SYNC pin
++    sync_level = 1  # Assume active high
++
+     if sync != sync_level:
+         sync_level = sync
+         if sync:  # Rising edge
+             period = tick_curr - sync_prev_tick
+-            # Clamp period to minimum 1<<10 to avoid division by zero
++            # Clamp period to minimum 1<<10 to prevent division by zero [S1, unofficial]
+             if period < (1 << 10):
+                 period = 1 << 10
+-            
+-            # Compute frequency: (1<<20) / period
+             frequency = (1 << REVOLUTION_PRECISION) // period
+-            
+-            return tick_curr, period, frequency
+-        else:
+-            # Falling edge or other state change, keep previous state
+-            return None, None, None
+-            
+-    # If no edge, angle advances based on current frequency and time delta
+-    # Note: The source implies angle is computed from tick delta * frequency
+-    # This part is inferred from "Update current angle as (current_tick - sync_prev_tick) * frequency"
+-    # However, strictly speaking, between sync pulses, the angle accumulates.
+-    # The source code snippet `current_angle()` suggests:
+-    # revolution_frequency is updated on sync.
+-    # The angle is likely accumulated or computed relative to the last sync.
+-    
+-    # Re-reading source: "Update current angle as (current_tick - sync_prev_tick) * frequency"
+-    # This formula seems to compute the angle *since the last sync pulse*.
+-    # For a full oscillation, we need to map this to the sine/cosine table.
+-    
+-    # Let's assume the function returns the delta angle or the raw value to be indexed.
+-    # The source uses `revolution_frequency` which is fixed point.
+-    
+-    # To implement strictly from source:
+-    # We need to track the angle index.
+-    # The source doesn't show the full accumulation loop, only the update on sync.
+-    # We will return the computed frequency and period for the caller to manage angle accumulation.
+-    
+-    return tick_curr, period, frequency
++            sync_prev_tick = tick_curr
++            return sync_prev_tick, period, frequency
++    return sync_prev_tick, revolution_period, revolution_frequency
+ 
+ def main_loop():
+     sincos = init_sincos_table()
+-    
++    vx, vy, vsh, vsv, offsets = init_span_offsets(100, 50, 80, 10, 60)
++
+     sync_prev_tick = 0
+-    revolution_period = 1 << 26  # Initial large period
++    revolution_period = 1 << 26
+     revolution_frequency = 1
+-    
+-    # GPIO and Timer setup would go here
+-    # timer_uS = ...
+-    # gpio_get_pin = ...
+-    
++
+     while True:
+-        # Check for sync edge
+-        result = get_current_angle(timer_uS, gpio_get_pin, sync_prev_tick, revolution_period, revolution_frequency)
+-        
+-        if result[0] is not None:
+-            sync_prev_tick, revolution_period, revolution_frequency = result
+-            
+-        # Compute current angle index for table lookup
+-        # The source implies angle is derived from time delta * frequency
+-        # Since frequency is fixed-point (20 bits), and time is in microseconds,
+-        # we need to scale appropriately.
+-        # The source uses `current_tick - sync_prev_tick` which is the delta time.
+-        # But for continuous display, we need the absolute angle or phase.
+-        # The source code snippet is incomplete regarding the full angle accumulation.
+-        # However, the key insight is the undulating motion.
+-        # The angle $\theta$ maps to the sine/cosine table to determine the screen position.
+-        
+-        # Assuming we have a way to get the current phase of the oscillation
+-        # The source mentions "undulating motion", implying $\theta$ varies sinusoidally.
+-        # The sync pulse likely marks the peak or zero-crossing of the oscillation.
+-        
+-        # For the purpose of this implementation guide, we assume the hardware
+-        # provides a sync pulse at a consistent phase (e.g., peak amplitude).
+-        # The angle between sync pulses is integrated.
+-        
+-        # Placeholder for angle integration logic not fully detailed in source
+-        # current_angle_index = (delta_time * revolution_frequency) >> SHIFT
+-        # This would be used to index into sincos table for projection mapping.
++        sync_prev_tick, revolution_period, revolution_frequency = angle_tracking_loop(
++            lambda: int(time.time() * 1000000), lambda pin: 1, sync_prev_tick, revolution_period, revolution_frequency
++        )
++
++        # Compute current angle index for table lookup [S1, unofficial]
++        delta_ticks = int(time.time() * 1000000) - sync_prev_tick
++        current_angle_index = (delta_ticks * revolution_frequency) >> ANGLE_PRECISION
++        current_angle_index %= TABLE_SIZE
++
++        # Projection mapping logic not fully detailed in the source; implement angle-to-screen coordinate transformation here.
++        # Use sincos[current_angle_index] and offsets to map 3D voxel coordinates to 2D LED matrix positions.
+         pass
+ ```
++
++## Subtopics
++
++### Reciprocating Volumetric Display (VX1)
++A volumetric display that creates 3D images by projecting horizontal layer slices onto a single piece of rear-projection glass moving back and forth in the air, synchronized with a high-speed projector [S2, unofficial]. It breaks a 3D form into horizontal layer slices, moves the glass back and forth at 15 cycles per second using harmonic resonance springs, and tracks the glass location to synchronize with a 4,000 frames per second projector so each slice is projected at exactly the right height [S2, unofficial]. The slices are stacked and re-stacked rapidly so the eye cannot track the motion, creating a floating object illusion [S2, unofficial]. The image is redrawn on both the up and down swing of the glass to achieve a 30 frames per second hologram video refresh rate [S2, unofficial]. Parameters include a glass movement frequency of 15 cycles per second, a projector frame rate of 4,000 frames per second, a video refresh rate of 30 frames per second, and a display volume of 18x18x8 cm (approx. 7x7x3 inches) [S2, unofficial]. Pitfalls include projector beam divergence, multiple color projections, and synchronization issues requiring advanced programming and processing [S2, unofficial]. It is used in the Voxon VX1 table, sold for US$10,000 [S2, unofficial].
+ 
+ ## Operating characteristics
+@@ -199,3 +141,4 @@
+ 
+ ## Sources
+-[S1] AncientJames/oscivox, https://github.com/AncientJames/oscivox, fetched 2026-10-26 (unofficial)+[S1] AncientJames/oscivox, https://github.com/AncientJames/oscivox, fetched 2026-10-26 (unofficial)
++[S2] Voxon hologram volumetric display (2019), https://newatlas.com/vr/voxon-photonics-3d-hologram-volumetric-displays/, fetched 2026-10-26 (unofficial)

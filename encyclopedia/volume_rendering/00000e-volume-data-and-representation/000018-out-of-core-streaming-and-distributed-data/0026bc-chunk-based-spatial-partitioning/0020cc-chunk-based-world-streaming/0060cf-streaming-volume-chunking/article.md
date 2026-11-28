@@ -1,0 +1,129 @@
+# Streaming Volume Chunking
+
+Also called: ITK streaming, Z-axis chunking
+
+## Overview
+Streaming Volume Chunking is a technique for rendering large 3D volumes by splitting them into smaller chunks along the Z-axis to fit within GPU texture size limits (specifically `max3DTextureSize`), processing them sequentially, and combining them for rendering [S1, unofficial]. It addresses the problem of GPU memory constraints on large datasets by decomposing the volume into manageable spatial segments, unlike sibling methods that may load chunks synchronously or manage complex lifecycles [S1, unofficial].
+
+## How it works
+**Inputs:** A 3D volume dataset with dimensions `width`, `height`, and `depth`; a target `chunkSize` (depth dimension); and GPU texture size limits.
+**Outputs:** A sequence of chunk objects ready for rendering, combined to form the final image.
+
+**Data Structures:**
+*   **Chunk Object:** Contains:
+    *   `metadata`: Original image metadata.
+    *   `size`: Array `[width, height, chunkDepth]`.
+    *   `data`: A typed array (e.g., `Int16Array`) of size `width * height * chunkDepth`.
+
+**Steps:**
+1.  Calculate the maximum number of chunks along the depth:
+    $$ \text{maxChunks} = \lceil \text{depth} / \text{chunkSize} \rceil $$
+2.  Initialize an empty list `chunks`.
+3.  Iterate through each chunk index $i$ from $0$ to $\text{maxChunks} - 1$:
+    a. Calculate the start and end Z coordinates:
+       $$ z_{\text{start}} = i \times \text{chunkSize} $$
+       $$ z_{\text{end}} = \min((i + 1) \times \text{chunkSize}, \text{depth}) $$
+    b. Calculate the depth of the current chunk:
+       $$ \text{chunkDepth} = z_{\text{end}} - z_{\text{start}} $$
+    c. Allocate a new array `chunkData` of size `width * height * chunkDepth`.
+    d. Copy voxel data from the original image to the chunk:
+       For each $z$ from $z_{\text{start}}$ to $z_{\text{end}} - 1$:
+       For each $y$ from $0$ to `height` - 1:
+       For each $x$ from $0$ to `width` - 1:
+       $$ \text{originalIndex} = z \times \text{width} \times \text{height} + y \times \text{width} + x $$
+       $$ \text{chunkIndex} = (z - z_{\text{start}}) \times \text{width} \times \text{height} + y \times \text{width} + x $$
+       $$ \text{chunkData}[\text{chunkIndex}] = \text{data}[\text{originalIndex}] $$
+    e. Create a chunk object containing the original image metadata, the new size `[width, height, chunkDepth]`, and the new `chunkData`.
+    f. Append the chunk to `chunks`.
+4.  Reverse the order of the collected `chunks` to ensure they are combined from bottom to top [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def stream_volume_chunks(data, width, height, depth, chunk_size):
+    """
+    Splits a 3D volume into Z-axis chunks for streaming.
+    
+    Args:
+        data: 1D array of voxel values, size width*height*depth.
+        width: Volume width.
+        height: Volume height.
+        depth: Volume depth.
+        chunk_size: Maximum depth for each chunk.
+        
+    Returns:
+        List of chunk objects, reversed (bottom to top).
+    """
+    max_chunks = math.ceil(depth / chunk_size)
+    chunks = []
+    
+    for i in range(max_chunks):
+        z_start = i * chunk_size
+        z_end = min((i + 1) * chunk_size, depth)
+        chunk_depth = z_end - z_start
+        
+        # Allocate chunk data
+        chunk_data = [0] * (width * height * chunk_depth)
+        
+        # Copy voxel data
+        for z in range(z_start, z_end):
+            for y in range(height):
+                for x in range(width):
+                    original_index = z * width * height + y * width + x
+                    chunk_index = (z - z_start) * width * height + y * width + x
+                    chunk_data[chunk_index] = data[original_index]
+        
+        # Create chunk object
+        chunk = {
+            "metadata": {"width": width, "height": height, "depth": chunk_depth},
+            "size": [width, height, chunk_depth],
+            "data": chunk_data
+        }
+        chunks.append(chunk)
+        
+    # Reverse to ensure bottom-to-top combination
+    chunks.reverse()
+    return chunks
+```
+
+**Parameters:**
+*   `chunk_size`: Typically determined by `max3DTextureSize` / `width` / `height` to ensure the chunk fits in GPU memory [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** The last chunk may have a smaller depth than `chunk_size`. The formula `z_end = min((i + 1) * chunk_size, depth)` handles this [S1, unofficial].
+*   **Precision:** Ensure integer arithmetic is used for indices to avoid floating-point errors [S1, unofficial].
+*   **Ordering:** The reversal step is critical for correct compositing order in ray marching [S1, unofficial].
+
+## Subtopics
+
+### [Synchronous Chunk Loading](3904-synchronous-chunk-loading.md)
+Loads chunks one by one, blocking until each is ready. Choose when simplicity is prioritized over performance.
+
+### [Chunk Lifecycle Management](3987-chunk-lifecycle-management.md)
+Manages the creation and destruction of chunks. Choose when memory usage needs to be strictly controlled.
+
+### [Chunk-Based World Management & Asynchronous Loading](6440-chunk-based-world-management-asynchronous-loading.md)
+Loads chunks in the background. Choose for smoother rendering in interactive applications.
+
+### [Dynamic Channel & Timepoint Switching](8814-dynamic-channel-timepoint-switching.md)
+Switches between different data channels or time points. Choose for multi-dimensional datasets.
+
+### [Extent-based Spatial Streaming](16936-extent-based-spatial-streaming.md)
+Streams based on view frustum extents. Choose for large scenes where only parts are visible.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the total number of voxels, as each voxel is copied once [S1, unofficial].
+*   **Memory Complexity:** $O(C)$ where $C$ is the size of a single chunk, as only one chunk is processed at a time [S1, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales linearly with volume size, but limited by GPU texture size [S1, unofficial].
+*   **Strengths:** Simple implementation, fits within GPU memory limits [S1, unofficial].
+*   **Limitations:** Sequential processing may lead to stalls if chunk loading is slow [S1, unofficial].
+*   **When to use:** When GPU texture size is the primary constraint [S1, unofficial].
+*   **When not:** When asynchronous loading or complex spatial partitioning is needed [S1, unofficial].
+
+## Background
+Streaming Volume Chunking is used in WebGL volume rendering to handle large datasets [S1, unofficial]. It is based on the principle of splitting volumes along the Z-axis to fit within `max3DTextureSize` [S1, unofficial].
+
+## Sources
+[S1] mohammed-abo-arab/3D_WebGL_VolumeRendering, https://github.com/mohammed-abo-arab/3D_WebGL_VolumeRendering, fetched 2026-10-27 (unofficial)

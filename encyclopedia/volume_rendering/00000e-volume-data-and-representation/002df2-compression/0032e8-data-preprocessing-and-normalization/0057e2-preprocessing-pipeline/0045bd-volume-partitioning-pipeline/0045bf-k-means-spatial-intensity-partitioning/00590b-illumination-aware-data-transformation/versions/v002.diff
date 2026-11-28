@@ -1,0 +1,272 @@
+--- v001.md
++++ v002.md
+@@ -7,23 +7,21 @@
+ 
+ ## How it works
+-**Inputs:** A dataset consisting of $n$ volumetric modalities, where each voxel has an intensity value for each modality.
+-**Outputs:** A reference volume (3D texture) containing a cluster ID for each voxel, and a cluster lookup map (2D texture) storing the intensity vectors for each cluster.
++**Inputs:** A dataset consisting of $n$ volumetric modalities, where each voxel has an intensity value for each modality [S1, unofficial].
++**Outputs:** A reference volume containing a cluster ID for each voxel, and a cluster lookup map storing the associated intensity vectors for each cluster ID [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Reference Volume:** A 3D volume where each voxel stores a single integer representing its assigned cluster ID.
+-2.  **Cluster Lookup Map:** A 2D texture where each row corresponds to a cluster ID and each column corresponds to a modality. To optimize fetches, up to four modalities are combined into a single texel (4 channels). If $n > 4$, multiple texels or offsetting techniques are used to exceed maximum texture dimensions [S1, unofficial].
++1. **Reference Volume:** A 3D volume where each voxel stores a single integer representing its assigned cluster ID [S1, unofficial].
++2. **Cluster Lookup Map:** A 2D map where each row corresponds to an intensity vector (cluster) and each column corresponds to one modality [S1, unofficial]. To optimize fetches, up to four modalities are combined into a single texel (4 channels) [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Weight Calculation:** For each voxel $x$ and each modality $i$, compute a local weight $w_i(x)$ based on illumination importance. Two schemes are defined:
+-    *   *Occlusion-Based:* Compute occlusion $occ(x)$ using a neighborhood radius $r$ and intensity window $\delta$. Count $n_r$ (total voxels in neighborhood) and $n_o$ (voxels with intensity in $[s_i(x) - \delta, s_i(x) + \delta]$). Set $w_i(x) = 1 - occ(x)$ where $occ(x) = \frac{n_o}{n_r}$ [S1, unofficial].
+-    *   *Boundary-Based:* Compute the gradient magnitude of the voxel. Normalize gradient magnitudes across the volume and map them to weights such that larger gradients (boundaries) receive higher weights [S1, unofficial].
+-2.  **Distance Metric Modification:** Define the weighted Euclidean distance between two intensity vectors $x_i$ and $x_j$ (representing voxels or cluster centers) as:
+-    $$d(i, j) = \sqrt{\sum_{k=1}^{n} w_k |x_{ik} - x_{jk}|^2}$$
+-    where $w_k$ are the local weights derived from the illumination importance of the voxel location [S1, unofficial].
+-3.  **K-Means Clustering:** Perform CPU-based k-means clustering on the intensity vectors of all voxals using the modified distance metric. The algorithm iterates until convergence, assigning each voxel to the nearest cluster center [S1, unofficial].
+-4.  **Data Structure Construction:**
+-    *   Create the **Reference Volume** by storing the final cluster ID for each voxel.
+-    *   Create the **Cluster Lookup Map** by storing the final cluster center intensity vector for each cluster ID. Each row in the map corresponds to a cluster, and columns correspond to modalities [S1, unofficial].
+-5.  **GPU Upload:** Upload the Reference Volume and Cluster Lookup Map to GPU memory. Use offsetting if the number of clusters exceeds the maximum texture dimension [S1, unofficial].
++1. **Weight Calculation:** For each voxel $x$ and each modality $i$, compute a local weight $w_i(x)$ based on illumination importance [S1, unofficial]. Two schemes are defined:
++   * *Occlusion-Based:* Compute the degree of occlusion for each voxel and its intensity $s_i(x)$ by considering a local neighborhood radius $r$ and an intensity window parameter $\delta$ [S1, unofficial]. Derive occlusion based on the number of all voxels within the $r$ neighborhood ($n_r$) and the number of voxels ($n_o$) having intensity in $[s_i(x) - \delta, s_i(x) + \delta]$ [S1, unofficial]. Set $w_i(x) = 1 - occ(x)$ where $occ(x) = \frac{n_o}{n_r}$ [S1, unofficial].
++   * *Boundary-Based:* Map the gradient length of a voxel to a local weight used in the Euclidean distance function [S1, unofficial]. Normalize gradient magnitudes and map them to weights such that larger gradient magnitudes obtain higher weighting [S1, unofficial].
++2. **Distance Metric Modification:** Modify the Euclidean distance metric in k-means clustering by incorporating illumination-aware weights to emphasize important voxels [S1, unofficial]. The distance between two intensity vectors $x_i$ and $x_j$ is:
++   $$d(i, j) = \sqrt{w_1 |x_{i1} - x_{j1}|^2 + w_2 |x_{i2} - x_{j2}|^2 + \dots + w_n |x_{in} - x_{jn}|^2}$$
++   where $w_k$ are the local weights derived from the illumination importance of the voxel location [S1, unofficial].
++3. **K-Means Clustering:** Perform CPU-based k-means clustering on the intensity vectors of all voxels using the modified distance metric [S1, unofficial]. The algorithm iterates until convergence, assigning each voxel to the nearest cluster center [S1, unofficial].
++4. **Data Structure Construction:** Create the **Reference Volume** by storing the final cluster ID for each voxel [S1, unofficial]. Create the **Cluster Lookup Map** by storing the final cluster center intensity vector for each cluster ID [S1, unofficial].
++5. **GPU Upload:** Upload the Reference Volume and Cluster Lookup Map to GPU memory [S1, unofficial]. Use offsetting to avoid limiting clusters to the maximum texture dimension of the GPU [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -31,64 +29,68 @@
+ def illumination_aware_data_transformation(modalities, num_clusters, r, delta):
+     """
+-    modalities: list of 3D arrays, shape (D, H, W), containing intensity values for each modality.
++    modalities: list of 3D lists/arrays, shape (D, H, W), containing intensity values for each modality.
+     num_clusters: int, number of clusters K.
+     r: int, neighborhood radius for occlusion calculation.
+     delta: float, intensity window parameter for occlusion calculation.
+     """
+-    D, H, W = modalities[0].shape
++    D, H, W = len(modalities[0]), len(modalities[0][0]), len(modalities[0][0][0])
+     n_modalities = len(modalities)
+     
+     # Step 1: Compute weights for each voxel and modality
+-    # Initialize weight arrays
+-    weights = [np.zeros((D, H, W)) for _ in range(n_modalities)]
++    # The source specifies using a single modality's occlusion to derive weights for the k-means algorithm.
++    weights = [[[0.0 for _ in range(W)] for _ in range(H)] for _ in range(D)]
+     
+-    for i in range(n_modalities):
+-        mod = modalities[i]
+-        # Compute occlusion-based weights
+-        # For each voxel, count neighbors in radius r with intensity in [mod[x]-delta, mod[x]+delta]
+-        # This requires a local neighborhood search. For efficiency, this is often done with a sliding window or spatial index.
+-        # Here we assume a helper function compute_occlusion(mod, r, delta) exists which returns occ_map.
+-        occ_map = compute_occlusion(mod, r, delta)
+-        weights[i] = 1.0 - occ_map
+-        
+-        # Note: Boundary-based weighting would replace or combine with this.
+-        # If using boundary-based:
+-        # grad_mag = compute_gradient_magnitude(mod)
+-        # weights[i] = normalize(grad_mag) 
+-        
++    for z in range(D):
++        for y in range(H):
++            for x in range(W):
++                intensity = modalities[0][z][y][x]
++                z_min, z_max = max(0, z - r), min(D - 1, z + r)
++                y_min, y_max = max(0, y - r), min(H - 1, y + r)
++                x_min, x_max = max(0, x - r), min(W - 1, x + r)
++                
++                n_r = 0
++                n_o = 0
++                for zz in range(z_min, z_max + 1):
++                    for yy in range(y_min, y_max + 1):
++                        for xx in range(x_min, x_max + 1):
++                            n_r += 1
++                            if abs(modalities[0][zz][yy][xx] - intensity) <= delta:
++                                n_o += 1
++                occ = n_o / n_r if n_r > 0 else 0.0
++                weights[z][y][x] = 1.0 - occ
++    
+     # Step 2: Prepare data for clustering
+-    # Flatten volumes to list of vectors
+-    voxel_indices = np.ndindex(D, H, W)
++    voxel_indices = []
+     intensity_vectors = []
+-    voxel_positions = []
+-    
+-    for idx in voxel_indices:
+-        vec = [modalities[m][idx] for m in range(n_modalities)]
+-        intensity_vectors.append(vec)
+-        voxel_positions.append(idx)
+-        
+-    intensity_vectors = np.array(intensity_vectors)
++    for z in range(D):
++        for y in range(H):
++            for x in range(W):
++                voxel_indices.append((z, y, x))
++                vec = [modalities[m][z][y][x] for m in range(n_modalities)]
++                intensity_vectors.append(vec)
+     
+     # Step 3: K-Means Clustering with weighted distance
+-    # Initialize centroids randomly or using k-means++
+-    centroids = initialize_centroids(intensity_vectors, num_clusters)
+-    
+-    assignments = np.zeros(len(intensity_vectors), dtype=int)
++    import random
++    centroids = random.sample(intensity_vectors, num_clusters)
++    assignments = [0] * len(intensity_vectors)
++    max_iterations = 100
++    converged = False
+     
+     for iteration in range(max_iterations):
++        if converged:
++            break
++        old_centroids = [c[:] for c in centroids]
++        
+         # Assign each voxel to nearest centroid using weighted distance
+         for v_idx, vec in enumerate(intensity_vectors):
+-            min_dist = infinity
++            min_dist_sq = float('inf')
+             best_cluster = -1
+             for c_idx, centroid in enumerate(centroids):
+-                # Compute weighted distance
+                 dist_sq = 0.0
+                 for m in range(n_modalities):
+-                    w = weights[m][voxel_positions[v_idx]]
+-                    dist_sq += w * (vec[m] - centroid[m])**2
+-                dist = np.sqrt(dist_sq)
+-                
+-                if dist < min_dist:
+-                    min_dist = dist
++                    w = weights[voxel_indices[v_idx][0]][voxel_indices[v_idx][1]][voxel_indices[v_idx][2]]
++                    dist_sq += w * (vec[m] - centroid[m]) ** 2
++                if dist_sq < min_dist_sq:
++                    min_dist_sq = dist_sq
+                     best_cluster = c_idx
+             assignments[v_idx] = best_cluster
+@@ -96,84 +98,54 @@
+         # Update centroids
+         for c_idx in range(num_clusters):
+-            cluster_voxels = intensity_vectors[assignments == c_idx]
++            cluster_voxels = [intensity_vectors[i] for i in range(len(intensity_vectors)) if assignments[i] == c_idx]
+             if len(cluster_voxels) > 0:
+-                # Weighted mean update? The source describes weighted distance for assignment.
+-                # Standard k-means updates centroid as mean of assigned points.
+-                # The weighting affects which points are grouped, not necessarily the centroid calculation itself
+-                # unless specified. We assume standard mean update for centroid.
+-                centroids[c_idx] = np.mean(cluster_voxels, axis=0)
++                new_centroid = [0.0] * n_modalities
++                for m in range(n_modalities):
++                    new_centroid[m] = sum(v[m] for v in cluster_voxels) / len(cluster_voxels)
++                centroids[c_idx] = new_centroid
++        
++        # Check convergence
++        converged = True
++        for c_idx in range(num_clusters):
++            for m in range(n_modalities):
++                if abs(centroids[c_idx][m] - old_centroids[c_idx][m]) > 1e-6:
++                    converged = False
++                    break
++            if not converged:
++                break
+                 
+-        # Check convergence
+-        if converged(centroids, old_centroids):
+-            break
+-        old_centroids = centroids.copy()
+-        
+     # Step 4: Construct Reference Volume
+-    reference_volume = np.zeros((D, H, W), dtype=int)
++    reference_volume = [[[0 for _ in range(W)] for _ in range(H)] for _ in range(D)]
+     for v_idx, idx in enumerate(voxel_indices):
+-        reference_volume[idx] = assignments[v_idx]
++        reference_volume[idx[0]][idx[1]][idx[2]] = assignments[v_idx]
+         
+     # Step 5: Construct Cluster Lookup Map
+-    # Map shape: (num_clusters, n_modalities)
+-    # If n_modalities > 4, pack into multiple texels or use offsetting.
+-    lookup_map = np.zeros((num_clusters, n_modalities))
++    lookup_map = [[0.0] * n_modalities for _ in range(num_clusters)]
+     for c_idx in range(num_clusters):
+-        cluster_voxels = intensity_vectors[assignments == c_idx]
++        cluster_voxels = [intensity_vectors[i] for i in range(len(intensity_vectors)) if assignments[i] == c_idx]
+         if len(cluster_voxels) > 0:
+-            lookup_map[c_idx] = np.mean(cluster_voxels, axis=0)
+-            
++            for m in range(n_modalities):
++                lookup_map[c_idx][m] = sum(v[m] for v in cluster_voxels) / len(cluster_voxels)
++                
+     return reference_volume, lookup_map
+-
+-def compute_occlusion(mod, r, delta):
+-    """
+-    Computes occlusion map for a single modality.
+-    occ(x) = n_o / n_r
+-    """
+-    D, H, W = mod.shape
+-    occ_map = np.zeros((D, H, W))
+-    
+-    # Iterate over all voxels
+-    for z in range(D):
+-        for y in range(H):
+-            for x in range(W):
+-                intensity = mod[z, y, x]
+-                # Define neighborhood bounds
+-                z_min, z_max = max(0, z-r), min(D-1, z+r)
+-                y_min, y_max = max(0, y-r), min(H-1, y+r)
+-                x_min, x_max = max(0, x-r), min(W-1, x+r)
+-                
+-                n_r = 0
+-                n_o = 0
+-                
+-                # Count voxels in neighborhood
+-                for zz in range(z_min, z_max + 1):
+-                    for yy in range(y_min, y_max + 1):
+-                        for xx in range(x_min, x_max + 1):
+-                            n_r += 1
+-                            if abs(mod[zz, yy, xx] - intensity) <= delta:
+-                                n_o += 1
+-                                
+-                occ_map[z, y, x] = n_o / n_r if n_r > 0 else 0
+-                
+-    return occ_map
+ ```
+ 
+ **Parameters:**
+-*   `num_clusters`: Number of clusters $K$. Not given in the sources.
+-*   `r`: Neighborhood radius for occlusion calculation. Not given in the sources.
+-*   `delta`: Intensity window parameter for occlusion calculation. Not given in the sources.
++* `num_clusters`: Number of clusters $K$. Not given in the sources.
++* `r`: Neighborhood radius for occlusion calculation. Not given in the sources.
++* `delta`: Intensity window parameter for occlusion calculation. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Texture Dimensions:** The number of clusters may exceed the maximum texture dimension of the GPU. Offseting techniques must be used to handle this [S1, unofficial].
+-*   **Modality Count:** The method combines up to four modalities into a single texel. For more than four modalities, additional handling is required [S1, unofficial].
+-*   **Occlusion Calculation:** The neighborhood search for occlusion is computationally expensive on the CPU. Efficient spatial indexing or sliding window techniques are implied but not detailed [S1, unofficial].
++* **Texture Dimensions:** The number of clusters may exceed the maximum texture dimension of the GPU, requiring offsetting techniques during upload [S1, unofficial].
++* **Modality Count:** The method combines up to four modalities into a single texel for constant-time query fetches [S1, unofficial].
++* **Occlusion Calculation:** The neighborhood search for occlusion is computationally expensive on the CPU [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Occlusion-Based Weighting
+-A weighting scheme that derives local weights based on voxel occlusion to consider occluded voxels as less important during clustering [S1, unofficial]. It computes the degree of occlusion for each voxel and its intensity $s_i(x)$ by considering a local neighborhood radius $r$ and an intensity window parameter $\delta$. The occlusion is derived based on the number of all voxels within the $r$ neighborhood ($n_r$) and the number of voxels ($n_o$) having intensity in $[s_i(x) - \delta, s_i(x) + \delta]$. The weight is $1 - occ(x)$ where $occ(x) = \frac{n_o}{n_r}$ [S1, unofficial]. Choose this when occlusion significantly impacts the visual contribution of voxels.
++A weighting scheme that derives local weights based on voxel occlusion to consider occluded voxels as less important during clustering [S1, unofficial]. It computes the degree of occlusion for each voxel and its intensity $s_i(x)$ by considering a local neighborhood radius $r$ and an intensity window parameter $\delta$ [S1, unofficial]. The occlusion is derived based on the number of all voxels within the $r$ neighborhood ($n_r$) and the number of voxels ($n_o$) having intensity in $[s_i(x) - \delta, s_i(x) + \delta]$ [S1, unofficial]. The weight is $1 - occ(x)$ where $occ(x) = \frac{n_o}{n_r}$ [S1, unofficial]. Choose this when occlusion significantly impacts the visual contribution of voxels [S1, unofficial].
+ 
+ ### Boundary-Based Weighting
+-A weighting scheme based on the rationale that viewers focus on boundary layers, mapping gradient length to a local weight to emphasize shadow silhouettes [S1, unofficial]. It maps the gradient length of a voxel to a local weight used in the Euclidean distance function. Gradient magnitudes are normalized and mapped to weights such that larger gradient magnitudes obtain higher weighting [S1, unofficial]. Choose this when boundary features are critical for shape recognition and illumination effects.
++A weighting scheme based on the rationale that viewers focus on boundary layers, mapping gradient length to a local weight to emphasize shadow silhouettes [S1, unofficial]. It maps the gradient length of a voxel to a local weight used in the Euclidean distance function [S1, unofficial]. Gradient magnitudes are normalized and mapped to weights such that larger gradient magnitudes obtain higher weighting [S1, unofficial]. Choose this when boundary features are critical for shape recognition and illumination effects [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -183,6 +155,6 @@
+ **Strengths:** Reduces GPU memory footprint and sampling costs. Enables rapid data fetches. Incorporates perceptual properties of illumination to simplify computation [S1, unofficial].
+ **Limitations:** Requires CPU precomputation. Limited to up to four modalities per texel fetch without offsetting complexity. The quality of clustering depends on the weight schemes [S1, unofficial].
+-**When to use:** When rendering multimodal volumes with advanced illumination algorithms where GPU memory and sampling costs are bottlenecks.
+-**When not to use:** When real-time preprocessing is not feasible or when the number of modalities is very large and cannot be efficiently packed [S1, unofficial].
++**When to use:** When rendering multimodal volumes with advanced illumination algorithms where GPU memory and sampling costs are bottlenecks [S1, unofficial].
++**When not to use:** Not given in the sources.
+ 
+ ## Background

@@ -1,0 +1,123 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Light Ray Sampling computes the direct illumination at a volume sample point by stepping along the direction to a distant light source (typically the sun), accumulating optical density, and applying a phase function to determine the scattered light color [S1, unofficial]. It differs from mesh-based shadow casting by explicitly integrating density through the participating medium along the light path, allowing for soft, volumetric shadows [S1, unofficial].
++Light Ray Sampling computes the direct illumination at a volume sample point by stepping along the direction to a distant light source (typically the sun), accumulating density, and applying a phase function to determine the scattered light color [S1, unofficial]. It differs from mesh-based shadow casting by explicitly integrating density through the participating medium along the light path [S1, unofficial].
+ 
+ ## How it works
+@@ -12,6 +12,7 @@
+ - View direction $\omega_v$ (unit vector, for powder effect).
+ - Extinction coefficient $\sigma_T$ (scalar or field).
+-- Number of steps $N_{steps}$ (integer, typically 16–64).
+-- Light ray distance $D$ (distance from $p$ to light source or AABB boundary).
++- Number of steps $N_{steps}$ (integer, constant `STEPS_LIGHT` in source).
++- Light ray distance $D$ (distance from $p$ to sun or AABB boundary).
++- Density field: Accessible via `getDensity(pos)`, returning a scalar density value $\rho$ at position `pos`.
+ 
+ **Outputs:**
+@@ -19,19 +20,14 @@
+ 
+ **Data Structures:**
+-- Density field: Accessible via `getDensity(pos)`, returning a scalar density value $\rho$ at position `pos`.
++- Accumulator `lightRayDensity` (scalar, initialized to 0.0).
+ 
+ **Steps:**
+-1. **Calculate Light Ray Distance:** Determine the distance $D$ from point $p$ to the light source or the exit boundary of the volume using an AABB intersection test [S1, unofficial].
+-2. **Initialize Accumulators:** Set `lightRayDensity` = 0.0 [S1, unofficial].
++1. **Calculate Light Ray Distance:** Determine the distance $D$ from point $p$ to the sun using an AABB intersection test [S1, unofficial].
++2. **Initialize Accumulators:** Set `lightRayDensity` = 0.0 and `distToStart` = 0.0 [S1, unofficial].
+ 3. **Calculate Step Size:** Compute the step length $h = D / N_{steps}$ [S1, unofficial].
+-4. **Accumulate Density:** Loop $j$ from 0 to $N_{steps}-1$:
+-   - Evaluate position: $p_j = p + \omega_l \cdot (j \cdot h)$ [S1, unofficial].
+-   - Sample density: $\rho_j = \text{getDensity}(p_j)$ [S1, unofficial].
+-   - Add to accumulator: `lightRayDensity` += $\rho_j$ [S1, unofficial].
+-5. **Scale Density:** Multiply the accumulated density by the step size: $\tau = \text{lightRayDensity} \cdot h$ [S1, unofficial]. This $\tau$ represents the optical depth.
+-6. **Calculate Inscastr Color:** Compute the base inscastr color using the accumulated optical depth $\tau$ and the scattering angle cosine $\cos\Theta = \omega_l \cdot \omega_v$ [S1, unofficial]. The source uses a function `multipleOctaves(lightRayDensity, cosTheta)` [S1, unofficial].
+-7. **Apply Powder Effect:** Modulate the result using a view-dependent attenuation to simulate subsurface scattering or powder-like appearance [S1, unofficial]:
+-   $$ L_{inscatter} = \text{mix}(L_{base} \cdot 2.0 \cdot (1.0 - e^{-2.0 \cdot \tau \cdot \sigma_T}), L_{base}, 0.5 + 0.5 \cdot \cos\Theta) $$
+-   Where $L_{base}$ is the result from step 6, and `mix(a, b, t)` is linear interpolation $a(1-t) + b t$ [S1, unofficial].
++4. **Accumulate Density:** Loop $j$ from 0 to $N_{steps}-1$: `lightRayDensity` += `getDensity`($p + \omega_l \cdot j \cdot h$) [S1, unofficial].
++5. **Scale Density:** Multiply the accumulated density by the step size: `lightRayDensity` *= $h$ [S1, unofficial].
++6. **Calculate Inscastr Color:** Compute the base inscatter color using the accumulated optical depth and the scattering angle cosine $\cos\Theta = \omega_l \cdot \omega_v$ via `multipleOctaves`(`lightRayDensity`, $\cos\Theta$) [S1, unofficial].
++7. **Apply Powder Effect:** Modulate the result using a view-dependent attenuation: return `mix`(`beersLaw` $\cdot 2.0 \cdot (1.0 - \exp(-\text{lightRayDensity} \cdot 2.0 \cdot \sigma_T))$, `beersLaw`, $0.5 + 0.5 \cdot \cos\Theta$) [S1, unofficial]. Here `beersLaw` is the result from step 6, and `mix(a, b, t)` is linear interpolation $a(1-t) + b t$.
+ 
+ **Pseudocode:**
+@@ -40,4 +36,5 @@
+     # Step 1 & 2: Initialize
+     light_ray_density = 0.0
++    dist_to_start = 0.0
+     
+     # Step 3: Step size
+@@ -47,49 +44,48 @@
+     for j in range(N_steps):
+         pos = p + omega_l * (j * step_l)
+-        density = get_density(pos)
+-        light_ray_density += density
++        light_ray_density += get_density(pos)
+         
+     # Step 5: Scale by step size
+-    tau = light_ray_density * step_l
++    light_ray_density *= step_l
+     
+-    # Step 6: Calculate base inscastr color
++    # Step 6: Calculate base inscatter color
+     cos_theta = dot(omega_l, omega_v)
+-    # Note: multipleOctaves implementation details are source-specific; 
+-    # here we assume it returns a color based on tau and cos_theta.
+-    base_color = multiple_octaves(tau, cos_theta)
++    # Source does not specify multipleOctaves implementation [S1, unofficial]
++    beers_law = multiple_octaves(light_ray_density, cos_theta)
+     
+     # Step 7: Apply powder effect
+-    # Formula: mix(base_color * 2.0 * (1.0 - exp(-2.0 * tau * sigma_T)), base_color, 0.5 + 0.5 * cos_theta)
+-    attenuation = 2.0 * (1.0 - exp(-2.0 * tau * sigma_T))
+-    modified_color = base_color * attenuation
++    attenuation = 2.0 * (1.0 - exp(-light_ray_density * 2.0 * sigma_T))
++    modified_color = beers_law * attenuation
+     blend_factor = 0.5 + 0.5 * cos_theta
+-    final_color = mix(modified_color, base_color, blend_factor)
++    final_color = mix(modified_color, beers_law, blend_factor)
+     
+     return final_color
++
++def mix(a, b, t):
++    return a * (1.0 - t) + b * t
+ ```
+ 
+ **Parameters:**
+-- $N_{steps}$: Number of samples along the light ray. Typical values are not explicitly given, but "STEPS_LIGHT" is used as a constant [S1, unofficial].
++- $N_{steps}$: Number of samples along the light ray. The source uses a constant `STEPS_LIGHT` [S1, unofficial].
+ - $\sigma_T$: Extinction coefficient. Not given in the sources.
+ 
+ **Edge Cases:**
+-- If $D=0$, step size is undefined. Guard against division by zero.
+-- If $\cos\Theta < -1$ or $> 1$ due to floating point error, clamp to $[-1, 1]$.
++- If $D=0$, step size is undefined. Guard against division by zero [G].
++- If $\cos\Theta < -1$ or $> 1$ due to floating point error, clamp to $[-1, 1]$ [G].
+ 
+ ## Subtopics
+ 
+ ### Sun Direction Sampling
+-A variant for distant light sources with small angular diameter. Instead of a single fixed direction, the sun direction is sampled uniformly within its defined angular cone [S2, unofficial]. The sun's contribution is added to the camera's escaped radiance, separate from environment sky contributions [S2, unofficial]. This accounts for the finite size of the sun, creating softer volumetric shadows compared to a point sun [S2, unofficial].
++A variant for distant light sources with a small angular diameter, modeled by irradiance and sampled uniformly within its cone [S2, unofficial]. Instead of a single fixed direction, the sun direction is sampled uniformly within its defined angular cone [S2, unofficial]. The sun's contribution is added to the camera's escaped radiance in addition to any environment sky contribution [S2, unofficial].
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(N_{steps})$ per sample point, where $N_{steps}$ is the number of light ray samples [S1, unofficial].
+-**Memory Complexity:** $O(1)$ auxiliary memory, assuming density access is $O(1)$ [S1, unofficial].
+-**Strengths:** Captures volumetric shadowing and light scattering within participating media [S1, unofficial]. Simple to implement [S1, unofficial].
+-**Limitations:** Requires explicit density sampling along the ray, which can be expensive for high-resolution volumes [S1, unofficial]. Does not account for multiple scattering events along the light path (single scattering approximation) [S1, unofficial].
+-**When to use:** When direct illumination from a dominant directional light (sun) is required in a participating medium [S1, unofficial].
+-**When not to use:** For complex light sources with large angular extent requiring many samples, or when multiple scattering is significant [S2, unofficial].
++Time and memory complexity: Not given in the sources.
++Measured performance with hardware, resolution and scene: Not given in the sources.
++Scaling: Not given in the sources.
++Strengths and limitations: Not given in the sources.
++When to use it and when not: Not given in the sources.
+ 
+ ## Background
+-Originating from real-time volumetric rendering techniques, this method is used in implementations such as `al-ro/volumetrics` [S1, unofficial] and `mypbr` [S2, unofficial]. It is commonly employed in real-time engines to simulate sun shafts and volumetric shadows in fog or smoke [S1, S2, unofficial].
++Used in implementations such as `al-ro/volumetrics` [S1, unofficial] and `mypbr` [S2, unofficial].
+ 
+ ## Sources

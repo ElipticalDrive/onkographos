@@ -1,0 +1,204 @@
+# VTK Legacy Binary File Writing
+
+Also called: RSM Volume to VTR Export (Inline Binary), VTR Export (Inline Binary)
+
+## Overview
+Writes a 3D Regular Sparse Mesh (RSM) volume to a portable VTK Rectilinear Grid (VTR) file using inline binary data mode [S1, unofficial]. This method solves the parsing issues encountered in older VTK-based readers (e.g., ParaView 5.9.1) when handling appended binary data, by encoding the binary scalar fields directly within the XML element content using base64 [S1, unofficial]. It builds on [VTK Legacy ASCII File Writing](6698-vtk-legacy-ascii-file-writing.md) by switching from ASCII to binary encoding for efficiency and compatibility [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `rsm`: A NumPy ndarray of shape `(nx, ny, nz)` containing cell-centered intensity values [S1, unofficial].
+- `coords`: A list `[x_coords, y_coords, z_coords]` defining the grid geometry. Each coordinate array must contain either bin edges (length $n+1$) or bin centers (length $n$) [S1, unofficial].
+- `compress`: A boolean flag to enable zlib compression of the inline binary data [S1, unofficial].
+
+**Outputs:**
+- A `.vtr` XML file containing a `vtkRectilinearGrid` object with inline binary scalar data [S1, unofficial].
+
+**Data Structures:**
+The output is an XML document. The root element is `<VTKFile>`. Inside, a `<RectilinearGrid>` element contains:
+- `<Piece>` with `NumberOfPoints` set to $(n_x+1)(n_y+1)(n_z+1)$ and `NumberOfCells` set to $n_x n_y n_z$.
+- `<Coordinates>` containing three `<DataArray>` elements for X, Y, and Z coordinates (type `Float64`).
+- `<PointData>` containing one or more `<DataArray>` elements for scalar fields (type `Float32` or `Float64`, depending on input, with `encoding="base64"` and optional `compress="1"`).
+
+**Steps:**
+1. **Coordinate Validation and Edge Computation:**
+   Let $N_x, N_y, N_z$ be the dimensions of `rsm`.
+   Define a helper function `_as_edges(arr)` that converts centers to edges or validates edges:
+   - If `len(arr) == n + 1`: Return a copy of `arr` [S1, unofficial].
+   - If `len(arr) == n`: Compute edges `e` of length $n+1$:
+     - $e[0] = arr[0] - 0.5 \times (arr[1] - arr[0])$
+     - $e[i] = 0.5 \times (arr[i] + arr[i-1])$ for $1 \le i < n$
+     - $e[n] = arr[n-1] + 0.5 \times (arr[n-1] - arr[n-2])$
+     - Return `e` [S1, unofficial].
+   
+   Compute `x_edges`, `y_edges`, `z_edges` by applying `_as_edges` to the respective coordinate arrays [S1, unofficial].
+
+2. **Axis Orientation and Monotonicity Check:**
+   For each axis (x, y, z):
+   - If `edges[1] < edges[0]`:
+     - Flip the `edges` array (reverse order).
+     - Flip the corresponding axis of `rsm` (e.g., `np.flip(rsm, axis=0)` for x) [S1, unofficial].
+   - Compute bin widths $w_i = edges[i+1] - edges[i]$.
+   - If any $w_i \le 0$, raise a `ValueError` [S1, unofficial].
+
+3. **VTK Grid Construction:**
+   - Create a `vtkRectilinearGrid` object [S1, unofficial].
+   - Set dimensions to $(n_x+1, n_y+1, n_z+1)$ [S1, unofficial].
+   - Set extent to $(0, n_x, 0, n_y, 0, n_z)$ [S1, unofficial].
+   - Set the coordinate arrays to `x_edges`, `y_edges`, `z_edges` as `Float64` [S1, unofficial].
+
+4. **Scalar Data Encoding:**
+   - Flatten `rsm` into a 1D array [S1, unofficial].
+   - Convert to binary bytes [S1, unofficial].
+   - If `compress` is true, apply zlib compression to the bytes [S1, unofficial].
+   - Encode the resulting bytes using base64 [S1, unofficial].
+   - Add the encoded string as a `<DataArray>` in the `<PointData>` section of the XML [S1, unofficial].
+
+5. **File Writing:**
+   - Write the XML structure to a `.vtr` file [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import base64
+import zlib
+import xml.etree.ElementTree as ET
+
+def _as_edges(arr):
+    """Convert centers to edges or return edges if already edges."""
+    n = len(arr)
+    if n == 0:
+        return np.array([])
+    if n > 1 and arr[1] < arr[0]:
+        # Already edges but descending, handled by caller flipping
+        pass
+    if n > 1 and arr[1] > arr[0]:
+        # Check if it looks like centers (length n) or edges (length n+1)
+        # The source implies the function handles both cases based on length
+        pass
+    
+    # Logic from source: if size is n+1, return copy. If size is n, compute edges.
+    # Note: The source does not explicitly distinguish between ascending/descending
+    # inside _as_edges, but relies on the caller to flip if needed.
+    # However, the formula for edges assumes ascending order for the center calculation.
+    # We assume the input arr is ascending for the calculation.
+    
+    if len(arr) == n + 1:
+        return arr.copy()
+    else:
+        # arr has length n (centers)
+        edges = np.empty(n + 1)
+        edges[0] = arr[0] - 0.5 * (arr[1] - arr[0])
+        edges[1:-1] = 0.5 * (arr[1:] + arr[:-1])
+        edges[-1] = arr[-1] + 0.5 * (arr[-1] - arr[-2])
+        return edges
+
+def write_vtk_legacy_binary(rsm, coords, compress=False, filename="output.vtr"):
+    nx, ny, nz = rsm.shape
+    
+    # 1. Process Coordinates
+    x_edges = _as_edges(coords[0])
+    y_edges = _as_edges(coords[1])
+    z_edges = _as_edges(coords[2])
+    
+    rsm_work = rsm.copy()
+    
+    # 2. Ensure Ascending and Flip if Necessary
+    axes = [(0, x_edges, rsm_work), (1, y_edges, rsm_work), (2, z_edges, rsm_work)]
+    
+    for axis_idx, edges, data in axes:
+        if len(edges) > 1 and edges[1] < edges[0]:
+            edges[:] = edges[::-1]
+            data[:] = np.flip(data, axis=axis_idx)
+            
+    # 3. Check Bin Widths
+    for edges in [x_edges, y_edges, z_edges]:
+        diffs = np.diff(edges)
+        if np.any(diffs <= 0):
+            raise ValueError("Non-positive bin widths detected.")
+            
+    # 4. Prepare VTK XML Structure
+    root = ET.Element("VTKFile", type="RectilinearGrid", version="1.0", byte_order="LittleEndian")
+    rect_grid = ET.SubElement(root, "RectilinearGrid", 
+                              WholeExtent=f"0 {nx} 0 {ny} 0 {nz}",
+                              NumberOfPoints=f"{(nx+1)*(ny+1)*(nz+1)}",
+                              NumberOfCells=f"{nx*ny*nz}")
+    
+    piece = ET.SubElement(rect_grid, "Piece", 
+                          Extent=f"0 {nx} 0 {ny} 0 {nz}",
+                          NumberOfPoints=f"{(nx+1)*(ny+1)*(nz+1)}",
+                          NumberOfCells=f"{nx*ny*nz}")
+    
+    # Coordinates
+    coords_elem = ET.SubElement(piece, "Coordinates")
+    ET.SubElement(coords_elem, "DataArray", type="Float64", Name="x", format="appended", offset="0") # Placeholder for structure
+    # Note: The source specifies "inline binary data mode". 
+    # VTK RectilinearGrid coordinates are usually separate from PointData scalars.
+    # The source [S1, unofficial] mentions "inline binary data mode... to avoid appended data parsing issues".
+    # This typically applies to the Scalar Data. Coordinates are often ASCII or small enough.
+    # However, to be strictly compliant with "inline binary" for the whole file to avoid parsing issues:
+    # We will encode coordinates as inline base64 as well if they are large, but typically they are small.
+    # The source specifically mentions "scalar fields" in [S2] context, but [S1, unofficial] says "inline binary data mode".
+    # We will encode scalars as inline binary. Coordinates are usually written as ASCII or inline.
+    # Let's write coordinates as ASCII for simplicity unless specified otherwise, but the "inline binary" 
+    # constraint in [S1, unofficial] is broad. We'll stick to standard VTK RectilinearGrid structure where coords are separate.
+    # Actually, VTK RectilinearGrid *requires* coordinates to be defined. 
+    # We will write coordinates as ASCII DataArrays to ensure compatibility, and scalars as inline binary.
+    
+    ET.SubElement(coords_elem, "DataArray", type="Float64", Name="x", format="ascii")
+    ET.SubElement(coords_elem, "DataArray", type="Float64", Name="y", format="ascii")
+    ET.SubElement(coords_elem, "DataArray", type="Float64", Name="z", format="ascii")
+    
+    # Point Data (Scalars)
+    point_data = ET.SubElement(piece, "PointData", Scalars="intensity")
+    scalar_data = ET.SubElement(point_data, "DataArray", 
+                                type="Float32", # Assuming float32 for intensities, adjust if needed
+                                Name="intensity", 
+                                format="appended", # Will be overridden by inline logic
+                                offset="0")
+    
+    # 5. Encode Scalars
+    scalar_bytes = rsm_work.astype(np.float32).tobytes()
+    if compress:
+        scalar_bytes = zlib.compress(scalar_bytes)
+    scalar_b64 = base64.b64encode(scalar_bytes).decode('ascii')
+    
+    # Update scalar data element to be inline
+    scalar_data.set("format", "binary") # VTK uses "binary" for inline base64 in legacy format? 
+    # Actually, VTK XML format uses "appended" with offset for appended, and "binary" for inline base64.
+    # Source [S1, unofficial] says "inline binary data mode (base64-encoded inside element content)".
+    # This corresponds to format="binary" in VTK XML.
+    scalar_data.set("format", "binary")
+    scalar_data.text = scalar_b64
+    
+    # Write Coordinates as ASCII
+    coords_elem[0].text = " ".join(map(str, x_edges))
+    coords_elem[1].text = " ".join(map(str, y_edges))
+    coords_elem[2].text = " ".join(map(str, z_edges))
+    
+    # 6. Write File
+    tree = ET.ElementTree(root)
+    ET.indent(tree, space="  ")
+    tree.write(filename, xml_declaration=True, encoding="UTF-8")
+```
+
+## Subtopics
+
+### VTK Rectilinear Grid (VTR) Export
+Transforms raw volume data from HDF5 files into VTK's `vtkRectilinearGrid` format (VTR) for direct visualization without XDMF creation [S2]. For large scalar fields, VTR files are stored as partitions across multiple files due to VTK library reader limitations [S2]. This variant focuses on HDF5 ingestion rather than RSM/NumPy generation [S2].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of voxels $N = n_x n_y n_z$ for coordinate processing and base64 encoding [S1, unofficial].
+- **Memory Complexity:** Linear with respect to $N$ for storing the RSM array and the encoded binary string [S1, unofficial].
+- **Performance:** Avoids the overhead and parsing bugs of appended binary data in older readers like ParaView 5.9.1 [S1, unofficial]. Base64 encoding increases file size by approximately 33% compared to raw binary, but zlib compression can mitigate this [S1, unofficial].
+- **Strengths:** High compatibility with legacy VTK readers; portable file format [S1, unofficial].
+- **Limitations:** Base64 encoding is less space-efficient than raw binary; not suitable for extremely large datasets where memory constraints prevent holding the entire encoded string in RAM [S1, unofficial].
+
+## Background
+The method originates from the `stacy-zhang/voxel` repository, an unofficial implementation for exporting RSM volumes to VTR format [S1, unofficial]. It addresses specific compatibility issues with ParaView versions prior to 5.10, which had bugs in parsing appended binary data in VTK XML files [S1, unofficial]. The VTR format itself is part of the VTK legacy XML file format family, designed to store rectilinear grids efficiently [S2].
+
+## Sources
+[S1] stacy-zhang/voxel, https://github.com/stacy-zhang/voxel, fetched 2026-10-28 (unofficial)
+[S2] Immersive Isosurface Visualisation for Engineering Datasets, https://doi.org/10.1109/bdva.2017.8114624, fetched 2026-10-26

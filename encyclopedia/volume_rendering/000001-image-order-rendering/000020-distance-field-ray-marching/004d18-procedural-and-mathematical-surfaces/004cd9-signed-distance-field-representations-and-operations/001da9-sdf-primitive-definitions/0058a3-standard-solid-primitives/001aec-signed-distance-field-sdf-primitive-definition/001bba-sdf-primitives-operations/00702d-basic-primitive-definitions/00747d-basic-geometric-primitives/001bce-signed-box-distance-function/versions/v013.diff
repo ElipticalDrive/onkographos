@@ -1,0 +1,176 @@
+--- v012.md
++++ v013.md
+@@ -4,88 +4,103 @@
+ 
+ ## Overview
+-The Signed Box Distance Function computes the exact Euclidean signed distance from a query point to the surface of an axis-aligned box centered at the origin [S9, unofficial]. It distinguishes interior from exterior space by returning negative values inside the box and positive values outside [S9, unofficial]. It sets itself apart from the [Unsigned Box Distance Function](3750-unsigned-box-distance-function.md) by providing signed output and from the [Plane Signed Distance Function](1102-plane-signed-distance-function.md) by handling bounded 3D volumes with sharp corners rather than infinite half-spaces [S7, unofficial]. Unlike the cheaper half-space intersection approximation [S14, unofficial], this method correctly calculates the distance to edges and corners [S13, unofficial].
++The Signed Box Distance Function computes the exact Euclidean signed distance from a query point $p$ to the surface of an axis-aligned box centered at the origin [S9, S12, S13, unofficial]. It solves the problem of defining a precise implicit volume primitive for ray marching, ensuring that the distance estimate is neither an under-estimate (which causes ray overshooting) nor an over-estimate (which causes visual artifacts) [S13, S14, unofficial]. It differs from the [Unsigned Box Distance Function](3750-unsigned-box-distance-function.md) by distinguishing interior from exterior space, and from the [Box with Edge Rounding SDF](4004-box-with-edge-rounding-sdf.md) by maintaining sharp 90-degree corners [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: `p`, a 3D point in space (vector).
+-- Input: `b`, the half-extents of the box (vector), defining the box as $[-b_x, b_x] \times [-b_y, b_y] \times [-b_z, b_z]$ [S12, unofficial].
+-- Output: `d`, a scalar representing the signed distance.
++*   Input: A query point $p \in \mathbb{R}^3$ and the box half-extents $b \in \mathbb{R}^3$ (where $b_i$ is half the side length along axis $i$). If the box is not centered at the origin or axis-aligned, $p$ is transformed into the box's local space first [S2, S16, unofficial].
++*   Output: A scalar $d \in \mathbb{R}$. $d < 0$ if $p$ is inside, $d > 0$ if $p$ is outside, $d = 0$ on the surface.
+ 
+ **Data Structures:**
+-- `p`: `vec3` (x, y, z).
+-- `b`: `vec3` (x, y, z).
++*   `p`: Vector of 3 floats $(p_x, p_y, p_z)$.
++*   `b`: Vector of 3 floats $(b_x, b_y, b_z)$ representing half-extents.
+ 
+-**Steps:**
+-1. Compute the difference vector `di` by subtracting the half-extents from the absolute coordinates of the point: $di = |p| - b$. This exploits symmetry to handle all octants uniformly [S2, unofficial].
+-2. Calculate the "inside distance" component `res` as the maximum of the components of `di`: $res = \max(di_x, \max(di_y, di_z))$ [S12, unofficial].
+-3. Check if the point is outside. If $res > 0$, the point is outside the box [S12, unofficial]. In this case, calculate the Euclidean distance to the closest face, edge, or corner by taking the length of the positive components of `di`: $res = \| \max(di, 0) \|$ [S12, unofficial].
+-4. If the point is inside ($res \le 0$), `res` remains the negative distance to the closest face [S9, unofficial].
+-5. Return `res`.
++**Algorithm:**
++The method exploits symmetry by taking the absolute value of the point coordinates, reducing the problem to the first octant [S2, unofficial]. It then calculates the distance to the nearest face/edge/corner based on whether the point is inside or outside the box bounds [S13, S14, unofficial].
+ 
+-**Formula:**
+-$$ d(p) = \begin{cases} \max(di_x, \max(di_y, di_z)) & \text{if } \max(di_x, \max(di_y, di_z)) \le 0 \\ \| \max(di, 0) \| & \text{if } \max(di_x, \max(di_y, di_z)) > 0 \end{cases} $$
+-where $di = |p| - b$.
+-
+-Where:
+-- $|p|$ is the component-wise absolute value of $p$ [S12, unofficial].
+-- $\max(v)$ is the maximum component of vector $v$ [S12, unofficial].
+-- $\max(v, 0)$ is the component-wise maximum of $v$ and the zero vector [S12, unofficial].
+-- $\| \cdot \|$ is the Euclidean norm (L2 norm) [S12, unofficial].
+-
+-**Parameters:**
+-- `b`: Half-extents. For a 1x1x1 box centered at the origin, $b = (0.5, 0.5, 0.5)$ [S12, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Underestimation (Version 1):** An earlier version (Algorithm 3.5 in [S12, unofficial]) returned $\min(\max(|p|-b), \| \max(|p|-b, 0) \|)$. This underestimates the distance in corner regions, leading to smaller ray steps, slower convergence, and incorrect ambient occlusion (black dots/aliasing) [S12, unofficial][S13, unofficial].
+-- **Overestimation:** Overestimating the distance can cause the ray to pass through the surface or inaccurately estimate the surface point position, negatively impacting ambient occlusion [S12, unofficial].
+-- **Approximation:** A cheaper approximation $d = \max(|p-c| - s)$ (where $s$ is side length) is not a true Euclidean distance for points outside corners and returns distance to the nearest face/edge rather than the vertex. It is sufficient for raymarching as a safe lower bound but lacks precision [S14, unofficial].
++1.  Compute the difference vector $di$ by subtracting the half-extents from the absolute coordinates of $p$:
++    $$ di = |p| - b $$
++    where $|p| = (|p_x|, |p_y|, |p_z|)$.
++2.  Calculate the maximum component of $di$, denoted $res$:
++    $$ res = \max(di_x, \max(di_y, di_z)) $$
++    This value represents the signed distance along the axis where the point is furthest from the center relative to the box boundary.
++3.  Determine the final distance based on the sign of $res$:
++    *   If $res > 0$ (point is outside): The distance is the Euclidean length of the positive components of $di$. This correctly accounts for edges and corners.
++        $$ d = \| \max(di, 0) \|_2 $$
++        where $\max(di, 0)$ is the vector $(\max(di_x, 0), \max(di_y, 0), \max(di_z, 0))$ and $\|\cdot\|_2$ is the L2 norm.
++    *   If $res \le 0$ (point is inside): The distance is simply $res$ (which is negative or zero).
++        $$ d = res $$
+ 
+ **Pseudocode:**
+ ```python
+ def signed_box_distance(p: Vec3, b: Vec3) -> float:
+-    # Step 1: Compute difference vector using symmetry
+-    di_x = abs(p.x) - b.x
+-    di_y = abs(p.y) - b.y
+-    di_z = abs(p.z) - b.z
++    """
++    Computes the signed Euclidean distance from point p to an axis-aligned box
++    centered at the origin with half-extents b.
+     
+-    # Step 2: Calculate inside distance (max component)
+-    res = max(di_x, max(di_y, di_z))
++    Args:
++        p: Query point (x, y, z).
++        b: Half-extents (bx, by, bz).
++        
++    Returns:
++        Signed distance. Negative if inside, positive if outside.
++    """
++    # Step 1: Exploit symmetry by taking absolute values
++    abs_p = Vec3(abs(p.x), abs(p.y), abs(p.z))
+     
+-    # Step 3: If outside (res > 0), calculate Euclidean distance to surface
++    # Step 2: Calculate difference vector
++    di = abs_p - b
++    
++    # Step 3: Calculate the maximum component (distance along the dominant axis)
++    res = max(di.x, max(di.y, di.z))
++    
++    # Step 4: Determine if inside or outside and compute final distance
+     if res > 0:
+-        pos_x = max(di_x, 0.0)
+-        pos_y = max(di_y, 0.0)
+-        pos_z = max(di_z, 0.0)
+-        res = sqrt(pos_x**2 + pos_y**2 + pos_z**2)
+-        
+-    # Step 4: If inside (res <= 0), res is already the negative distance
+-    return res
++        # Outside: Euclidean distance to the nearest face, edge, or corner
++        # Clamp negative components to zero, then take L2 norm
++        positive_di = Vec3(max(di.x, 0.0), max(di.y, 0.0), max(di.z, 0.0))
++        return length(positive_di)
++    else:
++        # Inside: The distance is the negative of the maximum component
++        return res
+ ```
++
++**Parameters:**
++*   `b`: Half-extents. For a $1 \times 1 \times 1$ box, $b = (0.5, 0.5, 0.5)$ [S13, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Corner Artifacts (Version 1):** A simplified version that returns $\min(res, \| \max(di, 0) \|)$ underestimates the distance in corner regions [S13, S14, unofficial]. This leads to smaller ray steps, slower convergence, and incorrect ambient occlusion (black dots) [S13, S14, unofficial]. The correct implementation (Version 2) uses the conditional logic above to avoid this [S14, unofficial].
++*   **Overestimation:** Overestimating the distance can cause the ray to pass through the surface or inaccurately estimate the surface point position [S13, unofficial].
++*   **Precision:** The function is differentiable almost everywhere. The gradient $\nabla d$ can be used for surface normals [Parent].
+ 
+ ## Subtopics
+ 
+ ### [Unsigned Box Distance Function](3750-unsigned-box-distance-function.md)
+-Computes the Euclidean distance to the box surface, returning only non-negative values. Use when interior/exterior distinction is not needed.
++The Unsigned Box Distance Function computes the Euclidean distance from a query point to the surface of an axis-aligned box centered at the origin, returning only non-negative values regardless of whether the point lies inside or outside the volume. Unlike its sibling, the Signed Box Distance Function, which distinguishes interior from exterior space, this method treats the box as a solid boundary where internal points are measured by their distance to the nearest face.
+ 
+ ### [Box with Edge Rounding SDF](4004-box-with-edge-rounding-sdf.md)
+-Computes distance to a box with rounded edges/corners. Use for smooth geometric transitions.
++Computes the signed Euclidean distance from a query point to the surface of an axis-aligned box whose edges and corners are rounded by a constant radius. It solves the problem of defining smooth, organic variations of standard rectangular primitives for ray marching and implicit modeling. It differs from the [Signed Box Distance Function](1092-signed-boxdistance-function.md) by replacing sharp 90-degree corners with spherical fillets, allowing for continuous normals and softer visual interactions.
+ 
+ ### [Rectangle Signed Distance Function](4031-rectangle-signed-distance-function.md)
+-The 2D analog of the Signed Box Distance Function. Use for planar rectangles.
++Computes the exact Euclidean distance from a query point to the boundary of an axis-aligned rectangle centered at the origin. It is the 2D analog of the [Signed Box Distance Function](1092-signed-boxdistance-function.md).
+ 
+ ### [Oriented Box2D SDF](4370-oriented-box2d-sdf.md)
+-Computes distance to a 2D oriented box (segment-based). Use for 2D shapes with specific orientation.
++Computes the signed Euclidean distance from a 2D point to a line segment of arbitrary length and thickness, effectively representing a 2D box with rounded corners oriented along the segment axis. It differs from the [Unsigned Box Distance Function](3750-unsigned-boxdistance-function.md) by providing signed output and from the [Signed Box Distance Function](1092-signed-boxdistance-function.md) by operating in 2D with a specific segment-based orientation rather than a general 3D axis-aligned or oriented box. It serves as a primitive for constructing 2D shapes in ray marching or implicit modeling.
++
++### Oriented Box SDF
++Computes the signed distance from a point to an Oriented Bounding Box (OBB). It transforms the point into the box's local coordinate system using the inverse of the box's transformation matrix, computes the distance to the unit box scaled by the box's dimensions, and adjusts for being inside or outside [S16, unofficial].
++**Steps:**
++1.  Transform the input point `point` into the box's local coordinate system: `trans = self.full_inverse * point.extend(1.0)`.
++2.  Compute the vector `q_local` representing the distance from the unit box surface scaled by the box's scale: `q_local = (trans.abs() - Vec4::splat(1.0)) * self.scale`.
++3.  Compute the distance: `dist = q_local.max(Vec4::ZERO).length() + q_local.x.max(q_local.y.max(q_local.z)).min(0.0)`.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** O(1). The computation involves a fixed number of arithmetic operations, absolute values, and a square root [G].
+-- **Memory Complexity:** O(1). No auxiliary data structures are required [G].
+-- **Performance:** Extremely fast, suitable for real-time ray marching. The exact version (Version 2) is slightly more expensive than the approximation due to the square root, but necessary for correct AO [G].
+-- **Strengths:** Exact Euclidean distance; handles inside/outside correctly; robust for sphere tracing [G].
+-- **Limitations:** The square root operation is more expensive than simple max/min. The approximation is faster but inaccurate for AO [S12, unofficial][S13, unofficial].
+-- **When to use:** Standard primitive for ray marching axis-aligned boxes [G].
+-- **When not to use:** When performance is critical and AO is not required (use approximation); when rounded edges are needed (use Box with Edge Rounding) [G].
++*   **Time Complexity:** $O(1)$. The computation involves a fixed number of arithmetic operations (absolute value, subtraction, max, min, length).
++*   **Memory Complexity:** $O(1)$. No auxiliary data structures are required.
++*   **Performance:** Extremely fast, making it suitable for real-time ray marching and implicit modeling [S13, S15, unofficial].
++*   **Strengths:** Exact Euclidean distance ensures correct ray stepping and accurate ambient occlusion [S13, S14, unofficial]. Simple implementation.
++*   **Limitations:** Sharp corners can cause aliasing in some rendering contexts if not handled with appropriate sampling or anti-aliasing techniques [S13, unofficial]. The "cheap" approximation $d = \max(|p-c| - s)$ is not a true Euclidean distance function for points outside corners and should be avoided for precise applications like AO [S15, unofficial].
+ 
+ ## Background
+-The Signed Box Distance Function is a fundamental primitive in Signed Distance Field (SDF) ray marching [S8, unofficial]. The "Version 1" approximation was popularized by Inigo Quilez [S2, unofficial][S12, unofficial]. The "Version 2" exact formulation was introduced to fix corner artifacts and incorrect ambient occlusion calculations, as detailed in [S12, unofficial] and [S13, unofficial].
++The Signed Box Distance Function is a fundamental primitive in Signed Distance Field (SDF) ray marching. The exact formulation (Version 2) was popularized by Inigo Quilez in his online resources on distance functions [S9, S13, S14, unofficial]. Earlier versions or approximations existed, such as the "cheap" box SDF which intersects half-spaces [S15, unofficial], but these were noted to underestimate distance at corners, leading to visual artifacts in ambient occlusion [S13, S14, unofficial]. The correct formulation distinguishes between inside and outside cases to provide the true Euclidean distance [S14, unofficial]. It is widely used in procedural geometry, ray marching shaders, and implicit modeling [S2, S9, S16, unofficial].
+ 
+ ## Sources
+@@ -99,8 +114,9 @@
+ [S8] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+ [S9] marklundin/glsl-sdf-primitives, https://github.com/marklundin/glsl-sdf-primitives, fetched 2026-10-26 (unofficial)
+-[S10] markpmlim/RaymarchingAndSDF, https://github.com/markpmlim/RaymarchingAndSDF, fetched 2026-10-27 (unofficial)
+-[S11] bhubbard/sdf-math-rs, https://github.com/bhubbard/sdf-math-rs, fetched 2026-10-27 (unofficial)
+-[S12] GPU Ray Marching of Distance Fields, https://www2.compute.dtu.dk/pubdb/edoc/imm6392.pdf, fetched 2026-10-27 (unofficial)
+-[S13] GPU Ray Marching for Ambient Occlusion, https://www.scribd.com/document/520755804/imm6392, fetched 2026-10-28 (unofficial)
+-[S14] Volumetric Rendering: Signed Distance Functions - Alan Zucconi, https://www.alanzucconi.com/2016/07/01/signed-distance-functions/, fetched 2026-10-28 (unofficial)
+-[S15] holger-kibur/sdf, https://github.com/holger-kibur/sdf, fetched 2026-10-27 (unofficial)+[S10] nschaievitch/sdf-editor, https://github.com/nschaievitch/sdf-editor, fetched 2026-10-26 (unofficial)
++[S11] markpmlim/RaymarchingAndSDF, https://github.com/markpmlim/RaymarchingAndSDF, fetched 2026-10-27 (unofficial)
++[S12] bhubbard/sdf-math-rs, https://github.com/bhubbard/sdf-math-rs, fetched 2026-10-27 (unofficial)
++[S13] GPU Ray Marching of Distance Fields, https://www2.compute.dtu.dk/pubdb/edoc/imm6392.pdf, fetched 2026-10-27 (unofficial)
++[S14] GPU Ray Marching for Ambient Occlusion, https://www.scribd.com/document/520755804/imm6392, fetched 2026-10-28 (unofficial)
++[S15] Volumetric Rendering: Signed Distance Functions - Alan Zucconi, https://www.alanzucconi.com/2016/07/01/signed-distance-functions/, fetched 2026-10-28 (unofficial)
++[S16] holger-kibur/sdf, https://github.com/holger-kibur/sdf, fetched 2026-10-27 (unofficial)

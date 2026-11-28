@@ -1,0 +1,59 @@
+--- v001.md
++++ v002.md
+@@ -1,44 +1,30 @@
+ # Pruning and Sparsification
+ 
+-Also called: Gaussian Pruning, Model Compression
++Also called: Gaussian Pruning, Sparsification
+ 
+ ## Overview
+-Pruning and Sparsification are post-training or in-training strategies that reduce the number of 3D Gaussians in a scene to improve rendering efficiency, reduce memory footprint, or correct reconstruction artifacts. Unlike [Densification Strategy](6234-densification-strategy.md), which increases density to capture detail, this family removes redundant or insignificant primitives. It is distinguished from sibling methods by its focus on removing Gaussians based on specific criteria such as accumulated rendering significance, second-order uncertainty (Fisher Information), or spatial depth, rather than simple opacity thresholds or gradient norms alone.
++Pruning and Sparsification is the family of methods responsible for removing redundant 3D Gaussians during or after the training of Gaussian Splatting models to reduce memory footprint and improve rendering efficiency. It solves the problem of excessive primitive counts caused by densification strategies, which can lead to "floaters" (noisy, low-opacity primitives) and structural redundancy. Unlike densification methods that add primitives, this family removes them based on criteria such as opacity, accumulated rendering significance, or second-order sensitivity (Fisher Information).
+ 
+ ## Shared principles
+-All pruning methods in this family operate on a set of Gaussians $\mathcal{G} = \{g_1, \dots, g_n\}$ and remove a subset $G_{prune} \subset \mathcal{G}$ to produce a pruned set $\mathcal{G}'$. The shared mechanisms include:
+-
+-1.  **Scoring Metric:** Each Gaussian $g_i$ is assigned a scalar score $S_i$ representing its "redundancy" or "insignificance." Lower scores indicate higher candidates for removal. Common metrics include:
+-    *   **Accumulated Significance:** The sum of alpha blending coefficients $w_i^p$ over all pixels $p$ and views [Child 9676].
+-    *   **Uncertainty/Sensitivity:** The log-determinant of the Fisher Information matrix block corresponding to the Gaussian's spatial parameters [Child 9680].
+-    *   **Opacity:** A simple threshold $o_{min}$ below which Gaussians are considered candidates [Child 9676].
+-2.  **Selection:** Gaussians are sorted by their score $S_i$ (ascending). The bottom $N_{prune}$ Gaussians are selected for removal.
+-3.  **Removal:** Selected Gaussians are deleted from the active set. The data structure (e.g., GPU buffer) is compacted to maintain contiguous memory layout [Parent].
+-4.  **Refinement (Optional):** Some methods employ a prune-refine pipeline where the remaining Gaussians are fine-tuned via gradient descent to recover quality lost during pruning [Child 9680].
++The family shares the goal of managing the primitive count to match local scene complexity. Common mechanisms include:
++1.  **Gradient-Based Triggering:** Densification is typically triggered by the magnitude of the 2D positional gradient $\frac{\partial L_v}{\partial \mu_v^k}$ for each Gaussian $g_k$ across training views [S4][S8, unofficial]. A Gaussian becomes a candidate if its average gradient magnitude $\tau_k$ exceeds a threshold $T_{grad}$ [S8, unofficial].
++2.  **Split vs. Clone Decision:** For candidates, the action depends on the Gaussian's size relative to the scene extent $e_{scene}$ and a density threshold $P_{dense}$ [S8, unofficial]. If the maximum scaling factor $\max(s_k) > P_{dense} \cdot e_{scene}$, the Gaussian is split into smaller children to resolve over-reconstruction [S8, unofficial]. If $\max(s_k) \le P_{dense} \cdot e_{scene}$, it is cloned to resolve under-reconstruction [S8, unofficial].
++3.  **Opacity Management:** Pruning and opacity resets are used to remove redundant "floaters" and stabilize optimization. Gaussians with opacity $\alpha$ below a threshold $\alpha_{min}$ are removed or clamped [S1][S2]. Opacity may be periodically reset to allow re-optimization [S6, unofficial].
++4.  **Periodic Execution:** Densification and pruning are performed periodically (e.g., every `refineEvery` steps) rather than at every step to allow the optimizer to stabilize [S1].
++5.  **Buffer Management:** Pruned primitives are removed from the active set, often requiring buffer compaction or marking for garbage collection [Parent].
+ 
+ ## Subtopics
+ 
+ ### [Significance-Aware Pruning](9676-significance-aware-pruning.md)
+-[Significance-Aware Pruning](9676-significance-aware-pruning.md) removes Gaussians based on their accumulated contribution to the rendered image, solving the problem where standard opacity pruning removes large, structurally significant Gaussians that have low opacity but high transmittance. It differs from [Principled Uncertainty Pruning](9680-principled-uncertainty-pruning.md) by using alpha blending coefficients rather than second-order derivatives. It is chosen when computational efficiency is prioritized over theoretical optimality and when standard opacity pruning leads to structural artifacts.
++Significance-Aware Pruning removes redundant 3D Gaussians by evaluating their actual contribution to the rendered image rather than relying solely on opacity or spatial extent. It solves the problem where standard opacity pruning removes large, structurally important Gaussians that have low opacity but high transmittance, and size pruning causes an explosion in Gaussian count as small Gaussians replace large ones. Unlike standard opacity pruning, it spares Gaussians with low opacity if they have high accumulated alpha blending coefficients, thereby optimizing the trade-off between reconstruction quality and scene compactness. See [Significance-Aware Pruning](9676-significance-aware-pruning.md).
+ 
+ ### [Principled Uncertainty Pruning](9680-principled-uncertainty-pruning.md)
+-[Principled Uncertainty Pruning](9680-principled-uncertainty-pruning.md) is a post-hoc compression method that prunes Gaussians based on a sensitivity score derived from the Fisher Information matrix. It solves the problem of aggressive compression by quantifying the uncertainty of spatial parameters, allowing for up to 90% pruning while preserving visual fidelity. It differs from heuristic methods by using a second-order approximation of the reconstruction error. It is chosen when maximum model compression is required without significant quality loss, assuming the model is fully converged.
++Principled Uncertainty Pruning (PUP) is a post-hoc method for compressing pretrained 3D Gaussian Splatting (3D-GS) models by removing redundant Gaussians based on their sensitivity to reconstruction error. Unlike heuristic approaches that rely on opacity or visibility, PUP computes a principled uncertainty score derived from the Fisher Information matrix of the spatial parameters (mean and scale). It distinguishes itself from siblings like [Significance-Aware Pruning](9676-significance-aware-pruning.md) by using a second-order approximation of the loss landscape rather than accumulated rendering weights, enabling higher compression ratios (up to 90%) while preserving fine foreground details. See [Principled Uncertainty Pruning](9680-principled-uncertainty-pruning.md).
+ 
+ ### Depth-Based Gaussian Pruning
+-A minor variant that varies the pruning threshold based on the relative depth (z-axis value) of 3D Gaussians to preserve points at the far plane in forward-facing scenes [S1].
+-
+-**Definition:**
+-The pruning threshold $t_p$ is scaled by a multiplier $w_p$ determined by the relative depth of each Gaussian [S1]. The lowest threshold is applied to the farthest point to prevent over-pruning of distant geometry [S1].
+-
+-**Steps:**
+-1.  Determine the relative depth for each 3D Gaussian based on its z-axis value [S1].
+-2.  Scale the base pruning threshold $t_p$ by a multiplier $w_p$ determined by the relative depth [S1].
+-
+-**Parameters:**
+-*   $t_p$: The base 3D Gaussian pruning threshold. Value: $5 \times 10^{-3}$ for real defocus blur dataset; $1 \times 10^{-2}$ for real camera motion blur dataset [S1].
+-*   $w_p$: The pruning threshold multiplier based on depth. Value: 3 [S1].
++A pruning strategy that varies the pruning threshold based on the relative depth (z-axis value) of 3D Gaussians to preserve points at the far plane in forward-facing scenes [S1]. It determines the relative depth for each 3D Gaussian based on its z-axis value and scales the base pruning threshold $t_p$ by a multiplier $w_p$ determined by the relative depth, applying the lowest threshold to the farthest point [S1]. The base threshold $t_p$ is set to $5 \times 10^{-3}$ for real defocus blur datasets and $1 \times 10^{-2}$ for real camera motion blur datasets, with a depth multiplier $w_p$ of 3 [S1].
+ 
+ ## Background
+-Pruning in 3D Gaussian Splatting originated as a component of the adaptive density control mechanism in the original 3D-GS paper [14], where it was used to remove low-opacity Gaussians during training. Later works, such as Deblurring 3D Gaussian Splatting [S1], introduced depth-aware pruning to handle specific artifacts in forward-facing scenes. More recently, Principled Uncertainty Pruning [S1] adapted techniques from neural network pruning (Fisher Information) to 3D-GS for post-training compression.
++Pruning is a core component of the original 3D Gaussian Splatting (3D-GS) training pipeline, introduced by Kerbl et al. in 2023 [S1]. It was designed to work in tandem with densification to maintain a compact representation. Subsequent works have refined this process: Significance-Aware Pruning was introduced to address the limitations of simple opacity thresholds [S2], while Principled Uncertainty Pruning (PUP) was developed to enable high-compression post-training sparsification using second-order information [S1]. Depth-based pruning was proposed specifically for forward-facing scenes with blur, such as in Deblurring 3D Gaussian Splatting, to handle sparse far-plane geometry [S1].
+ 
+ ## Sources

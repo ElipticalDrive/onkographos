@@ -1,0 +1,173 @@
+Context The current heightmap pipeline takes the Azgaard source (1920×1006, u8) and upscales it bilinearly to 2048×1024. At ×100 in-game, each texel covers ~100 world units. The hillshading shader (Sobel gradient) operates on this low-re...
+
+Enriched Heightmap Generation — Altitude-dependent FBM Detail · Issue #215 · FifionRibana/Living-Landz-re- · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Enriched Heightmap Generation — Altitude-dependent FBM Detail #215
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Enriched Heightmap Generation — Altitude-dependent FBM Detail#215
+Copy link
+Labels
+Look&Feeldomain::renderingprio::lowtype::enhancement
+Description
+FifionRibana
+opened on Apr 8, 2026
+Issue body actions
+Context
+The current heightmap pipeline takes the Azgaard source (1920×1006, u8) and upscales it bilinearly to 2048×1024. At ×100 in-game, each texel covers ~100 world units. The hillshading shader (Sobel gradient) operates on this low-resolution data, producing shadows that are too macro-scale to convey local relief. The terrain looks flat despite having continental-scale elevation data.
+Reference screenshot: coastal zone with trees but no visible terrain relief.
+Objective
+Generate an enriched heightmap at ×4 resolution (~8192×4096) with procedural FBM detail baked in, producing a single source of truth for:
+Rendering: hillshading shader reads richer gradient data → visible hills, valleys, cliffs
+Tagging: hex cells are tagged with altitude band and slope class for gameplay (resource placement, building restrictions, pathfinding cost)
+UI: per-cell altitude display (meters above sea level)
+Design Decisions
+Pipeline
+Source Azgaard heightmap (u8, ~1920×1006)
+Bilinear interpolation to target resolution (f32, 0.0–1.0)
+Meso FBM (4 octaves, rotated): hills and valleys, ~2–8 km wavelength, ±15–30m amplitude
+Micro FBM (2 octaves, rotated): surface texture, ~500m wavelength, ±5–8m amplitude
+Altitude-dependent amplitude: coast = minimal noise (15%), mountains = full noise (100%), smooth ramp via smoothstep
+Clamp to [0.001, 1.0] — land never pushed below sea level
+Quantize to u16 (R16Unorm) — 0.04m precision over 2560m range
+Format
+Output: Vec<u16>, R16Unorm texture
+Resolution: 8192 × (8192 × source_aspect) ≈ 8192 × 4288
+Memory: ~70 MB uncompressed, ~15–20 MB zstd-compressed for transfer
+Shader impact: textureSample returns 0.0–1.0 identically to R8 → shader reads are transparent
+Tagging (derived from enriched heightmap)
+Altitude bands:
+Band
+Range
+Gameplay
+CoastalPlain
+0–50m
+Fishing, salt, ports
+Lowland
+50–200m
+Best farmland, most settlements
+Highland
+200–600m
+Mixed forest, some mining
+LowerMountain
+600–1200m
+Mining, sparse settlements
+UpperMountain
+1200–2000m
+Alpine meadows, rare ores
+Peak
+2000m+
+Snow, impassable except passes
+Slope classes (from Sobel gradient on enriched heightmap):
+Class
+Gradient
+Gameplay
+Flat
+< 0.05
+Buildable, farmable
+Gentle
+0.05–0.15
+Buildable with penalty, vineyards/orchards
+Moderate
+0.15–0.35
+Limited building, forest/pasture
+Steep
+0.35–0.60
+No building, natural barrier, quarry candidate
+Cliff
+> 0.60
+Impassable, visual landmark, tag for gameplay
+Tagging is based on the enriched heightmap (option A: deterministic, noise baked in data). The shader may add additional normal perturbation for micro-detail rendering, but this does not affect gameplay tags.
+Parameters to tune (via Python visualization script)
+meso_frequency: 0.003–0.01 (hill size)
+meso_amplitude_max: 0.012–0.025 (hill height in normalized units)
+micro_frequency: 0.01–0.02 (surface bump size)
+micro_amplitude_max: 0.002–0.005 (surface bump height)
+altitude_low_threshold: 0.05 (below = flat coast)
+altitude_high_threshold: 0.40 (above = full ruggedness)
+altitude_min_factor: 0.10–0.20 (coast still gets some noise)
+Tasks
+Python visualization script: generate comparison images (before/after enrichment, hillshading simulation) to calibrate FBM parameters
+Implement generate_enriched_heightmap in Rust (server-side, game-seed or shared crate)
+Update heightmap endpoint to serve u16 data (verify compression is applied)
+Client: change texture format from R8Unorm to R16Unorm
+Shader: reduce slope_scale (8.0 → 2.0–4.0) and Sobel step (×8 → ×2–4) to match new resolution
+Implement hex tagging: altitude band + slope class per cell from enriched heightmap
+Expose per-cell altitude in UI (meters above sea level)
+Benchmark generation time (target: < 15s for ×4 enrichment on top of existing pipeline)
+Dependencies
+Existing: generate_global_heightmap, Azgaard heightmap pipeline
+Chunk height fix (670 → 675) should be done before or alongside
+Overlay resource placement (rocks, minerals) depends on tagging from this issue
+Out of scope
+Occlusion / line-of-crest rendering (separate issue)
+Shader micro-detail normal perturbation (separate issue, can use enriched heightmap as base)
+Snow rendering at high altitude (separate, uses altitude band)
+Tree density variation by altitude (separate, uses altitude band)
+Activity
+FifionRibana
+added
+Look&Feel
+domain::rendering
+prio::low
+type::enhancement
+on Apr 8, 2026
+FifionRibana
+added 12 commits that reference this issue on Apr 9, 2026
+FEAT : enriched heightmap generation with altitude-dependent FBM deta…
+...
+f85b7a8
+FIX : Update chunk size to match 12.5x14 cells per chunks [#215]
+895b99a
+FIX : Ensure that territory contours are properly generated [#215]
+4b6275e
+FEAT : Compute ShoreType to match the enriched heightmap [#215]
+833ff23
+FIX : Update SDF and biome to use the enriched heightmap [#215]
+f66b592
+FIX : Water threshold to 0, heightmap sampler filtering, chunk SDF wo…
+...
+1e4ed7d
+FEAT : Adjust shader to use properly the enriched heightmap (WIP) [#215]
+fb1ffe8
+FEAT : Use ocean global SDF for beach transitions and adjust for new …
+...
+eabac20
+FIX : Lake flood fill + biome-based ShoreType classification [#215]
+...
+3c6f5ba
+FIX: Lake pipeline symmetric with ocean — SDF-only rendering, no mask […
+...
+923792a
+FEAT : Rock rendering on cliffs + altitude shading + lake bank attenu…
+...
+6e7a2d6
+FEAT: Show slope in debug UI for all cells including sea level [#215]
+...
+442bea6
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+Look&Feeldomain::renderingprio::lowtype::enhancement
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

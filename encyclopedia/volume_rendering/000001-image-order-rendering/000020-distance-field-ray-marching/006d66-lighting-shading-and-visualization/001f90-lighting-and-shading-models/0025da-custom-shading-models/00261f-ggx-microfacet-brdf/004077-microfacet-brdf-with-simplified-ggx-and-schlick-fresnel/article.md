@@ -1,0 +1,122 @@
+# Microfacet BRDF with Simplified GGX and Schlick Fresnel
+
+Also called: NeRV BRDF, Walter et al. BRDF with Filament/Unreal simplifications
+
+## Overview
+This method defines a surface reflectance function $R(\mathbf{x}, \boldsymbol{\omega}_i, \boldsymbol{\omega}_o)$ that combines a specular microfacet term with a diffuse Lambertian term, incorporating specific simplifications from the Filament and Unreal Engine renderers [S1]. It sets itself apart from the parent [GGX Microfacet BRDF](3715-ggx-microfacet-brdf.md) by using a specific analytical form for the geometry function $G$ and embedding the incoming cosine term $(\mathbf{n} \cdot \boldsymbol{\omega}_i)$ directly into the diffuse term to simplify equations in the main paper [S1].
+
+## How it works
+**Inputs:**
+- $\mathbf{x}$: 3D surface location [S1].
+- $\boldsymbol{\omega}_i$: Incoming light direction (unit vector) [S1].
+- $\boldsymbol{\omega}_o$: Outgoing view direction (unit vector) [S1].
+- $\mathbf{n}$: Surface normal at $\mathbf{x}$ (unit vector) [S1].
+- $\gamma$: Roughness parameter (scalar, $\gamma > 0$) [S1].
+- $\mathbf{a}$: Diffuse albedo (scalar or RGB vector) [S1].
+- $F_0$: Fresnel reflectance at normal incidence (scalar, typically 0.04 for dielectric materials) [S1].
+
+**Outputs:**
+- $R(\mathbf{x}, \boldsymbol{\omega}_i, \boldsymbol{\omega}_o)$: Reflectance value [S1].
+
+**Steps:**
+1. Compute the half-vector $\mathbf{h}$:
+   $$ \mathbf{h} = \frac{\boldsymbol{\omega}_o + \boldsymbol{\omega}_i}{\|\boldsymbol{\omega}_o + \boldsymbol{\omega}_i\|} $$ [S1]
+2. Compute intermediate roughness parameters:
+   $$ \rho = \gamma^2, \quad k = \frac{\gamma^4}{2} $$ [S1]
+3. Compute the Normal Distribution Function $D(\mathbf{h}, \mathbf{n}, \gamma)$:
+   $$ D(\mathbf{h}, \mathbf{n}, \gamma) = \frac{\rho^2}{\pi \left( (\mathbf{n} \cdot \mathbf{h})^2 (\rho^2 - 1) + 1 \right)^2} $$ [S1]
+4. Compute the Fresnel term $F(\boldsymbol{\omega}_i, \mathbf{h})$ using Schlick's approximation:
+   $$ F(\boldsymbol{\omega}_i, \mathbf{h}) = F_0 + (1 - F_0)(1 - (\boldsymbol{\omega}_i \cdot \mathbf{h}))^5 $$ [S1]
+5. Compute the Geometry function $G(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o, \gamma)$:
+   $$ G(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o, \gamma) = \frac{(\mathbf{n} \cdot \boldsymbol{\omega}_o)(\mathbf{n} \cdot \boldsymbol{\omega}_i)}{\left( (\mathbf{n} \cdot \boldsymbol{\omega}_o)(1-k) + k \right) \left( (\mathbf{n} \cdot \boldsymbol{\omega}_i)(1-k) + k \right)} $$ [S1]
+6. Compute the specular reflectance component:
+   $$ R_{\text{spec}} = \frac{D(\mathbf{h}, \mathbf{n}, \gamma) F(\boldsymbol{\omega}_i, \mathbf{h}) G(\boldsymbol{\omega}_i, \boldsymbol{\omega}_o, \gamma)}{4(\mathbf{n} \cdot \boldsymbol{\omega}_o)} $$ [S1]
+7. Compute the diffuse reflectance component, which includes the Lambert cosine term $(\mathbf{n} \cdot \boldsymbol{\omega}_i)$:
+   $$ R_{\text{diff}} = (\mathbf{n} \cdot \boldsymbol{\omega}_i)(1 - F(\boldsymbol{\omega}_i, \mathbf{h})) \left(\frac{\mathbf{a}}{\pi}\right) $$ [S1]
+8. Sum components:
+   $$ R(\mathbf{x}, \boldsymbol{\omega}_i, \boldsymbol{\omega}_o) = R_{\text{spec}} + R_{\text{diff}} $$ [S1]
+
+**Pitfalls:**
+- The BRDF definition explicitly includes the multiplication by the Lambert cosine term $(\mathbf{n} \cdot \boldsymbol{\omega}_i)$ in the diffuse part to simplify equations in the main paper, meaning the geometric term $G$ and the diffuse term are structured differently than standard separable forms [S1].
+- Division by zero occurs if $\mathbf{n} \cdot \boldsymbol{\omega}_o = 0$ or $\mathbf{n} \cdot \boldsymbol{\omega}_i = 0$, requiring clamping or early exit for grazing angles [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def dot(v1, v2):
+    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+
+def length(v):
+    return math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+
+def microfacet_brdf_simplified_ggx_schlick(n, wi, wo, gamma, a, F0):
+    # 1. Half vector
+    h = [wi[0] + wo[0], wi[1] + wo[1], wi[2] + wo[2]]
+    h_len = length(h)
+    if h_len < 1e-6:
+        return 0.0
+    h = [x / h_len for x in h]
+
+    # 2. Parameters
+    rho = gamma * gamma
+    k = (gamma ** 4) / 2.0
+
+    # 3. NDF D
+    nh = dot(n, h)
+    nh2 = nh * nh
+    denom_d = (nh2 * (rho * rho - 1.0) + 1.0)
+    D = (rho * rho) / (math.pi * denom_d * denom_d)
+
+    # 4. Fresnel F
+    wi_dot_h = dot(wi, h)
+    F = F0 + (1.0 - F0) * ((1.0 - wi_dot_h) ** 5)
+
+    # 5. Geometry G
+    no = dot(n, wo)
+    ni = dot(n, wi)
+
+    if no < 1e-6 or ni < 1e-6:
+        return 0.0
+
+    g_num = no * ni
+    g_denom1 = no * (1.0 - k) + k
+    g_denom2 = ni * (1.0 - k) + k
+    G = g_num / (g_denom1 * g_denom2)
+
+    # 6. Specular term
+    spec = (D * F * G) / (4.0 * no)
+
+    # 7. Diffuse term
+    diff = ni * (1.0 - F) * (a / math.pi)
+
+    # 8. Total
+    return spec + diff
+```
+
+## Subtopics
+
+### [Modified Disney Principled BRDF](10860-modified-disney-principled-brdf.md)
+The Modified Disney Principled BRDF is a simplified surface reflectance model derived from the Disney Principled BRDF, tailored for use in the Absorption-Based Scene Diffusion Factorization (ABSDF) framework. It solves the problem of efficiently aggregating complex microfacet reflections by reducing the original model's complexity while retaining its core appearance capabilities for metals and plastics. It sets itself apart from its parent, the [Microfacet BRDF with Simplified GGX and Schlick Fresnel](10259-microfacet-brdf-with-simplified-ggx-and-schlick-fresnel.md), by explicitly adopting a Lambertian diffuse term, omitting sheen and clearcoat lobes, and assuming double-sided surfaces to facilitate analytical factorization.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time and memory complexity: Not given in the sources.
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Strengths and Limitations:**
+- Strengths: Computationally efficient due to simplified analytical forms for $D$, $F$, and $G$ [S1].
+- Limitations: Not given in the sources.
+
+**When to use:**
+- Not given in the sources.
+
+## Background
+This BRDF parameterization is used in the NeRV (Neural Reflectance and Visibility Fields) method for relighting and view synthesis [S1]. It builds on the standard microfacet BRDF described by Walter et al. [S1] and incorporates simplifications from the Filament [S1] and Unreal Engine [S1] rendering engines. The specific formulation, including the geometry term $G$ and the embedding of the cosine term, is designed to simplify equations in the main NeRV paper [S1].
+
+## Sources
+[S1] NeRV: Neural Reflectance and Visibility Fields for Relighting and View Synthesis, https://doi.org/10.1109/cvpr46437.2021.00741, fetched 2026-10-26

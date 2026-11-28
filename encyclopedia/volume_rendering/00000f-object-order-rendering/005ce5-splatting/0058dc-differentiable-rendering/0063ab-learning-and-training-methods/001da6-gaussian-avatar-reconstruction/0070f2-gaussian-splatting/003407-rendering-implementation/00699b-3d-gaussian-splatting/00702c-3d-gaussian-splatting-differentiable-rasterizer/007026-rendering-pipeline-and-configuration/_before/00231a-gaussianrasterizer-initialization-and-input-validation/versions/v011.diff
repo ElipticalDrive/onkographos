@@ -1,0 +1,412 @@
+--- v010.md
++++ v011.md
+@@ -4,82 +4,63 @@
+ 
+ ## Overview
+-The `GaussianRasterizer` initialization and input validation module serves as the PyTorch `nn.Module` wrapper that prepares data for the underlying C++/CUDA rasterization backend. It solves the problem of ensuring type safety, device consistency, and logical mutual exclusivity of input representations before invoking the heavy computation kernel. It is distinguished from its siblings by its specific role in **pre-processing and validation**: while [GaussianRasterizationSettings](2924-gaussianrasterizationsettings.md) defines the camera and rendering parameters, and the [Gaussian Splatting Rendering Pipeline](3415-gaussian-splatting-rendering-pipeline.md) orchestrates the high-level training loop, this module strictly enforces that the Gaussian attributes (color and geometry) are provided in exactly one valid format, preventing undefined states in the CUDA execution [S1, S2, S3, unofficial].
++The `GaussianRasterizer` initialization and input validation phase ensures that the PyTorch module wrapper correctly prepares data structures before invoking the underlying C++/CUDA rasterization backend. It solves the problem of undefined behavior and CUDA kernel crashes caused by inconsistent tensor states, such as missing color or geometry representations, or tensors residing on mismatched devices. It distinguishes itself from the rendering pipeline by focusing strictly on pre-computation checks and tensor normalization rather than the actual splatting or blending operations.
+ 
+ ## How it works
+-The module implements a forward pass that validates inputs, normalizes `None` values to empty tensors, and constructs the argument tuple for the C++ rasterizer.
++The method operates as a PyTorch `nn.Module` wrapper (or a static function in some implementations) that validates inputs and invokes the C++/CUDA rasterization routine.
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   `raster_settings`: An instance of `GaussianRasterizationSettings` (see [GaussianRasterizationSettings](2924-gaussianrasterizationsettings.md)).
+-*   `means3D`: Tensor of shape $(N, 3)$, Gaussian means in world coordinates.
+-*   `colors_precomp`: Tensor of shape $(N, 3)$, precomputed RGB colors. **Mutually exclusive** with `shs`.
+-*   `opacities`: Tensor of shape $(N, 1)$ or $(N,)$, Gaussian opacities.
+-*   `scales`: Tensor of shape $(N, 3)$, Gaussian scales. **Mutually exclusive** with `cov3D_precomp`.
+-*   `rotations`: Tensor of shape $(N, 4)$, Gaussian rotations (quaternions). **Mutually exclusive** with `cov3D_precomp`.
+-*   `cov3D_precomp`: Tensor of shape $(N, 6)$, precomputed 3D covariances. **Mutually exclusive** with `scales`/`rotations`.
+-*   `shs`: Tensor of shape $(N, K, 3)$, Spherical Harmonics coefficients. **Mutually exclusive** with `colors_precomp`.
+-*   `dc`: Tensor of shape $(N, 3)$, DC offset for SH. Optional.
+-*   `features`: Optional feature tensor. If `None`, initialized to empty tensor matching `means3D` feature dimension [S1, unofficial].
++1.  `raster_settings`: A container object (typically a `NamedTuple` or class instance) holding camera and rendering parameters.
++2.  `means3D`: Tensor of shape $(N, 3)$, 3D Gaussian centers.
++3.  `opacities`: Tensor of shape $(N, 1)$ or $(N)$, Gaussian opacities.
++4.  `shs` (Spherical Harmonics coefficients): Tensor of shape $(N, K, C)$ or $(N, C)$, where $K$ depends on SH degree.
++5.  `colors_precomp`: Tensor of shape $(N, C)$, pre-computed colors (alternative to `shs`).
++6.  `scales`: Tensor of shape $(N, 3)$, Gaussian scaling factors.
++7.  `rotations`: Tensor of shape $(N, 4)$, Gaussian rotations (quaternions).
++8.  `cov3D_precomp`: Tensor of shape $(N, 6)$ or $(N, 3, 3)$, pre-computed 3D covariances (alternative to `scales`/`rotations`).
++9.  Optional inputs: `dc` (DC offset), `bg` (background color), `viewmatrix`, `projmatrix`, `tanfovx`, `tanfovy`, `image_height`, `image_width`, `campos`, `scale_modifier`, `mult`, `get_flag`, `prefiltered`, `debug`.
+ 
+ **Outputs:**
+-*   `render`: Tensor of shape $(3, H, W)$, the rendered RGB image.
+-*   `accum`: Tensor of shape $(1, H, W)$, accumulated opacity/alpha.
+-*   Additional buffers (e.g., `depth`, `normals`, `metric_map`) if enabled by `raster_settings` flags [S3, unofficial].
++*   Validated tensors ready for the CUDA kernel.
++*   Exceptions raised if validation fails.
+ 
+ ### Data Structures
+ 
+-**GaussianRasterizationSettings**
+-A `NamedTuple` (or dataclass) containing:
++#### GaussianRasterizationSettings
++A container for camera and rendering configuration. The exact fields vary slightly by implementation variant, but generally include:
++
+ *   `image_height`: `int`
+ *   `image_width`: `int`
+-*   `tanfovx`: `float`
+-*   `tanfovy`: `float`
+-*   `bg`: `torch.Tensor` (background color, typically shape $(3)$)
+-*   `scale_modifier`: `float`
+-*   `viewmatrix`: `torch.Tensor` (4x4 view matrix)
+-*   `projmatrix`: `torch.Tensor` (4x4 projection matrix)
+-*   `sh_degree`: `int`
++*   `tanfovx`: `float` (tangent of horizontal field of view)
++*   `tanfovy`: `float` (tangent of vertical field of view)
++*   `bg`: `torch.Tensor` (background color, typically shape $(3)$ or $(1, 3)$)
++*   `scale_modifier`: `float` (modifier for Gaussian scales)
++*   `viewmatrix`: `torch.Tensor` (view transformation matrix)
++*   `projmatrix`: `torch.Tensor` (projection matrix)
++*   `sh_degree`: `int` (active SH degree)
+ *   `campos`: `torch.Tensor` (camera position)
+-*   `mult`: `float` (metric scaling/accumulation weighting) [S3, unofficial]
++*   `mult`: `float` (metric scaling/accumulation weighting, used in specific variants like FastGS) [S3, unofficial]
++*   `get_flag`: `bool` (default `False`, controls specific rasterization behavior or buffer allocation) [S3, unofficial]
+ *   `prefiltered`: `bool`
+ *   `debug`: `bool`
+ *   `antialiasing`: `bool` (present in some variants) [S3, unofficial]
+-*   `get_flag`: `bool` (controls specific rasterization behavior/buffer allocation, defaults to `False` if `None`) [S3, unofficial]
+-
+-### Numbered Steps
+-
+-1.  **Mutual Exclusivity Check (Color):** Verify that exactly one of `shs` or `colors_precomp` is provided. If both are `None` or both are not `None`, raise an `Exception` [S1, S2, S3, unofficial].
+-2.  **Mutual Exclusivity Check (Geometry):** Verify that exactly one of the pair (`scales`, `rotations`) or `cov3D_precomp` is provided. If both are `None` or both are not `None`, raise an `Exception` [S1, S2, S3, unofficial].
+-3.  **None Normalization:** For any input tensor that is `None`, replace it with an empty `torch.Tensor` of appropriate shape.
+-    *   For `shs`, `colors_precomp`, `scales`, `rotations`, `cov3D_precomp`, `dc`: Initialize to `torch.Tensor([])` or shape $(N, 0)$ [S1, S2, S3, unofficial].
+-    *   For `features`: If `None`, initialize as an empty tensor matching the feature dimension of `means3D` (e.g., `means3D[..., :0]`) [S1, unofficial].
+-4.  **Device Consistency:** Ensure all input tensors reside on the same device (typically CUDA) as `raster_settings` and the expected output [Parent].
+-5.  **Argument Construction:** Construct the argument tuple for the C++ rasterizer `_C.rasterize_gaussians`. The tuple includes:
+-    *   `raster_settings.bg`
+-    *   `means3D`
+-    *   `colors_precomp`
+-    *   `opacities`
+-    *   `scales`
+-    *   `rotations`
+-    *   `scale_modifier`
+-    *   `cov3Ds_precomp`
+-    *   `metric_map` (if applicable) [S3, unofficial]
+-    *   `viewmatrix`
+-    *   `projmatrix`
+-    *   `tanfovx`
+-    *   `tanfovy`
+-    *   `image_height`
+-    *   `image_width`
+-    *   `dc`
+-    *   `sh` (or `shs`)
+-    *   `sh_degree`
+-    *   `campos`
+-    *   `mult` [S3, unofficial]
+-    *   `prefiltered`
+-    *   `debug`
+-    *   `get_flag` [S3, unofficial]
+-6.  **CUDA Invocation:** Call `_C.rasterize_gaussians(*args)`.
+-    *   If `debug` mode is enabled in `raster_settings`, catch exceptions and save the CPU arguments to `'snapshot_fw.dump'` for debugging corrupted tensors [S3, unofficial].
+-    *   Otherwise, call directly [S3, unofficial].
++
++### Steps
++
++1.  **Device Consistency Check**: Ensure all input tensors (`means3D`, `opacities`, `scales`, `rotations`, `shs`, `colors_precomp`, `bg`, `viewmatrix`, `projmatrix`, etc.) reside on the same device (typically CUDA) as the rasterizer's expected output. If not, raise an error or move tensors [Parent].
++2.  **Mutual Exclusivity Validation (Color)**: Check that exactly one of `shs` or `colors_precomp` is provided.
++    *   If both are `None` or both are not `None`, raise an `Exception`.
++3.  **Mutual Exclusivity Validation (Geometry)**: Check that exactly one of the scale/rotation pair (`scales`, `rotations`) or `cov3D_precomp` is provided.
++    *   If both are `None` or both are not `None`, raise an `Exception`.
++4.  **None Normalization**: For any input tensor that is `None`, convert it to an empty `torch.Tensor` with the appropriate shape to prevent CUDA kernel crashes.
++    *   `shs` $\rightarrow$ `torch.Tensor([])` or shape $(N, 0)$
++    *   `colors_precomp` $\rightarrow$ `torch.Tensor([])` or shape $(N, 0)$
++    *   `scales` $\rightarrow$ `torch.Tensor([])` or shape $(N, 0)$
++    *   `rotations` $\rightarrow$ `torch.Tensor([])` or shape $(N, 0)$
++    *   `cov3D_precomp` $\rightarrow$ `torch.Tensor([])` or shape $(N, 0)$
++    *   `dc` $\rightarrow$ `torch.Tensor([])` or shape $(N, 0)$ [S3, unofficial]
++    *   `sh` (if distinct from `shs`) $\rightarrow$ `torch.Tensor([])` [S3, unofficial]
++    *   *Note*: If `features` is `None`, initialize it as an empty tensor matching the feature dimension of `means3D` (slice `[..., :0]`) [S1, unofficial].
++5.  **Invoke Rasterizer**: Call the underlying C++/CUDA rasterization routine (e.g., `_C.rasterize_gaussians` or `rasterize_gaussians`) with the validated and prepared arguments.
+ 
+ ### Pseudocode
+@@ -87,122 +68,151 @@
+ ```python
+ import torch
+-from typing import Tuple, Optional
+-
+-# Assume _C is the imported C++/CUDA extension module
+-# Assume GaussianRasterizationSettings is the NamedTuple for settings
+-
+-class GaussianRasterizer(torch.nn.Module):
+-    def __init__(self, raster_settings):
+-        super().__init__()
+-        self.raster_settings = raster_settings
+-
+-    def forward(
+-        self,
+-        means3D: torch.Tensor,
+-        colors_precomp: Optional[torch.Tensor] = None,
+-        shs: Optional[torch.Tensor] = None,
+-        opacities: Optional[torch.Tensor] = None,
+-        scales: Optional[torch.Tensor] = None,
+-        rotations: Optional[torch.Tensor] = None,
+-        cov3D_precomp: Optional[torch.Tensor] = None,
+-        dc: Optional[torch.Tensor] = None,
+-        features: Optional[torch.Tensor] = None
+-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+-        """
+-        Validates inputs and invokes the CUDA rasterizer.
+-        """
+-        rs = self.raster_settings
+-        
+-        # 1. Mutual Exclusivity Check (Color)
+-        if (colors_precomp is None) == (shs is None):
+-            raise Exception("Exactly one of colors_precomp or shs must be provided.")
+-        
+-        # 2. Mutual Exclusivity Check (Geometry)
+-        scales_rotations_provided = (scales is not None and rotations is not None)
+-        cov3D_provided = (cov3D_precomp is not None)
+-        
+-        if (not scales_rotations_provided) == (not cov3D_provided):
+-            raise Exception("Exactly one of (scales, rotations) or cov3D_precomp must be provided.")
+-
+-        # 3. None Normalization
+-        # Replace None with empty tensors of appropriate shape
+-        if colors_precomp is None:
+-            # Shape (N, 0) or empty tensor
+-            colors_precomp = torch.empty((means3D.shape[0], 0), device=means3D.device)
+-        if shs is None:
+-            shs = torch.empty((means3D.shape[0], 0, 3), device=means3D.device)
+-        if scales is None:
+-            scales = torch.empty((means3D.shape[0], 0), device=means3D.device)
+-        if rotations is None:
+-            rotations = torch.empty((means3D.shape[0], 0), device=means3D.device)
+-        if cov3D_precomp is None:
+-            cov3D_precomp = torch.empty((means3D.shape[0], 0), device=means3D.device)
+-        if dc is None:
+-            dc = torch.empty((means3D.shape[0], 0), device=means3D.device)
+-        
+-        # Handle features if provided but None logic applies to other optional args
+-        # Note: features is not always passed to the core rasterizer in all variants,
+-        # but if it is, it should be normalized similarly.
+-        if features is None:
+-            # Initialize as empty tensor matching feature dim of means3D if needed
+-            # Assuming means3D has no extra feature dim, just empty
+-            features = torch.empty((means3D.shape[0], 0), device=means3D.device)
+-
+-        # 4. Device Consistency (Implicitly handled by torch.empty(..., device=means3D.device))
+-        # Ensure opacities is on the same device
+-        if opacities is not None:
+-            opacities = opacities.to(means3D.device)
+-        
+-        # 5. Argument Construction
+-        args = (
+-            rs.bg,
+-            means3D,
+-            colors_precomp,
+-            opacities,
+-            scales,
+-            rotations,
+-            rs.scale_modifier,
+-            cov3D_precomp,
+-            rs.viewmatrix,
+-            rs.projmatrix,
+-            rs.tanfovx,
+-            rs.tanfovy,
+-            rs.image_height,
+-            rs.image_width,
+-            dc,
+-            shs,
+-            rs.sh_degree,
+-            rs.campos,
+-            rs.mult,
+-            rs.prefiltered,
+-            rs.debug,
+-            rs.get_flag
+-        )
+-
+-        # 6. CUDA Invocation
++
++def validate_and_prepare_gaussian_inputs(
++    means3D: torch.Tensor,
++    opacities: torch.Tensor,
++    shs: torch.Tensor = None,
++    colors_precomp: torch.Tensor = None,
++    scales: torch.Tensor = None,
++    rotations: torch.Tensor = None,
++    cov3D_precomp: torch.Tensor = None,
++    dc: torch.Tensor = None,
++    raster_settings: dict,
++    debug: bool = False
++) -> tuple:
++    """
++    Validates inputs and prepares empty tensors for missing optional arguments
++    before invoking the CUDA rasterizer.
++    
++    Args:
++        means3D: Tensor of shape (N, 3)
++        opacities: Tensor of shape (N, 1) or (N)
++        shs: Tensor of SH coefficients or None
++        colors_precomp: Tensor of precomputed colors or None
++        scales: Tensor of shape (N, 3) or None
++        rotations: Tensor of shape (N, 4) or None
++        cov3D_precomp: Tensor of precomputed covariances or None
++        dc: Tensor of DC offset or None
++        raster_settings: Container with camera parameters
++        debug: Boolean flag for debug mode
++        
++    Returns:
++        Tuple of validated tensors ready for CUDA kernel
++    """
++    
++    # 1. Device Consistency Check [Parent]
++    # Ensure all tensors are on the same device as means3D
++    device = means3D.device
++    opacities = opacities.to(device)
++    
++    # Helper to move tensor to device if not None
++    def to_device(t):
++        return t.to(device) if t is not None else None
++
++    shs = to_device(shs)
++    colors_precomp = to_device(colors_precomp)
++    scales = to_device(scales)
++    rotations = to_device(rotations)
++    cov3D_precomp = to_device(cov3D_precomp)
++    dc = to_device(dc)
++    
++    # 2. Mutual Exclusivity Validation (Color) [S1, S2, S3, S4, unofficial]
++    if (shs is None) == (colors_precomp is None):
++        raise Exception("Exactly one of shs or colors_precomp must be provided.")
++        
++    # 3. Mutual Exclusivity Validation (Geometry) [S1, S2, S3, S4, unofficial]
++    if (scales is None and rotations is None) == (cov3D_precomp is None):
++        # Note: scales and rotations are a pair. If cov3D_precomp is provided, 
++        # scales/rotations must be None. If cov3D_precomp is None, 
++        # both scales and rotations must be provided (or handled as a pair).
++        # The check above ensures we don't have (both None) vs (cov provided)
++        # or (cov None) vs (both provided).
++        # However, standard logic is: exactly one representation.
++        # If cov3D_precomp is not None, scales/rotations MUST be None.
++        # If cov3D_precomp is None, scales/rotations MUST be provided.
++        if cov3D_precomp is not None and (scales is not None or rotations is not None):
++            raise Exception("Cannot provide both cov3D_precomp and scales/rotations.")
++        if cov3D_precomp is None and (scales is None or rotations is None):
++            raise Exception("Must provide both scales and rotations if cov3D_precomp is not provided.")
++
++    # 4. None Normalization [S1, S2, S3, S4, unofficial]
++    # Replace None with empty tensors of appropriate shape
++    if shs is None:
++        # Shape depends on implementation, often (N, 0) or empty
++        shs = torch.empty((means3D.shape[0], 0), device=device)
++        
++    if colors_precomp is None:
++        colors_precomp = torch.empty((means3D.shape[0], 0), device=device)
++        
++    if scales is None:
++        scales = torch.empty((means3D.shape[0], 0), device=device)
++        
++    if rotations is None:
++        rotations = torch.empty((means3D.shape[0], 0), device=device)
++        
++    if cov3D_precomp is None:
++        cov3D_precomp = torch.empty((means3D.shape[0], 0), device=device)
++        
++    if dc is None:
++        dc = torch.empty((means3D.shape[0], 0), device=device)
++
++    # 5. Invoke Rasterizer [S2, S3, S4, unofficial]
++    # Construct argument tuple for C++ rasterizer
++    args = (
++        raster_settings.bg,
++        means3D,
++        colors_precomp,
++        opacities,
++        scales,
++        rotations,
++        raster_settings.scale_modifier,
++        cov3D_precomp,
++        # Additional args depending on variant:
++        # raster_settings.viewmatrix,
++        # raster_settings.projmatrix,
++        # raster_settings.tanfovx,
++        # raster_settings.tanfovy,
++        # raster_settings.image_height,
++        # raster_settings.image_width,
++        # dc,
++        # shs, # if shs is passed separately in some variants
++        # raster_settings.sh_degree,
++        # raster_settings.campos,
++        # raster_settings.mult,
++        # raster_settings.prefiltered,
++        # debug,
++        # raster_settings.get_flag
++    )
++    
++    # In debug mode, catch exceptions and save snapshot [S3, unofficial]
++    if debug:
+         try:
+-            render_output = _C.rasterize_gaussians(*args)
++            # Call C++ rasterizer
++            # result = _C.rasterize_gaussians(*args)
++            pass 
+         except Exception as e:
+-            if rs.debug:
+-                # Save snapshot for debugging
+-                import pickle
+-                with open('snapshot_fw.dump', 'wb') as f:
+-                    pickle.dump(args, f)
++            # Save cpu_args to 'snapshot_fw.dump' for debugging
++            import pickle
++            with open('snapshot_fw.dump', 'wb') as f:
++                pickle.dump(args, f)
+             raise e
+-
+-        return render_output
++    else:
++        # Call C++ rasterizer directly
++        # result = _C.rasterize_gaussians(*args)
++        pass
++        
++    return args
+ ```
+ 
+-### Parameters with Typical Values
+-*   `sh_degree`: Typically 3 (for 45 coefficients per Gaussian) [S3, unofficial].
+-*   `mult`: Float, used for metric scaling. Value depends on scene scale [S3, unofficial].
+-*   `get_flag`: Boolean, default `False` [S3, unofficial].
+-*   `scale_modifier`: Float, typically 1.0 [S3, unofficial].
++### Parameters and Typical Values
++*   `debug`: `bool`, default `False`. Enables snapshot saving on error.
++*   `mult`: `float`, used in FastGS variants for metric scaling.
++*   `get_flag`: `bool`, default `False`. Controls buffer allocation.
+ 
+ ### Edge Cases and Pitfalls
+-*   **Mutual Exclusivity Violation:** Providing both `shs` and `colors_precomp`, or both `cov3D_precomp` and (`scales`, `rotations`), raises an exception. This prevents undefined behavior in the CUDA kernel which expects one specific format [S1, S2, S3, unofficial].
+-*   **None Propagation:** Passing `None` directly to the CUDA kernel causes crashes. All `None` inputs must be converted to empty tensors [S1, S2, S3, unofficial].
+-*   **Device Mismatch:** Tensors on different devices (e.g., CPU vs. CUDA) cause kernel launch errors. All inputs must be on the same device as `means3D` [Parent].
+-*   **Debug Snapshot:** In debug mode, if the CUDA kernel fails, the arguments are saved to `snapshot_fw.dump` to allow inspection of corrupted tensors [S3, unofficial].
++*   **Passing `None` directly to CUDA**: Passing `None` instead of an empty tensor causes CUDA kernel crashes [Parent].
++*   **Device Mismatch**: Tensors on different devices (e.g., CPU vs. CUDA) cause undefined behavior or errors [Parent].
++*   **Mutual Exclusivity Violation**: Providing both SHs and precomputed colors, or both scales/rotations and precomputed covariances, raises an exception [S1, S2, S3, S4, unofficial].
++*   **Debug Snapshot**: In debug mode, if an exception occurs, arguments are saved to `snapshot_fw.dump` for inspection [S3, unofficial].
+ 
+ ## Subtopics
+@@ -215,14 +225,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The validation step is $O(N)$ where $N$ is the number of Gaussians, due to tensor shape checks and empty tensor creation. The actual rasterization time is dominated by the CUDA kernel, which is typically $O(N \cdot T)$ where $T$ is the number of tiles, but this is outside the scope of the initialization module.
+-*   **Memory Complexity:** $O(N)$ for storing the input tensors. The empty tensor initialization adds negligible overhead.
+-*   **Measured Performance:** The validation step is extremely fast compared to the rasterization pass. In benchmarks, the overhead of this module is negligible [S3, unofficial].
+-*   **Strengths:** Prevents common user errors (wrong input format, device mismatch) before they reach the CUDA kernel, providing clear error messages.
+-*   **Limitations:** Adds a small Python overhead per frame. Not suitable for scenarios where validation is bypassed for extreme performance tuning (though this is rare).
+-*   **When to Use:** Always use this module as the entry point for Gaussian rasterization in PyTorch-based pipelines to ensure robustness.
+-*   **When Not to Use:** If implementing a custom C++/CUDA pipeline that handles its own validation, or if using a pre-validated data loader that guarantees correct formats.
++*   **Time Complexity**: $O(N)$ for validation and tensor preparation, where $N$ is the number of Gaussians. This is negligible compared to the rasterization step.
++*   **Memory Complexity**: $O(N)$ for storing the input tensors. Empty tensors have minimal overhead.
++*   **Strengths**: Prevents runtime crashes due to invalid inputs; ensures consistency across different variants (3DGS, FastGS, etc.).
++*   **Limitations**: Adds a small overhead for validation; does not optimize the rasterization itself.
++*   **When to use**: Always required before invoking the CUDA rasterizer.
+ 
+ ## Background
+-The `GaussianRasterizer` module is part of the 3D Gaussian Splatting ecosystem, originating from the work on differentiable rendering of 3D Gaussians. It was developed to provide a robust PyTorch interface for the underlying CUDA rasterization code, handling the complexities of input validation and tensor management. Variants such as FastGS and unified dispatchers build upon this foundation to optimize performance and support multiple Gaussian splatting variants [S1, S3, S4, unofficial].
++The `GaussianRasterizer` initialization and input validation is a critical component of the 3D Gaussian Splatting rendering pipeline, introduced in the original 3D Gaussian Splatting paper and subsequent implementations. It ensures that the differentiable rasterization backend receives correctly formatted and validated inputs, enabling stable training and rendering. Variants like FastGS and Unified Dispatchers build upon this foundation by adding specific parameters and dispatch logic.
+ 
+ ## Sources

@@ -1,0 +1,220 @@
+# Topologically Accurate Dual Isosurfacing
+
+Also called: Trilinear Isosurfacing with Ambiguous Face Handling
+
+## Overview
+Topologically Accurate Dual Isosurfacing is a method for extracting the topology of an analytical isosurface within a voxel cell using trilinear interpolation, specifically resolving ambiguous face configurations to ensure topological correctness [S1]. Unlike standard Marching Cubes which may produce topological errors in ambiguous cases, this method guarantees accuracy by determining specific diagonals for ray intersection based on the signs of ambiguous faces and the connectivity of diagonal vertices [S1]. It builds on [Marching Cubes Edge Intersection and Topology Test](2251-marching-cubes-edge-intersection-and-topology-test.md) by providing the precise diagonal selection logic required when trilinear interpolation creates multiple potential intersection paths within a single cell.
+
+## How it works
+**Inputs:**
+*   Scalar field values at the 8 vertices of a voxel cell: $v_0, \dots, v_7$.
+*   Isosurface value $I$.
+*   Cell sign: determined by the majority of vertex signs or a reference sign for the cell (denoted as $(+)$ or $(-)$) [S1].
+
+**Outputs:**
+*   A set of intersection points on the cell edges or diagonals.
+*   Topological classification of the cell configuration (index $x.y.z$).
+
+**Data Structures:**
+*   **Configuration Index:** A string or tuple format `x.y.z` where:
+    *   `x`: Sign configuration (0–13) from the standard MC case table.
+    *   `y`: Topological configuration (distinguishing disjoint surfaces from tunnels).
+    *   `z`: Sub-configuration (further distinction if required by the necklace test).
+*   **Ambiguous Face Sign:** Each of the 6 faces is classified as $(+)$ ambiguous-face or $(-)$ ambiguous-face based on the asymptotic decider [S1].
+
+**Key Concepts:**
+1.  **Ambiguous Face:** A face where the contour is a rectangular hyperbola. The sign is determined by the vertices in the quadrants containing the hyperbola [S1].
+2.  **Asymptotic Decider:** A function used to resolve the sign of an ambiguous face. It evaluates the scalar values at the four vertices of the face [S1, NH91].
+3.  **DeVella’s Necklace Test:** A test used to detect tunnels by checking if two vertices on a diagonal are "internally connected" [S1, Nie03]. A positive result indicates a tunnel topology [S1].
+
+**Steps:**
+
+1.  **Determine Cell Sign and Vertex Signs:**
+    Compute the sign of each vertex relative to the isosurface value $I$. Let $s_i = \text{sign}(v_i - I)$. Determine the dominant sign of the cell (e.g., if more vertices are positive, the cell is $(+)$) [S1].
+
+2.  **Identify Ambiguous Faces:**
+    For each of the 6 faces, determine if it is ambiguous. An ambiguous face occurs when the trilinear interpolation on the face creates a saddle point. Use the **Asymptotic Decider** to determine if the face is $(+)$ or $(-)$ ambiguous [S1].
+    *   *Note:* The sources cite [NH91] for the equations of the asymptotic decider. The decider evaluates the scalar values at the face vertices to determine the sign of the hyperbola branches [S1].
+
+3.  **Categorize Configuration:**
+    Map the 14 sign-configurations (0–13) to one of five categories based on the number of ambiguous faces: 0, 1, 2, 3, or 6 [S1].
+    *   Case 0 (no vertices on one side) is ignored as it does not intersect the isosurface [S1].
+
+4.  **Select Diagonals for Intersection:**
+    Based on the category, the number of ambiguous faces, their signs, and the signs of the diagonal vertices, select the diagonals to intersect [S1]. The goal is typically "one-point-per-disjoint-component," but this is relaxed for tunnels to capture complexity [S1].
+
+    **Rules for Diagonal Selection (for a $(+)$ cell):**
+
+    *   **Category 0 Ambiguous Faces (Cases 1, 2, 4, 5, 8, 9, 11):**
+        *   **Case 1:** Use 1 $(+/-)$ diagonal and 3 $(+/+)$ diagonals [S1].
+        *   **Case 2:** Use 2 $(+/-)$ diagonals and 2 $(+/+)$ diagonals [S1].
+        *   **Case 4:**
+            *   Determine if vertices on the $(-/-)$ diagonal are internally connected using DeVella’s Necklace Test [S1].
+            *   If **not** connected (Topology 4.1, disjoint surfaces): Use the $(-/-)$ diagonal [S1].
+            *   If **connected** (Topology 4.2, tunnel): Use 2 of the 3 $(+/+)$ diagonals [S1].
+        *   **Case 5:** Use 1 $(+/-)$ diagonal and 3 $(+/+)$ diagonals [S1].
+        *   **Case 8:** Use 4 $(+/-)$ diagonals [S1].
+        *   **Case 9:** Use 2 $(+/-)$ diagonals and 2 $(+/+)$ diagonals [S1].
+        *   **Case 11:** Use 1 $(+/-)$ diagonal and 3 $(+/+)$ diagonals [S1].
+
+    *   **Category 1 Ambiguous Face (Cases 3, 6):**
+        *   **Case 3:** (One ambiguous face). If the ambiguous face is $(+)$, use 1 $(+/+)$ diagonal. If $(-)$, use 1 $(-/-)$ diagonal [S1].
+        *   **Case 6:** (One ambiguous face).
+            *   If the ambiguous face is $(+)$: Use 1 $(+/+)$ diagonal [S1].
+            *   If the ambiguous face is $(-)$: Use 1 $(-/-)$ diagonal [S1].
+            *   *Note:* The sources mention sub-configurations for Case 6 involving tunnels if vertices on a same-sign diagonal are internally connected (6.1.1 vs 6.1.2) [S1].
+
+    *   **Category 2 Ambiguous Faces (Cases 10, 12):**
+        *   **Case 10:** (Two $(+)$ ambiguous faces).
+            *   Topology 10.1.1: Use 1 $(+/+)$ diagonal [S1].
+            *   Topology 10.1.2: Use 2 $(-/-)$ diagonals [S1].
+            *   Topology 10.2: Use 1 $(+/+)$ diagonal [S1].
+        *   **Case 12:** (Two $(+)$ ambiguous faces).
+            *   Topology 12.1.1: Use 1 $(+/+)$ diagonal [S1].
+            *   Topology 12.1.2: Use 2 $(-/-)$ diagonals [S1].
+            *   Topology 12.2: Use 1 $(+/-)$ diagonal [S1].
+
+    *   **Category 3 Ambiguous Faces (Case 7):**
+        *   **Case 7:** (Three ambiguous faces). Four sign combinations exist: $(+,+,+)$, $(+,+,-)$, $(+,-,-)$, $(-,-,-)$.
+            *   **7.1** (Three $(+)$ AFs): Use 3 $(+/-)$ diagonals [S1].
+            *   **7.2** (Two $(+)$ AFs, one $(-)$ AF): Use 2 $(+/-)$ diagonals [S1].
+            *   **7.3** (One $(+)$ AF, two $(-)$ AFs): Use 1 $(+/-)$ diagonal [S1].
+            *   **7.4** (Three $(-)$ AFs):
+                *   Check if vertices on the $(+/+)$ diagonal are internally connected using DeVella’s Necklace Test [S1].
+                *   If **not** connected (7.4.1, disjoint): Use 1 $(+/+)$ diagonal [S1].
+                *   If **connected** (7.4.2, tunnel): Use 3 $(+/-)$ diagonals [S1].
+
+    *   **Category 6 Ambiguous Faces (Case 13):**
+        *   **Case 13:**
+            *   **13.1:** Use 4 $(+/-)$ diagonals [S1].
+            *   **13.2:** Use 3 $(+/-)$ diagonals [S1].
+            *   **13.3:** Use 2 $(+/-)$ diagonals [S1].
+            *   **13.4:** Use 1 $(+/-)$ diagonal [S1].
+            *   **13.5.1:** Use 1 $(+/-)$ diagonal [S1].
+            *   **13.5.2:** Use 1 $(+/-)$ diagonal and 3 $(+/-)$ diagonals (specifically the $(+/-)$ diagonal through common vertices of 3 $(+)$ and 3 $(-)$ ambiguous faces) [S1].
+
+5.  **Compute Intersection Points:**
+    For each selected diagonal, compute the intersection point with the isosurface using trilinear interpolation [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def topologically_acurate_dual_isosurfacing(cell_vertices, isosurface_value):
+    """
+    cell_vertices: list of 8 scalar values [v0, ..., v7]
+    isosurface_value: float I
+    Returns: list of intersection points (3D coordinates)
+    """
+    # 1. Determine vertex signs
+    vertex_signs = [1 if v > isosurface_value else -1 for v in cell_vertices]
+    
+    # 2. Determine cell sign (majority vote)
+    cell_sign = 1 if sum(vertex_signs) > 0 else -1
+    
+    # 3. Identify ambiguous faces and their signs
+    # This requires the Asymptotic Decider [NH91]
+    # face_signs[i] is +1 for (+) ambiguous, -1 for (-) ambiguous, 0 for non-ambiguous
+    face_signs = [0] * 6
+    for i in range(6):
+        face_vertices = get_face_vertex_indices(i)
+        face_signs[i] = asymptotic_decider(cell_vertices, face_vertices, isosurface_value)
+        
+    # 4. Determine sign configuration (0-13)
+    # This maps the pattern of positive/negative vertices to the standard MC case index
+    sign_config = get_mc_case_index(vertex_signs)
+    
+    # 5. Categorize by number of ambiguous faces
+    num_ambiguous = sum(1 for s in face_signs if s != 0)
+    
+    # 6. Select diagonals based on rules
+    selected_diagonals = []
+    
+    if sign_config == 0:
+        return [] # No intersection
+        
+    elif sign_config == 4:
+        # Check for tunnel using DeVella's Necklace Test
+        # The (-/-) diagonal connects two negative vertices
+        is_tunnel = devellas_necklace_test(cell_vertices, vertex_signs, isosurface_value, diagonal_type='minus_minus')
+        if not is_tunnel:
+            # Topology 4.1: Disjoint
+            selected_diagonals.append('minus_minus')
+        else:
+            # Topology 4.2: Tunnel
+            selected_diagonals.append('plus_plus_1')
+            selected_diagonals.append('plus_plus_2')
+            
+    elif sign_config == 7:
+        # Check for tunnel in 7.4 (three negative ambiguous faces)
+        # Determine if it is case 7.4 based on face signs
+        if all(s == -1 for s in face_signs if s != 0):
+            is_tunnel = devellas_necklace_test(cell_vertices, vertex_signs, isosurface_value, diagonal_type='plus_plus')
+            if not is_tunnel:
+                # 7.4.1
+                selected_diagonals.append('plus_plus')
+            else:
+                # 7.4.2
+                selected_diagonals.append('plus_minus_1')
+                selected_diagonals.append('plus_minus_2')
+                selected_diagonals.append('plus_minus_3')
+        else:
+            # Other subcases of 7
+            # 7.1: 3 positive AFs -> 3 plus_minus
+            # 7.2: 2 positive, 1 negative -> 2 plus_minus
+            # 7.3: 1 positive, 2 negative -> 1 plus_minus
+            # Logic simplified for brevity; exact diagonal selection depends on specific AF signs
+            pass
+            
+    elif sign_config == 13:
+        # Case 13 has 6 ambiguous faces
+        # Selection depends on sub-configuration 13.1 to 13.5.2
+        # 13.5.2 requires specific diagonal through common vertices
+        pass
+        
+    else:
+        # General rule application for other cases
+        # See Table 3 in [S1] for exact diagonal types
+        pass
+
+    # 7. Compute intersection points
+    points = []
+    for diag in selected_diagonals:
+        p = compute_trilinear_intersection(cell_vertices, isosurface_value, diag)
+        points.append(p)
+        
+    return points
+
+def asymptotic_decider(vertices, face_indices, isosurface_value):
+    """
+    Returns +1 for (+) ambiguous face, -1 for (-) ambiguous face.
+    Uses equations from [NH91].
+    """
+    # Implementation of the asymptotic decider [NH91]
+    # Not given in the sources. Placeholder for the specific formula.
+    pass
+
+def devellas_necklace_test(vertices, vertex_signs, isosurface_value, diagonal_type):
+    """
+    Returns True if vertices on the diagonal are internally connected (tunnel).
+    Uses equations from [Nie03].
+    """
+    # Implementation of DeVella's necklace test [Nie03]
+    # Not given in the sources. Placeholder for the specific formula.
+    pass
+```
+
+## Operating characteristics
+*   **Complexity:** The method requires evaluating the asymptotic decider for each face and potentially the necklace test for specific cases. This is more computationally expensive than standard Marching Cubes due to the additional topological checks [S1].
+*   **Accuracy:** Guarantees topological correctness for trilinear interpolation, resolving ambiguities that standard MC fails to handle [S1].
+*   **Performance:** Optimized by selecting only necessary diagonals (one point per disjoint component, relaxed for tunnels) to minimize intersection calculations [S1].
+*   **Limitations:** Requires the implementation of the Asymptotic Decider and DeVella’s Necklace Test, which are non-trivial [S1].
+
+## Background
+*   **Origin:** The method is described in "Topologically Accurate Dual Isosurfacing Using Ray Intersection" by Sreevalsan-Nair, Linsen, and Hamann [S1].
+*   **History:** Nielson [Nie03] analytically showed that there are just three "levels of characterization" for cell configurations. DeVella’s necklace test is cited from [Nie03]. The Asymptotic Decider is cited from [NH91] (Nielson and Hamann).
+*   **Usage:** Used in volume rendering and surface extraction where topological accuracy is critical, particularly for complex features like tunnels [S1].
+
+## Sources
+[S1] Topologically Accurate Dual Isosurfacing Using Ray Intersection, https://graphics.cs.ucdavis.edu/~hamann/SreevalsanNairLinsenHamann2007FinalForJVRB03042007.pdf, fetched 2026-10-29

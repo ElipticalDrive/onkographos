@@ -1,0 +1,293 @@
+# Scale-Consistent Volume Rescaling (SCVR)
+Also called: DPV rescaling, Disparity Plane Volume rescaling
+
+## Overview
+Scale-Consistent Volume Rescaling (SCVR) is an iterative algorithm that rescales Disparity Probability Volumes (DPVs) from multiple source views to ensure cross-view scale consistency before fusion [S1]. It solves the problem where disparity intervals correspond to different object-space distances across captures due to varying camera settings (e.g., focal length), by aligning DPVs to sparse 3D anchors derived from COLMAP [S1]. Unlike one-off rescaling, SCVR iteratively refines the alignment, trimming, and interpolation to produce a compact, high-resolution volume suitable for coherent fusion into a target frustum [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:**
+    *   Sparse 3D anchors $P$: A set of reliable 3D points $P(x, y, z)$ in world coordinates established by COLMAP [S1].
+    *   DPV $V_t$: The initial Disparity Probability Volume for source view $t$, with layout $V_t(x, y, d) \in \mathbb{R}^{H_t \times W_t \times N_{dp}}$, where $H_t, W_t$ are spatial dimensions and $N_{dp}$ is the number of disparity planes [S1].
+    *   COLMAP depth range $\kappa$: The maximum valid depth range for discarding out-of-bounds planes [S1].
+    *   Iterative times $N$: The number of iterations for the rescaling process [S1].
+    *   Initial disparity map $D_{init}$: Calculated from $V_t$ [S1].
+*   **Outputs:**
+    *   Rescaled DPV $\bar{U}_t$: A scale-consistent probability volume with layout $\bar{U}_t \in \mathbb{R}^{H \times W \times N_{dp}}$ [S1].
+
+**Data Structures**
+*   **3D Anchors $P$**: Represented as a list or array of 3D points. For a point $P$, $P_t(x, y)$ denotes its 2D projection in source view $t$'s image, and $P_t(z)$ denotes its depth relative to view $t$'s image plane [S1].
+*   **DPV $V_t$**: A 3D tensor where the third dimension represents disparity planes. Each voxel $(x, y, d)$ holds the probability that the pixel at $(x, y)$ has disparity $d$ [S1].
+
+**Parameters**
+*   $\alpha$: A parameter related to focal length and camera baseline, governing the inverse-proportional scaling [S1].
+*   $\beta$: A bias parameter for the depth-disparity mapping [S1].
+*   $N$: Number of iterations. Typical value: 7 [S1].
+
+**Algorithm Steps**
+1.  **Preprocessing**: Use COLMAP to analyze scene geometry based on central views of source Light Field Images (LFIs) and the target view image. COLMAP outputs camera parameters and sparse reliable 3D points $P(x, y, z)$ [S1].
+2.  **Initialization**: Initialize parameters $\alpha$ and $\beta$ by minimizing the alignment error between the transformed initial disparity and the anchor depths (see Formula 3 below) [S1].
+3.  **Iteration Loop** (for $n = 1$ to $N$):
+    a.  **Update Mapping**: Update the mapping function $\Psi_{\alpha, \beta}$ and parameters $\{\alpha, \beta\}$ by minimizing the error between the mapped initial disparity and the 3D anchor depths [S1].
+    b.  **Rescale Volume**: Transform the DPV $V_t$ using $\Psi_{\alpha, \beta}$ to produce the intermediate volume $U_t$ [S1].
+    c.  **Trim Planes**: Discard disparity planes in $U_t$ that exceed the COLMAP depth range $\kappa$ to produce $U^\gamma_t$ [S1].
+    d.  **Interpolate**: Perform linear interpolation along the depth dimension of $U^\gamma_t$ to restore the original disparity plane resolution $N_{dp}$, producing $\bar{U}_t$ [S1].
+    e.  **Increment**: $n = n + 1$ [S1].
+4.  **Convergence**: The process repeats $N$ times. In experiments, $N=7$ yields satisfactory results [S1].
+
+**Formulas**
+The mapping function $\Psi_{\alpha, \beta}$ transforms initial disparity $D_{init}$ to depth:
+$$ \Psi_{\alpha, \beta}(D_{init}(P_t(x, y))) = \frac{\alpha}{D_{init}(P_t(x, y))} + \beta \quad (2) $$
+where $P_t(x, y)$ is the 2D coordinate in view $t$ and $P_t(z)$ is the depth of the 3D anchor [S1].
+
+The parameters $\{\alpha, \beta\}$ are determined by minimizing the squared error:
+$$ \{\hat{\alpha}, \hat{\beta}\} = \arg \min_{\hat{\alpha}, \hat{\beta}} \| \Psi_{\hat{\alpha}, \hat{\beta}}(D_{init}(P_t(x, y))) - P_t(z) \|_2^2 \quad (3) $$
+This minimization is performed over the set of 3D anchors $P$ [S1].
+
+The volume transformation is applied element-wise:
+$$ U_t = \Psi_{\alpha, \beta}(V_t) \quad (4) $$
+This stretches or compresses the DPVs to be scale-consistent [S1].
+
+Trimming discards planes exceeding $\kappa$:
+$$ U^\gamma_t = \Gamma_{trim}(U_t) : \mathbb{R}^{H \times W \times N_{dp}} \mapsto \mathbb{R}^{H \times W \times N^\gamma_{dp}} \quad (5) $$
+where $N^\gamma_{dp}$ is the remaining number of planes after trimming [S1].
+
+Interpolation restores the resolution:
+$$ \bar{U}_t = \Gamma_{interp}(U^\gamma_t) : \mathbb{R}^{H \times W \times N^\gamma_{dp}} \mapsto \mathbb{R}^{H \times W \times N_{dp}} \quad (6) $$
+Linear interpolation is used along the depth dimension to preserve the original disparity plane resolution $N_{dp}$ [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def scale_consistent_volume_rescaling(P, V_t, kappa, N, D_init):
+    """
+    Rescales Disparity Probability Volume V_t to be scale-consistent.
+    
+    Args:
+        P: List of 3D anchors (x, y, z) in world coordinates.
+        V_t: 3D DPV tensor of shape (H, W, N_dp).
+        kappa: COLMAP depth range threshold.
+        N: Number of iterations (default 7).
+        D_init: Initial disparity map of shape (H, W).
+        
+    Returns:
+        U_bar: Rescaled DPV of shape (H, W, N_dp).
+    """
+    H, W, N_dp = V_t.shape
+    # Initialize alpha and beta using Eq. 3
+    # Minimize || alpha / D_init(P_t(x,y)) + beta - P_t(z) ||^2
+    # for all anchors P visible in view t.
+    # Let D_anchor be the list of D_init values at projected anchor positions.
+    # Let Z_anchor be the list of P_t(z) values for those anchors.
+    # Solve linear least squares for [alpha, beta] in Z = D_inv * alpha + beta
+    D_inv = 1.0 / D_anchor
+    # Construct matrix A for linear system A * [alpha, beta]^T = Z
+    A = np.column_stack((D_inv, np.ones_like(D_inv)))
+    # Solve for alpha, beta
+    params, _, _, _ = np.linalg.lstsq(A, Z_anchor, rcond=None)
+    alpha, beta = params
+    
+    U_t = V_t.copy()
+    
+    for n in range(N):
+        # Step 1: Update alpha, beta (Eq. 3)
+        # Re-calculate based on current alignment if necessary, 
+        # though the source implies re-estimating from D_init and P each iteration.
+        # Note: D_init is static, P is static. The "update" likely refers to 
+        # re-evaluating the optimal parameters for the current state or 
+        # simply applying the initial fit if the source implies a fixed fit.
+        # However, Eq 3 is defined on D_init. The text says "Update ... as Eq 2, 3".
+        # We assume we re-solve for alpha, beta using the same anchors.
+        D_inv = 1.0 / D_anchor
+        A = np.column_stack((D_inv, np.ones_like(D_inv)))
+        params, _, _, _ = np.linalg.lstsq(A, Z_anchor, rcond=None)
+        alpha, beta = params
+        
+        # Step 2: Update V_t with Psi to produce U_t (Eq. 4)
+        # Psi maps disparity d to depth z = alpha/d + beta.
+        # We need to resample the volume based on this mapping.
+        # The source says "Update the V_t with Psi_alpha,beta to produce U_t".
+        # This implies transforming the disparity axis.
+        # Let old_disparities be the disparity values corresponding to indices 0..N_dp-1.
+        # new_depths = alpha / old_disparities + beta
+        # We need to map the probability mass from old_disparities to new_depths.
+        # However, Eq 4 is written as U_t = Psi(V_t). This is ambiguous.
+        # Given Eq 5 and 6, it seems U_t is a volume in depth space or rescaled disparity space.
+        # Let's assume U_t is a volume where the depth dimension is transformed.
+        # To implement Eq 4, 5, 6 precisely:
+        # 1. Define the disparity grid for V_t: d_i.
+        # 2. Map to depth: z_i = alpha / d_i + beta.
+        # 3. The volume U_t represents probabilities at these new depths?
+        # Or does it mean we resample V_t such that the disparity values are scaled?
+        # The text says "Psi stretches or compresses the DPVs".
+        # Let's assume we create a new volume U_t by interpolating V_t's values 
+        # onto a new disparity grid that corresponds to the depth range.
+        
+        # Alternative interpretation: U_t is the volume in the transformed space.
+        # Let's define the target disparity grid.
+        # The trimming step (Eq 5) removes planes exceeding kappa.
+        # This implies U_t has a depth/disparity axis that can be compared to kappa.
+        
+        # Implementation of Eq 4: Resample V_t.
+        # We need to know the disparity values associated with V_t's depth dimension.
+        # Let's assume V_t is defined over a disparity range [d_min, d_max].
+        # The mapping Psi transforms disparity d to depth z.
+        # We want to create U_t such that its depth dimension corresponds to the mapped depths.
+        # But Eq 6 interpolates back to N_dp.
+        
+        # Let's follow the operations strictly:
+        # 1. Calculate new depths for existing disparity planes?
+        # Or calculate new disparities for a fixed depth range?
+        # Eq 5: "Discard planes exceeding kappa". This suggests U_t is in depth units or 
+        # has a depth axis.
+        # Let's assume U_t is a volume where the 3rd dimension is depth.
+        
+        # To implement Eq 4:
+        # We need to map the probability distribution from disparity space to depth space.
+        # Let d_vals be the disparity values for V_t's planes.
+        # z_vals = alpha / d_vals + beta
+        # U_t is a volume of shape (H, W, N_dp) where the 3rd dim corresponds to z_vals?
+        # But N_dp might change after trimming.
+        
+        # Let's assume the standard approach:
+        # 1. Interpolate V_t to a new disparity grid that is linearly spaced in depth?
+        # Or simply rescale the disparity values.
+        
+        # Given the ambiguity of "Psi(V_t)", and the subsequent trim/interpolate,
+        # we assume:
+        # U_t is created by resampling V_t such that the disparity axis is transformed.
+        # Specifically, we want the volume to represent probabilities over a depth range.
+        
+        # Let's define the disparity values for V_t.
+        # If not given, assume uniform spacing or derived from D_init range.
+        # Let's assume we have a function get_disparity_grid(V_t) -> d_grid.
+        # d_grid is of length N_dp.
+        
+        # Map to depth
+        z_grid = alpha / d_grid + beta
+        
+        # We need to create a volume U_t. The source doesn't specify the grid for U_t 
+        # before trimming. It says "produce U_t". Then "Discard planes exceeding kappa".
+        # This implies U_t has a depth axis.
+        # Let's assume U_t is defined on z_grid.
+        
+        # Resample V_t to z_grid?
+        # V_t(x,y,d) -> U_t(x,y,z).
+        # This requires interpolation in the 3rd dimension.
+        # Since V_t is discrete, we interpolate the probability values.
+        
+        # However, Eq 4 is a single line.
+        # Let's assume U_t is simply the volume V_t with its disparity axis transformed.
+        # But probabilities must sum to 1 or be consistent.
+        
+        # Let's look at Eq 5: U_gamma_t = Gamma_trim(U_t).
+        # This removes planes where depth > kappa.
+        # So U_t must have a depth axis.
+        
+        # Let's assume the implementation:
+        # 1. Get disparity values for V_t.
+        # 2. Compute corresponding depths.
+        # 3. Create U_t by interpolating V_t's values to these depths.
+        #    If the depth grid is not uniform, we might need to resample to a uniform depth grid.
+        #    But Eq 6 interpolates back to N_dp.
+        
+        # Let's assume a simpler interpretation:
+        # U_t is a volume where the 3rd dimension is depth.
+        # We resample V_t to a depth grid.
+        
+        # For the sake of the pseudocode, we assume we have a way to resample.
+        # We will use linear interpolation.
+        
+        # Step 4: Trim
+        # Identify planes in U_t where depth > kappa.
+        # Remove them.
+        
+        # Step 5: Interpolate
+        # Interpolate the trimmed volume back to N_dp planes.
+        
+        # Since the exact grid for U_t is not specified, we assume it's defined by z_grid.
+        # If z_grid is not uniform, we might need to resample to a uniform grid first.
+        # But Eq 6 interpolates U_gamma_t to U_bar_t with N_dp planes.
+        # This implies U_gamma_t has N_gamma_dp planes.
+        
+        # Let's assume U_t is defined on z_grid.
+        # We resample V_t to z_grid to get U_t.
+        
+        # To make the pseudocode self-contained, we assume helper functions.
+        
+        # Resample V_t to depth grid z_grid
+        U_t = resample_volume(V_t, d_grid, z_grid)
+        
+        # Trim planes exceeding kappa
+        valid_mask = z_grid <= kappa
+        U_gamma_t = U_t[:, :, valid_mask]
+        z_gamma_grid = z_grid[valid_mask]
+        N_gamma_dp = len(z_gamma_grid)
+        
+        # Interpolate back to N_dp planes
+        # We need a target depth grid of size N_dp.
+        # The source says "preserves the original disparity plane resolution N_dp".
+        # It doesn't specify the depth range for the target grid.
+        # It likely spans the valid depth range of U_gamma_t.
+        # Let's assume we interpolate to a uniform depth grid spanning min(z_gamma) to max(z_gamma).
+        z_target_grid = np.linspace(z_gamma_grid[0], z_gamma_grid[-1], N_dp)
+        U_bar_t = interpolate_volume(U_gamma_t, z_gamma_grid, z_target_grid)
+        
+        # Update V_t for next iteration?
+        # The source says "Update the V_t with Psi... to produce U_t".
+        # And "Repeat... for N times".
+        # It doesn't explicitly say V_t is updated to U_bar_t.
+        # But Eq 6 produces U_bar_t.
+        # And the loop continues.
+        # Usually, the output of one iteration is the input of the next.
+        # So V_t = U_bar_t for the next iteration.
+        V_t = U_bar_t
+        
+    return V_t
+
+def resample_volume(V, old_grid, new_grid):
+    """
+    Resample a 3D volume V along the last dimension from old_grid to new_grid.
+    V shape: (H, W, len(old_grid))
+    Returns shape: (H, W, len(new_grid))
+    """
+    H, W, _ = V.shape
+    new_shape = (H, W, len(new_grid))
+    result = np.zeros(new_shape)
+    for h in range(H):
+        for w in range(W):
+            # Linear interpolation
+            result[h, w, :] = np.interp(new_grid, old_grid, V[h, w, :])
+    return result
+
+def interpolate_volume(V, old_grid, new_grid):
+    """
+    Interpolate a 3D volume V along the last dimension from old_grid to new_grid.
+    Same as resample_volume.
+    """
+    return resample_volume(V, old_grid, new_grid)
+```
+
+**Edge Cases and Pitfalls**
+*   **Scale Inconsistency**: If not rescaled, disparity intervals correspond to different object-space distances across captures, preventing coherent fusion [S1].
+*   **Precision**: Iterative refinement helps progressively remove redundant planes and ensure higher alignment accuracy than one-off rescaling [S1].
+*   **Boundaries**: Planes exceeding the COLMAP depth range $\kappa$ are discarded, which may lead to loss of information if $\kappa$ is too small [S1].
+*   **Degenerate Input**: If COLMAP fails to produce reliable 3D anchors $P$, the parameter estimation for $\alpha$ and $\beta$ will fail [S1].
+
+## Operating characteristics
+*   **Time Complexity**: The algorithm runs for $N$ iterations (typically 7). Each iteration involves parameter estimation (linear least squares), volume resampling, trimming, and interpolation. The complexity is $O(N \cdot H \cdot W \cdot N_{dp})$ [S1].
+*   **Memory Complexity**: Requires storing the DPV $V_t$ and intermediate volumes $U_t, U^\gamma_t, \bar{U}_t$. Memory usage is $O(H \cdot W \cdot N_{dp})$ [S1].
+*   **Measured Performance**: In experiments, $N=7$ gives satisfactory results [S1].
+*   **Strengths**: Ensures scale consistency among source views, enabling coherent fusion. Iterative process improves alignment accuracy [S1].
+*   **Limitations**: Relies on COLMAP for sparse 3D anchors. If COLMAP fails, the method fails. Computationally intensive due to iterative resampling [S1].
+*   **When to Use**: When fusing DPVs from multiple source views with different camera settings (e.g., focal length) into a target frustum [S1].
+*   **When Not to Use**: If the scene lacks sufficient texture for COLMAP to produce reliable 3D anchors [S1].
+
+## Background
+*   **Origin**: Proposed in "Scale-Consistent Fusion: From Heterogeneous Local Sampling to Global Immersive Rendering" (2022) [S1].
+*   **History**: The method addresses the issue of scale inconsistency in Disparity Probability Volumes (DPVs) derived from Light Field Images (LFIs) [S1].
+*   **Usage**: Used in immersive rendering pipelines to fuse heterogeneous local sampling data into a global volume [S1].
+
+## Sources
+[S1] Scale-Consistent Fusion: From Heterogeneous Local Sampling to Global Immersive Rendering, https://doi.org/10.1109/tip.2022.3205745, fetched 2026-10-26

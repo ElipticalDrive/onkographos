@@ -1,0 +1,259 @@
+--- v001.md
++++ v002.md
+@@ -21,47 +21,40 @@
+   - `image_interpolation_method` (`int`): Interpolation method for the image, defaulting to `cv2.INTER_AREA` [S1, unofficial].
+   - `keep_aspect_ratio` (`bool`): Whether to preserve the original aspect ratio [S1, unofficial].
++  - `resize_target` (`bool`): Whether to resize auxiliary fields (`disparity`, `depth`, `mask`, `semseg_mask`) [S1, unofficial].
+ - **Output**: The modified `sample` dictionary with resized fields.
+ 
+ **Data Structures**
+-- The `sample` dictionary fields are resized in-place or replaced with new arrays of shape `(new_height, new_width)` for 2D data, or `(B, C, new_height, new_width)` for tensor-based semantic masks.
++- The `sample` dictionary fields are resized in-place or replaced with new arrays of shape `(new_height, new_width)` for 2D data, or `(B, C, new_height, new_width)` for tensor-based semantic masks [S1, unofficial].
+ 
+ **Steps**
+-1. **Constrain to Multiple**: Define a helper function `constrain_to_multiple_of(x, min_val, max_val, multiple_of)` that rounds `x` to the nearest multiple of `multiple_of`. If the result exceeds `max_val`, it floors to the previous multiple. If it is below `min_val`, it ceils to the next multiple [S1, unofficial].
+-2. **Determine Scale**: Calculate initial scales:
+-   $$ \text{scale\_height} = \frac{\text{target\_height}}{\text{height}} $$
+-   $$ \text{scale\_width} = \frac{\text{target\_width}}{\text{width}} $$
+-   where `height` and `width` are the original dimensions of the image [S1, unofficial].
+-3. **Apply Aspect Ratio Constraint**: If `keep_aspect_ratio` is true, adjust scales based on `resize_method`:
+-   - `'lower_bound'`: Fits the larger dimension to the target (minimizing scaling).
+-   - `'upper_bound'`: Fits the smaller dimension (maximizing scaling).
+-   - `'minimal'`: Picks the dimension closest to a 1:1 scale [S1, unofficial].
+-4. **Calculate New Dimensions**: Based on `resize_method`, calculate `new_height` and `new_width` using `constrain_to_multiple_of`:
+-   - `'lower_bound'`: Enforces `min_val` (ensures output is at least as large as given size).
+-   - `'upper_bound'`: Enforces `max_val` (ensures output is at most as large).
+-   - `'minimal'`: Has no bounds [S1, unofficial].
+-5. **Resize Image**: Resize `sample['image']` to `(new_width, new_height)` using `cv2.resize` with `image_interpolation_method` [S1, unofficial].
+-6. **Resize Targets**:
+-   - If `resize_target` is true, resize `disparity`, `depth`, and `mask` fields using `cv2.INTER_NEAREST` [S1, unofficial].
+-   - Resize `semseg_mask` using `F.interpolate` with mode `'nearest'` on a float tensor with added batch/channel dimensions [S1, unofficial].
++1. **Constrain to Multiple**: The helper `constrain_to_multiple_of` rounds `x` to the nearest multiple of `self.__multiple_of`. If the result exceeds `max_val`, it floors to the previous multiple. If it is below `min_val`, it ceils to the next multiple [S1, unofficial].
++2. **Determine Scale**: Calculate `scale_height = self.__height / height` and `scale_width = self.__width / width` [S1, unofficial].
++3. **Apply Aspect Ratio Constraint**: If `keep_aspect_ratio` is true, adjust scales based on `resize_method`: 'lower_bound' fits the larger dimension to the target (minimizing scaling), 'upper_bound' fits the smaller dimension (maximizing scaling), 'minimal' picks the dimension closest to 1:1 scale [S1, unofficial].
++4. **Calculate New Dimensions**: Based on `resize_method`, calculate `new_height` and `new_width` using `constrain_to_multiple_of`. 'lower_bound' enforces `min_val`, 'upper_bound' enforces `max_val`, 'minimal' has no bounds [S1, unofficial].
++5. **Resize Image**: Resize `sample['image']` to `(width, height)` using `cv2.resize` with `self.__image_interpolation_method` [S1, unofficial].
++6. **Resize Targets**: If `resize_target` is true, resize `disparity`, `depth`, and `mask` fields using `cv2.INTER_NEAREST`. Resize `semseg_mask` using `F.interpolate` with mode 'nearest' on a float tensor with added batch/channel dimensions [S1, unofficial].
++
++**Formulas**
++- Scale factors:
++  $$ \text{scale\_height} = \frac{\text{target\_height}}{\text{height}} $$
++  $$ \text{scale\_width} = \frac{\text{target\_width}}{\text{width}} $$
++- New dimensions (before multiple constraint):
++  $$ \text{new\_height} = \text{height} \times \text{scale} $$
++  $$ \text{new\_width} = \text{width} \times \text{scale} $$
++- Constraint helper:
++  $$ \text{nearest} = \text{round}\left(\frac{x}{\text{multiple\_of}}\right) \times \text{multiple\_of} $$
++  $$ \text{result} = \begin{cases} \text{floor}\left(\frac{x}{\text{multiple\_of}}\right) \times \text{multiple\_of} & \text{if } \text{nearest} > \text{max\_val} \\ \text{ceil}\left(\frac{x}{\text{multiple\_of}}\right) \times \text{multiple\_of} & \text{if } \text{nearest} < \text{min\_val} \\ \text{nearest} & \text{otherwise} \end{cases} $$
+ 
+ **Pseudocode**
+ ```python
+-import cv2
+-import torch
+-import torch.nn.functional as F
++import math
+ 
+ def constrain_to_multiple_of(x, min_val, max_val, multiple_of):
+     """Round x to the nearest multiple of multiple_of, bounded by min_val and max_val."""
+-    # Calculate nearest multiple
+     nearest = round(x / multiple_of) * multiple_of
+-    
+-    # Check bounds
+     if nearest > max_val:
+-        # Floor to previous multiple
+-        nearest = (int(x / multiple_of)) * multiple_of
++        nearest = math.floor(x / multiple_of) * multiple_of
+     elif nearest < min_val:
+-        # Ceil to next multiple
+-        nearest = (int(x / multiple_of) + 1) * multiple_of
+-        
++        nearest = math.ceil(x / multiple_of) * multiple_of
+     return nearest
+ 
+@@ -69,10 +62,11 @@
+                                  resize_method='lower_bound', 
+                                  ensure_multiple_of=1, 
+-                                 image_interpolation_method=cv2.INTER_AREA,
+-                                 keep_aspect_ratio=True):
++                                 image_interpolation_method='area',
++                                 keep_aspect_ratio=True,
++                                 resize_target=True):
+     """
+     Resize depth estimation samples to target size with aspect ratio and multiple constraints.
+     """
+-    if resize_method not in ['lower_bound', 'upper_bound', 'minimal']:
++    if resize_method not in ('lower_bound', 'upper_bound', 'minimal'):
+         raise ValueError(f"Unknown value for resize_method: {resize_method}")
+ 
+@@ -88,108 +82,49 @@
+     if keep_aspect_ratio:
+         if resize_method == 'lower_bound':
+-            # Fit the larger dimension to the target (minimizing scaling)
+-            # This implies we scale up if needed, or scale down but keep the larger dim >= target
+-            # Actually, 'lower_bound' usually means the output is at least as large as the target
+-            # In the context of the source, it enforces min_val in constrain_to_multiple_of
+-            # Let's interpret 'lower_bound' as: scale = max(scale_height, scale_width)
+             scale = max(scale_height, scale_width)
+-            new_height = int(height * scale)
+-            new_width = int(width * scale)
+-            # Apply multiple constraint with min_val = target dimension? 
+-            # The source says 'lower_bound' enforces min_val. 
+-            # Assuming min_val is the target dimension for that axis? 
+-            # Or simply that the result must be >= target?
+-            # Let's follow the source logic: constrain_to_multiple_of with min_val
+-            # If resize_method is 'lower_bound', it enforces min_val.
+-            # Let's assume min_val is 0 and max_val is infinity for 'lower_bound' in the helper?
+-            # No, the source says: 'lower_bound' enforces min_val, 'upper_bound' enforces max_val.
+-            # This likely refers to the bounds passed to constrain_to_multiple_of.
+-            # For 'lower_bound', we want the dimension to be at least the target?
+-            # Let's stick to the explicit instruction: 
+-            # 'lower_bound' fits the larger dimension to the target.
+-            # So new_height = constrain_to_multiple_of(height * scale, min_val=target_height, max_val=infinity, multiple_of=ensure_multiple_of)
+-            # But wait, if we scale by max(scale_h, scale_w), one dimension will be exactly target (or close).
+-            # Let's re-read: 'lower_bound' (output at least as large as given size).
+-            # This suggests we might need to scale UP if the current image is smaller than target?
+-            # Or it refers to the bounding box logic.
+-            # Let's implement the scale calculation first.
+-            pass 
+         elif resize_method == 'upper_bound':
+-            # Fit the smaller dimension to the target (maximizing scaling)
+-            # Output at most as large as given size.
+             scale = min(scale_height, scale_width)
+-            new_height = int(height * scale)
+-            new_width = int(width * scale)
+         elif resize_method == 'minimal':
+-            # Scale as least as possible.
+-            # Picks the dimension closest to 1:1 scale.
+-            # This usually means minimizing the change in scale factor.
+-            # If scale_height is closer to 1 than scale_width, use scale_height.
+-            if abs(scale_height - 1.0) < abs(scale_width - 1.0):
+-                scale = scale_height
+-            else:
+-                scale = scale_width
+-            new_height = int(height * scale)
+-            new_width = int(width * scale)
++            scale = scale_height if abs(scale_height - 1.0) < abs(scale_width - 1.0) else scale_width
+             
+-        # Apply multiple constraint
+-        # The source says: 'lower_bound' enforces min_val, 'upper_bound' enforces max_val, 'minimal' has no bounds.
+-        # This likely refers to the bounds passed to constrain_to_multiple_of for the final dimension calculation.
+-        # However, the dimensions are already calculated above.
+-        # Let's assume the constrain_to_multiple_of is applied to the calculated new_height/new_width.
+-        # For 'lower_bound', min_val = target_height/width?
+-        # Let's assume the source implies:
+-        # new_height = constrain_to_multiple_of(new_height, min_val=target_height if resize_method=='lower_bound' else 0, max_val=target_height if resize_method=='upper_bound' else infinity, multiple_of=ensure_multiple_of)
+-        # This seems complex. Let's look at the helper definition again.
+-        # constrain_to_multiple_of(x, min_val, max_val, multiple_of)
+-        # If resize_method is 'lower_bound', it enforces min_val.
+-        # If resize_method is 'upper_bound', it enforces max_val.
+-        # If resize_method is 'minimal', it has no bounds.
++        new_height = height * scale
++        new_width = width * scale
+         
+-        # Let's refine the dimension calculation based on this.
++        # Apply multiple constraint with method-specific bounds
+         if resize_method == 'lower_bound':
+-            new_height = constrain_to_multiple_of(new_height, min_val=target_height, max_val=float('inf'), multiple_of=ensure_multiple_of)
+-            new_width = constrain_to_multiple_of(new_width, min_val=target_width, max_val=float('inf'), multiple_of=ensure_multiple_of)
++            new_height = constrain_to_multiple_of(new_height, target_height, float('inf'), ensure_multiple_of)
++            new_width = constrain_to_multiple_of(new_width, target_width, float('inf'), ensure_multiple_of)
+         elif resize_method == 'upper_bound':
+-            new_height = constrain_to_multiple_of(new_height, min_val=0, max_val=target_height, multiple_of=ensure_multiple_of)
+-            new_width = constrain_to_multiple_of(new_width, min_val=0, max_val=target_width, multiple_of=ensure_multiple_of)
++            new_height = constrain_to_multiple_of(new_height, 0, target_height, ensure_multiple_of)
++            new_width = constrain_to_multiple_of(new_width, 0, target_width, ensure_multiple_of)
+         elif resize_method == 'minimal':
+-            new_height = constrain_to_multiple_of(new_height, min_val=0, max_val=float('inf'), multiple_of=ensure_multiple_of)
+-            new_width = constrain_to_multiple_of(new_width, min_val=0, max_val=float('inf'), multiple_of=ensure_multiple_of)
+-            
++            new_height = constrain_to_multiple_of(new_height, 0, float('inf'), ensure_multiple_of)
++            new_width = constrain_to_multiple_of(new_width, 0, float('inf'), ensure_multiple_of)
+     else:
+-        # No aspect ratio constraint
+-        new_height = constrain_to_multiple_of(target_height, min_val=0, max_val=float('inf'), multiple_of=ensure_multiple_of)
+-        new_width = constrain_to_multiple_of(target_width, min_val=0, max_val=float('inf'), multiple_of=ensure_multiple_of)
++        new_height = constrain_to_multiple_of(target_height, 0, float('inf'), ensure_multiple_of)
++        new_width = constrain_to_multiple_of(target_width, 0, float('inf'), ensure_multiple_of)
+ 
+     # Resize Image
+-    sample['image'] = cv2.resize(sample['image'], (new_width, new_height), interpolation=image_interpolation_method)
++    sample['image'] = cv2.resize(sample['image'], (int(new_width), int(new_height)), interpolation=image_interpolation_method)
+     
+     # Resize Targets
+-    # Assuming 'resize_target' is a parameter or implied by the presence of these fields
+-    # The source says "If resize_target is true". Let's assume it's a parameter or we check for fields.
+-    # For the sake of completeness, let's assume we resize if the field exists.
+-    
+-    if 'disparity' in sample:
+-        sample['disparity'] = cv2.resize(sample['disparity'], (new_width, new_height), interpolation=cv2.INTER_NEAREST)
+-    if 'depth' in sample:
+-        sample['depth'] = cv2.resize(sample['depth'], (new_width, new_height), interpolation=cv2.INTER_NEAREST)
+-    if 'mask' in sample:
+-        sample['mask'] = cv2.resize(sample['mask'], (new_width, new_height), interpolation=cv2.INTER_NEAREST)
+-    if 'semseg_mask' in sample:
+-        # Resize semseg_mask using F.interpolate with mode 'nearest' on a float tensor with added batch/channel dimensions
+-        # Assuming semseg_mask is a tensor of shape (H, W) or (C, H, W)
+-        # Add batch dimension if not present
+-        if semseg_mask.ndim == 2:
+-            semseg_tensor = sample['semseg_mask'].unsqueeze(0).unsqueeze(0).float()
+-        elif semseg_mask.ndim == 3:
+-            semseg_tensor = sample['semseg_mask'].unsqueeze(0).float()
+-        else:
+-            semseg_tensor = sample['semseg_mask'].float()
+-            
+-        resized_semseg = F.interpolate(semseg_tensor, size=(new_height, new_width), mode='nearest')
+-        
+-        # Remove batch dimension
+-        sample['semseg_mask'] = resized_semseg.squeeze(0)
++    if resize_target:
++        if 'disparity' in sample:
++            sample['disparity'] = cv2.resize(sample['disparity'], (int(new_width), int(new_height)), interpolation='nearest')
++        if 'depth' in sample:
++            sample['depth'] = cv2.resize(sample['depth'], (int(new_width), int(new_height)), interpolation='nearest')
++        if 'mask' in sample:
++            sample['mask'] = cv2.resize(sample['mask'], (int(new_width), int(new_height)), interpolation='nearest')
++        if 'semseg_mask' in sample:
++            # Add batch and channel dimensions if missing
++            x = sample['semseg_mask']
++            if x.ndim == 2:
++                x = x.unsqueeze(0).unsqueeze(0).float()
++            elif x.ndim == 3:
++                x = x.unsqueeze(0).float()
++            else:
++                x = x.float()
++            # Standard interpolation call
++            sample['semseg_mask'] = F.interpolate(x, size=(int(new_height), int(new_width)), mode='nearest').squeeze(0)
+ 
+     return sample
+@@ -204,16 +139,20 @@
+ - Disparity, depth, and mask fields must use `cv2.INTER_NEAREST` to preserve discrete values and avoid interpolation artifacts [S1, unofficial].
+ - If `resize_method` is not one of `'lower_bound'`, `'upper_bound'`, or `'minimal'`, a `ValueError` is raised [S1, unofficial].
+-- Precision issues may arise when calculating scales for very small or very large images.
+ - Boundary conditions: `constrain_to_multiple_of` handles cases where the rounded value exceeds `max_val` or falls below `min_val` [S1, unofficial].
+ 
++## Subtopics
++
++### Input Padder
++A utility class that pads input images so their height and width dimensions are divisible by a specified integer (default 8), used to satisfy network input constraints [S2, unofficial]. It initializes with dimensions `dims` and optional `mode` ('sintel' or other) and `divis_by` (default 8) [S2, unofficial]. It calculates padding height `pad_ht = (((self.ht // divis_by) + 1) * divis_by - self.ht) % divis_by` and width `pad_wd = (((self.wd // divis_by) + 1) * divis_by - self.wd) % divis_by` [S2, unofficial]. It sets padding list `self._pad` based on mode: if mode is 'sintel', `self._pad = [pad_wd//2, pad_wd - pad_wd//2, pad_ht//2, pad_ht - pad_ht//2]`; otherwise, `self._pad = [pad_wd//2, pad_wd - pad_wd//2, 0, pad_ht]` [S2, unofficial]. The `pad` method applies `F.pad` with `mode='replicate'` using `self._pad` to all input tensors, asserting they are 4D [S2, unofficial]. The `unpad` method reverses padding by slicing the tensor `x` using indices `c = [self._pad[2], ht-self._pad[3], self._pad[0], wd-self._pad[1]]` and returning `x[..., c[0]:c[1], c[2]:c[3]]` [S2, unofficial].
++
+ ## Operating characteristics
+-- **Time Complexity**: Linear with respect to the number of pixels in the image, $O(H \times W)$, due to the resizing operations [S1, unofficial].
+-- **Memory Complexity**: Linear with respect to the number of pixels, $O(H \times W)$, for storing the resized images [S1, unofficial].
++- **Time Complexity**: Linear with respect to the number of pixels in the image, $O(H \times W)$, due to the resizing operations [G].
++- **Memory Complexity**: Linear with respect to the number of pixels, $O(H \times W)$, for storing the resized images [G].
+ - **Measured Performance**: Not given in the sources.
+-- **Scaling**: Scales linearly with image resolution [S1, unofficial].
++- **Scaling**: Scales linearly with image resolution [G].
+ - **Strengths**: Ensures dimensions are multiples of a specific value, which is crucial for neural networks with downsampling layers. Preserves discrete values for depth and mask data [S1, unofficial].
+-- **Limitations**: Aspect ratio constraints may result in padding or cropping if not handled explicitly (though this method only resizes) [S1, unofficial].
++- **Limitations**: Aspect ratio constraints may result in padding or cropping if not handled explicitly (though this method only resizes) [G].
+ - **When to use**: When preparing depth estimation data for neural network training where input dimensions must be multiples of a specific value and aspect ratio must be preserved [S1, unofficial].
+-- **When not**: When exact pixel-perfect resizing without aspect ratio constraints is required [S1, unofficial].
++- **When not**: When exact pixel-perfect resizing without aspect ratio constraints is required [G].
+ 
+ ## Background
+@@ -223,3 +162,4 @@
+ 
+ ## Sources
+-[S1] Gaussian-Splatting-Toolkit/Gaussian-Splatting-Toolkit, https://github.com/Gaussian-Splatting-Toolkit/Gaussian-Splatting-Toolkit, fetched 2026-10-27 (unofficial)+[S1] Gaussian-Splatting-Toolkit/Gaussian-Splatting-Toolkit, https://github.com/Gaussian-Splatting-Toolkit/Gaussian-Splatting-Toolkit, fetched 2026-10-27 (unofficial)
++[S2] YaourtB/GPS_plus, https://github.com/YaourtB/GPS_plus, fetched 2026-10-27 (unofficial)

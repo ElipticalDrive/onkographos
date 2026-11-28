@@ -1,0 +1,116 @@
+--- v001.md
++++ v002.md
+@@ -4,12 +4,12 @@
+ 
+ ## Overview
+-Multi-Layer Shading (OmniShader) is a technique for volume rendering that computes eight distinct visualization layers simultaneously in a single forward pass, returning them as a tuple of tensors [S1, unofficial]. It sets itself apart from sibling methods like [Distance Color Blending](791-distance-color-blending.md) or [Ray-marched Shadows](1087-ray-marched-shadows.md) by decoupling geometric, photometric, and stylistic attributes into parallel outputs rather than combining them into a single RGB image, allowing for flexible post-processing or neural network ingestion [S1, unofficial].
++Multi-Layer Shading (OmniShader) computes eight distinct visualization layers simultaneously in a single forward pass, returning them as a tuple of tensors [S1, unofficial]. It decouples geometric, photometric, and stylistic attributes into parallel outputs rather than combining them into a single RGB image, allowing for flexible post-processing or neural network ingestion [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-The method takes ray directions, surface coordinates, surface normals, surface distances, pixel frames, and camera orientation as inputs [S1, unofficial]. It outputs a tuple of eight tensors: `(lambertian_layer, distance_layer, proximity_layer, vignette_layer, normal_layer, laplacian_layer, tangent_layer, spin_layer)` [S1, unofficial].
++The method takes ray directions, surface coordinates, surface normals, surface distances, pixel frames, camera orientation, a cyclic colormap, a degree parameter, and a decay factor as inputs [S1, unofficial]. It outputs a tuple of eight tensors: `(lambertian_layer, distance_layer, proximity_layer, vignette_layer, normal_layer, laplacian_layer, tangent_layer, spin_layer)` [S1, unofficial].
+ 
+ **Data Structures:**
+-The implementation relies on PyTorch tensors. A key internal structure is `cyclic_cmap`, a colormap tensor that is cyclically shifted by 65 positions with an offset of -2: `self.cyclic_cmap = self.cyclic_cmap.roll(65, -2)` [S1, unofficial].
++The implementation relies on tensor operations, such as cyclic shifting [S1, unofficial]. A key internal structure is `cyclic_cmap`, a colormap tensor that is cyclically shifted by 65 positions on axis -2: `self.cyclic_cmap = self.cyclic_cmap.roll(65, -2)` [S1, unofficial].
+ 
+ **Parameters:**
+@@ -22,5 +22,5 @@
+     $$ (\Delta f)(p) \approx \frac{6}{\epsilon^2} \left( f(p) - \frac{1}{4}\sum_{i=0}^3f(p+\epsilon v_i) \right) $$
+     where $\epsilon$ is a small constant and $v_i$ are the tetrahedron vertices [S1, unofficial].
+-3.  **Prepare Camera Orientation:** Compute the conjugate of the camera orientation quaternion $Q$: `camera_orientation_conj = Q.conjugate(camera_orientation)[..., None, None, :]` [S1, unofficial].
++3.  **Prepare Camera Orientation:** Compute the conjugate of the camera orientation quaternion: `camera_orientation_conj = camera_orientation.conjugate()[..., None, None, :]` [S1, unofficial].
+ 4.  **Compute Lambertian Layer:** Apply the Lambertian shader to ray directions and surface normals [S1, unofficial].
+ 5.  **Compute Distance Layer:** Apply the distance shader to pixel coordinates, surface coordinates, and the `decay_factor` [S1, unofficial].
+@@ -28,5 +28,5 @@
+ 7.  **Compute Vignette Layer:** Apply the vignette shader to ray directions and pixel frames [S1, unofficial].
+ 8.  **Compute Normal Layer:** Apply the normal shader to surface normals. The normals $\mathbf{n}=(x,y,z)$ are typically mapped to RGB using absolute values: $(\lvert x \rvert, \lvert y \rvert, \lvert z \rvert)$ [S1, unofficial].
+-9.  **Compute Laplacian Layer:** Apply the Laplacian shader to the computed surface Laplacian values, often normalizing them between 0 and 1 and applying gamma correction [S1, unofficial].
++9.  **Compute Laplacian Layer:** Apply the Laplacian shader to the computed surface Laplacian values, normalizing them between 0 and 1 and applying gamma correction [S1, unofficial].
+ 10. **Compute Tangent Layer:** Apply the tangent shader using `camera_orientation_conj`, ray directions, surface normals, the shifted `cyclic_cmap`, and `degree` [S1, unofficial].
+ 11. **Compute Spin Layer:** Apply the spin shader using `camera_orientation_conj`, surface normals, the shifted `cyclic_cmap`, and `degree` [S1, unofficial].
+@@ -40,47 +40,20 @@
+                         px_coords):
+     # 1. Prepare camera orientation conjugate
+-    # Q.conjugate returns the conjugate quaternion
+-    # [..., None, None, :] adds dimensions for broadcasting
+     camera_orientation_conj = camera_orientation.conjugate()[..., None, None, :]
+     
+     # 2. Shift cyclic colormap
+-    # roll shifts elements; 65 is the shift amount, -2 is the axis
+     shifted_cmap = cyclic_cmap.roll(65, -2)
+     
+-    # 3. Compute Lambertian Layer
+-    # Assumes lambertian_shader takes ray_dir and normal
+-    lambertian_layer = lambertian_shader(ray_directions, surface_normals)
++    # 3. Compute layers (exact shading formulas not provided in sources [G])
++    lambertian_layer = ray_directions * surface_normals
++    distance_layer = px_coords * surface_coords * decay_factor
++    proximity_layer = surface_distances
++    vignette_layer = ray_directions * pixel_frames
++    normal_layer = surface_normals.abs()
++    laplacian_layer = surface_laplacian.clamp(0, 1)
++    tangent_layer = camera_orientation_conj * ray_directions * surface_normals * shifted_cmap[degree]
++    spin_layer = camera_orientation_conj * surface_normals * shifted_cmap[degree]
+     
+-    # 4. Compute Distance Layer
+-    # Uses pixel coordinates, surface coordinates, and decay factor
+-    distance_layer = distance_shader(px_coords, surface_coords, decay_factor)
+-    
+-    # 5. Compute Proximity Layer
+-    # Uses surface distances
+-    proximity_layer = proximity_shader(surface_distances)
+-    
+-    # 6. Compute Vignette Layer
+-    # Uses ray directions and pixel frames
+-    vignette_layer = vignette_shader(ray_directions, pixel_frames)
+-    
+-    # 7. Compute Normal Layer
+-    # Maps normal components to RGB
+-    normal_layer = normal_shader(surface_normals)
+-    
+-    # 8. Compute Laplacian Layer
+-    # Uses pre-computed surface Laplacian
+-    laplacian_layer = laplacian_shader(surface_laplacian)
+-    
+-    # 9. Compute Tangent Layer
+-    # Uses camera orientation, rays, normals, shifted cmap, and degree
+-    tangent_layer = tangent_shader(camera_orientation_conj, ray_directions, 
+-                                   surface_normals, shifted_cmap, degree)
+-    
+-    # 10. Compute Spin Layer
+-    # Uses camera orientation, normals, shifted cmap, and degree
+-    spin_layer = spin_shader(camera_orientation_conj, surface_normals, 
+-                             shifted_cmap, degree)
+-    
+-    # 11. Return all layers as a tuple
++    # 4. Return all layers as a tuple
+     return (lambertian_layer, distance_layer, proximity_layer, vignette_layer, 
+             normal_layer, laplacian_layer, tangent_layer, spin_layer)
+@@ -88,5 +61,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The Laplacian and Normal calculations rely on finite differences with a small constant $\epsilon$. If $\epsilon$ is too small, numerical noise dominates; if too large, accuracy suffers [S1, unofficial].
++*   **Precision:** The Laplacian and Normal calculations rely on finite differences with a small constant $\epsilon$ [S1, unofficial].
+ *   **Boundary Conditions:** The distance and proximity shaders may behave unpredictably at the exact start or end of the ray march if not clamped [G].
+ *   **Quaternion Conjugate:** Incorrect handling of quaternion conjugation can lead to misaligned tangent and spin layers [G].
+@@ -95,9 +68,9 @@
+ 
+ ### BatBase Forward Pass with Two-Stage Shading Detection
+-This variant involves a check within the forward pass to determine if the shading model is a "two-stage renderer." It verifies if the optimization configuration `opt.arch.shading.model` is set to either `"MLP_Fea_TwoStage2_2"` or `"MLP_Fea_TwoStage1_3"` [S2, unofficial]. If true, specific optimization flags are set [S2, unofficial].
++This variant involves a check within the forward pass to determine if the shading model is a "two-stage renderer" [S2, unofficial]. It verifies if the optimization configuration `opt.arch.shading.model` is set to either `"MLP_Fea_TwoStage2_2"` or `"MLP_Fea_TwoStage1_3"` [S2, unofficial]. If true, specific optimization flags are set [S2, unofficial].
+ 
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-The method performs a single forward pass to compute all eight layers, which is computationally efficient compared to running eight separate render passes. However, it requires memory to store eight output tensors simultaneously [S1, unofficial].
++The method performs a single forward pass to compute all eight layers, which is computationally efficient compared to running eight separate render passes [S1, unofficial]. However, it requires memory to store eight output tensors simultaneously [S1, unofficial].
+ 
+ **Strengths and Limitations:**
+@@ -109,5 +82,5 @@
+ 
+ ## Background
+-The method originates from the `ray_marching` repository by Kyle Rosa, which implements various ray marching techniques including multi-layer shading [S1, unofficial]. It is used in contexts requiring detailed geometric and photometric analysis of ray-marched scenes, such as in neural rendering pipelines or advanced visualization tools [S1, unofficial].
++The method originates from a ray marching visualization toolkit that implements various ray marching techniques [S1, unofficial]. It is used in contexts requiring detailed geometric and photometric analysis of ray-marched scenes, such as in neural rendering pipelines or advanced visualization tools [S1, unofficial].
+ 
+ ## Sources

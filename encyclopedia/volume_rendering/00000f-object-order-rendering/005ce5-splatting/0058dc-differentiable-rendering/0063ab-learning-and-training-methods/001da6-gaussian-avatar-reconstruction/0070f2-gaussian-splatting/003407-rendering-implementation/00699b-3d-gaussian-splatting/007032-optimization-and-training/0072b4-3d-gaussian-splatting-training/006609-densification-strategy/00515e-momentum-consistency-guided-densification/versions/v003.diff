@@ -1,0 +1,143 @@
+--- v002.md
++++ v003.md
+@@ -2,19 +2,19 @@
+ Also called: Inherent Momentum Consistency-Guided Densification
+ ## Overview
+-Momentum Consistency-Guided Densification is a strategy for 3D Gaussian Splatting that uses kinematic phase-space trajectories (momentum) to guide primitive growth, aiming to overcome floating artifacts in non-manifold regions caused by single-step gradient snapshots [S1, unofficial]. It sets itself apart from standard gradient-based strategies by evaluating the consistency between current gradients and accumulated historical trends, rather than relying solely on instantaneous gradient magnitude [S1, unofficial].
++Momentum Consistency-Guided Densification is a training optimization strategy for 3D Gaussian Splatting that uses kinematic phase-space trajectories (momentum) to guide primitive growth, aiming to overcome floating artifacts in non-manifold regions caused by single-step gradient snapshots [S1, unofficial]. It sets itself apart from standard gradient-based strategies by evaluating the cosine consistency between current gradients and accumulated historical trends, rather than relying solely on instantaneous gradient magnitude [S1, unofficial].
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The current set of 3D Gaussians $\mathcal{G}$, the accumulated momentum buffer $m_t$ for each Gaussian, the current loss gradient $\nabla_p \mathcal{L}_t$ with respect to primitive attributes $p = \{x, \alpha, s, r, c\}$, and hyperparameters $\gamma$ (momentum decay), $\tau_{grad}$ (gradient threshold), and $k_E$ (densification interval) [S1, unofficial].
++*   **Input:** The current set of 3D Gaussians $\mathcal{G}$, the accumulated momentum buffer $m_t$ for each primitive, the current loss gradient $\nabla_p \mathcal{L}_t$ with respect to primitive attributes $p = \{x, \alpha, s, r, c\}$, and hyperparameters $\gamma$ (momentum decay), $\tau_{grad}$ (gradient threshold), $k_E$ (densification interval), and $\epsilon$ (stability constant) [S1, unofficial].
+ *   **Output:** A binary mask $\mathbb{I}_{densify}$ indicating which Gaussians should be densified (split or cloned) at the current step [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Momentum Buffer ($m_t$):** A tensor of the same shape as the position attributes $\mu$, storing the exponential moving average of gradients [S1, unofficial]. Initialized to zero at the start of training [G].
+-*   **Gradient Tensor ($\nabla_p \mathcal{L}_t$):** The gradient of the loss with respect to all primitive attributes at iteration $t$ [S1, unofficial].
++*   **Momentum Buffer ($m_t$):** A tensor matching the shape of $\nabla_p \mathcal{L}_t$, storing the exponential moving average of gradients [S1, unofficial]. Initialized to zero at the start of training [G].
++*   **Gradient Tensor ($\nabla_p \mathcal{L}_t$):** A tensor of shape $(N, D)$ where $N$ is the number of primitives and $D$ is the attribute dimensionality [S1, unofficial].
+ 
+ **Parameters:**
+-*   $\gamma$ (momentum decay factor): Balances historical trends and current observations. Value not explicitly given in sources, but required [S1, unofficial].
+-*   $\tau_{grad}$ (gradient magnitude threshold): Predefined threshold for gradient magnitude. Value not explicitly given in sources, but required [S1, unofficial].
++*   $\gamma$ (momentum decay factor): Balances historical trends and current observations in the momentum calculation [S1, unofficial]. Value not explicitly given in sources [S1, unofficial].
++*   $\tau_{grad}$ (gradient magnitude threshold): Predefined threshold for gradient magnitude [S1, unofficial]. Value not explicitly given in sources [S1, unofficial].
+ *   $k_E$ (densification interval): Fixed at 100 iterations [S1, unofficial].
+-*   $\epsilon$: Numerical stability constant to prevent division by zero. Value not explicitly given, but required [S1, unofficial].
++*   $\epsilon$: Numerical stability constant to prevent division by zero [S1, unofficial]. Value not explicitly given in sources [S1, unofficial].
+ 
+ **Steps:**
+@@ -31,16 +31,16 @@
+     $$ \mathbb{I}_{densify}^{(i)} = (\|\nabla_p \mathcal{L}_t^{(i)}\| > \tau_{grad}) \land (\Psi_i > \bar{\Psi}) $$
+     Densification is triggered only if the gradient magnitude exceeds $\tau_{grad}$ AND the consistency score is higher than the population average [S1, unofficial].
+-5.  **Execution:** If $\mathbb{I}_{densify}^{(i)}$ is true, perform densification operations (splitting or cloning) as defined in the parent [Densification Strategy](6234-densification-strategy.md). This check is performed every $k_E = 100$ iterations [S1, unofficial].
++5.  **Execution:** If $\mathbb{I}_{densify}^{(i)}$ is true, perform densification operations (splitting or cloning) as defined in the parent [Densification Strategy](6234-densification-strategy.md) [S1, unofficial]. This check is performed every $k_E = 100$ iterations [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def momentum_consistency_densification_step(gaussians, momentum_buffer, loss_gradients, gamma, tau_grad, epsilon, k_E, current_iter):
++def momentum_consistency_densification(gaussians, momentum_buffer, loss_gradients, gamma, tau_grad, epsilon, k_E, current_iter):
+     """
+     Performs one step of momentum consistency-guided densification.
+     
+     Args:
+-        gaussians: List of Gaussian primitives, each with attributes {x, alpha, s, r, c}.
+-        momentum_buffer: Array of shape (N, 3) storing momentum for positions.
+-        loss_gradients: Array of shape (N, D) storing gradients for all attributes.
++        gaussians: List of Gaussian primitives.
++        momentum_buffer: 2D list of shape (N, D) storing momentum for all attributes.
++        loss_gradients: 2D list of shape (N, D) storing gradients for all attributes.
+         gamma: Momentum decay factor.
+         tau_grad: Gradient magnitude threshold.
+@@ -50,60 +50,58 @@
+         
+     Returns:
+-        densify_mask: Boolean array of shape (N,) indicating which Gaussians to densify.
+-        new_momentum_buffer: Updated momentum buffer.
++        densify_mask: Boolean list of length N indicating which Gaussians to densify.
++        new_momentum_buffer: Updated 2D list of shape (N, D).
+     """
+     N = len(gaussians)
++    D = len(loss_gradients[0])
++    new_momentum = [[0.0] * D for _ in range(N)]
+     
+-    # Only perform densification check at specified intervals
++    # 1. Momentum Update
++    for i in range(N):
++        for d in range(D):
++            new_momentum[i][d] = gamma * momentum_buffer[i][d] + (1 - gamma) * loss_gradients[i][d]
++            
++    # Only evaluate densification at interval k_E
+     if current_iter % k_E != 0:
+-        # Update momentum even if not densifying
+-        grad_pos = [loss_gradients[j][d] for j in range(N) for d in range(3)]
+-        new_momentum_buffer = [gamma * momentum_buffer[j][d] + (1 - gamma) * grad_pos[j*3 + d] for j in range(N) for d in range(3)]
+-        return [False] * N, new_momentum_buffer
+-
+-    # 1. Momentum Update
+-    grad_pos = [loss_gradients[j][d] for j in range(N) for d in range(3)]
+-    new_momentum_buffer = [gamma * momentum_buffer[j][d] + (1 - gamma) * grad_pos[j*3 + d] for j in range(N) for d in range(3)]
+-    
++        return [False] * N, new_momentum
++        
+     # 2. Consistency Score Calculation
+     consistency_scores = []
+-    for j in range(N):
+-        dot_product = sum(new_momentum_buffer[j*3 + d] * grad_pos[j*3 + d] for d in range(3))
+-        norm_momentum = sum(new_momentum_buffer[j*3 + d]**2 for d in range(3)) ** 0.5
+-        norm_gradient = sum(grad_pos[j*3 + d]**2 for d in range(3)) ** 0.5
+-        consistency_scores.append(dot_product / (norm_momentum * norm_gradient + epsilon))
+-    
++    grad_magnitudes = []
++    for i in range(N):
++        dot_prod = sum(new_momentum[i][d] * loss_gradients[i][d] for d in range(D))
++        norm_m = sum(new_momentum[i][d] ** 2 for d in range(D)) ** 0.5
++        norm_g = sum(loss_gradients[i][d] ** 2 for d in range(D)) ** 0.5
++        consistency_scores.append(dot_prod / (norm_m * norm_g + epsilon))
++        grad_magnitudes.append(norm_g)
++        
+     # 3. Population Average
+     mean_consistency = sum(consistency_scores) / N
+     
+     # 4. Densification Trigger
+-    grad_magnitude = [sum(grad_pos[j*3 + d]**2 for d in range(3)) ** 0.5 for j in range(N)]
+-    high_grad = [m > tau_grad for m in grad_magnitude]
+-    high_consistency = [c > mean_consistency for c in consistency_scores]
+-    
+-    # Combine conditions
+-    densify_mask = [h_grad and h_cons for h_grad, h_cons in zip(high_grad, high_consistency)]
+-    
+-    return densify_mask, new_momentum_buffer
++    densify_mask = []
++    for i in range(N):
++        high_grad = grad_magnitudes[i] > tau_grad
++        high_consistency = consistency_scores[i] > mean_consistency
++        densify_mask.append(high_grad and high_consistency)
++        
++    return densify_mask, new_momentum
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Floating Artifacts:** Standard gradient-based strategies can create floating artifacts in non-manifold regions due to reliance on single-step gradient snapshots. This method mitigates this by using momentum, which represents more deterministic historical motion trends [S1, unofficial].
++*   **Floating Artifacts:** Standard gradient-based strategies can create floating artifacts in non-manifold regions due to reliance on single-step gradient snapshots [S1, unofficial]. This method mitigates this by using momentum, which represents more deterministic historical motion trends [S1, unofficial].
+ *   **Numerical Stability:** The denominator in the consistency score calculation includes $\epsilon$ to prevent division by zero when norms are near zero [S1, unofficial].
+-*   **Hyperparameter Sensitivity:** The choice of $\gamma$ and $\tau_{grad}$ is critical. The source does not provide specific values, implying they may require tuning or follow default 3DGS configurations [S1, unofficial].
+-
++*   **Hyperparameter Sensitivity:** The choice of $\gamma$ and $\tau_{grad}$ is critical [S1, unofficial]. The source does not provide specific values, implying they may require tuning or follow default 3DGS configurations [S1, unofficial].
+ ## Operating characteristics
+-*   **Time Complexity:** The additional cost per iteration is the momentum update and consistency score calculation, which are $O(N)$ operations where $N$ is the number of Gaussians [G]. The densification check itself is $O(N)$ [G]. This is lightweight compared to the rendering and gradient computation steps [G].
+-*   **Memory Complexity:** Requires an additional momentum buffer of size $O(N \times 3)$ for position gradients [G].
++*   **Time Complexity:** The additional cost per iteration is the momentum update and consistency score calculation, which are $O(N \cdot D)$ operations where $N$ is the number of Gaussians and $D$ is the attribute dimensionality [G]. The densification check itself is $O(N)$ [G]. This is lightweight compared to the rendering and gradient computation steps [G].
++*   **Memory Complexity:** Requires an additional momentum buffer of size $O(N \cdot D)$ [G].
+ *   **Strengths:** Reduces floating artifacts in complex/non-manifold regions by leveraging historical gradient information [S1, unofficial]. Scene-adaptive without manual hyperparameter search for the consistency threshold (uses population mean) [S1, unofficial].
+ *   **Limitations:** Requires maintaining an additional buffer [G]. Performance depends on the choice of $\gamma$ and $\tau_{grad}$ [S1, unofficial].
+ *   **When to use:** When standard densification leads to floating artifacts or noisy geometry in non-manifold regions [S1, unofficial].
+ *   **When not to use:** If memory is extremely constrained (due to the momentum buffer) or if the scene is simple and standard densification suffices [G].
+-
+ ## Background
+ *   **Origin:** Proposed in the ACE-GS paper [S1, unofficial].
+ *   **History:** Developed to address limitations of standard gradient-based densification in 3D Gaussian Splatting, specifically the issue of floating artifacts in non-manifold regions [S1, unofficial].
+ *   **Usage:** Used in the ACE-GS framework for 3D Gaussian Splatting optimization [S1, unofficial].
+-
+ ## Sources
+ [S1] ACE-GS: Acing the Trade-off with Accurate, Compact and Efficient 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2606.21244, fetched 2026-10-29 (unofficial)

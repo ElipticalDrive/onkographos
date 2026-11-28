@@ -1,0 +1,100 @@
+# Marching Cubes 2
+## Overview
+Marching Cubes 2 is a variant of the Marching Cubes algorithm that extracts isosurfaces from 3D scalar fields using a different lookup table or implementation strategy [S2, unofficial]. It builds on the standard voxel-independent processing of Marching Cubes but modifies the core configuration logic to address specific implementation constraints or performance characteristics [S2, unofficial].
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   `lower`, `upper`: Lower and upper bounds of the scalar field data.
+*   `numx`, `numy`, `numz`: Dimensions of the 3D grid in the x, y, and z directions [S2, unofficial].
+*   `arr`: A function or pointer providing access to the scalar values at grid vertices (e.g., `PyArrayToCFunc(arr)`) [S2, unofficial].
+*   `isovalue`: The scalar threshold value at which the isosurface is extracted.
+
+**Outputs:**
+*   `vertices`: A list or array of 3D coordinates representing the vertices of the extracted polygonal mesh.
+*   `polygons`: A list or array of indices referencing the `vertices` array, defining the triangular faces of the mesh.
+
+### Data Structures
+The implementation relies on standard Marching Cubes data structures, specifically the edge table and triangle table (lookup tables) that map the 256 possible vertex configurations of a cube to the set of edges intersected by the isosurface [G].
+
+### Steps
+1.  **Preparation**: Validate that the input data is 3D. Extract the shape of the data to determine `numx`, `numy`, and `numz`. Compute the bounds (`lower`, `upper`) of the scalar field values [S2, unofficial].
+2.  **Initialization**: Initialize empty vectors or arrays for `vertices` and `polygons` to store the output mesh data [G].
+3.  **Core Execution**: Invoke the core Marching Cubes 2 algorithm function. In the reference implementation, this is called as `mc::marching_cubes2<double>(lower, upper, numx, numy, numz, PyArrayToCFunc(arr), isovalue, vertices, polygons)` [S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def marching_cubes_2(lower, upper, numx, numy, numz, field_func, isovalue):
+    vertices = []
+    polygons = []
+    # Iterate over all voxels in the grid
+    for x in range(numx - 1):
+        for y in range(numy - 1):
+            for z in range(numz - 1):
+                # Sample the 8 corner values of the current voxel
+                v = [field_func(x + i, y + j, z + k) 
+                     for i in (0, 1) for j in (0, 1) for k in (0, 1)]
+                # Compute configuration index based on isovalue comparison
+                config = sum(1 << idx for idx, val in enumerate(v) if val >= isovalue)
+                # Lookup triangle edge indices from the variant lookup table
+                tri_edges = lookup_table[config]
+                for edge_idx in tri_edges:
+                    if edge_idx == -1:
+                        break
+                    # Interpolate vertex positions on the intersected edges
+                    verts = [interpolate_edge(v, edge_idx, isovalue) for _ in range(3)]
+                    vertices.extend(verts)
+                    polygons.append(len(vertices) - 3)
+    return vertices, polygons
+
+def interpolate_edge(v, edge_idx, isovalue):
+    # Standard linear interpolation along the specified voxel edge
+    # edge_idx maps to two corner indices (e.g., 0 and 1)
+    i0, i1 = edge_map[edge_idx]
+    t = (isovalue - v[i0]) / (v[i1] - v[i0] + 1e-9)
+    return v[i0] + t * (v[i1] - v[i0])
+```
+
+### Parameters
+*   **Isoscale**: The `isovalue` parameter determines the threshold for surface extraction.
+*   **Data Access**: The method assumes a function-based access pattern for the scalar field (`PyArrayToCFunc`), which may allow for lazy evaluation or optimized memory access patterns compared to direct array indexing [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Degenerate Cases**: The sources do not specify how MC2 handles degenerate triangles or exact vertex intersections differently from standard Marching Cubes [S2, unofficial]. Implementers should verify precision handling for the `isovalue` comparison and add epsilon guards where necessary [G].
+*   **Precision**: The use of `double` in the reference signature suggests that floating-point precision is a consideration, particularly for the comparison between scalar values and the `isovalue` [S2, unofficial].
+## Subtopics
+
+### CUDA Isosurface Extraction with Overlapped Execution
+An optimization for CUDA-based isosurface extraction that overlaps data transfers and kernel executions to hide latency, specifically for devices with compute capability 1.1 or higher where host-device memory copies of blocks <= 64 KB are asynchronous [S3]. It sets itself apart from standard Marching Cubes 2 implementations by utilizing asynchronous streams to pipeline the processing of slices [S3]. When to choose it: For large-scale 3D datasets on GPU clusters where I/O and memory transfer latency is a bottleneck [S3].
+*   **Steps**: The `Classify` function executes three overlapping pairs of operations: 1) calculation of vertices and transfer of triangles found for the previous pair of slices; 2) calculation of triangles and transfer of vertices; 3) compaction of triangles and transfer of the next slice [S3].
+*   **Parameters**: Constant memory is used for the look-up table and other constant values, such as the isovalue, to improve performance [S3]. Loop unrolling and tiling are implemented as optimizations, though they provided no noticeable performance improvement for the specific GPU architecture tested [S3].
+*   **Performance**: Device initialization takes approximately 4 seconds on the considered devices, which is negligible for large datasets but significant for small datasets (<100 MB) [S3]. For a 2048x2048x6936 synthetic dataset (23 GB), ParCUDAIso with 16 GTX480 devices achieved a TIso speedup of 752.3x for isovalue 1000 and 1489.7x for isovalue 4000 relative to sequential single-core execution [S3].
+
+### Connectivity Table Generation
+A preprocessing step often associated with Marching Cubes variants that maps edge indices to vertex indices to build a connectivity table [S4, unofficial]. It sets itself apart by explicitly resolving the relationship between intersected edges and the resulting vertex positions in the output mesh [S4, unofficial]. When to choose it: When downstream processing requires explicit vertex-edge connectivity information beyond the triangle indices [S4, unofficial].
+*   **Steps**: Iterate through all 256 cases of the Marching Cubes `tri_table`. For each case, map the edge indices from `tri_table` to vertex indices using `_mc_verts` to build a connectivity table. If an edge index is not found or is 0, assign 0 to the connectivity table entry; otherwise assign the found vertex index [S4, unofficial].
+
+### Smoothing and Distortion Coefficient Control
+A technique to control the smoothness and distortion of the 3D reconstruction model by introducing smoothing and distortion coefficients during the calculation of equivalent points (interpolation) [S5]. It sets itself apart from standard Marching Cubes by allowing tunable interpolation behavior between median and linear methods [S5]. When to choose it: When visual smoothness or geometric fidelity needs to be balanced against computational rigidity [S5].
+*   **Parameters**:
+    *   Smoothing/Distortion Coefficient = 0: Uses median interpolation method. Triangles are uniform in size, shape, and orientation. Model is rigid visually with reduced smoothness [S5].
+    *   Smoothing/Distortion Coefficient = 1: Uses linear interpolation method. Triangular patches change in size, shape, and direction according to the gradient of the gray value. Smoothness is improved at the cost of distortion [S5].
+    *   Smoothing/Distortion Coefficient = 0.25 and 0.75: Intermediate states between median and linear interpolation, balancing smoothness and distortion [S5].
+
+## Operating characteristics
+*   **Time Complexity**: Not given in the sources [S3].
+*   **Memory Complexity**: Not given in the sources [S3].
+*   **Measured Performance**: For CUDA-optimized variants, speedups of up to 1489.7x were achieved on large datasets (23 GB) using 16 GPUs compared to single-core execution [S3].
+*   **Strengths**: The variant allows for specific optimizations such as constant memory usage for lookup tables and asynchronous data transfer overlapping [S3]. It supports tunable interpolation via smoothing coefficients [S5].
+*   **Limitations**: Device initialization overhead (~4 seconds) can be significant for small datasets (<100 MB) [S3]. The specific lookup table differences from standard Marching Cubes are not detailed in the sources, making it difficult to predict topological differences without implementation inspection [S2, unofficial].
+*   **When to use**: Use when standard Marching Cubes implementation constraints require a specific lookup table variant or when GPU-specific optimizations like overlapped execution are needed [S2, unofficial][S3].
+*   **When not to use**: Avoid for small datasets where the GPU initialization overhead dominates execution time [S3].
+## Background
+Marching Cubes 2 is described as a variant of the original Marching Cubes algorithm, which was introduced by William E. Lorensen and Harvey E. Cline in 1987. The "2" designation likely refers to a specific implementation or lookup table variant rather than a fundamental change in the algorithm's topology, as indicated by the alias `mc::marching_cubes2` [S2, unofficial]. The method has been adapted for various platforms, including CUDA-based GPU clusters, where it has been optimized for parallel execution and memory transfer hiding [S3]. It is used in contexts requiring efficient isosurface extraction from large 3D scalar fields, such as medical imaging and scientific visualization [S3][S5].
+## Sources
+[S1] Evaluation of Manifold Dual Contouring Algorithms Based on K-d Tree and Octree Data Structures, https://doi.org/10.31449/inf.v48i3.5420, fetched 2026-10-26
+[S2] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)
+[S3] A parallel isosurface extraction component for visualization pipelines executing on GPU clusters, https://doi.org/10.1016/j.cam.2014.05.019, fetched 2026-10-27
+[S4] JuliaGeometry/Meshing.jl, https://github.com/JuliaGeometry/Meshing.jl, fetched 2026-10-27 (unofficial)
+[S5] A Novel 3D Reconstruction Algorithm of CT Images Based on Improved Marching Cubes Algorithm, https://doi.org/10.4108/eai.27-8-2020.2295136, fetched 2026-10-26

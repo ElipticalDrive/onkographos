@@ -1,0 +1,257 @@
+--- v007.md
++++ v008.md
+@@ -8,15 +8,15 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** $V$ input images (typically $V=3$) with known camera poses, and their corresponding depth maps or point clouds generated via SfM/PatchMatch Stereo.
++*   **Inputs:** $V$ input images (typically $V=3$) with known camera poses, and their corresponding depth maps or point clouds generated via SfM/PatchMatch Stereo [S1].
+ *   **Outputs:** A rendered color image $\hat{C}(r)$ for a novel view ray $r$.
+ 
+ **Data Structures:**
+-1.  **Triplane ($P$):** A set of three mutually orthogonal feature planes $P = \{P_{XY}, P_{YZ}, P_{ZX}\}$. Each plane $P_{ij}$ is a tensor of size $H \times W \times C$.
+-    *   $H, W$: Height and width of the feature maps.
+-    *   $C$: Channel dimension (typically 64).
+-    *   Initialized randomly and optimized directly.
+-2.  **Density MLP:** A Multi-Layer Perceptron with CUTLASS architecture, width 512, depth 8.
+-3.  **Color MLP:** A compact MLP combining triplane features and density features.
+-4.  **Reference Features:** Extracted from input images using a pretrained CNN encoder.
++1.  **Triplane ($P$):** A set of three mutually orthogonal feature planes $P = \{P_{XY}, P_{YZ}, P_{ZX}\}$ [S1]. Each plane $P_{ij}$ is a tensor of size $H \times W \times C$ [S1].
++    *   $H, W$: Height and width of the feature maps (Not given in the sources.) [S1].
++    *   $C$: Channel dimension (typically 64) [S1].
++    *   Initialized randomly and optimized directly [S1].
++2.  **Density MLP:** A Multi-Layer Perceptron with CUTLASS architecture, width 512, depth 8 [S1].
++3.  **Color MLP:** A compact MLP combining triplane features and density features [S1].
++4.  **Reference Features:** Extracted from input images using a pretrained CNN encoder [S1].
+ 
+ **Numbered Steps:**
+@@ -27,10 +27,10 @@
+ 
+ 2.  **Feature Extraction (IBR):**
+-    *   Extract pixel-aligned reference features $f_{ref}$ from input images using a pretrained CNN encoder. The feature vector dimension is 64 [S1].
++    *   Extract pixel-aligned reference features $f_{ref}$ from input images using a pretrained CNN encoder [S1]. The feature vector dimension is 64 [S1].
+     *   For each sampling point along a ray, project these reference features to obtain corresponding feature vectors [S1].
+ 
+ 3.  **Triplane Feature Retrieval (Color Branch):**
+     *   Decompose the scene space into three orthogonal parameterized planes $P = \{P_{XY}, P_{YZ}, P_{ZX}\}$ [S1].
+-    *   For a 3D spatial point $\mathbf{x}$, project it orthogonally onto the three planes.
++    *   For a 3D spatial point $\mathbf{x}$, project it orthogonally onto the three planes [S1].
+     *   Identify the four nearest grid points on each plane and apply bilinear interpolation to compute feature vectors $f_{XY}, f_{YZ}, f_{ZX}$ [S1]:
+         $$ f = \text{TriPlane}(\mathbf{x}; P) $$
+@@ -71,111 +71,124 @@
+ class TriDF:
+     def __init__(self, H=256, W=256, C=64, density_width=512, density_depth=8):
+-        """
+-        Initialize TriDF model.
+-        H, W: Triplane resolution.
+-        C: Triplane channel dimension.
+-        """
+-        # Triplane: 3 planes of size H x W x C
++        # Triplane: 3 planes of size H x W x C [S1]
+         self.P = nn.Parameter(torch.randn(3, C, H, W))
+-        
+-        # Density MLP: CUTLASS architecture, width 512, depth 8
+-        self.density_mlp = nn.Sequential()
+-        in_dim = C + 7 * 3 # C reference features + 7*3 positional encoding (freq=6 implies 6*2+1=13 dims? Source says freq=6, standard PE is 2L+1=13. Source says "frequency=6", usually implies L=6. Let's assume standard PE expansion. 
+-        # Note: Source says "concatenates all projected feature vectors with positionally encoded coordinates (frequency = 6)". 
+-        # Standard PE for dim d with freq L results in 2*L+1 dimensions. For 3D coords, 3 * 13 = 39 dims.
+-        # However, source says "concatenates... with positionally encoded coordinates". 
+-        # Let's stick to the structure described: Reference Features + PE(Coords) -> Density MLP.
+-        
+-        # Re-reading source: "concatenates all projected feature vectors with positionally encoded coordinates (frequency = 6)"
+-        # Reference features dim: 64.
+-        # Coords dim: 3. PE freq 6 -> 13 dims per coord -> 39 dims.
+-        # Total input to Density MLP: 64 + 39 = 103.
+-        
+-        layers = []
++        self.C = C
++        self.H = H
++        self.W = W
++        
++        # Density MLP: CUTLASS architecture, width 512, depth 8 [S1]
++        # Input: PE(coords) [39 dims] + ref_features [64 dims] = 103 dims
++        density_layers = []
+         current_dim = 103
+         for _ in range(density_depth):
+-            layers.append(nn.Linear(current_dim, density_width))
+-            layers.append(nn.ReLU())
++            density_layers.append(nn.Linear(current_dim, density_width))
++            density_layers.append(nn.ReLU())
+             current_dim = density_width
+-        layers.append(nn.Linear(density_width, 4)) # Output: sigma (1) + f_m (3)? Or sigma (1) + f_m (C)? 
+-        # Source says "density fields simultaneously generate volume density and intermediate features fm".
+-        # Source says "compact MLP that combines triplane features ftri and density features fm".
+-        # f_tri is 3*C = 192.
+-        # If f_m is used in f_base, it needs to match dimensions or be projected.
+-        # Let's assume f_m is a vector of size C (64) for simplicity in concatenation with f_tri (192) -> 256.
+-        # Or f_m is size 3? Source doesn't specify f_m size explicitly, but f_base combines f_tri and f_m.
+-        # Let's assume f_m is size C for alignment.
+-        # Output: sigma (1) + f_m (C=64). Total 65.
+-        
+-        self.density_mlp = nn.Sequential(*layers)
+-        # Adjust last layer to output 1 + C
+-        self.density_mlp[-1] = nn.Linear(density_width, 1 + C)
+-
+-        # Color MLP
+-        # Input: f_base (f_tri + f_m) + SH(d)
+-        # f_tri: 3*C = 192. f_m: C = 64. f_base dim = 256.
+-        # SH(d): Source says "encode viewing direction d ... on the spherical harmonics basis".
+-        # Standard SH for degree 3 is 16 dims. Degree 4 is 25. Let's assume standard SH encoding function.
++        # Output: sigma (1) + f_m (C=64) [S1]
++        density_layers.append(nn.Linear(density_width, 1 + C))
++        self.density_mlp = nn.Sequential(*density_layers)
++        
++        # Color MLP: compact MLP combining triplane features and density features [S1]
++        # f_tri dim = 3*C = 192. f_m dim = C = 64. f_base dim = 256.
++        # SH(d) dim = 16 (degree 3) [G]
+         self.color_mlp = nn.Sequential(
+-            nn.Linear(256 + 16, 128), # Intermediate
++            nn.Linear(256 + 16, 128),
+             nn.ReLU(),
+-            nn.Linear(128, 3) # Output RGB
++            nn.Linear(128, 3)
+         )
+-        
+-        # Optimizer
+         self.optimizer = torch.optim.AdamW(self.parameters(), lr=0.0001)
+ 
+     def get_pe(self, coords, freq=6):
+-        """
+-        Positional Encoding for coordinates.
+-        freq=6 implies 6 sine/cosine frequencies.
+-        Output dim: 3 * (2*freq + 1) = 39.
+-        """
+-        # Standard PE implementation
+-        # ...
+-        pass
+-
+-    def get_sh(self, direction):
+-        """
+-        Spherical Harmonics encoding for viewing direction.
+-        """
+-        # Standard SH implementation
+-        # ...
+-        pass
+-
+-    def forward(self, ray_origins, ray_directions, ref_images, ref_intrinsics, ref_extrinsics):
+-        """
+-        Forward pass for a batch of rays.
+-        """
+-        # 1. Sample points along rays
+-        # ...
+-        
+-        # 2. Extract Reference Features from ref_images using pretrained CNN
+-        # ref_features = cnn_encoder(ref_images)
+-        
+-        # 3. For each sample point x:
+-        #    a. Project x to XY, YZ, ZX planes.
+-        #    b. Bilinear interpolation to get f_xy, f_yz, f_zx.
+-        #    c. Concatenate to f_tri.
+-        
+-        #    d. Project ref_features to x to get f_ref.
+-        #    e. PE(x) and concat with f_ref.
+-        #    f. Density MLP -> sigma, f_m.
+-        
+-        #    g. f_base = concat(f_tri, f_m).
+-        #    h. SH(d) encoding.
+-        #    i. Color MLP -> color.
+-        
+-        # 4. Volume Rendering
+-        # ...
+-        
+-        # 5. Loss Calculation
+-        # Photometric loss + Depth loss + Smoothness loss
+-        pass
++        # Positional encoding for 3D coordinates with frequency 6 [S1]
++        # Standard PE: 2*freq + 1 = 13 dimensions per coordinate
++        pe_dim = 2 * freq + 1
++        device = coords.device
++        pe = torch.zeros(coords.shape[0], 3 * pe_dim, device=device)
++        for i in range(3):
++            for j in range(freq):
++                pe[:, i * pe_dim + 2 * j] = torch.sin(coords[:, i] * (2 ** j * torch.pi))
++                pe[:, i * pe_dim + 2 * j + 1] = torch.cos(coords[:, i] * (2 ** j * torch.pi))
++            pe[:, i * pe_dim + 2 * freq] = coords[:, i]
++        return pe
++
++    def get_sh(self, direction, degree=3):
++        # Spherical harmonics encoding for viewing direction [S1]
++        # Standard implementation for degree 3 [G]
++        x, y, z = direction[:, 0], direction[:, 1], direction[:, 2]
++        sh = torch.zeros(direction.shape[0], (degree + 1) ** 2, device=direction.device)
++        sh[:, 0] = 0.282095
++        sh[:, 1] = 0.488603 * y
++        sh[:, 2] = 0.488603 * z
++        sh[:, 3] = 0.488603 * x
++        sh[:, 4] = 1.092548 * x * y
++        sh[:, 5] = -0.315392 * (3 * z ** 2 - 1)
++        sh[:, 6] = 1.092548 * y * z
++        sh[:, 7] = 0.546274 * (x ** 2 - y ** 2)
++        sh[:, 8] = 1.092548 * x * z
++        sh[:, 9] = 0.590592 * y
++        sh[:, 10] = 2.890611 * x * y * z
++        sh[:, 11] = -0.457895 * y * (3 * z ** 2 - 1)
++        sh[:, 12] = 0.373176 * (5 * z ** 3 - 3 * z)
++        sh[:, 13] = -0.457895 * x * (5 * z ** 2 - 1)
++        sh[:, 14] = 0.946174 * z * (x ** 2 - y ** 2)
++        sh[:, 15] = 0.669046 * x * (x ** 2 - 3 * y ** 2)
++        return sh
++
++    def triplane_lookup(self, x):
++        # Project x orthogonally onto three planes and bilinearly interpolate [S1]
++        # x shape: (N, 3)
++        coords_xy = torch.stack([x[:, 0], x[:, 1]], dim=-1)
++        coords_yz = torch.stack([x[:, 1], x[:, 2]], dim=-1)
++        coords_zx = torch.stack([x[:, 2], x[:, 0]], dim=-1)
++        
++        def bilinear_interp(coords, plane):
++            # Normalize to [-1, 1] for F.grid_sample
++            coords_norm = coords * 2 - 1
++            coords_norm = coords_norm.unsqueeze(1).unsqueeze(1)
++            feats = F.grid_sample(plane.unsqueeze(0), coords_norm, align_corners=True).squeeze()
++            return feats
++            
++        f_xy = bilinear_interp(coords_xy, self.P[0])
++        f_yz = bilinear_interp(coords_yz, self.P[1])
++        f_zx = bilinear_interp(coords_zx, self.P[2])
++        return torch.cat([f_xy, f_yz, f_zx], dim=-1)
++
++    def forward(self, ray_origins, ray_directions, ref_features, t_vals):
++        # Sample points along rays [G]
++        # x = ray_origins + t_vals * ray_directions
++        x = ray_origins.unsqueeze(1) + t_vals.unsqueeze(2) * ray_directions.unsqueeze(1)
++        
++        # 1. Triplane feature retrieval [S1]
++        f_tri = self.triplane_lookup(x.reshape(-1, 3)).reshape(x.shape[0], x.shape[1], -1)
++        
++        # 2. Density field prediction [S1]
++        pe_x = self.get_pe(x.reshape(-1, 3)).reshape(x.shape[0], x.shape[1], -1)
++        density_input = torch.cat([pe_x, ref_features], dim=-1)
++        density_out = self.density_mlp(density_input)
++        sigma = density_out[:, :, 0]
++        f_m = density_out[:, :, 1:]
++        
++        # 3. Color prediction [S1]
++        f_base = torch.cat([f_tri, f_m], dim=-1)
++        sh_d = self.get_sh(ray_directions)
++        color = self.color_mlp(torch.cat([f_base, sh_d.unsqueeze(1).expand(-1, x.shape[1], -1)], dim=-1))
++        
++        # 4. Volume rendering [S1]
++        # delta = t_vals[i+1] - t_vals[i]
++        # T_i = exp(-sum_{j<i} sigma_j * delta_j)
++        # C = sum T_i * (1 - exp(-sigma_i * delta_i)) * c_i
++        deltas = t_vals[:, 1:] - t_vals[:, :-1]
++        delta = torch.cat([deltas, torch.ones_like(deltas[:, :1]) * 1e10], dim=-1)
++        sigma_delta = sigma * delta
++        alpha = 1.0 - torch.exp(-sigma_delta)
++        transmittance = torch.exp(torch.cat([torch.zeros_like(sigma[:, :1]), -torch.cumsum(sigma_delta[:, :-1], dim=-1)], dim=-1))
++        weights = alpha * transmittance
++        C = torch.sum(weights.unsqueeze(-1) * color, dim=1)
++        return C
+ ```
+ 
+ **Parameters:**
+ *   **Input Views:** 3 (sparse views with limited viewpoints and low overlap) [S1].
+-*   **Triplane Resolution:** $H \times W$ (Not given in the sources, but typical values are implied by "fixed resolution").
++*   **Triplane Resolution:** $H \times W$ (Not given in the sources.) [S1].
+ *   **Channel Dimension ($C$):** 64 [S1].
+ *   **Density MLP:** Width 512, Depth 8 [S1].

@@ -1,0 +1,155 @@
+--- v004.md
++++ v005.md
+@@ -1,63 +1,113 @@
+ # Parallel 3D-DDA
+-
+ Also called: SIMD Ray Marching, 并行化改造方案
+-
+ ## Overview
+-Parallel 3D-DDA is a GPU-optimized implementation of the 3D Digital Differential Analyzer (DDA) algorithm, designed to traverse volumetric data structures using Single Instruction, Multiple Data (SIMD) parallelism. It solves the performance bottleneck of naive ray marching by eliminating branch divergence and maximizing memory throughput on modern graphics hardware. Unlike the [Per-pixel 3D-DDA Renderer](12466-per-pixel-3d-dda-renderer.md), which focuses on CPU-based per-pixel traversal for correct compositing, Parallel 3D-DDA prioritizes high-throughput SIMD execution on GPUs, leveraging warp-level parallelism to process millions of rays simultaneously.
+-
++Parallel 3D-DDA is a GPU-optimized implementation of the 3D Digital Differential Analyzer traversal algorithm, designed to process large batches of rays simultaneously using Single Instruction, Multiple Data (SIMD) parallelism [S1, unofficial]. It solves the performance bottleneck of naive ray marching by leveraging modern GPU architectures to achieve high throughput, processing approximately 28 million rays per second on an NVIDIA A100 [S1, unofficial]. Unlike its parent [Hardware/Implementation Optimization](10943-hardware-implementation-optimization.md) which outlines general principles, this method specifically details the warp-level parallelization and mixed-precision strategies required to maintain efficiency in volume rendering [S1, unofficial].
+ ## How it works
+-The method transforms the sequential ray-marching loop into a data-parallel kernel where each thread in a GPU warp processes one ray, while shared memory is used to cache voxel data to reduce global memory latency.
+-
+ **Inputs and Outputs:**
+-*   **Input:** A set of rays (origin, direction, length), a volumetric dataset (texture or buffer), and traversal parameters (step size, bounds).
+-*   **Output:** Computed color and opacity for each ray, composited into the final image buffer.
++*   **Input:** A set of $N$ rays, each defined by origin $\mathbf{o}$, direction $\mathbf{d}$, and step size $\Delta s$. The volume data is stored in a 3D grid (Structure of Arrays or Structure of Structures).
++*   **Output:** Computed color and opacity for each ray, or traversal termination status.
+ 
+ **Data Structures:**
+-*   **Ray Data:** Stored in a Structure of Arrays (SoA) layout to ensure coalesced memory access. Fields typically include `origin_x, origin_y, origin_z`, `dir_x, dir_y, dir_z`, `t_max`, and `current_t`.
+-*   **Voxel Data:** Stored in 3D textures or 1D buffers with SoA layout for density/opacity channels.
++*   **Ray Data:** Stored in a Structure of Arrays (SoA) layout to ensure coalesced global memory access [G]. Each ray requires fields for current position, step size, and remaining distance.
++*   **Voxel Data:** Cached in shared memory to reduce global memory latency [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Each thread loads its ray parameters from global memory into registers. The initial step size is determined by the grid resolution.
+-2.  **Warp Execution:** Threads within a warp execute the DDA step simultaneously. To maintain SIMD efficiency, divergent branches (e.g., rays exiting the volume at different times) are handled via masking or sentinel values rather than control flow divergence [S1, unofficial].
+-3.  **Memory Access:** Threads access voxel data. To optimize, threads accessing nearby voxels (spatial coherence) share cached data in shared memory (L1/Shared cache) [S1, unofficial].
++1.  **Warp Partitioning:** Divide the set of $N$ rays into groups of 32 (one warp per GPU thread block or subgroup). Each thread within a warp processes exactly one ray [S1, unofficial].
++2.  **Initialization:** For each ray, calculate the initial intersection with the volume bounding box. Determine the entry voxel and the direction of traversal (sign of $\mathbf{d}$ components) [G].
++3.  **Shared Memory Loading:** Load the relevant voxel tile or chunk into shared memory for the warp [S1, unofficial].
+ 4.  **Traversal Loop:**
+-    *   Calculate the next voxel coordinate using DDA logic: determine which axis (x, y, or z) the ray exits the current voxel first.
+-    *   Update the ray's position and the distance to the next voxel boundary.
+-    *   Sample the voxel at the new position.
+-    *   Accumulate color and opacity using front-to-back or back-to-front compositing.
+-    *   Check for termination: if `current_t > t_max` or the voxel is empty (if occupancy maps are used), terminate the ray.
+-5.  **Output:** Write the final accumulated color and opacity to the frame buffer.
++    a.  Sample the voxel at the current ray position.
++    b.  Update ray position: $\mathbf{p}_{new} = \mathbf{p}_{old} + \mathbf{d} \cdot \Delta s$.
++    c.  Check for termination (exit volume or opacity threshold reached).
++    d.  If not terminated, update voxel indices based on direction signs.
++5.  **Termination:** Write results to global memory.
+ 
+-**Formulas:**
+-The DDA step determines the next intersection. For a ray $R(t) = O + tD$, the distance to the next voxel boundary along axis $i$ is:
+-$$ t_{next\_i} = t_{current} + \frac{V_{boundary\_i} - P_{current\_i}}{D_i} $$
+-where $V_{boundary\_i}$ is the coordinate of the next voxel face, and $P_{current\_i}$ is the current position. The minimum $t_{next\_i}$ determines the axis of exit.
++**Mixed Precision Strategy:**
++To balance precision and performance, the algorithm employs a two-stage precision approach [S1, unofficial]:
++1.  **Initial Stage:** Use 32-bit floating-point numbers (FP32) for the first few steps to ensure accurate entry point calculation and initial sampling [S1, unofficial].
++2.  **Deep Penetration Stage:** Switch to 16-bit floating-point numbers (FP16) as the ray penetrates deeper into the medium to accelerate calculation [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Step Size:** Typically 0.5 voxel spacing for medical imaging to balance detail and performance [S1, unofficial].
+-*   **Warp Size:** 32 threads (standard NVIDIA warp size).
++*   **Step Size:** Typically set to 0.5 voxel spacing to balance detail and performance [S1, unofficial].
++*   **Warp Size:** 32 threads (standard NVIDIA GPU warp size) [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Floating-point errors can cause gaps or overlaps in traversal. Use higher precision for initial calculations [S1, unofficial].
+-*   **Out-of-Bounds:** Accessing voxels outside the volume bounds must return sentinel values (e.g., zero opacity) to naturally terminate iteration without explicit clipping logic [S1, unofficial].
+-*   **Register Pressure:** Excessive state carried across loops reduces occupancy. Minimize register usage to allow more concurrent warps [S1, unofficial].
++*   **Precision Loss:** Using FP16 for initial entry calculations can cause jitter or incorrect voxel hits. The switch to FP16 should only occur after the ray is firmly inside the volume [S1, unofficial].
++*   **Memory Coalescing:** Non-coalesced access patterns in global memory can severely degrade performance. SoA layout is critical [G].
++*   **Occupancy:** High register pressure from carrying per-ray state can reduce occupancy. State should be minimized or stored in registers efficiently [G].
+ 
++**Pseudocode:**
++```python
++# Pseudocode for Parallel 3D-DDA Warp Execution
++# Assumes thread_id is the lane index (0-31) within the warp
++# Assumes ray_data is an SoA structure accessible by all threads
++
++def parallel_3d_dda_warp(ray_indices):
++    # 1. Load ray data into registers
++    origins = [ray_data.origin[i] for i in ray_indices]
++    directions = [ray_data.direction[i] for i in ray_indices]
++    steps = [ray_data.step[i] for i in ray_indices]
++    
++    # 2. Initialize traversal state
++    # Calculate entry voxel and step signs based on direction
++    entry_voxels = compute_entry_voxel(origins, directions)
++    step_signs = sign(directions)
++    t_max = compute_distance_to_exit(origins, directions, volume_bounds)
++    
++    # 3. Shared memory cache for voxels
++    shared_voxel_cache = allocate_shared_memory()
++    
++    for step_count in range(MAX_STEPS):
++        # 4. Load voxel data into shared memory if needed
++        # (Optimization: Load tile covering current voxel coordinates)
++        current_voxels = load_voxels_into_shared_memory(entry_voxels)
++        
++        # 5. Sample and update
++        for i in range(32): # Unrolled or loop over warp
++            if t_max[i] <= 0:
++                continue # Ray terminated
++            
++            # Determine precision based on step count
++            if step_count < PRECISION_SWITCH_THRESHOLD:
++                precision = FP32
++            else:
++                precision = FP16
++            
++            # Sample voxel
++            voxel_value = sample_voxel(current_voxels[i], precision)
++            
++            # Update position
++            origins[i] += directions[i] * steps[i]
++            t_max[i] -= steps[i]
++            
++            # Update voxel index
++            entry_voxels[i] += step_signs[i]
++            
++            # Check termination
++            if t_max[i] <= 0 or is_out_of_bounds(entry_voxels[i]):
++                t_max[i] = 0
++
++    # 6. Write results
++    write_results(ray_indices, origins, t_max)
++```
+ ## Subtopics
+ 
+ ### Mixed Precision Optimization
+-A variant that uses 32-bit floating-point numbers in the initial stage to ensure precision, then switches to 16-bit floating-point numbers as the ray penetrates deeper into the medium to accelerate calculation. This strategy increased computational throughput by 40% in game engine practice while maintaining visual effects [S1, unofficial].
++A variant that dynamically switches from FP32 to FP16 during traversal. It uses FP32 for initial steps to ensure precision and FP16 for deeper penetration to accelerate calculation. This strategy increased computational throughput by 40% in game engine practice while maintaining visual effects [S1, unofficial].
++
++### [Per-pixel 3D-DDA Renderer](12466-per-pixel-3d-dda-renderer.md)
++A CPU-based method that performs strict per-pixel traversal order over a brickmap. It serves as a clean-room alternative to column-coherent raycasting, enabling correct compositing of transparent voxels without depth sorting or Order-Independent Transparency (OIT) schemes. Unlike the parallel GPU method, it focuses on traversal order correctness on CPU architectures.
+ 
+ ## Operating characteristics
+-*   **Performance:** On an NVIDIA A100 GPU, the parallelized 3D-DDA implementation can process 28 million rays per second [S1, unofficial].
+-*   **Complexity:** The average sampling count is $1.2N$ for 3D-DDA, compared to $N^3$ for brute force and $0.5N \log N$ for octree acceleration, where $N$ is the linear dimension of the volume [S1, unofficial].
+-*   **Memory:** Medium memory usage for 3D-DDA, higher for octrees and SVOs [S1, unofficial].
+-*   **Strengths:** High throughput for dynamic volumetric data; efficient use of GPU parallelism; reduced sampling count compared to brute force (99.7% reduction) [S1, unofficial].
+-*   **Limitations:** Performance degrades with highly sparse data unless occupancy maps are used; precision issues if not managed; high register pressure can limit occupancy.
+-*   **When to Use:** Real-time rendering of large-scale dynamic volumes (e.g., clouds, smoke) or medical CT visualization where high frame rates are required.
+-*   **When Not to Use:** Static scenes with extreme sparsity where hierarchical structures (SVO) are more efficient; scenarios requiring exact geometric precision without tolerance for mixed-precision artifacts.
+-
++*   **Throughput:** On an NVIDIA A100 GPU, the parallelized 3D-DDA implementation can process 28 million rays per second [S1, unofficial].
++*   **Sampling Efficiency:** The average sampling count is reduced by 99.7% compared to brute-force traversal [S1, unofficial].
++*   **Performance Gains:** Empty voxel skipping techniques can increase rendering frame rates by 3.2x in medical imaging projects [S1, unofficial].
++*   **Memory Usage:** Medium memory footprint compared to brute-force (low) or SVO (extremely high) [S1, unofficial].
++*   **Strengths:** High throughput on modern GPUs; suitable for dynamic volume data and large-scale scenes [S1, unofficial].
++*   **Limitations:** Requires careful management of shared memory and precision; less efficient for extremely sparse data without occupancy maps [S1, unofficial].
++*   **When to Use:** Real-time volume rendering, medical CT visualization, and meteorological cloud rendering where high performance is critical [S1, unofficial].
++*   **When Not to Use:** Extremely sparse data where SVO or octree acceleration is more appropriate; static scenes where precomputed acceleration structures are viable [S1, unofficial].
+ ## Background
+-The method originates from the need to optimize volume rendering on modern GPUs, leveraging the SIMD architecture of shaders. It builds on the foundational 3D-DDA algorithm, adapting it for parallel execution. The specific performance metrics (28M rays/sec on A100) and optimization techniques (mixed precision, occupancy maps) are documented in recent engineering practices for game engines and medical imaging systems [S1, unofficial].
+-
++The method originates from the need to optimize volume rendering on modern GPU architectures. It builds upon the foundational 3D-DDA algorithm, adapting it for SIMD execution. The specific implementation details, including warp partitioning and mixed-precision strategies, are documented in practical engineering guides for volume rendering [S1, unofficial]. It is used in medical CT 3D reconstruction, meteorological cloud simulation, and game engines [S1, unofficial].
+ ## Sources
+-[S1] 体渲染中的体素遍历技术:从理论到实践-百度开发者中心, https://developer.baidu.com/article/detail.html?id=6975905, fetched 2026-10-25 (unofficial)+[S1] 体渲染中的体素遍历技术:从理论到实践, https://developer.baidu.com/article/detail.html?id=6975905, fetched 2026-10-25 (unofficial)

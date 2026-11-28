@@ -1,0 +1,114 @@
+# Voxel Table Registry
+
+Also called: Voxel Registry, VoxelTable
+
+## Overview
+The Voxel Table Registry is a centralized lookup structure providing $O(1)$ access to voxel definitions by unique identifier and internal name [S1, unofficial]. It manages voxel definitions, supporting loading from a ScriptableObject database or falling back to hardcoded definitions [S1, unofficial]. It differs from sibling hash-grid storage methods by focusing on semantic definition management rather than spatial coordinate mapping [G].
+
+## How it works
+The registry operates as a static singleton or global state manager [G]. It maps integer IDs to voxel properties and string names to integer IDs [S1, unofficial].
+
+**Inputs and Outputs**
+- **Input**: A serialized database asset (e.g., ScriptableObject) containing voxel definitions [S1, unofficial].
+- **Output**: An in-memory structure allowing constant-time retrieval of voxel metadata given an ID or name [S1, unofficial].
+
+**Data Structures**
+The registry maintains two primary static data structures:
+1. `_runtimeVoxels`: A static array of `VoxelDefinition` objects, indexed by `(id - 1)` [S1, unofficial].
+2. `_nameIdMap`: A static `Dictionary<string, uint>` mapping internal voxel names to their IDs [S1, unofficial].
+
+**Layout Details**
+- **ID 0**: Reserved for "air" or "null" voxels [S1, unofficial]. It is implicitly defined and does not require an entry in the database or runtime array [G].
+- **Indexing**: If a voxel has ID $k$ ($k > 0$), it is stored at `_runtimeVoxels[k - 1]` [S1, unofficial].
+
+**Initialization Steps**
+1. Load the database resource from the path specified by `DATABASE_RESOURCE_PATH` (default: `"VoxelDatabase"`) [S1, unofficial].
+2. Iterate through the loaded database entries.
+3. For each entry with a non-null and non-empty `InternalName`:
+   - Assign the next available integer ID starting from 1.
+   - Create a `VoxelDefinition` object.
+   - Store the object in `_runtimeVoxels` at index `ID - 1` [S1, unofficial].
+   - Insert the mapping `InternalName -> ID` into `_nameIdMap` [S1, unofficial].
+4. Skip entries with null or empty `InternalName` to prevent map corruption [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class VoxelDefinition:
+    id: int
+    name: str
+    properties: dict
+
+def load_database(path: str) -> list:
+    """Standard file I/O to parse the database asset at the given path."""
+    pass
+
+class VoxelRegistry:
+    _runtimeVoxels: list[VoxelDefinition] = []
+    _nameIdMap: dict[str, int] = {}
+    DATABASE_RESOURCE_PATH: str = "VoxelDatabase"
+
+    @staticmethod
+    def initialize():
+        """Load voxel definitions from the database asset."""
+        database_entries = load_database(VoxelRegistry.DATABASE_RESOURCE_PATH)
+        current_id = 1
+        for entry in database_entries:
+            name = entry.InternalName
+            if name is None or name == "":
+                continue
+            definition = VoxelDefinition(id=current_id, name=name, properties=entry.properties)
+            while len(VoxelRegistry._runtimeVoxels) < current_id:
+                VoxelRegistry._runtimeVoxels.append(None)
+            VoxelRegistry._runtimeVoxels[current_id - 1] = definition
+            current_id += 1
+        # Create name-to-ID map by iterating through _runtimeVoxels, using index i + 1 as the ID [S1, unofficial]
+        for i, voxel in enumerate(VoxelRegistry._runtimeVoxels):
+            if voxel is not None:
+                VoxelRegistry._nameIdMap[voxel.name] = i + 1
+
+    @staticmethod
+    def get_definition_by_id(voxel_id: int) -> VoxelDefinition:
+        """Retrieve voxel definition by ID. O(1) access."""
+        if voxel_id == 0:
+            return None # Air/Null [S1, unofficial]
+        if voxel_id <= 0 or voxel_id > len(VoxelRegistry._runtimeVoxels):
+            raise IndexError(f"Invalid voxel ID: {voxel_id}")
+        return VoxelRegistry._runtimeVoxels[voxel_id - 1]
+
+    @staticmethod
+    def get_id_by_name(name: str) -> int:
+        """Retrieve voxel ID by internal name. O(1) access."""
+        if name in VoxelRegistry._nameIdMap:
+            return VoxelRegistry._nameIdMap[name]
+        raise KeyError(f"Voxel name not found: {name}")
+```
+
+**Parameters**
+- `DATABASE_RESOURCE_PATH`: String path to the default database asset. Default: `"VoxelDatabase"` [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- **ID 0 Handling**: ID 0 is reserved for air. The registry must ensure no database entry is assigned ID 0 [S1, unofficial].
+- **Empty Names**: Voxels with empty `InternalName` fields must be skipped during initialization to maintain map integrity [S1, unofficial].
+- **Index Out of Bounds**: Accessing `_runtimeVoxels` requires careful boundary checking since the array is 0-indexed but IDs start at 1 [G].
+
+## Subtopics
+
+### Voxel Registry Caching
+VoxelRegistry definitions are loaded once at initialization to prevent redundant disk access during chunk generation [S2, unofficial]. This caching strategy minimizes I/O overhead, ensuring that procedural chunk regeneration (which bypasses disk saving) relies solely on the in-memory registry [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Lookup by ID or name is $O(1)$ due to array indexing and hash map usage [S1, unofficial]. Initialization is $O(N)$ where $N$ is the number of voxel types [G].
+- **Memory Complexity**: $O(N)$ for storing voxel definitions and the name-to-ID map [S1, unofficial].
+- **Strengths**: Fast lookup, centralized management of voxel semantics, reduced I/O latency during runtime generation [G].
+- **Limitations**: Static nature means dynamic addition of voxel types at runtime requires reloading or complex extension logic [G].
+- **When to use**: When voxel types are fixed or rarely change, and fast lookup is critical for procedural generation [G].
+- **When not to use**: When voxel types are highly dynamic or user-generated in real-time without restart [G].
+
+## Background
+The Voxel Table Registry is implemented in the VektorKnight/vektor-voxels project [S1, unofficial]. It supports procedural pipelines where chunks are regenerated from seeds rather than saved to disk [S2, unofficial]. The caching mechanism was introduced to optimize performance by avoiding repeated disk reads during chunk generation [S2, unofficial].
+
+## Sources
+[S1] VektorKnight/vektor-voxels, https://github.com/VektorKnight/vektor-voxels, fetched 2026-10-27 (unofficial)
+[S2] herbal1st/pyvorengi-sdk-demo, https://github.com/herbal1st/pyvorengi-sdk-demo, fetched 2026-10-27 (unofficial)

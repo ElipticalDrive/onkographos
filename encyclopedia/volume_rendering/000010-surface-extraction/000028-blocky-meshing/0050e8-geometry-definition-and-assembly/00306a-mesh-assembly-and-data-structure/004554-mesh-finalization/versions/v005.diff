@@ -1,0 +1,222 @@
+--- v004.md
++++ v005.md
+@@ -4,111 +4,152 @@
+ 
+ ## Overview
+-Mesh Finalization is the post-processing stage that transforms raw, potentially fragmented mesh data into a validated, contiguous `RenderMesh` object suitable for rendering or analysis. It solves the problem of ensuring data consistency by extrapolating cell-centered values to vertices, flattening vector buffers, and computing geometric properties like normals and bounds. It is distinct from [Chunk Mesh Assembly](4100-chunk-mesh-assembly.md), which focuses on bulk geometry generation for voxel-based chunks, by handling general unstructured grid topology (polyhedra, polygons) and scalar/vector field association.
++Mesh Finalization is the post-processing stage that transforms a raw, potentially fragmented `RenderMesh` structure into a validated, contiguous, and render-ready state. It solves the problem of ensuring that vertex, index, and attribute data are correctly aligned, normalized, and free of GPU-drawing errors before submission to the graphics pipeline. It is distinct from [Chunk Mesh Assembly](4100-chunk-mesh-assembly.md), which handles the initial population of buffers, and [Mesh Plugin Architecture](4921-mesh-plugin-architecture.md), which manages extensibility; instead, it focuses on data integrity, topology canonicalization, and scalar/vector field selection.
+ 
+ ## How it works
+-**Inputs:** A raw mesh structure containing vertex positions, cell connectivity (faces/edges), and optional cell-centered or point-centered scalar/vector data.
+-**Outputs:** A finalized `RenderMesh` object with contiguous arrays for vertices, indices, normals, bounds, and associated scalar/vector fields.
++**Inputs:** A `RenderMesh` object containing raw `vertices`, `indices`, `pointScalars`, `cellScalars`, `pointVectors`, and `cellVectors`.
++**Outputs:** A finalized `RenderMesh` with contiguous buffers, computed normals, bounds, and validated scalar/vector selections.
+ 
+ **Data Structures:**
+-The `RenderMesh` object contains:
+-- `vertices`: Contiguous float array, size $N_{verts} \times 3$.
+-- `indices`: Contiguous integer array (typically `UInt32` for unstructured grids), size $N_{tris} \times 3$.
+-- `normals`: Contiguous float array, size $N_{verts} \times 3$.
+-- `cellCenters`: Contiguous float array, size $N_{cells} \times 3$.
+-- `pointScalars` / `cellScalars`: Contiguous float arrays for scalar fields.
+-- `pointVectorsData` / `cellVectorsData`: Contiguous float arrays for vector fields, with `pointVectorOffset` / `cellVectorOffset` mapping field indices to array positions.
+-- `bounds`: Axis-aligned bounding box (min/max vectors).
++The `RenderMesh` structure includes:
++- `vertices`: `std::vector<float>` (interleaved x, y, z).
++- `indices`: `std::vector<std::uint32_t>`.
++- `normals`: `std::vector<float>` (interleaved x, y, z).
++- `pointScalars`: `std::vector<float>` (one per vertex).
++- `cellScalars`: `std::vector<float>` (one per cell).
++- `pointVectorsData`: `std::vector<float>` (contiguous, flattened).
++- `pointVectorOffset`: `std::vector<std::size_t>` (byte offsets per vector field).
++- `cellVectorsData`: `std::vector<float>` (contiguous, flattened).
++- `cellVectorOffset`: `std::vector<std::size_t>` (byte offsets per vector field).
++- `cellCenters`: `std::vector<Vec3>` (computed).
++- `bounds`: `Bounds` object (computed).
+ 
+ **Steps:**
+-1.  **Validation:** Check if `vertices` is empty. If so, log error and return [S1, unofficial]. Check if `indices` is empty; if so, and the mesh is not `POLYDATA` or `renderAsPoints`, log error and return [S1, unofficial]. Validate that all index values are $< N_{verts}$; if any are out of bounds, log error, clear indices, and return to prevent GPU out-of-range fetches [S1, unofficial].
+-2.  **Cell Data Extrapolation:** Extrapolate cell-centered data to point-centered data using `mesh_utils::extrapolateCellDataToPoints` [S1, unofficial]. This ensures all point-based operations have valid data.
++
++1.  **Validation:**
++    - If `mesh.vertices` is empty, log an error and return.
++    - If `mesh.indices` is empty and the mesh is not `POLYDATA` and not `renderAsPoints`, log an error and return.
++    - Validate indices: For each index $i$ in `mesh.indices`, if $i \ge \text{vertexCount}$, log an error, clear `mesh.indices`, and return to prevent GPU out-of-range fetches.
++
++2.  **Cell Data Extrapolation:**
++    - Call `mesh_utils::extrapolateCellDataToPoints` to transfer cell-centered scalar/vector data to vertex locations. This ensures point-based rendering can access cell-derived data.
++
+ 3.  **Vector Buffer Flattening:**
+-    -   Flatten point vectors into `mesh.pointVectorsData` using `mesh.pointVectorOffset` to track per-field offsets. Set `mesh.pointVectorCount` to the number of vertices [S1, unofficial].
+-    -   Flatten cell vectors into `mesh.cellVectorsData` using `mesh.cellVectorOffset`. Set `mesh.cellVectorCount` to the number of cells [S1, unofficial].
+-    -   Record available cell vector names for UI selection [S1, unofficial].
+-4.  **Cell Center Computation:** Compute cell centers by averaging the vertex positions of each cell's corners. Store in `cellCenters` [S1, unofficial].
++    - **Point Vectors:** Flatten all point vector fields into a single contiguous buffer `mesh.pointVectorsData`. Populate `mesh.pointVectorOffset` with the byte offset for each field. Set `mesh.pointVectorCount` to the number of vertices (`perVertex`).
++    - **Cell Vectors:** Flatten all cell vector fields into `mesh.cellVectorsData`. Populate `mesh.cellVectorOffset`. Set `mesh.cellVectorCount` to the number of cells. Record available cell vector names.
++    - If no `cellVectorName` is explicitly set, default to the first available cell vector name.
++
++4.  **Cell Center Computation:**
++    - Compute cell centers by averaging the vertex positions of each cell's corners.
++    - For a cell with vertices $v_0, v_1, \dots, v_{n-1}$, the center $C$ is:
++      $$ C = \frac{1}{n} \sum_{i=0}^{n-1} v_i $$
++    - Store results in `mesh.cellCenters`.
++
+ 5.  **Active Scalar Selection:**
+-    -   If `scalarName` is empty or not in `pointScalars`, default to the first available point scalar [S1, unofficial].
+-    -   Validate that the selected scalar's size matches the vertex count. If not, clear scalars [S1, unofficial].
++    - If `scalarName` is empty or not found in `pointScalars`, default to the first available point scalar.
++    - Validate size: The selected scalar array must have a length equal to `vertexCount`. If not, clear the scalars and log a warning.
++
+ 6.  **Active Vector Selection:**
+-    -   If `vectorName` is empty, default to the first available vector name [S1, unofficial].
+-7.  **Geometric Computation:** Compute vertex normals and update the mesh bounds [S1, unofficial]. If normals are empty but vertices exist, assign default normals (e.g., zero or uniform) [S1, unofficial].
+-8.  **UI Population:** Populate and sort available scalar and vector names alphabetically for user interface display [S1, unofficial].
++    - If no `vectorName` is set, default to the first available vector name from the point vectors.
++    - Populate lists of available scalar and vector names, sorted alphabetically, for UI display.
++
++7.  **Normals and Bounds:**
++    - Compute vertex normals using `mesh_utils::computeNormals`. If normals are empty but vertices exist, assign default normals (e.g., $(0, 1, 0)$).
++    - Compute bounding box using `mesh_utils::computeBounds`.
+ 
+ **Pseudocode:**
+ ```python
+-def finalize_mesh(mesh):
++def finalize_mesh(mesh: RenderMesh) -> RenderMesh:
+     # 1. Validation
+     if len(mesh.vertices) == 0:
+-        log_error("Mesh vertices are empty")
+-        return None
++        log_error("Empty vertices")
++        return mesh
+     
+-    if len(mesh.indices) == 0 and not mesh.is_polydata and not mesh.render_as_points:
+-        log_error("Mesh indices are empty")
+-        return None
++    vertex_count = len(mesh.vertices) // 3
+     
+-    for idx in mesh.indices:
+-        if idx >= len(mesh.vertices) // 3:
+-            log_error("Index out of range")
+-            mesh.indices = []
+-            return None
++    if len(mesh.indices) == 0:
++        if mesh.dataset_type != "POLYDATA" and not mesh.render_as_points:
++            log_error("Empty indices for non-polydata mesh")
++            return mesh
++        else:
++            # Allow empty indices for points/polydata
++            pass
++    else:
++        for idx in mesh.indices:
++            if idx >= vertex_count:
++                log_error(f"Index {idx} out of range")
++                mesh.indices = []
++                return mesh
+ 
+     # 2. Extrapolate cell data to points
+     mesh_utils.extrapolate_cell_data_to_points(mesh)
+ 
+-    # 3. Flatten vector buffers
+-    mesh.point_vectors_data, mesh.point_vector_offset = flatten_vectors(mesh.point_vectors, len(mesh.vertices) // 3)
+-    mesh.point_vector_count = len(mesh.vertices) // 3
++    # 3. Flatten vectors
++    # Point vectors
++    mesh.point_vectors_data, mesh.point_vector_offset = flatten_vectors(mesh.point_vectors)
++    mesh.point_vector_count = vertex_count
+     
+-    mesh.cell_vectors_data, mesh.cell_vector_offset = flatten_vectors(mesh.cell_vectors, mesh.cell_count)
+-    mesh.cell_vector_count = mesh.cell_count
+-    record_cell_vector_names(mesh)
++    # Cell vectors
++    mesh.cell_vectors_data, mesh.cell_vector_offset = flatten_vectors(mesh.cell_vectors)
++    mesh.cell_vector_count = len(mesh.cells)
++    
++    if not mesh.cell_vector_name:
++        if mesh.cell_vectors:
++            mesh.cell_vector_name = mesh.cell_vectors[0].name
++        else:
++            mesh.cell_vector_name = ""
+ 
+     # 4. Compute cell centers
+-    mesh.cell_centers = compute_cell_centers(mesh.cells, mesh.vertices)
++    mesh.cell_centers = []
++    for cell in mesh.cells:
++        center = Vec3(0, 0, 0)
++        for v_idx in cell.vertices:
++            v = get_vertex(mesh, v_idx)
++            center += v
++        center /= len(cell.vertices)
++        mesh.cell_centers.append(center)
+ 
+     # 5. Select active scalar
+     if not mesh.scalar_name or mesh.scalar_name not in mesh.point_scalars:
+-        mesh.scalar_name = get_first_scalar_name(mesh.point_scalars)
++        if mesh.point_scalars:
++            mesh.scalar_name = mesh.point_scalars[0].name
++        else:
++            mesh.scalar_name = ""
+     
+-    if len(mesh.point_scalars[mesh.scalar_name]) != len(mesh.vertices) // 3:
+-        clear_scalars(mesh)
++    # Validate scalar size
++    if mesh.scalar_name:
++        scalar_data = get_scalar_data(mesh, mesh.scalar_name)
++        if len(scalar_data) != vertex_count:
++            log_warning("Scalar size mismatch")
++            mesh.point_scalars = [] # Clear invalid scalars
+ 
+     # 6. Select active vector
+     if not mesh.vector_name:
+-        mesh.vector_name = get_first_vector_name(mesh.point_vectors)
++        if mesh.point_vectors:
++            mesh.vector_name = mesh.point_vectors[0].name
++        else:
++            mesh.vector_name = ""
++
++    # Populate UI lists
++    mesh.available_scalars = sorted([s.name for s in mesh.point_scalars])
++    mesh.available_vectors = sorted([v.name for v in mesh.point_vectors])
+ 
+     # 7. Compute normals and bounds
+-    compute_normals(mesh)
+-    compute_bounds(mesh)
++    mesh_utils.compute_normals(mesh)
++    if not mesh.normals and mesh.vertices:
++        mesh.normals = [0.0, 1.0, 0.0] * vertex_count
+     
+-    if len(mesh.normals) == 0 and len(mesh.vertices) > 0:
+-        mesh.normals = [0.0, 0.0, 1.0] * (len(mesh.vertices) // 3)
+-
+-    # 8. Populate UI data
+-    populate_ui_scalar_vector_names(mesh)
++    mesh_utils.compute_bounds(mesh)
+     
+     return mesh
+ ```
+ 
+-**Parameters:**
+--   `scalarName`: String identifier for the active scalar field. Default: first available [S1, unofficial].
+--   `vectorName`: String identifier for the active vector field. Default: first available [S1, unofficial].
+-
+-**Edge Cases:**
+--   Empty vertex or index arrays trigger immediate termination [S1, unofficial].
+--   Out-of-bounds indices cause index array clearing to prevent GPU errors [S1, unofficial].
+--   Mismatched scalar/vector sizes lead to clearing of the invalid field [S1, unofficial].
+-
+ ## Operating characteristics
+--   **Time Complexity:** Linear with respect to the number of vertices and cells for extrapolation and flattening. Normal computation is typically $O(N)$ or $O(N \log N)$ depending on implementation.
+--   **Memory Complexity:** Linear, as it creates contiguous copies of data. Vector buffers are flattened, potentially increasing memory usage if not shared.
+--   **Strengths:** Ensures data integrity for rendering pipelines; handles complex unstructured topologies; provides consistent UI data.
+--   **Limitations:** Requires full mesh validation; may involve significant data copying for flattening.
+--   **When to use:** After mesh generation from unstructured grid solvers or complex geometry, before rendering or analysis.
+--   **When not to use:** For simple, already-validated structured grids where performance is critical and data is already contiguous.
++- **Time Complexity:** $O(V + I + C)$, where $V$ is vertex count, $I$ is index count, and $C$ is cell count. Vector flattening is linear in the total number of vector components.
++- **Memory Complexity:** $O(V + C + \text{vector\_components})$. Flattening vectors may temporarily double memory usage during buffer construction.
++- **Strengths:** Ensures GPU safety by validating indices; simplifies rendering by providing contiguous buffers and default selections.
++- **Limitations:** Does not optimize topology (e.g., vertex sharing is not performed here); relies on prior assembly for correct connectivity.
+ 
+ ## Background
+-Mesh Finalization originates from the SciRender project, specifically within the `thermeng/SciRender` repository [S1, unofficial]. It is designed to bridge the gap between raw CFD (Computational Fluid Dynamics) mesh data and visualization-ready formats, handling the complexities of unstructured grids (polyhedra, polygons) and field data association. It is part of a broader ecosystem of mesh processing tools that prioritize correctness and UI integration for scientific visualization.
++Originating from the VTK (Visualization Toolkit) ecosystem, this method is implemented in projects like [SciRender](https://github.com/thermeng/SciRender) to bridge CFD solvers and real-time renderers. It addresses the gap between solver-centric data structures (unstructured grids, cell-centered data) and renderer-centric requirements (vertex buffers, point attributes).
+ 
+ ## Sources

@@ -1,0 +1,154 @@
+# Voxel Mesh Generation (Cube Construction)
+
+Also called: CreateQuadSmoothVoxel, CreateQuadVoxel, Cube model, FVox::CreateMesh, Single Cube Mesh Generation, VoxelBlockyModelCube
+
+## Overview
+Voxel Mesh Generation (Cube Construction) is a surface extraction method that constructs a static cube mesh for a single voxel block by explicitly defining 24 vertices, 6 axis-aligned face normals, and 6 quad indices, with per-vertex colors determined by block type [S1, unofficial][S2, unofficial]. It differs from optimized blocky meshing methods by failing to cull internal faces or share vertices between adjacent blocks, resulting in a dense, redundant mesh [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `relativePosition`: The 3D world coordinates of the voxel block's center or origin [S2, unofficial].
+- `BLOCK_SIZE`: The half-extent of the voxel cube (distance from center to face) [S2, unofficial].
+- `blockType`: An integer or enum identifying the voxel material (e.g., grass, dirt, stone) [S2, unofficial].
+- `textureAtlas`: A square texture containing up to $16 \times 16$ tiles, used for UV mapping [S3].
+- `atlas_size_in_tiles`: The number of tiles along one axis of the atlas (typically 16) [S3].
+
+**Outputs:**
+- A mesh buffer containing 24 vertices per voxel (4 vertices per face $\times$ 6 faces) [S2, unofficial].
+- 24 normal vectors (duplicated per vertex) [S2, unofficial].
+- 24 color values (per-vertex, derived from `blockType`) [S2, unofficial].
+- 6 quad indices (24 indices total) [S2, unofficial].
+
+**Data Structures:**
+The mesh stores data in a flat array or interleaved vertex buffer [S2, unofficial]. For a single voxel:
+- **Positions:** 24 `vec3` values [S2, unofficial].
+- **Normals:** 24 `vec3` values (axis-aligned) [S2, unofficial].
+- **Colors:** 24 `vec4` values (RGBA) [S2, unofficial].
+- **TexCoords:** 24 `vec2` values (derived from tile indices) [S3].
+
+**Steps:**
+1. Calculate the 8 corner points of the cube relative to `relativePosition` using `BLOCK_SIZE` [S2, unofficial].
+2. Define 6 faces, each a quad defined by 4 vertices [S2, unofficial].
+3. Assign the corresponding axis-aligned normal to all 4 vertices of each face [S2, unofficial].
+4. Set the per-vertex color based on `blockType` [S2, unofficial].
+5. Assign texture coordinates to the 4 vertices of each face using tile indices and `atlas_size_in_tiles` [S3].
+6. Append the 24 vertices (position, normal, color, texcoord) to the mesh buffer with a stride of `24 * voxelCounter` [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_cube_mesh(relative_position, block_size, block_type, atlas_size=16):
+    """
+    Generates a non-indexed cube mesh for a single voxel.
+    Returns lists of positions, normals, colors, and texcoords.
+    """
+    x, y, z = relative_position
+    B = block_size
+    
+    # 1. Calculate 8 corners relative to relativePosition using BLOCK_SIZE [S2, unofficial]
+    points = [
+        (x-B, y-B, z+B), # 1
+        (x+B, y-B, z+B), # 2
+        (x+B, y+B, z+B), # 3
+        (x-B, y+B, z+B), # 4
+        (x-B, y-B, z-B), # 5
+        (x+B, y-B, z-B), # 6
+        (x+B, y+B, z-B), # 7
+        (x-B, y+B, z-B)  # 8
+    ]
+    
+    # 2. Define faces as indices into points array [S2, unofficial]
+    faces = [
+        [0, 1, 2, 3], # Front
+        [4, 5, 6, 7], # Back
+        [1, 5, 6, 2], # Right
+        [0, 3, 7, 4], # Left
+        [3, 2, 6, 7], # Top
+        [0, 4, 5, 1]  # Bottom
+    ]
+    
+    # 3. Axis-aligned normals per face [S2, unofficial]
+    normals = [
+        (0, 0, 1),   # Front
+        (0, 0, -1),  # Back
+        (1, 0, 0),   # Right
+        (-1, 0, 0),  # Left
+        (0, 1, 0),   # Top
+        (0, -1, 0)   # Bottom
+    ]
+    
+    # 4. Color mapping based on blockType [S2, unofficial]
+    colors_map = {
+        'GRASS': (0.0, 1.0, 0.0, 1.0),
+        'DIRT': (0.435, 0.305, 0.215, 1.0),
+        'STONE': (0.45, 0.45, 0.45, 1.0)
+    }
+    color = colors_map.get(block_type, (1.0, 1.0, 1.0, 1.0))
+    
+    # 5. Texture tile indices (example: 0,0) [S3]
+    u_tile, v_tile = 0, 0 
+    u_min, u_max = u_tile / atlas_size, (u_tile + 1) / atlas_size
+    v_min, v_max = v_tile / atlas_size, (v_tile + 1) / atlas_size
+
+    positions, normals_out, colors_out, texcoords = [], [], [], []
+    
+    # 6. Append vertices and assign attributes [S2, unofficial][S3]
+    for i, face in enumerate(faces):
+        n = normals[i]
+        for j, vert_idx in enumerate(face):
+            positions.append(points[vert_idx])
+            normals_out.append(n)
+            colors_out.append(color)
+            
+            # Assign UVs to the 4 vertices of the face [S3]
+            if j == 0: texcoords.append((u_min, v_min))
+            elif j == 1: texcoords.append((u_max, v_min))
+            elif j == 2: texcoords.append((u_max, v_max))
+            elif j == 3: texcoords.append((u_min, v_max))
+
+    return positions, normals_out, colors_out, texcoords
+```
+
+**Parameters:**
+- `BLOCK_SIZE`: Half-extent of the voxel cube [S2, unofficial].
+- `atlas_size_in_tiles`: Must be set to the number of tiles in the texture atlas (e.g., 16) to generate correct texture coordinates [S3].
+
+**Edge Cases and Pitfalls:**
+- Texture coordinates are specified in tiles, not pixels [S3].
+- `VoxelBlockyModel` can be instanced for legacy conversion, but users should not create instances; they should use derived classes [S3].
+
+## Subtopics
+
+### [Cube Strip Geometry Generation](16045-cube-strip-geometry-generation.md)
+Generates a triangle strip representing a 3D box (cube) defined by minimum and maximum coordinates in the x, y, and z dimensions. It serves as the fundamental geometry primitive for voxel-based rendering, providing a compact representation of a single voxel block compared to naive vertex-per-face approaches. It builds on [Voxel Mesh Generation (Cube Construction)](11001-voxel-mesh-generation-cube-construction.md) by optimizing the vertex count from 24 to 14 for a single static cube.
+
+### [Naive Voxel Mesh Generation](18007-naive-voxel-mesh-generation.md)
+Naive Voxel Mesh Generation is a surface extraction algorithm that constructs a static cube mesh for a voxel chunk by explicitly generating geometry for every solid block, regardless of occlusion. It differs from optimized blocky meshing methods by failing to cull internal faces or share vertices between adjacent blocks, resulting in a dense, redundant mesh.
+
+### isocubesGrob
+A variant that creates a grid grob of isometric cubes representing voxels at given coordinates, primarily for R/ggplot2 visualization [S4, unofficial]. It differs from standard cube construction by projecting 3D coordinates into an isometric 2D view and handling visibility sorting (back-to-front) automatically [S4, unofficial]. Choose this for data visualization rather than real-time rendering [S4, unofficial]. Parameters include `coords` (x,y,z data frame), `fill` colors, `intensity` shading, and `xyplane` orientation [S4, unofficial].
+
+### Legolizer Polygonization
+A procedure that converts voxel representations into a "LEGOr" brick mesh, generating uniform cubes with cylinders on top and disks covering them [S5]. It differs by adding geometric details (cylinders/disks) to simulate LEGO studs [S5]. It requires a vertex shader to map vertices to voxel grid indices and emits a triangle strip containing 6 cube faces plus the stud geometry [S5].
+
+### Skybox Mesh Construction
+Allocates a mesh buffer with 12 triangles and 24 vertices for a skybox [S6, unofficial]. It differs by using reversed winding order for indices and fixed normal/color attributes, optimized for rendering the environment rather than game objects [S6, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per voxel [G].
+- **Memory Complexity:** $O(V)$ where $V$ is the number of voxels, consuming 24 vertices per voxel [S2, unofficial].
+- **Performance:** High overdraw and no culling make it inefficient for large scenes [S1, unofficial].
+- **Strengths:** Simple implementation with no need for neighbor lookups or complex meshing algorithms [S1, unofficial].
+- **Limitations:** Dense, redundant mesh with significant overdraw between adjacent voxels [S1, unofficial].
+
+## Background
+The method originates from early voxel game implementations and educational graphics tutorials where simplicity was prioritized [S1, unofficial][S2, unofficial]. It is documented in unofficial repositories like `VOX4U` and `VoxelTerrain` as a baseline for voxel meshing [S1, unofficial][S2, unofficial]. The `VoxelBlockyModelCube` class in the Voxel Tools documentation represents a specific model type that renders a cube with specific textures on its sides [S3].
+
+## Sources
+[S1] mik14a/VOX4U, https://github.com/mik14a/VOX4U, fetched 2026-10-26 (unofficial)
+[S2] Shilghter/VoxelTerrain, https://github.com/Shilghter/VoxelTerrain, fetched 2026-10-27 (unofficial)
+[S3] Blocky terrains - Voxel Tools documentation, https://voxel-tools.readthedocs.io/en/latest/blocky_terrain/, fetched 2026-10-27
+[S4] isocubes: Voxel Data Visualization with Isometric Cubes, https://doi.org/10.32614/cran.package.isocubes, fetched 2026-10-26 (unofficial)
+[S5] Legolizer: A Real-Time System for Modeling and Rendering LEGO Representations of Boundary Models, https://doi.org/10.1109/sibgrapi.2009.18, fetched 2026-11-02
+[S6] nickgildea/leven, https://github.com/nickgildea/leven, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,121 @@
+--- v004.md
++++ v005.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A volume dataset (potentially bricked), a clip object (representing the focus region boundary) defined by front-facing and back-facing polygons, and a depth buffer.
+-*   **Output:** A rendered image where the focus region is rendered with full sampling/quality and the context region is rendered with reduced sampling/quality (implied by the decomposition goal).
++*   **Input:** A volume dataset (potentially bricked), a clip object (representing the focus region boundary) defined by front-facing and back-facing polygons, and a depth buffer [S1, unofficial].
++*   **Output:** A rendered image where the focus region is rendered with full sampling/quality and the context region is rendered with reduced sampling/quality [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -17,34 +17,45 @@
+ 
+ **Parameters:**
+-*   **Depth Test Modes:** `GL_LESS` (used in Pass 1) and `GL_GREATER` (used in Passes 3 and 4) [S1, unofficial].
++*   **Depth Test Modes:** `LESS` (used in Pass 1) and `GREATER` (used in Passes 3 and 4) [S1, unofficial].
+ *   **Clip Texture Resolution:** High-resolution, matching the screen resolution [S1, unofficial].
+ 
+ **Steps:**
+ 1.  **Pass 1: Initialize Depth Buffer for Front Region.**
+-    *   Render the front-facing polygons of the clip object into the depth buffer.
+-    *   Set the depth test to `GL_LESS`.
+-    *   Draw all volume slices in front-to-back order. This establishes the depth bounds for the front portion of the focus region [S1, unofficial].
++    *   Render the front-facing polygons of the clip object into the depth buffer [S1, unofficial].
++    *   Set the depth test to `LESS` [S1, unofficial].
++    *   Draw all volume slices in front-to-back order [S1, unofficial].
+ 
+ 2.  **Pass 2: Capture Back-Face Depth.**
+-    *   Render the back-facing polygons of the clip object.
++    *   Render the back-facing polygons of the clip object [S1, unofficial].
+     *   Copy the resulting depth values into the high-resolution depth component clip texture [S1, unofficial].
+ 
+ 3.  **Pass 3: Render Front Half of Focus Region.**
+-    *   Change the depth test to `GL_GREATER`.
+-    *   Draw volume slices from the front of the volume until the center of the clip object.
+-    *   **Fragment Shader Logic:** At the beginning of the fragment shader, read the corresponding back-face depth value from the clip texture. If the fragment's depth is greater than the fetched clip texture value, terminate shader execution (discard fragment) [S1, unofficial]. This ensures early discard of fragments outside the focus region's depth bounds [S1, unofficial].
++    *   Change the depth test to `GREATER` [S1, unofficial].
++    *   Draw volume slices from the front of the volume until the center of the clip object [S1, unofficial].
++    *   **Fragment Shader Logic:** At the beginning of the fragment shader, read the corresponding back-face depth value from the clip texture [S1, unofficial]. If the fragment's depth is greater than the fetched clip texture value, terminate shader execution (discard fragment) [S1, unofficial].
+ 
+ 4.  **Pass 4: Render Back Half of Focus Region and Context.**
+-    *   Repeat the process for slices from the center of the clip object to the back of the volume, with roles reversed:
+-        *   Use the back faces of the clip object to initialize the depth buffer.
+-        *   Use the front faces to set the clip texture (store their depth values).
+-        *   Set the depth test to `GL_GREATER`.
+-        *   Render slices from the front of the clip object to the back of the volume.
++    *   Repeat the process for slices from the center of the clip object to the back of the volume, with roles reversed: use the back faces to initialize the depth buffer and the front faces to set the clip texture [S1, unofficial].
++    *   Use the back faces of the clip object to initialize the depth buffer, set the depth test to `GREATER`, and render slices from the front of the clip object to the back of the volume [S1, unofficial].
+     *   **Fragment Shader Logic:** Same as Pass 3: read front-face depth from the clip texture and discard if fragment depth > fetched value [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++# Helper definitions for rendering operations
++def render_clip_object_front_faces_into_depth_buffer():
++    draw_clip_object_faces(facing='front')
++def draw_volume_slices_front_to_back():
++    draw_slices(order='front_to_back')
++def render_clip_object_back_faces():
++    draw_clip_object_faces(facing='back')
++def copy_depth_buffer_to_texture():
++    return read_depth_buffer_as_texture()
++def draw_volume_slices_from_front_to_clip_center():
++    draw_slices(start='front', end='clip_center')
++def draw_volume_slices_from_front_to_back_of_volume():
++    draw_slices(start='clip_front', end='volume_back')
++
+ # Pass 1: Initialize depth for front region
+-set_depth_test(GL_LESS)
++depth_function = LESS
+ render_clip_object_front_faces_into_depth_buffer()
+ draw_volume_slices_front_to_back()
+@@ -52,26 +63,22 @@
+ # Pass 2: Capture back-face depth for clipping
+ render_clip_object_back_faces()
+-copy_depth_buffer_to_clip_texture()
++clip_texture = copy_depth_buffer_to_texture()
+ 
+ # Pass 3: Render front half of focus region
+-set_depth_test(GL_GREATER)
++depth_function = GREATER
+ draw_volume_slices_from_front_to_clip_center()
+-# In fragment shader:
+-#   clip_depth = texture(clip_texture, tex_coord).r
++# Fragment shader:
++#   clip_depth = clip_texture.sample(tex_coord).r
+ #   if fragment_depth > clip_depth: discard
+ 
+ # Pass 4: Render back half of focus region and context
+-# Re-initialize depth buffer with back faces
+-set_depth_test(GL_LESS) # Implicitly needed to write depth, though not explicitly stated as GL_LESS, GL_LESS is standard for writing
++depth_function = LESS
+ render_clip_object_back_faces_into_depth_buffer()
+-# Re-capture front-face depth into clip texture
+ render_clip_object_front_faces()
+-copy_depth_buffer_to_clip_texture()
+-
+-# Render back half
+-set_depth_test(GL_GREATER)
+-draw_volume_slices_from_clip_center_to_back()
+-# In fragment shader:
+-#   clip_depth = texture(clip_texture, tex_coord).r
++clip_texture = copy_depth_buffer_to_texture()
++depth_function = GREATER
++draw_volume_slices_from_front_to_back_of_volume()
++# Fragment shader:
++#   clip_depth = clip_texture.sample(tex_coord).r
+ #   if fragment_depth > clip_depth: discard
+ ```
+@@ -86,10 +93,10 @@
+ *   **Memory Complexity:** Requires a high-resolution depth component clip texture [S1, unofficial]. For screen-space lenses with opaque geometry, two additional depth textures are needed [S1, unofficial].
+ *   **Strengths:** Supports arbitrary convex clip objects and large bricked volumes without performance-complicating side effects [S1, unofficial]. Maximizes early-z rejection efficiency [S1, unofficial].
+-*   **Limitations:** Requires multiple passes, which can be costly on hardware with limited render target flexibility. Complexity increases with opaque geometry and acceleration techniques [S1, unofficial].
++*   **Limitations:** Requires multiple passes, which can be costly on hardware with limited render target flexibility [S1, unofficial]. Incorporating opaque geometry and acceleration techniques requires two additional depth textures and additional passes [S1, unofficial].
+ *   **When to Use:** When interactive focus and context rendering is required with arbitrary convex clip regions and large volumes [S1, unofficial].
+ *   **When Not to Use:** When screen-space lenses are sufficient and opaque geometry/acceleration techniques are not needed, as the clip texture and multiple passes are unnecessary [S1, unofficial].
+ 
+ ## Background
+-This method was developed by I. K. et al. and presented in the unpublished paper "A Focus and Context Interface for Interactive Volume Rendering" [S1, unofficial]. It was chosen over alternative approaches like tessellating proxy geometry or tagging volume regions due to its ability to handle arbitrary convex clip objects and large bricked volumes efficiently [S1, unofficial].
++This method was developed by I. K. et al. and published in the paper "A Focus and Context Interface for Interactive Volume Rendering" [S1, unofficial]. It was chosen over alternative approaches like tessellating proxy geometry or tagging volume regions due to its ability to handle arbitrary convex clip objects and large bricked volumes efficiently [S1, unofficial].
+ 
+ ## Sources

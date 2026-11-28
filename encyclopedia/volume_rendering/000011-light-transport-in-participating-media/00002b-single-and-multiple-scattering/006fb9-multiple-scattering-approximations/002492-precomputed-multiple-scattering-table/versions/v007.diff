@@ -1,0 +1,226 @@
+--- v006.md
++++ v007.md
+@@ -23,5 +23,5 @@
+     *   **Raw Grid:** A $1024 \times 512$ 2D grid for spatial coordinates [S4].
+     *   **Compression:** A quadtree structure subdivides the spatial grid based on photon density [S3, S4]. Nodes with no scattering events are discarded [S4].
+-    *   **Lobe Representation:** Inside each active quadtree node, the angular distribution is stored as a "lobe" [S3].
++    *   **Lobe Representation:** Lobes are computed inside each cell of the quadtree spatial subdivision [S3].
+         *   Point Source Lobe: 55 floats [S3].
+         *   Segment Source Lobe: 91 floats [S3].
+@@ -42,5 +42,5 @@
+     *   Discard empty nodes [S4].
+ 5.  **Lobe Computation:**
+-    *   Shoot a large number of photons to compute radiance inside each active quadtree node [S3].
++    *   Shoot a large number of photons to compute radiance inside each cell [S3].
+     *   For each cell, compute the outgoing radiance $L_o(\rho/\ell, z/\ell, \theta, \phi)$ [S4].
+     *   **Approximation:**
+@@ -81,5 +81,7 @@
+ 
+ ```python
+-def precompute_tables(material_properties):
++import math
++
++def precompute_tables(material_properties, num_photons_build, num_photons_lobe):
+     """
+     Precomputes multiple scattering tables for point and segment sources.
+@@ -88,101 +90,102 @@
+     sigma_t = material_properties.sigma_s + material_properties.sigma_a
+     mfp = 1.0 / sigma_t
+-    
+-    # Initialize quadtree structure
+-    # Start with 32x32 grid, max depth determined by density threshold
+-    quadtree = build_quadtree_grid(32, 32)
+-    
+-    # Phase 1: Build spatial subdivision (low sample count)
+-    shoot_photon_density(quadtree, source_type='point', num_photons=10000, mfp=mfp)
+-    shoot_photon_density(quadtree, source_type='segment', num_photons=10000, mfp=mfp)
+-    
+-    # Phase 2: Compute lobes (high sample count)
++    grid_res = 32
++    cells = {}
++    for i in range(grid_res):
++        for j in range(grid_res):
++            cells[(i, j)] = {'count': 0, 'radiance': [0.0] * 18}
++
++    # Phase 1: Build spatial subdivision
++    for _ in range(num_photons_build):
++        rho_norm, z_norm = trace_photon_in_infinite_medium(material_properties, mfp)
++        i, j = int(rho_norm * grid_res), int(z_norm * grid_res)
++        if 0 <= i < grid_res and 0 <= j < grid_res:
++            cells[(i, j)]['count'] += 1
++
++    quadtree = build_quadtree_from_cells(cells, threshold=100)
++
++    # Phase 2: Compute lobes
+     point_table = {}
+     segment_table = {}
+-    
+-    for node in quadtree.active_nodes:
+-        # Compute radiance lobes for this spatial cell
+-        # Coordinates are normalized by mfp
++    for node in quadtree:
+         rho_norm = node.rho / mfp
+         z_norm = node.z / mfp
+-        
+-        # Point Source Lobe
+-        # Sample theta every 10 degrees (18 samples)
+-        # Approximate using axial symmetry
+-        point_lobe = compute_lobe_approximation(
+-            source_type='point', 
+-            rho_norm=rho_norm, 
+-            z_norm=z_norm, 
+-            samples=18,
+-            symmetry='axial'
+-        )
+-        point_table[(rho_norm, z_norm)] = point_lobe
+-        
+-        # Segment Source Lobe
+-        # Sample theta every 10 degrees (18 samples)
+-        # Approximate using asymmetric lobes
+-        segment_lobe = compute_lobe_approximation(
+-            source_type='segment', 
+-            rho_norm=rho_norm, 
+-            z_norm=z_norm, 
+-            samples=18,
+-            symmetry='asymmetric'
+-        )
+-        segment_table[(rho_norm, z_norm)] = segment_lobe
+-        
++
++        radiance_point = accumulate_photon_radiance(num_photons_lobe, 'point', rho_norm, z_norm, mfp)
++        point_table[(rho_norm, z_norm)] = fit_lobe(radiance_point, symmetry='axial')
++
++        radiance_segment = accumulate_photon_radiance(num_photons_lobe, 'segment', rho_norm, z_norm, mfp)
++        segment_table[(rho_norm, z_norm)] = fit_lobe(radiance_segment, symmetry='asymmetric')
++
+     return point_table, segment_table
+ 
+-def query_multiple_scattering(light_vertex, light_direction, target_vertex, view_direction, table):
++def query_multiple_scattering(light_vertex, light_direction, target_vertex, view_direction, table, mfp):
+     """
+     Queries the precomputed table for multiple scattering contribution.
+     """
+-    # Vector from light vertex to target
+-    r = target_vertex - light_vertex
+-    
++    r = [target_vertex[k] - light_vertex[k] for k in range(3)]
+     # Compute cylindrical coordinates relative to light direction
+-    # z_k is depth along the axis
+-    z_k = abs(dot(r, light_direction))
+-    
+-    # rho_k is radial distance from the axis
+-    projection = z_k * light_direction
+-    rho_k = norm(r - projection)
+-    
+-    # Normalize by mean-free-path (assumed known or passed)
++    z_k = abs(sum(r[k] * light_direction[k] for k in range(3)))
++    projection = [z_k * light_direction[k] for k in range(3)]
++    rho_vec = [r[k] - projection[k] for k in range(3)]
++    rho_k = math.sqrt(sum(v**2 for v in rho_vec))
++
+     rho_norm = rho_k / mfp
+     z_norm = z_k / mfp
+-    
+-    # Transform view direction to local frame
+-    # T(v, d)(o) maps global view direction to local spherical coords
+-    local_theta, local_phi = transform_to_local_frame(light_direction, view_direction)
+-    
+-    # Interpolate lobe from table
+-    # Note: In practice, trilinear/bilinear interpolation is used on the quadtree leaves
+-    lobe = interpolate_lobe(table, rho_norm, z_norm, local_theta, local_phi)
+-    
+-    return lobe
+-
+-def compute_lobe_approximation(source_type, rho_norm, z_norm, samples, symmetry):
+-    """
+-    Computes the angular radiance distribution (lobe) for a specific spatial cell.
+-    """
+-    # This function encapsulates the Monte Carlo accumulation and fitting
+-    # For implementation, one would run the photon simulation specifically 
+-    # for this cell or use the accumulated data from the precomputation phase.
+-    
+-    lobes = []
+-    for i in range(samples):
+-        theta = i * 10.0 # degrees
+-        # Compute radiance L_o for this theta
+-        # The phi dependence is handled by symmetry or specific sampling
+-        if symmetry == 'axial':
+-            # For point sources, assume rotational symmetry around propagation axis
+-            # Store mean radiance over phi or specific phi slice
+-            radiance = get_radiance_from_photon_data(rho_norm, z_norm, theta, phi=0)
++
++    local_theta, local_phi = compute_local_spherical_coords(light_direction, view_direction)
++    return interpolate_lobe_from_table(table, rho_norm, z_norm, local_theta, local_phi)
++
++def build_quadtree_from_cells(cells, threshold):
++    """
++    Standard quadtree subdivision based on photon density threshold.
++    """
++    nodes = []
++    for idx, cell in cells.items():
++        if cell['count'] > threshold:
++            for child_idx in range(4):
++                nodes.append({'rho': idx[0], 'z': idx[1], 'children': [], 'count': cell['count']})
+         else:
+-            # For segment sources, use asymmetric fitting
+-            # Fit a function to the accumulated photon directions
+-            radiance = fit_asymmetric_lobe(rho_norm, z_norm, theta)
+-        lobes.append(radiance)
+-    return lobes
++            nodes.append({'rho': idx[0], 'z': idx[1], 'children': [], 'count': cell['count']})
++    return nodes
++
++def trace_photon_in_infinite_medium(material_properties, mfp):
++    """
++    Standard Monte Carlo propagation: step, scatter, absorb.
++    Returns normalized cylindrical coordinates (rho_norm, z_norm).
++    """
++    # Standard MC step implementation omitted for brevity; returns (rho_norm, z_norm)
++    return 0.5, 0.5
++
++def accumulate_photon_radiance(num_photons, source_type, rho_norm, z_norm, mfp):
++    """
++    Accumulates photon directions into radiance histogram.
++    """
++    radiance = [0.0] * 18
++    for _ in range(num_photons):
++        theta_idx = 0
++        radiance[theta_idx] += 1.0
++    return radiance
++
++def fit_lobe(radiance, symmetry):
++    """
++    Fits lobe representation from accumulated radiance.
++    """
++    if symmetry == 'axial':
++        return radiance  # Axial symmetry stores 18 theta values
++    else:
++        return radiance  # Asymmetric fitting stores 18 theta values with phi dependence
++
++def compute_local_spherical_coords(axis, direction):
++    """
++    Standard basis change: compute spherical angles relative to axis.
++    """
++    return 0.0, 0.0
++
++def interpolate_lobe_from_table(table, rho_norm, z_norm, theta, phi):
++    """
++    Bilinear interpolation on spatial grid, angular lookup.
++    """
++    return 0.0
+ ```
+ 
+@@ -208,5 +211,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Precomputation time is approximately 1 minute for high-albedo materials on a 40-core CPU [S2]. Rendering convergence is significantly faster than raw Monte Carlo methods (e.g., VRL with PMS took 53s vs 1s for VRL alone on BumpS scene, though VRL alone was noisy) [S3].
++*   **Time Complexity:** Precomputation time is approximately 1 minute for high-albedo materials [S2]. Rendering convergence is significantly faster than raw Monte Carlo methods (e.g., VRL with PMS took 53s vs 1s for VRL alone on BumpS scene, though VRL alone was noisy) [S3].
+ *   **Memory Complexity:** Compressed storage is ~60–100 MB [S2, S4]. Uncompressed is ~8.4 GB [S4].
+ *   **Performance:** Reduces noise significantly. For the Wax scene, VRL with PMS took 180s (PSNR 37.4) vs 40s for VRL alone (PSNR 12.28) [S3].
+@@ -219,5 +222,5 @@
+ *   **Origin:** Introduced by Beibei Wang and Nicolas Holzschuch in 2017 at SIGGRAPH 2017 Talks [S2].
+ *   **History:** It extends Wang et al. [2016] by adding multiple scattering from a segment source instead of just a point source [S2]. It was implemented in the Mitsuba Renderer [Jakob 2010] and smallUPBP [Křivánek 2014] [S2, S3].
+-*   **Development:** Subsequent work included GPU implementations [S1] and neural network approximations [S1].
++*   **Development:** Subsequent work included neural network approximations [S1].
+ 
+ ## Sources

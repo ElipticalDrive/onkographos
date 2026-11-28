@@ -1,0 +1,325 @@
+# Surface Jacobian Covariance Stabilization
+
+Also called: Surface Jacobian Covariance
+
+## Overview
+Surface Jacobian Covariance Stabilization computes a floor for the layer-0 Gaussian covariance matrix based on the image-space Jacobian of the target surface, ensuring Gaussians are not smaller than the surface detail implied by the depth map [S1, unofficial]. It builds on [2D Gaussian Covariance Stabilization and Rescaling](3467-2d-gaussian-covariance-stabilization-and-rescaling.md) by incorporating explicit surface geometry constraints into the covariance rescaling process.
+
+## How it works
+**Inputs:**
+- `surface_points`: Tensor of shape $(N, 3)$ containing 3D coordinates of surface points.
+- `gaussians`: Object containing `quaternions` (shape $(N, 4)$) and `singular_values` (shape $(N, 3)$) representing the current Gaussian parameters.
+- `native_width`, `native_height`: Native resolution of the source image/depth map.
+- `grid_width`, `grid_height`: Grid resolution used for the Jacobian computation.
+- `focal`: Focal length of the camera.
+- `tangent_sigma`: Float, scaling factor for the target tangent-space sigma.
+- `normal_min_ratio`: Float, minimum ratio of normal sigma to the minimum tangent sigma.
+- `normal_max_ratio`: Float, maximum ratio of normal sigma to the minimum tangent sigma.
+- `max_stretch`: Float, maximum allowed stretch for grid tangents.
+
+**Outputs:**
+- Updated `gaussians.singular_values` and `gaussians.quaternions` for indices `[:, :layer_size]`.
+
+**Data Structures:**
+- `surface_points`: $(N, 3)$ float tensor.
+- `gaussians.quaternions`: $(N, 4)$ float tensor, normalized.
+- `gaussians.singular_values`: $(N, 3)$ float tensor, positive.
+- `old_covariance`: $(N, 3, 3)$ float tensor, symmetric positive definite.
+
+**Steps:**
+
+1.  **Compute Base Grid Units:**
+    Calculate the base pixel units in the native resolution space based on depth $z$:
+    $$
+    \text{base\_u} = \frac{z \cdot (\text{native\_width} / \text{grid\_width})}{\text{focal}}
+    $$
+    $$
+    \text{base\_v} = \frac{z \cdot (\text{native\_height} / \text{grid\_height})}{\text{focal}}
+    $$
+    where $z$ is the z-coordinate of `surface_points` [S1, unofficial].
+
+2.  **Compute Tangents:**
+    Compute tangent vectors `tangent_u` and `tangent_v` using a robust grid tangent function `robust_grid_tangent` on `surface_points`.
+    - `tangent_u` is computed with axis 2 (z-axis) and `base_u`.
+    - `tangent_v` is computed with axis 1 (y-axis) and `base_v`.
+    - `max_stretch` limits the magnitude of these tangents [S1, unofficial].
+
+3.  **Normalize First Tangent ($e_u$):**
+    $$
+    \text{length\_u} = \| \text{tangent\_u} \|
+    $$
+    $$
+    e_u = \frac{\text{tangent\_u}}{\text{length\_u}}
+    $$
+    [S1, unofficial]
+
+4.  **Orthogonalize Second Tangent:**
+    Orthogonalize `tangent_v` against $e_u$:
+    $$
+    \text{tangent\_v\_orthogonal} = \text{tangent\_v} - (\text{tangent\_v} \cdot e_u) e_u
+    $$
+    [S1, unofficial]
+
+5.  **Compute Fallback for $e_v$:**
+    Orthogonalize vector $[0, 1, 0]^T$ against $e_u$ to get `fallback_v`.
+    - If $\| \text{fallback\_v} \| > 10^{-8}$, use `fallback_v`.
+    - Else, orthogonalize $[0, 0, 1]^T$ against $e_u$ to get `fallback_z` and use it.
+    [S1, unofficial]
+
+6.  **Normalize Second Tangent ($e_v$):**
+    $$
+    \text{length\_v} = \| \text{tangent\_v\_orthogonal} \text{ or fallback\_v} \|
+    $$
+    $$
+    e_v = \frac{\text{tangent\_v\_orthogonal} \text{ or fallback\_v}}{\text{length\_v}}
+    $$
+    [S1, unofficial]
+
+7.  **Compute Normal and Re-orthogonalize $e_v$:**
+    $$
+    \text{normal} = \text{normalize}(e_u \times e_v)
+    $$
+    Recompute $e_v$ to ensure strict orthogonality with $e_u$ and normal:
+    $$
+    e_v = \text{normal} \times e_u
+    $$
+    [S1, unofficial]
+
+8.  **Retrieve Old Covariance:**
+    Decompose `gaussians.quaternions` and `gaussians.singular_values` for `layer_size` into $3 \times 3$ covariance matrices `old_covariance` of shape $(N, \text{grid\_height}, \text{grid\_width}, 3, 3)$ [S1, unofficial].
+
+9.  **Compute Directional Sigmas:**
+    For each direction $d \in \{e_u, e_v, \text{normal}\}$, compute the projected sigma:
+    $$
+    \text{directional\_sigma}(d) = \sqrt{\max(10^{-16}, d^T \cdot \text{old\_covariance} \cdot d)}
+    $$
+    Let $\sigma_u^{\text{old}} = \text{directional\_sigma}(e_u)$, $\sigma_v^{\text{old}} = \text{directional\_sigma}(e_v)$, $\sigma_n^{\text{old}} = \text{directional\_sigma}(\text{normal})$ [S1, unofficial].
+
+10. **Compute Target Sigmas:**
+    $$
+    \sigma_u^{\text{target}} = \text{tangent\_sigma} \cdot \text{length\_u}
+    $$
+    $$
+    \text{effective\_length\_v} = \max(\text{length\_v}, 0.50 \cdot \text{base\_v})
+    $$
+    $$
+    \sigma_v^{\text{target}} = \text{tangent\_sigma} \cdot \text{effective\_length\_v}
+    $$
+    [S1, unofficial]
+
+11. **Apply Floor to Tangent Sigmas:**
+    $$
+    \sigma_u = \max(\sigma_u^{\text{old}}, \sigma_u^{\text{target}})
+    $$
+    $$
+    \sigma_v = \max(\sigma_v^{\text{old}}, \sigma_v^{\text{target}})
+    $$
+    [S1, unofficial]
+
+12. **Compute Normal Sigma with Constraints:**
+    $$
+    \text{tangent\_min} = \min(\sigma_u, \sigma_v)
+    $$
+    $$
+    \sigma_n = \max(\sigma_n^{\text{old}}, \text{normal\_min\_ratio} \cdot \text{tangent\_min})
+    $$
+    Clamp $\sigma_n$:
+    $$
+    \sigma_n = \min(\sigma_n, \text{normal\_max\_ratio} \cdot \text{tangent\_min})
+    $$
+    [S1, unofficial]
+
+13. **Reconstruct Covariance:**
+    $$
+    \Sigma = \sigma_u^2 (e_u e_u^T) + \sigma_v^2 (e_v e_v^T) + \sigma_n^2 (\text{normal} \cdot \text{normal}^T)
+    $$
+    [S1, unofficial]
+
+14. **Update Gaussians:**
+    Decompose $\Sigma$ into new quaternions and singular values using `sharp_gaussians.decompose_covariance_matrices`. Update `gaussians.singular_values` and `gaussians.quaternions` for indices `[:, :layer_size]` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.linalg
+
+def surface_jacobian_covariance_stabilization(
+    surface_points: torch.Tensor,
+    gaussians: dict,
+    native_width: int,
+    native_height: int,
+    grid_width: int,
+    grid_height: int,
+    focal: float,
+    tangent_sigma: float,
+    normal_min_ratio: float,
+    normal_max_ratio: float,
+    max_stretch: float,
+    layer_size: int
+) -> dict:
+    """
+    Stabilizes Gaussian covariance based on surface Jacobian.
+    
+    Args:
+        surface_points: (N, 3) tensor of 3D points.
+        gaussians: Dict with 'quaternions' (N, 4) and 'singular_values' (N, 3).
+        native_width, native_height: Source image resolution.
+        grid_width, grid_height: Grid resolution for Jacobian.
+        focal: Camera focal length.
+        tangent_sigma: Scaling factor for tangent space.
+        normal_min_ratio: Min ratio of normal sigma to min tangent sigma.
+        normal_max_ratio: Max ratio of normal sigma to min tangent sigma.
+        max_stretch: Max stretch for grid tangents.
+        layer_size: Number of Gaussians to update.
+        
+    Returns:
+        Updated gaussians dict.
+    """
+    # 1. Compute Base Grid Units
+    z = surface_points[:, 2] # Shape (N,)
+    base_u = z * (native_width / grid_width) / focal
+    base_v = z * (native_height / grid_height) / focal
+    
+    # 2. Compute Tangents using robust_grid_tangent
+    # Note: robust_grid_tangent is assumed to be defined elsewhere or implemented as:
+    # It computes tangent vectors based on surface points and base units.
+    # For implementation, we assume a helper function exists or implement the grid derivative logic.
+    # Here we assume robust_grid_tangent(surface_points, axis, base_unit, max_stretch)
+    tangent_u = robust_grid_tangent(surface_points, axis=2, base_unit=base_u, max_stretch=max_stretch)
+    tangent_v = robust_grid_tangent(surface_points, axis=1, base_unit=base_v, max_stretch=max_stretch)
+    
+    # 3. Normalize e_u
+    length_u = torch.linalg.vector_norm(tangent_u, dim=-1, keepdim=True)
+    e_u = tangent_u / length_u
+    
+    # 4. Orthogonalize tangent_v against e_u
+    # tangent_v_orthogonal = tangent_v - (tangent_v . e_u) * e_u
+    dot_product = torch.sum(tangent_v * e_u, dim=-1, keepdim=True)
+    tangent_v_orthogonal = tangent_v - dot_product * e_u
+    
+    # 5. Compute Fallback for e_v
+    # Fallback 1: Orthogonalize [0, 1, 0] against e_u
+    vec_y = torch.tensor([0.0, 1.0, 0.0], device=surface_points.device).unsqueeze(0).expand(surface_points.shape[0], -1)
+    dot_y = torch.sum(vec_y * e_u, dim=-1, keepdim=True)
+    fallback_v = vec_y - dot_y * e_u
+    fallback_v_norm = torch.linalg.vector_norm(fallback_v, dim=-1, keepdim=True)
+    
+    # Fallback 2: Orthogonalize [0, 0, 1] against e_u
+    vec_z = torch.tensor([0.0, 0.0, 1.0], device=surface_points.device).unsqueeze(0).expand(surface_points.shape[0], -1)
+    dot_z = torch.sum(vec_z * e_u, dim=-1, keepdim=True)
+    fallback_z = vec_z - dot_z * e_u
+    
+    # Select fallback
+    use_fallback_v = fallback_v_norm > 1e-8
+    tangent_v_final = torch.where(use_fallback_v, fallback_v, fallback_z)
+    
+    # 6. Normalize e_v
+    length_v = torch.linalg.vector_norm(tangent_v_final, dim=-1, keepdim=True)
+    e_v = tangent_v_final / length_v
+    
+    # 7. Compute Normal and Re-orthogonalize e_v
+    normal = torch.linalg.cross(e_u, e_v, dim=-1)
+    normal = normal / torch.linalg.vector_norm(normal, dim=-1, keepdim=True)
+    e_v = torch.linalg.cross(normal, e_u, dim=-1)
+    # e_v is already normalized if normal and e_u are orthonormal
+    
+    # 8. Retrieve Old Covariance
+    # Assuming sharp_gaussians.decompose_covariance_matrices is available
+    # old_covariance shape: (N, grid_height, grid_width, 3, 3)
+    # This step requires reshaping and decomposing the existing Gaussians
+    # For the sake of this pseudocode, we assume we have a function to get old covariance
+    old_covariance = get_old_covariance(gaussians, layer_size)
+    
+    # 9. Compute Directional Sigmas
+    def directional_sigma(direction, cov):
+        # direction: (N, 1, 1, 3), cov: (N, 1, 1, 3, 3)
+        # sigma = sqrt(direction^T * cov * direction)
+        # direction^T * cov: (N, 1, 1, 3)
+        temp = torch.bmm(direction.squeeze(-2), cov.squeeze(-2)) # (N, 1, 1, 3)
+        sigma_sq = torch.sum(temp * direction, dim=-1, keepdim=True) # (N, 1, 1, 1)
+        sigma_sq = torch.clamp(sigma_sq, min=1e-16)
+        return torch.sqrt(sigma_sq)
+    
+    # Reshape directions for batched matrix multiplication
+    e_u_4d = e_u.unsqueeze(1).unsqueeze(1) # (N, 1, 1, 3)
+    e_v_4d = e_v.unsqueeze(1).unsqueeze(1)
+    normal_4d = normal.unsqueeze(1).unsqueeze(1)
+    
+    sigma_u_old = directional_sigma(e_u_4d, old_covariance).squeeze(-1).squeeze(-1) # (N,)
+    sigma_v_old = directional_sigma(e_v_4d, old_covariance).squeeze(-1).squeeze(-1)
+    sigma_n_old = directional_sigma(normal_4d, old_covariance).squeeze(-1).squeeze(-1)
+    
+    # 10. Compute Target Sigmas
+    sigma_u_target = tangent_sigma * length_u.squeeze(-1)
+    effective_length_v = torch.max(length_v.squeeze(-1), 0.50 * base_v)
+    sigma_v_target = tangent_sigma * effective_length_v
+    
+    # 11. Apply Floor to Tangent Sigmas
+    sigma_u = torch.max(sigma_u_old, sigma_u_target)
+    sigma_v = torch.max(sigma_v_old, sigma_v_target)
+    
+    # 12. Compute Normal Sigma with Constraints
+    tangent_min = torch.min(sigma_u, sigma_v)
+    sigma_n = torch.max(sigma_n_old, normal_min_ratio * tangent_min)
+    sigma_n = torch.min(sigma_n, normal_max_ratio * tangent_min)
+    
+    # 13. Reconstruct Covariance
+    # Sigma = sigma_u^2 * (e_u e_u^T) + sigma_v^2 * (e_v e_v^T) + sigma_n^2 * (normal normal^T)
+    # e_u e_u^T: (N, 3, 3)
+    outer_u = torch.einsum('ni,nj->nij', e_u, e_u)
+    outer_v = torch.einsum('ni,nj->nij', e_v, e_v)
+    outer_n = torch.einsum('ni,nj->nij', normal, normal)
+    
+    new_covariance = (sigma_u.unsqueeze(-1).unsqueeze(-1)**2 * outer_u +
+                      sigma_v.unsqueeze(-1).unsqueeze(-1)**2 * outer_v +
+                      sigma_n.unsqueeze(-1).unsqueeze(-1)**2 * outer_n)
+    
+    # 14. Update Gaussians
+    new_quaternions, new_singular_values = sharp_gaussians.decompose_covariance_matrices(new_covariance)
+    
+    gaussians['quaternions'][:layer_size] = new_quaternions
+    gaussians['singular_values'][:layer_size] = new_singular_values
+    
+    return gaussians
+
+def robust_grid_tangent(points: torch.Tensor, axis: int, base_unit: torch.Tensor, max_stretch: float) -> torch.Tensor:
+    """
+    Computes tangent vectors using robust grid tangent method.
+    This is a placeholder for the specific implementation details of robust_grid_tangent.
+    In practice, this involves computing finite differences or derivatives on the grid.
+    """
+    # Implementation details of robust_grid_tangent are not fully specified in the source.
+    # It likely computes the gradient of the surface points with respect to the grid coordinates.
+    # For the purpose of this article, we assume it returns a tensor of shape (N, 3).
+    # [G] Placeholder for robust_grid_tangent implementation.
+    # A typical implementation might involve:
+    # 1. Projecting points to a 2D grid.
+    # 2. Computing finite differences along the grid axes.
+    # 3. Scaling by base_unit.
+    # 4. Clamping magnitude by max_stretch.
+    # Since the exact algorithm is not provided, we return a zero tensor as a placeholder.
+    return torch.zeros_like(points)
+```
+
+**Parameters:**
+- `tangent_sigma`: Float, scaling factor for the target tangent-space sigma.
+- `normal_min_ratio`: Float, minimum ratio of normal sigma to the minimum tangent sigma.
+- `normal_max_ratio`: Float, maximum ratio of normal sigma to the minimum tangent sigma.
+- `max_stretch`: Float, maximum allowed stretch for grid tangents.
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Tangents:** If `length_u` or `length_v` is zero, normalization fails. The fallback mechanism for $e_v$ handles cases where $e_u$ is aligned with the y-axis.
+- **Precision:** The `directional_sigma` function clamps the value inside the square root to $10^{-16}$ to avoid numerical instability [S1, unofficial].
+- **Orthogonality:** The final $e_v$ is recomputed as `cross(normal, e_u)` to ensure strict orthogonality with $e_u$ and the normal vector [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Surface Jacobian Covariance Stabilization is part of the SplatMend project, which focuses on repairing and enhancing 3D Gaussian Splatting models [S1, unofficial]. It is used in the context of depth-anchored Gaussian reconstruction to ensure that the Gaussians accurately represent the surface geometry derived from depth maps [S1, unofficial].
+
+## Sources
+[S1] zjllllllllll/SplatMend, https://github.com/zjllllllllll/SplatMend, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,185 @@
+# Shell Space Renderer
+
+Also called: Nanouniverse, Nanouniverse Three-Level Virtual Instancing, Three-level Virtual Instancing, Three-level acceleration structure tree
+
+## Overview
+The Shell Space Renderer is a dedicated rendering method for visualizing membrane proteins by placing Wang square tiles within an adaptive volumetric shell layer surrounding a proxy mesh [S1]. It solves the problem of rendering intricate hierarchical structural detail (mesostructures and nanostructures) without storing transformation matrices for every instance, instead computing them on the fly during ray traversal to minimize memory footprint [S1]. It sets itself apart from standard two-level acceleration structures by employing a three-level tree (µLAS, mLAS, nLAS) that allows for virtual instancing of geometric detail, distinguishing it from the Core Space Renderer which handles soluble components using AABBs in a core grid [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A proxy mesh (low-poly triangles) defining the membrane surface; a tiling recipe defining Wang tiles; molecule definitions (atoms as spheres); ray origin $a$ and direction $b$.
+*   **Output:** The closest intersection point $d$ and its world transformation matrix $M_{123}$, or background color if no hit.
+
+**Data Structures:**
+The method uses a three-level acceleration structure tree [S1]:
+1.  **µLAS (Micro Level):**
+    *   **BLAS:** Contains mesh vertices and indices. The lowest primitive is an extruded prism representing the shell space [S1].
+    *   **TLAS:** Contains mesh instances with world-space transformation matrices and pointers to the BLAS [S1].
+2.  **mLAS (Meso Level):**
+    *   **BLAS:** Contains molecule Axis-Aligned Bounding Boxes (AABBs). The lowest primitive is the molecule AABB [S1].
+    *   **TLAS:** Contains molecular instances with object-space transformation matrices and pointers to the molecule in BLAS [S1]. Each Wang tile has its own mLAS instance [S1].
+3.  **nLAS (Nano Level):**
+    *   **BLAS:** Contains object-space positions of molecule atoms (spheres). The lowest primitive is the atom [S1].
+    *   **TLAS:** Contains a single instance with an identity matrix [S1].
+
+**Pre-processing (Adaptive Shell Space Construction):**
+An adaptive shell space is constructed as a volumetric layer between a positive-offset mesh (extruded along vertex normals) and a negative-offset mesh (extruded opposite to vertex normals) [S1].
+*   Offsets for each triangle are calculated based on the height along the $\pm y$-axis of the largest molecule mapped to that triangle [S1].
+*   Side offsets are calculated based on the width of the largest molecule on the edge [S1].
+*   Overlapping prisms are constructed by extruding vertices in the direction of the center-to-vertex vector [S1].
+
+**Ray Traversal Steps:**
+
+1.  **µLAS Traversal:** Cast ray $a+tb$ into the scene. Traverse µLAS to find the intersection between the ray and a prism [S1].
+    *   If no hit at point $q$, return background color [S1].
+    *   If hit found, continue to Step 2 [S1].
+
+2.  **Mapping and Transformation (µLAS to mLAS):**
+    *   Identify the respective AS in mLAS using the texture coordinates of the base triangle vertices $(v_0, v_1, v_2)$ defining the intersected prism [S1].
+    *   Use a **Wang tile mapper** to project the triangle onto a tiling recipe (large enough to cover entire $u,v$ texture coordinates) to identify the **replication area** (a 2D list of Wang tiles) [S1].
+    *   Define $g_{uv}$ for every tile in the replication area using vertex $uv$-coordinates [S1].
+    *   Compute the transformation matrix $M_1$ for the virtual placement of the mesostructure [S1]:
+        *   **Translation:** Obtain 3D world position of the tile center $g_{xyz}$ by interpolation [S1].
+        *   **Rotation:** Compute from triangle normal, tangent, and bi-tangent vectors [S1].
+        *   **Scaling/Shearing:** Determine distortion ratio based on the difference between the tile's world position $g_{xyz}$ and the world position of neighbor tiles along the $uv$-axis [S1].
+        *   $M_1 = \text{Translation} \times \text{Rotation} \times \text{Scaling} \times \text{Shearing}$ [S1]. All tiles in the replication area use the same $M_1$ (with different translations) [S1].
+
+3.  **mLAS Traversal:**
+    *   Test ray intersection with all tiles in the replication area (sequentially or in parallel) [S1].
+    *   All tiles have the same size. Use tile AABB and $M_1$. Terminate traversal for a specific tile if there is no ray-AABB intersection [S1].
+    *   If hit found, use $g_{uv}$ to obtain the corresponding **Wang tile Id** from the tiling recipe [S1].
+    *   Wang tiles are stored in object space. Compute the inverse ray $M_1^{-1} a + t M_1^{-1} b$ by multiplying ray origin and direction with $M_1^{-1}$ [S1].
+    *   Cast the inverse ray into mLAS, looking for ray-AABB intersection [S1].
+    *   If hit found at point $p$, continue to Step 4 [S1]. Otherwise, check next tile in replication area [S1].
+
+4.  **Molecule Transformation (mLAS to nLAS):**
+    *   Compute transformation matrix $M_2$ for the virtual placement of the nanostructure [S1].
+    *   **Translation:** Multiply molecule's local position $n_{\mu\gamma}$ with tile transformation matrix $M_1$ [S1].
+    *   **Rotation:**
+        *   Obtain molecule position in $uv$-coordinates by adding molecule's local position in tile to center of tile in $uv$-coordinates [S1].
+        *   Use barycentric interpolation of triangle vertex normals to obtain interpolated normal for molecule position [S1].
+        *   Multiply this rotation with molecule's local rotation $n_{\theta}$ [S1].
+    *   $M_2 = \text{Molecule Translation} \times \text{Molecule Rotation}$ [S1].
+    *   If the instance is located outside the prism, reject intersection [S1]. Otherwise, continue [S1].
+
+5.  **nLAS Traversal:**
+    *   Molecules are stored in nLAS in object space. Compute inverse ray $M_{12}^{-1} a + t M_{12}^{-1} b$ where $M_{12} = M_1 \times M_2$ [S1].
+    *   Cast ray into nLAS to detect ray-sphere intersection (atoms are the lowest primitive) [S1].
+    *   If hit found at point $d$, record hit information [S1].
+    *   Compute atom transformation matrix $M_3$ from atom's local transformation matrix (local coordinate position within molecule model) [S1].
+    *   Compute world transformation matrix $M_{123} = M_1 \times M_2 \times M_3$ [S1].
+    *   Record hit information for point $d$ and $M_{123}$ as a candidate for intersection [S1].
+    *   Update ray $t_{max}$ with candidate position. Ignore prisms, Wang tiles, and atoms further than $t_{max}$ [S1].
+
+6.  **Compositing:**
+    *   At the end of every frame draw call, composite the resulting images from the shell renderer and the core renderer based on depth [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def shell_space_renderer(ray_origin, ray_direction, proxy_mesh, tiling_recipe, molecules):
+    # 1. Traverse µLAS
+    prism_hit = traverse_micro_level(ray_origin, ray_direction, proxy_mesh)
+    
+    if prism_hit is None:
+        return background_color
+
+    # Extract triangle vertices defining the prism
+    v0, v1, v2 = prism_hit.triangle_vertices
+    
+    # 2. Map µLAS to mLAS
+    # Determine replication area (list of Wang tiles) based on texture coordinates
+    replication_area = wang_tile_mapper(v0, v1, v2, tiling_recipe)
+    
+    # Compute M1 for the triangle
+    # Translation: Interpolate world position from uv coordinates
+    g_xyz = interpolate_world_position(v0, v1, v2, replication_area.center_uv)
+    translation_matrix = make_translation(g_xyz)
+    
+    # Rotation: From triangle normal, tangent, bi-tangent
+    rotation_matrix = make_rotation_from_triangle(v0, v1, v2)
+    
+    # Scaling/Shearing: Based on distortion ratio with neighbors
+    scaling_matrix, shearing_matrix = compute_distortion_matrices(replication_area)
+    
+    M1 = translation_matrix @ rotation_matrix @ scaling_matrix @ shearing_matrix
+    
+    closest_hit = None
+    t_max = ray_direction.magnitude() # Initial max distance
+    
+    # 3. Traverse mLAS (Replication Area)
+    for tile in replication_area:
+        # Test ray intersection with tile AABB transformed by M1
+        # Or inverse ray test against object-space tile AABB
+        tile_inv_ray_origin = M1.inverse() @ ray_origin
+        tile_inv_ray_dir = M1.inverse() @ ray_direction
+        
+        tile_hit = traverse_meso_level(tile_inv_ray_origin, tile_inv_ray_dir, tile.mlas)
+        
+        if tile_hit is not None:
+            # Get Wang Tile ID
+            wang_tile_id = get_wang_tile_id(tile, tile_hit.uv_position)
+            
+            # 4. Compute M2 for the molecule
+            molecule = molecules[wang_tile_id]
+            
+            # Molecule Translation: Local pos * M1
+            molecule_local_pos = molecule.local_position
+            molecule_translation = make_translation(molecule_local_pos) @ M1
+            
+            # Molecule Rotation: Interpolated normal * local rotation
+            molecule_uv_pos = tile.center_uv + molecule.local_uv_offset
+            interpolated_normal = interpolate_normal(v0, v1, v2, molecule_uv_pos)
+            molecule_rotation = make_rotation_from_normal(interpolated_normal) @ molecule.local_rotation
+            
+            M2 = molecule_translation @ molecule_rotation
+            
+            # Check if molecule is inside prism (early termination)
+            if not is_inside_prism(prism_hit, M2):
+                continue
+                
+            # 5. Traverse nLAS
+            M12 = M1 @ M2
+            nlas_inv_ray_origin = M12.inverse() @ ray_origin
+            nlas_inv_ray_dir = M12.inverse() @ ray_direction
+            
+            atom_hit = traverse_nano_level(nlas_inv_ray_origin, nlas_inv_ray_dir, molecule.nlas)
+            
+            if atom_hit is not None:
+                # Compute M3 for atom
+                atom_local_pos = atom_hit.local_position
+                M3 = make_translation(atom_local_pos)
+                
+                M123 = M1 @ M2 @ M3
+                
+                # Update t_max if closer
+                if atom_hit.distance < t_max:
+                    t_max = atom_hit.distance
+                    closest_hit = (atom_hit.point, M123)
+    
+    if closest_hit is None:
+        return background_color
+        
+    return closest_hit
+```
+
+## Subtopics
+
+### Shell Space Renderer Optimization (repLAS)
+An optimization extending the three-level AS by adding `repLAS` between µLAS and mLAS to perform ray traversal in replication area tiles in parallel [S1]. It creates a 2D grid of tile AABBs in object space using replication area predefined dimensions [S1]. After hitting a prism in µLAS, it computes $M_1$ (using the replication area's center position in world space) and shoots the inverse ray into `repLAS` [S1]. Upon finding a hit in `repLAS`, it retrieves the Wang tile ID, inverts the ray again, and shoots it into the specific mLAS of that Wang tile, continuing with standard mLAS and nLAS traversal [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Ray traversal involves three levels of acceleration structures. The shell layer traversal is noted as expensive [S1]. Optimization via `repLAS` allows parallel traversal of replication area tiles [S1].
+*   **Memory Footprint:** Significantly minimized by virtually instantiating instances and computing transformation matrices on the fly rather than storing them for every instance [S1]. Geometric descriptions of mesostructures/nanostructures are stored only once in GPU memory [S1].
+*   **Strengths:** Enables interactive rates for rendering intricate molecular biological structures; allows free navigation by changing camera position or visibility settings [S1].
+*   **Limitations:** Tracing rays in the shell layer is computationally expensive without optimization [S1].
+*   **When to use:** For rendering membrane proteins where structural detail (meso/nano) needs to be visualized relative to a proxy mesh surface [S1].
+*   **When not to use:** For soluble components, the Core Space Renderer (using AABBs in a core grid) is used instead [S1].
+
+## Background
+The Shell Space Renderer is part of the **Nanouniverse** system, which proposes a three-level acceleration structure tree (µLAS, mLAS, nLAS) inspired by NVIDIA's two-level RTX acceleration structures but providing greater control for hierarchical structural detail [S1]. It was introduced in the paper "Nanouniverse: Virtual Instancing of Structural Detail and Adaptive Shell Mapping" [S1]. The method is specifically designed for visualizing molecular biological structures, such as membrane proteins and soluble components, by mapping Wang tiles and cubes to proxy geometry [S1].
+
+## Sources
+[S1] Nanouniverse: Virtual Instancing of Structural Detail and Adaptive Shell Mapping., https://doi.org/10.1109/tvcg.2025.3618914, fetched 2026-10-26

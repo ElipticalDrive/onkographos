@@ -1,0 +1,42 @@
+# Rendering and Lighting Pipelines
+
+
+## Overview
+This family defines extensions to the 3D Gaussian Splatting rendering pipeline to support advanced effects such as order-independent transparency, explicit geometry, volumetric lighting, inverse rendering, and physically-based dynamic relighting. While standard 3DGS uses view-dependent spherical harmonic colors and simple alpha blending, these methods diverge by introducing physical parameters (extinction, albedo), explicit primitives (polyhedra), or multi-stage training to decouple geometry from lighting [G].
+
+## Shared principles
+All extensions retain the core 3D Gaussian primitive representation: a set of $M$ anisotropic 3D Gaussian kernels $\mathcal{G} = \{G_i\}_{i=1}^M$ [G]. Each kernel is defined by:
+*   $\mathbf{p}_i \in \mathbb{R}^3$: Position (mean) [G].
+*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix [G].
+*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale matrix [G].
+*   The covariance matrix is $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^\top \mathbf{R}_i^\top$ [G].
+
+The rendering pipeline's geometric projection remains consistent for ray-based methods: 3D Gaussians are transformed into ray space, and the projected 2D covariance $\mathbf{\hat{\Sigma}}_i$ is computed using the Jacobian $J$ of the affine approximation of the projection and the rotation part $W$ of the extrinsic matrix:
+$$ \mathbf{\hat{\Sigma}}_i = J W \mathbf{\Sigma}_i W^T J^T $$
+[G].
+
+However, the attribute representation and loss functions diverge significantly from the standard RGB opacity/color model [G]. Standard 3DGS uses view-dependent color $\mathbf{c}_i(\mathbf{d})$ [G]. In radiative and domain-specific variants, this is replaced by view-independent scalar attributes or feature vectors [G].
+
+## Subtopics
+
+### [Duplex-GS](1988-duplex-gs.md)
+Duplex-GS is a dual-hierarchy rendering framework for real-time order-independent Gaussian Splatting that combines alpha-blending with a reformulated Weighted-Sum Rendering (WSR) strategy. It solves the transparency artifacts and lack of early termination inherent in vanilla OIT-based Gaussian Splatting, while reducing the sorting overhead of conventional alpha-blending. Unlike vanilla OIT methods which lack physical constraints, Duplex-GS reintroduces them via cell-level transmittance decay, and unlike Sort-free Gaussian Splatting which uses linear depth decay, it uses cell-level sorting to compute a physically grounded transmittance. See [Duplex-GS](1988-duplex-gs.md).
+
+### [LinPrim Differentiable Rendering Pipeline](2195-linprim-differentiable-rendering-pipeline.md)
+LinPrim is a differentiable rendering pipeline that replaces the Gaussian primitives of 3D Gaussian Splatting with convex polyhedra, specifically octahedra, to enable explicit geometric representation. It solves the problem of approximating complex scene geometry with bounded, triangular surfaces while maintaining real-time performance and full differentiability for gradient-based optimization. Unlike its sibling [3D Gaussian Splatting](3d-gaussian-splatting.md) which uses implicit Gaussian kernels, LinPrim uses explicit ray-triangle intersections to determine opacity, allowing gradients to be backpropagated directly onto the geometric features of the polyhedra. See [LinPrim Differentiable Rendering Pipeline](2195-linprim-differentiable-rendering-pipeline.md).
+
+### [GsplatVolumeLighting](2203-gsplatvolumelighting.md)
+GsplatVolumeLighting is a volume lighting and occlusion technique for 3D Gaussian Splatting (3DGS) that ray-marches through a 3D density texture to compute transmittance for shadow and volume occlusion, combined with per-light attenuation and diffuse shading. It extends the standard 3DGS rendering pipeline by introducing volumetric shadows and ambient occlusion-like effects, allowing splats to cast and receive shadows from a defined volume rather than relying solely on geometric primitives or screen-space techniques. Unlike sibling methods such as [4DGS-Volume-Cloud Two-Stage Relighting](4101-4dgs-volume-cloud-two-stage-relighting.md) which may use separate relighting stages, GsplatVolumeLighting integrates the shadow march directly into the lighting evaluation per splat, making it suitable for real-time interactive applications like those in the Unity engine. See [GsplatVolumeLighting](2203-gsplatvolumelighting.md).
+
+### [NeILF Rendering and Loss Calculation](2920-neilf-rendering-and-loss-calculation.md)
+NeILF (Neural Inverse Lighting Field) is a rendering pipeline that decomposes Gaussian Splatting features into diffuse, specular, and ambient components using a Blinn-Phong model, enabling inverse rendering via loss functions on depth, normals, and color sparsity. It distinguishes itself from standard Gaussian Splatting by explicitly modeling lighting interactions through learnable material factors (diffuse, specular, ambient) and supporting multi-Gaussian group rendering with palette-based color offsets, allowing for physically plausible relighting and material optimization. See [NeILF Rendering and Loss Calculation](2920-neilf-rendering-and-loss-calculation.md).
+
+### [4DGS-Volume-Cloud Two-Stage Relighting](4101-4dgs-volume-cloud-two-stage-relighting.md)
+This method enables real-time, physically-based dynamic relighting of volume clouds using 3D Gaussian Splatting by decoupling geometry/medium parameters from environmental lighting. It solves the problem of arbitrary sun-direction relighting in volumetric media by training a static physical representation in Stage 1 under single-direction illumination, then freezing those parameters to train a global environment network in Stage 2 that adds sky atmospheric scattering. Unlike standard Gaussian Splatting which uses empirical SH colors, this approach parameterizes participating medium physics (extinction, albedo, scattering) and separates direct sun attenuation from additive sky inscattering. See [4DGS-Volume-Cloud Two-Stage Relighting](4101-4dgs-volume-cloud-two-stage-relighting.md).
+
+## Background
+Originating from the foundational 3D Gaussian Splatting paper [17] (cited in [S2]), the standard pipeline uses analytic alpha blending. Subsequent extensions have adapted this for specific domains: Duplex-GS addresses order-independence [S1, unofficial], LinPrim introduces explicit geometry [S1, unofficial], GsplatVolumeLighting adds volumetric shadows [S1, unofficial], NeILF enables inverse rendering [S1, unofficial], and 4DGS-Volume-Cloud handles dynamic cloud relighting [S1, unofficial].
+
+## Sources
+[S1] JSplat, https://github.com/javagl/JSplat, fetched 2026-10-30 (unofficial)
+[S2] On the Error Analysis of 3D Gaussian Splatting and an Optimal Projection Strategy, https://doi.org/10.1007/978-3-031-72643-9_15, fetched 2026-10-29

@@ -1,0 +1,150 @@
+Contribute to berkgeveci/tack development by creating an account on GitHub.
+
+Validation round after #114; tetrahedralize across pieces by berkgeveci · Pull Request #118 · berkgeveci/tack · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+berkgeveci
+commented
+Oct 24, 2026
+Copy link
+Copy Markdown
+Owner
+The fixes the CUDA, HIP and Level Zero rounds after #114 found (cherry-picked from their branches, authors kept), and tetrahedralize agreeing across pieces.
+From the validation round (vault tickets mustafar-linux / illyad / headroom - validation after 114)
+34c6cba, 8d01ede (mustafar): slice/slice_plane of a curved dataset raised NotImplementedError since Fixes from hand testing: copyto and for_each docs, contour refuses order-2 H1 #93 (contour refuses order 2, and the implicit function's values are in the geometry's space). The values are projected into order-1 H1 first, so cells are cut linearized at their corners, as before Fixes from hand testing: copyto and for_each docs, contour refuses order-2 H1 #93; new test. Example 43 contours its field's order-1 interpolant (output unchanged from before Fixes from hand testing: copyto and for_each docs, contour refuses order-2 H1 #93: 324 / 108 / 264).
+ab58016 (illyad): _sort_buckets sorts a bucket of up to 16 in a local array: 2.48 → 0.76 ms on an MI210 (faces() 9.2 → 7.5, fresh extract_surface 11.6 → 9.8); H100 unchanged; CPU faces() on 1M hexahedra 37.9 → 36.9 ms (checked here). New bucket-size test.
+a1c5f8a (headroom): test_partitioned.py skips its DIY2 comparisons when VTK lacks FiltersParallelDIY2 instead of failing to collect under TACK_REQUIRE_VTK. 43a7827 does the same for test_ghost_cells.py and test_global_ids.py. Checked with the module refused: 74 passed, the 7 that need it skipped.
+tetrahedralize across pieces (8662557)
+A structured piece alternated hexahedra by its own (i, j, k) parity, so a piece starting at an odd index split shared quads the other way. StructuredTopology(..., offset=) is the grid index of its first point (split sets it; vtk_to_dataset takes it from an extent); tetrahedralize adds its parity.
+Other cells split from the corner of smallest local id, which pieces number differently; corners now rank by global id where there are global ids. A single dataset's output is unchanged.
+Checked: split's pieces with odd offsets give the whole's tetrahedra; renumbered pieces give the whole's with global ids and not without; pieces numbered by generate_global_ids meet face to face.
+Quick tier 1615 passed; example 43 runs; docs build strict.
+🤖 Generated with Claude Code
+berkgeveci
+added 7 commits
+October 24, 2026 13:34
+Tetrahedralize: pieces split the faces they share alike
+…
+8662557
+```
+A structured piece alternated its hexahedra by the parity of its own
+(i, j, k), so a piece whose first cell sits at an odd index in the whole
+grid split the quads it shares with its neighbour along the other
+diagonal, and the pieces' tetrahedra did not meet. StructuredTopology
+gains offset, the grid index of its first point in a larger grid, which
+split sets and vtk_to_dataset takes from an extent; tetrahedralize adds
+its parity.
+
+Other cells split from their corner of smallest local id, which two
+pieces number differently; tetrahedralize now ranks corners by global id
+where the dataset has global ids. A single dataset's tetrahedra are
+unchanged.
+
+Checked: split's pieces with odd offsets give the whole grid's
+tetrahedra; renumbered unstructured pieces give the whole's with global
+ids and not without; pieces numbered by generate_global_ids meet face to
+face (every inner triangle shared by two tetrahedra).
+```
+Skip the partitioned tests that need DIY2 when VTK lacks the module
+…
+a1c5f8a
+```
+test_partitioned.py imported vtkFiltersParallelDIY2 with the rest of VTK,
+so with TACK_REQUIRE_VTK=1 a VTK built without that optional module
+(headroom's master build, without MPI) errored at collection and ran none
+of its 51 tests. The three that redistribute pieces and generate ghosts
+through VTK now skip on their own; the other 48 run on any VTK.
+```
+Tests: ghost-cell and global-id tests skip VTK's DIY2 comparisons wit…
+…
+43a7827
+```
+…hout it
+
+As test_partitioned.py now does (headroom's VTK master build has no
+FiltersParallelDIY2): the DIY2 import gets its own guard, and the tests
+comparing with vtkGhostCellsGenerator, vtkRedistributeDataSetFilter and
+vtkGenerateGlobalIds skip on their own, instead of the modules failing to
+collect under TACK_REQUIRE_VTK. Checked with the module refused: 74
+passed, the 7 that need it skipped.
+```
+Sort a small bucket in a local array, not in place
+…
+ab58016
+```
+bucket_order sorts each bucket by insertion, one thread per bucket. In
+global memory every shift is a store the next comparison reads back,
+and on an MI210 that cost three times the comparisons: for the faces
+of 1M hexahedra (1.03M buckets of about 6 entries), _sort_buckets took
+2.48 ms, 0.97 of it with the input already sorted (no shifts), against
+0.40 ms on an H100 either way. A bucket of up to 16 entries is now read
+into a local array, sorted there and written back once: 0.76 ms on the
+MI210, 0.41 on the H100, the same order. Deriving those faces on the
+MI210 went from 9.2 to 7.5 ms, a fresh extract_surface from 11.6 to
+9.8 ms. Larger buckets, up to the radix sort's threshold, sort in place
+as before; a test covers bucket sizes on both sides of 16, for keys of
+one, two and four ids and both index types.
+```
+slice: cut a curved geometry's cells at their corners
+…
+34c6cba
+```
+slice contours the implicit function's values in the geometry's space,
+and on a curved geometry (H1 order 2) that is an order-2 field, which
+contour has refused since #93 (198019e). So slice_plane on a curved
+dataset raised NotImplementedError: examples/43_mfem_poisson.py, an MFEM
+order-2 mesh, failed on CPU and CUDA. Nothing tested a slice of an
+order-2 geometry.
+
+Before #93 contour read the field's corner values, so a curved dataset
+was cut with its cells linearized at their corners. slice now does that
+explicitly: the function's values projected into order-1 H1, which keeps
+a continuous field's values at the points. Example 43's slice is 108
+triangles, as it was before #93.
+
+New test: a straight-sided geometry raised to order 2 is cut as its
+order-1 self, at one level and at several.
+```
+Example 43: contour u's order-1 interpolant
+…
+8d01ede
+```
+The example contoured u, an order-2 H1 field from MFEM, which contour
+refuses since #93 (it would need each cell subdivided); the example was
+not updated and raised NotImplementedError on CPU and CUDA. It now
+contours u projected into order-1 H1 -- u's values at the points, the
+linear field contour used to take silently, as the example's comment
+says -- and gives the same 324 triangles as before #93.
+```
+CHANGELOG: the slice of a curved dataset and the bucket sort
+707486f
+Hide details
+View details
+berkgeveci
+merged commit b0a3dc8
+into
+main
+Oct 24, 2026
+23 of 24 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+berkgeveci
+deleted the
+vis/conforming-pieces
+branch
+October 24, 2026 20:09
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,859 @@
+Powerful web graphics runtime built on WebGL, WebGPU, WebXR and glTF - feat: Add clipping planes to cameras, mesh instances and render components by willeastcott · Pull Request #9755 · playcanvas/engine
+
+feat: Add clipping planes to cameras, mesh instances and render components by willeastcott · Pull Request #9755 · playcanvas/engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+willeastcott
+commented
+Oct 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Adds clipping planes to cameras and to mesh instances. A plane cuts geometry open: the part behind it isn't rendered. A camera's planes clip everything it renders, for section views of a building or an assembly. A mesh instance's planes clip only that mesh, in every pass including shadows, for cutaways. The new example, graphics/clipping-planes, uses mesh instance planes to cut open a turbofan engine.
+Try the example live on this branch's preview deployment.
+API
+CameraComponent#clippingPlanes: up to 8 Planes in world space that clip everything the camera renders. The parts behind any of them, on the side opposite to the normal, aren't rendered. They apply to all of the camera's passes, including picking. They don't clip shadows, which meshes cast whole, or screen space elements.
+MeshInstance#clippingPlanes: up to 8 planes that clip one mesh instance, in every pass: forward, prepass, picking and shadows. A mesh instance is clipped by its own planes and by the camera's. Each set uses its own clipIntersection, and a part that either set clips isn't rendered.
+RenderComponent#clippingPlanes gives the component's planes and its clipIntersection together to its mesh instances, including ones it creates or is given later. They replace the clipping of the mesh instances, even when the component has no planes, so planes assigned to a mesh instance directly last until the component next writes its clipping: when its clippingPlanes or clipIntersection are assigned, or it gets new mesh instances.
+clipIntersection, on all three, clips only the parts behind all of the planes instead. Two planes cut a wedge, three a corner.
+The planes are copied on assignment, as clearColor is. The getters return the copies, and a change to them applies when the array is assigned again. Cloning a component copies its planes as assigned, but not planes assigned directly to mesh instances. More than 8 planes trigger a debug assert, and the rest are ignored. The component properties are component data, so addComponent takes them and cloning keeps them.
+```
+// a section view: cut away everything the camera renders above a height of 3
+cameraEntity.camera.clippingPlanes = [
+    new Plane().setFromPointNormal(new Vec3(0, 3, 0), Vec3.DOWN)
+];
+
+// a cutaway: cut the top front quarter out of an entity and its descendants
+const planes = [
+    new Plane().setFromPointNormal(Vec3.ZERO, Vec3.DOWN),
+    new Plane().setFromPointNormal(Vec3.ZERO, Vec3.FORWARD)
+];
+for (const render of entity.findComponents('render')) {
+    render.clippingPlanes = planes;
+    render.clipIntersection = true;
+}
+```
+Changes
+Two scopes. Camera planes need no setup per object, cover content loaded later, and can differ between cameras, as in a split view. Mesh instance planes leave the rest of the scene whole, as a cutaway on a stand needs, and clip shadows too.
+Per mesh instance, not per material. The meshes of a glTF often share materials, so clipping a material would clip all of them.
+Mesh instance planes clip every pass. They're mesh instance parameters (clipPlanes[0] and clipParams), so every draw of the mesh instance uses them. Clipped parts cast no shadows, write no depth and can't be picked.
+Camera planes clip the camera's passes. They're view uniforms (camera_clipPlanes[0] and camera_clipParams), set for each pass and part of the view uniform buffer on WebGPU. Shadow maps render with the light's shadow camera, so they aren't clipped. Spot and omni shadow maps are shared by all cameras, so they couldn't follow one camera's planes anyway. The chunk skips the camera planes for SCREENSPACE shaders.
+Shaders compile once. A mesh instance with planes gets a new shader define, SHADERDEF_CLIP. A camera with planes adds CLIP_PLANES to its camera shader params, so its shader variants are keyed per camera, as fog is. The new clipPlanesPS chunk, in GLSL and WGSL, discards clipped fragments at the start of the lit forward, other and shadow passes. Only the first planes compile new variants: for a camera, that's every shader it renders. Moving the planes, or changing their number, only updates the uniforms.
+Materials. StandardMaterial and LitMaterial are clipped. A ShaderMaterial gets the CLIP_PLANES define for either kind of planes, and its shader opts in by including clipPlanesPS and calling applyClipPlanes with the world space position of the fragment.
+Batching. Mesh instances with planes are excluded from batching, as skinned and morphed ones are. Clipping a batched render component rebuilds its batch group without it, and the batcher adds the excluded entity back to its layers, so it renders on its own. Camera planes don't affect batching. Planes given directly to a mesh instance that's already batched apply once its batch group is rebuilt with BatchManager#markGroupDirty, as other changes to batched mesh instances do.
+Example
+graphics/clipping-planes: a turbofan on a stand in a studio. It uses mesh instance planes, so the stand and the floor stay whole.
+The cut. Two planes through the engine's axis, with clipIntersection, cut out a wedge. A third plane across the axis sets how far back the cut goes. The cut opens over 3 seconds when the example starts.
+Section caps. A second render component draws each part's mesh again under the same planes, unlit red with front faces culled. Where the cut opens a part, its back faces show as a solid cut face. This needs closed meshes, and shows their inner surfaces rather than a face generated at the plane. The caps reuse each part's mesh and node, and the instancing buffer of each blade row, so no geometry is copied.
+Controls for the cut (enabled, opening, rotation, length, caps and spin) and the post effects (MSAA, SMAA, TAA or no anti-aliasing, bloom, ambient occlusion and vignette).
+The turbofan was made for this example. It's a 600 KB GLB with Draco compressed geometry, KTX2 textures (Basis ETC1S and UASTC) and instanced blade rows (EXT_mesh_gpu_instancing). Its materials use clearcoat, anisotropy, iridescence, sheen, specular, transmission, volume, IOR, dispersion, emissive strength and texture transforms. The studio environment atlas (77 KB) was made for it with EnvLighting.
+Under CameraFrame the clear color isn't linearized (Fog + Tonemapping #7181), so the camera clears to the fog color passed through Color#linear(), and the floor fades into the backdrop.
+Testing
+test/scene/clipping-planes.test.mjs adds 51 tests:
+Mesh instances copy their planes and set them as uniforms. They enable the define while they have planes, keep their shaders as the planes move, use at most 8, and apply them to their own forward and shadow draws.
+Cameras copy their planes and set them as uniforms of their draws. They enable the defines while they have planes, keep their shader variants as the planes move, and use at most 8. Shadows aren't clipped by them. They take the planes from component data and keep them when cloned.
+The forward, prepass, picking and shadow shaders of StandardMaterial and LitMaterial are clipped by mesh instance planes, and their camera passes by camera planes, together with the mesh instance's own. Screen space shaders skip the camera planes. ShaderMaterial gets the define from both.
+Render components apply their planes to current and later mesh instances, take them from component data, keep them when cloned, and remove them.
+Assignment: each owner keeps the values when given its own planes in another order, and keeps its copies, and their normals, independent whatever is put into the returned array. A changed clipIntersection changes only the mode. Clones take the planes as assigned. Render components take at most 8 planes, and give their planes and mode together to all of their mesh instances, also ones given later, from either setter, replacing the clipping of the mesh instances, also when the component has none.
+A clipped entity renders on its own, outside of its batch, and stays hidden while its render component is disabled. The batch group is rebuilt when planes are pushed into, or cleared from, the returned array and assigned, and when the component removes planes of its mesh instances. A mesh instance given planes directly is clipped once its group is rebuilt. Batching follows the assigned planes, not changes to the returned ones.
+Full suites pass: 4339 tests on Node, 4338 on Dawn (test:webgpu). Types and docs build cleanly.
+In the browser, on WebGL2 and WebGPU:
+Mesh instance planes: union and intersection clipping, shadows (light falls into the cut), picking through clipped parts, and the example, including portrait on a phone-sized viewport.
+Camera planes: a plane through the example's scene cuts the engine, the stand and the floor. In user-interface/world-to-screen, a plane that clips all of the world geometry leaves the screen space labels, and the Picker hits a capsule without the plane and nothing with it.
+Not in this PR
+Gaussian splats and particle systems aren't clipped.
+Hardware clip distances (GraphicsDevice#supportsClipDistances, WebGPU support for ClipDistances feature #7134) could replace the discard where they're supported.
+Planes for a subtree of the scene, which would also apply to entities added to it later.
+An option to keep the whole shadows of clipped mesh instances.
+Anti-aliased cut edges. The cut is a hard discard, which alpha to coverage could soften.
+🤖 Generated with Claude Code
+willeastcott
+added
+enhancement
+Request for a new feature
+area: graphics
+Graphics related issue
+area: examples
+labels
+Oct 13, 2026
+vercel
+Bot
+deployed
+to
+Preview – engine-api-docs
+October 13, 2026 21:36
+View deployment
+github-actions
+Bot
+commented
+Oct 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Public API report
+This PR changes the public API surface (+13 / −0), per the docs' rules (@ignore / @Private / undocumented are excluded).
+Show API diff
+```
++CameraComponent.get clipIntersection(): boolean
++CameraComponent.get clippingPlanes(): Plane[]
++CameraComponent.set clipIntersection(value: boolean)
++CameraComponent.set clippingPlanes(value: Plane[])
++LitShaderOptions.useClipPlanes: boolean
++MeshInstance.get clipIntersection(): boolean
++MeshInstance.get clippingPlanes(): Plane[]
++MeshInstance.set clipIntersection(value: boolean)
++MeshInstance.set clippingPlanes(value: Plane[])
++RenderComponent.get clipIntersection(): boolean
++RenderComponent.get clippingPlanes(): Plane[]
++RenderComponent.set clipIntersection(value: boolean)
++RenderComponent.set clippingPlanes(value: Plane[])
+```
+Informational only — this never fails the build.
+vercel
+Bot
+deployed
+to
+Preview – engine
+October 13, 2026 21:37
+View deployment
+github-actions
+Bot
+commented
+Oct 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Build size report
+This PR changes the size of the minified bundles.
+Bundle
+Minified
+Gzip
+Brotli
+playcanvas.min.js
+2664.7 KB (+7.6 KB, +0.28%)
+691.0 KB (+1.8 KB, +0.26%)
+536.0 KB (+1.3 KB, +0.25%)
+playcanvas.min.mjs
+2661.5 KB (+7.6 KB, +0.29%)
+689.6 KB (+1.8 KB, +0.26%)
+535.6 KB (+1.6 KB, +0.30%)
+willeastcott
+requested review from
+mvaligursky
+and
+a balanced review from Copilot
+October 13, 2026 21:37
+willeastcott
+self-assigned this
+Oct 13, 2026
+Copilot started reviewing on behalf of
+willeastcott
+October 13, 2026 21:38
+View session
+Copilot
+AI
+reviewed
+Oct 13, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+Plane-array aliasing breaks copy semantics and can prevent batched components from being invalidated correctly.
+3 open findings
+Track prior clipping state before processing mutated arrays · New
+Enforce the eight-plane limit in the component API · New
+Snapshot aliased source planes before in-place copying · New
+What changed in this PR
+Adds world-space clipping planes to mesh instances and render components across WebGL2 and WebGPU.
+Changes:
+Adds clipping APIs, shader support, and batching exclusion.
+Adds an interactive turbofan cutaway example and comprehensive tests.
+Includes the iridescence fixes from #9752.
+File
+Description
+test/​scene/​shader-lib/​standard-iridescence.test.mjs
+Tests iridescence shader fixes.
+test/​scene/​clipping-planes.test.mjs
+Tests clipping APIs, shaders, and batching.
+src/​scene/​shader-lib/​wgsl/​collections/​shader-chunks-wgsl.js
+Registers the WGSL clipping chunk.
+src/​scene/​shader-lib/​wgsl/​chunks/​standard/​frag/​stdDeclaration.js
+Corrects the iridescence map define.
+src/​scene/​shader-lib/​wgsl/​chunks/​lit/​frag/​pass-shadow/​litShadowMain.js
+Clips WGSL shadow fragments.
+src/​scene/​shader-lib/​wgsl/​chunks/​lit/​frag/​pass-other/​litOtherMain.js
+Clips WGSL auxiliary passes.
+src/​scene/​shader-lib/​wgsl/​chunks/​lit/​frag/​pass-forward/​litForwardMain.js
+Clips WGSL forward fragments.
+src/​scene/​shader-lib/​wgsl/​chunks/​lit/​frag/​litMain.js
+Includes WGSL clipping support.
+src/​scene/​shader-lib/​wgsl/​chunks/​lit/​frag/​iridescenceDiffraction.js
+Corrects the Rec. 709 matrix.
+src/​scene/​shader-lib/​wgsl/​chunks/​common/​frag/​clipPlanes.js
+Implements WGSL clipping.
+src/​scene/​shader-lib/​programs/​shader-generator-shader.js
+Adds clipping to custom shader variants.
+src/​scene/​shader-lib/​programs/​lit-shader.js
+Defines clipping for lit shaders.
+src/​scene/​shader-lib/​programs/​lit-shader-options.js
+Adds the lit clipping option.
+src/​scene/​shader-lib/​glsl/​collections/​shader-chunks-glsl.js
+Registers the GLSL clipping chunk.
+src/​scene/​shader-lib/​glsl/​chunks/​standard/​frag/​stdDeclaration.js
+Corrects the iridescence map define.
+src/​scene/​shader-lib/​glsl/​chunks/​lit/​frag/​pass-shadow/​litShadowMain.js
+Clips GLSL shadow fragments.
+src/​scene/​shader-lib/​glsl/​chunks/​lit/​frag/​pass-other/​litOtherMain.js
+Clips GLSL auxiliary passes.
+src/​scene/​shader-lib/​glsl/​chunks/​lit/​frag/​pass-forward/​litForwardMain.js
+Clips GLSL forward fragments.
+src/​scene/​shader-lib/​glsl/​chunks/​lit/​frag/​litMain.js
+Includes GLSL clipping support.
+src/​scene/​shader-lib/​glsl/​chunks/​common/​frag/​clipPlanes.js
+Implements GLSL clipping.
+src/​scene/​mesh-instance.js
+Adds per-instance clipping state and uniforms.
+src/​scene/​materials/​standard-material-options-builder.js
+Enables clipping for standard materials.
+src/​scene/​materials/​shader-material.js
+Exposes clipping to shader materials.
+src/​scene/​materials/​lit-material-options-builder.js
+Enables clipping for lit materials.
+src/​scene/​constants.js
+Defines the clipping shader flag.
+src/​scene/​batching/​batch-manager.js
+Excludes clipped instances from batches.
+src/​framework/​components/​render/​system.js
+Registers clipping component data.
+src/​framework/​components/​render/​component.js
+Propagates clipping to mesh instances.
+examples/​src/​examples/​graphics/​clipping-planes.example.mjs
+Adds the turbofan cutaway example.
+examples/​src/​examples/​graphics/​clipping-planes.controls.jsx
+Adds example controls.
+🧠 Review effort: Balanced
+💡 Add a code-review agent skill or configure MCP servers for context-aware, tailored reviews. Learn more in the docs.
+Comment thread
+src/framework/components/render/component.js
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/framework/components/render/component.js
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/scene/mesh-instance.js
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+willeastcott
+changed the title
+feat: Add clipping planes to mesh instances and render components
+feat: Add clipping planes to cameras, mesh instances and render components
+Oct 14, 2026
+vercel
+Bot
+deployed
+to
+Preview – engine-api-docs
+October 14, 2026 07:05
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine
+October 14, 2026 07:05
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine-api-docs
+October 14, 2026 08:16
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine
+October 14, 2026 08:16
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine-api-docs
+October 14, 2026 08:48
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine
+October 14, 2026 08:48
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine-api-docs
+October 14, 2026 09:08
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine
+October 14, 2026 09:09
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine-api-docs
+October 14, 2026 09:25
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine
+October 14, 2026 09:26
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine-api-docs
+October 14, 2026 09:41
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine
+October 14, 2026 09:42
+View deployment
+mvaligursky
+reviewed
+Oct 14, 2026
+View reviewed changes
+mvaligursky
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Using both RenderComponent#clippingPlanes and MeshInstance#clippingPlanes on the same mesh instances can leave a mesh instance in a mixed state.
+1. RenderComponent#clipIntersection writes only the mode, not the planes
+The component's clippingPlanes setter and its meshInstances setter both replace the planes and the mode of each mesh instance. The component's clipIntersection setter only writes the mode. So a mesh instance with its own planes ends up with those planes and the component's mode:
+```
+// a wedge cut out of one part
+meshInstance.clippingPlanes = [planeA, planeB];
+meshInstance.clipIntersection = true;
+
+// later, e.g. from a UI toggle
+render.clipIntersection = false;
+// the mesh instance keeps [planeA, planeB], now in union mode, and most of the part disappears
+```
+castShadows and the other properties the component passes down are single values, so this can't happen with them. Planes and mode have to stay in sync, so both component setters should write the planes and the mode together. Then the component always replaces the whole clipping state of its mesh instances.
+2. Docs: how long planes set directly on a mesh instance last
+The docs say to assign a mesh instance its own planes after it's given to the component. Those planes are replaced again the next time the component assigns its planes, or gets new mesh instances (asset load, type change). That includes when the component has none of its own. Could MeshInstance#clippingPlanes say they last only until the component writes again?
+3. File name
+src/scene/clip-planes.js mainly holds ClipPlaneSet, so per our naming convention it should be clip-plane-set.js.
+4. Rebase
+#9752 is merged, so a rebase on main should drop the iridescence commit and standard-iridescence.test.mjs from this PR.
+mvaligursky
+reviewed
+Oct 14, 2026
+View reviewed changes
+mvaligursky
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+5. Could more of the clipping state move into ClipPlaneSet?
+Camera and MeshInstance both keep the same members around the set: _clipIntersection and the two uniform arrays (clipPlanesData / _clipPlanesData, clipParamsData / _clipParamsData). Their clipIntersection setters and _updateClipUniforms() are almost the same, and RenderComponent keeps its own _clipIntersection too. Only the reaction to a change differs per owner:
+MeshInstance sets or deletes the parameters and toggles SHADERDEF_CLIP
+Camera sets shaderParams.clipPlanes
+RenderComponent passes the state on to its mesh instances
+If the set owned intersection and the uniform data, with a method that writes the uniforms in place of the free writeClipPlanes, each owner would keep a single _clipPlaneSet and a small hook.
+It also fixes point 1: the component could pass on the whole set, e.g. meshInstance._clipPlaneSet.copy(componentSet), so the planes and the mode always travel together.
+MeshInstance goes from four clipping fields to one.
+Camera's copy becomes set.copy(other).
+Two details: RenderComponent never uploads uniforms, so the arrays should be allocated on the first uniform write rather than on assignment. And the component's clipIntersection getter can read this._clipPlaneSet?.intersection ?? false, so reading it doesn't create a set.
+mvaligursky
+commented
+Oct 15, 2026
+Copy link
+Copy Markdown
+Contributor
+Also, perhaps ClipPlaneSet should be just ClipPlanes.
+willeastcott
+force-pushed
+the
+feat/clipping-planes
+branch
+from
+9131a3b to
+5590879
+Compare
+October 16, 2026 10:20
+vercel
+Bot
+deployed
+to
+Preview – engine-api-docs
+October 16, 2026 10:20
+View deployment
+willeastcott
+commented
+Oct 16, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@mvaligursky Good to merge now?
+willeastcott
+and others
+added 12 commits
+October 16, 2026 11:45
+feat: Add clipping planes to mesh instances and render components
+…
+ea03d18
+```
+MeshInstance#clippingPlanes and RenderComponent#clippingPlanes take up to 8 world
+space planes. Fragments behind any of the planes are discarded, or with
+clipIntersection only those behind all of them, which cuts a wedge or a corner
+out as a cutaway does.
+
+The clipping applies to every pass of StandardMaterial and LitMaterial: forward,
+prepass, picking and shadows, so clipped parts neither render, write depth, get
+picked nor cast shadows. ShaderMaterial shaders get the CLIP_PLANES define and
+clip by including the new clipPlanesPS chunk. The planes are per mesh instance
+uniforms, so only the first plane compiles new shaders, and moving the planes
+or changing their number does not.
+
+Clipped mesh instances are excluded from batching, and a batched render
+component whose planes change has its batch group rebuilt, keeping the
+excluded entity in its layers.
+
+Adds a graphics/clipping-planes example: a section plane through the
+laboratory model, dragged with a translate gizmo.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+examples: Replace the clipping planes example with a turbofan cutaway
+…
+45e58b6
+```
+The example cuts a quarter out of a turbofan on a display stand. Two planes through the engine
+axis remove a wedge, and in intersection mode a third plane across the axis limits how far back
+the cut runs, which the example animates on start. The back faces of the parts, drawn flat red
+with the same planes, cap the cut, and the spools keep turning through it. Controls change the
+opening, rotation and length of the cut, the caps, and the post effects: MSAA, SMAA or TAA,
+bloom, SSAO and vignette.
+
+The turbofan and the studio environment are new, generated for the example:
+- 552 KB GLB: closed solids from revolved profiles and lofted airfoils, with Draco geometry,
+  EXT_mesh_gpu_instancing blade rows and procedural KTX2 (Basis ETC1S and UASTC) textures.
+- Materials use clearcoat (paint, carbon), anisotropy (turned and brushed metal, carbon fiber
+  direction map), iridescence (heat tint), sheen (thermal blankets, aramid), specular,
+  transmission, volume, IOR and dispersion (acrylic stand), and emissive strength (combustor).
+- A 77 KB RGBP studio env atlas, prefiltered by EnvLighting from a procedural HDR.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+examples: Give the turbofan vertex tangents, so its turned metal hold…
+…
+318fc35
+```
+…s still as it spins
+
+The anisotropic materials had neither tangents nor normal maps, which KHR_materials_anisotropy
+doesn't allow. The engine then took the anisotropy direction from the object's up axis, which
+turns with the spools, so the highlights on the discs swept on and off as they spun. Parts with
+anisotropy or normal maps now carry tangents along u, with the handedness of the engine's
+derived frame, so the normal mapped liner, blankets and carbon look as before. 603 KB, from 552.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+examples: Rebuild the turbofan's spinner and plug as true shells
+…
+93ba53b
+```
+The spinner's inside was placed by hand, and near the nose it crossed its outside, so the shell
+turned inside out there and its section caps showed through as a flat red patch with jagged
+edges. The spinner and the exhaust plug now offset their inside from the outside along the
+normal. The generator checks every profile for crossings, which also found the compressor's
+front cone folding over itself and the core compartment running past the cowl behind the
+turbine. The rear frame struts no longer poke through the core nozzle.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: Keep disabled components hidden when the batcher excludes their …
+…
+1761c93
+```
+…entity
+
+A render or model component that is disabled can still be in a batch group,
+when the group was set on it while it was disabled. Re-adding the excluded
+entity to its layers showed it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: Add clipping planes to cameras
+…
+99eed52
+```
+CameraComponent#clippingPlanes and #clipIntersection clip everything the
+camera renders with StandardMaterial and LitMaterial, and with ShaderMaterials
+that include clipPlanesPS, in all of the camera's passes including picking.
+Shadows render with the shadow camera, so they are not clipped, and screen
+space elements are not either. A mesh instance with planes of its own is
+clipped by both sets.
+
+Whether the camera has planes is part of its shader params, so only its first
+plane compiles new shader variants. The planes are view uniforms, set for each
+pass. Mesh instances, render components and cameras share the plane copying
+in clip-planes.js.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: Describe clipping an entity and its descendants rather than a m…
+…
+6bf3d7e
+```
+…odel
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: Keep clipping planes as assigned until they are assigned again
+…
+055eeab
+```
+From a review of the clipping planes API:
+- Assigning an owner's own planes in another order no longer overwrites one
+  plane with another. Copying reads every assigned value before writing.
+- Changing clipIntersection changes only the mode on mesh instances and
+  cameras, so edits to the returned planes stay unapplied until assigned.
+- Render components keep the assigned planes apart from the ones their getter
+  returns. They rebuild their batch group by comparing with the assigned
+  planes, also when the returned array was edited and assigned back, and give
+  mesh instances created later the assigned planes.
+- Render components take at most 8 planes, as mesh instances and cameras do.
+- The batcher excludes mesh instances by their assigned planes.
+
+The docs now say how the planes of a mesh instance and of its camera combine,
+that render components replace planes assigned to their mesh instances, that a
+batched mesh instance given planes needs its batch group rebuilt, and that the
+example's caps need closed meshes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: Keep returned clipping planes independent, and clone the assigne…
+…
+2e07cfa
+```
+…d planes
+
+- Mesh instances, cameras and render components keep their clipping planes
+  in a ClipPlaneSet: the planes as last assigned, and the copies the getter
+  returns. The set owns the planes of both and rebuilds the returned array on
+  every assignment. A plane put into that array twice, or a plane of the
+  caller, no longer ends up shared, so later assignments no longer overwrite
+  one plane with another.
+- Cloning a render or camera component copies the planes as assigned, not
+  changes to the returned planes that were never assigned.
+- Mesh instances given to a render component take its mode along with its
+  planes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: Give render component clipping to all mesh instances, and keep n…
+…
+b2bcc50
+```
+…ormals independent
+
+- Render components pass every clipping planes assignment on to their mesh
+  instances, also an empty one before they have had planes, so planes assigned
+  to the mesh instances directly are removed. Mesh instances given to a render
+  component take its planes and mode, also when it has none. The batch group
+  is rebuilt when the clipping of the mesh instances changes, including planes
+  they had been given directly.
+- The planes a getter returns get their own normals back on each assignment.
+  Making two of them share a normal no longer makes the next assignment write
+  one normal over another.
+- The docs say that cloning copies the planes of a render component, but not
+  planes assigned to mesh instances directly.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: Say when a render component replaces the clipping planes of its…
+…
+882cb76
+```
+… mesh instances
+
+The planes of a render component replace those assigned to its mesh instances
+directly, also when the component has none, so planes of a mesh instance's
+own are assigned after it is given to the component. The mesh instance docs
+now point to that.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+refactor: Keep all clipping state in ClipPlanes, and give mesh instan…
+…
+ab95ebe
+```
+…ces a component's whole clipping
+
+- ClipPlaneSet is renamed to ClipPlanes. It also holds the mode and the
+  uniform data, which updateUniforms() writes and allocates on its first
+  write. Mesh instances, cameras and render components each keep one field.
+- A render component gives its mesh instances its planes and mode together.
+  It does so from both its clippingPlanes and clipIntersection setters, and
+  when it gets new mesh instances. A mesh instance can no longer keep its own
+  planes with the mode of the component.
+- The docs say how long planes assigned directly to a mesh instance of a
+  render component last.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+willeastcott
+force-pushed
+the
+feat/clipping-planes
+branch
+from
+5590879 to
+ab95ebe
+Compare
+October 16, 2026 10:49
+vercel
+Bot
+deployed
+to
+Preview – engine-api-docs
+October 16, 2026 10:49
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine
+October 16, 2026 10:50
+View deployment
+mvaligursky
+commented
+Oct 16, 2026
+Copy link
+Copy Markdown
+Contributor
+If you address comments, then yes please.
+willeastcott
+commented
+Oct 16, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@mvaligursky All addressed in ab95ebe (rebased on main):
+Both RenderComponent setters, and the meshInstances setter, give the mesh instances the component's planes and mode together, so a mesh instance can't keep its own planes with the component's mode.
+MeshInstance#clippingPlanes now says planes assigned directly last until the component next writes its clipping: when its clippingPlanes or clipIntersection are assigned, or it gets new mesh instances (asset load, type change), also when it has no planes.
+ClipPlaneSet is now ClipPlanes, matching clip-planes.js.
+Rebased: the iridescence commit and standard-iridescence.test.mjs are gone.
+ClipPlanes owns intersection and the uniform data, written by updateUniforms() and allocated on first write, so RenderComponent never allocates them. Each owner keeps one _clipPlanes, the component passes its whole clipping with copy, Camera#copy uses copy, and the component's clipIntersection getter doesn't create it.
+Copilot's three threads were fixed earlier and are resolved. Also, the turbofan's environment atlas is now product-studio-env-atlas.png, since #9775 added a different studio-env-atlas.png.
+Merge branch 'main' into feat/clipping-planes
+96496b5
+vercel
+Bot
+deployed
+to
+Preview – engine-api-docs
+October 16, 2026 11:27
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine
+October 16, 2026 11:28
+View deployment
+mvaligursky
+reviewed
+Oct 16, 2026
+View reviewed changes
+mvaligursky
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Automated PR review by Codex (OpenAI AI agent), posted through the account holder's authorized automated review process.
+Re-reviewed the current diff at 96496b5, including all of @mvaligursky's review requests and the follow-up discussion. All five requests are addressed; I found no remaining actionable issues.
+Whole-state propagation: both RenderComponent clipping setters and its meshInstances setter replace the mesh instances' planes and intersection mode together, including an empty component state. Direct mesh planes no longer survive with only the component's mode applied.
+Lifetime documentation: MeshInstance#clippingPlanes now explicitly describes replacement on either component clipping setter and on receiving new mesh instances, including asset/type changes and components with no planes.
+Naming: the class is now ClipPlanes, matching clip-planes.js and the follow-up naming request.
+PR scope: the current base-to-head diff no longer includes the unrelated iridescence changes or standard-iridescence.test.mjs.
+State ownership: ClipPlanes owns the intersection mode and lazily allocated uniform arrays; owners retain one clipping-state object, component propagation and camera copying copy the whole state, and the component's mode getter does not allocate. The browser probe also confirms that assigning component planes does not allocate component uniform arrays.
+The three inline Copilot threads are resolved on GitHub, and their underlying fixes are present: batching uses assigned clipping state, the component enforces the eight-plane limit, and assignment snapshots aliased/reordered inputs while retaining independent owned planes/normals. Your five requests were general review comments rather than individually resolvable inline threads.
+Validation performed on this head:
+Full Node suite: 4,351 passing, 43 pending.
+Full Dawn/Metal WebGPU suite: 4,350 passing, 39 pending.
+Type declaration build and consumer type tests pass.
+Lint passes for all changed source/test files and both example files using their respective configurations.
+15 targeted checks per backend in Chrome WebGL2 and WebGPU all pass, with no browser errors. These cover measured union/intersection clipping, combined camera/mesh planes, clearing each scope, deferred getter edits and reassignment, empty component state replacing direct mesh clipping, lazy component uniforms, and an unclipped mesh behind a clipped mesh.
+GitHub CI is green.
+Also inspected the shader/pass integration, cloning, batching transitions, API documentation, and example code. No additional blocking findings; browser validation was a focused primitive-scene probe, not an exhaustive visual test of every example configuration.
+mvaligursky
+approved these changes
+Oct 16, 2026
+View reviewed changes
+Hide details
+View details
+willeastcott
+merged commit b0b6f67
+into
+main
+Oct 16, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+willeastcott
+deleted the
+feat/clipping-planes
+branch
+October 16, 2026 11:42
+willeastcott
+mentioned this pull request
+Oct 16, 2026
+fix: Keep a disabled render or model component out of its batch group
+#9779
+Merged
+willeastcott
+added a commit
+that referenced
+this pull request
+Oct 16, 2026
+fix: Keep a disabled render or model component out of its batch group (…
+…
+1361865
+```
+…#9779)
+
+* fix: Keep a disabled render or model component out of its batch group
+
+Setting batchGroupId inserted the entity into the batch group whenever the
+entity was enabled, also while the component itself was disabled. The
+disabled component was then batched and drawn, drawn twice once it was
+enabled, and left in the group when it was removed. The setter now inserts
+and removes only while the component is enabled, as onEnable and onDisable
+do.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* refactor: Drop the batcher's enabled check on excluded entities
+
+Only an enabled render or model component of an enabled entity is in a batch
+group now, so the check #9755 added before re-adding an excluded entity to
+its layers can no longer be false. The clipping planes test of a disabled,
+clipped render component still covers the case: the component stays hidden
+because it never joins the group.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+---------
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Maksims
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Collaborator
+There is a significant performance deopt on mobile GPU hardware if shader uses discard. Please ensure that if clip planes are not added/used, then discard is not added to the shader.
+willeastcott
+mentioned this pull request
+Oct 21, 2026
+docs: rewrite the Engine landing page and run Engine examples live
+playcanvas/developer-site#1298
+Merged
+SashaRX
+mentioned this pull request
+Oct 23, 2026
+Sync with playcanvas/engine main (2026-10-23)
+SashaRX/engine#2
+Merged
+Hide environments
+Show environments
+This branch was successfully deployed
+2 active
+deployments
+Preview – engine
+—
+96496b5a
+Deployed
+Oct 16, 2026 by
+vercel[bot]
+View deployment
+Preview – engine-api-docs
+—
+96496b5a
+Deployed
+Oct 16, 2026 by
+vercel[bot]
+View deployment
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+area: examples
+area: graphics
+Graphics related issue
+enhancement
+Request for a new feature
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

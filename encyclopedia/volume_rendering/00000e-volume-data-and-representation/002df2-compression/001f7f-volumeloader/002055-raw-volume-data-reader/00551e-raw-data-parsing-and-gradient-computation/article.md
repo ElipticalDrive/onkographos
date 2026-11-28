@@ -1,0 +1,155 @@
+# Raw Data Parsing and Gradient Computation
+
+Also called: FileReader, Raw Volume Data Reader Gradient Computation, RawInf parser, Volume Data Loading and Gradient Computation
+
+## Overview
+This method parses raw binary volume data and associated metadata files to initialize the volume representation for rendering. It extracts resolution, data type, and endianness, loads the voxel intensities, and computes per-voxel gradients required for lighting calculations. It is distinguished from sibling loaders by its specific reliance on a custom text-based "info" file format and its explicit handling of gradient computation and transfer function control point parsing within the same loading pipeline [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+1.  A metadata text file (often named `RawInf` or similar) containing configuration parameters.
+2.  A raw binary data file containing the volume voxel data.
+3.  (Optional) A pre-computed gradient file (`.grd`).
+4.  (Optional) A header file containing transfer function control points [S2, unofficial].
+
+**Outputs:**
+1.  A structured volume data object containing:
+    *   Dimensions: $W, H, D$ (or $X, Y, Z$).
+    *   Voxel intensities: Array of floats.
+    *   Gradients: Array of 3D vectors.
+    *   Intensity statistics: Min and Max intensity values.
+    *   Transfer function control points (if applicable) [S1, S2, unofficial].
+
+**Data Structures:**
+*   `RawInf_t`: Stores metadata.
+    *   `fileName`: `char[60]`
+    *   `res`: `Res_t` (struct with `x`, `y`, `z` integers)
+    *   `sampleType`: Enum (`UNSIGNED_CHAR`, `UNSIGNED_SHORT`, `FLOAT_POINT`)
+    *   `ratio`: `Ratio_t` (struct with `x`, `y`, `z` floats)
+    *   `endian`: Enum (`BIG`, `LITTLE`)
+    *   `size`: `int`
+*   `RawData_t`: Stores loaded data.
+    *   `intensity`: `float*` array of size $W \times H \times D$.
+    *   `gradient`: `Gradient_t*` array (or `sVector3D<float>*`) of size $W \times H \times D$.
+    *   `maxInt`, `minInt`: `float`
+    *   `maxGra`, `minGra`: `float`
+*   `sTransferControlPoint`: Stores transfer function data.
+    *   `Color`: `D3DXVECTOR4` (RGBA)
+    *   `IsoValue`: `int` [S2, unofficial]
+
+**Steps:**
+
+1.  **Parse Metadata:** Open the info file and read the entire text content. Search for specific keywords: `raw-file`, `resolution`, `sample-type`, `ratio`, and `endian` [S1, unofficial].
+2.  **Extract Parameters:**
+    *   Parse `resolution` string in format `WxHxD` into integers $W, H, D$ [S1, unofficial].
+    *   Parse `sample-type` into the corresponding enum. Default is `UNSIGNED_CHAR` if not specified [S1, unofficial].
+    *   Parse `ratio` string in format `X:Y:Z` into floats [S1, unofficial]. Default is `1.0:1.0:1.0` [S1, unofficial].
+    *   Parse `endian` into `BIG` or `LITTLE`. Default is `LITTLE` [S1, unofficial].
+3.  **Load Transfer Functions (Optional):** If a header file is present:
+    *   Read dimensions and number of color/alpha knots [S2, unofficial].
+    *   If number of colors $< 256$: Read custom transfer function knots. For each knot, read Color (RGB) and IsoValue for color; read Color.w and IsoValue for alpha [S2, unofficial].
+    *   If number of colors $\ge 256$: Read a 256-entry Look-Up Table (LUT) of RGB integers. Construct `sTransferControlPoint` where $w = i/255.0$ and $IsoValue = i$ for each entry $i$ [S2, unofficial].
+4.  **Allocate Memory:** Allocate memory for the raw intensity data based on $W \times H \times D$ and the parsed `sampleType` [S1, unofficial].
+5.  **Read Raw Data:** Read the binary data from the file specified in `raw-file`. Convert data to `float` if necessary (e.g., from `UNSIGNED_CHAR` or `UNSIGNED_SHORT`) [S1, unofficial].
+6.  **Compute Gradients:**
+    *   Attempt to load pre-computed gradients from a `.grd` file. If successful, skip computation [S2, unofficial].
+    *   If loading fails or file does not exist, compute gradients using central differences [S2, unofficial].
+    *   For each voxel at $(x, y, z)$, compute the gradient vector $\mathbf{g} = (g_x, g_y, g_z)$:
+        $$ g_x = \frac{I(x+1, y, z) - I(x-1, y, z)}{2} $$
+        $$ g_y = \frac{I(x, y+1, z) - I(x, y-1, z)}{2} $$
+        $$ g_z = \frac{I(x, y, z+1) - I(x, y, z-1)}{2} $$
+    *   **Boundary Handling:** If a neighbor index is out of bounds (e.g., $x-1 < 0$), treat the sample value $I$ as $0.0$ [S2, unofficial].
+    *   **Smoothing:** Apply a 3x3x3 box filter to the computed gradients to smooth them [S2, unofficial].
+7.  **Record Statistics:** Calculate and store the minimum and maximum intensity values across the entire volume [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parse_and_load_volume(info_file_path, raw_data_path, header_file_path=None):
+    # 1. Parse Metadata
+    info_content = read_text_file(info_file_path)
+    
+    # Extract resolution (format: WxHxD)
+    res_match = extract_keyword(info_content, "resolution")
+    if res_match:
+        W, H, D = parse_resolution(res_match) # e.g., sscanf(input, "%dx%dx%d", &W, &H, &D)
+    else:
+        raise ValueError("Resolution not found in info file")
+        
+    # Extract sample type
+    sample_type_str = extract_keyword(info_content, "sample-type")
+    sample_type = parse_sample_type(sample_type_str) # Default: UNSIGNED_CHAR
+    
+    # Extract ratio (format: X:Y:Z)
+    ratio_str = extract_keyword(info_content, "ratio")
+    if ratio_str:
+        ratio_x, ratio_y, ratio_z = parse_ratio(ratio_str) # e.g., sscanf(input, "%f:%f:%f", &rx, &ry, &rz)
+    else:
+        ratio_x, ratio_y, ratio_z = 1.0, 1.0, 1.0 # Default
+        
+    # Extract endian
+    endian_str = extract_keyword(info_content, "endian")
+    endian = parse_endian(endian_str) # Default: LITTLE
+    
+    # 2. Load Transfer Functions (if header exists)
+    transfer_points = []
+    if header_file_path:
+        transfer_points = load_transfer_control_points(header_file_path)
+        
+    # 3. Read Raw Data
+    raw_bytes = read_binary_file(raw_data_path)
+    intensity_data = convert_to_float_array(raw_bytes, sample_type, endian)
+    
+    # 4. Compute Gradients
+    gradient_data = compute_gradients(intensity_data, W, H, D)
+    
+    # 5. Statistics
+    min_int = min(intensity_data)
+    max_int = max(intensity_data)
+    
+    return {
+        "dimensions": (W, H, D),
+        "intensity": intensity_data,
+        "gradient": gradient_data,
+        "min_intensity": min_int,
+        "max_intensity": max_int,
+        "transfer_points": transfer_points
+    }
+
+def compute_gradients(intensity, W, H, D):
+    gradients = []
+    for z in range(D):
+        for y in range(H):
+            for x in range(W):
+                # Central differences with boundary handling (0.0 for out-of-bounds)
+                gx = (get_sample(intensity, x+1, y, z, W, H, D) - get_sample(intensity, x-1, y, z, W, H, D)) * 0.5
+                gy = (get_sample(intensity, x, y+1, z, W, H, D) - get_sample(intensity, x, y-1, z, W, H, D)) * 0.5
+                gz = (get_sample(intensity, x, y, z+1, W, H, D) - get_sample(intensity, x, y, z-1, W, H, D)) * 0.5
+                
+                # Apply 3x3x3 box filter smoothing (simplified representation)
+                gx, gy, gz = smooth_gradient_3x3x3(gx, gy, gz, x, y, z, W, H, D)
+                gradients.append((gx, gy, gz))
+    return gradients
+
+def get_sample(intensity, x, y, z, W, H, D):
+    if 0 <= x < W and 0 <= y < H and 0 <= z < D:
+        return intensity[z * W * H + y * W + x]
+    else:
+        return 0.0 # Boundary condition
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(W \times H \times D)$ for reading data and computing gradients. The gradient computation involves a constant number of operations per voxel (central difference + smoothing).
+*   **Memory Complexity:** $O(W \times H \times D)$ for storing intensity and gradient arrays.
+*   **Performance:** Gradient computation is CPU-bound. Pre-computing and saving gradients to a `.grd` file can significantly speed up subsequent loads [S2, unofficial].
+*   **Strengths:** Handles various data types and endianness; integrates transfer function loading; provides necessary gradient data for lighting.
+*   **Limitations:** Relies on a specific text-based metadata format; boundary handling uses zero-padding which may introduce artifacts at volume edges [S2, unofficial].
+
+## Background
+This method originates from early scientific visualization systems that used raw binary volume data formats. It is implemented in projects such as `Scientific-visualization-Slicing-volume-rendering` and `DigitalVolumeLibrary` [S1, S2, unofficial]. The approach of parsing a separate metadata file alongside raw data was common in early 3D graphics applications to maintain flexibility in data representation.
+
+## Sources
+[S1] extrovert7986/Scientific-visualization-Slicing-volume-rendering, https://github.com/extrovert7986/Scientific-visualization-Slicing-volume-rendering, fetched 2026-10-26 (unofficial)
+[S2] mihaipopescu/DigitalVolumeLibrary, https://github.com/mihaipopescu/DigitalVolumeLibrary, fetched 2026-10-27 (unofficial)

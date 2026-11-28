@@ -1,0 +1,128 @@
+My playground project for exploring and experimenting with SDL GPU APIs - Implement GPU-driven rendering with frustum culling and MDI by painfulexistence · Pull Request #1 · painfulexistence/sdl3-gpu-experiments
+
+Implement GPU-driven rendering with frustum culling and MDI by painfulexistence · Pull Request #1 · painfulexistence/sdl3-gpu-experiments · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+painfulexistence
+commented
+Jul 11, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+This PR implements a complete GPU-driven rendering pipeline with frustum culling and multi-draw indirect (MDI) rendering. The system uses compute shaders to cull instances on the GPU and compact them into per-mesh ranges, enabling efficient rendering of large scenes with a single indirect draw call.
+Key Changes
+GPU-Driven Rendering Pipeline
+Reset Pass: Seeds draw commands with mesh info and clears per-frame counters
+Cull + Count Pass: Frustum-tests instances and counts visible ones per mesh using Gribb-Hartmann plane extraction
+Build Commands Pass: Converts per-mesh instance counts into contiguous ranges via exclusive prefix sum
+Scatter Pass: Compacts visible instance indices into per-mesh ranges in a dedicated buffer
+Vertex Pulling Architecture
+Converted Uber.vert to a pure vertex-pulling shader with no vertex input attributes
+Shader manually reads vertices, indices, and instances from storage buffers
+Uses non-indexed indirect draw where vertexCount equals mesh index count
+Compacted instance buffer is indexed directly via gl_InstanceIndex
+HDRI Skybox Support
+Added Skybox.vert and Skybox.frag for equirectangular environment mapping
+Fullscreen triangle reconstruction of world rays from NDC and inverse camera matrices
+Renders behind scene geometry with depth compare LESS_OR_EQUAL and no depth write
+Optional HDR texture loading via CreateHDRTexture() helper
+Compute Pipeline Refactoring
+Replaced indexed draw commands (SDL_GPUIndexedIndirectDrawCommand) with non-indexed (SDL_GPUIndirectDrawCommand)
+Removed old compute shaders: CommandBuild.comp, SerializedPrefixSum.comp, ResetCounter.comp
+Added new compute shaders: Reset.comp, BuildCommands.comp, Scatter.comp
+Updated Cull.comp to flag visibility and count per-mesh instead of building a flat visible list
+Buffer Layout Changes
+Replaced prefixSums buffer with writeCursors (per-mesh atomic scatter cursors)
+Added compactedInstances buffer for grouped visible instance indices
+Updated all buffer offsets and transfer logic accordingly
+User Interface
+Added toggle (G key) to switch between GPU-driven culling and direct draw paths
+GPU-driven rendering is OFF by default; direct draw is the fallback path
+Logs state changes when toggling the GPU-driven path
+Implementation Details
+Frustum planes are extracted from the view-projection matrix using the Gribb-Hartmann method
+Conservative bounding sphere test uses BASE_RADIUS = 2.0 with per-instance scale approximation
+Vertex data is stored as raw floats (8-float stride: x,y,z,nx,ny,nz,u,v) to avoid std430 padding issues
+Skybox exposure is configurable via uniform buffer
+All compute passes use automatic barrier insertion between them (cycle=false)
+https://claude.ai/code/session_01MVt6Zojfj9zazafapNeXf8
+claude
+added 3 commits
+July 8, 2026 06:46
+fix: make GPU-driven culling + multi-draw indirect actually work
+…
+7195866
+```
+The compute-culling / multi-draw-indirect prototype was never functional:
+the whole pipeline was commented out in the render loop, and the shaders had
+fundamental bugs (no per-mesh instance compaction, a broken O(N*M) racy
+baseInstance prefix sum, a stub frustum test, a vertex shader that ignored
+gl_VertexIndex, and wrong compute-pipeline resource counts).
+
+Rewrite it as a correct GPU-driven pipeline with four compute passes:
+  Reset       - seed draw commands from mesh info, clear per-frame counters
+  Cull        - Gribb-Hartmann frustum test, flag survivors, count per mesh
+  BuildCommands - exclusive prefix sum of instance counts -> firstInstance
+  Scatter     - compact visible instance indices into contiguous per-mesh ranges
+
+Uber.vert becomes a pure vertex-pulling shader (fixed to use gl_VertexIndex and
+a flat 8-float vertex layout matching the CPU struct, and to read instances via
+the compacted buffer), and the uber pipeline now uses an empty vertex input
+state. A single SDL_DrawGPUPrimitivesIndirect call then draws the whole scene.
+
+All shaders validated with glslangValidator (the project's build step). Not
+runtime-tested here: this container has no GPU.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MVt6Zojfj9zazafapNeXf8
+```
+feat: add HDRI equirectangular skybox
+…
+a57082b
+```
+Adds HDR environment map support (previously absent):
+- CreateHDRTexture() loads an equirect .hdr via stbi_loadf into an
+  R32G32B32A32_FLOAT sampler texture (self-contained upload).
+- Skybox.vert/frag: fullscreen triangle that reconstructs a per-pixel world ray
+  from the inverse camera matrices and samples the equirect map. Depth compare
+  LESS_OR_EQUAL with depth-write off, drawn first so the scene overwrites it.
+- Wired into the scene render pass; optional — if res/images/environment.hdr is
+  absent the load returns null and the skybox is skipped (clear color shows).
+
+Shaders validated with glslangValidator. Provide res/images/environment.hdr to
+see it; not runtime-tested here (no GPU).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MVt6Zojfj9zazafapNeXf8
+```
+feat: keyboard toggle for the GPU-driven path (default = direct draw)
+…
+4702e1d
+```
+The compute cull -> multi-draw-indirect path over the SSBO scene now defaults
+OFF, so the default render path is the original direct draw (Sponza + particles).
+Press G to toggle the GPU-driven path on/off (single-press, handled on key-down).
+
+- Gates the four compute passes (reset/cull/build/scatter) on the flag.
+- Gates the SSBO indirect draw on the flag.
+When off, none of the GPU-driven work runs and the original path is unchanged.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MVt6Zojfj9zazafapNeXf8
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

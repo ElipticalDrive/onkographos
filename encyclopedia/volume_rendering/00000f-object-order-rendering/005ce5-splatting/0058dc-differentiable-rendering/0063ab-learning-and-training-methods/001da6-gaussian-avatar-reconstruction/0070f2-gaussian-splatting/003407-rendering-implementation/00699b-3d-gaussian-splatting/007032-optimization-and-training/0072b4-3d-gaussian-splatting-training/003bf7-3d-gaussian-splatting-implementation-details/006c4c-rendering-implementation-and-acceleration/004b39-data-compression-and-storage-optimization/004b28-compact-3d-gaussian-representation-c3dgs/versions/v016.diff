@@ -1,0 +1,200 @@
+--- v015.md
++++ v016.md
+@@ -1,157 +1,62 @@
+ # Compact 3D Gaussian Representation (C3DGS)
++
+ ## Overview
+-Compact 3D Gaussian Representation (C3DGS) is a method for reducing the storage footprint and rendering latency of 3D Gaussian Splatting (3DGS) by exploiting spatial redundancy in scene attributes. It addresses the excessive memory usage of standard 3DGS, which stores high-dimensional per-Gaussian attributes, by replacing direct storage with a grid-based neural field for color and a codebook for geometry, while simultaneously pruning redundant Gaussians via a learnable mask. Unlike its sibling [Sensitivity-Aware Vector Clustering](12167-sensitivity-aware-vector-clustering.md) which focuses on clustering sensitivity, C3DGS explicitly separates geometric and appearance compression into distinct structural mechanisms (codebooks and hash grids) to achieve over 25× compression.
++Compact 3D Gaussian Representation (C3DGS) is a method for reducing the memory footprint and storage requirements of 3D Gaussian Splatting (3DGS) by eliminating redundant primitives and compressing attributes via spatial sharing [S1]. It addresses the excessive storage costs of standard 3DGS, which often exceed 1 GB for large scenes, by introducing a volume-based masking strategy to prune non-essential Gaussians and using a hash-based neural field for colors and a codebook for geometry [S1]. Unlike 3DGS, which stores unique per-Gaussian attributes, C3DGS exploits spatial redundancy to achieve over 25× compression while maintaining or improving reconstruction quality [S1].
++
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussians $\{G_i\}$ initialized from a reconstruction process, each with position $\mathbf{p}_i$, scale $\mathbf{s}_i$, rotation $\mathbf{q}_i$, opacity $\alpha_i$, and spherical harmonic (SH) coefficients $\mathbf{c}_i$.
+-*   **Output:** A compact scene representation consisting of:
+-    1.  A binary mask vector $\mathbf{m}$ indicating active Gaussians.
+-    2.  A hash-based grid neural field $\mathcal{F}_{grid}$ for color prediction.
+-    3.  A geometry codebook $\mathcal{C}_{geo}$ containing prototype scale/rotation vectors.
+-    4.  Codebook indices $\mathbf{k}_i$ for each Gaussian.
++**Inputs:** Initial set of 3D Gaussians $\{G_i\}$ from a 3DGS training pipeline, including position $\mathbf{p}_i$, scale $\mathbf{s}_i$, rotation $\mathbf{q}_i$, opacity $\alpha_i$, and spherical harmonic (SH) coefficients $\mathbf{c}_i$.
++**Outputs:** A compact representation consisting of:
++1. A subset of active Gaussians with pruned attributes.
++2. A hash-based grid neural field $\mathcal{F}_{grid}$ for view-dependent color.
++3. A geometry codebook $\mathcal{C}_{geo}$ and per-Gaussian indices $k_i$.
+ 
+ **Data Structures:**
+-1.  **Mask $\mathbf{m}$:** A boolean array of size $N$ (number of Gaussians). $\mathbf{m}_i = 1$ if Gaussian $i$ is active, $0$ otherwise.
+-2.  **Hash Grid $\mathcal{F}_{grid}$:** Uses the Instant NGP hash grid structure [S1]. It maps 3D coordinates to a feature vector $\mathbf{f} \in \mathbb{R}^d$. The grid consists of multiple levels of hash tables mapping coordinate hashes to feature vectors.
+-3.  **Geometry Codebook $\mathcal{C}_{geo}$:** A set of $K$ prototype vectors. Each prototype $j \in \{1, \dots, K\}$ stores a scale vector $\mathbf{s}_j$ and a rotation quaternion $\mathbf{q}_j$. The size $K$ is small (e.g., hundreds), significantly smaller than $N$.
+-4.  **Indices $\mathbf{k}$:** An integer array of size $N$, where $\mathbf{k}_i \in \{1, \dots, K\}$ is the index of the codebook entry assigned to Gaussian $i$.
++1. **Active Gaussian List:** Stores $\mathbf{p}_i$, $\alpha_i$, and indices $k_i$ for active Gaussians.
++2. **Hash Grid ($\mathcal{F}_{grid}$):** A multi-resolution hash table (Instant NGP style) mapping 3D coordinates to feature vectors. The feature vector is processed by a small MLP to output SH coefficients.
++3. **Geometry Codebook ($\mathcal{C}_{geo}$):** A fixed-size table of prototype scale/rotation vectors. Each entry stores a scale vector $\mathbf{s}_k$ and rotation quaternion $\mathbf{q}_k$.
+ 
+-**Numbered Steps:**
++**Steps:**
++1. **Volume-Based Masking (Pruning):**
++   During training, a learnable mask $m_i \in \{0, 1\}$ is associated with each Gaussian $G_i$. The mask is optimized to identify and remove Gaussians that have minimal impact on the rendering loss. This reduces the total number of Gaussians $N$ without sacrificing performance, directly lowering computational complexity which is linear in $N$ [S1].
+ 
+-1.  **Volume-Based Masking (Pruning):**
+-    During training, a learnable mask $\mathbf{m}$ is introduced. Gaussians with low contribution to the rendered image (determined by a threshold on opacity or gradient magnitude) are masked out ($\mathbf{m}_i = 0$). This reduces the effective number of Gaussians $N_{eff}$ without sacrificing visual quality [S1].
++2. **Color Compression via Hash Grid:**
++   Instead of storing SH coefficients $\mathbf{c}_i$ for each Gaussian, the view-dependent color is computed by querying the hash grid $\mathcal{F}_{grid}$ at the Gaussian's position $\mathbf{p}_i$.
++   - Let $\mathcal{H}(\mathbf{p}_i)$ be the hash lookup for position $\mathbf{p}_i$.
++   - The color feature $\mathbf{f}_i$ is extracted from the grid.
++   - An MLP $\mathcal{M}$ maps $\mathbf{f}_i$ to SH coefficients: $\mathbf{c}_i = \mathcal{M}(\mathbf{f}_i)$.
++   - This replaces $O(N)$ storage for colors with the fixed size of the hash grid [S1].
+ 
+-2.  **Grid-Based Color Compression:**
+-    Instead of storing SH coefficients $\mathbf{c}_i$ for each Gaussian, the view-dependent color is predicted by querying the hash grid $\mathcal{F}_{grid}$ at the Gaussian's position $\mathbf{p}_i$.
+-    *   Query $\mathcal{F}_{grid}(\mathbf{p}_i)$ to obtain a feature vector $\mathbf{f}_i$.
+-    *   Decode $\mathbf{f}_i$ through a small MLP to predict the SH coefficients $\hat{\mathbf{c}}_i$ for the current view direction.
+-    *   This replaces $O(N \cdot D_{SH})$ storage with $O(|\mathcal{F}_{grid}|)$, where $|\mathcal{F}_{grid}|$ is the size of the hash grid [S1].
++3. **Geometry Compression via Codebook:**
++   Scale $\mathbf{s}_i$ and rotation $\mathbf{q}_i$ are quantized to indices in a codebook $\mathcal{C}_{geo}$.
++   - For each Gaussian, find the codebook entry $k_i$ that minimizes the reconstruction error of $\mathbf{s}_i$ and $\mathbf{q}_i$.
++   - Store only the index $k_i$ (e.g., 8-16 bits) instead of the full float vectors.
++   - The actual scale and rotation are retrieved as $\mathbf{s}_i = \mathcal{C}_{geo}[k_i].\mathbf{s}$ and $\mathbf{q}_i = \mathcal{C}_{geo}[k_i].\mathbf{q}$ [S1].
+ 
+-3.  **Codebook-Based Geometry Compression:**
+-    Scale and rotation attributes are quantized to a codebook.
+-    *   **Initialization:** Initialize $\mathcal{C}_{geo}$ with $K$ random or k-means clustered prototypes of $(\mathbf{s}, \mathbf{q})$.
+-    *   **Assignment:** For each Gaussian $i$, find the closest codebook entry $j^*$ based on a distance metric $d(\mathbf{s}_i, \mathbf{q}_i, \mathbf{s}_j, \mathbf{q}_j)$. Store the index $\mathbf{k}_i = j^*$.
+-    *   **Update:** During training, update the codebook entries $\mathcal{C}_{geo}$ and the indices $\mathbf{k}_i$ to minimize the reconstruction error. The actual scale and rotation used for rendering are retrieved from $\mathcal{C}_{geo}[\mathbf{k}_i]$ [S1].
+-
+-4.  **Rendering:**
+-    For each pixel, iterate over active Gaussians ($\mathbf{m}_i = 1$).
+-    *   Retrieve geometry from $\mathcal{C}_{geo}[\mathbf{k}_i]$.
+-    *   Predict color from $\mathcal{F}_{grid}(\mathbf{p}_i)$.
+-    *   Splat and composite as in standard 3DGS.
+-
+-**Formulas:**
+-*   **Color Prediction:** $\hat{\mathbf{c}}_i = \text{MLP}(\mathcal{F}_{grid}(\mathbf{p}_i))$ [S1].
+-*   **Codebook Assignment:** $\mathbf{k}_i = \arg\min_{j} \| (\mathbf{s}_i, \mathbf{q}_i) - (\mathbf{s}_j, \mathbf{q}_j) \|^2$ [S1].
+-*   **Storage Reduction:** The storage is reduced from $O(N \cdot (D_{SH} + D_{geo}))$ to $O(N_{eff} \cdot (\log_2 K + D_{grid}))$, where $D_{grid}$ is the size of the grid features [S1].
++4. **Training Optimization:**
++   The total loss includes the standard rendering loss plus regularization terms for the mask $m_i$ and codebook quantization error. The hash grid and codebook are updated via backpropagation [S1].
+ 
+ **Parameters:**
+-*   **Grid Type:** Hash-based grid (Instant NGP) [S1].
+-*   **Codebook Size $K$:** Not given in the sources.
+-*   **Mask Threshold:** Not given in the sources.
++- **Hash Grid Resolution:** Uses Instant NGP multi-resolution hash grid. Specific resolution levels are not given in the sources [S1].
++- **Codebook Size:** Not given in the sources [S1].
++- **Masking Rate:** The target reduction in Gaussian count is learned, not fixed [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The hash grid and codebook introduce quantization errors. The sources note that post-processing (quantization and entropy coding) further compresses the data, achieving over 25× compression [S1].
+-*   **Boundaries:** The hash grid must handle out-of-bounds queries gracefully. Not given in the sources.
+-*   **Degenerate Input:** If all Gaussians are masked out, rendering fails. A minimum number of active Gaussians should be enforced [G].
++- **Sparse Regions:** The hash grid may struggle in sparse regions where neighboring Gaussians are far apart, as spatial coherence is lower. This is a known limitation addressed by variants like OMG [S1].
++- **Quantization Error:** Codebook quantization introduces approximation errors in geometry. The codebook size must be large enough to capture geometric diversity but small enough to save space [S1].
+ 
+-**Pseudocode:**
+-```python
+-def c3dgs_render(gaussians, grid, codebook, mask, view_direction):
+-    """
+-    Render a frame using C3DGS.
+-    
+-    Args:
+-        gaussians: List of Gaussian primitives with positions p_i.
+-        grid: Hash-based neural field function F_grid(p).
+-        codebook: List of (scale, rotation) tuples.
+-        mask: Boolean array indicating active Gaussians.
+-        view_direction: Camera view direction vector.
+-        
+-    Returns:
+-        Rendered image.
+-    """
+-    image = zeros_like(target_image)
+-    
+-    for i in range(len(gaussians)):
+-        if not mask[i]:
+-            continue
+-            
+-        p_i = gaussians[i].position
+-        alpha_i = gaussians[i].opacity
+-        
+-        # Retrieve geometry from codebook
+-        k_i = gaussians[i].codebook_index
+-        scale_i, rot_i = codebook[k_i]
+-        
+-        # Predict color from grid
+-        feature_i = grid(p_i)
+-        sh_coeffs_i = mlp_decode(feature_i) # Small MLP to decode SH from grid features
+-        color_i = evaluate_sh(sh_coeffs_i, view_direction)
+-        
+-        # Splat Gaussian with retrieved geometry and predicted color
+-        image += splat(p_i, scale_i, rot_i, alpha_i, color_i)
+-        
+-    return image
+-
+-def c3dgs_train_step(gaussians, grid, codebook, mask, images, targets):
+-    """
+-    One training step for C3DGS.
+-    """
+-    # Forward pass
+-    rendered_images = c3dgs_render(gaussians, grid, codebook, mask, view_direction)
+-    
+-    # Compute loss
+-    loss = mse_loss(rendered_images, targets)
+-    
+-    # Backward pass
+-    # Update grid parameters
+-    grid.backward(loss)
+-    
+-    # Update codebook entries
+-    # Assign Gaussians to nearest codebook entry
+-    for i in range(len(gaussians)):
+-        if not mask[i]:
+-            continue
+-        p_i = gaussians[i].position
+-        s_i = gaussians[i].scale
+-        q_i = gaussians[i].rotation
+-        
+-        # Find closest codebook entry
+-        min_dist = infinity
+-        best_k = 0
+-        for j in range(len(codebook)):
+-            s_j, q_j = codebook[j]
+-            dist = distance((s_i, q_i), (s_j, q_j))
+-            if dist < min_dist:
+-                min_dist = dist
+-                best_k = j
+-        gaussians[i].codebook_index = best_k
+-        
+-        # Update codebook entry based on gradient
+-        codebook[best_k].backward(loss)
+-        
+-    # Update mask
+-    # Prune Gaussians with low contribution
+-    for i in range(len(gaussians)):
+-        if gaussians[i].contribution < threshold:
+-            mask[i] = False
+-            
+-    return loss
+-```
+ ## Subtopics
+ 
+ ### [Optimized Minimal 3D Gaussian Splatting (OMG)](13978-optimized-minimal-3d-gaussian-splatting-omg.md)
+-Optimized Minimal 3D Gaussian Splatting (OMG) is a method for compact 3D Gaussian representation that retains per-Gaussian parameterization for geometry (scale and rotation) to handle sparsity, while using a small neural field and Sub-Vector Quantization (SVQ) for appearance features to exploit local continuity. It achieves state-of-the-art storage compression (e.g., >300× relative to 3DGS in the bicycle scene) while maintaining high visual fidelity, building on [Compact 3D Gaussian Representation (C3DGS)](12927-compact-3d-gaussian-representation-c3dgs.md) by addressing the weakness of neural fields in sparse settings where neighboring Gaussians are further apart.
++Retains per-Gaussian geometry for sparsity handling while using SVQ for appearance. Chosen when scene sparsity causes neural field artifacts.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering complexity is linearly proportional to the number of active Gaussians $N_{eff}$, which is reduced by the masking strategy [S1]. Grid queries are $O(1)$ on average due to hashing.
+-*   **Memory Complexity:** Storage is reduced by over 25× compared to 3DGS [S1]. The grid size is fixed and independent of $N$, while the codebook size $K$ is small.
+-*   **Measured Performance:** On the Deep Blending dataset, C3DGS achieves over 28× storage efficiency enhancement and nearly 40% increase in rendering speed compared to 3DGS, while outperforming it in PSNR [S1]. Across various datasets, it consistently shows about 15× reduced storage and enhanced rendering speed [S1].
+-*   **Strengths:** Significant storage reduction, faster rendering, high visual fidelity.
+-*   **Limitations:** Relies on spatial redundancy; may struggle with highly sparse or non-repetitive scenes where grid interpolation is inaccurate.
+-*   **When to use:** When storage and rendering speed are critical constraints and the scene exhibits spatial redundancy in color and geometry.
+-*   **When not to use:** For scenes with high geometric diversity and low spatial redundancy where codebook quantization errors are unacceptable.
++- **Storage:** Achieves >25× compression compared to standard 3DGS [S1]. On the Deep Blending dataset, storage efficiency is enhanced by over 28× [S1]. General datasets show ~15× reduction [S1].
++- **Speed:** Rendering speed increases by nearly 40% on Deep Blending due to fewer Gaussians and efficient grid lookups [S1].
++- **Quality:** Maintains or improves PSNR over 3DGS [S1].
++- **Complexity:** Spatial complexity is reduced from $O(N)$ for attributes to $O(1)$ for color (grid size) and $O(N)$ for indices [S1]. Computational complexity is linear in the number of *active* Gaussians [S1].
++
+ ## Background
+-C3DGS was proposed to address the critical memory and storage issues in 3D Gaussian Splatting, which often requires >1GB for large real-world scenes [S1]. It builds on the observation that current densification algorithms produce redundant Gaussians and that neighboring Gaussians share similar attributes. The method uses a hash-based grid representation (Instant NGP) for color and a codebook for geometry [S1].
++C3DGS was proposed to address the critical memory and storage issues in 3D Gaussian Splatting, which often require >1 GB for large scenes [S1]. It builds on the observation that standard densification produces redundant Gaussians and that spatial redundancy in color and geometry can be exploited [S1]. The method uses Instant NGP for the hash grid [S1].
++
+ ## Sources
+ [S1] Compact 3D Gaussian Representation for Radiance Field, https://doi.org/10.1109/cvpr52733.2024.02052, fetched 2026-10-26

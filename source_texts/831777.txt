@@ -1,0 +1,164 @@
+3d dynamic mmorpg's framework. Contribute to dkwkekzz/HktFramework development by creating an account on GitHub.
+
+Replace shader-based edge rounding with geometry-level bevel for player chunk by dkwkekzz · Pull Request #38 · dkwkekzz/HktFramework · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+dkwkekzz
+commented
+Apr 23, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+This PR replaces the previous shader-based edge rounding system (normal bending + dithered alpha clipping) with a geometry-level beveling approach that only applies to the chunk containing the player camera. The new system adds per-vertex offset data to the mesh, allowing actual silhouette edges to be chamfered inward, providing a more convincing rounded appearance while maintaining performance for distant chunks.
+Key Changes
+Meshing System
+FHktVoxelMesher: Added BevelSize and FHktVoxelMeshNeighbors* parameters to MeshChunk(), MergeQuads(), and EmitQuad() methods
+Silhouette Detection: Implemented per-corner bevel offset calculation in EmitQuad() that:
+Probes neighboring cells (including across chunk boundaries via neighbor pointers) to detect silhouette edges
+Applies inward offset (in-plane) and normal-opposite offset (into solid) only to silhouette corners
+Quantizes float offsets to int16 (1/1024 voxel precision) for storage efficiency
+FHktVoxelVertex: Extended from 8 to 16 bytes, adding BevelOffsetX/Y/Z (int16 × 3) + padding fields
+FHktVoxelMeshNeighbors: New struct to pass 6-directional neighbor chunk pointers to the mesher for boundary probing
+Terrain Actor
+UpdatePlayerChunkBevel(): New method that:
+Tracks player camera position and determines current chunk coordinate
+Detects chunk transitions and option changes
+Requests remeshing of previous/new chunks with appropriate bevel values via SetRequestedBevel()
+Removed shader-based parameters: EdgeRoundStrength, EdgeAlphaStrength, EdgeAlphaStart replaced with bEnableChunkEdgeRounding (bool) and ChunkEdgeRoundingBevel (float)
+LOD Settings: Removed EdgeRoundScale field; normal map scaling now independent of edge treatment
+Rendering Pipeline
+Vertex Factory:
+Added BevelOffsetComponent stream (VET_Short4) to vertex factory data
+Removed shader parameters for edge round/alpha strength
+Shader now applies bevel offset in vertex shader: LocalPos += float3(Input.BevelOffset.xyz) * BevelScale
+Removed Shader Functions: Deleted HktApplyEdgeRounding() and HktApplyEdgeAlpha() from HktVoxelStylized.ush
+Chunk Component: Removed SetEdgeRoundStrength(), SetEdgeAlphaStrength(), SetEdgeAlphaStart() methods and related render-thread calls
+Mesh Scheduling
+FHktVoxelMeshScheduler: Enhanced to pre-fetch 6-directional neighbor chunks when bevel is active, passing them to mesher tasks via lambda capture
+Maintains zero-overhead path for non-beveled chunks (no neighbor lookup)
+Data Storage
+FHktVoxelChunk: Added RequestedBevelBits (atomic uint32) to store bevel size via bit-cast, enabling thread-safe game-thread writes and worker-thread reads
+Implementation Details
+Bevel is only applied at LOD 0 (full detail); higher LODs automatically disable it to save triangles
+Silhouette detection uses representative sample cells at quad edges rather than testing entire edges, trading perfect accuracy for efficiency
+Neighbor chunk pointers are captured in task lambdas, ensuring chunk lifetime safety during meshing
+Offset quantization (1/1024 voxel) provides sub-voxel precision while fitting in int16 range
+The system gracefully degrades: chunks without bevel data render identically to before (all offsets = 0)
+https://claude.ai/code/session_01GmLWMCZfJ9rbKT7t5tBVWx
+claude
+added 2 commits
+April 23, 2026 04:02
+feat(HktVoxel): 플레이어 청크 전용 지오메트리 베벨 라운딩 옵션
+…
+962f56a
+```
+- HktApplyEdgeAlpha/HktApplyEdgeRounding PS 셰이더 경로 제거
+  (노멀 벤딩·Dithered clip 기반 "시뮬레이션" 라운딩은 그림자/GBuffer 불일치
+  때문에 실제 지오메트리 변경으로 대체)
+- FHktVoxelVertex를 8→16바이트로 확장: int16×4 per-vertex bevel offset 추가
+  (셰이더가 1/1024 voxel 단위로 복원해 LocalPos에 더함)
+- HktVoxelMesher가 BevelSize>0일 때 greedy-merge 쿼드의 실루엣 U/V edge를
+  감지해 해당 코너를 in-plane 안쪽 + face 법선 반대로 오프셋. 인접 solid에
+  붙은 edge에는 베벨 미적용하여 이웃 청크와 크랙이 없음
+- FHktVoxelChunk에 RequestedBevelBits 필드 + SetRequestedBevel/GetRequestedBevel.
+  FHktVoxelMeshScheduler가 워커 태스크로 bevel 크기를 전달
+- AHktVoxelTerrainActor.bEnableChunkEdgeRounding + ChunkEdgeRoundingBevel
+  옵션 추가. Tick에서 카메라 위치로 플레이어 소속 청크를 결정,
+  이동/옵션 토글/크기 변경 시 이전·새 청크를 재메싱 요청
+- 첫 로드 시점에도 ShouldBevelChunk이면 초기 bevel 값을 세팅해 첫 프레임부터
+  라운딩 지오메트리 적용
+- 베벨은 LOD 0에서만 유효 (원거리 청크는 시각 이득 없음)
+- LODSettings의 EdgeRoundScale 필드 제거 (PS 기반 라운딩 삭제로 무의미)
+
+https://claude.ai/code/session_01GmLWMCZfJ9rbKT7t5tBVWx
+```
+feat(HktVoxel): 베벨 실루엣 판정에 이웃 청크 샘플링 추가
+…
+14d6477
+```
+플레이어 청크 경계 바깥을 probe할 때 이웃 청크의 대응 셀을 조회해
+청크 이음새에서 발생하던 false-positive 베벨(단단한 이웃이 있어도
+경계를 empty로 간주하던 문제)을 제거.
+
+- FHktVoxelMeshNeighbors 구조체 추가 (±X ±Y ±Z 6방향 raw 포인터)
+- FHktVoxelMesher::MeshChunk/MergeQuads/EmitQuad에 const FHktVoxelMeshNeighbors*
+  파라미터를 전달. BevelSize>0일 때만 유효하게 동작
+- EmitQuad의 CellEmpty 람다가 좌표축별로 경계를 벗어나면 이웃 청크의
+  해당 로컬 좌표(±SIZE 오프셋)로 리다이렉트. 이웃이 nullptr이면 기존처럼
+  empty로 처리 (맵 가장자리 등 경계 이후 진짜 공기인 경우)
+- FHktVoxelMeshScheduler가 Bevel>0인 태스크에만 6방향 FHktVoxelChunkRef를
+  사전 조회. TSharedPtr를 람다에 MoveTemp 캡처해 워커 실행 중 이웃 청크
+  unload로부터 수명을 보호. 베벨 미적용 경로는 이웃 조회 오버헤드 없음
+
+https://claude.ai/code/session_01GmLWMCZfJ9rbKT7t5tBVWx
+```
+dkwkekzz
+merged commit 3c49e68
+into
+main
+Apr 23, 2026
+dkwkekzz
+pushed a commit
+that referenced
+this pull request
+Apr 23, 2026
+merge: origin/main (엣지 라운딩 베벨 옵션 통합)
+…
+a535a3e
+```
+main의 PR #38 (플레이어 청크 지오메트리 베벨 + 이웃 청크 샘플링)을
+브랜치에 머지. 기존 LOD/EdgeRound/EdgeAlpha 기반 필드들은 양쪽 모두
+제거되어 자연스럽게 일치. Proximity 로더의 Tier 시스템은 유지.
+
+통합 내용:
+- HktVoxelChunkComponent: SetChunkLOD 시그니처 3-arg로 변경
+  (ActorEdgeRoundStrength 파라미터 제거), EdgeRoundScale 필드 제거
+- HktVoxelTerrainActor: bEnableChunkEdgeRounding +
+  ChunkEdgeRoundingBevel UPROPERTY 추가, PlayerChunkCoord 멤버,
+  UpdatePlayerChunkBevel() / ShouldBevelChunk() 메서드 추가
+- GenerateAndLoadChunk: Tier → MeshLOD 경로 유지하되 첫 메싱부터
+  ShouldBevelChunk()으로 베벨 적용
+- ApplyTierToComponent: Near/Far Tier 프리셋 유지, 제거된
+  EdgeRoundScale/SetEdgeAlphaStrength/Start 호출 제거
+
+충돌 해결 원칙:
+- 로더 추상화 (Loader/Tier) = HEAD 유지
+- 베벨 관련 새 기능 = main에서 가져옴
+- LODSettings[] / Streamer / Frustum / EdgeRound UPROPERTY = 양쪽 모두 삭제
+
+https://claude.ai/code/session_01NDRhaUrJRUdKBe6ptxVE9t
+```
+dkwkekzz
+pushed a commit
+that referenced
+this pull request
+Jun 23, 2026
+reviews: 0131-0140 묶음 감사 — 거래소↔가방 saga liveness arc
+…
+6b01488
+```
+진행 지도(progress/3-services.md) — 거래소 박스에 'saga liveness 유계화·자율 복구·
+관측·정합 capstone' 기능 추가(0131~0140·네 정합층 완성)·가방 박스에 회복 자기 공지.
+묶음 감사(review-0131-0140.md) — 척추 5불변 재현(Math.random/await/UObject 0·spine
+ALL OK·exsagalive 4체제)·이슈 연결(#35 해소·#34 절반·#36/#37/#38 신규).
+README 원장 갱신(0001~0140 열네 묶음 완료).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VZCj9nmFATKq951gRDAKKk
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

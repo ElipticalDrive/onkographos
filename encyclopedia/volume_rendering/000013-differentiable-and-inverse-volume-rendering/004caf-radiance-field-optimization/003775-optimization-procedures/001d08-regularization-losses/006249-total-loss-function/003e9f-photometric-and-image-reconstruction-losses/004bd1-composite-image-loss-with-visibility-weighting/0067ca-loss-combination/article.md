@@ -1,0 +1,68 @@
+# Loss Combination
+## Overview
+Loss Combination aggregates photometric, depth, and coverage errors into a single scalar loss for backpropagation during radiance field optimization [S1, unofficial]. It differs from sibling methods like [SRF-Loss](6978-srf-loss.md) and [NTS Training Objective](18042-nts-training-objective.md) by explicitly weighting depth and coverage terms alongside color reconstruction [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   `color_loss`: Sum of L1 and SSIM losses averaged over views [S1, unofficial].
+*   `d_loss`: Depth loss averaged over views [S1, unofficial].
+*   `coverage_loss`: Coverage loss term [S1, unofficial].
+*   `depth_lambda`: Weight for depth loss [S1, unofficial].
+*   `coverage_lambda`: Weight for coverage loss [S1, unofficial].
+
+**Outputs:**
+*   `loss`: Final scalar loss for backpropagation [S1, unofficial].
+
+**Data Structures:** Not given in the sources. [S1, unofficial].
+
+**Steps:**
+1. Compute `color_loss` as the sum of L1 and SSIM losses averaged over views. [S1, unofficial].
+2. Compute `d_loss` as the depth loss averaged over views. [S1, unofficial].
+3. Compute `coverage_loss`. [S1, unofficial].
+4. Combine the terms using the weighted sum formula. [S1, unofficial].
+
+**Formula:**
+$$
+\text{loss} = \text{color\_loss} + \text{depth\_lambda} \cdot \text{d\_loss} + \text{coverage\_lambda} \cdot \text{coverage\_loss}
+$$
+Where $\text{loss}$ is the final scalar loss, $\text{color\_loss}$ is the sum of L1 and SSIM losses averaged over views, $\text{d\_loss}$ is the depth loss averaged over views, and $\text{coverage\_loss}$ is the coverage loss term [S1, unofficial].
+
+**Parameters:**
+*   `depth_lambda`: Weight for depth loss. Typical values are not given in the sources. [S1, unofficial].
+*   `coverage_lambda`: Weight for coverage loss. Typical values are not given in the sources. [S1, unofficial].
+
+**Edge Cases and Pitfalls:** Not given in the sources. [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_total_loss(color_loss, d_loss, coverage_loss, depth_lambda, coverage_lambda):
+    """
+    Computes the combined training loss.
+    
+    Args:
+        color_loss (float): Sum of L1 and SSIM losses averaged over views.
+        d_loss (float): Depth loss averaged over views.
+        coverage_loss (float): Coverage loss term.
+        depth_lambda (float): Weight for depth loss.
+        coverage_lambda (float): Weight for coverage loss.
+        
+    Returns:
+        float: Final scalar loss.
+    """
+    loss = color_loss + depth_lambda * d_loss + coverage_lambda * coverage_loss
+    return loss
+```
+
+## Subtopics
+
+### [Multi-Modal Supervision Loss](21642-multi-modal-supervision-loss.md)
+Extends the standard combination by replacing generic coverage with modality-specific terms for normals and sky, providing stricter geometric regularization..
+
+## Operating characteristics
+
+## Background
+
+## Sources
+[S1] SpaceCollectors/dust3r-3dgs, https://github.com/SpaceCollectors/dust3r-3dgs, fetched 2026-10-27 (unofficial)

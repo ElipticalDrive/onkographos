@@ -1,0 +1,228 @@
+--- v001.md
++++ v002.md
+@@ -12,5 +12,5 @@
+ **Data Structures:**
+ 1.  **Voxel Grid:** A 3D grid storing volumetric density $\sigma$ and color $\mathbf{c}$ at each voxel. This replaces the MLP $f_{NeRF}$ used in standard NeRF [S1]. The grid supports trilinear interpolation for direct evaluation at any 3D coordinate [S1].
+-2.  **Bézier Curve Control Points:** For each image $m$, a set of control points $\{\hat{\mathbf{p}}_j\}_{j=0}^M$ in the Lie algebra $\mathfrak{se}(3)$ defining the 6-DOF camera motion trajectory. $M$ is the order of the Bézier curve [S1].
++2.  **Bézier Curve Control Points:** For each image $m$, a set of control points $\{\hat{\mathbf{p}}_j\}_{j=0}^M$ defining the 6-DOF camera motion trajectory. $M$ is the order of the Bézier curve [S1].
+ 3.  **Ray Batch:** A batch of $B$ rays, where each ray corresponds to a pixel $x$ and an intermediate shutter time $\tau_i$ [S1].
+ 
+@@ -18,5 +18,4 @@
+ *   $N$: Number of sampling points (intermediate sub-frames) along the camera trajectory to approximate the motion blur integral. Typical values range from 5 to 31 [S1].
+ *   $P$: Number of sample points on a single ray during volume rendering [S1].
+-*   $L$: Number of layers in the MLP (used for comparison with DeblurNeRF; ExBluRF uses a voxel grid, so $L$ is not applicable to the radiance field itself) [S1].
+ *   $M$: Order of the Bézier curve. Typical value is 3 for challenging motions [S1].
+ *   $\phi_{voxel}$: Parameters of the voxel grid [S1].
+@@ -24,15 +23,15 @@
+ **Algorithm Steps:**
+ 
+-1.  **Trajectory Reparameterization:** For each input image $m$, define the initial pose $P_{\tau_o}$ and final pose $P_{\tau_c}$. Reparameterize the 6-DOF motion trajectory using a Bézier curve of order $M$ in the Lie algebra $\mathfrak{se}(3)$ [S1]. The pose at normalized time $\tau'_i$ is computed as:
++1.  **Trajectory Reparameterization:** For each input image $m$, define the initial pose $P_{\tau_o}$ and final pose $P_{\tau_c}$. Reparameterize the 6-DOF motion trajectory using a Bézier curve of order $M$ [S1]. The pose at normalized time $\tau'_i$ is computed as:
+     $$
+     \mathbf{p}_{\tau_i} = \sum_{j=0}^{M} \binom{M}{j} (1-\tau'_i)^{M-j} (\tau'_i)^j \cdot \hat{\mathbf{p}}_j
+     $$
+-    where $\tau'_i = \frac{\tau_i - \tau_o}{\tau_c - \tau_o}$ and $\tau_i = \tau_o + \frac{i-1}{N-1}(\tau_c - \tau_o)$ for $i=1 \dots N$ [S1]. The matrix pose $P_{\tau_i}$ is obtained by exponentiating $\mathbf{p}_{\tau_i}$ [S1].
+-
+-2.  **Ray Generation:** For each blurred input image $m$ and each pixel $x$ in that image, generate $N$ rays $\{\mathbf{r}_{\tau_i}(x)\}_{i=1}^N$ corresponding to the intermediate poses $P_{\tau_i}$ [S1]. The direction $\mathbf{d}_{\tau_i}$ of a ray at pixel $x$ is calculated using the camera intrinsic $K$ and the extrinsic rotation $R_{\tau_i}$ from $P_{\tau_i}$:
++    where $\tau'_i = \frac{\tau_i - \tau_o}{\tau_c - \tau_o}$ and $\tau_i = \tau_o + \frac{i-1}{N-1}(\tau_c - \tau_o)$ for $i=1 \dots N$ [S1].
++
++2.  **Ray Generation:** For each blurred input image $m$ and each pixel $x$ in that image, generate $N$ rays $\{\mathbf{r}_{\tau_i}(x)\}_{i=1}^N$ corresponding to the intermediate poses [S1]. The direction $\mathbf{d}_{\tau_i}$ of a ray at pixel $x$ is calculated using the camera intrinsic $K$ and the extrinsic rotation $R_{\tau_i}$:
+     $$
+     \mathbf{d}_{\tau_i} = R_{\tau_i} \cdot K^{-1} [\mathbf{x}]_+
+     $$
+-    where $[\mathbf{x}]_+$ is the homogeneous coordinate of pixel $x$ [S1]. The origin of the ray is the translation component of $P_{\tau_i}$ [S1].
++    where $[\mathbf{x}]_+$ is the homogeneous coordinate of pixel $x$ [S1]. The origin of the ray is the translation component of the pose [S1].
+ 
+ 3.  **Volume Rendering:** For each ray $\mathbf{r}_{\tau_i}(x)$, compute the rendered color $\hat{\mathbf{C}}(\mathbf{r}_{\tau_i}(x))$ using the standard volume rendering equation with the voxel-based radiance field [S1]:
+@@ -53,98 +52,103 @@
+ 
+ ```python
+-def render_exblurf(voxel_grid, camera_intrinsics, control_points, pixel_coords, num_samples_trajectory):
++import math
++import numpy as np
++
++def se3_exp(pose_se3):
++    """Standard SE(3) exponential map from Lie algebra to 4x4 matrix [G]."""
++    w = pose_se3[:3]
++    v = pose_se3[3:]
++    theta = np.linalg.norm(w)
++    if theta < 1e-6:
++        R = np.eye(3)
++        S = np.eye(3)
++    else:
++        w_hat = np.array([[0, -w[2], w[1]],
++                          [w[2], 0, -w[0]],
++                          [-w[1], w[0], 0]])
++        R = np.eye(3) + (math.sin(theta)/theta)*w_hat + ((1-math.cos(theta))/theta**2)*(w_hat @ w_hat)
++        V = np.eye(3) + ((1-math.cos(theta))/theta**2)*w_hat + ((theta-math.sin(theta))/theta**3)*(w_hat @ w_hat)
++        S = V
++    t = S @ v
++    pose_matrix = np.eye(4)
++    pose_matrix[:3, :3] = R
++    pose_matrix[:3, 3] = t
++    return pose_matrix
++
++def trilinear_interpolate(grid, pos):
++    """Standard trilinear interpolation from voxel grid [G]."""
++    # Assumes grid is a callable or array supporting bounds-checked query
++    return grid.query(pos)
++
++def compute_l1_loss(pred, target):
++    """Standard L1 loss computation."""
++    return np.mean(np.abs(pred - target))
++
++def render_exblurf(voxel_grid, camera_intrinsics, control_points, pixel_coords, num_samples_trajectory, num_samples_ray):
+     """
+     Renders a single blurred image from a set of blurred inputs using ExBluRF.
+-    
+-    Args:
+-        voxel_grid: Voxel grid storing density and color. Supports trilinear interpolation.
+-        camera_intrinsics: Matrix K.
+-        control_points: List of M+1 control points in se(3) Lie algebra for the Bézier curve.
+-        pixel_coords: Array of pixel coordinates (u, v) for the image.
+-        num_samples_trajectory: N, number of intermediate sub-frames.
+-        
+-    Returns:
+-        blurred_image: Rendered blurred image of shape (H, W, 3).
+     """
+     H, W = pixel_coords.shape[:2]
+     blurred_image = np.zeros((H, W, 3))
+-    
++    M = len(control_points) - 1
++
+     # 1. Generate intermediate poses using Bézier curve
+-    # Normalize time for N samples
+     tau_prime = np.linspace(0, 1, num_samples_trajectory)
+-    
+-    # Compute poses for each tau_prime
+-    # Note: In practice, this involves Lie algebra exponential map
+     poses = []
+     for t in tau_prime:
+         pose_se3 = np.zeros(6)
+         for j in range(len(control_points)):
+-            # Bernstein polynomial coefficient
+-            coeff = comb(len(control_points)-1, j) * ((1-t)**(len(control_points)-1-j)) * (t**j)
++            coeff = math.comb(M, j) * ((1-t)**(M-j)) * (t**j)
+             pose_se3 += coeff * control_points[j]
+-        # Exponential map from se(3) to SE(3) to get 4x4 matrix
+-        pose_matrix = exp_se3_to_se3(pose_se3)
+-        poses.append(pose_matrix)
+-        
++        poses.append(se3_exp(pose_se3))
++
+     # 2. For each pixel, accumulate rays along the trajectory
+     for y in range(H):
+         for x in range(W):
+-            pixel = pixel_coords[y, x]
+             accumulated_color = np.zeros(3)
+-            
++
+             for pose in poses:
+-                # Extract R and t from pose matrix
+                 R = pose[:3, :3]
+-                t = pose[:3, 3]
+-                
++                t_vec = pose[:3, 3]
++
+                 # 3. Ray direction
+-                # d = R * K^-1 * [x, y, 1]^T
+                 hom_coord = np.array([x, y, 1.0])
+-                inv_K_hom = np.linalg.inv(camera_intrinsics) @ hom_coord
++                inv_K = np.linalg.inv(camera_intrinsics)
++                inv_K_hom = inv_K @ hom_coord
+                 d = R @ inv_K_hom
+-                d = d / np.linalg.norm(d) # Normalize direction
+-                
++                d = d / np.linalg.norm(d)
++
+                 # 4. Ray origin
+-                origin = t
+-                
++                origin = t_vec
++
+                 # 5. Volume Rendering along ray
+-                # Sample P points along the ray
+-                # Assume near and far planes are defined or inferred
+-                # For simplicity, assume standard NeRF sampling strategy
+-                samples = sample_ray(origin, d, num_samples_ray=P)
+-                
++                samples = []
++                for k in range(num_samples_ray):
++                    depth = (k + 0.5) / num_samples_ray * 10.0
++                    pos = origin + depth * d
++                    samples.append((pos, 10.0/num_samples_ray))
++
+                 density_sum = 0.0
+                 color_acc = np.zeros(3)
+-                
++
+                 for k, (pos, dist_to_next) in enumerate(samples):
+-                    # Interpolate density and color from voxel grid
+-                    sigma, c = voxel_grid.interpolate(pos)
+-                    
+-                    # Alpha and transmittance
++                    sigma, c = trilinear_interpolate(voxel_grid, pos)
+                     alpha = 1.0 - np.exp(-sigma * dist_to_next)
+                     T = np.exp(-density_sum)
+-                    
+                     color_acc += T * alpha * c
+                     density_sum += sigma * dist_to_next
+-                    
++
+                 accumulated_color += color_acc
+-                
+-            # Average over N samples
++
+             blurred_image[y, x] = accumulated_color / num_samples_trajectory
+-            
++
+     return blurred_image
+ 
+-def train_exblurf(blurred_images, voxel_grid_init, camera_intrinsics, num_samples_trajectory, num_iterations):
++def train_exblurf(blurred_images, voxel_grid_init, camera_intrinsics, num_samples_trajectory, num_iterations, num_samples_ray):
+     """
+     Jointly optimizes voxel grid and camera trajectories.
+     """
+-    # Initialize voxel grid
+     voxel_grid = voxel_grid_init
+-    
+-    # Initialize control points for each image (e.g., from initial poses)
+-    # Each image has its own set of control points
+-    control_points_list = [init_control_points_from_pose(initial_pose) for initial_pose in initial_poses]
+-    
+-    optimizer = Adam([voxel_grid.parameters(), control_points_list])
++    control_points_list = [np.zeros(6) for _ in blurred_images]
+     
+     for iteration in range(num_iterations):
+@@ -152,19 +156,16 @@
+         
+         for i, blurred_img in enumerate(blurred_images):
+-            # Render the blurred image for current view
+             rendered_blurred = render_exblurf(
+                 voxel_grid, 
+                 camera_intrinsics, 
+                 control_points_list[i], 
+-                get_pixel_coords(blurred_img.shape), 
+-                num_samples_trajectory
++                np.indices(blurred_img.shape[:2]).T, 
++                num_samples_trajectory,
++                num_samples_ray
+             )
+-            
+-            # Compute loss
+-            loss = L1Loss(rendered_blurred, blurred_img)
++            loss = compute_l1_loss(rendered_blurred, blurred_img)
+             total_loss += loss
+             
+-        # Backpropagate
+-        optimizer.zero_grad()
++        # Backpropagate (framework handles gradients for voxel_grid and control_points_list)
+         total_loss.backward()
+         optimizer.step()
+@@ -174,5 +175,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The method relies on accurate Lie algebra operations for pose interpolation. Incorrect exponential maps can lead to non-smooth trajectories [S1].
++*   **Precision:** The method relies on accurate pose interpolation. Incorrect trajectory modeling can lead to non-smooth or physically inconsistent blur accumulation [S1].
+ *   **Boundaries:** The voxel grid must cover the entire scene extent. If the camera moves significantly outside the initial bounding box, extrapolation errors may occur [S1].
+ *   **Degenerate Input:** If the blur is too extreme or the motion is too fast, the assumption of a smooth Bézier curve may fail. Using a low-order (1st order) Bézier curve for complex hand-shake motions leads to poor performance [S1].

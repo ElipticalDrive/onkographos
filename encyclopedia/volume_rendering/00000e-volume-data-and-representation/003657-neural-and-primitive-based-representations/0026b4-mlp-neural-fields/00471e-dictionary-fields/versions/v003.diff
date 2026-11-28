@@ -1,0 +1,77 @@
+--- v002.md
++++ v003.md
+@@ -52,11 +52,12 @@
+ class DictionaryField(nn.Module):
+     def __init__(self, D=3, Q=3, L=6, eta=0, M_c=64, M_b_range=(32, 128), 
+-                 freq_range=(2.0, 8.0), use_linear_proj=False):
++                 freq_range=(2.0, 8.0), use_linear_proj=False, dropout_prob=0.0):
+         super().__init__()
+         self.D = D
+         self.Q = Q
+         self.L = L
++        self.dropout_prob = dropout_prob
+         
+-        # Frequencies for L levels, linearly increasing
++        # Frequencies for L levels, linearly increasing: [2., 3.2, 4.4, 5.6, 6.8, 8.]
+         self.frequencies = torch.linspace(freq_range[0], freq_range[1], L)
+         
+@@ -102,5 +103,4 @@
+             
+             # Standard grid sampling with trilinear interpolation
+-            # Converts normalized coordinates [0,1] to grid indices and interpolates
+             basis_val = self._sample_grid(self.basis_grids[l], x_transformed)
+             basis_outputs.append(basis_val)
+@@ -117,4 +117,9 @@
+         v = c_val * b_total
+         
++        # Dropout regularization: randomly drop features with probability mu to encourage sparsity [S2, unofficial]
++        if self.training and self.dropout_prob > 0:
++            mask = (torch.rand_like(v) > self.dropout_prob).float()
++            v = v * mask
++        
+         # 4. Projection
+         s_hat = self.proj(v)
+@@ -129,16 +134,19 @@
+         Returns: Tensor of shape (..., K)
+         """
+-        # Map [0, 1] coordinates to grid indices [-1, 1] for standard interpolation
+-        coords_norm = 2.0 * coords - 1.0
+-        # Ensure coordinates are within bounds for interpolation
+-        coords_norm = torch.clamp(coords_norm, -1.0, 1.0)
+-        # Expand dimensions to match grid_sample expectation (N, H, W, D, C)
+-        # Assuming grid is (M, M, M, K), we reshape for sampling
+-        grid_perm = grid.permute(3, 0, 1, 2).unsqueeze(0) # (1, K, M, M, M)
+-        coords_exp = coords_norm.unsqueeze(-1).permute(0, 4, 1, 2, 3) # (..., 1, D)
++        # Permute to (K, M, M, M) and add batch dim for grid_sample
++        grid_perm = grid.permute(3, 0, 1, 2).unsqueeze(0)  # (1, K, M, M, M)
++        
++        # Map [0, 1] coordinates to [-1, 1] for standard interpolation
++        coords_norm = 2.0 * coords - 1.0  # (..., D)
++        
++        # grid_sample expects grid of shape (..., 3) for 3D spatial dims
++        coords_grid = coords_norm.unsqueeze(-1).expand(-1, -1, -1, 3)  # (..., 3)
++        coords_grid = coords_grid.unsqueeze(0)  # (1, ..., 3)
++        
+         # Perform trilinear interpolation
+         samples = torch.nn.functional.grid_sample(
+-            grid_perm, coords_exp, mode='bilinear', align_corners=True
+-        )
++            grid_perm, coords_grid, mode='trilinear', align_corners=True
++        )  # (1, K, 1, 1, 1)
++        
+         # Reshape back to (..., K)
+         return samples.squeeze(0).permute(0, 2, 3, 1).reshape(*coords.shape[:-1], -1)
+@@ -151,5 +159,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Faster than purely MLP-based representations (like [SIREN](1250-siren-neural-field.md)) because the basis field uses grid lookups instead of network evaluations. However, slightly slower than single-factor grid methods like [DVGO](1150-scene-representation-networks-srn.md) due to the additional basis sampling and Hadamard product [S2, unofficial].
++*   **Time Complexity:** Faster than purely MLP-based representations (like [SIREN](1250-siren-neural-field.md)) because the basis field uses grid lookups instead of network evaluations [S2, unofficial]. However, slightly slower than single-factor grid methods like [DVGO](1150-scene-representation-networks-srn.md) due to the additional basis sampling and Hadamard product [S2, unofficial].
+ *   **Memory Complexity:** More compact than Instant-NGP. DiF halves the total number of model parameters for SDF and radiance field reconstruction compared to Instant-NGP [S2, unofficial]. Memory is dominated by the basis and coefficient grids [S2, unofficial].
+ *   **Performance:** Achieves state-of-the-art reconstruction quality on 2D image regression, 3D SDF, and radiance field tasks, often better or on par with Instant-NGP and Plenoxels [S2, unofficial].
+@@ -160,5 +168,5 @@
+ 
+ ## Background
+-Dictionary Fields were introduced by the authors of the "Factor Fields" paper [S2, unofficial]. The method was developed to address the limitations of existing neural field representations, which either relied on slow MLPs (NeRF) or memory-heavy grids (DVGO) or lacked the ability to share structure across signals (Instant-NGP). DiF was designed to unify these approaches by explicitly separating global basis functions from local coefficients, enabling efficient and generalizable signal representation. It has been used in 2D image regression, 3D SDF geometry reconstruction, and radiance field reconstruction for novel view synthesis [S2, unofficial].
++Dictionary Fields were introduced by the authors of the "Factor Fields" paper [S2, unofficial]. The method was developed to address the limitations of existing neural field representations, which either relied on slow MLPs (NeRF) or memory-heavy grids (DVGO) or lacked the ability to share structure across signals (Instant-NGP) [S2, unofficial]. DiF was designed to unify these approaches by explicitly separating global basis functions from local coefficients, enabling efficient and generalizable signal representation [S2, unofficial]. It has been used in 2D image regression, 3D SDF geometry reconstruction, and radiance field reconstruction for novel view synthesis [S2, unofficial].
+ 
+ ## Sources

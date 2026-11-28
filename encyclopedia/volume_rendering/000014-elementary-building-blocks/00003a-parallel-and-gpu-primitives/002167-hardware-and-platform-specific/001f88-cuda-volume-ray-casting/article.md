@@ -1,0 +1,207 @@
+# CUDA Volume Ray Casting
+
+Also called: CUDA Raycasting, Enhanced ray casting, Real-time Volumetric Ray-Casting, Single-pass CUDA Raycasting, VRCUDA, cudaRC
+
+## Overview
+CUDA Volume Ray Casting is a direct volume rendering method that parallelizes the ray casting algorithm on the NVIDIA GPU using the CUDA programming model, avoiding intermediate geometric entities to directly generate 2D images from 3D datasets [S1]. It assigns one thread per pixel to cast rays through a 3D volume texture, sampling scalar values, mapping them to color and opacity via a transfer function, and compositing the result using front-to-back alpha blending with early termination [S5, unofficial]. It sets itself apart from standard OpenGL shader-based approaches by providing explicit control over memory hierarchy (textures, surfaces, and global memory) and kernel launch parameters, often yielding performance improvements over generic GPU-based implementations [S1][S4, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   **Volume Data:** 3D scalar field stored as a 1D unsigned char array on the device, mapped to a CUDA 3D Array and bound to a 3D texture [S1].
+*   **Transfer Function:** A 1D function mapping scalar values to RGBA [S5, unofficial]. It is stored as a 2D texture (float4) [S5, unofficial]. The file format specifies `<num_points>` followed by lines of `<scalar_value> <r> <g> <b> <a>`, where scalar values are in [0, 255] and RGBA are normalized floats in [0.0f, 1.0f] [S5, unofficial].
+*   **Camera Parameters:** Eye position, view direction, and inverse view matrix [S5, unofficial].
+*   **Geometry:** Either a Ray-Box bounding box for dynamic intersection or pre-computed hit point textures (`texFirst`, `texLast`) [S3][S5, unofficial].
+
+**Outputs:**
+*   **Image Buffer:** A 2D surface object (mapped from an OpenGL Pixel Buffer Object or CUDA array) where the final composited color and opacity are written [S3][S5, unofficial].
+
+### Data Structures
+*   **Volume Texture:** `texture<VolType, 3, cudaReadModeNormalizedFloat> volume` [S5, unofficial]. Uses linear filtering and clamp addressing [S3][S5, unofficial].
+*   **Transfer Function Texture:** `texture<float4, 2, cudaReadModeElementType> transFunc` [S5, unofficial]. Uses linear filtering and clamp addressing [S3][S5, unofficial].
+*   **Hit Point Textures (Optional):** `texture<float4, 2, cudaReadModeElementType> texFirst` and `texLast` [S3][S5, unofficial].
+*   **Output Surface:** `surface<void, cudaSurfaceType2D> surf` [S3]. Used because CUDA cannot write directly to a texture [S3].
+
+### Parameters
+*   **Ray Step Size (`constantH`):** Typically calculated as $1.0 / \text{diagonal of the volume bounding box}$ [S5, unofficial]. In some implementations, a fixed value like 0.01 AU is used for a 1x1x1 AU volume [S2].
+*   **Opacity Threshold:** Threshold for early ray termination [S3]. Commonly set to 0.99 [S3][S5, unofficial] or 1.0 [S1].
+*   **Block Size:** Example: `dim3(8, 16)` [S7, unofficial] or `dim3(16, 16)` [S5, unofficial].
+*   **Bounding Box:** Often defined as `boxMin = (0,0,0)` and `boxMax = (1,1,1)` in texture space [S7, unofficial], or `(-1,-1,-1)` to `(1,1,1)` in world space [S1].
+*   **Eye Position:** Example: `(0, 0, 6)` [S1].
+*   **Near Plane Clipping:** Rays must be clamped to the near plane distance (`constantNCP`) to prevent sampling outside the volume [S5, unofficial].
+
+### Steps
+
+1.  **Thread Indexing:** Calculate unique linear index for each ray/thread:
+    $$ \text{index} = \text{blockIdx} \times \text{blockDim} + \text{threadIdx} $$
+    [S1]
+
+2.  **Pixel Coordinates:** Calculate thread coordinates:
+    $$ x = \text{blockIdx}.x \times \text{blockDim}.x + \text{threadIdx}.x $$
+    $$ y = \text{blockIdx}.y \times \text{blockDim}.y + \text{threadIdx}.y $$
+    [S3]
+
+3.  **Bounds Check:** If $x < \text{width}$ and $y < \text{height}$, proceed; otherwise, terminate [S3].
+
+4.  **Ray Initialization:**
+    *   **Option A (Dynamic Ray-Box):** Calculate normalized screen coordinates $u, v \in [-1, 1]$ [S5, unofficial]. Compute eye ray direction using the inverse view matrix and camera parameters [S7, unofficial]. Calculate ray-box intersection to find entry ($t_{near}$) and exit ($t_{far}$) distances [S1]. Clamp $t_{near}$ to the near plane distance if necessary [S5, S7, unofficial].
+    *   **Option B (Pre-computed):** Sample `first = tex2D(texFirst, x, y)` and `last = tex2D(texLast, x, y)` [S3]. Compute direction and length:
+        $$ \text{direction} = \text{normalize}(\text{last} - \text{first}) $$
+        $$ D = \text{length}(\text{direction}) $$
+        [S3]
+
+5.  **Intersection Check:** If no intersection (Option A) or invalid bounds, set pixel to background (black) and terminate [S2][S7, unofficial].
+
+6.  **Ray Traversal Loop:**
+    Initialize ray position `tr` (to `first` or entry point) and accumulator `color = float4(0.0f, 0.0f, 0.0f, 1.0f)` [S3]. Set step vector `rayStep = direction * constantH` [S3].
+    Iterate $t$ from 0 to $D$ (or $t_{far}$) with increment `constantH`:
+    
+    a.  **Coordinate Transformation:** Transform sample position to texture space $[0, 1]$. For a volume centered at $(0,0,0)$ with extent $[-0.5, 0.5]$:
+        $$ \text{tx} = \text{tr}.x + 0.5, \quad \text{ty} = \text{tr}.y + 0.5, \quad \text{tz} = 1.0 - (\text{tr}.z + 0.5) $$
+        [S5, unofficial]
+        
+    b.  **Sample Volume:** Get scalar value:
+        $$ \text{scalar} = \text{tex3D}(\text{volume}, \text{tx}, \text{ty}, \text{tz}) $$
+        [S3]
+        
+    c.  **Sample Transfer Function:**
+        $$ \text{samp} = \text{tex2D}(\text{transFunc}, \text{scalar}, 0.5f) $$
+        [S3]
+        
+    d.  **Convert Alpha:** Convert transfer function alpha to optical depth-based opacity:
+        $$ \text{samp}.w = 1.0f - \exp(-0.5f \times \text{samp}.w) $$
+        [S5, unofficial]
+        
+    e.  **Pre-multiply Color:**
+        $$ \text{samp}.x = \text{samp}.x \times \text{samp}.w $$
+        $$ \text{samp}.y = \text{samp}.y \times \text{samp}.w $$
+        $$ \text{samp}.z = \text{samp}.z \times \text{samp}.w $$
+        [S3]
+        
+    f.  **Composite (Under Operator):**
+        $$ \text{color}.x += \text{samp}.x \times \text{color}.w $$
+        $$ \text{color}.y += \text{samp}.y \times \text{color}.w $$
+        $$ \text{color}.z += \text{samp}.z \times \text{color}.w $$
+        $$ \text{color}.w = \text{color}.w \times (1.0f - \text{samp}.w) $$
+        [S3][S5, unofficial]
+        
+    g.  **Early Termination:** If accumulated opacity $(1.0f - \text{color}.w)$ exceeds `opacityThreshold`, break loop [S3][S5, unofficial].
+        
+    h.  **Increment Ray:**
+        $$ \text{tr} += \text{rayStep} $$
+        [S3]
+
+7.  **Finalize Alpha:**
+    $$ \text{color}.w = 1.0f - \text{color}.w $$
+    [S3]
+
+8.  **Write Output:** Convert `color` to `uchar4` (multiply by 255) and write to surface:
+    $$ \text{surf2Dwrite}(\text{ucolor}, \text{surf}, x \times \text{sizeof}(\text{uchar4}), y, \text{cudaBoundaryModeClamp}) $$
+    [S3]
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_rendering_kernel(width, height, volume, trans_func, first_points, last_points, constant_h, opacity_threshold):
+    # Simulated per-thread execution context
+    x = ...  # blockIdx.x * blockDim.x + threadIdx.x
+    y = ...  # blockIdx.y * blockDim.y + threadIdx.y
+    
+    if x >= width or y >= height:
+        return
+
+    # 1. Ray Initialization (Pre-computed hit points)
+    first = first_points[x, y]
+    last = last_points[x, y]
+    
+    direction = last - first
+    D = length(direction)
+    if D == 0:
+        return  # No intersection or degenerate ray
+    
+    direction = direction / D
+    tr = first
+    color = [0.0, 0.0, 0.0, 1.0]  # r, g, b, a
+    ray_step = direction * constant_h
+    
+    # 2. Ray Traversal Loop
+    t = 0.0
+    while t <= D:
+        # Coordinate transformation to texture space [0, 1]
+        tx = tr[0] + 0.5
+        ty = tr[1] + 0.5
+        tz = 1.0 - (tr[2] + 0.5)
+        
+        # Sample volume and transfer function
+        scalar = sample_volume(volume, tx, ty, tz)
+        samp = sample_trans_func(trans_func, scalar)
+        
+        # Convert alpha to optical depth opacity
+        alpha = 1.0 - exp(-0.5 * samp[3])
+        
+        # Pre-multiply color
+        samp_rgb = [samp[0] * alpha, samp[1] * alpha, samp[2] * alpha]
+        
+        # Composite using under operator
+        color[0] += samp_rgb[0] * color[3]
+        color[1] += samp_rgb[1] * color[3]
+        color[2] += samp_rgb[2] * color[3]
+        color[3] *= (1.0 - alpha)
+        
+        # Early termination
+        if 1.0 - color[3] > opacity_threshold:
+            break
+            
+        # Increment ray
+        tr += ray_step
+        t += constant_h
+        
+    # 3. Finalize alpha
+    color[3] = 1.0 - color[3]
+    
+    # 4. Write output
+    output[x, y] = [int(c * 255.0) for c in color]
+```
+
+### Edge Cases and Pitfalls
+*   **Texture Writing:** CUDA cannot write directly to a texture. The output image must be mapped to a CUDA surface using `cudaBindSurfaceToArray` [S3].
+*   **Coordinate Transformation:** If the volume is centered at (0,0,0) with extent [-0.5, 0.5], texture coordinates require shifting by +0.5 for x/y and $1.0 - (z + 0.5)$ for z to map correctly to [0,1] texture space [S5, unofficial].
+*   **Ray-Box Intersection:** Dynamic ray-box intersection can be problematic if not implemented correctly; pre-computed hit points are often preferred for stability [S5, unofficial].
+*   **Near Plane Clipping:** Rays must be clamped to the near plane distance to prevent sampling outside the volume or causing artifacts [S5, unofficial].
+*   **Precision:** Use `cudaReadModeNormalizedFloat` for volume data to handle unsigned char input correctly as normalized floats [S5, unofficial].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time Complexity:** $O(W \times H \times N)$, where $W, H$ are image dimensions and $N$ is the number of samples per ray [G]. Early termination reduces the average $N$ [S2].
+*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels [G].
+
+### Measured Performance
+*   On an NVIDIA GeForce 8400M GS, the CUDA-based approach rendered a 64x64x64 'neghip' dataset in 0.703 seconds, compared to 0.812 seconds for a standard GPU-based algorithm (1.16x speedup) [S1].
+*   For a 256x256x256 'engine' dataset, CUDA was 1.15x faster than the GPU-based approach [S1].
+*   A 15x speedup over Intel Xeon and 1.5x over CELL processor was reported on NVIDIA 8800GTX [S4, unofficial].
+
+### Strengths and Limitations
+*   **Strengths:** Direct memory control allows optimization of texture caching and memory coalescing. Early termination significantly reduces computation for opaque regions [S4, unofficial]. Interoperability with OpenGL allows seamless integration into existing rendering pipelines [S1, S3].
+*   **Limitations:** Performance is highly dependent on the transfer function and volume density. Dynamic ray-box intersection can be computationally expensive and prone to errors if not carefully implemented [S5, unofficial]. Requires NVIDIA hardware and CUDA SDK [S1].
+
+## Background
+
+### Origin and History
+CUDA Volume Ray Casting was developed to leverage the parallel processing capabilities of NVIDIA GPUs for direct volume rendering, which is computationally intensive due to the large amount of calculation required [S1]. The method was implemented and optimized using the CUDA SDK, demonstrating significant performance improvements over standard GPU-based ray casting algorithms that rely on OpenGL shaders without explicit CUDA memory management [S1]. It builds on earlier work in GPU-based volume rendering and extends it with CUDA-specific optimizations such as explicit texture/surface mapping and kernel launch configuration [S4, unofficial].
+
+### Usage
+The method has been used in real-time volumetric visualization for intraoperative ophthalmic swept-source OCT [S2] and in educational and research contexts for comparing GPU-based volume rendering implementations [S3]. It is implemented on NVIDIA hardware using CUDA SDK and OpenGL for display [S1].
+
+## Sources
+
+[S1] Algorithm of Ray Casting Volume Rendering Based on CUDA, https://doi.org/10.12792/iciae2014.011, fetched 2026-10-24
+[S2] Enhanced volumetric visualization for real time 4D intraoperative ophthalmic swept-source OCT, https://doi.org/10.1364/boe.7.001815, fetched 2026-11-08
+[S3] A Comparison between GPU-based Volume Ray Casting Implementations: Fragment Shader, Compute Shader, OpenCL and CUDA, https://www.researchgate.net/publication/321454253_A_Comparison_between_GPU-based_Volume_Ray_Casting_Implementations_Fragment_Shader_Compute_Shader_OpenCL_and_CUDA, fetched 2026-10-26
+[S4] Volume Ray Casting Techniques and Applications using GPGPU, https://halogenica.net/bin/graphics/volume-rendering-using-gpgpu/Thesis.pdf, fetched 2026-10-27 (unofficial)
+[S5] franjaviersans/VRCUDA, https://github.com/franjaviersans/VRCUDA, fetched 2026-10-27 (unofficial)
+[S6] dtu-2010-cuda-volume-rendering, https://github.com/ojaisnielsen/dtu-2010-cuda-volume-rendering, fetched 2026-10-27 (unofficial)
+[S7] GTC09: CUDA Volume Rendering, https://www.nvidia.com/content/GTC/documents/1102_GTC09.pdf, fetched 2026-10-29 (unofficial)

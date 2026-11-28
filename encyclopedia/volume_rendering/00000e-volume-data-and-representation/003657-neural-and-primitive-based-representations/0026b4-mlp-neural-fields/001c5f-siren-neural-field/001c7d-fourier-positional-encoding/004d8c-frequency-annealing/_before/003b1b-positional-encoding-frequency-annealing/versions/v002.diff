@@ -1,0 +1,204 @@
+--- v001.md
++++ v002.md
+@@ -4,117 +4,129 @@
+ 
+ ## Overview
+-Positional Encoding Frequency Annealing is a coarse-to-fine optimization strategy that constrains Fourier positional encoding to low dimensions initially to suppress high-frequency artifacts and self-occlusions in neural radiance fields [S1, unofficial]. It sets itself apart from standard Fourier Positional Encoding by dynamically masking high-frequency bands during early training, forcing the network to prioritize low-frequency geometry before resolving fine details [S1, unofficial].
++Positional Encoding Frequency Annealing is a coarse-to-fine optimization strategy that controls the bandwidth of a Neural Tangent Kernel (NTK) by weighting the frequency bands of Fourier positional encoding with a time-dependent window function [S1]. It prevents MLPs from overfitting to high-frequency noise or underfitting due to insufficient bandwidth by initially constraining the network to low-frequency components and gradually exposing higher frequencies [S1][S2, unofficial]. This method sets itself apart from standard Fourier Positional Encoding by introducing a temporal schedule that modulates the effective input dimensionality during training, whereas siblings like Off-Axis Positional Encoding modify the spatial orientation of frequencies and Integrated Positional Encoding modifies the statistical properties of the encoding [S1][S2, S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Current training iteration step $t$, total annealing steps $K$, number of encoding frequencies $m$, and input coordinates.
+-- Output: Annealed positional encoding vector with high-frequency components masked out.
++- Input: Spatial coordinates $x$, optimization iteration $t$, total annealing steps $K$, number of frequency bands $m$.
++- Output: Windowed positional encoding vector $\gamma_\alpha(x)$.
+ 
+ **Data Structures:**
+-- The positional encoding uses interleaved sine and cosine functions.
+-- The annealing factor $\alpha(t)$ is a scalar float.
+-- The mask is applied element-wise to the sine and cosine components.
++- Frequency bands are indexed $j \in \{0, \dots, m-1\}$.
++- The parameter $\alpha$ is a scalar that increases linearly from $0$ to $m$ over the course of optimization.
+ 
+ **Steps:**
+-1. Calculate the annealing factor $\alpha(t)$ based on the current iteration $t$.
+-2. Determine the cutoff frequency based on $\alpha(t)$. Frequencies corresponding to indices greater than $\alpha(t) \times m$ are masked.
+-3. Compute the standard Fourier positional encoding for the input coordinates.
+-4. Apply the mask to the encoding vector, zeroing out high-frequency components.
+-5. Pass the masked encoding to the MLP.
+-
+-**Formula:**
+-The annealing equation is defined as [S1, unofficial]:
+-$$ \alpha(t) = \frac{mt}{K} $$
+-Where:
+-- $m$ is the number of encoding frequencies.
+-- $t$ is the current iteration step.
+-- $K$ is a hyper-parameter controlling the duration of the annealing process.
+-
+-The mask $M_i$ for the $i$-th frequency band (where $i$ ranges from $0$ to $m-1$) is:
+-$$ M_i = \begin{cases} 1 & \text{if } i < \alpha(t) \\ 0 & \text{otherwise} \end{cases} $$
++1. Calculate the annealing parameter $\alpha$ based on the current iteration $t$. The sources provide two formulations for this schedule:
++   - Linear schedule: $\alpha(t) = \frac{m \cdot t}{K}$, where $K$ is a hyper-parameter controlling the total duration of annealing [S2, unofficial].
++   - Fixed-step schedule: Fix $\beta=0$ (see below) for a fixed number of iterations (e.g., 1000), then linearly ease in frequencies by increasing $\beta$ to 1 over a subsequent period (e.g., 10k iterations) [S1]. Note: In the context of the window function formula, $\alpha$ is the primary driver of frequency exposure.
++2. Compute the window weight $w_j(\alpha)$ for each frequency band index $j$ using a truncated Hann window function:
++   $$ w_j(\alpha) = \frac{1 - \cos(\pi \cdot \text{clamp}(\alpha - j, 0, 1))}{2} $$
++   where $\text{clamp}(v, 0, 1)$ restricts the value to the range $[0, 1]$ [S1].
++3. Compute the standard Fourier positional encoding components for each band $j$: $\sin(2^j x)$ and $\cos(2^j x)$ [S1].
++4. Apply the window weights to the sine and cosine components:
++   $$ \gamma_\alpha(x) = [w_0(\alpha)\sin(x), \dots, w_{m-1}(\alpha)\cos(2^{m-1}x)]^T $$
++   This effectively masks out high-frequency bands when $\alpha < j$ and fully exposes them when $\alpha \ge j+1$ [S1].
+ 
+ **Parameters:**
+-- $K$: Set to 15,000 (15k) [S1, unofficial].
++- $m$: Number of encoding frequencies. Typical values depend on the scene complexity; not explicitly fixed in sources but implied to be sufficient for the target resolution [S1][S2, unofficial].
++- $K$: Hyper-parameter for the annealing schedule duration. Set to 15,000 iterations in reported experiments [S2, unofficial].
++- $\beta$: A parameter used specifically for ambient coordinates in deformation fields. Setting $\beta=0$ disables identity concatenation, allowing ambient dimensions to be collapsed during initial optimization phases [S1].
++
++**Edge Cases and Pitfalls:**
++- **Precision:** The clamp operation ensures numerical stability in the window function calculation [S1].
++- **Boundaries:** When $\alpha < 0$, all weights are zero; when $\alpha \ge m$, all weights are one. The transition is smooth due to the cosine window [S1].
++- **Ambient vs. Spatial:** In hyper-space neural radiance fields, windowing is applied only to ambient coordinates (with $\beta$ schedule), while spatial coordinates $x$ use their own windowing schedule or standard encoding [S1].
+ 
+ **Pseudocode:**
+ ```python
++import torch
+ import math
+-import torch
+ 
+-def positional_encoding_frequency_annealing(positions, m, t, K):
++def windowed_positional_encoding(positions, m, alpha):
+     """
+-    Compute Fourier positional encoding with frequency annealing.
++    Computes windowed positional encoding for a given alpha.
+     
+     Args:
+-        positions: Tensor of shape (..., D) containing input coordinates.
+-        m: Number of encoding frequencies (int).
+-        t: Current training iteration step (int).
+-        K: Hyper-parameter for annealing duration (int).
++        positions: Tensor of shape [..., D] containing input coordinates.
++        m: Number of frequency bands.
++        alpha: Current annealing parameter in [0, m].
+         
+     Returns:
+-        Masked positional encoding tensor.
++        Tensor of shape [..., m * 2 * D] containing windowed sin/cos components.
+     """
+-    # Standard Fourier positional encoding setup
+-    # freq_bands = 2^0, 2^1, ..., 2^(m-1)
++    # Generate frequency bands: 2^0, 2^1, ..., 2^(m-1)
++    # levels are integers 0 to m-1
+     levels = torch.arange(m, device=positions.device)
+-    freq_bands = 2 ** levels
++    freq_bands = 2.0 ** levels
+     
+-    # Compute annealing factor alpha(t)
+-    # alpha(t) = m * t / K
+-    alpha = (m * t) / K
++    # Compute window weights for each band j
++    # w_j(alpha) = (1 - cos(pi * clamp(alpha - j, 0, 1))) / 2
++    # Note: alpha is a scalar or broadcastable tensor
++    diff = alpha - levels
++    clamped_diff = torch.clamp(diff, min=0.0, max=1.0)
++    weights = (1.0 - torch.cos(math.pi * clamped_diff)) / 2.0
+     
+-    # Determine which frequencies to keep
+-    # Keep frequencies where index < alpha
+-    # Mask is 1.0 if kept, 0.0 if masked
+-    # Note: alpha can exceed m, so we clamp or handle bounds
+-    mask = (levels < alpha).float()
++    # Expand weights to match positions shape for broadcasting
++    # weights shape: [m]
++    # positions shape: [..., D]
++    # We need to apply weight j to the j-th frequency band of all positions
+     
+-    # Compute base frequencies
+-    # pts shape: (..., m)
+-    pts = positions[..., None] * freq_bands
++    # Reshape weights for broadcasting: [1, m, 1]
++    weights_expanded = weights.view(1, -1, 1)
+     
+-    # Compute sine and cosine
++    # Compute frequency components for all bands at once
++    # pts shape: [..., m, D]
++    pts = positions[..., None, :] * freq_bands.view(1, -1, 1)
++    
++    # Compute sin and cos
+     pts_sin = torch.sin(pts)
+     pts_cos = torch.cos(pts)
+     
+-    # Apply mask to both sin and cos components
+-    pts_sin = pts_sin * mask
+-    pts_cos = pts_cos * mask
++    # Apply window weights
++    # weights_expanded broadcasts over [..., m, D]
++    pts_sin_windowed = pts_sin * weights_expanded
++    pts_cos_windowed = pts_cos * weights_expanded
+     
+-    # Concatenate and reshape
+-    # Output shape: (..., m * 2 * D)
+-    pts_enc = torch.cat([pts_sin, pts_cos], dim=-1)
++    # Concatenate sin and cos along the last dimension
++    # Result shape: [..., m, 2*D]
++    pts_combined = torch.cat([pts_sin_windowed, pts_cos_windowed], dim=-1)
+     
+-    # Reshape to match expected input dimension for MLP
+-    # Assuming positions has shape (..., D), output is (..., m*2*D)
+-    new_shape = list(positions.shape[:-1]) + [m * 2 * positions.shape[-1]]
+-    pts_enc = pts_enc.reshape(new_shape)
++    # Reshape to final dimension: [..., m * 2 * D]
++    final_shape = list(positions.shape[:-1]) + [m * 2 * positions.shape[-1]]
++    pts_final = pts_combined.view(final_shape)
+     
+-    return pts_enc
++    return pts_final
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-- If $t=0$, $\alpha(0)=0$, and all frequencies are masked, resulting in a zero vector. This may cause initial training stagnation if not handled [G].
+-- If $t \ge K$, $\alpha(t) \ge m$, and all frequencies are exposed, effectively reverting to standard Fourier encoding.
+-- Precision issues may arise if $K$ is very large and $t$ is small, causing $\alpha(t)$ to be very close to 0.
+ 
+ ## Subtopics
+ 
+ ### Positional Encoding with Linear Annealing
+-A variant that applies linear annealing to frequency bands based on a progress parameter, masking lower frequencies at progress=0 and exposing all at progress=1 [S2, unofficial]. It creates frequency bands as powers of 2 ($2^{\text{levels}}$) and computes a mask using linear interpolation: $\text{mask} = \text{clamp}(\text{progress} \times \text{freqs} - \text{levels}, 0.0, 1)$ [S2, unofficial]. This allows for a smoother transition compared to the step-wise masking in the standard method. It is useful when a gradual exposure of frequencies is preferred over a sharp cutoff [S2, unofficial].
++A variant that applies linear annealing to frequency bands based on a progress parameter, masking lower frequencies at progress=0 and exposing all at progress=1 [S3, unofficial]. It creates frequency bands as powers of 2 ($2^{\text{levels}}$) and computes a mask using $\text{clamp}(\text{progress} \cdot \text{freqs} - \text{levels}, 0.0, 1.0)$ [S3, unofficial]. This mask is multiplied directly with the sine and cosine components before concatenation [S3, unofficial]. The parameter `progress` controls exposure, where 0 means fully masked and 1 means fully exposed [S3, unofficial]. This approach is simpler than the Hann window but achieves similar coarse-to-fine regularization [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot m \cdot D)$, where $N$ is the number of points, $m$ is the number of frequencies, and $D$ is the input dimension. The annealing calculation is $O(m)$, which is negligible compared to the encoding computation.
+-- **Memory Complexity:** $O(N \cdot m \cdot D)$ for storing the encoded positions.
+-- **Performance:** Suppresses high-frequency artifacts and self-occlusions in the early stages of training, leading to more stable convergence [S1, unofficial].
+-- **Strengths:** Improves optimization stability for few-shot NeRF and complex scenes by preventing the network from fitting noise early on [S1, unofficial].
+-- **Limitations:** Requires careful tuning of $K$ and $m$. If $K$ is too small, the annealing finishes too quickly, losing its benefit. If too large, training may be slow to converge to fine details.
+-- **When to use:** When training neural radiance fields with limited data or complex geometry where high-frequency artifacts are problematic [S1, unofficial].
+-- **When not to use:** When real-time inference is critical and the overhead of dynamic masking is unacceptable, or when the scene is simple and does not suffer from high-frequency artifacts.
++**Time and Memory Complexity:**
++- Time: $O(m \cdot D)$ per evaluation, where $m$ is the number of frequency bands and $D$ is the input dimension. The windowing adds negligible overhead compared to standard positional encoding [S1][S3, unofficial].
++- Memory: $O(m \cdot D)$ to store the encoded vector. No additional memory is required for the schedule parameters [S1].
++
++**Measured Performance:**
++- In NeRF-Synthetic and LLFF datasets, this method improves PSNR and SSIM compared to baselines like standard NeRF and mip-NeRF when used in few-shot settings (e.g., GeCoNeRF) [S2, unofficial].
++- It prevents getting stuck in sub-optimal local minima in deformation fields (Nerfies) by retaining the ability to represent high-frequency deformations while avoiding early overfitting [S1].
++
++**Scaling:**
++- Scales linearly with the number of frequency bands $m$ [S1].
++- The annealing schedule $K$ should be scaled with the complexity of the scene; larger scenes may require larger $K$ [S2, unofficial].
++
++**Strengths and Limitations:**
++- Strengths: Regularizes optimization, prevents high-frequency artifacts and self-occlusions in early training stages, and allows coarse-to-fine learning [S1][S2, unofficial].
++- Limitations: Requires careful tuning of $K$ and $m$; improper scheduling can lead to underfitting if high frequencies are not exposed sufficiently [S1][S2, unofficial].
++
++**When to Use:**
++- Use when optimizing MLPs for neural radiance fields or deformation fields, especially in few-shot or dynamic scenarios where high-frequency details are prone to noise [S1][S2, unofficial].
++- Do not use when real-time inference is the primary concern and training time is not a bottleneck, as the annealing schedule adds complexity to the training loop [S1].
+ 
+ ## Background
+-Originated in the context of few-shot Neural Radiance Fields (NeRF) to address high-frequency occlusions that fill the space between scene and camera [S1, unofficial]. The strategy was previously used by Park et al. (2021) and adopted in GeCoNeRF (2021) to regularize optimization by forcing the network to optimize coarse, low-frequency details first [S1, unofficial]. This eases the difficulty of the warping process in the beginning stages of training [S1, unofficial].
++Originating from the observation that the number of frequencies $m$ in positional encoding controls the bandwidth of the Neural Tangent Kernel (NTK) [S1], this method was introduced by Park et al. [2020] and Hertz et al. [2021] to implement coarse-to-fine optimization strategies [S1]. It was adopted in Nerfies for optimizing deformation fields and in GeCoNeRF for few-shot neural radiance fields to suppress high-frequency occlusions [S1][S2, unofficial]. The technique builds on the work of Tancik et al. [2020] regarding Fourier positional encoding [S1][S2, unofficial].
+ 
+ ## Sources
+-[S1] GeCoNeRF: Few-Shot Neural Radiance Fields via Geometric Consistency, https://core.ac.uk/works/309257742, fetched 2026-11-01 (unofficial)
+-[S2] Nemo1999/Joint-TensoRF, https://github.com/Nemo1999/Joint-TensoRF, fetched 2026-10-27 (unofficial)+[S1] HyperNeRF, https://doi.org/10.1145/3478513.3480487, fetched 2026-10-28
++[S2] GeCoNeRF: Few-Shot Neural Radiance Fields via Geometric Consistency, https://core.ac.uk/works/309257742, fetched 2026-11-01 (unofficial)
++[S3] Nemo1999/Joint-TensoRF, https://github.com/Nemo1999/Joint-TensoRF, fetched 2026-10-27 (unofficial)

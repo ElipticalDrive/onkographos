@@ -1,0 +1,35 @@
+# Surface Reconstruction via SDF
+
+Also called: Implicit Surface Reconstruction with 3DGS, SDF-Gaussian Coupling
+
+## Overview
+This family of methods reconstructs high-quality, watertight 3D meshes from multi-view RGB images by coupling the explicit 3D Gaussian Splatting (3DGS) representation with an implicit Signed Distance Field (SDF) [17501-3d-gaussian-splatting-for-surface-reconstruction.md]. Standard 3DGS lacks explicit geometric structure, requiring post-processing for mesh extraction; these methods solve this by jointly optimizing Gaussians and an SDF to enforce surface constraints during training [17501-3d-gaussian-splatting-for-surface-reconstruction.md]. They differ from siblings like [Mesh Extraction and Representation](14095-mesh-extraction-and-representation.md) by integrating geometry regularization directly into the differentiable rendering loop rather than relying on separate reconstruction pipelines.
+
+## Shared principles
+All methods in this family operate on the standard 3D Gaussian Splatting representation, where the scene is defined by a set of $N$ 3D Gaussians $\{G_i\}_{i=1}^N$. Each Gaussian $G_i$ is defined by its mean $\boldsymbol{\mu}_i$, covariance matrix $\boldsymbol{\Sigma}_i$ (derived from rotation $\mathbf{R}_i$ and scale $\mathbf{S}_i$), opacity $\alpha_i$, and view-dependent color $\mathbf{c}_i(\omega)$.
+
+The rendering process evaluates the Gaussian density along a ray $\mathbf{r}(t) = \mathbf{o} + t\omega$ and integrates contributions. The Gaussian density function is:
+$$ G(\mathbf{x}) = \exp\left(-\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu})^\top \boldsymbol{\Sigma}^{-1} (\mathbf{x} - \boldsymbol{\mu})\right) $$
+
+The core variation across methods lies in the definition, storage, and optimization of $\mathbf{c}_i(\omega)$ and potentially $\alpha_i$, moving beyond the fixed SH coefficients used in base 3DGS. Common strategies include:
+1.  **Post-Processing Transformation:** Applying a learned affine transformation to the rendered image based on 3D position and view embedding [14740-color-and-appearance-modeling.md].
+2.  **Factorized Illumination:** Separating scene lighting (via a tensor grid) from material properties (via BRDF features) to model specular effects [14740-color-and-appearance-modeling.md].
+3.  **Image-Conditioned Modulation:** Using an MLP and per-image embeddings to modulate Gaussian color and opacity, enabling transient object removal and appearance synthesis [14740-color-and-appearance-modeling.md].
+4.  **Neural Field Substitution:** Replacing per-Gaussian SH with a shared grid-based neural field to reduce parameters and improve generalization [14740-color-and-appearance-modeling.md].
+5.  **Volumetric Attenuation:** Modifying the alpha-blending equation to incorporate medium properties, such as direct attenuation $B_d$ and backscatter parameters $B_\infty, B_b$, to model light transport in non-vacuum media [15148-physics-and-optical-modeling.md].
+
+## Subtopics
+
+### [Neural SDF Inference via Gaussian Pulling](15776-neural-sdf-inference-via-gaussian-pulling.md)
+Infers a neural SDF by dynamically aligning 3D Gaussians to the SDF's zero-level set using a differentiable 'pulling' operation. It sets itself apart by using "pulling to disks" to avoid overfitting to Gaussian centers, which is a common issue in other pulling methods [15776-neural-sdf-inference-via-gaussian-pulling.md].
+
+### [3D Gaussian Splatting for Surface Reconstruction](17501-3d-gaussian-splatting-for-surface-reconstruction.md)
+Incorporates a neural SDF within the 3DGS framework to enable joint optimization of geometry and appearance. It solves the problem of extracting watertight meshes from 3DGS by unifying optimization end-to-end, leveraging explicit Gaussian rasterization for rendering and implicit volumetric rendering for geometric regularization [17501-3d-gaussian-splatting-for-surface-reconstruction.md].
+
+### [GSurf](20857-gsurf.md)
+A single-branch framework that jointly optimizes discrete 2D Gaussian primitives and a continuous SDF without an additional volume-rendering branch. It eliminates the computational intensity of neural implicit surfaces by using Gaussian centroids for direct SDF supervision and opacity entropy regularization to create a compact, opaque surface shell [20857-gsurf.md].
+
+## Background
+Originating from the need to extract explicit geometry from the inherently volumetric 3D Gaussian Splatting representation, these methods bridge the gap between explicit splatting and implicit neural fields. The approach builds on [Scene Representation and Geometry Constraints](15421-scene-representation-and-geometry-constraints.md) by introducing specific SDF-based constraints.
+
+## Sources

@@ -1,0 +1,399 @@
+# NeFTY (Neural Field Thermal Tomography)
+Also called: Neural Field Thermal Tomography, Ours
+
+## Overview
+NeFTY is a hard-constrained neural field framework for label-free three-dimensional inverse heat conduction, recovering spatially varying thermal diffusivity fields from surface thermal observations [S1, unofficial]. It solves the ill-posed inverse problem by parameterizing the diffusivity as a continuous coordinate-based neural network and enforcing the heat equation as a hard constraint via a differentiable implicit-Euler solver with harmonic-mean interface flux, avoiding the gradient decoupling and saturation pathologies of soft-constrained Physics-Informed Neural Networks (PINNs) [S1, unofficial]. Unlike its siblings [Space-Time Image Formation Model](3268-space-time-image-formation-model.md) and [B-mode Image Reconstruction](5511-b-mode-image-reconstruction.md) which often rely on soft penalties or 1D pixel-wise inversions, NeFTY ensures the governing PDE holds exactly on the discretization, enabling non-vanishing gradients from surface data to the diffusivity network via the adjoint of the discrete heat operator [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A sequence of noisy surface temperature measurements $\hat{T}(\cdot, t_i)$ at observation window $\Gamma_{obs}$ and time steps $t_i$ for $i=1,\dots,M$.
+- **Output:** The parameters $\theta$ of a neural network representing the thermal diffusivity field $\alpha_\theta(\mathbf{x})$.
+
+**Data Structures:**
+1.  **Neural Diffusivity Field:** A fully connected MLP $f_\theta$ with depth $L_{MLP}$, hidden width $W_{MLP}$, ReLU activations, and a single skip connection re-injecting encoded coordinates at the middle layer [S1, unofficial].
+2.  **Grid:** A uniform Cartesian grid covering domain $\Omega$ with $N_x \times N_y \times N_z$ nodes, spacings $\Delta x, \Delta y, \Delta z$, and $N_t$ time steps of size $\Delta t$ [S1, unofficial].
+3.  **State Variables:**
+    -   $T_n \in \mathbb{R}^{N_g}$: Discrete temperature deviation from ambient at time step $n$.
+    -   $\mu_n \in \mathbb{R}^{N_g}$: Adjoint variable at time step $n$.
+    -   $\alpha_\theta(\mathbf{x})$: Diffusivity field sampled at grid nodes.
+
+**Numbered Steps:**
+
+1.  **Coordinate Encoding:** Normalize input coordinates $\mathbf{x} \in [-1, 1]^3$. Apply Fourier feature encoding $\gamma(\mathbf{x}) \in \mathbb{R}^{2DN}$:
+    $$
+    \gamma(\mathbf{x}) = [\sin(2^0 \pi \mathbf{x}), \cos(2^0 \pi \mathbf{x}), \dots, \sin(2^{N-1} \pi \mathbf{x}), \cos(2^{N-1} \pi \mathbf{x})]
+    $$
+    where $N$ is the bandwidth [S1, unofficial].
+
+2.  **Frequency Annealing:** Apply a cosine schedule to suppress high-frequency noise amplification during early training. Let $\beta$ linearly increase from $0$ to $N$ over $T_{FA}$ optimization steps. The weight for the $k$-th band ($k=0,\dots,N-1$) is:
+    $$
+    w_k(\beta) = 0.5 \left( 1 - \cos\left( \pi \cdot \text{clamp}\left(\frac{\beta - k}{1}, 0, 1\right) \right) \right)
+    $$
+    Multiply the $k$-th band of $\gamma(\mathbf{x})$ by $w_k(\beta)$ [S1, unofficial].
+
+3.  **Diffusivity Parameterization:** Compute the bounded diffusivity field:
+    $$
+    \alpha_\theta(\mathbf{x}) = \alpha_{min} + (\alpha_{max} - \alpha_{min}) \cdot \sigma(f_\theta(\gamma(\mathbf{x})))
+    $$
+    where $\sigma$ is the logistic sigmoid, and $\alpha_{min}, \alpha_{max} > 0$ are physical bounds calibrated to the bulk-to-defect contrast [S1, unofficial].
+
+4.  **Forward Solver (Implicit Euler):**
+    a. Construct the finite-volume diffusion operator $L(\alpha_\theta)$. For an interior node $(i,j,k)$, the operator acts as:
+    $$
+    [L(\alpha_\theta)T]_{i,j,k} = \frac{1}{\Delta x} \left[ \bar{\alpha}_{i+1/2,j,k}(T_{i+1,j,k} - T_{i,j,k}) - \bar{\alpha}_{i-1/2,j,k}(T_{i,j,k} - T_{i-1,j,k}) \right] + \text{y-terms} + \text{z-terms}
+    $$
+    where face-centered coefficients $\bar{\alpha}$ are the harmonic mean of neighboring cell-centered values:
+    $$
+    \bar{\alpha}_{i+1/2} = \frac{2 \alpha_i \alpha_{i+1}}{\alpha_i + \alpha_{i+1}}
+    $$
+    b. Apply boundary conditions:
+    -   Lateral: Periodicity via circular padding (wrap $i=0$ to $N_x-1$).
+    -   Through-thickness: Adiabatic (zero-flux) via replicate padding (zeroing cross-face increments) or Robin condition via ghost-cell update [S1, unofficial].
+    c. Form the system matrix $A(\alpha_\theta) = I - \Delta t L(\alpha_\theta)$.
+    d. Solve $A(\alpha_\theta) T_{n+1} = T_n$ using $K$ unrolled Jacobi iterations:
+    $$
+    T^{(\kappa+1)} = D^{-1} (T_n - R T^{(\kappa)})
+    $$
+    where $A = D + R$, initialized from the previous frame's solution (warm-start). $K$ is chosen such that the residual falls below the camera noise floor (empirically $K=50$) [S1, unofficial].
+
+5.  **Loss Computation:** Compute the discrete reconstruction objective:
+    $$
+    J_{disc}(\theta) = \sum_{i=1}^M \| \Pi_\Gamma T_{n_i}(\alpha_\theta) - \hat{T}_i \|^2 + \lambda R(\alpha_\theta)
+    $$
+    where $\Pi_\Gamma$ extracts surface samples, and $R(\alpha_\theta)$ is the discrete total variation regularizer:
+    $$
+    R(\alpha_\theta) = \sum \Delta x \Delta y \Delta z \sqrt{ \left(\frac{\delta_x \alpha}{\Delta x}\right)^2 + \left(\frac{\delta_y \alpha}{\Delta y}\right)^2 + \left(\frac{\delta_z \alpha}{\Delta z}\right)^2 + \epsilon_{TV} }
+    $$
+    using forward differences with lateral periodic wrap and vanishing through-thickness difference at the top slice [S1, unofficial].
+
+6.  **Adjoint Gradient Computation:**
+    a. Initialize $\mu_{N_t+1} = 0$.
+    b. Backward sweep for $n = N_t, \dots, 1$:
+    $$
+    A(\alpha_\theta)^\top \mu_n = \mu_{n+1} + \frac{\partial \ell_n}{\partial T_n}
+    $$
+    where $\ell_n$ collects data-fidelity terms at measurement frames (nonzero only if $n \in \{n_1, \dots, n_M\}$). Solve this linear system using the same Jacobi inner loop as the forward pass [S1, unofficial].
+    c. Assemble the gradient with respect to network weights $\theta$:
+    $$
+    \frac{d J_{disc}}{d \theta} = \sum_{n=1}^{N_t} \left( \mu_n^\top \frac{\partial (L(\alpha_\theta) T_n)}{\partial \alpha_\theta} \frac{\partial \alpha_\theta}{\partial \theta} + \frac{\partial (\lambda R)}{\partial \alpha_\theta} \frac{\partial \alpha_\theta}{\partial \theta} \right)
+    $$
+    where $\frac{\partial \alpha_\theta}{\partial \theta}$ is the standard MLP Jacobian [S1, unofficial].
+
+7.  **Optimization Update:** Update $\theta$ using an optimizer (e.g., Adam) with the computed gradient [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class NeFTY:
+    def __init__(self, grid_shape, dt, alpha_min, alpha_max, N_bandwidth, K_jacobi, lambda_tv, epsilon_tv):
+        """
+        Initialize NeFTY model.
+        grid_shape: tuple (Nx, Ny, Nz)
+        dt: time step size
+        alpha_min, alpha_max: physical bounds for diffusivity
+        N_bandwidth: Fourier feature bandwidth
+        K_jacobi: number of Jacobi iterations
+        lambda_tv: TV regularizer weight
+        epsilon_tv: smoothing constant for TV
+        """
+        self.grid_shape = grid_shape
+        self.Nx, self.Ny, self.Nz = grid_shape
+        self.dt = dt
+        self.alpha_min = alpha_min
+        self.alpha_max = alpha_max
+        self.N = N_bandwidth
+        self.K = K_jacobi
+        self.lambda_tv = lambda_tv
+        self.epsilon_tv = epsilon_tv
+        
+        # Neural Network for Diffusivity
+        self.f_theta = MLP(hidden_width=128, depth=5) # Architecture details from [S1, unofficial]
+        
+        # Grid coordinates
+        self.x, self.y, self.z = torch.meshgrid(
+            torch.linspace(-1, 1, Nx), 
+            torch.linspace(-1, 1, Ny), 
+            torch.linspace(-1, 1, Nz), 
+            indexing='ij'
+        )
+        self.coords = torch.stack([self.x, self.y, self.z], dim=-1).reshape(-1, 3)
+        
+        # Precompute Laplacian stencil structure (indices for sparse matrix)
+        # This is simplified; in practice, use sparse tensor operations or explicit stencil loops
+        self.laplacian_indices = self._build_laplacian_indices()
+        
+    def _build_laplacian_indices(self):
+        # Returns indices for the sparse matrix A = I - dt * L
+        # L is the finite-volume diffusion operator
+        # This function constructs the connectivity for the 7-point stencil
+        # with periodic lateral and adiabatic/Robin vertical boundaries
+        pass
+
+    def fourier_encoding(self, x, step, T_FA):
+        """
+        Apply Fourier feature encoding with cosine frequency annealing.
+        x: (B, 3) coordinates
+        step: current optimization step
+        T_FA: total steps for frequency annealing
+        """
+        # Normalize x to [-1, 1] if not already
+        # Generate base frequencies
+        freqs = 2**torch.arange(self.N, device=x.device) * torch.pi
+        # Expand dims for broadcasting
+        freqs = freqs.view(1, -1, 1) # (1, N, 1)
+        x_expanded = x.unsqueeze(1) # (B, 1, 3)
+        
+        # Base encoding
+        sin_enc = torch.sin(freqs * x_expanded)
+        cos_enc = torch.cos(freqs * x_expanded)
+        
+        # Frequency annealing schedule
+        beta = (step / T_FA) * self.N
+        weights = 0.5 * (1 - torch.cos(torch.pi * torch.clamp((beta - torch.arange(self.N, device=x.device).float()) / 1, 0, 1)))
+        weights = weights.view(1, -1, 1) # (1, N, 1)
+        
+        # Apply weights
+        sin_enc = sin_enc * weights
+        cos_enc = cos_enc * weights
+        
+        # Concatenate
+        enc = torch.cat([sin_enc, cos_enc], dim=-1).reshape(x.shape[0], -1)
+        return enc
+
+    def compute_diffusivity(self, coords, step, T_FA):
+        """
+        Compute alpha_theta(x) for given coordinates.
+        """
+        enc = self.fourier_encoding(coords, step, T_FA)
+        out = self.f_theta(enc)
+        # Bounded output
+        alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * torch.sigmoid(out)
+        return alpha
+
+    def solve_jacobi(self, A_diag, A_off_diag, b, T_init, K):
+        """
+        Solve A T = b using K Jacobi iterations.
+        A is split into D (diagonal) and R (off-diagonal).
+        T^(k+1) = D^-1 (b - R T^(k))
+        """
+        T = T_init
+        for _ in range(K):
+            # R * T
+            # A_off_diag contains the off-diagonal elements of A
+            # We need to compute sum_{j != i} A_ij * T_j
+            # This is equivalent to (A * T) - (A_diag * T)
+            # However, since A is sparse and structured, we can use convolution-like operations
+            # For simplicity, assuming A_off_diag is structured for stencil application
+            
+            # Placeholder for actual stencil application of R * T
+            # In a real implementation, this would be a sparse matrix-vector product or explicit stencil loops
+            R_T = self.apply_off_diagonal_stencil(A_off_diag, T)
+            
+            # Jacobi update
+            T = (b - R_T) / A_diag
+        return T
+
+    def apply_off_diagonal_stencil(self, A_off_diag, T):
+        """
+        Apply the off-diagonal part of the Laplacian stencil to T.
+        Handles periodic lateral and adiabatic/Robin vertical boundaries.
+        """
+        # Reshape T to (Nx, Ny, Nz)
+        T_grid = T.reshape(self.Nx, self.Ny, self.Nz)
+        
+        # Compute fluxes at faces using harmonic mean of adjacent alpha values
+        # This requires alpha values at cell centers and faces
+        # For simplicity, assume alpha is interpolated to faces
+        
+        # X-direction
+        alpha_x_plus = self.interpolate_alpha_to_face_x(T_grid, direction='plus') # Not implemented, placeholder
+        alpha_x_minus = self.interpolate_alpha_to_face_x(T_grid, direction='minus')
+        
+        # Y-direction
+        alpha_y_plus = self.interpolate_alpha_to_face_y(T_grid, direction='plus')
+        alpha_y_minus = self.interpolate_alpha_to_face_y(T_grid, direction='minus')
+        
+        # Z-direction
+        alpha_z_plus = self.interpolate_alpha_to_face_z(T_grid, direction='plus')
+        alpha_z_minus = self.interpolate_alpha_to_face_z(T_grid, direction='minus')
+        
+        # Compute divergence of flux
+        # [L T]_i,j,k = 1/dx * (flux_x_plus - flux_x_minus) + ...
+        # flux_x_plus = alpha_x_plus * (T_i+1 - T_i)
+        
+        # This is a complex stencil operation. 
+        # For the purpose of this article, we assume a function `apply_laplacian_stencil` exists
+        # which computes L(T) given alpha values at faces.
+        
+        # Return placeholder
+        return torch.zeros_like(T)
+
+    def forward_pass(self, T0, alpha_grid, step, T_FA):
+        """
+        Perform one time step of the implicit Euler solver.
+        T0: initial temperature field (N_g,)
+        alpha_grid: diffusivity values at grid nodes (N_g,)
+        """
+        # Construct A matrix elements
+        # A = I - dt * L
+        # L is symmetric positive definite
+        
+        # Compute face-centered alpha (harmonic mean)
+        alpha_faces_x = self.harmonic_mean_1d(alpha_grid.reshape(self.Nx, self.Ny, self.Nz), dim=0)
+        alpha_faces_y = self.harmonic_mean_1d(alpha_grid.reshape(self.Nx, self.Ny, self.Nz), dim=1)
+        alpha_faces_z = self.harmonic_mean_1d(alpha_grid.reshape(self.Nx, self.Ny, self.Nz), dim=2)
+        
+        # Construct diagonal and off-diagonal parts of A
+        # This is non-trivial for a sparse matrix. 
+        # For the Jacobi solver, we need D (diagonal) and R (off-diagonal)
+        
+        # D_i = 1 - dt * L_ii
+        # R_ij = -dt * L_ij for i != j
+        
+        # Compute L_ii and L_ij contributions
+        # L_ii = - sum_{faces} alpha_face / dx^2
+        # L_ij = alpha_face / dx^2
+        
+        # This part requires careful indexing. 
+        # We will use a simplified representation for the pseudocode.
+        
+        # Construct A_diag and A_off_diag for Jacobi
+        # A_diag is a vector of length N_g
+        # A_off_diag is a sparse matrix or a set of stencil weights
+        
+        # For the sake of the article, we assume these are computed correctly
+        A_diag, A_off_diag = self.construct_jacobi_matrices(alpha_faces_x, alpha_faces_y, alpha_faces_z)
+        
+        # Solve A T_new = T0
+        T_new = self.solve_jacobi(A_diag, A_off_diag, T0, T0, self.K)
+        
+        return T_new
+
+    def compute_tv_regularization(self, alpha_grid):
+        """
+        Compute discrete total variation regularization.
+        """
+        alpha_grid = alpha_grid.reshape(self.Nx, self.Ny, self.Nz)
+        
+        # Forward differences
+        dx = torch.diff(alpha_grid, dim=0, prepend=alpha_grid[:, :, 0]) # Periodic wrap handled separately?
+        # Actually, for TV, we use forward differences with periodic wrap for x,y and zero for z at top
+        
+        # X: periodic
+        dx = torch.diff(alpha_grid, dim=0, wrap=True)
+        # Y: periodic
+        dy = torch.diff(alpha_grid, dim=1, wrap=True)
+        # Z: adiabatic (zero at top)
+        dz = torch.diff(alpha_grid, dim=2)
+        dz = torch.cat([dz, torch.zeros_like(dz[:, :, :1])], dim=2)
+        
+        # Scale by grid spacing
+        dx = dx / self.dx
+        dy = dy / self.dy
+        dz = dz / self.dz
+        
+        # Isotropic TV
+        tv = torch.sqrt(dx**2 + dy**2 + dz**2 + self.epsilon_tv)
+        return torch.sum(tv) * self.dx * self.dy * self.dz
+
+    def train_step(self, T_meas, T0, step, T_FA):
+        """
+        Perform one training step.
+        T_meas: measured surface temperatures at specific time steps
+        T0: initial temperature field
+        """
+        # 1. Compute alpha_theta
+        alpha_grid = self.compute_diffusivity(self.coords, step, T_FA)
+        
+        # 2. Forward pass through time
+        T_current = T0
+        T_history = [T_current]
+        for n in range(1, self.Nt + 1):
+            T_current = self.forward_pass(T_current, alpha_grid, step, T_FA)
+            T_history.append(T_current)
+            
+        # 3. Compute loss
+        loss_data = 0
+        for i, t_idx in enumerate(self.measurement_indices):
+            T_pred = T_history[t_idx]
+            # Extract surface samples
+            T_surf_pred = self.extract_surface(T_pred)
+            T_surf_meas = T_meas[i]
+            loss_data += torch.sum((T_surf_pred - T_surf_meas)**2)
+            
+        loss_tv = self.lambda_tv * self.compute_tv_regularization(alpha_grid)
+        loss = loss_data + loss_tv
+        
+        # 4. Backward pass using Adjoint Method
+        # This is complex to implement in pure Python pseudocode without a framework like PyTorch
+        # We assume PyTorch's autograd can handle the forward pass if it's differentiable
+        # But NeFTY uses a custom adjoint for memory efficiency.
+        # Here, we show the conceptual gradient computation.
+        
+        # In a real implementation, you would use torch.autograd.grad or a custom autograd Function
+        # For the purpose of this article, we assume the gradient is computed via the adjoint recurrence
+        
+        loss.backward() # This would use the custom adjoint if implemented as a custom autograd Function
+        
+        return loss
+
+    def extract_surface(self, T_grid):
+        """
+        Extract surface temperature from the 3D grid.
+        """
+        # Assuming surface is at z=0 or z=Nz-1
+        # Return flattened tensor of surface nodes
+        pass
+
+    def harmonic_mean_1d(self, grid, dim):
+        """
+        Compute harmonic mean along a dimension.
+        """
+        # grid: (Nx, Ny, Nz)
+        # dim: 0, 1, or 2
+        # Returns face-centered values
+        pass
+
+    def construct_jacobi_matrices(self, alpha_faces_x, alpha_faces_y, alpha_faces_z):
+        """
+        Construct diagonal and off-diagonal parts of the Jacobi matrix.
+        """
+        pass
+```
+
+**Parameters:**
+-   $\alpha_{min}, \alpha_{max}$: Physical bounds for diffusivity, chosen to span bulk-to-defect contrast without inducing ill-conditioning [S1, unofficial].
+-   $N$: Bandwidth of the Fourier feature map, controlling the highest frequency representable by the network [S1, unofficial].
+-   $\lambda$: Weight for the total variation regularizer $R(\alpha_\theta)$ [S1, unofficial].
+-   $K$: Number of Jacobi iterations, empirically $K=50$ suffices to fall below camera noise floor [S1, unofficial].
+-   $T_{FA}$: Frequency-annealing horizon, number of optimization steps over which $\beta$ increases from $0$ to $N$ [S1, unofficial].
+-   $\epsilon_{TV}$: Smoothing constant for the total-variation regularizer [S1, unofficial].
+-   Network architecture: Depth 5, width 128, totaling 4.91 M parameters [S1, unofficial].
+-   Optimizer: Adam with learning rate $10^{-3}$ [S1, unofficial].
+-   Iterations: 22,000 iterations for training [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+-   **Gradient Decoupling:** Standard PINNs suffer from gradient pathology in stiff parabolic PDEs because the PDE residual is high and rugged, causing the optimizer to fit boundary measurements while the diffusivity network saturates at a near-trivial field [S1, unofficial]. NeFTY avoids this by using hard constraints and adjoints [S1, unofficial].
+-   **High-Frequency Noise Amplification:** Raising positional encoding bandwidth $N$ exposes the network to algebraic noise amplification along high-eigenmode left singular vectors of the parameter-to-observation map [S1, unofficial]. Frequency annealing mitigates this [S1, unofficial].
+-   **Sigmoid Saturation:** Early training optimizer probing extreme diffusivity values can yield zero gradients through sigmoid saturation or stiff numerical regimes. Bounded output prevents this [S1, unofficial].
+-   **Shallow Defect Failure:** When defects are shallow and close to the laser-illuminated front surface, surface-only data become weakly sensitive to backface diffusivity, causing spurious low-$\alpha$ artifacts along the back boundary [S1, unofficial].
+-   **Arithmetic Mean:** Using arithmetic mean for face diffusivity allows spurious heat leakage across interfaces; harmonic mean is required for effective-flux continuity [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity:** Training time is 9.6 minutes per specimen on NVIDIA RTX PRO 6000 (96 GB) [S1, unofficial]. The backward sweep is $\sim 7\times$ faster than PhiFlow’s implicit solver [S1, unofficial].
+-   **Memory Complexity:** Peak GPU memory is 4.3 GB, dominated by unrolled Jacobi iterations of the forward solve [S1, unofficial]. The discrete adjoint method reduces peak GPU memory by three orders of magnitude compared to standard Autograd (from 18.63 GB to 21.9 MB) [S1, unofficial]. The backward sweep has constant memory in $N_t$ [S1, unofficial].
+-   **Performance:** On synthetic homogeneous and layered settings, NeFTY reaches volumetric IoU of 0.45 and 0.37, while soft-constrained PINN variants and a voxel-grid baseline remain at or near zero [S1, unofficial]. On real PVC data, it achieves 2D segmentation IoU of 0.431 and 2.5D depth Abs Rel of 0.465 [S1, unofficial].
+-   **Strengths:** Label-free, handles stiff parabolic PDEs without gradient decoupling, efficient memory usage via adjoint method, robust to high-contrast interfaces via harmonic mean.
+-   **Limitations:** Per-specimen optimization at higher latency than supervised feedforward inversion, attenuated quantitative recovery inside very high-contrast voids, evaluation against projected 2D and 2.5D supervision because public NDT benchmarks do not yet provide 3D volumetric ground truth [S1, unofficial].
+
+## Background
+NeFTY was proposed by Tao Zhong, Yixun Hu, Dongzhe Zheng, Aditya Sood, and Christine Allen-Blanchette from Princeton University in 2026 [S1, unofficial]. It addresses the limitations of soft-constrained PINNs and classical thermography pipelines (TSR, PPT, VWC) which reduce to 1D pixel-wise inversions that ignore lateral diffusion and bias estimates for shallow or low-aspect-ratio defects [S1, unofficial]. The method builds on the principles of differentiable physics and adjoint optimization, specifically tailored for the inverse heat conduction problem [S1, unofficial].
+
+## Sources
+[S1] [2603.11045] Neural Field Thermal Tomography: A Differentiable Physics Framework for Non-Destructive Evaluation, https://arxiv.org/abs/2603.11045, fetched 2026-10-29 (unofficial)

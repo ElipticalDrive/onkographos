@@ -1,0 +1,287 @@
+--- v007.md
++++ v008.md
+@@ -3,184 +3,137 @@
+ 
+ ## Overview
+-GPU Data Layout defines the specific arrangement of OpenGL resources (textures, framebuffers, and auxiliary buffers) required to execute multi-volume raycasting on the GPU. It solves the problem of managing multiple heterogeneous data sources (primary volume, color maps, depth buffers, and noise textures) within a single rendering pass. It differs from [Device Volume Snapshot](2246-device-volume-snapshot.md) by focusing on the active resource binding for raycasting rather than post-processing snapshots, and from [ClearView Unified Buffer Construction](2475-clearview-unified-buffer-construction.md) by using distinct texture objects for color/opacity tables rather than a unified buffer structure.
++GPU Data Layout defines the host-side C++ structures and OpenGL resource bindings required to map volumetric scalar data, transfer functions, and rendering buffers to the GPU for raycasting [S1, unofficial]. It solves the problem of organizing heterogeneous GPU resources (textures, framebuffers, renderbuffers) into a coherent state object that the volume mapper can access efficiently [S1, unofficial]. It differs from [Device Volume Snapshot](2246-device-volume-snapshot.md) by focusing on the initial construction and binding of mutable rendering resources rather than creating immutable snapshots for thread-safe sharing, and from [ClearView Unified Buffer Construction](2475-clearview-unified-buffer-construction.md) by using explicit OpenGL texture and framebuffer IDs rather than a unified buffer abstraction [S1, unofficial].
+ 
+ ## How it works
+-The method constructs a set of OpenGL handles and metadata structures that map host-side volumetric data to GPU-accessible resources.
+-
+-**Inputs:**
+-- Primary 3D scalar volume data.
+-- 1D color table data.
+-- 1D opacity table data.
+-- Viewport dimensions (width, height).
+-- Bounding box of the volume in world coordinates.
+-- Optional additional volume data and transformation matrices.
+-
+-**Outputs:**
+-- A set of OpenGL resource IDs bound to shader stages.
++**Inputs and Outputs:**
++*   **Input:** Volumetric scalar data (1-component or 4-component unsigned char), bounding box coordinates, and rendering configuration (blend mode, number of additional volumes).
++*   **Output:** A populated `TextureObjects` array and associated framebuffer/renderbuffer IDs ready for shader binding.
+ 
+ **Data Structures:**
+-The layout is defined by the following fields:
++The core layout is defined by the following host-side structures [S1, unofficial]:
+ 
+ 1.  **TextureObjects**: An array of 5 `unsigned int` OpenGL texture IDs.
+-    -   `TextureObjects[0]`: 3D scalar texture (primary volume).
+-    -   `TextureObjects[1]`: 1D color table texture.
+-    -   `TextureObjects[2]`: 1D opacity table texture.
+-    -   `TextureObjects[3]`: 2D grabbed depth buffer.
+-    -   `TextureObjects[4]`: 2D color buffer (accumulation target).
+-2.  **MaxValueFrameBuffer**: `unsigned int` framebuffer ID for ping-pong accumulation in MIP (Maximum Intensity Projection) mode.
+-3.  **MaxValueFrameBuffer2**: `unsigned int` framebuffer ID for ping-pong accumulation in MIP mode.
+-4.  **BoundingBox**: `double` array of size `[8][3]` storing the world coordinates of the 8 corners of the dataset bounding box.
+-5.  **FrameBufferObject**: `unsigned int` ID for the primary offscreen framebuffer object.
+-6.  **DepthRenderBufferObject**: `unsigned int` ID for the depth renderbuffer attached to the framebuffer.
+-7.  **NoiseTexture**: `float` array storing procedural noise data for speckle reduction.
+-8.  **NoiseTextureSize**: `int` specifying the 1D dimension size of the noise texture.
+-9.  **NoiseTextureId**: `unsigned int` OpenGL ID for the noise texture.
+-10. **TextureCoord_1toN**: Array of `vtkTransform` pointers mapping texture coordinates from the primary volume to additional volumes.
++    *   `TextureObjects[0]`: 3D scalar texture (volume data).
++    *   `TextureObjects[1]`: 1D color table (transfer function).
++    *   `TextureObjects[2]`: 1D opacity table (transfer function).
++    *   `TextureObjects[3]`: 2D grabbed depth buffer (ping-pong buffer).
++    *   `TextureObjects[4]`: 2D color buffer (ping-pong buffer).
++2.  **MaxValueFrameBuffer** and **MaxValueFrameBuffer2**: Two `unsigned int` framebuffer IDs used for ping-pong accumulation in Minimum Intensity Projection (MIP) mode [S1, unofficial].
++3.  **BoundingBox**: A `double` array of size `[8][3]` storing the world coordinates of the 8 corners of the dataset bounding box [S1, unofficial].
++4.  **FrameBufferObject**: An `unsigned int` ID for the primary offscreen framebuffer object [S1, unofficial].
++5.  **DepthRenderBufferObject**: An `unsigned int` ID for the depth renderbuffer attached to the framebuffer [S1, unofficial].
++6.  **NoiseTexture**: A `float` array storing procedural noise data for speckle reduction [S1, unofficial].
++7.  **NoiseTextureSize**: An `int` specifying the 1D dimension size of the noise texture [S1, unofficial].
++8.  **NoiseTextureId**: An `unsigned int` OpenGL ID for the noise texture [S1, unofficial].
++9.  **TextureCoord_1toN**: An array of `vtkTransform` pointers mapping texture coordinates from the primary volume to additional volumes, with size `MAX_NUMBER_OF_ADDITIONAL_VOLUMES` [S1, unofficial].
+ 
+-**Steps:**
+-
+-1.  **Validate Input Data**:
+-    -   Check that the scalar data has either 1 component or 4 components.
+-    -   If 4 components, verify the data type is `VTK_UNSIGNED_CHAR` (RGBA).
+-    -   If `ADDITIVE_BLEND` mode is selected, verify that the data has exactly 1 component.
+-    -   If validation fails, abort resource creation [S1, unofficial].
+-
+-2.  **Generate Bounding Box**:
+-    -   Calculate the 8 corner coordinates of the volume's bounding box in world space.
+-    -   Store these in `BoundingBox[8][3]`.
+-
+-3.  **Create Primary 3D Texture**:
+-    -   Allocate a 3D texture object.
+-    -   Upload the primary scalar volume data.
+-    -   Set sampling parameters (e.g., linear filtering for interpolation).
+-
+-4.  **Create 1D Lookup Tables**:
+-    -   Allocate two 1D texture objects.
+-    -   Upload color data to `TextureObjects[1]`.
+-    -   Upload opacity data to `TextureObjects[2]`.
+-
+-5.  **Create Framebuffer and Renderbuffers**:
+-    -   Generate `FrameBufferObject` and `DepthRenderBufferObject`.
+-    -   Attach the depth renderbuffer to the framebuffer.
+-    -   For MIP mode, generate `MaxValueFrameBuffer` and `MaxValueFrameBuffer2` for ping-pong accumulation.
+-
+-6.  **Create Auxiliary Textures**:
+-    -   Allocate `NoiseTextureId` with size `NoiseTextureSize`.
+-    -   Populate `NoiseTexture` with procedural noise data.
+-    -   Allocate 2D textures for `TextureObjects[3]` (depth) and `TextureObjects[4]` (color accumulation).
+-
+-7.  **Handle Additional Volumes**:
+-    -   For each additional volume, create a corresponding 3D texture.
+-    -   Store the transformation matrix in `TextureCoord_1toN` to map coordinates from the primary volume space to the additional volume space.
+-
+-8.  **Bind Resources**:
+-    -   Bind all texture objects to appropriate texture units in the shader.
+-    -   Bind framebuffers for rendering passes.
++**Constraints and Validation:**
++The layout enforces strict data type and component constraints before resource creation [S1, unofficial]:
++*   Only 1-component scalars or 4-component scalars with non-independent components are supported.
++*   If 4 components are present, the data type must be `VTK_UNSIGNED_CHAR` (RGBA).
++*   Additive blend mode is only supported with 1-component scalars.
+ 
+ **Pseudocode:**
++The following pseudocode outlines the validation and structure population logic derived from the source [S1, unofficial].
+ 
+ ```python
+-def create_gpu_data_layout(volume_data, color_table, opacity_table, viewport_size, bounds, blend_mode):
+-    # Step 1: Validate
+-    num_components = volume_data.num_components
+-    data_type = volume_data.dtype
++def validate_volume_data(number_of_components, data_type, blend_mode):
++    """
++    Validates input data against GPU layout constraints.
++    Returns True if valid, False otherwise.
++    """
++    # Check component count and independence
++    # Note: IndependentComponents() logic is abstracted here
++    if not is_single_component_or_non_independent_4_component(number_of_components):
++        return False
++
++    # Check data type for 4-component data
++    if number_of_components == 4 and data_type != VTK_UNSIGNED_CHAR:
++        return False
++
++    # Check blend mode compatibility
++    if blend_mode == ADDITIVE_BLEND and number_of_components != 1:
++        return False
++
++    return True
++
++def initialize_gpu_layout(volume, renderer):
++    """
++    Initializes the GPU data layout structures.
++    """
++    # 1. Validate data
++    if not validate_volume_data(volume.num_components, volume.data_type, volume.blend_mode):
++        raise ValueError("Unsupported volume configuration for GPU layout")
++
++    # 2. Initialize Texture Objects Array (Size 5)
++    texture_objects = [0] * 5
+     
+-    if num_components not in [1, 4]:
+-        raise ValueError("Only 1 or 4 component scalars supported")
++    # 3. Initialize Framebuffers for MIP mode
++    max_value_framebuffer = 0
++    max_value_framebuffer2 = 0
+     
+-    if num_components == 4 and data_type != VTK_UNSIGNED_CHAR:
+-        raise ValueError("4-component data must be unsigned char")
+-        
+-    if blend_mode == ADDITIVE_BLEND and num_components != 1:
+-        raise ValueError("Additive mode requires 1-component scalars")
+-
+-    # Step 2: Bounding Box
+-    bounding_box = compute_bounding_box_corners(bounds) # Returns [8][3] double array
+-
+-    # Step 3: Primary 3D Texture
+-    tex_3d = glCreateTexture(GL_TEXTURE_3D)
+-    glTexImage3D(tex_3d, 0, GL_RGBA32F, volume_data.dim_x, volume_data.dim_y, volume_data.dim_z, 0, GL_RGBA, GL_FLOAT, volume_data.data)
+-    glTexParameteri(tex_3d, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+-    glTexParameteri(tex_3d, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+-
+-    # Step 4: 1D Lookup Tables
+-    tex_color = glCreateTexture(GL_TEXTURE_1D)
+-    glTexImage1D(tex_color, 0, GL_RGBA32F, color_table.size, 0, GL_RGBA, GL_FLOAT, color_table.data)
++    # 4. Initialize Bounding Box
++    # Extract bounds from volume
++    bounds = volume.get_bounds() # Returns [x_min, x_max, y_min, y_max, z_min, z_max]
+     
+-    tex_opacity = glCreateTexture(GL_TEXTURE_1D)
+-    glTexImage1D(tex_opacity, 0, GL_RGBA32F, opacity_table.size, 0, GL_RGBA, GL_FLOAT, opacity_table.data)
+-
+-    # Step 5: Framebuffers
+-    fbo = glCreateFramebuffer()
+-    depth_rb = glCreateRenderbuffer()
+-    glBindFramebuffer(GL_FRAMEBUFFER, fbo)
+-    glBindRenderbuffer(GL_RENDERBUFFER, depth_rb)
+-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, viewport_size.width, viewport_size.height)
+-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_rb)
+-
+-    # MIP Mode Ping-Pong Buffers
+-    if blend_mode == MIP:
+-        fbo_max1 = glCreateFramebuffer()
+-        fbo_max2 = glCreateFramebuffer()
+-        # Attach accumulation textures to fbo_max1 and fbo_max2
+-
+-    # Step 6: Auxiliary Textures
+-    noise_size = 64 # Typical size, not given in sources
+-    noise_tex = glCreateTexture(GL_TEXTURE_1D)
+-    noise_data = generate_procedural_noise(noise_size)
+-    glTexImage1D(noise_tex, 0, GL_RGBA32F, noise_size, 0, GL_RGBA, GL_FLOAT, noise_data)
+-
+-    # Depth and Color Accumulation Textures
+-    tex_depth = glCreateTexture(GL_TEXTURE_2D)
+-    glTexImage2D(tex_depth, 0, GL_DEPTH_COMPONENT, viewport_size.width, viewport_size.height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, None)
++    # Calculate center and diagonal distance for canonical view setup
++    center = volume.get_center()
++    d_x = bounds[1] - bounds[0]
++    # Note: Source uses x-distance for d in canonical view setup
++    d = d_x 
+     
+-    tex_color_buf = glCreateTexture(GL_TEXTURE_2D)
+-    glTexImage2D(tex_color_buf, 0, GL_RGBA32F, viewport_size.width, viewport_size.height, 0, GL_RGBA, GL_FLOAT, None)
+-
+-    # Step 7: Additional Volumes (Placeholder for logic)
+-    # For each additional volume:
+-    #   create 3D texture
+-    #   store transform in TextureCoord_1toN array
+-
+-    # Step 8: Bind
+-    texture_objects = [tex_3d, tex_color, tex_opacity, tex_depth, tex_color_buf]
++    # Populate BoundingBox[8][3] with world coordinates of corners
++    # This requires computing the 8 corners from bounds and volume transform
++    bounding_box = compute_bounding_box_corners(bounds, volume.transform)
++    
++    # 5. Initialize Framebuffer and Renderbuffer IDs
++    frame_buffer_object = 0
++    depth_render_buffer_object = 0
++    
++    # 6. Initialize Noise Texture
++    noise_texture_size = 0 # Determined by speckle reduction requirements
++    noise_texture = [0.0] * noise_texture_size
++    noise_texture_id = 0
++    
++    # 7. Initialize Additional Volume Transforms
++    texture_coord_1_to_n = [None] * MAX_NUMBER_OF_ADDITIONAL_VOLUMES
+     
+     return {
+         "TextureObjects": texture_objects,
+-        "MaxValueFrameBuffer": fbo_max1 if blend_mode == MIP else None,
+-        "MaxValueFrameBuffer2": fbo_max2 if blend_mode == MIP else None,
++        "MaxValueFrameBuffer": max_value_framebuffer,
++        "MaxValueFrameBuffer2": max_value_framebuffer2,
+         "BoundingBox": bounding_box,
+-        "FrameBufferObject": fbo,
+-        "DepthRenderBufferObject": depth_rb,
+-        "NoiseTexture": noise_data,
+-        "NoiseTextureSize": noise_size,
+-        "NoiseTextureId": noise_tex,
+-        "TextureCoord_1toN": [] # Array of transforms
++        "FrameBufferObject": frame_buffer_object,
++        "DepthRenderBufferObject": depth_render_buffer_object,
++        "NoiseTexture": noise_texture,
++        "NoiseTextureSize": noise_texture_size,
++        "NoiseTextureId": noise_texture_id,
++        "TextureCoord_1toN": texture_coord_1_to_n
+     }
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+--   **Precision Loss**: Using `GL_RGBA32F` for textures prevents precision loss for scalar data. Using `GL_RGBA8` for 4-component unsigned char data is required for memory efficiency but limits dynamic range [S1, unofficial].
+--   **Additive Blend Constraint**: Additive blending is only supported for 1-component scalars. Attempting to use it with multi-component data will fail validation [S1, unofficial].
+--   **Bounding Box Calculation**: The bounding box must be calculated in world coordinates, not voxel coordinates, to ensure correct ray-volume intersection [S1, unofficial].
++*   **Data Type Mismatch:** Attempting to use 4-component data with a type other than `unsigned char` will fail validation [S1, unofficial].
++*   **Blend Mode Conflict:** Using additive blending with multi-component data is unsupported [S1, unofficial].
++*   **Canonical View Setup:** The source uses a simplified distance calculation (`d = bounds[1] - bounds[0]`) for setting the parallel projection scale, which may not be accurate for non-cubic volumes [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [GPU Texture Loading](2473-gpu-texture-loading.md)
+-Transfers volumetric scalar data from host memory or binary files into GPU-accessible 3D textures. It differs by focusing on the data transfer mechanism rather than the final resource binding layout.
++Transfers volumetric scalar data from host memory or binary files into GPU-accessible 3D textures. It differs by focusing on the data transfer mechanism rather than the resource binding structure.
+ 
+ ### [Tiled 2D Texture Storage for 3D Fields](2740-tiled-2d-texture-storage-for-3d-fields.md)
+-Stores 3D scalar fields in 2D textures by tiling. It differs by using 2D texture objects instead of native 3D textures, which may be necessary for hardware without efficient 3D texture support.
++Stores 3D scalar fields in 2D textures via tiling. It differs by using 2D texture objects instead of native 3D textures for memory optimization.
+ 
+ ## Operating characteristics
+--   **Memory Complexity**: O(V + C + O + D + N), where V is volume size, C is color table size, O is opacity table size, D is depth buffer size, and N is noise texture size.
+--   **Time Complexity**: O(1) for layout creation (assuming data upload is handled by separate upload methods).
+--   **Strengths**: Explicit control over resource binding allows for optimized raycasting shaders. Support for multiple volumes via coordinate transformation.
+--   **Limitations**: Requires OpenGL 3.3+ or equivalent for 3D textures and framebuffer objects. Memory usage scales linearly with volume resolution.
+--   **When to Use**: When implementing custom multi-volume raycasting on the GPU with OpenGL.
+--   **When Not to Use**: When using high-level rendering engines that abstract texture management, or when hardware lacks 3D texture support.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Proportional to the size of the volume data, transfer functions, and ping-pong buffers. The `TextureObjects` array itself is fixed size (5 elements) [S1, unofficial].
++*   **Strengths:** Explicit control over OpenGL resource IDs allows for fine-grained management of texture units and framebuffer attachments.
++*   **Limitations:** Tightly coupled to OpenGL API. Validation is strict, limiting supported data types and blend modes [S1, unofficial].
++*   **When to use:** When implementing a custom OpenGL-based volume raycaster that requires explicit management of 3D textures, 1D transfer functions, and ping-pong framebuffers.
++*   **When not to use:** When using higher-level abstractions like Vulkan, DirectX, or CUDA unified memory, or when supporting arbitrary data types beyond 1-component float/char or 4-component RGBA char.
+ 
+ ## Background
+-The method originates from the VTKMultiVolumeRayCaster project, an unofficial extension to the Visualization Toolkit (VTK) for multi-volume raycasting [S1, unofficial]. It was developed to support the rendering of multiple volumetric datasets simultaneously, requiring a robust data layout to manage the associated OpenGL resources.
++The GPU Data Layout structure originates from the `vtkGPUMultiVolumeRayCastMapper` implementation in the VTKMultiVolumeRayCaster project [S1, unofficial]. It is designed to support multi-volume rendering with features like additive blending, MIP accumulation, and speckle reduction via procedural noise [S1, unofficial].
+ 
+ ## Sources

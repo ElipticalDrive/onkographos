@@ -1,0 +1,75 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The AABB Ray Intersection method computes the entry ($t_{min}$) and exit ($t_{max}$) distances of a ray against an Axis-Aligned Bounding Box (AABB), returning a boolean hit status [S3, S8, unofficial]. It solves the fundamental problem of determining whether a ray intersects a volume primitive and, if so, the interval along the ray parameter $t$ where the intersection occurs [S3, unofficial]. It is distinguished from its siblings by its reliance on the "slab" method (computing intersections with min/max planes per axis) [S6] and its common implementation as a batched kernel for GPU acceleration [S1, unofficial], whereas [Ray-Bounding Box Intersection and Sampling Preparation](2364-ray-bounding-box-intersection-and-sampling-preparation.md) focuses on sampling preparation and [Ray-Cube Intersection](2466-ray-cube-intersection.md) assumes unit cubes.
++The AABB Ray Intersection method computes the entry ($t_{min}$) and exit ($t_{max}$) distances of a ray against an Axis-Aligned Bounding Box (AABB), returning a boolean hit status [S3, S8, unofficial]. It solves the fundamental problem of determining whether a ray intersects a volume primitive and, if so, the interval along the ray parameter $t$ where the intersection occurs [S3, unofficial]. It is distinguished from its siblings by its reliance on the "slab" method (computing intersections with min/max planes per axis) [S6] and its common implementation as a batched kernel for GPU acceleration [S1, unofficial], whereas [Ray-Bounding Box Intersection and Sampling Preparation](2364-ray-bounding-box-intersection-and-sampling-preparation.md) focuses on sampling preparation and [Ray-Cube Intersection](2466-ray-cube-intersection.md) assumes unit cubes [G].
+ 
+ ## How it works
+@@ -20,15 +20,9 @@
+ *   **VolumeRange (Optional):** A data structure containing fields $t_0$ (entry), $t_1$ (exit), and $intersected$ (boolean mask), all with shape $[batch\_size, *shape, 1]$ [S3, unofficial].
+ 
+-**Parameters:**
+-*   $\epsilon$: Small value to prevent division by zero (default $10^{-6}$) [S3, unofficial].
+-*   $min\_dist$: Minimum allowed value for $t_0$ (default $0.0$) [S3, unofficial].
+-*   $min\_t\_range$: Minimum step size for valid intersection (default $10^{-3}$) [S3, unofficial].
+-*   $near\_plane$: Clamping lower bound for $t_{min}$ (often $0.0$ during inference) [S2, unofficial].
+-
+-**Steps:**
++**Numbered Steps:**
+ 1.  **Compute Direction Fractions:** To avoid division by zero, compute the reciprocal of the ray direction components:
+     $$ \mathbf{f} = \frac{1}{\mathbf{d} + \epsilon} $$
+-    where $\epsilon$ is a small constant (e.g., $10^{-6}$) [S2, unofficial].
+-2.  **Compute Slab Intersections:** For each axis $i \in \{x, y, z\}$, calculate the intersection distances with the min and max planes of the AABB. Let $\mathbf{B}_{min} = [x_{min}, y_{min}, z_{min}]$ and $\mathbf{B}_{max} = [x_{max}, y_{max}, z_{max}]$.
++    where $\epsilon$ is a small constant (e.g., $10^{-6}$) [S2, S3, unofficial].
++2.  **Compute Slab Intersections:** For each axis $i \in \{x, y, z\}$, calculate the intersection distances with the min and max planes of the AABB [S7, unofficial]. Let $\mathbf{B}_{min} = [x_{min}, y_{min}, z_{min}]$ and $\mathbf{B}_{max} = [x_{max}, y_{max}, z_{max}]$ [S3, unofficial].
+     $$ t_{i,1} = (\mathbf{B}_{min}[i] - \mathbf{o}[i]) \cdot \mathbf{f}[i] $$
+     $$ t_{i,2} = (\mathbf{B}_{max}[i] - \mathbf{o}[i]) \cdot \mathbf{f}[i] $$
+@@ -49,7 +43,13 @@
+     *   If not intersected, set $t_{min}$ and $t_{max}$ to a miss value (e.g., $-\infty$ or a specific flag) [S1, S5, unofficial].
+ 
++**Parameters:**
++*   $\epsilon$: Small value to prevent division by zero (default $10^{-6}$) [S3, unofficial].
++*   $min\_dist$: Minimum allowed value for $t_0$ (default $0.0$) [S3, unofficial].
++*   $min\_t\_range$: Minimum step size for valid intersection (default $10^{-3}$) [S3, unofficial].
++*   $near\_plane$: Clamping lower bound for $t_{min}$ (often $0.0$ during inference) [S2, unofficial].
++
+ **Edge Cases and Pitfalls:**
+-*   **Zero Direction Component:** If $d_i = 0$, the ray is parallel to the slab planes. Adding $\epsilon$ prevents division by zero, and the min/max operations correctly handle the resulting large values for axis-aligned boxes [S2, S8, unofficial].
+-*   **Ray Origin Inside Box:** If the ray starts inside the AABB, $t_{min}$ becomes negative. Clamping to $min\_dist \ge 0$ treats the entry point as the origin offset [S3, unofficial].
++*   **Zero Direction Component:** If $d_i = 0$, the ray is parallel to the slab planes [S8, unofficial]. Adding $\epsilon$ prevents division by zero, and the min/max operations correctly handle the resulting large values for axis-aligned boxes [S2, S8, unofficial].
++*   **Ray Origin Inside Box:** If the ray starts inside the AABB, $t_{min}$ becomes negative [S3, unofficial]. Clamping to $min\_dist \ge 0$ treats the entry point as the origin offset [S3, unofficial].
+ *   **Miss Condition:** If $t_{min} > t_{max}$, the ray passes through the gap between slabs and misses the box [S7, unofficial].
+ *   **Precision:** Degenerate intersections occur when $t_{max} \le t_{min} + \epsilon$. Enforcing a minimum step range ($min\_t\_range$) prevents invalid sampling intervals [S3, unofficial].
+@@ -83,11 +83,11 @@
+             t2 = [(b_max[j] - o[j]) * inv_d[j] for j in range(3)]
+             # Entry: max of mins along each axis
+-            entry = max(t1[j] if t1[j] < t2[j] else t2[j] for j in range(3))
++            entry = max(min(t1[j], t2[j]) for j in range(3))
+             # Exit: min of maxs along each axis
+-            exit_dist = min(t1[j] if t1[j] > t2[j] else t2[j] for j in range(3))
++            exit_dist = max(max(t1[j], t2[j]) for j in range(3))
+             # Clamp entry to min_dist
+-            entry = entry if entry > min_dist else min_dist
++            entry = max(entry, min_dist)
+             # Ensure valid interval margin
+-            exit_dist = exit_dist if exit_dist > entry + 1e-6 else entry + 1e-6
++            exit_dist = max(exit_dist, entry + 1e-6)
+             # Check hit status
+             is_hit = (entry + min_t_range < exit_dist)
+@@ -104,11 +104,11 @@
+ 
+ ## Operating characteristics
+-*   **Performance:** Highly parallelizable on GPUs. Batched implementations (e.g., processing chunks of rays) are used to avoid out-of-memory errors when $N$ is large [S4, unofficial].
++*   **Performance:** Highly parallelizable on GPUs [S6]. Batched implementations (e.g., processing chunks of rays) are used to avoid out-of-memory errors when $N$ is large [S11, unofficial].
+ *   **Strengths:** Fast, branchless when implemented with vector operations, handles arbitrary AABB sizes [S6].
+-*   **Limitations:** Does not handle rotated boxes. Precision issues can arise if ray directions are near-zero without epsilon handling [S2, unofficial].
++*   **Limitations:** Does not handle rotated boxes [G]. Precision issues can arise if ray directions are near-zero without epsilon handling [S2, unofficial].
+ *   **Complexity:** Not given in the sources.
+ 
+ ## Background
+-The method is used in neural rendering pipelines (NeRF, SDFStudio) for ray-box intersection [S1, unofficial][S3, unofficial]. Batching strategies to limit memory usage are adapted from implementations in [S4, unofficial].
++The method is used in neural rendering pipelines (NeRF, SDFStudio) for ray-box intersection [S1, unofficial][S3, unofficial]. Batching strategies to limit memory usage are adapted from implementations in [S11, unofficial].
+ 
+ ## Sources

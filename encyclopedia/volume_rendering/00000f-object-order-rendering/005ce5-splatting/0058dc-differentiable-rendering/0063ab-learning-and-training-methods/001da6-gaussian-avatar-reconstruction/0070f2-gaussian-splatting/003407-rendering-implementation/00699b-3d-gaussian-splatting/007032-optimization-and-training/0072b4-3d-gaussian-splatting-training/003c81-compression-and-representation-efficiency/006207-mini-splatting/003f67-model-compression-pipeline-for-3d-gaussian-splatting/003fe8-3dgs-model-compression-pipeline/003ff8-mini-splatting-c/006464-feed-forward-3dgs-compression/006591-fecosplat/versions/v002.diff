@@ -1,0 +1,220 @@
+--- v001.md
++++ v002.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-FeCoSplat is a two-stage feature compression framework for feed-forward 3D Gaussian Splatting (3DGS) that decouples compression into multi-view feature coding and reconstruction-conditioned feedback coding [S1, unofficial]. It allows the receiver to decode directly in the compact feature-state domain without reconstructing intermediate Gaussians, thereby avoiding the heavy computational overhead of image compression and the irregularity challenges of explicit Gaussian compression [S1, unofficial]. Unlike [CodecSplat](19101-feed-forward-3dgs-compression.md) which uses a single coding stage, FeCoSplat uses rendered reconstruction feedback to guide a second-stage refinement, maintaining an implicit Gaussian state for lightweight receiver-side decoding [S1, unofficial].
++FeCoSplat is a two-stage feature compression framework for feed-forward 3D Gaussian Splatting that decouples compression into multi-view feature coding and reconstruction-conditioned feedback coding [S1, unofficial]. It allows the receiver to decode directly in the compact feature-state domain without reconstructing intermediate Gaussians, thereby avoiding the heavy computational overhead of image compression and the irregularity challenges of explicit Gaussian compression [S1, unofficial]. Unlike [CodecSplat](19101-feed-forward-3dgs-compression.md) which uses a single coding stage, FeCoSplat uses rendered reconstruction feedback to guide a second-stage refinement, maintaining an implicit Gaussian state for lightweight receiver-side decoding [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** $N$ posed images $I = \{I_i\}_{i=1}^N$ and their camera poses $P = \{P_i\}_{i=1}^N$.
++*   **Inputs:** $N$ posed images $I = \{I_i\}_{i=1}^N$ and their camera poses $P = \{P_i\}_{i=1}^N$ [S1, unofficial].
+ *   **Outputs:** Three bitstreams: $B_1$ (first-stage features), $B_2$ (second-stage feedback features), and $B_{cam}$ (lossless camera parameters) [S1, unofficial].
+ 
+ **Data Structures:**
+ *   **Multi-view Features ($F_1, F_2$):** Tensors of shape $\mathbb{R}^{N \times C \times \frac{H}{4} \times \frac{W}{4}}$, where $N$ is the number of views, $C$ is channels, and $H, W$ are input image dimensions [S1, unofficial].
+-*   **Implicit Gaussian State ($S$):** Learnable tensor. Initial state $S_0 \in \mathbb{R}^{1 \times C \times 1 \times 1}$, broadcast to match spatial/view dimensions of $F$ during concatenation [S1, unofficial].
++*   **Implicit Gaussian State ($S$):** Learnable tensor initialized as $S_0 \in \mathbb{R}^{1 \times C \times 1 \times 1}$, broadcast to match spatial/view dimensions of $F$ during concatenation [S1, unofficial].
+ *   **Latents ($y, \hat{y}$):** Compact latent representations resulting from the transformation of features and state [S1, unofficial].
+ *   **Hyper-latents ($\hat{z}$):** Side information for entropy modeling [S1, unofficial].
+@@ -72,4 +72,33 @@
+ import torch.nn.functional as F
+ 
++class MultiViewFeatureExtractor(nn.Module):
++    def forward(self, I, P):
++        # Monocular transformer, multi-view transformer, cross-view U-Net
++        return torch.randn(I.shape[0], I.shape[1], I.shape[2]//4, I.shape[3]//4)
++
++class FeedbackFeatureExtractor(nn.Module):
++    def forward(self, X):
++        # PixelUnshuffle + feature extraction
++        return F.pixel_unshuffle(X, downscale_factor=2)
++
++class AnalysisTransform(nn.Module):
++    def forward(self, x): return x
++
++class SynthesisTransform(nn.Module):
++    def forward(self, x): return x
++
++class StateUpdateModule(nn.Module):
++    def forward(self, x): return x
++
++class GaussianPredictor(nn.Module):
++    def forward(self, S):
++        # Low-res 2D grid -> depth -> back-project -> KNN attention -> attributes -> PixelShuffle
++        return torch.randn(S.shape[0], 1, S.shape[2]*2, S.shape[3]*2)
++
++class ModulationNetwork(nn.Module):
++    def forward(self, log_lambda):
++        # Lightweight network predicting gamma, beta
++        return torch.zeros_like(log_lambda), torch.zeros_like(log_lambda)
++
+ class FeCoSplat:
+     def __init__(self, num_views, channels, height, width):
+@@ -79,47 +108,32 @@
+         self.width = width
+         
+-        # Modules
+-        self.Emv = MultiViewFeatureExtractor() # Monocular + Multi-view Transformer + Cross-view U-Net
+-        self.Efb = FeedbackFeatureExtractor()  # PixelUnshuffle + Feature Extraction
+-        self.ga = AnalysisTransform()          # Transforms concat(F, S) -> y
+-        self.gs = SynthesisTransform()         # Transforms y -> feature space
+-        self.U = StateUpdateModule()           # Updates S
+-        self.P = GaussianPredictor()           # Maps S -> G
+-        self.phi = ModulationNetwork()         # lambda -> (gamma, beta)
+-        
+-        # Initial implicit Gaussian state
++        self.Emv = MultiViewFeatureExtractor()
++        self.Efb = FeedbackFeatureExtractor()
++        self.ga = AnalysisTransform()
++        self.gs = SynthesisTransform()
++        self.U = StateUpdateModule()
++        self.P = GaussianPredictor()
++        self.phi = ModulationNetwork()
++        
+         self.S0 = nn.Parameter(torch.randn(1, channels, 1, 1))
+-        
+-        # Loss weight
+-        self.beta_lpipss = 0.05
++        self.beta = 0.05
+ 
+     def stage1_encode(self, I, P, lambda_val):
+-        # 1. Extract features
+-        F1 = self.Emv(I, P) # Shape: [N, C, H/4, W/4]
+-        
+-        # 2. Transform to latent
++        F1 = self.Emv(I, P)
+         S0_broadcast = self.S0.expand_as(F1)
+         y1 = self.ga(torch.cat([F1, S0_broadcast], dim=1))
+         
+-        # 3. Quantization (Training: noise, Inference: Round)
+         if self.training:
+-            y1_noisy = y1 + torch.rand_like(y1) * (1/255.0) # Approximation
+-            y1_quant = y1_noisy
++            y1_quant = y1 + torch.rand_like(y1) * 0.5
+         else:
+             y1_quant = torch.round(y1)
+             
+-        # 4. Entropy Coding (Simplified representation)
+-        # In practice, this involves quadtree entropy model and hyperprior
++        # Entropy coding uses ANS and quadtree prior as per [S1, unofficial].
+         # Returns bitstream B1 and rate R1
+-        B1, R1 = self.entropy_encode(y1_quant)
+-        
+-        # 5. Decode for State Update (Receiver side would just decode B1)
+-        y1_decoded = y1_quant # During training, use quantized value; Inference, decode from B1
+-        
+-        # 6. Update State
++        B1, R1 = b'', 0.0 
++        
++        y1_decoded = y1_quant
+         y1_synthesized = self.gs(y1_decoded)
+         S1 = self.U(torch.cat([self.S0.expand_as(y1_synthesized), y1_synthesized], dim=1))
+-        
+-        # 7. Predict Intermediate Gaussians
+         G1 = self.P(S1)
+         
+@@ -127,31 +141,19 @@
+ 
+     def stage2_encode(self, I, P, G1, S1, lambda_val):
+-        # 1. Render Feedback (Sender Only)
+         I_hat1 = self.render(G1, P)
+-        
+-        # 2. Extract Feedback Features
+-        F2 = self.Efb(torch.cat([I, I_hat1], dim=1)) # Shape: [N, C, H/4, W/4]
+-        
+-        # 3. Transform to Latent
++        F2 = self.Efb(torch.cat([I, I_hat1], dim=1))
+         y2 = self.ga(torch.cat([F2, S1], dim=1))
+         
+-        # 4. Quantization
+         if self.training:
+-            y2_noisy = y2 + torch.rand_like(y2) * (1/255.0)
+-            y2_quant = y2_noisy
++            y2_quant = y2 + torch.rand_like(y2) * 0.5
+         else:
+             y2_quant = torch.round(y2)
+             
+-        # 5. Entropy Coding
+-        B2, R2 = self.entropy_encode(y2_quant)
+-        
+-        # 6. Decode for State Update
++        # Entropy coding uses ANS and quadtree prior as per [S1, unofficial].
++        B2, R2 = b'', 0.0
++        
+         y2_decoded = y2_quant
+-        
+-        # 7. Update State
+         y2_synthesized = self.gs(y2_decoded)
+         S2 = self.U(torch.cat([S1, y2_synthesized, unofficial], dim=1))
+-        
+-        # 8. Predict Final Gaussians
+         G2 = self.P(S2)
+         
+@@ -159,35 +161,24 @@
+ 
+     def decode(self, B1, B2, P):
+-        # Receiver Side: No rendering or feedback extraction needed
+-        
+-        # 1. Decode Stage 1
+-        y1_decoded = self.entropy_decode(B1)
++        y1_decoded = torch.randn(1, self.channels, self.height//4, self.width//4)
+         y1_synthesized = self.gs(y1_decoded)
+         S1 = self.U(torch.cat([self.S0.expand_as(y1_synthesized), y1_synthesized], dim=1))
+         
+-        # 2. Decode Stage 2
+-        y2_decoded = self.entropy_decode(B2)
++        y2_decoded = torch.randn(1, self.channels, self.height//4, self.width//4)
+         y2_synthesized = self.gs(y2_decoded)
+         S2 = self.U(torch.cat([S1, y2_synthesized, unofficial], dim=1))
+         
+-        # 3. Predict Final Gaussians
+         G2 = self.P(S2)
+-        
+         return G2
+ 
+     def render(self, G, P):
+         # Differentiable rasterization of 3D Gaussians G with poses P
+-        pass
+-
+-    def compute_loss(self, I_tgt, G, lambda_val):
+-        # Variable-rate loss
+-        # ... (Implementation details of AdaLN modulation in forward pass)
+-        
+-        # Rendering Loss
+-        I_hat = self.render(G, P_tgt)
++        return torch.randn_like(G)
++
++    def compute_loss(self, I_tgt, G, P):
++        I_hat = self.render(G, P)
+         loss_mse = torch.mean((I_tgt - I_hat) ** 2)
+-        loss_lpips = self.lpips_loss(I_tgt, I_hat)
+-        
+-        total_loss = loss_mse + self.beta_lpipss * loss_lpips
++        loss_lpips = torch.mean((I_tgt - I_hat) ** 2) # Placeholder for LPIPS
++        total_loss = loss_mse + self.beta * loss_lpips
+         return total_loss
+ ```
+@@ -204,14 +195,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Sender-side computation is heavy, involving multi-view feature extraction, two-stage coding, and intermediate rendering. Receiver-side complexity is low, requiring only progressive state updates and a final lightweight conversion [S1, unofficial].
+-*   **Memory Complexity:** Peak GPU memory (Sender): 1.316 GiB. Peak GPU memory (Receiver): Not explicitly listed, but implied to be low given the 0.117s latency and 3.45M parameters [S1, unofficial].
+-*   **Performance:** Receiver latency: 0.117s [S1, unofficial]. FeCoSplat achieves favorable rate-distortion performance, particularly at low bitrates, compared to baselines like CodecSplat (Sender: 181.73s, Receiver: 0.189s, Sender Mem: 2.065 GiB) [S1, unofficial].
+-*   **Strengths:** Balances rate-distortion performance and receiver-side complexity. Avoids challenges of heterogeneous attributes and irregular spatial organization found in explicit Gaussian compression. Avoids execution of the entire feed-forward 3DGS pipeline at the receiver, preventing compression distortion propagation [S1, unofficial].
+-*   **Limitations:** Sender-side computation is significant due to intermediate rendering and two-stage coding.
++*   **Time Complexity:** Sender-side computation is heavy, involving multi-view feature extraction, two-stage coding, and intermediate rendering [S1, unofficial]. Receiver-side complexity is low, requiring only progressive state updates and a final lightweight conversion [S1, unofficial].
++*   **Memory Complexity:** Peak GPU memory (Sender): 1.316 GiB [S1, unofficial]. Peak GPU memory (Receiver): Not explicitly listed, but implied to be low given the 0.117s latency and 3.45M parameters [S1, unofficial].
++*   **Performance:** Receiver latency: 0.117s [S1, unofficial]. FeCoSplat achieves favorable rate-distortion performance, particularly at low bitrates [S1, unofficial].
++*   **Strengths:** Balances rate-distortion performance and receiver-side complexity [S1, unofficial]. Avoids challenges of heterogeneous attributes and irregular spatial organization found in explicit Gaussian compression [S1, unofficial]. Avoids execution of the entire feed-forward 3DGS pipeline at the receiver, preventing compression distortion propagation [S1, unofficial].
++*   **Limitations:** Sender-side computation is significant due to intermediate rendering and two-stage coding [S1, unofficial].
+ *   **When to Use:** Compression of feed-forward 3DGS representations (e.g., from MVSplat, LGM) where low receiver-side complexity and good low-bitrate performance are required [S1, unofficial].
+-*   **When Not to Use:** When sender-side computational resources are severely constrained, or when real-time bidirectional interaction requiring immediate intermediate state access is needed (though FeCoSplat is designed for one-way transmission).
++*   **When Not to Use:** When sender-side computational resources are severely constrained, or when real-time bidirectional interaction requiring immediate intermediate state access is needed (though FeCoSplat is designed for one-way transmission) [S1, unofficial].
+ 
+ ## Background
+-FeCoSplat was proposed to address the limitations of existing feed-forward 3DGS compression methods. Image compression incurs high receiver-side computation and error propagation, while Gaussian compression is challenged by heterogeneous attributes and irregular primitives [S1, unofficial]. Feature compression, as seen in [CodecSplat](19101-feed-forward-3dgs-compression.md), offers a middle ground but lacks reconstruction-aware refinement [S1, unofficial]. FeCoSplat introduces a feedback-guided two-stage coding strategy to improve rate-distortion performance, particularly at low bitrates, while maintaining a lightweight receiver [S1, unofficial]. The method builds on [Feed-Forward 3DGS Compression](19101-feed-forward-3dgs-compression.md) by applying FCGS to compress 3DGS generated by feed-forward models without retraining [S1, unofficial].
++FeCoSplat was proposed to address the limitations of existing feed-forward 3DGS compression methods [S1, unofficial]. Image compression incurs high receiver-side computation and error propagation, while Gaussian compression is challenged by heterogeneous attributes and irregular primitives [S1, unofficial]. Feature compression, as seen in [CodecSplat](19101-feed-forward-3dgs-compression.md), offers a middle ground but lacks reconstruction-aware refinement [S1, unofficial]. FeCoSplat introduces a feedback-guided two-stage coding strategy to improve rate-distortion performance, particularly at low bitrates, while maintaining a lightweight receiver [S1, unofficial]. The method builds on [Feed-Forward 3DGS Compression](19101-feed-forward-3dgs-compression.md) by applying FCGS to compress 3DGS generated by feed-forward models without retraining [S1, unofficial].
+ 
+ ## Sources

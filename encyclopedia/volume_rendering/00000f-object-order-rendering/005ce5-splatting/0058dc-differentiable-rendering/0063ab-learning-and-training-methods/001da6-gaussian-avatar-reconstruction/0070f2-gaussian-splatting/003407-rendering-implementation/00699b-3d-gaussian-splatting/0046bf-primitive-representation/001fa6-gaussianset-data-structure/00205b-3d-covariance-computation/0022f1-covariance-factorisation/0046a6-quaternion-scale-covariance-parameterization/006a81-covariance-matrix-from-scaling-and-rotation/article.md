@@ -1,0 +1,249 @@
+# Covariance Matrix from Scaling and Rotation
+
+Also called: 3D Gaussian Splatting Covariance Computation, Covariance Matrix Construction from Quaternions and Scales, Gaussian Splatting Covariance Computation
+
+## Overview
+This method constructs the 3D covariance matrix $\Sigma$ of a 3D Gaussian primitive from its stored rotation (quaternion) and scale parameters, then projects it into 2D screen space to determine the rendering footprint [S2, unofficial]. It solves the problem of defining the ellipsoidal shape of a Gaussian splat and accurately approximating its perspective-projected 2D covariance for rasterization [S2, unofficial]. Unlike billboarding techniques that discard orientation by setting the model-view rotation to identity, this method preserves the full rotation and scaling information to maintain the correct ellipsoidal orientation and aspect ratio in screen space [S2, unofficial].
+
+## How it works
+**Inputs:**
+- Rotation quaternion $q = [q_x, q_y, q_z, q_w]$ [S2, unofficial].
+- Scaling vector $s = [s_x, s_y, s_z]$ [S2, unofficial].
+- Model-view matrix $M_{view}$ (4x4) [S2, unofficial].
+- Projection matrix $P$ (4x4) [S2, unofficial].
+- Viewport dimensions: width $W$, height $H$, device pixel ratio $dpr$ [S2, unofficial].
+- Centroid position $\mu$ (3D) [S2, unofficial].
+
+**Outputs:**
+- 2D covariance matrix components $a, b, d$ (upper-left 2x2 of projected 3x3 covariance) [S2, unofficial].
+- 2D basis vectors for rendering quad construction [S2, unofficial].
+
+**Data Structures:**
+- Matrices are stored in column-major order [S2, unofficial].
+- The 3D covariance matrix $\Sigma$ is 3x3 [S2, unofficial].
+- The projected covariance is extracted as a 2x2 matrix from the 3x3 result [S2, unofficial].
+
+**Steps:**
+
+1.  **Construct Rotation Matrix $R$**: Convert the quaternion $q$ to a 3x3 rotation matrix $R$.
+    $$ R = \text{mat3\_from\_quat}(q) $$
+    [S2, unofficial]
+
+2.  **Construct Scaling Matrix $S$**: Create a 3x3 diagonal scaling matrix from $s$.
+    $$ S = \begin{bmatrix} s_x & 0 & 0 \\ 0 & s_y & 0 \\ 0 & 0 & s_z \end{bmatrix} $$
+    [S2, unofficial]
+
+3.  **Compute Transformation Matrix $T$**: Multiply rotation and scaling.
+    $$ T = R \cdot S $$
+    [S2, unofficial]
+
+4.  **Compute 3D Covariance $\Sigma$**:
+    $$ \Sigma = T \cdot T^\top $$
+    [S2, unofficial]
+
+5.  **Extract Model-View Matrix $W$**: Take the upper-left 3x3 corner of the 4x4 model-view matrix and transpose it.
+    $$ W = (\text{mat3\_from\_mat4}(M_{view}))^\top $$
+    [S2, unofficial]
+    *Note: This preserves rotation and scaling, unlike billboarding which uses identity [S2, unofficial].*
+
+6.  **Compute Jacobian $J$ for Perspective Projection**:
+    Perspective projection is non-affine and warps ellipsoids. We approximate it using a first-order Taylor expansion (Jacobian) assuming constant depth $z_p$ for sorting [S2, unofficial].
+    
+    a. Calculate focal lengths:
+    $$ f_x = P_{0,0} \cdot dpr \cdot W \cdot 0.5 $$
+    $$ f_y = P_{5,5} \cdot dpr \cdot H \cdot 0.5 $$
+    [S2, unofficial]
+    
+    b. Transform centroid to camera space:
+    $$ \mu_{cam} = M_{view} \cdot \begin{bmatrix} \mu_x \\ \mu_y \\ \mu_z \\ 1 \end{bmatrix} $$
+    Let $\mu_{cam} = [x_c, y_c, z_c, w_c]^\top$. The code uses $z_c$ directly from the transformed vector [S2, unofficial].
+    
+    c. Compute scaling factor $s_z$:
+    $$ s_z = \frac{1}{z_c^2} $$
+    [S2, unofficial]
+    
+    d. Construct $J$ (column-major):
+    $$ J = \begin{bmatrix} -\frac{f_x}{z_c} & 0 & f_x \cdot x_c \cdot s_z \\ 0 & -\frac{f_y}{z_c} & f_y \cdot y_c \cdot s_z \\ 0 & 0 & 0 \end{bmatrix} $$
+    [S2, unofficial]
+
+7.  **Project Covariance to 2D**:
+    Combine $W$ and $J$ to get the total projection transformation $T_{proj}$:
+    $$ T_{proj} = W \cdot J $$
+    [S2, unofficial]
+    
+    Update the covariance matrix:
+    $$ \Sigma_{proj} = T_{proj}^\top \cdot \Sigma \cdot T_{proj} $$
+    [S2, unofficial]
+
+8.  **Extract 2D Covariance Components**:
+    Extract the upper-left 2x2 elements from $\Sigma_{proj}$ (indices 0, 1, 4 in column-major 3x3):
+    $$ a = \Sigma_{proj}[0] $$
+    $$ b = \Sigma_{proj}[1] $$
+    $$ d = \Sigma_{proj}[4] $$
+    [S2, unofficial]
+
+9.  **Compute Eigenvalues**:
+    Calculate the determinant $D$ and trace:
+    $$ D = a \cdot d - b^2 $$
+    $$ \text{trace} = a + d $$
+    $$ \text{traceOver2} = 0.5 \cdot \text{trace} $$
+    $$ \text{term2} = \sqrt{\frac{\text{trace}^2}{4} - D} $$
+    [S2, unofficial]
+    
+    Eigenvalues:
+    $$ \lambda_1 = \text{traceOver2} + \text{term2} $$
+    $$ \lambda_2 = \max(\text{traceOver2} - \text{term2}, 0.00) $$
+    [S2, unofficial]
+    *Pitfall: Clamp $\lambda_2$ to 0.00 to prevent negative eigenvalues due to numerical instability [S2, unofficial].*
+
+10. **Compute Eigenvectors**:
+    First eigenvector:
+    $$ v_1 = \text{normalize} \begin{bmatrix} b \\ \lambda_1 - a \end{bmatrix} $$
+    [S2, unofficial]
+    
+    Second eigenvector (orthogonal to $v_1$):
+    $$ v_2 = \begin{bmatrix} v_{1,y} \\ -v_{1,x} \end{bmatrix} $$
+    [S2, unofficial]
+
+11. **Compute Basis Vectors for Rendering**:
+    Scale eigenvectors by the square root of their eigenvalues, capped at a maximum splat size (1024.0):
+    $$ \text{basis}_1 = v_1 \cdot \min(\sqrt{\lambda_1} \cdot 4, 1024.0) $$
+    $$ \text{basis}_2 = v_2 \cdot \min(\sqrt{\lambda_2} \cdot 4, 1024.0) $$
+    [S2, unofficial]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def quat_to_mat3(q):
+    """Convert quaternion [x, y, z, w] to 3x3 rotation matrix."""
+    x, y, z, w = q
+    # Standard quaternion to rotation matrix conversion
+    xx, yy, zz = x*x, y*y, z*z
+    xy, xz, yz = x*y, x*z, y*z
+    wx, wy, wz = w*x, w*y, w*z
+    
+    return np.array([
+        [1 - 2*(yy + zz), 2*(xy - wz), 2*(xz + wy)],
+        [2*(xy + wz), 1 - 2*(xx + zz), 2*(yz - wx)],
+        [2*(xz - wy), 2*(yz + wx), 1 - 2*(xx + yy)]
+    ])
+
+def compute_covariance_and_basis(q, s, mu, model_view, projection, width, height, dpr):
+    """
+    Compute 2D covariance and basis vectors for a 3D Gaussian splat.
+    
+    Args:
+        q: Quaternion [x, y, z, w]
+        s: Scale vector [sx, sy, sz]
+        mu: Centroid [x, y, z]
+        model_view: 4x4 Model-View matrix (column-major)
+        projection: 4x4 Projection matrix (column-major)
+        width: Viewport width
+        height: Viewport height
+        dpr: Device pixel ratio
+        
+    Returns:
+        a, b, d: 2D covariance components
+        basis1, basis2: 2D basis vectors
+    """
+    # 1. Construct Rotation Matrix R
+    R = quat_to_mat3(q)
+    
+    # 2. Construct Scaling Matrix S
+    S = np.diag(s)
+    
+    # 3. Compute Transformation Matrix T = R * S
+    T = R @ S
+    
+    # 4. Compute 3D Covariance Sigma = T * T^T
+    Sigma = T @ T.T
+    
+    # 5. Extract Model-View Matrix W (upper-left 3x3 of model_view, transposed)
+    # Note: model_view is 4x4. Take [:3, :3] then transpose.
+    W = model_view[:3, :3].T
+    
+    # 6. Compute Jacobian J
+    # Focal lengths
+    fx = projection[0, 0] * dpr * width * 0.5
+    fy = projection[1, 1] * dpr * height * 0.5
+    
+    # Transform centroid to camera space
+    mu_homogeneous = np.array([mu[0], mu[1], mu[2], 1.0])
+    mu_cam = model_view @ mu_homogeneous
+    xc, yc, zc = mu_cam[0], mu_cam[1], mu_cam[2]
+    
+    # Scaling factor
+    sz = 1.0 / (zc * zc)
+    
+    # Construct J (column-major representation, but we build row-by-row for clarity then transpose if needed)
+    # The source defines J as:
+    # [[-fx/zc, 0, fx*xc*sz],
+    #  [0, -fy/zc, fy*yc*sz],
+    #  [0, 0, 0]]
+    J = np.array([
+        [-fx / zc, 0.0, fx * xc * sz],
+        [0.0, -fy / zc, fy * yc * sz],
+        [0.0, 0.0, 0.0]
+    ])
+    
+    # 7. Project Covariance
+    T_proj = W @ J
+    Sigma_proj = T_proj.T @ Sigma @ T_proj
+    
+    # 8. Extract 2D Covariance Components (upper-left 2x2)
+    a = Sigma_proj[0, 0]
+    b = Sigma_proj[0, 1]
+    d = Sigma_proj[1, 1]
+    
+    # 9. Compute Eigenvalues
+    det_D = a * d - b * b
+    trace = a + d
+    trace_over_2 = 0.5 * trace
+    term2 = math.sqrt(trace * trace / 4.0 - det_D)
+    
+    lambda1 = trace_over_2 + term2
+    lambda2 = max(trace_over_2 - term2, 0.00)
+    
+    # 10. Compute Eigenvectors
+    # v1 = normalize([b, lambda1 - a])
+    v1_x = b
+    v1_y = lambda1 - a
+    norm_v1 = math.sqrt(v1_x**2 + v1_y**2)
+    if norm_v1 == 0:
+        v1 = np.array([1.0, 0.0])
+    else:
+        v1 = np.array([v1_x / norm_v1, v1_y / norm_v1])
+        
+    # v2 = [v1.y, -v1.x]
+    v2 = np.array([v1[1], -v1[0]])
+    
+    # 11. Compute Basis Vectors
+    max_splat_size = 1024.0
+    scale1 = min(math.sqrt(lambda1) * 4, max_splat_size)
+    scale2 = min(math.sqrt(lambda2) * 4, max_splat_size)
+    
+    basis1 = v1 * scale1
+    basis2 = v2 * scale2
+    
+    return a, b, d, basis1, basis2
+```
+
+## Operating characteristics
+- **Time Complexity**: Constant time $O(1)$ per Gaussian primitive, involving a fixed number of matrix multiplications and square roots.
+- **Memory Complexity**: $O(1)$ auxiliary memory per primitive for intermediate matrices.
+- **Strengths**: Accurately preserves orientation and scale during projection; handles perspective distortion via Jacobian approximation; robust against numerical instability via eigenvalue clamping.
+- **Limitations**: The Jacobian approximation assumes constant depth within the Gaussian, which may introduce slight warping errors for very large or deep Gaussians [S2, unofficial].
+- **When to use**: When rendering 3D Gaussian splats with arbitrary orientation and scale in a perspective camera.
+- **When not to use**: For billboarding (where rotation is ignored) or orthographic projection (where Jacobian simplifies).
+
+## Background
+This method is central to the 3D Gaussian Splatting rendering pipeline, specifically for converting learned or stored Gaussian parameters into screen-space primitives for rasterization [S2, unofficial]. It was popularized by the 3D Gaussian Splatting paper (Kerbl et al., 2023), though the specific implementation details regarding the Jacobian approximation and eigen-decomposition for basis vector generation are documented in practical WebGPU tutorials [S2, unofficial]. The approach ensures that the ellipsoidal shape of the Gaussian is correctly transformed from 3D world space to 2D screen space, allowing for efficient alpha-blended rendering.
+
+## Sources
+[S1] xmed-lab/DIF-Gaussian, https://github.com/xmed-lab/DIF-Gaussian, fetched 2026-10-27 (unofficial)
+[S2] WebGPU Unleashed: A Practical Tutorial, https://shi-yan.github.io/webgpuunleashed/Advanced/gaussian_splatting.html, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,165 @@
+# Non-periodic Photon Sieve Holographic Display
+
+Also called: Deterministic pseudorandom mask holography, Photon sieve display
+
+## Overview
+The Non-periodic Photon Sieve Holographic Display is a flat-panel wavefront modulation technique that combines a transmissive liquid crystal display (LCD) with a deterministically generated pseudorandom mask of pinholes to generate large dynamic holographic images with a wide viewing angle [S1]. It solves the fundamental limitation of standard Spatial Light Modulators (SLMs), which are restricted to narrow diffraction angles and small space-bandwidth products due to pixel pitch constraints [S1]. By diffracting light at wide angles through the pinholes, the method expands the optical mode space significantly, enabling large-area projection and multi-color holography without the bulky complexity of SLM multiplexing or time-consuming calibration processes [S1].
+
+## How it works
+### Inputs and Outputs
+*   **Inputs:**
+    *   Collimated laser beams at specific wavelengths (Red: 639 nm, Green: 532 nm, Blue: 473 nm) [S1].
+    *   Target 3D scene defined by desired focal positions $(x_f, y_f, z_f)$ [S1].
+    *   LCD panel parameters: Resolution $N \times M$ (e.g., $1024 \times 768$), pixel pitch $p$ [S1].
+    *   Photon sieve parameters: Pinhole size $d$, pinhole positions $\mathbf{r}_k$, and LCD pixel positions $\mathbf{p}_k$ [S1].
+*   **Outputs:**
+    *   Phase modulation pattern displayed on the LCD panel [S1].
+    *   Reconstructed 3D holographic image in the volume between the observer and the screen [S1].
+
+### Data Structures
+1.  **LCD Panel:** A 2D array of pixels with resolution $W \times H$. Each pixel $k$ has a center position $\mathbf{p}_k = (x_k, y_k)$ in the $x$-$y$ plane [S1].
+2.  **Photon Sieve Mask:** A binary transmission mask defined by a set of pinholes.
+    *   **Layout:** One-to-one correspondence with LCD pixels. There is exactly one pinhole per LCD pixel [S1].
+    *   **Pinhole Position:** The lateral displacement of the $k$-th pinhole from the center of the $k$-th LCD pixel follows a continuous uniform distribution [S1].
+    *   **Pinhole Size:** Diameter $d$ (e.g., 2.2 μm) [S1].
+    *   **Orientation:** Pseudo-randomly oriented to suppress spatial aliasing [S1].
+3.  **Optical Path Data:** For each pinhole $k$ and target focus $j$, the optical path length $L_{k,j}$ from the pinhole position to the focal point [S1].
+
+### Algorithm Steps
+1.  **System Setup:** Place the non-periodic photon sieve close to the transmissive LCD panel to maintain a small form factor [S1]. Illuminate the LCD panel with collimated laser beams [S1].
+2.  **Pattern Generation (for each target focus $j$):**
+    *   Calculate the required phase shift for each LCD pixel $k$ to direct light from the pinhole $k$ to the target focal position $\mathbf{f}_j = (x_j, y_j, z_j)$ [S1].
+    *   The phase value $\phi_k$ is determined by the optical path length from the pinhole to the focus:
+        $$ \phi_k = \frac{2\pi}{\lambda} L_{k,j} $$
+        where $\lambda$ is the wavelength of the light [S1].
+    *   The optical path length $L_{k,j}$ is the Euclidean distance between the pinhole position and the focal point [S1].
+3.  **LCD Modulation:**
+    *   Convert the calculated phase values $\phi_k$ into bias values suitable for the LCD panel [S1].
+    *   Display the bias values on the LCD panel [S1]. The LCD acts as a wavefront modulator; its non-ideal amplitude/phase response is scrambled by the photon sieve's randomness, allowing efficient modulation upon precise calibration [S1].
+4.  **Diffraction:**
+    *   Light passes through the LCD and the photon sieve pinholes [S1].
+    *   The pinholes act as a spectrally uncorrelated optical transformation, diffracting light at wide angles [S1].
+5.  **Projection:**
+    *   Project the holographic images onto a large volume [S1].
+    *   The images are formed in the space between the observer's eyes and the scattering surface (photon sieve) because the light is emitted from the screen [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_photon_sieve_hologram(lcd_width, lcd_height, pinhole_positions, pinhole_sizes, 
+                                   target_foci, wavelengths):
+    """
+    Generates the phase pattern for an LCD to create holographic foci using a non-periodic photon sieve.
+    
+    Args:
+        lcd_width (int): Number of pixels in x-direction.
+        lcd_height (int): Number of pixels in y-direction.
+        pinhole_positions (list of tuples): List of (x, y) coordinates for each pinhole.
+                                            Length must equal lcd_width * lcd_height.
+                                            Positions are pseudo-randomly displaced from pixel centers.
+        pinhole_sizes (float): Diameter of each pinhole in meters.
+        target_foci (list of tuples): List of (x, y, z) coordinates for desired focal points.
+        wavelengths (list of float): List of wavelengths (e.g., [639e-9, 532e-9, 473e-9]) for RGB.
+        
+    Returns:
+        dict: A dictionary mapping each wavelength to a 2D numpy array of phase values (radians).
+    """
+    # Initialize phase patterns for each wavelength
+    phase_patterns = {w: np.zeros((lcd_height, lcd_width)) for w in wavelengths}
+    
+    # Map linear index to 2D coordinates
+    num_pixels = lcd_width * lcd_height
+    
+    for w in wavelengths:
+        phase_pattern = phase_patterns[w]
+        
+        for idx in range(num_pixels):
+            # Get pinhole position for this pixel
+            px, py = pinhole_positions[idx]
+            
+            # Calculate phase contribution for each target focus
+            # Note: In a multi-focus scenario, phases are typically summed or optimized.
+            # The source describes generating foci at "different spatial positions" by displaying 
+            # "optimal patterns". For a single focus j:
+            for focus in target_foci:
+                fx, fy, fz = focus
+                
+                # Calculate optical path length from pinhole to focus
+                # L = sqrt((fx - px)^2 + (fy - py)^2 + fz^2)
+                dx = fx - px
+                dy = fy - py
+                dz = fz
+                optical_path_length = np.sqrt(dx**2 + dy**2 + dz**2)
+                
+                # Calculate phase shift required
+                # phi = 2 * pi * L / lambda
+                phase_shift = (2 * np.pi * optical_path_length) / w
+                
+                # Accumulate phase (simplified superposition)
+                # [G] In practice, LCDs are phase-only or amplitude-only; 
+                # here we assume phase modulation is the primary mechanism described.
+                phase_pattern[idx // lcd_width, idx % lcd_width] += phase_shift
+        
+        # Normalize or wrap phase if necessary for LCD driver
+        phase_patterns[w] = phase_pattern % (2 * np.pi)
+        
+    return phase_patterns
+
+def display_and_project(phase_patterns, lcd_panel, photon_sieve, lasers):
+    """
+    Displays the patterns and projects the hologram.
+    """
+    for w, pattern in phase_patterns.items():
+        # Find corresponding laser
+        laser = lasers[w]
+        
+        # Illuminate LCD with laser
+        lcd_panel.illuminate(laser)
+        
+        # Display phase pattern on LCD
+        lcd_panel.display(pattern)
+        
+        # Light passes through LCD and Photon Sieve
+        # The sieve diffracts light at wide angles
+        light_field = photon_sieve.transmit(lcd_panel.get_output())
+        
+        # Project to volume
+        # [G] The actual projection geometry depends on the optical setup.
+        # The source states images lie between observer and screen.
+        project_to_volume(light_field)
+```
+
+### Parameters
+*   **Pinhole Size ($d$):** 2.2 μm (standard demonstration); variable sizes tested include 2 μm, 3 μm, and 5 μm [S1].
+*   **LCD Resolution:** XGA ($1024 \times 768$ pixels), providing $\sim 10^6$ controlled optical modes [S1].
+*   **Wavelengths:** Red ($\lambda = 639$ nm), Green ($\lambda = 532$ nm), Blue ($\lambda = 473$ nm) [S1].
+*   **Numerical Aperture (NA):** 0.75 (used in measurement system) [S1].
+
+### Edge Cases and Pitfalls
+*   **Low Light Efficiency:** The active area of the LCD pixel is confined by the pinhole size, resulting in low transmittance (e.g., 0.16% for 2.2 μm pinholes) [S1].
+*   **Viewing Angle Reduction with Distance:** When the distance between the screen and focus increases beyond a certain distance ($Z_{1,2}$), the effective viewing angle decreases inversely proportional to the distance due to the limited supported spatial frequency range [S1].
+*   **Contrast Degradation with Multiple Foci:** When a large number of optical modes are addressed simultaneously, the signal level decreases proportionally to the number of optical modes while background noise remains constant [S1].
+*   **Spatial Aliasing:** If pinholes are periodically aligned, reconstructed holograms carry optical information only within the Nyquist frequency defined by pixel pitches, causing unwanted multiple cloned images [S1]. This is avoided by using pseudo-randomly oriented pinholes [S1].
+*   **Background Noise:** Pseudo-random pinhole orientation suppresses image duplication but introduces background noise [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The calculation of the optimal pattern requires $O(\sim 10^6)$ computations, equal to the number of LCD pixels, rather than $O(>10^9)$ for the large optical mode space [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:**
+    *   **Viewing Angle:** Approximately $30^\circ$ achieved with a single flat-panel wavefront modulator [S1].
+    *   **Contrast Factor:** Approximately $2.0 \times 10^5$ achieved using all pixels in XGA resolution [S1].
+    *   **Transmittance:** 0.16% measured for a photon sieve with 2.2 μm sized pinholes [S1].
+    *   **Enhancement:** The product of screen size and diffraction angle was enhanced by a factor of $\sim 1200$ compared to using only a wavefront modulator with XGA resolution [S1].
+*   **Scaling:** Larger pinhole sizes or a larger number of pinholes per LCD pixel can increase transmittance, but this compromises viewing angles and increases calculation burden linearly [S1]. A demonstration with 7.8 million pinholes successfully generated a holographic tetrahedron with 60 foci [S1].
+*   **Strengths:** Wide viewing angle, large screen size, multi-color projection, small form factor, no time-consuming calibration [S1].
+*   **Limitations:** Low light efficiency, contrast degradation with many foci, viewing angle reduction at large distances, background noise [S1].
+*   **When to Use:** When a wide viewing angle and large holographic image area are required from a compact, flat-panel device without complex SLM multiplexing [S1].
+*   **When Not to Use:** When high light efficiency is critical, or when complex holographic images requiring many simultaneous foci are needed without sacrificing contrast [S1].
+
+## Background
+*   **Origin:** Published in *Nature Communications*, 2019, Volume 10, Article 1304 [S1].
+*   **History:** The method addresses the limitations of standard SLMs, which have limited diffraction angles ($\theta = 2\sin^{-1}(\lambda/2p)$) and small space-bandwidth products [S1]. Unlike wavefront shaping through disordered systems, which requires time-consuming calibration, this method uses a deterministically generated pseudorandom mask [S1]. It overcomes the challenges of transmissive SLMs (narrow pixel pitch difficulties due to embedded electrodes) by using an off-the-shelf LCD combined with a photon sieve [S1].
+
+## Sources
+[S1] Ultrathin wide-angle large-area digital 3D holographic display using a non-periodic photon sieve, https://doi.org/10.1038/s41467-019-09126-9, fetched 2026-10-30

@@ -1,0 +1,187 @@
+--- v001.md
++++ v002.md
+@@ -1,145 +1,63 @@
+ # Key View Generation
++
+ Also called: Lumigraph Key View Generation
+ 
+ ## Overview
+-Key View Generation is a preprocessing step in image-based volume rendering that synthesizes intermediate views from a sparse set of pre-rendered ray slices using a geometric proxy surface [S1, unofficial]. It solves the problem of real-time interactive viewing by replacing expensive ray-casting with fast 2D interpolation of precomputed data [S1, unofficial]. Unlike direct ray casting, it decouples the volume integration from the viewing angle, relying on the accuracy of the proxy surface to minimize interpolation artifacts [S1, unofficial].
++Key View Generation is a preprocessing step in image-based volume rendering that synthesizes a set of intermediate images (key views) from pre-computed ray slices and a geometric proxy surface [S1, unofficial]. It solves the problem of efficiently rendering a volume from arbitrary viewpoints by replacing real-time ray casting with the interpolation of these pre-rendered views [S1, unofficial]. Unlike direct ray casting, it decouples the expensive volumetric integration from the viewing phase, trading memory for rendering speed [S1, unofficial]. It is distinct from [Image-based volume rendering](11273-image-based-volume-rendering.md) in its specific reliance on ray slices and proxy geometry for interpolation, and from [View-aligned slicing](6530-view-aligned-slicing.md) as it generates static key views rather than dynamic slices.
+ 
+ ## How it works
+ **Inputs:**
+-*   A set of pre-rendered ray slices, one for each original viewpoint. Each slice is a 2D image containing RGB color and alpha values [S1, unofficial].
+-*   Viewpoint parameters (position and orientation) for each original ray slice [S1, unofficial].
+-*   A geometric proxy surface representing the exterior boundary of the volume of interest [S1, unofficial].
+-*   A target viewpoint for which the key view is to be generated [S1, unofficial].
++1.  A set of ray slices, where each slice corresponds to a specific original viewpoint. Each ray slice is a 2D image representing the volume integration along rays from that viewpoint.
++2.  A geometric proxy surface, typically an isosurface extracted from the volume data, representing the outer boundary of the volume [S1, unofficial].
++3.  Viewpoint parameters for the original viewpoints used to generate the ray slices.
+ 
+ **Outputs:**
+-*   A single key view image in PNG RGBA format, representing the volume as seen from the target viewpoint, bounded by the proxy surface [S1, unofficial].
++A set of key views, one for each original viewpoint, stored in PNG RGBA image format [S1, unofficial]. Each key view represents the volume bounded by the proxy surface from that specific viewpoint.
+ 
+ **Data Structures:**
+-*   **Ray Slice:** A 2D grid of pixels. Each pixel stores 4 channels: Red, Green, Blue, and Alpha (opacity) [S1, unofficial].
+-*   **Proxy Surface:** A mesh or implicit surface definition. For implementation, it is treated as a renderable object that produces a depth buffer [S1, unofficial].
+-*   **Depth Buffer:** A 2D array of depth values ($z$) corresponding to the distance from the target viewpoint to the proxy surface for each pixel in the output image [S1, unofficial].
++*   **Ray Slices:** 2D arrays of RGBA values. The resolution matches the target display or buffer resolution.
++*   **Proxy Surface:** A mesh or implicit surface definition. For the algorithm, it is treated as a renderable geometry.
++*   **Depth Buffer:** A 2D array of depth values (distance from viewpoint to proxy surface).
+ 
+ **Steps:**
++1.  **Proxy Rendering:** For a specific original viewpoint, render the geometric proxy surface to the frame buffer. This establishes the visible boundary of the volume from that perspective [S1, unofficial].
++2.  **Depth Query:** Query the depth buffer to obtain the distance $d$ from the viewpoint to the proxy surface for each pixel $(u, v)$ in the key view [S1, unofficial]. This depth represents how far into the volume the viewer sees along the ray at pixel $(u, v)$ [S1, unofficial].
++3.  **Ray Slice Indexing:** Use the depth values $d$ to determine which ray slices are relevant for interpolation. The depth $d$ is mapped to a position along the ray axis defined by the original viewpoint's ray slices. This identifies the "front" and "back" ray slices that bracket the depth $d$ [S1, unofficial].
++4.  **Interpolation:** For each pixel $(u, v)$ in the key view:
++    *   Identify the two adjacent ray slices, $S_{front}$ and $S_{back}$, based on the depth $d$ [S1, unofficial].
++    *   Retrieve the RGBA color values from $S_{front}$ and $S_{back}$ at the corresponding pixel coordinates.
++    *   Perform linear interpolation between the two slices based on the relative depth $d$ [S1, unofficial]. The interpolation weights $w_{front}$ and $w_{back}$ are determined by the distance of $d$ to the planes of $S_{front}$ and $S_{back}$.
++    *   Compute the final RGBA value:
++        $$ C_{key} = w_{front} \cdot C_{front} + w_{back} \cdot C_{back} $$
++        where $C$ represents the RGBA vector [S1, unofficial].
++5.  **Output:** Store the resulting key view as a PNG RGBA image [S1, unofficial].
++6.  **Repeat:** Repeat steps 1-5 for every original viewpoint to generate the complete set of key views [S1, unofficial].
+ 
+-1.  **Render Proxy Surface:** Render the geometric proxy surface from the target viewpoint into a frame buffer. This generates a color buffer (unused) and a depth buffer [S1, unofficial].
+-2.  **Query Depth:** For each pixel $(u, v)$ in the output image, read the depth value $d_{proxy}(u, v)$ from the depth buffer. This value represents the distance from the viewpoint to the proxy surface at that pixel [S1, unofficial].
+-3.  **Identify Ray Slices:** Determine which pre-rendered ray slices are relevant for interpolation. Typically, this involves finding the two ray slices whose viewpoints bracket the target viewpoint along the interpolation path, or selecting the nearest slice if only one is used [S1, unofficial].
+-4.  **Interpolate Pixels:** For each pixel $(u, v)$ in the output image:
+-    *   Map the pixel coordinates to the coordinate systems of the source ray slices.
+-    *   Retrieve the color and alpha values from the identified ray slices at the mapped coordinates.
+-    *   Perform linear interpolation between the retrieved values based on the depth $d_{proxy}(u, v)$ and the distances of the source ray slices to the viewpoint [S1, unofficial].
+-    *   The interpolation weights are determined by the relative depth of the proxy surface compared to the depths of the source ray slices [S1, unofficial].
+-5.  **Output:** Store the interpolated RGB and Alpha values in the output image. Repeat for all pixels. Save as PNG RGBA [S1, unofficial].
+-
+-**Pseudocode:**
+-
+-```python
+-def generate_key_view(ray_slices, proxy_surface, target_viewpoint):
+-    """
+-    ray_slices: List of dicts, each containing:
+-        - 'viewpoint': Camera object (position, orientation)
+-        - 'image': 2D numpy array of shape (H, W, 4) [R, G, B, A]
+-    proxy_surface: Object with method 'render_depth(viewpoint)' returning a 2D depth map
+-    target_viewpoint: Camera object for the desired output view
+-    
+-    Returns: 2D numpy array of shape (H, W, 4) [R, G, B, A]
+-    """
+-    # Step 1: Render proxy surface to get depth buffer
+-    depth_buffer = proxy_surface.render_depth(target_viewpoint)
+-    
+-    # Determine height and width from the first ray slice (assuming uniform resolution)
+-    H, W, _ = ray_slices[0]['image'].shape
+-    key_view = np.zeros((H, W, 4))
+-    
+-    # Step 2 & 3: Iterate over each pixel in the output image
+-    for y in range(H):
+-        for x in range(W):
+-            # Get depth to proxy surface at this pixel
+-            d_proxy = depth_buffer[y, x]
+-            
+-            # Identify relevant ray slices for interpolation
+-            # In the general case, find two slices that bracket the target viewpoint
+-            # For simplicity, assume we interpolate between the nearest two slices
+-            # based on angular distance or depth.
+-            # Let's assume we have selected 'slice_a' and 'slice_b'
+-            # and their depths from the target viewpoint are d_a and d_b.
+-            
+-            # Note: The exact mapping from target pixel (x,y) to source slice pixels
+-            # requires projecting the ray through the proxy surface intersection point
+-            # into the source slice planes. This is a geometric projection step.
+-            
+-            # For each source slice, we need the pixel value at the projected location.
+-            # Let's assume a helper function 'project_pixel' exists which maps
+-            # the 3D point defined by (target_viewpoint, x, y, d_proxy)
+-            # to coordinates (u_src, v_src) in the source slice's image plane.
+-            
+-            # Interpolation logic:
+-            # value = w_a * value_a + w_b * value_b
+-            # where weights w_a, w_b depend on d_proxy, d_a, d_b
+-            
+-            # If only one ray slice is used (Single Ray Slice Technique):
+-            if len(ray_slices) == 1:
+-                slice = ray_slices[0]
+-                # Project the 3D point at depth d_proxy onto the single slice
+-                u_src, v_src = project_pixel(target_viewpoint, x, y, d_proxy, slice['viewpoint'])
+-                # Sample the slice
+-                val = sample_image(slice['image'], u_src, v_src)
+-                key_view[y, x] = val
+-            else:
+-                # General case: Interpolate between multiple slices
+-                # Find slices that bound the depth d_proxy
+-                # This part is complex and depends on the specific ray slice arrangement
+-                # The source mentions linear interpolation between ray slice pixels.
+-                # We assume 'interpolate_slices' handles the geometric projection and blending
+-                val = interpolate_slices(ray_slices, target_viewpoint, x, y, d_proxy)
+-                key_view[y, x] = val
+-                
+-    return key_view
+-
+-def sample_image(image, u, v):
+-    """Bilinearly sample a 2D image at float coordinates u, v."""
+-    # Implementation details for bilinear interpolation
+-    # ...
+-    pass
+-
+-def interpolate_slices(ray_slices, viewpoint, x, y, d_proxy):
+-    """
+-    Interpolate values from multiple ray slices based on proxy depth.
+-    This function encapsulates the geometric projection of the ray
+-    through the proxy surface intersection into the various ray slice planes.
+-    """
+-    # Find the two ray slices that best bracket the target viewpoint
+-    # relative to the proxy surface depth.
+-    # Let's assume we have identified slice1 and slice2.
+-    # Calculate their distances from the target viewpoint.
+-    # d1 = distance(viewpoint, slice1_plane)
+-    # d2 = distance(viewpoint, slice2_plane)
+-    
+-    # Interpolate the color and alpha from slice1 and slice2
+-    # based on the ratio (d_proxy - d1) / (d2 - d1)
+-    # ...
+-    pass
+-```
++**Single Ray Slice Technique:**
++If only one ray slice is used per viewpoint, interpolation is skipped [S1, unofficial].
++1.  Render the proxy surface to the depth buffer [S1, unofficial].
++2.  For each pixel, if the depth equals the far plane distance (indicating the ray did not intersect the proxy surface or the volume interior is empty/transparent), color the pixel black [S1, unofficial].
++3.  Otherwise, copy the pixel from the single ray slice [S1, unofficial].
++This technique removes scanning artifacts and hides surfaces external to the proxy surface [S1, unofficial].
+ 
+ **Parameters:**
+ *   **Output Format:** PNG RGBA [S1, unofficial].
+-*   **Interpolation Method:** Linear interpolation is used for RGB and Alpha channels [S1, unofficial]. Higher-order or nearest-neighbor interpolation is possible but not specified as default [S1, unofficial].
+-*   **Number of Key Views:** Adjustable; depends on data, application, and system [S1, unofficial].
++*   **Interpolation Method:** Linear interpolation is standard, though higher-order or nearest-neighbor methods are possible [S1, unofficial].
++*   **Number of Ray Slices:** Can be one or multiple per viewpoint, limited by memory [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Proxy Surface Accuracy:** Inaccurate proxy surface extraction causes ghosting artifacts around the isosurface boundary [S1, unofficial]. A better proxy surface allows fewer key views for smooth output [S1, unofficial].
+-*   **Proxy Surface Modification:** If the proxy surface is modified (e.g., by clipping planes) to reveal interior structure, key views must be recomputed using the new proxy geometry [S1, unofficial].
+-*   **Single Ray Slice:** If only one ray slice per viewpoint is used, no interpolation is required. Pixels where the depth equals the far plane distance are colored black to remove scanning artifacts and surfaces external to the proxy surface [S1, unofficial].
++**Pitfalls:**
++*   **Proxy Surface Accuracy:** An inaccurate proxy surface extraction causes ghosting artifacts around the isosurface boundary [S1, unofficial]. A better proxy surface allows fewer key views for smooth output, while a coarse surface requires more key views [S1, unofficial].
++*   **Proxy Modification:** If the proxy surface is modified (e.g., via clipping planes) to reveal interior structure, the key views must be recomputed using the new proxy geometry [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Preprocessing is $O(N \cdot M)$ where $N$ is the number of original viewpoints and $M$ is the number of pixels per slice. Real-time viewing is $O(P)$ where $P$ is the number of pixels in the output image, as it involves only 2D interpolation [S1, unofficial].
+-*   **Memory Complexity:** Requires storing all ray slices. Memory usage is $O(N \cdot H \cdot W \cdot C)$ where $H, W$ are slice dimensions and $C=4$ channels [S1, unofficial].
+-*   **Strengths:** Enables real-time interactive volume rendering by avoiding per-pixel ray casting during viewing [S1, unofficial].
+-*   **Limitations:** Image quality is heavily dependent on the accuracy of the proxy surface and the density of key views [S1, unofficial]. Interpolation errors can cause artifacts [S1, unofficial].
+-*   **When to Use:** When interactive frame rates are required and the volume has a well-defined exterior boundary that can be approximated by a proxy surface [S1, unofficial].
+-*   **When Not to Use:** When the volume has complex internal structures that cannot be bounded by a single proxy surface, or when high fidelity is required without the risk of interpolation artifacts [S1, unofficial].
++*   **Time Complexity:** Preprocessing is $O(N \cdot M)$, where $N$ is the number of viewpoints and $M$ is the number of pixels per slice. Rendering is $O(K)$, where $K$ is the number of pixels in the final image, as it involves simple texture lookups and interpolation.
++*   **Memory Complexity:** $O(N \cdot M \cdot B)$, where $B$ is the bytes per pixel (4 for RGBA). This can be significant for high-resolution volumes and many viewpoints [S1, unofficial].
++*   **Strengths:** Fast rendering of complex volumes; decouples volumetric integration from viewing; supports interactive exploration if key views are pre-computed [S1, unofficial].
++*   **Limitations:** High memory usage; interpolation artifacts if key views are sparse or proxy surface is inaccurate; static viewpoint arrangement limits free navigation compared to ray casting [S1, unofficial].
++*   **When to Use:** When interactive frame rates are required for complex volumes and memory is sufficient to store key views. Suitable for applications like surgical simulation or seismic data exploration where specific viewing cones are defined [S1, unofficial].
++*   **When Not to Use:** When memory is constrained, or when free, unconstrained 360-degree navigation is required without pre-computing a dense set of key views [S1, unofficial].
+ 
+ ## Background
+-Key View Generation is based on the principles of lumigraph rendering, adapted for volume data [S1, unofficial]. It was introduced as part of Image-Based Volume Rendering with Opacity Light Fields [S1, unofficial]. The method allows for efficient exploration of volume data by precomputing views from multiple angles and interpolating between them [S1, unofficial].
++Key View Generation is based on the principles of lumigraph rendering, adapted for volume data [S1, unofficial]. It was introduced in the context of image-based volume rendering to address the computational cost of real-time ray casting. The method relies on the decomposition of the 3D volume into a set of 2D planar slices (ray slices) and uses a geometric proxy to guide the interpolation of these slices into key views [S1, unofficial]. The approach allows for efficient rendering by leveraging the GPU's rasterization capabilities for proxy surface rendering and texture interpolation for key view synthesis [S1, unofficial].
+ 
+ ## Sources

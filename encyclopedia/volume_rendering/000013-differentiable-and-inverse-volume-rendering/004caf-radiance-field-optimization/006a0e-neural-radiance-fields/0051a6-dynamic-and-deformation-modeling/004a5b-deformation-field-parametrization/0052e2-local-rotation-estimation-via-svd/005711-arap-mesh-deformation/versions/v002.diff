@@ -1,0 +1,252 @@
+--- v001.md
++++ v002.md
+@@ -4,35 +4,34 @@
+ 
+ ## Overview
+-ARAP Mesh Deformation is a method for deforming a triangular mesh while preserving local rigidity, minimizing distortion energy by approximating local rotations. It solves the problem of transferring user-specified edits (boundary conditions) to the entire mesh structure smoothly. It is distinguished from global rigid transformations by allowing local flexibility, and from linear blend skinning by avoiding weight interpolation artifacts through explicit rotation optimization [S1].
++ARAP Mesh Deformation is a technique for deforming a triangular mesh while preserving local rigidity, minimizing distortion energy by approximating local rotations. It solves the problem of transferring user-specified boundary edits to the interior of a mesh without excessive stretching or shearing. It differs from global rigid transformations by allowing local rotation estimation per vertex, and from linear blend skinning by avoiding skeletal dependencies, relying instead on the mesh connectivity and cotangent weights [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Original triangular mesh $S$ with vertex positions $v_i \in \mathbb{R}^3$ for $i=1 \dots n$; a set of boundary conditions (user-edited vertex positions $v_i'$ for specific vertices); connectivity information (adjacency list $N(i)$).
+-*   **Output:** Deformed mesh $S'$ with new vertex positions $v_i'$.
++**Inputs:**
++- Original mesh $S$ with vertex positions $v_i \in \mathbb{R}^3$ for $i=1 \dots n$.
++- Connectivity information (adjacency list $N(i)$ for each vertex).
++- Boundary conditions: deformed positions $v'_i$ for a subset of vertices (user edits).
++
++**Outputs:**
++- Deformed mesh $S'$ with vertex positions $v'_i$ for all $i$.
+ 
+ **Data Structures:**
+-*   **Mesh Connectivity:** Adjacency list where $N(i)$ contains indices of vertices adjacent to vertex $i$.
+-*   **Cotangent Weights:** Precomputed scalar $w_{ij}$ for each edge $(i,j)$.
+-*   **Rotation Matrices:** $R_i \in \mathbb{R}^{3 \times 3}$ for each vertex $i$.
++- Adjacency list: $N(i)$ contains indices of vertices adjacent to $i$.
++- Cotangent weights: $w_{ij}$ stored for each edge $(i,j)$.
++- Rotation matrices: $R_i \in \mathbb{R}^{3 \times 3}$ for each vertex $i$.
+ 
+ **Formulas:**
+ The ARAP energy is defined as [S1]:
+-$$ E(S') = \sum_{i=1}^{n} \sum_{j \in N(i)} w_{ij} \| (v_i' - v_j') - R_i(v_i - v_j) \|^2 $$
++$$ E(S') = \sum_{i=1}^{n} \sum_{j \in N(i)} w_{ij} \| (v'_i - v'_j) - R_i(v_i - v_j) \|^2 $$
+ where:
+-*   $w_{ij} = \frac{1}{2}(\cot \alpha_{ij} + \cot \beta_{ij})$ is the cotangent weight [S1].
+-*   $\alpha_{ij}, \beta_{ij}$ are the angles opposite to the edge $(i,j)$ in the two triangles sharing that edge [S1].
+-*   $R_i$ is the local rotation matrix at vertex $i$ [S1].
++- $w_{ij} = \frac{1}{2}(\cot \alpha_{ij} + \cot \beta_{ij})$ is the cotangent weight for edge $(i,j)$.
++- $\alpha_{ij}, \beta_{ij}$ are the angles opposite to edge $(i,j)$ in the two triangles sharing it.
++- $R_i$ is the local rotation matrix at vertex $i$.
+ 
+-**Algorithm Steps:**
+-The energy is minimized by alternating optimization of rotations $R_i$ and positions $v_i'$ [S1].
+-
+-1.  **Initialize:** Set initial deformed positions $v_i'$ to original positions $v_i$ for all $i$, except for boundary vertices which are fixed to user-specified values. Initialize $R_i = I$ (identity) for all $i$.
+-2.  **Optimize Rotations:** For each vertex $i$, compute the optimal rotation $R_i$ that minimizes the energy term involving $R_i$. This is a Procrustes problem:
+-    $$ R_i = \arg \min_{R \in SO(3)} \sum_{j \in N(i)} w_{ij} \| (v_i' - v_j') - R(v_i - v_j) \|^2 $$
+-    The solution is obtained via Singular Value Decomposition (SVD) of the covariance matrix $H_i = \sum_{j \in N(i)} w_{ij} (v_i - v_j)(v_i' - v_j')^T$. Let $H_i = U \Sigma V^T$. Then $R_i = V U^T$. If $\det(R_i) = -1$, correct by flipping the sign of the smallest singular value [G].
+-3.  **Optimize Positions:** For each vertex $i$ (excluding fixed boundary vertices), solve for $v_i'$ by minimizing the energy with respect to $v_i'$. This results in a linear system. The gradient of the energy with respect to $v_i'$ is set to zero:
+-    $$ \frac{\partial E}{\partial v_i'} = 0 $$
+-    This yields a linear equation for each vertex. The system can be written as $A x = b$, where $x$ is the vector of all unknown vertex positions. The matrix $A$ is sparse and symmetric positive definite.
+-4.  **Iterate:** Repeat steps 2 and 3 until convergence (e.g., change in energy or positions is below a threshold).
++**Steps:**
++1. **Precompute Weights:** Calculate $w_{ij}$ for all edges using the original mesh geometry.
++2. **Initialize:** Set initial rotations $R_i = I$ (identity) for all $i$. Fix boundary vertices $v'_i$ to user-specified positions.
++3. **Optimize Rotations:** For each vertex $i$, compute the optimal rotation $R_i$ that minimizes the energy term involving $i$ and its neighbors, given current $v'_j$. This typically involves a Singular Value Decomposition (SVD) of a covariance matrix constructed from vectors $(v_i - v_j)$ and $(v'_i - v'_j)$ [S1, Note: SVD step implied by parent article context and standard ARAP literature, but specific matrix construction not detailed in S1 text. We assume standard ARAP rotation update].
++4. **Optimize Positions:** Solve for $v'_i$ for all free vertices by setting the gradient of $E(S')$ with respect to $v'_i$ to zero. This results in a linear system $A v' = b$, where $A$ is a sparse matrix derived from the cotangent weights and $R_i$, and $b$ incorporates boundary conditions and rotation terms.
++5. **Iterate:** Repeat steps 3 and 4 until convergence (change in energy or positions below a threshold).
+ 
+ **Pseudocode:**
+@@ -40,134 +39,88 @@
+ def arap_deformation(mesh, boundary_vertices, boundary_positions, max_iter=100, tol=1e-6):
+     """
+-    mesh: object with vertices V (n x 3), adjacency N (list of lists), and cotangent weights W (dict of dicts)
++    mesh: object with vertices V (n x 3), faces, and adjacency list N
+     boundary_vertices: list of vertex indices fixed to boundary_positions
+-    boundary_positions: list of 3D vectors corresponding to boundary_vertices
++    boundary_positions: list of 3D positions for boundary vertices
+     """
+     n = len(mesh.V)
+-    V_prime = mesh.V.copy() # Current deformed positions
++    V_prime = mesh.V.copy()
++    # Initialize rotations to identity
++    R = [np.eye(3) for _ in range(n)]
+     
+-    # Initialize boundary conditions
+-    for idx, pos in zip(boundary_vertices, boundary_positions):
+-        V_prime[idx] = pos
+-        
+-    R = [np.eye(3) for _ in range(n)] # Local rotations
++    # Precompute cotangent weights
++    weights = compute_cotangent_weights(mesh)
+     
+     for iteration in range(max_iter):
+         # Step 1: Optimize Rotations
+         for i in range(n):
+-            # Compute covariance matrix H_i
+-            H_i = np.zeros((3, 3))
++            # Construct covariance matrix M_i = sum_{j in N(i)} w_ij * (V[i] - V[j]) * (V_prime[i] - V_prime[j]).T
++            M_i = np.zeros((3, 3))
+             for j in mesh.N[i]:
+                 diff_orig = mesh.V[i] - mesh.V[j]
+                 diff_deformed = V_prime[i] - V_prime[j]
+-                w = mesh.W[i][j]
+-                H_i += w * np.outer(diff_orig, diff_deformed)
++                M_i += weights[(i,j)] * np.outer(diff_orig, diff_deformed)
+             
+-            # SVD for rotation
+-            U, S, Vt = np.linalg.svd(H_i)
+-            R_i = Vt.T @ U.T
+-            if np.linalg.det(R_i) < 0:
++            # SVD to find optimal rotation R_i
++            U, S, Vt = np.linalg.svd(M_i)
++            R[i] = Vt.T @ U.T
++            # Handle reflection case if necessary (det(R[i]) < 0)
++            if np.linalg.det(R[i]) < 0:
+                 Vt[-1, :] *= -1
+-                R_i = Vt.T @ U.T
+-            R[i] = R_i
++                R[i] = Vt.T @ U.T
++
++        # Step 2: Optimize Positions
++        # Solve linear system A * V_prime = b
++        # A is constructed from weights and R, b from boundary conditions and R
++        A, b = build_linear_system(mesh, weights, R, boundary_vertices, boundary_positions)
++        V_prime_flat = np.linalg.solve(A, b)
++        V_prime = V_prime_flat.reshape(n, 3)
++        
++        # Check convergence
++        if np.linalg.norm(V_prime - mesh.V) < tol:
++            break
+             
+-        # Step 2: Optimize Positions
+-        # Build linear system A x = b
+-        # For each vertex i, the energy term involving v_i' is:
+-        # sum_{j in N(i)} w_ij * || (v_i' - v_j') - R_i(v_i - v_j) ||^2
+-        # Gradient w.r.t v_i': 2 * sum_{j in N(i)} w_ij * ( (v_i' - v_j') - R_i(v_i - v_j) )
+-        # Setting to 0: v_i' * sum_{j in N(i)} w_ij - sum_{j in N(i)} w_ij * v_j' = sum_{j in N(i)} w_ij * R_i(v_i - v_j)
+-        
+-        A = np.zeros((n, n))
+-        b = np.zeros((n, 3))
+-        
+-        for i in range(n):
+-            if i in boundary_vertices:
+-                continue # Skip boundary vertices, they are fixed
+-            
+-            sum_w = 0
+-            rhs = np.zeros(3)
+-            for j in mesh.N[i]:
+-                w = mesh.W[i][j]
+-                sum_w += w
+-                # Contribution to b from neighbor j
+-                # Note: R_i is used for the target vector R_i(v_i - v_j)
+-                target = R[i] @ (mesh.V[i] - mesh.V[j])
+-                rhs += w * target
+-                
+-            A[i, i] = sum_w
+-            b[i] = rhs
+-            
+-            # Add contributions to neighbors' equations
+-            for j in mesh.N[i]:
+-                if j not in boundary_vertices:
+-                    A[i, j] -= mesh.W[i][j]
+-                # If j is boundary, its position is known and moved to RHS, 
+-                # but since we skip boundary rows, we must account for their fixed positions in b[i]
+-                # Actually, the standard way is to build the full system and then fix rows.
+-                # Here we build for unknowns only.
+-                
+-        # Handle boundary conditions in RHS
+-        for i in range(n):
+-            if i in boundary_vertices:
+-                continue
+-            rhs = np.zeros(3)
+-            for j in mesh.N[i]:
+-                w = mesh.W[i][j]
+-                target = R[i] @ (mesh.V[i] - mesh.V[j])
+-                rhs += w * target
+-                if j in boundary_vertices:
+-                    # Move fixed v_j' to RHS
+-                    rhs -= w * V_prime[j]
+-            b[i] = rhs
+-            
+-        # Solve linear system for unknown vertices
+-        unknown_indices = [i for i in range(n) if i not in boundary_vertices]
+-        A_sub = A[np.ix_(unknown_indices, unknown_indices)]
+-        b_sub = b[unknown_indices]
+-        
+-        try:
+-            x_sub = np.linalg.solve(A_sub, b_sub)
+-        except np.linalg.LinAlgError:
+-            break # Singular matrix
+-            
+-        for idx, pos in zip(unknown_indices, x_sub):
+-            V_prime[idx] = pos
+-            
+-        # Check convergence
+-        if iteration > 0:
+-            diff = np.linalg.norm(V_prime - V_prev)
+-            if diff < tol:
+-                break
+-        V_prev = V_prime.copy()
+-        
+     return V_prime
++
++def compute_cotangent_weights(mesh):
++    weights = {}
++    for face in mesh.faces:
++        i, j, k = face
++        # Calculate angles opposite to edges (i,j), (j,k), (k,i)
++        # This requires a helper to get opposite vertices and angles
++        # Simplified: assume helper function exists
++        weights[(i,j)] = 0.5 * (cot(angle_opposite_to_ij) + cot(angle_opposite_to_ij_other_triangle))
++        weights[(j,k)] = ...
++        weights[(k,i)] = ...
++    return weights
++
++def build_linear_system(mesh, weights, R, boundary_vertices, boundary_positions):
++    # Construct sparse matrix A and vector b
++    # For each free vertex i:
++    # sum_{j in N(i)} w_ij * (v'_i - v'_j) = sum_{j in N(i)} w_ij * R_i * (v_i - v_j)
++    # Rearrange to form linear equations
++    # This is a standard ARAP linear solve step
++    # Not fully detailed in S1, but implied by "efficiently solved"
++    pass
+ ```
+ 
+-**Parameters:**
+-*   $w_{ij}$: Cotangent weights, computed from the original mesh geometry [S1].
+-*   $R_i$: Local rotation matrices, optimized iteratively [S1].
+-*   $v_i$: Original vertex positions [S1].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Degenerate Triangles:** If triangles are degenerate (zero area), cotangent weights may be undefined or unstable. [G] Handle by checking for zero area and skipping or using alternative weights.
+-*   **Boundary Conditions:** The method requires fixed boundary vertices. If no boundaries are specified, the mesh may drift. [G] Ensure at least one vertex is fixed.
+-*   **Rotation Ambiguity:** SVD may yield a reflection ($\det(R) = -1$). This must be corrected to ensure $R \in SO(3)$ [G].
++- **Boundary Conditions:** Incorrectly fixing boundary vertices can lead to unrealistic deformations.
++- **Degenerate Triangles:** Cotangent weights become undefined for degenerate triangles (zero area). [G] Handle by skipping or smoothing weights.
++- **Reflections:** SVD may produce a reflection (det(R) = -1). Ensure proper handling to maintain orientation. [G]
+ 
+ ## Subtopics
+ 
+ ### ARAP Tetrahedral Deformation
+-Deforms a tetrahedral mesh $T$ under constraints from a surface triangular mesh deformation, extending the ARAP energy from triangles to tetrahedra [S1]. It finds which tetrahedron each triangular mesh vertex is located in and calculates its barycentric coordinates relative to the tetrahedron's four vertices [S1]. The optimization problem is $\min E(T')$ subject to $A t' = v'$, where $A$ is the barycentric weight matrix and $t'$ are deformed tetrahedron vertices [S1]. This converts the problem into linear equations using the Lagrangian multiplier method [S1].
++Extends ARAP deformation from triangular meshes to tetrahedral meshes. It deforms the tetrahedral mesh $T$ under constraints from the surface mesh deformation. The optimization problem is $\min E(T')$ subject to $A t' = v'$, where $A$ is the barycentric weight matrix and $t'$ are deformed tetrahedron vertices. It involves finding which tetrahedron each triangular mesh vertex is located in and calculating barycentric coordinates. The problem is converted to linear equations using Lagrangian multipliers [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Each iteration involves solving a sparse linear system, which is $O(n)$ to $O(n^{1.5})$ depending on the solver, where $n$ is the number of vertices. Convergence is typically fast (10-20 iterations) [S1].
+-*   **Memory Complexity:** $O(n)$ for storing vertices, rotations, and the sparse matrix [S1].
+-*   **Strengths:** Preserves local rigidity well; handles large deformations better than linear methods; efficient optimization [S1].
+-*   **Limitations:** Requires solving a linear system; sensitive to boundary conditions; may not preserve volume perfectly [S1].
+-*   **When to Use:** When rigid deformation is desired for mesh editing in NeRFs [S1].
+-*   **When Not to Use:** When real-time performance is critical and iterative solving is too slow; when volume preservation is strictly required [S1].
++- **Time Complexity:** Depends on the number of iterations and the cost of solving the linear system. Each iteration involves SVD for rotations and a sparse linear solve for positions.
++- **Memory Complexity:** Proportional to the number of vertices and edges for storing weights, rotations, and the linear system matrix.
++- **Strengths:** Preserves local rigidity well, handles complex deformations, no need for skeletons.
++- **Limitations:** Can be slow for large meshes due to iterative optimization. Sensitive to boundary conditions.
++- **When to Use:** When rigid deformation is desired without skeletal animation, or for transferring deformations from a surface mesh to a volume representation [S1].
+ 
+ ## Background
+-ARAP Mesh Deformation was introduced in the context of NeRF-Editing for geometry editing of Neural Radiance Fields [S1]. It builds on the parent method [Local Rotation Estimation via SVD](14864-local-rotation-estimation-via-svd.md) by providing a discrete mesh deformation mechanism that can be transferred to volume representations [S1].
++ARAP mesh deformation was introduced in the context of NeRF editing, specifically in the paper "NeRF-Editing: Geometry Editing of Neural Radiance Fields" [S1]. It is used to transfer user edits from a triangular mesh to an implicit volume representation, enabling geometry editing of neural radiance fields.
+ 
+ ## Sources

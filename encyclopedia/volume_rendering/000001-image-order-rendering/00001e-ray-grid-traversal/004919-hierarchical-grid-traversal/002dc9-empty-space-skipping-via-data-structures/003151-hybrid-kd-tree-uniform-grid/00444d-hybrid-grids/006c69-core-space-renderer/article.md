@@ -1,0 +1,188 @@
+# Core Space Renderer
+
+Also called: Core Space
+
+## Overview
+The Core Space Renderer is a hierarchical ray-tracing method for visualizing the interior of biological compartments by defining the proxy geometry's volume as a union of rectangular prisms (boxes) [S1]. It solves the problem of rendering mesostructures located deep within a mesh by combining a coarse uniform core grid for initial ray culling with fine-grained acceleration structures for molecular data [S1]. Unlike the Shell Space Renderer, which uses triangular prisms for the exterior, Core Space uses a uniform grid to efficiently skip empty space and determine the valid ray interval $[t_{min}, t_{max}]$ before delegating to lower-level acceleration structures [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray origin $\mathbf{o}$ and direction $\mathbf{d}$; Core Grid Metadata (AABB, box size, grid dimensions); Micro Level Acceleration Structure ($\mu$LAS) containing proxy geometry triangles; Meso Level AS (mLAS) containing Wang tiles/cubes; Nano Level AS (nLAS) containing protein instances.
+*   **Output:** Intersection points with molecular data within the core volume.
+
+**Data Structures:**
+1.  **Core Grid Metadata:**
+    *   `grid_aabb`: Axis-aligned bounding box of the proxy geometry (min/max coordinates).
+    *   `box_size`: Uniform width/height/depth of each grid cell.
+    *   `grid_dims`: Number of cells along X, Y, Z axes.
+    *   *Note:* No explicit data structure is stored for the grid boxes; positions are derived mathematically from metadata [S1].
+2.  **$\mu$LAS:** Bottom-level acceleration structure (e.g., BVH) storing the triangles of the proxy geometry mesh.
+3.  **mLAS/nLAS:** Acceleration structures for Wang cubes and protein instances, respectively.
+
+**Algorithm Steps:**
+
+1.  **Define Core Space:**
+    Construct the core grid by uniformly subdividing the proxy geometry's AABB into non-overlapping 3D axis-aligned boxes [S1].
+
+2.  **Determine Ray Interval:**
+    Cast the ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ into the $\mu$LAS twice to find intersections with the proxy geometry mesh:
+    *   Find the closest **front-facing** triangle intersection. Let the hit point be $\mathbf{q}$ and the parameter be $t_q$.
+    *   Find the closest **back-facing** triangle intersection. Let the hit point be $\mathbf{k}$ and the parameter be $t_k$.
+    
+    Determine the ray interval $[t_{min}, t_{max}]$ based on the viewpoint position relative to the mesh:
+    *   If $t_q < t_k$ (viewpoint outside mesh volume):
+        $$ t_{min} = t_q, \quad t_{max} = t_k $$
+    *   If $t_q > t_k$ (viewpoint inside mesh volume):
+        $$ t_{min} = \epsilon, \quad t_{max} = t_k $$
+        Where $\epsilon$ is a small positive number to avoid self-intersection at the entry point [S1].
+
+3.  **Compute Grid Bounds:**
+    Calculate the coordinates of the start box $(i_{start}, j_{start}, k_{start})$ and exit box $(i_{end}, j_{end}, k_{end})$ corresponding to positions $\mathbf{q}$ and $\mathbf{k}$ within the core grid. This is done by mapping the world coordinates of $\mathbf{q}$ and $\mathbf{k}$ to grid indices using the Core Grid Metadata [S1].
+
+4.  **Sequential Grid Traversal:**
+    Traverse the core grid boxes sequentially from the start box to the exit box. For each box:
+    *   Check if the ray intersects the box's AABB.
+    *   If an intersection is found with molecular data (via lower-level AS), record the hit and terminate traversal for this ray [S1].
+    *   If the exit box is fully processed without a hit, terminate traversal [S1].
+    
+    *Optimization:* Traversal is performed sequentially, not in parallel, to reduce memory consumption. This is justified because biological cells and viruses are typically crowded, meaning a hit is usually found in the first intersected box [S1].
+
+5.  **Wang Cube Lookup and Transformation:**
+    If the ray intersects the proxy geometry at point $\mathbf{q}$ (detected during grid traversal or initial $\mu$LAS cast):
+    *   Obtain the box coordinates $b_{ijk}$ of the intersected box by exploiting grid regularity [S1].
+    *   Use the 3D tile Wang recipe to look up the corresponding Wang cube for $b_{ijk}$ [S1].
+    *   Compute the center position $\mathbf{c}$ of the box $b_{ijk}$ [S1].
+    *   Construct a translation matrix $T$ using $\mathbf{c}$ [S1].
+    *   Retrieve the transformation matrix $M_{proxy}$ of the proxy geometry [S1].
+    *   Compute the final transformation matrix $M_1$ for the Wang cube:
+        $$ M_1 = T \times M_{proxy} $$
+        [S1].
+
+6.  **Inverse Ray Traversal for mLAS/nLAS:**
+    *   Inverse the ray $\mathbf{r}$ using $M_1$ to transform it into the object space of the Wang cube [S1].
+    *   Search for intersections in the mLAS (Wang tiles) and nLAS (protein instances) using the inverse ray [S1].
+    *   Process mLAS and nLAS levels in parallel [S1].
+    *   If a hit is found in mLAS, obtain the Wang tile ID, inverse the ray again, and traverse the specific mLAS/nLAS associated with that tile [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def core_space_renderer(ray_o, ray_d, core_grid_meta, mu_las, m_las, n_las):
+    """
+    ray_o: vec3, ray origin
+    ray_d: vec3, ray direction (normalized)
+    core_grid_meta: dict with keys 'aabb_min', 'aabb_max', 'box_size', 'dims'
+    mu_las: object with method intersect(ray) returning (hit_point, t, normal)
+    m_las: object with method intersect(ray) returning hits
+    n_las: object with method intersect(ray) returning hits
+    """
+    
+    # Step 1: Determine Ray Interval by intersecting with proxy geometry (mu_las)
+    # Cast ray to find closest front-facing hit
+    hit_front = mu_las.intersect(ray_o, ray_d, front_facing=True)
+    # Cast ray to find closest back-facing hit
+    hit_back = mu_las.intersect(ray_o, ray_d, front_facing=False)
+    
+    if not hit_front or not hit_back:
+        return None # No intersection with proxy geometry
+        
+    t_q = hit_front.t
+    t_k = hit_back.t
+    
+    # Step 2: Set interval based on viewpoint position
+    epsilon = 1e-6
+    if t_q < t_k:
+        # Viewpoint outside
+        t_min = t_q
+        t_max = t_k
+    else:
+        # Viewpoint inside
+        t_min = epsilon
+        t_max = t_k
+        
+    # Calculate start and exit positions
+    pos_start = ray_o + t_min * ray_d
+    pos_exit = ray_o + t_max * ray_d
+    
+    # Step 3: Compute grid box coordinates for start and exit
+    # Helper to convert world pos to grid index
+    def world_to_grid_index(pos, aabb_min, box_size):
+        return (pos - aabb_min) / box_size
+    
+    start_idx = world_to_grid_index(pos_start, core_grid_meta['aabb_min'], core_grid_meta['box_size'])
+    exit_idx = world_to_grid_index(pos_exit, core_grid_meta['aabb_min'], core_grid_meta['box_size'])
+    
+    # Step 4: Sequential Grid Traversal
+    # Iterate through boxes along the ray path from start_idx to exit_idx
+    # Note: A proper ray-grid traversal algorithm (e.g., Amanatides & Woo) is used here
+    # to determine the sequence of boxes. For simplicity, we assume a function 
+    # `get_grid_boxes_along_ray` returns an iterator of (i, j, k) boxes.
+    
+    for box_idx in get_grid_boxes_along_ray(start_idx, exit_idx, ray_o, ray_d, core_grid_meta):
+        # Check intersection with molecular data in this box
+        # This involves checking against mLAS/nLAS instances mapped to this box
+        # However, the primary hit detection for the "Core Space" logic is 
+        # often the proxy geometry intersection itself or the first molecular hit.
+        
+        # If we find a hit in the lowest level AS, return it
+        hit = check_molecular_hits_in_box(box_idx, ray_o, ray_d, m_las, n_las)
+        if hit:
+            return hit
+            
+        # If we exit the grid without a hit, stop
+        if box_idx == exit_idx:
+            break
+            
+    # Step 5 & 6: Wang Cube Transformation (if needed for specific shading/lookup)
+    # This part is triggered if a specific proxy hit q is identified for 
+    # mapping to a Wang cube.
+    if hit_front:
+        q = hit_front.point
+        # Get box coordinates b_ijk for q
+        b_ijk = world_to_grid_index(q, core_grid_meta['aabb_min'], core_grid_meta['box_size'])
+        
+        # Look up Wang cube for b_ijk
+        wang_cube = lookup_wang_cube(b_ijk)
+        
+        # Compute center of the box
+        box_center = core_grid_meta['aabb_min'] + (b_ijk + 0.5) * core_grid_meta['box_size']
+        
+        # Compute transformation matrix M1
+        T = translation_matrix(box_center)
+        M_proxy = get_proxy_transformation_matrix()
+        M1 = T * M_proxy
+        
+        # Inverse ray and search in mLAS/nLAS
+        inv_ray_o = inverse_transform_point(ray_o, M1)
+        inv_ray_d = inverse_transform_vector(ray_d, M1)
+        
+        # Parallel traversal of mLAS and nLAS
+        hit_m = m_las.intersect(inv_ray_o, inv_ray_d)
+        hit_n = n_las.intersect(inv_ray_o, inv_ray_d)
+        
+        # Return closest hit from mLAS/nLAS
+        if hit_m and hit_n:
+            return hit_m if hit_m.t < hit_n.t else hit_n
+        elif hit_m:
+            return hit_m
+        elif hit_n:
+            return hit_n
+            
+    return None
+```
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the initial $\mu$LAS intersection tests (2 casts) and the sequential grid traversal. The sequential nature of the grid traversal reduces parallel overhead but may be slower than a fully parallel BVH if hits are rare. However, in crowded biological scenes, the first box often contains a hit, making the sequential approach efficient [S1].
+*   **Memory Complexity:** Low memory footprint for the acceleration structure. The core grid requires no explicit storage, only metadata (AABB, box size, dimensions) [S1]. This avoids the memory allocation required for building an AS for the core grid boxes [S1].
+*   **Strengths:** Efficient handling of large, crowded biological volumes; minimal memory usage for the coarse grid; leverages GPU RT cores for fine-level structures [S1].
+*   **Limitations:** Sequential grid traversal may not scale well on hardware with high parallelism if hits are sparse; relies on the assumption that molecular data is dense within the core [S1].
+*   **When to use:** Rendering internal structures of biological compartments where the proxy geometry encloses a dense volume of mesostructures [S1].
+*   **When not to use:** Sparse volumes where the ray might traverse many empty boxes before finding a hit, as sequential traversal would be inefficient compared to a parallel BVH [S1].
+
+## Background
+The Core Space Renderer was introduced in the **Nanouniverse** system, which focuses on the virtual instancing of structural detail and adaptive shell mapping in biological visualization [S1]. It extends the concept of "Shell Space" (which uses triangular prisms for the exterior) to handle the interior of proxy geometries using rectangular prisms (boxes) [S1]. The method is part of a hierarchical acceleration structure approach involving $\mu$LAS (micro), mLAS (meso), and nLAS (nano) levels, designed for interactive visualization on NVIDIA RTX GPUs [S1].
+
+## Sources
+[S1] Nanouniverse: Virtual Instancing of Structural Detail and Adaptive Shell Mapping., https://doi.org/10.1109/tvcg.2025.3618914, fetched 2026-10-26

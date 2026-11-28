@@ -1,0 +1,59 @@
+# Key-Frame Animation with In-Betweening
+
+Also called: Key-Frame Interpolation, Temporal Interpolation for Animation
+
+## Overview
+Key-frame animation with in-betweening is a technique that generates continuous video frames (typically 30 fps) from discrete simulation data by interpolating between computed "key-frames" [S1, unofficial]. It solves the problem of insufficient temporal resolution in high-performance simulations, which often output data at rates far lower than display requirements [S1, unofficial]. It differs from continuous time-stepping by decoupling simulation cost from visual fidelity, relying on post-processing interpolation rather than physical continuity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of discrete time states (key-frames) from a simulation (Eulerian or Lagrangian), and a target output frame rate (e.g., 30 fps) [S1, unofficial].
+*   **Output:** A sequence of interpolated frames constituting the animation video [S1, unofficial].
+
+**Data Structures:**
+*   **Key-Frame List:** A sequence of simulation states $S_i$ at times $t_i$, where each state contains spatial field data (e.g., velocity, stress) and/or particle positions [S1, unofficial].
+*   **Time Interval:** The duration between two consecutive key-frames $t_i$ and $t_{i+1}$ [S1, unofficial].
+
+**Steps:**
+1.  **Identify Data Type:** Determine if the simulation data is Eulerian (fixed grid) or Lagrangian (moving particles/mesh) [S1, unofficial].
+2.  **Apply Interpolation:**
+    *   **For Eulerian Data:** Perform linear interpolation of field variables at discrete time intervals between key-frames [S1, unofficial].
+    *   **For Lagrangian Data (Rigid Body/Contact):** Use conditional interpolation based on material identification [S1, unofficial].
+        *   Identify objects by material in the mesh [S1, unofficial].
+        *   Activate conditional interpolation only during specific events (e.g., impact) [S1, unofficial].
+        *   Deactivate conditional interpolation when rigid body dynamics are not dominant, reverting to simple linear in-betweening for spatial coordinates and field variables [S1, unofficial].
+3.  **Handle Uncertain Events:** If the exact timing of an impact event is unknown or cannot be captured by a key-frame, store multiple time states immediately before and after the expected impact time [S1, unofficial].
+4.  **Render:** Generate intermediate frames by interpolating between the stored states at the target frame rate [S1, unofficial].
+
+**Formulas:**
+*   **Linear Interpolation (Eulerian):** For a field variable $V$ at time $t$ between key-frames $t_i$ and $t_{i+1}$:
+    $$ V(t) = V_i + \frac{t - t_i}{t_{i+1} - t_i} (V_{i+1} - V_i) $$
+    Where $V_i$ is the value at key-frame $i$ [S1, unofficial].
+
+**Parameters:**
+*   **Target Frame Rate:** Typically 30 frames per second [S1, unofficial].
+*   **Material Identification:** User-defined tags for mesh elements to enable conditional interpolation [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Impact Artifacts:** If conditional interpolation is not used for impact events in Lagrangian data, artifacts are produced when key-frames span the event [S1, unofficial].
+*   **Timing Uncertainty:** It is practically impossible to place a key-frame precisely at the time of impact; therefore, dense sampling around impact is required if conditional logic is not feasible [S1, unofficial].
+
+## Subtopics
+
+### Sequence Blending
+A technique to combine different simulation sequences to generate a desired temporal progression that may be absent from the sampled parameter space or physically impossible, by sacrificing physical plausibility for artistic control [S2]. It is chosen when artists need to manually blend fluid simulation sequences within a cluster timeline interface [S2]. The process involves marking a cluster item as a key frame to display the best matching sequence until the end of its time interval [S2]. If a second key frame is selected, a transition occurs between the two sequences within the time interval separating them [S2]. Blending is performed in volume space by computing on-the-fly interpolation between corresponding time steps of both sequences, driven by a user-specified easing curve [S2]. The easing curve is a user-defined function that controls the interpolation weight over the transition interval [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of interpolated frames between key-frames [S1, unofficial].
+*   **Memory Complexity:** Proportional to the number of stored key-frames [S1, unofficial].
+*   **Strengths:** Reduces computational cost by allowing sparse simulation sampling while maintaining smooth visual output [S1, unofficial].
+*   **Limitations:** Linear interpolation may produce artifacts for complex dynamic events like impacts if not handled with conditional logic [S1, unofficial].
+*   **When to Use:** When simulation cost is high and visual smoothness is prioritized over exact physical continuity at every frame [S1, unofficial].
+*   **When Not to Use:** When precise physical accuracy during transient events (e.g., collision) is required and conditional interpolation is not implemented [S1, unofficial].
+
+## Background
+The method originated in the context of visualizing high-resolution, transient, 3-D finite element simulations [S1, unofficial]. It was developed to address the need for video-quality output (30 fps) from simulation codes that produce data at much lower frequencies [S1, unofficial]. Early implementations relied on disk-based animation systems where images were rendered and stored on rotating disks before being recorded to video tape [S1, unofficial]. The technique distinguishes between Eulerian and Lagrangian data handling to manage the complexities of rigid body dynamics and contact [S1, unofficial].
+
+## Sources
+[S1] Visualization methods for high-resolution, transient, 3-D, finite element situations, https://digital.library.unt.edu/ark:/67531/metadc686501/?q=tensor field visualization volume, fetched 2026-10-29 (unofficial)
+[S2] Result-Driven Exploration of Simulation Parameter Spaces for Visual Effects Design, https://doi.org/10.1109/TVCG.2010.190, fetched 2026-10-31

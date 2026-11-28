@@ -1,0 +1,235 @@
+# Point Diffusion Implicit Function (PDF)
+## Overview
+Point Diffusion Implicit Function (PDF) is a neural representation method for large-scale outdoor scene novel view synthesis that reduces the 3D sampling space to a 2D surface distribution using a diffusion-based point cloud prior [S1]. Unlike methods that decompose space into subspaces or compress sampling areas, PDF explicitly restricts foreground sampling to dense surface points, addressing the inefficiency of sampling unbounded air in large scenes [S1]. It builds on [NeRF++](6198-nerf.md) by separating foreground and background rendering, using [Mip-NeRF 360](https://doi.org/10.1145/3450626.3459758) for background handling [S1].
+
+## How it works
+PDF consists of two main modules: a Point Diffusion Render Module for foreground features and a Background Render Module for background features, which are fused to generate novel views [S1].
+
+### Inputs and Outputs
+**Inputs:**
+- Sparse point cloud $x_s \in \mathbb{R}^{M \times 3}$ reconstructed from training views using COLMAP [S1].
+- Training images for radiance field optimization [S1].
+
+**Outputs:**
+- Dense surface point cloud $x_d \in \mathbb{R}^{N \times 3}$ [S1].
+- Novel view images synthesized from foreground and background features [S1].
+
+### Data Structures
+1. **Sparse Point Cloud ($x_s$):** $M$ points, each with 3 coordinates $(x, y, z)$ [S1].
+2. **Dense Surface Point Cloud ($x_d$):** $N$ points, each with 3 coordinates $(x, y, z)$, where $N > M$ [S1].
+3. **Neural Network (MLP):** Predicts color and density for sampled points [S1].
+
+### Steps
+
+#### 1. Point Cloud Super-Resolution via Diffusion
+Since dense ground truth for large-scale outdoor scenes is unavailable, a diffusion-based super-resolution network is trained to generate dense points from sparse inputs [S1].
+
+1. **Data Preparation:**
+   - Start with COLMAP-reconstructed sparse point cloud $x_s \in \mathbb{R}^{M \times 3}$ [S1].
+   - Downsample $x_s$ twice to create two sparser point clouds: $z_0 \in \mathbb{R}^{n \times 3}$ and $x_0 \in \mathbb{R}^{m \times 3}$, where $m < n < M$ [S1].
+   - These pairs $(x_0, z_0)$ serve as training data to prevent overfitting to the specific COLMAP reconstruction [S1].
+
+2. **Diffusion Training:**
+   - Train a denoising diffusion probabilistic model to learn the distribution of dense point clouds [S1].
+   - The model learns to generate $x_d \in \mathbb{R}^{N \times 3}$ from sparse inputs [S1].
+
+#### 2. Foreground Rendering
+Foreground rendering uses the dense point cloud $x_d$ as an explicit prior to restrict sampling [S1].
+
+1. **Ray Sampling:**
+   - Sample points along the ray [S1].
+   - **Filtering:** Retain a sampled point $p$ only if there exists a point $q \in x_d$ such that the distance $\|p - q\| < r$, where $r$ is a predefined sampling radius [S1].
+   - This restricts the effective sampling space to the vicinity of the scene surface, reducing it from 3D to a 2D surface manifold [S1].
+
+2. **Feature Extraction:**
+   - For retained points, query a neural network to predict color and density [S1].
+   - Aggregate features using volume rendering to produce foreground features [S1].
+
+#### 3. Background Rendering
+The point cloud only models the foreground surface; the unbounded background is handled separately, following [NeRF++](6198-nerf.md) [S1].
+
+1. **Background Identification:**
+   - For each ray, determine if it intersects the foreground surface [S1].
+   - If a ray does not find a neighborhood point in $x_d$ within radius $r$, it is considered a background ray [S1].
+
+2. **Background Sampling:**
+   - Use the Mip-NeRF 360 strategy to sample regions in scene space for background rays [S1].
+   - This involves sampling areas rather than single points to handle unbounded space efficiently [S1].
+
+3. **Feature Extraction:**
+   - Query a separate neural network for background features [S1].
+   - Aggregate features using volume rendering to produce background features [S1].
+
+#### 4. Fusion
+- Combine foreground and background features to generate the final pixel color [S1].
+- The features are fused using standard alpha compositing [G].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def prepare_diffusion_data(colmap_points, downsample_factors):
+    """
+    Prepare training data for diffusion model by downsampling COLMAP points.
+    colmap_points: np.array of shape (M, 3)
+    downsample_factors: list of integers for downsampling steps
+    Returns: tuple of (sparse, medium) point clouds
+    """
+    medium_points = colmap_points[np.random.choice(colmap_points.shape[0], colmap_points.shape[0] // downsample_factors[0], replace=False)]
+    sparse_points = medium_points[np.random.choice(medium_points.shape[0], medium_points.shape[0] // downsample_factors[1], replace=False)]
+    return sparse_points, medium_points
+
+def train_diffusion_model(sparse_points, medium_points, num_steps):
+    """
+    Train diffusion model to map sparse to dense points.
+    sparse_points: np.array of shape (m, 3)
+    medium_points: np.array of shape (n, 3)
+    Returns: trained diffusion model
+    """
+    # The exact diffusion network architecture and noise scheduling are not specified in the sources [G].
+    # Standard denoising diffusion training loop:
+    model = {}  # Placeholder for model parameters
+    for step in range(num_steps):
+        # Forward diffusion: add noise to medium_points
+        noise = np.random.normal(0, 1, medium_points.shape) * (step / 100.0)
+        noisy_points = medium_points + noise
+        # Reverse diffusion: predict noise or clean points
+        predicted_clean = {}  # Placeholder for model prediction
+        loss = np.mean((predicted_clean - medium_points) ** 2)
+        # model.update_weights(loss)  # Placeholder for optimizer step
+    return model
+
+def generate_dense_surface(diffusion_model, sparse_points, target_density):
+    """
+    Generate dense surface points from sparse input using trained diffusion model.
+    sparse_points: np.array of shape (m, 3)
+    target_density: float, target number of points N
+    Returns: np.array of shape (N, 3)
+    """
+    # Sample from diffusion model to get dense points
+    dense_points = np.random.randn(target_density, 3)  # Placeholder for actual diffusion sampling
+    return dense_points
+
+def sample_along_ray(origin, direction, num_samples, step_size):
+    """
+    Sample points along a ray.
+    origin: np.array of shape (3,)
+    direction: np.array of shape (3,)
+    num_samples: int
+    step_size: float
+    Returns: np.array of shape (num_samples, 3)
+    """
+    t = np.linspace(0, num_samples * step_size, num_samples)
+    return origin + t[:, None] * direction
+
+def filter_points(sampled_points, dense_points, radius):
+    """
+    Filter points based on proximity to dense surface.
+    sampled_points: np.array of shape (K, 3)
+    dense_points: np.array of shape (N, 3)
+    radius: float
+    Returns: np.array of shape (K_valid, 3)
+    """
+    # Compute distances from each sampled point to all dense points
+    # Using broadcasting: (K, 1, 3) - (1, N, 3) -> (K, N, 3)
+    diff = sampled_points[:, None, :] - dense_points[None, :, :]
+    distances = np.linalg.norm(diff, axis=2)  # Shape (K, N)
+    min_distances = np.min(distances, axis=1)  # Shape (K,)
+    valid_mask = min_distances < radius
+    return sampled_points[valid_mask]
+
+def query_network(points, direction, network_weights):
+    """
+    Query neural network for color and density.
+    points: np.array of shape (K, 3)
+    direction: np.array of shape (3,)
+    network_weights: dict or object representing MLP parameters
+    Returns: colors (K, 3), densities (K,)
+    """
+    # Placeholder for MLP forward pass
+    # In practice, this concatenates position and direction, passes through MLP layers
+    colors = np.random.rand(points.shape[0], 3).astype(np.float32)
+    densities = np.abs(np.random.rand(points.shape[0])).astype(np.float32)
+    return colors, densities
+
+def volume_render(colors, densities, step_size):
+    """
+    Standard volume rendering accumulation.
+    colors: np.array of shape (K, 3)
+    densities: np.array of shape (K,)
+    step_size: float
+    Returns: color (3,), opacity (float)
+    """
+    alphas = 1.0 - np.exp(-np.clip(densities, 0, 10) * step_size)
+    transmittance = np.concatenate([[1.0], np.cumprod(1.0 - alphas[:-1])])
+    weights = alphas * transmittance
+    color = np.sum(weights[:, None] * colors, axis=0)
+    opacity = np.sum(weights, axis=0)
+    return color, opacity
+
+def render_foreground(ray_origin, ray_direction, dense_points, radius, step_size, network_weights):
+    """
+    Render foreground along a ray using dense point cloud prior.
+    Returns: foreground color (3,), foreground opacity (float)
+    """
+    sampled_points = sample_along_ray(ray_origin, ray_direction, 100, step_size)
+    valid_points = filter_points(sampled_points, dense_points, radius)
+    
+    if valid_points.shape[0] == 0:
+        return np.zeros(3), 0.0
+    
+    colors, densities = query_network(valid_points, ray_direction, network_weights)
+    color, opacity = volume_render(colors, densities, step_size)
+    return color, opacity
+
+def render_background(ray_origin, ray_direction, step_size, network_weights):
+    """
+    Render background using Mip-NeRF 360 strategy.
+    Returns: background color (3,), background opacity (float)
+    """
+    # Sample regions in scene space for background
+    sampled_regions = sample_along_ray(ray_origin, ray_direction, 100, step_size)
+    
+    colors, densities = query_network(sampled_regions, ray_direction, network_weights)
+    color, opacity = volume_render(colors, densities, step_size)
+    return color, opacity
+
+def render_novel_view(camera_origin, camera_direction, dense_points, radius, step_size, fg_network, bg_network):
+    """
+    Render a novel view by combining foreground and background.
+    Returns: rendered image (H, W, 3)
+    """
+    # Placeholder for camera ray generation loop
+    # For a single ray:
+    fg_color, fg_opacity = render_foreground(camera_origin, camera_direction, dense_points, radius, step_size, fg_network)
+    bg_color, bg_opacity = render_background(camera_origin, camera_direction, step_size, bg_network)
+    
+    # Standard alpha compositing fusion [G]
+    final_color = fg_color + bg_color * (1.0 - fg_opacity)
+    return final_color
+```
+
+### Parameters
+- **Sampling Radius ($r$):** Not given in the sources. [G] Typical values depend on scene scale and point cloud density.
+- **Downsampling Factors:** Not given in the sources. [G] Must ensure $m < n < M$.
+- **Diffusion Steps:** Not given in the sources. [G] Typical values for diffusion models are 50-1000 steps.
+
+### Edge Cases and Pitfalls
+- **Lack of Dense Ground Truth:** The method relies on synthetic dense points from diffusion, which may not perfectly match the true surface, leading to artifacts [S1].
+- **Background Handling:** If the foreground surface is incomplete, rays may incorrectly sample background as foreground or vice versa [S1].
+- **Precision Loss:** While PDF reduces sampling space, the diffusion process introduces approximation errors [S1].
+
+## Operating characteristics
+- **Time Complexity:** Reduces sampling space from 3D to 2D surface, significantly lowering the number of points to evaluate per ray compared to unbounded space methods [S1].
+- **Memory Complexity:** Stores dense point cloud $x_d \in \mathbb{R}^{N \times 3}$ and two radiance fields (foreground and background) [S1].
+- **Performance:** Outperforms state-of-the-art methods on OMMO and BlendMVS datasets [S1].
+- **Strengths:** Efficient for large-scale outdoor scenes; reduces representation complexity by compressing 3D space to 2D surface [S1].
+- **Limitations:** Requires initial COLMAP reconstruction; diffusion model training adds complexity; background rendering may lack detail [S1].
+
+## Background
+PDF was proposed to address the challenge of novel view synthesis for large-scale outdoor scenes, where traditional methods struggle with the exploding sampling space [S1]. It builds on [NeRF++](6198-nerf.md) for foreground-background separation and uses [Mip-NeRF 360](https://doi.org/10.1145/3450626.3459758) for background rendering [S1]. The method was introduced in "PDF: Point Diffusion Implicit Function for Large-scale Scene Neural Representation" [S1].
+
+## Sources
+[S1] PDF: Point Diffusion Implicit Function for Large-scale Scene Neural Representation, https://doi.org/10.48550/arXiv.2311.01773, fetched 2026-10-29

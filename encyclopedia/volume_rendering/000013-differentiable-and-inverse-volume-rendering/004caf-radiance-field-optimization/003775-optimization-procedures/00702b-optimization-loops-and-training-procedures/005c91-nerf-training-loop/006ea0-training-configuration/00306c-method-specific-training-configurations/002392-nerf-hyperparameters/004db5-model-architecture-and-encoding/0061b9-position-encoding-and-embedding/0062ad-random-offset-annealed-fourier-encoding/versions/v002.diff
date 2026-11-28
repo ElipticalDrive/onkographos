@@ -1,0 +1,215 @@
+--- v001.md
++++ v002.md
+@@ -4,140 +4,111 @@
+ 
+ ## Overview
+-Random Offset Annealed Fourier Encoding (ROAFE) is a positional encoding scheme for 3D coordinates that combines Fourier basis functions with random Gaussian offsets and an annealing schedule to improve the optimization landscape for neural radiance fields. It addresses the axis-alignment artifacts and striping issues inherent in standard NeRF encoding by breaking symmetry through random shifts, while using a truncated Hann window to gradually introduce high-frequency details. It is primarily used in the SAMURAI framework.
++Random Offset Annealed Fourier Encoding (ROAFE) is a positional encoding scheme for radiance fields that modifies standard Fourier encoding by introducing random Gaussian offsets to frequency basis functions and applying an annealing schedule to the frequencies [S1]. It solves the problem of axis-aligned frequency artifacts (striping) inherent in standard NeRF encoding while maintaining the optimization stability provided by frequency annealing [S1]. It is distinguished from standard NeRF encoding by the addition of random offsets and from BARF/Nerfies by the specific handling of these offsets within the annealing window [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: A 3D coordinate vector $x \in \mathbb{R}^3$.
+-- Output: An encoded vector $\gamma(x) \in \mathbb{R}^{3+6L}$, where $L$ is the number of frequency bands.
++**Inputs and Outputs**
++*   **Input:** A 3D coordinate vector $\mathbf{x} \in \mathbb{R}^3$.
++*   **Parameters:**
++    *   $L$: Number of frequency bands. Default: 10 [S1].
++    *   $\alpha$: Annealing parameter, ranging from $0$ to $L$. Annealed over 50,000 steps [S1].
++    *   $\mathbf{R}$: Random offset matrix of size $L \times 3$, sampled from $\mathcal{N}(0, 0.1)$ [S1].
++*   **Output:** An encoded vector $\gamma(\mathbf{x}) \in \mathbb{R}^{3 + 6L}$ [S1].
+ 
+-**Data Structures:**
+-- $R \in \mathbb{R}^{L \times 3}$: Matrix of random Gaussian offsets, sampled from $\mathcal{N}(0, 0.1)$.
+-- $\alpha \in [0, L]$: Annealing parameter, typically annealed from 0 to $L$ over a fixed number of training steps (e.g., 50,000 steps).
+-- $L$: Number of frequency bands. Default value is 10.
++**Data Structures**
++*   $\mathbf{R}$: A static matrix of shape $(L, 3)$ containing Gaussian random values.
++*   $\alpha$: A scalar integer or float representing the current training step normalized to the frequency range.
+ 
+-**Formulas:**
+-The encoding is defined as:
+-$$ \gamma(x) = (x, \Gamma_1(x; \alpha), \dots, \Gamma_{L-1}(x; \alpha)) $$
+-Note: The source notation uses indices $1$ to $L-1$ for the frequency components, implying $L$ total bands including the input or a specific indexing convention. However, the text states "10 Random Offset Annealed Fourier Frequencies" and the formula sums up to $L$ components if we consider the range. The source formula (1) lists $\Gamma_1 \dots \Gamma_{L-1}$. Let us strictly follow the source's indexing:
+-$$ \gamma(x) = (x, \Gamma_1, \dots, \Gamma_{L-1}) $$
+-Each frequency component $\Gamma_k$ for $k \in \{1, \dots, L-1\}$ is computed as:
+-$$ \Gamma_k(x; \alpha) = w_k(\alpha) \left[ \sin(2^k x + 2^k R_k), \cos(2^k x + 2^k R_k) \right] $$
+-where $R_k$ is the $k$-th row of the offset matrix $R$ (a vector in $\mathbb{R}^3$). The annealing weight $w_k(\alpha)$ is a truncated Hann window:
++**Formulas**
++The encoding is defined as [S1]:
++$$ \gamma(\mathbf{x}) = (\mathbf{x}, \Gamma_1, \dots, \Gamma_{L-1}) $$
++where each frequency component $\Gamma_k$ for $k \in \{1, \dots, L-1\}$ is computed as [S1]:
++$$ \Gamma_k(\mathbf{x}; \alpha) = w_k(\alpha) \left[ \sin(2^k \mathbf{x} + 2^k \mathbf{R}_k), \cos(2^k \mathbf{x} + 2^k \mathbf{R}_k) \right] $$
++The annealing weight $w_k(\alpha)$ acts as a truncated Hann window [S1]:
+ $$ w_k(\alpha) = \frac{1 - \cos(\pi \cdot \text{clamp}(\alpha - k, 0, 1))}{2} $$
+-Here, $\text{clamp}(v, 0, 1)$ restricts $v$ to the range $[0, 1]$.
++where $\text{clamp}(v, 0, 1)$ restricts $v$ to the interval $[0, 1]$ [S1].
+ 
+-**Parameters:**
+-- $L = 10$: Number of frequency bands.
+-- $R \sim \mathcal{N}(0, 0.1)$: Random offsets.
+-- $\alpha$: Annealing parameter, annealed over 50,000 steps.
+-- Direction encoding: 4 non-annealed and non-offset Fourier frequencies are used for the view direction $d$.
++**Direction Encoding**
++View directions $\mathbf{d}$ are encoded separately using 4 non-annealed and non-offset Fourier frequencies [S1].
+ 
+-**Pseudocode:**
++**Pseudocode**
+ ```python
++import math
+ import numpy as np
+ 
+-def random_offset_annealed_fourier_encoding(x, L=10, alpha=0.0, R=None):
++def roafe_encode(x, L=10, alpha=0, R=None):
+     """
+-    Computes the Random Offset Annealed Fourier Encoding for a batch of 3D coordinates.
++    Encode a 3D coordinate using Random Offset Annealed Fourier Encoding.
+     
+     Args:
+-        x: numpy array of shape (N, 3), batch of 3D coordinates.
++        x: numpy array of shape (3,), the 3D coordinate.
+         L: int, number of frequency bands.
+-        alpha: float, annealing parameter in [0, L].
+-        R: numpy array of shape (L, 3), random offsets. If None, sampled from N(0, 0.1).
++        alpha: float, annealing parameter (0 to L).
++        R: numpy array of shape (L, 3), random offsets. If None, generated deterministically for reproducibility in this example.
+         
+     Returns:
+-        numpy array of shape (N, 3 + 6*(L-1)), the encoded vector.
++        numpy array of shape (3 + 6*(L-1),), the encoded vector.
+     """
+     if R is None:
+-        R = np.random.normal(0, 0.1, size=(L, 3))
++        # Deterministic seed for reproducibility in implementation example
++        rng = np.random.RandomState(42)
++        R = rng.normal(0, 0.1, size=(L, 3))
++        
++    # Initialize output with raw coordinates
++    # Note: The source defines gamma(x) = (x, Gamma_1, ..., Gamma_{L-1})
++    # This implies the raw x is included, and frequencies start from index 1 to L-1.
++    # However, standard NeRF often uses 0 to L-1. The source explicitly writes Gamma_1 to Gamma_{L-1}.
++    # We follow the source notation strictly.
+     
+-    # Initialize output array
+-    # The input x is concatenated at the beginning.
+-    # There are L-1 frequency bands in the source formula (1).
+-    # Each band produces 2 * 3 = 6 values (sin and cos for x, y, z).
+-    # However, the formula (5) shows sin(2^k x + 2^k R_k). 
+-    # x is a vector, R_k is a vector. The addition is element-wise.
+-    # sin(2^k x + 2^k R_k) results in a vector of size 3.
+-    # So each k contributes 6 values.
+-    
+-    num_bands = L - 1
+-    output_dim = 3 + 6 * num_bands
+-    encoded = np.zeros((x.shape[0], output_dim))
+-    
+-    # Concatenate original coordinates
+-    encoded[:, :3] = x
++    encoded_parts = [x]
+     
+     for k in range(1, L):
+-        # Calculate annealing weight w_k(alpha)
+-        # clamp(alpha - k, 0, 1)
+-        val = alpha - k
+-        clamped_val = np.clip(val, 0, 1)
+-        w_k = (1 - np.cos(np.pi * clamped_val)) / 2
+-        
+-        # Frequency scaling factor 2^k
++        # Calculate base frequency scaling factor 2^k
++        # Source text has garbled '2k' but context implies 2^k or similar scaling.
++        # The formula block shows 2^k.
+         freq_scale = 2 ** k
+         
+-        # Random offset for this band
+-        R_k = R[k-1, :] # R is 0-indexed in code, but formula uses 1-based k? 
+-                        # Source says R in R^{Lx3} and R_k. 
+-                        # If k goes 1..L-1, we need L-1 rows. 
+-                        # Let's assume R has L rows and we use indices 0..L-2 or similar.
+-                        # The source says "R in R^{Lx3}" and "R_k". 
+-                        # If k=1..L-1, we need L-1 vectors. 
+-                        # Let's assume R is indexed 0..L-1 and we use R[k-1] for k=1..L-1.
++        # Get random offset for this frequency band
++        # R_k is the k-th row of R. Note: R is size Lx3.
++        # If k goes 1..L-1, we access R[1]..R[L-1].
++        # The source says R is sampled from N(0, 0.1).
++        offset = R[k]
+         
+-        # Compute argument: 2^k * x + 2^k * R_k
+-        # x shape: (N, 3), R_k shape: (3,)
+-        arg = freq_scale * x + freq_scale * R_k
++        # Compute the argument for sin/cos: 2^k * x + 2^k * R_k
++        # This is equivalent to 2^k * (x + R_k)
++        arg = freq_scale * (x + offset)
+         
+-        # Compute sin and cos
+-        sin_vals = np.sin(arg)
+-        cos_vals = np.cos(arg)
++        # Compute sine and cosine components
++        sin_comp = np.sin(arg)
++        cos_comp = np.cos(arg)
++        
++        # Concatenate sin and cos for this band
++        band_output = np.concatenate([sin_comp, cos_comp])
++        
++        # Compute annealing weight w_k(alpha)
++        # clamp(alpha - k, 0, 1)
++        clamp_val = max(0.0, min(1.0, alpha - k))
++        weight = (1.0 - math.cos(math.pi * clamp_val)) / 2.0
+         
+         # Apply weight
+-        # w_k is a scalar, broadcast to (N, 3)
+-        sin_weighted = w_k * sin_vals
+-        cos_weighted = w_k * cos_vals
++        weighted_band = weight * band_output
+         
+-        # Concatenate to output
+-        # Indices in output: 3 + (k-1)*6 to 3 + (k-1)*6 + 5
+-        start_idx = 3 + (k - 1) * 6
+-        encoded[:, start_idx : start_idx + 3] = sin_weighted
+-        encoded[:, start_idx + 3 : start_idx + 6] = cos_weighted
++        encoded_parts.append(weighted_band)
+         
+-    return encoded
++    return np.concatenate(encoded_parts)
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- **Precision:** The exponential scaling $2^k$ can lead to large values for high $k$, potentially causing numerical instability in sine/cosine calculations if $x$ is not normalized.
+-- **Boundary Conditions:** The `clamp` function in the weight calculation ensures $w_k$ is 0 when $\alpha < k$ and 1 when $\alpha > k+1$, providing a smooth transition.
+-- **Degenerate Input:** If $x$ is not normalized, the high-frequency components may oscillate rapidly, leading to optimization difficulties.
+-
+-## Subtopics
+-
+-### [Frequency-Modulated Position Encoding](15897-frequency-modulated-position-encoding.md)
+-Uses frequency modulation to handle multi-scale features. Choose when varying frequency scales are needed per feature.
+-
+-### [Neural Light Fields with Ray-Space Embedding](17616-neural-light-fields-with-ray-space-embedding.md)
+-Embeds ray-space directly. Choose for light field rendering.
+-
+-### [Ray-Space Embedding Network with Local Affine Transformation](18128-ray-space-embedding-network-with-local-affine-transformation.md)
+-Uses local affine transformations for ray-space embedding. Choose for complex ray-space variations.
+-
+-### [Skeleton-Relative Encoding](18148-skeleton-relative-encoding.md)
+-Encodes coordinates relative to a skeleton. Choose for articulated objects.
++**Edge Cases and Pitfalls**
++*   **Annealing Boundary:** When $\alpha < k$, the weight $w_k(\alpha)$ is 0, effectively disabling higher frequencies early in training. When $\alpha \ge k+1$, the weight is 1. The transition occurs between $\alpha=k$ and $\alpha=k+1$ [S1].
++*   **Direction Encoding:** Directions use a fixed 4-band encoding without annealing or offsets, distinct from position encoding [S1].
++*   **Offset Initialization:** Offsets are sampled from $\mathcal{N}(0, 0.1)$. These should be fixed after initialization to avoid non-deterministic behavior during training [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(L \cdot N)$, where $N$ is the batch size and $L$ is the number of frequency bands. The computation involves simple trigonometric functions and linear scaling.
+-- **Memory Complexity:** $O(L \cdot D)$, where $D$ is the dimensionality of the coordinate (3). The random offsets $R$ are stored once.
+-- **Measured Performance:** In SAMURAI, using 10 ROAFE bands annealed over 50,000 steps improved reconstruction quality compared to standard NeRF encoding, particularly in reducing striping artifacts.
+-- **Strengths:** Breaks axis-alignment, reduces striping artifacts, and provides a smooth optimization landscape via annealing.
+-- **Limitations:** Requires careful tuning of the annealing schedule and random offset variance. Not given in the sources: specific hardware performance metrics.
+-- **When to Use:** When standard NeRF encoding suffers from axis-aligned artifacts or slow convergence due to high-frequency details.
+-- **When Not to Use:** When computational resources are extremely limited and $L$ needs to be very small, or when the scene does not exhibit high-frequency details.
++*   **Complexity:** Time complexity is linear with respect to the number of frequency bands $L$ and the number of samples. Memory complexity is $O(L \cdot D)$ for storing the offset matrix $\mathbf{R}$, where $D=3$ is the input dimension.
++*   **Performance:** Improves optimization landscape by breaking axis-alignment, reducing striping artifacts compared to standard NeRF [S1].
++*   **Strengths:** Combines the benefits of random frequency rotation (reducing artifacts) with annealing (stabilizing optimization) [S1].
++*   **Limitations:** Requires careful tuning of the annealing schedule (50,000 steps in SAMURAI) and offset variance (0.1) [S1].
+ 
+ ## Background
+-ROAFE was introduced in the SAMURAI paper (2022) [S1]. It builds on the Fourier encoding from NeRF [7], the annealing technique from BARF [5] and Nerfies [8], and the benefits of random frequencies from Tancik et al. [11]. The method was designed to improve the optimization landscape for neural radiance fields by combining these techniques.
++ROAFE was introduced in the SAMURAI paper (2022) [S1]. It builds upon the Fourier encoding used in NeRF [S1], the annealing technique from BARF and Nerfies [S1], and the concept of random frequency offsets demonstrated by Tancik et al. [S1]. It was developed to handle unconstrained real-world image collections where axis-aligned artifacts are more pronounced [S1].
+ 
+ ## Sources

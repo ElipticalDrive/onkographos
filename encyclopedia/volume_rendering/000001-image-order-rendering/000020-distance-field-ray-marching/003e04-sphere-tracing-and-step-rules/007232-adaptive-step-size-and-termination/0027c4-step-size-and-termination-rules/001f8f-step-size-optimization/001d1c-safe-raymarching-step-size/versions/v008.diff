@@ -1,0 +1,369 @@
+--- v007.md
++++ v008.md
+@@ -4,163 +4,205 @@
+ 
+ ## Overview
+-Safe Raymarching Step Size is a method for determining the step length $\Delta t$ along a ray in volume rendering and implicit surface rendering to prevent the ray from overshooting geometry or density features [S2, S3, unofficial]. It solves the problem of artifacts caused by large steps that skip over thin structures or surface intersections, particularly when the distance field is distorted or when sampling neural implicit representations [S1, S2, unofficial]. It sets itself apart from its siblings by explicitly combining clamping of the distance value, a configurable ratio multiplier, and strict boundary checks to ensure numerical stability and correctness in both parallel and recursive marching implementations [S2, S3, unofficial].
++Safe Raymarching Step Size is a method for determining the distance to advance along a ray in Signed Distance Field (SDF) rendering to guarantee that the ray never overshoots or penetrates the implicit surface [S1, S2, S3, unofficial]. It solves the problem of geometric artifacts and missed intersections caused by inaccurate distance estimates, particularly when SDFs are distorted by boolean operations or domain repetition [S1, unofficial]. Unlike standard sphere tracing which assumes the SDF is a perfect lower bound, this method introduces safety margins (clamping, ratios) or grid-aware bounds to ensure numerical stability [S2, S3, unofficial]. It sets itself apart from siblings like [Adaptive Step Size Control](9843-adaptive-step-size-control.md) by prioritizing strict non-penetration guarantees over aggressive convergence speed, often at the cost of increased sample counts [S1, S2, unofficial].
+ 
+ ## How it works
+-The method determines the step size $\Delta t_i$ based on the current position $\mathbf{p}_i$, the ray direction $\mathbf{d}$, and the local distance field value $f(\mathbf{p}_i)$ [S2, S3, unofficial]. It operates on tensor-based batches of rays for parallel execution and recursive structures for adaptive execution [S2, unofficial].
++The method operates by computing a step size $\Delta d$ that is guaranteed to be less than or equal to the true distance to the surface. Two primary implementations exist in the source literature: a neural-decoder-based approach using clamping and ratios [S2, unofficial], and a grid-based approach using AABB dimensions [S3, unofficial].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ for each pixel/ray [S2, unofficial].
+-*   Initial depth $t_{init}$ (often 0 or camera near plane) [S2, unofficial].
+-*   Signed Distance Field (SDF) function $f(\mathbf{p})$ or neural decoder [S2, unofficial].
+-*   Axis-Aligned Bounding Box (AABB) defining the scene bounds $[min, max]$ [S3, unofficial].
+-*   Grid resolution `gridSize` if using voxel-based step sizing [S3, unofficial].
+-*   Parameters: `clamp_dist`, `ray_marching_ratio`, `threshold`, `march_step` [S2, unofficial].
++*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized).
++*   Scene representation:
++    *   Neural SDF decoder $f(\mathbf{p})$ [S2, unofficial].
++    *   Or, Voxel grid with resolution $G$ and Axis-Aligned Bounding Box (AABB) defined by $\mathbf{min}$ and $\mathbf{max}$ [S3, unofficial].
++*   Parameters:
++    *   `clamp_dist`: Maximum absolute SDF value allowed during stepping [S2, unofficial].
++    *   `ray_marching_ratio` (or `step_ratio`): Multiplier applied to the estimated distance to ensure safety [S2, S3, unofficial].
++    *   `threshold`: Convergence threshold for surface hit detection [S2, unofficial].
++    *   `march_step`: Maximum number of iterations [S2, unofficial].
++    *   `maxbound_zdepth`: Maximum allowable depth along the ray [S2, unofficial].
+ 
+ **Outputs:**
+-*   List of sampled points $\mathbf{p}_i$ [S2, unofficial].
+-*   Accumulated depth `marching_zdepth` [S2, unofficial].
+-*   SDF values $f(\mathbf{p}_i)$ [S2, unofficial].
+-*   Validity mask indicating successful convergence or hit [S2, unofficial].
++*   List of sampled points $\mathbf{p}_i$.
++*   List of SDF values $s_i = f(\mathbf{p}_i)$.
++*   Accumulated depth $z_{depth}$.
++*   Validity mask indicating if a surface was hit within bounds [S2, unofficial].
+ 
+ ### Data Structures
+-1.  **Batch Tensors (Parallel):**
+-    *   `marching_zdepth`: Tensor of shape $(N_{rays})$, initialized to zeros. Stores accumulated distance along the ray [S2, unofficial].
+-    *   `sdf_list`: List of tensors, each of shape $(N_{rays})$, storing $f(\mathbf{p}_i)$ at each step [S2, unofficial].
+-    *   `points_list`: List of tensors, each of shape $(N_{rays}, 3)$, storing $\mathbf{p}_i$ [S2, unofficial].
+-    *   `valid_mask`: Boolean tensor tracking rays that have not yet hit the surface or escaped [S2, unofficial].
+-
+-2.  **Recursive State (Adaptive):**
+-    *   State includes current depth and current position [S2, unofficial]. Only rays with $f(\mathbf{p}) > \text{threshold}$ are processed in subsequent steps [S2, unofficial].
+-
+-### Step-by-Step Method
++*   **Tensors/Lists:**
++    *   `marching_zdepth`: Accumulated depth along the ray, initialized to 0.
++    *   `sdf_list`: List of SDF values at each step.
++    *   `points_list`: List of 3D coordinates sampled.
++    *   `valid_mask_render`: Boolean mask indicating valid rays (hit surface, within bounds, and not starting inside) [S2, unofficial].
++
++### Numbered Steps
++
++#### Variant A: Neural SDF with Clamping and Ratios [S2, unofficial]
++This variant is used when the SDF is evaluated via a neural network, where Lipschitz continuity is not strictly guaranteed or known.
+ 
+ 1.  **Initialization:**
+-    *   Initialize `marching_zdepth` to 0 for all valid rays [S2, unofficial].
+-    *   Initialize empty lists `sdf_list`, `points_list`, `marching_zdepth_list` [S2, unofficial].
+-    *   Compute `maxbound_zdepth` based on the AABB and camera position [S2, S3, unofficial].
++    *   Initialize `marching_zdepth` = 0.
++    *   Initialize empty lists `sdf_list`, `points_list`.
++    *   Initialize `valid_mask_render` components to False.
++
++2.  **Iterative Marching (Loop $i$ from 0 to `march_step` - 1):**
++    *   **Sample Point:** Calculate current position $\mathbf{p} = \mathbf{o} + (\text{init\_zdepth} + \text{marching\_zdepth}) \cdot \mathbf{d}$.
++    *   **Evaluate SDF:** Compute $s = f(\mathbf{p})$. Detach gradients if differentiability is not required for this step [S2, unofficial].
++    *   **Clamp SDF:** Compute `sdf_marching` = $\text{clamp}(s, -\text{clamp\_dist}, \text{clamp\_dist})$. This prevents extreme values from causing unstable steps [S2, unofficial].
++    *   **Compute Step Size:** Calculate $\Delta d = \text{sdf\_marching} \cdot \text{ray\_marching\_ratio}$. The `ray_marching_ratio` is typically $< 1.0$ to ensure the step is shorter than the estimated distance [S2, unofficial].
++    *   **Update Depth:** `marching_zdepth` += $\Delta d$.
++    *   **Store Data:** Append $\mathbf{p}$ to `points_list` and `sdf_marching` to `sdf_list`.
++    *   **Termination Check:**
++        *   If `sdf_marching` $\le$ `threshold`, mark surface hit.
++        *   If `marching_zdepth` + `init_zdepth` $\ge$ `maxbound_zdepth`, mark out of bounds.
++
++3.  **Validity Masking:**
++    *   Compute `valid_mask_max_marching_zdepth`: True if final depth < `maxbound_zdepth` [S2, unofficial].
++    *   Compute `valid_mask_ray_marching`: True if $\min(|s_i|) \le$ `threshold` for any $i$ [S2, unofficial].
++    *   Compute `valid_mask_first_query`: True if $s_0 >$ `threshold`. This handles the corner case where the ray starts inside the surface ($s_0 < 0$), which might be invalid for certain rendering pipelines [S2, unofficial].
++    *   `valid_mask_render` = `valid_mask_max_marching_zdepth` AND `valid_mask_ray_marching` AND `valid_mask_first_query` [S2, unofficial].
++
++#### Variant B: Grid-Based AABB Step Size [S3, unofficial]
++This variant is used for voxel grids where the maximum possible distance to a surface within a cell is bounded by the grid geometry.
++
++1.  **Pre-computation:**
++    *   Calculate AABB dimensions: $\mathbf{dim} = \mathbf{max} - \mathbf{min}$.
++    *   Calculate inverse AABB size: $\mathbf{inv\_dim} = 1.0 / \mathbf{dim}$.
++    *   Calculate unit size per grid cell: $u = \mathbf{dim} / G$, where $G$ is the grid resolution (assumed uniform or per-axis) [S3, unofficial].
++    *   Calculate diagonal length of AABB: $D_{diag} = \|\mathbf{dim}\|_2$.
+ 
+ 2.  **Step Size Calculation:**
+-    The step size $\Delta t$ is calculated differently depending on the context (SDF vs. Grid):
+-    
+-    *   **SDF-based (Conservative):**
+-        $$ \Delta t = \text{clamp}(f(\mathbf{p}_i), -\text{clamp\_dist}, \text{clamp\_dist}) \times \text{ray\_marching\_ratio} $$
+-        Where `clamp_dist` prevents extreme steps from noisy or distorted SDFs [S2, unofficial].
+-        
+-    *   **Grid-based (Volumetric):**
+-        $$ \text{unit\_size} = \frac{\text{AABB\_dimension}}{\text{gridSize}} $$
+-        $$ \Delta t = \text{mean}(\text{unit\_size}) \times \text{step\_ratio} $$
+-        [S3, unofficial]
+-
+-3.  **Ray Marching Loop:**
+-    For each iteration $i$ from 0 to `march_step`:
+-    a.  **Sample Points:**
+-        $$ \mathbf{p}_i = \mathbf{o} + (\text{init\_zdepth} + \text{marching\_zdepth}) \mathbf{d} $$
+-        [S2, unofficial]
+-    b.  **Evaluate SDF:**
+-        $$ f_i = f(\mathbf{p}_i) $$
+-        If using a neural decoder, detach gradients if not training [S2, unofficial].
+-    c.  **Clamp SDF:**
+-        $$ f_{clamped} = \max(-\text{clamp\_dist}, \min(f_i, \text{clamp\_dist})) $$
+-        [S2, unofficial]
+-    d.  **Update Depth:**
+-        $$ \text{marching\_zdepth}_{new} = \text{marching\_zdepth} + f_{clamped} \times \text{ray\_marching\_ratio} $$
+-        [S2, unofficial]
+-    e.  **Store Data:**
+-        Append $f_{clamped}$ to `sdf_list`, $\mathbf{p}_i$ to `points_list`, and new depth to `marching_zdepth_list` [S2, unofficial].
+-
+-4.  **Termination and Validity Checks:**
+-    After the loop (or during recursive steps), compute validity masks:
+-    *   **Max Bound Check:**
+-        $$ \text{valid\_mask\_max} = (\text{final\_depth} + \text{init\_zdepth}) < \text{maxbound\_zdepth} $$
+-        [S2, unofficial]
+-    *   **Surface Hit Check:**
+-        $$ \text{valid\_mask\_hit} = \min_i(|f_i|) \le \text{threshold} $$
+-        [S2, unofficial]
+-    *   **First Query Check (Corner Case):**
+-        $$ \text{valid\_mask\_first} = f_0 > \text{threshold} $$
+-        This handles corner cases where the first SDF query is already below the threshold, filtering it out to prevent incorrect rendering logic [S2, unofficial].
+-    *   **Final Valid Mask:**
+-        $$ \text{valid\_mask\_render} = \text{valid\_mask\_max} \land \text{valid\_mask\_hit} \land \text{valid\_mask\_first} $$
+-        [S2, unofficial]
+-
+-5.  **Recursive Optimization (Optional):**
+-    In `ray_marching_recursive`, only rays where `valid_mask_render` is true are processed in the next iteration, skipping rays that have already hit the surface or escaped [S2, unofficial].
++    *   Compute mean unit size: $\bar{u} = \text{mean}(u)$.
++    *   Compute step size: $\Delta d = \bar{u} \cdot \text{step\_ratio}$ [S3, unofficial].
++
++3.  **Sample Count Estimation:**
++    *   Number of samples $N = \lceil D_{diag} / \Delta d \rceil + 1$ [S3, unofficial].
++
++4.  **Marching:**
++    *   Perform fixed-step or adaptive stepping using $\Delta d$ as the upper bound. Note that [S3, unofficial] focuses on the calculation of step size and sample count based on grid resolution, implying a fixed or grid-aligned stepping strategy rather than pure SDF-guided variable stepping [S3, unofficial].
++
++### Formulas
++*   **Clamped SDF:**
++    $$ s_{clamped} = \max(-\text{clamp\_dist}, \min(s, \text{clamp\_dist})) $$
++*   **Safe Step Size (Neural):**
++    $$ \Delta d = s_{clamped} \cdot \text{ray\_marching\_ratio} $$
++    Where $\text{ray\_marching\_ratio} < 1.0$ [S2, unofficial].
++*   **Grid Step Size:**
++    $$ \Delta d = \left( \frac{\|\mathbf{max} - \mathbf{min}\|_2}{G} \right) \cdot \text{step\_ratio} $$
++    (Assuming uniform grid for simplicity, or mean of axis-aligned cell sizes) [S3, unofficial].
++*   **Validity Mask:**
++    $$ M_{valid} = (z_{final} < z_{max}) \land (\min_i |s_i| \le \tau) \land (s_0 > \tau) $$
++
++### Parameters
++*   `clamp_dist`: Float. Threshold for clamping SDF values. Typical value: 0.1 [S2, unofficial].
++*   `ray_marching_ratio`: Float. Multiplier for step size. Typical value: 1.5 is mentioned in args, but logic implies ratio < 1.0 for safety if $s$ is positive. Note: [S2, unofficial] sets default ratio to 1.5 in argparse, but the logic `sdf_marching * ratio` suggests if $s$ is the distance, ratio should be $<1$. If ratio > 1, it is unsafe. However, if `sdf_marching` is clamped, a ratio > 1 might be used for aggressive marching if the clamp acts as the primary bound. Given the name "Safe", ratio < 1 is the standard interpretation. The source [S2, unofficial] lists `--ratio` default 1.5, which contradicts "safe" unless `clamp_dist` is the hard limit. We note this discrepancy [S2, unofficial].
++*   `threshold`: Float. Surface hit threshold. Typical value: $5 \times 10^{-5}$ [S2, unofficial].
++*   `march_step`: Integer. Max iterations. Typical value: 100 [S2, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Distorted SDFs:** Domain repetition or boolean operations can distort the SDF such that the estimated distance is larger than the actual distance, causing the ray to skip geometry. Mitigation: Step shorter than the returned distance (use ratio < 1) [S1, unofficial].
++*   **Starting Inside Surface:** If the first query $s_0 <$ `threshold`, the ray may be inside the object. `valid_mask_first_query` filters this out to prevent incorrect rendering logic [S2, unofficial].
++*   **Boundary Exceedance:** Rays must not exceed `maxbound_zdepth`. This is checked against the final accumulated depth [S2, unofficial].
++*   **Precision:** Floating point errors in SDF evaluation can lead to overshooting. Clamping helps mitigate extreme outliers [S2, unofficial].
+ 
+ ### Pseudocode
++
+ ```python
+-def safe_raymarching_step_size(ray_origins, ray_directions, init_zdepth, maxbound_zdepth, 
+-                               march_step, clamp_dist, ray_marching_ratio, threshold, 
+-                               evaluate_sdf, gridSize=None, aabb_dim=None, step_ratio=1.0):
+-    # Initialize accumulated depth for all rays
+-    marching_zdepth = [0.0] * len(ray_origins)
++def safe_raymarching_neural(cam_pos, cam_rays, decoder, params):
++    """
++    Variant A: Neural SDF with clamping and ratios.
++    """
++    # Unpack params
++    clamp_dist = params['clamp_dist']      # e.g., 0.1
++    ratio = params['ray_marching_ratio']   # e.g., 1.5 (note: check safety)
++    threshold = params['threshold']        # e.g., 5e-5
++    march_step = params['march_step']      # e.g., 100
++    maxbound_zdepth = params['maxbound_zdepth']
++    init_zdepth = params['init_zdepth']    # e.g., 0.0
++
++    marching_zdepth = 0.0
+     sdf_list = []
+     points_list = []
+-    marching_zdepth_list = []
++
++    # Pre-calculate maxbound check
++    # Note: maxbound_zdepth is usually scene-dependent, passed as param
+     
+     for i in range(march_step):
+-        # Sample points along rays
+-        points = []
+-        for j, (o, d) in enumerate(zip(ray_origins, ray_directions)):
+-            current_depth = init_zdepth + marching_zdepth[j]
+-            points.append(o + current_depth * d)
+-        points_list.append(points)
+-        
+-        # Evaluate SDF at sampled points
+-        sdf_values = [evaluate_sdf(p) for p in points]
+-        
+-        # Clamp SDF values
+-        sdf_clamped = [max(-clamp_dist, min(v, clamp_dist)) for v in sdf_values]
++        # 1. Generate point sample
++        # cam_rays is normalized direction
++        current_depth = init_zdepth + marching_zdepth
++        point = cam_pos + current_depth * cam_rays
++        
++        # 2. Decode SDF
++        sdf_val = decoder(point)
++        
++        # 3. Clamp SDF
++        sdf_clamped = max(-clamp_dist, min(sdf_val, clamp_dist))
++        
++        # 4. Compute step size
++        # Safety: if ratio > 1, this is not strictly "safe" unless clamp_dist is the hard bound
++        # Assuming ratio < 1 for true safety, or relying on clamp_dist
++        step = sdf_clamped * ratio
++        
++        # 5. Update depth
++        marching_zdepth += step
++        
++        # 6. Store
++        points_list.append(point)
+         sdf_list.append(sdf_clamped)
+         
+-        # Update accumulated depth
+-        for j in range(len(marching_zdepth)):
+-            marching_zdepth[j] += sdf_clamped[j] * ray_marching_ratio
+-        marching_zdepth_list.append(list(marching_zdepth))
+-        
+-        # Check termination conditions
+-        hit_mask = [abs(v) <= threshold for v in sdf_clamped]
+-        bound_mask = [(init_zdepth + marching_zdepth[j]) < maxbound_zdepth for j in range(len(marching_zdepth))]
+-        valid_mask = [h and b for h, b in zip(hit_mask, bound_mask)]
+-        
+-        if all(valid_mask):
++        # 7. Early termination check (optional optimization)
++        if abs(sdf_clamped) <= threshold:
+             break
+             
+-    # Concatenate lists
+-    sdf_list = list(zip(*sdf_list))
+-    points_list = list(zip(*points_list))
+-    marching_zdepth_list = list(zip(*marching_zdepth_list))
+-    
+-    # Final validity mask
+-    min_sdf = [min(abs(v) for v in col) for col in zip(*sdf_list)]
+-    valid_mask_max = [(init_zdepth + marching_zdepth[j]) < maxbound_zdepth for j in range(len(marching_zdepth))]
+-    valid_mask_hit = [v <= threshold for v in min_sdf]
+-    first_points = [o + init_zdepth * d for o, d in zip(ray_origins, ray_directions)]
+-    valid_mask_first = [evaluate_sdf(p) > threshold for p in first_points]
+-    valid_mask_render = [m and h and f for m, h, f in zip(valid_mask_max, valid_mask_hit, valid_mask_first)]
+-    
+-    return sdf_list, marching_zdepth_list, points_list, valid_mask_render
++    # 8. Compute Validity Masks
++    final_depth = init_zdepth + marching_zdepth
++    
++    # Mask 1: Within bounds
++    mask_bounds = final_depth < maxbound_zdepth
++    
++    # Mask 2: Hit surface
++    # Check if any step was close to surface
++    hit_surface = any(abs(s) <= threshold for s in sdf_list)
++    
++    # Mask 3: First query > threshold (not starting inside)
++    first_query_safe = sdf_list[0] > threshold if sdf_list else True
++    
++    valid_mask = mask_bounds and hit_surface and first_query_safe
++    
++    return sdf_list, marching_zdepth, points_list, valid_mask
++
++def safe_raymarching_grid(aabb_min, aabb_max, grid_size, step_ratio):
++    """
++    Variant B: Grid-based AABB step size.
++    """
++    # 1. Calculate dimensions
++    dim = aabb_max - aabb_min
++    
++    # 2. Calculate unit size per grid cell
++    # Assuming uniform grid resolution G
++    unit_size = dim / grid_size
++    
++    # 3. Calculate mean unit size
++    mean_unit_size = sum(unit_size) / len(unit_size)
++    
++    # 4. Calculate step size
++    step_size = mean_unit_size * step_ratio
++    
++    # 5. Calculate diagonal length
++    diagonal_length = sqrt(sum(d**2 for d in dim))
++    
++    # 6. Calculate number of samples
++    num_samples = ceil(diagonal_length / step_size) + 1
++    
++    return step_size, num_samples
+ ```
+ 
+-### Parameters
+-*   `clamp_dist`: Float. Threshold for clamping SDF values to prevent instability. Typical value: 0.1 [S2, unofficial].
+-*   `ray_marching_ratio`: Float. Multiplier applied to the clamped SDF to control step aggressiveness. Typical value: 1.5 [S2, unofficial].
+-*   `threshold`: Float. SDF value threshold for surface hit detection. Default value in implementation: $5 \times 10^{-5}$ [S2, unofficial].
+-*   `march_step`: Integer. Maximum number of iterations. Typical value: 100 [S2, unofficial].
+-*   `step_ratio`: Float. Multiplier for grid-based step size [S3, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Distorted SDFs:** Domain repetition or boolean operations can distort the distance field, causing the estimated distance to be larger than the actual distance [S1, unofficial]. This leads to the ray skipping over geometry [S1, unofficial]. Mitigation: Step shorter than the SDF returns (use `ray_marching_ratio < 1.0` or clamp aggressively) [S1, unofficial].
+-*   **Immediate Surface Hit:** If the first SDF query $f_0$ is already below the threshold, standard logic might fail to register a hit if not handled. The `valid_mask_first_query` check ensures rays starting inside or on the surface are handled correctly [S2, unofficial].
+-*   **Boundary Escape:** Rays must not exceed `maxbound_zdepth`. Failure to check this leads to sampling outside the valid volume or infinite loops in unbounded scenes [S2, unofficial].
+-*   **Precision:** Clamping SDF values prevents numerical instability from very large or small distance values, especially in neural implicit representations [S2, unofficial].
+-
+ ## Subtopics
+ 
+ ### [Distance Accuracy vs Performance Trade-off](1546-distance-accuracy-vs-performance-trade-off.md)
+-Analyzes the inverse relationship between SDF evaluation accuracy and computational cost. Underestimating distance forces smaller steps, increasing iterations. An exact but slower SDF may outperform an inaccurate but fast one if the inaccuracy causes disproportionate step reduction.
++Analyzes the inverse relationship between SDF evaluation accuracy and computational cost. Underestimating distance forces smaller steps, increasing iterations. Exact SDF evaluation can outperform inaccurate bounds if the inaccuracy causes disproportionate step count increases.
+ 
+ ### [Adaptive Lipschitz Constant (ALC)](1883-adaptive-lipschitz-constant-alc.md)
+-Uses a nested BVH to compute tighter, adaptive Lipschitz constants for step size calculation, solving the problem of overly conservative steps in large scenes with high global Lipschitz constants.
++Uses a nested BVH to compute tighter, adaptive Lipschitz constants for step size, solving the problem of overly conservative global constants in large scenes.
+ 
+ ### [Gradient-based Sphere Tracing with Lipschitz Constraints](1936-gradient-based-sphere-tracing-with-lipschitz-constraints.md)
+@@ -168,23 +210,20 @@
+ 
+ ### [Lipschitz Step Size Ray Marching](3729-lipschitz-step-size-ray-marching.md)
+-Uses a pre-computed global Lipschitz constant $\lambda$ to guarantee no surface penetration. Simple and stable but potentially less efficient for complex scenes with varying feature scales.
++Uses a pre-computed global Lipschitz constant $\lambda$ to guarantee no penetration. Simple and stable, but potentially less efficient for complex scenes with varying feature scales.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Performance:** Parallel implementation (`ray_marching_trivial`) processes all rays simultaneously, leveraging GPU tensor cores. Recursive implementation (`ray_marching_recursive`) optimizes for scenes with early occlusion by skipping finished rays [S2, unofficial].
+-*   **Strengths:** Handles both implicit surfaces and volumetric grids; supports differentiable rendering via gradient detachment options [S2, unofficial].
+-*   **Limitations:** Requires careful tuning of `clamp_dist` and `ray_marching_ratio` [S2, unofficial].
+-*   **When to Use:** When rendering distorted or neural implicit SDFs where standard sphere tracing fails due to overshooting; when high precision is required near complex boundaries [S1, S2, unofficial].
++*   **Time Complexity:** $O(N)$, where $N$ is the number of marching steps. $N$ depends on the scene complexity and the safety ratio. Conservative stepping (ratio < 1) increases $N$ [S1, S2, unofficial].
++*   **Memory Complexity:** $O(N)$ to store the list of sampled points and SDF values for post-processing or differentiable rendering [S2, unofficial].
++*   **Measured Performance:** In neural SDF rendering, using `ray_marching_ratio` < 1.0 increases robustness but may require more steps to converge to the surface [S2, unofficial]. Grid-based stepping [S3, unofficial] provides a fixed upper bound on steps, simplifying parallelization but potentially wasting samples in empty space.
++*   **Strengths:** Guarantees no surface penetration (if ratio $\le$ 1 and SDF is valid). Handles distorted SDFs better than naive sphere tracing [S1, unofficial]. Simple to implement for voxel grids [S3, unofficial].
++*   **Limitations:** Can be slower than adaptive methods if the safety margin is too large. Clamping [S2, unofficial] may introduce discontinuities in the gradient if not handled carefully.
++*   **When to Use:** When rendering distorted SDFs (boolean ops, repetition) [S1, unofficial], or when using neural SDFs with unknown Lipschitz constants [S2, unofficial]. When using voxel grids, for predictable memory usage [S3, unofficial].
++*   **When Not to Use:** When maximum performance is required and the SDF is known to be a perfect lower bound (standard sphere tracing is faster) [S1, unofficial].
+ 
+ ## Background
+-Safe Raymarching Step Size originates from the practical challenges of rendering distorted Signed Distance Fields, such as those created by domain repetition or boolean operations [S1, unofficial]. The blog post [S1, unofficial] highlights that naive sphere tracing fails when the distance field is distorted, leading to artifacts where the ray skips geometry. The solution proposed is to step shorter than the distance field returns [S1, unofficial].
+-
+-The tensor-based implementation ([S2, unofficial]) emerged from differentiable rendering frameworks (e.g., DeepSDF, NeRF variants) where stable gradient flow and correct surface hit detection are crucial for optimization. The `DIST-Renderer` [S2, unofficial] formalized the clamping and validity mask logic to handle neural implicit representations.
+-
+-The grid-based approach ([S3, unofficial]) is common in volumetric rendering and collaborative NeRF systems, where step size is derived from voxel dimensions to ensure consistent sampling density across the scene [S3, unofficial].
++Safe Raymarching Step Size originates from the practical challenges of rendering distorted Signed Distance Fields. Early observations by [S1, unofficial] noted that operations like domain repetition and boolean subtraction could distort the distance field, causing artifacts where the ray skips geometry. The solution proposed was to step shorter than the distance field returns. Later, implementations in neural SDF renderers [S2, unofficial] formalized this with clamping and ratio parameters to handle the non-guaranteed Lipschitz continuity of neural networks. Grid-based approaches [S3, unofficial] provide a geometric bound for voxel-based representations.
+ 
+ ## Sources
+ [S1] Raymarching Distance Fields (2013), http://9bitscience.blogspot.com/2013/07/raymarching-distance-fields_14.html, fetched 2026-10-26 (unofficial)
+ [S2] B1ueber2y/DIST-Renderer, https://github.com/B1ueber2y/DIST-Renderer, fetched 2026-10-26 (unofficial)
+-[S3] Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)+[S3] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)

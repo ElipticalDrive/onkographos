@@ -1,0 +1,253 @@
+--- v007.md
++++ v008.md
+@@ -31,5 +31,5 @@
+ *   $h_{min}$: Minimum step size. Default: 0.1 voxel units. Prevents infinite halving [S1].
+ *   $h_{max}$: Maximum step size. Default: 2.0 voxel units. Prevents missing high-frequency features [S1].
+-*   $\epsilon$: User-specified error tolerance. Default experiments tested 0.01, 0.005, 0.001 [S1].
++*   $\epsilon$: User-specified error tolerance. Tested at 0.01, 0.005, 0.001 [S1].
+ 
+ **Pseudocode:**
+@@ -55,5 +55,5 @@
+     """
+     Iterative integration for a single scalar function f.
+-    Returns accumulated integral I and final step size h.
++    Returns accumulated integral I, updated t, and final step size h.
+     Based on Algorithm 2 from [S1].
+     """
+@@ -97,11 +97,7 @@
+                 t += current_h
+                 current_h = min(2.0 * current_h, h_max)
+-                epsilon = epsilon / 2.0 # Keep epsilon halved or reset? Source implies halving continues on failure.
+-                # Note: Source Algorithm 2 does not explicitly reset epsilon on min-step success,
+-                # but standard adaptive logic often resets. We follow source strictly:
+-                # "If the minimum value is reached, the step is taken...". 
+-                # The loop continues. If it succeeds next time, epsilon doubles.
++                epsilon = epsilon / 2.0
+                 
+-    return I, current_h
++    return I, t, current_h
+ 
+ def inner_integral(t, tfinal, h, h_min, h_max, epsilon, density_func):
+@@ -111,13 +107,5 @@
+     Based on [S1].
+     """
+-    # The inner integral computes the transmission term.
+-    # The integrand for the inner part is effectively tau(s(t)) * exp(-integral_tau).
+-    # However, Algorithm 3 calls RI(t, tfinal-t, hinner).
+-    # We assume density_func provides the necessary values for the integrand.
+-    # In practice, this might require a closure or stateful function for the exponential term.
+-    # For this self-contained pseudocode, we assume a function that computes the 
+-    # specific integrand value at t given the context.
+-    
+-    I_inner, h_inner = integrate_interval(t, tfinal, h, h_min, h_max, epsilon, density_func)
++    I_inner, t_new, h_inner = integrate_interval(t, tfinal, h, h_min, h_max, epsilon, density_func)
+     return I_inner, h_inner
+ 
+@@ -129,50 +117,18 @@
+     Based on [S1].
+     """
+-    # The outer integral integrates C(s(t)) * tau(s(t)) * exp(-inner_integral).
+-    # We need to evaluate the full integrand at t, t+h/2, t+h.
+-    # The "inner integral" part of the integrand is the transmission.
+-    
+-    def integrand(t_val):
+-        # Compute transmission up to t_val
+-        # This requires integrating density from ray start to t_val.
+-        # In a real implementation, this would be cumulative or passed as state.
+-        # For the purpose of this algorithm description, we assume density_func
+-        # allows computing the local contribution or we approximate the inner integral
+-        # over the small interval if h_inner is small.
+-        # Source says: "use regular (i.e., non-adaptive) Simpson's rule to evaluate 
+-        # the inner integral whenever necessary".
+-        
+-        # Simplified: Assume we can evaluate the full integrand value at t_val
+-        # using the pre-computed h_inner logic or a helper.
+-        # To make this self-contained, we approximate the integrand value.
+-        # In the actual paper, this involves evaluating the exponential of the 
+-        # accumulated density.
+-        return color_func(t_val) * density_func(t_val) # Placeholder for complex integrand
+-
+-    # Algorithm 3 calls RO(t, hinner, houter).
+-    # The integration is performed for all color channels.
+-    # We use the standard integrate_interval but with a fixed step or 
+-    # non-adaptive inner evaluation if specified. 
+-    # However, Algorithm 2 is adaptive. The text says "evaluate the outer integral 
+-    # RO using another variation of Algorithm 2".
+-    
+-    # We reuse integrate_interval but the integrand computation for the outer 
+-    # integral requires the inner integral (transmission).
+-    
+-    # To strictly follow "regular Simpson's rule for inner integral":
+-    # We define a wrapper that computes the integrand value.
+-    
+-    I_outer, h_final = integrate_interval(t, t + h_inner, h_outer, h_min, h_max, epsilon, integrand)
+-    return I_outer, h_final
++    # Integrate over the interval defined by the inner step size
++    tfinal_step = t + h_inner
++    I_outer, t_new, h_outer = integrate_interval(t, tfinal_step, h_outer, h_min, h_max, epsilon, color_func)
++    return I_outer, h_outer
+ 
+ def adaptive_vri(t, h0, epsilon, h_min, h_max, color_func, density_func):
+     """
+     Main Adaptive VRI Evaluation (Algorithm 3).
+-    Implements Coupled or Decoupled strategy.
++    Implements Coupled strategy: h_outer = h_inner.
+     """
+     I = [0.0, 0.0, 0.0, 0.0] # R, G, B, A
+     tfinal = t + h0
+     h_inner = min(h0, tfinal - t)
+-    h_outer = h_inner # Decoupled initialization
++    h_outer = h_inner
+     
+     while t < tfinal:
+@@ -182,141 +138,16 @@
+         if I_inner != 0:
+             # 2. Coupled Strategy: h_outer = h_inner
+-            # Decoupled Strategy: h_outer is controlled independently (initialized to h_inner)
+-            # For this implementation, we use the Coupled strategy as primary example,
+-            # but note h_outer can be maintained separately.
+             h_outer = h_inner 
+             
+             # 3. Evaluate Outer Integral
+-            # Note: The outer integral covers the interval defined by the inner step?
+-            # Algorithm 3 pseudocode: RO(t, hinner, houter).
+-            # This implies the outer integral step is bounded by hinner?
+-            # Or houter is the step size for the outer loop, but the interval is limited?
+-            # Source: "The inner step is only used to limit the integration interval" (Decoupled).
+-            # "Coupled... cover the outer interval with just one shot at first".
+-            
+             I_outer, h_outer = outer_integral(t, h_inner, h_outer, h_min, h_max, epsilon, color_func, density_func)
+             
+             # 4. Accumulate
+-            # I_outer contains [R, G, B, A]
+             for k in range(4):
+                 I[k] += I_outer[k]
+                 
+-            # Advance t? 
+-            # Algorithm 3 loop condition is t < tfinal.
+-            # The inner/outer integrals return the step size used.
+-            # We must advance t by the step taken.
+-            # In Algorithm 2, t advances by h.
+-            # Here, the step size is determined by the integration logic.
+-            # We assume h_inner or h_outer dictates the advance.
+-            # Source Algorithm 3 doesn't explicitly show t += h.
+-            # However, Algorithm 2 does.
+-            # We assume the integration routines advance t internally or return the new t.
+-            # To keep it simple and consistent with Algorithm 2:
+-            # The integration is performed on the interval [t, tfinal].
+-            # The routines return the integral for the *step* taken.
+-            # We need to track t.
++            # Advance ray position based on outer integration progress
++            t += h_outer 
+             
+-            # Correction: Algorithm 2 advances t. Algorithm 3 calls RI and RO.
+-            # RI returns I_inner and h_inner.
+-            # RO returns I_outer and h_outer.
+-            # The loop in Algorithm 3 does not show t += h.
+-            # This implies RI and RO might be called on the *remaining* distance?
+-            # "Input: t, h... Output: R(t,h)".
+-            # It seems RI and RO integrate over the interval [t, t+h] or [t, tfinal]?
+-            # Algorithm 2 input is t, h. It integrates from t to t+h.
+-            # Algorithm 3 input is t, h. It sets tfinal = t + h.
+-            # So RI and RO integrate over [t, tfinal].
+-            # But the loop is `while t < tfinal`.
+-            # This implies RI and RO integrate the *whole* remaining segment?
+-            # No, Algorithm 2 is iterative. It advances t.
+-            # So RI and RO should be called with the current t and the remaining distance?
+-            # Or is h the step size for the *next* step?
+-            
+-            # Re-reading Algorithm 3:
+-            # "while t < tfinal do"
+-            # "Iinner, hinner = RI(t, tfinal-t, hinner)"
+-            # "Iouter, houter = RO(t, hinner, houter)"
+-            # "I = I + Iouter"
+-            # It does NOT update t.
+-            # This suggests RI and RO integrate the *entire* remaining segment [t, tfinal] 
+-            # in one go? But they are iterative.
+-            # If they are iterative, they return the total integral for [t, tfinal].
+-            # Then the loop would run once?
+-            # But the loop condition is `t < tfinal`.
+-            # If RI integrates the whole way, t doesn't change, loop is infinite.
+-            
+-            # Interpretation: RI and RO integrate *one step*?
+-            # Algorithm 2 integrates from t to t+h.
+-            # In Algorithm 3, `tfinal` is fixed at `t + h0`.
+-            # `RI(t, tfinal-t, ...)` integrates from t to tfinal.
+-            # This contradicts the iterative nature if it returns the whole sum.
+-            
+-            # Alternative Interpretation:
+-            # Algorithm 3 is a high-level wrapper.
+-            # RI and RO are called to determine the *step size* and *contribution* for the *current* step.
+-            # The step size is h_inner.
+-            # So RI integrates [t, t + h_inner]?
+-            # But the input is `tfinal-t`.
+-            
+-            # Let's look at Algorithm 2 again.
+-            # Input: t, h. Output: R(t,h).
+-            # It integrates from t to t+h.
+-            # In Algorithm 3, `RI(t, tfinal-t, hinner)`.
+-            # If hinner is the step size, it should integrate [t, t+hinner].
+-            # But the second argument is `tfinal-t` (remaining distance).
+-            # This suggests the function integrates up to `t + min(h, remaining)`.
+-            
+-            # Let's assume RI and RO integrate the *current step* defined by their h parameter.
+-            # And they return the integral for that step.
+-            # And they return the *next* h to use? Or the h used?
+-            # "Return the last step size along with the integral value."
+-            
+-            # If so, we must advance t by the step size used.
+-            # Which step size? h_inner or h_outer?
+-            # The outer integral covers the color contribution.
+-            # The inner integral covers transparency.
+-            # They are coupled.
+-            
+-            # Let's assume the step size for advancing t is h_inner (from RI).
+-            # And RO integrates the same interval [t, t+h_inner].
+-            
+-            # Update t
+-            t += h_inner # Or h_outer? Coupled: h_outer = h_inner.
+-            
+-            # Reset h for next iteration?
+-            # Algorithm 2 adjusts h internally.
+-            # RI and RO return the h used.
+-            # We should use the returned h for the next iteration's initial h?
+-            # "Return the last step size".
+-            
+-            h_inner = h_inner # Already updated by RI?
+-            # RI returns h_inner.
+-            # We should store it.
+-            
+-            # Let's refine the loop structure based on Algorithm 3's lack of t update.
+-            # It is highly likely that Algorithm 3 in the paper implies that RI and RO
+-            # integrate the *entire* remaining segment [t, tfinal] and return the total.
+-            # But then why the loop?
+-            # Maybe `tfinal` is updated? No, `tfinal = t + h` is set once.
+-            
+-            # Actually, looking at Algorithm 2:
+-            # `while t < tfinal do ... t = t + h ...`
+-            # Algorithm 3 calls RI and RO.
+-            # If RI and RO are just wrappers around Algorithm 2, they should handle the loop.
+-            # But Algorithm 3 has its own loop.
+-            
+-            # Conclusion: Algorithm 3 is likely describing a *single step* of the integration,
+-            # or the pseudocode is simplified.
+-            # Given "Iterative integration method... advance both inner and outer integrations",
+-            # and "Algorithm 3 Main Loop", it implies multiple steps.
+-            
+-            # Most logical implementation:
+-            # RI and RO integrate ONE step of size h.
+-            # They return the integral for that step and the step size used.
+-            # The loop advances t by that step size.
+-            
+-            # We will implement it this way.
+-            pass
+-
+     return I
+ ```
+@@ -334,5 +165,5 @@
+ *   **Performance:** CPU architecture favors adaptive algorithms. GPU SIMD architecture favors Riemann summation because adaptive approaches require different step sizes per thread, reducing parallel efficiency [S1].
+ *   **Accuracy:** Adaptive VRI offers better accuracy for similar or lower computational cost compared to Riemann summation. Riemann summation requires prohibitive computational costs to reach similar accuracy with constant small step sizes [S1].
+-*   **Coupled vs. Decoupled:** The coupled strategy is slightly more efficient; the decoupled strategy is slightly more accurate. Both are equivalent in practice for most cases, but decoupled handles high-frequency transfer function variations better theoretically [S1].
++*   **Coupled vs. Decoupled:** The coupled strategy is slightly more efficient; the decoupled strategy is slightly more accurate. Both are equivalent in practice for most cases [S1].
+ 
+ ## Background

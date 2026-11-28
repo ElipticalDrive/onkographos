@@ -1,0 +1,204 @@
+--- v004.md
++++ v005.md
+@@ -1,37 +1,30 @@
+ # Real-scattering vertex connection with ratio tracking
+ 
+-Also called: Delta Tracking for Transmittance Estimation, Ratio Tracking Volumetric Sensor, Ratio Tracking with Null Scattering, RatioVolumetricSensor, Real-scattering vertex connection
++Also called: Delta Tracking for Transmittance Estimation, Ratio Tracking Volumetric Sensor, Real-scattering vertex connection
+ 
+ ## Overview
+-This method estimates the transmittance between two points $p_1$ and $2$ in a participating medium using ratio tracking, which accumulates a product of null-scattering ratios rather than terminating on collision [S2, S3, unofficial]. It is used to connect real-scattering vertices on camera and light subpaths in a null-scattering path integral framework [S3, unofficial]. Unlike delta tracking for sampling which terminates on collision, ratio tracking continues until the endpoint is reached, accumulating a product of ratios to estimate the total transmittance [S2, unofficial].
++This method estimates the transmittance between two points $p_1$ and $p_2$ in a participating medium using ratio tracking, which accumulates a product of null-scattering ratios rather than terminating on collision [S2, unofficial]. It is used to connect real-scattering vertices on camera and light subpaths within a null-scattering path integral framework [S3, unofficial]. Unlike standard delta tracking which terminates on collision, ratio tracking continues until the endpoint is reached, accumulating a product of ratios to estimate the total transmittance [S2, unofficial].
+ 
+ ## How it works
+ ### Inputs and Outputs
+ **Inputs:**
+-*   $p_1, p_2$: Start and end points of the segment.
++*   $p_1, p_2$: Start and end points of the connection segment.
+ *   `sampler`: A random number generator providing uniform samples in $[0, 1)$.
+-*   `majorant`: The homogenized extinction coefficient $\hat{\mu}_t$ (stored as `self.majorant`) [S1, S3, unofficial].
++*   `majorant`: The homogenized extinction coefficient $\hat{\mu}_t$ used for ratio tracking sampling [S1, unofficial].
+ *   `throughput`: The current path throughput, initialized by undoing transmittance from previous interactions [S1, unofficial].
+-*   `attenuation`: The accumulated transmittance from previous segments [S1, unofficial].
+ *   `t_prev`: The distance traveled in the previous segment [S1, unofficial].
+-*   `n_scat`: The number of scattering events in the history [S1, unofficial].
+-*   `sigma_s`: The scattering coefficient [S1, unofficial].
+-*   `sigma_a`: The absorption coefficient (derived from `sigma_t` and `sigma_s`) [S1, unofficial].
+-*   `sigma_t`: The total extinction coefficient at the current position [S1, unofficial].
+-*   `em`: The emission coefficient [S1, unofficial].
+-*   `sa`: The absorption coefficient ($\sigma_a = \sigma_t - \sigma_s$) [S1, unofficial].
+-*   `st`: The total extinction coefficient $\sigma_t$ [S1, unofficial].
+-*   `weight`: The initial weight for the contribution, calculated as `throughput * exp(-st * t_prev)` [S1, unofficial].
+-*   `bbox`: The bounding box of the medium grid [S1, unofficial].
+-*   `voxel_size`: The size of each voxel in the grid [S1, unofficial].
+-*   `m_film`: The volumetric film to write contributions to [S1, unofficial].
+-*   `δL.array`: The differentiable array for gradient storage [S1, unofficial].
++*   `n_scat`: The number of scattering events in the history, used for throughput weighting [S1, unofficial].
++*   `sigma_s`, `sigma_a`, `sigma_t`: The scattering, absorption, and total extinction coefficients at the current position [S1, unofficial].
++*   `em`: The emission coefficient at the connection point [S1, unofficial].
++*   `bbox`, `voxel_size`, `res`: The bounding box, voxel dimensions, and grid resolution for spatial discretization [S1, unofficial].
++*   `film`: The volumetric film buffer for writing contributions [S1, unofficial].
++*   `grad_array`: The differentiable array for gradient storage [S1, unofficial].
+ 
+ **Outputs:**
+-*   `transmittance`: The estimated transmittance product [S1, S2, unofficial].
+-*   `contrib`: The contribution written to the film [S1, unofficial].
++*   `transmittance`: The estimated transmittance product along the segment [S1, unofficial].
++*   `contrib`: The volumetric contribution written to the film [S1, unofficial].
+ 
+ ### Data Structures
+-*   **VolumetricFilm**: A tensor of shape `(resz, resy, resx, channels)` where `channels` is 2 if `surface_aware` is true, else 1 [S1, unofficial].
++*   **VolumetricFilm**: A tensor of shape `(resz, resy, resx, channels)` where `channels` equals 2 if surface-aware discretization is enabled, else 1 [S1, unofficial].
+ *   **Container**: Stores medium properties including `sigma_t`, `albedo`, and `medium_phase` [S1, unofficial].
+ 
+@@ -40,12 +33,12 @@
+     Undo transmittance from previous interactions and adjust for scattering history [S1, unofficial]:
+     ```python
+-    throughput = dr.detach(attenuation * dr.exp(mei.sigma_t * t_prev))
+-    throughput *= dr.select(mei.sigma_s != 0, dr.rcp(dr.detach(mei.sigma_s) ** n_scat), 1.)
++    throughput = throughput * exp(sigma_t * t_prev)
++    if sigma_s != 0:
++        throughput *= rcp(sigma_s ** n_scat)
+     ```
+ 
+ 2.  **Setup Segment**:
+-    Calculate the distance to the endpoint: `distToEnd = length(p1 - p2)` [S1, S2, unofficial].
+-    Initialize `t = 0` and `transmittance = (1, 1, 1)` [S1, S2, unofficial].
+-    Create a ray from $p_1$ to $p_2$ [S1, unofficial].
++    Calculate the distance to the endpoint: `dist_to_end = length(p2 - p1)` [S1, S2, unofficial].
++    Initialize `t = 0.0`, `transmittance = 1.0`, and `n_interactions = 0` [S1, S2, unofficial].
+ 
+ 3.  **Ratio Tracking Loop**:
+@@ -54,65 +47,50 @@
+         Sample a collision-free distance $s$ using the majorant [S1, S2, unofficial]:
+         ```python
+-        # Using uniform sample u in [0, 1)
+-        u = sampler.next_1d(active)
+-        # Ensure u is not exactly 1 to avoid log(0)
+-        u = dr.clamp(u, 0.0, 0.9999999) 
+-        sampled_t = - dr.log(1.0 - u) / self.majorant
+-        ```
+-        Alternatively, using `invMajorant` [S2, unofficial]:
+-        ```python
+-        s = - dr.log(dr.max(1.0 - sampler.getNext1D(), 0.0)) * invMajorant
+-        sampled_t = s
++        u = clamp(sampler.next_1d(), 0.0, 0.9999999)
++        sampled_t = -log(1.0 - u) / majorant
+         ```
+     b.  **Update Position**:
+-        Update the ray position $t$ [S1, S2, unofficial]:
++        Update the accumulated distance $t$ [S1, S2, unofficial]:
+         ```python
+-        t[active] += sampled_t
++        t += sampled_t
+         ```
+     c.  **Check Bounds**:
+-        Check if the ray is still within the maximum distance `maxt` (or `distToEnd`) [S1, S2, unofficial]:
++        Check if the ray has reached the endpoint [S2, unofficial]:
+         ```python
+-        active &= t < maxt # or t < distToEnd
++        if t >= dist_to_end:
++            break
+         ```
+-        If `t > distToEnd`, break the loop and return `transmittance` [S2, unofficial].
+-
+     d.  **Voxel Lookup**:
+         Determine the current voxel index [S1, unofficial]:
+         ```python
+-        current_voxel = mi.Vector3i(dr.floor((p - self.bbox.min) / self.voxel_size))
+-        is_inside_grid = dr.all(current_voxel >= 0) & dr.all(current_voxel < self.res)
+-        idx = compute_flat_index(current_voxel, self.res, self.surface_aware)
++        pos = p1 + (t / dist_to_end) * (p2 - p1)
++        voxel = floor((pos - bbox.min) / voxel_size)
++        is_inside = all(voxel >= 0) and all(voxel < res)
++        if is_inside:
++            idx = voxel[0] * res[1] * res[2] + voxel[1] * res[2] + voxel[2]
++            if surface_aware:
++                idx *= 2
+         ```
+-        Compute the local density/extinction coefficients at `ray(t)` [S2, unofficial]. Let $\sigma_t$ be the total extinction and $\sigma_s$ be the scattering coefficient at the current position.
+-
+     e.  **Update Transmittance**:
+         Compute the null-scattering ratio and update the transmittance product [S2, unofficial]:
+         ```python
+-        sigma_n = self.majorant - sigma_a - sigma_s
+-        # Ratio tracking accumulates the ratio of null-scattering probability
+-        # to the majorant sampling probability.
+-        # The term (sigma_n / majorant) represents the probability of a null event.
+-        transmittance *= (sigma_n * invMajorant)
++        sigma_n = majorant - sigma_a - sigma_s
++        transmittance *= sigma_n / majorant
++        n_interactions += 1
+         ```
+-        Note: Some implementations accumulate the product of ratios directly as the estimator for transmittance [S2, unofficial].
+-
+-    f.  **Compute Contribution (for Sensor/Connection)**:
+-        If performing a connection (e.g., Next-Event Estimation), compute the contribution [S1, unofficial]:
++    f.  **Compute Contribution**:
++        Calculate the sensor contribution for the connection step [S1, unofficial]:
+         ```python
+-        # sa = sigma_t - sigma_s
+-        # st = sigma_t
+-        # weight = throughput * exp(-st * t_prev)
+-        contrib = dr.select(
+-            active & is_inside_grid,
+-            weight * em * sa / st * (1 - st / self.majorant) ** n_interactions * st / self.majorant,
+-            0.
+-        )
++        weight = throughput * exp(-sigma_t * t_prev)
++        sa = sigma_t - sigma_s
++        st = sigma_t
++        contrib = weight * em * (sa / st) * ((1.0 - st / majorant) ** n_interactions) * (st / majorant)
++        if is_inside:
++            film.write(contrib, idx, True)
+         ```
+-        Here, $n_{interactions}$ is the number of steps taken in the ratio tracking loop [S1, unofficial].
+-
+     g.  **Write to Film**:
+         In primal mode, write the contribution to the film [S1, unofficial]:
+         ```python
+-        self.m_film.write(contrib, idx, active & is_inside_grid)
++        film.write(contrib, idx, is_inside)
+         ```
+ 
+@@ -120,10 +98,10 @@
+     *   **Forward Mode**: Scatter the gradient [S1, unofficial]:
+         ```python
+-        dr.scatter_reduce(dr.ReduceOp.Add, δL.array, dr.forward_to(contrib), idx, active & is_inside_grid)
++        grad_array.scatter_reduce(Add, forward_to(contrib), idx, is_inside)
+         ```
+     *   **Reverse Mode**: Gather the gradient and backpropagate [S1, unofficial]:
+         ```python
+-        grad = dr.gather(mi.Spectrum, δL.array, idx, active & is_inside_grid)
+-        dr.backward_from(contrib * grad)
++        grad = grad_array.gather(Spectrum, idx, is_inside)
++        backward_from(contrib * grad)
+         ```
+ 
+@@ -158,18 +136,18 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision**: Logarithms of values close to 1 or 0 can cause precision issues. Clamp sampler outputs away from 1.0 [S2, unofficial].
+-*   **Boundaries**: Ensure voxel indices are within grid bounds before accessing data [S1, unofficial].
+-*   **Degenerate Input**: If `sigma_s` is 0, avoid division by zero in throughput initialization [S1, unofficial].
++*   **Precision**: Logarithms of values close to 1 or 0 can cause precision issues, so sampler outputs must be clamped away from 1.0 [S2, unofficial].
++*   **Boundaries**: Voxel indices must be validated against grid bounds before accessing data to prevent out-of-bounds memory access [S1, unofficial].
++*   **Degenerate Input**: If `sigma_s` is 0, division by zero must be avoided during throughput initialization [S1, unofficial].
+ *   **Termination**: Ratio tracking must continue until the endpoint is reached, unlike standard delta tracking which stops at the first collision [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Proportional to the number of ratio tracking steps, which depends on the ratio of the majorant to the local extinction coefficient. Higher majorants lead to more steps but lower variance per step.
++*   **Time Complexity**: Proportional to the number of ratio tracking steps, which scales with the ratio of the majorant to the local extinction coefficient [S2, unofficial].
+ *   **Memory Complexity**: Depends on the grid resolution for storing medium properties and the film buffer [S1, unofficial].
+-*   **Strengths**: Unbiased estimation of transmittance in heterogeneous media without requiring spatial coherence or bounding volume hierarchies for acceleration structures [S2, S3, unofficial].
+-*   **Limitations**: Can be slow if the majorant is much larger than the local extinction coefficient, leading to many null-scattering events [S2, unofficial].
+-*   **When to use**: When estimating transmittance between two points in a participating medium within a null-scattering path integral framework, especially for connecting real-scattering vertices [S3, unofficial].
++*   **Strengths**: Provides unbiased estimation of transmittance in heterogeneous media without requiring spatial coherence or bounding volume hierarchies for acceleration structures [S2, S3, unofficial].
++*   **Limitations**: Performance degrades when the majorant is much larger than the local extinction coefficient, causing excessive null-scattering events [S2, unofficial].
++*   **When to use**: Use when estimating transmittance between two points in a participating medium within a null-scattering path integral framework, particularly for connecting real-scattering vertices [S3, unofficial].
+ 
+ ## Background
+-This method is part of the null-scattering path integral formulation of light transport [S3, unofficial]. It builds on the concept of ratio tracking introduced for transmittance estimation [S2, unofficial]. The implementation details are found in the Dr. TVAM project for inverse rendering in volumetric additive manufacturing [S1, unofficial].
++This method originates from the null-scattering path integral formulation of light transport [S3, unofficial]. It builds on the concept of ratio tracking introduced for transmittance estimation [S2, unofficial]. The implementation details are documented in the Dr. TVAM project for inverse rendering in volumetric additive manufacturing [S1, unofficial].
+ 
+ ## Sources

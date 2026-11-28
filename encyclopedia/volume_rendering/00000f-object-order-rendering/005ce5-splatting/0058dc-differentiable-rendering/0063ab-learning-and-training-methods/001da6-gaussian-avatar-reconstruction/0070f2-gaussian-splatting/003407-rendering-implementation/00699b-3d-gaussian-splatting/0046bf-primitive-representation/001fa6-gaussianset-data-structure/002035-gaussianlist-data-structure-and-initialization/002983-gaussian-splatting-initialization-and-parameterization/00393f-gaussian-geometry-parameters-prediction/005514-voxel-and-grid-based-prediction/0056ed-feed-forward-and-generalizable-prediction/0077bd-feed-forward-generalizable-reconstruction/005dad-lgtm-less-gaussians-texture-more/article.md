@@ -1,0 +1,156 @@
+# LGTM (Less Gaussians, Texture More)
+
+Also called: Feed-Forward Prediction of Textured Gaussians, Feed-Forward Textured Splatting
+
+## Overview
+LGTM is a feed-forward framework that predicts compact 2D Gaussian primitives coupled with per-primitive texture maps, decoupling geometric complexity from rendering resolution to enable high-fidelity 4K novel view synthesis without per-scene optimization [S1, unofficial]. It solves the quadratic growth in primitive count as resolution increases in existing feed-forward 3DGS methods, which makes high-resolution synthesis intractable due to memory and compute limits [S1, unofficial]. Unlike standard 3DGS which couples appearance and geometry within each primitive, LGTM decouples them, allowing a compact set of geometric primitives to represent rich texture regions via per-primitive textures [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+The network $f$ takes a set of input images $\{I^v\}_{v=1}^N$ and their low-resolution counterparts $\{I^v_{low}\}_{v=1}^N$ as input. It outputs a set of textured 2D Gaussians:
+$$ f : (I^v, I^v_{low}) \rightarrow \{\mu_i, s_i, r_i, c_i, T^i_c, T^i_\alpha\} $$
+where $\mu_i$ is the mean, $s_i$ and $r_i$ define the covariance (scale and rotation), $c_i$ are spherical harmonics coefficients, $T^i_c$ is the color texture map, and $T^i_\alpha$ is the alpha texture map for primitive $i$ [S1, unofficial].
+
+**Data Structures:**
+*   **Primitive Grid:** The primitive network predicts a grid of size $h \times w$ corresponding to the low-resolution input dimensions. Each cell contains 2DGS parameters: mean $\mu$, scale $s$, rotation $r$, base opacity $o$, and SH coefficients $c$ [S1, unofficial].
+*   **Per-Primitive Texture Maps:** Each primitive $i$ has two texture maps:
+    *   Color texture: $T^i_c \in \mathbb{R}^{T \times T \times 3}$
+    *   Alpha texture: $T^i_\alpha \in \mathbb{R}^{T \times T}$
+    *   $T$ is the texture resolution, a tunable parameter trading off primitive size and texture size [S1, unofficial].
+    *   $T^i_c$ is zero-initialized [S1, unofficial].
+
+**Rendering Formulas:**
+For a ray-splat intersection point $u$ on primitive $i$, the alpha and color are redefined using the texture maps [S1, unofficial]:
+$$ a_i(u) = o_i \cdot T^i_\alpha[u] $$
+$$ \hat{c}_i(u, d_i) = T^i_c[u] + SH(c_i, d_i) $$
+where $T[u]$ denotes bilinear sampling from the texture map at local coordinate $u$, $o_i$ is the base opacity, $d_i$ is the view direction, and $SH(c_i, d_i)$ is the spherical harmonics evaluation. The alpha texture replaces the standard Gaussian falloff $G(u) = \exp(-\frac{1}{2}(u^2 + v^2))$, and the color texture adds high-frequency detail to the SH base color [S1, unofficial].
+
+The final pixel color $C$ is computed by alpha-blending contributions from all primitives sorted by depth:
+$$ C = \sum_i a_i(u_i) \hat{c}_i(d_i) \prod_{j=1}^{i-1} (1 - a_j(u_j)) $$
+[S1, unofficial]
+
+**Algorithm Steps:**
+The architecture consists of two submodules: a primitive network $f_{prim}$ and a texture network $f_{texture}$ [S1, unofficial].
+
+1.  **Primitive Network ($f_{prim}$):**
+    *   Input: Low-resolution image $I^v_{low} \in \mathbb{R}^{h \times w \times 3}$.
+    *   Process: Pass through a Vision Transformer (ViT) encoder-decoder.
+    *   Output: Predict primitive grid parameters $\{\mu_i, s_i, r_i, o_i, c_i\}$ and feature maps $F^{v}_{prim}$ [S1, unofficial].
+    *   Note: The network is trained with high-resolution supervision (rendering at full resolution $H \times W$ despite low-res input) to ensure anti-aliasing and robust geometry [S1, unofficial].
+
+2.  **Texture Network ($f_{texture}$):**
+    *   Input: High-resolution image $I^v$ and primitive features $F^{v}_{prim}$.
+    *   Feature Extraction:
+        *   Compute patch features $F^{v}_{patch}$ from $I^v$ via image patchification and convolutions [S1, unofficial].
+        *   Compute projective features $F^{v}_{proj}$ by mapping source image pixels back to primitive local coordinates using the inverse transformation $M_{i,v}^{-1}$:
+            $$ T^{c,proj}_i[u] = I^v[x] = I^v[M_{i,v}^{-1}(u)] $$
+            where $M_{i,v}$ is the 2D homography transformation mapping pixel coordinates to primitive local coordinates. Features are extracted from this projective prior texture [S1, unofficial].
+        *   Aggregate $F^{v}_{prim}$, $F^{v}_{patch}$, and $F^{v}_{proj}$ to predict per-primitive texture maps $T^i_\alpha$ and $T^i_c$ [S1, unofficial].
+
+3.  **Rendering:**
+    *   For each ray, find intersection $u$ with primitives.
+    *   Retrieve $a_i(u)$ and $\hat{c}_i(u, d_i)$ from texture maps using bilinear sampling.
+    *   Composite using alpha-blending [S1, unofficial].
+
+**Training Strategy:**
+A staged two-stage strategy is used [S1, unofficial]:
+1.  **Stage 1:** Pre-train the primitive network $f_{prim}$ in isolation to establish a robust geometric foundation. Loss: MSE + LPIPS between rendered and ground truth images [S1, unofficial].
+2.  **Stage 2:** Jointly train $f_{prim}$ and $f_{texture}$. Freeze or reduce the learning rate of $f_{prim}$ by 0.1x to maintain geometric stability. The color texture $T_c$ is zero-initialized. Loss: MSE + LPIPS [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lgtm_forward(input_images, low_res_images, camera_params):
+    """
+    input_images: List of high-res RGB images [N, H, W, 3]
+    low_res_images: List of low-res RGB images [N, h, w, 3]
+    camera_params: Camera poses and intrinsics for each view
+    Returns: List of textured Gaussian primitives
+    """
+    N = len(input_images)
+    all_primitives = []
+
+    # Stage 1: Primitive Network (Pre-trained)
+    # f_prim takes low-res images and predicts geometry
+    for v in range(N):
+        # Encode low-res image
+        features = vit_encoder(low_res_images[v])
+        # Decode to predict primitive grid
+        prim_grid = vit_decoder(features)
+        
+        # Extract primitive parameters
+        # prim_grid contains mu, s, r, o, c for h*w primitives
+        primitives_v = decode_primitives(prim_grid)
+        
+        # Store features for texture network
+        F_prim = get_primitive_features(prim_grid)
+        
+        # Stage 2: Texture Network
+        # f_texture takes high-res image and primitive features
+        # 1. Patchify high-res image
+        F_patch = extract_patch_features(input_images[v])
+        
+        # 2. Projective Mapping
+        # Map primitive local coordinates to image pixels
+        # M_inv is inverse homography for each primitive
+        T_proj = projective_texture_mapping(input_images[v], primitives_v, camera_params[v])
+        F_proj = extract_projective_features(T_proj)
+        
+        # 3. Aggregate and Predict Textures
+        # Combine F_prim, F_patch, F_proj
+        texture_maps = predict_textures(F_prim, F_patch, F_proj)
+        
+        # Assign textures to primitives
+        for i, prim in enumerate(primitives_v):
+            prim.T_c = texture_maps['color'][i]
+            prim.T_alpha = texture_maps['alpha'][i]
+            
+        all_primitives.append(primitives_v)
+        
+    return all_primitives
+
+def render_textured_gaussians(primitives, camera_params):
+    """
+    Render textured Gaussians using alpha blending
+    """
+    # Initialize output image
+    image = zeros_like(target_resolution)
+    
+    # Sort primitives by depth for current view
+    sorted_prims = sort_by_depth(primitives, camera_params)
+    
+    for prim in sorted_prims:
+        # Find ray-splat intersection u for each pixel
+        # This is handled by the rasterizer
+        u = get_local_coordinates(prim, camera_params)
+        
+        # Sample textures
+        alpha = prim.o * bilinear_sample(prim.T_alpha, u)
+        color = bilinear_sample(prim.T_c, u) + spherical_harmonics(prim.c, prim.view_direction)
+        
+        # Alpha blend
+        # C = sum(a_i * c_i * product(1 - a_j))
+        image = composite_pixel(image, alpha, color)
+        
+    return image
+```
+
+**Edge Cases and Pitfalls:**
+*   **Memory Constraints:** Standard feed-forward methods fail at 2K+ resolutions due to memory limits (e.g., NoPoSplat requires >61 GB for 1024x576). LGTM uses <30 GB [S1, unofficial].
+*   **Holes in Rendering:** Without high-resolution supervision, predicted Gaussians may result in holes due to lack of anti-aliasing. High-res supervision forces the network to learn proper coverage [S1, unofficial].
+*   **Geometric Stability:** In Stage 2, the primitive network must be trained with a reduced learning rate (0.1x) to prevent destabilizing the geometry while learning textures [S1, unofficial].
+
+## Operating characteristics
+*   **Memory:** LGTM trains successfully at 2K and 4K resolutions using under 30 GB of memory [S1, unofficial]. In contrast, NoPoSplat fails to train at 2K or higher due to memory constraints (OOM) [S1, unofficial].
+*   **Scalability:** Scaling from 512 to 4K requires 64x more Gaussians in standard methods. LGTM scales efficiently at inference, adding only modest memory and time overhead for a 64x pixel increase [S1, unofficial].
+*   **Performance:** Enables high-fidelity 4K novel view synthesis, a capability previously out of reach for feed-forward methods [S1, unofficial].
+*   **Strengths:** Decouples geometry and appearance; enables high-resolution rendering with significantly fewer primitives; no per-scene optimization required; versatile input support (monocular, posed/unposed two-view, multi-view) [S1, unofficial].
+*   **Limitations:** Requires a dual-network architecture; relies on high-resolution supervision during training to avoid holes; texture resolution $T$ is a hyperparameter that trades off primitive count and texture detail [S1, unofficial].
+
+## Background
+LGTM was published as a conference paper at ICLR 2026 by Yixing Lao, Xuyang Bai, Xiaoyang Wu, Nuoyuan Yan, Zixin Luo, Jean-Daniel Nahmias, Yanghai Tsin, Shiwei Li, and Hengshuang Zhao from HKU and Apple [S1, unofficial]. It addresses the limitations of existing feed-forward 3DGS methods which suffer from quadratic primitive growth and the per-scene optimization requirement of textured Gaussian methods [S1, unofficial].
+
+## Sources
+[S1] Less Gaussians, Texture More: 4K Feed-Forward Textured Splatting, https://doi.org/10.48550/arXiv.2603.25745, fetched 2026-10-30 (unofficial)

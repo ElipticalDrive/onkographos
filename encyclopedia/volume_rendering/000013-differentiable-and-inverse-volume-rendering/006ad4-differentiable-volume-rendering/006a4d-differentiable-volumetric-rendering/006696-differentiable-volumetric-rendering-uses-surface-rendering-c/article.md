@@ -1,0 +1,134 @@
+# Differentiable Volumetric Rendering — Uses surface rendering, computes gradients analytically, and performs inference via a CNN encoder.
+
+Also called: SinGRAF, Single Scene 3D GAN
+
+## Overview
+SinGRAF is a 3D-aware generative model trained on a small set of unposed 2D images of a single scene to generate diverse 3D radiance fields that preserve appearance while varying scene layout [S1]. It distinguishes itself from sibling methods by employing a progressive-scale patch discrimination strategy during training, where the discriminator is conditioned on the spatial scale of the rendered patch, allowing the model to learn structural information at large scales and fine details at small scales [S1]. Unlike methods that require posed data or large datasets, SinGRAF operates on unposed inputs and uses a tri-plane representation for efficient 3D synthesis [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N$ unposed images $\{I_1, \dots, I_N\}$, each of resolution $H' \times H' \times 3$. Camera intrinsic parameters are assumed available [S1].
+*   **Output:** A 3D generative model $G$ that produces diverse 3D radiance fields. The generator takes a noise vector and outputs RGB predictions for query rays [S1].
+
+**Data Structures:**
+1.  **Latent Code:** The mapping network outputs a latent code vector $w \in \mathbb{R}^{128}$ from a noise vector $z \sim \mathbb{R}^{128}$ [S1].
+2.  **Tri-planes:** The synthesis network produces a 2D feature image $F \in \mathbb{R}^{N \times N \times 3C}$. This is split into three axis-aligned feature planes:
+    *   $F_{xy} \in \mathbb{R}^{N \times N \times C}$
+    *   $F_{xz} \in \mathbb{R}^{N \times N \times C}$
+    *   $F_{yz} \in \mathbb{R}^{N \times N \times C}$
+    [S1]
+3.  **Decoder:** A small multilayer perceptron (MLP) mapping $\mathbb{R}^{3C} \to \mathbb{R}^4$ (RGB + density) [S1].
+
+**Algorithm Steps:**
+
+1.  **Sampling:** For each training iteration, sample a patch scale $s$ from a uniform distribution $s \sim U(s_{min}(t), s_{max}(t))$, where $t$ is the current training epoch. The schedule decreases $s$ from large values (structural info) to small values (quality/diversity) over epochs [S1].
+2.  **Ray Generation:** Define a virtual camera image plane $P$ with the same field of view (FOV) $\theta$ as the input images. Sample a random patch location on $P$. Generate rays $\Gamma_\rho$ corresponding to a fixed resolution $H \times H$ patch with spatial extent $s$ on $P$. If $s=1.0$, the patch covers the entire image plane [S1].
+3.  **Feature Aggregation:** For each ray origin $o$ and direction $d$, define the ray parametrically as $r(t) = o + td$. Sample 96 points along the ray between near bound $t_n$ and far bound $t_f$ [S1]. For each point $x = r(t)$, aggregate tri-plane features:
+    $$ \mathbf{F}_{agg}(x) = \mathbf{F}_{xy}(x) + \mathbf{F}_{xz}(x) + \mathbf{F}_{yz}(x) $$
+    [S1]
+4.  **Field Query:** Pass the aggregated features through the MLP decoder to obtain color $\mathbf{c}(x)$ and density $\sigma(x)$:
+    $$ (\mathbf{c}(x), \sigma(x)) = \text{mlp}(\mathbf{F}_{xy}(x) + \mathbf{F}_{xz}(x) + \mathbf{F}_{yz}(x)) $$
+    [S1]
+5.  **Volume Rendering:** Compute the accumulated color $\mathbf{C}(\mathbf{r})$ for the ray using quadrature:
+    $$ \mathbf{C}(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t)) \, dt $$
+    $$ T(t) = \exp\left(-\int_{t_n}^{t} \sigma(\mathbf{r}(s)) \, ds\right) $$
+    [S1]
+6.  **Ground Truth Sampling:** Crop the input images $\{I_i\}$ using the same patch scale $s$ and random location to obtain ground truth patches [S1].
+7.  **Discriminator Input:** Condition the discriminator $D$ with the scale value $s$. Implementation detail: repeat the scalar $s$ to match the patch resolution before feeding it to $D$ [S1].
+8.  **Discriminator Output:** The discriminator $D: G(\Gamma_\rho, z) \times s \mapsto \mathbb{R}$ outputs a scalar indicating patch realism [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_step(images, camera_intrinsics, epoch, generator, discriminator, optimizer_G, optimizer_D):
+    # 1. Sample scale s based on epoch t
+    s_min = schedule_s_min(epoch)
+    s_max = schedule_s_max(epoch)
+    s = uniform_sample(s_min, s_max)
+    
+    # 2. Sample random patch location and generate rays
+    # Assume virtual camera plane P with FOV theta
+    patch_location = random_sample_on_plane(P)
+    rays = generate_rays(patch_location, scale=s, resolution=H, fov=camera_intrinsics.fov)
+    
+    # 3. Generate 3D radiance field via Tri-planes
+    z = sample_noise(128)
+    w = mapping_network(z)
+    F_xy, F_xz, F_yz = synthesis_network(w)
+    
+    # 4. Query field along rays
+    num_samples = 96
+    t_n, t_f = near_far_bounds(rays)
+    t_samples = linspace(t_n, t_f, num_samples)
+    
+    colors = []
+    densities = []
+    
+    for ray in rays:
+        ray_colors = []
+        ray_densities = []
+        for t in t_samples:
+            x = ray.origin + t * ray.direction
+            # Aggregate tri-plane features
+            F_agg = interpolate(F_xy, x) + interpolate(F_xz, x) + interpolate(F_yz, x)
+            # Decode to color and density
+            c, sigma = mlp_decoder(F_agg)
+            ray_colors.append(c)
+            ray_densities.append(sigma)
+        colors.append(ray_colors)
+        densities.append(ray_densities)
+        
+    # 5. Volume Rendering
+    rendered_patches = volume_render(rays, colors, densities, t_samples)
+    
+    # 6. Sample Ground Truth
+    gt_patches = crop_images(images, patch_location, scale=s)
+    
+    # 7. Discriminator Conditioning
+    # Repeat scale s to match patch resolution
+    s_conditioned = repeat(s, rendered_patches.shape)
+    
+    # 8. Compute Losses
+    # Adversarial Loss
+    d_fake = discriminator(rendered_patches, s_conditioned)
+    d_real = discriminator(gt_patches, s_conditioned)
+    
+    # R1 Gradient Penalty
+    r1_penalty = compute_r1_penalty(discriminator, gt_patches)
+    
+    # Discriminator Reconstruction Loss (ER)
+    er_loss = compute_er_loss(discriminator, gt_patches)
+    
+    # Update Generators and Discriminators
+    update_optimizer(optimizer_G, generator, r1_penalty) # Note: R1 is typically D-side, but source lists it under losses combined with adversarial
+    update_optimizer(optimizer_D, discriminator, d_fake, d_real, r1_penalty, er_loss)
+```
+
+**Parameters:**
+*   **Samples per ray:** 96 [S1].
+*   **Latent dimension:** 128 [S1].
+*   **Tri-plane resolution:** $N \times N$ (Not given in the sources).
+*   **Feature channels:** $3C$ total, split into $C$ per plane (Not given in the sources).
+*   **Super-resolution:** Not applied [S1].
+*   **Hierarchical sampling:** Not used [S1].
+
+**Edge Cases and Pitfalls:**
+*   The model does not model view-dependent effects [S1].
+*   The scale schedule must be carefully tuned; early epochs require larger patches for structural information, while later epochs require smaller patches for quality and diversity [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** SinGRAF outperforms closest related works in both quality and diversity by a large margin [S1].
+*   **Strengths:** Works with a few unposed images; generates diverse 3D radiance fields; preserves appearance while varying layout [S1].
+*   **Limitations:** Does not model view-dependent effects; requires camera intrinsic parameters [S1].
+*   **When to use:** When training on a single scene with limited, unposed 2D images and needing diverse 3D generations [S1].
+*   **When not to use:** When view-dependent effects are critical or when posed data is available and other methods might be more suitable [S1].
+
+## Background
+SinGRAF was introduced by Minjung Son, Junyong Park, Gordon Wetzstein, and Leonidas Guibas, published at CVPR 2023 [S1]. It builds on recent progress in 3D GAN architectures and introduces a novel progressive-scale patch discrimination approach [S1]. The method is designed to address the laborious task of creating 3D assets by automating the generation of 3D-aware generative models from limited 2D observations [S1].
+
+## Sources
+[S1] SinGRAF: Learning a 3D Generative Radiance Field for a Single Scene, https://doi.org/10.1109/cvpr52729.2023.00822, fetched 2026-10-29

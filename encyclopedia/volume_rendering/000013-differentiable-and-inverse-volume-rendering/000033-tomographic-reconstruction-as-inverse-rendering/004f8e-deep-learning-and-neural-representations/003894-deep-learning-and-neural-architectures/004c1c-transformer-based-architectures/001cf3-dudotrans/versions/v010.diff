@@ -1,0 +1,119 @@
+--- v009.md
++++ v010.md
+@@ -1,19 +1,16 @@
+ # DuDoTrans
+ 
+-Also called: DuDoTransModel
++Also called: Dual-Domain Transformer, DuDoTransModel
+ 
+ ## Overview
+-DuDoTrans is a dual-domain transformer architecture designed for sparse-view CT reconstruction, addressing the ill-posed nature of tomographic inversion when projection data is limited [S1, unofficial]. It distinguishes itself from standard transformer-based reconstruction methods by explicitly operating in both the image domain (via Swin Transformer blocks) and the projection domain (via differentiable forward/back-projection), leveraging window-based multi-head self-attention to reduce computational complexity while maintaining global context [S1, unofficial].
++DuDoTrans is a dual-domain transformer architecture for sparse-view CT reconstruction that adapts Swin Transformer blocks with window-based multi-head self-attention (W-MSA) and shifted windows to model local structures efficiently [S1, unofficial]. It distinguishes itself from global attention methods by restricting attention to local windows, lowering computational complexity from $O(N^2)$ to $O(N \cdot W_s^2)$ where $N$ is the number of tokens and $W_s$ is the window size [S1, unofficial].
+ 
+ ## How it works
+-DuDoTrans integrates a Swin Transformer [S1, unofficial] into the iterative optimization loop of differentiable tomographic reconstruction. The network processes 2D projection images (sinograms) or reconstructed volume slices, using windowed attention to model local structures efficiently.
+-
+ ### Inputs and Outputs
+-- **Input:** A batch of 2D images (sinograms or volume slices) with shape $(B, H, W, C)$, where $B$ is batch size, $H, W$ are spatial dimensions, and $C$ is the number of channels (typically 1 for grayscale sinograms).
+-- **Output:** A refined 2D image tensor of shape $(B, H, W, C)$. In the full reconstruction pipeline, these outputs are aggregated or used to update the 3D volume estimate via the differentiable forward/back-projection operators defined in the parent article.
++- **Input:** A batch of 2D images (sinograms or volume slices) with shape $(B, H, W, C)$, where $B$ is batch size, $H, W$ are spatial dimensions, and $C$ is the number of channels [S1, unofficial].
++- **Output:** A refined 2D image tensor of shape $(B, H, W, C)$ [S1, unofficial].
+ 
+ ### Data Structures
+-The core data structure is the **Swin Transformer Block**, which relies on specific tensor layouts for relative position bias.
+-
++The core data structure relies on specific tensor layouts for relative position bias [S1, unofficial].
+ 1.  **Relative Position Bias Table (`relative_position_bias_table`)**
+     -   **Type:** Parameter tensor (learnable weights).
+@@ -21,5 +18,4 @@
+     -   **Initialization:** Zeros, followed by truncated normal distribution with standard deviation $0.02$ [S1, unofficial].
+     -   **Purpose:** Stores learnable biases for relative spatial positions within an attention window.
+-
+ 2.  **Relative Position Index (`relative_position_index`)**
+     -   **Type:** Buffer tensor (constant, not updated during training).
+@@ -29,59 +25,29 @@
+ ### Parameters
+ -   **`window_size`**: Height and width of the attention window. Default: $(7, 7)$ [S1, unofficial].
+--   **`shift_size`**: Shift size for shifted window partitioning. If $0$, non-shifted windows are used. Default: $0$ [S1, unofficial].
++-   **`shift_size`**: Shift size for Swin-MSA. If $0$, non-shifted windows are used. Default: $0$ [S1, unofficial].
+ -   **`mlp_ratio`**: Ratio of MLP hidden dimension to embedding dimension. Default: $4.0$ [S1, unofficial].
+--   **`qk_scale`**: Override for the scaling factor of Query and Key vectors. If `None`, defaults to $d_k^{-0.5}$ where $d_k$ is the head dimension [S1, unofficial].
++-   **`qk_scale`**: Override default QK scale. If `None`, defaults to $d_k^{-0.5}$ [S1, unofficial].
+ 
+ ### Numbered Steps
+-
+-#### 1. Window Partitioning
+-The input tensor is partitioned into non-overlapping windows to enable local attention.
+-1.  Reshape input $x \in \mathbb{R}^{B \times H \times W \times C}$ to $(B, H/W_s, W_s, W/W_s, W_s, C)$, where $W_s$ is the window size.
+-2.  Permute dimensions to $(B, H/W_s, W/W_s, W_s, W_s, C)$.
+-3.  Flatten spatial window dimensions to obtain windows $x_{win} \in \mathbb{R}^{(B \cdot \frac{H}{W_s} \cdot \frac{W}{W_s}) \times W_s \times W_s \times C}$. Let $N_{win} = B \cdot \frac{H}{W_s} \cdot \frac{W}{W_s}$ be the number of windows.
+-
+-#### 2. Relative Position Bias Calculation
+-Compute the index mapping for relative positions within each window.
+-1.  Generate coordinates: $coords_h = \text{arange}(W_h)$, $coords_w = \text{arange}(W_w)$.
+-2.  Create meshgrid and flatten to shape $(2, W_h W_w)$.
+-3.  Compute relative coordinates: $relative\_coords = coords\_flatten[:, :, \text{None}] - coords\_flatten[:, \text{None}, :]$.
+-4.  Permute to shape $(W_h W_w, W_h W_w, 2)$.
+-5.  Shift indices to ensure non-negative values:
+-    -   $relative\_coords[:, :, 0] += W_h - 1$
+-    -   $relative\_coords[:, :, 1] += W_w - 1$
+-6.  Map to 1D index: $relative\_coords[:, :, 0] *= 2W_w - 1$.
+-7.  Sum to get final index: $relative\_position\_index = \text{sum}(relative\_coords, \text{axis}=-1)$. Result shape: $(W_h W_w, W_h W_w)$ [S1, unofficial].
+-
+-#### 3. Window Attention Forward (W-MSA)
+-Compute attention within each window.
+-1.  **Linear Projection:** Compute $qkv = \text{Linear}(x_{win})$. Reshape to $(N_{win}, N, 3, \text{num\_heads}, C/\text{num\_heads})$ where $N = W_s^2$. Permute to $(3, N_{win}, \text{num\_heads}, N, C/\text{num\_heads})$ to separate Q, K, V.
+-2.  **Scale Q:** $q = q \cdot \text{scale}$, where $\text{scale} = \text{qk\_scale}$ or $d_k^{-0.5}$ [S1, unofficial].
+-3.  **Attention Scores:** $attn = q \cdot k^T$. Shape: $(N_{win}, \text{num\_heads}, N, N)$.
+-4.  **Add Bias:**
+-    -   Retrieve bias: $bias = \text{table}[relative\_position\_index]$. Shape: $(N, N, \text{num\_heads})$.
+-    -   Reshape/Permute bias to $(\text{num\_heads}, N, N)$.
+-    -   Add to attention scores: $attn = attn + bias$.
+-5.  **Softmax:** Apply softmax along the last dimension (key dimension).
+-6.  **Dropout:** Apply attention dropout.
+-7.  **Output:**
+-    -   Compute $x_{out} = \text{softmax}(attn) \cdot v$.
+-    -   Transpose and reshape to $(N_{win}, N, C)$.
+-    -   Apply linear projection and projection dropout [S1, unofficial].
+-
+-#### 4. Window Reverse
+-Reconstruct the full image from the processed windows.
+-1.  Reshape $x_{out}$ from $(N_{win}, W_s, W_s, C)$ to $(B, H/W_s, W/W_s, W_s, W_s, C)$.
+-2.  Permute to $(B, H/W_s, W_s, W/W_s, W_s, C)$.
+-3.  Flatten to $(B, H, W, C)$ [S1, unofficial].
+-
+-#### 5. Integration in Tomographic Loop
+-In the context of sparse-view CT reconstruction:
+-1.  The current volume estimate $x$ is projected to a sinogram $\hat{p}$ using the differentiable forward projection operator $\mathcal{P}$ [G].
+-2.  The residual $\frac{\partial \mathcal{L}}{\partial \hat{p}}$ is computed.
+-3.  This residual (or the sinogram itself, depending on the specific variant) is passed through the DuDoTrans encoder/decoder blocks to refine features or predict corrections.
+-4.  The refined features are used to update the volume estimate $x$ via back-projection $\mathcal{P}^T$ and gradient descent [S1, unofficial].
++1.  **Window Partitioning**: Reshape input tensor $x$ of shape $(B, H, W, C)$ into windows. Reshape to $(B, H/W_s, W_s, W/W_s, W_s, C)$, permute to $(B, H/W_s, W/W_s, W_s, W_s, C)$, and flatten to $(num\_windows \cdot B, W_s, W_s, C)$, where $W_s$ is window_size [S1, unofficial].
++2.  **Relative Position Bias Calculation**: 
++    1. Generate coordinates for the window: $coords_h = \text{arange}(W_h)$, $coords_w = \text{arange}(W_w)$. 
++    2. Create meshgrid and flatten to $(2, W_h W_w)$. 
++    3. Compute relative coordinates: $relative\_coords = coords\_flatten[:, :, \text{None}] - coords\_flatten[:, \text{None}, :]$. 
++    4. Permute to $(W_h W_w, W_h W_w, 2)$. 
++    5. Shift indices: $relative\_coords[:, :, 0] += W_h - 1$, $relative\_coords[:, :, 1] += W_w - 1$. 
++    6. Map to 1D index: $relative\_coords[:, :, 0] *= 2 W_w - 1$. 
++    7. Sum to get final index: $relative\_position\_index = relative\_coords.sum(-1)$ [S1, unofficial].
++3.  **Window Attention Forward**: 
++    1. Compute Q, K, V via linear projection and reshape: $qkv = \text{Linear}(x)$, reshape to $(B_, N, 3, \text{num\_heads}, C/\text{num\_heads})$, permute to $(3, B_, \text{num\_heads}, N, C/\text{num\_heads})$. 
++    2. Scale Q: $q = q \cdot \text{scale}$. 
++    3. Compute attention scores: $attn = q @ k^T$. 
++    4. Add relative position bias: $bias = \text{table}[index]$, reshape to $(W_h W_w, W_h W_w, \text{num\_heads})$, permute to $(\text{num\_heads}, W_h W_w, W_h W_w)$, add to attn. 
++    5. Apply softmax. 
++    6. Apply attention dropout. 
++    7. Compute output: $x = (attn @ v)^T$, reshape, project, and apply projection dropout [S1, unofficial].
++4.  **Window Reverse**: Reconstruct the image from windows. Reshape windows $(num\_windows \cdot B, W_s, W_s, C)$ to $(B, H/W_s, W/W_s, W_s, W_s, C)$, permute to $(B, H/W_s, W_s, W/W_s, W_s, C)$, and flatten to $(B, H, W, C)$ [S1, unofficial].
+ 
+ ### Pseudocode
+-
+ ```python
+ import torch
+@@ -312,5 +278,4 @@
+ -   **Time Complexity:** The window-based attention reduces complexity from $O(N^2)$ to $O(N \cdot W_s^2)$, where $N$ is the number of tokens (pixels) and $W_s$ is the window size [S1, unofficial]. This makes it significantly more efficient than global self-attention for high-resolution images.
+ -   **Memory Complexity:** Memory usage is dominated by the storage of the attention maps within windows and the relative position bias table. The bias table size is $O(W_s^2 \cdot \text{num\_heads})$, which is constant and small.
+--   **Performance:** DuDoTrans demonstrates superior performance in sparse-view CT reconstruction compared to non-transformer baselines and standard CNNs, effectively recovering high-frequency details from limited projections [S1, unofficial].
+ -   **Strengths:** Efficient local modeling, ability to capture long-range dependencies via shifted windows, and compatibility with differentiable tomographic operators.
+ -   **Limitations:** Performance may degrade if the window size is not well-tuned for the specific frequency content of the sinogram/volume. Requires careful handling of boundary conditions in the tomographic loop.

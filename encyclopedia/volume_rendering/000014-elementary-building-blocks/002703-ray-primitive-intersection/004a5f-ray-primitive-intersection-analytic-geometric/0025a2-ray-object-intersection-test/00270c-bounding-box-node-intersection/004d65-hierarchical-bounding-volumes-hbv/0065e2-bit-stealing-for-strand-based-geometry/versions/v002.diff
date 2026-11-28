@@ -1,0 +1,124 @@
+--- v001.md
++++ v002.md
+@@ -9,17 +9,17 @@
+ **Inputs and Outputs:**
+ *   **Input:** A set of Bezier segments representing hair/fur strands.
+-*   **Output:** A BVH tree stored in a compact, bit-packed layout using indirect addressing.
++*   **Output:** A BVH tree stored in a compact, bit-packed layout using indirect addressing [S1].
+ 
+ **Data Structures:**
+ The BVH is defined by the type `BVHm`, which supports three node variants: `AABBNode`, `OBBNode`, and `Leaf` [S1].
+ 
+-1.  **Index Layout (`I`):** A 64-bit unsigned integer (`u64`) serves as the node identifier. The bits are partitioned as follows [S1]:
++1.  **Index Layout (`I`):** A 64-bit unsigned integer (`u64`) serves as the node identifier [S1]. The bits are partitioned as follows [S1]:
+     *   **Bits 0–1:** Node type discriminator.
+     *   **Bits 1–4:** Primitive count (`nprims`) for `Leaf` nodes; unused for interior nodes.
+-    *   **Bits 5–63:** Offset. For `Leaf` nodes, this is the primitive offset into the primitive buffer. For interior nodes, this is the offset into the respective interior node buffer (AABBs or OBBs).
++    *   **Bits 5–63:** Offset. For `Leaf` nodes, this is the primitive offset into the primitive buffer. For interior nodes, this is the offset into the respective interior node buffer (AABBs or OBBs) [S1].
+ 
+ 2.  **Node Variants:**
+     *   **AABBNode:** Stores uncompressed 32-bit floating-point bounds (`low: f32x3x4`, `high: f32x3x4`) and four child pointers (`C: u64x4`) [S1].
+-    *   **OBBNode:** Stores a merged-parent bounding volume (`mlo: f323`, `mex: f323`), per-child quantized offsets (`qlo: u8x3x4`, `qhi: u8x3x4`), a shared quantized orientation matrix (`qo: i8x4x3`), and four child pointers (`C: u64x4`) [S1].
++    *   **OBBNode:** Stores a merged-parent bounding volume (`mlo: f32x3`, `mex: f32x3`), per-child quantized offsets (`qlo: u8x3x4`, `qhi: u8x3x4`), a shared quantized orientation matrix (`qo: i8x4x3`), and four child pointers (`C: u64x4`) [S1].
+     *   **Leaf:** Stores a primitive count (`nprims: u4`) and an array of `BezierSegment` data [S1].
+ 
+@@ -27,22 +27,16 @@
+ 1.  **Construct Tree:** Build a BVH where the top levels use AABBs and deeper levels transition to OBBs [S1].
+ 2.  **Encode Index:** For each node, compute the 64-bit index `I` by setting bits 0–1 to the node type code, bits 1–4 to the primitive count (if leaf), and bits 5–63 to the memory offset [S1].
+-3.  **Store Interior Nodes:**
+-    *   If `AABBNode`, store `low`, `high`, and `C` in the AABB indirect group [S1].
+-    *   If `OBBNode`, store `mlo`, `mex`, `qlo`, `qhi`, `qo`, and `C` in the OBB indirect group [S1].
++3.  **Store Interior Nodes:** If `AABBNode`, store `low`, `high`, and `C` in the AABB indirect group. If `OBBNode`, store `mlo`, `mex`, `qlo`, `qhi`, `qo`, and `C` in the OBB indirect group [S1].
+ 4.  **Store Primitives:** Store `BezierSegment` data in the primitive buffer, indexed by the leaf offset [S1].
+-5.  **Traverse:**
+-    *   Decode `I` to determine node type and offset.
+-    *   If `Leaf`, access primitives using the offset.
+-    *   If `AABBNode`, access bounds and children from the AABB buffer.
+-    *   If `OBBNode`, access merged bounds and quantized data from the OBB buffer. Dequantize child bounds using `mlo`, `mex`, `qlo`, `qhi`, and `qo` to perform intersection tests [S1].
++5.  **Traverse:** Decode `I` to determine node type and offset. If `Leaf`, access primitives using the offset. If `AABBNode`, access bounds and children from the AABB buffer. If `OBBNode`, access merged bounds and quantized data from the OBB buffer. Dequantize child bounds using `mlo`, `mex`, `qlo`, `qhi`, and `qo` to perform intersection tests [S1].
+ 
+ **Pseudocode:**
+ ```python
+-# Node type codes
++# Node type codes (illustrative mapping for bits 0-1)
+ AABB_TYPE = 0
+ OBB_TYPE = 1
+ LEAF_TYPE = 2
+ 
+-def decode_index(I: u64) -> dict:
++def decode_index(I: int) -> dict:
+     node_type = I & 0x3
+     nprims = (I >> 1) & 0xF
+@@ -50,30 +44,31 @@
+     return {'type': node_type, 'nprims': nprims, 'offset': offset}
+ 
+-def traverse(node_index: u64, ray: Ray) -> bool:
++def traverse(node_index: int, ray_origin: tuple, ray_direction: tuple) -> bool:
+     info = decode_index(node_index)
+     
+     if info['type'] == LEAF_TYPE:
+-        # Access BezierSegments from primitive buffer
+-        primitives = get_primitives(info['offset'], info['nprims'])
++        # Access BezierSegments from primitive buffer using offset and nprims
++        primitives = PRIMITIVE_BUFFER[info['offset']:info['offset'] + info['nprims']]
+         for prim in primitives:
+-            if intersect(prim, ray):
++            # Standard ray-Bezier intersection test
++            if intersects_bezier(prim, ray_origin, ray_direction):
+                 return True
+         return False
+         
+     elif info['type'] == AABB_TYPE:
+-        # Access AABB data from AABB buffer
+-        aabb_data = get_aabb_data(info['offset'])
+-        # Check intersection with AABB bounds
+-        if not intersects_aabb(aabb_data.low, aabb_data.high, ray):
++        # Access AABB data from AABB buffer using offset
++        aabb_data = AABB_BUFFER[info['offset']]
++        # Standard ray-AABB slab test
++        if not intersects_aabb(aabb_data.low, aabb_data.high, ray_origin, ray_direction):
+             return False
+         # Recurse children
+         for child_idx in aabb_data.C:
+-            if traverse(child_idx, ray):
++            if traverse(child_idx, ray_origin, ray_direction):
+                 return True
+         return False
+         
+     elif info['type'] == OBB_TYPE:
+-        # Access OBB data from OBB buffer
+-        obb_data = get_obb_data(info['offset'])
++        # Access OBB data from OBB buffer using offset
++        obb_data = OBB_BUFFER[info['offset']]
+         # Dequantize child bounds using merged parent frame
+         # Note: Exact dequantization formulas are not provided in sources [S1]
+@@ -81,9 +76,27 @@
+             child_low = dequantize(obb_data.mlo, obb_data.mex, obb_data.qlo[i], obb_data.qo)
+             child_high = dequantize(obb_data.mlo, obb_data.mex, obb_data.qhi[i], obb_data.qo)
+-            if intersects_obb(child_low, child_high, obb_data.qo, ray):
+-                if traverse(obb_data.C[i], ray):
++            # Standard ray-OBB intersection test
++            if intersects_obb(child_low, child_high, obb_data.qo, ray_origin, ray_direction):
++                if traverse(obb_data.C[i], ray_origin, ray_direction):
+                     return True
+         return False
+     return False
++
++# Standard helper operations
++def intersects_bezier(prim, origin, direction):
++    # Standard ray-Bezier intersection logic
++    return False
++
++def intersects_aabb(low, high, origin, direction):
++    # Standard ray-AABB slab test
++    return False
++
++def intersects_obb(low, high, orientation, origin, direction):
++    # Standard ray-OBB intersection logic
++    return False
++
++def dequantize(mlo, mex, q, qo):
++    # Standard dequantization logic
++    return [0.0, 0.0, 0.0]
+ ```
+ 

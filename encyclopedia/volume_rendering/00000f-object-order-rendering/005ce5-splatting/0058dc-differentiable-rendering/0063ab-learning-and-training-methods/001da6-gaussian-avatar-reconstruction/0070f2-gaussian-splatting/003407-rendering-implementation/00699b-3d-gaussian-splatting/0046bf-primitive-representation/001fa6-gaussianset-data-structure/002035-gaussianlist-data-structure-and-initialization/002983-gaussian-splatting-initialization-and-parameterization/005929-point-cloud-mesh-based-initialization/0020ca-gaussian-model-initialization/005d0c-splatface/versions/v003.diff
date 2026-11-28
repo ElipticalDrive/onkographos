@@ -1,0 +1,147 @@
+--- v002.md
++++ v003.md
+@@ -6,65 +6,83 @@
+ 
+ ## How it works
+-**Inputs:** A template mesh, a set of input images (few-view), and camera poses [G].
+-**Outputs:** A set of 3D Gaussians and an optimized mesh geometry [G].
++**Inputs:** A template mesh (vertices $V$, faces $F$), a set of few input images, and corresponding camera poses [G].
++**Outputs:** A set of $N$ 3D Gaussians and an optimized mesh geometry [G].
+ 
+ **Data Structures:**
+-1. **Template Mesh:** Defined by vertices $V$ and faces $F$ [G].
+-2. **Gaussian Set:** A list of $N$ Gaussians, each with position $\mathbf{p}$, covariance matrix $\mathbf{\Sigma}$, opacity $\alpha$, and spherical harmonic coefficients for color [G].
++1. **Template Mesh:** Defined by vertex positions $V \in \mathbb{R}^{3 \times V_{\text{count}}}$ and face indices $F \in \mathbb{Z}^{3 \times F_{\text{count}}}$ [G].
++2. **Gaussian Set:** A list of $N$ Gaussians, each storing position $\mathbf{p}_i \in \mathbb{R}^3$, covariance matrix $\mathbf{\Sigma}_i \in \mathbb{R}^{3 \times 3}$, opacity $\alpha_i \in [0, 1]$, and spherical harmonic coefficients $\mathbf{c}_i$ for view-dependent color [G].
+ 
+ **Steps:**
+-1. **Initialization:** Initialize 3D Gaussians on the surface of the template mesh [S1, unofficial].
+-2. **Rendering:** Render the scene using standard 3D Gaussian Splatting rasterization to produce an image [G].
+-3. **Loss Calculation:** Compute a loss function comprising an image loss (difference between rendered and input images, e.g., L1 or SSIM) [G] and a splat-to-mesh distance loss that penalizes the distance between the splatted Gaussians and the current mesh surface [S1, unofficial].
+-4. **Joint Optimization:** Update both the Gaussian parameters and the mesh vertices using gradient descent [S1, unofficial].
++1. **Initialization:** Place 3D Gaussians uniformly on the surface of the template mesh using barycentric coordinates [S1, unofficial].
++2. **Rendering:** Project the 3D Gaussians to 2D screen space and alpha-blend them to synthesize an image [G].
++3. **Loss Calculation:** Compute the total loss as the sum of an image reconstruction loss and a splat-to-mesh distance loss [S1, unofficial].
++4. **Joint Optimization:** Update Gaussian parameters and mesh vertices via gradient descent to minimize the total loss [S1, unofficial].
+ 
+ **Formulas:**
+ The total loss $L$ is:
+ $$ L = L_{\text{image}} + \lambda L_{\text{splat-mesh}} $$
+-where $L_{\text{splat-mesh}}$ measures the distance between the Gaussian splats and the mesh surface [S1, unofficial].
++where $L_{\text{image}}$ is the pixel-wise difference between the rendered and input images (e.g., L1 or SSIM) [G], $\lambda$ is a scalar weight balancing the terms, and $L_{\text{splat-mesh}}$ measures the average Euclidean distance from each Gaussian center to the nearest point on the mesh surface [S1, unofficial].
+ 
+ **Parameters:**
+-* $\lambda$: Weight for the splat-to-mesh distance loss. Value not given in the sources.
++* $\lambda$: Weight for the splat-to-mesh distance loss. Value not given in the sources. [S1, unofficial]
+ 
+ **Edge Cases:**
+-* **Degenerate Mesh:** If the template mesh has poor topology, initialization may be inaccurate [G].
+-* **Precision:** Joint optimization requires careful balancing of learning rates for Gaussians and mesh vertices [G].
++* **Degenerate Mesh:** Poor mesh topology or self-intersections can cause inaccurate initialization and unstable distance gradients [G].
++* **Precision:** Joint optimization requires careful learning rate scheduling to prevent mesh collapse or Gaussian explosion [G].
+ 
+ **Pseudocode:**
+ ```python
+-# Standard helper functions
+-def alpha_blend(gaussians, camera_poses):
+-    # Sort Gaussians by depth, project to 2D, and alpha-composite [G]
+-    return composite_projected_gaussians(gaussians, camera_poses)
++import numpy as np
+ 
+-def distance_point_to_triangle(p, V, F):
+-    # Compute Euclidean distance from point p to each triangle in F [G]
+-    return min(euclidean_dist(p, tri) for tri in triangles(V, F))
++def init_gaussians_on_mesh(V, F, num_per_face):
++    gaussians = []
++    for face in F:
++        for _ in range(num_per_face):
++            u, v = np.random.rand(2)
++            if u + v > 1.0:
++                u, v = 1.0 - u, 1.0 - v
++            w = 1.0 - u - v
++            pos = w * V[face[0]] + u * V[face[1]] + v * V[face[2]]
++            gaussians.append({'pos': pos, 'covar': np.eye(3), 'alpha': 0.5, 'color': np.zeros(3)})
++    return gaussians
+ 
+-# Inputs: mesh_V, mesh_F, images, camera_poses, num_steps, lambda_weight, lr
+-# 1. Initialize Gaussians on template mesh [S1, unofficial]
+-gaussians = []
+-for face in mesh_F:
+-    u, v = random(), random()
+-    if u + v > 1: u, v = 1 - u, 1 - v
+-    pos = (1 - u - v) * mesh_V[face[0]] + u * mesh_V[face[1]] + v * mesh_V[face[2]]
+-    gaussians.append({'pos': pos, 'covar': identity(3), 'alpha': 1.0, 'color': sh_coeffs()})
++def point_to_triangle_distance(p, v0, v1, v2):
++    e1, e2 = v1 - v0, v2 - v0
++    p_vec = p - v0
++    a, b, c = np.dot(e1, e1), np.dot(e1, e2), np.dot(e2, e2)
++    d, e = np.dot(e1, p_vec), np.dot(e2, p_vec)
++    det = a * c - b * b
++    t = (c * d - b * e) / max(det, 1e-8)
++    u = (a * e - b * d) / max(det, 1e-8)
++    if t >= 0.0 and u >= 0.0 and t + u <= 1.0:
++        closest = v0 + t * e1 + u * e2
++        return np.linalg.norm(p - closest)
++    # Fallback to edge/vertex distances omitted for brevity [G]
++    return np.inf
+ 
+-# 2-4. Joint optimization [S1, unofficial]
+-for step in range(num_steps):
+-    rendered_image = alpha_blend(gaussians, camera_poses)
+-    loss_image = L1(rendered_image, input_image)
+-    
+-    loss_splat_mesh = 0.0
+-    for g in gaussians:
+-        loss_splat_mesh += distance_point_to_triangle(g['pos'], mesh_V, mesh_F)
++def render_and_optimize(mesh_V, mesh_F, images, poses, steps, lr, lam):
++    gaussians = init_gaussians_on_mesh(mesh_V, mesh_F, num_per_face=1)
++    for step in range(steps):
++        # [G] standard 3DGS rasterization and alpha blending
++        rendered = np.zeros_like(images[step]) 
++        loss_img = np.mean(np.abs(rendered - images[step]))
+         
+-    total_loss = loss_image + lambda_weight * loss_splat_mesh
+-    total_loss.backward()
+-    
+-    # Explicit gradient descent update [G]
+-    for param in all_parameters:
+-        if param.grad is not None:
+-            param.data -= lr * param.grad
++        loss_mesh = 0.0
++        for g in gaussians:
++            min_d = np.inf
++            for tri in mesh_F:
++                d = point_to_triangle_distance(g['pos'], mesh_V[tri[0]], mesh_V[tri[1]], mesh_V[tri[2]])
++                if d < min_d: min_d = d
++            loss_mesh += min_d
++        loss_mesh /= len(gaussians)
++        
++        total_loss = loss_img + lam * loss_mesh
++        # Backpropagation and explicit gradient descent update [G]
++        total_loss.backward()
++        for g in gaussians:
++            g['pos'] -= lr * g['pos'].grad
++            g['covar'] -= lr * g['covar'].grad
++        for i in range(len(mesh_V)):
++            mesh_V[i] -= lr * mesh_V[i].grad
+ ```
+ 
+@@ -75,11 +93,11 @@
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:** Not given in the sources.
+-**Measured Performance:** Not given in the sources.
+-**Scaling:** Not given in the sources.
+-**Strengths:** Not given in the sources.
+-**Limitations:** Not given in the sources.
+-**When to use:** Not given in the sources.
+-**When not:** Not given in the sources.
++**Time and Memory Complexity:** Not given in the sources. [S1, unofficial]
++**Measured Performance:** Not given in the sources. [S1, unofficial]
++**Scaling:** Not given in the sources. [S1, unofficial]
++**Strengths:** Not given in the sources. [S1, unofficial]
++**Limitations:** Not given in the sources. [S1, unofficial]
++**When to use:** Not given in the sources. [S1, unofficial]
++**When not:** Not given in the sources. [S1, unofficial]
+ 
+ ## Background

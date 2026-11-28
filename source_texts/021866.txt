@@ -1,0 +1,715 @@
+# RayGaussX: Accelerating Gaussian-Based Ray Marching for Real-Time and High-Quality Novel View Synthesis
+
+Hugo Blanc, Jean-Emmanuel Deschaud, Alexis Paljic
+
+Mines Paris, PSL University, Centre for robotics, 75006 Paris, France
+
+{hugo.blanc,jean-emmanuel.deschaud,alexis.paljic}@minesparis.psl.eu
+
+Figure 1. Comparison of RayGaussX with RayGauss, Zip-NeRF and 3D-GS. Test image from the garden scene of Mip-NeRF360.
+
+# Abstract
+
+RayGauss has achieved state-of-the-art rendering quality for novel-view synthesis on synthetic and indoor scenes by representing radiance and density fields with irregularly distributed elliptical basis functions, rendered via volume ray casting using a Bounding Volume Hierarchy (BVH). However, its computational cost prevents real-time rendering on real-world scenes. Our approach, RayGaussX, builds on RayGauss by introducing key contributions that accelerate both training and inference. Specifically, we incorporate volumetric rendering acceleration strategies such as empty-space skipping and adaptive sampling, enhance ray coherence, and introduce scale regularization to reduce false-positive intersections. Additionally, we propose a new densification criterion that improves density distribution in distant regions, leading to enhanced graphical quality on larger scenes. As a result, RayGaussX achieves 5× to 12× faster training and 50× to 80× higher rendering speeds (FPS) on real-world datasets while improving visual quality by up to +0.56 dB in PSNR. The associated code is available at: [github.com/hugobl1/raygaussx.](https://github.com/hugobl1/raygaussx)
+
+# 1. Introduction
+
+Novel view synthesis (NVS) methods enable the generation of new images of a scene from a set of known viewpoints. This field has made significant progress with the introduction of Neural Radiance Fields (NeRF) [23]. This groundbreaking approach introduced a differentiable volumetric rendering equation coupled with a neural network to learn the scene's radiance fields. Subsequent research has further refined this method by enhancing both rendering quality and speed. One promising direction involves representing radiance and density fields using irregularly distributed local parametric functions. These approaches replace the computationally expensive neural networks used by NeRF with more localized structures that are less demanding and better suited to reconstruct the scene's geometry and appearance. Among these approaches, two main categories can be identified according to their rendering algorithms. The first relies on a differentiable rasterization algorithm for local primitives, such as Gaussians, as in the 3D Gaussian Splatting approach [16]. This rasterization algorithm enables high rendering speeds. However, it can introduce artifacts such as flickering, which is inherent to
+
+
+
+the rasterization process. The second category employs the volumetric ray-marching rendering algorithm introduced by NeRF, providing a more exhaustive sampling of the space and being less prone to rendering artifacts. The recent Ray-Gauss approach [5] leverages this type of algorithm to render scenes represented with irregularly distributed elliptical basis functions, achieving state-of-the-art graphical results on synthetic and indoor scenes. However, its performance slightly degrades in outdoor environments, and its training and inference times remain significant for complex scenes. Thus, this paper aims to address these limitations and enhance the method's applicability to a broader range of scenarios. To achieve this, we focus on key aspects to improve computational efficiency. First, we draw inspiration from acceleration strategies in classic volumetric ray marching, such as empty-space skipping and adaptive sampling, to speed up the rendering equation computation. Then, by analyzing the implementation specifics, we introduce a reordering of primitives and rays to better adapt the algorithm for parallel computation on GPUs, enhancing ray coherence and memory-access efficiency. Furthermore, we propose a scale-regularization function to minimize false-positive intersections. Finally, to improve rendering quality in largescale scenes, we present a new densification method that evenly increases the density of Gaussians in the scene, regardless of their distance from the camera. Thus, our contributions can be summarized as follows:
+
+- Integrating empty-space skipping and adaptive sampling strategies to accelerate the evaluation of the rendering equation.
+- Enhancing ray coherence by reordering rays and primitives for efficient GPU parallelization.
+- Introducing a scale-regularization function to mitigate false-positive intersections.
+- Formulating a novel criterion for improving densification in distant regions.
+
+# 2. Related Work
+
+Novel view synthesis has been studied in the computer vision community for decades, with early approaches known as Image-Based Rendering (IBR), including [19], which interpolate new images from the closest known views. Another strategy involves using a proxy, such as a mesh [11], to enhance interpolation or even leveraging neural networks [14]. Point clouds can also serve as proxies, as seen in NPBG [1], NPBG++ [30], and ADOP [32]. However, these image-space interpolation methods suffer from artifacts and flickering.
+
+In 2020, NeRF [23] showed that scene density and radiance fields can be encoded within a Multi-Layer Perceptron (MLP), with its weights learned thanks to differentiable volumetric rendering. Numerous improvements have made NeRF faster, such as using grids of small MLPs in KiloNeRF [31], caching in FastNeRF [13], dense voxel grids [33], sparse voxel structures [15, 20], octreebased representations in PlenOctrees [39], or hash tables in Instant-NGP [27]. Other approaches have improved rendering quality by addressing aliasing, as in Mip-NeRF [2] and Mip-NeRF360 [3]. More recently, Zip-NeRF [4], which combines Mip-NeRF360 and Instant-NGP, has set the state of the art in rendering quality but suffers from slow training and does not allow interactive rendering. Furthermore, Plenoxels [12] demonstrated that NeRF's key aspect is the differentiability of the rendering equation. Instead of using a network to encode scene density and color parameters, they employ a voxel grid with spherical harmonics. Since then, other data structures have been explored, including point clouds in Point-NeRF [36], PointNeRF++ [34], and tetrahedra in Tetra-NeRF [18].
+
+DSS [38], Point-Based Radiance [41], and the recent, widely adopted 3D Gaussian Splatting (3D-GS) [16] also use point clouds to encode scenes. However, instead of volumetric ray marching, they use a rasterizationbased approximation: splat-based differentiable rendering enables training and rendering speeds several orders of magnitude faster than NeRF-like methods. Many approaches have since built upon 3D-GS, including Mip-Splatting [40] for anti-aliasing, Scaffold-GS [21] using anchors to better regularize Gaussian parameters, and Spec-Gaussian [37], which incorporates a MLP to better model specular and anisotropic colors. However, rasterization-based radiance-field rendering suffers from two key limitations [7]: flickering arising from image-space primitive ordering, which induces popping artifacts [29], and inherent approximations in the rendering equation (each primitive contributes only once per pixel, irrespective of its size). Furthermore, rasterization algorithms struggle to accommodate complex camera models and to simulate a broader range of physical phenomena, such as volumetric scattering.
+
+A final category relies on rendering primitives defined by radial basis functions (RBFs) via volumetric ray casting. NeuRBF [9] uses a hybrid representation with adaptive RBFs for fine details, but is limited to a small number of primitives per sample along a ray. More recently, 3DGRT [24], RayGauss [5] and EVER [22] have leveraged a Bounding Volume Hierarchy (BVH) structure and the OptiX library for fast ray casting in a scene using Gaussian-based primitives. RayGauss [5] showed state-ofthe-art rendering quality on synthetic datasets like the NeRF dataset [23], but suffers from slow training and rendering on real-world datasets.
+
+Our approach, RayGaussX, extends RayGauss [5] by significantly reducing training and rendering times through key contributions that exploit irregularly distributed elliptical primitives rendered via volume ray marching.
+
+
+
+Figure 2. Main contributions of RayGaussX approach to improve training and rendering speed.
+
+# 3. RayGaussX approach
+
+## 3.1. Preliminary: gaussian-based ray-marching
+
+The RayGauss method offers a physically consistent formulation of the emitted radiance c and density σ, expressed through a decomposition using Gaussian functions combined with Spherical Gaussians/Harmonics (SG/SH) for an all-frequency colorimetric representation. Specifically, it represents the density σ and radiance c as:
+
+$$\sigma(\mathbf{x}) = \sum_{l=1}^N \tilde{\sigma}_l \mathcal{G}(\mathbf{x}; \mu_l, \mathbf{q}_l, \mathbf{s}_l) \quad (1)$$
+
+$$c(\mathbf{x}, \mathbf{d}) = \frac{\sum_{l=1}^N c_l(\mathbf{d}) \tilde{\sigma}_l \mathcal{G}(\mathbf{x}; \mu_l, \mathbf{q}_l, \mathbf{s}_l)}{\sum_{m=1}^N \tilde{\sigma}_m \mathcal{G}(\mathbf{x}; \mu_m, \mathbf{q}_m, \mathbf{s}_m)}$$
+
+where cl is the radiance emitted by the l-th primitive, parameterized with SH/SG, σ˜l is a density parameter of the l-th primitive, and G is an unnormalized Gaussian. To render these fields, RayGauss relies on volumetric rendering theory, expressing the interaction of light with the medium through the classical volumetric rendering equation:
+
+$$C(\mathbf{r}) = \int_{t_n}^{t_f} c(\mathbf{r}(t), \mathbf{d}) \sigma(\mathbf{r}(t)) T(t) dt, \quad (2)$$
+
+$$T(t) = e^{-\int_{t_n}^t \sigma(\mathbf{r}(s)) ds}$$
+
+To numerically compute this integral, the usual approach subdivides it into uniform segments and computes an approximation for each segment, yielding the Volume Ray Marching equation used in recent works [5, 23]:
+
+
+$$C(\mathbf{r}) = \sum_{i=0}^N (1 - \exp(-\sigma_i \Delta t)) c_i T_i \quad (3)$$
+
+$$T_i = \exp \left( - \sum_{j=0}^{i-1} \sigma_j \Delta t \right)$$
+
+where the step size ∆t is constant. In the RayGauss approach, this equation is efficiently computed using an algorithm that leverages a Bounding Volume Hierarchy (BVH) to rapidly compute ray-primitive intersections.
+
+In this section, we present our main contributions aimed at improving this algorithm: empty-space skipping, adaptive sampling, enhanced ray coherence through ray and primitive reordering, scale regularization to reduce false positive intersections, and finally, a novel densification criterion improving rendering quality in distant regions.
+
+### 3.2. Efficient Ray Sampling: Empty Space Skipping and Adaptive Sampling
+
+As illustrated by Eq. \(3\), the computational cost of evaluating the color per ray is directly related to the number of samples N. Thus, to reduce computation time, a key approach is to minimize the samples needed for ray color computation. Two main types of approaches can be distinguished: the first, empty space skipping, aims to avoid sampling completely transparent regions with null density. Since these regions do not contribute to the integration, such methods do not affect rendering quality. A second type of approach consists in adjusting the sampling step based on the integrated space region, focusing samples on areas that contribute the most to color computation. These two types of approaches are complementary, and in the following, we introduce advancements in both areas that accelerate the computation times of the RayGauss approach.
+
+Empty Space Skipping: As previously discussed, the objective is to design a method that avoids sampling in regions with zero density. A key advantage of RayGauss [5] is its representation based on sparsely distributed truncated Gaussians, which explicitly encode regions of non-zero density. In contrast, other representations, such as those based on neural networks, do not define these regions explicitly. Additionally, RayGauss stores these primitives in a Bounding Volume Hierarchy (BVH) for efficient intersection computations. Ray integration is performed sequentially: at step i, a segment Si = [ti , ti + Ns · ∆t] containing a fixed number Ns of samples is considered. The BVH is used to compute the intersection of the scene's Gaussians with Si . If no intersection is found, the next segment is evaluated; otherwise, the contribution of this segment to the color is computed. Thus, at the segment level, RayGauss can detect whether the region is empty. Our approach enhances this empty space skipping by leveraging the precomputed BVH, which is already required by the algorithm.
+
+### Algorithm 1 Volume Ray Marching
+
+Input: (o, d): ray origin/direction, ∆t: step size, Ns: buffer size, Tϵ: transmittance threshold, (tn, tf ): integration bounds, Hb: hit primitive index buffer, Gp: gaussians parameters
+
+Output: CR 1: ∆S ← ∆t × Ns ▷ Segment size 2: T ← 1.0 ▷ Ray transmittance 3: CR ← (0.0, 0.0, 0.0) ▷ Ray color 4: tmin ← BVHClosestHit(o, d, tn, tf ) 5: tS ← tmin ▷ Segment distance along the ray 6: while tS < tf and T > Tϵ do 7: np ← 0 ▷ Number of primitives 8: ▷ Collect the intersected primitives 9: (Hb, np) ← BVHTraversal(o, d, tS, tS + ∆S) 10: if np == 0 then 11: tS ← tS + ∆S 12: ▷ Recompute closest hit 13: tS ← BVHClosestHit(o, d, tS, tf ) 14: continue 15: end if 16: ▷ Update ray color and transmittance 17: (CR, T) ← RayUpdate(np, ∆t, tS, o, d, Gp, Hb, CR, T) 18: tS ← tS + ∆S 19: end while
+
+Our method follows the procedure described in Algorithm 1. Ray tracing libraries, such as the OptiX API used by RayGauss, are designed to efficiently compute the closest intersection point for a given ray, as this is a fundamental operation in classical ray tracing algorithms. Our idea is to leverage this by alternating between two types of processes during scene traversal. On the one hand, the ClosestHit shader computes the nearest intersection point with primitives for a ray constrained to a given region, e.g., [tn, tf ]. On the other hand, the AnyHit shader (referred to as BVH-Traversal in line 9 of Alg. 1\), already implemented in Ray-Gauss [5], collects all primitives intersected along the segment. Thus, starting from the initial integration bound tn, we first compute the closest hit with the primitives at tmin, which allows us to avoid sampling empty regions between the camera and the closest primitive. Indeed:
+
+| $\sigma(\mathbf{r}(t)) = 0, \quad \forall t \in [t_n, t_{\min}],$ $\int_{t_n}^{t_{\min}} c(\mathbf{r}(t), \mathbf{d}) \sigma(\mathbf{r}(t)) T(t) \, dt = 0. \quad (4)$ |
+|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+Once the closest intersection point is found, we begin the integration process as described in [5]. However, other large empty regions may still exist along [tmin, tf ]. Moreover, the AnyHit shader not only collects primitives but also determines their number. If no primitives are detected within the current segment [tS, tS + ∆S], it indicates that the region has zero density. In this case, the ClosestHit program is invoked again to locate the next point of interest. This approach effectively avoids exhaustive sampling of empty regions while adapting to the specific requirements of the Volume Ray Casting algorithm developed in [5].
+
+Adaptive Sampling: A second approach to accelerating the computation of the volumetric rendering equation is to adapt the spatial subdivision of the integral to reduce the number of samples. Several studies have explored this problem. Danskin et al. [10] leveraged importance sampling principles to construct a pyramidal structure enabling adaptive sampling. More recently, Morrical et al. [25] employed a kd-tree to adjust the sampling step based on the variance within the subpartitions. Campagnolo et al. [6] proposed an adaptive Simpson integration scheme to tackle this problem. Thus, adaptive sampling strategies are designed to align with the specific constraints of the scene representation and rendering algorithm to determine an adaptive step size. In our case, two criteria are important. During training, the structure is updated at each optimization step, meaning that an approach storing the sampling criterion in an auxiliary structure, as in Morrical et al. [25], would require frequent reconstruction, increasing computational cost. Furthermore, the RayGauss rendering algorithm sequentially accumulates properties segment by segment, with each segment containing multiple samples. To retain the algorithm's advantages, we adopt adaptive subdivision at the segment level while keeping a fixed number of samples NS per segment for improved ray coherence. Since our primary goal is to accelerate rendering, we introduce a criterion with minimal computational overhead. Danskin et al. [10] suggest that adaptive sampling should depend on transmittance. Here, we define a criterion using the transmittance at the end of (i − 1)-th segment to determine the size of the i-th segment. The idea is that for a low resulting transmittance, the subsequent segments will contribute less to the rendering integral, allowing for a larger step size. Furthermore, we also make the sampling criterion dependent on the distance to the camera, assuming that distant regions require less precision than closer ones.
+
+Consequently, the size of the i-th segment, ∆Si , can be dynamically adapted using a criterion based on the current distance from the origin, di = ∥si − o∥, and the transmittance, Ti = T(si), where si is the position at the beginning of the segment and o is the camera origin:
+
+$$\Delta S_i = N_S \cdot \min \left( \max \left( \frac{d_i}{\beta}, \Delta t_{\min} \right) \cdot T_i^{-\frac{1}{3}}, \Delta t_{\max} \right) \quad (5)$$
+
+where β quantifies the variation of the step size with respect to the distance from the origin, ∆tmin is the minimum step size and ∆tmax is the maximum step size to prevent excessively large variations in the sampling step.
+
+#### 3.3. Optimizing Ray Coherence and Memory Access Efficiency
+
+This section explores improvements enabled by the specifics of parallel GPU computation, particularly through enhanced ray coherency, ensuring more consistent data access patterns and execution paths.
+
+### Enhancing Memory Access Efficiency through Spatial
+
+Reordering of Gaussians: The Volume Ray Marching algorithm from [5] efficiently renders irregularly distributed Gaussians using the OptiX API. Scene parameter optimization and inference are performed per image, which is significant because rays from the same image tend to traverse spatially adjacent regions, a property not guaranteed if originating from different viewpoints. Consequently, during rendering, these rays pass through contiguous spatial areas and intersect nearby Gaussians. In this context, it is important to note that global memory access, where Gaussian parameters are stored, benefits from spatial locality in modern frameworks like CUDA, used by the OptiX API. Memory accesses occur via the transfer of contiguous blocks, and spatial locality in memory enables more efficient coalescing and higher data throughput. Moreover, spatially adjacent Gaussians are accessed simultaneously, suggesting that grouping their parameters in memory and reordering them based on their spatial distribution could enhance performance by improving memory coalescing.
+
+The objective is to efficiently reorder data, so that spatially proximate Gaussians are stored in contiguous memory regions. To achieve this, we employ Z-order curve theory, which maps multidimensional integer data point to an integer index while preserving data locality. This means that points that are close together in the multidimensional space are more likely to have nearby indices [26]. In practice, the Gaussian mean serves as an indicator of its spatial position, which is normalized, quantized into an integer, and mapped to a Z-order index. The Gaussians are then reordered in ascending Z-index order, allowing spatially close Gaussians to be stored in neighboring memory regions (illustrated in Fig. 2 and applied to the bonsai scene in Fig. 3\).
+
+
+
+Figure 3. Comparison of the bonsai scene from the Mip-NeRF360 dataset: the left image shows the scene with default indexing, while the right image uses indexing obtained via a Z-order curve. Note that the color scale ranges from yellow to red, and that colorimetric similarity corresponds to a proximity of indices, hence contiguous memory allocation.
+
+Improving Ray Coherence: In the classical parallel computing model supported by CUDA [28], computations are performed in parallel by threads. In the CUDA architecture, these threads are organized into groups of 32, called warps. Within a warp, all threads execute the same instruction simultaneously, although each may process different data. Maximum efficiency is achieved when all 32 threads follow the same execution path. However, if divergence occurs, such as through a data-dependent conditional branch, the warp must sequentially execute each path taken, temporarily disabling inactive threads. While necessary for handling different execution scenarios, this mechanism significantly degrades performance by reducing parallelism efficiency. This phenomenon is known as warp divergence.
+
+If each ray is processed in parallel, minimizing warp divergence requires maximizing coherence among rays within a warp, ensuring that as many rays as possible execute the same operations on similar data. However, achieving this coherence depends on how rays are organized. Ray-Gauss [5] does not perform any specific ray ordering, leading to an initial grouping in scanline order. Without prior scene information, dividing the image into tiles and grouping rays accordingly generally reduces variance among rays compared to a scanline-order approach. Rays within the same tile typically sample similar regions (and thus similar Gaussians), whereas scanline ordering may group rays observing significantly different parts of the scene, increasing divergence. In practice, we leverage the OptiX API, which transparently manages this initial distribution by launching rays on a 2D grid. Although threads may later be dynamically reordered, making the process more opaque, this approach provides an effective initial grouping.
+
+# 3.4. Limiting Highly Anisotropic Gaussian
+
+We observe that differentiable rendering algorithms relying on Gaussian kernels often produce highly anisotropic Gaussians, with substantial variations in their scale values (e.g., smin ≪ smax). This phenomenon negatively impacts the computational efficiency of RayGauss [5]. Indeed, the algorithm leverages a BVH for efficient intersection computations. However, for custom primitives like ellipsoids, an Axis-Aligned Bounding Box (AABB) is first constructed around each ellipsoid, and a BVH is then built around these AABBs. Subsequently, during intersection computations, the optimized OptiX API first computes the intersection with the AABB and then calls the user-code intersection program for the ellipsoid. Here, the smallest enclosing AABB is used for each ellipsoid. If this AABB's volume is significantly larger than that of the ellipsoid, more falsepositive calls to the user-code intersection program occur. This slows down BVH traversal and is particularly problematic in the context of hardware-accelerated ray intersection [35]. Thus, to accelerate rendering, reducing falsepositive hits is beneficial. Also, their occurrence is correlated with the following volume ratio:
+
+$$r = \frac{\text{Vol}(\text{AABB}(\mathcal{E}))}{\text{Vol}(\mathcal{E})} \quad (6)$$
+
+with Vol the volume function, E a given ellipsoid, and AABB(E) its associated axis-aligned bounding box. When r is high, many false-positive intersections occur. Conversely, when r is low, false-positive intersections decrease. To ensure a rotation-invariant criterion and avoid bias toward any specific Gaussian orientation, we constrain the worst-case scenario with respect to rotation by computing an upper bound. (see supplementary material for details):
+
+| $\frac{\text{Vol}(\text{AABB}(\mathcal{E}))}{\text{Vol}(\mathcal{E})} \leq \frac{2}{\pi \sqrt{3}} \frac{(s_1^2 + s_2^2 + s_3^2)^{\frac{3}{2}}}{s_1 s_2 s_3}$ | (7) |
+|--------------------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+|--------------------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+
+Thus, to minimize false-positive intersections, we add a loss term (hereafter referred to as the isotropic loss) that constrains this ratio for all Gaussians:
+
+$$L_s = \frac{1}{N} \sum_l (\max(r_{\max,l}, r_0) - r_0) \quad (8)$$
+
+with:
+
+$$r_{\max,l} = \frac{2}{\pi \sqrt{3}} \frac{(s_{l,1}^2 + s_{l,2}^2 + s_{l,3}^2)^{\frac{3}{2}}}{s_{l,1} s_{l,2} s_{l,3}} \quad (9)$$
+
+and r0 is a threshold ratio beyond which a penalty is applied. Then, the total loss function is: L = (1 − λ) · L1 + λ · DSSIM + λsLs where λs is a fixed hyperparameter.
+
+## 3.5. A Novel Densification Criterion
+
+RayGauss densification process [5] is inspired by the adaptive density control heuristic introduced in 3D Gaussian Splatting [16]. This heuristic enables cloning or splitting the Gaussians in the scene by evaluating a criterion every I iterations. For a Gaussian l with mean position µl , let µ P l
+
+be its projection in normalized device coordinates (NDC). If this Gaussian has been observed in Il < I images during recent iterations, the heuristic determines whether to densify it by comparing the average norm of the loss gradient with respect to µ P across these Il images to a given threshold τ :
+
+$$\frac{1}{\bar{L}_l} \sum_{i=1}^{\bar{L}_l} \left\| \nabla_{\mu_l^P} L_i \right\| > \tau. \quad (10)$$
+
+where Li is the loss computed for the i-th image in which Gaussian l appears. RayGauss does not compute µ P l , since rendering uses volumetric ray casting rather than projection and splatting, and replaces the densification criterion with:
+
+
+$$\frac{1}{I_l} \sum_{i=1}^{I_l} \|\nabla_{\mu_l} L_i\| > \tau. \quad (11)$$
+
+where the gradient with respect to µl is computed during optimization. However, a limitation of the RayGauss formulation (Eq. 11\) is that it introduces a dependency on the distance between the Gaussian and the camera. Specifically, distant Gaussians are more likely to exhibit low gradients compared to closer ones, even if their contributions to the image are similar. This occurs because a slight deviation of the mean in world space results in a smaller variation in the image contribution of a distant Gaussian compared to a closer one, due to perspective projection. As a result, Gaussians farther from the camera exhibit lower gradients and are less likely to be densified. This may explain the lower performance of RayGauss on outdoor scenes compared to indoor environments. In contrast, the original densification criterion from [16] does not suffer from this issue, as it relies on the view-space position gradient. This prevents the criterion from being biased by the Gaussian's distance to the camera. Indeed, a slight deviation in view space does not favor closer Gaussians over distant ones. For this reason, we modify the criterion from the RayGauss approach [5] by introducing a corrective factor that weights the gradients in 3D space, ensuring densification of distant Gaussians:
+
+$$\frac{1}{I_l} \sum_{i=1}^{I_l} \alpha_i \|\nabla_{\mu_l} L_i\| > \tau. \quad (12)$$
+
+where αi = ∥µl−oi∥ f , with oi being the center of camera i, and f the focal distance. Empirically, we observe that ∇µlLi · µl−oi ∥µl−oi∥ is generally negligible compared to its tangential component. Under this approximation, our criterion corresponds to averaging the norms of the gradients with respect to the mean projected onto the sphere of radius f (see supplementary for details). This criterion therefore remains closer to the original criterion of 3D Gaussian Splatting, accounts for the scaling factor, and is efficiently computable.
+
+## 4. Experiments and Results
+
+#### 4.1. Experiments
+
+The experiments are conducted on two synthetic datasets, the NeRF Synthetic dataset [23] and the NSVF Synthetic dataset [20], as well as on three real-world datasets: Mip-NeRF360 [3], Tanks&Temples [17], and Deep Blending [14]. We evaluate our approach using standard image synthesis metrics, including rendering quality (PSNR, SSIM, and LPIPS computed with a VGG network), training time (Train), and rendering speed (FPS, Frames Per Second). Our RayGaussX approach is compared to the RayGauss method [5] as well as to state-of-the-art novel view synthesis techniques. Specifically, we include Zip-NeRF [4], which achieves the highest visual quality but requires a long training time and does not support real-time rendering, and 3D-GS [16], a rasterization-based Gaussian rendering method that offers the fastest performance. Additionally, we compare against more recent variants of 3D-GS: Mip-Splatting [40], which addresses aliasing, and Spec-Gaussian [37], which incorporates an MLP network to better model high-frequency color details. All methods were retrained from their official repositories on a single NVIDIA RTX 4090 to ensure a fair comparison of training and rendering performance (see supplementary).
+
+### 4.2. Implementation details
+
+The training parameters for the RayGaussX method are identical to those used for the RayGauss method [5]. The only differences concern the following contributions:
+
+- Sampling strategy: We use uniform sampling with ∆t = 0.0025 for synthetic datasets (same as Ray-Gauss), whereas for real-world datasets, we adopt adaptive sampling with ∆tmin = 0.005, ∆tmax = 4 × ∆tmin, β = 1024. In contrast, to benchmark Ray-Gauss, we kept a fixed ∆t = 0.005 for real-world datasets.
+- Loss for isotropic Gaussians: This loss is applied to real-world datasets with the following hyperparameters λs = 0.00025, r0 = 10.
+- New densification: We use the parameter τ = 0.00015. in all experiments.
+
+No major hyperparameters are introduced by the Empty Space Skipping, Ray Coherence, or Memory Reordering of Gaussians techniques.
+
+## 4.3. Results on synthetic datasets
+
+Tab. 1 and Tab. 2 present the results of our RayGaussX approach in comparison with RayGauss [5] and other novel view synthesis methods on the synthetic NeRF [23] and NSVF [20] datasets. All methods were trained with a white background, a standard practice for comparisons on synthetic data.
+
+It can be observed that for both datasets, RayGaussX achieves the best rendering quality (slightly superior to Ray-Gauss) while offering a rendering speed three times faster in terms of FPS. For synthetic datasets, we applied empty space skipping, z-curve indexing, ray reordering, and uniform sampling (to maximize rendering quality), which already provide significant improvements in rendering speed.
+
+
+
+| Method        | \      | Metric | PSNR    | NeRF Synthetic ↑ SSIM | ↑ LPIPS | ↓ Train | ↓ FPS ↑ |
+|---------------|--------|--------|---------|-----------------------|---------|---------|---------|
+| Instant-NGP   |        | [27]   | 33.18   | 0.963                 | 0.045   |         |         |
+| Mip-NeRF360   |        | [3]    | 33.24   | 0.961                 | 0.042   |         |         |
+| Point-NeRF    |        | [36]   | 33.30   | 0.962                 | 0.049   |         |         |
+| 3D-GS         | [16] * |        | 33.39   | 0.968                 | 0.031   | 4min    | 681     |
+| Zip-NeRF      | [4]    | *      | 33.69   | 0.974                 | 0.028   | 445min  | 0.3     |
+| Mip-Splatting |        | [40] * | 33.74   | 0.971                 | 0.029   | 5min    | 468     |
+| Spec-Gaussian |        | [37]   | * 33.80 | 0.970                 | 0.027   | 11min   | 142     |
+| 3DGRT         | [24]   | *      | 33.86   | 0.970                 | 0.037   | 9min    | 304     |
+| NeuRBF        | [9]    |        | 34.47   | 0.974                 | 0.035   |         | ≃ 1     |
+| RayGauss      | [5]    | *      | 34.53   | 0.974                 | 0.024   | 33min   | 25      |
+| RayGaussX     |        | (ours) | 34.54   | 0.974                 | 0.024   | 22min   | 85      |
+
+Table 1. Results on NeRF Synthetic dataset [23]. Methods marked \* were retrained on an NVIDIA RTX4090 for fair comparison of training and rendering (FPS) times.
+
+
+
+| Method        | \ Metric |        | NSVF PSNR | Synthetic ↑ SSIM | ↑ LPIPS | ↓ Train | ↓ FPS ↑ |
+|---------------|----------|--------|-----------|------------------|---------|---------|---------|
+| TensoRF       | [8]      |        | 36.53     | 0.982            | 0.026   |         |         |
+| 3D-GS         | [16] *   |        | 37.07     | 0.987            | 0.014   | 6min    | 498     |
+| Mip-Splatting |          | [40] * | 37.28     | 0.988            | 0.014   | 6min    | 445     |
+| NeuRBF        | [9]      |        | 37.80     | 0.988            | 0.019   |         | ≃ 1     |
+| Spec-Gaussian |          | [37] * | 37.97     | 0.989            | 0.012   | 15min   | 102     |
+| RayGauss      | [5] *    |        | 38.72     | 0.990            | 0.011   | 42min   | 22      |
+| RayGaussX     | (ours)   |        | 38.75     | 0.991            | 0.010   | 26min   | 71      |
+
+Table 2. Results on NSVF Synthetic dataset [20]. Methods marked \* were retrained on an NVIDIA RTX4090 for fair comparison of training and rendering (FPS) times.
+
+### 4.4. Results on real-world datasets
+
+Tab. 3 reports results on three real-world datasets: Mip-NeRF360, Tanks&Temples, and Deep Blending [3, 14, 17].
+
+First, we observe that compared to RayGauss, Ray-GaussX achieves training times that are 5 to 12 times faster and rendering speeds that are 50 to 80 times faster in FPS, while also improving quality by up to +0.56 dB in PSNR on the Tanks&Temples dataset. Also, RayGaussX is 100x to 200x faster in FPS than the state-of-the-art method Zip-NeRF [4], while being only -0.13 dB lower in PSNR on Mip-NeRF360. Furthermore, RayGaussX outperforms Spec-Gaussian [37], the best Gaussian splatting variant, by +0.38 dB in PSNR on Mip-NeRF360 dataset, while being only twice as slow in rendering speed. Overall, RayGaussX achieves better rendering quality than Gaussian splattingbased methods (3D-GS [16], Mip-Splatting [40], and Spec-Gaussian [37]) while approaching the rendering speed of
+
+
+
+| Dataset Method | \      | Metric | PSNR    | ↑ SSIM | Mip-NeRF360 ↑ LPIPS | ↓ Train | ↓ FPS ↑ | PSNR  | ↑ SSIM | Tanks&Temples ↑ LPIPS | ↓ Train | ↓ FPS ↑ | PSNR  | ↑ SSIM | Deep Blending ↑ LPIPS | ↓ Train | ↓ FPS ↑ |
+|----------------|--------|--------|---------|--------|---------------------|---------|---------|-------|--------|-----------------------|---------|---------|-------|--------|-----------------------|---------|---------|
+| Instant-NGP    |        | [27]   | 25.59   | 0.699  | 0.331               |         |         | 21.92 | 0.745  | 0.305                 |         |         | 24.97 | 0.817  | 0.390                 |         |         |
+| 3DGRT          | [24]   | *      | 26.89   | 0.807  | 0.259               | 60min   | 59      | 22.74 | 0.844  | 0.197                 | 28min   | 111     | 29.74 | 0.905  | 0.315                 | 49min   | 65      |
+| EVER           | [22]   |        | 27.51   | 0.825  | 0.194               |         | 36      |       |        |                       |         |         |       |        |                       |         |         |
+| Mip-NeRF360    |        | [3]    | 27.69   | 0.792  | 0.237               |         |         | 22.22 | 0.759  | 0.257                 |         |         | 29.40 | 0.901  | 0.245                 |         |         |
+| 3D-GS          | [16] * |        | 27.80   | 0.825  | 0.208               | 21min   | 161     | 23.72 | 0.848  | 0.178                 | 14min   | 197     | 29.92 | 0.905  | 0.244                 | 22min   | 176     |
+| Mip-Splatting  |        | [40] * | 27.93   | 0.838  | 0.176               | 27min   | 114     | 23.72 | 0.860  | 0.157                 | 15min   | 170     | 29.51 | 0.903  | 0.243                 | 24min   | 139     |
+| Spec-Gaussian  |        | [37]   | * 28.05 | 0.835  | 0.177               | 41min   | 42      | 23.86 | 0.856  | 0.166                 | 21min   | 85      | 29.67 | 0.906  | 0.245                 | 26min   | 75      |
+| Zip-NeRF       | [4]    | *      | 28.56   | 0.828  | 0.176               | 425min  | 0.1     | 10.85 | 0.326  | 0.661                 | 422min  | 0.3     | 30.76 | 0.914  | 0.209                 | 416min  | 0.2     |
+| RayGauss       | [5]    | *      | 28.23   | 0.834  | 0.193               | 456min  | 0.5     | 23.20 | 0.849  | 0.167                 | 565min  | 0.5     | 30.30 | 0.914  | 0.242                 | 553min  | 0.8     |
+| RayGaussX      |        | (ours) | 28.43   | 0.842  | 0.177               | 85min   | 24.1    | 23.76 | 0.865  | 0.150                 | 47min   | 41.1    | 30.32 | 0.915  | 0.242                 | 56min   | 39.6    |
+
+Table 3. Results on Mip-NeRF360 [3], Tanks&Temples [17] and Deep Blending [14] datasets. FPS are calculated on the resolutions of the test set images. Methods marked \* were retrained on an NVIDIA RTX4090 for fair comparison of training and rendering (FPS) times.
+
+the most recent variant, Spec-Gaussian [37]. As shown in Tab. 3, the addition of features to improve the rendering quality of 3D-GS, such as antialiasing in Mip-Splatting [40] and the MLP for high-frequency color prediction in Spec-Gaussian [37], has progressively slowed down rasterizationbased methods, decreasing from 161 FPS for 3D-GS to 42 FPS for Spec-Gaussian on Mip-NeRF360 dataset.
+
+Secondly, we observe that the most notable improvement in rendering quality between RayGauss and RayGaussX occurs in outdoor scenes (from the Mip-NeRF360 [3] and Tanks&Temples [17] datasets). This improvement is due to the new densification strategy, which allows densifying Gaussians far from the camera and better reconstructing distant areas.
+
+Qualitative results on the Mip-NeRF360 [3] dataset are shown in Figure 1 and in the supplementary material.
+
+## 4.5. Ablation study on the main contributions
+
+Tab. 4 presents an ablation study on the different contributions of RayGaussX that significantly accelerate rendering. This study was conducted on the garden scene from the Mip-NeRF360 [3] dataset. We decomposed RayGaussX into four main contributions: the new densification (D), empty space skipping with adaptive sampling (E+A), reordering of Gaussians with ray coherence (Z+R), and finally, the isotropic loss (L). The first row (1) of Tab. 4 represents the original RayGauss method, row (1\*) is our optimized RayGauss baseline with only implementation-level optimizations and the last row (8) corresponds to our complete RayGaussX approach.
+
+It can be observed that all four contributions improve the training time and rendering speed of RayGauss. The new densification alone (row (2)) significantly improves rendering quality (28.38 dB) while also slightly enhancing training and rendering speed. This is due to the novel densification strategy, which, compared to RayGauss, adds more distant Gaussians while reducing the number of nearby ones, thereby slightly speeding up the ray marching process. The most impactful contributions for accelerating ray marching with Gaussian primitives are empty space skipping with adaptive sampling (row (3), achieving a 3.9× speedup in FPS compared to (1\*)) and the isotropic loss (row (5), yielding a 6.7× increase in FPS). Additionally, the isotropic loss alone (row (5)) results in a -0.2 dB drop in PSNR compared to (1\*), but it provides significant gains in training and rendering speed. For this reason, the isotropic loss is preferred for real-world datasets but is not retained for synthetic datasets. Finally, as more contributions are added, rendering speed progressively improves, reaching 27 FPS for interactive rendering, compared to 0.5 FPS for Ray-Gauss at a test image resolution of 1297×840 pixels.
+
+
+
+|      | D E+A | Z+R L | PSNR ↑ | SSIM ↑ | LPIPS ↓ | Train ↓ | FPS ↑ |
+|------|-------|-------|--------|--------|---------|---------|-------|
+| (1)  |       |       | 28.06  | 0.879  | 0.103   | 585min  | 0.5   |
+| (1*) |       |       | 28.14  | 0.885  | 0.090   | 297min  | 1.5   |
+| (2)  | ✓     |       | 28.38  | 0.887  | 0.090   | 294min  | 1.8   |
+| (3)  | ✓     |       | 28.14  | 0.884  | 0.090   | 180min  | 5.9   |
+| (4)  |       | ✓     | 28.15  | 0.885  | 0.089   | 200min  | 3.6   |
+| (5)  |       | ✓     | 28.12  | 0.885  | 0.090   | 133min  | 10.1  |
+| (6)  | ✓ ✓   |       | 28.35  | 0.887  | 0.089   | 168min  | 6.3   |
+| (7)  | ✓ ✓   | ✓     | 28.36  | 0.888  | 0.089   | 116min  | 10.5  |
+| (8)  | ✓ ✓   | ✓ ✓   | 28.35  | 0.887  | 0.090   | 84min   | 27.4  |
+
+Table 4. Ablation study of key contributions on garden scene from Mip-NeRF360 dataset (D: new Densification criterion, E+A: Empty space Skipping + Adaptive sampling, Z+R: Zcurve re-indexing of gaussians + Ray coherence, L: Loss for isotropic gaussians). Row (1) represents the original RayGauss method [5], row (1\*) is our optimized RayGauss baseline with only implementation-level optimizations (excluding D, E, A, Z, R, L), and row (8) corresponds to our full method, RayGaussX.
+
+## 5. Conclusion
+
+Building on the RayGauss algorithm [5], which has achieved great graphical results on synthetic and indoor scenes, we propose a new approach for real-time novel view synthesis. Our approach introduces innovative contributions: empty-space skipping, adaptive sampling, reordering of rays and primitives for improved ray coherence, scale regularization, and a novel densification criterion. These enhancements enable the real-time synthesis of novel views with state-of-the-art graphical quality across indoor and outdoor scenes from multiple datasets.
+
+# References
+
+[1] Kara-Ali Aliev, Artem Sevastopolsky, Maria Kolos, Dmitry Ulyanov, and Victor Lempitsky. Neural point-based graphics. In European Conference on Computer Vision (ECCV), 2020. 2 [2] Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla, and Pratul P. Srinivasan. Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields. In IEEE/CVF International Conference on Computer Vision (ICCV), 2021. 2 [3] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded anti-aliased neural radiance fields. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2022. 2, 7, 8 [4] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. Zip-nerf: Anti-aliased gridbased neural radiance fields. In IEEE/CVF International Conference on Computer Vision (ICCV), 2023. 2, 7, 8 [5] Hugo Blanc, Jean-Emmanuel Deschaud, and Alexis Paljic. Raygauss: Volumetric gaussian-based ray casting for photorealistic novel view synthesis, 2024. 2, 3, 4, 5, 6, 7, 8 [6] Leonardo Quatrin Campagnolo, Waldemar Celes, and Luiz Henrique de Figueiredo. Accurate volume rendering based on adaptive numerical integration. In 2015 28th SIB-GRAPI Conference on Graphics, Patterns and Images, pages 17–24, 2015. 4 [7] Adam Celarek, Georgios Kopanas, George Drettakis, Michael Wimmer, and Kerbl Bernhard. Does 3d gaussian splatting need accurate volumetric rendering? Computer Graphics Forum, 44(2):e15256, 2025. 2 [8] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. Tensorf: Tensorial radiance fields. In European Conference on Computer Vision (ECCV), 2022. 7 [9] Zhang Chen, Zhong Li, Liangchen Song, Lele Chen, Jingyi Yu, Junsong Yuan, and Yi Xu. Neurbf: A neural fields representation with adaptive radial basis functions. In IEEE/CVF International Conference on Computer Vision (ICCV), 2023. 2, 7 [10] John Danskin and Pat Hanrahan. Fast algorithms for volume ray tracing. In Proceedings of the 1992 Workshop on Volume Visualization, page 91–98, New York, NY, USA, 1992. Association for Computing Machinery. 4 [11] Paul Debevec, Yizhou Yu, and George Borshukov. Efficient view-dependent image-based rendering with projective texture-mapping. In Eurographics Rendering Workshop, 1998. 2 [12] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2022. 2 [13] Stephan J. Garbin, Marek Kowalski, Matthew Johnson, Jamie Shotton, and Julien Valentin. Fastnerf: High-fidelity neural rendering at 200fps. In IEEE/CVF International Conference on Computer Vision (ICCV), 2021. 2 [14] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel Brostow. Deep blending for free-viewpoint image-based rendering. ACM Trans. Graph., 37(6), 2018. 2, 7, 8 [15] Peter Hedman, Pratul P. Srinivasan, Ben Mildenhall, Jonathan T. Barron, and Paul Debevec. Baking neural radiance fields for real-time view synthesis. In 2021 IEEE/CVF International Conference on Computer Vision (ICCV), 2021. 2 [16] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler, and George Drettakis. 3d gaussian splatting for real-time radiance field rendering. ACM Trans. Graph., 42(4), 2023. 1, 2, 6, 7, 8 [17] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking large-scale scene reconstruction. ACM Transactions on Graphics, 36(4), 2017. 7, 8 [18] J. Kulhanek and T. Sattler. Tetra-nerf: Representing neural radiance fields using tetrahedra. In IEEE/CVF International Conference on Computer Vision (ICCV), 2023. 2 [19] Marc Levoy and Pat Hanrahan. Light field rendering. In Conference on Computer Graphics and Interactive Techniques (SIGGRAPH), 1996. 2 [20] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt. Neural sparse voxel fields. In Conference on Neural Information Processing Systems (NeurIPS), 2020. 2, 7 [21] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. Scaffold-gs: Structured 3d gaussians for view-adaptive rendering. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024. 2 [22] Alexander Mai, Peter Hedman, George Kopanas, Dor Verbin, David Futschik, Qiangeng Xu, Falko Kuester, Jonathan T. Barron, and Yinda Zhang. Ever: Exact volumetric ellipsoid rendering for real-time view synthesis, 2024. 2, 8 [23] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In European Conference on Computer Vision (ECCV), 2020. 1, 2, 3, 7 [24] Nicolas Moenne-Loccoz, Ashkan Mirzaei, Or Perel, Riccardo de Lutio, Janick Martinez Esturo, Gavriel State, Sanja Fidler, Nicholas Sharp, and Zan Gojcic. 3d gaussian ray tracing: Fast tracing of particle scenes. ACM Transactions on Graphics and SIGGRAPH Asia, 2024. 2, 7, 8 [25] Nate Morrical, Will Usher, Ingo Wald, and Valerio Pascucci. Efficient space skipping and adaptive sampling of unstructured volumes using hardware accelerated ray tracing. In 2019 IEEE Visualization Conference (VIS), pages 256–260, 2019. 4 [26] G.M. Morton. A computer oriented geodetic data base; and a new technique in file sequencing. Technical report, IBM Ltd., Ottawa, Canada, 1966. 5 [27] Thomas Muller, Alex Evans, Christoph Schied, and Alexan- ¨ der Keller. Instant neural graphics primitives with a multires-
+
+olution hash encoding. ACM Trans. Graph., 41(4), 2022. 2, 7, 8 [28] John Nickolls, Ian Buck, Michael Garland, and Kevin Skadron. Scalable parallel programming with cuda. In ACM SIGGRAPH 2008 Classes, New York, NY, USA, 2008. Association for Computing Machinery. 5 [29] Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch, Bernhard Kerbl, and Markus Steinberger. StopThePop: Sorted Gaussian Splatting for View-Consistent Real-time Rendering. ACM Transactions on Graphics, 4 (43), 2024. 2 [30] Ruslan Rakhimov, Andrei-Timotei Ardelean, Victor Lempitsky, and Evgeny Burnaev. NPBG++: Accelerating neural point-based graphics. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2022. 2 [31] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas Geiger. Kilonerf: Speeding up neural radiance fields with thousands of tiny mlps. In IEEE/CVF International Conference on Computer Vision (ICCV), 2021. 2 [32] Darius Ruckert, Linus Franke, and Marc Stamminger. Adop: ¨ approximate differentiable one-pixel point rendering. ACM Trans. Graph., 41(4), 2022. 2 [33] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel grid optimization: Super-fast convergence for radiance fields reconstruction. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2022. 2 [34] Weiwei Sun, Eduard Trulls, Yang-Che Tseng, Sneha Sambandam, Gopal Sharma, Andrea Tagliasacchi, and Kwang Moo Yi. PointNeRF++: A multi-scale, point-based Neural Radiance Field. arXiv e-prints, art. arXiv:2312.02362, 2023. 2 [35] Ingo Wald, Nate Morrical, Stefan Zellmann, Lei Ma, Will Usher, Tiejun Huang, and Valerio Pascucci. Using Hardware Ray Transforms to Accelerate Ray/Primitive Intersections for Long, Thin Primitive Types. Proceedings of the ACM on Computer Graphics and Interactive Techniques (Proceedings of High Performance Graphics), 2020. 6 [36] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu, Kalyan Sunkavalli, and Ulrich Neumann. Point-nerf: Pointbased neural radiance fields. In 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 5428–5438, 2022. 2, 7 [37] Ziyi Yang, Xinyu Gao, Yangtian Sun, Yihua Huang, Xiaoyang Lyu, Wen Zhou, Shaohui Jiao, Xiaojuan Qi, and Xiaogang Jin. Spec-gaussian: Anisotropic view-dependent appearance for 3d gaussian splatting. In Conference on Neural Information Processing Systems (NeurIPS), 2024. 2, 7, 8 [38] Wang Yifan, Felice Serena, Shihao Wu, Cengiz Oztireli, and ¨ Olga Sorkine-Hornung. Differentiable surface splatting for point-based geometry processing. ACM Trans. Graph., 38 (6), 2019. 2 [39] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa. Plenoctrees for real-time rendering of neural radiance fields. In IEEE/CVF International Conference on Computer Vision (ICCV), 2021. 2 [40] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-splatting: Alias-free 3d gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 19447– 19456, 2024. 2, 7, 8 [41] Qiang Zhang, Seung-Hwan Baek, Szymon Rusinkiewicz, and Felix Heide. Differentiable point-based radiance fields for efficient view synthesis. In SIGGRAPH Asia Conference, 2022. 2
+
+# Supplementary RayGaussX: Accelerating Gaussian-Based Ray Marching for Real-Time and High-Quality Novel View Synthesis
+
+# Supplementary Overview
+
+This supplementary material is organized as follows. Section 1 discusses current limitations and outlines future work. Section 2 derives the upper bound on the volume ratio (see Sec. 3.4 of the main paper). We first outline a general derivation of the bound in Subsection 2.1, then compute the minimum AABB of an ellipsoid in Subsection 2.2, and finally establish an upper bound on its volume in Subsection 2.3. Section 3 connects the densification criterion with the projected-mean derivative. Section 4 experimentally demonstrates that the new densification criterion more effectively densifies regions far from camera poses. Section 5 presents a detailed ablation study evaluating the impact of each contribution. Section 6 presents a targeted comparison of our approach with two related methods: 3D Gaussian Splatting (3D-GS) [9] and 3D Gaussian Ray Tracing (3DGRT) [16]. First, we compare rendering quality using the same appearance model (spherical harmonics / spherical Gaussians) for both 3D-GS and our method to isolate the impact of their rendering pipelines. Second, we analyze the different constraints of our approach and 3DGRT that motivate our choice of enclosing volumes. Section 7 presents additional experimental results in two parts: Subsection 7.1 shows qualitative comparisons, and Subsection 7.2 provides detailed quantitative evaluations.
+
+# 1. Limitations and Future Work
+
+The proposed approach achieves state-of-the-art rendering quality with a reasonable training time of 60–80 minutes and enables interactive rendering. However, this requires a high-end GPU (NVIDIA RTX 4090 in our experiments), whereas Gaussian Splatting and its variants can run on mobile devices or in web-GL environments. Future work could further accelerate rendering with novel optimizations. Additionally, our approach does not properly handle aliasing, which falls outside the scope of this paper and could be addressed by future work. Nevertheless, RayGaussX's fast training and high-quality rendering make it a strong framework for applications requiring high accuracy, including surface reconstruction [6], inverse rendering [11], SLAM [14], camera optimization [12], and relighting [3].
+
+# 2. Computation of the upper bound on the ratio of volumes
+
+In this section, we derive the upper bound used for the volume ratio in Section 3.4 Limiting Highly Anisotropic Gaussian of the main paper. First, in Subsection 2.1, we present a general derivation of this bound by assuming intermediate results, which are then proven in Subsections 2.2 and 2.3.
+
+# 2.1. Derivation of the Volume Ratio Bound
+
+We consider here the computation of an upper bound for the ratio:
+
+$$r = \frac{\text{Vol}(\text{AABB}(\mathcal{E}))}{\text{Vol}(\mathcal{E})} \quad (1)$$
+
+with Vol the volume function, E a given ellipsoid, and
+
+AABB(E) its associated axis-aligned bounding box. In particular, if we consider the l-th primitive of our representation, the ellipsoid associated with the l-th Gaussian is the σϵ-level isosurface of the density function of the l-th primitive:
+
+$$\sigma_l(\mathbf{x}) = \tilde{\sigma}_l \cdot \exp\left(-\frac{1}{2}(\mathbf{x} - \mu_1)^T \Sigma_1^{-1}(\mathbf{x} - \mu_1)\right) \quad (2)$$
+
+where σϵ is the chosen density threshold [4]. In order to avoid overloading the notations, we omit the index l hereafter. The covariance matrix can be decomposed as: Σ = RSST RT where R = (ri,j )1≤i,j≤3 is a rotation matrix and S = diag(s1, s2, s3) a scale matrix. Hence, the ellipsoid associated with the primitive can be described by the equation:
+
+$$(\mathbf{x} - \boldsymbol{\mu})^T \tilde{\boldsymbol{\Sigma}}^{-1} (\mathbf{x} - \boldsymbol{\mu}) \leq 1 \quad (3)$$
+
+such that Σ˜ = R S˜ S˜T RT , where S˜ = r 2 ln σ˜ σϵ ·S. The volume of ellipsoid E is then:
+
+---
+
+$$\text{Vol}(\mathcal{E}) = \frac{4\pi}{3} \left[ 2 \ln\left(\frac{\tilde{\sigma}}{\sigma_c}\right) \right]^{3/2} s_1 s_2 s_3$$
+
+Also, it can be shown that the volume of the associated AABB, Vol(AABB(E)), is equal to (see Subsection 2.2 for details):
+
+$$8 \left( 2 \ln \left( \frac{\bar{\sigma}}{\sigma_\epsilon} \right) \right)^{\frac{3}{2}} \sqrt{\prod_{i=1}^3 \left( r_{i,1}^2 s_1^2 + r_{i,2}^2 s_2^2 + r_{i,3}^2 s_3^2 \right)} \quad (4)$$
+
+And therefore, the ratio of the volumes is:
+
+| $r = \frac{6}{\pi} \sqrt{\prod_{i=1}^3 (r_{i,1}^2 s_1^2 + r_{i,2}^2 s_2^2 + r_{i,3}^2 s_3^2)}$ | (5) |
+|------------------------------------------------------------------------------------------------|-----|
+| $s_1 s_2 s_3$                                                                                  |     |
+
+independent of the scale factor introduced by σϵ and σ˜. Subsequently, we ensure that this ratio remains rotationinvariant to avoid bias toward any particular Gaussian orientation, and we constrain the worst-case scenario by computing an upper bound (see Subsection 2.3 for details):
+
+| $\frac{\text{Vol}(\text{AABB}(\mathcal{E}))}{\text{Vol}(\mathcal{E})} \leq \frac{2}{\pi \sqrt{3}} \frac{(s_1^2 + s_2^2 + s_3^2)^{\frac{3}{2}}}{s_1 s_2 s_3}$ | (6) |
+|--------------------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+|--------------------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+
+Thus, we obtain the expression for the upper bound used in the main article in the section Limiting Highly Anisotropic Gaussian.
+
+### 2.2. Computation of the Minimum Axis-Aligned Bounding Box for an Ellipsoid
+
+Considering the ellipsoid E defined in global coordinates by
+
+$$(x - \mu)^T \tilde{\Sigma}^{-1} (x - \mu) \leq 1 \quad (7)$$
+
+with: Σ =˜ R S˜ S˜T RT and S˜ = diag(˜s1, s˜2, s˜3), where the rotation matrix R = (rij ) performs the transformation of the ellipsoid (aligned in its local coordinate system) into the global coordinate system.
+
+In this section, we determine the minimum axis-aligned bounding box for the ellipsoid E. To obtain the axis-aligned bounding box in the world reference frame, we need to determine, for each axis i in the world frame (with i = 1, 2, 3 corresponding to x, y, and z), the maximum half-length Li such that
+
+$$L_i = \max_{x \in \mathbb{R}^3} \left\{ |x_i - \mu_i| : (x - \mu)^T \tilde{\Sigma}^{-1} (x - \mu) \leq 1 \right\} \quad (8)$$
+
+The volume of the axis-aligned bounding box (AABB) will then be computed as
+
+$$\text{Vol}(\text{AABB}(\mathcal{E})) = \prod_{i=1}^3 2L_i \quad (9)$$
+
+First, we introduce the local variable in the ellipsoidcentered reference frame: y = RT (x − µ) and thus we obtain: (x − µ) = Ry thanks to the orthogonality of R. Similarly, the half-lengths can be re-expressed using the local coordinate y in the ellipsoid's reference frame, using the fact that:
+
+$$|x_i - \mu_i| = |[x - \mu]_i| = \left| \sum_{j=1}^3 r_{ij} y_j \right| \quad (10)$$
+
+and:
+
+---
+
+$$(x - \mu)^T \tilde{\Sigma}^{-1} (x - \mu) = y^T (\tilde{S} \tilde{S}^T)^{-1} y \leq 1 \quad (11)$$
+
+Since S˜ is diagonal, this constraint can be rewritten as:
+
+$$\sum_{j=1}^3 \left( \frac{y_j}{\tilde{s}_j} \right)^2 \leq 1$$
+
+Thus, we obtain the new expression for the half-lengths:
+
+$$L_i = \max_{y \in \mathbb{R}^3} \left\{ \left| \sum_{j=1}^3 r_{ij} y_j \right| : \sum_{j=1}^3 \left( \frac{y_j}{\tilde{s}_j} \right)^2 \leq 1 \right\}. \quad (12)$$
+
+   We now introduce the variable zj = yj s˜j and reformulate the problem in terms of the variable z, which belongs to the unit ball in R , as follows:
+
+$$L_i = \max_{z \in \mathbb{R}^3} \left\{ \left| \sum_{j=1}^3 r_{ij} \tilde{s}_j z_j \right| : \sum_{j=1}^3 (z_j)^2 \leq 1 \right\}. \quad (13)$$
+
+     Here, using the Cauchy-Schwarz inequality, we obtain:
+
+$$L_i = \sqrt{\sum_{j=1}^3 r_{ij}^2 s_j^2} \quad (14)$$
+
+where the maximum is attained for the vector collinear to ri,·˜s with unit norm. Consequently, the volume of the axisaligned bounding box can be computed as:
+
+$$\text{Vol}(\text{AABB}(\mathcal{E})) = 8 \sqrt{\prod_{i=1}^3 \sum_{j=1}^3 r_{ij}^3 \bar{s}_j^2} \quad (15)$$
+
+Thus, we derive the formula used to compute the expression of r in Section 2.
+
+### 2.3. Upper Bound on the Volume of the Enclosing Axis-Aligned Bounding Box
+
+We express the volume of the AABB enclosing the ellipsoid in the form:
+
+$$\text{Vol}(\text{AABB}(\mathcal{E})) = 8 \sqrt{\prod_{i=1}^3 \sum_{j=1}^3 r_{ij}^2 s_j^2} \quad (16)$$
+
+We use s instead of s˜ because, at the stage of the section 2 requiring this upper bound, the scaling accounting for σ and σϵ is no longer necessary.
+
+Here, we apply the arithmetic-geometric inequality to li = P3 j=1 r ij s j , yielding:
+
+---
+
+$$l_1 l_2 l_3 \leq \left( \frac{l_1 + l_2 + l_3}{3} \right)^3 \quad (17)$$
+
+with equality when l1 = l2 = l3. Then, we have:
+
+$$\sum_{i=1}^3 l_i = \sum_{i=1}^3 \sum_{j=1}^3 r_{ij}^2 s_j^2 \quad (18)$$
+
+We can note here that, since the matrix R is orthogonal, its columns form an orthonormal basis, thus P3 i=1 r ij = 1, yielding:
+
+$$\sum_{i=1}^3 l_i = \sum_{j=1}^3 s_j^2 \quad (19)$$
+
+and:
+
+
+$$l_1 l_2 l_3 \leq \left( \frac{\sum_{j=1}^3 s_j^2}{3} \right)^3 \quad (20)$$
+
+Thus, knowing that Vol(AABB(E)) = 8√ l1l2l3, and by using the equations \(20\), we obtain:
+
+$$\text{Vol}(\text{AABB}(\mathcal{E})) \leq \frac{8}{3\sqrt{3}} \left( \sum_{j=1}^3 s_j^2 \right)^{\frac{30}{2}} \quad (21)$$
+
+This expression enables us to establish an upper bound on the ratio r in Section 2. Moreover, this upper bound is achieved when the half-lengths are equal L1 = L2 = L3 (since Li = √ li).
+
+# 3. Connecting the Densification Criterion and the Projected Mean Derivative
+
+In this section, o denotes the center of the camera, f its focal distance, and µ the position of a Gaussian. We will see here that the densification criterion can be expressed in terms of the gradient with respect to the position µ projected onto the sphere centered at o with radius f, under well-chosen assumptions. We define the projection P : R 3 \ {o} → R 3 by:
+
+$$P(\mu) = o + f \frac{\mu - o}{\|\mu - o\|} \quad (22)$$
+
+where f > 0 is the camera's focal distance and o is the camera center. Thus, P(µ) is always a point on the sphere of radius f centered at o. Here, we introduce a new parameterization based on the position on the sphere. We define µ˜ = (µP , r) where:
+
+- µP = P(µ) = o + f µ − o ∥µ − o∥ is the projection of µ ∈ R 3 \ {o} onto the sphere S 2 (o, f) (the sphere of radius f > 0 centered at o).
+- r = ∥µ − o∥ is the radial distance of µ from o. We then define the reprojection function F : S (o, f) × R+ → R such that:
+
+$$\mu = F(\mu_P, r) = o + \frac{r}{f}(\mu_P - o) \quad (23)$$
+
+Also, by introducing the unit vector u = µ−o ∥µ−o∥ , we note that the derivatives of F with respect to the parameters can be expressed as follows:
+
+$$\frac{\partial F}{\partial \mu_P} = \frac{r}{f} (I - uu^T) \quad (24)$$
+
+where I − uuT is the projector onto TµP S 2 (o, f) = {v ∈ R | v · u = 0}, the tangent space to the sphere centered at o and with radius f at the point µP = o + fu. This multiplication by the projection is necessary because µP is constrained to lie on the sphere S (o, f); hence, its derivatives must lie in the tangent space TµP S (o, f). Furthermore, we have:
+
+$$\frac{\partial F}{\partial r} = \frac{1}{f} (\mu_P - o) \quad (25)$$
+
+Thus, we obtain the gradients, with respect to µP :
+
+$$\nabla_{\mu_P} L = \frac{r}{f} (I - uu^T) \nabla_{\mu} L \quad (26)$$
+
+and the radial component:
+
+$$\nabla_r L = \frac{1}{f} (\mu_P - o)^T \nabla_\mu L \quad (27)$$
+
+Experimentally, we observe that the derivative along the radial direction is significantly smaller compared to the tangential components. Also, we assume in the following analysis that ∇µL · u = 0. Thus, we have:
+
+∇µL ∈ TµP S 2 (o, f) (28)
+
+Moreover, since (I − uuT ) is a projector onto TµP S 2 (o, f) and ∇µL lies in this tangent space, we have:
+
+$$(I - uu^T)\nabla_\mu L = \nabla_\mu L. \quad (29)$$
+
+and:
+
+$$(\mu_P - o)^T \nabla_\mu L = 0 \quad (30)$$
+
+Thus, we finally obtain that:
+
+$$\nabla_{\mu_F} L = \frac{r}{f} \nabla_{\mu} L \quad (31)$$
+
+and:
+
+∇rL = 0 (32)
+
+
+
+Figure 1. Comparison of background reconstruction for image 1 in the garden test scene. From left to right, the full scene with the region of interest highlighted in red, the reconstruction obtained with the new densification criterion, the reconstruction obtained with the previous densification criterion, and the corresponding ground-truth image crop.
+
+Therefore, the gradient with respect to the projection on the sphere is, in this case, proportional to the gradient in the 3D space, and by taking the norm, we obtain:
+
+$$\|\nabla_{\mu_P} L\| = \frac{r}{f} \|\nabla_{\mu} L\| \quad (33)$$
+
+## 4. Experimental Evaluation of Densification
+
+In this section, we experimentally demonstrate the effectiveness of the new densification criterion. To this end, we train the garden scene from the MipNeRF360 dataset first using the original criterion and then using the new densification criterion, with densification parameters tuned to yield approximately the same number of Gaussians in the scene (around 4 million). Subsequently, by considering the point clouds associated with the centers of the Gaussians, we compute the number of neighbors of each Gaussian within a radius of R = 0.125 and use this metric to denote the density of Gaussians around a given Gaussian. The point clouds associated with this scalar field are shown in Fig. 2. In this scene, the cameras are predominantly positioned around the central table. Under the new densification criterion, there remains a significant number of Gaussians around the table, which corresponds to the area with the most information, and there are also more points distributed in the distant regions. In particular, the right-hand side of the garden scene contains a higher density of Gaussians, confirming the effectiveness of the new criterion in better densifying distant areas.
+
+Moreover, we demonstrate the effect of the new densification on rendering in Fig. 1 by comparing the background reconstruction of image 1 in the garden scene test set. As shown, the previous densification produces a poorly reconstructed background that appears blurry and lacks detail. In contrast, our new approach yields a much more accurate background reconstruction, with fine details such as the reflection on the glass pane clearly visible.
+
+
+
+Figure 2. Densification comparison in the MipNeRF360 garden scene using Raygauss and RaygaussX criteria. The color gradient from blue through green, yellow, and red encodes on a logarithmic scale the increasing number of Gaussian neighbors within a radius of R = 0.125.
+
+# 5. Detailed ablation study of each contribution
+
+In this section, we present a detailed ablation study of the various contributions introduced in RayGaussX to complement the study presented in the main paper by detailing the influence of each component individually. Specifically, we investigate the influence of the main contributions: the novel densification strategy (D) which yields a more uniform distribution of Gaussians in regions distant from the camera poses, empty-space skipping (E), adaptive sampling (A), spatial reordering of Gaussians via a Z-order curve (Z), ray coherence optimization (R) and the isotropic loss (L).
+
+This ablation study, presented in Table 1, is designed to determine how each individual contribution and their combinations influence rendering quality (PSNR, SSIM, LPIPS), training time, and inference speed in frames per second (FPS). First, rows (1) and (1\*) demonstrate that implementation-level optimizations provide a stronger baseline than RayGauss in terms of training time and FPS, while preserving comparable rendering performance. These improvements are not described in the paper as they consist of using faster operations and pertain to implementation details. However, interested readers may compare our code, available online, with the implementation from the RayGauss paper.
+
+Next, rows (2), (3), (5), (6), and (9) confirm that the core contributions of the paper effectively reduce both training
+
+
+
+|      | D E | A Z | R L | PSNR ↑ | SSIM ↑ | LPIPS ↓ | Train ↓ | FPS ↑ |
+|------|-----|-----|-----|--------|--------|---------|---------|-------|
+| (1)  |     |     |     | 28.06  | 0.879  | 0.103   | 585 min | 0.5   |
+| (1*) |     |     |     | 28.14  | 0.885  | 0.090   | 297 min | 1.5   |
+| (2)  | ✓   |     |     | 28.14  | 0.884  | 0.090   | 218 min | 4.4   |
+| (3)  |     | ✓   |     | 28.13  | 0.885  | 0.089   | 191 min | 4.7   |
+| (4)  | ✓   | ✓   |     | 28.14  | 0.884  | 0.090   | 180 min | 5.9   |
+| (5)  |     | ✓   |     | 28.14  | 0.885  | 0.089   | 237 min | 2.4   |
+| (6)  |     |     | ✓   | 28.12  | 0.884  | 0.090   | 238 min | 2.4   |
+| (7)  |     | ✓   | ✓   | 28.15  | 0.885  | 0.089   | 200 min | 3.6   |
+| (8)  | ✓   | ✓ ✓ | ✓   | 28.15  | 0.885  | 0.089   | 125 min | 10.2  |
+| (9)  |     |     | ✓   | 28.12  | 0.885  | 0.090   | 133 min | 10.1  |
+| (10) | ✓   | ✓ ✓ | ✓ ✓ | 28.16  | 0.885  | 0.090   | 88 min  | 26.1  |
+| (11) | ✓   |     |     | 28.38  | 0.887  | 0.090   | 294 min | 1.8   |
+| (12) | ✓ ✓ | ✓   |     | 28.35  | 0.887  | 0.089   | 168 min | 6.3   |
+| (13) | ✓ ✓ | ✓ ✓ | ✓   | 28.36  | 0.888  | 0.089   | 116 min | 10.5  |
+| (14) | ✓ ✓ | ✓ ✓ | ✓ ✓ | 28.35  | 0.887  | 0.090   | 84 min  | 27.4  |
+
+Table 1. Ablation study of key contributions on the garden scene from the Mip-NeRF360 dataset (D: new Densification criterion; E: Empty-space Skipping; A: Adaptive sampling; Z: Z-curve re-indexing of Gaussians; R: Ray coherence; L: Loss for isotropic Gaussians). Row (1) represents the original RayGauss method [4], Row (1\*) corresponds to the optimized RayGauss baseline underlying RayGaussX, incorporating implementation-level optimizations but excluding the main contributions (D, E, A, Z, R, L) and row (14) corresponds to our full method, RayGaussX.
+
+and inference times. We also observe that overall rendering quality is minimally affected by these contributions, demonstrating that they accelerate rendering without any significant trade-off in quality. The isotropic loss appears to slightly reduce PSNR, but this effect is minor.
+
+Rows (4), (7), (8), and (10) illustrate the cumulative effect of the individual contributions. We observe no accumulation of errors that could degrade the renderingquality metrics; indeed, the PSNR remains approximately 28.14 dB. This confirms that, with the chosen hyperparameters, the contributions do not compromise rendering quality. Furthermore, training and inference are accelerated when combining these contributions, achieving a training time of 88 minutes and an inference speed of 26.1 FPS when all speed-related contributions are applied.
+
+Finally, rows (11), (12), (13), and (14) highlight the influence of the new densification on the algorithm's performance. It is clear that the new densification yields superior rendering quality by better densifying distant regions, as shown in Section 4. In particular, with the new densification we achieve a PSNR of approximately 28.36 dB compared to 28.14 dB obtained with (1\*). Furthermore, by comparing rows (12), (13), and (14) to their counterparts without the new densification, we observe that the new densification also appears to slightly accelerate rendering and inference times.
+
+# 6. Selective comparison with related methods
+
+In this section, we present a targeted comparison of our approach with two related methods: 3D Gaussian Splatting (3D-GS) [9] and 3D Gaussian Ray Tracing (3DGRT) [16]. First, we compare rendering quality using the same appearance model, spherical harmonics/spherical Gaussians, for both 3D-GS and our method to isolate the impact of their rendering pipelines. Second, we analyze the different constraints of our approach and 3DGRT that motivate our choice of enclosing volumes.
+
+### 6.1. Rendering quality comparison with a similar appearance model
+
+In this subsection, we compare RayGaussX with 3D Gaussian Splatting (3D-GS) under the same appearance model (spherical harmonics and spherical Gaussians). Using an identical appearance representation isolates the rendering algorithm's impact on output quality, since both methods employ Gaussian primitives within an identical appearance framework. We evaluate both methods on the datasets introduced in the main paper: NeRF-Synthetic,
+
+
+
+| Method           | NeRF-Synth. | NSVF-Synth. | Mip-NeRF360 | Tanks & Temp. | Deep Blending |
+|------------------|-------------|-------------|-------------|---------------|---------------|
+| 3D-GS            | 33.39/0.968 | 37.07/0.987 | 27.80/0.825 | 23.72/0.848   | 29.92/0.905   |
+| 3D-GS (SH, SG)   | 33.88/0.971 | 38.06/0.988 | 28.12/0.827 | 23.81 /0.855  | 29.88/0.908   |
+| RayGaussX (ours) | 34.54/0.974 | 38.75/0.991 | 28.43/0.842 | 23.76/ 0.865  | 30.32/0.915   |
+
+Table 2. Comparison in terms of PSNR/SSIM of RayGaussX (ours) and 3D-GS methods (with and without spherical harmonics/gaussians) on NeRF-Synthetic, NSVF-Synthetic, Mip-NeRF360, Tanks and Temples, and Deep Blending datasets. Best results in bold.
+
+NSVF-Synthetic, Mip-NeRF360, Tanks&Temples, and Deep Blending. The appearance model comprises nine spherical harmonics and seven spherical Gaussians per primitive. The resulting PSNR and SSIM values are reported in Fig. 2. Results show that the SH/SG formulation also enhances 3D-GS's performance. However, except for PSNR on Tanks&Temples, across all datasets and for every standard metric, RayGaussX outperforms the modified 3D-GS in terms of rendering quality, confirming the advantage of employing Volume Ray Marching. This aligns with theory, as ray marching provides a less approximate formulation that avoids rendering artifacts such as flickering compared to 3D-GS rasterization. Additionally, as noted by the authors of [1], the Tanks & Temples [10] dataset exhibits significant lighting variations, making conclusions drawn from this dataset somewhat uncertain.
+
+### 6.2. Enclosing volume selection
+
+The recent 3DGRT method [16] also uses the OptiX API to ray trace Gaussian primitives. However, their choice of enclosing volume differs from ours: they use bounding polyhedra and we use axis aligned bounding boxes(AABB). We explain the reasons for this difference in this subsection.
+
+The 3D Gaussian Ray Tracing approach performs ray tracing of Gaussians with a single sample per Gaussian; this simplified approach approximates the rendering equation and, unlike RayGauss, does not account for the overlap of multiple Gaussians. Additionally, compared with AABBs, 3DGRT's complex bounding primitives raise two issues. First, constructing them and building the associated BVH are several orders of magnitude slower (Fig. 9 in 3DGRT paper), so the frequent BVH rebuilds required during training become a bottleneck in scenes with many primitives. A second drawback stems from using polyhedra with the OptiX API for ray marching: indeed, we integrate each ray segment sequentially. However, if a segment lies entirely within a bounding polyhedron, OptiX reports no intersection, wrongly treating it as empty because it crosses no faces. In contrast, with AABBs, an OptiX-specific behavior is that it reports an intersection even for fully enclosed segments. For these reasons, AABBs are better suited to our Volume Ray Marching algorithm than the bounding polyhedra proposed by 3DGRT.
+
+### 7. Additional experimental results
+
+### 7.1. Qualitative results
+
+Fig. 3 presents qualitative results of our RayGaussX approach compared to RayGauss [4], Zip-NeRF [2], and 3D-GS [9] on the Mip-NeRF360 [1] dataset. First, we observe that the qualitative results are very similar between Ray-GaussX and RayGauss for indoor scenes. However, for outdoor scenes, our approach shows a clear improvement in background rendering thanks to our new densification criterion. The Zip-NeRF method achieves very good visual results but produces grainy images (particularly noticeable in the counter scene) and sometimes generates floaters, as seen on the wooden foot in the treehill scene. Finally, 3D-GS exhibits lower reconstruction quality, with less accurately reconstructed objects, which is especially visible in the shelf of the room scene.
+
+As noted by the authors of [1], the Tanks&Temples [10] dataset contains images with significant variations in lighting conditions, making conclusions drawn from this dataset somewhat uncertain. Moreover, we can observe that the Zip-NeRF [2] method failed on this dataset.
+
+### 7.2. Detailed quantitative results
+
+Tab. 3, Tab. 4, Tab. 5, and Tab. 6 show the detailed per scene results of the main paper with metrics PSNR, SSIM, and LPIPS on the NeRF Synthetic [15], NSVF Synthetic [13], Mip-NeRF360 [1], Tanks&Temples [10] and Deep Blending [8] datasets.
+
+All methods with an \* in tables of the main paper and supplementary have been re-trained using the available online code of respective methods:
+
+- 3D Gaussian Splatting: [https://github.com/](https://github.com/graphdeco-inria/gaussian-splatting) [graphdeco-inria/gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting)
+- Mip-Splatting: [https : / / github . com /](https://github.com/autonomousvision/mip-splatting) [autonomousvision/mip-splatting](https://github.com/autonomousvision/mip-splatting)
+- Spec-Gaussian: [https : / / github . com /](https://github.com/ingra14m/Specular-Gaussians) [ingra14m/Specular-Gaussians](https://github.com/ingra14m/Specular-Gaussians)
+- Zip-NeRF: [https://github.com/jonbarron/](https://github.com/jonbarron/camp_zipnerf) [camp\\_zipnerf](https://github.com/jonbarron/camp_zipnerf)
+- RayGauss: [https : / / github . com / hugobl1 /](https://github.com/hugobl1/ray_gauss) [ray\\_gauss](https://github.com/hugobl1/ray_gauss)
+
+
+
+Figure 3. Qualitative results on the Mip-NeRF360 [1] dataset. The scenes are from the top down: bonsai, counter, room, garden, bicycle, treehill.
+
+
+
+|               |       |        | chair   | drums | ficus | hotdog | PSNR ↑ lego | materials | mic   | ship  | Avg.  |
+|---------------|-------|--------|---------|-------|-------|--------|-------------|-----------|-------|-------|-------|
+| Instant-NGP   |       | [17]   | 35.00   | 26.02 | 33.51 | 37.40  | 36.39       | 29.78     | 36.22 | 31.10 | 33.18 |
+| Mip-NeRF360   |       | [1]    | 35.65   | 25.60 | 33.19 | 37.71  | 36.10       | 29.90     | 36.52 | 31.26 | 33.24 |
+| Point-NeRF    |       | [18]   | 35.40   | 26.06 | 36.13 | 37.30  | 35.04       | 29.61     | 35.95 | 30.97 | 33.30 |
+| 3D-GS         | [9] * |        | 35.85   | 26.22 | 35.00 | 37.81  | 35.87       | 30.00     | 35.40 | 30.95 | 33.39 |
+| Zip-NeRF      | [2]   | *      | 35.78   | 25.91 | 34.72 | 38.05  | 35.79       | 31.05     | 35.92 | 32.33 | 33.69 |
+| Mip-Splatting |       | [20] * | 36.23   | 26.29 | 35.33 | 38.04  | 36.13       | 30.37     | 36.22 | 31.32 | 33.74 |
+| Spec-Gaussian |       | [19]   | * 36.20 | 26.76 | 35.56 | 38.04  | 36.06       | 30.61     | 35.78 | 31.45 | 33.80 |
+| 3DGRT         | [16]  | *      | 35.69   | 25.88 | 36.54 | 37.98  | 36.80       | 30.40     | 35.88 | 31.73 | 33.86 |
+| NeuRBF        | [7]   | *      | 36.54   | 26.38 | 35.01 | 38.44  | 37.35       | 34.12     | 36.16 | 31.73 | 34.47 |
+| RayGauss      | [4]   | *      | 37.20   | 27.14 | 35.11 | 38.30  | 37.10       | 31.36     | 38.11 | 31.95 | 34.53 |
+| RayGaussX     |       | (ours) | 37.19   | 27.10 | 35.09 | 38.46  | 37.01       | 31.33     | 38.02 | 32.13 | 34.54 |
+|               |       |        |         |       |       | SSIM   | ↑           |           |       |       |       |
+|               |       |        | chair   | drums | ficus | hotdog | lego        | materials | mic   | ship  | Avg.  |
+| Instant-NGP   |       | [17]   | 0.979   | 0.937 | 0.981 | 0.982  | 0.982       | 0.951     | 0.990 | 0.896 | 0.963 |
+| Mip-NeRF360   |       | [1]    | 0.983   | 0.931 | 0.979 | 0.982  | 0.980       | 0.949     | 0.991 | 0.893 | 0.961 |
+| Point-NeRF    |       | [18]   | 0.984   | 0.935 | 0.987 | 0.982  | 0.978       | 0.948     | 0.990 | 0.892 | 0.962 |
+| 3D-GS         | [9] * |        | 0.988   | 0.955 | 0.988 | 0.986  | 0.983       | 0.960     | 0.992 | 0.893 | 0.968 |
+| Zip-NeRF      | [2]   | *      | 0.987   | 0.948 | 0.987 | 0.987  | 0.983       | 0.968     | 0.992 | 0.937 | 0.974 |
+| Mip-Splatting |       | [20] * | 0.988   | 0.955 | 0.988 | 0.987  | 0.984       | 0.963     | 0.993 | 0.908 | 0.971 |
+| Spec-Gaussian |       | [19]   | * 0.987 | 0.955 | 0.988 | 0.986  | 0.983       | 0.964     | 0.992 | 0.906 | 0.970 |
+| 3DGRT         | [16]  | *      | 0.987   | 0.954 | 0.989 | 0.986  | 0.985       | 0.961     | 0.991 | 0.909 | 0.970 |
+| NeuRBF        | [7] * |        | 0.988   | 0.944 | 0.987 | 0.987  | 0.986       | 0.979     | 0.992 | 0.925 | 0.974 |
+| RayGauss      | [4]   | *      | 0.990   | 0.960 | 0.988 | 0.988  | 0.986       | 0.969     | 0.995 | 0.914 | 0.974 |
+| RayGaussX     |       | (ours) | 0.990   | 0.959 | 0.988 | 0.988  | 0.986       | 0.969     | 0.995 | 0.914 | 0.974 |
+|               |       |        |         |       |       | LPIPS  | ↓           |           |       |       |       |
+|               |       |        | chair   | drums | ficus | hotdog | lego        | materials | mic   | ship  | Avg.  |
+| Instant-NGP   |       | [17]   | 0.022   | 0.071 | 0.023 | 0.027  | 0.017       | 0.060     | 0.010 | 0.132 | 0.045 |
+| Mip-NeRF360   |       | [1]    | 0.018   | 0.069 | 0.022 | 0.024  | 0.018       | 0.053     | 0.011 | 0.119 | 0.042 |
+| Point-NeRF    |       | [18]   | 0.023   | 0.078 | 0.022 | 0.037  | 0.024       | 0.072     | 0.014 | 0.124 | 0.049 |
+| 3D-GS         | [9] * |        | 0.011   | 0.037 | 0.011 | 0.017  | 0.015       | 0.034     | 0.006 | 0.118 | 0.031 |
+| Zip-NeRF      | [2]   | *      | 0.013   | 0.045 | 0.013 | 0.017  | 0.015       | 0.031     | 0.006 | 0.082 | 0.028 |
+| Mip-Splatting |       | [20] * | 0.013   | 0.038 | 0.011 | 0.017  | 0.015       | 0.033     | 0.006 | 0.098 | 0.029 |
+| Spec-Gaussian |       | [19]   | * 0.011 | 0.034 | 0.011 | 0.017  | 0.015       | 0.030     | 0.005 | 0.094 | 0.027 |
+| 3DGRT         | [16]  | *      | 0.016   | 0.047 | 0.013 | 0.024  | 0.016       | 0.046     | 0.009 | 0.123 | 0.037 |
+| NeuRBF        | [7] * |        | 0.016   | 0.061 | 0.016 | 0.021  | 0.015       | 0.032     | 0.008 | 0.114 | 0.035 |
+| RayGauss      | [4]   | *      | 0.009   | 0.030 | 0.011 | 0.015  | 0.012       | 0.026     | 0.004 | 0.088 | 0.024 |
+| RayGaussX     |       | (ours) | 0.009   | 0.030 | 0.010 | 0.015  | 0.012       | 0.026     | 0.004 | 0.088 | 0.024 |
+
+Table 3. PSNR, SSIM and LPIPS (with VGG network) scores on the NeRF Synthetic dataset [15]. All methods are trained on the train set with full-resolution images (800x800 pixels) and evaluated on the test set with full-resolution images (800x800 pixels). Methods marked \* were retrained on an NVIDIA RTX4090.
+
+
+
+|               |        |        | Bike  | Life  | Palace | Robot | PSNR ↑ Space | Steam | Toad  | Wine  | Avg.  |
+|---------------|--------|--------|-------|-------|--------|-------|--------------|-------|-------|-------|-------|
+| TensoRF       | [5]    |        | 39.23 | 34.51 | 37.56  | 38.26 | 38.60        | 37.87 | 34.85 | 31.32 | 36.53 |
+| 3D-GS         | [9] *  |        | 40.76 | 33.19 | 38.89  | 39.16 | 36.80        | 37.67 | 37.33 | 32.76 | 37.07 |
+| Mip-Splatting |        | [20] * | 40.34 | 35.06 | 39.00  | 39.34 | 37.11        | 38.42 | 36.64 | 32.30 | 37.28 |
+| NeuRBF        | [7]    |        | 40.71 | 36.08 | 38.93  | 39.13 | 40.44        | 38.35 | 35.73 | 32.99 | 37.80 |
+| Spec-Gaussian |        | [19] * | 40.93 | 36.17 | 39.39  | 39.64 | 40.12        | 38.08 | 36.63 | 32.82 | 37.97 |
+| RayGauss      | [4] *  |        | 41.25 | 36.21 | 40.30  | 40.37 | 40.03        | 39.08 | 38.39 | 34.12 | 38.72 |
+| RayGaussX     | (ours) |        | 41.34 | 36.39 | 40.28  | 40.32 | 40.11        | 39.12 | 38.39 | 34.01 | 38.75 |
+|               |        |        |       |       |        | SSIM  | ↑            |       |       |       |       |
+|               |        |        | Bike  | Life  | Palace | Robot | Space        | Steam | Toad  | Wine  | Avg.  |
+| TensoRF       | [5]    |        | 0.993 | 0.968 | 0.979  | 0.994 | 0.989        | 0.991 | 0.978 | 0.961 | 0.982 |
+| 3D-GS         | [9] *  |        | 0.994 | 0.979 | 0.983  | 0.994 | 0.991        | 0.993 | 0.985 | 0.975 | 0.987 |
+| Mip-Splatting |        | [20] * | 0.995 | 0.982 | 0.985  | 0.996 | 0.992        | 0.994 | 0.985 | 0.978 | 0.988 |
+| NeuRBF        | [7]    |        | 0.995 | 0.977 | 0.985  | 0.995 | 0.993        | 0.993 | 0.983 | 0.972 | 0.987 |
+| Spec-Gaussian |        | [19] * | 0.995 | 0.982 | 0.986  | 0.996 | 0.994        | 0.994 | 0.985 | 0.977 | 0.989 |
+| RayGauss      | [4] *  |        | 0.996 | 0.983 | 0.987  | 0.996 | 0.994        | 0.994 | 0.989 | 0.981 | 0.990 |
+| RayGaussX     | (ours) |        | 0.996 | 0.984 | 0.989  | 0.996 | 0.995        | 0.995 | 0.989 | 0.981 | 0.991 |
+|               |        |        |       |       |        | LPIPS | ↓            |       |       |       |       |
+|               |        |        | Bike  | Life  | Palace | Robot | Space        | Steam | Toad  | Wine  | Avg.  |
+| TensoRF       | [5]    |        | 0.010 | 0.048 | 0.022  | 0.010 | 0.020        | 0.017 | 0.031 | 0.051 | 0.026 |
+| 3D-GS         | [9] *  |        | 0.005 | 0.028 | 0.017  | 0.006 | 0.009        | 0.007 | 0.018 | 0.025 | 0.014 |
+| Mip-Splatting |        | [20] * | 0.005 | 0.024 | 0.015  | 0.007 | 0.010        | 0.008 | 0.019 | 0.022 | 0.014 |
+| NeuRBF        | [7]    |        | 0.006 | 0.036 | 0.016  | 0.009 | 0.011        | 0.011 | 0.025 | 0.036 | 0.019 |
+| Spec-Gaussian |        | [19] * | 0.004 | 0.022 | 0.013  | 0.006 | 0.007        | 0.007 | 0.016 | 0.020 | 0.012 |
+| RayGauss      | [4] *  |        | 0.003 | 0.022 | 0.011  | 0.006 | 0.007        | 0.006 | 0.012 | 0.017 | 0.011 |
+| RayGaussX     | (ours) |        | 0.003 | 0.021 | 0.011  | 0.006 | 0.006        | 0.006 | 0.011 | 0.018 | 0.010 |
+
+Table 4. PSNR, SSIM and LPIPS (with VGG network) scores on the NSVF Synthetic dataset [13]. All methods are trained on the train set with full-resolution images (800x800 pixels) and evaluated on the test set with full-resolution images (800x800 pixels). Methods marked \* were retrained on an NVIDIA RTX4090.
+
+
+
+|               |       |        | bonsai  | counter | kitchen | room  | PSNR bicycle | ↑ flowers | garden | stump | treehill | Avg.  |
+|---------------|-------|--------|---------|---------|---------|-------|--------------|-----------|--------|-------|----------|-------|
+| Instant-NGP   |       | [17]   | 30.69   | 26.69   | 29.48   | 29.69 | 22.17        | 20.65     | 25.07  | 23.47 | 22.37    | 25.59 |
+| 3DGRT         | [16]  | *      | 31.93   | 28.51   | 29.67   | 30.68 | 24.74        | 21.36     | 26.82  | 26.25 | 22.05    | 26.89 |
+| Mip-NeRF360   |       | [1]    | 33.46   | 29.55   | 32.23   | 31.63 | 24.37        | 21.73     | 26.98  | 26.40 | 22.87    | 27.69 |
+| 3D-GS         | [9] * |        | 32.62   | 29.17   | 31.39   | 31.96 | 25.65        | 21.77     | 27.62  | 27.00 | 23.00    | 27.80 |
+| Mip-Splatting |       | [20] * | 32.42   | 29.41   | 31.85   | 31.68 | 25.97        | 22.08     | 27.97  | 27.31 | 22.71    | 27.93 |
+| Spec-Gaussian |       | [19]   | * 33.26 | 29.86   | 32.45   | 32.15 | 25.81        | 21.52     | 28.00  | 27.17 | 22.23    | 28.05 |
+| Zip-NeRF      | [2]   | *      | 34.79   | 29.12   | 32.36   | 33.04 | 25.85        | 22.33     | 28.22  | 27.35 | 23.95    | 28.56 |
+| RayGauss      | [4]   | *      | 33.91   | 30.56   | 32.83   | 31.83 | 25.51        | 21.85     | 28.06  | 26.33 | 23.18    | 28.23 |
+| RayGaussX     |       | (ours) | 34.06   | 30.64   | 32.92   | 32.11 | 25.71        | 22.31     | 28.35  | 26.66 | 23.15    | 28.43 |
+|               |       |        |         |         |         |       | SSIM         | ↑         |        |       |          |       |
+|               |       |        | bonsai  | counter | kitchen | room  | bicycle      | flowers   | garden | stump | treehill | Avg.  |
+| Instant-NGP   |       | [17]   | 0.906   | 0.817   | 0.858   | 0.871 | 0.512        | 0.486     | 0.701  | 0.594 | 0.542    | 0.699 |
+| 3DGRT         | [16]  | *      | 0.941   | 0.904   | 0.914   | 0.914 | 0.744        | 0.612     | 0.848  | 0.767 | 0.621    | 0.807 |
+| Mip-NeRF360   |       | [1]    | 0.941   | 0.894   | 0.920   | 0.913 | 0.685        | 0.583     | 0.813  | 0.744 | 0.632    | 0.792 |
+| 3D-GS         | [9] * |        | 0.947   | 0.916   | 0.933   | 0.929 | 0.777        | 0.618     | 0.868  | 0.783 | 0.654    | 0.825 |
+| Mip-Splatting |       | [20] * | 0.952   | 0.921   | 0.937   | 0.933 | 0.803        | 0.656     | 0.885  | 0.801 | 0.657    | 0.838 |
+| Spec-Gaussian |       | [19]   | * 0.954 | 0.923   | 0.938   | 0.935 | 0.796        | 0.647     | 0.881  | 0.796 | 0.645    | 0.835 |
+| Zip-NeRF      | [2]   | *      | 0.952   | 0.905   | 0.929   | 0.929 | 0.772        | 0.637     | 0.863  | 0.788 | 0.674    | 0.828 |
+| RayGauss      | [4]   | *      | 0.957   | 0.932   | 0.942   | 0.936 | 0.782        | 0.634     | 0.879  | 0.775 | 0.672    | 0.834 |
+| RayGaussX     |       | (ours) | 0.959   | 0.932   | 0.943   | 0.939 | 0.797        | 0.655     | 0.887  | 0.789 | 0.677    | 0.842 |
+|               |       |        |         |         |         |       | LPIPS        | ↓         |        |       |          |       |
+|               |       |        | bonsai  | counter | kitchen | room  | bicycle      | flowers   | garden | stump | treehill | Avg.  |
+| Instant-NGP   |       | [17]   | 0.205   | 0.306   | 0.195   | 0.261 | 0.446        | 0.441     | 0.257  | 0.421 | 0.450    | 0.331 |
+| 3DGRT         | [16]  | *      | 0.249   | 0.258   | 0.169   | 0.295 | 0.254        | 0.335     | 0.145  | 0.251 | 0.372    | 0.259 |
+| Mip-NeRF360   |       | [1]    | 0.176   | 0.204   | 0.127   | 0.211 | 0.301        | 0.344     | 0.170  | 0.261 | 0.339    | 0.237 |
+| 3D-GS         | [9] * |        | 0.178   | 0.181   | 0.114   | 0.195 | 0.213        | 0.336     | 0.115  | 0.211 | 0.326    | 0.208 |
+| Mip-Splatting |       | [20] * | 0.161   | 0.167   | 0.109   | 0.177 | 0.164        | 0.266     | 0.090  | 0.182 | 0.270    | 0.176 |
+| Spec-Gaussian |       | [19]   | * 0.163 | 0.167   | 0.108   | 0.178 | 0.167        | 0.263     | 0.093  | 0.185 | 0.270    | 0.177 |
+| Zip-NeRF      | [2]   | *      | 0.134   | 0.160   | 0.102   | 0.159 | 0.198        | 0.276     | 0.117  | 0.199 | 0.239    | 0.176 |
+| RayGauss      | [4]   | *      | 0.163   | 0.157   | 0.105   | 0.178 | 0.205        | 0.306     | 0.103  | 0.221 | 0.297    | 0.193 |
+| RayGaussX     |       | (ours) | 0.154   | 0.156   | 0.103   | 0.171 | 0.177        | 0.285     | 0.090  | 0.200 | 0.262    | 0.177 |
+
+Table 5. PSNR, SSIM and LPIPS (with VGG network) scores on the Mip-NeRF360 dataset [15]. All methods are trained and tested on downsampled images by a factor of 2 in indoor (bonsai, counter, kitchen, room) and 4 in outdoor (bicycle, flowers, garden, stump, treehill). Methods marked \* were retrained on an NVIDIA RTX4090.
+
+
+
+|               |       |        | train   | truck | Avg.  | PSNR ↑ drjohnson | playroom | Avg.  |
+|---------------|-------|--------|---------|-------|-------|------------------|----------|-------|
+| Instant-NGP   |       | [17]   | 20.46   | 23.38 | 21.92 | 28.26            | 21.67    | 24.97 |
+| 3DGRT         | [16]  | *      | 21.06   | 24.41 | 22.74 | 29.16            | 30.33    | 29.74 |
+| Mip-NeRF360   |       | [1]    | 19.52   | 24.91 | 22.22 | 29.14            | 29.66    | 29.40 |
+| 3D-GS         | [9] * |        | 22.03   | 25.41 | 23.72 | 29.52            | 30.32    | 29.92 |
+| Mip-Splatting |       | [20] * | 21.78   | 25.66 | 23.72 | 28.83            | 30.19    | 29.51 |
+| Spec-Gaussian |       | [19]   | * 22.10 | 25.62 | 23.86 | 29.03            | 30.31    | 29.67 |
+| Zip-NeRF      | [2]   | *      | 10.53   | 11.16 | 10.85 | 30.28            | 31.23    | 30.76 |
+| RayGauss      | [4]   | *      | 21.80   | 24.59 | 23.20 | 29.74            | 30.85    | 30.30 |
+| RayGaussX     |       | (ours) | 22.24   | 25.27 | 23.76 | 29.85            | 30.79    | 30.32 |
+|               |       |        |         |       |       | SSIM ↑           |          |       |
+|               |       |        | train   | truck | Avg.  | drjohnson        | playroom | Avg.  |
+| Instant-NGP   |       | [17]   | 0.689   | 0.800 | 0.745 | 0.854            | 0.779    | 0.817 |
+| 3DGRT         | [16]  | *      | 0.814   | 0.873 | 0.844 | 0.904            | 0.906    | 0.905 |
+| Mip-NeRF360   |       | [1]    | 0.660   | 0.857 | 0.759 | 0.901            | 0.900    | 0.901 |
+| 3D-GS         | [9] * |        | 0.816   | 0.880 | 0.848 | 0.904            | 0.905    | 0.905 |
+| Mip-Splatting |       | [20] * | 0.827   | 0.893 | 0.860 | 0.899            | 0.907    | 0.903 |
+| Spec-Gaussian |       | [19]   | * 0.823 | 0.888 | 0.856 | 0.902            | 0.910    | 0.906 |
+| Zip-NeRF      | [2]   | *      | 0.300   | 0.351 | 0.326 | 0.912            | 0.915    | 0.914 |
+| RayGauss      | [4]   | *      | 0.814   | 0.883 | 0.849 | 0.912            | 0.916    | 0.914 |
+| RayGaussX     |       | (ours) | 0.834   | 0.896 | 0.865 | 0.913            | 0.916    | 0.915 |
+|               |       |        |         |       |       | LPIPS ↓          |          |       |
+|               |       |        | train   | truck | Avg.  | drjohnson        | playroom | Avg.  |
+| Instant-NGP   |       | [17]   | 0.360   | 0.249 | 0.305 | 0.352            | 0.428    | 0.390 |
+| 3DGRT         | [16]  | *      | 0.223   | 0.170 | 0.197 | 0.316            | 0.313    | 0.315 |
+| Mip-NeRF360   |       | [1]    | 0.354   | 0.159 | 0.257 | 0.237            | 0.252    | 0.245 |
+| 3D-GS         | [9] * |        | 0.205   | 0.150 | 0.178 | 0.241            | 0.246    | 0.244 |
+| Mip-Splatting |       | [20] * | 0.190   | 0.123 | 0.157 | 0.246            | 0.239    | 0.243 |
+| Spec-Gaussian |       | [19]   | * 0.196 | 0.135 | 0.166 | 0.245            | 0.245    | 0.245 |
+| Zip-NeRF      | [2]   | *      | 0.658   | 0.664 | 0.661 | 0.217            | 0.201    | 0.209 |
+| RayGauss      | [4]   | *      | 0.201   | 0.132 | 0.167 | 0.238            | 0.245    | 0.242 |
+| RayGaussX     |       | (ours) | 0.183   | 0.117 | 0.150 | 0.242            | 0.242    | 0.242 |
+
+Table 6. PSNR, SSIM and LPIPS (with VGG network) scores on the Tanks&Temples [10] and Deep Blending [8] datasets. All methods are trained and tested on full images. Methods marked \* were retrained on an NVIDIA RTX4090.
+
+# References
+
+[1] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded anti-aliased neural radiance fields. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2022. 6, 7, 8, 10, 11 [2] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. Zip-nerf: Anti-aliased gridbased neural radiance fields. In IEEE/CVF International Conference on Computer Vision (ICCV), 2023. 6, 7, 8, 10, 11 [3] Zoubin Bi, Yixin Zeng, Chong Zeng, Fan Pei, Xiang Feng, Kun Zhou, and Hongzhi Wu. Gs3: Efficient relighting with triple gaussian splatting. In SIGGRAPH Asia 2024 Conference Papers, 2024. 1 [4] Hugo Blanc, Jean-Emmanuel Deschaud, and Alexis Paljic. Raygauss: Volumetric gaussian-based ray casting for photorealistic novel view synthesis, 2024. 1, 5, 6, 7, 8, 9, 10, 11 [5] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. Tensorf: Tensorial radiance fields. In European Conference on Computer Vision (ECCV), 2022. 9 [6] Danpeng Chen, Hai Li, Weicai Ye, Yifan Wang, Weijian Xie, Shangjin Zhai, Nan Wang, Haomin Liu, Hujun Bao, and Guofeng Zhang. Pgsr: Planar-based gaussian splatting for efficient and high-fidelity surface reconstruction. IEEE Transactions on Visualization and Computer Graphics, pages 1– 12, 2024. 1 [7] Zhang Chen, Zhong Li, Liangchen Song, Lele Chen, Jingyi Yu, Junsong Yuan, and Yi Xu. Neurbf: A neural fields representation with adaptive radial basis functions. In IEEE/CVF International Conference on Computer Vision (ICCV), 2023. 8, 9 [8] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel Brostow. Deep blending for free-viewpoint image-based rendering. ACM Trans. Graph., 37(6), 2018. 6, 11 [9] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler, and George Drettakis. 3d gaussian splatting for real-time radiance field rendering. ACM Trans. Graph., 42(4), 2023. 1, 5, 6, 7, 8, 9, 10, 11 [10] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking large-scale scene reconstruction. ACM Transactions on Graphics, 36(4), 2017. 6, 11 [11] Zhihao Liang, Qi Zhang, Ying Feng, Ying Shan, and Kui Jia. Gs-ir: 3d gaussian splatting for inverse rendering. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024. 1 [12] Changkun Liu, Shuai Chen, Yash Sanjay Bhalgat, Siyan HU, Ming Cheng, Zirui Wang, Victor Adrian Prisacariu, and Tristan Braud. GS-CPR: Efficient camera pose refinement via 3d gaussian splatting. In The Thirteenth International Conference on Learning Representations (ICLR), 2025. 1 [13] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt. Neural sparse voxel fields. In Conference on Neural Information Processing Systems (NeurIPS), 2020. 6, 9 [14] Hidenobu Matsuki, Riku Murai, Paul H. J. Kelly, and Andrew J. Davison. Gaussian splatting slam. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024. 1 [15] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In European Conference on Computer Vision (ECCV), 2020. 6, 8, 10 [16] Nicolas Moenne-Loccoz, Ashkan Mirzaei, Or Perel, Riccardo de Lutio, Janick Martinez Esturo, Gavriel State, Sanja Fidler, Nicholas Sharp, and Zan Gojcic. 3d gaussian ray tracing: Fast tracing of particle scenes. ACM Transactions on Graphics and SIGGRAPH Asia, 2024. 1, 5, 6, 8, 10, 11 [17] Thomas Muller, Alex Evans, Christoph Schied, and Alexan- ¨ der Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 41(4), 2022. 8, 10, 11 [18] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu, Kalyan Sunkavalli, and Ulrich Neumann. Point-nerf: Pointbased neural radiance fields. In 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 5428–5438, 2022. 8 [19] Ziyi Yang, Xinyu Gao, Yangtian Sun, Yihua Huang, Xiaoyang Lyu, Wen Zhou, Shaohui Jiao, Xiaojuan Qi, and Xiaogang Jin. Spec-gaussian: Anisotropic view-dependent appearance for 3d gaussian splatting. In Conference on Neural Information Processing Systems (NeurIPS), 2024. 8, 9, 10, 11 [20] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-splatting: Alias-free 3d gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 19447– 19456, 2024. 8, 9, 10, 11

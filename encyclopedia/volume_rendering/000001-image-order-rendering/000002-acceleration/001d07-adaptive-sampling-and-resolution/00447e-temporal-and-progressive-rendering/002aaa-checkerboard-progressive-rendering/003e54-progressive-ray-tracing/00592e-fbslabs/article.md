@@ -1,0 +1,144 @@
+# FBSlabs
+
+Also called: Fixed Budget Slabs, Front-to-back Slices, Front-to-back Slabs
+
+## Overview
+FBSlabs is a progressive ray casting technique that refines a low-resolution volume rendering into high resolution by splitting each ray into segments of fixed length (slabs) and rendering them in front-to-back order over subsequent frames [S1, unofficial]. It addresses the problem of interactive volume rendering on mobile and low-performance devices by distributing the computational workload of high-resolution ray casting across multiple frames, ensuring a constant frame rate during user interaction [S1, unofficial]. Unlike sibling methods such as [STiles](9724-stiles.md), which sort screen-space tiles by cost, FBSlabs distributes work uniformly across all pixels per frame, making it suitable for hardware lacking compute shaders [S1, unofficial].
+
+## How it works
+FBSlabs operates by maintaining two render targets: a low-resolution texture ($T_{low}$) for the unrendered or partially rendered volume, and a high-resolution texture ($T_{high}$) for the progressively refined front portion [S1, unofficial]. The method relies on orthographic projection to ensure slabs remain piecewise planar [S1, unofficial].
+
+### Inputs and Outputs
+*   **Input:** Volume dataset, proxy geometry bounding the volume, viewport dimensions ($V_w \times V_h$), camera parameters (orthographic) [S1, unofficial].
+*   **Output:** Composite image displayed to the user, composed of $T_{high}$ overlaid on $T_{low}$ [S1, unofficial].
+
+### Data Structures
+1.  **$T_{low}$**: A 2D texture storing the color of the volume rendered at low resolution [S1, unofficial]. It acts as the background for the high-resolution overlay [S1, unofficial].
+2.  **$T_{high}$**: A 2D texture storing the accumulated color of the high-resolution ray casting [S1, unofficial]. It is cleared at the start of the progressive phase and updated via front-to-back alpha blending [S1, unofficial].
+3.  **Frame Counter**: An integer tracking the number of frames elapsed since the start of the progressive high-resolution rendering [S1, unofficial]. This determines the starting position of the current slab [S1, unofficial].
+
+### Parameters
+*   **$N$**: The fixed number of ray casting samples performed per frame per ray. The source specifies $N = 40$ [S1, unofficial].
+*   **Projection**: Orthographic. Perspective projection causes slabs to become pseudo-spherical as they extend from the proxy geometry, complicating the fixed-thickness assumption [S1, unofficial].
+
+### Algorithm Steps
+The algorithm proceeds in two phases: Low-Resolution Initialization and Progressive High-Resolution Refinement [S1, unofficial].
+1.  **Low Resolution Ray Casting (Initialization):** During user interaction, perform standard ray casting at low resolution [S1, unofficial]. Store the resulting color in $T_{low}$ [S1, unofficial].
+2.  **Progressive High Resolution Ray Casting - Initialization:** When interaction ceases, clear $T_{high}$ [S1, unofficial]. Place the first sampling position for each ray at the entry point on the proxy geometry bounding the volume model [S1, unofficial].
+3.  **Progressive High Resolution Ray Casting - Slab Rendering:** For the current frame, iterate over all pixels in the viewport [S1, unofficial]. For each pixel:
+    a. Calculate the starting position of the ray segment based on the current frame counter and $N$ [S1, unofficial]. Since each slab has a fixed thickness defined by $N$ samples, the start position for frame $f$ is offset by $f \times N$ samples from the entry point [S1, unofficial].
+    b. Perform a loop of $N$ samples along the ray segment [S1, unofficial].
+    c. Sample the volume and compute the color contribution [S1, unofficial].
+    d. Composite the resulting color with the previous partial result in $T_{high}$ using front-to-back alpha blending [S1, unofficial]. The blending state must be configured to add color in a front-to-back order [S1, unofficial].
+4.  **Progressive High Resolution Ray Casting - Low Res Remainder:** Render the remaining part of the volume (from the end of the high-resolution slab to the exit of the proxy geometry) using low-resolution ray casting [S1, unofficial]. Start this rendering at the sample position where the high-resolution step finished [S1, unofficial]. Store the result in $T_{low}$, overwriting the previous low-res data for the unrendered portion [S1, unofficial].
+5.  **Progressive High Resolution Ray Casting - Composite:** Generate the current image by compositing $T_{high}$ on top of $T_{low}$ using alpha blending [S1, unofficial]. The blending time is negligible [S1, unofficial].
+6.  **Iteration:** In the next frame, increase the frame counter and resume from Step 3 [S1, unofficial]. Continue until sampling positions exceed volume boundaries [S1, unofficial].
+
+### Termination Condition
+The algorithm conservatively approximates the end of ray casting by repeating the iterative process until the computed rays are longer than the diagonal of the volume bounding box [S1, unofficial]. This ensures all rays have exited the proxy geometry [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fbslabs_render(volume, camera, viewport_w, viewport_h, n_samples=40):
+    # Data structures
+    t_low = [[None for _ in range(viewport_w)] for _ in range(viewport_h)]
+    t_high = [[None for _ in range(viewport_w)] for _ in range(viewport_h)]
+    frame_counter = 0
+    
+    # Constants
+    STEP_HIGH = 1.0  # Fixed step size for high-resolution sampling [G]
+    STEP_LOW = 2.0   # Fixed step size for low-resolution sampling [G]
+    Z_NEAR = camera.z_near
+    Z_FAR = camera.z_far
+    VOLUME_DIAGONAL = camera.volume_diagonal
+    
+    # Step 1: Low Resolution Ray Casting (Initialization)
+    for y in range(viewport_h):
+        for x in range(viewport_w):
+            ray_origin = vec3(float(x), float(y), Z_NEAR)
+            ray_dir = vec3(0.0, 0.0, 1.0)
+            t_low[y][x] = ray_cast_low_res(volume, ray_origin, ray_dir, Z_FAR)
+            
+    # Step 2: Progressive High Resolution Ray Casting - Initialization
+    for y in range(viewport_h):
+        for x in range(viewport_w):
+            t_high[y][x] = (vec3(0.0), 0.0) # (color, alpha)
+    frame_counter = 0
+    
+    while True:
+        # Step 3: Progressive High Resolution Ray Casting - Slab Rendering
+        start_offset_samples = frame_counter * n_samples
+        entry_point = vec3(0.0, 0.0, Z_NEAR) # Orthographic entry plane [G]
+        ray_dir = vec3(0.0, 0.0, 1.0)
+        start_position = entry_point + start_offset_samples * STEP_HIGH * ray_dir
+        
+        for y in range(viewport_h):
+            for x in range(viewport_w):
+                acc_color, acc_alpha = t_high[y][x]
+                ray_origin = vec3(float(x), float(y), Z_NEAR)
+                
+                for i in range(n_samples):
+                    sample_pos = start_position + i * STEP_HIGH * ray_dir
+                    if not (Z_NEAR <= sample_pos.z <= Z_FAR):
+                        break
+                        
+                    color, alpha = sample_volume(volume, sample_pos)
+                    weight = alpha * (1.0 - acc_alpha)
+                    acc_color = acc_color + color * weight
+                    acc_alpha = acc_alpha + weight
+                    
+                    if acc_alpha >= 1.0:
+                        break
+                
+                t_high[y][x] = (acc_color, acc_alpha)
+        
+        # Step 4: Progressive High Resolution Ray Casting - Low Res Remainder
+        end_position = start_position + n_samples * STEP_HIGH * ray_dir
+        
+        for y in range(viewport_h):
+            for x in range(viewport_w):
+                acc_color = vec3(0.0)
+                acc_alpha = 0.0
+                current_pos = end_position
+                
+                while current_pos.z <= Z_FAR and acc_alpha < 1.0:
+                    color, alpha = sample_volume_low_res(volume, current_pos)
+                    weight = alpha * (1.0 - acc_alpha)
+                    acc_color = acc_color + color * weight
+                    acc_alpha = acc_alpha + weight
+                    current_pos += STEP_LOW * ray_dir
+                    
+                t_low[y][x] = (acc_color, acc_alpha)
+        
+        # Step 5: Progressive High Resolution Ray Casting - Composite
+        display_composite(t_high, t_low)
+        
+        # Step 6: Iteration
+        frame_counter += 1
+        
+        # Termination Condition
+        if start_offset_samples * STEP_HIGH > VOLUME_DIAGONAL:
+            break
+```
+
+### Edge Cases and Pitfalls
+*   **Global Early Ray Termination (ERT):** Implementing global ERT (stopping ray casting for a pixel entirely if it becomes opaque) requires an extra pass to copy accumulated opacity to a queryable texture [S1, unofficial]. This extra pass incurs a time penalty larger than the benefits of ERT [S1, unofficial]. Therefore, only per-slab ERT is effective [S1, unofficial].
+*   **Termination Approximation:** The termination condition (ray length > bounding box diagonal) is conservative [S1, unofficial]. It may continue rendering for a few frames after the volume is fully traversed to ensure all rays have exited [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The maximum number of samples per frame is $O(V_w \times V_h \times N)$, where $V_w \times V_h$ is the viewport pixel count and $N$ is the fixed samples per ray [S1, unofficial].
+*   **Memory Complexity:** Requires storage for two 2D textures ($T_{low}$ and $T_{high}$) and a frame counter [S1, unofficial].
+*   **Performance:** Experiments show average completion times under 1 second for tested models [S1, unofficial]. The blending time is negligible [S1, unofficial].
+*   **Convergence:** FBSlabs shows a less uniform slope in perceptual convergence compared to tile-based methods [S1, unofficial]. It converges quickly because the front part of the model covers most of the image, but continues executing for several frames after approaching ground truth to render the back part, which has smaller visual impact [S1, unofficial].
+*   **Strengths:** High interactivity rate; good average completion times; simple implementation; no need for compute shaders [S1, unofficial].
+*   **Limitations:** Perceptual seams between low-resolution and high-resolution models can be more perceivable than in tile-based methods; non-uniform convergence [S1, unofficial].
+*   **When to use:** Recommended for less powerful devices that do not provide compute shaders (available from OpenGL ES 3.1) or platforms like WebGL that do not support modern features such as compute shaders [S1, unofficial].
+*   **When not to use:** When uniform perceptual convergence is critical, or when hardware supports compute shaders and tile-based sorting (STiles) which offers faster completion and smoother transitions [S1, unofficial].
+
+## Background
+FBSlabs (Front-to-back Slabs) was proposed in the context of mobile volume rendering, specifically for medical data visualization on devices with limited computational power [S1, unofficial]. The method was introduced alongside "STiles" (Sorted Tiles) as part of a multiresolution architecture aimed at achieving interactive rendering of volumetric models [S1, unofficial]. The technique leverages the fact that in medical imaging, orthographic projection is commonly used, allowing slabs to remain piecewise planar [S1, unofficial].
+
+## Sources
+[S1] [PDF] Progressive Ray Casting for Volumetric Models on Mobile Devices, https://upcommons.upc.edu/bitstreams/3eb1f762-d021-4817-9f39-f580bce072f2/download, fetched 2026-10-26 (unofficial)

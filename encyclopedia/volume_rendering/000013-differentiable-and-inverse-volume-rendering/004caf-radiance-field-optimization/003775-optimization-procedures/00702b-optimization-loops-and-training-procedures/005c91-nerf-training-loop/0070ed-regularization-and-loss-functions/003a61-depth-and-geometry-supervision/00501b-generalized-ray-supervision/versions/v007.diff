@@ -1,0 +1,146 @@
+--- v006.md
++++ v007.md
+@@ -1,103 +1,64 @@
+ # Generalized Ray Supervision
+ 
+-Also called: Arbitrary Ray Supervision, Ray Sensor Supervision
++Also called: Ray Sensor Supervision, Arbitrary Ray Supervision
+ 
+ ## Overview
+-Generalized Ray Supervision is a framework for optimizing neural scene representations by treating arbitrary rays in a scene as "ray sensors" that record radiance, extending the standard NeRF approach which is limited to camera rays [S1]. It solves the problem of insufficient or ambiguous supervision from camera views alone by allowing the integration of other ray types, such as shadow rays, to constrain the density field [S1]. Unlike standard NeRF which assumes light emission from scene particles, this method can model explicit light sources and absorption-only scenarios, offering a more physically grounded supervision signal for specific reconstruction tasks [S1].
++Generalized Ray Supervision extends the standard NeRF training paradigm by treating "ray sensors" as arbitrary geometric entities rather than being limited to camera rays [S1]. While standard NeRF optimizes a neural field by fitting the radiance recorded by pixels (camera rays), this method allows any ray with a known 3D location, orientation, and target radiance label to supervise the optimization [S1]. It sets itself apart from sibling methods like [Depth and Geometry Supervision](8727-depth-and-geometry-supervision.md) by not requiring the supervision signal to be a depth value or a geometric prior; instead, it directly supervises the radiance along arbitrary paths, such as shadow rays or rays from unseen views [S1, S2].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A neural field representation (e.g., MLP mapping coordinates to density/opacity), a set of "ray sensors" defining arbitrary rays (defined by origin and direction), and the recorded radiance labels for those rays.
+-*   **Output:** Optimized neural field parameters that minimize the difference between simulated radiance along the rays and the recorded labels.
++**Inputs:**
++*   A neural scene representation (e.g., MLP mapping 3D coordinates and viewing directions to density $\sigma$ and color $C$).
++*   A set of "ray sensors," where each sensor defines a ray origin $\mathbf{o}$, direction $\mathbf{d}$, and a target radiance label $C_{\text{target}}$.
++*   For shadow rays: A known light source direction and position [S1].
++*   For multi-view consistency: Unseen view origins and pseudo-ground truth depth/color [S2].
++
++**Outputs:**
++*   Updated neural field parameters minimizing the difference between rendered radiance and target radiance.
+ 
+ **Data Structures:**
+-*   **Ray Sensor:** Defined by a 3D origin point $\mathbf{o}$ and a 3D direction vector $\mathbf{d}$.
+-*   **Neural Field:** A function $f_\theta(\mathbf{x})$ that outputs density $\sigma$ and/or opacity $\tau$ at position $\mathbf{x}$.
++*   **Ray:** Defined by origin $\mathbf{o} \in \mathbb{R}^3$ and direction $\mathbf{d} \in \mathbb{R}^3$ (normalized).
++*   **Sample Point:** Along a ray, defined by distance $t$, position $\mathbf{x} = \mathbf{o} + t\mathbf{d}$.
++*   **Neural Field:** $\mathcal{N}(\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, C)$, where $\sigma$ is volume density and $C$ is color.
+ 
+-**Method Steps:**
+-1.  **Ray Definition:** Define a set of rays $\mathcal{R}$ that are not necessarily camera rays. Each ray $r \in \mathcal{R}$ is parameterized by origin $\mathbf{o}_r$ and direction $\mathbf{d}_r$.
+-2.  **Sampling:** For each ray, sample $N$ points $\mathbf{x}_i = \mathbf{o}_r + t_i \mathbf{d}_r$ along the ray path, where $t_i$ are depths.
+-3.  **Field Query:** Query the neural field at each sample point to obtain density $\sigma_i$ or discrete opacity $\tau_i$.
+-4.  **Radiance Simulation:** Compute the simulated radiance $C$ along the ray using quadrature. The specific formulation depends on the ray type (e.g., camera vs. shadow).
+-5.  **Loss Calculation:** Compare the simulated radiance $C$ with the recorded radiance label $C_{\text{label}}$ from the ray sensor.
+-6.  **Optimization:** Backpropagate the loss through the differentiable rendering equation to update the neural field parameters $\theta$.
+-
+-**Formulas:**
+-For **Shadow Ray Supervision**, a specific variant of generalized ray supervision:
+-*   Assumption: The scene does not emit light; it only absorbs light from a known directional source [S1].
+-*   The incoming radiance $C$ at a ray sensor is computed as:
+-    $$ C = \sum_{i=1}^N T_i \tau_i $$
+-    where:
+-    *   $T_i$ is the light transmittance up to sample $i$.
+-    *   $\tau_i$ is the discrete opacity at sample $i$.
+-    *   This is analogous to NeRF's volume rendering equation but simplified by removing the emission term [S1].
++**Steps:**
++1.  **Ray Generation:** Define a set of rays $\{\mathbf{r}_j\}$ that are not necessarily camera rays. Each ray $\mathbf{r}_j$ has an associated target radiance $C_{\text{target}, j}$ [S1, S2].
++2.  **Sampling:** For each ray $\mathbf{r}_j$, sample $N$ points along the ray at distances $t_1, \dots, t_N$.
++3.  **Neural Query:** Query the neural field at each sample point $\mathbf{x}_i$ to obtain density $\sigma_i$ and color $C_i$. For shadow rays, the viewing direction is typically the light direction [S1].
++4.  **Volume Rendering:** Compute the rendered radiance $C_{\text{rendered}, j}$ using the standard volume rendering equation [S1]:
++    $$ C_{\text{rendered}, j} = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) C_i $$
++    where $\delta_i = t_{i+1} - t_i$, and $T_i = \exp\left(-\sum_{k=1}^{i-1} \sigma_k \delta_k\right)$ is the accumulated transmittance.
++5.  **Loss Computation:** Calculate the loss between the rendered radiance and the target radiance. For direct radiance supervision, this is typically an L2 loss [S1, S2]:
++    $$ \mathcal{L}_{\text{ray}} = \| C_{\text{rendered}, j} - C_{\text{target}, j} \|^2 $$
++6.  **Optimization:** Backpropagate the loss through the differentiable volume rendering process to update the neural field parameters [S1].
+ 
+ **Parameters:**
+-*   Number of samples per ray ($N$): Not given in the sources.
+-*   Ray spacing ($\delta_i$): Not given in the sources.
++*   $N$: Number of samples per ray. Not given in the sources.
++*   $\delta_i$: Distance between adjacent samples. Determined by the sampling strategy.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Light Source Modeling:** Requires accurate knowledge of the light source direction and intensity if modeling explicit lighting [S1].
+-*   **Sensor Placement:** The effectiveness depends on the placement and density of the hypothetical ray sensors in the scene [S1].
+-
+-**Pseudocode:**
+-```python
+-def generalized_ray_supervision(neural_field, rays, labels):
+-    """
+-    Optimizes neural field using arbitrary ray supervision.
+-    
+-    Args:
+-        neural_field: Function f(x) returning density/opacity.
+-        rays: List of Ray objects, each with origin o and direction d.
+-        labels: List of recorded radiance values corresponding to rays.
+-        
+-    Returns:
+-        Optimized neural_field parameters.
+-    """
+-    loss_total = 0.0
+-    
+-    for ray, label in zip(rays, labels):
+-        # Sample points along the ray
+-        # Note: Specific sampling strategy (uniform, depth-based) is not detailed in sources [G]
+-        samples = sample_along_ray(ray.origin, ray.direction, num_samples=128)
+-        
+-        # Query neural field
+-        densities = []
+-        for point in samples:
+-            densities.append(neural_field(point))
+-            
+-        # Compute simulated radiance
+-        # For shadow rays (absorption only):
+-        # C = sum(T_i * tau_i)
+-        # For camera rays (emission + absorption):
+-        # C = sum(T_i * (1 - exp(-sigma_i * delta_i)) * color_i)
+-        # The specific formula depends on the ray type [S1]
+-        
+-        simulated_radiance = compute_radiance(densities, ray)
+-        
+-        # Compute loss
+-        loss = (simulated_radiance - label) ** 2
+-        loss_total += loss
+-        
+-    # Backpropagate and update neural_field parameters
+-    optimize(neural_field, loss_total)
+-```
++*   **Light Emission Assumption:** In shadow ray supervision, the scene is assumed not to emit light, only to absorb light from the source [S1]. This simplifies the radiance equation but may not hold for all scenes.
++*   **Occlusion:** For multi-view consistency, rays may pass through occluded regions. Filtering using depth priors (e.g., DPT) is recommended [S2].
++*   **Precision:** The accuracy of the supervision depends on the precision of the ray termination or target label generation [S2].
+ 
+ ## Subtopics
+ 
+ ### Shadow Ray Supervision
+-A specific application of generalized ray supervision using shadow rays (connecting scene and light source) to reconstruct neural scenes [S1]. It differs from standard NeRF by assuming the scene does not emit light, only absorbs light from a known source, which simplifies the radiance equation to a sum of transmittance-weighted opacities [S1]. Choose this when explicit light source modeling and absorption-based supervision are beneficial for scene reconstruction [S1].
++A specific application of generalized ray supervision using shadow rays (connecting scene points to a light source) to reconstruct neural scenes [S1]. It differs from standard NeRF by assuming the scene does not emit light, only absorbs light from a known directional source, which is more physically correct for non-emissive scenes [S1]. It is chosen when light transport modeling is required or when camera rays are insufficient. Link: [ShadowNeuS](https://doi.org/10.1109/cvpr52729.2023.00025).
++
++### Multi-view Consistency Supervision
++A supervision signal ensuring semantic consistency across views by generating rays from unseen views and supervising their color against pseudo-ground truth [S2]. It differs by using map priors and uncertainty weighting to handle occlusions and imprecise ray terminations [S2]. It is chosen for driving simulation and urban scene reconstruction where map data is available. Link: [MapNeRF](https://doi.org/10.1109/iros55552.2023.10341681).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of rays and samples per ray. Generally similar to NeRF training per iteration but may require additional ray sampling strategies.
+-*   **Memory Complexity:** Similar to NeRF, storing the neural field and intermediate rendering values.
+-*   **Strengths:** Allows for more flexible supervision signals beyond camera views; can incorporate physical light transport models (e.g., shadow rays) [S1].
+-*   **Limitations:** Requires defining and managing additional ray sensors; may need assumptions about light sources (e.g., directional light) [S1].
+-*   **When to Use:** When camera rays alone are insufficient for reconstruction, or when physical accuracy regarding light absorption is desired [S1].
+-*   **When Not to Use:** When computational resources are limited and standard camera supervision is sufficient [S1].
++*   **Time Complexity:** Linear with respect to the number of rays and samples per ray, similar to standard NeRF rendering [S1, S2].
++*   **Memory Complexity:** Linear with respect to the number of rays and samples [S1, S2].
++*   **Strengths:** Enables supervision from arbitrary viewpoints and light paths, improving geometry and appearance in areas with sparse camera coverage [S1, S2].
++*   **Limitations:** Requires generation of valid target rays and labels, which may involve additional processing (e.g., depth estimation, light simulation) [S1, S2].
++*   **When to use:** When camera rays are insufficient, or when additional geometric/semantic priors (like maps or light sources) are available [S1, S2].
++*   **When not to use:** When no additional priors are available and standard camera rays are sufficient [S1].
+ 
+ ## Background
+-Originating from the observation that NeRF's success relies on supervising camera rays, the concept of Generalized Ray Supervision was proposed to extend this principle to arbitrary rays [S1]. The specific application of Shadow Ray Supervision was detailed in "ShadowNeuS: Neural SDF Reconstruction by Shadow Ray Supervision" [S1]. This approach leverages the fact that multi-view cameras act as ray sensors, and hypothesizes that other rays, such as those from light sources, can also serve as effective supervision signals [S1].
++Generalized Ray Supervision was introduced in ShadowNeuS [S1] and MapNeRF [S2]. ShadowNeuS [S1] (2023) revealed that NeRF training essentially supervises camera rays and proposed extending this to shadow rays. MapNeRF [S2] (2023) applied the concept to multi-view consistency using map priors for driving scenes. The method builds on the differentiable volume rendering framework established by NeRF [S1].
+ 
+ ## Sources
+-[S1] ShadowNeuS: Neural SDF Reconstruction by Shadow Ray Supervision, https://doi.org/10.1109/cvpr52729.2023.00025, fetched 2026-10-26+[S1] ShadowNeuS: Neural SDF Reconstruction by Shadow Ray Supervision, https://doi.org/10.1109/cvpr52729.2023.00025, fetched 2026-10-26
++[S2] MapNeRF: Incorporating Map Priors into Neural Radiance Fields for Driving View Simulation, https://doi.org/10.1109/iros55552.2023.10341681, fetched 2026-10-26

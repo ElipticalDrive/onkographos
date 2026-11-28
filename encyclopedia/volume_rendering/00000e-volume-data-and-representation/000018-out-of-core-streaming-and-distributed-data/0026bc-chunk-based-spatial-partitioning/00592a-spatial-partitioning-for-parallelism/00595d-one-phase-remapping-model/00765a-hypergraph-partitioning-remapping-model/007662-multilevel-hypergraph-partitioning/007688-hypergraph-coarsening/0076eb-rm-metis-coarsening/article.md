@@ -1,0 +1,206 @@
+# RM-MeTiS Coarsening
+
+Also called: Heavy Edge Matching (HEM) with mapping constraint, RM-MeTiS
+
+## Overview
+RM-MeTiS Coarsening is a graph coarsening strategy for object-space decomposition that maintains a mapping constraint by distinguishing between 't-nodes' (texture/data nodes) and 'p-nodes' (processor nodes), ensuring each supernode contains at most one p-node [S1, unofficial]. It builds on [Hypergraph Coarsening](23490-hypergraph-coarsening.md) by enforcing a specific structural invariant during the clustering process, which facilitates subsequent parallel partitioning where data and processing units are explicitly tracked [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A coarse graph $Q_i$ at level $i$, containing nodes classified as either t-nodes or p-nodes. Each node has an associated weight. Edges have weights.
+*   **Output:** A coarser graph $Q_{i+1}$ where vertices of $Q_i$ are merged into supernodes, preserving the mapping constraint.
+
+**Data Structures**
+*   **Node State:** Each node $n$ in $Q_i$ maintains a flag indicating its type: `t-node` or `p-node`.
+*   **Matched Status:** A boolean flag indicating if a node has already been merged into a supernode.
+*   **Supernode Properties:**
+    *   **Type:** `t-supernode` or `p-supernode`.
+    *   **Weight:** Sum of weights of constituent nodes.
+    *   **Edges:** Weighted union of edges from constituent nodes.
+
+**Numbered Steps**
+1.  **Initialization:** For each node $n$ in the current graph $Q_i$, initialize a flag to identify it as a t-node or p-node. Mark all nodes as unmatched.
+2.  **Random Ordering:** Generate a random permutation of the nodes in $Q_i$ to determine the visitation order for matching [S1, unofficial].
+3.  **Iterate Nodes:** Visit each node $n_i$ in the random order.
+4.  **Check Match Status:** If $n_i$ is already matched, skip to the next node.
+5.  **Select Partner:** If $n_i$ is unmatched, identify its unmatched adjacent nodes. Select an adjacent node $n_j$ using the **Heavy Edge Matching (HEM)** criterion: maximize the weight of the edge between $n_i$ and $n_j$ [S1, unofficial].
+    *   If no unmatched adjacent node exists, $n_i$ remains unmatched for this pass (it may be matched later if the algorithm iterates or if a different strategy is used, but in this specific randomized HEM description, it effectively stays unmatched until potentially considered as a supernode if no match is found, or the process continues to the next node. The source states "If there is no unmatched adjacent node of $n_i$, then node $n_i$ remains unmatched" [S1, unofficial]).
+6.  **Merge:** If a partner $n_j$ is found, merge the pair $\{n_i, n_j\}$ into a new supernode in $Q_{i+1}$.
+7.  **Determine Supernode Type:**
+    *   If both $n_i$ and $n_j$ are t-nodes, the resulting supernode is a **t-supernode**.
+    *   If one is a t-node and the other is a p-node, the resulting supernode is a **p-supernode**.
+    *   *Constraint:* Two p-nodes are never matched directly.
+8.  **Enforce Matching Constraint:** During the selection of $n_j$ for $n_i$, ensure that the match respects the invariant: two unmatched supernodes are considered for matching only if at least one is a t-supernode. This prevents p-nodes from matching with other p-nodes [S1, unofficial].
+9.  **Update Invariants:**
+    *   A t-supernode contains only t-nodes.
+    *   A p-supernode contains only t-nodes except for exactly one p-node.
+    *   Ensure that at each coarsening level $i$, there exist exactly $p$ p-supernodes (where $p$ is the number of processors) [S1, unofficial].
+10. **Aggregate Properties:**
+    *   Set the weight of the new supernode to the sum of the weights of its constituent nodes.
+    *   Set the edge set of the new supernode to the weighted union of the edge sets of its constituent nodes [S1, unofficial].
+11. **Repeat:** Continue until the graph reduces below a threshold value [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rmmetis_coarsening(graph_Q_i, num_processors):
+    """
+    Coarsens graph Q_i into Q_{i+1} using RM-MeTiS strategy.
+    graph_Q_i: List of nodes, each with attributes:
+        - id: unique identifier
+        - weight: float
+        - type: 't' or 'p'
+        - edges: list of (neighbor_id, edge_weight)
+        - matched: bool (initially False)
+        - supernode_id: int (initially None)
+    """
+    nodes = graph_Q_i
+    # 1. Initialize flags and random order
+    random.shuffle(nodes)
+    
+    supernodes = []
+    node_to_supernode = {}
+    
+    # 2. Iterate in random order
+    for node_i in nodes:
+        if node_i.matched:
+            continue
+            
+        # 3. Find unmatched adjacent nodes
+        unmatched_neighbors = []
+        for neighbor_id, edge_weight in node_i.edges:
+            neighbor = get_node_by_id(neighbor_id, nodes)
+            if not neighbor.matched:
+                unmatched_neighbors.append((neighbor, edge_weight))
+                
+        if not unmatched_neighbors:
+            # No match found, node remains unmatched in this pass
+            # In a full multilevel scheme, this node might form a singleton supernode
+            # or be processed in a subsequent phase. Based on source, it remains unmatched.
+            continue
+            
+        # 4. Heavy Edge Matching: select neighbor with max edge weight
+        # Sort by edge_weight descending
+        unmatched_neighbors.sort(key=lambda x: x[1], reverse=True)
+        node_j, max_weight = unmatched_neighbors[0]
+        
+        # 5. Enforce Mapping Constraint
+        # Two p-nodes cannot match.
+        # If node_i is 'p' and node_j is 'p', this match is invalid.
+        # However, the source implies that p-nodes are rare (only p-supernodes exist).
+        # The constraint "two unmatched supernodes are considered for matching only if 
+        # at least one is a t-supernode" ensures p-nodes only match with t-nodes.
+        if node_i.type == 'p' and node_j.type == 'p':
+            # This case should theoretically not occur if the invariant holds 
+            # and p-nodes are limited. If it does, skip or handle as singleton.
+            continue
+            
+        # 6. Merge
+        node_i.matched = True
+        node_j.matched = True
+        
+        # Determine supernode type
+        if node_i.type == 'p' or node_j.type == 'p':
+            new_type = 'p'
+        else:
+            new_type = 't'
+            
+        # Create supernode
+        new_supernode = {
+            'id': len(supernodes),
+            'type': new_type,
+            'weight': node_i.weight + node_j.weight,
+            'constituents': [node_i.id, node_j.id],
+            'edges': {} # Will be populated by union
+        }
+        
+        # 7. Aggregate Edges (Weighted Union)
+        # Combine edges from both nodes, summing weights for duplicate edges
+        all_edges = []
+        for nid, ew in node_i.edges:
+            all_edges.append((nid, ew))
+        for nid, ew in node_j.edges:
+            all_edges.append((nid, ew))
+            
+        # Aggregate weights
+        edge_weights = {}
+        for nid, ew in all_edges:
+            if nid in edge_weights:
+                edge_weights[nid] += ew
+            else:
+                edge_weights[nid] = ew
+                
+        new_supernode['edges'] = edge_weights
+        
+        supernodes.append(new_supernode)
+        node_to_supernode[node_i.id] = new_supernode['id']
+        node_to_supernode[node_j.id] = new_supernode['id']
+        
+    # 8. Handle unmatched nodes (if any remain)
+    # The source mentions "If there is no unmatched adjacent node... node remains unmatched."
+    # These must be added as singleton supernodes to complete the graph.
+    for node in nodes:
+        if not node.matched:
+            new_supernode = {
+                'id': len(supernodes),
+                'type': node.type,
+                'weight': node.weight,
+                'constituents': [node.id],
+                'edges': {nid: ew for nid, ew in node.edges}
+            }
+            supernodes.append(new_supernode)
+            node_to_supernode[node.id] = new_supernode['id']
+            
+    # 9. Construct Q_{i+1}
+    # Map supernode IDs to new node objects
+    Q_i_plus_1_nodes = []
+    for sn in supernodes:
+        new_node = {
+            'id': sn['id'],
+            'weight': sn['weight'],
+            'type': sn['type'],
+            'edges': sn['edges']
+        }
+        Q_i_plus_1_nodes.append(new_node)
+        
+    return Q_i_plus_1_nodes
+
+def get_node_by_id(node_id, nodes_list):
+    for n in nodes_list:
+        if n.id == node_id:
+            return n
+    return None
+```
+
+**Parameters**
+*   **Matching Criterion:** Heavy Edge Matching (HEM) [S1, unofficial].
+*   **Randomization:** Nodes are visited in a random order [S1, unofficial].
+*   **Threshold:** Coarsening stops when the graph reduces below a threshold value [S1, unofficial]. Not given in the sources.
+
+**Edge Cases and Pitfalls**
+*   **Unmatched Nodes:** If a node has no unmatched adjacent nodes, it remains unmatched. These must be handled as singleton supernodes to ensure all original nodes are represented in the coarser graph [S1, unofficial].
+*   **p-node Constraint:** The invariant that exactly $p$ p-supernodes exist at each level must be maintained. If the initial graph does not have exactly $p$ p-nodes, or if matching logic fails to preserve this, the partitioning phase may fail [S1, unofficial].
+*   **Precision:** Edge weights are summed. Ensure floating-point precision is sufficient if weights are small or numerous.
+
+## Subtopics
+
+### Heavy Edge Matching (HEM)
+A matching criterion that selects the adjacent node with the maximum edge weight. It is chosen for RM-MeTiS for its effectiveness in reducing cutsize [S1, unofficial].
+
+### Mapping Constraint
+The rule that each supernode contains at most one p-node. This distinguishes RM-MeTiS from standard HEM and ensures compatibility with the object-space decomposition model [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. Typically, randomized matching is linear in the number of edges, $O(|E|)$.
+*   **Memory Complexity:** Not given in the sources. Requires storage for node flags, matched status, and supernode aggregation.
+*   **Strengths:** Maintains the mapping constraint explicitly during coarsening, which simplifies the subsequent partitioning phase by ensuring data and processor nodes are correctly grouped [S1, unofficial].
+*   **Limitations:** The constraint may limit the effectiveness of coarsening if p-nodes are sparse or if the graph structure does not allow for optimal matching under the constraint.
+*   **When to use:** When performing object-space decomposition for parallel volume rendering where data (t-nodes) and processors (p-nodes) must be explicitly mapped and balanced [S1, unofficial].
+
+## Background
+RM-MeTiS was introduced in the context of parallel direct volume rendering of unstructured grids based on object-space decomposition [S1, unofficial]. It extends the MeTiS multilevel partitioning framework by incorporating a randomized heavy edge matching scheme that respects the mapping constraint between texture/data nodes and processor nodes [S1, unofficial].
+
+## Sources
+[S1] Parallel direct volume rendering of unstructured grids based on object-space decomposition, http://hdl.handle.net/11693/17897, fetched 2026-10-26 (unofficial)

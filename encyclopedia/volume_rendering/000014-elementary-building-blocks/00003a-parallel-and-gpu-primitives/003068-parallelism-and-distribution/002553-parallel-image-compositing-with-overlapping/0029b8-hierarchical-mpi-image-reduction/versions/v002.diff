@@ -1,0 +1,333 @@
+--- v001.md
++++ v002.md
+@@ -1,35 +1,27 @@
+ # Hierarchical MPI Image Reduction
+ 
+-Also called: MPI Reduce for Volume Rendering, Tree-based Image Compositing
++Also called: Binary Tree Image Composition, MPI Reduce for Volume Rendering, Tree-based Image Compositing
+ 
+ ## Overview
+-Hierarchical MPI Image Reduction is a parallel compositing strategy that combines per-process rendered sub-images into a single final image using a binary tree reduction over MPI ranks [S1, unofficial]. It addresses the bottleneck of sending all partial images to a single root process for final assembly, which causes network congestion and memory pressure on the root [S1, unofficial]. Unlike flat reductions, this method distributes the compositing load across the process hierarchy, reducing the communication depth and balancing the workload [S1, unofficial]. It builds on [Parallel Image Compositing with Overlapping](3554-parallel-image-compositing-with-overlapping.md) by handling the final aggregation of ray segments or sub-images after local computation.
++Hierarchical MPI Image Reduction is a parallel compositing strategy that combines per-process rendered sub-images into a single final image using a binary tree reduction over MPI ranks [S1, unofficial]. It addresses the bottleneck of sending all partial images to a single root process for final assembly, which causes network congestion and memory pressure on the root [S1, unofficial]. Unlike flat reductions, this method distributes the compositing load across the process hierarchy, reducing the communication depth and balancing the workload [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: `rgba_image` (accumulated color and opacity per pixel), `max_time` (computation time metric), `early_ray_terminations` (ray termination count), and `size` (total MPI processes).
+-- Output: A single composite image held by rank 0.
++- Input: `rgba_image` (accumulated color and opacity per pixel), `max_time` (computation time metric), `early_ray_terminations` (ray termination count), and `size` (total MPI processes) [S1, unofficial].
++- Output: A single composite image held by rank 0 [S2, unofficial].
+ 
+ **Data Structures:**
+-- `image_list`: A list of `rgba_image` arrays. Initially contains the local `rgba_image`.
+-- `d`: Tree depth, calculated as $\lfloor \log_2(\text{size}) \rfloor$.
++- `image_list`: A list containing the local `rgba_image` [S2, unofficial].
++- `d`: Tree depth, calculated as $\lfloor \log_2(\text{size}) \rfloor$ [S2, unofficial].
+ 
+ **Algorithm Steps:**
+-1. Calculate tree depth $d = \lfloor \log_2(\text{size}) \rfloor$ [S1, unofficial].
+-2. Initialize `image_list` with the local `rgba_image` [S1, unofficial].
+-3. Iterate from level $i = d$ down to $0$ [S1, unofficial]:
+-   - If $i == d$ and the current rank is odd:
+-     - Send `rgba_image`, `max_time`, and `early_ray_terminations` to `rank - 1` [S1, unofficial].
+-     - Receive the partner's data from `rank - 1`.
+-     - Composite the received data with the local data into `rgba_image`.
+-     - Update `image_list` with the new `rgba_image`.
+-   - For levels $i < d$:
+-     - Determine destination rank: $\text{dest\_rank} = \text{rank} - \lceil 2^d / 2^i \rceil$ [S1, unofficial].
+-     - If the current rank is a sender (typically odd ranks in the specific pairing logic described, or based on tree structure):
+-       - Send `image_list` to `dest_rank` [S1, unofficial].
+-     - If the current rank is a receiver:
+-       - Receive `image_list` from the partner.
+-       - Composite the received images with the local `image_list`.
+-4. Repeat until $i == 0$, where rank 0 holds the final composite image [S1, unofficial].
++1. Calculate tree depth $d = \lfloor \log_2(\text{size}) \rfloor$ [S2, unofficial].
++2. Initialize `image_list` with the local `rgba_image` [S2, unofficial].
++3. At the top level ($i = d$), odd-ranked processes send their `rgba_image`, `max_time`, and `early_ray_terminations` to `rank - 1` [S1, unofficial]. Even-ranked processes receive this data, composite it with their local image, and update their metadata [S1, unofficial].
++4. For each tree level $i$ from $d-1$ down to $0$:
++   - Compute destination rank: $\text{dest\_rank} = \text{rank} - \lceil 2^d / 2^i \rceil$ [S2, unofficial].
++   - If $\text{dest\_rank} \ge 0$, the current rank sends its `image_list` to `dest_rank` [S2, unofficial].
++   - Otherwise, the current rank receives `image_list` from `sender\_rank = rank + \lceil 2^d / 2^i \rceil`, composites the received image with its local image, and aggregates `max_time` and `early_ray_terminations` [S2, unofficial].
++5. Repeat until $i == 0$, where rank 0 holds the final composite image [S2, unofficial].
+ 
+ **Pseudocode:**
+@@ -37,33 +29,14 @@
+ import math
+ import numpy as np
+-from mpi4py import MPI
+ 
+-def composite_images(img1, img2):
+-    """
+-    Standard front-to-back volume compositing.
+-    img1 and img2 are (H, W, 4) arrays: [R, G, B, A]
+-    """
+-    # Extract components
+-    r1, g1, b1, a1 = img1[:, :, 0], img1[:, :, 1], img1[:, :, 2], img1[:, :, 3]
+-    r2, g2, b2, a2 = img2[:, :, 0], img2[:, :, 1], img2[:, :, 2], img2[:, :, 3]
+-    
+-    # Composite
+-    # C_out = C1 + (1 - A1) * C2
+-    # A_out = A1 + (1 - A1) * A2
+-    # Note: Standard compositing assumes A1 is the front layer.
+-    # In MPI reduction, the order depends on tree structure.
+-    # Assuming img1 is "front" (lower depth/farther in ray space? or closer?)
+-    # Standard front-to-back: C = C1 + (1-A1)*C2
+-    
+-    alpha_out = a1 + (1.0 - a1) * a2
+-    # Avoid division by zero or invalid alpha if needed, but standard formula holds
+-    r_out = r1 + (1.0 - a1) * r2
+-    g_out = g1 + (1.0 - a1) * g2
+-    b_out = b1 + (1.0 - a1) * b2
+-    
+-    result = np.zeros_like(img1)
+-    result[:, :, 0] = r_out
+-    result[:, :, 1] = g_out
+-    result[:, :, 2] = b_out
++def composite_front_to_back(img_front, img_back):
++    """Standard front-to-back volume compositing [G].
++    Expects (H, W, 4) arrays with channels [R, G, B, A]."""
++    af = img_front[:, :, 3]
++    ab = img_back[:, :, 3]
++    alpha_out = af + (1.0 - af) * ab
++    rgb_out = img_front[:, :, :3] + (1.0 - af)[:, :, np.newaxis] * img_back[:, :, :3]
++    result = np.zeros_like(img_front)
++    result[:, :, :3] = rgb_out
+     result[:, :, 3] = alpha_out
+     return result
+@@ -72,174 +45,89 @@
+     rank = comm.Get_rank()
+     size = comm.Get_size()
+-    
+     if size == 1:
+         return local_rgba_image, local_max_time, local_early_ray_terminations
+ 
+     d = math.floor(math.log2(size))
+-    
+-    # Initialize image list with local image
+     image_list = [local_rgba_image]
+-    
+-    # We need to track which ranks are active and their roles
+-    # The source code implies a specific pairing logic based on d and i
+-    
+-    for i in range(d, -1, -1):
+-        # Level i logic
+-        # If i == d, handle initial odd/even pairing
+-        if i == d:
+-            if rank % 2 == 1:
+-                # Odd rank sends to rank-1
+-                partner = rank - 1
+-                comm.Send(local_rgba_image, dest=partner)
+-                comm.Send(local_max_time, dest=partner)
+-                comm.Send(local_early_ray_terminations, dest=partner)
+-                
+-                # Receive from partner
+-                recv_img = np.empty_like(local_rgba_image)
++    max_time = local_max_time
++    early_ray_terminations = local_early_ray_terminations
++
++    # Level i = d: Initial odd/even pairing
++    if rank % 2 == 1:
++        partner = rank - 1
++        comm.Send(local_rgba_image, dest=partner)
++        comm.Send(np.array([max_time]), dest=partner)
++        comm.Send(np.array([early_ray_terminations]), dest=partner)
++        recv_img = np.empty_like(local_rgba_image)
++        recv_time = np.empty(1)
++        recv_term = np.empty(1)
++        comm.Recv(recv_img, source=partner)
++        comm.Recv(recv_time, source=partner)
++        comm.Recv(recv_term, source=partner)
++        image_list[0] = composite_front_to_back(recv_img, local_rgba_image)
++        max_time = max(max_time, recv_time[0])
++        early_ray_terminations += recv_term[0]
++    else:
++        partner = rank + 1
++        recv_img = np.empty_like(local_rgba_image)
++        recv_time = np.empty(1)
++        recv_term = np.empty(1)
++        comm.Recv(recv_img, source=partner)
++        comm.Recv(recv_time, source=partner)
++        comm.Recv(recv_term, source=partner)
++        image_list[0] = composite_front_to_back(recv_img, local_rgba_image)
++        max_time = max(max_time, recv_time[0])
++        early_ray_terminations += recv_term[0]
++
++    # Tree reduction for levels i = d-1 down to 0
++    for i in range(d - 1, -1, -1):
++        offset = math.ceil(2**d / (2**i))
++        dest_rank = rank - offset
++        if dest_rank >= 0 and dest_rank < size:
++            comm.Send(image_list, dest=dest_rank)
++        else:
++            sender_rank = rank + offset
++            if sender_rank < size:
++                recv_list = [None]
++                comm.Recv(recv_list, source=sender_rank)
++                image_list[0] = composite_front_to_back(recv_list[0], image_list[0])
+                 recv_time = np.empty(1)
+                 recv_term = np.empty(1)
+-                comm.Recv(recv_img, source=partner)
+-                comm.Recv(recv_time, source=partner)
+-                comm.Recv(recv_term, source=partner)
+-                
+-                # Composite: Partner (rank-1) is "front" or "back"?
+-                # In standard tree reduction for compositing, order matters.
+-                # Assuming rank-1 is processed first or is "closer" to camera?
+-                # The source code doesn't specify order, but standard MPI reduce
+-                # often implies left-associative or specific tree order.
+-                # Let's assume rank-1 is the "first" image (front) and current rank is "second" (back)
+-                # Or vice versa. Without explicit source, we use standard front-to-back
+-                # where the sender (rank-1) is front.
+-                local_rgba_image = composite_images(recv_img, local_rgba_image)
+-                local_max_time = max(local_max_time, recv_time[0])
+-                local_early_ray_terminations += recv_term[0]
+-                
+-                # Update image_list for next steps if needed, though source uses image_list
+-                image_list = [local_rgba_image]
+-            else:
+-                # Even rank receives from rank+1
+-                partner = rank + 1
+-                recv_img = np.empty_like(local_rgba_image)
+-                recv_time = np.empty(1)
+-                recv_term = np.empty(1)
+-                comm.Recv(recv_img, source=partner)
+-                comm.Recv(recv_time, source=partner)
+-                comm.Recv(recv_term, source=partner)
+-                
+-                # Composite: Partner (rank+1) is "back" relative to current rank?
+-                # If rank is even, it received from odd (rank+1).
+-                # If rank-1 was front, then rank+1 is back.
+-                local_rgba_image = composite_images(local_rgba_image, recv_img)
+-                local_max_time = max(local_max_time, recv_time[0])
+-                local_early_ray_terminations += recv_term[0]
+-                
+-                image_list = [local_rgba_image]
+-        else:
+-            # For i < d, the source code specifies:
+-            # dest_rank = rank - ceil(2**d / (2 ** i))
+-            # This logic seems to imply a specific tree traversal where
+-            # only certain ranks participate or send/receive.
+-            # The source code snippet:
+-            # if i == 0: ...
+-            # else:
+-            #   if rank % (2**(d-i)) == 0 and rank < 2**d:
+-            #     ...
+-            
+-            # Re-interpreting source logic for i < d:
+-            # The source code has a loop: for i in range(d, -1, -1)
+-            # Inside: if rank % (2**(d-i)) == 0 and rank < 2**d:
+-            
+-            if rank % (2**(d-i)) == 0 and rank < 2**d:
+-                # This rank is a receiver/accumulator in this step
+-                # It receives from a partner. Who is the partner?
+-                # The source code sends from odd ranks in the first step.
+-                # In subsequent steps, the logic is less explicit in the snippet.
+-                # However, standard binary tree reduction:
+-                # Rank R receives from R + 2^(d-i) ? Or R - 2^(d-i)?
+-                
+-                # Let's look at dest_rank formula: dest_rank = rank - ceil(2**d / (2 ** i))
+-                # This formula is used for SENDING in the source comment?
+-                # "processes send their accumulated image_list to destination_rank"
+-                
+-                # If I am a sender, I send to dest_rank.
+-                # If I am a receiver, I receive from someone.
+-                
+-                # Let's assume the standard binary tree where at level i (from bottom),
+-                # blocks of size 2^(d-i) are merged.
+-                
+-                # To be safe and implementable:
+-                # We need to know who sends to whom.
+-                # In the first step (i=d), odd sends to even.
+-                # In subsequent steps, the pattern repeats on the reduced set.
+-                
+-                # Let's implement a generic tree reduction for images.
+-                # At level k (0 to d), we merge blocks of size 2^k.
+-                # But the source uses i from d down to 0.
+-                
+-                # Let's stick to the source's specific logic if possible.
+-                # Source: "In each tree level i, processes send their accumulated image_list to destination_rank = rank - math.ceil(2**d / (2 ** i))"
+-                # This implies if rank > dest_rank, rank sends to dest_rank.
+-                
+-                dest_rank = rank - math.ceil(2**d / (2 ** i))
+-                
+-                if rank != dest_rank:
+-                    # I am sending to dest_rank
+-                    # But wait, if rank > dest_rank, then dest_rank is smaller.
+-                    # So larger ranks send to smaller ranks.
+-                    comm.Send(image_list, dest=dest_rank)
+-                else:
+-                    # I am receiving from someone who sent to me.
+-                    # Who sent to me? Someone with rank' such that rank' - ceil(...) = rank.
+-                    # rank' = rank + ceil(2**d / (2 ** i))
+-                    sender_rank = rank + math.ceil(2**d / (2 ** i))
+-                    
+-                    # Check if sender exists
+-                    if sender_rank < size:
+-                        recv_list = [None]
+-                        comm.Recv(recv_list, source=sender_rank)
+-                        # Composite recv_list with local image_list
+-                        # Assuming recv_list[0] is the image to composite
+-                        local_img = image_list[0]
+-                        recv_img = recv_list[0]
+-                        # Composite: local_img is front, recv_img is back?
+-                        # Or vice versa?
+-                        # In the first step, odd (sender) sent to even (receiver).
+-                        # Even received from Odd. Even composed Odd (front) + Even (back).
+-                        # So Receiver's local image is BACK. Sender's image is FRONT.
+-                        # Here, I am Receiver. Sender sent to me.
+-                        # So Sender's image is FRONT. My image is BACK.
+-                        image_list[0] = composite_images(recv_img, local_img)
+-    
+-    # Final result is in image_list[0] at rank 0
++                comm.Recv(recv_time, source=sender_rank)
++                comm.Recv(recv_term, source=sender_rank)
++                max_time = max(max_time, recv_time[0])
++                early_ray_terminations += recv_term[0]
++
+     if rank == 0:
+-        return image_list[0], local_max_time, local_early_ray_terminations
+-    else:
+-        return None, None, None
++        return image_list[0], max_time, early_ray_terminations
++    return None, None, None
+ ```
+ 
+ **Parameters:**
+-- `size`: Total number of MPI processes. Determines tree height $d$ [S1, unofficial].
++- `size`: Total number of MPI processes, determines tree height $d$ [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- Precision: Floating-point accumulation order affects final color. Front-to-back compositing is non-commutative. The tree structure must preserve the correct ray order (front-to-back) to be physically correct [S1, unofficial].
+-- Boundaries: The tree depth $d$ is based on $\lfloor \log_2(\text{size}) \rfloor$. If size is not a power of 2, some ranks may be idle or the tree is unbalanced. The source code handles non-power-of-2 sizes by having rank 0 send data to ranks $\ge 2^d$ after the tree reduction [S1, unofficial].
+-- Degenerate Input: Empty images or zero opacity should be handled to avoid division by zero in compositing formulas if normalized.
++- Precision: Floating-point accumulation order affects final color [G]. Front-to-back compositing is non-commutative [G].
++- Boundaries: The tree depth $d$ is based on $\lfloor \log_2(\text{size}) \rfloor$ [S2, unofficial]. If size is not a power of 2, some ranks may be idle or the tree is unbalanced; the implementation handles this by having rank 0 send data to ranks $\ge 2^d$ after the tree reduction [S2, unofficial].
++- Degenerate Input: Empty images or zero opacity should be handled to avoid division by zero in compositing formulas if normalized [G].
++- Communication Overhead: Two sub-images sent up the tree can only be combined if they cover the same area of the final image; if they do not, both are passed along, potentially resulting in more communication and synchronization costs than a sequential design [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Tree-based MPI Reduction of Volumetric Grids
+-A parallel reduction algorithm that combines per-rank volumetric data into a single global grid on rank 0 using a tree-based approach with point-to-point MPI communication [S2, unofficial]. It is chosen when the goal is to merge raw volumetric data (e.g., for post-processing or global analysis) rather than compositing rendered images [S2, unofficial]. It differs from image reduction by operating on 3D grid structures (dense or sparse) and using a `MERGE_GRID` operation instead of pixel-wise compositing [S2, unofficial]. For dense grids, standard MPI reduction with addition is used instead of explicit tree-based point-to-point communication [S2, unofficial].
++A parallel reduction algorithm that combines per-rank volumetric data into a single global grid on rank 0 using a tree-based approach with point-to-point MPI communication [S3, unofficial]. It operates on 3D grid structures (dense or sparse) and uses a `MERGE_GRID` operation instead of pixel-wise compositing [S3, unofficial]. For dense grids, standard MPI reduction with addition across two ranks is used instead of explicit tree-based point-to-point communication [S3, unofficial]. The reduction proceeds in $\lceil \log_2 P \rceil$ steps, with communication depth $O(\log P)$, where $P$ is the total number of MPI ranks [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The reduction proceeds in $\lceil \log_2 P \rceil$ steps, with communication depth $O(\log P)$ [S2, unofficial].
+-- **Memory Complexity:** Each rank holds its local grid/image. The root holds the final global grid/image. Intermediate steps may require temporary buffers for serialization [S2, unofficial].
+-- **Performance:** Reduces network congestion compared to flat reductions by distributing the compositing load [S1, unofficial]. Performance scales with the number of processes, but communication overhead increases with tree depth [S2, unofficial].
+-- **Strengths:** Efficient for large-scale parallel rendering where final image assembly is a bottleneck. Balances load across processes [S1, unofficial].
+-- **Limitations:** Requires careful handling of compositing order to maintain physical accuracy. Unbalanced trees (non-power-of-2 ranks) can lead to idle processes or complex logic [S1, unofficial].
++- **Time Complexity:** The reduction proceeds in $\lceil \log_2 P \rceil$ steps, with communication depth $O(\log P)$ [S3, unofficial].
++- **Memory Complexity:** Each rank holds its local grid/image [S3, unofficial]. The root holds the final global grid/image [S2, unofficial].
++- **Performance:** Reduces network congestion compared to flat reductions by distributing the compositing load [S1, unofficial]. Best performance achieved with tree schemes was equivalent to the sequential scheme; some tree schemes had much worse performance [S1, unofficial].
++- **Strengths:** Efficient for large-scale parallel rendering where final image assembly is a bottleneck [S1, unofficial].
++- **Limitations:** Requires careful handling of compositing order to maintain physical accuracy [G]. Unbalanced trees (non-power-of-2 ranks) can lead to idle processes or complex logic [S2, unofficial].
+ 
+ ## Background
+-The method originates from parallel volume rendering implementations using MPI, where hierarchical reduction is used to aggregate partial results [S1, unofficial]. It is commonly used in scientific visualization and astrophysics simulations where large volumetric datasets are rendered in parallel [S2, unofficial]. The tree-based reduction of volumetric grids is described in the context of visualizing cosmological simulations [S2, unofficial].
++The method originates from parallel volume rendering implementations using MPI, where hierarchical reduction is used to aggregate partial results [S1, unofficial]. It is commonly used in scientific visualization and astrophysics simulations where large volumetric datasets are rendered in parallel [S3, unofficial]. The tree-based reduction of volumetric grids is described in the context of visualizing cosmological simulations [S3, unofficial].
+ 
+ ## Sources
+-[S1] vooranagendra/Parallel-3D-Volume-Rendering-using-MPI, https://github.com/vooranagendra/Parallel-3D-Volume-Rendering-using-MPI, fetched 2026-10-27 (unofficial)
+-[S2] Visualizing the Cosmos: Bridging Astrophysical Simulations with Volume Rendering, https://doi.org/10.2312/visgap.20261003, fetched 2026-10-26 (unofficial)+[S1] DTIC ADA296601: An Investigation of the Parallel Implementation of Two Volume Visualization Techniques on the nCUBE 2., https://archive.org/details/DTIC_ADA296601, fetched 2026-10-26 (unofficial)
++[S2] vooranagendra/Parallel-3D-Volume-Rendering-using-MPI, https://github.com/vooranagendra/Parallel-3D-Volume-Rendering-using-MPI, fetched 2026-10-27 (unofficial)
++[S3] Visualizing the Cosmos: Bridging Astrophysical Simulations with Volume Rendering, https://doi.org/10.2312/visgap.20261003, fetched 2026-10-26 (unofficial)

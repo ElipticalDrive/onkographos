@@ -1,0 +1,122 @@
+# Laser-Induced Plasma and Bubble Volumetric Displays
+
+Also called: Laser-induced plasma display, Laser plasma displays, Laser-induced bubble display, Laser-Induced Plasma Volumetric Displays
+
+## Overview
+Laser-induced plasma and bubble volumetric displays generate visible voxels in free space or within a liquid medium by focusing high-energy laser pulses to trigger nonlinear optical effects, such as air ionization or cavitation [S2, S3, unofficial]. Unlike swept-volume or light-field displays, these systems create self-emitting point sources at specific $(x, y, z)$ coordinates without requiring a physical screen or moving macroscopic parts inside the image volume [S1, unofficial]. They are distinguished from sibling methods like inkjet printing or quantum-dot displays by their ability to render in open air (plasma) or transparent fluids (bubbles) using laser energy rather than physical deposition or fluorescence from pre-doped solids [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** High-power pulsed laser source (femtosecond or nanosecond IR), 3D positioning system (galvanometer mirrors, linear motors, varifocal lenses), and optionally a spatial light modulator (SLM) for holographic generation.
+*   **Outputs:** Visible light emission (plasma glow) or refractive index changes (microbubbles) at targeted 3D coordinates.
+
+**Data Structures:**
+The system does not use a traditional voxel grid stored in memory. Instead, it uses a stream of target coordinates $(x, y, z)$ and pulse timing parameters.
+*   **Target List:** A sequence of 3D coordinates $\{P_i\}$ where $P_i = (x_i, y_i, z_i)$.
+*   **Pulse Parameters:** For each target, a pulse energy $E$ and duration $\tau$ are defined.
+
+**Numbered Steps:**
+1.  **Beam Steering:** The laser beam is directed through a galvanometer mirror system to control the $x$ and $y$ positions of the focal point [S2, unofficial].
+2.  **Axial Focusing:** A varifocal lens or linear motor adjusts the $z$ position of the focal plane [S2, unofficial].
+3.  **Excitation:** A high-intensity laser pulse is emitted. When the intensity exceeds the threshold of the medium (air or liquid), nonlinear absorption occurs [S3, unofficial].
+    *   *For Plasma:* The electric field of the laser ionizes the air molecules at the focal point, creating a micro-plasma that emits broadband visible light [S1, S3, unofficial].
+    *   *For Bubbles:* In a high-viscosity liquid, the laser induces optical breakdown, creating a cavitation bubble that scatters or emits light when illuminated [S2, unofficial].
+4.  **Scanning:** The system moves to the next coordinate in the target list. The persistence of the plasma glow or bubble formation allows the eye to perceive a continuous image [S3, unofficial].
+5.  **Holographic Alternative (Optional):** Instead of direct scanning, a computer-generated hologram (CGH) is calculated on an SLM to shape the wavefront, focusing multiple beams simultaneously to create voxel arrays [S2, unofficial].
+
+**Formulas:**
+*   **Plasma Threshold:** Plasma generation occurs when the peak intensity $I$ exceeds the ionization threshold $I_{th}$ of the medium:
+    $$ I = \frac{2P}{\pi w_0^2} > I_{th} $$
+    Where $P$ is the peak pulse power and $w_0$ is the beam waist radius at the focus [S3, unofficial].
+*   **Voxel Generation Rate:** The frame rate is limited by the pulse repetition rate. For early systems, this was approximately 100 pulses per second [S1, unofficial].
+
+**Parameters:**
+*   **Laser Type:** Femtosecond or nanosecond infrared lasers [S1, S2, unofficial].
+*   **Voxel Size (Plasma):** Determined by the diffraction limit of the focusing optics and the ionization threshold [S3, unofficial].
+*   **Voxel Size (Bubble):** In high-viscosity liquids, microbubbles can be controlled in size and intensity via holographic laser drawing [S2, unofficial].
+*   **Resolution:** Limited by the scanning speed and the minimum spot size. Early plasma displays achieved roughly a cubic meter volume [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def laser_plasma_display(target_points, laser, scanner, lens):
+    """
+    Renders a 3D image using laser-induced plasma voxels.
+    
+    Args:
+        target_points: List of (x, y, z) coordinates for voxels.
+        laser: Object with method emit_pulse(energy, duration).
+        scanner: Object with method set_xy(x, y).
+        lens: Object with method set_z(z).
+    """
+    for point in target_points:
+        x, y, z = point
+        
+        # 1. Position the focal point in 3D space
+        scanner.set_xy(x, y)
+        lens.set_z(z)
+        
+        # 2. Emit a high-power pulse to induce plasma
+        # The pulse must exceed the ionization threshold of air
+        laser.emit_pulse(energy=HIGH_ENERGY, duration=FEMTOSECOND)
+        
+        # 3. Wait for plasma decay or persistence if required
+        # Note: Plasma glow is transient; persistence relies on eye integration
+        # or high repetition rates.
+        wait_for_decay()
+
+def laser_bubble_display(target_points, liquid_medium, laser, scanner, lens):
+    """
+    Renders a 3D image using laser-induced microbubbles in a high-viscosity liquid.
+    
+    Args:
+        target_points: List of (x, y, z) coordinates.
+        liquid_medium: The high-viscosity fluid containing the bubbles.
+        laser: Femtosecond laser source.
+        scanner: Galvanometer mirror system.
+        lens: Varifocal lens.
+    """
+    for point in target_points:
+        x, y, z = point
+        
+        # 1. Position the focal point within the liquid
+        scanner.set_xy(x, y)
+        lens.set_z(z)
+        
+        # 2. Emit pulse to create cavitation bubble
+        # The bubble acts as a voxel, scattering or emitting light
+        laser.emit_pulse(energy=CAVITATION_THRESHOLD, duration=FEMTOSECOND)
+        
+        # 3. Control bubble geometry/intensity if using holographic method
+        # This step is specific to advanced implementations using SLMs
+        # apply_holographic_wavefront(laser, point)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Aberration:** High-speed changes in varifocal lenses can introduce optical aberrations, degrading voxel quality [S2, unofficial].
+*   **Aperture Limits:** The aperture of the objective lens limits the maximum working space and the angular range of the galvanometer mirror [S2, unofficial].
+*   **Acoustic Noise:** Plasma voxels produce an audible "popping" sound due to rapid air expansion [S1, unofficial].
+*   **Eye Safety:** The high energy density required for plasma generation near the focal point raises significant eye-safety concerns [S1, unofficial].
+
+## Subtopics
+
+### Point-Light (Free-Space) Display
+A subclass of laser-induced displays that renders voxels in open air without any containing medium, resembling science-fiction holograms [S1, unofficial]. It uses self-illuminating sources like plasma or photophoretic traps to levitate and illuminate particles [S1, unofficial]. Unlike bubble displays, it operates in air, but suffers from monochrome output, audible noise, and strict scanning speed limits that constrain refresh rates [S1, unofficial]. Commercial examples include Burton Inc.'s Aerial Burton (2011) [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Frame rate is linearly dependent on the number of voxels and the pulse repetition rate. With ~100 pulses/second in early systems, complex scenes require multiplexing or parallel beam generation [S1, unofficial].
+*   **Memory Complexity:** Low; only the target coordinate list needs to be stored. No volumetric texture maps are required [S1, unofficial].
+*   **Performance:** Early 2006 techniques achieved ~100 pulses/second within a cubic meter volume [S1, unofficial]. Modern femtosecond systems offer higher precision but remain limited by scanning mechanics [S2, unofficial].
+*   **Strengths:** True 3D voxels in free space; no glasses required; works with transparent media (air/liquid) [S1, S3, unofficial].
+*   **Limitations:** Monochrome (unless up-conversion crystals are used); audible noise; eye safety risks; limited color capability without complex multiplexing; occlusion is additive (back voxels bleed through front ones) [S1, S2, unofficial].
+*   **When to Use:** When true free-space volumetric presence is required and safety/acoustic constraints are manageable.
+*   **When Not to Use:** For high-color fidelity, silent operation, or dense opaque surfaces [S1, unofficial].
+
+## Background
+The technique originated from the observation that strongly focused laser beams induce air plasma emission only near the focal point [S3, unofficial]. Kimura et al. first demonstrated 2D images in air using galvanometric scanning mirrors, later extending this to 3D [S3, unofficial]. Ochiai et al. proposed using femtosecond lasers with spatial light modulation for holographic rendering [S2, unofficial]. The field expanded to include laser-induced bubbles in high-viscosity liquids (Kumagai et al.) and up-conversion crystals (Zhu et al., Mun et al.) to address color and resolution limitations [S2, unofficial]. Commercial efforts like Burton Inc.'s Aerial Burton (2011) and research from Brigham Young University's Optical Trap Display have further explored free-space point-light displays [S1, unofficial].
+
+## Sources
+[S1] What is A Volumetric Display?, https://www.mobilepixels.us/pages/what-is-a-volumetric-display?srsltid=AYCX9vK8xrsJpADuue0kuBQrGLoGaAlKbDhSUiAQBf97hCstLFLUkQ-f, fetched 2026-10-27 (unofficial)
+[S2] Volumetric 3D Display: Features and Classification, https://www.coppjournal.org/journal/view.html?uid=1568, fetched 2026-10-28 (unofficial)
+[S3] Three-dimensional display technologies, https://pmc.ncbi.nlm.nih.gov/articles/PMC4269274, fetched 2026-10-29 (unofficial)

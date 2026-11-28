@@ -1,0 +1,302 @@
+--- v001.md
++++ v002.md
+@@ -4,110 +4,143 @@
+ 
+ ## Overview
+-This method transfers dense volumetric scalar data from host memory to GPU device-local memory by using an intermediate host-visible, host-coherent staging buffer. It solves the problem of moving large 3D datasets to the GPU when direct mapping is not supported or when explicit asynchronous transfer control is required. It differs from direct mapping [G] by decoupling data population from GPU residency, and from pinned memory transfers [G] by using standard coherent host memory which simplifies allocation but may incur higher bandwidth costs.
++This method transfers dense volumetric field data from host memory to GPU device-local memory using an intermediate staging buffer. It solves the problem of populating a 3D texture with data that resides on the CPU, ensuring memory coherence and allowing the GPU to optimize access patterns for sampling. It is distinguished from direct mapping methods by explicitly decoupling the host-side data population phase from the GPU residency phase, which is necessary when the source data is not already in a host-visible, coherent memory region or when asynchronous transfer is required [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Host-side volumetric field data (e.g., `std::span<const float>`), volume dimensions (`dims.nx`, `dims.ny`, `dims.nz`), and number of channels (`kChannels`, typically 1 for scalar, 4 for RGBA).
+-**Outputs:** A GPU-resident 3D texture (image) ready for sampling in shaders.
++**Inputs:**
++- `dims`: A structure containing volume dimensions `nx`, `ny`, `nz`.
++- `field`: A pointer or span to the source volumetric data (e.g., `std::span<const float>`).
++- `kChannels`: The number of channels per voxel (e.g., 1 for scalar, 3 for RGB).
++- `kVolumeFormat`: The GPU texture format (e.g., `R32F`, `RGBA32F`).
++
++**Outputs:**
++- A GPU 3D image resource handle.
++- A GPU image view handle.
+ 
+ **Data Structures:**
+-1.  **Volume Dimensions:** Struct containing `nx`, `ny`, `nz` (unsigned integers).
+-2.  **Staging Buffer:** A device-independent memory object allocated with `VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT`.
+-3.  **3D Image:** A Vulkan image object with `VK_IMAGE_TYPE_3D`, `VK_IMAGE_TILING_OPTIMAL`, and usage flags `VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT`.
+-4.  **Image View:** A handle to the 3D image for shader access.
++1.  **Volume Dimensions (`dims`)**:
++    -   `nx`: Width (uint32)
++    -   `ny`: Height (uint32)
++    -   `nz`: Depth (uint32)
++    -   `count()`: Returns `nx * ny * nz` [S1, unofficial].
++2.  **Staging Buffer**:
++    -   Type: Buffer or linear memory block.
++    -   Usage Flags: `TRANSFER_SRC` [S1, unofficial].
++    -   Memory Properties: Host-visible, Host-coherent [S1, unofficial].
++3.  **3D Image**:
++    -   Type: `e3D` [S1, unofficial].
++    -   Format: `kVolumeFormat` [S1, unofficial].
++    -   Extent: `(dims.nx, dims.ny, dims.nz)` [S1, unofficial].
++    -   Mip Levels: 1 [S1, unofficial].
++    -   Array Layers: 1 [S1, unofficial].
++    -   Samples: `e1` (non-multisampled) [S1, unofficial].
++    -   Tiling: `eOptimal` [S1, unofficial].
++    -   Usage Flags: `SAMPLED` | `TRANSFER_DST` | `TRANSFER_SRC` [S1, unofficial].
++    -   Initial Layout: `eUndefined` [S1, unofficial].
++4.  **Image View**:
++    -   View Type: `e3D` [S1, unofficial].
++    -   Format: `kVolumeFormat` [S1, unofficial].
++    -   Subresource Range: Aspect `eColor`, Base Mip Level 0, Level Count 1, Base Array Layer 0, Layer Count 1 [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Validation:** Check if `dims.nx`, `dims.ny`, or `dims.nz` exceed `limits.maxImageDimension3D`. If so, return error `Errc::unsupported_configuration` [S1, unofficial].
+-2.  **Calculate Size:** Compute the byte size of the volume data:
++1.  **Validation**: Check if `dims.nx`, `dims.ny`, or `dims.nz` exceed the device's `maxImageDimension3D` limit. If any dimension exceeds the limit, return error `Errc::unsupported_configuration` [S1, unofficial].
++2.  **Calculate Size**: Compute the byte size of the volume data:
+     $$ \text{byteSize} = \text{dims.count()} \times \text{kChannels} \times \text{sizeof(float)} $$
+-    where $\text{dims.count()} = \text{dims.nx} \times \text{dims.ny} \times \text{dims.nz}$ [S1, unofficial].
+-3.  **Allocate Staging Buffer:** Allocate device-local memory for the 3D image (conceptually, the final destination) and host-visible, host-coherent memory for the staging buffer of size `byteSize` [S1, unofficial].
+-4.  **Populate Staging Buffer:** Map the staging memory. Create a `std::span<float>` of size `dims.count() * kChannels`. Call `deriveField<T>` (or equivalent data population routine) to copy the host field data into this span. This step may also compute the `autoRange` of the data [S1, unofficial].
+-5.  **Unmap Staging Buffer:** Unmap the staging memory to ensure data is visible to the GPU.
+-6.  **Create 3D Image:** Create the 3D image with:
+-    *   Type: `VK_IMAGE_TYPE_3D`
+-    *   Format: `kVolumeFormat` (e.g., `VK_FORMAT_R32G8B8A8_UNORM` or `VK_FORMAT_R32_SFLOAT`)
+-    *   Extent: `(dims.nx, dims.ny, dims.nz)`
+-    *   Mip Levels: 1
+-    *   Array Layers: 1
+-    *   Samples: `VK_SAMPLE_COUNT_1_BIT`
+-    *   Tiling: `VK_IMAGE_TILING_OPTIMAL`
+-    *   Usage: `VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT`
+-    *   Initial Layout: `VK_IMAGE_LAYOUT_UNDEFINED` [S1, unofficial].
+-7.  **Create Image View:** Create a 3D image view with:
+-    *   View Type: `VK_IMAGE_VIEW_TYPE_3D`
+-    *   Format: `kVolumeFormat`
+-    *   Subresource Range: Aspect `VK_IMAGE_ASPECT_COLOR`, Base Mip Level 0, Level Count 1, Base Array Layer 0, Layer Count 1 [S1, unofficial].
+-8.  **Record Transfer Command:** Record a command buffer that:
+-    *   Transitions the 3D image layout from `VK_IMAGE_LAYOUT_UNDEFINED` to `VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL`.
+-    *   Executes a `vkCmdCopyBufferToImage` command, copying `byteSize` bytes from the staging buffer to the 3D image. The image layout for the copy is `VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL`.
+-    *   Transitions the 3D image layout from `VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL` to `VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL`.
+-9.  **Submit and Wait:** Submit the command buffer to the graphics queue and wait for completion (or use a fence) to ensure the data is fully uploaded before the image is sampled.
+-10. **Cleanup:** Destroy the staging buffer and its associated memory. The 3D image and image view remain valid [S1, unofficial].
++    [S1, unofficial].
++3.  **Allocate Staging Buffer**: Allocate host-visible, host-coherent memory for the staging buffer with size `byteSize` and usage `eTransferSrc` [S1, unofficial].
++4.  **Populate Staging Data**:
++    -   Map the staging memory.
++    -   Create a writable span of floats of size `dims.count() * kChannels`.
++    -   Populate this span with the field data. The source code references a helper `deriveField<T>` which transforms the input field into the staging layout and returns an `autoRange` [S1, unofficial].
++    -   Unmap the staging memory.
++5.  **Allocate Device Memory**: Allocate device-local memory for the 3D image [S1, unofficial].
++6.  **Create Image**: Create the 3D image resource with the parameters defined in the Data Structures section [S1, unofficial].
++7.  **Transfer Data**:
++    -   Record a command buffer command to copy the data from the staging buffer (`eTransferSrc`) to the 3D image (`eTransferDst`).
++    -   The copy operation transfers `byteSize` bytes.
++    -   Submit and wait for the command buffer to complete to ensure data coherence before the image is used for sampling [S1, unofficial].
++8.  **Create Image View**: Create the 3D image view to allow the GPU shader to sample the texture [S1, unofficial].
++9.  **Cleanup Staging**: Destroy the staging buffer and its associated memory to free host-visible resources [S1, unofficial].
+ 
+ **Pitfalls:**
+-*   **Memory Destruction Order:** Memory must be destroyed in reverse order of binding to avoid freeing memory bound to destroyed objects. Specifically, destroy `imageMem`, then `image`, then `view`, then `stagingMem`, then `staging` [S1, unofficial].
+-*   **Precision:** Ensure `kChannels` and `sizeof(float)` match the shader's expectation. Mismatches cause corruption or undefined behavior.
+-*   **Boundaries:** If dimensions are zero or negative, the upload will fail or produce undefined results. Validate dimensions before allocation.
++-   **Destruction Order**: Memory and resources must be destroyed in reverse order of creation to avoid freeing memory bound to destroyed objects. The correct order is: image memory, image, image view, staging memory, staging buffer [S1, unofficial].
++-   **Precision**: Ensure `sizeof(float)` matches the data type used in `kVolumeFormat`. Mismatches will cause corruption or alignment errors.
++-   **Boundaries**: If `dims.count() * kChannels` is large, ensure the staging buffer allocation does not fail due to host memory limits.
+ 
+ **Pseudocode:**
+ ```python
+-def upload_volume_to_gpu(field_data: list[float], dims: Dimensions, k_channels: int, device: VulkanDevice):
+-    """
+-    Uploads volumetric data to GPU via staging buffer.
+-    """
++def upload_volume_to_gpu(field: Span[float], dims: Dims, k_channels: int, k_volume_format: Format):
+     # 1. Validation
+-    if dims.nx > device.limits.max_image_dimension_3d or \
+-       dims.ny > device.limits.max_image_dimension_3d or \
+-       dims.nz > device.limits.max_image_dimension_3d:
+-        raise Error(Errc::unsupported_configuration)
++    if dims.nx > max_image_dimension_3d or dims.ny > max_image_dimension_3d or dims.nz > max_image_dimension_3d:
++        raise Error(Errc::unsupported_configuration, "Volume dimensions exceed device limits")
+ 
+     # 2. Calculate Size
+-    num_voxels = dims.nx * dims.ny * dims.nz
+-    byte_size = num_voxels * k_channels * 4  # sizeof(float) = 4
++    byte_size = (dims.nx * dims.ny * dims.nz) * k_channels * sizeof(float)
+ 
+     # 3. Allocate Staging Buffer
+-    staging_buffer = device.allocate_buffer(byte_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+-    staging_memory = device.allocate_memory(
+-        staging_buffer, 
+-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+-    )
+-    device.bind_buffer_memory(staging_buffer, staging_memory)
++    staging_buffer = allocate_buffer(size=byte_size, usage=Usage::TRANSFER_SRC)
++    staging_memory = allocate_memory(buffer=staging_buffer, properties=MemoryProperty::HOST_VISIBLE | MemoryProperty::HOST_COHERENT)
++    bind_memory(staging_buffer, staging_memory)
+ 
+-    # 4. Populate Staging Buffer
+-    mapped_data = device.map_memory(staging_memory, 0, byte_size)
+-    # Assuming field_data is a flat list of floats
+-    # In C++, this would be a std::span<float>
+-    staging_span = mapped_data.as_span_of_floats(byte_size / 4)
++    # 4. Populate Staging Data
++    staging_ptr = map_memory(staging_memory)
++    staging_span = Span[float](staging_ptr, dims.nx * dims.ny * dims.nz * k_channels)
+     
+-    # deriveField<T> populates the span with field data
+-    # and returns autoRange. Here we simulate the copy.
+-    for i in range(len(field_data)):
+-        staging_span[i] = field_data[i]
+-        
+-    device.unmap_memory(staging_memory)
++    # deriveField populates staging_span from field and returns auto_range
++    auto_range = derive_field(staging_span, field)
++    
++    unmap_memory(staging_memory)
+ 
+-    # 5. Create 3D Image
+-    image_create_info = ImageCreateInfo(
+-        image_type=VK_IMAGE_TYPE_3D,
++    # 5. Allocate Device Memory
++    device_memory = allocate_memory(size=byte_size, properties=MemoryProperty::DEVICE_LOCAL)
++
++    # 6. Create Image
++    image = create_image(
++        type=ImageType::e3D,
+         format=k_volume_format,
+-        extent=Extent3D(dims.nx, dims.ny, dims.nz),
++        extent=(dims.nx, dims.ny, dims.nz),
+         mip_levels=1,
+         array_layers=1,
+-        samples=VK_SAMPLE_COUNT_1_BIT,
+-        tiling=VK_IMAGE_TILING_OPTIMAL,
+-        usage=VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+-        initial_layout=VK_IMAGE_LAYOUT_UNDEFINED
++        samples=SampleCount::e1,
++        tiling=Tiling::eOptimal,
++        usage=Usage::SAMPLED | Usage::TRANSFER_DST | Usage::TRANSFER_SRC,
++        initial_layout=Layout::eUndefined
+     )
+-    volume_image = device.create_image(image_create_info)
+-    image_memory = device.allocate_memory(volume_image, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+-    device.bind_image_memory(volume_image, image_memory)
++    bind_memory(image, device_memory)
+ 
+-    # 6. Create Image View
+-    view_create_info = ImageViewCreateInfo(
+-        image=volume_image,
+-        view_type=VK_IMAGE_VIEW_TYPE_3D,
++    # 7. Transfer Data
++    command_buffer = begin_command_buffer()
++    copy_buffer_to_image(
++        command_buffer,
++        src_buffer=staging_buffer,
++        dst_image=image,
++        dst_layout=Layout::eTransferDstOptimal,
++        regions=[BufferImageCopy(
++            buffer_offset=0,
++            buffer_row_length=0,
++            buffer_image_height=0,
++            image_subresource=ImageSubresourceLayers(
++                aspect_mask=Aspect::eColor,
++                mip_level=0,
++                base_array_layer=0,
++                layer_count=1
++            ),
++            image_offset=(0, 0, 0),
++            image_extent=(dims.nx, dims.ny, dims.nz)
++        )]
++    )
++    end_command_buffer(command_buffer)
++    submit_and_wait(command_buffer)
++
++    # Transition image to SHADER_READ_ONLY_OPTIMAL for sampling (implied by usage flags and typical Vulkan workflow)
++    transition_image_layout(command_buffer, image, Layout::eTransferDstOptimal, Layout::eShaderReadOnlyOptimal)
++    submit_and_wait(command_buffer)
++
++    # 8. Create Image View
++    image_view = create_image_view(
++        image=image,
++        view_type=ImageViewType::e3D,
+         format=k_volume_format,
+-        subresource_range=SubresourceRange(
+-            aspect_mask=VK_IMAGE_ASPECT_COLOR,
++        subresource_range=ImageSubresourceRange(
++            aspect_mask=Aspect::eColor,
+             base_mip_level=0,
+             level_count=1,
+@@ -116,44 +149,10 @@
+         )
+     )
+-    volume_image_view = device.create_image_view(view_create_info)
+ 
+-    # 7. Record Transfer Command
+-    command_buffer = device.begin_command_buffer()
+-    
+-    # Transition to transfer destination
+-    transition_image_layout(command_buffer, volume_image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+-    
+-    # Copy buffer to image
+-    buffer_copy_region = BufferImageCopy(
+-        buffer_offset=0,
+-        buffer_row_length=0,
+-        buffer_image_height=0,
+-        image_subresource=ImageSubresourceLayers(
+-            aspect_mask=VK_IMAGE_ASPECT_COLOR,
+-            mip_level=0,
+-            base_array_layer=0,
+-            layer_count=1
+-        ),
+-        image_offset=Offset3D(0, 0, 0),
+-        image_extent=Extent3D(dims.nx, dims.ny, dims.nz)
+-    )
+-    command_buffer.copy_buffer_to_image(staging_buffer, volume_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, [buffer_copy_region])
+-    
+-    # Transition to shader read-only
+-    transition_image_layout(command_buffer, volume_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+-    
+-    device.end_command_buffer()
+-    device.submit_and_wait(command_buffer)
++    # 9. Cleanup Staging
++    destroy_buffer(staging_buffer)
++    free_memory(staging_memory)
+ 
+-    # 8. Cleanup Staging
+-    device.destroy_buffer(staging_buffer)
+-    device.free_memory(staging_memory)
+-
+-    return volume_image_view, volume_image, image_memory
+-
+-def transition_image_layout(command_buffer, image, old_layout, new_layout):
+-    """Helper to transition image layout."""
+-    # Implementation details omitted for brevity, but involves VkImageMemoryBarrier
+-    pass
++    return image, image_view
+ ```
+ 
+@@ -161,17 +160,17 @@
+ 
+ ### Volume Readback via Staging Buffer
+-This variant transfers data from GPU device-local memory back to host memory. It allocates a host-visible, host-coherent staging buffer with `VK_BUFFER_USAGE_TRANSFER_DST_BIT`. A command buffer copies the 3D image to the staging buffer (`vkCmdCopyImageToBuffer`), then the host maps the staging buffer to read the data into a `std::vector<float>`. The byte size is calculated identically: `byteSize = dims.count() * kChannels * sizeof(float)` [S1, unofficial].
++This variant transfers data from the GPU back to the host. It allocates a host-visible, host-coherent staging buffer with usage `eTransferDst` [S1, unofficial]. It copies `byteSize` bytes from the 3D image to the staging buffer, maps the staging memory, copies the data into a host-side `std::vector<float>`, and unmaps the memory [S1, unofficial]. The `byteSize` formula is identical to the upload method: `dims.count() * kChannels * sizeof(float)` [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, dominated by the memory copy bandwidth.
+-*   **Memory Complexity:** $O(N)$ for the staging buffer, in addition to the device-local image memory.
+-*   **Performance:** Depends on PCIe bandwidth. For large volumes, this can be a bottleneck. Asynchronous transfers (using separate queues) can hide latency.
+-*   **Strengths:** Works with any GPU that supports Vulkan/OpenGL, no special pinned memory requirements, simple to implement.
+-*   **Limitations:** Requires extra memory (staging buffer), slower than direct mapping if supported, synchronous by default unless async queues are used.
+-*   **When to use:** When direct mapping is not available, or when explicit control over the transfer pipeline is needed.
+-*   **When not to use:** When memory is extremely constrained, or when real-time updates of small volumes are needed and direct mapping is supported.
++-   **Time Complexity**: $O(N)$ where $N$ is the number of voxels, dominated by the memory copy operation.
++-   **Memory Complexity**: $O(N)$ for the staging buffer, which doubles the peak memory usage during upload (host staging + device storage).
++-   **Performance**: The staging buffer approach is generally slower than direct mapping for small datasets due to the extra copy step, but it is necessary for large datasets or when the source data is not already in host-coherent memory. It allows for asynchronous transfers if the API supports it (e.g., Vulkan queues).
++-   **Strengths**: Decouples host population from GPU residency; works with non-coherent host memory; standard pattern for bulk data upload.
++-   **Limitations**: Requires additional host memory for the staging buffer; involves at least two memory copies (host to staging, staging to device).
++-   **When to use**: When uploading large volumes, when the source data is not in host-visible memory, or when asynchronous transfer is required.
++-   **When not to use**: For very small volumes where the overhead of buffer allocation and command submission outweighs the benefits; if direct mapping is supported and sufficient.
+ 
+ ## Background
+-This method is a standard technique in Vulkan and OpenGL applications for transferring large datasets to the GPU. It is widely used in scientific visualization and medical imaging applications where volumetric data is loaded from disk. The specific implementation details described here are derived from the `imaginaryVolumes` project [S1, unofficial].
++This method is a standard technique in GPU programming, particularly in Vulkan and OpenGL, for transferring large datasets to the GPU. It is based on the principle of using staging buffers to bridge the gap between host memory and device-local memory, ensuring optimal performance for GPU access patterns [S1, unofficial]. The specific implementation details are derived from the `imaginaryVolumes` project [S1, unofficial].
+ 
+ ## Sources

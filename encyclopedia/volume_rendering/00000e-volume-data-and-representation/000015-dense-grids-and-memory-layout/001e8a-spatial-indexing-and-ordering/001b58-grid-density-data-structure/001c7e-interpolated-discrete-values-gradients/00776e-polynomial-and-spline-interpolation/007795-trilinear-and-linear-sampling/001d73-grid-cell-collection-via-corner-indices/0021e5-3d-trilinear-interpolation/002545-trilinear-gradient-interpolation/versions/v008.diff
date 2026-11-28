@@ -1,0 +1,105 @@
+--- v007.md
++++ v008.md
+@@ -27,17 +27,12 @@
+ **Steps:**
+ 1. Initialize `grad_payload` as a zero-filled array of size `num_leaves * channels` [S1, unofficial].
+-2. For each point `p` at index `point_index`:
+-   a. Check if `p` is within `min_bound` and `max_bound`. If not, skip to the next point [S1, unofficial].
+-   b. Compute `scale = 2^max_depth`, `extent = max_bound - min_bound`. Compute voxel coordinates and fractional offsets:
+-      - `voxel_x = floor(((p.x - min_bound.x) / extent.x) * scale)`
+-      - `frac_x = ((p.x - min_bound.x) / extent.x) * scale - voxel_x`
+-      - Similarly for `y` and `z` [S1, unofficial].
+-   c. Traverse the SVO to find the leaf node containing `p`. If traversal fails or returns `payload_index < 0`, skip [S1, unofficial].
+-   d. Compute trilinear weights for the 8 corners of the unit cube surrounding `p`. Let `w_x0 = 1 - frac_x`, `w_x1 = frac_x`, `w_y0 = 1 - frac_y`, `w_y1 = frac_y`, `w_z0 = 1 - frac_z`, `w_z1 = frac_z` [G].
+-   e. For each corner `(cx, cy, cz)` in `{0,1}^3`:
+-      i. Compute `weight = (cx ? w_x1 : w_x0) * (cy ? w_y1 : w_y0) * (cz ? w_z1 : w_z0)` [G].
+-      ii. Determine the voxel coordinates for this corner: `corner_voxel_x = voxel_x + cx`, `corner_voxel_y = voxel_y + cy`, `corner_voxel_z = voxel_z + cz` [G].
+-      iii. Traverse the SVO (or use neighbor lookup) to find the `payload_index` for this corner voxel. If `payload_index < 0`, skip [S1, unofficial].
+-      iv. Accumulate gradients: for each channel `c` in `0..channels-1`, update `grad_payload[corner_payload_index * channels + c] += weight * grad_outputs[point_index * channels + c]` [S1, unofficial].
++2. Loop over each point `p` at index `point_index`. If `p` is outside `min_bound` and `max_bound`, skip to the next point [S1, unofficial].
++3. Compute `scale = 2^max_depth`, `extent = max_bound - min_bound`. Compute grid coordinates, base voxel, and fractional offsets `frac` exactly as in the forward pass: `voxel_x = floor(((p.x - min_bound.x) / extent.x) * scale)`, `frac_x = ((p.x - min_bound.x) / extent.x) * scale - voxel_x`, and similarly for `y` and `z` [S1, unofficial].
++4. Compute trilinear weights for the 8 corners of the unit cube surrounding `p` by looping `dx, dy, dz` from 0 to 1 and calculating `weight = (1 - frac_x)^(1-dx) * frac_x^dx * (1 - frac_y)^(1-dy) * frac_y^dy * (1 - frac_z)^(1-dz) * frac_z^dz` [S1, unofficial].
++5. If `weight` is 0, continue to the next corner [S1, unofficial].
++6. Normalize the gradient contribution from the range `[-1, 1]` to `[0, 1]` by computing `(result + 1.0) / 2.0` if the payload data uses this encoding [S1, unofficial].
++7. Determine the neighbor voxel coordinates for the current corner and lookup its `payload_index` in the SVO. If `payload_index < 0`, skip [S1, unofficial].
++8. Get pointer to gradient row: `grad_row = grad_payload.data() + payload_index * channels` [S1, unofficial].
++9. Loop over each channel. Update gradient: `grad_row[channel] += weight * grad_outputs[point_index * channels + channel]` [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -55,11 +50,7 @@
+         p = points[point_index]
+         
+-        # Check bounds
+-        if not (min_bound.x <= p.x <= max_bound.x and 
+-                min_bound.y <= p.y <= max_bound.y and 
+-                min_bound.z <= p.z <= max_bound.z):
++        if not (min_bound.x <= p.x <= max_bound.x and min_bound.y <= p.y <= max_bound.y and min_bound.z <= p.z <= max_bound.z):
+             continue
+             
+-        # Compute voxel coordinates and fractional offsets
+         voxel_x = int(((p.x - min_bound.x) / extent_x) * scale)
+         voxel_y = int(((p.y - min_bound.y) / extent_y) * scale)
+@@ -70,21 +61,18 @@
+         frac_z = ((p.z - min_bound.z) / extent_z) * scale - voxel_z
+         
+-        # Compute trilinear weights
+-        w_x0, w_x1 = 1.0 - frac_x, frac_x
+-        w_y0, w_y1 = 1.0 - frac_y, frac_y
+-        w_z0, w_z1 = 1.0 - frac_z, frac_z
+-        
+-        # Iterate over the 8 corners of the unit cube
+-        for cx in (0, 1):
+-            for cy in (0, 1):
+-                for cz in (0, 1):
+-                    weight = (w_x1 if cx else w_x0) * (w_y1 if cy else w_y0) * (w_z1 if cz else w_z0)
++        for dx in (0, 1):
++            for dy in (0, 1):
++                for dz in (0, 1):
++                    weight = (1.0 - frac_x if dx == 0 else frac_x) * \
++                             (1.0 - frac_y if dy == 0 else frac_y) * \
++                             (1.0 - frac_z if dz == 0 else frac_z)
+                     
+-                    # Determine corner voxel coordinates
+-                    corner_voxel_x = voxel_x + cx
+-                    corner_voxel_y = voxel_y + cy
+-                    corner_voxel_z = voxel_z + cz
++                    if weight == 0.0:
++                        continue
++                        
++                    corner_voxel_x = voxel_x + dx
++                    corner_voxel_y = voxel_y + dy
++                    corner_voxel_z = voxel_z + dz
+                     
+-                    # Find payload index for this corner voxel
+                     payload_index = query_leaf_payload_index(
+                         corner_voxel_x, corner_voxel_y, corner_voxel_z,
+@@ -95,5 +83,4 @@
+                         continue
+                         
+-                    # Accumulate gradient
+                     base_idx = payload_index * channels
+                     out_base = point_index * channels
+@@ -104,5 +91,4 @@
+ 
+ def query_leaf_payload_index(voxel_x, voxel_y, voxel_z, min_bound, max_bound, max_depth, nodes, leaf_payload_indices):
+-    # Standard SVO traversal matching the forward pass logic
+     if not (min_bound.x <= voxel_x and voxel_x < max_bound.x and
+             min_bound.y <= voxel_y and voxel_y < max_bound.y and
+@@ -118,7 +104,8 @@
+             
+         descriptor = nodes[node_index]
+-        child_index = ((voxel_x >> (depth_remaining - 1)) & 1) | \
+-                      ((voxel_y >> (depth_remaining - 1)) & 1) << 1 | \
+-                      ((voxel_z >> (depth_remaining - 1)) & 1) << 2
++        shift = depth_remaining - 1
++        child_index = ((voxel_x >> shift) & 1) | \
++                      ((voxel_y >> shift) & 1) << 1 | \
++                      ((voxel_z >> shift) & 1) << 2
+         child_bit = 1 << child_index
+         
+@@ -139,5 +126,4 @@
+ 
+ def prefix_rank(mask, bit):
+-    # Count set bits in mask before the given bit position
+     count = 0
+     for i in range(bit):

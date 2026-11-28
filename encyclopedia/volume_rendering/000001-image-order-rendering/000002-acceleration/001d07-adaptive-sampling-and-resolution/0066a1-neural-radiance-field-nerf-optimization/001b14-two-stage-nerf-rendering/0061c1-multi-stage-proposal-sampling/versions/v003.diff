@@ -1,0 +1,106 @@
+--- v002.md
++++ v003.md
+@@ -34,59 +34,56 @@
+ **Pseudocode:**
+ ```python
+-def multi_stage_proposal_sampling(
+-    ray_bundle,
+-    density_fns,
+-    num_proposal_network_iterations,
+-    num_proposal_samples_per_ray,
+-    num_nerf_samples_per_ray,
+-    anneal=1.0,
+-    update_sched=None,
+-    steps_since_update=0,
+-    step=0
+-):
+-    all_weights = []
+-    all_ray_samples = []
+-    current_ray_samples = None
+-    should_update = (steps_since_update > update_sched(step)) or (step < 10)
++class MultiStageProposalSampler:
++    def __init__(self, num_proposal_network_iterations, num_proposal_samples_per_ray, num_nerf_samples_per_ray, anneal=1.0):
++        self.num_proposal_network_iterations = num_proposal_network_iterations
++        self.num_proposal_samples_per_ray = num_proposal_samples_per_ray
++        self.num_nerf_samples_per_ray = num_nerf_samples_per_ray
++        self._anneal = anneal
++        self._steps_since_update = 0
+ 
+-    for i_level in range(num_proposal_network_iterations + 1):
+-        is_proposal_stage = (i_level < num_proposal_network_iterations)
++    def forward(self, ray_bundle, density_fns, step, update_sched):
++        all_weights = []
++        all_ray_samples = []
++        current_ray_samples = None
++        should_update = (self._steps_since_update > update_sched(step)) or (step < 10)
+ 
+-        if i_level == 0:
+-            num_samples = num_proposal_samples_per_ray[0]
+-            current_ray_samples = uniform_sample_ray(ray_bundle, num_samples)
+-        elif i_level < num_proposal_network_iterations:
+-            prev_weights = all_weights[-1]
+-            annealed_weights = prev_weights ** anneal
+-            num_samples = num_proposal_samples_per_ray[i_level]
+-            current_ray_samples = pdf_sampler(ray_bundle, all_ray_samples[-1], annealed_weights, num_samples)
+-        else:
+-            num_samples = num_nerf_samples_per_ray
+-            current_ray_samples = uniform_sample_ray(ray_bundle, num_samples)
++        for i_level in range(self.num_proposal_network_iterations + 1):
++            is_proposal_stage = (i_level < self.num_proposal_network_iterations)
+ 
+-        if is_proposal_stage:
+-            positions = current_ray_samples.frustums.get_positions()
+-            if should_update:
+-                densities = density_fns[i_level](positions)
++            if i_level == 0:
++                num_samples = self.num_proposal_samples_per_ray[0]
++                current_ray_samples = uniform_sample_ray(ray_bundle, num_samples)
++            elif i_level < self.num_proposal_network_iterations:
++                prev_weights = all_weights[-1]
++                annealed_weights = torch.pow(prev_weights, self._anneal)
++                num_samples = self.num_proposal_samples_per_ray[i_level]
++                current_ray_samples = pdf_sampler(ray_bundle, all_ray_samples[-1], annealed_weights, num_samples)
+             else:
+-                with torch.no_grad():
++                num_samples = self.num_nerf_samples_per_ray
++                current_ray_samples = uniform_sample_ray(ray_bundle, num_samples)
++
++            if is_proposal_stage:
++                positions = current_ray_samples.frustums.get_positions()
++                if should_update:
+                     densities = density_fns[i_level](positions)
+-            weights = compute_importance_weights(densities, current_ray_samples)
+-            all_weights.append(weights)
++                else:
++                    with torch.no_grad():
++                        densities = density_fns[i_level](positions)
++                weights = compute_importance_weights(densities, current_ray_samples)
++                all_weights.append(weights)
+ 
+-        all_ray_samples.append(current_ray_samples)
++            all_ray_samples.append(current_ray_samples)
+ 
+-    if should_update:
+-        steps_since_update = 0
++        if should_update:
++            self._steps_since_update = 0
+ 
+-    return current_ray_samples, all_weights, all_ray_samples
++        return current_ray_samples, all_weights, all_ray_samples
+ 
++# Standard NeRF sampling steps [G]
+ def uniform_sample_ray(ray_bundle, num_samples):
+-    # Standard uniform sampling along ray parameter t
+     t = torch.linspace(0.0, 1.0, num_samples)
+     return RaySamples(origin=ray_bundle.origin, direction=ray_bundle.direction, t=t)
+ 
+ def pdf_sampler(ray_bundle, prev_ray_samples, weights, num_samples):
+-    # Standard inverse CDF sampling
+     cdf = torch.cumsum(weights, dim=-1)
+     cdf = torch.cat([torch.zeros_like(cdf[:, :1]), cdf], dim=-1)
+@@ -96,5 +93,4 @@
+ 
+ def compute_importance_weights(densities, ray_samples):
+-    # Standard NeRF volume rendering weights
+     deltas = ray_samples.frustums.get_deltas()
+     alphas = 1.0 - torch.exp(-densities * deltas)

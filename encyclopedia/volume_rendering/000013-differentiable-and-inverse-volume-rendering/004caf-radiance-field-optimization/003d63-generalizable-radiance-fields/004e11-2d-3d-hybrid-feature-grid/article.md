@@ -1,0 +1,154 @@
+# 2D-3D Hybrid Feature Grid
+
+Also called: Hybrid Tri-Plane and Voxel Grid
+
+## Overview
+The 2D-3D Hybrid Feature Grid is a scene representation architecture that combines 2D feature planes (tri-planes) and a 3D voxel grid to improve reconstruction quality while maintaining compact parameter counts [S1]. It addresses the trade-off between the geometric expressiveness of 3D voxels and the computational efficiency of 2D planes [S1]. Compared to a pure 2D tri-plane representation and a pure 3D voxel representation, the hybrid grid achieves superior compactness and quality, using fewer parameters to reach higher PSNR and SSIM scores [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of source images used for training; a query ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ for rendering [G].
+*   **Output:** Volume density $\sigma$ and view-dependent color $\mathbf{c}$ for sample points along the ray [S1].
+
+**Data Structures:**
+The representation consists of a hybrid feature grid $\Psi$ [S1]. The architecture uses two resolution levels and two feature dimensions [S1].
+*   **2D Feature Planes (Tri-planes):** Three 2D grids storing spatial features [S1].
+*   **3D Feature Grid:** A 3D volume storing features [S1].
+*   **Density Features $f_d$:** A vector in $\mathbb{R}^4$ [S3, unofficial].
+*   **Appearance Features $f_c$:** A vector in $\mathbb{R}^8$ [S3, unofficial].
+*   **Positional Encoding $\gamma(\cdot)$:** Applied to the view direction $\mathbf{d}$, using 6 frequencies [S3, unofficial].
+
+**Parameters:**
+*   Feature dimensions = 2 [S1].
+*   Resolution levels = 2 [S1].
+*   $d = 256$: The final grid resolution dimension for the 3D component [S3, unofficial].
+*   $f_d \in \mathbb{R}^4$: Number of density feature channels [S3, unofficial].
+*   $f_c \in \mathbb{R}^8$: Number of appearance feature channels [S3, unofficial].
+*   $N_\gamma = 6$: Number of frequencies in the positional encoding function $\gamma(\cdot)$ [S3, unofficial].
+
+**Steps:**
+1.  **Ray Sampling:** Sample points $p_i$ along the query ray [G].
+2.  **Coarse Interpolation:** At the coarse resolution level, perform bilinear interpolation on the 2D feature planes and trilinear interpolation on the 3D voxel grid for each $p_i$ [S1].
+3.  **Fine Interpolation:** At the fine resolution level, perform trilinear interpolation exclusively on the 3D voxel grid for each $p_i$ [S1].
+4.  **Feature Combination:** Combine the coarse and fine interpolated features to form the input for the MLP decoders [S1].
+5.  **Density & Color Prediction:** Process the combined features through MLPs $\pi_d$ and $\pi_c$ to estimate raw density $\sigma_i$ and color $\mathbf{c}_i$ [S1].
+
+**Formulas:**
+$$ \sigma_i = \pi_d(\mathbf{f}_{\text{combined}}) $$
+$$ \mathbf{c}_i = \pi_c(\mathbf{f}_{\text{combined}}, \gamma(\mathbf{d})) $$
+where $\mathbf{f}_{\text{combined}}$ is the concatenated output of the coarse and fine interpolation stages [S3, unofficial].
+
+**Pitfalls:**
+*   **Hardware Efficiency:** The number of features for each network must be a multiple of four to maximize texture efficiency, as one hardware-accelerated texture read fetches four channel values [S3, unofficial].
+*   **Precision & Boundaries:** Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def query_hybrid_grid(grid_3d, planes_2d, point, view_direction):
+    # 1. Coarse scale: bilinear on 2D planes, trilinear on 3D grid
+    coarse_2d = bilinear_interpolate(planes_2d, point.xy)
+    coarse_3d = trilinear_interpolate(grid_3d, point)
+    coarse_features = concatenate(coarse_2d, coarse_3d)
+
+    # 2. Fine scale: trilinear on 3D grid only
+    fine_features = trilinear_interpolate(grid_3d, point)
+
+    # 3. Combine scales
+    combined_features = concatenate(coarse_features, fine_features)
+
+    # 4. Density prediction
+    sigma = mlp_density(combined_features)
+
+    # 5. Color prediction
+    view_encoding = positional_encoding(view_direction, num_frequencies=6)
+    color_input = concatenate(combined_features, view_encoding)
+    color = mlp_color(color_input)
+
+    return sigma, color
+
+def trilinear_interpolate(grid, p):
+    x, y, z = p
+    x0, y0, z0 = floor(x), floor(y), floor(z)
+    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
+    dx, dy, dz = x - x0, y - y0, z - z0
+    v000 = grid[x0, y0, z0]; v100 = grid[x1, y0, z0]
+    v010 = grid[x0, y1, z0]; v110 = grid[x1, y1, z0]
+    v001 = grid[x0, y0, z1]; v101 = grid[x1, y0, z1]
+    v011 = grid[x0, y1, z1]; v111 = grid[x1, y1, z1]
+    c00 = lerp(v000, v100, dx); c10 = lerp(v010, v110, dx)
+    c01 = lerp(v001, v101, dx); c11 = lerp(v011, v111, dx)
+    c0 = lerp(c00, c10, dy); c1 = lerp(c01, c11, dy)
+    return lerp(c0, c1, dz)
+
+def bilinear_interpolate(planes, uv):
+    u, v = uv
+    u0, v0 = floor(u), floor(v)
+    u1, v1 = u0 + 1, v0 + 1
+    du, dv = u - u0, v - v0
+    features = []
+    for plane in planes:
+        v00 = plane[u0, v0]; v10 = plane[u1, v0]
+        v01 = plane[u0, v1]; v11 = plane[u1, v1]
+        c0 = lerp(v00, v10, du); c1 = lerp(v01, v11, du)
+        features.append(lerp(c0, c1, dv))
+    return concatenate(*features)
+
+def lerp(a, b, t):
+    return a + t * (b - a)
+
+def concatenate(*args):
+    return sum(args) # Standard vector concatenation
+
+def positional_encoding(v, num_frequencies):
+    encoded = []
+    for i in range(num_frequencies):
+        scale = 2.0 ** i
+        encoded.append(sin(2 * pi * scale * v))
+        encoded.append(cos(2 * pi * scale * v))
+    return concatenate(*encoded)
+
+def mlp_density(features):
+    return exp(features @ W_d + b_d) # Small MLP for density
+
+def mlp_color(features):
+    return tanh(features @ W_c + b_c) # Small MLP for color
+```
+
+## Subtopics
+
+### Hardware-guided model design
+A model architecture combining a 3D feature grid with small MLP decoders to leverage hardware texture interpolation and cache coherence for efficient real-time rendering [S3, unofficial]. It uses a 3D feature grid $\psi$ of dimension $f \times d^3$ and small MLPs $\pi_d$ and $\pi_c$ for density and color, respectively [S3, unofficial]. This design achieves higher computational efficiency due to better cache coherence for sampling [S3, unofficial]. It is critical to use multiples of four for the number of features for each network to maximize texture efficiency, as one hardware-accelerated texture read fetches four channel values [S3, unofficial]. The grid resolution is set to $d=256$, with $f_d \in \mathbb{R}^4$ and $f_c \in \mathbb{R}^8$ [S3, unofficial]. The view direction $\mathbf{d}$ is encoded using a positional encoding function $\gamma(\cdot)$ with 6 frequencies [S3, unofficial]. To address aliasing artifacts and high-resolution query costs in virtual reality, a hierarchy of feature grids is introduced by trilinearly downsampling the full-resolution grid to multiple levels of lower resolutions, similar to mipmaps [S3, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Memory:** The hybrid grid uses 13.2M parameters, which is fewer than the tri-plane (13.7M) and voxel (13.6M) representations [S2]. The 3D component has a resolution of $256^3$ [S3, unofficial].
+*   **Time:** The compact representation leads to better cache coherence, improving computational efficiency [S3, unofficial]. Sparsity loss can improve rendering time in both training and inference with a minor decrease in reconstruction quality [S1].
+
+**Measured Performance:**
+*   **Synthetic-NeRF Dataset:**
+    *   Tri-plane: 13.7M params, 31.44 PSNR, 0.949 SSIM [S2].
+    *   Voxel: 13.6M params, 32.35 PSNR, 0.956 SSIM [S2].
+    *   Hybrid: 13.2M params, 32.64 PSNR, 0.958 SSIM [S2].
+*   **Dynamic Scene Reconstruction (D-NeRF/HyperNeRF):**
+    *   Ours-B2 (w/o sparsity loss): 6.4m train time, 3.3 fps inference, 32.69 PSNR, 0.958 SSIM [S1].
+    *   Ours-B2 (w/ sparsity loss): 6.1m train time, 3.8 fps inference, 32.64 PSNR, 0.958 SSIM [S1].
+    *   Ours-B8 (w/o sparsity loss): 14.7m train time, 2.2 fps inference, 33.60 PSNR, 0.964 SSIM [S1].
+    *   Ours-B8 (w/ sparsity loss): 13.9m train time, 2.7 fps inference, 33.59 PSNR, 0.964 SSIM [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Superior compactness and quality compared to pure 2D or 3D representations [S2]. Efficient real-time rendering potential due to hardware texture interpolation and cache coherence [S3, unofficial].
+*   **Limitations:** Not given in the sources.
+
+**When to Use:**
+*   Use when high reconstruction quality is needed with compact parameter counts [S2].
+*   Use when real-time rendering efficiency is critical, leveraging hardware texture interpolation [S3, unofficial].
+
+## Background
+The 2D-3D Hybrid Feature Grid was introduced in "Binary Radiance Fields" [S2]. It was developed to improve radiance field reconstruction quality while maintaining compact feature encoding [S2]. The hardware-guided variant was presented in "Neural Assets: Volumetric Object Capture and Rendering for Interactive Environments" [S3, unofficial].
+
+## Sources
+[S1] Benchmarking Implicit Neural Representation and Geometric Rendering in Real-Time RGB-D SLAM, https://doi.org/10.1109/cvpr52733.2024.02017, fetched 2026-10-26
+[S2] Binary Radiance Fields, https://doi.org/10.52202/075280-2438, fetched 2026-10-26
+[S3] Neural Assets: Volumetric Object Capture and Rendering for Interactive Environments, https://core.ac.uk/download/552466290.pdf, fetched 2026-10-30 (unofficial)

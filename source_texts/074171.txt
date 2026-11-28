@@ -1,0 +1,127 @@
+Follow-up work of PR #2931. This issue holds work that remains after #2931 merges. The merge of #2931 does not close this issue. Summary A reduced volume texture holds a box average of the source frames. At present, the render calculates...
+
+Volume textures: brick copies in the render, a recorded update copy, paced renders, and a preload that states its loader · Issue #2966 · cornerstonejs/cornerstone3D · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Volume textures: brick copies in the render, a recorded update copy, paced renders, and a preload that states its loader #2966
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Volume textures: brick copies in the render, a recorded update copy, paced renders, and a preload that states its loader#2966
+Copy link
+Description
+wayfarer3130
+opened on Oct 6, 2026
+Issue body actions
+Follow-up work of PR #2931. This issue holds work that remains after #2931 merges. The merge of #2931 does not close this issue.
+Summary
+A reduced volume texture holds a box average of the source frames. At present, the render calculates that box average on the main thread, inside the requestAnimationFrame callback. PR #2931 adds a limit for each render (commit 793d575). The limit is a safety measure, and the work stays inside the render.
+This issue proposes four changes:
+B. The volume calculates the reduced slices outside the render, and keeps them in a reduced slice store. The render only uploads slices that are ready.
+D. A render pacer for each volume decides when a render shows the progress of a load. The pacer replaces the render after each 2% of the frames.
+E. The texture copy has two parts. The render copies only the bricks that the view needs. An ongoing update copies the delivered data, and it records what the texture holds. Data that is already loaded is then only added to a texture, and nothing calculates it again.
+F. The preload of a volume can state the retrieve configuration, for example the interleaved loader.
+Current behaviour
+A frame arrives. ImageVolume.markFrameTexturesDirty marks the reduced slice dirty. No reduction occurs at this time.
+The next render calls update3DFromRaw from buildBufferObjects of the mapper. updateTextureFromComposite in vtkStreamingOpenGLTexture.js then calls fillPlane for each dirty slice, and uploads the slice with texSubImage3D.
+With factorK > 1, each frame of a box marks the reduced slice again. One reduced slice can get up to factorK calculations, and a progressive load adds more passes.
+The loader renders after each 2% of the frames (reRenderFraction). A scroll render during a load also does all of the fill work that is pending.
+After feat(core): multi-resolution volume textures, the base for task T2 #2931, one render fills at most 16 slices that hold data, or stops after 8 ms (rendering.reducedTextureFill). The render then requests another render.
+The unit of a texture copy is one whole slice. A sagittal or a coronal view needs a column of every slice, so a render copies whole slices that the view mostly does not show.
+A new texture marks all of its slices dirty, so a new viewport on a loaded volume copies, and for a reduced grid calculates, the whole volume again.
+BaseStreamingImageVolume.load() reads the retrieve configuration from imageRetrieveMetadataProvider only, with the keys volumeId, the transfer syntax and 'volume'. The loader option progressiveRendering?: boolean | IRetrieveConfiguration of cornerstoneStreamingImageVolumeLoader exists in the type, but load() does not read it. A preload therefore cannot choose its loader.
+§ User requirements
+TF-U-1. A scroll, a pan or a zoom during a volume load must not wait for the reduction of slices that the user does not see.
+TF-U-2. The slice that a viewport shows must get its data first, when the data arrives.
+TF-U-3. A reduced texture of intensity data must hold the box average of the frames that arrived, when the load is complete. An interactive display can show a lower-quality preview before that time.
+TF-U-4. The display must show the progress of a load at a steady rate. The rate must not depend on the number of frames.
+TF-U-5. An application must be able to wait until all textures of a volume are complete. Examples are a screenshot, an export and a test.
+TF-U-6. A render must copy only the data that its view needs. A view of one plane must not wait for the copy of data that the plane does not cross.
+TF-U-7. Data that is already loaded must appear in a new viewport without a second load and without a second reduction of the whole volume.
+TF-U-8. An application that preloads a volume must be able to state the order of the load, for example the interleaved loader. The preload must give the same progressive display as a load that a viewport starts.
+§ Implementation requirements
+These requirements give the recommended approach. A better approach can replace them.
+B. Reduction that the volume owns
+TF-I-1. The volume reduces each delivered frame into a reduced representation in CPU memory. The work occurs in batches, outside the render.
+TF-I-2. The reduction uses the existing parts of CompositeVoxelManager: createVoxelRepresentation, refreshDerivedFrames for each delivery, and deriveInBatches with scheduleIdle.
+TF-I-3. The derived path uses the fillPlane fast path of the statistic. At present the derived path uses the getAtIJK reducer for an i or j factor, and that reducer is slow.
+TF-I-4. The texture reads the reduced slices through derivedSliceReaderOf, which exists now. The render only uploads, and it keeps the limit for each render.
+TF-I-5. The size of the reduced copy is at most the size of the texture. For example, 256 × 256 × 256 int16 is 32 MB.
+TF-I-6. The docs state that the provider derives no representation, because a derivation of the full volume stalled the main thread for seconds (volumeRenderStrategy.md, VRS-I-9). A derivation for each delivery, in batches, does not stall. The change must update VRS-I-9.
+D. Render pacer for each volume
+TF-I-7. The pacer requests a render in these cases:
+The data for a slice that a viewport shows is ready. The request is immediate.
+A retrieve stage completes (IMAGE_RETRIEVAL_STAGE).
+A timer expires during a load, for example after 150–250 ms, and new slices are ready.
+The load completes.
+TF-I-8. The pacer replaces reRenderFraction / autoLoad in BaseStreamingImageVolume, and the volume-modified dispatcher of BaseVolumeViewport.
+TF-I-9. A render that the user starts does not wait for the pacer.
+E. Two copies to the texture: a brick copy in the render, and a recorded update copy
+TF-I-15. The unit of a texture copy is a brick, for example 64 × 64 × 64 voxels of the grid of the texture. texSubImage3D takes an offset and a size on each axis, so a brick copy needs no new GL feature.
+TF-I-16. Each texture keeps a record for each brick: the quality and the delivery that the brick holds. The record has the form of the quality record of the composite, so a comparison of the two records gives the bricks that are out of date.
+TF-I-17. The render copy. A render copies only the out-of-date bricks that its view crosses:
+An MPR view copies the bricks that its plane or its slab crosses.
+A 3D view copies the bricks in its view volume.
+The copy keeps the limit for each render (rendering.reducedTextureFill), and it copies the bricks nearest to the centre of the view first.
+TF-I-18. The update copy. An ongoing update follows the delivery record of the volume (recordFrameDelivery). It copies each delivered region once, at the best quality that the source holds: full resolution for a full-resolution texture, or the box average for a reduced texture. It then updates the record of the brick. The update copy runs between renders or in the renders of the pacer (D), and never in a render that the user starts.
+TF-I-19. A brick that the update copy has already filled at the quality of the source is not out of date. A render therefore copies nothing for it, and nothing calculates it again.
+TF-I-20. A new texture of a loaded volume starts with an empty record. The update copy fills it from the representations that the composite already holds: the full-resolution frames, or a reduced representation of B. Nothing loads the data again, and a reduced representation is not calculated again.
+TF-I-21. A GL call outside the render of vtk.js must keep the record of the bound textures of vtk.js correct. Option A below lists the risks. If the update copy cannot meet this requirement, it runs inside the paced renders.
+F. A preload that states its retrieve configuration
+TF-I-22. load() takes an optional retrieve configuration. The order of precedence is:
+the argument of load();
+the progressiveRendering option of the volume loader, which exists in the type but has no effect now;
+imageRetrieveMetadataProvider, as now.
+TF-I-23. progressiveRendering: true selects ProgressiveRetrieveImages.coarseInterleavedRetrieveStages. An object selects that configuration. false selects the request order of getImageLoadRequests.
+TF-I-24. A preload with a progressive configuration gets the same behaviour as a load that a viewport starts. This includes the take-in of cached images, the removal of other prefetch requests, and isLoadingProgressively().
+Completion, restart and priority
+TF-I-10. Each volume has a state: idle, loading, updating or complete.
+TF-I-11. completeUpdate(): Promise<void> reduces and uploads all pending slices, then renders.
+TF-I-12. restart() clears the queue, resets the cursor, marks all slices dirty, and increments a generation number. These events call restart(): cancelLoading followed by load, a change of the grid, and a new allocation of a texture.
+TF-I-13. A batch or a worker result with an old generation number has no effect.
+TF-I-14. A viewport gives its focal reduced slice to the volume, and that slice gets the highest priority. An oblique view uses all slices, so the round-robin cursor stays as the fallback.
+Later options
+C. Move the reduction into a worker. The decode worker already scales a frame to targetBuffer.rows/columns (decodeImageFrameWorker.js). A box-average scalingType, next to replicate and bilinear, can give a frame that has the i and j reduction already. A direct fetch at a reduced resolution (HTJ2K or J2K decode levels) fits here too. The k reduction needs factorK frames together, so a running sum for each reduced slice adds the frames.
+A. Move the GPU upload out of the render too. This needs care, because vtk.js keeps a record of the bound textures. Also, a texture exists only after its first render. Do this only if a profile shows that the upload itself costs too much time.
+Related
+PR feat(core): multi-resolution volume textures, the base for task T2 #2931: multi-resolution volume textures.
+Commit 793d575: the limit for each render, and the fast box average of the frames that arrived.
+Commit 323ba06: a stack prefetch stays out of a progressive volume load.
+Commit c980f08: a volume load takes in the images that the cache already holds.
+Commit e85899e: a large volume loads in 64 stages of every 64th image.
+Reactions are currently unavailable
+Activity
+linear commented on Oct 6, 2026
+linearBot
+on Oct 6, 2026 – with Linear
+More actions
+CS-230
+wayfarer3130
+changed the title [-]Reduced volume textures: reduce outside the render, and pace the renders of a load[/-] [+]Volume textures: brick copies in the render, a recorded update copy, paced renders, and a preload that states its loader[/+] on Oct 6, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

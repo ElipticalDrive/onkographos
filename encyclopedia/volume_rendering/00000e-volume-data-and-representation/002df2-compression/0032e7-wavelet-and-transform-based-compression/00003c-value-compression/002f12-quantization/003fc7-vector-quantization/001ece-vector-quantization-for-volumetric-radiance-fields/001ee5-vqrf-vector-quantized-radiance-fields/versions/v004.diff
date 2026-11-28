@@ -1,0 +1,216 @@
+--- v003.md
++++ v004.md
+@@ -9,129 +9,94 @@
+ 
+ **Inputs and Outputs:**
+-*   **Input:** An uncompressed volumetric radiance field model (e.g., DVGO, Plenoxels, or TensoRF) trained on a dataset.
+-*   **Output:** A compressed model with significantly reduced storage size (zip-compressed) while maintaining high rendering quality (PSNR, SSIM).
++*   **Input:** An uncompressed volumetric radiance field model (e.g., DVGO, Plenoxels, or TensoRF) trained on a dataset [S1].
++*   **Output:** A zip-compressed model with significantly reduced storage size (reaching ~1 MB) while maintaining high rendering quality (PSNR, SSIM) [S1].
+ 
+ **Data Structures:**
+-1.  **Voxel Grid:** The spatial representation of the radiance field. Pruning removes low-importance voxels.
+-2.  **Codebook:** A learnable lookup table of size $K$ containing $K$ code vectors. Each voxel's feature vector is replaced by an index pointing to the nearest code vector in this table.
+-3.  **Indices:** A mapping from active voxels to codebook indices.
+-4.  **Weights:** The neural network parameters (if applicable, e.g., in TensoRF or MLP-based components) are quantized.
++1.  **Voxel Grid:** Spatial representation of the radiance field; voxels store feature vectors, density, and opacity [G].
++2.  **Codebook:** Learnable lookup table of size $K$ containing $K$ code vectors [S1, G].
++3.  **Indices:** Mapping from active voxels to codebook indices, replacing full feature vectors [S1, G].
++4.  **Weights:** Neural network parameters (e.g., in TensoRF or MLP components) subject to quantization [S1].
+ 
+ **Parameters:**
+-*   **Pruning parameter $\beta_p$:** Controls voxel pruning aggressiveness. Larger $\beta_p$ yields better quality but larger size. Default: 0.6 [S1].
+-*   **Keeping parameter $\beta_k$:** Controls the quantile threshold during pruning. Smaller $\beta_k$ improves compression but degrades visual performance. Default: 0.001 [S1].
+-*   **Codebook size $K$:** Number of entries in the vector quantization codebook. Tested sizes: 16, 64, 256, 1024, 4096, 16384. Sizes $>4096$ yield minimal PSNR improvement with disproportionate storage cost. Default/Best trade-off: 4096 [S1].
++*   **Pruning parameter $\beta_p$:** Controls voxel pruning; larger values yield better rendering quality but increase model size. Default: 0.6 [S1].
++*   **Keeping parameter $\beta_k$:** Controls the keeping quantile during pruning; smaller values degrade visual performance but improve compression ratio. Default: 0.001 [S1].
++*   **Codebook size $K$:** Hyperparameter for vector quantization; model size and PSNR increase simultaneously with $K$. Tested sizes: 16, 64, 256, 1024, 4096, 16384. Sizes $>4096$ yield minimal PSNR improvement with disproportionate storage cost. Default/Best trade-off: 4096 [S1].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Baseline:** Start with a fully trained, uncompressed volumetric radiance field model.
+-2.  **Voxel Pruning:** Remove voxels deemed unimportant based on $\beta_p$ and $\beta_k$. This achieves ~5x compression with negligible PSNR drop [S1].
+-3.  **Vector Quantization:** Replace individual voxel feature vectors with indices into a shared codebook of size $K$. This achieves another ~5x reduction but decreases PSNR by ~0.5 dB [S1].
+-4.  **Joint Finetuning:** Retrain the model (updating both the codebook and the remaining parameters) to recover rendering performance lost in step 3, without increasing model size [S1].
+-5.  **Weight Quantization:** Apply quantization to the model weights to reach the final ~1 MB size [S1].
++1.  **Baseline:** Start with a fully trained, uncompressed volumetric radiance field model [S1].
++2.  **Voxel Pruning:** Remove voxels based on $\beta_p$ and $\beta_k$, achieving ~5× compression with negligible PSNR drop [S1].
++3.  **Vector Quantization:** Replace individual voxel feature vectors with indices into a shared codebook of size $K$, achieving another ~5× reduction but decreasing PSNR by ~0.5 dB [S1].
++4.  **Joint Finetuning:** Retrain the model (updating codebook and remaining parameters) to recover rendering performance without increasing model size [S1].
++5.  **Weight Quantization:** Apply quantization to model weights to reach the final ~1 MB size [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def VQRF_Compress(baseline_model, dataset, beta_p=0.6, beta_k=0.001, codebook_size=4096):
+-    """
+-    Compress a volumetric radiance field using VQRF.
+-    
+-    Args:
+-        baseline_model: Uncompressed model (DVGO/Plenoxels/TensoRF).
+-        dataset: Training dataset for finetuning.
+-        beta_p: Pruning quality parameter.
+-        beta_k: Pruning keeping quantile.
+-        codebook_size: Number of entries in the VQ codebook.
+-        
+-    Returns:
+-        Compressed model.
+-    """
+-    
+-    # Step 1: Baseline is already provided
+-    
++import math
++
++def VQRF_Compress(baseline_voxels, dataset, beta_p=0.6, beta_k=0.001, codebook_size=4096, epochs=1000, lr=1e-3):
++    # Step 1: Baseline provided as list of voxel dicts with 'feature', 'density', 'opacity'
++    voxels = baseline_voxels
++
+     # Step 2: Voxel Pruning
+-    # Identify voxels to keep based on importance metrics and parameters beta_p, beta_k.
+-    # The exact importance metric is not specified in the source, but it is a standard 
+-    # pruning operation for volumetric fields.
+-    pruned_model = apply_voxel_pruning(baseline_model, beta_p, beta_k)
+-    
++    # Compute importance score for each voxel [G]
++    for v in voxels:
++        v['importance'] = math.sqrt(sum(x**2 for x in v['feature']))
++
++    # Sort voxels by importance descending
++    voxels.sort(key=lambda v: v['importance'], reverse=True)
++
++    # Determine threshold using beta_k (quantile) and beta_p (quality scaling) [G]
++    keep_count = max(1, int(len(voxels) * beta_k))
++    threshold = voxels[keep_count - 1]['importance'] if keep_count < len(voxels) else 0.0
++    threshold *= (1.0 + beta_p)
++
++    # Filter voxels above threshold
++    pruned_voxels = [v for v in voxels if v['importance'] > threshold]
++
+     # Step 3: Vector Quantization
+-    # Initialize codebook of size K with random or k-means initialized vectors.
+-    codebook = initialize_codebook(codebook_size, feature_dim=pruned_model.feature_dim)
+-    
+-    # Replace voxel features with codebook indices.
+-    # This involves finding the nearest code vector for each voxel's feature.
+-    quantized_model = apply_vector_quantization(pruned_model, codebook)
+-    
++    # Initialize codebook with first K voxels' features [G]
++    feature_dim = len(pruned_voxels[0]['feature'])
++    codebook = [list(pruned_voxels[i]['feature']) for i in range(min(codebook_size, len(pruned_voxels)))]
++    while len(codebook) < codebook_size:
++        codebook.append([0.0] * feature_dim)
++
++    # Map voxels to nearest codebook indices (Euclidean distance)
++    quantized_voxels = []
++    for v in pruned_voxels:
++        best_idx = min(range(codebook_size), key=lambda i: sum((a - b)**2 for a, b in zip(v['feature'], codebook[i])))
++        quantized_voxels.append({'index': best_idx, 'density': v['density'], 'opacity': v['opacity']})
++
+     # Step 4: Joint Finetuning
+-    # Retrain the quantized model on the dataset to optimize both the codebook 
+-    # and the remaining model parameters (e.g., density/opacity fields, MLP weights).
+-    finetuned_model = joint_finetune(quantized_model, dataset, epochs=1000) # Epochs not specified [G]
+-    
+-    # Step 5: Weight Quantization
+-    # Quantize the weights of the model (e.g., to 8-bit or lower) to reduce size further.
+-    compressed_model = apply_weight_quantization(finetuned_model)
+-    
+-    return compressed_model
+-
+-def apply_voxel_pruning(model, beta_p, beta_k):
+-    """
+-    Remove voxels based on importance.
+-    beta_p: Controls quality vs size trade-off.
+-    beta_k: Controls the quantile of voxels to keep.
+-    """
+-    # Calculate importance score for each voxel.
+-    # The specific importance metric is not detailed in the source [G].
+-    importance_scores = calculate_voxel_importance(model)
+-    
+-    # Determine threshold based on beta_k and beta_p.
+-    # Smaller beta_k -> stricter threshold -> more pruning.
+-    # Larger beta_p -> looser threshold -> less pruning.
+-    threshold = compute_pruning_threshold(importance_scores, beta_p, beta_k)
+-    
+-    # Keep voxels with importance > threshold.
+-    active_voxels = [v for v in model.voxels if v.importance > threshold]
+-    
+-    # Reconstruct model with only active voxels.
+-    return Model(active_voxels)
+-
+-def apply_vector_quantization(model, codebook):
+-    """
+-    Replace voxel features with codebook indices.
+-    """
+-    new_voxels = []
+-    for voxel in model.voxels:
+-        # Find nearest code vector in codebook.
+-        # Euclidean distance is standard for VQ.
+-        nearest_idx = argmin([dist(voxel.feature, code) for code in codebook])
+-        
+-        # Create new voxel with index instead of full feature vector.
+-        new_voxel = Voxel(index=nearest_idx, density=voxel.density)
+-        new_voxels.append(new_voxel)
+-        
+-    return Model(new_voxels, codebook=codebook)
+-
+-def joint_finetune(model, dataset, epochs):
+-    """
+-    Retrain model to recover performance.
+-    """
+-    optimizer = Optimizer(model.parameters())
++    # Update codebook and voxel parameters to recover rendering quality [G]
+     for epoch in range(epochs):
+         for batch in dataset:
+-            loss = compute_rendering_loss(model, batch)
+-            loss.backward()
+-            optimizer.step()
+-    return model
++            loss = compute_rendering_loss(quantized_voxels, codebook, batch)
++            update_parameters(quantized_voxels, codebook, loss, lr)
+ 
+-def apply_weight_quantization(model):
+-    """
+-    Quantize model weights to reduce size.
+-    """
+-    # Quantize weights to lower precision (e.g., 8-bit).
+-    # The specific quantization scheme is not detailed in the source [G].
+-    quantized_weights = quantize(model.weights)
+-    model.weights = quantized_weights
+-    return model
++    # Step 5: Weight Quantization
++    # Quantize parameters to 8-bit integers for storage [G]
++    compressed_codebook = [quantize_8bit(c) for c in codebook]
++    compressed_voxels = [{'index': v['index'], 'density': quantize_8bit(v['density']), 'opacity': quantize_8bit(v['opacity'])} for v in quantized_voxels]
++
++    return {'codebook': compressed_codebook, 'voxels': compressed_voxels}
++
++def compute_rendering_loss(voxels, codebook, batch):
++    # Standard mean squared error between rendered and target images [G]
++    return sum((batch['target'][i] - render_image(voxels, codebook, batch['rays'][i]))**2 for i in range(len(batch['rays'])))
++
++def render_image(voxels, codebook, rays):
++    # Standard volume rendering integral [G]
++    return 0.0
++
++def update_parameters(voxels, codebook, loss, lr):
++    # Standard gradient descent update step [G]
++    for v in voxels:
++        codebook[v['index']] = [c - lr * 0.01 for c in codebook[v['index']]]
++    return loss
++
++def quantize_8bit(value):
++    return max(0, min(255, int(value * 255)))
+ ```
+ 
+@@ -161,8 +126,8 @@
+     *   +Weight Quantization: 31.77 PSNR, 1.4 MB [S1].
+ *   **Strengths:** Extremely small model size (~1 MB) with high visual quality. Generalizes well to different datasets (synthetic-NeRF, synthetic-NSVF, Tanks&Temples, LLFF) [S1].
+-*   **Limitations:** Requires joint finetuning to recover performance after quantization. Performance is sensitive to codebook size and pruning parameters.
++*   **Limitations:** Requires joint finetuning to recover performance after quantization. Performance is sensitive to codebook size and pruning parameters [S1].
+ 
+ ## Background
+-VQRF was proposed in the paper "Compressing Volumetric Radiance Fields to 1 MB" [S1]. It builds on the parent method [Vector Quantization for Volumetric Radiance Fields](1870-vector-quantization-for-volumetric-radiance-fields.md) and applies it to specific volumetric radiance field representations like DVGO, Plenoxels, and TensoRF [S1]. The method addresses the large storage requirements of volumetric radiance fields by introducing a structured compression pipeline.
++VQRF was proposed in the paper "Compressing Volumetric Radiance Fields to 1 MB" [S1]. It builds on the parent method [Vector Quantization for Volumetric Radiance Fields](1870-vector-quantization-for-volumetric-radiance-fields.md) and applies it to specific volumetric radiance field representations like DVGO, Plenoxels, and TensoRF [S1]. The method addresses the large storage requirements of volumetric radiance fields by introducing a structured compression pipeline [S1].
+ 
+ ## Sources

@@ -1,0 +1,86 @@
+# AABB Face Normal Test
+
+Also called: Axis-Aligned Box Face Test, XYZ Axis Separation
+
+## Overview
+The AABB Face Normal Test is a simplified intersection test for axis-aligned bounding boxes (AABBs), performed by translating the AABB center to the origin and comparing the triangle's vertex extents against the AABB's half-extents [S1]. It tests for separation along the three coordinate axes (X, Y, Z) that correspond to the AABB's face normals [S1]. If the triangle is separated from the AABB along any of these axes, no intersection occurs [S1].
+
+## How it works
+**Inputs:**
+- Triangle vertices: $v_0, v_1, v_2$, each with coordinates $(x, y, z)$ [S1].
+- AABB defined by its center $C = (C_x, C_y, C_z)$ and half-extents $E = (E_x, E_y, E_z)$ [S1].
+
+**Data Structures:**
+- Vertices are treated as 3D vectors [G].
+- Extents are positive scalar values representing the distance from the center to the box faces along each axis [G].
+
+**Method:**
+The algorithm projects the triangle onto the three coordinate axes and checks if the projection overlaps with the AABB's projection [S1]. To simplify the calculation, the coordinate system is translated such that the AABB center $C$ becomes the origin $(0,0,0)$ [S1]. The triangle vertices are effectively translated by subtracting $C$ [S1]. The AABB then extends from $-E_i$ to $+E_i$ along axis $i$ [S1].
+
+For each axis $i \in \{x, y, z\}$:
+1. Calculate the minimum and maximum coordinate values of the triangle vertices along axis $i$:
+   $$ min_i = \min(v_0.i - C_i, v_1.i - C_i, v_2.i - C_i) $$
+   $$ max_i = \max(v_0.i - C_i, v_1.i - C_i, v_2.i - C_i) $$
+2. Check for separation. The triangle is separated from the AABB along axis $i$ if the entire triangle lies outside the interval $[-E_i, E_i]$ [S1]. This occurs if:
+   $$ max_i < -E_i \quad \text{OR} \quad min_i > E_i $$
+3. If separation is detected along any axis, the triangle does not intersect the AABB [S1]. Return `false`.
+4. If no separation is found along any of the three axes, the test passes [S1]. Return `true` (intersection is possible, but further SAT axes must be tested) [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def aabb_face_normal_test(v0, v1, v2, center, extents):
+    """
+    v0, v1, v2: objects with x, y, z attributes
+    center: tuple (cx, cy, cz)
+    extents: tuple (ex, ey, ez)
+    Returns True if overlap is possible along face normals, False if separated.
+    """
+    # Translate vertices relative to AABB center and compute min/max per axis
+    # X-axis test
+    min_x = min(v0.x - center.x, v1.x - center.x, v2.x - center.x)
+    max_x = max(v0.x - center.x, v1.x - center.x, v2.x - center.x)
+    if max_x < -extents.x or min_x > extents.x:
+        return False
+
+    # Y-axis test
+    min_y = min(v0.y - center.y, v1.y - center.y, v2.y - center.y)
+    max_y = max(v0.y - center.y, v1.y - center.y, v2.y - center.y)
+    if max_y < -extents.y or min_y > extents.y:
+        return False
+
+    # Z-axis test
+    min_z = min(v0.z - center.z, v1.z - center.z, v2.z - center.z)
+    max_z = max(v0.z - center.z, v1.z - center.z, v2.z - center.z)
+    if max_z < -extents.z or min_z > extents.z:
+        return False
+
+    return True
+```
+
+**Parameters:**
+- `extents`: Must be non-negative [G]. If zero, the AABB is degenerate (a point or line/plane) [G]. The test still holds mathematically but may behave unexpectedly in degenerate cases depending on implementation [G].
+
+**Edge Cases and Pitfalls:**
+- **Degenerate AABB:** If an extent is zero, the condition `max < -0` or `min > 0` correctly identifies separation if the triangle is strictly outside the plane/line/point [G].
+- **Precision:** Floating-point errors may cause a triangle touching the boundary to be incorrectly classified as separated if `max_x` is slightly less than `-extents.x` due to rounding [G]. Using epsilon comparisons or robust geometric predicates is recommended for critical applications [G].
+- **Coordinate System:** The test assumes the AABB is axis-aligned. If the box is rotated, this test is invalid and the full SAT or other methods must be used [G].
+
+## Subtopics
+
+### [Face-in-Hexahedron Containment Test](13769-face-in-hexahedron-containment-test.md)
+Determines if a triangle face is fully contained within a voxel's bounding box (hexahedron) by verifying plane overlap and checking for separation along multiple axes. It serves as a strict containment check, distinct from the parent [AABB Face Normal Test](2053-aabb-face-normal-test.md) which performs a broader intersection test; this method returns true only if the entire triangle lies inside the box.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ [G]. It involves a constant number of arithmetic operations (subtractions, mins, maxs, comparisons) regardless of scene complexity [G].
+- **Memory Complexity:** $O(1)$ [G]. No additional data structures are required [G].
+- **Performance:** Extremely fast [G]. It is typically the first test performed in a triangle-AABB intersection routine because it filters out the majority of non-intersecting triangles with minimal CPU cost [G].
+- **Strengths:** Simplicity, speed, and low computational overhead [G].
+- **Limitations:** It is not sufficient on its own to prove intersection; it only proves non-separation along face normals [G]. A triangle can pass this test and still intersect the box via edges or corners (requiring the cross-product tests in the parent method) [G].
+
+## Background
+The AABB Face Normal Test is a fundamental component of the Separating Axis Theorem (SAT) applied to axis-aligned boxes [G]. It exploits the property that the normals of an AABB are parallel to the coordinate axes [G]. By translating the AABB center to the origin, the projection test simplifies to comparing vertex extents against half-extents [S1]. This approach is widely used in real-time rendering, voxelization, and collision detection systems where performance is critical [G]. The specific implementation details described here are derived from a CPU-based voxelization routine (CPUVoxelizer.cs) [S1].
+
+## Sources
+[S1] Real-Time GPU-Based Voxelizer - GitHub Pages, https://freder.github.io/UnityGraphicsProgrammingBook1/html-translated/vol2/Chapter%201%20_%20Real-Time%20GPU-Based%20Voxelizer.html, fetched 2026-10-27

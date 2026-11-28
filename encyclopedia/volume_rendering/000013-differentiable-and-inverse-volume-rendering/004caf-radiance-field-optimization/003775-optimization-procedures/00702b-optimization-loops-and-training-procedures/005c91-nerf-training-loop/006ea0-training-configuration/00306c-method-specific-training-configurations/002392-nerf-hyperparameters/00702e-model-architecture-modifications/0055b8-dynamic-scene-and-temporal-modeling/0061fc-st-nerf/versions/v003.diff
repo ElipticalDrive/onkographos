@@ -1,0 +1,179 @@
+--- v002.md
++++ v003.md
+@@ -1,63 +1,133 @@
+ # ST-NeRF
++
+ Also called: Spatially and temporally consistent NeRF
+ 
+ ## Overview
+-ST-NeRF is a layered neural radiance field representation designed for editable free-viewpoint videos of dynamic scenes [S1, unofficial][S2]. It solves the problem of disentangling spatial and temporal variations in moving objects by assigning each independently moving or articulated entity to a separate layer [S1, unofficial]. Unlike monolithic dynamic NeRFs, ST-NeRF explicitly models space-time coherence through a deformation module and a canonical space radiance module, enabling direct spatial and temporal editing of individual entities [S1, unofficial][S2].
++ST-NeRF is a layered neural radiance field representation designed for editable free-viewpoint videos of dynamic scenes [S1, unofficial][S2]. It solves the problem of modeling independently moving and articulated objects by assigning each entity its own continuous function spanning space and time, thereby disentangling position, deformation, and appearance [S1, unofficial][S2]. Unlike monolithic dynamic NeRFs, ST-NeRF enables explicit spatial and temporal editing (e.g., rescaling, shifting, removal) by treating scene entities as separate layers rendered via ray-box intersection [S1, unofficial][S2].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:** A set of synchronized multi-view videos (typically 16 cameras arranged in a half-circle) and human-background segmentation masks [S1, unofficial]. The model also accepts timestamps (or frame numbers) to account for temporal evolution [S1, unofficial][S2].
+-*   **Outputs:** Accumulated density $\sigma$ and view-dependent color $\mathbf{c}$ for rays cast through the scene layers [S1, unofficial].
++**Inputs and Outputs:**
++*   **Inputs:** A set of $N$ synchronized videos (typically $N=16$) captured from cameras at regular intervals in a half-circle [S1, unofficial]. For each frame, human-background segmentation masks are required [S1, unofficial]. The model also accepts a timestamp $t$ (or frame number) [S1, unofficial][S2].
++*   **Outputs:** Accumulated density $\sigma$ and view-dependent color $\mathbf{c}$ for novel views [S1, unofficial].
+ 
+-**Data Structures**
+-The scene is represented as a collection of layers, where each layer corresponds to a distinct dynamic entity (e.g., a performer) [S1, unofficial][S2]. Each layer contains:
+-1.  A **Space-Time Deformation Module**: A neural network that maps 3D spatial coordinates $\mathbf{x}$ and time $t$ to a canonical space [S1, unofficial][S2].
+-2.  A **Neural Radiance Module**: A standard NeRF MLP that maps canonical coordinates and viewing direction $\mathbf{d}$ to density $\sigma$ and color $\mathbf{c}$ [S1, unofficial][S2].
++**Data Structures:**
++The scene is represented as a set of layers, one for each dynamic entity (e.g., performer, background) [S1, unofficial]. Each layer $i$ consists of:
++1.  **Bounding Box:** Defines the spatial extent of the entity [S1, unofficial].
++2.  **Space-Time Deformation Module:** A neural network $D_i(\mathbf{x}, t)$ that predicts a displacement or transformation [S1, unofficial][S2].
++3.  **Canonical Radiance Module:** A standard NeRF MLP $R_i(\mathbf{x}', \mathbf{d})$ that outputs density and color from the canonical space [S1, unofficial][S2].
+ 
+-**Algorithm**
+-1.  **Layer Initialization:** For each dynamic entity in the scene, initialize a separate layer with its own deformation and radiance networks [S1, unofficial][S2].
+-2.  **Time Encoding:** Encode the input timestamp $t$ (or frame number) directly into the model parameters or as an input feature to facilitate the disentanglement of space and time [S2].
+-3.  **Deformation:** For a query point $\mathbf{x}$ at time $t$, pass $(\mathbf{x}, t)$ through the Space-Time Deformation Module of the relevant layer to obtain the canonical coordinate $\mathbf{x}'$ [S1, unofficial][S2].
+-    $$ \mathbf{x}' = \mathcal{D}_i(\mathbf{x}, t) $$
+-    where $\mathcal{D}_i$ is the deformation network for layer $i$ [S1, unofficial].
+-4.  **Radiance Query:** Pass the canonical coordinate $\mathbf{x}'$, viewing direction $\mathbf{d}$, and potentially the timestamp $t$ into the Neural Radiance Module of layer $i$ to obtain density $\sigma_i$ and color $\mathbf{c}_i$ [S1, unofficial][S2].
+-    $$ \sigma_i, \mathbf{c}_i = \mathcal{R}_i(\mathbf{x}', \mathbf{d}, t) $$
+-    where $\mathcal{R}_i$ is the radiance network for layer $i$ [S1, unofficial].
+-5.  **Rendering:** Cast rays through the scene. For each ray, determine intersections with the bounding boxes of the layers [S1, unofficial][S2]. Sample points along the ray within each intersected layer. Accumulate density and color using the standard volume rendering integral, summing contributions from all layers [S1, unofficial].
+-    $$ \mathbf{C}(\mathbf{r}) = \sum_{i} \sum_{k} T_{i,k} (1 - \exp(-\sigma_{i,k} \delta_k)) \mathbf{c}_{i,k} $$
+-    where $T_{i,k}$ is the accumulated transmittance up to sample $k$ in layer $i$, and $\delta_k$ is the distance between samples [S1, unofficial][S2].
++**Algorithm:**
++1.  **Encoding:** The timestamp $t$ (frame number) is directly encoded into the model, often via positional encoding or concatenation, to facilitate space-time disentanglement [S1, unofficial][S2].
++2.  **Ray Casting:** For a target viewpoint, cast a ray $\mathbf{r}$.
++3.  **Layer Intersection:** Determine which scene layers the ray intersects using ray-box intersection tests against the bounding boxes of each entity [S2].
++4.  **Deformation:** For each intersected layer $i$, sample points $\mathbf{x}$ along the ray. Pass $\mathbf{x}$ and $t$ to the space-time deformation module $D_i$ to obtain the canonical coordinate $\mathbf{x}' = D_i(\mathbf{x}, t)$ [S1, unofficial][S2].
++5.  **Radiance Evaluation:** Query the canonical radiance module $R_i$ with $\mathbf{x}'$ and viewing direction $\mathbf{d}$ to get density $\sigma_i$ and color $\mathbf{c}_i$ [S1, unofficial][S2].
++6.  **Volume Rendering:** Accumulate density and color across all intersected layers using standard volume rendering integration [S1, unofficial].
+ 
+-**Parameters**
+-*   **Number of Layers:** Equal to the number of independently moving entities [S1, unofficial].
+-*   **Camera Setup:** 16 synchronized cameras in a half-circle arrangement [S1, unofficial].
+-*   **Segmentation:** Human-background masks are required as input [S1, unofficial].
++**Pseudocode:**
++```python
++def render_st_nerf(ray_origin, ray_direction, timestamp, layers):
++    """
++    ray_origin: (3,) float32
++    ray_direction: (3,) float32
++    timestamp: float32 (frame number)
++    layers: list of Layer objects
++    """
++    accumulated_color = [0.0, 0.0, 0.0]
++    accumulated_alpha = 0.0
++    
++    # Sort layers by distance from camera for correct alpha blending
++    # Note: Sorting logic depends on specific implementation of layer depth
++    sorted_layers = sort_layers_by_depth(layers, ray_origin)
++    
++    for layer in sorted_layers:
++        # 1. Ray-Box Intersection
++        t_min, t_max = ray_box_intersection(ray_origin, ray_direction, layer.bounding_box)
++        if t_min is None:
++            continue
++            
++        # 2. Sample points along the ray segment within the box
++        # In practice, multiple samples are taken; here simplified to one representative point
++        # or integrated over the segment.
++        num_samples = 32
++        t_vals = linspace(t_min, t_max, num_samples)
++        points = ray_origin + ray_direction * t_vals[:, None]
++        
++        for point in points:
++            # 3. Space-Time Deformation
++            # D_i maps (x, t) -> x' (canonical space)
++            canonical_point = layer.deformation_module(point, timestamp)
++            
++            # 4. Canonical Radiance Query
++            # R_i maps (x', d) -> (sigma, c)
++            sigma, color = layer.radiance_module(canonical_point, ray_direction)
++            
++            # 5. Volume Rendering Step
++            # alpha = 1 - exp(-sigma * delta_t)
++            delta_t = t_max - t_min
++            alpha = 1.0 - exp(-sigma * delta_t)
++            
++            # Weight = alpha * (1 - accumulated_alpha)
++            weight = alpha * (1.0 - accumulated_alpha)
++            
++            accumulated_color += weight * color
++            accumulated_alpha += weight
++            
++            if accumulated_alpha > 0.99:
++                break
++                
++    return accumulated_color
+ 
+-**Edge Cases and Pitfalls**
+-*   **Occlusion:** The layered representation assumes entities can be disentangled. Heavy occlusion between layers may complicate the assignment of rays to specific layers [S1, unofficial].
+-*   **Non-Rigid Editing:** The current implementation focuses on rigid transformations (rescaling, shifting) and temporal rearrangements. Non-rigid scene editing is noted as a future direction, implying current limitations in handling complex deformations beyond the learned space-time deformation [S1, unofficial].
++def ray_box_intersection(origin, direction, bbox):
++    """
++    Returns (t_min, t_max) or (None, None) if no intersection.
++    bbox: [min_x, min_y, min_z, max_x, max_y, max_z]
++    """
++    t_min = -inf
++    t_max = inf
++    
++    for i in range(3):
++        if direction[i] == 0:
++            if origin[i] < bbox[i] or origin[i] > bbox[i+3]:
++                return None, None
++        else:
++            t1 = (bbox[i] - origin[i]) / direction[i]
++            t2 = (bbox[i+3] - origin[i]) / direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++            
++    if t_min > t_max:
++        return None, None
++    return t_min, t_max
++```
++
++**Parameters:**
++*   **Input Views:** 16 synchronized videos [S1, unofficial].
++*   **Camera Arrangement:** Regular intervals in a half-circle [S1, unofficial].
++*   **Segmentation:** Human-background masks required for layer separation [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Occlusion:** Ray-box intersection must handle occlusions correctly; layers behind occluders should not contribute [S2].
++*   **Non-Rigid Editing:** The method currently supports rigid transformations (rescaling, shifting) and removal; non-rigid editing is noted as future work [S1, unofficial].
++*   **View Count:** Performance degrades if the number of input views is reduced below the recommended 16 [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Neural Scene Graph (NSG)
+-A related layered representation that uses bounding boxes for objects and disentangles positions, deformations, and appearance. It supports background-foreground decomposition and scene editing [S1, unofficial].
++### Layered NeRFs
++Methods that decompose a scene into independent bounding-boxed entities, each with its own radiance field, enabling efficient rendering and editing [S2].
+ 
+-### AutoRF
+-Builds a full 3D radiance field for each object within a bounding box, allowing efficient rendering by focusing on ray-box intersections [S2].
+-
+-### PNF (Parametric Neural Fields)
+-Represents dynamic scenes using parametric fields for individual objects, enabling independent manipulation [S2].
+-
+-### Dis-CoScene
+-Disentangles scene components into separate radiance fields for efficient editing and rendering [S2].
++### Deformation Fields
++Techniques that warp dynamic points to a canonical space using a learned displacement field, allowing static NeRFs to model dynamics [S1, unofficial][S2].
+ 
+ ## Operating characteristics
+-*   **Complexity:** Rendering complexity scales with the number of layers and the number of samples per layer. Ray-box intersection tests are required to determine which layers to sample [S2].
+-*   **Strengths:** Enables direct spatial editing (affine transformation, insertion, removal) and temporal editing (re-timing) of individual entities [S2]. Provides spatial and temporal consistency through explicit deformation modeling [S1, unofficial].
+-*   **Limitations:** Requires segmented input data (human-background masks) and multiple synchronized views [S1, unofficial]. Reducing the number of input views is an open challenge [S1, unofficial]. Non-rigid editing is not fully supported in the current formulation [S1, unofficial].
+-*   **When to use:** When editing specific dynamic entities in a scene (e.g., rescaling, removing, or re-timing a performer) is required, and multi-view segmented data is available [S1, unofficial][S2].
+-*   **When not to use:** For scenes with unsegmented, densely interacting dynamic objects where layer separation is ambiguous, or when only monocular input is available [S1, unofficial].
++*   **Time Complexity:** Rendering time scales with the number of intersected layers and samples per layer. Ray-box intersection adds overhead but culls non-intersecting layers [S2].
++*   **Memory Complexity:** Memory usage scales with the number of layers and the size of each layer's MLP [S1, unofficial][S2].
++*   **Strengths:** Enables explicit spatial and temporal editing (affine transformation, insertion, removal, re-timing) [S1, unofficial][S2]. Disentangles position, deformation, and appearance [S1, unofficial].
++*   **Limitations:** Requires segmentation masks for layer separation [S1, unofficial]. Limited to rigid editing; non-rigid editing is not supported [S1, unofficial]. Requires multiple synchronized views (16) [S1, unofficial].
++*   **When to Use:** When editable free-viewpoint video is required with distinct moving entities [S1, unofficial][S2].
++*   **When Not to Use:** For fully dense, unstructured dynamic scenes without clear object boundaries [S1, unofficial].
+ 
+ ## Background
+-ST-NeRF was introduced by Zhang et al. [JXX∗ 21] as a layered representation for editable free-viewpoint videos [S1, unofficial]. It builds on the principles of neural radiance fields and extends them to dynamic scenes by explicitly modeling space-time coherence [S1, unofficial]. The method is part of a broader family of neural scene graph and layered representation approaches that aim to disentangle scene components for editing and understanding [S1, unofficial][S2]. Applications include background-foreground decomposition, enriching training datasets for automotive perception, and improved object detection and scene understanding [S1, unofficial].
++ST-NeRF was introduced by Zhang et al. [JXX∗ 21] as a layered representation for editable free-viewpoint videos [S1, unofficial]. It builds on the concept of neural scene graphs and bounding-box-based radiance fields [S2]. The method addresses the need for spatial and temporal consistency in dynamic scenes while allowing for neural scene editing [S1, unofficial]. Future work includes reducing input view requirements and enabling non-rigid editing [S1, unofficial].
+ 
+ ## Sources

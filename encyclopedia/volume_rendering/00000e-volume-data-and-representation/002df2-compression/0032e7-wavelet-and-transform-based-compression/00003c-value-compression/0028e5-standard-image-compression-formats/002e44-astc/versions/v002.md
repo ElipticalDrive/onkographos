@@ -1,0 +1,56 @@
+# ASTC
+Also called: ASTC Decompression, Adaptive Scalable Texture Compression
+
+## Overview
+ASTC is a flexible, hardware-supported fixed-rate lossy compression method designed for texture and volumetric data, utilizing variable block-size configurations to cover a wide range of bit rates [S1, S2]. It distinguishes itself from siblings like [Variable-Block Color Compression](1878-variable-block-color-compression.md) by its standardized, scalable block structures and its specific capability to represent value sequences using a fractional number of bits per value, enabling efficient on-the-fly reconstruction for direct volume rendering [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A block of volumetric data (texels/voxels) of size $N_x \times N_y \times N_z$.
+*   **Output:** A compressed bitstream representing the block, and a decompression routine that reconstructs per-texel values from the bitstream.
+
+**Data Structures:**
+The compressed data structure is not fully detailed in the provided sources, but it is implied to contain:
+1.  Block type/configuration identifier (determining block size and encoding mode).
+2.  Quantization endpoints and interpolation weights (encoded using a fractional number of bits per value).
+3.  Sparse sample indices or weights for reconstruction [S1, S2].
+
+**Numbered Steps:**
+1.  **Block Partitioning:** Divide the volume into fixed-size spatial blocks. ASTC supports multiple block size configurations (e.g., $3\times3\times3$, $6\times6\times6$ for 3D data) [S1, S2].
+2.  **Quantization:** Quantize the values within each block using a limited set of endpoints and interpolation weights. The method represents value sequences using a fractional number of bits per value, allowing for flexible bit-rate adaptation [S1, S2].
+3.  **Weight Construction:** Construct per-texel color weights from sparse samples. This step involves determining the contribution of each sample to the final reconstructed value based on the block's encoding [S1, S2].
+4.  **Bitstream Generation:** Encode the block type, endpoints, weights, and sparse sample information into a fixed-rate bitstream. The bitstream is designed for hardware-accelerated decoding [S1, S2].
+5.  **Decompression (On-the-fly):** During rendering, the GPU texture unit decodes the bitstream directly. It reconstructs the voxel value in real-time by applying the interpolation weights to the sparse samples, without storing the full decompressed volume in system memory [S1, S2].
+
+**Formulas:**
+*   **Bits per Sample (bps):** The bit rate is determined by the block size and the fixed bit budget per block. For 3D textures:
+    *   $6\times6\times6$ blocks result in $0.56$ bps [S1, S2].
+    *   $3\times3\times3$ blocks result in $4.74$ bps [S1, S2].
+*   **Reconstruction:** The value $V$ of a texel is reconstructed from sparse samples $S_i$ and weights $W_i$:
+    $$ V = \sum_{i} W_i \cdot S_i $$
+    where $W_i$ are the per-texel color weights constructed from the compressed data [S1, S2].
+
+**Parameters:**
+*   **Block Sizes:** Variable. Common 3D configurations include $3\times3\times3$ and $6\times6\times6$ [S1, S2].
+*   **Bit Rate:** Ranges from $0.56$ bps ($6\times6\times6$) to $4.74$ bps ($3\times3\times3$) for 3D data [S1, S2].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The use of fractional bits per value requires careful handling of precision during interpolation to avoid visual artifacts [S1, S2].
+*   **Hardware Support:** The method relies on hardware-accelerated decompression. If the target hardware does not support the specific ASTC block configurations, fallback software decoding may be required, which is not covered in the sources [S1, S2].
+*   **3D Specification Status:** The sources note that the 3D part of the full ASTC specification was still undergoing evaluation for inclusion in OpenGL releases at the time of writing, which may impact implementation stability [S1, S2].
+
+## Operating characteristics
+*   **Time Complexity:** Decompression is $O(1)$ per block, as it is performed by hardware texture units in a single render pass [S1, S2].
+*   **Memory Complexity:** The compressed data size is fixed per block. For 3D, $6\times6\times6$ blocks use $0.56$ bps, and $3\times3\times3$ blocks use $4.74$ bps [S1, S2].
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Flexible bit-rate coverage, hardware-accelerated random access, and efficient on-the-fly reconstruction for direct volume rendering [S1, S2].
+*   **Limitations:** Reliance on hardware support; the 3D specification status was uncertain at the time of the sources [S1, S2].
+*   **When to Use:** When real-time direct volume rendering is required with limited memory bandwidth and hardware support for ASTC is available [S1, S2].
+*   **When Not to Use:** When the target hardware does not support ASTC decompression or when the 3D specification is not yet standardized for the target platform [S1, S2].
+
+## Background
+ASTC was introduced by Nishita et al. [NLP* 12] as a fixed-rate lossy texture compression method that is scalable and adaptive [S1, S2]. It shares similarities with S3TC and supports hardware-accelerated random access [S2]. The method was proposed to improve upon industry standards such as DXT [Bro01], ETC2 [SP07], and PVRTC [Fen03] [S1, S2]. The 3D part of the specification was under evaluation for OpenGL inclusion as of 2012 [S1, S2].
+
+## Sources
+[S1] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S2] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

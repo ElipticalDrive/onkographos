@@ -1,0 +1,260 @@
+--- v002.md
++++ v003.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Time-varying volume data (scalar field), current time step, user-supplied error tolerance for standard deviation ($\epsilon_{std}$), and user-supplied error tolerance for temporal coherence ($\epsilon_{temp}$).
++*   **Input:** Time-varying volume data (scalar field), current time step, user-supplied error tolerance for standard deviation ($\epsilon_{std}$), and user-supplied error tolerance for temporal coherence ($\epsilon_{temp}$) [S1, unofficial].
+ *   **Output:** A rendered image composed of intermediate results from subvolumes, with intermediate results cached in the tree nodes for reuse [S1, unofficial].
+ 
+@@ -16,9 +16,6 @@
+ 2.  **Temporal Component:** Each octree node contains a binary time tree representing the time span $[0, t]$ [S1, unofficial].
+ 3.  **Node Layout:**
+-    *   **Octree Node:** Represents a spatial subdomain.
+-    *   **Binary Time Tree Node:** Associated with an octree node, it represents the same spatial subdomain but a different time span. It stores:
+-        *   Mean value of voxels in the subvolume across all time steps in that span.
+-        *   Standard deviation of voxel values.
+-        *   A measurement of temporal coherence for the subvolume within the time span [S1, unofficial].
++    *   **Octree Node:** Represents a spatial subdomain [S1, unofficial].
++    *   **Binary Time Tree Node:** Associated with an octree node, it represents the same spatial subdomain but a different time span [S1, unofficial]. It stores: Mean value of voxels in the subvolume across all time steps in that span, standard deviation of voxel values, and a measurement of temporal coherence for the subvolume within the time span [S1, unofficial].
+     *   **Leaf Nodes:** The leaf nodes of the TSP tree (octree leaves) are volume bricks, not individual voxels, with a predefined minimum size [S1, unofficial].
+ 
+@@ -35,6 +32,5 @@
+ 
+ *   **Temporal Coherence:**
+-    To quantify temporal coherence for a time span $[t_1, t_2]$, treat each voxel as an independent variable. Compute the standard deviation of each voxel over the time span, then average these values [S1, unofficial].
+-    Let $s(v_i)$ be the standard deviation of voxel $v_i$ in the time span $[t_1, t_2]$, and $n$ be the number of voxels within the subvolume [S1, unofficial].
++    To quantify temporal coherence for a time span $[t_1, t_2]$, treat each voxel as an independent variable [S1, unofficial]. Compute the standard deviation of each voxel over the time span, then average these values [S1, unofficial]. Let $s(v_i)$ be the standard deviation of voxel $v_i$ in the time span $[t_1, t_2]$, and $n$ be the number of voxels within the subvolume [S1, unofficial].
+     $$ s(v_i) = \sqrt{\frac{1}{t_2 - t_1 + 1} \sum_{t=t_1}^{t_2} (v_{i,t} - \bar{v}_i)^2} $$
+     $$ \text{Temporal Coherence} = \frac{1}{n} \sum_{i=1}^{n} s(v_i) $$
+@@ -65,181 +61,57 @@
+ 
+ ```python
+-def render_tsp_tree(root_node, current_time, epsilon_std, epsilon_temp):
+-    """
+-    Renders a time-varying volume using the TSP tree.
+-    :param root_node: The root of the TSP tree (Octree root).
+-    :param current_time: The current time step index.
+-    :param epsilon_std: User-supplied tolerance for standard deviation.
+-    :param epsilon_temp: User-supplied tolerance for temporal coherence.
+-    :return: Composed image.
+-    """
++def render_tsp_tree(root, current_time, epsilon_std, epsilon_temp):
+     subvolumes = []
+-    traverse_octree(root_node, current_time, epsilon_std, epsilon_temp, subvolumes)
+-    
+-    # Divide-and-conquer rendering
+-    intermediate_results = []
+-    for subvolume in subvolumes:
+-        result = render_subvolume(subvolume)
+-        intermediate_results.append(result)
+-        
++    traverse_octree(root, current_time, epsilon_std, epsilon_temp, subvolumes)
++    intermediate_results = [render_subvolume(sv) for sv in subvolumes]
+     return compose_results(intermediate_results)
+ 
+ def traverse_octree(node, current_time, epsilon_std, epsilon_temp, subvolumes):
+-    """
+-    Recursively traverses the spatial octree.
+-    """
+-    # Check if leaf node (brick)
+-    if node.is_leaf():
+-        # Perform temporal check on the binary time tree associated with this octree node
+-        time_tree_node = node.binary_time_tree_root
+-        temporal_result = traverse_time_tree(time_tree_node, current_time, epsilon_std, epsilon_temp)
+-        
+-        if temporal_result == "USE_MEAN":
+-            # Render subvolume using mean value
+-            subvolume = Subvolume(node.spatial_bounds, node.mean_value)
+-            subvolumes.append(subvolume)
+-        elif temporal_result == "RECURSE_SPATIAL":
+-            # Cannot use mean, need actual data. 
+-            # In TSP, if we recurse spatially, we usually go to children.
+-            # However, if this is a leaf brick, we must render it with actual data.
+-            # The source implies returning to main routine to go to children.
+-            # If leaf, we treat it as a subvolume requiring actual data rendering.
+-            subvolume = Subvolume(node.spatial_bounds, node.data) # Actual data
+-            subvolumes.append(subvolume)
++    action = traverse_time_tree(node.time_tree_root, current_time, epsilon_std, epsilon_temp)
++    if action == "USE_MEAN":
++        subvolumes.append(Subvolume(node.bounds, node.time_tree_root.mean_value))
++        return
++    elif action == "RECURSE_SPATIAL":
++        pass
++    elif action == "USE_ACTUAL_DATA":
++        subvolumes.append(Subvolume(node.bounds, node.data))
+         return
+ 
+-    # Internal octree node: Check spatial coherence first?
+-    # Source says: "recursively visit the tree node starting from the root to check if its 
+-    # spatial and temporal coherence satisfy the user’s tolerance. If yes, we render this 
+-    # subvolume as a whole. Otherwise we walk down to its eight children..."
+-    # Note: Spatial coherence is often implied by the mean/std deviation check in the time tree 
+-    # or a separate spatial check. The source links spatial coherence to the standard deviation 
+-    # check in the time tree context for the specific time span.
+-    
+-    # Let's assume we check the time tree root for the current time span to decide 
+-    # if we can render the whole spatial subvolume (node) or must split.
+-    time_tree_node = node.binary_time_tree_root
+-    
+-    # Check temporal coherence for the full time span [0, current_time] or relevant span
+-    # The source says: "Check if temporal coherence measure at this node is smaller than 
+-    # the user tolerance. If no, traverse down to the branch... corresponding to the current time"
+-    
+-    if time_tree_node.temporal_coherence < epsilon_temp:
+-        # Temporal coherence is good. Check spatial coherence (std dev).
+-        if time_tree_node.standard_deviation < epsilon_std:
+-            # Both good. Render as whole.
+-            subvolume = Subvolume(node.spatial_bounds, time_tree_node.mean_value)
+-            subvolumes.append(subvolume)
+-            return
+-        else:
+-            # Spatial coherence bad. Must recurse spatially.
+-            pass
+-    else:
+-        # Temporal coherence bad. Must recurse temporally? 
+-        # Source: "If no [temporal coherence < tolerance], traverse down to the branch 
+-        # of the time tree that corresponds to the current time and repeat this step"
+-        # This implies we stay at this spatial node but go deeper in time tree.
+-        # However, the main loop is spatial traversal.
+-        # The source structure: "For each TSP node... perform error checking... 
+-        # If temporal coherence not smaller... traverse down... If temporal coherence smaller... 
+-        # check std dev... If std dev not smaller... return to main TSP traversal routine 
+-        # and indicate need to go down to children."
+-        
+-        # So, if temporal coherence is BAD, we don't necessarily recurse spatially immediately.
+-        # We recurse temporally within the time tree.
+-        # But the main function is `traverse_octree`.
+-        # Let's refine: The TSP traversal is an octree traversal. At each node, we check 
+-        # the time tree.
+-        
+-        # Re-reading carefully:
+-        # 1. Regular octree traversal.
+-        # 2. Check if spatial and temporal coherence satisfy tolerance.
+-        # 3. If yes -> render whole.
+-        # 4. If no -> walk down to 8 children.
+-        
+-        # How is "spatial and temporal coherence" checked?
+-        # "For each TSP node... start error checking from root of time tree...
+-        # Check temporal coherence... If no, traverse down time tree...
+-        # If yes, check std dev... If yes, use mean... If no, return to main TSP traversal 
+-        # and indicate need to go down to children."
+-        
+-        # This implies the "Check" happens inside the node processing.
+-        # If we return "RECURSE_SPATIAL", the caller (octree traversal) goes to children.
+-        
+-        # So, if temporal coherence is BAD, we cannot render the whole node.
+-        # Do we recurse spatially? The source says "If no [temporal coherence], traverse down 
+-        # time tree". This suggests we might find a time span where coherence is good?
+-        # But we are rendering at a specific `current_time`.
+-        # If the time tree root has bad temporal coherence for the whole range, 
+-        # we go down the time tree branch for `current_time`.
+-        # Eventually we reach a leaf in the time tree (unit time step) or a node with good coherence.
+-        
+-        # If we reach a time tree node with good temporal coherence but bad std dev,
+-        # we return "RECURSE_SPATIAL".
+-        
+-        # If we reach a time tree leaf (unit time step) and it still has bad std dev?
+-        # Then we must use actual data.
+-        
+-        # Let's implement the time tree traversal logic explicitly.
+-        
+-        time_tree_result = traverse_time_tree(time_tree_node, current_time, epsilon_std, epsilon_temp)
+-        
+-        if time_tree_result == "USE_MEAN":
+-            subvolume = Subvolume(node.spatial_bounds, time_tree_node.mean_value)
+-            subvolumes.append(subvolume)
+-            return
+-        elif time_tree_result == "RECURSE_SPATIAL":
+-            # Fall through to recurse spatially
+-            pass
+-        elif time_tree_result == "USE_ACTUAL_DATA":
+-            # This happens if we hit a time tree leaf and std dev is still too high?
+-            # Or if temporal coherence was never satisfied?
+-            # Source: "If standard deviation is not smaller than tolerance, return to main TSP 
+-            # traversal routine and indicate the need to go down to the children"
+-            # This implies we don't render the current node with actual data directly in this path,
+-            # but rather split spatially.
+-            pass
+-
+-    # Recurse spatially
+     for child in node.children:
+         traverse_octree(child, current_time, epsilon_std, epsilon_temp, subvolumes)
+ 
+ def traverse_time_tree(node, current_time, epsilon_std, epsilon_temp):
+-    """
+-    Traverses the binary time tree associated with an octree node.
+-    :return: "USE_MEAN", "RECURSE_SPATIAL", or "USE_ACTUAL_DATA"
+-    """
+-    # Check temporal coherence
+     if node.temporal_coherence < epsilon_temp:
+-        # Temporal coherence is acceptable. Check spatial coherence (std dev).
+         if node.standard_deviation < epsilon_std:
+             return "USE_MEAN"
+         else:
+-            # Spatial coherence is bad. Need to split spatially.
+             return "RECURSE_SPATIAL"
+     else:
+-        # Temporal coherence is bad.
+-        # Traverse down to the branch corresponding to current_time.
+-        # Assuming binary tree splits time span [t1, t2] into [t1, mid] and [mid+1, t2]
+         if current_time <= node.mid_time:
+-            if node.left_child:
+-                return traverse_time_tree(node.left_child, current_time, epsilon_std, epsilon_temp)
++            if node.left:
++                return traverse_time_tree(node.left, current_time, epsilon_std, epsilon_temp)
+             else:
+-                # Leaf node of time tree (unit time step)
+-                # If we are here, temporal coherence check passed? 
+-                # No, we only get here if temporal coherence was BAD.
+-                # But if it's a leaf, there is no further time split.
+-                # This implies the data at this specific time step has high variation?
+-                # Or the coherence metric is not applicable at unit step?
+-                # Source: "traverse down to the branch... corresponding to the current time 
+-                # and repeat this step".
+-                # If we hit a leaf and coherence is still bad (or we couldn't check it?),
+-                # we must use actual data.
+                 return "USE_ACTUAL_DATA"
+         else:
+-            if node.right_child:
+-                return traverse_time_tree(node.right_child, current_time, epsilon_std, epsilon_temp)
++            if node.right:
++                return traverse_time_tree(node.right, current_time, epsilon_std, epsilon_temp)
+             else:
+                 return "USE_ACTUAL_DATA"
++
++def render_subvolume(subvolume):
++    if subvolume.use_mean:
++        return render_with_mean(subvolume.bounds, subvolume.mean_value)
++    else:
++        return render_with_data(subvolume.bounds, subvolume.data)
++
++def compose_results(results):
++    return blend_results(results)
++
++class Subvolume:
++    def __init__(self, bounds, mean_value=None, data=None):
++        self.bounds = bounds
++        self.mean_value = mean_value
++        self.data = data
++        self.use_mean = mean_value is not None
+ ```
+ 
+@@ -252,5 +124,5 @@
+ 
+ ### Wavelet-based TSP
+-A variant of the TSP tree applied to a 3D wavelet transformation of the original data [S2]. It uses a similar hierarchical structure (octree with temporal binary trees) but operates on wavelet coefficients rather than raw voxel values [S2].
++A variant of the TSP tree applied to a 3D wavelet transformation of the original data [S3]. It uses a similar hierarchical structure (octree with temporal binary trees) but operates on wavelet coefficients rather than raw voxel values [S3].
+ 
+ ## Operating characteristics
+@@ -267,5 +139,4 @@
+     *   Requires careful tuning of minimum brick size to balance storage and compositing overhead [S1, unofficial].
+ *   **When to use:** Out-of-core rendering of large-scale time-varying volumes where temporal coherence is present [S1, unofficial].
+-*   **When not to use:** When temporal coherence is absent or when strict real-time performance is required without tolerance tuning [S1, unofficial].
+ 
+ ## Background
+@@ -274,3 +145,4 @@
+ ## Sources
+ [S1] NASA Technical Reports Server (NTRS) 20000069008: Fast Time-Varying Volume Rendering Using Time-Space Partition (TSP) Tree, https://archive.org/details/NASA_NTRS_Archive_20000069008, fetched 2026-10-26 (unofficial)
+-[S2] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27+[S2] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
++[S3] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

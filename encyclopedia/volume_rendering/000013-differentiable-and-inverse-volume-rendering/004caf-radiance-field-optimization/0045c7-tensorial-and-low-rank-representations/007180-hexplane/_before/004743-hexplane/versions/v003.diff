@@ -1,0 +1,86 @@
+--- v002.md
++++ v003.md
+@@ -111,5 +111,11 @@
+     return points
+ 
+-def render_ray(ray_origin, ray_direction, t, hexplane_opacity, hexplane_appearance, mlp, emptiness_voxel, n_samples):
++def mlp_decoder(features, point, view_dir):
++    """Tiny MLP decoder [G]."""
++    x = np.concatenate([features, point, view_dir])
++    h = np.maximum(0, x @ np.ones((x.shape[0], 16)))
++    return h @ np.ones((16, 3))
++
++def render_ray(ray_origin, ray_direction, t, opacity_planes, opacity_fusion, appearance_planes, appearance_fusion, n_samples):
+     """
+     Volume render a single ray.
+@@ -122,10 +128,10 @@
+     for p in points:
+         x, y, z = p
+-        op_feat = query_hexplane(x, y, z, t, hexplane_opacity.planes, hexplane_opacity.fusion_matrices)
++        op_feat = query_hexplane(x, y, z, t, opacity_planes, opacity_fusion)
+         sigma = op_feat[0]
+         opacities.append(sigma)
+         
+         if sigma > 0.1:
+-            ap_feat = query_hexplane(x, y, z, t, hexplane_appearance.planes, hexplane_appearance.fusion_matrices)
++            ap_feat = query_hexplane(x, y, z, t, appearance_planes, appearance_fusion)
+             appearances.append(ap_feat)
+         else:
+@@ -135,5 +141,5 @@
+     for i, p in enumerate(points):
+         if len(appearances) > i and np.linalg.norm(appearances[i]) > 0:
+-            color = mlp(appearances[i], p, ray_direction)
++            color = mlp_decoder(appearances[i], p, ray_direction)
+             colors.append(color)
+         else:
+@@ -141,5 +147,5 @@
+             
+     # Standard volume rendering compositing [G]
+-    alphas = 1.0 - np.exp(-np.array(opacities))
++    alphas = 1.0 - np.exp(np.array(opacities))
+     transmittance = np.cumprod(1.0 - alphas)
+     weights = alphas * np.concatenate([[1.0], transmittance[:-1]])
+@@ -149,10 +155,10 @@
+ 
+ **Parameters:**
+-*   **Spatial Resolution ($N$):** Typically $128^3$ to $512^3$. Higher resolution improves quality [S2].
+-*   **Temporal Resolution ($T$):** Typically 32 to 300. Matches the number of frames or time steps [S2].
++*   **Spatial Resolution ($N$):** Typically $128^3$ to $512^3$ [S2].
++*   **Temporal Resolution ($T$):** Typically 32 to 300 [S2].
+ *   **Rank ($R$):** Number of basis functions. Typical values: 8, 12, 16, 24, 48, 96. Larger $R$ improves quality but increases memory and computation; too large causes overfitting [S2].
+-    *   Plenoptic Video Appearance: $R_1=48, R_2=24, R_3=24$.
+-    *   Plenoptic Video Opacity: $R_1=24, R_2=12, R_3=12$.
+-    *   D-NeRF Appearance: $R_1=R_2=R_3=48$.
++    *   Plenoptic Video Appearance: $R_1=48, R_2=24, R_3=24$ [S2].
++    *   Plenoptic Video Opacity: $R_1=24, R_2=12, R_3=12$ [S2].
++    *   D-NeRF Appearance: $R_1=R_2=R_3=48$ [S2].
+     *   D-NeRF Opacity: $R_1=R_2=R_3=24$ [S2].
+ *   **Learning Rate:** $0.02$ for feature planes, $0.001$ for MLP/VRF [S2].
+@@ -160,5 +166,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Unbounded Scenes:** HexPlane is limited to bounded scenes because grid sampling fails for out-of-boundary points. For unbounded scenes, spherical coordinate re-parameterization ($\theta, \phi, r, t$) is required, with $r = 1/\sqrt{x^2+y^2+z^2}$ [S2].
++*   **Unbounded Scenes:** HexPlane is limited to bounded scenes because grid sampling fails for out-of-boundary points [S2].
+ *   **Fast Motion:** Degraded results occur when objects move too fast or observations are too sparse [S2].
+ *   **Color Jittering:** Explicit representations are prone to artifacts; strong regularization (TV loss) is required [S2].
+@@ -167,17 +173,11 @@
+ ## Subtopics
+ 
+-### TensoRF
+-Uses vector-matrix decomposition for static 3D volumes. HexPlane extends this by adding temporal planes to handle 4D dynamic scenes. Choose TensoRF for static scenes; choose HexPlane for dynamic scenes requiring explicit spatiotemporal factorization. [TensoRF](3026-tensorf.md)
+-
+-### K*-Planes
+-Also employs six feature planes for representation. HexPlane is most closely related to this method. Choose K*-Planes for n-dimensional generalizations; choose HexPlane for standard 4D dynamic novel view synthesis. [K*-Planes](link_not_provided)
+-
+-### DyNeRF
+-Uses implicit MLPs and per-frame latent codes. HexPlane is >100× faster and uses less memory (200MB vs implicit models). Choose DyNeRF for deformation-heavy monocular videos; choose HexPlane for speed and memory efficiency without deformation fields. [DyNeRF](link_not_provided)
++### Serial 4D Feature Volumes
++A dynamic scene representation consisting of a series of feature volumes, one for each gear level $G$, instead of a unified 4D volume [S4]. Each gear describes regions of a certain scale of motion, while purely spatial features are shared [S4]. The feature vector for gear $G$ at space-time coordinate $(x,t)$ is computed as $f^G(x, t) = B_1(h_1(x, y) \odot k^G_1(z, t)) + B_2(h_2(x, z) \odot k^G_2(y, t)) + B_3(h_3(y, z) \odot k^G_3(x, t))$, where $h_j$ are shared spatial embedding functions, $k^G_j$ are gear-specific spatio-temporal embeddings, and $B_j$ are shared linear transforms [S4]. A continuous gear score is computed via $g(x, t) = 1^\top (h'_1(x, y) \odot k'_1(z, t)) + 1^\top (h'_2(x, z) \odot k'_2(y, t)) + 1^\top (h'_3(y, z) \odot k'_3(x, t))$ [S4]. Typical parameters are $M=32$ for the spatio-temporal embedding dimension and $N_{\text{gear}}=4$ gear levels [S4].
+ 
+ ## Operating characteristics
+ *   **Memory Complexity:** Reduced from $O(N^3 T F)$ to $O(N^2 R + N T R + R F)$ [S2]. For $N=512, T=32, F=3$, a naive 4D volume requires 48GB, while HexPlane requires only ~200MB [S2].
+ *   **Time Complexity:** Querying requires six bilinear interpolations and vector-matrix products, making it significantly faster than MLP-based methods [S2].
+-*   **Performance:** On the Plenoptic Video dataset, HexPlane achieves 29.47 PSNR in 12 GPU hours (112× speedup over DyNeRF). With fewer iterations (100k), it achieves 29.26 PSNR in 2 GPU hours (672× speedup) [S2]. On D-NeRF, it achieves 31.04 PSNR in 11 minutes [S2].
++*   **Performance:** On the Plenoptic Video dataset, HexPlane achieves 29.47 PSNR in 12 GPU hours (112× speedup over DyNeRF) [S2]. With fewer iterations (100k), it achieves 29.26 PSNR in 2 GPU hours (672× speedup) [S2]. On D-NeRF, it achieves 31.04 PSNR in 11 minutes [S2].
+ *   **Strengths:** High efficiency, low memory footprint, no need for deformation fields, robust to various fusion mechanisms and coordinate systems [S2].
+ *   **Limitations:** Limited to bounded scenes (unless spherical coordinates are used), sensitive to sparse observations and fast motion, requires strong regularization to avoid artifacts [S2].

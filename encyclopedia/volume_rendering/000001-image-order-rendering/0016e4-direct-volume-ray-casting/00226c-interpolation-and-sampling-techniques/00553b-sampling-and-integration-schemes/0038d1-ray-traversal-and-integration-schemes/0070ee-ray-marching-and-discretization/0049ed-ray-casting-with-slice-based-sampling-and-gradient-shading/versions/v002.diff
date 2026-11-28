@@ -1,0 +1,160 @@
+--- v001.md
++++ v002.md
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-*   **Volume Texture:** A `sampler2D` representing a 256x256x256 volume. The volume is packed into a 16x16 grid of slices. Each slice is 256x256 texels [S1, unofficial].
++*   **Volume Texture:** A `sampler2D` representing the volume. The volume is packed into a 16x16 grid of slices. Each slice is 256x256 texels [S1, unofficial].
+ *   **Ray Parameters:** `tmin` and `tmax` defining the intersection interval with the bounding box [S1, unofficial].
+ 
+@@ -24,6 +24,6 @@
+ 
+ **Algorithm Steps:**
+-1.  **Ray-Box Intersection:** Calculate the intersection parameters `tmin` and `tmax` for the ray against the bounding box defined by `boxPoint1` and `boxPoint2` using a function `intersectParams(boxPoint1, boxPoint2, eye, dir)` [S1, unofficial].
+-2.  **Initialization:** Initialize the ray parameter `t` to `tmin` (accessed as `t1t2.x`) and the accumulated color `color` to `vec3(0,0,0)` [S1, unofficial].
++1.  **Ray-Box Intersection:** Calculate the intersection parameters `tmin` and `tmax` for the ray against the bounding box defined by `boxPoint1` and `boxPoint2` using a slab method [S1, unofficial].
++2.  **Initialization:** Initialize the ray parameter `t` to `tmin` and the accumulated color `color` to `vec3(0,0,0)` [S1, unofficial].
+ 3.  **Ray Marching Loop:** Iterate `i` from 0 to 1499 (1500 iterations) [S1, unofficial]:
+     a.  **Ray Position:** Calculate the current 3D point `point` as `eye + t * dir` [S1, unofficial].
+@@ -39,17 +39,16 @@
+         $$ \text{color} = \text{sample} \times \text{cosalpha} \times \text{lightcolor} $$
+         [S1, unofficial]
+-    e.  **Termination Check:** If the sampled density's red channel `sample.r` is greater than `density_threshold` (0.3) OR `t` exceeds `tmax` (`t1t2.y`), break the loop [S1, unofficial].
++    e.  **Termination Check:** If the sampled density's red channel `sample.r` is greater than `density_threshold` (0.3) OR `t` exceeds `tmax`, break the loop [S1, unofficial].
+     f.  **Advance Ray:** Increment `t` by `dt` [G].
+-4.  **Output:** If `tmin` (`t1t2.x`) is greater than 0.0, output `gl_FragColor = vec4(color.xyz, 1.0)` [S1, unofficial]. Otherwise, output `vec4(0.5, 0.5, 0.5, 1.0)` [S1, unofficial].
++4.  **Output:** If `tmin` is greater than 0.0, output `gl_FragColor = vec4(color.xyz, 1.0)` [S1, unofficial]. Otherwise, output `vec4(0.5, 0.5, 0.5, 1.0)` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def ray_cast_slice_gradient(eye, dir, volume_texture, light_pos, light_color):
+-    # 1. Ray-Box Intersection
+-    # Bounding box defined by boxPoint1=(0,0,3) and boxPoint2=(1,1,4)
+-    t_min, t_max = intersect_params(vec3(0,0,3), vec3(1,1,4), eye, dir)
++    # 1. Ray-Box Intersection using slab method
++    t_min, t_max = intersect_aabb(eye, dir, vec3(0,0,3), vec3(1,1,4))
+     
+-    # Pitfall: If ray does not intersect box, intersect_params returns (-1, -1)
+-    if t_min <= 0.0:
++    # Pitfall: If ray does not intersect box, intersect_aabb returns None
++    if t_min is None:
+         return vec4(0.5, 0.5, 0.5, 1.0)
+ 
+@@ -68,6 +67,4 @@
+         
+         # Sample density and neighbors for gradient
+-        # sliceSample performs linear interpolation between slices based on rate
+-        # We need samples at point and point +/- dt in x, y, z
+         dx1 = slice_sample(volume_texture, point + vec3(dt, 0, 0))
+         dx2 = slice_sample(volume_texture, point - vec3(dt, 0, 0))
+@@ -97,18 +94,29 @@
+     return vec4(color, 1.0)
+ 
++def intersect_aabb(origin, direction, box_min, box_max):
++    t_min = -float('inf')
++    t_max = float('inf')
++    for i in range(3):
++        if direction[i] == 0:
++            if origin[i] < box_min[i] or origin[i] > box_max[i]:
++                return None
++        else:
++            t1 = (box_min[i] - origin[i]) / direction[i]
++            t2 = (box_max[i] - origin[i]) / direction[i]
++            if t1 > t2:
++                t1, t2 = t2, t1
++            if t1 > t_min: t_min = t1
++            if t2 < t_max: t_max = t2
++            if t_min > t_max:
++                return None
++    if t_max < 0:
++        return None
++    return (t_min, t_max)
++
+ def slice_sample(texture, point):
+     # Calculate texture coordinates for the 2D texture atlas
+     # Volume is 256x256x256, packed in 16x16 grid of 16x16 slices
+-    # point is in [0,1] range relative to box? Or world? 
+-    # Based on box (0,0,3) to (1,1,4), point needs to be mapped to texture coords.
+-    # The source formula: tex256 = vec2(mod(slice,16.0), floor(slice/16.0))/16.0 + point.xy/16.0
+-    # This implies point.xy are used for S,T, and Z determines the slice.
+-    # However, standard volume rendering maps 3D point to 3D texture coords.
+-    # Given the specific formula in source, we assume point is normalized or mapped appropriately.
+-    # Let's assume point is in [0,1] for x,y and z determines slice index.
+-    
+-    # Extract slice index from Z coordinate
+-    # Assuming point.z is in [0, 1] range corresponding to 256 slices
+-    slice_float = point.z * 256.0
++    # point is assumed to be in world space; map z to slice index
++    slice_float = (point.z - 3.0) * 256.0  # box z-range is [3, 4]
+     slice_idx = floor(slice_float)
+     slice_rate = slice_float - slice_idx
+@@ -117,45 +125,15 @@
+     slice_idx = clamp(slice_idx, 0.0, 255.0)
+     
+-    # Calculate 2D texture coordinates
+-    # The source formula: tex256 = vec2(mod(slice,16.0), floor(slice/16.0))/16.0 + point.xy/16.0
+-    # This suggests the texture is 256x256, and each "slice" is 16x16 blocks of 16x16 texels?
+-    # 256x256 texture. 16x16 grid of slices. Each slice is 16x16 texels? 
+-    # 16*16 = 256. So each slice is 16x16 texels.
+-    # Total volume 256x256x256.
+-    # Texture size 256x256.
+-    # Grid 16x16 slices.
+-    # Each slice is 16x16 texels.
++    # Calculate 2D texture coordinates based on source formula
++    # tex256 = vec2(mod(slice,16.0), floor(slice/16.0))/16.0 + point.xy/16.0
++    u_base = (mod(slice_idx, 16.0)) / 16.0
++    v_base = (floor(slice_idx / 16.0)) / 16.0
+     
+-    # Calculate base offset for the slice in the 256x256 texture
+-    # Slice index 0..255.
+-    # Grid position: (slice % 16, slice / 16)
+-    # Each cell in grid is 16x16 texels.
+-    # So offset in texture coords (0..1) is:
+-    # u = (slice % 16) * 16 / 256 = (slice % 16) / 16
+-    # v = (slice / 16) * 16 / 256 = (slice / 16) / 16
+-    
+-    # The source formula: vec2(mod(slice,16.0), floor(slice/16.0))/16.0
+-    # This gives u,v in [0,1] for the slice block.
+-    
+-    # Then add point.xy/16.0? 
+-    # If point.xy are in [0,1], point.xy/16.0 is very small.
+-    # This implies point.xy might be in [0,16] range? Or the formula is specific to the implementation.
+-    # Let's follow the source formula exactly.
+-    
+-    slice_f = slice_idx
+-    u_base = (mod(slice_f, 16.0)) / 16.0
+-    v_base = (floor(slice_f / 16.0)) / 16.0
+-    
+-    # point.xy are assumed to be in [0,1] range? 
+-    # If point is in [0,1], then point.xy/16.0 is [0, 1/16].
+-    # This would mean the slice is 1/16th of the texture?
+-    # 1/16 of 256 is 16. So yes, each slice is 16x16 texels.
+-    
++    # point.xy are assumed to be in [0, 1] range relative to box x,y bounds
+     u = u_base + point.x / 16.0
+     v = v_base + point.y / 16.0
+     
+-    # Sample texture
+-    # Assuming linear filtering
+-    return texture2D(volume_texture, vec2(u, v))
++    # Sample texture with linear filtering
++    return texture2D(texture, vec2(u, v))
+ ```
+ 
+@@ -163,12 +141,12 @@
+ *   **Time Complexity:** $O(N)$ where $N$ is the number of ray steps (1500 in the reference implementation). Each step involves 7 texture samples (current point + 6 neighbors) and vector operations [S1, unofficial].
+ *   **Memory Complexity:** $O(1)$ per pixel for the ray marching state, plus the memory for the volume texture (256x256x256 packed into 256x256 2D texture) [S1, unofficial].
+-*   **Performance:** The method is designed for real-time rendering on GPUs using WebGL [S1, unofficial]. The fixed iteration count and simple shading model allow for predictable performance [S1, unofficial].
++*   **Performance:** Not given in the sources.
+ *   **Strengths:** Simple implementation; provides basic surface-like shading via gradient estimation; efficient memory usage via texture atlas packing [S1, unofficial].
+ *   **Limitations:** No transmittance/absorption accumulation; limited to diffuse shading; fixed step size may lead to aliasing or missed features; gradient estimation is noisy and approximate [S1, unofficial].
+-*   **When to use:** Real-time visualization of volumetric data where approximate surface shading is sufficient and performance is critical [S1, unofficial].
+-*   **When not to use:** High-fidelity medical imaging requiring accurate light transport; scenes with complex lighting or transparency effects [S1, unofficial].
++*   **When to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-This method originates from an unofficial WebGL volume rendering tutorial by tkris007 [S1, unofficial]. It demonstrates a practical approach to rendering 3D volumes on the web using fragment shaders and texture atlases [S1, unofficial]. The technique is part of a broader set of direct volume rendering methods that prioritize simplicity and real-time performance over physical accuracy [S1, unofficial].
++This method originates from an unofficial WebGL volume rendering tutorial by tkris007 [S1, unofficial]. It demonstrates a practical approach to rendering 3D volumes on the web using fragment shaders and texture atlases [S1, unofficial].
+ 
+ ## Sources

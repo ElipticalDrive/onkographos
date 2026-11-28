@@ -1,0 +1,6569 @@
+SVO Workbench
+=============
+
+Workbench for Raytracing of Sparse Voxel Octrees
+
+This is a workbench I created to help me with research for my master thesis, [Efficient Ray Tracing of Sparse Voxel Octrees on an FPGA](http://brage.bibsys.no/xmlui/handle/11250/255856).
+
+See this repository for the Verilog/FPGA-code for the same thesis: https://github.com/skyfex/svo-raycaster
+
+The code is very messy in places, as it's not intented to be an actual product or library. But some of the code here may be useful to others doing similar work.
+
+If you want to render the pologyn models in this worbench you need to fetch the original PLY-models from here: 
+https://graphics.stanford.edu/data/3Dscanrep/
+
+Put the models in data/ and rename them or update the awakeFromNib function in OctreeView.mm to point at the correct file. The models come in different resolutions, and any of them should be fine.
+
+The included octree models (the .bin files in data/) was generated from those PLY models.
+
+This project features:
+* A software implementation of ray tracing of sparse voxel octree
+** The latest version is written as a state machine that models the Verilog-version
+** There is a copy of an older version which is more straigth-forward and should be easier to understand.
+* Modeling of caching for hardware raytracing
+* Demonstrating SW ray tracing and GPU rasterization rendering into the same framebuffer
+* Export data to FPGA-version
+* Push data to FPGA-version through fpgalink
+
+![Screenshot](https://raw.githubusercontent.com/skyfex/svo-workbench/master/screenshot.png)
+
+### Octree/Framebuffer.cpp
+```
+#include <iostream>
+```
+
+### Octree/Framebuffer.h
+```
+#ifndef Octree_Framebuffer_h
+#define Octree_Framebuffer_h
+
+
+#include <OpenGL/gl.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include "vmath.h"
+
+#define PCtype GLfloat
+
+struct Pixel {
+    PCtype red;
+    PCtype green;
+    PCtype blue;
+    PCtype alpha;
+    
+    Pixel(PCtype red, PCtype green, PCtype blue, PCtype alpha=1) :
+    red(red),
+    green(green),
+    blue(blue),
+    alpha(alpha)
+    {
+    }
+};
+
+
+
+class Framebuffer {
+    
+public:
+    const GLenum format;
+    const GLenum format_type;
+    const size_t bpp;
+    
+    const GLuint width;
+    const GLuint height;
+    PCtype *framebuffer;
+    PCtype *depthbuffer;
+    
+public:
+    Framebuffer (uint32_t width, uint32_t height) :
+    width(width),
+    height(height),
+    format(GL_RGBA),
+    format_type(GL_FLOAT),
+    bpp(4)
+    {
+        framebuffer = (PCtype*)malloc(sizeof(PCtype)*bpp*width*height);
+        depthbuffer = (PCtype*)malloc(sizeof(PCtype)*width*height);
+        clear();
+    }
+    
+    void drawPixel(int x, int y, Pixel p, float depth)
+    {
+        y = height-1-y;
+        PCtype *ptr = framebuffer + ((x%width)+(y*width))*bpp;
+        *ptr++ = p.red;
+        *ptr++ = p.green;
+        *ptr++ = p.blue;
+        *ptr++ = p.alpha;
+        PCtype *dptr = depthbuffer + ((x%width)+(y*width));
+        *dptr = depth;
+    }
+    
+    void clear() 
+    {
+        PCtype *ptr = framebuffer;
+        PCtype *dptr = depthbuffer;
+        int i;
+        for (i=0;i<width*height*bpp;i++) {
+            ptr[i] = 0;
+        }
+        for (i=0;i<width*height;i++) {
+            dptr[i] = 1;
+        }
+    }
+    
+    void flush()
+    {
+//        glGenTextures (1, &texID);
+//        glBindTextures (GL_TEXTURE_RECTANGLE_EXT, texID);
+//        glTexImage2D (GL_TEXTURE_RECTANGLE_EXT, 0, GL_RGBA, 640, 480, 0, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, frame);
+//        glBegin (GL_QUADS);
+//        glTexCoord2f (0, 0);
+//        glVertex2f (0, 0);
+//        glTexCoord2f (640, 0);
+//        glVertex2f (windowWidth, 0);
+//        glTexCoord2f (640, 480);
+//        glVertex2f (windowWidth, windowHeight);
+//        glTexCoord2f (0, 480);
+//        glVertex2f (0, windowHeight);
+//        glEnd();
+        
+
+
+        if (width<32)
+            glPixelZoom(8,8);
+        glDepthMask(GL_FALSE);
+        glDrawPixels(width, height, format, format_type, (GLvoid*)framebuffer);	
+        glDepthMask(GL_TRUE);
+
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glDrawPixels(width, height, GL_DEPTH_COMPONENT, format_type, (GLvoid*)depthbuffer);
+        glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
+
+
+    }
+};
+
+
+#endif
+```
+
+### Octree/NSOpenGLView-imageFromView.h
+```
+#import <Cocoa/Cocoa.h>
+
+@interface NSOpenGLView ( imageFromView )
+
+- (NSImage *) imageFromView;
+
+@end
+```
+
+### Octree/Octree.h
+```
+#ifndef Octree_Octree_h
+#define Octree_Octree_h
+
+#include <OpenGL/gl.h>
+#include <math.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <algorithm>
+#include <iostream>
+#include <fstream>
+#include <assert.h>
+
+#include "vmath.h"
+#include "glutils.h"
+#include "binvox.h"
+
+#import "Framebuffer.h"
+#include "Shared.h"
+
+using namespace std;
+
+
+
+enum NodeType { NT_EMPTY, NT_PARTIAL, NT_FILLED };
+
+struct Node {
+    NodeType type;
+    Node *children[8];
+    int childAdr;
+    int farAdr;
+    int nid;
+};
+
+struct CNode { // Compact node
+//    int nid; // For debugging purposes
+    union {
+        struct {
+            UInt8 valid_mask;
+            UInt8 leaf_mask;
+            UInt16 child_ptr;
+        };
+        UInt32 far_ptr;
+    };
+} __attribute__((packed));
+
+
+enum CacheType {
+    CTDirectMapped,
+    CTTwoWaySetAssoc,
+    CTFourWaySetAssoc
+};
+
+class Cache
+{
+public:
+    int *tags;
+    int *flags;
+    int size;
+    int blockSize;
+    CacheType type;
+    int hits;
+    int misses;
+    int maxlevel;
+    
+    Cache(int size, int blockSize, CacheType type) : blockSize(blockSize), type(type)
+    {
+        this->size = size/blockSize;
+        tags = (int*)malloc(sizeof(int*)*size);
+        flags = (int*)malloc(sizeof(int*)*size);
+        maxlevel = 30;
+        reset();
+    }
+
+    void reset()
+    {
+        hits = 0;
+        misses = 0;
+        for (int i=0;i<size;i++) {
+            tags[i] = -1;
+            flags[i] = 0;
+        }
+    }
+    
+    void request(int adr, int level)
+    {
+        if (level>maxlevel) {
+            misses++;
+            return;
+        }
+        adr = adr/blockSize;
+        int slot;
+        int setSize;
+        if (type==CTDirectMapped) {
+            slot = adr % size;
+            if (tags[slot] == adr)
+                hits++;
+            else
+                misses++;
+        }
+        else if (type==CTTwoWaySetAssoc) {
+            setSize = size/2;
+            for (int i=0;i<2;i++) {
+                slot = (adr % setSize)+setSize*i;
+                if (tags[slot] == adr) {
+                    flags[adr%setSize] = (i+1)%2;
+                    break;
+                }                            
+            }
+            if (tags[slot] == adr) {
+                hits++;
+            }
+            else {
+                misses++;
+                slot = (adr % setSize)+setSize*flags[adr%setSize];
+                flags[adr%setSize] = (flags[adr%setSize]+1)%2;
+            }
+        }
+        else if (type==CTFourWaySetAssoc) {
+            setSize = size/4;
+            for (int i=0;i<4;i++) {
+                slot = (adr % setSize)+setSize*i;
+                if (tags[slot] == adr) {
+                    break;
+                }                            
+            }
+            if (tags[slot] == adr) {
+                hits++;
+            }
+            else {
+                misses++;
+                int max = -1;
+                for (int i=0;i<4;i++) {
+                    int checkSlot = (adr % setSize)+setSize*i;
+                    if (flags[checkSlot] > max) {
+                        max = flags[checkSlot];
+                        slot = checkSlot;
+                    }
+                }
+            }
+            for (int j=0;j<4;j++) {
+                int otherSlot = (adr % setSize)+setSize*j;
+                flags[otherSlot]++;
+            }
+            flags[slot] = 1;
+        }
+        
+        tags[slot] = adr;
+
+    }
+};
+
+
+struct OctreeCursor {
+
+    CNode *data;
+    int dataSize;
+    CNode *node;
+    Node *refNode;
+    int adr;
+    int level;
+    Cache *cache;
+    
+    
+    OctreeCursor getChild(int child)
+    {
+        OctreeCursor cur;
+        cur.data = data;
+        cur.dataSize = dataSize;
+        cur.cache = cache;
+        cur.level = level+1;
+        
+        int childIdx=0;
+        for (int i=0; i<child; i++) {
+            if (childIsPartial(i)) {
+                childIdx++;
+            }
+        }
+        
+        int childPtr = node->child_ptr & ~(1<<15);
+        if (node->child_ptr & (1<<15)) {
+            int farAdr = adr+childPtr;
+            if (cache) cache->request(farAdr, level);
+            assert(farAdr < dataSize);
+            CNode *farEntry = &data[farAdr];
+            childPtr = farEntry->far_ptr;
+        }
+        int childAdr = adr + childPtr + childIdx;
+        if (cache) cache->request(childAdr, level);
+        assert(childAdr < dataSize);
+
+        cur.node = &data[childAdr];
+        if (refNode)
+            cur.refNode = refNode->children[child];
+        else
+            cur.refNode = NULL;
+//        assert(cur.refNode->nid == childNode->nid);
+        cur.adr = childAdr;
+        return cur;
+    }
+    
+    bool childPtrIsFar()
+    {
+        return node->child_ptr & (1<<15);
+    }
+    int childPtr()
+    {
+        return node->child_ptr & ~(1<<15); 
+    }
+    int farPtr()
+    {
+        if (!childPtrIsFar()) return 0;
+        int childPtr = node->child_ptr & ~(1<<15);
+        int farAdr = adr+childPtr;
+        CNode *farEntry = &data[farAdr];
+        childPtr = farEntry->far_ptr;
+        return childPtr;
+    }
+    
+    bool childIsFilled(int child)
+    {
+        return (node->leaf_mask & (1<<child));
+    }
+    
+    bool childIsPartial(int child)
+    {
+        return (node->valid_mask & (1<<child)) && !(node->leaf_mask & (1<<child));
+    }
+    
+    bool childIsValid(int child)
+    {
+        return (node->valid_mask & (1<<child));   
+    }
+    
+    bool childIsEmpty(int child)
+    {
+        return !(node->valid_mask & (1<<child));
+    }
+} ;
+
+class Octree {
+    
+private:
+    UInt64 _nodeSize;
+    UInt64 _shortPtrSize;
+    UInt64 _shortPtrTop;
+    UInt64 _longPtrSize;
+    UInt64 _longPtrTop;
+        
+public:
+    
+    Node* rootNode;
+    CNode* data;
+    int dataSize;
+    int nextNid;
+    
+    Octree()
+    {   
+        _nodeSize = 4;
+        _shortPtrSize = 2;
+        _longPtrSize = 4;
+        _shortPtrTop = 1 << 15;
+        _longPtrTop  = 1l << 32l;
+        rootNode = NULL;
+        data = NULL;
+        dataSize = NULL;
+    }
+    
+    void generateChildCoords(Vector3f children[8], Vector3f p, float size)
+    {
+        children[0] = Vector3f(p.x, p.y, p.z);
+        children[1] = Vector3f(p.x, p.y, p.z+size);
+        children[2] = Vector3f(p.x, p.y+size, p.z);
+        children[3] = Vector3f(p.x, p.y+size, p.z+size);
+        children[4] = Vector3f(p.x+size, p.y, p.z);
+        children[5] = Vector3f(p.x+size, p.y, p.z+size);
+        children[6] = Vector3f(p.x+size, p.y+size, p.z);
+        children[7] = Vector3f(p.x+size, p.y+size, p.z+size);
+    }
+    
+    void writeToFile(ofstream *file)
+    {
+        file->write((char*)data, dataSize*sizeof(CNode));
+    }
+    void readFromFile(ifstream *file)
+    {
+        file->seekg(0, std::ios::end);
+        int filesize = file->tellg();
+        file->seekg(0);
+        dataSize = filesize / sizeof(CNode);
+        data = (CNode*)malloc(dataSize * sizeof(CNode));
+        file->read((char*)data, dataSize*sizeof(CNode));
+        assert(file->gcount() == dataSize*sizeof(CNode));
+    }
+    
+    
+    // ----
+    
+    OctreeCursor newRootCursor()
+    {
+        OctreeCursor cur;
+        cur.data = data;
+        cur.dataSize = dataSize;
+        cur.node = data;
+        cur.refNode = rootNode;
+        cur.adr = 0;
+        cur.level = 0;
+        return cur;
+    }
+    
+    
+    // ----
+    
+    void compactTree()
+    {
+        rootNode->farAdr = 0;
+        rootNode->childAdr = 0;
+        dataSize = compactAllocate(rootNode, 1);
+        data = (CNode*)malloc(dataSize*sizeof(CNode));
+        compactNode(rootNode, dataSize);
+    }
+    
+
+    
+    void compactNode(Node *node, int pos)
+    {
+        int childAdr = node->childAdr;
+        for (int i=0;i<8;i++) {
+            Node *child = node->children[i];
+            if (child && child->type==NT_PARTIAL) {
+                compactNode(child, childAdr);
+                childAdr--;
+            }
+        }
+        assert(pos<=dataSize);
+        
+        CNode *cnode = &data[dataSize-pos];
+//        cnode->nid = node->nid;
+        cnode->valid_mask = 0;
+        cnode->leaf_mask = 0;
+        
+        for (int i=0;i<8;i++) {
+            if (node->children[i]) {
+                cnode->valid_mask |= (1<<i);
+                if (node->children[i]->type == NT_FILLED)
+                    cnode->leaf_mask |= (1<<i);
+            }
+        }
+        
+        int childPtr = pos - node->childAdr;
+        
+        if (node->farAdr) {
+            int farPtr = pos-node->farAdr;
+            assert(farPtr < _shortPtrTop);
+            CNode *farPtrEntry = &data[dataSize-node->farAdr]; 
+            farPtrEntry->far_ptr = childPtr;
+            cnode->child_ptr = (1<<15) | farPtr;
+        }
+        else {
+            cnode->child_ptr = childPtr;
+        }
+        
+    }
+    
+    int compactAllocate(Node *node, int pos)
+    {  
+        // Example 
+        // 1: Node 1
+        // 2: Node 2
+        // -----------
+        // 3: FarPtr (-> #0)
+        // 4: Node 3 (Far -> #2) 
+        // 5: Node 4
+        // -----------
+        // 6: This Node (-> #4)
+        
+        for (int i=0;i<8;i++) {
+            Node *child = node->children[i];
+            if (child) {
+                child->farAdr = 0;
+                child->childAdr = 0;
+            }
+            if (child && child->type==NT_PARTIAL) {
+                pos = compactAllocate(child, pos);
+            }
+        }
+        
+        
+        for (int i=0;i<8;i++) {
+            Node *child = node->children[i];
+            if (child && child->childAdr) {
+                int gchildAdrMax = pos - child->childAdr + 16;
+                if (gchildAdrMax > _shortPtrTop) {
+                    child->farAdr = pos;
+                    pos++;
+                }
+            }
+        }
+        
+        for (int i=0;i<8;i++) {
+            Node *child = node->children[i];
+            if (child && child->type==NT_PARTIAL) {
+                node->childAdr = pos;
+                pos++;
+            }
+        }
+        
+        
+        return pos;
+    }
+    
+    // ---
+    
+    Node* readFromBinvox_rec(unsigned char *voxels, int voxels_width, int x, int y, int z, int width)
+    {
+        Node *node = new Node;
+        if (width==1) {
+            if (voxels[y + z*voxels_width + x*voxels_width*voxels_width]) {
+                // Solid Leaf node
+                node->type = NT_FILLED;
+                node->nid = nextNid++;
+                memset(node->children, 0, sizeof(node->children));
+                return node;
+            }
+            else {
+                delete node;
+                return NULL;
+            }
+        }
+        int child_width = width/2;
+        Node** children = node->children;
+        children[0] = readFromBinvox_rec(voxels,voxels_width, x, y, z, child_width);
+        children[1] = readFromBinvox_rec(voxels,voxels_width, x, y, z+child_width, child_width);
+        children[2] = readFromBinvox_rec(voxels,voxels_width, x, y+child_width, z, child_width);
+        children[3] = readFromBinvox_rec(voxels,voxels_width, x, y+child_width, z+child_width, child_width);
+        children[4] = readFromBinvox_rec(voxels,voxels_width, x+child_width, y, z, child_width);
+        children[5] = readFromBinvox_rec(voxels,voxels_width, x+child_width, y, z+child_width, child_width);
+        children[6] = readFromBinvox_rec(voxels,voxels_width, x+child_width, y+child_width, z, child_width);
+        children[7] = readFromBinvox_rec(voxels,voxels_width, x+child_width, y+child_width, z+child_width, child_width);
+        bool all_empty = true;
+        bool all_filled = true;
+        for (int i=0;i<8;i++) {
+            if (children[i]) {
+                if (children[i]->type != NT_FILLED)
+                    all_filled = false;
+                all_empty = false;
+            }
+            else {
+                all_filled = false;
+            }
+        }
+        if (all_empty) {
+            delete node;
+            return NULL;
+        }
+        else {
+            if (all_filled) {
+                for (int i=0;i<8;i++) {
+                    delete children[i];
+                    children[i] = NULL;
+                }
+                node->type = NT_FILLED;
+            }
+            else
+                node->type = NT_PARTIAL;
+            node->nid = nextNid++;
+            return node;
+        }
+    }
+    
+    void readFromBinvox(ifstream *file)
+    {
+        nextNid = 0;
+        unsigned char *voxels = NULL;
+        int width = read_binvox(file, &voxels);
+        
+        if (!width) {
+            return;
+        }
+        printf("Voxel model width: %d\n", width);
+        
+        rootNode = readFromBinvox_rec(voxels, width, 0, 0, 0, width);
+                
+        compactTree();
+        printf("Data size: %d\n", dataSize);
+
+        
+        free(voxels);
+    }
+    
+    // ----
+    
+    bool isBuilt()
+    {
+        return (data!=NULL);
+    }
+    
+    void clear()
+    {
+        
+    }
+    
+};
+
+#endif
+```
+
+### Octree/OctreeAppDelegate.h
+```
+#import <Cocoa/Cocoa.h>
+#import "OctreeView.h"
+
+@interface OctreeAppDelegate : NSObject <NSApplicationDelegate> {
+@private
+    NSWindow *window;
+    OctreeView *oglview;
+
+}
+
+- (IBAction)foobar:(id)sender;
+
+@property (assign) IBOutlet OctreeView *oglview;
+@property (assign) IBOutlet NSWindow *window;
+
+@end
+```
+
+### Octree/OctreeGL.h
+```
+#ifndef Octree_OctreeGL_h
+#define Octree_OctreeGL_h
+
+#include "Shared.h"
+#include "Octree.h"
+
+class OctreeGL
+{
+public:
+    Octree *ot;
+    
+    int terminLevel;
+
+    OctreeGL(Octree *targetOctree) : ot(targetOctree) 
+    {
+        terminLevel = 10;
+    }
+    
+    
+    void renderLevel(OctreeCursor cur, Vector3f p0, float size, int level)
+    {
+        if (level==terminLevel) {
+            glAxisCube(p0, p0+Vector3f(size,size,size));
+            return;
+        }
+        float c_size = size/2;
+        Vector3f c_p0[8];
+        ot->generateChildCoords(c_p0, p0, c_size);
+        int i;
+        for (i=0;i<8;i++) {
+            if (cur.childIsFilled(i)) {
+                glAxisCube(c_p0[i], c_p0[i]+Vector3f(c_size, c_size, c_size));
+            }
+            else
+            if (cur.childIsPartial(i)) {
+                renderLevel(cur.getChild(i), c_p0[i], c_size, level+1);                
+            }
+  
+        }
+    }
+    
+    void render()
+    {
+        if (!ot->isBuilt()) return;
+        OctreeCursor cur = ot->newRootCursor();
+        renderLevel(cur, Vector3f(-1,-1,-1), 2, 0);
+    }
+    
+    
+};
+
+#endif
+```
+
+### Octree/OctreeSWRaytracer.OLD.h
+```
+//
+//  OctreeSWRaytracer.h
+//  Octree
+//
+//  Created by Audun Wilhelmsen on 15.11.11.
+//  Copyright 2011 NTNU. All rights reserved.
+//
+
+#ifndef Octree_OctreeSWRaytracer_h
+#define Octree_OctreeSWRaytracer_h
+
+#include "Shared.h"
+#include "Octree.h"
+
+typedef int32_t tnum; 
+const tnum tnum_max = INT32_MAX;
+const tnum tnum_min = INT32_MIN;
+float tnum_scale = 1;
+
+class OctreeSWRaytracer
+{
+public:
+    Octree *ot;
+    int terminLevel;
+    
+    Framebuffer *cur_fb;
+    
+    OctreeSWRaytracer(Octree *targetOctree) : ot(targetOctree) 
+    {
+        terminLevel = 10;
+    }
+    
+    int cur_x, cur_y;
+    int dir_mask;
+    int zero_mask;
+    bool debug_ray;
+    
+    void rayCast(Ray r)
+    {
+        Ray r2 = r;
+        dir_mask=0;
+        zero_mask=0;
+        
+        if (debug_ray)    {
+            printf("%f %f %f\n", r.d.x, r.d.y, r.d.z);
+            printf("%f %f %f\n", r.o.x, r.o.y, r.o.z);
+        }
+
+        
+        if (r.d.x==0) 
+            r.d.x+=0.001; 
+        //            zero_mask |= 4;
+        if (r.d.x<0.0) {
+            r.o.x = -r.o.x; // todo
+            r.d.x = -r.d.x;
+            dir_mask |= 4;
+        }
+        if (r.d.y==0) 
+            r.d.y+=0.001;
+        //            zero_mask |= 2;
+        if (r.d.y<0.0) {
+            r.o.y = -r.o.y; // --
+            r.d.y = -r.d.y;
+            dir_mask |= 2;
+        }
+        if (r.d.z==0)  
+            r.d.z+=0.001; 
+        //            zero_mask |= 1;
+        if (r.d.z<0.0) {
+            r.o.z = -r.o.z; // --
+            r.d.z = -r.d.z;
+            dir_mask |= 1;
+        }
+        
+        
+        float tx0, tx1, ty0, ty1, tz0, tz1;
+            
+        
+        
+        tx0 = (min(ot->p0.x, ot->p1.x)-r.o.x)/r.d.x;
+        tx1 = (max(ot->p0.x, ot->p1.x)-r.o.x)/r.d.x;
+        ty0 = (min(ot->p0.y, ot->p1.y)-r.o.y)/r.d.y;
+        ty1 = (max(ot->p0.y, ot->p1.y)-r.o.y)/r.d.y;
+        tz0 = (min(ot->p0.z, ot->p1.z)-r.o.z)/r.d.z;
+        tz1 = (max(ot->p0.z, ot->p1.z)-r.o.z)/r.d.z;
+        
+        if (debug_ray) {
+            printf("Init:\n\t%f %f %f\n\t%f %f %f\n", 
+                   tx0, ty0, tz0,
+                   tx1, ty1, tz1);
+            printf("\tdir_mask: %d\n", dir_mask);
+        }
+        
+        float t_min = min(tx0,min(ty0,tz0));
+        float t_max = max(tx1,max(ty1,tz1));
+        float t_absmax = max(abs(t_min),abs(t_max));
+        tnum_scale = 10000;//(float)tnum_max / (t_absmax*2);
+        
+        float t_enter = max(max(tx0,ty0),tz0);
+        float t_exit = min(min(tx1, ty1), tz1);
+        
+        tx0 *= tnum_scale; tx1 *= tnum_scale;
+        ty0 *= tnum_scale; ty1 *= tnum_scale;
+        tz0 *= tnum_scale; tz1 *= tnum_scale;
+        
+        if (debug_ray)
+            printf("%.8x %.8x %.8x\n%.8x %.8x %.8x\n\n", 
+                   (tnum)tx0, (tnum)ty0, (tnum)tz0, 
+                   (tnum)tx1, (tnum)ty1, (tnum)tz1);
+        
+        if (t_enter < t_exit)
+            procSubtree2(r2, 
+                         tx0,ty0,tz0,
+                         tx1,ty1,tz1, 
+                         ot->size, ot->root_adr);
+        if (debug_ray) printf("End.\n");
+    }
+    
+    
+    //#define NO_STACK
+#define STACK_SIZE 100
+    
+    struct stack_item_t;
+    struct stack_item_t {
+        tnum tx0; tnum ty0; tnum tz0;
+        tnum tx1; tnum ty1; tnum tz1;
+        int adr;
+        char idx;
+        
+    };
+        
+        
+    bool procSubtree2(Ray r,
+                      tnum r_tx0, tnum r_ty0, tnum r_tz0,
+                      tnum r_tx1, tnum r_ty1, tnum r_tz1,
+                      tnum size,
+                      int r_adr)
+    {
+        
+        stack_item_t stack[STACK_SIZE];
+        
+        int si = 0; // stack index
+        int sl = 0; // stack level
+        int stack_level_max = 3;
+        
+        Node *n;
+        int node_adr;
+        
+        int level;
+        int idx;
+        bool is_first_node;
+        
+        tnum t_exit;
+        tnum t_start = 0;
+        
+        tnum tx0, ty0, tz0;
+        tnum tx1, ty1, tz1;
+        
+        int  c_offset[8];
+        bool c_valid[8];
+        bool c_leaf[8];       
+    
+        if (debug_ray) printf("Start\n");
+
+    S_INIT:
+        tx0 = r_tx0; ty0 = r_ty0; tz0 = r_tz0;
+        tx1 = r_tx1; ty1 = r_ty1; tz1 = r_tz1;
+        node_adr = r_adr;
+        is_first_node = true;
+        level = 0;
+        si = 0;
+        sl = 0;
+        
+        BlockEntry *be = ot->getEntry(node_adr);
+        n = &be->node;
+        child_decode(n, c_leaf, c_valid, c_offset);
+        
+        while(true) {  
+            assert(si>=0);
+            
+            tnum txm, tym, tzm;
+            
+            txm = (tx0+tx1)/2;
+            tym = (ty0+ty1)/2;
+            tzm = (tz0+tz1)/2;
+            
+            bool pass_node = false;
+            bool exit_node = false;
+            bool stack_underflow = (sl==0);
+            
+            
+            // -- Find first/next node --
+            if (is_first_node) {
+                idx = first_node(tx0, ty0, tz0, txm, tym, tzm);
+                is_first_node = false;
+            }
+            else {
+                idx = new_node((idx & 0b100)?tx1:txm, (idx & 0b010)?ty1:tym, (idx & 0b001)?tz1:tzm, 
+                               idx);
+                exit_node = (idx==8);
+            }
+            
+            int idx_flip = idx^dir_mask;
+            
+            tnum tx0_child = (idx & 0b100)?txm:tx0; 
+            tnum ty0_child = (idx & 0b010)?tym:ty0; 
+            tnum tz0_child = (idx & 0b001)?tzm:tz0;
+            tnum tx1_child = (idx & 0b100)?tx1:txm; 
+            tnum ty1_child = (idx & 0b010)?ty1:tym; 
+            tnum tz1_child = (idx & 0b001)?tz1:tzm; 
+            
+            tnum t_enter_child = max(tx0_child, max(ty0_child, tz0_child));
+            tnum t_exit_child = min(tx1_child, min(ty1_child, tz1_child));
+            
+            pass_node = t_exit_child<=t_start;
+            
+            if (debug_ray) {
+                printf("State:\n\t%.8x %.8x %.8x\n\t%.8x %.8x %.8x\n\t%.8x %.8x %.8x\n", 
+                       tx0, ty0, tz0, txm, tym, tzm, tx1, ty1, tz1);
+                printf("Node %d data: %.8x\n", node_adr,  *(int*)(n));
+                printf("Idx: %x Flipped: %x\n", idx, idx_flip); 
+            }
+            
+            // = S_EVAL =
+            
+            // -- Exited node --
+            if (exit_node)
+            {
+                if (debug_ray) printf("Pop %d\n", level);
+                
+                if (level==0) {
+                    // -- Exited octree --
+                    if (debug_ray) cur_fb->drawPixel(cur_x, cur_y, Pixel(1,0,0));
+                    return false;
+                }
+                else if (stack_underflow) { // stack underflow
+                    tnum t_exit = min(min(tx1,ty1),tz1); 
+                    t_start = t_exit;
+                    
+//                    printf("Underflow %d\n", t_start);
+                    if (debug_ray) printf("Underflow %d\n", t_start);
+                    
+                    goto S_INIT;
+                    
+                }
+                else {
+                    // Pop
+                    level--;
+                    si--;
+                    sl--;
+                    tx0 = stack[si].tx0; ty0 = stack[si].ty0; tz0 = stack[si].tz0;
+                    tx1 = stack[si].tx1; ty1 = stack[si].ty1; tz1 = stack[si].tz1;
+                    idx = stack[si].idx;
+                    node_adr = stack[si].adr;
+                    
+                    BlockEntry *be = ot->getEntry(node_adr);
+                    n = &be->node;
+                    child_decode(n, c_leaf, c_valid, c_offset);
+                }
+                continue;
+            }
+            else if (pass_node) {
+                continue;
+            }
+            // -- Hit leaf --
+            else if (c_leaf[idx_flip] || level==terminLevel) {
+                procLeaf(r, t_enter_child, size);
+                if (debug_ray) cur_fb->drawPixel(cur_x, cur_y, Pixel(0,1,0));
+                return true;
+            }
+            else if (c_valid[idx_flip]) { 
+                // -- Hit an octant containing something --
+                if (debug_ray) printf("Push %d\n", level);
+
+                assert(si<STACK_SIZE);
+                stack_item_t s_new = {
+                    tx0, ty0, tz0,
+                    tx1, ty1, tz1,
+                    node_adr,
+                    idx
+                };
+                stack[si] = s_new;
+                si++;
+                if (sl<stack_level_max) sl++;
+                
+                level++;
+                is_first_node = true;
+
+                tx0 = tx0_child; ty0 = ty0_child; tz0 = tz0_child;
+                tx1 = tx1_child; ty1 = ty1_child; tz1 = tz1_child;
+                
+                if (debug_ray) printf("Request adr: %x child_ptr: %x offset: %x\n", node_adr, n->child_ptr, c_offset[idx_flip]);   
+                BlockEntryPtr child_bep = ot->getRelativeEntry(node_adr, n->child_ptr);
+                node_adr = child_bep.adr+c_offset[idx_flip];
+                BlockEntry *be = ot->getEntry(node_adr);
+                n = &be->node;
+                child_decode(n, c_leaf, c_valid, c_offset);
+                
+            }
+            
+        }
+    }
+    
+    void child_decode(Node *n, bool *c_leaf, bool *c_valid, int *c_offset)
+    {
+        int i, c;
+        for (i=0,c=0;i<8;i++) {
+            bool valid = ((n->valid_mask >>i)&1);
+            bool leaf =  ((n->leaf_mask  >>i)&1);
+            c_valid[i] = valid;
+            c_leaf[i] = leaf;
+            //            if (debug_ray) printf("\t%d: valid: %d; leaf: %d; offset: %d\n", i, valid, leaf, c);
+            
+            if (valid && !leaf) {
+                c_offset[i] = c;
+                c++;
+            }
+        }
+    }
+    
+    int new_node(tnum tx1, tnum ty1, tnum tz1, int node_index)
+    {
+        if (debug_ray) printf("next_node: %.8x %.8x %.8x - old idx: %x\n", tx1, ty1, tz1, node_index);
+        if (tx1<ty1 && tx1<tz1) {
+            if (node_index & 0b100) return 8;
+            return node_index ^ 0b100;
+        }
+        else if (ty1 < tz1) {
+            if (node_index & 0b010) return 8;
+            return node_index ^ 0b010;
+        }
+        else {
+            if (node_index & 0b001) return 8;
+            return node_index ^ 0b001;
+        }
+    }
+    
+    int first_node(tnum tx0, tnum ty0, tnum tz0, tnum txm, tnum tym, tnum tzm)
+    {
+        int i = 0;
+        tnum t_enter = max(tx0,max(ty0,tz0));
+        if (tzm < t_enter) i ^= 1;
+        if (tym < t_enter) i ^= 2;
+        if (txm < t_enter) i ^= 4;
+        
+        return i;
+    }
+    
+    void procLeaf(Ray r, tnum tmin, tnum size)
+    {
+        //        cur_fb->drawPixel(cur_x, cur_y, Pixel(1,1,1));
+        
+        //        float tmin_f = tmin/tnum_scale;
+        //        Vector3f p = r.o + r.d*tmin_f;
+        //        
+        //        Vector3f c = Vector3f((p.x/40)+0.5, 0.2, (p.y/40)+0.5);
+        //        
+        //        c *= (25-tmin_f)/10;
+        //        cur_fb->drawPixel(cur_x, cur_y, Pixel(c.x, c.y, c.z));
+        
+        //        Vector3f c = Vector3f(1,1,1);
+        float blu = 0;
+        float red = (tmin>>8)%256;
+        
+        //        printf("%f\n", x);
+        cur_fb->drawPixel(cur_x, cur_y, Pixel(red/256, 0, blu/256));
+    }
+    
+    void render(Framebuffer *fb, Camera cam, int terminLevel)
+    {
+        if (!ot->rootNode) return;
+        this->terminLevel = terminLevel;
+        cur_fb = fb;
+        float w = fb->width;
+        float h = fb->height;
+        int i, c;
+        c = fb->width*fb->height;
+        int x = 0;
+        int y = 0;
+        for (i=0;i<c;i++) {
+            Vector3f ray_d = cam.calcCameraRay(w, h, x, y);
+            cur_x = x;
+            cur_y = fb->height-1-y;
+            if (x==15 && y==5) debug_ray = true;
+            rayCast(Ray(cam.o, ray_d));
+            if (x==w) {x=0;y++;}
+            x++;
+            debug_ray = false;
+        }
+    }
+};
+
+#endif
+```
+
+### Octree/OctreeSWRaytracer.h
+```
+#ifndef Octree_OctreeSWRaytracer_h
+#define Octree_OctreeSWRaytracer_h
+
+#include "Shared.h"
+#include "Octree.h"
+
+typedef SInt32 tnum; 
+const tnum tnum_max = INT32_MAX;
+const tnum tnum_min = INT32_MIN;
+const float o_max = (1<<5);
+const float d_min = 1/(1<<10);
+float tnum_scale = (1<<16);
+
+#define EXIT_X 1
+#define EXIT_Y 2
+#define EXIT_Z 3
+
+void tnum_clip(float *v)
+{
+    if (*v >= tnum_max) *v = tnum_max-1000;
+    if (*v <= tnum_min) *v = tnum_min+1000;
+}
+
+struct RayCastOutput 
+{
+    float t;
+    bool is_leaf;
+    
+    RayCastOutput()
+    {
+        
+    }
+    
+    RayCastOutput(float t, bool is_leaf) : t(t), is_leaf(is_leaf)
+    {
+        
+    }
+};
+
+struct StackItem
+{
+    OctreeCursor cur;
+    tnum tx0, ty0, tz0;
+    tnum tx1, ty1, tz1;
+    int idx;
+};
+
+struct Stack
+{
+    StackItem *store;
+    int top;
+    int length;
+    int ss;
+    
+    Stack(int size) : ss(size) {
+        store = (StackItem*)malloc(sizeof(StackItem)*size);
+        top = 0;
+        length = 0;
+    }  
+    
+    bool empty()
+    {
+        if (ss==0) return true;
+        return length==0;
+    }
+    
+    void reset()
+    {
+        top = 0;
+        length = 0;
+    }
+    
+    void push(OctreeCursor cur, 
+              tnum tx0, tnum ty0, tnum tz0,
+              tnum tx1, tnum ty1, tnum tz1,
+              int idx)
+    {
+        if (ss==0) return;
+        store[top] = (StackItem){cur, tx0, ty0, tz0, tx1, ty1, tz1, idx};
+        top = (top+1)%ss;
+        if (length<ss)
+            length++;
+    }
+    
+    void pop(OctreeCursor *cur, 
+             tnum *tx0, tnum *ty0, tnum *tz0,
+             tnum *tx1, tnum *ty1, tnum *tz1,
+             int *idx)
+    {
+        if (empty()) throw;
+        top--;
+        if (top<0) top+=ss;
+        length--;
+        *cur = store[top].cur;
+        *tx0 = store[top].tx0;
+        *ty0 = store[top].ty0;
+        *tz0 = store[top].tz0;
+        *tx1 = store[top].tx1;
+        *ty1 = store[top].ty1;
+        *tz1 = store[top].tz1;
+        *idx = store[top].idx;
+    }
+    
+};
+
+class OctreeSWRaytracer
+{
+public:
+    Octree *ot;
+    int terminLevel;
+    Framebuffer *fb;
+    Matrix4f projectionMat;
+    Matrix4f glProjectionMat;
+    Matrix4f modelMat;
+    Vector4f lightPos;
+    
+    Cache *cache;
+    
+    bool debug_ray;
+    bool gl_debug;
+    
+    Stack *stack;
+    
+    bool exportMode;
+    ofstream *exportFile;
+    int exportRayCount;
+    
+    int far_count;
+    int push_count;
+    int restart_count;
+    
+    OctreeSWRaytracer(Octree *targetOctree, Framebuffer *fb) : ot(targetOctree), fb(fb) 
+    {
+        debug_ray = false;
+        terminLevel = 10;
+        cache = NULL;
+        stack = new Stack(8);
+        exportMode = false;
+    }
+    
+    
+    RayCastOutput rayCast(Ray r)
+    {
+        Ray r2 = r;
+        int dir_mask=0;
+        
+//        if (fabs(r.o.x)>o_max ||
+//            fabs(r.o.y)>o_max ||
+//            fabs(r.o.z)>o_max)
+//            throw;
+        
+        if (r.d.x==0) 
+            r.d.x+=0.001; 
+        if (r.d.x<0.0) {
+            r.o.x = -r.o.x;
+            r.d.x = -r.d.x;
+            dir_mask |= 4;
+        }
+        if (r.d.y==0) 
+            r.d.y+=0.001;
+        if (r.d.y<0.0) {
+            r.o.y = -r.o.y;
+            r.d.y = -r.d.y;
+            dir_mask |= 2;
+        }
+        if (r.d.z==0)  
+            r.d.z+=0.001; 
+        if (r.d.z<0.0) {
+            r.o.z = -r.o.z;
+            r.d.z = -r.d.z;
+            dir_mask |= 1;
+        }
+
+        float tx0, tx1, ty0, ty1, tz0, tz1;
+
+        tx0 = (-1-r.o.x)/r.d.x;
+        tx1 = (1-r.o.x)/r.d.x;
+        ty0 = (-1-r.o.y)/r.d.y;
+        ty1 = (1-r.o.y)/r.d.y;
+        tz0 = (-1-r.o.z)/r.d.z;
+        tz1 = (1-r.o.z)/r.d.z;
+        
+        if (debug_ray) {
+//            printf("Init:\n\t%f %f %f\n\t%f %f %f\n", 
+//                   tx0, ty0, tz0,
+//                   tx1, ty1, tz1);
+            printf("\tdir_mask: %d\n", dir_mask);
+        }
+        
+//        float t_min = min(tx0,min(ty0,tz0));
+//        float t_max = max(tx1,max(ty1,tz1));
+//        float t_absmax = max(abs(t_min),abs(t_max));
+        
+        float t_enter = max(max(tx0,ty0),tz0);
+        float t_exit = min(min(tx1, ty1), tz1);
+        
+
+        tx0 *= tnum_scale; ty0 *= tnum_scale; tz0 *= tnum_scale;
+        tx1 *= tnum_scale; ty1 *= tnum_scale; tz1 *= tnum_scale;
+
+        
+        tnum_clip(&tx0); 
+        tnum_clip(&ty0); 
+        tnum_clip(&tz0);
+        tnum_clip(&tx1); tnum_clip(&ty1); tnum_clip(&tz1);
+        
+        assert(tx0<tnum_max && tx0>tnum_min);
+        assert(ty0<tnum_max && ty0>tnum_min);
+        assert(tz0<tnum_max && tz0>tnum_min);
+        
+        assert(tx1<tnum_max && tx1>tnum_min);
+        assert(ty1<tnum_max && ty1>tnum_min);
+        assert(tz1<tnum_max && tz1>tnum_min);
+        
+        if (debug_ray)
+            printf("%.8x %.8x %.8x\n%.8x %.8x %.8x\n\n", 
+                   (tnum)tx0, (tnum)ty0, (tnum)tz0, 
+                   (tnum)tx1, (tnum)ty1, (tnum)tz1);
+        
+        if (t_enter < t_exit) {
+            OctreeCursor cursor = ot->newRootCursor();
+            cursor.cache = cache;
+            
+            if (exportMode){
+                exportRay(tx0,ty0,tz0,
+                          tx1,ty1,tz1,
+                          dir_mask);
+                return RayCastOutput(0,0);
+            }
+            else
+                return rayCastCore(r2, 
+                            tx0,ty0,tz0,
+                            tx1,ty1,tz1,
+                            dir_mask,
+                            cursor);
+        }
+        else {
+            if (exportMode)
+                exportRay(0,0,0,0,0,0, (1<<31));
+        }
+        if (debug_ray) printf("End.\n");
+        return RayCastOutput(0,false);
+    }
+
+
+
+    
+    RayCastOutput rayCastCore(Ray ray, 
+                     tnum r_tx0, tnum r_ty0, tnum r_tz0,
+                     tnum r_tx1, tnum r_ty1, tnum r_tz1,
+                     int dir_mask,
+                     OctreeCursor r_cur)
+    {
+        
+        int level;
+        int idx, idx_flip;
+        bool is_first_node;
+        bool exits_node;
+        bool pass_node;
+        tnum t_start = 0;
+        tnum t_enter;
+        tnum t_exit_child;
+        
+        tnum tx0, ty0, tz0;
+        tnum tx1, ty1, tz1;
+        tnum txm, tym, tzm;
+        tnum tx0_child, ty0_child, tz0_child;
+        tnum tx1_child, ty1_child, tz1_child;
+        
+        bool is_leaf;
+        tnum t_out;
+        
+        OctreeCursor cur;
+        
+    S_INIT:
+        cur = r_cur;
+
+        tx0 = r_tx0; ty0 = r_ty0; tz0 = r_tz0;
+        tx1 = r_tx1; ty1 = r_ty1; tz1 = r_tz1;
+        
+        is_first_node = true;
+        level = 0;
+        exits_node = false;
+        
+        stack->reset();
+        
+        if (debug_ray)
+            printf("Init - t_start: %.8x\n",  t_start);
+        goto S_CALC_T;
+        
+  
+    S_CALC_T:
+        txm = (tx0+tx1)/2;
+        tym = (ty0+ty1)/2;
+        tzm = (tz0+tz1)/2;
+
+        t_enter = max(tx0,max(ty0,tz0));
+        
+        if (debug_ray)
+            printf("t_enter: %.8x\n",  t_enter);
+        
+        if (is_first_node)
+            goto S_FIRST_IDX;
+        else
+            goto S_NEXT_IDX;
+        
+    S_FIRST_IDX:
+        idx = (txm < t_enter)<<2 | (tym < t_enter)<<1 | (tzm < t_enter);
+        exits_node = false;
+        is_first_node = false;
+        if (debug_ray)
+            printf("FrstIdx: %d / %d\n", idx, idx^dir_mask);
+        goto S_DATA_WAIT;
+        
+    S_DATA_WAIT:
+        // if (got_data)
+        if (debug_ray)
+            printf("Data: %.8x : %.8x\n", cur.adr*4, *((int*)cur.node));
+        goto S_CALC_CHILD_T;
+
+        
+        
+    S_NEXT_IDX:
+        exits_node = false;
+        if (t_exit_child == tx1_child) {
+            if (idx & 4)
+                exits_node = true;
+            else
+                idx = idx ^ 4;
+        }
+        else if (t_exit_child == ty1_child) {
+            if (idx & 2)
+                exits_node = true;
+            else
+                idx = idx ^ 2;
+        }
+        else {
+            if (idx & 1)
+                exits_node = true;
+            else
+                idx = idx ^ 1;        
+        }
+        if (debug_ray)
+            printf("NextIdx: %d / %d   exit: %d\n", idx, idx^dir_mask, exits_node);
+        goto S_NEXT_EVAL;
+
+    S_NEXT_EVAL:
+        if (exits_node) {
+            if (level==0) {
+                is_leaf = false;
+                goto S_FINISHED;
+            }
+            else if (stack->empty()) {
+                if (debug_ray) 
+                    printf("Underflow\n\n");
+                restart_count++;
+                t_start = t_exit_child;
+                goto S_INIT;
+            }
+            else {
+                if (debug_ray) printf("Pop\n");
+                stack->pop(&cur,
+                           &tx0, &ty0, &tz0,
+                           &tx1, &ty1, &tz1,
+                           &idx);
+                level--;
+                goto S_CALC_T;
+            }
+        }
+        else {
+            goto S_CALC_CHILD_T;
+        }
+        
+    S_CALC_CHILD_T:
+//        if (debug_ray) printf("Idx %d / %d\n", idx, idx ^ dir_mask);
+        tx0_child = (idx&4) ? txm : tx0;
+        tx1_child = (idx&4) ? tx1 : txm;
+        ty0_child = (idx&2) ? tym : ty0;
+        ty1_child = (idx&2) ? ty1 : tym;
+        tz0_child = (idx&1) ? tzm : tz0;
+        tz1_child = (idx&1) ? tz1 : tzm;
+        
+        t_exit_child = min(tx1_child,min(ty1_child,tz1_child));
+
+        goto S_EVAL;
+        
+    S_EVAL:
+        idx_flip = idx ^ dir_mask;
+        pass_node = t_exit_child <= t_start;
+        if (pass_node) {
+            goto S_NEXT_IDX;
+        }
+        else if (cur.childIsFilled(idx_flip) || level==terminLevel) {
+            tx0 = tx0_child; ty0 = ty0_child; tz0 = tz0_child;
+            tx1 = tx1_child; ty1 = ty1_child; tz1 = tz1_child;
+            is_leaf = true;
+            goto S_FINISHED;
+        }
+        else if (cur.childIsValid(idx_flip)) {
+            if (debug_ray) {
+//                printf("%.8x %.8x %.8x\n%.8x %.8x %.8x\n", 
+//                       tx0, ty0, tz0, tx1, ty1, tz1);
+                if (cur.childPtrIsFar())
+                    printf("Far %x\n", cur.farPtr());
+                printf("Push\n\n");
+            }
+            if (cur.childPtrIsFar()) {
+                far_count++;
+            }
+            push_count++;
+            stack->push(cur,
+                        tx0, ty0, tz0,
+                        tx1, ty1, tz1,
+                        idx);
+            
+            tx0 = tx0_child; ty0 = ty0_child; tz0 = tz0_child;
+            tx1 = tx1_child; ty1 = ty1_child; tz1 = tz1_child;
+            
+            level++;
+            is_first_node = true;
+            
+            cur = cur.getChild(idx_flip);
+            
+            goto S_CALC_T;
+        }
+        else {
+            goto S_NEXT_IDX;
+        }
+        
+    S_FINISHED:
+        t_enter = max(tx0,max(ty0,tz0));
+        t_out = is_leaf ? t_enter : t_exit_child;
+        if (debug_ray) {
+         printf("Leaf: %d %.8x\n\n\n", is_leaf, t_out);   
+        }
+        return RayCastOutput((float)t_out/(float)tnum_scale, is_leaf);
+    }
+    
+    void drawRay(int x, int y, Ray ray, RayCastOutput result)
+    {
+        if (result.is_leaf) {
+            float qz = result.t;
+            float n = 0.1;
+            float f = 8;
+            float vz = f/(f-n) - f*n/(f-n)/((f-n)*qz+n);
+            fb->drawPixel(x, y, Pixel(vz,vz,vz), 0);
+        }
+        else {
+            fb->drawPixel(x, y, Pixel(1,1,1), 0);
+        }
+    }
+ 
+    void render()
+    {
+        if (!ot->isBuilt()) return;
+        if (cache) cache->reset();
+        
+        float w = fb->width;
+        float h = fb->height;
+        
+        float dx = 2/w;
+        float dy = 2/h;
+        
+        float rx, ry;
+        int x,y;
+        for (x = 0, rx = -1; x < fb->width; x++, rx+=dx) {
+            for (y = 0, ry = -1; y < fb->height; y++, ry+=dy) {
+                
+//                if (x==10 && y==7) 
+//                    debug_ray = true;
+                
+                Vector4f origin = Vector4f(rx, -ry, -1, 1);
+                Vector4f dest = Vector4f(rx, -ry, 1, 1);
+                
+                origin = projectionMat * origin;
+                origin = origin / origin.w;
+                dest = projectionMat * dest;
+                dest = dest / dest.w;
+                Vector4f vec = dest-origin;
+                
+                Vector4f origin2 = modelMat * origin;
+                Vector4f dest2 = modelMat * dest;
+                Vector4f vec2 = dest2-origin2;
+                
+                Ray ray = Ray(origin2, vec2);
+                
+                push_count = 0;
+                restart_count = 0;
+                far_count = 0;
+                RayCastOutput result;
+                result = rayCast(ray);
+                
+                if (result.is_leaf) {
+                    debug_ray = false;
+                    float t = result.t - 10/(float)tnum_scale;
+                    Vector4f ipoint = origin + vec*t;
+                    Vector4f glipoint = glProjectionMat * ipoint;
+                    glipoint = glipoint / glipoint.w;
+                    float vz = (glipoint.z+1)/2;
+                    
+                    
+                    if (1) {
+                        // Normal drawing routine
+                        Vector4f ipoint2 = origin2 + vec2*t;
+                        Vector4f lightVec = lightPos - ipoint2;
+                        
+                        Ray lray = Ray(ipoint2, lightVec);
+                        
+                        RayCastOutput lres;
+                        lres = rayCast(lray); 
+                        if (!lres.is_leaf) {
+                            fb->drawPixel(x, y, Pixel(1,0.7,0.5), vz); 
+                        }
+                        else {
+                            fb->drawPixel(x, y, Pixel(0.5,0.35,0.25), vz); 
+                        }
+                    }
+                    else {
+                        // Debug drawing routine to show cost of rays
+                        fb->drawPixel(x, y, Pixel((float)push_count/20.0,0,0), 0); 
+                    }
+                }
+                else {
+                    if (0) 
+                        fb->drawPixel(x, y, Pixel(0,(float)push_count/20.0,(float)push_count/20.0), 0); 
+                    if (debug_ray) {
+                        fb->drawPixel(x, y, Pixel(1,0,0), 1);
+                    }
+                }
+                
+                debug_ray = false;
+            }
+        }
+    }
+    
+    void exportRay(tnum r_tx0, tnum r_ty0, tnum r_tz0,
+                   tnum r_tx1, tnum r_ty1, tnum r_tz1,
+                   int dir_mask)
+    {
+        exportFile->write((char*)&dir_mask, sizeof(int));
+        exportFile->write((char*)&r_tx0, sizeof(tnum));
+        exportFile->write((char*)&r_ty0, sizeof(tnum));
+        exportFile->write((char*)&r_tz0, sizeof(tnum));
+        exportFile->write((char*)&r_tx1, sizeof(tnum));
+        exportFile->write((char*)&r_ty1, sizeof(tnum));
+        exportFile->write((char*)&r_tz1, sizeof(tnum));
+        exportRayCount++;
+    }
+    
+    void exportRayData(ofstream *file, int width, int height)
+    {
+
+        exportMode = true;
+        exportFile = file;
+        exportRayCount = width*height;
+        
+        float w = width;
+        float h = height;
+        
+        float dx = 2/w;
+        float dy = 2/h;
+        
+        
+        exportFile->write((char*)&exportRayCount, sizeof(int));
+        
+        float rx, ry;
+        int x,y;
+        for (y = 0, ry = -1; y < height; y++, ry+=dy) {
+            for (x = 0, rx = -1; x < width; x++, rx+=dx) {
+
+                Vector4f origin = Vector4f(rx, -ry, -1, 1);
+                Vector4f dest = Vector4f(rx, -ry, 1, 1);
+                
+                origin = projectionMat * origin;
+                origin = origin / origin.w;
+                dest = projectionMat * dest;
+                dest = dest / dest.w;
+                Vector4f vec = dest-origin;
+                
+                Vector4f origin2 = modelMat * origin;
+                Vector4f dest2 = modelMat * dest;
+                Vector4f vec2 = dest2-origin2;
+                
+                Ray ray = Ray(origin2, vec2);
+                rayCast(ray);
+                
+            }
+        }
+
+        exportFile = NULL;
+        exportMode = false;
+    }
+};
+
+#endif
+```
+
+### Octree/OctreeView.h
+```
+#import <Cocoa/Cocoa.h>
+
+#ifdef __cplusplus
+#include "Framebuffer.h"
+#include "Octree.h"
+#include "OctreeSWRaytracer.h"
+#include "OctreeGL.h"
+#endif
+
+@interface OctreeView : NSOpenGLView {
+    
+#ifdef __cplusplus
+    Framebuffer *framebuffer;
+    Octree *octree;
+    OctreeSWRaytracer *raytracer;
+    OctreeGL *gl_renderer;
+#else
+    void *framebuffer;
+    void *octree;
+    void *raytracer;
+    void *gl_renderer;
+#endif
+    bool shouldSaveImage;
+    
+    IBOutlet NSSlider *slider;
+    IBOutlet NSTextField *renderLevelText;
+    IBOutlet NSSlider *rotateSlider;
+    IBOutlet NSSlider *camRotateSlider;
+    IBOutlet NSSlider *newSlider;
+    IBOutlet NSSlider *scaleSlider;
+    IBOutlet NSTextField *sizeField;
+    IBOutlet NSTextField *glTimeField;
+    IBOutlet NSTextField *rcTimeField;
+    
+    IBOutlet NSTextField *buildLevelText;
+    
+    IBOutlet NSTextField *cacheMissText;
+    IBOutlet NSTextField *cacheHitText;
+    IBOutlet NSTextField *cacheHitMissText;
+    
+    IBOutlet NSButton *drawSVO;
+    IBOutlet NSButton *drawPolygon;
+    IBOutlet NSButton *showZbuffer;
+    
+
+}
+
+- (IBAction)update:(id)sender;
+- (IBAction)rebuild:(id)sender;
+- (IBAction)save:(id)sender;
+- (IBAction)load:(id)sender;
+- (IBAction)loadBinVox:(id)sender;
+- (IBAction)saveImage:(id)sender;
+- (IBAction)saveRayData:(id)sender;
+- (IBAction)cacheProgram:(id)sender;
+- (IBAction)push:(id)sender;
+
+@end
+```
+
+### Octree/Shared.h
+```
+#ifndef Octree_Shared_h
+#define Octree_Shared_h
+
+struct Ray {
+    Vector4f o;
+    Vector4f d;
+    
+    Ray(Vector4f o, Vector4f d) : o(o), d(d)
+    {
+        
+    }
+};
+
+
+#endif
+```
+
+### Octree/binvox.cpp
+```
+#include "binvox.h"
+#include <string>
+
+using namespace std;
+
+typedef unsigned char byte;
+
+int read_binvox(ifstream *input, unsigned char **voxels_ptr)
+{
+    
+    
+    //
+    // read header
+    //
+    string line;
+    *input >> line;  // #binvox
+    if (line.compare("#binvox") != 0) {
+        cout << "Error: first line reads [" << line << "] instead of [#binvox]" << endl;
+        delete input;
+        return 0;
+    }
+    int version;
+    *input >> version;
+    cout << "reading binvox version " << version << endl;
+    
+    int depth, height, width;
+    depth = -1;
+    int done = 0;
+    while(input->good() && !done) {
+        *input >> line;
+        if (line.compare("data") == 0) done = 1;
+        else if (line.compare("dim") == 0) {
+            *input >> depth >> height >> width;
+        }
+        else {
+            cout << "  unrecognized keyword [" << line << "], skipping" << endl;
+            char c;
+            do {  // skip until end of line
+                c = input->get();
+            } while(input->good() && (c != '\n'));
+            
+        }
+    }
+    if (!done) {
+        cout << "  error reading header" << endl;
+        return 0;
+    }
+    if (depth == -1) {
+        cout << "  missing dimensions in header" << endl;
+        return 0;
+    }
+    
+    if (!((width==height) && (width==depth))) {
+        cout << " width, height and depth must be equal" << endl;
+        return 0;
+    }
+    
+    // TODO: Check that width is power of 2
+    
+    int size = width * height * depth;
+    byte *voxels = new byte[size];
+    if (!voxels) {
+        cout << "  error allocating memory" << endl;
+        return 0;
+    }
+    
+    //
+    // read voxel data
+    //
+    byte value;
+    byte count;
+    int index = 0;
+    int end_index = 0;
+    int nr_voxels = 0;
+    
+    input->unsetf(ios::skipws);  // need to read every byte now (!)
+    *input >> value;  // read the linefeed char
+    
+    while((end_index < size) && input->good()) {
+        *input >> value >> count;
+        
+        if (input->good()) {
+            end_index = index + count;
+            if (end_index > size) return 0;
+            for(int i=index; i < end_index; i++) voxels[i] = value;
+            
+            if (value) nr_voxels += count;
+            index = end_index;
+        }  // if file still ok
+        
+    }  // while
+    
+    cout << "  read " << nr_voxels << " voxels" << endl;
+    
+    *voxels_ptr = voxels;
+    return width;
+    
+}
+```
+
+### Octree/binvox.h
+```
+#ifndef Octree_binvox_h
+#define Octree_binvox_h
+
+#include <iostream>
+#include <fstream>
+
+int read_binvox(std::ifstream *input, unsigned char **voxels_ptr);
+
+#endif
+```
+
+### Octree/fpgalink.c
+```
+//
+//  fpgalink.c
+//  Octree
+//
+//  Created by Audun Wilhelmsen on 09.06.12.
+//  Copyright (c) 2012 NTNU. All rights reserved.
+//
+//
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <libfpgalink.h>
+
+#define CMD_WRITE 0x01
+#define CMD_READ 0x02
+
+#define FAIL(x) exit(x)
+
+#define CHECK(x) \
+if ( status != FL_SUCCESS ) {       \
+fprintf(stderr, "%s\n", error); \
+flFreeError(error);             \
+FAIL(x);									\
+}
+static bool opened = false;
+static struct FLContext *handle = NULL;
+static FLStatus status;
+static const char *error = NULL;
+static bool flag;
+static uint8 byte = 0;
+
+static char *vp = "1443:0007";
+static char *ivp = "1443:0007";
+
+static bool isNeroCapable, isCommCapable;
+
+unsigned int swap_endian(unsigned int value)
+{
+    char *ptr = (char*)&value;
+    char out[4];
+    out[0] = ptr[3]; out[1] = ptr[2]; out[2] = ptr[1]; out[3] = ptr[0];
+    return *((unsigned int*)out);
+}
+
+void fl_init()
+{
+	if (opened) return;
+	flInitialise();
+	
+	printf("Attempting to open connection to FPGALink device %s...\n", vp);
+	status = flOpen(vp, &handle, NULL);
+	if (status ) {
+		
+		printf("Loading firmware...\n");
+		status = flLoadStandardFirmware(ivp, vp, &error);
+        
+		int count = 60;
+		printf("Awaiting renumeration");
+		flSleep(1000);
+		do {
+			printf(".");
+			fflush(stdout);
+			flSleep(100);
+			status = flIsDeviceAvailable(vp, &flag, &error);
+			CHECK(9);
+			count--;
+		} while ( !flag && count );
+		printf("\n");
+		if ( !flag ) {
+			fprintf(stderr, "FPGALink device did not renumerate properly as %s\n", vp);
+			FAIL(10);
+		}
+		flSleep(2000);
+		printf("Attempting to open connection to FPGLink device %s again...\n", vp);
+		status = flOpen(vp, &handle, &error);
+		CHECK(11);
+		
+	}
+	
+	printf("Connection open\n");
+	
+	isNeroCapable = flIsNeroCapable(handle);
+	isCommCapable = flIsCommCapable(handle);
+    
+    opened = true;
+    
+}
+
+
+void fl_upload(const char *file_path, unsigned int address, bool verify, bool swap)
+{
+	if (isCommCapable) {
+		// Stall CPU
+        if (!handle) return;
+		byte = 0x01;
+		status = flWriteRegister(handle, 1000, 0x00, 1, &byte, &error); 
+        CHECK(19);	
+        
+        
+        
+		// Open file
+		FILE *f;
+		f = fopen(file_path, "rb");
+		if (!f) {
+			printf("File not found: %s\n", file_path);
+		}
+		
+		// Get file size
+		fseek(f, 0L, SEEK_END);
+        unsigned int size = ftell(f);
+        unsigned int size_in_words = (size + (4-1)) / 4;
+        fseek(f, 0L, SEEK_SET);
+		
+		// Send command
+        unsigned int cmd[3] = {
+            swap_endian(CMD_WRITE),
+            swap_endian(size_in_words),
+            swap_endian(address)
+        };
+        status = flWriteRegister(handle, 1000, 0x01, 12, (unsigned char*)cmd, &error); CHECK(19);
+        
+        // Allocate buffer
+        unsigned int *buffer = malloc(size_in_words*4);
+		
+		
+		// Upload file
+		size_t n_read;
+		
+        n_read = fread(buffer, 1, size, f);
+        
+        if (swap) {
+            unsigned int i;
+            for (i=0;i<size_in_words;i++)
+                buffer[i] = swap_endian(buffer[i]);
+        }
+        
+        status = flWriteRegister(handle, 2000, 0x01, size_in_words*4, (unsigned char*)buffer, &error); CHECK(30);
+        
+        // Verify data
+        if (verify) {
+            printf("Verifying...\n");
+            // Send command
+            unsigned int cmd[3] = {
+                swap_endian(CMD_READ),
+                swap_endian(size_in_words),
+                swap_endian(address)
+            };
+            status = flWriteRegister(handle, 1000, 0x01, 12, (unsigned char*)cmd, &error); CHECK(19);
+            
+            
+            unsigned int *verify_buffer = malloc(size_in_words*4);
+            unsigned int *verify_ptr = verify_buffer;
+            unsigned int i = 0;
+            unsigned int block_size = 256;
+            
+            while((i+block_size)<size_in_words) {            
+                status = flReadRegister(handle, 2000, 0x01, block_size*4, (unsigned char*)verify_ptr, &error); CHECK(30); 
+                i += block_size; 
+                verify_ptr += block_size;      
+                // sleep(1);
+            }
+            for(;i<size_in_words;i++) {
+                // printf("%d %d\n", i, size_in_words);
+                status = flReadRegister(handle, 2000, 0x01, 4, (unsigned char*)verify_ptr, &error); CHECK(30);   
+                verify_ptr++;         
+            }
+            printf("\n");
+            
+            // status = flReadRegister(handle, 2000, 0x01, size_in_words*4, (unsigned char*)&verify_buffer, &error); CHECK(30);			
+            for (i=0;i<size_in_words;i++) {
+                if (buffer[i] != verify_buffer[i]) {
+                    printf("Error at address %d - %.8x vs %.8x\n", address+i*4, buffer[i], verify_buffer[i]);
+                    {
+                        unsigned int cmd[4] = {
+                            swap_endian(CMD_WRITE),
+                            swap_endian(1),
+                            swap_endian(address+i*4),
+                            buffer[i]
+                        };
+                        status = flWriteRegister(handle, 1000, 0x01, 16, (unsigned char*)cmd, &error); CHECK(19);  
+                    }
+                    {             
+                        unsigned int cmd[3] = {
+                            swap_endian(CMD_READ),
+                            swap_endian(1),
+                            swap_endian(address+i*4)
+                        };
+                        unsigned int data;
+                        status = flWriteRegister(handle, 1000, 0x01, 12, (unsigned char*)cmd, &error); CHECK(19);  
+                        status = flReadRegister(handle, 2000, 0x01, 4, (unsigned char*)&data, &error); CHECK(30);   
+                        // printf("%.8x\n", data);
+                        if (data == buffer[i])
+                            printf("Double-check OK\n");
+                    }
+                }
+            }
+            printf("\n");
+        }
+        
+        
+		
+		fclose(f);
+        free(buffer);
+		printf("Upladed %d bytes\n", (int)n_read*4);
+		
+		// Reset & resume CPU. TODO: Optional reset
+        byte = 0x03;
+        status = flWriteRegister(handle, 1000, 0x00, 1, &byte, &error); CHECK(19);
+        byte = 0x02;
+        status = flWriteRegister(handle, 1000, 0x00, 1, &byte, &error); CHECK(19);
+		byte = 0x00;
+		status = flWriteRegister(handle, 1000, 0x00, 1, &byte, &error); CHECK(19);
+		
+		// TODO: Check data
+	}	else {
+		fprintf(stderr, "Device at %s does not support comm", vp);
+		FAIL(20);
+	}
+}
+```
+
+### Octree/fpgalink.h
+```
+//
+//  fpgalink.h
+//  Octree
+//
+//  Created by Audun Wilhelmsen on 09.06.12.
+//  Copyright (c) 2012 NTNU. All rights reserved.
+//
+
+#ifndef Octree_fpgalink_h
+#define Octree_fpgalink_h
+extern "C" {
+    void fl_upload(const char *file_path, unsigned int address, bool verify, bool swap);
+    void fl_init();
+}
+#endif
+```
+
+### Octree/glutils.h
+```
+#ifndef Octree_glutils_h
+#define Octree_glutils_h
+
+#include <OpenGL/gl.h>
+#include "vmath.h"
+
+static inline void glQuad(Vector3f p0, Vector3f p1, Vector3f p2, Vector3f p3)
+{
+    glBegin(GL_QUADS);
+	glVertex3f(p0.x, p0.y, p0.z);
+	glVertex3f(p1.x, p1.y, p1.z);
+	glVertex3f(p2.x, p2.y, p2.z);
+	glVertex3f(p3.x, p3.y, p3.z);
+
+	glEnd();
+}
+
+static inline void glAxisCube(Vector3f p0, Vector3f p1)
+{
+    glBegin(GL_QUADS);
+    
+	glVertex3f(p0.x, p0.y, p0.z);
+	glVertex3f(p1.x, p0.y, p0.z);
+    glVertex3f(p1.x, p1.y, p0.z);
+	glVertex3f(p0.x, p1.y, p0.z);
+    
+	glVertex3f(p1.x, p0.y, p0.z);
+	glVertex3f(p1.x, p0.y, p1.z);
+	glVertex3f(p1.x, p1.y, p1.z);
+	glVertex3f(p1.x, p1.y, p0.z);
+
+    glVertex3f(p0.x, p0.y, p1.z);
+	glVertex3f(p1.x, p0.y, p1.z);
+    glVertex3f(p1.x, p1.y, p1.z);
+	glVertex3f(p0.x, p1.y, p1.z);
+    
+    glVertex3f(p0.x, p0.y, p0.z);
+	glVertex3f(p0.x, p0.y, p1.z);
+	glVertex3f(p0.x, p1.y, p1.z);
+	glVertex3f(p0.x, p1.y, p0.z);
+    
+    glVertex3f(p0.x, p1.y, p0.z);
+	glVertex3f(p1.x, p1.y, p0.z);
+	glVertex3f(p1.x, p1.y, p1.z);
+	glVertex3f(p0.x, p1.y, p1.z);
+
+    glVertex3f(p0.x, p0.y, p0.z);
+	glVertex3f(p1.x, p0.y, p0.z);
+	glVertex3f(p1.x, p0.y, p1.z);
+	glVertex3f(p0.x, p0.y, p1.z);
+	glEnd();
+}
+
+static inline void glLine(Vector3f p0, Vector3f p1)
+{
+    glBegin(GL_LINES);
+	glVertex3f(p0.x, p0.y, p0.z);
+	glVertex3f(p1.x, p1.y, p1.z);
+    glEnd();
+}
+
+static inline void glPoint(Vector3f p, float size)
+{
+    glPointSize(size);
+    glBegin(GL_POINTS);
+    glVertex3f(p.x, p.y, p.z);
+    glEnd();
+}
+
+
+
+static void glAxisIndicators(float s)
+{
+    glColor3f(1,0,0);
+    glLine(Vector3f(0,0,0), Vector3f(s,0,0));
+    glLine(Vector3f(s,0,0), Vector3f(s-0.1,0.1,0));
+    glLine(Vector3f(s,0,0), Vector3f(s-0.1,-0.1,0));
+    glColor3f(0,1,0);
+    glLine(Vector3f(0,0,0), Vector3f(0,s,0));
+    glLine(Vector3f(0,s,0), Vector3f(0.1,s-0.1,0));
+    glLine(Vector3f(0,s,0), Vector3f(-0.1,s-0.1,0));
+    glColor3f(0,0,1);
+    glLine(Vector3f(0,0,0), Vector3f(0,0,s));
+    glLine(Vector3f(0,0,s), Vector3f(0.1,0,s-0.1));
+    glLine(Vector3f(0,0,s), Vector3f(-0.1,0,s-0.1));
+}
+
+
+static void glMakePTransform(float *mat, float left, float right, float bottom, float top,  float near, float far)
+{
+    float n = near; float f = far;
+    float l = left; float r = right;
+    float t = top; float b = bottom;
+    mat[0] = 2*n / (r - l);
+    mat[1] = 0.0;
+    mat[2] = 0.0;
+    mat[3] = 0.0;
+    
+    mat[4] = 0.0;
+    mat[5] = 2*n / (t - b);
+    mat[6] = 0.0;
+    mat[7] = 0.0;
+    
+    mat[8] = (r + l) / (r - l);
+    mat[9] = (t + b) / (t - b);
+    mat[10] = -(f + n) / (f - n);
+    mat[11] = -1.0;
+    
+    mat[12] = 0.0;
+    mat[13] = 0.0;
+    mat[14] = - 2*n *f / (f-n);
+    mat[15] = 0.0;
+}
+
+static void glMakePTransform2(float *mat, float left, float right, float bottom, float top,  float near, float far)
+{
+    float temp, temp2, temp3, temp4;
+    temp = 2.0 * near;
+    temp2 = right - left;
+    temp3 = top - bottom;
+    temp4 = far - near;
+    
+    mat[0] = temp / temp2;
+    mat[1] = 0.0;
+    mat[2] = 0.0;
+    mat[3] = 0.0;
+    
+    mat[4] = 0.0;
+    mat[5] = temp / temp3;
+    mat[6] = 0.0;
+    mat[7] = 0.0;
+    
+    mat[8] = (right + left) / temp2;
+    mat[9] = (top + bottom) / temp3;
+    mat[10] = (far + near) / temp4;
+    mat[11] = -1.0;
+    
+    mat[12] = 0.0;
+    mat[13] = 0.0;
+    mat[14] = (temp * far) / temp4;
+    mat[15] = 0.0;
+}
+
+static void glMakeIPTransform(float *mat, float left, float right, float bottom, float top,  float near, float far)
+{
+    float n = near; float f = far;
+    float l = left; float r = right;
+    float t = top; float b = bottom;
+    
+    mat[0] = -f*(r-l) / (f-n);
+    mat[1] = 0.0;
+    mat[2] = 0.0;
+    mat[3] = 0.0;
+    
+    mat[4] = 0.0;
+    mat[5] = -f*(t-b) / (f-n);
+    mat[6] = 0.0;
+    mat[7] = 0.0;
+    
+    mat[8] = 0;
+    mat[9] = 0;
+    mat[10] = 0;
+    mat[11] = 1.0;
+    
+    mat[12] = - f*(r+l) / (f-n);
+    mat[13] = - f*(t+b) / (f-n);
+    mat[14] = 2*f*n / (f-n);
+    mat[15] = - (f+n) / (f-n);
+}
+
+
+
+#endif
+```
+
+### Octree/ply.cpp
+```
+#include <stdio.h>
+#include <string.h>
+#include <OpenGL/gl.h>
+#include <OpenGL/glu.h>
+#include <cmath>
+#include <string>
+
+#include "ply.h"
+
+Model_PLY::Model_PLY()
+{
+    
+}
+
+
+void Model_PLY::calculateNormal(float norm[3], float *coord1, float *coord2, float *coord3 )
+{
+    /* calculate Vector1 and Vector2 */
+    float va[3], vb[3], vr[3], val;
+    va[0] = coord1[0] - coord2[0];
+    va[1] = coord1[1] - coord2[1];
+    va[2] = coord1[2] - coord2[2];
+    
+    vb[0] = coord1[0] - coord3[0];
+    vb[1] = coord1[1] - coord3[1];
+    vb[2] = coord1[2] - coord3[2];
+    
+    /* cross product */
+    vr[0] = va[1] * vb[2] - vb[1] * va[2];
+    vr[1] = vb[0] * va[2] - va[0] * vb[2];
+    vr[2] = va[0] * vb[1] - vb[0] * va[1];
+    
+    /* normalization factor */
+    val = sqrt( vr[0]*vr[0] + vr[1]*vr[1] + vr[2]*vr[2] );
+    
+	norm[0] = vr[0]/val;
+	norm[1] = vr[1]/val;
+	norm[2] = vr[2]/val;
+    
+    
+}
+
+
+
+int Model_PLY::Load(const char* filename)
+{
+    this->TotalConnectedTriangles = 0; 
+	this->TotalConnectedQuads = 0;
+	this->TotalConnectedPoints = 0;
+    
+    char* pch = strstr(filename,".ply");
+    
+    if (pch != NULL)
+    {
+        FILE* file = fopen(filename,"r");
+        if (!file) {
+            printf("File not found\n");
+            return -1;
+        }
+        
+		fseek(file,0,SEEK_END);
+		long fileSize = ftell(file);
+        
+		try
+		{
+            Vertex_Buffer = (float*) malloc (ftell(file));
+		}
+		catch (char* )
+		{
+			return -1;
+		}
+		if (Vertex_Buffer == NULL) return -1;
+		fseek(file,0,SEEK_SET); 
+        
+        Faces_Triangles = (float*) malloc(fileSize*sizeof(float));
+        Normals  = (float*) malloc(fileSize*sizeof(float));
+        
+        if (file)
+        {
+			int i = 0;   
+			int temp = 0;
+			int quads_index = 0;
+            int triangle_index = 0;
+			int normal_index = 0;
+			char buffer[1000];
+            
+            
+			fgets(buffer,300,file);			// ply
+            
+            
+			// READ HEADER
+			// -----------------
+            
+			// Find number of vertexes
+			while (  strncmp( "element vertex", buffer,strlen("element vertex")) != 0  )
+			{
+				fgets(buffer,300,file);			// format
+			}
+			strcpy(buffer, buffer+strlen("element vertex"));
+			sscanf(buffer,"%i", &this->TotalConnectedPoints);
+            
+            
+			// Find number of vertexes
+			fseek(file,0,SEEK_SET);
+			while (  strncmp( "element face", buffer,strlen("element face")) != 0  )
+			{
+				fgets(buffer,300,file);			// format
+			}
+			strcpy(buffer, buffer+strlen("element face"));
+			sscanf(buffer,"%i", &this->TotalFaces);
+            
+            
+			// go to end_header
+			while (  strncmp( "end_header", buffer,strlen("end_header")) != 0  )
+			{
+				fgets(buffer,300,file);			// format
+			}
+            
+			//----------------------
+            
+            
+			// read verteces
+			i =0;
+			for (int iterator = 0; iterator < this->TotalConnectedPoints; iterator++)
+			{
+				fgets(buffer,300,file);
+                
+				sscanf(buffer,"%f %f %f", &Vertex_Buffer[i], &Vertex_Buffer[i+1], &Vertex_Buffer[i+2]);
+				i += 3;
+			}
+            
+			// read faces
+			i =0;
+			for (int iterator = 0; iterator < this->TotalFaces; iterator++)
+			{
+				fgets(buffer,300,file);
+                
+                if (buffer[0] == '3')
+                {
+                    
+                    int vertex1 = 0, vertex2 = 0, vertex3 = 0;
+                    //sscanf(buffer,"%i%i%i\n", vertex1,vertex2,vertex3 );
+                    buffer[0] = ' ';
+                    sscanf(buffer,"%i%i%i", &vertex1,&vertex2,&vertex3 );
+                    /*vertex1 -= 1;
+                     vertex2 -= 1;
+                     vertex3 -= 1;
+                     */
+                    //  vertex == punt van vertex lijst
+                    // vertex_buffer -> xyz xyz xyz xyz
+//                    printf("%f %f %f ", Vertex_Buffer[3*vertex1], Vertex_Buffer[3*vertex1+1], Vertex_Buffer[3*vertex1+2]);
+                    
+                    Faces_Triangles[triangle_index] = Vertex_Buffer[3*vertex1];
+                    Faces_Triangles[triangle_index+1] = Vertex_Buffer[3*vertex1+1];
+                    Faces_Triangles[triangle_index+2] = Vertex_Buffer[3*vertex1+2];
+                    Faces_Triangles[triangle_index+3] = Vertex_Buffer[3*vertex2];
+                    Faces_Triangles[triangle_index+4] = Vertex_Buffer[3*vertex2+1];
+                    Faces_Triangles[triangle_index+5] = Vertex_Buffer[3*vertex2+2];
+                    Faces_Triangles[triangle_index+6] = Vertex_Buffer[3*vertex3];
+                    Faces_Triangles[triangle_index+7] = Vertex_Buffer[3*vertex3+1];
+                    Faces_Triangles[triangle_index+8] = Vertex_Buffer[3*vertex3+2];
+                    
+                    float coord1[3] = { Faces_Triangles[triangle_index], Faces_Triangles[triangle_index+1],Faces_Triangles[triangle_index+2]};
+                    float coord2[3] = {Faces_Triangles[triangle_index+3],Faces_Triangles[triangle_index+4],Faces_Triangles[triangle_index+5]};
+                    float coord3[3] = {Faces_Triangles[triangle_index+6],Faces_Triangles[triangle_index+7],Faces_Triangles[triangle_index+8]};
+                    float norm[3];
+                    this->calculateNormal(norm, coord1, coord2, coord3 );
+                    
+                    Normals[normal_index] = norm[0];
+                    Normals[normal_index+1] = norm[1];
+                    Normals[normal_index+2] = norm[2];
+                    Normals[normal_index+3] = norm[0];
+                    Normals[normal_index+4] = norm[1];
+                    Normals[normal_index+5] = norm[2];
+                    Normals[normal_index+6] = norm[0];
+                    Normals[normal_index+7] = norm[1];
+                    Normals[normal_index+8] = norm[2];
+                    
+                    normal_index += 9;
+                    
+                    triangle_index += 9;
+                    TotalConnectedTriangles += 3;
+                }
+                
+                
+                i += 3;
+			}
+            
+            
+			fclose(file);
+		}
+        
+        else { printf("File can't be opened\n"); }
+    } else {
+        printf("File does not have a .PLY extension. ");    
+    }   
+	return 0;
+}
+
+void Model_PLY::Draw()
+{
+	glEnableClientState(GL_VERTEX_ARRAY);	
+ 	glEnableClientState(GL_NORMAL_ARRAY);
+	glVertexPointer(3,GL_FLOAT,	0,Faces_Triangles);	
+	glNormalPointer(GL_FLOAT, 0, Normals);
+	glDrawArrays(GL_TRIANGLES, 0, TotalConnectedTriangles);	
+	glDisableClientState(GL_VERTEX_ARRAY);    
+	glDisableClientState(GL_NORMAL_ARRAY);
+}
+```
+
+### Octree/ply.h
+```
+#ifndef Octree_ply_h
+#define Octree_ply_h
+
+class Model_PLY 
+{
+public:
+	int Load(const char *filename);
+	void Draw();
+    void calculateNormal(float norm[3], float *coord1, float *coord2, float *coord3 );
+	Model_PLY();
+    
+    float* Faces_Triangles;
+    float* Faces_Quads;
+	float* Vertex_Buffer;
+	float* Normals;
+    
+	int TotalConnectedTriangles;	
+	int TotalConnectedQuads;	
+	int TotalConnectedPoints;
+	int TotalFaces;
+    
+    
+};
+
+#endif
+```
+
+### Octree/vmath.cpp
+```
+/*
+ * vmath, set of classes for computer graphics mathemtics.
+ * Copyright (c) 2005-2006, Jan Bartipan < barzto at gmail dot com >
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without 
+ * modification, are permitted provided that the following conditions 
+ * are met:
+ *
+ * - Redistributions of source code must retain the above copyright 
+ *   notice, this list of conditions and the following disclaimer.
+ * - Redistributions in binary form must reproduce the above copyright 
+ *   notice, this list of conditions and the following disclaimer in 
+ *   the documentation and/or other materials provided with the 
+ *   distribution.
+ * - Neither the names of its contributors may be used to endorse or 
+ *   promote products derived from this software without specific 
+ *   prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT 
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS 
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE 
+ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, 
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, 
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; 
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER 
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT 
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY
+ * WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE 
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#include "vmath.h"
+
+#ifdef VMATH_NAMESPACE
+namespace VMATH_NAMESPACE
+{
+#endif
+
+template class Vector2<float>;
+template class Vector2<double>;
+template class Vector3<float>;
+template class Vector3<double>;
+template class Vector4<float>;
+template class Vector4<double>;
+template class Matrix3<float>;
+template class Matrix3<double>;
+template class Matrix4<float>;
+template class Matrix4<double>;
+template class Quaternion<float>;
+template class Quaternion<double>;
+	
+#ifdef VMATH_NAMESPACE
+}
+#endif
+```
+
+### Octree/vmath.h
+```
+/* -*- C++ -*- */
+/*
+ * vmath, set of classes for computer graphics mathemtics.
+ * Copyright (c) 2005-2011, Jan Bartipan < barzto at gmail dot com >
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without 
+ * modification, are permitted provided that the following conditions 
+ * are met:
+ *
+ * - Redistributions of source code must retain the above copyright 
+ *   notice, this list of conditions and the following disclaimer.
+ * - Redistributions in binary form must reproduce the above copyright 
+ *   notice, this list of conditions and the following disclaimer in 
+ *   the documentation and/or other materials provided with the 
+ *   distribution.
+ * - Neither the names of its contributors may be used to endorse or 
+ *   promote products derived from this software without specific 
+ *   prior written permission.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT 
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS 
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE 
+ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, 
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, 
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; 
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER 
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT 
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY
+ * WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE 
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+
+/**
+ * @mainpage Vector mathemtics for computer graphics
+ *
+ * @section Features
+ * <ul>
+ *    <li> basic aritemetic operations - using operators </li>
+ *    <li> basic linear algebra operations - such as transpose, dot product, etc. </li>
+ *    <li> aliasis for vertex coordinates - it means:
+ *    <pre>
+ *  Vector3f v;
+ *  // use vertex coordinates
+ *  v.x = 1; v.y = 2; v.z = -1;
+ *
+ *  // use texture coordinates
+ *  v.s = 0; v.t = 1; v.u = 0.5;
+ *  // use color coordinates
+ *  v.r = 1; v.g = 0.5; v.b = 0;
+ *    </pre>
+ *    </li>
+ *    <li> conversion constructor and assign operators - so you can assign a value of Vector3&lt;T1&gt; type 
+ *    to a variable of Vector3&lt;T2&gt; type for any convertable T1, T2 type pairs. In other words, you can do this:
+ *    <pre>
+ *
+ *  Vector3f f3; Vector3d d3 = f3;
+ *  ...
+ *  f3 = d3;
+ *    </pre>
+ *    </li>
+ * </ul>
+ */
+
+
+
+#ifndef __vmath_Header_File__
+#define __vmath_Header_File__
+
+#include <cmath>
+#include <cstring>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <cassert>
+
+
+
+#ifdef VMATH_NAMESPACE
+namespace VMATH_NAMESPACE
+{
+#endif
+
+#ifndef M_PI
+#define M_PI           3.14159265358979323846  /* pi */
+#endif
+   
+#define DEG2RAD(x) ((x * M_PI) / 180.0)
+   //#define EPSILON (4.37114e-07)
+   
+   const double epsilon = 4.37114e-05;
+#define EPSILON epsilon
+   
+   
+   /**
+    * Class for two dimensional vector.
+    */
+   template <class T>
+   class Vector2 
+   {
+      public:
+	 union 
+	 {
+	       /**
+		* First element of vector, alias for X-coordinate.
+		*/
+	       T x;
+		
+	       /**
+		* First element of vector, alias for S-coordinate.
+		* For textures notation.
+		*/
+	       T s; 
+	 };
+	
+	 union 
+	 {
+	       /**
+		* Second element of vector, alias for Y-coordinate.
+		*/
+	       T y; 
+		
+	       /**
+		* Second element of vector, alias for T-coordinate.
+		* For textures notation.
+		*/
+	       T t; 
+	 };
+
+	 //----------------[ constructors ]--------------------------
+	 /**
+	  * Creates and sets to (0,0)
+	  */
+	 Vector2() : x(0),y(0)
+	 {	}
+	
+	
+
+	 /**
+	  * Creates and sets to (x,y)
+	  * @param nx intial x-coordinate value
+	  * @param ny intial y-coordinate value
+	  */
+	 Vector2(T nx, T ny) : x(nx), y(ny)
+	 {	}
+
+
+	 /**
+	  * Copy constructor.
+	  * @param src Source of data for new created instace.
+	  */
+	 Vector2(const Vector2<T>& src)
+	    : x(src.x), y(src.y) 
+	 {	 }
+
+
+	 /**
+	  * Copy casting constructor.
+	  * @param src Source of data for new created instace.
+	  */
+	 template <class FromT>
+	 Vector2(const Vector2<FromT>& src)
+	    : x(static_cast<T>(src.x)),
+	      y(static_cast<T>(src.y))
+	 {	 }
+	
+	
+	 //----------------[ access operators ]-------------------
+	 /**
+	  * Copy casting operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 template <class FromT>
+	 Vector2<T>& operator=(const Vector2<FromT>& rhs)
+	 {
+	    x = static_cast<T>(rhs.x);
+	    y = static_cast<T>(rhs.y);
+	    return * this;
+	 }
+
+	 /**
+	  * Copy operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T>& operator=(const Vector2<T>& rhs)
+	 {
+	    x = rhs.x;
+	    y = rhs.y;
+	    return * this;
+	 }
+
+
+	 /**
+	  * Array access operator
+	  * @param n Array index
+	  * @return For n = 0, reference to x coordinate, else reference to y 
+	  * y coordinate.
+	  */
+	 T& operator[](int n)
+	 {
+	    assert(n >= 0 && n <= 1);
+	    if (0 == n) return x;
+	    else
+	       return y;
+	 }
+	
+	
+	 //---------------[ vector aritmetic operator ]--------------
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T> operator+(const Vector2<T>& rhs) const
+	 {
+	    return Vector2<T> (x + rhs.x, y + rhs.y);
+	 }
+
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T> operator-(const Vector2<T>& rhs) const
+	 {
+	    return Vector2<T> (x - rhs.x, y - rhs.y);
+	 }
+
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T> operator*(const Vector2<T>& rhs) const
+	 {
+	    return Vector2<T> (x * rhs.x, y * rhs.y);
+	 }
+
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T> operator/(const Vector2<T>& rhs) const 
+	 {
+	    return Vector2<T> (x / rhs.x, y / rhs.y);
+	 }
+
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T>& operator+=(const Vector2<T>& rhs)
+	 {
+	    x += rhs.x;
+	    y += rhs.y;
+	    return * this;
+	 }
+
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T>& operator-=(const Vector2<T>& rhs)
+	 {
+	    x -= rhs.x;
+	    y -= rhs.y;
+	    return * this;
+	 }
+	
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T>& operator*=(const Vector2<T>& rhs)
+	 {
+	    x *= rhs.x;
+	    y *= rhs.y;
+	    return * this;
+	 }
+	
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T>& operator/=(const Vector2<T>& rhs)
+	 {
+	    x /= rhs.x;
+	    y /= rhs.y;
+	    return * this;
+	 }
+
+	 //--------------[ scalar vector operator ]--------------------
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T> operator+(T rhs) const
+	 {
+	    return Vector2<T> (x + rhs, y + rhs);
+	 }
+	
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T> operator-(T rhs) const
+	 {
+	    return Vector2<T> (x - rhs, y - rhs);
+	 }
+	
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T> operator*(T rhs) const
+	 {
+	    return Vector2<T> (x * rhs, y * rhs);
+	 }
+	
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T> operator/(T rhs) const
+	 {
+	    return Vector2<T> (x / rhs, y / rhs);
+	 }
+
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T>& operator+=(T rhs)
+	 {
+	    x += rhs;
+	    y += rhs;
+	    return * this;
+	 }
+
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T>& operator-=(T rhs) 
+	 {
+	    x -= rhs;
+	    y -= rhs;
+	    return * this;
+	 }
+
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T>& operator*=(T rhs)
+	 {
+	    x *= rhs;
+	    y *= rhs;
+	    return * this;
+	 }
+
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector2<T>& operator/=(T rhs) 
+	 {
+	    x /= rhs;
+	    y /= rhs;
+	    return * this;
+	 }
+
+	 //--------------[ equality operator ]------------------------
+	 /**
+	  * Equality test operator
+	  * @param rhs Right hand side argument of binary operator.
+	  * @note Test of equality is based of threshold EPSILON value. To be two
+	  * values equal, must satisfy this condition | lws.x - rhs.y | < EPSILON,
+	  * same for y-coordinate.
+	  */
+	 bool operator==(const Vector2<T>& rhs) const 
+	 {
+	    return (std::abs(x - rhs.x) < EPSILON) && (std::abs(y - rhs.y) < EPSILON);
+	 }
+
+	
+	 /**
+	  * Inequality test operator
+	  * @param rhs Right hand side argument of binary operator.
+	  * @return not (lhs == rhs) :-P
+	  */
+	 bool operator!=(const Vector2<T>& rhs) const { return ! (*this == rhs); }
+
+	 //-------------[ unary operations ]--------------------------
+	 /**
+	  * Unary negate operator
+	  * @return negated vector
+	  */
+	 Vector2<T> operator-() const
+	 {
+	    return Vector2<T>(-x, -y);
+	 }
+
+	 //-------------[ size operations ]---------------------------
+	 /**
+	  * Get lenght of vector.
+	  * @return lenght of vector
+	  */
+	 T length() const
+	 {
+	    return (T)std::sqrt(x * x + y * y);
+	 }
+
+	 /**
+	  * Normalize vector
+	  */
+	 void normalize()
+	 {
+	    T s = length();
+	    x /= s;
+	    y /= s;
+	 }
+
+	 /**
+	  * Return square of length.
+	  * @return lenght ^ 2
+	  * @note This method is faster then length(). For comparsion
+	  * of length of two vector can be used just this value, instead
+	  * of computionaly more expensive length() method.
+	  */
+	 T lengthSq() const
+	 {
+	    return x * x + y * y;
+	 }
+	
+	 //--------------[ misc. operations ]-----------------------
+	 /**
+	  * Linear interpolation of two vectors
+	  * @param fact Factor of interpolation. For translation from positon
+	  * of this vector to vector r, values of factor goes from 0.0 to 1.0.
+	  * @param r Second Vector for interpolation 
+	  * @note Hovewer values of fact parameter are reasonable only in interval
+	  * [0.0 , 1.0], you can pass also values outside of this interval and you
+	  * can get result (extrapolation?)
+	  */
+	 Vector2<T> lerp(T fact, const Vector2<T>& r) const
+	 {
+	    return (*this) + (r - (*this)) * fact;	
+	 }
+	
+    
+	 //-------------[ conversion ]-----------------------------
+	 /**
+	  * Conversion to pointer operator
+	  * @return Pointer to internaly stored (in managment of class Vector2<T>)
+	  * used for passing Vector2<T> values to gl*2[fd] functions.
+	  */
+	 operator T*(){ return (T*) this; }
+	 /**
+	  * Conversion to pointer operator
+	  * @return Constant Pointer to internaly stored (in managment of class Vector2<T>)
+	  * used for passing Vector2<T> values to gl*2[fd] functions.
+	  */
+	 operator const T*() const { return (const T*) this; }
+
+	 //-------------[ output operator ]------------------------
+	 /**
+	  * Output to stream operator
+	  * @param lhs Left hand side argument of operator (commonly ostream instance). 
+	  * @param rhs Right hand side argument of operator.
+	  * @return Left hand side argument - the ostream object passed to operator.
+	  */
+	 friend std::ostream& operator<<(std::ostream& lhs, const Vector2<T>& rhs) 
+	 {
+	    lhs << "[" << rhs.x << "," << rhs.y << "]";
+	    return lhs;
+	 }
+
+	 /**
+	  * Gets string representation.
+	  */
+	 std::string toString() const
+	 {
+		 std::ostringstream oss;
+		 oss << *this;
+		 return oss.str();
+	 }
+   };
+
+
+   //--------------------------------------
+   // Typedef shortcuts for 2D vector
+   //-------------------------------------
+   /// Two dimensional Vector of floats
+   typedef class Vector2 <float> Vector2f;
+   /// Two dimensional Vector of doubles
+   typedef class Vector2 <double> Vector2d;
+
+
+   /**
+    * Class for three dimensional vector.
+    */
+   template <class T>
+   class Vector3 
+   {
+      public:
+	 //T x, y, z;
+	 union
+	 {
+	       /**
+		* First element of vector, alias for X-coordinate.
+		*/
+	       T x;
+		
+	       /**
+		* First element of vector, alias for S-coordinate.
+		* For textures notation.
+		*/
+	       T s;
+		
+	       /**
+		* First element of vector, alias for R-coordinate.
+		* For color notation.
+		*/
+	       T r; 
+	 };
+	
+	 union
+	 {
+	       /**
+		* Second element of vector, alias for Y-coordinate.
+		*/
+	       T y; 
+	       /**
+		* Second element of vector, alias for T-coordinate.
+		* For textures notation.
+		*/
+	       T t; 
+	       /**
+		* Second element of vector, alias for G-coordinate.
+		* For color notation.
+		*/
+	       T g; 
+	 };
+	
+	 union
+	 {
+	       /**
+		* Third element of vector, alias for Z-coordinate.
+		*/
+	       T z;
+		
+	       /**
+		* Third element of vector, alias for U-coordinate.
+		* For textures notation.
+		*/
+	       T u; 
+	       /**
+		* Third element of vector, alias for B-coordinate.
+		* For color notation.
+		*/
+	       T b; 
+	 };
+	
+	 //----------------[ constructors ]--------------------------
+	 /**
+	  * Creates and sets to (0,0,0)
+	  */
+	 Vector3() : x(0),y(0),z(0)
+	 {	}
+
+	 /**
+	  * Creates and sets to (x,y,z)
+	  * @param nx intial x-coordinate value
+	  * @param ny intial y-coordinate value
+	  * @param nz intial z-coordinate value
+	  */
+	 Vector3(T nx, T ny, T nz) : x(nx),y(ny),z(nz)
+	 {	}
+
+	 /**
+	  * Copy constructor.
+	  * @param src Source of data for new created Vector3 instance.
+	  */
+	 Vector3(const Vector3<T>& src)
+	    : x(src.x), y(src.y), z(src.z)
+	 {}
+	 
+	 /**
+	  * Copy casting constructor.
+	  * @param src Source of data for new created Vector3 instance.
+	  */
+	 template <class FromT>
+	 Vector3(const Vector3<FromT>& src)
+	    : x(static_cast<T>(src.x)),
+	      y(static_cast<T>(src.y)),
+	      z(static_cast<T>(src.z))
+	 {}
+	
+	
+	 //----------------[ access operators ]-------------------
+	 /**
+	  * Copy operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T> operator=(const Vector3<T>& rhs) 
+	 {
+	    x = rhs.x;
+	    y = rhs.y;
+	    z = rhs.z;
+	    return * this;
+	 }
+
+	 /**
+	  * Copy casting operator.
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 template <class FromT>
+	 Vector3<T> operator=(const Vector3<FromT>& rhs)
+	 {
+	    x = static_cast<T>(rhs.x);
+	    y = static_cast<T>(rhs.y);
+	    z = static_cast<T>(rhs.z);
+	    return * this;
+	 }
+
+	 /**
+	  * Array access operator
+	  * @param n Array index
+	  * @return For n = 0, reference to x coordinate, n = 1
+	  * reference to y, else reference to z 
+	  * y coordinate.
+	  */
+	 T & operator[](int n)
+	 {
+	    assert(n >= 0 && n <= 2);
+	    if (0 == n) return x;
+	    else if (1 == n) return y;
+	    else
+	       return z;
+	 }
+
+
+	 //---------------[ vector aritmetic operator ]--------------
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T> operator+(const Vector3<T>& rhs) const 
+	 {
+	    return Vector3<T> (x + rhs.x, y + rhs.y, z + rhs.z);
+	 }
+	
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T> operator-(const Vector3<T>& rhs) const 
+	 {
+	    return Vector3<T> (x - rhs.x, y - rhs.y, z - rhs.z);
+	 }
+	
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T> operator*(const Vector3<T>& rhs) const 
+	 {
+	    return Vector3<T> (x * rhs.x, y * rhs.y, z * rhs.z);
+	 }
+
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T> operator/(const Vector3<T>& rhs) const 
+	 {
+	    return Vector3<T> (x / rhs.x, y / rhs.y, z / rhs.z);
+	 }
+
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T>& operator+=(const Vector3<T>& rhs) 
+	 {
+	    x += rhs.x;
+	    y += rhs.y;
+	    z += rhs.z;
+	    return * this;
+	 }
+
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T>& operator-=(const Vector3<T>& rhs) 
+	 {
+	    x -= rhs.x;
+	    y -= rhs.y;
+	    z -= rhs.z;
+	    return * this;
+	 }
+
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T>& operator*=(const Vector3<T>& rhs) 
+	 {
+	    x *= rhs.x;
+	    y *= rhs.y;
+	    z *= rhs.z;
+	    return * this;
+	 }
+
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T>& operator/=(const Vector3<T>& rhs) 
+	 {
+	    x /= rhs.x;
+	    y /= rhs.y;
+	    z /= rhs.z;
+	    return * this;
+	 }
+
+	 /**
+	  * Dot product of two vectors.
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 T dotProduct(const Vector3<T>& rhs) const 
+	 {
+	    return x * rhs.x + y * rhs.y + z * rhs.z;
+	 }
+
+	 /**
+	  * Cross product opertor
+	  * @param rhs Right hand side argument of binary operator.
+	  */	
+	 Vector3<T> crossProduct(const Vector3<T>& rhs) const 
+	 {
+	    return Vector3<T> (y * rhs.z - rhs.y * z, z * rhs.x - rhs.z * x, x * rhs.y - rhs.x * y);
+	 }
+	
+
+	 //--------------[ scalar vector operator ]--------------------
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T> operator+(T rhs) const 
+	 {
+	    return Vector3<T> (x + rhs, y + rhs, z + rhs);
+	 }
+
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T> operator-(T rhs) const 
+	 {
+	    return Vector3<T> (x - rhs, y - rhs, z - rhs);
+	 }
+
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T> operator*(T rhs) const 
+	 {
+	    return Vector3<T> (x * rhs, y * rhs, z * rhs);
+	 }
+	
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T> operator/(T rhs) const 
+	 {
+	    return Vector3<T> (x / rhs, y / rhs, z / rhs);
+	 }
+	
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T>& operator+=(T rhs) 
+	 {
+	    x += rhs;
+	    y += rhs;
+	    z += rhs;
+	    return * this;
+	 }
+
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T>& operator-=(T rhs) 
+	 {
+	    x -= rhs;
+	    y -= rhs;
+	    z -= rhs;
+	    return * this;
+	 }
+
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T>& operator*=(T rhs) 
+	 {
+	    x *= rhs;
+	    y *= rhs;
+	    z *= rhs;
+	    return * this;
+	 }
+
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T>& operator/=(T rhs) 
+	 {
+	    x /= rhs;
+	    y /= rhs;
+	    z /= rhs;
+	    return * this;
+	 }
+
+	 //--------------[ equiality operator ]------------------------
+	 /**
+	  * Equality test operator
+	  * @param rhs Right hand side argument of binary operator.
+	  * @note Test of equality is based of threshold EPSILON value. To be two
+	  * values equal, must satisfy this condition | lws.x - rhs.y | < EPSILON,
+	  * same for y-coordinate, and z-coordinate.
+	  */
+	 bool operator==(const Vector3<T>& rhs) const
+	 {
+	    return std::fabs(x - rhs.x) < EPSILON 
+	       && std::fabs(y - rhs.y) < EPSILON 
+	       && std::fabs(z - rhs.z) < EPSILON;
+	 }
+
+	 /**
+	  * Inequality test operator
+	  * @param rhs Right hand side argument of binary operator.
+	  * @return not (lhs == rhs) :-P
+	  */
+	 bool operator!=(const Vector3<T>& rhs) const { return !(*this == rhs); }
+
+	 //-------------[ unary operations ]--------------------------
+	 /**
+	  * Unary negate operator
+	  * @return negated vector
+	  */
+	 Vector3<T> operator-() const
+	 {
+	    return Vector3<T>(-x, -y, -z);
+	 }
+
+	 //-------------[ size operations ]---------------------------
+	 /**
+	  * Get lenght of vector.
+	  * @return lenght of vector
+	  */
+	 T length() const 
+	 {
+	    return (T)std::sqrt(x * x + y * y + z * z);
+	 }
+	
+	 /**
+	  * Return square of length.
+	  * @return lenght ^ 2
+	  * @note This method is faster then length(). For comparsion
+	  * of length of two vector can be used just this value, instead
+	  * of computionaly more expensive length() method.
+	  */
+	 T lengthSq() const 
+	 {
+	    return x * x + y * y + z * z;
+	 }
+	
+	 /**
+	  * Normalize vector
+	  */
+	 void normalize() 
+	 {
+	    T s = length();
+	    x /= s;
+	    y /= s;
+	    z /= s;
+	 }
+
+	 //------------[ other operations ]---------------------------
+	 /**
+	  * Rotate vector around three axis.
+	  * @param ax Angle (in degrees) to be rotated around X-axis.
+	  * @param ay Angle (in degrees) to be rotated around Y-axis.
+	  * @param az Angle (in degrees) to be rotated around Z-axis.
+	  */
+	 void rotate(T ax, T ay, T az) 
+	 {
+	    T a = cos(DEG2RAD(ax));
+	    T b = sin(DEG2RAD(ax));
+	    T c = cos(DEG2RAD(ay));
+	    T d = sin(DEG2RAD(ay));
+	    T e = cos(DEG2RAD(az));
+	    T f = sin(DEG2RAD(az));
+	    T nx = c * e * x - c * f * y + d * z;
+	    T ny = (a * f + b * d * e) * x + (a * e - b * d * f) * y - b * c * z;
+	    T nz = (b * f - a * d * e) * x + (a * d * f + b * e) * y + a * c * z;
+	    x = nx; y = ny; z = nz;
+		
+		
+	 }
+	
+	 /**
+	  * Linear interpolation of two vectors
+	  * @param fact Factor of interpolation. For translation from positon
+	  * of this vector to vector r, values of factor goes from 0.0 to 1.0.
+	  * @param r Second Vector for interpolation 
+	  * @note Hovewer values of fact parameter are reasonable only in interval
+	  * [0.0 , 1.0], you can pass also values outside of this interval and you
+	  * can get result (extrapolation?)
+	  */
+	 Vector3<T> lerp(T fact, const Vector3<T>& r) const
+	 {
+	    return (*this) + (r - (*this)) * fact;	
+	 }
+	
+    
+
+
+
+	 //-------------[ conversion ]-----------------------------
+	
+	 /**
+	  * Conversion to pointer operator
+	  * @return Pointer to internaly stored (in managment of class Vector3<T>)
+	  * used for passing Vector3<T> values to gl*3[fd] functions.
+	  */
+	 operator T*(){ return (T*) this; }
+
+	 /**
+	  * Conversion to pointer operator
+	  * @return Constant Pointer to internaly stored (in managment of class Vector3<T>)
+	  * used for passing Vector3<T> values to gl*3[fd] functions.
+	  */	
+	 operator const T*() const { return (const T*) this; }
+
+	 //-------------[ output operator ]------------------------
+	 /**
+	  * Output to stream operator
+	  * @param lhs Left hand side argument of operator (commonly ostream instance). 
+	  * @param rhs Right hand side argument of operator.
+	  * @return Left hand side argument - the ostream object passed to operator.
+	  */
+	 friend std::ostream& operator<<(std::ostream& lhs, const Vector3<T> rhs) 
+	 {
+	    lhs << "[" << rhs.x << "," << rhs.y << "," << rhs.z  << "]";
+	    return lhs;
+	 }
+	
+	 /**
+	  * Gets string representation.
+	  */
+	 std::string toString() const
+	 {
+		 std::ostringstream oss;
+		 oss << *this;
+		 return oss.str();
+	 }
+   };
+
+
+   /// Three dimensional Vector of floats
+   typedef Vector3 <float> Vector3f;
+   /// Three dimensional Vector of doubles
+   typedef Vector3 <double> Vector3d;
+
+   /**
+    * Class for four dimensional vector.
+    */
+   template <class T>
+   class Vector4{
+      public:
+
+	 union 
+	 { 
+	       /**
+		* First element of vector, alias for R-coordinate.
+		* For color notation.
+		*/
+	       T r
+	       /**
+		* First element of vector, alias for X-coordinate.
+		*/; 
+	       T x; 
+	 };
+	
+	 union 
+	 { 
+	       /**
+		* Second element of vector, alias for G-coordinate.
+		* For color notation.
+		*/
+	       T g; 
+	       /**
+		* Second element of vector, alias for Y-coordinate.
+		*/
+	       T y; 
+	 };
+	
+	 union 
+	 {
+	       /**
+		* Third element of vector, alias for B-coordinate.
+		* For color notation.
+		*/
+	       T b; 
+	       /**
+		* Third element of vector, alias for Z-coordinate.
+		*/
+	       T z; 
+	 };
+	
+	 union 
+	 {
+	       /**
+		* Fourth element of vector, alias for A-coordinate.
+		* For color notation. This represnt aplha chanell
+		*/
+	       T a; 
+	       /**
+		* First element of vector, alias for W-coordinate.
+		* @note For vectors (such as normals) should be set to 0.0
+		* For vertices should be set to 1.0
+		*/
+	       T w; 
+	 };
+	
+	 //----------------[ constructors ]--------------------------
+	 /**
+	  * Creates and sets to (0,0,0,0)
+	  */
+	 Vector4() : x(0),y(0),z(0),w(0)
+	 { }
+
+
+	 /**
+	  * Creates and sets to (x,y,z,z)
+	  * @param nx intial x-coordinate value (R)
+	  * @param ny intial y-coordinate value (G)
+	  * @param nz intial z-coordinate value (B)
+	  * @param nw intial w-coordinate value (Aplha)
+	  */
+	 Vector4(T nx, T ny, T nz, T nw) : x(nx), y(ny), z(nz), w(nw)
+	 { }
+
+	 /**
+	  * Copy constructor.
+	  * @param src Source of data for new created Vector4 instance.
+	  */
+	 Vector4(const Vector4<T>& src)
+	    : x(src.x), y(src.y), z(src.z), w(src.w)
+	 {}
+
+	 /**
+	  * Copy casting constructor.
+	  * @param src Source of data for new created Vector4 instance.
+	  */
+	 template <class FromT>
+	 Vector4(const Vector4<FromT>& src)
+	    : x(static_cast<T>(src.x)),
+	      y(static_cast<T>(src.y)),
+	      z(static_cast<T>(src.z)),
+	      w(static_cast<T>(src.w))
+	 {}
+
+
+	 //----------------[ access operators ]-------------------
+	 /**
+	  * Copy operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T> operator=(const Vector4<T>& rhs) 
+	 {
+	    x = rhs.x;
+	    y = rhs.y;
+	    z = rhs.z;
+	    w = rhs.w;
+	    return * this;
+	 }
+
+	 /**
+	  * Copy casting operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 template<class FromT>
+	 Vector4<T> operator=(const Vector4<FromT>& rhs) 
+	 {
+	    x = static_cast<T>(rhs.x);
+	    y = static_cast<T>(rhs.y);
+	    z = static_cast<T>(rhs.z);
+	    w = static_cast<T>(rhs.w);
+	    return * this;
+	 }
+
+
+	 /**
+	  * Array access operator
+	  * @param n Array index
+	  * @return For n = 0, reference to x coordinate, n = 1
+	  * reference to y coordinate, n = 2 reference to z,  
+	  * else reference to w coordinate.
+	  */
+	 T & operator[](int n) 
+	 {
+	    assert(n >= 0 && n <= 3);
+	    if (0 == n) return x;
+	    else if (1 == n) return y;
+	    else if (2 == n) return z;
+	    else return w;
+	 }
+
+
+	 //---------------[ vector aritmetic operator ]--------------
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T> operator+(const Vector4<T>& rhs) const 
+	 {
+	    return Vector4<T> (x + rhs.x, y + rhs.y, z + rhs.z, w + rhs.w);
+	 }
+
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T> operator-(const Vector4<T>& rhs) const 
+	 {
+	    return Vector4<T> (x - rhs.x, y - rhs.y, z - rhs.z, w - rhs.w);
+	 }
+
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T> operator*(const Vector4<T> rhs) const 
+	 {
+	    return Vector4<T> (x * rhs.x, y * rhs.y, z * rhs.z, w * rhs.w);
+	 }
+
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T> operator/(const Vector4<T>& rhs) const 
+	 {
+	    return Vector4<T> (x / rhs.x, y / rhs.y, z / rhs.z, w / rhs.w);
+	 }
+
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T>& operator+=(const Vector4<T>& rhs) 
+	 {
+	    x += rhs.x;
+	    y += rhs.y;
+	    z += rhs.z;
+	    w += rhs.w;
+	    return * this;
+	 }
+
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T>& operator-=(const Vector4<T>& rhs) 
+	 {
+	    x -= rhs.x;
+	    y -= rhs.y;
+	    z -= rhs.z;
+	    w -= rhs.w;
+	    return * this;
+	 }
+
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T>& operator*=(const Vector4<T>& rhs) 
+	 {
+	    x *= rhs.x;
+	    y *= rhs.y;
+	    z *= rhs.z;
+	    w *= rhs.w;
+	    return * this;
+	 }
+
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T>& operator/=(const Vector4<T>& rhs) 
+	 {
+	    x /= rhs.x;
+	    y /= rhs.y;
+	    z /= rhs.z;
+	    w /= rhs.w;
+	    return * this;
+	 }
+
+	 //--------------[ equiality operator ]------------------------
+	 /**
+	  * Equality test operator
+	  * @param rhs Right hand side argument of binary operator.
+	  * @note Test of equality is based of threshold EPSILON value. To be two
+	  * values equal, must satisfy this condition | lws.x - rhs.y | < EPSILON,
+	  * same for y-coordinate, z-coordinate, and w-coordinate.
+	  */
+	 bool operator==(const Vector4<T>& rhs) const 
+	 {
+	    return std::fabs(x - rhs.x) < EPSILON 
+	       && std::fabs(y - rhs.y) < EPSILON 
+	       && std::fabs(z - rhs.z) < EPSILON 
+	       && std::fabs(w - rhs.w) < EPSILON;
+	 }
+
+	
+	 /**
+	  * Inequality test operator
+	  * @param rhs Right hand side argument of binary operator.
+	  * @return not (lhs == rhs) :-P
+	  */
+	 bool operator!=(const Vector4<T>& rhs) const { return ! (*this == rhs); }
+
+	 //-------------[ unary operations ]--------------------------
+	 /**
+	  * Unary negate operator
+	  * @return negated vector
+	  */
+	 Vector4<T> operator-() const
+	 {
+	    return Vector4<T>(-x, -y, -z, -w);
+	 }
+
+	 //--------------[ scalar vector operator ]--------------------
+	
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T> operator+(T rhs) const 
+	 {
+	    return Vector4<T> (x + rhs, y + rhs, z + rhs, w + rhs);
+	 }
+
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T> operator-(T rhs) const 
+	 {
+	    return Vector4<T> (x - rhs, y - rhs, z - rhs, w - rhs);
+	 }
+
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T> operator*(T rhs) const 
+	 {
+	    return Vector4<T> (x * rhs, y * rhs, z * rhs, w * rhs);
+	 }
+
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T> operator/(T rhs) const 
+	 {
+	    return Vector4<T> (x / rhs, y / rhs, z / rhs, w / rhs);
+	 }
+
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T>& operator+=(T rhs) 
+	 {
+	    x += rhs;
+	    y += rhs;
+	    z += rhs;
+	    w += rhs;
+	    return * this;
+	 }
+
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T>& operator-=(T rhs) 
+	 {
+	    x -= rhs;
+	    y -= rhs;
+	    z -= rhs;
+	    w -= rhs;
+	    return * this;
+	 }
+
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T>& operator*=(T rhs) 
+	 {
+	    x *= rhs;
+	    y *= rhs;
+	    z *= rhs;
+	    w *= rhs;
+	    return * this;
+	 }
+
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T>& operator/=(T rhs) 
+	 {
+	    x /= rhs;
+	    y /= rhs;
+	    z /= rhs;
+	    w /= rhs;
+	    return * this;
+	 }
+
+	 //-------------[ size operations ]---------------------------
+	 /**
+	  * Get lenght of vector.
+	  * @return lenght of vector
+	  */
+	 T length() const
+	 {
+	    return (T)std::sqrt(x * x + y * y + z * z + w * w);
+	 }
+
+	 /**
+	  * Normalize vector
+	  */
+	 void normalize() 
+	 {
+	    T s = length();
+	    x /= s;
+	    y /= s;
+	    z /= s;
+	    w /= s;
+	 }
+	
+	 /**
+	  * Return square of length.
+	  * @return lenght ^ 2
+	  * @note This method is faster then length(). For comparsion
+	  * of length of two vector can be used just this value, instead
+	  * of computionaly more expensive length() method.
+	  */
+	 T lengthSq() const 
+	 {
+	    return x * x + y * y + z * z + w * w;
+	 }
+	
+	 //--------------[ misc. operations ]-----------------------
+	 /**
+	  * Linear interpolation of two vectors
+	  * @param fact Factor of interpolation. For translation from positon
+	  * of this vector to vector r, values of factor goes from 0.0 to 1.0.
+	  * @param r Second Vector for interpolation 
+	  * @note Hovewer values of fact parameter are reasonable only in interval
+	  * [0.0 , 1.0], you can pass also values outside of this interval and you
+	  * can get result (extrapolation?)
+	  */
+	 Vector4<T> lerp(T fact, const Vector4<T>& r) const
+	 {
+	    return (*this) + (r - (*this)) * fact;	
+	 }
+	
+    
+	
+
+	 //-------------[ conversion ]-----------------------------
+	
+	 /**
+	  * Conversion to pointer operator
+	  * @return Pointer to internaly stored (in managment of class Vector4<T>)
+	  * used for passing Vector4<T> values to gl*4[fd] functions.
+	  */
+	 operator T*(){ return (T*) this; }
+	
+	
+	 /**
+	  * Conversion to pointer operator
+	  * @return Constant Pointer to internaly stored (in managment of class Vector4<T>)
+	  * used for passing Vector4<T> values to gl*4[fd] functions.
+	  */
+	 operator const T*() const { return (const T*) this; }
+
+	 //-------------[ output operator ]------------------------
+	 /**
+	  * Output to stream operator
+	  * @param lhs Left hand side argument of operator (commonly ostream instance). 
+	  * @param rhs Right hand side argument of operator.
+	  * @return Left hand side argument - the ostream object passed to operator.
+	  */
+	 friend std::ostream& operator<<(std::ostream& lhs, const Vector4<T>& rhs) 
+	 {
+	    lhs << "[" << rhs.x << "," << rhs.y << "," << rhs.z << "," << rhs.w << "]";
+	    return lhs;
+	 }
+
+	 /**
+	  * Gets string representation.
+	  */
+	 std::string toString() const
+	 {
+		 std::ostringstream oss;
+		 oss << *this;
+		 return oss.str();
+	 }
+
+   };
+
+   /// Three dimensional Vector of floats
+   typedef Vector4<float> Vector4f;
+   /// Three dimensional Vector of doubles
+   typedef Vector4<double> Vector4d;
+
+
+
+
+
+   /**
+    * Class for matrix 3x3. 
+    * @note Data stored in this matrix are in column major order. This arrangement suits OpenGL.
+    * If you're using row major matrix, consider using fromRowMajorArray as way for construction
+    * Matrix3<T> instance.
+    */
+   template <class T>
+   class Matrix3 
+   {
+      public:
+	 /// Data stored in column major order
+	 T data[9];
+	
+	 //--------------------------[ constructors ]-------------------------------
+	 /**
+	  * Creates identity matrix
+	  */
+	 Matrix3() 
+	 {
+	    for (int i = 0; i < 9; i++)
+	       data[i] = (i % 4) ? 0 : 1;
+	 }
+
+	 /**
+	  * Copy matrix values from array (these data must be in column
+	  * major order!)
+	  */
+	 Matrix3(const T * dt)
+	 {
+	    std::memcpy(data, dt, sizeof(T) * 9); 
+	 }
+
+	 /**
+	  * Copy constructor.
+	  * @param src Data source for new created instance of Matrix3
+	  */
+	 Matrix3(const Matrix3<T>& src)
+	 {
+	    std::memcpy(data, src.data, sizeof(T) * 9);
+	 }
+
+	 /**
+	  * Copy casting constructor.
+	  * @param src Data source for new created instance of Matrix3
+	  */
+	 template<class FromT>
+	 Matrix3(const Matrix3<FromT>& src)
+	 {
+	    for (int i = 0; i < 9; i++)
+	    {
+	       data[i] = static_cast<T>(src.data[i]);
+	    }
+	 }
+	
+	 /**
+	  * Resets matrix to be identity matrix
+	  */
+	 void identity()
+	 {
+	    for (int i = 0; i < 9; i++)
+	       data[i] = (i % 4) ? 0 : 1;
+	 }
+	
+	
+
+	 /**
+	  * Creates rotation matrix by rotation around axis.
+	  * @param a Angle (in radians) of rotation around axis X.
+	  * @param b Angle (in radians) of rotation around axis Y.
+	  * @param c Angle (in radians) of rotation around axis Z.
+	  */
+	 static Matrix3<T> createRotationAroundAxis(T a, T b, T c)
+	 {
+	    Matrix3<T> ma, mb, mc;
+	    float ac = cos(a);
+	    float as = sin(a);
+	    float bc = cos(b);
+	    float bs = sin(b);
+	    float cc = cos(c);
+	    float cs = sin(c);
+
+	    ma.at(1,1) = ac;
+	    ma.at(2,1) = as;
+	    ma.at(1,2) = -as;
+	    ma.at(2,2) = ac;
+
+	    mb.at(0,0) = bc;
+	    mb.at(2,0) = -bs;
+	    mb.at(0,2) = bs;
+	    mb.at(2,2) = bc;
+
+	    mc.at(0,0) = cc;
+	    mc.at(1,0) = cs;
+	    mc.at(0,1) = -cs;
+	    mc.at(1,1) = cc;
+
+	    Matrix3<T> ret = ma * mb * mc;
+	    return ret;
+	 }
+
+	 /**
+	  * Creates roation matrix from ODE Matrix.
+	  */
+	 template <class It>
+	 static Matrix3<T> fromOde(const It* mat)
+	 {
+	    Matrix3<T> ret;
+	    for (int i = 0; i < 3; i++)
+	    {
+	       for (int j = 0; j < 3; j++)
+	       {
+		  ret.at(i,j) = static_cast<T>(mat[j * 4 + i]);
+	       }
+	    }
+	    return ret;
+	 }
+
+	 /**
+	  * Creates new matrix 3x3 from array that represents such matrix 3x3
+	  * as array of tightly packed elements in row major order.
+	  * @param arr An array of elements for 3x3 matrix in row major order.
+	  * @return An instance of Matrix3<T> representing @a arr
+	  */
+	 template <class FromT>
+	 static Matrix3<T> fromRowMajorArray(const FromT* arr)
+	 {
+		 const T retData[] =
+		 {
+			static_cast<T>(arr[0]), static_cast<T>(arr[3]), static_cast<T>(arr[6]),
+			static_cast<T>(arr[1]), static_cast<T>(arr[4]), static_cast<T>(arr[7]),
+			static_cast<T>(arr[2]), static_cast<T>(arr[5]), static_cast<T>(arr[8])
+		 };
+
+		 return retData;
+	 }
+
+	 /**
+	  * Creates new matrix 3x3 from array that represents such matrix 3x3
+	  * as array of tightly packed elements in column major order.
+	  * @param arr An array of elements for 3x3 matrix in column major order.
+	  * @return An instance of Matrix3<T> representing @a arr
+	  */
+	 template <class FromT>
+	 static Matrix3<T> fromColumnMajorArray(const FromT* arr)
+	 {
+		 const T retData[] =
+		 {
+			static_cast<T>(arr[0]), static_cast<T>(arr[1]), static_cast<T>(arr[2]),
+			static_cast<T>(arr[3]), static_cast<T>(arr[4]), static_cast<T>(arr[5]),
+			static_cast<T>(arr[6]), static_cast<T>(arr[7]), static_cast<T>(arr[8])
+		 };
+
+		 return retData;
+	 }
+
+	 //---------------------[ equiality operators ]------------------------------
+	 /**
+	  * Equality test operator
+	  * @param rhs Right hand side argument of binary operator.
+	  * @note Test of equality is based of threshold EPSILON value. To be two
+	  * values equal, must satisfy this condition all elements of matrix 
+	  * | lws[i] - rhs[i] | < EPSILON,
+	  * same for y-coordinate, z-coordinate, and w-coordinate.
+	  */	
+	 bool operator==(const Matrix3<T>& rhs) const
+	 {
+	    for (int i = 0; i < 9; i++)
+	    {
+	       if (std::fabs(data[i] - rhs.data[i]) >= EPSILON)
+		  return false;
+	    }
+	    return true;
+	 }
+	
+	
+	 /**
+	  * Inequality test operator
+	  * @param rhs Right hand side argument of binary operator.
+	  * @return not (lhs == rhs) :-P
+	  */
+	 bool operator!=(const Matrix3<T>& rhs) const
+	 {
+	    return !(*this == rhs);
+	 }
+	
+
+	 //---------------------[ access operators ]---------------------------------
+	 /**
+	  * Get reference to element at postion (x,y).
+	  * @param x Number of column (0..2)
+	  * @param y Number of row (0..2)
+	  */
+	 T& at(int x, int y) 
+	 {
+	    assert(x >= 0 && x < 3);
+	    assert(y >= 0 && y < 3);
+	    return data[x * 3 + y];
+	 }
+
+	 /**
+	  * Get constant reference to element at postion (x,y).
+	  * @param x Number of column (0..2)
+	  * @param y Number of row (0..2)
+	  */
+	 const T& at(int x, int y) const 
+	 {
+	    assert(x >= 0 && x < 3);
+	    assert(y >= 0 && y < 3);
+	    return data[x * 3 + y];
+	 }
+
+	 /**
+	  * Copy operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix3<T>& operator=(const Matrix3<T>& rhs) 
+	 {
+	    std::memcpy(data, rhs.data, sizeof(T) * 9);
+	    return * this;
+	 }
+
+	 /**
+	  * Copy casting operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 template<class FromT>
+	 Matrix3<T>& operator=(const Matrix3<FromT>& rhs) 
+	 {
+	    for (int i = 0; i < 9; i++)
+	    {
+	       data[i] = static_cast<T>(rhs.data[i]);
+	    }
+	    return * this;
+	 }
+
+	 /**
+	  * Copy operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix3<T>& operator=(const T* rhs) 
+	 {
+	    std::memcpy(data, rhs, sizeof(T) * 9);
+	    return * this;
+	 }
+
+
+	 /*Matrix3<T> & operator=(const double* m)
+	   {
+	   for (int i = 0; i < 9; i++) data[i] = (T)m[i];
+	   return * this;
+	   }*/
+	
+	 //--------------------[ matrix with matrix operations ]---------------------
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix3<T> operator+(const Matrix3<T>& rhs) const
+	 {
+	    Matrix3<T> ret;
+	    for (int i = 0; i < 9; i++)
+	       ret.data[i] = data[i] + rhs.data[i];
+	    return ret;
+	 }
+	
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix3<T> operator-(const Matrix3<T>& rhs) const
+	 {
+	    Matrix3<T> ret;
+	    for (int i = 0; i < 9; i++)
+	       ret.data[i] = data[i] - rhs.data[i];
+	    return ret;
+	 }
+	
+	 //--------------------[ matrix with scalar operations ]---------------------
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix3<T> operator+(T rhs) const
+	 {
+	    Matrix3<T> ret;
+	    for (int i = 0; i < 9; i++)
+	       ret.data[i] = data[i] + rhs;
+	    return ret;
+	 }
+	
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix3<T> operator-(T rhs) const
+	 {
+	    Matrix3<T> ret;
+	    for (int i = 0; i < 9; i++)
+	       ret.data[i] = data[i] - rhs;
+	    return ret;
+	 }
+	
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix3<T> operator*(T rhs) const
+	 {
+	    Matrix3<T> ret;
+	    for (int i = 0; i < 9; i++)
+	       ret.data[i] = data[i] * rhs;
+	    return ret;
+	 }
+	
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix3<T> operator/(T rhs) const
+	 {
+	    Matrix3<T> ret;
+	    for (int i = 0; i < 9; i++)
+	       ret.data[i] = data[i] / rhs;
+	    return ret;
+	 }
+	
+
+	 //--------------------[ multiply operators ]--------------------------------
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T> operator*(const Vector3<T>& rhs) const
+	 {
+	    return Vector3<T>(
+	       data[0] * rhs.x + data[3] * rhs.y + data[6] * rhs.z,
+	       data[1] * rhs.x + data[4] * rhs.y + data[7] * rhs.z,
+	       data[2] * rhs.x + data[5] * rhs.y + data[8] * rhs.z
+	       );
+	 }
+
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix3<T> operator*(Matrix3<T> rhs) const 
+	 {
+	    static Matrix3<T> w;
+	    for (int i = 0; i < 3; i++) 
+	    {
+	       for (int j = 0; j < 3; j++) 
+	       {
+		  T n = 0;
+		  for (int k = 0; k < 3; k++) n += rhs.at(i, k) * at(k, j);
+		  w.at(i, j) = n;
+	       }
+	    }
+	    return w;
+		
+	 }
+	
+	
+	 //---------------------------[ misc operations ]----------------------------
+	 /**
+	  * Transpose matrix.
+	  */
+	 Matrix3<T> transpose()
+	 {
+	    Matrix3<T> ret;
+	    for (int i = 0; i < 3; i++)
+	    {
+	       for (int j = 0; j < 3; j++)
+	       {
+		  ret.at(i,j) = at(j,i);
+	       }
+	    }
+	    return ret;
+	 }
+	
+	 /**
+	  * Linear interpolation of two vectors
+	  * @param fact Factor of interpolation. For translation from positon
+	  * of this matrix (lhs) to matrix rhs, values of factor goes from 0.0 to 1.0.
+	  * @param rhs Second Matrix for interpolation 
+	  * @note Hovewer values of fact parameter are reasonable only in interval
+	  * [0.0 , 1.0], you can pass also values outside of this interval and you
+	  * can get result (extrapolation?)
+	  */
+	 Matrix3<T> lerp(T fact, const Matrix3<T>& rhs) const
+	 {
+	    Matrix3<T> ret = (*this) + (rhs - (*this)) * fact;
+	    return ret;		
+	 }
+
+	 T det()
+	 {
+	    return
+	     +at(0,0) * at(1,1) * at(2,2)
+	     +at(0,1) * at(1,2) * at(2,0)
+	     +at(0,2) * at(1,0) * at(2,1)
+	     -at(0,0) * at(1,2) * at(2,1)
+	     -at(0,1) * at(1,0) * at(2,2)
+	     -at(0,2) * at(1,1) * at(2,0)
+	     ;
+	 }
+
+
+	 /**
+	  * Computes inverse matrix
+	  * @return Inverse matrix of this matrix.
+	  */
+	 Matrix3<T> inverse()
+	 {
+	    Matrix3<T> ret;
+	    ret.at(0,0) = at(1,1)*at(2,2) - at(2,1)*at(1,2);
+	    ret.at(0,1) = at(2,1)*at(0,2) - at(0,1)*at(2,2);
+	    ret.at(0,2) = at(0,1)*at(1,2) - at(1,1)*at(0,2);
+	    ret.at(1,0) = at(2,0)*at(1,2) - at(1,0)*at(2,2);
+	    ret.at(1,1) = at(0,0)*at(2,2) - at(2,0)*at(0,2);
+	    ret.at(1,2) = at(1,0)*at(0,2) - at(0,0)*at(1,2);
+	    ret.at(2,0) = at(1,0)*at(2,1) - at(2,0)*at(1,1);
+	    ret.at(2,1) = at(2,0)*at(0,1) - at(0,0)*at(2,1);
+	    ret.at(2,2) = at(0,0)*at(1,1) - at(1,0)*at(0,1);
+	    return ret * (1.0f / det());
+	 }
+
+
+
+    
+	 //-------------[ conversion ]-----------------------------
+	
+	 /**
+	  * Conversion to pointer operator
+	  * @return Pointer to internaly stored (in managment of class Matrix3<T>)
+	  * used for passing Matrix3<T> values to gl*[fd]v functions.
+	  */
+	 operator T*(){ return (T*) data; }
+	
+	 /**
+	  * Conversion to pointer operator
+	  * @return Constant Pointer to internaly stored (in managment of class Matrix3<T>)
+	  * used for passing Matrix3<T> values to gl*[fd]v functions.
+	  */
+	 operator const T*() const { return (const T*) data; }
+
+	 //----------[ output operator ]----------------------------
+	 /**
+	  * Output to stream operator
+	  * @param lhs Left hand side argument of operator (commonly ostream instance). 
+	  * @param rhs Right hand side argument of operator.
+	  * @return Left hand side argument - the ostream object passed to operator.
+	  */
+	 friend std::ostream& operator << (std::ostream& lhs, const Matrix3<T>& rhs) 
+	 {
+	    for (int i = 0; i < 3; i++)
+	    {
+	       lhs << "|\t";
+	       for (int j = 0; j < 3; j++)
+	       {
+		  lhs << rhs.at(j,i) << "\t";
+	       }
+	       lhs << "|" << std::endl;
+	    }
+	    return lhs;
+	 }
+    
+	 /**
+	  * Gets string representation.
+	  */
+	 std::string toString() const
+	 {
+		 std::ostringstream oss;
+		 oss << *this;
+		 return oss.str();
+	 }
+   };
+
+   /// Matrix 3x3 of floats
+   typedef Matrix3<float> Matrix3f;
+   /// Matrix 3x3 of doubles
+   typedef Matrix3<double> Matrix3d;
+
+
+   /**
+    * Class for matrix 4x4 
+    * @note Data stored in this matrix are in column major order. This arrangement suits OpenGL.
+    * If you're using row major matrix, consider using fromRowMajorArray as way for construction
+    * Matrix4<T> instance.
+    */
+   template <class T>
+   class Matrix4 
+   {
+      public:
+	 /// Data stored in column major order
+	 T data[16];
+	
+	 //--------------------------[ constructors ]-------------------------------
+	 /**
+	  *Creates identity matrix
+	  */
+	 Matrix4() 
+	 {
+	    for (int i = 0; i < 16; i++)
+	       data[i] = (i % 5) ? 0 : 1;
+	 }
+
+	 /**
+	  * Copy matrix values from array (these data must be in column
+	  * major order!)
+	  */
+	 Matrix4(const T * dt) 
+	 {
+	    std::memcpy(data, dt, sizeof(T) * 16); 
+	 }
+
+	 /**
+	  * Copy constructor.
+	  * @param src Data source for new created instance of Matrix4.
+	  */
+	 Matrix4(const Matrix4<T>& src)
+	 {
+	    std::memcpy(data, src.data, sizeof(T) * 16);
+	 }
+	
+	 /**
+	  * Copy casting constructor.
+	  * @param src Data source for new created instance of Matrix4.
+	  */
+	 template <class FromT>
+	 Matrix4(const Matrix4<FromT>& src)
+	 {
+	    for (int i = 0; i < 16; i++)
+	    {
+	       data[i] = static_cast<T>(src.data[i]);
+	    }
+	 }
+
+	 /**
+	  * Resets matrix to be identity matrix
+	  */
+	 void identity()
+	 {
+	    for (int i = 0; i < 16; i++)
+	       data[i] = (i % 5) ? 0 : 1;
+	 }
+	
+	
+
+	 /**
+	  * Creates rotation matrix by rotation around axis.
+	  * @param a Angle (in radians) of rotation around axis X.
+	  * @param b Angle (in radians) of rotation around axis Y.
+	  * @param c Angle (in radians) of rotation around axis Z.
+	  */
+	 static Matrix4<T> createRotationAroundAxis(T a, T b, T c)
+	 {
+	    Matrix4<T> ma, mb, mc;
+	    float ac = cos(a);
+	    float as = sin(a);
+	    float bc = cos(b);
+	    float bs = sin(b);
+	    float cc = cos(c);
+	    float cs = sin(c);
+
+	    ma.at(1,1) = ac;
+	    ma.at(2,1) = as;
+	    ma.at(1,2) = -as;
+	    ma.at(2,2) = ac;
+
+	    mb.at(0,0) = bc;
+	    mb.at(2,0) = -bs;
+	    mb.at(0,2) = bs;
+	    mb.at(2,2) = bc;
+
+	    mc.at(0,0) = cc;
+	    mc.at(1,0) = cs;
+	    mc.at(0,1) = -cs;
+	    mc.at(1,1) = cc;
+
+	    /*std::cout << "RotVec = " << a << "," << b << "," << c << std::endl;
+	      std::cout << "Rx = " << std::endl << ma;
+	      std::cout << "Ry = " << std::endl << mb;
+	      std::cout << "Rz = " << std::endl << mc;*/
+		
+	    Matrix4<T> ret = ma * mb * mc;
+	    //std::cout << "Result = " << std::endl << ma * (mb * mc);
+		
+	    return ret;
+	 }
+
+	 /// Creates translation matrix
+	 /**
+	  * Creates translation matrix.
+	  * @param x X-direction translation
+	  * @param y Y-direction translation
+	  * @param z Z-direction translation
+	  * @param w for W-coordinate translation (impictily set to 1)
+	  */
+	 static Matrix4<T> createTranslation(T x, T y, T z, T w = 1)
+	 {
+	    Matrix4 ret;
+	    ret.at(3,0) = x;
+	    ret.at(3,1) = y;
+	    ret.at(3,2) = z;
+	    ret.at(3,3) = w;
+		
+	    return ret;
+	 }
+
+	 /**
+	  * Creates new matrix 4x4 from array that represents such matrix 4x4
+	  * as array of tightly packed elements in row major order.
+	  * @param arr An array of elements for 4x4 matrix in row major order.
+	  * @return An instance of Matrix4<T> representing @a arr
+	  */
+	 template <class FromT>
+	 static Matrix4<T> fromRowMajorArray(const FromT* arr)
+	 {
+		 const T retData[] =
+		 {
+			static_cast<T>(arr[0]), static_cast<T>(arr[4]), static_cast<T>(arr[ 8]), static_cast<T>(arr[12]),
+			static_cast<T>(arr[1]), static_cast<T>(arr[5]), static_cast<T>(arr[ 9]), static_cast<T>(arr[13]),
+			static_cast<T>(arr[2]), static_cast<T>(arr[6]), static_cast<T>(arr[10]), static_cast<T>(arr[14]),
+			static_cast<T>(arr[3]), static_cast<T>(arr[7]), static_cast<T>(arr[11]), static_cast<T>(arr[15])
+		 };
+
+		 return retData;
+	 }
+
+	 /**
+	  * Creates new matrix 4x4 from array that represents such matrix 4x4
+	  * as array of tightly packed elements in column major order.
+	  * @param arr An array of elements for 4x4 matrix in column major order.
+	  * @return An instance of Matrix4<T> representing @a arr
+	  */
+	 template <class FromT>
+	 static Matrix4<T> fromColumnMajorArray(const FromT* arr)
+	 {
+		 const T retData[] =
+		 {
+			static_cast<T>(arr[ 0]), static_cast<T>(arr[ 1]), static_cast<T>(arr[ 2]), static_cast<T>(arr[ 3]),
+			static_cast<T>(arr[ 4]), static_cast<T>(arr[ 5]), static_cast<T>(arr[ 6]), static_cast<T>(arr[ 7]),
+			static_cast<T>(arr[ 8]), static_cast<T>(arr[ 9]), static_cast<T>(arr[10]), static_cast<T>(arr[11]),
+			static_cast<T>(arr[12]), static_cast<T>(arr[13]), static_cast<T>(arr[14]), static_cast<T>(arr[15])
+		 };
+
+		 return retData;
+	 }
+
+
+
+	 //---------------------[ equiality operators ]------------------------------	
+	 /**
+	  * Equality test operator
+	  * @param rhs Right hand side argument of binary operator.
+	  * @note Test of equality is based of threshold EPSILON value. To be two
+	  * values equal, must satisfy this condition all elements of matrix 
+	  * | lws[i] - rhs[i] | < EPSILON,
+	  * same for y-coordinate, z-coordinate, and w-coordinate.
+	  */	
+	 bool operator==(const Matrix4<T>& rhs) const
+	 {
+	    for (int i = 0; i < 16; i++)
+	    {
+	       if (std::fabs(data[i] - rhs.data[i]) >= EPSILON)
+		  return false;
+	    }
+	    return true;
+	 }
+	
+	 /**
+	  * Inequality test operator
+	  * @param rhs Right hand side argument of binary operator.
+	  * @return not (lhs == rhs) :-P
+	  */
+	 bool operator!=(const Matrix4<T>& rhs) const
+	 {
+	    return !(*this == rhs);
+	 }
+	
+
+	 //---------------------[ access operators ]---------------------------------
+	 /**
+	  * Get reference to element at postion (x,y).
+	  * @param x Number of column (0..3)
+	  * @param y Number of row (0..3)
+	  */
+	 T& at(int x, int y) 
+	 {
+	    assert(x >= 0 && x < 4);
+	    assert(y >= 0 && y < 4);
+	    return data[x * 4 + y];
+	 }
+
+	 /**
+	  * Get constant reference to element at postion (x,y).
+	  * @param x Number of column (0..3)
+	  * @param y Number of row (0..3)
+	  */
+	 const T& at(int x, int y) const 
+	 {
+	    assert(x >= 0 && x < 4);
+	    assert(y >= 0 && y < 4);
+	    return data[x * 4 + y];
+	 }
+
+
+	 /**
+	  * Sets translation part of matrix.
+	  *
+	  * @param v Vector of translation to be set.
+	  */
+	 void setTranslation(const Vector3<T>& v)
+	 {
+	    at(3,0) = v.x;
+	    at(3,1) = v.y;
+	    at(3,2) = v.z;
+	    at(3,3) = 1;
+	 }
+
+	 Vector3<T> getTranslation()
+	 { return Vector3<T>(at(3,0),at(3,1),at(3,2)); }
+
+	 /**
+	  * Sets roation part (matrix 3x3) of matrix.
+	  *
+	  * @param m Rotation part of matrix
+	  */
+	 void setRotation(const Matrix3<T>& m)
+	 {
+	    for (int i = 0; i < 3; i++)
+	    {
+	       for (int j = 0; j < 3; j++)
+	       {
+		  at(i,j) = m.at(i,j);
+	       }
+	    }
+	 }
+				 
+
+	 /**
+	  * Copy operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix4<T>& operator=(const Matrix4<T>& rhs) 
+	 {
+	    std::memcpy(data, rhs.data, sizeof(T) * 16);
+	    return * this;
+	 }
+
+	 /**
+	  * Copy casting operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 template <class FromT>
+	 Matrix4<T>& operator=(const Matrix4<FromT>& rhs) 
+	 {
+	    for (int i = 0; i < 16; i++)
+	    {
+	       data[i] = static_cast<T>(rhs.data[i]);
+	    }
+	    return * this;
+	 }
+
+	 /**
+	  * Copy operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix4<T>& operator=(const T* rhs) 
+	 {
+	    std::memcpy(data, rhs, sizeof(T) * 16);
+	    return * this;
+	 }
+
+	 /*Matrix4<T> & operator=(const double* m)
+	   {
+	   for (int i = 0; i < 16; i++) data[i] = (T)m[i];
+	   return * this;
+	   }*/
+	
+	 //--------------------[ matrix with matrix operations ]---------------------
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix4<T> operator+(const Matrix4<T>& rhs) const
+	 {
+	    Matrix4<T> ret;
+	    for (int i = 0; i < 16; i++)
+	       ret.data[i] = data[i] + rhs.data[i];
+	    return ret;
+	 }
+	
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix4<T> operator-(const Matrix4<T>& rhs) const
+	 {
+	    Matrix4<T> ret;
+	    for (int i = 0; i < 16; i++)
+	       ret.data[i] = data[i] - rhs.data[i];
+	    return ret;
+	 }
+	
+	 //--------------------[ matrix with scalar operations ]---------------------
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix4<T> operator+(T rhs) const
+	 {
+	    Matrix4<T> ret;
+	    for (int i = 0; i < 16; i++)
+	       ret.data[i] = data[i] + rhs;
+	    return ret;
+	 }
+	
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix4<T> operator-(T rhs) const
+	 {
+	    Matrix4<T> ret;
+	    for (int i = 0; i < 16; i++)
+	       ret.data[i] = data[i] - rhs;
+	    return ret;
+	 }
+	
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix4<T> operator*(T rhs) const
+	 {
+	    Matrix4<T> ret;
+	    for (int i = 0; i < 16; i++)
+	       ret.data[i] = data[i] * rhs;
+	    return ret;
+	 }
+	
+	 /**
+	  * Division operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix4<T> operator/(T rhs) const
+	 {
+	    Matrix4<T> ret;
+	    for (int i = 0; i < 16; i++)
+	       ret.data[i] = data[i] / rhs;
+	    return ret;
+	 }
+	
+
+	 //--------------------[ multiply operators ]--------------------------------
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector4<T> operator*(const Vector4<T>& rhs) const 
+	 {
+	    return Vector4<T>(
+	       data[0] * rhs.x + data[4] * rhs.y + data[8]  * rhs.z + data[12] * rhs.w,
+	       data[1] * rhs.x + data[5] * rhs.y + data[9]  * rhs.z + data[13] * rhs.w,
+	       data[2] * rhs.x + data[6] * rhs.y + data[10] * rhs.z + data[14] * rhs.w,
+	       data[3] * rhs.x + data[7] * rhs.y + data[11] * rhs.z + data[15] * rhs.w
+	       );
+
+	 }
+	
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Vector3<T> operator*(const Vector3<T>& rhs) const
+	 {
+	    return Vector3<T>(
+	       data[0] * rhs.x + data[4] * rhs.y + data[8] * rhs.z,
+	       data[1] * rhs.x + data[5] * rhs.y + data[9] * rhs.z,
+	       data[2] * rhs.x + data[6] * rhs.y + data[10] * rhs.z
+	       );
+	 }
+
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Matrix4<T> operator*(Matrix4<T> rhs) const 
+	 {
+	    static Matrix4<T> w;
+	    for (int i = 0; i < 4; i++) 
+	    {
+	       for (int j = 0; j < 4; j++) 
+	       {
+		  T n = 0;
+		  for (int k = 0; k < 4; k++) n += rhs.at(i, k) * at(k, j);
+		  w.at(i, j) = n;
+	       }
+	    }
+	    return w;
+		
+	 }
+	
+	
+	 //---------------------------[ misc operations ]----------------------------
+ 
+	 /**
+	  * Computes determinant of matrix
+	  * @return Determinant of matrix
+	  * @note This function does 3 * 4 * 6 mul, 3 * 6 add.
+	  */
+	 T det()
+	 {
+
+	    return
+	       + at(3,0) * at(2,1) * at(1,2) * at(0,3)
+	       - at(2,0) * at(3,1) * at(1,2) * at(0,3)
+	       - at(3,0) * at(1,1) * at(2,2) * at(0,3)
+	       + at(1,0) * at(3,1) * at(2,2) * at(0,3)
+
+	       + at(2,0) * at(1,1) * at(3,2) * at(0,3)
+	       - at(1,0) * at(2,1) * at(3,2) * at(0,3)
+	       - at(3,0) * at(2,1) * at(0,2) * at(1,3)
+	       + at(2,0) * at(3,1) * at(0,2) * at(1,3)
+
+	       + at(3,0) * at(0,1) * at(2,2) * at(1,3)
+	       - at(0,0) * at(3,1) * at(2,2) * at(1,3)
+	       - at(2,0) * at(0,1) * at(3,2) * at(1,3)
+	       + at(0,0) * at(2,1) * at(3,2) * at(1,3)
+
+	       + at(3,0) * at(1,1) * at(0,2) * at(2,3)
+	       - at(1,0) * at(3,1) * at(0,2) * at(2,3)
+	       - at(3,0) * at(0,1) * at(1,2) * at(2,3)
+	       + at(0,0) * at(3,1) * at(1,2) * at(2,3)
+
+	       + at(1,0) * at(0,1) * at(3,2) * at(2,3)
+	       - at(0,0) * at(1,1) * at(3,2) * at(2,3)
+	       - at(2,0) * at(1,1) * at(0,2) * at(3,3)
+	       + at(1,0) * at(2,1) * at(0,2) * at(3,3)
+
+	       + at(2,0) * at(0,1) * at(1,2) * at(3,3)
+	       - at(0,0) * at(2,1) * at(1,2) * at(3,3)
+	       - at(1,0) * at(0,1) * at(2,2) * at(3,3)
+	       + at(0,0) * at(1,1) * at(2,2) * at(3,3);
+
+
+	 }
+
+
+	 /**
+	  * Computes inverse matrix
+	  * @return Inverse matrix of this matrix.
+	  * @note This is a little bit time consuming operation
+	  * (16 * 6 * 3 mul, 16 * 5 add + det() + mul() functions)
+	  */
+	 Matrix4<T> inverse()
+	 {
+	    Matrix4<T> ret;
+
+	    ret.at(0,0) =  
+	       + at(2,1) * at(3,2) * at(1,3) 
+	       - at(3,1) * at(2,2) * at(1,3) 
+	       + at(3,1) * at(1,2) * at(2,3) 
+	       - at(1,1) * at(3,2) * at(2,3) 
+	       - at(2,1) * at(1,2) * at(3,3) 
+	       + at(1,1) * at(2,2) * at(3,3);
+
+	    ret.at(1,0) =
+	       + at(3,0) * at(2,2) * at(1,3) 
+	       - at(2,0) * at(3,2) * at(1,3) 
+	       - at(3,0) * at(1,2) * at(2,3) 
+	       + at(1,0) * at(3,2) * at(2,3) 
+	       + at(2,0) * at(1,2) * at(3,3) 
+	       - at(1,0) * at(2,2) * at(3,3);
+
+	    ret.at(2,0) = 
+	       + at(2,0) * at(3,1) * at(1,3) 
+	       - at(3,0) * at(2,1) * at(1,3) 
+	       + at(3,0) * at(1,1) * at(2,3) 
+	       - at(1,0) * at(3,1) * at(2,3) 
+	       - at(2,0) * at(1,1) * at(3,3) 
+	       + at(1,0) * at(2,1) * at(3,3);
+
+	    ret.at(3,0) = 
+	       + at(3,0) * at(2,1) * at(1,2) 
+	       - at(2,0) * at(3,1) * at(1,2) 
+	       - at(3,0) * at(1,1) * at(2,2) 
+	       + at(1,0) * at(3,1) * at(2,2) 
+	       + at(2,0) * at(1,1) * at(3,2) 
+	       - at(1,0) * at(2,1) * at(3,2);
+
+	    ret.at(0,1) = 
+	       + at(3,1) * at(2,2) * at(0,3) 
+	       - at(2,1) * at(3,2) * at(0,3) 
+	       - at(3,1) * at(0,2) * at(2,3) 
+	       + at(0,1) * at(3,2) * at(2,3) 
+	       + at(2,1) * at(0,2) * at(3,3) 
+	       - at(0,1) * at(2,2) * at(3,3);
+
+	    ret.at(1,1) = 
+	       + at(2,0) * at(3,2) * at(0,3) 
+	       - at(3,0) * at(2,2) * at(0,3) 
+	       + at(3,0) * at(0,2) * at(2,3) 
+	       - at(0,0) * at(3,2) * at(2,3) 
+	       - at(2,0) * at(0,2) * at(3,3) 
+	       + at(0,0) * at(2,2) * at(3,3);
+
+	    ret.at(2,1) =
+	       + at(3,0) * at(2,1) * at(0,3) 
+	       - at(2,0) * at(3,1) * at(0,3) 
+	       - at(3,0) * at(0,1) * at(2,3) 
+	       + at(0,0) * at(3,1) * at(2,3) 
+	       + at(2,0) * at(0,1) * at(3,3) 
+	       - at(0,0) * at(2,1) * at(3,3);
+
+	    ret.at(3,1) = 
+	       + at(2,0) * at(3,1) * at(0,2) 
+	       - at(3,0) * at(2,1) * at(0,2) 
+	       + at(3,0) * at(0,1) * at(2,2) 
+	       - at(0,0) * at(3,1) * at(2,2) 
+	       - at(2,0) * at(0,1) * at(3,2) 
+	       + at(0,0) * at(2,1) * at(3,2);
+
+	    ret.at(0,2) =  
+	       + at(1,1) * at(3,2) * at(0,3) 
+	       - at(3,1) * at(1,2) * at(0,3) 
+	       + at(3,1) * at(0,2) * at(1,3) 
+	       - at(0,1) * at(3,2) * at(1,3) 
+	       - at(1,1) * at(0,2) * at(3,3) 
+	       + at(0,1) * at(1,2) * at(3,3);
+
+	    ret.at(1,2) =
+	       + at(3,0) * at(1,2) * at(0,3) 
+	       - at(1,0) * at(3,2) * at(0,3) 
+	       - at(3,0) * at(0,2) * at(1,3) 
+	       + at(0,0) * at(3,2) * at(1,3) 
+	       + at(1,0) * at(0,2) * at(3,3) 
+	       - at(0,0) * at(1,2) * at(3,3);
+
+	    ret.at(2,2) = 
+	       + at(1,0) * at(3,1) * at(0,3) 
+	       - at(3,0) * at(1,1) * at(0,3) 
+	       + at(3,0) * at(0,1) * at(1,3) 
+	       - at(0,0) * at(3,1) * at(1,3) 
+	       - at(1,0) * at(0,1) * at(3,3) 
+	       + at(0,0) * at(1,1) * at(3,3);
+
+	    ret.at(3,2) = 
+	       + at(3,0) * at(1,1) * at(0,2) 
+	       - at(1,0) * at(3,1) * at(0,2) 
+	       - at(3,0) * at(0,1) * at(1,2) 
+	       + at(0,0) * at(3,1) * at(1,2) 
+	       + at(1,0) * at(0,1) * at(3,2) 
+	       - at(0,0) * at(1,1) * at(3,2);
+
+	    ret.at(0,3) =
+	       + at(2,1) * at(1,2) * at(0,3) 
+	       - at(1,1) * at(2,2) * at(0,3) 
+	       - at(2,1) * at(0,2) * at(1,3) 
+	       + at(0,1) * at(2,2) * at(1,3) 
+	       + at(1,1) * at(0,2) * at(2,3) 
+	       - at(0,1) * at(1,2) * at(2,3);
+
+	    ret.at(1,3) = 
+	       + at(1,0) * at(2,2) * at(0,3) 
+	       - at(2,0) * at(1,2) * at(0,3) 
+	       + at(2,0) * at(0,2) * at(1,3) 
+	       - at(0,0) * at(2,2) * at(1,3) 
+	       - at(1,0) * at(0,2) * at(2,3) 
+	       + at(0,0) * at(1,2) * at(2,3);
+
+	    ret.at(2,3) =  
+	       + at(2,0) * at(1,1) * at(0,3) 
+	       - at(1,0) * at(2,1) * at(0,3) 
+	       - at(2,0) * at(0,1) * at(1,3) 
+	       + at(0,0) * at(2,1) * at(1,3) 
+	       + at(1,0) * at(0,1) * at(2,3) 
+	       - at(0,0) * at(1,1) * at(2,3);
+
+	    ret.at(3,3) = 
+	       + at(1,0) * at(2,1) * at(0,2) 
+	       - at(2,0) * at(1,1) * at(0,2) 
+	       + at(2,0) * at(0,1) * at(1,2) 
+	       - at(0,0) * at(2,1) * at(1,2) 
+	       - at(1,0) * at(0,1) * at(2,2) 
+	       + at(0,0) * at(1,1) * at(2,2);
+  
+	    return ret / det();
+	 }
+
+
+
+	 /**
+	  * Transpose matrix.
+	  */
+	 Matrix4<T> transpose()
+	 {
+	    Matrix4<T> ret;
+	    for (int i = 0; i < 4; i++)
+	    {
+	       for (int j = 0; j < 4; j++)
+	       {
+		  ret.at(i,j) = at(j,i);
+	       }
+	    }
+	    return ret;
+	 }
+	
+	 /**
+	  * Linear interpolation of two vectors
+	  * @param fact Factor of interpolation. For translation from positon
+	  * of this matrix (lhs) to matrix rhs, values of factor goes from 0.0 to 1.0.
+	  * @param rhs Second Matrix for interpolation 
+	  * @note Hovewer values of fact parameter are reasonable only in interval
+	  * [0.0 , 1.0], you can pass also values outside of this interval and you
+	  * can get result (extrapolation?)
+	  */
+	 Matrix4<T> lerp(T fact, const Matrix4<T>& rhs) const
+	 {
+	    Matrix4<T> ret = (*this) + (rhs - (*this)) * fact;
+	    return ret;		
+	 }
+
+    
+	 //-------------[ conversion ]-----------------------------
+	 /**
+	  * Conversion to pointer operator
+	  * @return Pointer to internaly stored (in managment of class Matrix4<T>)
+	  * used for passing Matrix4<T> values to gl*[fd]v functions.
+	  */
+	 operator T*(){ return (T*) data; }
+	
+	 /**
+	  * Conversion to pointer operator
+	  * @return Constant Pointer to internaly stored (in managment of class Matrix4<T>)
+	  * used for passing Matrix4<T> values to gl*[fd]v functions.
+	  */
+	 operator const T*() const { return (const T*) data; }
+
+	 //----------[ output operator ]----------------------------
+	 /**
+	  * Output to stream operator
+	  * @param lhs Left hand side argument of operator (commonly ostream instance). 
+	  * @param rhs Right hand side argument of operator.
+	  * @return Left hand side argument - the ostream object passed to operator.
+	  */
+	 friend std::ostream& operator << (std::ostream& lhs, const Matrix4<T>& rhs) 
+	 {
+	    for (int i = 0; i < 4; i++)
+	    {
+	       lhs << "|\t";
+	       for (int j = 0; j < 4; j++)
+	       {
+		  lhs << rhs.at(j,i) << "\t";
+	       }
+	       lhs << "|" << std::endl;
+	    }
+	    return lhs;
+	 }
+
+	 /**
+	  * Gets string representation.
+	  */
+	 std::string toString() const
+	 {
+		 std::ostringstream oss;
+		 oss << *this;
+		 return oss.str();
+	 }
+
+    
+   };
+
+
+   /// Matrix 4x4 of floats
+   typedef Matrix4<float> Matrix4f;
+   /// Matrix 4x4 of doubles
+   typedef Matrix4<double> Matrix4d;
+
+
+   /**
+    * Quaternion class implementing some quaternion algebra operations.
+    * Quaternion is kind of complex number it consists of its real part (w)
+    * and its complex part v. This complex part has three elements, so we
+    * can express it as xi + yj + zk . Note that coordinates of (x,y,z) are
+    * hold inside v field.
+    */
+   template <class T>
+   class Quaternion
+   {
+      public:
+	 /**
+	  * Real part of quaternion.
+	  */
+	 T w;
+	 /**
+	  * Complex part of quaternion.
+	  */
+	 Vector3<T> v;
+	
+	 /**
+	  * Quaternion constructor, sets quaternion to (0 + 0i + 0j + 0k).
+	  */
+	 Quaternion(): w(0), v(0,0,0){}
+	
+	 /**
+	  * Copy constructor.
+	  */
+	 Quaternion(const Quaternion<T>& q): w(q.w), v(q.v){	}
+
+	 /**
+	  * Copy casting constructor.
+	  */
+	 template <class FromT>
+	 Quaternion(const Quaternion<FromT>& q)
+	    : w(static_cast<T>(q.w)), 
+	      v(q.v){	}
+
+	
+	 /**
+	  * Creates quaternion object from real part w_ and complex part v_.
+	  * @param w_ Real part of quaternion.
+	  * @param v_ Complex part of quaternion (xi + yj + zk).
+	  */
+	 Quaternion(T w_, const Vector3<T>& v_): w(w_), v(v_){}
+	
+	 /**
+	  * Creates quaternion object from value (w_ + xi + yj + zk).
+	  * @param w_ Real part of quaternion.
+	  * @param x Complex cooeficinet for i complex constant.
+	  * @param y Complex cooeficinet for j complex constant.
+	  * @param z Complex cooeficinet for k complex constant.
+	  */
+	 Quaternion(T w_, T x, T y, T z): w(w_), v(x,y,z){}
+	
+	 /**
+	  * Copy operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Quaternion<T>& operator= (const Quaternion<T>& rhs)
+	 {
+	    v = rhs.v;
+	    w = rhs.w;
+	    return *this;
+	 }
+
+	 /**
+	  * Copy convert operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 template<class FromT>
+	 Quaternion<T>& operator= (const Quaternion<FromT>& rhs)
+	 {
+	    v = rhs.v;
+	    w = static_cast<T>(rhs.w);
+	    return *this;
+	 }
+	
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Quaternion<T> operator+ (const Quaternion<T>& rhs) const
+	 {
+	    const Quaternion<T>& lhs = *this;
+	    return Quaternion<T>(lhs.w + rhs.w, lhs.v + rhs.v);  
+	 }
+	
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Quaternion<T> operator* (const Quaternion<T>& rhs) const
+	 {
+	    const Quaternion<T>& lhs = *this;
+	    return Quaternion<T>(
+	       lhs.w * rhs.w 	- lhs.v.x * rhs.v.x 	- lhs.v.y * rhs.v.y 	- lhs.v.z * rhs.v.z,
+	       lhs.w * rhs.v.x 	+ lhs.v.x * rhs.w 	+ lhs.v.y * rhs.v.z	- lhs.v.z * rhs.v.y,
+	       lhs.w * rhs.v.y 	- lhs.v.x * rhs.v.z	+ lhs.v.y * rhs.w	+ lhs.v.z * rhs.v.x,
+	       lhs.w * rhs.v.z	+ lhs.v.x * rhs.v.y	- lhs.v.y * rhs.v.x	+ lhs.v.z * rhs.w
+	       );
+	 }
+	
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Quaternion<T> operator* (T rhs) const 
+	 { 
+	    return Quaternion<T>(w*rhs, v*rhs);
+	 }
+	
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Quaternion<T> operator- (const Quaternion<T>& rhs) const
+	 {
+	    const Quaternion<T>& lhs = *this;
+	    return Quaternion<T>(lhs.w - rhs.w, lhs.v - rhs.v);
+	 }
+	
+	 /**
+	  * Addition operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Quaternion<T>& operator+= (const Quaternion<T>& rhs)
+	 {
+	    w += rhs.w;
+	    v += rhs.v;
+	    return *this;
+	 }
+	
+	 /**
+	  * Substraction operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Quaternion<T>& operator-= (const Quaternion<T>& rhs)
+	 {
+	    w -= rhs.w;
+	    v -= rhs.v;
+	    return *this;
+	 }
+
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Quaternion<T>& operator*= (const Quaternion<T>& rhs)
+	 {
+	    Quaternion q = (*this) * rhs;
+	    v = q.v;
+	    w = q.w;
+	    return *this;
+	 }
+	
+	 /**
+	  * Multiplication operator
+	  * @param rhs Right hand side argument of binary operator.
+	  */
+	 Quaternion<T>& operator*= (T rhs)
+	 {
+	    w *= rhs;
+	    v *= rhs;
+	    return *this;
+	 }
+
+	 /**
+	  * Equality test operator
+	  * @param rhs Right hand side argument of binary operator.
+	  * @note Test of equality is based of threshold EPSILON value. To be two
+	  * values equal, must satisfy this condition | lws - rhs | < EPSILON,
+	  * for all quaternion coordinates.
+	  */
+	 bool operator==(const Quaternion<T>& rhs) const
+	 {
+	    const Quaternion<T>& lhs = *this;
+	    return (std::fabs(lhs.w - rhs.w) < EPSILON) && lhs.v == rhs.v;
+	 }
+	
+	 /**
+	  * Inequality test operator
+	  * @param rhs Right hand side argument of binary operator.
+	  * @return not (lhs == rhs) :-P
+	  */
+	 bool operator!=(const Quaternion<T>& rhs) const { return ! (*this == rhs); }
+
+	 //-------------[ unary operations ]--------------------------
+	 /**
+	  * Unary negate operator
+	  * @return negated quaternion
+	  */
+	 Quaternion<T> operator-() const
+	 {
+	    return Quaternion<T>(-w, -v);
+	 }
+
+	 /**
+	  * Unary conjugate operator
+	  * @return conjugated quaternion
+	  */
+	 Quaternion<T> operator~() const
+	 {
+	    return Quaternion<T>(w, -v);
+	 }
+
+	 /**
+	  * Get lenght of quaternion.
+	  * @return Length of quaternion.
+	  */
+	 T length() const
+	 {
+	    return (T)std::sqrt(w*w + v.lengthSq());	
+	 }
+	
+	 /**
+	  * Return square of length.
+	  * @return lenght ^ 2
+	  * @note This method is faster then length(). For comparsion
+	  * of length of two quaternion can be used just this value, instead
+	  * of computionaly more expensive length() method.
+	  */
+	 T lengthSq() const
+	 {
+	    return w * w + v.lengthSq();	
+	 }
+	
+	
+	 /**
+	  * Normalize quaternion
+	  */
+	 void normalize()
+	 {
+	    T len = length();
+	    w /= len;
+	    v /= len;
+	 }
+	
+	 /**
+	  * Creates quaternion for eulers angles.
+	  * @param x Rotation around x axis (in degrees).
+	  * @param y Rotation around y axis (in degrees).
+	  * @param z Rotation around z axis (in degrees).
+	  * @return Quaternion object representing transoformation.
+	  */
+	 static Quaternion<T> fromEulerAngles(T x, T y, T z)
+	 {
+	    Quaternion<T> ret = fromAxisRot(Vector3<T>(1,0,0), x)
+	       * fromAxisRot(Vector3<T>(0,1,0),y) * fromAxisRot(Vector3<T>(0,0,1),z);
+	    return ret;
+	 }
+	
+	 /**
+	  * Creates quaternion as rotation around axis.
+	  * @param axis Unit vector expressing axis of rotation.
+	  * @param angleDeg Angle of rotation around axis (in degrees).
+	  */
+	 static Quaternion<T> fromAxisRot(Vector3<T> axis, float angleDeg)
+	 {
+	    double angleRad = DEG2RAD(angleDeg);
+	    double sa2 = std::sin(angleRad/2);
+	    double ca2 = std::cos(angleRad/2);
+	    return Quaternion<T>( ca2, axis * sa2);
+	 }
+	
+	 /**
+	  * Converts quaternion into rotation matrix.
+	  * @return Rotation matrix expresing this quaternion.
+	  */
+	 Matrix3<T> rotMatrix()
+	 {
+	    Matrix3<T> ret;
+		
+	    /*ret.at(0,0) = 1 - 2*v.y*v.y - 2*v.z*v.z;
+	      ret.at(1,0) = 2*v.x*v.y - 2*w*v.z;
+	      ret.at(2,0) = 2*v.x*v.z - 2*w*v.y;
+		
+	      ret.at(0,1) = 2*v.x*v.y + 2*w*v.z;
+	      ret.at(1,1) = 1 - 2*v.x*v.x - 2*v.z*v.z;
+	      ret.at(2,1) = 2*v.y*v.z - 2*w*v.x;
+		
+	      ret.at(0,2) = 2*v.x*v.z - 2*w*v.y;
+	      ret.at(1,2) = 2*v.y*v.z + 2*w*v.x;
+	      ret.at(2,2) = 1 - 2*v.x*v.x - 2*v.y*v.y;*/
+		
+	    T xx = v.x * v.x;
+	    T xy = v.x * v.y;
+	    T xz = v.x * v.z;
+	    T xw = v.x * w;
+		
+	    T yy = v.y * v.y;
+	    T yz = v.y * v.z;
+	    T yw = v.y * w;
+		
+	    T zz = v.z * v.z;
+	    T zw = v.z * w;
+		
+	    ret.at(0,0) = 1 - 2 * (yy + zz);
+	    ret.at(1,0) = 2 * (xy - zw);
+	    ret.at(2,0) = 2 * (xz + yw);
+		
+	    ret.at(0,1) = 2 * (xy + zw);
+	    ret.at(1,1) = 1 - 2 * (xx + zz);
+	    ret.at(2,1) = 2 * (yz - xw);
+		
+	    ret.at(0,2) = 2 * (xz - yw);
+	    ret.at(1,2) = 2 * (yz + xw);
+	    ret.at(2,2) = 1 - 2 * (xx + yy);
+		
+		
+	    return ret;
+	 }
+	
+	 /**
+	  * Converts quaternion into transformation matrix.
+	  * @note This method performs same operation as rotMatrix() 
+	  * conversion method. But returns Matrix of 4x4 elements.
+	  * @return Transformation matrix expressing this quaternion.
+	  */
+	 Matrix4<T> transform()
+	 {
+	    Matrix4<T> ret;
+		
+	    T xx = v.x * v.x;
+	    T xy = v.x * v.y;
+	    T xz = v.x * v.z;
+	    T xw = v.x * w;
+		
+	    T yy = v.y * v.y;
+	    T yz = v.y * v.z;
+	    T yw = v.y * w;
+		
+	    T zz = v.z * v.z;
+	    T zw = v.z * w;
+		
+	    ret.at(0,0) = 1 - 2 * (yy + zz);
+	    ret.at(1,0) = 2 * (xy - zw);
+	    ret.at(2,0) = 2 * (xz + yw);
+	    ret.at(3,0) = 0;
+		
+	    ret.at(0,1) = 2 * (xy + zw);
+	    ret.at(1,1) = 1 - 2 * (xx + zz);
+	    ret.at(2,1) = 2 * (yz - xw);
+	    ret.at(3,1) = 0;
+		
+	    ret.at(0,2) = 2 * (xz - yw);
+	    ret.at(1,2) = 2 * (yz + xw);
+	    ret.at(2,2) = 1 - 2 * (xx + yy);
+	    ret.at(3,2) = 0;
+
+	    ret.at(0,3) = 0;
+	    ret.at(1,3) = 0;
+	    ret.at(2,3) = 0;
+	    ret.at(3,3) = 1;
+		
+	    return ret;
+		
+	 }
+
+	 /**
+	  * Linear interpolation of two quaternions
+	  * @param fact Factor of interpolation. For translation from positon
+	  * of this vector to quaternion rhs, values of factor goes from 0.0 to 1.0.
+	  * @param rhs Second Quaternion for interpolation 
+	  * @note Hovewer values of fact parameter are reasonable only in interval
+	  * [0.0 , 1.0], you can pass also values outside of this interval and you
+	  * can get result (extrapolation?)
+	  */
+	 Quaternion<T> lerp(T fact, const Quaternion<T>& rhs) const
+	 {
+	    return Quaternion<T>((1-fact) * w + fact * rhs.w, v.lerp(fact, rhs.v));
+	 }
+
+	 /**
+	  * Provides output to standard output stream.
+	  */
+	 friend std::ostream& operator << (std::ostream& oss, const Quaternion<T>& q)
+	 {
+	    oss << "Re: " << q.w << " Im: " << q.v;
+	    return oss;
+	 }
+
+	 /**
+	  * Creates quaternion from transform matrix.
+	  *
+	  * @param m Transfrom matrix used to compute quaternion.
+	  * @return Quaternion representing rotation of matrix m.
+	  */
+	 static Quaternion<T> fromMatrix(const Matrix4<T>& m)
+	 {
+	    Quaternion<T> q;
+						
+	    T tr,s;
+	    tr = m.at(0,0) + m.at(1,1) + m.at(2,2);
+	    if (tr >= epsilon)
+	    {
+	       s = (T)sqrt(tr + 1);
+	       q.w = 0.5 * s;
+	       s = 0.5 / s;
+							 
+	       q.v.x = (m.at(1,2) - m.at(2,1)) * s;
+	       q.v.y = (m.at(2,0) - m.at(0,2)) * s;
+	       q.v.z = (m.at(0,1) - m.at(1,0)) * s;
+	    }
+	    else
+	    {
+	       T d0 = m.at(0,0);
+	       T d1 = m.at(1,1);
+	       T d2 = m.at(2,2);
+							 
+	       char bigIdx = (d0 > d1) ? ((d0 > d2)? 0 : 2) : ((d1 > d2) ? 1 : 2);
+							 
+	       if (bigIdx == 0)
+	       {
+		  s = (T)sqrt((d0 - (d1 + d2)) + 1);
+									
+		  q.v.x = 0.5 * s;
+		  s = 0.5 / s;
+		  q.v.y = (m.at(1,0) + m.at(0,1)) * s;
+		  q.v.z = (m.at(2,0) + m.at(0,2)) * s;
+		  q.w = (m.at(1,2) - m.at(2,1)) * s;
+	       }
+	       else if (bigIdx == 1)
+	       {
+		  s = (T)sqrt(1 + d1 - (d0 + d2));
+		  q.v.y = 0.5 * s;
+		  s = 0.5 / s;
+		  q.v.z = (m.at(2,1) + m.at(1,2)) / s;
+		  q.w = (m.at(2,0) - m.at(0,2)) / s;
+		  q.v.x = (m.at(1,0) + m.at(0,1)) / s;
+	       }
+	       else
+	       {
+		  s = (T)sqrt(1 + d2 - (d0 + d1));
+		  q.v.z = 0.5 * s;
+		  s = 0.5 / s;
+		  q.w = (m.at(0,1) - m.at(1,0)) / s;
+		  q.v.x = (m.at(2,0) + m.at(0,2)) / s;
+		  q.v.y = (m.at(2,1) + m.at(1,2)) / s;
+	       }
+	    }
+						
+	    return q;
+	 }
+				 
+	 /**
+	  * Creates quaternion from rotation matrix.
+	  *
+	  * @param m Rotation matrix used to compute quaternion.
+	  * @return Quaternion representing rotation of matrix m.
+	  */
+	 static Quaternion<T> fromMatrix(const Matrix3<T>& m)
+	 {
+	    Quaternion<T> q;
+						
+	    T tr,s;
+	    tr = m.at(0,0) + m.at(1,1) + m.at(2,2);
+	    // if trace is greater or equal then zero
+	    if (tr >= epsilon)
+	    {
+	       s = (T)sqrt(tr + 1);
+	       q.w = 0.5 * s;
+	       s = 0.5 / s;
+							 
+	       q.v.x = (m.at(1,2) - m.at(2,1)) * s;
+	       q.v.y = (m.at(2,0) - m.at(0,2)) * s;
+	       q.v.z = (m.at(0,1) - m.at(1,0)) * s;
+	    }
+	    else
+	    {
+	       T d0 = m.at(0,0);
+	       T d1 = m.at(1,1);
+	       T d2 = m.at(2,2);
+							 
+	       // find greates diagonal number
+	       char bigIdx = (d0 > d1) ? ((d0 > d2)? 0 : 2) : ((d1 > d2) ? 1 : 2);
+							 
+	       if (bigIdx == 0)
+	       {
+		  s = (T)sqrt((d0 - (d1 + d2)) + 1);
+									
+		  q.v.x = 0.5 * s;
+		  s = 0.5 / s;
+		  q.v.y = (m.at(1,0) + m.at(0,1)) * s;
+		  q.v.z = (m.at(2,0) + m.at(0,2)) * s;
+		  q.w = (m.at(1,2) - m.at(2,1)) * s;
+	       }
+	       else if (bigIdx == 1)
+	       {
+		  s = (T)sqrt(1 + d1 - (d0 + d2));
+		  q.v.y = 0.5 * s;
+		  s = 0.5 / s;
+		  q.v.z = (m.at(2,1) + m.at(1,2)) / s;
+		  q.w = (m.at(2,0) - m.at(0,2)) / s;
+		  q.v.x = (m.at(1,0) + m.at(0,1)) / s;
+	       }
+	       else
+	       {
+		  s = (T)sqrt(1 + d2 - (d0 + d1));
+		  q.v.z = 0.5 * s;
+		  s = 0.5 / s;
+		  q.w = (m.at(0,1) - m.at(1,0)) / s;
+		  q.v.x = (m.at(2,0) + m.at(0,2)) / s;
+		  q.v.y = (m.at(2,1) + m.at(1,2)) / s;
+	       }
+	    }
+						
+	    return q;
+	 }
+
+	 /**
+	  * Computes spherical interpolation between quaternions (this, q2)
+	  * using coeficient of interpolation r (in [0, 1]).
+	  *
+	  * @param r The ratio of interpolation form this (r = 0) to q2 (r = 1).
+	  * @param q2 Second quaternion for interpolation.
+	  * @return Result of interpolation.
+	  */
+	 Quaternion<T> slerp(T r, const Quaternion<T>& q2) const 
+	 {
+	    Quaternion<T> ret;
+	    T cosTheta = w * q2.w + v.x * q2.v.x + v.y *q2.v.y + v.z * q2.v.z;
+	    T theta = (T) acos(cosTheta);
+	    if (fabs(theta) < epsilon)
+	    {
+	       ret = *this;
+	    }
+	    else
+	    {
+	       T sinTheta = (T)sqrt(1.0 - cosTheta * cosTheta);
+	       if (fabs(sinTheta) < epsilon)
+	       {
+		  ret.w = 0.5 * w + 0.5 * q2.w;
+		  ret.v = v.lerp(0.5, q2.v);
+	       }
+	       else
+	       {
+		  T rA = (T)sin((1.0 - r) * theta) / sinTheta;
+		  T rB = (T)sin(r * theta) / sinTheta;
+									
+		  ret.w = w * rA + q2.w * rB;
+		  ret.v.x = v.x * rA + q2.v.x * rB;
+		  ret.v.y = v.y * rA + q2.v.y * rB;
+		  ret.v.z = v.z * rA + q2.v.z * rB;
+	       }
+	    }
+	    return ret;
+	 }
+				 
+	 /**
+	  * Gets string representation.
+	  */
+	 std::string toString() const
+	 {
+		 std::ostringstream oss;
+		 oss << *this;
+		 return oss.str();
+	 }
+   };
+
+   typedef Quaternion<float> Quatf;
+   typedef Quaternion<double> Quatd;
+   
+   
+   
+#ifdef VMATH_NAMESPACE
+}
+#endif
+
+#endif // __vmath_Header_File__
+```
+
+### Octree/fpgalink/libfpgalink.h
+```
+/* 
+ * Copyright (C) 2011 Chris McClelland
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *  
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/**
+ * @file libfpgalink.h
+ *
+ * The <b>FPGALink</b> library makes it easier to talk to an FPGA over USB (via a suitable micro).
+ *
+ * It performs three classes of function:
+ * - Load firmware into an FX2LP chip
+ * - Play an XSVF file into a JTAG chain
+ * - Communicate with a target device over USB
+ */
+#ifndef FPGALINK_H
+#define FPGALINK_H
+
+#include <makestuff.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+	// ---------------------------------------------------------------------------------------------
+	// Type declarations
+	// ---------------------------------------------------------------------------------------------
+	/**
+	 * @name Enumerations
+	 * @{
+	 */
+	/**
+	 * Return codes from the functions.
+	 */
+	typedef enum {
+		FL_SUCCESS = 0,   ///< The operation completed successfully.
+		FL_ALLOC_ERR,     ///< There was a memory allocation error.
+		FL_USB_ERR,       ///< There was some USB-related problem.
+		FL_PROTOCOL_ERR,  ///< The device is probably not a valid \b FPGALink device.
+		FL_SYNC_ERR,      ///< The library was unable to synchronise the device's bulk endpoints.
+		FL_FX2_ERR,       ///< There was some problem talking to the FX2 chip.
+		FL_JTAG_ERR,      ///< There was some problem with the \b NeroJTAG interface.
+		FL_FILE_ERR,      ///< There was a file-related problem.
+		FL_WBUF_ERR,      ///< There was some problem with the write buffer.
+		FL_INTERNAL_ERR   ///< An internal error occurred. Please report it!
+	} FLStatus;
+	//@}
+
+	struct FLContext;  // Opaque context type
+
+	// ---------------------------------------------------------------------------------------------
+	// Miscellaneous functions
+	// ---------------------------------------------------------------------------------------------
+	/**
+	 * @name Miscellaneous Functions
+	 * @{
+	 */
+	/**
+	 * @brief Initialise the library.
+	 */
+	DLLEXPORT(void) flInitialise(void);
+
+	/**
+	 * @brief Free an error allocated when one of the other functions fails.
+	 *
+	 * @param err An error message previously allocated by one of the other library functions.
+	 */
+	DLLEXPORT(void) flFreeError(const char *err);
+	//@}
+
+	// ---------------------------------------------------------------------------------------------
+	// Connection lifecycle functions
+	// ---------------------------------------------------------------------------------------------
+	/**
+	 * @name Connection Lifecycle
+	 * @{
+	 */
+	/**
+	 * @brief Open a connection to the \b FPGALink device at the specified VID & PID.
+	 *
+	 * Connects to the device and verifies it is an \b FPGALink device, then queries its
+	 * capabilities and synchronises the USB bulk endpoints.
+	 *
+	 * @param vp The Vendor/Product (i.e VVVV:PPPP) of the \b FPGALink device.
+	 * @param handle A pointer to a <code>struct FLContext*</code> which will be set on exit to
+	 *            point at a newly-allocated context structure. Responsibility for this allocated
+	 *            memory (and its associated USB resources) passes to the caller and must be freed
+	 *            with \c flClose().
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if all is well (\c *handle is valid).
+	 *     - \c FL_USB_ERR if the VID/PID is invalid or the device cannot be found or opened.
+	 *     - \c FL_PROTOCOL_ERR if the device is not an \b FPGALink device.
+	 *     - \c FL_SYNC_ERR if the bulk endpoint pairs cannot be synchronised.
+	 *     - \c FL_ALLOC_ERR if there was a memory allocation failure.
+	 */
+	DLLEXPORT(FLStatus) flOpen(
+		const char *vp, struct FLContext **handle, const char **error
+	) WARN_UNUSED_RESULT;
+
+	/**
+	 * @brief Close the connection to the \b FPGALink device.
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 */
+	DLLEXPORT(void) flClose(
+		struct FLContext *handle
+	);
+	//@}
+
+	// ---------------------------------------------------------------------------------------------
+	// Get device capabilities & status
+	// ---------------------------------------------------------------------------------------------
+	/**
+	 * @name Device Capabilities and Status
+	 * @{
+	 */
+	/**
+	 * @brief Check if the given device is actually connected to the system.
+	 *
+	 * The \b LibUSB devices in the system are searched for a device with the given VID/PID. On
+	 * Linux this will always work. On Windows it's necessary to install a \b LibUSB-Win32 driver
+	 * for the device beforehand.
+	 *
+	 * There is a short period of time following a call to \c flLoadStandardFirmware() or
+	 * \c flLoadCustomFirmware() during which this function will still return true for the
+	 * "current" VID/PID, so when you load new firmware, it's important to ensure that the "new"
+	 * VID/PID is different from the "current" VID/PID to avoid such false positives.
+	 *
+	 * @param vp The Vendor/Product (i.e VVVV:PPPP) of the \b FPGALink device.
+	 * @param isAvailable A pointer to an 8-bit integer which will be set on exit to 1 if available
+	 *            else 0.
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if all is well (\c *isAvailable is valid).
+	 *     - \c FL_USB_ERR if the VID/PID is invalid or if no USB buses were found (did you
+	 *            remember to call \c flInitialise()?).
+	 */
+	DLLEXPORT(FLStatus) flIsDeviceAvailable(
+		const char *vp, bool *isAvailable, const char **error
+	) WARN_UNUSED_RESULT;
+
+	/**
+	 * @brief Check to see if the device supports \b NeroJTAG.
+	 *
+	 * \b NeroJTAG is a simple JTAG-over-USB protocol, currently implemented for Atmel AVR and
+	 * Cypress FX2. It uses bulk endpoints 2 and 4. An affirmative response means you can call
+	 * \c flPlayXSVF() and \c flScanChain().
+	 *
+	 * This function merely returns a flag determined by \c flOpen(), so it cannot fail.
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 * @returns An 8-bit integer: 1 if the device supports NeroJTAG, else 0.
+	 */
+	DLLEXPORT(bool) flIsNeroCapable(struct FLContext *handle);
+
+	/**
+	 * @brief Check to see if the device supports \b CommFPGA.
+	 *
+	 * \b CommFPGA is a simple register read/write protocol using USB bulk endpoints 6 and 8. This
+	 * only returns whether the micro itself supports the protocol, not whether the target logic
+	 * device has been configured with a suitable design implementing the other end of the protocol.
+	 * An affirmative response means you are free to call \c flReadRegister(), \c flWriteRegister()
+	 * and \c flIsFPGARunning().
+	 *
+	 * This function merely returns a flag determined by \c flOpen(), so it cannot fail.
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 * @returns An 8-bit integer: 1 if the device supports \b CommFPGA, else 0.
+	 */
+	DLLEXPORT(bool) flIsCommCapable(struct FLContext *handle);
+	//@}
+
+	// ---------------------------------------------------------------------------------------------
+	// CommFPGA register read/write functions (only if flIsCommCapable() returns true)
+	// ---------------------------------------------------------------------------------------------
+	/**
+	 * @name CommFPGA Operations
+	 * @{
+	 */
+	/**
+	 * @brief Check to see if the FPGA is running.
+	 *
+	 * This may only be called if \c flIsCommCapable() returns true. It merely verifies that
+	 * the FPGA is asserting that it's ready to read. Before calling \c flIsFPGARunning(), you
+	 * should verify that the \b FPGALink device actually supports \b CommFPGA using
+	 * \c flIsCommCapable().
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 * @param isRunning A pointer to an 8-bit integer which will be set on exit to 1 if available
+	 *            else 0.
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if all is well (<code>*isRunning</code> is valid).
+	 *     - \c FL_PROTOCOL_ERR if the device does not support \b CommFPGA.
+	 *     - \c FL_USB_ERR if the device no longer responds.
+	 */
+	DLLEXPORT(FLStatus) flIsFPGARunning(
+		struct FLContext *handle, bool *isRunning, const char **error
+	) WARN_UNUSED_RESULT;
+
+	/**
+	 * @brief Read the specified register into the supplied buffer.
+	 *
+	 * Read \c count bytes from the FPGA register \c reg to the \c data array, with the given
+	 * \c timeout in milliseconds. In the event of a timeout, the connection between host and FPGA
+	 * will be left in an undefined state; before the two can resynchronise it's likely the FPGA
+	 * will need to be reset and the host side disconnected (\c flOpen()) and reconnected
+	 * (\c flClose()) again. Before calling \c flReadRegister(), you should verify that the
+	 * \b FPGALink device actually supports \b CommFPGA using \c flIsCommCapable().
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 * @param timeout The time to wait (in milliseconds) for the read to complete before giving up.
+	 * @param reg The FPGA register to read.
+	 * @param count The number of bytes to read.
+	 * @param buf The address of a buffer to store the bytes read from the FPGA.
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if the write completed successfully.
+	 *     - \c FL_PROTOCOL_ERR if the device does not support \b CommFPGA.
+	 *     - \c FL_USB_ERR if a USB error (including timeout) occurred.
+	 */
+	DLLEXPORT(FLStatus) flReadRegister(
+		struct FLContext *handle, uint32 timeout, uint8 reg, uint32 count, uint8 *buf,
+		const char **error
+	) WARN_UNUSED_RESULT;
+
+	/**
+	 * @brief Write the supplied data to the specified register.
+	 *
+	 * Write \c count bytes from the \c data array to FPGA register \c reg, with the given
+	 * \c timeout in milliseconds. In the event of a timeout, the connection between host and FPGA
+	 * will be left in an undefined state; before the two can resynchronise it's likely the FPGA
+	 * will need to be reset and the host side disconnected (\c flOpen()) and reconnected
+	 * (\c flClose()) again. Before calling \c flWriteRegister(), you should verify that the
+	 * \b FPGALink device actually supports \b CommFPGA using \c flIsCommCapable().
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 * @param timeout The time to wait (in milliseconds) for the write to complete before giving up.
+	 * @param reg The FPGA register to write.
+	 * @param count The number of bytes to write.
+	 * @param data The address of the array of bytes to be written to the FPGA.
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if the write completed successfully.
+	 *     - \c FL_PROTOCOL_ERR if the device does not support \b CommFPGA.
+	 *     - \c FL_USB_ERR if a USB error (including timeout) occurred.
+	 */
+	DLLEXPORT(FLStatus) flWriteRegister(
+		struct FLContext *handle, uint32 timeout, uint8 reg, uint32 count, const uint8 *data,
+		const char **error
+	) WARN_UNUSED_RESULT;
+
+	/**
+	 * @brief Append a write command to the end of the write buffer.
+	 *
+	 * The write buffer is like a notepad onto which one or more FPGA register write commands can be
+	 * written by calls to this function. The current state of the notepad can then be played in one
+	 * go (by \c flPlayWriteBuffer()) or written (by \c flFlashStandardFirmware()) to the FX2's
+	 * EEPROM for execution on power-on.
+	 *
+	 * You'll notice that apart from the lack of a \c timeout parameter, the signature of this
+	 * function is identical to that of \c flWriteRegister(), but rather than executing the write
+	 * immediately, it just appends the write command to the write buffer for playback later.
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 * @param reg The FPGA register to write.
+	 * @param count The number of bytes to write.
+	 * @param data The address of the array of bytes to be written to the FPGA.
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if the write command was successfully appended to the write buffer.
+	 *     - \c FL_ALLOC_ERR if there was a memory allocation failure.
+	 */
+	DLLEXPORT(FLStatus) flAppendWriteRegisterCommand(
+		struct FLContext *handle, uint8 reg, uint32 count, const uint8 *data, const char **error
+	) WARN_UNUSED_RESULT;
+
+	/**
+	 * @brief Play the write buffer into the \b FPGALink device immediately.
+	 *
+	 * Appending several small (i.e <10KiB) register writes to the write buffer and playing them in
+	 * one go is more efficient than making several calls to \c flWriteRegister().
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 * @param timeout The time to wait (in milliseconds) for the operation to complete before giving
+	 *            up.
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if the write buffer played successfully.
+	 *     - \c FL_WBUF_ERR if there was no write buffer.
+	 *     - \c FL_USB_ERR if a USB error (including timeout) occurred.
+	 */
+	DLLEXPORT(FLStatus) flPlayWriteBuffer(
+		struct FLContext *handle, uint32 timeout, const char **error
+	) WARN_UNUSED_RESULT;
+
+	/**
+	 * @brief Clean the write buffer (if any).
+	 * 
+	 * The write buffer is like a notepad onto which one or more FPGA register write commands can be
+	 * written (by \c flAppendWriteRegisterCommand()). The current state of the notepad can then be
+	 * played in one go (by \c flPlayWriteBuffer()) or written (by \c flFlashStandardFirmware()) to
+	 * the FX2's EEPROM for execution on power-on.
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 */
+	DLLEXPORT(void) flCleanWriteBuffer(
+		struct FLContext *handle
+	);
+	//@}
+
+	// ---------------------------------------------------------------------------------------------
+	// JTAG functions (only if flIsNeroCapable() returns true)
+	// ---------------------------------------------------------------------------------------------
+	/**
+	 * @name NeroJTAG Operations
+	 * @{
+	 */
+	/**
+	 * @brief Play an XSVF file into the JTAG chain.
+	 *
+	 * Play a Xilinx Serial Vector Format file into the JTAG chain. This is typically used for
+	 * programming devices. Before calling \c flPlayXSVF(), you should verify that the \b FPGALink
+	 * device actually supports \b NeroJTAG using \c flIsNeroCapable().
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 * @param xsvfFile An XSVF file (generated by Xilinx \b iMPACT).
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if the XSVF file played successfully.
+	 *     - \c FL_PROTOCOL_ERR if the device does not support \b NeroJTAG.
+	 *     - \c FL_FILE_ERR if the XSVF file could not be loaded.
+	 *     - \c FL_JTAG_ERR if an error occurred during the JTAG operation.
+	 *     - \c FL_ALLOC_ERR if there was a memory allocation failure.
+	 */
+	DLLEXPORT(FLStatus) flPlayXSVF(
+		struct FLContext *handle, const char *xsvfFile, const char **error
+	) WARN_UNUSED_RESULT;
+
+	/**
+	 * @brief Scan the JTAG chain and return an array of IDCODEs.
+	 *
+	 * Count the number of devices on the JTAG chain, and set \c *numDevices accordingly. Then, if
+	 * \c deviceArray is not \c NULL, populate it with at most \c arraySize IDCODEs, in chain order.
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 * @param numDevices A pointer to a \c uint32 which will be set on exit to the number of devices
+	 *            in the JTAG chain.
+	 * @param deviceArray A pointer to an array of \c uint32, which will be populated on exit with a
+	 *            list of IDCODEs in chain order. May be \c NULL, in which case the function returns
+	 *            after setting \c *numDevices.
+	 * @param arraySize The number of 32-bit IDCODE slots available in \c deviceArray.
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if the write completed successfully.
+	 *     - \c FL_PROTOCOL_ERR if the device does not support \b NeroJTAG.
+	 *     - \c FL_JTAG_ERR if an error occurred during the JTAG operation.
+	 */
+	DLLEXPORT(FLStatus) flScanChain(
+		struct FLContext *handle, uint32 *numDevices, uint32 *deviceArray, uint32 arraySize,
+		const char **error
+	) WARN_UNUSED_RESULT;
+	//@}
+
+	// ---------------------------------------------------------------------------------------------
+	// FX2 firmware functions
+	// ---------------------------------------------------------------------------------------------
+	/**
+	 * @name FX2 Firmware Operations
+	 * @{
+	 */
+	/**
+	 * @brief Load standard \b FPGALink firmware into the FX2's RAM.
+	 *
+	 * Load the FX2 chip at the "current" VID/PID with a precompiled firmware such that it will
+	 * renumerate as the "new" VID/PID. The firmware is loaded into RAM, so the change is not
+	 * permanent. Typically after calling \c flLoadStandardFirmware() applications should wait for
+	 * the renumeration to complete by calling \c flIsDeviceAvailable() repeatedly until the "new"
+	 * VID/PID becomes active.
+	 *
+	 * @param curVidPid The current Vendor/Product (i.e VVVV:PPPP) of the FX2 device.
+	 * @param newVidPid The Vendor/Product (i.e VVVV:PPPP) that you \b want the FX2 device to be.
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if the firmware loaded successfully.
+	 *     - \c FL_USB_ERR if one of the VID/PIDs was invalid or the current VID/PID was not found.
+	 *     - \c FL_FX2_ERR if there was a problem talking to the FX2.
+	 *     - \c FL_ALLOC_ERR if there was a memory allocation failure.
+	 */
+	DLLEXPORT(FLStatus) flLoadStandardFirmware(
+		const char *curVidPid, const char *newVidPid, const char **error
+	) WARN_UNUSED_RESULT;
+
+	/**
+	 * @brief Flash standard \b FPGALink firmware into the FX2's EEPROM, optionally appending an
+	 * XSVF initialisation stream and an FPGA initialisation stream.
+	 *
+	 * @warning This function will make permanent changes to your hardware. Remember to make a
+	 * backup copy of the existing EEPROM firmware with \c flSaveFirmware() before calling it.
+	 *
+	 * Load a precompiled firmware into the FX2's EEPROM such that it will enumerate on power-on as
+	 * the "new" VID/PID. If \c xsvfFile is not \c NULL, its contents are compressed and appended to
+	 * the end of the FX2 firmware, and played into the JTAG chain on power-on. If a write buffer
+	 * has been built (by calls to \c flAppendWriteRegisterCommand()), this will be appended to the
+	 * end of the XSVF data and played into the FPGA on power-on.
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 * @param newVidPid The Vendor/Product (i.e VVVV:PPPP) you want the FX2 to be on power-on.
+	 * @param eepromSize The size in kilobits of the EEPROM (e.g Nexys2's EEPROM is 128kbit).
+	 * @param xsvfFile An XSVF file to play on power-up, or \c NULL.
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if the firmware loaded successfully.
+	 *     - \c FL_USB_ERR if the VID/PID was invalid.
+	 *     - \c FL_FX2_ERR if there was a problem talking to the FX2, or the EEPROM was too small.
+	 *     - \c FL_ALLOC_ERR if there was a memory allocation failure.
+	 */
+	DLLEXPORT(FLStatus) flFlashStandardFirmware(
+		struct FLContext *handle, const char *newVidPid, uint32 eepromSize,
+		const char *xsvfFile, const char **error
+	) WARN_UNUSED_RESULT;
+
+	/**
+	 * @brief Load custom firmware (<code>.hex</code>) into the FX2's RAM.
+	 *
+	 * Load the FX2 chip at the given VID/PID with a <code>.hex</code> firmware file. The firmware
+	 * is loaded into RAM, so the change is not permanent.
+	 *
+	 * @param curVidPid The current Vendor/Product (i.e VVVV:PPPP) of the FX2 device.
+	 * @param fwFile A <code>.hex</code> file containing new FX2 firmware to be loaded into the
+                  FX2's RAM.
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if the firmware loaded successfully.
+	 *     - \c FL_USB_ERR if the VID/PID was invalid.
+	 *     - \c FL_FILE_ERR if the firmware file has a bad extension or could not be loaded.
+	 *     - \c FL_FX2_ERR if there was a problem talking to the FX2.
+	 *     - \c FL_ALLOC_ERR if there was a memory allocation failure.
+	 */
+	DLLEXPORT(FLStatus) flLoadCustomFirmware(
+		const char *curVidPid, const char *fwFile, const char **error
+	) WARN_UNUSED_RESULT;
+
+	/**
+	 * @brief Flash a custom firmware from a <code>.hex</code> or <code>.iic</code> file into the
+	 *            FX2's EEPROM.
+	 *
+	 * @warning This function will make permanent changes to your hardware. Remember to make a
+	 * backup copy of the existing EEPROM firmware with \c flSaveFirmware() before calling it.
+	 *
+	 * Load a custom firmware from a <code>.hex</code> or <code>.iic</code> file into the FX2's
+	 * EEPROM.
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 * @param fwFile A <code>.hex</code> or <code>.iic</code> file containing new FX2 firmware to be
+	 *            loaded into the FX2's EEPROM.
+	 * @param eepromSize The size in kilobits of the EEPROM (e.g Nexys2's EEPROM is 128kbit).
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if the firmware loaded successfully.
+	 *     - \c FL_FILE_ERR if the firmware file could not be loaded.
+	 *     - \c FL_FX2_ERR if there was a problem talking to the FX2, or if the EEPROM was too
+	 *            small.
+	 *     - \c FL_ALLOC_ERR if there was a memory allocation failure.
+	 */
+	DLLEXPORT(FLStatus) flFlashCustomFirmware(
+		struct FLContext *handle, const char *fwFile, uint32 eepromSize, const char **error
+	) WARN_UNUSED_RESULT;
+
+	/**
+	 * @brief Save existing EEPROM data to an <code>.iic</code> file.
+	 *
+	 * The existing EEPROM firmware is saved to a file, for backup purposes.
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 * @param eepromSize The size in kilobits of the EEPROM (e.g Nexys2's EEPROM is 128kbit).
+	 * @param saveFile An <code>.iic</code> file to save the EEPROM to.
+	 * @param error A pointer to a <code>char*</code> which will be set on exit to an allocated
+	 *            error message if something goes wrong. Responsibility for this allocated memory
+	 *            passes to the caller and must be freed with \c flFreeError(). If \c error is
+	 *            \c NULL, no allocation is done and no message is returned, but the return code
+	 *            will still be valid.
+	 * @returns
+	 *     - \c FL_SUCCESS if the firmware loaded successfully.
+	 *     - \c FL_FILE_ERR if the firmware file could not be loaded.
+	 *     - \c FL_FX2_ERR if there was a problem talking to the FX2.
+	 *     - \c FL_ALLOC_ERR if there was a memory allocation failure.
+	 */
+	DLLEXPORT(FLStatus) flSaveFirmware(
+		struct FLContext *handle, uint32 eepromSize, const char *saveFile, const char **error
+	) WARN_UNUSED_RESULT;
+	//@}
+
+	// ---------------------------------------------------------------------------------------------
+	// Utility functions
+	// ---------------------------------------------------------------------------------------------
+	/**
+	 * @name Utility Functions
+	 * @{
+	 */
+	/**
+	 * @brief Sleep for the specified number of milliseconds.
+	 * @param ms The number of milliseconds to sleep.
+	 */
+	DLLEXPORT(void) flSleep(
+		uint32 ms
+	);
+
+	/**
+	 * @brief Return a newly-allocated buffer with the specified file loaded into it.
+	 *
+	 * The specified file is queried for its length, that length is written to the \c length
+	 * parameter. Then a buffer of that length is allocated, and the file is loaded into it and a
+	 * pointer to the buffer returned. The responsibility for the buffer passes to the caller; it
+	 * must be freed later by a call to \c flFreeFile().
+	 *
+	 * @param name The name of the file to load.
+	 * @param length A pointer to a \c uint32 which will be populated on exit with the length of the
+	 *            file.
+	 * @returns A pointer to the allocated buffer, or NULL if the file could not be loaded.
+	 */
+	DLLEXPORT(uint8*) flLoadFile(
+		const char *name, uint32 *length
+	);
+
+	/**
+	 * @brief Free a buffer previously returned by \c flLoadFile().
+	 * @param buffer A buffer previously returned by \c flLoadFile().
+	 */
+	DLLEXPORT(void) flFreeFile(
+		uint8 *buffer
+	);
+
+	/**
+	 * @brief Access port lines on the microcontroller
+	 *
+	 * With this function you can set a 16-bit data direction register and write a 16-bit number to
+	 * the corresponding port lines. You can also optionally query the state of the port lines. The
+	 * actual physical ports used will differ from micro to micro.
+	 *
+	 * On the FX2LP, the low order bytes access port D (which is also used for JTAG, so only four
+	 * bits are actually available) and the high order bytes access port C (which is only available
+	 * on the larger FX2LP chips).
+	 *
+	 * On the AVR, the low order bytes access port B (which is also used for JTAG, so only four bits
+	 * are actually available) and the high order bytes access port D.
+	 *
+	 * @param handle The handle returned by \c flOpen().
+	 * @param portWrite Value to write to the port lines.
+	 * @param ddr Value to write to the DDR registers.
+	 * @param portRead Pointer to a \c uint16 to be populated with the value read back from the port
+	 *            lines. May be \c NULL if you're not interested.
+	 * @returns
+	 *     - \c FL_SUCCESS if the port access command completed successfully.
+	 *     - \c FL_USB_ERR if the micro failed to respond to the port access command.
+	 */
+	DLLEXPORT(FLStatus) flPortAccess(
+		struct FLContext *handle, uint16 portWrite, uint16 ddr, uint16 *portRead, const char **error
+	) WARN_UNUSED_RESULT;
+	//@}
+
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+```
+
+### Octree/fpgalink/makestuff.h
+```
+/*
+ * Copyright (C) 2009 Chris McClelland
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef MAKESTUFF_H
+#define MAKESTUFF_H
+
+#ifndef __cplusplus
+	#ifdef WIN32
+		typedef char bool;
+		enum {
+			false = 0,
+			true = 1
+		};
+	#else
+		#include <stdbool.h>
+	#endif
+#endif
+
+#ifdef WIN32
+	#define WARN_UNUSED_RESULT
+	#define DLLEXPORT(t) __declspec(dllexport) t __stdcall
+#else
+	#define WARN_UNUSED_RESULT __attribute__((warn_unused_result))
+	#define DLLEXPORT(t) t
+#endif
+
+#ifndef NULL
+	#define NULL ((void*)0)
+#endif
+
+typedef unsigned char      uint8;
+typedef unsigned short     uint16;
+#ifndef __cplusplus
+	typedef unsigned long long uint64;
+#endif
+
+typedef signed char        int8;
+typedef signed short       int16;
+
+#if (defined __AVR__ && defined __GNUC__) || defined SDCC
+	// The embedded platforms have sizeof(int) = 2, so use long
+	typedef signed long    int32;
+	typedef unsigned long  uint32;
+#else
+	// The i686 & x86_64 have sizeof(int) = 4
+	typedef signed int     int32;
+	typedef unsigned int   uint32;
+#endif
+
+#ifndef __cplusplus
+	typedef signed long long   int64;
+#endif
+
+typedef unsigned int       bitfield;
+
+#endif
+```

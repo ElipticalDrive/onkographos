@@ -1,0 +1,354 @@
+--- v003.md
++++ v004.md
+@@ -4,262 +4,112 @@
+ 
+ ## Overview
+-Segment Tracing is a ray marching algorithm for implicit surfaces that computes a local Lipschitz bound $\lambda(e)$ for each ray segment $e$ to determine safe, adaptive step sizes, significantly reducing field function queries compared to global bound methods [S1]. Unlike [Gradient-based Sphere Tracing with Lipschitz Constraints](1936-gradient-based-sphere-tracing-with-lipschitz-constraints.md) which uses gradient magnitude to estimate step size, Segment Tracing rigorously bounds the gradient of the deformed field and the Jacobian of the deformation map to guarantee no surface intersections are skipped, even under complex non-linear warping [S1].
++Segment Tracing is a ray marching algorithm that computes a local Lipschitz bound $\lambda(e)$ for each ray segment $e$ to determine safe, larger stepping distances, significantly reducing the number of field function queries compared to global bound methods like Sphere Tracing [S1]. It solves the problem of inefficient stepping near grazing surfaces and complex implicit structures by adapting the step size to the local geometry's smoothness, allowing for convergence in fewer steps while maintaining safety via an overstepping check [S2, S3, unofficial]. Unlike its siblings, it explicitly bounds the gradient and Jacobian of deformed fields to compute these local constraints [S1].
+ 
+ ## How it works
++**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, scalar field defined by a Blob Tree (or implicit surface model), scene bounding box.
++**Outputs:** Intersection point (or null), accumulated opacity/color.
+ 
+-### Inputs and Outputs
+-*   **Inputs**: A ray defined by origin $o$ and direction $d$; a scalar field defined by a Blob Tree (sum of primitives, potentially with deformation operators); scene bounding box [S2, unofficial].
+-*   **Outputs**: Intersection distance $t$, accumulated opacity $\alpha$, and accumulated color $C$ [S2, unofficial].
++**Data Structures:**
++*   `BlobTreeNode`: Base class for the implicit field hierarchy.
++    *   Fields: `Box box` (bounding box), `double k` (global Lipschitz constant).
++    *   Methods: `Intensity(p)`, `Gradient(p)`, `K()`, `K(Segment s)`.
++*   `BlobTreeBlend`: Inherits `BlobTreeNode`.
++    *   Fields: `BlobTreeNode* e[2]` (left and right children).
++    *   Methods: `Intensity` returns sum of children's intensity; `Gradient` returns sum of children's gradient; `K` returns sum of children's $K$.
++*   `BlobTreePoint`: Inherits `BlobTreeNode`.
++    *   Fields: `Vector c` (center), `double r` (radius), `double e` (energy/intensity).
++    *   Methods: `Intensity`, `K(Segment s)`.
++*   `Box`:
++    *   Fields: `Vector a` (min corner), `Vector b` (max corner).
++    *   Methods: `Inside(p)`, `Intersect(Ray)`, `Intersect(Box)`.
++*   `Segment`: Defined by endpoints $\mathbf{a}$ and $\mathbf{b}$.
+ 
+-### Data Structures
++**Parameters:**
++*   $\epsilon$: Small constant for numerical stability, $10^{-3}$ [S3, unofficial].
++*   $e_{over}$: Overstep factor, range $[1.0, 2.0]$, typically $1.0$ [S3, unofficial].
++*   $c_{acc}$: Acceleration factor for step size increase, typically $1.5$ [S3, unofficial].
++*   $\lambda$: Global Lipschitz bound of the inverse deformation $\omega^{-1}$, used for bounding sphere radius in deformed fields [S1].
+ 
+-**Blob Tree Node Hierarchy**
+-The scalar field is represented as a tree [S2, unofficial]. Two primary node types are defined in the reference implementation [S2, unofficial]:
++**Formulas:**
++1.  **Deformed Field Gradient:** For a warping $\omega$, the gradient is $\nabla f_W = \nabla f_N \circ \omega^{-1} \cdot \mathbf{J}_{\omega^{-1}}$ [S1].
++2.  **Lipschitz Bound Estimate:** $\|\nabla f_W\| \leq \|\nabla f_N \circ \omega^{-1}\| \cdot \|\mathbf{J}_{\omega^{-1}}\|$ [S1].
++3.  **Bounding Sphere Inclusion:** $\omega^{-1}(e) \subset S(\omega^{-1}(c), \lambda \|e\|/2)$, where $c$ is the segment center [S1].
++4.  **Jacobian Norm:** Computed as $\sqrt{\rho(\mathbf{J}_{\omega^{-1}} \mathbf{J}_{\omega^{-1}}^*)}$, where $\rho$ is the spectral radius. If difficult, use Frobenius norm $\|\mathbf{J}\|_F$ as a fallback [S1].
++5.  **Cubic Falloff Intensity:** $I(p) = (1 - \frac{\|p-c\|}{r})^3$ if $\|p-c\| < r$, else $0$ [S3, unofficial].
++6.  **Cubic Falloff Lipschitz Constant:** $K = 1.72 \frac{|e|}{r}$ for a point [S3, unofficial].
+ 
+-1.  **BlobTreePoint (Primitive)**
+-    *   `Vector c`: Center of the primitive.
+-    *   `double r`: Radius of the primitive.
+-    *   `double e`: Energy (intensity magnitude).
+-    *   `Box box`: Axis-aligned bounding box enclosing the primitive.
+-    *   `double k`: Precomputed global Lipschitz constant for this primitive.
++**Algorithm Steps:**
+ 
+-2.  **BlobTreeBlend (Composite)**
+-    *   `BlobTreeNode* e[2]`: Pointers to left and right child nodes.
+-    *   `Box box`: Bounding box of the union of children.
+-    *   `double k`: Global Lipschitz constant (sum of children's $k$).
++1.  **Initialization:**
++    *   Compute scene bounding box $\mathcal{B}$ using `BlobTree::GetBox()` [S3, unofficial].
++    *   Intersect ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ with $\mathcal{B}$ to find $t_{min}$ and $t_{max}$ [S3, unofficial]. If no intersection, terminate [S3, unofficial].
++    *   Set current position $t = t_{min}$ [S3, unofficial].
++    *   Initialize accumulated opacity $\alpha = 0$ and color $C = 0$ [S3, unofficial].
++    *   Set initial step size $t_s = t_{max} - t_{min}$ (full box depth) [S3, unofficial].
++    *   Set previous step size $t_e = 0.0$ [S3, unofficial].
++    *   Set overstep factor $c_e = e_{over} - 1.0$ (typically $0.0$ if $e_{over}=1.0$) [S3, unofficial].
+ 
+-**Box**
+-*   `Vector a`: Minimum corner.
+-*   `Vector b`: Maximum corner.
++2.  **Marching Loop:**
++    While $t < t_{max}$ and $\alpha < 1.0$:
++    *   **Evaluate Field:** Compute intensity $i = \text{Tree}.\text{Intensity}(\mathbf{r}(t))$ [S3, unofficial].
++    *   **Intersection Check:** If $i > 0.0$ (or surface threshold), return intersection [S3, unofficial].
++    *   **Compute Local Lipschitz Constant:** Calculate $K$ for the segment from $t$ to $t + t_s$ using `Tree.K(Segment(t, t + t_s))` [S3, unofficial].
++        *   For deformed fields, this involves finding the bounding sphere $S$ of the deformed segment and querying the subtree for $\|\nabla f_N(S)\|$ and $\|\mathbf{J}_{\omega^{-1}}\|$ [S1].
++    *   **Calculate Safe Step:** Compute tentative step $t_k = |i| / K$ [S3, unofficial].
++        *   *Note:* In density-based rendering, $K$ bounds the gradient of the density field. If $K=0$, step size is limited by $t_s$ or a maximum value [G].
++    *   **Clamp Step:** $t_k = \min(t_k, t_s)$ [S3, unofficial].
++    *   **Update Max Step:** $t_s = t_k$ [S3, unofficial].
++    *   **Overstepping Safety Check:**
++        *   If $t_k < c_e \cdot t_e$: The previous step was too large relative to the local bound.
++        *   Backtrack: $t = t - c_e \cdot t_e$ [S3, unofficial].
++        *   Reset: $t_e = 0.0$ [S3, unofficial].
++        *   Continue to next iteration (re-evaluate at new $t$) [S3, unofficial].
++    *   **Advance Ray:**
++        *   Update previous step: $t_e = \max(t_k \cdot e_{over}, \epsilon)$ [S3, unofficial].
++        *   Advance position: $t = t + t_e$ [S3, unofficial].
++    *   **Accumulate (Volume Rendering):**
++        *   Compute segment length $dt = t_e$ [S3, unofficial].
++        *   Compute density $\sigma$ from intensity $i$ (e.g., $\sigma = i$ or derived via falloff) [S3, unofficial].
++        *   Compute opacity: $\alpha_{seg} = 1 - \exp(-\sigma \cdot dt)$ [S3, unofficial].
++        *   Update accumulated opacity: $\alpha = 1 - (1 - \alpha)(1 - \alpha_{seg})$ [G].
++        *   Update color: $C = C + \text{Color}(p) \cdot \alpha_{seg} \cdot (1 - \alpha)$ [G].
++    *   **Acceleration:**
++        *   Attempt to increase future step size: $t_s = t_k \cdot c_{acc}$ [S3, unofficial].
+ 
+-**Segment**
+-*   Defined by endpoints $a$ and $b$ (vectors). Used to compute local bounds [S2, unofficial].
++3.  **Termination:**
++    *   If $t \geq t_{max}$, return no intersection (or background color) [S3, unofficial].
+ 
+-### Formulas
++**Optimized Bisection (for root finding):**
++If finding the exact intersection surface rather than volume rendering:
++*   Given segment $e=[a,b]$ with center $c$ and bound $\lambda(e)$:
++*   If $|f(c)| / \lambda(e) > \|e\|$, the segment does not intersect the surface [S1].
++*   Shrink interval to $[e_a, e_b]$ where $e_a = a + |f(a)|/\lambda(e)$ and $e_b = b - |f(b)|/\lambda(e)$ [S1].
+ 
+-**1. Deformed Field Gradient**
+-For a warping function $\omega: \mathbb{R}^3 \to \mathbb{R}^3$ deforming space, the field function is $f_W = f_N \circ \omega^{-1}$ [S1]. The gradient is:
+-$$ \nabla f_W = \nabla(f_N \circ \omega^{-1}) = \nabla f_N \circ \omega^{-1} \cdot \mathbf{J}_{\omega^{-1}} $$
+-where $\mathbf{J}_{\omega^{-1}}$ is the Jacobian matrix of the inverse deformation [S1].
++**Pitfalls:**
++*   **Jacobian Computation:** Computing the spectral norm of the Jacobian is difficult. Use the Frobenius norm as a fallback, which is less accurate but easier to compute [S1].
++*   **Uniform Fields:** For objects with uniform primitive distribution and uniform Lipschitz bounds (e.g., Chess king, Amphora), the overhead of computing $\lambda(e)$ can make Segment Tracing slower than Sphere Tracing. Use Ray or Sphere variations instead [S1].
++*   **Ray-Box Intersection:** If a ray direction component is near zero (parallel to slab), handle carefully to avoid division by zero or incorrect intersection tests [S3, unofficial].
++*   **BVH Degeneracy:** If partitioning places all elements on one side, adjust `midIndex` to `(begin + end) / 2` to ensure recursion progresses [S3, unofficial].
+ 
+-**2. Lipschitz Bound Estimation**
+-The local Lipschitz bound $\lambda(e)$ for a segment $e$ is estimated by bounding the gradient norm and the Jacobian norm:
+-$$ \|\nabla(f_N \circ \omega^{-1})\| \leq \|\nabla f_N \circ \omega^{-1}\| \cdot \|\mathbf{J}_{\omega^{-1}}\| $$
+-Two bounds must be computed for segment $e$: the bound of the gradient norm $\|\nabla(f_N \circ \omega^{-1})(e)\|$ and the bound of the Jacobian norm $\|\mathbf{J}_{\omega^{-1}}(e)\|$ [S1].
++## Subtopics
+ 
+-**3. Gradient Bound via Bounding Sphere**
+-To bound the gradient over the deformed segment $\omega^{-1}(e)$, a bounding sphere $S$ is computed such that $S \supset \omega^{-1}(e)$ [S1]. Let $\lambda$ be the global Lipschitz bound of $\omega^{-1}$ and $c$ be the segment center [S1]. The inclusion property is:
+-$$ \omega^{-1}(e) \subset \mathbf{S}(\omega^{-1}(c), \lambda \|e\|/2) $$
+-The upper bound is then:
+-$$ \sup \|\nabla f_N \circ \omega^{-1}(e)\| \leq \sup \|\nabla f_N(S)\| $$
+-This allows bounding the gradient by recursively querying the sub-tree for the sphere $S$, which is simpler than evaluating the curve $\omega^{-1}(e)$ directly [S1].
+-
+-**4. Jacobian Norm**
+-The Euclidean norm of the Jacobian is the square root of the spectral radius of $\mathbf{J}_{\omega^{-1}} \mathbf{J}_{\omega^{-1}}^*$:
+-$$ \|\mathbf{J}_{\omega^{-1}}\| = \sqrt{\rho(\mathbf{J}_{\omega^{-1}} \mathbf{J}_{\omega^{-1}}^*)} $$
+-In the general case where spectral norm computation is difficult, the Frobenius norm is used as a fallback:
+-$$ \|\mathbf{J}_{\omega^{-1}}\| \leq \|\mathbf{J}_{\omega^{-1}}\|_F = \sqrt{\sum_{i,j} (\mathbf{J}_{\omega^{-1}})_{ij}^2} $$
+-This is less accurate but easier to compute [S1].
+-
+-**5. Intersection Rejection Criterion**
+-For a segment $e=[a,b]$ with center $c$, the segment does not intersect the surface if:
+-$$ \frac{|f(c)|}{\lambda(e)} > \|e\| $$
+-This allows early rejection in binary search bisection [S1].
+-
+-**6. Optimized Bisection**
+-Instead of equal halves, the interval $e=[a,b]$ is shrunk to $[e_a, e_b]$ where:
+-$$ e_a = a + \frac{|f(a)|}{\lambda(e)}, \quad e_b = b - \frac{|f(b)|}{\lambda(e)} $$
+-This discards parts of the interval guaranteed to be free of intersections [S1].
+-
+-### Parameters
+-*   $\epsilon$: Small constant for numerical stability, defined as $10^{-3}$ [S2, unofficial].
+-*   $e_{overstep}$: Overstep factor, range $[1.0, 2.0]$. Implementation uses $1.0$ [S2, unofficial].
+-*   $c_{accel}$: Acceleration factor for step size increase. Implementation uses $1.5$ [S2, unofficial].
+-*   $\lambda$: Global Lipschitz bound of $\omega^{-1}$, used for bounding sphere radius [S1].
+-
+-### Pseudocode
+-
+-```python
+-def SegmentTracing(ray_o, ray_d, blob_tree, box_min, box_max):
+-    # 1. Intersect with scene bounding box
+-    t_min, t_max = box_min.Intersect(ray_o, ray_d)
+-    if t_min is None:
+-        return False, 0.0, 0.0, 0.0
+-
+-    t = t_min
+-    alpha = 0.0
+-    color = [0.0, 0.0, 0.0]
+-    step_count = 0
+-    ts = t_max - t_min  # initial max step size (full bbox depth)
+-    te = 0.0            # previous step size
+-    overstep_e = 1.0    # e parameter
+-    ce = overstep_e - 1.0  # = 0.0 per implementation
+-    accel_c = 1.5       # c parameter
+-    epsilon = 1e-3
+-
+-    while t < t_max and alpha < 1.0:
+-        step_count += 1
+-        p = ray_o + t * ray_d
+-        intensity = blob_tree.Intensity(p)
+-        if intensity > 0.0:
+-            return True, t, alpha, color
+-
+-        seg_start = ray_o + t * ray_d
+-        seg_end = ray_o + (t + ts) * ray_d
+-        segment = Segment(seg_start, seg_end)
+-
+-        K = blob_tree.K(segment)
+-        if K == 0.0:
+-            tk = ts
+-        else:
+-            tk = abs(intensity) / K
+-            tk = min(tk, ts)
+-
+-        ts = tk
+-
+-        if tk < ce * te:
+-            t = t - ce * te
+-            te = 0.0
+-            continue
+-
+-        te = max(tk * overstep_e, epsilon)
+-        t = t + te
+-
+-        ts = tk * accel_c
+-
+-        # Volume accumulation
+-        sigma = max(0.0, intensity - 0.5) # offset from intensity
+-        alpha_seg = 1.0 - exp(-sigma * te)
+-        color += alpha_seg * (1.0 - alpha) * [1.0, 1.0, 1.0]
+-        alpha += alpha_seg * (1.0 - alpha)
+-
+-    return False, t, alpha, color
+-
+-def Norm(v):
+-    return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+-
+-def SquaredNorm(v):
+-    return v[0]**2 + v[1]**2 + v[2]**2
+-
+-def Dot(u, v):
+-    return u[0]*v[0] + u[1]*v[1] + u[2]*v[2]
+-
+-def Normalize(v):
+-    n = Norm(v)
+-    if n == 0.0: return [0.0, 0.0, 0.0]
+-    return [x/n for x in v]
+-
+-class Segment:
+-    def __init__(self, start, end):
+-        self.start = start
+-        self.end = end
+-    def GetBox(self):
+-        return Box(Min(self.start, self.end), Max(self.start, self.end))
+-    def Intersect(self, box):
+-        b = box.GetBox()
+-        for i in range(3):
+-            if self.start[i] > b.b[i] or self.end[i] < b.a[i]:
+-                return False
+-        return True
+-
+-class Box:
+-    def __init__(self, a, b):
+-        self.a = a
+-        self.b = b
+-    def GetBox(self):
+-        return self
+-    def Intersect(self, ray_o, ray_d):
+-        t_min, t_max = -float('inf'), float('inf')
+-        for i in range(3):
+-            if abs(ray_d[i]) < 1e-6:
+-                if ray_o[i] < self.a[i] or ray_o[i] > self.b[i]:
+-                    return None, None
+-            else:
+-                t1 = (self.a[i] - ray_o[i]) / ray_d[i]
+-                t2 = (self.b[i] - ray_o[i]) / ray_d[i]
+-                t_min = max(t_min, min(t1, t2))
+-                t_max = min(t_max, max(t1, t2))
+-        if t_min > t_max:
+-            return None, None
+-        return t_min, t_max
+-
+-def Min(a, b):
+-    return [min(a[i], b[i]) for i in range(3)]
+-
+-def Max(a, b):
+-    return [max(a[i], b[i]) for i in range(3)]
+-
+-def BlobTreePoint_K(segment, c, r, e):
+-    a = segment.start
+-    b = segment.end
+-    if not segment.Intersect(Box([c[i]-r for i in range(3)], [c[i]+r for i in range(3)])):
+-        return 0.0
+-    axis = Normalize(b - a)
+-    l = Dot(c - a, axis)
+-    kk = 0.0
+-    if l < 0.0:
+-        kk = CubicFalloffK(SquaredNorm(c - a), SquaredNorm(c - b), r, e)
+-    elif Norm(b - a) < l:
+-        kk = CubicFalloffK(SquaredNorm(c - b), SquaredNorm(c - a), r, e)
+-    else:
+-        dd = SquaredNorm(c - a) - (l * l)
+-        kk = CubicFalloffK(dd, max(SquaredNorm(c - b), SquaredNorm(c - a)), r, e)
+-    grad_factor = max(abs(Dot(axis, Normalize(c - a))), abs(Dot(axis, Normalize(c - b))))
+-    return kk * grad_factor
+-
+-def CubicFalloffK(a_sq, b_sq, R, s):
+-    R_sq = R * R
+-    if a_sq > R_sq:
+-        return 0.0
+-    if b_sq < (R_sq / 5.0):
+-        t = 1.0 - b_sq / R_sq
+-        return abs(s) * 6.0 * (b_sq**0.5 / R_sq) * (t * t)
+-    elif a_sq > (R_sq / 5.0):
+-        t = 1.0 - a_sq / R_sq
+-        return abs(s) * 6.0 * (a_sq**0.5 / R_sq) * (t * t)
+-    else:
+-        return 1.72 * abs(s) / R
+-```
+-
+-### Edge Cases and Pitfalls
+-1.  **Spectral Norm Computation**: Computing the exact spectral norm of the Jacobian is difficult. Use the Frobenius norm as a fallback [S1].
+-2.  **Uniform Distribution**: For objects with uniform primitive distribution and uniform Lipschitz bounds (e.g., Chess king, Amphora, Mechanic), the overhead of computing $\lambda(e)$ makes Segment Tracing slower than Sphere Tracing. Use Ray or Sphere variations instead [S1].
+-3.  **Degenerate BVH Partition**: If `std::partition` places all elements on one side during BVH construction, adjust `midIndex` to `(begin + end) / 2` to ensure recursion progresses [S2, unofficial].
+-4.  **Ray Parallel to Slab**: In `Box::Intersect`, if a ray direction component $d[i]$ is near zero ($|d[i]| < \epsilon$), the ray is parallel to the slab. If the origin is outside the slab, return no intersection [S2, unofficial].
+-5.  **Segment-BVH Culling**: `BlobTreeBlend::K` checks if the segment's bounding box intersects the node's box. If not, return 0 [S2, unofficial].
++### Local Lipschitz Bound Computation for Density Segments
++A variant for volume rendering of neural implicit surfaces where the Lipschitz constant $K_i$ of density $\sigma$ within segment $[t_i, t_{i+1}]$ is bounded using distance information. The bound satisfies $K_i \leq \frac{\alpha}{2\beta} \exp\left(-\frac{d_i^*}{\beta}\right)$, where $d_i^*$ is a lower distance bound to the surface. $d_i^*$ is computed based on distances $|d_i|$ and $|d_{i+1}|$ at segment endpoints and segment length $\delta_i$: if $|d_i| + |d_{i+1}| \leq \delta_i$, $d_i^*=0$; if $|d_i|^2 - |d_{i+1}|^2 \geq \delta_i^2$, $d_i^* = \min\{|d_i|, |d_{i+1}|\}$; otherwise $d_i^* = h_i$ (Heron's formula variant) [S4, unofficial].
+ 
+ ## Operating characteristics
+-
+-### Time and Memory Complexity
+-*   **Time**: The algorithm reduces field function queries by one to two orders of magnitude for complex models compared to global Sphere Tracing [S1]. However, the computation of $\lambda(e)$ adds overhead per step [S1].
+-*   **Memory**: Preserves the compact format of hierarchical implicit surface models (Blob Trees). Does not require additional memory structures like voxel grids [S1].
+-
+-### Measured Performance
+-*   **CPU**: On Intel Core i7 3GHz, Segment Tracing reduced queries significantly for Chandelier and Temple models [S1].
+-*   **GPU**: On nVidia GeForce 2070, Segment Tracing achieved 67 Hz vs 6 Hz for standard Sphere Tracing, an acceleration factor close to an order of magnitude [S1].
+-
+-### Strengths and Limitations
+-*   **Strengths**: Significantly fewer field function queries for complex, non-linear deformations. Safe stepping guaranteed by local bounds [S2, unofficial].
+-*   **Limitations**: Overhead of computing $\lambda(e)$ can negate benefits for simple or uniformly distributed primitives. Computation of Jacobian norms can be costly if spectral norm is required [S1].
+-
+-### When to Use
+-*   Use for complex implicit surfaces with non-linear deformations (warping) where global bounds are too conservative [S1].
+-*   Avoid for simple, uniformly distributed primitives where Ray or Sphere variations are faster [S1].
++*   **Time Complexity:** Depends on the cost of evaluating $\lambda(e)$. For complex deformed fields, computing the bounding sphere and traversing the tree adds overhead per step. However, the number of field function queries is reduced by one to two orders of magnitude for complex models [S1].
++*   **Memory Complexity:** Similar to Sphere Tracing, as it uses the same hierarchical data structures (Blob Tree/BVH) without additional large buffers [S1].
++*   **Performance:** On an nVidia GeForce 2070, Segment Tracing achieved 67 Hz rendering speed compared to 6 Hz for standard Sphere Tracing, an acceleration factor close to an order of magnitude [S1]. On CPU (Intel Core i7 3GHz), it reduced field function queries significantly for models like Chandelier and Temple [S1].
++*   **Strengths:** Dramatically reduces step count for grazing surfaces and complex implicit structures. Preserves compact format of hierarchical models.
++*   **Limitations:** Overhead of local bound computation can negate benefits for uniform fields or simple primitives. Computing spectral norms is expensive; Frobenius norm fallback reduces accuracy.
++*   **When to use:** Complex implicit surfaces, deformed fields, grazing angles.
++*   **When not to use:** Uniform primitive distributions, simple primitives where global bounds are tight, or when hardware limits prevent efficient tree traversal.
+ 
+ ## Background
+-
+-### Origin
+-Segment Tracing was introduced by Eric Galin, Eric Guérin, Axel Paris, and Adrien Peytavie in 2020 in the paper "Segment Tracing Using Local Lipschitz Bounds" published in *Computer Graphics Forum* [S2, unofficial].
+-
+-### History and Development
+-The method builds upon Sphere Tracing and Lipschitz-constrained ray marching [S2, unofficial]. It specifically addresses the inefficiency of global Lipschitz bounds in the presence of local variations in field complexity and deformation [S1]. The technique is particularly effective for blob trees with deformation operators (e.g., tapering) [S1].
+-
+-### Applications
+-*   Rendering complex implicit surfaces defined by blob trees [S2, unofficial].
+-*   Volume rendering using scalar fields defined by cubic falloff primitives [S2, unofficial].
+-*   Global illumination secondary ray intersections where field function query cost is critical [S1].
++Segment Tracing was introduced by Eric Galin, Eric Guérin, Axel Paris, and Adrien Peytavie in 2020 in the paper "Segment Tracing Using Local Lipschitz Bounds" published in Computer Graphics Forum [S1][S3, unofficial]. It builds on the concept of using Lipschitz continuity to bound function changes, extending it from global bounds (Sphere Tracing) to local bounds computed over segments. The method addresses the inefficiency of Sphere Tracing near silhouettes and backward-facing surfaces by adapting step sizes to local geometry [S2, S3, unofficial].
+ 
+ ## Sources
+-
+ [S1] Segment Tracing Using Local Lipschitz Bounds, https://doi.org/10.1111/cgf.13951, fetched 2026-10-26
+-[S2] aparis69/Segment-Tracing, https://github.com/aparis69/Segment-Tracing, fetched 2026-10-27 (unofficial)+[S2] Understanding segment tracing - the faster alternative to ..., https://www.reddit.com/r/GraphicsProgramming/comments/1jhcd6m/understanding_segment_tracing_the_faster/, fetched 2026-10-27 (unofficial)
++[S3] aparis69/Segment-Tracing, https://github.com/aparis69/Segment-Tracing, fetched 2026-10-27 (unofficial)
++[S4] Volume Rendering of Neural Implicit Surfaces, https://doi.org/10.48550/arxiv.2106.12052, fetched 2026-10-26 (unofficial)

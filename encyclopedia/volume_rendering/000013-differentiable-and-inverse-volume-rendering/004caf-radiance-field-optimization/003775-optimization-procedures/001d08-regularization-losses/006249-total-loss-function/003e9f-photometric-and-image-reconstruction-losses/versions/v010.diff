@@ -1,0 +1,240 @@
+--- v009.md
++++ v010.md
+@@ -1,207 +1,48 @@
+ # Photometric and Image Reconstruction Losses
+ 
+-Also called: Image Reconstruction Losses, Photometric Losses
++Also called: Photometric Loss, Image Reconstruction Loss, RGB Loss
+ 
+ ## Overview
+-This family defines the primary error metrics used to supervise the optimization of radiance field representations by comparing rendered images against ground-truth observations. It solves the problem of aligning the synthesized view with the input data, serving as the foundational term in the total loss function. It sets itself apart from sibling regularization methods (e.g., [Total Variation Loss](7047-total-variation-loss.md), [Numerical Gradient Eikonal Loss](9954-numerical-gradient-eikonal-loss.md)) by focusing exclusively on pixel-space or perceptual fidelity rather than geometric or structural constraints on the latent representation.
++This family of methods supervises the optimization of radiance fields and volumetric representations by minimizing the pixel-wise difference between rendered images $\mathbf{I}_r$ and ground-truth reference images $\mathbf{I}_{gt}$. It solves the fundamental inverse problem of ensuring visual fidelity, serving as the primary term in the total loss function [Parent](4177-total-loss-function.md). Unlike sibling methods that focus on regularization [Total Variation Loss](7047-total-variation-loss.md) or geometric constraints [Sparse Depth Consistency Loss](7294-sparse-depth-consistency-loss.md), this family focuses exclusively on appearance accuracy, often combining L1, SSIM, and perceptual metrics to balance local detail and global structure.
+ 
+ ## Shared principles
+-All methods in this family compute a scalar loss value $\mathcal{L}$ derived from the difference between a rendered image $\mathbf{I}_r$ (or $\tilde{I}$) and a ground-truth reference image $\mathbf{I}_{gt}$ (or $I$). The core mechanism involves a differentiable comparison operator applied to pixel colors, often weighted by hyperparameters $\lambda$. The general structure is:
+-$$ \mathcal{L}_{\text{photo}} = \text{Metric}(\mathbf{I}_r, \mathbf{I}_{gt}) $$
+-Common metrics include L1, L2, SSIM, and perceptual losses. These terms are typically combined with regularization losses in the total loss function [S1, S2, S3, S4, S6, S7].
++All methods in this family compute a scalar loss $\mathcal{L}_{\text{photo}}$ derived from the comparison of $\mathbf{I}_r$ and $\mathbf{I}_{gt}$. The core mechanism involves:
++1.  **Pixel-wise Error:** Calculating the difference between corresponding pixels in the rendered and ground-truth images.
++2.  **Metric Combination:** Often combining multiple metrics (e.g., L1 for intensity, SSIM for structure) to mitigate the blurriness associated with pure L2/L1 losses.
++3.  **Weighting:** Applying scalar hyperparameters to balance the contribution of different metrics or to handle specific artifacts (e.g., saturation, occlusion).
++
++The general form is:
++$$ \mathcal{L}_{\text{photo}} = \sum_k w_k \mathcal{M}_k(\mathbf{I}_r, \mathbf{I}_{gt}) $$
++where $\mathcal{M}_k$ is a specific metric (L1, SSIM, LPIPS, etc.) and $w_k$ is its weight.
+ 
+ ## Subtopics
+ 
+ ### [Composite Image Loss with Visibility Weighting](4262-composite-image-loss-with-visibility-weighting.md)
+-This method defines the composite image reconstruction loss $\mathcal{L}_c$ used to train radiance field models (specifically SuRFNet) by combining pixel-wise, structural, and perceptual errors, weighted by a visibility map to handle partial or noisy input data. It sets itself apart from standard photometric losses by explicitly masking unreliable regions (e.g., occlusions, missing views, or noise) via the visibility map $V_M$ before computing L1 and SSIM terms, while applying the perceptual loss to the full rendered image.
+-
+-**Inputs and Outputs:**
+-*   **Inputs:** Rendered image $\mathbf{I}_r$, ground-truth reference image $\mathbf{I}_{gt}$, visibility map $V_M$ (same spatial dimensions as images, values in $[0,1]$ or $\{0,1\}$), and regularization losses $\mathcal{L}_{sc}$ (sampling coordinate) and $\mathcal{L}_{vm}$ (visibility map).
+-*   **Outputs:** Composite image loss $\mathcal{L}_c$ and total loss $\mathcal{L}$.
+-
+-**Data Structures:**
+-*   $V_M$: A 2D tensor (or array) where each element $V_M(\mathbf{r})$ indicates the reliability of pixel $\mathbf{r}$.
+-*   $\mathbf{I}_r, \mathbf{I}_{gt}$: 2D tensors of pixel colors (RGB).
+-
+-**Parameters:**
+-*   $\lambda_1 = 0.8$: Weight for L1 loss.
+-*   $\lambda_{SSIM} = 0.2$: Weight for SSIM loss.
+-*   $\lambda_{LPIPS} = 0.005$: Weight for LPIPS loss.
+-*   $\lambda_{sc} = 0.001$: Weight for sampling coordinate regularization.
+-*   $\lambda_{vm} = 0.15$: Weight for visibility map regularization.
+-
+-**Steps:**
+-1.  **Visibility Masking:** Compute the masked rendered and ground-truth images using the Hadamard product:
+-    $$ \mathbf{I}_r^M = V_M \odot \mathbf{I}_r $$
+-    $$ \mathbf{I}_{gt}^M = V_M \odot \mathbf{I}_{gt} $$
+-2.  **L1 Loss:** Calculate the mean absolute error between masked images:
+-    $$ \mathcal{L}_1 = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \| \mathbf{I}_r^M(\mathbf{r}) - \mathbf{I}_{gt}^M(\mathbf{r}) \|_1 $$
+-3.  **SSIM Loss:** Calculate the Structural Similarity Index loss between masked images. Note that $\mathcal{L}_{SSIM}$ is typically $1 - \text{SSIM}$:
+-    $$ \mathcal{L}_{SSIM} = 1 - \text{SSIM}(\mathbf{I}_r^M, \mathbf{I}_{gt}^M) $$
+-4.  **LPIPS Loss:** Calculate the Learned Perceptual Image Patch Similarity loss between the *unmasked* rendered and ground-truth images:
+-    $$ \mathcal{L}_{LPIPS} = \text{LPIPS}(\mathbf{I}_r, \mathbf{I}_{gt}) $$
+-5.  **Composite Image Loss:** Combine the terms:
+-    $$ \mathcal{L}_c = \lambda_1 \mathcal{L}_1 + \lambda_{SSIM} \mathcal{L}_{SSIM} + \lambda_{LPIPS} \mathcal{L}_{LPIPS} $$
+-6.  **Total Loss:** Add regularization terms (details of $\mathcal{L}_{sc}$ and $\mathcal{L}_{vm}$ are defined in their respective regularization articles, referenced here as):
+-    $$ \mathcal{L} = \mathcal{L}_c + \lambda_{sc} \mathcal{L}_{sc} + \lambda_{vm} \mathcal{L}_{vm} $$
+-
+-**Pseudocode:**
+-```python
+-def compute_composite_image_loss(I_r, I_gt, V_M, L_sc, L_vm):
+-    """
+-    Computes the composite image loss L_c and total loss L.
+-    
+-    Args:
+-        I_r: Rendered image tensor [H, W, C]
+-        I_gt: Ground truth image tensor [H, W, C]
+-        V_M: Visibility map tensor [H, W] (values 0 or 1)
+-        L_sc: Sampling coordinate regularization loss (scalar)
+-        L_vm: Visibility map regularization loss (scalar)
+-        
+-    Returns:
+-        L_c: Composite image loss (scalar)
+-        L: Total loss (scalar)
+-    """
+-    # Parameters
+-    lambda_1 = 0.8
+-    lambda_ssim = 0.2
+-    lambda_lpips = 0.005
+-    lambda_sc = 0.001
+-    lambda_vm = 0.15
+-    
+-    # Step 1: Mask images
+-    I_r_masked = V_M.unsqueeze(-1) * I_r  # Broadcasting V_M to [H, W, C]
+-    I_gt_masked = V_M.unsqueeze(-1) * I_gt
+-    
+-    # Step 2: L1 Loss on masked images
+-    # Mean absolute error over all pixels and channels
+-    L1 = torch.mean(torch.abs(I_r_masked - I_gt_masked))
+-    
+-    # Step 3: SSIM Loss on masked images
+-    # Assuming a function ssim_loss that returns 1 - SSIM
+-    L_ssim = ssim_loss(I_r_masked, I_gt_masked)
+-    
+-    # Step 4: LPIPS Loss on unmasked images
+-    # Assuming a function lpips_loss that uses a pre-trained VGG network
+-    L_lpips = lpips_loss(I_r, I_gt)
+-    
+-    # Step 5: Composite Image Loss
+-    L_c = (lambda_1 * L1) + (lambda_ssim * L_ssim) + (lambda_lpips * L_lpips)
+-    
+-    # Step 6: Total Loss
+-    L = L_c + (lambda_sc * L_sc) + (lambda_vm * L_vm)
+-    
+-    return L_c, L
+-```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Visibility Map Definition:** The visibility map $V_M$ must accurately reflect which pixels are reliable. If $V_M$ is not provided or incorrectly computed (e.g., masking valid geometry), the L1 and SSIM terms will ignore useful supervision signals.
+-*   **LPIPS Masking:** The LPIPS term is applied to unmasked images. This ensures perceptual quality is optimized globally, even in regions where pixel-wise intensity might be unreliable.
+-*   **Gradient Flow:** The Hadamard product with $V_M$ is differentiable. Ensure $V_M$ is not treated as a constant mask that blocks gradients entirely if it is learned; however, in SuRFNet, $V_M$ is typically derived from geometric consistency or input availability.
++This method computes a composite photometric loss $\mathcal{L}_c$ by weighting pixel-wise errors with a visibility map $\mathbf{V}_M$ [Child](4262-composite-image-loss-with-visibility-weighting.md). It sets itself apart by explicitly masking unreliable pixels (e.g., due to occlusion or incomplete geometry) for L1 and SSIM terms, while leaving the perceptual LPIPS term unmasked to preserve global texture [Child](4262-composite-image-loss-with-visibility-weighting.md).
++*   **Formula:** $\mathcal{L}_c = \lambda_1 \mathcal{L}_1(\mathbf{V}_M \odot \mathbf{I}_r, \mathbf{V}_M \odot \mathbf{I}_{gt}) + \lambda_{SSIM} \mathcal{L}_{SSIM}(\mathbf{V}_M \odot \mathbf{I}_r, \mathbf{V}_M \odot \mathbf{I}_{gt}) + \lambda_{LPIPS} \mathcal{L}_{LPIPS}(\mathbf{I}_r, \mathbf{I}_{gt})$ [Child](4262-composite-image-loss-with-visibility-weighting.md).
++*   **Parameters:** $\lambda_1=0.8, \lambda_{SSIM}=0.2, \lambda_{LPIPS}=0.005$ [Child](4262-composite-image-loss-with-visibility-weighting.md).
++*   **When to choose:** Use when rendering involves significant occlusion, transparency, or incomplete geometry where standard pixel-wise comparison would penalize valid but occluded pixels.
+ 
+ ### [Composite Photometric and Regularization Loss](9355-composite-photometric-and-regularization-loss.md)
+-This method defines the total training objective for differentiable volume rendering by aggregating a photometric reconstruction term with optional regularization terms to prevent overfitting and ensure physical plausibility. It builds on [Photometric and Image Reconstruction Losses](9789-photometric-and-image-reconstruction-losses.md) by providing the specific weighted-sum structure $\mathcal{L} = \mathcal{L}_{\text{photo}} + \sum_k \lambda_k \mathcal{L}_{\text{reg}, k}$ used across various radiance field optimization pipelines. Unlike sibling methods that may focus on visibility weighting or specific single-domain constraints, this composite approach is characterized by its modular inclusion of diverse regularizers (e.g., Total Variation, Eikonal, Compactness) tailored to the specific representation (voxels, Gaussians, SDFs) and task (HDR, dynamic, inverse rendering).
++This method defines the composite objective function balancing photometric fidelity against geometric and structural regularization [Child](9355-composite-photometric-and-regularization-loss.md). It differs from the parent by explicitly integrating regularization terms (e.g., Total Variation, Eikonal, Compactness) to constrain the solution space, preventing overfitting to noise [Child](9355-composite-photometric-and-regularization-loss.md).
++*   **Formula:** $\mathcal{L} = \mathcal{L}_{\text{photo}} + \sum_k \lambda_k \mathcal{L}_{\text{reg}, k}$ [Child](9355-composite-photometric-and-regularization-loss.md).
++*   **Variants:** Includes Voxel-based TV [Child](9355-composite-photometric-and-regularization-loss.md), Triangle Splatting Size Regularization [Child](9355-composite-photometric-and-regularization-loss.md), and SDF Eikonal Loss [Child](9355-composite-photometric-and-regularization-loss.md).
++*   **When to choose:** Use when optimizing complex representations (voxels, Gaussians, SDFs) where geometric plausibility is as important as visual appearance.
+ 
+-The method computes a scalar loss $\mathcal{L}$ by combining a photometric term $\mathcal{L}_{\text{photo}}$ with regularization terms $\mathcal{L}_{\text{reg}, k}$. The specific components and their formulas depend on the rendering representation and task, as detailed in the subtopics below.
++### Composite RGB and Entropy Loss
++This variant combines L1 and SSIM losses with an entropy regularization term on the foreground accumulated alpha value $\mathbf{O}_{\text{fg}}$ [S1].
++*   **Formula:** $\mathcal{L} = (1-\lambda_r)\mathcal{L}_1 + \lambda_r\mathcal{L}_{\text{ssim}} + \lambda_e\mathcal{L}_{\text{entropy}}$ [S1].
++*   **Entropy Term:** $\mathcal{L}_{\text{entropy}} = -\sum (\mathbf{O}_{\text{fg}}\log \mathbf{O}_{\text{fg}} + (1-\mathbf{O}_{\text{fg}})\log (1-\mathbf{O}_{\text{fg}}))$ [S1].
++*   **Parameters:** $\lambda_r=0.2, \lambda_e=0.1$ [S1].
++*   **Purpose:** Encourages opaque rendering by penalizing alpha values close to 0.5 [S1].
+ 
+-### Inputs and Outputs
+-*   **Inputs:**
+-    *   Rendered image/patch $\tilde{I}$ or $\mathbf{C}_r$ (from the differentiable renderer).
+-    *   Ground-truth image/patch $I$ or $\mathbf{C}_{gt}$.
+-    *   Scene parameters: Voxel grid values (opacity $\sigma$, SH coefficients), Gaussian parameters (position, scale $\mathbf{s}$, opacity $\alpha$), SDF values $S$, material parameters.
+-    *   Camera parameters and ray set $\mathcal{R}$.
+-    *   Optional: Saturation masks $M_i$, CRF functions $g_i$, flow fields $\mathbf{V}_{flow}$.
+-*   **Outputs:**
+-    *   Scalar loss value $\mathcal{L}$ for backpropagation.
+-
+-### Data Structures
+-*   **Ray Set $\mathcal{R}$:** Collection of rays sampled for the current batch.
+-*   **Voxel Grid:** 3D array storing density $\sigma$ and color features (e.g., SH coefficients).
+-*   **Gaussian Primitives:** List of objects with attributes: position $\mathbf{p}$, scale $\mathbf{s} \in \mathbb{R}^3$, opacity $\alpha$, rotation $\mathbf{q}$, color coefficients.
+-*   **SDF Field:** Neural network or grid representing signed distance function $S(\mathbf{x})$.
+-
+-### General Form
+-$$ \mathcal{L} = \mathcal{L}_{\text{photo}} + \sum_k \lambda_k \mathcal{L}_{\text{reg}, k} $$
+-
+-### Photometric Terms (Examples)
+-The photometric term varies by source:
+-1.  **LDR Reconstruction with Saturation Masking [S1]:**
+-    $$ \mathcal{L}_{\text{recon}} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} M_i(\mathbf{r}) \| I_i(\Pi_i(\mathbf{r})) - \mathcal{T}(\hat{C}(\mathbf{r})) \|_2^2 $$
+-    where $\Pi_i$ is camera projection, $\mathcal{T}$ is tone mapping, and $M_i$ masks saturated pixels.
+-2.  **Dual-Grid Photometric Loss [S2]:**
+-    $$ \mathcal{L}_{\text{photo}} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \| \mathbf{C}_{\text{Inp}}(\mathbf{r}) - \mathbf{C}_{\text{gt}}(\mathbf{r}) \|_2^2 + \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \| \mathbf{C}_{\text{Up}}(\mathbf{r}) - \mathbf{C}_{\text{gt}}(\mathbf{r}) \|_2^2 $$
+-    where $\mathbf{C}_{\text{Inp}}$ is rendered from an inpainted grid and $\mathbf{C}_{\text{Up}}$ from an up-sampled grid.
+-3.  **L1 + D-SSIM [S3]:**
+-    $$ \mathcal{L}_{\text{photo}} = (1 - \lambda)\mathcal{L}_1 + \lambda\mathcal{L}_{\text{D-SSIM}} $$
+-4.  **Perceptual Loss [S4]:**
+-    $$ \mathcal{L}_{\text{rgb}} = \| \tilde{I}_P - I_P \|_2^2 + \| F_{\text{vgg}} (\tilde{I}_P) - F_{\text{vgg}} (I_P) \|_2^2 $$
+-5.  **Multi-scale L2 + SSIM [S6]:**
+-    $$ \mathcal{L}_{\text{photo}} = L_2(\text{pyramid}(\hat{I}), \text{pyramid}(I)) + (1 - \text{SSIM}(\hat{I}, I)) $$
+-6.  **Compact 3DGS [S7]:**
+-    $$ \mathcal{L}_{\text{photo}} = (1-\lambda_D)L_1 + \lambda_D L_{D-SSIM} $$
+-
+-### Regularization Terms (Examples)
+-1.  **Total Variation (TV) [S1, S2]:**
+-    $$ \mathcal{L}_{\text{TV}}(V) = \frac{1}{|\mathcal{V}|} \sum_{\mathbf{v} \in \mathcal{V}, d \in [D]} \sqrt{\Delta_x^2(\mathbf{v}, d) + \Delta_y^2(\mathbf{v}, d) + \Delta_z^2(\mathbf{v}, d) + \epsilon} $$
+-    Applied to opacity $\sigma$, SH coefficients, flow fields, or depth $D$.
+-2.  **Smoothness Loss (CRF) [S1]:**
+-    $$ \mathcal{L}_{\text{smooth}} = \sum_{i=1}^N \sum_{e \in [0,1]} g_i''(e)^2 $$
+-3.  **Opacity/Background Entropy [S2]:**
+-    $$ \mathcal{L}_{\text{bg}} \quad \text{(Background entropy loss)} $$
+-4.  **Static Motion Prior [S2]:**
+-    $$ \mathcal{L}_{\text{flow}} = \| \mathbf{V}_{\text{flow}}^{\text{Can}} \|_1 $$
+-5.  **Inpainting Difference [S2]:**
+-    $$ \mathcal{L}_{\text{vdiff}} = \| \mathbf{V}_{\text{R}_{\text{Inp}}}^t - \mathbf{V}_{\text{R}_{\text{Up}}}^t \|_1 $$
+-6.  **Eikonal Loss [S6]:**
+-    $$ \mathcal{L}_{\text{eikonal}} = \| \nabla_x S - 1 \|_2^2 $$
+-7.  **Roughness Range Loss [S6]:**
+-    Encourages estimated roughness to stay below 0.5. Formula not explicitly provided, referred to as Eq. 13 in source [S6].
+-8.  **Triangle Size Regularization [S3]:**
+-    $$ \mathcal{L}_s = 2 \| (\mathbf{v}_1 - \mathbf{v}_0) \times (\mathbf{v}_2 - \mathbf{v}_0) \|^{-1} $$
+-    where $\mathbf{v}_i$ are vertices sampled from the unit sphere scaled by distance $d$ and centered at point $\mathbf{q}$: $\mathbf{v}_i = \mathbf{q} + k \cdot d \cdot \mathbf{u}_i$.
+-9.  **Gaussian Volume Regularization [S7]:**
+-    $$ \mathcal{L}_{\text{vol}} = \frac{1}{|\mathcal{G}|} \sum_i \prod_{j=1}^3 s_{i,j} $$
+-10. **Gaussian Opacity Regularization [S7]:**
+-    $$ \mathcal{L}_{\text{op}} = \frac{1}{|\mathcal{G}|} \sum_i \alpha_i $$
+-11. **Scaling Regularization [S5, unofficial]:**
+-    $$ \mathcal{L}_{\text{scaling}}(i) = \begin{cases} |\hat{s}_i|, & \hat{s}_i > \max(T_s, T_r \tilde{s}_i) \\ 0, & \text{otherwise} \end{cases} $$
+-    where $\hat{s}_i$ is max scaling, $\tilde{s}_i$ is min scaling, $T_s$ is length threshold, $T_r$ is thinness ratio.
+-
+-### Parameters
+-*   **Weights:** $\lambda_k$ are hyperparameters balancing the terms. Typical values:
+-    *   $\lambda_{\text{TV}, \sigma} = 5 \cdot 10^{-4}$, $\lambda_{\text{TV}, \text{SH}} = 1 \cdot 10^{-2}$, $\lambda_{\text{smooth}} = 1 \cdot 10^{-3}$ [S1].
+-    *   $\lambda_D = 0.2$ (D-SSIM weight) [S7].
+-    *   $\lambda_s = \lambda_o = 0.01$ (Compactness weights) [S7].
+-    *   $w_1 \sim w_7$ balance components in dynamic scene loss [S2].
+-    *   $\beta_1, \beta_2, \beta_3, \beta_4$ balance opacity, distortion, normal, and size losses [S3].
+-    *   $\lambda_1, \lambda_2$ balance Eikonal and roughness losses [S6].
+-*   **Thresholds:** $T_s$ (length threshold), $T_r$ (thinness ratio) [S5, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Saturation Masking:** In HDR pipelines, failing to mask saturated pixels leads to incorrect gradient signals [S1].
+-*   **Background Mixing:** For monocular setups, generating a random background color every iteration helps provide silhouette cues [S5, unofficial].
+-*   **Scaling Regularization:** Applied only when a Gaussian is both long ($\hat{s}_i > T_s$) and thin ($\hat{s}_i > T_r \tilde{s}_i$) [S5, unofficial].
+-
+-#### Composite RGB and Entropy Loss
+-
+-### formula
+-- [S1] $\mathcal {L}_{\mathrm {rgb}}=\left (1-\lambda _r\right ) \mathcal {L}_1+\lambda _r \mathcal {L}_{\mathrm {ssim}}$ where $\mathcal{L}_1$ is L1 loss, $\mathcal{L}_{\mathrm{ssim}}$ is SSIM loss, and $\lambda_r$ is the weight.
+-- [S1] $\mathcal {L}_{\text {entropy}}=-\sum \left (\mathbf {O}_{\text {fg}}\log \mathbf {O}_{\text {fg}}+\left (1-\mathbf {O}_{\text {fg}}\right ) \log \left (1-\mathbf {O}_{\text {fg}}\right )\right )$ where $\mathbf{O}_{\text{fg}}$ is the foreground accumulated alpha value.
+-- [S1] $\mathcal {L}=\left (1-\lambda _r\right ) \mathcal {L}_1+\lambda _r \mathcal {L}_{\mathrm {ssim}}+\lambda _e \mathcal {L}_{\text {entropy}}$ where $\lambda_e$ is the entropy loss weight.
+-
+-### parameter
+-- [S1] $\lambda_r$: Weight for SSIM loss in RGB loss. Value: 0.2.
+-- [S1] $\lambda_e$: Weight for entropy loss. Value: 0.1.
+-
+-#### Batch-Wise Rendering Loss Rescaling
+-
+-### definition
+-- [S2] A technique to rescale the rendering loss during single-stage training and test-time reconstruction to keep its overall magnitude invariant to the batch size of rays, ensuring consistent gradient magnitudes regardless of how many rays are sampled per pass.
+-
+-### formula
+-- [S2] $L_{rend}(\{x_i\}, \psi) = \mathbb{E}_{i} \left[ \frac{1}{|B_{ray}|} \sum_{j \in B_{ray}} \frac{1}{N_{ray}^i} (y_{ij}^{gt} - y_{\psi}(x_i, r_{ij}))^2 \right]$, where $N_{ray}^i$ is the total number of observed rays of the $i$-th scene, $|B_{ray}|$ is the batch size of rays, $y_{ij}^{gt}$ is the ground truth, and $y_{\psi}$ is the rendered value.
++### Batch-Wise Rendering Loss Rescaling
++A technique to rescale the rendering loss during single-stage training and test-time reconstruction to keep its overall magnitude invariant to the batch size of rays [S2].
++*   **Formula:** $L_{rend}(\{x_i\}, \psi) = \mathbb{E}_{i} \left[ \frac{1}{|B_{ray}|} \sum_{j \in B_{ray}} \frac{1}{N_{ray}^i} (y_{ij}^{gt} - y_{\psi}(x_i, r_{ij}))^2 \right]$ [S2].
++*   **Variables:** $N_{ray}^i$ is the total number of observed rays of the $i$-th scene, $|B_{ray}|$ is the batch size of rays [S2].
++*   **Purpose:** Ensures consistent gradient magnitudes regardless of how many rays are sampled per pass [S2].
+ 
+ ## Background
+-The use of photometric losses is standard in differentiable rendering and inverse graphics. The specific combination of L1, SSIM, and entropy regularization for Gaussian Splatting variants is detailed in [S1]. The concept of rescaling rendering loss based on batch size and total observation count to maintain gradient stability in single-stage training is introduced in [S2].
++Photometric loss is the standard supervision signal in differentiable rendering. Early works like MVSNeRF [S2] used L2 loss, while later methods incorporated SSIM [S1] and LPIPS [Child](4262-composite-image-loss-with-visibility-weighting.md) to improve perceptual quality. The integration of entropy loss [S1] and visibility weighting [Child](4262-composite-image-loss-with-visibility-weighting.md) addresses specific challenges in urban view synthesis and occlusion handling.
+ 
+ ## Sources

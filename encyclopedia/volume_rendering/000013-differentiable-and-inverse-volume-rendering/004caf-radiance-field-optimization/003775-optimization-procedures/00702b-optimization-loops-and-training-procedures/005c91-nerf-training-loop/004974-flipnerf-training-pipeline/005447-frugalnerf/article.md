@@ -1,0 +1,414 @@
+# FrugalNeRF
+
+Also called: FrugalNeRF
+
+## Overview
+FrugalNeRF is a few-shot NeRF framework designed to synthesize novel views from extremely sparse inputs (e.g., 2 views) without relying on learned external priors [S1]. It solves the problems of overfitting and long training times inherent in extreme few-shot scenarios by leveraging weight-sharing voxels across multiple scales and a cross-scale geometric adaptation scheme [S1]. Unlike methods that require complex scheduling or pre-trained models, FrugalNeRF uses reprojection errors to select pseudo-ground truth depth, enabling fast convergence and robust regularization [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A small set of training views (typically 2) with known camera parameters, and optionally COLMAP-generated sparse point clouds [S1].
+*   **Outputs:** A neural radiance field represented by multi-scale voxels, capable of rendering novel views [S1].
+
+**Data Structures:**
+The scene is represented by a pair of voxels: density ($V_D$) and appearance ($V_A$) [S1].
+*   **Base Voxel:** A single high-resolution voxel grid serves as the base [S1].
+*   **Multi-scale Voxels:** $L+1$ scales are constructed by hierarchical subsampling of the base voxel with a downsample ratio $s=4$ [S1].
+    *   $L=2$ is the typical setting, resulting in 3 total scales (LL, L, H) [S1].
+    *   Lower resolutions capture global geometry; higher resolutions capture fine details [S1].
+    *   Weights are shared across scales, meaning the higher-resolution voxels are subsampled versions of the base, ensuring consistent scene representation without increasing model size [S1].
+*   **Voxel Resolution:**
+    *   $640^3$ for LLFF and RealEstate10K datasets [S1].
+    *   $300^3$ for DTU dataset [S1].
+
+**Numbered Steps:**
+
+1.  **Ray Sampling:**
+    *   Sample rays from training views ($r_{train}$) [S1].
+    *   Sample rays from randomly generated novel views ($r_{novel}$) along a spiral trajectory around the training views [S1].
+    *   Batch size: 4,096 rays for both training and novel view rays [S1].
+    *   Number of novel poses: 120 [S1].
+
+2.  **Multi-scale Volume Rendering:**
+    *   For each ray $r$, compute rendered RGB color $\hat{C}_l(r)$ and depth $\hat{D}_l(r)$ at each scale $l \in \{0, \dots, L\}$ using the corresponding subsampled voxels $V_{D,l}$ and $V_{A,l}$ [S1].
+
+3.  **Cross-Scale Geometric Adaptation (Training Views):**
+    *   For each pixel $p_i$ in a training view $i$:
+        *   Compute depth $\hat{D}_l(p_i)$ at each scale $l$ [S1].
+        *   Lift $p_i$ to 3D point $x^l_i$ using intrinsic $K_i$ and depth $\hat{D}_l(p_i)$ [S1].
+        *   Transform $x^l_i$ to world coordinates, then to the nearest training view $j$ to find projected coordinate $p_{l \to j}$ [S1].
+        *   Calculate reprojection error $e_l(p_i)$:
+            $$ e_l(p_i) = C_i(p_i) - C_j(p_{l \to j}) $$
+            where $C_i, C_j$ are input RGB images [S1].
+        *   Identify optimal scale $l'$:
+            $$ l'(r_{train}) = \arg \min_l e_l(r_{train}) $$
+        *   Set pseudo-ground truth depth:
+            $$ D'(r_{train}) = \hat{D}_{l'}(r_{train}) $$
+        *   **Pitfall/Guard:** If the reprojection error exceeds a threshold of 0.5, the pixel is excluded from loss computation to ensure robustness [S1].
+
+4.  **Cross-Scale Geometric Adaptation (Novel Views):**
+    *   For each ray $r_{novel}$ from a novel view $n$ at pixel $p_n$:
+        *   Compute rendered color $\hat{C}_n(p_n)$ [S1].
+        *   Warp to nearest training view $j$ to find $p_{l \to j}$ [S1].
+        *   Calculate reprojection error using rendered color instead of input RGB:
+            $$ e_l(p_n) = \hat{C}_n(p_n) - C_j(p_{l \to j}) $$
+        *   Identify optimal scale $l'$:
+            $$ l'(r_{novel}) = \arg \min_l e_l(r_{novel}) $$
+        *   Set pseudo-ground truth depth:
+            $$ D'(r_{novel}) = \hat{D}_{l'}(r_{novel}) $$
+
+5.  **Loss Computation:**
+    *   **Multi-scale Color Loss ($L_{ms-color}$):** MSE between rendered RGB and input RGB for training rays at all scales:
+        $$ L_{ms-color} = \sum_{l=0}^{L} \sum_{r_{train} \in R_{train}} \| \hat{C}_l(r_{train}) - C(r_{train}) \|_2^2 $$
+        [S1]
+    *   **Geometric Adaptation Loss ($L_{geo}$):** MSE between rendered depth and pseudo-ground truth depth for both training and novel rays:
+        $$ L_{geo}(r_{train}) = \sum_{l=0}^{L} \| \hat{D}_l(r_{train}) - D'(r_{train}) \|_2^2 $$
+        $$ L_{geo}(r_{novel}) = \sum_{l=0}^{L} \| \hat{D}_l(r_{novel}) - D'(r_{novel}) \|_2^2 $$
+        $$ L_{geo} = L_{geo}(r_{train}) + L_{geo}(r_{novel}) $$
+        [S1]
+    *   **Global Regularization Loss ($L_{reg}$):** Includes total variation, patch-wise depth smoothness, L1 sparsity, and distortion losses to suppress floaters and background collapse [S1].
+    *   **Sparse Depth Loss ($L_{sd}$):** Uses COLMAP-generated sparse point cloud for absolute scale constraints [S1].
+    *   **Dense Depth Loss ($L_d$):** (Optional) Uses Dense Prediction Transformer (DPT) to generate depth maps from training views [S1].
+
+6.  **Total Loss:**
+    $$ L = L_{ms-color} + \lambda_{geo} L_{geo} + \lambda_{reg} L_{reg} + \lambda_{sd} L_{sd} + \lambda_{d} L_{d} $$
+    [S1]
+
+7.  **Optimization:**
+    *   Use Adam optimizer [S1].
+    *   Initial learning rate: 0.08, decaying to 0.002 [S1].
+    *   Iterations: 5,000 per scene [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def frugal_nerf_training_loop(training_views, novel_view_count=120, iterations=5000, 
+                              voxel_res=640, L=2, downsample_ratio=4, 
+                              lambda_geo=0.01, lambda_sd=0.5, lambda_d=0.01,
+                              reprojection_threshold=0.5):
+    """
+    FrugalNeRF Training Loop.
+    
+    Args:
+        training_views: List of training view data (RGB images, camera intrinsics/extrinsics).
+        novel_view_count: Number of novel views to sample.
+        iterations: Number of training iterations.
+        voxel_res: Base voxel resolution.
+        L: Number of scales minus 1 (e.g., L=2 means 3 scales).
+        downsample_ratio: Ratio for subsampling voxels.
+        lambda_geo: Weight for geometric adaptation loss.
+        lambda_sd: Weight for sparse depth loss.
+        lambda_d: Weight for dense depth loss.
+        reprojection_threshold: Threshold for excluding unreliable reprojection errors.
+        
+    Returns:
+        Trained voxel models (V_D, V_A).
+    """
+    
+    # 1. Initialize Multi-scale Voxels
+    # Base voxels for density and appearance
+    V_D = torch.nn.Parameter(torch.randn(voxel_res, voxel_res, voxel_res, 1))
+    V_A = torch.nn.Parameter(torch.randn(voxel_res, voxel_res, voxel_res, 3))
+    
+    # Create L+1 scales by hierarchical subsampling
+    scales = []
+    current_res = voxel_res
+    for i in range(L + 1):
+        # Downsample by ratio s=4 at each step
+        # Note: In practice, this is done via strided convolution or pooling
+        # Here we assume a helper function for subsampling
+        V_D_l = subsample(V_D, current_res, downsample_ratio)
+        V_A_l = subsample(V_A, current_res, downsample_ratio)
+        scales.append((V_D_l, V_A_l))
+        current_res = current_res // downsample_ratio
+        
+    optimizer = torch.optim.Adam([V_D, V_A], lr=0.08)
+    
+    # Optional: Load sparse point cloud for L_sd
+    sparse_points = load_colmap_sparse_points(training_views)
+    
+    # Optional: Load DPT depth maps for L_d
+    dense_depth_maps = load_dpt_depths(training_views)
+    
+    for step in range(iterations):
+        optimizer.zero_grad()
+        
+        # 2. Sample Rays
+        # Sample rays from training views
+        r_train, C_train = sample_rays_from_views(training_views, batch_size=4096)
+        
+        # Sample rays from novel views (spiral trajectory)
+        r_novel, C_novel_gt = sample_novel_views(training_views, count=novel_view_count, batch_size=4096)
+        # Note: C_novel_gt is not used for loss, only for evaluation or if using teacher forcing (not standard here)
+        
+        # 3. Volume Rendering at All Scales
+        # Render RGB and Depth for training rays
+        C_hat_train = []
+        D_hat_train = []
+        for l in range(L + 1):
+            V_D_l, V_A_l = scales[l]
+            C_hat, D_hat = volume_render(V_D_l, V_A_l, r_train)
+            C_hat_train.append(C_hat)
+            D_hat_train.append(D_hat)
+            
+        # Render RGB and Depth for novel rays
+        C_hat_novel = []
+        D_hat_novel = []
+        for l in range(L + 1):
+            V_D_l, V_A_l = scales[l]
+            C_hat, D_hat = volume_render(V_D_l, V_A_l, r_novel)
+            C_hat_novel.append(C_hat)
+            D_hat_novel.append(D_hat)
+            
+        # 4. Compute Multi-scale Color Loss (Training Views)
+        L_ms_color = 0
+        for l in range(L + 1):
+            # MSE between rendered and input RGB
+            L_ms_color += F.mse_loss(C_hat_train[l], C_train)
+            
+        # 5. Cross-Scale Geometric Adaptation
+        # For Training Views
+        L_geo_train = 0
+        for l in range(L + 1):
+            # Calculate reprojection error
+            # Warp view i to nearest view j using depth D_hat[l]
+            # This requires camera parameters from training_views
+            # p_l_to_j is the projected coordinate in frame j
+            # e_l = C_i - C_j(p_l_to_j)
+            
+            # Helper: get reprojection error mask and error values
+            # Returns: valid_mask, error_values
+            valid_mask, error_values = compute_reprojection_error(
+                r_train, training_views, C_hat_train[l], D_hat_train[l]
+            )
+            
+            # Find optimal scale l' for each pixel
+            # l' = argmin_l(e_l)
+            # We need to aggregate errors across scales to find l'
+            # Note: The paper defines l' per pixel based on min error across l
+            # So we first compute all e_l, then find min
+            
+            # Aggregate errors for all scales to find l'
+            # error_values shape: (batch, H, W) for each l
+            # We need to stack them to find argmin
+            pass # Implementation detail: stack errors across l to find l'
+            
+        # Simplified logic for L_geo based on paper description:
+        # 1. Compute e_l for all l.
+        # 2. Find l' = argmin_l(e_l).
+        # 3. D' = D_hat[l'].
+        # 4. L_geo = MSE(D_hat[l'], D').
+        
+        # Let's implement the aggregation properly
+        all_errors_train = []
+        all_depths_train = []
+        for l in range(L + 1):
+            valid_mask, error_values = compute_reprojection_error(
+                r_train, training_views, C_hat_train[l], D_hat_train[l]
+            )
+            all_errors_train.append(error_values)
+            all_depths_train.append(D_hat_train[l])
+            
+        # Stack errors: (L, batch, H, W)
+        all_errors_train_stacked = torch.stack(all_errors_train, dim=0)
+        
+        # Find optimal scale index l' for each pixel
+        # argmin along dim 0
+        l_prime_train = torch.argmin(all_errors_train_stacked, dim=0)
+        
+        # Gather depths at l'
+        # D' = D_hat[l']
+        # This requires gathering from all_depths_train using l_prime_train
+        D_prime_train = gather_depths(all_depths_train, l_prime_train)
+        
+        # Compute L_geo for training views
+        # Only for pixels where error < threshold
+        # First, find min error for each pixel
+        min_error_train = torch.min(all_errors_train_stacked, dim=0).values
+        valid_mask_train = min_error_train < reprojection_threshold
+        
+        # Masked MSE
+        L_geo_train = F.mse_loss(
+            D_hat_train[l_prime_train] * valid_mask_train, 
+            D_prime_train * valid_mask_train
+        )
+        
+        # For Novel Views
+        L_geo_novel = 0
+        all_errors_novel = []
+        all_depths_novel = []
+        for l in range(L + 1):
+            # Warp novel view n to nearest training view j
+            # Use rendered color C_hat_novel[l] instead of input RGB
+            valid_mask, error_values = compute_reprojection_error_novel(
+                r_novel, training_views, C_hat_novel[l], D_hat_novel[l]
+            )
+            all_errors_novel.append(error_values)
+            all_depths_novel.append(D_hat_novel[l])
+            
+        all_errors_novel_stacked = torch.stack(all_errors_novel, dim=0)
+        l_prime_novel = torch.argmin(all_errors_novel_stacked, dim=0)
+        D_prime_novel = gather_depths(all_depths_novel, l_prime_novel)
+        
+        min_error_novel = torch.min(all_errors_novel_stacked, dim=0).values
+        valid_mask_novel = min_error_novel < reprojection_threshold
+        
+        L_geo_novel = F.mse_loss(
+            D_hat_novel[l_prime_novel] * valid_mask_novel, 
+            D_prime_novel * valid_mask_novel
+        )
+        
+        L_geo = L_geo_train + L_geo_novel
+        
+        # 6. Global Regularization Loss
+        L_reg = compute_global_regularization(V_D, V_A)
+        
+        # 7. Sparse Depth Loss
+        L_sd = compute_sparse_depth_loss(V_D, sparse_points)
+        
+        # 8. Dense Depth Loss (Optional)
+        L_d = 0
+        if dense_depth_maps is not None:
+            L_d = compute_dense_depth_loss(V_D, dense_depth_maps)
+            
+        # 9. Total Loss
+        L_total = L_ms_color + lambda_geo * L_geo + lambda_reg * L_reg + lambda_sd * L_sd + lambda_d * L_d
+        
+        # 10. Backpropagation
+        L_total.backward()
+        optimizer.step()
+        
+        # Decay learning rate
+        adjust_learning_rate(optimizer, step, initial_lr=0.08, final_lr=0.002, total_iters=iterations)
+
+def subsample(voxel, res, ratio):
+    """
+    Subsample voxel by ratio.
+    """
+    # Assuming voxel is (res, res, res, channels)
+    # Use strided convolution or pooling
+    # For density (1 channel) and appearance (3 channels)
+    if voxel.shape[-1] == 1:
+        # Use avg pooling for density
+        kernel = ratio
+        stride = ratio
+        # Add batch and channel dims for pooling
+        voxel_4d = voxel.unsqueeze(0).unsqueeze(0)
+        pooled = F.avg_pool3d(voxel_4d, kernel_size=kernel, stride=stride)
+        return pooled.squeeze(0).squeeze(0)
+    else:
+        # For appearance, use trilinear interpolation or similar
+        # Or simply strided slicing if exact division
+        new_res = res // ratio
+        # Strided slicing
+        return voxel[::ratio, ::ratio, ::ratio, :]
+
+def compute_reprojection_error(rays, views, C_hat, D_hat):
+    """
+    Compute reprojection error for training views.
+    """
+    # rays: (batch, H, W, 3) or similar
+    # views: list of view data
+    # C_hat: (batch, H, W, 3)
+    # D_hat: (batch, H, W, 1)
+    
+    # 1. Lift pixels to 3D
+    # x_3d = unproject(rays, D_hat, intrinsics)
+    
+    # 2. Transform to world, then to nearest view j
+    # x_world = transform_to_world(x_3d, extrinsics_i)
+    # x_j = transform_to_view_j(x_world, extrinsics_j)
+    
+    # 3. Project to 2D in view j
+    # p_j = project(x_j, intrinsics_j)
+    
+    # 4. Sample C_j at p_j
+    # C_j_sampled = sample_image(C_j, p_j)
+    
+    # 5. Error
+    # e = C_hat - C_j_sampled
+    
+    # 6. Mask pixels outside bounds or with invalid depth
+    # valid_mask = (depth > 0) and (p_j within bounds)
+    
+    # Return valid_mask and error
+    pass
+
+def compute_reprojection_error_novel(rays, views, C_hat, D_hat):
+    """
+    Compute reprojection error for novel views.
+    Uses rendered color C_hat instead of input RGB.
+    """
+    # Similar to training, but C_i is replaced by C_hat (rendered color of novel view)
+    # C_i(p_i) -> C_hat(p_i)
+    pass
+
+def compute_global_regularization(V_D, V_A):
+    """
+    Compute total variation, patch-wise depth smoothness, L1 sparsity, and distortion losses.
+    """
+    # Total Variation
+    tv_D = compute_total_variation(V_D)
+    tv_A = compute_total_variation(V_A)
+    
+    # L1 Sparsity
+    l1_D = torch.mean(torch.abs(V_D))
+    
+    # Distortion Loss (requires sampling along rays)
+    # This is complex to implement without ray marching
+    # Placeholder for distortion loss
+    distortion = 0
+    
+    # Patch-wise depth smoothness
+    # Requires rendering depth and computing smoothness
+    depth = volume_render_depth(V_D, V_A)
+    smoothness = compute_depth_smoothness(depth)
+    
+    return tv_D + tv_A + l1_D + distortion + smoothness
+
+def compute_sparse_depth_loss(V_D, sparse_points):
+    """
+    Compute loss against sparse point cloud from COLMAP.
+    """
+    # Sample depth at sparse points
+    # Compare with sparse point depths
+    pass
+
+def compute_dense_depth_loss(V_D, dense_depth_maps):
+    """
+    Compute loss against DPT depth maps.
+    """
+    # Render depth from V_D
+    # Compare with DPT depth maps
+    pass
+
+def adjust_learning_rate(optimizer, step, initial_lr, final_lr, total_iters):
+    """
+    Linear decay of learning rate.
+    """
+    lr = initial_lr - (initial_lr - final_lr) * (step / total_iters)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+```
+
+## Operating characteristics
+*   **Time Complexity:** Training is significantly faster than previous few-shot methods. On LLFF 2-view setting, it takes 10 minutes compared to FreeNeRF's 1.5 hours and TensoRF's 6 minutes (though TensoRF has lower quality) [S1].
+*   **Memory Complexity:** Weight-sharing voxels reduce model size compared to independent multi-scale voxels. Memory usage is comparable to TensoRF (183.04 MB) [S1].
+*   **Performance:**
+    *   LLFF 2-view: PSNR 18.07, SSIM 0.54, LPIPS 0.35 [S1].
+    *   Outperforms FreeNeRF, ViP-NeRF, SimpleNeRF, ZeroRF, SparseNeRF, and FSGS in PSNR and LPIPS with comparable SSIM [S1].
+*   **Strengths:** Fast convergence, no learned priors required, robust to overfitting in extreme few-shot scenarios, handles diverse geometric details via multi-scale voxels [S1].
+*   **Limitations:** Relies on accurate camera parameters. Performance may degrade if reprojection errors are noisy (mitigated by thresholding) [S1].
+*   **When to use:** Extreme few-shot novel view synthesis (2-4 views) where training time and lack of priors are constraints [S1].
+*   **When not to use:** Dense input scenarios where other methods might be more efficient, or when ground truth depth is available and dense depth loss is preferred [S1].
+
+## Background
+FrugalNeRF was introduced in 2025 by authors publishing in CVPR 2025 [S1]. It builds on TensoRF for fast training and addresses limitations of existing few-shot NeRF methods like FreeNeRF and SparseNeRF, which struggle with complex scheduling and bias from learned priors [S1]. It is evaluated on LLFF, DTU, and RealEstate10K datasets [S1].
+
+## Sources
+[S1] FrugalNeRF: Fast Convergence for Extreme Few-shot Novel View Synthesis without Learned Priors, https://doi.org/10.1109/cvpr52734.2025.01049, fetched 2026-10-29

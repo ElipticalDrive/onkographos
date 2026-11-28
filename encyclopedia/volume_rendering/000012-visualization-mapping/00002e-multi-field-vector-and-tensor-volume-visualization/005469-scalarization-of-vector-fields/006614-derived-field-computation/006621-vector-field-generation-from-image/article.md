@@ -1,0 +1,98 @@
+# Vector Field Generation from Image
+
+Also called: Gradient-based Vector Field Synthesis, Image-derived Vector Field
+
+## Overview
+This method synthesizes a 2D vector field from a scalar input image to enable visualization techniques such as Line Integral Convolution (LIC) [S1]. It solves the problem of creating flow-like textures from static imagery by deriving directionality from image intensity gradients. It differs from direct gradient visualization by rotating the gradient vectors by 90 degrees, ensuring the resulting field is tangent to the intensity contours rather than perpendicular to them [S1].
+
+## How it works
+**Inputs:** A 2D scalar image $I(x,y)$ (grayscale or luminance channel).
+**Outputs:** A 2D vector field $\vec{V}(x,y) = (V_x, V_y)$ of the same dimensions as $I$.
+
+**Data Structures:**
+*   Input: 2D array of shape $(H, W)$, type float32 or float64.
+*   Output: Tuple of two 2D arrays $(V_x, V_y)$, shape $(H, W)$.
+
+**Steps:**
+1.  **Low-pass Filtering:** Apply a Gaussian blur or box filter to the input image $I$ to obtain a smoothed image $I_{smooth}$. This reduces high-frequency noise that would otherwise create erratic vector directions [S1].
+2.  **Gradient Computation:** Compute the spatial gradients of $I_{smooth}$ in the x and y directions. Let $\nabla I_{smooth} = (\frac{\partial I_{smooth}}{\partial x}, \frac{\partial I_{smooth}}{\partial y})$.
+3.  **Rotation:** Rotate the gradient vectors by 90 degrees counter-clockwise to obtain the tangent field. The rotation matrix for 90 degrees is $\begin{pmatrix} 0 & -1 \\ 1 & 0 \end{pmatrix}$.
+    *   $V_x = -\frac{\partial I_{smooth}}{\partial y}$
+    *   $V_y = \frac{\partial I_{smooth}}{\partial x}$
+4.  **Normalization (Optional):** Normalize $\vec{V}$ to unit length if only direction is required for LIC [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.ndimage import gaussian_filter, sobel
+
+def generate_vector_field_from_image(image: np.ndarray, sigma: float = 1.0) -> tuple:
+    """
+    Generate a 90-degree rotated gradient vector field from an image.
+    
+    Args:
+        image: 2D numpy array (H, W), scalar intensity values.
+        sigma: Standard deviation for the Gaussian low-pass filter.
+        
+    Returns:
+        tuple: (Vx, Vy) 2D arrays representing the vector field components.
+    """
+    # Step 1: Low-pass filtering to reduce noise
+    # [S1] specifies low-pass filtering before gradient computation
+    smoothed = gaussian_filter(image, sigma=sigma)
+    
+    # Step 2: Compute gradients
+    # Using Sobel operators for gradient estimation
+    # [S1] implies standard gradient computation
+    grad_x = sobel(smoothed, axis=1)  # Derivative in x direction
+    grad_y = sobel(smoothed, axis=0)  # Derivative in y direction
+    
+    # Step 3: Rotate vectors by 90 degrees
+    # Gradient is (grad_x, grad_y). 
+    # Rotated vector (Vx, Vy) = (-grad_y, grad_x)
+    Vx = -grad_y
+    Vy = grad_x
+    
+    return (Vx, Vy)
+```
+
+**Parameters:**
+*   `sigma`: Standard deviation for the Gaussian filter. Typical values depend on image resolution; higher resolution images may require larger sigma to smooth noise effectively [S1]. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Flat Regions:** In regions where the image intensity is constant, the gradient is zero, resulting in zero-magnitude vectors. These may need special handling (e.g., zero vector or interpolation from neighbors) depending on the downstream visualization [S1].
+*   **Noise Sensitivity:** Without sufficient low-pass filtering, high-frequency noise in the image will produce high-frequency, chaotic vector directions, degrading the quality of LIC textures [S1].
+
+## Subtopics
+
+### Potential Field Extrapolation
+Derives horizontal magnetic field components ($B_x, B_y$) at a photospheric boundary ($z=0$) from an observed vertical field ($B_z$) under the assumption of a current-free (potential) field where $\vec{B} = -\nabla \phi$ and $\nabla^2 \phi = 0$ [S2, unofficial]. This method operates in Fourier space rather than spatial gradients. It is chosen when physical consistency with potential field models is required, such as in solar physics [S2, unofficial].
+
+**Steps:**
+1.  Compute the 2D FFT of the vertical field $B_z$: `bz_hat = np.fft.fft2(bz_2d)`.
+2.  Compute horizontal wavenumber arrays: `kx = 2.0 * np.pi * np.fft.fftfreq(nx, d=pixel_size)`, `ky = 2.0 * np.pi * np.fft.fftfreq(ny, d=pixel_size)`. Create meshgrids `KX, KY` and magnitude `K = sqrt(KX^2 + KY^2)`.
+3.  Compute horizontal components in Fourier space: `bx_hat = -1j * (KX / K) * bz_hat`, `by_hat = -1j * (KY / K) * bz_hat`.
+4.  Recover spatial domain components via inverse FFT and take the real part: `bx = np.real(np.fft.ifft2(bx_hat))`, `by = np.real(np.fft.ifft2(by_hat))`.
+
+**Formula:**
+$\hat{\phi}(k_x, k_y) = \hat{B}_z(k_x, k_y) / k$, $\hat{B}_x = -i \cdot (k_x/k) \cdot \hat{B}_z$, $\hat{B}_y = -i \cdot (k_y/k) \cdot \hat{B}_z$, where $k = \sqrt{k_x^2 + k_y^2}$ [S2, unofficial].
+
+**Pitfall:**
+Regularize the DC wavenumber component ($k=0$) to avoid division by zero, e.g., `K[0, 0] = 1e-12`, consistent with the zero net magnetic flux assumption [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(HW \log(HW))$ if FFT-based gradient methods are used, or $O(HW)$ for spatial convolution and Sobel filters. The standard gradient method is very fast.
+*   **Memory Complexity:** $O(HW)$ for storing the input, smoothed image, gradients, and output vectors.
+*   **Strengths:** Simple to implement; computationally inexpensive; produces visually coherent flow fields from static images [S1].
+*   **Limitations:** The resulting field is tangent to intensity contours, which may not represent physical flow if the image is not a velocity magnitude field. It does not enforce divergence-free constraints unless explicitly modified [S1].
+*   **When to use:** For artistic texture synthesis (LIC) or when a tangent field is desired for visualization [S1].
+*   **When not to use:** When physical accuracy of the vector field direction is required (e.g., fluid dynamics simulation) or when the field must be divergence-free [S1].
+
+## Background
+The method was described in the context of Line Integral Convolution (LIC) for visualizing vector fields [S1]. It leverages the fact that LIC can process an image using a vector field generated from the image itself, allowing for the generation of fine-grained detail even in low-magnitude areas [S1]. The technique was presented in "Imaging vector fields using Line Integral Convolution" [S1].
+
+## Sources
+[S1] Imaging vector fields using Line Integral Convolution, https://digital.library.unt.edu/ark:/67531/metadc1399414/?q=vector field volume rendering, fetched 2026-10-28
+[S2] VitorFigueiredoResearch/AstroSplat-Browser-native-volumetric-visualization-for-astrophysical-vector-fields, https://github.com/VitorFigueiredoResearch/AstroSplat-Browser-native-volumetric-visualization-for-astrophysical-vector-fields, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -8,16 +8,16 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ multi-view RGB images $\{x_i\}$ of an object captured under unknown, varying illumination.
++*   **Inputs:** A set of $N$ multi-view RGB images $\{x_i\}$ of an object captured under unknown, varying illumination [S1].
+ *   **Outputs:** A 3D mesh geometry $G$, UV material textures (albedo $k_d$ and ORM $k_{orm}$), and an HDR environment light map $L$ [S1].
+ 
+ **Data Structures and Layouts:**
+-1.  **Geometry:** Parameterized as a Signed Distance Field (SDF) $S$. The mesh $G$ is extracted from $S$ in each optimization iteration using DMTet [S1].
++1.  **Geometry:** Parameterized as a Signed Distance Field (SDF) $S$ [S1]. The mesh $G$ is extracted from $S$ in each optimization iteration using DMTet [S1].
+ 2.  **Material Texture:**
+     *   **Albedo ($k_d$):** A UV-map where each texel is $a \in \mathbb{R}^3$ [S1].
+-    *   **ORM ($k_{orm}$):** A UV-map where each texel is $(o, r, m)$. $o$ (occlusion) is unused. $r \in \mathbb{R}$ is roughness, and $m \in \mathbb{R}$ is metallicness [S1].
++    *   **ORM ($k_{orm}$):** A UV-map where each texel is $(o, r, m)$ [S1]. $o$ (occlusion) is unused [S1]. $r \in \mathbb{R}$ is roughness, and $m \in \mathbb{R}$ is metallicness [S1].
+ 3.  **Illumination:** Represented as a High Dynamic Range (HDR) environment map $L$ [S1].
+ 
+ **Optimization Steps:**
+-The method optimizes $S$, $k_d$, $k_{orm}$, and $L$ by minimizing a total loss function. The procedure for each optimization iteration is as follows:
++The method optimizes $S$, $k_d$, $k_{orm}$, and $L$ by minimizing a total loss function [S1]. The procedure for each optimization iteration is as follows:
+ 
+ 1.  **Sampling:** Sample a subset of training images $x$ and their associated camera views $C$ [S1].
+@@ -66,67 +66,54 @@
+ 
+ ```python
+-def material_fusion_step(S, k_d, k_orm, L, x, C, diffusion_model, sd_encoder, sd_decoder, dmtet_extractor, renderer):
+-    """
+-    Performs one optimization step for MaterialFusion.
+-    
+-    Args:
+-        S: Signed Distance Field parameters (geometry)
+-        k_d: Albedo UV-map texture
+-        k_orm: ORM UV-map texture (occlusion, roughness, metallicness)
+-        L: HDR environment light map
+-        x: Reference RGB image
+-        C: Camera view parameters
+-        diffusion_model: Stable Diffusion 2.1 model
+-        sd_encoder: Stable Diffusion encoder
+-        sd_decoder: Stable Diffusion decoder
+-        dmtet_extractor: DMTet mesh extraction function
+-        renderer: nvdiffrecmc differentiable renderer
+-        
+-    Returns:
+-        total_loss: Scalar loss value
+-    """
++import numpy as np
++
++def material_fusion_step(S, k_d, k_orm, L, x, C, diffusion_model, sd_encoder, sd_decoder, dmtet_extractor, renderer, lambda_latent, lambda_rgb, current_iteration, total_iterations):
+     # 1. Extract mesh from SDF
+     G = dmtet_extractor(S)
+-    
++
+     # 2. Render RGB, Albedo, and ORM
+     x_hat = renderer.render_rgb(G, k_d, k_orm, C, L)
+     I_d_hat = renderer.render_albedo(G, k_d, k_orm, C, L)
+     I_orm_hat = renderer.render_orm(G, k_d, k_orm, C, L)
+-    
++
+     # 3. Encode rendered materials
+     z_d = sd_encoder(I_d_hat)
+     z_orm = sd_encoder(I_orm_hat)
+-    z = concatenate(z_d, z_orm)
+-    
++    z = np.concatenate([z_d, z_orm], axis=-1)
++
+     # 4. Add noise
+-    t = random.uniform(0.02, 0.98)
+-    epsilon = random_gaussian_noise(z.shape)
+-    z_t = add_noise(z, epsilon, t)
+-    
++    t = np.random.uniform(0.02, 0.98)
++    epsilon = np.random.randn(*z.shape)
++    z_t = z + t * epsilon
++
+     # 5. Denoise using DDIM (5 steps) conditioned on x
+-    z_hat = ddim_denoise(z_t, diffusion_model, steps=5, condition=x)
+-    
++    z_hat = z_t
++    for _ in range(5):
++        noise_pred = diffusion_model.predict_noise(z_hat, t, condition=x)
++        z_hat = z_hat - t * noise_pred  # Simplified DDIM update [G]
++
+     # 6. Compute SDS Loss
+-    # Latent space term
+-    latent_loss = lambda_latent * squared_norm(z - z_hat)
+-    
+-    # RGB space term
++    latent_loss = lambda_latent * np.linalg.norm(z - z_hat, ord=2)**2
+     z_rgb = sd_decoder(z)
+     z_hat_rgb = sd_decoder(z_hat)
+-    rgb_loss = lambda_rgb * squared_norm(z_rgb - z_hat_rgb)
+-    
++    rgb_loss = lambda_rgb * np.linalg.norm(z_rgb - z_hat_rgb, ord=2)**2
+     l_sds = latent_loss + rgb_loss
+-    
++
+     # 7. Compute Reconstruction Loss
+-    l_recon = squared_norm(x_hat - x)
+-    
+-    # 8. Compute Regularization Loss (from nvdiffrecmc)
++    l_recon = np.linalg.norm(x_hat - x, ord=2)**2
++
++    # 8. Compute Regularization Loss
+     l_reg = compute_nvdiffrecmc_regularization(S, k_d, k_orm, L)
+-    
++
+     # 9. Compute Total Loss
+-    gamma_i = get_decay_factor(current_iteration)
++    gamma_i = max(0.0, 1.0 - current_iteration / total_iterations)
+     total_loss = l_recon + l_reg + gamma_i * l_sds
+-    
++
+     return total_loss
++
++def compute_nvdiffrecmc_regularization(S, k_d, k_orm, L):
++    # Combines normal smoothness, albedo smoothness, ORM smoothness, normal perturbation, and demodulated lighting regularization [S1]
++    # Implementation details are specific to nvdiffrecmc [19]
++    return 0.0  # Placeholder for regularization computation
+ ```
+ 
+@@ -138,12 +125,6 @@
+ ## Subtopics
+ 
+-### StableMaterial
+-The 2D diffusion prior model trained on BlenderVault data to predict albedo and ORM from RGB images. It serves as the source of the SDS guidance. [Link](8117-diffusion-based-guidance-for-radiance-field-optimization.md)
+-
+-### nvdiffrecmc
+-The differentiable renderer used to render geometry, materials, and lighting. It provides the foundation for the inverse rendering pipeline. [Link](8117-diffusion-based-guidance-for-radiance-field-optimization.md)
+-
+-### DMTet
+-The method used to extract the mesh $G$ from the SDF $S$ during optimization. [Link](8117-diffusion-based-guidance-for-radiance-field-optimization.md)
++### MaterialFusion Regularization & Rendering Setup
++Rendering and optimization configuration for MaterialFusion, utilizing nvdiffrast for differentiable rasterization and applying multiple regularizers to stabilize material reconstruction [S1]. It renders appearance, albedo, ORM, diffuse lighting, and specular lighting using nvdiffrast [S1]. It feeds rasterized estimated albedo and ORM batches to StableMaterial, converting inputs to RGB format to ensure sRGB tonemapped image inputs are properly handled [S1]. It applies regularizers including normal smoothness, albedo smoothness, ORM smoothness, normal perturbation, and demodulated lighting regularization [S1]. It differs from standard inverse rendering by integrating a pretrained diffusion prior (StableMaterial) and relying on nvdiffrast's rasterization rather than ray tracing for appearance rendering [S1]. It serves as the core optimization setup for the MaterialFusion inverse rendering pipeline [S1]. sRGB tonemapping must be explicitly handled before feeding inputs to StableMaterial to prevent color space mismatches [S1].
+ 
+ ## Operating characteristics

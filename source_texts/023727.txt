@@ -1,0 +1,284 @@
+I created a voxel engine in Unity. It worked fine until yesterday when I tried to remove the faces between chunks to create a seamless world.  
+ Now there's just an empty world when entering the game. I hope that you can help me. 
+ On a side note, I have an idea why it doesn't work. Lines 143 and 144 in Chunk.cs don't seem to be executed, that's why there are no blocks added, but I don't have an idea what's causing this. 
+ Here's my code: 
+ using UnityEngine;
+using System.Collections.Generic;
+using System;
+using System.Threading;
+
+public class Chunk : MonoBehaviour
+{
+    public Transform player;
+    public int UnloadingDistance;
+    public string pos;
+
+    public static int CHUNK_DIMENSION = 16;
+
+    void Update()
+    {
+        if ((transform.position - player.position).magnitude > UnloadingDistance)
+        {
+            Unload();
+        }
+    }
+
+    public void Unload()
+    {
+        //TODO save
+        Player.chunks.Remove(pos);
+        Destroy(gameObject);
+    }
+
+    public static void Load(Transform player,int LoadingDistance,int UnloadingDistance)
+    {
+        Vector3 start = player.position - new Vector3(LoadingDistance, LoadingDistance, LoadingDistance);
+        Vector3 end = player.position + new Vector3(LoadingDistance, LoadingDistance, LoadingDistance);
+        start.x = Mathf.Clamp(start.x, -50000000, 50000000);
+        end.x = Mathf.Clamp(end.x, -50000000, 50000000);
+        start.y = Mathf.Clamp(start.y, 0, 512);
+        end.y = Mathf.Clamp(end.y, 0, 512);
+        start.z = Mathf.Clamp(start.z, -50000000, 50000000);
+        end.z = Mathf.Clamp(end.z, -50000000, 50000000);
+        for (int x = Mathf.FloorToInt(start.x / CHUNK_DIMENSION) * CHUNK_DIMENSION; x < Mathf.FloorToInt(end.x / CHUNK_DIMENSION) * CHUNK_DIMENSION; x += CHUNK_DIMENSION)
+        {
+            for (int y = Mathf.FloorToInt(start.y / CHUNK_DIMENSION) * CHUNK_DIMENSION; y < Mathf.FloorToInt(end.y / CHUNK_DIMENSION) * CHUNK_DIMENSION; y += CHUNK_DIMENSION)
+            {
+                for (int z = Mathf.FloorToInt(start.z / CHUNK_DIMENSION) * CHUNK_DIMENSION; z < Mathf.FloorToInt(end.z / CHUNK_DIMENSION) * CHUNK_DIMENSION; z += CHUNK_DIMENSION)
+                {
+                    if ((new Vector3(x,y,z)-player.position).magnitude > LoadingDistance) { continue; }
+                    if (!Player.chunks.ContainsKey(x.ToString() + ";" + y.ToString() + ";" + z.ToString()))
+                    {
+                        loadChunk(x, y, z, UnloadingDistance, LoadingDistance, player);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void loadChunk(int x, int y, int z, int UnloadingDistance, int LoadingDistance, Transform player)
+    {
+        GameObject chunk = Instantiate(Player.ChunkPrefab);
+        chunk.transform.position = new Vector3(x, y, z);
+        Chunk c = chunk.GetComponent<Chunk>();
+        c.pos = x.ToString() + ";" + y.ToString() + ";" + z.ToString();
+        c.UnloadingDistance = UnloadingDistance;
+        c.player = player;
+        Player.chunks.Add(c.pos, c);
+
+        new Thread(delegate () {
+            List<Vector3> verts = new List<Vector3>();
+            List<int> tris = new List<int>();
+            List<Vector2> uvs = new List<Vector2>();
+            List<Vector3> norms = new List<Vector3>();
+            List<int> types = new List<int>();
+            List<Vector3> positions = new List<Vector3>();
+
+            int[,,] existants = new int[CHUNK_DIMENSION + 2, CHUNK_DIMENSION + 2, CHUNK_DIMENSION + 2];
+
+            System.Random r = new System.Random();
+            for (int bx = -1; bx < CHUNK_DIMENSION + 1; bx++)
+            {
+                for (int bz = -1; bz < CHUNK_DIMENSION + 1; bz++)
+                {
+                    int perlinHeight = Mathf.RoundToInt(Mathf.PerlinNoise(0.01f * (bx + x) + 0.001f, 0.01f * (bz + z) + 0.001f) * 100f) + 156;
+                    for (int by = -1; by < CHUNK_DIMENSION + 1; by++)
+                    {
+                        Vector3 cPos = new Vector3(
+                            x + (bx < 0 ? -1 : bx < CHUNK_DIMENSION ? 0 : 1),
+                            y + (by < 0 ? -1 : by < CHUNK_DIMENSION ? 0 : 1),
+                            z + (bz < 0 ? -1 : bz < CHUNK_DIMENSION ? 0 : 1)
+                        );
+                        Vector3 bPos = new Vector3(
+                            bx < 0 ? CHUNK_DIMENSION - 1 : bx >= CHUNK_DIMENSION ? 0 : bx,
+                            by < 0 ? CHUNK_DIMENSION - 1 : by >= CHUNK_DIMENSION ? 0 : by,
+                            bz < 0 ? CHUNK_DIMENSION - 1 : bz >= CHUNK_DIMENSION ? 0 : bz
+                        );
+                        int type = -1;
+                        if (Player.WorldData != "")
+                        {
+                            string btype = Player.tryGetB64Arr(Player.WorldData, new int[] { (int)cPos.x, (int)cPos.y, (int)cPos.z, (int)bPos.x, (int)bPos.y, (int)bPos.z });
+                            if (btype != "")
+                            {
+                                type = Convert.ToInt16(btype);
+                            }
+                        }
+                        if (type == -1)
+                        {
+                            if (by + y > perlinHeight)
+                            {
+                                if (by + y < Player.SeaLevel)
+                                {
+                                    type = Player.WaterBlock;
+                                }
+                                else
+                                {
+                                    break;
+                                }
+                            }
+                            else if (by + y == perlinHeight)
+                            {
+                                type = Player.ToppingBlock;
+                            }
+                            else if (by + y == 0)
+                            {
+                                type = Player.GroundBorderBlock;
+                            }
+                            else if (by + y < Player.GroundMedianBorder * perlinHeight)
+                            {
+                                type = Player.GroundBlocks[r.Next(0, Player.GroundBlocks.Length - 1)];
+                            }
+                            else if (by + y < Player.MedianUpperBorder * perlinHeight)
+                            {
+                                type = Player.MedianBlocks[r.Next(0, Player.MedianBlocks.Length - 1)];
+                            }
+                            else
+                            {
+                                type = Player.UpperBlocks[r.Next(0, Player.UpperBlocks.Length - 1)];
+                            }
+                        }
+                        if (type == -1)
+                        {
+                            continue;
+                        }
+                        existants[bx+1, by+1, bz+1] = Player.TransparentBlocks.Contains((int)type) ? 1 : 2;
+                        if (bx > -1 && bx < CHUNK_DIMENSION && by > -1 && by < CHUNK_DIMENSION && bz > -1 && bz < CHUNK_DIMENSION)
+                        {
+                            types.Add(type);
+                            positions.Add(new Vector3(bx, by, bz));
+                        }
+                    }
+                }
+            }
+
+            for (int i = 0; i < types.Count;i++)
+            {
+                addBlock(verts, tris, uvs, norms, types[i], positions[i],existants);
+            }
+
+            Player.LoaderQueue.Add(delegate ()
+            {
+                if (chunk == null)
+                {
+                    return;
+                }
+
+                Mesh mesh = chunk.GetComponent<MeshFilter>().mesh;
+                mesh.SetVertices(verts);
+                mesh.SetTriangles(tris, 0);
+                mesh.SetUVs(0, uvs);
+                mesh.SetNormals(norms);
+                mesh.RecalculateTangents();
+                chunk.GetComponent<MeshFilter>().mesh = mesh;
+                chunk.GetComponent<MeshCollider>().sharedMesh = mesh;
+            });
+        }).Start();
+    }
+
+    private static void addBlock(List<Vector3> verts,List<int> tris, List<Vector2> uvs, List<Vector3> norms,float type,Vector3 localPos, int[,,] existants)
+    {
+        Debug.Log(type + ";" + localPos);
+        float us = (type % 8f) / 8f + 0.0002f;
+        float vs = Mathf.Floor(type / 8f) / 8f + 0.0002f;
+        float ue = us + 0.1246f;
+        float ve = vs + 0.1246f;
+        int si = 0;
+        int selfLevel = Player.TransparentBlocks.Contains((int)type) ? 1 : 2;
+
+        selfLevel = 10;
+
+        //back
+        if (existants[(int)localPos.x,(int)localPos.y,(int)localPos.z-1] < selfLevel)
+        {
+            si = verts.Count;
+            verts.Add(new Vector3(0, 0, 0) + localPos);
+            uvs.Add(new Vector2(us, vs));
+            verts.Add(new Vector3(0, 1, 0) + localPos);
+            uvs.Add(new Vector2(us, ve));
+            verts.Add(new Vector3(1, 0, 0) + localPos);
+            uvs.Add(new Vector2(ue, vs));
+            verts.Add(new Vector3(1, 1, 0) + localPos);
+            uvs.Add(new Vector2(ue, ve));
+            norms.Add(Vector3.back);
+            norms.Add(Vector3.back);
+            norms.Add(Vector3.back);
+            norms.Add(Vector3.back);
+            tris.Add(si); tris.Add(si + 1); tris.Add(si + 2);
+            tris.Add(si + 2); tris.Add(si + 1); tris.Add(si + 3);
+        }
+
+        //front
+        if (existants[(int)localPos.x,(int)localPos.y,(int)localPos.z + 1] < selfLevel)
+        {
+            si = verts.Count;
+            verts.Add(new Vector3(0, 0, 1) + localPos);
+            uvs.Add(new Vector2(us, vs));
+            verts.Add(new Vector3(1, 0, 1) + localPos);
+            uvs.Add(new Vector2(ue, vs));
+            verts.Add(new Vector3(1, 1, 1) + localPos);
+            uvs.Add(new Vector2(ue, ve));
+            verts.Add(new Vector3(0, 1, 1) + localPos);
+            uvs.Add(new Vector2(us, ve));
+            norms.Add(Vector3.forward);
+            norms.Add(Vector3.forward);
+            norms.Add(Vector3.forward);
+            norms.Add(Vector3.forward);
+            tris.Add(si); tris.Add(si + 1); tris.Add(si + 2);
+            tris.Add(si); tris.Add(si + 2); tris.Add(si + 3);
+        }
+
+        //right
+        if (existants[(int)localPos.x+1,(int)localPos.y,(int)localPos.z] < selfLevel)
+        {
+            si = verts.Count;
+            verts.Add(new Vector3(1, 0, 1) + localPos);
+            uvs.Add(new Vector2(us, ve));
+            verts.Add(new Vector3(1, 0, 0) + localPos);
+            uvs.Add(new Vector2(us, vs));
+            verts.Add(new Vector3(1, 1, 0) + localPos);
+            uvs.Add(new Vector2(ue, vs));
+            verts.Add(new Vector3(1, 1, 1) + localPos);
+            uvs.Add(new Vector2(ue, ve));
+            norms.Add(Vector3.right);
+            norms.Add(Vector3.right);
+            norms.Add(Vector3.right);
+            norms.Add(Vector3.right);
+            tris.Add(si); tris.Add(si + 1); tris.Add(si + 2);
+            tris.Add(si); tris.Add(si + 2); tris.Add(si + 3);
+        }
+
+        //left
+        if (existants[(int)localPos.x-1,(int)localPos.y,(int)localPos.z] < selfLevel)
+        {
+            si = verts.Count;
+            verts.Add(new Vector3(0, 0, 1) + localPos);
+            uvs.Add(new Vector2(us, ve));
+            verts.Add(new Vector3(0, 1, 0) + localPos);
+            uvs.Add(new Vector2(ue, vs));
+            verts.Add(new Vector3(0, 0, 0) + localPos);
+            uvs.Add(new Vector2(us, vs));
+            verts.Add(new Vector3(0, 1, 1) + localPos);
+            uvs.Add(new Vector2(ue, ve));
+            norms.Add(Vector3.left);
+            norms.Add(Vector3.left);
+            norms.Add(Vector3.left);
+            norms.Add(Vector3.left);
+            tris.Add(si); tris.Add(si + 1); tris.Add(si + 2);
+            tris.Add(si); tris.Add(si + 3); tris.Add(si + 1);
+        }
+
+        //top
+        if (existants[(int)localPos.x,(int)localPos.y+1,(int)localPos.z] < selfLevel)
+        {
+            si = verts.Count;
+            verts.Add(new Vector3(1, 1, 0) + localPos);
+            uvs.Add(new Vector2(ue, vs));
+            verts.Add(new Vector3(0, 1, 1) + localPos);
+            uvs.Add(new Vector2(us, ve));
+            verts.Add(new Vector3(1, 1, 1) + localPos);
+            uvs.Add(new Vector2(ue, ve));
+            verts.Add(new Vector3(0, 1, 0) + localPos);
+            uvs.Add(new Vector2(us, vs));
+            norms.Add(Vector3.up);
+            norms.Add(Vector3.up);
+ 

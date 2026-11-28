@@ -1,0 +1,187 @@
+# InFusionSurf
+
+
+## Overview
+InFusionSurf is a NeRF-style RGB-D 3D surface reconstruction framework that refines depth information to enhance reconstruction quality with minimal impact on optimization time, using per-frame intrinsic refinement and TSDF Fusion prior learning [S1]. It addresses camera motion-induced blurs in depth frames by correcting the camera intrinsic matrix per frame and accelerates training by pre-training the geometric prior using classical TSDF Fusion [S1]. It builds on [Neural RGB-D Surface Reconstruction](11352-neural-rgb-d-surface-reconstruction.md) by adding specific intrinsic refinement and a two-stage initialization process [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A sequence of RGB-D video frames (color images $C_{u,v}^i$ and depth maps), initial camera poses $[R|t]$, and initial camera intrinsics ($f_x, f_y, c_x, c_y$) [S1].
+*   **Outputs:** A trained hybrid scene representation consisting of a dense feature grid $\mathcal{V}^{(feat)}$, MLPs for color ($MLP^C$) and signed distance ($MLP^D$), per-frame latent embeddings $\xi_i$, per-frame intrinsic refinement parameters ($s^i, \tau^i$), and an image-plane deformation field (from parent method) [S1]. The final output is a renderable radiance field and a mesh extracted via Marching Cubes [S1, G].
+
+**Data Structures:**
+1.  **Dense Feature Grid $\mathcal{V}^{(feat)}$:**
+    *   Layout: 3D array of dimensions $N_x \times N_y \times N_z$ with feature length $F$ [S1].
+    *   Dimensions: $N_x = \lceil L_x/g_s \rceil$, $N_y = \lceil L_y/g_s \rceil$, $N_z = \lceil L_z/g_s \rceil$, where $L_x, L_y, L_z$ are scene bounds and $g_s$ is cell size [S1].
+    *   Initialization: Zeros [S1].
+2.  **MLPs:**
+    *   $MLP^C$: Color decoder. 2 hidden layers, 128 nodes each [S1].
+    *   $MLP^D$: Signed distance decoder. 2 hidden layers, 128 nodes each [S1].
+    *   Image-plane deformation MLP (from parent): 2 hidden layers, 64 nodes each [S1].
+3.  **Per-Frame Parameters:**
+    *   Scaling matrix $s^i \in \mathbb{R}^{3 \times 3}$ and translation vector $\tau^i \in \mathbb{R}^3$ for each frame $i$ [S1].
+    *   Latent embedding $\xi_i$ for each frame $i$ [S1].
+
+**Numbered Steps:**
+1.  **Scene Bounds and Grid Setup:** Estimate scene bounds $L_x, L_y, L_z$ from depth frames and initial poses [S1]. Set cell size $g_s$ (default 10cm) and feature length $F$ (default 12) [S1]. Compute grid dimensions $N_x, N_y, N_z$ and initialize $\mathcal{V}^{(feat)}$ with zeros [S1].
+2.  **Phase 1: TSDF Fusion Prior Learning:** Set $F=1$ for this phase [S1]. Construct a TSDF volume from the input depth frames using a standard TSDF Fusion algorithm [G]. Randomly sample grid cells and query their center points $p$ [S1]. Query the TSDF volume for the signed distance value $D_{TSDF}(p)$ [S1]. Compute feature vector $\phi_p$ via trilinear interpolation of the 8 nearest vertices in $\mathcal{V}^{(feat)}$ [S1]. Compute predicted signed distance $\hat{D}_p = MLP^D(\phi_p)$ [S1]. Minimize mean squared error between $\hat{D}_p$ and $D_{TSDF}(p)$ [S1]. Optimize only $\mathcal{V}^{(feat)}$ and $MLP^D$ for 3,000 iterations [S1].
+3.  **Phase 2: Progressive Learning (Low-Frequency):** Set $F=12$ [S1]. Randomly sample ray batches $r_b$. For each ray, sample points $S_c$ every 15.625mm along the ray [S1]. Compute normalized image coordinates $\varrho_{u,v}$ using initial intrinsics [S1]:
+    $$ \varrho_{u,v} = \begin{bmatrix} 1/f_x & 0 & -c_x/f_x \\ 0 & -1/f_y & c_y/f_y \\ 0 & 0 & -1 \end{bmatrix} \begin{bmatrix} u \\ v \\ 1 \end{bmatrix} $$
+    (Note: The source table contains a typo $\begin{bmatrix} v \\ v \\ 1 \end{bmatrix}$ and text uses $\begin{bmatrix} v \\ u \\ 1 \end{bmatrix}$, but standard pinhole projection uses $\begin{bmatrix} u \\ v \\ 1 \end{bmatrix}$ [S1, G].) Apply per-frame intrinsic refinement to get refined $\hat{\varrho}_{u,v}^i = s^i \cdot (\varrho_{u,v} + \tau^i)$ [S1]. Compute ray direction $\hat{d}_{u,v}^i = [R|t] [\hat{\varrho}_{u,v}^i; 1]$ [S1]. Sample points $p$ along $\hat{d}_{u,v}^i$. Compute $\phi_p$ via trilinear interpolation from $\mathcal{V}^{(feat)}$ [S1]. Compute $\hat{D}_p = MLP^D(\phi_p)$ [S1]. Compute weight $\omega_p = \sigma(\hat{D}_p/tr) \cdot \sigma(-\hat{D}_p/tr)$ [S1]. Compute color $C_{p,d}^i = MLP^C(\phi_p, \Lambda(\hat{d}_{u,v}^i), \xi_i)$ [S1]. Compute rendered color $\hat{C}_r^i = \frac{\sum \omega_p C_{p,d}^i}{\sum \omega_p}$ [S1]. Compute Loss $\mathcal{L}$ (see below) [S1]. Optimize all parameters for 7,000 iterations [S1].
+4.  **Phase 3: Progressive Learning (High-Frequency):** Halve the grid cell size $g_s$ (e.g., from 10cm to 5cm) [S1]. Re-initialize $\mathcal{V}^{(feat)}$ to new dimensions $N_x, N_y, N_z$ with $F=12$ [S1]. Sample points $S_c$ as in Phase 2. Identify surfaces in $S_c$ and sample additional points $S_f$ around these surfaces [S1]. Use both $S_c$ and $S_f$ for loss computation [S1]. Optimize all parameters for 65,000 iterations [S1].
+
+**Per-Frame Intrinsic Refinement:**
+For each frame $i$, optimize scaling $s^i$ and translation $\tau^i$ [S1]. $s^i = \text{diag}(s_x^i, s_y^i, 1)$, $\tau^i = [\tau_x^i, \tau_y^i, 0]^T$ [S1]. Initialize $s^i$ to identity (1,1,1) and $\tau^i$ to zero [S1]. Refined coordinate: $\hat{\varrho}_{u,v}^i = s^i \cdot (\varrho_{u,v} + \tau^i)$ [S1].
+
+**Loss Function:**
+$$ \mathcal{L} = \lambda_{fs} \mathcal{L}_{fs} + \lambda_{sdf} \mathcal{L}_{sdf} + \lambda_{rgb} \mathcal{L}_{rgb} + \lambda_{reg} \mathcal{L}_{reg} $$
+*   $\mathcal{L}_{fs}$ (Points outside truncation $S_{fs}$): $\frac{1}{|r_b|} \sum_{r \in r_b} \frac{1}{|S_{fs}|} \sum_{p \in S_{fs}} (\hat{D}_p - tr)^2$ [S1].
+*   $\mathcal{L}_{sdf}$ (Points inside truncation $S_{sdf}$): $\frac{1}{|r_b|} \sum_{r \in r_b} \frac{1}{|S_{sdf}|} \sum_{p \in S_{sdf}} (\hat{D}_p - D_r^i)^2$, where $D_r^i$ is the observed depth-derived signed distance [S1].
+*   $\mathcal{L}_{rgb}$: $\frac{1}{|r_b|} \sum_{r \in r_b} (\hat{C}_r^i - C_{u,v}^i)^2$ [S1].
+*   $\mathcal{L}_{reg}$: L2 regularization on $\xi_i$, $s^i, \tau^i$, and deformation parameters. Scaling parameters regularized around 1 [S1].
+
+**Parameters:**
+*   $tr = 5$cm [S1].
+*   $\lambda_{fs} = 10, \lambda_{sdf} = 6 \times 10^3, \lambda_{rgb} = 0.5, \lambda_{reg} = 0.1$ [S1].
+*   Optimizer: ADAM, lr=$5 \times 10^{-4}$, decays to 1/10 every 250K iterations, $\beta_1=0.9, \beta_2=0.999$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+class InFusionSurf:
+    def __init__(self, scene_bounds, depth_frames, color_frames, initial_poses, initial_intrinsics):
+        self.scene_bounds = scene_bounds  # Lx, Ly, Lz in meters
+        self.depth_frames = depth_frames
+        self.color_frames = color_frames
+        self.poses = initial_poses  # [R|t]
+        self.intrinsics = initial_intrinsics  # fx, fy, cx, cy
+
+        # Hyperparameters
+        self.gs = 0.1  # 10cm
+        self.F = 12
+        self.tr = 0.05  # 5cm
+        self.sampling_interval = 0.015625  # 15.625mm
+
+        # Grid dimensions
+        Nx = int(np.ceil(scene_bounds[0] / self.gs))
+        Ny = int(np.ceil(scene_bounds[1] / self.gs))
+        Nz = int(np.ceil(scene_bounds[2] / self.gs))
+
+        # Data structures
+        self.V_feat = torch.zeros(Nx, Ny, Nz, 1)  # Phase 1 uses F=1
+        self.MLP_D = MLP(in_dim=1, h1=128, h2=128, out_dim=1)
+        self.MLP_C = MLP(in_dim=12, h1=128, h2=128, out_dim=3)
+        self.num_frames = len(depth_frames)
+        self.scales = torch.ones(self.num_frames, 3)  # sx, sy, 1
+        self.translations = torch.zeros(self.num_frames, 3)  # tx, ty, 0
+        self.latents = torch.randn(self.num_frames, 16)  # Example latent dim
+
+        # Optimizers
+        self.opt_phase1 = torch.optim.Adam([self.V_feat] + list(self.MLP_D.parameters()), lr=5e-4)
+        self.opt_phase2 = torch.optim.Adam(
+            [self.V_feat] + list(self.MLP_C.parameters()) +
+            list(self.MLP_D.parameters()) + [self.scales, self.translations, self.latents],
+            lr=5e-4
+        )
+
+    def trilinear_interp(self, V, points):
+        # points: (N, 3) in grid coordinates
+        # Returns (N, F)
+        p = points.float()
+        p000 = torch.floor(p).long()
+        p111 = p000 + 1
+        w = p - p000.float()
+        c000 = V[p000[:, 0], p000[:, 1], p000[:, 2]]
+        c100 = V[p111[:, 0], p000[:, 1], p000[:, 2]]
+        c010 = V[p000[:, 0], p111[:, 1], p000[:, 2]]
+        c110 = V[p111[:, 0], p111[:, 1], p000[:, 2]]
+        c001 = V[p000[:, 0], p000[:, 1], p111[:, 2]]
+        c101 = V[p111[:, 0], p000[:, 1], p111[:, 2]]
+        c011 = V[p000[:, 0], p111[:, 1], p111[:, 2]]
+        c111 = V[p111[:, 0], p111[:, 1], p111[:, 2]]
+        w000 = (1-w[:,0])*(1-w[:,1])*(1-w[:,2])
+        w100 = w[:,0]*(1-w[:,1])*(1-w[:,2])
+        w010 = (1-w[:,0])*w[:,1]*(1-w[:,2])
+        w110 = w[:,0]*w[:,1]*(1-w[:,2])
+        w001 = (1-w[:,0])*(1-w[:,1])*w[:,2]
+        w101 = w[:,0]*(1-w[:,1])*w[:,2]
+        w011 = (1-w[:,0])*w[:,1]*w[:,2]
+        w111 = w[:,0]*w[:,1]*w[:,2]
+        return (w000*c000 + w100*c100 + w010*c010 + w110*c110 +
+                w001*c001 + w101*c101 + w011*c011 + w111*c111)
+
+    def get_normalized_coords(self, u, v, fx, fy, cx, cy):
+        x = (u - cx) / fx
+        y = -(v - cy) / fy
+        z = -1
+        return torch.stack([x, y, z], dim=-1)
+
+    def refine_intrinsics(self, rho, frame_idx):
+        s = self.scales[frame_idx]
+        t = self.translations[frame_idx]
+        s_mat = torch.diag(s)
+        rho_refined = s_mat @ (rho + t.unsqueeze(0))
+        return rho_refined
+
+    def compute_sdf_loss(self, points, D_obs, is_outside):
+        D_pred = self.MLP_D(self.trilinear_interp(self.V_feat, points))
+        target = self.tr if is_outside else D_obs
+        return torch.mean((D_pred - target) ** 2)
+
+    def train(self):
+        # Phase 1: TSDF Fusion Prior Learning
+        self.V_feat = torch.zeros(self.V_feat.shape[0], self.V_feat.shape[1], self.V_feat.shape[2], 1)
+        # Construct TSDF volume from depth frames [G]
+        D_TSDF = self.construct_tsdf_volume(self.depth_frames)
+
+        for _ in range(3000):
+            # Sample grid cells, query centers, get D_TSDF
+            # Forward MLP_D, compute MSE, backward
+            self.opt_phase1.step()
+
+        # Phase 2: Progressive Learning
+        self.V_feat = torch.zeros(self.V_feat.shape[0], self.V_feat.shape[1], self.V_feat.shape[2], 12)
+        for _ in range(7000):
+            # Sample rays, points Sc every 15.625mm
+            # Compute loss, backward
+            self.opt_phase2.step()
+
+        # Phase 3: Progressive Learning
+        self.gs /= 2
+        Nx, Ny, Nz = int(np.ceil(self.scene_bounds[0]/self.gs)), int(np.ceil(self.scene_bounds[1]/self.gs)), int(np.ceil(self.scene_bounds[2]/self.gs))
+        self.V_feat = torch.zeros(Nx, Ny, Nz, 12)
+        for _ in range(65000):
+            # Sample Sc and Sf, compute loss, backward
+            self.opt_phase2.step()
+
+class MLP(nn.Module):
+    def __init__(self, in_dim, h1, h2, out_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, h1), nn.ReLU(),
+            nn.Linear(h1, h2), nn.ReLU(),
+            nn.Linear(h2, out_dim)
+        )
+    def forward(self, x):
+        return self.net(x)
+```
+
+## Operating characteristics
+*   **Time Complexity:** Training is significantly faster than Neural RGB-D. 75K iterations take ~96 minutes on average, which is 7.3 to 8.7 times faster than Neural RGB-D [S1].
+*   **Memory Complexity:** Uses a dense feature grid. Memory usage scales with $N_x N_y N_z F$. The grid size is determined by scene bounds and cell size $g_s$ [S1].
+*   **Measured Performance:** On ScanNet V2 and synthetic scenes, InFusionSurf outperforms GO-Surf in C-ℓ1, IoU, and F-score with 20% less training time at 20K iterations [S1]. It is less effective on normal consistency, indicating that its results contained relatively uneven surfaces [S1].
+*   **Strengths:** Fast training, high-quality geometry reconstruction, handles motion blur in depth frames via intrinsic refinement [S1].
+*   **Limitations:** Relies on simple transformation matrices for intrinsic refinement; does not handle local blurs (object motion, rolling shutter) effectively [S1]. Less effective on normal consistency [S1].
+*   **When to use:** Quick reconstruction of complex geometries from RGB-D video with camera motion [S1].
+*   **When not to use:** Scenes with significant local motion blur or rolling shutter effects where uniform intrinsic refinement is insufficient [S1].
+
+## Background
+InFusionSurf was introduced by Seunghwan Lee, Gwanmo Park, Hyewon Son, Jiwon Ryu, and Han Joo Chae from ROKIT Healthcare, Inc. [S1]. It was published in 2024 [S1]. It builds upon Neural RGB-D Surface Reconstruction [S1]. It is implemented in PyTorch and evaluated on the ScanNet V2 dataset and synthetic scenes [S1].
+
+## Sources
+[S1] InFusionSurf: Refining Neural RGB-D Surface Reconstruction Using Per-Frame Intrinsic Refinement and TSDF Fusion Prior Learning, https://doi.org/10.1109/icme57554.2024.10687901, fetched 2026-10-26

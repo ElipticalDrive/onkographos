@@ -1,0 +1,776 @@
+Contribute to Biohub/idetik development by creating an account on GitHub.
+
+feat: composite volume with images in 3D by aganders3 · Pull Request #737 · Biohub/idetik · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+aganders3
+commented
+Aug 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+In #730 there is an added depth-only pass to help disambiguate blending within a layer (e.g. channels) and between layers (occlusion). This PR also restores the volume to the multi-viewport example.
+Here's what it looks like on main:
+In this PR we conditionally render that depth-only pass into a depth texture, which can be subsequently sampled. This is useful in the volume layer where we can terminate rays at the scene depth, allowing us to compose the volume layer with slices or other opaque objects.
+Neuroglancer does something similar, but because it renders everything to offscreen framebuffers depth is just another attachment. They then bind the opaque depth to the volume shader as uDepthSampler. We render to the default framebuffer, which WebGL does not let you sample depth from. We might be able to optimize similarly with an offscreen pipeline, but I think that's out of scope here.
+That's half the battle, but our "premultiplied" blend mode used in the volume layer also assumes front-to-back draw order and attempts to blend "under" with ONE_MINUS_DST_ALPHA. This is why the whole volume is occluded in the example above. Instead this PR reverses the draw order and changes to composite premultiplied "over" (updating the name to premultipliedOver as well). The cost here is that we no longer have the opportunity to do certain cross-chunk volume optimizations, such as early ray termination (we can still do early-termination within a chunk). We're not making use of this at the moment anyway.
+Here's the result with this PR:
+aganders3
+force-pushed
+the
+layer-occlusion-prototype
+branch
+from
+3d7f02c to
+fd66aaf
+Compare
+August 20, 2026 15:20
+aganders3
+force-pushed
+the
+volume-scene-depth-prototype
+branch
+from
+8dbe8db to
+dae1330
+Compare
+August 20, 2026 15:20
+aganders3
+changed the title
+feat: terminate volume rays at scene depth
+feat: composite volume with images in 3D
+Aug 20, 2026
+aganders3
+marked this pull request as ready for review
+August 20, 2026 16:16
+aganders3
+requested review from
+shlomnissan and
+srivarra
+August 20, 2026 16:18
+srivarra
+previously requested changes
+Aug 24, 2026
+View reviewed changes
+srivarra
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Looks good, just one small optimization that could be nice.
+Comment thread
+src/renderers/webgl_renderer.ts
+Outdated
+Comment on lines
++141
+to
++142
+if (transparentLayers.some((l) => l.readsSceneDepth)) {
+this.renderSceneDepthToTexture(occludingLayers, viewport.camera, frustum);
+srivarra
+Aug 24, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+VolumeLayer always reads the depth of the scene, so volume viewports still allocate and clear an empty depth target every frame. Could we add occludingLayers.length > 0 into the conditional here as well? It's a very small perf bump in the multi_viewport example cause we don't need to clear an empty depth target each frame. But it may be more useful at larger datasets.
+shlomnissan
+Aug 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+good catch!
+aganders3
+Aug 28, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Agree - thanks!
+I don't think it applies to the multi_viewport example though, does it? We do have occluding layers in the volume viewport there.
+srivarra
+reviewed
+Aug 24, 2026
+View reviewed changes
+Comment thread
+src/renderers/webgl_renderer.ts
+Outdated
+Comment on lines
++210
+to
++222
+const tex = gl.createTexture()!;
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texImage2D(
+gl.TEXTURE_2D,
+0,
+gl.DEPTH_COMPONENT24,
+w,
+h,
+0,
+gl.DEPTH_COMPONENT,
+gl.UNSIGNED_INT,
+null
+);
+srivarra
+Aug 24, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Do you think it's important to have this texture be accounted for in gpuTextureCount() and gpuTextureBytes()? I did some tests locally and it doesn't seem to get that large (at 3840 x 2160 it takes up like 31.6 MiB).
+aganders3
+Aug 28, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Yes, I think this is a worthwhile change.
+aganders3
+Sep 1, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+@shlomnissan's comment below changed my mind on this: this memory cannot be evicted, which is the main use for the memory tracking at the moment. I think it's small enough to ignore for now, but we can revisit if it makes the memory budget unintuitive.
+shlomnissan
+requested changes
+Aug 26, 2026
+View reviewed changes
+shlomnissan
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+enough to refactor here that i feel comfortable requesting changes: simplifying the shader code and encapsulating some of this work is worth it.
+Comment thread
+examples/multi_viewport/main.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/core/layer.ts
+Outdated
+opacity?: number;
+blendMode?: BlendMode;
+occludes?: boolean;
+readsSceneDepth?: boolean;
+shlomnissan
+Aug 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+this is kinda weird. it's a user-facing value that's only used internally by the volume layer which hard-codes its value. it's not a preference, it's how the layer's shader works. i think adding a protected member is probably better:
+```
+protected readsSceneDepth_: boolean = false;
+```
+with an accessor for the renderer. and then override it in the volume layer:
+```
+protected override readsSceneDepth_ = true;
+```
+Comment thread
+src/core/layer.ts
+Outdated
+Comment on lines
++73
+to
++77
+if (this.occludes && this.readsSceneDepth) {
+throw new Error(
+`${this.constructor.name} cannot both occlude and read scene depth.`
+);
+}
+shlomnissan
+Aug 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+if you follow the suggestion above, this probably moves to layer's onAttached function. this becomes more of an internal invariant.
+Comment thread
+src/math/sort_by_distance.ts
+Outdated
+* @param camera - The camera to calculate distances from
+* @returns Input objects sorted-in-place from farthest to closest
+*/
+export function sortBackToFront(
+shlomnissan
+Aug 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+what's the point of exporting these functions in a separate module and implementing one in terms of the other? this feels like unnecessary generalization to me. i don't think idetik should provide these kind of helpers. i would implement sortBackToFront in the volume layer as a private function and delete this module entirely.
+aganders3
+Aug 28, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Agree we shouldn't make these public - I just implemented here as its where the previous version was. We only need one right now though and it's only used in one place, so happy to move it.
+Comment thread
+src/renderers/shaders/volume_frag.glsl
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/renderers/webgl_renderer.ts
+Outdated
+private renderedObjectsPerFrame_ = 0;
+private stencilRef_ = 0;
+private currentViewportSize_: [number, number] = [0, 0];
+private currentViewportOrigin_: [number, number] = [0, 0];
+shlomnissan
+Aug 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+If you follow the previous suggestion this probably goes away.
+Comment thread
+src/renderers/webgl_renderer.ts
+Outdated
+private currentViewportSize_: [number, number] = [0, 0];
+private currentViewportOrigin_: [number, number] = [0, 0];
+private sceneDepthFbo_: WebGLFramebuffer | null = null;
+shlomnissan
+Aug 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+i find passes are much easier to reason about when they're encapsulated in their own object with resources managed there instead of in the main renderer. i would add a WebGLDepthPass that owns the FBO and depth texture:
+bind() lazily creates/resizes the target, then binds the FBO.
+unbind() restores the default framebuffer.
+bindTexture(unit) binds the depth texture so the volume pass can sample it.
+destroy() deletes the FBO and texture; right now the FBO is never freed.
+The pass should own the render target not the render loop.
+Comment thread
+src/renderers/webgl_renderer.ts
+Outdated
+Comment on lines
++141
+to
++142
+if (transparentLayers.some((l) => l.readsSceneDepth)) {
+this.renderSceneDepthToTexture(occludingLayers, viewport.camera, frustum);
+shlomnissan
+Aug 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+good catch!
+Comment thread
+src/renderers/webgl_textures.ts
+Outdated
+return this.textureCount_;
+}
+public get reservedUnit() {
+shlomnissan
+Aug 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+reserve for what and who? if we were to implement virtual textures we may also need reserved units.
+i used to have reserved units in vglx and moved away from it because most of the bindings have the same lifetime but i guess it makes sense here.
+i would consider having something like reservePersistentUnit() that hands out units from the back maxUnits - 1 and have the owner keep track of it (i.e. GLDepthPass or whatever)
+aganders3
+Aug 28, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I think this mechanism makes more sense with the WebGLDepthPass encapsulation.
+aganders3
+force-pushed
+the
+layer-occlusion-prototype
+branch
+3 times, most recently
+from
+20cde42 to
+dc5e6cc
+Compare
+August 28, 2026 01:39
+aganders3
+force-pushed
+the
+volume-scene-depth-prototype
+branch
+2 times, most recently
+from
+7df984d to
+cdc1bc8
+Compare
+August 28, 2026 14:11
+aganders3
+marked this pull request as draft
+August 28, 2026 15:37
+Base automatically changed from
+layer-occlusion-prototype
+to
+main
+August 28, 2026 19:09
+aganders3
+added 9 commits
+August 28, 2026 15:12
+Terminate volume rays at scene depth and composite back-to-front so o…
+…
+98cc9fd
+```
+…paque slices cut the volume
+```
+Cleaning up
+36bc84a
+Move the scene depth target into a WebGLDepthPass that owns its FBO a…
+…
+873d078
+```
+…nd texture unit
+```
+Derive screen-space position from clip position so the volume shader …
+…
+b6cc2f7
+```
+…needs three depth uniforms instead of six
+```
+Make readsSceneDepth a protected member checked on attach instead of …
+…
+4d82c54
+```
+…a layer prop
+```
+Inline back-to-front sorting into the volume layer and drop the sort_…
+…
+4d05b24
+```
+…by_distance module
+```
+Remove stray comment in the multi-viewport example
+59df3e2
+Cleanup
+7c91ff1
+Update depth pass structure
+981cabc
+aganders3
+force-pushed
+the
+volume-scene-depth-prototype
+branch
+from
+6348e95 to
+981cabc
+Compare
+August 28, 2026 19:13
+shlomnissan
+requested changes
+Aug 31, 2026
+View reviewed changes
+Comment thread
+examples/multi_viewport/main.ts
+policy: createPlaybackPolicy({ lod: { min: volumeLod, max: volumeLod } }),
+channelProps,
+});
+volumeLayer.opacityMultiplier = 0.01;
+shlomnissan
+Aug 31, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+this value feels random. is there a way to derive it so opacity multiplier 1.0 means a ray crossing the whole volume at full intensity saturates about once? maybe we can open an issue.
+aganders3
+Sep 1, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+100% agree, I don't understand this parameter at all really. There should be a data-independent way of setting a reasonable default, or at least based on the size/scale of the data. I'll take a look.
+Comment thread
+src/core/layer.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/layers/volume_layer.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/layers/volume_layer.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/renderers/shaders/volume_frag.glsl
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/renderers/shaders/volume_frag.glsl
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/renderers/webgl_depth_pass.ts
+Outdated
+private readonly gl_: WebGL2RenderingContext;
+private readonly state_: WebGLState;
+private readonly textures_: WebGLTextures;
+shlomnissan
+Aug 31, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+i don't think this is the right shape.
+to support this depth pass you added a second texture model to WebGLTextures (createDepthTarget, bindTarget, disposeTarget, and the targets map). none of it has to do with what WebGLTextures is for: a texture-object cache with an upload pipeline.
+the changes to disposeAll is a clear tell because it has to enumerate things it doesn't own.
+meanwhile WebGLDepthPass already mostly owns the resource. it owns the raw texture handle, the framebuffer, the sizing logic, etc. it only delegates creation and deletion so it reads as split to me.
+imo a better shape is letting the pass create/bind/delete its own depth texture. so basically:
+WebGLTextures drops the public methods and the map, back to what it was
+unit allocate stays centralized in reservePersistentUnit(). the renderer owns the unit and takes care of binding it bindTexture() is deleted.
+WebGLDepthPass handles depth texture creation and active/bind.
+i know it means that we're not accounting for the chunk memory budget but i can make an argument that it's better because this is not evictable memory? either way a handful of MBs is probably not a big deal.
+Comment thread
+src/renderers/webgl_depth_pass.ts
+Outdated
+this.unbindFBO();
+}
+private bindFBO(width: number, height: number) {
+shlomnissan
+Aug 31, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+i feel like bindFBO and unbindFBO can be inlined. they don't and probably won't have any other callers and gl_.bindFramebuffer is already clear about what's going on.
+Comment thread
+src/renderers/webgl_depth_pass.ts
+Outdated
+}
+private ensureTarget(width: number, height: number) {
+if (this.texture_ && this.width_ === width && this.height_ === height) {
+shlomnissan
+Aug 31, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+i would split this to improve clarity:
+move the check to the call site (maybe even wrap it in a function hasValidTarget)
+rename the function to createRenderTarget or something along those lines
+depth texture creation should probably live here as well
+something like this:
+```
+if (!this.hasValidTarget(width, height)) {
+  this.createRenderTarget(width, height);
+}
+
+this.gl_.bindFramebuffer(this.gl_.FRAMEBUFFER, this.framebuffer_);
+```
+Comment thread
+src/renderers/webgl_renderer.ts
+Outdated
+Comment on lines
++129
+to
++143
+const drawOccluders = () =>
+this.drawDepthOnly(occludingLayers, viewport.camera, frustum);
+this.depthPass_.renderPrePass(drawOccluders);
+this.resetState();
+const needsSceneDepth =
+occludingLayers.length > 0 &&
+nonOccludingLayers.some((l) => l.readsSceneDepth);
+if (needsSceneDepth) {
+this.depthPass_.renderToTexture(this.width, this.height, drawOccluders);
+this.depthPass_.bindTexture();
+this.resetState();
+}
+shlomnissan
+Aug 31, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+i'm not sure why renderPrePass and renderToTexture are grouped.
+renderPrePass uses none of the depth pass class state. these functions are grouped by theme instead of by data but they're doing unrelated jobs.
+i also think state ownership is split across now. i think the renderer should be responsible for managing the state in general (no need to pass the state object to the depth pass):
+```
+// add two functions to the renderer
+
+private renderDepthPrePass(layers: Layer[], camera: Camera, frustum: Frustum) {
+  this.state_.setColorMask(false);
+  this.state_.setDepthFunc(this.gl_.LESS);
+  this.state_.setPolygonOffset(true);
+
+  this.drawDepthOnly(layers, camera, frustum);
+
+  this.resetState();
+}
+
+private renderDepthTarget(layers: Layer[], camera: Camera, frustum: Frustum) {
+  this.depthPass_.bindTarget(this.width, this.height);
+  this.gl_.clear(this.gl_.DEPTH_BUFFER_BIT);
+  this.state_.setDepthMask(true);
+  this.state_.setDepthFunc(this.gl_.LESS);
+  
+  this.drawDepthOnly(layers, camera, frustum);
+
+  this.depthPass_.unbindTarget();
+  this.resetState();
+}
+```
+and call them from here.
+shlomnissan
+commented
+Aug 31, 2026
+Copy link
+Copy Markdown
+Collaborator
+my blocking comments:
+#737 (comment)
+#737 (comment)
+all other comments are just nits.
+aganders3
+commented
+Sep 1, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Thanks! I wasn't expecting another review here yet, but I was probably headed in some wrong directions so the earlier feedback is helpful. I'll try to incorporate these suggestions and re-request review when done.
+WebGLDepthPass -> WebGLDepthTarget
+846b7b6
+aganders3
+force-pushed
+the
+volume-scene-depth-prototype
+branch
+from
+1354d2e to
+f5588cf
+Compare
+September 1, 2026 21:04
+aganders3
+requested review from
+shlomnissan and
+srivarra
+September 2, 2026 17:10
+aganders3
+marked this pull request as ready for review
+September 2, 2026 17:10
+aganders3
+force-pushed
+the
+volume-scene-depth-prototype
+branch
+from
+f5588cf to
+a4028b6
+Compare
+September 2, 2026 17:10
+Minor fixes
+22bf3a7
+aganders3
+force-pushed
+the
+volume-scene-depth-prototype
+branch
+from
+a4028b6 to
+22bf3a7
+Compare
+September 2, 2026 17:11
+aganders3
+commented
+Sep 2, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Okay I think this is ready for another review. Thanks for all the attention on this so far.
+I changed the name of WebGLDepthPass to WebGLDepthTarget, which I think is more accurate regarding the responsibilities. "Pass" reads more like a verb to me that would including drawing, etc. I'm also open to changing back if this is an established convention or if you disagree.
+shlomnissan
+approved these changes
+Sep 2, 2026
+View reviewed changes
+shlomnissan
+left a comment
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+looks good 👍
+one non-blocking concern!
+the rendering code is accumulating logic that isn't self-describing. i already re-derive the stencil code from scratch every couple of months and this feature adds two more things future-me will find confusing:
+why the depth pre-pass always runs. the answer is an invariant: the color pass never writes depth, so occlusion is established up front even when a viewport is simple enough not to need it. but why does the color pass never writes depth? nothing in the code says that.
+why the depth target exists at all. it's not redundant with the pre-pass, it's there because the volume shader needs depth as data to clamp rays mid-fragment which the hardware depth test can't do. again invisible unless you already know it and easy to forget.
+none of this is a problem with the implementation. the approach is right. it's that the why lives in our heads and in the PR discussion instead of the repo.
+maybe we need a document explaining the visibility model in detail (color pass never writes depth, pre-pass feeds the fixed-function test, depth target feeds shaders that read depth, stencil resolves coplanar overlap, etc). maybe we can slo think harder about naming that hints at purpose (something that ties the depth target to scene depth for shader sampling rather than depth generically.
+either way, this is good to go, but i think documenting this will help us in the future and better to do it now before we forget. maybe we can fold it into a guide on the docsite?
+Comment thread
+src/renderers/webgl_renderer.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+aganders3
+dismissed
+srivarra’s stale review
+September 3, 2026 18:01
+Superseded
+Update names
+739961d
+aganders3
+force-pushed
+the
+volume-scene-depth-prototype
+branch
+from
+6984808 to
+739961d
+Compare
+September 3, 2026 18:45
+aganders3
+commented
+Sep 3, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Thanks! We chatted in our sync but to summarize: I agree the structure is confusing and too much is in our collective memory. My concern is more that the structure makes sense only for exactly our current feature set, but may be inflexible and need to be continually re-thought when new features are added that are not compatible.
+I think starting by documenting the renderer in detail is probably the right approach.
+Hide details
+View details
+aganders3
+merged commit 52efe2c
+into
+main
+Sep 3, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+aganders3
+deleted the
+volume-scene-depth-prototype
+branch
+September 3, 2026 18:48
+czi-github-helper
+Bot
+commented
+Sep 3, 2026
+Copy link
+Copy Markdown
+🎉 This PR is included in version 0.39.0 🎉
+The release is available on:
+npm package (@latest dist-tag)
+GitHub release
+Your semantic-release bot 📦🚀
+czi-github-helper
+Bot
+added
+the
+released
+label
+Sep 3, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+released
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

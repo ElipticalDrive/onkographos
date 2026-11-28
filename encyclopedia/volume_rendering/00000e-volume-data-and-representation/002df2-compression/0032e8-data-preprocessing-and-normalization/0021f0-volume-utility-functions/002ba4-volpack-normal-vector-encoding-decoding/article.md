@@ -1,0 +1,119 @@
+# VolPack Normal Vector Encoding/Decoding
+
+Also called: vpNormal, vpNormalIndex
+
+## Overview
+VolPack normal vector encoding is a method for compressing a normalized 3D surface normal into a single 16-bit integer for efficient storage and transmission in volume rendering pipelines [S1]. It solves the problem of high memory bandwidth requirements for gradient data by replacing three floating-point components with one integer, which is then decoded back to double-precision components for shading calculations [S1]. It differs from general vector normalization [3145-vector-normalization.md] by providing a specific lossy integer packing scheme tailored for the VolPack shading library, and from density-to-vector encoding [Density-to-Vector Encoding] by targeting geometric direction rather than scalar similarity.
+
+## How it works
+**Inputs and Outputs:**
+*   **Encoding Input:** A normalized 3D vector $(n_x, n_y, n_z)$ where $n_x^2 + n_y^2 + n_z^2 = 1$ [S1].
+*   **Encoding Output:** A 16-bit integer representing the encoded normal [S1].
+*   **Decoding Input:** The 16-bit encoded integer [S1].
+*   **Decoding Output:** Three double-precision values $(n_x, n_y, n_z)$ stored at provided pointers [S1].
+
+**Data Structures:**
+The encoded normal is stored as a signed 16-bit integer (`int` in C, typically 2 bytes). The internal bit-packing layout is not explicitly defined in the source text, but the function signature implies a direct mapping from the normalized vector components to this integer format [S1].
+
+**Steps:**
+
+1.  **Encoding (`vpNormalIndex`):**
+    *   Input: `nx`, `ny`, `nz` (double).
+    *   Constraint: The vector must be normalized. If the input is not normalized, the result is undefined [S1].
+    *   Process: The function maps the three normalized components into a 16-bit integer. The exact mathematical mapping (e.g., quantization levels, octahedral packing, or lookup table) is not described in the provided text [S1].
+    *   Return: The 16-bit integer.
+
+2.  **Decoding (`vpNormal`):**
+    *   Input: `n` (16-bit integer), pointers to `nx`, `ny`, `nz` (double).
+    *   Process: The function unpacks the 16-bit integer back into three double-precision components.
+    *   Output: The components are written to the memory locations pointed to by `nx`, `ny`, and `nz` [S1].
+
+**Pseudocode:**
+The following pseudocode represents the interface and constraints. The internal implementation details of the bit-packing algorithm are not provided in the sources [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def vp_normal_index(nx: float, ny: float, nz: float) -> int:
+    """
+    Encodes a normalized 3D vector into a 16-bit integer.
+    
+    Args:
+        nx: X component of the normal vector.
+        ny: Y component of the normal vector.
+        nz: Z component of the normal vector.
+        
+    Returns:
+        A 16-bit integer encoding the normal.
+        
+    Raises:
+        ValueError: If the vector is not normalized.
+    """
+    # Constraint check: nx*nx + ny*ny + nz*nz must equal 1.0
+    # Note: Exact tolerance for floating point comparison is not specified [S1].
+    magnitude_sq = nx*nx + ny*ny + nz*nz
+    if abs(magnitude_sq - 1.0) > 1e-6: # [G] Standard epsilon for double precision normalization check
+        raise ValueError("Vector must be normalized (nx^2 + ny^2 + nz^2 == 1)")
+    
+    # Internal bit-packing logic is not described in the source [S1].
+    # This step is a placeholder for the proprietary VolPack encoding.
+    encoded_int = _internal_volpack_encode(nx, ny, nz)
+    return encoded_int
+
+def vp_normal(n: int) -> tuple:
+    """
+    Decodes a 16-bit encoded normal back into its vector components.
+    
+    Args:
+        n: The 16-bit encoded normal integer.
+        
+    Returns:
+        A tuple (nx, ny, nz) of double-precision floats.
+    """
+    # Internal unpacking logic is not described in the source [S1].
+    nx, ny, nz = _internal_volpack_decode(n)
+    return (nx, ny, nz)
+```
+
+**Parameters:**
+*   `nx`, `ny`, `nz`: Normalized vector components. Must satisfy $n_x^2 + n_y^2 + n_z^2 = 1$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Normalization:** The input vector to `vpNormalIndex` must be strictly normalized. Passing non-normalized vectors results in undefined behavior [S1].
+*   **Precision:** The decoding returns double-precision values, but the encoding is lossy (16-bit integer). Precision loss occurs during the encoding step [S1].
+
+## Subtopics
+
+### Density-to-Vector Encoding
+A scheme to encode a normalized scalar density value into a vector of specified dimensions to enable homomorphic dot-product similarity checks [S2, unofficial]. It is based on HSV-to-RGB color conversion principles to produce natural-feeling results [S2, unofficial].
+*   **Definition:** Encodes a scalar density into a multi-dimensional vector such that the dot product with a target vector indicates similarity [S2, unofficial].
+*   **Steps:**
+    1.  Initialize vector $v$ of length $dim$ with zeros [S2, unofficial].
+    2.  Calculate $s = density \times 2 \times (dim - 1)$ [S2, unofficial].
+    3.  Calculate $f = \lfloor (s + 1) / 2 \rfloor$ [S2, unofficial].
+    4.  Set $d = \lfloor f \rfloor$ [S2, unofficial].
+    5.  Set $v[d] = 1$ [S2, unofficial].
+    6.  If $d > 0$ and $d \neq f$, set $v[d - 1] = 1 - (s - \lfloor s \rfloor)$ [S2, unofficial].
+    7.  Else if $d + 1 < dim$ and $d < f$, set $v[d + 1] = s - \lfloor s \rfloor$ [S2, unofficial].
+    8.  Normalize vector $v$ so the dot product result is between 0 and 1, with the maximum result (1) occurring at the user-defined emphasizing density [S2, unofficial].
+*   **Parameters:**
+    *   `density`: The normalized density value to encode [S2, unofficial].
+    *   `dim`: The number of dimensions of the returned vector. Must be consistent during encryption and emphasizing density encoding [S2, unofficial].
+*   **Pitfalls:** The dimension count (`dim`) must be identical for both the volume encryption encoding and the user-defined emphasizing density encoding; otherwise, the dot product will be invalid [S2, unofficial].
+*   **Comparison:** Increasing dimensions makes the dot product response curve steeper and narrower, improving density selectivity, but increases storage size and computation count [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Encoding and decoding are $O(1)$ operations [S1].
+*   **Memory Complexity:** Reduces storage from 3 double-precision floats (24 bytes) to 1 16-bit integer (2 bytes), a reduction of approximately 92% [S1].
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Significant memory bandwidth reduction for normal data in volume rendering [S1].
+*   **Limitations:** Lossy compression; precision is limited to the 16-bit integer format [S1].
+*   **When to use:** When using VolPack shaders and memory bandwidth for normals is a bottleneck [S1].
+*   **When not to use:** When high-precision normals are required or when not using VolPack [S1].
+
+## Background
+VolPack is a volume rendering library developed by Stanford University [S1]. The `vpNormalIndex` and `vpNormal` functions are part of the VolPack User's Guide, providing utilities for normal vector handling within the library's shading routines [S1]. The density-to-vector encoding is described in the context of homomorphic-encrypted volume rendering, utilizing HSV-to-RGB conversion principles [S2, unofficial].
+
+## Sources
+[S1] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
+[S2] Homomorphic-Encrypted Volume Rendering, https://www.computer.org/csdl/journal/tg/2021/02/09222562/1nTqvh6tnr2, fetched 2026-10-27 (unofficial)

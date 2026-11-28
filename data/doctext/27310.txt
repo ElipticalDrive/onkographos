@@ -1,0 +1,1565 @@
+# Volume Rendering Visualization in 3D
+
+* Ray Casting
+* Volume Rendering
+* AABB ray intersection
+
+## Overview
+I used `plotly` for interactive 3D visualization.
+
+### Plot
+
+![スクリーンショット 2023-09-26 午後3 25 15](https://github.com/Rintarooo/volume_rendering_plot/assets/51239551/37e56d6e-6934-4a5a-a195-c63e4133fb0a)
+![スクリーンショット 2023-09-26 午後3 26 22](https://github.com/Rintarooo/volume_rendering_plot/assets/51239551/a15098b5-37e4-4513-b0ee-40773c02ed43)
+![スクリーンショット 2023-09-26 午後3 26 31](https://github.com/Rintarooo/volume_rendering_plot/assets/51239551/70e32dc5-9451-4bbe-acf4-9e6aff7f9760)
+
+### Rendered Image
+![render](https://github.com/Rintarooo/volume_rendering_plot/assets/51239551/cfea8558-9fd0-4cce-8912-0e5f8cb30a4f)
+
+### density plot for a ray
+![density_plot](https://github.com/Rintarooo/volume_rendering_plot/assets/51239551/15e9a172-15c0-44c4-9840-a63dc946be7a)
+
+
+### Maya
+![スクリーンショット](https://github.com/Rintarooo/volume_rendering_plot/assets/51239551/9a2a5974-7d53-44fe-b2b7-d0854ad14c36)
+
+
+<!-- <img src="https://github.com/Rintarooo/volume_rendering_plot/assets/51239551/9a2a5974-7d53-44fe-b2b7-d0854ad14c36)" width="30"> -->
+<!-- <img src="https://github.com/Rintarooo/volume_rendering_plot/assets/51239551/9a2a5974-7d53-44fe-b2b7-d0854ad14c36)"> -->
+
+## Usage
+### Execute Python
+```bash
+poetry run python -m main config/cfg.yaml
+```
+
+modify `src/utils/logger_global.py` and `config/cfg.yaml` as you like.
+
+
+## Setup
+
+* pyenv + poetry
+    * python 3.10.1
+    * plotly
+
+### pyenv
+```bash
+# version of pyenv
+pyenv --version
+
+# version of python installed in pyenv
+pyenv versions
+
+# list v3.10 python in pyenv
+pyenv install --list | grep -i "3.10."
+
+# install python v3.10.1 in pyenv
+pyenv install 3.10.1
+
+# create '.python-version' file in the current directory
+pyenv local 3.10.1
+
+# confirm * points at v3.10.1
+pyenv versions
+```
+
+### poetry
+```bash
+# create .venv directory in the current directory
+poetry config virtualenvs.in-project true
+
+# Enter all [y]
+poetry init --python ">=3.9,<3.13"
+
+# Make sure you correctly installed python, get in poetry shell
+poetry shell
+# in poetry shell, this command should output 'Python 3.10.1'
+python -V
+
+# add packages
+poetry add numpy matplotlib plotly scipy pyyaml
+```
+
+## Reference
+* https://github.com/shauseth/pyramidify
+
+### main.py
+```
+import numpy as np
+import plotly.graph_objects as go
+import sys
+
+from src.utils.logger_global import logger
+from src.utils.get_yaml import YamlLoader
+from src.utils.camera_plotter import CameraPlotter
+from src.utils.camera_mover import CameraMover
+
+from src.volume_rendering.cube_plotter import CubePlotter
+from src.volume_rendering.ray_plotter import RayPlotter
+from src.volume_rendering.ray_caster import RayCaster
+from src.volume_rendering.aabb import AABB
+from src.volume_rendering.volume_renderer import render_img_from_volume
+
+
+if __name__ == "__main__":
+    logger.debug(f"len(sys.argv): {len(sys.argv)}")
+    assert len(sys.argv) == 2, "specify yaml file\npoetry run python -m main config/cfg.yaml"
+    yaml_loader = YamlLoader(sys.argv[1])
+    cfg = yaml_loader.load_yaml()
+
+    cam_pos = np.array(cfg["cam_pos"])
+    cam_lookat = np.array(cfg["cam_lookat"])
+    cam_up = np.array(cfg["cam_up"])
+    cam_right = np.cross(cam_lookat, cam_up)
+
+    fov = cfg["fov"]
+    w_, h_ = cfg["w_"], cfg["h_"]
+
+    cam_plotter = CameraPlotter(w_, h_, cam_pos, cam_lookat, cam_up, cam_right, fov)
+    raycaster = RayCaster(w_, h_, cam_pos, cam_lookat, cam_up, cam_right, fov)
+    ray_plotter = RayPlotter()
+
+    pos_cube_center = cfg["pos_cube_center"]
+    mint, maxt = cfg["mint"], cfg["maxt"]
+    rgba = 'rgba(0,0,0,0.2)'
+    cube_plotter = CubePlotter(pos_cube_center, mint, maxt, rgba)
+    trace_cube = cube_plotter.get_trace_cube()
+    cam_plotter.fig.add_trace(trace_cube)
+
+    grid_resolution = cfg["grid_resolution"]    
+    aabb = AABB(pos_cube_center, mint, maxt, grid_resolution)
+
+    thres_pos = 0.8#1.0#0.5#0.65
+    assert thres_pos > 0, "thres_pos should be positive"
+    high_density_val = 0.95
+    min_density_val, max_density_val = 0.2, 0.95#0.1, 0.2
+    density_mode = cfg["density_mode"]
+    aabb.create_density_volume(thres_pos, min_density_val, max_density_val, high_density_val, density_mode)
+
+    
+    num_cam = cfg["num_cam"]
+    for i in range(num_cam):
+
+        cam_mover = CameraMover()        
+        step_x, step_y, step_z = cfg["cam_step"]
+        rotate_x, rotate_y, rotate_z = cfg["cam_rotate"]    
+        if cfg["cam_rotate_around_aim_flag"]:
+            # M_ext = cam_mover.M_ext
+            # _, cam_pos_world, cam_lookat_world, _, _ = cam_plotter.cam2world(M_ext)
+            cam_pos_world = np.array([step_x,step_y,step_z])
+            aim_pos_world = np.array(cfg["aim_pos_world"])
+            # cam_mover.rotate_aim_pos_world(cam_pos_world, cam_lookat_world, aim_pos_world)
+            cam_mover.rotate_aim_pos_world(cam_pos_world, cam_lookat, aim_pos_world)
+        else:
+            cam_mover.step_x(step_x)
+            cam_mover.step_y(step_y)
+            cam_mover.step_z(step_z)
+            cam_mover.rotate_x(rotate_x)
+            cam_mover.rotate_y(rotate_y)
+            cam_mover.rotate_z(rotate_z)
+
+        M_ext = cam_mover.M_ext
+        cam_plotter.add_cam(M_ext, plot_color='blue', plot_name='cam'+str(i))
+        cam_plotter.add_trace_cam_coord()
+        # cam_plotter.add_trace_cam_screen()
+
+        ray_dirs_world, cam_pos_world = raycaster.raycast(M_ext)
+        logger.debug(f"ray_dirs_world.shape: {ray_dirs_world.shape}, cam_pos_world: {cam_pos_world}")
+
+        # ray cast
+        tmin_0 = 4.5#3.5
+        tmax_0 = 9.5#4.5
+        tmin = tmin_0
+        tmax = tmax_0
+        assert tmin < tmax, "ray marching range"
+        trace_ray_lis = []
+        trace_sampling_point_lis = []
+
+        num_points = cfg["num_points"]
+        tmax_margin = 2.0
+
+
+        light_pos = np.array([0.,0.,0.])
+        render_img_from_volume(ray_dirs_world, w_, h_, num_points, aabb, cam_pos_world, light_pos)
+
+
+        ray_plot_flag = cfg["ray_plot_flag"]
+        plot_thres_reso = cfg["ray_plot_thres_reso"]
+        if w_ >= plot_thres_reso:
+            ray_plot_flag = False
+            logger.info(f"not plot ray. beacause w_ is over threshold: {w_} >= {plot_thres_reso}")
+        if not ray_plot_flag:
+            continue
+
+        for px in range(w_):
+            for py in range(h_):
+            # for ray_idx in ray_idx_plot_lis:
+                ray_dir_world = ray_dirs_world[px][py]
+                tmin, tmax, if_intersect = aabb.ray_intersect_and_get_mint(ray_dir_world, cam_pos_world)
+                if not if_intersect:
+                    tmin = tmin_0
+                    tmax = tmax_0
+                assert tmin < tmax, "ray marching range"
+                ray_idx = px*w_+py
+                logger.info(f"ray idx: {ray_idx}/{w_*h_}")
+                traces_ray = ray_plotter.get_traces_ray(cam_pos_world, ray_dir_world, tmax, tmax_margin, if_intersect, plot_name= "ray"+str(ray_idx))
+                cam_plotter.fig.add_traces(traces_ray)
+
+                if if_intersect:
+                    dt = (tmax-tmin)/num_points
+                    # r(t) = o + td = o + (tmin+dt*i)d
+                    sampling_points = np.array([cam_pos_world + (tmin + dt*i) * ray_dir_world for i in range(num_points)])
+                    trace_sampling_points = ray_plotter.get_trace_sampling_point(sampling_points)
+                    cam_plotter.fig.add_trace(trace_sampling_points)
+        
+    if cfg["plot_flag"]:
+        cam_plotter.fig_show()
+```
+
+### src/utils/__init__.py
+```
+
+```
+
+### src/utils/base_plotter.py
+```
+import plotly.graph_objects as go
+
+class BasePlotter:
+    def __init__(self):
+        self.fig = go.Figure()
+    
+    def fig_show(self, plot_range = 15):
+        self.fig.update_layout(
+            scene =dict(
+                xaxis = dict(range=(-plot_range, plot_range)),
+                yaxis = dict(range=(-plot_range, plot_range)),
+                zaxis = dict(range=(-plot_range, plot_range)),
+                camera = dict(
+                    up = dict(x=0,y=1,z=0),
+                    ),
+                aspectmode='cube'
+            )
+        )
+        self.fig.update_layout(showlegend=False)
+        self.fig.show()
+```
+
+### src/utils/camera_mover.py
+```
+import numpy as np
+
+from src.utils.logger_global import logger
+from src.utils.np_vec import normalize
+
+class CameraMover:
+    def __init__(self):
+        self.M_ext = M_ext = np.array([[1, 0, 0, 0],
+                                       [0, 1, 0, 0],
+                                       [0, 0, 1, 0],
+                                       [0, 0, 0, 1]], dtype=float)
+
+    def step_x(self, size):
+        # self.M_ext[0, 3] += size
+        self.M_ext[0, 3] -= size
+
+    def step_y(self, size):
+        # self.M_ext[1, 3] += size
+        self.M_ext[1, 3] -= size
+
+    def step_z(self, size):
+        # self.M_ext[2, 3] += size
+        self.M_ext[2, 3] -= size
+
+    def rotate_x(self, angle):
+        angle = np.radians(angle)
+        R_x = np.array([[1, 0, 0, 0],
+                          [0, np.cos(angle), -np.sin(angle), 0],
+                          [0, np.sin(angle), np.cos(angle), 0],
+                          [0, 0, 0, 1]], dtype=float)
+        self.M_ext = R_x @ self.M_ext
+
+    def rotate_y(self, angle):
+        angle = np.radians(angle)
+        R_y = np.array([[np.cos(angle), 0, np.sin(angle), 0],
+                            [0, 1, 0, 0],
+                            [-np.sin(angle), 0, np.cos(angle), 0],
+                            [0, 0, 0, 1]], dtype=float)
+        """
+        from y axis, z axis goes right and x axis goes bottom, not up 
+        """
+        # R_y = np.array([[np.cos(angle), 0, -np.sin(angle), 0],
+        #                     [0, 1, 0, 0],
+        #                     [np.sin(angle), 0, np.cos(angle), 0],
+        #                     [0, 0, 0, 1]], dtype=float)
+        self.M_ext = R_y @ self.M_ext
+
+    def rotate_z(self, angle):
+        angle = np.radians(angle)
+        R_z = np.array([[np.cos(angle), -np.sin(angle), 0, 0],
+                          [np.sin(angle), np.cos(angle), 0, 0],
+                          [0, 0, 1, 0],
+                          [0, 0, 0, 1]], dtype=float)
+        self.M_ext = R_z @ self.M_ext
+
+    def rotate_aim_pos_world(self, cam_pos, cam_lookat, aim_pos):
+        # https://stackoverflow.com/questions/21830340/understanding-glmlookat
+        z_ = aim_pos - cam_pos
+        logger.debug(f"aim_pos: {aim_pos},  cam_pos: {cam_pos}, [z_]: [{z_}]")
+        # z_[2] *= cam_lookat[2]
+        z_ *= cam_lookat[2]
+        logger.debug(f"z_[2] *= cam_lookat[2] aim_pos: {aim_pos},  cam_pos: {cam_pos}, [z_]: [{z_}]")
+        z_ = normalize(z_)
+        logger.debug(f"z_ = normalize(z_) aim_pos: {aim_pos},  cam_pos: {cam_pos}, [z_]: [{z_}]")
+        y_ = np.array([0.,1.,0.])
+        # x_ = normalize(np.cross(z_, y_))
+        x_ = normalize(np.cross(y_, z_))# c = np.cross(a, b) right hand. a is index finger, b is thumb. c = middle finger
+        logger.debug(f"[x_, y_, z_]: [{x_},{y_},{z_}]")
+        # recompute y_
+        # y_ = normalize(np.cross(x_, z_))
+        y_ = normalize(np.cross(z_, x_))
+        logger.debug(f"[x_, y_, z_]: [{x_},{y_},{z_}]")
+        # R_ = np.array([[x_[0],y_[0],z_[0], 0],
+        #                [x_[1],y_[1],z_[1], 0],
+        #                [x_[2],y_[2],z_[2], 0],
+        #                [0, 0, 0, 1]], dtype=float)
+        # R_ = np.array([[-x_[0],-y_[0],-z_[0], 0],
+        #                [-x_[1],-y_[1],-z_[1], 0],
+        #                [-x_[2],-y_[2],-z_[2], 0],
+        #                [0, 0, 0, 1]], dtype=float)
+        # self.rotate_z(90)
+        # logger.debug(f"cam_pos: {cam_pos}")
+        # R_ = np.array([[x_[0],y_[0],z_[0], -cam_pos[0]],
+        #                [x_[1],y_[1],z_[1], -cam_pos[1]],
+        #                [x_[2],y_[2],z_[2], -cam_pos[2]],
+        #                [0, 0, 0, 1]], dtype=float)
+        # R_ = np.array([[x_[0],y_[0],z_[0], 0],
+        #                [x_[1],y_[1],z_[1], 0],
+        #                [x_[2],y_[2],z_[2], 0],
+        #                [0, 0, 0, 1]], dtype=float)
+        # R_ = np.array([[x_[0],y_[0],z_[0], 0],
+        #                [x_[1],y_[1],z_[1], 0],
+        #                [x_[2],y_[2],z_[2], 0],
+        #                [-np.dot(x_, cam_pos), -np.dot(y_, cam_pos), -np.dot(z_, cam_pos), 1]], dtype=float)
+        # R_ = np.array([[x_[0],x_[1],x_[2], 0],
+        #                [y_[0],y_[1],y_[2], 0],
+        #                [z_[0],z_[1],z_[2], 0],
+        #                [0, 0, 0, 0]], dtype=float)
+        R_ = np.array([[x_[0],x_[1],x_[2], -np.dot(x_, cam_pos)],
+                       [y_[0],y_[1],y_[2], -np.dot(y_, cam_pos)],
+                       [z_[0],z_[1],z_[2], -np.dot(z_, cam_pos)],
+                       [0, 0, 0, 0]], dtype=float)
+        # self.M_ext = R_
+        
+        logger.debug(f"self.M_ext: {self.M_ext}")
+        # self.rotate_y(90)
+        self.M_ext = R_ @ self.M_ext
+        # self.M_ext = R_
+        logger.debug(f"R_ @ self.M_ext: {self.M_ext}")
+        
+
+if __name__ == "__main__":
+    from logger_global import logger
+    mover = CameraMover()
+    num_camera = 2
+    for i in range(num_camera):
+        camera_mover = CameraMover()
+        radius = 5
+        angle = np.radians(360/num_camera * i)
+        step_x = radius*np.cos(angle)
+        step_z = radius*np.sin(angle)
+        camera_mover.step_x(step_x)
+        camera_mover.step_z(step_z)
+                
+        # camera_mover.rotate_y(10*i)
+        # camera_mover.rotate_x(20*i)
+        # camera_mover.rotate_z(20*i)
+        M_ext = camera_mover.M_ext
+
+        # M_ext = np.array(frame['transform_matrix'])
+        # n = 1
+        # plotter.add_camera(M_ext, color='blue', name='frame'+str(i))
+        # plotter.add_camera_coord(M_ext)
+        # plotter.add_rays(M_ext)
+```
+
+### src/utils/camera_plotter.py
+```
+import numpy as np
+import plotly.graph_objects as go
+
+from src.utils.logger_global import logger
+from src.utils.base_plotter import BasePlotter
+from src.utils.np_vec import normalize
+from src.utils.camera_mover import CameraMover
+from src.volume_rendering.cube_plotter import CubePlotter
+
+# poetry run python -m src.utils.camera_plotter
+
+class CameraPlotter(BasePlotter):
+    def __init__(self, w_, h_, cam_pos, cam_lookat, cam_up, cam_right, fov = 45):
+        super().__init__()
+        self.cam_pos = cam_pos
+        self.cam_lookat = cam_lookat
+        self.cam_up = cam_up
+        self.cam_right = cam_right
+        # self.look_dir = normalize(self.cam_lookat - self.cam_pos)# look direction
+        # self.cam_right = np.cross(self.look_dir, self.cam_up)
+        
+        self.cam_pyramid, self.lines = self.get_pyramid()
+        
+        self.w_ = w_
+        self.h_ = h_
+        # カメラからスクリーンまでの距離
+        self.fl_x = w_ / (2. * np.tan(np.radians(fov) * 0.5))
+        self.fl_y = h_ / (2. * np.tan(np.radians(fov) * 0.5))
+
+
+        # self.plot_scale = plot_scale
+        # logger.debug(f"self.plot_scale: {self.plot_scale}")
+        self.cam_pyramid_world_lis = []
+        self.cam_pos_world_lis = []
+        self.cam_up_world_lis = []
+        self.cam_lookat_world_lis = []
+        self.cam_right_world_lis = []
+        self.cam_plot_name_lis = []
+        self.ray_dirs_world_lis = []
+
+        # self.fig = fig
+
+
+    def get_pyramid(self):
+        # pyramid verticies
+        # points = [[ 0,  w_/2,  w_/2, -w_/2, -w_/2], 
+        #                [ 0,  h_/2, -h_/2, -h_/2, h_/2],
+        #                [ 0,  -1.0,  -1.0,  -1.0,  -1.0]] # towards -z
+        # points = [[ 0,  1., 1., -1., -1.],  
+        #         [ 0,  1., -1., -1., 1.],
+        #         [ 0,  1., 1., 1., 1.]] # towards z
+        points = [[ 0,  1., 1., -1., -1.],  
+                [ 0,  1., -1., -1., 1.],
+                [ 0,  -1., -1., -1., -1.]] # towards -z
+        
+        # pyramid lines
+        lines = [[1, 2], [2, 3], [3, 4], [4, 1], 
+                [0, 1], [0, 2], [0, 3], [0, 4]]
+        return points, lines
+
+
+    def cam2world(self, M_ext):
+        """
+        input
+        M_ext: 4x4 mat
+        M_ext convert 3d vector x from world to cam.
+        x_c = M_ext * x_w
+
+
+        return
+        R: 3x3 mat
+        t: 3x1 vec
+
+        """
+        R = M_ext[:3, :3] # rotation matrix
+        t = M_ext[:3, 3] # translation vector
+
+        # cam = np.array(self.cam_pyramid) * self.cam_size
+        # cam[0, :] *= np.tan(self.ca_x/2)
+        # cam[1, :] *= np.tan(self.ca_y/2)
+
+        cam_pyramid_world = np.array(self.cam_pyramid)
+        # cam *= self.plot_scale
+        # logger.debug(f"cam_pyramid_world: {cam_pyramid_world}")
+        ## [x',y',z'] = [x/fl_x, y/fl_y, 1]
+        cam_pyramid_world[0,:] *= 1./self.fl_x
+        cam_pyramid_world[1,:] *= 1./self.fl_y
+        # cam_pyramid_world[2,:] *= self.fl_y
+
+        # logger.debug(f"after cam_pyramid_world: {cam_pyramid_world}")
+
+
+        # cam = -((R @ cam).T - t).T        
+        # cam = R.T @ cam - R.T @ t
+
+        num_points = len(self.cam_pyramid[0])
+        for i in range(num_points):
+            # print("cam[:,i]: ", cam[:,i])
+            cam_pyramid_world[:,i] = R.T @ cam_pyramid_world[:,i] - R.T @ t
+
+        # cam = R.T @ cam - R.T @ t
+        # np.linalg.inv
+
+        cam_pos_world = R.T @ self.cam_pos - R.T @ t
+        cam_lookat_world = R.T @ self.cam_lookat - R.T @ t
+        cam_up_world = R.T @ self.cam_up - R.T @ t
+        cam_right_world = R.T @ self.cam_right - R.T @ t
+        return cam_pyramid_world, cam_pos_world, cam_lookat_world, cam_up_world, cam_right_world
+
+    def add_cam(self, M_ext, plot_color, plot_name):
+        logger.debug(f"plot_name: {plot_name}, M_ext: {M_ext}")
+        cam_pyramid_world, cam_pos_world, cam_lookat_world, cam_up_world, cam_right_world = self.cam2world(M_ext)
+        logger.debug(f"plot_name: {plot_name}, cam_pos: {self.cam_pos}, cam_pos_world: {cam_pos_world}")
+        # self.cam_pyramid_world_lis.append((cam_pyramid_world, plot_color, plot_name))
+        self.cam_pyramid_world_lis.append(cam_pyramid_world)
+        self.cam_pos_world_lis.append(cam_pos_world)
+        self.cam_up_world_lis.append(cam_up_world)
+        self.cam_lookat_world_lis.append(cam_lookat_world)
+        self.cam_right_world_lis.append(cam_right_world)
+        self.cam_plot_name_lis.append(plot_name)
+    
+    def update_cam(self, M_ext, plot_color, plot_name):
+        cam_pyramid_world = self.cam2world(M_ext)
+        del self.cam_pyramid_world_lis[-1]
+        # self.cam_lis.append((cam, plot_color, plot_name))
+    
+    def add_trace_cam_coord(self):
+        assert len(self.cam_pos_world_lis) > 0, "you should call method, add_cam"
+        for i in range(len(self.cam_pos_world_lis)):
+            cam_pos = self.cam_pos_world_lis[i]
+            cam_up = self.cam_up_world_lis[i]
+            cam_lookat = self.cam_lookat_world_lis[i]
+            cam_right = self.cam_right_world_lis[i]
+            plot_name = self.cam_plot_name_lis[i]
+            trace1 = {
+                "line": {"width": 9}, 
+                "mode": "lines", 
+                "name": plot_name, 
+                "type": "scatter3d", 
+                "x": [cam_pos[0], cam_up[0]], 
+                "y": [cam_pos[1], cam_up[1]], 
+                "z": [cam_pos[2], cam_up[2]], 
+                "marker": {"color": "rgb(0, 200, 0)"}, 
+                "showlegend": False
+            }
+            trace2 = {
+                "name": "cam_up", 
+                "type": "cone", 
+                "u": [cam_up[0]-cam_pos[0]], # 矢印の終点のx座標
+                "v": [cam_up[1]-cam_pos[1]], 
+                "w": [cam_up[2]-cam_pos[2]], 
+                "x": [cam_up[0]], # 矢印の始点のx座標
+                "y": [cam_up[1]], 
+                "z": [cam_up[2]], 
+                "sizeref": 0.1, 
+                "lighting": {"ambient": 0.8}, 
+                "sizemode": "scaled", 
+                "hoverinfo": "x+y+z+name", 
+                "colorscale": [[0.0, 'rgb(0,200,0)'],[1.0, 'rgb(0,200,0)']],
+                "showscale": False, 
+                "autocolorscale": False
+            }
+            trace3 = {
+                "line": {"width": 9}, 
+                "mode": "lines", 
+                "name": plot_name, 
+                "type": "scatter3d", 
+                "x": [cam_pos[0], cam_right[0]], 
+                "y": [cam_pos[1], cam_right[1]], 
+                "z": [cam_pos[2], cam_right[2]], 
+                "marker": {"color": "rgb(200, 0, 0)"}, 
+                "showlegend": False
+            }
+            trace4 = {
+                "name": "cam_right", 
+                "type": "cone", 
+                "u": [cam_right[0]-cam_pos[0]], # 矢印の終点のx座標
+                "v": [cam_right[1]-cam_pos[1]], 
+                "w": [cam_right[2]-cam_pos[2]], 
+                "x": [cam_right[0]], # 矢印の始点のx座標
+                "y": [cam_right[1]], 
+                "z": [cam_right[2]], 
+                "sizeref": 0.1, 
+                "lighting": {"ambient": 0.8}, 
+                "sizemode": "scaled", 
+                "hoverinfo": "x+y+z+name", 
+                "colorscale": [[0.0, 'rgb(200,0,0)'],[1.0, 'rgb(200,0,0)']],
+                "showscale": False, 
+                "autocolorscale": False
+            }
+            trace5 = {
+                "line": {"width": 9}, 
+                "mode": "lines", 
+                "name": plot_name, 
+                "type": "scatter3d", 
+                "x": [cam_pos[0], cam_lookat[0]], 
+                "y": [cam_pos[1], cam_lookat[1]], 
+                "z": [cam_pos[2], cam_lookat[2]], 
+                "marker": {"color": "rgb(0, 0, 200)"}, 
+                "showlegend": False
+            }
+            trace6 = {
+                "name": "cam_lookat", 
+                "type": "cone", 
+                "u": [cam_lookat[0]-cam_pos[0]], # 矢印の終点のx座標
+                "v": [cam_lookat[1]-cam_pos[1]], 
+                "w": [cam_lookat[2]-cam_pos[2]], 
+                "x": [cam_lookat[0]], # 矢印の始点のx座標
+                "y": [cam_lookat[1]], 
+                "z": [cam_lookat[2]], 
+                "sizeref": 0.1, 
+                "lighting": {"ambient": 0.8}, 
+                "sizemode": "scaled", 
+                "hoverinfo": "x+y+z+name", 
+                "colorscale": [[0.0, 'rgb(0,0,200)'],[1.0, 'rgb(0,0,200)']],
+                "showscale": False, 
+                "autocolorscale": False
+            }
+            trace_cam_coord = [trace1, trace2, trace3, trace4, trace5, trace6]
+            self.fig.add_traces(trace_cam_coord)
+
+
+    def add_trace_cam_screen(self):
+        color='blue'
+        # name='cam-screen'
+        # square draw
+        for i in range(len(self.cam_pyramid_world_lis)):
+            cam = self.cam_pyramid_world_lis[i]
+            name = self.cam_plot_name_lis[i]
+            trace_screen_lines = []
+            for i, j in self.lines:
+                x, y, z = [[axis[i], axis[j]] for axis in cam]
+                # logger.debug(f"lines: [{x},{y},{z}]")
+                # x, y, z = [[x, y, z][i] + cam_pos[i] for i in range(3)]
+                # logger.debug(f"lines + cam_pos: [{x},{y},{z}]")
+                trace = go.Scatter3d(x=x, y=y, z=z, mode='lines', line_width=2, line_color=color, name=name)
+                trace_screen_lines.append(trace)
+            x, y, z = cam[:, 1:]
+            # logger.debug(f"x,y,z: {x}, {y}, {z}, name: {name}")
+            trace_screen_mesh = [go.Mesh3d(x=x, y=y, z=z, opacity=0.2, color=color, name=name)]
+            self.fig.add_traces(trace_screen_lines + trace_screen_mesh)
+
+        # boarder in square draw
+        # for i in range(len(pxl_boarders_x)):
+        #     x, y, z = [[pxl_boarders_x[i], pxl_boarders_y[j]] for axis in cam]
+        # trace_boarder = go.Scatter3d(x=pxl_boarders_x, y=pxl_boarders_y, z=[cam[-1][-1] for _ in range(len(pxl_boarders_x))], mode='lines', line_width=2, line_color=color, name="pixel")
+        # grid = np.mgrid[-width/2:(width/2)+0.01:1.0, -width/2:(width/2)+0.01:1.0]
+        # print(grid.shape)
+        # print([0.1 for _ in range(grid.shape[1]))])
+        # trace_boarder = go.Scatter3d(x=grid[0], y=grid[1], z=[cam[-1][-1] for _ in range(len(grid[0]))], mode='markers+lines', line_width=2, line_color=color, name="pixel")
+        # trace_boarder = go.Scatter3d(x=grid[0], y=grid[1], z=[0.1 for _ in range(len(grid[0]))], mode='markers', line_width=2, line_color=color, name="pixel")
+        # 2次元グリッドの座標を定義
+        # x = [-width/2 + d for d in range(int(width/2))]#[-1.5, 0, 1.5]
+        # y = [-width/2 + d for d in range(int(width/2))]#[-1.5, 0, 1.5]
+
+
+        # dw = (float)(2./width)# 2 = 1.- (-1.)
+        # dh = (float)(2./height)
+        # delta = 10**-5
+        # x = np.arange(-1., 1.+delta, 2./dw, dtype = float)
+        # y = np.arange(-1., 1.+delta, 2./dh, dtype = float)
+        # print(x)
+
+
+        # x = [-width/2 + d for d in range(width+1)]#[-1.5, -0.5, 0.5, 1.5]
+        # y = [-height/2 + d for d in range(height+1)]#[-1.5, -0.5, 0.5, 1.5]
+
+        # # print(x, y)
+        # for i in range(width+1):
+        #     for j in range(height+1):
+        #         trace_gridx = go.Scatter3d(x=[x[j]]*(width+1), y=y, z=[cam[-1][-1] for _ in range(width+1)], mode='lines', line_width=2, line_color=color, name="pixel")
+        #         fig.add_trace(trace_gridx)
+        #         trace_gridy = go.Scatter3d(x=x, y=[y[i]]*(height+1), z=[cam[-1][-1] for _ in range(height+1)], mode='lines', line_width=2, line_color=color, name="pixel")
+        #         fig.add_trace(trace_gridy)
+        # fig.add_trace(trace_boarder)
+
+        # x, y, z = cam[:, 1:]
+        # mesh = go.Mesh3d(x=x, y=y, z=z, opacity=0.5, color=color, name=name)
+        # fig.add_trace(mesh)
+        # return 
+
+    def add_trace_grid_img():
+        """
+        # 2次元グリッドの座標を定義
+        # x = [-width/2 + d for d in range(int(width/2))]#[-1.5, 0, 1.5]
+        # y = [-width/2 + d for d in range(int(width/2))]#[-1.5, 0, 1.5]
+        x = [-width/2 + d for d in range(width+1)]#[-1.5, -0.5, 0.5, 1.5]
+        y = [-height/2 + d for d in range(height+1)]#[-1.5, -0.5, 0.5, 1.5]
+        # print(x, y)
+        for i in range(width+1):
+            for j in range(height+1):
+                trace_gridx = go.Scatter3d(x=[x[j]]*(width+1), y=y, z=[camera[-1][-1] for _ in range(width+1)], mode='lines', line_width=2, line_color=color, name="pixel")
+                fig.add_trace(trace_gridx)
+                trace_gridy = go.Scatter3d(x=x, y=[y[i]]*(height+1), z=[camera[-1][-1] for _ in range(height+1)], mode='lines', line_width=2, line_color=color, name="pixel")
+                fig.add_trace(trace_gridy)
+        """
+
+    # def add_traces_to_fig(self, cam, lines):
+        # self.add_trace_cam_coord()
+        # trace_screen = self.get_trace_screen(cam_pos, cam, lines)
+
+        # data = trace_cam_coord# + trace_screen
+        # data += trace_cube
+        # for i in range(len(trace_ray_lis)):
+        #     data += trace_ray_lis[i]
+        # for j in range(len(trace_sampling_point_lis)):
+        #     data += trace_sampling_point_lis[j]
+
+        # self.fig.add_traces(data)
+    
+
+if __name__ == "__main__":
+    w_, h_ = 3, 3
+    fov = 80#120#45
+    cam_pos = np.array([0, 0, 0])
+    cam_lookat = np.array([0, 0, -1])
+    cam_up = np.array([0, 1, 0])
+    cam_right = np.cross(cam_lookat, cam_up)
+        
+    cam_plotter = CameraPlotter(w_, h_, cam_pos, cam_lookat, cam_up, cam_right, fov)
+
+    a = 3
+    pos_cube_center = (0,0,0)#(0,0,7)#(0,0,-3)
+    mint, maxt = -1.0, 1.0#-2.0, 2.0#-3.0, 3.0#-0.5, 0.5
+    rgba = 'rgba(0,0,0,0.2)'
+    cube_plotter = CubePlotter(pos_cube_center, mint, maxt, rgba)
+
+    num_camera = 10#3
+    for i in range(num_camera):
+        camera_mover = CameraMover()
+        radius = 5
+        degree = 360./num_camera * i
+        angle = np.radians(degree)
+        step_x = radius*np.cos(angle)
+        step_z = radius*np.sin(angle)
+        camera_mover.step_x(step_x)
+        camera_mover.step_z(step_z)                
+        camera_mover.rotate_y(degree-90)
+        M_ext = camera_mover.M_ext
+        cam_plotter.add_cam(M_ext, plot_color='blue', plot_name='frame'+str(i))
+
+    cam_plotter.add_trace_cam_coord()
+    cam_plotter.add_trace_cam_screen()
+    trace_cube = cube_plotter.get_trace_cube()
+    cam_plotter.fig.add_trace(trace_cube)
+    cam_plotter.fig_show()
+```
+
+### src/utils/get_yaml.py
+```
+import yaml
+import sys
+from src.utils.logger_global import logger
+
+class YamlLoader():
+    def __init__(self, yaml_file) -> None:
+        self.yaml_file = yaml_file
+
+    def load_yaml(self):
+        # https://maku77.github.io/python/io/yaml.html
+        try:
+            with open(self.yaml_file) as f:
+                cfg = yaml.safe_load(f)
+                logger.info(f"load YAML: {self.yaml_file}...\n{cfg}")
+        except Exception as e:
+            logger.info(f'Exception occurred while loading YAML: {self.yaml_file}')
+            logger.info(f"error: {e}")
+            sys.exit(1)
+        return cfg
+```
+
+### src/utils/logger_global.py
+```
+import logging
+import os
+
+"""
+# https://yassanabc.com/2021/04/14/%E3%80%90python%E3%80%91logging%E3%81%AE%E6%AD%A3%E3%81%97%E3%81%84%E4%BD%BF%E3%81%84%E6%96%B9/
+# https://note.com/enkey/n/na366b382800a
+# https://stackoverflow.com/questions/533048/how-to-log-source-file-name-and-line-number-in-python
+"""
+
+logger = logging.getLogger(__name__)
+# logger = logging.getLogger()
+
+log_file = './logs/logging.log'
+
+if os.path.exists(log_file):
+    os.remove(log_file)
+    
+# streamhandler = logging.StreamHandler()
+filehandler = logging.FileHandler(log_file)
+
+# format = '[%(asctime)s][%(levelname)s] %(message)s'
+format = '[%(asctime)s][%(levelname)s] {%(module)s.%(funcName)s, l: %(lineno)d} %(message)s'
+# datefmt='%Y/%m/%d %I:%M:%S'
+datefmt='%I:%M:%Ss'
+
+formatter = logging.Formatter(format, datefmt)
+# streamhandler.setFormatter(formatter)
+filehandler.setFormatter(formatter)
+# logger.addHandler(streamhandler)
+logger.addHandler(filehandler)
+
+# logging.disable(logging.CRITICAL)
+logger.setLevel(logging.INFO)  # DEBUG #INFO #WARNING
+
+logger.info("Logger INFO mode Start!")
+logger.debug("Logger DEBUG mode Start!")
+
+
+
+# class LoggerGlobal:
+#     def __init__(self) -> None:
+
+# def get_logger(log_file = './out/logging.log'):
+    # return logger
+
+# if __name__ == "__main__":
+#     global logger
+#     log_file = './out/logging.log'
+#     logger = get_logger(log_file)
+#     logger.info("Logger INFO mode Start!")
+
+
+    # lg = LoggerGlobal()
+```
+
+### src/utils/np_vec.py
+```
+import numpy as np
+from src.utils.logger_global import logger
+
+def swap_val(a, b):
+    swap_tmp = a
+    a = b
+    b = swap_tmp
+    return a, b
+
+def degree2radian(deg):
+    return deg * np.pi / 180.
+
+def normalize(x):
+    # logger.debug(f"x:{x}, np.any(x):{np.any(x)}")
+    if np.any(x):
+        try:
+            return x / np.linalg.norm(x)
+        except ZeroDivisionError as e:
+            logger.debug(f"normalize x: {x}, norm: {np.linalg.norm(x)}, zero devide error: {e}")
+    else:# array elements are all zero
+        return x
+```
+
+### src/volume_rendering/aabb.py
+```
+import numpy as np
+
+from src.utils.logger_global import logger
+from src.volume_rendering.cube_plotter import CubePlotter
+from src.utils.np_vec import swap_val
+
+# poetry run python -m src.volume_rendering.aabb
+
+class AABB():
+    def __init__(self, pos_cube_center, mint, maxt, grid_resolution) -> None:
+        # self.min_x, self.min_y, self.min_z = -aabb_min, -aabb_min, -aabb_min#-1, -1, -1
+        # self.max_x, self.max_y, self.max_z = aabb_max, aabb_max, aabb_max#1, 1, 1
+        # self.min_x, self.min_y, self.min_z = -0.5, -0.5, -3.5#-1, -1, -1
+        # self.max_x, self.max_y, self.max_z = 0.5, 0.5, -2.5#1, 1, 1
+
+        # self.min_x, self.min_y, self.min_z = -1.0, -1.0, 6.0#-1, -1, -1
+        # self.max_x, self.max_y, self.max_z = 1.0, 1.0, 8.0#1, 1, 1
+
+
+        assert mint < maxt, "range cube"
+        self.pos_cube_center = pos_cube_center
+        self.pos_x_center, self.pos_y_center, self.pos_z_center = pos_cube_center 
+        self.min_x, self.min_y, self.min_z = self.pos_x_center+mint, self.pos_y_center+mint, self.pos_z_center+mint
+        self.max_x, self.max_y, self.max_z = self.pos_x_center+maxt, self.pos_y_center+maxt, self.pos_z_center+maxt
+        self.min_pos = np.array([self.min_x, self.min_y, self.min_z])
+        self.max_pos = np.array([self.max_x, self.max_y, self.max_z])
+
+        # density volume
+        self.grid_resolution = grid_resolution
+        self.H, self.W, self.D = [self.grid_resolution for _ in range(3)]
+        self.num_cell = self.H * self.W * self.D
+        # initialize
+        self.density_volume = np.zeros((self.H, self.W, self.D, 7))
+
+        
+    def ray_intersect_and_get_mint(self, ray_dir, camera_pos):
+        # https://github.com/Rintarooo/instant-ngp/blob/090aed613499ac2dbba3c2cede24befa248ece8a/include/neural-graphics-primitives/bounding_box.cuh#L163
+        # https://github.com/Southparketeer/SLAM-Large-Dense-Scene-Real-Time-3D-Reconstruction/blob/master/CUDA_Kernel/cu_raycast.cu#L127-L132
+        # https://www.scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-voxel-grids.html
+        # https://www.scratchapixel.com/lessons/3d-basic-rendering/minimal-ray-tracer-rendering-simple-shapes/ray-box-intersection.html
+        # print("ray_dir[0]: ", ray_dir[0])
+
+        # max_ray_scale = 10.0
+        # ray_dir *= max_ray_scale
+
+        if_intersect = True
+        # print("ray_dir: ", ray_dir)
+
+        # r(t) = o + td, ray_dir is d
+        # if ray_dir[0] != 0:# prevent divide by 0
+        #     # camera_pos[0] == camera_pos.x
+        #     # tmin = aabb.min_x - camera_pos[0] / ray_dir[0]
+        #     tmin = (self.min_x - camera_pos[0]) / ray_dir[0]
+        #     tmax = (self.max_x - camera_pos[0])/ ray_dir[0]
+        # else:
+        #     tmin, tmax = 100, 100#0, 0
+        if ray_dir[0] == 0:
+            tmin = -np.inf
+            tmax = np.inf
+        else:
+            inv_ray_dir_x = 1. / ray_dir[0]
+            tmin = (self.min_x - camera_pos[0]) * inv_ray_dir_x
+            tmax = (self.max_x - camera_pos[0]) * inv_ray_dir_x
+
+        if (tmin > tmax): tmin, tmax = swap_val(tmin, tmax)
+        # print(f"tminx: {tmin}, tmaxx: {tmax}")
+
+
+        # if ray_dir[1] != 0:
+        #     tmin_y = (self.min_y - camera_pos[1])/ ray_dir[1]
+        #     tmax_y = (self.max_y - camera_pos[1])/ ray_dir[1]
+        # else:
+        #     tmin_y, tmax_y = 100, 100
+        if ray_dir[1] == 0:
+            tmin_y = -np.inf
+            tmax_y = np.inf
+        else:
+            inv_ray_dir_y = 1. / ray_dir[1]
+            tmin_y = (self.min_y - camera_pos[1]) * inv_ray_dir_y
+            tmax_y = (self.max_y - camera_pos[1]) * inv_ray_dir_y
+        if (tmin_y > tmax_y): tmin_y, tmax_y = swap_val(tmin_y, tmax_y)
+
+        if tmin > tmax_y or tmin_y > tmax:
+            if_intersect = False
+            return tmin, tmax, if_intersect
+        # tmin = np.min([tmin, tmin_y])
+        # tmax = np.max([tmax, tmax_y])
+        if tmin_y > tmin: tmin = tmin_y
+        if tmax_y < tmax: tmax = tmax_y
+        # print(f"tmin: {tmin}, tmax: {tmax}")
+
+
+
+        # if ray_dir[2] != 0:
+        #     tmin_z = (self.min_z - camera_pos[2])/ ray_dir[2]
+        #     tmax_z = (self.max_z - camera_pos[2])/ ray_dir[2]
+        #     print(f"tmin_z: {tmin_z}, tmax_z: {tmax_z}")
+        # else:
+        #     tmin_z, tmax_z = 100, 100
+        if ray_dir[2] == 0:
+            tmin_z = -np.inf
+            tmax_z = np.inf
+        else:
+            inv_ray_dir_z = 1. / ray_dir[2]
+            tmin_z = (self.min_z - camera_pos[2]) * inv_ray_dir_z
+            tmax_z = (self.max_z - camera_pos[2]) * inv_ray_dir_z
+        if (tmin_z > tmax_z): tmin_z, tmax_z = swap_val(tmin_z, tmax_z)
+        
+        if tmin > tmax_z or tmin_z > tmax:
+            if_intersect = False
+            return tmin, tmax, if_intersect
+
+        # tmin = np.min([tmin, tmin_z])
+        # tmax = np.max([tmax, tmax_z])
+        if tmin_z > tmin: tmin = tmin_z
+        if tmax_z < tmax: tmax = tmax_z
+        # print(f"tmin: {tmin}, tmax: {tmax}")
+
+        return tmin, tmax, if_intersect
+    
+    def create_density_volume(self, thres_pos, min_density_val, max_density_val, high_density_val, density_mode):
+        density = min_density_val
+        for i in range(self.H):
+            for k in range(self.W):
+                for j in range(self.D):
+                    # scaling: i is in [0, H-1] --> [0, 1] --> #[0, 2.] --> #[-1., 1.]
+                    # x = i/(self.H-1)*2.+(-1.)
+                    # y = k/(self.W-1)*2.+(-1.)
+                    # z = i/(self.D-1)*2.+(-1.)
+
+                    # scaling: i is in [0, H-1] --> [0, 1] --> #[0, self.max_x-self.min_x] --> #[self.min_x, slf.max_x]
+                    x = i/(self.H-1)*(self.max_x-self.min_x)+self.min_x
+                    y = k/(self.W-1)*(self.max_y-self.min_y)+self.min_y
+                    z = j/(self.D-1)*(self.max_z-self.min_z)+self.min_z
+                    density = 0.
+
+                    if density_mode == "sphere":
+                        # https://github.com/Rintarooo/Volume-Rendering-Tutorial/blob/f27c64f7909f368dc8205adcef2efa24b40e1e29/Tutorial1/src/main.cpp#L17-L21
+                        radius_x = abs(x - self.pos_x_center)
+                        radius_y = abs(y - self.pos_y_center)
+                        radius_z = abs(z - self.pos_z_center)
+
+                        # Fill the grid with a solid sphere with a very dense inner sphere
+                        sphere_radius = radius_x * radius_x + radius_y * radius_y + radius_z * radius_z
+                        if sphere_radius < 1.:
+                            density = 1.0#sphere_radius
+                            if sphere_radius < 0.25:
+                                density = high_density_val
+                    elif density_mode == "cube":
+                        # range_density_val = max_density_val - min_density_val# https://stackoverflow.com/questions/59389241/how-to-generate-a-random-float-in-range-1-1-using-numpy-random-rand
+                        # density = np.random.rand()*range_density_val + min_density_val
+                        density = min_density_val
+                        if self.pos_x_center - thres_pos <= x and x <= self.pos_x_center + thres_pos:
+                            if self.pos_y_center - thres_pos <= y and y <= self.pos_y_center + thres_pos:
+                                if self.pos_z_center - thres_pos <= z and z <= self.pos_z_center + thres_pos:
+                                    # logger.debug(f"high_density_val. because x, y and z is in range min z: {self.pos_z_center - thres_pos} <= z: {z} <= max z: {self.pos_z_center + thres_pos}")
+                                    density = high_density_val
+
+                    # white
+                    r, g, b = 255, 255, 255
+
+                    # self.density_volume[i][k][j] = (x,y,z,density)
+                    
+                    # 3d position
+                    self.density_volume[i][k][j][0] = x
+                    self.density_volume[i][k][j][1] = y
+                    self.density_volume[i][k][j][2] = z
+                    # rgb
+                    self.density_volume[i][k][j][3] = r
+                    self.density_volume[i][k][j][4] = g
+                    self.density_volume[i][k][j][5] = b
+                    # density
+                    self.density_volume[i][k][j][6] = density
+                    # logger.debug(f"i: {i}, k: {k}, j: {j}")
+                    # logger.debug(f"cell pos, x: {x}, y: {y}, z: {z}, density: {density}")
+
+    def read_volume(self, point_pos):
+        # nearest neighbor search
+        # https://www.scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-voxel-grids.html
+        # https://github.com/Rintarooo/code/blob/7f5ea4b995026e9fd1fba127ebce059830e95584/volume-rendering-for-developers/raymarch-chap5.cpp#L247-L259
+    #     float evalDensity(const Grid* grid, const Point& p)
+    # {
+        gridSize_xyz = self.max_pos - self.min_pos
+        pLocal = (point_pos - self.min_pos) / gridSize_xyz
+        pVoxel = pLocal * self.grid_resolution
+
+        # relative index
+        xi =int(np.floor(pVoxel[0]))
+        yi =int(np.floor(pVoxel[1]))
+        zi =int(np.floor(pVoxel[2]))
+
+        # If outside the grid, then return density zero
+        if (xi < 0) or (xi >= self.W): return 0
+        if (yi < 0) or (yi >= self.H): return 0
+        if (zi < 0) or (zi >= self.D): return 0
+
+
+        ## nearest neighbor
+        # grid_idx = (zi * grid->resolution + yi) * grid->resolution + xi
+        # return grid->density[grid_idx]
+        x = self.density_volume[xi][yi][zi][0]
+        y = self.density_volume[xi][yi][zi][1]
+        z = self.density_volume[xi][yi][zi][2]
+        density = self.density_volume[xi][yi][zi][6]
+        # if point_pos[0] == 0 and point_pos[1]==0:
+            # logger.debug(f"\nxi: {xi}, yi: {yi}, zi: {zi}")
+        # logger.debug(f"\nray point_pos: {point_pos}\ncell pos: [{x}, {y}, {z}]\nread density: {density}")
+        return density
+    # }
+
+if __name__ == "__main__":
+    pos_cube_center = (0,0,9)#(0,0,7)#(0,0,-3)
+    mint, maxt = -2.0, 2.0#-3.0, 3.0#-1.0, 1.0#-0.5, 0.5
+    rgba = 'rgba(0,0,0,0.2)'
+    cube_plotter = CubePlotter(pos_cube_center, mint, maxt, rgba)
+    trace_cube = cube_plotter.get_trace_cube()
+
+    grid_resolution = 16#128#30
+    aabb = AABB(pos_cube_center, mint, maxt, grid_resolution)
+```
+
+### src/volume_rendering/cube_plotter.py
+```
+import numpy as np
+import plotly.graph_objects as go
+
+from src.utils.logger_global import logger
+from src.utils.base_plotter import BasePlotter
+
+# poetry run python -m src.volume_rendering.cube_plotter
+
+class CubePlotter(BasePlotter):
+    def __init__(self, pos_cube_center, mint, maxt, rgba):
+        super().__init__()
+        self.pos_cube_center = pos_cube_center
+        self.mint = mint
+        self.maxt = maxt
+        self.rgba = rgba
+
+    def get_trace_cube(self):
+        pos_x, pos_y, pos_z = self.pos_cube_center# 3 dimentional tuple
+        # create points
+        x, y, z = np.meshgrid(
+            # np.linspace(mint, maxt, 2), 
+            # np.linspace(mint, maxt, 2), 
+            # np.linspace(mint, maxt, 2),
+            np.linspace(self.mint+pos_x, self.maxt+pos_x, 2), 
+            np.linspace(self.mint+pos_y, self.maxt+pos_y, 2), 
+            np.linspace(self.mint+pos_z, self.maxt+pos_z, 2),
+        )
+        # logger.debug(f"plotly cube x: {x}")
+        x = x.flatten()
+        # logger.debug(f"plotly cube x flatten: {x}")
+        y = y.flatten()
+        z = z.flatten()
+        
+        # return go.Mesh3d(x=x, y=y, z=z, alphahull=1, flatshading=True, rgba=rgba, lighting={'diffuse': 0.1, 'specular': 2.0, 'roughness': 0.5})
+        trace_cube = go.Mesh3d(x=x, y=y, z=z, alphahull=1.0, color=self.rgba, name = "cube")
+        # self.fig.add_trace(trace_cube)
+        # self.fig.show()
+        return trace_cube
+
+
+if __name__ == "__main__":
+    a = 3
+    pos_cube_center = (0,0,9)#(0,0,7)#(0,0,-3)
+    mint, maxt = -2.0, 2.0#-3.0, 3.0#-1.0, 1.0#-0.5, 0.5
+    rgba = 'rgba(0,0,0,0.2)'
+    cube_plotter = CubePlotter(pos_cube_center, mint, maxt, rgba)
+    trace_cube = cube_plotter.get_trace_cube()
+```
+
+### src/volume_rendering/get_cube.py
+```
+import numpy as np
+import plotly.graph_objects as go
+
+from src.utils.logger_global import logger
+
+
+if __name__ == "__main__":
+    a = 3
+```
+
+### src/volume_rendering/ray_caster.py
+```
+import numpy as np
+
+from src.utils.logger_global import logger
+from src.utils.camera_mover import CameraMover
+from src.volume_rendering.cube_plotter import CubePlotter
+from src.utils.camera_plotter import normalize
+
+# poetry run python -m src.volume_rendering.raycaster
+
+class RayCaster():
+    def __init__(self, w_, h_, cam_pos, cam_lookat, cam_up, cam_right, fov = 45) -> None:
+        self.w_ = w_
+        self.h_ = h_
+        # カメラからスクリーンまでの距離
+        self.fl_x = w_ / (2. * np.tan(np.radians(fov) * 0.5))
+        self.fl_y = h_ / (2. * np.tan(np.radians(fov) * 0.5))
+        self.cx = (float)(w_ / 2)
+        self.cy = (float)(h_ / 2)
+        self.cam_pos = cam_pos
+        self.cam_lookat = cam_lookat
+        self.cam_up = cam_up
+        self.cam_right = cam_right
+
+    def raycast(self, M_ext):
+
+        # dw = (float)(2./w_)# 2 = 1.- (-1.)
+        # dh = (float)(2./h_)
+        # delta = 10**-5
+        # lis_w = np.arange(-1., 1.+delta, 2./dw, dtype = float)
+        # lis_h = np.arange(-1., 1.+delta, 2./dh, dtype = float)
+
+        cam_pos_world = self.cam2world_cam_pos(M_ext)
+
+        # ray_dirs = []
+        ray_dirs_world = np.zeros([self.w_, self.h_, 3])
+        # ray_dirs_world = np.zeros([self.h_, self.w_, 3])
+        for px in range(self.w_):
+            for py in range(self.h_):
+        # for px in range(-1., 1., dw):
+        #     for py in range(-1., 1., dh):
+        # for px in lis_w:
+        #     for py in lis_h:
+                # https://github.com/Rintarooo/Volume-Rendering-Tutorial/blob/f27c64f7909f368dc8205adcef2efa24b40e1e29/Tutorial1/src/VolumeRenderer.cpp#L72-L75
+                # Compute the ray direction for this pixel. Same as in standard ray tracing.
+				# `px`は現在考慮しているピクセルの水平方向の位置（0から`width-1`まで）、`width`は画像の幅（ピクセル数）を表しています。
+				# まず`px+.5f`でピクセルの中心を基準に位置を取得し、それを`(float)(width-1)`で割ることで、0.5からwidth-1+0.5を、0から1の範囲に正規化しています。
+				# その後、`-.5f`を加えることで、値の範囲を-0.5から0.5に変更しています。
+                # u_ = -.5 + (px + .5) / (float)(self.w_-1)
+                # v_ =  .5 - (py + .5) / (float)(self.h_-1)
+                # u_ = -.5 + (px) / (float)(self.w_-1)
+                # v_ =  .5 - (py) / (float)(self.h_-1)
+                # u_ = -1. + (px + .5) / (float)(self.w_-1)
+                # v_ =  1. - (py + .5) / (float)(self.h_-1)
+                # v_ =  -1. + (py + .5) / (float)(self.h_-1)
+                # u_ = -1. + (px) / (float)(self.w_-1) * 2.# 2. = 1.- (-1.), [-1. 1.]
+                # v_ =  1. - (py) / (float)(self.h_-1) * 2.
+                # u_ = -1. + (px+.5) / (float)(self.w_-1) * 2.# 2. = 1.- (-1.), [-1. 1.]
+                # v_ =  1. - (py+.5) / (float)(self.h_-1) * 2.
+
+                u_ = (px + .5) - self.cx
+                # v_ = (py + .5) - self.cy
+                v_ = -((py + .5) - self.cy)
+                # u_ = px - self.cx
+                # v_ = py - self.cy
+
+                # u_ = (px + .5*dw) - cx
+                # v_ = (py + .5*dh) - cy
+
+                # logger.debug(f"[u_,v_]: [{u_},{v_}], px + .5: {px + .5}, cx:{self.cx}")
+                
+                ray_dir = self.cam_lookat + u_ * self.cam_right / self.fl_x + v_ * self.cam_up /self.fl_y
+                # ray_dir = np.array([u_ / dist_camera2plane, v_ / dist_camera2plane, -1.])
+                # ray_dir = np.array([u_ / self.fl_x, v_ / self.fl_y, 1.])
+                # ray_dir = np.array([u_ / self.fl_x, v_ / self.fl_y, -1.])
+
+
+                # ray_dir -= self.cam_pos
+
+                # ray_dirs.append(ray_dir)
+                # ray_dirs[self.w_-px-1][self.h_-py-1] = ray_dir
+
+                ray_dir_world = self.cam2world_ray_dir(M_ext, ray_dir)
+                ray_dir_world -= cam_pos_world
+                ray_dir_world = normalize(ray_dir_world)
+
+                ray_dirs_world[px][py] = ray_dir_world
+                logger.debug(f"[u_,v_]: [{u_},{v_}], [px,py]: [{px},{py}]")
+                logger.debug(f"ray_dir_world: {ray_dir_world}, ray_dir:{ray_dir}")
+        # grid = np.mgrid[-w_/2:w_/2:1.0, -w_/2:w_/2:1.0]
+        return ray_dirs_world, cam_pos_world
+    
+    def cam2world_ray_dir(self, M_ext, ray_dir):
+        """
+        input
+        M_ext: 4x4 mat
+        M_ext convert 3d vector x from world to cam.
+        x_c = M_ext * x_w
+        """
+        R = M_ext[:3, :3] # rotation matrix
+        t = M_ext[:3, 3] # translation vector
+
+        ray_dir_world = R.T @ ray_dir - R.T @ t
+        return ray_dir_world
+
+    def cam2world_cam_pos(self, M_ext):
+        R = M_ext[:3, :3] # rotation matrix
+        t = M_ext[:3, 3] # translation vector
+
+        cam_pos_world = R.T @ self.cam_pos - R.T @ t
+        return cam_pos_world
+
+
+if __name__ == "__main__":
+    cam_pos = np.array([0, 0, 0])#([1.45, 1.1, 3.1])#([-1, 1, 0])
+    cam_lookat = np.array([0, 0, -1])#([0, 0, 0])#([0, 0, 1])
+    cam_up = np.array([0, 1, 0])
+    cam_right = np.cross(cam_lookat, cam_up)
+    # cam_up = np.cross(cam_right, look_dir)
+
+    fov = 45#90#150#20#85#10#80
+    w_, h_ = 3, 3#4, 4##32, 32#256,256#64,64#128, 128#1,1#5,5
+
+    raycaster = RayCaster(w_, h_, cam_pos, cam_lookat, cam_up, cam_right, fov)
+    camera_mover = CameraMover()
+    M_ext = camera_mover.M_ext
+    raycaster.raycast(M_ext)
+    # ray_dirs = raycast(width, height, dist_cam2plane, look_dir, cam_right, cam_up, cam_pos)
+```
+
+### src/volume_rendering/ray_plotter.py
+```
+import numpy as np
+import plotly.graph_objects as go
+
+from src.utils.logger_global import logger
+from src.utils.base_plotter import BasePlotter
+from src.utils.camera_plotter import CameraPlotter
+from src.utils.camera_mover import CameraMover
+from src.volume_rendering.ray_caster import RayCaster
+
+
+# poetry run python -m src.volume_rendering.ray_plotter
+
+class RayPlotter(BasePlotter):
+    def __init__(self):
+        super().__init__()
+        self.ray_dirs_list = []
+    
+    def get_traces_ray(self, cam_pos, ray_dir, tmax, tmax_margin, if_intersect, plot_name):
+        # tmax = 1.0
+        # logger.debug(f"cam_pos: {cam_pos}, ray_dir_0: {ray_dir_0}")
+        ray_ = cam_pos + (tmax+tmax_margin) * ray_dir
+        width = 3
+        cone_size = 0.05
+        if not if_intersect:
+            width = 1
+            cone_size = 0.01
+        trace1 = {
+            "line": {"width": width}, 
+            "mode": "lines", 
+            "name": plot_name,#"ray_", 
+            "type": "scatter3d", 
+            "x": [cam_pos[0], ray_[0]], 
+            "y": [cam_pos[1], ray_[1]], 
+            "z": [cam_pos[2], ray_[2]], 
+            "marker": {"color": "rgb(255, 217, 0)"}, 
+            # "marker": {"line": {"color": "rgb(35, 155, 118)"}}, 
+            "showlegend": False
+        }
+        trace2 = {
+            "name": plot_name, #"ray_", 
+            "type": "cone", 
+            "u": [ray_[0]-cam_pos[0]], # 矢印の終点のx座標
+            "v": [ray_[1]-cam_pos[1]], 
+            "w": [ray_[2]-cam_pos[2]], 
+            "x": [ray_[0]], # 矢印の始点のx座標
+            "y": [ray_[1]], 
+            "z": [ray_[2]], 
+            "sizeref": cone_size, 
+            "lighting": {"ambient": 0.8}, 
+            "sizemode": "scaled", 
+            "hoverinfo": "x+y+z+name", 
+            "colorscale": [[0.0, 'rgb(255,217,0)'],[1.0, 'rgb(255,217,0)']],
+            "showscale": False, 
+            "autocolorscale": False
+        }
+        traces_ray = [trace1, trace2]
+        return traces_ray
+
+    def get_trace_sampling_point(self, sampling_points):
+        trace1 = {
+            "name": "sampling_point", 
+            "type": "scatter3d", 
+            "x": sampling_points[:,0], # 点のx座標
+            "y": sampling_points[:,1], 
+            "z": sampling_points[:,2], 
+            # "sizeref": 0.1, 
+            # "lighting": {"ambient": 0.8}, 
+            # "sizemode": "scaled", 
+            # "hoverinfo": "x+y+z+name", 
+            # "colorscale": [[0.0, 'rgb(0,0,0)'],[1.0, 'rgb(0,0,0)']],
+            # "showscale": False, 
+            # "autocolorscale": False
+            "mode": 'markers',
+            "marker": {
+                "size": 4,
+                "color": 'rgb(0,0,0)',
+                "colorscale": 'Viridis',
+                "opacity": 0.2
+            }
+        }
+        # trace_sampling_point = [trace1]
+        # return trace_sampling_point
+        return trace1
+
+
+if __name__ == "__main__":
+    cam_pos = np.array([0, 0, 0])#([1.45, 1.1, 3.1])#([-1, 1, 0])
+    cam_lookat = np.array([0, 0, -1])#([0, 0, 0])#([0, 0, 1])
+    cam_up = np.array([0, 1, 0])
+    cam_right = np.cross(cam_lookat, cam_up)
+    # cam_up = np.cross(cam_right, look_dir)
+
+    fov = 45#90#150#20#85#10#80
+    img_resolution = 12
+    w_, h_ = img_resolution, img_resolution#3, 3#4, 4##32, 32#256,256#64,64#128, 128#1,1#5,5
+    plot_scale = 1.0
+    cam_plotter = CameraPlotter(w_, h_, cam_pos, cam_lookat, cam_up, fov, plot_scale)
+    camera_mover = CameraMover()
+    # camera_mover.step_x(-2)
+    # camera_mover.rotate_x(10)
+    M_ext = camera_mover.M_ext
+                
+    plot_name = 'debug raycast'
+    cam_plotter.add_cam(M_ext, plot_color='blue', plot_name=plot_name)
+    cam_plotter.add_trace_cam_coord()
+    cam_plotter.add_trace_cam_screen()
+
+    raycaster = RayCaster(w_, h_, cam_lookat, cam_pos, cam_up, cam_right, fov)
+    ray_dirs_world, cam_pos_world = raycaster.raycast(M_ext)
+    # i = 0
+    # ray_dir_world = ray_dirs_world[i][i]
+    for px in range(w_):
+        for py in range(h_):
+            ray_dir_world = ray_dirs_world[px][py]
+            ray_plotter = RayPlotter()
+            traces_ray = ray_plotter.get_traces_ray(cam_pos_world, ray_dir_world, plot_name)
+            # ray_plotter.fig.add_traces(traces_ray)
+            # ray_plotter.fig_show()
+            cam_plotter.fig.add_traces(traces_ray)
+    cam_plotter.fig_show()
+
+
+
+
+    """bash
+    cam_pos = np.array([0, 0, 0])#([1.45, 1.1, 3.1])#([-1, 1, 0])
+    cam_lookat = np.array([0, 0, -1])#([0, 0, 0])#([0, 0, 1])
+    cam_up = np.array([0, 1, 0])
+    cam_right = np.cross(cam_lookat, cam_up)
+    # cam_up = np.cross(cam_right, look_dir)
+
+    fov = 45#90#150#20#85#10#80
+    width, height = 32, 32#256,256#64,64#3, 3#128, 128#1,1#5,5
+
+    ray_dirs = raycast(width, height, dist_cam2plane, look_dir, cam_right, cam_up, cam_pos)
+    
+    pos_cube_center = (0,0,9)#(0,0,7)#(0,0,-3)
+    mint, maxt = -2.0, 2.0#-3.0, 3.0#-1.0, 1.0#-0.5, 0.5
+    rgba = 'rgba(0,0,0,0.2)'
+    trace_cube = get_trace_cube(pos_cube_center, mint, maxt, rgba)
+    grid_resolution = 16#128#30
+    aabb = AABB(pos_cube_center, mint, maxt, grid_resolution)
+
+    ray_idx_plot_lis = [0, int(len(ray_dirs)/2), int(len(ray_dirs))-1]#[0, int(len(ray_dirs)/4), int(len(ray_dirs)/2), int(len(ray_dirs)*3/4), int(len(ray_dirs))-1]#[0,4,8]
+
+    # ray cast
+    tmin_0 = 4.5#3.5
+    tmax_0 = 9.5#4.5
+    tmin = tmin_0
+    tmax = tmax_0
+    assert tmin < tmax, "ray marching range"
+    trace_ray_lis = []
+    trace_sampling_point_lis = []
+
+    num_point = 5#128#30#10
+    for ray_idx in ray_idx_plot_lis:
+        assert ray_idx <= len(ray_dirs), "ray index should be lower than ray number (render img resolution: H x W)"
+        ray_dir = ray_dirs[ray_idx]
+        tmin, tmax, if_intersect = aabb.ray_intersect_and_get_mint(ray_dir, cam_pos)
+        if not if_intersect:
+            tmin = tmin_0
+            tmax = tmax_0
+        assert tmin < tmax, "ray marching range"
+        ray_max = cam_pos + (tmax+3.0) * ray_dir
+        # for plotly
+        trace_ray = get_trace_ray(cam_pos, ray_max, "ray_dir_"+str(ray_idx))
+        trace_ray_lis.append(trace_ray)
+        if if_intersect:
+            dt = (tmax-tmin)/num_point
+            # r(t) = o + td = o + (tmin+dt*i)d
+            sampling_point = np.array([cam_pos + (tmin + dt*i) * ray_dirs[ray_idx] for i in range(num_point)])
+            trace_sampling_point = get_trace_sampling_point(sampling_point)
+            trace_sampling_point_lis.append(trace_sampling_point)
+    """
+```
+
+### src/volume_rendering/volume_renderer.py
+```
+import numpy as np
+from typing import Any
+import matplotlib.pyplot as plt
+
+from src.volume_rendering.aabb import AABB
+from src.utils.logger_global import logger
+
+def render_img_from_volume(
+    ray_dirs: Any,
+    w_: Any,
+    h_: Any,
+    num_points: Any,
+    aabb: Any,
+    cam_pos: Any,
+    light_pos: Any,
+) -> None:    
+    """"
+    absorptionCoef, scatteringCoef = 0.1, 0.1
+    # 減衰係数(extinction coefficient) = 吸収係数(absorption coefficient)+散乱係数(scattering coefficient)
+    # https://qiita.com/Renard_Renard/items/fd706def17cb8d1e8ec4
+    # 減衰が発生し、その結果残る光の割合を透過率(transmittance)と呼ぶ
+    # T = e^(-tau)
+    # extinctionCoef = 0.1
+    extinctionCoef = absorptionCoef + scatteringCoef
+    """
+    # point_pos = np.array([trace_sampling_point_lis[0][0]["x"][0], trace_sampling_point_lis[0][0]["y"][0], trace_sampling_point_lis[0][0]["z"][0]])
+    # cur_density = aabb.read_volume(point_pos)
+
+    
+    # for each ray    
+    channels = 3
+    # render_img = np.zeros([w_, h_, channels])
+    render_img = np.zeros([h_, w_, channels])
+    
+    ## for density plot
+    density_plot_dic = {"density_lis":[], "tmin":0, "tmax":0, "ray_idx":0}
+    # density_plot_index_ray = int(len(ray_dirs)/2)#5
+    density_plot_index_ray = int(h_ * w_ /2)#5
+    assert density_plot_index_ray < ray_dirs.shape[0]*ray_dirs.shape[1], "ray index is over list ray_dirs"
+
+
+    # for ray_idx in range(len(ray_dirs)):
+    # white, volume cell has homogenious color
+    cell_color = np.array([255,255,255])#np.array([0,0,255])
+    ## light blue
+    background_color = np.array([157.,204.,224.])
+    cnt_intersect = 0
+    for px in range(w_):
+        for py in range(h_):
+            # intialize render_color, black
+            render_color = np.array([0.,0.,0.])
+            ## transmittance, initialize transmission to 1 (fully transparent, so background color is rendered)
+            T_ = 1. 
+            # ray_idx = idx_px + py
+            # assert ray_idx < len(ray_dirs), "ray index is over list ray_dirs"
+            # ray_dir = ray_dirs[ray_idx]
+            # ray_idx = py * w_ + px
+            ray_idx = px * w_ + py
+            ray_dir = ray_dirs[px][py]
+            tmin, tmax, if_intersect = aabb.ray_intersect_and_get_mint(ray_dir, cam_pos)
+            if not if_intersect:
+                tmin = 4.5
+                tmax = 9.5
+                # black if it does not intersect
+                # render_color = np.array([0,0,0])
+                render_color = background_color
+            assert tmin < tmax, "ray marching range"
+            delta = (tmax-tmin)/num_points
+
+            logger.info(f"ray idx: {ray_idx}/{w_*h_}, if_intersect: {if_intersect}, [px,py]: [{px},{py}]")
+            
+            if ray_idx == density_plot_index_ray and if_intersect is False:
+                density_plot_index_ray += 1
+
+            if if_intersect:
+                cnt_intersect += 1
+                for i in range(num_points):
+                    # point_pos = np.array([cam_pos + (tmin + dt*t) * ray_dirs[ray_idx] for t in range(num_points)])
+                    point_pos = cam_pos + (tmin+delta*i) * ray_dir
+                    cur_density = aabb.read_volume(point_pos)
+                    if ray_idx == density_plot_index_ray:
+                        density_plot_dic["density_lis"].append(cur_density)
+                        if i == 0:
+                            density_plot_dic["ray_idx"] = ray_idx#density_plot_index_ray
+                            density_plot_dic["tmin"] = tmin
+                            density_plot_dic["tmax"] = tmax
+                    # logger.debug(f"ray_idx: {ray_idx}, density_plot_index_ray: {density_plot_index_ray}")
+                    # transmittance *= np.exp(-cur_density * extinctionCoef * delta)
+                    alpha_i = 1 - np.exp(-cur_density * delta)
+                    T_ *= np.exp(-cur_density * delta)
+                    
+
+                    # T_i is the product of 1. - alpha
+                    # T_i = sampling_light(light_pos, point_pos, delta, aabb)
+                    # T_i = 1.
+
+                    # light emission
+                    # weight_i = T_i*alpha_i
+                    weight_i = T_*alpha_i
+
+                    logger.debug(f"ray_idx: {ray_idx}, ray step: {i}, weight_i: {weight_i}, delta: {delta}, point_pos: {point_pos}, cur_density: {cur_density}")
+                    # render_color += np.uint8(weight_i*color)
+                    render_color += weight_i*cell_color
+                    # render_color += weight_i*cell_color*5
+                
+            # logger.debug(f"ray_idx: {ray_idx}, px: {px}, py: {py}, np.uint8(render_color): {np.uint8(render_color)}")
+            # logger.debug(f"img_x: {w_-px-1}, img_y: {h_-py-1}")
+            # logger.debug(f"transmittance: {T_}, background_color: {background_color}, render_color: {render_color}")
+            render_color =  T_ * background_color + (1.0 - T_) * render_color
+            # render_img[w_-px-1][h_-py-1] = np.uint8(render_color)
+            # render_img[px][py] = np.uint8(render_color)
+            render_img[py][px] = np.uint8(render_color)
+            
+
+    render_path , density_plot_path = "./out/render.png", "./out/density_plot.png"
+    plt.imsave(render_path, np.uint8(render_img))
+    logger.info(f"save render_path: {render_path}")
+    logger.debug(f"cnt_intersect: {cnt_intersect}/{len(ray_dirs)}")
+    
+    logger.debug(f"density_lis: {density_plot_dic['density_lis']}")
+    plt.plot(np.linspace(density_plot_dic["tmin"], density_plot_dic["tmax"], len(density_plot_dic["density_lis"])), density_plot_dic["density_lis"], ".", markersize=8)
+    plt.xlabel(f"tmin:{density_plot_dic['tmin']:.2f} - tmax:{density_plot_dic['tmax']:.2f}")
+    plt.ylabel("density")
+    plt.ylim(0, 1)
+    plt.title(f"ray index: {density_plot_dic['ray_idx']}")
+    plt.savefig(density_plot_path)
+    logger.info(f"save density_plot_path: {density_plot_path}")
+```

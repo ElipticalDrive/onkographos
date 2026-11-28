@@ -1,0 +1,106 @@
+--- v002.md
++++ v003.md
+@@ -67,5 +67,5 @@
+ 
+ class UniVoxel:
+-    def __init__(self, Nx, Ny, Nz, C=6, k=16, Cv=6):
++    def __init__(self, Nx, Ny, Nz, C=6, k=16, Cv=6, d1=100.0):
+         """Initialize UniVoxel representation."""
+         self.V_sdf = nn.Parameter(torch.randn(1, Nx, Ny, Nz))
+@@ -74,5 +74,6 @@
+         self.Psi_zeta = MLP(C + 3, 1, 192, 3)
+         self.Psi_h = MLP(C + 3 + Cv, k * 7, 192, 3)
+-        self.d1 = 100.0
++        self.d1 = d1
++        # Voxel size depends on scene AABB; assuming [-1,1] bounds for grid_sample
+         self.v = 1.0 / max(Nx, Ny, Nz)
+         self.k = k
+@@ -122,8 +123,17 @@
+         return sg_flat.view(-1, self.k, 7)
+ 
++    def compute_visibility(self, alpha):
++        """Compute light visibility v = 1 - sum(alpha_i * prod(1-alpha_j)) [S1]."""
++        # alpha shape: [N]
++        prod_term = torch.cumprod(1.0 - alpha, dim=0)
++        # prod(1-alpha_j) for j < i is prod_term[i-1] if i>0 else 1.0
++        prod_shifted = torch.cat([torch.ones_like(prod_term[:1]), prod_term[:-1]], dim=0)
++        visibility = 1.0 - torch.sum(alpha * prod_shifted, dim=0)
++        return visibility
++
+     def render_ray(self, ray_o, ray_d, num_samples):
+-        """Render a single ray."""
++        """Render a single ray for volume opacity/transmittance."""
+         step = self.v / 2.0
+-        t = torch.linspace(0, num_samples * step, num_samples, device=ray_o.device)
++        t = torch.arange(num_samples, device=ray_o.device) * step
+         x = ray_o.unsqueeze(0) + t.unsqueeze(1) * ray_d.unsqueeze(0)
+         s, f = self.query(x)
+@@ -140,5 +150,5 @@
+         _, f = self.query(x)
+         sg = self.predict_lighting(x, f, view_embed)
+-        dirs = F.normalize(sg[:, :, :3], dim=-1)
++        dirs = sg[:, :, :3]
+         colors = sg[:, :, 3:6]
+         sharp = sg[:, :, 6:7]
+@@ -146,5 +156,5 @@
+         dot = torch.sum(omega_i.unsqueeze(1) * dirs.unsqueeze(0), dim=-1)
+         L_i = torch.sum(colors.unsqueeze(0) * torch.exp(sharp.unsqueeze(0) * (dot.unsqueeze(-1) - 1)), dim=-1)
+-        v = 1.0
++        v = self.compute_visibility(torch.ones_like(L_i[:, :1])) # Direct lighting visibility ~1
+         f_r = ggx_brdf(kappa, zeta, n, omega_i, view_dir)
+         cos = torch.clamp(torch.sum(omega_i * n.unsqueeze(0), dim=-1).unsqueeze(-1), min=0)
+@@ -152,7 +162,15 @@
+         return C
+ 
+-    def loss_fn(self, C_pred, C_gt):
+-        """Compute total loss."""
+-        return torch.mean((C_pred - C_gt) ** 2)
++    def compute_loss(self, C_pred, C_gt, C_rad, x_surf, h_surf, h_perturbed, kappa_pred, zeta_pred, n_pred):
++        """Compute total loss L = L_rec + L_smo + L_reg [S1]."""
++        # Reconstruction loss
++        L_rec = 1.0 * torch.mean((C_pred - C_gt) ** 2) + 1.0 * torch.mean((C_rad - C_gt) ** 2)
++        # Smoothness loss (placeholder for surface gradient regularization terms)
++        L_smo = 0.002 * torch.mean((n_pred - 0) ** 2) + 0.0005 * torch.mean((kappa_pred - 0) ** 2) + 0.0005 * torch.mean((zeta_pred - 0) ** 2)
++        # Illumination regularization
++        L_sg = 0.0005 * torch.mean((h_surf - h_perturbed) ** 2)
++        L_white = 0.0001 * torch.mean(torch.abs(L_i - torch.mean(L_i, dim=-1, keepdim=True)))
++        L_reg = L_sg + L_white
++        return L_rec + L_smo + L_reg
+ 
+ class MLP(nn.Module):
+@@ -171,16 +189,13 @@
+ def fibonacci_hemisphere(N, normal):
+     """Generate N points on hemisphere defined by normal using Fibonacci lattice [G]."""
+-    points = []
++    pts = []
+     for i in range(N):
+-        y = 1 - (i / (N - 1)) * 2
+-        r = torch.sqrt(1 - y**2)
+-        theta = 2 * torch.pi * i / 1.61803398875
+-        x = torch.cos(theta) * r
+-        z = torch.sin(theta) * r
+-        points.append(torch.tensor([x, y, z]))
+-    pts = torch.stack(points)
+-    # Rotate to align with normal using cross-product basis [G]
++        y = 1.0 - (i / (N - 1)) * 2.0
++        r = torch.sqrt(torch.clamp(1.0 - y**2, min=0.0))
++        theta = 2.0 * torch.pi * i / 1.61803398875
++        pts.append(torch.tensor([torch.cos(theta) * r, y, torch.sin(theta) * r]))
++    pts = torch.stack(pts)
+     up = torch.tensor([0.0, 1.0, 0.0], device=pts.device)
+-    if torch.dot(normal, up) > 0.999:
++    if torch.sum(normal * up) > 0.999:
+         up = torch.tensor([1.0, 0.0, 0.0], device=pts.device)
+     right = torch.cross(normal, up)
+@@ -192,5 +207,10 @@
+ def ggx_brdf(albedo, roughness, normal, omega_i, view_dir):
+     """Simplified GGX BRDF approximation [G]."""
+-    return albedo * (1.0 - 0.5 * torch.sum(normal * view_dir.unsqueeze(0), dim=-1).unsqueeze(-1))
++    dot = torch.sum(normal * view_dir.unsqueeze(0), dim=-1).unsqueeze(-1)
++    dot = torch.clamp(dot, min=0.0)
++    alpha = roughness * roughness
++    denom = (dot * dot) * (1.0 - alpha) + alpha
++    F = torch.pow(1.0 - dot, 5.0)
++    return albedo * (F * (1.0 - alpha) + alpha / denom)
+ ```
+ 

@@ -1,0 +1,276 @@
+# LOD Download Manager
+
+
+## Overview
+The LOD Download Manager is a component of the Reall3D Viewer that manages the asynchronous, prioritized downloading of 3D Gaussian splat data organized in a Level of Detail (LOD) hierarchy [S1, unofficial]. It solves the problem of efficiently loading large-scale splat clouds over variable network connections by fetching metadata, resolving file URLs, and scheduling downloads based on camera proximity and device constraints [S1, unofficial]. It differs from static LOD selection by dynamically adapting to predicted bandwidth and viewport position to prioritize splats that contribute most to the current user view, ensuring the highest visual fidelity for nearby tiles first [S1, unofficial].
+
+## How it works
+The manager operates as an event-driven state machine that initializes upon receiving a download request, parses hierarchical metadata, and executes a frame-by-frame download loop that prioritizes tiles based on their distance to the camera.
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `TodoDownloadLod` event: Triggers initialization with a splat file identifier [S1, unofficial].
+    *   `LodDownloadManagerAddLodMeta` event: Provides the URL to fetch LOD metadata [S1, unofficial].
+    *   Camera position: Used to calculate `currentDistance` for priority sorting [S1, unofficial].
+    *   Device type (mobile/desktop): Determines concurrency limits [S1, unofficial].
+*   **Outputs**:
+    *   `SplatUpdateBoundBox` event: Fired with the bounding box coordinates extracted from metadata [S1, unofficial].
+    *   Downloaded file data: Stored in `splatTiles` structure [S1, unofficial].
+
+### Data Structures
+The core data structure is `splatTiles`, which holds the parsed metadata and download state:
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```typescript
+interface SplatTiles {
+    version: number;          // Metadata version
+    magicNumber: number;      // File format identifier
+    totalCount: number;       // Total point count
+    lodLevels: number;        // Number of LOD levels
+    lodTargets: number[];     // LOD selection targets (filtered by device)
+    lodDistances: number[];   // LOD selection distances (filtered by device)
+    files: Map<string, SplatFileMeta>; // Map of fileKey to metadata
+    boundMin: [number, number, number]; // Bounding box min
+    boundMax: [number, number, number]; // Bounding box max
+    topLodReady: boolean;     // Flag indicating if top LOD is sufficiently downloaded
+}
+
+interface SplatFileMeta {
+    fileKey: string;          // Unique identifier for the file
+    offset: number;           // Offset in the file (if applicable)
+    count: number;            // Number of points in this tile
+    lodLevel: number;         // LOD level index (0 is highest detail)
+    currentDistance: number;  // Distance from camera to tile center
+    downloaded: boolean;      // Whether data has been received
+    data: ArrayBuffer | null; // Downloaded binary data
+}
+```
+
+### Parameters
+*   `MaxDownloadCount`: Maximum concurrent downloads.
+    *   Value: `3` if `isMobile` is true.
+    *   Value: `7` if `isMobile` is false [S1, unofficial].
+
+### Steps
+
+1.  **Initialization**:
+    *   Listen for the `TodoDownloadLod` event [S1, unofficial].
+    *   When triggered, check if the `splatFile` exists and has no status. If so, add it to the `splatFileSet` [S1, unofficial].
+    *   Register a frame-by-frame loop to execute the `checkDownload` function. Ensure the loop terminates if the manager is disposed [S1, unofficial].
+
+2.  **Metadata Fetching**:
+    *   Upon receiving `LodDownloadManagerAddLodMeta`, calculate the metadata URL [S1, unofficial].
+    *   Fetch the JSON from the URL. If the URL ends in `lod-meta.json`, parse it as LOD metadata; otherwise, parse it as standard LOD JSON [S1, unofficial].
+
+3.  **Bounding Box Extraction**:
+    *   Extract `min` and `max` coordinates from the metadata tree [S1, unofficial].
+    *   Fire the `SplatUpdateBoundBox` event with these coordinates [S1, unofficial].
+
+4.  **LOD Tree Traversal and Parsing**:
+    *   Traverse the LOD tree nodes [S1, unofficial].
+    *   For each node, calculate its center and radius from its `bound min/max`. Store these values and remove the raw bound object from the node to save memory [S1, unofficial].
+    *   If the node contains LODs, parse them into a structured array containing `fileKey`, `offset`, `count`, and `lodLevel` [S1, unofficial].
+
+5.  **Tile Population**:
+    *   Populate the `splatTiles` object with metadata derived from `sceneMeta`:
+        *   `version`, `magicNumber`, `totalCount` [S1, unofficial].
+        *   `lodTargets` and `lodDistances` for both PC and mobile modes [S1, unofficial].
+    *   Compute active `lodTargets` and `lodDistances` using helper functions `getLodTargets` and `getLodDistances`. These functions filter and sort targets/distances based on device type (mobile/PC) and ensure the first distance is `0` [S1, unofficial].
+    *   Resolve all relative URLs in `splatTiles.files` using the base URL of the fetched metadata [S1, unofficial].
+
+6.  **Download Scheduling (`checkDownload`)**:
+    *   **Top LOD Check**: Count files at the highest LOD level (`splatTiles.lodLevels - 1`) that have downloaded data. If more than 4 such files are ready, set `topLodReady = true` [S1, unofficial].
+    *   **Early Exit Conditions**:
+        *   If no todos remain, return [S1, unofficial].
+        *   If the count of currently fetching files exceeds `MaxDownloadCount`, return [S1, unofficial].
+        *   If top-level files (highest LOD) were queued but not yet started, return early to allow them to download first [S1, unofficial].
+    *   **Priority Sorting**:
+        *   Sort remaining todo files by `currentDistance` from the camera in ascending order [S1, unofficial].
+        *   Slice the sorted list to fit within the remaining download capacity: `MaxDownloadCount - fetchingCnt` [S1, unofficial].
+    *   **Execution**: Initiate downloads for the sliced list [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class LODDownloadManager:
+    def __init__(self, is_mobile: bool):
+        self.is_mobile = is_mobile
+        self.max_download_count = 3 if is_mobile else 7
+        self.splat_tiles = None
+        self.fetching_count = 0
+        self.top_lod_ready = False
+        self.todo_files = []
+        self.is_disposed = False
+        self.frame_loop_id = None
+
+    def initialize(self, splat_file_id: str):
+        """Called on TodoDownloadLod event."""
+        if self.splat_file_exists(splat_file_id) and not self.has_status(splat_file_id):
+            self.add_to_splat_file_set(splat_file_id)
+        self.start_frame_loop()
+
+    def start_frame_loop(self):
+        """Register frame-by-frame execution."""
+        self.frame_loop_id = register_frame_callback(self.check_download)
+
+    def on_add_lod_meta(self, url: str):
+        """Called on LodDownloadManagerAddLodMeta event."""
+        metadata = self.fetch_json(url)
+        self.parse_metadata(metadata, url)
+
+    def parse_metadata(self, metadata: dict, base_url: str):
+        """Parse LOD tree and populate splatTiles."""
+        # Extract bounding box
+        min_bound = metadata['bound_min']
+        max_bound = metadata['bound_max']
+        fire_event('SplatUpdateBoundBox', min_bound, max_bound)
+
+        # Initialize splatTiles structure
+        self.splat_tiles = {
+            'version': metadata.get('version'),
+            'magicNumber': metadata.get('magicNumber'),
+            'totalCount': metadata.get('totalCount'),
+            'lodLevels': metadata.get('lodLevels'),
+            'files': {},
+            'boundMin': min_bound,
+            'boundMax': max_bound,
+            'topLodReady': False
+        }
+
+        # Traverse LOD tree
+        self.traverse_lod_tree(metadata['tree'], self.splat_tiles['files'], base_url)
+
+        # Compute active LOD targets/distances
+        device_type = 'mobile' if self.is_mobile else 'pc'
+        self.splat_tiles['lodTargets'] = get_lod_targets(metadata['sceneMeta'], device_type)
+        self.splat_tiles['lodDistances'] = get_lod_distances(metadata['sceneMeta'], device_type)
+        
+        # Validate distances
+        if len(self.splat_tiles['lodDistances']) != len(self.splat_tiles['lodTargets']):
+            # Reset to default linear progression if mismatch
+            self.splat_tiles['lodDistances'] = [i * 20 for i in range(len(self.splat_tiles['lodTargets']))]
+
+        # Ensure first distance is 0
+        if self.splat_tiles['lodDistances']:
+            self.splat_tiles['lodDistances'][0] = 0
+
+    def traverse_lod_tree(self, node: dict, file_map: dict, base_url: str):
+        """Recursively parse LOD nodes."""
+        # Calculate center and radius from bound min/max
+        center = (node['bound_min'] + node['bound_max']) / 2.0
+        radius = norm(node['bound_max'] - node['bound_min']) / 2.0
+        
+        # Store center/radius, remove bound object
+        node['center'] = center
+        node['radius'] = radius
+        del node['bound_min']
+        del node['bound_max']
+
+        # Parse LODs if present
+        if 'lods' in node:
+            for lod in node['lods']:
+                file_key = lod['fileKey']
+                # Resolve relative URL
+                full_url = resolve_relative_url(lod['url'], base_url)
+                file_map[file_key] = {
+                    'fileKey': file_key,
+                    'offset': lod.get('offset', 0),
+                    'count': lod.get('count', 0),
+                    'lodLevel': lod.get('lodLevel', 0),
+                    'url': full_url,
+                    'downloaded': False,
+                    'data': None,
+                    'currentDistance': 0.0 # Updated in check_download
+                }
+
+        # Recurse into children
+        if 'children' in node:
+            for child in node['children']:
+                self.traverse_lod_tree(child, file_map, base_url)
+
+    def check_download(self):
+        """Frame-by-frame download scheduling logic."""
+        if self.is_disposed:
+            self.stop_frame_loop()
+            return
+
+        if not self.splat_tiles:
+            return
+
+        # Check if top LOD is ready
+        highest_lod_level = self.splat_tiles['lodLevels'] - 1
+        top_lod_ready_count = 0
+        for file_meta in self.splat_tiles['files'].values():
+            if file_meta['lodLevel'] == highest_lod_level and file_meta['downloaded']:
+                top_lod_ready_count += 1
+        
+        if top_lod_ready_count > 4:
+            self.splat_tiles['topLodReady'] = True
+
+        # Count todos and fetching
+        todo_files = [f for f in self.splat_tiles['files'].values() if not f['downloaded'] and f['data'] is None]
+        fetching_count = self.get_fetching_count()
+
+        # Early exit conditions
+        if len(todo_files) == 0:
+            return
+        if fetching_count >= self.max_download_count:
+            return
+        
+        # Prioritize top-level files if queued
+        top_lod_todos = [f for f in todo_files if f['lodLevel'] == highest_lod_level]
+        if top_lod_todos:
+            # Return early to allow them to download first (they will be picked up in next frame or by scheduler)
+            # Note: Source says "If top-level files were queued, return early to allow them to download first."
+            # This implies we don't add *new* lower-level files, but let top-level ones proceed.
+            return
+
+        # Sort remaining by distance
+        camera_pos = get_camera_position()
+        for f in todo_files:
+            f['currentDistance'] = norm(camera_pos - f['center'])
+        
+        todo_files.sort(key=lambda x: x['currentDistance'])
+
+        # Slice to fit capacity
+        remaining_capacity = self.max_download_count - fetching_count
+        files_to_download = todo_files[:remaining_capacity]
+
+        # Initiate downloads
+        for f in files_to_download:
+            self.start_download(f['url'], f)
+
+    def destroy(self):
+        self.is_disposed = True
+        self.stop_frame_loop()
+```
+
+### Edge Cases and Pitfalls
+*   **LOD Distance Mismatch**: If the number of provided LOD distances does not match the number of LOD targets, the system resets the distances to a default linear progression `i * 20` to ensure valid configuration [S1, unofficial].
+*   **Precision**: Bounding box calculations use floating-point arithmetic. Center and radius are derived from min/max bounds.
+*   **Boundaries**: The manager checks for disposal to prevent memory leaks or crashes after the viewer is closed [S1, unofficial].
+
+## Subtopics
+
+### [Splat Download Scheduler](15798-splat-download-scheduler.md)
+Determines which splats to download and in what order to maximize visual utility under bandwidth constraints. It formulates selection as an optimization problem (knapsack/progressive loading) and dynamically adapts to bandwidth and viewport position. Choose this when fine-grained, utility-based scheduling is required beyond simple distance sorting.
+
+### [Splat Cloud Loading](13758-splat-cloud-loading.md)
+General mechanism for loading splat clouds. Use this for the broader context of cloud-based splat ingestion.
+
+## Operating characteristics
+*   **Time Complexity**: Metadata parsing is linear with respect to the number of LOD nodes. Download scheduling is $O(N \log N)$ per frame due to sorting by distance, where $N$ is the number of pending downloads.
+*   **Memory Complexity**: Linear with respect to the number of splat tiles stored in `splatTiles`. Bounding box objects are removed after parsing to save memory [S1, unofficial].
+*   **Performance**: Concurrency is limited to 3 (mobile) or 7 (desktop) to prevent network saturation [S1, unofficial].
+*   **Strengths**: Prioritizes visually important (nearby) tiles first; handles hierarchical LOD structures efficiently; adapts to device capabilities.
+*   **Limitations**: Relies on a frame-by-frame loop which may introduce slight latency in download initiation; simple distance-based sorting may not account for occlusion or screen-space coverage as effectively as the Splat Download Scheduler.
+*   **When to use**: For real-time web-based 3D Gaussian splat visualization where network bandwidth is variable and immediate visual feedback for the current viewpoint is critical.
+
+## Background
+The LOD Download Manager is part of the Reall3D Viewer project, an open-source 3D Gaussian splatting viewer developed by Reall3D [S1, unofficial]. It was designed to handle the specific challenges of loading large-scale, multi-resolution splat data in web browsers, leveraging the `ISplatSource` interface for asynchronous loading [S1, unofficial].
+
+## Sources
+[S1] reall3d-com/Reall3dViewer, https://github.com/reall3d-com/Reall3dViewer, fetched 2026-10-27 (unofficial)

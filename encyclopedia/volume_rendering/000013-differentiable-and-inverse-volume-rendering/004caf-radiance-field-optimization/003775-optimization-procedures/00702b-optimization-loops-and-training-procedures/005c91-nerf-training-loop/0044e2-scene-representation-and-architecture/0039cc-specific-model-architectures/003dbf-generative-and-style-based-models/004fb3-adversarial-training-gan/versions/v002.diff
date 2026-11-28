@@ -1,0 +1,130 @@
+--- v001.md
++++ v002.md
+@@ -1,50 +1,81 @@
+ # Adversarial Training (GAN)
+ 
+-Also called: Discriminator Training, GAN Loss
++Also called: Discriminator Training, GAN Loss, Joint Adversarial-Rasterization Training, LSGAN Adversarial Training
+ 
+ ## Overview
+-Adversarial Training introduces a discriminator network trained in parallel with the radiance field generator to classify rendered images as ground truth or predicted [S1]. It distinguishes itself from standard differentiable rendering pipelines by adding a game-theoretic loss term that encourages photorealism and high-frequency detail, addressing the blurriness often associated with pure pixel-wise reconstruction losses [S1].
++Adversarial Training integrates a discriminator network trained in parallel with a generator (e.g., a radiance field or super-resolution network) to classify rendered images as real or fake [S1]. It distinguishes itself from standard differentiable rendering pipelines by adding a game-theoretic loss term that encourages photorealism and high-frequency detail, addressing the blurriness often associated with pure pixel-wise reconstruction losses [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Generator Input ($z$):** The latent representation or low-resolution input passed through the radiance field network (e.g., super-resolution network) to produce a predicted image $G(z)$ [S1].
++*   **Generator Input ($z$):** A latent vector, low-resolution image, or scene representation passed through the generator network to produce a predicted image $G(z)$ [S1], [S2].
+ *   **Discriminator Input:** Pairs of images consisting of real ground truth images $x$ and generated fake images $G(z)$ [S1].
+ *   **Outputs:** The generator outputs a rendered image; the discriminator outputs a scalar score $D(\cdot) \in [0, 1]$ indicating the probability that the input is real [S1].
+ 
+ **Data Structures:**
+-*   **Discriminator Network ($D$):** A neural network (typically a CNN in image-based contexts, or adapted for volumetric features) that takes an image as input and outputs a single scalar value [S1].
+-*   **Generator Network ($G$):** The existing radiance field model (e.g., the super-resolution network described in the parent article) [S1].
++*   **Generator Network ($G$):** The existing radiance field, super-resolution, or synthesizer network (e.g., $R_\theta$) that maps inputs to images [S1], [S2].
++*   **Discriminator Network ($D$):** A neural network (typically fully convolutional or CNN-based) that takes an image as input and outputs a single scalar value [S1], [S3].
+ 
+ **Formulas:**
+-The discriminator loss $L_{GAN,D}$ minimizes the error in distinguishing real from fake data [S1]:
++The standard adversarial losses minimize the error in distinguishing real from fake data [S1]:
+ $$
+ L_{GAN,D} = - \log(D(x)) - \log(1 - D(G(z)))
+ $$
+-where $x$ is the ground truth image and $G(z)$ is the generated image [S1].
+-
+-The generator loss $L_{GAN,G}$ minimizes the discriminator's ability to detect fakes, effectively maximizing the probability that the discriminator classifies generated images as real [S1]:
+ $$
+ L_{GAN,G} = - \log(D(G(z)))
+ $$
++where $x$ is the ground truth image and $G(z)$ is the generated image [S1].
++
++The Least-Squares GAN (LSGAN) variant replaces the log terms with squared errors to improve training stability [S2]:
++$$
++L_{adv} = \sum_{i=1}^{N_s} \sum_{t=1}^{T} \left[ D_\phi(R_\theta(S_t^{(i)}))^2 + (D_\phi(I_{gt}^{(i)}) - 1)^2 \right]
++$$
++where $N_s$ is the total number of discriminator scales (typically 5), $I_{gt}^{(i)}$ is the scale-adjusted ground-truth image, and $S_t^{(i)}$ is the rasterized raw image at resolution level $t$ and scale $i$ [S2].
+ 
+ **Parameters:**
+ *   $\lambda_G$: Weight for the adversarial generator loss in the total objective function [S1].
+-*   $\lambda_{M}, \lambda_{AO}, \lambda_{N}$, etc.: Weights for other auxiliary losses (e.g., L1 losses on masks, albedo, normals) which are summed with the GAN loss [S1].
++*   $\lambda_{M}, \lambda_{AO}, \lambda_{N}$, etc.: Weights for auxiliary reconstruction losses (e.g., L1 losses on masks, albedo, normals) summed with the GAN loss [S1].
++*   $\lambda$: R1 regularization strength applied to discriminator gradients [S4].
++*   $\tau$: Temperature scaling parameter in contrastive pose losses [S4].
+ 
+ **Steps:**
+-1.  **Forward Pass (Generator):** Render the image $G(z)$ using the radiance field network from input $z$ [S1].
++1.  **Generate:** Pass input $z$ through the generator to produce $G(z)$ [S1], [S2].
+ 2.  **Discriminator Update:**
+-    a. Compute $D(x)$ for ground truth images $x$ [S1].
+-    b. Compute $D(G(z))$ for generated images $G(z)$ [S1].
+-    c. Calculate $L_{GAN,D}$ [S1].
+-    d. Update discriminator weights to minimize $L_{GAN,D}$ [S1].
++    a. Evaluate discriminator on real images $D(x)$ [S1].
++    b. Evaluate discriminator on generated images $D(G(z))$ [S1].
++    c. Compute $L_{GAN,D}$ or $L_{adv}$ [S1], [S2].
++    d. Update discriminator weights to minimize the loss [S1].
+ 3.  **Generator Update:**
+-    a. Compute $D(G(z))$ using the current discriminator [S1].
+-    b. Calculate $L_{GAN,G}$ [S1].
+-    c. Update generator weights to minimize $L_{GAN,G}$ (often combined with other reconstruction losses) [S1].
++    a. Evaluate discriminator on generated images $D(G(z))$ [S1].
++    b. Compute $L_{GAN,G}$ [S1].
++    c. Update generator weights to minimize the adversarial loss combined with reconstruction losses [S1].
++
++**Pseudocode:**
++```python
++def train_adversarial(generator, discriminator, real_batch, latent_batch, optimizer_G, optimizer_D, lambda_adv):
++    # Discriminator step
++    optimizer_D.zero_grad()
++    real_scores = discriminator(real_batch)
++    fake_images = generator(latent_batch)
++    fake_scores = discriminator(fake_images.detach())
++    
++    # Standard log loss (LSGAN variant replaces these terms with squared errors)
++    loss_D = -torch.mean(torch.log(real_scores + 1e-8)) - torch.mean(torch.log(1.0 - fake_scores + 1e-8))
++    loss_D.backward()
++    optimizer_D.step()
++    
++    # Generator step
++    optimizer_G.zero_grad()
++    fake_images = generator(latent_batch)
++    fake_scores = discriminator(fake_images)
++    loss_G_adv = -torch.mean(torch.log(fake_scores + 1e-8))
++    loss_G_total = lambda_adv * loss_G_adv + reconstruction_loss(fake_images, real_batch)
++    loss_G_total.backward()
++    optimizer_G.step()
++```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Training Instability:** GAN training is known to be unstable; the discriminator may overpower the generator, leading to mode collapse or vanishing gradients [S1].
+-*   **Loss Balance:** The relative weights ($\lambda$) of the adversarial loss versus reconstruction losses (like L1) must be carefully tuned [S1].
++*   **Discriminator Reuse:** Reusing a pre-trained discriminator yields inferior results; it must be retrained alongside each new reconstruction to provide feedback for different aspects of the solution [S3].
++*   **Batch & Resolution Handling:** The relativistic GAN 'average' formulation allows different resolutions and batch sizes for real and fake samples, while the least-squares variant gives empirically better results [S3].
++*   **Loss Balancing:** The relative weights ($\lambda$) of the adversarial loss versus reconstruction losses must be carefully tuned to prevent the discriminator from overpowering the generator [S1].
+ 
+ ## Subtopics
+@@ -53,14 +84,20 @@
+ A training strategy for predicting lighting conditions in street scenes that addresses depth rendering ambiguity and encourages photorealism through adversarial supervision. It distinguishes itself from standard differentiable rendering pipelines by combining a multi-term hybrid loss (including sky regression, reconstruction, and regularization) with a PatchGAN discriminator, trained in a two-stage process (pre-training followed by joint adversarial training) to stabilize convergence.
+ 
++### Adversarial and Contrastive Losses
++A variant that integrates pose-aware contrastive learning with adversarial training for 3D Gaussian splat generation [S4]. The discriminator includes a pose branch $d_p$ estimating a pose embedding $p_I$ from input images, while a pose encoder maps camera parameters $\theta$ to $p_\theta$ [S4]. The adversarial loss uses a softplus function with R1 regularization: $L_{adv} = \mathbb{E}_{z,\theta}[f(d(g(z,\theta)))] + \mathbb{E}_{I_r}[f(-d(I_r)) + \lambda||\nabla d(I_r)||^2]$ where $f(t) = -\log(1 + \exp(-t))$ [S4]. Contrastive pose loss $L_{pose}$ maximizes cosine similarity between $p_I$ and $p_\theta$ at temperature $\tau$ [S4]. Positional regularization uses $L_{center}$ to anchor coarsest-level Gaussians to the origin and $L_{knn}$ to minimize distances between $K$ nearest neighbors [S4]. The total objective is $L = L_{adv} + \lambda_{pose} L_{pose} + \lambda_{center} L_{center} + \lambda_{knn} L_{knn}$ [S4].
++
+ ## Operating characteristics
+-*   **Complexity:** Adds the computational cost of the discriminator network to each training step. The discriminator typically requires fewer parameters than the generator but adds significant overhead to the backward pass if not carefully sized [S1].
+-*   **Performance:** Improves perceptual quality and high-frequency details compared to MSE/L1-only training [S1].
+-*   **Strengths:** Produces sharper, more realistic textures; reduces blurriness [S1].
+-*   **Limitations:** Harder to train; prone to instability; requires careful hyperparameter tuning for loss weights [S1].
++*   **Complexity:** Adds the forward and backward pass of the discriminator network to each training step [S1], [S3]. The discriminator architecture typically uses 14 convolutional layers with $4 \times 4$ filters and LReLU activations [S3].
++*   **Performance:** Improves perceptual quality and high-frequency details compared to MSE/L1-only training [S1], [S2].
++*   **Strengths:** Produces sharper, more realistic textures; reduces smearing and streak artifacts common in single-view reconstruction [S2], [S3].
++*   **Limitations:** Requires careful hyperparameter tuning for loss weights; necessitates per-reconstruction discriminator retraining [S3].
+ *   **When to use:** When photorealism and high-frequency detail are prioritized over strict pixel-wise accuracy [S1].
+ 
+ ## Background
+-Originated from Generative Adversarial Networks (GANs) introduced by Goodfellow et al. [S1]. In the context of volumetric rendering and super-resolution, it was employed to train a discriminator network in parallel with a super-resolution generator to classify images as ground truth or predicted, using the discriminator's output as a loss term for the generator [S1].
++Originated from Generative Adversarial Networks (GANs) introduced by Goodfellow et al. [S1]. In volumetric rendering and super-resolution, it was first employed to train a discriminator network in parallel with a super-resolution generator to classify images as ground truth or not, using the discriminator's output as a loss term [S1]. The methodology was subsequently adapted for point-based graphics with multi-scale discriminators [S2], fluid reconstruction with fully convolutional discriminators [S3], and hierarchical 3D Gaussian splats with pose-aware contrastive objectives [S4].
+ 
+ ## Sources
+-[S1] Volumetric Isosurface Rendering with Deep Learning-Based Super ..., https://ieeexplore.ieee.org/abstract/document/8918030, fetched 2026-10-31+[S1] Volumetric Isosurface Rendering with Deep Learning-Based Super ..., https://ieeexplore.ieee.org/abstract/document/8918030, fetched 2026-10-31
++[S2] CE-NPBG: Connectivity Enhanced Neural Point-Based Graphics for Novel View Synthesis in Autonomous Driving Scenes, https://doi.org/10.1109/cvprw67362.2025.00240, fetched 2026-10-29
++[S3] Global Transport for Fluid Reconstruction with Learned Self-Supervision, https://doi.org/10.1109/cvpr46437.2021.00168, fetched 2026-10-30
++[S4] GSGAN: Adversarial Learning for Hierarchical Generation of 3D Gaussian Splats, https://doi.org/10.52202/079017-2171, fetched 2026-10-29

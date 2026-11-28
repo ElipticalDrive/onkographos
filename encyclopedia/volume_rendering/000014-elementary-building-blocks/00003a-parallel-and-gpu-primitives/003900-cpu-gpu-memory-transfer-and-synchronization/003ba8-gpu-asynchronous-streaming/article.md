@@ -1,0 +1,89 @@
+# GPU Asynchronous Streaming
+
+Also called: GPU Async - Implementation, GPU Asynchronous
+
+## Overview
+GPU Asynchronous Streaming is a technique for performing truly asynchronous data transfers between the CPU and GPU by utilizing separate OpenGL contexts for download and drawing threads, leveraging the GPU's Copy Engine (CE) [S1, unofficial]. It solves the problem of GPU stalls caused by blocking data transfers in the same thread as rendering [S1, unofficial]. It sets itself apart from [GPU Buffer Upload via Transfer Buffer](9032-gpu-buffer-upload-via-transfer-buffer.md) and [Host-Device Memory Transfer with Events](14603-host-device-memory-transfer-with-events.md) by using a separate download thread and OpenGL contexts to allow the GPU's Copy Engine to overlap compute, download, and readback [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Host-side volume data (e.g., `m_pVolume[m_curTimeStep]`), dimensions (`m_w`, `m_h`, `m_d`), and a Device Context (`hDC`) [S1, unofficial].
+- Output: Rendered frames using textures updated asynchronously [S1, unofficial].
+
+**Data Structures:**
+- `HGLRC`: OpenGL Rendering Context handle [S1, unofficial].
+- `HANDLE`: Thread handle [S1, unofficial].
+- `texID`: Texture identifier generated via `glGenTextures` [S1, unofficial].
+- PBOs (Pixel Buffer Objects): Used for data staging, managed by the driver [S1, unofficial].
+
+**Steps:**
+1. Create two OpenGL contexts from the same Device Context (`hDC`) using `wglCreateContext` [S1, unofficial].
+2. Share textures between the two contexts using `wglShareLists` before any loading occurs, respecting the specified argument order [S1, unofficial].
+3. Launch a separate download thread [S1, unofficial].
+4. In the main draw thread, make the draw context current and perform texture access and drawing [S1, unofficial].
+5. In the download thread, make the download context current and perform PBO-based texture downloads [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+hDC = get_device_context()  # Retrieves the shared Windows device context handle
+downloadRC = wglCreateContext(hDC)  # Creates a dedicated OpenGL rendering context for downloads
+drawRC = wglCreateContext(hDC)      # Creates a dedicated OpenGL rendering context for drawing
+wglShareLists(downloadRC, drawRC)   # Links the two contexts so texture objects are shared
+downloadThread = create_thread(download_func)  # Spawns a background OS thread for data transfer
+
+def main_loop():
+    while not done:
+        wglMakeCurrent(hDC, drawRC)  # Sets drawRC as the active context for the main thread
+        # Texture access and drawing operations occur here
+        render_frame()               # Executes the GPU rendering pipeline
+
+def download_func(lpParam):
+    wglMakeCurrent(hDC, downloadRC)  # Sets downloadRC as the active context for the background thread
+    texID = glGenTextures(1)         # Allocates a new texture object ID
+    while True:
+        # Standard PBO mapping, host memory copy, and glTexSubImage3D upload
+        pass
+
+# Helper definitions to ensure self-contained validity
+def get_device_context(): return None
+def wglCreateContext(dc): return None
+def wglShareLists(ctx1, ctx2): pass
+def create_thread(func): return None
+def wglMakeCurrent(dc, ctx): pass
+def render_frame(): pass
+def glGenTextures(n): return 0
+done = False
+```
+
+**Parameters:**
+- `wglCreateContext`: API for context creation [S1, unofficial].
+- `wglShareLists`: API for sharing lists [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- The order of `wglShareLists` arguments matters [S1, unofficial].
+- PBOs can block the GPU if used in the same thread as drawing [S1, unofficial].
+
+## Subtopics
+
+### [Asynchronous Pipeline (Overlap)](10166-asynchronous-pipeline-overlap.md)
+A pipelining strategy that overlaps SSD read/prefetch, Host-to-Device (H2D) staging, and GPU rendering/backpropagation to hide I/O latency in out-of-core volume rendering. It sets itself apart from sequential implementations by using multi-threading and asynchronous I/O to allow rendering to proceed while data is still being fetched from storage or the network. Choose it when out-of-core roaming causes frame rate drops due to sequential cache scanning, data fetching, and rendering.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Measured Performance:** Not given in the sources [S1, unofficial].
+- **Scaling:** Not given in the sources [S1, unofficial].
+- **Strengths:** Allows the GPU's Copy Engine to overlap compute, download, and readback [S1, unofficial].
+- **Limitations:** Requires separate threads and contexts [S1, unofficial].
+- **When to use:** When using Fermi architecture or later GPUs with Copy Engines [S1, unofficial].
+
+## Background
+Origin: NVIDIA GTC 2009 presentation [S1, unofficial].
+History: Introduced as a method to leverage the Fermi architecture's Copy Engine for truly asynchronous downloads [S1, unofficial].
+Usage: Part of NVIDIA Application Performance Optimization [S1, unofficial].
+
+## Sources
+[S1] PDF Slide 1, https://www.nvidia.com/content/GTC/documents/1102_GTC09.pdf, fetched 2026-10-29 (unofficial)

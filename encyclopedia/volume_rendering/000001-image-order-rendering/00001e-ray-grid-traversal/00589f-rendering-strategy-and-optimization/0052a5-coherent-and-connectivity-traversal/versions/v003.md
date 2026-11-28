@@ -1,0 +1,31 @@
+# Coherent and Connectivity Traversal
+
+
+## Overview
+This family accelerates ray-grid traversal by exploiting spatial coherence among ray bundles or by enforcing strict topological connectivity rules to resolve boundary ambiguities [G]. It solves the problem of packet divergence in coherent ray tracing and normal inaccuracies in uniform grid traversal [G].
+
+## Shared principles
+All methods in this family build on [Ray-grid traversal](17-ray-grid-traversal.md), which advances analytically from one cell boundary to the next [Parent]. Optimization and cost models do not alter this fundamental geometric logic but instead optimize the cost of executing it or the parameters under which it runs [Parent].
+
+## Subtopics
+
+### [Coherent Grid Traversal](2987-coherent-grid-traversal.md)
+Processes bundles of coherent rays as frustums, advancing slice-by-slice along a dominant axis rather than cell-by-cell. It sets itself apart from its sibling [Rendering Order and Strategy](14814-rendering-order-and-strategy.md) and standard 3DDDA by avoiding expensive packet splitting and merging operations, allowing the grid to be rebuilt from scratch every frame for dynamic scenes while maintaining performance competitive with kd-trees. Choose it when rendering dynamic scenes with large coherent ray packets where packet divergence would break cell-by-cell traversal.
+
+### [Hero-like 4-Connectivity (H4T)](3436-hero-like-4-connectivity-h4t.md)
+Guarantees strict 4-connectivity by explicitly resolving boundary crossing ambiguities via stable sorting of intersection distances. It sets itself apart from its sibling [Coherent Grid Traversal](2987-coherent-grid-traversal.md) and standard DDA by explicitly testing a 2x2 cell neighborhood and using axis-priority sorting to prevent diagonal jumps, ensuring that rays crossing grid lines do so one axis at a time. Choose it when topological consistency and correct normal calculation are required, particularly for primary rays hitting silhouettes or when diagonal jumps cause artifacts.
+
+### Ray Connectivity
+#### definition
+- [S1, unofficial] A property defining the set of cells a ray can traverse to from its current cell, inspired by pixel connectivity in image processing.
+#### formula
+- [S1, unofficial] Taxicab metric distance between $P_1=(x_1, y_1)$ and $P_2=(x_2, y_2)$ is $|x_1 - x_2| + |y_1 - y_2|$.
+- [S1, unofficial] Chebyshev metric distance between $P_1=(x_1, y_1)$ and $P_2=(x_2, y_2)$ is $\max(|x_1 - x_2|, |y_1 - y_2|)$.
+#### number
+- [S1, unofficial] In 2D, there are 4-connectivity (orthogonal neighbors) and 8-connectivity (including diagonal neighbors).
+
+## Background
+The concept of connectivity in ray traversal was formalized in a thesis by Hur [S1, unofficial], which analyzed the behavior of rays crossing voxel corners. The thesis noted that standard DDA methods might traverse through corners, leading to 8-connectivity, whereas specific algorithms aim for 4-connectivity to ensure correct normal calculation and topological consistency [S1, unofficial].
+
+## Sources
+[S1] versal algorithm for ray tracing Hur man gör en hierarkisk ..., https://kth.diva-portal.org/smash/get/diva2:2069409/FULLTEXT01.pdf, fetched 2026-10-25 (unofficial)

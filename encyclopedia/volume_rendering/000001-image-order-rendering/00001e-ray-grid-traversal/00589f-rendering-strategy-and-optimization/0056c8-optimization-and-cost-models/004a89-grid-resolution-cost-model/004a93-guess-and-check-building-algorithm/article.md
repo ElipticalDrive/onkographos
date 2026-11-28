@@ -1,0 +1,68 @@
+# Guess and Check Building Algorithm
+Also called: Sampling-based building algorithm
+## Overview
+The Guess and Check Building Algorithm determines the optimal grid subdivision factor $m$ by sampling a cost function over a theoretically bounded interval to minimize average traversal time [S1]. It distinguishes itself from exhaustive search methods by guaranteeing linear overall building time while leveraging theoretical bounds to restrict the search space [S1].
+## How it works
+**Inputs and Outputs:**
+- Input: The number of geometric primitives $N$ in the scene.
+- Output: The optimal subdivision factor $m$ that minimizes the cost function $T$ [S1].
+
+**Data Structures:**
+The algorithm operates on scalar values for $m$ and the cost function $T$ [S1].
+
+**Steps:**
+1. **Determine the Search Interval:** Calculate the lower and upper bounds for $m$ using theoretical results derived from the cost model assumptions [S1]. For typical constants where $T_{setup} \approx 1.0$, $T_{step} \approx 0.1$, and $T_{inter} \approx 0.5$, the interval is $m \in ((10N)^{1/3}, 5N^{2/3})$ [S1].
+2. **Sample the Cost Function:** Select a set of discrete values for $m$ within the bounded interval [S1]. For each candidate $m$, evaluate the cost function $T$ [S1]. The cost function $T$ depends on the number of occupied cells $N_m$, which can be evaluated in linear time for a given $m$ by performing primitive counting during the build [S1].
+3. **Select the Minimum:** Compare the evaluated cost values and select the $m$ that yields the minimum cost $T$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def guess_and_check_build(N, T_setup, T_step, T_inter):
+    # Step 1: Determine bounds based on theoretical analysis [S1]
+    lower_bound = (10 * N) ** (1/3)
+    upper_bound = 5 * (N ** (2/3))
+    
+    best_m = None
+    min_cost = float('inf')
+    
+    # Step 2: Sample the cost function
+    # A naive approach samples a constant number of points in the interval [S1]
+    num_samples = 10 # Example constant, not specified in sources
+    step_size = (upper_bound - lower_bound) / num_samples
+    
+    for i in range(num_samples + 1):
+        m_candidate = lower_bound + i * step_size
+        if m_candidate < lower_bound or m_candidate > upper_bound:
+            continue
+            
+        # Evaluate cost for this m
+        # N_m can be computed in linear time for this m via primitive counting [S1]
+        # The exact cost formula for T is not provided in the sources [S1]
+        N_m = 0 # The sources do not give the primitive counting implementation
+        cost = 0.0 # The sources do not give the exact cost function formula
+        
+        if cost < min_cost:
+            min_cost = cost
+            best_m = m_candidate
+            
+    return best_m
+```
+
+**Edge Cases and Pitfalls:**
+- The theoretical bounds assume specific values for $T_{setup}$, $T_{step}$, and $T_{inter}$ [S1].
+- The algorithm assumes that $N_m$ can be evaluated in linear time for any given $m$ [S1].
+
+## Operating characteristics
+- **Time Complexity:** Linear overall building time $O(N)$ [S1]. This is achieved because a naive approach samples the interval in a constant number of points, and evaluating the cost for each sample (including primitive counting for $N_m$) takes linear time [S1].
+- **Memory Complexity:** Not given in the sources [S1].
+- **Strengths:** Guarantees linear build time while finding a near-optimal resolution [S1].
+- **Limitations:** Relies on theoretical bounds derived from fixed typical constants [S1].
+
+## Background
+The algorithm is described in the context of grid-based ray tracing as a method to optimize grid resolution [S1]. It is compared to similar sampling-based approaches used in SAH kd-tree building, such as the conservatively sub-sampling method by Popov et al. [PGSS06] and the adaptive error-bounded heuristic by Hunt et al. [HMS06] [S1][S2, unofficial]. The work is attributed to Biagio Cosenza in "A Survey on Exploiting Grids for Ray Tracing" [S1].
+
+## Sources
+[S1] A Survey on Exploiting Grids for Ray Tracing, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/089-096, fetched 2026-10-24
+[S2] Grids in Ray Tracing: A Comprehensive Survey, https://www.scribd.com/document/349616186/GG-400, fetched 2026-10-25 (unofficial)

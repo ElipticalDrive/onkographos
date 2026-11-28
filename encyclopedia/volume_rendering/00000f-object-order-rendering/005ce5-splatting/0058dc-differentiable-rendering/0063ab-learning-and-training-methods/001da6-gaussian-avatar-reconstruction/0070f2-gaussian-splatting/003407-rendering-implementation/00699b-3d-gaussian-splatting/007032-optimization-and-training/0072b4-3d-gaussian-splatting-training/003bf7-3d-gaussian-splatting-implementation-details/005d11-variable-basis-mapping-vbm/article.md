@@ -1,0 +1,296 @@
+# Variable Basis Mapping (VBM)
+
+## Overview
+Variable Basis Mapping (VBM) is a framework that transforms volumetric fields into 3D Gaussian Splatting (3DGS) representations through wavelet-domain analysis, enabling real-time volumetric visualization by avoiding the prohibitively high computational costs of direct volume rendering [S1, unofficial]. Unlike iVR-GS, which uses randomly initialized Gaussians, or VEG, which uses heuristic density-based spheres, VBM establishes a direct, mathematical bridge using wavelet analysis to exploit structural and statistical information [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A physical volumetric field $F$ discretized into a uniform grid of resolution $G^3$, where $G$ is the volumetric data resolution [S1, unofficial].
+*   **Intermediate:** A radiance field $RF \in \mathbb{R}^{G \times G \times G \times 4}$ obtained by applying a transfer function $T_F: \mathbb{R}^r \to \mathbb{R}^4$ to $F$, producing RGBA vectors (color $c$, opacity $\alpha$) [S1, unofficial].
+*   **Output:** A set of $N$ anisotropic 3D Gaussian primitives, each defined by center $\mu_i \in \mathbb{R}^3$, covariance matrix $\Sigma_i \in \mathbb{R}^{3\times3}$, color $c_i$, and opacity $\alpha_i$ [S1, unofficial].
+
+**Data Structures**
+1.  **Wavelet-to-Gaussian Transition Bank:** A precomputed lookup structure mapping canonical wavelet atoms to optimal Gaussian surrogates [S1, unofficial]. It stores the parameters $(\mu, \Sigma, c, \alpha)$ for the canonical kernel $\psi_{j,k=(0,0,0)}$ at each decomposition level $j$ [S1, unofficial].
+2.  **Gaussian Primitive:** Defined by the tuple $(\mu_i, \Sigma_i, c_i, \alpha_i)$ [S1, unofficial]. The radiance field is approximated by:
+    $$ RF(x) \approx \sum_{i=1}^{N} c_i \frac{\alpha_i}{\sqrt{\det(\Sigma_i)}} \exp\left(-\frac{1}{2}(x - \mu_i)^\top \Sigma_i^{-1} (x - \mu_i)\right) $$
+    where $\mu_i$ is the center, $\Sigma_i$ is the covariance matrix, $c_i$ is the color, and $\alpha_i$ is the opacity [S1, unofficial].
+
+**Steps**
+1.  **Precompute Transition Bank:** Compute optimal Gaussian surrogates for canonical wavelet atoms across multiple scales [S1, unofficial]. To avoid cubic complexity ($J \times G^3$ fittings), only the canonical kernel $\psi_{j,k=(0,0,0)}$ is computed for each level $j$ [S1, unofficial]. Remaining kernels are derived analytically via translation and scaling, guaranteed by the group representation theorem [S1, unofficial].
+2.  **Wavelet Decomposition:** Express the radiance field $RF$ in a compact multi-scale form using the 3D Discrete Wavelet Transform (DWT) [S1, unofficial]. The field is decomposed into low-frequency coefficients $c_{0,k}$ and high-frequency coefficients $d_{j,k}$:
+    $$ RF(x) \approx \sum_{k} c_{0,k} \phi(x - k) + \sum_{j=0}^{J-1} \sum_{k} d_{j,k} \psi_{j,k}(x) $$
+    where $J$ is the number of decomposition levels, $\phi$ is the scaling function, and $\psi_{j,k}$ are dyadic wavelet atoms defined as $\psi_{j,k}(x) = 2^{3j/2} \psi(2^j x - k)$ [S1, unofficial].
+3.  **Analytical Gaussian Construction:** Map the discrete wavelet coefficients directly to 3DGS parameters using the precomputed Transition Bank [S1, unofficial]. Each wavelet basis $\psi_{j,k}$ is mapped to a Gaussian basis, and the associated coefficients $c_{j,k}$ (color) and $\alpha_{j,k}$ (opacity) are translated into the corresponding 3DGS parameters $(\mu, \Sigma, c, \alpha)$ [S1, unofficial].
+4.  **Image-Space Fine-Tuning:** Apply a lightweight optimization stage in image space to refine the representation and improve rendering fidelity [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def variable_basis_mapping(radiance_field, resolution_G, num_levels_J, transition_bank):
+    # radiance_field: numpy array of shape (G, G, G, 4)
+    # transition_bank: dict mapping scale j to (mu_base, Sigma_base, c_base, alpha_base)
+    gaussians = []
+
+    # Step 1: Low-frequency scaling function coefficients
+    # c0,k corresponds to the coarsest approximation. Mapped to Gaussians centered at grid points.
+    coarse_res = resolution_G // (2 ** (num_levels_J - 1)) if num_levels_J > 0 else resolution_G
+    for kx in range(coarse_res):
+        for ky in range(coarse_res):
+            for kz in range(coarse_res):
+                # Extract low-frequency coefficients for this grid cell
+                c_low = radiance_field[kx::coarse_res, ky::coarse_res, kz::coarse_res, :3].mean()
+                alpha_low = radiance_field[kx::coarse_res, ky::coarse_res, kz::coarse_res, 3].mean()
+                # Map to Gaussian: center at k, covariance scaled by grid spacing
+                mu = (kx, ky, kz)
+                Sigma = compute_scaling_covariance(coarse_res)
+                gaussians.append((mu, Sigma, c_low, alpha_low))
+
+    # Step 2: High-frequency wavelet coefficients
+    for j in range(num_levels_J):
+        scale = 2 ** j
+        grid_size = resolution_G // scale
+        base_mu, base_Sigma, _, _ = transition_bank[j]
+
+        for kx in range(grid_size):
+            for ky in range(grid_size):
+                for kz in range(grid_size):
+                    # Translate and scale the canonical Gaussian
+                    # Wavelet support shrinks by 2^j, so covariance divides by 4^j
+                    mu = (kx, ky, kz) / scale + base_mu
+                    Sigma = base_Sigma / (scale ** 2)
+
+                    # Extract wavelet coefficients for this atom
+                    c_high = wavelet_coeffs[j][kx, ky, kz, :3]
+                    alpha_high = wavelet_coeffs[j][kx, ky, kz, 3]
+
+                    gaussians.append((mu, Sigma, c_high, alpha_high))
+
+    # Step 3: Image-space fine-tuning
+    # Optimize parameters to minimize rendering loss against target views [G]
+    gaussians = fine_tune(gaussians, radiance_field)
+    return gaussians
+
+def compute_scaling_covariance(grid_size):
+    # Standard Gaussian approximation for the scaling function support
+    return [[1.0/grid_size**2, 0, 0], [0, 1.0/grid_size**2, 0], [0, 0, 1.0/grid_size**2]]
+
+def fine_tune(gaussians, target):
+    # Standard differentiable rasterization optimization loop [G]
+    return gaussians
+```
+
+**Parameters**
+*   $G$: Volumetric data resolution. The dataset is discretized into a uniform grid of resolution $G^3$ [S1, unofficial].
+*   $J$: Number of decomposition levels in the wavelet transform [S1, unofficial].
+*   $N$: Number of Gaussian primitives in the 3DGS representation [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Representational Gap:** There is a substantial representational gap between wavelet and Gaussian bases, making direct conversion nontrivial [S1, unofficial].
+*   **Computational Complexity:** A naïve implementation of Wavelet-to-Gaussian transitions incurs cubic computational complexity ($J \times G^3$ fittings), resulting in prohibitive computational cost [S1, unofficial]. The VBM method avoids this by computing only canonical kernels and deriving others analytically [S1, unofficial].
+
+## Subtopics
+
+### [DeSplat](12925-desplat.md)
+Dynamic scene representation using time-aware splatting. Choose when rendering animated volumetric sequences.
+
+### [360 Gaussian Splatting](12929-360-gaussian-splatting.md)
+Extends 3DGS to spherical panoramas. Choose for equirectangular volumetric capture.
+
+### [Scene Representation and Geometry Constraints](15421-scene-representation-and-geometry-constraints.md)
+Adds geometric priors to the representation. Choose when structural accuracy is critical.
+
+### [Perceptual Wrapper](15438-perceptual-wrapper.md)
+Uses perceptual loss functions to improve visual quality. Choose when PSNR is insufficient for quality.
+
+### [Inverse and Internal Rendering](15764-inverse-and-internal-rendering.md)
+Renders from internal viewpoints or inverts the process. Choose for volumetric interior visualization.
+
+### [Gaussian Frosting](15863-gaussian-frosting.md)
+Adds a lightweight neural network on top of Gaussians for detail. Choose when high-frequency detail is needed.
+
+### [Semantic and Language Integration](15930-semantic-and-language-integration.md)
+Integrates semantic labels or language queries. Choose for interactive volumetric exploration.
+
+### [3D Difference-of-Gaussians (3D-DoG)](16198-3d-difference-of-gaussians-3d-dog.md)
+Uses DoG primitives for sharper edges. Choose when boundary precision is required.
+
+### [Pruning and Density Control](16215-pruning-and-density-control.md)
+Removes redundant Gaussians during training. Choose when memory or compute is constrained.
+
+### [QuantumGS](16253-quantumgs.md)
+Explores quantum computing for Gaussian optimization. Choose for experimental high-dimensional optimization.
+
+### [Dynamic and Spacetime Modeling](16342-dynamic-and-spacetime-modeling.md)
+Extends 3DGS to 4D dynamic scenes. Choose for time-varying volumetric data.
+
+### [Closed-Form Triangle Splatting (CF-Splat)](16773-closed-form-triangle-splatting-cf-splat.md)
+Uses triangles instead of Gaussians. Choose when exact geometric primitives are preferred.
+
+### [Softmax-GS](16854-softmax-gs.md)
+Uses softmax blending for opacity. Choose when alpha blending artifacts are problematic.
+
+### [Student’s t-Primitive Representation](17072-student-s-t-primitive-representation.md)
+Uses t-distributions for heavier tails. Choose for data with long-tailed intensity distributions.
+
+### [Hierarchical, Graph-Based, and Adaptive Structures](17106-hierarchical-graph-based-and-adaptive-structures.md)
+Advanced data structures for Gaussians. Choose for large-scale scene management.
+
+### [Human Gaussian Splatting](16261-human-gaussian-splatting.md)
+Specialized for human avatars. Choose for character reconstruction.
+
+### [Uncertainty and Probabilistic Modeling](17380-uncertainty-and-probabilistic-modeling.md)
+Models rendering uncertainty. Choose for safety-critical volumetric analysis.
+
+### [SCION](17424-scion.md)
+Scene compression and optimization network. Choose for bandwidth-limited streaming.
+
+### [On-the-Fly GS](17509-on-the-fly-gs.md)
+Generates Gaussians during rendering. Choose for dynamic LOD streaming.
+
+### [View-Dependent and Appearance Modeling](17617-view-dependent-and-appearance-modeling.md)
+Models view-dependent appearance. Choose for anisotropic volumetric materials.
+
+### [Optimization and Training Loop](17791-optimization-and-training-loop.md)
+Standard iterative training process. Choose as a baseline for convergence tuning.
+
+### [BAD-Gaussians](18036-bad-gaussians.md)
+Bias-aware density adaptation. Choose for unevenly sampled volumetric data.
+
+### [LiteTex-GS](18111-litetex-gs.md)
+Lightweight texture encoding. Choose when texture memory is limited.
+
+### [Virtual Camera Optimization for Mirror Reflections](18121-virtual-camera-optimization-for-mirror-reflections.md)
+Handles mirror reflections via virtual cameras. Choose for scenes with reflective surfaces.
+
+### [Differentiable DOF Rendering](18289-differentiable-dof-rendering.md)
+Adds depth-of-field effects. Choose for cinematic volumetric visualization.
+
+### [ParetoGS Continuous-Budget Decoding](18388-paretogs-continuous-budget-decoding.md)
+Continuous quality-budget trade-offs. Choose for adaptive streaming.
+
+### [TruncGradGS](18675-truncgradgs.md)
+Truncates gradients for stability. Choose when optimization diverges.
+
+### [EfficientGS](18681-efficientgs.md)
+Optimized memory and compute. Choose for resource-constrained hardware.
+
+### [Variational 3D Gaussians](18706-variational-3d-gaussians.md)
+Probabilistic Gaussian modeling. Choose for uncertainty-aware rendering.
+
+### [Gaussian Splatting Training with SDS Loss](18710-gaussian-splatting-training-with-sds-loss.md)
+Uses score distillation sampling. Choose for text-to-3D volumetric generation.
+
+### [EnvMap-GS](18915-envmap-gs.md)
+Environment map integration. Choose for outdoor volumetric scenes.
+
+### [Thermal-Physics-Informed 3D Gaussian Splatting](18935-thermal-physics-informed-3d-gaussian-splatting.md)
+Physics-constrained thermal rendering. Choose for scientific visualization.
+
+### [Environment Map Generation from Gaussian Background](18942-environment-map-generation-from-gaussian-background.md)
+Generates envmaps from Gaussians. Choose for realistic lighting integration.
+
+### [CC-4DGS Training Schedule and Hash Encoding Configuration](19196-cc-4dgs-training-schedule-and-hash-encoding-configuration.md)
+Optimized training schedules. Choose for fast 4D convergence.
+
+### [MAC-Splat](19210-mac-splat.md)
+Memory-aware compression. Choose for mobile deployment.
+
+### [Heat Kernel Textures (HKTex)](19427-heat-kernel-textures-hktex.md)
+Heat kernel-based texture encoding. Choose for smooth volumetric shading.
+
+### [Gaussian Splatting in Style](19431-gaussian-splatting-in-style.md)
+Style transfer for Gaussians. Choose for artistic volumetric rendering.
+
+### [EOGS (Earth-observation Gaussian Splatting)](19449-eogs-earth-observation-gaussian-splatting.md)
+Earth observation specific. Choose for satellite volumetric data.
+
+### [HDR Gaussian Splatting](19777-hdr-gaussian-splatting.md)
+High dynamic range support. Choose for scenes with extreme lighting.
+
+### [BoundedGS](20068-boundedgs.md)
+Bounded primitive constraints. Choose for physically constrained volumes.
+
+### [Connectivity-based Visibility for 3D Gaussian Splatting](20071-connectivity-based-visibility-for-3d-gaussian-splatting.md)
+Visibility culling via connectivity. Choose for large occluded scenes.
+
+### [Sketch and Patch](20108-sketch-and-patch.md)
+Sketch-guided patch rendering. Choose for interactive editing.
+
+### [Scene Extent and Camera Initialization](20164-scene-extent-and-camera-initialization.md)
+Initialization strategies. Choose for robust training starts.
+
+### [Laplacian Frequency Hierarchies](20304-laplacian-frequency-hierarchies.md)
+Frequency-aware hierarchy. Choose for multi-resolution control.
+
+### [Gradient-Aware Super Sampling (GASS)](20492-gradient-aware-super-sampling-gass.md)
+Adaptive super-sampling. Choose when aliasing is severe.
+
+### [3D Gaussian Splatting for CT](20630-3d-gaussian-splatting-for-ct.md)
+CT-specific adaptation. Choose for medical volumetric data.
+
+### [Fisheye-GS](20662-fisheye-gs.md)
+Fisheye lens correction. Choose for wide-angle volumetric capture.
+
+### [AquaMass-GS](20667-aquamass-gs.md)
+Aquatic volume rendering. Choose for underwater scenes.
+
+### [GS-Scale Host Offloading](20685-gs-scale-host-offloading.md)
+Host-device offloading. Choose for massive-scale rendering.
+
+### [DeltaSplat](20851-deltasplat.md)
+Delta-based incremental updates. Choose for streaming updates.
+
+### [Rendering Implementation and Acceleration](21069-rendering-implementation-and-acceleration.md)
+Hardware acceleration techniques. Choose for performance tuning.
+
+### [ClunoGS Unified Optimization](21178-clunogs-unified-optimization.md)
+Unified optimization framework. Choose for multi-objective training.
+
+### [Splat and Replace](21189-splat-and-replace.md)
+Dynamic primitive replacement. Choose for adaptive density control.
+
+### [Shared Representation for Repetitive Elements](21241-shared-representation-for-repetitive-elements.md)
+Shared primitives for repetition. Choose for scenes with repetitive structures.
+
+### [Parameter-level Geometry-Appearance Decoupling](21297-parameter-level-geometry-appearance-decoupling.md)
+Decoupled geometry/appearance. Choose when geometry drifts during training.
+
+### [Radiance Field-Informed Gaussian Splatting](21331-radiance-field-informed-gaussian-splatting.md)
+Radiance field guidance. Choose for hybrid field representations.
+
+### [Hybrid Gaussian Splatting](21999-hybrid-gaussian-splatting.md)
+Hybrid primitive types. Choose for mixed geometry/apparence needs.
+
+### [Laplacian-Based Deformation for Gaussian Splatting](22006-laplacian-based-deformation-for-gaussian-splatting.md)
+Laplacian deformation. Choose for non-rigid volumetric animation.
+
+### [Surface-Aware Splat Graph Construction](22007-surface-aware-splat-graph-construction.md)
+Surface-aware graph. Choose for mesh-aligned rendering.
+
+### [GS2Mesh](22457-gs2mesh.md)
+Gaussian-to-mesh conversion. Choose when explicit meshes are required.
+
+### [Anchor-based and Coupled Primitives](22458-anchor-based-and-coupled-primitives.md)
+Coupled anchor primitives. Choose for structured volumetric layouts.
+
+### [Hybrid Radiance Fields (HyRF)](22697-hybrid-radiance-fields-hyrf.md)
+Hybrid radiance fields. Choose for neural-Gaussian integration.
+
+### [Distractor Removal and Robust Masking](23014-distractor-removal-and-robust-mask-ing.md)
+Distractor removal. Choose for noisy input data.
+
+## Operating characteristics
+*   **Time Complexity:** The precomputation step is reduced from $O(J \times G^3)$ to $O(J)$ by leveraging translation covariance and computing only canonical kernels [S1, unofficial]. The mapping step complexity is Not given in the sources. Fine-tuning is comparable to standard 3DGS optimization [S1, unofficial].
+*   **Memory Complexity:** Stores $N$ Gaussian primitives. The Transition Bank size is Not given in the sources.
+*   **Performance:** Significantly accelerates convergence and enhances rendering quality compared to heuristic initialization methods like iVR-GS and VEG [S1, unofficial]. Enables real-time volumetric visualization [S1, unofficial].
+*   **Strengths:** Principled mathematical bridge between volumetric analysis and 3DGS; exploits structural and statistical information; efficient precomputation [S1, unofficial].
+*   **Limitations:** Representational gap between wavelet and Gaussian bases requires careful approximation; relies on the quality of the wavelet transform and transfer function [S1, unofficial].
+*   **When to use:** Real-time visualization of large-scale volumetric data where direct volume rendering is too slow [S1, unofficial].
+*   **When not to use:** Not given in the sources.
+
+## Background
+Variable Basis Mapping (VBM) was proposed in 2026 by Cai Yucheng et al. from USTC [S1, unofficial]. It addresses the challenge of real-time visualization of large-scale volumetric data, which suffers from prohibitively high computational costs with direct volume rendering and voxel-based methods [S1, unofficial]. The method builds on 3D Gaussian Splatting (3DGS) [S1, unofficial] and integrates concepts from wavelet analysis [S1, unofficial]. It is the first framework to establish a direct, mathematical bridge between volumetric analysis and 3DGS [S1, unofficial].
+
+## Sources
+[S1] Variable Basis Mapping for Real-Time Volumetric Visualization, https://doi.org/10.48550/arxiv.2601.09417, fetched 2026-10-26 (unofficial)

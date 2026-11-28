@@ -1,0 +1,302 @@
+# Transputer Pipeline Volume Rendering System
+
+Also called: Distributed Voxel Rendering Pipeline, PE Pipeline Architecture, Transputer Network Voxel Processing, Voxel Data Processing on a Transputer Network, Voxel Processor
+
+## Overview
+The Transputer Pipeline Volume Rendering System is a distributed architecture that processes voxel data (e.g., CT or CLSM scans) across a linear network of Transputer processors [S1, unofficial]. It solves the problem of rendering large 3D empirical data sets by partitioning the volume into slices and assigning each slice to a specific Processing Element (PE) in a pipeline [S1, unofficial]. Unlike sibling methods that may use octrees or slice-based parallelism with different communication topologies, this system relies on a strict linear pipeline where commands flow forward and partial results flow backward, utilizing a fixed set of three concurrent processes per node [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   Global voxel data (e.g., $128 \times 128 \times 128$ or $256 \times 256 \times 32$) [S1, unofficial].
+*   Rendering parameters: `render.mode`, `transform.vectors`, `transform.sizes`, `z.cut.value`, `threshold.value` [S1, unofficial].
+*   Node identification: `NODE.NR` (integer, 0–15) [S1, unofficial].
+
+**Outputs:**
+*   Rendered images or processed data (histograms, edges, etc.) sent to the Controller/Framegrabber node [S1, unofficial].
+
+### Data Structures
+**Processing Element (PE) Structure:**
+Each PE (nodes 1–15) runs three concurrent processes:
+1.  **Distributor:**
+    *   Input channel: `distr.in` (from previous PE or Controller).
+    *   Output channel: `distr.to.next` (to next PE).
+    *   Output channel: `distr.to.proc` (to local Subprocessor).
+2.  **Merger:**
+    *   Input channel: `next.to.merger` (from next PE).
+    *   Input channel: `proc.to.merger` (from local Subprocessor).
+    *   Output channel: `merger.out` (to previous PE).
+3.  **Subprocessor:**
+    *   Input channel: `distr.to.proc`.
+    *   Output channel: `proc.to.merger`.
+
+**Node 0 (Controller/Loader):**
+*   Connects to Framegrabber (Node 100) via `net.loader`.
+*   Manages `command.pipe` and `merge.pipe` channels [S1, unofficial].
+
+**Node 100 (Framegrabber/Display):**
+*   Handles display output via `tfg.in`/`tfg.out` [S1, unofficial].
+
+**Slice Assignment Logic:**
+*   `SCDZ`: Number of slices per node (derived from total slices / number of nodes).
+*   `FIRST.SLICE`: `NODE.NR * SCDZ` [S1, unofficial].
+*   `LAST.SLICE`: `FIRST.SLICE + SCDZ` [S1, unofficial].
+*   `LAST`: Boolean flag, `LAST.ARRAY[NODE.NR]`. True if the node is the last in the pipeline [S1, unofficial].
+
+**Fixed-Point Coordinate System:**
+*   32-bit integers representing 16-bit integer + 16-bit fraction [S1, unofficial].
+*   Used for object-space to display-space transformation [S1, unofficial].
+*   Integer index into subcube image obtained by taking the upper 16 bits of the computed coordinate [S1, unofficial].
+
+### Steps
+1.  **Pipeline Initialization:**
+    *   Determine `LAST` based on `NODE.NR` [S1, unofficial].
+    *   If `LAST` is true, run only `subprocessor` [S1, unofficial].
+    *   If `LAST` is false, run `distributor`, `merger`, and `subprocessor` in parallel (`PRI PAR`) [S1, unofficial].
+
+2.  **Slice Assignment and Distribution:**
+    *   The distributor reads tags from `distr.in` [S1, unofficial].
+    *   If tag is `command`:
+        *   Forward command and data to `distr.to.next` (next PE) [S1, unofficial].
+        *   Forward command and data to `distr.to.proc` (local subprocessor) [S1, unofficial].
+    *   If tag is `quit`:
+        *   Set `running := FALSE` [S1, unofficial].
+        *   Send `quit` to `distr.to.next` and `distr.to.proc` [S1, unofficial].
+        *   Terminate [S1, unofficial].
+    *   Slice filtering: The subprocessor checks if the incoming `slice.nr` falls within `[FIRST.SLICE, LAST.SLICE]`. If `slice.nr > LAST.SLICE`, the slice is forwarded to the next PE (handled by the distributor logic implicitly or explicitly in the command stream) [S1, unofficial]. *Note: The source describes the distributor forwarding commands/data, and the subprocessor converting global indices to local indices, implying inactive PEs for out-of-range slices.*
+
+3.  **Subprocessor Command Processing:**
+    *   Read tags from `distr.to.proc` [S1, unofficial].
+    *   For `pe.render`:
+        *   Receive `render.mode`, `transform.vectors`, `transform.sizes`, `z.cut.value`, `threshold.value` [S1, unofficial].
+        *   Call `voxel.limit()` to convert global indices to local indices based on `NODE.NR` [S1, unofficial].
+        *   Compute result (e.g., histogram, view) [S1, unofficial].
+        *   Send partial result to merger via `sub.processor.out` with tag `merge.histogram` (or equivalent for other operations) [S1, unofficial].
+
+4.  **Back-to-Front Voxel Traversal Setup:**
+    *   Check sign of transformed unit vector's z-component (`unit.Step.xz`) [S1, unofficial].
+    *   If `unit.Step.xz >= 0.0`:
+        *   Step forward: `idx.step.x := 1` [S1, unofficial].
+    *   If `unit.Step.xz < 0.0`:
+        *   Step backward: `idx.step.x := -1` [S1, unofficial].
+        *   Swap `idx.start.x` and `idx.end.x` [S1, unofficial].
+        *   Invert unit vector components: `unit.step.xx := -unit.step.xx` (and similarly for y, z) [S1, unofficial].
+
+5.  **Voxel Loop Initialization:**
+    *   Initialize indices: `idx.z := idx.start.z`, `idx.y := idx.start.y`, `idx.x := idx.start.x` [S1, unofficial].
+    *   Initialize transformed coordinates: `zxi := start.zi`, `zyi := start.yi`, `zxi := start.xi` (Note: Source lists `zxi` twice, likely a typo for `zzi` or similar; implemented as incremental vars for x, y, z) [S1, unofficial].
+    *   Restrict processing to volume-of-interest using `idx.run.z`, `idx.run.y`, `idx.run.x` [S1, unofficial].
+
+6.  **Rendering Loop (View Mode Example):**
+    *   Iterate `z` from 0 to `idx.run.z` [S1, unofficial].
+    *   Iterate `y` from 0 to `idx.run.y` [S1, unofficial].
+    *   Iterate `x` from 0 to `idx.run.x` [S1, unofficial].
+    *   **Optimization:** Pack four neighboring voxels into one `INT32` variable (`durruny`) [S1, unofficial].
+    *   Test if all four voxels are '0'.
+        *   If true, jump four voxels in the x-direction [S1, unofficial].
+        *   If false, process individually in back-to-front order determined by `forward.x` [S1, unofficial].
+    *   Compute transformed coordinates incrementally [S1, unofficial].
+    *   Access voxel data and compute subimage value based on `render.mode` [S1, unofficial].
+
+7.  **Result Aggregation:**
+    *   Merger receives results from `next.to.merger` and `proc.to.merger` [S1, unofficial].
+    *   Aggregates results and sends to `merger.out` (previous PE) [S1, unofficial].
+    *   Final result sent to Controller (Node 0) [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+SCDZ = Total_Slices / 16  # Slices per node
+LAST_ARRAY = [False] * 16
+LAST_ARRAY[15] = True     # Node 15 is last
+
+def run_node(node_nr):
+    last = LAST_ARRAY[node_nr]
+    
+    # Data structures for channels (simplified for logic)
+    distr_in = Channel()
+    distr_to_next = Channel()
+    distr_to_proc = Channel()
+    proc_to_merger = Channel()
+    next_to_merger = Channel()
+    merger_out = Channel()
+    
+    if last:
+        # Last node: only subprocessor
+        subprocessor(node_nr, distr_in, merger_out)
+    else:
+        # Other nodes: parallel processes
+        distributor(node_nr, distr_in, distr_to_proc, distr_to_next)
+        merger(node_nr, proc_to_merger, next_to_merger, merger_out)
+        subprocessor(node_nr, distr_to_proc, proc_to_merger)
+
+def distributor(node_nr, distr_in, distr_to_proc, distr_to_next):
+    running = True
+    while running:
+        tag = distr_in.receive()
+        if tag == "command":
+            # Receive command and associated data
+            cmd_data = distr_in.receive_data()
+            # Forward to next PE
+            distr_to_next.send("command", cmd_data)
+            # Forward to local subprocessor
+            distr_to_proc.send("command", cmd_data)
+        elif tag == "quit":
+            running = False
+            distr_to_next.send("quit")
+            distr_to_proc.send("quit")
+        else:
+            raise Error("Illegal tag")
+
+def subprocessor(node_nr, distr_to_proc, proc_to_merger):
+    while True:
+        tag = distr_to_proc.receive()
+        if tag == "quit":
+            return
+        elif tag == "command":
+            cmd_data = distr_to_proc.receive_data()
+            if cmd_data.type == "pe.render":
+                render_mode = cmd_data.render_mode
+                transform_vectors = cmd_data.transform_vectors
+                transform_sizes = cmd_data.transform_sizes
+                z_cut_value = cmd_data.z_cut_value
+                threshold_value = cmd_data.threshold_value
+                
+                # Convert global indices to local indices
+                local_indices = voxel_limit(node_nr, transform_vectors, transform_sizes)
+                
+                # Perform rendering
+                result = render_view(
+                    render_mode, 
+                    local_indices, 
+                    z_cut_value, 
+                    threshold_value,
+                    transform_vectors
+                )
+                
+                # Send result to merger
+                proc_to_merger.send("merge_result", result)
+
+def render_view(render_mode, local_indices, z_cut_value, threshold_value, transform_vectors):
+    # Fixed-point transformation setup
+    # 32-bit INT: 16-bit integer, 16-bit fraction
+    unit_step = transform_unit_vector(transform_vectors)
+    
+    # Back-to-Front Setup
+    if unit_step.z >= 0.0:
+        idx_step_x = 1
+    else:
+        idx_step_x = -1
+        swap(local_indices.start_x, local_indices.end_x)
+        unit_step.x = -unit_step.x
+        unit_step.y = -unit_step.y
+        unit_step.z = -unit_step.z
+        
+    # Initialize indices and transformed coordinates
+    idx_z = local_indices.start_z
+    idx_y = local_indices.start_y
+    idx_x = local_indices.start_x
+    
+    zxi = local_indices.start_zi
+    zyi = local_indices.start_yi
+    zxi_x = local_indices.start_xi # Note: Source typo 'zxi' used for x start
+    
+    # Loop over volume of interest
+    for z in range(local_indices.run_z):
+        for y in range(local_indices.run_y):
+            for x in range(local_indices.run_x):
+                # Optimization: Pack 4 voxels
+                voxels = pack_four_voxels(idx_x, idx_y, idx_z)
+                
+                if all_zero(voxels):
+                    idx_x += 4 * idx_step_x
+                    continue
+                
+                # Process individually
+                for v in voxels:
+                    if v != 0:
+                        # Compute transformed coordinate
+                        # Use upper 16 bits for index
+                        coord = compute_transformed_coord(zxi, zyi, zxi_x)
+                        index = coord >> 16
+                        
+                        # Accumulate result based on render_mode
+                        accumulate_result(index, v, render_mode, threshold_value)
+                    
+                    # Increment transformed coordinates
+                    zxi_x += unit_step.x
+                    zyi += unit_step.y
+                    zxi += unit_step.z # Assuming zxi is z coordinate var
+                
+                idx_x += idx_step_x
+                zyi += unit_step.y
+                zxi += unit_step.z
+        
+        idx_z += 1
+        zxi += unit_step.z
+
+def voxel_limit(node_nr, global_indices, transform_sizes):
+    first_slice = node_nr * SCDZ
+    last_slice = first_slice + SCDZ
+    
+    # Convert global to local
+    local_indices = {}
+    for key in global_indices:
+        if key == 'slice':
+            if global_indices[key] < first_slice or global_indices[key] > last_slice:
+                # Out of range, mark inactive or handle appropriately
+                # Source says PE remains inactive if global indices fall outside
+                return None 
+            local_indices[key] = global_indices[key] - first_slice
+        else:
+            local_indices[key] = global_indices[key]
+    return local_indices
+
+def merger(node_nr, proc_to_merger, next_to_merger, merger_out):
+    # Receive from next PE and local subprocessor
+    # Aggregate results
+    # Send to previous PE
+    pass
+```
+
+### Parameters
+*   **Number of processors:** Constant 16 (Nodes 0–15, plus Node 100 Framegrabber) [S1, unofficial].
+*   **Link bandwidth:** 1.5 MByte/s per Transputer link [S1, unofficial].
+*   **Volume size:** Typically $128 \times 128 \times 128$ (2 MByte) or $256 \times 256 \times 32$ [S1, unofficial].
+*   **Communication overhead:** ~0.3s constant for transmitting results to the controller [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Precision:** Fixed-point arithmetic (16.16) is used for coordinate transformation to allow integer indexing [S1, unofficial].
+*   **Boundaries:** Slices outside `[FIRST.SLICE, LAST.SLICE]` are not processed by the local subprocessor [S1, unofficial].
+*   **Performance Imbalance:** Non-linear performance increase from 2 to 16 processors due to constant communication overhead (0.3s). Further processor increase is not useful for small problem sizes ($128^3$) due to imbalance between communication and computational demand [S1, unofficial].
+*   **Bottleneck:** Link bandwidth (1.5 MByte/s) may become a bottleneck for future slice data exchange between neighbors [S1, unofficial].
+
+## Subtopics
+
+### MPI Master-Slave Octree Volume Rendering
+Uses octree data structures for adaptive resolution and master-slave parallelism. Choose when data has large empty regions or varying density. [MPI Master-Slave Octree Volume Rendering](2744-mpi-master-slave-octree-volume-rendering.md)
+
+### MPI Parallel Slice-Based Volume Rendering
+Distributes slices across nodes without a strict pipeline, often using a master to coordinate. Choose for simpler load balancing or when pipeline latency is prohibitive. [MPI Parallel Slice-Based Volume Rendering](3827-mpi-parallel-slice-based-volume-rendering.md)
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time decreases with more processors but is bounded by communication overhead. For $128^3$ volume:
+    *   2 Nodes: View 3.7s, Integrate 4.2s, Layer 3.6s, Shade 4.5s, Mean 31.9s, Median 95.7s, Edges 65.0s, Convolution 103.8s, Histogram 2.8s [S1, unofficial].
+    *   4 Nodes: View 2.4s, Integrate 2.7s, Layer 2.3s, Shade 2.8s, Mean 16.5s, Median 52.5s, Edges 33.2s, Convolution 52.6s, Histogram 1.5s [S1, unofficial].
+    *   8 Nodes: View 1.4s, Integrate 1.6s, Layer 1.3s, Shade 1.6s, Mean 9.4s, Median 28.3s, Edges 17.3s, Convolution 27.0s, Histogram 1.0s [S1, unofficial].
+    *   16 Nodes: View 0.9s, Integrate 1.0s, Layer 0.9s, Shade 1.0s, Mean 5.9s, Median 15.5s, Edges 8.8s, Convolution 17.0s, Histogram 0.5s [S1, unofficial].
+*   **Memory Complexity:** Each PE stores only its assigned slices ($SCDZ$). Total memory is distributed across the network [S1, unofficial].
+*   **Scaling:** Linear speedup is not achieved for small volumes due to constant 0.3s communication overhead. Scaling is better for larger volumes (e.g., $512 \times 512 \times 256$) [S1, unofficial].
+*   **Strengths:** Efficient for large volumes; simple software structure (Distributor/Subprocessor/Merger) can be reused in tree architectures [S1, unofficial].
+*   **Limitations:** Fixed number of processors (16) requires recompilation; link bandwidth bottleneck; non-linear scaling for small datasets [S1, unofficial].
+*   **When to use:** Large 3D empirical data sets (CT, CLSM) where volume can be partitioned into slices and processed in parallel.
+*   **When not to use:** Small datasets where communication overhead dominates; scenarios requiring dynamic load balancing across varying data densities (octree methods may be better) [S1, unofficial].
+
+## Background
+The system was developed by TNO (Ir. P.L.J. van Lieshout, Ir. W. Huiskamp) and documented in a report dated June 1991 [S1, unofficial]. It is based on earlier work "The Voxel Processor Architecture" by Goldwasser and Reynolds (1987) and "Visualization of 3D Empirical Data" by Huiskamp et al. (1989) [S1, unofficial]. It was used for visualizing CLSM scans (Integrated Circuit, Pollen) and CT scans (Baby Head) [S1, unofficial]. The architecture was designed to handle data sizes typical of CT images ($512 \times 512 \times 256$) and proposed a future tree architecture to reduce communication path length [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA245410: Voxel Data Processing on a Transputer Network, https://archive.org/details/DTIC_ADA245410, fetched 2026-10-26 (unofficial)

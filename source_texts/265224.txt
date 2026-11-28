@@ -1,0 +1,759 @@
+Literature Analysis: Densification Strategies for 3D Gaussian Splatting Relevance to Photo-SLAM + TriaGS Research (IROS 2026) Author: Cong Thai Date: February 2026 Purpose: Supervisor meeting — positioning our contributions against recen...
+
+U · Issue #1 · zerokhong1/Photo-slam-keyframe-selection · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+U #1
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+U#1
+Copy link
+Description
+zerokhong1
+opened on Feb 16, 2026
+Issue body actions
+Literature Analysis: Densification Strategies for 3D Gaussian Splatting
+Relevance to Photo-SLAM + TriaGS Research (IROS 2026)
+Author: Cong Thai
+Date: February 2026
+Purpose: Supervisor meeting — positioning our contributions against recent densification works
+1. Papers Reviewed
+Paper
+Authors
+Venue
+Key Idea
+Revising Densification in Gaussian Splatting
+Rota Bulò et al. (Meta Reality Labs)
+arXiv 2404.06109, Apr 2024
+Replace gradient-based ADC with pixel-error-driven densification; fix opacity bias in cloning
+ConeGS: Error-Guided Densification Using Pixel Cones
+Baranowski et al. (Univ. Tübingen)
+arXiv 2511.06810, Jan 2026
+Fully replace clone/split with iNGP-guided, pixel-cone-sized Gaussian placement
+2. Problem Statement — Why ADC Fails
+The original 3DGS Adaptive Density Control (ADC) decides clone/split based on positional gradient magnitude τ_k. This has three critical limitations:
+Blind to absolute error: A region covered by few large Gaussians over high-frequency patterns (e.g., grass, gravel) produces near-zero gradients — densification never triggers despite high reconstruction error.
+Non-intuitive thresholds: Gradient magnitude thresholds are sensitive to model changes, loss terms, and hyperparameters.
+Uncontrolled growth: No mechanism to limit total primitive count → out-of-memory in resource-constrained settings (especially SLAM).
+2.1 Illustration: Why gradient ≈ 0 even when error is high
+Consider a region of grass covered by two large Gaussians:
+```
+  Ground Truth (high-frequency)          3DGS Reconstruction (blurry)
+  ┌─────────────────────────┐            ┌─────────────────────────┐
+  │▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓│            │                         │
+  │▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒│            │    ╭──── G_A ────╮      │
+  │▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓│            │    │  (large,     │      │
+  │▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒│            │    │   blurry)    │      │
+  │▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓│            │    ╰─────────────╯      │
+  │▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒│            │         ╭── G_B ──╮    │
+  │▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓▒▓│            │         │ (large)  │    │
+  └─────────────────────────┘            └─────────╰──────────╯────┘
+        Per-pixel error = HIGH                 Only 2 Gaussians
+```
+Step-by-step failure of ADC:
+```
+  Step 1: Error is HIGH at every pixel
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  |GT(u) - Render(u)| is large at every pixel in the grass       │
+  │  because 2 blurry Gaussians cannot reproduce checkerboard       │
+  └──────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+  Step 2: But when we shift μ_k slightly...
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  G_A covers a HUGE area. Shifting μ_A by δ barely changes       │
+  │  which pixels it covers → rendered image almost identical        │
+  │                                                                  │
+  │  Before shift:  ╭──── G_A ────╮     After shift: ╭──── G_A ───╮ │
+  │                 │     •μ      │                   │     •→μ'   │ │
+  │                 ╰─────────────╯                   ╰────────────╯ │
+  │                                                                  │
+  │  ΔL ≈ 0  →  ∂L/∂μ_A ≈ 0  →  τ_A ≈ 0                           │
+  └──────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+  Step 3: ADC checks τ_A against threshold
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  τ_A ≈ 0  <  threshold (0.0002)                                 │
+  │                                                                  │
+  │  ⚠ ADC decision: DO NOT densify                                  │
+  │  ⚠ Grass stays blurry FOREVER                                    │
+  │                                                                  │
+  │  KEY INSIGHT: gradient measures SENSITIVITY (how error changes   │
+  │  when μ moves), NOT absolute error.                              │
+  │  High error + low sensitivity = ADC is blind.                    │
+  │                                                                  │
+  │  Rota Bulò proved: even with 10M primitives, the flowers scene  │
+  │  stays blurry because gradient never triggers densification.     │
+  └──────────────────────────────────────────────────────────────────┘
+```
+Our work (TriaGS + Photo-SLAM) faces the same problems, compounded by the online, sequential nature of SLAM where primitives must be managed incrementally.
+3. Paper 1: Revising Densification (Rota Bulò et al.)
+3.1 Core idea — Error redistribution to per-Gaussian scores
+Instead of gradient τ_k, they directly use pixel reconstruction error to decide which Gaussians need densification.
+Problem: Error is per-pixel, but densification decisions are per-Gaussian. How to convert?
+Solution: Redistribute pixel errors to Gaussians proportionally to their alpha-compositing weight ω_k^π(u).
+```
+  PIXEL SPACE                              GAUSSIAN SPACE
+  ┌─────────────────────┐                  
+  │ Error map E_π(u)    │                  
+  │ ┌───┬───┬───┬───┐   │     Redistribute     ┌─────────────────┐
+  │ │0.1│0.3│0.2│0.1│   │  ──────────────────►  │  G_A:  E_A = ?  │
+  │ ├───┼───┼───┼───┤   │                       │  G_B:  E_B = ?  │
+  │ │0.2│0.9│0.8│0.3│   │     Using weights     │  G_C:  E_C = ?  │
+  │ ├───┼───┼───┼───┤   │     ω_k^π(u)          └─────────────────┘
+  │ │0.3│0.8│0.7│0.2│   │                  
+  │ ├───┼───┼───┼───┤   │                  
+  │ │0.1│0.2│0.3│0.1│   │                  
+  │ └───┴───┴───┴───┘   │                  
+  └─────────────────────┘                  
+```
+Detailed computation:
+```
+  For Gaussian G_A with weights ω_A^π(u) at each pixel:
+  
+  Error map E_π(u):          Weights ω_A^π(u):           Contribution:
+  ┌────┬────┬────┬────┐      ┌────┬────┬────┬────┐       
+  │0.1 │0.3 │0.2 │0.1 │      │0.8 │0.5 │0.1 │0.0 │      E_A^π = Σ_u E(u)·ω_A(u)
+  ├────┼────┼────┼────┤      ├────┼────┼────┼────┤       
+  │0.2 │0.9 │0.8 │0.3 │  ×   │0.9 │0.7 │0.2 │0.0 │      = 0.1×0.8 + 0.3×0.5 + ...
+  ├────┼────┼────┼────┤      ├────┼────┼────┼────┤         + 0.2×0.9 + 0.9×0.7 + ...
+  │0.3 │0.8 │0.7 │0.2 │      │0.7 │0.5 │0.1 │0.0 │      
+  ├────┼────┼────┼────┤      ├────┼────┼────┼────┤      = 2.14 (HIGH → densify!)
+  │0.1 │0.2 │0.3 │0.1 │      │0.3 │0.2 │0.0 │0.0 │       
+  └────┴────┴────┴────┘      └────┴────┴────┴────┘       
+
+  Then: E_A = max over all views π ∈ Π of E_A^π
+  
+  ┌───────────────────────────────────────────────────────┐
+  │  View 1: E_A^1 = 2.14                                │
+  │  View 2: E_A^2 = 1.87                                │
+  │  View 3: E_A^3 = 3.05  ← max                        │
+  │  ...                                                  │
+  │  E_A = max(2.14, 1.87, 3.05, ...) = 3.05             │
+  │                                                       │
+  │  If E_A > threshold (0.1 on SSIM scale):              │
+  │  → DENSIFY G_A                                        │
+  │                                                       │
+  │  Advantage: threshold 0.1 is intuitive (SSIM scale)   │
+  │  vs ADC's 0.0002 (gradient magnitude — what unit?)    │
+  └───────────────────────────────────────────────────────┘
+```
+3.2 Implementation trick — Auxiliary loss for free per-Gaussian error
+This is the most elegant part. They compute E_k^π without modifying the rasterizer, using only the existing backward pass:
+```
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  SETUP                                                          │
+  │  ------                                                         │
+  │  For each Gaussian G_k, attach a NEW scalar parameter e_k = 0  │
+  │  Define a new decoder: Φ_ERR(G_k, u) := e_k                    │
+  │  This means: render e_k using same alpha-compositing as color   │
+  │                                                                 │
+  │  rendered_e(u) = Σ_k  e_k · ω_k^π(u)                           │
+  │                                                                 │
+  │  Since all e_k = 0:  rendered_e(u) = 0 for all pixels           │
+  └─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  AUXILIARY LOSS                                                  │
+  │  --------------                                                  │
+  │  L_aux = Σ_u  stop_grad[E_π(u)] · rendered_e(u)                │
+  │                                                                 │
+  │  stop_grad means: treat E_π(u) as a CONSTANT (no gradient       │
+  │  flows through it). Only e_k receives gradient.                 │
+  │                                                                 │
+  │  Since rendered_e = 0:  L_aux = 0                               │
+  │  → Does NOT affect training at all!                             │
+  │  → No change to any other Gaussian parameter!                   │
+  └─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  THE MAGIC: Gradient of L_aux w.r.t. e_k                       │
+  │  ────────────────────────────────────────                       │
+  │                                                                 │
+  │  ∂L_aux     ∂                                                   │
+  │  ────── = ────  Σ_u  E_π(u) · Σ_j e_j · ω_j^π(u)              │
+  │  ∂e_k     ∂e_k                                                 │
+  │                                                                 │
+  │         = Σ_u  E_π(u) · ω_k^π(u)                               │
+  │                                                                 │
+  │         = E_k^π    ← This is EXACTLY the per-Gaussian error!    │
+  │                                                                 │
+  │  RESULT: Just read the gradient of e_k after backward pass.     │
+  │  No custom CUDA kernel. No rasterizer changes. Brilliant.       │
+  └─────────────────────────────────────────────────────────────────┘
+```
+3.3 Opacity correction after cloning
+When a Gaussian with opacity α is cloned (duplicated at same position), the alpha-compositing is affected:
+```
+  BEFORE CLONING                    AFTER CLONING (no fix)
+  ═══════════════                   ══════════════════════
+                                    
+  Ray → [G_A (α)] → rest            Ray → [G_A (α)] → [G_A' (α)] → rest
+          │                                   │            │
+          │ weight for G_A: α                 │            │
+          │ weight for rest: (1−α)            │            │
+          ▼                                   │ weight for G_A:  α
+                                              │ weight for G_A': α(1−α)
+  Example α = 0.7:                            │ weight for rest: (1−α)² 
+  G_A gets 0.7                                ▼
+  rest gets 0.3                    
+                                    Example α = 0.7:
+                                    G_A  gets 0.70      
+                                    G_A' gets 0.21    (= 0.7 × 0.3)
+                                    rest gets  0.09   (= 0.3²)  ← was 0.30!
+                                    
+                                    ⚠ rest weight dropped from 0.30 → 0.09
+                                    ⚠ Cloned region now dominates rendering
+                                    ⚠ Other Gaussians behind are suppressed
+
+  ─────────────────────────────────────────────────────────────────────
+
+  AFTER CLONING (WITH FIX)
+  ════════════════════════
+  
+  Find α̂ such that: (1−α̂)² = (1−α)
+  Solution: α̂ = 1 − √(1−α)
+  
+  Example α = 0.7:
+  α̂ = 1 − √0.3 = 1 − 0.5477 = 0.4523
+  
+  Ray → [G_A (0.45)] → [G_A' (0.45)] → rest
+  
+  G_A  gets 0.4523
+  G_A' gets 0.4523 × (1−0.4523) = 0.2477
+  rest gets  (1−0.4523)² = 0.3000  ← exactly same as before! ✓
+  
+  ┌──────────────────────────────────────────────────┐
+  │  FORMULA:  α̂ = 1 − √(1 − α)                     │
+  │                                                    │
+  │  Proof:  (1 − α̂)² = (√(1−α))² = 1−α      ✓      │
+  │                                                    │
+  │  This is ONLY for clone. Split moves offspring     │
+  │  away from center → different geometry → keep α.   │
+  │                                                    │
+  │  Impact: LARGEST single improvement in ablation    │
+  │  (Table 4 of paper). Free to implement.            │
+  └──────────────────────────────────────────────────┘
+```
+3.4 Growth control & Smooth opacity decay
+```
+  ORIGINAL 3DGS                         REVISING DENSIFICATION
+  ═══════════                            ══════════════════════
+                                         
+  Gaussians                              Gaussians
+  6M ┤     ╭─────────────                6M ┤
+     │    ╱    (stops at 15k)               │
+  4M ┤   ╱                               4M ┤            ╭──────── (cap reached)
+     │  ╱↗ opacity reset shock               │         ╱
+  2M ┤ ╱                                 2M ┤       ╱     (smooth growth)
+     │╱                                     │    ╱
+   0 ┼─────┼─────┼─────┼──              0 ┼──╱──┼─────┼─────┼──
+     0    10k   20k   30k                  0   10k   20k   30k
+     iterations                            iterations
+                                           (ADC active until 27k!)
+  
+  Problems:                              Fixes:
+  • Discontinuity at opacity reset       • Gradual opacity decrease: −0.001/step
+  • ADC stops at 15k (50% of training)  • ADC active for 90% of training
+  • No max budget                        • Cap at 5% growth per step
+  • Growth depends on random threshold   • Rank by E_k when budget exceeded
+```
+3.5 Results summary
+```
+  Mip-NeRF 360 (averaged over 5 runs, same # primitives):
+  
+  Method              PSNR ↑    SSIM ↑    LPIPS ↓
+  ─────────────────────────────────────────────────
+  3DGS baseline       27.45     0.817     0.250
+  Ours, 3DGS          27.61     0.822     0.223    ← biggest gain in LPIPS
+  Mip-Splatting        27.51     0.818     0.251
+  Ours, Mip-Splatting  27.70     0.823     0.223
+  
+  Key: LPIPS improvement (−0.027) is large because the method fixes
+  LOCAL underfitting that PSNR (global average) barely captures.
+```
+4. Paper 2: ConeGS (Baranowski et al.)
+4.1 Core idea — Replace clone/split entirely
+Instead of cloning existing Gaussians (which limits exploration to vicinity of current geometry), ConeGS:
+Uses a fast iNGP model as depth proxy
+Identifies high-error pixels
+Places NEW Gaussians at estimated depth
+Sizes them to match the pixel's viewing cone
+4.2 Pipeline illustration
+```
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  PHASE 1: Initialization (once)                                  │
+  │                                                                  │
+  │  Training images ──► Train iNGP (20k iter, ~1.6 min)            │
+  │                          │                                       │
+  │                          ▼                                       │
+  │  Sample 1M random pixels from training set                      │
+  │       │                                                          │
+  │       ├── For each pixel (I, u, v):                              │
+  │       │     ray = camera_center + t · direction(u,v)             │
+  │       │     query iNGP along ray → transmittance τ_k             │
+  │       │     t_med = depth where τ crosses 0.5                    │
+  │       │     Gaussian center = camera + t_med · direction         │
+  │       │     Gaussian scale = kNN of 3 nearest neighbors          │
+  │       │     opacity = 0.1, color from iNGP                      │
+  │       │                                                          │
+  │       ▼                                                          │
+  │  Initial scene: 1M Gaussians uniformly covering visible surfaces │
+  └──────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  PHASE 2: Optimization with error-guided densification           │
+  │  (30k iterations, densification active for first 25k)            │
+  │                                                                  │
+  │  Every iteration:                                                │
+  │  ┌────────────────────────────────────────────────┐              │
+  │  │ 1. Render image I with current Gaussians       │              │
+  │  │ 2. Compute L1 error: E(p) = |I(p) − I*(p)|    │              │
+  │  │ 3. Sample N pixels ~ Multinomial(E/ΣE)         │              │
+  │  │    (high error → high probability of selection) │              │
+  │  │ 4. For each sampled pixel:                      │              │
+  │  │    • Shoot ray through pixel                    │              │
+  │  │    • Query iNGP → get median depth t_med        │              │
+  │  │    • Create Gaussian at ray(t_med)              │              │
+  │  │    • Scale = 2 · r_cone(t_med)  ← PIXEL CONE   │              │
+  │  │ 5. Accumulate new Gaussians in buffer           │              │
+  │  └────────────────────────────────────────────────┘              │
+  │                                                                  │
+  │  Every 100 iterations:                                           │
+  │  ┌────────────────────────────────────────────────┐              │
+  │  │ 1. Prune: remove Gaussians with opacity < 0.005│              │
+  │  │ 2. Merge accumulated buffer into scene          │              │
+  │  │ 3. Joint optimization continues                 │              │
+  │  └────────────────────────────────────────────────┘              │
+  └──────────────────────────────────────────────────────────────────┘
+```
+4.3 Pixel-cone scaling — Detailed explanation
+This is inspired by Mip-NeRF's cone casting. Each pixel defines a cone in 3D:
+```
+  SIDE VIEW: One pixel's viewing cone
+  
+  Camera ──────────────────────────────────────────► depth
+    •╲                                                
+    │ ╲  ←── cone edge                               
+    │  ╲                                              
+    │   ╲        r_cone(t)                            
+    │    ╲──────────┤                                 
+    │     ●═════════● New Gaussian                    
+    │    ╱──────────┤ (diameter = 2·r_cone)           
+    │   ╱                                             
+    │  ╱                                              
+    │ ╱  ←── cone edge                               
+    •╱                                                
+  Camera                                              
+  
+  
+  r_cone(t) = t × (‖d_x − d‖ + ‖d_y − d‖) / 2
+  
+  Where:
+  • t = depth along ray
+  • d = ray direction through pixel center
+  • d_x, d_y = ray directions through neighboring pixels
+  • The term (‖d_x − d‖ + ‖d_y − d‖)/2 ≈ pixel angular width
+  
+  Gaussian scale:  s_i = 2 · r_cone(t_med)
+  (λ_scale = 2 converts radius to diameter)
+  
+  
+  WHY THIS IS GOOD:
+  ┌────────────────────────────────────────────────────────────────┐
+  │                                                                │
+  │  CLOSE object (small t):                                       │
+  │    r_cone small → small Gaussian → captures fine detail        │
+  │    ╭─╮                                                         │
+  │    │●│ ← pixel-sized, can represent sharp edges                │
+  │    ╰─╯                                                         │
+  │                                                                │
+  │  FAR object (large t):                                         │
+  │    r_cone large → large Gaussian → less detail needed          │
+  │    ╭───────╮                                                   │
+  │    │       │                                                   │
+  │    │   ●   │ ← covers more area, fewer Gaussians needed        │
+  │    │       │                                                   │
+  │    ╰───────╯                                                   │
+  │                                                                │
+  │  This is EXACTLY the right inductive bias!                     │
+  │  Same principle as Mip-NeRF's anti-aliasing cone integration.  │
+  └────────────────────────────────────────────────────────────────┘
+```
+4.4 Why ConeGS beats cloning — Exploration capability
+```
+  CLONING (3DGS, MCMC, etc.)              ConeGS
+  ═════════════════════════               ═══════
+  
+  Clone creates new Gaussian              ConeGS places Gaussian 
+  NEAR the parent:                        ANYWHERE there's error:
+  
+       ╭─── G_A ───╮                     Error map:
+       │            │                     ┌──────────────────┐
+       │  •───→•    │                     │ ░░░░▓▓▓▓▓▓░░░░░ │
+       │  parent→clone                    │ ░░░░▓▓▓▓▓▓░░░░░ │
+       ╰────────────╯                     │ ░░░░░░░░░░░░░░░ │
+                                          │ ▓▓▓▓▓▓▓░░░░░░░░ │ ← high error here
+       Problem: if no Gaussian            │ ▓▓▓▓▓▓▓░░░░░░░░ │
+       exists in a region,                └──────────────────┘
+       cloning CAN'T reach it.                    │
+                                                  ▼
+       Empty region with no                New Gaussians placed
+       Gaussians nearby:                   directly in high-error
+       ┌────────────────┐                  regions, regardless of
+       │                │                  where existing Gaussians are.
+       │   (nothing)    │                  
+       │    ← cloning   │                  ╭●╮  ╭●╮  ╭●╮
+       │    can't help   │                  ╰─╯  ╰─╯  ╰─╯ ← pixel-cone sized
+       │                │                  
+       └────────────────┘                  
+
+  This is why ConeGS excels at LOW primitive budgets:
+  Every Gaussian is placed where it matters most.
+  
+  At 100k Gaussians on Mip-NeRF 360:
+  ┌──────────────────────────────────────┐
+  │  3DGS:    23.61 PSNR  (wastes many   │
+  │            Gaussians in easy areas)   │
+  │  MCMC:    27.06 PSNR                 │
+  │  ConeGS:  27.74 PSNR  (+4.13 over   │
+  │            3DGS with same budget!)    │
+  └──────────────────────────────────────┘
+```
+4.5 Opacity penalty comparison
+```
+  3DGS original:       Hard opacity reset every N iterations
+                       ┌───────────────────────────────────┐
+                       │ α_k ← 0.01 for ALL Gaussians     │
+                       │ → training shock, misleading error│
+                       └───────────────────────────────────┘
+
+  Rota Bulò:           Gradual opacity decrease
+                       ┌───────────────────────────────────┐
+                       │ α_k ← α_k − 0.001 per densify    │
+                       │ → smoother, but constant push     │
+                       └───────────────────────────────────┘
+
+  MCMC:                Post-activation penalty
+                       ┌───────────────────────────────────┐
+                       │ L_o = ‖σ(o_pre)‖₁                 │
+                       │ Gradient: σ(o)(1−σ(o))             │
+                       │ → strongest at σ(o)=0.5            │
+                       │ → WEAK near 0 (pruning threshold!) │
+                       │                                    │
+                       │  gradient                          │
+                       │  ▲                                 │
+                       │  │    ╭──╮                         │
+                       │  │   ╱    ╲                        │
+                       │  │  ╱      ╲                       │
+                       │  │─╱────────╲──► opacity           │
+                       │  0   0.5    1.0                    │
+                       │    weak↑      ↑weak                │
+                       └───────────────────────────────────┘
+
+  ConeGS:              Pre-activation penalty (BETTER)
+                       ┌───────────────────────────────────┐
+                       │ L_o = λ_o · ‖o_pre‖₁  (λ=0.0002) │
+                       │ Gradient: λ_o · sign(o_pre)        │
+                       │ → CONSTANT across full range       │
+                       │ → effective at pushing low-opacity  │
+                       │   Gaussians to 0 for pruning       │
+                       │                                    │
+                       │  gradient                          │
+                       │  ▲                                 │
+                       │  │─────────────────── constant     │
+                       │  │                                 │
+                       │  │                                 │
+                       │  │─────────────────► o_pre         │
+                       │                                    │
+                       │    ↑ effective everywhere           │
+                       └───────────────────────────────────┘
+```
+4.6 Results summary
+```
+  Mip-NeRF 360 + OMMO, averaged:
+  
+  Budget: 100k Gaussians
+  ─────────────────────────────────────────────────
+  Method                PSNR ↑   SSIM ↑   LPIPS ↓
+  3DGS (SfM init)       23.61    0.693    0.413
+  MCMC (SfM init)       27.06    0.800    0.303
+  EDGS                  27.09    0.798    0.296
+  ConeGS (Ours)         27.74    0.809    0.285    ← best across board
+  
+  Budget: 1M Gaussians  
+  ─────────────────────────────────────────────────
+  3DGS (SfM init)       28.71    0.846    0.222
+  MCMC (SfM init)       29.23    0.875    0.190
+  EDGS                  29.18    0.877    0.168
+  ConeGS (Ours)         29.37    0.880    0.168    ← competitive at high budget
+  
+  KEY: ConeGS wins BIG at low budget, matches at high budget.
+  Plus: renders FASTER (fewer overlapping Gaussians per pixel).
+```
+5. Comparison: Two Approaches to the Same Problem
+Aspect
+Revising Densification
+ConeGS
+Our Work (TriaGS)
+Densification trigger
+Per-Gaussian error score (max over views)
+Per-pixel L1 error map
+Triangulation confidence + photometric error
+Clone/Split
+Retained (improved)
+Fully removed
+To be determined
+Position of new Gaussians
+Near parent (clone/split)
+At iNGP depth (independent)
+At triangulated 3D points
+Sizing strategy
+Inherited from parent
+Pixel-cone diameter
+Currently k-NN → should adopt cone sizing
+External dependency
+None
+iNGP proxy (~1.6 min)
+SLAM depth estimates (available online)
+Opacity handling
+Gradual decay + clone correction
+Pre-activation penalty
+Standard ADC → needs improvement
+Budget control
+5% growth cap + global limit
+Fixed or adaptive β
+Required for real-time SLAM
+Setting
+Offline NVS
+Offline NVS
+Online SLAM
+Sequential input
+No
+No
+Yes
+6. Direct Implications for Our Research
+6.1 Immediately Adoptable Techniques
+A. Opacity correction after cloning (zero-cost improvement)
+```
+# Before: clone preserves opacity
+alpha_new = alpha_original
+
+# After: corrected opacity  (1 line of code!)
+alpha_new = 1 - sqrt(1 - alpha_original)
+
+# Example: alpha = 0.7  →  alpha_new = 0.4523
+# Rest weight preserved: (1-0.4523)^2 = 0.30 = (1-0.7) ✓
+```
+No architectural change required. Largest single improvement in Rota Bulò's ablation (Table 4).
+B. Pixel-cone sizing for dense initialization
+Our dense initialization from triangulation gives 3D position but needs a principled scale. Currently using k-NN (expensive, outlier-sensitive). With SLAM, we already have camera intrinsics and depth:
+```
+# For each newly triangulated Gaussian at depth d_i:
+pixel_angular_width = 1.0 / focal_length   # approximation
+r_cone = d_i * pixel_angular_width
+s_i = 2 * r_cone                           # diameter = 2 × radius
+
+# Advantages over k-NN:
+# • O(1) per Gaussian vs O(N log N) for k-NN
+# • Independent of other Gaussians' distribution
+# • Principled: matches pixel footprint at that depth
+# • No outlier sensitivity
+```
+C. Growth control / budgeting
+Essential for SLAM:
+```
+# Option 1: Rota Bulò style — cap at X% growth
+max_new = 0.05 * current_count              # 5% per step
+if candidates > max_new:
+    keep top max_new by confidence score     # rank and cut
+
+# Option 2: ConeGS style — balance add/prune
+N_sample = max(0.2 * N_GS, 1.2 * N_last) / 100
+# Keeps count stable near budget even under aggressive pruning
+```
+6.2 Techniques Requiring Adaptation for SLAM
+D. Error redistribution (Rota Bulò's auxiliary loss trick)
+```
+  OFFLINE (Rota Bulò):                    SLAM ADAPTATION:
+  ════════════════════                    ═════════════════
+  
+  E_k = max over ALL views               E_k = max over RECENT keyframes
+  (all views available upfront)           (sliding window of last W keyframes)
+  
+  ┌─────────────────────────┐            ┌─────────────────────────┐
+  │ View 1   View 2   ...   │            │ KF_t  KF_{t-1} KF_{t-2}│
+  │ E_k^1    E_k^2   ...   │            │ E_k^t  E_k^{t-1} ...   │
+  │                         │            │                         │
+  │ E_k = max(all)          │            │ E_k = max(window W)    │
+  └─────────────────────────┘            └─────────────────────────┘
+  
+  Also: auxiliary loss trick works with ANY differentiable renderer
+  → compatible with Photo-SLAM's Gaussian rasterizer
+```
+E. Error-guided placement (ConeGS-style, adapted for SLAM)
+```
+  ConeGS (offline):                       SLAM adaptation:
+  ═════════════════                       ═════════════════
+  
+  Depth from iNGP                          Depth from SLAM
+  (trained 20k iter, ~1.6 min)            (available from tracking / sensor)
+  
+  ┌──────────────────────┐                ┌──────────────────────┐
+  │ 1. Train iNGP        │                │ 1. Use SLAM depth    │
+  │ 2. For high-error px: │                │    (already computed!)│
+  │    query iNGP depth   │                │ 2. For high-error px: │
+  │ 3. Place Gaussian     │                │    use tracking depth │
+  │ 4. Cone-size it       │                │ 3. Place Gaussian     │
+  └──────────────────────┘                │ 4. Cone-size it       │
+                                          └──────────────────────┘
+  
+  ADVANTAGE: We get depth FOR FREE from SLAM tracking.
+  No iNGP overhead. No separate training step.
+  Depth is updated every frame → always current.
+```
+6.3 Novelty Differentiation
+What we have that neither paper addresses:
+```
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                     NOVELTY SPACE DIAGRAM                       │
+  │                                                                 │
+  │            Rota Bulò          ConeGS            OURS            │
+  │           ┌─────────┐     ┌──────────┐     ┌──────────────┐    │
+  │           │ Error    │     │ iNGP     │     │ Triangulation│    │
+  │  WHERE    │ redistr. │     │ depth    │     │ + confidence │    │
+  │  to       │ to per-  │     │ proxy    │     │ from multi-  │    │
+  │  densify  │ Gaussian │     │          │     │ view geom.   │    │
+  │           └────┬─────┘     └────┬─────┘     └──────┬───────┘    │
+  │                │                │                   │            │
+  │  HOW to    clone/split      ray-based         triangulation-    │
+  │  place     (near parent)    (independent)     guided (online)   │
+  │                │                │                   │            │
+  │  WHEN      offline           offline            ONLINE          │
+  │            (all views)       (all views)        (sequential)    │
+  │                │                │                   │            │
+  │  BUDGET    optional          required           ESSENTIAL       │
+  │            (add-on)          (integral)         (real-time)     │
+  │                                                                 │
+  │  ═══════════════════════════════════════════════════════════     │
+  │  OUR UNIQUE CONTRIBUTIONS:                                      │
+  │  • Geometric confidence FROM triangulation (not just photo err) │
+  │  • Online sequential processing (no batch over all views)       │
+  │  • SLAM-integrated (densify ↔ tracking must be compatible)      │
+  │  • Depth available for free (no iNGP, no extra computation)     │
+  │  • Strict real-time budget (not optional)                       │
+  └─────────────────────────────────────────────────────────────────┘
+```
+7. Proposed Integration Strategy for TriaGS
+Phase 1: Low-hanging fruit (immediate)
+Implement opacity correction for clone operations (α̂ = 1 − √(1−α))
+Replace k-NN sizing with pixel-cone sizing for newly triangulated Gaussians
+Add growth control: cap densification at 5% per step, rank by confidence score
+Phase 2: Core contribution enhancement
+Implement per-Gaussian error redistribution via auxiliary loss trick
+Define confidence score = f(triangulation_quality, photometric_error, multi-view_consistency)
+Use confidence score for both densification priority AND Gaussian shape optimization
+Phase 3: Narrative for IROS 2026
+Position: "Confidence-guided dense initialization and geometry-aware densification for Gaussian Splatting SLAM"
+```
+  NARRATIVE FLOW:
+  
+  1. Problem: ADC fails in SLAM (same as offline, but worse under budget constraints)
+  
+  2. Existing solutions don't work for SLAM:
+     • Rota Bulò: good error metric, but still clone/split → limited exploration
+     • ConeGS: good exploration, but needs offline iNGP → not real-time
+  
+  3. Our insight: SLAM already has what both papers need!
+     • Depth → from tracking (replaces iNGP)
+     • Multi-view error → from keyframe optimization (replaces offline accumulation)  
+     • Geometric confidence → from triangulation (NOVEL — neither paper has this)
+  
+  4. Our method:
+     • Triangulation gives both POSITION and CONFIDENCE for new Gaussians
+     • Confidence combines geometric consistency + photometric quality
+     • Pixel-cone sizing from SLAM depth (free, no extra computation)
+     • Budget-aware densification (essential for real-time)
+  
+  5. Core claim:
+     In sequential SLAM settings, triangulation-based geometric confidence
+     provides a more reliable and efficient densification signal than
+     gradient-based (3DGS) or purely photometric (Rota Bulò, ConeGS) approaches.
+```
+8. Key Equations Reference
+Rota Bulò — Per-Gaussian error:
+```
+E_k^π = Σ_u E_π(u) · ω_k^π(u)
+E_k = max_{π∈Π} E_k^π
+```
+Rota Bulò — Opacity correction:
+```
+α̂ = 1 − √(1 − α)
+```
+ConeGS — Cone radius (from Mip-NeRF):
+```
+r_cone(t) = t · (‖dx − d‖ + ‖dy − d‖) / 2
+```
+ConeGS — Pixel-cone scaling:
+```
+s_i = 2 · r_cone(t_med,i)
+```
+ConeGS — Error-weighted sampling:
+```
+{p_s} ~ Multinomial(N_sample, E(p) / Σ E(p'))
+```
+ConeGS — Pre-activation opacity penalty:
+```
+L_o = λ_o · ‖o_pre‖₁     (λ_o = 0.0002)
+```
+ConeGS — Budget-aware sampling:
+```
+N_sample = max(0.2 · N_GS, 1.2 · N_last) / 100     (fixed budget)
+N_sample = β · N_GS / 100                            (adaptive growth)
+```
+9. Open Questions for Discussion
+Should we fully replace clone/split (ConeGS approach) or improve it (Rota Bulò approach)?
+ConeGS shows clone/split can be removed entirely with good initialization + error-guided placement
+But in SLAM, clone/split may still be useful for quick local refinement between keyframes
+Proposal: use error-guided placement as PRIMARY, keep split as SECONDARY for large Gaussians
+How to define confidence score that combines triangulation quality + photometric error?
+Option A: Weighted combination → simple but needs tuning
+Option B: Use triangulation confidence for position, photometric error for densification priority → cleaner separation
+Option C: Triangulation parallax angle as confidence for position quality, then Rota Bulò's error redistribution for when to trigger densification
+Experimental validation plan:
+Ablate each adopted technique independently (as Rota Bulò does in Table 4)
+Compare on TUM RGB-D and Replica: our method vs. Photo-SLAM baseline vs. Photo-SLAM + individual improvements
+Report PSNR, SSIM, LPIPS, ATE, and primitive count
+Critical: show improvement at FIXED primitive budget (like ConeGS's strong result at 100k)
+Last updated: February 2026
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

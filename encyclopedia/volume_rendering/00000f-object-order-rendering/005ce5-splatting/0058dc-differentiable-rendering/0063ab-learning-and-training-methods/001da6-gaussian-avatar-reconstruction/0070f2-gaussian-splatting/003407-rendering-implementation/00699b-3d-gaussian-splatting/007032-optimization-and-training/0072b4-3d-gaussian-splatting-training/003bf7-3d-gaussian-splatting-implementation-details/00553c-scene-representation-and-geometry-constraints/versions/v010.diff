@@ -1,0 +1,536 @@
+--- v009.md
++++ v010.md
+@@ -1,8 +1,7 @@
+ # Scene Representation and Geometry Constraints
+ 
+-Also called: Geometry-aware Gaussian Splatting, Surface-constrained 3DGS
+ 
+ ## Overview
+-Scene Representation and Geometry Constraints refers to a family of methods that enhance the standard 3D Gaussian Splatting (3DGS) representation by imposing explicit geometric priors, surface constraints, or structural regularization. While base 3DGS relies on volumetric alpha-blending which can result in "floaters" and ambiguous geometry, this family addresses the discrepancy between the soft volumetric primitives and hard surface boundaries. It sets itself apart from sibling methods like [Data Compression and Storage Optimization](12943-data-compression-and-storage-optimization.md) by focusing on geometric fidelity and physical plausibility rather than memory efficiency, and from [Perceptual Wrapper](15438-perceptual-wrapper.md) by enforcing structural constraints during optimization rather than post-processing perceptual metrics.
++This family of methods modifies the standard 3D Gaussian Splatting (3DGS) representation to improve geometric fidelity, enforce surface constraints, or extract explicit geometry, addressing the limitation that base 3DGS produces volumetric, soft primitives that lack precise surface alignment and watertight mesh compatibility [S1, 14095-mesh-extraction-and-representation.md]. It sets itself apart from sibling methods like [DeSplat](12925-desplat.md) and [360 Gaussian Splatting](12929-360-gaussian-splatting.md) by focusing on the structural definition of the primitives (e.g., planar alignment, SDF coupling, or discontinuity boundaries) rather than just rendering efficiency or compression.
+ 
+ ## Shared principles
+@@ -22,501 +21,48 @@
+ 
+ ### [Gaussian Representation and Truncation](12855-gaussian-representation-and-truncation.md)
+-This family modifies the standard 3DGS representation to improve geometric fidelity, rendering efficiency, or physical accuracy. It sets itself apart by addressing specific limitations of the base method: [Inverse Multiquadric Splatting](9910-inverse-multiquadric-splatting.md) changes the radial basis function for better tail behavior; [Opacity-Independent Gaussian Truncation](10266-opacity-independent-gaussian-truncation.md) decouples visibility from opacity to allow aggressive culling; [Content-Aware Texturing](12606-content-aware-texturing-for-gaussian-splatting.md) adds dynamic textures to capture high-frequency details; [Directed Distance Field](12854-directed-distance-field-ddf-for-gaussian-splatting.md) provides a neural oracle for secondary rays; and [Atomized Proliferation](12924-atomized-proliferation.md) constrains Gaussian sizes for precise geometry.
++This family modifies the standard 3DGS representation to improve geometric fidelity, rendering efficiency, or physical accuracy. It sets itself apart by addressing specific limitations of the base method: [Inverse Multiquadric Splatting](9910-inverse-multiquadric-splatting.md) changes the radial basis function for better tail behavior; [Opacity-Independent Gaussian Truncation](10266-opacity-independent-gaussian-truncation.md) decouples visibility from opacity to allow aggressive culling; [Content-Aware Texturing](12606-content-aware-texturing-for-gaussian-splatting.md) adds dynamic textures to capture high-frequency details; [Directed Distance Field](12854-directed-distance-field-ddf-for-gaussian-splatting.md) provides a neural oracle for secondary rays; and [Atomized Proliferation](12924-atomized-proliferation.md) constrains Gaussian sizes for precise geometry. Choose this when you need to refine the primitive shape or density function itself.
+ 
+ ### [Discontinuity-aware Gaussian Splatting](13138-discontinuity-aware-gaussian-splatting.md)
+-Discontinuity-aware Gaussian Splatting (DisC-GS) enables 3DGS to represent and render sharp boundaries and discontinuities, addressing the limitation of standard 3DGS which tends to blur such features. It differs from sibling methods like [Planar Gaussian Splatting](16706-planar-gaussian-splatting.md) by explicitly modeling boundaries as cubic Bézier curves within the Gaussian's local subspace and applying a "pre-scissoring" operation during rendering, rather than relying solely on geometric constraints or mesh extraction.
+-
+-**Inputs:** A set of $N$ 3D Gaussians $\{G_i\}_{i=1}^N$, where each Gaussian $G_i$ is defined by mean $\boldsymbol{\mu}_i$, rotation $\mathbf{R}_i$, scale $\mathbf{S}_i$, opacity $\alpha_i$, and color $\mathbf{c}_i$. For 2D Gaussian Splatting, the last column of $\mathbf{S}_i$ is fixed to zero. The input also includes the camera projection matrix $\mathbf{P}$ and viewing transformation matrix $\mathbf{W}$, and a user-defined hyperparameter $M$ (number of Bézier curves per Gaussian).
+-
+-**Outputs:** A rendered image $C(p)$ for each pixel $p$, where discontinuities are preserved.
+-
+-**Data Structures:**
+-Each Gaussian $G_i$ is augmented with an additional attribute $\mathbf{c}_{\text{curve}} \in \mathbb{R}^{4M \times 2}$.
+-*   **Layout:** $\mathbf{c}_{\text{curve}}$ stores $4M$ points in the 2D coordinate system defined by the Gaussian's center $\boldsymbol{\mu}_i$ (origin), rotation matrix column $\mathbf{r}_{1,i}$ (x-axis), and rotation matrix column $\mathbf{r}_{2,i}$ (y-axis).
+-*   **Interpretation:** These points serve as control points for $M$ cubic Bézier curves representing the boundaries of the Gaussian's projection.
+-
+-**Numbered Steps:**
+-
+-1.  **Local to World Transformation:** For each Gaussian $G_i$, transform the control points from its local 2D subspace to the 3D world space. Let $\mathbf{c}_{\text{curve}}[i, :]$ denote the $i$-th point in the local attribute (for $i \in \{0, \dots, 4M-1\}$). The 3D control points $\mathbf{c}_{\text{3D\_curve}}[i]$ are computed as:
+-    $$ \mathbf{c}_{\text{3D\_curve}}[i] = \boldsymbol{\mu}_i + \mathbf{c}_{\text{curve}}[i, 0] \times \mathbf{r}_{1,i} + \mathbf{c}_{\text{curve}}[i, 1] \times \mathbf{r}_{2,i} $$
+-    Note: $\mathbf{r}_{1,i}$ and $\mathbf{r}_{2,i}$ are unit vectors, so normalization is omitted.
+-
+-2.  **Projection to Image Plane:** Project the 3D control points onto the image plane to obtain the 2D control points $\mathbf{c}_{\text{2D\_curve}}[i]$:
+-    $$ \mathbf{c}_{\text{2D\_curve}}[i] = \mathbf{P} \mathbf{W} \mathbf{c}_{\text{3D\_curve}}[i] $$
+-    where $\mathbf{P}$ is the projective transformation matrix and $\mathbf{W}$ is the viewing transformation matrix.
+-
+-3.  **Implicit Curve Representation:** For each of the $M$ cubic Bézier curves defined by four ordered control points $\boldsymbol{\omega}_0, \boldsymbol{\omega}_1, \boldsymbol{\omega}_2, \boldsymbol{\omega}_3$ (where $\boldsymbol{\omega}_k = \mathbf{c}_{\text{2D\_curve}}[4j+k]$ for curve index $j$), compute the implicit representation $B_{\text{imp}}(x, y)$:
+-    $$ B_{\text{imp}}(x, y) = \gamma_{xxx} x^3 + \gamma_{xxy} x^2 y + \gamma_{xyy} x y^2 + \gamma_{yyy} y^3 + \gamma_{xx} x^2 + \gamma_{xy} xy + \gamma_{yy} y^2 + \gamma_x x + \gamma_y y + \gamma_0 = 0 $$
+-    The coefficients $\gamma$ are obtained via $O(1)$ arithmetic operations on the control point coordinates.
+-
+-4.  **Indicator Function Construction:** Define the single-curve indicator function $g_{\text{sc}}$ for a pixel $p=(x_p, y_p)$:
+-    $$ g_{\text{sc}}(\boldsymbol{\omega}_0, \boldsymbol{\omega}_1, \boldsymbol{\omega}_2, \boldsymbol{\omega}_3; p) = \begin{cases} 1 & \text{if } B_{\text{imp}}(x_p, y_p) > 0 \\ 0 & \text{otherwise} \end{cases} $$
+-    For $M > 1$ curves, the combined indicator function $g(p)$ is the product of individual indicators:
+-    $$ g(p) = \prod_{j=0}^{M-1} g_{\text{sc}}(\mathbf{c}_{\text{2D\_curve}}[4j], \mathbf{c}_{\text{2D\_curve}}[4j+1], \mathbf{c}_{\text{2D\_curve}}[4j+2], \mathbf{c}_{\text{2D\_curve}}[4j+3]; p) $$
+-    A pixel is "scissored out" ($g(p)=0$) if it is outside at least one of the $M$ curves.
+-
+-5.  **Discontinuity-Aware Rendering:** Compute the color $C(p)$ using a modified $\alpha$-blending function:
+-    $$ C(p) = \sum_{i=1}^{N} \mathbf{c}_i \beta_i \prod_{j=1}^{i-1} (1 - \beta_j) $$
+-    where the effective opacity $\beta_i$ for the $i$-th Gaussian is:
+-    $$ \beta_i = \alpha_i g_i(p) \exp\left(-\frac{1}{2} (\mathbf{p} - \boldsymbol{\mu}_{i,2D})^\top (\boldsymbol{\Sigma}_{i,2D})^{-1} (\mathbf{p} - \boldsymbol{\mu}_{i,2D})\right) $$
+-    Here, $\boldsymbol{\mu}_{i,2D}$ and $\boldsymbol{\Sigma}_{i,2D}$ are the projected mean and covariance of the $i$-th Gaussian, and $g_i(p)$ is the indicator function for the $i$-th Gaussian.
+-
+-6.  **Gradient Approximation:** During backpropagation, use a Bézier-boundary gradient approximation strategy to enable gradients to pass through the discontinuous indicator function $g(p)$, maintaining differentiability for learning $\mathbf{c}_{\text{curve}}$.
+-
+-**Pseudocode:**
+-
+-```python
+-import numpy as np
+-
+-def cubic_bezier_implicit_coeffs(w0, w1, w2, w3):
+-    """
+-    Computes the coefficients gamma for the implicit representation of a cubic Bezier curve.
+-    w0, w1, w2, w3: numpy arrays of shape (2,) representing control points.
+-    Returns: dict of gamma coefficients.
+-    Note: Implementation details for O(1) arithmetic operations are omitted as per source 
+-    which refers to supplementary material for exact derivation.
+-    """
+-    # Placeholder for the specific algebraic derivation provided in supplementary
+-    # This function must return gamma_xxx, gamma_xxy, etc.
+-    raise NotImplementedError("See supplementary for exact O(1) arithmetic derivation")
+-
+-def bezier_indicator(p, coeffs):
+-    """
+-    Evaluates the implicit function B_imp(x, y) for a pixel p.
+-    p: numpy array of shape (2,) [x, y]
+-    coeffs: dict of gamma coefficients
+-    Returns: float value of B_imp(x, y)
+-    """
+-    x, y = p
+-    gamma = coeffs
+-    val = (gamma['gamma_xxx'] * x**3 +
+-           gamma['gamma_xxy'] * x**2 * y +
+-           gamma['gamma_xyy'] * x * y**2 +
+-           gamma['gamma_yyy'] * y**3 +
+-           gamma['gamma_xx'] * x**2 +
+-           gamma['gamma_xy'] * x * y +
+-           gamma['gamma_yy'] * y**2 +
+-           gamma['gamma_x'] * x +
+-           gamma['gamma_y'] * y +
+-           gamma['gamma_0'])
+-    return val
+-
+-def pre_scissor_render(gaussians, camera_matrix_P, camera_matrix_W, M):
+-    """
+-    Renders an image using Discontinuity-aware Gaussian Splatting.
+-    gaussians: list of N Gaussian objects. Each has:
+-        mu: (3,) mean
+-        R: (3,3) rotation matrix
+-        alpha: scalar opacity
+-        color: (3,) color
+-        c_curve: (4M, 2) control points in local 2D space
+-    camera_matrix_P: (4,4) projection matrix
+-    camera_matrix_W: (4,4) viewing matrix
+-    M: int, number of Bezier curves per Gaussian
+-    Returns: rendered_image (H, W, 3)
+-    """
+-    # Assume image dimensions H, W are known or derived from camera frustum
+-    # For simplicity, we iterate pixels. In practice, rasterization is used.
+-    
+-    # Precompute projected Gaussians
+-    projected_gaussians = []
+-    for g in gaussians:
+-        # Project mean
+-        mu_2d = camera_matrix_P @ camera_matrix_W @ np.append(g.mu, 1)
+-        mu_2d = mu_2d[:2] / mu_2d[2] # Perspective divide
+-        
+-        # Project covariance (simplified Jacobian J omitted for brevity, assume standard 3DGS projection)
+-        # Sigma_2D = J @ W @ Sigma_3D @ W.T @ J.T
+-        # This step relies on standard 3DGS projection logic
+-        projected_gaussians.append({
+-            'mu_2d': mu_2d,
+-            'alpha': g.alpha,
+-            'color': g.color,
+-            'c_curve': g.c_curve
+-        })
+-        
+-    # Initialize image
+-    # Note: Full rasterization loop is complex; this pseudocode outlines the core DisC-GS logic
+-    # for a single pixel p.
+-    
+-    def render_pixel(p):
+-        color_sum = np.zeros(3)
+-        alpha_sum = 0.0
+-        
+-        # Sort Gaussians by depth (standard 3DGS step)
+-        # ... sorting logic ...
+-        
+-        for pg in projected_gaussians:
+-            # 1. Transform local control points to 3D
+-            # r1, r2 are first two columns of R
+-            r1 = pg['R'][:, 0]
+-            r2 = pg['R'][:, 1]
+-            
+-            c_3d_curve = np.zeros((4*M, 3))
+-            for i in range(4*M):
+-                c_3d_curve[i] = pg['mu'] + pg['c_curve'][i, 0] * r1 + pg['c_curve'][i, 1] * r2
+-                
+-            # 2. Project control points to 2D
+-            c_2d_curve = np.zeros((4*M, 2))
+-            for i in range(4*M):
+-                pt_3d_hom = np.append(c_3d_curve[i], 1)
+-                pt_2d_hom = camera_matrix_P @ camera_matrix_W @ pt_3d_hom
+-                c_2d_curve[i] = pt_2d_hom[:2] / pt_2d_hom[2]
+-                
+-            # 3. Compute Indicator Function g(p)
+-            g_val = 1.0
+-            for j in range(M):
+-                w0 = c_2d_curve[4*j]
+-                w1 = c_2d_curve[4*j+1]
+-                w2 = c_2d_curve[4*j+2]
+-                w3 = c_2d_curve[4*j+3]
+-                
+-                coeffs = cubic_bezier_implicit_coeffs(w0, w1, w2, w3)
+-                b_imp = bezier_indicator(p, coeffs)
+-                
+-                if b_imp <= 0:
+-                    g_val = 0.0
+-                    break
+-            
+-            if g_val == 0:
+-                continue
+-                
+-            # 4. Compute Beta
+-            # Sigma_2D calculation omitted, assume standard 3DGS projection
+-            # dist_sq = (p - mu_2d).T @ inv(Sigma_2D) @ (p - mu_2d)
+-            # beta = alpha * g_val * exp(-0.5 * dist_sq)
+-            
+-            # Simplified beta for pseudocode structure
+-            beta = pg['alpha'] * g_val * 1.0 # Placeholder for Gaussian term
+-            
+-            # 5. Alpha Blending
+-            color_sum += pg['color'] * beta * (1 - alpha_sum)
+-            alpha_sum += beta * (1 - alpha_sum)
+-            
+-        return color_sum
+-
+-    # Iterate over all pixels
+-    # rendered_image = np.zeros((H, W, 3))
+-    # for y in range(H):
+-    #     for x in range(W):
+-    #         p = np.array([x, y])
+-    #         rendered_image[y, x] = render_pixel(p)
+-        
+-    return None # Placeholder
+-```
+-
+-**Parameters:**
+-*   $M$: User-defined hyperparameter representing the number of Bézier curves per Gaussian distribution.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Non-differentiability:** The indicator function $g(p)$ is discontinuous. Gradients must be approximated using the Bézier-boundary gradient approximation strategy.
+-*   **Control Point Initialization:** The initial placement of control points $\mathbf{c}_{\text{curve}}$ affects convergence. Standard initialization may require specific heuristics not detailed in the source [G].
++Discontinuity-aware Gaussian Splatting (DisC-GS) enables 3DGS to represent and render sharp boundaries and discontinuities, addressing the limitation of standard 3DGS which tends to blur such features. It differs from sibling methods like [Planar Gaussian Splatting](16706-planar-gaussian-splatting.md) by explicitly modeling boundaries as cubic Bézier curves within the Gaussian's local subspace and applying a "pre-scissoring" operation during rendering, rather than relying solely on geometric constraints or mesh extraction. Choose this when rendering scenes with sharp occlusion boundaries or thin structures.
+ 
+ ### [Mesh Extraction and Representation](14095-mesh-extraction-and-representation.md)
+-This family converts the volumetric, implicit representation of 3D Gaussian Splatting (3DGS) into explicit geometric structures, primarily triangular meshes or dense point clouds, to enable compatibility with standard 3D graphics pipelines, mesh editing tools, and physics simulations. Unlike standard 3DGS, which renders via alpha-blended splats, these methods extract a discrete surface or point set that approximates the radiance field, allowing for operations such as texture mapping, rigging, and collision detection. The key distinction lies in whether the extraction is driven by surface-alignment regularization during training (e.g., SuGaR) or by post-hoc probabilistic sampling of the trained density field (e.g., Point Cloud Conversion).
++This family converts the volumetric, implicit representation of 3DGS into explicit geometric structures, primarily triangular meshes or dense point clouds, to enable compatibility with standard 3D graphics pipelines, mesh editing tools, and physics simulations. Unlike standard 3DGS, which renders via alpha-blended splats, these methods extract a discrete surface or point set that approximates the radiance field, allowing for operations such as texture mapping, rigging, and collision detection. The key distinction lies in whether the extraction is driven by surface-alignment regularization during training (e.g., SuGaR) or by post-hoc probabilistic sampling of the trained density field (e.g., Point Cloud Conversion). Choose this when you need a watertight mesh for downstream applications.
+ 
+ ### [Appearance and Physical Modeling](15766-appearance-and-physical-modeling.md)
+-Appearance and Physical Modeling extends the standard 3D Gaussian Splatting (3DGS) representation to support physically based rendering (PBR), relighting, and volumetric light transport, solving the limitations of base 3DGS which relies on fixed Spherical Harmonic (SH) coefficients that cannot accurately represent complex specularities, dynamic lighting, or non-vacuum media. It sets itself apart from sibling methods like [Gaussian Representation and Truncation](12855-gaussian-representation-and-truncation.md) by focusing on the radiance and material representation rather than geometric simplification, and distinguishes itself from [Physics and Optical Modeling](15148-physics-and-optical-modeling.md) by prioritizing surface material decomposition and relighting over volumetric attenuation equations, although both families modify the core Gaussian properties beyond simple color.
++Appearance and Physical Modeling extends the standard 3DGS representation to support physically based rendering (PBR), relighting, and volumetric light transport, solving the limitations of base 3DGS which relies on fixed Spherical Harmonic (SH) coefficients that cannot accurately represent complex specularities, dynamic lighting, or non-vacuum media. It sets itself apart from sibling methods like [Gaussian Representation and Truncation](12855-gaussian-representation-and-truncation.md) by focusing on the radiance and material representation rather than geometric simplification, and distinguishes itself from [Physics and Optical Modeling](15148-physics-and-optical-modeling.md) by prioritizing surface material decomposition and relighting over volumetric attenuation equations, although both families modify the core Gaussian properties beyond simple color. Choose this for PBR or volumetric effects.
+ 
+ ### [Neural SDF Inference via Gaussian Pulling](15776-neural-sdf-inference-via-gaussian-pulling.md)
+-Neural SDF Inference via Gaussian Pulling is a method for reconstructing continuous 3D surfaces from multi-view RGB images by jointly optimizing a set of 3D Gaussians and a neural Signed Distance Function (SDF). It solves the problem of inferring accurate geometry from 3D Gaussian Splatting (3DGS), which typically suffers from discreteness, sparseness, and off-surface drift, making direct SDF inference difficult. Unlike standard 3DGS which renders appearance without explicit surface constraints, this method dynamically aligns Gaussians to the SDF's zero-level set and constrains them to be thin disks tangent to the surface, enabling robust surface reconstruction. It differs from [Gaussian Representation and Truncation](12855-gaussian-representation-and-truncation.md) by explicitly coupling the Gaussian positions to a continuous implicit field via differentiable pulling, and from [Mesh Extraction and Representation](14095-mesh-extraction-and-representation.md) by learning the SDF directly rather than extracting meshes from static Gaussian clusters.
+-
+-**Inputs:** Posed multi-view RGB images $\{v_i\}_{i=1}^I$.
+-**Outputs:** A neural SDF network $f$ and a set of optimized 3D Gaussians $\{g_j\}_{j=1}^J$.
+-
+-**Data Structures:**
+-1.  **3D Gaussians:** Each Gaussian $g_j$ is defined by mean $\boldsymbol{\mu}_j$, covariance matrix $\boldsymbol{\Sigma}_j$ (derived from rotation $\mathbf{R}_j$ and scale $\mathbf{S}_j$), opacity $\alpha_j$, and view-dependent color $\mathbf{c}_j$. The probability density at query $\mathbf{q}$ is:
+-    $$ p_j(\mathbf{q}) = \exp\left(-\frac{1}{2}(\mathbf{q} - \boldsymbol{\mu}_j)^\top \boldsymbol{\Sigma}_j^{-1} (\mathbf{q} - \boldsymbol{\mu}_j)\right) $$
+-2.  **Neural SDF:** An MLP with 8 layers, 256 hidden units, and ReLU activation, initialized to represent a sphere. It predicts signed distance $s = f(\mathbf{q})$ and gradient $\nabla f(\mathbf{q})$ at any point $\mathbf{q}$.
+-
+-**Numbered Steps:**
+-
+-1.  **Initialization:** Initialize $J$ 3D Gaussians $\{g_j\}$ and the SDF network $f$.
+-2.  **Gaussian Rendering:** Render the Gaussians $\{g_j\}$ into RGB images using volume rendering:
+-    $$ C'(u, v) = \sum_{j=1}^{J} c_j \alpha_j p_j(u, v) \prod_{k=1}^{j-1} (1 - \alpha_k p_k(u, v)) $$
+-    where $p_j(u, v)$ is the 2D projection probability of the $j$-th Gaussian at pixel $(u, v)$.
+-3.  **Neural Pulling (Gaussian Alignment):** For each Gaussian $g_j$, compute the signed distance $s_j = f(\boldsymbol{\mu}_j)$ and gradient $\nabla f(\boldsymbol{\mu}_j)$. Pull the Gaussian center to the zero-level set to obtain $\boldsymbol{\mu}'_j$:
+-    $$ \boldsymbol{\mu}'_j = \boldsymbol{\mu}_j - s_j \frac{\nabla f(\boldsymbol{\mu}_j)}{\|\nabla f(\boldsymbol{\mu}_j)\|} $$
+-    The pulled Gaussian $g'_j$ shares attributes with $g_j$ except for the center $\boldsymbol{\mu}'_j$.
+-4.  **Pulled Gaussian Rendering:** Render the pulled Gaussians $\{g'_j\}$ into images $\{v'_i\}$ using the same volume rendering equation.
+-5.  **SDF Inference (Query Pulling):** For query points $\mathbf{q}$ in the neighborhood of the surface, pull them onto the zero-level set using the SDF gradient:
+-    $$ \mathbf{q}' = \mathbf{q} - f(\mathbf{q}) \frac{\nabla f(\mathbf{q})}{\|\nabla f(\mathbf{q})\|} $$
+-    Identify the nearest pulled Gaussian $\bar{g}$ with center $\bar{\boldsymbol{\mu}}$ based on distance $\|\boldsymbol{\mu}'_j - \mathbf{q}\|^2$.
+-6.  **Loss Computation:** Compute the total loss comprising rendering, thin disk, tangent, pulling, and orthogonal constraints (see Formulas).
+-7.  **Optimization:** Update $\{g_j\}$ and $f$ parameters using gradient descent to minimize the total loss.
+-8.  **Mesh Extraction:** After optimization, extract the mesh from the learned SDF $f$ using the marching cubes algorithm. For small scenes, use resolution 800; for large scenes, split into parts and reconstruct each with resolution 800.
+-
+-**Formulas:**
+-
+-*   **Thin Disk Constraint ($L_{Thin}$):** Encourages Gaussians to become flat disks by penalizing the smallest variance. The normal $\mathbf{n}_j$ is defined by the axis with minimum variance $\bar{r} = \min\{r_1, r_2, r_3\}$.
+-    $$ L_{Thin} = \|\min\{r_1, r_2, r_3\}\|_1 $$
+-*   **Tangent Constraint ($L_{Tangent}$):** Aligns the Gaussian normal $\mathbf{n}_j$ with the SDF gradient at the pulled center $\boldsymbol{\mu}'_j$:
+-    $$ L_{Tangent} = 1 - \frac{\nabla f(\boldsymbol{\mu}'_j)}{\|\nabla f(\boldsymbol{\mu}'_j)\|} \cdot \mathbf{n}_j $$
+-*   **Pulling Probability Loss ($L_{Pull}$):** Maximizes the probability that the pulled query $\mathbf{q}'$ belongs to the nearest pulled Gaussian $\bar{g}$. Implemented as the negative logarithm of the probability:
+-    $$ L_{Pull}(\mathbf{q}'; \bar{\boldsymbol{\mu}}) = -\log \left( \exp\left(-\frac{1}{2}(\mathbf{q}' - \bar{\boldsymbol{\mu}})^\top \bar{\boldsymbol{\Sigma}}^{-1} (\mathbf{q}' - \bar{\boldsymbol{\mu}})\right) \right) $$
+-    where $\bar{\boldsymbol{\Sigma}}$ is the covariance of $\bar{g}$.
+-*   **Orthogonal Constraint ($L_{Orthogonal}$):** Aligns the SDF gradient at query $\mathbf{q}$ with the normal $\bar{\mathbf{n}}$ of the nearest pulled Gaussian disk:
+-    $$ L_{Orthogonal} = 1 - \frac{\nabla f(\mathbf{q})}{\|\nabla f(\mathbf{q})\|} \cdot \bar{\mathbf{n}} $$
+-*   **Rendering Loss ($L_{Splatting}$):** Combines L1 and D-SSIM terms between pulled rendered images $\{v'_i\}$ and ground truth $\{v_i\}$:
+-    $$ L_{Splatting} = 0.8 \cdot L_1(v'_i, v_i) + 0.2 \cdot L_{D-SSIM}(v'_i, v_i) $$
+-*   **Total Objective:**
+-    $$ \min_{\{g_j\}, f} L_{Splatting} + \alpha L_{Thin} + \beta L_{Tangent} + \gamma L_{Pull} + \delta L_{Orthogonal} $$
+-
+-**Parameters:**
+-*   Regularization weights: $\alpha=100$, $\beta=0.1$, $\gamma=1$, $\delta=0.1$.
+-*   Optimization iterations: 15k total. Densification stops and pulling/constraints are incorporated at 7k iterations.
+-
+-**Pseudocode:**
+-
+-```python
+-def train_neural_sdf_gaussian_pulling(images, initial_gaussians, sdf_network):
+-    """
+-    Jointly optimize 3D Gaussians and Neural SDF using Gaussian Pulling.
+-    """
+-    # Hyperparameters
+-    alpha = 100.0  # Thin disk weight
+-    beta = 0.1     # Tangent weight
+-    gamma = 1.0    # Pulling probability weight
+-    delta = 0.1    # Orthogonal weight
+-    total_iters = 15000
+-    pull_start_iter = 7000
+-    
+-    # Optimizers for Gaussians and SDF
+-    opt_gaussians = Adam(initial_gaussians.parameters())
+-    opt_sdf = Adam(sdf_network.parameters())
+-    
+-    for iteration in range(1, total_iters + 1):
+-        # 1. Sample a batch of camera views and corresponding GT images
+-        batch_views, gt_images = sample_batch(images)
+-        
+-        # 2. Render current Gaussians (optional for densification before pull_start_iter)
+-        # Note: Densification logic is handled externally or via standard 3DGS rules
+-        # until iteration 7000.
+-        
+-        # 3. Neural Pulling: Align Gaussians to SDF Zero-Level Set
+-        pulled_gaussians = []
+-        for g in initial_gaussians:
+-            mu = g.mean
+-            s = sdf_network(mu)  # Signed distance f(mu)
+-            grad = sdf_network.gradient(mu)  # Gradient df/dmu
+-            
+-            # Normalize gradient
+-            grad_norm = torch.norm(grad)
+-            if grad_norm > 1e-8:
+-                grad_normalized = grad / grad_norm
+-            else:
+-                grad_normalized = grad # Fallback for degenerate case [G]
+-            
+-            # Pull center to zero-level set
+-            mu_pulled = mu - s * grad_normalized
+-            
+-            # Create pulled Gaussian with same attributes but new center
+-            g_pulled = Gaussian(mean=mu_pulled, cov=g.cov, alpha=g.alpha, color=g.color)
+-            pulled_gaussians.append(g_pulled)
+-            
+-        # 4. Render Pulled Gaussians
+-        rendered_images = render_volume_rendering(pulled_gaussians, batch_views)
+-        
+-        # 5. Compute Rendering Loss
+-        l1_loss = compute_l1(rendered_images, gt_images)
+-        ssim_loss = compute_d_ssim(rendered_images, gt_images)
+-        l_splatting = 0.8 * l1_loss + 0.2 * ssim_loss
+-        
+-        total_loss = l_splatting
+-        
+-        # 6. Geometry Constraints (Active after pull_start_iter)
+-        if iteration >= pull_start_iter:
+-            # Thin Disk Loss
+-            l_thin = 0.0
+-            for g in initial_gaussians:
+-                variances = g.cov.diagonal() # Extract r1, r2, r3
+-                min_var = torch.min(variances)
+-                l_thin += torch.abs(min_var)
+-            l_thin = torch.mean(l_thin)
+-            total_loss += alpha * l_thin
+-            
+-            # Tangent Loss
+-            l_tangent = 0.0
+-            for g, g_pulled in zip(initial_gaussians, pulled_gaussians):
+-                mu_p = g_pulled.mean
+-                grad_p = sdf_network.gradient(mu_p)
+-                grad_norm_p = torch.norm(grad_p)
+-                
+-                # Determine Gaussian normal from min variance axis
+-                variances = g.cov.diagonal()
+-                min_idx = torch.argmin(variances)
+-                # Get axis direction corresponding to min variance
+-                # Assuming covariance is diagonal in local frame, transform to world
+-                # For simplicity, assume g.normal is stored or derived from rotation
+-                n_g = g.normal 
+-                
+-                if grad_norm_p > 1e-8:
+-                    grad_norm_p_normalized = grad_p / grad_norm_p
+-                else:
+-                    grad_norm_p_normalized = grad_p # Fallback [G]
+-                    
+-                l_tangent += 1.0 - torch.dot(grad_norm_p_normalized, n_g)
+-            l_tangent = torch.mean(l_tangent)
+-            total_loss += beta * l_tangent
+-            
+-            # Pulling Probability and Orthogonal Loss (on query points)
+-            # Sample query points q near the surface
+-            query_points = sample_queries_near_surface(pulled_gaussians)
+-            l_pull = 0.0
+-            l_orthogonal = 0.0
+-            
+-            for q in query_points:
+-                s_q = sdf_network(q)
+-                grad_q = sdf_network.gradient(q)
+-                grad_norm_q = torch.norm(grad_q)
+-                
+-                if grad_norm_q > 1e-8:
+-                    grad_norm_q_normalized = grad_q / grad_norm_q
+-                else:
+-                    grad_norm_q_normalized = grad_q # Fallback [G]
+-                
+-                # Pull query to zero-level set
+-                q_pulled = q - s_q * grad_norm_q_normalized
+-                
+-                # Find nearest pulled Gaussian
+-                nearest_g_pulled = find_nearest_gaussian(q_pulled, pulled_gaussians)
+-                mu_bar = nearest_g_pulled.mean
+-                cov_bar = nearest_g_pulled.cov
+-                
+-                # Pulling Probability Loss (Negative Log Likelihood)
+-                diff = q_pulled - mu_bar
+-                # Mahalanobis distance squared
+-                dist_sq = torch.dot(diff, torch.inverse(cov_bar) @ diff)
+-                prob = torch.exp(-0.5 * dist_sq)
+-                l_pull -= torch.log(prob + 1e-8)
+-                
+-                # Orthogonal Loss
+-                n_bar = nearest_g_pulled.normal
+-                if grad_norm_q > 1e-8:
+-                    l_orthogonal += 1.0 - torch.dot(grad_norm_q_normalized, n_bar)
+-                else:
+-                    l_orthogonal += 0.0 # Fallback [G]
+-            
+-            l_pull = torch.mean(l_pull)
+-            l_orthogonal = torch.mean(l_orthogonal)
+-            total_loss += gamma * l_pull + delta * l_orthogonal
+-            
+-        # 7. Backpropagation
+-        total_loss.backward()
+-        opt_gaussians.step()
+-        opt_sdf.step()
+-        opt_gaussians.zero_grad()
+-        opt_sdf.zero_grad()
+-```
++Neural SDF Inference via Gaussian Pulling is a method for reconstructing continuous 3D surfaces from multi-view RGB images by jointly optimizing a set of 3D Gaussians and a neural Signed Distance Function (SDF). It solves the problem of inferring accurate geometry from 3DGS, which typically suffers from discreteness, sparseness, and off-surface drift, making direct SDF inference difficult. Unlike standard 3DGS which renders appearance without explicit surface constraints, this method dynamically aligns Gaussians to the SDF's zero-level set and constrains them to be thin disks tangent to the surface, enabling robust surface reconstruction. It differs from [Gaussian Representation and Truncation](12855-gaussian-representation-and-truncation.md) by explicitly coupling the Gaussian positions to a continuous implicit field via differentiable pulling, and from [Mesh Extraction and Representation](14095-mesh-extraction-and-representation.md) by learning the SDF directly rather than extracting meshes from static Gaussian clusters. Choose this for high-fidelity surface reconstruction from RGB inputs.
+ 
+ ### [Planar Gaussian Splatting](16706-planar-gaussian-splatting.md)
+-Planar Gaussian Splatting (PGS) is an unsupervised neural rendering framework that reconstructs 3D geometry and explicitly parses 3D planar surfaces from multiple RGB images without requiring 3D labels or depth supervision. It extends the standard 3D Gaussian Splatting representation by introducing discriminative 3D plane descriptors and enforcing local planar alignment constraints. Unlike sibling methods that focus on high-fidelity rendering or generic mesh extraction, PGS is designed to identify distinct 3D plane instances through a hierarchical Gaussian Mixture Tree (GMT). It sets itself apart by using 2D segmentation priors from foundation models (like SAM) to guide the learning of these descriptors, enabling robust planar reconstruction across different scenes.
++Planar Gaussian Splatting (PGS) is an unsupervised neural rendering framework that reconstructs 3D geometry and explicitly parses 3D planar surfaces from multiple RGB images without requiring 3D labels or depth supervision. It extends the standard 3DGS representation by introducing discriminative 3D plane descriptors and enforcing local planar alignment constraints. Unlike sibling methods that focus on high-fidelity rendering or generic mesh extraction, PGS is designed to identify distinct 3D plane instances through a hierarchical Gaussian Mixture Tree (GMT). It sets itself apart by using 2D segmentation priors from foundation models (like SAM) to guide the learning of these descriptors, enabling robust planar reconstruction across different scenes. Choose this for scenes dominated by planar structures like indoor environments.
+ 
+-PGS operates on a set of $N$ 3D Gaussians $\{G_i\}_{i=1}^N$. Each Gaussian $G_i$ retains the standard parameters: mean $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$ (derived from rotation $\mathbf{R}_i$ and scale $\mathbf{S}_i$), opacity $\alpha_i$, and view-dependent color $\mathbf{c}_i(\omega)$. Additionally, each Gaussian carries two new parameters: a surface normal vector $\mathbf{n}_i$ and a learnable plane descriptor vector $\mathbf{z}_i$. The descriptor $\mathbf{z}_i$ is constrained to unit norm ($\|\mathbf{z}_i\|_2 = 1$) and serves to identify distinct 3D planes.
++### [3D Gaussian Splatting for Surface Reconstruction](17501-3d-gaussian-splatting-for-surface-reconstruction.md)
++3D Gaussian Splatting for Surface Reconstruction (3DGSR) is an implicit surface reconstruction method that integrates a neural Signed Distance Field (SDF) with the explicit 3DGS representation. It solves the problem of extracting high-quality, watertight meshes from 3DGS, which traditionally yields unstructured point clouds that are difficult to process with standard post-processing techniques like Poisson reconstruction. Unlike sibling methods that rely on post-processing or separate optimization stages, 3DGSR unifies the optimization of the Gaussian appearance and the implicit surface geometry end-to-end. It achieves this by coupling the SDF with the Gaussians via alignment constraints and regularizing the SDF using volumetric rendering consistency, enabling reconstruction quality superior to Gaussian-based methods like 2DGS while maintaining the rendering speed of 3DGS. Choose this for end-to-end surface reconstruction with high geometric accuracy.
+ 
+-### Data Structures
+-*   **Gaussian Field:** A list of $N$ Gaussians. Each Gaussian stores:
+-    *   $\boldsymbol{\mu}_i \in \mathbb{R}^3$: Position.
+-    *   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix.
+-    *   $\mathbf{S}_i \in \mathbb{R}^3$: Scale vector.
+-    *   $\alpha_i \in \mathbb{R}$: Opacity.
+-    *   $\mathbf{c}_i$: Spherical Harmonics coefficients (Degree 2) [S1].
+-    *   $\mathbf{n}_i \in \mathbb{R}^3$: Surface normal (unit vector).
+-    *   $\mathbf{z}_i \in \mathbb{R}^d$: Plane descriptor (unit vector, $d=3$ in experiments) [S1].
+-*   **KNN Structure:** For each Gaussian, a list of $K$ nearest neighbor indices is maintained to compute local covariance and smoothing [S1].
+-*   **Region Adjacency Graph (RAG):** A graph where nodes are 2D segments and edges represent adjacency, used to merge segments belonging to the same plane [S1].
+-
+-### Initialization
+-1.  **Gaussian Placement:** Initialize Gaussian locations and colors using a sparse point cloud obtained by running Structure-from-Motion (SfM) on the training images [S1].
+-2.  **Leaf Node Generation (Optional/Alternative):** Instead of initializing all Gaussians randomly, leaf nodes of the Gaussian Mixture Tree can be generated by:
+-    *   Prompting SAM with a $32 \times 32$ grid on input images to get masks [S1].
+-    *   Ignoring segments with high normal vector variance [S1].
+-    *   Lifting boundary points of valid SAM masks into 3D space using rendered depth maps and camera parameters [S1].
+-    *   Computing the mean and covariance of these 3D boundary points to form initial Gaussian distributions [S1].
+-
+-### Optimization Steps
+-The training runs for 15,000 iterations on a single GPU [S1]. The core loop involves standard 3DGS densification (cloning, splitting, culling) and the following specialized steps:
+-
+-1.  **Rendering:** Render the scene to obtain photometric loss. Use Spherical Harmonics of degree 2 [S1].
+-2.  **Plane Descriptor Learning (Linear Regression):**
+-    *   Render a 2D descriptor image where each pixel is the blended 3D descriptor $\mathbf{z}$ of the Gaussians visible at that pixel [S1].
+-    *   Let $\mathbf{Z} \in \mathbb{R}^{P \times d}$ be the matrix of rendered descriptors for $P$ pixels, augmented with a column of 1s.
+-    *   Let $\mathbf{Y} \in \mathbb{R}^{P \times m}$ be the one-hot label matrix for the $m$ segments in the current view (derived from SAM) [S1].
+-    *   Solve for weights $\hat{\mathbf{W}}$ using the closed-form solution:
+-        $$ \hat{\mathbf{W}} = (\mathbf{Z}^\top \mathbf{Z})^{-1} \mathbf{Z}^\top \mathbf{Y} $$
+-    *   Compute the prediction $\hat{\mathbf{y}}_i = [\mathbf{z}_i | 1] \hat{\mathbf{W}}$ for each pixel [S1].
+-    *   Compute segmentation loss:
+-        $$ \mathcal{L}_{seg} = \sum_{i} \| \mathbf{y}_i - \hat{\mathbf{y}}_i \|_1 $$
+-    *   Backpropagate $\mathcal{L}_{seg}$ to update $\mathbf{z}_i$ [S1].
+-    *   *Note:* This regression is recomputed for each camera view. The number of segments $m$ varies per image [S1].
+-3.  **Segment Merging (RAG):**
+-    *   Construct a RAG from the 2D segments [S1].
+-    *   Cut edges in the RAG if the planar distance between segments exceeds 10 cm or the surface normal cosine distance exceeds 20 degrees [S1].
+-    *   Merge remaining connected components to form consistent 2D plane labels for the current view [S1].
+-4.  **Local Planar Alignment:**
+-    *   Applied every 500 iterations [S1].
+-    *   For each Gaussian, find its $K=30$ nearest neighbors (KNN) [S1].
+-    *   Compute the $3 \times 3$ covariance matrix of the KNN Gaussian centers [S1].
+-    *   Perform Singular Value Decomposition (SVD) on the covariance matrix [S1].
+-    *   Identify the local tangent plane using the two eigenvectors corresponding to the two largest eigenvalues [S1].
+-    *   Project the Gaussian center $\boldsymbol{\mu}_i$ onto this local tangent plane [S1].
+-    *   Apply Laplacian smoothing to $\mathbf{n}_i$ and $\mathbf{z}_i$ by averaging over the features of the KNN neighbors [S1].
+-5.  **Holistic Separability (Mean-Shift):**
+-    *   Applied once after 2,000 iterations, then every 100 iterations [S1].
+-    *   Goal: Enhance separability of descriptors $\mathbf{z}$ for distinct planes [S1].
+-    *   Update rule for the descriptor matrix $\mathbf{Z} \in \mathbb{R}^{N \times d}$:
+-        $$ \mathbf{Z} \leftarrow \mathbf{Z} \cdot (\eta \cdot \mathbf{K} \cdot \mathbf{D}^{-1} + (1-\eta) \cdot \mathbf{I}) $$
+-        Where:
+-        *   $\mathbf{K}$ is the pairwise distance kernel using the von Mises-Fisher distribution [S1].
+-        *   $\mathbf{D}$ is the diagonal matrix of row sums of $\mathbf{K}$ [S1].
+-        *   $\mathbf{I}$ is the identity matrix [S1].
+-        *   $\eta$ is a mixing parameter [S1].
+-        *   $\gamma = 60$ is the kernel parameter (used in von Mises-Fisher) [S1].
+-    *   *Efficient Implementation:* Computing $\mathbf{K} \in \mathbb{R}^{N \times N}$ is infeasible for large $N$. Instead:
+-        1.  Estimate $\mathbf{K}$ on a random subset of $M$ points ($M \ll N$) without replacement [S1].
+-        2.  Propagate and share the estimated kernel and update vectors across all KNN samples within the chosen set [S1].
+-        3.  Repeat sampling until an update vector is computed for all samples or their neighbors [S1].
+-        4.  Perform 10 update steps per run [S1].
+-        5.  This process takes approximately 1 second on GPU [S1].
+-6.  **KNN Recomputation:** Recompute KNN indices after any refinement to the Gaussian field (cloning, splitting, culling) [S1].
+-
+-### Parameters
+-*   **Training Iterations:** 15,000 [S1].
+-*   **Hardware:** Single NVIDIA GeForce RTX 2080 Ti [S1].
+-*   **Gradient Densification Threshold:** 0.001 (increased to limit cloning/splitting) [S1].
+-*   **Spherical Harmonics Degree:** 2 [S1].
+-*   **RAG Thresholds:** Planar distance 10 cm, Normal cosine distance 20 degrees [S1].
+-*   **Mean-Shift Frequency:** Once after 2k iterations, then every 100 iterations [S1].
+-*   **Mean-Shift Steps:** 10 per run [S1].
+-*   **Mean-Shift Gamma ($\gamma$):** 60 [S1].
+-*   **KNN Neighbors ($K$):** 30 [S1].
+-*   **Local Planar Alignment Frequency:** Every 500 iterations [S1].
+-
+-### Edge Cases and Pitfalls
+-*   **Kernel Computation:** Computing the full kernel $\mathbf{K} \in \mathbb{R}^{N \times N}$ is quadratic in memory and infeasible for millions of points [S1]. The sampling strategy is required [S1].
+-*   **SAM Ambiguity:** SAM may return subparts, parts, or entire objects for a single point. High-variance normal segments are ignored as invalid [S1].
+-*   **Multi-view Association:** SAM masks lack semantic information, making 2D-3D lifting difficult due to unknown mask associations and variable numbers of segments [S1]. The linear regression approach handles this by solving for weights per view [S1].
++### [Sparse2DGS](18424-sparse2dgs.md)
++Sparse2DGS is a Gaussian Splatting method designed for surface reconstruction from sparse input views, addressing the ill-posed nature of geometric optimization when dense Structure-from-Motion points are unavailable. It distinguishes itself from standard 3DGS and its sibling [2DGS](12855-gaussian-representation-and-truncation.md) by initializing primitives with unsupervised Multi-View Stereo (MVS) points and employing geometric-prioritized enhancements—such as fixed feature splatting and selective updates—to prevent appearance overfitting and improve geometric learning. Choose this when training data is sparse.
+ 
+ #### Model-based depth estimation for volume parameter update
+-- [S1] During optimization, use Eq. (6) to extract depth values $z$ from the current scene estimate. These depth values are then used to update the medium-parameter estimates ($B_\infty, B_b$).
+-- [S1] Depth extraction from 3DGS: $z = \frac{\sum_{i=1}^M d_i \alpha_i T_i}{\sum_{i=1}^M \alpha_i T_i}$. Here $d_i$ is the depth of Gaussian $i$. This is computed at each pixel during rendering.
++- **Step:** During optimization, use Eq. (6) to extract depth values $z$ from the current scene estimate. These depth values are then used to update the medium-parameter estimates ($B_\infty, B_b$) [S1].
++- **Formula:** Depth extraction from 3DGS: $z = \frac{\sum_{i=1}^M d_i \alpha_i T_i}{\sum_{i=1}^M \alpha_i T_i}$. Here $d_i$ is the depth of Gaussian $i$. This is computed at each pixel during rendering [S1].
+ 
+ #### Scale Constrained by Mesh Geometry
+-- [S2] A constraint to prevent discrepancies between Gaussian Splat scales and the scales of corresponding triangular mesh faces by bounding the relative scale coefficients.
+-- [S2] $s = s_{rel} \odot s_0$, where $s$ is the final scale, $s_{rel} = (s_{rel,1}, s_{rel,2}) \in [s_{min}, s_{max}] \times [s_{min}, s_{max}]$ is the coefficient vector, $s_0$ is the predefined scale derived from the mesh faces, and $\odot$ denotes element-wise multiplication.
+-- [S2] $s_{min}, s_{max}$: The lower and upper bounds for the relative scale coefficients $s_{rel}$.
++- **Definition:** A constraint to prevent discrepancies between Gaussian Splat scales and the scales of corresponding triangular mesh faces by bounding the relative scale coefficients [S2].
++- **Formula:** $s = s_{rel} \odot s_0$, where $s$ is the final scale, $s_{rel} = (s_{rel,1}, s_{rel,2}) \in [s_{min}, s_{max}] \times [s_{min}, s_{max}]$ is the coefficient vector, $s_0$ is the predefined scale derived from the mesh faces, and $\odot$ denotes element-wise multiplication [S2].
++- **Parameter:** $s_{min}, s_{max}$: The lower and upper bounds for the relative scale coefficients $s_{rel}$ [S2].
+ 
+ #### Normal Estimation via Back-propagation
+-- [S3] A method to solve for the normal attribute $n$ for each 3D Gaussian by optimizing it from an initial random vector via back-propagation, perceiving the depth of all Gaussians along a ray as a distribution.
+-- [S3] Determine the normal for each pixel by estimating the expectation of the depth distribution along the ray.
+-- [S3] Normal consistency loss: $\mathcal {L}_{n}=\|\mathcal {N}-\tilde {\mathcal {N}}\|_2$.
++- **Definition:** A method to solve for the normal attribute $n$ for each 3D Gaussian by optimizing it from an initial random vector via back-propagation, perceiving the depth of all Gaussians along a ray as a distribution [S3].
++- **Step:** Determine the normal for each pixel by estimating the expectation of the depth distribution along the ray [S3].
++- **Formula:** Normal consistency loss: $\mathcal {L}_{n}=\|\mathcal {N}-\tilde {\mathcal {N}}\|_2$ [S3].
+ 
+ #### Tangent Plane Constrained Gaussian Splatting
+-- [S4] An extension of 3D Gaussian Splatting where Gaussians are constrained to a 2D tangent plane to resolve the conflict between volumetric Gaussians and surface representation, enabling accurate normal map estimation.
+-- [S4] Normal Rendering: Perform splatting of normals in the same manner as color splatting to generate a normal map, leveraging the tangent plane constraint.
+-- [S4] A point $P$ on the 2D Gaussian plane with coordinates $(u, v)$ is defined as: $P(u, v) = p_k + s_u t_u u + s_v t_v v = H(u, v, 1, 1)^T$, where $H = [p_k, t_u, t_v, t_w]$ is the transformation matrix.
++- **Definition:** An extension of 3DGS where Gaussians are constrained to a 2D tangent plane to resolve the conflict between volumetric Gaussians and surface representation, enabling accurate normal map estimation [S4].
++- **Step:** Normal Rendering: Perform splatting of normals in the same manner as color splatting to generate a normal map, leveraging the tangent plane constraint [S4].
++- **Formula:** A point $P$ on the 2D Gaussian plane with coordinates $(u, v)$ is defined as: $P(u, v) = p_k + s_u t_u u + s_v t_v v = H(u, v, 1, 1)^T$, where $H = [p_k, t_u, t_v, t_w]$ is the transformation matrix [S4].
+ 
+ ## Background
+-The standard 3D Gaussian Splatting method [Kerbl et al., 2023] introduced a highly efficient differentiable rendering pipeline using 3D Gaussians. However, the volumetric nature of these primitives often leads to geometric ambiguities, such as "floaters" (spurious Gaussians in empty space) and blurred surfaces. The family of Scene Representation and Geometry Constraints emerged to address these issues by incorporating explicit geometric priors, such as SDFs, planar constraints, and mesh alignments, into the optimization process. This allows for the extraction of clean, watertight meshes and physically plausible surface normals directly from the Gaussian representation.
++3D Gaussian Splatting was introduced by Kerbl et al. in 2023 as a real-time explicit scene representation [G]. Subsequent work focused on extracting explicit geometry from these soft primitives, leading to families like Mesh Extraction and SDF-based reconstruction. Methods like DisC-GS and Planar GS address specific geometric artifacts (blurring, lack of planarity) inherent in the original formulation. The integration of SDFs (e.g., Neural SDF Inference, 3DGSR) represents a shift towards hybrid explicit-implicit representations for higher geometric fidelity.
+ 
+ ## Sources

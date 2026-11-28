@@ -1,0 +1,113 @@
+# Field-Aggregation Transformer
+## Overview
+The Field-Aggregation Transformer (FAT) is a shared attention mechanism that co-aggregates radiance and semantic-embedding fields by combining features from multiple reference views for a 3D point [S1]. It builds on [View Transformer](14756-view-transformer.md) by explicitly handling two distinct feature types (RGB and semantic) within a single aggregation step, ensuring that the aggregation weights derived from low-level visual features are consistently applied to high-level semantic features [S1]. Unlike standard view transformers that may treat views independently or sequentially, FAT enforces joint optimization of geometry (via RGB) and semantics (via semantic embeddings) through a unified attention structure [S1].
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $X^0$: Coordinate-aligned features, shape $(N_{rays}, N_{pts}, D_{rgb})$ [S1].
+    *   $X^{rgb}$: Epipolar view RGB features, shape $(N_{rays}, N_{pts}, N_{views}, D_{rgb})$ [S1].
+    *   $X^{sem}$: Epipolar view Semantic features, shape $(N_{rays}, N_{pts}, N_{views}, D_{sem})$ [S1].
+    *   $\Delta d$: Relative directions, shape $(N_{rays}, N_{pts}, N_{views}, 3)$ [S1].
+*   **Outputs:**
+    *   $S^{3D}_{rgb}$: Aggregated 3D RGB feature field [S1].
+    *   $S^{3D}_{sem}$: Aggregated 3D Semantic feature field [S1].
+
+**Data Structures:**
+The method operates on tensors with dimensions corresponding to rays, points, views, and feature channels [S1]. No specific bit-packing is defined; standard dense floating-point tensors are implied by the use of bilinear interpolation and MLPs [S1].
+
+**Steps:**
+1.  **Projection:** For a position $\boldsymbol{x}$ in the novel view, project $\boldsymbol{x}$ to every reference image plane using extrinsic matrices to get projected positions $\Pi_i(\boldsymbol{x})$ [S1]. The features at these positions are obtained via bilinear interpolation on the feature grids of the reference views [S1].
+2.  **Query/Key/Value Generation:** Compute Query $Q$ from $X^0$: $Q = f_Q(X^0)$ [S1]. Compute Key $K$ and Value $V$ from $X^{rgb}$: $K = f_K(X^{rgb})$, $V = f_V(X^{rgb})$ [S1]. Here, $f_Q, f_K, f_V$ are MLP layers [S1].
+3.  **Positional Bias:** Compute positional bias $P_{field}$ from relative directions $\Delta d$: $P_{field} = f_P(\Delta d)$ [S1]. $f_P$ is an MLP layer [S1].
+4.  **Attention Logits:** Compute attention logits $A_{field}$ by combining $Q$ and $P_{field}$:
+    $$ A_{field} = K - Q[:, \text{None}, :] + P_{field} $$
+    The term $Q[:, \text{None}, :]$ broadcasts $Q$ to match the view dimension of $K$ and $P_{field}$ [S1].
+5.  **Softmax:** Apply softmax to $A_{field}$ along dimension 2 ($N_{views}$) to get normalized attention weights $A_{field}$ [S1].
+6.  **Feature Aggregation (RGB):** Compute aggregated RGB feature $S^{3D}_{rgb}$ by adding $V$ and $P_{field}$, multiplying by $A_{field}$, and summing over dimension 2:
+    $$ S^{3D}_{rgb} = ((V + P_{field}) \cdot A_{field}).\text{sum}(\text{dim}=2) $$
+    Apply MLP $f_{rgb}$ to $S^{3D}_{rgb}$ to get the final output:
+    $$ S^{3D}_{rgb} = f_{rgb}(S^{3D}_{rgb}) $$
+    [S1].
+7.  **Feature Aggregation (Semantic):** The semantic aggregation uses the same attention weights $A_{FAT}$ (derived from the RGB path) but applies them to semantic features [S1]. Compute aggregated Semantic feature $S^{3D}_{sem}$ by adding $X^{sem}$ and a modified positional bias $P'_{field}$, multiplying by a modified attention map $A'_{field}$, and summing over dimension 2:
+    $$ S^{3D}_{sem} = ((X^{sem} + P'_{field}) \cdot A'_{field}).\text{sum}(\text{dim}=2) $$
+    The source algorithm specifies that $A'_{field} = A_{field} \cdot \text{repeat\_interleave}(4)$ and $P'_{field} = P_{field} \cdot \text{repeat\_interleave}(4)$ to handle channel expansion before aggregation [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def field_aggregation_transformer(X0, X_rgb, X_sem, Delta_d, fQ, fK, fV, fP, f_rgb):
+    """
+    Field-Aggregation Transformer (FAT)
+    
+    Args:
+        X0: Coordinate aligned features, shape (Nrays, Npts, D_rgb)
+        X_rgb: Epipolar view Ray feats, shape (Nrays, Npts, Nviews, D_rgb)
+        X_sem: Epipolar view Sem feats, shape (Nrays, Npts, Nviews, D_sem)
+        Delta_d: Relative directions, shape (Nrays, Npts, Nviews, 3)
+        fQ, fK, fV, fP, f_rgb: MLP layers
+        
+    Returns:
+        S_3D_rgb: Aggregated 3D RGB feature, shape (Nrays, Npts, D_rgb)
+        S_3D_sem: Aggregated 3D Semantic feature, shape (Nrays, Npts, D_sem)
+    """
+    # 1. Compute Q, K, V
+    Q = fQ(X0)          # (Nrays, Npts, D_rgb)
+    K = fK(X_rgb)       # (Nrays, Npts, Nviews, D_rgb)
+    V = fV(X_rgb)       # (Nrays, Npts, Nviews, D_rgb)
+    
+    # 2. Compute Positional Bias
+    P_field = fP(Delta_d) # (Nrays, Npts, Nviews, D_rgb)
+    
+    # 3. Compute Attention Logits
+    # Q is broadcasted to (Nrays, Npts, 1, D_rgb) to subtract from K
+    A_field = K - Q[:, :, None, :] + P_field # (Nrays, Npts, Nviews, D_rgb)
+    
+    # 4. Softmax over views (dim=2)
+    A_field = F.softmax(A_field, dim=2) # (Nrays, Npts, Nviews, D_rgb)
+    
+    # 5. Aggregate RGB Features
+    S_3D_rgb_raw = ((V + P_field) * A_field).sum(dim=2) # (Nrays, Npts, D_rgb)
+    S_3D_rgb = f_rgb(S_3D_rgb_raw) # (Nrays, Npts, D_rgb)
+    
+    # 6. Aggregate Semantic Features
+    # Apply repeat_interleave(4) along the channel dimension (dim=3)
+    A_prime_field = torch.repeat_interleave(A_field, repeats=4, dim=3) # (Nrays, Npts, Nviews, 4*D_rgb)
+    P_prime_field = torch.repeat_interleave(P_field, repeats=4, dim=3) # (Nrays, Npts, Nviews, 4*D_rgb)
+    
+    # Compute semantic aggregation
+    # Note: X_sem shape is (Nrays, Npts, Nviews, D_sem). 
+    # The source algorithm multiplies (X_sem + P'_field) by A'_field.
+    # This implies D_sem matches the expanded channel dimension or broadcasting is applied.
+    S_3D_sem = ((X_sem + P_prime_field) * A_prime_field).sum(dim=2) # (Nrays, Npts, 4*D_rgb)
+    
+    return S_3D_rgb, S_3D_sem
+```
+
+**Parameters:**
+*   $f_Q, f_K, f_V, f_P, f_{rgb}$: MLP layers [S1].
+*   Typical values for dimensions ($D_{rgb}, D_{sem}$) are not given in the sources [S1].
+*   $N_{views}$: Number of reference views [S1].
+
+**Edge Cases and Pitfalls:**
+Not given in the sources.
+
+## Subtopics
+
+### [Ray-Aggregation Transformer](15113-ray-aggregation-transformer.md)
+A transformer block that aggregates features across the point dimension ($N_{pts}$) along rays to produce 2D semantic-embedding fields ($S_{2D\_rgb}, S_{2D\_sem}$) for rendering. It follows FAT in the pipeline, taking the 3D fields produced by FAT and aggregating them along the ray to generate final view features.
+
+## Operating characteristics
+*   **Performance:** The method surpasses SOTA methods like DM-NeRF in SSIM and LPIPS metrics in instance settings, demonstrating that contextual information from semantic features enhances geometry reconstruction [S1]. It also shows improved mIoU and finetuning times on the ScanNet dataset [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Joint optimization of radiance and semantic fields improves both rendering quality and semantic segmentation accuracy [S1].
+*   **Limitations:** Requires epipolar geometry constraints and bilinear interpolation, which can be computationally expensive for high-resolution features [S1].
+## Background
+The Field-Aggregation Transformer was introduced in the GP-NeRF paper (Generalized Perception NeRF for Context-Aware 3D Scene Understanding) [S1]. It is part of a framework that uses multi-scale feature extractors to obtain low-level (RGB) and high-level (semantic) features, which are then co-aggregated using FAT and subsequently rendered using a Ray-Aggregation Transformer [S1]. The method leverages epipolar geometry constraints to project novel view points to reference views [S1].
+## Sources
+[S1] GP-NeRF: Generalized Perception NeRF for Context-Aware 3D Scene Understanding, https://doi.org/10.1109/cvpr52733.2024.02051, fetched 2026-10-26

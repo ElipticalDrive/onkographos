@@ -1,0 +1,129 @@
+# Depth-based Circle of Confusion (CoC) Calculation
+
+Also called: fragCaptureForegroundCoc, fragMergeCoc
+
+## Overview
+This method calculates the magnitude of the Circle of Confusion (CoC) for a given pixel based on its linear depth relative to a focal plane, producing an unsigned blur radius used in depth-of-field post-processing. It differs from parent methods by converting scene depth into a specific blur metric using a parametric formula, rather than storing raw depth or performing the blur itself. It serves as the input generator for [Foreground CoC Blur](21034-foreground-coc-blur.md).
+
+## How it works
+**Inputs:**
+- `depthTexture`: A texture containing non-linear depth values (e.g., OpenGL or DirectX clip-space depth) sampled at current UV coordinates.
+- `_CurveParams`: A vector of four floats:
+  - `_CurveParams.x`: Maximum CoC value (clamping upper bound).
+  - `_CurveParams.y`: Minimum CoC threshold (values below this become 0).
+  - `_CurveParams.z`: Scale factor for the CoC calculation.
+  - `_CurveParams.w`: Focal depth plane (linear depth value where CoC is 0).
+
+**Outputs:**
+- `coc`: A single float representing the unsigned blur radius for the pixel.
+
+**Data Structures:**
+- The implementation typically resides in a fragment shader. No persistent data structures are required; the calculation is per-pixel.
+
+**Steps:**
+1. **Sample Depth:** Read the depth value from the depth texture at the current UV coordinates.
+2. **Linearize Depth:** Convert the sampled depth $d_{sample}$ to linear 0-1 depth $d$. The source code uses a helper function `Linear01Depth`:
+   $$ d = \text{Linear01Depth}(d_{sample}) $$
+   [G] In standard OpenGL, this typically involves $d = \frac{2 \cdot near}{far + near - d_{sample} \cdot (far - near)}$. In DirectX, it involves $d = d_{sample} \cdot far$. The exact conversion depends on the graphics API and depth buffer configuration, but the source assumes a `Linear01Depth` function exists that returns a value in $[0, 1]$.
+3. **Calculate Raw CoC:** Compute the raw CoC value using the parametric formula:
+   $$ C_{raw} = \frac{\text{_CurveParams.z} \times (\text{_CurveParams.w} - d)}{d + 10^{-5}} $$
+   Here, $10^{-5}$ is a small epsilon added to the denominator to prevent division by zero when $d \approx 0$.
+4. **Apply Minimum Threshold:** Subtract the minimum CoC threshold `_CurveParams.y` from $C_{raw}$. If the result is negative, clamp it to 0.
+   $$ C_{thresh} = \max(0, C_{raw} - \text{_CurveParams.y}) $$
+5. **Apply Maximum Clamping:** Clamp the result to the maximum CoC value `_CurveParams.x`.
+   $$ \text{coc} = \min(C_{thresh}, \text{_CurveParams.x}) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_coc(depth_sample, curve_params):
+    """
+    Calculate the unsigned Circle of Confusion (CoC) for a pixel.
+    
+    Args:
+        depth_sample: The non-linear depth value sampled from the depth texture.
+        curve_params: A tuple or list [max_coc, min_coc_threshold, scale_factor, focal_depth].
+                      curve_params[0]: _CurveParams.x (Max CoC)
+                      curve_params[1]: _CurveParams.y (Min CoC Threshold)
+                      curve_params[2]: _CurveParams.z (Scale Factor)
+                      curve_params[3]: _CurveParams.w (Focal Depth)
+                      
+    Returns:
+        float: The calculated unsigned CoC value.
+    """
+    # 1. Sample and Linearize Depth
+    # Note: Linear01Depth is API-specific. 
+    # OpenGL: d = 2.0 * near / (far + near - depth_sample * (far - near))
+    # DirectX: d = depth_sample * far
+    # The source assumes a function Linear01Depth(depth_sample) exists.
+    d = linear_01_depth(depth_sample)
+    
+    # Extract parameters for clarity
+    max_coc = curve_params[0]
+    min_coc_threshold = curve_params[1]
+    scale_factor = curve_params[2]
+    focal_depth = curve_params[3]
+    
+    # 2. Calculate Raw CoC
+    # Formula: C_raw = (scale_factor * (focal_depth - d)) / (d + epsilon)
+    epsilon = 1e-5
+    c_raw = (scale_factor * (focal_depth - d)) / (d + epsilon)
+    
+    # 3. Apply Minimum Threshold
+    # Subtract min threshold and clamp to 0
+    c_thresh = max(0.0, c_raw - min_coc_threshold)
+    
+    # 4. Apply Maximum Clamping
+    # Clamp to max CoC
+    coc = min(c_thresh, max_coc)
+    
+    return coc
+```
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** The denominator $d + 10^{-5}$ prevents division by zero if $d=0$. [S1, unofficial]
+- **Negative CoC:** The formula can produce negative values if $d > \text{_CurveParams.w}$ (pixel is behind focal plane). The subtraction of `_CurveParams.y` and subsequent clamping to $\max(0, \dots)$ handles this, effectively treating out-of-focus regions symmetrically in magnitude but potentially requiring the blur kernel to handle directionality if signed CoC were needed (though this method outputs unsigned). [S1, unofficial]
+- **Depth Precision:** The accuracy of $d$ depends on the depth buffer precision and the linearization function. Incorrect linearization leads to incorrect CoC values. [G]
+
+## Subtopics
+
+### Camera Focus Parameter Calibration
+This variant is not a calculation method but a calibration procedure to map a software focus parameter to physical focal distance. It is used to determine the `_CurveParams.w` (focal depth) or to validate the scale factor `_CurveParams.z` in real-world scenarios. [S2, unofficial]
+- **Definition:** Establishes a one-to-one correspondence between a software focus parameter (`FParam`) and physical focal distance for a fixed focal length. [S2, unofficial]
+- **Steps:**
+  1. Manually set the zoom (focal length). [S2, unofficial]
+  2. Turn the focus ring to the far end until the camera is focused on the nearest objects, setting `FParam = 0`. [S2, unofficial]
+  3. Launch DigicamControl software, vary `FParam`, and measure the focal distance for each value by recording the distance interval within which a printed grid is seen without blur. [S2, unofficial]
+  4. Fit a curve between the mean values of the focused intervals and `FParam` to generate the final calibration mapping. [S2, unofficial]
+- **Parameters:**
+  - `FParam`: A focus parameter controlled via DigicamControl software, associated with focal distance. Initialized to 0 when the focus ring is turned to the far end. [S2, unofficial]
+- **Calibration Data (Table I):** [S2, unofficial]
+  | FParam | Focused Interval (meters) |
+  | :--- | :--- |
+  | 0 | 0.24-0.25 |
+  | -500 | 0.27-0.28 |
+  | -1000 | 0.30-0.32 |
+  | -1500 | 0.35-0.37 |
+  | -2000 | 0.41-0.43 |
+  | -2500 | 0.49-0.51 |
+  | -3000 | 0.60-0.63 |
+  | -3500 | 0.79-0.82 |
+  | -4000 | 1.20-1.27 |
+  | -4500 | 2.0-2.7 |
+  | -5000 | 15-25 |
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per pixel. The calculation involves a few arithmetic operations and texture sampling.
+- **Memory Complexity:** $O(1)$ auxiliary memory. Requires only the depth texture and the curve parameters.
+- **Strengths:** Simple to implement; computationally inexpensive; provides a smooth transition of blur based on depth.
+- **Limitations:** Assumes a thin-lens model; does not account for lens aberrations or complex bokeh shapes; relies on accurate depth information.
+- **When to Use:** When a simple depth-of-field effect is needed in post-processing and the scene depth is available.
+- **When Not to Use:** When physically accurate lens simulation is required, or when depth information is unavailable or unreliable.
+
+## Background
+This method is derived from shader implementations found in the `metaballs` repository, specifically in the fragment shaders `fragCaptureForegroundCoc` and `fragMergeCoc`. [S1, unofficial] The calibration procedure is described in the context of partial light field tomographic reconstruction, where accurate focus parameter mapping is essential for refocusing algorithms. [S2, unofficial]
+
+## Sources
+[S1] dario-zubovic/metaballs, https://github.com/dario-zubovic/metaballs, fetched 2026-10-26 (unofficial)
+[S2] Partial light field tomographic reconstruction from a fixed-camera focal stack, https://arxiv.org/abs/1503.01903v1, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,324 @@
+--- v001.md
++++ v002.md
+@@ -22,93 +22,87 @@
+ 
+ **MTCut Internal Steps (Per Affected Voxel):**
+-The algorithm processes each affected voxel by splitting it into 5 tetrahedra. For each tetrahedron, it performs:
++The algorithm processes each affected voxel by splitting it into 5 tetrahedra [S1, unofficial]. For each tetrahedron, it performs:
+ 
+ 1.  **Classification:** Classify the four vertices of the tetrahedron with respect to two criteria:
+     *   The isovalue (isosurface).
+     *   The cutting mesh (cutting surface). At the voxel level, the cutting surface is approximated by at most two planes [S1, unofficial].
+-2.  **Vertex Reclassification:** Reclassify vertices to determine if they are "inside" the *final* isosurface (the volume to be kept).
++2.  **Vertex Reclassification:** Reclassify vertices to determine if they are "inside" the *final* isosurface (the volume to be kept) [S1, unofficial].
+     *   **Single Plane Cut:** A point is classified as inside if it lies inside the isosurface AND in the positive half-space of the cutting plane [S1, unofficial].
+     *   **Two Plane Cut:** Classification depends on the concavity/convexity that the two cutting planes form with respect to the cut direction [S1, unofficial].
+ 3.  **Pattern Calculation & Edge Identification:** Determine which edges of the tetrahedron are intersected by the final isosurface based on the reclassified vertex signs [S1, unofficial].
+-4.  **Vertex Generation:** Determine new vertex positions for triangulation.
++4.  **Vertex Generation:** Determine new vertex positions for triangulation [S1, unofficial].
+     *   If an edge is cut *only* by the cutting plane, place the vertex at the intersection of the plane with the edge [S1, unofficial].
+     *   If an edge is traversed by *both* the isosurface and the cutting plane, place the new vertex at the more interior intersection point (closer to the inside) [S1, unofficial].
+     *   **Exception:** If the edge is shared with a non-cut voxel, keep the intersection with the isosurface [S1, unofficial].
+ 
++**Formulas:**
++*   **Plane Representation:** A cutting plane is defined by $ax + by + cz + d = 0$. A point $P$ is inside the cut volume if $aP_x + bP_y + cP_z + d > 0$.
++*   **Isosurface Classification:** $S_{iso} = 1$ if $V \ge I$, else $-1$, where $V$ is the vertex value and $I$ is the isovalue.
++*   **Cut Classification:** $S_{cut} = 1$ if the vertex satisfies the positive half-space condition for all cutting planes in the voxel, else $-1$.
++*   **Vertex Reclassification:** $S_{final} = 1$ if $S_{iso} = 1 \land S_{cut} = 1$, else $-1$.
++*   **Linear Interpolation (Edge Intersection):** $P_{int} = P_1 + \frac{I - V_1}{V_2 - V_1}(P_2 - P_1)$, where $P_1, P_2$ are edge endpoints and $V_1, V_2$ their scalar values.
++*   **Line-Plane Intersection:** For segment $P_1 \to P_2$ and plane $ax+by+cz+d=0$, $t = -\frac{aP_{1x} + bP_{1y} + cP_{1z} + d}{a(P_{2x}-P_{1x}) + b(P_{2y}-P_{1y}) + c(P_{2z}-P_{1z})}$. Intersection exists if $0 \le t \le 1$.
++
++**Parameters:**
++*   **Isovalue:** Threshold scalar for isosurface extraction. Typical values depend on the volume dataset's normalization.
++*   **Cutting Tool Representation:** The tool is represented by a segment. The blade path is approximated by a set of quads formed between two consecutive positions (segments) of the tool, creating a piecewise-bilinear surface [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Crack Generation:** Cracks between the newly created surface and the original isosurface are avoided because the classification of vertices shared between cut voxels and non-cut voxels is never changed [S1, unofficial].
++*   **Precision:** The algorithm relies on accurate intersection calculations. Precision issues may arise if the cutting plane is nearly parallel to an edge or if the isovalue is very close to a vertex value [G].
++*   **Boundary Conditions:** The haptic sampling condition (one stick per voxel, coplanarity) is critical to guarantee that a voxel is cut by at most two planes [S1, unofficial].
++
+ **Pseudocode:**
+ ```python
+ def mtcut_cut_volume(volume_data, isovalue, cutting_tool_path):
+-    """
+-    Main entry point for MTCut.
+-    volume_data: 3D array of scalar values.
+-    isovalue: float, threshold for isosurface.
+-    cutting_tool_path: list of 3D points representing the tool trajectory.
+-    """
+     # Step 1: Haptic Sampling and Voxel Encoding
+-    # Approximate blade path as piecewise-bilinear surface (quads between segments)
+     sticks = []
+     for i in range(len(cutting_tool_path) - 1):
+-        p1 = cutting_tool_path[i]
+-        p2 = cutting_tool_path[i+1]
+-        sticks.append((p1, p2))
++        sticks.append((cutting_tool_path[i], cutting_tool_path[i+1]))
+     
+     intersected_voxels = set()
+-    # Impose coplanarity of consecutive sticks to ensure max 2 planes per voxel
+-    # Sample only one stick per voxel
+-    for stick in sticks:
+-        voxels_traversed = get_voxels_traversed_by_segment(stick[0], stick[1])
++    for p1, p2 in sticks:
++        # [G]: Standard 3D grid traversal (e.g., Amanatides & Woo) to find voxels intersected by segment
++        voxels_traversed = trace_segment_to_voxels(p1, p2, volume_data.grid_origin, volume_data.grid_spacing)
+         intersected_voxels.update(voxels_traversed)
++        
++    # Encode intersected voxels in a texture for GPU access
++    voxel_texture = encode_voxels_to_texture(intersected_voxels)
+     
+-    # Encode intersected voxels in a texture (implementation detail omitted)
+-    voxel_texture = encode_voxels(intersected_voxels)
+-    
+-    # Step 2 & 3: Rendering and Geometry Generation
+-    # Draw original isosurface, discarding fragments in intersected_voxels
++    # Step 2: Discard Intersected Fragments
++    # [G]: Standard fragment shader discards fragments whose voxel coordinate is in voxel_texture
+     draw_isosurface_discarding(volume_data, isovalue, voxel_texture)
+     
+-    # Generate new geometry for affected voxels
++    # Step 3: Generate Cut Geometry
+     new_triangles = []
+     for voxel in intersected_voxels:
+         # Split voxel into 5 tetrahedra (conformal splitting [ABE+03])
+-        tetrahedra = split_voxel_into_5_tets(voxel)
++        tetrahedra = split_voxel_into_5_tets(voxel, volume_data.grid_spacing)
+         
+         for tet in tetrahedra:
+-            # Get vertex positions and values
+-            v_pos = [tet.v0.pos, tet.v1.pos, tet.v2.pos, tet.v3.pos]
+-            v_val = [tet.v0.val, tet.v1.val, tet.v2.val, tet.v3.val]
+-            
+-            # Determine cutting planes for this voxel
+-            # Based on the specific stick(s) traversing this voxel
+-            cutting_planes = get_cutting_planes_for_voxel(voxel, sticks)
+-            
+-            # Step 4.1: Classification
+-            # Classify vertices w.r.t isovalue
+-            iso_signs = classify_by_isovalue(v_val, isovalue)
+-            
+-            # Classify vertices w.r.t cutting planes
+-            # At voxel level, approx cutting surface by at most 2 planes
++            v_pos = [tet.v0, tet.v1, tet.v2, tet.v3]
++            v_val = [tet.v0_val, tet.v1_val, tet.v2_val, tet.v3_val]
++            
++            # Determine cutting planes for this voxel from the sticks traversing it
++            cutting_planes = get_cutting_planes_from_sticks(voxel, sticks)
++            
++            # 4.1 Classification
++            iso_signs = [1 if v >= isovalue else -1 for v in v_val]
+             cut_signs = classify_by_cutting_planes(v_pos, cutting_planes)
+             
+-            # Step 4.2: Vertex Reclassification
+-            # Determine final 'inside' status
++            # 4.2 Vertex Reclassification
+             final_signs = reclassify_vertices(iso_signs, cut_signs, cutting_planes)
+             
+-            # Step 4.3: Edge Identification
+-            # Identify edges where signs differ
+-            intersected_edges = find_intersected_edges(final_signs)
+-            
+-            # Step 4.4: Vertex Generation
++            # 4.3 Edge Identification & 4.4 Vertex Generation
+             generated_vertices = []
+-            for edge in intersected_edges:
+-                p_start, p_end = edge.start, edge.end
+-                val_start, val_end = edge.start_val, edge.end_val
+-                
+-                # Check if edge is shared with non-cut voxel
+-                is_shared_with_non_cut = edge.is_shared_with_non_cut_voxel()
+-                
+-                # Calculate intersection with isosurface
++            edges = get_tetrahedron_edges()
++            for edge in edges:
++                p_start, p_end = v_pos[edge[0]], v_pos[edge[1]]
++                val_start, val_end = v_val[edge[0]], v_val[edge[1]]
++                
++                is_shared_with_non_cut = is_edge_shared_with_non_cut_voxel(edge, intersected_voxels)
++                
+                 iso_intersection = interpolate_isosurface(p_start, p_end, val_start, val_end, isovalue)
+                 
+-                # Calculate intersection with cutting plane(s)
+                 cut_intersections = []
+                 for plane in cutting_planes:
+@@ -118,24 +112,16 @@
+                 
+                 if len(cut_intersections) == 0:
+-                    # Edge cut only by isosurface (standard MT)
+                     generated_vertices.append(iso_intersection)
+                 elif len(cut_intersections) == 1:
+-                    # Edge cut only by cutting plane (or both, but iso doesn't cut? 
+-                    # Note: If iso doesn't cut, final_signs wouldn't differ unless cut plane changes inside/outside)
+-                    # If edge is cut ONLY by cutting plane, place at intersection
+                     generated_vertices.append(cut_intersections[0])
+                 else:
+-                    # Edge traversed by both isosurface and cutting plane
+                     if is_shared_with_non_cut:
+-                        # Exception: keep intersection with isosurface
+                         generated_vertices.append(iso_intersection)
+                     else:
+-                        # Place at more interior intersection point
+-                        # "Interior" means closer to the "inside" of the final volume
+-                        # Determine which side is inside based on reclassification
+-                        interior_pt = select_interior_point(iso_intersection, cut_intersections, final_signs)
++                        # Select the intersection point that lies inside the cut volume
++                        interior_pt = select_interior_point(iso_intersection, cut_intersections, cutting_planes)
+                         generated_vertices.append(interior_pt)
+             
+-            # Triangulate based on pattern
++            # Triangulate based on final_signs pattern
+             triangles = triangulate_tetrahedron(final_signs, generated_vertices)
+             new_triangles.extend(triangles)
+@@ -143,16 +129,30 @@
+     return new_triangles
+ 
+-def classify_by_isovalue(values, isovalue):
+-    return [1 if v > isovalue else -1 for v in values]
++def trace_segment_to_voxels(p1, p2, origin, spacing):
++    # [G]: Standard 3D grid traversal algorithm returning list of (x,y,z) voxel indices
++    return []
++
++def encode_voxels_to_texture(voxels):
++    # [G]: Maps voxel indices to a 3D texture or buffer for shader lookup
++    return {}
++
++def split_voxel_into_5_tets(voxel, spacing):
++    # [G]: Conformal splitting into 5 tetrahedra as per [ABE+03]
++    return []
++
++def get_cutting_planes_from_sticks(voxel, sticks):
++    # [G]: Extract planes defined by consecutive sticks intersecting this voxel
++    # Ensures at most 2 planes per voxel due to coplanarity constraint
++    return []
+ 
+ def classify_by_cutting_planes(positions, planes):
+     signs = []
+     for p in positions:
+-        # Positive half-space is 'inside' the cut volume
+-        s = 1
+-        for plane in planes:
+-            if plane.distance_to_point(p) < 0:
+-                s = -1 # Outside the positive half-space
+-        signs.append(s)
++        inside = True
++        for nx, ny, nz, d in planes:
++            if nx*p[0] + ny*p[1] + nz*p[2] + d <= 0:
++                inside = False
++                break
++        signs.append(1 if inside else -1)
+     return signs
+ 
+@@ -160,75 +160,47 @@
+     final = []
+     for i in range(4):
+-        # If cut by single plane
+         if len(planes) == 1:
+             # Inside if inside isosurface AND in positive half-space of cutting plane
+-            if iso_signs[i] == 1 and cut_signs[i] == 1:
+-                final.append(1)
+-            else:
+-                final.append(-1)
++            final.append(1 if (iso_signs[i] == 1 and cut_signs[i] == 1) else -1)
+         else:
+-            # If cut by two planes, classification depends on concavity/convexity
+-            # This is a heuristic based on the cut direction
+-            # [G]: Specific formula for concavity/convexity check is not detailed in source.
+-            # Assume standard logic: if both planes push vertex out, it's out.
+-            # If source implies complex logic, we note it.
+-            # For implementation, we assume cut_signs already reflects the combined effect
+-            # or we need a specific function.
+-            # Let's assume cut_signs is the result of the combined plane test.
+-            # The source says: "classification is done according to the concavity/convexity... 
+-            # This allows us to calculate the new vertex position... if edge cut only by cutting plane..."
+-            # We will use cut_signs directly as the "cut" component.
+-            # The reclassification logic for 2 planes is not explicitly formulaic in the text.
+-            # We assume the 'cut_signs' provided by classify_by_cutting_planes is sufficient 
+-            # if we define 'inside' as being on the 'positive' side of the cut volume.
+-            # However, the text says "reclassify... setting values inside to those which are inside the final isosurface".
+-            # And "if tetrahedron is cut by a single plane, points are classified as inside if they lie inside the isosurface and in the positive half space".
+-            # For two planes, it's more complex.
+-            # [G]: Without explicit formula, we assume the 'cut_signs' output from a robust 
+-            # half-space intersection test for the cut volume is used.
+-            # If iso_signs[i] == 1 (inside isosurface) AND cut_signs[i] == 1 (inside cut volume), then inside.
+-            # This is a simplification of the "concavity/convexity" note, but aligns with the single plane logic.
+-            if iso_signs[i] == 1 and cut_signs[i] == 1:
+-                final.append(1)
+-            else:
+-                final.append(-1)
++            # [G]: Two-plane classification depends on concavity/convexity of planes w.r.t cut direction.
++            # Implemented as combined half-space test for simplicity, matching single-plane logic.
++            final.append(1 if (iso_signs[i] == 1 and cut_signs[i] == 1) else -1)
+     return final
+ 
+-def select_interior_point(iso_pt, cut_pts, final_signs):
+-    # "More interior" means closer to the inside.
+-    # The inside is defined by the final_signs.
+-    # We need to know which direction is "inside".
+-    # [G]: This requires knowing the gradient or the specific cut volume geometry.
+-    # Assuming iso_pt and cut_pts are on the edge.
+-    # The "more interior" point is the one that is on the same side of the cut as the "inside" vertices.
+-    # Since we are on the edge, and the edge is cut by both, one intersection is "inside" the cut volume, 
+-    # one is "outside" (or vice versa depending on definition).
+-    # Actually, the isosurface cuts the edge. The cutting plane cuts the edge.
+-    # The "inside" of the final model is the part of the isosurface that is also "inside" the cut volume.
+-    # So we pick the intersection that is inside the cut volume.
+-    # If iso_pt is inside the cut volume, pick iso_pt.
+-    # If cut_pts[0] is inside the cut volume, pick cut_pts[0].
+-    # If both are inside? (Unlikely for a convex cut on a line segment unless the segment is fully inside).
+-    # If neither? (Unlikely if the edge is intersected by both).
+-    
+-    # Check if iso_pt is inside the cut volume
+-    is_iso_inside = is_point_inside_cut_volume(iso_pt, planes)
+-    
+-    # Check if cut_pts are inside
+-    is_cut_inside = [is_point_inside_cut_volume(pt, planes) for pt in cut_pts]
+-    
+-    if is_iso_inside:
+-        return iso_pt
+-    elif any(is_cut_inside):
+-        return cut_pts[is_cut_inside.index(True)]
+-    else:
+-        # Fallback, should not happen if logic is correct
+-        return iso_pt
++def get_tetrahedron_edges():
++    return [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
++
++def is_edge_shared_with_non_cut_voxel(edge, intersected_voxels):
++    # [G]: Checks if the edge belongs to a voxel not in intersected_voxels
++    return False
++
++def interpolate_isosurface(p1, p2, v1, v2, isovalue):
++    t = (isovalue - v1) / (v2 - v1)
++    return (p1[0] + t*(p2[0]-p1[0]), p1[1] + t*(p2[1]-p1[1]), p1[2] + t*(p2[2]-p1[2]))
++
++def intersect_plane_with_segment(plane, p1, p2):
++    nx, ny, nz, d = plane
++    denom = nx*(p2[0]-p1[0]) + ny*(p2[1]-p1[1]) + nz*(p2[2]-p1[2])
++    if abs(denom) < 1e-9: return None
++    t = -(nx*p1[0] + ny*p1[1] + nz*p1[2] + d) / denom
++    if 0 <= t <= 1:
++        return (p1[0] + t*(p2[0]-p1[0]), p1[1] + t*(p2[1]-p1[1]), p1[2] + t*(p2[2]-p1[2]))
++    return None
++
++def select_interior_point(iso_pt, cut_pts, planes):
++    # Returns the point that lies inside the cut volume (positive half-space of all planes)
++    def is_inside(pt):
++        return all(nx*pt[0] + ny*pt[1] + nz*pt[2] + d > 0 for nx, ny, nz, d in planes)
++    if is_inside(iso_pt): return iso_pt
++    for pt in cut_pts:
++        if is_inside(pt): return pt
++    return iso_pt # Fallback
++
++def triangulate_tetrahedron(signs, vertices):
++    # [G]: Standard Marching Tetrahedra pattern lookup based on signs tuple
++    # Returns list of triangles (each triangle is a list of 3 vertex indices)
++    return []
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Crack Generation:** Cracks between the newly created surface and the original isosurface are avoided because the classification of vertices shared between cut voxels and non-cut voxels is never changed [S1, unofficial].
+-*   **Precision:** The algorithm relies on accurate intersection calculations. Precision issues may arise if the cutting plane is nearly parallel to an edge or if the isovalue is very close to a vertex value [G].
+-*   **Boundary Conditions:** The haptic sampling condition (one stick per voxel, coplanarity) is critical. If violated, a voxel may be cut by more than two planes, breaking the algorithm's assumptions [S1, unofficial].
+ 
+ ## Operating characteristics

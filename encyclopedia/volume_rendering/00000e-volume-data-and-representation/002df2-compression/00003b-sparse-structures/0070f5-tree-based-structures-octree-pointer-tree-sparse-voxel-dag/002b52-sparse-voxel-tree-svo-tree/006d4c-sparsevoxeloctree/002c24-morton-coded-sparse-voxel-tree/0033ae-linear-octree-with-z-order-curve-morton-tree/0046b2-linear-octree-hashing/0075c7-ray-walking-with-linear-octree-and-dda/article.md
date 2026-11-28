@@ -1,0 +1,154 @@
+# Ray-walking with Linear-Octree and DDA
+
+Also called: AMR ray-walking, Morton Code DDA
+
+## Overview
+This method performs ray traversal on an Adaptive Mesh Refinement (AMR) grid stored in a linear-octree structure, combining DDA (Digital Differential Analyzer) stepping with Morton code indexing to locate leaf cells [S1, unofficial]. It solves the problem of efficiently sampling sparse, multi-resolution volumetric data by restricting traversal only to cells actually intersected by the ray, avoiding the overhead of pointer-based tree traversal or uniform grid sampling [S1, unofficial]. It differs from sibling methods like [Linear Level Octree (LLO)](16467-linear-level-octree-llo.md) by relying on a flat array of leaf nodes sorted by Morton code rather than explicit level-based indexing structures.
+
+## How it works
+**Inputs:**
+- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized).
+- Contribution chunk bounding box $[x_{min}, x_{max}] \times [y_{min}, y_{max}] \times [z_{min}, z_{max}]$.
+- Linear-octree leaf array: a contiguous list of leaf cells, each containing:
+  - `morton_code`: 64-bit integer (or sufficient width for domain resolution).
+  - `level`: integer refinement level (0 = coarsest).
+  - `value`: scalar or vector data associated with the cell.
+- Maximum octree depth $L_{max}$ and minimum cell size (implicit in $L_{max}$ and domain bounds).
+
+**Outputs:**
+- Sequence of intersected leaf cells with their respective path lengths within the ray.
+
+**Data Structures:**
+The linear-octree stores only leaf cells in three parallel arrays (or a struct of arrays) sorted by `morton_code`. The Morton code maps the 3D logical position of a leaf cell to a 1D key, preserving spatial locality [S1, unofficial]. The refinement level determines the cell's physical size.
+
+**Formulas:**
+1. **Morton Code Interleaving:** For a cell at logical coordinates $(x, y, z)$ and level $l$, the Morton code $M$ is computed by interleaving the bits of the relative coordinates within the cell's parent block. If the domain is divided into $2^L$ cells per axis, the absolute Morton code for a leaf at level $l$ with relative offset $(x_r, y_r, z_r)$ in its parent is:
+   $$ M = \text{interleave}(x_r, y_r, z_r) $$
+   where $x_r, y_r, z_r \in [0, 2^l - 1]$. The global Morton code includes the higher-order bits from ancestor levels [S1, unofficial].
+
+2. **Cell Size:** The physical size of a cell at level $l$ is:
+   $$ s_l = \frac{S_{domain}}{2^{L_{max}}} \cdot 2^{L_{max} - l} $$
+   where $S_{domain}$ is the side length of the cubic domain [S1, unofficial].
+
+3. **Ray-Cell Intersection:** The DDA method advances the ray to the next grid boundary. For a cell at level $l$, the step size is determined by the cell dimensions. The ray is advanced to the next cell boundary along the dominant axis [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Chunk Intersection Test:** Check if the ray intersects the contribution chunk bounding box. If not, terminate [S1, unofficial].
+2. **Initialize DDA:** Compute the initial entry point into the chunk. Determine the initial cell level and position.
+3. **Ray Walking Loop:**
+   a. **Current Position Encoding:** Encode the current ray position $\mathbf{p}$ into a Morton code $M_{curr}$. This requires determining the logical coordinates $(x, y, z)$ of $\mathbf{p}$ relative to the domain origin, scaled by the maximum resolution, and interleaving the bits [S1, unofficial].
+   b. **Leaf Lookup:** Perform a binary search on the sorted leaf array for $M_{curr}$. If found, retrieve the leaf's `level` and `value`. If not found, the ray is in an empty region (or a region not refined to a leaf); skip to the next leaf boundary or handle as empty [S1, unofficial].
+   c. **Cell Extent Reconstruction:** Using the retrieved `level` $l$, compute the cell's physical size $s_l$ and its spatial extent $[x_c, x_c+s_l] \times [y_c, y_c+s_l] \times [z_c, z_c+s_l]$. The base coordinates $(x_c, y_c, z_c)$ are derived from the Morton code and level [S1, unofficial].
+   d. **Path Length Calculation:** Compute the intersection segment of the ray within this cell. The entry point is $\mathbf{p}$, and the exit point is the first boundary of the cell intersected by the ray. Calculate the path length $\Delta t$ [S1, unofficial].
+   e. **Sample Data:** Accumulate the contribution using the cell's `value` and $\Delta t$.
+   f. **Advance Ray:** Update $\mathbf{p}$ to the exit point. If $\mathbf{p}$ is outside the chunk, terminate. Otherwise, repeat from step 3a [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_walk_linear_octree(ray_origin, ray_dir, chunk_bounds, leaf_mortons, leaf_levels, leaf_values):
+    # 1. Check intersection with chunk
+    t_min, t_max = intersect_bounding_box(ray_origin, ray_dir, chunk_bounds)
+    if t_min > t_max:
+        return []
+
+    # 2. Initialize DDA state
+    # Assume domain is cubic with side S_domain and max level L_max
+    # Cell size at level l: s_l = S_domain / 2^(L_max - l)
+    # We need to map ray position to Morton code
+    
+    current_t = t_min
+    current_pos = ray_origin + ray_dir * current_t
+    
+    results = []
+    
+    while current_t <= t_max:
+        # 3a. Encode current position to Morton code
+        # Logical coordinates in domain [0, 1] scaled to max resolution
+        # Let N = 2^L_max
+        nx = int(current_pos.x * N)
+        ny = int(current_pos.y * N)
+        nz = int(current_pos.z * N)
+        
+        # Clamp to domain bounds
+        nx = max(0, min(nx, N - 1))
+        ny = max(0, min(ny, N - 1))
+        nz = max(0, min(nz, N - 1))
+        
+        morton = interleave_bits(nx, ny, nz)
+        
+        # 3b. Binary search for leaf
+        idx = binary_search(leaf_mortons, morton)
+        
+        if idx < len(leaf_mortons) and leaf_mortons[idx] == morton:
+            level = leaf_levels[idx]
+            value = leaf_values[idx]
+            
+            # 3c. Reconstruct cell extent
+            # Cell size at this level
+            cell_size = S_domain / (2 ** (L_max - level))
+            
+            # Base coordinates from Morton code and level
+            # Extract higher bits to get parent block, then add relative offset
+            # This is complex; simplified: use the Morton code to find the cell's
+            # logical position at this level.
+            # Let (lx, ly, lz) be the logical coordinates at level L_max
+            # The cell at level l covers [lx // 2^(L_max-l), ...]
+            
+            # For simplicity, assume we can derive cell bounds from morton and level
+            # In practice, this requires decoding the Morton code
+            cell_bounds = get_cell_bounds(morton, level, S_domain, L_max)
+            
+            # 3d. Calculate path length within this cell
+            t_entry = current_t
+            t_exit = intersect_ray_cell(ray_origin, ray_dir, cell_bounds)
+            
+            if t_exit is not None:
+                path_length = (t_exit - t_entry) * length(ray_dir)
+                results.append((value, path_length))
+                current_t = t_exit
+                current_pos = ray_origin + ray_dir * current_t
+            else:
+                # Ray does not intersect this cell? Should not happen if DDA is correct
+                break
+        else:
+            # Leaf not found: empty region or not refined
+            # Advance to next potential leaf boundary
+            # This is a pitfall: how to skip efficiently?
+            # DDA naturally advances to next grid boundary.
+            # We need to find the next cell boundary in the AMR grid.
+            # Simplified: advance by minimum cell size or use DDA step
+            current_t += min_cell_size / length(ray_dir)
+            current_pos = ray_origin + ray_dir * current_t
+            
+    return results
+
+def interleave_bits(x, y, z):
+    # Standard bit interleaving for Morton code
+    # Implementation details omitted for brevity, but must be exact
+    pass
+
+def get_cell_bounds(morton, level, S_domain, L_max):
+    # Decode Morton code to get logical position at level L_max
+    # Then scale down to level
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Morton code generation and decoding must handle floating-point to integer conversion carefully to avoid off-by-one errors at cell boundaries [S1, unofficial].
+- **Empty Regions:** If the ray passes through a region with no leaf nodes, the binary search fails. The algorithm must efficiently skip these regions, potentially by advancing the ray to the next known leaf boundary [S1, unofficial].
+- **Boundary Conditions:** Rays exactly on cell boundaries may be assigned to multiple cells or none. A consistent tie-breaking rule is required [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(k \log n)$ per ray, where $k$ is the number of intersected cells and $n$ is the number of leaf nodes. Binary search dominates the lookup [S1, unofficial].
+- **Memory Complexity:** $O(n)$, storing only leaf nodes. Significantly less than pointer-based octrees or uniform grids [S1, unofficial].
+- **Performance:** Efficient for sparse data with large low-density regions. Automatically takes large steps in coarse regions and small steps in refined regions, improving efficiency [S1, unofficial].
+- **Strengths:** Low memory overhead, cache-friendly due to linear storage, adaptive step size.
+- **Limitations:** Binary search overhead for each step; Morton code computation can be costly if not optimized.
+
+## Background
+The method is used in the RAYTHEIA library for high-performance ray-tracing in astronomical simulations [S1, unofficial]. It builds on linear-octree structures introduced by Gargantini (1982) and Frisken & Perry (2002), and Morton code indexing by Karras (2012) [S1, unofficial]. The DDA method is attributed to Amanatides et al. (1987) [S1, unofficial].
+
+## Sources
+[S1] RAYTHEIA: A high-performance ray-tracing algorithm for three-dimensional direction-dependent equations in astronomical simulations, https://arxiv.org/pdf/2605.09882, fetched 2026-10-24 (unofficial)

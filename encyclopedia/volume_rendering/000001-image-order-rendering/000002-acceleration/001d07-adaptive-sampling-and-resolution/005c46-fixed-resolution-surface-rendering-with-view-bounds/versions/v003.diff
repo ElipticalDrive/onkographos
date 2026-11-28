@@ -1,0 +1,102 @@
+--- v002.md
++++ v003.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs:** A medical volume dataset (voxel grid with physical spacing) [S1, unofficial].
+-**Outputs:** Six surface render views (Front, Back, Left, Right, Top, Bottom) and associated projection data [S1, unofficial].
++**Outputs:** Six surface render views and associated projection data [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -40,5 +40,5 @@
+ 3. **Generate Views:**
+    Define six viewing directions. Five are standard orthogonal views. The sixth is the "From Behind" view [S1, unofficial].
+-   * **From Behind Configuration:** Rotate the view by 180 degrees around the vertical axis [S1, unofficial]. The patient's left remains on the viewer's left [S1, unofficial]. Rays travel along the voxels in the same direction as the frontal view (head-to-foot or foot-to-head depending on convention, but consistent with frontal) [S1, unofficial].
++   * **From Behind Configuration:** Rotate the view by 180 degrees around the vertical axis [S1, unofficial]. The patient's left remains on the viewer's left [S1, unofficial]. Rays travel along the voxels in the same direction as the frontal view, reusing frontal ray geometry [S1, unofficial].
+ 
+ 4. **Render Crossings (Batch Processing):**
+@@ -68,13 +68,12 @@
+     step_size = min(min_spacing, min_voxel)
+ 
+-    # 3. Generate Views
++    # 3. Generate Views (6 total)
+     views = [
+-        {"name": "Front", "dir": (0, 0, 1), "rot": 0},
+-        {"name": "Back", "dir": (0, 0, -1), "rot": 0},
+-        {"name": "Left", "dir": (1, 0, 0), "rot": 0},
+-        {"name": "Right", "dir": (-1, 0, 0), "rot": 0},
+-        {"name": "Top", "dir": (0, 1, 0), "rot": 0},
+-        {"name": "Bottom", "dir": (0, -1, 0), "rot": 0},
+-        {"name": "FromBehind", "dir": (0, 0, 1), "rot": 180}
++        {"name": "Front", "dir": (0, 0, 1)},
++        {"name": "Left", "dir": (1, 0, 0)},
++        {"name": "Right", "dir": (-1, 0, 0)},
++        {"name": "Top", "dir": (0, 1, 0)},
++        {"name": "Bottom", "dir": (0, -1, 0)},
++        {"name": "FromBehind", "dir": (0, 0, 1), "tile": True}
+     ]
+ 
+@@ -91,25 +90,23 @@
+ 
+             # Step rays for the current slice batch alone
+-            for ray in view.rays:
++            for ray_idx in range(volume.width):
++                ray_origin = volume.get_ray_origin(ray_idx, view["name"])
++                ray_dir = view["dir"]
+                 for slice_data in batch:
+-                    # Calculate surface intersection for this ray and slice
+-                    intersection = compute_intersection(ray, slice_data, step_size)
+-                    if intersection is not None:
++                    # Calculate surface intersection for this ray and slice [G]
++                    t = (slice_data.z - ray_origin.z) / ray_dir.z
++                    if 0.0 <= t <= step_size:
++                        intersection = int(t / step_size)
+                         # Build crossings as 16-bit integers from the start to save memory
+                         crossings.append(intersection & 0xFFFF)
+ 
+         # For the "From Behind" view, add a tile to each row but do not create new rows
+-        if view["rot"] == 180:
++        if view.get("tile"):
+             for i in range(len(crossings)):
+-                crossings[i] = (crossings[i] << 16) | 0x8000
++                crossings[i] |= 0x8000  # Mark tile bit
+ 
+         results[view["name"]] = crossings
+ 
+     return results
+-
+-def compute_intersection(ray, slice_data, step_size):
+-    # Standard ray-slice intersection calculation
+-    # Returns integer index or None
+-    return None  # Not given in the sources.
+ ```
+ 
+@@ -117,20 +114,20 @@
+ 
+ ### Standard Orthogonal Surface Rendering
+-The five standard views (Front, Back, Left, Right, Top). Used for general anatomical overview. Choose when standard DICOM viewer compatibility is required. [G]
++Renders anatomical structures from five standard orthogonal directions. Sets itself apart by providing conventional diagnostic angles for general overview [G]. Choose when standard DICOM viewer compatibility or routine anatomical review is required [G]. Link: [Standard Orthogonal Surface Rendering](1412-adaptive-sampling-and-resolution.md).
+ 
+ ### From-Behind Surface Rendering
+-The sixth view, rotated 180 degrees. Sets itself apart by showing posterior surfaces face-on, resolving edge-case visibility issues. Choose when reviewing posterior features or ensuring consistent facial preview in whole-body scans. [S1, unofficial]
++Renders anatomical structures from a posterior direction rotated 180 degrees around the vertical axis. Sets itself apart by showing posterior surfaces face-on, resolving edge-case visibility issues where marks near slice edges were previously only visible edge-on. Choose when reviewing posterior features or ensuring consistent facial preview in whole-body scans. Link: [From-Behind Surface Rendering](1412-adaptive-sampling-and-resolution.md).
+ 
+ ## Operating characteristics
+-* **Time Complexity:** Linear with respect to the number of voxels in the volume, $O(N)$, where $N$ is the total voxel count within the bounds. The fixed resolution means the number of samples per ray is constant relative to the volume's physical depth, not its voxel count. [G]
+-* **Memory Complexity:** Dominated by the volume data itself. The largest rendered volume (1,000x1,000x2,000 mm) peaks at approximately 1.4 GB memory usage [S1, unofficial]. Using 16-bit integers for crossings reduces intermediate memory overhead compared to 64-bit floats. [S1, unofficial]
++* **Time Complexity:** Not given in the sources.
++* **Memory Complexity:** Dominated by the volume data itself [G]. The largest rendered volume (1,000x1,000x2,000 mm) peaks at approximately 1.4 GB memory usage [S1, unofficial]. Using 16-bit integers for crossings reduces intermediate memory overhead compared to 64-bit floats [S1, unofficial].
+ * **Measured Performance:** In a whole-body MR Otsu threshold calculation, memory usage dropped from 911 MB (with float64 copy) to 355 MB (direct comparison/chunked) [S1, unofficial].
+-* **Strengths:** Consistent visual detail for medical review regardless of volume length; prevents coarse sampling artifacts in long volumes; memory efficient through batching and 16-bit integer storage. [S1, unofficial]
+-* **Limitations:** Volumes exceeding 2,000 mm in length or 1,000 mm in width are not rendered at all; fixed resolution may be overkill for small volumes or under-resolving for very high-resolution small volumes (though native spacing is used if finer). [S1, unofficial]
+-* **When to use:** Medical QC packs, contour sheets, and previews where consistent facial/anatomical detail is critical across varying scan lengths. [S1, unofficial]
+-* **When not to use:** Volumes exceeding the physical bounds; real-time interactive rendering where memory is extremely constrained and the volume is very large. [G]
++* **Strengths:** Consistent visual detail for medical review regardless of volume length; prevents coarse sampling artifacts in long volumes; memory efficient through batching and 16-bit integer storage [S1, unofficial].
++* **Limitations:** Volumes exceeding 2,000 mm in length or 1,000 mm in width are not rendered at all; fixed resolution may be overkill for small volumes or under-resolving for very high-resolution small volumes (though native spacing is used if finer) [S1, unofficial].
++* **When to use:** Medical QC packs, contour sheets, and previews where consistent facial/anatomical detail is critical across varying scan lengths [S1, unofficial].
++* **When not to use:** Volumes exceeding the physical bounds; real-time interactive rendering where memory is extremely constrained and the volume is very large [G].
+ 
+ ## Background
+-This method was introduced in the `pymedphys` project to address gaps in the QC pack's surface rendering capabilities. Prior to this change, volumes longer than 510 mm were coarsened to maintain a 256-voxel limit per side, leading to resolutions as coarse as ~7 mm for whole-body CTs. The change, documented in pull request #2434, added a "from behind" view and removed the voxel-side limit, enforcing a 2 mm sampling resolution for volumes within strict bounds [S1, unofficial]. It is used in medical physics QC tools for verifying contour accuracy and dose distributions. [S1, unofficial]
++This method was introduced in the `pymedphys` project to address gaps in the QC pack's surface rendering capabilities [S1, unofficial]. Prior to this change, volumes longer than 510 mm were coarsened to maintain a 256-voxel limit per side, leading to resolutions as coarse as ~7 mm for whole-body CTs [S1, unofficial]. The change, documented in pull request #2434, added a "from behind" view and removed the voxel-side limit, enforcing a 2 mm sampling resolution for volumes within strict bounds [S1, unofficial]. It is used in medical physics QC tools for verifying contour accuracy and dose distributions [S1, unofficial].
+ 
+ ## Sources

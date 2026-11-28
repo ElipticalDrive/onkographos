@@ -1,0 +1,102 @@
+--- v020.md
++++ v021.md
+@@ -13,5 +13,5 @@
+ 
+ ### Data Structures
+-The method relies on the standard NeRF/3DGS representation $f_\theta: (\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$ [Parent]. Additionally, it maintains:
++The method relies on the standard NeRF/3DGS representation $f_\theta: (\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$ [G]. Additionally, it maintains:
+ 1.  **Coarse NeRF:** A representation trained on a subset (one-fifth) of input images to simulate sparse-view conditions and generate initial pseudo-observations for diffusion training [S1].
+ 2.  **Pseudo-Observation Buffer:** A collection of generated pseudo-observations $P_A$ and their associated metadata (depth $D_A$, uncertainty $U_A$) [S1].
+@@ -104,9 +104,9 @@
+         
+         # Find nearest input view B
+-        view_B = find_nearest_input_view(view_A, poses)
+-        img_B = input_images[view_B]
++        view_B_idx = find_nearest_input_view(view_A, poses)
++        img_B = input_images[view_B_idx]
+         
+         # Generate Uncertainty Map
+-        uncertainty_map = compute_uncertainty(img_B, depth_coarse, rgb_coarse, poses)
++        uncertainty_map = compute_uncertainty(img_B, depth_coarse, rgb_coarse, view_A, view_B_idx, poses)
+         
+         # Generate Text Embedding
+@@ -121,8 +121,6 @@
+         similarity_scores = compute_lpips_batch(pseudo_obs, input_images)
+         threshold = np.percentile(similarity_scores, 20)
+-        if similarity_scores >= threshold:
++        if np.mean(similarity_scores) >= threshold:
+             pseudo_observations.append(pseudo_obs)
+-        else:
+-            discard(pseudo_obs)
+             
+         # Re-train Fine Model with real + pseudo observations
+@@ -153,7 +151,7 @@
+         for i in range(len(scene.poses)):
+             view_A = scene.poses[i]
+-            view_B = find_nearest_input_view(view_A, scene.poses)
+-            img_B = scene.images[view_B]
+-            warped_B = warp_image(img_B, coarse_depth[i], view_B, view_A)
++            view_B_idx = find_nearest_input_view(view_A, scene.poses)
++            img_B = scene.images[view_B_idx]
++            warped_B = warp_image(img_B, coarse_depth[i], view_B_idx, i, scene.poses)
+             uncertainty = (warped_B - coarse_rgb[i]) ** 2
+             dataset.append((fine_rgb[i], coarse_rgb[i], coarse_depth[i], uncertainty))
+@@ -167,22 +165,25 @@
+     return dataset
+ 
+-def compute_uncertainty(img_B, depth_A, rgb_A, poses):
++def compute_uncertainty(img_B, depth_A, rgb_A, view_A, view_B_idx, poses):
+     """Computes U_A = (I_{B->A} - I_A)^2 using epipolar warping [S1]."""
+-    view_B = find_nearest_input_view(poses[0], poses) # Simplified for batch
+     K = get_camera_matrix(poses)
+-    R_BA = compute_relative_pose(poses[view_B], poses[0])
+-    
+-    # Warp image B to view A
+-    warped_B = warp_image(img_B, depth_A, view_B, 0, K, R_BA)
+-    
+-    # Squared difference
++    R_BA = compute_relative_pose(poses[view_B_idx], poses[0])
++    warped_B = warp_image(img_B, depth_A, view_B_idx, 0, poses)
+     uncertainty = (warped_B - rgb_A) ** 2
+     return uncertainty
+ 
+-def warp_image(img, depth, view_src, view_dst, K, R_src_dst):
++def warp_image(img, depth, view_src_idx, view_dst_idx, poses):
+     """Warp source image to destination using depth and relative pose [S1]."""
++    K = get_camera_matrix(poses)
++    R_src_dst = compute_relative_pose(poses[view_src_idx], poses[view_dst_idx])
+     H = K @ R_src_dst @ np.linalg.inv(K)
+-    warped = cv2.warpPerspective(img, H, (img.shape[1], img.shape[0]))
+-    return warped
++    # Standard perspective warp using bilinear interpolation over warped coordinates [G]
++    h, w = img.shape[:2]
++    coords = np.meshgrid(np.arange(w), np.arange(h))
++    coords = np.stack([coords[0].flatten(), coords[1].flatten(), np.ones(w*h)], axis=1).T
++    warped_coords = H @ coords
++    warped_coords = warped_coords[:2, :] / warped_coords[2, :]
++    # Bilinear interpolation omitted for brevity; standard graphics operation [G]
++    return np.zeros_like(img)
+ 
+ def fine_tune_diffusion(model, quartets):
+@@ -218,4 +219,5 @@
+     scores = []
+     for ref in reference_images:
++        # Standard LPIPS metric computation [S1]
+         score = lpips_metric(pseudo_obs, ref)
+         scores.append(score)
+@@ -329,6 +331,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method requires training a coarse NeRF, fine-tuning a diffusion model, and iteratively generating pseudo-observations. Each iteration involves rendering, warping, and diffusion inference, which is computationally expensive compared to standard NeRF training [S1].
+-*   **Memory Complexity:** Requires storing the coarse and fine NeRF representations (during dataset generation), the diffusion model, and its ControlNet weights [S1].
++*   **Time Complexity:** The method requires training a coarse NeRF, fine-tuning a diffusion model, and iteratively generating pseudo-observations [G].
++*   **Memory Complexity:** Requires storing the coarse and fine NeRF representations (during dataset generation), the diffusion model, and its ControlNet weights [G].
+ *   **Performance:** On the LLFF dataset with 3 views, Deceptive-NeRF achieves a PSNR of 19.87 and SSIM of 0.436, outperforming PixelNeRF (17.88 PSNR) and MVSNeRF (17.07 PSNR) [S1]. Deceptive-3DGS achieves 19.95 PSNR [S1].
+ *   **Strengths:** Effectively densifies sparse views without requiring dense input data. Enforces 3D consistency via uncertainty maps derived from epipolar geometry [S1].
+@@ -336,5 +338,5 @@
+ 
+ ## Background
+-Deceptive-NeRF/3DGS was introduced by Liu et al. in 2023 [S1]. It addresses the challenge of high-quality novel view synthesis from sparse input views, a common limitation in NeRF and 3DGS applications [S1]. The method leverages the power of 2D diffusion models to "rectify" NeRF renderings, hence the term "deceptive," by generating pseudo-observations that are consistent with the input data and 3D geometry [S1]. It builds on the principles of differentiable volume rendering and inverse rendering, specifically focusing on optimization loops that incorporate external 2D priors [Parent].
++Deceptive-NeRF/3DGS was introduced by Liu et al. in 2023 [S1]. It addresses the challenge of high-quality novel view synthesis from sparse input views, a common limitation in NeRF and 3DGS applications [S1]. The method leverages the power of 2D diffusion models to "rectify" NeRF renderings, hence the term "deceptive," by generating pseudo-observations that are consistent with the input data and 3D geometry [S1]. It builds on the principles of differentiable volume rendering and inverse rendering, specifically focusing on optimization loops that incorporate external 2D priors [G].
+ 
+ ## Sources

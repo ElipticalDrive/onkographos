@@ -1,0 +1,183 @@
+--- v003.md
++++ v004.md
+@@ -4,106 +4,108 @@
+ 
+ ## Overview
+-This method reduces register pressure and increases GPU shader occupancy in Digital Differential Analyzer (DDA) ray traversal by minimizing state carried across nested loops and deduplicating calculations [S1, unofficial]. It addresses the performance degradation caused by low occupancy (e.g., 35.43%) and high register allocation (e.g., 92 registers) in unoptimized 2-level DDA shaders, which leads to memory stalls despite high ALU usage [S1, unofficial]. It sets itself apart from general execution configuration tuning by focusing specifically on the internal register layout and variable lifecycle within the shader code itself [S1, unofficial].
++This method optimizes the Digital Differential Analyzer (DDA) ray traversal shader to increase GPU occupancy by reducing register allocation and minimizing state carried across loops [S1, unofficial]. It addresses the performance degradation caused by high register pressure in complex traversal logic, which limits the number of concurrent warps and leads to memory stalls [S1, unofficial]. It sets itself apart from general execution configuration tuning by focusing on the internal variable management and instruction deduplication within the shader code itself, rather than block/grid sizing [S2, unofficial].
+ 
+ ## How it works
++The method modifies the 2-level DDA shader implementation to reduce the number of live variables and eliminate redundant calculations.
++
+ **Inputs and Outputs:**
+-*   **Input:** An unoptimized 2-level DDA shader implementation containing nested loops for voxel traversal, typically using separate `min_cell` and `max_cell` variables and redundant `tdelta` calculations.
+-*   **Output:** An optimized shader with reduced register allocation and higher occupancy.
++- Input: Unoptimized DDA shader source code (typically containing nested loops for brick and voxel traversal).
++- Output: Optimized shader source code with reduced register footprint.
+ 
+ **Data Structures:**
+-*   `local_cell`: A single `int3` variable replacing separate `min_cell` and `max_cell` structures.
+-*   `VX_BRICK_EXT`: A constant defining the brick extent (dimensions of the voxel brick).
+-*   `voxel_mask`: An array or buffer containing voxel occupancy data.
+-*   `voxels`: A texture or buffer for loading voxel values.
++- `local_cell`: A single `int3` variable replacing separate `min_cell` and `max_cell` variables.
++- `VX_BRICK_EXT`: A constant defining the brick dimensions (e.g., 8 or 16).
++- `voxel_mask`: An array or buffer storing voxel occupancy bits.
+ 
+-**Numbered Steps:**
+-1.  **Variable Consolidation:** Replace the dual-variable approach (`min_cell`, `max_cell`) with a single `local_cell` variable (`int3`) used in both nested loops. This reduces the number of registers required to track traversal state [S1, unofficial].
+-2.  **Bounds Checking:** Implement bounds checking using a unified condition that casts `local_cell` to unsigned integers to prevent signed integer overflow issues during comparison. The condition checks if any component of `local_cell` exceeds the brick extent [S1, unofficial]:
+-    $$ \text{if } (\text{any}((\text{uint3})\text{local\_cell} \ge (\text{uint})\text{VX\_BRICK\_EXT})) $$
+-3.  **Index Calculation:** Calculate the linear index for the voxel mask using the consolidated `local_cell` coordinates:
+-    $$ \text{voxel\_idx} = \text{local\_cell}.x + \text{local\_cell}.y \times \text{VX\_BRICK\_EXT} + \text{local\_cell}.z \times \text{VX\_BRICK\_EXT} \times \text{VX\_BRICK\_EXT} $$
+-4.  **Bitwise Masking:** Determine the word and bit position within the voxel mask to check for voxel existence:
+-    $$ \text{word} = \text{voxel\_mask}[\text{voxel\_idx} \gg 5u] $$
+-    $$ \text{bit} = 1u \ll (\text{voxel\_idx} \& 31u) $$
+-5.  **Conditional Load:** If the bit is set, load the voxel value. Otherwise, the traversal continues or terminates based on the specific DDA logic [S1, unofficial]:
+-    ```python
+-    if ((word & bit) != 0u):
+-        return voxels.Load(int4(brick_min + local_cell, 0)).r
+-    ```
+-6.  **Deduplication:** Remove redundant calculations of `tdelta` (time delta for ray traversal) and other unnecessary work identified in intermediate commits to further reduce register pressure [S1, unofficial].
++**Steps:**
++1.  **Variable Consolidation:** Replace the pair of variables `min_cell` and `max_cell` with a single `local_cell` variable. This variable tracks the current position within the brick.
++2.  **Bounds Checking:** Implement bounds checking using the single `local_cell` variable. The check verifies if any component of `local_cell` exceeds the brick extent.
++    -   Formula: `if (any((uint3)local_cell >= (uint)VX_BRICK_EXT))`
++    -   This replaces the previous logic: `if (any(cell < min_cell) || any(cell > max_cell))` [S1, unofficial].
++3.  **Deduplication:** Identify and remove duplicate calculations of `tdelta` (time delta for ray traversal) and other unnecessary intermediate states carried across loop iterations [S1, unofficial].
++4.  **State Minimization:** Ensure that fewer variables are carried over the loops. This reduces the register pressure on the GPU execution units [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def optimized_dda_traversal(ray_origin, ray_direction, brick_min, brick_max, voxel_mask, voxels, VX_BRICK_EXT):
+-    # Initialize traversal state
+-    # Note: Specific initialization of t, cell, and tdelta depends on the parent DDA method [G]
++# Optimized 2-level DDA bounds check
++# local_cell is an int3 representing the current voxel index within the brick
++# VX_BRICK_EXT is the constant dimension of the brick (e.g., 8)
++
++def check_brick_bounds(local_cell: int3, VX_BRICK_EXT: int) -> bool:
++    """
++    Returns True if local_cell is out of bounds.
++    Uses uint casting to handle signed/unsigned comparison correctly.
++    """
++    # Cast to uint to ensure unsigned comparison for >= check
++    local_cell_uint = uint3(local_cell.x, local_cell.y, local_cell.z)
++    brick_ext_uint = uint(VX_BRICK_EXT)
+     
+-    # Use a single local_cell variable instead of min_cell and max_cell
+-    local_cell = int3(0, 0, 0) 
++    # Check if any component is >= brick extent
++    if any(local_cell_uint >= brick_ext_uint):
++        return True
++    return False
++
++# Example usage in traversal loop
++def traverse_brick(local_cell: int3, voxel_mask, brick_min: int3, voxels):
++    if check_brick_bounds(local_cell, 8): # Assuming 8x8x8 brick
++        return 0.0 # Out of bounds, return sentinel or terminate
+     
+-    # Nested loops for 2-level DDA traversal
+-    for level_1 in range(...): # Loop structure from parent DDA
+-        for level_2 in range(...): # Loop structure from parent DDA
+-            
+-            # Check bounds using unified condition
+-            if any((uint3)local_cell >= (uint)VX_BRICK_EXT):
+-                break # Or handle out-of-bounds logic
+-            
+-            # Calculate linear index
+-            voxel_idx = local_cell.x + local_cell.y * VX_BRICK_EXT + local_cell.z * VX_BRICK_EXT * VX_BRICK_EXT
+-            
+-            # Bitwise mask check
+-            word = voxel_mask[voxel_idx >> 5u]
+-            bit = 1u << (voxel_idx & 31u)
+-            
+-            if (word & bit) != 0u:
+-                # Load voxel value
+-                return voxels.Load(int4(brick_min + local_cell, 0)).r
+-            
+-            # Update local_cell and other state (tdelta deduplicated)
+-            # Update logic from parent DDA [G]
+-            
+-    return 0.0 # Default return if no voxel hit
++    # Calculate linear index
++    # Note: VX_BRICK_EXT is assumed to be 8 for this example
++    brick_size = 8
++    voxel_idx = local_cell.x + local_cell.y * brick_size + local_cell.z * brick_size * brick_size
++    
++    # Check voxel mask
++    word = voxel_mask[voxel_idx >> 5]
++    bit = 1 << (voxel_idx & 31)
++    
++    if (word & bit) != 0:
++        # Load voxel value
++        # brick_min is the origin of the brick in world space
++        # local_cell is the offset within the brick
++        return voxels.Load(int4(brick_min + local_cell, 0)).r
++    else:
++        return 0.0
+ ```
+ 
+ **Parameters:**
+-*   `VX_BRICK_EXT`: The extent of the voxel brick. Typical values depend on the specific implementation (e.g., 8, 16, 32). Not given in the sources.
++- `VX_BRICK_EXT`: Typically 8 or 16, depending on the brick size.
++- Register Allocation Target: Reduce from ~92 to ~72 registers per thread [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Signed Integer Overflow:** Using signed integers for bounds checking can lead to incorrect results if `local_cell` components become negative or exceed the maximum signed integer value. Casting to `uint3` before comparison avoids this [S1, unofficial].
+-*   **Register Pressure:** Failing to deduplicate `tdelta` calculations or keeping unnecessary state across loops can lead to high register allocation (e.g., 92 registers), causing low occupancy and memory stalls [S1, unofficial].
++- **Precision:** Ensure that the cast from `int3` to `uint3` is handled correctly to avoid signed/unsigned comparison errors [S1, unofficial].
++- **Boundary Conditions:** The check `any((uint3)local_cell >= (uint)VX_BRICK_EXT)` must correctly handle the upper bound of the brick. If `local_cell` equals `VX_BRICK_EXT`, it is out of bounds.
++- **Register Pressure:** Failure to deduplicate `tdelta` calculations can negate the benefits of variable consolidation [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### CUDA Execution Configuration Optimization
+-This variant focuses on selecting block size, grid size, and shared memory size to maximize GPU occupancy and performance [S2, unofficial]. Occupancy is defined as the number of warps being executed divided by the number of warps allowed per multiprocessor [S2, unofficial]. Benchmarked block sizes include 4x4, 4x8, 4x16, 4x32, 8x8, 8x16, 8x32, and 16x16 [S2, unofficial]. On an NVIDIA GTX280 GPU, block sizes of 4x16, 4x32, 8x8, 8x16, and 8x32 yielded higher performance (e.g., 31 FPS on the Engine dataset) compared to 16x16 (21 FPS) [S2, unofficial].
++### [CUDA Execution Configuration Optimization](15104-cuda-execution-configuration-optimization.md)
++This variant focuses on selecting block size, grid size, and shared memory size to maximize GPU occupancy. Occupancy is defined as the number of warps being executed divided by the number of warps allowed per multiprocessor. Benchmarked block sizes include 4x4, 4x8, 4x16, 4x32, 8x8, 8x16, 8x32, and 16x16. On an NVIDIA GTX280, block sizes of 4x16, 4x32, 8x8, 8x16, and 8x32 yielded higher performance (e.g., 31 FPS on Engine dataset) compared to 16x16 (21 FPS). This approach complements shader-level optimizations by ensuring the hardware resources are utilized efficiently.
+ 
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **Time Complexity:** The optimization reduces the constant factor in the traversal loop by minimizing register spills and redundant calculations. The asymptotic complexity remains dependent on the number of voxels traversed [S1, unofficial].
+-*   **Memory Complexity:** Register usage is reduced from 92 to 72 registers per thread, allowing for higher occupancy [S1, unofficial].
++- The optimization reduces register allocation, which does not change the asymptotic time complexity of the DDA traversal but reduces the constant factor by improving cache utilization and reducing memory stalls [S1, unofficial].
++- Memory complexity is reduced by fewer live variables in registers [S1, unofficial].
+ 
+ **Measured Performance:**
+-*   **Hardware:** MacBook Air (M2) with a 144 Hz ultrawide monitor at 3840 x 1600 resolution [S1, unofficial].
+-*   **monu2-1 (128³ resolution):** FPS increased from 143.20 to 144.00 (+0.56%); Walltime decreased from 6.58 ms to 5.37 ms (-18.32%) [S1, unofficial].
+-*   **sponza-256-1:** FPS increased from 59.78 to 72.83 (+21.83%); Walltime decreased from 28.39 ms to 22.51 ms (-20.71%) [S1, unofficial].
+-*   **sponza-256-2:** FPS increased from 109.53 to 143.94 (+31.42%); Walltime decreased from 13.40 ms to 7.32 ms (-45.33%) [S1, unofficial].
++- On a Macbook Air (M2) at 3840x1600 resolution:
++    - **monu2-1 (128³):** FPS increased from 143.20 to 144.00 (+0.56%); Walltime decreased from 6.58 ms to 5.37 ms (-18.32%) [S1, unofficial].
++    - **sponza-256-1 (256³):** FPS increased from 59.78 to 72.83 (+21.83%); Walltime decreased from 28.39 ms to 22.51 ms (-20.71%) [S1, unofficial].
++    - **sponza-256-2 (256³):** FPS increased from 109.53 to 143.94 (+31.42%); Walltime decreased from 13.40 ms to 7.32 ms (-45.33%) [S1, unofficial].
++- Occupancy increased from 35.43% to 42.37% [S1, unofficial].
++- Register allocation decreased from 92 to 72 [S1, unofficial].
+ 
+ **Scaling:**
+-*   Performance gains are more significant in scenes with higher complexity or larger voxel counts (e.g., sponza-256-2) where register pressure and memory stalls have a greater impact [S1, unofficial].
++- The benefits are more pronounced in complex scenes with higher voxel density and longer traversal paths (e.g., sponza-256-2) [S1, unofficial].
++- Simpler scenes (monu2-1) show modest improvements [S1, unofficial].
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Significant reduction in walltime and improvement in FPS for complex scenes; reduced register allocation allows for higher occupancy [S1, unofficial].
+-*   **Limitations:** The optimization is specific to the 2-level DDA shader structure; benefits may be less pronounced in simpler scenes (e.g., monu2-1) where other bottlenecks dominate [S1, unofficial].
+-
+-**When to Use:**
+-*   Use when profiling reveals low shader occupancy and high register allocation in DDA traversal shaders [S1, unofficial].
+-*   Use when rendering complex scenes where memory stalls are a bottleneck [S1, unofficial].
+-
+-**When Not to Use:**
+-*   Use with caution in very simple scenes where the overhead of optimization might not justify the gains [S1, unofficial].
++- **Strengths:** Significant reduction in walltime for complex scenes; improved occupancy leads to better hardware utilization [S1, unofficial].
++- **Limitations:** The optimization is specific to the 2-level DDA shader structure; it may not apply directly to other traversal algorithms [S1, unofficial].
++- **When to Use:** When the DDA shader is the bottleneck and register allocation is high [S1, unofficial].
++- **When Not to Use:** When the bottleneck is memory bandwidth or other parts of the rendering pipeline [S1, unofficial].
+ 
+ ## Background
+-The method originated from development logs of a voxel raytracer, specifically addressing performance issues in the 2-level DDA shader [S1, unofficial]. The low occupancy (35.43%) and high register allocation (92) were identified as bottlenecks compared to a naive DDA implementation (71.39% occupancy, 42 registers) [S1, unofficial]. The optimization was implemented through a series of commits that consolidated variables and deduplicated calculations [S1, unofficial].
++The method originates from development logs of a voxel raytracer, specifically addressing performance issues in the 2-level DDA shader [S1, unofficial]. The low occupancy (35.43%) and high register allocation (92) in the unoptimized shader were identified as causes for memory stalls, despite high ALU usage [S1, unofficial]. The optimization was implemented through a series of commits that consolidated variables and deduplicated calculations [S1, unofficial]. The concept of occupancy is further supported by CUDA execution configuration optimization principles, which emphasize the importance of maximizing the number of concurrent warps per multiprocessor [S2, unofficial].
+ 
+ ## Sources

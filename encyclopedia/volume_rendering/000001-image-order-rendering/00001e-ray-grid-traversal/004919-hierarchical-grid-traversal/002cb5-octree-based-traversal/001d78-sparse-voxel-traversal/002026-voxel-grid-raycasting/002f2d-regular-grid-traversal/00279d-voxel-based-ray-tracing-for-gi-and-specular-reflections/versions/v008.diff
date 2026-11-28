@@ -1,0 +1,167 @@
+--- v007.md
++++ v008.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Voxel-based Ray Tracing is a global illumination (GI) and specular reflection fallback method that uses Digital Differential Analyzer (3D-DDA) traversal through a uniform block-occupancy voxel grid to sample indirect lighting and reflections [S1, unofficial]. It serves as a drop-in replacement for Screen-Space Ray Tracing (SSRT) for GI and a fallback for Screen-Space Reflections (SSR) when coverage is incomplete, combining sky occlusion with Light Propagation Volumes (LPV) colour bleeding [S1, unofficial]. Unlike sibling methods that may rely on screen-space data alone, this method leverages a pre-computed 3D voxel grid populated in the shadow pass to provide scene-wide illumination data [S1, unofficial].
++Voxel-based Ray Tracing is a global illumination (GI) and specular reflection fallback method that uses Digital Differential Analyzer (3D-DDA) traversal through a uniform block-occupancy voxel grid to sample indirect lighting and reflections [S1, unofficial]. It serves as a drop-in replacement for Screen-Space Ray Tracing (SSRT) for GI and a fallback for Screen-Space Reflections (SSR) when coverage is incomplete, combining sky occlusion with Light Propagation Volumes (LPV) colour bleeding [S1, unofficial]. Unlike sibling methods that rely solely on screen-space data, this method leverages a pre-computed 3D voxel grid populated in the shadow pass to provide scene-wide illumination data [S1, unofficial].
+ 
+ ## How it works
+@@ -36,4 +36,15 @@
+ ```python
+ import math
++import random
++
++def normalize(v):
++    l = math.sqrt(sum(x*x for x in v))
++    return [x/l for x in v] if l > 0 else [0.0, 0.0, 0.0]
++
++def cross(a, b):
++    return [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]]
++
++def texture(tex, coords):
++    return [0.0, 0.0, 0.0] # [G] Standard 3D texture fetch
+ 
+ def VoxelDDA(ray_origin, ray_direction, voxel_size, grid_size, max_steps, is_occupied):
+@@ -42,8 +53,6 @@
+     Returns (hit_position, hit_normal) or None if no hit.
+     """
+-    # Initialize grid coordinates
+     current_cell = [math.floor(ray_origin[i] / voxel_size) for i in range(3)]
+     
+-    # Handle direction components, including zero to prevent division by zero
+     step = [0, 0, 0]
+     t_delta = [0.0, 0.0, 0.0]
+@@ -65,5 +74,4 @@
+             t_delta[i] = INF
+             
+-    # Ray bias to avoid self-intersection [S1, unofficial]
+     epsilon = 1e-4
+     t_max[0] += epsilon
+@@ -72,5 +80,4 @@
+     
+     for _ in range(max_steps):
+-        # Check grid bounds
+         if not (0 <= current_cell[0] < grid_size and
+                 0 <= current_cell[1] < grid_size and
+@@ -78,22 +85,18 @@
+             return None
+             
+-        # Check occupancy
+         if is_occupied(current_cell):
+-            # Calculate hit position at the face
+             t_hit = min(t_max[0], t_max[1], t_max[2])
+             hit_pos = [ray_origin[i] + ray_direction[i] * t_hit for i in range(3)]
+             
+-            # Determine normal based on which axis hit first
+             normal = [0.0, 0.0, 0.0]
+             if t_max[0] <= t_max[1] and t_max[0] <= t_max[2]:
+-                normal[0] = -step[0]
++                normal[0] = step[0]
+             elif t_max[1] <= t_max[0] and t_max[1] <= t_max[2]:
+-                normal[1] = -step[1]
++                normal[1] = step[1]
+             else:
+-                normal[2] = -step[2]
++                normal[2] = step[2]
+                 
+             return (hit_pos, normal)
+             
+-        # Advance DDA
+         if t_max[0] <= t_max[1]:
+             if t_max[0] <= t_max[2]:
+@@ -117,10 +120,6 @@
+     Read LPV data half a block in front of the hit face.
+     """
+-    # Offset by half a block in the direction of the normal
+     sample_pos = [hit_position[i] + hit_normal[i] * (voxel_size * 0.5) for i in range(3)]
+-    
+-    # Standard 3D texture fetch [G]
+-    lpv_color = texture(lpv_data, sample_pos)
+-    return lpv_color
++    return texture(lpv_data, sample_pos)
+ 
+ def cosine_weighted_hemisphere_sample(surface_normal):
+@@ -128,12 +127,10 @@
+     Generate a cosine-weighted hemisphere ray direction [G].
+     """
+-    u = math.random()
+-    v = math.random()
++    u = random.random()
++    v = random.random()
+     phi = 2.0 * math.pi * u
+     cos_theta = math.sqrt(v)
+     sin_theta = math.sqrt(1.0 - v)
+     
+-    # Construct local basis aligned with surface normal
+-    # Simplified for axis-aligned normal; general case requires Gram-Schmidt [G]
+     if abs(surface_normal[0]) > 0.9:
+         up = [0.0, 1.0, 0.0]
+@@ -151,5 +148,5 @@
+     ]
+ 
+-def ApplyVoxelRT(surface_position, surface_normal, sky_color, voxel_size, grid_size, is_occupied):
++def ApplyVoxelRT(surface_position, surface_normal, sky_color, lpv_data, voxel_size, grid_size, is_occupied, num_samples, max_steps):
+     """
+     Drop-in replacement for ApplySSRT.
+@@ -157,12 +154,8 @@
+     """
+     total_indirect = [0.0, 0.0, 0.0]
+-    num_samples = 4  # VOXEL_GI_SAMPLES_DEFAULT [S1, unofficial]
+     
+     for _ in range(num_samples):
+-        # Generate cosine-weighted hemisphere ray
+         ray_dir = cosine_weighted_hemisphere_sample(surface_normal)
+-        
+-        # Trace ray
+-        hit = VoxelDDA(surface_position, ray_dir, voxel_size, grid_size, 64, is_occupied)
++        hit = VoxelDDA(surface_position, ray_dir, voxel_size, grid_size, max_steps, is_occupied)
+         
+         if hit is not None:
+@@ -171,20 +164,16 @@
+             total_indirect = [total_indirect[i] + lpv_color[i] for i in range(3)]
+         else:
+-            # No hit, use sky contribution
+             total_indirect = [total_indirect[i] + sky_color[i] for i in range(3)]
+             
+-    # Average samples
+     return [total_indirect[i] / num_samples for i in range(3)]
+ 
+-def VoxelReflectionFallback(view_ray_origin, view_ray_direction, environment_reflection, voxel_size, grid_size, is_occupied):
++def VoxelReflectionFallback(view_ray_origin, view_ray_direction, environment_reflection, lpv_data, voxel_size, grid_size, is_occupied, max_steps):
+     """
+     Specular reflection fallback when SSR misses.
+     """
+-    # Check if SSR missed
+     if environment_reflection[3] >= 1.0:
+         return environment_reflection[:3]
+         
+-    # Perform single specular DDA trace
+-    hit = VoxelDDA(view_ray_origin, view_ray_direction, voxel_size, grid_size, 64, is_occupied)
++    hit = VoxelDDA(view_ray_origin, view_ray_direction, voxel_size, grid_size, max_steps, is_occupied)
+     
+     if hit is not None:
+@@ -192,6 +181,5 @@
+         voxel_color = SampleVoxelLighting(hit_pos, hit_normal, lpv_data, voxel_size)
+         
+-        # Scale to match sky-reflection brightness [S1, unofficial]
+-        brightness_scale_factor = 1.5  # [G]
++        brightness_scale_factor = 1.5  # [G] Matches typical sky-reflection brightness ranges
+         scaled_color = [voxel_color[i] * brightness_scale_factor for i in range(3)]
+         return scaled_color
+@@ -214,6 +202,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Not given in the sources.
+-*   **Memory Complexity**: Not given in the sources.
++*   **Time Complexity**: Not given in the sources [S1, unofficial].
++*   **Memory Complexity**: Not given in the sources [S1, unofficial].
+ *   **Performance**: Depends on grid resolution (128³) and step limits. The method is efficient as it avoids complex scene traversal, relying on the uniform grid structure [S1, unofficial].
+ *   **Strengths**: Provides scene-wide GI and reflections independent of camera position or screen-space coverage. Drop-in replacement for SSRT [S1, unofficial].
+@@ -223,5 +211,5 @@
+ 
+ ## Background
+-The method was implemented by nyzxor as a pull request to the Eclipse-Shader (an edit of Chocapic13 V9 / Bliss) for Minecraft, integrated via Iris [S1, unofficial]. It was merged into the Unstable branch on May 22, 2026 [S1, unofficial]. The implementation builds on the principles of 3D-DDA traversal shared by the Regular Grid Traversal family [4091-voxel-based-ray-tracing-for-gi-and-specular-reflections, 4240-optimised-voxel-ray-marching].
++The method was implemented by nyzxor as a pull request to the Eclipse-Shader (an edit of Chocapic13 V9 / Bliss) for Minecraft, integrated via Iris [S1, unofficial]. It was merged into the Unstable branch on May 22, 2026 [S1, unofficial]. The implementation builds on the principles of 3D-DDA traversal shared by the Regular Grid Traversal family [4091-voxel-based-ray-tracing-for-gi-and-specular-reflections, 4240-optimised-voxel-ray-marching] and links to [Regular Grid Traversal](5939-regular-grid-traversal.md) [S1, unofficial].
+ 
+ ## Sources

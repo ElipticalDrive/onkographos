@@ -1,0 +1,256 @@
+--- v001.md
++++ v002.md
+@@ -4,67 +4,96 @@
+ 
+ ## Overview
+-This method optimizes interactive camera navigation (orbit/dolly) over static fractal surfaces by baking the expensive analytical Distance Estimator (DE) into a sparse 3D brick volume, allowing the renderer to sample precomputed distances instead of re-evaluating the fractal formula every frame [S1, unofficial]. It sets itself apart from standard raymarching by decoupling the geometric query cost from the frame rate during camera motion, trading bounded spatial precision for significant interactive performance gains [S1, unofficial].
++This method optimizes interactive camera navigation (orbit/dolly) over static fractal surfaces by baking the expensive analytical Distance Estimator (DE) into a sparse 3D brick volume, allowing the renderer to sample precomputed distances instead of re-evaluating the fractal formula every frame [S1, unofficial]. Unlike standard raymarching which re-evaluates the fractal DE along every ray every frame, this method caches the DE to avoid repeated formula evaluation during camera movement [S1, unofficial]. It trades bounded spatial precision for significant interactive performance gains [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The analytical Distance Estimator function $DE(x, y, z)$ for the fractal surface, the current camera view volume, and a maximum brick count limit.
+-*   **Output:** A sparse 3D texture (brick volume) containing precomputed distance values, used for raymarching during interactive preview.
++*   **Input:** The analytical Distance Estimator function $DE(\mathbf{p})$, the camera view volume, brick size, brick resolution, and a maximum brick count limit [S1, unofficial].
++*   **Output:** A sparse 3D brick volume cache containing precomputed distance values, used for raymarching during interactive preview [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Brick Volume:** A sparse 3D grid where each active cell is a "brick."
+-    *   **Brick Layout:** Each brick is a small 3D texture (e.g., $N \times N \times N$ voxels).
+-    *   **Voxel Content:** A single floating-point value representing the signed distance to the surface.
+-    *   **Sparsity:** Only bricks where the surface exists (defined by $DE < \text{brick size}$) are allocated. Empty space is represented by the coarse-level empty-space distance.
+-2.  **Coarse Level:** A lower-resolution representation of the brick volume storing the empty-space distance for regions outside the active surface boundary.
++1.  **Brick Volume:** A sparse 3D grid where each active cell is a "brick" [S1, unofficial].
++    *   **Brick Layout:** Each brick is a small 3D texture of size $R \times R \times R$ voxels [S1, unofficial].
++    *   **Voxel Content:** A single floating-point value representing the signed distance to the surface [S1, unofficial].
++    *   **Sparsity:** Only bricks where the surface exists (defined by $DE < \text{brick size}$) are allocated [S1, unofficial].
++2.  **Coarse Level:** A lower-resolution representation of the brick volume storing the empty-space distance for regions outside the active surface boundary [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Brick Count:** Must be capped to control GPU memory usage [S1, unofficial].
+-*   **Brick Resolution:** Determines the bounded detail level; suitable for preview, not final output [S1, unofficial].
++*   **Brick Count:** Must be capped to control memory usage [S1, unofficial].
++*   **Brick Resolution:** Bounded detail level, suitable for preview rather than final output [S1, unofficial].
+ *   **Bake Time:** Must be less than a few frames' worth of computation to be beneficial [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Progressive Baking:**
+-    *   Start by baking the coarse level of the brick volume.
+-    *   Iterate through the 3D space around the surface.
+-    *   For each potential brick location, evaluate the analytical $DE(x, y, z)$ at the brick center.
+-    *   If $DE < \text{brick size}$, allocate the brick and populate its voxels by sampling the analytical $DE$ at each voxel center within the brick.
+-    *   Store the empty-space distance at the coarse level for regions where no bricks are allocated.
+-    *   Continue until the brick count limit is reached or the surface boundary is fully covered.
+-2.  **Interactive Raymarching:**
+-    *   When the camera moves, perform raymarching using the sparse brick volume.
+-    *   For each ray step, sample the distance from the brick volume using trilinear interpolation.
+-    *   Utilize hardware texture filtering on the GPU for efficient trilinear distance sampling [S1, unofficial].
+-    *   Use the sampled distance to advance the ray.
+-3.  **Cache Rebuild:**
+-    *   Rebuild the cache only when fractal parameters change, not on every frame [S1, unofficial].
+-4.  **Final Render:**
+-    *   Once the camera interaction settles, run the full-detail DE render using the analytical formula to produce the final high-quality frame [S1, unofficial].
++1.  **Progressive Baking:** Start by baking the coarse level of the brick volume [S1, unofficial]. Iterate through the 3D space around the surface [S1, unofficial]. For each potential brick location, evaluate the analytical $DE(\mathbf{p})$ at the brick center [S1, unofficial]. If $DE < \text{brick size}$, allocate the brick and populate its voxels by sampling the analytical $DE$ at each voxel center within the brick [S1, unofficial]. Store the empty-space distance at the coarse level for regions where no bricks are allocated [S1, unofficial]. Continue until the brick count limit is reached or the surface boundary is fully covered [S1, unofficial].
++2.  **Interactive Raymarching:** When the camera moves, perform raymarching using the sparse brick volume [S1, unofficial]. For each ray step, sample the distance from the brick volume using trilinear interpolation [S1, unofficial]. Use hardware texture filtering on the GPU for efficient trilinear distance sampling [S1, unofficial]. Use the sampled distance to advance the ray [S1, unofficial].
++3.  **Cache Rebuild:** Rebuild the cache only when a parameter changes [S1, unofficial].
++4.  **Final Render:** Run the full-detail DE render once the camera settles to produce the final frame [S1, unofficial].
+ 
+ **Pseudocode:**
++```python
++import math
+ 
+-```python
+-def bake_sparse_sdf_cache(de_function, camera_view_volume, max_brick_count, brick_size, brick_resolution):
+-    """
+-    Bakes the distance field into a sparse brick volume.
+-    """
+-    brick_volume = Sparse3DTexture()
+-    coarse_level = CoarseLevelTexture()
++class Vector3:
++    def __init__(self, x, y, z):
++        self.x, self.y, self.z = x, y, z
++    def __add__(self, other): return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
++    def __sub__(self, other): return Vector3(self.x - other.x, self.y - other.y, self.z - other.z)
++    def __mul__(self, s): return Vector3(self.x * s, self.y * s, self.z * s)
++    def length(self): return math.sqrt(self.x**2 + self.y**2 + self.z**2)
++
++class Brick:
++    def __init__(self, resolution):
++        self.resolution = resolution
++        self.data = [0.0] * (resolution ** 3)
++    def set_voxel(self, i, j, k, val):
++        self.data[i * self.resolution**2 + j * self.resolution + k] = val
++    def get_voxel(self, i, j, k):
++        return self.data[i * self.resolution**2 + j * self.resolution + k]
++
++class SparseBrickVolume:
++    def __init__(self):
++        self.bricks = {}
++    def set_brick(self, bx, by, bz, brick):
++        self.bricks[(bx, by, bz)] = brick
++    def has_brick(self, bx, by, bz):
++        return (bx, by, bz) in self.bricks
++    def sample_trilinear(self, bx, by, bz, lx, ly, lz, res):
++        brick = self.bricks[(bx, by, bz)]
++        r = res
++        i0, j0, k0 = int(lx * (r - 1)), int(ly * (r - 1)), int(lz * (r - 1))
++        i1, j1, k1 = min(i0 + 1, r - 1), min(j0 + 1, r - 1), min(k0 + 1, r - 1)
++        fx, fy, fz = lx * (r - 1) - i0, ly * (r - 1) - j0, lz * (r - 1) - k0
++        def v(i, j, k): return brick.get_voxel(i, j, k)
++        c00 = v(i0, j0, k0) * (1-fx) + v(i1, j0, k0) * fx
++        c10 = v(i0, j1, k0) * (1-fx) + v(i1, j1, k0) * fx
++        c01 = v(i0, j0, k1) * (1-fx) + v(i1, j0, k1) * fx
++        c11 = v(i0, j1, k1) * (1-fx) + v(i1, j1, k1) * fx
++        return c00 * (1-fy) * (1-fz) + c10 * fx * (1-fy) * (1-fz) + c01 * (1-fy) * fz + c11 * fy * fz
++
++class CoarseLevel:
++    def __init__(self, empty_dist):
++        self.empty_dist = empty_dist
++    def sample_empty_space_distance(self, pos):
++        return self.empty_dist
++
++def bake_sparse_sdf_cache(de_function, bounds, brick_size, brick_resolution, max_brick_count):
++    brick_volume = SparseBrickVolume()
++    coarse_level = CoarseLevel(brick_size * 2.0)
++    brick_count = 0
+     
+-    # Define the bounding box of the camera view volume
+-    bounds = camera_view_volume.get_bounds()
++    bx_start = int(math.floor(bounds[0] / brick_size))
++    by_start = int(math.floor(bounds[1] / brick_size))
++    bz_start = int(math.floor(bounds[2] / brick_size))
++    bx_end = int(math.ceil(bounds[3] / brick_size))
++    by_end = int(math.ceil(bounds[4] / brick_size))
++    bz_end = int(math.ceil(bounds[5] / brick_size))
+     
+-    # Iterate through the volume in brick-sized steps
+-    # Note: In practice, this might use a hierarchical traversal or spatial hashing
+-    # to efficiently find active bricks.
+-    brick_count = 0
+-    for x in range(bounds.min_x, bounds.max_x, brick_size):
+-        for y in range(bounds.min_y, bounds.max_y, brick_size):
+-            for z in range(bounds.min_z, bounds.max_z, brick_size):
+-                # Check if this brick is near the surface
+-                center = Vector3(x + brick_size/2, y + brick_size/2, z + brick_size/2)
++    for bx in range(bx_start, bx_end):
++        for by in range(by_start, by_end):
++            for bz in range(bz_start, bz_end):
++                if brick_count >= max_brick_count:
++                    return brick_volume, coarse_level
++                center = Vector3((bx + 0.5) * brick_size, (by + 0.5) * brick_size, (bz + 0.5) * brick_size)
+                 dist = de_function(center)
+-                
+                 if dist < brick_size:
+-                    # Allocate brick and populate
+                     brick = Brick(brick_resolution)
+                     for i in range(brick_resolution):
+@@ -72,65 +101,48 @@
+                             for k in range(brick_resolution):
+                                 voxel_pos = center + Vector3(
+-                                    (i - brick_resolution/2) * (brick_size / brick_resolution),
+-                                    (j - brick_resolution/2) * (brick_size / brick_resolution),
+-                                    (k - brick_resolution/2) * (brick_size / brick_resolution)
++                                    (i - (brick_resolution - 1) / 2.0) * (brick_size / (brick_resolution - 1)),
++                                    (j - (brick_resolution - 1) / 2.0) * (brick_size / (brick_resolution - 1)),
++                                    (k - (brick_resolution - 1) / 2.0) * (brick_size / (brick_resolution - 1))
+                                 )
+-                                voxel_dist = de_function(voxel_pos)
+-                                brick.set_voxel(i, j, k, voxel_dist)
+-                    
+-                    brick_volume.set_brick(x, y, z, brick)
++                                brick.set_voxel(i, j, k, de_function(voxel_pos))
++                    brick_volume.set_brick(bx, by, bz, brick)
+                     brick_count += 1
+-                    
+-                    if brick_count >= max_brick_count:
+-                        break
+-            if brick_count >= max_brick_count:
+-                break
+-        if brick_count >= max_brick_count:
+-            break
+-            
+-    # Populate coarse level with empty space distance
+-    # This is a simplified representation; in reality, it might store
+-    # the distance to the nearest brick or a conservative bound.
+-    coarse_level.populate_empty_space_distance(brick_volume, brick_size)
+-    
+     return brick_volume, coarse_level
+ 
+-def raymarch_with_cache(brick_volume, coarse_level, ray_origin, ray_direction, brick_size, brick_resolution):
+-    """
+-    Raymarches using the sparse SDF cache.
+-    """
++def raymarch_cache(brick_volume, coarse_level, ray_origin, ray_direction, brick_size, brick_resolution, max_steps=1000, epsilon=1e-4):
++    dir_len = ray_direction.length()
++    if dir_len == 0:
++        return float('inf'), False
++    d = Vector3(ray_direction.x / dir_len, ray_direction.y / dir_len, ray_direction.z / dir_len)
++    
+     t = 0.0
+-    max_steps = 1000
+-    
+-    for step in range(max_steps):
+-        current_pos = ray_origin + ray_direction * t
++    for _ in range(max_steps):
++        pos = ray_origin + d * t
++        bx = int(math.floor(pos.x / brick_size))
++        by = int(math.floor(pos.y / brick_size))
++        bz = int(math.floor(pos.z / brick_size))
+         
+-        # Determine which brick contains the current position
+-        brick_coords = get_brick_coords(current_pos, brick_size)
+-        
+-        # Sample distance from brick volume
+-        # Use trilinear interpolation for smooth distance estimation
+-        if brick_volume.has_brick(brick_coords):
+-            dist = brick_volume.sample_trilinear(brick_coords, current_pos, brick_size, brick_resolution)
++        if brick_volume.has_brick(bx, by, bz):
++            lx = (pos.x - bx * brick_size) / brick_size
++            ly = (pos.y - by * brick_size) / brick_size
++            lz = (pos.z - bz * brick_size) / brick_size
++            dist = brick_volume.sample_trilinear(bx, by, bz, lx, ly, lz, brick_resolution)
+         else:
+-            # Fallback to coarse level empty space distance
+-            dist = coarse_level.sample_empty_space_distance(current_pos)
++            dist = coarse_level.sample_empty_space_distance(pos)
+             
+-        # Advance ray
++        if dist < 0:
++            dist = -dist
++            
+         t += dist
+         
+-        # Check for surface intersection (distance is very small)
+-        if dist < 1e-4:
++        if dist < epsilon:
+             return t, True
+-            
+-        # Check if ray has left the view volume (simplified)
+-        if not is_inside_view_volume(ray_origin + ray_direction * t):
++        if t > 1000.0:
+             return t, False
+-            
+     return t, False
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The cached-distance error is $\le$ half a voxel diagonal near the surface [S1, unofficial]. This is acceptable for preview but not final output.
++*   **Precision:** The cached-distance error is $\le$ half a voxel diagonal near the surface [S1, unofficial]. This is acceptable for preview but not final output [S1, unofficial].
+ *   **Memory:** The brick count must be capped; otherwise, memory usage can explode for complex fractals [S1, unofficial].
+ *   **Bake Time:** If the bake time exceeds a few frames, the performance gain is lost [S1, unofficial].
+@@ -138,11 +150,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Baking is $O(N)$ where $N$ is the number of voxels in the active surface region. Interactive raymarching is $O(1)$ per step for distance queries (assuming hardware texture sampling), compared to $O(K)$ for analytical DE evaluation where $K$ is the number of iterations in the fractal formula.
+-*   **Memory Complexity:** $O(B \cdot R^3)$ where $B$ is the number of bricks and $R$ is the brick resolution. Capped by `max_brick_count`.
++*   **Time Complexity:** Baking time must be less than a few frames' worth of computation to be beneficial [S1, unofficial]. Interactive raymarching replaces per-frame fractal DE evaluation with hardware texture sampling [S1, unofficial].
++*   **Memory Complexity:** Memory usage is controlled by capping the brick count [S1, unofficial].
+ *   **Measured Performance:** Reduces frame time from seconds to near real time for heavy User Bulb maps and KIFS on interactive camera moves [S1, unofficial].
+ *   **Strengths:** Significant speedup for interactive camera navigation on expensive fractal formulas; works well on weak and strong hardware for heavy maps [S1, unofficial].
+-*   **Limitations:** Bounded detail level makes it unsuitable for final output; requires rebuild on parameter changes; memory usage can be high if not capped.
+-*   **When to Use:** Interactive preview, orbit/dolly camera moves over static fractals.
+-*   **When Not to Use:** Final rendering, dynamic fractal parameters, scenes requiring high-precision distance estimates.
++*   **Limitations:** Bounded detail level makes it unsuitable for final output; requires rebuild on parameter changes; memory usage can be high if not capped [S1, unofficial].
++*   **When to Use:** Interactive preview, orbit/dolly camera moves over static fractals [S1, unofficial].
++*   **When Not to Use:** Final rendering, dynamic fractal parameters, scenes requiring high-precision distance estimates [S1, unofficial].
+ 
+ ## Background

@@ -1,0 +1,171 @@
+--- v002.md
++++ v003.md
+@@ -17,5 +17,5 @@
+ 
+ **Formulas:**
+-The method assumes the transfer function is piecewise linear between density values [S2, unofficial]. For a ray segment of length $\Delta s$ connecting two sample points with densities $d_b$ (back) and $d_f$ (front), the analytical integration of the volume rendering equation is pre-computed.
++The method assumes the transfer function is piecewise linear between density values [S2, unofficial]. For a ray segment of length $\Delta s$ connecting two sample points with densities $d_b$ (back) and $d_f$ (front), the analytical integration of the volume rendering equation is pre-computed [S2, unofficial].
+ 
+ The standard volume rendering equation for a segment is:
+@@ -99,12 +99,8 @@
+             # This is more complex. For constant alpha, it simplifies.
+             # For linear alpha, the integral of c(s)*alpha(s)*exp(-A(s)) must be computed.
+-            # [G] Standard implementation uses the closed-form solution for linear opacity.
+-            # If alpha_b == alpha_f == alpha_const:
+-            #   alpha_int = 1 - exp(-alpha_const * delta_s)
+-            #   C_int = c_avg * (1 - exp(-alpha_const * delta_s)) where c_avg is average color
+-            # If alpha varies, the exact formula involves exponential integrals or specific algebraic forms.
+-            # We assume a helper function exists for this analytical integration.
+-            
+-            C_int = compute_linear_segment_color_integral(c_b, alpha_b, c_f, alpha_f, delta_s)
++            # [G] Standard implementation uses a high-accuracy numerical quadrature 
++            # for the color integral when the closed form is unwieldy, or the exact 
++            # Engel et al. closed form. We implement a robust 100-step Simpson's rule here.
++            C_int = compute_color_integral(c_b, alpha_b, c_f, alpha_f, delta_s)
+             
+             PreIntTable[i][j] = (C_int, alpha_int)
+@@ -112,61 +108,69 @@
+     return PreIntTable
+ 
+-def compute_linear_segment_color_integral(c_b, alpha_b, c_f, alpha_f, delta_s):
++def compute_color_integral(c_b, alpha_b, c_f, alpha_f, delta_s):
+     """
+     Computes the pre-integrated color for a segment with linearly varying opacity and color.
+-    [G] This function implements the analytical solution derived from the volume rendering equation.
+-    """
+-    # Simplified case: constant opacity
+-    if abs(alpha_b - alpha_f) < 1e-6:
++    [G] Implements a 100-step Simpson's rule for the volume rendering color integral.
++    """
++    if abs(alpha_b - alpha_f) < 1e-6 and abs(c_b[0] - c_f[0]) < 1e-6:
++        # Constant opacity and color case
+         alpha = alpha_b
+         if alpha == 0:
+-            return (0, 0, 0)
+-        avg_c = (c_b + c_f) / 2.0
+-        return avg_c * (1.0 - math.exp(-alpha * delta_s))
+-    
+-    # General case: linear opacity
+-    # Let alpha(s) = alpha_b + k * s, where k = (alpha_f - alpha_b) / delta_s
+-    # Let c(s) = c_b + m * s, where m = (c_f - c_b) / delta_s
+-    # The integral is: integral_0^delta_s (c_b + m*s) * (alpha_b + k*s) * exp(-alpha_b*s - 0.5*k*s^2) ds
+-    # This requires numerical integration or a specific closed-form approximation if available.
+-    # [G] In practice, this is often approximated or solved via pre-computed tables for specific TF shapes.
+-    # For the purpose of this article, we assume the analytical result is computed.
+-    # A common approximation is to use the midpoint rule or higher-order quadrature if closed form is too complex.
+-    # However, Engel et al. provide the analytical form.
+-    
+-    # Using the analytical formula from Engel et al. (2003):
+-    # If alpha_b != alpha_f:
+-    #   Let A = alpha_b * delta_s
+-    #   Let B = (alpha_f - alpha_b) * delta_s
+-    #   The integral involves terms like exp(-A) and exp(-(A+B)).
+-    #   We return a placeholder for the exact complex algebraic expression.
+-    return (0, 0, 0) # Placeholder for exact analytical derivation
+-
+-def render_ray(samples, PreIntTable, num_levels):
++            return (0.0, 0.0, 0.0)
++        avg_c = ((c_b[0] + c_f[0]) / 2.0, (c_b[1] + c_f[1]) / 2.0, (c_b[2] + c_f[2]) / 2.0)
++        return tuple(ch * (1.0 - math.exp(-alpha * delta_s)) for ch in avg_c)
++    
++    # General case: linear opacity and color
++    # alpha(s) = alpha_b + k * s, k = (alpha_f - alpha_b) / delta_s
++    # c(s) = c_b + m * s, m = (c_f - c_b) / delta_s
++    # T(s) = exp(-alpha_b * s - 0.5 * k * s^2)
++    # Integrand: c(s) * alpha(s) * T(s)
++    k = (alpha_f - alpha_b) / delta_s
++    m = [(c_f[ch] - c_b[ch]) / delta_s for ch in range(3)]
++    
++    n = 100
++    h = delta_s / n
++    integral = [0.0, 0.0, 0.0]
++    
++    for i in range(n + 1):
++        s = i * h
++        alpha_s = alpha_b + k * s
++        c_s = [c_b[ch] + m[ch] * s for ch in range(3)]
++        T_s = math.exp(-alpha_b * s - 0.5 * k * s * s)
++        
++        coeff = 4.0 if i % 2 == 1 else 2.0 if i > 0 and i < n else 1.0
++        for ch in range(3):
++            integral[ch] += coeff * c_s[ch] * alpha_s * T_s
++            
++    return tuple(ch * h / 3.0 for ch in integral)
++
++def render_ray(samples, PreIntTable, num_levels, volume_min, volume_max):
+     """
+     Render a single ray using pre-integrated transfer functions.
+     
+     Args:
+-        samples: List of (density, depth) pairs for the ray.
++        samples: List of density values along the ray.
+         PreIntTable: The pre-computed 2D table.
+-        num_levels: Number of density levels.
++        num_levels: Number of density levels (N).
++        volume_min: Minimum density value in the volume.
++        volume_max: Maximum density value in the volume.
+         
+     Returns:
+-        Final color and opacity.
+-    """
+-    color = (0, 0, 0)
+-    alpha = 0.0
++        Final color and transmittance.
++    """
++    color = [0.0, 0.0, 0.0]
+     transmittance = 1.0
+     
++    density_step = (volume_max - volume_min) / (num_levels - 1)
++    
+     for k in range(len(samples) - 1):
+-        d_b, _ = samples[k]
+-        d_f, _ = samples[k+1]
++        d_b = samples[k]
++        d_f = samples[k+1]
+         
+         # Quantize densities to indices
+-        # [G] Assuming density is normalized to [0, 1] for indexing
+-        i = int(d_b * (num_levels - 1))
+-        j = int(d_f * (num_levels - 1))
+-        
+-        # Clamp indices
++        i = int((d_b - volume_min) / density_step)
++        j = int((d_f - volume_min) / density_step)
++        
++        # Clamp indices to valid range
+         i = max(0, min(num_levels - 1, i))
+         j = max(0, min(num_levels - 1, j))
+@@ -176,6 +180,6 @@
+         
+         # Front-to-back compositing
+-        color += transmittance * C_int
+-        alpha += transmittance * alpha_int
++        for ch in range(3):
++            color[ch] += transmittance * C_int[ch]
+         transmittance *= (1.0 - alpha_int)
+         
+@@ -183,5 +187,5 @@
+             break
+             
+-    return color, alpha
++    return tuple(color), transmittance
+ ```
+ 
+@@ -200,11 +204,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Pre-computation is $O(N^2)$, where $N$ is the number of density levels. Rendering is $O(1)$ per sample pair, as it involves a single 2-D texture lookup and compositing step.
+-*   **Memory Complexity:** $O(N^2)$ to store the pre-integrated table. For $N=256$, this is $65,536$ entries, each storing a color (3 floats) and opacity (1 float), totaling ~1 MB.
+-*   **Performance:** Significantly reduces the computational cost of evaluating the transfer function and integrating the volume rendering equation per sample. It allows for higher sampling rates or more complex transfer functions without performance loss.
+-*   **Strengths:** Eliminates aliasing artifacts from low sampling frequencies; guarantees that transfer function details between samples are considered; hardware-friendly via 2-D texture lookups.
+-*   **Limitations:** Limited to 1-D transfer functions (or separable ones); assumes piecewise linearity; memory usage grows quadratically with density resolution; less flexible for 3-D transfer functions without significant memory overhead.
+-*   **When to use:** When using direct volume ray casting with low sampling rates and 1-D transfer functions, and when aliasing artifacts are a concern.
+-*   **When not to use:** When using high sampling rates (aliasing is less visible), or when using complex 3-D transfer functions that cannot be easily decomposed.
++Not given in the sources.
+ 
+ ## Background
+@@ -213,3 +211,4 @@
+ ## Sources
+ [S1] Recent advances in hardware-accelerated volume rendering, https://doi.org/10.1016/s0097-8493(03)00146-8, fetched 2026-10-26
+-[S2] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)+[S2] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
++[S3] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

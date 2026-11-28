@@ -1,0 +1,138 @@
+--- v002.md
++++ v003.md
+@@ -4,104 +4,56 @@
+ 
+ ## Overview
+-Predicts 3D shape from multiple color images by minimizing cross-view photometric consistency loss without requiring segmentation masks [S1]. It differs from encoder-based methods like PMO by using random initialization and an implicit representation, making it robust to initialization noise and camera focal length changes [S1].
++Predicts 3D shape from multiple color images by minimizing cross-view photometric consistency loss without requiring segmentation masks [S1]. It differs from encoder-based methods like PMO by using random initialization and implicit representations, making it robust to initialization noise and camera focal length changes [S1]. It also differs from Pix2Vex [S2, unofficial] by optimizing a latent code for a specific instance rather than training a network to predict vertex coordinates from a fixed topology.
+ 
+ ## How it works
+-**Inputs:** A set of $N$ color images $\{I_0, \dots, I_{N-1}\}$ from known camera poses [S1].
+-**Outputs:** A latent code $\mathbf{z}$ representing the 3D shape [S1].
++**Inputs:** A set of $N$ color images $\{I_i\}_{i=0}^{N-1}$ with known camera poses.
++**Outputs:** An optimized latent code $\mathbf{z}$ representing the 3D shape.
+ 
+ **Data Structures:**
+-*   $\mathbf{z}$: Latent vector. Initialized randomly [S1].
++*   $\mathbf{z}$: Latent code vector.
+ *   $f(\mathbf{z})$: Implicit Signed Distance Function (SDF) decoder (e.g., DeepSDF) [S1].
+-*   $\mathcal{R}_d^i$: Differentiable depth renderer for view $i$ [S1].
+-*   $\mathcal{N}_i$: Set of neighboring views for image $I_i$ [S1].
++*   $\mathcal{R}_d^i(\mathbf{z})$: Rendered depth image for view $i$ using differentiable sphere tracing.
++*   $I_{j \rightarrow i}$: Warped image from view $j$ to view $i$.
+ 
+ **Steps:**
+-1. Initialize latent code $\mathbf{z}$ randomly [S1].
+-2. For each view $i$, render a depth image $D_i = \mathcal{R}_d^i(f(\mathbf{z}))$ [S1].
+-3. For each view $i$ and neighbor $j \in \mathcal{N}_i$:
+-    a. Warp color image $I_j$ to view $i$ using depth $D_i$ and camera pose to get $I_{j \rightarrow i}$ [S1].
++1.  Initialize $\mathbf{z}$ randomly [S1].
++2.  For each view $i \in \{0, \dots, N-1\}$:
++    a. Render depth image $D_i = \mathcal{R}_d^i(f(\mathbf{z}))$ [S1].
++3.  For each view $i$ and each neighbor $j \in \mathcal{N}_i$:
++    a. Warp image $I_j$ to view $i$ using $D_j$, camera poses, and $D_i$ to get $I_{j \rightarrow i}$ [S1].
+     b. Compute photometric difference between $I_i$ and $I_{j \rightarrow i}$ [S1].
+-4. Minimize the total photometric loss with respect to $\mathbf{z}$ [S1].
++4.  Minimize the total photometric loss with respect to $\mathbf{z}$ [S1].
+ 
+ **Formula:**
+-$$ \arg \min_{\mathbf{z}} \sum_{i=0}^{N-1} \sum_{j \in \mathcal{N}_i} I_i - I_{j \rightarrow i}(\mathcal{R}_d^i(f(\mathbf{z}))) $$
++$$ \arg \min_{\mathbf{z}} \sum_{i=0}^{N-1} \sum_{j \in \mathcal{N}_i} \| I_i - I_{j \rightarrow i}(\mathcal{R}_d^i(f(\mathbf{z}))) \| $$
+ where $\mathcal{R}_d^i$ is the rendered depth image at view $i$, $\mathcal{N}_i$ are the neighboring images of $I_i$, and $I_{j \rightarrow i}$ is the warped image from view $j$ to $i$ using the rendered depth [S1]. No mask is required [S1].
+ 
+-**Pseudocode:**
+-```python
+-def multi_view_photometric_shape_prediction(images, cameras, sdf_decoder, num_iters=1000, lr=0.01, max_steps=64, eps=1e-4):
+-    # Initialize latent code randomly [S1]
+-    z = np.random.randn(sdf_decoder.latent_dim)
+-    
+-    for step in range(num_iters):
+-        depths = []
+-        # Render depth for each view [S1]
+-        for i, cam in enumerate(cameras):
+-            h, w = images[i].shape[:2]
+-            depth_map = np.zeros((h, w))
+-            for u in range(h):
+-                for v in range(w):
+-                    ray_o, ray_d = cam.unproject(u, v)
+-                    ray_d = ray_d / np.linalg.norm(ray_d)
+-                    t = 0.0
+-                    for _ in range(max_steps):
+-                        sdf_val = sdf_decoder(z, ray_o + t * ray_d)
+-                        if sdf_val < eps:
+-                            break
+-                        t += sdf_val
+-                    depth_map[u, v] = t
+-            depths.append(depth_map)
+-        
+-        loss = 0.0
+-        # Compute photometric loss [S1]
+-        for i in range(len(images)):
+-            for j in range(len(images)):
+-                if i == j: continue
+-                # Warp image j to view i using rendered depth [S1]
+-                warped_img = warp_images(images[j], cameras[j], cameras[i], depths[i])
+-                # Photometric difference [S1]
+-                diff = images[i] - warped_img
+-                loss += np.sum(diff ** 2)
+-        
+-        # Update latent code to minimize loss [S1]
+-        grad = autograd.compute(loss, z)
+-        z = z - lr * grad
+-        
+-    return z
+-
+-def warp_images(source_img, src_cam, dst_cam, dst_depth):
+-    h, w = dst_depth.shape
+-    warped = np.zeros_like(source_img)
+-    for u in range(h):
+-        for v in range(w):
+-            ray_o, ray_d = dst_cam.unproject(u, v)
+-            ray_d = ray_d / np.linalg.norm(ray_d)
+-            t = dst_depth[u, v]
+-            point_3d = ray_o + t * ray_d
+-            src_u, src_v = src_cam.project(point_3d)
+-            if 0 <= src_u < source_img.shape[1] and 0 <= src_v < source_img.shape[0]:
+-                warped[u, v] = bilinear_interpolate(source_img, src_v, src_u)
+-    return warped
+-
+-def bilinear_interpolate(img, y, x):
+-    x0, x1 = int(x), min(int(x) + 1, img.shape[1] - 1)
+-    y0, y1 = int(y), min(int(y) + 1, img.shape[0] - 1)
+-    dx, dy = x - x0, y - y0
+-    return (1-dx)*(1-dy)*img[y0, x0] + dx*(1-dy)*img[y0, x1] + (1-dx)*dy*img[y1, x0] + dx*dy*img[y1, x1]
+-```
++**Parameters:**
++*   $\mathbf{z}$ initialization: Random vector [S1].
++*   Neighbor set $\mathcal{N}_i$: Not specified in sources [S1].
+ 
+ **Edge Cases:**
+-*   Initialization: Random initialization is used to ensure robustness against noise [S1].
++*   Initialization: Random initialization is used, which is robust to noise [S1].
+ *   Masks: No segmentation masks are required [S1].
+ 
++## Subtopics
++
++### 3D Object Prediction with Texture and Light
++A variant where the network predicts vertex positions, a texture map, and lighting information [S3, unofficial]. It uses a W-GAN with gradient penalty and perceptual loss for training stability [S3, unofficial]. The objective is:
++$$ \theta^*, \phi^* = \arg \min_\theta \arg \max_\phi (\lambda_{adv} L_{adv} - \lambda_{gp} L_{gp}) + \lambda_{per} L_{percep} + L_1 $$
++where $L_{adv}$ and $L_{gp}$ are adversarial and gradient penalty losses, and $L_{percep}$ is a perceptual loss using pre-trained VGG and discriminator features [S3, unofficial].
++
+ ## Operating characteristics
+-*   **Robustness:** More robust to initialization noise and camera focal length changes than PMO [S1].
+-*   **Performance:** Maintains accuracy because initialization is randomized and the implicit representation handles details better [S1].
+-*   **Comparison:** PMO relies on a trained image encoder and triangular mesh representation, causing significant performance drops with random initialization or domain shifts [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:** On ShapeNet, it achieves a median Chamfer Distance of 5.37 (partial dense) and 12.05 (sparse) compared to DeepSDF's 13.76 and 15.77 [S1]. For multi-view prediction, it achieves 0.919 Chamfer Distance with random initialization, outperforming PMO's 1.187 [S1].
++*   **Strengths:** Robust to initialization noise and camera focal length changes [S1]. Does not require segmentation masks [S1].
++*   **Limitations:** Requires known camera poses [S1]. Optimization may be slow due to iterative gradient descent [S1].
+ 
+ ## Background
+-Originated from research on differentiable rendering for 3D shape prediction [S1]. It leverages cross-view photometric consistency to optimize shape without supervision [S1].
++Originated from the DIST paper [S1] and Pix2Vex [S2, unofficial]. The method leverages differentiable sphere tracing to enable geometry-based reasoning from multi-view color images [S1]. It was developed to address the sensitivity of encoder-based methods like PMO to domain shifts and initialization [S1].
+ 
+ ## Sources
+ [S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26
+-[S2] Pix2Vex: Image-to-Geometry Reconstruction using a Smooth Differentiable Renderer, https://doi.org/10.48550/arxiv.1903.11149, fetched 2026-10-26 (unofficial)+[S2] Pix2Vex: Image-to-Geometry Reconstruction using a Smooth Differentiable Renderer, https://doi.org/10.48550/arxiv.1903.11149, fetched 2026-10-26 (unofficial)
++[S3] Learning to Predict 3D Objects with an Interpolation-based Differentiable Renderer, https://doi.org/10.48550/arxiv.1908.01210, fetched 2026-10-26 (unofficial)

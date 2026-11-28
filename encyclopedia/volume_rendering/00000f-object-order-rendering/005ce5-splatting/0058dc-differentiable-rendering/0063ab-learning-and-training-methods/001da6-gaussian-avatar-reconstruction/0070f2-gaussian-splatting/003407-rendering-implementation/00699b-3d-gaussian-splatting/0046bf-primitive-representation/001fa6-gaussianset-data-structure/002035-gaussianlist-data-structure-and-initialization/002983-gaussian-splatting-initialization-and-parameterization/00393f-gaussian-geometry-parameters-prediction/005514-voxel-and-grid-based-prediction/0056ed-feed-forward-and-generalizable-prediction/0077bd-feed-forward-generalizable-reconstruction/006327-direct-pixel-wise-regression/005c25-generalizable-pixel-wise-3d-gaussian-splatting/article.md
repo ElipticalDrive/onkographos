@@ -1,0 +1,193 @@
+# Generalizable Pixel-Wise 3D Gaussian Splatting
+
+Also called: GPS-Gaussian, Generalizable 3D Gaussian Splatting, Generalizable 3D-Gaussians
+
+## Overview
+Generalizable Pixel-Wise 3D Gaussian Splatting (GPS-Gaussian) is a feed-forward method for real-time novel view synthesis of humans from sparse camera views [S1]. It predicts pixel-wise Gaussian parameter maps (position, color, rotation, scaling, opacity) for selected source views, unprojects them to 3D, aggregates them, and renders the target view using differentiable Gaussian splatting [S1]. Unlike original 3D Gaussian Splatting which requires per-subject optimization, or implicit methods like ENeRF that recompute modules per target view, GPS-Gaussian eliminates fine-tuning by regressing parameters directly from source images [S1]. It differs from sibling methods like [FineSplat](15257-finesplat.md) and [SparSplat](15813-sparsplat.md) by defining Gaussian parameters on 2D image planes of source views rather than unstructured point clouds or sparse grids, allowing the use of efficient 2D convolution networks [S1].
+
+## How it works
+**Inputs:** $N$ source RGB images $\{I_n\}_{n=1}^N$ with known camera positions $\{C_n\}_{n=1}^N$ and scene center $O$. A target novel view camera position $C_{tar}$ and view vector $V_{tar} = C_{tar} - O$.
+**Outputs:** Rendered image $I_{tar}$ at the target viewpoint.
+
+**Data Structures:**
+1.  **Feature Maps:** $f^s \in \mathbb{R}^{H/2^s \times W/2^s \times D_s}$ for $s=1..S$.
+2.  **Correlation Volume:** $C \in \mathbb{R}^{H/2 \times W/2 \times W/2}$.
+3.  **Depth Maps:** $D \in \mathbb{R}^{H \times W}$.
+4.  **Gaussian Parameter Maps:** Defined on image planes.
+    *   Position Map $M_p(x)$: 3D vector.
+    *   Color Map $M_c(x)$: 3D vector (RGB).
+    *   Rotation Map $M_r(x)$: 4D vector (quaternion).
+    *   Scaling Map $M_s(x)$: 3D vector.
+    *   Opacity Map $M_\alpha(x)$: Scalar.
+5.  **Gaussian Set:** Aggregated 3D Gaussians $\mathcal{G} = \{g_k\}_k$, where $g_k = (\mu_k, \Sigma_k, \alpha_k, S_k, c_k)$.
+
+**Parameters:**
+*   $S=3$: Number of feature scales [S1].
+*   $\beta=0.8$: Weight for L1 loss [S1].
+*   $\gamma=0.2$: Weight for SSIM loss [S1].
+*   $\mu=0.9$: Exponential decay weight for depth supervision [S1].
+*   $T$: Number of iterative depth estimation steps.
+*   Input Resolution: $1024 \times 1024$ [S1].
+
+**Steps:**
+
+1.  **View Selection:**
+    Compute view vectors $V_n = C_n - O$ for all source views. Compute dot products between all $V_n$ and $V_{tar}$. Select the two source views with the highest dot products (nearest views) as the working set: left view $I_l$ and right view $I_r$ [S1].
+
+2.  **Feature Extraction:**
+    Feed rectified source images $I_l, I_r$ into a shared image encoder $E_{img}$ [S1]. The encoder uses residual blocks and downsampling. It produces dense feature maps $f^s \in \mathbb{R}^{H/2^s \times W/2^s \times D_s}$ for $s=1, 2, 3$ [S1].
+    *   $s=1$: Resolution $H/2 \times W/2$, Channels $D_1=32$.
+    *   $s=2$: Resolution $H/4 \times W/4$, Channels $D_2=48$.
+    *   $s=3$: Resolution $H/8 \times W/8$, Channels $D_3=96$ [S1].
+    *   Architecture: Similar to RAFT-Stereo encoder. First conv kernel $5 \times 5$ (instead of $7 \times 7$). Batch normalization replaced with Group Normalization [S1].
+
+3.  **Cost Volume Construction:**
+    For the finest scale features $f^1_l, f^1_r \in \mathbb{R}^{H/2 \times W/2 \times D_1}$, compute a 3D correlation volume $C \in \mathbb{R}^{H/2 \times W/2 \times W/2}$ using matrix multiplication [S1]:
+    $$ C(f^1_l, f^1_r), C_{ijk} = \sum_{h=1}^{D_1} (f^1_l)_{ijh} \cdot (f^1_r)_{ikh} $$
+    where $i,j$ are spatial coordinates in the left view and $k$ is the disparity index [S1].
+
+4.  **Iterative Depth Estimation:**
+    Predict a sequence of depth estimations $\{d^t_l\}_{t=1}^T$ and $\{d^t_r\}_{t=1}^T$ by looking up in volume $C$ using an iterative update mechanism [S1]. The final outputs $(d^T_l, d^T_r)$ are upsampled to full image resolution $(D_l, D_r)$ via convex upsampling [S1].
+    The depth estimation module is formulated as:
+    $$ \langle D_l, D_r \rangle = \Phi_{depth}(f^1_l, f^1_r, K_l, K_r) $$
+    where $K_l, K_r$ are camera intrinsics [S1].
+
+5.  **Position Map Generation:**
+    For each foreground pixel $x$ in the source image, unproject from 2D to 3D using the predicted depth map $D(x)$ and projection matrix $P$ [S1]:
+    $$ M_p(x) = \Pi^{-1}_P (x, D(x)) $$
+    where $\Pi^{-1}_P$ is the unprojection operation [S1].
+
+6.  **Color Map Generation:**
+    For diffuse human scenes, use the source RGB image directly as the color map [S1]:
+    $$ M_c(x) = I(x) $$
+
+7.  **Geometric Feature Fusion:**
+    Construct an encoder $E_{depth}$ taking the depth map $D$ as input to complement geometric awareness [S1]. Fuse image features from $E_{img}$ and spatial features from $E_{depth}$ using a U-Net like decoder $D_{parm}$ to regress Gaussian features $\Gamma \in \mathbb{R}^{H \times W \times D_G}$ [S1]:
+    $$ \Gamma = D_{parm} (E_{img}(I) \oplus E_{depth}(D)) $$
+    where $\oplus$ denotes concatenation at all feature levels [S1].
+
+8.  **Scaling Map Generation:**
+    Predict scaling $h_s(\Gamma(x))$ and apply Softplus activation [S1]:
+    $$ M_s(x) = \text{Softplus}(h_s(\Gamma(x))) $$
+
+9.  **Opacity Map Generation:**
+    Predict opacity $h_\alpha(\Gamma(x))$ and apply Sigmoid activation [S1]:
+    $$ M_\alpha(x) = \text{Sigmoid}(h_\alpha(\Gamma(x))) $$
+
+10. **Rotation Map Generation:**
+    Predict rotation $h_r(\Gamma(x))$ and apply normalization [S1]:
+    $$ M_r(x) = \text{Norm}(h_r(\Gamma(x))) $$
+    *(Note: Specific normalization function details are in supplementary material [S1], typically L2 normalization for quaternions)*.
+
+11. **Aggregation and Rendering:**
+    Unproject Gaussian parameter maps from both source views ($I_l, I_r$) to 3D space to create Gaussian points. Aggregate the Gaussians from both views into a single set $\mathcal{G}$ [S1]. Render the target viewpoint using differentiable Gaussian splatting on $\mathcal{G}$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gps_gaussian_render(source_images, camera_positions, scene_center, target_camera):
+    """
+    source_images: List of N RGB images (H, W, 3)
+    camera_positions: List of N camera positions (3,)
+    scene_center: Scene center (3,)
+    target_camera: Target camera position (3,)
+    Returns: Rendered image (H, W, 3)
+    """
+    # 1. View Selection
+    view_vectors = [pos - scene_center for pos in camera_positions]
+    target_vector = target_camera - scene_center
+    
+    # Compute dot products and select two nearest views
+    scores = [dot(v, target_vector) for v in view_vectors]
+    indices = argsort(scores, descending=True)[:2]
+    idx_l, idx_r = indices[0], indices[1]
+    
+    I_l = source_images[idx_l]
+    I_r = source_images[idx_r]
+    
+    # 2. Feature Extraction
+    # E_img is a shared encoder with 3 scales
+    f_l = E_img(I_l) # Returns list of feature maps [f^1_l, f^2_l, f^3_l]
+    f_r = E_img(I_r) # Returns list of feature maps [f^1_r, f^2_r, f^3_r]
+    
+    # 3. Cost Volume Construction (using finest scale f^1)
+    f1_l, f1_r = f_l[0], f_r[0]
+    # C shape: (H/2, W/2, W/2)
+    C = compute_correlation_volume(f1_l, f1_r)
+    
+    # 4. Iterative Depth Estimation
+    # Returns full resolution depth maps D_l, D_r
+    D_l, D_r = iterative_depth_estimator(C, f1_l, f1_r)
+    
+    # 5. Generate Parameter Maps for Left View
+    # Position
+    M_p_l = unproject_2d_to_3d(I_l, D_l, camera_positions[idx_l])
+    # Color
+    M_c_l = I_l
+    # Geometric Fusion for other params
+    # E_depth takes D_l, E_img takes I_l
+    feat_l = fuse_features(E_img(I_l), E_depth(D_l))
+    # Regress Gamma
+    Gamma_l = D_parm(feat_l)
+    # Scaling, Opacity, Rotation
+    M_s_l = softplus(head_s(Gamma_l))
+    M_alpha_l = sigmoid(head_alpha(Gamma_l))
+    M_r_l = normalize(head_r(Gamma_l))
+    
+    # 6. Generate Parameter Maps for Right View (Same logic)
+    M_p_r = unproject_2d_to_3d(I_r, D_r, camera_positions[idx_r])
+    M_c_r = I_r
+    feat_r = fuse_features(E_img(I_r), E_depth(D_r))
+    Gamma_r = D_parm(feat_r)
+    M_s_r = softplus(head_s(Gamma_r))
+    M_alpha_r = sigmoid(head_alpha(Gamma_r))
+    M_r_r = normalize(head_r(Gamma_r))
+    
+    # 7. Aggregation
+    # Create Gaussian points from Left View
+    gaussians_l = create_gaussians(M_p_l, M_c_l, M_r_l, M_s_l, M_alpha_l)
+    # Create Gaussian points from Right View
+    gaussians_r = create_gaussians(M_p_r, M_c_r, M_r_r, M_s_r, M_alpha_r)
+    
+    # Aggregate all Gaussians
+    all_gaussians = gaussians_l + gaussians_r
+    
+    # 8. Rendering
+    rendered_image = differentiable_splatting(all_gaussians, target_camera)
+    
+    return rendered_image
+```
+
+## Subtopics
+
+### Epipolar Sampling and Attention (G-3DG variant)
+Used in [GGRt](https://doi.org/10.1007/978-3-031-73209-6_19) [S2]. Organizes images into pairs, uses an Epipolar Sampler to find correspondences along epipolar lines, Cross-Attention for per-pixel correspondence, and Local Self-Attention for high-resolution processing. Concatenates Gaussian points from all pairs for large scenes. Choose when generalizing to larger scenes or pose-free settings. Link: [GGRt](16747-ggrt.md).
+
+### FineSplat
+Uses sparse splatting for efficiency. Choose when memory is constrained. Link: [FineSplat](15257-finesplat.md).
+
+### SparSplat
+Focuses on sparse representation. Choose for very sparse input views. Link: [SparSplat](15813-sparsplat.md).
+
+## Operating characteristics
+**Time Complexity:** The source view computation (depth estimation and Gaussian parameter regression) dominates the runtime [S1]. Novel view rendering is extremely fast [S1].
+**Memory Complexity:** Requires storing feature maps, correlation volume, and depth maps for two source views. The correlation volume size is $O(H \cdot W^2)$ for the finest scale [S1].
+**Measured Performance:**
+*   On RTX 3090 GPU with 10 concurrent novel views, total time is 35ms [S1].
+*   Source view computation time ($T_{src}$) is approximately 14-27ms depending on implementation details (TensorRT vs standard) [S1].
+*   Novel view rendering time ($T_{novel}$) is 0.8ms per view [S1].
+*   Training time: ~15 hours on a single RTX 3090 [S1].
+**Scaling:** Rendering multiple novel views is concurrent and linear in the number of views ($T = T_{src} + n \times T_{novel}$) [S1].
+**Strengths:** Real-time performance, no per-subject optimization, handles sparse views better than implicit methods in occluded regions due to learned human priors [S1].
+**Limitations:** Performance depends on the quality of depth estimation; unstable depth in early training impacts Gaussian regression [S1]. Occlusion can cause depth ambiguity if human priors are insufficient [S1].
+**When to use:** Real-time human novel view synthesis from sparse views.
+**When not to use:** Scenes with significant specular reflections (method assumes diffuse) [S1], or when per-subject optimization time is acceptable for higher quality [S1].
+
+## Background
+GPS-Gaussian was introduced by Zheng et al. in 2024 [S1]. It builds on the principles of 3D Gaussian Splatting [12] and generalizable neural rendering [19, 57]. It addresses the limitations of per-subject optimization in 3D-GS and the slow rendering speed of implicit methods like ENeRF [S1]. The method leverages large-scale human scan data (Twindom, THuman2.0) to learn human priors [S1].
+
+## Sources
+[S1] GPS-Gaussian: Generalizable Pixel-Wise 3D Gaussian Splatting for Real-Time Human Novel View Synthesis, https://doi.org/10.1109/cvpr52733.2024.01861, fetched 2026-10-26
+[S2] GGRt: Towards Pose-Free Generalizable 3D Gaussian Splatting in Real-Time, https://doi.org/10.1007/978-3-031-73209-6_19, fetched 2026-10-29

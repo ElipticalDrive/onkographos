@@ -1,0 +1,152 @@
+# Dual Volume Rendering
+Also called: Dual-field volume rendering, Multi-field correlation visualization
+
+## Overview
+Dual Volume Rendering is a visualization technique for displaying two scalar fields simultaneously within a volume to investigate their correlations [S1, book]. It extends standard texture-based volume rendering by using the transparency (opacity) values of one scalar field to define the isocontours (isobars) onto which the second scalar field is color-mapped [S1, book]. Unlike overlaid rendering, which conceals features in regions of rapid value changes or high concentrations, Dual Volume Rendering allows the viewer to follow steep gradients of both quantities simultaneously [S1, book].
+
+## How it works
+**Inputs and Outputs**
+- **Input:** Two scalar fields, $F_1(\mathbf{x})$ and $F_2(\mathbf{x})$, defined on a 3D grid or point set.
+- **Output:** A 2D image where color encodes one field and opacity/structure encodes the other.
+
+**Data Structures**
+- Two scalar grids of identical dimensions (or resampled to match).
+- Transfer functions for color mapping ($T_c$) and opacity mapping ($T_o$).
+
+**Method**
+The method constructs a composite visual attribute for each sample point $\mathbf{x}$ along a ray. Let $F_A$ be the field defining the structural opacity (the "carrier") and $F_B$ be the field defining the color (the "content").
+
+1. **Sample Fields:** At sample point $\mathbf{x}$, retrieve values $v_A = F_A(\mathbf{x})$ and $v_B = F_B(\mathbf{x})$.
+2. **Compute Opacity:** Determine the opacity $\alpha$ using the transfer function for the carrier field:
+   $$ \alpha = T_o(v_A) $$
+   Typically, $T_o$ is designed to highlight isocontours or gradients of $F_A$, often resulting in high opacity at specific threshold values of $F_A$ and low opacity elsewhere.
+3. **Compute Color:** Determine the color $C$ using the transfer function for the content field:
+   $$ C = T_c(v_B) $$
+   $T_c$ maps the range of $F_B$ to a color spectrum (e.g., red-blue for low-high).
+4. **Composite:** Accumulate the color and opacity along the ray using standard volume integration (e.g., front-to-back compositing).
+
+**Pseudocode**
+The following pseudocode implements the per-sample computation for Dual Volume Rendering. It assumes standard front-to-back volume rendering integration.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dual_volume_render_sample(x, ray_direction, grid_A, grid_B, T_o, T_c):
+    """
+    Computes the color and opacity contribution for a single sample point
+    in a Dual Volume Rendering setup.
+    
+    Args:
+        x: Current 3D position in world space.
+        ray_direction: Normalized ray direction vector.
+        grid_A: Scalar field defining opacity (carrier).
+        grid_B: Scalar field defining color (content).
+        T_o: Opacity transfer function mapping value -> [0, 1].
+        T_c: Color transfer function mapping value -> RGB color.
+        
+    Returns:
+        color: RGB color contribution.
+        alpha: Opacity contribution.
+    """
+    # 1. Sample the two scalar fields at position x
+    # Note: Interpolation (e.g., trilinear) is required if x is not on grid nodes.
+    val_A = grid_A.sample(x)
+    val_B = grid_B.sample(x)
+    
+    # 2. Map the carrier field (A) to opacity
+    # This defines the "isocontours" or structural visibility
+    alpha = T_o(val_A)
+    
+    # 3. Map the content field (B) to color
+    # This provides the visual information about the second quantity
+    color = T_c(val_B)
+    
+    return color, alpha
+
+def dual_volume_render_ray(ray_origin, ray_direction, grid_A, grid_B, T_o, T_c, num_samples):
+    """
+    Renders a single ray using Dual Volume Rendering.
+    
+    Args:
+        ray_origin: Start of the ray.
+        ray_direction: Direction of the ray.
+        grid_A: Scalar field for opacity.
+        grid_B: Scalar field for color.
+        T_o: Opacity transfer function.
+        T_c: Color transfer function.
+        num_samples: Number of steps along the ray.
+        
+    Returns:
+        final_color: The resulting RGB color for this ray.
+    """
+    # Standard front-to-back compositing initialization
+    accumulated_color = [0.0, 0.0, 0.0]
+    accumulated_alpha = 0.0
+    
+    # Step size
+    step_size = 1.0 / num_samples
+    
+    for i in range(num_samples):
+        # Calculate current sample position
+        t = i * step_size
+        x = ray_origin + t * ray_direction
+        
+        # Check if x is within volume bounds
+        if not is_inside_volume(x):
+            break
+            
+        # Get contribution from this sample
+        color, alpha = dual_volume_render_sample(x, ray_direction, grid_A, grid_B, T_o, T_c)
+        
+        # Front-to-back compositing
+        # Weight of current sample relative to what has already been accumulated
+        weight = alpha * (1.0 - accumulated_alpha)
+        
+        accumulated_color = accumulated_color + color * weight
+        accumulated_alpha = accumulated_alpha + weight
+        
+        # Early ray termination if fully opaque
+        if accumulated_alpha >= 1.0:
+            break
+            
+    return accumulated_color
+```
+
+**Parameters and Typical Values**
+- **Transfer Functions:** $T_o$ is often a threshold or gradient-based function to highlight isocontours of $F_A$. $T_c$ is typically a linear or diverging colormap (e.g., red-blue) for $F_B$ [S1, book].
+- **Symmetry:** The method is symmetric in concept; one can map $F_1$ color onto $F_2$ isocontours or vice versa [S1, book].
+
+**Edge Cases and Pitfalls**
+- **Occlusion:** If $T_o$ for the carrier field is too opaque, it may obscure the color information of the content field in regions where both fields are significant.
+- **Gradient Concealment:** Unlike simple overlay, this method is specifically designed to avoid concealing features in regions of rapid value changes, but poor choice of $T_o$ can still lead to loss of detail [S1, book].
+
+## Subtopics
+
+### Multi-field Visualization Combination
+General techniques for combining multiple data fields, including additive blending and layering. Choose when simple overlay is sufficient and correlation analysis is not the primary goal. [Multi-field Visualization Combination](7061-multi-field-visualization-combination.md)
+
+### Multivariate Volume Rendering
+Methods that map multiple scalar components to color directly (e.g., via color space mapping). Choose when the number of fields exceeds two or when complex multivariate relationships need direct color encoding. [Multivariate Volume Rendering](21566-multivariate-volume-rendering.md)
+
+### Transfer Function and Color Mapping
+Techniques for defining how data values map to visual attributes. Essential for tuning the $T_c$ and $T_o$ functions in Dual Volume Rendering. [Transfer Function and Color Mapping](15647-transfer-function-and-color-mapping.md)
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples, identical to standard volume rendering. The additional cost is the sampling of a second grid and the evaluation of an additional transfer function.
+- **Memory Complexity:** Requires storage for two scalar fields. If the fields are large, memory bandwidth may become a bottleneck during ray traversal.
+- **Strengths:**
+  - Reveals correlations between two scalar fields that are otherwise hidden in overlaid rendering [S1, book].
+  - Preserves visibility of steep gradients for both quantities simultaneously [S1, book].
+  - Intuitive interpretation: structure is defined by one field, content by the other.
+- **Limitations:**
+  - Limited to two scalar fields.
+  - Requires careful tuning of transfer functions to balance visibility of both fields.
+  - May suffer from visual clutter if both fields have high-frequency variations.
+- **When to Use:** Investigating correlations between plasma properties (e.g., magnetic pressure and density) in astrophysical simulations or other domains where two scalar quantities interact [S1, book].
+- **When Not to Use:** When more than two fields need to be visualized simultaneously, or when the primary goal is to visualize vector/tensor directions rather than scalar correlations.
+
+## Background
+Dual Volume Rendering was introduced in the context of visualizing numerical astrophysics data, specifically for investigating correlations between plasma properties in the intra-cluster medium (ICM) from magnetohydrodynamic (MHD) simulations [S1, book]. The technique extends the usual color-mapping algorithm of texture-based volume rendering to use transparency values from a second scalar field, allowing the display of two scalar fields at once [S1, book]. It addresses the limitation of overlaid rendering, which conceals features in regions of rapid value changes or high concentrations [S1, book].
+
+## Sources
+[S1] Visualization Methods for Numerical Astrophysics, https://doi.org/10.5772/32203, fetched 2026-10-26 (book)

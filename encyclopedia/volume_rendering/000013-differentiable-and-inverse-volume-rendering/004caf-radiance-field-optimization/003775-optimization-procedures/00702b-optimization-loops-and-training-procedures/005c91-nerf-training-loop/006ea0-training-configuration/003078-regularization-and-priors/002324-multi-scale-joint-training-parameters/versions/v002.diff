@@ -1,0 +1,133 @@
+--- v001.md
++++ v002.md
+@@ -4,73 +4,88 @@
+ 
+ ## Overview
+-Multi-scale joint training parameters are hyperparameters used to balance loss terms across different network depths or training stages in dynamically growing neural radiance fields. They ensure that uncertainty-aware losses and standard reconstruction losses contribute appropriately to the gradient updates as the network expands. This method is distinct from static regularization priors by adapting weights to the hierarchical structure of the model's growth.
++Multi-scale joint training parameters are hyperparameters used to balance the contributions of reconstruction and uncertainty losses across multiple stages of a dynamically growing neural radiance field. This method addresses the problem of stable optimization in recursive NeRF architectures by ensuring that errors in coarser stages do not dominate the gradient updates for finer details. It sets apart from standard single-scale training by explicitly weighting the loss at each depth level of the network hierarchy, preventing the "forgetting" of coarse geometry as the network grows.
+ 
+ ## How it works
+-The method applies specific weights to loss components calculated at each stage of a dynamically growing network.
++The method operates within a multi-stage training framework where the network grows iteratively. At each stage $i$, the total loss is a weighted sum of the Mean Squared Error (MSE) and an uncertainty-based loss.
+ 
+ **Inputs and Outputs:**
+-- Input: Loss values from multiple stages $i=1 \dots D$, where $D$ is the current number of stages.
+-- Output: A scalar total loss $\mathcal{L}$ used for backpropagation.
++*   **Input:** The current stage index $i$, the predicted color/opacity at stage $i$, and the ground truth image.
++*   **Output:** The scalar loss value $\mathcal{L}^i$ for stage $i$, and the total loss $\mathcal{L}$ for backpropagation.
+ 
+ **Data Structures:**
+-- $\mathcal{L}_{MSE}^i$: Mean Squared Error loss at stage $i$.
+-- $L_{unct}^i$: Uncertainty loss at stage $i$.
+-- $\beta_1, \beta_2$: Scalar weights.
++*   $\mathcal{L}_{MSE}^i$: Scalar MSE loss for stage $i$.
++*   $\mathcal{L}_{unct}^i$: Scalar uncertainty loss for stage $i$.
++*   $\beta_1$: Weight for the MSE term.
++*   $\beta_2$: Weight for the uncertainty term.
++
++**Parameters:**
++*   $\beta_1 = 1.0$
++*   $\beta_2 = 0.1$
++*   $D$: The current number of stages in the network.
+ 
+ **Formulas:**
+-The total loss is computed as [S1]:
++The loss for a single stage $i$ is defined as:
+ $$
+-\mathcal{L} = \sum_{i=1}^D \beta_1 \mathcal{L}_{MSE}^i + \beta_2 L_{unct}^i
++\mathcal{L}^i = \beta_1 \mathcal{L}_{MSE}^i + \beta_2 \mathcal{L}_{unct}^i
+ $$
+-where:
+-- $D$ is the current number of stages (also equal to $D-1$ times the network growth count).
+-- $\mathcal{L}_{MSE}^i$ is the MSE loss of the output image of layer $i$.
+-- $L_{unct}^i$ is the uncertainty loss of the output image of layer $i$.
+-- $\beta_1$ and $\beta_2$ are the multi-scale joint training weights.
++The total loss for the multi-scale joint training is the sum over all $D$ stages:
++$$
++\mathcal{L} = \sum_{i=1}^D \mathcal{L}^i = \sum_{i=1}^D \left( \beta_1 \mathcal{L}_{MSE}^i + \beta_2 \mathcal{L}_{unct}^i \right)
++$$
++where $\mathcal{L}_{MSE}^i$ is the pixel-wise MSE between the rendered and ground truth images at stage $i$, and $\mathcal{L}_{unct}^i$ is the uncertainty loss derived from the network's predictive uncertainty at stage $i$.
+ 
+-**Parameters:**
+-- $\beta_1 = 1.0$
+-- $\beta_2 = 0.1$ [S1]
++**Steps:**
++1.  Initialize $\beta_1 = 1.0$ and $\beta_2 = 0.1$.
++2.  For each training iteration:
++    a. Perform forward pass through all active stages $1 \dots D$.
++    b. For each stage $i$:
++       i. Compute $\mathcal{L}_{MSE}^i$ between rendered output and ground truth.
++       ii. Compute $\mathcal{L}_{unct}^i$ based on the uncertainty estimate of the stage.
++       iii. Compute $\mathcal{L}^i = \beta_1 \mathcal{L}_{MSE}^i + \beta_2 \mathcal{L}_{unct}^i$.
++    c. Compute total loss $\mathcal{L} = \sum_{i=1}^D \mathcal{L}^i$.
++    d. Backpropagate $\mathcal{L}$ to update network parameters.
+ 
+ **Pseudocode:**
+ ```python
+-def compute_multi_scale_loss(stages, beta1=1.0, beta2=0.1):
+-    """
+-    Compute total loss for dynamically growing NeRF stages.
++def compute_multi_scale_loss(rendered_images, ground_truth_images, uncertainties, num_stages):
++    beta1 = 1.0
++    beta2 = 0.1
++    total_loss = 0.0
+     
+-    Args:
+-        stages: List of stage objects, each containing 'mse_loss' and 'unct_loss'.
+-        beta1: Weight for MSE loss.
+-        beta2: Weight for uncertainty loss.
++    for i in range(num_stages):
++        # Compute MSE loss for stage i
++        mse_loss = mean_squared_error(rendered_images[i], ground_truth_images[i])
+         
+-    Returns:
+-        Total scalar loss.
+-    """
+-    total_loss = 0.0
+-    for stage in stages:
+-        mse_loss = stage.mse_loss
+-        unct_loss = stage.unct_loss
+-        total_loss += beta1 * mse_loss + beta2 * unct_loss
++        # Compute uncertainty loss for stage i
++        # Note: Specific formulation of L_unct is not detailed in source, 
++        # assumed to be a function of uncertainties[i]
++        unct_loss = compute_uncertainty_loss(uncertainties[i])
++        
++        # Weighted sum for stage i
++        stage_loss = beta1 * mse_loss + beta2 * unct_loss
++        total_loss += stage_loss
++        
+     return total_loss
+ ```
+ 
+-**Edge Cases:**
+-- If the network has not grown ($D=1$), the sum contains only the initial stage.
+-- Uncertainty values must be positive; if $L_{unct}^i$ is undefined or zero, it contributes nothing to the weighted sum.
++**Edge Cases and Pitfalls:**
++*   **Precision:** Ensure $\mathcal{L}_{unct}^i$ is normalized similarly to $\mathcal{L}_{MSE}^i$ before weighting, as uncertainty values may have different scales.
++*   **Boundary:** If $D=1$, the method reduces to single-scale training with fixed weights.
+ 
+ ## Subtopics
+ 
+-### Multi-stage Training Protocol
+-A progressive training scheme used in inverse rendering frameworks that utilizes multi-scale parameters. It involves four steps: (1) Pretrain Direct Prediction Module (albedo, normal, depth) to ensure reasonable initial values; (2) Jointly train Direct and Lighting Joint Prediction Modules using a multi-task loss; (3) Freeze the first two modules and train the Joint Re-prediction Module; (4) End-to-end finetune all modules with multi-task loss on both joint prediction outputs and intermediate outputs [S2]. This protocol ensures stable convergence when learning HDR lighting from LDR images.
++### [Multi-stage Training Protocol](14692-multi-stage-training-protocol.md)
++Structures optimization into sequential phases to ensure stable convergence of coupled components, decoupling geometry and lighting training before joint optimization.
+ 
+ ## Operating characteristics
+-- **Complexity:** Linear with respect to the number of stages $D$.
+-- **Performance:** Improves convergence in dynamically growing networks by preventing early stages from being overwhelmed by later-stage gradients [S1].
+-- **Limitations:** Requires careful tuning of $\beta_1$ and $\beta_2$ if the scale of MSE and uncertainty losses differs significantly across stages.
++*   **Time Complexity:** Linear with respect to the number of stages $D$, as each stage's loss is computed and summed.
++*   **Memory Complexity:** Requires storing intermediate outputs and uncertainties for all $D$ stages during the forward pass.
++*   **Strengths:** Stabilizes training in dynamically growing networks by preventing fine-scale details from being overwhelmed by coarse-scale errors.
++*   **Limitations:** Requires careful tuning of $\beta_1$ and $\beta_2$ if the scale of uncertainty loss changes significantly across stages.
++*   **When to use:** When using recursive or dynamically growing NeRF architectures that involve multiple stages of refinement.
+ 
+ ## Background
+-The parameters originate from Recursive-NeRF, which introduces an adaptive dynamic growth strategy. The method clusters uncertain queries to grow deeper networks, requiring balanced loss weighting across these new and existing stages [S1]. The multi-stage protocol is also referenced in inverse rendering contexts to handle coupled prediction tasks [S2].
++The method originates from Recursive-NeRF, an efficient and dynamically growing NeRF approach. It was introduced to handle the challenges of training networks that grow in depth and capacity over time, ensuring that the loss function appropriately accounts for the contributions of each stage to the final rendering quality.
+ 
+ ## Sources
+-[S1] Recursive-NeRF: An Efficient and Dynamically Growing NeRF, https://doi.org/10.1109/tvcg.2022.3204608, fetched 2026-10-26
+-[S2] Learning Indoor Inverse Rendering with 3D Spatially-Varying Lighting, https://doi.org/10.1109/iccv48922.2021.01231, fetched 2026-10-26+[S1] Recursive-NeRF: An Efficient and Dynamically Growing NeRF, https://doi.org/10.1109/tvcg.2022.3204608, fetched 2026-10-26

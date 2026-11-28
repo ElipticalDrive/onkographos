@@ -1,0 +1,163 @@
+# Multi-resolution Triangle Texture
+Also called: Learnable Feature Vectors at Vertices of Recursively Subdivided Triangle Grid
+
+## Overview
+Multi-resolution Triangle Texture is a parameterization for per-triangle textures using learnable feature vectors at the vertices of a recursively subdivided triangle grid, supporting multi-resolution optimization without requiring a 2D texture atlas [S1, unofficial]. It builds on [Multi-resolution Surface Feature Encoding](12891-multi-resolution-surface-feature-encoding.md) by applying learnable features directly to the triangle soup. It sets itself apart from [Adaptive Multi-resolution LOD for Vertex Features](12898-adaptive-multi-resolution-lod-for-vertex-features.md) by maintaining explicit lower-resolution grids during training to improve optimization stability, while storing only the finest resolution at runtime [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A triangle soup (set of triangles), target maximum resolution level $R_{max}$, minimum resolution level $R_{min}$.
+*   **Output:** A set of 8-bit PNG images representing the finest-resolution texture, where each pixel corresponds to a feature vector at a subdivision point.
+
+**Data Structures:**
+*   **Feature Vector:** 8-dimensional.
+    *   7 dimensions: Color feature vector (32-bit float during training, encoded into 8-bit PNGs at storage).
+    *   1 dimension: Opacity/Alpha (32-bit float during training, encoded into 8-bit PNGs at storage).
+*   **Resolution Grids:** For each resolution level $R$ from $R_{min}$ to $R_{max}-1$, a grid of learnable feature vectors is maintained at the vertices of the recursively subdivided triangle grid.
+*   **Vertex Count:** At level $R$, the number of feature vertices is $(2^{R-1} + 1)(2^R + 1)$ [S1, unofficial]. Level $R=0$ corresponds to original triangle vertices.
+
+**Steps:**
+1.  **Initialization:** Initialize learnable feature vectors for all vertices at resolution levels $R_{min}, \dots, R_{max}-1$.
+2.  **Querying (Training Time):**
+    *   For a given evaluation point within a triangle, determine the micro-triangle containing the point at the finest resolution $R_{max}$.
+    *   Query feature vectors from all lower-resolution grids ($R_{min}$ to $R_{max}-1$) that contribute to this region.
+    *   Accumulate these features onto the finest grid. The accumulation mechanism is described as "accumulated on the finest grid" [S1, unofficial]. Note: The exact mathematical accumulation formula (e.g., weighted sum, max, average) is not explicitly defined in the sources, but the result is an over-parameterized high-resolution texture field [S1, unofficial].
+3.  **Activation:** Apply a sigmoid activation function to the accumulated features to constrain values to $[0, 1]$ [S1, unofficial].
+4.  **Decoding:**
+    *   The 7-dimensional color feature vector is decoded into RGB using a small neural network (Neural Deferred Shading) [S1, unofficial].
+    *   The 8th dimension (opacity) is used directly [S1, unofficial].
+5.  **Rasterization:** Render using the decoded RGB and opacity values via barycentric interpolation within the micro-triangle [S1, unofficial].
+6.  **Storage (Post-Training):** After training, only the finest-resolution texture (at $R_{max}$) is retained. The feature vectors are stored as 8-bit PNG images [S1, unofficial].
+
+**Parameters:**
+*   $R_{min}, R_{max}$: Define the range of resolution levels.
+    *   Typical values: $R_{min} = R_{max} = 3$ for the first 5000 iterations; $R_{min} = 2, R_{max} = 5$ for the final 5000 iterations [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Features are 32-bit floats during training but stored as 8-bit PNGs after training, potentially losing precision [S1, unofficial].
+*   **Accumulation Ambiguity:** The exact method of accumulating lower-resolution grids onto the finest grid is not specified beyond "accumulated" [S1, unofficial]. Implementers must infer or define this (e.g., weighted interpolation or direct assignment).
+*   **Neural Network:** The "small neural network" for decoding color features is not detailed. A standard MLP or linear layer is implied [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+class MultiResolutionTriangleTexture:
+    def __init__(self, triangles, R_min, R_max):
+        """
+        Initialize multi-resolution triangle texture.
+        triangles: List of triangles, each with 3 vertices.
+        R_min: Minimum resolution level for training.
+        R_max: Maximum resolution level for training.
+        """
+        self.R_min = R_min
+        self.R_max = R_max
+        self.triangles = triangles
+        
+        # Initialize learnable features for each resolution level
+        # Feature vector: 8 dims (7 color features + 1 opacity)
+        self.features = {}
+        for R in range(R_min, R_max):
+            # Number of vertices at level R: (2^(R-1) + 1) * (2^R + 1)
+            num_vertices = (2**(R-1) + 1) * (2**R + 1)
+            # Initialize with random values or zeros
+            self.features[R] = nn.Parameter(torch.randn(num_vertices, 8))
+            
+        # Neural network for decoding color features to RGB
+        self.color_decoder = nn.Sequential(
+            nn.Linear(7, 16),
+            nn.ReLU(),
+            nn.Linear(16, 3)
+        )
+
+    def get_vertex_count(self, R):
+        return (2**(R-1) + 1) * (2**R + 1)
+
+    def query_features(self, point, triangle, R_max):
+        """
+        Query features for a point within a triangle at resolution R_max.
+        point: 3D point (x, y, z)
+        triangle: Triangle object with vertices and subdivision points
+        R_max: Target resolution level
+        """
+        # Determine micro-triangle containing the point
+        micro_triangle = self.get_micro_triangle(point, triangle, R_max)
+        
+        # Query features from all lower-resolution grids
+        accumulated_features = torch.zeros(8)
+        for R in range(self.R_min, R_max):
+            # Get features for the micro-triangle at resolution R
+            # This requires mapping the point to the lower-resolution grid
+            # The exact mapping/accumulation is not specified in sources [S1, unofficial]
+            # Placeholder for accumulation logic
+            lower_res_features = self.query_lower_res_features(point, triangle, R)
+            accumulated_features += lower_res_features
+            
+        # Apply sigmoid activation
+        accumulated_features = torch.sigmoid(accumulated_features)
+        
+        # Decode color features
+        color_features = accumulated_features[:7]
+        opacity = accumulated_features[7]
+        rgb = self.color_decoder(color_features)
+        
+        return rgb, opacity
+
+    def query_lower_res_features(self, point, triangle, R):
+        """
+        Query features from a lower-resolution grid.
+        This function is a placeholder as the exact accumulation method is not specified [S1, unofficial].
+        """
+        # Get the vertex indices for the micro-triangle at resolution R
+        # Interpolate features based on barycentric coordinates
+        # Return interpolated feature vector
+        pass
+
+    def train_step(self, point, triangle):
+        """
+        Perform a training step.
+        """
+        rgb, opacity = self.query_features(point, triangle, self.R_max)
+        # Compute loss against ground truth
+        # ...
+        # Backpropagate
+        pass
+
+    def save_texture(self, filename):
+        """
+        Save the finest-resolution texture as 8-bit PNG images.
+        """
+        # Extract features at R_max - 1 (since R_max is not stored as a grid, but the result of accumulation)
+        # Note: The source says "only the finest-resolution texture is retained" [S1, unofficial]
+        # This implies the accumulated features at R_max are stored.
+        # However, the grid is maintained up to R_max - 1.
+        # The "finest-resolution texture" likely refers to the result of the accumulation at R_max.
+        # Since the source mentions storing as 8-bit PNGs, we assume the accumulated features are flattened and saved.
+        # The exact mapping of accumulated features to PNG pixels is not specified [S1, unofficial].
+        pass
+```
+
+## Subtopics
+
+### Triangle Texture Representation
+Represents RGB color and opacity within each triangle by linearly interpolating values stored at subdivision points [S1, unofficial]. Each subdivision point stores eight 32-bit floating-point values: a 7-dimensional color feature vector and one opacity value [S1, unofficial]. The color feature vector is decoded into RGB using a small neural network, while the opacity is used directly [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training involves querying and accumulating features from multiple resolution levels, which may be more computationally expensive than single-resolution methods. Rendering at runtime only queries the finest-resolution texture, which is efficient [S1, unofficial].
+*   **Memory Complexity:** During training, memory usage scales with the number of resolution levels and the number of vertices at each level. At runtime, only the finest-resolution texture is stored, which is compact [S1, unofficial].
+*   **Performance:** The method yields noticeably sharper results than TexGS, which uses textured translucent primitives [S1, unofficial].
+*   **Strengths:** Avoids multiple per-level texture lookups during rendering; preserves benefits of multi-resolution optimization; atlas-free texturing [S1, unofficial].
+*   **Limitations:** Requires a neural network for color decoding; accumulation of lower-resolution grids is not fully specified; precision loss when storing as 8-bit PNGs [S1, unofficial].
+*   **When to Use:** When high-frequency detail is required and multi-resolution optimization is beneficial.
+*   **When Not to Use:** When runtime performance is critical and the overhead of the neural network decoding is unacceptable.
+
+## Background
+Originated in DiffSoup: Direct Differentiable Rasterization of Triangle Soup for Extreme Radiance Field Simplification [S1, unofficial]. The method adapts the "mesh color" approach for atlas-free texturing to support learnable feature vectors [S1, unofficial]. It is similar in spirit to texture mip-mapping but applied to a triangular grid [S1, unofficial].
+
+## Sources
+[S1] DiffSoup: Direct Differentiable Rasterization of Triangle Soup for Extreme Radiance Field Simplification, https://doi.org/10.48550/arXiv.2603.27151, fetched 2026-10-30 (unofficial)

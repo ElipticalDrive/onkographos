@@ -1,0 +1,303 @@
+Start with the why: OAK has been used across many different industries and applications throughout the time, and lately Luxonis has been pushing more into the robotics perception space. This includes actual robots (AMRs, pick&place robot...
+
+[Feature-Request] On-device pointcloud & voxelization · Issue #791 · luxonis/depthai-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Feature-Request] On-device pointcloud & voxelization #791
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[Feature-Request] On-device pointcloud & voxelization#791
+Copy link
+Assignees
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+Erol444
+opened on Mar 30, 2023
+Issue body actions
+Start with the why:
+OAK has been used across many different industries and applications throughout the time, and lately Luxonis has been pushing more into the robotics perception space. This includes actual robots (AMRs, pick&place robot arms, drones), where point clouds operations is dominant, for path planning & navigation, collision avoidance, 3D mapping, pose estimation of objects for pick&place, etc.
+We do have on-device pointcloud demo here, based on "custom NN" approach, which is quite slow. Additionally, it doesn't support voxelization, which is the de-facto approach for reducing number of points in pointclouds (as, usually, applications don't require 1 million points at 30fps).
+Move to the what:
+Add Pointcloud node to depthai, which would run efficiently on SHAVE cores. You would connect depth (+ optionally RGB) and it would output pointcloud (optionally colored pointcloud).
+Move to the how:
+I have heard Open3D has a great implementation for depth -> pointcloud conversion, which includes voxelization in the same step and is more efficient.
+Reactions are currently unavailable
+Activity
+Erol444
+added
+enhancementNew feature or requestNew feature or request
+on Mar 30, 2023
+asa commented on Mar 30, 2023
+asa
+on Mar 30, 2023
+More actions
+Great news! I would love to keep track and help how I might.
+👍React with 👍1Reacted by Erik
+doisyg commented on Mar 30, 2023
+doisyg
+on Mar 30, 2023
+Last edited by doisyg
+More actions
+Thanks for opening this. Indeed this would be amazing for robotics applications!
+Saving CPU on the host but also tons of bandwidth between the camera and the host.
+As a first step, outputting a 0.05 m voxel grid (ie a pointcloud with points representing the center of their respective voxel) and without colors would satisfy 80% of the robotics navigation use cases (obstacle avoidance). In particular if the outputted voxel grid has a limited number of false positive.
+Later, we can imagine considering a voxel empty or full based on a threshold of points inside it. Ideally this threshold should vary with the distance and the angle to the camera.
+Open3d has a good example of voxelization (pointcloud to pointcloud, not from a depth image, but both steps can be combined and optimized, I did it in the past): https://github.com/isl-org/Open3D/blob/03231bb99b1b02fbca5ca79285e4a2e3d157218e/cpp/open3d/geometry/PointCloud.cpp#L354
+👍React with 👍1Reacted by Erik
+asa commented on Apr 5, 2023
+asa
+on Apr 5, 2023
+More actions
+Is there an example of where to write this kind of code? How do I do a simple operation on an image directly on the shave cores? Is this exposed somewhere that would allow a user to write this kind of code or is it in the proprietary part of the firmware stack?
+nabcouwer-dusty commented on Apr 7, 2023
+nabcouwer-dusty
+on Apr 7, 2023
+More actions
+Also tracking, as this would be very valuable. And happy to help out as well.
+👍React with 👍1Reacted by Erik
+Erol444 commented on Apr 8, 2023
+Erol444
+on Apr 8, 2023
+ContributorAuthor
+More actions
+@asa perhaps look into running on-device OpenCL kernels
+Erol444 commented on Jul 5, 2023
+Erol444
+on Jul 5, 2023
+ContributorAuthor
+More actions
+On-device pointcloud is available at on custom branch: https://github.com/luxonis/depthai-core/tree/pointcloud
+Demo
+Depthai.Viewer.2023-07-05.17-16-51.mp4
+Note that we haven't done any postprocessing on the host to smooth out the points / remove outliers. Voxelization should also help with outliers (noise).
+Demo script
+```
+#!/usr/bin/env python3
+
+import numpy as np
+import depthai as dai
+import depthai_viewer as viewer
+import subprocess
+import time
+from typing import Dict, Optional
+import sys
+
+class SeqSync:
+    def __init__(self):
+        self.msgs = dict()
+
+    def add_msg(self, msg, name):
+        seq = msg.getSequenceNum()
+        seq = str(seq)
+        if seq not in self.msgs:
+            self.msgs[seq] = dict()
+        self.msgs[seq][name] = msg
+
+    def get_msgs(self) -> Optional[Dict[str, dai.ImgFrame]]:
+        seq_remove = [] # Arr of sequence numbers to get deleted
+        for seq, syncMsgs in self.msgs.items():
+            seq_remove.append(seq) # Will get removed from dict if we find synced msgs pair
+            # Check if we have both detections and color frame with this sequence number
+            if len(syncMsgs) == 2: # rgb + depth
+                for rm in seq_remove:
+                    del self.msgs[rm]
+                return syncMsgs # Returned synced msgs
+        return None
+
+subprocess.Popen([sys.executable, "-m", "depthai_viewer"])
+time.sleep(1)  # Wait til rerun spins up
+viewer.init("Depthai Viewer")
+viewer.connect()
+
+monoResolution = dai.MonoCameraProperties.SensorResolution.THE_400_P
+
+# Create pipeline
+def create_pipeline(device):
+    pipeline = dai.Pipeline()
+    # Define sources and outputs
+    camRgb = pipeline.create(dai.node.ColorCamera)
+    left = pipeline.create(dai.node.MonoCamera)
+    right = pipeline.create(dai.node.MonoCamera)
+    stereo = pipeline.create(dai.node.StereoDepth)
+
+    rgbOut = pipeline.create(dai.node.XLinkOut)
+    pcl_out = pipeline.create(dai.node.XLinkOut)
+
+    rgbOut.setStreamName("rgb")
+    pcl_out.setStreamName("pcl")
+
+    #Properties
+    camRgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+    camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_800_P)
+    camRgb.setIspScale(1,2)
+    # For now, RGB needs fixed focus to properly align with depth.
+    # This value was used during calibration
+    try:
+        calibData = device.readCalibration2()
+        lensPosition = calibData.getLensPosition(dai.CameraBoardSocket.CAM_A)
+        if lensPosition:
+            camRgb.initialControl.setManualFocus(lensPosition)
+    except:
+        raise
+    left.setResolution(monoResolution)
+    left.setCamera("left")
+    right.setResolution(monoResolution)
+    right.setCamera("right")
+
+    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)
+    stereo.setSubpixel(True)
+    stereo.setLeftRightCheck(True)
+
+    config = stereo.initialConfig.get()
+    config.postProcessing.speckleFilter.enable = False
+    config.postProcessing.speckleFilter.speckleRange = 50
+    config.postProcessing.temporalFilter.enable = True
+    config.postProcessing.spatialFilter.enable = True
+    config.postProcessing.spatialFilter.holeFillingRadius = 2
+    config.postProcessing.spatialFilter.numIterations = 1
+    config.postProcessing.thresholdFilter.minRange = 500
+    config.postProcessing.thresholdFilter.maxRange = 5000
+    config.postProcessing.decimationFilter.decimationFactor = 2
+    config.postProcessing.decimationFilter.decimationMode = dai.StereoDepthConfig.PostProcessing.DecimationFilter.DecimationMode.NON_ZERO_MEDIAN
+    stereo.initialConfig.set(config)
+
+    # LR-check is required for depth alignment
+    stereo.setLeftRightCheck(True)
+    stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
+
+    pcl = pipeline.create(dai.node.PointCloud)
+    stereo.depth.link(pcl.inputDepth)
+
+    # Linking
+    camRgb.isp.link(rgbOut.input)
+    left.out.link(stereo.left)
+    right.out.link(stereo.right)
+    pcl.outputPointCloud.link(pcl_out.input)
+    return pipeline
+
+# Connect to device and start pipeline
+with dai.Device() as device:
+    # device.setIrLaserDotProjectorBrightness(760)
+    device.startPipeline(create_pipeline(device))
+    sync = SeqSync()
+
+    while True:
+        for name in device.getQueueEvents(("rgb", "pcl")):
+            msg = device.getOutputQueue(name).get()
+            sync.add_msg(msg, name)
+
+        msgs = sync.get_msgs()
+        if msgs is not None:
+                pcl_frame: dai.ImgFrame = msgs['pcl']
+                pcl_arr = pcl_frame.getFrame().view(np.float32).reshape((pcl_frame.getHeight() * pcl_frame.getWidth(), 3))
+                colors = msgs['rgb'].getCvFrame()[..., ::-1] # BGR to RGB
+                viewer.log_points("Pointcloud", pcl_arr.reshape(-1, 3), colors=colors.reshape(-1, 3))
+                viewer.log_image("Color", colors)
+```
+👍React with 👍5Reacted by smellslikeml, Zach, jenadzitsiuk, matbee and Neil Abcouwer
+jenadzitsiuk commented on Jul 10, 2023
+jenadzitsiuk
+on Jul 10, 2023
+Last edited by jenadzitsiuk
+More actions
+Thanks for the demo!
+After running it on Oak-D pro wide camera I see the pointcloud but the it seems to have issues. Its hard to see in the default depthai viewer, so I would like to export pointcloud with open3d and open it in meshlab.
+I added the following code to get this exported:
+```
+                pcl = o3d.geometry.PointCloud()
+                pcl.points = pcl_arr
+                pcl.colors = colors
+                counter += 1
+                filename = "/data/lux_pointcloud" + str(counter) + ".ply"
+                o3d.io.write_point_cloud(filename, pcl)
+```
+..but its not executed because msgs is always None in the above demo code, even though the viewer displays points and images. Could you please advise on how to extract the points / make the msgs not None?
+Erol444
+assigned
+SzabolcsGergely
+on Jul 31, 2023
+nabcouwer-dusty commented on Aug 21, 2023
+nabcouwer-dusty
+on Aug 21, 2023
+Last edited by nabcouwer-dusty
+More actions
+I'm having trouble getting the python demo script running.
+Should the custom branch of depthai-core be set as the submodule to depthai-python? Or is there a specific way to install the custom branch of depthai-core so that this python script can be run?
+faraaz-peppermint commented on Aug 28, 2023
+faraaz-peppermint
+on Aug 28, 2023
+More actions
+I'm having trouble getting the python demo script running. Should the custom branch of depthai-core be set as the submodule to depthai-python? Or is there a specific way to install the custom branch of depthai-core so that this python script can be run?
+@nabcouwer-dusty I'd recommend to clone depthai-python and then checkout to (pointcloud)[https://github.com/luxonis/depthai-python/tree/pointcloud] branch of depthai-python and build it as per their instructions. I did that and it works.
+nsteve2407 commented on Sep 12, 2023
+nsteve2407
+on Sep 12, 2023
+More actions
+I've been trying to implement the example code by @Erol444 using depthai-core. For some reason the pointcloud from the on-device computation looks a bit different that the one I get using the pytohn sdk.
+I have a hunch that it might be realated to how I am converting the data to a pcl pointcloud. Here's how I do it currently:
+```
+    auto left = colorQueue->get<dai::ImgFrame>();
+    auto pcl_msg = pclQueue->get<dai::ImgFrame>();
+
+    cv::Mat pcl_oakd = pcl_msg->getFrame();
+
+    // Get the raw PCL data as a vector of unsigned char
+    std::vector<uint8_t> pclData = pcl_msg->getData();
+
+    // Convert to float and fill to point cloud
+    float *pclFloatData = reinterpret_cast<float *>(pclData.data());
+
+    // Populate the PCL point cloud
+    cloud->clear();
+    cloud->reserve(w * h);
+    for (size_t i = 0; i < pclData.size() / sizeof(float); i += 3)
+    {
+      point.x = pclFloatData[i];
+      point.y = pclFloatData[i + 1];
+      point.z = pclFloatData[i + 2];
+      cloud->push_back(point);
+    }
+```
+kneave commented on Oct 7, 2023
+kneave
+on Oct 7, 2023
+Last edited by kneave
+More actions
+For those having problems building this, thanks to Luxonis' CI setup the wheels are available on their artifact server:
+python3 -m pip install --extra-index-url https://artifacts.luxonis.com/artifactory/luxonis-python-snapshot-local/ depthai==2.22.0.0.dev0+be16a6892c6131f9b310617986cf0049ade17880
+This is the latest built version as of this comment, if it's updated just replace the be16..... bit with the latest git hash.
+I'm also seeing some oddness with with the depth cloud not quite matching up, I'm using two colour cameras for stereo though so that tends to be the cause of a lot of these things 😅
+Edit to add: Disabled Temporal filtering and it seems a lot happier
+kneave commented on Nov 1, 2023
+kneave
+on Nov 1, 2023
+More actions
+As tagged in the above bug, is there any chance this branch could be updated from develop to include the multi-model support so I can use the AR0234 and IMX378 combo with this feature please? :)
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+SzabolcsGergely
+Labels
+enhancementNew feature or requestNew feature or request
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

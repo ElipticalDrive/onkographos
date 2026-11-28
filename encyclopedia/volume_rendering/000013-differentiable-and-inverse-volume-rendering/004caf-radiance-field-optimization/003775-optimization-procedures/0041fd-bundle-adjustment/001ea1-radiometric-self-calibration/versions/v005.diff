@@ -1,0 +1,117 @@
+--- v004.md
++++ v005.md
+@@ -8,14 +8,14 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Training images $I_{\text{rgb}}$, camera poses, volume representation (e.g., neural field or voxel grid), and initial geometric calibration.
+-*   **Outputs:** Optimized volume representation, per-camera gain $g$ and bias $b$ parameters, and optionally a background image $I_{\text{rgb}}^{(\text{bg})}$ and response curve parameters.
++*   **Inputs:** Training images $I_{\text{rgb}}$, camera poses, volume representation, and initial geometric calibration [S1, S2].
++*   **Outputs:** Optimized volume representation, per-camera gain $g$ and bias $b$ parameters, and optionally a background image $I_{\text{rgb}}^{(\text{bg})}$ and response curve parameters [S1, S2].
+ 
+ **Data Structures:**
+-*   **Per-camera parameters:** For each camera $c$, store a gain $g_c$ and bias $b_c$ for each color channel (RGB). These are learnable parameters.
+-*   **Background image (Optional):** A static per-camera background image $I_{\text{rgb}}^{(\text{bg})}$ of the same resolution as the training images.
+-*   **Response curve (Optional):** Parameters defining the camera response function, if enabled.
++*   **Per-camera parameters:** For each camera $c$, store a gain $g_c$ and bias $b_c$ for each color channel (RGB) [S2].
++*   **Background image (Optional):** A static per-camera background image $I_{\text{rgb}}^{(\text{bg})}$ of the same resolution as the training images [S2].
++*   **Response curve (Optional):** Parameters defining the camera response function, if enabled [S1].
+ 
+ **Steps:**
+-1.  **Initialize Parameters:** Initialize per-camera gain $g$ and bias $b$ to identity values (e.g., $g=1, b=0$) or small random values. If background estimation is enabled, initialize $I_{\text{rgb}}^{(\text{bg})}$ to a neutral color or black.
++1.  **Initialize Parameters:** Initialize per-camera gain $g$ and bias $b$ to identity values ($g=1, b=0$) [G]. If background estimation is enabled, initialize $I_{\text{rgb}}^{(\text{bg})}$ to a neutral color or black [G].
+ 2.  **Ray Marching:** For each training view, ray march through the volume to compute the accumulated color $I_{\text{rgb}}(\mathbf{p})$ and opacity $I_\alpha(\mathbf{p})$ for each pixel $\mathbf{p}$ [S2].
+ 3.  **Apply Radiometric Correction:** Apply the per-camera gain and bias to the accumulated volume color:
+@@ -24,6 +24,6 @@
+     $$ \widehat{I}_{\text{rgb}}(\mathbf{p}) = (1 - I_\alpha(\mathbf{p})) I_{\text{rgb}}^{(\text{bg})}(\mathbf{p}) + I_{\text{corrected}}(\mathbf{p}) $$
+     [S2]
+-4.  **Compute Loss:** Compare the rendered image $\widehat{I}_{\text{rgb}}$ with the ground truth training image $I_{\text{gt}}$ using a loss function (e.g., L2 or L1).
+-5.  **Optimize:** Update the volume parameters, per-camera gain $g$, bias $b$, and background image $I_{\text{rgb}}^{(\text{bg})}$ using gradient descent (e.g., Adam) [S2].
++4.  **Compute Loss:** Compare the rendered image $\widehat{I}_{\text{rgb}}$ with the ground truth training image $I_{\text{gt}}$ using a loss function (e.g., L2) [S2].
++5.  **Optimize:** Update the volume parameters, per-camera gain $g$, bias $b$, and background image $I_{\text{rgb}}^{(\text{bg})}$ using gradient descent (Adam) [S2].
+ 6.  **Response Curve Optimization (Optional):** If enabled, optimize the response curve parameters to further improve reconstruction quality [S1].
+ 
+@@ -45,5 +45,4 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Ensure that gain and bias parameters do not diverge to extreme values, which could lead to saturation or noise amplification.
+ *   **Boundaries:** The background image should only capture stationary objects outside the reconstruction volume to avoid artifacts [S2].
+ *   **Degenerate Input:** If the background is not static, the background estimation may fail, leading to artifacts [S2].
+@@ -53,35 +52,32 @@
+ def radiometric_self_calibration(volume_model, cameras, training_images, num_iterations=500000):
+     # Initialize per-camera gain and bias
+-    gains = {cam: torch.ones(3) for cam in cameras}  # Per-channel gain
+-    biases = {cam: torch.zeros(3) for cam in cameras}  # Per-channel bias
+-    
++    gains = {cam: [1.0, 1.0, 1.0] for cam in cameras}
++    biases = {cam: [0.0, 0.0, 0.0] for cam in cameras}
+     # Initialize background images (optional)
+-    backgrounds = {cam: torch.zeros_like(training_images[cam]) for cam in cameras}
+-    
+-    optimizer = torch.optim.Adam([
+-        {'params': volume_model.parameters(), 'lr': 1e-4},
+-        {'params': list(gains.values()) + list(biases.values()), 'lr': 1e-3},
+-        {'params': list(backgrounds.values()), 'lr': 1e-1}
+-    ])
++    backgrounds = {cam: [[0.0, 0.0, 0.0] for _ in range(height)] for cam in cameras}
+     
+     for iteration in range(num_iterations):
+-        optimizer.zero_grad()
+-        
+         for cam in cameras:
+-            # Ray march through volume
++            # Standard volumetric ray marching integration
+             I_rgb, I_alpha = ray_march(volume_model, cameras[cam])
+             
+-            # Apply radiometric correction
+-            I_corrected = gains[cam] * I_rgb + biases[cam]
++            # Apply per-camera gain and bias to volume color
++            I_corrected = [gains[cam][c] * I_rgb[c] + biases[cam][c] for c in range(3)]
+             
+-            # Merge with background if enabled
+-            I_rendered = (1 - I_alpha) * backgrounds[cam] + I_corrected
++            # Merge corrected volume color with background using remaining opacity
++            I_rendered = [(1.0 - I_alpha[c]) * backgrounds[cam][c] + I_corrected[c] for c in range(3)]
+             
+-            # Compute loss
+-            loss = torch.mean((I_rendered - training_images[cam]) ** 2)
+-            loss.backward()
++            # Compute L2 loss against ground truth
++            loss = sum((I_rendered[c] - training_images[cam][c]) ** 2 for c in range(3)) / 3
++            
++            # Compute gradients and update parameters
++            gradients = compute_gradients(volume_model, gains[cam], biases[cam], backgrounds[cam], loss)
+         
+-        optimizer.step()
+-    
++        # Apply Adam-like updates with specified learning rates
++        volume_model.step(lr=1e-4)
++        for cam in cameras:
++            gains[cam] = [g - 1e-3 * gradients['gain'][cam][c] for c, g in enumerate(gains[cam])]
++            biases[cam] = [b - 1e-3 * gradients['bias'][cam][c] for c, b in enumerate(biases[cam])]
++            backgrounds[cam] = [[bg - 1e-1 * gradients['bg'][cam][r][c] for c, bg in enumerate(row)] for r, row in enumerate(backgrounds[cam])]
+     return volume_model, gains, biases, backgrounds
+ ```
+@@ -90,5 +86,5 @@
+ 
+ ### [Exposure Correction Strategy](8760-exposure-correction-strategy.md)
+-This strategy corrects inconsistent exposure across training views caused by the auto-exposure behavior of modern cameras in radiance-field optimization. It addresses the limitation of prior methods that only correct exposure at training views by generalizing to images rendered at any novel viewpoint. Unlike approaches that jointly optimize an affine transformation matrix for each training view [6, 17], this method assumes that images taken at nearby locations share similar global lighting conditions and corrects camera exposure at novel views by mimicking the exposure setting of the closest source view.
++This strategy corrects inconsistent exposure across training views caused by the auto-exposure behavior of modern cameras in radiance-field optimization. It addresses the limitation of prior methods that only correct exposure at training views by generalizing to images rendered at any novel viewpoint. Unlike approaches that jointly optimize an affine transformation matrix for each training view, this method assumes that images taken at nearby locations share similar global lighting conditions and corrects camera exposure at novel views by mimicking the exposure setting of the closest source view.
+ 
+ ### Geometric Self-Calibration
+@@ -99,8 +95,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of iterations and the complexity of the volume model. Training takes about 10 days on a single NVIDIA Tesla V00 for 500,000 iterations [S2].
++*   **Time Complexity:** Training takes about 10 days on a single NVIDIA Tesla V100 for 500,000 iterations [S2].
+ *   **Memory Complexity:** Increases with the number of cameras and the resolution of the background images. Randomly sampling 128x128 pixels helps reduce memory usage [S2].
+ *   **Measured Performance:** Enabling exposure and sensor bias estimation improves reconstruction by approximately 1 dB [S1]. Geometric Self-Calibration recovers from a 15 dB degradation [S1].
+-*   **Scaling:** The method scales with the number of cameras and the resolution of the images.
+ *   **Strengths:** Corrects for photometric errors and intensity mismatches, improving reconstruction quality [S1, S2].
+ *   **Limitations:** Requires additional parameters to be optimized, which can increase training time and complexity [S2].
+@@ -109,5 +104,5 @@
+ 
+ ## Background
+-Radiometric Self-Calibration originated in the context of neural volume rendering and tomography to address the lack of color calibration in multiview systems [S2]. It was introduced in "Neural Volumes: Learning Dynamic Renderable Volumes from Images" [S2] and further developed in "NeAT: Neural Adaptive Tomography" [S1]. The method is used in applications where high-fidelity reconstruction is required, such as medical imaging and 3D scene reconstruction [S1, S2].
++Radiometric Self-Calibration originated in the context of neural volume rendering and tomography to address the lack of color calibration in multiview systems [S2]. It was introduced in "Neural Volumes: Learning Dynamic Renderable Volumes from Images" [S2] and further developed in "NeAT: Neural Adaptive Tomography" [S1].
+ 
+ ## Sources

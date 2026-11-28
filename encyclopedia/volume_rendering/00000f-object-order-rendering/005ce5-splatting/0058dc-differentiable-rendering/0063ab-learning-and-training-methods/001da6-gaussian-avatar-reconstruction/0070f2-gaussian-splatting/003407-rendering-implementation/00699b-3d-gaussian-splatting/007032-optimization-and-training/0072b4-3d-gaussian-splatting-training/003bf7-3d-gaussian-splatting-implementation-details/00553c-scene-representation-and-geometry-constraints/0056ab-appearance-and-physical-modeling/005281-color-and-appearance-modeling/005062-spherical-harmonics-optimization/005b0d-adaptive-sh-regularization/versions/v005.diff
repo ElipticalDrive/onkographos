@@ -1,0 +1,193 @@
+--- v004.md
++++ v005.md
+@@ -4,90 +4,134 @@
+ 
+ ## Overview
+-Adaptive SH Regularization is a technique used during the optimization of Spherical Harmonics (SH) coefficients in 3D Gaussian Splatting to prevent overfitting when training views are sparse or unevenly distributed [S1, unofficial]. It selectively suppresses higher-order SH components ($l > 0$) for primitives lacking sufficient directional support from camera viewpoints, while preserving the zeroth-order (DC) component [S1, unofficial]. Unlike methods that rely solely on iterative optimization with fixed SH complexity, this approach explicitly adapts the regularization strength based on the geometric relationship between the primitive and the available viewing directions [S1, unofficial].
++Adaptive SH Regularization is a technique for stabilizing the optimization of Spherical Harmonics (SH) coefficients in 3D Gaussian Splatting under sparse or uneven camera observations. It prevents overfitting by suppressing higher-order SH components for vertices that lack sufficient directional support, while preserving the zeroth-order (DC) component. Unlike methods that rely on iterative optimization with fixed SH complexity, this approach explicitly adapts the regularization strength to the available viewing directions, improving generalization to unseen viewpoints and conditioning of the linear system.
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** The set of training camera poses and viewing directions $\{\mathbf{v}_i\}$, the current SH coefficients $\mathbf{c}$ for each primitive, and the maximum SH degree $L$.
+-*   **Output:** Regularized SH coefficients $\mathbf{c}'$ or a regularized linear system ready for solving.
++*   **Input:** Per-vertex SH coefficients $\mathbf{c}_i$ (stored as in [Scene Representation and Geometry Constraints](15421-scene-representation-and-geometry-constraints.md)), the set of observed viewing directions $\{\omega_k\}$ for vertex $i$, and a support threshold parameter.
++*   **Output:** Regularized SH coefficients $\mathbf{c}_i'$ suitable for rendering and further optimization.
+ 
+ **Data Structures**
+-*   **Directional Support Metric:** A scalar value or binary flag per SH band $(l, m)$ per primitive, indicating whether the band is "well-supported" by the current set of viewing directions.
+-*   **Regularization Weights:** A diagonal matrix or per-coefficient weight vector $\lambda_{l,m}$ applied during the Least Squares (LLS) solution.
++The method operates on the standard SH coefficient vector for each Gaussian. For degree $L$, the vector has size $(L+1)^2$. The coefficients are typically stored in a flat array or tensor, indexed by band $l$ and order $m$.
+ 
+ **Steps**
+-1.  **Evaluate Directional Support:** For each primitive and each SH band $(l, m)$ with $l > 0$, determine if the available viewing directions provide sufficient angular coverage to constrain the coefficient [S1, unofficial]. This is governed by a support criterion, implicitly defined in the source literature (referred to as equation 25 in the source) [S1, unofficial].
+-2.  **Assign Regularization Strength:**
+-    *   If the support criterion is **not** met (weak support), apply strong regularization (high penalty) to the non-DC coefficients of that band [S1, unofficial].
+-    *   If the support criterion **is** met (strong support), apply weak or no regularization, allowing the coefficient to fit the observed data [S1, unofficial].
+-    *   The DC component ($l=0$) is generally preserved with minimal or no regularization regardless of support [S1, unofficial].
+-3.  **Solve Regularized System:** Incorporate these weights into the global Linear Least Squares (LLS) system (or Per-Component Gaussian (PCG) solver) to update the SH coefficients [S1, unofficial]. The regularization term improves the conditioning of the system, leading to faster convergence [S1, unofficial].
++1.  **Evaluate Directional Support:** For each vertex $i$, determine the set of viewing directions $\{\omega_k\}$ from which it is observed in the training data.
++2.  **Check Support Criterion:** For each SH band $l$ (where $l=0$ is DC, $l>0$ are higher-order), evaluate whether the available viewing directions provide sufficient constraints. The criterion is defined by equation (25) in [S1, unofficial]. While the exact mathematical form of (25) is not fully detailed in the provided text, it implicitly determines if the band is "well-supported" or "weakly supported" based on the geometry of the viewing cone.
++3.  **Compute Regularization Weights:** Assign a regularization weight $\lambda_{i,l}$ to each band $l$ of vertex $i$:
++    *   If band $l$ satisfies the support criterion (well-supported), apply weak regularization (small $\lambda_{i,l}$).
++    *   If band $l$ does not satisfy the criterion (weakly supported), apply strong suppression (large $\lambda_{i,l}$).
++    *   The DC component ($l=0$) is always preserved (weak regularization) regardless of support, as it represents average color.
++4.  **Apply Regularization in LLS:** When solving the Least Squares System (LLS) for SH coefficients (as in [CF-Splat](12021-cf-splat-closed-form-triangle-splatting-with-mesh-priors.md)), incorporate these weights into the diagonal of the regularization matrix. This modifies the normal equations to penalize large coefficients in weakly supported bands more heavily.
+ 
+ **Formulas**
+-The core mechanism modifies the optimization objective. While the exact formula for the support criterion (Eq. 25 in source) is not explicitly written out in the provided text, the effect is described as:
+-$$ \mathcal{L}_{total} = \mathcal{L}_{photometric} + \sum_{p} \sum_{l,m} \lambda_{l,m}^{(p)} \| c_{l,m}^{(p)} \|^2 $$
+-Where $\lambda_{l,m}^{(p)}$ is the regularization weight for primitive $p$, band $(l,m)$.
+-*   $\lambda_{l,m}^{(p)}$ is large if directional support is insufficient [S1, unofficial].
+-*   $\lambda_{l,m}^{(p)}$ is small if directional support is sufficient [S1, unofficial].
+-*   For $l=0$, $\lambda_{0,0}^{(p)} \approx 0$ [S1, unofficial].
++The regularization term added to the loss or LLS system for vertex $i$ is:
++$$ \mathcal{L}_{reg} = \sum_{l=0}^{L} \lambda_{i,l} \sum_{m=-l}^{l} |c_{i,l,m}|^2 $$
++Where:
++*   $c_{i,l,m}$ is the SH coefficient for vertex $i$, band $l$, order $m$.
++*   $\lambda_{i,l}$ is the adaptive weight for band $l$.
++*   The support criterion (Eq. 25 in [S1, unofficial]) determines $\lambda_{i,l}$. Specifically, as more views are added, more bands satisfy the criterion, leading to weaker regularization for those bands (Eq. 26 in [S1, unofficial]).
+ 
+ **Parameters**
+-*   **Support Criterion Threshold:** Implicitly defined in the source's equation (25). It determines the boundary between "weak" and "strong" support. The exact mathematical definition of this threshold is not provided in the text [S1, unofficial].
+-*   **Regularization Strengths:** The specific magnitudes for "weak" and "strong" regularization are not explicitly quantified in the provided notes, but the relative difference is critical for suppressing overfitting [S1, unofficial].
++*   **Support Threshold:** Implicitly defined in equation (25). It controls the transition between weak and strong regularization. Not given in the sources as a specific numerical value, but described as determining whether an SH band receives weak or strong regularization based on available viewing directions.
++*   **Regularization Strength Ratio:** The ratio between strong and weak $\lambda$. Not given in the sources.
+ 
+-**Pitfalls**
+-*   **Overfitting:** Without this regularization, unconstrained SH coefficients lacking sufficient directional constraints overfit input views, resulting in noisy colors and poor generalization to unseen viewpoints [S1, unofficial].
+-*   **Convergence Failure:** An unregularized system with sparse views may fail to converge within a reasonable iteration count (e.g., $T_{max}=300$) due to poor conditioning [S1, unofficial].
+-*   **Degenerate Input:** If all views are collinear or clustered in a small solid angle, most non-DC bands will be deemed unsupported, leading to overly smooth (constant color) appearances [G].
++**Edge Cases and Pitfalls**
++*   **Overfitting:** Without regularization, unconstrained SH coefficients lacking sufficient directional constraints overfit input views and generalize poorly to unseen viewpoints, producing noisy colors [S1, unofficial].
++*   **Convergence:** Unregularized systems may fail to converge within a reasonable iteration count (e.g., $T_{max}=300$) due to poor conditioning [S1, unofficial].
++*   **Degenerate Input:** If a vertex is observed from only one direction, all non-DC bands are weakly supported and will be strongly suppressed, leaving only the DC color.
++
++**Pseudocode**
++```python
++def adaptive_sh_regularization(sh_coeffs, viewing_directions, support_threshold):
++    """
++    sh_coeffs: Tensor of shape (N, (L+1)^2), N vertices, SH coefficients flattened.
++    viewing_directions: List of arrays, viewing_directions[i] contains directions for vertex i.
++    support_threshold: Scalar threshold for the support criterion (Eq. 25 in [S1, unofficial]).
++    
++    Returns:
++    regularized_coeffs: Tensor of shape (N, (L+1)^2)
++    """
++    N, num_coeffs = sh_coeffs.shape
++    L = int((num_coeffs)**0.5) - 1
++    regularized_coeffs = sh_coeffs.clone()
++    
++    # Precompute regularization weights
++    reg_weights = torch.zeros(N, num_coeffs)
++    
++    for i in range(N):
++        directions = viewing_directions[i]
++        if len(directions) == 0:
++            # No views, suppress all except DC
++            reg_weights[i, 0] = 0.0 # Preserve DC
++            reg_weights[i, 1:] = 1e6 # Strong suppression
++            continue
++            
++        # Evaluate support for each band l
++        for l in range(L + 1):
++            # Determine if band l is supported by directions
++            # This corresponds to Eq. 25 in [S1, unofficial]
++            # The exact formula is not provided, but it depends on the spread of directions
++            is_supported = check_directional_support(directions, l, support_threshold)
++            
++            # Assign weights
++            if l == 0:
++                # DC component always preserved
++                reg_weights[i, l] = 1e-6 # Weak regularization
++            elif is_supported:
++                # Well-supported band
++                reg_weights[i, l] = 1e-6 # Weak regularization
++            else:
++                # Weakly supported band
++                reg_weights[i, l] = 1.0 # Strong suppression (relative to weak)
++                
++    # Apply regularization during LLS solve
++    # In the LLS system Ax = b, the regularized system is (A^T A + Lambda) x = A^T b
++    # Lambda is a diagonal matrix with reg_weights
++    return regularized_coeffs, reg_weights
++
++def check_directional_support(directions, l, threshold):
++    """
++    Placeholder for Eq. 25 in [S1, unofficial].
++    Returns True if the viewing directions provide sufficient constraints for band l.
++    """
++    # Implementation detail: This likely involves checking the condition number
++    # or spread of the SH basis functions evaluated at the viewing directions.
++    # Since the exact formula is not in the sources, we mark it as [G].
++    # A typical implementation might check if the viewing cone covers enough solid angle
++    # or if the basis vectors are linearly independent enough.
++    pass
++```
+ 
+ ## Subtopics
+ 
+ ### First-order Spherical Harmonics Distillation
+-*   **What it is:** A method that distills high-order SH information into a first-order representation.
+-*   **Difference:** Focuses on compression and speed by reducing SH degree, whereas Adaptive SH Regularization maintains the full degree but suppresses unreliable coefficients.
+-*   **When to choose:** When computational budget is extremely limited and high-frequency detail is less critical than stability.
+-*   **Link:** [First-order Spherical Harmonics Distillation](9467-first-order-spherical-harmonics-distillation.md)
++Distills SH coefficients into a simpler representation. Choose when computational efficiency is prioritized over high-fidelity view-dependent effects. [First-order Spherical Harmonics Distillation](9467-first-order-spherical-harmonics-distillation.md)
+ 
+ ### Explicit Camera Jacobian Derivation
+-*   **What it is:** Derives the exact Jacobian of the rendering process with respect to camera parameters.
+-*   **Difference:** Focuses on gradient accuracy for camera optimization, not on stabilizing SH coefficients under sparse views.
+-*   **When to choose:** When joint optimization of geometry, appearance, and camera poses is required.
+-*   **Link:** [Explicit Camera Jacobian Derivation](10077-explicit-camera-jacobian-derivation.md)
++Provides analytical gradients for camera parameters. Choose when optimizing camera poses alongside geometry. [Explicit Camera Jacobian Derivation](10077-explicit-camera-jacobian-derivation.md)
+ 
+ ### Efficient Multi-View Training for 3D Gaussian Splatting
+-*   **What it is:** Optimizes training efficiency for large numbers of views.
+-*   **Difference:** Focuses on scaling to many views, whereas Adaptive SH Regularization is specifically designed for *sparse* or *uneven* views.
+-*   **When to choose:** When training data is abundant and uniformly distributed.
+-*   **Link:** [Efficient Multi-View Training for 3D Gaussian Splatting](13982-efficient-multi-view-training-for-3d-gaussian-splatting.md)
++Optimizes training speed for large datasets. Choose when training time is a bottleneck. [Efficient Multi-View Training for 3D Gaussian Splatting](13982-efficient-multi-view-training-for-3d-gaussian-splatting.md)
+ 
+ ### Spherical Harmonics Vector Quantization
+-*   **What it is:** Compresses SH coefficients using vector quantization.
+-*   **Difference:** A lossy compression technique, whereas Adaptive SH Regularization is a training-time stabilization technique.
+-*   **When to choose:** When memory footprint is the primary constraint.
+-*   **Link:** [Spherical Harmonics Vector Quantization](14181-spherical-harmonics-vector-quantization.md)
++Reduces memory usage by quantizing SH coefficients. Choose when memory is constrained. [Spherical Harmonics Vector Quantization](14181-spherical-harmonics-vector-quantization.md)
+ 
+ ### Closed-Form Scene Appearance Estimation
+-*   **What it is:** Estimates appearance using a closed-form solution rather than iterative optimization.
+-*   **Difference:** Adaptive SH Regularization is often used *within* such closed-form solvers (like CF-Splat) to handle ill-conditioning, but the parent method is the broader estimation framework.
+-*   **When to choose:** When a global, non-iterative solution for appearance is preferred.
+-*   **Link:** [Closed-Form Scene Appearance Estimation](16750-closed-form-scene-appearance-estimation.md)
++Solves for appearance in closed form. Choose when iterative optimization is too slow or unstable. [Closed-Form Scene Appearance Estimation](16750-closed-form-scene-appearance-estimation.md)
+ 
+ ### Geometry-Guided Appearance Modeling
+-*   **What it is:** Uses geometric priors (e.g., normals, depth) to constrain appearance.
+-*   **Difference:** Uses explicit geometric data, whereas Adaptive SH Regularization uses only viewing direction statistics.
+-*   **When to choose:** When reliable geometric priors are available.
+-*   **Link:** [Geometry-Guided Appearance Modeling](20876-geometry-guided-appearance-modeling.md)
++Uses geometry to inform appearance. Choose when geometry and appearance are coupled. [Geometry-Guided Appearance Modeling](20876-geometry-guided-appearance-modeling.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The regularization adds negligible overhead to the evaluation of the support criterion. The primary benefit is faster convergence of the LLS/PCG solver, reducing the total time to reach a stable solution [S1, unofficial].
+-*   **Memory Complexity:** No significant additional memory overhead, as it only modifies weights in the existing linear system [S1, unofficial].
+-*   **Measured Performance:** On the C3VD c t1 b scene with $K=7$ views and $L=3$, adaptive regularization improved test-view PSNR from 33.66 to 34.69 [S1, unofficial]. It also caused the PCG residual to decrease rapidly, whereas the unregularized system failed to converge within 300 iterations [S1, unofficial].
+-*   **Scaling:** As the number of input views increases, more SH bands satisfy the support criterion, receiving weaker regularization. This allows the method to scale gracefully from sparse to dense views, maintaining stable fidelity gains unlike baselines that do not adapt SH complexity [S1, unofficial].
+-*   **Strengths:** Prevents overfitting in sparse view scenarios; improves conditioning of the linear system; preserves DC color accuracy.
+-*   **Limitations:** Requires a defined support criterion (which may be heuristic); may oversmooth high-frequency details if the support threshold is too conservative.
+-*   **When to use:** Sparse, uneven, or noisy training views; closed-form or global optimization approaches.
+-*   **When not to use:** Dense, uniformly distributed views where SH coefficients are well-constrained; iterative methods that are robust to ill-conditioning via other means.
++*   **Time Complexity:** The regularization step adds minimal overhead to the LLS solving process. The global LLS solution remains efficient, with solving time growing with the number of observations, consistent with the complexity of the LLS solver [S1, unofficial].
++*   **Memory Complexity:** No additional memory is required beyond the SH coefficients and viewing direction metadata.
++*   **Measured Performance:** On the C3VD scene with $K=7$ views and $L=3$, adaptive regularization improves test-view PSNR from 33.66 to 34.69 compared to baselines [S1, unofficial].
++*   **Convergence:** With regularization, the PCG residual decreases rapidly. Without it, the system fails to converge within $T_{max}=300$ iterations, demonstrating improved conditioning [S1, unofficial].
++*   **Strengths:** Improves generalization to unseen viewpoints, stabilizes optimization under sparse views, and reduces noisy colors.
++*   **Limitations:** Requires knowledge of viewing directions for each vertex. Performance may vary with the choice of support threshold.
++*   **When to Use:** Use when training data is sparse or unevenly distributed, and when standard SH optimization leads to overfitting or convergence issues.
++*   **When Not to Use:** Use with caution when views are dense and uniformly distributed, as the regularization may unnecessarily suppress valid high-frequency details.
+ 
+ ## Background
+-Adaptive SH Regularization was introduced in the context of **CF-Splat** (Closed-Form Triangle Splatting with Mesh Priors) [S1, unofficial]. The method addresses the issue that standard 3D Gaussian Splatting and other baselines (like FastGS, Triangle-Splat) do not explicitly adapt SH complexity to available directional support, leading to less stable fidelity gains as the number of views changes [S1, unofficial]. By incorporating mesh priors and closed-form estimation, CF-Splat leverages this regularization to achieve higher PSNR and better convergence properties under sparse observations [S1, unofficial].
++Adaptive SH Regularization was introduced in the context of CF-Splat (Closed-Form Triangle Splatting with Mesh Priors) to address the challenges of appearance estimation under sparse and uneven observations. It builds on the standard 3D Gaussian Splatting representation but modifies the SH optimization process to be aware of directional support. The method is part of a broader effort to improve the robustness and fidelity of differentiable rendering methods in challenging acquisition scenarios.
+ 
+ ## Sources

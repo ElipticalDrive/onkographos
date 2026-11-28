@@ -1,0 +1,31 @@
+# Glyph-based Vector/Tensor Visualization
+
+Also called: Glyphs, Vector Glyphs, Tensor Glyphs
+
+## Overview
+Glyph-based visualization maps vector or tensor field values at discrete sample points to geometric primitives (glyphs) placed in space, allowing the viewer to perceive local field properties such as direction, magnitude, and anisotropy through shape and orientation [S1, S2]. It differs from line-integral methods like [Stream Lines](4796-stream-lines.md) by providing a discrete, point-wise sampling of the field rather than continuous trajectories, and from domain coloring by using explicit 3D geometry rather than scalar color mapping on surfaces [S1, S2].
+
+## Shared principles
+All glyph-based methods evaluate the data field at specific sample locations $\mathbf{x}_i$ within the volume. The core mechanism involves:
+1.  **Sampling:** Retrieving the raw data value (vector $\mathbf{v}$ or tensor $\mathbf{T}$) at $\mathbf{x}_i$.
+2.  **Decomposition/Normalization:** Extracting geometric attributes such as direction, magnitude, eigenvalues, or principal axes. For vectors, this typically involves normalization $\hat{\mathbf{v}} = \mathbf{v} / \|\mathbf{v}\|$ and magnitude extraction $\|\mathbf{v}\|$ [G]. For tensors, this involves eigen-decomposition to determine principal directions and scaling factors [G].
+3.  **Geometric Construction:** Generating a primitive (e.g., line, arrow, ellipsoid) centered at $\mathbf{x}_i$. The primitive's orientation is aligned with the extracted direction(s), and its size/shape is scaled by the magnitude or eigenvalues.
+4.  **Rendering:** The primitives are rendered as geometric primitives (lines, triangles) with colors mapped from the data values via a transfer function.
+
+## Subtopics
+
+### [Line Glyphs for Vector Field Visualization](2569-line-glyphs-for-vector-field-visualization.md)
+Represents vectors as simple line segments. Distinguished by extreme computational efficiency and low memory usage, allowing millions of glyphs, but suffers from direction ambiguity and poor 3D orientation perception due to lack of shading.
+
+### [Arrow Glyphs for Vector Field Visualization](2663-arrow-glyphs-for-vector-field-visualization.md)
+Uses arrow-shaped primitives (cone + shaft) to explicitly encode flow direction. Distinguished by resolving the direction ambiguity of line glyphs and allowing for 3D shading, implemented on GPU for performance, but requires more memory and computation per glyph.
+
+### [Interactive Glyph Placement for Tensor Fields](10455-interactive-glyph-placement-for-tensor-fields.md)
+An iterative packing algorithm for tensor glyphs using Delaunay triangulation to optimize placement and avoid overlap. Distinguished by its focus on interactive placement and clustering acceleration for complex tensor fields.
+
+## Background
+Glyph-based visualization is a foundational technique in scientific visualization, originating from the need to visualize vector fields in fluid dynamics and electromagnetism. Early work by Rosenblum and Psaltis (1980s) and later by Hultquist (1992) established the use of arrows and lines for vector fields [G]. The technique has evolved to include complex tensor glyphs (e.g., ellipsoids for diffusion tensors) and GPU-accelerated implementations for real-time interaction [S2, unofficial].
+
+## Sources
+[S1] Unofficial notes on Glyph-based Vector/Tensor Visualization.
+[S2] Unofficial notes on Arrow Glyphs for Vector Field Visualization.

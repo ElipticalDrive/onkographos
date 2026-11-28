@@ -1,0 +1,212 @@
+# Sparse Voxel Octree Ray Traversal
+
+Also called: GPU Voxel Renderer, OctreeSimple Shader, SVO Ray Tracing, SVO Traversal, Sparse Voxel Octree (SVO) Traversal, Sparse Voxel Octree Tracing
+
+## Overview
+Sparse Voxel Octree (SVO) Ray Traversal is a GPU-based raycasting technique that renders volumetric data stored in a sparse voxel octree by traversing the tree structure along ray paths to find occupied cells [S2, S3, S6, S10, unofficial]. It solves the problem of efficiently rendering large, sparse 3D models without the memory overhead of dense voxel grids or the topology complexity of polygon meshes [S3, S10, unofficial]. Unlike sibling methods such as [Hierarchical Traversal](896-hierarchical-traversal.md) which may assume in-core data or simpler traversal, SVO Ray Traversal explicitly manages a stack to control visitation order based on eye position, operating directly on the octree structure to skip empty space [S10, unofficial]. It differs from [GigaVoxels](3057-gigavoxels.md) by not relying on a fixed-resolution texture-based cache, and from [Sparse Voxel Octree Ray Traversal (State Machine)](3299-sparse-voxel-octree-ray-traversal-state-machine.md) by using a standard stack-based backtracking approach rather than a deterministic finite state machine [S10, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Ray origin $O$, ray direction $D$, SVO data buffer, camera parameters (position, rotation, FOV, viewport size).
+*   **Outputs:** Color $C$, position $P$, and optionally normal $N$ for the first occupied leaf node (voxel) hit by the ray.
+
+**Data Structures:**
+The SVO is stored in a flat array (e.g., `std430` buffer or `Texture3D`) [S3, S5, S6, S10, unofficial]. A common layout uses 32-bit integers [S3, S5, S6, S10, unofficial]:
+*   **Internal Node:** The integer contains a pointer to the first child node. In some layouts, bits indicate validity or leaf status [S3, S8, S10, unofficial]. For example, [S10, unofficial] uses bit 31 as a flag: 1 for internal, 0 for leaf. Bits 0-30 store the child address.
+*   **Leaf Node (Voxel):** The integer contains encoded data. [S3, S6, unofficial] store RGBA color in the lower bits (e.g., `data[block_i]` contains packed RGBA). [S5, unofficial] uses bit 31 to distinguish type (0=Pointer, 1=Voxel) and bits 0-30 for attributes or pointers.
+*   **Traversal Stack:** Stores state for backtracking. [S10, unofficial] defines a stack struct:
+    ```python
+    struct Stack {
+        uint node_address;
+        uint frontal_mask;
+        float t_min;
+        vec3 t_corner;
+    };
+    ```
+    [S1, unofficial] uses a `ParentElement` struct with `masks` and `childPointer`. [S3, S6, unofficial] use parallel arrays for `child`, `leaf`, `valid`, `corner`, and `octant`.
+
+**Algorithm Steps:**
+
+1.  **Ray Initialization:**
+    *   Compute ray direction from screen coordinates (e.g., `gl_FragCoord`) and camera parameters [S3, S6, S7, S10, unofficial].
+    *   Handle zero direction components by clamping to epsilon ($\epsilon$) to avoid division by zero [S8, S10, unofficial]. Typical $\epsilon \approx 10^{-4}$ or $3.55 \times 10^{-15}$ [S8, S10, unofficial].
+    *   If the camera is outside the root bounding box, compute the intersection $t_{entry}$ with the root box. If no intersection or $t_{entry} < 0$, return background color [S3, S6, unofficial].
+
+2.  **Root Intersection:**
+    *   Compute ray-box intersection for the root node using the slab method [S1, S10, unofficial]:
+        $$ t_{min} = \max_i \left( \frac{boxMin_i - O_i}{D_i} \right), \quad t_{max} = \min_i \left( \frac{boxMax_i - O_i}{D_i} \right) $$
+    *   If $t_{min} > t_{max}$, the ray misses the root. Return background [S10, unofficial].
+
+3.  **Traversal Loop:**
+    *   Initialize stack with root node. Set current node address, depth, and scale (root size) [S10, S8, unofficial].
+    *   Determine the initial octant (child index 0-7) the ray enters. This is done by comparing the ray position to the node center or using direction signs to create a mask [S1, S3, S6, S10, unofficial].
+        *   [S3, S6, unofficial]: `oct = 0; if (pos.x > corner.x + size/2) oct ^= 4; if (pos.y > corner.y + size/2) oct ^= 2; if (pos.z > corner.z + size/2) oct ^= 1;`
+    *   **While** stack is not empty (or depth < MAX_DEPTH):
+        1.  **Fetch Node:** Load node data from `SVO[node_address]` [S10, S8, unofficial].
+        2.  **Check Type:**
+            *   **Leaf:** If the node is a leaf (e.g., MSB is 0 in [S10, unofficial], or type bit is 1 in [S5, unofficial]), sample the color/attributes and terminate the ray for this pixel [S10, S3, S6, unofficial].
+            *   **Internal:** If the node is internal (e.g., MSB is 1 in [S10, unofficial]), proceed to children.
+        3.  **Descend:**
+            *   Calculate the child address. [S3, S6, unofficial] use `addressOf(child, leaf, valid, oct)` which accounts for sparse children using bitmasks. [S10, unofficial] uses `value & 0x7FFFFFFFu`.
+            *   Push current state (address, mask, $t_{min}$, corner) to stack [S10, unofficial].
+            *   Update current node address to child address.
+            *   Halve the scale (node size).
+            *   Update the corner position: `corner += scale * octVec(oct)` [S3, S6, unofficial].
+            *   Recalculate the entry octant for the new child node [S3, S6, unofficial].
+        4.  **Skip Empty Space (if not descending):**
+            *   If the current octant is invalid/empty, compute the exit distance $t_{exit}$ from the current child box [S3, S6, unofficial].
+            *   Advance ray position: `position += direction * t_exit` [S3, S6, unofficial].
+            *   Pop from stack until a valid sibling or parent is found [S3, S6, unofficial].
+            *   If stack empty, ray has exited the SVO. Return background [S6, unofficial].
+
+4.  **Normal Calculation (Optional):**
+    *   Normals can be calculated on-the-fly based on the ray exit face from the leaf voxel [S1, S8, unofficial].
+    *   Compute vector $v = pos - boxPos$. The dominant axis of $v$ determines the normal direction [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+MAX_DEPTH = 32
+EPSILON = 1e-4
+
+# Stack Element
+struct StackEntry:
+    node_address: uint
+    frontal_mask: uint
+    t_min: float
+    t_corner: vec3
+
+def trace_ray(O: vec3, D: vec3, svo_data: buffer, root_min: vec3, root_max: vec3):
+    # 1. Ray Initialization
+    D = clamp(D, -1.0, 1.0) # Normalize
+    # Handle zero components
+    D.x = EPSILON if abs(D.x) < EPSILON else D.x
+    D.y = EPSILON if abs(D.y) < EPSILON else D.y
+    D.z = EPSILON if abs(D.z) < EPSILON else D.z
+    
+    inv_D = 1.0 / D
+    
+    # 2. Root Intersection
+    t_min = max((root_min - O) * inv_D)
+    t_max = min((root_max - O) * inv_D)
+    
+    if t_min > t_max:
+        return vec4(0.0) # Miss
+    
+    t_min = max(t_min, 0.0)
+    O = O + D * t_min
+    
+    # 3. Traversal State
+    stack = array[StackEntry](MAX_DEPTH)
+    depth = 0
+    node_address = 0 # Root address
+    scale = length(root_max - root_min) / 2.0
+    corner = root_min
+    frontal_mask = 0 # Bitmask for direction
+    
+    # Determine initial octant
+    # Simplified: check which half of the box the ray is in
+    # This logic varies by implementation (see S3, S6, S10)
+    oct = 0
+    if O.x > corner.x + scale: oct |= 4
+    if O.y > corner.y + scale: oct |= 2
+    if O.z > corner.z + scale: oct |= 1
+    
+    while depth < MAX_DEPTH:
+        # Fetch Node
+        node_val = svo_data[node_address]
+        
+        # Check Leaf/Internal
+        # Assuming MSB (bit 31) indicates Internal Node [S10, unofficial]
+        is_internal = (node_val & 0x80000000u) != 0
+        
+        if not is_internal:
+            # Leaf Node: Return Color
+            # Decode color from node_val or pointer
+            color = decode_color(node_val)
+            return vec4(color, 1.0)
+        
+        # Internal Node: Descend
+        # Push state
+        stack[depth].node_address = node_address
+        stack[depth].frontal_mask = frontal_mask
+        stack[depth].t_min = t_min
+        stack[depth].t_corner = corner
+        depth += 1
+        
+        # Get Child Address
+        child_address = node_val & 0x7FFFFFFFu
+        
+        # Update State for Child
+        scale *= 0.5
+        corner += scale * octVec(oct)
+        
+        # Recalculate Octant for new corner
+        # Re-evaluate which sub-cube the ray origin is in relative to new corner
+        new_oct = 0
+        if O.x > corner.x + scale: new_oct |= 4
+        if O.y > corner.y + scale: new_oct |= 2
+        if O.z > corner.z + scale: new_oct |= 1
+        oct = new_oct
+        
+        node_address = child_address
+        
+        # Optimization: If child is empty/invalid, skip
+        # This requires checking validity flags in the SVO layout
+        # If invalid, compute exit t and pop stack
+        # (Implementation detail varies, see S3, S6)
+        
+    return vec4(0.0) # Max depth reached or miss
+```
+
+## Subtopics
+
+### [Sparse Voxel DAG Construction with Subtree Caching](1289-sparse-voxel-dag-construction-with-subtree-caching.md)
+Compresses SVO by merging identical subtrees into a DAG, reducing memory usage while maintaining traversal speed.
+
+### [GigaVoxels](3057-gigavoxels.md)
+Extends SVO traversal with GPU caching and ray-guided streaming for out-of-core rendering of billions of voxels.
+
+### [SVO Node Location](3249-svo-node-location.md)
+Focuses on the specific routine to map continuous ray coordinates to discrete octree indices.
+
+### [Sparse Voxel Octree Ray Traversal (State Machine)](3299-sparse-voxel-octree-ray-traversal-state-machine.md)
+Implements traversal as a deterministic finite state machine using fixed-point arithmetic, suitable for hardware/FPGA.
+
+### [Animated Sparse Voxel Octrees (ASVO)](3326-animated-sparse-voxel-octrees-asvo.md)
+Handles animated SVOs by updating a BVH of rigid octree parts per frame.
+
+### [Sparse Voxel Octree Ray Tracing](3451-sparse-voxel-octree-ray-tracing.md)
+General term for casting rays into SVOs, often used as a baseline comparison.
+
+### [Hierarchical Voxel Traversal with Portal Teleportation](6596-hierarchical-voxel-traversal-with-portal-teleportation.md)
+Adds portal logic to allow rays to jump between disconnected spatial regions.
+
+### [Ray Casting with Octrees](11389-ray-casting-with-octrees.md)
+A broader technique for AMR/sparse data, explicitly traversing the octree without grid projection.
+
+## Operating characteristics
+*   **Time Complexity:** $O(\log N)$ on average for sparse data, where $N$ is the number of voxels, but depends on tree depth and branching factor. In the worst case (dense or deep empty space), it can approach $O(D)$ where $D$ is the maximum depth [S9].
+*   **Memory Complexity:** $O(N)$ for the SVO structure, but significantly less than dense grids due to sparsity. DAG variants reduce this further [S9].
+*   **Performance:** Real-time performance (e.g., 20 FPS at 720p) has been demonstrated on AMD 5700 for scenes with >1 billion voxels [S8, unofficial]. Performance is heavily dependent on cache coherence and branch divergence in the shader [S4, unofficial].
+*   **Strengths:** Efficient memory usage for sparse data; implicit LOD; no polygon mesh overhead; supports complex volumetric data [S3, S4, unofficial].
+*   **Limitations:** High memory overhead for very dense or deep trees; dynamic updates are expensive (may require full regeneration) [S4, unofficial]; stack depth limits (typically 23-32) [S8, S10, unofficial].
+*   **When to Use:** Large, sparse volumetric datasets; real-time rendering on GPU; scenes with high detail but low fill factor.
+*   **When Not to Use:** Dense volumetric data (use ray marching on 3D textures); highly dynamic data requiring frequent tree rebuilds; hardware with limited stack depth or no support for dynamic indexing [S4, S10, unofficial].
+
+## Background
+Sparse Voxel Octree Ray Traversal originated from the need to render high-resolution volumetric data on GPUs. Key early work includes "Octree Textures on the GPU" in GPU Gems [S2, unofficial], which introduced the concept of storing octrees in 3D textures. The method has been implemented in various forms, including the `mxbrt/svo` renderer [S8, unofficial] and Unity-based prototypes [S5, unofficial]. It is often compared to or extended by DAG-based methods [S9] and caching systems like GigaVoxels [S1, S4, unofficial].
+
+## Sources
+[S1] Onlinerocker/SVO, https://github.com/Onlinerocker/SVO, fetched 2026-10-24 (unofficial)
+[S2] RvanderLaan/lwjgl-voxel-raycasting, https://github.com/RvanderLaan/lwjgl-voxel-raycasting, fetched 2026-10-24 (unofficial)
+[S3] UNIVERSIDADE FEDERAL DE SANTA CATARINA, https://repositorio.ufsc.br/bitstream/handle/123456789/202673/TCC.pdf?sequence=1&isAllowed=y, fetched 2026-10-24 (unofficial)
+[S4] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)
+[S5] xandergos/unity-sparse-voxel-octrees, https://github.com/xandergos/unity-sparse-voxel-octrees, fetched 2026-10-26 (unofficial)
+[S6] gabrielmuller/zazen, https://github.com/gabrielmuller/zazen, fetched 2026-10-26 (unofficial)
+[S7] krre/origin, https://github.com/krre/origin, fetched 2026-10-26 (unofficial)
+[S8] mxbrt/svo, https://github.com/mxbrt/svo, fetched 2026-10-26 (unofficial)
+[S9] (PDF) High resolution sparse voxel DAGs - ResearchGate, https://www.researchgate.net/publication/262367808_High_resolution_sparse_voxel_DAGs, fetched 2026-10-27
+[S10] loryruta/voxelizer, https://github.com/loryruta/voxelizer, fetched 2026-10-27 (unofficial)

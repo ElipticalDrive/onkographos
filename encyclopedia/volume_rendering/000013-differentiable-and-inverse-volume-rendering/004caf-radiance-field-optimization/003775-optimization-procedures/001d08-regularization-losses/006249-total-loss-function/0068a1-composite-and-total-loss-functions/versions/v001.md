@@ -1,0 +1,61 @@
+# Composite and Total Loss Functions
+
+Also called: Composite Loss, Total Training Objective, Aggregated Loss
+
+## Overview
+This family defines the mathematical framework for aggregating multiple supervision signals—such as photometric fidelity, geometric consistency, semantic alignment, and regularization constraints—into a single scalar value for optimizing differentiable volume rendering representations. It solves the problem of balancing competing objectives during end-to-end training. What sets this family apart from its siblings is that it serves as the structural definition for how individual loss components (such as those defined in [Opacity Loss](4203-opacity-loss.md) or [Total Variation Loss](7047-total-variation-loss.md)) are combined, weighted, and scheduled, rather than defining the specific metric for a single signal.
+
+## Shared principles
+The core mechanism of all methods in this family is the weighted summation of individual loss components $\mathcal{L}_k$ to form a total loss $L_{tot}$:
+
+$$ L_{tot} = \sum_{k} \lambda_k \mathcal{L}_k $$
+
+Where:
+*   $\mathcal{L}_k$ represents a specific loss term (e.g., photometric, geometric, semantic, regularization).
+*   $\lambda_k$ is a scalar hyperparameter controlling the contribution of term $k$.
+
+The specific instantiation of this formula varies based on the representation (e.g., Gaussian Splatting, Voxel Grids, Implicit Neural Fields), the training stage (e.g., initialization, refinement, dynamic growth), and the scale of supervision. The components $\mathcal{L}_k$ are computed per-pixel or per-voxel and then aggregated (summed or averaged) before weighting.
+
+## Subtopics
+
+### [Specific Method Implementations](9794-specific-method-implementations.md)
+This family details concrete loss function formulations and training routines used in specific radiance-field optimization methods [G]. It covers implementations ranging from neural implicit fields to Gaussian splatting and sparse voxel representations [G]. These implementations differ in their component terms (e.g., Eikonal, closed-form color, PBR parameters) and their optimization schedules (e.g., delayed updates, early stopping) [G].
+
+### [Total and Composite Training Objectives](16924-total-and-composite-training-objectives.md)
+Total and Composite Training Objectives define the mathematical framework for aggregating multiple supervision signals into a single scalar value for optimizing differentiable volume rendering representations. They solve the problem of balancing photometric fidelity, geometric consistency, semantic alignment, and regularization constraints during end-to-end training. What sets this family apart from its siblings is that it serves as the structural definition for how individual loss components (such as those defined in [Opacity Loss](4203-opacity-loss.md) or [Total Variation Loss](7047-total-variation-loss.md)) are combined, weighted, and scheduled, rather than defining the specific metric for a single signal.
+
+### [ARAH Loss Function](19682-arah-loss-function.md)
+The ARAH loss function is the composite training objective for the ARAH (Animatable Volume Rendering of Articulated Human SDFs) model, designed to optimize a signed distance function (SDF) and color field for animatable human bodies. It distinguishes itself from standard NeRF losses by incorporating specific geometric constraints tailored to articulated meshes, including an off-surface point loss and an inside point loss that leverage the canonical SMPL mesh topology. Unlike general radiance field optimization, it explicitly penalizes SDF values in regions far from the surface and inside the body volume to enforce a valid SDF representation for animation.
+
+### Subset Consistency Objective
+#### step
+- When subset consistency is disabled, training falls back to the standard single-branch supervised objective.
+#### formula
+- When subset consistency is enabled, compute final objective: $L = 0.5 (L_{subset}^a + L_{subset}^b) + L_{con}$, where $L_{subset}^k = L_{ren}^k + L_{reg}^k$ for $k \in \{a,b\}$.
+
+### Loss Function Composition
+#### formula
+- Total Loss = Rendering Loss + Regularization Loss + Rate Loss (conditional). Rendering Loss = $(1 - ssim\_weight) * L1 + ssim\_weight * SSIM$. Regularization Loss = $0.01 * mean(prod(scales))$. Rate Loss = $lambda\_weight * sum(bpp)$.
+#### parameter
+- $ssim\_weight$: Weight for SSIM component in rendering loss.
+- $rate\_loss\_start\_iteration$: Iteration after which rate loss is added to the total loss.
+
+### HIVE Loss Function
+#### definition
+- The total loss function combining rendering loss, Eikonal loss, optional warping loss, and two new regularization terms (TV and Normal) for smooth surface reconstruction.
+#### formula
+- $L = L_{ori} + \lambda_{tv} * L_{tv} + \lambda_{normal} * L_{normal}$. $L$ is the total loss, $L_{ori}$ is the original method's loss, $\lambda_{tv}$ and $\lambda_{normal}$ are weights.
+- $L_{tv} = \sum_{i,j,k} \sqrt{(V_{i+1,j,k} - V_{i,j,k})^2 + (V_{i,j+1,k} - V_{i,j,k})^2 + (V_{i,j,k+1} - V_{i,j,k})^2}$. Sum over all voxels in all $m$ hierarchical volumes. Encourages adjacent voxels to have similar characteristics.
+- $ngrad(t) = \nabla^2 sdf(F(p(t)))$. The Hessian of the SDF function evaluated at the point on the ray.
+#### parameter
+- $Npix$: Number of pixels in one optimization step.
+#### comparison
+- Includes $L_{warp}$ only for NeuralWarp to enforce multi-view photo-consistency.
+
+## Background
+The concept of composite loss functions in differentiable rendering emerged alongside the rise of neural implicit representations and neural radiance fields (NeRF). Early works like NeRF [10] primarily relied on photometric reconstruction losses. However, as the field evolved to include explicit surface reconstruction (e.g., NeuS [6], VolSDF [7]), regularization terms such as the Eikonal loss became standard to enforce signed distance function (SDF) properties. The HIVE method [S3, unofficial] demonstrates the continued evolution of these composite objectives by adding hierarchical volume encoding and specific smoothness constraints (TV and Normal losses) to handle complex geometries. Similarly, methods like ARAH [S1] and GlobalSplat [S1] show the adaptation of these composite frameworks to specific domains like animatable humans and efficient Gaussian splatting, respectively. The inclusion of rate-distortion losses in compressed representations like CompGS [S2, unofficial] highlights the expansion of loss composition to include information-theoretic constraints.
+
+## Sources
+[S1] GlobalSplat: Efficient Feed-Forward 3D Gaussian Splatting via Global Scene Tokens, https://doi.org/10.1007/978-3-032-37595-7_10, fetched 2026-10-29
+[S2] LiuXiangrui/CompGS, https://github.com/LiuXiangrui/CompGS, fetched 2026-10-27 (unofficial)
+[S3] HIVE: HIerarchical Volume Encoding for Neural Implicit Surface Reconstruction, https://doi.org/10.48550/arxiv.2408.01677, fetched 2026-10-26 (unofficial)

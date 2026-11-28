@@ -1,0 +1,2002 @@
+![](docs/preview.jpg)
+
+## Resources:
+
+- https://developer.nvidia.com/orca/amazon-lumberyard-bistro
+- https://antongerdelan.net/opengl/compute.html
+- https://dubiousconst282.github.io/2024/10/03/voxel-ray-tracing
+
+### resources/raytrace_octree.comp
+```
+#version 460 core
+
+#define MAX_DEPTH 12
+#define MAX_ITERS 128
+#define EPSILON 1e-4
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(rgba8, binding = 0) uniform image2D img_RenderOutput;
+
+struct OctreeNode {
+	uint info;
+	uint childPtr;
+};
+bool nodeCheckMask(in OctreeNode node, in uint childIdx) {
+	return ((node.info >> (childIdx + 1)) & 0x1) != 0;
+}
+bool nodeIsLeaf(in OctreeNode node) {
+	return (node.info & 0x1) != 0;
+}
+uint nodeGetIthChildPtr(in OctreeNode node, in uint childIdx) {
+	uint mask = node.info >> 1;
+	return node.childPtr + bitCount(mask & ((1 << childIdx) - 1));
+}
+layout(std430, binding = 0) readonly buffer OctreeNodesSSBO {
+	OctreeNode buf_OctreeNodes[];
+};
+
+struct OctreeVoxel {
+	uint rgb;
+};
+vec3 voxelGetColor(in OctreeVoxel voxel) {
+	return vec3(
+		float((voxel.rgb >> 24) & 0xFF) / 255.0,
+		float((voxel.rgb >> 16) & 0xFF) / 255.0,
+		float((voxel.rgb >>  8) & 0xFF) / 255.0
+	);
+}
+layout(std430, binding = 1) readonly buffer OctreeVoxelsSSBO {
+	OctreeVoxel buf_OctreeVoxels[];
+};
+
+layout(std140, binding = 0) uniform FrameUBO {
+	mat4 invProj;
+	mat4 invView;
+} ubo_Frame;
+
+shared uint sh_Stack[64][MAX_DEPTH];
+
+uint getCellIdx(vec3 pos, int mantissaBitIdx) {
+	// for mantissaBitIdx=22 at root node, decremented by 1 each level:
+	// float cellSize = exp2(float(mantissaBitIdx - 23));
+	// uvec3 cellPos = uvec3(floor((pos - 1.0) / cellSize)) & 1u;
+	// return cellPos.x + cellPos.y * 2u + cellPos.z * 4u;
+
+	// bitwise trick: extract relevant bit of mantissa to get cell index
+	uvec3 cellPos = (floatBitsToUint(pos) >> mantissaBitIdx) & 1;
+    return cellPos.x + cellPos.y * 2 + cellPos.z * 4;
+}
+
+vec3 quantizePos(vec3 pos, int mantissaBitIdx) {
+	// for mantissaBitIdx=22 at root node, decremented by 1 each level:
+	// float cellSize = exp2(float(mantissaBitIdx - 23));
+	// return floor((pos - 1.0) / cellSize) * cellSize + 1.0;
+    
+	// bitwise trick: mask out lower bits of mantissa to quantize between [1,2)
+	uint mask = ~0u << mantissaBitIdx;
+    return uintBitsToFloat(floatBitsToUint(pos) & mask);
+}
+
+vec2 intersectAabb(in vec3 minBound, in vec3 maxBound, in vec3 origin, in vec3 invDir) {
+	vec3 minBoundTDist = (minBound - origin) * invDir;
+	vec3 maxBoundTDist = (maxBound - origin) * invDir;
+	vec3 enterDist = min(minBoundTDist, maxBoundTDist);
+	vec3 exitDist = max(minBoundTDist, maxBoundTDist);
+	float enter = max(max(enterDist.x,  enterDist.y),  enterDist.z);
+	float exit = min(min(exitDist.x,  exitDist.y),  exitDist.z);
+	return vec2(enter, exit);
+}
+
+vec3 heatmap(in float value) {
+    const vec3 colors[] = vec3[](
+        vec3(0.0),
+        vec3(0.2, 0.1, 0.3),
+        vec3(0.7, 0.2, 0.4),
+        vec3(1.0, 0.6, 0.1),
+        vec3(1.0, 1.0, 0.7)
+	);
+	float scaledValue = clamp(value * float(colors.length() - 1), 0.0, float(colors.length() - 1) - 1e-6);
+	int i = int(floor(scaledValue));
+	return mix(colors[i], colors[i + 1], scaledValue - float(i));
+}
+
+// octree is axis-aligned, centered at origin so that each axis spans [-1, 1]
+struct RayTraceResult {
+	bool hit;
+	vec3 color;
+	vec3 pos;
+} rayTraceOctree(in vec3 origin, in vec3 dir) {
+	// scale origin from [-1, 1] to [1, 2]
+	origin = origin * 0.5 + 1.5;
+	
+	// fix symmetric dir + precompute 1/dir for AABB intersections
+	if (abs(dir.x) == 0) dir.x = EPSILON;
+	if (abs(dir.y) == 0) dir.y = EPSILON;
+	if (abs(dir.z) == 0) dir.z = EPSILON;
+	dir = sign(dir) * max(abs(dir), vec3(EPSILON));
+	dir = normalize(dir);
+	const vec3 invDir = 1.0 / dir;
+
+	// intersect ray with root AABB to find starting position in the volume
+	{
+		vec2 result = intersectAabb(vec3(1.0), vec3(2.0), origin, invDir);
+		if (result.y < result.x || result.y < 0.0) {
+			// no intersection with the volume
+			RayTraceResult result;
+			result.hit = false;
+			result.color = vec3(0.0);
+			return result;
+		}
+		origin += dir * max(result.x, 0.0);
+	}
+	origin = clamp(origin, 1.0, 1.9999999);
+
+	vec3 pos = origin;
+
+	// first bit in 23-bit mantissa
+	// (for 64-tree, first two bits, bitIdx should be 21!)
+	int mantissaBitIdx = 22;
+
+	uint nodeIdx = buf_OctreeNodes.length() - 1; // root node
+	OctreeNode node = buf_OctreeNodes[nodeIdx];
+
+	uint i;
+	for (i = 0; i < MAX_ITERS; i++) {
+		uint childIdx = getCellIdx(pos, mantissaBitIdx);
+
+		// descend until leaf
+		while (!nodeIsLeaf(node) && nodeCheckMask(node, childIdx)) {
+			sh_Stack[gl_LocalInvocationIndex][22 - mantissaBitIdx] = nodeIdx;
+
+			nodeIdx = nodeGetIthChildPtr(node, childIdx);
+			node = buf_OctreeNodes[nodeIdx];
+
+			mantissaBitIdx -= 1;
+			childIdx = getCellIdx(pos, mantissaBitIdx);
+		}
+		// stop traversal if a voxel was found
+		if (nodeIsLeaf(node) && nodeCheckMask(node, childIdx)) {
+			RayTraceResult result;
+			result.hit = true;
+			result.color = heatmap(float(i) / float(MAX_ITERS));
+			return result;
+		}
+
+		vec3 cellMin = quantizePos(pos, mantissaBitIdx);
+		// for root node (mantissaBitIdx=22), cellSize=0.5
+		// for mantissaBitIdx=21, cellSize=0.25
+		// ...
+		// float cellSize = exp2(float(mantissaBitIdx - 23));
+		// build it from ieee-754 bits:
+		float cellSize = uintBitsToFloat((127 + mantissaBitIdx - 23) << 23);
+
+		// advance ray using aabb exit intersection
+		// planePos = dir < 0.0 ? cellMin : cellMin + cellSize;
+		vec3 planePos = cellMin + step(0.0, dir) * cellSize;
+		vec3 planeDist = (planePos - origin) * invDir;
+		float tMax = min(min(planeDist.x, planeDist.y), planeDist.z);
+		pos = origin + dir * tMax;
+
+		// clamp to neighbor cell aabb to avoid precision issues
+		vec3 neighborMin = cellMin + cellSize * sign(dir) * vec3(equal(planeDist, vec3(tMax)));
+		vec3 neighborMax = uintBitsToFloat(floatBitsToUint(neighborMin + cellSize) - 1u);
+		// vec3 neighborMax = uintBitsToFloat(floatBitsToUint(neighborMin) + ((1 << mantissaBitIdx) - 1));
+		// ^ subtract smallest possible epsilon
+		pos = clamp(pos, neighborMin, neighborMax);
+
+		// ascend:
+		// find common ancestor node between previous and new position
+		// (cellMin has the same depth level as previous pos)
+		uvec3 xorPos = floatBitsToUint(pos) ^ floatBitsToUint(cellMin);
+		int commonBitIdx = findMSB((xorPos.x | xorPos.y | xorPos.z)/* & 0xFFAAAAAAu */); 
+		// FFAAAAAA = 11111111 10101010 10101010 10101010 used for 64-tree
+		// sign+exponent (first 9 bits) only change when exiting root node
+		if (commonBitIdx > mantissaBitIdx) {
+			// moving up the tree
+			mantissaBitIdx = commonBitIdx;
+			if (commonBitIdx > 22) {
+				// exited the root
+				break;
+			}
+
+			nodeIdx = sh_Stack[gl_LocalInvocationIndex][22 - mantissaBitIdx];
+			node = buf_OctreeNodes[nodeIdx];
+		}
+	}
+
+	// traversed full tree, didn't find a hit
+	RayTraceResult result;
+	result.hit = false;
+	result.color = heatmap(float(i) / float(MAX_ITERS));
+	return result;
+}
+
+vec3 normalizedMul(in mat4 matrix, in vec3 pos) {
+	vec4 clip = matrix * vec4(pos, 1.0);
+	return clip.xyz / clip.w;
+}
+// screen space is NDC * 0.5 + 0.5
+vec3 screenToView(in vec2 screenPos, in float depth) {
+	return normalizedMul(
+	    ubo_Frame.invProj, vec3(screenPos, depth) * 2.0 - 1.0
+	);
+}
+
+void main() {
+	if (any(greaterThanEqual(gl_GlobalInvocationID.xy, imageSize(img_RenderOutput)))) {
+		return;
+	}
+	vec2 texCoord = (gl_GlobalInvocationID.xy + vec2(0.5)) / vec2(imageSize(img_RenderOutput));
+
+	vec3 fragPosView  = screenToView(texCoord, 0.0);
+	vec3 eyeDirView  = normalize(fragPosView);
+	vec3 eyeDirWorld = normalize(mat3(ubo_Frame.invView) * eyeDirView);
+	vec3 eyePosWorld = vec3(ubo_Frame.invView[3]);
+
+	RayTraceResult trace = rayTraceOctree(eyePosWorld, eyeDirWorld);
+	vec4 out_Color;
+	if (trace.hit) {
+		out_Color = vec4(trace.color, 1.0);
+	} else {
+		// out_Color = vec4(var_TexCoord, 0.0, 1.0);
+		out_Color = vec4(trace.color, 1.0);
+	}
+	imageStore(img_RenderOutput, ivec2(gl_GlobalInvocationID.xy), out_Color);
+}
+```
+
+### resources/tex_to_screen.frag
+```
+#version 460 core
+
+layout(location = 0) out vec4 out_Color;
+
+layout(location = 0) in vec2 var_TexCoord;
+
+layout(binding = 0) uniform sampler2D tex_Texture;
+
+void main() {
+	out_Color = texture(tex_Texture, var_TexCoord);
+}
+```
+
+### resources/tex_to_screen.vert
+```
+#version 460 core
+
+layout(location = 0) out vec2 var_TexCoord;
+
+const vec2 FULLSCREEN_TRIANGLE[3] = vec2[3](
+	vec2(-1.0, -1.0),
+	vec2( 3.0, -1.0),
+	vec2(-1.0,  3.0)
+);
+
+void main() {
+    gl_Position = vec4(FULLSCREEN_TRIANGLE[gl_VertexID], 0.0, 1.0);
+    var_TexCoord = (gl_Position.xy * 0.5) + 0.5;
+}
+```
+
+### src/camera.hpp
+```
+#pragma once
+
+#include "./pch.hpp"
+
+class camera {
+public:
+	glm::vec3 xyz = glm::vec3(0.0f), rpy = glm::vec3(0.0f);
+	float fov = 90.0f;
+	uint32_t width = 800, height = 600;
+
+	~camera() = default;
+
+	void update(float dt, GLFWwindow *glfw_window) {
+		// if esc pressed, release cursor
+		if (glfwGetKey(glfw_window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+			captured_cursor = false;
+		}
+
+		// if clicked anywhere in the window, capture cursor
+		if (glfwGetMouseButton(glfw_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+			captured_cursor = true;
+		}
+
+		// set cursor mode based on captured state
+		glfwSetInputMode(
+		    glfw_window, GLFW_CURSOR, captured_cursor ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL
+		);
+
+		// calculate mouse delta
+		double mouse_x, mouse_y;
+		glfwGetCursorPos(glfw_window, &mouse_x, &mouse_y);
+		if (last_mouse_x == 0 && last_mouse_y == 0) {
+			last_mouse_x = static_cast<float>(mouse_x);
+			last_mouse_y = static_cast<float>(mouse_y);
+		}
+		float mouse_dx = static_cast<float>(mouse_x) - last_mouse_x;
+		float mouse_dy = static_cast<float>(mouse_y) - last_mouse_y;
+		last_mouse_x = static_cast<float>(mouse_x);
+		last_mouse_y = static_cast<float>(mouse_y);
+
+		if (init_iters_to_skip > 0) {
+			// skip first few iterations to allow for mouse deltas to stabilize
+			init_iters_to_skip--;
+			return;
+		}
+
+		// update rot if captured
+		if (captured_cursor) {
+			// remap sensitivity from rots per screen to deg/px
+			// > get monitor width
+			int monitor_width, monitor_height;
+			glfwGetMonitorWorkarea(
+			    glfwGetPrimaryMonitor(), nullptr, nullptr, &monitor_width, &monitor_height
+			);
+			float unit_deg_per_px = 360.0f / monitor_width;
+			float movement_scale = unit_deg_per_px * sensitivity;
+
+			// compute current pitch/yaw
+			float &pitch = rpy.y;
+			float &yaw = rpy.z;
+			pitch += mouse_dy * movement_scale;
+			yaw -= mouse_dx * movement_scale;
+			pitch = std::clamp(pitch, -89.0f, 89.0f);
+
+			// read WSADEQ input
+			float input_x = (glfwGetKey(glfw_window, GLFW_KEY_W) == GLFW_PRESS ? 1.0f : 0.0f) -
+			                (glfwGetKey(glfw_window, GLFW_KEY_S) == GLFW_PRESS ? 1.0f : 0.0f);
+			float input_y = (glfwGetKey(glfw_window, GLFW_KEY_A) == GLFW_PRESS ? 1.0f : 0.0f) -
+			                (glfwGetKey(glfw_window, GLFW_KEY_D) == GLFW_PRESS ? 1.0f : 0.0f);
+			float input_z = (glfwGetKey(glfw_window, GLFW_KEY_E) == GLFW_PRESS ? 1.0f : 0.0f) -
+			                (glfwGetKey(glfw_window, GLFW_KEY_Q) == GLFW_PRESS ? 1.0f : 0.0f);
+			float input_scale =
+			    (glfwGetKey(glfw_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? 1.0f : 0.0f) -
+			    (glfwGetKey(glfw_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ? 1.0f : 0.0f);
+			glm::vec4 target_input = glm::vec4(input_x, input_y, input_z, input_scale);
+
+			// apply input acceleration
+			glm::vec4 input_delta = target_input - this->input;
+			float max_delta_norm = input_acceleration * dt;
+			if (glm::length(input_delta) > max_delta_norm) {
+				input_delta = glm::normalize(input_delta) * max_delta_norm;
+			}
+			this->input += input_delta;
+
+			// compute velocity
+			float boost = glm::mix(1.0f, movement_boost, glm::clamp(this->input.w, 0.0f, 1.0f));
+			float slowdown =
+			    glm::mix(movement_slow, 1.0f, glm::clamp(this->input.w + 1.0f, 0.0f, 1.0f));
+			glm::vec3 velocity = glm::vec3(this->input) * movement_speed * boost * slowdown;
+
+			// rotate velocity using rpy
+			constexpr glm::vec3 left(0.0, 1.0, 0.0);
+			constexpr glm::vec3 up(0.0, 0.0, 1.0);
+			glm::mat4 rot = glm::rotate(glm::mat4(1.0f), glm::radians(pitch), left);
+			rot = glm::rotate(glm::mat4(1.0f), glm::radians(yaw), up) * rot;
+			velocity = glm::vec3(rot * glm::vec4(velocity, 0.0f));
+
+			xyz += velocity * dt;
+		}
+
+		// update width/height
+		glfwGetFramebufferSize(glfw_window, (int *)&width, (int *)&height);
+	}
+
+	glm::mat4 calc_view() const {
+		glm::mat4 combined_tf =
+		    glm::rotate(glm::mat4(1), glm::radians(rpy.x), glm::vec3(1.0f, 0.0f, 0.0f));
+		combined_tf = glm::rotate(glm::mat4(1), glm::radians(rpy.y), glm::vec3(0.0f, 1.0f, 0.0f)) *
+		              combined_tf;
+		combined_tf = glm::rotate(glm::mat4(1), glm::radians(rpy.z), glm::vec3(0.0f, 0.0f, 1.0f)) *
+		              combined_tf;
+		combined_tf = glm::translate(glm::mat4(1), xyz) * combined_tf;
+		return glm::inverse(combined_tf);
+	}
+
+	// input: +x = forward, +y = left, +z = up;
+	// output: +x = right, +y = up, +z = back;
+	// remember to divide by w!
+	glm::mat4 calc_proj() const {
+		// proj matrix
+		float fov_y_deg = fov;
+		if (width > height) {
+			// scale down vertical FOV when screen is horizontal
+			float tan_half_fov = std::tan(glm::radians(fov * 0.5f));
+			tan_half_fov *= (float)height / (float)width;
+			fov_y_deg = glm::degrees(2.0f * std::atan(tan_half_fov));
+		}
+		glm::mat4 gl_to_ndc =
+		    glm::perspective(glm::radians(fov_y_deg), (float)width / (float)height, 0.1f, 1000.0f);
+		// flu: +x = forward, +y = left, +z = up
+		// gl:  +x = right, +y = up, +z = back
+		constexpr glm::mat4 flu_to_gl = {
+		    {0.0f, 0.0f, -1.0f, 0.0f},
+		    {-1.0f, 0.0f, 0.0f, 0.0f},
+		    {0.0f, 1.0f, 0.0f, 0.0f},
+		    {0.0f, 0.0f, 0.0f, 1.0f}
+		};
+		glm::mat4 flu_to_ndc = gl_to_ndc * flu_to_gl;
+		return flu_to_ndc;
+	}
+
+private:
+	const float sensitivity = 0.5f; // full rots per screen width of mouse movement
+	const float input_acceleration = 5.0f; // units per second^2, inputs range from -1 to 1
+	const float movement_speed = 0.2f; // units per second
+	const float movement_boost = 5.0f; // multiplier when holding shift
+	const float movement_slow = 0.1f;
+	// ^ multiplier when holding ctrl (holding both does not multiply them together)
+
+	float last_mouse_x = 0.0f;
+	float last_mouse_y = 0.0f;
+
+	glm::vec4 input = glm::vec4(0.0f); // x,y,z,speed
+
+	bool captured_cursor = false;
+	uint32_t init_iters_to_skip = 2;
+};
+```
+
+### src/load_ply.hpp
+```
+#pragma once
+
+#include "./pch.hpp"
+#include <sys/types.h>
+
+inline std::vector<glm::vec3> load_ply(std::span<const std::byte> buffer) {
+	std::istringstream ss(
+	    std::string(reinterpret_cast<const char *>(buffer.data()), buffer.size())
+	);
+
+	std::string line;
+	size_t vertex_count = 0;
+	while (std::getline(ss, line)) {
+		if (line.starts_with("element vertex ")) {
+			vertex_count = std::stoul(line.substr(15));
+		} else if (line == "end_header") {
+			break;
+		}
+	}
+	std::vector<glm::vec3> vertices(vertex_count);
+	ss.read(reinterpret_cast<char *>(vertices.data()), vertex_count * sizeof(glm::vec3));
+	return vertices;
+}
+
+inline std::vector<glm::vec3> load_ply_from_file(std::filesystem::path const &path) {
+	std::ifstream file(path, std::ios::binary);
+	if (!file.is_open()) {
+		throw std::runtime_error("Failed to open file: " + path.string());
+	}
+
+	file.seekg(0, std::ios::end);
+	size_t size = file.tellg();
+	file.seekg(0, std::ios::beg);
+	std::vector<uint8_t> data(size);
+	file.read(reinterpret_cast<char *>(data.data()), size);
+
+	return load_ply(std::as_bytes(std::span(data)));
+}
+```
+
+### src/main.cpp
+```
+#include "./pch.hpp"
+
+#include "./gl/framebuffer.hpp"
+#include "./gl/texture.hpp"
+#include "./gl/vertex_array.hpp"
+#include <resources.h>
+
+#include "./camera.hpp"
+#include "./gl/shader.hpp"
+#include "./gl/shader_storage_buffer.hpp"
+#include "./gl/uniform_buffer.hpp"
+#include "./octree.hpp"
+#include "./voxelizer.hpp"
+#include "./window.hpp"
+
+int main() {
+	// // std::vector<voxel> voxels = voxelizer().voxelize_assimp_scene(
+	// //     "/home/rayferric/Source/voxel-engine/Bistro_v5_2/BistroExterior.fbx",
+	// //     4096,
+	// //     glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1, 0, 0))
+	// // );
+	// std::vector<voxel> voxels = voxelizer().voxelize_assimp_scene(
+	//     "/home/rayferric/Source/voxel-engine/resources/dragon.ply", 1024
+	// );
+	// std::cout << "Loaded " << voxels.size() << " voxels from assimp.\n";
+	// octree tree;
+	// octree_builder(tree).from_voxels(voxels, 10);
+
+	// tree.save("/home/rayferric/Source/voxel-engine/bistro_octree.bin");
+
+	octree tree;
+	tree.load("/home/rayferric/Source/voxel-engine/bistro_octree.bin");
+
+	std::cout << "Octree has " << tree.nodes.size() << " nodes and " << tree.voxels.size()
+	          << " voxels.\n";
+
+	window win;
+	win.open(1280, 720, "Voxel Engine");
+
+	// fps camera + view ubo
+	camera cam;
+	uniform_buffer ubo_view;
+	ubo_view.update_fields(
+	    glm::inverse(cam.calc_proj()), glm::inverse(cam.calc_view())
+	); // init before rendering
+
+	// octree data buffers
+	shader_storage_buffer ssbo_nodes;
+	ssbo_nodes.update(
+	    std::span<const std::byte>(
+	        reinterpret_cast<const std::byte *>(tree.nodes.data()),
+	        sizeof(octree_node) * tree.nodes.size()
+	    )
+	);
+	shader_storage_buffer ssbo_voxels;
+	ssbo_voxels.update(
+	    std::span<const std::byte>(
+	        reinterpret_cast<const std::byte *>(tree.voxels.data()),
+	        sizeof(octree_voxel) * tree.voxels.size()
+	    )
+	);
+
+	// compute shader + output texture
+	shader sh_raytrace;
+	sh_raytrace.build_compute(
+	    std::string_view(reinterpret_cast<char *>(_binary_raytrace_octree_comp_start))
+	);
+	texture_2d render_output;
+	render_output.alloc_storage(win.get_size().width, win.get_size().height, texture_format::rgba8);
+
+	// fullscreen triangle shader + vao
+	shader sh_tex_to_screen;
+	sh_tex_to_screen.build_raster(
+	    std::string_view(reinterpret_cast<char *>(_binary_tex_to_screen_vert_start)),
+	    std::string_view(reinterpret_cast<char *>(_binary_tex_to_screen_frag_start))
+	);
+	vertex_array dummy_vao;
+
+	// bind buffers and textures
+	ubo_view.bind(0);
+	ssbo_nodes.bind(0);
+	ssbo_voxels.bind(1);
+	render_output.bind_image(0);
+	render_output.bind_sampler(0);
+
+	// clang-format off
+	float fps_timer = 0.0f;
+	int frame_count = 0;
+	win.run_loop({
+		.on_draw = [&]() {
+			sh_raytrace.bind();
+			constexpr uint32_t work_group_size = 8;
+			glDispatchCompute(
+			    (render_output.width + work_group_size - 1) / work_group_size,
+			    (render_output.height + work_group_size - 1) / work_group_size,
+			    1
+			);
+			glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+			sh_tex_to_screen.bind();
+			dummy_vao.bind();
+			glClear(GL_DEPTH_BUFFER_BIT);
+			glEnable(GL_CULL_FACE);
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+
+			frame_count++;
+		},
+		.on_update = [&](float dt) {
+			cam.update(dt, win.glfw_window);
+			ubo_view.update_fields(glm::inverse(cam.calc_proj()), glm::inverse(cam.calc_view()));
+
+			fps_timer += dt;
+			if (fps_timer >= 1.0f) {
+				std::cout << "FPS: " << frame_count << std::endl;
+				frame_count = 0;
+				fps_timer = 0.0f;
+			}
+		},
+		.on_resize = [&](uint32_t width, uint32_t height) {
+			glViewport(0, 0, width, height);
+			render_output.alloc_storage(width, height, texture_format::rgba8);
+		}
+	});
+	// clang-format on
+
+	return 0;
+}
+```
+
+### src/material.hpp
+```
+#pragma once
+
+#include "./pch.hpp"
+
+class material {
+public:
+	// gamma space color (linear ^ 1/2.2)
+	uint32_t rgb; // + 8 bit padding
+
+	material() : rgb(0) {}
+	material(uint8_t r, uint8_t g, uint8_t b) : rgb((r << 24) | (g << 16) | (b << 8)) {}
+};
+
+struct pbr_material {
+	// gamma space color (linear ^ 1/2.2)
+	uint8_t r, g, b;
+	// 0=dielectric (almost no specular, full diffuse), 255=metal (no diffuse, full specular)
+	uint8_t metallic;
+	// 0=perfect mirror, 255=fully rough
+	uint8_t roughness;
+	// 0=non-emissive, 255=fully emissive
+	uint8_t emissive;
+	// 0=opaque, 255=fully transmissive, no diffuse
+	uint8_t transmissive;
+	// 0=1.0, 255=5.0
+	uint8_t ior;
+};
+```
+
+### src/octree.hpp
+```
+#pragma once
+
+#include "./voxelizer.hpp"
+
+struct octree_node {
+	// first 8 bits: occupancy mask (1=child exists, 0=no child)
+	// next 1 bit: "is leaf?", index into nodes or voxels array (0=nodes, 1=voxels)
+	uint32_t info;
+	// index of first child in nodes or voxels array
+	uint32_t child_ptr;
+	// the memory layout is sub-optimal since we waste 23 bits, but it allows for 32-bit addressing
+
+	octree_node() {}
+
+	octree_node(uint8_t mask, bool is_leaf, uint32_t child_ptr) {
+		this->info = static_cast<uint32_t>(mask) << 1 | static_cast<uint32_t>(is_leaf);
+		this->child_ptr = child_ptr;
+	}
+};
+
+struct octree_voxel {
+	// 8 last bits: padding
+	uint32_t rgb;
+
+	octree_voxel() {}
+
+	octree_voxel(uint8_t r, uint8_t g, uint8_t b) : rgb((r << 24) | (g << 16) | (b << 8)) {}
+};
+
+class octree {
+public:
+	std::vector<octree_node> nodes;
+	std::vector<octree_voxel> voxels;
+
+	void save(const std::filesystem::path &path) {
+		std::ofstream ofs(path, std::ios::out | std::ios::binary);
+		size_t num_nodes = nodes.size();
+		size_t num_voxels = voxels.size();
+		ofs.write(reinterpret_cast<const char *>(&num_nodes), sizeof(size_t));
+		ofs.write(reinterpret_cast<const char *>(&num_voxels), sizeof(size_t));
+		ofs.write(reinterpret_cast<const char *>(nodes.data()), num_nodes * sizeof(octree_node));
+		ofs.write(reinterpret_cast<const char *>(voxels.data()), num_voxels * sizeof(octree_voxel));
+		ofs.close();
+	}
+	void load(const std::filesystem::path &path) {
+		std::ifstream ifs(path, std::ios::in | std::ios::binary);
+		size_t num_nodes;
+		size_t num_voxels;
+		ifs.read(reinterpret_cast<char *>(&num_nodes), sizeof(size_t));
+		ifs.read(reinterpret_cast<char *>(&num_voxels), sizeof(size_t));
+		nodes.resize(num_nodes);
+		voxels.resize(num_voxels);
+		ifs.read(reinterpret_cast<char *>(nodes.data()), num_nodes * sizeof(octree_node));
+		ifs.read(reinterpret_cast<char *>(voxels.data()), num_voxels * sizeof(octree_voxel));
+		ifs.close();
+	}
+};
+
+class octree_builder {
+public:
+	octree &tree;
+
+	octree_builder(octree &tree) : tree(tree) {}
+
+	// max_depth is the branching level, minimum 1 -> means one branch with 8 leaves (2^3 voxels)
+	void from_points(const std::vector<glm::vec3> &points, uint32_t max_depth = 8) {
+		// max_depth=12 -> 2^12=4096
+		assert(max_depth <= 12 && "max_depth must be in [1, 12] (max 4096^3 voxels)");
+
+		if (points.empty()) {
+			return;
+		}
+
+		tree.nodes.clear();
+		tree.voxels.clear();
+
+		this->max_depth = max_depth;
+
+		glm::vec3 min_bound = points[0];
+		glm::vec3 max_bound = points[0];
+		for (const auto &p : points) {
+			min_bound = glm::min(min_bound, p);
+			max_bound = glm::max(max_bound, p);
+		}
+
+		// restore 1:1:1 aspect ratio between bounds
+		glm::vec3 extent = max_bound - min_bound;
+		float max_extent = glm::compMax(extent);
+		glm::vec3 margin = (glm::vec3(max_extent) - extent) * 0.5f;
+		min_bound -= margin;
+		// max_bound += margin;
+		float scale = (1 << max_depth) / std::max(max_extent, 1e-6f);
+		// ^ 1 << max_depth will never overflow since max_depth <= 12
+
+		// tf points to grid space and convert to morton code
+		morton_points.reserve(points.size());
+		for (const auto &p : points) {
+			glm::uvec3 grid_pos = glm::uvec3((p - min_bound) * scale);
+			grid_pos = glm::min(grid_pos, glm::uvec3((1 << max_depth) - 1));
+			morton_points.emplace_back(z_order(grid_pos));
+		}
+
+		// sort so that each octree region is stored contiguously in memory
+		std::sort(morton_points.begin(), morton_points.end());
+		// remove duplicates
+		morton_points.erase(
+		    std::unique(morton_points.begin(), morton_points.end()), morton_points.end()
+		);
+
+		octree_node root_node =
+		    insert_children_recursive(glm::uvec3(0), 0, morton_points.size(), 1);
+		tree.nodes.push_back(root_node);
+	}
+
+	void from_voxels(const std::vector<voxel> &voxels, uint32_t depth) {
+		// max_depth=12 -> 2^12=4096
+		assert(depth <= 12 && "max_depth must be in [1, 12] (max 4096^3 voxels)");
+
+		if (voxels.empty()) {
+			return;
+		}
+
+		tree.nodes.clear();
+		tree.voxels.clear();
+
+		this->max_depth = depth;
+
+		// convert voxels to morton codes
+		morton_points.reserve(voxels.size());
+		for (const auto &v : voxels) {
+			if (glm::any(glm::greaterThanEqual(v.xyz, glm::u16vec3(1 << depth)))) {
+				throw std::runtime_error(
+				    "voxel position out of bounds for depth = " + std::to_string(depth)
+				);
+			}
+			morton_points.emplace_back(z_order(glm::uvec3(v.xyz)));
+		}
+
+		// sort so that each octree region is stored contiguously in memory
+		std::sort(morton_points.begin(), morton_points.end());
+		// remove duplicates
+		morton_points.erase(
+		    std::unique(morton_points.begin(), morton_points.end()), morton_points.end()
+		);
+
+		octree_node root_node =
+		    insert_children_recursive(glm::uvec3(0), 0, morton_points.size(), 1);
+		tree.nodes.push_back(root_node);
+	}
+
+private:
+	uint32_t max_depth;
+	std::vector<uint64_t> morton_points;
+	std::array<std::vector<octree_node>, 20> children_nodes;
+	std::array<std::vector<octree_voxel>, 20> children_voxels;
+	// inserts the children of the node defined by (min, start_index, end_index)
+	// returns the definition of the node with pointer to the children
+	octree_node insert_children_recursive(
+	    glm::uvec3 min, uint32_t start_index, uint32_t end_index, uint8_t depth
+	) {
+		uint8_t occupancy_mask = 0;
+		bool is_leaf = (depth == this->max_depth);
+
+		// at deepest iteration depth=max_depth -> half_size=1
+		uint32_t half_size = (1 << (max_depth - depth));
+		children_nodes[depth].clear();
+		children_voxels[depth].clear();
+		for (uint8_t i = 0; i < 8; ++i) {
+			glm::uvec3 child_min = min + nth_child_octant(i) * glm::uvec3(half_size);
+			glm::uvec3 child_max = child_min + glm::uvec3(half_size) - glm::uvec3(1);
+			// - 1 since child_max must be inclusive, because z_order(child_max)
+			// must fall within the same octant as z_order(child_min)
+
+			auto range_start = std::lower_bound(
+			    morton_points.begin() + start_index,
+			    morton_points.begin() + end_index,
+			    z_order(child_min)
+			);
+			auto range_end = std::upper_bound(
+			    range_start, morton_points.begin() + end_index, z_order(child_max)
+			);
+			size_t new_start_index = range_start - morton_points.begin();
+			size_t new_end_index = range_end - morton_points.begin();
+
+			if (new_start_index < new_end_index) {
+				// child has points
+				occupancy_mask |= (1 << i);
+				if (is_leaf) {
+					// remember this node's i-th voxel for addition later on
+					children_voxels[depth].emplace_back(255, 255, 255);
+				} else {
+					// insert the children of this node's i-th child
+					octree_node child = insert_children_recursive(
+					    child_min, new_start_index, new_end_index, depth + 1
+					);
+					children_nodes[depth].push_back(child);
+				}
+			}
+		}
+
+		uint32_t child_ptr = is_leaf ? tree.voxels.size() : tree.nodes.size();
+		if (is_leaf) {
+			// insert the voxels of this node
+			tree.voxels.insert(
+			    tree.voxels.end(), children_voxels[depth].begin(), children_voxels[depth].end()
+			);
+		} else {
+			// insert the children of this node
+			tree.nodes.insert(
+			    tree.nodes.end(), children_nodes[depth].begin(), children_nodes[depth].end()
+			);
+		}
+
+		// return the parent node
+		return octree_node(occupancy_mask, is_leaf, child_ptr);
+	}
+
+	uint64_t z_order(const glm::uvec3 &pos) {
+		assert(glm::all(glm::lessThan(pos, glm::uvec3(4096))) && "position must be < 4096");
+		uint64_t index = 0;
+		for (uint32_t i = 0; i < 12; ++i) {
+			index |= ((uint64_t(pos.x) & (1ULL << i)) << (2 * i)) |
+			         ((uint64_t(pos.y) & (1ULL << i)) << (2 * i + 1)) |
+			         ((uint64_t(pos.z) & (1ULL << i)) << (2 * i + 2));
+		}
+		return index;
+	}
+
+	glm::uvec3 nth_child_octant(uint8_t n) {
+		return glm::uvec3(n & 0x1, (n >> 1) & 0x1, (n >> 2) & 0x1);
+	}
+};
+```
+
+### src/pch.hpp
+```
+#pragma once
+
+#include <algorithm>
+#include <bit>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <span>
+#include <sstream>
+#include <stack>
+#include <string_view>
+#include <vector>
+
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+
+#include <glad/gl.h>
+
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <glm/gtx/component_wise.hpp>
+#include <glm/gtx/string_cast.hpp>
+
+#include <assimp/Importer.hpp>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
+```
+
+### src/voxel_grid.hpp
+```
+// #pragma once
+
+// #include "./pch.hpp"
+
+// #include "./material.hpp"
+
+// class voxel_grid {
+// public:
+// 	std::vector<material> voxels;
+// 	uint32_t size;
+
+// 	voxel_grid() : size(0) {}
+
+// 	// supports only up to 1024^3 (1B voxels) to avoid 32-bit overflow
+// 	// we use a z-order curve to improve cache locality
+// 	// it requires the dimensions to be powers of two
+// 	void resize(uint32_t size) {
+// 		// powers of two
+// 		assert((size & (size - 1)) == 0 && "size must be a power of two");
+// 		assert(size <= 1024 && "size must be <= 1024");
+
+// 		this->size = size;
+// 		voxels.resize(size * size * size);
+// 	}
+
+// 	material &at(uint32_t x, uint32_t y, uint32_t z) {
+// 		assert(x < size && y < size && z < size);
+
+// 		// z-order curve
+// 		uint32_t index = 0;
+// 		for (uint32_t i = 0; i < 10; ++i) {
+// 			// up to 2^10=1024 per axis
+// 			index |= ((x & (1 << i)) << (2 * i)) | ((y & (1 << i)) << (2 * i + 1)) | ((z & (1 << i)) << (2 * i + 2));
+// 		}
+// 		return voxels[index];
+// 	}
+
+// 	const material &at(uint32_t x, uint32_t y, uint32_t z) const {
+// 		assert(x < size && y < size && z < size);
+
+// 		// z-order curve
+// 		uint32_t index = 0;
+// 		for (uint32_t i = 0; i < 10; ++i) {
+// 			// up to 2^10=1024 per axis
+// 			index |= ((x & (1 << i)) << (2 * i)) | ((y & (1 << i)) << (2 * i + 1)) | ((z & (1 << i)) << (2 * i + 2));
+// 		}
+// 		return voxels[index];
+// 	}
+
+// 	void from_points(const std::vector<glm::vec3> &points) {
+// 		if (points.empty()) {
+// 			return;
+// 		}
+
+// 		std::fill(voxels.begin(), voxels.end(), material{0, 0, 0});
+
+// 		glm::vec3 min_bound = points[0];
+// 		glm::vec3 max_bound = points[0];
+// 		for (auto const &p : points) {
+// 			min_bound = glm::min(min_bound, p);
+// 			max_bound = glm::max(max_bound, p);
+// 		}
+
+// 		glm::vec3 extent = max_bound - min_bound;
+// 		float max_extent = std::max(glm::compMax(extent), 1e-6f);
+// 		glm::vec3 margin = (max_extent - glm::vec3(extent)) * 0.5f;
+// 		min_bound -= margin;
+// 		// max_bound += margin; --- IGNORE ---
+
+// 		for (auto const &p : points) {
+// 			// scale p to grid bounds [0, size) while preserving aspect ratio
+// 			glm::vec3 pos = (p - min_bound) / max_extent;
+// 			uint32_t x = std::min(static_cast<uint32_t>(pos.x * size), size - 1);
+// 			uint32_t y = std::min(static_cast<uint32_t>(pos.y * size), size - 1);
+// 			uint32_t z = std::min(static_cast<uint32_t>(pos.z * size), size - 1);
+// 			at(x, y, z) = {255, 255, 255};
+// 		}
+// 	}
+// };
+```
+
+### src/voxelizer.hpp
+```
+#pragma once
+
+#include "./pch.hpp"
+
+struct voxel {
+	glm::u16vec3 xyz;
+	glm::u8vec3 rgb;
+};
+
+inline bool operator==(const voxel &a, const voxel &b) {
+	return (a.xyz == b.xyz) && (a.rgb == b.rgb);
+}
+
+class voxelizer {
+public:
+	const std::vector<voxel> &voxelize_assimp_scene(
+	    const std::filesystem::path &path,
+	    uint16_t resolution = 1024,
+	    glm::mat4 transform = glm::mat4(1.0f)
+	) {
+		this->resolution = resolution;
+		this->transform_correction = transform;
+
+		std::cout << "Loading model from " << path << "...\n";
+		load_assimp_scene(path); // updates ai_scene
+
+		std::cout << "Computing model bounds...\n";
+		compute_bounds(ai_scene, resolution); // updates grid_remapping
+
+		std::cout << "Voxelizing model...\n";
+		voxels.reserve(resolution * resolution * 4); // heuristic
+		traverse_nodes(
+		    ai_scene->mRootNode,
+		    this->transform_correction,
+		    std::bind(&voxelizer::process_node, this, std::placeholders::_1, std::placeholders::_2)
+		);
+
+		std::cout << "Removing duplicate voxels...\n";
+		make_voxels_unique();
+
+		std::cout << "Generated " << voxels.size() << " voxels.\n";
+
+		return voxels;
+	}
+
+private:
+	uint16_t resolution = 1024;
+	glm::mat4 transform_correction = glm::mat4(1.0f);
+	std::vector<voxel> voxels;
+
+	std::unique_ptr<Assimp::Importer> importer;
+	const aiScene *ai_scene = nullptr;
+	void load_assimp_scene(const std::filesystem::path &path) {
+		importer = std::make_unique<Assimp::Importer>();
+		ai_scene = importer->ReadFile(
+		    path.string(), aiProcess_Triangulate | aiProcess_JoinIdenticalVertices
+		);
+
+		if (!ai_scene || (ai_scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) > 0 ||
+		    !ai_scene->mRootNode) {
+			throw std::runtime_error(importer->GetErrorString());
+		}
+	}
+
+	static void traverse_nodes(
+	    aiNode *node,
+	    const glm::mat4 &parent_transform,
+	    std::function<void(aiNode *, const glm::mat4 &)> callback
+	) {
+		glm::mat4 node_transform = glm::transpose(glm::make_mat4(&node->mTransformation.a1));
+		glm::mat4 global_transform = parent_transform * node_transform;
+		callback(node, global_transform);
+		for (uint32_t i = 0; i < node->mNumChildren; i++) {
+			traverse_nodes(node->mChildren[i], global_transform, callback);
+		}
+	}
+
+	struct {
+		glm::vec3 min_bound;
+		double scale;
+	} grid_remapping;
+	void compute_bounds(const aiScene *ai_scene, uint16_t resolution) {
+		glm::vec3 min_bound(FLT_MAX);
+		glm::vec3 max_bound(-FLT_MAX);
+
+		traverse_nodes(
+		    ai_scene->mRootNode,
+		    this->transform_correction,
+		    [&](aiNode *ai_node, const glm::mat4 &global_transform) {
+			    // process meshes
+			    for (uint32_t i = 0; i < ai_node->mNumMeshes; i++) {
+				    aiMesh *ai_mesh = ai_scene->mMeshes[ai_node->mMeshes[i]];
+				    for (uint32_t j = 0; j < ai_mesh->mNumVertices; j++) {
+					    aiVector3D &v = ai_mesh->mVertices[j];
+					    glm::vec4 p = global_transform * glm::vec4(v.x, v.y, v.z, 1.0f);
+					    min_bound = glm::min(min_bound, glm::vec3(p));
+					    max_bound = glm::max(max_bound, glm::vec3(p));
+				    }
+			    }
+		    }
+		);
+
+		std::cout << "Model bounds: [" << min_bound.x << ", " << min_bound.y << ", " << min_bound.z
+		          << "] to [" << max_bound.x << ", " << max_bound.y << ", " << max_bound.z << "]\n";
+
+		// restore 1:1:1 aspect ratio between bounds
+		glm::vec3 extent = max_bound - min_bound;
+		double max_extent = glm::compMax(extent);
+		glm::vec3 margin = (glm::vec3(max_extent) - extent) * 0.5f;
+		min_bound -= margin;
+		// max_bound += margin;
+		double scale = resolution / max_extent;
+
+		grid_remapping.min_bound = min_bound;
+		grid_remapping.scale = scale;
+	}
+
+	static inline uint16_t &project_x(glm::u16vec3 &v, int axis) {
+		if (axis == 0) {
+			return v.y;
+		} else if (axis == 1) {
+			return v.z;
+		} else { // axis == 2
+			return v.x;
+		}
+	}
+
+	static inline uint16_t &project_y(glm::u16vec3 &v, int axis) {
+		if (axis == 0) {
+			return v.z;
+		} else if (axis == 1) {
+			return v.x;
+		} else { // axis == 2
+			return v.y;
+		}
+	}
+
+	static inline glm::u16vec3 unproject(const glm::u16vec2 &p, uint16_t z, int axis) {
+		if (axis == 0) {
+			return glm::u16vec3(z, p.x, p.y);
+		} else if (axis == 1) {
+			return glm::u16vec3(p.y, z, p.x);
+		} else { // axis == 2
+			return glm::u16vec3(p.x, p.y, z);
+		}
+	}
+
+	static inline int32_t
+	signed_tri_area(const glm::i32vec2 &a, const glm::i32vec2 &b, const glm::i32vec2 &c) {
+		return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+	}
+
+	inline void process_node(aiNode *ai_node, const glm::mat4 &local_transform) {
+		// process meshes
+		for (uint32_t i = 0; i < ai_node->mNumMeshes; i++) {
+			aiMesh *ai_mesh = ai_scene->mMeshes[ai_node->mMeshes[i]];
+			for (uint32_t j = 0; j < ai_mesh->mNumFaces; j++) {
+				aiFace &face = ai_mesh->mFaces[j];
+				if (face.mNumIndices != 3) {
+					continue; // skip non-triangle faces
+				}
+
+				// extract triangle vertices and texcoords
+				glm::vec3 vertices[3];
+				glm::vec2 texcoords[3];
+				for (uint32_t k = 0; k < 3; k++) {
+					aiVector3D &v = ai_mesh->mVertices[face.mIndices[k]];
+					vertices[k] = local_transform * glm::vec4(v.x, v.y, v.z, 1.0f);
+					if (ai_mesh->HasTextureCoords(0)) {
+						texcoords[k] = glm::vec2(
+						    ai_mesh->mTextureCoords[0][face.mIndices[k]].x,
+						    ai_mesh->mTextureCoords[0][face.mIndices[k]].y
+						);
+					} else {
+						texcoords[k] = glm::vec2(0.0f, 0.0f);
+					}
+				}
+				// transport to grid space
+				glm::u16vec3 grid_vertices[3];
+				for (int k = 0; k < 3; k++) {
+					glm::dvec3 p = glm::dvec3(vertices[k] - grid_remapping.min_bound) *
+					               (double)grid_remapping.scale;
+					grid_vertices[k] = glm::min(glm::u16vec3(p), glm::u16vec3(resolution - 1));
+				}
+
+				// take a short path if all vertices are in the same voxel
+				if ((grid_vertices[0] == grid_vertices[1]) &&
+				    (grid_vertices[0] == grid_vertices[2])) {
+					voxels.push_back({grid_vertices[0], glm::u8vec3(255)});
+					continue;
+				}
+
+				// find which axis is most aligned with the normal
+				glm::vec3 e0 = vertices[1] - vertices[0];
+				glm::vec3 e1 = vertices[2] - vertices[0];
+				glm::vec3 normal = glm::normalize(glm::cross(e0, e1));
+				glm::vec3 abs_normal = glm::abs(normal);
+				int major_axis = 0;
+				if (abs_normal.y > abs_normal.x) {
+					major_axis = 1;
+				}
+				if (abs_normal.z > abs_normal[major_axis]) {
+					major_axis = 2;
+				}
+
+				// check if normal angle is close to 45, and set a bool
+				glm::vec3 major_axis_vec(0.0f);
+				major_axis_vec[major_axis] = 1.0f;
+				bool is_diagonal = glm::abs(glm::dot(normal, major_axis_vec)) < 0.9f;
+
+				// project triangle onto 2D plane orthogonal to major axis
+				glm::u16vec2 proj[3];
+				for (int k = 0; k < 3; k++) {
+					proj[k] = glm::u16vec2(
+					    project_x(grid_vertices[k], major_axis),
+					    project_y(grid_vertices[k], major_axis)
+					);
+				}
+
+				// rasterize triangle edges
+				for (int k = 0; k < 3; k++) {
+					traverse_line(
+					    proj[k],
+					    proj[(k + 1) % 3],
+					    [&](const glm::u16vec2 &p, uint16_t i_l, uint16_t n_l) {
+						    int32_t z = 0;
+						    if (n_l != 0) {
+							    int32_t w0 = n_l - i_l;
+							    int32_t w1 = i_l;
+							    int32_t z0 = grid_vertices[k][major_axis];
+							    int32_t z1 = grid_vertices[(k + 1) % 3][major_axis];
+							    z = (w0 * z0 + w1 * z1) / ((int32_t)n_l);
+						    } else {
+							    z = grid_vertices[k][major_axis];
+						    }
+						    uint16_t z_clamped = std::clamp(z, 0, resolution - 1);
+						    glm::u16vec3 voxel_pos = unproject(p, z_clamped, major_axis);
+						    voxels.push_back({voxel_pos, glm::u8vec3(255)});
+					    }
+					);
+				}
+
+				// rasterize projected triangle using barycentric coordinates
+				int32_t area = signed_tri_area(proj[0], proj[1], proj[2]);
+				if (area == 0) {
+					continue;
+				}
+				int sign = (area > 0) ? 1 : -1;
+				glm::u16vec2 min_2d = glm::min(glm::min(proj[0], proj[1]), proj[2]);
+				glm::u16vec2 max_2d = glm::max(glm::max(proj[0], proj[1]), proj[2]);
+				for (uint16_t y = min_2d.y; y <= max_2d.y; y++) {
+					for (uint16_t x = min_2d.x; x <= max_2d.x; x++) {
+						glm::u16vec2 p(x, y);
+
+						// barycentric weights
+						int32_t w0 = signed_tri_area(proj[1], proj[2], p);
+						int32_t w1 = signed_tri_area(proj[2], proj[0], p);
+						int32_t w2 = signed_tri_area(proj[0], proj[1], p);
+
+						constexpr int32_t epsilon = 1;
+						if (w0 * sign >= -epsilon && w1 * sign >= -epsilon &&
+						    w2 * sign >= -epsilon) {
+							// integer rounding fix for z
+							int32_t z0 = grid_vertices[0][major_axis];
+							int32_t z1 = grid_vertices[1][major_axis];
+							int32_t z2 = grid_vertices[2][major_axis];
+							int32_t z = (w0 * z0 + w1 * z1 + w2 * z2) / area;
+							uint16_t z_clamped = std::clamp(z, 0, resolution - 1);
+							glm::u16vec3 voxel_pos = unproject(p, z_clamped, major_axis);
+							voxels.push_back({voxel_pos, glm::u8vec3(255)});
+							if (is_diagonal) {
+								// also fill voxel above
+								if (z_clamped + 1 < resolution) {
+									glm::u16vec3 voxel_pos_above =
+									    unproject(p, z_clamped + 1, major_axis);
+									voxels.push_back({voxel_pos_above, glm::u8vec3(255)});
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	inline void traverse_line(
+	    glm::i16vec2 start,
+	    glm::i16vec2 end,
+	    const std::function<void(const glm::u16vec2 &, uint16_t, uint16_t)> &callback
+	) {
+		glm::i16vec2 delta = glm::abs(end - start);
+		glm::i16vec2 step = glm::sign(end - start);
+
+		int16_t err = (delta.x > delta.y ? delta.x : -delta.y) / 2;
+		int16_t e2;
+
+		uint16_t num_iter = glm::max(delta.x, delta.y);
+		for (uint16_t i = 0; i <= num_iter; ++i) {
+			callback(glm::u16vec2(start), i, num_iter);
+
+			e2 = err;
+			if (e2 > -delta.x) {
+				err -= delta.y;
+				start.x += step.x;
+			}
+			if (e2 < delta.y) {
+				err += delta.x;
+				start.y += step.y;
+			}
+		}
+	}
+
+	inline void make_voxels_unique() {
+		// sort and remove duplicates
+		auto voxel_cmp = [](const voxel &a, const voxel &b) {
+			if (a.xyz.x != b.xyz.x) {
+				return a.xyz.x < b.xyz.x;
+			} else if (a.xyz.y != b.xyz.y) {
+				return a.xyz.y < b.xyz.y;
+			} else {
+				return a.xyz.z < b.xyz.z;
+			}
+		};
+		std::sort(voxels.begin(), voxels.end(), voxel_cmp);
+		voxels.erase(std::unique(voxels.begin(), voxels.end()), voxels.end());
+	}
+};
+```
+
+### src/window.hpp
+```
+#pragma once
+
+#include "./pch.hpp"
+#include <cstdint>
+
+struct window_size {
+	uint32_t width;
+	uint32_t height;
+};
+
+class window {
+public:
+	struct loop_info {
+		std::function<void()> on_draw = nullptr;
+		std::function<void(double)> on_update = nullptr;
+		std::function<void(uint32_t, uint32_t)> on_resize = nullptr;
+	};
+
+	GLFWwindow *glfw_window;
+
+	window() {
+		if (!glfwInit()) {
+			throw std::runtime_error("glfwInit failed");
+		}
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+		glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+	}
+	~window() {
+		glfwTerminate();
+	}
+
+	void open(uint32_t w, uint32_t h, const std::string &title) {
+		// create window
+		glfw_window = glfwCreateWindow(w, h, title.c_str(), NULL, NULL);
+		if (glfw_window == NULL) {
+			glfwTerminate();
+			throw std::runtime_error("glfwCreateWindow failed");
+		}
+		glfwMakeContextCurrent(glfw_window);
+
+		// load gl
+		if (!gladLoadGL((GLADloadfunc)glfwGetProcAddress)) {
+			throw std::runtime_error("gladLoadGL failed");
+		}
+
+		// add this user ptr
+		glfwSetWindowUserPointer(glfw_window, this);
+
+		// disable vsync
+		glfwSwapInterval(0);
+	}
+	void run_loop(const loop_info &info) {
+		cur_loop_info = info;
+
+		// hook window resize -> viewport resize
+		uint32_t w, h;
+		glfwGetFramebufferSize(glfw_window, (int *)&w, (int *)&h);
+		window::fbsz_cb(glfw_window, w, h);
+		glfwSetFramebufferSizeCallback(glfw_window, window::fbsz_cb);
+
+		// start counting time for updates
+		double last_time = glfwGetTime();
+
+		// main loop
+		while (!glfwWindowShouldClose(glfw_window)) {
+			glfwSwapBuffers(glfw_window);
+
+			if (cur_loop_info.on_draw) {
+				cur_loop_info.on_draw();
+			}
+
+			glfwPollEvents();
+
+			if (cur_loop_info.on_update) {
+				double cur_time = glfwGetTime();
+				double dt = cur_time - last_time;
+				last_time = cur_time;
+				cur_loop_info.on_update(dt);
+			}
+		}
+	}
+
+	window_size get_size() const {
+		window_size res;
+		glfwGetFramebufferSize(glfw_window, (int *)&res.width, (int *)&res.height);
+		return res;
+	}
+
+private:
+	window::loop_info cur_loop_info;
+
+	template <typename T = void>
+	static void fbsz_cb(GLFWwindow *window, int width, int height);
+};
+
+// static
+template <typename T>
+void window::fbsz_cb(GLFWwindow *glfw_window, int width, int height) {
+	window *this_ptr = static_cast<window *>(glfwGetWindowUserPointer(glfw_window));
+	if (this_ptr->cur_loop_info.on_resize) {
+		this_ptr->cur_loop_info.on_resize(width, height);
+	}
+}
+```
+
+### src/gl/framebuffer.hpp
+```
+#pragma once
+
+#include "../pch.hpp"
+
+#include "./texture.hpp"
+
+struct framebuffer_roi {
+	uint32_t x = 0, y = 0;
+	uint32_t width, height;
+};
+
+class framebuffer {
+public:
+	GLuint gl_id;
+
+	framebuffer() {
+		glGenFramebuffers(1, &gl_id);
+	}
+	~framebuffer() {
+		glDeleteFramebuffers(1, &gl_id);
+	}
+
+	void attach_texture_2d(const texture_2d &tex, uint8_t location) {
+		glBindFramebuffer(GL_FRAMEBUFFER, gl_id);
+		glFramebufferTexture2D(
+		    GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + location, GL_TEXTURE_2D, tex.gl_id, 0
+		);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	}
+
+	void
+	blit_to_another(const framebuffer &other, framebuffer_roi roi, framebuffer_roi other_roi = {}) {
+		gl_blit(gl_id, other.gl_id, roi, other_roi);
+	}
+
+	void blit_to_screen(framebuffer_roi roi, framebuffer_roi screen_roi = {}) {
+		gl_blit(gl_id, 0, roi, screen_roi);
+	}
+
+private:
+	void gl_blit(GLuint src_fbo, GLuint dst_fbo, framebuffer_roi src_roi, framebuffer_roi dst_roi) {
+		if (dst_roi.width == 0 || dst_roi.height == 0) {
+			dst_roi = src_roi;
+		}
+
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, src_fbo);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst_fbo);
+		glBlitFramebuffer(
+		    src_roi.x,
+		    src_roi.y,
+		    src_roi.x + src_roi.width,
+		    src_roi.y + src_roi.height,
+		    dst_roi.x,
+		    dst_roi.y,
+		    dst_roi.x + dst_roi.width,
+		    dst_roi.y + dst_roi.height,
+		    GL_COLOR_BUFFER_BIT,
+		    GL_NEAREST
+		);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	}
+};
+```
+
+### src/gl/shader.hpp
+```
+#pragma once
+
+#include "../pch.hpp"
+
+class shader {
+public:
+	GLuint gl_id;
+
+	shader() {
+		gl_id = glCreateProgram();
+	}
+	~shader() {
+		glDeleteProgram(gl_id);
+	}
+
+	void bind() {
+		glUseProgram(gl_id);
+	}
+
+	void build_compute(std::string_view comp_src) {
+		GLuint comp_id = glCreateShader(GL_COMPUTE_SHADER);
+
+		const char *comp_data = comp_src.data();
+		const GLint comp_size = comp_src.size();
+
+		glShaderSource(comp_id, 1, &comp_data, &comp_size);
+
+		glCompileShader(comp_id);
+		check_compile(comp_id);
+
+		glAttachShader(gl_id, comp_id);
+		glLinkProgram(gl_id);
+		check_link(gl_id);
+
+		glDeleteShader(comp_id);
+	}
+
+	void build_raster(std::string_view vert_src, std::string_view frag_src) {
+		GLuint vert_id = glCreateShader(GL_VERTEX_SHADER);
+		GLuint frag_id = glCreateShader(GL_FRAGMENT_SHADER);
+
+		const char *vert_data = vert_src.data();
+		const char *frag_data = frag_src.data();
+		const GLint vert_size = vert_src.size();
+		const GLint frag_size = frag_src.size();
+
+		glShaderSource(vert_id, 1, &vert_data, &vert_size);
+		glShaderSource(frag_id, 1, &frag_data, &frag_size);
+
+		glCompileShader(vert_id);
+		glCompileShader(frag_id);
+		check_compile(vert_id);
+		check_compile(frag_id);
+
+		glAttachShader(gl_id, vert_id);
+		glAttachShader(gl_id, frag_id);
+		glLinkProgram(gl_id);
+		check_link(gl_id);
+
+		glDeleteShader(frag_id);
+		glDeleteShader(vert_id);
+	}
+
+private:
+	static inline std::string load_text(const std::filesystem::path &path) {
+		std::ifstream f(path, std::ios::in | std::ios::binary);
+		const auto sz = std::filesystem::file_size(path);
+
+		std::string str(sz, '\0');
+		f.read(str.data(), sz);
+
+		return str;
+	}
+
+	static inline void check_compile(GLuint id) {
+		GLint success;
+		glGetShaderiv(id, GL_COMPILE_STATUS, &success);
+		if (!success) {
+			GLchar info[4096];
+			glGetShaderInfoLog(id, sizeof(info), NULL, info);
+			throw std::runtime_error("glCompileShader failed:\n" + std::string(info) + "\n");
+		}
+	}
+
+	static inline void check_link(GLuint id) {
+		GLint success;
+		glGetProgramiv(id, GL_LINK_STATUS, &success);
+		if (!success) {
+			GLchar info[4096];
+			glGetProgramInfoLog(id, sizeof(info), NULL, info);
+			throw std::runtime_error("glLinkProgram failed:\n" + std::string(info) + "\n");
+		}
+	}
+};
+```
+
+### src/gl/shader_storage_buffer.hpp
+```
+#pragma once
+
+#include "../pch.hpp"
+
+class shader_storage_buffer {
+public:
+	GLuint gl_id;
+
+	shader_storage_buffer() {
+		glGenBuffers(1, &gl_id);
+	}
+
+	~shader_storage_buffer() {
+		glDeleteBuffers(1, &gl_id);
+	}
+
+	void bind(uint32_t binding) {
+		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, binding, gl_id);
+	}
+
+	void update(std::span<const std::byte> data) {
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, gl_id);
+		if (data.size() != last_size) {
+			last_size = data.size();
+			glBufferData(GL_SHADER_STORAGE_BUFFER, last_size, data.data(), GL_DYNAMIC_DRAW);
+		} else {
+			glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, last_size, data.data());
+		}
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+	}
+
+private:
+	size_t last_size = 0;
+};
+```
+
+### src/gl/texture.hpp
+```
+#pragma once
+
+#include "../pch.hpp"
+
+enum class texture_format {
+	rgba8,
+};
+
+enum class texture_image_access {
+	read_only = GL_READ_ONLY,
+	write_only = GL_WRITE_ONLY,
+	read_write = GL_READ_WRITE
+};
+
+enum class texture_wrap {
+	repeat = GL_REPEAT,
+	clamp = GL_CLAMP_TO_EDGE,
+	mirror = GL_MIRRORED_REPEAT
+};
+enum class texture_filter {
+	nearest = GL_NEAREST,
+	bilinear = GL_LINEAR,
+	trilinear = GL_LINEAR_MIPMAP_LINEAR
+};
+enum class texture_anisotropy { off = 1, x2 = 2, x4 = 4, x8 = 8, x16 = 16 };
+struct texture_sampler_params {
+	texture_wrap wrap = texture_wrap::repeat;
+	texture_filter filter_min = texture_filter::nearest;
+	texture_filter filter_mag = texture_filter::nearest;
+	texture_anisotropy anisotropy = texture_anisotropy::off;
+};
+
+class texture {
+protected:
+	texture(GLenum target) : target(target) {
+		glGenTextures(1, &gl_id);
+		set_sampler_params({});
+	}
+
+public:
+	GLenum target;
+	GLuint gl_id;
+
+	~texture() {
+		if (gl_id) {
+			glDeleteTextures(1, &gl_id);
+		}
+	}
+
+	void bind_sampler(uint8_t binding) {
+		glActiveTexture(GL_TEXTURE0 + binding);
+		glBindTexture(target, gl_id);
+	}
+
+	void bind_image(
+	    uint8_t binding,
+	    uint8_t lod = 0,
+	    texture_image_access access = texture_image_access::read_write
+	) {
+		auto [gl_internal_format, gl_pixel_format] = get_gl_formats(texture_format::rgba8);
+		glBindImageTexture(
+		    binding, gl_id, lod, GL_FALSE, 0, static_cast<GLenum>(access), gl_internal_format
+		);
+	}
+
+	void set_sampler_params(const texture_sampler_params &params) {
+		glBindTexture(target, gl_id);
+		glTexParameteri(target, GL_TEXTURE_WRAP_S, static_cast<GLint>(params.wrap));
+		glTexParameteri(target, GL_TEXTURE_WRAP_T, static_cast<GLint>(params.wrap));
+		glTexParameteri(target, GL_TEXTURE_MIN_FILTER, static_cast<GLint>(params.filter_min));
+		glTexParameteri(target, GL_TEXTURE_MAG_FILTER, static_cast<GLint>(params.filter_mag));
+		glTexParameterf(target, GL_TEXTURE_MAX_ANISOTROPY, static_cast<GLfloat>(params.anisotropy));
+	}
+
+protected:
+	std::tuple<GLenum, GLenum> get_gl_formats(texture_format format) {
+		GLenum gl_internal_format, gl_pixel_format;
+		switch (format) {
+		case texture_format::rgba8:
+			gl_internal_format = GL_RGBA8;
+			gl_pixel_format = GL_RGBA;
+			break;
+		default:
+			throw std::runtime_error("unsupported texture format");
+		}
+		return {gl_internal_format, gl_pixel_format};
+	}
+
+	uint8_t get_num_channels(texture_format format) {
+		switch (format) {
+		case texture_format::rgba8:
+			return 4;
+		default:
+			throw std::runtime_error("unsupported texture format");
+		}
+	}
+};
+
+class texture_2d : public texture {
+public:
+	uint32_t width = 0;
+	uint32_t height = 0;
+	texture_format format = texture_format::rgba8;
+
+	texture_2d() : texture(GL_TEXTURE_2D) {}
+
+	void alloc_storage(uint32_t width, uint32_t height, texture_format format) {
+		this->width = width;
+		this->height = height;
+		this->format = format;
+
+		auto [gl_internal_format, gl_pixel_format] = get_gl_formats(format);
+		glBindTexture(GL_TEXTURE_2D, gl_id);
+		glTexImage2D(
+		    GL_TEXTURE_2D,
+		    0,
+		    gl_internal_format,
+		    width,
+		    height,
+		    0,
+		    gl_pixel_format,
+		    GL_UNSIGNED_BYTE,
+		    nullptr
+		);
+	}
+
+	std::vector<std::byte> read_pixels() {
+		std::vector<std::byte> data;
+		data.resize(width * height * get_num_channels(format));
+		auto [_, gl_pixel_format] = get_gl_formats(format);
+		glBindTexture(GL_TEXTURE_2D, gl_id);
+		glGetTexImage(GL_TEXTURE_2D, 0, gl_pixel_format, GL_UNSIGNED_BYTE, data.data());
+		return data;
+	}
+};
+```
+
+### src/gl/uniform_buffer.hpp
+```
+#pragma once
+
+#include "../pch.hpp"
+
+template <typename T>
+struct uniform_info {
+	// static constexpr size_t size = sizeof(T);
+	// static constexpr size_t align = sizeof(T);
+};
+
+template <>
+struct uniform_info<float> {
+	static constexpr size_t size = 4;
+	static constexpr size_t align = 4;
+};
+
+template <>
+struct uniform_info<glm::vec2> {
+	static constexpr size_t size = 8;
+	static constexpr size_t align = 8;
+};
+
+template <>
+struct uniform_info<glm::vec3> {
+	static constexpr size_t size = 12;
+	static constexpr size_t align = 16;
+};
+
+template <>
+struct uniform_info<glm::vec4> {
+	static constexpr size_t size = 16;
+	static constexpr size_t align = 16;
+};
+
+template <>
+struct uniform_info<glm::mat4> {
+	static constexpr size_t size = 64;
+	static constexpr size_t align = 64;
+};
+
+template <>
+struct uniform_info<uint32_t> {
+	static constexpr size_t size = 4;
+	static constexpr size_t align = 4;
+};
+
+class uniform_buffer {
+public:
+	GLuint gl_id;
+
+	uniform_buffer() {
+		glGenBuffers(1, &gl_id);
+	}
+
+	~uniform_buffer() {
+		glDeleteBuffers(1, &gl_id);
+	}
+
+	void bind(uint32_t binding) {
+		glBindBufferBase(GL_UNIFORM_BUFFER, binding, gl_id);
+	}
+
+	void update(std::span<const std::byte> data) {
+		glBindBuffer(GL_UNIFORM_BUFFER, gl_id);
+		if (data.size() != last_size) {
+			last_size = data.size();
+			glBufferData(GL_UNIFORM_BUFFER, last_size, data.data(), GL_DYNAMIC_DRAW);
+		} else {
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, last_size, data.data());
+		}
+		glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	}
+
+	template <typename... Fields>
+	void update_fields(Fields... fields) {
+		static_assert(
+		    ((std::is_same_v<Fields, float> || std::is_same_v<Fields, glm::vec2> ||
+		      std::is_same_v<Fields, glm::vec3> || std::is_same_v<Fields, glm::vec4> ||
+		      std::is_same_v<Fields, glm::mat4> || std::is_same_v<Fields, uint32_t>) &&
+		     ...),
+		    "fields must be float, uint32_t, or glm types"
+		);
+
+		size_t total_size = 0;
+		auto calc_size = [&](const auto &field) {
+			using T = std::decay_t<decltype(field)>;
+			size_t alignment = uniform_info<T>::align;
+			size_t padding = (alignment - (total_size % alignment)) % alignment;
+			total_size += padding + uniform_info<T>::size;
+		};
+		(calc_size(fields), ...);
+
+		std::vector<std::byte> buffer(total_size);
+
+		size_t offset = 0;
+		auto copy_field = [&](const auto &field) {
+			using T = std::decay_t<decltype(field)>;
+			size_t alignment = uniform_info<T>::align;
+			size_t size = uniform_info<T>::size;
+			size_t padding = (alignment - (offset % alignment)) % alignment;
+			offset += padding;
+			std::copy(
+			    reinterpret_cast<const std::byte *>(&field),
+			    reinterpret_cast<const std::byte *>(&field) + size,
+			    buffer.data() + offset
+			);
+			offset += size;
+		};
+		(copy_field(fields), ...);
+
+		update(std::span<const std::byte>(buffer.data(), buffer.size()));
+	}
+
+private:
+	size_t last_size = 0;
+};
+```
+
+### src/gl/vertex_array.hpp
+```
+#pragma once
+
+#include "../pch.hpp"
+
+class vertex_array {
+public:
+	GLuint gl_id = 0;
+
+	vertex_array() {
+		glGenVertexArrays(1, &gl_id);
+	}
+	~vertex_array() {
+		if (gl_id) {
+			glDeleteVertexArrays(1, &gl_id);
+		}
+	}
+
+	void bind() const {
+		glBindVertexArray(gl_id);
+	}
+
+	// 	template <typename... AttribTypes>
+	// 	inline void set_layout() {
+	// 		bind();
+	// 		GLuint index = 0;
+	// 		GLsizei stride = 0;
+
+	// 		// calc stride
+	// 		(
+	// 		    [&] {
+	// 			    auto [count, gl_type] = get_attrib_info<AttribTypes>();
+	// 			    stride += count * ((gl_type == GL_FLOAT) ? sizeof(float)
+	// 			                                             : sizeof(int32_t));
+	// 		    }(),
+	// 		    ...
+	// 		);
+
+	// 		// set attribs
+	// 		GLintptr offset = 0;
+	// 		(
+	// 		    [&] {
+	// 			    auto [count, gl_type] = get_attrib_info<AttribTypes>();
+	// 			    glEnableVertexAttribArray(index);
+	// 			    if (gl_type == GL_FLOAT) {
+	// 				    glVertexAttribPointer(
+	// 				        index,
+	// 				        count,
+	// 				        gl_type,
+	// 				        GL_FALSE,
+	// 				        stride,
+	// 				        reinterpret_cast<const void *>(offset)
+	// 				    );
+	// 			    } else {
+	// 				    glVertexAttribIPointer(
+	// 				        index,
+	// 				        count,
+	// 				        gl_type,
+	// 				        stride,
+	// 				        reinterpret_cast<const void *>(offset)
+	// 				    );
+	// 			    }
+	// 			    offset += count * ((gl_type == GL_FLOAT) ? sizeof(float)
+	// 			                                             : sizeof(int32_t));
+	// 			    ++index;
+	// 		    }(),
+	// 		    ...
+	// 		);
+	// 	}
+
+	// private:
+	// 	template <typename T>
+	// 	static constexpr auto get_attrib_info() {
+	// 		if constexpr (std::is_same_v<T, float>) {
+	// 			return std::make_tuple(1, GL_FLOAT);
+	// 		} else if constexpr (std::is_same_v<T, glm::vec2>) {
+	// 			return std::make_tuple(2, GL_FLOAT);
+	// 		} else if constexpr (std::is_same_v<T, glm::vec3>) {
+	// 			return std::make_tuple(3, GL_FLOAT);
+	// 		} else if constexpr (std::is_same_v<T, glm::vec4>) {
+	// 			return std::make_tuple(4, GL_FLOAT);
+	// 		} else if constexpr (std::is_same_v<T, int32_t>) {
+	// 			return std::make_tuple(1, GL_INT);
+	// 		} else if constexpr (std::is_same_v<T, glm::ivec2>) {
+	// 			return std::make_tuple(2, GL_INT);
+	// 		} else if constexpr (std::is_same_v<T, glm::ivec3>) {
+	// 			return std::make_tuple(3, GL_INT);
+	// 		} else if constexpr (std::is_same_v<T, glm::ivec4>) {
+	// 			return std::make_tuple(4, GL_INT);
+	// 		} else if constexpr (std::is_same_v<T, uint32_t>) {
+	// 			return std::make_tuple(1, GL_UNSIGNED_INT);
+	// 		} else if constexpr (std::is_same_v<T, glm::uvec2>) {
+	// 			return std::make_tuple(2, GL_UNSIGNED_INT);
+	// 		} else if constexpr (std::is_same_v<T, glm::uvec3>) {
+	// 			return std::make_tuple(3, GL_UNSIGNED_INT);
+	// 		} else if constexpr (std::is_same_v<T, glm::uvec4>) {
+	// 			return std::make_tuple(4, GL_UNSIGNED_INT);
+	// 		} else {
+	// 			static_assert(sizeof(T) == 0, "Unsupported attribute type");
+	// 		}
+	// 	}
+};
+```

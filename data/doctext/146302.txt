@@ -1,0 +1,1451 @@
+arXiv:2605.25563v2 [cs.CV] 15 Oct 2026
+CodecSplat: Ultra-Compact Latent Coding for
+Feed-Forward 3D Gaussian Splatting
+Pengpeng Yu1,2 , Runqing Jiang1 , Qi Zhang2,3
+Dingquan Li2 , Jing Wang2† , Yulan Guo1,2†
+1
+Sun Yat-sen University, China
+2
+Pengcheng Laboratory, China
+3
+Peking University, China
+yupp5@mail2.sysu.edu.cn
+Abstract
+While feed-forward 3D Gaussian splatting reconstructs renderable Gaussian primitives from sparse context views without per-scene optimization, existing pipelines
+do not provide a compact scene representation for storage or transmission. A
+natural solution is to apply existing 3DGS compression methods to the generated
+Gaussian primitives. However, this approach operates on the final irregular 3D
+representation and is decoupled from the internal feature-to-Gaussian generation
+process, which limits compression efficiency. To address this, we introduce CodecSplat, an ultra-compact latent coding framework for feed-forward 3D Gaussian
+splatting. CodecSplat first encodes an intermediate 2D Gaussian-generation feature into an entropy-coded scene bitstream. At the decoder, the latent feature is
+reconstructed and used to predict depth and Gaussian parameters, which are then
+mapped to 3D Gaussian primitives. By integrating compression into the feedforward Gaussian generation pipeline, CodecSplat avoids inefficient compression
+over irregular 3D Gaussian primitives and allows the codec to exploit the structured
+intermediate feature representation. We instantiate CodecSplat on a feed-forward
+Gaussian splatting backbone with depth-guided multi-view feature refinement and
+a hierarchical learned feature codec. On DL3DV and RealEstate10K datasets,
+CodecSplat achieves 23.56–26.36 dB and 24.76–27.05 dB PSNR with only 20.00–
+107.77 KiB and 3.37–12.51 KiB per scene, respectively. This is roughly one order
+of magnitude smaller than compressing feed-forward generated Gaussian primitives, while preserving controllable rate–distortion behavior. Code is available at
+https://github.com/pengpeng-yu/CodecSplat.
+1
+Introduction
+3D Gaussian Splatting (3DGS) represents a scene as a set of Gaussian primitives with learnable
+positions, covariances, opacities, and view-dependent colors, and renders them efficiently with
+differentiable rasterization [Kerbl et al., 2023]. Despite its high rendering quality, the original 3DGS
+formulation requires optimizing Gaussian parameters separately for each scene, which limits its
+scalability in applications that demand rapid reconstruction of many unseen scenes.
+Feed-forward 3D Gaussian splatting (FF3DGS) addresses this limitation by predicting Gaussian
+primitives directly from sparse context images and camera parameters. Numerous methods [Charatan
+et al., 2024, Chen et al., 2024b, Xu et al., 2025, 2026] learn generalizable mappings from posed
+images to renderable Gaussian representations. These works generally combine multi-view matching,
+† Corresponding author.
+40th Conference on Neural Information Processing Systems (NeurIPS 2026).
+depth or geometry estimation, and pixel-aligned Gaussian prediction, thereby avoiding iterative
+scene-specific optimization and enabling fast sparse-view novel view synthesis.
+Despite this progress, compact representations for feed-forward Gaussian scenes have received less
+attention. Existing 3DGS compression methods are mostly developed in the per-scene optimized
+3DGS setting, where the Gaussian representation and compression-related components are optimized
+for each scene through pruning, quantization, learned entropy modeling, or anchor-based context
+modeling [Fan et al., 2024, Navaneet et al., 2024, Chen et al., 2024a, Wang et al., 2024b,a, Lee et al.,
+2025]. These methods are well matched to per-scene optimized Gaussian assets, but are suboptimal
+for FF3DGS outputs because they compress Gaussian primitives after a structured-to-irregular
+transformation, where spatial locality and cross-view redundancy have already been largely lost.
+Unlike per-scene optimized 3DGS, FF3DGS generates Gaussian primitives through a feed-forward
+image-to-Gaussian pipeline. A straightforward way to reuse existing compressors is to first execute
+the FF3DGS model and then compress the generated Gaussian primitives. However, this approach
+still needs to encode a large set of irregular 3D Gaussian primitives, making the codec operate on a
+less structured representation. More importantly, it treats the generated primitives as a standalone
+compression target and is decoupled from the internal feature-to-Gaussian generation process. Before
+the final primitives are formed, the feed-forward network has typically organized scene information
+into dense, view-aligned, and geometry-aware features on regular 2D grids. Therefore, compressing
+only the generated primitives discards this structured intermediate representation and can degrade
+compression efficiency. This observation motivates us to move the coding point earlier in the pipeline
+by encoding the intermediate representation before it is mapped to 3D Gaussian primitives.
+To obtain a compact scene representation for FF3DGS, we propose CodecSplat, a learned latent
+coding framework integrated into the feed-forward Gaussian generation pipeline. On the encoder side,
+CodecSplat performs multi-view depth and feature extraction, refines the Gaussian-generation feature
+with depth-guided multi-view interaction, and entropy-codes the resulting latent feature into a scenelevel bitstream. On the decoder side, CodecSplat entropy-decodes the latent representation, predicts
+depth and Gaussian attributes with lightweight heads, and maps the pixel-aligned predictions to 3D
+space. By placing the coding bottleneck before 2D-to-3D Gaussian construction, CodecSplat allows
+compression and feed-forward Gaussian generation to operate on the same compact intermediate
+representation. Experiments on DL3DV and RealEstate10K show that this design yields KB-level
+scene bitstreams while preserving controllable rate–distortion behavior.
+Our contributions are summarized as follows:
+• We introduce an integrated compression paradigm for feed-forward 3D Gaussian splatting.
+By placing the coding bottleneck inside the feed-forward image-to-Gaussian pipeline,
+the proposed formulation directly produces a compact 3DGS representation and avoids a
+separate export-and-compress stage over irregular Gaussian primitives.
+• We propose CodecSplat, a learned latent coding framework that encodes an intermediate
+Gaussian-generation feature before it is mapped to 3D Gaussian primitives. The framework combines entropy-coded latent feature compression, depth-guided multi-view feature
+refinement, and self-contained latent-to-Gaussian decoding.
+• We evaluate CodecSplat on DL3DV and RealEstate10K. The proposed method achieves
+KB-level scene representations and reduces scene size by roughly one order of magnitude
+compared with compressing feed-forward generated Gaussian primitives.
+2
+Related Work
+Feed-forward 3D Gaussian splatting. 3DGS represents a scene with explicit Gaussian primitives
+and enables real-time radiance-field rendering through differentiable rasterization [Kerbl et al., 2023].
+To avoid per-scene optimization, recent feed-forward methods predict Gaussian representations
+directly from sparse images or posed context views, improving scalability for fast reconstruction and
+novel-view synthesis. Representative methods predict Gaussians from single images, image pairs, or
+sparse multi-view inputs, and improve reconstruction with multi-view stereo cues, depth estimation,
+recurrent refinement, or large feed-forward Gaussian reconstruction models [Szymanowicz et al.,
+2024, Charatan et al., 2024, Chen et al., 2024b, Xu et al., 2025, 2026, Tang et al., 2024, Xu et al.,
+2024, Ren et al., 2026]. These works mainly focus on reconstruction quality, generalization, and
+inference efficiency. CodecSplat addresses a complementary problem: how to produce a compact
+2
+and decodable scene representation for feed-forward 3DGS under a shared decoder, so that generated
+scenes can be efficiently stored or transmitted.
+Compression of Gaussian representations. The explicit nature of 3DGS brings high rendering
+efficiency but also substantial storage overhead, since a scene may contain a large number of
+Gaussians with heterogeneous attributes. Existing 3DGS compression methods mainly reduce this
+cost through pruning, masking, vector quantization, entropy coding, rate–distortion optimization,
+or compact Gaussian parameterizations [Lee et al., 2024, Girish et al., 2024, Fang and Wang, 2024,
+Ali et al., 2024, Fan et al., 2024, Navaneet et al., 2024, Wang et al., 2024a]. Other methods further
+exploit structured anchors, spatial or hash-grid contexts, self-organized attribute layouts, post-training
+attribute transformation, standard image/video codecs, or compressed Gaussian primitives for more
+efficient storage [Lu et al., 2024, Chen et al., 2024a, Wang et al., 2024b, Morgenstern et al., 2024,
+Xie et al., 2024, Lee et al., 2025, Liu et al., 2024]. More closely related to our setting, FCGS
+studies fast compression of feed-forward generated 3DGS outputs with learned entropy models over
+Gaussian attributes [Chen et al., 2025]. Nevertheless, these methods still compress explicit Gaussian
+primitives, anchors, or optimized Gaussian parameterizations after they have been formed. In contrast,
+CodecSplat moves the coding point inside the feed-forward image-to-Gaussian pipeline and entropycodes an intermediate Gaussian-generation feature before 2D-to-3D Gaussian construction, allowing
+compression to exploit a regular, view-aligned, and geometry-aware representation.
+Learned latent compression. Learned compression maps an input signal to quantized latent
+representations and encodes the latent symbols with learned entropy models. End-to-end optimized
+image codecs established nonlinear transform coding with learned entropy models, where hyperpriors
+and autoregressive contexts are used to estimate the probability distribution of quantized latents [Ballé
+et al., 2017, 2018, Minnen et al., 2018]. To support multiple rate points with a single network,
+variable-rate codecs condition transforms, entropy models, or gain units on rate parameters or quality
+embeddings [Choi et al., 2019, Cui et al., 2021, Cai et al., 2022]. CodecSplat follows the principle
+of entropy-coded latent representation learning, but applies it to a different coding target from
+conventional image codecs. Rather than reconstructing RGB images, the decoded latent is optimized
+to support depth recovery, Gaussian attribute prediction, and 2D-to-3D mapping inside a feed-forward
+3DGS pipeline.
+3
+Method
+3.1
+Overview
+Existing 3DGS compressors typically start from explicit Gaussian primitives, which lie in an irregular
+3D space and contain heterogeneous attributes. In FF3DGS, Gaussian primitives are the outputs
+of a learned image-to-Gaussian pipeline. Before Gaussian attributes are predicted, the network
+has organized scene-specific geometry and appearance cues into dense, view-aligned features on
+regular 2D grids. Since compression seeks compact and structured representations that expose
+redundancy, we encode this intermediate 2D feature representation rather than the final irregular
+Gaussian primitives. This gives the codec a compact and regular target that is directly tied to the
+feed-forward Gaussian generation process.
+H×W ×3
+Given N posed context views C = {(Ii , Ki , Ti , ni , fi )}N
+is a context
+i=1 , where Ii ∈ R
+image, Ki and Ti denote camera intrinsics and extrinsics, and ni , fi are near and far bounds,
+CodecSplat produces a self-contained scene bitstream B. The decoder reconstructs from B a Gaussian
+representation Ĝ that can be rendered from target cameras.
+The overall pipeline is illustrated in Fig. 1. The encoder first performs multi-view matching and
+feature extraction, then compresses the resulting feed-forward feature by latent encoding, including
+analysis transform, quantization, and entropy coding. The encoded latent features and compressed
+context-view cameras are packed into a scene bitstream. On the decoder side, CodecSplat entropydecodes the latent representation, reconstructs the feature with a synthesis transform, and recovers the
+camera metadata. The decoded feature is then used for depth prediction, feature refinement, Gaussian
+parameter prediction, and 2D-to-3D mapping.
+3
+Inputs
+Context views
+Encoder
+Multi-view
+feature
+extraction &
+refinement
+Decoder
+Latent
+encoding
+Latent
+decoding
+Analysis
+transform
+Depth
+prediction &
+feature
+refinement
+Entropy
+decoding
+Gaussian
+prediction
+Opacity
+Scale
+Quantization
+Synthesis
+transform
+…
+Entropy
+encoding
+Rate control 𝜆
+Rotation
+Color / SH
+Bitstream
+Latent
+features &
+Context-view
+cameras
+Rate control 𝜆
+2D-to-3D mapping
+Context-view
+camera
+parameters
+Deflate
+Compression
+3D Gaussians
+Deflate
+Decompression
+Figure 1: Main architecture of CodecSplat.
+3.2
+Feed-forward Gaussian-generation representation
+CodecSplat is built on a DepthSplat-style FF3DGS backbone [Xu et al., 2025]. Given posed context
+views C, the backbone extracts multi-view features and predicts context-view depth:
+(Fmv , Denc , Pdepth ) = MVEnc(C),
+(1)
+N ×H×W
+where Fmv denotes image and cross-view matching features, Denc ∈ R
+is the encoder-side
+depth prediction, and Pdepth contains depth matching-probability features. These cues are converted
+into a dense Gaussian-generation feature:
+Fg = FeatHead (I1:N , Fmv , Pdepth ) ,
+Fg ∈ RN ×CF ×H×W .
+(2)
+In the codec-free backbone, Fg is consumed by Gaussian prediction heads together with depth to
+produce explicit Gaussian primitives. CodecSplat instead places the entropy-coded bottleneck on
+this intermediate feature. The feature is already specialized for Gaussian generation, but it remains
+a regular view-aligned tensor before 2D-to-3D mapping, making it a more compact and structured
+coding target than the final unordered primitive set.
+3.3
+Depth-guided multi-view feature refinement
+Before latent feature coding, CodecSplat refines the Gaussian-generation feature with depth-guided
+multi-view interaction. The refinement has two purposes. First, depth provides an explicit geometric
+anchor for Gaussian attribute prediction, since each pixel-aligned prediction will later be mapped
+to a 3D location. Second, overlapping context views contain redundant information. We therefore
+exchange geometrically aligned features across views before coding, which provides a lightweight
+form of cross-view redundancy reduction without a multi-view conditional entropy model.
+Given a feature tensor F and a depth map D, we denote by A(F, D) the geometry-aligned multi-view
+feature. For each reference view r, it is obtained by warping neighboring source-view features to the
+reference view, fusing each view pair, and aggregating valid pairwise features:
+
+
+Ar (F, D) = Avgs̸=r Φ Fr , Warps→r (Fs ; Dr , Kr , Tr , Ks , Ts ) , E(d−1
+(3)
+r→s ) ,
+where Warps→r back-projects reference-view pixels using the reference depth Dr , projects them to
+the source view s, and bilinearly samples Fs . Here dr→s is the depth of the back-projected reference
+point in the source camera, E encodes its inverse depth, and Φ performs learned pairwise feature
+fusion. The operator Avg averages valid pairwise features.
+4
+The pre-codec refiner then produces the feature to be compressed by a residual update:
+Fc = Fg + Rpre (Fg , A(Fg , Denc )) .
+(4)
+And the same refinement process is used after latent decoding. Once the reconstructed feature F̂c and
+codec-side depth D̂ are available, the post-codec refiner produces
+
+
+Fdec = F̂c + Rpost F̂c , A(F̂c , D̂) .
+(5)
+The pre-codec refiner prepares a more geometry-aware and cross-view informed feature for compression, while the post-codec refiner compensates for compression artifacts before Gaussian prediction.
+3.4
+Latent feature coding
+The refined feature Fc is compressed by a learned feature codec. A rate parameter λ selects the rate
+point of a single model, and eλ denotes its embedding. The codec consists of an analysis transform,
+quantization, an entropy model, and a synthesis transform:
+Z = Analysis(Fc ; eλ ),
+Ẑ = Q(Z),
+F̂c = Synthesis(Ẑ; eλ ).
+(6)
+Here Z = {Zℓ } denotes hierarchical latent tensors, Ẑ denotes their quantized symbols, and F̂c is the
+reconstructed feature used by the decoder. We implement this codec as a hierarchical variational
+autoencoder with learned entropy models [Duan et al., 2023].
+During training, the rate is estimated by the entropy model and normalized by the feature-map area:
+N
+
+
+1 XXX
+− log2 pℓ Ẑi,ℓ,u | Ci,ℓ,u , eλ ,
+(7)
+R=
+HW i=1
+u
+ℓ
+where i indexes context views, ℓ indexes latent blocks, u indexes spatial/channel positions, and Ci,ℓ,u
+is the entropy-model context for the corresponding symbol.
+During evaluation, the reported scene size is measured from the packed bitstream, which contains
+compressed camera metadata and per-view feature streams:
+
+B = Pack Bcam , {Bifeat }N
+(8)
+i=1 ,
+where the camera stream stores the image shape, number of context views, intrinsics, extrinsics,
+and near/far bounds, and is compressed with Deflate. Each feature stream stores the entropy-coded
+quantized latents for one context view.
+3.5
+Depth and Gaussian decoding
+CodecSplat decodes explicit Gaussian primitives from the reconstructed feature. Since Gaussian
+centers require 3D geometry, the decoder predicts depth from F̂c instead of relying on encoder-side
+depth or original context images. The depth head predicts a normalized inverse-depth map:
+
+
+Si = σ DepthHead(F̂c,i ) ,
+Si ∈ [0, 1]H×W .
+(9)
+The bitstream contains the near and far depth bounds ni and fi for each context view. For each pixel
+p, we convert the normalized inverse-depth value to metric depth by
+
+
+−1 −1
+D̂i (p) = fi−1 + Si (p) n−1
+.
+(10)
+i − fi
+Thus Si (p) = 0 corresponds to the far bound fi , and Si (p) = 1 corresponds to the near bound ni .
+This inverse-depth parameterization constrains the decoded depth to the valid scene range.
+The post-codec refiner in Eq. (5) produces Fdec . A Gaussian head predicts pixel-aligned attributes:
+
+
+Θ̂i = GSHead Fdec,i , D̂i .
+(11)
+The decoded depth and camera metadata then map the pixel-aligned predictions to 3D Gaussian
+primitives:
+
+
+Ĝ = Map2D→3D {D̂i , Θ̂i , Ki , Ti }N
+(12)
+i=1 .
+Here Map2D→3D uses the decoded depth and camera parameters to determine Gaussian centers, and
+instantiates each primitive with the corresponding pixel-aligned attributes.
+5
+3.6
+Two-stage optimization
+Directly training CodecSplat with a quantized bottleneck is unstable, as the model must adapt the
+Gaussian generation pipeline while simultaneously learning a compact latent representation. We
+therefore separate the optimization into two stages: a codec-free stage that stabilizes Gaussian
+generation, followed by a codec-aware stage that optimizes rate–distortion performance.
+Stage 1: codec-free Gaussian generation. We first train the modified feed-forward Gaussian
+generation pipeline without the feature codec. Let Gcf denote the codec-free Gaussian set predicted
+from the refined feature Fc and the encoder-side depth Denc . The target view is rendered as
+Ŷtcf = Render (Gcf , Kt , Tt ) .
+(13)
+
+
+Lstage1 = Drender Ŷtcf , Yt ,
+(14)
+The Stage-1 objective is
+where Yt is the target-view image and Drender denotes the rendering reconstruction loss.
+Stage 2: codec-aware latent coding. We initialize from the Stage-1 checkpoint, enable the feature
+codec and the post-codec refiner, and optimize the codec-related modules while keeping the remaining
+backbone modules fixed. After latent coding and Gaussian decoding, the decoded Gaussian set Ĝ is
+rendered to the target view:
+
+
+Ŷt = Render Ĝ, Kt , Tt .
+(15)
+The codec-stage objective is
+Lstage2 (λ) =
+λ
+λmax
+h
+
+
+i
+Drender Ŷt , Yt + γ Dcodec-depth + βR,
+(16)
+where R is the estimated rate, γ weights the codec-side depth supervision, and β controls the rate
+penalty. The codec-side depth loss is defined on normalized inverse depth:
+Dcodec-depth = ∥S − Senc ∥1 ,
+(17)
+where S is the decoder-side normalized inverse-depth map from Eq. (9). The supervision target Senc
+is obtained by converting the encoder-side depth Denc to the same normalized inverse-depth domain:
+Senc,i (p) =
+−1
+Denc,i
+(p) − fi−1
+−1
+n−1
+i − fi
+,
+(18)
+where ni and fi are the near and far bounds of context view i. During training, we sample λ ∈
+[16, 1024]. At test time, we fix λ to obtain a specific rate point.
+4
+Experiments
+4.1
+Experimental setup
+Datasets. We evaluate CodecSplat on two standard feed-forward 3D Gaussian splatting benchmarks.
+For DL3DV [Ling et al., 2024], we follow the ReSplat [Xu et al., 2026] 8-input-view benchmark
+protocol at 256 × 448 resolution. For RealEstate10K (RE10K) [Zhou et al., 2018], we use the
+common 2-input-view protocol at 256 × 256 resolution [Xu et al., 2025, 2026]. We report PSNR,
+SSIM, and LPIPS on target-view rendering.
+Training setup. CodecSplat is trained in two stages. The first stage trains the feed-forward Gaussian
+prediction model without the codec, initialized from the official DepthSplat checkpoint. The second
+stage initializes from the first-stage checkpoint and trains the learned feature codec for rate–distortion
+performance. The first-stage model is trained for 100K steps, and the second-stage model is trained
+for 200K steps. We train all models using bfloat16 mixed precision and the AdamW optimizer,
+with an initial learning rate of 10−4 and a weight decay of 0.01. We used four NVIDIA RTX 5880
+48GB GPUs. The learned codec is trained with λ ∈ [16, 1024] for rate–distortion control. In the
+second-stage objective, we set the codec-side depth loss weight to γ = 0.1, and use the rate weight
+β = 10−4 for DL3DV and β = 4 × 10−4 for RE10K.
+6
+22.06dB 12.09MiB
+24.60dB 1.40MiB
+22.82dB 93.16KiB
+20.52dB 11.97MiB
+24.47dB 1.31MiB
+22.45dB 120.23KiB
+31.73dB 1.50MiB
+24.88dB 11.54MiB
+Target view
+DepthSplat→PNG
+ReSplat→FCGS
+28.52dB 87.29KiB
+CodecSplat
+Figure 2: Qualitative comparison on target-view rendering. We compare CodecSplat with Gaussianoutput compression baselines that first generate explicit Gaussian primitives and then compress them.
+Compared with MiB-level compressed Gaussian outputs, CodecSplat produces KiB-level scene
+bitstreams while preserving the dominant scene structure and overall appearance.
+Baselines. We compare against released DepthSplat and ReSplat models as feed-forward reconstruction references. DepthSplat predicts pixel-aligned Gaussians from sparse views with explicit
+depth estimation, while ReSplat improves feed-forward Gaussian prediction with recurrent refinement.
+To evaluate compressors that operate on generated Gaussian primitives, we first export complete
+Gaussian PLY files from DepthSplat and ReSplat, then apply existing 3DGS compressors to the
+exported Gaussian primitives. We consider FCGS, gsplat PNG Compression, and SOGS [Chen et al.,
+2025, Ye et al., 2025, Morgenstern et al., 2024]. FCGS performs learned compression of feed-forward
+generated Gaussian attributes. We use released FCGS models at λFCGS ∈ {0.0001, 0.0004, 0.0016}.
+gsplat PNG Compression quantizes and stores Gaussian attributes with standard image-style coding. We use KSH ∈ {128, 8192} clusters for high-order spherical harmonic coefficients. SOGS
+reorganizes Gaussian parameters into locally smooth 2D grids before compression. We use its
+default compression configuration as a reference. For lower-rate tests on ReSplat outputs, we modify
+PNG/SOGS quantization from the default 16/8-bit means/attribute precision to 4/2, 8/4, and 12/6 bits.
+In the tables, A → B means that backbone A first generates Gaussian primitives and codec B then
+compresses the generated output.
+Bitstream accounting and timing. For CodecSplat, the reported scene size includes camera
+metadata and per-view feature streams. Context cameras are included for CodecSplat because
+they are required for decoder-side mapping from 2D predictions to 3D Gaussian primitives. For
+timing, we report GS generation, compression, and decompression. Compression and decompression
+correspond to codec encode/decode for both CodecSplat and baselines that compress generated
+primitives. GS generation includes the feed-forward generation needed before compression. For
+baselines that compress generated primitives, GS generation includes generating and preparing the
+Gaussian representation. For CodecSplat, GS generation corresponds to producing the intermediate
+representation before latent feature coding.
+4.2
+Main compression results
+Table 1 compares CodecSplat with methods that compress generated feed-forward Gaussian primitives.
+The seven CodecSplat rows on each dataset correspond to fixed test-time values of λ. Increasing λ
+consistently increases the bitstream size and improves reconstruction quality, showing controllable
+rate–distortion behavior with a single trained codec. On DL3DV, CodecSplat ranges from 20.00
+to 107.77 KiB per scene and reaches 23.56–26.36 dB PSNR. On RE10K, CodecSplat uses only
+3.37–12.51 KiB per scene while reaching 24.76–27.05 dB PSNR.
+The results show a clear difference between compressing generated primitives and coding the internal
+feed-forward representation. DepthSplat-based baselines require large bitstreams on both datasets:
+11.48–12.08 MiB on DL3DV and 1.63–1.83 MiB on RE10K. This is because DepthSplat predicts
+7
+Table 1: Rate-distortion comparison with methods that compress generated feed-forward Gaussian
+primitives. For PNG/SOGS, the codec setting lists the means/attribute quantization bits. PNG uses
+KSH = 8192 unless otherwise specified.
+Dataset
+Method
+Codec Setting
+KiB/scene ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+DL3DV
+DepthSplat→PNG
+DepthSplat→SOGS
+DepthSplat→FCGS
+ReSplat→PNG
+ReSplat→PNG
+ReSplat→PNG
+ReSplat→PNG
+ReSplat→PNG
+ReSplat→SOGS
+ReSplat→SOGS
+ReSplat→SOGS
+ReSplat→SOGS
+ReSplat→FCGS
+ReSplat→FCGS
+ReSplat→FCGS
+CodecSplat
+CodecSplat
+CodecSplat
+CodecSplat
+CodecSplat
+CodecSplat
+CodecSplat
+16/8 bits
+16/8 bits
+λFCGS = 0.0016
+4/2 bits
+8/4 bits
+12/6 bits
+16/8 bits
+16/8 bits, KSH = 128
+4/2 bits
+8/4 bits
+12/6 bits
+16/8 bits
+λFCGS = 0.0016
+λFCGS = 0.0004
+λFCGS = 0.0001
+λ = 16
+λ = 32
+λ = 64
+λ = 128
+λ = 256
+λ = 512
+λ = 1024
+11942.05
+11759.53
+12367.10
+282.74
+447.16
+659.55
+856.74
+741.09
+466.49
+604.84
+759.27
+879.45
+1425.22
+1641.63
+1926.43
+20.00
+28.70
+41.52
+57.79
+76.56
+94.38
+107.77
+24.94
+24.94
+24.93
+8.67
+19.79
+22.62
+22.75
+23.36
+11.85
+23.46
+28.27
+28.36
+28.72
+28.88
+28.93
+23.56
+24.48
+25.24
+25.79
+26.14
+26.30
+26.36
+0.848
+0.848
+0.847
+0.298
+0.639
+0.833
+0.843
+0.841
+0.348
+0.727
+0.892
+0.894
+0.897
+0.900
+0.901
+0.768
+0.809
+0.839
+0.858
+0.869
+0.874
+0.876
+0.128
+0.128
+0.129
+0.818
+0.404
+0.188
+0.172
+0.171
+0.764
+0.267
+0.123
+0.120
+0.113
+0.109
+0.108
+0.267
+0.209
+0.167
+0.141
+0.127
+0.120
+0.117
+RE10K
+DepthSplat→PNG
+DepthSplat→SOGS
+DepthSplat→FCGS
+ReSplat→PNG
+ReSplat→PNG
+ReSplat→PNG
+ReSplat→PNG
+ReSplat→PNG
+ReSplat→SOGS
+ReSplat→SOGS
+ReSplat→SOGS
+ReSplat→SOGS
+ReSplat→FCGS
+ReSplat→FCGS
+ReSplat→FCGS
+CodecSplat
+CodecSplat
+CodecSplat
+CodecSplat
+CodecSplat
+CodecSplat
+CodecSplat
+16/8 bits
+16/8 bits
+λFCGS = 0.0016
+4/2 bits
+8/4 bits
+12/6 bits
+16/8 bits
+16/8 bits, KSH = 128
+4/2 bits
+8/4 bits
+12/6 bits
+16/8 bits
+λFCGS = 0.0016
+λFCGS = 0.0004
+λFCGS = 0.0001
+λ = 16
+λ = 32
+λ = 64
+λ = 128
+λ = 256
+λ = 512
+λ = 1024
+1678.17
+1670.96
+1869.35
+518.90
+890.08
+1372.35
+1841.51
+1674.83
+849.09
+1119.22
+1473.14
+1841.91
+2526.32
+2959.61
+3555.14
+3.37
+4.28
+5.58
+7.13
+8.89
+10.78
+12.51
+27.28
+27.28
+26.01
+10.93
+22.38
+25.66
+25.90
+26.39
+12.73
+26.25
+29.33
+29.36
+29.16
+29.56
+29.66
+24.76
+25.55
+26.18
+26.59
+26.84
+26.99
+27.05
+0.885
+0.885
+0.872
+0.307
+0.754
+0.880
+0.887
+0.891
+0.427
+0.836
+0.907
+0.908
+0.905
+0.909
+0.910
+0.809
+0.839
+0.859
+0.871
+0.877
+0.880
+0.882
+0.117
+0.116
+0.146
+0.747
+0.318
+0.133
+0.122
+0.119
+0.716
+0.202
+0.104
+0.102
+0.109
+0.103
+0.101
+0.231
+0.188
+0.157
+0.140
+0.130
+0.125
+0.123
+pixel-aligned Gaussians at the input image resolution, producing a dense set of primitives that remains
+expensive to store even after applying 3DGS compressors. In contrast, ReSplat generates a more
+compact Gaussian output by predicting Gaussians on downsampled feature maps and refining them
+through 3D context extraction and recurrent refinement. This makes ReSplat more compressionfriendly and also improves rendering quality, as shown by ReSplat→SOGS and ReSplat→FCGS.
+For example, on DL3DV, ReSplat→FCGS reaches 28.72 dB with 1.39 MiB, and ReSplat→SOGS
+reaches 28.36 dB with 0.86 MiB. The cost of this stronger representation is higher feed-forward
+generation complexity, as reflected in Table 2.
+CodecSplat follows a different design. Instead of first generating a full Gaussian output and then
+compressing it, CodecSplat encodes the intermediate Gaussian-generation feature before it is mapped
+to 3D Gaussian primitives. This leads to substantially smaller scene representations. ReSplat-based
+SOGS and FCGS outputs retain higher PSNR at high-rate settings, whereas aggressive PNG/SOGS
+quantization reduces the rate at the cost of substantial quality degradation. CodecSplat provides a
+much lower bitrate range while retaining competitive reconstruction quality.
+4.3
+Coding-time analysis
+Table 2 reports the timing breakdown. CodecSplat keeps codec operations lightweight in absolute
+time: compression/decompression takes 0.267/0.273 seconds on DL3DV and 0.062/0.059 seconds
+8
+Table 2: Timing breakdown in seconds. GS generation includes the feed-forward GS generation
+stage, and compression/decompression corresponds to codec encode/decode.
+Dataset
+Method
+Codec Setting
+GS Gen. T. ↓
+Compress T. ↓
+Decompress T. ↓
+DL3DV
+DepthSplat→PNG
+DepthSplat→SOGS
+DepthSplat→FCGS
+ReSplat→PNG
+ReSplat→SOGS
+ReSplat→FCGS
+CodecSplat
+KSH = 8192
+Default
+λFCGS = 0.0016
+KSH = 8192
+Default
+λFCGS = 0.0016
+λ = 16, . . . , 1024
+0.155
+0.155
+0.155
+0.282
+0.282
+0.282
+0.124
+18.277
+69.768
+4.470
+2.919
+16.114
+0.762
+0.267
+0.487
+0.452
+3.790
+0.050
+0.024
+0.969
+0.273
+RE10K
+DepthSplat→PNG
+DepthSplat→SOGS
+DepthSplat→FCGS
+ReSplat→PNG
+ReSplat→SOGS
+ReSplat→FCGS
+CodecSplat
+KSH = 8192
+Default
+λFCGS = 0.0016
+KSH = 8192
+Default
+λFCGS = 0.0016
+λ = 16, . . . , 1024
+0.046
+0.046
+0.046
+0.284
+0.284
+0.284
+0.047
+2.778
+53.856
+0.851
+2.901
+60.284
+1.062
+0.062
+0.075
+0.049
+0.928
+0.081
+0.062
+1.271
+0.059
+Table 3: Codec-free ablation on DL3DV.
+Method
+DepthSplat
+ReSplat
+CodecSplat w/o codec w/o refiner
+CodecSplat w/o codec
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+GS Gen. T. ↓
+24.94
+28.96
+25.68
+26.22
+0.848
+0.901
+0.866
+0.880
+0.128
+0.107
+0.116
+0.108
+0.155
+0.282
+0.102
+0.146
+on RE10K. It avoids the multi-second compression cost observed for several baselines that operate
+on exported Gaussian files, while achieving subsecond decompression on both datasets. CodecSplat
+primarily targets compact scene storage, and its codec time remains practical for the tested settings.
+4.4
+Ablation and transfer studies
+Codec-free Gaussian generation. Table 3 evaluates the codec-free variants on DL3DV. This
+ablation serves two purposes. First, it measures the reconstruction upper bound of each FF3DGS
+backbone before compression is introduced. The codec-free CodecSplat reaches 26.22 dB PSNR,
+outperforming DepthSplat but remaining below ReSplat. This explains why CodecSplat has lower
+PSNR than ReSplat-based compression baselines in Table 1: our Gaussian generation backbone
+follows a DepthSplat-style design with lower model complexity, while ReSplat uses recurrent
+refinement and stronger 3D feature interaction. Second, the ablation isolates the effect of the depthguided multi-view refiner. Adding the refiner improves the codec-free model from 25.68 dB to 26.22
+dB, showing that cross-view feature interaction strengthens the Gaussian-generation representation
+before coding. Notably, at λ = 1024, CodecSplat achieves 26.36 dB PSNR in Table 1, matching the
+codec-free upper bound without observable quality degradation. This indicates that the proposed
+rate-control mechanism can approach the reconstruction capacity of the underlying feed-forward
+Gaussian generator at high bitrate, while still supporting much lower rate points.
+Naive tensor compression. This ablation examines whether a learned codec is necessary for
+integrated FF3DGS compression. A simple alternative is to serialize the intermediate feature representation and predicted depth from the codec-free model in float16 and compress them with Deflate.
+This baseline does not use the second-stage codec-aware training of CodecSplat, and serves as a comparison for directly storing the intermediate representation. As shown in Table 4, Deflate preserves
+the codec-free reconstruction quality but requires 81.08 MiB per scene. In contrast, CodecSplat
+achieves 26.36 dB PSNR with only 0.11 MiB at λ = 1024. This result shows that moving the coding
+point earlier is not sufficient by itself. A learned codec is necessary to transform the intermediate
+Table 4: Naive tensor-compression ablation on DL3DV.
+Method
+Codec Setting
+CodecSplat
+CodecSplat w/ Deflate
+λ = 1024
+float16 features + depth
+Bytes/scene ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+0.11 MiB
+81.08 MiB
+26.36
+26.22
+0.876
+0.880
+0.117
+0.108
+9
+Table 5: Refinement ablation with the learned codec enabled on DL3DV.
+Full CodecSplat
+KiB/scene ↓
+PSNR ↑
+λ
+16
+32
+64
+128
+256
+512
+1024
+20.00
+28.70
+41.52
+57.79
+76.56
+94.38
+107.77
+Without pre-refiner
+KiB/scene ↓
+PSNR ↑
+23.56
+24.48
+25.24
+25.79
+26.14
+26.30
+26.36
+33.39
+46.66
+63.88
+83.44
+102.98
+119.73
+130.13
+Without post-refiner
+KiB/scene ↓
+PSNR ↑
+24.44
+25.21
+25.75
+26.05
+26.22
+26.28
+26.29
+33.02
+44.64
+61.02
+81.05
+102.42
+119.88
+131.65
+24.37
+25.04
+25.57
+25.94
+26.17
+26.25
+26.28
+Table 6: Transfer to ZPressor on DL3DV.
+Context views
+ZPressor
+PSNR ↑
+12
+16
+24
+36
+24.30
+24.25
+24.26
+23.88
+ZPressor+CodecSplat λ = 16
+KiB/scene ↓
+PSNR ↑
+17.56
+17.72
+17.77
+17.79
+22.96
+22.93
+22.90
+22.43
+ZPressor+CodecSplat λ = 1024
+KiB/scene ↓
+PSNR ↑
+85.65
+86.02
+86.25
+86.30
+24.66
+24.60
+24.59
+24.16
+representation into a compact latent space while preserving the information needed for Gaussian
+decoding.
+Pre- and post-codec refinement. We train two codec variants, removing either the pre-codec
+depth-guided refinement module or the post-codec refinement module. Table 5 compares both
+variants with the full model on DL3DV at seven rate points. We assess the contribution of refinement
+through rate-distortion performance across these rate points. The full model reduces BD-rate by
+13.67% relative to the model without the pre-refiner and by 18.08% relative to the model without the
+post-refiner. Both refinement stages therefore help the codec allocate rate more effectively rather than
+merely increasing reconstruction capacity.
+Transfer to ZPressor. To test whether our coding strategy transfers beyond the original pipeline,
+we integrate CodecSplat into another FF3DGS model, ZPressor [Wang et al., 2025], which aggregates
+support-view information into selected anchor-view features before Gaussian prediction. We train
+one variable-rate model using ZPressor’s 12-view, 6-cluster protocol and evaluate the same model
+with 12, 16, 24, and 36 context views on DL3DV. Table 6 reports the results at λ = 16 and λ = 1024,
+alongside the original ZPressor PSNR values. At λ = 1024, ZPressor+CodecSplat exceeds the
+published PSNR by 0.28–0.36 dB while using 85.65–86.30 KiB per scene. This shows that the
+latent coding strategy transfers to a substantially different multi-view feature aggregation pipeline,
+achieving KiB-scale representations while preserving reconstruction quality.
+5
+Conclusion
+We presented CodecSplat, an ultra-compact latent coding framework for feed-forward 3D Gaussian
+splatting. Instead of compressing generated Gaussian primitives, CodecSplat encodes an intermediate
+Gaussian-generation feature and decodes it into Gaussian primitives, allowing the codec to operate on
+a compact and regular 2D representation before it is mapped to irregular 3D primitives. Experiments
+on DL3DV and RE10K demonstrate KB-level scene representations with controllable rate–distortion
+behavior, suggesting that the intermediate representation inside FF3DGS provides an effective coding
+point for compact storage and transmission.
+Limitations and future work. CodecSplat prioritizes compactness over peak novel-view synthesis
+quality, and its PSNR is still limited by the underlying FF3DGS backbone and the current latent-toGaussian decoder. Since the codec is integrated into the feed-forward Gaussian generation pipeline,
+it also requires joint training rather than being directly plugged into arbitrary pretrained FF3DGS
+models. Future work will explore stronger backbones and more expressive decoding designs to
+improve reconstruction quality while preserving compact scene representations.
+10
+Acknowledgements
+This work was partially supported by the National Natural Science Foundation of China (No.
+62372491), the Guangdong S&T Programme (No. 2025B0101130003), the Guangdong Basic
+and Applied Basic Research Foundation (2023B1515120087), and the Science and Technology
+Planning Project of Key Laboratory of Advanced IntelliSense Technology, Guangdong Science and
+Technology Department (2023B1212060024), and the Major Key Project of Pengcheng Laboratory
+(No. PCL2026A02).
+References
+Muhammad Salman Ali, Maryam Qamar, Sung-Ho Bae, and Enzo Tartaglione. Trimming the
+fat: Efficient compression of 3D Gaussian splats through pruning. In British Machine Vision
+Conference (BMVC), 2024.
+Johannes Ballé, Valero Laparra, and Eero P. Simoncelli. End-to-end optimized image compression.
+In International Conference on Learning Representations (ICLR), 2017.
+Johannes Ballé, David Minnen, Saurabh Singh, Sung Jin Hwang, and Nick Johnston. Variational image compression with a scale hyperprior. In International Conference on Learning Representations
+(ICLR), 2018.
+Shilv Cai, Zhijun Zhang, Liqun Chen, Luxin Yan, Sheng Zhong, and Xu Zou. High-fidelity variablerate image compression via invertible activation transformation. In Proceedings of the ACM
+International Conference on Multimedia (ACM MM), pages 2021–2031, 2022.
+David Charatan, Sizhe Lester Li, Andrea Tagliasacchi, and Vincent Sitzmann. pixelSplat: 3D
+Gaussian splats from image pairs for scalable generalizable 3D reconstruction. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 19457–
+19467, 2024.
+Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai. HAC: Hash-grid assisted
+context for 3D Gaussian splatting compression. In European Conference on Computer Vision
+(ECCV), pages 422–438, 2024a.
+Yihang Chen, Qianyi Wu, Mengyao Li, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai. Fast feedforward 3D Gaussian splatting compression. In International Conference on Learning Representations
+(ICLR), 2025.
+Yuedong Chen, Haofei Xu, Chuanxia Zheng, Bohan Zhuang, Marc Pollefeys, Andreas Geiger, Tat-Jen
+Cham, and Jianfei Cai. MVSplat: Efficient 3D Gaussian splatting from sparse multi-view images.
+In European Conference on Computer Vision (ECCV), pages 370–386, 2024b.
+Yoojin Choi, Mostafa El-Khamy, and Jungwon Lee. Variable rate deep image compression with a
+conditional autoencoder. In IEEE/CVF International Conference on Computer Vision (ICCV),
+pages 3146–3154, 2019.
+Ze Cui, Jing Wang, Shangyin Gao, Tiansheng Guo, Yihui Feng, and Bo Bai. Asymmetric gained deep
+image compression with continuous rate adaptation. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages 10527–10536, 2021.
+Zhihao Duan, Ming Lu, Zhan Ma, and Fengqing Zhu. Lossy image compression with quantized
+hierarchical VAEs. In IEEE/CVF Winter Conference on Applications of Computer Vision (WACV),
+pages 198–207, 2023.
+Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang. LightGaussian:
+Unbounded 3D Gaussian compression with 15x reduction and 200+ FPS. In Neural Information
+Processing Systems (NeurIPS), pages 140138–140158, 2024.
+Guangchi Fang and Bing Wang. Mini-Splatting: Representing scenes with a constrained number of
+Gaussians. In European Conference on Computer Vision (ECCV), pages 165–181, 2024.
+11
+Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. EAGLES: Efficient accelerated 3D Gaussians
+with lightweight encodings. In European Conference on Computer Vision (ECCV), pages 54–71,
+2024.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3D Gaussian
+splatting for real-time radiance field rendering. ACM Transactions on Graphics, 42(4), 2023.
+Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. Compact 3D Gaussian
+representation for radiance field. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), pages 21719–21728, 2024.
+Soonbin Lee, Fangwen Shu, Yago Sanchez, Thomas Schierl, and Cornelius Hellge. Compression of
+3D Gaussian splatting with optimized feature planes and standard video codecs. In IEEE/CVF
+International Conference on Computer Vision (ICCV), pages 25496–25505, 2025.
+Lu Ling, Yichen Sheng, Zhi Tu, Wentian Zhao, Cheng Xin, Kun Wan, Lantao Yu, Qianyu Guo,
+Zixun Yu, Yawen Lu, Xuanmao Li, Xingpeng Sun, Rohan Ashok, Aniruddha Mukherjee, Hao
+Kang, Xiangrui Kong, Gang Hua, Tianyi Zhang, Bedrich Benes, and Aniket Bera. DL3DV-10K:
+A large-scale scene dataset for deep learning-based 3D vision. In IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), pages 22160–22169, 2024.
+Xiangrui Liu, Xinju Wu, Pingping Zhang, Shiqi Wang, Zhu Li, and Sam Kwong. CompGS: Efficient 3D scene representation via compressed Gaussian splatting. In Proceedings of the ACM
+International Conference on Multimedia (ACM MM), pages 2936–2944, 2024.
+Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. Scaffold-GS:
+Structured 3D Gaussians for view-adaptive rendering. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages 20654–20664, 2024.
+David Minnen, Johannes Ballé, and George Toderici. Joint autoregressive and hierarchical priors
+for learned image compression. In Neural Information Processing Systems (NeurIPS), pages
+10794–10803, 2018.
+Wieland Morgenstern, Florian Barthel, Anna Hilsmann, and Peter Eisert. Compact 3D scene
+representation via self-organizing Gaussian grids. In European Conference on Computer Vision
+(ECCV), pages 18–34, 2024.
+K. L. Navaneet, Kossar Pourahmadi Meibodi, Soroush Abbasi Koohpayegani, and Hamed Pirsiavash.
+CompGS: Smaller and faster Gaussian splatting with vector quantization. In European Conference
+on Computer Vision (ECCV), pages 330–349, 2024.
+Jiawei Ren, Michal Jan Tyszkiewicz, Jiahui Huang, and Zan Gojcic. TokenGS: Decoupling 3D
+Gaussian prediction from pixels with learnable tokens. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages 15365–15375, 2026.
+Stanislaw Szymanowicz, Christian Rupprecht, and Andrea Vedaldi. Splatter image: Ultra-fast singleview 3D reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pages 10208–10217, 2024.
+Jiaxiang Tang, Zhaoxi Chen, Xiaokang Chen, Tengfei Wang, Gang Zeng, and Ziwei Liu. LGM: Large
+multi-view Gaussian model for high-resolution 3D content creation. In European Conference on
+Computer Vision (ECCV), pages 1–18, 2024.
+Henan Wang, Hanxin Zhu, Tianyu He, Runsen Feng, Jiajun Deng, Jiang Bian, and Zhibo Chen.
+End-to-end rate-distortion optimized 3D Gaussian representation. In European Conference on
+Computer Vision (ECCV), pages 76–92, 2024a.
+Weijie Wang, Donny Y. Chen, Zeyu Zhang, Duochao Shi, Akide Liu, and Bohan Zhuang. ZPressor:
+Bottleneck-aware compression for scalable feed-forward 3DGS. In Advances in Neural Information
+Processing Systems (NeurIPS), pages 125793–125822, 2025.
+Yufei Wang, Zhihao Li, Lanqing Guo, Wenhan Yang, Alex C. Kot, and Bihan Wen. ContextGS:
+Compact 3D Gaussian splatting with anchor level context model. In Neural Information Processing
+Systems (NeurIPS), pages 51532–51551, 2024b.
+12
+Shuzhao Xie, Weixiang Zhang, Chen Tang, Yunpeng Bai, Rongwei Lu, Shijia Ge, and Zhi Wang.
+MesonGS: Post-training compression of 3D Gaussians via efficient attribute transformation. In
+European Conference on Computer Vision (ECCV), page 434–452, 2024.
+Haofei Xu, Songyou Peng, Fangjinhua Wang, Hermann Blum, Daniel Barath, Andreas Geiger, and
+Marc Pollefeys. DepthSplat: Connecting Gaussian splatting and depth. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 16453–16463,
+2025.
+Haofei Xu, Daniel Barath, Andreas Geiger, and Marc Pollefeys. ReSplat: Learning recurrent Gaussian
+splatting. In European Conference on Computer Vision (ECCV), pages 364–382, 2026.
+Yinghao Xu, Zifan Shi, Yifan Wang, Hansheng Chen, Ceyuan Yang, Sida Peng, Yujun Shen, and
+Gordon Wetzstein. GRM: Large gaussian reconstruction model for efficient 3D reconstruction and
+generation. In European Conference on Computer Vision (ECCV), pages 1–20, 2024.
+Vickie Ye, Ruilong Li, Justin Kerr, Matias Turkulainen, Brent Yi, Zhuoyang Pan, Otto Seiskari,
+Jianbo Ye, Jeffrey Hu, Matthew Tancik, and Angjoo Kanazawa. gsplat: An open-source library for
+Gaussian splatting. Journal of Machine Learning Research, 26(34):1–17, 2025.
+Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe, and Noah Snavely. Stereo magnification:
+learning view synthesis using multiplane images. ACM Transactions on Graphics, 37(4), 2018.
+NeurIPS Paper Checklist
+1. Claims
+Question: Do the main claims made in the abstract and introduction accurately reflect the
+paper’s contributions and scope?
+Answer: [Yes]
+Justification: The abstract and introduction state the integrated FF3DGS compression problem, the CodecSplat framework, and the empirical claim of compact scene representations.
+These claims are supported by the method description and the experiments on DL3DV and
+RealEstate10K.
+Guidelines:
+• The answer [N/A] means that the abstract and introduction do not include the claims
+made in the paper.
+• The abstract and/or introduction should clearly state the claims made, including the
+contributions made in the paper and important assumptions and limitations. A [No] or
+[N/A] answer to this question will not be perceived well by the reviewers.
+• The claims made should match theoretical and experimental results, and reflect how
+much the results can be expected to generalize to other settings.
+• It is fine to include aspirational goals as motivation as long as it is clear that these goals
+are not attained by the paper.
+2. Limitations
+Question: Does the paper discuss the limitations of the work performed by the authors?
+Answer: [Yes]
+Justification: The conclusion discusses the remaining novel-view synthesis quality gap, the
+dependence on the FF3DGS backbone and latent-to-Gaussian decoder, and the need for
+joint training with the feed-forward pipeline.
+Guidelines:
+• The answer [N/A] means that the paper has no limitation while the answer [No] means
+that the paper has limitations, but those are not discussed in the paper.
+• The authors are encouraged to create a separate “Limitations” section in their paper.
+13
+• The paper should point out any strong assumptions and how robust the results are to
+violations of these assumptions (e.g., independence assumptions, noiseless settings,
+model well-specification, asymptotic approximations only holding locally). The authors
+should reflect on how these assumptions might be violated in practice and what the
+implications would be.
+• The authors should reflect on the scope of the claims made, e.g., if the approach was
+only tested on a few datasets or with a few runs. In general, empirical results often
+depend on implicit assumptions, which should be articulated.
+• The authors should reflect on the factors that influence the performance of the approach.
+For example, a facial recognition algorithm may perform poorly when image resolution
+is low or images are taken in low lighting. Or a speech-to-text system might not be
+used reliably to provide closed captions for online lectures because it fails to handle
+technical jargon.
+• The authors should discuss the computational efficiency of the proposed algorithms
+and how they scale with dataset size.
+• If applicable, the authors should discuss possible limitations of their approach to
+address problems of privacy and fairness.
+• While the authors might fear that complete honesty about limitations might be used by
+reviewers as grounds for rejection, a worse outcome might be that reviewers discover
+limitations that aren’t acknowledged in the paper. The authors should use their best
+judgment and recognize that individual actions in favor of transparency play an important role in developing norms that preserve the integrity of the community. Reviewers
+will be specifically instructed to not penalize honesty concerning limitations.
+3. Theory assumptions and proofs
+Question: For each theoretical result, does the paper provide the full set of assumptions and
+a complete (and correct) proof?
+Answer: [N/A]
+Justification: The paper does not present theoretical theorems or proof-based results.
+Guidelines:
+• The answer [N/A] means that the paper does not include theoretical results.
+• All the theorems, formulas, and proofs in the paper should be numbered and crossreferenced.
+• All assumptions should be clearly stated or referenced in the statement of any theorems.
+• The proofs can either appear in the main paper or the supplemental material, but if
+they appear in the supplemental material, the authors are encouraged to provide a short
+proof sketch to provide intuition.
+• Inversely, any informal proof provided in the core of the paper should be complemented
+by formal proofs provided in appendix or supplemental material.
+• Theorems and Lemmas that the proof relies upon should be properly referenced.
+4. Experimental result reproducibility
+Question: Does the paper fully disclose all the information needed to reproduce the main experimental results of the paper to the extent that it affects the main claims and/or conclusions
+of the paper (regardless of whether the code and data are provided or not)?
+Answer: [Yes]
+Justification: The paper describes the model pipeline, two-stage training, datasets, evaluation
+protocols, rate-control settings, optimizer, loss weights, baselines, and bitstream accounting
+needed to reproduce the main results.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• If the paper includes experiments, a [No] answer to this question will not be perceived
+well by the reviewers: Making the paper reproducible is important, regardless of
+whether the code and data are provided or not.
+14
+• If the contribution is a dataset and/or model, the authors should describe the steps taken
+to make their results reproducible or verifiable.
+• Depending on the contribution, reproducibility can be accomplished in various ways.
+For example, if the contribution is a novel architecture, describing the architecture fully
+might suffice, or if the contribution is a specific model and empirical evaluation, it may
+be necessary to either make it possible for others to replicate the model with the same
+dataset, or provide access to the model. In general. releasing code and data is often
+one good way to accomplish this, but reproducibility can also be provided via detailed
+instructions for how to replicate the results, access to a hosted model (e.g., in the case
+of a large language model), releasing of a model checkpoint, or other means that are
+appropriate to the research performed.
+• While NeurIPS does not require releasing code, the conference does require all submissions to provide some reasonable avenue for reproducibility, which may depend on the
+nature of the contribution. For example
+(a) If the contribution is primarily a new algorithm, the paper should make it clear how
+to reproduce that algorithm.
+(b) If the contribution is primarily a new model architecture, the paper should describe
+the architecture clearly and fully.
+(c) If the contribution is a new model (e.g., a large language model), then there should
+either be a way to access this model for reproducing the results or a way to reproduce
+the model (e.g., with an open-source dataset or instructions for how to construct
+the dataset).
+(d) We recognize that reproducibility may be tricky in some cases, in which case
+authors are welcome to describe the particular way they provide for reproducibility.
+In the case of closed-source models, it may be that access to the model is limited in
+some way (e.g., to registered users), but it should be possible for other researchers
+to have some path to reproducing or verifying the results.
+5. Open access to data and code
+Question: Does the paper provide open access to the data and code, with sufficient instructions to faithfully reproduce the main experimental results, as described in supplemental
+material?
+Answer: [Yes]
+Justification: Code is available at https://github.com/pengpeng-yu/CodecSplat.
+Guidelines:
+• The answer [N/A] means that paper does not include experiments requiring code.
+• Please see the NeurIPS code and data submission guidelines (https://neurips.cc/
+public/guides/CodeSubmissionPolicy) for more details.
+• While we encourage the release of code and data, we understand that this might not
+be possible, so [No] is an acceptable answer. Papers cannot be rejected simply for not
+including code, unless this is central to the contribution (e.g., for a new open-source
+benchmark).
+• The instructions should contain the exact command and environment needed to run to
+reproduce the results. See the NeurIPS code and data submission guidelines (https:
+//neurips.cc/public/guides/CodeSubmissionPolicy) for more details.
+• The authors should provide instructions on data access and preparation, including how
+to access the raw data, preprocessed data, intermediate data, and generated data, etc.
+• The authors should provide scripts to reproduce all experimental results for the new
+proposed method and baselines. If only a subset of experiments are reproducible, they
+should state which ones are omitted from the script and why.
+• At submission time, to preserve anonymity, the authors should release anonymized
+versions (if applicable).
+• Providing as much information as possible in supplemental material (appended to the
+paper) is recommended, but including URLs to data and code is permitted.
+6. Experimental setting/details
+15
+Question: Does the paper specify all the training and test details (e.g., data splits, hyperparameters, how they were chosen, type of optimizer) necessary to understand the results?
+Answer: [Yes]
+Justification: The experimental setup specifies the datasets, input-view protocols, resolutions,
+two-stage training schedule, optimizer, learning rate, weight decay, rate range, loss weights,
+baseline settings, and evaluation metrics.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The experimental setting should be presented in the core of the paper to a level of detail
+that is necessary to appreciate the results and make sense of them.
+• The full details can be provided either with the code, in appendix, or as supplemental
+material.
+7. Experiment statistical significance
+Question: Does the paper report error bars suitably and correctly defined or other appropriate
+information about the statistical significance of the experiments?
+Answer: [No]
+Justification: The paper reports benchmark averages under standard evaluation protocols but
+does not include repeated runs, confidence intervals, or error bars due to computational cost.
+The main conclusions are based on consistent rate–distortion trends and large differences in
+scene size.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The authors should answer [Yes] if the results are accompanied by error bars, confidence
+intervals, or statistical significance tests, at least for the experiments that support the
+main claims of the paper.
+• The factors of variability that the error bars are capturing should be clearly stated (for
+example, train/test split, initialization, random drawing of some parameter, or overall
+run with given experimental conditions).
+• The method for calculating the error bars should be explained (closed form formula,
+call to a library function, bootstrap, etc.)
+• The assumptions made should be given (e.g., Normally distributed errors).
+• It should be clear whether the error bar is the standard deviation or the standard error
+of the mean.
+• It is OK to report 1-sigma error bars, but one should state it. The authors should
+preferably report a 2-sigma error bar than state that they have a 96% CI, if the hypothesis
+of Normality of errors is not verified.
+• For asymmetric distributions, the authors should be careful not to show in tables or
+figures symmetric error bars that would yield results that are out of range (e.g., negative
+error rates).
+• If error bars are reported in tables or plots, the authors should explain in the text how
+they were calculated and reference the corresponding figures or tables in the text.
+8. Experiments compute resources
+Question: For each experiment, does the paper provide sufficient information on the computer resources (type of compute workers, memory, time of execution) needed to reproduce
+the experiments?
+Answer: [Yes]
+Justification: We used four NVIDIA RTX 5880 48GB GPUs.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The paper should indicate the type of compute workers CPU or GPU, internal cluster,
+or cloud provider, including relevant memory and storage.
+16
+• The paper should provide the amount of compute required for each of the individual
+experimental runs as well as estimate the total compute.
+• The paper should disclose whether the full research project required more compute
+than the experiments reported in the paper (e.g., preliminary or failed experiments that
+didn’t make it into the paper).
+9. Code of ethics
+Question: Does the research conducted in the paper conform, in every respect, with the
+NeurIPS Code of Ethics https://neurips.cc/public/EthicsGuidelines?
+Answer: [Yes]
+Justification: The work follows the NeurIPS Code of Ethics.
+Guidelines:
+• The answer [N/A] means that the authors have not reviewed the NeurIPS Code of
+Ethics.
+• If the authors answer [No], they should explain the special circumstances that require a
+deviation from the Code of Ethics.
+• The authors should make sure to preserve anonymity (e.g., if there is a special consideration due to laws or regulations in their jurisdiction).
+10. Broader impacts
+Question: Does the paper discuss both potential positive societal impacts and negative
+societal impacts of the work performed?
+Answer: [N/A]
+Justification: The paper focuses on a technical compression method for feed-forward 3D
+Gaussian representations and does not introduce a deployment system or application-specific
+decision-making pipeline. We do not identify direct societal impacts.
+Guidelines:
+• The answer [N/A] means that there is no societal impact of the work performed.
+• If the authors answer [N/A] or [No], they should explain why their work has no societal
+impact or why the paper does not address societal impact.
+• Examples of negative societal impacts include potential malicious or unintended uses
+(e.g., disinformation, generating fake profiles, surveillance), fairness considerations
+(e.g., deployment of technologies that could make decisions that unfairly impact specific
+groups), privacy considerations, and security considerations.
+• The conference expects that many papers will be foundational research and not tied
+to particular applications, let alone deployments. However, if there is a direct path to
+any negative applications, the authors should point it out. For example, it is legitimate
+to point out that an improvement in the quality of generative models could be used to
+generate Deepfakes for disinformation. On the other hand, it is not needed to point out
+that a generic algorithm for optimizing neural networks could enable people to train
+models that generate Deepfakes faster.
+• The authors should consider possible harms that could arise when the technology is
+being used as intended and functioning correctly, harms that could arise when the
+technology is being used as intended but gives incorrect results, and harms following
+from (intentional or unintentional) misuse of the technology.
+• If there are negative societal impacts, the authors could also discuss possible mitigation
+strategies (e.g., gated release of models, providing defenses in addition to attacks,
+mechanisms for monitoring misuse, mechanisms to monitor how a system learns from
+feedback over time, improving the efficiency and accessibility of ML).
+11. Safeguards
+Question: Does the paper describe safeguards that have been put in place for responsible
+release of data or models that have a high risk for misuse (e.g., pre-trained language models,
+image generators, or scraped datasets)?
+Answer: [N/A]
+17
+Justification: The paper poses no such risks.
+Guidelines:
+• The answer [N/A] means that the paper poses no such risks.
+• Released models that have a high risk for misuse or dual-use should be released with
+necessary safeguards to allow for controlled use of the model, for example by requiring
+that users adhere to usage guidelines or restrictions to access the model or implementing
+safety filters.
+• Datasets that have been scraped from the Internet could pose safety risks. The authors
+should describe how they avoided releasing unsafe images.
+• We recognize that providing effective safeguards is challenging, and many papers do
+not require this, but we encourage authors to take this into account and make a best
+faith effort.
+12. Licenses for existing assets
+Question: Are the creators or original owners of assets (e.g., code, data, models), used in
+the paper, properly credited and are the license and terms of use explicitly mentioned and
+properly respected?
+Answer: [Yes]
+Justification: The paper cites the datasets, pretrained FF3DGS models, and compression
+baselines used in the experiments.
+Guidelines:
+• The answer [N/A] means that the paper does not use existing assets.
+• The authors should cite the original paper that produced the code package or dataset.
+• The authors should state which version of the asset is used and, if possible, include a
+URL.
+• The name of the license (e.g., CC-BY 4.0) should be included for each asset.
+• For scraped data from a particular source (e.g., website), the copyright and terms of
+service of that source should be provided.
+• If assets are released, the license, copyright information, and terms of use in the
+package should be provided. For popular datasets, paperswithcode.com/datasets
+has curated licenses for some datasets. Their licensing guide can help determine the
+license of a dataset.
+• For existing datasets that are re-packaged, both the original license and the license of
+the derived asset (if it has changed) should be provided.
+• If this information is not available online, the authors are encouraged to reach out to
+the asset’s creators.
+13. New assets
+Question: Are new assets introduced in the paper well documented and is the documentation
+provided alongside the assets?
+Answer: [Yes]
+Justification: We release code and pretrained models with documentation covering installation, dataset preparation, training, and evaluation.
+Guidelines:
+• The answer [N/A] means that the paper does not release new assets.
+• Researchers should communicate the details of the dataset/code/model as part of their
+submissions via structured templates. This includes details about training, license,
+limitations, etc.
+• The paper should discuss whether and how consent was obtained from people whose
+asset is used.
+• At submission time, remember to anonymize your assets (if applicable). You can either
+create an anonymized URL or include an anonymized zip file.
+14. Crowdsourcing and research with human subjects
+18
+Question: For crowdsourcing experiments and research with human subjects, does the paper
+include the full text of instructions given to participants and screenshots, if applicable, as
+well as details about compensation (if any)?
+Answer: [N/A]
+Justification: The paper does not involve crowdsourcing nor research with human subjects.
+Guidelines:
+• The answer [N/A] means that the paper does not involve crowdsourcing nor research
+with human subjects.
+• Including this information in the supplemental material is fine, but if the main contribution of the paper involves human subjects, then as much detail as possible should be
+included in the main paper.
+• According to the NeurIPS Code of Ethics, workers involved in data collection, curation,
+or other labor should be paid at least the minimum wage in the country of the data
+collector.
+15. Institutional review board (IRB) approvals or equivalent for research with human
+subjects
+Question: Does the paper describe potential risks incurred by study participants, whether
+such risks were disclosed to the subjects, and whether Institutional Review Board (IRB)
+approvals (or an equivalent approval/review based on the requirements of your country or
+institution) were obtained?
+Answer: [N/A]
+Justification: The paper does not involve crowdsourcing nor research with human subjects.
+Guidelines:
+• The answer [N/A] means that the paper does not involve crowdsourcing nor research
+with human subjects.
+• Depending on the country in which research is conducted, IRB approval (or equivalent)
+may be required for any human subjects research. If you obtained IRB approval, you
+should clearly state this in the paper.
+• We recognize that the procedures for this may vary significantly between institutions
+and locations, and we expect authors to adhere to the NeurIPS Code of Ethics and the
+guidelines for their institution.
+• For initial submissions, do not include any information that would break anonymity (if
+applicable), such as the institution conducting the review.
+16. Declaration of LLM usage
+Question: Does the paper describe the usage of LLMs if it is an important, original, or
+non-standard component of the core methods in this research? Note that if the LLM is used
+only for writing, editing, or formatting purposes and does not impact the core methodology,
+scientific rigor, or originality of the research, declaration is not required.
+Answer: [N/A]
+Justification: The core method development in this research does not involve LLMs as any
+important, original, or non-standard components.
+Guidelines:
+• The answer [N/A] means that the core method development in this research does not
+involve LLMs as any important, original, or non-standard components.
+• Please refer to our LLM policy in the NeurIPS handbook for what should or should not
+be described.
+19

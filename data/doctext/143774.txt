@@ -1,0 +1,530 @@
+# NeuManifold: Neural Watertight Manifold Reconstruction with Efficient and High-Quality Rendering Support
+
+Xinyue Wei1 , Fanbo Xiang1 , Sai Bi2 , Anpei Chen3,4 , Kalyan Sunkavalli2 Zexiang Xu2∗ , Hao Su1∗
+
+1University of California San Diego, 2Adobe Research, 3ETH Zurich, ¨ 4University of Tubingen ¨
+
+# Abstract
+
+While existing volumetric rendering approaches provide photorealistic results, extracting high-quality meshes from optimized neural field representations is challenging. Conversely, existing differentiable rasterization-based methods are typically sensitive to initialization and suffer from poor mesh rendering quality. In this paper, we introduce Neu-Manifold, a novel method for reconstructing watertight manifold meshes with high-quality textures from multi-view input images. NeuManifold overcomes the limitations of existing approaches by first learning a neural volumetric field and then refining it through differentiable mesh extraction and surface rendering. To eliminate artifacts and preserve mesh properties during iso-surface extraction, we introduce a novel differentiable marching cubes method. Instead of traditional textures, we use neural textures to enhance rendering quality. To integrate with modern graphics rendering pipelines, we also provide customized GLSL shader support for neural textures. Extensive experiments demonstrate that NeuManifold outperforms existing mesh-based reconstruction methods in both mesh quality and rendering metrics, achieving comparable or superior rendering quality to prior volume-rendering-based methods. The generated results enable real-time, high-quality rendering and seamlessly support numerous graphics pipelines and applications requiring high-quality meshes, such as 3D printing and physical simulation. [https://sarahweiii.](https://sarahweiii.github.io/neumanifold/) [github.io/neumanifold/](https://sarahweiii.github.io/neumanifold/).
+
+# 1. Introduction
+
+Recent advancements in neural field representations [9, 37,38] have enabled scene reconstructions with photorealistic rendering quality. However, these methods typically rely on implicit volumetric representations, resulting in slower processing speeds and limited compatibility with standard graphics pipelines, such as 3D printing, geometry editing, and physical simulation.
+
+For many such applications, meshes—especially those that are manifold and watertight—are the preferred option. Meshes can be efficiently rendered using standard 3D rendering engines. Additionally, the watertight manifold property is often advantageous in various geometry processing algorithms, such as mesh Boolean operations, approximate convex decomposition [59], mesh tetrahedralization [20, 23, 24], and volumetric point sampling for initializing particle simulations [3, 49, 51].
+
+Although mesh reconstruction has been extensively studied in prior arts [17, 45, 48], reconstructing a high-quality manifold mesh with realistic rendering remains a significant challenge. In response, recent advancements in inverse graphics through differentiable surface rendering have shown considerable promise, such as nvdiffrec [39] and nerf2mesh [54]. However, the rendering quality of these methods still falls short of neural-field-based approaches, and their meshes, optimized primarily for rendering applications, often result in non-manifold models with selfintersections. These are unsuitable for 3D printing, physical simulation, and other geometry processing applications.
+
+To bridge this gap, we introduce NeuManifold, a novel approach for reconstructing high-quality, watertight manifold meshes of 3D objects with neural textures from posed multi-view images. NeuManifold combines advanced volumetric neural field rendering with differentiable rasterization mesh reconstruction techniques, offering mutually complementary benefits. Specifically, NeuManifold begins by learning a neural volumetric field, facilitating flexible geometry topology and high visual quality. Extracting highquality mesh from the optimized implicit field while retaining the original high visual quality achieved through volume rendering is non-trivial. Therefore, we use the learned results as a solid initial point and further refine them with differentiable mesh extraction and surface rendering. Existing rasterization-based approaches, such as
+
+1Research partially done when X. Wei was an intern at Adobe Research
+
+2\* Equal advisory.
+
+
+
+Figure 1. Left: NeuManifold takes multi-view posed images and generates watertight manifold meshes with neural textures. Middle: NeuManifold outperforms many mesh reconstruction methods in geometry while maintaining excellent rendering quality. The circle, triangle, and star represent methods without a guarantee, methods generating watertight meshes, and methods producing watertight manifold meshes, respectively. Right: The generated manifold meshes with neural textures support downstream applications like high-quality novelview synthesis and soft-body simulation.
+
+nvdiffrec [39], which optimize the final mesh representation from scratch, are sensitive to geometry initialization and often get trapped in local minima, especially when reconstructing high-resolution meshes (see Fig. 4\). In contrast, NeuManifold benefits from high-quality initializations, significantly improving the final mesh reconstruction quality.
+
+To refine the geometry networks using differentiable rasterization, an important component is needed: differentiable iso-surface extraction. The most commonly used algorithm for this purpose has been the differentiable tetrahedra-based algorithm DMTet [46]. However, we have observed that the non-linear characteristics of the density field can lead to undesirable artifacts when using DMTet. In contrast, voxel-based algorithms, such as Marching Cubes, can significantly reduce these artifacts, as illustrated in Fig. 3. For end-to-end training of the networks, differentiable voxelbased iso-surface algorithms are essential. However, existing methods such as FlexiCubes [47] do not adequately preserve manifold properties. To address this issue, we introduce Differentiable Marching Cubes (DiffMC), which effectively eliminates these artifacts and results in significantly smoother surfaces. Moreover, we provide an efficient DiffMC implementation with CUDA, which is substantially more efficient in terms of both GPU memory and speed compared to previous works (see Tab. 5\).
+
+Instead of using the traditional BRDF textures utilized in most inverse rendering methods [34, 39], we opt to use neural textures for appearance modeling of the generated mesh, which enhances the visual quality to the greatest extent possible. To seamlessly integrate into modern graphics rendering pipelines, we also provide customized GLSL shader support for the generated neural textures.
+
+Extensive experiments on both synthetic and real data have demonstrated that NeuManifold surpasses existing mesh-based reconstruction methods in terms of both mesh quality metrics and rendering metrics. It achieves comparable rendering quality with prior volume-rendering-based methods and significantly higher quality than mesh-based methods. For instance, it attains a 2.29 dB higher PSNR than nvdiffrec [39], along with superior mesh properties, as illustrated in Fig. 1. Furthermore, the results generated by NeuManifold enable real-time, high-quality rendering and support numerous graphics applications with stringent mesh requirements, such as 3D printing and physical simulation. In summary, our work offers the following key contributions:
+
+- We propose NeuManifold, which excels in producing high-quality, watertight manifold meshes with neural textures. The generated results can be seamlessly integrated with existing graphic pipelines and support real-time, realistic rendering, and numerous downstream applications.
+- We introduce the first complete model of Differentiable Marching Cubes (DiffMC). Our DiffMC delivers smooth surfaces from density fields and effectively preserves both manifoldness and watertightness. Notably, our CUDAbased implementation leads to a significant speedup (∼20x) and a substantial reduction in memory usage (∼1/5) compared to DMTet and FlexiCubes.
+- We enhance rendering quality using neural textures and implement them in the GLSL shader, allowing seamless integration of our mesh-based representation into modern rendering engines.
+- Extensive experiments demonstrate that our method achieves high-quality rendering and mesh reconstruction simultaneously, significantly outperforming existing mesh-based methods.
+
+### 2. Related Work
+
+#### 2.1. Neural field representations.
+
+Neural rendering methods have demonstrated photorealistic scene reconstruction and rendering quality. In particular, NeRF [37] introduced the neural radiance field representation and achieved remarkable visual quality with volume rendering techniques. Various neural field representations have been proposed for better efficiency and quality, including MipNeRF [1] and RefNeRF [55] that are based on coordinate-based MLPs, TensoRF [7] and DiF [8] that leverage tensor factorization, iNGP [38] that introduces multi-scale hashing, Plenoxels [16] and DVGO [52] that are voxel-based, and Point-NeRF [62] that is based on neural point clouds.
+
+However, most neural field representations represent 3D geometry as a volume-density field, which is hard to edit for 3D applications. While several methods have enabled appearance editing or shape deformation [14,26,60,61,66,67], it is still highly challenging to apply them directly in modern 3D engines. Recent methods have proposed replacing density fields with volume SDFs to achieve better surface reconstruction with volume rendering [41,57,58,64]. However, Density- or SDF-based models struggle to be exported as meshes without notable loss in rendering quality. MobileNeRF [10] turns the neural field into a triangle soup for real-time rendering but fails to capture accurate scene geometry for further applications. Our work provides a versatile solution for converting volumetric neural fields into high-quality manifold meshes, facilitating both high-quality rendering and a range of 3D applications such as physical simulation.
+
+### 2.2. Mesh reconstruction and rendering.
+
+Polygonal meshes are a staple in modern 3D engines, widely employed for modeling, simulation, and rendering. Previous research has extensively explored mesh reconstruction from multi-view captured images through photogrammetry systems [42, 45, 48] like structure from motion [44, 53, 56], multi-view stereo [13, 17, 27, 45, 63], and surface extraction techniques [25, 32]. However, achieving photorealistic rendering with classical photogrammetry pipelines remains a formidable challenge.
+
+On the other hand, inverse rendering aims to fully disentangle intrinsic scene properties from captured images [4–6,18,21,30,68,69,71,72]. Recent methods, such as nvdiffrec [39], nerf2mesh [54], BakedSDF [65], achieve highquality reconstruction and fast rendering speed. Nevertheless, these methods often introduce self-intersections or an excessive number of triangles in the mesh reconstruction, which are undesired for simulation and geometry processing tasks.
+
+#### 2.3. Differentiable Iso-Surface Extraction
+
+In recent years, there has been increasing interest in differentiable iso-surface extraction algorithms due to their crucial role in bridging implicit fields with explicit mesh representations, enabling end-to-end training using differentiable rasterization. Deep Marching Cubes [31] proposed an alternative to traditional marching cubes for extracting meshes from network-predicted occupancy. NMC [12] and NDC [11] train neural networks on large-scale datasets, achieving better preservation of shape features. These learning-based methods often sacrifice mesh manifold properties. MeshSDF [43] approaches differentiable processing through the gradient of SDF, and [35] expanded this using level-set theory, but they struggle to maintain sharp features. DMTet [46] and FlexiCubes [47] explicitly make Marching Tetraheda [15] and Dual Marching Cubes [40] differentiable, respectively, and introduce learnable modules to enhance performance. However, FlexiCubes can introduce self-intersections, and DMTet suffers from artifacts when applied to density fields. Our method, DiffMC, addresses these challenges; it can accurately fit the original shape while preserving all mesh properties.
+
+# 3. Method
+
+We present NeuManifold, a novel 3D reconstruction pipeline that reconstructs watertight manifold meshes with high-quality textures from captured multi-view images.
+
+Existing neural-field-based methods [7, 38] can achieve high rendering quality and effectively support flexible topology changes using neural density field representations. However, extracting high-quality meshes from these learned density fields is challenging due to their lack of a precise surface definition. Directly using iso-surface extraction methods like marching cubes (MC) on the density field necessitates the addition of a margin to artificially create a pseudo-surface. This may result in the extracted meshes being larger than the actual surface and significantly reducing rendering quality, as discussed in Sec. 4.2. Conversely, existing mesh-based methods [39] facilitate accurate surface extraction, but the mesh representation imposes strict constraints during the optimization process. This can lead to the optimization getting trapped in local minima, particularly when reconstructing high-resolution meshes, as detailed in Sec. 4.3. Such limitation hinders the reconstruction of high-quality meshes with fine details. Fortunately, we discovered that with proper initialization, mesh-based methods can converge to a more favorable state, enabling the reconstruction of high-quality meshes. Therefore, we propose to integrate the advantages of both approaches.
+
+As depicted in Fig. 2, the proposed method comprises two primary stages. In the first stage, we optimize a neural field representation using volume rendering to provide
+
+
+
+Figure 2. Overall training pipeline of NeuManifold. In Stage 1, volumetric rendering pipelines are used to initialize geometry and appearance networks. In Stage 2, the initialized geometry and appearance networks are further trained in differentiable rasterization with the help of DiffMC, generating watertight manifold mesh. In the optional Stage 3, the mesh vertices are moved to further improve rendering quality.
+
+a solid initialization. During the subsequent mesh optimization phase, we further optimize the topology, geometry, and appearance. This is achieved by extracting the iso-surface with our proposed differentiable marching cubes and rendering with differentiable rasterization. Optionally, we further fine-tune the geometry and appearance by directly adjusting mesh vertices and the appearance network, which enhances the rendering quality. Since neural textures, rather than traditional textures, are used, we also provide rendering support for the generated results using GLSL shaders, which enables cross-platform, real-time rendering. We elaborate on the details of each stage from Sec. 3.1 to Sec. 3.3 and illustrate how we deploy the generated results in modern rendering engines in Sec. 3.4.
+
+
+
+### 3.1. Stage 1: Initialization by Volume Rendering
+
+In the first stage, we train the networks through differentiable volume rendering to establish a strong initialization for the subsequent differentiable rasterization-based optimization phase.
+
+We represent a 3D scene with a geometry network G and an appearance network A. Given a3D location x, the geometry network outputs its corresponding volume density σ, and the appearance network regresses a view-dependent color c at the location:
+
+$$\sigma_x, c_x = G(x), A(x, d) \quad (1)$$
+
+where d is the viewing direction. Our approach supports any common neural field representations for the geometry and appearance networks. In this work, we choose the state-ofthe-art neural field representation TensoRF [7].
+
+As in NeRF, we render pixel colors C using the volume density and view-dependent colors from geometry and appearance models:
+
+|  | $C = \sum_{i=1}^N T_i(1 - \exp(-\sigma_i \delta_i))c_i,$ | $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j).$ |
+|--|----------------------------------------------------------|----------------------------------------------------|
+|  |                                                          |                                                    |
+
+(2) where T is the volume transmittance and δ is the ray marching step size. This differentiable rendering process allows us to optimize our networks with a rendering loss.
+
+#### 3.2. Stage 2: Manifold Generation & Optimization
+
+Figure 3. Comparison of the voxel-based method DiffMC and the tetrahedra-based method DMTet on SDF and density fields. DMTet significantly struggles with the non-linear nature of density fields, resulting in the generation of severe artifacts.
+
+In the second stage, we utilize the network weights pretrained in the first stage as initializations. We then employ differentiable rasterization to optimize the object topology, geometry, and appearance simultaneously.
+
+In this stage, the implementation of a differentiable isosurface method was necessary. Initially, we integrated DMTet [46] into our architecture due to its effective preservation of watertight manifold properties. However, we observed that DMTet produces severe artifacts when extracting meshes from density fields. As depicted in Fig.3, meshes extracted from density fields using DMTet exhibit deformations characterized by peaks and valleys, an issue not present with SDF. We attribute this to the non-linear characteristics of density fields. The mesh vertex generation of DMTet relies on linear interpolations between pairs of tetrahedra vertices. Consequently, the traditional method of linear interpolation proves inadequate for handling nonlinear fields, leading to surface artifacts, particularly on surfaces not aligned with tetrahedral divisions. Considering that most real-world objects are typically axis-aligned, adopting an axis-aligned spatial division can significantly mitigate these artifacts. This explains why voxel-based methods are effective on density fields. For further elucidation, a 2D example is provided in Appendix Fig. 1.
+
+Therefore, we introduce the Differentiable Marching Cubes method (DiffMC), which operates on an axis-aligned grid. DiffMC not only extracts meshes using the conventional Marching Cubes [33] but also provides gradients for the mesh vertices relative to the grid. Thanks to the advantageous properties of Marching Cubes [33], the generated mesh effectively preserves watertightness, manifoldness, and intersection-free characteristics. As illustrated in Fig. 3, DiffMC is less susceptible to the non-linear nature of the data and is capable of producing significantly smoother surfaces, even for geometries not aligned with the grid axis.
+
+Furthermore, we have implemented the algorithm using CUDA for optimal performance, enabling efficient GPU operation. To the best of our knowledge, we are the first to implement a complete differentiable marching cubes algorithm, achieving speeds approximately 20 times faster than DMTet.
+
+The resulting mesh from DiffMC is fed into nvdiffrast [28] to render 2D images. We then use the rendering loss to update the geometry and appearance networks. With a solid initialization from networks pretrained in volume rendering and the proposed voxel-based iso-surface extraction algorithm, we achieve watertight manifold meshes that are more accurate than both volumetric rendering and mesh rendering alone, offering superior visual quality.
+
+### 3.3. Stage 3: Geometry and Appearance Fine-tune
+
+The mesh generated by DiffMC is guaranteed to be a watertight manifold, meeting the stringent requirements of common geometry processing algorithms. However, the degree of freedom in DiffMC is limited. To enhance rendering quality, we can directly adjust the positions of mesh vertices. Specifically, we fine-tune only the positions of the mesh vertices and the appearance network to minimize the rendering loss. This approach preserves the original robust edge connections, thereby maintaining watertightness. However, it may occasionally introduce self-intersections.
+
+#### 3.4. Rendering Deployment
+
+GLSL shaders. Our pipeline generates a triangle mesh accompanied by an appearance network. We have implemented the neural networks as GLSL shaders, allowing the results produced by our method to be seamlessly integrated into modern rendering engines. The appearance network is composed of TensoRF and MLPs. We treat the TensoRF weights as three 3D textures and three 1D textures with linear filtering, and the MLP weights as 2D textures. After rasterizing the triangles in the vertex shader, we compute TensoRF and the MLPs in the fragment shader using modelspace coordinates and viewing directions.
+
+Anti-Aliasing. Aliasing is a prevalent issue in rasterization pipelines, often arising from the undersampling of high-frequency features, such as mesh edges and detailed textures. Unlike volumetric rendering, which uses semi-transparent volumes to reduce aliasing, mesh-based pipelines are more affected by this issue. We address this by using Supersample Anti-Aliasing (SSAA), which renders at high resolution and downsamples to the target resolution, offering excellent visual quality but at a higher computational cost. An efficient alternative is Multisample Anti-Aliasing (MSAA), which reduces aliasing by averaging multiple samples per pixel, a feature supported by modern GPUs.
+
+#### 4. Experiments
+
+We present extensive experiments demonstrating that our method achieves high-quality mesh reconstruction (Sec. 4.1\), photorealistic rendering quality (Sec. 4.2\), and realtime rendering (Sec. 4.4\). Additionally, we have conducted numerous ablation studies to illustrate the significance of each module in our pipeline (Sec. 4.3\).
+
+We compare our method with state-of-the-art meshbased methods. Additionally, we adapt two volume-based methods, TensoRF [7] and Instant NeuS (iNeuS) [19], for surface rendering to provide further comparison. Specifically, we use Marching Cubes (MC) to extract meshes and, during rasterization, query the colors of the surface points from their appearance networks. Thus, we refer to the adapted methods as TensoRF+MC and iNeuS+MC, respectively. We offer two versions of our method differing in their appearance networks: one prioritizes higher quality (Ours) and the other faster rendering speed (Ours-F). The parameters of their appearance networks and the rendering speeds are detailed in Sec. 4.4.
+
+### 4.1. Comparison on Mesh Reconstruction
+
+We have observed that traditional mesh-distance metrics, such as the Chamfer distance, are not well-suited for comparing mesh quality, as they often disproportionately reflect the performance in regions not seen during training. To this end, we propose to use the visible surface agreement (VSA) metric, modified from the visible surface discrepancy proposed by [22]:
+
+$$e_{\text{VSA}} = \underset{p \in V \cup \hat{V}}{\text{avg}} \begin{cases} 1 & \text{if } p \in V \cap \hat{V} \wedge |D(p) - \hat{D}(p)| < \tau \\ 0 & \text{otherwise} \end{cases}$$
+
+where given a view, D and Dˆ denote the depth map of the ground-truth and reconstructed meshes, V and Vˆ denote the pixel visibility masks, and τ is the misalignment tolerance. A higher VSA indicates a better match between depth maps.
+
+We evaluated the average VSA metric across 200 testing views of the NeRF-Synthetic dataset, with a tolerance set at 0.05, denoted as VSA(0.05). The results are presented in Tab. 1. The outcomes for different misalignment tolerances are shown in Appendix Fig. 11. The comparisons clearly demonstrate that our method consistently outperforms all mesh-based methods in VSA performance, even when their
+
+
+
+Figure 4. Visual comparison of mesh quality across different methods. MobileNeRF produces a 'triangle soup' that preserves only the rough shape. Nvdiffrec yields a coarse mesh and fails in some regions. TensoRF generates meshes with high-frequency noise, while NeuS tends to be over-smoothed, losing detail. Our method combines the strengths of these approaches, yielding results that are comparable to, or even better than, the non-manifold meshes produced by nerf2mesh. (Methods producing non-manifold meshes are denoted by \*, and wrongly oriented faces are marked in black color.)
+
+
+
+Figure 5. Rendering quality comparison between our and existing mesh rendering methods. Our methods can well preserve thin structures as well as achieve high rendering quality.
+
+meshes exhibit inferior properties compared to ours. Additionally, we provide a visual comparison of the reconstructed meshes in Fig. 4. Here, it is evident that our method more accurately captures intricate structures, such as the details of the ship and the legs of the drum, surpassing even nerf2mesh [54], which generates non-manifold meshes (we have marked triangles with incorrect orientations in black).
+
+### 4.2. Comparison on Novel-View Synthesis
+
+We present a quantitative comparison of novel view synthesis performance between our method and other neural rendering and differentiable rasterization methods on the NeRF-Synthetic dataset in Tab. 1. We observe that while TensoRF and iNeuS achieve very high quality with their original volume rendering, their performance significantly declines when adapted to surface rendering without finetuning. Nvdiffrec is capable of generating watertight and manifold meshes without its final fine-tuning stage, but its rendering quality falls notably short compared to other neural rendering methods. In contrast, our models not only maintain high rendering quality but also preserve favorable mesh properties. It is noteworthy that our method achieves the highest rendering quality among all the surface rendering techniques compared, even outperforming those that
+
+Table 1. Average results on NeRF-Synthetic dataset. The results of NeRF and MobileNeRF are taken from their papers, and the other results for mesh rendering are tested on our machine using the official implementation. The geometry property is grouped by color.
+
+| Method         | Geometry     | Render    | Mesh Watertight | Manifold VSA(0.05) | ↑ PSNR ↑ | SSIM ↑ | LPIPS ↓ |
+|----------------|--------------|-----------|-----------------|--------------------|----------|--------|---------|
+| NeRF [37]      | Volume       | RayMarch  | ✗               |                    | 31.00    | 0.947  | 0.081   |
+| TensoRF [7]    | Volume       | RayMarch  | ✗               |                    | 33.20    | 0.963  | 0.050   |
+| iNeuS [19]     | Volume       | RayMarch  | ✗               |                    | 30.74    | 0.951  | 0.064   |
+| MobileNeRF     | [10] TriSoup | Rasterize | ✓ ✗             | ✗ 0.559            | 30.90    | 0.947  | 0.062   |
+| nvdiffrec [39] | Mesh         | Rasterize | ✓ ✓             | ✗ 0.633            | 28.90    | 0.938  | 0.073   |
+| nerf2mesh [54] | Mesh         | Rasterize | ✓ ✓             | ✗ 0.787            | 29.76    | 0.940  | 0.072   |
+| TensoRF+MC     | Mesh         | Rasterize | ✓ ✓             | ✓ 0.827            | 25.28    | 0.886  | 0.115   |
+| iNeuS+MC       | Mesh         | Rasterize | ✓ ✓             | ✓ 0.856            | 27.85    | 0.935  | 0.074   |
+| nvdiffrec (w/o | ft) Mesh     | Rasterize | ✓ ✓             | ✓ 0.635            | 27.65    | 0.933  | 0.084   |
+| Ours-F (w/ ft) | Mesh         | Rasterize | ✓ ✓             | ✗ 0.872            | 30.94    | 0.952  | 0.061   |
+| Ours (w/ ft)   | Mesh         | Rasterize | ✓ ✓             | ✗ 0.899            | 31.65    | 0.956  | 0.056   |
+| Ours-F         | Mesh         | Rasterize | ✓ ✓             | ✓ 0.860            | 30.47    | 0.949  | 0.065   |
+| Ours           | Mesh         | Rasterize | ✓ ✓             | ✓ 0.890            | 31.19    | 0.954  | 0.059   |
+
+Table 2. Average PSNR on Mip-NeRF360 Scenes. \* The results for BakedSDF are sourced from its original paper and its mesh resolution is significantly higher than ours, as no code has been released. Additional metrics can be found in the Appendix.
+
+| Method      |         | Geometry | Outdoor | Indoor |
+|-------------|---------|----------|---------|--------|
+| NeRF        | [37]    | Volume   | 21.46   | 26.84  |
+| NeRF++      | [70]    | Volume   | 22.76   | 28.05  |
+| mip-NeRF    | [1]     | Volume   | 24.47   | 31.72  |
+| Mobile-NeRF | [10]    | Mesh     | 21.95   |        |
+| BakedSDF*   | [65]    | Mesh     | 22.47   | 27.06  |
+| Ours        |         | Mesh     | 21.07   | 25.80  |
+| Ours        | (w/ ft) | Mesh     | 22.05   | 27.63  |
+
+generate non-manifold meshes. Moreover, by fine-tuning the mesh vertices, we can further enhance our visual fidelity, achieving an average PSNR that is 0.65 dB higher than that of the vanilla NeRF.
+
+We also provide visual comparisons of mesh-based rendering in Fig. 5. It is evident that mesh renderings using meshes directly extracted from TensoRF and iNeuS struggle to capture high-frequency details and thin structures in the scene. This issue arises because these methods employ volume rendering during optimization, integrating the colors of multiple points along a ray to match training images. Consequently, simply extracting the color of a single point at the isosurface does not accurately reproduce the scene's appearance. While Nvdiffrec uses direct mesh rendering during training, the recovered meshes often miss complex structures, leading to a decline in visual quality. In contrast, our method, leveraging the initial training from neural volume rendering, is more adept at capturing fine-grained details of the scene. This advantage is reflected in the improved visual quality of our rendered images.
+
+We further validate the efficacy of our method on two real-world datasets: the MipNeRF-360 dataset [2] and
+
+Table 3. Ablation study for Stage 1. Using initializations from volume rendering enables more accurate mesh reconstruction and rendering, leading to more accurate novel view synthesis.
+
+| G. Init A. Init | PSNR  | ↑ SSIM | ↑ LPIPS ↓ | VSA(0.05) ↑ |
+|-----------------|-------|--------|-----------|-------------|
+| ✗ ✗             | 20.56 | 0.826  | 0.204     | 0.214       |
+| ✗ ✓             | 24.43 | 0.882  | 0.149     | 0.385       |
+| ✓ ✗             | 29.74 | 0.945  | 0.067     | 0.893       |
+| ✓ ✓             | 31.19 | 0.954  | 0.059     | 0.890       |
+
+Table 4. Ablation study for topology optimization in Stage 2. Ablation on the appearance optimization is in the Appendix.
+
+|                   | PSNR $\uparrow$ | SSIM $\uparrow$ | PLISD $\downarrow$ | VSA(0.05) $\uparrow$ |
+|-------------------|-----------------|-----------------|--------------------|----------------------|
+| w/o Topology Opt. | 27.00           | 0.929           | 0.081              | 0.827                |
+| w/ Topology Opt.  | 29.74    | 0.945    | 0.067       | 0.890         |
+
+the LLFF dataset [36]. The quantitative results on the MipNeRF-360 dataset are presented in Tab. 2, where our method notably surpasses other mesh-based methods in indoor scene reconstructions. Visual results are available in Appendix Fig. 5 and Fig. 9.
+
+### 4.3. Ablation for Stage 1 & 2
+
+In this section, we conduct ablation studies on the NeRF-Synthetic dataset for each stage in our pipeline and also show the speed and memory cost of our DiffMC.
+
+We begin by demonstrating that initialization from volume rendering is crucial for effective mesh optimization, with different initialization approaches yielding varying outcomes. As evidenced by the data in Tab. 3, optimizing the mesh without any prior initialization from volume rendering results in the poorest performance in terms of both rendering and mesh quality. Both geometry and appearance initialization enhance model performance, but geometry initialization is more pivotal for improving performance. The visual results in the Appendix also underscore this point.
+
+We further validate the necessity of stage two in our
+
+
+
+Figure 6. Applications of NeuManifold. (a) Laplacian surface editing. (b) Collision-aware convex decomposition. (c) Soft-body simulations. (d) 3D printing.
+
+Table 5. Speed and memory comparison between DiffMC and other differentiable iso-surface extraction methods.
+
+|               | Rounded Cube |     |      |       | Random Init. |      |      |     |       |       |
+|---------------|--------------|-----|------|-------|--------------|------|------|-----|-------|-------|
+|               | #            | V   | F    | Mem/G | Tms/m        | #    | V    | F   | Mem/G | Tms/m |
+| DMTet         | 19k          | 39k | 1.57 | 9.61  | 2.5M         | 4.7M | 3.07 | 4.9 | 29.5  | 47.5  |
+| FlexiCubes    | 19k          | 38k | 5.4  | 10.00 | 2.7M         | 4.3M | 3.07 | 4.9 | 29.5  | 47.5  |
+| DiffMC (Ours) | 19k          | 39k | 0.6  | 1.54  | 2.6M         | 4.7M | 3.07 | 4.9 | 29.5  | 47.5  |
+
+pipeline, which focuses on the crucial role of topology optimization via differentiable iso-surface extraction; details on appearance networks are in the Appendix Tab. 7. Besides the naive way of transferring volumetric methods to surface rendering (TensoRF+MC, iNeuS+MC), another strategy involves using non-differentiable algorithms to extract meshes from the density field, then freezing the geometry while only optimizing the appearance network. While this approach can maintain good mesh properties, it results in unmodifiable topology. Our experiments reveal a significant drop in both rendering and mesh quality without topology optimization, with a notable gap of up to 2.74 PSNR as shown in Tab. 4.
+
+We compare the speed and GPU memory usage of our DiffMC implementation with two previous methods, DMTet [46] and FlexiCubes [47] across two scenarios: simple rounded cube SDF and randomly initialized SDF. The algorithms were rigorously tested on an NVIDIA RTX 4090. Each algorithm underwent 100 repeated runs. Tab. 5 presents the time and CUDA memory consumption for a single run, demonstrating that our method is more efficient in terms of both memory and speed.
+
+### 4.4. Deployment Speed
+
+We present the model performance and speed after deployment in GLSL in Appendix Tab. 6 illustrating the tradeoff between model capacity and inference speed. The two versions of our method differ only in their appearance networks: the fast version substitutes the original TensoRF MLP with Spherical Harmonics (SH), where learned features (considered as SH coefficients) are fed into a fixed SH function to decode colors, eliminating the need for any neural decoders. Both models achieve real-time rendering, with FPS based on the average time of the first frame from the NeRF-Synthetic test set on an NVIDIA RTX 4090.
+
+### 5. Applications
+
+NeuManifold generates high-quality meshes, enabling seamless integration into graphics pipelines—a significant improvement over prior neural reconstruction methods.
+
+Geometry Editing. Effective geometry editing algorithms typically depend on reliable input mesh connectivity. As illustrated in Fig. 6a, we apply Laplacian surface editing [50] for the non-rigid deformation of a microphone reconstructed using NeuManifold.
+
+Physical Simulation. Our reconstructed meshes can be used as direct input to the collision-aware convex decomposition algorithm [59] for rigid-body collision shape generation (Fig. 6b). They can be directly converted to finiteelement meshes by Delaunay tetrahedralizations [20] and used in a finite-element simulation with incremental potential contact (IPC) [29] (Fig. 1 and Fig. 6c).
+
+3D printing. 3D printing imposes stringent requirements on mesh quality, as it relies on slicing software to convert 3D models into printable instructions. Non-manifold models can complicate the slicing process, potentially leading to interpretation challenges for the printer. The meshes generated by NeuManifold meet these rigorous standards, enabling them to be printed as realistic objects, as demonstrated in Fig. 6d.
+
+### 6. Conclusion
+
+We have introduced a novel method capable of reconstructing high-quality, watertight manifold meshes and enablinng real-time photorealistic rendering. However, our method encounters limitations in handling specular areas, as observed with the "materials" in NeRF-Synthetic and the "room" in the LLFF dataset. In such instances, the reconstructed meshes may exhibit discontinuities, reflecting the challenge of capturing different color perceptions of the same point from various viewpoints. To address this issue, we believe it will be necessary to integrate inverse rendering techniques and incorporate additional priors, aiming to achieve a more precise geometry representation
+
+## References
+
+- [1] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla, and Pratul P Srinivasan. Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 5855–5864, 2021. 3, 7 [2] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5470–5479, 2022. 7, 13 [3] Jan Bender, Matthias Muller, and Miles Macklin. A survey ¨ on position based dynamics. 2017. 1 [4] Sai Bi, Zexiang Xu, Pratul Srinivasan, Ben Mildenhall, Kalyan Sunkavalli, Milos Ha ˇ san, Yannick Hold-Geoffroy, ˇ David Kriegman, and Ravi Ramamoorthi. Neural reflectance fields for appearance acquisition. arXiv preprint arXiv:2008.03824, 2020. 3 [5] Sai Bi, Zexiang Xu, Kalyan Sunkavalli, Milos Ha ˇ san, Yan- ˇ nick Hold-Geoffroy, David Kriegman, and Ravi Ramamoorthi. Deep reflectance volumes: Relightable reconstructions from multi-view photometric images. In European Conference on Computer Vision, pages 294–311. Springer, 2020. 3 [6] Sai Bi, Zexiang Xu, Kalyan Sunkavalli, David Kriegman, and Ravi Ramamoorthi. Deep 3d capture: Geometry and reflectance from sparse multi-view images. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5960–5969, 2020. 3 [7] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. Tensorf: Tensorial radiance fields. In Computer Vision–ECCV 2022: 17th European Conference, Tel Aviv, Israel, October 23–27, 2022, Proceedings, Part XXXII, pages 333–350. Springer, 2022. 3, 4, 5, 7, 12, 13 [8] Anpei Chen, Zexiang Xu, Xinyue Wei, Siyu Tang, Hao Su, and Andreas Geiger. Dictionary fields: Learning a neural basis decomposition. ACM Transactions on Graphics (TOG), 42(4):1–12, 2023. 3 [9] Anpei Chen, Zexiang Xu, Xinyue Wei, Siyu Tang, Hao Su, and Andreas Geiger. Factor fields: A unified framework for neural fields and beyond. arXiv preprint arXiv:2302.01226, 2023. 1 [10] Zhiqin Chen, Thomas Funkhouser, Peter Hedman, and Andrea Tagliasacchi. Mobilenerf: Exploiting the polygon rasterization pipeline for efficient neural field rendering on mobile architectures. arXiv preprint arXiv:2208.00277, 2022. 3, 7, 13 [11] Zhiqin Chen, Andrea Tagliasacchi, Thomas Funkhouser, and Hao Zhang. Neural dual contouring. ACM Transactions on Graphics (TOG), 41(4):1–13, 2022. 3 [12] Zhiqin Chen and Hao Zhang. Neural marching cubes. ACM Transactions on Graphics (TOG), 40(6):1–15, 2021. 3 [13] Shuo Cheng, Zexiang Xu, Shilin Zhu, Zhuwen Li, Li Erran Li, Ravi Ramamoorthi, and Hao Su. Deep stereo using adaptive thin volume representation with uncertainty awareness. In Proceedings of the CVPR, pages 2524–2534, 2020. 3 [14] Chong Bao and Bangbang Yang, Zeng Junyi, Bao Hujun, Zhang Yinda, Cui Zhaopeng, and Zhang Guofeng. Neumesh: Learning disentangled neural mesh-based implicit field for geometry and texture editing. In European Conference on Computer Vision (ECCV), 2022. 3 [15] Akio Doi and Akio Koide. An efficient method of triangulating equi-valued surfaces by using tetrahedral cells. IEICE TRANSACTIONS on Information and Systems, 74(1):214– 224, 1991. 3 [16] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5501–5510, 2022. 3 [17] Yasutaka Furukawa and Jean Ponce. Accurate, dense, and robust multiview stereopsis. IEEE transactions on pattern analysis and machine intelligence, 32(8):1362–1376, 2010. 1, 3 [18] Dan B Goldman, Brian Curless, Aaron Hertzmann, and Steven M Seitz. Shape and spatially-varying brdfs from photometric stereo. IEEE Transactions on Pattern Analysis and Machine Intelligence, 32(6):1060–1071, 2009. 3 [19] Yuanchen Guo. Instant neural surface reconstruction, 2022. https://github.com/bennyguo/instant-nsr-pl/tree/main. 5, 7 [20] Si Hang. Tetgen, a delaunay-based quality tetrahedral mesh generator. ACM Trans. Math. Softw, 41(2):11, 2015. 1, 8 [21] Carlos Hernandez, George Vogiatzis, and Roberto Cipolla. Multiview photometric stereo. IEEE Transactions on Pattern Analysis and Machine Intelligence, 30(3):548–554, 2008. 3 [22] Toma´s Hoda ˇ n, Martin Sundermeyer, Bertram Drost, Yann ˇ Labbe, Eric Brachmann, Frank Michel, Carsten Rother, and ´ Jiˇr´ı Matas. Bop challenge 2020 on 6d object localization. In Computer Vision–ECCV 2020 Workshops: Glasgow, UK, August 23–28, 2020, Proceedings, Part II 16, pages 577–
+  - 594. Springer, 2020. 5 [23] Yixin Hu, Teseo Schneider, Bolun Wang, Denis Zorin, and Daniele Panozzo. Fast tetrahedral meshing in the wild. ACM Transactions on Graphics (TOG), 39(4):117–1, 2020. 1 [24] Yixin Hu, Qingnan Zhou, Xifeng Gao, Alec Jacobson, Denis Zorin, and Daniele Panozzo. Tetrahedral meshing in the wild. ACM Trans. Graph., 37(4):60–1, 2018. 1 [25] Michael Kazhdan, Matthew Bolitho, and Hugues Hoppe. Poisson surface reconstruction. In Proceedings of the fourth Eurographics symposium on Geometry processing, volume 7, page 0, 2006. 3 [26] Zhengfei Kuang, Fujun Luan, Sai Bi, Zhixin Shu, Gordon Wetzstein, and Kalyan Sunkavalli. Palettenerf: Palette-based appearance editing of neural radiance fields. arXiv preprint arXiv:2212.10699, 2022. 3 [27] Kiriakos N Kutulakos and Steven M Seitz. A theory of shape by space carving. International Journal of Computer Vision, 38(3):199–218, 2000. 3 [28] Samuli Laine, Janne Hellsten, Tero Karras, Yeongho Seol, Jaakko Lehtinen, and Timo Aila. Modular primitives for high-performance differentiable rendering. ACM Transactions on Graphics, 39(6), 2020. 5, 12, 13
+
+[29] Minchen Li, Zachary Ferguson, Teseo Schneider, Timothy Langlois, Denis Zorin, Daniele Panozzo, Chenfanfu Jiang, and Danny M. Kaufman. Incremental potential contact: Intersection- and inversion-free large deformation dynamics. ACM Trans. Graph. (SIGGRAPH), 39(4), 2020. 8 [30] Zhengqin Li, Zexiang Xu, Ravi Ramamoorthi, Kalyan Sunkavalli, and Manmohan Chandraker. Learning to reconstruct shape and spatially-varying reflectance from a single image. In SIGGRAPH Asia 2018, page 269. ACM, 2018. 3 [31] Yiyi Liao, Simon Donne, and Andreas Geiger. Deep marching cubes: Learning explicit surface representations. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pages 2916–2925, 2018. 3 [32] William E Lorensen and Harvey E Cline. Marching cubes: A high resolution 3d surface construction algorithm. ACM siggraph computer graphics, 21(4):163–169, 1987. 3 [33] William E Lorensen and Harvey E Cline. Marching cubes: A high resolution 3d surface construction algorithm. In Seminal graphics: pioneering efforts that shaped the field, pages 347–353. 1998. 5 [34] Fujun Luan, Shuang Zhao, Kavita Bala, and Zhao Dong. Unified shape and svbrdf recovery using differentiable monte carlo rendering. In Computer Graphics Forum, volume 40, pages 101–113. Wiley Online Library, 2021. 2 [35] Ishit Mehta, Manmohan Chandraker, and Ravi Ramamoorthi. A level set theory for neural implicit evolution under explicit flows. In European Conference on Computer Vision, pages 711–729. Springer, 2022. 3 [36] Ben Mildenhall, Pratul P Srinivasan, Rodrigo Ortiz-Cayon, Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions on Graphics (TOG), 38(4):1–14, 2019. 7, 13 [37] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021. 1, 3, 7, 13, 23 [38] Thomas Muller, Alex Evans, Christoph Schied, and Alexan- ¨ der Keller. Instant neural graphics primitives with a multiresolution hash encoding. arXiv preprint arXiv:2201.05989, 2022. 1, 3, 13, 23 [39] Jacob Munkberg, Jon Hasselgren, Tianchang Shen, Jun Gao, Wenzheng Chen, Alex Evans, Thomas Mueller, and Sanja Fidler. Extracting Triangular 3D Models, Materials, and Lighting From Images. arXiv:2111.12503, 2021. 1, 2, 3, 7 [40] Gregory M Nielson. Dual marching cubes. In IEEE visualization 2004, pages 489–496. IEEE, 2004. 3 [41] Michael Oechsle, Songyou Peng, and Andreas Geiger. Unisurf: Unifying neural implicit surfaces and radiance fields for multi-view reconstruction. In International Conference on Computer Vision (ICCV), 2021. 3 [42] Marc Pollefeys and Luc Van Gool. From images to 3d models. Communications of the ACM, 45(7):50–55, 2002. 3 [43] Edoardo Remelli, Artem Lukoianov, Stephan Richter, Benoit Guillard, Timur Bagautdinov, Pierre Baque, and Pascal Fua. Meshsdf: Differentiable iso-surface extraction. Advances in Neural Information Processing Systems, 33:22468–22478, 2020. 3 [44] Johannes Lutz Schonberger and Jan-Michael Frahm. ¨ Structure-from-motion revisited. In Proc. CVPR, 2016. 3 [45] Johannes Lutz Schonberger, Enliang Zheng, Marc Pollefeys, ¨ and Jan-Michael Frahm. Pixelwise view selection for unstructured multi-view stereo. In European Conference on Computer Vision (ECCV), 2016. 1, 3 [46] Tianchang Shen, Jun Gao, Kangxue Yin, Ming-Yu Liu, and Sanja Fidler. Deep marching tetrahedra: a hybrid representation for high-resolution 3d shape synthesis. Advances in Neural Information Processing Systems, 34:6087–6101, 2021. 2, 3, 4, 8, 12, 13 [47] Tianchang Shen, Jacob Munkberg, Jon Hasselgren, Kangxue Yin, Zian Wang, Wenzheng Chen, Zan Gojcic, Sanja Fidler, Nicholas Sharp, and Jun Gao. Flexible isosurface extraction for gradient-based mesh optimization. ACM Transactions on Graphics (TOG), 42(4):1–16, 2023. 2, 3, 8 [48] Noah Snavely, Steven M Seitz, and Richard Szeliski. Photo tourism: exploring photo collections in 3d. In ACM siggraph 2006 papers, pages 835–846. 2006. 1, 3 [49] Barbara Solenthaler and Renato Pajarola. Predictivecorrective incompressible sph. In ACM SIGGRAPH 2009 papers, pages 1–6. 2009. 1 [50] Olga Sorkine, Daniel Cohen-Or, Yaron Lipman, Marc Alexa, Christian Rossl, and H-P Seidel. Laplacian surface editing. ¨ In Proceedings of the 2004 Eurographics/ACM SIGGRAPH symposium on Geometry processing, pages 175–184, 2004. 8 [51] Alexey Stomakhin, Craig Schroeder, Lawrence Chai, Joseph Teran, and Andrew Selle. A material point method for snow simulation. ACM Transactions on Graphics (TOG), 32(4):1– 10, 2013. 1 [52] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel grid optimization: Super-fast convergence for radiance fields reconstruction. In CVPR, 2022. 3 [53] Chengzhou Tang and Ping Tan. BA-net: Dense bundle adjustment network. In Proc. ICLR, 2019. 3 [54] Jiaxiang Tang, Hang Zhou, Xiaokang Chen, Tianshu Hu, Errui Ding, Jingdong Wang, and Gang Zeng. Delicate textured mesh recovery from nerf via adaptive surface refinement. arXiv preprint arXiv:2303.02091, 2023. 1, 3, 6, 7, 13 [55] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler, Jonathan T Barron, and Pratul P Srinivasan. Ref-nerf: Structured view-dependent appearance for neural radiance fields. In 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 5481–5490. IEEE, 2022. 3 [56] Sudheendra Vijayanarasimhan, Susanna Ricco, Cordelia Schmid, Rahul Sukthankar, and Katerina Fragkiadaki. Sfmnet: Learning of structure and motion from video. arXiv preprint arXiv:1704.07804, 2017. 3 [57] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping Wang. Neus: Learning neural implicit surfaces by volume rendering for multi-view reconstruction. NeurIPS, 2021. 3
+
+[58] Yiming Wang, Qin Han, Marc Habermann, Kostas Daniilidis, Christian Theobalt, and Lingjie Liu. Neus2: Fast learning of neural implicit surfaces for multi-view reconstruction. arXiv preprint arXiv:2212.05231, 2022. 3 [59] Xinyue Wei, Minghua Liu, Zhan Ling, and Hao Su. Approximate convex decomposition for 3d meshes with collisionaware concavity and tree search. ACM Transactions on Graphics (TOG), 41(4):1–18, 2022. 1, 8 [60] Qiling Wu, Jianchao Tan, and Kun Xu. Palettenerf: Palette-based color editing for nerfs. arXiv preprint arXiv:2212.12871, 2022. 3 [61] Fanbo Xiang, Zexiang Xu, Milos Hasan, Yannick Hold-Geoffroy, Kalyan Sunkavalli, and Hao Su. Neutex: Neural texture mapping for volumetric neural rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 7119–7128, 2021. 3 [62] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu, Kalyan Sunkavalli, and Ulrich Neumann. Point-nerf: Point-based neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5438–5448, 2022. 3 [63] Yao Yao, Zixin Luo, Shiwei Li, Tian Fang, and Long Quan. MVSnet: Depth inference for unstructured multi-view stereo. In Proc. ECCV, pages 767–783, 2018. 3 [64] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. Advances in Neural Information Processing Systems, 34:4805–4815, 2021. 3 [65] Lior Yariv, Peter Hedman, Christian Reiser, Dor Verbin, Pratul P Srinivasan, Richard Szeliski, Jonathan T Barron, and Ben Mildenhall. Bakedsdf: Meshing neural sdfs for realtime view synthesis. arXiv preprint arXiv:2302.14859, 2023. 3, 7 [66] Yu-Jie Yuan, Yang-Tian Sun, Yu-Kun Lai, Yuewen Ma, Rongfei Jia, and Lin Gao. Nerf-editing: geometry editing of neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 18353–18364, 2022. 3 [67] Kai Zhang, Nick Kolkin, Sai Bi, Fujun Luan, Zexiang Xu, Eli Shechtman, and Noah Snavely. Arf: Artistic radiance fields. In European Conference on Computer Vision, pages 717–733. Springer, 2022. 3 [68] Kai Zhang, Fujun Luan, Zhengqi Li, and Noah Snavely. Iron: Inverse rendering by optimizing neural sdfs and materials from photometric images. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5565–5574, 2022. 3 [69] Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and Noah Snavely. Physg: Inverse rendering with spherical gaussians for physics-based material editing and relighting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5453–5462, 2021. 3 [70] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen Koltun. Nerf++: Analyzing and improving neural radiance fields. arXiv preprint arXiv:2010.07492, 2020. 7 [71] Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T Freeman, and Jonathan T Barron. Nerfactor: Neural factorization of shape and reflectance under an unknown illumination. ACM Transactions on Graphics (TOG), 40(6):1–18, 2021. 3 [72] Yuanqing Zhang, Jiaming Sun, Xingyi He, Huan Fu, Rongfei Jia, and Xiaowei Zhou. Modeling indirect illumination for inverse rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 18643–18652, 2022. 3
+
+#### A. Prelimiaries
+
+#### A.1. Watertight and Manifold Meshes
+
+Watertight. If all edges are shared by exactly two faces, then the mesh is watertight.
+
+Manifold. A manifold mesh must meet the following properties: (1) all edges must connect at most two faces; (2) each edge is incident to one or two faces and faces incident to a vertex must form a closed or open fan; (3) the faces must not self-intersect with each other.
+
+#### A.2. Volumetric Neural Fields
+
+Recent neural field representations utilize differentiable volume rendering for their reconstruction and leads to high visual quality. While our approach can generally support any neural field models, we apply TensoRF and NeuS in our paper. We now briefly cover the preliminaries of the method.
+
+The original NeRF uses pure MLPs, which make it slow to train and incapable of modeling details accurately. TensoRF [7] decodes the radiance field from a volume of features, and this feature volume is further factorized into factors leveraging CANDECOMP/PARAFAC decomposition or vector-matrix decomposition. In this work, we are interested in the vector-matrix decomposition, which factorizes the 4D feature volume as the sum of three outer products between a matrix and a vector.
+
+### A.3. Differentiable Rasterization
+
+Differentiable rasterization refers to methods that optimize inputs of rasterization-based rendering pipelines. In this work, we are interested in nvdiffrast [28], which consists of 4 stages, rasterization, interpolation, texture lookup, and anti-aliasing. We mainly use the rasterization stage, which maps triangles from 3D space onto pixel space, and the interpolation stage, which provides 3D coordinates of pixels to query the appearance network.
+
+To ensure the mesh optimized by differentiable rasterization is a watertight manifold, we need to apply a meshing algorithm that generates such meshes. In this work we propose DiffMC, which divides the 3D space into a deformable grid and takes a scalar field (often SDF) defined on its vertices as input. The algorithm turns the scalar field into an explicit mesh by a differentiable marching cubes algorithm.
+
+# B. Implementation Details
+
+For the first stage, we directly build on off-the-shelf volume rendering models. Specifically, for TensoRF, we use the official implementation. We compare two of our models for our main results: a high-quality one, labeled with Ours, which uses the TensoRF (VM) with 48-dim input features and 12-dim output features, plus a three-layer MLP decoder; a fast one, labeled with Ours-F that uses the TensoRF (VM) with 48-dim input features and output 27-dim SH coefficients.
+
+To adapt the density values for DiffMC, we transform these values into opacity using the formula: α = 1 − exp(−σ · δ), where σ represents density, α denotes opacity, and δ is the ray step size used in volume rendering. We employ a threshold t to control the surface's position relative to opacity and use the value α − t for mesh extraction.
+
+We train all the stage 2 and 3 models with batch size of 2 for 10k iterations. We use DiffMC with a grid resolution of 256 for all results. Except when comparing with nvdiffrec, we use the default resolution of 128 as nvdiffrec's performance drops on higher resolutions, possibly due to the decreased batch size and harder optimization.
+
+# C. Differentiable Marching Cubes (DiffMC)
+
+
+
+
+
+Figure 7. 2D example illustrating why DMTet tends to introduce more artifacts when extracting meshes from density fields while DiffMC can generate much smoother surfaces.
+
+In this section, we present additional results for DiffMC. These include a 2D example showing why DMTet tends to introduce more artifacts on density fields than DiffMC, an ablation study that demonstrates how grid resolution influences visual fidelity and a comparison highlighting the effectiveness of our method in mesh reconstruction when compared to DMTet [46].
+
+First, we illustrate how DMTet and DiffMC generate surfaces with a 2D schematic diagram in Fig. 7. In 2D, Marching Cubes is analogous to "Marching Squares" and Marching Tetrahedra is analogous to "Marching Triangles". Given a surface (shown as a green vertical line) passing through the square/triangle grids (shown as black lines), suppose we have recorded the perfect signed distance function (SDF) values of the surface on the grid nodes, as shown in the two leftmost figures, regardless of how the algorithm divides the space, both methods exactly recover the ground truth surface through linear interpolation.
+
+However, in practice, perfect SDF values are not easily obtainable, especially when the input comes from a volumetric density representation. Here, we simulate an imperfect SDF by applying a non-linear transformation f(s) = exp(s) − 1 − t to the SDF values. Under this scenario, DiffMC can still generate a flat surface (red line in the second figure from the right), albeit with a slight offset t which can be rectified by introducing an adjustable threshold to the grid values. In contrast, DMTet produces zigzag lines (red line in the rightmost figure) due to varying space divisions and cannot be easily fixed.
+
+As we transition from lower to higher resolutions, we observe a consistent improvement in rendering quality, ultimately converging as the resolution reaches 400, as demonstrated in Tab. 6. Moreover, as depicted in Fig. 8, a higherresolution DiffMC is notably more adept at recovering intricate structures, such as the ropes on the ship.
+
+Next, we highlight the advantages of our method in extracting meshes from density fields by applying both our approach and DMTet [46] to a set of pre-trained density networks, including TensoRF [7], instant-NGP [38] and vanilla NeRF [37]. By comparing the visible surface agreemen (VSA) of the reconstructed meshes, as illustrated in Fig. 9, we observe a consistent enhancement brought about by DiffMC across all methods. We also conduct a comparison between our DiffMC and DMTet in our pipeline, noting a significant improvement in surface smoothness with our method, which effectively mitigates most of the artifacts resulting from the non-linearity of the density field.
+
+# D. Mip-NeRF 360 Dataset
+
+We evaluate our method on unbounded real scenes in the Mip-NeRF 360 dataset [2]. To deal with the unbounded background, we follow the contraction function proposed in [2] to warp the far objects from their original space, t-space, into the contracted space s-space (a sphere with a radius of 1.2 in our setup). When generating the mesh, we apply DiffMC on the geometry network within t-space so that the mesh can be watertight manifold, otherwise the contraction may break the property. After getting the points on the mesh surface, we contract the points back to s-space to compute the color. Within the t-space, we utilize multiple resolutions for the entire scene, with a higher resolution (340) for the foreground and a lower resolution (56) for the background. To represent the distant background that falls outside the [-4, 4] box range, we employ a skybox. We use the antialiasing of nvdiffrast [28] for this dataset.
+
+Our method generates watertight manifold foreground meshes. Therefore, we can apply simulation algorithms on the foreground objects, as shown in Fig. 13, where we apply soft-body simulation on the flower and use a solid ball to hit it.
+
+In Tab. 7, we compared our method with others. Some mesh rendering methods, such as MobileNeRF [10] and nerf2mesh [54], provided results for selected scenes, while our method worked effectively on all unbounded scenes, particularly excelling in indoor scenes.
+
+### E. LLFF dataset
+
+We evaluate our method on forward-facing scenes on LLFF dataset [36]. Following [7], we contract the whole scene into NDC space to do the reconstruction and mesh extraction. On this dataset, we use DiffMC with resolution of 375. We use 9× sample per-pixel SSAA for this dataset. Tab. 8 and Fig. 15 shows the quantitative and qualitative results. Fig. 16 shows the reconstructed mesh of the scenes.
+
+We put our method to the test with forward-facing scenes from the LLFF dataset [36]. In line with [7], we condensed the entire scene into NDC space for reconstruction and mesh extraction. For this dataset, we employed DiffMC with a resolution of 375. You can find both the quantitative results in Tab. 8 and the qualitative results in Fig. 15. Additionally, Fig. 16 showcases the reconstructed mesh for these scenes.
+
+# F. NeRF-Synthetic Dataset
+
+We show the complete quantitative comparison between our method and the previous works on the NeRF-Synthetic dataset in Tab. 9 and the complete visual comparison in Fig. 18.
+
+### G. Mesh Quality
+
+We show the mesh quality comparison in Fig.19, where except for Mobile-NeRF [10] and nerf2mesh [54], all the meshes are watertight manifold. We show the VSAtolerance curves for the scenes in NeRF-Synthetic in Fig. 17.
+
+# H. Network Architecture
+
+In this section, we describe the network architecture used in the experiments. Our proposed method has two versions, a high-quality one and a fast one, and they share the same geometry network architecture but with different appearance networks. The geometry network is the same as TensoRF [7] VM-192 in its paper. The appearance network is from TensoRF and we show the two versions below respectively.
+
+High-quality. We use the Vector-Matrix (VM) decomposition in TensoRF, which factorizes a tensor into multiple vectors and matrices along the axes as in Equation 3 of the TensoRF paper. The feature Gc(x) generated by VM decomposition is concatenated with the viewing direction d and put into the MLP decoder S for the output color c:
+
+$$c = S(\mathcal{G}_c(\mathbf{x}), d), \quad (3)$$
+
+We also apply frequency encodings (with Sin and Cos functions) on both the features Gc(x) and the viewing direction
+
+Table 6. The influence of DiffMC resolution to rendering quality. The visual fidelity consistently improves as the resolution increases, eventually reaching a plateau when it reaches 400.
+
+| DiffMC | reso 32 | 64    | 100   | 128   | 200   | 256   | 300   | 384   | 400   |
+|--------|---------|-------|-------|-------|-------|-------|-------|-------|-------|
+| PSNR   | 23.12   | 26.83 | 28.64 | 29.46 | 30.8  | 31.19 | 31.34 | 31.53 | 31.54 |
+| SSIM   | 0.894   | 0.925 | 0.94  | 0.946 | 0.952 | 0.954 | 0.955 | 0.956 | 0.956 |
+| LPIPS  | 0.121   | 0.089 | 0.075 | 0.069 | 0.061 | 0.059 | 0.057 | 0.056 | 0.056 |
+
+
+
+Figure 8. The influence of DiffMC resolution to rendeirng quality. We have noticed that lower resolutions can capture most of the coarse structures but tend to lose finer details, such as the drum legs and the ropes on the ship. These finer details become more discernible as the resolution increases.
+
+Table 7. Quantitative results on each scene in the Mip-NeRF 360 dataset.
+
+|            | PSNR       | Bicycle | Garden | Stump | Flowers | Treehill | Bonsai | Counter | Kitchen | Room  | Mean  |
+|------------|------------|---------|--------|-------|---------|----------|--------|---------|---------|-------|-------|
+| MobileNeRF |            | 21.70   | 23.54  | 23.95 | 18.86   | 21.72    |        |         |         |       |       |
+| nerf2mesh  |            | 22.16   | 22.39  | 22.53 |         |          |        |         |         |       |       |
+| BakedSDF   |            |         |        |       |         |          |        |         |         |       | 24.51 |
+| Ours       | (HQ-m)     | 20.16   | 23.36  | 22.27 | 18.49   | 21.07    | 26.64  | 24.83   | 24.97   | 26.75 | 23.17 |
+| Ours       | (HQ) SSIM  | 21.38   | 24.90  | 23.51 | 18.82   | 21.64    | 28.61  | 26.31   | 26.63   | 28.95 | 24.53 |
+| MobileNeRF |            | 0.426   | 0.599  | 0.556 | 0.321   | 0.450    |        |         |         |       |       |
+| nerf2mesh  |            | 0.470   | 0.500  | 0.508 |         |          |        |         |         |       |       |
+| BakedSDF   |            |         |        |       |         |          |        |         |         |       | 0.697 |
+| Ours       | (HQ-m)     | 0.382   | 0.616  | 0.492 | 0.334   | 0.447    | 0.835  | 0.746   | 0.644   | 0.815 | 0.590 |
+| Ours       | (HQ) LPIPS | 0.469   | 0.746  | 0.589 | 0.366   | 0.494    | 0.888  | 0.808   | 0.764   | 0.872 | 0.666 |
+| MobileNeRF |            | 0.513   | 0.358  | 0.430 | 0.526   | 0.522    |        |         |         |       |       |
+| nerf2mesh  |            | 0.510   | 0.434  | 0.490 |         |          |        |         |         |       |       |
+| BakedSDF   |            |         |        |       |         |          |        |         |         |       | 0.309 |
+| Ours       | (HQ-m)     | 0.561   | 0.372  | 0.475 | 0.553   | 0.560    | 0.268  | 0.346   | 0.380   | 0.348 | 0.429 |
+| Ours       | (HQ)       | 0.488   | 0.252  | 0.413 | 0.520   | 0.506    | 0.201  | 0.270   | 0.275   | 0.274 | 0.355 |
+
+d. We use a 3003 dense grid to represent the scenes in NeRF-Synthetic and use 2 frequencies for features and 6 frequencies for the viewing direction. The detailed network architecture is shown in Tab. 10. As for Mip-NeRF 360 and LLFF datasets we use a 5123 dense grid to represent the unbounded indoor scenes and do not use frequency encodings.
+
+Fast. The fast version shares similar architecture and positional encoding setups with the high-quality version before the MLP decoder but uses the spherical harmonics (SH) function as Gc instead, as shown in Tab. 10.
+
+Quality Speed Trade-off We also show the model rendering quality and speed after deployment in Tab. 11.
+
+# I. Visualization of ablation Study on Stage 1
+
+We visualize the rendering results of models using different initialization strategies during stage 1, as shown in Fig. 14. The comparison shows that employing highresolution DiffMC grids without proper geometry initial-
+
+
+
+Figure 9. DMTet vs DiffMC on extracting meshes from pre-trained density fields. Across all three methods, DiffMC consistently outperforms DMTet in terms of mesh quality.
+
+
+
+Figure 10. A mesh surface comparison of Ours between using DiffMC and DMTet reveals that DiffMC can create significantly smoother surfaces. This improvement is not limited to axis-aligned surfaces; it consistently outperforms DMTet on various rounded surfaces as well.
+
+ization can lead the mesh optimization process to become stuck in suboptimal geometric configurations.
+
+# J. Ablation Study on Appearance Network
+
+We validate the necessity of optimizing the meshes in Tab. 12. To achieve this, we compare against baselines that keep the meshes from Stage 1 fixed and only optimize the appearance. We also provide the results using the GT mesh in combination with the TensorF appearance network as a reference, representing the upper limit of texture optimization methods. As we can see from the results, TensoRF appearance network achieves the best performance. All appearance networks were trained from scratch for fair comparison.
+
+
+
+Figure 11. Mip-NeRF 360 renderings.
+
+
+
+
+
+
+
+Figure 12. Comparison between 8x MSAA and no AA. (a) Our deployed high-quality model without AA (FPS: 146, PSNR: 31.26). (c) the same model with 8× MSAA (FPS: 93, PSNR: 33.01). (b) and (d) show the error maps of (a) and (c) respectively. The visual quality at edges is significantly improved by MSAA with a rela-
+
+tively small performance hit. Figure 13. Soft-body simulation on the foreground watertight manifold mesh. The solid ball hits the flower and makes it deform. See the attached video.
+
+
+
+
+
+Figure 14. Visual comparison of Ours w/ or w/o geometry and texture initialization. when both initializations are omitted, the mesh optimization process can easily become trapped in local minima, as illustrated in the first left image. Although texture initialization can provide some assistance to the optimization process, it still falls short of achieving satisfactory geometric quality.
+
+Table 8. Quantitative results on each scene in the LLFF dataset.
+
+
+
+|            | PSNR       | Fern  | Flower | Fortress | Horns | Leaves | Orchids | Room  | Trex  | Mean  |
+|------------|------------|-------|--------|----------|-------|--------|---------|-------|-------|-------|
+| MobileNeRF |            | 24.59 | 27.05  | 30.82    | 27.09 | 20.54  | 19.66   | 31.28 | 26.26 | 25.91 |
+| nerf2mesh  |            | 23.94 | 26.48  | 28.02    | 26.25 | 19.22  | 19.08   | 29.24 | 25.80 | 24.75 |
+| Ours       | (F-m)      | 23.72 | 27.05  | 30.88    | 27.01 | 19.68  | 18.43   | 30.33 | 25.03 | 25.27 |
+| Ours       | (F)        | 24.05 | 27.22  | 30.98    | 27.09 | 19.92  | 18.91   | 30.63 | 25.58 | 25.55 |
+| Ours       | (HQ-m)     | 24.19 | 26.99  | 31.18    | 27.35 | 20.49  | 19.68   | 30.79 | 26.61 | 25.91 |
+| Ours       | (HQ) SSIM  | 24.54 | 27.08  | 31.32    | 27.49 | 20.59  | 19.73   | 31.11 | 27.16 | 26.13 |
+| MobileNeRF |            | 0.808 | 0.839  | 0.891    | 0.864 | 0.711  | 0.647   | 0.943 | 0.900 | 0.825 |
+| nerf2mesh  |            | 0.751 | 0.879  | 0.765    | 0.819 | 0.644  | 0.602   | 0.914 | 0.868 | 0.780 |
+| Ours       | (F-m)      | 0.757 | 0.842  | 0.895    | 0.864 | 0.681  | 0.601   | 0.923 | 0.865 | 0.803 |
+| Ours       | (F)        | 0.772 | 0.848  | 0.898    | 0.866 | 0.693  | 0.622   | 0.926 | 0.872 | 0.812 |
+| Ours       | (HQ-m)     | 0.789 | 0.852  | 0.902    | 0.877 | 0.739  | 0.677   | 0.930 | 0.896 | 0.833 |
+| Ours       | (HQ) LPIPS | 0.801 | 0.856  | 0.902    | 0.881 | 0.745  | 0.681   | 0.933 | 0.904 | 0.838 |
+| MobileNeRF |            | 0.202 | 0.163  | 0.115    | 0.169 | 0.245  | 0.277   | 0.143 | 0.147 | 0.183 |
+| nerf2mesh  |            | 0.303 | 0.204  | 0.270    | 0.260 | 0.321  | 0.314   | 0.246 | 0.215 | 0.267 |
+| Ours       | (F-m)      | 0.274 | 0.181  | 0.158    | 0.196 | 0.254  | 0.278   | 0.208 | 0.256 | 0.226 |
+| Ours       | (F)        | 0.258 | 0.175  | 0.152    | 0.191 | 0.244  | 0.260   | 0.203 | 0.247 | 0.216 |
+| Ours       | (HQ-m)     | 0.245 | 0.164  | 0.137    | 0.171 | 0.202  | 0.234   | 0.188 | 0.216 | 0.195 |
+| Ours       | (HQ)       | 0.228 | 0.160  | 0.136    | 0.165 | 0.198  | 0.226   | 0.181 | 0.205 | 0.187 |
+
+
+
+Figure 15. LLFF renderings.
+
+
+
+Figure 16. LLFF mesh.
+
+Table 9. Quantitative results on each scene in the NeRF-Synthetic dataset.
+
+
+
+|            | PSNR         | Chair | Drums | Ficus | Hotdog | Lego  | Materials | Mic   | Ship  | Mean  |
+|------------|--------------|-------|-------|-------|--------|-------|-----------|-------|-------|-------|
+| MobileNeRF |              | 34.09 | 25.02 | 30.20 | 35.46  | 34.18 | 26.72     | 32.48 | 29.06 | 30.90 |
+| nvdiffrec  |              | 31.00 | 24.39 | 29.86 | 33.27  | 29.61 | 26.64     | 30.37 | 26.05 | 28.90 |
+| TensoRF    | (DT)         | 27.72 | 22.20 | 25.66 | 28.85  | 25.86 | 22.12     | 26.13 | 23.67 | 25.28 |
+| NeuS       | (DT)         | 31.80 | 22.52 | 23.44 | 33.86  | 28.07 | 26.68     | 31.42 | 25.02 | 27.85 |
+| nerf2mesh  |              | 31.93 | 24.80 | 29.81 | 34.11  | 32.07 | 25.45     | 31.25 | 28.69 | 29.76 |
+| nvdiffrec  | (m)          | 31.24 | 23.17 | 25.11 | 32.67  | 28.44 | 26.33     | 29.39 | 24.82 | 27.65 |
+| Ours       | (F)          | 33.82 | 25.25 | 31.28 | 35.43  | 34.40 | 26.83     | 32.37 | 28.13 | 30.94 |
+| Ours       | (HQ)         | 34.46 | 25.42 | 31.83 | 36.45  | 35.40 | 27.38     | 33.46 | 28.77 | 31.65 |
+| Ours       | (F-m)        | 33.68 | 24.98 | 30.23 | 35.10  | 33.39 | 26.61     | 32.21 | 27.54 | 30.47 |
+| Ours       | (HQ-m) SSIM  | 34.37 | 25.17 | 30.64 | 36.35  | 34.28 | 27.22     | 33.35 | 28.12 | 31.19 |
+| MobileNeRF |              | 0.978 | 0.927 | 0.965 | 0.973  | 0.975 | 0.913     | 0.979 | 0.867 | 0.947 |
+| nvdiffrec  |              | 0.965 | 0.921 | 0.969 | 0.973  | 0.952 | 0.924     | 0.975 | 0.827 | 0.938 |
+| TensoRF    | (DT)         | 0.922 | 0.872 | 0.933 | 0.916  | 0.893 | 0.835     | 0.936 | 0.780 | 0.886 |
+| NeuS       | (DT)         | 0.975 | 0.907 | 0.934 | 0.975  | 0.949 | 0.921     | 0.981 | 0.840 | 0.935 |
+| nerf2mesh  |              | 0.964 | 0.927 | 0.967 | 0.970  | 0.957 | 0.896     | 0.974 | 0.865 | 0.940 |
+| nvdiffrec  | (m)          | 0.970 | 0.915 | 0.937 | 0.973  | 0.943 | 0.927     | 0.975 | 0.820 | 0.932 |
+| Ours       | (F)          | 0.977 | 0.935 | 0.974 | 0.978  | 0.978 | 0.925     | 0.981 | 0.865 | 0.952 |
+| Ours       | (HQ)         | 0.981 | 0.939 | 0.977 | 0.981  | 0.982 | 0.930     | 0.986 | 0.877 | 0.956 |
+| Ours       | (F-m)        | 0.976 | 0.932 | 0.970 | 0.978  | 0.976 | 0.923     | 0.980 | 0.859 | 0.949 |
+| Ours       | (HQ-m) LPIPS | 0.981 | 0.935 | 0.973 | 0.981  | 0.979 | 0.928     | 0.985 | 0.871 | 0.954 |
+| MobileNeRF |              | 0.025 | 0.077 | 0.048 | 0.050  | 0.025 | 0.092     | 0.032 | 0.145 | 0.062 |
+| nvdiffrec  |              | 0.023 | 0.086 | 0.032 | 0.064  | 0.047 | 0.111     | 0.031 | 0.188 | 0.073 |
+| TensoRF    | (DT)         | 0.076 | 0.130 | 0.070 | 0.113  | 0.090 | 0.146     | 0.070 | 0.230 | 0.115 |
+| NeuS       | (DT)         | 0.033 | 0.101 | 0.065 | 0.041  | 0.056 | 0.084     | 0.021 | 0.191 | 0.074 |
+| nerf2mesh  |              | 0.046 | 0.084 | 0.045 | 0.060  | 0.047 | 0.107     | 0.042 | 0.145 | 0.072 |
+| nvdiffrec  | (m)          | 0.020 | 0.104 | 0.057 | 0.068  | 0.059 | 0.116     | 0.028 | 0.220 | 0.084 |
+| Ours       | (F)          | 0.036 | 0.073 | 0.035 | 0.041  | 0.027 | 0.089     | 0.024 | 0.167 | 0.061 |
+| Ours       | (HQ)         | 0.026 | 0.068 | 0.033 | 0.035  | 0.023 | 0.085     | 0.017 | 0.159 | 0.056 |
+| Ours       | (F-m)        | 0.037 | 0.079 | 0.040 | 0.043  | 0.031 | 0.091     | 0.024 | 0.174 | 0.065 |
+| Ours       | (HQ-m)       | 0.027 | 0.074 | 0.038 | 0.036  | 0.027 | 0.086     | 0.017 | 0.164 | 0.059 |
+
+
+
+| Name  |        |    |        | High-Quality  |     |             |   |      |           |       | Fast      |             |   |      |
+|-------|--------|----|--------|---------------|-----|-------------|---|------|-----------|-------|-----------|-------------|---|------|
+| app   | matrix | xy | Param  | (48           | x   | 300         | x | 300) | Param     | (48   | x         | 300         | x | 300) |
+| app   | matrix | yz | Param  | (48           | x   | 300         | x | 300) | Param     | (48   | x         | 300         | x | 300) |
+| app   | matrix | zx | Param  | (48           | x   | 300         | x | 300) | Param     | (48   | x         | 300         | x | 300) |
+| app   | vector | x  | Param  | (48           | x   | 300         | x | 1)   | Param     | (48   | x         | 300         | x | 1)   |
+| app   | vector | y  | Param  | (48           | x   | 300         | x | 1)   | Param     | (48   | x         | 300         | x | 1)   |
+| app   | vector | z  | Param  | (48           | x   | 300         | x | 1)   | Param     | (48   | x         | 300         | x | 1)   |
+| basis | mat    |    | Linear | (144,         | 12, | bias=False) |   |      | Linear    | (144, | 27,       | bias=False) |   |      |
+| last  | layer  |    | Linear | (99,          | 64, | bias=True)  |   |      |           |       |           |             |   |      |
+|       |        |    | ReLU   | (inlace=True) |     |             |   |      |           |       |           |             |   |      |
+|       |        |    | Linear | (64,          | 64, | bias=True)  |   |      | Spherical |       | Harmonics |             |   |      |
+|       |        |    | ReLU   | (inlace=True) |     |             |   |      |           |       |           |             |   |      |
+|       |        |    | Linear | (64,          | 3,  | bias=True)  |   |      |           |       |           |             |   |      |
+
+
+
+Figure 17. VSA plots for different misalignment tolerances.
+
+
+
+Figure 18. NeRF-Synthetic renderings.
+
+
+
+Figure 19. NeRF-Synthetic mesh.
+
+Table 11. Trade-off between rendering speed and quality with different appearance network capacity. 8× MS: 8× sample per-pixel MSAA, 16× SS: 16× sample per-pixel SSAA.
+
+| Params   |       | AA   | PSNR  | ↑ SSIM | ↑ LPIPS | ↓ FPS |
+|----------|-------|------|-------|--------|---------|-------|
+| #feat=48 | 8     | × MS | 30.34 | 0.949  | 0.062   | 93    |
+| mlp=3 ×  | 64 16 | × SS | 31.16 | 0.954  | 0.057   | 26    |
+| #feat=48 | 8     | × MS | 29.73 | 0.942  | 0.071   | 322   |
+| mlp=3 ×  | 16 16 | × SS | 30.49 | 0.947  | 0.064   | 86    |
+| #feat=12 | 8     | × MS | 30.11 | 0.946  | 0.066   | 98    |
+| mlp=3 ×  | 64 16 | × SS | 30.90 | 0.951  | 0.060   | 27    |
+| #feat=12 | 8     | × MS | 29.55 | 0.941  | 0.073   | 585   |
+| mlp=3 ×  | 16 16 | × SS | 30.28 | 0.946  | 0.066   | 163   |
+| #feat=48 | 8     | × MS | 29.73 | 0.943  | 0.068   | 312   |
+| SH       | 16    | × SS | 30.44 | 0.949  | 0.063   | 82    |
+
+Table 12. Ablation study for Stage 2. Except for the first row using GT mesh, the rest experiments are conducted on fixed meshes extracted from pre-trained TensoRF by Marching Cubes. MLP: vanilla NeRF [37] representation; Hash: HashGrid used in iNGP [38]; SH: Spherical Harmonics; TF: TensoRF-VM.
+
+| Geo.   | +    | App. | PSNR  | ↑ SSIM | ↑ LPIPS ↓ |
+|--------|------|------|-------|--------|-----------|
+| GT     | + TF |      | 31.78 | 0.958  | 0.053     |
+| TFmesh | +    | MLP  | 26.28 | 0.915  | 0.203     |
+| TFmesh | +    | Hash | 26.62 | 0.921  | 0.090     |
+| TFmesh | +    | SH   | 26.48 | 0.909  | 0.103     |
+| TFmesh | +    | TF   | 27.00 | 0.929  | 0.081     |

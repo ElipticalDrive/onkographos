@@ -1,0 +1,60 @@
+# Differentiable Marching Tetrahedrons (DMTet)
+
+Also called: DMTet, Differentiable Marching Tetrahedra Extraction
+
+## Overview
+Differentiable Marching Tetrahedrons (DMTet) is a surface extraction method that generates a triangle mesh from a learned Signed Distance Field (SDF) by applying the Marching Tetrahedra algorithm on an adaptive tetrahedral grid [S1][S2, unofficial]. It is distinguished from its sibling [Mesh Extraction from NeRF](12441-mesh-extraction-from-nerf.md), which typically relies on Marching Cubes (MC) on fixed grids, by producing meshes with lower Chamfer distance, fewer holes, and reduced noise or floaters, even when compared to MC at higher uniform resolutions [S1].
+
+## How it works
+**Inputs:**
+1.  A learned SDF field $S(\mathbf{x})$ defined over a 3D domain, typically output by a neural network [S1][S2, unofficial].
+2.  An adaptive tetrahedral grid covering the domain of interest [S1].
+
+**Outputs:**
+1.  A triangle mesh representing the zero-level set ($S(\mathbf{x}) = 0$) of the SDF [S1][S2, unofficial].
+
+**Data Structures:**
+*   **Tetrahedral Grid:** A collection of tetrahedra. The grid is adaptive, meaning cell density varies based on surface complexity or error metrics [S1].
+*   **SDF Values:** Scalar values $S_i$ associated with each vertex $i$ of the tetrahedra [S1][S2, unofficial].
+
+**Algorithm Steps:**
+1.  **Grid Initialization:** Construct or refine the tetrahedral grid adaptively around the region where the SDF is non-trivial [S1].
+2.  **SDF Evaluation:** Evaluate the SDF $S(\mathbf{x})$ at the vertices of each tetrahedron in the grid [S1][S2, unofficial].
+3.  **Tetrahedron Classification:** For each tetrahedron, determine the intersection of the zero-level set with its edges. A tetrahedron intersects the surface if its vertices have mixed signs (some positive, some negative) [S1][S2, unofficial].
+4.  **Vertex Interpolation:** For each intersected edge, compute the precise intersection point $\mathbf{p}$ where $S(\mathbf{p}) = 0$ using linear interpolation between the edge's endpoints $\mathbf{v}_a$ and $\mathbf{v}_b$ with values $S_a$ and $S_b$:
+    $$ \mathbf{p} = \mathbf{v}_a + \frac{0 - S_a}{S_b - S_a} (\mathbf{v}_b - \mathbf{v}_a) $$
+    [S1][S2, unofficial]
+5.  **Triangle Generation:** Connect the intersection points within each tetrahedron to form triangles. The connectivity pattern depends on the specific configuration of signs at the tetrahedron's vertices [S1][S2, unofficial].
+6.  **Differentiability:** The entire process is differentiable with respect to the SDF values at the grid vertices. This allows gradients to flow from the mesh geometry back to the neural network parameters during training [S1][S2, unofficial].
+
+**Parameters:**
+*   Loss weights for training (e.g., $\lambda_{\text{eik}} = 0.01$) are used to regularize the SDF prior to extraction, ensuring smoothness and adherence to the Eikonal equation [S1].
+*   Typical values for other loss weights (e.g., curvature) are not specified in the sources [S1].
+
+**Edge Cases and Pitfalls:**
+*   **SDF Initialization:** A robust initial estimate of the SDF is required to prevent mismatches between the extracted mesh and other components (like a Neural Radiance Cache) [S2, unofficial].
+*   **Thin Structures:** Unlike depth fusion methods, DMTet on an adaptive grid handles thin structures better, as it extracts the zero level set directly from the SDF rather than fusing noisy depth maps [S1].
+
+## Subtopics
+
+### Adaptive Tetrahedral Grids
+A grid refinement strategy that increases resolution only where necessary, leading to more compact meshes compared to fixed-resolution grids [S1].
+
+### Marching Cubes (MC)
+The traditional alternative used in [Mesh Extraction from NeRF](12441-mesh-extraction-from-nerf.md). MC on fixed grids produces noisier surfaces with holes and floaters compared to DMTet [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** On the Tanks and Temples and Mip-NeRF 360 datasets, DMTet yields lower Chamfer distance and more compact meshes than Marching Cubes on fixed-resolution grids, even when MC uses higher uniform resolution [S1].
+*   **Strengths:** Produces cleaner surfaces with fewer artifacts (holes, floaters) and handles thin structures better than depth fusion methods [S1]. Differentiability allows end-to-end optimization of geometry and appearance [S1][S2, unofficial].
+*   **Limitations:** Requires a well-initialized SDF to avoid mismatches with other rendering components [S2, unofficial].
+*   **When to use:** When high-quality, watertight mesh extraction from a learned SDF is needed during training, especially for scenes with complex or thin geometry [S1][S2, unofficial].
+*   **When not to use:** When a fixed-resolution grid is already sufficient and differentiability is not required, or when the SDF is poorly initialized [S2, unofficial].
+
+## Background
+DMTet was introduced by Shen et al. in 2021 [S2, unofficial]. It builds upon the Marching Tetrahedra algorithm by Treece et al. (1999) [S1][S2, unofficial]. The method is used in frameworks like JOC to generate triangle meshes initialized by the SDF from a neural field, enabling joint optimization of geometry, material, and light [S2, unofficial]. It addresses the limitations of Marching Cubes, which can produce noisy surfaces and artifacts, by leveraging the topological advantages of tetrahedral grids [S1].
+
+## Sources
+[S1] Distance Field Rasterization for End-to-End Mesh Reconstruction, https://doi.org/10.1145/3799902.3811155, fetched 2026-10-26
+[S2] Joint Optimization of Triangle Mesh, Material, and Light from Neural Fields with Neural Radiance Cache, https://doi.org/10.48550/arxiv.2305.16800, fetched 2026-10-26 (unofficial)

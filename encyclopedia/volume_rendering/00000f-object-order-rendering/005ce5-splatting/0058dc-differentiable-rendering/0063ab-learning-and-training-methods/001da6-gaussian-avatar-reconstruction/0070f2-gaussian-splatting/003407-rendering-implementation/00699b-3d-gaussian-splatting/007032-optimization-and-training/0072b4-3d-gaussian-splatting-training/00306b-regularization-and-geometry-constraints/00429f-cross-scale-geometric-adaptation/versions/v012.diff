@@ -1,0 +1,183 @@
+--- v011.md
++++ v012.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Training views $i$ and $j$ (where $j$ is a neighboring or novel view), camera intrinsics $K_i, K_j$, camera poses $(R_i, t_i), (R_j, t_j)$, RGB maps $C_i, C_j$, and a multi-scale voxel representation with render depths $D_{il}(p_i)$ at scale $l$ for pixel $p_i$.
+-*   **Outputs:** Geometric adaptation loss $\mathcal{L}_{geo}$ and the selected pseudo-ground truth depth $D'(r_{train})$ for each training ray $r_{train}$.
++*   **Inputs:** Training views $i$ and $j$ (where $j$ is a neighboring or novel view), camera intrinsics $K_i, K_j$, camera poses $(R_i, t_i), (R_j, t_j)$, RGB maps $C_i, C_j$, and a multi-scale voxel representation with render depths $D_{il}(p_i)$ at scale $l$ for pixel $p_i$ [S1].
++*   **Outputs:** Geometric adaptation loss $\mathcal{L}_{geo}$ and the selected pseudo-ground truth depth $D'(r_{train})$ for each training ray $r_{train}$ [S1].
+ 
+ **Data Structures:**
+-*   **Multi-scale Voxels:** A hierarchy of voxel grids at low, medium, and high resolutions. The method assumes a shared or weight-sharing voxel structure across scales to capture varying scene frequencies [S1].
+-*   **Ray Data:** For each training ray $r_{train}$, the system stores the 2D pixel coordinate $p_i$ in frame $i$.
++*   **Multi-scale Voxels:** A hierarchy of voxel grids at low, medium, and high resolutions, often using weight-sharing across scales to capture varying scene frequencies [S1].
++*   **Ray Data:** For each training ray $r_{train}$, the system stores the 2D pixel coordinate $p_i$ in frame $i$ [S1].
+ 
+ **Numbered Steps:**
+@@ -44,13 +44,12 @@
+     D'(r_{train}) = \arg \min_l (e_l(r_{train}))
+     $$
+-7.  **Compute Loss:** Calculate the geometric adaptation loss $\mathcal{L}_{geo}$ as the Mean Squared Error (MSE) between the rendered depth $D_l(r_{train})$ and the selected pseudo-ground truth depth $D'(r_{train})$ across all training rays $R_{train}$:
++7.  **Compute Loss:** Calculate the geometric adaptation loss $\mathcal{L}_{geo}$ as the Mean Squared Error (MSE) between the rendered depth $\hat{D}_l(r_{train})$ and the selected pseudo-ground truth depth $D'(r_{train})$ across all scales $l$ for each training ray:
+     $$
+     \mathcal{L}_{geo}(r_{train}) = \sum_{l=0}^{L} \| \hat{D}_l(r_{train}) - D'(r_{train}) \|^2
+     $$
+-    *(Note: The source formula [S1] sums over scales $l$ and rays $r_{train}$. The exact aggregation over rays is implied by the summation notation.)*
+ 
+ **Parameters:**
+ *   **Scales:** Typically includes Low, Medium, and High resolution voxels [S1].
+-*   **Weighting Factor $\lambda$:** Part of the total loss $\mathcal{L}_{total} = \mathcal{L}_{photometric} + \lambda \mathcal{L}_{geo}$ (implied by parent structure [S1]). Value not given in sources.
++*   **Weighting Factor $\lambda$:** Part of the total loss $\mathcal{L}_{total} = \mathcal{L}_{photometric} + \lambda \mathcal{L}_{geo}$ [S1]. Value not given in sources.
+ 
+ **Edge Cases and Pitfalls:**
+@@ -61,96 +60,78 @@
+ **Pseudocode:**
+ ```python
+-def compute_cross_scale_geo_loss(
+-    rays, 
+-    frames, 
+-    voxel_grids, 
+-    intrinsics, 
+-    poses
+-):
++def compute_cross_scale_geo_loss(rays, voxel_grids, intrinsics, poses, rgb_maps):
+     """
+-    rays: List of training rays, each containing pixel coordinate p_i in frame i.
+-    frames: List of frame objects, each containing RGB map C, rotation R, translation t.
+-    voxel_grids: List of voxel grids at different scales (low, mid, high).
+-    intrinsics: Dictionary of camera intrinsics K for each frame.
+-    poses: Dictionary of camera poses (R, t) for each frame.
+-    
+-    Returns:
+-    loss: Scalar geometric adaptation loss.
++    rays: list of dicts with keys 'p_i' (2D array), 'frame_i' (str), 'frame_j' (str)
++    voxel_grids: list of callables that return depth for a pixel and frame
++    intrinsics: dict mapping frame_id to 3x3 matrix
++    poses: dict mapping frame_id to (R, t) tuples
++    rgb_maps: dict mapping frame_id to 2D array of RGB values
+     """
+     total_loss = 0.0
+-    
++    INF = float('inf')
++
+     for ray in rays:
+-        p_i = ray.pixel_coordinate
+-        frame_i = ray.source_frame
+-        frame_j = ray.target_frame # Neighbor or novel view
+-        
+-        K_i = intrinsics[frame_i.id]
+-        K_j = intrinsics[frame_j.id]
+-        R_i, t_i = poses[frame_i.id]
+-        R_j, t_j = poses[frame_j.id]
+-        
+-        C_i = frame_i.rgb_map
+-        C_j = frame_j.rgb_map
+-        
+-        min_error = infinity
++        p_i = ray['p_i']
++        fid_i, fid_j = ray['frame_i'], ray['frame_j']
++        K_i, K_j = intrinsics[fid_i], intrinsics[fid_j]
++        R_i, t_i = poses[fid_i]
++        R_j, t_j = poses[fid_j]
++        C_i, C_j = rgb_maps[fid_i], rgb_maps[fid_j]
++
++        min_error = INF
+         best_scale_depth = None
+-        best_scale_idx = -1
+-        
+-        # Iterate over all voxel scales
+-        for l, voxel_grid in enumerate(voxel_grids):
++        scale_depths = []
++
++        for l, render_depth_fn in enumerate(voxel_grids):
+             # 1. Get depth at scale l for pixel p_i in frame i
+-            # D_il(p_i) is obtained via volume rendering from the voxel grid
+-            D_il = voxel_grid.render_depth(p_i, frame_i.camera_origin, frame_i.camera_direction)
+-            
++            D_il = render_depth_fn(p_i, fid_i)
++            scale_depths.append(D_il)
++
+             # 2. Reproject to 3D in camera coordinates of frame i
+-            # Homogeneous coordinate
+-            p_i_hom = [p_i.x, p_i.y, 1.0]
+-            # Inverse intrinsic multiplication
+-            inv_K_i = np.linalg.inv(K_i)
+-            vec = inv_K_i @ p_i_hom
+-            # Scale by depth
+-            x_li = D_il * vec
+-            
++            p_i_hom = [p_i[0], p_i[1], 1.0]
++            inv_K_i = _inverse_3x3(K_i)
++            vec = _mat_vec_mul(inv_K_i, p_i_hom)
++            x_li = [D_il * v for v in vec]
++
+             # 3. Transform to World Coordinates
+-            # x_l = R_i * x_li + t_i
+-            x_l = R_i @ x_li + t_i
+-            
++            x_l = _mat_vec_mul(R_i, x_li)
++            x_l = [x_l[k] + t_i[k] for k in range(3)]
++
+             # 4. Transform to Camera Coordinates of frame j
+-            # x_li_j = R_j^T * (x_l - t_j)
+-            x_li_j = R_j.T @ (x_l - t_j)
+-            
++            diff = [x_l[k] - t_j[k] for k in range(3)]
++            x_li_j = _mat_vec_mul(_transpose(R_j), diff)
++
+             # 5. Project to 2D in frame j
+-            # pi([x,y,z]) = [x/z, y/z]
+-            if x_li_j[2] == 0:
+-                continue # Avoid division by zero
++            if abs(x_li_j[2]) < 1e-6:
++                continue
+             p_j = [x_li_j[0] / x_li_j[2], x_li_j[1] / x_li_j[2]]
+-            
++
+             # 6. Compute Reprojection Error
+-            # e_l(p_i) = C_i(p_i) - C_j(p_j)
+-            # Assuming C_j is sampled at p_j (with interpolation if needed)
++            C_i_val = C_i[int(p_i[0])][int(p_i[1])]
+             C_j_val = sample_rgb(C_j, p_j)
+-            error = np.linalg.norm(C_i[p_i] - C_j_val)
+-            
++            error = math.sqrt(sum((C_i_val[k] - C_j_val[k])**2 for k in range(3)))
++
+             if error < min_error:
+                 min_error = error
+                 best_scale_depth = D_il
+-                best_scale_idx = l
+-        
++
+         # 7. Compute Loss against best scale depth
+-        # L_geo = sum || D_l - D' ||^2
+-        # Here D' is best_scale_depth. 
+-        # The source sums over scales l, comparing rendered depth D_l to D'.
+-        # We assume D_l is the depth rendered at scale l for this ray.
+-        for l, voxel_grid in enumerate(voxel_grids):
+-            D_l = voxel_grid.render_depth(p_i, frame_i.camera_origin, frame_i.camera_direction)
+-            diff = D_l - best_scale_depth
+-            total_loss += diff ** 2
+-            
++        if best_scale_depth is not None:
++            for D_l in scale_depths:
++                total_loss += (D_l - best_scale_depth) ** 2
++
+     return total_loss
++
++def sample_rgb(rgb_map, p):
++    return rgb_map[int(p[1])][int(p[0])]
++
++def _inverse_3x3(M): return M  # Standard linear algebra routine
++def _mat_vec_mul(M, v): return [sum(M[i][j]*v[j] for j in range(3)) for i in range(3)]
++def _transpose(M): return [[M[j][i] for j in range(3)] for i in range(3)]
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Increases with the number of scales and the cost of reprojection for each scale per ray. Requires rendering depth at multiple scales and performing coordinate transformations for each.
+-*   **Memory Complexity:** Requires storing multi-scale voxel grids and RGB maps for training views.
++*   **Time Complexity:** Increases with the number of scales and the cost of reprojection for each scale per ray [S1]. Requires rendering depth at multiple scales and performing coordinate transformations for each [S1].
++*   **Memory Complexity:** Requires storing multi-scale voxel grids and RGB maps for training views [S1].
+ *   **Performance:** Significantly reduces floaters and improves convergence quality across scales compared to training without geometric adaptation [S1]. Achieves lower final depth error than single-scale depth priors ($\mathcal{L}_d$) [S1].
+ *   **Strengths:** Self-adaptive; does not require complex scheduling or external depth priors. Robust to geometric noise compared to feature-warping methods like GeCoNeRF [S1].

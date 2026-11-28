@@ -1,0 +1,142 @@
+--- v004.md
++++ v005.md
+@@ -1,82 +1,70 @@
+ # Load Balancing
+ 
+-Also called: Dynamic Work Assignment, Adaptive Size-aware Scheduling, Online Linear Sum Assignment
+ 
+ ## Overview
+-Load balancing is a technique applied in both point assignment and image assignment to balance workload in parallel rendering systems [S1, unofficial]. It is a core component of dynamic work assignment algorithms, which provide better load balancing compared to static assignment, resulting in better overall performance [S1, Parent, unofficial]. Unlike static methods that distribute work evenly regardless of data complexity, load balancing adapts to the varying computational cost of individual primitives (e.g., Gaussians of different sizes) or image patches [S1, unofficial][S2].
++Load balancing is a technique applied in both point assignment and image assignment to balance computational workload in parallel rendering systems [S1, unofficial]. It serves as a core component of dynamic work assignment algorithms, improving overall performance over static assignment by adapting to varying primitive costs or image patch complexities [S1, Parent, unofficial][S2].
+ 
+ ## How it works
+-Load balancing operates by dynamically assigning computational tasks to available processing units (threads, warps, or machines) based on the estimated or observed cost of the task. The specific implementation varies by context (point cloud partitioning vs. rasterization), but the core principle is to minimize idle time by ensuring all processors finish their assigned work simultaneously.
++Load balancing dynamically assigns computational tasks to available processing units based on estimated task costs [S1, unofficial][S2].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A set of computational tasks (e.g., 3D Gaussian primitives, image patches) with associated costs (e.g., projected ellipse size, resolution); a set of processing resources (e.g., GPU threads, CPU cores, distributed nodes).
+-*   **Outputs:** An assignment map linking each task to a specific resource.
++*   **Inputs:** A set of computational tasks (e.g., 3D Gaussian primitives, image patches) with associated costs (e.g., projected ellipse size, resolution) and a set of processing resources (e.g., GPU threads, distributed nodes) [S1, unofficial][S2].
++*   **Outputs:** An assignment map linking each task to a specific resource [G].
+ 
+ ### Data Structures
+-1.  **Task Queue/List:** Stores tasks with their properties (e.g., Gaussian parameters, bounding box, ellipse size).
+-2.  **Resource Queue/Pool:** Tracks available processing units.
+-3.  **Cost Estimator:** A function or lookup table that maps task properties to an estimated computational cost (e.g., number of tiles to intersect).
++1.  **Task Queue:** Stores tasks with properties such as Gaussian parameters or bounding box dimensions [S2].
++2.  **Resource Pool:** Tracks available processing units (threads or warps) [G].
++3.  **Cost Estimator:** A function mapping task properties to an estimated computational cost, typically the number of tiles the projected ellipse intersects [S2].
+ 
+ ### Steps
+ 1.  **Partitioning (Offline):** Divide the global dataset into initial chunks using a graph partitioning algorithm (e.g., METIS) to ensure spatial locality and reduce communication overhead [S1, unofficial].
+-2.  **Cost Estimation:** For each task, estimate the computational cost.
+-    *   For 3D Gaussians, this is often the number of tiles the projected ellipse intersects [S2].
+-    *   For images, this is the resolution or complexity of the patch [S1, unofficial].
+-3.  **Assignment (Online):**
+-    *   **Point Assignment:** Use an online scheduling technique (e.g., Linear Sum Assignment) to assign points to machines/GPUs based on the partitioning and current load [S1, unofficial].
++2.  **Cost Estimation:** For each task, estimate the computational cost based on the projected ellipse size or patch resolution [S1, unofficial][S2].
++3.  **Assignment (Online):** 
++    *   **Point Assignment:** Use an online scheduling technique (e.g., Linear Sum Assignment) to assign points to machines or GPUs based on the partitioning and current load [S1, unofficial].
+     *   **Image Assignment:** Split large images into smaller patches to allow flexible assignment to available resources [S1, unofficial].
+-    *   **Adaptive Scheduling (GPU):**
+-        *   If a Gaussian's projected ellipse is small (covers 1 tile), assign the intersection task to a single thread [S2].
+-        *   If a Gaussian's projected ellipse is large (covers multiple tiles), remap the workload to a thread group (warp) to balance synchronization overhead [S2].
+-4.  **Execution:** Process tasks. If a resource finishes early, it may pull from a shared queue if dynamic load balancing is active.
++    *   **Adaptive Scheduling (GPU):** If a Gaussian's projected ellipse is small and covers only one tile, assign the intersection task to the current thread [S2]. If the ellipse is large, remap the workload to a thread group (warp) to balance synchronization overhead [S2].
++4.  **Execution:** Process tasks. Threads or warps pull tasks from the queue until completion [G].
+ 
+ ### Formulas
+ *   **Cost Estimation (Gaussian):** $C_i = \text{number of tiles intersected by ellipse}_i$ [S2].
+-*   **Load Balance Metric:** $\text{Balance} = \frac{\max(T_i)}{\min(T_i)}$, where $T_i$ is the completion time of resource $i$. Ideally, this ratio approaches 1.
+ 
+ ### Parameters
+-*   **Warp Size:** 32 threads (standard for NVIDIA GPUs) [S2].
++*   **Warp Size:** 32 threads, chosen because the projected ellipse seldom covers more than 32 tiles [S2].
+ *   **Partitioning Algorithm:** METIS (bipartite graph partitioning) [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Communication Dominance:** In distributed settings, communication time may dominate runtime, making the performance gain from load balancing modest [S1, unofficial].
++*   **Communication Dominance:** In distributed settings, communication time may dominate the overall runtime, making the performance gain from load balancing modest [S1, unofficial].
+ *   **Small Impact:** Removing load balancing causes performance reductions ranging from 1% to 14%, indicating it is less critical than other optimizations like hierarchical assignment or patching [S1, unofficial].
+-*   **Ellipses > 32 Tiles:** The adaptive warp-based scheduling assumes ellipses seldom cover more than 32 tiles [S2]. Larger ellipses may require different handling.
++*   **Large Ellipses:** The adaptive warp-based scheduling assumes ellipses seldom cover more than 32 tiles; larger ellipses require different handling [S2].
+ 
+ ### Pseudocode
+ ```python
+-def assign_tasks(tasks, resources):
++def assign_tasks(tasks):
+     """
+-    Assigns tasks to resources using adaptive scheduling.
+-    tasks: List of objects with property 'ellipse_size' (number of tiles).
+-    resources: List of available processing units (threads/warps).
++    Assigns tasks to processing units using adaptive scheduling.
++    tasks: List of dicts with 'ellipse_size' (number of tiles).
+     """
+     assignment = {}
+-    
+-    # Step 1: Offline Partitioning (Simplified)
+-    # In practice, use METIS to partition points/images into chunks
+-    # assigned to different machines/GPUs.
+-    # chunked_tasks = metis_partition(tasks)
++    thread_queue = [f"thread_{i}" for i in range(8)]
++    warp_queue = [f"warp_{i}" for i in range(4)]
+     
+     for task in tasks:
+-        cost = estimate_cost(task)
++        cost = task['ellipse_size']
+         
+-        # Step 2: Adaptive Scheduling
+         if cost == 1:
+             # Small ellipse: assign to single thread
+-            thread = get_available_thread(resources)
+-            assignment[task] = {'type': 'single_thread', 'thread': thread}
++            if not thread_queue:
++                thread_queue = [f"thread_{i}" for i in range(8)]
++            thread = thread_queue.pop(0)
++            assignment[task] = {'type': 'single_thread', 'unit': thread}
+         else:
+             # Large ellipse: assign to warp
+             # Assumes cost <= 32 tiles
+-            warp = get_available_warp(resources)
+-            assignment[task] = {'type': 'warp', 'warp': warp}
++            if not warp_queue:
++                warp_queue = [f"warp_{i}" for i in range(4)]
++            warp = warp_queue.pop(0)
++            assignment[task] = {'type': 'warp', 'unit': warp}
+             
+     return assignment
+-
+-def estimate_cost(task):
+-    """Estimates cost based on projected ellipse size."""
+-    # For 3DGS, this is the number of tiles the ellipse intersects
+-    return task.ellipse_size
+ ```
+ 
+@@ -84,20 +72,20 @@
+ 
+ ### Online Linear Sum Assignment
+-An online scheduling technique paired with offline METIS partitioning to assign points/images, reducing communication overhead [S1, unofficial]. It introduces no significant overhead, as indicated by end-to-end speedups across scenes [S1, unofficial]. Choose this when distributed rendering across multiple machines/GPUs is required and communication efficiency is critical.
++An online scheduling technique paired with offline METIS partitioning to assign points or images, reducing communication overhead [S1, unofficial]. It introduces no significant overhead, as indicated by end-to-end speedups across scenes [S1, unofficial].
+ 
+ ### Adaptive Size-aware Scheduling
+-A strategy to balance workload by assigning single-tile intersection tasks to individual threads and multi-tile tasks to a warp, based on the size of the projected Gaussian ellipse [S2]. If the ellipse is small and covers only one tile, use the current thread for precise intersection. If the ellipse is large, remap the workload to a thread group (warp) to balance synchronization overhead [S2]. The warp size is chosen because the size of the ellipse seldom covers more than 32 tiles [S2]. Choose this for high-performance GPU rendering of 3D Gaussians where primitive sizes vary significantly.
++A strategy to balance workload by assigning single-tile intersection tasks to individual threads and multi-tile tasks to a warp, based on the size of the projected Gaussian ellipse [S2]. If the ellipse is small and covers only one tile, the current thread handles the precise intersection [S2]. If the ellipse is large, the workload is remapped to a thread group (warp) to balance synchronization overhead [S2]. The warp size is chosen because the size of the ellipse seldom covers more than 32 tiles [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the partitioning algorithm (METIS is near-linear) and the online assignment (Linear Sum Assignment is polynomial but fast for small sets) [S1, unofficial].
+-*   **Memory Complexity:** Requires storing the partition graph and task queues [S1, unofficial].
+-*   **Performance Impact:** Removing load balancing causes performance reductions ranging from 1% to 14% [S1, unofficial]. Hierarchical assignment and patching have larger impacts (16-35% and 10-52% respectively) [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance Impact:** Removing load balancing causes performance reductions ranging from 1% to 14% [S1, unofficial]. Hierarchical assignment and patching have larger impacts (16% to 35% and 10% to 52% respectively) [S1, unofficial].
+ *   **Strengths:** Reduces idle time in heterogeneous workloads; adapts to varying primitive sizes [S1, unofficial][S2].
+ *   **Limitations:** Modest effect in communication-bound distributed systems [S1, unofficial]; assumes ellipses are small enough for warp-based scheduling [S2].
+ *   **When to Use:** When workload is uneven (e.g., varying Gaussian sizes, image resolutions) and communication overhead is manageable [S1, unofficial][S2].
+-*   **When Not to Use:** When communication time dominates runtime, or when workload is uniform [S1, unofficial].
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-Load balancing in volume rendering and point-based rendering has evolved from static grid-based partitioning to dynamic, cost-aware assignment. Early methods used fixed grid partitions, which led to load imbalance when data density varied. Modern approaches, such as those in [S1, unofficial] and [S2], integrate graph partitioning (METIS) with online scheduling and adaptive GPU kernels to handle the irregularity of 3D Gaussian splatting and large-scale scenes. The technique is particularly relevant in distributed rendering systems where communication costs must be minimized alongside computational load [S1, unofficial].
++Load balancing in parallel rendering has evolved from static grid-based partitioning to dynamic, cost-aware assignment [G]. Early methods used fixed grid partitions, which led to load imbalance when data density varied [G]. Modern approaches, such as those in [S1, unofficial] and [S2], integrate graph partitioning (METIS) with online scheduling and adaptive GPU kernels to handle the irregularity of 3D Gaussian splatting and large-scale scenes. The technique is particularly relevant in distributed rendering systems where communication costs must be minimized alongside computational load [S1, unofficial].
+ 
+ ## Sources

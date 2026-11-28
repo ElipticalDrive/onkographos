@@ -1,0 +1,80 @@
+--- v006.md
++++ v007.md
+@@ -12,10 +12,10 @@
+ **Data Structures:**
+ The core structure is the `Chunk`. It contains:
+-1. `bitMask[16]`: An array of 16 unsigned integers (64 bytes total). This represents an $8 \times 8 \times 8$ voxel grid (512 bits). Each bit corresponds to a voxel; a set bit indicates the voxel is active [S1, unofficial].
+-2. `partialCounts[3]`: An array of 3 integers storing cumulative voxel counts at the 1/4, 1/2, and 3/4 points of the chunk. This speeds up bit counting and coordinate mapping [S1, unofficial].
++1. `bitMask[16]`: An array of 16 unsigned integers (64 bytes total). This represents an $8 \times 8 \times 8$ voxel grid (512 bits) [S1, unofficial]. Each bit corresponds to a voxel; a set bit indicates the voxel is active [S1, unofficial].
++2. `partialCounts[3]`: An array of 3 integers storing cumulative voxel counts at the 1/4, 1/2, and 3/4 points of the chunk [S1, unofficial]. This speeds up bit counting and coordinate mapping [S1, unofficial].
+ 3. `voxelIndex`: A field in the `ChunkHandle` pointing to the start of this chunk's voxels in the linear voxel buffer [S1, unofficial].
+ 
+-**Coordinate Mapping (Map Index to 3D Position):**
+-To find the 3D position from a linear map index and chunk position:
++**Coordinate Mapping (Map Index to Linear Voxel Index):**
++To find the linear voxel index from a map index and local chunk index:
+ 1. Calculate `localIndex` within the chunk [S1, unofficial].
+ 2. Determine `bitMaskIndex` by shifting `localIndex` right by 5 (integer division by 32) [S1, unofficial].
+@@ -27,9 +27,9 @@
+ 
+ **Position Mapping (Chunk Index and Voxel Number to 3D Position):**
+-To find the chunk position from a chunk index and a specific voxel number within that chunk:
++To find the 3D position from a chunk index and a specific voxel number within that chunk:
+ 1. Initialize `count=0`, `pos=0`, `startIndex=0` [S1, unofficial].
+-2. Loop `i` from 0 to 2. If `chunks[chunk].partialCounts[i] < voxNum`, set `count` to that partial count, add 128 to `pos`, add 4 to `startIndex`. Else break. Decrement `voxNum` by `count` [S1, unofficial].
+-3. Loop `i` from `startIndex` to 15. If `count == voxNum` break.
+-4. Get `bitCount` of `bitMask[i]`.
++2. Loop `i` from 0 to 2. If `chunks[chunk].partialCounts[i] < voxNum`, set `count` to that partial count, add 128 to `pos`, add 4 to `startIndex` [S1, unofficial]. Else break. Decrement `voxNum` by `count` to track the remaining target index [G].
++3. Loop `i` from `startIndex` to 15. If `count == voxNum` break [S1, unofficial].
++4. Get `bitCount` of `bitMask[i]` [S1, unofficial].
+ 5. If `count + bitCount >= voxNum`, step bit-by-bit: loop `bitNum` from 0, add `(bitMask[i] >> bitNum) & 1` to count, increment `bitNum` and `pos` until `count == voxNum` [S1, unofficial].
+ 6. Else add `bitCount` to `count` and 32 to `pos` [S1, unofficial].
+@@ -41,4 +41,7 @@
+ 
+ ```python
++def bit_count(n):
++    return bin(n).count('1')
++
+ def map_index_to_voxel_index(map_index, local_index, chunk):
+     """
+@@ -84,5 +87,5 @@
+             pos += 128
+             start_index = 4 * (i + 1)
+-            vox_num -= count  # [G] Fixed from source note "Increment voxNum" to correctly track remaining index
++            vox_num -= count  # [G] Corrected from source note "Increment voxNum" to track remaining index
+         else:
+             break
+@@ -127,23 +130,11 @@
+ 
+ ### [GPU Accelerated Sparse Grid Construction](9812-gpu-accelerated-sparse-grid-construction.md)
+-This method constructs the **IndexGrid** acceleration structure on the GPU from a set of signed voxel coordinates, enabling the handling of large-scale inputs with a competitive memory footprint. Unlike standard NanoVDB which assumes a fixed topology, this algorithm supports dynamic sparsity patterns, such as those required for Level-of-Detail (LOD) hierarchies. It builds on [Sparse Voxel Chunk Indexing](8606-sparse-voxel-chunk-indexing.md) and implements the core construction logic for the [IndexGrid](9819-indexgrid.md) data structure.
++Constructs the **IndexGrid** acceleration structure on the GPU from signed voxel coordinates, enabling large-scale inputs with a competitive memory footprint. Unlike standard NanoVDB which assumes a fixed topology, it supports dynamic sparsity patterns like Level-of-Detail (LOD) hierarchies. It builds on this method and implements the core construction logic for the [IndexGrid](9819-indexgrid.md) data structure.
+ 
+ ### [IndexGrid](9819-indexgrid.md)
+-IndexGrid is a sparse data structure derived from NanoVDB, designed to aggressively accelerate stencil-centric operations (e.g., convolution) while serving as an effective acceleration structure for ray marching and other spatial operations. It solves the problem of memory inefficiency and code complexity in standard VDB implementations by separating topology (sparsity pattern) from values (features). Unlike hash tables, which lack spatial coherence, or octrees, which suffer from $O(\log n)$ access times, IndexGrid uses a fixed-depth shallow tree to maintain $O(1)$ amortized access while preserving spatial coherence.
++A sparse data structure derived from NanoVDB designed to aggressively accelerate stencil-centric operations (e.g., convolution) while serving as an effective acceleration structure for ray marching and other spatial operations. It solves memory inefficiency and code complexity in standard VDB implementations by separating topology from values. Unlike hash tables or octrees, it uses a fixed-depth shallow tree to maintain $O(1)$ amortized access while preserving spatial coherence.
+ 
+ ### Slice-Based Binary Shell (SBS) Conversion
+-#### Definition
+-Converts a dense 3D volume into a sparse Slice-Based Binary Shell structure containing only non-empty voxels, organized by slice with cumulative offsets for fast GPU traversal [S2, unofficial].
+-
+-#### Steps
+-1. Initialize `current_offset = 0` and iterate over each z-slice [S2, unofficial].
+-2. For each slice, find non-empty voxel coordinates where `slice_data > 0` [S2, unofficial].
+-3. Stack 2D indices into `[y, x]` format and append to `index_array` [S2, unofficial].
+-4. Extract corresponding voxel values and append to `attribute_list` [S2, unofficial].
+-5. Update `slice_offsets[z] = current_offset` and increment `current_offset += len(indices)` [S2, unofficial].
+-6. Convert lists to numpy arrays: `index_array` to int32, `attribute_list` to uint8 [S2, unofficial].
+-
+-#### Layout
+-Dictionary `sbs_data` with three fields: `index_array` (N×2 int32, stores [y, x] coordinates), `attribute_list` (N uint8, stores voxel values), `slice_offsets` (Z int32, stores cumulative start index per z-slice) [S2, unofficial].
++Converts a dense 3D volume into a sparse structure containing only non-empty voxels, organized by slice with cumulative offsets for fast GPU traversal [S2, unofficial]. It initializes `current_offset = 0` and iterates over each z-slice, finding non-empty voxel coordinates where `slice_data > 0` [S2, unofficial]. It stacks 2D indices into `[y, x]` format into an `index_array` and extracts corresponding voxel values into an `attribute_list` [S2, unofficial]. It updates `slice_offsets[z] = current_offset` and increments `current_offset += len(indices)` per slice [S2, unofficial]. The final layout is a dictionary `sbs_data` with three fields: `index_array` (N×2 int32), `attribute_list` (N uint8), and `slice_offsets` (Z int32) [S2, unofficial].
+ 
+ ## Operating characteristics
+@@ -151,5 +142,5 @@
+ * **Memory Complexity:** Highly efficient for sparse volumes. The bitmask uses 1 bit per voxel (512 bits per chunk), and partial counts use minimal additional space. Active voxels are stored in a linear buffer, improving cache locality compared to pointer-based structures [S1, unofficial].
+ * **Performance:** Competitive memory footprint for large-scale inputs, especially when constructed on the GPU [S1, unofficial].
+-* **Strengths:** Spatial coherence, fast access times, low memory overhead for sparse data.
++* **Strengths:** Spatial coherence, fast access times, low memory overhead for sparse data [S1, unofficial].
+ * **Limitations:** Fixed chunk size may lead to fragmentation if sparsity patterns are highly irregular. Bitwise operations can be complex to implement correctly [S1, unofficial].
+ * **When to Use:** Ideal for ray marching and stencil operations on sparse volumes where spatial coherence is important and memory bandwidth is a constraint [S1, unofficial].

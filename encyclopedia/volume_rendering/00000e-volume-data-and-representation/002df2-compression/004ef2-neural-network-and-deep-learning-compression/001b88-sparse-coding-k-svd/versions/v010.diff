@@ -1,0 +1,167 @@
+--- v009.md
++++ v010.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Sparse Coding (K-SVD) compresses volume rendering data by learning an overcomplete dictionary from training images and representing image blocks as sparse linear combinations of dictionary atoms [S2, unofficial]. It differs from fixed-basis methods like DCT by adapting the basis to the specific statistical structure of the volume data, yielding higher reconstruction fidelity (PSNR) for the same redundancy level [S2, unofficial]. It builds on [Sparse Representation (Dictionary Based)](5366-sparse-representation-dictionary-based.md) by jointly optimizing the dictionary and the sparse coefficients.
++Sparse Coding (K-SVD) compresses volume rendering data by learning an overcomplete dictionary from training images and representing image blocks as sparse linear combinations of dictionary atoms [S2, unofficial]. It differs from fixed-basis methods like DCT by adapting the basis to the specific statistical structure of the volume data, yielding higher reconstruction fidelity (PSNR) for the same redundancy level [S2, unofficial]. It builds on [Sparse Representation (Dictionary Based)](5366-sparse-representation-dictionary-based.md) by jointly optimizing the dictionary and the sparse coefficients [S2, unofficial].
+ 
+ ## How it works
+@@ -11,5 +11,5 @@
+ 
+ **Data Structures:**
+-*   **Dictionary $\mathbf{D}$:** Matrix of size $M \times N$, where $M$ is the dimension of a block (e.g., $16 \times 16 = 256$ for grayscale, $16 \times 16 \times 3 = 768$ for RGB) and $N$ is the number of atoms (e.g., 1024 or 2304) [S2, unofficial]. Columns are normalized to unit 2-norm.
++*   **Dictionary $\mathbf{D}$:** Matrix of size $M \times N$, where $M$ is the dimension of a block (e.g., $16 \times 16 = 256$ for grayscale, $16 \times 16 \times 3 = 768$ for RGB) and $N$ is the number of atoms (e.g., 1024 or 2304) [S2, unofficial]. Columns are normalized to unit 2-norm [S2, unofficial].
+ *   **Training Matrix $\mathbf{Y}$:** Matrix where each column is a flattened training block [S2, unofficial].
+ *   **Coefficient Matrix $\mathbf{X}$:** Matrix where each column $\mathbf{x}_i$ contains the sparse coefficients for the corresponding block in $\mathbf{Y}$ [S2, unofficial].
+@@ -18,15 +18,9 @@
+ The K-SVD algorithm alternates between two steps to minimize the reconstruction error subject to a sparsity constraint [S2, unofficial]:
+ 
+-1.  **Sparse Coding Step:** Given the current dictionary $\mathbf{D}$, compute the sparse coefficients $\mathbf{X}$ for all training blocks in $\mathbf{Y}$. This is typically done using Orthogonal Matching Pursuit (OMP) [S2, unofficial]. For each column $\mathbf{y}_i$ of $\mathbf{Y}$, find $\mathbf{x}_i$ such that:
++1.  **Sparse Coding Step:** Given the current dictionary $\mathbf{D}$, compute the sparse coefficients $\mathbf{X}$ for all training blocks in $\mathbf{Y}$ using a pursuit algorithm such as Orthogonal Matching Pursuit (OMP) [S2, unofficial]. For each column $\mathbf{y}_i$ of $\mathbf{Y}$, find $\mathbf{x}_i$ such that:
+     $$ \min_{\mathbf{x}_i} \|\mathbf{y}_i - \mathbf{D}\mathbf{x}_i\|_2^2 \quad \text{subject to} \quad \|\mathbf{x}_i\|_0 \leq L $$
+     where $L$ is the maximum number of non-zero coefficients (sparsity level) [S2, unofficial].
+ 
+-2.  **Dictionary Update Step:** With $\mathbf{X}$ fixed, update the dictionary $\mathbf{D}$ to reduce the reconstruction error. This is done atom by atom. For the $k$-th atom $\mathbf{d}_k$ and its corresponding coefficient row $\mathbf{r}_k^T$ in $\mathbf{X}$:
+-    *   Identify the set of indices $\mathcal{I}_k$ where the $k$-th coefficient is non-zero: $\mathcal{I}_k = \{i : \mathbf{x}_i[k] \neq 0\}$ [S2, unofficial].
+-    *   Compute the residual matrix $\mathbf{E}_k = \mathbf{Y} - \sum_{j \neq k} \mathbf{d}_j \mathbf{r}_j^T$, which represents the error excluding the contribution of the $k$-th atom [S2, unofficial].
+-    *   Extract the sub-matrix $\mathbf{E}_k^{\mathcal{I}_k}$ containing only the columns indexed by $\mathcal{I}_k$ [S2, unofficial].
+-    *   Perform Singular Value Decomposition (SVD) on $\mathbf{E}_k^{\mathcal{I}_k} = \mathbf{U} \mathbf{\Sigma} \mathbf{V}^T$ [S2, unofficial].
+-    *   Update the atom $\mathbf{d}_k$ to the first column of $\mathbf{U}$ and the corresponding coefficient row $\mathbf{r}_k^T$ to the first row of $\mathbf{V}^T$ scaled by $\sigma_1$ (the largest singular value) [S2, unofficial].
+-    *   Normalize $\mathbf{d}_k$ to unit 2-norm and scale $\mathbf{r}_k$ accordingly to maintain the product [S2, unofficial].
++2.  **Dictionary Update Step:** With $\mathbf{X}$ fixed, update the dictionary $\mathbf{D}$ to reduce the reconstruction error [S2, unofficial]. The algorithm updates atoms one by one to better fit the training vectors, ensuring a reduction or no change in the Mean Squared Error (MSE) without violating the sparsity constraint [S2, unofficial].
+ 
+ **Parameters:**
+@@ -50,4 +44,9 @@
+     max_iterations: Number of alternating steps
+     """
++    M = len(Y[0])
++    N = len(D)
++    NumSamples = len(Y)
++    X = [[0.0] * NumSamples for _ in range(N)]
++    
+     for iteration in range(max_iterations):
+         # Step 1: Sparse Coding
+@@ -56,54 +55,55 @@
+         # Step 2: Dictionary Update
+         for k in range(N):
+-            # Find indices where k-th coefficient is non-zero
+-            indices = [i for i in range(NumSamples) if X[k, i] != 0]
+-            
++            indices = [i for i in range(NumSamples) if X[k][i] != 0]
+             if not indices:
+                 continue
+                 
+             # Compute residual excluding k-th atom
+-            # E_k = Y - sum_{j != k} D[:, j] * X[j, :]
+-            # Optimization: Start with Y and subtract contributions of other atoms
+-            E_k = Y.copy()
++            E_k = [row[:] for row in Y]
+             for j in range(N):
+                 if j != k:
+-                    E_k -= np.outer(D[:, j], X[j, :])
++                    for i in range(NumSamples):
++                        for m in range(M):
++                            E_k[m][i] -= D[m][j] * X[j][i]
+             
+             # Extract columns corresponding to non-zero coefficients
+-            E_k_sub = E_k[:, indices]
++            E_k_sub = [[E_k[m][i] for i in indices] for m in range(M)]
+             
+-            # SVD of the sub-residual
+-            U, Sigma, Vt = svd(E_k_sub, full_matrices=False)
++            # Standard linear algebra operation: SVD
++            U, Sigma, Vt = svd(E_k_sub)
+             
+             # Update atom and coefficients
+-            d_new = U[:, 0]
+-            r_new = Sigma[0] * Vt[0, :]
++            d_new = [U[m][0] for m in range(M)]
++            r_new = [Sigma[0] * Vt[0][i] for i in range(len(indices))]
+             
+-            D[:, k] = d_new
+-            X[k, indices] = r_new
+-            
++            for m in range(M):
++                D[m][k] = d_new[m]
++            for idx, i in enumerate(indices):
++                X[k][i] = r_new[idx]
++                
+             # Normalize atom to unit 2-norm
+-            norm_d = np.linalg.norm(d_new)
+-            D[:, k] /= norm_d
+-            X[k, indices] *= norm_d
+-            
++            norm_d = sum(v**2 for v in d_new)**0.5
++            for m in range(M):
++                D[m][k] /= norm_d
++            for idx in range(len(indices)):
++                X[k][indices[idx]] *= norm_d
++                
+     return D, X
+ 
+ def sparse_coding(Y, D, L):
+-    """
+-    Simple OMP implementation for sparse coding
+-    """
+-    NumSamples, N = D.shape
+-    X = np.zeros((N, NumSamples))
++    M = len(Y[0])
++    N = len(D)
++    NumSamples = len(Y)
++    X = [[0.0] * NumSamples for _ in range(N)]
+     
+     for i in range(NumSamples):
+-        y = Y[:, i]
+-        residual = y.copy()
++        y = [Y[m][i] for m in range(M)]
++        residual = y[:]
+         support = []
++        coeffs = []
+         
+         for _ in range(L):
+-            # Find atom most correlated with residual
+-            correlations = np.abs(D.T @ residual)
+-            atom_idx = np.argmax(correlations)
++            correlations = [sum(D[m][j] * residual[m] for m in range(M)) for j in range(N)]
++            atom_idx = max(range(N), key=lambda j: abs(correlations[j]))
+             
+             if atom_idx in support:
+@@ -112,16 +112,21 @@
+             support.append(atom_idx)
+             
+-            # Solve least squares for coefficients on support
+-            D_support = D[:, support]
+-            coeffs, _, _, _ = lstsq(D_support, y)
++            # Standard linear algebra operation: Least Squares solve
++            coeffs = lstsq(D, support, y)
+             
+-            # Update residual
+-            residual = y - D_support @ coeffs
++            residual = [y[m] - sum(D[m][support[s]] * coeffs[s] for s in range(len(support))) for m in range(M)]
+             
+-        # Store coefficients
+         for idx, atom_idx in enumerate(support):
+-            X[atom_idx, i] = coeffs[idx]
++            X[atom_idx][i] = coeffs[idx]
+             
+     return X
++
++def svd(A):
++    # Standard linear algebra routine to compute U, Sigma, Vt such that A = U @ diag(Sigma) @ Vt
++    pass
++
++def lstsq(D, support, y):
++    # Standard linear algebra routine to solve min ||D[:, support] @ x - y||_2
++    pass
+ ```
+ 
+@@ -147,6 +152,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is iterative and depends on the number of samples, dictionary size, and sparsity. Training a $256 \times 1024$ dictionary on grayscale images took 7.1 minutes on a single-threaded Intel Core i7-4770K [S2, unofficial]. RGB training ($768 \times 2304$) took 47.3 minutes [S2, unofficial].
+-*   **Memory Complexity:** Requires storing the dictionary ($M \times N$) and the coefficient matrix ($N \times \text{NumSamples}$) during training. For compression, only the dictionary and sparse coefficients for each block need to be stored.
++*   **Time Complexity:** Training is iterative and depends on the number of samples, dictionary size, and sparsity [S2, unofficial]. Training a $256 \times 1024$ dictionary on grayscale images took 7.1 minutes on a single-threaded Intel Core i7-4770K [S2, unofficial]. RGB training ($768 \times 2304$) took 47.3 minutes [S2, unofficial].
++*   **Memory Complexity:** Requires storing the dictionary ($M \times N$) and the coefficient matrix ($N \times \text{NumSamples}$) during training [G]. For compression, only the dictionary and sparse coefficients for each block need to be stored [G].
+ *   **Performance:** Achieves bits-per-sample (bps) of 0.25 (Chameleon), 0.07 (Supernova), and 0.20 (Turbulence) [S1, unofficial]. Deblocked SSIM scores are 0.72 (Chameleon), 0.76 (Supernova), and 0.84 (Turbulence) [S1, unofficial]. For missing pixel recovery (70% missing), trained dictionary PSNR is 31.2 dB vs. 22.97 dB for DCT [S2, unofficial].
+ *   **Strengths:** Adapts to data statistics, better reconstruction quality than fixed bases (DCT) for the same redundancy, handles color correlations effectively [S2, unofficial].

@@ -1,0 +1,155 @@
+# Voxel Face Generation with Ambient Occlusion
+
+Also called: AO-aware Quad Generation, Face-based Voxel Meshing
+
+## Overview
+This method generates a single quad mesh for an exposed voxel face, populating a `MeshData` buffer with vertices, indices, normals, UVs, tangents, and vertex colors based on face direction and block type [S1, unofficial]. It distinguishes itself from sibling methods by computing diagonal ambient occlusion (AO) values from neighboring block occupancy to determine mesh topology (vertex ordering) and shading intensity, rather than relying on fixed geometry or smooth lighting approximations [S1, unofficial]. It builds on [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md) by providing the specific AO-aware logic for vertex and index generation.
+
+## How it works
+**Inputs:**
+- `mask`: An `AO Mask` structure containing four corner AO values (`int4`).
+- `normal`: The face normal vector (`float3` or `int3`).
+- `width`, `height`: Horizontal and vertical texture atlas dimensions in pixels [S1, unofficial].
+- `vertex_count`: Current index in the mesh vertex buffer [S1, unofficial].
+
+**Outputs:**
+- Updated `MeshData` buffer containing vertices and indices for the face [S1, unofficial].
+
+**Data Structures:**
+- **Vertex**: Contains `Position` (`float3`), `Normal` (`float3`/`int3`), `UV0` (`float3`), `UV1` (`float2`), and `UV2` (`float`, storing the AO value) [S1, unofficial].
+- **AO Mask**: `int4` storing four corner AO values computed from neighboring blocks [S1, unofficial].
+
+**AO Corner Value Calculation:**
+The AO value for a corner is derived from the occupancy of adjacent side blocks and the diagonal corner block [S1, unofficial]. Let $s_1$ and $s_2$ be binary occupancy flags of adjacent side blocks (1 if empty, 0 if solid), and $c$ be the binary occupancy flag of the diagonal corner block [S1, unofficial].
+$$
+AO = 3 - (s_1 + s_2 + c)
+$$
+If both adjacent sides are empty ($s_1 == 1$ and $s_2 == 1$), the AO value is clamped to 0 to prevent incorrect shading [S1, unofficial].
+
+**Steps:**
+1. **UV Layout Determination**: Determine UV layout based on the X component of the normal [S1, unofficial].
+   - If `normal.x` is 1 or -1: `uv2.y = width`, `uv3.x = height`.
+   - Else: `uv2.x = width`, `uv3.y = height`.
+2. **Y-Offset Application**: If `normal.y` equals 1, apply a Y-offset of `0.25f` to all four vertex positions [S1, unofficial].
+3. **Vertex Generation**: Create four vertices with `Position`, `Normal`, `UV0`, `UV1` (ranging from 0,0 to 1,1), and `UV2` (AO value). Add them to the mesh vertex buffer [S1, unofficial].
+4. **Index Generation (Diagonal AO Check)**: Evaluate the diagonal AO sum condition: `mask.AO[0] + mask.AO[3] > mask.AO[1] + mask.AO[2]` [S1, unofficial].
+   - If true, add indices in order: `vertex_count`, `vertex_count + 2 - mask.Normal`, `vertex_count + 2 + mask.Normal`, `vertex_count + 3`, `vertex_count + 1 + mask.Normal`, `vertex_count + 1 - mask.Normal` [S1, unofficial].
+   - If false, add indices in order: `vertex_count + 1`, `vertex_count + 1 + mask.Normal`, `vertex_count + 1 - mask.Normal`, `vertex_count + 2`, `vertex_count + 2 - mask.Normal`, `vertex_count + 2 + mask.Normal` [S1, unofficial].
+5. **Back-Face Generation**: Check if the normal is not `(0,1,0)` using `AndReduce()` [S1, unofficial].
+   - If true, return 4 (front face only) [S1, unofficial].
+   - Otherwise, flip the normal, generate four back-face vertices with the same positions but inverted normal, add them to the buffer, increment `vertex_count` by 4, and add back-face indices using the same diagonal AO logic [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_voxel_face_with_ao(mask, normal, width, height, vertex_count, mesh_data):
+    # Step 1: UV Layout
+    if normal.x in [1, -1]:
+        uv2_y = width
+        uv3_x = height
+    else:
+        uv2_x = width
+        uv3_y = height
+
+    # Step 2: Y-Offset
+    y_offset = 0.25f if normal.y == 1 else 0.0f
+
+    # Step 3: Vertex Generation
+    # Assuming base positions are defined relative to the face center/origin
+    # Positions are adjusted by y_offset if normal.y == 1
+    vertices = []
+    for i in range(4):
+        pos = get_base_position(i) + (0.0, y_offset, 0.0)
+        # UV1 is 0,0 to 1,1 based on vertex index
+        uv1 = get_uv1(i)
+        # UV2 is the AO value from mask
+        # Note: The specific mapping of mask.AO[i] to vertex i is not explicitly detailed
+        # in the notes, but typically corresponds to corner indices 0-3
+        ao_value = mask.AO[i]
+        vertices.append(Vertex(pos, normal, uv1, ao_value))
+    
+    mesh_data.add_vertices(vertices)
+    current_vertex_count = vertex_count
+
+    # Step 4: Index Generation
+    # Diagonal AO sum condition
+    if mask.AO[0] + mask.AO[3] > mask.AO[1] + mask.AO[2]:
+        indices = [
+            current_vertex_count,
+            current_vertex_count + 2 - mask.Normal,
+            current_vertex_count + 2 + mask.Normal,
+            current_vertex_count + 3,
+            current_vertex_count + 1 + mask.Normal,
+            current_vertex_count + 1 - mask.Normal
+        ]
+    else:
+        indices = [
+            current_vertex_count + 1,
+            current_vertex_count + 1 + mask.Normal,
+            current_vertex_count + 1 - mask.Normal,
+            current_vertex_count + 2,
+            current_vertex_count + 2 - mask.Normal,
+            current_vertex_count + 2 + mask.Normal
+        ]
+    mesh_data.add_indices(indices)
+
+    # Step 5: Back-Face Generation
+    # Check if normal is not (0,1,0) using AndReduce()
+    # AndReduce() likely checks if any component of the normal is non-zero,
+    # or specifically if the normal is not exactly (0,1,0).
+    # Assuming AndReduce(normal) returns true if normal != (0,1,0)
+    if and_reduce(normal) != (0, 1, 0): # Placeholder for AndReduce logic
+        return 4 # Front face only
+
+    # Flip normal
+    back_normal = -normal
+    back_vertices = []
+    for i in range(4):
+        pos = get_base_position(i) + (0.0, y_offset, 0.0)
+        uv1 = get_uv1(i)
+        ao_value = mask.AO[i]
+        back_vertices.append(Vertex(pos, back_normal, uv1, ao_value))
+    
+    mesh_data.add_vertices(back_vertices)
+    back_vertex_count = current_vertex_count + 4
+
+    # Add back-face indices using same diagonal AO logic
+    if mask.AO[0] + mask.AO[3] > mask.AO[1] + mask.AO[2]:
+        back_indices = [
+            back_vertex_count,
+            back_vertex_count + 2 - mask.Normal,
+            back_vertex_count + 2 + mask.Normal,
+            back_vertex_count + 3,
+            back_vertex_count + 1 + mask.Normal,
+            back_vertex_count + 1 - mask.Normal
+        ]
+    else:
+        back_indices = [
+            back_vertex_count + 1,
+            back_vertex_count + 1 + mask.Normal,
+            back_vertex_count + 1 - mask.Normal,
+            back_vertex_count + 2,
+            back_vertex_count + 2 - mask.Normal,
+            back_vertex_count + 2 + mask.Normal
+        ]
+    mesh_data.add_indices(back_indices)
+```
+
+**Parameters:**
+- `width`: Horizontal texture atlas dimension in pixels [S1, unofficial].
+- `height`: Vertical texture atlas dimension in pixels [S1, unofficial].
+- `0.25f`: Y-axis offset applied to vertex positions when `normal.y == 1`, likely for texture atlas alignment or z-fighting prevention [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Fully occluded corners (both adjacent sides empty) must return AO 0 to prevent incorrect shading [S1, unofficial].
+- Precision issues may arise if `mask.Normal` is not handled correctly in index calculations, as it is used as an offset [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+This method is part of the VloxyEngine project, an unofficial voxel engine implementation [S1, unofficial]. It is designed to generate efficient, AO-aware mesh geometry for voxel-based scenes, optimizing visual quality through diagonal occlusion checks and dynamic vertex ordering [S1, unofficial].
+
+## Sources
+[S1] BLaZeKiLL/VloxyEngine, https://github.com/BLaZeKiLL/VloxyEngine, fetched 2026-10-26 (unofficial)

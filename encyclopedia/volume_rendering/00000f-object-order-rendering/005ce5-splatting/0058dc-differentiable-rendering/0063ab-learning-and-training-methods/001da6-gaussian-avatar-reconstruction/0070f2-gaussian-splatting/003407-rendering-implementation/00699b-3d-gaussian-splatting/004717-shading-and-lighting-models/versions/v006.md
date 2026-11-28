@@ -1,0 +1,32 @@
+# Shading and Lighting Models
+
+Also called: 3DGS Shading, Gaussian Splatting Lighting
+
+## Overview
+This family defines how 3D Gaussian primitives are shaded, blended, and lit to produce the final pixel color, extending the basic rasterization of [3D Gaussian Splatting](2812-3d-gaussian-splatting.md). It solves the limitation of standard splatting, which renders only baked view-dependent colors, by introducing physical material properties, analytic anti-aliasing, and robust transparency handling. It differs from [Analytic-Splatting Forward Shading](3459-analytic-splatting-forward-shading.md) by focusing on physical material properties and deferred pipelines rather than analytic signal response, and from [Transparency and Blending Models](9274-transparency-and-blending-models.md) by its explicit handling of light transport and occlusion transmittance.
+
+## Shared principles
+All methods in this family operate on 3D Gaussian primitives defined by mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$ (or scales and orientation), opacity $o$, and color $\mathbf{c}$ (or spherical harmonic coefficients) [G]. The core challenge is computing the pixel color $C$ and accumulated alpha $\alpha$ given a camera ray [G]. Standard splatting projects 3D Gaussians to 2D ellipses, computes a 2D alpha mask, and blends them in screen space [3D Gaussian Splatting Rasterization](2812-3d-gaussian-splatting-rasterization.md). These models modify the blending or shading stage: some refine the depth metric used for sorting, others integrate the 3D density function directly along the ray, and others use weighted averages to bypass sorting [Transparency and Blending Models](9274-transparency-and-blending-models.md). All assume the Gaussians are sorted or processed in a manner that approximates front-to-back accumulation to ensure correct occlusion [G].
+
+For relighting, splats must carry physical material attributes: normal, roughness, reflectance (specular strength), and albedo (diffuse color) [4464-ref-gaussian-deferred-surfel-rendering-with-split-sum-ibl.md]. These are stored in a parallel Material Buffer aligned with the Splat Buffer [4464-ref-gaussian-deferred-surfel-rendering-with-split-sum-ibl.md].
+
+For self-shadowing, a virtual "sun camera" is constructed to simulate a directional light source [4487-3d-gaussian-splatting-self-shadowing-t-light.md]. This camera is placed at a large distance with a narrow field of view (FOV) to minimize parallax error to below 2% [4487-3d-gaussian-splatting-self-shadowing-t-light.md].
+
+Both relighting (for cache locality) and shadowing (for correct front-to-back accumulation) require sorting [4464-ref-gaussian-deferred-surfel-rendering-with-split-sum-ibl.md][4487-3d-gaussian-splatting-self-shadowing-t-light.md]. Relighting uses spatial locality algorithms like Morton codes [4464-ref-gaussian-deferred-surfel-rendering-with-split-sum-ibl.md]. Shadowing sorts Gaussians by depth relative to the sun camera [4487-3d-gaussian-splatting-self-shadowing-t-light.md].
+
+During the light pass for shadowing, the projection covariance is not expanded by $0.3I$ and no amplitude compensation is applied, preserving the main camera pass's sampling expansion [4487-3d-gaussian-splatting-self-shadowing-t-light.md]. In shadowing calculations, sun camera framing, sorting, coverage, and threshold branches are treated as constants to prevent incorrect gradient propagation [4487-3d-gaussian-splatting-self-shadowing-t-light.md].
+
+## Subtopics
+
+### [Analytic-Splatting Forward Shading](3459-analytic-splatting-forward-shading.md)
+Computes the 2D Gaussian signal response for a pixel by performing eigendecomposition on the projected covariance matrix, rotating the coordinate system to decouple axes, and applying a conditioned logistic function to approximate the pixel area integral of the Gaussian CDF. It differs from standard 3D Gaussian Splatting by replacing the simple Gaussian evaluation at the pixel center with an analytic integration approximation, and from Mip-Splatting by using a logistic function approximation rather than a Mip-NeRF-inspired cone integral, thereby achieving state-of-the-art detail fidelity under multiscale and super-resolution settings at the cost of increased computational operations.
+
+### [Transparency and Blending Models](9274-transparency-and-blending-models.md)
+Defines how 3D Gaussian primitives are composited into a 2D image, addressing the limitations of standard front-to-back alpha blending which requires strict depth sorting and assumes non-overlapping primitives [G]. The family includes approaches that balance performance and accuracy [3294-hybrid-transparency.md], analytic volumetric integration that eliminates projection artifacts [4440-analytic-transmittance-3dgs.md], and order-independent methods that bypass sorting entirely [7562-sparseoit-rasterizer.md].
+
+### [Lighting, Shadowing & Relighting](11894-lighting-shadowing-relighting.md)
+Extends 3D Gaussian Splatting to support physically based lighting, self-occlusion, and material-aware relighting. It solves the limitation of standard splatting, which renders only baked view-dependent colors, by introducing material attributes (normals, roughness, albedo) and computing lighting via deferred shading or dedicated light-space rasterization passes [4464-ref-gaussian-deferred-surfel-rendering-with-split-sum-ibl.md][4487-3d-gaussian-splatting-self-shadowing-t-light.md][4489-light-space-rasterization-for-t-light.md]. It is distinguished from [Analytic-Splatting Forward Shading](3459-analytic-splatting-forward-shading.md) by its focus on physical material properties and deferred pipelines rather than analytic signal response, and from [Transparency and Blending Models](9274-transparency-and-blending-models.md) by its explicit handling of light transport and occlusion transmittance.
+
+## Background
+The standard 3D Gaussian Splatting method [3D Gaussian Splatting](2812-3d-gaussian-splatting.md) renders baked view-dependent colors using a fast differentiable rasterizer. Extensions to support physical lighting and robust blending emerged to address artifacts in transparent regions and the inability to relight scenes. Deferred surfel rendering and self-shadowing techniques were introduced to enable physically based rendering within the Gaussian splatting framework [4464-ref-gaussian-deferred-surfel-rendering-with-split-sum-ibl.md][4487-3d-gaussian-splatting-self-shadowing-t-light.md].
+

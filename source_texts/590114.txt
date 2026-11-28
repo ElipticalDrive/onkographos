@@ -1,0 +1,646 @@
+Devkit - RslPlugin: Iso-Surface (Reyes)
+RslPlugin (Reyes)
+Iso-Surface
+main index
+Introduction
+Writing interior volume shaders allows the visualization of
+many interesting effects. A starting point for the development of a volume shader
+that ray-marches through a volume such as a sphere is shown in listing 1.
+A simple scene that can be used to test the shader is given in listing 2.
+Listing 1 "raymarcher.sl" - version 1
+```
+volume
+raymarcher(float stepSize = 0.05,
+                  nFreq = 5,
+                  nAmp = 0.05,
+                  nMin = 0.58,
+                  nMax = 0.65,
+                  Kfb = 0.1)
+{
+float   totalDist = length(I);
+point   frontP = P - I;
+point   currP = frontP, p;
+float   accum = 0, ns;
+float   currDist = random() * stepSize;
+  
+while(currDist <= totalDist) {
+    currP = frontP + currDist/totalDist * I;
+        
+    // Simple sampling of 3D noise
+    p = transform("current", "shader", currP);
+    ns = noise(p * nFreq);
+    accum += smoothstep(nMin, nMax, ns) * nAmp;
+    currDist += stepSize;
+    }
+accum *= Kfb;
+Oi = accum;
+Ci = accum;
+}
+```
+Listing 2 (raymarcher.rib)
+```
+Option "searchpath" "shader" "@:../shaders"
+Display "raymarcher" "it" "rgb"
+Format 427 427 1
+Projection "perspective" "fov" 20
+ShadingRate 2
+  
+Translate  0 0 3.5
+Rotate 0 1 0 0
+Rotate 90   0 1 0
+Scale 1 1 -1
+WorldBegin
+    Attribute "shade" "strategy" ["vpvolumes"]    
+    Interior "raymarcher"
+             "float stepSize" 0.05
+             "float nFreq" 7
+             "float nAmp" 0.2
+    Surface "defaultsurface"
+    Opacity .1 .1 .1
+    Sphere 0.5 -0.5 0.5 360
+WorldEnd
+```
+The sampling of 3D noise can also be done in a way that finds an iso-surface
+defined by points that have values equal, or very nearly equal, to zero. Such
+points can be baked into a pointcloud, subsequently converted to a brickmap and
+then rendered as geometry. Baking the points defined by an implicit function
+is not difficult. However, for a brickmap to create the illusion of a
+continuous surface, figure 1, requires the baking of both points and accurate
+normals.
+Figure 1
+With and without baked normals.
+As a volume shader (ray) marches from the front to the rear surface of an
+enclosed shape it can detect, relatively easily, when the current
+point (refer to the variable currP in listing 1) is close
+to the iso-surface. Unfortunately, a
+built-in RSL function (shadeop) does not exist that will enable the shader to
+get information about the normal at that point. Unless the shader writer can determine the
+normal from a mathematical analysis of the implicit function the only recourse
+is to consider the current point as the center of a small cube (voxel) and to test
+if the cube spans the iso-surface. If the voxel does span the iso-surface there
+are techniques that can be used to polygonize the cube. In effect, the polygon can
+be considered to be a tiny patch of the iso-surface. After polygonization the
+normal to the polygon can be calculated - figure 2.
+Figure 2
+A voxel that spans the iso-surface has a mixture of positive and negative
+"field" values at its vertices (shown as red and blue dots). Polygonization
+finds the iso-surface (shown as a purple polygon). The normal to
+the iso-surface is calculated by taking the cross-
+product of the vectors formed by two edges of the polygon.
+The next part of the tutorial explains how a custom RSL function is implemented
+as a RslPlugin. I have prepared a C++ class,
+called Voxel, that uses a polygonization algorithm by Jules
+Bloomenthal. His reseach paper "Boundary Representation of Implicit Surfaces" was
+published by the Palo Alto Research Center (CSL-87-2) in 1987. The Voxel class will
+be the foundation upon which a custom RSL function, called implicit()
+is built. The function will be used by the modified version of the volume shader
+shown below.
+Listing 3 (raymarcher.sl)
+```
+plugin "implicit";
+volume raymarcher (float  step = 0.025,
+                          freq = 4,
+                          Kd = 0.6;
+                  string  bakename = "",
+                          bakespace = "world")
+{
+float    totalDist = length(I);
+point    frontP = P - I;    
+point    currP = frontP;
+float    stepCount = 1;
+  
+// Jitter the starting point
+float   currDist = random() * step;
+vector  deltaI = 1.0/totalDist * I;
+float   ns;
+normal  n = 0;
+  
+while(currDist <= totalDist) {
+    currP = frontP + currDist/totalDist * I;
+    currP = transform(bakespace, currP);
+    // Use the custom function to find the normal
+    if(implicit(currP, step, freq, n) == 1) {
+        currP = transform(bakespace, "camera", currP);
+        n = ntransform(bakespace, "camera", n);
+        n = normalize(n);
+        if(bakename != "")
+                bake3d(bakename,"P,N", currP, n, "P", currP, "N", n,
+                        "radius", 0.005);
+        }
+    currDist += step;
+    stepCount += 1;
+    }
+Ci = Ci;
+}
+```
+The shader, using the custom implicit() function, is able to bake the
+points and the normals that will be used by a brickmap to "reconstruct" the appearance
+of an iso-surface.
+Implementing the RslPlugin
+The RslPlugin, called "implicit", consists of the following source code files.
+```
+   1  implicit.cpp
+   2  Voxel.h, Voxel.cpp
+   3  DemoVoxel.h, DemoVoxel.cpp
+```
+The first file implements the actual RslPlugin. The second group of files
+define the Voxel class that implements the Bloomenthal's polygonization algorithm.
+The third pair of files define a class called DemoVoxel that is derived from the
+Voxel class. The DemoVoxel overrides a method called getImplicitValueAt().
+Given a 3D point, the method returns a value calculated by the arbitary use the sin() and
+cos() functions - figure 3.
+```
+    double NoiseVoxel::getImplicitValueAt(Vertex *vert) {
+        return sin(vert->x * freq) + 
+               cos(vert->y * freq) + 
+               sin(vert->z * freq);
+        }
+```
+The reader should note the implementation of getImplicitValueAt() is
+part of the DemoVoxel class NOT the Voxel class. It is best not to edit the code
+of the Voxel class.
+Figure 3
+The getImplicitValueAt() is called 8 times, once for each vertex
+of the voxel. The (central location) of the voxel is determined by the shader
+that ray-marches through a volume. The "work" done by the DemoVoxel class is
+very light - it merely calculates floating point values. The Voxel class
+determines if the current location of the voxel spans the iso-surface and if
+it does it polygonizes the voxel and calculates the normal.
+Building the RslPlugin
+The following notes assume the reader is using Pixar's RenderManProServer on
+either Linux or MacOSX. For more information about steps 1 to 3 refer to the
+tutorial "RslPlugin: aveOpacity"
+Step 1
+Create a folder (project directory) in which you can save the files associated
+with building and testing the plugin - the location is not important.
+Step 2
+In preferences set the locations of your "rsl source" and "shader" files.
+Step 3
+In Cutter's->Edit->Preferences set the root directory of Pixar's devkit.
+This will generally be the same folder as the RenderManProServer installation
+directory.
+Step 4
+Copy and paste the text for listings 3 to 9 into files saved in your project
+directory. The directory should contain these files.
+```
+   implicit.cpp
+   DemoVoxel.cpp
+   DemoVoxel.h
+   raymarcher.rib
+   raymarcher.sl
+   Voxel.cpp
+   Voxel.h
+   
+```
+Step 5
+With the implicit.cpp file as the front window in Cutter use the
+keyboard shortcut Control + e or Alt + e to compile and build the RslPlugin -
+you should find it in the project directory named as implicit.so.
+If you encounter a problem refer to step 4 of tutorial
+"RslPlugin: aveOpacity".
+Step 6
+Open the raymarcher.sl document in Cutter and compile the shader - Alt + e,
+Control + e.
+Step 7
+Open the raymarcher.rib file in Cutter and render both frames - Alt + e,
+Control + e. You should see a beauty pass render similar to figure 3.
+Suggestions
+Unless (core) functionality is being added to the Voxel class it is best not to
+edit the Voxel.cpp file - simply leave it alone! However, there are a couple of
+improvements
+that could be made to Voxel. For example, the point that is baked by raymarcher.sl
+represents the center of the voxel. It would be better if the RslPlugin (implicit)
+returned the center of the iso-surface. Baking that point would probably give more
+accurate results. Also, the shader bakes a value for the
+"radius" parameter of the bake3d() function that is somewhat arbitary in size.
+It might be better if the Voxel class also calculated the "size" of the iso-surface
+(polygon) and returned that value. The shader would then have a better opportunity
+of setting an appropriate "radius" value.
+Listing 4 (implicit.cpp)
+```
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+#include "pnoise.h"
+#include "Voxel.h"
+#include "DemoVoxel.h"
+#include "RslPlugin.h"
+  
+extern "C" {
+  
+//-------------------------------------
+// init - Called at startup
+//-------------------------------------
+void init(RixContext *ctx) {
+    }
+//-------------------------------------
+// cleanup - Called at shutdown
+//-------------------------------------
+void cleanup(RixContext *ctx) {
+    }
+//-------------------------------------
+// implicit - Main function
+//-------------------------------------
+RSLEXPORT int implicit (RslContext* rslContext, int argc, const RslArg* argv[])
+{
+RslFloatIter    result(argv[0]);
+RslPointIter    pointArg(argv[1]);
+RslFloatIter    stepArg(argv[2]);
+RslFloatIter    freqArg(argv[3]);
+RslPointIter    normalArg(argv[4]);
+  
+int     numVals = argv[0]->NumValues();
+float   x,y,z, step, freq;
+  
+DemoVoxel voxel;
+  
+for (int i = 0; i < numVals; ++i) {
+    x = (*pointArg)[0];
+    y = (*pointArg)[1];
+    z = (*pointArg)[2];    
+    step = *stepArg;
+    freq = *freqArg;
+    voxel.setFrequency(freq);
+    voxel.setbounds(x,y,z, step);
+    voxel.polygonize();
+    if(voxel.isActive()) {
+        *result = 1;
+        Point3D *norm = voxel.getNormal();
+        (*normalArg)[0] = norm->x;
+        (*normalArg)[1] = norm->y;
+        (*normalArg)[2] = norm->z;
+        }
+  
+    // Increment the iterators - not really necessary
+    // because we are accessing uniform values!!
+    ++normalArg;
+    ++pointArg;
+    ++stepArg;
+    ++result;
+    }
+return 0;
+}
+  
+static RslFunction myFunctions[] = {
+    { "float implicit(point,float,float,output normal)", implicit,init,cleanup },
+    { NULL }
+    };
+RSLEXPORT RslFunctionTable RslPublicFunctions = myFunctions;
+};  // extern "C"
+```
+Listing 5 (Voxel.h)
+```
+#ifndef VOXEL_H
+#define VOXEL_H
+#define HOT   1
+#define COLD  0
+  
+typedef struct {
+    float x,y,z;
+    } Point3D;
+typedef struct {
+    Point3D  pnt[8];
+    int      index; // Effectively the number of sides of the poly
+    Point3D  normal;
+    } Polygon;     
+typedef struct {
+    float    x,y,z;
+    float    fv;        // The raw field value
+    int      temp;    // HOT or COLD ie. 1 or 0
+    float    P[3];
+    } Vertex;
+class Voxel {
+public:
+    Voxel();
+    void     setbounds(double x, double y, double z, double step);
+    void     polygonize();
+    int      isActive();
+    Point3D *getNormal();
+    // Sub-classes must override this method
+    virtual double     getImplicitValueAt(Vertex *pnt);
+private:
+    void    setVertexValues();
+    int     findFirstEdge();
+    void    findNextEdge(int code, int thisEdge);
+    void    crossProduct(Point3D *v1, Point3D *v2);
+    Vertex  vtx[8];
+    Polygon isoSurface;
+};
+#endif
+```
+Listing 6 (Voxel.cpp)
+```
+/*  Voxel.cpp
+    Malcolm Kesson
+    Feb 28 2011
+*/ 
+#include <math.h>
+#include "Voxel.h"
+#include <stdio.h>
+  
+//---------------------------------------------------
+// getImplicitValueAt - public
+//---------------------------------------------------
+// Sub-classes must override this method
+double Voxel::getImplicitValueAt(Vertex *vert) {
+return 0.0;
+}
+//---------------------------------------------------
+// setVertexValues - private
+//---------------------------------------------------
+
+void Voxel::setVertexValues() {
+double     val;
+for(int n = 0; n < 8; n++) {
+    val = getImplicitValueAt(&vtx[n]);
+    vtx[n].temp = (val <= 0.0) ? COLD : HOT;
+    vtx[n].fv = val;
+    }
+}
+//---------------------------------------------------
+// polygonize - public
+//---------------------------------------------------
+void Voxel::polygonize() {
+setVertexValues();
+int firstEdge = findFirstEdge();
+// Voxel does not cross the field
+if(firstEdge >= 100) {
+    return;
+    }
+// Reverse edgecode to give completion code    
+int    lastVert = firstEdge % 10;
+int    firstVert = int ((firstEdge - lastVert) * 0.1);
+int    completionCode = lastVert * 10 + firstVert;
+  
+// Note: the FindNextEdge() function is recursive
+findNextEdge(completionCode, firstEdge);
+return;
+}
+//---------------------------------------------------
+// findFirstEdge - private
+//---------------------------------------------------
+// The implementation of findFirstEdge() and findNextEdge() 
+// is based on Blumenthal's polygonization algorithm. See,
+//        Bloomenthal J. (1987) 
+//        Boundary Representation of Implicit Surfaces. 
+//        Palo Alto Research Center (CSL-87-2) (Draft)
+// Having found an edge that is crossed by the implicit 
+// surface we visit the other edges of the voxel that also 
+// cross the implicit surface.
+//
+int    Voxel::findFirstEdge() 
+{  
+// Find a hot/cold combination, edgecode must be ordered cold->hot
+for(int i = 0; i <= 7; i++) {
+     // Check the special cases first
+    if (i == 3) {
+        if (vtx[3].temp == COLD && vtx[0].temp == HOT) return 30;         
+        if (vtx[3].temp == HOT && vtx[0].temp == COLD) return 3; 
+         }
+     else if (i == 7) {
+        if (vtx[7].temp == COLD && vtx[4].temp == HOT) return 74;         
+        if (vtx[7].temp == HOT && vtx[4].temp == COLD) return 47;     
+         }    
+     else if (i != 3 || i != 7) {
+         if (vtx[i].temp == COLD && vtx[i+1].temp == HOT) return i*10 + i+1;
+         if (vtx[i].temp == HOT && vtx[i+1].temp == COLD) return (i+1)*10 + i;
+         }    
+    }
+// Do the same for the vertical edges
+for(int i = 0; i <= 3; i++) { 
+     if (vtx[i].temp == COLD && vtx[i+4].temp == HOT) return i*10 + i+4;    
+     if (vtx[i].temp == HOT && vtx[i+4].temp == COLD) return (i+4)*10 + i;
+     }
+return 100; // This voxel does not span the implicit-surface
+}
+//---------------------------------------------------
+// findNextEdge - private
+//---------------------------------------------------
+// See the comments for findFirstEdge()
+void Voxel::findNextEdge(int completionCode, int thisEdge) 
+{
+int    next, nextEdge, reverse;
+int    prev = thisEdge % 10;
+switch (thisEdge) { 
+      /* Left face */
+       case 1:     next = 5; nextEdge = 15; reverse = 51; break;
+       case 15:    next = 4; nextEdge = 54; reverse = 45; break;                 
+       case 54:    next = 0; nextEdge = 40; reverse = 4;  break;
+       case 40:    next = 1; nextEdge = 1;  reverse = 10; break;
+                          
+       /* Front face */                                     
+       case 4:     next = 7; nextEdge = 47; reverse = 74; break;
+       case 47:    next = 3; nextEdge = 73; reverse = 37; break;                 
+       case 73:    next = 0; nextEdge = 30; reverse = 3;  break;
+       case 30:    next = 4; nextEdge = 4;  reverse = 40; break; 
+                 
+       /* Right face */                                                  
+       case 37:    next = 6; nextEdge = 76; reverse = 67; break;
+       case 76:    next = 2; nextEdge = 62; reverse = 26; break;                 
+       case 62:    next = 3; nextEdge = 23; reverse = 32; break;
+       case 23:    next = 7; nextEdge = 37; reverse = 73; break;
+                 
+       /* Rear face */                 
+       case 12:    next = 6; nextEdge = 26; reverse = 62; break;                 
+       case 26:    next = 5; nextEdge = 65; reverse = 56; break;
+       case 65:    next = 1; nextEdge = 51; reverse = 15; break;                 
+       case 51:    next = 2; nextEdge = 12; reverse = 21; break;
+                 
+       /* Top face */                 
+       case 45:    next = 6; nextEdge = 56; reverse = 65; break;                 
+       case 56:    next = 7; nextEdge = 67; reverse = 76; break;
+       case 67:    next = 4; nextEdge = 74; reverse = 47; break;                 
+       case 74:    next = 5; nextEdge = 45; reverse = 54; break;
+                 
+       /* Base */                 
+       case 3:     next = 2; nextEdge = 32; reverse = 23; break;                 
+       case 32:    next = 1; nextEdge = 21; reverse = 12; break;
+       case 21:    next = 0; nextEdge = 10; reverse = 1;  break;                 
+       case 10:    next = 3; nextEdge = 3; reverse = 30;                          
+     }            
+if((vtx[next].temp == COLD) && (vtx[prev].temp == HOT))
+     {
+     // Calculate implicit surface/edge of cube intersection
+     double  t = fabs( vtx[prev].fv / (vtx[prev].fv - vtx[next].fv));    
+     int     index = isoSurface.index;
+    
+     isoSurface.pnt[index].x = t * (vtx[next].x - vtx[prev].x) + vtx[prev].x;
+     isoSurface.pnt[index].y = t * (vtx[next].y - vtx[prev].y) + vtx[prev].y;            
+     isoSurface.pnt[index].z = t * (vtx[next].z - vtx[prev].z) + vtx[prev].z;
+     isoSurface.index++;
+        
+     if(nextEdge == completionCode) 
+        return;     
+     // The maximum number of edges of a polygon crossing a
+     // voxel is 8. Something has gone wrong if index exceeds 7!
+     if(index > 7) 
+        return;
+        
+     // Note: recursion
+     findNextEdge(completionCode, reverse);
+     }
+else
+     findNextEdge(completionCode, nextEdge);
+  
+// Get the normal to the voxel's polygon 
+if(isoSurface.index >= 3) {
+    Point3D v1;
+    v1.x = isoSurface.pnt[0].x - isoSurface.pnt[1].x;
+    v1.y = isoSurface.pnt[0].y - isoSurface.pnt[1].y;
+    v1.z = isoSurface.pnt[0].z - isoSurface.pnt[1].z;
+    Point3D v2;
+    v2.x = isoSurface.pnt[2].x - isoSurface.pnt[1].x;
+    v2.y = isoSurface.pnt[2].y - isoSurface.pnt[1].y;
+    v2.z = isoSurface.pnt[2].z - isoSurface.pnt[1].z;
+    crossProduct(&v1, &v2);
+    }
+}
+//---------------------------------------------------
+// crossProduct - private
+//---------------------------------------------------
+// http://www.physics.uoguelph.ca/tutorials/torque/Q.torque.cross.html
+void Voxel::crossProduct(Point3D *v1, Point3D *v2)
+{
+isoSurface.normal.x = v1->y * v2->z - v1->z * v2->y;
+isoSurface.normal.y = v1->z * v2->x - v1->x * v2->z;
+isoSurface.normal.z = v1->x * v2->y - v1->y * v2->x;
+}
+//---------------------------------------------------
+// isActive - public
+//---------------------------------------------------
+int    Voxel::isActive() { return (isoSurface.index >= 3) ? 1 : 0; }
+//---------------------------------------------------
+// getNormal - public
+//---------------------------------------------------
+Point3D *Voxel::getNormal() { return &isoSurface.normal }
+//---------------------------------------------------
+// setbounds - public
+//---------------------------------------------------
+// Reset the information for the voxel data structure
+void Voxel::setbounds(double x, double y, double z, double step)
+{
+double delta = step/2;
+vtx[0].x = vtx[1].x = vtx[4].x = vtx[5].x = x - delta;
+vtx[2].x = vtx[3].x = vtx[6].x = vtx[7].x = x + delta;
+vtx[0].y = vtx[1].y = vtx[2].y = vtx[3].y = y - delta;
+vtx[4].y = vtx[5].y = vtx[6].y = vtx[7].y = y + delta;
+vtx[1].z = vtx[2].z = vtx[5].z = vtx[6].z = z - delta;    
+vtx[0].z = vtx[3].z = vtx[4].z = vtx[7].z = z + delta;
+isoSurface.index = 0;
+for(int n = 0; n <= 7; n++)
+    vtx[n].temp = COLD;
+return;
+}
+Voxel::Voxel()  { }
+```
+Listing 7 (DemoVoxel.h)
+```
+#ifndef DEMOVOXEL_H
+#define DEMOVOXEL_H
+  
+#include "Voxel.h"
+  
+class DemoVoxel : public Voxel {
+public:
+    DemoVoxel();
+    void    setFrequency(double f);
+    virtual double     getImplicitValueAt(Vertex *pnt);
+    
+private:
+    double freq;
+};
+  
+#endif
+```
+Listing 8 (DemoVoxel.cpp)
+```
+// DemoVoxel.cpp
+// An example of sub-classing Voxel
+#include "DemoVoxel.h"
+#include "Voxel.h"
+#include "pnoise.h"
+#include <stdio.h>
+  
+//---------------------------------------------------
+// constructor
+//---------------------------------------------------
+// This is called by raymarcher's init() function. Here
+// we initialize the lookup tables used by Ken Perlin's
+// pnoise function.
+DemoVoxel::DemoVoxel() : Voxel()
+{
+noise_init(); 
+}
+  
+//---------------------------------------------------
+// getImplicitValueAt - override
+//---------------------------------------------------
+double DemoVoxel::getImplicitValueAt(Vertex *vert) 
+{
+return pnoise(vert->x * freq, vert->y * freq, vert->z * freq);
+}
+  
+//---------------------------------------------------
+// getImplicitValueAt - public
+//---------------------------------------------------
+void DemoVoxel::setFrequency(double f) 
+{ 
+freq = f; 
+}
+```
+Listing 9 (raymarcher.rib)
+```
+Option "searchpath" "shader"  "@:../shaders"
+FrameBegin 1
+    DisplayChannel "point P"
+    DisplayChannel "normal N"
+    Option "limits" "bucketsize" [24 24]
+  
+    Display "marcher" "it" "rgba"
+    Format 400 400 1
+    Projection "perspective" "fov" 20
+    ShadingRate 10
+    
+    Translate  0 0 7
+    Rotate -30 1 0 0
+    Rotate 0   0 1 0
+    Scale 1 1 -1
+    WorldBegin
+        Interior "raymarcher" 
+                "string bakename" ["./marcher.ptc"]
+                "float step" 0.02 "float freq" 9
+                
+        Attribute "shade" "strategy" ["vpvolumes"]    
+        Surface "defaultsurface"
+        Opacity .1 .1 .1
+        Sphere 1 -1 1 360
+    WorldEnd
+    System "brickmake -progress 1 ./marcher.ptc ./marcher.bkm"
+FrameEnd
+  
+FrameBegin 2
+    Option "limits" "bucketsize" [24 24]    
+    Display "implicit" "it" "rgba"
+    Format 400 400 1
+    Projection "perspective" "fov" 20
+    ShadingRate 20
+    LightSource "distantlight" 1 "intensity" 0.1
+                "from" [0 0 0] "to" [0 0 1]    
+    Translate  0 0 7
+    Rotate -30 1 0 0
+    Rotate 0   0 1 0
+    Scale 1 1 -1
+    Imager "background" "background" [1 1 1]
+    Exposure 1 2.2
+    WorldBegin
+        Attribute "visibility" "int trace" [1]
+        LightSource "shadowdistant" 1 "intensity" 0.4
+                    "from" [0 1 0] "to" [0 0 0]    
+                    "string shadowname" ["raytrace"]
+        
+        Surface "plastic" "Ks" 1
+        Geometry "brickmap" "filename" "./marcher.bkm"
+    WorldEnd
+FrameEnd
+```
+© 2002- Malcolm Kesson. All rights reserved.

@@ -1,0 +1,238 @@
+Contribute to taojin-6/volumetric_kit_recon development by creating an account on GitHub.
+
+feat(volume): VoxelBlockGrid SoA per-voxel attribute store by taojin-6 · Pull Request #16 · taojin-6/volumetric_kit_recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Jul 6, 2026
+Copy link
+Copy Markdown
+Owner
+What
+Adds VoxelBlockGrid — a structure-of-arrays (SoA) per-voxel attribute store in the volume tier, the foundation the TSDF (and later colour) integrators write into and meshing reads from.
+Design (Open3D VoxelBlockGrid model)
+The VoxelHashMap keys only a block index; each per-voxel channel is its own flat device array of num_blocks · voxels_per_block elements, keyed by BlockIndex::ptr, declared at create() and allocated + zeroed independently:
+```
+AttributeSpec attrs[] = {{"tsdf", 4}, {"weight", 4}};   // name + per-voxel byte size
+auto vbg = VoxelBlockGrid::create(dev, alloc, grid, attrs, 2);
+vbg.map().allocate(coords, n);                            // block index
+auto tsdf = vbg.attribute("tsdf").value();               // buffer + size to bind/read
+```
+A consumer materialises only the channels it needs, so a volume-only user (pure spatial hashing) allocates zero per-voxel memory — instead of forcing the full SDF volume (~6 GB at prod defaults) onto every map. This diverges from the monolithic prior engine (a single AoS Voxel{sdf,weight} buffer inside the hash-table struct); recorded as the 2026-07-05 locked decision in CLAUDE.md.
+Move-only (rule of zero over the owned map + attribute Buffers); attribute() returns a non-owning view (buffer + element_size + element_count).
+Proof
+volume_block_grid_test verifies two independent float attributes are distinct, correctly-sized buffers; that writing one leaves the other untouched; that the composed map still allocates/compacts and its BlockIndex::ptr keys into the attributes; the error paths (null list, empty name, zero size, duplicate name); a bare zero-attribute grid; and the move-only trio.
+✅ 14/14 ctest on MoltenVK · ASan clean · -Werror clean
+Next
+feat(tsdf): classic projective integration — a new tsdf tier that binds attribute("tsdf")/("weight") + the compacted block list + a uint16 depth SSBO + camera params, and runs the faithful classic kernel (sdf = depth − Zc, node-centred voxels, inverse-square weight, running average capped at max_tsdf_weight).
+🤖 Generated with Claude Code
+taojin-6
+self-assigned this
+Jul 6, 2026
+taojin-6
+mentioned this pull request
+Jul 6, 2026
+feat(tsdf): classic projective TSDF integration (stacked on #16)
+#17
+Merged
+taojin-6
+added a commit
+that referenced
+this pull request
+Jul 6, 2026
+fix(volume): address PR #16 review
+…
+82dcb46
+```
+- VoxelBlockGrid::attribute() derives element_count from the backing
+  buffer, not the live map grid, so a later map().resize() cannot inflate
+  the reported count past the frozen attribute storage (a downstream
+  bounds check stays sound). Document the resize limitation on map() with
+  a greppable TODO, and add a resize regression test.
+- Hand-write operator= with a self-move guard: the defaulted memberwise
+  move-assign ran `attributes_ = std::move(attributes_)`, whose std::vector
+  self-move frees the attribute Buffers while map_ survives (valid()==true
+  with the attributes gone). The self-move test now runs on a grid that
+  still owns its attributes, exercising the guard.
+- Strengthen the ptr-keying test: probe two distinct blocks for
+  voxel-granular, disjoint ranges instead of a tautological same-index
+  round-trip; drop the heap-order-coupled weight==0 assertion.
+- Hoist attribute-spec validation ahead of the map + buffer allocations,
+  so a malformed spec is rejected allocation-free (the test's "before any
+  buffer is allocated" claim now holds).
+- Mark the host-visible attribute buffers' device-local follow-up with a
+  greppable TODO.
+
+Verified on MoltenVK: 14/14 ctest, ASan/UBSan clean, -Werror clean,
+pinned clang-format. Confirmed the strengthened self-move test fails
+against the pre-fix defaulted operator=.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+and others
+added 4 commits
+July 6, 2026 00:45
+feat(volume): VoxelBlockGrid SoA per-voxel attribute store
+…
+f4e31b2
+```
+Introduce VoxelBlockGrid: a VoxelHashMap block index composed with a set of
+named, independently-allocated per-voxel attribute arrays (structure-of-
+arrays), mirroring Open3D's VoxelBlockGrid. Each attribute ("tsdf", "weight",
+"color", ...) is its own flat device buffer of num_blocks * voxels_per_block
+elements, keyed by BlockIndex::ptr, declared at create() with a per-voxel byte
+size and allocated + zeroed independently.
+
+A consumer materialises only the channels it needs, so a volume-only user
+allocates zero per-voxel memory rather than the full SDF volume (~6 GB at prod
+defaults). Diverges from the monolithic prior engine's AoS Voxel{sdf,weight}
+buffer inside the hash table (see the 2026-07-05 SoA decision in CLAUDE.md).
+The TSDF / colour integrators and meshing will bind attribute("tsdf") etc.
+
+Move-only (rule of zero over the owned map + attribute Buffers); attribute()
+returns a non-owning view (buffer + element_size + count) to bind or read.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+test(volume): prove VoxelBlockGrid SoA storage on MoltenVK
+…
+1b2082a
+```
+Declare two independent float attributes, verify they are distinct,
+correctly-sized device buffers (num_blocks * voxels_per_block), that writing
+one leaves the other untouched, that the composed VoxelHashMap still allocates
++ compacts and its BlockIndex::ptr keys into the attribute arrays, and the
+error paths (null list, empty name, zero size, duplicate name) + a bare
+zero-attribute grid + the move-only trio.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+docs: record the VoxelBlockGrid SoA attribute store
+…
+af97d04
+```
+Add the 2026-07-05 locked decision (SoA per-voxel storage over the prior
+engine's AoS Voxel-in-the-hashmap) and note VoxelBlockGrid in the volume-tier
+"Where to start" + CHANGELOG.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+fix(volume): address PR #16 review
+…
+446ac34
+```
+- VoxelBlockGrid::attribute() derives element_count from the backing
+  buffer, not the live map grid, so a later map().resize() cannot inflate
+  the reported count past the frozen attribute storage (a downstream
+  bounds check stays sound). Document the resize limitation on map() with
+  a greppable TODO, and add a resize regression test.
+- Hand-write operator= with a self-move guard: the defaulted memberwise
+  move-assign ran `attributes_ = std::move(attributes_)`, whose std::vector
+  self-move frees the attribute Buffers while map_ survives (valid()==true
+  with the attributes gone). The self-move test now runs on a grid that
+  still owns its attributes, exercising the guard.
+- Strengthen the ptr-keying test: probe two distinct blocks for
+  voxel-granular, disjoint ranges instead of a tautological same-index
+  round-trip; drop the heap-order-coupled weight==0 assertion.
+- Hoist attribute-spec validation ahead of the map + buffer allocations,
+  so a malformed spec is rejected allocation-free (the test's "before any
+  buffer is allocated" claim now holds).
+- Mark the host-visible attribute buffers' device-local follow-up with a
+  greppable TODO.
+
+Verified on MoltenVK: 14/14 ctest, ASan/UBSan clean, -Werror clean,
+pinned clang-format. Confirmed the strengthened self-move test fails
+against the pre-fix defaulted operator=.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+force-pushed
+the
+feat/volume-block-grid
+branch
+from
+82dcb46 to
+446ac34
+Compare
+July 6, 2026 07:47
+Hide details
+View details
+taojin-6
+merged commit 9ef2c7f
+into
+main
+Jul 6, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+taojin-6
+added a commit
+that referenced
+this pull request
+Jul 6, 2026
+Merge pull request #17 from taojin-6/feat/tsdf-integrate
+…
+c30228b
+```
+feat(tsdf): classic projective TSDF integration (stacked on #16)
+```
+taojin-6
+deleted the
+feat/volume-block-grid
+branch
+July 6, 2026 08:35
+taojin-6
+mentioned this pull request
+Oct 8, 2026
+ci: only the owner triggers CI; the runner tooling is the core's
+#204
+Merged
+2 of 4 tasks
+taojin-6
+added a commit
+that referenced
+this pull request
+Oct 8, 2026
+ci: address the review of #204
+…
+6c13a18
+```
+The DECISIONS entry keeps only what is recon's and links the core's
+decision for the rationale and the runner tooling; ci.yml's header comment
+shrinks to the rule for editors. sanitizers.yml keeps the reason it stays
+off the GPU box, lost with the runner guide. The lint checkout's TODO says
+the core pin becomes one, read from third_party/CMakeLists.txt, once core
+#16 lands. The CHANGELOG's Removed entry moves to the top of its list.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+taojin-6
+mentioned this pull request
+Oct 22, 2026
+feat(networking): report partial stream client progress
+#269
+Merged
+taojin-6
+mentioned this pull request
+Oct 31, 2026
+build: re-pin sensor 0.13.0, depth outliers dropped by default
+#331
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

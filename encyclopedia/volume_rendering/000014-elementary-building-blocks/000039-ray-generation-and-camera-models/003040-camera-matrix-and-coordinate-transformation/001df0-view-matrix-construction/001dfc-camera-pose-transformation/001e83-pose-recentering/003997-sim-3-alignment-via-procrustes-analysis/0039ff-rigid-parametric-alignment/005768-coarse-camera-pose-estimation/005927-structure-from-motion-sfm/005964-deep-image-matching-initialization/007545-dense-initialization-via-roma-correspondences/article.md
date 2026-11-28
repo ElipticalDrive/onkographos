@@ -1,0 +1,187 @@
+# Dense Initialization via RoMa Correspondences
+
+Also called: RoMa-based Dense Initialization
+
+## Overview
+This method generates a dense, static point cloud initialization for differentiable Voronoi ray tracing by leveraging deep learning-based feature matching (RoMa) to establish correspondences between reference images. It solves the problem of sparse or noisy initial geometry in neural rendering by producing a high-quality, density-aware point cloud that serves as the fixed set of sites for subsequent optimization. Unlike traditional Structure-from-Motion (SfM) pipelines that rely on sparse keypoints, this approach uses dense matching confidence to sample correspondences, ensuring robust coverage even in textureless or repetitive regions. It builds on [Deep Image Matching Initialization](16400-deep-image-matching-initialization.md) by replacing generic deep matching with specific RoMa v2 correspondences and a density-aware subsampling strategy.
+
+## How it works
+The method constructs a fixed set of $N$ sites (points) with associated attributes (position, color, density, view-dependent features) and their Voronoi adjacency. The process is performed once at the beginning of training; no sites are inserted or removed during optimization.
+
+### Inputs and Outputs
+**Inputs:**
+- A set of input images with known camera poses (extrinsics) and intrinsics.
+- A target training budget $N_{total}$ (e.g., 2,000,000 sites).
+- A number of random background points $N_{bg}$ (e.g., 5,000).
+
+**Outputs:**
+- A point cloud of $N_{total}$ sites.
+- For each site: 3D position, diffuse color (logits), view-dependent texture (zeros), density parameter (low for background), and Voronoi cell adjacency.
+
+### Data Structures
+1.  **Point Cloud:** A list/array of $N_{total}$ sites.
+    -   `position`: `float32[3]` (World coordinates).
+    -   `color_logits`: `float32[T]` (Diffuse texture logits, repeated for all texels).
+    -   `vd_features`: `float32[V]` (View-dependent texture, initialized to zero).
+    -   `density`: `float32` (Initialized low for background points, standard for others).
+2.  **Voronoi Adjacency:** Constructed on GPU using the algorithm of Taveira et al. [2026]. Stores cell indices and neighbors for ray tracing.
+
+### Parameters
+-   $N_{ref}$: Maximum number of reference images (100).
+-   $k_{nn}$: Number of nearest neighbors for matching (3).
+-   $N_{samp}$: Correspondences sampled per image pair (15,000).
+-   $\epsilon_{reproj}$: Reprojection error threshold (2 pixels).
+-   $R_{vox}$: Voxel grid resolution for density estimation ($128^3$).
+-   $N_{total}$: Total training budget (2,000,000).
+-   $N_{bg}$: Number of random background points (5,000).
+
+### Steps
+
+1.  **Select Reference Images:**
+    Cluster the camera poses of all input images. Select up to $N_{ref}$ representative reference images from the clusters.
+
+2.  **Match Reference Images:**
+    For each reference image $I_i$:
+    -   Identify its $k_{nn}$ nearest neighboring cameras based on pose distance.
+    -   Use RoMa v2 [Edstedt et al. 2025] to match $I_i$ against each neighbor $I_j$.
+    -   Obtain a set of correspondences $(u_i, u_j)$ with matching confidence scores $c_{ij}$.
+
+3.  **Sample Correspondences:**
+    For each matched image pair $(I_i, I_j)$:
+    -   Sample $N_{samp}$ correspondences from the matched set.
+    -   Sampling probability is proportional to the matching confidence $c_{ij}$.
+
+4.  **Triangulate Points:**
+    For each sampled correspondence $(u_i, u_j)$:
+    -   Unproject $u_i$ and $u_j$ to 3D rays using the calibrated poses and intrinsics of $I_i$ and $I_j$.
+    -   Compute the midpoint of the shortest segment between the two rays as the 3D point $P$.
+    -   Calculate the reprojection error: project $P$ back into $I_i$ and $I_j$ and measure the pixel distance.
+
+5.  **Filter Points:**
+    Reject $P$ if:
+    -   Depth is negative (behind the camera).
+    -   Coordinates are non-finite (NaN or Inf).
+    -   Reprojection error $> \epsilon_{reproj}$.
+    -   Assign the RGB color of $P$ from the reference image $I_i$.
+
+6.  **Density-Aware Subsampling:**
+    -   Create a voxel grid of resolution $R_{vox} \times R_{vox} \times R_{vox}$ covering the scene.
+    -   Count the number of accepted points in each voxel to estimate local density $d_v$.
+    -   Calculate sampling probability for each point $P$ in voxel $v$ as $p \propto 1/d_v$.
+    -   Draw points according to these probabilities until the budget for foreground points $N_{fg} = N_{total} - N_{bg}$ is filled.
+
+7.  **Add Background Points:**
+    -   Generate $N_{bg}$ random points in the bounding volume surrounding the cloud.
+    -   Assign them low density values.
+
+8.  **Initialize Attributes:**
+    -   **Diffuse Texture:** For each point, take the logit of its RGB color. Repeat this logit value across all texels of the point's texture map.
+    -   **View-Dependent Texture:** Initialize all values to zero.
+    -   **Voronoi Adjacency:** Construct Voronoi cells and adjacency lists on the GPU using the scalable algorithm of Taveira et al. [2026].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dense_initialization_via_roma(images, poses, intrinsics, N_total=2_000_000, N_bg=5_000):
+    # Step 1: Select Reference Images
+    ref_indices = cluster_camera_poses(poses, max_clusters=100)
+    ref_images = [images[i] for i in ref_indices]
+    ref_poses = [poses[i] for i in ref_indices]
+    
+    all_points = []
+    
+    # Step 2 & 3: Match and Sample Correspondences
+    for i, (img_i, pose_i) in enumerate(zip(ref_images, ref_poses)):
+        # Find 3 nearest neighbors among reference images
+        neighbors = find_k_nearest_neighbors(pose_i, ref_poses, k=3)
+        
+        for neighbor in neighbors:
+            # Match using RoMa v2
+            correspondences = roma_v2_match(img_i, neighbor.image)
+            
+            # Sample 15,000 correspondences by confidence
+            sampled_corrs = sample_by_confidence(correspondences, n=15_000)
+            
+            # Step 4: Triangulate
+            for u_i, u_j in sampled_corrs:
+                ray_i = unproject_ray(u_i, pose_i, intrinsics)
+                ray_j = unproject_ray(u_j, neighbor.pose, intrinsics)
+                
+                # Compute closest point between two rays
+                p, _, _ = closest_point_between_rays(ray_i, ray_j)
+                
+                # Step 5: Filter
+                if is_valid_point(p, pose_i, intrinsics, threshold=2.0):
+                    color = get_pixel_color(img_i, u_i)
+                    all_points.append({
+                        'position': p,
+                        'color': color,
+                        'source_image': img_i
+                    })
+    
+    # Step 6: Density-Aware Subsampling
+    # Estimate density with 128^3 voxel grid
+    voxel_grid = create_voxel_grid(resolution=128, bounds=get_scene_bounds(all_points))
+    voxel_counts = compute_voxel_occupancy(voxel_grid, all_points)
+    
+    # Calculate inverse density weights
+    weights = []
+    for p in all_points:
+        v = voxel_grid.get_voxel(p.position)
+        density = voxel_counts[v]
+        # Avoid division by zero
+        w = 1.0 / max(density, 1e-6)
+        weights.append(w)
+    
+    # Draw points proportional to inverse occupancy
+    n_fg = N_total - N_bg
+    selected_points = weighted_sampling(all_points, weights, n=n_fg)
+    
+    # Step 7: Add Background Points
+    bg_points = generate_random_points_in_bounds(N_bg, get_scene_bounds(all_points))
+    
+    # Combine
+    final_points = selected_points + bg_points
+    
+    # Step 8: Initialize Attributes
+    for p in final_points:
+        if p in bg_points:
+            p.density = LOW_DENSITY
+        else:
+            p.density = STANDARD_DENSITY
+            
+        # Diffuse texture: repeat logit of RGB across all texels
+        logits = rgb_to_logit(p.color)
+        p.diffuse_texture = repeat(logits, num_texels)
+        
+        # View-dependent texture: zero
+        p.vd_texture = zeros_like(p.vd_texture)
+        
+    # Construct Voronoi Adjacency on GPU
+    voronoi_cells = construct_voronoi_cells(final_points)
+    adjacency = compute_voronoi_adjacency(voronoi_cells)
+    
+    return final_points, adjacency
+```
+
+### Edge Cases and Pitfalls
+-   **Negative Depth:** Points must be rejected if they lie behind the camera plane of the reference image.
+-   **Non-Finite Coordinates:** Triangulation of parallel rays or numerical instability can produce NaN/Inf; these must be filtered.
+-   **Over-matching:** Density-aware sampling is critical to prevent the budget from being exhausted in high-texture regions, leaving textureless areas uncovered.
+-   **Reprojection Error:** A threshold of 2 pixels is used to reject outliers from incorrect matches.
+
+## Operating characteristics
+-   **Time Complexity:** Dominated by the RoMa matching step ($O(N_{ref} \cdot k_{nn} \cdot H \cdot W)$) and the Voronoi construction. The subsampling is $O(N_{points})$.
+-   **Memory Complexity:** $O(N_{total})$ for the point cloud and textures. The voxel grid is $O(R_{vox}^3)$.
+-   **Strengths:** Produces a dense, high-quality initial point cloud without iterative densification. Robust to sparse features due to deep matching.
+-   **Limitations:** Requires calibrated poses and intrinsics. Computationally expensive for large numbers of input images.
+-   **When to use:** When a robust, dense initialization is needed for differentiable Voronoi ray tracing, especially in scenes where traditional SfM might fail.
+-   **When not to use:** If computational resources for RoMa matching are limited, or if the scene has no overlapping views for matching.
+
+## Background
+This method is based on the work by Kotovenko et al. [2026] in "Differentiable Voronoi Ray Tracing Beyond Rasterization Speeds" [S1, unofficial]. It extends the dense initialization strategy of EDGS by using RoMa v2 [Edstedt et al. 2025] for matching and a density-aware subsampling technique. The Voronoi adjacency is constructed using the algorithm of Taveira et al. [2026].
+
+## Sources
+[S1] Differentiable Voronoi Ray Tracing Beyond Rasterization Speeds, https://arxiv.org/abs/2608.17682, fetched 2026-10-27 (unofficial)

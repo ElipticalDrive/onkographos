@@ -1,0 +1,106 @@
+# Simulation Grid Cell Skipping
+
+Also called: Surface Extraction with Simulation Grid
+
+## Overview
+Simulation Grid Cell Skipping is an optimization technique for surface extraction that accelerates iteration over voxel columns by skipping over empty and fully occupied simulation grid cells, processing only partially filled cells [S1]. It differs from standard voxel traversal by leveraging the coarse-grained status of simulation grid cells to bypass large volumes of uniform data [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A simulation grid with cells classified as empty, full, or partially filled; a view ray for each voxel column [S1].
+- Output: A list of relevant voxels within partially filled cells for surface extraction [S1].
+
+**Data Structures:**
+- Simulation Grid: A regular 3D grid where each cell stores a status flag: `EMPTY`, `FULL`, or `PARTIAL` [S1].
+- Voxel Column: A sequence of voxels along a view ray [S1].
+- Packed Machine Words: Bits representing voxel occupancy, processed in chunks for efficiency [S1].
+
+**Numbered Steps:**
+1. For each voxel column, initialize a ray marcher along the view ray corresponding to that column [S1].
+2. Iterate over packed machine words rather than single bits, using bit counting intrinsics to quickly determine the next relevant bits to be considered [S1].
+3. March along the view ray through the simulation grid [S1].
+4. Keep marching through full or empty simulation grid cells until encountering a succession of partially filled cells [S1].
+5. Interrupt ray marching to iterate over the corresponding voxels when partially filled cells are encountered [S1].
+6. When the iteration reaches the end of the current set of connected partially filled cells, resume ray marching in the simulation grid [S1].
+
+**Formulas:**
+Not given in the sources [S1].
+
+**Parameters:**
+Not given in the sources [S1].
+
+**Edge Cases and Pitfalls:**
+Do not skip cells that have partially filled neighbors to avoid cutting off detailed boundary surfaces potentially formed by particles overlapping cell boundaries; only inner full and empty cells may be skipped [S1]. Ray marching precision may cause missed intersections if cell boundaries are not handled correctly [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+EMPTY, FULL, PARTIAL = 0, 1, 2
+
+def simulate_grid_cell_skipping(grid, rays):
+    """
+    Accelerates surface extraction by skipping empty/full cells.
+    
+    Args:
+        grid: Object with .cell_size, .bounds_min, .bounds_max, .get_cell_at(), .get_neighbor()
+        rays: List of ray objects with .origin, .direction
+    Returns:
+        List of voxels to process for surface extraction
+    """
+    processed_voxels = []
+    for ray in rays:
+        t = 0.0
+        while True:
+            pos = ray.origin + ray.direction * t
+            if not (grid.bounds_min[0] <= pos[0] < grid.bounds_max[0] and
+                    grid.bounds_min[1] <= pos[1] < grid.bounds_max[1] and
+                    grid.bounds_min[2] <= pos[2] < grid.bounds_max[2]):
+                break
+            cell = grid.get_cell_at(pos)
+            # Pitfall: only skip inner full/empty cells
+            has_partial_neighbor = any(
+                grid.get_neighbor(pos, offset).status == PARTIAL 
+                for offset in _get_26_offsets()
+            )
+            if cell.status in (EMPTY, FULL) and not has_partial_neighbor:
+                t += grid.cell_size
+                continue
+            # Interrupt ray marching to iterate over voxels in partially filled cells
+            voxels = []
+            for word in cell.voxel_bits:
+                while word:
+                    # Use bit counting intrinsics to find next set bit [G]
+                    bit = word & -word
+                    voxels.append({"bit_mask": bit, "processed": True})
+                    word ^= bit
+            processed_voxels.extend(voxels)
+            t += grid.cell_size
+    return processed_voxels
+
+def _get_26_offsets():
+    offsets = []
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                if dx == 0 and dy == 0 and dz == 0:
+                    continue
+                offsets.append((dx, dy, dz))
+    return offsets
+```
+
+## Subtopics
+
+### [Masking EB-covered cells in isosurface extraction](12775-masking-eb-covered-cells-in-isosurface-extraction.md)
+A technique to exclude fully covered cells from isosurface extraction in simulations using Embedded Boundary (EB) methods, ensuring the surface geometry respects the boundary geometry defined by volume fractions. It differs from this method by specifically targeting EB-covered cells (volume fraction == 0) rather than just empty or fully occupied cells, and it requires specific ghost cell handling to avoid artifacts at AMR coarse/fine boundaries.
+
+## Operating characteristics
+- Strengths: Significant speedup for simulations with large empty or full regions [S1].
+- Limitations: Overhead of checking neighbor status; less effective for highly fragmented partial regions [G].
+- When to Use: SPH simulations with regular grids and distinct empty/full/partial regions [S1].
+
+## Background
+Not given in the sources [S1].
+
+## Sources
+[S1] Memory-Efficient On-The-Fly Voxelization of Particle Data, https://doi.org/10.2312/pgv.20151150, fetched 2026-10-26

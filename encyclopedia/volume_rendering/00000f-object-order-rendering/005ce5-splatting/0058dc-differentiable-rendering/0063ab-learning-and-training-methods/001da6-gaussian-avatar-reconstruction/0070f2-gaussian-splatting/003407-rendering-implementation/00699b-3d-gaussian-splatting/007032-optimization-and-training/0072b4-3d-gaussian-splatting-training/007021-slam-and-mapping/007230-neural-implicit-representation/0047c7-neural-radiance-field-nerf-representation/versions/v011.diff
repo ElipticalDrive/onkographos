@@ -1,0 +1,277 @@
+--- v010.md
++++ v011.md
+@@ -1,179 +1,145 @@
+ # Neural Radiance Field (NeRF) Representation
+ 
+-Also called: INGP, Instant Neural Graphics Primitives, Photon Field Networks, Photon Fields
++Also called: Instant Neural Graphics Primitives (INGP), Photon Field Networks, Photon Fields
+ 
+ ## Overview
+-This article covers two distinct but related implicit and explicit scene representations often grouped under "NeRF Representation" in SLAM and mapping contexts: **Photon Field Networks** (an implicit method for global illumination) and **3D Gaussian Splatting** (an explicit method for view-dependent appearance). Photon Field Networks [S1] replace costly volumetric photon tracing with a neural network that maps position, view direction, and phase function coefficients to indirect radiance, enabling real-time global illumination in heterogeneous media. 3D Gaussian Splatting [S2, unofficial] represents scenes as millions of explicit 3D Gaussians, allowing real-time rendering (>100 FPS) and rapid training by avoiding neural network evaluation during rendering. While NeRF [Parent] stores scenes implicitly in a network, Gaussian Splatting stores them explicitly as blobs, trading memory for speed.
++Neural Radiance Field (NeRF) representation refers to methods that model 3D scenes using neural networks or explicit geometric primitives to enable novel view synthesis and mapping. The term broadly encompasses two distinct paradigms: **Photon Field Networks**, which use implicit neural networks to approximate indirect global illumination in volumetric media [S1], and **3D Gaussian Splatting** (often associated with Instant Neural Graphics Primitives), which represents scenes explicitly as millions of 3D Gaussians for real-time rendering [S2, unofficial]. While standard NeRF methods store scene information implicitly within a neural network, Gaussian Splatting stores it explicitly as a set of blobs, trading higher memory usage for significantly faster training and rendering speeds [S2, unofficial].
+ 
+ ## How it works
+ 
+-### Photon Field Networks (Implicit Global Illumination)
++### Photon Field Networks (Implicit Volumetric Illumination)
++This method models scene geometry and appearance as an implicit volumetric representation of indirect radiance.
+ 
+ **Inputs and Outputs:**
+-*   **Input:** Scene geometry (volume samples), light sources, and camera parameters.
+-*   **Output:** Indirect radiance $L_i(x, \vec{\omega})$ for a given position $x$, view direction $\vec{\omega}$, and phase coefficient $g$.
++*   **Input:** Sample position $x \in [0,1]^3$, view direction $\vec{\omega}$ (normalized spherical coordinates), and phase function coefficient $g \in [-1,1]$.
++*   **Output:** Predicted RGB indirect radiance $L_i(x, \vec{\omega})$.
+ 
+ **Data Structures:**
+-*   **Photon Map:** A collection of photons, each storing position, direction, intensity $\Phi$, and phase coefficient $g$.
+-*   **KD-Tree:** A GPU-constructed KD-tree over the photon map for fast spatial queries [S1].
+-*   **Neural Network:** A 5-layer MLP with 64 neurons per layer, ReLU activations, and no output activation [S1].
+-*   **Hashgrid Encoding:** 16 grid levels, 8 features per level, 2x scaling factor, hash table size $2^{19}$ for positions and directions. Phase $g$ is unencoded [S1].
++*   **Photon Map:** A collection of photons generated via multi-phase photon tracing. Each photon stores position, direction, intensity $\Phi_n$, and phase coefficient $g$.
++*   **KD-Tree:** A GPU-constructed KD-tree built on the photon map to enable fast spatial queries [S1].
++*   **Neural Network:** A 5-layer perceptron with 64 neurons per layer, ReLU activations, and no output activation [S1].
++*   **Encoding:** Hashgrid encoding for positions (3D) and directions (2D). Uses 16 grid levels, 8 features per level, a $2\times$ scaling factor between levels, and a hash table size of $2^{19}$. The phase coefficient $g$ is left unencoded [S1].
+ 
+ **Steps:**
++1.  **Photon Tracing:** Generate photons from random light sources using delta tracking. For each photon, randomly select a phase coefficient $g$ from a discrete set $G$. Store photons after their first interaction with the medium [S1].
++    *   The set of discrete phase coefficients $G$ is typically $\{-0.75, 0.0, 0.75\}$ [S1].
++2.  **Data Sampling:** Generate training batches of size $2^{16}$. Each batch contains uniformly sampled grid coordinates $x \in [0,1]$, random uniform directions $\vec{\omega}$, and phase coefficients $g$ randomly selected from $G$ [S1].
++3.  **Ground Truth Computation:** For each sample, compute the ground truth radiance using a phase-specific k-nearest-neighbor (KNN) range query on the KD-tree. Only photons with the matching phase coefficient $g$ are considered. Use $K=1024$ neighbors and a maximum query radius $r$ [S1].
++    *   The radiance is estimated as:
++        $$ L_i(x, \vec{\omega}) \approx \sum_{n=1}^K p_g(x, \vec{\omega}, \vec{\omega}_n) \frac{\Phi_n}{4\pi r^3} $$
++        where $p_g$ is the Henyey-Greenstein phase function, $\Phi_n$ is the photon intensity, and $r$ is the distance to the farthest photon [S1].
++4.  **Target Encoding:** Encode the target radiance values logarithmically to normalize them to $[0,1]$. Compute $L_i'(x, \vec{\omega})$ using a precision parameter $\psi$ (typically 4-6). If $L_i < 10^{-\psi}$, clamp to 1 (which maps to 0 in the inverse transformation) [S1]:
++    $$ L_i'(x, \vec{\omega}) = \begin{cases} -\frac{\log_{10}(L_i(x, \vec{\omega}))}{\psi} & \text{if } L_i(x, \vec{\omega}) > \frac{1}{10^{\psi}} \\ 1 & \text{otherwise} \end{cases} $$
++5.  **Network Training:** Train the 5-layer MLP to predict $L_i'$. The network takes the encoded position, direction, and phase as input [S1].
++6.  **Decoding:** Decode the network output by applying the inverse logarithmic transformation to obtain the final RGB indirect radiance values [S1]:
++    $$ L_i(x, \vec{\omega}) = 10^{-L_i'(x, \vec{\omega})} \cdot \Psi $$
++    where $\Psi$ is the precision parameter [S1].
+ 
+-1.  **Photon Tracing:** Generate photons from random light sources using delta tracking in heterogeneous media [S1].
+-    *   Select a phase coefficient $g$ from a discrete set $G$. The authors use $G = \{-0.75, 0.0, 0.75\}$ as a compromise between speed and quality [S1].
+-    *   Trace photons until they leave the volume or undergo Russian roulette termination.
+-    *   Store photons after their first interaction with the medium (indirect light only) [S1].
+-
+-2.  **Ground Truth Radiance Estimation:** For training, compute target radiance values using KNN queries on the photon map [S1].
+-    *   Generate batches of size $2^{16}$ containing uniform grid coordinates $x \in [0,1]$, random directions $\vec{\omega}$, and phase coefficients $g$ [S1].
+-    *   For each sample, perform a KNN query with $K=1024$ neighbors and a maximum radius $r$ [S1].
+-    *   Compute radiance using the adaptive radius estimator:
+-        $$
+-        L_i(x, \vec{\omega}) \approx \sum_{n=1}^K p_g(x, \vec{\omega}, \vec{\omega}_n) \frac{\Phi_n}{4\pi r^3}
+-        $$
+-        where $p_g$ is the Henyey-Greenstein phase function, $\Phi_n$ is photon intensity, and $r$ is the distance to the farthest photon [S1].
+-
+-3.  **Target Encoding:** Normalize radiance values for network training [S1].
+-    *   Apply logarithmic encoding to map radiance to $[0,1]$:
+-        $$
+-        L_i'(x, \vec{\omega}) = \begin{cases} -\frac{\log_{10}(L_i(x, \vec{\omega}))}{\psi} & \text{if } L_i(x, \vec{\omega}) > \frac{1}{10^{\psi}} \\ 1 & \text{otherwise} \end{cases}
+-        $$
+-        where $\psi$ is the precision parameter (typically 4-6) [S1].
+-
+-4.  **Network Inference:** The network $P_\theta$ predicts the encoded radiance $L_i'$ given encoded position, direction, and phase $g$ [S1].
+-    *   The field approximates the indirect radiance:
+-        $$
+-        P_{\theta}(x, g, \vec{\omega}) \approx L_i(x, \vec{\omega}) = \int_{\Omega_{4\pi}} p_g(x, \vec{\omega}, \vec{\omega}_i) L(x, \vec{\omega}_i) d\omega_i
+-        $$
+-
+-5.  **Decoding:** Inverse transformation to restore radiance [S1]:
+-    $$
+-    L_i(x, \vec{\omega}) = 10^{-L_i'(x, \vec{\omega})} \cdot \Psi
+-    $$
+-
+-**Pseudocode (Photon Tracing):**
++**Pseudocode for Photon Tracing:**
+ ```python
+-# Algorithm 1: Multi-phase photon tracing in heterogeneous media [S1]
+-n_photons = 0
+-photonmap = []
+-while n_photons < max_n_photons:
+-    bounces = 0
+-    throughput = 1.0
+-    photon = generate_from_random_light_source()
+-    photon.g = random_pick_from(G) # G = {-0.75, 0.0, 0.75}
+-    
+-    while bounces < max_bounces:
+-        # Compute sample distance via delta tracking
+-        sample_dist = delta_tracking_sample_distance(photon.position, photon.direction, volume)
++def multi_phase_photon_tracing(max_n_photons, max_bounces, G):
++    photonmap = []
++    n_photons = 0
++    while n_photons < max_n_photons:
++        bounces = 0
++        throughput = 1.0
++        photon = generate_from_random_light_source()
++        photon.g = random.choice(G)
+         
+-        if no_interaction(sample_dist):
+-            break # Photon left the volume
++        while bounces < max_bounces:
++            # Compute sample distance via delta tracking
++            interaction_found = delta_tracking(photon.position, photon.direction, throughput)
+             
+-        photon.position += photon.direction * sample_dist
+-        photon.direction = phase_function(photon.g, photon.direction)
+-        
+-        sample = volume_sample(photon.position)
+-        albedo = transfer_function(sample)
+-        throughput *= albedo.alpha * albedo.rgb
+-        photon.intensity = light.intensity * throughput
+-        
+-        if bounces >= 1:
+-            photonmap.append(photon)
+-            n_photons += 1
++            if not interaction_found:
++                break # Photon left the volume
++                
++            photon.position = interaction_location
++            photon.direction = phase_function(photon.g, photon.direction)
+             
+-        bounces += 1
+-        if russian_roulette_termination(throughput):
+-            break
++            sample = volume_sample(photon.position)
++            albedo = transfer_function(sample)
++            
++            throughput = throughput * albedo.alpha * albedo.rgb
++            photon.intensity = light.intensity * throughput
++            
++            if bounces >= 1:
++                photonmap.append(photon)
++                n_photons += 1
++            
++            if russian_roulette_termination(throughput):
++                break
++                
++            bounces += 1
++    return photonmap
+ ```
+ 
+-### 3D Gaussian Splatting (Explicit Appearance)
++### 3D Gaussian Splatting (Explicit Geometric Representation)
++This method represents a scene explicitly as millions of tiny colored semi-transparent 3D Gaussian blobs, rendered by projecting them onto the screen and blending, avoiding neural network evaluation for real-time performance [S2, unofficial].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** A set of images with known camera poses (from Structure from Motion, e.g., COLMAP) [S2, unofficial].
+-*   **Output:** A set of 3D Gaussians representing the scene, rendered as images.
++*   **Input:** A set of images with known camera poses (from Structure from Motion, e.g., COLMAP).
++*   **Output:** A set of 3D Gaussians $\mathcal{G}$ and rendered images.
+ 
+ **Data Structures:**
+-*   **3D Gaussian:** Each Gaussian stores ~59 learnable parameters [S2, unofficial]:
+-    *   Position $\mu$ (3D center).
+-    *   Scale and Rotation (defining covariance $\Sigma$). Covariance is constructed as $R S S^T R^T$ to ensure positive semi-definiteness [S2, unofficial].
+-    *   Opacity $\alpha$.
+-    *   Color, stored as spherical harmonic coefficients $\mathbf{c}$ for view-dependent appearance [S2, unofficial].
++*   **Gaussian:** Each Gaussian stores approximately 59 learnable numbers [S2, unofficial]:
++    *   Position: Center in 3D space ($\mu$).
++    *   Scale and Rotation: Defining the covariance matrix $\Sigma$. The covariance is constructed as $R S S^T R^T$ to ensure the shape remains valid (positive semi-definite), where $R$ is the rotation matrix and $S$ is the scale matrix [S2, unofficial].
++    *   Opacity: Transparency ($\alpha$).
++    *   Color: Stored as spherical harmonic coefficients $\mathbf{c}$ for view-dependent color [S2, unofficial].
+ 
+ **Steps:**
+-
+-1.  **Initialization:** Start with a sparse cloud of 3D points from Structure from Motion (SfM). Each point becomes the initial position of one Gaussian [S2, unofficial].
+-
+-2.  **Projection:** Project each 3D Gaussian onto the camera image plane.
+-    *   A projected 3D Gaussian becomes a 2D Gaussian (soft ellipse) on the screen.
+-    *   The 2D covariance $\Sigma_{2D}$ is computed using the camera transformation and a local linear approximation of the projection [S2, unofficial].
+-
+-3.  **Tiling:** Divide the screen into small tiles (e.g., 16x16 pixels). Assign each Gaussian to the tiles it overlaps [S2, unofficial].
+-
+-4.  **Sorting:** Within each tile, sort the Gaussians by depth from front to back using a fast GPU sort [S2, unofficial].
+-
+-5.  **Rasterization/Blending:** For each pixel, blend the colors of the sorted Gaussians front-to-back using alpha compositing [S2, unofficial]:
+-    $$
+-    C(\mathbf{r}) = \sum_{i \in \mathcal{N}} T_i \alpha_i \mathbf{c}_i(\vec{\omega})
+-    $$
+-    where $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ [Parent].
+-
+-6.  **Training Loss:** Compare the rendered image $\hat{C}$ with the real training photo $C$ using an L1 loss combined with a Structural Similarity (SSIM) term [S2, unofficial].
+-
+-7.  **Optimization:** Backpropagate the error to update each Gaussian's position, shape, opacity, and color directly via gradient descent [S2, unofficial].
+-
++1.  **Initialization:** Start with photos and camera poses from Structure from Motion (e.g., COLMAP) to generate a sparse cloud of 3D points. Each point becomes the starting position of one Gaussian [S2, unofficial].
++2.  **Projection:** Project every 3D Gaussian onto the camera image. A projected 3D Gaussian results in a 2D Gaussian (soft ellipse) on the screen. Its 2D covariance $\Sigma_{2D}$ is computed using the camera transformation and a local linear approximation of the projection [S2, unofficial].
++3.  **Tiling:** Divide the screen into small tiles of 16x16 pixels. Assign each Gaussian to the tiles it overlaps [S2, unofficial].
++4.  **Sorting:** Within each tile, sort the Gaussians by depth from front to back using a very fast GPU sort [S2, unofficial].
++5.  **Rasterization/Blending:** For each pixel, blend the colors of the sorted Gaussians front-to-back using alpha compositing:
++    $$ C(\mathbf{r}) = \sum_{i \in \mathcal{N}} T_i \alpha_i \mathbf{c}_i(\vec{\omega}) $$
++    where $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ [S2, unofficial].
++6.  **Training Loss:** Compare the rendered image with the real training photo using an L1 loss combined with a structural similarity (SSIM) term [S2, unofficial].
++7.  **Optimization:** Because the rasterizer is differentiable, backpropagate the error to update each Gaussian's position, shape, opacity, and color directly via gradient descent [S2, unofficial].
+ 8.  **Adaptive Density Control:**
+-    *   **Cloning:** Clone small Gaussians in under-reconstructed regions [S2, unofficial].
+-    *   **Splitting:** Split large Gaussians that cover too much detail into two smaller ones [S2, unofficial].
+-    *   **Pruning:** Prune Gaussians that become almost transparent [S2, unofficial].
++    *   **Cloning:** In regions that are under-reconstructed with missing details, clone small Gaussians [S2, unofficial].
++    *   **Splitting:** Where a single Gaussian is too large and covers too much detail, split it into two smaller ones [S2, unofficial].
++    *   **Pruning:** Prune away Gaussians that become almost transparent [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Scene NeRF](12484-scene-nerf.md)
+-Scene NeRF is a method for isolating and rendering the static background of a scene by training a Neural Radiance Field (NeRF) exclusively on pixels identified as background via human segmentation masks [12484-scene-nerf.md]. It differs from standard NeRF by explicitly excluding dynamic foreground elements (e.g., humans) from the training data and employing an emptiness regularizer to prevent artifacts in empty space [12484-scene-nerf.md].
++Scene NeRF is a method for isolating and rendering the static background of a scene by training a Neural Radiance Field (NeRF) exclusively on pixels identified as background via human segmentation masks. It differs from standard NeRF by explicitly excluding dynamic foreground elements (e.g., humans) from the training data and employing an emptiness regularizer to prevent artifacts in empty space.
+ 
+ ### [NeRF-OSR](14477-nerf-osr.md)
+-NeRF-OSR is a neural radiance field approach for outdoor scene relighting that learns a neural representation of scene geometry, diffuse albedo, and illumination-dependent shadows from a set of images capturing the same site from different viewpoints and at different times, enabling simultaneous editing of both the scene’s lighting and viewpoint [14477-nerf-osr.md]. Unlike standard NeRF which learns a Lambertian model under fixed lighting, NeRF-OSR decomposes the scene into spatial occupancy, illumination, shadowing, and diffuse albedo reflectance, trained in a self-supervised manner from outdoor data captured from various viewpoints and at different illuminations [14477-nerf-osr.md]. It sets itself apart from siblings like [Scene NeRF](12484-scene-nerf.md) by providing explicit intrinsic decomposition (albedo, geometry, lighting) rather than just view-dependent appearance, allowing for physical relighting and albedo editing [14477-nerf-osr.md].
++NeRF-OSR is a neural radiance field approach for outdoor scene relighting that learns a neural representation of scene geometry, diffuse albedo, and illumination-dependent shadows from a set of images capturing the same site from different viewpoints and at different times, enabling simultaneous editing of both the scene’s lighting and viewpoint. Unlike standard NeRF which learns a Lambertian model under fixed lighting, NeRF-OSR decomposes the scene into spatial occupancy, illumination, shadowing, and diffuse albedo reflectance, trained in a self-supervised manner from outdoor data captured from various viewpoints and at different illuminations. It sets itself apart from siblings like [Scene NeRF](12484-scene-nerf.md) by providing explicit intrinsic decomposition (albedo, geometry, lighting) rather than just view-dependent appearance, allowing for physical relighting and albedo editing.
+ 
+ ### [Explicit Volumetric Rendering with Multiple View Aggregation](15335-explicit-volumetric-rendering-with-multiple-view-aggregation.md)
+-This method models scene geometry and appearance as an explicit RGBα volume to amortize rendering across multiple views, solving the computational inefficiency of NeRF-like methods where per-ray sampling is independent and not reusable across different viewing angles [15335-explicit-volumetric-rendering-with-multiple-view-aggregation.md]. Unlike its siblings [Scene NeRF](12484-scene-nerf.md), [NeRF-OSR](14477-nerf-osr.md), and [Dynamic Neural Radiance Fields](16398-dynamic-neural-radiance-fields.md), which typically rely on implicit field evaluations or sparse ray sampling, this approach generates a dense volumetric representation that enables real-time rendering and the use of structural losses like SSIM during training [15335-explicit-volumetric-rendering-with-multiple-view-aggregation.md].
++This method models scene geometry and appearance as an explicit RGBα volume to amortize rendering across multiple views, solving the computational inefficiency of NeRF-like methods where per-ray sampling is independent and not reusable across different viewing angles. Unlike its siblings [Scene NeRF](12484-scene-nerf.md), [NeRF-OSR](14477-nerf-osr.md), and [Dynamic Neural Radiance Fields](15318-dynamic-neural-radiance-fields.md), which typically rely on implicit field evaluations or sparse ray sampling, this approach generates a dense volumetric representation that enables real-time rendering and the use of structural losses like SSIM during training.
+ 
+ ### [Dynamic Neural Radiance Fields](16398-dynamic-neural-radiance-fields.md)
+-Dynamic Neural Radiance Fields (Dynamic NeRF) is a method for modeling the appearance and dynamics of a human face using an implicit volumetric representation [16398-dynamic-neural-radiance-fields.md]. It combines a neural scene representation network with a low-dimensional morphable model to handle facial dynamics, allowing novel viewpoint and expression synthesis from monocular input [16398-dynamic-neural-radiance-fields.md]. Unlike static NeRF methods, this approach handles dynamically changing surfaces by conditioning the neural network on morphable model expression parameters and a per-frame latent code [16398-dynamic-neural-radiance-fields.md]. It differs from other volumetric approaches by requiring only a single view from a fixed camera (e.g., webcam) instead of an expensive calibrated multi-view rig [16398-dynamic-neural-radiance-fields.md].
+-
+-### SLAIM
++Dynamic Neural Radiance Fields (Dynamic NeRF) is a method for modeling the appearance and dynamics of a human face using an implicit volumetric representation. It combines a neural scene representation network with a low-dimensional morphable model to handle facial dynamics, allowing novel viewpoint and expression synthesis from monocular input. Unlike static NeRF methods, this approach handles dynamically changing surfaces by conditioning the neural network on morphable model expression parameters and a per-frame latent code. It differs from other volumetric approaches by requiring only a single view from a fixed camera (e.g., webcam) instead of an expensive calibrated multi-view rig.
++#### SLAIM
+ SLAIM is a SLAM method that introduces a coarse-to-fine tracking pipeline and improves photometric bundle adjustment for NeRF-based mapping [S3]. It maintains NeRF’s original volume density formulation while introducing a KL regularization over the ray termination distribution [S3]. It addresses the challenge of high-frequency renderings in NeRF hindering image alignment [S3].
+-
+-### SNI-SLAM
++#### SNI-SLAM
+ SNI-SLAM is a dense NeRF-based RGB-D SLAM system for accurate real-time 3D semantic mapping [S3]. It introduces a hierarchical semantic encoding and cross-attention mechanism to enable mutual reinforcement between appearance, geometry, and semantics modalities [S3]. It proposes a novel one-way decoder design to enhance inter-modal information flow without reverse interference [S3].
+-
+-### KN-SLAM
++#### KN-SLAM
+ KN-SLAM is a NeRF-based SLAM method that integrates local feature correspondences for coarse pose initialization and joint optimization [S3]. It uses global image features and local matches for explicit loop detection [S3]. It performs pose graph optimization and global refinement of the neural map to ensure consistency [S3].
+ 
+ ## Operating characteristics
+ 
+-**Photon Field Networks:**
+-*   **Time Complexity:** Constant-time neural network inference replaces costly volumetric photon tracing, scaling slower than baseline methods [S1].
+-*   **Memory Complexity:** Depends on the hashgrid size ($2^{19}$) and the number of photons stored in the KD-tree [S1].
+-*   **Strengths:** Enables real-time global illumination in heterogeneous media, replacing expensive sampling steps [S1].
+-*   **Limitations:** Requires pre-computation of photon maps and training of the neural field [S1].
++### Photon Field Networks
++*   **Time Complexity:** The method replaces expensive sampling steps involved in realizing global illumination with constant-time neural network inference, scaling at a much slower pace compared to baseline methods [S1].
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Can represent phase-function-sensitive, indirect, in-scattered radiance for all possible phase-dependent illumination states on a continuous scale [S1]. The indirect term tends to be lower-frequency, allowing for smaller, faster networks [S1].
++*   **Limitations:** Requires pre-computation of photon maps and KD-tree construction [S1].
+ 
+-**3D Gaussian Splatting:**
+-*   **Time Complexity:** Rendering is real-time (>100 FPS) as it avoids neural network evaluation per pixel [S2, unofficial]. Training is significantly faster than NeRF (tens of minutes vs. many hours) [S2, unofficial].
+-*   **Memory Complexity:** Higher than NeRF. A scene can require hundreds of megabytes compared to a few megabytes for a NeRF network [S2, unofficial].
+-*   **Strengths:** Real-time rendering, fast training, explicit representation allows for easy manipulation [S2, unofficial].
+-*   **Limitations:** Floating artifacts and needle-like Gaussians in regions seen by few cameras, aliasing when zooming in or out, and inability to directly extract a clean surface or mesh [S2, unofficial].
++### 3D Gaussian Splatting
++*   **Time Complexity:** Training time drops from many hours (NeRF) to tens of minutes. Rendering jumps from seconds per image to >100 FPS [S2, unofficial].
++*   **Memory Complexity:** Memory usage increases from a few megabytes (NeRF) to hundreds of megabytes (Gaussian Splatting) [S2, unofficial].
++*   **Strengths:** Real-time rendering without neural network evaluation per pixel. Explicit representation allows for adaptive density control [S2, unofficial].
++*   **Limitations:** Can produce floating artifacts and needle-like Gaussians in regions seen by few cameras. Aliasing when zooming in or out. The blobs do not directly give a clean surface or mesh [S2, unofficial].
+ 
+ ## Background
+-
+-**Photon Field Networks:**
+-Introduced in a paper on dynamic real-time volumetric global illumination [S1]. The method replaces the expensive evaluation of long scattering paths in scientific volume rendering with a neural network that implicitly represents a 6-dimensional illumination volume [S1].
+-
+-**3D Gaussian Splatting:**
+-Introduced by Kerbal and colleagues at SIGGRAPH 2023 [S2, unofficial]. It represents a scene explicitly as millions of tiny colored semi-transparent 3D Gaussian blobs in 3D space, rendered by projecting them onto the screen and blending, avoiding neural network evaluation for real-time performance [S2, unofficial]. It is used in virtual reality games, film, robotics, mapping, digital humans, ecommerce, and cultural heritage [S2, unofficial].
++*   **Photon Field Networks:** Introduced in a paper published in IEEE Transactions on Visualization and Computer Graphics in 2023 [S1]. It addresses the computational inefficiency of traditional volumetric rendering by using neural networks to approximate indirect global illumination [S1].
++*   **3D Gaussian Splatting:** Introduced by Kerbl and colleagues at SIGGRAPH 2023 [S2, unofficial]. It was developed to overcome the slow rendering speeds of implicit NeRF methods by using an explicit representation of 3D Gaussians [S2, unofficial]. It is used in virtual reality games, film, robotics, mapping, digital humans, ecommerce, and cultural heritage [S2, unofficial].
+ 
+ ## Sources
+-
+ [S1] Photon Field Networks for Dynamic Real-Time Volumetric Global Illumination, https://doi.org/10.1109/tvcg.2023.3327107, fetched 2026-10-26
+ [S2] Gaussian Splatting Explained: Real-Time 3D from Photos (with a Real Demo), https://www.youtube.com/watch?v=HABVlXlRqOs, fetched 2026-10-27 (unofficial)

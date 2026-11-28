@@ -1,0 +1,252 @@
+# Dynamic Neural Motion Factorization (DynMF)
+
+## Overview
+DynMF is a method for representing and rendering dynamic 3D scenes using 3D Gaussian Splatting, where the motion of each Gaussian is modeled as a linear combination of a small set of learned basis trajectories [S1]. It solves the problem of efficiently modeling complex, non-rigid deformations in dynamic scenes by sharing a compact set of motion bases across all Gaussians, rather than learning independent trajectories for each point [S1]. Unlike methods that use fixed Fourier series bases for temporal decomposition, DynMF employs learned MLP-based basis functions, which are argued to be smoother and more expressive for dynamic scene deformations [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A sequence of images of a dynamic scene captured from varying viewpoints over time; camera poses and intrinsics for each timestamp.
+*   **Outputs:** A set of 3D Gaussians with time-dependent parameters (mean $\mu(t)$, rotation $q(t)$) and static parameters (density, spherical harmonics) that can be rendered into novel views at any timestamp $t$.
+
+**Data Structures**
+Each Gaussian $i$ stores the following learned parameters:
+1.  **Canonical Mean ($\mu_c$):** A 3D vector $\in \mathbb{R}^3$ representing the Gaussian's position in the canonical (static) space.
+2.  **Canonical Rotation ($q_c$):** A 4D quaternion $\in \mathbb{R}^4$ representing the Gaussian's orientation in the canonical space.
+3.  **Motion Coefficients ($c_i$):** A vector of size $B$ containing the weights for the basis trajectories. These coefficients are shared between the translational and rotational decompositions for a given Gaussian.
+4.  **Static Attributes:** Density and spherical harmonic coefficients, which remain fixed over time.
+
+The basis functions are implemented as a Multi-Layer Perceptron (MLP). The MLP takes a normalized time input $t/T$ and outputs the basis values.
+
+**Numbered Steps**
+
+1.  **Initialization:** Initialize $N$ Gaussians. The means are randomly initialized around the center of the scene (e.g., 2k Gaussians) [S1]. Canonical means $\mu_c$, canonical rotations $q_c$, and motion coefficients $c_i$ are initialized as learnable parameters. The MLP weights $w_j$ for the basis functions are initialized.
+
+2.  **Basis Function Definition:** Define $B$ basis trajectories. Each basis $j$ is a function of time implemented by an MLP:
+    $$ b_j(t) = \text{MLP}\left(\frac{t}{T}; w_j\right) $$
+    where $T$ is the total number of timestamps in the training sequence, and $w_j$ are the learnable weights for the $j$-th trajectory [S1]. The MLP consists of 8 linear layers of 256 width. The final two layers produce outputs of size $(B, 3)$ for displacement and $(B, 4)$ for quaternion correction [S1]. The input $t/T$ is encoded using positional encoding with 32 frequencies [S1].
+
+3.  **Time-Dependent Parameter Computation:** For a given timestamp $t$, compute the dynamic mean $\mu(t)$ and rotation $q(t)$ for each Gaussian $i$ using the canonical parameters and the motion coefficients $c_i$:
+    $$ \mu_i(t) = \mu_{c,i} + \sum_{j=1}^B c_{ij} b^\mu_j(t) $$
+    $$ q_i(t) = q_{c,i} + \sum_{j=1}^B c_{ij} b^R_j(t) $$
+    where $\mu_{c,i} \in \mathbb{R}^3$ is the canonical mean, $q_{c,i} \in \mathbb{R}^4$ is the canonical quaternion, $c_{ij}$ is the $j$-th motion coefficient for Gaussian $i$, and $b^\mu_j(t)$ and $b^R_j(t)$ are the basis functions for translation and rotation, respectively [S1]. Note that the same coefficients $c_{ij}$ are used for both translation and rotation [S1].
+
+4.  **Rendering:** Render the scene using the standard 3D Gaussian Splatting pipeline, substituting the static mean $\mu$ with $\mu(t)$ and the static rotation $q$ with $q(t)$ for the current timestamp [S1]. Density and spherical harmonic coefficients are kept fixed along time [S1].
+
+5.  **Densification and Rigidity:** When a Gaussian is split or densified during training, copy the motion coefficients $c$ from the parent Gaussian to the new Gaussian to enforce rigidity [S1].
+
+6.  **Loss Computation:** Compute the total loss, which includes the standard rendering loss (e.g., L1 or SSIM between rendered and ground truth images) and the following regularization losses:
+    *   **L1 Regularization:** Penalizes unnecessary basis choices to prevent apparent but nonexistent movements:
+        $$ \mathcal{L}_1 = \frac{1}{NB}\sum_{i=1}^N \sum_{j=1}^B |c_{ij}| $$
+    *   **Sparsity Loss:** Enforces strict sparsity in trajectory selection, encouraging each Gaussian to choose only a few trajectories:
+        $$ \mathcal{L}_s = \frac{1}{N} \sum_{i=1}^{N} \frac{\|c_i\|_1}{\|c_i\|_\infty} $$
+    *   **Rigidity Loss:** Encourages rigidity between nearby Gaussians by minimizing the difference in their motion coefficients, weighted by their spatial proximity at a reference time $t^*$:
+        $$ \mathcal{L}_r = \frac{1}{Nk} \sum_{i=1}^N \sum_{j \in knn_{i;k}} w_{ij} \|c_i - c_j\|_2 $$
+        where $k$ is the number of nearest neighbors, and $w_{ij} = \exp(-\lambda_w \|\mu_i(t^*) - \mu_j(t^*)\|^2)$ [S1].
+
+**Parameters**
+*   **Number of basis trajectories ($B$):** 10 for D-NeRF dataset; 32 for HyperNeRF and N3DV datasets [S1].
+*   **MLP Architecture:** 8 linear layers of 256 width. Final layers produce $(B, 3)$ for displacement and $(B, 4)$ for quaternion correction [S1].
+*   **Positional Encoding:** 32 frequencies used to encode the time input $t/T$ [S1].
+*   **Training Iterations:** 30k total. Basis functions and motion coefficients are enabled only after the first 3k iterations [S1].
+*   **Learning Rates:** Basis learning rate decays exponentially from $8 \times 10^{-4}$ to $8 \times 10^{-6}$. Coefficients learning rate is fixed at $8 \times 10^{-3}$ [S1].
+*   **Initialization:** 2k Gaussians' means are randomly initialized around the center of the scene [S1].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DynMF:
+    def __init__(self, num_gaussians, num_basis, num_timestamps):
+        self.num_gaussians = num_gaussians
+        self.num_basis = num_basis
+        self.num_timestamps = num_timestamps
+        
+        # Canonical parameters (learnable)
+        # mu_c: (N, 3), q_c: (N, 4)
+        self.mu_c = nn.Parameter(torch.randn(num_gaussians, 3))
+        self.q_c = nn.Parameter(torch.randn(num_gaussians, 4))
+        
+        # Motion coefficients (learnable)
+        # c: (N, B)
+        self.c = nn.Parameter(torch.randn(num_gaussians, num_basis))
+        
+        # Basis MLP
+        # Input: normalized time (scalar), Output: basis values
+        # For translation: output size (B, 3)
+        # For rotation: output size (B, 4)
+        self.mlp_basis = nn.Sequential(
+            nn.Linear(32, 256), # Positional encoding expands time to 32 dims
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, num_basis * 7) # 3 for trans, 4 for rot
+        )
+        
+        # Positional encoding for time
+        self.freq_bands = 32
+        
+    def positional_encoding(self, t_norm, num_frequencies):
+        """Standard positional encoding for scalar time input."""
+        # t_norm: (T,)
+        # Output: (T, num_frequencies)
+        scales = torch.tensor([2**i for i in range(num_frequencies)], dtype=torch.float32)
+        # t_norm is in [0, 1]
+        scaled_t = t_norm.unsqueeze(-1) * scales.unsqueeze(0)
+        pe = torch.cat([torch.sin(scaled_t), torch.cos(scaled_t)], dim=-1)
+        return pe
+
+    def get_basis_values(self, t_norm):
+        """
+        Compute basis values for given normalized timestamps.
+        t_norm: (T,) tensor of normalized times in [0, 1]
+        Returns:
+        basis_trans: (T, B, 3)
+        basis_rot: (T, B, 4)
+        """
+        pe = self.positional_encoding(t_norm, self.freq_bands) # (T, 32)
+        # MLP output: (T, B*7)
+        mlp_out = self.mlp_basis(pe) # (T, B*7)
+        
+        # Reshape to (T, B, 7)
+        mlp_out = mlp_out.view(-1, self.num_basis, 7)
+        
+        # Split into translation (3) and rotation (4)
+        basis_trans = mlp_out[:, :, :3] # (T, B, 3)
+        basis_rot = mlp_out[:, :, 3:]   # (T, B, 4)
+        
+        return basis_trans, basis_rot
+
+    def get_dynamic_params(self, t_norm):
+        """
+        Compute dynamic mean and rotation for all Gaussians at given timestamps.
+        t_norm: (T,) tensor of normalized times in [0, 1]
+        Returns:
+        mu_t: (T, N, 3)
+        q_t: (T, N, 4)
+        """
+        basis_trans, basis_rot = self.get_basis_values(t_norm) # (T, B, 3), (T, B, 4)
+        
+        # c: (N, B) -> (1, N, B) for broadcasting
+        c = self.c.unsqueeze(0) # (1, N, B)
+        
+        # mu_t = mu_c + sum_j c_j * b_j(t)
+        # basis_trans: (T, B, 3), c: (1, N, B)
+        # dot product over B: (T, N, 3)
+        trans_offset = torch.einsum('tb, nb -> tnb', basis_trans, c) # (T, N, 3)
+        mu_t = self.mu_c.unsqueeze(0) + trans_offset # (T, N, 3)
+        
+        # q_t = q_c + sum_j c_j * b_j(t)
+        # basis_rot: (T, B, 4), c: (1, N, B)
+        rot_offset = torch.einsum('tb, nb -> tnb', basis_rot, c) # (T, N, 4)
+        q_t = self.q_c.unsqueeze(0) + rot_offset # (T, N, 4)
+        
+        return mu_t, q_t
+
+    def compute_losses(self, mu_t, q_t, c, gt_images, rendered_images, t_norm, k=5, lambda_w=1.0):
+        """
+        Compute total loss including rendering, L1, sparsity, and rigidity.
+        """
+        # Rendering loss (e.g., L1)
+        rendering_loss = torch.mean(torch.abs(rendered_images - gt_images))
+        
+        # L1 Regularization
+        # c: (N, B)
+        l1_loss = torch.mean(torch.abs(c))
+        
+        # Sparsity Loss
+        # c: (N, B)
+        l1_norm = torch.norm(c, p=1, dim=1) # (N,)
+        inf_norm = torch.norm(c, p=float('inf'), dim=1) # (N,)
+        # Avoid division by zero
+        inf_norm = torch.clamp(inf_norm, min=1e-8)
+        sparsity_loss = torch.mean(l1_norm / inf_norm)
+        
+        # Rigidity Loss
+        # Use a reference time t* (e.g., first timestamp)
+        # mu_t: (T, N, 3)
+        mu_ref = mu_t[0] # (N, 3)
+        
+        # Compute pairwise distances for weighting
+        # dist: (N, N)
+        dist = torch.cdist(mu_ref, mu_ref, p=2) # (N, N)
+        w_ij = torch.exp(-lambda_w * dist) # (N, N)
+        
+        # Find k-nearest neighbors for each Gaussian
+        # knn_indices: (N, k)
+        _, knn_indices = torch.topk(dist, k=k+1, largest=False, dim=1) # Exclude self
+        knn_indices = knn_indices[:, 1:] # Remove self (index 0)
+        
+        # Gather coefficients of neighbors
+        # c: (N, B)
+        c_neighbors = c[knn_indices] # (N, k, B)
+        
+        # Compute difference
+        # c_i - c_j
+        diff = c.unsqueeze(1) - c_neighbors # (N, k, B)
+        
+        # L2 norm of difference
+        diff_norm = torch.norm(diff, p=2, dim=2) # (N, k)
+        
+        # Weighted sum
+        # w_ij for neighbors: (N, k)
+        w_knn = w_ij.gather(1, knn_indices) # (N, k)
+        
+        rigidity_loss = torch.mean(w_knn * diff_norm)
+        
+        total_loss = rendering_loss + l1_loss + sparsity_loss + rigidity_loss
+        return total_loss, rendering_loss, l1_loss, sparsity_loss, rigidity_loss
+```
+
+**Edge Cases and Pitfalls**
+*   **Division by Zero in Sparsity Loss:** If a Gaussian has all zero motion coefficients, the $L_\infty$ norm is zero, leading to division by zero. A small epsilon should be added to the denominator [G].
+*   **Quaternion Normalization:** The output of the rotation basis function is added to the canonical quaternion. The resulting quaternion $q(t)$ must be normalized to unit length before use in the rendering pipeline to ensure valid rotation [G].
+*   **Basis Function Expressiveness:** The learned MLP basis functions are not strictly a basis in the mathematical sense, but they empirically span a large enough space to cover deformation variations [S1]. If the number of basis trajectories $B$ is too small, the representation may not capture complex motions.
+
+## Subtopics
+
+### [4D Neural Voxel Splatting](16404-4d-neural-voxel-splatting.md)
+A method that uses neural voxels for dynamic scene representation. Choose when voxel-based representations are preferred over Gaussian splatting for volumetric data.
+
+### [Computational Deformation Field (CDF)](19197-computational-deformation-field-cdf.md)
+A method that learns a deformation field to warp static Gaussians. Choose when explicit motion coefficients are not desired and a continuous deformation field is preferred.
+
+### [MaGS Pipeline](20248-mags-pipeline.md)
+A pipeline for dynamic Gaussian Splatting. Choose when a different training or optimization strategy for dynamic Gaussians is required.
+
+## Operating characteristics
+*   **Time Complexity:** Rendering is efficient, comparable to static 3D Gaussian Splatting, as the basis functions are queried per timestamp and the Gaussians are splatted in standard order. Training time is 30k iterations, which takes approximately 20 minutes on the D-NeRF dataset [S1].
+*   **Memory Complexity:** Memory usage is dominated by the storage of canonical parameters, motion coefficients, and the MLP weights. The number of basis trajectories $B$ is small (10-32), so the memory overhead per Gaussian is minimal [S1].
+*   **Measured Performance:** On the D-NeRF synthetic dataset (400x400 resolution), DynMF achieves 36.89 PSNR, 0.983 SSIM, 0.02 LPIPS, and >300 FPS [S1].
+*   **Strengths:** Compact representation due to shared basis functions; high rendering FPS; good quality on synthetic dynamic scenes; inherent rigidity through coefficient sharing and copying during densification [S1].
+*   **Limitations:** May struggle with highly non-rigid motions or dynamic opacity (e.g., flame or smoke) [S1]; performance on real-world datasets (HyperNeRF, N3DV) is lower than on synthetic datasets [S1].
+*   **When to Use:** Suitable for real-time dynamic view synthesis of scenes with moderate non-rigid deformations where high FPS is required.
+*   **When Not to Use:** Not suitable for scenes with extreme non-rigid deformations or dynamic opacity.
+
+## Background
+DynMF was proposed by A. Kratimenos et al. in the paper "DynMF: Neural Motion Factorization for Real-Time Dynamic View Synthesis with 3D Gaussian Splatting" [S1]. The method builds on 3D Gaussian Splatting [20] and aims to extend it to dynamic scenes. It was developed to address the limitations of using Fourier series bases for dynamic motion trajectories, arguing that learned MLP bases are smoother and more expressive [S1]. The method has been evaluated on synthetic datasets (D-NeRF) and real-world datasets (HyperNeRF, N3DV) [S1].
+
+## Sources
+[S1] DynMF: Neural Motion Factorization for Real-Time Dynamic View Synthesis with 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-72986-7_15, fetched 2026-10-26

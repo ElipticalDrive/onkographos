@@ -1,0 +1,215 @@
+--- v004.md
++++ v005.md
+@@ -4,133 +4,117 @@
+ 
+ ## Overview
+-Voxel Filled Check determines whether a specific voxel coordinate within a structured grid or hierarchical block (brick/chunk) is occupied. It solves the problem of quickly culling empty space during ray traversal or point-in-volume queries by testing a bitmask rather than loading full density values. It differs from [Point-in-Box Inclusion Test](1400-point-in-box-inclusion-test.md) by operating on discrete integer grid coordinates and bitmasks, and from [Voxel Visibility Culling](8235-voxel-visibility-culling.md) by returning a binary occupancy status for a single voxel rather than culling entire view-frustum-aligned blocks.
++Voxel Filled Check determines whether a specific voxel, brick, or chunk within a structured grid is occupied by geometry or data [S1, unofficial][S3, unofficial]. It serves as the fundamental occupancy test for ray traversal and rendering, returning a boolean result for a given coordinate [S1, unofficial]. Unlike [Point-in-Box Inclusion Test](1400-point-in-box-inclusion-test.md) which tests geometric primitives against bounds, or [Voxel Visibility Culling](8235-voxel-visibility-culling.md) which determines visibility along a ray, this method directly queries the discrete occupancy state of the voxel grid itself [S1, unofficial].
+ 
+ ## How it works
+-The method checks occupancy by accessing a bitmask texture or array associated with a voxel block. It supports two modes: a metadata mode that checks semantic occupancy flags, and a raw bitmask mode that checks structural presence.
+-
+ **Inputs:**
+-- `coord`: A 3D integer coordinate $(x, y, z)$ representing the voxel position.
+-- `option_.WithMeta()`: A boolean flag indicating whether to use voxel metadata.
+-- `voxel_metas_`: An array of metadata objects (used if `WithMeta()` is true).
+-- `output_lb_`, `output_ub_`: Lower and upper bounds defining the valid output region (used if `WithMeta()` is false).
+-- `mask_texture` or `voxel_batch`: The data structure containing the occupancy bitmask.
++- `coord`: A 3D integer coordinate $(x, y, z)$ representing the voxel to check.
++- `mask`: A bitmask texture or array storing occupancy data for a block (brick/chunk) of voxels.
++- `output_lb_`, `output_ub_`: Lower and upper bounds defining the valid output region (optional, depending on implementation).
++- `option_.WithMeta()`: A boolean flag indicating whether voxel metadata is available and should be checked [S2, unofficial].
++- `voxel_metas_`: An array of metadata objects associated with voxels (optional) [S2, unofficial].
+ 
+ **Outputs:**
+-- A boolean or integer value (0 or 1) indicating if the voxel is filled.
++- A boolean value (or integer 0/1) indicating if the voxel is occupied.
+ 
+ **Data Structures:**
+-- **Bitmask Block**: A texture or array where each bit corresponds to a voxel in a local block of size $VX\_MASK\_EXT \times VX\_MASK\_EXT \times VX\_MASK\_EXT$.
+-- **Voxel Metadata**: An object containing semantic flags for occupancy.
++- **Bitmask:** Occupancy is typically stored in a compact bitmask where each bit represents one voxel. The size of the mask depends on the block dimensions (e.g., $VX\_MASK\_EXT \times VX\_MASK\_EXT \times VX\_MASK\_EXT$).
++- **Voxel Meta:** Optional structure containing additional properties per voxel, used if metadata checking is enabled [S2, unofficial].
+ 
+ **Steps:**
+-1. Determine the execution path based on `option_.WithMeta()`.
+-2. **If Metadata Mode is active:**
+-   - Retrieve the metadata object for the given `coord` from `voxel_metas_`.
+-   - Call the `Filled()` method on the metadata object.
+-   - Return the result.
+-3. **If Bitmask Mode is active:**
+-   - Calculate the local coordinate within the block:
+-     $$ local = coord \ \& \ (VX\_MASK\_EXT - 1) $$
+-     This extracts the lower bits of the coordinate, effectively computing $coord \mod VX\_MASK\_EXT$ for each dimension [S1, unofficial].
+-   - Calculate the linear index within the 3D bitmask block:
+-     $$ mask\_linear\_idx = local.x + local.y \cdot VX\_MASK\_EXT + local.z \cdot VX\_MASK\_EXT \cdot VX\_MASK\_EXT $$
+-     [S1, unofficial]
+-   - **Bounds Check:**
+-     - Verify if `coord` is within the valid output range defined by `output_lb_` and `output_ub_`.
+-     - If `coord` is outside these bounds, return 0 (not filled) [S2, unofficial].
+-   - **Bit Test:**
+-     - Determine the batch index: $batch\_idx = mask\_linear\_idx / kBatchSize$.
+-     - Determine the bit offset: $bit\_offset = mask\_linear\_idx \mod kBatchSize$.
+-     - Retrieve the integer word from the `voxel_batch` at `batch_idx`.
+-     - Extract the bit at `bit_offset` using a bitwise AND operation:
+-       $$ result = (voxel\_batch[batch\_idx] \gg bit\_offset) \ \& \ 1 $$
+-     - Return `result` [S2, unofficial].
++1. **Calculate Local Coordinate:** Determine the local position of the input coordinate within its block. This is done using a bitwise AND operation with the mask extent minus one:
++   $$
++   local = coord \ \& \ (VX\_MASK\_EXT - 1)
++   $$
++   This assumes $VX\_MASK\_EXT$ is a power of two [S1, unofficial].
++
++2. **Calculate Linear Index:** Compute the linear index of the voxel within the bitmask array. The formula is:
++   $$
++   mask\_linear\_idx(coord) = local.x + local.y \cdot VX\_MASK\_EXT + local.z \cdot VX\_MASK\_EXT \cdot VX\_MASK\_EXT
++   $$
++   where $local = (local.x, local.y, local.z)$ [S1, unofficial].
++
++3. **Check Metadata (Optional):** If `option_.WithMeta()` is true, retrieve the metadata for the voxel at the calculated index and call the `Filled()` function on that metadata. Return the result of this check [S2, unofficial].
++
++4. **Check Bounds (Optional):** If metadata is not used, convert the linear index back to $(x, y, z)$ coordinates (or use the original `coord`). Check if the coordinate is within the valid output bounds defined by `output_lb_` and `output_ub_`. If the coordinate is out of bounds, return 0 (false) [S2, unofficial].
++
++5. **Check Bitmask:** If the coordinate is within bounds, determine the batch index by dividing the linear index by the batch size ($kBatchSize$). Retrieve the corresponding integer from the voxel batch array. Use a bitwise AND operation with a mask corresponding to the bit position within that integer to check if the bit is set.
++   $$
++   is\_occupied = (voxel\_batch[index / kBatchSize] \ \& \ (1 \ll (index \ \% \ kBatchSize))) \neq 0
++   $$
++   Return the result [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def voxel_filled_check(coord, option_with_meta, voxel_metas, output_lb, output_ub, voxel_batch, k_batch_size, vx_mask_ext):
+-    """
+-    Checks if a voxel at 'coord' is occupied.
++def voxel_filled_check(coord, mask, output_lb, output_ub, use_meta, voxel_metas, k_batch_size, vx_mask_ext):
++    # Step 1: Calculate local coordinate within the block
++    # Assuming vx_mask_ext is a power of 2
++    local_x = coord.x & (vx_mask_ext - 1)
++    local_y = coord.y & (vx_mask_ext - 1)
++    local_z = coord.z & (vx_mask_ext - 1)
+     
+-    Args:
+-        coord (tuple): (x, y, z) integer coordinates.
+-        option_with_meta (bool): If True, use metadata mode.
+-        voxel_metas (list): Array of metadata objects.
+-        output_lb (tuple): Lower bounds (x, y, z).
+-        output_ub (tuple): Upper bounds (x, y, z).
+-        voxel_batch (list): List of integers representing the bitmask blocks.
+-        k_batch_size (int): Number of bits per integer in the batch.
+-        vx_mask_ext (int): Extent of the mask block (e.g., 8 or 16).
+-        
+-    Returns:
+-        int: 1 if filled, 0 otherwise.
+-    """
+-    if option_with_meta:
+-        # Metadata mode: check semantic flag in metadata object
+-        # Note: Exact indexing into voxel_metas depends on implementation details not fully specified in sources.
+-        # Assuming a direct mapping or lookup function exists.
+-        meta = get_metadata_for_coord(coord, voxel_metas) # [G] Helper to retrieve metadata
++    # Step 2: Calculate linear index
++    mask_linear_idx = local_x + local_y * vx_mask_ext + local_z * vx_mask_ext * vx_mask_ext
++    
++    # Step 3: Check metadata if enabled
++    if use_meta:
++        # Retrieve metadata for the voxel
++        meta = voxel_metas[mask_linear_idx]
++        # Call Filled() on the metadata
+         return meta.filled()
+     
+-    else:
+-        # Bitmask mode
+-        # 1. Calculate local coordinate within the block using bitwise AND
+-        local_x = coord[0] & (vx_mask_ext - 1)
+-        local_y = coord[1] & (vx_mask_ext - 1)
+-        local_z = coord[2] & (vx_mask_ext - 1)
+-        
+-        # 2. Calculate linear index in the 3D mask block
+-        mask_linear_idx = local_x + local_y * vx_mask_ext + local_z * vx_mask_ext * vx_mask_ext
+-        
+-        # 3. Bounds check
+-        if not (output_lb[0] <= coord[0] <= output_ub[0] and
+-                output_lb[1] <= coord[1] <= output_ub[1] and
+-                output_lb[2] <= coord[2] <= output_ub[2]):
+-            return 0
+-            
+-        # 4. Bit test
+-        batch_idx = mask_linear_idx // k_batch_size
+-        bit_offset = mask_linear_idx % k_batch_size
+-        
+-        # Retrieve the word and extract the bit
+-        word = voxel_batch[batch_idx]
+-        is_filled = (word >> bit_offset) & 1
+-        
+-        return is_filled
++    # Step 4: Check bounds
++    # Convert linear index back to coordinates for bound check if necessary, 
++    # or use original coord if bounds are defined in global space.
++    # Here we assume output_lb/ub are global bounds.
++    if not (output_lb.x <= coord.x <= output_ub.x and
++            output_lb.y <= coord.y <= output_ub.y and
++            output_lb.z <= coord.z <= output_ub.z):
++        return False
++    
++    # Step 5: Check bitmask
++    batch_index = mask_linear_idx // k_batch_size
++    bit_offset = mask_linear_idx % k_batch_size
++    
++    # Retrieve the batch integer from the mask array
++    batch_value = mask[batch_index]
++    
++    # Check if the specific bit is set
++    is_set = (batch_value & (1 << bit_offset)) != 0
++    
++    return is_set
+ ```
+ 
+ **Parameters:**
+-- `VX_MASK_EXT`: The side length of the voxel mask block. Typical values are powers of 2 (e.g., 8, 16) to allow efficient bitwise modulo operations [S1, unofficial].
+-- `kBatchSize`: The number of bits packed into a single integer word in the `voxel_batch` array. Typically 32 or 64 [S2, unofficial].
+-- `option_.WithMeta()`: Boolean flag. If true, the method bypasses the bitmask and checks a metadata structure [S2, unofficial].
++- `VX_MASK_EXT`: The dimension of the mask block (e.g., 8, 16). Must be a power of two for the bitwise optimization [S1, unofficial].
++- `kBatchSize`: The number of bits stored in one integer of the `voxel_batch` array (typically 32 or 64) [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Out-of-Bounds Coordinates:** If the coordinate falls outside `output_lb_` and `output_ub_`, the method must return 0 to prevent invalid memory access or false positives [S2, unofficial].
+-- **Bitwise Precision:** Ensure `VX_MASK_EXT` is a power of 2 to use the bitwise AND trick for modulo arithmetic. If not, standard modulo must be used [S1, unofficial].
+-- **Batch Indexing:** Division and modulo operations for `batch_idx` and `bit_offset` must be consistent with the storage layout of `voxel_batch`.
++- **Out of Bounds:** If the input coordinate falls outside the defined output bounds (`output_lb_` to `output_ub_`), the function must return false to prevent accessing invalid memory or returning incorrect occupancy states [S2, unofficial].
++- **Power of Two Assumption:** The bitwise calculation for `local` coordinates relies on `VX_MASK_EXT` being a power of two. If this is not the case, standard modulo and division operations must be used instead [S1, unofficial].
++- **Metadata Consistency:** If metadata is used, the `Filled()` method within the metadata must be consistent with the bitmask definition. Discrepancies can lead to false negatives or positives [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Voxel Material Classification](3645-voxel-material-classification.md)
+-Determines if a voxel's material is transparent for ray traversal. It differs by interpreting material IDs rather than just checking occupancy bits.
++Determines if a voxel's material is transparent for ray traversal. It extends occupancy by interpreting material IDs, whereas Voxel Filled Check only returns binary occupancy.
+ 
+ ### [Voxel Solidity Check](3758-voxel-solidity-check.md)
+-Validates if a sampled voxel contributes to opacity, reducing artifacts. It differs by performing a post-sampling validation rather than a pre-traversal occupancy test.
++A post-sampling validation that verifies if a sampled voxel contributes to opacity, reducing artifacts. It operates on sampled values rather than raw grid occupancy.
+ 
+ ### [Voxel Filtering](4035-voxel-filtering.md)
+-Iterates over a grid to return linear indices of voxels satisfying a predicate. It differs by returning a list of indices rather than a single boolean result.
++Iterates over the grid to return linear indices of voxels satisfying a predicate. It returns a list of indices rather than a single boolean result.
+ 
+ ### [Voxel Value Counting](10358-voxel-value-counting.md)
+-Tallies occurrences of unique voxel values. It differs by producing histograms rather than binary occupancy checks.
++Tallies occurrences of unique voxel values (fragment IDs), ignoring empty/free voxels. It provides statistical histograms rather than binary occupancy checks.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per voxel query. The calculation involves a constant number of bitwise operations, arithmetic, and array lookups.
+-- **Memory Complexity:** Depends on the storage of the bitmask. Typically, 1 bit per voxel is used, offering high compression compared to storing full density values.
+-- **Performance:** Extremely fast on both CPU and GPU due to minimal branching and simple arithmetic. The CUDA implementation (`intersect_occ_cuda`) leverages parallel execution for batched queries [S3, unofficial].
+-- **Strengths:** Low memory footprint, fast culling of empty space, simple implementation.
+-- **Limitations:** Only provides binary occupancy; does not provide density or material information unless combined with metadata mode. Requires careful handling of block boundaries and coordinate systems.
++- **Time Complexity:** $O(1)$ per voxel check, as it involves constant-time bitwise operations and array lookups [S1, unofficial][S2, unofficial].
++- **Memory Complexity:** Depends on the storage format of the bitmask. Bit-packed storage reduces memory usage by a factor of $kBatchSize$ (e.g., 32 or 64) compared to boolean arrays [S2, unofficial].
++- **Performance:** Highly efficient on both CPU and GPU due to minimal branching and cache-friendly access patterns when checking contiguous blocks [S1, unofficial][S3, unofficial].
++- **Strengths:** Fast occupancy queries, low memory footprint with bitmasks, simple implementation [S1, unofficial].
++- **Limitations:** Only provides binary occupancy; does not handle partial occupancy or material properties directly [S1, unofficial]. Requires careful handling of bounds and metadata if enabled [S2, unofficial].
+ 
+ ## Background
+-The method originates from voxel-based ray tracing and volume rendering systems, specifically those using hierarchical data structures like bricks or chunks to manage large voxel grids. It is a fundamental component in engines like vxray and voxelizer, where efficient empty space culling is critical for performance [S1, S2, unofficial]. The distinction between metadata-based and bitmask-based checks allows for flexibility in handling semantic occupancy (e.g., transparent vs. opaque) versus structural occupancy [S2, unofficial].
++Voxel Filled Check is a fundamental operation in voxel-based rendering and geometry processing. It is implemented in various open-source voxel rendering engines and libraries, such as vxray and voxelizer, to efficiently determine which voxels contain geometry during ray traversal or rasterization [S1, unofficial][S2, unofficial]. The method leverages bitmasks for compact storage and fast access, a common technique in high-performance graphics applications [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,193 @@
+--- v008.md
++++ v009.md
+@@ -104,7 +104,4 @@
+ 
+ def voxelize_cf_forward(vertices, indices, grid_shape, voxel_size, num_samples_per_voxel=16):
+-    """
+-    Forward pass for Convolution Filter Differentiable Voxelization.
+-    """
+     # 1. Validate inputs
+     # validate_common_voxelize_arguments(vertices, indices, grid_shape)
+@@ -112,11 +109,9 @@
+     # 2. Initialize output
+     occupancy = torch.zeros(grid_shape, dtype=vertices.dtype, device=vertices.device)
+-    
+-    # 3. Dispatch to primal function based on method ('cf') and dtype
+-    # voxelize_cf_f32(vertices, indices, occupancy, ...)
+     
+     step_x = 2.0 / grid_shape[0]
+     step_y = 2.0 / grid_shape[1]
+     step_z = 2.0 / grid_shape[2] if len(grid_shape) == 3 else 1.0
++    cell_volume = step_x * step_y * step_z
+     
+     for i in range(indices.shape[0]):
+@@ -129,5 +124,6 @@
+         normal = torch.cross(e1, e2)
+         area = 0.5 * torch.norm(normal)
+-        normal = normal / (torch.norm(normal) + 1e-12)
++        if area < 1e-12: continue
++        unit_normal = normal / area
+         
+         # Bounding box in grid coordinates
+@@ -146,27 +142,69 @@
+         bbox_max_k = min(grid_shape[2] - 1, int((max_z + 1) / step_z))
+         
++        # Initialize barycentric polygon for the triangle
++        poly_bary = [torch.tensor([1.0, 0.0, 0.0]), torch.tensor([0.0, 1.0, 0.0]), torch.tensor([0.0, 0.0, 1.0])]
++        
+         for k in range(bbox_min_k, bbox_max_k + 1):
++            x_hi = -1.0 + (k + 1) * step_z
++            poly_bary = split_polygon_bary(poly_bary, torch.tensor([v0[2], v1[2], v2[2]]), x_hi)
++            if len(poly_bary) < 3: break
++            
+             for j in range(bbox_min_j, bbox_max_j + 1):
++                y_hi = -1.0 + (j + 1) * step_y
++                poly_bary = split_polygon_bary(poly_bary, torch.tensor([v0[1], v1[1], v2[1]]), y_hi)
++                if len(poly_bary) < 3: break
++                
+                 for i_vox in range(bbox_min_i, bbox_max_i + 1):
+-                    # Compute intersection weight via barycentric splitting against voxel planes [S1, unofficial]
+-                    # Implementation details for split_polygon_bary are omitted for brevity
+-                    weight = 0.0  # Placeholder for barycentric split weight
+-                    occupancy[i_vox, j, k] += weight * area
+-    
++                    z_hi = -1.0 + (i_vox + 1) * step_x
++                    poly_bary = split_polygon_bary(poly_bary, torch.tensor([v0[0], v1[0], v2[0]]), z_hi)
++                    if len(poly_bary) < 3: break
++                    
++                    # Compute contribution from intersection polygon
++                    contrib = torch.tensor([0.0, 0.0, 0.0])
++                    pivot = poly_bary[0] / 3.0
++                    for vi in range(1, len(poly_bary) - 1):
++                        pv0, pv1, pv2 = poly_bary[vi], poly_bary[vi+1], poly_bary[0]
++                        edge1 = pv1 - pv0
++                        edge2 = pv2 - pv0
++                        sub_area = 0.5 * torch.norm(torch.cross(edge1, edge2))
++                        b1 = poly_bary[vi] / 3.0
++                        b2 = poly_bary[vi+1] / 3.0
++                        contrib += sub_area * (pivot + b1 + b2)
++                    
++                    occupancy[i_vox, j, k] += contrib[0] / cell_volume
++                    
+     return occupancy
+ 
++def split_polygon_bary(polygon_bary, tri_coords, value):
++    below = []
++    above = []
++    n = len(polygon_bary)
++    for i in range(n):
++        curr_bary = polygon_bary[i]
++        next_bary = polygon_bary[(i + 1) % n]
++        curr_val = torch.dot(curr_bary, tri_coords)
++        next_val = torch.dot(next_bary, tri_coords)
++        curr_below = curr_val <= value
++        next_below = next_val <= value
++        if curr_below:
++            below.append(curr_bary)
++        else:
++            above.append(curr_bary)
++        if curr_below != next_below:
++            d = next_val - curr_val
++            if torch.abs(d) > 1e-12:
++                t = (value - curr_val) / d
++                intersection_bary = curr_bary + t * (next_bary - curr_bary)
++                below.append(intersection_bary)
++                above.append(intersection_bary)
++    return below
++
+ def voxelize_cf_backward(vertices, indices, occupancy_grad, grid_shape, voxel_size):
+-    """
+-    Backward pass for Convolution Filter Differentiable Voxelization.
+-    """
+-    # 1. Initialize gradients
+     d_vertices = torch.zeros_like(vertices)
+-    
+-    # 2. Dispatch to primal function based on method ('cf') and dtype
+-    # voxelize_backward_cf_f32(vertices, indices, occupancy, d_vertices, occupancy_grad, ...)
+     
+     step_x = 2.0 / grid_shape[0]
+     step_y = 2.0 / grid_shape[1]
+     step_z = 2.0 / grid_shape[2] if len(grid_shape) == 3 else 1.0
++    cell_volume = step_x * step_y * step_z
+     
+     for i in range(indices.shape[0]):
+@@ -179,7 +217,7 @@
+         normal = torch.cross(e1, e2)
+         area = 0.5 * torch.norm(normal)
+-        normal = normal / (torch.norm(normal) + 1e-12)
+-        
+-        # Bounding box in grid coordinates
++        if area < 1e-12: continue
++        unit_normal = normal / area
++        
+         min_x = torch.min(v0[0], torch.min(v1[0], v2[0]))
+         max_x = torch.max(v0[0], torch.max(v1[0], v2[0]))
+@@ -196,18 +234,38 @@
+         bbox_max_k = min(grid_shape[2] - 1, int((max_z + 1) / step_z))
+         
++        poly_bary = [torch.tensor([1.0, 0.0, 0.0]), torch.tensor([0.0, 1.0, 0.0]), torch.tensor([0.0, 0.0, 1.0])]
++        
+         for k in range(bbox_min_k, bbox_max_k + 1):
++            x_hi = -1.0 + (k + 1) * step_z
++            poly_bary = split_polygon_bary(poly_bary, torch.tensor([v0[2], v1[2], v2[2]]), x_hi)
++            if len(poly_bary) < 3: break
++            
+             for j in range(bbox_min_j, bbox_max_j + 1):
++                y_hi = -1.0 + (j + 1) * step_y
++                poly_bary = split_polygon_bary(poly_bary, torch.tensor([v0[1], v1[1], v2[1]]), y_hi)
++                if len(poly_bary) < 3: break
++                
+                 for i_vox in range(bbox_min_i, bbox_max_i + 1):
+-                    # Compute intersection weight via barycentric splitting against voxel planes [S1, unofficial]
+-                    weight = 0.0  # Placeholder for barycentric split weight
+-                    if weight > 0:
+-                        d_occupancy = occupancy_grad[i_vox, j, k]
+-                        differential_weight = d_occupancy * weight * area
+-                        # Update vertex gradients
+-                        # d_vertices[3*i0 + d] += normal[d] * differential_weight
+-                        # This is a simplified update; actual implementation uses barycentric derivatives
+-                        d_vertices[indices[i, 0]] += normal * differential_weight
+-                        d_vertices[indices[i, 1]] += normal * differential_weight
+-                        d_vertices[indices[i, 2]] += normal * differential_weight
++                    z_hi = -1.0 + (i_vox + 1) * step_x
++                    poly_bary = split_polygon_bary(poly_bary, torch.tensor([v0[0], v1[0], v2[0]]), z_hi)
++                    if len(poly_bary) < 3: break
++                    
++                    contrib = torch.tensor([0.0, 0.0, 0.0])
++                    pivot = poly_bary[0] / 3.0
++                    for vi in range(1, len(poly_bary) - 1):
++                        pv0, pv1, pv2 = poly_bary[vi], poly_bary[vi+1], poly_bary[0]
++                        edge1 = pv1 - pv0
++                        edge2 = pv2 - pv0
++                        sub_area = 0.5 * torch.norm(torch.cross(edge1, edge2))
++                        b1 = poly_bary[vi] / 3.0
++                        b2 = poly_bary[vi+1] / 3.0
++                        contrib += sub_area * (pivot + b1 + b2)
++                    
++                    d_occupancy = occupancy_grad[i_vox, j, k]
++                    differential_weight = d_occupancy / cell_volume
++                    for d in range(3):
++                        d_vertices[3 * indices[i, 0] + d] += contrib[0] * unit_normal[d] * differential_weight
++                        d_vertices[3 * indices[i, 1] + d] += contrib[1] * unit_normal[d] * differential_weight
++                        d_vertices[3 * indices[i, 2] + d] += contrib[2] * unit_normal[d] * differential_weight
+                         
+     return d_vertices
+@@ -257,12 +315,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
++*   **Measured Performance:** Not given in the sources [S1, unofficial].
+ *   **Scaling:** The method is CPU-only in the provided implementation, which limits scalability for large grids or high-resolution meshes [S1, unofficial].
+ *   **Strengths:** Provides closed-form gradients, enabling end-to-end differentiable rendering and optimization. Supports both MC and CF modes.
+-*   **Limitations:** CPU-only implementation. CF mode has a coordinate convention pitfall. MC mode is stochastic and may require many samples for low noise.
+-*   **When to use:** When gradient-based optimization of mesh vertices is required based on volumetric properties.
+-*   **When not to use:** When GPU acceleration is critical, or when non-differentiable voxelization is sufficient.
++*   **Limitations:** CPU-only implementation. CF mode has a coordinate convention pitfall. MC mode is stochastic and may require many samples for low noise [S1, unofficial].
++*   **When to use:** When gradient-based optimization of mesh vertices is required based on volumetric properties [S1, unofficial].
++*   **When not to use:** When GPU acceleration is critical, or when non-differentiable voxelization is sufficient [S1, unofficial].
+ 
+ ## Background

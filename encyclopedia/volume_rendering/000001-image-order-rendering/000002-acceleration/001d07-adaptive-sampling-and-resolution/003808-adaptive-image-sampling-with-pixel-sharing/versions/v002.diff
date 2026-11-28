@@ -1,0 +1,302 @@
+--- v001.md
++++ v002.md
+@@ -1,160 +1,164 @@
+ # Adaptive Image Sampling with Pixel Sharing
+ 
+-Also called: adaptive sampling with synchronization
++Also called: Adaptive Image Sampling, Adaptive image sampling optimization, adaptive sampling with synchronization
+ 
+ ## Overview
+-Adaptive Image Sampling with Pixel Sharing is a parallel volume rendering acceleration technique that reduces computational cost by casting rays only from the corners of square image regions and interpolating the interior [S1]. It solves the problem of redundant ray tracing in smooth volume areas while addressing the synchronization overhead inherent in parallel adaptive sampling, where adjacent regions share corner pixels [S1]. Unlike static partitioning or methods that replicate ray tracing for synchronization, this method communicates pixel values to avoid redundant computation, making it suitable for MIMD shared-memory architectures [S1].
++Adaptive Image Sampling with Pixel Sharing is a parallel volume rendering optimization that reduces computational cost by casting rays only from the corners of square image regions and interpolating the interior pixels [S1][S2, unofficial]. It solves the problem of redundant ray casting in smooth areas while managing the synchronization dependencies inherent in parallel implementations where adjacent regions share corner pixels [S1][S2, unofficial]. Unlike non-ray-dependent optimizations such as early ray termination, this method requires careful handling of shared pixel values to avoid replicated computation across processor boundaries [S2, unofficial].
+ 
+ ## How it works
+-The method partitions the image plane into square sample regions and uses a recursive subdivision strategy based on local image complexity. It handles parallel execution by managing dependencies between adjacent regions that share corner pixels.
++**Inputs and Outputs:**
++*   **Input:** A 3D volume dataset (voxels), an initial maximum sample region size $w_{max}$, a color difference threshold $T_c$, and a density difference threshold $T_d$ [S1][S2, unofficial].
++*   **Output:** A rendered 2D image where pixels are either explicitly ray-traced or bilinearly interpolated from traced corner pixels [S1].
+ 
+-### Inputs and Outputs
+-*   **Inputs:**
+-    *   Volume data (voxel array).
+-    *   Precomputed normals, opacities, and an octree structure [S1].
+-    *   Lookup table for shading (color as a function of local voxel gradient) [S1].
+-    *   Parameters: $w_{max}$ (initial region side length in pixels), $T$ (color threshold).
+-    *   Number of processors $P$ [S1].
+-*   **Outputs:**
+-    *   Final rendered image with pixel values for all regions.
++**Data Structures:**
++*   **Image Plane Partitioning:** The image is divided into square sample regions of size $w_{max} \times w_{max}$ pixels [S1][S2, unofficial].
++*   **Task Queue:** A queue of image tiles (or sample regions) to be processed by processors in a MIMD architecture [S1].
++*   **Wait Queue:** A local data structure storing the state of sample regions that cannot be fully evaluated because their corner pixels are currently being traced by other processors [S1].
++*   **Preprocessing Data:** Normals, opacities, and an octree structure are computed as preprocessing steps [S1]. A lookup table mapping local voxel gradient to color is used to accelerate shading [S1].
+ 
+-### Data Structures
+-*   **Image Plane:** Partitioned into square sample regions of size $w_{max} \times w_{max}$ initially [S1].
+-*   **Task Queue:** A queue of image tiles/regions to be processed by each processor [S1].
+-*   **Local Wait Queue:** A per-processor queue storing the state of sample regions that cannot be fully processed because some corner pixels are currently being traced by other processors [S1].
+-*   **Pixel State:** Tracks whether a corner pixel has been traced, is currently being traced, or is untraced [S1].
++**Algorithm Steps:**
++The method operates in two phases: initial processing and wait-queue resolution.
+ 
+-### Algorithm Steps
+-1.  **Initialization:** Divide the image plane into square sample regions of size $w_{max} \times w_{max}$ [S1]. Distribute image tiles to processor task queues [S1].
+-2.  **Ray Tracing Corners:** For a given sample region, identify the four corner pixels. Ray trace only those corner pixels that have not already been traced by adjacent regions and are not currently being traced by other processors [S1].
+-3.  **Complexity Measurement:** Compute the image complexity of the sample region by calculating the color difference among the corner pixels that have been successfully ray traced. Exclude pixels currently being traced by other processors from this calculation [S1].
+-4.  **Decision:**
+-    *   If the color difference exceeds the user-selected color threshold $T$, subdivide the sample region into four smaller square subregions and recursively apply the algorithm to them [S1].
+-    *   If the color difference does not exceed $T$, bilinearly interpolate the untraced pixels in the region from the traced corner pixels [S1].
++1.  **Region Division:** Divide the image plane into square sample regions of size $w_{max} \times w_{max}$ [S1][S2, unofficial].
++2.  **Corner Ray Casting:** For each sample region, identify the four corner pixels. Cast rays only for those corner pixels that have not already been traced by adjacent regions and are not currently being traced by other processors [S1].
++3.  **Complexity Measurement:** Compute the image complexity $M$ of the sample region by calculating the color difference between the successfully traced corner pixels [S1].
++    *   Formula: $M = \max(|C_i - C_j|)$ for all pairs of traced corners $i, j$ in the region, where $C$ is the color vector [S1].
++    *   Note: Pixels currently being traced by other processors are excluded from this calculation [S1].
++4.  **Adaptation Decision:**
++    *   If $M > T_c$ (color threshold), subdivide the sample region into smaller subregions and recursively apply the algorithm to them [S1].
++    *   If $M \le T_c$, the region is considered smooth.
+ 5.  **Handling Dependencies (Wait Queue):**
+-    *   If subdivision is required but some corner pixels are still being traced by other processors, or if subdivision is not required but some pixels are still being traced, store the sample region's state in the local wait queue [S1].
+-    *   If all necessary corner pixels are available and processed, proceed to the next region [S1].
+-6.  **Completion Phase:** After all task queues are empty, process the local wait queues [S1].
+-7.  **Re-evaluation:** For each sample region in the wait queue, re-evaluate complexity (Step 3).
+-    *   If corner pixels are still being traced, busy wait until they are ray traced [S1].
+-    *   Once available, proceed with the decision logic (Step 4) [S1].
++    *   If the region requires subdivision but some corner pixels are still being traced by other processors, or if the region does not require subdivision but some corners are still being traced, store the sample region's state in a local **wait queue** [S1].
++    *   If all necessary corner pixels are available and the region does not require subdivision, proceed to interpolation (Step 6) [S1].
++6.  **Interpolation:** For regions that do not require subdivision, bilinearly interpolate the untraced interior pixels from the traced corner pixels [S1].
++7.  **Wait Queue Resolution:**
++    *   After all initial task queues are empty, process the local wait queues [S1].
++    *   For each sample region in the wait queue, re-evaluate complexity (Step 3).
++    *   If corner pixels are still being traced, **busy wait** until they are ray traced [S1].
++    *   Once all corners are available, re-evaluate the complexity and proceed to subdivision or interpolation as determined in Step 4 [S1].
+ 
+-### Pseudocode
++**Pseudocode:**
+ ```python
+-def adaptive_sampling_with_pixel_sharing(region, w_max, threshold, shared_pixel_state):
+-    """
+-    Recursively processes a sample region.
+-    region: The square region defined by its top-left corner and size.
+-    w_max: Initial maximum side length.
+-    threshold: Color difference threshold for subdivision.
+-    shared_pixel_state: Global or shared memory structure tracking pixel trace status.
+-    """
+-    # Step 2: Ray trace available corners
+-    corners = get_four_corners(region)
+-    traced_corners = []
+-    waiting_corners = []
++def adaptive_image_sampling(image_width, image_height, w_max, T_c, T_d, volume_data):
++    # Initialize image buffer with undefined values
++    image = create_buffer(image_width, image_height)
+     
+-    for corner in corners:
+-        status = shared_pixel_state.get_status(corner)
+-        if status == UNTRACED:
+-            # Mark as being traced to prevent other processors from tracing it
+-            shared_pixel_state.mark_being_traced(corner)
+-            color = ray_trace(corner)
+-            shared_pixel_state.mark_traced(corner)
+-            traced_corners.append((corner, color))
+-        elif status == BEING_TRACED:
+-            waiting_corners.append(corner)
+-        else: # Already traced by adjacent region
+-            traced_corners.append((corner, shared_pixel_state.get_color(corner)))
++    # Create initial task queue with all sample regions
++    task_queue = []
++    for y in range(0, image_height, w_max):
++        for x in range(0, image_width, w_max):
++            region = SampleRegion(x, y, w_max)
++            task_queue.append(region)
+             
+-    # Step 3: Measure complexity using only traced corners
+-    # Note: If fewer than 4 corners are available, complexity calculation may be partial
+-    # The source implies using "those of the corner pixels that have been ray traced"
+-    if len(traced_corners) < 4:
+-        # Cannot make a reliable subdivision decision based on full corner set
+-        # Store state in wait queue if not already done
+-        if waiting_corners:
+-            return WAIT_QUEUE
+-        # If no corners are waiting but we don't have enough traced corners,
+-        # we might need to wait or handle as smooth. 
+-        # Based on source logic: if some are being traced, store in wait queue.
+-        # If none are being traced but we lack corners (e.g. all traced by others),
+-        # we have all info. If we have <4 traced and 0 waiting, it's an edge case 
+-        # not explicitly detailed, but likely treated as smooth or requires waiting.
+-        # Assuming standard case: if waiting_corners is empty, we have all available info.
+-        pass
++    # Process task queue
++    while task_queue is not empty:
++        region = task_queue.pop()
++        
++        # Identify corner pixels
++        corners = region.get_corners()
++        
++        # Cast rays only for corners not currently traced by others
++        traced_corners = []
++        for corner in corners:
++            if not is_traced(corner) and not is_being_traced_by_other(corner):
++                color = ray_trace(corner, volume_data)
++                set_traced(corner, color)
++                traced_corners.append(corner)
++        
++        # Measure complexity using only available traced corners
++        if len(traced_corners) < 4:
++            # Some corners are missing; store in wait queue
++            region.state = 'waiting'
++            region.traced_corners = traced_corners
++            wait_queue.append(region)
++            continue
++        else:
++            region.traced_corners = traced_corners
++            
++        # Calculate color difference
++        max_diff = 0
++        for i in range(len(traced_corners)):
++            for j in range(i + 1, len(traced_corners)):
++                diff = color_distance(traced_corners[i].color, traced_corners[j].color)
++                if diff > max_diff:
++                    max_diff = diff
++        
++        # Adaptation
++        if max_diff > T_c:
++            # Subdivide
++            sub_regions = region.subdivide()
++            for sub in sub_regions:
++                task_queue.append(sub)
++        else:
++            # Interpolate interior pixels
++            region.interpolate_interior_pixels(image)
++            
++    # Process wait queue
++    while wait_queue is not empty:
++        region = wait_queue.pop()
++        
++        # Check if all corners are now available
++        all_available = True
++        for corner in region.get_corners():
++            if not is_traced(corner):
++                # Busy wait until corner is traced
++                while not is_traced(corner):
++                    pass 
++                all_available = False
++                break
++        
++        if not all_available:
++            # Re-add to wait queue or retry immediately
++            wait_queue.append(region)
++            continue
++            
++        # Re-evaluate complexity with all corners
++        traced_corners = region.get_corners()
++        max_diff = 0
++        for i in range(len(traced_corners)):
++            for j in range(i + 1, len(traced_corners)):
++                diff = color_distance(traced_corners[i].color, traced_corners[j].color)
++                if diff > max_diff:
++                    max_diff = diff
++                    
++        if max_diff > T_c:
++            sub_regions = region.subdivide()
++            for sub in sub_regions:
++                task_queue.append(sub)
++        else:
++            region.interpolate_interior_pixels(image)
+ 
+-    complexity = compute_color_difference(traced_corners)
+-    
+-    # Step 4: Decision
+-    if complexity > threshold:
+-        # Subdivide
+-        sub_regions = divide_region(region)
+-        for sub in sub_regions:
+-            result = adaptive_sampling_with_pixel_sharing(sub, w_max/2, threshold, shared_pixel_state)
+-            if result == WAIT_QUEUE:
+-                # If a sub-region waits, it should be handled. 
+-                # The source describes storing the *sample region* state.
+-                # For simplicity in this recursive structure, we might push to a global wait queue
+-                # or handle locally. The source mentions "local wait queue" per processor.
+-                # In a recursive call, we assume the caller manages the queue.
+-                pass
+-    else:
+-        # Interpolate
+-        interpolate_region(region, traced_corners)
+-        
+-    # Check if we need to wait
+-    if waiting_corners:
+-        return WAIT_QUEUE
+-        
+-    return SUCCESS
+-
+-def parallel_execution_loop(processor_id, task_queue, wait_queue, shared_pixel_state):
+-    """
+-    Main loop for a processor.
+-    """
+-    while not task_queue.empty():
+-        region = task_queue.pop()
+-        result = adaptive_sampling_with_pixel_sharing(region, w_max, threshold, shared_pixel_state)
+-        
+-        if result == WAIT_QUEUE:
+-            wait_queue.push(region)
+-        else:
+-            pass # Region completed
+-            
+-    # Step 6: Process wait queue after task queue is empty
+-    while not wait_queue.empty():
+-        region = wait_queue.pop()
+-        # Step 7: Re-evaluate
+-        # Busy wait until all corner pixels are traced
+-        corners = get_four_corners(region)
+-        for corner in corners:
+-            while shared_pixel_state.get_status(corner) == BEING_TRACED:
+-                busy_wait()
+-                
+-        # Now re-run the logic with all corners available
+-        # (In practice, this might just call the core logic again with updated state)
+-        adaptive_sampling_with_pixel_sharing(region, w_max, threshold, shared_pixel_state)
++    return image
+ ```
+ 
+-### Parameters
+-*   $w_{max}$: The side length in pixels of the initial square sample regions [S1].
+-*   Color threshold ($T$): A user-selected threshold for color difference used to determine if a sample region should be subdivided [S1].
++**Parameters:**
++*   $w_{max}$: The side length in pixels of the initial square sample regions. Typical values are not explicitly fixed, but implementations use $3 \times 3$ pixels [S2, unofficial].
++*   $T_c$: Color difference threshold for subdivision. Typical values: 10 (electric field), 40 (neghip), 30 (brain) [S2, unofficial].
++*   $T_d$: Density difference threshold for sample point interpolation along rays. Typical values: 30 (electric field), 80 (neghip), 5 (brain) [S2, unofficial].
++*   Early Ray Termination (ERT) Opacity Threshold: Often used in conjunction. Typical values: 98% (electric field), 92% (neghip), 98% (brain) [S2, unofficial].
+ 
+-### Edge Cases and Pitfalls
+-*   **Pixel Sharing Dependencies:** Adjacent sample regions share corner pixel values. If adjacent tiles are processed by different processors, synchronization is required [S1].
+-*   **Synchronization Overhead:** The method minimizes replicated ray tracing by communicating pixel values. Synchronization overhead is small because task queue partitioning usually results in adjacent image tiles being ray traced by the same processor [S1].
+-*   **Partial Information:** When measuring complexity, pixels currently being traced by other processors are excluded. This may lead to inaccurate complexity measurements if too many corners are unavailable [S1].
++**Edge Cases and Pitfalls:**
++*   **Pixel Sharing Dependencies:** Adjacent sample regions share corner pixels. If processed by different processors, synchronization is required to avoid replicated ray casting [S1][S2, unofficial].
++*   **Deadlock/Starvation:** If a processor waits indefinitely for a pixel traced by another, busy waiting or proper queue management is required [S1].
++*   **Precision:** Color difference calculations must be robust to small numerical variations [S1].
++
++## Subtopics
++
++### [Static Contiguous Image-Based Partitioning](11259-static-contiguous-image-based-partitioning.md)
++Static Contiguous Image-Based Partitioning is a parallel volume rendering strategy that divides the final image plane into contiguous blocks (tiles) and assigns each block to a specific processor, which then executes the complete rendering pipeline for that region. It solves the load-balancing and communication overhead issues inherent in adaptive sampling methods by ensuring that pixel-sharing costs are eliminated through static assignment and specific traversal orders. Unlike dynamic image-based partitioning which delays evaluation to handle shared pixels, this method avoids such costs entirely without extra synchronization overhead.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces total ray tracing cost by avoiding resampling in transparent or smooth regions [S1]. The cost depends on the image complexity and the threshold $T$.
+-*   **Memory Complexity:** Requires storage for the volume data, octree, lookup table, and pixel state tracking [S1].
+-*   **Performance:** Implemented on the DASH (Directory Architecture for SHared memory) Multiprocessor, a scalable shared-memory MIMD machine [S1].
+-*   **Strengths:** Avoids the cost of replicated ray tracing; synchronization overhead is small due to spatial locality of task queues [S1].
+-*   **Limitations:** Requires communication of 3D voxel values (a potential disadvantage of parallel ray tracing algorithms in general) [S1].
++*   **Time Complexity:** Reduces the number of ray casts in smooth regions by interpolating interior pixels, leading to faster rendering times. Performance scales with the complexity of the volume; smooth volumes benefit more [S1][S2, unofficial].
++*   **Memory Complexity:** Requires storage for the image buffer, task queues, wait queues, and preprocessing data (octree, normals, opacities) [S1].
++*   **Measured Performance:** On a 16-processor system, rendering rates of >10 frames per second were achieved for $256 \times 256$ resolution images on datasets like electric field, neghip, and brain [S2, unofficial].
++*   **Strengths:** Significant reduction in computational cost for smooth regions; avoids replicated ray casting in parallel environments through pixel sharing [S1][S2, unofficial].
++*   **Limitations:** Requires synchronization or queue management for parallel implementations; interpolation artifacts may occur in regions with high complexity if thresholds are not tuned correctly [S1][S2, unofficial].
++*   **When to Use:** Suitable for parallel volume rendering on MIMD architectures where smooth regions dominate the image [S1][S2, unofficial].
++*   **When Not to Use:** Not suitable for highly complex, noisy, or high-frequency regions where interpolation would introduce significant artifacts [S1].
+ 
+ ## Background
+-The method was implemented on the DASH (Directory Architecture for SHared memory) Multiprocessor, a scalable shared-memory MIMD machine under construction in the Computer Systems Laboratory at Stanford University [S1]. It was designed to support a wide variety of applications, including volume rendering [S1]. The approach builds on earlier work in adaptive sampling and parallel ray tracing, specifically addressing the synchronization issues that arise when partitioning adaptive regions across multiple processors [S1].
++The method was introduced in the context of volume rendering on scalable shared-memory MIMD architectures, specifically the DASH multiprocessor [S1]. It addresses the inefficiencies of uniform sampling by adapting the sampling rate based on image complexity [S1]. The approach was further optimized for parallel implementations by handling pixel sharing dependencies, leading to static contiguous image-based partitioning strategies [S2, unofficial].
+ 
+ ## Sources
+-[S1] Volume rendering on scalable shared-memory MIMD architectures, https://doi.org/10.1145/147130.147141, fetched 2026-10-25+[S1] Volume rendering on scalable shared-memory MIMD architectures, https://doi.org/10.1145/147130.147141, fetched 2026-10-25
++[S2] NASA Technical Reports Server (NTRS) 19990040407: Time-Critical Volume Rendering, https://archive.org/details/NASA_NTRS_Archive_19990040407, fetched 2026-10-26 (unofficial)

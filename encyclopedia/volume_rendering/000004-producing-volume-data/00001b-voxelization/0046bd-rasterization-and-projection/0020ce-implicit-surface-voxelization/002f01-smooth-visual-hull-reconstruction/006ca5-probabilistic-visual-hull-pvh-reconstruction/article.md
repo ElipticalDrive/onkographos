@@ -1,0 +1,145 @@
+# Probabilistic Visual Hull (PVH) Reconstruction
+
+Also called: soft visual hull
+
+## Overview
+Probabilistic Visual Hull (PVH) Reconstruction generates a voxel-based occupancy estimate by aggregating soft foreground mattes from multiple camera views, specifically designed to handle wide-baseline captures where traditional correspondence-based methods fail [S1]. Unlike the binary hard constraints of [Visual Hull Construction](20619-visual-hull-construction.md), PVH produces a continuous probability field that serves as a robust, low-fidelity input for subsequent refinement stages, such as those performed by [3D Convolutional Autoencoder for PVH Refinement](21225-3d-convolutional-autoencoder-for-pvh-refinement.md).
+
+## How it works
+**Inputs:**
+- Capture volume defined by a set of voxels $VL$.
+- $C$ camera views with known extrinsic parameters $\{R_c, COP_c\}$ (rotation matrix and center of projection) and intrinsic parameters $\{f_c, o_{xc}, o_{yc}\}$ (focal length and 2D optical center) [S1].
+- Soft foreground mattes $BG$ derived from each camera image $I_c$ via background subtraction [S1].
+
+**Outputs:**
+- A 3D volume $VL$ where each voxel $VL_i$ has an associated occupancy probability $p(VL_i)$ [S1].
+
+**Data Structures:**
+- The capture volume is decimated into voxels $VL_i = (v_{ix}, v_{iy}, v_{iz})$ for $i = 1, \dots, |VL|$ [S1].
+- In the referenced implementation, each voxel is approximately $5\text{mm}^3$ in size [S1].
+- The volume is typically processed as a sub-volume or "patch" to manage computational complexity [S1].
+
+**Algorithm Steps:**
+1.  **Voxel Decimation:** Divide the studio capture volume into a grid of voxels $VL_i$ [S1].
+2.  **Coordinate Transformation:** For each voxel $i$ and each camera view $c$, compute the voxel's position relative to the camera frame:
+    $$
+    \begin{bmatrix} v'_{ix} \\ v'_{iy} \\ v'_{iz} \end{bmatrix} = COP_c - R_c^{-1} VL_i
+    $$
+    where $VL_i$ is treated as a column vector of coordinates [S1].
+3.  **Projection:** Project the transformed voxel coordinates onto the 2D image plane of view $c$:
+    $$
+    x[VL_i] = \frac{f_c \cdot v'_{ix}}{v'_{iz}} + o_{xc}
+    $$
+    $$
+    y[VL_i] = \frac{f_c \cdot v'_{iy}}{v'_{iz}} + o_{yc}
+    $$
+    where $(x[VL_i], y[VL_i])$ is the point in image $I_c$ corresponding to voxel $VL_i$ [S1].
+4.  **View Probability:** Sample the soft foreground matte $BG$ at the projected coordinates to determine the probability of the voxel belonging to the subject in view $c$:
+    $$
+    p(VL_i|c) = BG(x[VL_i], y[VL_i])
+    $$
+    [S1].
+5.  **Aggregation:** Compute the overall likelihood of occupancy for voxel $i$ by aggregating probabilities across all $C$ views. The source provides the following formula for the overall likelihood:
+    $$
+    p(VL_i) = \sum_{c=1}^{C} \frac{1}{1 + e^{p(VL_i|c)}}
+    $$
+    [S1]. Note: The source text presents this as a summation of sigmoid-transformed view probabilities, though the exact mathematical interpretation of summing sigmoids of probabilities rather than combining them via product or average is specific to this implementation [S1].
+6.  **Efficiency Optimization:** Limit the extent of $VL$ to 3D patches. Ignore patches where the sum of $p(VL_i)$ equals 0 to avoid unnecessary processing [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_pvh(voxels, cameras, bg_mattes):
+    """
+    Compute Probabilistic Visual Hull.
+    
+    Args:
+        voxels: List of voxel coordinates VL_i = (v_ix, v_iy, v_iz).
+        cameras: List of camera parameters. Each camera c has:
+                 - R_c: 3x3 rotation matrix.
+                 - COP_c: 3x1 center of projection vector.
+                 - f_c: float focal length.
+                 - o_xc, o_yc: float optical center coordinates.
+        bg_mattes: List of background subtraction functions/mattes BG_c.
+                   BG_c(x, y) returns the soft foreground value at (x, y).
+    
+    Returns:
+        pvh: Dictionary mapping voxel index i to probability p(VL_i).
+    """
+    pvh = {}
+    
+    for i, voxel in enumerate(voxels):
+        v_ix, v_iy, v_iz = voxel
+        total_likelihood = 0.0
+        
+        for c in range(len(cameras)):
+            cam = cameras[c]
+            R_c = cam['R']
+            COP_c = cam['COP']
+            f_c = cam['f']
+            o_xc = cam['o_x']
+            o_yc = cam['o_y']
+            BG_c = bg_mattes[c]
+            
+            # Step 2: Coordinate Transformation
+            # v_prime = COP_c - R_c^{-1} * voxel
+            # Note: voxel is treated as a column vector.
+            # In practice, this involves matrix inversion and multiplication.
+            R_inv_c = invert_matrix(R_c)
+            voxel_vec = [v_ix, v_iy, v_iz]
+            transformed = subtract_vectors(COP_c, multiply_matrix_vector(R_inv_c, voxel_vec))
+            
+            v_prime_x, v_prime_y, v_prime_z = transformed
+            
+            # Step 3: Projection
+            # Avoid division by zero if voxel is at camera center
+            if v_prime_z == 0:
+                continue
+                
+            x_proj = (f_c * v_prime_x / v_prime_z) + o_xc
+            y_proj = (f_c * v_prime_y / v_prime_z) + o_yc
+            
+            # Step 4: View Probability
+            # Sample the soft matte. Assume BG_c handles boundary checks or returns 0 outside.
+            p_view = BG_c(x_proj, y_proj)
+            
+            # Step 5: Aggregation
+            # Formula: 1 / (1 + e^(p(VL_i|c)))
+            # Note: The source formula sums these terms over c.
+            term = 1.0 / (1.0 + math.exp(p_view))
+            total_likelihood += term
+            
+        pvh[i] = total_likelihood
+        
+    return pvh
+```
+
+**Parameters:**
+- Voxel size: Approximately $5\text{mm}^3$ [S1].
+- Patch size: Not given in the sources.
+- Overlap: Not given in the sources, though dense sampling with overlap is evaluated in the source [S1].
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** If a voxel lies exactly at the camera center of projection ($v'_{iz} = 0$), the projection is undefined. The implementation should skip or handle these voxels [S1].
+- **Wide Baselines:** Standard correspondence methods fail with wide baselines; PVH is chosen specifically to mitigate this, but the resulting PVH may contain "phantom limbs and blocky false positive voxels" if not refined [S1].
+- **Empty Patches:** Patches with zero total probability can be ignored for efficiency, but care must be taken to ensure no valid surface voxels are missed due to sampling gaps [S1].
+
+## Subtopics
+
+### [3D Convolutional Autoencoder for PVH Refinement](21225-3d-convolutional-autoencoder-for-pvh-refinement.md)
+Refines low-fidelity PVHs into high-fidelity volumes using a convolutional autoencoder, hallucinating detail from limited viewpoints. Choose this when wide-baseline captures produce coarse occupancy estimates that require high-quality volumetric reconstruction from minimal camera counts.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources. Processing is done per patch, making it tractable for large volumes, but the cost scales with the number of voxels and cameras [S1].
+- **Memory Complexity:** Not given in the sources. The method processes sub-volumes (patches) to avoid requiring excessively large receptive fields or up-convolutional layer counts in subsequent refinement steps [S1].
+- **Strengths:** Handles wide-baseline views that cause correspondence-based methods to fail; produces a soft probability field suitable for refinement [S1].
+- **Limitations:** The raw PVH contains phantom limbs and blocky false positives; it is a low-fidelity representation intended for further processing [S1].
+- **When to use:** When capturing performance with a limited number of cameras and wide baselines, and when a probabilistic input is required for a downstream refinement network [S1].
+- **When not to use:** When high-fidelity geometry is required directly from the reconstruction without refinement, or when correspondence-based methods are viable (narrow baselines) and faster binary hulls are sufficient [S1].
+
+## Background
+Probabilistic Visual Hull Reconstruction was introduced in the context of volumetric performance capture from minimal camera viewpoints [S1]. It builds on the concept of soft visual hulls, adapting them to handle the challenges of sparse, wide-baseline camera setups by treating the reconstruction as a probabilistic aggregation problem rather than a hard intersection of silhouettes [S1]. The method is often used as a pre-processing step for deep learning-based refinement, where the PVH serves as a low-fidelity input to a convolutional autoencoder [S1].
+
+## Sources
+[S1] Volumetric Performance Capture from Minimal Camera Viewpoints, https://link.springer.com/chapter/10.1007/978-3-030-01252-6_35, fetched 2026-10-26

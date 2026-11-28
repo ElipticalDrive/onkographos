@@ -1,0 +1,78 @@
+# Convex Polyhedron Bounding
+
+Also called: PARC (Polygon assisted ray casting)
+
+## Overview
+Convex Polyhedron Bounding is a space-leaping technique for direct volume rendering that accelerates ray traversal by enclosing objects within a convex polyhedron. It solves the problem of inefficiently stepping through empty space by allowing rays to skip large volumes of non-data voxels. Unlike its sibling [Bounding Shape Optimization](7750-bounding-shape-optimization.md) which generalizes the concept, this method specifically constructs a convex hull around the object, and differs from [Bounding Volume Extrusion](8410-bounding-volume-extrusion.md) by using a general polyhedron rather than a prism tailored for caustic beams.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volumetric dataset containing one or few distinct objects; the geometric definition of the object's surface or voxel extent.
+*   **Output:** A convex polyhedron (defined by a set of planes or vertices) that tightly encloses the object, used to cull empty space during ray marching.
+
+**Data Structures:**
+The polyhedron is typically represented by its defining planes. Each plane $i$ is defined by a normal vector $\mathbf{n}_i$ and a distance $d_i$ from the origin, such that a point $\mathbf{p}$ is inside if $\mathbf{n}_i \cdot \mathbf{p} + d_i \ge 0$ for all $i$. Alternatively, it may be stored as a list of vertices and faces. The exact layout is not specified in the sources [S1, unofficial].
+
+**Steps:**
+1.  **Object Identification:** Identify the voxels belonging to the object(s) in the volume.
+2.  **Polyhedron Construction:** Compute a convex polyhedron that encloses all identified object voxels. The sources do not specify the algorithm for this construction (e.g., QuickHull, Graham scan) [S1, unofficial].
+3.  **Ray Traversal Setup:** For each ray, determine the entry and exit points of the ray with respect to the convex polyhedron.
+4.  **Space Leaping:** If the ray does not intersect the polyhedron, skip the ray entirely. If it intersects, traverse only the segment within the polyhedron using standard volume rendering techniques.
+5.  **Fallback:** For volumes with many objects, the method suggests using bounding boxes instead, implying convex polyhedra are best for few, complex objects [S1, unofficial].
+
+**Parameters:**
+*   **Number of Objects:** The method is recommended for volumes with "few objects" [S1, unofficial].
+*   **Precision:** The method is distinct from "Adaptive ray traversal" which uses low-precision fast traversal for empty space and high-precision for vicinity voxels. Convex polyhedron bounding is a geometric culling step, not a precision-adaptive step [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Multiple Objects:** If the volume contains many objects, the convex hull may become too large or complex, reducing efficiency. The sources recommend bounding boxes for such cases [S1, unofficial].
+*   **Construction Cost:** The cost of computing the convex hull must be amortized over many rays. Not given in the sources [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def convex_polyhedron_bounding(volume_data, object_mask):
+    # 1. Identify object voxels
+    object_voxels = get_voxel_centers(object_mask)
+    
+    # 2. Build convex polyhedron
+    # Note: Specific algorithm for convex hull construction is not provided in sources [S1, unofficial]
+    polyhedron = compute_convex_hull(object_voxels)
+    
+    # 3. For each ray
+    for ray in rays:
+        # 4. Intersect ray with polyhedron
+        t_min, t_max = ray_intersect_polyhedron(ray, polyhedron)
+        
+        if t_min == None:
+            # Ray misses the object entirely, skip
+            continue
+            
+        # 5. March ray within the bounding volume
+        render_segment(ray, t_min, t_max, volume_data)
+```
+
+## Subtopics
+
+### [Bounding Volume Extrusion](8410-bounding-volume-extrusion.md)
+Computes tight convex hulls for caustic beams using 6-triangle hulls, superior to planar prism approximations for warped beams.
+
+### [Implicit Convex Hulls](15694-implicit-convex-hulls.md)
+Represents the bound as a reduced set of half-spaces for efficient distance queries, clustering orientations to minimize plane count.
+
+### [Approximate Convex Decomposition](15700-approximate-convex-decomposition.md)
+Decomposes point sets into a union of tighter convex volumes via recursive cutting planes, better for concave shapes than a single hull.
+
+## Operating characteristics
+*   **Time Complexity:** Construction of the convex hull is $O(N \log N)$ for $N$ vertices, but the specific complexity is not given in the sources [S1, unofficial]. Ray intersection with a convex polyhedron is linear in the number of faces.
+*   **Memory Complexity:** Depends on the number of faces/vertices in the polyhedron. Not given in the sources [S1, unofficial].
+*   **Performance:** Effective for volumes with few objects. For many objects, bounding boxes are preferred [S1, unofficial].
+*   **Strengths:** Tighter bounds than axis-aligned bounding boxes (AABBs) for rotated or irregular objects, reducing empty space traversal.
+*   **Limitations:** Higher computational cost to construct and intersect than AABBs. Not suitable for scenes with many small objects.
+
+## Background
+The method was introduced in the context of Direct Volume Rendering Techniques, specifically as part of the PARC (Polygon assisted ray casting) approach. It is designed for space-leaping in volumes with few objects [S1, unofficial].
+
+## Sources
+[S1] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)

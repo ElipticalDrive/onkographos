@@ -1,0 +1,64 @@
+# Early Ray Termination via Depth Buffer
+
+Also called: Depth-based Early Termination, Early Ray Termination via Z-Buffer Masking, Early Z Test, Early z-buffer kill, Early z-culling, Rendering-Driven Occlusion Culling
+
+## Overview
+Early Ray Termination via Depth Buffer is an acceleration technique that skips fragment shader execution for rays that have already reached saturation (opacity $\approx 1$) by testing against a depth buffer before processing the volume data [S1, unofficial][S2][S3, unofficial]. It solves the problem of redundant computation in opaque regions by preventing the GPU from generating fragments for occluded or saturated positions [S2][S3, unofficial]. It sets itself apart from sibling methods like [Empty-space skipping](1002-empty-space-skipping.md) (which skips empty geometry) and [Opacity-based Early Termination](7920-opacity-based-early-termination.md) (which terminates inside the shader) by using a hardware-level depth test to cull work *before* the expensive volume sampling occurs [S1, unofficial][S2].
+
+## How it works
+**Inputs:**
+*   Volume data (voxels or bricks) [S1, unofficial][S2][S3, unofficial].
+*   Current depth buffer, initialized from the previous frame or cleared [S2][S3, unofficial].
+*   Opacity threshold $\tau$, which varies between 0.0 and 1.0 depending on the rendering mode (isosurface or full volume) [S3, unofficial].
+
+**Outputs:**
+*   Final color buffer [S2][S3, unofficial].
+*   Updated depth buffer reflecting saturated rays [S2][S3, unofficial].
+
+**Data Structures:**
+*   **Depth Buffer:** Stores the maximum depth $z_{max}$ encountered so far for each pixel [S1, unofficial][S3, unofficial]. Bit packing and exact layout sizes are Not given in the sources.
+*   **Brick Bounding Box:** A solid mesh representing the spatial extent of the current volume brick, used for the depth test [S1, unofficial].
+
+**Algorithm Steps:**
+The method requires traversing the volume in front-to-back order [S1, unofficial][S2][S3, unofficial].
+
+1.  **Reconstruct Slice Stack:** Compute the current slice from all projections in front-to-back order [S2][S3, unofficial].
+2.  **Composite with Frame Buffer:** Composite the current slice with the existing frame buffer to update color and opacity [S2][S3, unofficial].
+3.  **Update Depth Buffer (Saturation Pass):** Examine every fragment's accumulated opacity $A$ [S3, unofficial]. If $A > \tau$, record the fragment's depth $z$ to update the depth buffer [S3, unofficial]. Specifically, write the maximal depth value for saturated rays [S1, unofficial][S3, unofficial]. This step ensures the depth buffer reflects where rays are already opaque [S2][S3, unofficial].
+4.  **Render Next Brick with Early Z-Test:** Before rendering the texture of the next brick, execute a fragment shader program while drawing a solid bounding box around the brick with back face culling switched on [S1, unofficial]. This shader writes the maximal depth value in the depth buffer for saturated rays [S1, unofficial]. When slicing the brick texture, perform an early Z-test [S1, unofficial]. If the depth test fails (indicating the ray is already saturated or occluded by a previous brick), prevent any fragment operations from being executed [S1, unofficial].
+5.  **Repeat:** Proceed to the next slice/brick [S2][S3, unofficial].
+
+**Formulas:**
+The standard front-to-back compositing equations are:
+$$ C_{i+1} = (1 - A_i) \cdot \alpha_i \cdot c_i + C_i $$
+$$ A_{i+1} = (1 - A_i) \cdot \alpha_i + A_i $$
+Where $C$ and $A$ are the current ray color and opacity, $c$ and $\alpha$ are the sample color and opacity from the transfer function, and $i$ is the sample index [S1, unofficial]. A ray is considered saturated when $A_i \approx 1$ [S1, unofficial].
+
+**Parameters:**
+*   **Opacity Threshold ($\tau$):** Varies between 0.0 and 1.0 depending on rendering mode (isosurface vs. full volume) [S3, unofficial].
+*   **Z-Buffer Re-initialization Interval ($n$):** The initialization of the z buffer in the separate pass consumes additional rendering time, so it is performed only for every $n$-th volume slice to compromise between perfect early ray termination and additional costs. A typical value is $n = 10$ [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Overhead:** Early ray termination is performed only once per brick, not per octree node or sample. Performing it more frequently (e.g., changing fragment shaders per sample) would annihilate the benefits due to overhead [S1, unofficial].
+*   **Low Computational Effort:** If the fragment shader has low computational effort, the overhead of the depth test and culling mechanism may offset the advantages [S3, unofficial]. This method benefits more from spreading methods with longer fragment shaders [S3, unofficial].
+*   **Order Dependency:** The technique strictly requires front-to-back traversal to correctly identify saturation [S1, unofficial][S2][S3, unofficial].
+
+## Subtopics
+
+### [Depth Prepass with Equal-Depth Shading](15884-depth-prepass-with-equal-depth-shading.md)
+Optimizes rendering of overlapping opaque primitives (spheres) by using a dedicated prepass and `depth_compare: Equal` to select the closest hit, bypassing GPU hidden-surface removal issues caused by discard-based impostors.
+
+## Operating characteristics
+*   **Time Complexity:** Reduces fragment shader invocations for saturated rays [S1, unofficial][S3, unofficial]. The cost is proportional to the number of saturated pixels plus the overhead of the depth update pass [S2].
+*   **Memory Complexity:** Requires storage for the depth buffer and the brick bounding boxes [S1, unofficial][S2].
+*   **Performance:** Achieves good speed-ups for iso-surface rendering where rays are generally terminated early [S3, unofficial]. Effectiveness depends on the ratio of computational effort per fragment; it is most beneficial when fragment shaders are expensive [S3, unofficial].
+*   **Strengths:** Eliminates reconstruction of voxels that do not contribute to rendering [S3, unofficial]. Reduces load on rasterization and fragment shader bottlenecks [S1, unofficial].
+*   **Limitations:** Only effective if the volume traversal is front-to-back [S1, unofficial][S2][S3, unofficial]. Overhead can negate benefits if the shading is simple or if the test is performed too frequently (e.g., per sample) [S1, unofficial][S3, unofficial].
+
+## Background
+The technique was introduced in the context of optimizing GPU volume rendering, specifically for brick-based rendering and distributed volume rendering (D2VR) [S1, unofficial][S3, unofficial]. It relies on the under operator for front-to-back compositing [S1, unofficial]. The method was cited in works by Krueger et al. [KW03] and Ropinski et al. [RGW+03] [S1, unofficial].
+
+## Sources
+[S1] Optimizing GPU Volume Rendering, Danny Ruijters, https://dannyruijters.nl/docs/OptimizingGPUVolumeRendering_final.pdf, fetched 2026-10-26 (unofficial)
+[S2] Real-Time Advection and Volumetric Illumination for the Visualization of 3D Unsteady Flow, https://doi.org/10.2312/vissym/eurovis05/013-020, fetched 2026-10-30
+[S3] GPU-Accelerated D2VR, https://doi.org/10.2312/vg/vg06/023-030, fetched 2026-10-26 (unofficial)

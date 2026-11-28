@@ -1,0 +1,77 @@
+# Surface Normal Computation from MDF
+
+Also called: MDF Gradient Normal Estimation, Normal from Modulated Distance Field
+
+## Overview
+Computes the surface normal at a query point $p$ by evaluating the gradient of the Modulated Distance Field (MDF) function $d(p, v)$ with respect to position $p$, where $v$ is the associated closest point on the surface or medial axis [S1]. It differs from standard Signed Distance Field (SDF) normal estimation by operating on a directed, modulated field that encodes visibility and orientation information, allowing normals to be derived directly from the field's spatial derivatives without explicit mesh reconstruction [S1, S2].
+
+## How it works
+**Inputs:**
+- Query point $p \in \mathbb{R}^3$.
+- Associated closest point vector $v \in \mathbb{R}^3$ (often the direction to the surface or the vector to the closest point).
+- The MDF function $d(p, v)$, typically implemented as a neural network or analytical function.
+
+**Outputs:**
+- Surface normal vector $n(p, v) \in \mathbb{R}^3$.
+
+**Data Structures:**
+- The MDF is represented as a differentiable function $d: \mathbb{R}^3 \times \mathbb{R}^3 \to \mathbb{R}$. In practice, this is often a neural network (e.g., SIREN) taking $(p, v)$ as input [S1, S2].
+
+**Steps:**
+1. Evaluate the gradient of the distance function with respect to the query point $p$:
+   $$ \nabla_p d(p, v) $$
+   This is computed using automatic differentiation if $d$ is a neural network [S2], or finite differences if $d$ is a discrete field [G].
+
+2. Normalize the gradient to obtain the unit normal:
+   $$ n(p, v) = \frac{\nabla_p d(p, v)^T}{\|\nabla_p d(p, v)\|} $$
+   Note: The transpose notation $T$ in the source [S1, S2] indicates that the gradient is treated as a row vector in the derivation, but the result is a column vector normal. In implementation, this is simply the normalized gradient vector.
+
+3. Ensure the normal points away from the surface. The property $n(p, v)^T v < 0$ must hold [S1]. If the computed normal does not satisfy this orientation constraint relative to $v$, flip the sign:
+   $$ \text{if } n(p, v)^T v \ge 0: \quad n(p, v) = -n(p, v) $$
+
+**Special Case: Unoriented Distance Field (UDF)**
+If the field is an Unoriented Distance Field (UDF), where $v^*(p)$ is the optimal closest point direction, the gradient simplifies significantly [S1, S2]:
+$$ \nabla_p \text{UDF}(p) = n(p, v^*(p))^T $$
+Furthermore, due to the directed Eikonal property, the gradient is equal to the negative transpose of the optimal direction:
+$$ \nabla_p \text{UDF}(p) = -v^*(p)^T $$
+Thus, for a UDF, the normal is simply:
+$$ n(p) = -\nabla_p \text{UDF}(p) $$
+provided $\|\nabla_p \text{UDF}(p)\| = 1$ [S1, S2].
+
+**Parameters:**
+- None explicitly defined for the normal computation itself; depends on the MDF implementation [S1, S2].
+
+**Edge Cases and Pitfalls:**
+- **Multivalued $v^*(p)$:** The derivation $\nabla_p \text{UDF}(p) = -v^*(p)^T$ holds only when $v^*(p)$ is not multivalued, i.e., $p$ is not on the surface $S$ or the medial surface of $S$ [S1, S2]. At these locations, the gradient may be undefined or ambiguous.
+- **Precision:** Near the surface, the gradient norm should be close to 1. Deviations indicate approximation errors in the MDF [S1].
+- **Orientation:** The condition $n(p, v)^T v < 0$ is critical for correct shading and visibility culling [S1].
+
+## Subtopics
+
+### Curvature Computation from DDF
+Computes Gaussian curvature $C_K$ and mean curvature $C_H$ at any visible surface point using only the Directed Distance Field (DDF) value $d(p, v)$ and its derivatives with respect to position $p$ [S2]. This enables local field-based geometric analysis without explicit mesh reconstruction [S2].
+- **Formulas:**
+  - Gaussian curvature: $C_K = \det(\text{II}) / \det(g)$, where $\text{II}$ is the second fundamental form and $g$ is the first fundamental form (metric tensor) derived from the DDF Hessian $\mathcal{H}_p[d]$ [S2].
+  - Mean curvature: $C_H = \text{tr}(\text{II} g^{-1})$, computed using the shape tensor derived from the DDF derivatives [S2].
+- **Implementation:** Derivatives of $d$ with respect to $p$ are computed using auto-differentiation [S2].
+- **When to choose:** When geometric smoothness or curvature-based shading is required directly from the implicit field, avoiding mesh extraction [S2].
+
+### Surface Normals from v* Gradient
+A theoretical derivation showing that the gradient of the UDF at point $p$ is equal to the negative transpose of the optimal direction $v^*(p)$, under the assumption that $v^*(p)$ is not multivalued [S2].
+- **Formula:** $\nabla_p \text{UDF}(p) = n(p, v^*(p))^T$ derived from the S/UDF Eikonal equation and the definition of surface normals [S2].
+- **Pitfall:** The derivation holds only when $v^*(p)$ is not multivalued, i.e., $p$ is not on the medial surface $S$ or the medial surface of $S$ [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per query point, dominated by the evaluation of the gradient via automatic differentiation or finite differences [S1, S2].
+- **Memory Complexity:** Depends on the MDF storage. For neural networks, it is the size of the network weights [S1]. For discrete fields, it is the grid size [G].
+- **Strengths:** No explicit mesh reconstruction required; differentiable; works directly with the field representation [S1, S2].
+- **Limitations:** Accuracy depends on the quality of the MDF approximation; undefined at medial surfaces or multivalued regions [S1, S2].
+- **When to use:** When normals are needed for shading or visibility in ray marching or differentiable rendering pipelines using implicit fields [S1, S2].
+- **When not to use:** When high-precision curvature or normal information is required at medial surfaces or complex topologies where the field is ambiguous [S1, S2].
+
+## Background
+Originated in the context of Probabilistic Directed Distance Fields (PDDF) and Modulated Distance Fields for 3D reconstruction and rendering [S1, S2]. The method leverages the property that the gradient of a distance field points in the direction of the surface normal, extended to directed and modulated fields [S1, S2]. It is used in single-image 3D reconstruction and view-consistent rendering pipelines [S1, S2].
+
+## Sources
+[S1] Probabilistic Directed Distance Fields for Ray-Based Shape Representations, https://doi.org/10.1109/tpami.2025.3594225, fetched 2026-10-29
+[S2] Representing 3D Shapes with Probabilistic Directed Distance Fields, https://doi.org/10.1109/cvpr52688.2022.01874, fetched 2026-10-26

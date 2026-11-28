@@ -1,0 +1,57 @@
+# Local Histogram Clustering for Volume Illumination
+
+Also called: Histogram-based Precomputed Lighting, Vector Quantization for Lighting
+
+## Overview
+Local Histogram Clustering is a preprocessing technique that captures complex light interactions in volumetric data by computing local histograms for each voxel and clustering them into a small set of representative codebook entries [S1, unofficial]. It enables interactive rendering with minimal additional texture fetches, distinguishing itself from standard volume rendering integrals that capture only emission and absorption, and from surface-based techniques that cannot dynamically adapt to transfer function changes [S1, unofficial].
+
+## How it works
+The method operates in two phases: preprocessing (capture and compression) and interactive rendering [S1, unofficial].
+
+### Inputs and Outputs
+Preprocessing takes a volumetric dataset and an initial bin count $i$, then outputs a codebook and a cluster ID map [S1, unofficial]. Interactive rendering takes the codebook, cluster ID map, and current transfer function $TF$, and outputs the illuminated volume image [S1, unofficial].
+
+### Data Structures
+- **Local Histogram:** For each voxel, a normalized vector representing light interaction intensities across $i$ bins [S1, unofficial].
+- **Packed Histogram:** A reduced-dimensionality histogram with $j$ bins ($j \ll i$), generated via iterative splitting [S1, unofficial].
+- **Codebook:** A set of $n_c$ representative lighting vectors, where $n_c \ll N$ ($N$ is total voxel count) [S1, unofficial].
+- **Cluster ID Map:** A 3D texture or array storing the index of the closest codebook entry for each voxel [G].
+
+### Steps
+
+#### Phase 1: Preprocessing
+
+1. **Analyze Vicinity:** For each voxel, analyze its spatial neighborhood to compute a normalized local histogram with bins representing light interactions [S1, unofficial].
+2. **Dimensionality Reduction:** Reduce the histogram dimensionality from $i$ bins to $j$ bins ($j \ll i$) using iterative splitting to generate a packed histogram [S1, unofficial].
+3. **Vector Quantization:** Given $n$ local histograms (treated as vectors), apply vector quantization to generate $m \ll n$ representatives (codebook) [S1, unofficial]. The goal is to find a codebook $C = \{c_1, \dots, c_{n_c}\}$ for the packed histograms $H = \{h_1, \dots, h_N\}$ that minimizes quantization error [G].
+4. **Assign Clusters:** For each voxel, assign it to the cluster index $k$ corresponding to the codebook entry $c_k$ closest to its packed histogram (e.g., using Euclidean distance) [G]. Store this index in the Cluster ID Map [S1, unofficial].
+
+#### Phase 2: Interactive Rendering
+
+For each sample point $x$ along a ray during GPU-based raycasting:
+
+1. **Obtain Cluster ID:** Retrieve the precomputed cluster ID $k$ for the voxel containing $x$ from the Cluster ID Map [S1, unofficial].
+2. **Fetch Environment Color:** Fetch the representative lighting vector $c_k$ from the codebook [S1, unofficial].
+3. **Modulate with Transfer Function:** Apply the current transfer function $TF$ to the fetched lighting vector to compute the environment color, which is computed by considering the current transfer function [S1, unofficial].
+4. **Shading:** Combine the modulated lighting with standard shading models (e.g., Phong shading) if desired [S1, unofficial]. The method requires only two additional texture fetches per sample: one for the cluster ID and one for the codebook entry [S1, unofficial].
+
+### Parameters
+- **Number of Clusters ($n_c$):** Controls the trade-off between quantization artifacts and performance. Typical values are 512, 1024, and 2048 [S1, unofficial].
+- **Initial Bin Count ($i$):** The number of bins in the raw local histogram [S1, unofficial].
+- **Reduced Bin Count ($j$):** The number of bins in the packed histogram after iterative splitting [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Quantization Artifacts:** Using too few clusters leads to visible quantization artifacts. A surface filter is used to reduce artifacts [S1, unofficial].
+- **Transfer Function Dependency:** Transfer functions influence displayed structures and light interactions dynamically, so precomputation with TF changes is not possible; representative local histograms are modulated interactively instead [S1, unofficial].
+
+## Operating characteristics
+- **Performance:** Enables interactive rendering by reducing lighting calculation cost to two additional texture fetches per sample [S1, unofficial].
+- **Memory:** Requires storage for the codebook ($n_c \times \text{vector\_size}$) and the cluster ID map ($N$ integers). Dimensionality reduction ($i \to j$) minimizes codebook size [S1, unofficial].
+- **Strengths:** Captures diffuse interreflection and scattering, which standard volume rendering integrals miss. Allows dynamic transfer function adjustments without recomputing lighting [S1, unofficial].
+- **Limitations:** Preprocessing time can be significant for large datasets (parallelized with OpenMP on CPU clusters) [S1, unofficial]. Quantization artifacts may appear if $n_c$ is too low [S1, unofficial].
+
+## Background
+The technique was presented by Timo Ropinski in his 2008 thesis "Advanced Illumination Techniques for GPU-Based Volume Raycasting" [S1, unofficial]. It builds upon earlier work in global volume illumination (Kniss et al., TVCG 2003) and vicinity shading (Stewart, Vis 2003) [S1, unofficial]. It is implemented in C++ for preprocessing and OpenGL/GLSL for GPU-based raycasting rendering [S1, unofficial].
+
+## Sources
+[S1] GPU-Based Volume Ray-Casting with Advanced Illumination, https://www.uni-ulz.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2008/advanced_illumination.pdf, fetched 2026-10-29 (unofficial)

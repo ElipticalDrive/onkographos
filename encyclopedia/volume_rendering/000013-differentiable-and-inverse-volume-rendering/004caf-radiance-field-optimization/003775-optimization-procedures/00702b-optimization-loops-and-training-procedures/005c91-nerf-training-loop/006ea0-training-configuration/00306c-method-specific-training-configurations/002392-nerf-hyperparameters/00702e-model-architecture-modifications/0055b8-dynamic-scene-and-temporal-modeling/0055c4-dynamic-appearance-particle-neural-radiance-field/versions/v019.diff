@@ -1,0 +1,278 @@
+--- v018.md
++++ v019.md
+@@ -4,162 +4,157 @@
+ 
+ ## Overview
+-Dynamic Appearance Particle Neural Radiance Field (DAP-NeRF) is a method for modeling dynamic scenes from monocular video data by superimposing a static grid-based radiance field with a dynamic component represented by moving appearance particles [S1]. It solves the problem of temporal variation in density and color without requiring multi-view stereo data or prior geometric knowledge of dynamic objects [S1]. Unlike ParticleNeRF, which encodes the entire scene with particles and requires multiple views per frame, DAP-NeRF applies particles only to dynamic elements and uses a grid-based field for efficient linear interpolation querying [S1].
++Dynamic Appearance Particle Neural Radiance Field is a method for novel view synthesis from monocular video that models scene dynamics using a particle-based representation [S1]. It solves the problem of reconstructing dynamic scenes without requiring multi-view data or prior geometric knowledge of moving objects [S1]. It differs from ParticleNeRF by applying appearance particles only to dynamic elements rather than the entire scene, and by using a grid-based field with linear interpolation for efficient querying instead of radius nearest neighbor searching [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Monocular video sequence (one camera view per time frame $t$), camera poses, and near/far bounds $s_n, s_f$.
+-*   **Outputs:** Rendered pixel color $C(\mathbf{r}, t)$ for a ray $\mathbf{r}$ at time $t$.
++*   **Inputs:** Monocular video data (one camera view per time frame) [S1].
++*   **Outputs:** Rendered pixel color $C(\mathbf{r}, t)$ for a ray $\mathbf{r}$ at time $t$ [S1].
+ 
+ **Data Structures:**
+-1.  **Static Field $V_s(\mathbf{x})$:** A time-independent grid-based model (e.g., hash grid or triplane) storing features for density $\sigma$ and color $\mathbf{c}$ [S1].
+-2.  **Dynamic Field $V_{td}(\mathbf{x}, t)$:** An ensemble of particles. Each particle $i$ at time $t$ has:
+-    *   Position $\mathbf{p}_i(t) \in \mathbb{R}^3$.
+-    *   Appearance features $\mathbf{f}_i(t) \in \mathbb{R}^k$ (encoding density and color contributions).
+-    *   The particle positions are updated by a **Particle Motion Network** (NN$_{motion}$) [S1].
+-3.  **Mask $w_t(\mathbf{x})$:** A binary weight indicating if the dynamic field is effective at location $\mathbf{x}$ and time $t$ [S1].
++The method uses a hybrid representation consisting of:
++1.  **Static Field ($V_s$):** A time-independent grid-based model (canonical feature field) [S1].
++2.  **Dynamic Field ($V_{td}$):** A particle-based representation where dynamics are encoded in individual particle models [S1].
++3.  **Weight ($w_t(x)$):** A binary indicator determining the effectiveness of the dynamic field at location $x$ and time $t$ [S1].
++
++**Notation:**
++*   $t$: Time, denoted in subscripts on the right-hand side of the superposition equation (e.g., $V_{td}$) to clarify that the dynamic component consists of an ensemble of particles [S1].
++*   $\mathbf{r}(s) = \mathbf{o} + s\mathbf{d}$: Ray parameterization, where $\mathbf{o}$ is the camera center, $\mathbf{d}$ is the direction, and $s$ is the distance [S1].
++*   $s_n, s_f$: Near and far bounds of the ray [S1].
++*   $\sigma(\cdot)$: Volume density [S1].
++*   $c(\cdot)$: Emitted radiance [S1].
++*   $T(s)$: Accumulated transmittance [S1].
+ 
+ **Formulas:**
+-The total feature field $V(\mathbf{x}, t)$ is a superposition of static and dynamic components [S1]:
++The rendered pixel color is computed via the standard volume rendering integral [S1]:
+ $$
+-V(\mathbf{x}, t) = (1 - w_t(\mathbf{x}))V_s(\mathbf{x}) + w_t(\mathbf{x})V_{td}(\mathbf{x})
++C(\mathbf{r}, t) = \int_{s_n}^{s_f} T(s) \sigma(\mathbf{r}(s), t) c(\mathbf{r}(s), \mathbf{d}, t) ds
+ $$
+-where $V_s(\mathbf{x})$ is the static field and $V_{td}(\mathbf{x})$ is the dynamic field [S1].
++where
++$$
++T(s) = \exp \left( - \int_{s_n}^{s} \sigma(\mathbf{r}(s'), t) ds' \right)
++$$
++
++The feature field $V$ is modeled by the superposition of static and dynamic components [S1]:
++$$
++V(x, t) = (1 - w_t(x))V_s(x) + w_t(x)V_{td}(x)
++$$
++where $V_s(x)$ is the static field, $V_{td}(x)$ is the dynamic field, and $w_t(x)$ is a weight taking value 1 if the dynamic field is effective at $(x,t)$ and 0 otherwise [S1]. The support of the dynamic field is implied by the particle representation [S1].
+ 
+ The dynamic field $V_{td}$ is formulated as a convolution with a Dirac function to integrate over finite volumes [S1]:
+ $$
+-V_{td}(\mathbf{x}) = (V_{td} * \delta)(\mathbf{x}) = \int V_{td}(\mathbf{x}')\delta(\mathbf{x} - \mathbf{x}')d\nu(\mathbf{x}')
++V_{td}(x) = (V_{td} * \delta)(x) = \int V_{td}(x') \delta(x - x') d\nu(x')
+ $$
+-where $\delta(\cdot)$ is the Dirac function [S1].
++where $\delta(\cdot)$ is the Dirac function ($\delta(r) = 0$ for $r \neq 0$ and $\int \delta(r)d\nu = 1$) and $\nu(\cdot)$ is the volume integration variable [S1].
+ 
+-To enable quantization and efficient querying, the Dirac function $\delta$ is replaced with a kernel $W$ with finite support [S1]:
++To quantize the field, the Dirac function $\delta$ is replaced with a kernel $W$ with finite support [S1]:
+ $$
+-W(\mathbf{x}) = 0 \quad \text{when } \|\mathbf{x}\| \text{ exceeds a small radius, and } \int W(\mathbf{x})d\nu(\mathbf{x}) = 1
++W(x) = 0 \text{ when } \|x\| \text{ exceeds a small radius, and } \int W(x)d\nu(x) = 1
+ $$
+-This leads to a finite-width kernel approximation [S1].
+ 
+-**Numbered Steps:**
+-1.  **Ray Casting:** For a pixel at time $t$, cast a ray $\mathbf{r}(s) = \mathbf{o} + s\mathbf{d}$ from camera center $\mathbf{o}$ with direction $\mathbf{d}$, where $s \in [s_n, s_f]$ [S1].
+-2.  **Discretization:** Sample points $\mathbf{x}_j$ along the ray [S1].
+-3.  **Dynamic Field Query:** For each sample point $\mathbf{x}_j$:
+-    *   Query the Particle Motion Network to get current particle positions $\mathbf{p}_i(t)$ and features $\mathbf{f}_i(t)$ [S1].
+-    *   Compute the contribution of nearby particles to $V_{td}(\mathbf{x}_j)$ using the kernel $W$ [S1].
+-    *   Determine $w_t(\mathbf{x}_j)$ based on particle presence/support [S1].
+-4.  **Static Field Query:** Query the static grid $V_s(\mathbf{x}_j)$ using linear interpolation [S1].
+-5.  **Superposition:** Combine fields: $V(\mathbf{x}_j, t) = (1 - w_t(\mathbf{x}_j))V_s(\mathbf{x}_j) + w_t(\mathbf{x}_j)V_{td}(\mathbf{x}_j)$ [S1].
+-6.  **Volume Rendering:** Compute density $\sigma$ and color $\mathbf{c}$ from $V(\mathbf{x}_j, t)$ and integrate along the ray using the standard volume rendering integral [S1]:
+-    $$
+-    C(\mathbf{r}, t) = \int_{s_n}^{s_f} T(s, t) \sigma(\mathbf{r}(s), t) c(\mathbf{r}(s), \mathbf{d}, t) ds
+-    $$
+-    where $T(s, t) = \exp \left( -\int_{s_n}^{s} \sigma(\mathbf{r}(s'), t) ds' \right)$ [S1].
++**Steps:**
++1.  Cast a ray $\mathbf{r}(s) = \mathbf{o} + s\mathbf{d}$ from the camera center $\mathbf{o}$ to the pixel on the image plane [S1].
++2.  Evaluate the volume density $\sigma(\mathbf{r}(s), t)$ and emitted radiance $c(\mathbf{r}(s), \mathbf{d}, t)$ at points along the ray from near bound $s_n$ to far bound $s_f$ [S1].
++3.  Compute the accumulated transmittance $T(s)$ along the ray [S1].
++4.  Integrate the product of transmittance, density, and radiance to obtain the pixel color $C(\mathbf{r}, t)$ [S1].
++5.  For the dynamic field component $V_{td}$, use the particle motion network to model scene dynamics across all time frames [S1].
++6.  Replace the Dirac function $\delta$ with the finite-support kernel $W$ to quantize the field [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def render_ray(ray_o, ray_d, time_t, static_grid, particles, kernel_W, mask_threshold):
++def render_dynamic_apperance_particle_nerf(ray_o, ray_d, time_t, static_grid, dynamic_particles, weight_map):
+     """
+-    Renders a single ray for DAP-NeRF.
++    Renders a pixel color for a dynamic scene using the Dynamic Appearance Particle NeRF method.
++    
++    Args:
++        ray_o: Origin of the ray (3D vector).
++        ray_d: Direction of the ray (3D vector).
++        time_t: Current time step.
++        static_grid: Grid-based static field model V_s.
++        dynamic_particles: List of particles representing the dynamic field V_td.
++        weight_map: Function or grid providing w_t(x) values.
++        
++    Returns:
++        Color C(r, t) for the ray.
+     """
+-    # 1. Sample points along the ray
+-    samples = sample_along_ray(ray_o, ray_d, num_samples=128) # [N, 3]
++    # Sample points along the ray
++    samples = sample_ray(ray_o, ray_d, near_bound=s_n, far_bound=s_f, num_samples=N)
+     
+-    # 2. Query Static Field
+-    static_features = static_grid.query(samples) # [N, D]
++    accumulated_transmittance = 1.0
++    accumulated_color = [0.0, 0.0, 0.0]
+     
+-    # 3. Query Dynamic Field
+-    # Get particle positions and features at time_t
+-    particle_positions, particle_features = particles.get_state(time_t) # [P, 3], [P, D]
+-    
+-    # Compute dynamic field contribution using kernel W
+-    # For each sample, sum contributions from nearby particles
+-    dynamic_features = zeros_like(static_features)
+-    for i in range(len(samples)):
+-        x = samples[i]
+-        # Find particles within kernel support radius
+-        nearby_particles = find_nearby(particle_positions, x, radius=kernel_W.radius)
++    for s in samples:
++        x = ray_o + s * ray_d
+         
+-        contribution = zeros_like(static_features[i])
+-        for p_idx in nearby_particles:
+-            p_pos = particle_positions[p_idx]
+-            p_feat = particle_features[p_idx]
+-            
+-            # Compute kernel weight
+-            dist = norm(x - p_pos)
+-            if dist <= kernel_W.radius:
+-                w = kernel_W.evaluate(dist)
+-                contribution += w * p_feat
++        # Query static field
++        sigma_s, c_s = query_static_field(static_grid, x)
+         
+-        dynamic_features[i] = contribution
++        # Query dynamic field using particle representation
++        # Note: The specific particle querying mechanism (e.g., kernel convolution) 
++        # is implied by the replacement of Dirac delta with kernel W [S1].
++        sigma_d, c_d = query_dynamic_field(dynamic_particles, x, time_t, kernel=W)
+         
+-        # Determine mask value (1 if dynamic field is effective, 0 otherwise)
+-        # Effective if any particle contributes significantly
+-        if norm(contribution) > mask_threshold:
+-            mask_val = 1.0
+-        else:
+-            mask_val = 0.0
+-        dynamic_features[i] *= mask_val # Apply mask to features
++        # Combine fields using superposition
++        w = weight_map(x, time_t) # w_t(x) is 1 if dynamic field is effective, 0 otherwise [S1]
+         
+-    # 4. Superposition
+-    # Note: mask_val is per-sample, so we need to handle it carefully
+-    # The formula uses w_t(x). We assume mask_val is w_t(x)
+-    # Re-compute mask for each sample to be precise
+-    masks = zeros(len(samples))
+-    for i in range(len(samples)):
+-        x = samples[i]
+-        nearby_particles = find_nearby(particle_positions, x, radius=kernel_W.radius)
+-        has_dynamic = False
+-        for p_idx in nearby_particles:
+-            p_pos = particle_positions[p_idx]
+-            dist = norm(x - p_pos)
+-            if dist <= kernel_W.radius:
+-                w = kernel_W.evaluate(dist)
+-                if w > 0:
+-                    has_dynamic = True
+-                    break
+-        masks[i] = 1.0 if has_dynamic else 0.0
++        sigma = (1 - w) * sigma_s + w * sigma_d
++        c = (1 - w) * c_s + w * c_d
+         
+-    # Superposition: V(x,t) = (1 - w_t(x))V_s(x) + w_t(x)V_td(x)
+-    combined_features = (1 - masks[:, None]) * static_features + masks[:, None] * dynamic_features
+-    
+-    # 5. Extract Density and Color
+-    sigma, color = extract_density_color(combined_features)
+-    
+-    # 6. Volume Rendering
+-    T = compute_transmittance(sigma)
+-    color_rendered = integrate_color(T, sigma, color)
+-    
+-    return color_rendered
++        # Volume rendering accumulation
++        alpha = 1.0 - exp(-sigma * delta_s) # delta_s is the distance between samples
++        weight = accumulated_transmittance * alpha
++        accumulated_color += weight * c
++        accumulated_transmittance *= (1.0 - alpha)
++        
++    return accumulated_color
++
++def query_dynamic_field(particles, x, t, kernel):
++    """
++    Queries the dynamic field V_td at location x and time t.
++    Implements the convolution with a finite-support kernel W [S1].
++    """
++    value = 0.0
++    for particle in particles:
++        # Calculate distance from particle to query point
++        dist = norm(particle.position - x)
++        
++        # Apply kernel W (finite support, integral = 1) [S1]
++        # If dist exceeds small radius, W is 0
++        weight = kernel(dist)
++        
++        # Accumulate contribution from particle
++        # The particle motion network encodes dynamics in individual particle models [S1]
++        value += weight * particle.feature
++        
++    return value
+ ```
+ 
+ **Parameters:**
+-*   **Kernel Radius:** Small radius for $W(\mathbf{x})$ [S1]. Not given in the sources.
+-*   **Mask Threshold:** Threshold for $w_t(\mathbf{x})$ to be 1 [S1]. Not given in the sources.
+-*   **Particle Motion Network:** NN$_{motion}$ updates particle positions [S1]. Architecture not specified in the sources.
++*   **Kernel $W$:** A locally supported kernel close to 0, where $W(x) = 0$ when $\|x\|$ exceeds a small radius, and $\int W(x)d\nu(x) = 1$ [S1]. The exact radius is not specified in the sources [S1].
++*   **Weight $w_t(x)$:** Takes value 1 if the dynamic field is effective at location $x$ and time $t$, and 0 otherwise [S1]. The support of the dynamic field is implied by the particle representation [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The kernel approximation $\delta \to W$ must ensure $\int W(\mathbf{x})d\nu(\mathbf{x}) = 1$ to preserve field magnitude [S1].
+-*   **Boundaries:** The kernel $W(\mathbf{x}) = 0$ when $\|\mathbf{x}\|$ exceeds a small radius, so particles far from samples do not contribute [S1].
+-*   **Degenerate Input:** If no particles are near a sample, $w_t(\mathbf{x}) = 0$, and the static field is used [S1].
+-
+-## Subtopics
+-
+-### ParticleNeRF
+-Encodes the entire scene with particles and uses radius nearest neighbor searching; requires 20 camera views per time frame [S1].
+-
+-### InstantNGP
+-An alternative framework that can integrate the Lagrangian representation [S1].
++*   **Monocular Data:** The method is designed to handle monocular video data with just one camera view at each time frame, unlike ParticleNeRF which requires 20 camera views per time frame [S1].
++*   **Dynamic Support:** The effectiveness of the dynamic field is determined by $w_t(x)$. If $w_t(x)$ is incorrectly set, the superposition may fail to capture dynamic elements or introduce artifacts in static regions [S1].
++*   **Kernel Approximation:** Replacing the Dirac function with a finite-support kernel $W$ leads to quantization. The choice of kernel radius affects the smoothness and accuracy of the dynamic field representation [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of particles and samples. Querying dynamic field requires finding nearby particles for each sample [S1].
+-*   **Memory Complexity:** Stores static grid and particle states [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** Not given in the sources.
+ *   **Scaling:** Not given in the sources.
+-*   **Strengths:** Handles monocular video data; no prior geometric knowledge required; efficient querying via linear interpolation for static part [S1].
+-*   **Limitations:** Requires tuning of kernel radius and mask threshold [S1].
+-*   **When to use:** Monocular dynamic scene reconstruction [S1].
+-*   **When not:** Multi-view static scenes (use standard NeRF) or scenes with known geometry (use deformation fields) [S1].
++*   **Strengths:**
++    *   Handles monocular video data [S1].
++    *   Does not require prior geometric knowledge of dynamic objects [S1].
++    *   More efficient querying than ParticleNeRF due to grid-based field with linear interpolation [S1].
++*   **Limitations:**
++    *   Requires a particle motion network to model dynamics [S1].
++    *   The dynamic field is limited to the support of the particles [S1].
++*   **When to use:** When reconstructing dynamic scenes from monocular video without prior geometric knowledge [S1].
++*   **When not to use:** When multi-view data is available and a simpler static NeRF or ParticleNeRF might suffice [S1].
+ 
+ ## Background
+-*   **Origin:** Proposed in [S1] (2025).
+-*   **History:** Builds on ParticleNeRF [S1] and static NeRF frameworks [S1].
+-*   **Usage:** Monocular video dynamic scene reconstruction [S1].
++*   **Origin:** The method was proposed in "Dynamic Appearance Particle Neural Radiance Field" [S1].
++*   **History and Development:** The method builds upon the concept of particle-based representations in NeRF, such as ParticleNeRF [S1]. It differs from ParticleNeRF by applying appearance particles only to dynamic elements and using a grid-based field for efficient querying [S1]. It also differs from ParticleNeRF by handling monocular video data instead of requiring multiple camera views [S1].
++*   **Usage:** The method is designed for novel view synthesis from monocular video [S1]. It can be integrated into alternative frameworks such as InstantNGP [S1].
+ 
+ ## Sources

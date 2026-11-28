@@ -1,0 +1,139 @@
+--- v003.md
++++ v004.md
+@@ -1,58 +1,73 @@
+ # Patch-based Ray Sampling
++
++Also called: Patch-based Rendering
++
+ ## Overview
+-Patch-based ray sampling is a ray sampling strategy where rays are sampled in contiguous 2D patches to form a local image grid, ensuring the spatial adjacency required for local-structure loss functions such as the Discrete Wavelet Transform (DWT) loss [S1, unofficial]. It sets itself apart from its sibling [Random Patch Sampling](14277-random-patch-sampling.md) by using rigid grid-based selection rather than random selection, and from [Loss-based Adaptive Sampling](6928-loss-based-adaptive-sampling.md) by focusing on spatial locality for blur convolution rather than error metrics. It solves the problem of high-frequency learning in deblurring neural fields by providing the structured neighborhood data necessary for wavelet decomposition [S1, unofficial].
++Patch-based ray sampling is a strategy where rays are grouped into spatially adjacent 2D patches to form local image grids, ensuring the adjacency required for local-structure losses like Discrete Wavelet Transform (DWT) loss [S1, unofficial]. It is distinguished from random ray sampling, which is used for global-structure losses (e.g., MSE), by enforcing local spatial coherence within each sampling batch [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and outputs:**
+-- Input: A set of rays intended for rendering a 2D image region.
+-- Output: A batch of rays grouped into square patches, where rays within a patch are spatially adjacent in the image plane.
++- Input: Image dimensions, patch size, total number of rays to sample per iteration.
++- Output: A set of ray origins and directions corresponding to a contiguous rectangular region of the image plane.
+ 
+ **Data structures:**
+-- Rays are stored in a contiguous block representing a square grid of size $P \times P$.
+-- Each ray is defined by its origin and direction. In the patch, rays are ordered to match their pixel coordinates in the 2D image grid.
++- Ray coordinates: 2D integer indices $(u, v)$ representing pixel locations in the image grid.
++- Patch buffer: A list of ray indices or coordinates with shape $(H_p, W_p)$, where $H_p$ and $W_p$ are patch height and width.
++
++**Steps:**
++1. Determine patch dimensions $H_p \times W_p$. Standard configuration uses $192 \times 192$ square patches [S1, unofficial].
++2. Calculate the number of rays per patch: $N_{patch} = H_p \times W_p$. For $192 \times 192$, $N_{patch} = 36,864$ [S1, unofficial].
++3. Select a random top-left corner $(u_0, v_0)$ within the valid image bounds such that the patch fits entirely within the image:
++   $$ 0 \le u_0 \le W_{img} - W_p $$
++   $$ 0 \le v_0 \le H_{img} - H_p $$
++   where $W_{img}$ and $H_{img}$ are image width and height.
++4. Generate all ray indices $(u, v)$ for $u \in [u_0, u_0 + W_p - 1]$ and $v \in [v_0, v_0 + H_p - 1]$.
++5. Convert indices to ray origins and directions using the camera projection matrix.
++6. Use these rays for loss computation (e.g., DWT loss) [S1, unofficial].
+ 
+ **Parameters:**
+-- Patch size: $192 \times 192$ square patches [S1, unofficial].
+-- This requires 36,864 rays for DWT loss calculation [S1, unofficial].
+-- Typical training configurations use 4,096 rays for LLFF datasets and 7,008 rays for NeRF-Synthetic datasets for standard loss, with the additional 36,864 rays for DWT loss [S1, unofficial].
+-
+-**Steps:**
+-1. Partition the image plane into non-overlapping square grids of size $P \times P$.
+-2. For each iteration, select one or more full patches from the grid.
+-3. Sample all rays corresponding to the pixels in the selected patch(es).
+-4. Pass these rays to the neural network to compute the DWT loss [S1, unofficial].
+-
+-**Formulas:**
+-- The DWT loss $L_{DW}$ requires adjacently sampled rays $r$ that make up a 2D image $I$ [S1, unofficial].
+-- The hybrid encoding used in the underlying model is $\gamma'(d, x) = [\gamma(d), \gamma_{1:N_x}(x)]$, where $[\cdot, \cdot]$ denotes concatenation, $d$ is view direction, $x$ is position, and $N_x$ is the highest dimension of the hash encoding [S1, unofficial].
++- Patch size: $192 \times 192$ [S1, unofficial].
++- Sampling frequency: DWT loss calculated every 10 iterations for LLFF dataset and every 150 iterations for NeRF-Synthetic (NS) dataset [S1, unofficial].
++- Training duration for DWT: Stopped altogether at 5,000 iterations to facilitate high-frequency learning [S1, unofficial].
+ 
+ **Edge cases and pitfalls:**
+-- Grid-based patch sampling cuts ray space strictly with certain grid lines, causing variations between grid boundaries to never be seen by convolutional kernels during training [S2]. This can lead to artifacts at patch edges if the model relies on convolutional operations [S2].
++- Boundary conditions: The patch must fit within the image. Random selection of top-left corner ensures this if bounds are respected [S1, unofficial].
++- Precision: No specific precision issues noted, but standard floating-point ray casting applies.
+ 
+ **Pseudocode:**
+ ```python
+-def sample_patch_rays(image_width, image_height, patch_size):
++import numpy as np
++
++def sample_patch_rays(image_width, image_height, patch_size=192):
+     """
+-    Samples rays for a single patch based on a rigid grid.
++    Samples rays for a single patch-based batch.
++    
++    Args:
++        image_width (int): Width of the image in pixels.
++        image_height (int): Height of the image in pixels.
++        patch_size (int): Side length of the square patch.
++        
++    Returns:
++        list of tuples: List of (u, v) pixel coordinates in the patch.
+     """
+-    # Calculate number of patches in x and y
+-    num_patches_x = image_width // patch_size
+-    num_patches_y = image_height // patch_size
++    # Step 1 & 2: Define patch dimensions
++    h_p, w_p = patch_size, patch_size
+     
+-    # Select a random patch index (or iterate through all)
+-    patch_x_idx = random.randint(0, num_patches_x - 1)
+-    patch_y_idx = random.randint(0, num_patches_y - 1)
++    # Step 3: Select random top-left corner within valid bounds
++    # Valid range for u0: [0, image_width - w_p]
++    # Valid range for v0: [0, image_height - h_p]
++    u0 = np.random.randint(0, image_width - w_p + 1)
++    v0 = np.random.randint(0, image_height - h_p + 1)
+     
+-    # Define the pixel range for this patch
+-    x_start = patch_x_idx * patch_size
+-    y_start = patch_y_idx * patch_size
++    # Step 4: Generate all ray indices in the patch
++    # Using meshgrid to create all combinations
++    u_coords, v_coords = np.meshgrid(
++        range(u0, u0 + w_p),
++        range(v0, v0 + h_p)
++    )
+     
+-    rays = []
+-    for y in range(y_start, y_start + patch_size):
+-        for x in range(x_start, x_start + patch_size):
+-            # Generate ray for pixel (x, y)
+-            ray = generate_ray_for_pixel(x, y)
+-            rays.append(ray)
+-            
++    # Flatten to list of (u, v) tuples
++    rays = list(zip(u_coords.flatten(), v_coords.flatten()))
++    
+     return rays
+ ```
+@@ -61,18 +76,15 @@
+ 
+ ### Grid-based Patch Sampling
+-A patch sampling method where rays of an image are divided into equal-size patches following rigid grid lines determined by a given grid size, shuffled, and fed into the SR-based NeRF pipeline [S2]. It sets itself apart from [Random Patch Sampling](14277-random-patch-sampling.md) by using fixed grid boundaries rather than random regions. It is chosen when strict adherence to a predefined grid structure is required for supervision [S2]. A key pitfall is that it cuts ray space strictly with certain grid sizes, causing variations between grid boundaries to never be seen by convolutional kernels during training [S2].
++A variant where rays are divided into equal-size patches following rigid grid lines determined by a fixed grid size, then shuffled [S2]. It is chosen for simplicity in SR-based NeRF pipelines but suffers from a pitfall: cutting ray space strictly with grid boundaries causes variations between boundaries to never be seen by convolutional kernels during training [S2].
+ 
+ ## Operating characteristics
+-- **Time complexity:** Sampling is $O(P^2)$ per patch, where $P$ is the patch dimension. The DWT loss calculation adds overhead proportional to the number of rays in the patch [S1, unofficial].
+-- **Memory complexity:** Requires storing $P^2$ rays per patch. For $P=192$, this is 36,864 rays [S1, unofficial].
+-- **Measured performance:** Evaluated on LLFF and NeRF-Synthetic datasets under few-shot conditions [S1, unofficial]. Training was done on GeForce RTX 4070 Ti Super [S1, unofficial].
+-- **Scaling:** The method scales with the number of patches and the patch size. Larger patches provide more local context for DWT but increase memory usage [S1, unofficial].
+-- **Strengths:** Ensures adjacency required for DWT, capturing local structures effectively [S1, unofficial].
+-- **Limitations:** Grid-based variants may miss variations at boundaries [S2].
+-- **When to use:** When using DWT loss or other local-structure losses that require adjacent pixels [S1, unofficial].
+-- **When not to use:** When global structures are the primary focus, in which case random ray sampling is preferred for $L_{MSE}$ [S1, unofficial].
++- **Time complexity:** Sampling is $O(N_{patch})$ where $N_{patch}$ is the number of rays in the patch. The overhead of coordinate generation is negligible compared to ray casting.
++- **Memory complexity:** $O(N_{patch})$ to store ray origins and directions. For $192 \times 192$, this is 36,864 rays [S1, unofficial].
++- **Performance:** Evaluated on GeForce RTX 4070 Ti Super [S1, unofficial]. DWT loss calculation adds computational cost but is limited to 5,000 iterations [S1, unofficial].
++- **Strengths:** Captures local structures required for DWT loss [S1, unofficial].
++- **Limitations:** Grid-based variants (see Subtopics) may miss boundary variations [S2]. Random patch sampling (the primary method) avoids this but requires careful boundary handling [S1, unofficial].
+ 
+ ## Background
+-Originated in the context of boosting few-shot Neural Radiance Fields via Discrete Wavelet Transform [S1, unofficial]. It was introduced to address the need for local structure preservation in neural rendering, contrasting with global structure preservation achieved by random sampling [S1, unofficial]. The method is part of the DWTNeRF pipeline [S1, unofficial].
++Originated in DWTNeRF, which boosts few-shot Neural Radiance Fields via Discrete Wavelet Transform [S1, unofficial]. The method was introduced to support the DW loss, which requires adjacently sampled rays to form a 2D image grid [S1, unofficial]. It contrasts with random ray sampling used for MSE loss to capture global structures [S1, unofficial].
+ 
+ ## Sources

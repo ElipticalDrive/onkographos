@@ -1,0 +1,137 @@
+--- v002.md
++++ v003.md
+@@ -4,89 +4,82 @@
+ 
+ ## Overview
+-An MLP architecture that concatenates the original input $z$ to intermediate layers specified in `input_skips`, allowing the network to access low-level features at deeper layers [S1, S2, unofficial]. It differs from the parent [MLP Neural Field](1256-mlp-neural-field.md) by explicitly preserving high-frequency input information in hidden representations [S1, S2, unofficial].
++An MLP architecture that concatenates the original input $z$ to intermediate layers specified in `input_skips`, allowing the network to access low-level features at deeper layers [S1, S2, unofficial]. It builds on [MLP Neural Field](1256-mlp-neural-field.md) by modifying the hidden state propagation to preserve direct access to the input coordinate information, which helps mitigate the spectral bias problem where standard MLPs struggle to learn high-frequency details [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A coordinate vector $z \in \mathbb{R}^{in_{dim}}$ [S1, S2, unofficial].
+-- Output: A value vector $v \in \mathbb{R}^{output_{dim}}$ [S1, S2, unofficial].
++- Input: A vector $z \in \mathbb{R}^{skip\_dim}$ (typically 3D spatial coordinates).
++- Output: A vector $y_{out} \in \mathbb{R}^{output\_dim}$ (e.g., density and color).
+ 
+ **Data Structures:**
+-- `input_skips`: A list of integers representing layer indices where the skip connection is applied [S1, S2, unofficial].
+-- Weights $W_i$ and biases $b_i$ for each linear layer $i$ [S2, unofficial].
++- `input_skips`: A list of integers representing the indices of layers that receive the skip connection.
++- `hidden_dim`: The dimensionality of the hidden layers.
++- `n_layers`: Total number of linear layers.
+ 
+ **Parameters:**
+-- $in_{dim}$: Dimensionality of the input vector $z$ [S1, S2, unofficial].
+-- $hidden_{dim}$: Dimensionality of the hidden layers [S1, S2, unofficial].
+-- $output_{dim}$: Dimensionality of the output vector [S1, S2, unofficial].
+-- $n_{layers}$: Total number of linear layers in the MLP [S1, S2, unofficial].
+-- $skip_{dim}$: Dimensionality of the vector $z$ to be skipped [S1, S2, unofficial].
++- `input_dim`: Dimension of the input vector $z$.
++- `hidden_dim`: Dimensionality of the hidden layers.
++- `output_dim`: Dimension of the output vector.
++- `n_layers`: Total number of linear layers in the MLP.
++- `input_skips`: List of layer indices where the input $z$ is concatenated.
+ 
+ **Algorithm:**
+-1. Initialize the hidden state $y$ as the input $z$ [S2, unofficial].
+-2. Iterate through each layer index $i$ from $0$ to $n_{layers} - 1$:
+-   a. If $i$ is in `input_skips` and $i > 0$: concatenate the original input $z$ to the current hidden state $y$: $y = [y, z]$ [S1, S2, unofficial].
+-   b. Apply the linear transformation: $y = W_i y + b_i$ [S2, unofficial].
+-   c. Apply the ReLU activation function: $y = \text{ReLU}(y)$ [S1, S2, unofficial].
+-3. After the final layer, apply a final linear transformation mapping $hidden_{dim}$ to $output_{dim}$ if $output_{dim} \neq hidden_{dim}$ [G]. The final output is $v = y$ [G].
+-
+-**Initialization:**
+-- Layer 0: Input dimension $in_{dim}$, output dimension $hidden_{dim}$ [S2, unofficial].
+-- Layers $i \notin \text{input\_skips}$: Input dimension $hidden_{dim}$, output dimension $hidden_{dim}$ [S2, unofficial].
+-- Layers $i \in \text{input\_skips}$: Input dimension $hidden_{dim} + skip_{dim}$, output dimension $hidden_{dim}$ [S2, unofficial].
++1. Initialize the hidden state $y = z$.
++2. Iterate through each layer $i$ from $0$ to $n\_layers - 1$:
++   a. If $i$ is in `input_skips`, concatenate the original input $z$ to the current hidden state: $y = [y, z]$.
++   b. Apply the linear transformation: $y = W_i y + b_i$.
++   c. Apply ReLU activation: $y = \text{ReLU}(y)$.
++3. After the final layer, apply a final linear transformation (without activation) to produce the output.
+ 
+ **Pseudocode:**
+ ```python
+ import torch
+-import torch.nn.functional as F
++import torch.nn as nn
+ 
+-class MLPWithInputSkips:
+-    def __init__(self, in_dim, hidden_dim, output_dim, n_layers, input_skips):
++class MLPWithInputSkips(nn.Module):
++    def __init__(self, input_dim, hidden_dim, output_dim, n_layers, input_skips):
++        super().__init__()
+         self.input_skips = set(input_skips)
+-        self.layers = []
++        self.layers = nn.ModuleList()
++        
+         # Layer 0
+-        self.layers.append(torch.nn.Linear(in_dim, hidden_dim))
++        self.layers.append(nn.Linear(input_dim, hidden_dim))
++        
+         # Intermediate layers
+         for i in range(1, n_layers):
+             if i in self.input_skips:
+-                in_features = hidden_dim + in_dim
++                # Concatenation happens in forward pass, so input size is hidden_dim + input_dim
++                self.layers.append(nn.Linear(hidden_dim + input_dim, hidden_dim))
+             else:
+-                in_features = hidden_dim
+-            self.layers.append(torch.nn.Linear(in_features, hidden_dim))
+-        # Final output layer
+-        self.output_layer = torch.nn.Linear(hidden_dim, output_dim)
++                self.layers.append(nn.Linear(hidden_dim, hidden_dim))
++                
++        # Output layer
++        self.layers.append(nn.Linear(hidden_dim, output_dim))
+ 
+-    def forward(self, z):
+-        y = z
++    def forward(self, x):
++        y = x
+         for i, layer in enumerate(self.layers):
+-            if i in self.input_skips and i > 0:
+-                y = torch.cat([y, z], dim=-1)
++            if i in self.input_skips:
++                y = torch.cat([y, x], dim=-1)
+             y = layer(y)
+-            y = F.relu(y)
+-        return self.output_layer(y)
++            if i < len(self.layers) - 1: # ReLU applied to all but the last layer
++                y = torch.relu(y)
++        return y
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- If `input_skips` contains 0, the skip is effectively ignored because there is no previous hidden state to concatenate to [G].
+-- Precision issues may arise if $in_{dim}$ is very large compared to $hidden_{dim}$, causing the skip connection to dominate the gradient [G].
+-- Boundary conditions require ensuring that the concatenation dimension is consistent across all layers [G].
++- `input_skips` must contain indices less than `n_layers - 1` (the output layer does not typically receive a skip connection in this formulation, or if it does, the output dimension must account for it).
++- Precision issues may arise if `input_dim` is significantly larger than `hidden_dim`, causing the concatenated vector to be dominated by the input signal.
+ 
+ ## Subtopics
+-
+-### ODENetwork (Conditioned Neural ODE)
+-A multi-layer perceptron that computes the derivative of the latent state over time, conditioned on a voxel embedding and a scalar time parameter [S3, unofficial]. It iterates through layers, concatenating the latent state, voxel embedding, and time $t$ at indices in `skip_layers` [S3, unofficial]. The update rule is $z_{i+1} = \text{ReLU}(\text{Linear}(z_i + \text{Concat}(\text{voxel\_emb}, t)))$ for skip layers, and $z_{i+1} = \text{ReLU}(\text{Linear}(z_i))$ otherwise [S3, unofficial]. The final output applies Tanh: $z_{out} = \tanh(\text{Linear}(z_{last}))$ [S3, unofficial]. Parameters include $latent_{dim}$ (default 512), $hidden_{dim}$ (default 512), and $skip_{layers}$ (default [1, 3]) [S3, unofficial]. It is chosen when modeling continuous latent state evolution conditioned on spatial embeddings [S3, unofficial].
+-
+ ## Operating characteristics
+-- Time Complexity: $O(n_{layers} \cdot hidden_{dim}^2)$ for standard layers, $O(n_{layers} \cdot hidden_{dim} \cdot (hidden_{dim} + in_{dim}))$ for skip layers [G].
+-- Memory Complexity: $O(n_{layers} \cdot hidden_{dim}^2)$ for weights, plus $O(hidden_{dim} + in_{dim})$ for activations [G].
+-- Strengths: Not given in the sources.
+-- Limitations: Not given in the sources.
+-- When to use: Not given in the sources.
+-- When not to use: Not given in the sources.
++- **Time Complexity:** $O(n\_layers \cdot hidden\_dim^2)$ for standard layers, $O(n\_layers \cdot hidden\_dim \cdot (hidden\_dim + input\_dim))$ for skip layers.
++- **Memory Complexity:** $O(n\_layers \cdot hidden\_dim^2)$ for weights.
++- **Strengths:** Improves learning of high-frequency details compared to plain MLPs [S1, S2, unofficial].
++- **Limitations:** Increases the input dimension for skip layers, potentially increasing computation and memory usage slightly.
+ 
+ ## Background
+-This method is implemented in various neural field repositories [S1, S2, unofficial]. Not given in the sources regarding its origin or history.
++This architecture is commonly used in Neural Radiance Fields (NeRF) and related neural implicit representations to address the slow convergence of standard MLPs on high-frequency signals [S1, S2, unofficial]. It was popularized by the original NeRF paper and is a standard component in many neural field implementations.
+ 
+ ## Sources
+ [S1] omkarchittar/Neural_Radiance_Fields, https://github.com/omkarchittar/Neural_Radiance_Fields, fetched 2026-10-26 (unofficial)
+-[S2] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+-[S3] TurtleJayWang/VC-SDFGen, https://github.com/TurtleJayWang/VC-SDFGen, fetched 2026-10-28 (unofficial)+[S2] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)

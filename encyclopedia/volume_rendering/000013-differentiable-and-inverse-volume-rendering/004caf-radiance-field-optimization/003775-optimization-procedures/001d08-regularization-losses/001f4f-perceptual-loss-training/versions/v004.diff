@@ -1,0 +1,228 @@
+--- v003.md
++++ v004.md
+@@ -1,185 +1,71 @@
+ # Perceptual Loss Training
+ 
+-Also called: PIPS Loss, Perceptual Loss for 3DGS
++Also called: PIPS Loss, Perceptual Loss for 3DGS, Perceptual loss for dynamic NeRF
+ 
+ ## Overview
+-Perceptual Loss Training is an optimization strategy that incorporates a perceptual loss term into the training objective to improve the perceptual quality of rendered images, specifically addressing the smoothness and blurriness issues inherent in pixel-wise reconstruction losses like L1 or L2 [S1]. Unlike pixel-wise metrics that penalize high-frequency details and color variations heavily, perceptual losses operate in a feature space extracted by a pre-trained Convolutional Neural Network (CNN), allowing the model to preserve structural and textural fidelity [S1]. This method is distinct from standard regularization techniques (e.g., Total Variation) by directly optimizing for human-perceived similarity rather than geometric smoothness or pixel-level alignment [S1].
++Perceptual Loss Training is an optimization strategy that incorporates a perceptual loss term during the training of radiance fields to improve perceptual quality and enforce high-level visual fidelity [S1, S2]. It addresses the inherent smoothness and lack of high-frequency detail in rendered images caused by pixel-wise losses (such as L1 or L2) [S1]. By leveraging features from pre-trained convolutional neural networks (CNNs), it reduces structural artifacts and improves metrics like LPIPS, distinguishing it from standard photometric regularization methods [S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Rendered image $\hat{C}(\mathbf{r})$ (or patch), ground-truth image $C_{gt}$ (or patch), pre-trained CNN feature extractor (e.g., VGG-19), and loss weights $\lambda_1, \lambda_2$ (or $w_{l1}, w_{vgg}, w_{ab}$).
+-*   **Outputs:** Scalar loss value $\mathcal{L}$ used for gradient backpropagation.
++*   **Inputs:** Rendered image $\hat{C}(\mathbf{r})$, ground truth image $C_{gt}$, and optionally a CNN feature extractor network $F$.
++*   **Outputs:** Gradient updates for the radiance field parameters (density, color, etc.) derived from the perceptual loss.
+ 
+ **Data Structures:**
+-*   **Feature Maps:** Intermediate activations from the CNN. The specific layers used depend on the variant (see Subtopics).
+-*   **Loss Weights:** Scalars $\lambda_1, \lambda_2$ (for SSIM and Perceptual terms) or $w_{l1}, w_{vgg}, w_{ab}$ (for L1, VGG, and Anti-Bias terms).
++*   **Feature Maps:** Intermediate activations from the CNN $F$. The specific layers used depend on the variant (e.g., block 1 only for High-Frequency Aware Loss, multiple blocks for standard VGG-based loss).
++*   **Loss Weights:** Scalars $\lambda_1, \lambda_2$ (or $w_{l1}, w_{vgg}, w_{ab}$) controlling the contribution of each loss term.
+ 
+ **Method Steps:**
+-1.  **Render Image:** Compute the rendered image $\hat{C}$ using the volume rendering equation or Gaussian splatting forward pass [S1, S3].
+-2.  **Compute Pixel-wise Loss:** Calculate the base pixel-wise loss $\mathcal{L}_1$ (L1 distance) between $\hat{C}$ and $C_{gt}$ [S1, S3].
+-3.  **Compute Perceptual Loss ($\mathcal{L}_{\text{PIPS}}$ or $\mathcal{L}_{\text{vgg}}$):**
+-    *   Pass both $\hat{C}$ and $C_{gt}$ through a pre-trained CNN (typically VGG-19) [S1, S3].
+-    *   Extract feature maps from specific layers.
+-    *   Compute the L1 or L2 distance between the feature maps of the rendered and ground-truth images [S1, S3].
+-    *   *Optimization Note:* To alleviate computational overhead, the perceptual loss may be computed only every $K$ training iterations (e.g., $K=20$) rather than every step [S1].
+-4.  **Compute Anti-Bias Loss ($\mathcal{L}_{ab}$) [Optional/Variant Specific]:**
+-    *   If using the Anti-Bias variant, downsample both $\hat{C}$ and $C_{gt}$ by a factor of $k$ (k-fold downsampling) [S3].
+-    *   Compute the L1 distance between the downsampled patches: $\mathcal{L}_{ab} = \| D S_k(P) - D S_k(\hat{P}) \|_1$ [S3].
+-5.  **Combine Losses:** Aggregate the terms using weighted coefficients [S1, S3].
+-
+-**Formulas:**
+-
+-**Standard Formulation (Duplex-GS):**
+-The total loss is a weighted sum of L1, Structural Similarity (SSIM), and Perceptual (PIPS) losses [S1]:
+-$$
+-\mathcal{L} = (1 - \lambda_1 - \lambda_2)\mathcal{L}_1 + \lambda_1\mathcal{L}_{\text{SSIM}} + \lambda_2\mathcal{L}_{\text{PIPS}}
+-$$
+-where:
+-*   $\mathcal{L}_1$: L1 pixel-wise loss.
+-*   $\mathcal{L}_{\text{SSIM}}$: Structural Similarity index loss.
+-*   $\mathcal{L}_{\text{PIPS}}$: Perceptual loss computed via CNN features.
+-*   $\lambda_1, \lambda_2$: Weighting coefficients for SSIM and Perceptual terms, respectively. Values not explicitly given in sources [S1].
+-
+-**Anti-Bias Formulation (DINER):**
+-The total loss combines L1, VGG perceptual, and Anti-Bias losses [S3]:
+-$$
+-\mathcal{L} = w_{l1} \cdot \mathcal{L}_{l1} + w_{vgg} \cdot \mathcal{L}_{vgg} + w_{ab} \cdot \mathcal{L}_{ab}
+-$$
+-where:
+-*   $\mathcal{L}_{l1}$: Pixel-wise L1 distance.
+-*   $\mathcal{L}_{vgg}$: Perceptual loss using VGG features.
+-*   $\mathcal{L}_{ab}$: Anti-bias loss defined as $\| D S_k(P) - D S_k(\hat{P}) \|_1$, where $D S_k(\cdot)$ is k-fold downsampling [S3].
+-*   $w_{l1}, w_{vgg}, w_{ab}$: Weights. Standard parameters used Adam optimizer with learning rate $10^{-4}$ [S3].
+-
+-**Pseudocode:**
+-
+-```python
+-def compute_perceptual_loss_training(rendered_image, ground_truth, cnn_model, 
+-                                     lambda1, lambda2, compute_pips_every=20, 
+-                                     current_iteration, use_anti_bias=False, 
+-                                     k_downsample=2, w_ab=1.0):
+-    """
+-    Computes the total loss including perceptual terms.
+-    
+-    Args:
+-        rendered_image: Tensor of shape (H, W, 3) or (B, H, W, 3)
+-        ground_truth: Tensor of shape (H, W, 3) or (B, H, W, 3)
+-        cnn_model: Pre-trained CNN (e.g., VGG-19) for feature extraction
+-        lambda1: Weight for SSIM loss
+-        lambda2: Weight for Perceptual (PIPS) loss
+-        compute_pips_every: Frequency of PIPS computation to save time
+-        current_iteration: Current training iteration number
+-        use_anti_bias: Whether to include Anti-Bias loss (DINER variant)
+-        k_downsample: Downsampling factor for Anti-Bias loss
+-        w_ab: Weight for Anti-Bias loss
+-        
+-    Returns:
+-        total_loss: Scalar tensor
+-    """
+-    
+-    # 1. Base L1 Loss
+-    l1_loss = torch.mean(torch.abs(rendered_image - ground_truth))
+-    
+-    # 2. SSIM Loss (Assuming a standard SSIM implementation is available)
+-    # Note: SSIM is often computed on luminance or per channel.
+-    ssim_loss = 1.0 - ssim(rendered_image, ground_truth)
+-    
+-    # 3. Perceptual Loss (PIPS/VGG)
+-    # Compute only every N iterations to reduce CNN overhead [S1]
+-    if current_iteration % compute_pips_every == 0:
+-        # Extract features from pre-trained CNN
+-        features_rendered = cnn_model(rendered_image)
+-        features_gt = cnn_model(ground_truth)
+-        
+-        # Compute L1 distance between feature maps
+-        # Typically summed over relevant layers
+-        pips_loss = torch.mean(torch.abs(features_rendered - features_gt))
+-    else:
+-        # Use cached value or zero if not computed this step
+-        # [G] In practice, one might cache the last computed pips_loss
+-        # or use a running average. Here we assume 0 for simplicity 
+-        # if not computed, though this breaks gradient flow for that step.
+-        # A better implementation would cache the last valid pips_loss.
+-        pips_loss = 0.0 
+-        
+-    # 4. Anti-Bias Loss (DINER Variant) [S3]
+-    if use_anti_bias:
+-        # Downsample ground truth and rendered image
+-        # DSk denotes k-fold downsampling
+-        gt_downsampled = downsample(ground_truth, k_downsample)
+-        pred_downsampled = downsample(rendered_image, k_downsample)
+-        
+-        # L1 distance on downsampled patches
+-        ab_loss = torch.mean(torch.abs(gt_downsampled - pred_downsampled))
+-    else:
+-        ab_loss = 0.0
+-        
+-    # 5. Combine Losses
+-    # Standard Formula [S1]: L = (1 - l1 - l2)*L1 + l1*L_SSIM + l2*L_PIPS
+-    # DINER Formula [S3]: L = wl1*Ll1 + wvgg*Lvgg + wab*Lab
+-    
+-    # We implement the Standard Formula as primary, with Anti-Bias as an additive term
+-    # if the variant requires it.
+-    
+-    total_loss = (1 - lambda1 - lambda2) * l1_loss + \
+-                 lambda1 * ssim_loss + \
+-                 lambda2 * pips_loss + \
+-                 w_ab * ab_loss
+-                 
+-    return total_loss
+-
+-def downsample(image, k):
+-    """
+-    Performs k-fold downsampling.
+-    [G] Implementation detail: typically involves resizing or pooling.
+-    """
+-    # Assuming image is (B, C, H, W) or (C, H, W)
+-    # Using average pooling for downsampling
+-    pool = torch.nn.AvgPool2d(kernel_size=k, stride=k)
+-    if image.dim() == 3:
+-        image = image.unsqueeze(0)
+-    downsampled = pool(image)
+-    if image.dim() == 3:
+-        downsampled = downsampled.squeeze(0)
+-    return downsampled
+-```
++1.  **Render:** Compute the rendered image $\hat{C}$ using the current radiance field parameters and the standard emission-absorption model [44-radiance-field-optimization.md].
++2.  **Feature Extraction:** Pass both the rendered image $\hat{C}$ and the ground truth image $C_{gt}$ through a pre-trained CNN $F$ to obtain feature representations $F(\hat{C})$ and $F(C_{gt})$ [S1, S2].
++3.  **Compute Perceptual Loss:** Calculate the distance between the feature maps. The standard formulation uses the L1 or L2 norm of the difference between features at specific layers [S1, S2].
++    $$ \mathcal{L}_{\text{PIPS}} = \| F(\hat{C}) - F(C_{gt}) \| $$
++    *Note: In the High-Frequency Aware variant, $F$ is restricted to the first block of the network, before any max-pooling operations, to preserve fine-grained spatial information [S1].*
++4.  **Combine with Photometric Losses:** Integrate the perceptual loss into the total objective function. A common formulation includes L1 loss and SSIM loss [S1]:
++    $$ \mathcal{L} = (1 - \lambda_1 - \lambda_2)\mathcal{L}_1 + \lambda_1\mathcal{L}_{\text{SSIM}} + \lambda_2\mathcal{L}_{\text{PIPS}} $$
++    where $\mathcal{L}_1$ is the L1 loss, $\mathcal{L}_{\text{SSIM}}$ is the structural similarity loss, and $\lambda_1, \lambda_2$ are weighting coefficients [S1].
++    *Alternative Formulation (Anti-Bias):* To mitigate color shifts introduced by perceptual loss, an anti-bias term $\mathcal{L}_{ab}$ can be added, defined as the L1 distance between k-fold downsampled versions of the prediction and ground truth [S4]:
++    $$ \mathcal{L}_{ab} = \| DSk(C_{gt}) - DSk(\hat{C}) \|_1 $$
++    The full objective becomes:
++    $$ \mathcal{L} = w_{l1} \mathcal{L}_{l1} + w_{vgg} \mathcal{L}_{vgg} + w_{ab} \mathcal{L}_{ab} $$
++    where $\mathcal{L}_{vgg}$ is the perceptual loss [S4].
++5.  **Backpropagate:** Compute gradients with respect to the radiance field parameters using the combined loss and update the model [S4].
+ 
+ **Parameters:**
+-*   $\lambda_1$ (SSIM weight): Not given in sources [S1].
+-*   $\lambda_2$ (Perceptual weight): Not given in sources [S1].
+-*   $w_{l1}, w_{vgg}, w_{ab}$: Weights for DINER variant. Values not explicitly given, but standard Adam optimizer with LR $10^{-4}$ is used [S3].
+-*   $K$ (Update frequency): 20 iterations [S1].
+-*   $k$ (Downsampling factor): Not explicitly given, referred to as "k-fold" [S3].
++*   $\lambda_1, \lambda_2$ (or $w_{l1}, w_{vgg}, w_{ab}$): Weights for the respective loss terms. Values are not explicitly given in the primary sources [S1, S4].
++*   $k$: Downsampling factor for the anti-bias term. Not explicitly given [S4].
++*   **Frequency:** In some implementations (e.g., Duplex-GS), the perceptual loss is computed every 20 training iterations to alleviate computational overhead from CNN-based computation [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Computational Overhead:** CNN-based perceptual loss is expensive. Computing it every iteration significantly increases training time. Mitigation: Compute every 20 iterations [S1].
+-*   **Color Shifts:** Perceptual loss (VGG) can introduce color shifts in the rendered output. Mitigation: Use Anti-Bias loss ($\mathcal{L}_{ab}$) which applies L1 on downsampled images to correct color while remaining robust to misalignments [S3].
+-*   **Proxy Geometry Dependency (SVS Variant):** If using Stable View Synthesis (SVS), incorrect proxy geometry (e.g., from COLMAP) leads to failures in distant/unobserved content (trees) [S2].
++*   **Computational Overhead:** CNN-based perceptual loss increases training time significantly [S1].
++*   **Visual Degradation:** Omitting perceptual loss increases the LPIPS distance, indicating degraded visual quality despite potentially acceptable pixel-wise metrics (PSNR/SSIM) [S2].
++*   **Color Shifts:** Perceptual loss alone can introduce color shifts; this is mitigated by adding an anti-bias term or combining with pixel-wise losses [S4].
++*   **Proxy Geometry Dependency:** In methods relying on proxy geometry (like SVS), incorrect proxy geometry (e.g., distant/unobserved content like trees) can cause failure, though this is a limitation of the geometry method, not the loss itself [S3].
+ 
+ ## Subtopics
+ 
+ ### [High-Frequency Aware Loss](7589-high-frequency-aware-loss.md)
+-A variant that uses only the first block of a pre-trained VGG-19 model (before max-pooling layers) to compute the perceptual loss [7589-high-frequency-aware-loss.md]. This approach preserves high-frequency details while avoiding the texture distortion common in deeper perceptual losses that use more aggressive pooling [7589-high-frequency-aware-loss.md]. It is chosen when fine texture preservation is critical and standard VGG losses cause blurring or artifacting.
++High-Frequency Aware Loss (LHF) is a perceptual regularization term designed to recover high-frequency details in rendered images while avoiding the texture distortion common in deeper perceptural losses. It sets itself apart from standard VGG-based perceptual losses by restricting feature extraction to the first block of the network, before any max-pooling operations, thereby preserving fine-grained spatial information. It builds on [Perceptual Loss Training](2000-perceptual-loss-training.md) by specifically targeting the loss of high-frequency content that occurs when using pixel-wise losses on misaligned data.
+ 
+ ### Stable View Synthesis (SVS) Baseline
+-A view synthesis method that blends training images together, relying on proxy geometry from an external system (e.g., COLMAP) [S2]. It is trained with a perceptual loss [S2]. It requires multiple large CNNs and access to all training images [S2]. It is better suited for large piecewise planar objects (vehicles) but may fail on natural content (trees, grass) if the proxy geometry is incorrect [S2].
++Stable View Synthesis (SVS) is a view synthesis method that blends training images together, relying on proxy geometry from an external system [S3]. It is trained with a perceptual loss [S3]. It requires multiple large CNNs and access to all training images to render novel views [S3]. It may fail when the external proxy geometry is incorrect, particularly struggling with distant/unobserved content like trees [S3]. It is better suited to large piecewise planar objects (vehicles) due to reliance on piecewise planar mesh proxy geometry, whereas other models handle natural content better [S3].
+ 
+ ### Anti-Bias Loss
+-An l1 loss applied to downsampled versions of prediction and ground truth to eliminate color shifts introduced by perceptual loss while remaining robust against minor misalignments [S3]. It is defined as $\mathcal{L}_{ab} = \| D S_k(P) - D S_k(\hat{P}) \|_1$ [S3]. It is used in conjunction with L1 and VGG perceptual losses in the DINER framework [S3].
++Anti-Bias Loss is an l1 loss applied to downsampled versions of prediction and ground truth to eliminate color shifts introduced by perceptual loss while remaining robust against minor misalignments [S4]. It is calculated as the l1 distance between k-fold downsampled ground truth patch P and predicted patch P̂: $\mathcal{L}_{ab} = \| DSk(P) - DSk(\hat{P}) \|_1$, where $DSk(\cdot)$ denotes k-fold downsampling [S4]. It is part of the full objective function: $\mathcal{L} = w_{l1} \mathcal{L}_{l1} + w_{vgg} \mathcal{L}_{vgg} + w_{ab} \mathcal{L}_{ab}$, where $\mathcal{L}_{l1}$ is pixel-wise l1 distance and $\mathcal{L}_{vgg}$ is perceptual loss [S4].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** High. CNN-based perceptual loss computation is significantly slower than pixel-wise L1/SSIM. Mitigated by computing every 20 iterations [S1].
+-*   **Memory Complexity:** Moderate. Requires storing intermediate CNN activations for backpropagation.
+-*   **Performance:** Improves perceptual quality (LPIPS, SSIM) compared to L1-only training [S1, S3]. DINER achieves lower LPIPS (0.086 vs 0.123 for KeypointNeRF) [S3].
+-*   **Strengths:** Reduces blurriness, preserves high-frequency details, improves structural similarity.
+-*   **Limitations:** Computationally expensive, potential for color shifts (mitigated by Anti-Bias), dependency on proxy geometry in SVS variants.
+-*   **When to Use:** When perceptual quality (LPIPS/SSIM) is more important than raw PSNR, and computational resources allow for periodic CNN evaluation.
+-*   **When Not to Use:** When real-time training speed is critical, or when proxy geometry is unreliable (for SVS).
++*   **Time Complexity:** High. The computation relies on convolutional neural networks (CNNs), which increases training time [S1]. To mitigate this, some implementations compute the perceptual loss every 20 training iterations [S1].
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:** Improves perceptual quality and reduces structural artifacts [S1, S2]. Reduces LPIPS distance [S2].
++*   **Strengths:** Addresses smoothness issues of pixel-wise losses [S1]. Enforces high-level visual fidelity [S2].
++*   **Limitations:** Increases computational overhead [S1]. Can introduce color shifts if not combined with anti-bias terms [S4].
++*   **When to use:** When perceptual quality is prioritized over pixel-wise accuracy (PSNR/SSIM) and computational resources allow for CNN-based loss computation [S1, S2].
++*   **When not to use:** When real-time training speed is critical and perceptual improvements are not required, or when proxy geometry is unreliable (in the context of SVS) [S3].
+ 
+ ## Background
+-Perceptual loss training in volume rendering and neural radiance fields was introduced to address the limitations of pixel-wise losses (L1/L2) which produce overly smooth results [S1]. The concept originates from GAN-based models where perceptual losses were shown to yield more convincing results [S1]. Specific applications include Duplex-GS, which incorporates PIPS loss for Gaussian Splatting [S1], and DINER, which uses VGG perceptual loss with an Anti-Bias term [S3]. Stable View Synthesis (SVS) also utilizes perceptual loss for blending-based view synthesis [S2].
++Perceptual loss training in the context of volume rendering and neural radiance fields has been adopted to address the limitations of pixel-wise losses, which often result in overly smooth and less convincing renderings [S1]. The concept is rooted in GAN-based models where perceptual losses are proven to yield better perceptual results [S1]. It has been applied to various radiance field optimizations, including Gaussian Splatting (e.g., Duplex-GS) [S1], dynamic NeRFs (e.g., MHE-augmented NeRF) [S2], and depth-aware image-based NeRFs (e.g., DINER) [S4]. The Stable View Synthesis (SVS) method also utilizes perceptual loss in conjunction with proxy geometry [S3].
+ 
+ ## Sources
+ [S1] Duplex-GS: Proxy-Guided Weighted Blending for Real-Time Order-Independent Gaussian Splatting, https://doi.org/10.1109/tcsvt.2026.3666188, fetched 2026-10-30
+-[S2] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26
+-[S3] DINER: Depth-aware Image-based NEural Radiance fields, https://doi.org/10.1109/cvpr52729.2023.01198, fetched 2026-10-29+[S2] Learning Neural Volumetric Representations of Dynamic Humans in Minutes, https://doi.org/10.1109/cvpr52729.2023.00846, fetched 2026-10-30
++[S3] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26
++[S4] DINER: Depth-aware Image-based NEural Radiance fields, https://doi.org/10.1109/cvpr52729.2023.01198, fetched 2026-10-29

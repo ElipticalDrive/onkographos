@@ -1,0 +1,153 @@
+--- v001.md
++++ v002.md
+@@ -8,22 +8,22 @@
+ ## How it works
+ **Inputs:**
+-*   Volume dataset $V$.
+-*   Iso-surface value $T$.
+-*   Surface normal $N$ at the point of interest.
+-*   Filterable Occlusion Map data structures (pre-computed from $V$).
++*   Volume dataset $V$ [S1].
++*   Iso-surface value $T$ [S1].
++*   Surface point $P$ [S1].
++*   Surface normal $N$ at the point of interest [S1].
++*   Filterable Occlusion Map data structures (pre-computed from $V$) [S1].
+ 
+ **Outputs:**
+-*   Occlusion factor $A$ for the surface point.
++*   Occlusion factor $A$ for the surface point [S1].
+ 
+ **Data Structures:**
+-The method relies on "filterable representations" of the distribution of values in the region above the surface point [S1]. While the specific internal layout of the map (e.g., variance shadow map vs. convolution shadow map) is not detailed beyond the general concept of storing statistical moments or convolution kernels, the implementation assumes these maps store compact representations of voxel occupancy/occlusion distributions [S1].
++The method relies on "filterable representations" of the distribution of values in the region above the surface point [S1]. Variance shadow maps store the first and second moments of the depth distribution, allowing for efficient soft shadow and occlusion approximation [S1]. Convolution shadow maps store pre-convolved depth values, allowing for efficient filtering during sampling [S1].
+ 
+ **Numbered Steps:**
+-
+-1.  **Pre-computation:** Generate filterable representations of the volume data. This involves creating compact maps that represent the distribution of values (specifically occluding voxels) in regions above the surface [S1].
++1.  **Pre-computation:** Generate filterable representations of the volume data by creating compact maps that represent the distribution of occluding voxels in regions above the surface [S1].
+ 2.  **Sampling:** Choose different sampling patterns from the filterable maps to dynamically approximate ambient occlusion and/or soft shadows [S1].
+-3.  **Occlusion Evaluation:** Evaluate the occlusion amount using one of two methods based on the sampled data:
+-    *   **All-or-nothing method:** Determine if a ray in direction $\omega_i$ hits an occluding voxel.
+-    *   **Partial occlusion method:** Determine the unobstructed distance to the first occlusion and apply a fall-off function.
++3.  **Occlusion Evaluation:** Evaluate the occlusion amount using one of two methods based on the sampled data [S1]:
++    *   **All-or-nothing method:** Determine if a ray in direction $\omega_i$ hits an occluding voxel [S1].
++    *   **Partial occlusion method:** Determine the unobstructed distance to the first occlusion and apply a fall-off function [S1].
+ 
+ **Formulas:**
+@@ -36,7 +36,8 @@
+ *   $\Omega$ is the set of directions above the surface point (where $N$ is the surface normal and $N \cdot \omega > 0$) [S1].
+ *   $N$ is the surface normal [S1].
++*   $\Delta\omega$ is the solid angle of each discretized sector [G].
+ 
+-For isosurface models, computing $L(\omega_i)$ is simplified [S1]:
+-*   If a ray enters the iso-surface, it is fully occluded [S1].
++For isosurface models, computing $L(\omega_i)$ is heavily simplified [S1]:
++*   If a ray ever enters the iso-surface, it immediately becomes fully occluded [S1].
+ *   **All-or-nothing:** $L(\omega_i) = 0$ when $\omega_i$ hits an occluding voxel; otherwise $L(\omega_i) = 1$ [S1].
+ *   **Partial occlusion:** $L(\omega_i)$ uses the unobstructed distance to the first occlusion to determine the amount of occlusion using a basic linear or quadratic fall-off function [S1].
+@@ -44,45 +45,39 @@
+ **Pseudocode:**
+ ```python
+-def compute_fo_maps_ao(volume, iso_value, surface_point, normal, map_type):
+-    """
+-    Computes ambient occlusion for an isosurface point using Filterable Occlusion Maps.
+-    
+-    Args:
+-        volume: The volume dataset.
+-        iso_value: The threshold value defining the isosurface.
+-        surface_point: The 3D position on the isosurface.
+-        normal: The surface normal N at surface_point.
+-        map_type: String indicating 'variance' or 'convolution' filterable map.
+-        
+-    Returns:
+-        float: The ambient occlusion factor (0.0 to 1.0).
+-    """
+-    # Step 1: Query the filterable map for the region above the surface point.
+-    # The map stores a compact representation of the distribution of occluding voxels.
+-    # Note: The specific sampling pattern and map query implementation depends on 
+-    # the chosen filterable representation (e.g., variance shadow map sampling).
+-    # This step replaces casting hundreds of rays.
+-    occlusion_distribution = query_filterable_map(volume, surface_point, normal, map_type)
+-    
+-    # Step 2: Discretize the hemisphere defined by the normal into k sectors.
+-    # In practice, this is handled by the sampling pattern of the filterable map.
+-    # We approximate the integral: sum(N . L(omega_i) * delta_omega)
+-    
+-    # Step 3: Evaluate occlusion using the selected method.
+-    # Method A: All-or-nothing
+-    # If the distribution indicates an occluding voxel is hit in a sector, 
+-    # L(omega_i) = 0, else L(omega_i) = 1.
+-    # This can result in complete occlusion in tight spaces.
+-    
+-    # Method B: Partial occlusion (Recommended for tight spaces)
+-    # Uses the unobstructed distance to the first occlusion to determine 
+-    # occlusion amount using a basic linear or quadratic fall-off function.
+-    # L(omega_i) = f(distance_to_occlusion)
+-    
+-    # The final AO factor is derived from the aggregated L(omega_i) values 
+-    # across the sampled sectors from the filterable map.
+-    ao_factor = aggregate_occlusion(occlusion_distribution, method='partial')
+-    
+-    return ao_factor
++def compute_fo_maps_ao(surface_point, normal, k, method):
++    # Discretize the hemisphere defined by the normal into k sectors [G]
++    directions = []
++    for i in range(k):
++        theta = sqrt(i / k) * pi
++        phi = 2 * pi * i
++        # Convert spherical to Cartesian and rotate to align with normal [G]
++        directions.append(cartesian_from_spherical(theta, phi, normal))
++    delta_omega = (4 * pi) / k
++
++    weighted_radiance = 0.0
++    for omega in directions:
++        # Query the filterable map for the unobstructed distance to the first occluding voxel [S1]
++        distance = query_filterable_map(surface_point, omega)
++        if distance is None: # Ray enters the iso-surface, fully occluded [S1]
++            L = 0.0
++        else:
++            if method == 'all_or_nothing':
++                L = 1.0 # Unobstructed [S1]
++            else: # partial occlusion method [S1]
++                # Apply basic linear or quadratic fall-off function [S1]
++                L = max(0.0, 1.0 - distance / max_sample_distance)
++        weighted_radiance += dot(normal, omega) * L * delta_omega
++    return weighted_radiance
++
++def cartesian_from_spherical(theta, phi, normal):
++    # Standard basis rotation to align spherical coordinates with surface normal [G]
++    x, y, z = sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta)
++    # Rotate (x,y,z) to align z-axis with normal [G]
++    return rotate_to_vector((x, y, z), normal)
++
++def query_filterable_map(point, direction):
++    # Standard texture lookup or ray-march on the pre-computed filterable map [G]
++    # Returns unobstructed distance or None if occluded
++    return sample_map_depth(point, direction)
+ ```
+ 
+@@ -94,12 +89,13 @@
+ *   The all-or-nothing method results in complete occlusion in tight spaces or completely occluded spaces, whereas the partial occlusion method works better in these scenarios [S1].
+ *   Pre-computed lighting effects can result in significant aliasing artifacts unless twice the original resolution is used, resulting in an 8X-100X memory footprint [S1]. FO Maps avoids this by using filterable representations [S1].
++*   Summed area tables must be recomputed whenever the transfer function or isosurface changes, whereas FO Maps allows dynamic approximation [S1].
+ 
+ ## Subtopics
+ 
+ ### Variance Shadow Maps
+-A type of filterable representation used to store the first and second moments of the depth distribution, allowing for efficient soft shadow and occlusion approximation. Chosen when smooth, blur-based occlusion is desired. [Link to sibling if available, otherwise generic reference].
++A type of filterable representation used to store the first and second moments of the depth distribution, allowing for efficient soft shadow and occlusion approximation [S1]. Chosen when smooth, blur-based occlusion is desired [S1]. See [Ambient Occlusion via Geometry/Neighbors](5936-ambient-occlusion-via-geometry-neighbors.md).
+ 
+ ### Convolution Shadow Maps
+-A type of filterable representation that stores pre-convolved depth values, allowing for efficient filtering during sampling. Chosen when specific kernel shapes are required for occlusion blurring. [Link to sibling if available, otherwise generic reference].
++A type of filterable representation that stores pre-convolved depth values, allowing for efficient filtering during sampling [S1]. Chosen when specific kernel shapes are required for occlusion blurring [S1]. See [Ambient Occlusion via Geometry/Neighbors](5936-ambient-occlusion-via-geometry-neighbors.md).
+ 
+ ## Operating characteristics
+@@ -108,6 +104,6 @@
+ *   **Strengths:** Dynamic approximation of ambient occlusion and soft shadows; avoids aliasing artifacts of pre-computed lighting; avoids recomputation costs of summed area tables when transfer functions change [S1].
+ *   **Limitations:** The approximation assumes that the percentage of occluding voxels surrounding the surface provides a good approximation to the percentage of rays that would be occluded, which is not strictly correct in all cases [S1].
+-*   **When to use:** Interactive volume rendering of isosurfaces requiring dynamic lighting changes.
+-*   **When not to use:** When strict physical accuracy of ray-traced ambient occlusion is required, or in scenes with extremely complex occlusion where the voxel-based statistical approximation fails.
++*   **When to use:** Interactive volume rendering of isosurfaces requiring dynamic lighting changes [S1].
++*   **When not to use:** When strict physical accuracy of ray-traced ambient occlusion is required, or in scenes with extremely complex occlusion where the voxel-based statistical approximation fails [S1].
+ 
+ ## Background

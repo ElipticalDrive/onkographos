@@ -1,0 +1,120 @@
+# Vicinity Occlusion Mapping (VOM)
+Also called: Vicinity Occlusion Map
+
+## Overview
+Vicinity Occlusion Mapping (VOM) is a screen-space technique that incorporates view-dependent ambient occlusion and halo effects into volume rendered images by utilizing two Summed Area Tables (SATs) computed from a depth map [S1][S2, unofficial]. It sets itself apart from its siblings, such as Histogram-based Voxel Ambient Occlusion, by operating in image space rather than volume space, allowing for real-time performance without the high preprocessing costs and memory footprint of 3D density SATs [S1][S2, unofficial]. Unlike Crytek's screen-space ambient occlusion which relies on subsampling patterns that cause noise artifacts and require filtering, VOM computes the average depth of pixel vicinities in constant time using SATs, eliminating the need for filtering [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A depth map generated from a volume rendering pass, where depth values are encoded in the range $[0, 1]$ ($0$ is the furthest point, $1$ is the closest point) [S2, unofficial]. Background pixels are assigned depth $0$ [S2, unofficial].
+*   **Output:** A modified color map with ambient occlusion and/or halo effects applied [S2, unofficial].
+
+**Data Structures:**
+The VOM consists of two 2D textures (Summed Area Tables) [S1][S2, unofficial]:
+1.  **$SAT_{depth}$**: Stores the accumulated depth for each pixel [S2, unofficial]. Each cell $(x, y)$ stores the sum of depth values from $(0, 0)$ to $(x, y)$ [S1][S2, unofficial].
+2.  **$SAT_{Ndepth}$**: Stores the count of contributed values in the neighborhood [S1]. It is computed from a bitmap where non-background pixels are $1$ and background pixels are $0$ [S2, unofficial].
+
+**Numbered Steps:**
+1.  **Stage 1 (GPU):** Perform ray casting on the 3D texture to generate a color map (using Phong shading) and a depth map [S2, unofficial]. The depth map encodes the depth of the first sample that reaches full opacity along the viewing rays [S2, unofficial].
+2.  **Stage 2 (CPU):** Compute $SAT_{depth}$ from the depth map and $SAT_{Ndepth}$ from the bitmap (0 for background, 1 otherwise) [S2, unofficial]. Store these as two 2D textures [S2, unofficial]. The 2D SAT is computed incrementally during a single pass [S1]. The value of each cell is computed as:
+    $$SAT_{image}(x, y) = \sum_{i=0, j=0}^{x,y} p_{i,j}$$
+    where $p_{i,j}$ is the value at cell $(i, j)$ [S1][S2, unofficial].
+3.  **Stage 3 (GPU):** Load the VOM textures [S2, unofficial]. For each pixel $[x, y]$ where the volume model is projected (background pixels are excluded), evaluate the average depth of the vicinity [S2, unofficial].
+4.  **Evaluate Occlusion:** Determine if the pixel is occluded by comparing the average depth of the vicinity ($avgdepth[x, y]$) with the pixel's depth ($depth[x, y]$) [S1][S2, unofficial]. If $avgdepth[x, y] > depth[x, y]$, the vicinity is closer to the observer, indicating occlusion [S2, unofficial].
+5.  **Calculate Occlusion Factor:** If occluded, calculate the occlusion factor $occ$ [S2, unofficial]:
+    $$occ = (avgdepth[x, y] - depth[x, y]) \times factor_{vic}$$
+    where $factor_{vic}$ is a user-defined scaling factor [S2, unofficial].
+6.  **Smooth Occlusion:** Smooth the occlusion value using `smoothstep` to obtain $dark_{vic}$ [S2, unofficial]:
+    $$dark_{vic} = smoothstep(0., 0.99, occ)$$
+7.  **Modify Color:** Apply the occlusion to the original Phong shading color $Phong[x, y]$ using a user-defined RGB triplet $Color_{vic}$ [S2, unofficial]:
+    $$Color[x, y] = (1 - dark_{vic}) \times Phong[x, y] + dark_{vic} \times Color_{vic}$$
+8.  **Halo Rendering (Optional):** To render halos, consider the average depth from the neighborhood [S1]. If the structure in the pixel lies outside the object, render a halo color that decays with respect to the distance to the object [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def smoothstep(edge0, edge1, x):
+    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
+    return t * t * (3.0 - 2.0 * t)
+
+def get_sat(S, x, y):
+    if x < 0 or y < 0:
+        return 0.0
+    return S[y, x]
+
+def apply_vom(color_map, depth_map, sat_depth, sat_ndepth, factor_vic, color_vic, sizex, sizey):
+    height, width = depth_map.shape
+    result_color = color_map.copy()
+    
+    for y in range(height):
+        for x in range(width):
+            # Skip background pixels
+            if depth_map[y, x] == 0:
+                continue
+            
+            # Define vicinity bounds
+            x1 = max(0, x - sizex)
+            x2 = min(width - 1, x + sizex)
+            y1 = max(0, y - sizey)
+            y2 = min(height - 1, y + sizey)
+            
+            # Calculate sum of depths in vicinity using SAT (4 texture accesses)
+            sum_depth = (get_sat(sat_depth, x2, y2) - get_sat(sat_depth, x1 - 1, y2) - 
+                         get_sat(sat_depth, x2, y1 - 1) + get_sat(sat_depth, x1 - 1, y1 - 1))
+            sum_count = (get_sat(sat_ndepth, x2, y2) - get_sat(sat_ndepth, x1 - 1, y2) - 
+                         get_sat(sat_ndepth, x2, y1 - 1) + get_sat(sat_ndepth, x1 - 1, y1 - 1))
+            
+            # Calculate average depth
+            if sum_count > 0:
+                avg_depth = sum_depth / sum_count
+            else:
+                avg_depth = depth_map[y, x]
+            
+            # Check for occlusion (higher depth value means closer)
+            if avg_depth > depth_map[y, x]:
+                # Calculate occlusion factor
+                occ = (avg_depth - depth_map[y, x]) * factor_vic
+                
+                # Smooth occlusion
+                dark_vic = smoothstep(0.0, 0.99, occ)
+                
+                # Modify color
+                phong_color = color_map[y, x]
+                result_color[y, x] = (1.0 - dark_vic) * phong_color + dark_vic * color_vic
+                
+    return result_color
+```
+
+**Parameters:**
+*   $factor_{vic}$: User-defined scaling factor controlling the intensity of the ambient occlusion effect [S2, unofficial].
+*   $Color_{vic}$: User-defined RGB triplet for darkening or changing the color of occluded pixels [S2, unofficial].
+*   $sizex, sizey$: Define the vicinity resolution, resulting in a $(2sizex + 1) \times (2sizey + 1)$ pixel neighborhood [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   The depth map only encodes the depth of the first sample that reaches full opacity [S2, unofficial]. Consequently, only opaque structures and semi-transparent ones contributing to full opacity are considered for occlusion and halos [S2, unofficial].
+*   Computations are performed only for pixels where the volume model is projected; background pixels are excluded [S2, unofficial].
+
+## Subtopics
+
+### [3D Density Summed Area Table](10986-3d-density-summed-area-table.md)
+The 3D Density Summed Area Table (DSAT) is a view-independent ambient occlusion technique for volume rendering that simulates occlusion at the voxel level by evaluating the local density environment. It supports semi-transparent structures and is more accurate than 2D image-space approaches, though it incurs higher preprocessing costs and memory usage. It sets itself apart from opacity-based SATs by storing raw density values, allowing the occlusion factor to update dynamically when the transfer function changes without recomputing the table.
+
+### VOM Ambient Occlusion Simulation
+Calculate occlusion factor $occ$ if the vicinity is closer to the observer ($avgdepth[x, y] > depth[x, y]$): $occ = (avgdepth[x, y] - depth[x, y]) \times factor_{vic}$ [S2, unofficial]. Smooth the occlusion value using `smoothstep`: $dark_{vic} = smoothstep(0., 0.99, occ)$ [S2, unofficial]. The average depth is computed as $avgdepth[x, y] = \frac{\sum_{i=x-sizex}^{x+sizex} \sum_{j=y-sizey}^{y+sizey} depth[i, j]}{NElems |depthElem > 0}$, where $sizex$ and $sizey$ define the vicinity resolution ($(2sizex +1)\times(2sizey +1)$ pixels), and $NElems|depthElem > 0$ is the count of non-background pixels in the vicinity [S2, unofficial]. The final color is $Color[x, y] = (1 - dark_{vic}) \times Phong[x, y] + dark_{vic} \times Color_{vic}$, where $Phong[x, y]$ is the original Phong shading color and $Color_{vic}$ is a user-defined RGB triplet for darkening/changing color [S2, unofficial]. $factor_{vic}$ is a user-defined scaling factor controlling the intensity of the ambient occlusion effect [S2, unofficial]. Computations are performed only for pixels where the volume model is projected; background pixels are excluded [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The 2D SAT computation cost increases linearly with the number of cells [S1][S2, unofficial]. Evaluating a region sum requires only four texture accesses to the corners of the regions [S1][S2, unofficial].
+*   **Memory Complexity:** Requires storing two 2D textures for the VOM [S1][S2, unofficial].
+*   **Measured Performance:** Enables real-time ambient occlusion and halo rendering [S2, unofficial]. Only one ray casting process is required in the whole pipeline [S2, unofficial].
+*   **Strengths:** View-dependent, real-time performance, no filtering required, simple implementation using SATs [S1][S2, unofficial].
+*   **Limitations:** Only considers structures that reach full opacity, view-dependent (requires recomputation if view changes significantly, though the VOM itself is computed per frame), higher memory footprint compared to simple shading [S1][S2, unofficial].
+*   **When to use:** When real-time view-dependent ambient occlusion and halos are needed for opaque or fully opaque-contributing semi-transparent volumes [S2, unofficial].
+*   **When not to use:** When view-independent occlusion is required, or when accurate occlusion for semi-transparent structures that do not reach full opacity is needed [S1][S2, unofficial].
+
+## Background
+Vicinity Occlusion Mapping (VOM) was introduced by Diaz et al. [DYV08] as a method to effectively utilize two SATs computed from the depth map to incorporate view-dependent ambient occlusion and halo effects in volume rendered images [S1]. It was presented as an alternative to screen-space ambient occlusion techniques that rely on subsampling and filtering [S2, unofficial].
+
+## Sources
+[S1] Interactive Volume Rendering with Volumetric Illumination, https://doi.org/10.2312/conf/eg2012/stars/053-074, fetched 2026-10-26
+[S2] Enhanced perception in volume visualization, https://doi.org/10.5821/dissertation-2117-94929, fetched 2026-10-26 (unofficial)

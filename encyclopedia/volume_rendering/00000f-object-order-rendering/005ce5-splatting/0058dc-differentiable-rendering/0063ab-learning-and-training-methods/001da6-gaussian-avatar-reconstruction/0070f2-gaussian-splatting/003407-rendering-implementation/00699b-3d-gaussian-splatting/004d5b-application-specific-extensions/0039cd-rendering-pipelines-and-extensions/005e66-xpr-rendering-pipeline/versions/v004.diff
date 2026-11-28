@@ -1,0 +1,291 @@
+--- v003.md
++++ v004.md
+@@ -4,157 +4,174 @@
+ 
+ ## Overview
+-XPR is a framework for point-based differentiable rendering that decouples method-specific logic from the shared rendering pipeline, allowing new methods to be implemented in a few hundred lines of code [S1, unofficial]. It separates the core rendering mechanics—parallelization, data layout, tiling, and differentiation—from the primitive evaluation logic, enabling portable execution across GPUs, TPUs, and CPUs via the XLA compiler [S1, unofficial]. Unlike traditional CUDA/Vulkan implementations that require thousands of lines and manual backward passes for each new primitive type, XPR exposes a four-function interface that captures only the method-specific math [S1, unofficial].
++XPR is a framework for point-based differentiable rendering that decouples method-specific logic from the shared rendering pipeline, allowing new rendering methods to be implemented in a few hundred lines of code [S1, unofficial]. It separates the core rasterization mechanics—parallelization, data layout, tiling, and differentiation—from the primitive evaluation logic, enabling portable execution across GPUs, TPUs, and CPUs via the XLA compiler [S1, unofficial]. Unlike traditional CUDA/Vulkan implementations that require thousands of lines and manual backward passes for each new primitive type, XPR exposes a four-function interface that captures only the method-specific math, while the framework handles the rest [S1, unofficial].
+ 
+ ## How it works
+-XPR decomposes the rendering pipeline into modular, statically shaped parallel operations [S1, unofficial]. It handles the dynamic nature of rendering (variable primitive counts per tile) by fixing tensor dimensions at compile time using upper bounds and padding, converting dynamic loops into fixed-trip-count loops with early exits [S1, unofficial].
++XPR decomposes the rendering pipeline into modular, statically shaped parallel operations. The pipeline is driven by four user-defined functions that capture method-specific logic: `project`, `tile_cull`, `pixel_info`, and `evaluate` [S1, unofficial]. The framework handles primitive filtering, tile assignment, depth sorting, alpha-blending, and automatic differentiation via JAX/XLA [S1, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** 3D primitives, camera parameters (`cam`, `view`), image dimensions, and tile configuration [S1, unofficial].
+-*   **Outputs:** Final color image `img` [S1, unofficial].
++*   **Inputs:** A set of $M$ 3D primitives (e.g., Gaussians), camera parameters (intrinsics/extrinsics), and image dimensions ($W \times H$).
++*   **Outputs:** A rendered image tensor of shape $(H, W, C)$ and gradients for the primitive parameters [S1, unofficial].
+ 
+ ### Data Structures
+-*   **`tile_prim_map`:** A dictionary mapping each tile `t` to a list of 2D primitive data `prim_2D` that intersects that tile, bounded by `Pmax` [S1, unofficial].
+-*   **`px_data`:** Pixel-specific data returned by `pixel_info`, passed to `evaluate` [S1, unofficial].
+-*   **`p_sd`:** Primitive shader data returned by `get_shader_data`, containing parameters needed for evaluation (e.g., 2D covariance, color, opacity) [S1, unofficial].
++*   **Primitives:** Defined by the parent article's Gaussian representation [G].
++*   **Tile Map (`tile_prim_map`):** A mapping from tile coordinates to a list of candidate 2D primitives that intersect the tile [S1, unofficial].
++*   **Static Bounds:** All tensor dimensions and loop trip counts are fixed at compile time. Dynamic sizes (e.g., number of visible primitives) are handled by padding unused entries and using fixed-trip-count loops with early exits [S1, unofficial].
++*   **Trip-Count Bins:** Tiles are sorted by primitive count and partitioned into bins. Each bin is processed with a static trip count equal to its upper bound to optimize parallelization [S1, unofficial].
+ 
+-### User-Defined Interface Functions
+-The programmer implements four functions [S1, unofficial]. The pipeline calls these for every relevant primitive-pixel pair:
+-1.  **`project(p)`**: Transforms a 3D primitive `p` into 2D screen space, returning `prim_2D` [S1, unofficial].
+-2.  **`tile_cull(t_min, t_max, p_tcd)`**: Given tile boundaries and primitive culling data, returns a boolean indicating if the primitive intersects the tile [S1, unofficial].
+-3.  **`pixel_info(px, cam, view)`**: Computes pixel-specific data for pixel `px=(x,y)` [S1, unofficial].
+-4.  **`evaluate(px_data, p_sd)`**: Computes the contribution of a primitive to a pixel, returning `alpha` (opacity), `valid` (boolean validity flag), and `c` (color) [S1, unofficial].
++### Parameters
++*   **$P_{max}$:** Maximum number of primitives per tile/pixel. Default is 4096 (XPR-4K). Lowering this increases frame rate but may skip contributions from distant or small primitives [S1, unofficial].
++*   **Tile Size:** Standard rectangular tiles (e.g., $16 \times 16$ pixels) [S1, unofficial].
+ 
+-### Pipeline Steps
+-1.  **Preprocess (Project):** Apply `project` to all $N$ primitives in parallel to generate `prim_2D` data [S1, unofficial].
+-2.  **Filter (Tile Assignment):** Perform a conservative axis-aligned bounding box check for each primitive against tiles [S1, unofficial]. Call `tile_cull` for candidate intersections to refine visibility [S1, unofficial]. Populate `tile_prim_map` with valid primitive-tile pairs [S1, unofficial].
+-3.  **Rasterization (Binning):** Count the number of primitives per tile [S1, unofficial]. Sort tiles by primitive count and partition them into bins, each processed with a static trip count equal to the bin's upper bound [S1, unofficial]. Tiles within the same bin are parallelized using `map_fn` [S1, unofficial].
+-4.  **Shader (Compositing):** For each tile in a bin, iterate over its pixels [S1, unofficial]. For each pixel, call `pixel_info` once [S1, unofficial]. Iterate over the primitives in `tile_prim_map[t]` (up to `Pmax`) [S1, unofficial]. Call `evaluate` for each primitive-pixel pair [S1, unofficial]. Accumulate color using alpha blending [S1, unofficial].
++### Numbered Steps
++
++1.  **Preprocess (Project):** Apply `project` to each of the $N$ primitives independently via `map_fn`. This transforms 3D primitives into 2D screen-space representations (e.g., 2D covariance matrices) [S1, unofficial].
++2.  **Filter (Cull):**
++    *   Perform a conservative bounding-box check (e.g., `intersect_8`) for each primitive against the image bounds [S1, unofficial].
++    *   Assign visible primitives to tiles.
++    *   For each primitive-tile pair, call `tile_cull` to refine the intersection test. If the primitive does not intersect the tile, discard it [S1, unofficial].
++    *   Populate `tile_prim_map` with the surviving primitive-tile pairs [S1, unofficial].
++3.  **Rasterizer (Shader):**
++    *   Iterate over each tile $t$ in `tile_prim_map`.
++    *   Sort tiles by primitive count and bin them to determine static loop bounds [S1, unofficial].
++    *   For each pixel $(x, y)$ in tile $t$:
++        *   Call `pixel_info(x, y, cam, view)` to generate pixel-specific data `px_data` (e.g., ray direction, view vector) [S1, unofficial].
++        *   Initialize accumulated color $C = 0$ and transmittance $T = 1$ [S1, unofficial].
++        *   Iterate over each candidate primitive $p_{2D}$ in `tile_prim_map[t]`.
++        *   Retrieve shader data `p_sd` for the primitive [S1, unofficial].
++        *   Call `evaluate(px_data, p_sd)` to compute opacity $\alpha$, validity `valid`, and color $c$ [S1, unofficial].
++        *   Accumulate color: $C = C + c \cdot \alpha \cdot \text{valid} \cdot T$ [S1, unofficial].
++        *   Update transmittance: $T = (1 - \alpha \cdot \text{valid}) \cdot T$ [S1, unofficial].
++        *   Store $C$ in the output image at $(x, y)$ [S1, unofficial].
+ 
+ ### Formulas
+-The alpha blending accumulation for a pixel is:
++The alpha-blending accumulation for each pixel is:
+ $$ C = C + c \cdot \alpha \cdot \text{valid} \cdot T $$
+ $$ T = (1 - \alpha \cdot \text{valid}) \cdot T $$
+ Where:
+-*   $C$ is the accumulated color.
+-*   $c$ is the primitive color returned by `evaluate`.
+-*   $\alpha$ is the primitive opacity returned by `evaluate`.
+-*   $\text{valid}$ is the validity flag returned by `evaluate`.
+-*   $T$ is the accumulated transmittance, initialized to 1 [S1, unofficial].
+-
+-### Parameters
+-*   **`Pmax`:** Maximum number of primitives per tile/pixel. Default is 4096 (XPR-4K). XPR-8K matches baseline quality, while lowering to 4096 increases frame rate but may skip contributions [S1, unofficial].
+-*   **Compilation Bounds:** All tensor dimensions and loop trip counts are fixed at compile time. Dynamic sizes are handled by padding unused entries and replacing dynamic loops with fixed-trip-count loops that exit early [S1, unofficial].
++*   $C$: Accumulated color.
++*   $c$: Primitive color (from `evaluate`).
++*   $\alpha$: Primitive opacity (from `evaluate`).
++*   `valid`: Validity flag (from `evaluate`, typically 1 if the primitive contributes, 0 otherwise) [S1, unofficial].
++*   $T$: Accumulated transmittance [S1, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-def project(p):
+-    # Returns 2D primitive data (position, covariance, opacity)
++# User-defined interface functions (implemented by the user)
++def project(primitive_3D):
++    # Returns 2D representation (e.g., mean, covariance)
+     pass
+ 
+-def tile_cull(t_min, t_max, p_tcd):
+-    # Returns boolean intersection result
++def tile_cull(t_min, t_max, primitive_tile_data):
++    # Returns True if primitive intersects tile [t_min, t_max]
+     pass
+ 
+ def pixel_info(px, cam, view):
+-    # Returns pixel-specific data (e.g., ray direction, screen coords)
++    # Returns pixel-specific data (e.g., ray direction)
+     pass
+ 
+-def evaluate(px_data, p_sd):
+-    # Returns alpha, valid, c
++def evaluate(px_data, primitive_shader_data):
++    # Returns (alpha, valid, color)
+     pass
+ 
+-def get_shader_data(prim_2D):
+-    # Extracts parameters needed for evaluate
+-    return prim_2D
+-
+-def intersects(prim_2D, t):
+-    # Conservative axis-aligned bounding box test
+-    return True # Placeholder for actual bbox check [G]
+-
+-def compute_tile_boundaries(t):
+-    # Returns (min_x, min_y, max_x, max_y) for tile t
+-    return (t[1], t[0], t[1] + 16, t[0] + 16) # Assumes 16x16 tiles [G]
+-
+-def create_bins(tile_counts, Pmax):
+-    # Sorts tiles by count, partitions into bins with static upper bounds
+-    sorted_tiles = sorted(tile_counts.keys(), key=lambda t: tile_counts[t])
+-    bins = []
+-    current_bin = []
+-    current_max = 0
+-    for t in sorted_tiles:
+-        count = min(tile_counts[t], Pmax)
+-        if not current_bin or count > current_max:
+-            current_max = count
+-            current_bin.append(t)
+-        else:
+-            bins.append({'tiles': current_bin, 'upper_bound': current_max})
+-            current_bin = [t]
+-            current_max = count
+-    if current_bin:
+-        bins.append({'tiles': current_bin, 'upper_bound': current_max})
+-    return bins
+-
+-def pad_to_size(lst, size):
+-    # Pads list to exact size with None
+-    return lst + [None] * (size - len(lst))
+-
+-def zeros_like(shape):
+-    # Returns zero array of given shape
+-    return [[0.0 for _ in range(shape[1])] for _ in range(shape[0])]
+-
+-def render(primitives, cam, view, tiles, Pmax=4096):
+-    H, W = cam['height'], cam['width']
+-    img = zeros_like((H, W))
+-
+-    # 1. Preprocess: map_fn(project) over primitives
+-    prim_2D_data = [project(p) for p in primitives]
+-
+-    # 2. Filter: map_fn over primitive-tile pairs
+-    tile_prim_map = {t: [] for t in tiles}
+-    for prim_2D in prim_2D_data:
++# XPR Framework Shader Logic
++def render(primitives, cam, view, image_shape):
++    # 1. Preprocess: Project all primitives
++    # map_fn applies project to each primitive independently
++    prims_2D = map_fn(project, primitives)
++    
++    # 2. Filter: Assign to tiles and cull
++    tile_prim_map = {}
++    
++    # Filter visible primitives
++    prims_2D_visible = []
++    for prim_2D in prims_2D:
++        if get_visible(prim_2D):
++            prims_2D_visible.append(prim_2D)
++            
++    # Assign to tiles and cull
++    for prim_2D in prims_2D_visible:
++        # Conservative bounding box check
++        if not intersects(prim_2D, image_bounds):
++            continue
++            
++        # Get tile boundaries for this primitive
++        tiles = get_intersecting_tiles(prim_2D)
++        
+         for t in tiles:
+-            if intersects(prim_2D, t):
+-                t_min, t_max = compute_tile_boundaries(t)
+-                p_tcd = get_shader_data(prim_2D)
+-                if tile_cull(t_min, t_max, p_tcd):
+-                    tile_prim_map[t].append(prim_2D)
+-
+-    # 3. Rasterization: Trip-count binning
+-    tile_counts = {t: len(prims) for t, prims in tile_prim_map.items()}
+-    bins = create_bins(tile_counts, Pmax)
+-
+-    # 4. Shader: Fixed-trip-count loops with early exit
++            t_min, t_max = compute_tile_boundaries(t)
++            p_tcd = get_tile_cull_data(prim_2D)
++            
++            # User-defined culling
++            if not tile_cull(t_min, t_max, p_tcd):
++                continue
++                
++            if t not in tile_prim_map:
++                tile_prim_map[t] = []
++            tile_prim_map[t].append(prim_2D)
++            
++    # 3. Rasterize: Render each tile
++    # Sort tiles by primitive count for binning
++    sorted_tiles = sort_tiles_by_primitive_count(tile_prim_map)
++    
++    # Bin tiles to handle variable primitive counts with static loops
++    bins = partition_into_bins(sorted_tiles)
++    
+     for bin in bins:
+-        trip_count = bin['upper_bound']
+-        for t in bin['tiles']:
+-            prims = pad_to_size(tile_prim_map[t], trip_count)
+-            for (x, y) in t['pixels']:
+-                C = 0.0
+-                T = 1.0
++        # Static trip count for this bin
++        max_prims_in_bin = get_bin_upper_bound(bin)
++        
++        # Parallelize over tiles in the bin
++        for t in bin.tiles:
++            candidates = tile_prim_map[t]
++            # Pad candidates to max_prims_in_bin if necessary
++            padded_candidates = pad_to_size(candidates, max_prims_in_bin)
++            
++            # Parallelize over pixels in the tile
++            for (x, y) in t.pixels:
+                 px_data = pixel_info((x, y), cam, view)
+-                for i in range(trip_count):
+-                    if prims[i] is None:
++                C = 0
++                T = 1
++                
++                # Fixed trip count loop
++                for i in range(max_prims_in_bin):
++                    prim_2D = padded_candidates[i]
++                    
++                    # Early exit if no more primitives
++                    if i >= len(candidates):
+                         break
+-                    p_sd = get_shader_data(prims[i])
++                        
++                    p_sd = get_shader_data(prim_2D)
+                     alpha, valid, c = evaluate(px_data, p_sd)
++                    
+                     C = C + c * alpha * valid * T
+-                    T = (1.0 - alpha * valid) * T
+-                img[y][x] = C
++                    T = (1 - alpha * valid) * T
++                    
++                img[x, y] = C
++                
+     return img
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Primitive Overflow:** If a tile has more than `Pmax` primitives, contributions beyond `Pmax` are skipped, resulting in quality differences within 0.06 PSNR on 360 and T&T scenes, and within 0.58 PSNR on Synthetic scenes compared to baselines [S1, unofficial].
+-*   **Compiler Overhead:** JAX/XLA kernel launch overhead can be significant at very high frame rates [S1, unofficial].
+-*   **Method-Specific Costs:** Methods like 3DGUT, which require per-pixel world-space ray directions in `pixel_info`, may be slower than fused CUDA implementations because XPR separates this computation from blending [S1, unofficial].
++*   **Dynamic Sizes:** The number of visible primitives and tile intersections varies per frame. XPR handles this by fixing dimensions to compile-time upper bounds and padding unused entries [S1, unofficial].
++*   **Performance vs. Quality Trade-off:** Lowering $P_{max}$ (e.g., to 4096) increases frame rate but may skip contributions from primitives that exceed the limit, potentially reducing PSNR [S1, unofficial].
++*   **Compiler Overhead:** JAX/XLA kernel launch overhead can be significant at very high frame rates (e.g., synthetic scenes) [S1, unofficial].
++*   **Method-Specific Costs:** Methods like 3DGUT, which require per-pixel world-space ray directions, may be slower in XPR than in hand-optimized CUDA because the ray direction computation is exposed via `pixel_info` rather than fused into the blending loop [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Performance:** On NVIDIA L40S GPU, XPR reaches 97.18% of the speed of hand-optimized CUDA baselines on average [S1, unofficial]. Per-scene frame rates are within 2.82% of hand-written CUDA implementations, and up to 208.18% faster for some methods [S1, unofficial].
+-*   **Code Size:** Implementations require 260 to 304 lines of Python, compared to 2,153+ lines for Base CUDA implementations [S1, unofficial].
+-*   **Scalability:** Efficiency is bounded by the maturity of the XLA backend for the target hardware. Performance on TPUs, Intel GPUs, and AMD GPUs varies based on backend optimization [S1, unofficial].
+-*   **Limitations:** XPR cannot express techniques involving ray marching or ray tracing (e.g., NeRFs, physically-based rendering) [S1, unofficial]. It is limited to point-based differentiable rendering [S1, unofficial].
++*   **Time Complexity:** The pipeline is decomposed into modules with explicit parallelism dimensions (primitives, tiles, pixels). The complexity is dominated by the rasterization step, which is $O(T \cdot P_{avg})$ where $T$ is the number of tiles and $P_{avg}$ is the average number of primitives per tile [S1, unofficial].
++*   **Memory Complexity:** Memory usage is bounded by the static upper bounds of primitives per tile and the number of tiles. Padding unused entries increases memory usage slightly [S1, unofficial].
++*   **Performance:** On NVIDIA L40S GPUs, XPR achieves rendering speeds that are, on average, 97.18% of hand-optimized CUDA baselines [S1, unofficial]. It can be up to 208.18% faster than baseline implementations for certain methods (e.g., LinPrim) due to more aggressive culling strategies [S1, unofficial].
++*   **Scalability:** XPR scales across hardware platforms (GPUs, TPUs, CPUs) without code changes, though absolute performance depends on the maturity of the XLA backend for each target [S1, unofficial].
++*   **Strengths:**
++    *   **Portability:** Runs on NVIDIA, AMD, Intel GPUs, TPUs, and CPUs [S1, unofficial].
++    *   **Ease of Use:** New methods can be implemented in 260–304 lines of Python, compared to thousands in CUDA [S1, unofficial].
++    *   **Automatic Differentiation:** Gradients flow through the four interface functions automatically via JAX [S1, unofficial].
++*   **Limitations:**
++    *   **Compiler Dependency:** Performance is bounded by the maturity of the XLA backend [S1, unofficial].
++    *   **Not for Ray Marching:** Techniques involving ray marching or ray tracing (e.g., NeRFs, physically-based rendering) cannot be expressed with XPR [S1, unofficial].
++    *   **Overhead for Complex Pixel Info:** Methods requiring complex per-pixel computations (like 3DGUT) may suffer from overhead compared to fused CUDA implementations [S1, unofficial].
+ 
+ ## Background
+-XPR was introduced in the paper "XPR: An Extensible Cross-Platform Point-Based Differentiable Renderer" [S1, unofficial]. It addresses the limitations of existing frameworks (CUDA/Vulkan) that require thousands of lines of code and manual backward passes for each new rendering method [S1, unofficial]. XPR leverages JAX/XLA to provide a cross-platform, differentiable rendering pipeline that separates method-specific logic from the pipeline structure [S1, unofficial].
++XPR was introduced in the paper "XPR: An Extensible Cross-Platform Point-Based Differentiable Renderer" [S1, unofficial]. It addresses the limitations of existing frameworks (written in CUDA/Vulkan) that require thousands of lines of code per method and manual backward passes [S1, unofficial]. XPR leverages JAX/XLA to provide a high-level programming interface that separates method-specific logic from the shared rendering pipeline [S1, unofficial]. It was demonstrated with implementations of 3DGS, 3DGUT, and LinPrim [S1, unofficial].
+ 
+ ## Sources

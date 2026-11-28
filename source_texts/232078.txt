@@ -1,0 +1,1051 @@
+Introduction PlayCanvas added support for SOG gaussian splat scenes thanks to the work of @vincentwoo and @w-m (see https://github.com/playcanvas/sogs). The SOG format is an image-based encoding of gaussian splat data. We are now updatin...
+
+Gsplat SOG v2 file format proposal · Issue #38 · playcanvas/splat-transform · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Gsplat SOG v2 file format proposal #38
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#41
+Closed
+Gsplat SOG v2 file format proposal#38
+#41
+Copy link
+Assignees
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+slimbuck
+opened on Aug 20, 2025
+Issue body actions
+Introduction
+PlayCanvas added support for SOG gaussian splat scenes thanks to the work of @vincentwoo and @w-m (see https://github.com/playcanvas/sogs). The SOG format is an image-based encoding of gaussian splat data.
+We are now updating this format to better match our runtime requirements:
+rather than using PLAS to order data, we order by morton code instead
+this results in roughly similar compression by webp
+it means we don't have to calculate morton code and reorder data at load time
+improve data robustness to cover a wider spectrum of scenes (see SOGS spherical harmonics #20)
+introduce a codebook for scales, sh0 and shN
+simplify meta.json layout
+introduce a single-file, bundled binary format which is more convenient to use compared to separate files
+Since this is an evolution on the SOG format, we keep the name, but consider them Spatially Ordered Gaussians.
+A SOG scene comprises multiple files:
+meta.json: contains the metadata and the names of the linked webp images
+images: images containing the packed gaussian data, by default in webp format
+means_u, means_l: upper and lower bits of position
+scales: sizes
+quats: orientation/quaternions
+sh0: color and opacity
+shN_centroids, shN_labels: (optional) palette of spherical harmonics and their per-gaussian labels
+All images have the same dimension apart from shN_centroids.
+Metadata v2 format
+```
+interface SogMeta {
+    version: 2;            // file format version
+    count: number;         // number of splats (pixels encoded)
+    antialias: boolean,
+
+    means: {
+        // Per-axis affine ranges used to (de)normalize log-transformed positions.
+        // Values are AFTER logTransform(value) = sign(v)*log(|v|+1).
+        mins: [number, number, number];   // [xmin', ymin', zmin']
+        maxs: [number, number, number];   // [xmax', ymax', zmax']
+        files: ["means_l.webp", "means_u.webp"];
+    };
+
+    scales: {
+        // Scale codebook for k=256 k-means over [scale_0, scale_1, scale_2]
+        codebook: number[];  // length 256
+        files: ["scales.webp"]; // per-splat byte labels in RGB
+    };
+
+    quats: {
+        // Orientation texture only; ranges are implicit in encoding.
+        files: ["quats.webp"];
+    };
+
+    sh0: {
+        // DC color codebook for k=256 k-means over [f_dc_0, f_dc_1, f_dc_2].
+        codebook: number[];  // length 256
+        files: ["sh0.webp"]; // per-splat byte labels in RGB; A = opacity (sigmoid*255)
+    };
+
+    // Present only if higher-order SH (f_rest_*) exists.
+    shN?: {
+        // A 256-entry 1D codebook built over the SH centroids.
+        codebook: number[];  // length 256
+        files: ["shN_centroids.webp", "shN_labels.webp"];
+        // - shN_centroids.webp packs centroid coefficient triplets per coeff in RGBA.
+        // - shN_labels.webp stores per-splat palette indices (uint16 little-endian in RG).
+    };
+}
+```
+Data layout
+A summary of the image data is as follows:
+```
+ ┌───────────────────┐
+ │ means_l.webp      │   Position (log-space, normalized, 16-bit split)
+ │───────────────────│
+ │ R = x low byte    │
+ │ G = y low byte    │
+ │ B = z low byte    │
+ │ A = 255           │
+ └───────────────────┘
+
+ ┌───────────────────┐
+ │ means_u.webp      │
+ │───────────────────│
+ │ R = x high byte   │
+ │ G = y high byte   │
+ │ B = z high byte   │
+ │ A = 255           │
+ └───────────────────┘
+
+ ┌───────────────────┐
+ │ quats.webp        │   Orientation (compressed quaternion)
+ │───────────────────│
+ │ R = comp0         │
+ │ G = comp1         │
+ │ B = comp2         │
+ │ A = 252 + index   │   (which component was dropped)
+ └───────────────────┘
+
+ ┌───────────────────┐
+ │ scales.webp       │   Log-scales
+ │───────────────────│
+ │ R = scale_x       │   (cluster index, 0–255)
+ │ G = scale_y       │
+ │ B = scale_z       │
+ │ A = 255           │
+ └───────────────────┘
+
+ ┌───────────────────┐
+ │ sh0.webp          │   Color + opacity
+ │───────────────────│
+ │ R = f_dc_0 label  │   (cluster index, 0–255)
+ │ G = f_dc_1 label  │
+ │ B = f_dc_2 label  │
+ │ A = opacity (0–255, sigmoid mapped)
+ └───────────────────┘
+
+ ┌─────────────────────────┐
+ │ shN_centroids.webp      │   (only if higher-order SH present)
+ │─────────────────────────│
+ │ R,G,B = centroid coeffs │
+ │ A = 255                 │
+ └─────────────────────────┘
+
+ ┌───────────────────┐
+ │ shN_labels.webp   │   Per-splat SH palette index
+ │───────────────────│
+ │ R = low byte      │
+ │ G = high byte     │
+ │ B = 0             │
+ │ A = 255           │
+ └───────────────────┘
+```
+Bundled format
+It can be inconvenient working with multiple files so we support a bundled version of SOG data.
+A bundled scene has a .sog extension and is a simple zip archive (i.e. uncompressed zip) of the constituent files.
+The bundle loader uses the following logic when resolving filenames appearing in meta.json:
+if the file is present in the bundle, use it
+otherwise consider the filename a URL and resolve it relative to current href
+This will allow bundles to reference resources external to the bundle.
+Many thanks to @nobbis for suggesting we use a zip archive instead of custom binary format (see discussion below).
+❤️React with ❤️5Reacted by Will Eastcott, Jonathan Chemla, Markus Lanxinger, Leo and にー兄さん / Kaito Tsutsumi
+🚀React with 🚀3Reacted by Kenneth Lynne, Jonathan Chemla and Leo
+Activity
+slimbuck
+self-assigned this
+on Aug 20, 2025
+slimbuck
+added
+enhancementNew feature or requestNew feature or request
+on Aug 20, 2025
+slimbuck commented on Aug 20, 2025
+slimbuck
+on Aug 20, 2025
+Last edited by slimbuck
+MemberAuthor
+More actions
+For the bundled .sog format we also considered zipping the unbundled files.
+However, in terms of file size there would be no benefit, because webp is already compressed.
+And the advantage of not zipping is that we can perform range requests directly to load the webp files. This way we get most of the same download benefits of the unbundled version.
+nobbis commented on Aug 20, 2025
+nobbis
+on Aug 20, 2025
+More actions
+You could use an uncompressed zip file (like USDZ does) and still allow range requests. A stored zip file has several advantages: forwards compatibility, no custom parser, standard tooling, >4GB file sizes, CRC checking.
+👍React with 👍5Reacted by Jonathan Chemla, Donovan Hutchence, johnbanq, Markus Lanxinger and Andy Baker
+lyehe commented on Aug 20, 2025
+lyehe
+on Aug 20, 2025
+More actions
+Maybe this is a dumb question. If no zipping, does it make sense to stack multiple webps side-by-side then? I don't think that will increase file size by too much.
+lyehe commented on Aug 20, 2025
+lyehe
+on Aug 20, 2025
+More actions
+Or use multi frames (add black borders to smaller frames). And keep the metadata in XMP. Then you only need a single webp file.
+slimbuck commented on Aug 20, 2025
+slimbuck
+on Aug 20, 2025
+MemberAuthor
+More actions
+You could use an uncompressed zip file (like USDZ does) and still allow range requests. A stored zip file has several advantages: forwards compatibility, no custom parser, standard tooling, >4GB file sizes, CRC checking.
+Loading an uncompressed zip over a network would require an extra request:
+request zip header and file size
+request zip file offsets (from end of file)
+request files
+In the case of a binary file you can save one round trip:
+read header (includes file offsets)
+request files
+slimbuck commented on Aug 20, 2025
+slimbuck
+on Aug 20, 2025
+MemberAuthor
+More actions
+Maybe this is a dumb question. If no zipping, does it make sense to stack multiple webps side-by-side then? I don't think that will increase file size by too much.
+The webp images are loaded into webgl/WebGPU texture memory (by the browser) and having them be a consistent size is desirable. Combing them could result in a too-large texture not supported by gpu.
+Also, loading multiple images in parallel results in much faster loads on fast connections than a single load request.
+👍React with 👍1Reacted by OpsiClear_admin
+slimbuck
+changed the title [-]SOG v2 format update[/-] [+]Gsplat SOG v2 file format[/+] on Aug 20, 2025
+slimbuck
+changed the title [-]Gsplat SOG v2 file format[/-] [+]Gsplat SOG v2 file format proposal[/+] on Aug 20, 2025
+nobbis commented on Aug 20, 2025
+nobbis
+on Aug 20, 2025
+More actions
+In the case of a binary file you can save one round trip:
+read header (includes file offsets)
+request files
+You don't need to know file size to make an end of file request, e.g. Range: bytes=-65536, so you'd multiplex with the header. Same number of round trips.
+slimbuck commented on Aug 20, 2025
+slimbuck
+on Aug 20, 2025
+MemberAuthor
+More actions
+You don't need to know file size to make an end of file request, e.g. Range: bytes=-65536, so you'd multiplex with the header. Same number of round trips.
+Yes I guess you're right. Loading n bytes from the end of the file seems messy (and then extracting the last meta.json), but perhaps worth it given the advantages of using a standard zip format.
+I actually wrote a simple uncompressed zip writer for supersplat's .ssproj format, so I could test this quite easily.
+Thanks for your input @nobbis (and @lyehe) it's much appreciated!
+👍React with 👍2Reacted by Tim Field and johnbanq
+Maksims commented on Aug 21, 2025
+Maksims
+on Aug 21, 2025
+More actions
+Is it possible to use an existing bundles system, which is simply a tar? It is pretty flexible, allows to bundle as many things together. The bundling process is very simple: just tar'ing files together.
+It is not a proprietary bundle format, so people will have existing tools to bundle and unbundle if needed.
+I believe with current bundles it is already possibile, just not "convenientised" enough.
+slimbuck commented on Aug 21, 2025
+slimbuck
+on Aug 21, 2025
+MemberAuthor
+More actions
+Is it possible to use an existing bundles system, which is simply a tar? It is pretty flexible, allows to bundle as many things together. The bundling process is very simple: just tar'ing files together.
+It is not a proprietary bundle format, so people will have existing tools to bundle and unbundle if needed.
+I believe with current bundles it is already possibile, just not "convenientised" enough.
+I investigated tar and a few other archiving options, but they don't have a table of contents easily accessible (files must be stepped through).
+It looks like a zip archive will support this though, as @nobbis has suggested.
+jo-chemla commented on Aug 21, 2025
+jo-chemla
+on Aug 21, 2025
+Last edited by jo-chemla
+More actions
+Thanks for sharing Playcanvas workflow regarding enhancing the SOG format, really amazed to see you building out in the open!
+Sharing a few thoughts/feedbacks here (ended up being a bit ore than a few, beware long read):
+First, indeed using an existing uncompressed zip for container will probably facilitate implementation for other renderers - either web or native apps. A successful similar take is the SZI format for large image pyramids see spec or below screen, which is basically an uncompressed DZI directory very much used for microscopy/astronomy images. Produced with libvips and js reader implementation highlighting how they fetch the zip central-directory at the end-of-file - probably variable length because szi can have a large directory structure. Other single-file tiled formats discussed in the OpenSeaDragon repo here, mentions also some hurdles you might face at the end - [1] gzip transport has some browser inconsistencies esp with firefox, [2] don't use head requests to get actual filesize etc
+Image format:
+format: it's great you specify what is the content of your images (+ metadata) and how to decode that into splats attributes, but is it necessary to also mention how these images are encoded? You decided to use webp after probably some time tinkering with different options, but should not this be left as the responsibility of other data-producers or renderers implementation? They might decide otherwise for various reasons - some we might even discover in the future - so I'm questioning whether this should be part of the format specification. In the end, since you are the initial implementor, it is also probable the choices you do will influence upcoming implementations but some room might be left here.
+KTX2: Regarding alternatives to webp for encoding SOG images, it will be a choice of file-size/compression ratio which impacts bandwidth necessary for the scene to reach the client, vs total time it takes for the image to reach the gpu memory from CPU thread as well as image size in gpu memory. On our end, when encoding massive meshes as 3D-tiles tilesets (HLOD hierarchies of glTF tile meshes with textures), we took the decision to use KTX2 to have a 3x increase in file-size but VRAM usage reduced 10x (see screen in details), and the texture became GPU ready in shader faster. It is probably a pretty different use-case because our textures look more natural and compression probably works better on these than on SOG noisy textures
+AVIF/JXL: Comparing "non gpu-ready" image formats, WebP vs eg AVIF or JPEGXL, comments in this thread by J. Cupitt from libvips roughly stated AVIF/AV1 being more future-proof (vs WebP) for compressed images for the web, at least until JPEGXL has better browser support (JXL has a lot of the old webp devs behind it).
+TIFF: also wanted to mention TIFF which could support a handful of your requirements - apart maybe from the GPU-ready data I introduced. Great GDAL doc on the GTiff format. This is what ended-up being used as a basis for COG Cloud Optimized Geotiff (for massive raster datasets), for its extensibility. Such images can:
+have arbitrary number of bands, so you could encode them all into a single image file - maybe one image for means_u, means_l, scales, quats, sh0, and another image for higher-level spherical harmonics
+be read/write by all imagery softwares (probably not very useful) or CLI js/py/whatever tiff RW libraries and SDKs
+be stored with contiguous memory blocks BLOCKXSIZE=YES, BLOCKXSIZE, BLOCKYSIZE so you could stream splats (with all their attributes) before loading the whole with INTERLEAVE=[BAND​/​PIXEL]
+Compression can take values among (shortlist) COMPRESS=[JPEG​/​/​DEFLATE​//​WEBP​/​JXL​/​NONE]
+Natively supports internal overviews, basically subsampled versions of the image raster. You could even use subdatasets in case you want multiple SOG splats scenes shared within the same tiff file. In the COG case tiff pages are used to store downsampled versions of the same scene, with the same tile block structure, to allow readers to efficiently fetch the data best fit to the user viewport.
+Other possible container: glTF?
+Combining all these thoughts together also yielded a possible nice container alternative (compared to uncompressed zip), also since I saw you comment on the PR for glTF extension KHR_gaussian_splatting - joining discussions for a possible KHR_gaussian_splatting_SOGv2_compression incoming 👀. There is already a pretty rich ecosystem for glTF, with the aim at storing/transferring as much gpu-ready assets as possible. glTF can be exploded as multiple files (which for meshes are usually json metadata, bin geometry, and image texture files), but can also be stored in a glb binary container. For initial testing, you could even just have a single tri/quad geometry with references to all the existing webp texture files each in its slot, and even tinker with glTF-transform to parse through that splat scene and convert all textures at once to ktx2 or bundle to binary glb container. You probably have in mind gathering community feedback to finalize a solid possible file format that could be encapsulated as a glTF extension, just wanted to mention it.
+Hope this helps, and sorry for the lengthy read!
+SZI spec p.5
+KTX vs WebP vs AVIF memory footprint
+❤️React with ❤️1Reacted by Donovan Hutchence
+slimbuck commented on Aug 21, 2025
+slimbuck
+on Aug 21, 2025
+MemberAuthor
+More actions
+Thanks for your thoughts on this @jo-chemla.
+We're using webp because the image data must be lossless and webp does the best job by far.
+But you're right about not needing to enforce webp specifically, there is no need. And the constituent image filenames are specified in the meta.json already, so this actually already supported.
+GLTF could be great, but would presumably make parallel download of images difficult.
+👍React with 👍1Reacted by Jonathan Chemla
+Maksims commented on Aug 21, 2025
+Maksims
+on Aug 21, 2025
+More actions
+We're using webp because the image data must be lossless and webp does the best job by far.
+Can lossy files be used for SH textures?
+slimbuck commented on Aug 21, 2025
+slimbuck
+on Aug 21, 2025
+MemberAuthor
+More actions
+We're using webp because the image data must be lossless and webp does the best job by far.
+Can lossy files be used for SH textures?
+I haven't spent a lot of time testing, but in general no. The impact is too large on scene quality. It would be good to spend some time and see what might be possible.
+❤️React with ❤️1Reacted by mrmaxm
+jo-chemla commented on Aug 21, 2025
+jo-chemla
+on Aug 21, 2025
+Last edited by jo-chemla
+More actions
+Thanks for getting back with these comments!
+We're using webp because the image data must be lossless and webp does the best job by far.
+Of course, lossless compression is needed for the SOG images, thanks for bringing it back to the top of my mind.
+Some of the above still stands - your choice WEBP, or TIFF container, JXL or AVIF image raster formats, all support lossless option.
+Also stumbled on this great lossless formats comparison table that might be of interest! A few additional notes:
+again from the GDAL GTiff raster doc, TIFF can encapsulate jxl, webp, or various flavors of losslessly compressed formats like DEFLATE, LZW, ZSTD, LZMA.
+Interesting discussion - although somehow heated - showing worse compression ratios fot lossless avif vs webp, over here AVIF lossless worse than WebP lossless, occasionally even PNG AOMediaCodec/av1-avif#111
+I read lossless WebP uses a LZ77 style compressor, so could be similar in performance to DEFLATE or LZMA, yielding higher compression ratios but potentially slower compression/decompression timings.
+sharp/libvips do support mentioned compression = none, webp, deflate, lzw and zstd compression schemes according to tiffsave doc. Not sure about browser/client side tiff parsing/decompression vs more standard/browser native image formats
+webp requires pixel interleaving, not sure about the others. Also useful, the COG driver also allows TILE interleaving, doing a compromise between pixel and band interleaving INTERLEAVE=[BAND​/​PIXEL​/​TILE]
+Additional note, option MAX_Z_ERROR_OVERVIEW=0 (lossless) is useful to set the maximum error threshold on values for compressors LERC/LERC_DEFLATE/LERC_ZSTD.
+But you're right about not needing to enforce webp specifically, there is no need. And the constituent image filenames are specified in the meta.json already, so this actually already supported.
+Great to have that flexibility from the start!
+GLTF could be great, but would presumably make parallel download of images difficult.
+This comment is not specific to glTF but to single-file container vs scene exploded into its image constituents as individual files. glTF itself can be either bundled single-file glb or exploded into its constituents with gltf json + companions.
+If you want a single container like uncompressed zip, then both glTF and 5-bands TIFF - which could encapsulate the format of your choosing - could work. Parallel download is independent of the type of container used. One could even do range-requests on a glb as done in threejs GLTFLoader here GLTFLoader: HTTP Range Requests support mrdoob/three.js#24506 and for FileLoader here.
+Whathever container you choose, you could even handle parallel downloads via range-requests either yourself or let the browser handle it for you in case of multiple files or single file
+Somehow related mention of HTTP/2: Instead of multiple TCP connections, HTTP/2 can use a single connection per domain, with multiple streams handling different requests. Also introduces prioritization, so you can even set higher weights on the means l/u+ sh0 requests to get a temp pointcloud loading, while awaiting for quats + scales with medium weight, and assigning other sh coefficients the lowest weight. See this great presentation linked in SO answer for more details about how each browser prioritizes and organizes its streams
+👍React with 👍1Reacted by Donovan Hutchence
+javagl commented on Aug 22, 2025
+javagl
+on Aug 22, 2025
+More actions
+Just a drive-by comment...
+We're using webp because the image data must be lossless ...
+Of course, lossless compression is needed for the SOG images,
+I could imagine that the importance of losslessness depends on what exactly is encoded in the texture. For example, for the rotations, the slightest deviation could cause artifacts like a long, thin, splat standing out somewhere. But a lot of work went into things like JPEG to make sure that there is not much perceptual difference in the colors introduced with the block compression, and I would have thought that these slight color variations might be as unimportant for splats as they are for pixels.
+(Of course, this involves a ton of assumptions about the "layout" of the data within the textures. Roughly: It would only be true if the data was indeed laid out similar to the example image in the SOG repo, where it looks like "similar colors" are close to each other, meaning that block compression could make sense to begin with. The SOG splat WEBP files that I've seen until now looked rather "noisy" compared to that, and something like JPEG would wreak havoc with that (and may not even be able to sensibly compress that data at all...)).
+Related, and because KTX was mentioned: The KTX Artist Guide explicitly differentiates between UASTC compression for normal textures, and ETC1S compression for the base color. Similarly, I could imagine, for example, using UASTC for the splat rotations, and ETC1S for the splat colors or so.
+(These are wild guesses for now - it's hard to visually imagine the effects that what is referred to as 'block compression artifacts' in standard 2D textures could have for textures that store splat properties...)
+👍React with 👍1Reacted by Donovan Hutchence
+Maksims commented on Aug 23, 2025
+Maksims
+on Aug 23, 2025
+Last edited by Maksims
+More actions
+Related, and because KTX was mentioned: The KTX Artist Guide explicitly differentiates between UASTC compression for normal textures, and ETC1S compression for the base color. Similarly, I could imagine, for example, using UASTC for the splat rotations, and ETC1S for the splat colors or so.
+The reason why UASTC is preferred for normals, is because in ETC1 data between channels is assumed to be correlated, so compression blocks will leak data between channels, and prioritize general visual consistency.
+While with UASTC there is a mode that allows to keep channels uncorrelated, as well as prioritize their vector length consistency (normals is a vector as color end of the day).
+The general problem, is if you try to encode more complex data into the texture, that relies on bit operations. As compression will flip bits that can have a significant effect on things like position or rotation.
+While for color data, like spherical harmonics - compression is ok.
+👍React with 👍1Reacted by Donovan Hutchence
+slimbuck
+closed this as completedin #41on Sep 1, 2025
+jo-chemla commented on Sep 10, 2025
+jo-chemla
+on Sep 10, 2025
+More actions
+Out of curiosity, I was playing around with the below glTF skeleton to follow-up after your comment on the glTF SPZ thread regarding a possible extension KHR_gaussian_splatting_compression_sog2.
+This sample is made of
+a json file.glTF, see below expandable snippet
+which references a simple fake quad.bin geometry
+and all the SOGv2 textures currently part of the format
+The sample glTF also incorporates your meta.json. Once created, it was easy to use the gltf-transform CLI to translate textures from one format to another, inspect the resulting filesizes/VRAM usage or assemble the constituent files into a single binary container with the below commands. After digging a bit, I realized KTX2 is mostly made for lossy block compression - although one can store ZSTD compressed raw RGBA8 buffers.
+But for my PNG compressed textures, it seems that I get better compression ratios than your webp files. I could not visually compare both scenes, since drag-dropping into the supersplat editor (with a modified meta.json referencing the new png or ktx2 texture files) do not parse them, only implemented for webp.
+For the helicopter mentioned in this thread (similar results for a 40M splat scene), I get the total filesize below - see details table:
+9.61MB sog container (uncompressed zip with webp)
+3.98MB glTF (png quality 100)
+5.74 MB UASTC visually lossless
+```
+# convert all webp textures to lossless png
+gltf-transform png sog-skeleton.glTF png-q100/sog-png.glTF --formats '*' --slots '*' --quality 100 --verbose  
+
+# compress visually-lossless UASTC
+gltf-transform uastc png-q100/sog-png.glTF sog-uastc-zstd19/helicopter-uastc.glTF --level 4 --rdo false --zstd 19 --jobs 6 --verbose
+
+# explore asset and VRAM sizes
+gltf-transform inspect scene.glTF 
+
+# explode or combine into a glb container
+gltf-transform copy scene.glTF scene.glb 
+```
+GLTF sog-skeleton-metadata.glTF
+zipped quad.bin
+```
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "sog-v2-experiment"
+  },
+  "scenes": [
+    {
+      "nodes": [0]
+    }
+  ],
+  "nodes": [
+    {
+      "mesh": 0
+    }
+  ],
+  "meshes": [
+    {
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0,
+            "TEXCOORD_0": 1
+          },
+          "indices": 2,
+          "material": 0
+        }
+      ]
+    }
+  ],
+  "materials": [
+    {
+      "name": "SplatMaterial",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+        "metallicFactor": 0.0,
+        "roughnessFactor": 1.0
+      },
+      "extensions": {
+        "SOG_attributes": {
+          "means_lTexture": { "index": 0 },
+          "means_uTexture": { "index": 1 },
+          "scalesTexture": { "index": 2 },
+          "quatsTexture": { "index": 3 },
+          "sh0Texture": { "index": 4 },
+          "shN_centroidsTexture": { "index": 5 },
+          "shN_labelsTexture": { "index": 6 }
+        }
+      }
+    }
+  ],
+  "samplers": [
+    {
+      "wrapS": 33071,
+      "wrapT": 33071,
+      "magFilter": 9729,
+      "minFilter": 9729
+    }
+  ],
+  "textures": [
+    { "source": 0, "sampler": 0 },
+    { "source": 1, "sampler": 0 },
+    { "source": 2, "sampler": 0 },
+    { "source": 3, "sampler": 0 },
+    { "source": 4, "sampler": 0 },
+    { "source": 5, "sampler": 0 },
+    { "source": 6, "sampler": 0 }
+  ],
+  "images": [
+    { "uri": "textures/means_l.webp", "mimeType": "image/webp" },
+    { "uri": "textures/means_u.webp", "mimeType": "image/webp" },
+    { "uri": "textures/scales.webp", "mimeType": "image/webp" },
+    { "uri": "textures/quats.webp", "mimeType": "image/webp" },
+    { "uri": "textures/sh0.webp", "mimeType": "image/webp" },
+    { "uri": "textures/shN_centroids.webp", "mimeType": "image/webp" },
+    { "uri": "textures/shN_labels.webp", "mimeType": "image/webp" }
+  ],
+  "buffers": [
+    {
+      "uri": "quad.bin",
+      "byteLength": 92
+    }
+  ],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0, "byteLength": 48 },
+    { "buffer": 0, "byteOffset": 48, "byteLength": 32 },
+    { "buffer": 0, "byteOffset": 80, "byteLength": 12 }
+  ],
+  "accessors": [
+    { "bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [-1, -1, -1], "max": [1, 1, 1] },
+    { "bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC2" },
+    { "bufferView": 2, "componentType": 5123, "count": 6, "type": "SCALAR" }
+  ],
+  "extensionsUsed": ["SOG_attributes", "EXT_texture_webp", "KHR_gaussian_splats_compression_sogv2"],
+  "extensions": {
+    "KHR_gaussian_splats_compression_sogv2": {
+      "version": 2,
+      "means": {
+        "mins": [-8.825556, -8.768281, -8.829216],
+        "maxs": [8.799815, 8.710823, 8.801936],
+        "files": ["means_l.webp", "means_u.webp"]
+      },
+      "scales": {
+        "codebook": [-9.998752, -9.940230, -9.878263 /* truncated for brevity */ ],
+        "files": ["scales.webp"]
+      },
+      "quats": {
+        "files": ["quats.webp"]
+      },
+      "sh0": {
+        "codebook": [-7.025391, -7.003906, -6.925781 /* truncated for brevity */ ],
+        "files": ["sh0.webp"]
+      },
+      "shN": {
+        "codebook": [-2.736904, -2.717331, -2.033916 /* truncated for brevity */ ],
+        "files": ["shN_centroids.webp", "shN_labels.webp"]
+      }
+    }
+  }
+}
+```
+Textures Sizes and GPU-Sizes
+```
+ TEXTURES WEBP
+ ────────────────────────────────────────────
+┌───┬──────┬────────────────────┬───────┬───────────┬────────────┬─────────────┬────────────┬───────────┬──────────┐
+│ # │ name │ uri                │ slots │ instances │ mimeType   │ compression │ resolution │ size      │ gpuSize⁵ │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 0 │      │ means_l.webp       │       │ 0         │ image/webp │             │ 832x832    │ 1.89 MB   │ 3.69 MB  │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 1 │      │ means_u.webp       │       │ 0         │ image/webp │             │ 832x832    │ 310.17 KB │ 3.69 MB  │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 2 │      │ scales.webp        │       │ 0         │ image/webp │             │ 832x832    │ 1.3 MB    │ 3.69 MB  │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 3 │      │ quats.webp         │       │ 0         │ image/webp │             │ 832x832    │ 1.95 MB   │ 3.69 MB  │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 4 │      │ sh0.webp           │       │ 0         │ image/webp │             │ 832x832    │ 1.99 MB   │ 3.69 MB  │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 5 │      │ shN_centroids.webp │       │ 0         │ image/webp │             │ 960x1024   │ 1.75 MB   │ 5.24 MB  │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 6 │      │ shN_labels.webp    │       │ 0         │ image/webp │             │ 832x832    │ 874.29 KB │ 3.69 MB  │
+└───┴──────┴────────────────────┴───────┴───────────┴────────────┴─────────────┴────────────┴───────────┴──────────┘
+
+ TEXTURES PNG
+ ────────────────────────────────────────────
+┌───┬──────┬───────────────────┬───────┬───────────┬───────────┬─────────────┬────────────┬───────────┬──────────┐
+│ # │ name │ uri               │ slots │ instances │ mimeType  │ compression │ resolution │ size      │ gpuSize⁵ │
+├───┼──────┼───────────────────┼───────┼───────────┼───────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 0 │      │ means_l.png       │       │ 0         │ image/png │             │ 832x832    │ 670.39 KB │ 3.69 MB  │
+├───┼──────┼───────────────────┼───────┼───────────┼───────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 1 │      │ means_u.png       │       │ 0         │ image/png │             │ 832x832    │ 97.77 KB  │ 3.69 MB  │
+├───┼──────┼───────────────────┼───────┼───────────┼───────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 2 │      │ scales.png        │       │ 0         │ image/png │             │ 832x832    │ 627.77 KB │ 3.69 MB  │
+├───┼──────┼───────────────────┼───────┼───────────┼───────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 3 │      │ quats.png         │       │ 0         │ image/png │             │ 832x832    │ 634.87 KB │ 3.69 MB  │
+├───┼──────┼───────────────────┼───────┼───────────┼───────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 4 │      │ sh0.png           │       │ 0         │ image/png │             │ 832x832    │ 645.25 KB │ 3.69 MB  │
+├───┼──────┼───────────────────┼───────┼───────────┼───────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 5 │      │ shN_centroids.png │       │ 0         │ image/png │             │ 960x1024   │ 853.99 KB │ 5.24 MB  │
+├───┼──────┼───────────────────┼───────┼───────────┼───────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 6 │      │ shN_labels.png    │       │ 0         │ image/png │             │ 832x832    │ 633.51 KB │ 3.69 MB  │
+└───┴──────┴───────────────────┴───────┴───────────┴───────────┴─────────────┴────────────┴───────────┴──────────┘
+
+ TEXTURES KTX2
+ ────────────────────────────────────────────
+┌───┬──────┬────────────────────┬───────┬───────────┬────────────┬─────────────┬────────────┬───────────┬──────────┐
+│ # │ name │ uri                │ slots │ instances │ mimeType   │ compression │ resolution │ size      │ gpuSize⁵ │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 0 │      │ means_l.ktx2       │       │ 0         │ image/ktx2 │ UASTC       │ 832x832    │ 867.15 KB │ 923.2 KB │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 1 │      │ means_u.ktx2       │       │ 0         │ image/ktx2 │ UASTC       │ 832x832    │ 425.57 KB │ 923.2 KB │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 2 │      │ scales.ktx2        │       │ 0         │ image/ktx2 │ UASTC       │ 832x832    │ 841.95 KB │ 923.2 KB │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 3 │      │ quats.ktx2         │       │ 0         │ image/ktx2 │ UASTC       │ 832x832    │ 867.61 KB │ 923.2 KB │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 4 │      │ sh0.ktx2           │       │ 0         │ image/ktx2 │ UASTC       │ 832x832    │ 770.74 KB │ 923.2 KB │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 5 │      │ shN_centroids.ktx2 │       │ 0         │ image/ktx2 │ UASTC       │ 960x1024   │ 1.15 MB   │ 1.31 MB  │
+├───┼──────┼────────────────────┼───────┼───────────┼────────────┼─────────────┼────────────┼───────────┼──────────┤
+│ 6 │      │ shN_labels.ktx2    │       │ 0         │ image/ktx2 │ UASTC       │ 832x832    │ 812.16 KB │ 923.2 KB │
+└───┴──────┴────────────────────┴───────┴───────────┴────────────┴─────────────┴────────────┴───────────┴──────────┘
+
+⁵ gpuSize estimates minimum VRAM memory allocation. Older devices may require
+  additional memory for GPU compression formats.
+```
+slimbuck commented on Sep 10, 2025
+slimbuck
+on Sep 10, 2025
+MemberAuthor
+More actions
+Hey @jo-chemla ,
+This is so cool, thanks for sharing!
+It actually helps a huge amount to see how SOG might be embedded into gltf structure.
+I just tried compressing one of the heli textures to lossless png using gimp and it's definitely not smaller than webp.
+I guess your tool is not doing lossy compression (even though it looks like it). Same for UASTC, it'll look almost the same, but in reality the data is quite different. I have found that any lossy compression results in unusable data, since they're not colors but rotations and scales.
+You could test this quite easily by converting to unbundled meta.json and replacing the textures with png/ktx2 versions then loading that in model-viewer. (If you can provide me the texture set I can help with this).
+Thanks!
+jo-chemla commented on Sep 10, 2025
+jo-chemla
+on Sep 10, 2025
+Last edited by jo-chemla
+More actions
+Bear in mind regarding how to embed SOG textures within the glTF container that I've just given it a shot and am not 100% confident with this, but this definitely can serve as a basis for discussion and to kickstart things. For example, this do not address at all the suggestion/feedback you got regrading storing any primitive/vertex attribute within a texture image file and mapping that to attribute value via a generic enough extension.
+You're right regarding lossy vs lossless PNG produced with gltf-transform. I encountered a funny edge-case which might come from this issue, where passing --quality 100 flag to the gltf-transform png CLI yields lossy png, while not passing that quality flag yield lossless PNGs. Results in increase in lossless png filesize by roughly 20% vs your original webp.
+To visualize things, I already did try copying meta.json pointing to my new texture sets, but loaded it into supersplat editor which resulted in console errors. Your idea to load them in playcanvas/model-viewer is the solution! Loading these:
+lossless png generated by gltf-transform do look correct
+lossy UASTC has skinny splats, probably due to bad decoding of some values, see error below
+lossy png results in pretty large splats. This makes me think it might be good to encode splat scales on a logarithmic scale from log(min) to log(max) rather than linear, so precision errors would result in less scale discrepancy. See edit below
+```
+// UASTC console error: 
+WebGL warning: readPixels: Framebuffer not complete. (status: 0x8cd6) COLOR_ATTACHMENT0: Attachment has an effective format of COMPRESSED_RGB_S3TC_DXT1_EXT, which is not renderable.
+WebGL warning: readPixels: Framebuffer must be complete. 
+```
+In earlier comment, I forgot to attach the files in case you wanted to use them for testing.
+helicopter-uastc-zstd19.zip
+helicopter-png-q100-lossy.zip
+helicopter-png-lossless.zip
+helicopter-sog-constituents.zip
+And finally, here are the filesize results for lossless vs lossy PNG.
+```
+# C:\test\splat-compression>gltf-transform png sog-skeleton-metadata.glTF helicopter-png-q100_2/helicopter-png.glTF --formats * --slots * --quality 100 --verbose
+# ...
+debug: textureCompress(helicopter/means_l.webp): Size = 1.89 MB → 670.39 KB
+info: sog-skeleton-metadata.glTF (10.07 MB) → helicopter-png.glTF (4.17 MB)
+
+
+# C:\test\splat-compression>gltf-transform png sog-skeleton-metadata.glTF helicopter-png-q100_2/helicopter-png.glTF --formats * --slots * --verbose
+# ...
+debug: textureCompress(helicopter/means_l.webp): Size = 1.89 MB → 2.36 MB
+info: sog-skeleton-metadata.glTF (10.07 MB) → helicopter-png.glTF (12.54 MB)
+```
+Details
+```
+C:\test\splat-compression>gltf-transform png sog-skeleton-metadata.glTF helicopter-png-q100_2/helicopter-png.glTF --formats * --slots * --quality 100 --verbose
+warn: Missing optional extension, "SOG_attributes".
+warn: Missing optional extension, "KHR_gaussian_splats_compression_sogv2".
+debug: textureCompress(helicopter/means_l.webp): Format = webp → png
+debug: textureCompress(helicopter/means_l.webp): Slots = []
+debug: textureCompress(helicopter/means_u.webp): Format = webp → png
+debug: textureCompress(helicopter/means_u.webp): Slots = []
+debug: textureCompress(helicopter/scales.webp): Format = webp → png
+debug: textureCompress(helicopter/scales.webp): Slots = []
+debug: textureCompress(helicopter/quats.webp): Format = webp → png
+debug: textureCompress(helicopter/quats.webp): Slots = []
+debug: textureCompress(helicopter/sh0.webp): Format = webp → png
+debug: textureCompress(helicopter/sh0.webp): Slots = []
+debug: textureCompress(helicopter/shN_centroids.webp): Format = webp → png
+debug: textureCompress(helicopter/shN_centroids.webp): Slots = []
+debug: textureCompress(helicopter/shN_labels.webp): Format = webp → png
+debug: textureCompress(helicopter/shN_labels.webp): Slots = []
+debug: textureCompress(helicopter/scales.webp): Size = 1.3 MB → 627.77 KB
+debug: textureCompress(helicopter/means_u.webp): Size = 310.17 KB → 97.77 KB
+debug: textureCompress(helicopter/shN_centroids.webp): Size = 1.75 MB → 853.99 KB
+debug: textureCompress(helicopter/shN_labels.webp): Size = 874.29 KB → 633.51 KB
+debug: textureCompress(helicopter/quats.webp): Size = 1.95 MB → 634.87 KB
+debug: textureCompress(helicopter/sh0.webp): Size = 1.99 MB → 645.25 KB
+debug: textureCompress(helicopter/means_l.webp): Size = 1.89 MB → 670.39 KB
+debug: textureCompress: Complete.
+info: sog-skeleton-metadata.glTF (10.07 MB) → helicopter-png.glTF (4.17 MB)
+
+
+C:\test\splat-compression>gltf-transform png sog-skeleton-metadata.glTF helicopter-png-q100_2/helicopter-png.glTF --formats * --slots * --verbose
+warn: Missing optional extension, "SOG_attributes".
+warn: Missing optional extension, "KHR_gaussian_splats_compression_sogv2".
+debug: textureCompress(helicopter/means_l.webp): Format = webp → png
+debug: textureCompress(helicopter/means_l.webp): Slots = []
+debug: textureCompress(helicopter/means_u.webp): Format = webp → png
+debug: textureCompress(helicopter/means_u.webp): Slots = []
+debug: textureCompress(helicopter/scales.webp): Format = webp → png
+debug: textureCompress(helicopter/scales.webp): Slots = []
+debug: textureCompress(helicopter/quats.webp): Format = webp → png
+debug: textureCompress(helicopter/quats.webp): Slots = []
+debug: textureCompress(helicopter/sh0.webp): Format = webp → png
+debug: textureCompress(helicopter/sh0.webp): Slots = []
+debug: textureCompress(helicopter/shN_centroids.webp): Format = webp → png
+debug: textureCompress(helicopter/shN_centroids.webp): Slots = []
+debug: textureCompress(helicopter/shN_labels.webp): Format = webp → png
+debug: textureCompress(helicopter/shN_labels.webp): Slots = []
+debug: textureCompress(helicopter/means_u.webp): Size = 310.17 KB → 581.55 KB
+debug: textureCompress(helicopter/scales.webp): Size = 1.3 MB → 1.56 MB
+debug: textureCompress(helicopter/means_l.webp): Size = 1.89 MB → 2.36 MB
+debug: textureCompress(helicopter/quats.webp): Size = 1.95 MB → 2.33 MB
+debug: textureCompress(helicopter/sh0.webp): Size = 1.99 MB → 2.48 MB
+debug: textureCompress(helicopter/shN_labels.webp): Size = 874.29 KB → 1.01 MB
+debug: textureCompress(helicopter/shN_centroids.webp): Size = 1.75 MB → 2.21 MB
+debug: textureCompress: Complete.
+info: sog-skeleton-metadata.glTF (10.07 MB) → helicopter-png.glTF (12.54 MB)
+```
+EDIT 1:
+Nevermind regarding logarithmic scales, probably since scales are sorted on 3 channels recombined, even a small value change of the larger constituent bits will yield enormous change. This would make an advantage to an image format that can store other than RGB 8 bits per channel, like either Float32 or Tiff, which would probably be better compressed - see above GeoTiff lossless compression methods used eg for DSMs.
+EDIT 2: Sorry, scales 3 channels are sx, sy, sz, so I'm thinking it could be great to not have them spans regularly the scale_min/scale_max range, but instead a log-scale or similar, so small errors would result in less visible artifacts. Or a way to have more bins where there are more concentration in the distribution of scales, not necessarily around the smallest scales. Probably this insight is way too convoluted to make it in a simple way.
+jo-chemla commented on Sep 12, 2025
+jo-chemla
+on Sep 12, 2025
+Last edited by jo-chemla
+More actions
+Again, I was curious regarding how WebP compares to other lossless compression formats for your SOG textures, especially for real 3DGS scenes, and depending on the texture and what it encodes.
+Just set-up a quick benchmark procedure on the 10 most starred SOGS scenes last month (python code below), which yielded this table. Shows you were definitely right! Only JPEGXL come close for quats, scales, sh0, yet still underperforms considering filesize.
+aggregated_results.csv
+all_results.csv
+Details
+```
+SOGS scenes benchmarked:
+- Tomatoes - No Postshot!
+- Torre di Capo Falcone - Stintino - Italy
+- Old Bridge - LichtFeld Studio
+- Simbulance2
+- Palace of Fine Arts, San Francisco
+- Downtown San Francisco (PREVIEW, SOGSv1)
+- Italian_Shaday_amulet
+- Potrero Power Station
+- Splatfacto-MCMC-3Msplats_EvalEvery10_30k
+- Torre della Pelosa - Stintino, Italy
+- Isola Piana - Stintino - Italy
+```
+```
+import os, re, json, requests, subprocess
+import pandas as pd
+
+# ============================================================
+# CONFIG
+# ============================================================
+OUTPUT_DIR = "supersplat-scenes"
+LIMIT = 30
+PLAYCANVAS_API = f"https://playcanvas.com/api/splats/explore?limit={LIMIT}&sort=starred&time=month&order=-1&skip=0"
+# get most starred last month from page 0, edit sort=starred&time=year&order=-1&skip=0
+# last month to retrieve some sogs i ntop 20, otherwise mostly compressed.ply
+# on 2025-09-12: 
+#   "num_scenes": 3006,
+#   "num_sogs": 87,
+#   "num_compressed-ply": 655,
+#   "num_unknown-format": 2264
+
+TEXTURE_NAMES = ["means_l", "means_u", "quats", "scales", "sh0", "shN_centroids", "shN_labels"]
+VIPS_EXE = 'C:\\Users\\jonathan\\Downloads\\splat-compression\\vips-dev-8.17\\bin\\vips.exe' # windows
+# VIPS_EXE = 'vips' # WSL
+CONVERSIONS = {
+    # "webp":      "vips copy {inp} {out}[lossless]",
+    "png":       "{vips_exe} copy {inp} {out}[Q=100,compression=9]",
+    "jxl-7":     "{vips_exe} copy {inp} {out}[lossless,effort=7]",
+    "avif":      "{vips_exe} copy {inp} {out}[lossless=true,compression=av1,effort=5]",
+    'tiff-deflate-6': '{vips_exe} copy {inp} {out}[compression=deflate,level=6]',
+    'tiff-lzw': '{vips_exe} copy {inp} {out}[compression=lzw]',
+    # Omit below ZSTD if on windows while libtiff compiled for libvips do not include zstd support
+    # 'tiff-zstd-9': '{vips_exe} copy {inp} {out}[compression=zstd,level=9]',
+    # 'tiff-zstd-22': '{vips_exe} copy {inp} {out}[compression=zstd,level=22]',
+    # 
+    # --- Not so much useful ---
+    # too slow for low gain
+    # "jxl-9":     "{vips_exe} copy {inp} {out}[lossless,effort=9]", # too slow for low gain
+    # 'tiff-deflate-9': '{vips_exe} copy {inp} {out}[compression=deflate,level=9]',  
+    # NO LERC SUPPORT IN LIBVIPS
+    # "zstd-9":    "gdal_translate {inp} {out} -co compress=ZSTD -co ZSTD_LEVEL=9",
+    # "deflate-9": "gdal_translate {inp} {out} -co compress=DEFLATE -co ZLEVEL=9",
+}
+# ----------------------------------------
+
+# For WINDOWS, ZSTD compression support is not configured, libtiff included in official, published, libvips is compiled without zstd support
+# Tiff compression: none, jpeg, deflate, packbits, ccittfax4, lzw, webp, zstd, jp2k
+# issue regarding zstd support for windows build https://github.com/libvips/build-win64-mxe/issues/80
+# recommended alternative: WSL with apt install libvips-tools
+# For WSL, libjxl do not seem to be supported by vips jxlsave unknown file format jxl, installed via https://github.com/libjxl/libjxl jxl-debs-amd64-ubuntu-20.04-v0.11.1.tar.gz
+
+# ============================================================
+# HELPERS
+# ============================================================
+def sanitize(name: str) -> str:
+    """Replace spaces with underscores, allow alphanumeric and underscores only."""
+    name = name.replace(" ", "_")
+    return re.sub(r'[^a-zA-Z0-9_]', '', name)
+
+
+def download(url: str, outpath: str, overwrite=False):
+    """Download a file unless it already exists (unless overwrite=True)."""
+    if os.path.exists(outpath) and not overwrite:
+        return
+    r = requests.get(url, stream=True)
+    if r.status_code == 200:
+        with open(outpath, "wb") as f:
+            for chunk in r.iter_content(1024 * 64):
+                f.write(chunk)
+    else:
+        print("Failed:", url, r.status_code)
+
+# Note since content is gzipped by server, header content-length reports wrong values so percentage goes beyond 100% 
+def download_with_progress(url: str, outpath: str, overwrite=False, prefix="", suffix=""):
+    """Download a file with a progress indicator, unless it already exists (unless overwrite=True)."""
+    if os.path.exists(outpath) and not overwrite:
+        return
+
+    r = requests.get(url, stream=True)
+    if r.status_code != 200:
+        print("Failed:", url, r.status_code)
+        return
+
+    total = int(r.headers.get("content-length", 0))
+    downloaded = 0
+    chunk_size = 1024 * 64
+
+    with open(outpath, "wb") as f:
+        for chunk in r.iter_content(chunk_size):
+            if not chunk:
+                continue
+            f.write(chunk)
+            downloaded += len(chunk)
+
+            if total > 0:
+                percent = int(downloaded * 100 / total)
+                print(f"\r{prefix}{percent}%{suffix}", end="", flush=True)
+
+# ============================================================
+# Part 1: Download supersplat scenes
+# ============================================================
+
+def download_scenes(stats_only=True):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    data = requests.get(PLAYCANVAS_API).json()["result"]
+
+    if stats_only: 
+        print(json.dumps({
+            'num_scenes': len(data), 
+            'num_sogs': len(list(filter(lambda x: x['format'] == 'sogs', data))), 
+            'num_compressed-ply': len(list(filter(lambda x: x['format'] == 'compressed.ply', data))), 
+            'num_unknown-format': len(list(filter(lambda x: x['format'] == '', data)))
+        }, indent=2))
+        return data
+
+    for scene in data:
+        title = sanitize(scene["title"])
+        format = scene["format"]
+        scene_folder = os.path.join(OUTPUT_DIR, format, title)
+        os.makedirs(scene_folder, exist_ok=True)
+        print(f' - Downloading scene {title} with format {format}... ', end = '')
+
+        # Pick largest thumbnail available
+        thumbs = scene.get("thumbnails", {})
+        for key in ["xl", "l", "m"]:
+            if key in thumbs:
+                download(thumbs[key], os.path.join(scene_folder, "thumb.webp"))
+                break
+
+        base = f"https://d28zzqy0iyovbz.cloudfront.net/{scene['hash']}/v{scene['version']}"
+
+        # seems that when format is not specified, it is compressed.ply
+        if format == "compressed.ply" or format == "":
+            download_with_progress(
+                f"{base}/scene.compressed.ply", 
+                os.path.join(scene_folder, "scene.compressed.ply"), 
+                prefix=f' - Downloading scene {title} with format {format}... '
+            )
+
+        elif format == "sogs":
+            # Download SOGS metadata
+            meta_url = f"{base}/meta.json"
+            meta_path = os.path.join(scene_folder, "meta.json")
+            # download(meta_url, meta_path)  # replaced by json dump below
+            meta = requests.get(meta_url).json()
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+
+            # Download textures
+            print('\n    - Downloading textures', end = '')
+            for attribute in meta.values():
+                for tex in attribute["files"]:
+                    tex_url = f"{base}/{tex}"
+                    tex_out = os.path.join(scene_folder, tex)
+                    download_with_progress(
+                        tex_url, 
+                        tex_out, 
+                        prefix=f'    - Downloading textures {tex}... ', 
+                        suffix= ' ' * 20
+                    )
+
+        print(f' Done!')
+
+    return data
+
+
+# ============================================================
+# Part 2: Convert textures 
+# ============================================================
+
+def convert_textures():
+    sog_root = os.path.join(OUTPUT_DIR, "sogs")
+    if not os.path.isdir(sog_root):
+        print("No sog scenes found.")
+        return 
+
+    for scene in os.listdir(sog_root):
+        print(f' - Compressing scene {scene}')
+        folder = os.path.join(sog_root, scene)
+        if not os.path.isdir(folder):
+            continue
+
+        compressed_dir = os.path.join(folder, "compressed")
+        os.makedirs(compressed_dir, exist_ok=True)
+
+        # loop through webp files, otherwise could loop through TEXTURE_NAMES
+        for fname in os.listdir(folder):
+            if not fname.endswith(".webp") or 'thumb' in fname:
+                continue
+
+            texname = os.path.splitext(fname)[0] 
+            input_tex = os.path.join(folder, fname)
+
+            for format, templated_cmd in CONVERSIONS.items():
+                # output_ext = "tif" if "gdal" in cmd else format.split('-')[0]
+                output_ext = format.split('-')[0]
+                output_tex_fn = f"{texname}-{format}.{output_ext}"
+                output_tex_fp = os.path.join(compressed_dir, output_tex_fn)
+
+                if not os.path.exists(output_tex_fp):
+                    cmd = templated_cmd.format(inp=input_tex, out=output_tex_fp, vips_exe=VIPS_EXE)
+                    print('   -     Executing... ', cmd.replace(VIPS_EXE, 'VIPS_BINARY'))
+                    try:
+                        subprocess.run(cmd, shell=True, check=True)
+                    except Exception as e:
+                        print("Failed:", cmd, e)
+                        continue
+    return 
+
+
+# ============================================================
+# Part 3: Measure compression gains/loss
+# ============================================================
+
+def measure_compression_ratios():
+    records = []
+    sog_root = os.path.join(OUTPUT_DIR, "sogs")
+    for scene in os.listdir(sog_root):
+        print(f' - Measuring scene {scene}')
+        folder = os.path.join(sog_root, scene)
+        if not os.path.isdir(folder):
+            continue
+        # loop through webp files, otherwise could loop through TEXTURE_NAMES
+        compressed_dir = os.path.join(folder, "compressed")
+        for fname in os.listdir(folder):
+            if not fname.endswith(".webp") or 'thumb' in fname:
+                continue
+            # Baseline size (WebP original)
+            input_tex = os.path.join(folder, fname)
+            baseline_size = os.path.getsize(input_tex)
+            texname = os.path.splitext(fname)[0] 
+            for format, templated_cmd in CONVERSIONS.items():
+                # output_ext = "tif" if "gdal" in cmd else format.split('-')[0]
+                output_ext = format.split('-')[0]
+                output_tex_fn = f"{texname}-{format}.{output_ext}"
+                output_tex_fp = os.path.join(compressed_dir, output_tex_fn)
+                if os.path.exists(output_tex_fp):
+                    size = os.path.getsize(output_tex_fp)
+                    records.append({
+                        "scene": scene,
+                        "texture": texname,
+                        "format": format,
+                        "size": size,
+                        "baseline_webp": baseline_size,
+                        "ratio_vs_webp": size / baseline_size
+                    })
+    return pd.DataFrame(records)
+
+def aggregate_table(df: pd.DataFrame):
+    """Aggregate ratios vs WebP by texture+format across scenes."""
+    agg = (
+        df.assign(ratio_pct = (df["ratio_vs_webp"] - 1) * 100) # simpler to read, and same doing the aggregate on ratios 1.xx or percentage +XX%
+        .groupby(["texture", "format"])["ratio_pct"]
+        .agg(["mean", "min", "max", "median"])
+        .reset_index()
+        .pivot(index="texture", columns="format", values=["min", "mean", "max", "median"])
+    )
+    return agg
+
+def main():
+    supersplat_scenes = download_scenes(stats_only=True)
+    print(f'{len(supersplat_scenes)} scenes returned by supersplat API')
+    sogs_titles = map(lambda x: x['title'], filter(lambda x: x['format'] == 'sogs', supersplat_scenes))
+    print('SOGS scenes titles:\n  - ' + '\n  - '.join(sogs_titles))
+
+    print('Converting textures and measuring filesize compression gains/loss vs baseline webp')
+    convert_textures()
+    df = measure_compression_ratios()
+    agg = aggregate_table(df)
+
+    print("\nRaw results:\n", df.head())
+    # show nice +58%, -9% rather than raw percentage ratios
+    print("\nAggregated table:\n", agg.applymap(lambda x: f"{x:+.1f}%"))
+
+    df.to_csv("all_results.csv", index=False)
+    agg.to_csv("aggregated_results.csv", index=True, index_label="texture")
+
+if __name__ == "__main__":
+    main()  
+
+
+# # Tested several compression schemes with gdal Gtiff driver
+# gdal_translate.exe scales-lossless.tif scales-webp.tif -co compress=WEBP -co WEBP_LOSSLESS=TRUE
+# gdal_translate.exe scales-lossless.tif scales-zstd-9.tif -co compress=ZSTD
+# gdal_translate.exe scales-lossless.tif scales-zstd-22-2.tif -co compress=ZSTD -co ZSTD_LEVEL=22 -co PREDICTOR=2
+# gdal_translate.exe scales-lossless.tif scales-zstd-22.tif -co compress=ZSTD -co ZSTD_LEVEL=22 -co PREDICTOR=1
+# gdal_translate.exe scales-lossless.tif scales-deflate-6.tif -co compress=DEFLATE
+# gdal_translate.exe scales-lossless.tif scales-deflate-9.tif -co compress=DEFLATE -co ZLEVEL=9
+# gdal_translate.exe scales-lossless.tif scales-lerc.tif -co compress=LERC
+# gdal_translate.exe scales-lossless.tif scales-lerc-deflate-6.tif -co compress=LERC_DEFLATE
+# gdal_translate.exe scales-lossless.tif scales-lerc-deflate-12.tif -co compress=LERC_DEFLATE -co ZLEVEL=12
+# gdal_translate.exe scales-lossless.tif scales-lerc-zstd-9.tif -co compress=LERC_ZSTD
+# gdal_translate.exe scales-lossless.tif scales-lerc-zstd-22.tif -co compress=LERC_ZSTD  -co ZSTD_LEVEL=22
+# gdal_translate.exe scales-lossless.tif scales-jxl-5.tif -co compress=JXL
+# gdal_translate.exe scales-lossless.tif scales-jxl-9.tif -co compress=JXL -co JXL_EFFORT=9
+# 
+# # Test with libvips CLI
+# vips copy scales.png scales-vips.webp[lossless]
+# vips copy scales.png scales-7.jxl[lossless,effort=7]
+# vips copy scales.png scales-9.jxl[lossless,effort=9]
+# vips copy scales.png scales-deflate-9.tif[compression=deflate,level=9,lossless]
+# vips copy scales.png scales-lzw.tif[compression=lzw,lossless]
+# # vips copy scales.png scales-zstd.tif[compression=zstd,level=22,lossless]
+```
+❤️React with ❤️1Reacted by Donovan Hutchence
+krpano commented on Oct 3, 2025
+krpano
+on Oct 3, 2025
+More actions
+Hello, a question about the shN_labels: that image is using only two bytes, so why not packing these two bytes into the A components of of the means_l and means_u images?
+In WebP the alpha channel is compressed separately and lossless anyway.
+That would save one whole image in GPU memory...
+slimbuck commented on Oct 3, 2025
+slimbuck
+on Oct 3, 2025
+MemberAuthor
+More actions
+Hi @krpano,
+This is a good point and actually one I considered at the time.
+Since SH is optional I preferred to keep the data separate, but perhaps worth re-evaluating.
+In playcanvas engine we download the data and interleave it for better render-time cache access. So we don't have wasted GPU memory, but there is still the extra network request.
+Would combining the channels make a big difference to you @krpano?
+slimbuck commented on Oct 3, 2025
+slimbuck
+on Oct 3, 2025
+MemberAuthor
+More actions
+Also to add, we might want the option of increasing the size of the spherical harmonics palette, in which case it would be simple to extend to the next channel in shN_labels.
+krpano commented on Oct 3, 2025
+krpano
+on Oct 3, 2025
+More actions
+I'm planing to add SOG support also to my software and when reading the specs now, and thinking about directly using the images as they are as textures, then these unused bytes just seemed waste of memory...
+But good points about later increasing the palette size and interleaving the data for the GPU.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+slimbuck
+Labels
+enhancementNew feature or requestNew feature or request
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

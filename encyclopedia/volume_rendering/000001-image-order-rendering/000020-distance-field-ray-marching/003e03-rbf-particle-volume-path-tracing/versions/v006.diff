@@ -1,0 +1,160 @@
+--- v005.md
++++ v006.md
+@@ -4,9 +4,7 @@
+ 
+ ## Overview
+-RBF Particle Volume Path Tracing renders volumetric particle data by modeling the scene as a continuous scalar field composed of additive weighted radial basis functions (RBFs), specifically Gaussians [S1, book]. It solves the visual clutter and pathological BVH performance issues of overlapping splatted particles by treating the volume as a unified field, enabling full path tracing through integration into a volume sampling kernel API [S1, book].
++RBF Particle Volume Path Tracing renders volumetric particle data by modeling the scene as a continuous scalar field composed of additive weighted radial basis functions (RBFs), specifically Gaussians [S1, book]. It solves the visual clutter and pathological BVH performance issues of overlapping splatted particles by treating the volume as a unified field, enabling full path tracing through integration into a volume sampling kernel API [S1, book]. The method builds on [Distance-field ray marching](21-distance-field-ray-marching.md).
+ 
+ ## How it works
+-The method combines a Bounding Volume Hierarchy (BVH) for spatial acceleration with Delta Tracking (Woodcock tracking) for unbiased Monte Carlo integration of the Radiative Transfer Equation (RTE) [S1, book].
+-
+ ### Inputs and Outputs
+ *   **Inputs**:
+@@ -27,15 +25,29 @@
+     *   Value Ranges: Each node stores the minimum and maximum scalar field values $\Phi$ achievable within its bounding volume [S1, book]. These are estimated during preprocessing [S1, book].
+ 
+-### Preprocessing
+-1.  **BVH Construction**: Build a BVH over the $N$ particles. The bounding box for particle $i$ is expanded by a factor of $\sigma$ (default 3) to account for the Gaussian kernel's support [S1, book].
+-2.  **Value Range Estimation**:
+-    *   For each leaf node (particle $i$), evaluate the RBF field $\Phi$ on a small grid (e.g., $10^3$ points) within the support radius $\sigma r_i$ [S1, book].
+-    *   Determine the local minimum and maximum values for that leaf [S1, book].
+-    *   Propagate these ranges up the tree to update interior node ranges [S1, book].
+-    *   Store the global minimum and maximum values for the entire dataset [S1, book].
+-    *   *Note*: This step has worst-case complexity $O(N)$ and is optional if the user can manually specify `clampMaxCumulativeValue` [S1, book].
++### Algorithm Steps
++1.  **Preprocessing**:
++    a.  **BVH Construction**: Build a BVH over the $N$ particles. The bounding box for particle $i$ is expanded by a factor of $\sigma$ (default 3) to account for the Gaussian kernel's support [S1, book].
++    b.  **Value Range Estimation**: For each leaf node (particle $i$), evaluate the RBF field $\Phi$ on a small grid (e.g., $10^3$ points) within the support radius $\sigma r_i$ [S1, book]. Determine the local minimum and maximum values for that leaf [S1, book]. Propagate these ranges up the tree to update interior node ranges [S1, book]. Store the global minimum and maximum values for the entire dataset [S1, book]. Estimate $\sigma_{t,\max}$, the maximum extinction coefficient along the ray, using these ranges or manual specification [S1, book].
++2.  **Ray Marching Loop** (per pixel):
++    a.  **Initialize**: Set accumulated radiance $L_{acc} = 0$, optical depth $\tau = 0$, and current ray distance $t_{curr} = 0$ [G].
++    b.  **Sample Distance**: Sample distance $t$ using the Delta Tracking formula with $\sigma_{t,\max}$ [S1, book].
++    c.  **Compute Position**: Compute sample position $\mathbf{x} = \mathbf{o} + t\omega$ [G].
++    d.  **Evaluate Field**:
++        i.  Traverse BVH to find all particles whose support radius intersects $\mathbf{x}$ [S1, book].
++        ii. For each intersecting particle $i$, compute $d_i(\mathbf{x})$ [S1, book].
++        iii. If $d_i(\mathbf{x}) < \sigma r_i$, compute $\phi_i(\mathbf{x}) = w_i e^{-\frac{1}{2}(d_i(\mathbf{x})/r_i)^2}$ [S1, book].
++        iv. Accumulate $\Phi(\mathbf{x}) = \sum \phi_i(\mathbf{x})$ [S1, book].
++        v.  If `clampMaxCumulativeValue` is set and $\Phi(\mathbf{x})$ exceeds it, clamp $\Phi(\mathbf{x})$ to this value and stop summing further particles [S1, book].
++    e.  **Apply Transfer Function**:
++        i.  Compute $\sigma_t = \alpha(\Phi(\mathbf{x}))$ [S1, book].
++        ii. Compute $L^e = C(\Phi(\mathbf{x}))$ [S1, book].
++    f.  **Check Virtual Event**:
++        i.  Generate $\xi \in [0, 1)$. If $\xi < 1 - \sigma_t/\sigma_{t,\max}$, the event is virtual; continue loop without advancing $t_{curr}$ [S1, book].
++        ii. If accepted, update accumulated radiance: $L_{acc} \leftarrow L_{acc} + e^{-\tau} \cdot \sigma_e L^e / \sigma_{t,\max}$ [S1, book].
++        iii. Update optical depth: $\tau \leftarrow \tau + \sigma_t \cdot t$ [G].
++        iv. Advance ray: $t_{curr} \leftarrow t_{curr} + t$ [G].
++3.  **Return** $L_{acc}$ [G].
+ 
+ ### Mathematical Formulation
+-
+ **1. RBF Scalar Field**
+ The scalar field $\Phi(\mathbf{x})$ at query point $\mathbf{x}$ is the sum of Gaussian kernels from all contributing particles $i$:
+@@ -71,5 +83,4 @@
+ **5. Delta Tracking (Woodcock Tracking)**
+ To sample distances unbiasedly in the non-homogeneous medium defined by $\Phi(t)$:
+-*   Estimate $\sigma_{t,\max}$, the maximum extinction coefficient along the ray. This is estimated during preprocessing by evaluating the RBF field over a grid, or manually specified by the user [S1, book].
+ *   Sample a distance $t$ to the next event:
+     $$
+@@ -84,28 +95,7 @@
+     If rejected, sample a new distance $t$ from the current position and repeat [S1, book].
+ 
+-### Algorithm Steps
+-1.  **Initialize**: Set accumulated radiance $L_{acc} = 0$, optical depth $\tau = 0$, and current ray distance $t_{curr} = 0$ [G].
+-2.  **Ray Marching Loop**:
+-    a.  Sample distance $t$ using Delta Tracking formula with $\sigma_{t,\max}$ [S1, book].
+-    b.  Compute sample position $\mathbf{x} = \mathbf{o} + t\omega$ [G].
+-    c.  **Evaluate Field**:
+-        i.  Traverse BVH to find all particles whose support radius intersects $\mathbf{x}$ [S1, book].
+-        ii. For each intersecting particle $i$, compute $d_i(\mathbf{x})$.
+-        iii. If $d_i(\mathbf{x}) < \sigma r_i$, compute $\phi_i(\mathbf{x}) = w_i e^{-\frac{1}{2}(d_i(\mathbf{x})/r_i)^2}$ [S1, book].
+-        iv. Accumulate $\Phi(\mathbf{x}) = \sum \phi_i(\mathbf{x})$.
+-        v.  **Early Termination**: If `clampMaxCumulativeValue` is set and $\Phi(\mathbf{x})$ exceeds it, clamp $\Phi(\mathbf{x})$ to this value and stop summing further particles [S1, book].
+-    d.  **Apply Transfer Function**:
+-        i.  Compute $\sigma_t = \alpha(\Phi(\mathbf{x}))$ [S1, book].
+-        ii. Compute $L^e = C(\Phi(\mathbf{x}))$ [S1, book].
+-    e.  **Check Virtual Event**:
+-        i.  Generate $\xi \in [0, 1)$. If $\xi < 1 - \sigma_t/\sigma_{t,\max}$, the event is virtual; continue loop without advancing $t_{curr}$ [S1, book].
+-        ii. If accepted, update accumulated radiance: $L_{acc} \leftarrow L_{acc} + e^{-\tau} \cdot \sigma_e L^e / \sigma_{t,\max}$ [S1, book].
+-        iii. Update optical depth: $\tau \leftarrow \tau + \sigma_t \cdot t$ [G].
+-        iv. Advance ray: $t_{curr} \leftarrow t_{curr} + t$ [G].
+-3.  **Return** $L_{acc}$ [G].
+-
+ ### Pseudocode
+ ```python
+-def rbf_volume_path_trace(ray_origin, ray_direction, bvh, particles, transfer_func, sigma_t_max, clamp_max, max_steps=100):
++def rbf_volume_path_trace(ray_origin, ray_direction, bvh, particles, transfer_func, sigma_t_max, clamp_max, radius_support_factor=3.0, max_transmittance_threshold=1e-4):
+     """
+     ray_origin: vec3
+@@ -116,4 +106,6 @@
+     sigma_t_max: float, maximum extinction coefficient
+     clamp_max: float, optional clamp for accumulated phi
++    radius_support_factor: float, kernel truncation multiplier
++    max_transmittance_threshold: float, ray termination threshold
+     """
+     accumulated_radiance = 0.0
+@@ -121,6 +113,6 @@
+     t_current = 0.0
+     
+-    for _ in range(max_steps):
+-        if exp(-optical_depth) < 1e-4:
++    while True:
++        if exp(-optical_depth) < max_transmittance_threshold:
+             break
+             
+@@ -132,5 +124,5 @@
+         # 2. Evaluate Scalar Field Phi at sample point
+         sample_pos = ray_origin + t_sample * ray_direction
+-        phi_value = evaluate_rbf_field(sample_pos, bvh, particles, clamp_max)
++        phi_value = evaluate_rbf_field(sample_pos, bvh, particles, clamp_max, radius_support_factor)
+         
+         # 3. Apply Transfer Function
+@@ -141,18 +133,13 @@
+         if uniform(0.0, 1.0) < acceptance_prob:
+             # Event is real
+-            # Transmittance from origin to sample point
+             transmittance = exp(-optical_depth)
+-            # Contribution to radiance: T(t) * sigma_e * L_e / sigma_t_max
+-            # Assuming emission_color represents sigma_e * L_e
+             accumulated_radiance += transmittance * emission_color / sigma_t_max
+-            
+-            # Update optical depth for next steps
+             optical_depth += sigma_t * t_step
+             t_current = t_sample
+-        # If virtual, we simply sample a new distance from the current position (loop continues)
++        # If virtual, loop continues and samples a new distance from current position
+         
+     return accumulated_radiance
+ 
+-def evaluate_rbf_field(sample_pos, bvh, particles, clamp_max):
++def evaluate_rbf_field(sample_pos, bvh, particles, clamp_max, radius_support_factor):
+     phi = 0.0
+     candidates = bvh.traverse(sample_pos)
+@@ -161,6 +148,6 @@
+         dist_sq = dot(delta, delta)
+         radius_sq = particle.radius * particle.radius
+-        support_factor = 3.0
+-        if dist_sq < (support_factor * particle.radius) ** 2:
++        support_radius_sq = (radius_support_factor * particle.radius) ** 2
++        if dist_sq < support_radius_sq:
+             val = particle.weight * exp(-0.5 * dist_sq / radius_sq)
+             phi += val
+@@ -181,9 +168,8 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The preprocessing step for value estimation has worst-case time complexity $O(N)$, where $N$ is the number of particles [S1, book]. Rendering complexity depends on the number of particles intersected by the ray and the depth of the BVH.
+-*   **Memory Complexity**: Requires storing the particle data ($N$ particles) and the BVH structure.
++*   **Time Complexity**: The preprocessing step for value estimation has worst-case time complexity $O(N)$, where $N$ is the number of particles [S1, book].
+ *   **Performance**: Allows interactive rendering of hundreds of millions of particles at high resolution (e.g., 4000) without simplification or proxy geometry [S1, book].
+ *   **Strengths**:
+-    *   Handles overlapping particles without visual clutter.
++    *   Handles overlapping particles without visual clutter [S1, book].
+     *   Supports full path tracing (unlike previous RBF implementations restricted to ray casting) [S1, book].
+     *   Adjustable smoothing/sharpening via kernel radius and weight [S1, book].
+@@ -192,6 +178,4 @@
+     *   Value estimation for $\sigma_{t,\max}$ can be costly for large, complex datasets [S1, book].
+     *   Requires careful tuning of `radiusSupportFactor` to balance performance and artifact avoidance [S1, book].
+-*   **When to Use**: Suitable for scientific visualization of particle-based data (e.g., SPH fluids, cosmology) where continuous field representation is desired and full path tracing is needed.
+-*   **When Not to Use**: If the dataset is extremely large and $\sigma_{t,\max}$ estimation is prohibitive, and manual clamping is not feasible, or if simple splatting is sufficient and path tracing is not required.
+ 
+ ## Background

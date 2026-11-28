@@ -1,0 +1,112 @@
+# BVH Traversal for Closest Point
+Also called: Closest Point BVH Traversal
+
+## Overview
+This method traverses a Bounding Volume Hierarchy (BVH) to find the triangle closest to a specific query point [S1]. It solves the problem of efficient nearest-neighbor search in geometric scenes by pruning branches that cannot contain a closer primitive than the current best [S1]. It sets itself apart from [Mesh BVH](1062-mesh-bvh.md) and [IRIS Ray-Geometry Intersection](3250-iris-ray-geometry-intersection.md) by operating on point-to-primitive distance rather than ray-parametric distance, and from [Multi-Hit BVH Traversal](12728-multi-hit-bvh-traversal.md) by returning only the single closest hit [S1].
+
+## How it works
+**Inputs:** A query point $p$, a BVH root node, and a mutable best state `best` initialized to $(\infty, \text{null})$, where the first element is the squared distance and the second is the closest primitive found so far [S1].
+**Outputs:** The updated `best` tuple containing the squared distance to the closest triangle and the triangle itself [S1].
+
+**Data Structures:**
+The BVH is defined recursively [S1]:
+- `AABB(low: f32x3, high: f32x3)`: Axis-aligned bounding box.
+- `Triangle(p0: f32x3, p1: f32x3, p2: f32x3)`: A triangle defined by three vertices.
+- `BVH`:
+  - `Interior(low: f32x3, high: f32x3, left: BVH, right: BVH)`: Internal node with bounding box and two children.
+  - `Leaf(low: f32x3, high: f32x3, nprims: u16, data: Triangle[nprims])`: Leaf node with bounding box and an array of triangles.
+
+**Helper Functions:**
+1. `distmin(pt, a)`: Returns the squared minimum distance from point $pt$ to AABB $a$ [S1].
+2. `distmax(pt, a)`: Returns the squared maximum distance from point $pt$ to AABB $a$ [S1].
+   - Formula: Let $u = a.low - pt.v$, $v = pt.v - a.high$, $d = \min(u, v)$. Return $\text{dot}(d, d)$ [S1].
+
+**Algorithm Steps:**
+1. **Interior Node:**
+   - Compute $d_{min} = \text{distmin}(p, \text{AABB}(low, high))$ [S1].
+   - If $d_{min} < \text{best}[0]$:
+     - Compute $upper\_bound = \text{distmax}(p, \text{AABB}(low, high))$ [S1].
+     - If $upper\_bound < \text{best}[0]$, update $\text{best} = (upper\_bound, \text{best}[1])$ [S1].
+     - Extract AABBs for left child $L_{aabb}$ and right child $R_{aabb}$ [S1].
+     - Compute $L = \text{distmin}(p, L_{aabb})$ and $R = \text{distmin}(p, R_{aabb})$ [S1].
+     - If $L < R$, recurse `closest_point(p, left, best)` then `closest_point(p, right, best)` [S1].
+     - Else, recurse `closest_point(p, right, best)` then `closest_point(p, left, best)` [S1].
+2. **Leaf Node:**
+   - Compute $d_{min} = \text{distmin}(p, \text{AABB}(low, high))$ [S1].
+   - If $d_{min} < \text{best}[0]$:
+     - Iterate through each triangle $t$ in `data` [S1].
+     - Compute $d_t = \text{distmin}(p, t)$ [S1].
+     - If $d_t < \text{best}[0]$, update $\text{best} = (d_t, t)$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def distmin(pt, aabb):
+    # Returns squared minimum distance from point to AABB
+    # Implementation details for distmin are not provided in source [S1]
+    # [G] Standard implementation: clamp point to AABB, return squared distance
+    pass
+
+def distmax(pt, aabb):
+    u = aabb.low - pt
+    v = pt - aabb.high
+    d = min(u, v)
+    return dot(d, d)
+
+def closest_point(p, bvh, best):
+    if bvh.type == "Interior":
+        if distmin(p, bvh.aabb) < best[0]:
+            upper_bound = distmax(p, bvh.aabb)
+            if upper_bound < best[0]:
+                best[0] = upper_bound
+                # best[1] remains unchanged as it holds the primitive, not a bound
+                # Note: Source updates best[1] but it is likely a placeholder or error in source logic
+                # as best[1] is the primitive. We assume best[0] is the distance.
+                # [G] Assuming best is (distance, primitive). Updating best[1] with a float is invalid.
+                # Source says: best = (upper_bound, best[1]). This implies best[1] is preserved.
+                best[0] = upper_bound
+            
+            # Determine child AABBs
+            left_aabb = bvh.left.aabb
+            right_aabb = bvh.right.aabb
+            
+            L = distmin(p, left_aabb)
+            R = distmin(p, right_aabb)
+            
+            if L < R:
+                closest_point(p, bvh.left, best)
+                closest_point(p, bvh.right, best)
+            else:
+                closest_point(p, bvh.right, best)
+                closest_point(p, bvh.left, best)
+                
+    elif bvh.type == "Leaf":
+        if distmin(p, bvh.aabb) < best[0]:
+            for t in bvh.data:
+                d_t = distmin(p, t)
+                if d_t < best[0]:
+                    best[0] = d_t
+                    best[1] = t
+```
+
+**Parameters:**
+- `best`: Initialized to $(\infty, \text{null})$ [S1].
+
+**Edge Cases and Pitfalls:**
+- The source uses `distmax` for pruning upper bounds on interior nodes to potentially update `best` before descending [S1].
+- Precision issues may arise if `distmin` or `distmax` calculations are not robust for degenerate AABBs or points on boundaries [S1].
+
+## Subtopics
+
+### [BVH Ray Traversal with Stack](22168-bvh-ray-traversal-with-stack.md)
+BVH Ray Traversal with Stack is an iterative algorithm for traversing a Bounding Volume Hierarchy (BVH) to find the closest ray-triangle intersection. It solves the problem of efficiently determining the first surface a ray hits within a scene composed of multiple entities, each with its own local BVH. It sets itself apart from [BVH Traversal for Closest Point](19482-bvh-traversal-for-closest-point.md) by using an explicit stack to manage traversal order for multiple entities and by returning the closest hit distance rather than just a boolean or closest point to a query. It differs from [Stackless BVH Traversal](22227-stackless-bvh-traversal.md) by relying on a fixed-size explicit stack buffer rather than encoding traversal order in the node structure.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] Decoupling Data Layouts from Bounding Volume Hierarchies, https://arxiv.org/pdf/2511.15028, fetched 2026-10-29

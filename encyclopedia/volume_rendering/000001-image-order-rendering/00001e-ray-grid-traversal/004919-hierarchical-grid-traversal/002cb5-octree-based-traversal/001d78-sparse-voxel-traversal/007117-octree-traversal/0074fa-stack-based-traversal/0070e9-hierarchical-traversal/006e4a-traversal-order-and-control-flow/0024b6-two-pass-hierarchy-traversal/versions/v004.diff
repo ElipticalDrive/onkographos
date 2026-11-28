@@ -1,0 +1,258 @@
+--- v003.md
++++ v004.md
+@@ -1,131 +1,152 @@
+ # Two-Pass Hierarchy Traversal
++
+ Also called: Two-Step Hierarchy Traversal, Two-pass traversal
+ 
+ ## Overview
+-Two-Pass Hierarchy Traversal is a spatial hierarchy traversal optimization that reduces computational cost by splitting the descent into a coarse initial pass and a fine subsequent pass [S1]. It sets itself apart from single-pass methods like [Leaf Collection](899-leaf-collection.md) or [Point Plane Test Traversal](982-point-plane-test-traversal.md) by explicitly decoupling the identification of relevant subtrees from the detailed node evaluation, allowing for significant reuse across pixel blocks [S1].
++Two-Pass Hierarchy Traversal is a spatial hierarchy traversal optimization that reduces computational cost by splitting the traversal process into two distinct phases: a coarse extraction of a subtree followed by a detailed traversal of that subtree. It solves the problem of high traversal overhead in participating media rendering by avoiding redundant checks for nodes that do not contribute to the final image. It differs from [Iterative Up-Down Tree Traversal](21243-iterative-up-down-tree-traversal.md) by explicitly decoupling the hierarchy exploration into a fixed-depth pre-pass and a variable-depth post-pass, rather than using a single unified state machine for descent and ascent.
+ 
+ ## How it works
+-**Inputs:**
+-- A spatial hierarchy (e.g., octree) representing the volume [S1].
+-- A set of rays to be evaluated [S1].
+-- A stopping depth parameter $d_{stop}$, defined as the number of levels above the leaves where the first traversal terminates [S1].
++The method operates on a spatial hierarchy $\mathcal{H}$ (typically an octree) and a set of rays. The core mechanism involves determining the next node to process based on the ray's current position and the hierarchy's structure, but executed in two sequential stages.
+ 
+-**Outputs:**
+-- A set of active nodes at depth $d_{stop}$ relative to the leaves, forming a "coarse subtree" [S1].
+-- The final traversal results (e.g., scattering contributions) for the rays [S1].
++### Inputs and Outputs
++- **Input:**
++  - The spatial hierarchy $\mathcal{H}$ (rooted tree).
++  - A set of rays $R$ (primary or secondary).
++  - A stopping depth parameter $d_{stop}$, defined as the number of levels above the leaves where the first traversal stops.
++- **Output:**
++  - A set of leaf nodes (or nodes satisfying the accuracy criterion) that the rays intersect, ready for shading/scattering computation.
++  - A performance metric showing reduced traversal time compared to naive traversal.
+ 
+-**Data Structures:**
+-- **Coarse Subtree:** A list of nodes identified at the end of the first pass. These nodes serve as the roots for the second pass [S1].
+-- **Tile Grouping:** Rays are grouped into $2 \times 2$ pixel blocks to facilitate sharing of the first pass results [S1].
++### Data Structures
++- **Hierarchy $\mathcal{H}$:** A tree where each node has a bounding volume (AABB) and up to 8 children (for octrees).
++- **Subtree Buffer:** A temporary data structure storing the nodes identified in Step 1. This buffer contains the roots of the coarse subtrees that will be traversed in Step 2.
++- **Ray State:** For each ray, the current intersection point and direction.
+ 
+-**Parameters:**
+-- **Stopping Depth ($d_{stop}$):** The depth relative to the leaves where the first traversal stops. A value of 3 means the first pass stops 3 levels above the leaves, producing subtrees of depth 3 [S1].
+-- **Tile Size:** $2 \times 2$ pixels for sharing the first pass results [S1].
++### Steps
++1. **Step 1: Coarse Subtree Extraction**
++   - Traverse the hierarchy $\mathcal{H}$ from the root for each ray.
++   - Descend through the tree until the current node's depth relative to the leaves equals $d_{stop}$.
++   - Record all nodes at this depth that are intersected by the ray. These nodes form the roots of the coarse subtrees.
++   - If $d_{stop} = 0$, the traversal continues to the leaves, and Step 2 is skipped (performance equals naive traversal).
+ 
+-**Algorithm Steps:**
++2. **Step 2: Detailed Traversal**
++   - For each ray, restart the traversal starting from the nodes identified in Step 1.
++   - Continue descending through the hierarchy until the accuracy criterion is met (typically reaching leaf nodes or nodes where scattering contributions are negligible).
++   - Compute scattering contributions for the intersected leaf nodes.
+ 
+-1. **Group Rays:** Divide the primary rays into groups of $2 \times 2$ pixels. [S1]
+-2. **First Pass (Coarse Extraction):**
+-    - For each unique ray group (or individual ray if sharing is disabled), traverse the hierarchy from the root. [S1]
+-    - Continue traversal until the current node's depth is $d_{stop}$ levels above the leaves. [S1]
+-    - Collect all visited nodes into the **Coarse Subtree** [S1].
+-    - If multiple rays share the same group, they share this subtree [S1].
+-3. **Second Pass (Fine Traversal):**
+-    - For each ray, restart the traversal starting from the nodes in the **Coarse Subtree** corresponding to its path [S1].
+-    - Continue traversing from these nodes until the node satisfies the accuracy criterion [S1].
+-    - Compute the scattering or rendering contribution for the ray [S1].
++### Parameters
++- **Stopping Depth ($d_{stop}$):** The depth relative to the leaves where the first traversal stops.
++  - Typical value: $d_{stop} = 3$. This produces a set of trees of depth 3, offering optimal performance.
++  - Edge case: $d_{stop} = 0$ results in no performance gain, as the second step cost is null.
+ 
+-**Edge Cases and Pitfalls:**
+-- **Stopping Depth 0:** If $d_{stop} = 0$, the first pass descends through the entire hierarchy. The second pass cost is null, and performance equals the direct implementation [S1].
+-- **Secondary Rays:** Do not apply the savings (sharing or two-pass structure) to secondary rays (rays that have bounced at least once) [S1].
+-- **Material Edges:** Do not apply the $2 \times 2$ pixel sharing when the block covers an edge of the material, as the hierarchy traversal results may differ significantly between adjacent pixels [S1].
++### Formulas
++- **Performance Gain:** The method reduces traversal time by approximately 15% for the two-pass method alone at $d_{stop}=3$, and up to 30% when combined with tile sharing [S1].
++- **Accuracy Criterion:** Traversal stops when the node satisfies the accuracy criterion, which is typically related to the scattering contribution becoming negligible (e.g., after one mean-free-path for single scattering) [S1].
+ 
+-**Pseudocode:**
++### Pseudocode
++```python
++def two_pass_hierarchy_traversal(hierarchy, rays, stopping_depth):
++    """
++    Perform two-pass hierarchy traversal.
++    
++    Args:
++        hierarchy: The root node of the spatial hierarchy.
++        rays: List of rays to traverse.
++        stopping_depth: Depth relative to leaves where first pass stops.
++        
++    Returns:
++        List of intersected leaf nodes with scattering contributions.
++    """
++    all_results = []
++    
++    # Step 1: Extract coarse subtrees
++    coarse_subtree_roots = []
++    for ray in rays:
++        current_node = hierarchy
++        depth_from_leaves = get_depth_from_leaves(current_node)
++        
++        # Traverse down to stopping_depth
++        while depth_from_leaves > stopping_depth:
++            if ray_intersects_node(ray, current_node):
++                # Check children and descend
++                children = get_children(current_node)
++                next_node = find_intersecting_child(ray, children)
++                if next_node is None:
++                    break
++                current_node = next_node
++                depth_from_leaves -= 1
++            else:
++                break
++        
++        # Record the node at stopping_depth
++        if ray_intersects_node(ray, current_node):
++            coarse_subtree_roots.append((ray, current_node))
++            
++    # Step 2: Traverse from coarse subtrees to leaves
++    for ray, subtree_root in coarse_subtree_roots:
++        current_node = subtree_root
++        while not is_leaf(current_node):
++            if ray_intersects_node(ray, current_node):
++                children = get_children(current_node)
++                next_node = find_intersecting_child(ray, children)
++                if next_node is None:
++                    break
++                current_node = next_node
++            else:
++                break
++        
++        # Compute scattering contribution for the leaf node
++        contribution = compute_scattering(ray, current_node)
++        all_results.append((ray, current_node, contribution))
++        
++    return all_results
+ 
+-```python
+-def two_pass_hierarchy_traversal(hierarchy, rays, stopping_depth, image_width, image_height):
+-    """
+-    Performs two-pass hierarchy traversal with 2x2 tile sharing.
+-    """
+-    contributions = [0.0] * len(rays)
+-    tile_size = 2
+-    num_tiles_x = image_width // tile_size
+-    num_tiles_y = image_height // tile_size
++def get_depth_from_leaves(node):
++    """Calculate the depth of a node relative to the leaves."""
++    # Implementation depends on hierarchy structure.
++    # Assumes each node stores its depth or height.
++    return node.height
+ 
+-    for ty in range(num_tiles_y):
+-        for tx in range(num_tiles_x):
+-            tile_rays = []
+-            for dy in range(tile_size):
+-                for dx in range(tile_size):
+-                    ry = ty * tile_size + dy
+-                    rx = tx * tile_size + dx
+-                    ray_idx = ry * image_width + rx
+-                    if ray_idx < len(rays):
+-                        tile_rays.append((ray_idx, rays[ray_idx]))
++def ray_intersects_node(ray, node):
++    """Check if a ray intersects a node's bounding volume."""
++    return ray_aabb_intersection(ray, node.bounding_box)
+ 
+-            # Check if the 2x2 pixel block covers a material edge [G]
+-            covers_edge = False  # Implementation-dependent check [G]
++def find_intersecting_child(ray, children):
++    """Find the child node intersected by the ray."""
++    for child in children:
++        if ray_intersects_node(ray, child):
++            return child
++    return None
+ 
+-            if covers_edge:
+-                for ray_idx, ray in tile_rays:
+-                    subtree_nodes = extract_subtree(hierarchy, ray, stopping_depth)
+-                    contributions[ray_idx] = second_pass_traverse(subtree_nodes, ray)
+-            else:
+-                # First pass: extract coarse subtree, shared for the tile [S1]
+-                _, first_ray = tile_rays[0]
+-                subtree_nodes = extract_subtree(hierarchy, first_ray, stopping_depth)
+-                # Second pass: restart traversal from shared nodes for each ray [S1]
+-                for ray_idx, ray in tile_rays:
+-                    contributions[ray_idx] = second_pass_traverse(subtree_nodes, ray)
+-    return contributions
++def compute_scattering(ray, leaf_node):
++    """Compute scattering contribution for a leaf node."""
++    # Implementation depends on the rendering algorithm.
++    # Typically involves integrating phase functions and absorption.
++    return integrate_scattering(ray, leaf_node)
++```
+ 
+-def extract_subtree(hierarchy, ray, stopping_depth):
+-    """
+-    Traverses from root to stopping_depth relative to leaves.
+-    Returns list of nodes at that depth.
+-    """
+-    current_nodes = [hierarchy.root]
+-    current_depth = 0
+-    target_depth = hierarchy.max_depth - stopping_depth
+-
+-    while current_nodes and current_depth < target_depth:
+-        next_nodes = []
+-        for node in current_nodes:
+-            if node.is_leaf:
+-                break
+-            for child in node.children:
+-                if ray.intersects(child):
+-                    next_nodes.append(child)
+-        current_nodes = next_nodes
+-        current_depth += 1
+-    return current_nodes
+-
+-def second_pass_traverse(subtree_nodes, ray):
+-    """
+-    Continues traversal from subtree_nodes until accuracy criterion is met.
+-    """
+-    # Continue traversing from these nodes until the node satisfies the accuracy criterion [S1]
+-    # Compute scattering contribution for the ray [S1]
+-    # The exact accumulation and termination logic is not specified in the sources [G]
+-    result = 0.0
+-    return result
+-```
++### Edge Cases and Pitfalls
++- **Stopping Depth 0:** If $d_{stop} = 0$, the first traversal descends through the entire hierarchy, and the second step cost is null. Performance equals the direct implementation [S1].
++- **Secondary Rays:** Do not apply the savings of tile sharing to secondary rays (rays that have bounced at least once) [S1].
++- **Material Edges:** Do not apply tile sharing when the 2x2 pixels block covers an edge of the material [S1].
++- **Precision:** Ensure that the depth calculation is accurate to avoid stopping at the wrong level.
+ 
+ ## Subtopics
+ 
+ ### Rendering Pipeline
+-A two-step rendering pipeline for participating media that separates ray tracing from scattering computation [S1]. In the first step, rays are traced from the camera through the scene, and each time a ray encounters translucent material, it is stored with its starting and ending points in an auxiliary buffer [S1]. In the second step, all rays from this buffer are processed to compute their single, double, and multiple scattering contributions, which are then added to the corresponding pixel values [S1]. The auxiliary buffer contains all paths through the material, including both primary rays and secondary rays that reach the material after one or more bounces [S1]. For each ray, attenuation from material absorption and BRDF reflectance is computed after each bounce, and tracing stops when attenuation exceeds a threshold [S1]. Single scattering contributions are gathered only over a material layer of thickness $\ell$ (one mean-free-path), as they become negligible compared to multiple scattering after roughly one mean-free-path [S1].
++In the context of the point-based rendering algorithm for participating media, the two-pass hierarchy traversal is integrated into a broader two-step rendering pipeline.
++- **Step 1:** Trace rays from the camera through the scene. Each time a ray encounters translucent material, store it, along with its starting and end points, in an auxiliary buffer. This buffer contains all paths through the material, including primary rays and secondary rays (rays that reach the material after one or several bounces) [S1].
++- **Step 2:** Treat all rays from this buffer, compute their single, double, and multiple scattering contributions, and add these to the corresponding pixel value. For each ray from the camera, after each bounce, compute the attenuation caused by material absorption and BRDF reflectance, and stop tracing when the attenuation is above a certain threshold. For single scattering, gather contributions only over a material layer of thickness $\ell$ (one mean-free-path), as it becomes negligible compared to multiple scattering after roughly one mean-free-path. For multiple scattering, group neighbouring rays together using 4x4 downsampling and interpolation [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The method reduces traversal time by up to 30% compared to a naive direct implementation [S1]. The gain depends on the stopping depth [S1].
+-- **Performance:** At an optimal stopping depth of 3, the two-pass method alone reduces computation time by 15% [S1]. When combined with tile sharing over $2 \times 2$ pixels, the reduction reaches 30% [S1]. Overall, it provides a 20% performance improvement over naive hierarchy traversal [S1].
+-- **Memory:** Not given in the sources.
+-- **Strengths:** Significant speedup for primary rays in single and multiple scattering computations [S1]. Efficient for homogeneous participating media [S1].
+-- **Limitations:** Not applicable to secondary rays [S1]. Sharing is invalid near material edges [S1]. Performance gain diminishes if stopping depth is too small (approaching 0) [S1].
++- **Time Complexity:** The method reduces traversal time by approximately 15% for the two-pass method alone at optimal stopping depth ($d_{stop}=3$), and up to 30% when combined with tile sharing [S1].
++- **Memory Complexity:** Requires additional memory for the auxiliary buffer storing rays and the coarse subtree buffer. The size of the auxiliary buffer depends on the number of rays per pixel, which varies with scene thickness (thinner regions require more rays) [S1].
++- **Measured Performance:** In the GPU implementation of the point-based rendering algorithm for participating media, the method provides a 20% performance improvement over naive hierarchy traversal [S1].
++- **Scaling:** Performance gain depends on the stopping depth. Best performance is achieved when the first step produces a set of trees of depth 3 [S1].
++- **Strengths:** Reduces computational cost by discarding a large subset of the hierarchy before the second pass. Efficient for single scattering computations.
++- **Limitations:** Not applicable to secondary rays or when material edges are involved in tile sharing. Performance gain diminishes if $d_{stop}$ is not optimized.
+ 
+ ## Background
+-- **Origin:** Introduced in the GPU implementation of the point-based rendering algorithm for participating media [S1].
+-- **Paper:** "Point-Based Rendering for Homogeneous Participating Media with Refractive Boundaries" (2017) [S1].
+-- **Usage:** Used in rendering participating media, specifically for single and multiple scattering computations [S1].
++The Two-Pass Hierarchy Traversal method was introduced in the context of point-based rendering for homogeneous participating media with refractive boundaries. It was developed to address the high computational cost of traversing spatial hierarchies in participating media rendering, particularly for single and multiple scattering computations. The method was presented in the paper "Point-Based Rendering for Homogeneous Participating Media with Refractive Boundaries" [S1].
+ 
+ ## Sources

@@ -1,0 +1,83 @@
+# Surrogate Gradient Method
+Also called: STE approximation, Straight-Through Estimator
+
+## Overview
+The Surrogate Gradient Method is a technique for optimizing systems containing non-differentiable operations, such as the Heaviside step function used in spiking neural networks, by replacing the undefined derivative with a differentiable approximation during back-propagation [S1, unofficial]. It differs from exact adjoint methods by introducing a bias in the gradient estimate, allowing end-to-end training where standard automatic differentiation would fail due to discontinuities [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A scalar value $x$ (e.g., membrane potential) and a hyperparameter $\alpha$ (steepness).
+- Output: The surrogate gradient value $\frac{d \Pi(x)}{dx}$ used to update weights.
+
+**Data Structures:**
+- No complex data structures are required. The method operates on scalar values or element-wise tensors.
+
+**Steps:**
+1. During the forward pass, compute the output of the non-differentiable function (e.g., spike generation) using the standard Heaviside step function $H(x)$.
+2. During the back-propagation pass, compute the gradient using the surrogate function $\Pi(x)$ instead of the true derivative.
+3. The surrogate derivative is calculated as:
+   $$
+   \frac{d \Pi(x)}{dx} = \frac{1}{1 + \exp(-\alpha x)}
+   $$
+   where $\alpha$ is a predefined hyperparameter controlling the steepness of the sigmoid approximation [S1, unofficial].
+
+**Parameters:**
+- $\alpha$: A predefined hyperparameter. Typical values are not specified in the source, but it controls the trade-off between gradient magnitude and approximation accuracy [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If $\alpha$ is too small, the gradient becomes nearly zero everywhere, leading to vanishing gradients.
+- If $\alpha$ is too large, the surrogate gradient approaches the true derivative of the step function (which is zero almost everywhere), potentially stalling learning.
+- The method is an approximation; the gradient is biased relative to the true subgradient of the Heaviside function [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def surrogate_gradient(x, alpha):
+    """
+    Computes the surrogate gradient for the Heaviside step function.
+    
+    Args:
+        x: Input scalar or tensor.
+        alpha: Steepness hyperparameter.
+        
+    Returns:
+        Gradient value using the sigmoid approximation.
+    """
+    # Compute the sigmoid function: 1 / (1 + exp(-alpha * x))
+    # Using standard math operations
+    exponent = -alpha * x
+    exp_val = math.exp(exponent)
+    gradient = 1.0 / (1.0 + exp_val)
+    return gradient
+```
+
+## Subtopics
+
+### [Surrogate Gradient for Discrete Material Assignment](22571-surrogate-gradient-for-discrete-material-assignment.md)
+This method reconstructs discrete material assignments $X_i \in \{1, \dots, m\}$ for voxels in a volume using differentiable volume rendering based on the Beer-Lambert law for absorptive X-rays.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time: $O(1)$ per element, as it involves a single exponential and division operation.
+- Memory: $O(1)$ per element, requiring no additional storage beyond the input and output values.
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Scales linearly with the number of neurons or parameters in the network.
+
+**Strengths and Limitations:**
+- Strengths: Enables end-to-end training of spiking neural networks without requiring custom C++/CUDA kernels for every non-differentiable operation. Simple to implement.
+- Limitations: The gradient is biased. The choice of $\alpha$ is critical and may require tuning. It does not provide the exact subgradient.
+
+**When to use it and when not:**
+- Use when training spiking neural networks or other models with hard thresholding where exact adjoint methods are difficult to implement.
+- Do not use when exact gradient information is critical and the bias introduced by the surrogate is unacceptable.
+
+## Background
+The Surrogate Gradient Method was introduced to solve the issue of non-differentiability in spiking neural networks (SNNs) [S1, unofficial]. It allows SNNs to be optimized end-to-end by approximating the derivative of the Heaviside step function used in spike firing [S1, unofficial]. The method is also known as the Straight-Through Estimator (STE) in other contexts, such as quantized neural networks.
+
+## Sources
+[S1] SpikingNeRF: Making Bio-inspired Neural Networks See through the Real World, https://doi.org/10.48550/arxiv.2309.10987, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,1812 @@
+# 3DGS Voxelizer
+
+Turn a 3D Gaussian Splatting scan into colored voxel blocks, inside NVIDIA
+Omniverse.
+
+<p align="center">
+  <img src="exts/danci.voxelizer.tool/data/preview.png" width="480" alt="Voxelized splat scene">
+</p>
+
+You give it a splat file (`.ply` or `.spz`). It gives you a stack of colored
+cubes that looks like your scene, right there in the viewport. Drag a slider
+and the blocks get bigger or smaller, live.
+
+The result is ordinary OpenUSD, so you can save it, hand it to someone else,
+drop it into another scene, or load it into Isaac Sim and have robots bump
+into it.
+
+## Install
+
+You need an Omniverse app that is built on Kit — **USD Composer**, **Isaac
+Sim**, or any Kit app. Then:
+
+1. **Download this repository.** Click the green *Code* button above →
+   *Download ZIP* → unzip it somewhere you will remember, for example
+   `C:\omniverse-tools\3dgs-voxelizer-Omni`.
+2. **Open your Omniverse app** and go to the menu **Window → Extensions**.
+3. In the Extensions window, click the **hamburger icon** (☰, top left of that
+   window) and choose **Settings**.
+4. Under *Extension Search Paths*, click the **+** button and paste the path
+   to the `exts` folder inside what you unzipped. Using the example above:
+   ```
+   C:\omniverse-tools\3dgs-voxelizer-Omni\exts
+   ```
+5. Back in the Extensions window, type `3dgs` in the search box. **3DGS
+   VOXELIZER** appears — click the toggle to turn it **on**.
+6. Tick **AUTOLOAD** if you want it to come back automatically next time.
+
+That's it. The tool now lives at **Window → 3DGS Voxelizer**.
+
+## Use it
+
+1. Open **Window → 3DGS Voxelizer**. A panel appears.
+2. **Drag your `.ply` or `.spz` file onto the panel**, or click *Browse…* and
+   pick it. It starts building right away — no extra button to press.
+3. After a moment, colored cubes appear in the viewport.
+4. **Drag any setting and it rebuilds automatically.** Try *Voxel size* first:
+   smaller number means smaller, more detailed blocks.
+
+Everything you do can be undone with **Ctrl+Z**.
+
+## What the settings do
+
+| Setting | In plain terms |
+|---|---|
+| **Voxel size** | How big each block is. Smaller = more detail, more blocks, slower. Start at 1 and adjust. |
+| **Min opacity** | Splat scans have faint, cloudy specks around them. Raise this to throw the faint ones away and clean up the result. Only appears for splat files. |
+| **Stage scale** | Makes the whole thing bigger or smaller. Leave at 1. If your model comes in tiny in USD Composer, try 100. |
+| **Flip axis** | If the model is upside down or mirrored, tick X, Y or Z until it looks right. Instant, and you can untick it. |
+| **Physics collision** | Makes the blocks solid, so things can land on them and robots can drive over them. Leave off if you only want to look at it. |
+| **Export USD…** | Saves your blocks as a single file you can reuse or send to someone. |
+| **Adopt Selected** | Reopened a scene later and want to keep tweaking the blocks? Click the blocks in the *Stage* list, then click this. |
+
+## If something looks wrong
+
+**Nothing appeared.** Look at the text at the bottom of the panel — it says
+what happened. If it says the file could not be read, the file is probably not
+a real `.ply` / `.spz`.
+
+**The model is tiny, or huge.** That is a units mismatch, not a bug. Set
+*Stage scale* to 100 in USD Composer (which measures in centimeters), or leave
+it at 1 in Isaac Sim (which measures in meters).
+
+**It is upside down or mirrored.** Use *Flip axis*. Different scanning apps
+disagree about which way is up.
+
+**Everything got slow.** You made the blocks too small, so there are too many
+of them. The panel warns you past about 800,000 blocks. Raise *Voxel size*.
+
+**The blocks look washed out or noisy.** Raise *Min opacity* to drop the faint
+specks the scanner left behind.
+
+## For developers
+
+The pipeline (`exts/danci.voxelizer.tool/danci/voxelizer/tool/core.py`)
+depends only on `numpy` and `pxr`, so it also runs outside Omniverse in any
+environment with `usd-core` — useful for batch jobs:
+
+```python
+from danci.voxelizer.tool import core
+
+pc = core.load_pointcloud("scan.ply")
+centers, colors, _ = core.voxelize(pc, resolution=1.0, min_opacity=0.3)
+core.author_voxel_instancer(stage, centers, colors, resolution=1.0)
+```
+
+Loading the extension from a terminal instead of the UI:
+
+```
+kit.exe your_app.kit --ext-folder path/to/3dgs-voxelizer-Omni/exts --enable danci.voxelizer.tool
+```
+
+Running the tests (needs `numpy`, `usd-core`, `pytest`):
+
+```
+python -m pytest tests/ -q
+```
+
+Architecture, USD layout, units policy and the verification record are in
+[docs/TECHNICAL.md](exts/danci.voxelizer.tool/docs/TECHNICAL.md).
+
+## Requirements
+
+Kit SDK 106 or newer. Pure Python, nothing to compile. Tested on USD Composer
+(Kit 110.2) and Isaac Sim 6.0.1 (Kit 110.1).
+
+## License
+
+MIT
+
+### exts/danci.voxelizer.tool/premake5.lua
+```
+-- Use folder name to build extension name and tag.
+local ext = get_current_extension_info()
+
+project_ext (ext)
+
+-- Link only those files and folders into the extension target directory
+repo_build.prebuild_link {
+    { "data", ext.target_dir.."/data" },
+    { "danci", ext.target_dir.."/danci" },
+    { "docs", ext.target_dir.."/docs" },
+}
+```
+
+### exts/danci.voxelizer.tool/danci/voxelizer/tool/__init__.py
+```
+"""3DGS Voxelizer.
+
+``core`` is importable in any Python with pxr + numpy (pipeline use);
+the Kit extension entry point loads only when omni.* is available.
+"""
+
+try:
+    from .extension import VoxelizerExtension  # noqa: F401
+except ModuleNotFoundError:
+    # Running outside Kit (plain USD Python) - core-only usage.
+    pass
+```
+
+### exts/danci.voxelizer.tool/danci/voxelizer/tool/commands.py
+```
+"""Undoable Kit commands wrapping the voxelizer's stage edits.
+
+Two commands cover every stage mutation the tool makes:
+
+- ``VoxelizeAsset``: create a new voxel root, or live-update an existing one.
+  Undo removes the created root, or restores a pre-update ``Sdf.CopySpec``
+  snapshot of the whole subtree (arrays, prototype shape, physics APIs and
+  customData all come back in one copy).
+- ``VoxelPhysics``: toggle prototype collision; undo re-toggles.
+
+The UI must go through ``omni.kit.commands.execute`` so Ctrl+Z behaves like
+every other Kit tool.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import omni.kit.commands
+import omni.usd
+from pxr import Sdf
+
+from . import core
+
+_SNAP_PATH = Sdf.Path("/Snapshot")
+
+# True while a VoxelizeAssetCommand is authoring. Tf notices dispatch
+# synchronously during authoring, so the live-edit service reads this to
+# ignore self-inflicted attribute changes.
+IN_FLIGHT = False
+
+
+class VoxelizeAssetCommand(omni.kit.commands.Command):
+    """Create or update a voxel PointInstancer asset (undoable)."""
+
+    def __init__(
+        self,
+        centers: np.ndarray,
+        colors: np.ndarray,
+        resolution: float,
+        unit_scale: float = 1.0,
+        shape: str = "cube",
+        physics: bool = False,
+        flip_axes: tuple = (False, False, False),
+        metadata: dict | None = None,
+        live_root: str | None = None,
+    ):
+        self._flip_axes = tuple(flip_axes)
+        self._centers = centers
+        self._colors = colors
+        self._resolution = resolution
+        self._unit_scale = unit_scale
+        self._shape = shape
+        self._physics = physics
+        self._metadata = metadata
+        self._live_root = live_root
+        self._created_root: str | None = None
+        self._snap_layer: Sdf.Layer | None = None
+
+    def do(self) -> str | None:
+        global IN_FLIGHT
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return None
+
+        IN_FLIGHT = True
+        try:
+            return self._do_impl(stage)
+        finally:
+            IN_FLIGHT = False
+
+    def _do_impl(self, stage) -> str | None:
+        updated = False
+        root = self._live_root
+        if root:
+            # Snapshot the subtree in the edit-target layer before mutating,
+            # so undo can restore it spec-for-spec.
+            layer = stage.GetEditTarget().GetLayer()
+            if layer.GetPrimAtPath(root):
+                self._snap_layer = Sdf.Layer.CreateAnonymous(".usda")
+                Sdf.CreatePrimInLayer(self._snap_layer, _SNAP_PATH)
+                Sdf.CopySpec(layer, Sdf.Path(root), self._snap_layer, _SNAP_PATH)
+            updated = core.update_voxel_instancer(
+                stage, root, self._centers, self._colors,
+                resolution=self._resolution, unit_scale=self._unit_scale,
+                shape=self._shape, flip_axes=self._flip_axes,
+            )
+
+        if not updated:
+            self._snap_layer = None
+            root = core.author_voxel_instancer(
+                stage, self._centers, self._colors,
+                resolution=self._resolution, unit_scale=self._unit_scale,
+                shape=self._shape, flip_axes=self._flip_axes,
+            )
+            self._created_root = root
+
+        core.set_prototype_collision(stage, root, self._physics)
+        if self._metadata is not None:
+            core.write_voxel_metadata(stage, root, self._metadata)
+            # Mirror as voxel:* attributes so the Property window can edit them.
+            core.author_voxel_attributes(stage, root, self._metadata)
+        return root
+
+    def undo(self):
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return
+        if self._created_root:
+            stage.RemovePrim(self._created_root)
+            self._created_root = None
+        elif self._snap_layer and self._live_root:
+            layer = stage.GetEditTarget().GetLayer()
+            Sdf.CopySpec(self._snap_layer, _SNAP_PATH, layer, Sdf.Path(self._live_root))
+
+
+class VoxelFlipCommand(omni.kit.commands.Command):
+    """Mirror a voxel asset on one or more axes (undoable, transform-only)."""
+
+    def __init__(self, root_path: str, flip_axes: tuple, unit_scale: float = 1.0,
+                 prev_flip_axes: tuple = (False, False, False)):
+        self._root_path = root_path
+        self._flip = tuple(flip_axes)
+        self._prev = tuple(prev_flip_axes)
+        self._unit_scale = unit_scale
+
+    def _apply(self, flip) -> bool:
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return False
+        prim = stage.GetPrimAtPath(self._root_path)
+        if not prim:
+            return False
+        core._apply_root_transform(prim, self._unit_scale, flip)
+        meta = dict(prim.GetCustomDataByKey(core.METADATA_KEY) or {})
+        meta["flipAxes"] = list(flip)
+        core.write_voxel_metadata(stage, self._root_path, meta)
+        return True
+
+    def do(self) -> bool:
+        return self._apply(self._flip)
+
+    def undo(self):
+        self._apply(self._prev)
+
+
+class VoxelPhysicsCommand(omni.kit.commands.Command):
+    """Toggle collision on a voxel asset's prototype (undoable)."""
+
+    def __init__(self, root_path: str, enabled: bool):
+        self._root_path = root_path
+        self._enabled = enabled
+
+    def do(self) -> bool:
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return False
+        return core.set_prototype_collision(stage, self._root_path, self._enabled)
+
+    def undo(self):
+        stage = omni.usd.get_context().get_stage()
+        if stage is not None:
+            core.set_prototype_collision(stage, self._root_path, not self._enabled)
+
+
+def register():
+    omni.kit.commands.register(VoxelizeAssetCommand)
+    omni.kit.commands.register(VoxelPhysicsCommand)
+    omni.kit.commands.register(VoxelFlipCommand)
+
+
+def unregister():
+    omni.kit.commands.unregister(VoxelizeAssetCommand)
+    omni.kit.commands.unregister(VoxelPhysicsCommand)
+    omni.kit.commands.unregister(VoxelFlipCommand)
+```
+
+### exts/danci.voxelizer.tool/danci/voxelizer/tool/core.py
+```
+"""Core 3DGS/PLY -> voxel -> USD PointInstancer logic.
+
+Ported from the standalone 3DGS-to-Voxel-OpenUSD pipeline, with three
+deliberate changes for in-Kit usage:
+
+1. Authoring uses the USD Python API (Usd/UsdGeom/UsdShade) on the live
+   stage instead of hand-written usda text.
+2. No baked-in DCC coordinate transform. The instancer is authored in
+   stage-native units under a plain Xform; a single optional
+   ``unit_scale`` covers cm/m mismatches (Composer cm vs Isaac m).
+3. Voxelization is fully vectorized with numpy so multi-million point
+   splats do not stall the UI thread.
+"""
+
+from __future__ import annotations
+
+import gzip
+import struct
+from dataclasses import dataclass
+
+import numpy as np
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
+
+# DC spherical-harmonics constant for 3DGS color extraction.
+SH_C0 = 0.28209479177387814
+
+
+def _vec3f_array(arr: np.ndarray) -> Vt.Vec3fArray:
+    """Zero-copy-ish numpy -> VtArray conversion (avoids per-element Gf.Vec3f)."""
+    return Vt.Vec3fArray.FromNumpy(np.ascontiguousarray(arr, dtype=np.float32))
+
+
+@dataclass
+class PointCloud:
+    positions: np.ndarray            # (N, 3) float32
+    colors: np.ndarray | None = None  # (N, 3) uint8
+    opacities: np.ndarray | None = None  # (N,) float32, sigmoid-activated
+    is_3dgs: bool = False
+
+
+# ---------------------------------------------------------------------------
+# PLY loading (vertex element only; binary_little_endian or ascii)
+# ---------------------------------------------------------------------------
+
+_PLY_DTYPES = {
+    "float": np.float32, "float32": np.float32,
+    "double": np.float64, "float64": np.float64,
+    "uchar": np.uint8, "uint8": np.uint8,
+    "int": np.int32, "int32": np.int32,
+    "short": np.int16, "int16": np.int16,
+}
+
+
+_PLY_MAX_HEADER_LINES = 10_000
+
+
+def load_ply(filepath: str) -> PointCloud:
+    """Load a standard or 3DGS PLY file (vertex element only)."""
+    with open(filepath, "rb") as f:
+        magic = f.readline().strip()
+        if magic[:3] != b"ply":
+            raise ValueError("Not a PLY file (missing 'ply' magic on line 1)")
+
+        fmt = "ascii"
+        n_vertices = 0
+        props: list[tuple[str, str]] = []
+        current_element = None
+        saw_end_header = False
+        # Bounded loop: readline() returns b"" forever at EOF, so a file with
+        # no end_header would otherwise spin here and freeze the UI thread.
+        for _ in range(_PLY_MAX_HEADER_LINES):
+            raw = f.readline()
+            if not raw:
+                break  # EOF before end_header
+            line = raw.decode("utf-8", errors="replace").strip()
+            if line == "end_header":
+                saw_end_header = True
+                break
+            parts = line.split()
+            if not parts:
+                continue
+            if parts[0] == "format":
+                fmt = parts[1] if len(parts) > 1 else fmt
+            elif parts[0] == "element" and len(parts) >= 3:
+                current_element = parts[1]
+                if current_element == "vertex":
+                    n_vertices = int(parts[2])
+            elif parts[0] == "property" and current_element == "vertex" and len(parts) >= 3:
+                props.append((parts[2], parts[1]))
+
+        if not saw_end_header:
+            raise ValueError("Malformed PLY header (no end_header found)")
+        if n_vertices == 0:
+            raise ValueError("PLY has no vertex element")
+        if not props:
+            raise ValueError("PLY vertex element declares no properties")
+        for axis in ("x", "y", "z"):
+            if axis not in [p[0] for p in props]:
+                raise ValueError(f"PLY vertex element has no '{axis}' property")
+
+        dtype = np.dtype([(name, _PLY_DTYPES.get(t, np.float32)) for name, t in props])
+        if fmt == "binary_little_endian":
+            expected = n_vertices * dtype.itemsize
+            raw = f.read(expected)
+            if len(raw) < expected:
+                raise ValueError(
+                    f"PLY body is truncated: header declares {n_vertices:,} vertices "
+                    f"({expected:,} bytes) but only {len(raw):,} bytes are present"
+                )
+            vertices = np.frombuffer(raw, dtype=dtype, count=n_vertices)
+        elif fmt == "ascii":
+            vertices = np.loadtxt(f, dtype=dtype, max_rows=n_vertices)
+        else:
+            raise ValueError(f"Unsupported PLY format '{fmt}' (big-endian is not supported)")
+
+    names = [p[0] for p in props]
+    positions = np.column_stack(
+        [vertices["x"], vertices["y"], vertices["z"]]
+    ).astype(np.float32)
+
+    colors = None
+    is_3dgs = "scale_0" in names
+    if "red" in names:
+        colors = np.column_stack(
+            [vertices["red"], vertices["green"], vertices["blue"]]
+        ).astype(np.uint8)
+    elif "f_dc_0" in names:
+        # 3DGS: recover RGB from the DC spherical-harmonics term.
+        dc = np.column_stack(
+            [vertices["f_dc_0"], vertices["f_dc_1"], vertices["f_dc_2"]]
+        ).astype(np.float32)
+        colors = np.clip((0.5 + SH_C0 * dc) * 255.0, 0, 255).astype(np.uint8)
+
+    opacities = None
+    if "opacity" in names:
+        # Stored as logits in 3DGS; sigmoid-activate for filtering.
+        opacities = 1.0 / (1.0 + np.exp(-vertices["opacity"].astype(np.float32)))
+
+    return PointCloud(positions=positions, colors=colors, opacities=opacities, is_3dgs=is_3dgs)
+
+
+# ---------------------------------------------------------------------------
+# SPZ loading (Niantic gzip format, versions 2/3)
+#
+# Independent implementation. The public format specification lives at
+# https://github.com/nianticlabs/spz; the decode constants below were checked
+# against NVIDIA's Apache-2.0 reader in omni.kit.converter.gsplat so that
+# assets round-trip identically between the two tools.
+#
+# Post-decompression layout: 16-byte header, then per-splat blocks in order
+# positions (int24 fixed-point) -> alphas (u8 sigmoid) -> colors (u8 SH DC)
+# -> scales -> rotations -> sh_rest. Voxelization needs only the first three
+# blocks, so parsing stops after colors regardless of SH degree.
+# Format reference: https://github.com/nianticlabs/spz
+# ---------------------------------------------------------------------------
+
+_SPZ_MAGIC = 0x5053474E  # "NGSP"
+_SPZ_COLOR_SCALE = 0.15
+
+
+def load_spz(filepath: str) -> PointCloud:
+    """Load a Niantic SPZ file (positions, colors, opacities only)."""
+    try:
+        f = gzip.open(filepath, "rb")
+    except OSError as exc:
+        raise ValueError(f"Cannot open SPZ file: {exc}") from exc
+    with f:
+        try:
+            header = f.read(16)
+        except (OSError, EOFError) as exc:
+            raise ValueError("Not a valid SPZ file (not gzip-compressed?)") from exc
+        if len(header) < 16:
+            raise ValueError("SPZ file too small for a valid header")
+        magic, version, n, sh_degree, frac_bits, _flags, _res = struct.unpack("<IIIBBBB", header)
+        if magic != _SPZ_MAGIC:
+            raise ValueError(f"Not an SPZ file (magic 0x{magic:08X})")
+        if version not in (2, 3):
+            raise ValueError(f"Unsupported SPZ version: {version}")
+        if n == 0:
+            raise ValueError("SPZ file declares zero splats")
+        # Only the first three blocks are needed; stop reading there.
+        needed = n * 9 + n + n * 3
+        data = f.read(needed)
+    if len(data) < needed:
+        raise ValueError("SPZ file truncated before color block")
+
+    # positions: packed 24-bit little-endian signed fixed-point
+    b = np.frombuffer(data, dtype=np.uint8, count=n * 9).reshape(n * 3, 3)
+    vals = (
+        b[:, 0].astype(np.int32)
+        | (b[:, 1].astype(np.int32) << 8)
+        | (b[:, 2].astype(np.int32) << 16)
+    )
+    vals = np.where(vals >= 0x800000, vals - 0x1000000, vals)
+    positions = (vals.astype(np.float32) / float(1 << frac_bits)).reshape(n, 3)
+
+    # alphas: u8, already sigmoid-space opacity in [0, 1]
+    opacities = (
+        np.frombuffer(data, dtype=np.uint8, count=n, offset=n * 9).astype(np.float32) / 255.0
+    )
+
+    # colors: u8-encoded SH DC -> RGB via the same C0 relation as PLY
+    dc_u8 = np.frombuffer(data, dtype=np.uint8, count=n * 3, offset=n * 10).reshape(n, 3)
+    f_dc = (dc_u8.astype(np.float32) / 255.0 - 0.5) / _SPZ_COLOR_SCALE
+    colors = np.clip((0.5 + SH_C0 * f_dc) * 255.0, 0, 255).astype(np.uint8)
+
+    return PointCloud(positions=positions, colors=colors, opacities=opacities, is_3dgs=True)
+
+
+def load_pointcloud(filepath: str) -> PointCloud:
+    """Dispatch loader by file extension (.ply or .spz)."""
+    lower = filepath.lower()
+    if lower.endswith(".spz"):
+        return load_spz(filepath)
+    return load_ply(filepath)
+
+
+# ---------------------------------------------------------------------------
+# Voxelization (vectorized)
+# ---------------------------------------------------------------------------
+
+def voxelize(
+    pc: PointCloud,
+    resolution: float,
+    min_opacity: float = 0.0,
+    density_threshold: int = 1,
+    origin: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Bin points into a voxel grid, averaging colors per cell.
+
+    Args:
+        origin: grid origin to quantize against. Defaults to this cloud's own
+            minimum corner. Pass a fixed origin to keep every frame of a
+            sequence on one shared lattice.
+
+    Returns (centers (M,3) float32, colors (M,3) float32 in 0..1, origin (3,)).
+    """
+    positions = pc.positions
+    colors = pc.colors
+
+    if pc.opacities is not None and min_opacity > 0.0:
+        keep = pc.opacities >= min_opacity
+        positions = positions[keep]
+        if colors is not None:
+            colors = colors[keep]
+
+    if len(positions) == 0:
+        raise ValueError(
+            "Every point was removed by the opacity filter - lower Min opacity"
+        )
+
+    if colors is None:
+        # Height-based grayscale fallback. np.ptp as a function, not a method:
+        # ndarray.ptp() was removed in NumPy 2.0.
+        z = positions[:, 2]
+        t = (z - z.min()) / max(float(np.ptp(z)), 1e-8)
+        colors = np.repeat((t[:, None] * 255).astype(np.uint8), 3, axis=1)
+
+    # An explicit origin lets a sequence share one grid across frames, so
+    # voxels do not shimmer from per-frame grid drift.
+    if origin is None:
+        origin = positions.min(axis=0)
+    origin = np.asarray(origin, dtype=np.float32)
+    grid = np.floor((positions - origin) / resolution).astype(np.int64)
+
+    # Collapse 3D indices to a single key per voxel for vectorized grouping.
+    # Shift so cells below a shared origin stay non-negative; the offset is
+    # added back when cell centers are reconstructed below.
+    grid_offset = grid.min(axis=0)
+    grid -= grid_offset
+    dims = grid.max(axis=0) + 1
+    keys = (grid[:, 0] * dims[1] + grid[:, 1]) * dims[2] + grid[:, 2]
+    order = np.argsort(keys)
+    keys_sorted = keys[order]
+    unique_keys, start, counts = np.unique(keys_sorted, return_index=True, return_counts=True)
+
+    csum = np.cumsum(colors[order].astype(np.float64), axis=0)
+    csum = np.vstack([np.zeros(3), csum])
+    color_sums = csum[start + counts] - csum[start]
+    avg_colors = (color_sums / counts[:, None]).astype(np.float32) / 255.0
+
+    if density_threshold > 1:
+        keep = counts >= density_threshold
+        unique_keys, avg_colors = unique_keys[keep], avg_colors[keep]
+
+    gz = unique_keys % dims[2]
+    gy = (unique_keys // dims[2]) % dims[1]
+    gx = unique_keys // (dims[1] * dims[2])
+    cells = np.column_stack([gx, gy, gz]) + grid_offset  # undo the shift
+    centers = (cells.astype(np.float32) + 0.5) * resolution + origin
+
+    return centers, avg_colors, origin
+
+
+# ---------------------------------------------------------------------------
+# USD authoring
+# ---------------------------------------------------------------------------
+
+def _author_cube_prototype(stage: Usd.Stage, path: Sdf.Path) -> UsdGeom.Mesh:
+    """Author a unit cube mesh (half-extent 1) with faceVarying normals."""
+    mesh = UsdGeom.Mesh.Define(stage, path)
+    pts = [
+        (-1, -1, -1), (-1, 1, -1), (1, 1, -1), (1, -1, -1),
+        (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+        (-1, -1, -1), (1, -1, -1), (1, -1, 1), (-1, -1, 1),
+        (-1, 1, -1), (-1, 1, 1), (1, 1, 1), (1, 1, -1),
+        (-1, -1, -1), (-1, -1, 1), (-1, 1, 1), (-1, 1, -1),
+        (1, -1, -1), (1, 1, -1), (1, 1, 1), (1, -1, 1),
+    ]
+    normals = (
+        [(0, 0, -1)] * 4 + [(0, 0, 1)] * 4 + [(0, -1, 0)] * 4
+        + [(0, 1, 0)] * 4 + [(-1, 0, 0)] * 4 + [(1, 0, 0)] * 4
+    )
+    mesh.CreatePointsAttr([Gf.Vec3f(*p) for p in pts])
+    mesh.CreateFaceVertexCountsAttr([4] * 6)
+    mesh.CreateFaceVertexIndicesAttr(list(range(24)))
+    normals_attr = mesh.CreateNormalsAttr([Gf.Vec3f(*n) for n in normals])
+    mesh.SetNormalsInterpolation(UsdGeom.Tokens.faceVarying)
+    mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+    mesh.CreateExtentAttr([Gf.Vec3f(-1, -1, -1), Gf.Vec3f(1, 1, 1)])
+    del normals_attr
+    return mesh
+
+
+def _author_display_color_material(stage: Usd.Stage, path: Sdf.Path) -> UsdShade.Material:
+    """UsdPreviewSurface driven by the displayColor primvar."""
+    material = UsdShade.Material.Define(stage, path)
+    shader = UsdShade.Shader.Define(stage, path.AppendChild("PreviewSurface"))
+    shader.CreateIdAttr("UsdPreviewSurface")
+    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.6)
+    shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+
+    reader = UsdShade.Shader.Define(stage, path.AppendChild("DisplayColorReader"))
+    reader.CreateIdAttr("UsdPrimvarReader_float3")
+    reader.CreateInput("varname", Sdf.ValueTypeNames.String).Set("displayColor")
+    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(
+        reader.CreateOutput("result", Sdf.ValueTypeNames.Float3)
+    )
+    material.CreateSurfaceOutput().ConnectToSource(
+        shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+    )
+    return material
+
+
+def _author_sphere_prototype(stage: Usd.Stage, path: Sdf.Path) -> UsdGeom.Mesh:
+    """Author an icosphere-ish prototype via a subdivided icosahedron."""
+    mesh = UsdGeom.Mesh.Define(stage, path)
+    t = 0.4472
+    pts = [
+        (0, -1, 0),
+        (0.7236, -t, 0.5257), (-0.2764, -t, 0.8506), (-0.8944, -t, 0),
+        (-0.2764, -t, -0.8506), (0.7236, -t, -0.5257),
+        (0.2764, t, 0.8506), (-0.7236, t, 0.5257), (-0.7236, t, -0.5257),
+        (0.2764, t, -0.8506), (0.8944, t, 0),
+        (0, 1, 0),
+    ]
+    indices = [
+        0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 0, 5, 1,
+        11, 6, 7, 11, 7, 8, 11, 8, 9, 11, 9, 10, 11, 10, 6,
+        1, 10, 6, 1, 6, 2, 2, 6, 7, 2, 7, 3, 3, 7, 8,
+        3, 8, 4, 4, 8, 9, 4, 9, 5, 5, 9, 10, 5, 10, 1,
+    ]
+    mesh.CreatePointsAttr([Gf.Vec3f(*p) for p in pts])
+    mesh.CreateFaceVertexCountsAttr([3] * 20)
+    mesh.CreateFaceVertexIndicesAttr(indices)
+    mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.catmullClark)
+    mesh.CreateExtentAttr([Gf.Vec3f(-1, -1, -1), Gf.Vec3f(1, 1, 1)])
+    return mesh
+
+
+PROTOTYPE_AUTHORS = {
+    "cube": _author_cube_prototype,
+    "sphere": _author_sphere_prototype,
+}
+
+# customData key on the voxel root Xform holding generation parameters, so a
+# generated asset can be re-adopted and continued in a later session.
+METADATA_KEY = "danciVoxelizer"
+
+# Generation parameters are ALSO authored as custom USD attributes in the
+# "voxel:" namespace, so they show up (and are editable) in Kit's Property
+# window. A stage listener rebuilds the asset when they change.
+ATTR_SPECS = {
+    "voxel:source": ("string", "source"),
+    "voxel:resolution": ("float", "resolution"),
+    "voxel:minOpacity": ("float", "minOpacity"),
+    "voxel:unitScale": ("float", "unitScale"),
+    "voxel:physics": ("bool", "physics"),
+}
+
+
+def author_voxel_attributes(stage: Usd.Stage, root_path: str, params: dict) -> None:
+    """Mirror generation params as editable attributes on the root prim."""
+    prim = stage.GetPrimAtPath(root_path)
+    if not prim:
+        return
+    type_map = {"string": Sdf.ValueTypeNames.String,
+                "float": Sdf.ValueTypeNames.Float,
+                "bool": Sdf.ValueTypeNames.Bool}
+    for attr_name, (type_key, param_key) in ATTR_SPECS.items():
+        if param_key in params:
+            attr = prim.CreateAttribute(attr_name, type_map[type_key], custom=True)
+            value = params[param_key]
+            if type_key == "float":
+                value = float(value)
+            elif type_key == "bool":
+                value = bool(value)
+            else:
+                value = str(value)
+            if attr.Get() != value:
+                attr.Set(value)
+
+
+def read_voxel_attributes(prim: Usd.Prim) -> dict:
+    """Read the voxel: attributes back into a params dict (missing keys omitted)."""
+    params = {}
+    for attr_name, (_type_key, param_key) in ATTR_SPECS.items():
+        attr = prim.GetAttribute(attr_name)
+        if attr and attr.HasAuthoredValue():
+            params[param_key] = attr.Get()
+    return params
+
+
+def set_prototype_collision(stage: Usd.Stage, root_path: str, enabled: bool) -> bool:
+    """Toggle UsdPhysics collision on the instanced prototype.
+
+    Applying CollisionAPI to the prototype gives every instance a static
+    collider (PhysX supports PointInstancer collision through prototypes), so
+    the whole voxel field becomes collidable at the cost of one API on one
+    prim. Bounding-cube approximation is exact for the cube prototype and a
+    fair fit for the sphere.
+    """
+    proto = stage.GetPrimAtPath(f"{root_path}/Prototypes/VoxelCube")
+    if not proto:
+        return False
+    if enabled:
+        UsdPhysics.CollisionAPI.Apply(proto)
+        mesh_api = UsdPhysics.MeshCollisionAPI.Apply(proto)
+        mesh_api.CreateApproximationAttr().Set(UsdPhysics.Tokens.boundingCube)
+    else:
+        proto.RemoveAPI(UsdPhysics.CollisionAPI)
+        proto.RemoveAPI(UsdPhysics.MeshCollisionAPI)
+    return True
+
+
+def export_voxel_asset(stage: Usd.Stage, root_path: str, out_path: str) -> str:
+    """Export one voxel root as a self-contained USD asset file.
+
+    The subtree is copied out of a flattened view of the stage (so session /
+    sublayer edits are included), re-rooted as the default prim, and written
+    with the source stage's upAxis and metersPerUnit so it references
+    correctly elsewhere.
+    """
+    src_prim = stage.GetPrimAtPath(root_path)
+    if not src_prim:
+        raise ValueError(f"No prim at {root_path}")
+
+    flat = stage.Flatten()
+    name = Sdf.Path(root_path).name
+    dst = Sdf.Layer.CreateAnonymous(".usda")
+    dst_path = Sdf.Path(f"/{name}")
+    Sdf.CreatePrimInLayer(dst, dst_path)
+    Sdf.CopySpec(flat, Sdf.Path(root_path), dst, dst_path)
+    dst.defaultPrim = name
+    dst.pseudoRoot.SetInfo("upAxis", UsdGeom.GetStageUpAxis(stage))
+    dst.pseudoRoot.SetInfo("metersPerUnit", UsdGeom.GetStageMetersPerUnit(stage))
+    if not dst.Export(out_path):
+        raise RuntimeError(f"Failed to write {out_path}")
+    return out_path
+
+
+def write_voxel_metadata(stage: Usd.Stage, root_path: str, params: dict) -> None:
+    prim = stage.GetPrimAtPath(root_path)
+    if prim:
+        prim.SetCustomDataByKey(METADATA_KEY, dict(params))
+
+
+def read_voxel_metadata(prim: Usd.Prim) -> dict | None:
+    """Return generation params from this prim or the nearest ancestor, else None."""
+    while prim and prim.GetPath() != Sdf.Path.absoluteRootPath:
+        data = prim.GetCustomDataByKey(METADATA_KEY)
+        if data:
+            return dict(data)
+        prim = prim.GetParent()
+    return None
+
+
+def _apply_root_transform(
+    root_prim: Usd.Prim, unit_scale: float, flip_axes: tuple[bool, bool, bool] = (False, False, False)
+) -> None:
+    """Set the root Xform's scale, folding in per-axis flips.
+
+    A flip is a negative scale on that axis. Doing it on the root keeps the
+    authored point data untouched, so flips are reversible and cost nothing.
+    """
+    sx, sy, sz = (
+        -unit_scale if flip_axes[0] else unit_scale,
+        -unit_scale if flip_axes[1] else unit_scale,
+        -unit_scale if flip_axes[2] else unit_scale,
+    )
+    UsdGeom.XformCommonAPI(UsdGeom.Xform(root_prim)).SetScale(Gf.Vec3f(sx, sy, sz))
+
+
+def update_voxel_instancer(
+    stage: Usd.Stage,
+    root_path: str,
+    centers: np.ndarray,
+    colors: np.ndarray,
+    resolution: float,
+    unit_scale: float = 1.0,
+    shape: str = "cube",
+    flip_axes: tuple[bool, bool, bool] = (False, False, False),
+) -> bool:
+    """Update an existing voxel root in place (PlaySplat-style live rebuild).
+
+    Returns False if the root or instancer no longer exists (caller should
+    author from scratch instead).
+    """
+    root_prim = stage.GetPrimAtPath(root_path)
+    instancer_prim = stage.GetPrimAtPath(f"{root_path}/VoxelInstancer")
+    if not root_prim or not instancer_prim:
+        return False
+
+    _apply_root_transform(root_prim, unit_scale, flip_axes)
+
+    # Swap the prototype geometry if the shape changed.
+    protos_scope = stage.GetPrimAtPath(f"{root_path}/Prototypes")
+    proto_path = Sdf.Path(f"{root_path}/Prototypes/VoxelCube")
+    current_shape = protos_scope.GetCustomDataByKey("voxelShape") if protos_scope else None
+    if current_shape != shape:
+        stage.RemovePrim(proto_path)
+        proto = PROTOTYPE_AUTHORS[shape](stage, proto_path)
+        material = UsdShade.Material(stage.GetPrimAtPath(f"{root_path}/VoxelMaterial"))
+        if material:
+            proto.GetPrim().ApplyAPI(UsdShade.MaterialBindingAPI)
+            UsdShade.MaterialBindingAPI(proto.GetPrim()).Bind(material)
+        if protos_scope:
+            protos_scope.SetCustomDataByKey("voxelShape", shape)
+
+    instancer = UsdGeom.PointInstancer(instancer_prim)
+    n = len(centers)
+    half = resolution / 2.0
+    instancer.GetProtoIndicesAttr().Set(Vt.IntArray(n, 0))
+    instancer.GetPositionsAttr().Set(_vec3f_array(centers))
+    instancer.GetScalesAttr().Set(_vec3f_array(np.full((n, 3), half, dtype=np.float32)))
+    UsdGeom.PrimvarsAPI(instancer_prim).GetPrimvar("displayColor").Set(_vec3f_array(colors))
+    mn = centers.min(axis=0) - half
+    mx = centers.max(axis=0) + half
+    instancer.GetExtentAttr().Set([Gf.Vec3f(*mn.tolist()), Gf.Vec3f(*mx.tolist())])
+    return True
+
+
+def author_voxel_instancer(
+    stage: Usd.Stage,
+    centers: np.ndarray,
+    colors: np.ndarray,
+    resolution: float,
+    root_path: str = "/World/Voxelized",
+    unit_scale: float = 1.0,
+    shape: str = "cube",
+    flip_axes: tuple[bool, bool, bool] = (False, False, False),
+) -> str:
+    """Author a PointInstancer with per-instance displayColor on the stage.
+
+    ``unit_scale`` scales positions/sizes into stage units (e.g. 100 when
+    bringing meter-scale splat data into a cm-based Composer stage). No
+    axis rotation is baked in - author in the source orientation and let
+    the user transform the root Xform if needed.
+
+    Returns the instancer path.
+    """
+    root_path = Sdf.Path(root_path)
+    counter = 0
+    unique_root = root_path
+    while stage.GetPrimAtPath(unique_root):
+        counter += 1
+        unique_root = Sdf.Path(f"{root_path.pathString}_{counter:02d}")
+
+    # Define ancestors as Xforms; UsdGeom.Xform.Define would otherwise leave
+    # e.g. /World typeless on a stage that does not already have it.
+    for ancestor in unique_root.GetPrefixes()[:-1]:
+        prim = stage.GetPrimAtPath(ancestor)
+        if not prim or not prim.GetTypeName():
+            UsdGeom.Xform.Define(stage, ancestor)
+
+    root = UsdGeom.Xform.Define(stage, unique_root)
+    if unit_scale != 1.0 or any(flip_axes):
+        _apply_root_transform(root.GetPrim(), unit_scale, flip_axes)
+
+    protos_scope = stage.DefinePrim(unique_root.AppendChild("Prototypes"), "Scope")
+    UsdGeom.Imageable(protos_scope).CreateVisibilityAttr(UsdGeom.Tokens.invisible)
+    protos_scope.SetCustomDataByKey("voxelShape", shape)
+    cube_path = protos_scope.GetPath().AppendChild("VoxelCube")
+    cube = PROTOTYPE_AUTHORS[shape](stage, cube_path)
+
+    material = _author_display_color_material(stage, unique_root.AppendChild("VoxelMaterial"))
+    cube.GetPrim().ApplyAPI(UsdShade.MaterialBindingAPI)
+    UsdShade.MaterialBindingAPI(cube.GetPrim()).Bind(material)
+
+    instancer = UsdGeom.PointInstancer.Define(stage, unique_root.AppendChild("VoxelInstancer"))
+    n = len(centers)
+    half = resolution / 2.0
+
+    instancer.CreatePrototypesRel().SetTargets([cube_path])
+    instancer.CreateProtoIndicesAttr().Set(Vt.IntArray(n, 0))
+    instancer.CreatePositionsAttr().Set(_vec3f_array(centers))
+    instancer.CreateScalesAttr().Set(_vec3f_array(np.full((n, 3), half, dtype=np.float32)))
+
+    color_primvar = UsdGeom.PrimvarsAPI(instancer.GetPrim()).CreatePrimvar(
+        "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.varying
+    )
+    color_primvar.Set(_vec3f_array(colors))
+
+    mn = centers.min(axis=0) - half
+    mx = centers.max(axis=0) + half
+    instancer.CreateExtentAttr([Gf.Vec3f(*mn.tolist()), Gf.Vec3f(*mx.tolist())])
+
+    return unique_root.pathString
+```
+
+### exts/danci.voxelizer.tool/danci/voxelizer/tool/extension.py
+```
+"""Extension entry point: registers the Voxelizer window and menu item."""
+
+from __future__ import annotations
+
+import omni.ext
+import omni.kit.menu.utils
+import omni.ui as ui
+from omni.kit.menu.utils import MenuItemDescription
+
+from . import commands
+from .live_edit import VoxelLiveEditService
+from .window import VoxelizerWindow
+
+_WINDOW_TITLE = "3DGS Voxelizer"
+_MENU_PATH = "Window"
+
+
+class VoxelizerExtension(omni.ext.IExt):
+    def on_startup(self, _ext_id: str):
+        commands.register()
+        self._live_edit = VoxelLiveEditService()
+        self._window: VoxelizerWindow | None = None
+        self._menu_items = [
+            MenuItemDescription(
+                name=_WINDOW_TITLE,
+                onclick_fn=self._toggle_window,
+            )
+        ]
+        omni.kit.menu.utils.add_menu_items(self._menu_items, _MENU_PATH)
+        ui.Workspace.set_show_window_fn(_WINDOW_TITLE, self._show_window)
+
+    def on_shutdown(self):
+        if self._live_edit:
+            self._live_edit.destroy()
+            self._live_edit = None
+        commands.unregister()
+        omni.kit.menu.utils.remove_menu_items(self._menu_items, _MENU_PATH)
+        ui.Workspace.set_show_window_fn(_WINDOW_TITLE, None)
+        if self._window:
+            self._window.destroy()
+            self._window = None
+
+    def _show_window(self, visible: bool):
+        if visible:
+            if self._window is None:
+                self._window = VoxelizerWindow(_WINDOW_TITLE)
+            self._window.visible = True
+        elif self._window:
+            self._window.visible = False
+
+    def _toggle_window(self):
+        if self._window is None:
+            self._window = VoxelizerWindow(_WINDOW_TITLE)
+        else:
+            self._window.visible = not self._window.visible
+```
+
+### exts/danci.voxelizer.tool/danci/voxelizer/tool/live_edit.py
+```
+"""Property-window live editing for generated voxel assets.
+
+Generation parameters are mirrored as ``voxel:*`` attributes on each asset's
+root prim (see ``core.ATTR_SPECS``), which makes them visible and editable in
+Kit's Property window. This module watches the stage for changes to those
+attributes and re-voxelizes the touched asset — so selecting a voxel root and
+editing ``voxel:resolution`` in the Property panel rebuilds it live, with the
+tool window closed.
+
+Loop safety: rebuilds run through the same ``VoxelizeAsset`` command as the
+UI, which re-authors the attributes; the service ignores notices raised while
+its own rebuild (or any command-driven build) is in flight via a busy flag.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import omni.kit.commands
+import omni.usd
+from pxr import Tf, Usd
+
+from . import commands, core
+
+_DEBOUNCE_S = 0.4
+
+
+class VoxelLiveEditService:
+    """Watches voxel:* attribute edits and rebuilds the owning asset."""
+
+    def __init__(self):
+        self._busy = False
+        self._pending: dict[str, asyncio.Task] = {}
+        self._pc_cache: dict[str, core.PointCloud] = {}
+        # Registered globally rather than per-stage: the handler filters by
+        # sender, so no stage-event subscription is needed and the listener
+        # survives new/open/close without any re-registration.
+        self._notice_key = Tf.Notice.RegisterGlobally(
+            Usd.Notice.ObjectsChanged, self._on_objects_changed
+        )
+
+    def destroy(self):
+        if self._notice_key is not None:
+            self._notice_key.Revoke()
+            self._notice_key = None
+        for task in self._pending.values():
+            task.cancel()
+        self._pending.clear()
+        self._pc_cache.clear()
+
+    # ------------------------------------------------------------ notices
+
+    def _on_objects_changed(self, notice, stage):
+        if self._busy or commands.IN_FLIGHT:
+            return
+        # Ignore stages we are not driving (asset previews, thumbnails, ...).
+        ctx = omni.usd.get_context()
+        if ctx is None or stage is not ctx.get_stage():
+            return
+        roots = set()
+        for path in notice.GetChangedInfoOnlyPaths():
+            if path.IsPropertyPath() and path.name.startswith("voxel:"):
+                roots.add(path.GetPrimPath().pathString)
+        for root in roots:
+            prim = stage.GetPrimAtPath(root)
+            if not prim or not prim.GetCustomDataByKey(core.METADATA_KEY):
+                continue
+            self._schedule(root)
+
+    def _schedule(self, root: str):
+        task = self._pending.get(root)
+        if task:
+            task.cancel()
+        self._pending[root] = asyncio.ensure_future(self._debounced_rebuild(root))
+
+    async def _debounced_rebuild(self, root: str):
+        try:
+            await asyncio.sleep(_DEBOUNCE_S)
+        except asyncio.CancelledError:
+            return
+        self._pending.pop(root, None)
+        await self._rebuild(root)
+
+    # ------------------------------------------------------------ rebuild
+
+    async def _rebuild(self, root: str):
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return
+        prim = stage.GetPrimAtPath(root)
+        if not prim:
+            return
+        params = core.read_voxel_attributes(prim)
+        source = str(params.get("source", ""))
+        resolution = float(params.get("resolution", 0.0))
+        if not source or resolution <= 0.0:
+            return
+
+        import os
+        if not os.path.isfile(source):
+            return
+
+        pc = self._pc_cache.get(source)
+        if pc is None:
+            try:
+                pc = core.load_pointcloud(source)
+            except Exception:
+                return
+            self._pc_cache[source] = pc
+
+        min_opacity = float(params.get("minOpacity", 0.0)) if pc.is_3dgs else 0.0
+        try:
+            centers, colors, _ = core.voxelize(
+                pc, resolution=resolution, min_opacity=min_opacity
+            )
+        except ValueError:
+            return  # e.g. everything filtered out; keep the current build
+
+        metadata = dict(prim.GetCustomDataByKey(core.METADATA_KEY) or {})
+        metadata.update(params)
+
+        self._busy = True
+        try:
+            omni.kit.commands.execute(
+                "VoxelizeAsset",
+                centers=centers,
+                colors=colors,
+                resolution=resolution,
+                unit_scale=float(params.get("unitScale", 1.0)),
+                shape=str(metadata.get("shape", "cube")),
+                physics=bool(params.get("physics", False)),
+                metadata=metadata,
+                live_root=root,
+            )
+        finally:
+            self._busy = False
+```
+
+### exts/danci.voxelizer.tool/danci/voxelizer/tool/window.py
+```
+"""UI window for the 3DGS Voxelizer tool.
+
+State-driven layout:
+
+- EMPTY: a drop zone (drop .ply/.spz or Browse) plus Adopt Selected for
+  returning to a previously generated asset. Nothing else.
+- LIVE: source info card, contextual parameters, output group, stats bar.
+  Selecting or dropping a file builds immediately (no ceremony click); every
+  parameter drag live-updates the same PointInstancer with a 300 ms debounce,
+  like PlaySplat's web voxelizer.
+
+The voxel-size slider range is derived from the source bounding box so the
+same slider position means the same relative density in any scene.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import time
+
+import omni.kit.app
+import omni.kit.commands
+import omni.ui as ui
+import omni.usd
+from omni.kit.window.filepicker import FilePickerDialog
+
+from . import core
+
+_LABEL_W = 100
+_ROW_H = 20
+_REBUILD_DEBOUNCE_S = 0.3
+_SOURCE_EXTS = (".ply", ".spz")
+
+# Voxel sizes above this are practically never useful, so the drag step is
+# tuned for the range below it. Larger values can still be typed in.
+_RES_SOFT_CAP = 40.0
+_DEFAULT_RES = 1.0
+
+# Past this instance count the viewport becomes unusable on most GPUs; the UI
+# warns rather than silently producing a 1-FPS scene.
+_INSTANCE_WARN = 800_000
+
+# omni.ui colors are 0xAABBGGRR
+_ACCENT = 0xFF00B976        # NVIDIA green
+_ACCENT_HOVER = 0xFF00D389
+_TEXT_DIM = 0xFF9A9A9A
+_TEXT_FAINT = 0xFF6F6F6F
+_CARD_BG = 0xFF2E2E33
+_DROP_BORDER = 0xFF5A5A60
+
+_BTN_ACCENT_STYLE = {
+    "Button": {"background_color": _ACCENT, "border_radius": 4},
+    "Button:hovered": {"background_color": _ACCENT_HOVER},
+    "Button.Label": {"color": 0xFF1E1E1E},
+}
+
+
+class VoxelizerWindow(ui.Window):
+    """Drop a splat file, get a live-editable voxel PointInstancer."""
+
+    def __init__(self, title: str = "3DGS Voxelizer", **kwargs):
+        super().__init__(title, width=380, height=480, **kwargs)
+        self._file_path_model = ui.SimpleStringModel("")
+        self._resolution_model = ui.SimpleFloatModel(_DEFAULT_RES)
+        self._min_opacity_model = ui.SimpleFloatModel(0.3)
+        self._unit_scale_model = ui.SimpleFloatModel(1.0)  # manual, defaults to 1
+        self._physics_model = ui.SimpleBoolModel(False)
+        self._flip_models = [ui.SimpleBoolModel(False) for _ in range(3)]
+        self._status_model = ui.SimpleStringModel("")
+        self._status_label: ui.Label | None = None
+        self._picker: FilePickerDialog | None = None
+        self._export_picker: FilePickerDialog | None = None
+
+        # Live-rebuild state.
+        self._pc: core.PointCloud | None = None   # cached parsed cloud
+        self._pc_path: str | None = None
+        self._live_root: str | None = None        # instancer root we authored
+        self._debounce_task: asyncio.Task | None = None
+        self._res_range = (0.001, 10.0)           # comfort range, from source bbox
+        self._res_hard_max = 1000.0               # typed values may go this high
+        self._res_step = 0.01                     # drag precision
+        self._last_stats = ""                     # "10,270 voxels · 0.21 s"
+        self._subs = [
+            self._resolution_model.subscribe_value_changed_fn(self._on_param_changed),
+            self._min_opacity_model.subscribe_value_changed_fn(self._on_param_changed),
+            self._unit_scale_model.subscribe_value_changed_fn(self._on_param_changed),
+            self._physics_model.subscribe_value_changed_fn(self._on_physics_toggled),
+            self._status_model.subscribe_value_changed_fn(self._sync_status_label),
+        ] + [m.subscribe_value_changed_fn(self._on_flip_changed) for m in self._flip_models]
+
+        # OS-level drops bypass omni.ui and go to the viewport's global
+        # handler (which imports PLY as a plain point cloud). Chain into it.
+        self._vp_window = None
+        self._vp_prev_drop = None
+        self._install_drop_interceptor()
+
+        self.frame.set_build_fn(self._build_ui)
+
+    def destroy(self):
+        self._remove_drop_interceptor()
+        self._subs = []
+        if self._debounce_task:
+            self._debounce_task.cancel()
+            self._debounce_task = None
+        for picker in (self._picker, self._export_picker):
+            if picker:
+                picker.destroy()
+        self._picker = self._export_picker = None
+        super().destroy()
+
+    # ------------------------------------------- external (OS) drop routing
+
+    def _install_drop_interceptor(self):
+        """Chain into the viewport's external-drop handler.
+
+        ``add_external_drag_drop_support`` returns the previous callback by
+        design; we filter drops that land on this window and hand everything
+        else back to the viewport's default import behavior.
+        """
+        try:
+            from omni.kit.viewport.utility import get_active_viewport_window
+            vp = get_active_viewport_window()
+            if vp is None or not hasattr(vp, "add_external_drag_drop_support"):
+                return
+            self._vp_window = vp
+            self._vp_prev_drop = vp.add_external_drag_drop_support(self._on_external_drop)
+        except Exception:  # viewport-less apps (headless/tests): no drop routing
+            self._vp_window = None
+            self._vp_prev_drop = None
+        try:
+            # Second registration scoped to THIS window, for the case where it
+            # doesn't overlap the viewport. _handle_splat_drop dedupes.
+            from omni.kit.window.drop_support import ExternalDragDrop
+            self._own_drop = ExternalDragDrop(
+                window_name=self.title, drag_drop_fn=self._on_own_drop
+            )
+        except Exception:
+            self._own_drop = None
+
+    def _remove_drop_interceptor(self):
+        if getattr(self, "_own_drop", None) is not None:
+            self._own_drop.destroy()
+            self._own_drop = None
+        if self._vp_window is not None:
+            try:
+                if self._vp_prev_drop:
+                    self._vp_window.add_external_drag_drop_support(self._vp_prev_drop)
+                else:
+                    # Restore the viewport's built-in default handler.
+                    self._vp_window.add_external_drag_drop_support(None)
+            except Exception:
+                pass
+            self._vp_window = None
+            self._vp_prev_drop = None
+
+    def _on_external_drop(self, edd, payload: list):
+        """Viewport-scoped hook: claim splat drops over our window, pass on the rest."""
+        paths = edd.expand_payload(payload)
+        splats = [p for p in paths if p.lower().endswith(_SOURCE_EXTS)]
+        mouse_x, mouse_y = edd.get_current_mouse_coords()
+        over_us = edd.is_window_hovered(mouse_x, mouse_y, self.title)
+        if splats and (over_us or self.focused):
+            self._handle_splat_drop(splats[0])
+            return
+        # Not ours: defer to the viewport's original behavior.
+        if self._vp_prev_drop:
+            self._vp_prev_drop(edd, payload)
+
+    def _on_own_drop(self, edd, payload: list):
+        """Own-window-scoped hook (covers the window when off the viewport)."""
+        paths = edd.expand_payload(payload)
+        splats = [p for p in paths if p.lower().endswith(_SOURCE_EXTS)]
+        if splats:
+            self._handle_splat_drop(splats[0])
+
+    def _handle_splat_drop(self, path: str):
+        # Both hooks can fire for one physical drop when the window overlaps
+        # the viewport; dedupe within a short window.
+        now = time.monotonic()
+        if now - getattr(self, "_last_drop_time", 0.0) < 0.25:
+            return
+        self._last_drop_time = now
+        self._file_path_model.set_value(path)
+        self._on_voxelize()
+
+    # ------------------------------------------------------------------ UI
+
+    def _build_ui(self):
+        # The whole window accepts .ply/.spz drops in every state.
+        self.frame.set_accept_drop_fn(self._accept_drop)
+        self.frame.set_drop_fn(self._on_drop)
+        if self._pc is None:
+            self._build_empty_state()
+        else:
+            self._build_live_state()
+
+    # ---- empty state: one job - get data in ------------------------------
+
+    def _build_empty_state(self):
+        with ui.VStack(spacing=8, style={"margin": 10}):
+            ui.Spacer(height=4)
+            with ui.ZStack(height=140):
+                ui.Rectangle(
+                    style={
+                        "background_color": _CARD_BG,
+                        "border_color": _DROP_BORDER,
+                        "border_width": 1.5,
+                        "border_radius": 8,
+                    }
+                )
+                with ui.VStack(spacing=6):
+                    ui.Spacer()
+                    ui.Label(
+                        "Drop a .ply / .spz splat here",
+                        alignment=ui.Alignment.CENTER,
+                        style={"font_size": 16},
+                    )
+                    ui.Label(
+                        "3DGS captures or plain point clouds",
+                        alignment=ui.Alignment.CENTER,
+                        style={"color": _TEXT_DIM, "font_size": 13},
+                    )
+                    with ui.HStack(height=28):
+                        ui.Spacer()
+                        ui.Button(
+                            "Browse...", width=110, clicked_fn=self._show_picker,
+                            style=_BTN_ACCENT_STYLE,
+                        )
+                        ui.Spacer()
+                    ui.Spacer()
+            with ui.HStack(height=_ROW_H, spacing=6):
+                ui.Spacer()
+                ui.Label(
+                    "Returning to an asset?",
+                    width=0,
+                    style={"color": _TEXT_FAINT, "font_size": 13},
+                )
+                ui.Button(
+                    "Adopt Selected",
+                    width=105,
+                    clicked_fn=self._on_adopt,
+                    tooltip="Select a previously generated voxel asset in the "
+                            "Stage window, then click to continue editing it.",
+                )
+                ui.Spacer()
+            self._build_status_row()
+            ui.Spacer()
+
+    # ---- live state: tune, output, iterate -------------------------------
+
+    def _build_live_state(self):
+        pc = self._pc
+        fname = os.path.basename(self._pc_path or "")
+        kind = "3D Gaussian Splat" if pc.is_3dgs else "Point cloud"
+        with ui.ScrollingFrame(
+            horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF
+        ):
+            with ui.VStack(spacing=6, style={"margin": 8}, height=0):
+                # Source card
+                with ui.ZStack(height=44):
+                    ui.Rectangle(style={"background_color": _CARD_BG, "border_radius": 6})
+                    with ui.HStack(style={"margin": 6}, spacing=6):
+                        with ui.VStack(spacing=0):
+                            ui.Label(fname, style={"font_size": 14}, elided_text=True)
+                            ui.Label(
+                                f"{len(pc.positions):,} points · {kind}",
+                                style={"color": _TEXT_DIM, "font_size": 12},
+                            )
+                        ui.Button(
+                            "Replace...", width=68,
+                            clicked_fn=self._show_picker,
+                            tooltip="Load a different source file",
+                        )
+                        ui.Button(
+                            "Adopt", width=48,
+                            clicked_fn=self._on_adopt,
+                            tooltip="Re-attach to a voxel asset selected in the Stage window",
+                        )
+
+                # Voxelization group
+                with ui.CollapsableFrame("Voxelization", collapsed=False):
+                    with ui.VStack(spacing=4, style={"margin": 4}):
+                        with ui.HStack(height=_ROW_H, spacing=6):
+                            ui.Label("Voxel size", width=_LABEL_W,
+                                     tooltip="Cell size in source units. Drag for fine "
+                                             "control; type any larger value directly.")
+                            # FloatDrag, not FloatSlider: dragging is relative, so
+                            # step (not the max) sets precision, and larger values
+                            # can still be typed in.
+                            ui.FloatDrag(
+                                model=self._resolution_model,
+                                min=self._res_range[0],
+                                max=self._res_hard_max,
+                                step=self._res_step,
+                            )
+                        if pc.is_3dgs:
+                            with ui.HStack(height=_ROW_H, spacing=6):
+                                ui.Label("Min opacity", width=_LABEL_W,
+                                         tooltip="Drop splats below this opacity "
+                                                 "before voxelizing (noise filter).")
+                                ui.FloatSlider(model=self._min_opacity_model, min=0.0, max=1.0)
+
+                # Output group
+                with ui.CollapsableFrame("Output", collapsed=False):
+                    with ui.VStack(spacing=4, style={"margin": 4}):
+                        with ui.HStack(height=_ROW_H, spacing=6):
+                            ui.Label("Stage scale", width=_LABEL_W,
+                                     tooltip="Multiplies source units into stage units "
+                                             "(e.g. 100 for meter-scale data in a "
+                                             "centimeter stage). Default 1.")
+                            ui.FloatDrag(model=self._unit_scale_model,
+                                         min=0.001, max=10000.0, step=0.5)
+                        with ui.HStack(height=_ROW_H, spacing=6):
+                            ui.Label("Flip axis", width=_LABEL_W,
+                                     tooltip="Mirror the asset on an axis. Applied as a "
+                                             "negative scale on the root, so the point "
+                                             "data is untouched and it is reversible.")
+                            for axis, model in zip("XYZ", self._flip_models):
+                                ui.CheckBox(model=model, width=18)
+                                ui.Label(axis, width=14,
+                                         style={"color": _TEXT_DIM, "font_size": 12})
+                            ui.Spacer()
+                        with ui.HStack(height=_ROW_H, spacing=6):
+                            ui.Label("Physics collision", width=_LABEL_W,
+                                     tooltip="Every voxel becomes a static collider "
+                                             "(UsdPhysics on the prototype).")
+                            ui.CheckBox(model=self._physics_model, width=20)
+                            ui.Spacer()
+                        with ui.HStack(height=24, spacing=6):
+                            ui.Button(
+                                "Export USD...", width=104,
+                                clicked_fn=self._on_export,
+                                tooltip="Save as a self-contained .usd asset",
+                            )
+                            ui.Spacer()
+
+                self._build_status_row()
+                ui.Button(
+                    "Rebuild", height=26, clicked_fn=self._on_voxelize,
+                    tooltip="Force a full rebuild (parameters normally apply live)",
+                )
+
+    def _build_status_row(self):
+        with ui.HStack(height=20, spacing=6):
+            self._status_label = ui.Label(
+                self._status_model.get_value_as_string() or self._last_stats,
+                style={"color": _TEXT_DIM, "font_size": 12},
+                elided_text=True,
+            )
+
+    def _sync_status_label(self, model):
+        if self._status_label is not None:
+            self._status_label.text = model.get_value_as_string()
+
+    # ------------------------------------------------------------- pickers
+
+    def _show_picker(self):
+        if self._picker is None:
+            self._picker = FilePickerDialog(
+                "Select PLY/SPZ file",
+                apply_button_label="Open",
+                click_apply_handler=self._on_file_picked,
+                item_filter_options=["Splat Files (*.ply, *.spz)", "All Files (*)"],
+            )
+        self._picker.show()
+
+    def _on_file_picked(self, filename: str, dirname: str):
+        self._picker.hide()
+        self._file_path_model.set_value(os.path.join(dirname, filename))
+        self._on_voxelize()  # no ceremony: picking a file builds immediately
+
+    # -------------------------------------------------------- in-app drops
+
+    def _accept_drop(self, url: str) -> bool:
+        return url.strip().strip('"').lower().endswith(_SOURCE_EXTS)
+
+    def _on_drop(self, event):
+        path = event.mime_data.strip().strip('"')
+        if path.startswith("file:"):
+            # content-browser drops arrive as file:// URLs
+            path = path.replace("file:///", "").replace("file://", "")
+        if not path.lower().endswith(_SOURCE_EXTS):
+            return
+        self._file_path_model.set_value(path)
+        self._on_voxelize()
+
+    # -------------------------------------------------------------- flip
+
+    def _flip_axes(self) -> tuple:
+        return tuple(m.get_value_as_bool() for m in self._flip_models)
+
+    def _on_flip_changed(self, _model):
+        """Flip is transform-only: apply directly, never re-voxelize."""
+        if self._live_root is None:
+            return
+        flip = self._flip_axes()
+        prev = getattr(self, "_prev_flip", (False, False, False))
+        if flip == prev:
+            return
+        self._prev_flip = flip
+        omni.kit.commands.execute(
+            "VoxelFlip",
+            root_path=self._live_root,
+            flip_axes=flip,
+            unit_scale=self._unit_scale_model.get_value_as_float(),
+            prev_flip_axes=prev,
+        )
+        axes = "".join(a for a, f in zip("XYZ", flip) if f) or "none"
+        self._status_model.set_value(f"Flipped: {axes}")
+
+    # ----------------------------------------------------------- physics
+
+    def _on_physics_toggled(self, model):
+        """Collision toggle is cheap: apply immediately, no re-voxelize."""
+        if self._live_root is None:
+            return
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return
+        enabled = model.get_value_as_bool()
+        ok, applied = omni.kit.commands.execute(
+            "VoxelPhysics", root_path=self._live_root, enabled=enabled
+        )
+        if ok and applied:
+            self._status_model.set_value(
+                f"Physics collision {'enabled' if enabled else 'disabled'}"
+            )
+
+    # ------------------------------------------------------------- export
+
+    def _on_export(self):
+        if self._live_root is None:
+            self._status_model.set_value("Nothing to export - voxelize first.")
+            return
+        if self._export_picker is None:
+            self._export_picker = FilePickerDialog(
+                "Export voxel asset",
+                apply_button_label="Save",
+                click_apply_handler=self._on_export_picked,
+                item_filter_options=["USD Files (*.usd, *.usda, *.usdc)", "All Files (*)"],
+            )
+        self._export_picker.show()
+
+    def _on_export_picked(self, filename: str, dirname: str):
+        self._export_picker.hide()
+        if not filename:
+            return
+        if not filename.lower().endswith((".usd", ".usda", ".usdc")):
+            filename += ".usd"
+        out = os.path.join(dirname, filename)
+        stage = omni.usd.get_context().get_stage()
+        try:
+            core.export_voxel_asset(stage, self._live_root, out)
+            self._status_model.set_value(f"Exported: {out}")
+        except Exception as exc:
+            self._status_model.set_value(f"Export error: {exc}")
+            raise
+
+    # ------------------------------------------------------- adopt existing
+
+    def _on_adopt(self):
+        asyncio.ensure_future(self._adopt_async())
+
+    async def _adopt_async(self):
+        """Re-attach the tool to a previously generated voxel asset."""
+        ctx = omni.usd.get_context()
+        stage = ctx.get_stage()
+        if stage is None:
+            self._status_model.set_value("No open stage.")
+            return
+        sel = ctx.get_selection().get_selected_prim_paths()
+        meta = None
+        root_prim = None
+        for path in sel:
+            prim = stage.GetPrimAtPath(path)
+            meta = core.read_voxel_metadata(prim)
+            if meta:
+                # Walk up to the prim actually holding the metadata.
+                while prim and not prim.GetCustomDataByKey(core.METADATA_KEY):
+                    prim = prim.GetParent()
+                root_prim = prim
+                break
+        if not meta or root_prim is None:
+            self._status_model.set_value("Selection is not a voxelizer asset.")
+            return
+
+        source = str(meta.get("source", ""))
+        if not source or not os.path.isfile(source):
+            self._status_model.set_value(f"Source file missing: {source or '(unknown)'}")
+            return
+
+        # Restore UI params BEFORE arming live mode, so the model-change
+        # callbacks (fired by set_value) see _live_root=None and do nothing.
+        self._live_root = None
+        self._file_path_model.set_value(source)
+        self._resolution_model.set_value(float(meta.get("resolution", 0.1)))
+        self._min_opacity_model.set_value(float(meta.get("minOpacity", 0.3)))
+        self._unit_scale_model.set_value(float(meta.get("unitScale", 1.0)))
+        self._physics_model.set_value(bool(meta.get("physics", False)))
+        stored_flip = list(meta.get("flipAxes", [False, False, False]))
+        for model, value in zip(self._flip_models, stored_flip):
+            model.set_value(bool(value))
+        self._prev_flip = tuple(bool(v) for v in stored_flip)
+
+        self._status_model.set_value("Loading source...")
+        await omni.kit.app.get_app().next_update_async()
+        try:
+            self._pc = core.load_pointcloud(source)
+        except Exception as exc:
+            self._status_model.set_value(f"Error reading source: {exc}")
+            raise
+        self._pc_path = source
+        self._refine_resolution_range()
+        self._live_root = root_prim.GetPath().pathString
+        self._last_stats = f"Adopted {self._live_root}"
+        self._status_model.set_value("Adopted - drag any parameter to edit live.")
+        self.frame.rebuild()
+
+    # ------------------------------------------------------- live rebuild
+
+    def _on_param_changed(self, _model):
+        """Debounced rebuild on any parameter change, once a build exists."""
+        if self._live_root is None or self._pc is None:
+            return
+        if self._debounce_task:
+            self._debounce_task.cancel()
+        self._debounce_task = asyncio.ensure_future(self._debounced_rebuild())
+
+    async def _debounced_rebuild(self):
+        try:
+            await asyncio.sleep(_REBUILD_DEBOUNCE_S)
+        except asyncio.CancelledError:
+            return
+        await self._voxelize_async(live=True)
+
+    # ------------------------------------------------------------ pipeline
+
+    def _on_voxelize(self):
+        asyncio.ensure_future(self._voxelize_async(live=False))
+
+    def _shape(self) -> str:
+        # Shape selection is retired from the UI (the sphere prototype did
+        # not read well); the pipeline keeps the parameter for the future.
+        return "cube"
+
+    def _refine_resolution_range(self, snap_default: bool = False):
+        """Derive a scene-relative voxel-size range from the source bbox.
+
+        With ``snap_default`` the resolution snaps to a chunky, readable
+        density (diag/64) — used for NEW sources, so a value tuned for a
+        previous scene can't silently produce dust-fine voxels that read as
+        a point cloud. Adopt keeps the asset's stored value instead.
+        """
+        if self._pc is None:
+            return
+        ext = self._pc.positions.max(axis=0) - self._pc.positions.min(axis=0)
+        diag = float((ext ** 2).sum() ** 0.5)
+        if diag <= 0:
+            return
+        # Comfort range: fine enough to resolve detail, capped where voxels
+        # stop being useful. Drag step follows this range, so precision does
+        # not degrade just because the field accepts much larger typed values.
+        soft_max = min(diag / 16.0, _RES_SOFT_CAP)
+        self._res_range = (diag / 512.0, soft_max)
+        self._res_step = max(soft_max / 200.0, 1e-4)
+        self._res_hard_max = max(soft_max * 25.0, _RES_SOFT_CAP * 25.0)
+        # The default voxel size is a fixed 1.0; only pull it into range when
+        # the scene is so small that 1.0 would collapse it to a single cell.
+        current = self._resolution_model.get_value_as_float()
+        if snap_default and current > soft_max:
+            self._set_resolution_silently(soft_max)
+
+    def _set_resolution_silently(self, value: float):
+        # Temporarily drop live root so the change callback doesn't rebuild.
+        root, self._live_root = self._live_root, None
+        try:
+            self._resolution_model.set_value(value)
+        finally:
+            self._live_root = root
+
+    async def _voxelize_async(self, live: bool):
+        path = self._file_path_model.get_value_as_string().strip().strip('"')
+        if not path or not os.path.isfile(path):
+            self._status_model.set_value("File not found.")
+            return
+
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            self._status_model.set_value("No open stage.")
+            return
+
+        app = omni.kit.app.get_app()
+        try:
+            t0 = time.perf_counter()
+            first_build = False
+            if self._pc is None or self._pc_path != path:
+                self._status_model.set_value("Loading source...")
+                await app.next_update_async()
+                self._pc = core.load_pointcloud(path)
+                self._pc_path = path
+                self._live_root = None  # new source => new build
+                self._refine_resolution_range(snap_default=True)
+                first_build = True
+
+            resolution = self._resolution_model.get_value_as_float()
+            self._status_model.set_value(f"Voxelizing {len(self._pc.positions):,} points...")
+            await app.next_update_async()
+            centers, colors, _ = core.voxelize(
+                self._pc,
+                resolution=resolution,
+                min_opacity=self._min_opacity_model.get_value_as_float() if self._pc.is_3dgs else 0.0,
+            )
+
+            unit_scale = self._unit_scale_model.get_value_as_float()
+            flip = self._flip_axes()
+            self._prev_flip = flip
+            was_live = bool(live and self._live_root)
+            # Single undoable command covers author-or-update, physics and
+            # metadata, so Ctrl+Z restores the whole asset in one step.
+            ok, root = omni.kit.commands.execute(
+                "VoxelizeAsset",
+                centers=centers,
+                colors=colors,
+                resolution=resolution,
+                unit_scale=unit_scale,
+                shape=self._shape(),
+                physics=self._physics_model.get_value_as_bool(),
+                flip_axes=flip,
+                metadata={
+                    "source": path,
+                    "resolution": resolution,
+                    "minOpacity": self._min_opacity_model.get_value_as_float(),
+                    "unitScale": unit_scale,
+                    "shape": self._shape(),
+                    "physics": self._physics_model.get_value_as_bool(),
+                    "flipAxes": list(flip),
+                },
+                live_root=self._live_root if was_live else None,
+            )
+            if not ok or not root:
+                self._status_model.set_value("Voxelize command failed - see console.")
+                return
+            updated = was_live and root == self._live_root
+            self._live_root = root
+            elapsed = time.perf_counter() - t0
+            n = len(centers)
+            self._last_stats = f"{n:,} voxels · {elapsed:.2f} s"
+            if n > _INSTANCE_WARN:
+                self._status_model.set_value(
+                    f"{self._last_stats} — heavy scene, raise Voxel size for smooth viewport"
+                )
+            else:
+                self._status_model.set_value(
+                    f"{'Updated' if updated else 'Done'}: {self._last_stats} · {root}"
+                )
+            if first_build:
+                self.frame.rebuild()  # empty state -> live state
+        except Exception as exc:  # surface errors in the UI, not just the log
+            self._status_model.set_value(f"Error: {exc}")
+            raise
+```

@@ -1,0 +1,48 @@
+# Contour Spectrum
+
+Also called: Bajaj et al. Isosurface Measures, Bajaj et al. technique
+
+## Overview
+Contour Spectrum is a data-driven technique for volume rendering that assists in transfer function specification by identifying significant isosurfaces within a scalar field [S1, unofficial][S2, unofficial]. It computes geometric and gradient-based measures for discretized scalar values to highlight structures of high importance, such as separation surfaces [S2, unofficial]. Unlike histogram-based methods that rely on intensity distributions, Contour Spectrum focuses on the topological and geometric properties of the isosurfaces themselves, using a directed acyclic graph to track their evolution [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs:** A 3D scalar volume dataset and a set of discretized scalar values spanning the data range [S2, unofficial].
+**Outputs:** A set of scalar values mapped to optical attributes (typically opacity) via a transfer function, and a Directed Acyclic Graph (DAG) representing the topological behavior of the isosurfaces [S2, unofficial].
+
+**Data Structures:**
+1. **Measure Vector:** For each scalar value $s_i$, a vector containing the isosurface area $A(s_i)$, the enclosed volume $V_{enc}(s_i)$, and the gradient integral $G(s_i)$ [S2, unofficial].
+2. **Topological DAG:** A graph where nodes and edges register separations and junctions of connected isosurface segments as the defining scalar value varies monotonically [S2, unofficial].
+
+**Steps:**
+1. **Discretization:** Define a set of scalar values $s_i$ spanning the volume range [S2, unofficial]. The discretization step size is Not given in the sources.
+2. **Surface Extraction:** Extract the isosurface $Iso(s_i)$ for each $s_i$ using a standard mesh generation algorithm [G].
+3. **Measure Computation:** For each $Iso(s_i)$:
+   a. Compute the surface area $A(s_i)$ as the sum of the areas of the extracted mesh faces [G].
+   b. Compute the enclosed volume $V_{enc}(s_i)$ as the volume bounded by the closed mesh [G].
+   c. Compute the gradient integral $G(s_i) = \int_{Iso(s_i)} |\nabla V| \, dA$ as the integral of the gradient magnitude along the isosurface [S2, unofficial].
+4. **Topological Analysis:** Construct the DAG by analyzing the connectivity of isosurface components across consecutive scalar values $s_i$ and $s_{i+1}$, registering separations (splitting) and junctions (merging) [S2, unofficial].
+5. **Selection:** Identify scalar values with high $A(s_i)$, $V_{enc}(s_i)$, and $G(s_i)$ as important separation surfaces [S2, unofficial]. Identify noisy areas as regions with high topological activity (many junctions and separations) in the DAG [S2, unofficial].
+6. **Transfer Function Mapping:** Associate the selected scalar values with opacity values in the transfer function to emphasize the corresponding structures [S2, unofficial].
+
+**Parameters:**
+* Discretization step for scalar values: Not given in the sources.
+* Thresholds for "high" measures: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+* **Noise:** Noisy regions exhibit high topological activity in the DAG, distinguishing them from true separation surfaces [S2, unofficial].
+* **Precision:** Accurate computation of area, volume, and gradient integration requires robust mesh processing and accurate gradient estimation at the surface [G].
+
+## Operating characteristics
+* **Time Complexity:** Not given in the sources. The method requires surface extraction, geometric integration, and topological analysis for every discretized scalar value [S2, unofficial].
+* **Memory Complexity:** Not given in the sources. Requires storing computed measures and the topological DAG for all scalar values [S2, unofficial].
+* **Strengths:** Provides geometric and topological insight into the data structure; effective at identifying significant separation surfaces; distinguishes noisy areas through topological activity analysis [S2, unofficial].
+* **Limitations:** Computationally expensive due to per-scalar-value extraction and integration; sensitive to the discretization of scalar values [S2, unofficial].
+* **When to use:** When the goal is to identify and emphasize significant internal structures in a volume based on their geometric and topological properties [S2, unofficial].
+* **When not to use:** Not given in the sources.
+
+## Background
+Contour Spectrum was proposed by Bajaj, Pascucci, and Schikore in 1997 [S1, unofficial][S2, unofficial]. It is a pioneering data-driven technique that assimilates surface fitting resources to discover isosurfaces after an initial specification [S1, unofficial]. The method computes scalar field measures to help select values representing important structures, which are then associated with optical attributes via a transfer function [S2, unofficial]. It was followed by automated detection methods using histograms, such as those by Kindlmann and Durkin (1998) and Sereda et al. (2006) [S1, unofficial]. Similar strategies were also proposed by Pekar et al. [S2, unofficial].
+
+## Sources
+[S1] A volume exploration approach based on clustering and dimensional reduction to support the definition of multidimensional transfer functions, http://hdl.handle.net/11449/153618, fetched 2026-10-26 (unofficial)
+[S2] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)

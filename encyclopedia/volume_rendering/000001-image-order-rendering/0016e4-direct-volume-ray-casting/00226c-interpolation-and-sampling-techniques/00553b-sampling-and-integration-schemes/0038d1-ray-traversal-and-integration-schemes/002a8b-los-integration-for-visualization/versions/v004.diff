@@ -1,0 +1,347 @@
+--- v003.md
++++ v004.md
+@@ -4,106 +4,94 @@
+ 
+ ## Overview
+-LOS-integration for visualization computes scalar physical quantities (electron column density, integrated emissivity, or emission-weighted temperature) along camera rays by integrating sampled neural network or ground truth field outputs. It differs from standard ray marching by explicitly handling unit conversions to physical consistency (cm, ergs, photons) and supporting spectral channel selection via a lookup table (LUT) for emissivity coefficients. It builds on [Ray Traversal and Integration Schemes](8341-ray-traversal-and-integration-schemes.md).
++LOS-integration for visualization computes physical scalar quantities (electron column density, integrated emissivity, or emission-weighted temperature) along camera rays by integrating sampled field values. It differs from standard direct volume ray casting by targeting specific astrophysical diagnostics rather than generic RGBA color compositing, utilizing a neural network or ground truth field to predict local densities and temperatures, and mapping them to emissivity via a lookup table (LUT) or learned field before integration [S1, unofficial]. It is designed for visualizing solar corona structures where physical consistency and unit conversion are critical [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- `rays_o`: Ray origins, shape `(N, 3)`.
+-- `rays_d`: Ray directions, shape `(N, 3)`.
+-- `t_s`: Start times, shape `(M,)`.
+-- `t_e`: End times, shape `(M,)`.
+-- `ray_idx`: Ray indices for samples, shape `(M,)`.
+-- `valid`: Boolean mask for valid rays, shape `(N,)`.
+-- `quantity`: String, one of `'column_ne'`, `'emission'`, `'ewt_temp'`.
+-- `uniform_samples`: Integer, number of uniform samples (default 0).
+-- `r_min_rsun`: Float or None, minimum radius in solar radii (default None).
+-- `r_max_rsun`: Float or None, maximum radius in solar radii (default None).
+-- `channels`: List, tuple, int, or None, spectral line indices to select (default None).
+-- `use_gt`: Boolean, whether to use ground truth fields.
+-- `clamp`: Boolean, whether to clamp log fields.
+-
+-**Outputs:**
+-- `full`: Integrated values, shape `(N, C)` where `C` is the number of intensity channels. Contains NaN for invalid rays.
++**Inputs and Outputs:**
++*   **Inputs:** Ray origins `rays_o` (shape `(N, 3)`), ray directions `rays_d` (shape `(N, 3)`), start times `t_s` (shape `(M,)`), end times `t_e` (shape `(M,)`), and ray indices `ray_idx` (shape `(M,)`) mapping samples to rays. Optional parameters: `uniform_samples` (int, default 0), `r_min_rsun` (float or None), `r_max_rsun` (float or None), `channels` (list/tuple/int or None), `quantity` (str: 'column_ne', 'emission', or 'ewt_temp').
++*   **Outputs:** A tensor `full` of shape `(N, C)` where $C$ is the number of spectral channels (or 1 for column density), containing the integrated values. Invalid rays contain NaN [S1, unofficial].
+ 
+ **Data Structures:**
+-- Fields are queried via interpolation (e.g., `self.ne_field(x_xyz)`).
+-- Emissivity coefficients are retrieved from a field `self.ccoef_field` indexed by stacked inputs `(log_ne, log_temp, log_r)`.
+-
+-**Parameters:**
+-- `aabb_scale`: Scaling factor from AABB space to physical units.
+-- `rsun_to_cm`: Conversion constant, default `6.957e10`.
+-- `wavelengths`: List of wavelengths in Angstroms for photon-to-ergs conversion.
++*   `rays_o`, `rays_d`: Float tensors representing 3D vectors.
++*   `valid`: Boolean mask of shape `(N,)` indicating rays that intersect the sampling domain.
++*   `keep_w`: Float tensor of shape `(M,)` masking samples outside the physical corona shell.
++*   `log_ne`, `log_temp`: Logarithmic scalar fields for electron density and temperature.
++*   `ccoef_field`: A neural network or LUT mapping `(log_ne, log_temp, log_r)` to emissivity coefficients [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Ray Preparation:** Convert `rays_o` and `rays_d` to the renderer's dtype and device.
+-2.  **Sampling:**
+-    - If `uniform_samples > 0`, call `_sample_uniform_shell` to obtain `t_s`, `t_e`, `ray_idx`, and `valid`.
+-    - Otherwise, call `_sample_points_along_rays`.
+-3.  **Coordinate Conversion:**
+-    - Compute midpoints: $t_{mid} = 0.5 \times (t_s + t_e)$.
+-    - Compute Cartesian coordinates in AABB space: $x_{AABB} = rays_o[valid][ray\_idx] + t_{mid} \times rays_d[valid][ray\_idx]$.
+-    - Scale to physical units: $x_{xyz} = x_{AABB} \times aabb\_scale$.
+-4.  **Radial Masking:**
+-    - Compute sample radius: $r_{samp} = \|x_{xyz}\|_2$.
+-    - Initialize mask: $keep\_w = \mathbf{1}$.
+-    - If `r_min_rsun` is not None, $keep\_w \leftarrow keep\_w \times (r_{samp} \ge r_{min\_rsun})$.
+-    - If `r_max_rsun` is not None, $keep\_w \leftarrow keep\_w \times (r_{samp} \le r_{max\_rsun})$.
+-    - This restricts integration to the physically-valid corona shell ($r \ge 1 R_{sun}$) to avoid saturated filled disk artifacts from chromospheric base padding [S1, unofficial].
+-5.  **Field Retrieval:**
+-    - If `use_gt` and `self.ne_field` exists, query $log\_ne = self.ne\_field(x_{xyz})$ and optionally $log\_temp = self.temp\_field(x_{xyz})$.
+-    - Else, call `self._predict_learned_fields(x_AABB)` to get $log\_ne$ and $log\_temp$.
+-    - If $log\_temp$ is None but `self.temp_field` exists, query it directly.
+-    - If `clamp` is True, clamp $log\_ne$ and $log\_temp$ using configured min/max bounds.
+-6.  **Segment Length:**
+-    - Compute physical segment length: $seg\_len = (t_e - t_s) \times aabb\_scale \times rsun\_to\_cm$.
+-7.  **Integration Helper:**
+-    - Define `integ(vals)`:
+-        - Initialize `out` tensor of size `valid.sum()`.
+-        - Perform `out.index_add_(0, ray_idx, vals * seg_len * keep_w)`.
+-8.  **Quantity-Specific Integration:**
+-    - **If `quantity == 'column_ne'`:**
+-        - $per\_ray = integ(10^{log\_ne})$.
+-    - **If `quantity == 'emission'` or `quantity == 'ewt_temp'`:**
+-        - Compute $r = \|x_{xyz}\|$ and $log\_r = \log_{10}(r)$. Clamp $log\_r$ if `clamp` is True.
+-        - Stack inputs: $ntr = \text{stack}(log\_ne, log\_temp, log\_r)$.
+-        - Query emissivity coefficients: $ccoef\_all = self.ccoef\_field(ntr)$.
+-        - Transpose $ccoef\_all$ to shape $(M, C)$.
+-        - If `channels` is specified, select those channels.
+-        - Sum over channels to get emissivity $\epsilon$.
+-        - **For `emission`:** $per\_ray = integ(\epsilon)$.
+-        - **For `ewt_temp`:**
+-            - $num = integ(10^{log\_temp} \times \epsilon)$.
+-            - $den = integ(\epsilon)$.
+-            - $per\_ray = num / \max(den, 10^{-30})$.
+-9.  **Finalization:**
+-    - Initialize `full` tensor of shape `(rays_o.shape[0], C)` with NaN.
+-    - Set `full[valid] = per_ray`.
+-    - Return `full`.
++
++1.  **Ray Preparation:** Convert `rays_o` and `rays_d` to the renderer's dtype and device. If `uniform_samples > 0`, sample uniform points along the ray to determine `t_s`, `t_e`, `ray_idx`, and `valid`. Otherwise, use pre-computed points [S1, unofficial].
++
++2.  **Coordinate Transformation:** Compute sample midpoints $t_{mid} = 0.5 \times (t_s + t_e)$. Calculate Cartesian coordinates in the axis-aligned bounding box (AABB) space:
++    $$ \mathbf{x}_{AABB} = \mathbf{rays\_o}_{valid}[\mathbf{ray\_idx}] + t_{mid} \odot \mathbf{rays\_d}_{valid}[\mathbf{ray\_idx}] $$
++    where $\odot$ denotes element-wise multiplication and indexing is applied appropriately. Convert to physical units:
++    $$ \mathbf{x}_{xyz} = \mathbf{x}_{AABB} \times \text{aabb\_scale} $$
++    [S1, unofficial].
++
++3.  **Radial Masking:** Compute sample radius $r_s = \|\mathbf{x}_{xyz}\|_2$. Initialize `keep_w` as ones. Apply radial constraints:
++    $$ \text{keep\_w} = \text{keep\_w} \times \mathbb{I}(r_s \ge r_{min\_rsun}) \times \mathbb{I}(r_s \le r_{max\_rsun}) $$
++    This prevents artifacts from the saturated chromospheric base padding below $1 R_{sun}$ [S1, unofficial].
++
++4.  **Field Retrieval:**
++    *   If using ground truth (`use_gt` and `ne_field` exists), query $\log n_e = \text{ne\_field}(\mathbf{x}_{xyz})$ and optionally $\log T = \text{temp\_field}(\mathbf{x}_{xyz})$.
++    *   Otherwise, predict fields using a neural network: $\_, \log n_e, \log T = \text{predict\_learned\_fields}(\mathbf{x}_{AABB})$.
++    *   Clamp $\log n_e$ and $\log T$ if configured [S1, unofficial].
++
++5.  **Segment Length:** Compute physical segment length in centimeters:
++    $$ \Delta l = (t_e - t_s) \times \text{aabb\_scale} \times \text{rsun\_to\_cm} $$
++    where $\text{rsun\_to\_cm} = 6.957 \times 10^{10}$ [S1, unofficial].
++
++6.  **Integration Helper:** Define `integ(vals)` which accumulates values along rays:
++    $$ \text{out}[\mathbf{ray\_idx}] \leftarrow \text{out}[\mathbf{ray\_idx}] + \text{vals} \times \Delta l \times \text{keep\_w} $$
++    [S1, unofficial].
++
++7.  **Quantity-Specific Integration:**
++    *   **column_ne:** Compute electron density $n_e = 10^{\log n_e}$. Integrate:
++        $$ \text{per\_ray} = \text{integ}(n_e) $$
++        [S1, unofficial].
++    *   **emission:**
++        1.  Compute $r = \|\mathbf{x}_{xyz}\|_2$ and $\log r = \log_{10}(r)$. Clamp $\log r$.
++        2.  Stack inputs: $\mathbf{ntr} = [\log n_e, \log T, \log r]^T$. Transpose to shape $(M, 3)$.
++        3.  Query emissivity coefficient: $\mathbf{ccoef} = \text{ccoef\_field}(\mathbf{ntr})$.
++        4.  Select channels if specified. Sum over channels to get total emissivity $\epsilon$ [S1, unofficial].
++        5.  Integrate: $\text{per\_ray} = \text{integ}(\epsilon)$ [S1, unofficial].
++    *   **ewt_temp:**
++        1.  Compute $\epsilon$ as in 'emission'.
++        2.  Compute numerator: $N = \text{integ}(10^{\log T} \times \epsilon)$.
++        3.  Compute denominator: $D = \text{integ}(\epsilon)$.
++        4.  Result: $\text{per\_ray} = N / \max(D, 10^{-30})$ [S1, unofficial].
++
++8.  **Output Assembly:** Initialize `full` tensor of shape `(N, C)` with NaN. Set `full[valid] = per_ray`. Return `full` [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def los_integration(rays_o, rays_d, t_s, t_e, ray_idx, valid, quantity, 
+-                    uniform_samples=0, r_min_rsun=None, r_max_rsun=None, 
+-                    channels=None, use_gt=False, clamp=False, 
+-                    aabb_scale=1.0, rsun_to_cm=6.957e10, wavelengths=None):
++def los_integration(rays_o, rays_d, t_s, t_e, ray_idx, valid, 
++                    quantity='emission', uniform_samples=0, 
++                    r_min_rsun=None, r_max_rsun=None, channels=None,
++                    aabb_scale=1.0, rsun_to_cm=6.957e10, 
++                    ne_field=None, temp_field=None, ccoef_field=None,
++                    use_gt=False, clamp=False):
++    """
++    Performs Line-of-Sight integration for visualization.
++    """
+     # 1. Ray Preparation
+-    # (Assume rays_o, rays_d are already on correct device/dtype)
+-    
+-    # 2. Sampling
+-    if uniform_samples > 0:
+-        t_s, t_e, ray_idx, valid = sample_uniform_shell(rays_o, rays_d, uniform_samples)
+-    else:
+-        t_s, t_e, ray_idx, valid = sample_points_along_rays(rays_o, rays_d)
+-        
+-    # 3. Coordinate Conversion
++    # If uniform_samples > 0, _sample_uniform_shell would be called here.
++    # For this implementation, we assume t_s, t_e, ray_idx, valid are provided.
++    
++    # 2. Coordinate Transformation
+     t_mid = 0.5 * (t_s + t_e)
+-    # Select valid rays for coordinate computation
+-    valid_rays_o = rays_o[valid]
+-    valid_rays_d = rays_d[valid]
+-    x_AABB = valid_rays_o[ray_idx] + t_mid[:, None] * valid_rays_d[ray_idx]
+-    x_xyz = x_AABB * aabb_scale
+-    
+-    # 4. Radial Masking
++    # Extract valid rays
++    rays_o_valid = rays_o[valid]
++    rays_d_valid = rays_d[valid]
++    
++    # Gather coordinates for samples
++    # ray_idx maps sample index to ray index in the valid set
++    x_aabb = rays_o_valid[ray_idx] + t_mid[:, None] * rays_d_valid[ray_idx]
++    x_xyz = x_aabb * aabb_scale
++    
++    # 3. Radial Masking
+     r_samp = torch.linalg.vector_norm(x_xyz, dim=-1)
+     keep_w = torch.ones_like(r_samp)
++    
+     if r_min_rsun is not None:
+         keep_w = keep_w * (r_samp >= r_min_rsun)
+@@ -111,75 +99,118 @@
+         keep_w = keep_w * (r_samp <= r_max_rsun)
+         
+-    # 5. Field Retrieval
++    # 4. Field Retrieval
+     if use_gt and ne_field is not None:
+         log_ne = ne_field(x_xyz)
+-        if temp_field is not None:
+-            log_temp = temp_field(x_xyz)
+-        else:
+-            log_temp = None
++        log_temp = temp_field(x_xyz) if temp_field is not None else None
+     else:
+-        _, log_ne, log_temp = predict_learned_fields(x_AABB)
++        # Placeholder for neural network prediction
++        _, log_ne, log_temp = _predict_learned_fields(x_aabb)
+         if log_temp is None and temp_field is not None:
+             log_temp = temp_field(x_xyz)
+             
+     if clamp:
+-        log_ne = torch.clamp(log_ne, min=log_ne_min, max=log_ne_max)
++        log_ne = torch.clamp(log_ne, min=min_log_ne, max=max_log_ne)
+         if log_temp is not None:
+-            log_temp = torch.clamp(log_temp, min=log_temp_min, max=log_temp_max)
+-            
+-    # 6. Segment Length
++            log_temp = torch.clamp(log_temp, min=min_log_temp, max=max_log_temp)
++            
++    # 5. Segment Length
+     seg_len = (t_e - t_s) * aabb_scale * rsun_to_cm
+     
+-    # 7. Integration Helper
++    # 6. Integration Helper
++    # Initialize output for valid rays
++    n_valid = valid.sum()
++    out = torch.zeros((n_valid, 1 if quantity == 'column_ne' else 1), device=rays_o.device)
++    
+     def integ(vals):
+-        out = torch.zeros(valid.sum(), device=vals.device, dtype=vals.dtype)
+-        out.index_add_(0, ray_idx, vals * seg_len * keep_w)
+-        return out
+-        
+-    # 8. Quantity-Specific Integration
++        # vals shape: (M, ...)
++        # out shape: (n_valid, ...)
++        # ray_idx maps M samples to n_valid rays
++        out.index_add_(0, ray_idx, vals * seg_len[:, None] * keep_w[:, None])
++        
++    # 7. Quantity-Specific Integration
+     if quantity == 'column_ne':
+-        per_ray = integ(torch.pow(10.0, log_ne))
+-    elif quantity in ('emission', 'ewt_temp'):
++        ne = torch.pow(10.0, log_ne)
++        integ(ne)
++        per_ray = out
++        
++    elif quantity in ['emission', 'ewt_temp']:
+         r = torch.linalg.vector_norm(x_xyz, dim=-1)
+         log_r = torch.log10(r)
+         if clamp:
+-            log_r = torch.clamp(log_r, min=log_r_min, max=log_r_max)
+-            
++            log_r = torch.clamp(log_r, min=min_log_r, max=max_log_r)
++            
++        # Stack inputs: (M, 3)
+         ntr = torch.stack([log_ne, log_temp, log_r], dim=-1)
+-        ccoef_all = ccoef_field(ntr)
+-        # Transpose to (M, C)
+-        ccoef_all = ccoef_all.transpose(0, 1) # Assuming ccoef_field returns (C, M) or similar layout requiring transpose
++        
++        # Query emissivity coefficient
++        ccoef_all = ccoef_field(ntr) # Returns (M, C)
+         
+         if channels is not None:
+-            ccoef_all = ccoef_all[channels]
+-            
+-        eps = torch.sum(ccoef_all, dim=0)
++            ccoef = ccoef_all[:, channels]
++        else:
++            ccoef = ccoef_all
++            
++        # Sum over channels to get total emissivity epsilon
++        eps = torch.sum(ccoef, dim=-1)
+         
+         if quantity == 'emission':
+-            per_ray = integ(eps)
++            integ(eps)
++            per_ray = out
++            
+         elif quantity == 'ewt_temp':
+-            num = integ(torch.pow(10.0, log_temp) * eps)
+-            den = integ(eps)
+-            per_ray = num / torch.clamp_min(den, 1e-30)
+-    else:
+-        raise ValueError(f"Unknown quantity: {quantity}")
+-        
+-    # 9. Finalization
+-    full = torch.full((rays_o.shape[0], per_ray.shape[1] if quantity in ('emission', 'ewt_temp') else 1), float('nan'), device=rays_o.device, dtype=rays_o.dtype)
++            # Numerator: integral of T * epsilon
++            # Denominator: integral of epsilon
++            # Note: log_temp is log10(T), so T = 10^log_temp
++            num_vals = torch.pow(10.0, log_temp) * eps
++            den_vals = eps
++            
++            # We need separate accumulators or a combined approach
++            # Since integ adds to 'out', we need to manage channels or use separate tensors
++            # Assuming out has shape (n_valid, 2) for [num, den]
++            # Re-initialize or use specific indices
++            out_num = torch.zeros((n_valid, 1), device=rays_o.device)
++            out_den = torch.zeros((n_valid, 1), device=rays_o.device)
++            
++            # Helper for specific accumulator
++            def integ_specific(acc, vals):
++                acc.index_add_(0, ray_idx, vals * seg_len[:, None] * keep_w[:, None])
++                
++            integ_specific(out_num, num_vals)
++            integ_specific(out_den, den_vals)
++            
++            per_ray = out_num / torch.clamp(out_den, min=1e-30)
++            
++    # 8. Output Assembly
++    full = torch.full((rays_o.shape[0], per_ray.shape[1]), float('nan'), device=rays_o.device)
+     full[valid] = per_ray
+     return full
+ ```
+ 
++**Parameters:**
++*   `uniform_samples`: Number of uniform samples. Default 0 [S1, unofficial].
++*   `r_min_rsun`: Minimum radius in solar radii. Default None [S1, unofficial].
++*   `r_max_rsun`: Maximum radius in solar radii. Default None [S1, unofficial].
++*   `channels`: Spectral line indices. Default None [S1, unofficial].
++*   `quantity`: 'column_ne', 'emission', or 'ewt_temp' [S1, unofficial].
++*   `rsun_to_cm`: Conversion factor, default $6.957 \times 10^{10}$ [S1, unofficial].
++*   `wavelengths`: List of wavelengths in Angstroms for photon-to-ergs conversion (used in `ph2ergs` calculation) [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Saturated Disk Artifacts:** Integrating below $r=1 R_{sun}$ creates a saturated filled disk due to chromospheric base padding. Mitigated by masking samples with `keep_w` based on `r_min_rsun` [S1, unofficial].
++*   **Division by Zero:** In `ewt_temp`, the denominator (integrated emissivity) can be zero. Mitigated by `den.clamp_min(1e-30)` [S1, unofficial].
++*   **Invalid Rays:** Rays that do not intersect the volume or sampling domain return NaN [S1, unofficial].
++
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of samples $M$ and rays $N$, dominated by field queries and integration.
+-- **Memory Complexity:** Linear with respect to $M$ and $N$.
+-- **Strengths:** Physically consistent unit conversion; supports spectral channel selection; handles radial cutoffs to prevent artifacts.
+-- **Limitations:** Requires accurate field data (neural network or GT); sensitive to radial boundaries.
+-- **When to use:** When physical quantities (column density, emissivity, temperature) are needed for visualization rather than just intensity.
+-- **When not to use:** When only visual appearance (color/intensity) is required without physical interpretation.
++*   **Time Complexity:** Linear with respect to the number of samples $M$ and rays $N$. The dominant cost is the neural network query or field lookup for each sample [S1, unofficial].
++*   **Memory Complexity:** Linear with respect to $M$ and $N$. Requires storing intermediate tensors for coordinates, fields, and integration accumulators [S1, unofficial].
++*   **Performance:** Performance depends heavily on the speed of the `ccoef_field` (neural network) and the efficiency of the `index_add_` operation for accumulation. GPU acceleration is typical for the tensor operations [S1, unofficial].
++*   **Strengths:** Physically consistent integration; supports multiple diagnostic quantities; handles unit conversions automatically; robust against chromospheric artifacts [S1, unofficial].
++*   **Limitations:** Requires pre-computed or predicted scalar fields; limited to specific astrophysical visualizations; dependent on the accuracy of the underlying field model [S1, unofficial].
++*   **When to Use:** Solar corona visualization where physical quantities like column density or temperature are needed.
++*   **When Not to Use:** General-purpose volume rendering where color compositing is sufficient; scenes without a defined physical field model [S1, unofficial].
+ 
+ ## Background
+-Originated in the CoroNeRF project [S1, unofficial]. It is used for visualizing solar corona properties such as electron density and temperature from neural radiance fields.
++LOS-integration for visualization originates from the CoroNeRF project, which applies neural radiance fields to solar corona data. It was developed to provide physically meaningful visualizations of solar atmospheric structures by integrating neural network-predicted or ground truth scalar fields along rays [S1, unofficial].
+ 
+ ## Sources
+-[S1] CoroNeRF_public, https://github.com/AlanHsu314/CoroNeRF_public, fetched 2026-10-27 (unofficial)+[S1] AlanHsu314/CoroNeRF_public, https://github.com/AlanHsu314/CoroNeRF_public, fetched 2026-10-27 (unofficial)

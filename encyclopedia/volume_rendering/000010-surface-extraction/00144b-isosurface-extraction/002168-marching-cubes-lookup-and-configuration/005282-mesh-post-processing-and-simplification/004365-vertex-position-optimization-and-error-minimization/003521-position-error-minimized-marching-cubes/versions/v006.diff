@@ -1,0 +1,154 @@
+--- v005.md
++++ v006.md
+@@ -26,14 +26,10 @@
+ **Pseudocode:**
+ ```python
+-def pem_marching_cubes(f, dim, isolevel, pem, snap_threshold):
++def pem_marching_cubes(sampler_fn, dim, isolevel, pem, snap_threshold):
+     # Data structures
+-    # grid_signs: size ((dim + 1) // 2) ** 3, uint16_t
+-    # grid_verts: size (dim + 1) ** 3, struct { value: float, index: int, position: vec3 }
+-    # edges: size (dim + 1) ** 3 * 3, struct { grid_v0: int, grid_v1: int }
+-    
+-    grid_signs = [0] * (((dim + 1) // 2) ** 3)
++    grid_signs = [0] * ((dim // 2) ** 3)
+     grid_verts = [{"value": 0.0, "index": -1, "position": (0.0, 0.0, 0.0)} for _ in range((dim + 1) ** 3)]
+     edges = [{"grid_v0": -1, "grid_v1": -1} for _ in range((dim + 1) ** 3 * 3)]
+-    
++
+     # Step 1: Grid Labeling
+     for x in range(dim + 1):
+@@ -41,26 +37,26 @@
+             for z in range(dim + 1):
+                 idx = x * (dim + 1) ** 2 + y * (dim + 1) + z
+-                pos = (float(x), float(y), float(z))
+-                val = f(pos)
+-                grid_verts[idx]["value"] = val
+-                grid_verts[idx]["position"] = pos
++                fx, fy, fz = float(x), float(y), float(z)
++                s = sampler_fn(fx, fy, fz)
++                grid_verts[idx]["value"] = s
++                grid_verts[idx]["position"] = (fx, fy, fz)
+                 grid_verts[idx]["index"] = -1
+-                
++
+                 if pem:
+-                    if val < isolevel:
++                    if s < isolevel:
+                         sign = 0
+-                    elif val == isolevel:
++                    elif s == isolevel:
+                         sign = 1
+                     else:
+                         sign = 2
+                 else:
+-                    sign = 1 if val >= isolevel else 0
+-                
++                    sign = 1 if s >= isolevel else 0
++
+                 block_x = x // 2
+                 block_y = y // 2
+                 block_z = z // 2
+-                block_idx = block_x * (((dim + 1) // 2) ** 2) + block_y * ((dim + 1) // 2) + block_z
++                block_idx = block_x * ((dim // 2) ** 2) + block_y * (dim // 2) + block_z
+                 bit_offset = (x & 1) + 2 * (y & 1) + 4 * (z & 1)
+-                
++
+                 if pem:
+                     grid_signs[block_idx] |= (sign << (2 * bit_offset))
+@@ -80,34 +76,39 @@
+                     else:
+                         nx, ny, nz = x, y, z + 1
+-                    
++
+                     if nx <= dim and ny <= dim and nz <= dim:
+                         n_idx = nx * (dim + 1) ** 2 + ny * (dim + 1) + nz
+                         edge_idx = idx * 3 + edge_dir
+-                        
++
+                         v0 = grid_verts[idx]
+                         v1 = grid_verts[n_idx]
+-                        
+-                        # Check crossing using sign bits
+-                        s0 = v0["value"] - isolevel
+-                        s1 = v1["value"] - isolevel
+-                        has_cross = (s0 < 0 and s1 >= 0) or (s0 >= 0 and s1 < 0)
+-                        
++
++                        # Check crossing
++                        has_cross = (v0["value"] < isolevel and v1["value"] >= isolevel) or \
++                                    (v0["value"] >= isolevel and v1["value"] < isolevel)
++
+                         if has_cross:
+-                            # Compute intersection via linear interpolation
++                            # Compute intersection
++                            s0 = v0["value"] - isolevel
++                            s1 = v1["value"] - isolevel
+                             t = s0 / (s0 - s1)
+                             ix = v0["position"][0] + t * (v1["position"][0] - v0["position"][0])
+                             iy = v0["position"][1] + t * (v1["position"][1] - v0["position"][1])
+                             iz = v0["position"][2] + t * (v1["position"][2] - v0["position"][2])
+-                            
++
+                             edges[edge_idx]["grid_v0"] = idx
+                             edges[edge_idx]["grid_v1"] = n_idx
+-                            
+-                            # Mark vertices for snapping in PEM mode
++
++                            # Snapping marking in PEM mode
+                             if pem:
+-                                # result_mask logic is source-specific; 
+-                                # here we mark endpoints if they are close to isolevel
+-                                if abs(s0) < snap_threshold:
++                                result_mask = 0
++                                if abs(v0["value"] - isolevel) <= snap_threshold:
++                                    result_mask |= 1
++                                if abs(v1["value"] - isolevel) <= snap_threshold:
++                                    result_mask |= 2
++
++                                if result_mask & 1:
+                                     v0["index"] = -2
+-                                if abs(s1) < snap_threshold:
++                                if result_mask & 2:
+                                     v1["index"] = -2
+ 
+@@ -117,31 +118,23 @@
+             for z in range(dim + 1):
+                 idx = x * (dim + 1) ** 2 + y * (dim + 1) + z
+-                
++
+                 # Skip boundary vertices
+                 if x == 0 or x == dim or y == 0 or y == dim or z == 0 or z == dim:
+                     continue
+-                
++
+                 if grid_verts[idx]["index"] == -2:
+-                    # Snap vertex to isosurface by projecting along gradient or edge
+-                    # Standard approach: adjust position to satisfy f(pos) = isolevel
+-                    pos = grid_verts[idx]["position"]
+-                    val = f(pos)
+-                    if abs(val - isolevel) > 1e-6:
+-                        # Simple projection along edge direction for demonstration
+-                        # In practice, use gradient descent or root finding constrained by snap_threshold
+-                        grid_verts[idx]["position"] = pos
+-                    grid_verts[idx]["index"] = idx
++                    # The exact snapping routine (_UMC_Chunk_snap_verts) is not detailed in the sources.
++                    # It adjusts the vertex position to lie on the isosurface.
++                    pass
+ 
+     # Step 5: Mesh Generation
+-    # Use standard Marching Cubes lookup tables with updated grid_verts positions
++    # Proceed with standard Marching Cubes lookup using grid_signs and edges
+     mesh = []
+     for x in range(dim):
+         for y in range(dim):
+             for z in range(dim):
+-                # Standard 2x2x2 block lookup using grid_signs
+-                block_idx = (x // 2) * (((dim + 1) // 2) ** 2) + (y // 2) * ((dim + 1) // 2) + (z // 2)
++                block_idx = (x // 2) * ((dim // 2) ** 2) + (y // 2) * (dim // 2) + (z // 2)
+                 sign_word = grid_signs[block_idx]
+-                # Generate triangles based on sign_word and edges array
+-                # (Standard MC lookup table application omitted for brevity)
++                # Standard MC lookup table application omitted per source limitation.
+                 pass
+     return mesh

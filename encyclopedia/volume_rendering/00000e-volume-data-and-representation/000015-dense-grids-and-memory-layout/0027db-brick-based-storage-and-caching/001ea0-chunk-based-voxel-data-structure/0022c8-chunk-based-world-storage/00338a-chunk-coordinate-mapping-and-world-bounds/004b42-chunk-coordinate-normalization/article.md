@@ -1,0 +1,113 @@
+# Chunk Coordinate Normalization
+
+Also called: Coordinate Validation, Spatial Bounds Checking, World Position Normalization, isSampleCoordInChunkBounds, isVoxelCoordInChunkBounds, isWorldPositionCanonical
+
+## Overview
+Chunk Coordinate Normalization converts a world-space position into a canonical chunk index and local coordinate pair by adjusting the chunk index when the local coordinate falls outside the chunk's physical bounds [S1, unofficial]. It differs from [Chunk Coordinate Mapping and World Bounds](7013-chunk-coordinate-mapping-and-world-bounds.md) by actively correcting non-canonical inputs rather than merely converting between valid representations [S1, unofficial].
+
+## How it works
+**Inputs:** A `WorldPosition` structure containing `chunk` indices and `localPosition` coordinates, along with the constant `CHUNK_SIZE_METERS` (float, physical size per chunk) [S1, unofficial].
+**Outputs:** A normalized `WorldPosition` where `localPosition` components are strictly within $[0, \text{CHUNK\_SIZE\_METERS})$ and `chunk` indices are updated accordingly [S1, unofficial].
+
+**Data Structures:**
+*   `WorldPosition.chunk`: integer indices (x, y, z) [S1, unofficial].
+*   `WorldPosition.localPosition`: floating-point coordinates (x, y, z) [S1, unofficial].
+*   `CHUNK_SIZE`: integer, voxel count per chunk axis [S1, unofficial].
+*   `CHUNK_SIZE_METERS`: float, physical size per chunk [S1, unofficial].
+*   `CHUNK_SAMPLE_SIZE`: integer, sample count per chunk axis [S1, unofficial].
+
+**Steps:**
+1.  **Calculate Chunk Offset:** Compute the number of full chunks the current local position exceeds or falls short of the canonical range using floor division [S1, unofficial].
+    $$ \text{chunkOffset} = \left\lfloor \frac{\text{localPosition}}{\text{CHUNK\_SIZE\_METERS}} \right\rfloor $$
+2.  **Update Chunk Coordinate:** Adjust the chunk index by adding the calculated offset [S1, unofficial].
+    $$ \text{chunkCoordinate}_{\text{new}} = \text{chunkCoordinate}_{\text{old}} + \text{chunkOffset} $$
+3.  **Update Local Position:** Subtract the physical distance covered by the offset from the local position to bring it back into the canonical range [S1, unofficial].
+    $$ \text{localPosition}_{\text{new}} = \text{localPosition}_{\text{old}} - \text{chunkOffset} \times \text{CHUNK\_SIZE\_METERS} $$
+4.  **Overflow Check:** Assert that the normalized chunk coordinate fits within the `int32_t` range to prevent integer overflow during subsequent calculations [S1, unofficial].
+5.  **Validation:** Verify that the resulting `localPosition` components are $\ge 0.0f$ and $< \text{CHUNK\_SIZE\_METERS}$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class WorldPosition:
+    def __init__(self, chunk_x, chunk_y, chunk_z, local_x, local_y, local_z):
+        self.chunk = (chunk_x, chunk_y, chunk_z)
+        self.localPosition = (local_x, local_y, local_z)
+
+def normalize_world_position(wp: WorldPosition, chunk_size_meters: float) -> WorldPosition:
+    """Normalizes a WorldPosition to canonical bounds per axis."""
+    axes = ['x', 'y', 'z']
+    for i, axis in enumerate(axes):
+        local_pos = wp.localPosition[i]
+        chunk_idx = wp.chunk[i]
+        
+        # Step 1: Calculate chunk offset
+        chunk_offset = math.floor(local_pos / chunk_size_meters)
+        
+        # Step 2 & 3: Update chunk and local position
+        chunk_idx += chunk_offset
+        local_pos -= chunk_offset * chunk_size_meters
+        
+        wp.chunk[i] = chunk_idx
+        wp.localPosition[i] = local_pos
+
+    # Step 4: Overflow check
+    assert -2147483648 <= wp.chunk[0] <= 2147483647
+    assert -2147483648 <= wp.chunk[1] <= 2147483647
+    assert -2147483648 <= wp.chunk[2] <= 2147483647
+
+    # Step 5: Validation
+    assert is_world_position_canonical(wp, chunk_size_meters)
+    return wp
+
+def is_world_position_canonical(wp: WorldPosition, chunk_size_meters: float) -> bool:
+    """Checks if localPosition components are >= 0.0f and < CHUNK_SIZE_METERS."""
+    return (
+        0.0 <= wp.localPosition[0] < chunk_size_meters and
+        0.0 <= wp.localPosition[1] < chunk_size_meters and
+        0.0 <= wp.localPosition[2] < chunk_size_meters
+    )
+
+def is_voxel_coord_in_chunk_bounds(voxel_coord, chunk_size: int) -> bool:
+    """Checks voxelCoord.x, y, z < CHUNK_SIZE."""
+    return (
+        voxel_coord[0] < chunk_size and
+        voxel_coord[1] < chunk_size and
+        voxel_coord[2] < chunk_size
+    )
+
+def is_sample_coord_in_chunk_bounds(sample_coord, chunk_sample_size: int) -> bool:
+    """Checks sampleCoord.x, y, z < CHUNK_SAMPLE_SIZE."""
+    return (
+        sample_coord[0] < chunk_sample_size and
+        sample_coord[1] < chunk_sample_size and
+        sample_coord[2] < chunk_sample_size
+    )
+```
+
+**Parameters:**
+*   `CHUNK_SIZE_METERS`: Physical size of a chunk in world units [S1, unofficial].
+*   `CHUNK_SIZE`: Voxel count per chunk axis [S1, unofficial].
+*   `CHUNK_SAMPLE_SIZE`: Sample count per chunk axis [S1, unofficial].
+Typical values for these parameters are not given in the sources [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Chunk Coordinate Overflow:** If the input `localPosition` is extremely large or small, the resulting `chunkCoordinate` may exceed `int32_t` limits [S1, unofficial]. This is handled by an assertion against `std::numeric_limits<int32_t>::min()` and `max()` [S1, unofficial].
+*   **Non-Canonical Input:** If `localPosition` components are outside $[0, \text{CHUNK\_SIZE\_METERS})$, normalization adjusts chunk coordinates to bring them back into range [S1, unofficial]. The final assertion ensures the result is canonical [S1, unofficial].
+
+## Subtopics
+
+### World Position Construction
+Initializes a `WorldPosition` from a chunk coordinate and a local position [S1, unofficial]. It calls `normalizeWorldPositionAxis` for the x, y, and z axes sequentially [S1, unofficial]. The resulting position must pass `isWorldPositionCanonical` [S1, unofficial]. If the input `localPosition` is non-canonical, normalization adjusts the chunk coordinates, and the final assertion ensures the state is canonical [S1, unofficial].
+
+## Operating characteristics
+Time and memory complexity are not given in the sources [S1, unofficial]. The operation modifies the input structure in place [S1, unofficial]. The `int32_t` assertion limits the maximum world extent to approximately $\pm 2 \times 10^9$ chunks [S1, unofficial].
+
+## Background
+Origin and history are not given in the sources [S1, unofficial]. The method is part of a dense grid and memory layout system for volume rendering, specifically within chunk-based voxel data structures [S1, unofficial].
+
+## Sources
+[S1] aaron-eugene/PlaneVoxelLab, https://github.com/aaron-eugene/PlaneVoxelLab, fetched 2026-10-27 (unofficial)

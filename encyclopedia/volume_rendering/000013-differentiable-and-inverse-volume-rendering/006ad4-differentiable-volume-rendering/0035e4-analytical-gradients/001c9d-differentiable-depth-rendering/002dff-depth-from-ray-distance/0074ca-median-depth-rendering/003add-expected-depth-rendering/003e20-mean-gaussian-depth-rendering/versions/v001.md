@@ -1,0 +1,70 @@
+# Mean Gaussian Depth Rendering
+
+Also called: Weighted Mean Gaussian Depth, Alpha-Blended Mean Depth
+
+## Overview
+Mean Gaussian Depth Rendering computes the expected depth of a ray by calculating the weighted mean of sample depths, where weights are derived from the Gaussian's opacity, 2D contribution, and transmittance [S1]. It differs from Mode Depth Rendering, which selects the single Gaussian with the highest weight, by integrating contributions from all Gaussians along the ray to produce a continuous depth value [S2]. This method builds on [Expected Depth Rendering](8816-expected-depth-rendering.md).
+
+## How it works
+**Inputs:**
+- A set of $N$ 3D Gaussians $\{G_k\}_{k=1}^N$.
+- For each Gaussian $k$:
+  - Center position $\mathbf{c}_k$ (from which depth $d_k$ is derived, typically the z-coordinate in camera space).
+  - Opacity $\alpha_k$ (or density $\sigma_k$ converted to opacity).
+  - 2D covariance matrix $\mathbf{\Sigma}_k$ (projected to image plane).
+  - View direction and camera intrinsics.
+
+**Outputs:**
+- A scalar depth value $d(\mathbf{x})$ for each pixel $\mathbf{x}$.
+
+**Data Structures:**
+- Gaussians are typically sorted by depth $d_k$ along the ray to ensure correct front-to-back compositing for transmittance calculation.
+
+**Steps:**
+1. **Sort:** Sort the $N$ Gaussians intersecting the pixel's ray by depth $d_k$ in increasing order (front to back).
+2. **Initialize:** Set transmittance $T_0 = 1.0$. Set accumulated depth $D = 0.0$.
+3. **Iterate:** For each Gaussian $k$ from 1 to $N$:
+   a. Calculate the 2D Gaussian contribution $\mathcal{G}_k^{\text{D}}(\mathbf{x})$ at pixel $\mathbf{x}$. This is the value of the projected 2D Gaussian density at the pixel center.
+   b. Calculate the opacity contribution $o_k$. In standard 3DGS, this is often $\alpha_k$ or derived from density $\sigma_k$ and step size $\Delta t$ as $1 - e^{-\sigma_k \Delta t}$.
+   c. Calculate the weight $w_k = o_k \cdot \mathcal{G}_k^{\text{D}}(\mathbf{x}) \cdot T_k$.
+   d. Update accumulated depth: $D \leftarrow D + d_k \cdot w_k$.
+   e. Update transmittance: $T_{k+1} = T_k \cdot (1 - o_k \cdot \mathcal{G}_k^{\text{D}}(\mathbf{x}))$.
+   f. If $T_{k+1} < \epsilon$ (e.g., $10^{-5}$), break loop.
+4. **Normalize:** The final mean depth is $d(\mathbf{x}) = D$. Note: In some formulations, if the weights are not normalized to sum to 1, the denominator $\sum w_k$ might be required, but Eq. (5) in [S1] implies the weights $o_k \mathcal{G}_k^{\text{D}}(\mathbf{x}) T_k$ are used directly in the sum, effectively assuming the transmittance and opacity terms handle the normalization implicitly or that the sum of weights approximates 1 for opaque surfaces. However, strictly speaking, expected value requires normalization. [S1] Eq. (5) is written as a sum. If the sum of weights $\sum w_k \neq 1$, this is an unnormalized moment. Given the context of "expected depth", normalization is theoretically required. We follow [S1] Eq. (5) literally: $d(\mathbf{x}) = \sum_{k=1}^N d_k o_k \mathcal{G}_k^{\text{D}}(\mathbf{x}) T_k$.
+
+**Formula:**
+The mean depth $d(\mathbf{x})$ for a pixel $\mathbf{x}$ is computed as:
+$$d(\mathbf{x}) = \sum_{k=1}^N d_k o_k \mathcal{G}_k^{\text{D}}(\mathbf{x}) T_k \quad (5)$$
+where:
+- $d_k$ is the depth of the $k$-th Gaussian.
+- $o_k$ is the opacity of the $k$-th Gaussian.
+- $\mathcal{G}_k^{\text{D}}(\mathbf{x})$ is the 2D Gaussian contribution (density) at pixel $\mathbf{x}$.
+- $T_k$ is the transmittance up to the $k$-th Gaussian, $T_k = \prod_{j=1}^{k-1} (1 - o_j \mathcal{G}_j^{\text{D}}(\mathbf{x}))$.
+
+**Parameters:**
+- $\epsilon$: Transmittance threshold for early termination. Typical value: $10^{-5}$ [G].
+
+**Pitfalls:**
+- **Inconsistency with Volumetric Density:** Fitting volumetric density (e.g., from ToF phase encoding) does not guarantee consistency with the rendered mean depth [S1]. If multiple density peaks exist along a ray but only one surface exists, the rendered mean depth diverges from the depth derived from raw quads [S1].
+- **Jensen's Inequality:** The discrepancy arises because sine/cosine functions in phase encoding oscillate, preventing equality in the finite form of Jensen's inequality [S1].
+- **Clustering Requirement:** The gap between fitted density and rendered depth reduces only when all Gaussians are clustered at the same z-position along each ray [S1].
+
+## Subtopics
+
+### Mode Depth Rendering
+Mode Depth Rendering selects the depth of the single Gaussian with the largest contributing weight $w_i = T_i \alpha_i$ as the pixel depth [S2]. The formula is $d_{mode_{x,y}} = d_{\arg \max_i (w_i)}$ [S2]. It differs from Mean Gaussian Depth Rendering by ignoring all other Gaussians, making it discrete and sensitive to the highest-opacity Gaussian rather than a weighted average [S2]. It is chosen when a sharp, single-surface depth is preferred over a continuous expected depth, though it may create ambiguity if low-weight Gaussians with greater depths influence the scene geometry [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \log N)$ for sorting, $O(N)$ for compositing per pixel, where $N$ is the number of Gaussians per ray.
+- **Memory Complexity:** $O(N)$ to store Gaussian attributes.
+- **Strengths:** Provides a continuous depth estimate that accounts for semi-transparent surfaces and noise by averaging [S1].
+- **Limitations:** Can produce inaccurate depth for thin structures or multiple surfaces due to averaging [S1]. Inconsistent with raw ToF measurements if not constrained [S1].
+- **When to use:** When a smooth, expected depth map is needed for differentiable rendering or scene understanding [S1].
+- **When not to use:** When a sharp, single-surface depth is required, or when the scene has multiple distinct surfaces along a ray and averaging is undesirable [S2].
+
+## Background
+Mean Gaussian Depth Rendering is used in the context of optimizing 3D Gaussian Splatting for depth estimation, particularly from Time-of-Flight (ToF) cameras [S1]. It was introduced to address the challenge that optimized volumetric properties (phasors/raw quads) are not the same as the property of interest (depth) [S1]. The method allows for the rendering of mean depth from 3D Gaussians, which can be used in loss functions for training [S1].
+
+## Sources
+[S1] Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52734.2025.01958, fetched 2026-10-26
+[S2] Sparsegs: Sparse View Synthesis Using 3D Gaussian Splatting, https://doi.org/10.1109/3dv66043.2025.00100, fetched 2026-10-26

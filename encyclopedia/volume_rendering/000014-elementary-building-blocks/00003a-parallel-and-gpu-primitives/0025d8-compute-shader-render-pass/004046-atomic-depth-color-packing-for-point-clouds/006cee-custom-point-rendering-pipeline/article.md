@@ -1,0 +1,85 @@
+# Custom Point Rendering Pipeline
+Also called: Software Rasterization of 2 Billion Points
+
+## Overview
+A rendering pipeline that generates Level-of-Detail (LOD) point clouds via compute shaders, renders them to an attribute buffer using atomic operations, and copies the result to the framebuffer [S1, unofficial]. It solves the problem of rendering massive point clouds (billions of points) by amortizing LOD generation over multiple frames and using batch-based frustum culling [S1, unofficial]. It differs from [Atomic Depth-Color Packing for Point Clouds](10206-atomic-depth-color-packing-for-point-clouds.md) by using separate 32-bit atomic operations for depth and color in a multi-pass approach, avoiding the need for 64-bit atomics [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of `PointCloudBatch` structures defining spatial bounds and offsets for point data; structured buffers for point positions (split into low/medium/high parts for LOD) and colors; view-projection matrix.
+*   **Output:** A framebuffer containing the final rendered point cloud image.
+
+**Data Structures:**
+The input point cloud is organized into batches. The layout is defined as [S1, unofficial]:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```cpp
+struct PointCloudBatch {
+    float3 Min;   // World-space minimum corner of the batch bounding box
+    uint Offset;  // Index offset into the position/color buffers
+    float3 Max;   // World-space maximum corner of the batch bounding box
+    uint Count;   // Number of points in this batch
+};
+```
+The attribute buffer used for rendering stores per-pixel attributes. The layout is defined as [S1, unofficial]:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```cpp
+struct PointCloudPixelAttributes {
+    uint colorCount; // Number of points contributing to this pixel
+    uint3 color;     // Accumulated color
+    uint depth;      // Closest depth value (unsigned integer)
+    uint3 pad;       // Padding to align the struct
+};
+```
+
+**Steps:**
+1.  **LOD Generation (Compute Shader):**
+    1.  Execute a compute shader where each thread evaluates a batch of points.
+    2.  Test the batch's bounding box (`Min`, `Max`) against the view frustum. If invisible, exit the thread early [S1, unofficial].
+    3.  For visible batches, iterate over the points.
+    4.  Evaluate the CLOD (Continuous Level of Detail) visibility for each point.
+    5.  If a point passes the CLOD check, project its position into world-space (using the view-projection matrix, assuming the LOD cloud is in world-space and the model matrix is identity) and copy it to the LOD point cloud buffer [S1, unofficial].
+    6.  **Amortization:** To handle the cost of iterating over millions of points, an upper bound on the number of points evaluated per frame is set. The pipeline tracks the last evaluated point index and resumes in the next frame [S1, unofficial].
+    7.  **Double-Buffering:** The LOD point cloud buffers are double-buffered. While points are being evaluated, the other buffer is presented. Once all points are evaluated, the buffers are swapped to hide partial culling results [S1, unofficial].
+
+2.  **Attribute Buffer Initialization:**
+    1.  Clear the `PointCloudPixelAttributes` buffer to zero to prevent corruption from previous frames [S1, unofficial].
+
+3.  **Depth Pass:**
+    1.  Project points from the LOD buffer into clip-space using the view-projection matrix [S1, unofficial].
+    2.  Convert the depth value to an unsigned integer using a bit-cast equivalent (e.g., HLSL `asuint`) to preserve ordering for atomic comparison [S1, unofficial].
+    3.  Perform atomic operations to store the closest depth and accumulate color in the attribute buffer. Note: 32-bit `uint` atomics are used for depth and color components separately because 64-bit atomics require Shader Model 6.6 and DXC, which may not be available [S1, unofficial].
+
+4.  **Framebuffer Copy:**
+    1.  Copy the contents of the attribute buffer to the final framebuffer [S1, unofficial].
+
+**Pitfalls:**
+*   **Atomic Precision:** Using 32-bit atomics instead of 64-bit atomics limits the precision of depth and color packing, potentially leaving performance improvements on the table if hardware supports SM 6.6 [S1, unofficial].
+*   **Synchronization:** In variants using early depth tests, reading the current framebuffer value is not synchronized with other threads. This is safe because depth values only decrease, but may lead to superfluous atomic calls [S2].
+
+## Subtopics
+
+### Early Depth Test
+An optimization that avoids expensive atomicMin calls by checking if the current point's depth is smaller than the value currently in the framebuffer before performing the atomic operation [S2].
+*   **Definition:** Read the current value from the framebuffer storage buffer, compare the current point's depth with the old point's depth, and only perform `atomicMin` if the current point is closer [S2].
+*   **Pseudocode:**
+    ```python
+    oldPoint = framebuffer[pixelID]
+    if point < oldPoint:
+        atomicMin(framebuffer[pixelID], point)
+    ```
+*   **Pitfall:** The read of the current depth value is not synchronized. This does not affect correctness because the real depth buffer value can only become smaller. In the worst case, superfluous `atomicMin` calls are invoked [S2].
+
+## Operating characteristics
+*   **Time Complexity:** The LOD generation pass is amortized over multiple frames, with an upper bound on points evaluated per frame [S1, unofficial]. Batch-based frustum culling provides measurable improvement by allowing early exit for invisible batches [S1, unofficial].
+*   **Memory Complexity:** Requires double-buffering for the LOD point cloud to hide partial culling results [S1, unofficial]. Requires an attribute buffer sized for the screen resolution [S1, unofficial].
+*   **Strengths:** Capable of rendering extremely large point clouds (billions of points) by organizing data into batches and amortizing computation [S1, unofficial].
+*   **Limitations:** Relies on 32-bit atomics if 64-bit support is unavailable, potentially sacrificing precision or performance [S1, unofficial]. Requires careful management of LOD generation across frames to ensure visual consistency [S1, unofficial].
+
+## Background
+The method was developed by Magnopus to render extremely large point clouds, specifically targeting the "Software Rasterization of 2 Billion Points" use case [S1, unofficial]. It was published in a blog post detailing their approach to handling massive datasets in real-time [S1, unofficial].
+
+## Sources
+[S1] How we render extremely large point clouds — Magnopus, https://www.magnopus.com/blog/how-we-render-extremely-large-point-clouds, fetched 2026-10-26 (unofficial)
+[S2] Rendering Point Clouds with Compute Shaders and Vertex Order Optimization, https://doi.org/10.1111/cgf.14345, fetched 2026-10-26

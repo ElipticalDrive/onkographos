@@ -1,0 +1,115 @@
+# Wind-driven Particle Advection
+
+Also called: BlowVoxel, BlowVoxelWithTrail
+
+## Overview
+Wind-driven Particle Advection displaces volumetric particles (voxels) through a static 3D wind vector field to simulate local cloud movement, such as swirls, by sampling the wind based on the particle's normalized position within the volume bounds [S1, unofficial]. It differs from [Global Cloud Flow](2270-global-cloud-flow.md) by using a localized, discrete grid-based wind field rather than a global flow, and from [Noise Texture Advection](10551-noise-texture-advection.md) by explicitly tracking particle positions against a vector field rather than advecting noise coordinates [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A particle position $\mathbf{p} = (x, y, z)$, typically in the range $[-0.5, 0.5]$ for $x, y$ and $[0, 1]$ for $z$; a wind data structure containing dimensions $W \times H \times D$ (where $W=H=m\_Wind.xy$) and a 1D array of 3D vectors `m_renderdata`.
+*   **Output:** Updated particle position $\mathbf{p}'$; a boolean flag indicating if the particle has left the valid wind field or hit a zero-wind cell, requiring a reset.
+
+**Data Structures:**
+*   `m_Wind`: A structure or object holding integer dimensions. Specifically, `m_Wind.xy` represents the width and height of the wind grid (assumed square), and `m_Wind.z` represents the depth.
+*   `m_renderdata`: A 1D array of 3D vectors (floats). The layout is row-major. The index for grid coordinates $(x, y, z)$ is calculated as:
+    $$ \text{index} = z \cdot W \cdot H + y \cdot W + x $$
+    where $W = H = m\_Wind.xy$.
+
+**Steps:**
+1.  **Normalize Position:** Convert the particle's current position $\mathbf{p}$ to the normalized range $[0.0, 1.0]$.
+    $$ \mathbf{p}_{norm} = (x + 0.5, y + 0.5, z) $$
+    This assumes the input $x, y \in [-0.5, 0.5]$ and $z \in [0, 1]$ [S1, unofficial].
+2.  **Boundary Check:** If any component of $\mathbf{p}_{norm}$ is $< 0.0$ or $\ge 1.0$, the particle is outside the valid wind volume. Return `true` (signal reset) [S1, unofficial].
+3.  **Calculate Grid Coordinates:** Compute the integer wind grid indices $(x_w, y_w, z_w)$ by multiplying the normalized position by the wind dimensions:
+    $$ x_w = \lfloor p_{norm,x} \cdot W \rfloor $$
+    $$ y_w = \lfloor p_{norm,y} \cdot H \rfloor $$
+    $$ z_w = \lfloor p_{norm,z} \cdot D \rfloor $$
+    where $W, H, D$ are `m_Wind.xy`, `m_Wind.xy`, and `m_Wind.z` respectively [S1, unofficial].
+4.  **Calculate Linear Index:** Compute the 1D index into `m_renderdata` using row-major ordering:
+    $$ \text{idx} = z_w \cdot W \cdot H + y_w \cdot W + x_w $$
+    [S1, unofficial].
+5.  **Zero-Wind Check:** Retrieve the wind vector $\mathbf{v} = \text{m\_renderdata}[\text{idx}]$. If $\mathbf{v}$ is zero (or effectively zero), return `true` (signal reset) [S1, unofficial].
+6.  **Update Position:** Add the wind vector to the particle's current position:
+    $$ \mathbf{p}' = \mathbf{p} + \mathbf{v} $$
+    Return `false` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def blow_voxel(pos: vec3f, m_wind: WindData, m_renderdata: list[vec3f]) -> bool:
+    """
+    Advection step for wind-driven particle.
+    pos: Current particle position (x,y in [-0.5, 0.5], z in [0, 1])
+    m_wind: Object with attributes xy (width/height) and z (depth)
+    m_renderdata: 1D array of vec3f wind vectors
+    Returns: True if particle needs reset, False otherwise
+    """
+    # Step 1: Normalize to [0.0, 1.0]
+    # Assumes input x,y in [-0.5, 0.5] and z in [0, 1]
+    norm_x = pos.x + 0.5
+    norm_y = pos.y + 0.5
+    norm_z = pos.z
+    
+    # Step 2: Boundary Check
+    if norm_x < 0.0 or norm_x >= 1.0:
+        return True
+    if norm_y < 0.0 or norm_y >= 1.0:
+        return True
+    if norm_z < 0.0 or norm_z >= 1.0:
+        return True
+        
+    # Step 3: Calculate integer grid coordinates
+    # m_wind.xy is width and height, m_wind.z is depth
+    w = m_wind.xy
+    h = m_wind.xy
+    d = m_wind.z
+    
+    wind_x = int(norm_x * w)
+    wind_y = int(norm_y * h)
+    wind_z = int(norm_z * d)
+    
+    # Step 4: Calculate linear index (row-major)
+    # index = z * width * height + y * width + x
+    wind_index = (wind_z * w * h) + (wind_y * w) + wind_x
+    
+    # Step 5: Zero-wind check
+    wind_vec = m_renderdata[wind_index]
+    if wind_vec.x == 0.0 and wind_vec.y == 0.0 and wind_vec.z == 0.0:
+        return True
+        
+    # Step 6: Update position
+    pos.x += wind_vec.x
+    pos.y += wind_vec.y
+    pos.z += wind_vec.z
+    
+    return False
+```
+
+**Parameters:**
+*   `m_Wind.xy`: Wind grid width and height. Typical values depend on the resolution of the wind data file (e.g., 128, 256) [S1, unofficial].
+*   `m_Wind.z`: Wind grid depth. Typical values depend on the resolution (e.g., 74) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Handling:** Particles leaving the $[0,1]$ normalized volume or hitting zero-wind cells trigger a reset. The implementation assumes the wind data volume is aligned such that edge cases are handled by this reset mechanism [S1, unofficial].
+*   **Precision:** Integer casting for grid coordinates truncates towards zero. This is consistent with the source implementation [S1, unofficial].
+
+## Subtopics
+
+### Particle Trail Advection
+A variant that maintains a history of positions (a trail) for visualization [S1, unofficial]. It shifts the history list and adds the new position. The algorithm stores the current front position as `previous_pos`, performs the standard normalization, boundary check, wind index calculation, and zero-wind check as `BlowVoxel`, calculates the new position by adding the wind vector, and then pushes the new position to the front of the list while popping the back element to maintain a fixed-length trail [S1, unofficial]. A pitfall is that updating the trail every frame might be too fast for visual clarity; the source code contains commented-out logic for throttling updates (e.g., `count % 5 == 0`), suggesting that updating every frame is the active but potentially suboptimal choice [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per particle per frame. The operation involves a constant number of arithmetic operations, array lookups, and comparisons [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ per particle for position storage. The wind field requires $O(W \cdot H \cdot D)$ memory, where $W, H, D$ are the wind grid dimensions [S1, unofficial].
+*   **Strengths:** Simple to implement; efficient for local, discrete wind effects; no need for complex interpolation or derivative calculations [S1, unofficial].
+*   **Limitations:** Discrete grid sampling can lead to aliasing or "blocky" movement if the wind grid resolution is low; particles may get stuck or disappear if they hit zero-wind cells or boundaries without robust reset logic [S1, unofficial].
+*   **When to use:** Suitable for stylized or low-resolution cloud effects where local wind patterns are defined by a discrete grid [S1, unofficial].
+*   **When not to use:** When smooth, continuous flow is required, or when the wind field is very large and sparse, making a dense grid inefficient [S1, unofficial].
+
+## Background
+The method originates from the `CloudRender-PointSplatting` project by qqdiguo, an unofficial implementation of cloud rendering using point splatting [S1, unofficial]. The code is written in C++ and is part of a larger system that includes Gaussian texture parameters and voxel size calculations [S1, unofficial]. The specific `BlowVoxel` function is designed to animate voxels based on a pre-computed wind data file, which is parsed from a filename format like `cloud-er_128_z74_1byte.raw` [S1, unofficial].
+
+## Sources
+[S1] qqdiguo/CloudRender-PointSplatting, https://github.com/qqdiguo/CloudRender-PointSplatting, fetched 2026-10-28 (unofficial)

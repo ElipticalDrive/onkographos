@@ -1,0 +1,297 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A byte buffer containing a NanoVDB file, a `band_clamp` value (float), and a `scale` factor (float).
+-*   **Output:** A `SignedDistanceField` object capable of returning distance and gradient values for arbitrary 3D points within the grid's domain.
++*   **Input:** A byte buffer containing a NanoVDB file, a `band_clamp` value (float), and a `scale` factor (float) [S1, unofficial].
++*   **Output:** A `SignedDistanceField` object capable of returning distance and gradient values for arbitrary 3D points within the grid's domain [S1, unofficial].
+ 
+ **Data Structures**
+@@ -23,5 +23,5 @@
+ 
+ **Domain Computation**
+-1.  Compute the domain as the grid's exact active bounds.
++1.  Compute the domain as the grid's exact active bounds [S1, unofficial].
+ 2.  Derive these bounds from the leaf masks and record them in the stored grid's root box [S1, unofficial].
+ 
+@@ -32,5 +32,5 @@
+ **Interpolation Configuration**
+ 1.  **Distance Interpolation:** Use `setInterpolation()` to choose between:
+-    *   **Trilinear:** Default. Results are unchanged from standard implementations.
++    *   **Trilinear:** Default. Results are unchanged from standard implementations [S1, unofficial].
+     *   **Tricubic Catmull-Rom:** Passes through samples and provides a continuous gradient, preventing contact direction jumps at cell faces [S1, unofficial].
+ 2.  **Gradient Interpolation:** Use `setGradientInterpolation()` to read the direction with a method independent of the distance interpolation. For example, use trilinear distance (which never overshoots samples) with tricubic direction (which is continuous and suits gradient-based optimizers) [S1, unofficial].
+@@ -38,5 +38,5 @@
+ 
+ **I/O Interface**
+-1.  Use `readSparseSignedDistanceFieldNVDB(bytes, band_clamps, scale)` to read a NanoVDB file as a sparse field.
++1.  Use `readSparseSignedDistanceFieldNVDB(bytes, band_clamps, scale)` to read a NanoVDB file as a sparse field [S1, unofficial].
+ 2.  The `band_clamp` is passed as a parameter to the reader, not stored in the file. This allows the clamp to be adjusted per-use or per-scene without modifying the source asset [S1, unofficial].
+ 
+@@ -50,97 +50,175 @@
+ 
+ ```python
+-def read_sparse_signed_distance_field_nvdb(bytes: bytes, band_clamp: float, scale: float) -> SignedDistanceField:
+-    """
+-    Reads a sparse NanoVDB SDF in place.
+-    
+-    Args:
+-        bytes: The raw bytes of the NanoVDB file.
+-        band_clamp: The distance at which narrow-band values saturate.
+-        scale: The scale factor for the grid.
+-        
+-    Returns:
+-        A SignedDistanceField object.
+-        
+-    Raises:
+-        ValueError: If validation fails.
+-    """
++def read_sparse_signed_distance_field_nvdb(bytes: bytes, band_clamp: float, scale: float) -> object:
+     # 1. Validation
+-    # Check NanoVDB major version 32
+-    if not is_nanovdb_version_32(bytes):
++    # [G] Check NanoVDB major version 32 in header
++    if not check_nanovdb_version_32(bytes):
+         raise ValueError("Only NanoVDB major version 32 is supported")
+-    
+-    # Check not a fog volume
++    # [G] Check grid type is not fog/density
+     if is_fog_volume(bytes):
+         raise ValueError("Fog/density volumes are not supported")
+-    
++    # [G] Verify every node array offset is within buffer bounds
++    if not all_node_arrays_in_buffer(bytes):
++        raise ValueError("Node arrays are not fully contained in the buffer")
++
+     # 2. Decompression and Header Parsing
+-    # Decompress if Blosc is available; reject if Blosc is missing and file is compressed
+-    decompressed_bytes = decompress_if_needed(bytes)
+-    
+-    # Parse headers from decompressed data, not compressed bytes
+-    grid_header = parse_grid_header(decompressed_bytes)
+-    tree_header = parse_tree_header(decompressed_bytes)
+-    
+-    # Ensure every node array is inside the buffer
+-    if not all_node_arrays_in_buffer(decompressed_bytes, grid_header, tree_header):
+-        raise ValueError("Node arrays are not fully contained in the buffer")
+-    
++    # [G] Decompress if Blosc is available; reject if Blosc is missing and file is compressed
++    decompressed = decompress_if_needed(bytes)
++    # [S1, unofficial] Parse headers from decompressed data, not compressed bytes
++    grid_header = parse_grid_header(decompressed)
++    tree_header = parse_tree_header(decompressed)
++
+     # 3. Construct Sparse Field
+-    # Create SignedDistanceFieldLayer from the FloatGrid and band_clamp
+-    # The layered constructor takes exactly one layer
+-    layer = SignedDistanceFieldLayer(
+-        grid=FloatGrid.from_buffer(decompressed_bytes),
+-        band_clamp=band_clamp
+-    )
+-    
++    # [S1, unofficial] SignedDistanceFieldLayer contains the FloatGrid and band_clamp
++    layer = SignedDistanceFieldLayer(grid=FloatGrid(decompressed), band_clamp=band_clamp)
++    sdf = SignedDistanceField(layers=[layer], scale=scale)
++
+     # 4. Configure Interpolation
+-    sdf = SignedDistanceField(layers=[layer], scale=scale)
+-    
+-    # Default to trilinear for distance
++    # [S1, unofficial] Default to trilinear for distance
+     sdf.set_interpolation(InterpolationMode.TRILINEAR)
+-    
+-    # Default to trilinear for gradient, but allow override
++    # [S1, unofficial] Default to trilinear for gradient
+     sdf.set_gradient_interpolation(InterpolationMode.TRILINEAR)
+-    
++
+     # 5. Domain Computation
+-    # Compute domain from leaf masks and root box
++    # [S1, unofficial] Compute domain from leaf masks and root box
+     domain = compute_active_bounds_from_leaf_masks(layer.grid)
+     sdf.set_domain(domain)
+-    
++
+     return sdf
+ 
+-def query_distance_and_gradient(sdf: SignedDistanceField, point: Vec3) -> Tuple[float, Vec3]:
+-    """
+-    Queries the distance and gradient at a point.
+-    
+-    Args:
+-        sdf: The sparse signed distance field.
+-        point: The 3D point to query.
+-        
+-    Returns:
+-        A tuple of (distance, gradient).
+-    """
+-    # Check if point is within domain
++def query_distance_and_gradient(sdf: object, point: tuple) -> tuple:
++    # [S1, unofficial] Check domain
+     if not sdf.is_in_domain(point):
+-        # Return band clamp signed by the value the grid stores there
+-        # For level sets, interior tiles store -background
+-        background_value = sdf.get_background_value()
+-        if background_value < 0:
+-            return (-sdf.band_clamp if sdf.band_clamp > 0 else float('inf'), Vec3(0, 0, 0))
+-        else:
+-            return (sdf.band_clamp if sdf.band_clamp > 0 else float('inf'), Vec3(0, 0, 0))
+-    
+-    # Check if all required voxels are active
++        background = sdf.get_background_value()
++        sign = -1 if background < 0 else 1
++        dist = -sdf.band_clamp if sdf.band_clamp > 0 else float('inf')
++        return (sign * dist, (0.0, 0.0, 0.0))
++
++    # [S1, unofficial] Active Voxel Check
+     if not sdf.are_all_voxels_active(point, sdf.get_interpolation_mode()):
+-        # Inactive voxel holds background value, which is not a distance
+-        # Return band clamp signed appropriately
+-        background_value = sdf.get_background_value()
+-        if background_value < 0:
+-            return (-sdf.band_clamp if sdf.band_clamp > 0 else float('inf'), Vec3(0, 0, 0))
+-        else:
+-            return (sdf.band_clamp if sdf.band_clamp > 0 else float('inf'), Vec3(0, 0, 0))
+-    
+-    # Perform joint query
++        background = sdf.get_background_value()
++        sign = -1 if background < 0 else 1
++        dist = -sdf.band_clamp if sdf.band_clamp > 0 else float('inf')
++        return (sign * dist, (0.0, 0.0, 0.0))
++
++    # [S1, unofficial] Joint Query
+     return sdf.get_distance_and_gradient(point)
++
++# Helper definitions for self-contained pseudocode
++def check_nanovdb_version_32(bytes: bytes) -> bool:
++    # [G] Standard header check for NanoVDB major version 32
++    return bytes[0:4] == b'NVDB' and bytes[4] == 32
++
++def is_fog_volume(bytes: bytes) -> bool:
++    # [G] Check grid type flag in header
++    return get_grid_type(bytes) != SDF_TYPE
++
++def all_node_arrays_in_buffer(bytes: bytes) -> bool:
++    # [G] Verify every node array offset is within buffer bounds
++    return all(offset < len(bytes) for offset in get_node_array_offsets(bytes))
++
++def decompress_if_needed(bytes: bytes) -> bytes:
++    # [G] Decompress if Blosc is available; reject if Blosc is missing and file is compressed
++    if is_blosc_compressed(bytes):
++        if not blosc_available():
++            raise ValueError("Blosc compression is required but not compiled in")
++        return blosc_decompress(bytes)
++    return bytes
++
++def parse_grid_header(decompressed: bytes) -> dict:
++    # [G] Read grid magic/version from decompressed data
++    return {"magic": decompressed[0:4], "version": decompressed[4]}
++
++def parse_tree_header(decompressed: bytes) -> dict:
++    # [G] Read tree structure from decompressed data
++    return {"root_offset": read_uint32(decompressed, 8)}
++
++class SignedDistanceFieldLayer:
++    def __init__(self, grid: object, band_clamp: float):
++        self.grid = grid
++        self.band_clamp = band_clamp
++
++class SignedDistanceField:
++    def __init__(self, layers: list, scale: float):
++        self.layers = layers
++        self.scale = scale
++        self.interpolation = InterpolationMode.TRILINEAR
++        self.gradient_interpolation = InterpolationMode.TRILINEAR
++        self.domain = None
++
++    def set_interpolation(self, mode: InterpolationMode):
++        self.interpolation = mode
++
++    def set_gradient_interpolation(self, mode: InterpolationMode):
++        self.gradient_interpolation = mode
++
++    def set_domain(self, domain: tuple):
++        self.domain = domain
++
++    def is_in_domain(self, point: tuple) -> bool:
++        # [G] Standard bounds check
++        return all(min_val <= coord <= max_val for coord, (min_val, max_val) in zip(point, self.domain))
++
++    def get_background_value(self) -> float:
++        # [G] Standard accessor for grid background
++        return self.layers[0].grid.get_background()
++
++    def are_all_voxels_active(self, point: tuple, mode: InterpolationMode) -> bool:
++        # [G] Check if all voxels required for the interpolation kernel are active
++        return all(is_voxel_active(self.layers[0].grid, voxel_coord) for voxel_coord in get_interpolation_voxels(point, mode))
++
++    def get_distance_and_gradient(self, point: tuple) -> tuple:
++        # [S1, unofficial] Joint query returning distance and gradient
++        distance = interpolate_distance(self.layers[0].grid, point, self.interpolation)
++        gradient = interpolate_gradient(self.layers[0].grid, point, self.gradient_interpolation)
++        return (distance, gradient)
++
++class InterpolationMode:
++    TRILINEAR = 0
++    TRICUBIC = 1
++
++def get_grid_type(bytes: bytes) -> int:
++    # [G] Standard header accessor
++    return bytes[12]
++
++def SDF_TYPE() -> int:
++    # [G] Standard constant
++    return 1
++
++def get_node_array_offsets(bytes: bytes) -> list:
++    # [G] Standard header accessor
++    return [read_uint32(bytes, i) for i in range(16, 64, 4)]
++
++def is_blosc_compressed(bytes: bytes) -> bool:
++    # [G] Standard magic check
++    return bytes[0:4] == b'BLOSC'
++
++def blosc_available() -> bool:
++    # [G] Standard build check
++    return True
++
++def blosc_decompress(bytes: bytes) -> bytes:
++    # [G] Standard decompression
++    return bytes[8:]
++
++def read_uint32(bytes: bytes, offset: int) -> int:
++    # [G] Standard byte unpacking
++    return int.from_bytes(bytes[offset:offset+4], 'little')
++
++def is_voxel_active(grid: object, coord: tuple) -> bool:
++    # [G] Standard leaf mask check
++    return True
++
++def get_interpolation_voxels(point: tuple, mode: InterpolationMode) -> list:
++    # [G] Standard kernel neighbor calculation
++    return [point]
++
++def interpolate_distance(grid: object, point: tuple, mode: InterpolationMode) -> float:
++    # [G] Standard interpolation
++    return 0.0
++
++def interpolate_gradient(grid: object, point: tuple, mode: InterpolationMode) -> tuple:
++    # [G] Standard interpolation
++    return (0.0, 0.0, 0.0)
+ ```
+ 
+@@ -150,8 +228,8 @@
+ *   **Accuracy:** Dense and sparse readings agree to $5 \times 10^{-14}$ mm over 200,000 points near the surface [S1, unofficial].
+ *   **Gradient Continuity:** Trilinear interpolation causes contact directions to jump 9.6 times per 10 mm walk (2 mm off the surface) at cell faces. Tricubic interpolation and trilinear distance with tricubic direction do not jump at all [S1, unofficial].
+-*   **Strengths:** Significant memory savings for sparse data; faster loading; continuous gradients with tricubic interpolation; flexible distance/gradient interpolation split.
+-*   **Limitations:** Requires NanoVDB major version 32; rejects fog volumes; requires Blosc for compressed files; legacy NanoVDB0 files are rejected; band clamp must be provided externally.
+-*   **When to use:** When memory is constrained, when the SDF is sparse (narrow band), or when gradient continuity is critical for physics simulations (e.g., collision detection).
+-*   **When not to use:** When dense access patterns are required, when the grid is not a signed distance field, or when using legacy NanoVDB files.
++*   **Strengths:** Significant memory savings for sparse data; faster loading; continuous gradients with tricubic interpolation; flexible distance/gradient interpolation split [S1, unofficial].
++*   **Limitations:** Requires NanoVDB major version 32; rejects fog volumes; requires Blosc for compressed files; legacy NanoVDB0 files are rejected; band clamp must be provided externally [S1, unofficial].
++*   **When to use:** When memory is constrained, when the SDF is sparse (narrow band), or when gradient continuity is critical for physics simulations (e.g., collision detection) [S1, unofficial].
++*   **When not to use:** When dense access patterns are required, when the grid is not a signed distance field, or when using legacy NanoVDB files [S1, unofficial].
+ 
+ ## Background

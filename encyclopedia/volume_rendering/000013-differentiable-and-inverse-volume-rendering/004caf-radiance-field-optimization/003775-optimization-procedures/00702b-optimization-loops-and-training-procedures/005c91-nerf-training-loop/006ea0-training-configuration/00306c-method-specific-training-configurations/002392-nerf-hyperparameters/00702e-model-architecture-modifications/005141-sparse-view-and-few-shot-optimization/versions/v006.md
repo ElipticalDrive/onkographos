@@ -1,0 +1,36 @@
+# Sparse View and Few-Shot Optimization
+
+Also called: Few-shot NeRF
+
+## Overview
+Sparse View and Few-Shot Optimization addresses the severe artifacts, overfitting, and geometry breakdown that occur when training Neural Radiance Fields (NeRF) with a drastically reduced number of input viewpoints ($|S| < 20$) [S1, unofficial]. It sets itself apart from standard NeRF training by introducing specialized regularization, data densification, or geometric constraints to mitigate the ambiguity inherent in limited observations, rather than relying on large-scale pre-training or external depth priors.
+
+## Shared principles
+The core task of a NeRF network architecture is to learn a continuous volumetric scene representation $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$, where $\mathbf{x} \in \mathbb{R}^3$ is the spatial position, $\mathbf{d} \in \mathbb{R}^3$ is the viewing direction, $\sigma$ is the volume density, and $\mathbf{c}$ is the view-dependent color. The rendering process integrates these outputs along rays using standard volume rendering equations.
+
+## Subtopics
+
+### [Simple-NeRF](7371-simple-nerf.md)
+Simple-NeRF is a regularization method for sparse-input Neural Radiance Fields that employs two simpler augmented NeRF models (points and views augmentations) to provide depth supervision to the main NeRF, mitigating overfitting and implausible geometries caused by high capacity and sparse views [7371-simple-nerf.md]. It sets itself apart from prior works by obtaining depth supervision through augmented models without requiring pre-training on large datasets or external depth models [7371-simple-nerf.md]. Unlike RegNeRF, which uses depth smoothness priors and may fuse objects at different depths, Simple-NeRF mitigates both floaters and incorrect depth issues by learning in-situ depth priors [7371-simple-nerf.md].
+
+### [WaH-NeRF](11548-wah-nerf.md)
+WaH-NeRF is a training framework for Neural Radiance Fields (NeRF) from sparse inputs that mitigates rendering confusion by addressing two root causes: sample-position confusion ("WHERE to Sample?") and prediction confusion ("HOW to Predict?") [11548-wah-nerf.md]. It differs from sibling methods like [Simple-NeRF](7371-simple-nerf.md) and [Deceptive-NeRF/3DGS](11859-deceptive-nerf-3dgs.md) by analyzing the sample-render process and mitigating confusion before volume rendering, rather than relying on regularization for rendered color and depth images after volume rendering [11548-wah-nerf.md]. Unlike [FlipNeRF](12967-flipnerf.md) which uses geometric consistency via flipped rays, WaH-NeRF uses a Deformable Sampling strategy for seen viewpoints and a Semi-Supervised NeRF paradigm based on pose perturbation for unseen viewpoints [11548-wah-nerf.md].
+
+### [Deceptive-NeRF/3DGS](11859-deceptive-nerf-3dgs.md)
+Deceptive-NeRF/3DGS is a sparse-view reconstruction method that overcomes the artifacts and overfitting inherent in standard NeRF and 3D Gaussian Splatting pipelines by densifying the input data. Unlike methods that use diffusion models as per-step regularizers (e.g., SDS), this approach generates photorealistic pseudo-observations (RGB-D images) from coarse renders and treats them as real training views [11859-deceptive-nerf-3dgs.md]. This "view densifier" strategy avoids the computational cost of inferring a large diffusion model at every optimization step, resulting in nearly tenfold faster training while improving reconstruction quality [11859-deceptive-nerf-3dgs.md].
+
+### FlipNeRF
+FlipNeRF is a regularization method for few-shot novel view synthesis that generates auxiliary "flipped reflection rays" from original input rays and estimated surface normals to improve rendering quality and surface normal accuracy with sparse inputs [12967-flipnerf.md]. Unlike existing regularization methods that focus on accurate depth estimation or pre-training methods requiring large datasets, FlipNeRF is optimized per scene without pre-training and derives rays from estimated normals without heuristic factors [12967-flipnerf.md]. It sets itself apart from Ref-NeRF by generating additional training rays rather than reparameterizing the radiance field's input viewing direction [12967-flipnerf.md].
+
+### Few-shot NeRF
+#### definition
+- NeRF represents a scene as a continuous function $F_\theta(\cdot)$ implemented by a neural network with parameters $\theta$, taking 3D coordinates $\mathbf{x}$ and viewing direction $\mathbf{d}$ with positional encoding $\gamma(\cdot)$ to output color $\mathbf{c}$ and density $\sigma$ [S1, unofficial].
+
+#### parameter
+- Few-shot NeRF setting: number of input viewpoints $|S|$ is drastically reduced to a few viewpoints, specifically $|S| < 20$ [S1, unofficial].
+
+## Background
+The term "Few-shot NeRF" was introduced to describe scenarios where the number of input viewpoints is drastically reduced from the standard hundreds to fewer than 20, leading to high divergent behaviors such as geometry breakdown and artifacts [S1, unofficial]. The DaRF paper [S1, unofficial] explores this setting, noting that existing frameworks applied regularization techniques at unknown viewpoints to constrain NeRF with additional 3D priors, though with limited performance.
+
+## Sources
+[S1] DaRF: Boosting Radiance Fields from Sparse Inputs with Monocular Depth Adaptation, https://doi.org/10.48550/arxiv.2305.19201, fetched 2026-10-29 (unofficial)

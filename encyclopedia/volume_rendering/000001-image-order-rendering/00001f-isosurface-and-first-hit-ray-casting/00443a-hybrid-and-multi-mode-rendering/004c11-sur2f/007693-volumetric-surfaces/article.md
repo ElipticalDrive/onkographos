@@ -1,0 +1,126 @@
+# Volumetric Surfaces
+
+
+## Overview
+Volumetric Surfaces is a real-time view synthesis method that represents objects as semi-transparent multi-layer meshes rendered in a fixed order [S1]. It solves the problem of efficiently modeling fuzzy geometries by bounding the number of sampling locations per ray and eliminating the computational overhead of empty-space skipping and primitive sorting found in volume rendering and splatting, respectively [S1]. Unlike its parent [Sur2f](13145-sur2f.md), which unifies an implicit SDF and an explicit mesh via a shared neural shader, Volumetric Surfaces explicitly bakes learned SDF shells into rasterizable meshes with UV textures to achieve sorting-free, hardware-accelerated rendering [S1].
+
+## How it works
+**Inputs:** Training images (multi-view or single-view with poses); initial scene geometry (optional).
+**Outputs:** A set of $N$ semi-transparent meshes (SDF shells) with associated UV textures; a fixed rendering order.
+
+**Data Structures:**
+*   **Mesh Layer $M_i$:** A triangle mesh representing the $i$-th SDF shell.
+    *   Vertices: $\mathbf{V}_i \in \mathbb{R}^{3 \times V_i}$.
+    *   Faces: $\mathbf{F}_i \in \mathbb{Z}^{3 \times F_i}$.
+    *   UV Texture: $T_i \in [0,1]^{H \times W \times 4}$, storing color and opacity per texel.
+*   **Rendering State:** Fixed layer index $i \in \{0, \dots, N-1\}$.
+
+**Parameters:**
+*   $N$: Number of layers. Typical range: 3 to 9 [S1]. A 7-layer configuration is noted as optimal for balancing quality and speed [S1].
+*   Spacing: The distance between adjacent SDF shells is learned during training [S1].
+
+**Algorithm Steps:**
+
+1.  **Initialization:** Initialize the model with a single opaque Signed Distance Function (SDF) shell to prevent degenerate solutions during training [S1].
+2.  **Layer Expansion:** Iteratively add new SDF shells to the representation. The optimal spacing between these shells is learned as part of the training process [S1].
+3.  **Training Optimization:**
+    *   **Hierarchical Sampling:** During training, samples are drawn hierarchically, focusing around the depth values along rays to improve efficiency [S1].
+    *   **Loss Functions:** Apply Eikonal loss to enforce the SDF property (gradient magnitude of 1) and curvature loss to ensure smooth, non-intersecting layers [S1].
+    *   **Rendering Loss:** Minimize the difference between rendered images and ground truth images.
+4.  **Baking:** After training converges, "bake" the learned SDF shells into explicit triangle meshes [S1].
+5.  **Texture Fitting:** Fit UV textures to the baked meshes. These textures encode the color and opacity information for each layer [S1].
+6.  **Simplification:** Simplify the multi-layer meshes using established mesh simplification techniques to ensure they are lightweight and suitable for hardware-accelerated rasterization [S1].
+7.  **Rendering (Inference):**
+    *   Rasterize the baked meshes in the fixed learned order.
+    *   For each pixel, the rasterizer determines the sampling locations along the ray based on the depth of the intersected triangles.
+    *   Composite the layers in the fixed order to produce the final image, eliminating the need for sorting [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_volumetric_surfaces(images, poses, num_layers_init=1):
+    """
+    Trains the Volumetric Surfaces representation.
+    """
+    # Step 1: Initialize with a single opaque SDF
+    layers = [create_sdf_shell(opaque=True)]
+    
+    # Step 2: Expand to target number of layers
+    target_layers = 7 # Typical optimal value [S1]
+    while len(layers) < target_layers:
+        # Add new SDF shell with learned spacing relative to previous
+        new_shell = create_sdf_shell(spacing=learned_spacing(layers[-1]))
+        layers.append(new_shell)
+        
+    # Step 3: Optimization Loop
+    for epoch in range(max_epochs):
+        for image, pose in zip(images, poses):
+            # Hierarchical sampling around ray depths [S1]
+            samples = hierarchical_sample_rays(layers, pose)
+            
+            # Render current layers
+            rendered_image = render_layers(layers, samples, pose)
+            
+            # Compute losses
+            # Eikonal loss: ||grad(SDF)|| - 1 = 0 [S1]
+            eikonal_loss = compute_eikonal_loss(layers)
+            # Curvature loss for smoothness [S1]
+            curvature_loss = compute_curvature_loss(layers)
+            # Image reconstruction loss
+            image_loss = compute_image_loss(rendered_image, image)
+            
+            total_loss = image_loss + eikonal_loss + curvature_loss
+            update_parameters(layers, total_loss)
+            
+    return layers
+
+def render_volumetric_surfaces(layers, camera_pose):
+    """
+    Renders the baked meshes in fixed order.
+    """
+    # Step 7: Fixed-order rasterization
+    # No sorting required [S1]
+    color_accum = 0.0
+    alpha_accum = 0.0
+    
+    for layer in layers:
+        # Rasterize mesh to get depth and UV coordinates
+        depth_map, uv_map = rasterize(layer, camera_pose)
+        
+        # Sample texture for color and opacity
+        tex_color, tex_alpha = sample_uv_texture(layer.texture, uv_map)
+        
+        # Alpha compositing in fixed order
+        # C_out = C_in * (1 - alpha) + C_tex * alpha
+        # A_out = A_in * (1 - alpha) + alpha
+        alpha = tex_alpha
+        color = tex_color
+        
+        color_accum = color_accum * (1 - alpha) + color * alpha
+        alpha_accum = alpha_accum * (1 - alpha) + alpha
+        
+        if alpha_accum >= 1.0:
+            break
+            
+    return color_accum
+```
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Solutions:** Training with multiple layers from the start can lead to degenerate geometries. Initialization with a single opaque SDF is required [S1].
+*   **Intersection:** Without curvature and Eikonal losses, layers may intersect, breaking the fixed-order rendering assumption [S1].
+*   **Precision:** Rasterization-based sampling relies on accurate depth values. Mesh simplification must preserve depth accuracy to avoid artifacts [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering is $O(N \cdot R)$, where $N$ is the number of layers and $R$ is the resolution, dominated by rasterization. It avoids the $O(S)$ cost of volume sampling (where $S$ is unbounded samples per ray) and the $O(M \log M)$ cost of sorting $M$ splats [S1].
+*   **Memory Complexity:** $O(N \cdot (V + F + T))$, where $V, F$ are vertices/faces per mesh and $T$ is texture size. The baked meshes and textures are compact [S1].
+*   **Performance:** Enables real-time rendering on low-power devices like laptops and smartphones [S1]. A 7-layer configuration offers an optimal balance of image quality and speed [S1].
+*   **Strengths:** Bounded sampling, no sorting overhead, efficient for fuzzy geometries [S1].
+*   **Limitations:** Requires a training phase to learn layer positions and spacings; less flexible than pure volume rendering for dynamic scene changes without retraining [S1].
+
+## Background
+Volumetric Surfaces was introduced by Stefano Esposito, Anpei Chen, Christian Reiser, et al. in 2024 [S1]. It bridges the gap between the fidelity of volume-based methods and the speed of surface-based methods, specifically targeting real-time view synthesis on mobile hardware [S1]. It builds on concepts from neural rendering and SDFs, differing from [Sur2f](13145-sur2f.md) by explicitly baking the representation into rasterizable meshes rather than using a shared neural shader for implicit and explicit components [S1].
+
+## Sources
+[S1] Volumetric Surfaces: Representing Fuzzy Geometries with Layered Meshes, https://www.emergentmind.com/papers/2409.02482, fetched 2026-10-26

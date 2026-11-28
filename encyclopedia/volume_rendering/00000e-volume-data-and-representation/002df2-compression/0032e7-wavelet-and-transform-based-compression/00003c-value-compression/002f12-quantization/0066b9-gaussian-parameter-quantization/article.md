@@ -1,0 +1,184 @@
+# Gaussian Parameter Quantization
+
+Also called: AIR Quantization, Quantization Schemes for AIR
+
+## Overview
+Gaussian Parameter Quantization is a method for compressing the parameters of 2D Gaussian primitives predicted by feed-forward neural networks, specifically within the AIR (Amortized Image Reconstruction) framework [S1, unofficial]. It solves the problem of high bit-per-pixel (bpp) costs and inference latency associated with storing full-precision Gaussian attributes (position, scale, rotation, color) by mapping continuous values to discrete indices [S1, unofficial]. It is distinguished from sibling methods like GaussianImage and Image-GS by its ability to perform quantization directly on the feed-forward prediction without requiring per-image iterative post-optimization or refinement [S1, unofficial]. Unlike standard scalar quantization which often uses fixed ranges, this method employs adaptive range strategies (Per-image, Learned Global, Adaptive) to balance reconstruction quality against bitrate and speed [S1, unofficial].
+
+## How it works
+
+**Inputs and Outputs**
+*   **Input:** A set of predicted Gaussian primitives $G$ for a specific image, where each primitive contains continuous parameters (position, scale, rotation, color, opacity).
+*   **Output:** A quantized representation $Q(G)$ suitable for storage or transmission, and the corresponding rendered image.
+
+**Data Structures**
+The specific bit allocation and decoding rules are defined in the supplementary material of the source paper [S1, unofficial]. The source notes that Image-GS uses 16-bit for position and scale, and 8-bit for rotation and color [S1, unofficial]. For AIR variants, the bit allocation is kept consistent across compared methods to ensure fair evaluation, but exact bit-widths per attribute for AIR are "Not given in the sources" beyond the general bpp metrics.
+
+**Parameters**
+*   $\bar{\alpha}$: Learnable base scale for the quantization range.
+*   $\bar{\beta}$: Learnable base shift for the quantization range.
+*   $\Delta \alpha, \Delta \beta$: Image-dependent offsets predicted by a network $g$.
+*   $\gamma$: Weight for the quantization error loss term.
+*   $Q(\cdot)$: The quantization function.
+*   $R(\cdot)$: The rendering function.
+
+**Steps**
+1.  **Range Determination:** Determine the quantization range $[\alpha, \beta]$ based on the chosen variant:
+    *   *Per-image Range:* Calculate the min/max of the predicted Gaussian parameters for the current image.
+    *   *Learned Global Range:* Use the fixed learned parameters $\bar{\alpha}, \bar{\beta}$.
+    *   *Adaptive Range:* Compute effective range parameters using offsets predicted from the ViT [CLS] token $z_{cls}$:
+        $$ [\Delta \alpha, \Delta \beta] = g(z_{cls}) $$
+        $$ \alpha = \bar{\alpha} + \Delta \alpha $$
+        $$ \beta = \bar{\beta} + \Delta \beta $$
+        [S1, unofficial]
+2.  **Quantization:** Apply uniform quantization to each Gaussian parameter $p$ using the determined range $[\alpha, \beta]$ and target bit-depth. The source notes that the rounding operator is non-differentiable [S1, unofficial].
+3.  **Training (Quantization-Aware):** During the finetuning phase, quantization is enabled only on the final-stage Gaussian set $G_S$ [S1, unofficial]. The straight-through estimator (STE) is used to pass gradients through the rounding operator during backpropagation [S1, unofficial]. The total loss includes the standard rendering loss and a quantization error penalty:
+    $$ L_q = L_{render}(R(Q(G_S)), I_{gt}) + \gamma L_{err} $$
+    where $L_{err}$ penalizes the difference between the quantized and original parameters [S1, unofficial].
+4.  **Inference:** The pipeline remains fully feed-forward. The quantization range is adjusted adaptively for each image (in the Adaptive variant) or fixed (in Global/Per-image variants), and the Gaussian parameters are quantized directly without iterative fitting [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def quantize_gaussians(gaussians, quantization_mode, base_scale, base_shift, 
+                       offset_predictor, cls_token, ste_enabled=True):
+    """
+    Quantize Gaussian parameters based on the specified mode.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes (pos, scale, rot, color).
+        quantization_mode: 'per_image', 'global', or 'adaptive'.
+        base_scale: Learnable base scale parameter (alpha_bar).
+        base_shift: Learnable base shift parameter (beta_bar).
+        offset_predictor: Neural network g(z_cls) for adaptive offsets.
+        cls_token: ViT [CLS] token for adaptive mode.
+        ste_enabled: Boolean flag for Straight-Through Estimator.
+        
+    Returns:
+        quantized_gaussians: List of quantized Gaussian objects.
+    """
+    quantized_gaussians = []
+    
+    # Determine range parameters
+    if quantization_mode == 'per_image':
+        # Calculate min/max for each attribute across the current Gaussian set
+        # Note: Exact bit allocation details are in supplementary material [S1, unofficial]
+        min_vals = get_min(gaussians)
+        max_vals = get_max(gaussians)
+        alpha = min_vals
+        beta = max_vals
+        
+    elif quantization_mode == 'global':
+        alpha = base_scale
+        beta = base_shift
+        
+    elif quantization_mode == 'adaptive':
+        # Predict bounded offsets from ViT CLS token
+        delta_alpha, delta_beta = offset_predictor(cls_token)
+        alpha = base_scale + delta_alpha
+        beta = base_shift + delta_beta
+        
+    else:
+        raise ValueError("Unknown quantization mode")
+
+    for g in gaussians:
+        q_g = Gaussian()
+        for attr in ['pos', 'scale', 'rot', 'color']:
+            val = g[attr]
+            # Map value to quantized index
+            # Assuming uniform quantization over [alpha, beta]
+            # Index = floor((val - alpha) / (beta - alpha) * (2^bits - 1))
+            # Reconstruction = alpha + (Index / (2^bits - 1)) * (beta - alpha)
+            
+            # Implementation detail: The exact bit-widths per attribute are not 
+            # specified in the main text for AIR, but are kept consistent with 
+            # Image-GS (16-bit for pos/scale, 8-bit for rot/color) for comparison [S1, unofficial].
+            # We assume a generic quantization function Q_attr(val, alpha, beta, bits).
+            
+            if ste_enabled:
+                # Straight-Through Estimator: gradient passes through as identity
+                # during backward pass, but forward pass uses rounded value.
+                q_val = quantize_round(val, alpha, beta)
+            else:
+                q_val = quantize_round(val, alpha, beta)
+                
+            q_g[attr] = q_val
+        quantized_gaussians.append(q_g)
+        
+    return quantized_gaussians
+
+def quantize_round(val, alpha, beta):
+    """
+    Uniform quantization with rounding.
+    """
+    # Normalize to [0, 1]
+    normalized = (val - alpha) / (beta - alpha)
+    # Clamp to [0, 1] to handle boundary cases
+    normalized = max(0.0, min(1.0, normalized))
+    # Quantize to integer levels (e.g., 256 levels for 8-bit)
+    # Note: Exact bit-depths are implementation-specific [S1, unofficial]
+    levels = 256 
+    idx = int(round(normalized * (levels - 1)))
+    # Dequantize
+    reconstructed = alpha + (idx / (levels - 1)) * (beta - alpha)
+    return reconstructed
+```
+
+**Edge Cases and Pitfalls**
+*   **Non-differentiability:** The rounding operator is non-differentiable. This is handled by the Straight-Through Estimator (STE) during training [S1, unofficial].
+*   **Range Selection:** Direct quantization requires an appropriate range. Optimization-based pipelines derive this from iterative fitting, which reintroduces per-image post-optimization, defeating the purpose of a feed-forward model [S1, unofficial].
+*   **Stage-wise Quantization:** Quantization is enabled only on the final-stage Gaussian set $G_S$ during finetuning to maintain the benefits of stage-wise reconstruction supervision in earlier stages [S1, unofficial].
+
+## Subtopics
+
+### Per-image Range
+A quantization variant that directly uses the parameter range (min/max) of each predicted Gaussian set for the current image. It adapts to the specific content of each image but requires computing statistics per image. It achieves 29.37 dB PSNR, 0.973 MS-SSIM, 0.234 LPIPS, 3.51 bpp, and 298 ms inference time [S1, unofficial].
+
+### Learned Global Range
+A quantization variant that learns a fixed global quantization range ($\bar{\alpha}, \bar{\beta}$) applied to all images. It avoids per-image computation but may not adapt well to content variations. It achieves 29.17 dB PSNR, 0.975 MS-SSIM, 0.223 LPIPS, 6.04 bpp, and 298 ms inference time [S1, unofficial].
+
+### Adaptive Range
+A quantization variant that adjusts a global range with image-dependent offsets predicted from the ViT [CLS] token. It combines the efficiency of global parameters with the adaptability of per-image ranges without iterative fitting. It achieves 30.23 dB PSNR, 0.979 MS-SSIM, 0.214 LPIPS, 3.28 bpp, and 300 ms inference time [S1, unofficial].
+
+### Image-Adaptive Quantization with ViT Offsets
+A specific implementation of adaptive quantization where uniform quantization of Gaussian parameters uses a global base quantizer with image-adaptive offsets predicted from the ViT [CLS] token. It avoids per-image post-optimization by predicting bounded offsets $[\Delta \alpha, \Delta \beta] = g(z_{cls})$ and computing effective range $\alpha = \bar{\alpha} + \Delta \alpha, \beta = \bar{\beta} + \Delta \beta$. It uses the straight-through estimator for gradients and adds a quantization-aware rendering loss during finetuning [S1, unofficial].
+
+## Operating characteristics
+
+**Time and Memory Complexity**
+*   **Time:** The method is fully feed-forward. Inference times are reported as ~298-300 ms for AIR variants on the tested hardware, significantly faster than optimization-based methods like GaussianImage which require hundreds of iterations of refinement [S1, unofficial].
+*   **Memory:** Bit-per-pixel (bpp) is reduced compared to full-precision storage. AIR with Adaptive Range achieves 3.28 bpp, compared to 6.04 bpp for Image-GS [S1, unofficial].
+
+**Measured Performance**
+Tests were conducted on DIV2K dataset with a patch size of 7 [S1, unofficial].
+*   **AIR without Quantization:** 30.76 dB PSNR, 0.984 MS-SSIM, 0.193 LPIPS, 0.193 bpp, 292 ms [S1, unofficial].
+*   **AIR with Per-image Range:** 29.37 dB PSNR, 0.973 MS-SSIM, 0.234 LPIPS, 3.51 bpp, 298 ms [S1, unofficial].
+*   **AIR with Learned Global Range:** 29.17 dB PSNR, 0.975 MS-SSIM, 0.223 LPIPS, 6.04 bpp, 298 ms [S1, unofficial].
+*   **AIR with Adaptive Range:** 30.23 dB PSNR, 0.979 MS-SSIM, 0.214 LPIPS, 3.28 bpp, 300 ms [S1, unofficial].
+*   **Comparison:** GaussianImage achieves 26.42 dB PSNR with 3.51 bpp and 4446 Gaussians. Image-GS achieves 30.17 dB PSNR with 6.04 bpp and 3091 Gaussians [S1, unofficial].
+
+**Strengths and Limitations**
+*   **Strengths:** Maintains fully feed-forward inference speed; avoids per-image iterative post-optimization; Adaptive Range offers a good trade-off between quality and bitrate.
+*   **Limitations:** Quantization is lossy; the exact bit allocation details are in supplementary material and not fully specified in the main text; performance depends on the accuracy of the offset predictor in Adaptive Range.
+
+**When to Use**
+Use when a feed-forward, real-time capable Gaussian splatting reconstruction is required, and storage/bandwidth constraints necessitate compression without sacrificing the speed benefits of amortized prediction.
+
+**When Not to Use**
+Do not use if maximum possible reconstruction quality (PSNR/SSIM) is required and iterative optimization is acceptable, as unquantized AIR achieves higher metrics (30.76 dB) [S1, unofficial].
+
+## Background
+
+**Origin**
+Gaussian Parameter Quantization was introduced in the AIR (Amortized Image Reconstruction) framework, a self-supervised feed-forward 2D Gaussian Splatting method [S1, unofficial]. The work builds upon prior quantization schemes in GaussianImage and Image-GS [S1, unofficial].
+
+**History and Development**
+The method was developed to address the high bitrate and inference latency of Gaussian Splatting representations. Previous methods like GaussianImage relied on post-optimization for quantization, which is incompatible with feed-forward pipelines. AIR introduced adaptive range quantization using ViT offsets to enable direct quantization of predicted Gaussians [S1, unofficial].
+
+**Usage**
+Used in feed-forward image reconstruction and novel view synthesis using 2D Gaussian Splatting, particularly in scenarios requiring efficient storage and fast inference [S1, unofficial].
+
+## Sources
+
+[S1] AIR: Amortized Image Reconstruction Framework for Self-Supervised Feed-Forward 2D Gaussian Splatting, https://doi.org/10.48550/arXiv.2605.20820, fetched 2026-10-29 (unofficial)

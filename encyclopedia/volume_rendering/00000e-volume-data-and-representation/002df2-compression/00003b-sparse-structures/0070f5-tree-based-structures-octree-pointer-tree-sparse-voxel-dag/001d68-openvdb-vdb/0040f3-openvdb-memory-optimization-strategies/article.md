@@ -1,0 +1,104 @@
+# OpenVDB Memory Optimization Strategies
+
+Also called: VDB leaf tuning, VDB streaming
+
+## Overview
+OpenVDB Memory Optimization Strategies are techniques to mitigate the memory overhead caused by broad tile initialization and custom datatype storage in sparse voxel grids [S1, unofficial]. They set themselves apart from standard OpenVDB usage by actively managing the granularity of leaf nodes and the layout of voxel data to reduce peak memory footprint, often trading off insertion or access latency for space efficiency [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: An OpenVDB grid configuration (leaf node size, internal node size, tile size) and a dataset with associated attributes.
+- Output: A memory-optimized grid structure with reduced footprint.
+
+**Data Structures:**
+- **Leaf Node:** The lowest level of the octree. Its size is defined by $N_{leaf}$, where the number of voxels per leaf is $N_{leaf}^3$.
+- **Tile:** A block of voxels at internal levels that stores a single value for all contained voxels (broad tile).
+- **Custom Datatype:** A user-defined struct stored in the voxel buffer.
+
+**Steps:**
+1. **Leaf Node Tuning:** Reduce the size of the lowest level (leaf nodes) to decrease the number of sibling tiles instantiated per activation.
+   - Formula: If leaf size is reduced from $L_{old}$ to $L_{new}$, the number of voxels per leaf changes from $L_{old}^3$ to $L_{new}^3$.
+   - Effect: Smaller leaves mean fewer implicit broad tiles are allocated when a new voxel is added far from existing data, reducing the "far-point" memory spike [S1, unofficial].
+   - Trade-off: Smaller blocks require more frequent tree traversal and node allocation, increasing insertion time [S1, unofficial].
+
+2. **Selective Streaming:** Stream data from VDB to disk to preserve sections of the map outside the sensor's current observation range.
+   - Implementation: Use memory mapping or explicit I/O to load only the active region of the grid into RAM [S1, unofficial].
+   - Pitfall: Page-fault latency may occur if unmapped pages are accessed unexpectedly [S1, unofficial].
+
+3. **Native Datatype Partitioning:** For grids with few additional fields, use multiple parallel trees with native datatypes instead of a single complex custom datatype.
+   - Rationale: A single complex datatype increases memory usage per voxel due to padding and alignment, while multiple native trees reduce per-voxel overhead [S1, unofficial].
+   - Trade-off: Multiple native trees increase computational cost due to multiple accesses (one per tree) compared to a single access for a complex datatype [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimize_vdb_memory(grid, config):
+    """
+    Apply memory optimization strategies to an OpenVDB grid.
+    
+    Args:
+        grid: OpenVDB Grid object
+        config: Dict with keys 'leaf_size', 'streaming_enabled', 'native_trees'
+    """
+    # Step 1: Leaf Node Tuning
+    if 'leaf_size' in config:
+        new_leaf_size = config['leaf_size']
+        # Rebuild grid with new leaf size
+        # Note: OpenVDB requires grid rebuild for leaf size change
+        grid = rebuild_grid_with_leaf_size(grid, new_leaf_size)
+        # Smaller leaf_size reduces memory footprint for sparse data
+        # but increases insertion time due to more node allocations
+        pass
+
+    # Step 2: Selective Streaming
+    if config.get('streaming_enabled', False):
+        # Map file to memory instead of loading all into RAM
+        # This defers I/O until access
+        grid = map_file_to_memory(grid)
+        # Only active regions are loaded into physical RAM
+        pass
+
+    # Step 3: Native Datatype Partitioning
+    if config.get('native_trees', False):
+        # Split complex datatype into multiple native trees
+        # e.g., instead of one tree with struct {float density; float temp;},
+        # use two trees: one for float density, one for float temp
+        native_trees = split_into_native_trees(grid)
+        # Reduces memory overhead per voxel
+        # Increases access cost due to multiple tree lookups
+        pass
+
+    return grid
+```
+
+**Parameters:**
+- `leaf_size`: Typical values are 8, 16, or 32. Smaller values (e.g., 8) reduce memory for sparse data but increase overhead [S1, unofficial].
+- `streaming_enabled`: Boolean. When true, uses memory mapping [S1, unofficial].
+- `native_trees`: Boolean. When true, splits attributes into separate trees [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Not given in the sources.
+- **Boundaries:** Reducing leaf size trades off memory footprint against insertion time [S1, unofficial].
+- **Degenerate Input:** If data is dense, smaller leaf sizes may increase memory overhead due to more node pointers [S1, unofficial].
+
+## Subtopics
+
+### [Delayed Loading with Memory Mapping](20437-delayed-loading-with-memory-mapping.md)
+Delayed Loading with Memory Mapping loads OpenVDB (VDB) files on-demand by mapping the file into virtual memory rather than reading all grids into RAM immediately, thereby minimizing memory usage. It sets itself apart from standard eager loading by deferring disk I/O until specific data structures are accessed, trading off potential page-fault latency for reduced peak memory footprint.
+
+## Operating characteristics
+- **Time Complexity:** Insertion time increases with smaller leaf nodes due to more frequent tree traversal and node allocation [S1, unofficial]. Access time increases when using multiple native trees due to multiple lookups [S1, unofficial].
+- **Memory Complexity:** Memory footprint is reduced by smaller leaf nodes and native datatype partitioning [S1, unofficial].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Memory footprint scales with the number of active voxels and leaf node size [S1, unofficial].
+- **Strengths:** Reduced peak memory usage, especially for sparse data [S1, unofficial].
+- **Limitations:** Increased computational cost for access and insertion [S1, unofficial].
+- **When to Use:** When memory is constrained and data is sparse [S1, unofficial].
+- **When Not to Use:** When insertion or access latency is critical [S1, unofficial].
+
+## Background
+OpenVDB Memory Optimization Strategies originated from community discussions on GitHub issues related to VDB mapping [S1, unofficial]. They address the problem of memory overhead in sparse voxel grids, particularly when dealing with large, sparse datasets [S1, unofficial].
+
+## Sources
+[S1] Question/doubt about VDB allocation, https://github.com/fzi-forschungszentrum-informatik/vdb_mapping/issues/2, fetched 2026-10-27 (unofficial)

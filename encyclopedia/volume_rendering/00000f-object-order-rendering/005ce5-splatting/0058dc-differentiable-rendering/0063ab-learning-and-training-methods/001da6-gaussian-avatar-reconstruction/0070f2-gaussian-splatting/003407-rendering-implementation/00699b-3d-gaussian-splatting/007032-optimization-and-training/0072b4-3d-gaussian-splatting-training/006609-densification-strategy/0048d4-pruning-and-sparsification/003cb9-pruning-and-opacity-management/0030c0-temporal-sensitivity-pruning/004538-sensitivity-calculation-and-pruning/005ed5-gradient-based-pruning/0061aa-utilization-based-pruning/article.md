@@ -1,0 +1,135 @@
+# Utilization-Based Pruning
+
+Also called: utilization pruning
+
+## Overview
+Utilization-Based Pruning (UBP) is a training-time sparsification technique for 3D Gaussian Splatting that removes Gaussians with negligible contribution to the rendered image gradient, replacing opacity reset to alleviate interference with residual distribution tracking and compress scene representation [S1]. It distinguishes itself from sibling methods by evaluating the gradient of the rendered image with respect to Gaussian positions rather than the loss gradient, allowing for efficient GPU implementation while effectively eliminating visual artifacts like floaters [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: The set of active 3D Gaussians $\mathcal{G}$, the current training step $t$, and a history of rendered images.
+- Output: A pruned set of Gaussians $\mathcal{G}'$ with low utilization removed.
+
+**Data Structures:**
+- Gaussian $g$: Contains position $x_g$, opacity, scale, rotation, and spherical harmonic coefficients.
+- Rendered Image $\hat{I}^{(t)}$: A 2D array of pixel values at step $t$.
+- Accumulator: A buffer storing the squared gradient magnitudes for each Gaussian over a window of steps.
+
+**Parameters:**
+- $\kappa = 10^{-8}$: The threshold for pruning. If $u_g < \kappa$, the Gaussian is removed [S1].
+- $T = 100$: The interval (in steps) at which the utilization metric is computed and pruning is considered [S1].
+- $|N_T(t)| = 100$: The number of previous images accumulated in the window for averaging [S1].
+- Pruning Schedule: UBP is executed every 100 steps, specifically from step 500 to step 15,000 [S1].
+
+**Formula:**
+The utilization $u_g$ of a Gaussian $g$ is defined as the average squared gradient of the rendered pixel values with respect to the Gaussian's position, accumulated over a window of images [S1]:
+
+$$
+u_g = \frac{\sum_{t} \sum_{(w,h) \in N_T(t)} \left( \frac{\partial \hat{I}_{h,w}^{(t)}}{\partial x_g} \right)^2}{2}
+$$
+
+Where:
+- $u_g$ is the utilization metric for Gaussian $g$ [S1].
+- $\hat{I}_{h,w}^{(t)}$ is the rendered pixel value at pixel coordinates $(h,w)$ for view $t$ [S1].
+- $x_g$ is the 3D position of Gaussian $g$ [S1].
+- $N_T(t)$ is the set of $|N_T(t)|=100$ images accumulated over the previous $T=100$ steps [S1].
+- The division by 2 arises from the derivative of the squared term in the accumulation [S1].
+
+**Note:** This metric uses the gradient of the rendered image with respect to Gaussian positions, not the gradient of the loss function [S1]. Computing the derivative with respect to projected positions (2D) rather than 3D positions allows for a less memory-intensive GPU implementation while providing a similar metric to prior work [S1].
+
+**Numbered Steps:**
+1. **Accumulation:** For each Gaussian $g$, accumulate the squared gradient of the rendered image with respect to its position over the current step $t$. This is done for all pixels $(h,w)$ covered by the Gaussian.
+2. **Windowing:** Maintain a rolling window of the last $|N_T(t)|=100$ images. Every $T=100$ steps, compute the average utilization $u_g$ across this window [S1].
+3. **Evaluation:** Compare $u_g$ against the threshold $\kappa = 10^{-8}$ [S1].
+4. **Pruning:** If $u_g < \kappa$, remove Gaussian $g$ from the scene representation [S1].
+5. **Frequency:** Repeat steps 1-4 every 100 steps, starting from step 500 and ending at step 15,000 [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def utilization_based_pruning(gaussians, rendered_images_window, step, threshold=1e-8):
+    """
+    Prunes Gaussians with low utilization based on image gradient.
+    
+    Args:
+        gaussians: List of Gaussian objects, each with a 'position' attribute.
+        rendered_images_window: List of the last 100 rendered images (tensors).
+        step: Current training step.
+        threshold: Pruning threshold kappa.
+        
+    Returns:
+        pruned_gaussians: List of Gaussians remaining after pruning.
+    """
+    # Pruning is only active between step 500 and 15000, every 100 steps
+    if step < 500 or step > 15000 or step % 100 != 0:
+        return gaussians
+
+    pruned_gaussians = []
+    
+    for g in gaussians:
+        utilization_sum = 0.0
+        num_images = len(rendered_images_window)
+        
+        # Accumulate squared gradient over the window of images
+        for img in rendered_images_window:
+            # Compute gradient of rendered image w.r.t Gaussian position
+            # Note: In practice, this is often computed w.r.t projected positions
+            # for memory efficiency, but the formula defines it w.r.t x_g.
+            # We assume a function 'compute_image_gradient' that returns
+            # the gradient vector dI/dx_g for the given Gaussian and image.
+            grad = compute_image_gradient(g.position, img)
+            
+            # Square the gradient magnitude
+            grad_sq = sum(val**2 for val in grad)
+            
+            # Accumulate
+            utilization_sum += grad_sq
+            
+        # Average over the window and divide by 2 as per formula
+        # Formula: u_g = (sum(sum(grad^2))) / 2
+        # The sources state averaging across the image and accumulating over images.
+        # The denominator 2 is explicit in the source formula (11).
+        utilization = utilization_sum / 2.0
+        
+        # Prune if below threshold
+        if utilization >= threshold:
+            pruned_gaussians.append(g)
+            
+    return pruned_gaussians
+
+def compute_image_gradient(position, image):
+    """
+    Computes the gradient of the rendered image with respect to the Gaussian position.
+    This is a placeholder for the specific differentiable rasterization logic.
+    In the source, this is computed w.r.t projected positions for efficiency.
+    """
+    # Implementation detail: [G]
+    # The source notes that computing w.r.t projected positions is used for
+    # memory efficiency. The gradient is backpropagated from the pixel values
+    # through the splatting function to the Gaussian position.
+    # This function would return a vector of the same dimension as position (3).
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Metric Degradation:** UBP may slightly degrade quantitative metrics such as PSNR and LPIPS, but produces cleaner renderings with fewer floaters, as these metrics do not fully reflect the presence of floaters [S1].
+- **Floater Removal:** The method is particularly effective at removing "floaters" (erroneous Gaussians) in cluttered scenes [S1].
+
+## Subtopics
+
+### Gradient-based Pruning
+The parent method that evaluates the magnitude of gradients associated with each Gaussian during training. UBP is a specific instantiation that uses image gradient magnitude rather than loss gradient magnitude [17720-gradient-based-pruning.md].
+
+## Operating characteristics
+- **Compression:** On clean MipNeRF360 datasets, UBP reduces the number of Gaussians by 2× to 4.5× while preserving rendering quality [S1]. In distractor-filled scenes, it decreases the number of Gaussians by 4× to 6× [S1].
+- **Performance:** Enabling UBP translates to at least a 2× reduction in training time and a 3× reduction in inference time [S1].
+- **Strengths:** Effective compression, removal of floaters, and alleviation of interference with residual distribution tracking compared to opacity reset [S1].
+- **Limitations:** Slight potential degradation in quantitative metrics (PSNR/LPIPS) [S1].
+- **When to Use:** Recommended for both cluttered and clean datasets to compress scene representation and improve rendering cleanliness [S1].
+
+## Background
+Utilization-Based Pruning was introduced in the paper "SpotLessSplats: Ignoring Distractors in 3D Gaussian Splatting" by Sabour and Goli et al. [S1]. It was developed as an improvement over opacity reset, which can interfere with residual distribution tracking. The method leverages the observation that Gaussians contributing minimally to the image gradient are likely artifacts or redundant primitives.
+
+## Sources
+[S1] SpotLessSplats: Ignoring Distractors in 3D Gaussian Splatting, https://doi.org/10.1145/3727143, fetched 2026-10-27

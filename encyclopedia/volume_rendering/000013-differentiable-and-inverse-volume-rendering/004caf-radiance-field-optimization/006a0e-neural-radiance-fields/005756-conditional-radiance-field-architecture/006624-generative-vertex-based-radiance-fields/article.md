@@ -1,0 +1,329 @@
+# Generative Vertex-based Radiance Fields
+
+Also called: VeRi3D, Vertex-based Radiance Fields
+
+## Overview
+VeRi3D is a generative radiance field method that maps 3D points to color and density using the $K$ nearest SMPL vertices and their local coordinate systems, enabling free control over camera pose, human pose, shape, and part-level editing [S1]. It differs from surface-based warping methods (which suffer from ghosting artifacts due to inaccurate mapping) and blend-weight-field methods (which struggle to generalize to out-of-distribution poses) by using fixed SMPL skinning weights and individual local coordinate systems for each point [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Noise vector $z \sim \mathcal{N}(0,1)$, camera pose $\xi \sim p_\xi$, human pose $\theta$, human shape $\beta$, and a 3D point $x_w$ in the observation space.
+*   **Outputs:** RGB color $c \in \mathbb{R}^3$ and density $\sigma \in \mathbb{R}^+$ for the point, which are volume-rendered into an image of size $H \times W$.
+
+**Data Structures:**
+*   **SMPL Vertices ($V_w$):** A set of $M$ vertices in the observation space, parameterized by pose $\theta$ and shape $\beta$.
+*   **Local Coordinate System ($T^l_{wk}$):** For each vertex $v_k$, a $4 \times 4$ transformation matrix defining a local frame.
+*   **Vertex Features ($f_k$):** A feature vector of dimension $L_F$ associated with each vertex $v_k$.
+*   **Local Coordinate Vector ($x_l$):** A vector of length 7 containing aggregated local geometric information.
+
+**Numbered Steps:**
+
+1.  **Vertex Feature Generation:**
+    *   Project the $M$ SMPL vertices $V \in \mathbb{R}^{M \times 3}$ to a 2D UV map.
+    *   Generate a 2D feature map $F \in \mathbb{R}^{H_F \times W_F \times L_F}$ using a 2D CNN $G_{\theta}^{2D}$ conditioned on noise $z$. Typical dimensions: $H_F=256, W_F=256, L_F=64$ [S1].
+    *   Query the feature $f_k \in \mathbb{R}^{L_F}$ for each vertex $v_k$ using bilinear interpolation on $F$ [S1].
+
+2.  **Local Coordinate System Definition:**
+    *   Define a fixed local coordinate system $\bar{T}^l_{wk}$ under the T-pose for each vertex.
+    *   Origin: The vertex position $\bar{v}^k_w$ in T-pose.
+    *   Z-axis: The vertex normal (weighted average of face normals).
+    *   X-axis: Cross product of Z-axis and $[0,0,1]^T$.
+    *   Y-axis: Cross product of X-axis and Z-axis.
+    *   Transform $\bar{T}^l_{wk}$ to the current pose $T^l_{wk}$ using linear blend skinning:
+        $$ T^l_{wk} = \sum_{p=1}^{P} W(\bar{v}^k_w) G_p(\theta) \bar{T}^l_{wk} $$
+        where $P$ is the number of SMPL parts, $W(\bar{v}^k_w)$ are skinning weights, and $G_p(\theta) \in SE(3)$ is the transformation matrix for part $p$ [S1].
+
+3.  **Point Sampling and Neighbor Retrieval:**
+    *   Sample a ray based on camera pose $\xi$.
+    *   Sample $N$ points $x^w_i$ along the ray in the observation space.
+    *   For each point $x^w_i$, retrieve its $K$ nearest neighbors $\{v_k\}_{k=1}^K$ from the set of $M$ SMPL vertices $V_w$ [S1].
+
+4.  **Local Coordinate Transformation:**
+    *   For each neighbor $v_k$, transform the 3D point $x^w_i$ to the vertex's local coordinate system:
+        $$ x^l_{ik} = (T^l_{wk})^{-1} x^w_i = T^l_{wk} x^w_i $$
+        where $x^l_{ik} \in \mathbb{R}^3$ is the local coordinate [S1].
+
+5.  **Aggregation of Local Coordinates:**
+    *   Compute the local coordinate vector $x_l \in \mathbb{R}^7$ to be order-invariant with respect to the $K$ neighbors:
+        *   Average the directions of $\{x^l_{ik}\}_{k=1}^K$ (3 dimensions).
+        *   Compute statistics (min, max, mean, variance) of the norms $\|x^l_{ik}\|$ (4 dimensions).
+        *   Concatenate these to form $x_l$ [S1].
+
+6.  **Aggregation of Vertex Features:**
+    *   Combine the weighted feature vectors $\{f_k\}$ of the $K$ neighbors. The weights $p_k$ are inverse-distance weights (scattered data interpolation) [S1].
+    *   Compute the accumulated feature $\bar{f}$ (dimension $L_F$) [S1].
+
+7.  **Color and Density Prediction:**
+    *   Apply positional encoding $\gamma(\cdot)$ to $x_l$.
+    *   Pass $\bar{f}$ and $\gamma(x_l)$ through an MLP $G_{\theta}^{3D}$:
+        $$ (c_i, \sigma_i) = G_{\theta}^{3D}(\bar{f}, \gamma(x_l)) $$
+        where $c_i \in \mathbb{R}^3$ and $\sigma_i \in \mathbb{R}^+$ [S1].
+
+8.  **Volume Rendering:**
+    *   Render the pixel color $c$ from the sampled points $\{(c_i, \sigma_i)\}_{i=1}^N$:
+        $$ c = \sum_{i=1}^{N} T_i \alpha_i c_i $$
+        $$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+        $$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
+        where $\delta_i$ is the distance interval between adjacent sample points [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def generate_vertex_features(smpl_vertices, noise_z, cnn_generator):
+    """
+    Generates vertex features using a 2D CNN on UV-mapped vertices.
+    smpl_vertices: (M, 3) array of SMPL vertices.
+    noise_z: Noise vector.
+    cnn_generator: 2D CNN model.
+    Returns:
+        vertex_features: (M, L_F) array of features.
+    """
+    # Project vertices to 2D UV map (implementation detail of UV mapping)
+    uv_coords = project_to_uv(smpl_vertices)
+    
+    # Generate 2D feature map F (H_F, W_F, L_F)
+    feature_map = cnn_generator(noise_z)
+    
+    # Query features for each vertex using bilinear interpolation
+    vertex_features = np.zeros((smpl_vertices.shape[0], feature_map.shape[2]))
+    for i, uv in enumerate(uv_coords):
+        vertex_features[i] = bilinear_interpolate(feature_map, uv)
+        
+    return vertex_features
+
+def build_local_coordinate_systems(smpl_vertices_tpose, smpl_vertices_current, skinning_weights, part_transforms):
+    """
+    Builds local coordinate systems for each vertex in the current pose.
+    smpl_vertices_tpose: (M, 3) vertices in T-pose.
+    smpl_vertices_current: (M, 3) vertices in current pose.
+    skinning_weights: (M, P) skinning weights.
+    part_transforms: List of P (4, 4) transformation matrices for each body part.
+    Returns:
+        local_transforms: (M, 4, 4) transformation matrices.
+    """
+    M = smpl_vertices_tpose.shape[0]
+    P = len(part_transforms)
+    local_transforms = np.zeros((M, 4, 4))
+    
+    for k in range(M):
+        # Define fixed local system T_bar_lwk under T-pose
+        origin = smpl_vertices_tpose[k]
+        normal = compute_vertex_normal(smpl_vertices_tpose, k) # Weighted avg of face normals
+        z_axis = normal / np.linalg.norm(normal)
+        x_axis = np.cross(z_axis, [0, 0, 1])
+        if np.linalg.norm(x_axis) < 1e-6:
+            x_axis = [1, 0, 0] # Fallback if parallel
+        x_axis = x_axis / np.linalg.norm(x_axis)
+        y_axis = np.cross(z_axis, x_axis)
+        
+        # Construct rotation matrix R_bar
+        R_bar = np.column_stack([x_axis, y_axis, z_axis])
+        T_bar_lwk = np.eye(4)
+        T_bar_lwk[:3, :3] = R_bar
+        T_bar_lwk[:3, 3] = origin
+        
+        # Transform to current pose using linear blend skinning
+        T_lwk = np.zeros((4, 4))
+        for p in range(P):
+            W_kp = skinning_weights[k, p]
+            G_p = part_transforms[p]
+            T_lwk += W_kp @ G_p @ T_bar_lwk
+            
+        local_transforms[k] = T_lwk
+        
+    return local_transforms
+
+def compute_local_coordinate_vector(x_w, local_transforms, k_neighbors_indices):
+    """
+    Computes the aggregated local coordinate vector x_l for a 3D point.
+    x_w: (3,) 3D point in observation space.
+    local_transforms: (M, 4, 4) local coordinate systems.
+    k_neighbors_indices: Indices of K nearest neighbors.
+    Returns:
+        x_l: (7,) vector.
+    """
+    k = len(k_neighbors_indices)
+    local_coords = []
+    norms = []
+    
+    for idx in k_neighbors_indices:
+        T_lwk = local_transforms[idx]
+        # Transform x_w to local coordinate system
+        x_w_homogeneous = np.append(x_w, 1)
+        x_l_k = T_lwk @ x_w_homogeneous
+        x_l_k = x_l_k[:3] # Remove homogeneous coordinate
+        local_coords.append(x_l_k)
+        norms.append(np.linalg.norm(x_l_k))
+        
+    # Average directions
+    directions = np.mean(local_coords, axis=0)
+    directions = directions / (np.linalg.norm(directions) + 1e-6)
+    
+    # Statistics of norms
+    norm_min = np.min(norms)
+    norm_max = np.max(norms)
+    norm_mean = np.mean(norms)
+    norm_var = np.var(norms)
+    
+    x_l = np.concatenate([directions, [norm_min, norm_max, norm_mean, norm_var]])
+    return x_l
+
+def aggregate_features(vertex_features, k_neighbors_indices, x_w, smpl_vertices_current):
+    """
+    Aggregates vertex features using inverse-distance weighting.
+    vertex_features: (M, L_F)
+    k_neighbors_indices: Indices of K nearest neighbors.
+    x_w: (3,) 3D point.
+    smpl_vertices_current: (M, 3) vertices.
+    Returns:
+        f_bar: (L_F,) aggregated feature.
+    """
+    k_indices = k_neighbors_indices
+    k_vertices = smpl_vertices_current[k_indices]
+    k_features = vertex_features[k_indices]
+    
+    # Compute distances
+    distances = np.linalg.norm(k_vertices - x_w, axis=1)
+    
+    # Inverse distance weights
+    weights = 1.0 / (distances + 1e-6)
+    weights = weights / np.sum(weights)
+    
+    # Weighted sum
+    f_bar = np.sum(weights[:, np.newaxis] * k_features, axis=0)
+    return f_bar
+
+def predict_color_density(f_bar, x_l, mlp_generator):
+    """
+    Predicts color and density using MLP.
+    f_bar: (L_F,) feature vector.
+    x_l: (7,) local coordinate vector.
+    mlp_generator: MLP model.
+    Returns:
+        c: (3,) color.
+        sigma: (1,) density.
+    """
+    x_l_encoded = positional_encoding(x_l)
+    c, sigma = mlp_generator(np.concatenate([f_bar, x_l_encoded]))
+    return c, sigma
+
+def render_image(camera_pose, noise_z, pose_params, shape_params, 
+                 cnn_generator, mlp_generator, smpl_model, 
+                 H, W, N, K):
+    """
+    Renders a single image.
+    """
+    # 1. Get SMPL vertices in current pose
+    smpl_vertices = smpl_model.get_vertices(pose_params, shape_params)
+    
+    # 2. Generate Vertex Features
+    vertex_features = generate_vertex_features(smpl_vertices, noise_z, cnn_generator)
+    
+    # 3. Build Local Coordinate Systems
+    # Note: Requires T-pose vertices and skinning weights from SMPL model
+    local_transforms = build_local_coordinate_systems(
+        smpl_model.t_pose_vertices, 
+        smpl_vertices, 
+        smpl_model.skinning_weights, 
+        smpl_model.get_part_transforms(pose_params)
+    )
+    
+    # 4. Render
+    image = np.zeros((H, W, 3))
+    
+    for y in range(H):
+        for x in range(W):
+            ray = camera_pose.get_ray(x, y)
+            # Sample N points along ray
+            points = sample_points_along_ray(ray, N)
+            
+            # Volume rendering accumulation
+            alpha_accum = 0.0
+            color_accum = np.zeros(3)
+            
+            for i, x_w in enumerate(points):
+                # Find K nearest neighbors
+                k_indices = find_k_nearest_neighbors(x_w, smpl_vertices, K)
+                
+                # Compute local coordinate vector
+                x_l = compute_local_coordinate_vector(x_w, local_transforms, k_indices)
+                
+                # Aggregate features
+                f_bar = aggregate_features(vertex_features, k_indices, x_w, smpl_vertices)
+                
+                # Predict color and density
+                c, sigma = predict_color_density(f_bar, x_l, mlp_generator)
+                
+                # Compute transmittance and alpha
+                if i == 0:
+                    delta = 0.0 # Or handle first point distance appropriately
+                else:
+                    delta = np.linalg.norm(x_w - points[i-1])
+                
+                alpha = 1.0 - np.exp(-sigma * delta)
+                transmittance = np.exp(-np.sum(alpha_accum)) # Simplified accumulation logic
+                # Correct transmittance calculation:
+                # T_i = product(1 - alpha_j) for j < i
+                # We need to track T_i explicitly
+                
+                # Standard volume rendering step
+                # T_i = product_{j=1}^{i-1} (1 - alpha_j)
+                # This requires keeping track of previous alphas. 
+                # For simplicity in pseudocode, assuming alpha_accum tracks T_i
+                # Actually, let's rewrite the loop properly below.
+                pass
+            
+            # Re-implementing the loop for clarity
+            T_i = 1.0
+            pixel_color = np.zeros(3)
+            for i, x_w in enumerate(points):
+                k_indices = find_k_nearest_neighbors(x_w, smpl_vertices, K)
+                x_l = compute_local_coordinate_vector(x_w, local_transforms, k_indices)
+                f_bar = aggregate_features(vertex_features, k_indices, x_w, smpl_vertices)
+                c, sigma = predict_color_density(f_bar, x_l, mlp_generator)
+                
+                if i == 0:
+                    delta = 0.0 # Placeholder, usually handled by near/far plane
+                else:
+                    delta = np.linalg.norm(x_w - points[i-1])
+                
+                alpha = 1.0 - np.exp(-sigma * delta)
+                pixel_color += T_i * alpha * c
+                T_i *= (1.0 - alpha)
+                
+            image[y, x] = pixel_color
+            
+    return image
+```
+
+**Parameters:**
+*   $K$: Number of nearest neighbors. Not given in the sources.
+*   $N$: Number of sampling points on each ray. Not given in the sources.
+*   $H, W$: Height and width of the output image. Not given in the sources.
+*   $L_F$: Feature dimension. 64 [S1].
+*   $H_F, W_F$: Feature map dimensions. 256 [S1].
+*   $x_l$ length: 7 [S1].
+*   $\lambda$: R1 regularization weight. Not given in the sources.
+*   Part-level control PCA: Top 30 components with largest eigenvalues for each body part [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Ghosting Artifacts:** Surface-based mapping can be inaccurate, causing unoccupied background points in observation space to map to occupied foreground points in canonical space, leading to ghosting. VeRi3D avoids this by using individual local coordinate systems [S1].
+*   **Controllability:** Naive approaches generating articulated humans in observation space lack controllability. VeRi3D solves this by leveraging SMPL parameters [S1].
+*   **Generalization:** Learned blend weight fields (e.g., ENARF) struggle to generalize to out-of-distribution poses. VeRi3D uses fixed SMPL skinning weights, improving generalization [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The feature generation is performed once per image using a 2D CNN. For each pixel and each of the $N$ sample points, $K$ nearest neighbor searches and aggregations are performed. The complexity is roughly $O(H \cdot W \cdot N \cdot K \log M)$ or $O(H \cdot W \cdot N \cdot K)$ with spatial indexing, plus the cost of the 2D CNN and the final MLP evaluation.
+*   **Memory Complexity:** Requires storing $M$ vertex features and the SMPL mesh data. The 2D feature map size is $H_F \times W_F \times L_F$.
+*   **Performance:** On DeepFashion (512x512), FID is 21.4, PCKh@0.5 is 0.991. On Surreal (128x128), FID is 6.7, PCKh@0.5 is 0.984. On AIST++ (256x256), FID is 32.3, PCKh@0.5 is 0.973 [S1].
+*   **Strengths:** Free control over pose, shape, and part-level editing; avoids ghosting artifacts; better generalization to novel poses compared to learned weight fields.
+*   **Limitations:** Relies on the accuracy of the SMPL model; performance may degrade on datasets with extreme pose variations if SMPL fitting is inaccurate (though the method itself is robust to pose changes due to fixed mapping) [S1].
+
+## Background
+VeRi3D was proposed to bridge the gap between the full controllability of parametric human models (like SMPL) and the image fidelity of 3D-aware GANs. Previous methods either learned blend weight fields (which are hard to train and generalize poorly) or used surface-based warping (which causes ghosting artifacts). VeRi3D was introduced in 2023 [S1]. It is used for generating photorealistic human images with free control over camera pose, human pose, shape, and part-level editing [S1].
+
+## Sources
+[S1] VeRi3D: Generative Vertex-based Radiance Fields for 3D Controllable Human Image Synthesis, https://doi.org/10.1109/iccv51070.2023.00825, fetched 2026-10-29

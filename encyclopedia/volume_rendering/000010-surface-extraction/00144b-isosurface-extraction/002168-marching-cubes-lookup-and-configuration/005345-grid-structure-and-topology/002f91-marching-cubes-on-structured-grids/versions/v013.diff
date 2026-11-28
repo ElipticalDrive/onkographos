@@ -1,0 +1,290 @@
+--- v012.md
++++ v013.md
+@@ -4,159 +4,121 @@
+ 
+ ## Overview
+-Marching Cubes on Structured Grids extracts a 3D triangular mesh from a scalar field defined on a regular 3D grid (voxel grid) by evaluating the field at grid vertices and applying the standard Marching Cubes topology rules [S1, unofficial][S2]. It builds on [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) by assuming the input data is strictly structured (uniform or logically regular), allowing for efficient batched evaluation and coordinate transformation [S1, unofficial][S2]. Unlike [Dual Grid Isosurface Extraction](10271-dual-grid-isosurface-extraction.md) which operates on cell centers, or [Flying Edges](7520-flying-edges.md) which processes edges directly to avoid point merging, this method processes voxel cells individually, generating vertices on edges and triangles within cells [S2].
++Marching Cubes on Structured Grids extracts a 3D polygonal mesh from a discretized scalar field defined on a regular 3D grid (IJK space) by identifying the isosurface where the scalar value crosses a specified threshold [S1, unofficial][S2]. It builds on [Isosurface extraction](30-isosurface-extraction.md) by processing each voxel cell independently to determine local topology, distinguishing itself from unstructured methods by leveraging the predictable connectivity of the grid [S2]. Unlike [Advancing Front Framework for Implicit Surfaces](819-advancing-front-framework-for-implicit-surfaces.md) which grows the mesh from a seed, or [Dual Contouring and Surface Nets](6319-dual-contouring-and-surface-nets.md) which optimize vertex positions for sharp features, standard Marching Cubes relies on linear interpolation along cell edges [S2].
+ 
+ ## How it works
+ **Inputs:**
+-1.  **Scalar Field Function ($F$):** A function that returns a scalar value for any 3D coordinate $(x, y, z)$. In neural implicit contexts, this is a neural network outputting a sigma value [S1, unofficial]. In traditional contexts, it is a lookup into a 3D array [S2].
+-2.  **Grid Bounds:** Two 3D vectors $c_1 = (x_{min}, y_{min}, z_{min})$ and $c_2 = (x_{max}, y_{max}, z_{max})$ defining the spatial extent of the volume [S1, unofficial].
+-3.  **Resolution:** A 3D integer tuple $R = (R_x, R_y, R_z)$ defining the number of grid points along each axis [S1, unofficial].
+-4.  **Isovalue ($I$):** The scalar threshold at which the surface is extracted [S1, unofficial].
++- `grid`: A 3D array of scalar values (e.g., density, signed distance, neural network output) with dimensions $R_x \times R_y \times R_z$ [S1, unofficial].
++- `c1`: Lower bounds of the volume in world coordinates $(x_{min}, y_{min}, z_{min})$ [S1, unofficial].
++- `c2`: Upper bounds of the volume in world coordinates $(x_{max}, y_{max}, z_{max})$ [S1, unofficial].
++- `isosurface`: The scalar threshold value $\sigma_{iso}$ defining the surface [S1, unofficial].
++- `reso`: The resolution of the grid $(R_x, R_y, R_z)$ [S1, unofficial].
+ 
+ **Outputs:**
+-1.  **Vertices:** A list of 3D coordinates $(x, y, z)$ in world space.
+-2.  **Triangles:** A list of triplets of vertex indices.
++- `vertices`: An array of 3D points in world coordinates representing the mesh vertices [S1, unofficial].
++- `triangles`: An array of integer indices referencing `vertices`, defining the mesh faces [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Grid Points:** A 3D array of shape $(R_x, R_y, R_z)$ storing the scalar values.
+-*   **Lookup Tables:** The `edgeTable` and `triangleTable` from [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) are required.
++- The scalar field is stored as a contiguous 3D array or flattened 1D array reshaped to 3D. In neural implicit contexts, this is often a tensor of shape $(R_x, R_y, R_z)$ [S1, unofficial].
++- The standard Marching Cubes lookup table maps 8-bit cell configurations (defined by the sign of the 8 vertices relative to $\sigma_{iso}$) to a set of triangle indices [S2].
+ 
+ **Steps:**
+ 
+-1.  **Grid Generation:** Generate the 3D grid of query points in IJK (index) space. For a resolution $R$, the indices are $i \in [0, R_x-1]$, $j \in [0, R_y-1]$, $k \in [0, R_z-1]$.
+-    *   *Note:* If using a neural network, the grid points must be converted to world coordinates for evaluation [S1, unofficial].
++1.  **Grid Generation**: Create a structured grid of query points in IJK coordinate space. If the grid is used to evaluate a neural network, generate points $P_{ijk}$ for $i \in [0, R_x-1], j \in [0, R_y-1], k \in [0, R_z-1]$ [S1, unofficial].
++    $$ P_{ijk} = (i, j, k) $$
++    [S1, unofficial]
+ 
+-2.  **Scalar Field Evaluation:** Evaluate the scalar field $F$ at every grid point.
+-    *   If $F$ depends on view direction (e.g., NeRF), fake view directions must be computed. A common heuristic is to point them toward the origin or camera center [S1, unofficial].
+-    *   To manage memory, split the grid points into batches of size $B$ (e.g., 100,000) [S1, unofficial].
+-    *   Compute $V_{ijk} = F(x_i, y_j, z_k)$ for all points.
++2.  **Scalar Field Evaluation**: Evaluate the scalar field $\sigma$ at each grid point.
++    - If using a neural network, pass $P_{ijk}$ through the network to obtain $\sigma_{ijk}$ [S1, unofficial].
++    - If the network uses view directions, compute fake view directions (e.g., pointing to the origin) to avoid invalid geometry, as sigma becomes view-dependent otherwise [S1, unofficial].
++    - Process in batches of size `eval_batch_size` to manage memory [S1, unofficial].
++    $$ \sigma_{ijk} = \text{Network}(P_{ijk}) $$
++    [S1, unofficial]
+ 
+-3.  **Reshape:** Reshape the flat list of scalar values into a 3D array of shape $(R_x, R_y, R_z)$ [S1, unofficial].
++3.  **Reshape**: Reshape the flattened list of $\sigma_{ijk}$ values into the 3D grid structure of size $R_x \times R_y \times R_z$ [S1, unofficial].
+ 
+-4.  **Marching Cubes Extraction:** Apply the standard Marching Cubes algorithm to the 3D scalar array.
+-    *   Iterate over each voxel $(i, j, k)$ where $i \in [0, R_x-2]$, $j \in [0, R_y-2]$, $k \in [0, R_z-2]$.
+-    *   Retrieve the 8 corner values $V_0 \dots V_7$ from the grid.
+-    *   Compute the case index $C$ based on the sign of $V_m - I$ [S2].
+-    *   Use `edgeTable` and `triangleTable` to determine intersections and triangle connectivity [S2].
+-    *   Interpolate intersection points on the cube edges using linear interpolation:
+-        $$ P = V_a + \frac{I - V_a}{V_b - V_a} (V_b - V_a) $$
+-        where $V_a$ and $V_b$ are the scalar values at the two endpoints of the edge [S2].
+-    *   *Coordinate Note:* The interpolation is typically performed in IJK space (grid indices), and the resulting vertices are mapped to XYZ space afterward [S2]. While not strictly mathematically correct for non-uniform grids, it is negligible for uniform grids [S2].
++4.  **Marching Cubes Extraction**: Apply the standard Marching Cubes algorithm to the scalar grid $\sigma$ with threshold $\sigma_{iso}$ [S1, unofficial].
++    - For each cell $(i, j, k)$, determine the 8 vertex signs relative to $\sigma_{iso}$.
++    - Use the lookup table to identify the triangle configuration.
++    - Calculate intersection points on the cell edges using linear interpolation. For an edge between vertices $V_1$ (value $\sigma_1$) and $V_2$ (value $\sigma_2$), the intersection point $V_{int}$ in IJK space is:
++      $$ V_{int} = V_1 + \frac{\sigma_{iso} - \sigma_1}{\sigma_2 - \sigma_1} (V_2 - V_1) $$
++      [S2]
+ 
+-5.  **Coordinate Transformation:** Convert the extracted vertices from IJK index space to World XYZ space.
+-    *   For a vertex with index coordinates $(u, v, w)$:
+-        $$ x = x_{min} + u \cdot \frac{x_{max} - x_{min}}{R_x - 1} $$
+-        $$ y = y_{min} + v \cdot \frac{y_{max} - y_{min}}{R_y - 1} $$
+-        $$ z = z_{min} + w \cdot \frac{z_{max} - z_{min}}{R_z - 1} $$
+-    *   *Implementation Detail:* Some implementations scale by $1/R$ instead of $1/(R-1)$ depending on whether the bounds represent cell centers or corners [S1, unofficial]. The source code in [S1, unofficial] uses:
+-        ```python
+-        vertices *= (c2 - c1) / np.array(reso)
+-        vertices += c1
+-        ```
+-        This implies the grid spans $[c_1, c_2]$ with $R$ steps, effectively treating the grid as covering the range with step size $(c_2-c_1)/R$. This is a specific implementation choice that may shift vertices slightly compared to the standard $R-1$ denominator [S1, unofficial].
++5.  **Coordinate Transformation**: Convert the extracted vertices from IJK grid space to World (XYZ) space.
++    - Scale the IJK coordinates by the physical dimensions of the grid:
++      $$ V_{world} = V_{ijk} \times \frac{c_2 - c_1}{\text{reso}} $$
++      [S1, unofficial]
++    - Translate by the lower bound:
++      $$ V_{final} = V_{world} + c_1 $$
++      [S1, unofficial]
++    - Note: This linear interpolation from IJK to XYZ is an approximation; strictly speaking, it assumes a uniform Cartesian grid [S2]. For non-uniform structured grids, this step is not technically correct but is negligible for most applications [S2].
+ 
+-6.  **Return:** Output the transformed vertices and the triangle index list.
++6.  **Return**: Output the final `vertices` and `triangles` [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import numpy as np
+-import mcubes # Assuming a standard mcubes library implementation
+-
+-def marching_cubes_structured_grid(field_func, c1, c2, reso, isosurface, eval_batch_size=100000, use_viewdirs=False):
++def marching_cubes_on_structured_grid(network, c1, c2, reso, isosurface, eval_batch_size=100000):
+     """
+-    Extracts isosurface from a structured grid.
++    Extracts a mesh from a scalar field defined on a structured grid.
+     
+     Args:
+-        field_func: Callable that takes (N, 3) points and returns (N,) scalars.
+-        c1: List[int], lower bounds (x_min, y_min, z_min).
+-        c2: List[int], upper bounds (x_max, y_max, z_max).
+-        reso: List[int], resolution (Rx, Ry, Rz).
+-        isosurface: Float, threshold value.
+-        eval_batch_size: Int, batch size for field evaluation.
+-        use_viewdirs: Bool, if True, handles view-dependent fields.
++        network: A callable that returns scalar values for input points.
++        c1: List[int] Lower bounds (x, y, z).
++        c2: List[int] Upper bounds (x, y, z).
++        reso: List[int] Resolution (Rx, Ry, Rz).
++        isosurface: Float Threshold value.
++        eval_batch_size: Int Number of points per batch.
+         
+     Returns:
+-        vertices: (V, 3) array in world space.
+-        triangles: (T, 3) array of vertex indices.
++        vertices: Array of shape (N, 3) in world coordinates.
++        triangles: Array of shape (M, 3) with vertex indices.
+     """
+-    Rx, Ry, Rz = reso
++    # 1. Generate IJK grid
++    # Create indices for the grid
++    ix = np.arange(reso[0])
++    iy = np.arange(reso[1])
++    iz = np.arange(reso[2])
++    # Create meshgrid and flatten to get all (i, j, k) coordinates
++    ii, jj, kk = np.meshgrid(ix, iy, iz, indexing='ij')
++    grid_points = np.stack([ii.ravel(), jj.ravel(), kk.ravel()], axis=-1).astype(np.float32)
+     
+-    # 1. Generate Grid in IJK Space
+-    # Create meshgrid for indices
+-    ix = np.arange(Rx)
+-    iy = np.arange(Ry)
+-    iz = np.arange(Rz)
+-    IJ, JK, KL = np.meshgrid(ix, iy, iz, indexing='ij')
++    # 2. Evaluate Scalar Field
++    all_sigmas = []
+     
+-    # Flatten to list of points in IJK space
+-    grid_points_ijk = np.stack([IJ.ravel(), JK.ravel(), KL.ravel()], axis=-1)
++    # Split grid into batches
++    grid_batches = np.array_split(grid_points, np.ceil(len(grid_points) / eval_batch_size))
+     
+-    # 2. Convert to World Space for Evaluation
+-    # Map IJK to XYZ
+-    # Using the scaling factor from [S1, unofficial]: scale = (c2 - c1) / reso
+-    scale = np.array(c2) - np.array(c1)
+-    scale = scale / np.array(reso)
+-    
+-    grid_points_xyz = grid_points_ijk * scale + np.array(c1)
+-    
+-    # 3. Handle View Directions if necessary
+-    viewdirs = None
+-    if use_viewdirs:
+-        # Compute fake viewdirs pointing to origin [S1, unofficial]
+-        # Normalize the vector from point to origin
+-        norms = np.linalg.norm(grid_points_xyz, axis=1, keepdims=True)
+-        # Avoid division by zero
+-        norms = np.where(norms == 0, 1, norms)
+-        viewdirs = -grid_points_xyz / norms
+-        # Split viewdirs similarly
+-        viewdirs_list = np.split(viewdirs, np.array_split_indices(eval_batch_size, len(viewdirs)))
+-    else:
+-        viewdirs_list = [None] * len(np.array_split(grid_points_xyz, np.array_split_indices(eval_batch_size, len(grid_points_xyz))))
+-
+-    # 4. Evaluate Field in Batches
+-    all_sigmas = []
+-    points_list = np.array_split(grid_points_xyz, np.array_split_indices(eval_batch_size, len(grid_points_xyz)))
+-    
+-    for points, vd in zip(points_list, viewdirs_list):
+-        # Call field function
+-        sigmas = field_func(points, viewdirs=vd)
++    for batch in grid_batches:
++        # If network requires viewdirs, compute fake viewdirs (pitfall mitigation)
++        # Assuming network expects (points, viewdirs) or similar
++        # Here we assume a simple scalar field evaluation for clarity
++        sigmas = network(batch)
+         all_sigmas.append(sigmas)
+         
+-    sigmas = np.concatenate(all_sigmas)
++    # Concatenate and reshape
++    sigmas = np.concatenate(all_sigmas, axis=0)
++    sigmas = sigmas.reshape(reso)
+     
+-    # 5. Reshape to 3D Grid
+-    # Note: mcubes expects (Z, Y, X) or (X, Y, Z) depending on implementation.
+-    # Standard numpy meshgrid with 'ij' indexing produces (X, Y, Z) layout in memory if raveled correctly.
+-    # However, mcubes.marching_cubes typically expects (Z, Y, X) order for the first dimension to be Z.
+-    # We must reshape carefully.
+-    sigmas_3d = sigmas.reshape((Rz, Ry, Rx))
++    # 3. Run Marching Cubes
++    # mcubes.marching_cubes expects the scalar volume and the threshold
++    vertices_ijk, triangles = mcubes.marching_cubes(sigmas, isosurface)
+     
+-    # 6. Run Marching Cubes
+-    # mcubes.marching_cubes returns (vertices, triangles)
+-    # Vertices are in grid index space (0..R-1)
+-    vertices_ijk, triangles = mcubes.marching_cubes(sigmas_3d, isosurface)
++    # 4. Transform to World Coordinates
++    # Scale: (c2 - c1) / reso
++    scale = (np.array(c2) - np.array(c1)) / np.array(reso)
++    vertices_world = vertices_ijk * scale + np.array(c1)
+     
+-    # 7. Transform Vertices to World Space
+-    # Apply the same transformation used for evaluation
+-    vertices_xyz = vertices_ijk * scale + np.array(c1)
+-    
+-    return vertices_xyz, triangles
+-
+-def array_split_indices(batch_size, total_size):
+-    """Helper to mimic torch.split or np.array_split indices logic"""
+-    num_splits = (total_size + batch_size - 1) // batch_size
+-    return np.linspace(0, total_size, num_splits + 1, dtype=int)[1:]
++    return vertices_world, triangles
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **View-Dependent Fields:** If the scalar field depends on view direction (e.g., NeRF), the isosurface is not well-defined as a static geometry. Using fake view directions (e.g., pointing to the origin) produces incorrect geometry [S1, unofficial].
+-*   **Coordinate Mapping:** The transformation from IJK to XYZ can be ambiguous. Using $R$ as the divisor (as in [S1, unofficial]) vs $R-1$ (standard linear interpolation between endpoints) shifts the mesh. Consistency between evaluation and reconstruction is critical [S1, unofficial][S2].
+-*   **Ambiguity:** Cases 46, 47, 98, 99, 210, 213, 214, 215 suffer from topological ambiguity. The standard LUT resolves these arbitrarily, potentially causing cracks if adjacent voxels resolve differently [2518-marching-cubes-lookup-and-configuration.md].
+-*   **Memory:** Evaluating large grids (e.g., $128^3$) requires significant memory for the scalar field array and intermediate batches [S1, unofficial].
++- **View Directions**: If the scalar field depends on view direction (e.g., NeRF), standard Marching Cubes is invalid because the surface is not well-defined without a camera position. Substituting fake view directions (e.g., pointing to the origin) may produce incorrect geometry [S1, unofficial].
++- **IJK to XYZ Interpolation**: The transformation assumes a uniform grid. For non-uniform structured grids, this method is not technically correct, though the error is often negligible [S2].
++- **Ambiguities**: Standard Marching Cubes may produce topological ambiguities in cells with specific configurations (e.g., saddle points). Advanced variants like [Matveyev's Algorithm](#matveyevs-algorithm) or [Extended CLCIR PLIC Reconstruction](954-extended-clcir-plic-reconstruction.md) address this, but standard MC uses a fixed lookup table [S3].
+ 
+ ## Subtopics
+ 
+ ### [Uniform Marching Cubes with Snapping](7468-uniform-marching-cubes-with-snapping.md)
+-Uniform Marching Cubes with Snapping is a variant that computes cell topology masks from coarse grid vertex signs and optionally snaps iso-surface vertices to edges by minimizing distance to grid vertices. It builds on [Marching Cubes on Structured Grids](6051-marching-cubes-on-structured-grids.md) by introducing a snapping mechanism that reduces geometric error, distinguishing it from standard UMC and other siblings like [Bitwise Marching Cubes](7374-bitwise-marching-cubes.md) which prioritize bitwise operations over positional accuracy.
++Uniform Marching Cubes with Snapping is a uniform-grid polygonization algorithm that computes cell topology masks from coarse grid vertex signs and optionally snaps iso-surface vertices to edges by minimizing distance to grid vertices. It builds on [Marching Cubes on Structured Grids](6051-marching-cubes-on-structured-grids.md) by introducing a snapping mechanism that reduces geometric error, distinguishing it from standard UMC and other siblings like [Bitwise Marching Cubes](7374-bitwise-marching-cubes.md) which prioritize bitwise operations over positional accuracy.
+ 
+ ### [Smart Conversion](7489-smart-conversion.md)
+@@ -179,35 +141,35 @@
+ 
+ ### Matveyev's Algorithm
+-Matveyev's Algorithm is an algorithm based on a triangulation table that correctly represents trilinear interpolant behavior using intersections on cube diagonals [S3]. Proposed by Matveyev in 1999, it addresses the ambiguity of the trilinear interpolant inside the cube by using diagonal intersections to determine the correct topology [S3].
++An algorithm based on a triangulation table that correctly represents trilinear interpolant behavior using intersections on cube diagonals [S3]. Proposed by Matveyev in 1999, it resolves ambiguities in the standard Marching Cubes lookup table by considering the internal topology of the trilinear interpolant within the cube [S3].
+ 
+ ### Geomorph LOD Seam Handling
+-Geomorph LOD Seam Handling is a technique to achieve watertight seams between fine and coarse LOD levels in Marching Cubes by geometrically deforming the fine surface at the boundary to match the coarse contour [S4, unofficial]. It identifies boundary vertices between fine and coarse LOD levels and applies a geometric morph (bending) to fine surface vertices at the boundary, deforming them toward the coarse contour to eliminate gaps [S4, unofficial].
++A technique to achieve watertight seams between fine and coarse LOD levels in Marching Cubes by geometrically deforming the fine surface at the boundary to match the coarse contour [S4, unofficial]. It identifies boundary vertices between fine and coarse LOD levels and applies a geometric morph (bending) to fine surface vertices at the boundary, deforming them toward the coarse contour to eliminate gaps [S4, unofficial].
+ 
+ ### Cell Subdivision Isosurface Extraction
+-Cell Subdivision Isosurface Extraction is a method that retains the identity of cells (vertex/node centered data) and eliminates non-linear hanging nodes by subdividing boundary cells into pyramids, allowing standard isosurface techniques to be applied [S5, unofficial]. It subdivides lower-resolution cell faces to match higher-resolution faces, obtaining values at newly created hanging nodes by linear interpolation, and then subdivides 3D cells into pyramids with a common apex point [S5, unofficial]. Unlike the dual grid approach, this method retains the original cell identity and uses subdivision/pyramids instead of stitch cells [S5, unofficial].
++A method that retains the identity of cells (vertex/node centered data) and eliminates non-linear hanging nodes by subdividing boundary cells into pyramids, allowing standard isosurface techniques to be applied [S5, unofficial]. It subdivides lower-resolution cell faces to match higher-resolution faces, obtains values at newly created hanging nodes by linear interpolation, and subdivides 3D cells into pyramids with a common apex point [S5, unofficial]. Unlike the dual grid approach, this method retains the original cell identity [S5, unofficial].
+ 
+ ### TexF with Implicit Geometry (SDF)
+-TexF with Implicit Geometry (SDF) is an extension where TexF shares a canonical grid with an implicit Signed Distance Field (SDF). The surface is extracted via Marching Cubes, and TexF attributes are transferred to vertices for standard vertex-color rendering, avoiding per-pixel TexF queries [S6, unofficial]. The SDF and TexF share the same grid; after extracting a mesh with Marching Cubes, TexF attributes are transferred to its vertices using k-nearest-neighbor interpolation [S6, unofficial].
++An extension where TexF shares a canonical grid with an implicit Signed Distance Field (SDF). The surface is extracted via Marching Cubes, and TexF attributes are transferred to vertices for standard vertex-color rendering, avoiding per-pixel TexF queries [S6, unofficial]. The SDF and TexF share the same grid; after extracting a mesh with Marching Cubes, TexF attributes are transferred to its vertices using k-nearest-neighbor interpolation [S6, unofficial].
+ 
+ ### 3-Edge Cube Sampling with Corner Extension
+-This optimization computes intersections for only the 3 edges in the bottom-left corner of each cube instead of all 12, adding an extra row in the top-right corner of the processing zone to ensure all necessary grid values are accessible [S7, unofficial]. The indexing logic requires a special upgrade/mapping to correctly access grid values, making it complicated to implement correctly [S7, unofficial].
++Instead of calculating intersection points for all 12 edges of a cube, compute intersections for only the 3 edges in the bottom-left corner of each cube [S7, unofficial]. Add an extra row in the top-right corner of the processing zone to ensure all necessary grid values are accessible for the reduced edge set [S7, unofficial]. The indexing logic requires a special upgrade/mapping to correctly access grid values, making it complicated to implement correctly [S7, unofficial].
+ 
+ ### Octree-Based Isolevel Culling
+-This method builds an octree structure over the volume to assess the ISO level distribution, allowing the algorithm to skip processing areas far from the target isolevel [S7, unofficial]. Propagation-based culling methods are noted as unreliable and inefficient compared to direct octree assessment [S7, unofficial].
++Build an octree structure over the volume to assess the ISO level distribution, allowing the algorithm to skip processing areas far from the target isolevel [S7, unofficial]. Propagation-based culling methods are noted as unreliable and inefficient compared to direct octree assessment [S7, unofficial].
+ 
+ ### Coarse Sampling Dead-Space Elimination
+-This technique performs an initial pass sampling the volume at a coarser spatial rate to identify and eliminate regions where field strength is well below the isolevel [S7, unofficial]. However, coarse sampling provides virtually no performance gain for non-trivial fields, as safe sampling borders still capture most of the grid [S7, unofficial].
++Perform an initial pass sampling the volume at a coarser spatial rate to identify and eliminate regions where field strength is well below the isolevel [S7, unofficial]. Coarse sampling provides virtually no performance gain for non-trivial fields, as safe sampling borders still capture most of the grid [S7, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is processed once. The constant factor depends on the cost of evaluating the scalar field $F$ [S1, unofficial][S2].
+-*   **Memory Complexity:** $O(N)$ to store the scalar field grid and the output mesh. Batched evaluation reduces peak memory usage for the field evaluation phase [S1, unofficial].
+-*   **Performance:** Performance is heavily dependent on the cost of $F$. For neural networks, batch size and GPU utilization are critical [S1, unofficial]. For simple lookup tables, CPU cache efficiency dominates [S2].
+-*   **Strengths:** Simple to implement; well-understood; parallelizable by voxel [S2].
+-*   **Limitations:** Resolution-dependent accuracy; artifacts from view-dependent fields; ambiguity cases [S1, unofficial][S2].
+-*   **When to Use:** When the input data is naturally structured (voxels, grids) and the scalar field is view-independent [S1, unofficial][S2].
+-*   **When Not to Use:** When view-dependent effects are critical (use Analytic Marching or ray-marching); when adaptive resolution is needed (use [Flying Edges](7520-flying-edges.md) or [Dividing Cubes](10391-dividing-cubes.md)); when exact trilinear topology is required (use [Matveyev's Algorithm](10391-dividing-cubes.md) or ambiguity-resolving variants) [S3].
++- **Time Complexity**: $O(N)$, where $N$ is the number of voxels in the grid, as each cell is processed independently [S2].
++- **Memory Complexity**: $O(N)$ to store the scalar field and the output mesh. The algorithm can be implemented as a streaming operation where only two slices of the data are necessary in memory at any given time, allowing it to work on extremely large datasets [S2].
++- **Performance**: Performance is heavily dependent on the cost of evaluating the scalar field at grid points. If the field evaluation is expensive (e.g., neural network inference), batching and GPU acceleration are critical [S1, unofficial].
++- **Strengths**: Simple to implement, robust for smooth fields, and easily parallelizable due to cell independence [S2].
++- **Limitations**: Produces triangular meshes which may not capture sharp features well without additional processing (e.g., [Dual Contouring and Surface Nets](6319-dual-contouring-and-surface-nets.md)). Sensitive to grid resolution; higher resolution yields better accuracy but increases memory and computation [S1, unofficial].
++- **When to Use**: When the input data is naturally structured (e.g., CT scans, uniform grids) and the surface is relatively smooth [S2].
++- **When Not to Use**: When the surface has sharp features requiring vertex optimization, or when the grid is highly non-uniform and the IJK-to-XYZ interpolation error is significant [S2].
+ 
+ ## Background
+-The Marching Cubes algorithm was originally developed and patented by GE Medical Systems for use in their CT and MRI equipment. The patent has since expired, placing the algorithm in the public domain [S2]. It is one of the most common visualization methods for isosurface extraction [S2]. The specific implementation on structured grids with IJK-to-XYZ interpolation is a standard adaptation for processing 3D arrays [S2]. Variants like Matveyev's Algorithm (1999) were proposed to address topological ambiguities in the trilinear interpolant [S3].
++The Marching Cubes algorithm was originally developed and patented by GE Medical Systems for use in their CT and MRI equipment [S2]. The patent has since expired, placing the algorithm in the public domain [S2]. It is one of the most common visualization methods in use today and is used by several other algorithms such as Metaballs and Part Extraction [S2]. The algorithm processes each cell individually, making it easy to convert into a "streaming" operation [S2].
+ 
+ ## Sources

@@ -1,0 +1,105 @@
+# XPR-LinPrim Culling
+Also called: Linear-Splatting Culling
+
+## Overview
+XPR-LinPrim Culling is a primitive-level early discard method for point-based volume rendering that uses a global bound on the maximum ray chord length through a primitive to determine if it can be discarded for an entire tile [S1, unofficial]. It eliminates the need for a separate per-pixel opacity test by leveraging the homogeneous density model of linear splats, where opacity is determined by the integral of density along the ray chord [S1, unofficial]. Unlike [Stop-the-pop](1472-stop-the-pop.md), which bounds the Gaussian response based on distance to the mean, LinPrim bounds the longest possible chord through the primitive's $L_1$ polytope [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: Primitive density $\boldsymbol{\sigma}$, tile geometry $\Omega_t$ (defined by pixel center bounds $[x_{\min}, x_{\max}) \times [y_{\min}, y_{\max})$), and alpha threshold $\alpha_{\text{thresh}}$ [S1, unofficial].
+- **Output**: Boolean flag indicating whether the primitive is discarded for the entire tile [S1, unofficial].
+
+**Data Structures**
+The method relies on the geometric definition of the primitive's support. For linear splats, the primitive is defined by an $L_1$ polytope [S1, unofficial]. The geometry is characterized by four slab pairs, indexed by $i \in \{0, 1, 2, 3\}$ [S1, unofficial]. Each slab pair $i$ has a normal vector:
+$$ \boldsymbol{n}_i = \varepsilon_{i,0}\boldsymbol{c}_0 + \varepsilon_{i,1}\boldsymbol{c}_1 + \varepsilon_{i,2}\boldsymbol{c}_2 $$
+where $\varepsilon_{i,0} = +1$ is fixed, and $\varepsilon_{i,1}, \varepsilon_{i,2} \in \{+1, -1\}$ [S1, unofficial]. The vectors $\boldsymbol{c}_0, \boldsymbol{c}_1, \boldsymbol{c}_2$ define the orientation and scale of the primitive in screen space [S1, unofficial].
+
+**Steps**
+1. **Compute Half-Chord Lengths**: For each slab pair $i \in \{0, 1, 2, 3\}$, calculate the minimum half-chord length $h_i$ over the tile $\Omega_t$ [S1, unofficial]. This value represents the maximum distance from the slab center to the boundary along the ray direction, constrained by the tile bounds [S1, unofficial]. If the slab normal's z-component $n_{i,z} \neq 0$, the bounds are derived from solving $|\boldsymbol{n}_i \cdot (\Delta x, \Delta y, \tau)| \le 1$ for the depth parameter $\tau$ [S1, unofficial]. The upper bound on the total chord length variation $\Delta \tau$ over the tile is given by:
+   $$ \Delta \tau_{\text{upper}}(\Omega_t) \le 2 \min_i h_i $$
+   [S1, unofficial]
+2. **Calculate Primitive-Level Bound**: Compute the global primitive-level bound on the chord length [S1, unofficial]. This is derived from the case where $i=j$ in the general tile-bound equation, reducing to $g_{ii} = 2h_i$ [S1, unofficial]. The bound is:
+   $$ B_{\text{chord}} = 2 \min_i h_i $$
+   [S1, unofficial]
+3. **Convert to Opacity Bound**: Multiply the chord length bound by the primitive's homogeneous density $\boldsymbol{\sigma}$ to obtain the maximum possible opacity contribution for any pixel in the tile [S1, unofficial]:
+   $$ B_{\text{opacity}} = \boldsymbol{\sigma} \cdot B_{\text{chord}} = 2\boldsymbol{\sigma} \min_i h_i $$
+   [S1, unofficial]
+4. **Compare and Cull**: Compare the opacity bound against the threshold derived from the alpha threshold [S1, unofficial]. The condition for discarding the primitive for the entire tile is:
+   $$ 2\boldsymbol{\sigma} \min_i h_i < -\log(1 - \alpha_{\text{thresh}}) $$
+   [S1, unofficial] If this inequality holds, the primitive is discarded for all pixels in the tile [S1, unofficial].
+
+**Parameters**
+- $\boldsymbol{\sigma}$: The density of the primitive [S1, unofficial].
+- $\alpha_{\text{thresh}}$: The alpha threshold for culling [S1, unofficial].
+
+**Pitfalls**
+- **Loose Bounds**: The bound can become loose when the constraint attaining the maximum chord length changes across the tile $\Omega_t$ [S1, unofficial]. This occurs when different slab pairs or different closest points are active at different locations within the tile [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def xpr_linprim_cull(sigma, c0, c1, c2, alpha_thresh):
+    """
+    Determines if a primitive can be discarded for an entire tile.
+    
+    Args:
+        sigma: Float, density of the primitive.
+        c0, c1, c2: 3D vectors defining the orientation and scale of the primitive.
+        alpha_thresh: Float, the alpha threshold for culling.
+        
+    Returns:
+        bool: True if the primitive should be discarded, False otherwise.
+    """
+    epsilons = [
+        (1, 1, 1),
+        (1, 1, -1),
+        (1, -1, 1),
+        (1, -1, -1)
+    ]
+    
+    min_h = float('inf')
+    
+    for eps in epsilons:
+        # Construct normal vector n_i
+        n_i = (eps[0] * c0) + (eps[1] * c1) + (eps[2] * c2)
+        nz = n_i.z
+        
+        # Compute half-chord length h_i for this slab pair.
+        # Derived from solving |n_i . (dx, dy, tau)| <= 1 for tau at the center.
+        # h_i = 1 / |n_{i,z}|. [G] Standard derivation for slab extent along view direction.
+        if abs(nz) < 1e-9:
+            continue
+        h_i = 1.0 / abs(nz)
+        if h_i < min_h:
+            min_h = h_i
+            
+    # Primitive-level bound on chord length
+    bound = 2.0 * sigma * min_h
+    threshold = -math.log(1.0 - alpha_thresh)
+    
+    return bound < threshold
+```
+
+## Subtopics
+
+### Stop-the-pop
+Bounds the Gaussian response based on distance to the mean. Choose when using Gaussian splats. [1472-stop-the-pop](1472-stop-the-pop.md)
+
+### XPR
+The extensible renderer framework that implements LinPrim. [XPR](52-xpr.md)
+
+## Operating characteristics
+- **Time Complexity**: O(1) per primitive per tile, as it involves a constant number of slab pair checks (4) and a single comparison. [S1, unofficial]
+- **Memory Complexity**: O(1) auxiliary memory. [S1, unofficial]
+- **Strengths**: Simple to implement, no per-pixel checks needed, conservative culling. [S1, unofficial]
+- **Limitations**: The bound can be loose when the constraint attaining the maximum changes across the tile. [S1, unofficial]
+- **When to use**: When using linear splats with homogeneous density. [S1, unofficial]
+
+## Background
+XPR-LinPrim Culling was introduced in the XPR renderer paper. It is based on the linear-splatting culling method used in the reference CUDA linear-splatting implementation. The method leverages the $L_1$ polytope geometry of linear splats to derive a global chord length bound. [S1, unofficial]
+
+## Sources
+[S1] XPR: An Extensible Cross-Platform Point-Based Differentiable Renderer, https://doi.org/10.48550/arxiv.2606.11529, fetched 2026-10-26 (unofficial)

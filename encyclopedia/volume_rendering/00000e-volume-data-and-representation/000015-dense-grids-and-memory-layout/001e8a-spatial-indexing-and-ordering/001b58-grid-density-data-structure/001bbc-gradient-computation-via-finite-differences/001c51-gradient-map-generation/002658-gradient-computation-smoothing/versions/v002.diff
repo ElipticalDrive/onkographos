@@ -1,0 +1,90 @@
+--- v001.md
++++ v002.md
+@@ -1,49 +1,69 @@
+ # Gradient Computation & Smoothing
+-Also called: Gradient Computation via Compute Shader with Box Filter Smoothing
++Also called: Gradient Computation and Smoothing, Gradient Computation via Compute Shader with Box Filter Smoothing, RaycastVolume::generateGradients
+ ## Overview
+-This method computes volume gradients for lighting and shading on the GPU, followed by spatial smoothing to reduce noise in the gradient field [S1, unofficial]. It differs from its parent [Gradient Map Generation](1204-gradient-map-generation.md) by explicitly including a post-processing smoothing pass, and from its sibling [Volume Gradient Computation and Light Propagation Compute Shader](3869-volume-gradient-computation-and-light-propagation-compute-sh.md) by using a simple box filter rather than light propagation techniques [S1, unofficial].
++This method computes volume gradients for lighting and shading on the GPU, followed by spatial smoothing to reduce noise in the gradient field [S1, unofficial]. It operates as a two-pass compute shader pipeline that transforms raw scalar voxel data into a smoothed vector field suitable for raycasting [S2, unofficial].
+ ## How it works
+ **Inputs and outputs:**
+-- Input: Volumetric data texture (8-bit or 16-bit raw data) [S1, unofficial].
+-- Output: Smoothed gradient map (magnitude and direction) [S1, unofficial].
++- Input: Volumetric data texture (8-bit or 16-bit raw scalar data) [S1, unofficial].
++- Output: Smoothed gradient texture storing magnitude and direction [S2, unofficial].
+ 
+ **Data structures:**
+-- Volume texture: 3D texture containing scalar voxel values [S1, unofficial].
+-- Gradient map: 3D texture or image storing computed gradients [S1, unofficial].
++- Volume texture: 3D texture containing scalar voxel values, bound as `GL_R8UI` read-only [S2, unofficial].
++- Gradient texture: 3D texture with internal format `GL_RG16F`, `GL_LINEAR` filtering, `GL_CLAMP_TO_BORDER` wrapping, and `GL_FLOAT` data type, bound as `GL_RG16F` read-write [S2, unofficial].
+ 
+ **Steps:**
+-1. Dispatch a compute shader (`gradients.comp`) to calculate gradients from the volume texture [S1, unofficial].
+-2. Dispatch a second compute shader (`smooth_gradients.comp`) to apply a 3x3x3 box filter (average) to the computed gradient field [S1, unofficial].
++1. Bind the volume texture to image unit 0 as read-only and the gradient texture to image unit 1 as write-only [S2, unofficial].
++2. Dispatch a compute shader (`gradients.comp`) with grid size $\lceil \text{dim}_x/8 \rceil \times \lceil \text{dim}_y/8 \rceil \times \lceil \text{dim}_z/8 \rceil$ to calculate gradients from the volume texture [S2, unofficial].
++3. Bind the gradient texture to image unit 0 as read-write [S2, unofficial].
++4. Dispatch a second compute shader (`smooth_gradients.comp`) with the same grid size to apply a 3×3×3 box filter to the computed gradient field [S1, unofficial].
+ 
+ **Formulas:**
+-- Gradient calculation: Not given in the sources.
+-- Smoothing: 3x3x3 box filter average [S1, unofficial].
++- Gradient calculation (central differences) [G]: $\nabla V(x,y,z) = \left( \frac{V(x+1,y,z)-V(x-1,y,z)}{2}, \frac{V(x,y+1,z)-V(x,y-1,z)}{2}, \frac{V(x,y,z+1)-V(x,y,z-1)}{2} \right)$
++- Smoothing (3×3×3 box filter) [G]: $G_{\text{smooth}}(x,y,z) = \frac{1}{27} \sum_{dx=-1}^{1} \sum_{dy=-1}^{1} \sum_{dz=-1}^{1} G(x+dx, y+dy, z+dz)$
+ 
+ **Parameters:**
+-- Filter size: 3x3x3 [S1, unofficial].
++- Filter size: 3×3×3 [S1, unofficial].
++- Compute shader thread block size: 8×8×8 (implied by grid division by 8) [G].
+ 
+ **Edge cases and pitfalls:**
+-- Not given in the sources.
++- Boundary voxels: The box filter and central differences require neighboring voxels outside the volume bounds; `GL_CLAMP_TO_BORDER` wrapping and zero-padding or edge-clamping handle out-of-bounds accesses [S2, unofficial][G].
++- Precision: `GL_RG16F` provides 16-bit floating point precision per component, which may underflow or lose detail for very high-resolution volumes [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ # gradients.comp
+-# Calculate gradients from volume texture
+-# Not given in the sources.
++def compute_gradients(volume_tex, gradient_tex, dim_x, dim_y, dim_z):
++    x, y, z = thread_id
++    if x >= dim_x or y >= dim_y or z >= dim_z:
++        return
++    # Central differences [G]
++    gx = (volume_tex[x+1, y, z] - volume_tex[x-1, y, z]) / 2.0
++    gy = (volume_tex[x, y+1, z] - volume_tex[x, y-1, z]) / 2.0
++    gz = (volume_tex[x, y, z+1] - volume_tex[x, y, z-1]) / 2.0
++    gradient_tex[x, y, z] = vec3(gx, gy, gz)
+ 
+ # smooth_gradients.comp
+-# Apply 3x3x3 box filter to gradient field
+-# Not given in the sources.
++def smooth_gradients(gradient_tex, dim_x, dim_y, dim_z):
++    x, y, z = thread_id
++    if x >= dim_x or y >= dim_y or z >= dim_z:
++        return
++    sum_grad = vec3(0.0)
++    for dx in range(-1, 2):
++        for dy in range(-1, 2):
++            for dz in range(-1, 2):
++                sum_grad += gradient_tex[x+dx, y+dy, z+dz]
++    gradient_tex[x, y, z] = sum_grad / 27.0
+ ```
+ ## Subtopics
+ 
+ ### On-the-fly Gradient Calculation
+-A method to calculate normal vectors on the fly by sampling neighboring texels, avoiding storage of precomputed normals and reducing bandwidth usage [S2]. It samples the six nearest neighbors to calculate the gradient of that voxel and applies lighting calculations using the calculated gradient [S2]. Performance trade-off: Can become bandwidth limited with respect to the graphics bus if rendering large volumes not fitting in video memory; dynamic calculation eliminates bus transfer cost but increases rasterization cost [S2]. Dynamic normals vs Pre-computed normals: Dynamic normals eliminate sending normal maps across the graphics bus (saving bandwidth) but replace it with rasterization cost. If both fit in video memory, pre-computed normals yield higher performance due to faster rasterization [S2].
++A method to calculate normal vectors on the fly by sampling neighboring texels, avoiding storage of precomputed normals and reducing bandwidth usage [S3]. It samples the six nearest neighbors to calculate the gradient of that voxel and applies lighting calculations using the calculated gradient [S3]. Performance trade-off: Can become bandwidth limited with respect to the graphics bus if rendering large volumes not fitting in video memory; dynamic calculation eliminates bus transfer cost but increases rasterization cost [S3]. Dynamic normals vs Pre-computed normals: Dynamic normals eliminate sending normal maps across the graphics bus (saving bandwidth) but replace it with rasterization cost [S3]. If both fit in video memory, pre-computed normals yield higher performance due to faster rasterization [S3].
+ 
+ ## Operating characteristics
+ Not given in the sources.
+ ## Background
+-Origin: GPU-accelerated calculation of volume gradients for lighting/shading, followed by spatial smoothing to reduce noise in the gradient field [S1, unofficial]. History and development: Not given in the sources. Where it is used: Volume rendering [S1, unofficial].
++Origin: GPU-accelerated calculation of volume gradients for lighting/shading, followed by spatial smoothing to reduce noise in the gradient field [S1, unofficial]. Where it is used: Volume rendering [S1, unofficial].
+ ## Sources
+ [S1] jose-villegas/VolumeRendering, https://github.com/jose-villegas/VolumeRendering, fetched 2026-10-27 (unofficial)
+-[S2] Recent advances in hardware-accelerated volume rendering, https://doi.org/10.1016/s0097-8493(03)00146-8, fetched 2026-10-26+[S2] jose-villegas/StyleTransferFunction, https://github.com/jose-villegas/StyleTransferFunction, fetched 2026-10-27 (unofficial)
++[S3] Recent advances in hardware-accelerated volume rendering, https://doi.org/10.1016/s0097-8493(03)00146-8, fetched 2026-10-26

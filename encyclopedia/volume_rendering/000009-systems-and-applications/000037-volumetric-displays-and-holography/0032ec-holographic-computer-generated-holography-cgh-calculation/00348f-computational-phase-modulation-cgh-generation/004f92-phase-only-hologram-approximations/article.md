@@ -1,0 +1,202 @@
+# Phase-Only Hologram Approximations
+
+Also called: Amplitude Discard Method, Binary Phase Method, DPE, Direct Amplitude Encoding, Double Phase Encoding, Double Phase Method, Double-phase holograms
+
+## Overview
+Phase-only hologram approximations are methods for generating holograms compatible with Liquid Crystal Spatial Light Modulators (LCSLMs) that can only modulate the phase of light, not its amplitude [S1, S2]. They solve the problem of encoding a complex-valued object wave $O(x,y;c)$ into a phase-only hologram $H$ without using computationally expensive iterative optimization [S1]. The Amplitude Discard Method is the simplest approach, retaining only the phase of the object wave, while the Double Phase Method explicitly encodes both amplitude and phase into two adjacent phase values [S1, S2]. The Binary Phase Method quantizes the phase to two levels [S1]. These methods trade off image quality and energy efficiency for computational simplicity and real-time capability [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** Complex-valued object wave $O(x, y; c)$, where $x, y$ are spatial coordinates and $c$ is the color channel index [S1].
+*   **Output:** Phase-only hologram $H(x, y)$, representing the phase values to be displayed on the SLM [S1, S2].
+
+### Data Structures
+*   **Object Wave:** A 2D array of complex numbers, one per pixel per color channel [S1].
+*   **Hologram:** A 2D array of phase values.
+    *   For Amplitude Discard and Binary Phase: One phase value per pixel, quantized to $L$ or 2 levels respectively [S1].
+    *   For Double Phase: Two phase values per logical pixel, typically arranged in a checkerboard pattern or sub-hologram block [S2].
+
+### Formulas and Parameters
+
+#### 1. Amplitude Discard Method
+This method discards the amplitude of the object wave and quantizes the phase [S1, S2].
+
+$$ H(x, y; c) = Q \left( \frac{L}{2\pi} \arg \{ O(x, y; c) \} \right) $$
+
+*   $\arg \{ O \}$: The phase angle of the complex object wave [S1].
+*   $L$: Number of discrete quantization levels (typically $L=256$) [S1].
+*   $Q$: A uniform mid-rise quantizer mapping the scaled phase to integer levels [S1].
+*   **Parameters:** $L=256$ [S1].
+*   **Characteristics:** Does not produce unwanted diffraction order artifacts, so no spatial filter is required in the optical system [S1].
+
+#### 2. Binary Phase Method
+This method discards the amplitude and quantizes the phase to two levels [S1].
+
+*   **Formula:** The phase is quantized to two discrete SLM levels [S1].
+*   **Parameters:** 2 quantization levels [S1].
+*   **Characteristics:** Requires temporal averaging and a single-sideband filter [S1].
+
+#### 3. Double Phase Method (Direct Amplitude Encoding)
+This method encodes the complex value $O$ into the sum of two complex numbers with constant amplitude and variable phase [S1, S2].
+
+$$ O(x, y; c) = 0.5 e^{j \theta_1(x, y; c)} + 0.5 e^{j \theta_2(x, y; c)} $$
+
+*   $\theta_1, \theta_2$: The two phase values to be encoded [S1].
+*   **Derivation:** Let $O = a e^{j p}$, where $a = |O|$ is the amplitude and $p = \arg \{ O \}$ is the phase [S2]. The two phase values are calculated as:
+    $$ P_a(r) = p - \arccos(a) $$
+    $$ P_b(r) = p + \arccos(a) $$
+    where $a \in [0, 1]$ [S2].
+*   **Parameters:** Quantization levels $L=256$ [S1].
+*   **Characteristics:** Requires spatial filtering by a pupil aperture to remove unwanted diffraction orders [S1, S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def amplitude_discard_hologram(object_wave, L=256):
+    """
+    Generates a phase-only hologram using the Amplitude Discard Method.
+    
+    Args:
+        object_wave: 2D numpy array of complex numbers representing O(x,y;c).
+        L: Number of quantization levels (default 256).
+        
+    Returns:
+        hologram: 2D numpy array of phase values in [0, 2*pi).
+    """
+    # Extract phase angle from complex object wave
+    phase = np.angle(object_wave)
+    
+    # Scale phase to [-L/2, L/2) and quantize using uniform mid-rise quantizer Q
+    scaled_phase = (L / (2 * np.pi)) * phase
+    quantized = np.round(scaled_phase)
+    
+    # Map back to phase range [0, 2*pi)
+    hologram = (quantized / L) * 2 * np.pi
+    hologram = hologram % (2 * np.pi)
+    
+    return hologram
+
+def binary_phase_hologram(object_wave, num_levels=2):
+    """
+    Generates a phase-only hologram using the Binary Phase Method.
+    
+    Args:
+        object_wave: 2D numpy array of complex numbers.
+        num_levels: Number of phase levels (default 2).
+        
+    Returns:
+        hologram: 2D numpy array of phase values.
+    """
+    phase = np.angle(object_wave)
+    
+    # Shift phase to [0, 2*pi]
+    phase_shifted = phase % (2 * np.pi)
+    
+    # Scale to [0, num_levels), quantize, and map back to phase range
+    scaled = (num_levels / (2 * np.pi)) * phase_shifted
+    quantized = np.round(scaled) % num_levels
+    hologram = (quantized / num_levels) * 2 * np.pi
+    
+    return hologram
+
+def double_phase_hologram(object_wave, L=256):
+    """
+    Generates a double phase hologram using Direct Amplitude Encoding.
+    
+    Args:
+        object_wave: 2D numpy array of complex numbers.
+        L: Number of quantization levels (default 256).
+        
+    Returns:
+        hologram_a: 2D numpy array of phase values P_a.
+        hologram_b: 2D numpy array of phase values P_b.
+    """
+    # Extract amplitude and phase
+    amplitude = np.abs(object_wave)
+    phase = np.angle(object_wave)
+    
+    # Clamp amplitude to [0, 1] to satisfy arccos domain requirement [G]
+    amplitude = np.clip(amplitude, 0.0, 1.0)
+    
+    # Calculate P_a and P_b per S2 derivation
+    acos_a = np.arccos(amplitude)
+    P_a = phase - acos_a
+    P_b = phase + acos_a
+    
+    # Quantize to L levels and map back to phase range
+    P_a_scaled = (L / (2 * np.pi)) * P_a
+    P_b_scaled = (L / (2 * np.pi)) * P_b
+    
+    P_a_quant = np.round(P_a_scaled) % L
+    P_b_quant = np.round(P_b_scaled) % L
+    
+    hologram_a = (P_a_quant / L) * 2 * np.pi
+    hologram_b = (P_b_quant / L) * 2 * np.pi
+    
+    return hologram_a, hologram_b
+```
+
+### Edge Cases and Pitfalls
+*   **Amplitude > 1:** The Double Phase Method requires $|O| \le 1$ for $\arccos(|O|)$ to be real [S2].
+*   **Resolution Loss:** The Double Phase Method requires two phase values for each complex value, leading to a corresponding loss in resolution [S2].
+*   **Ringing Artifacts:** The Double Phase Method may produce subtle ringing artifacts [S2].
+*   **Simple Text Only:** The Amplitude Discard Method may produce acceptable results only for simple text and symbology consisting of thin lines, as phase encodes high frequencies like object edges; it is not a practical general solution [S2].
+*   **Phase Wrapping:** Real-world SLMs may have imperfections in phase wrapping from $2\pi$ back to $0$ [S2].
+
+## Subtopics
+
+### [One Step Phase Retrieval (OSPR)](14717-one-step-phase-retrieval-ospr.md)
+One Step Phase Retrieval (OSPR) is a technique for generating phase-only holograms by replacing iterative phase optimization with random phase assignment, relying on temporal averaging to recover the target image intensity. It differs from standard amplitude discard methods by explicitly managing the resulting high-frequency noise through the rapid playback of multiple randomized sub-frames, rather than attempting to minimize noise within a single static hologram.
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Amplitude Discard:** $O(N)$ time and memory, where $N$ is the number of pixels [S2].
+*   **Binary Phase:** $O(N)$ time and memory [S1].
+*   **Double Phase:** $O(N)$ time and memory [S2].
+*   **Iterative Methods:** Not considered in these approximations due to high computational burden [S1].
+
+### Measured Performance
+*   **PSNR (dB):**
+    *   Binary Phase: 25.2 dB [S1].
+    *   Double Phase: 27.6 dB [S1], 30.57 dB (red), 30.05 dB (green), 27.26 dB (blue) in simulation [S2].
+    *   Amplitude Discard: 27.7 dB [S1].
+    *   Amplitude Holograms (for comparison): 40.2 dB at $\Delta=0.5$ [S1].
+*   **SSIM:**
+    *   Binary Phase: 0.30 [S1].
+    *   Double Phase: 0.40 [S1].
+    *   Amplitude Discard: 0.62 [S1].
+    *   Amplitude Holograms (for comparison): 0.97 at $\Delta=0.5$ [S1].
+*   **Energy Efficiency:**
+    *   Amplitude Discard: 100% [S1].
+    *   Binary Phase: 50% [S1].
+    *   Double Phase: 21.6% [S1].
+    *   Amplitude Holograms: 1.4% at $\Delta=0.5$ [S1].
+
+### Strengths and Limitations
+*   **Amplitude Discard:**
+    *   *Strengths:* Highest energy efficiency (100%), no spatial filter needed, simple computation [S1].
+    *   *Limitations:* Lower SSIM than binary phase, not practical for general images due to high-frequency noise [S2].
+*   **Binary Phase:**
+    *   *Strengths:* Superior SSIM compared to other phase methods due to temporal averaging reducing speckle noise [S1].
+    *   *Limitations:* Lower PSNR, requires temporal averaging and single-sideband filter, significant per-pixel error [S1].
+*   **Double Phase:**
+    *   *Strengths:* Higher contrast and less high-frequency noise than iterative methods, smooth phase profile [S2].
+    *   *Limitations:* Lowest energy efficiency (21.6%), requires spatial filtering, resolution loss, ringing artifacts [S1, S2].
+
+### When to Use
+*   Use **Amplitude Discard** for simple text or symbology [S2], or when maximum energy efficiency (100%) is required and no spatial filter is available [S1].
+*   Use **Binary Phase** when structural preservation (SSIM) is more important than PSNR and temporal averaging is feasible [S1].
+*   Use **Double Phase** when high contrast and smooth phase are required, and spatial filtering is available [S2].
+
+## Background
+The Amplitude Discard Method is described as the most trivial way of computing a phase-only hologram [S1]. The Double Phase Method was described by Hsueh and Sawchuk in 1978 [S1, S2]. These methods are used in holographic near-eye displays for virtual and augmented reality, where real-time embedded rendering is required [S1, S2].
+
+## Sources
+[S1] Holographic Near-eye Display with Real-time Embedded Rendering, https://doi.org/10.1145/3610548.3618179, fetched 2026-10-28
+[S2] Holographic near-eye displays for virtual and augmented reality, https://doi.org/10.1145/3072959.3073624, fetched 2026-10-30

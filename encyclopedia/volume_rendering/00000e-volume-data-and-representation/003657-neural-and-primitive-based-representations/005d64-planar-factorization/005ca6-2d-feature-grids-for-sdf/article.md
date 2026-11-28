@@ -1,0 +1,210 @@
+# 2D Feature Grids for SDF
+
+Also called: SDF Feature Grids, SDF Grid Factorization
+
+## Overview
+2D Feature Grids for SDF is a memory-efficient neural scene representation that factorizes a 3D Signed Distance Function (SDF) feature grid into three separate 2D feature grids [S1]. It solves the $O(N^3)$ memory cost of a full 3D grid by assuming independence between feature distributions in orthogonal planes, enabling faster training and inference compared to dense 3D voxel representations [S1]. It differs from its sibling [K-planes](3317-k-planes.md) by using a fixed set of three coordinate-aligned planes (xy, yz, zx) rather than arbitrary rotated planes, and from [Forplane](5177-forplane.md) by explicitly modeling the SDF value directly via the grid features rather than as an implicit radiance field component [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D query point $\mathbf{x} \in \mathbb{R}^3$.
+*   **Output:** A fused feature vector $\mathbf{f}^{ps}(\mathbf{x}) \in \mathbb{R}^{3 \times K}$, which is subsequently decoded into the SDF value.
+
+**Data Structures:**
+The representation consists of three 2D feature grids:
+*   $M^s_{xy}, M^s_{yz}, M^s_{zx} \in \mathbb{R}^{N \times N \times K}$
+*   Total structure: $(M^s_{xy}, M^s_{yz}, M^s_{zx}) \in \mathbb{R}^{3 \times N \times N \times K}$
+*   $N$: Resolution of each 2D grid (e.g., 512).
+*   $K$: Feature dimension per grid (e.g., 32).
+*   Each grid stores $K$-dimensional feature vectors for a specific 2D projection.
+
+**Numbered Steps:**
+1.  **Projection:** Project the 3D query point $\mathbf{x} = (x, y, z)$ onto the three orthogonal 2D planes: $(x, y)$, $(y, z)$, and $(z, x)$.
+2.  **Feature Retrieval:** For each plane, retrieve a $K$-dimensional feature vector via bilinear interpolation from the corresponding 2D grid [S1].
+    *   Retrieve $\mathbf{m}^s_{xy}$ from $M^s_{xy}$ at coordinates $(x, y)$.
+    *   Retrieve $\mathbf{m}^s_{yz}$ from $M^s_{yz}$ at coordinates $(y, z)$.
+    *   Retrieve $\mathbf{m}^s_{zx}$ from $M^s_{zx}$ at coordinates $(z, x)$.
+    *   Here, $\mathbf{m}^s_{xy}, \mathbf{m}^s_{yz}, \mathbf{m}^s_{zx} \in \mathbb{R}^K$.
+3.  **Concatenation:** Concatenate the three retrieved vectors to form the output of the feature retrieval function $f^{ps}: \mathbb{R}^3 \rightarrow \mathbb{R}^{3 \times K}$ [S1]:
+    $$ f^{ps}(\mathbf{x}) = (\mathbf{m}^s_{xy}, \mathbf{m}^s_{yz}, \mathbf{m}^s_{zx}) $$
+4.  **Decoding:** Pass the concatenated features through a Multi-Layer Perceptron (MLP) to predict the final SDF value. The MLP typically includes positional encoding of the input coordinates before the grid lookup or within the decoder, depending on the specific implementation variant [S1].
+
+**Formulas:**
+The feature retrieval function is defined as [S1]:
+$$ f^{ps}(\mathbf{x}) = (\mathbf{m}^s_{xy}, \mathbf{m}^s_{yz}, \mathbf{m}^s_{zx}) $$
+where $\mathbf{m}^s_{xy} \sim M^s_{xy}$, $\mathbf{m}^s_{yz} \sim M^s_{yz}$, and $\mathbf{m}^s_{zx} \sim M^s_{zx}$, and $\sim$ denotes bilinear interpolation of the 4 neighboring features in the respective 2D grid [S1].
+
+**Parameters:**
+*   **Grid Resolution ($N$):** 512 (typical value cited) [S1].
+*   **Feature Dimension ($K$):** 32 (typical value cited) [S1].
+*   **MLP Architecture:** 1 fully-connected block with 2 hidden layers of 256 dimensions [S1].
+*   **Activations:** ReLU for all layers except the last layer, which has no activation [S1].
+*   **Positional Encoding:** 3 frequencies for each dimension of the input points [S1].
+*   **SDF Truncation:** SDF values are truncated for better shape representation: values $> 0.1$ are set to $0.1$, and values $< -0.1$ are set to $-0.1$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Independence Assumption:** The method assumes that the distribution of high-dimensional features in the $(x, y)$ plane is independent of $z$, $(y, z)$ is independent of $x$, and $(z, x)$ is independent of $y$ [S1]. The MLP is expected to handle cases where this assumption is broken [S1].
+*   **Truncation:** The SDF is truncated to $[-0.1, 0.1]$ to improve shape representation stability [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class SDFFeatureGrid:
+    def __init__(self, resolution=512, feature_dim=32):
+        """
+        Initialize the 2D Feature Grids for SDF.
+        
+        Args:
+            resolution (int): N, the resolution of each 2D grid.
+            feature_dim (int): K, the feature dimension per grid.
+        """
+        self.N = resolution
+        self.K = feature_dim
+        # Three 2D feature grids: xy, yz, zx
+        # Shape: (N, N, K)
+        self.M_xy = nn.Parameter(torch.randn(N, N, K))
+        self.M_yz = nn.Parameter(torch.randn(N, N, K))
+        self.M_zx = nn.Parameter(torch.randn(N, N, K))
+        
+        # MLP Decoder
+        # 2 hidden layers of 256 dimensions
+        self.mlp = nn.Sequential(
+            nn.Linear(3 * K, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1) # Output SDF value
+        )
+
+    def bilinear_interpolate(self, grid, coords):
+        """
+        Perform bilinear interpolation on a 2D grid.
+        
+        Args:
+            grid (Tensor): (N, N, K) feature grid.
+            coords (Tensor): (..., 2) coordinates in [0, N-1].
+            
+        Returns:
+            Tensor: Interpolated features (..., K).
+        """
+        # Normalize coordinates to [-1, 1] for grid_sample if using standard libraries,
+        # or implement custom interpolation. Here we assume a helper that handles
+        # sampling from (N, N, K) grid at float coordinates.
+        # Note: Standard PyTorch grid_sample expects (N, N, C) and coords (..., 2) in [-1, 1].
+        # We map [0, N-1] to [-1, 1].
+        
+        # Map coords from [0, N-1] to [-1, 1]
+        # x_norm = 2 * (x / (N-1)) - 1
+        coords_norm = 2.0 * (coords / (self.N - 1)) - 1.0
+        
+        # grid_sample expects grid of shape (N, N, C) and grid of shape (..., H_out, W_out, 2)
+        # We need to unsqueeze for batch dimensions and transpose for grid_sample format (N, N, K) -> (1, N, N, K)
+        # However, for simplicity in pseudocode, we assume a function `sample_2d` that does this correctly.
+        # Implementing raw bilinear interp:
+        
+        x = coords[..., 0]
+        y = coords[..., 1]
+        
+        # Get integer and fractional parts
+        x0 = torch.floor(x).long()
+        y0 = torch.floor(y).long()
+        x1 = x0 + 1
+        y1 = y0 + 1
+        
+        # Clamp to grid boundaries
+        x0 = torch.clamp(x0, 0, self.N - 1)
+        y0 = torch.clamp(y0, 0, self.N - 1)
+        x1 = torch.clamp(x1, 0, self.N - 1)
+        y1 = torch.clamp(y1, 0, self.N - 1)
+        
+        # Fractional parts
+        dx = x - x0.float()
+        dy = y - y0.float()
+        
+        # Retrieve features
+        f00 = self.M_xy[x0, y0, :] # This indexing is complex for batched coords; 
+                                    # assuming grid_sample is used in practice.
+                                    # For pure python-like pseudocode without libraries:
+        
+        # Using grid_sample logic for clarity:
+        # We will assume a helper `interpolate_2d(grid, coords)` exists or use grid_sample.
+        # To be self-contained and valid Python-like without external libs:
+        
+        # Reshape for grid_sample: (1, N, N, K)
+        grid_4d = grid.unsqueeze(0)
+        # Coords need to be (1, ..., 2)
+        coords_4d = coords_norm.unsqueeze(0).unsqueeze(0) # (1, 1, ..., 2)
+        
+        # grid_sample output: (1, ..., K, 1) -> squeeze last dim
+        # Note: grid_sample expects grid (N, N, C) and grid (..., 2)
+        # We need to transpose grid to (1, K, N, N) for grid_sample? No, grid_sample expects (N, N, C)
+        # Actually, grid_sample expects grid of shape (N, N, C) and grid of shape (..., H_out, W_out, 2)
+        # Let's stick to the conceptual step:
+        
+        # In a real implementation, one would use torch.nn.functional.grid_sample.
+        # Here we describe the logical step.
+        return interpolate_2d(grid, coords) # Placeholder for standard bilinear interp
+
+    def forward(self, points):
+        """
+        Forward pass for SDF prediction.
+        
+        Args:
+            points (Tensor): (..., 3) 3D coordinates.
+            
+        Returns:
+            Tensor: SDF values (..., 1).
+        """
+        # 1. Positional Encoding (3 frequencies)
+        # Assuming a standard positional encoding function
+        points_encoded = positional_encoding(points, num_frequencies=3)
+        
+        # 2. Project to 2D planes
+        # xy: (..., 2) -> x, y
+        xy_coords = points[..., [0, 1]]
+        # yz: (..., 2) -> y, z
+        yz_coords = points[..., [1, 2]]
+        # zx: (..., 2) -> z, x
+        zx_coords = points[..., [2, 0]]
+        
+        # 3. Retrieve features
+        m_xy = self.bilinear_interpolate(self.M_xy, xy_coords)
+        m_yz = self.bilinear_interpolate(self.M_yz, yz_coords)
+        m_zx = self.bilinear_interpolate(self.M_zx, zx_coords)
+        
+        # 4. Concatenate
+        # Shape: (..., 3*K)
+        features = torch.cat([m_xy, m_yz, m_zx], dim=-1)
+        
+        # 5. Decode via MLP
+        sdf = self.mlp(features)
+        
+        # 6. Truncate SDF
+        sdf = torch.clamp(sdf, min=-0.1, max=0.1)
+        
+        return sdf
+```
+
+## Subtopics
+
+### [2D Feature Grids for DDF](17218-2d-feature-grids-for-ddf.md)
+A memory-efficient neural scene representation that factorizes a 6D feature grid into 15 separate 2D grids to represent Directional Distance Functions (DDF). It solves the $O(N^6)$ memory cost of a full 6D grid by assuming independence between feature distributions in orthogonal planes, enabling fast inverse rendering by replacing iterative sphere tracing with a single forward pass. It differs from its parent [2D Feature Grids for SDF](17216-2d-feature-grids-for-sdf.md) by operating on the 6D input space $(p, r) \in \mathbb{R}^6$ (point on unit sphere + direction) rather than the 3D space $\mathbb{R}^3$, allowing explicit encoding of directional information to resolve surface geometry along specific viewing directions without spatial ambiguity.
+
+## Operating characteristics
+*   **Memory Complexity:** $O(N^2 K)$ per plane, total $O(3 N^2 K)$. This is significantly lower than the $O(N^3 K)$ of a full 3D grid [S1].
+*   **Training Time:** Approximately 2.5 seconds per batch on an Nvidia A100 GPU. Training a model per class takes 1–4 days depending on the number of shapes [S1].
+*   **Inference Hardware:** Evaluated on Nvidia A40 GPU [S1].
+*   **Strengths:** Memory efficiency, fast inference compared to iterative methods, view-consistent geometric details [S1].
+*   **Limitations:** Relies on the independence assumption between orthogonal planes, which may not hold for all geometries [S1]. Truncation of SDF values may limit the range of representable distances [S1].
+*   **When to Use:** Suitable for applications requiring efficient memory usage and fast inference for SDF-based representations, particularly when the scene geometry can be approximated by independent 2D feature distributions [S1].
+*   **When Not to Use:** When high-fidelity representation of complex, non-separable 3D structures is required, or when the independence assumption is severely violated [S1].
+
+## Background
+The method originates from the paper "FIRe: Fast Inverse Rendering Using Directional and Signed Distance Functions" [S1]. It builds on recent efforts to factorize 3D grids into 2D grids, which have proven effective for reducing computational costs [S1]. The approach is part of a broader family of planar factorization methods for neural scene representations [S1].
+
+## Sources
+[S1] FIRe: Fast Inverse Rendering Using Directional and Signed Distance Functions, https://www.youtube.com/watch?v=Qj0ymDlRYZs, fetched 2026-10-30

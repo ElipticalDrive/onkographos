@@ -1,0 +1,125 @@
+--- v004.md
++++ v005.md
+@@ -14,5 +14,5 @@
+ 
+ **Data Structures:**
+-*   **Forward State Stack:** A list storing intermediate variables from the forward pass. For each ray sample $i$, this includes the accumulated color $c_i$, transmittance $T_i$, interpolated position $x_i$, density $d_i$, color contribution $\mathbf{c}_i$, and opacity $\alpha_i$ [S2]. In standard implementations, this scales linearly with the number of steps [S2].
++*   **Forward State Stack:** A list storing intermediate variables from the forward pass. For each ray sample $i$, this includes the accumulated color $c_i$, transmittance $T_i$, interpolated position $x_i$, density $d_i$, color contribution $\mathbf{c}_i$, and opacity $\alpha_i$ [S1][S2]. In standard implementations, this scales linearly with the number of steps [S2].
+ *   **Adjoint Variables:** Variables initialized to zero that accumulate gradients. For a variable $x$, the adjoint $\hat{x}$ represents $\frac{\partial x_{\text{out}}}{\partial x}$ [S2].
+ 
+@@ -66,8 +66,4 @@
+     num_samples: int
+ ) -> tuple:
+-    """
+-    Performs forward and backward pass for differentiable volume rendering.
+-    Returns gradients for volume, tf, cam_origin, cam_direction, and step_size.
+-    """
+     # 1. Forward Pass
+     accumulated_color = [0.0, 0.0, 0.0]
+@@ -76,32 +72,20 @@
+     
+     for i in range(num_samples):
+-        # Ray marching: pos = origin + i * step_size * direction
+         pos = [cam_origin[j] + i * step_size * cam_direction[j] for j in range(3)]
++        density = interpolate_volume(volume, pos)  # [G]
++        color_contrib, opacity = evaluate_tf(tf, density)  # [G]
+         
+-        # Interpolate density from volume grid (standard trilinear interpolation)
+-        density = 0.5 # Placeholder: standard 3D interpolation operation
+-        
+-        # Evaluate Transfer Function
+-        color_contrib = [density, density, density] # Placeholder: standard TF evaluation
+-        opacity = density # Placeholder: standard TF evaluation
+-        
+-        # Store intermediates for backward pass
+         intermediates.append({
+-            'pos': pos,
+-            'density': density,
+-            'color_contrib': color_contrib,
+-            'opacity': opacity,
+-            'accumulated_color': accumulated_color,
+-            'transmittance': transmittance
++            'pos': pos, 'density': density, 
++            'color_contrib': color_contrib, 'opacity': opacity,
++            'accumulated_color': accumulated_color, 'transmittance': transmittance
+         })
+         
+-        # Front-to-back blending
+-        accumulated_color = [
+-            accumulated_color[j] + transmittance * opacity * color_contrib[j] 
+-            for j in range(3)
+-        ]
++        accumulated_color = [accumulated_color[j] + transmittance * opacity * color_contrib[j] for j in range(3)]
+         transmittance = transmittance * (1.0 - opacity)
+         
+     final_color = accumulated_color
++    loss = compute_loss(final_color)  # [G]
++    dL_dfinal_color = compute_loss_gradient(final_color)  # [G]
+     
+     # 2. Backward Pass
+@@ -111,7 +95,4 @@
+     grad_cam_direction = [0.0, 0.0, 0.0]
+     grad_step_size = 0.0
+-    
+-    # Gradient from loss (provided by framework)
+-    dL_dfinal_color = [1.0, 1.0, 1.0] 
+     
+     d_color_next = dL_dfinal_color
+@@ -128,21 +109,13 @@
+         d_T_in = d_T_next * (1.0 - alpha) + sum(d_color_next[j] * alpha * c_contrib[j] for j in range(3))
+         
+-        # Adjoint of color contribution and alpha
+-        d_c_contrib = [d_color_next[j] * T_in * alpha for j in range(3)]
+-        d_alpha = sum(d_color_next[j] * T_in * c_contrib[j] for j in range(3)) - d_T_next * T_in
++        # TF Adjoint
++        d_density = sum(d_color_next[j] * T_in * alpha for j in range(3))  # [G]
++        d_tf_val = 0.0  # [G]
+         
+-        # Transfer Function Adjoint
+-        # d_density = sum(d_c_contrib[j] * df_tf/d_density for j in range(3))
+-        # d_tf_val = sum(d_c_contrib[j] * df_tf/d_tf for j in range(3))
+-        d_density = sum(d_c_contrib[j] for j in range(3))
+-        d_tf_val = 0.0
+-        
+-        # Accumulate TF and Volume gradients
+         grad_tf[0] += d_tf_val
+         grad_volume[0][0] += d_density
+         
+         # Interpolation Adjoint
+-        # d_pos = [d_density * df_interp/d_pos for _ in range(3)]
+-        d_pos = [d_density for _ in range(3)]
++        d_pos = [d_density for _ in range(3)]  # [G]
+         
+         # Ray Marching Adjoint
+@@ -151,5 +124,4 @@
+         grad_cam_direction = [grad_cam_direction[j] + d_pos[j] * i * step_size for j in range(3)]
+         
+-        # Update next adjoints
+         d_color_next = d_color_in
+         d_T_next = d_T_in
+@@ -186,14 +158,14 @@
+ 
+ ### Adjoint Method > Gradient w.r.t Ray Direction
+-Computes the gradient of the projection weight $P$ with respect to the ray direction $n$, i.e., $\partial P / \partial n_{idx}$. It accounts for the implicit dependence of the entry point $p_a$ on $n$. The total gradient is calculated as `ray_n.grad[idx] + fac_t * p_a.grad[idx]`, where `fac_t` accounts for the implicit dependence of the entry point $p_a$ on $n$ [S7, unofficial].
++Computes the gradient of the projection weight $P$ with respect to the ray direction $n$, i.e., $\partial P / \partial n_{idx}$ [S7, unofficial]. It accounts for the implicit dependence of the entry point $p_a$ on $n$ [S7, unofficial]. The total gradient is calculated as `ray_n.grad[idx] + fac_t * p_a.grad[idx]`, where `fac_t` accounts for the implicit dependence of the entry point $p_a$ on $n$ [S7, unofficial].
+ 
+ ### Memoized reverse-mode differentiation for recursion
+-A technique to differentiate recursive functions in reverse mode by caching results in a stack (or tree) to avoid redundant recomputation of the forward function, which causes $O(N^2)$ complexity in naive implementations. The forward pass populates a stack with intermediate values, and the reverse pass iterates backwards through the stack to compute gradients. If the recursive function calls itself multiple times (branching recursion), a tree structure should be used instead of a stack [S1].
++A technique to differentiate recursive functions in reverse mode by caching results in a stack (or tree) to avoid redundant recomputation of the forward function, which causes $O(N^2)$ complexity in naive implementations [S1]. The forward pass populates a stack with intermediate values, and the reverse pass iterates backwards through the stack to compute gradients [S1]. If the recursive function calls itself multiple times (branching recursion), a tree structure should be used instead of a stack [S1].
+ 
+ ### Differentiating SIMD-based rendering programs
+-A strategy for differentiating parallel rendering programs (written in parallel for loops) by executing the forward pass, storing intermediates in a stack of arrays, and then executing the reverse pass with transformed statements. Any read from external arrays in the original parallel for loop must be transformed into an atomic scatter write in the reverse pass to avoid race conditions. Implemented in Enoki, the core of Mitsuba 2 [S1].
++A strategy for differentiating parallel rendering programs (written in parallel for loops) by executing the forward pass, storing intermediates in a stack of arrays, and then executing the reverse pass with transformed statements [S1]. Any read from external arrays in the original parallel for loop must be transformed into an atomic scatter write in the reverse pass to avoid race conditions [S1]. Implemented in Enoki, the core of Mitsuba 2 [S1].
+ 
+ ### [Checkpointing for Reverse-Mode Memory Optimization](8843-checkpointing-for-reverse-mode-memory-optimization.md)
+-An optimization to reduce the memory complexity of reverse-mode automatic differentiation by storing only a subset of intermediate variables (checkpoints) and recomputing the loop segments between them during the reverse pass. Introduced by Andreas Griewank in 1992, it achieves memory complexity of $O(\log(N))$ at the cost of increasing time complexity to $O(N \log(N))$, where $N$ is the loop length.
++An optimization to reduce the memory complexity of reverse-mode automatic differentiation by storing only a subset of intermediate variables (checkpoints) and recomputing the loop segments between them during the reverse pass. Introduced by Andreas Griewank, it achieves memory complexity of $O(\log(N))$ at the cost of increasing time complexity to $O(N \log(N))$, where $N$ is the loop length.
+ 
+ ## Operating characteristics
+@@ -207,5 +179,5 @@
+ 
+ ## Background
+-The Adjoint Method, also known as Reverse-Mode Automatic Differentiation, was introduced by Andreas Griewank in 1992 [S1]. It is widely used in differentiable rendering for inverse problems such as transfer function reconstruction, volume reconstruction, and scene optimization [S2]. It serves as a baseline in inverse rendering optimization experiments [S6, unofficial]. Implementations often use custom CUDA operations with JIT compilation (e.g., via NVRTC) to integrate with deep learning frameworks like PyTorch [S2].
++The Adjoint Method is a standard technique in automatic differentiation, widely used in differentiable rendering for inverse problems such as transfer function reconstruction, volume reconstruction, and scene optimization [S2]. It serves as a baseline in inverse rendering optimization experiments [S6, unofficial]. Implementations often use custom CUDA operations with JIT compilation (e.g., via NVRTC) to integrate with deep learning frameworks like PyTorch [S2]. Checkpointing for reverse-mode memory optimization was introduced by Andreas Griewank [S1].
+ 
+ ## Sources

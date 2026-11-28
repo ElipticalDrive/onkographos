@@ -1,0 +1,187 @@
+Problem statement The DistanceCallback defines a dist value which returns the minimum distance "till now". The broadphase manager uses that value to determine if further pairs should be considered -- specifically, if a bounding box pair ...
+
+Signed distance, broadphase, and callback distance are not compatible · Issue #403 · flexible-collision-library/fcl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Signed distance, broadphase, and callback distance are not compatible #403
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Signed distance, broadphase, and callback distance are not compatible#403
+Copy link
+Assignees
+Labels
+Kind: bugPriority: low
+Description
+SeanCurtis-TRI
+opened on May 21, 2019
+Issue body actions
+Problem statement
+The DistanceCallback defines a dist value which returns the minimum distance "till now". The broadphase manager uses that value to determine if further pairs should be considered -- specifically, if a bounding box pair is farther than the dist value, the pair of bounding boxes (and the geometry they contain) will not be considered. (See the 'DynamicAABBTreeCollisionManager' code as an example.
+This can be used to limit the search of the tree if, for example, I'm only interested in distances within a certain radius (which a callback could do by setting the dist value to this radius value).
+The problem is that it doesn't work with signed distance. Signed distance is defined over the range [-∞, ∞]. This suggests that the dist value could easily be zero or negative as the minimum observed distance. It doesn't work for the following reasons:
+The distance between AABBs is reported strictly as a separating distance. If there is any penetration at all, zero is simply reported. So, this function's range is strictly positive values.
+The DynamicAABBTreeCollisionManager's test (linked above) tests to see if the AABB distance is strictly less than dist.
+If dist is less than or equal to zero, no signed distances will be computed. All AABB distances will be zero or larger which will fail the less-than-or-equal-to-zero test.
+At the end of the day, this is further evidence that signed distance was layered on top of separating distance after the fact (as is the fact that there are no signed distance primitive functions).
+note:: This is only a problem if the callback writes to the dist value. If dist is left at the maximum scalar value, all pairs get properly visited by the broadphase.
+Proposed solution
+Broadphase needs to be extended to directly support signed distance. Ideally:
+BVs report negative (aka penetrating) distance -- or, in other words, BVs support calculation of signed distance.
+The recursing algorithm uses the signed distance to determine if a BV-pair should be traversed.
+🎉React with 🎉2Reacted by Alessio Rocchi and Weidong Sun
+Activity
+SeanCurtis-TRI
+added
+Kind: bug
+Priority: low
+on May 21, 2019
+SeanCurtis-TRI
+self-assigned this
+on May 21, 2019
+sherm1 commented on May 21, 2019
+sherm1
+on May 21, 2019
+Member
+More actions
+I'm unclear whether this makes logical sense due to various ambiguities associated with signed distance. First, I'm fuzzy on the meaning of "signed distance" here. Is that maximum penetration depth? Or minimum translational distance? What is the use case here? Would it include "return all geometry pairs penetrating by at least 1mm"? Why is that important? Is the AABB or OBB computation of the appropriate signed distance quantity cheap enough to make sense as part of broad phase? Since bounding volumes don't generally fit perfectly, and penetration depths are typically small, isn't it likely that a negative cutoff won't trim off many contacting pairs anyway?
+I would want to make sure we have a meaningful use case here before we do anything -- what is wrong with having 0 as the cutoff and just return all overlapping pairs in that case? Narrow phase can do any further trimming if needed.
+SeanCurtis-TRI commented on May 21, 2019
+SeanCurtis-TRI
+on May 21, 2019
+ContributorAuthor
+More actions
+So, you're unsure about the proposal? But the problem is clear, right? I'm ok with defining specific, alternate semantics.
+However, I feel that the exact definition of "signed distance" is less important than the fact that the range of the function spans the real number line. In addition to that, we have a threshold value that ostensibly omits results that are greater than that threshold. Currently, when we provide a threshold value drawn from the function range, we end up omitting arbitrary results (greater and less than). And that is absolutely wrong. That should be correct regardless of the interpretation of the function's result.
+sherm1 commented on May 21, 2019
+sherm1
+on May 21, 2019
+Member
+More actions
+I was responding only to the broadphase part -- I'm skeptical that we would want to include anything as complicated as penetration depth in broadphase. I agree that the API should do what it promises!
+SeanCurtis-TRI commented on May 21, 2019
+SeanCurtis-TRI
+on May 21, 2019
+ContributorAuthor
+More actions
+I guess I don't understand what it means to respond "only to the broadphase part". The whole issue is about the broadphase part. Signed distance was introduced and shoe-horned into the old "distance" (to mean "separating distance") infrastructure. The broadphase aspect of the old distance infrastructure is sufficiently incompatible with the shoehorning, that parameters no longer work if you turn on "signed distance".
+sherm1 commented on May 21, 2019
+sherm1
+on May 21, 2019
+Last edited by sherm1
+Member
+More actions
+Your proposed solution above (literally in the "Proposed solution" section!) includes negative distances for the broadphase calculation. Broadphase is just a performance optimization -- I'm saying: don't do that particular optimization. Weed out the far away things, sure, but if a pair of boxes is touching just return that pair for further processing.
+SeanCurtis-TRI commented on May 21, 2019
+SeanCurtis-TRI
+on May 21, 2019
+ContributorAuthor
+More actions
+So, specifically, you're advocating don't compute signed distance for bounding volumes. We still need the BVTree traversal to be compatible with not culling BVs that are colliding. I'm certainly amenable to not computing BV signed distance.
+avalenzu commented on May 23, 2019
+avalenzu
+on May 23, 2019
+More actions
+don't compute signed distance for bounding volumes.
+Just to be sure I'm understanding correctly, we would still be able to use the broadphase in signed-distance queries, right?
+sherm1 commented on May 23, 2019
+sherm1
+on May 23, 2019
+Member
+More actions
+Just to be sure I'm understanding correctly, we would still be able to use the broadphase in signed-distance queries, right?
+Right! We just wouldn't attempt to figure out how deeply penetrated the bounding boxes are.
+SeanCurtis-TRI commented on May 23, 2019
+SeanCurtis-TRI
+on May 23, 2019
+ContributorAuthor
+More actions
+Ignoring the proposed details for a minute, what this is really about is the fact that the broadphase was tailored to separating distance. Signed distance was shoehorned in. It generally works, but there's an artifact that wasn't adapted to signed distance (specifically the "distance" value in the callback). It leads to undesirable and unexpected behaviors in some cases.
+We're currently using the broadphase in Drake and have a use case that falls into one of those "unexpected behavior cases". In Drake, we've implemented our own work around. But FCL should address the core issue directly.
+Levi-Armstrong commented on Apr 15, 2020
+Levi-Armstrong
+on Apr 15, 2020
+Last edited by sherm1
+Contributor
+More actions
+I have recently been conducting performance analysis of FCL and Bullet and noticed that for distance checks FCL was slower. After digging into the code I noticed that when making distance checks, it checks the distance between the bounding volumes. In the case of Bullet they have the concept of the contact threshold distance which increase/decreases the Bounding volume in the broadphase. Could a similar approach be used in FCL to solve the signed distance issue?
+I was able to solve this for my use case where I have single contact distance threshold for all objects. I created a FCL collision object wrapper that inherits from CollisionObject and exposes a setContactDistanceThreshold which modifies the protected member aabb. Then call update in the manger on the collision so the broadphase update the bounding volume for the increased/decreased aabb. In the manager I use the collide method instead of the distance with a callback function that calls the fcl::distance on the two objects. This has shown significant performance improvements for the case where you want to find the first contact that violates the contact distance threshold but does not appear to improve the performance in the case where you what to find every contact that violates the contact distance threshold.
+SeanCurtis-TRI commented on Apr 20, 2020
+SeanCurtis-TRI
+on Apr 20, 2020
+ContributorAuthor
+More actions
+Could a similar approach be used in FCL to solve the signed distance issue?
+I'm not clear on what this "issue" is.
+FCL's distance queries accept an optional "maximum distance" argument. It tests the distance between bounding volumes to determine if distance between volumes is greater than the maximum geometry distance, thus culling part of the tree. It isn't clear to me how "inflating" the BV changes that.
+If I recall correctly, one of the reasons Bullet has inflation is so that it can get continuous normals out of discontinuous surfaces. Think of a box, as I traverse over an edge, the normal discontinuously jumps from one direction to the next. By inflating it, I've convolved the box with a sphere and the edge is no longer a singularity, but a cylinder that allows normal directions to vary smoothly. I don't think it affects broadphase culling. (Although this is predicated on some memories that may be several years out of date.)
+SeanCurtis-TRI commented on Apr 20, 2020
+SeanCurtis-TRI
+on Apr 20, 2020
+ContributorAuthor
+More actions
+@sherm1 I revisited this issue and the conversation and I realize there was one detail that was missing. Hopefully, that'll help resolve the original topic.
+In a distance query, I can say, only give me distance for objects that are closer than 1 m. So, rather than getting O(N^2) results, I'll get which ever pairs are close.
+For signed distance, i can obviously do the same. However, I can take that a step further. I can say that any penetration up to 1 mm is not worth paying attention to. Just tell me about the pairs that penetrate at least 1mm. That would be a distance of -1e-3. The configuration of the DistanceRequest allows you to do that. However, because the BVH was written without thinking about distance carrying negative values, this doesn't work.
+So, this is a case of the API suggesting something that is a lie. This issue is about correcting the lie.
+sherm1 commented on Apr 20, 2020
+sherm1
+on Apr 20, 2020
+Member
+More actions
+@SeanCurtis-TRI IIRC Bullet does this only by allowing an offset value that effectively shrinks all the objects so that the broadphase can continue to deal with (cheap) separation distances >= 0. (E.g. shrinking all objects by 1e-3 and then reporting separation distance behaves very much like setting a negative distance threshhold as you described above.) Computing actual penetrations is much more expensive and much less robust. I don't think we should attempt that, but supporting "shrinkage" like Bullet seems reasonable.
+Levi-Armstrong commented on Apr 20, 2020
+Levi-Armstrong
+on Apr 20, 2020
+Contributor
+More actions
+Also I have seen a perform improvement with adjusting the bounding box size in the BVH opposed to using the current approach where the distance is checked between bounding boxes. Would you be opposed to adding the ability to set a margin in the collision object class?
+SeanCurtis-TRI commented on Apr 20, 2020
+SeanCurtis-TRI
+on Apr 20, 2020
+ContributorAuthor
+More actions
+For the record, I still have no idea what this conversation is about. This new incarnation of the conversation seems to have nothing to do with the original issue.
+And, as stated, I'm not sure what the new conversation is about. I still cannot conceive of what the problem is that the proposed solution solves.
+sherm1 commented on Apr 21, 2020
+sherm1
+on Apr 21, 2020
+Member
+More actions
+Oh, I just reread the problem statement (twice) and I am still not sure I get it, but I see that both @Levi-Armstrong and I interpreted it differently than I now think you may have intended. This sentence is un-parseable:
+All AABB distances will be zero or larger which will fail the less-than-or-equal-to-zero test.
+since zero satisifies less-than-or-equal-to-zero. But if I translate that to less-than-zero I can't quite get it to make sense with the other parts of the problem statement.
+I am trying to understand it as though the first sentence of the problem statement said:
+"When doing a signed distance query, under some circumstances the broadphase will eliminate contact pairs that should have been kept for narrowphase processing."
+Is that right? It is difficult to understand what the actual problem is from the description.
+SiddhantKadwe
+added a commit that references this issue on Oct 2, 2024
+Bug Fix: Calculating distance between two collision object using
+...
+4ca2c64
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+SeanCurtis-TRI
+Labels
+Kind: bugPriority: low
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

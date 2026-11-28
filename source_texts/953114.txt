@@ -1,0 +1,52 @@
+I was playing around with the new OptiX-7 version. To display the launch results (simple mono-colour written from raygen) I create an OpenGL texture, map it and obtain the mapped array via cuGraphicsSubResourceGetMappedArray, and finally create a CUDA surface with the array as backing. However, writing to the surface from the OptiX kernel yields neither a change in the (displayed) texture nor an error, whereas an almost identical regular CUDA kernel has visible effects. 
+ The CUDA code: 
+ __global__ void test_kernel(::CUsurfObject surface) {
+    const uint2 imageIndex{
+        threadIdx.x + blockDim.x * blockIdx.x,
+        threadIdx.y + blockDim.y * blockIdx.y
+    };
+    if(imageIndex.x < 800 && imageIndex.y < 100)
+        ::surf2Dwrite(::make_float4(1.f, 0.f, 1.f, 1.f), surface,
+                      imageIndex.x * sizeof(float4), imageIndex.y);
+}
+ 
+ The OptiX kernel: 
+ struct Params {
+    ::CUsurfObject image;
+};
+
+extern "C" {
+    __constant__ Params params;
+}
+
+extern "C" __global__ void __raygen__solid_color() {
+    const uint3 launchIndex = ::optixGetLaunchIndex();
+    const auto imageIndex = ::make_uint2(launchIndex.x, launchIndex.y);
+
+    ::surf2Dwrite(::make_float4(1.f, 0.f, 1.f, 1.f), params.image,
+                imageIndex.x * sizeof(float4), imageIndex.y);
+}
+ 
+ The surface handle is passed via the launch parameters: 
+ cuMemAlloc(&devParamBuf, sizeof(Params));
+cuMemcpyHtoD(devParamBuf, &hostParamBuf);
+...
+optixLaunch(pipeline, stream, devParamBuf, sizeof(Params), &sbt, 800, 600, 1);
+ 
+ The kernel itself gets executed just fine. The OptiX samples contain an example of texture display and simply use the cudaTextureObject_t. However, they also use plain buffers and PBOs for displaying the rendered image. Is it simply not possible to directly write to a CUDA surface? 
+ EDIT: to clarify how the surface is created:
+Taking an existing OpenGL texture, I register and map it with  
+ GLuint texture{};
+glGenTextures(...);
+...
+cuGraphicsGLRegisterImage(&resource, texture, GL_TEXTURE_2D, CU_GRAPHICS_REGISTER_FLAGS_SURFACE_LDST);
+cuGraphicsMapResources(1u, &resource, stream);
+CUarray surfaceArray{};
+cuGraphicsSubResourceGetMappedArray(&surfaceArray, resource, 0u, 0u);
+CUsurfObject surface{};
+CUDA_RESOURCE_DESC surfDesc{};
+surfDesc.resType = CU_RESOURCE_TYPE_ARRAY;
+surfDesc.res.array.hArray = surfaceArray;
+cuSurfObjectCreate(&surface, &surfDesc);
+ 
+ All calls are wrapped with error checking omitted for brevity. 

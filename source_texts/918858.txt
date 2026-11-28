@@ -1,0 +1,364 @@
+Three.js + GPS + WebXR sensor fusion that keeps 3D content pinned to real-world coordinates as the user walks - R/114 by cs-util · Pull Request #74 · cs-util-com/location-based-webxr
+
+R/114 by cs-util · Pull Request #74 · cs-util-com/location-based-webxr · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+cs-util
+commented
+Jun 12, 2026
+Copy link
+Copy Markdown
+Contributor
+This pull request introduces a new 3D Bresenham line tracing utility for integer grid traversal, ports and documents its Unity algorithm semantics, and significantly enhances the AR depth sampling logic for occupancy grid use. The depth sampler now emits the capturing view's projection matrix in each sample, supports a denser default sampling grid, and includes robust configuration and validation. Comprehensive property-based and unit tests have been added for both the Bresenham tracer and depth sampler, ensuring correctness and Unity parity.
+3D Bresenham Line Tracer Addition:
+Added a new bresenham3d implementation (src/ar/bresenham3d.ts) for integer grid cell traversal, directly ported from Unity's occupancy grid helper, with strict parity to its semantics, error handling, and stop-distance logic. Includes a detailed markdown doc (bresenham3d.ts.md). [1] [2]
+Registered the new tracer and related files in the build config (tsdown.config.ts).
+Added comprehensive property-based and unit tests for bresenham3d, covering known traces, invariants, stop-distance behavior, and error cases. [1] [2]
+Depth Sampler Improvements:
+Depth samples now include the capturing view's projection matrix (if available), enabling correct 3D unprojection for occupancy grid use; back-compat is maintained for samples without the matrix. [1] [2] [3]
+Introduced wrapXRDepthInfo to robustly wrap and validate browser XRDepthInformation objects, ensuring safe matrix copying and correct getDepthInMeters binding. [1] [2]
+Increased the default sampling grid size from 3×3 to 16×16, providing sufficient density for on-device occupancy grid verification. [1] [2]
+Depth Sampler Configuration and Testing:
+Added and improved tests for partial config updates, defensive validation of input values, and correct application of user settings to the sampler.
+Enhanced tests to verify correct sample emission, projection matrix handling, and grid size effects, ensuring round-trip JSON compatibility and robust behavior. [1] [2] [3] [4]
+File/Config Registration:
+Registered new AR utility files (bresenham3d.ts, depth-unprojection.ts, occupancy-grid.ts) in the TypeScript build config.
+These changes collectively lay the groundwork for robust AR occupancy grid operations, matching Unity's semantics, and enabling future on-device correctness verification.
+cs-util
+and others
+added 7 commits
+June 11, 2026 23:26
+feat(framework): capture XRView projectionMatrix in depth samples + d…
+…
+c5f2f1c
+```
+…enser default grid
+
+Iter 1 of the depth occupancy-grid port plan (2026-06-11): DepthSample
+gains an optional column-major projectionMatrix (additive persisted
+format, old recordings unaffected); webxr-session wraps the raw
+XRDepthInformation via wrapXRDepthInfo (bound getDepthInMeters +
+defensive matrix copy); DepthSampler default gridSize raised 3 -> 16 so
+first on-device grid tests get usable point density. Also fixes the
+stale NUE claim in the depth-sampler sidecar and adds the missing
+ar-types sidecar.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+feat(framework): add depth-unprojection helper (screen+depth -> raw W…
+…
+991bc8a
+```
+…ebXR point)
+
+Iter 2 of the depth occupancy-grid port plan: pure unprojectDepthPoint
+via generic inverse projection (gl-matrix), top-left-origin NDC flip
+documented as the single flip location, z-depth semantics, defensive
+null paths for old recordings (no projectionMatrix), singular matrices
+and out-of-range input. Property tests recover an analytic view-space
+expectation independent of the implementation code path.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+feat(framework): port Unity occupancy grid core (bresenham3d + Occupa…
+…
+81aff6b
+```
+…ncyGrid)
+
+Iter 3 of the depth occupancy-grid port plan: bit-identical 3D Bresenham
+port (visitor-before-stop-check Unity semantics, Chebyshev stop
+distance) and the OccupancyGrid class (15 cm round-quantized cells in
+raw WebXR space, per-cell observation counts, free-space carving with
+endpoint protection, TryRaycast port). Deliberate Unity deviations
+pinned by tests: skip carving when camera and point share a cell, never
+carve the endpoint, round-consistent getCellCenter (no +half-cell).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+feat: store latestDepthSample + wire occupancy grid to the recorder s…
+…
+9f820a2
+```
+…tore
+
+Iter 4 of the depth occupancy-grid port plan: the recordDepthSample
+reducer now stores the latest sample (observation hook; action type and
+persistence unchanged, payload stays raw WebXR / conversion-free) and
+the recorder gains wireOccupancyGridSubscribers - folds every new
+sample into the grid exactly once, throttles visualizer refreshes to
+~1 Hz (leading + trailing edge so replay bursts coalesce), clears grid
+and visualizer on store swap, surfaces failures via onError without
+breaking the subscription. ar-types docstrings updated (the raw-WebXR
+convention no longer justified by a no-op reducer).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+feat(recorder): occupancy-grid cube visualizer wired into live AR and…
+…
+b3197a4
+```
+… replay
+
+Iter 5 of the depth occupancy-grid port plan: OccupancyCubesVisualizer
+(single InstancedMesh, height-based per-instance color, deterministic
+random subset over the 2000-instance cap via injected RNG, clear keeps
+the mesh / dispose releases GPU resources) plus best-effort wiring in
+main.ts (live AR scene, torn down in resetMainState) and replay-mode.ts
+(replay scene, torn down in dispose) next to the frame-tile stack.
+Wiring pinned by main.occupancy-cubes-wiring.test.ts; NoInfer fix on
+wireOccupancyGridSubscribers so the concrete grid type drives inference.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+feat: plumb depth recording options into the sampler + stop dropping …
+…
+920fa63
+```
+…projectionMatrix
+
+Iter 6 of the depth occupancy-grid port plan. The depth.gridSize /
+depth.intervalMs settings were dead knobs (persisted + shown in the UI
+but the DepthSampler was constructed without config): startDepthCapture
+now accepts a config applied via the new DepthSampler.updateConfig
+(defensive validation, test asserts exact values reach the seam).
+Recording-options default gridSize raised 3 -> 16 and clamp max 10 -> 32
+to match the occupancy-grid density target. main.ts now dispatches the
+captured DepthSample AS-IS - the field-by-field rebuild silently
+dropped the optional projectionMatrix (audit F1; same-reference
+regression test added).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(recorder): close payload field-drop seams (audit F2/F3/F4)
+…
+9b603e8
+```
+- F2: forwarding test guards handleImageCaptured -> add2dImage payload
+- F3: fold resolutionDivisor into ImageCaptureConfig; forward whole
+  validated options section through capture seams via destructure
+- F4: compile-time keyof ArImageCapture exhaustiveness guard on
+  selectFrameTilesInWebXR
+- fix stale settings e2e: depth-grid default 3x3 -> 16x16
+```
+cloudflare-workers-and-pages
+Bot
+commented
+Jun 12, 2026
+Copy link
+Copy Markdown
+Deploying with Cloudflare Workers
+The latest updates on your project. Learn more about integrating Git with Workers.
+Status
+Name
+Latest Commit
+Preview URL
+Updated (UTC)
+✅ Deployment successful!
+View logs
+gps-plus-slam
+9b603e8
+Commit Preview URL
+Branch Preview URL
+Jun 12 2026, 01:50 PM
+coderabbitai
+Bot
+commented
+Jun 12, 2026
+Copy link
+Copy Markdown
+Warning
+Review limit reached
+@cs-util, we couldn't start this review because you've reached your PR review rate limit.
+More reviews will be available in 59 minutes and 53 seconds. Learn how PR review limits work.
+Your organization has run out of usage credits. Purchase more credits in the billing tab to continue.
+⌛ How to resolve this issue?
+After more reviews become available, a review can be triggered using the @coderabbitai review command as a PR comment. Alternatively, push new commits to this PR.
+We recommend that you space out your commits to avoid hitting the rate limit.
+🚦 How do rate limits work?
+CodeRabbit enforces hourly rate limits for each developer per organization.
+Our paid plans include higher PR review limits than trial, open-source, and free plans. In all cases, reviews become available again over time. During sustained high-volume PR review activity, CodeRabbit may temporarily slow when the next review becomes available.
+Please see our Fair Usage Limits Policy for further information.
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Organization UI
+Review profile: CHILL
+Plan: Pro
+Run ID: b7d28b1f-e6d4-4ca1-b635-494a73402bee
+📥 Commits
+Reviewing files that changed from the base of the PR and between 4229101 and 9b603e8.
+📒 Files selected for processing (46)
+GpsPlusSlamJs_AppFramework/config/tsdown.config.ts
+GpsPlusSlamJs_AppFramework/src/ar/bresenham3d.property.test.ts
+GpsPlusSlamJs_AppFramework/src/ar/bresenham3d.test.ts
+GpsPlusSlamJs_AppFramework/src/ar/bresenham3d.ts
+GpsPlusSlamJs_AppFramework/src/ar/bresenham3d.ts.md
+GpsPlusSlamJs_AppFramework/src/ar/depth-sampler.test.ts
+GpsPlusSlamJs_AppFramework/src/ar/depth-sampler.ts
+GpsPlusSlamJs_AppFramework/src/ar/depth-sampler.ts.md
+GpsPlusSlamJs_AppFramework/src/ar/depth-unprojection.property.test.ts
+GpsPlusSlamJs_AppFramework/src/ar/depth-unprojection.test.ts
+GpsPlusSlamJs_AppFramework/src/ar/depth-unprojection.ts
+GpsPlusSlamJs_AppFramework/src/ar/depth-unprojection.ts.md
+GpsPlusSlamJs_AppFramework/src/ar/image-capture.test.ts
+GpsPlusSlamJs_AppFramework/src/ar/image-capture.ts
+GpsPlusSlamJs_AppFramework/src/ar/image-capture.ts.md
+GpsPlusSlamJs_AppFramework/src/ar/index.ts
+GpsPlusSlamJs_AppFramework/src/ar/occupancy-grid.property.test.ts
+GpsPlusSlamJs_AppFramework/src/ar/occupancy-grid.test.ts
+GpsPlusSlamJs_AppFramework/src/ar/occupancy-grid.ts
+GpsPlusSlamJs_AppFramework/src/ar/occupancy-grid.ts.md
+GpsPlusSlamJs_AppFramework/src/ar/webxr-session.ts
+GpsPlusSlamJs_AppFramework/src/state/app-selectors.test.ts
+GpsPlusSlamJs_AppFramework/src/state/app-selectors.ts
+GpsPlusSlamJs_AppFramework/src/state/recording-options.test.ts
+GpsPlusSlamJs_AppFramework/src/state/recording-options.ts
+GpsPlusSlamJs_AppFramework/src/state/recording-options.ts.md
+GpsPlusSlamJs_AppFramework/src/state/recording-slice.test.ts
+GpsPlusSlamJs_AppFramework/src/state/recording-slice.ts
+GpsPlusSlamJs_AppFramework/src/state/recording-slice.ts.md
+GpsPlusSlamJs_AppFramework/src/types/ar-types.ts
+GpsPlusSlamJs_AppFramework/src/types/ar-types.ts.md
+GpsPlusSlamJs_RecorderApp/playwright-tests/settings-modal.spec.js
+GpsPlusSlamJs_RecorderApp/src/main.occupancy-cubes-wiring.test.ts
+GpsPlusSlamJs_RecorderApp/src/main.ts
+GpsPlusSlamJs_RecorderApp/src/main.ts.md
+GpsPlusSlamJs_RecorderApp/src/recording/recording-session-handlers.test.ts
+GpsPlusSlamJs_RecorderApp/src/recording/recording-session-handlers.ts
+GpsPlusSlamJs_RecorderApp/src/replay/replay-mode.ts
+GpsPlusSlamJs_RecorderApp/src/replay/replay-mode.ts.md
+GpsPlusSlamJs_RecorderApp/src/state/action-schema.test.ts
+GpsPlusSlamJs_RecorderApp/src/visualization/occupancy-cubes-visualizer.test.ts
+GpsPlusSlamJs_RecorderApp/src/visualization/occupancy-cubes-visualizer.ts
+GpsPlusSlamJs_RecorderApp/src/visualization/occupancy-cubes-visualizer.ts.md
+GpsPlusSlamJs_RecorderApp/src/visualization/wire-occupancy-grid-subscribers.test.ts
+GpsPlusSlamJs_RecorderApp/src/visualization/wire-occupancy-grid-subscribers.ts
+GpsPlusSlamJs_RecorderApp/src/visualization/wire-occupancy-grid-subscribers.ts.md
+✨ Finishing Touches
+🧪 Generate unit tests (beta)
+Create PR with unit tests
+Commit unit tests in branch r/114
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands and usage tips.
+gemini-code-assist
+Bot
+reviewed
+Jun 12, 2026
+View reviewed changes
+gemini-code-assist
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Code Review
+This pull request implements an AR-space occupancy grid system ported from Unity, which includes a 3D Bresenham line tracer, depth unprojection math, and an OccupancyGrid class to manage voxel occupancy and free-space carving. It also integrates these components into the WebXR session, recorder app, and replay mode, supported by an instanced-cube visualizer (OccupancyCubesVisualizer) and denser depth grid configurations. The review feedback highlights two key improvements: first, refactoring OccupancyGrid.addSample into a two-pass process (carving first, then incrementing) to prevent overlapping rays from incorrectly carving out shorter ray endpoints; second, optimizing unprojectDepthPoint by passing the projectionMatrix directly to mat4.invert to avoid the overhead of spreading it into mat4.fromValues.
+Important
+The consumer version of Gemini Code Assist on GitHub is being sunset. Starting June 18, 2026, new organization installations will be blocked, and all code review activity will officially cease on July 17, 2026.
+For more details on the timeline and next steps, please review the Help Documentation.
+Comment thread
+GpsPlusSlamJs_AppFramework/src/ar/occupancy-grid.ts
+Comment on lines
++81
+to
++105
+addSample(sample: DepthSample): number {
+if (!isFiniteTriple(sample.cameraPos)) {
+return 0;
+}
+const cameraCell = this.cellForPosition(sample.cameraPos);
+let added = 0;
+for (const point of sample.points) {
+const world = unprojectDepthPoint(
+point,
+sample.cameraPos,
+sample.cameraRot,
+sample.projectionMatrix
+);
+if (!world) {
+continue;
+}
+const cell = this.cellForPosition(world);
+if (!cellsEqual(cameraCell, cell)) {
+this.carve(cameraCell, cell);
+}
+this.increment(cell);
+added++;
+}
+return added;
+}
+gemini-code-assist
+Bot
+Jun 12, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+In addSample, processing carving and incrementing in a single loop can lead to order-dependent bugs within the same depth sample. If a shorter ray (e.g., endpoint at 5m) is processed before a longer overlapping ray (e.g., endpoint at 10m), the carving of the longer ray will delete the newly added occupied cell of the shorter ray.\n\nTo ensure correctness and determinism, perform all carving in a first pass, and then increment all occupied cells in a second pass.
+```
+  addSample(sample: DepthSample): number {\n    if (!isFiniteTriple(sample.cameraPos)) {\n      return 0;\n    }\n    const cameraCell = this.cellForPosition(sample.cameraPos);\n    const validCells: GridCell[] = [];\n\n    for (const point of sample.points) {\n      const world = unprojectDepthPoint(\n        point,\n        sample.cameraPos,\n        sample.cameraRot,\n        sample.projectionMatrix\n      );\n      if (!world) {\n        continue;\n      }\n      const cell = this.cellForPosition(world);\n      validCells.push(cell);\n\n      if (!cellsEqual(cameraCell, cell)) {\n        this.carve(cameraCell, cell);\n      }\n    }\n\n    for (const cell of validCells) {\n      this.increment(cell);\n    }\n\n    return validCells.length;\n  }
+```
+Comment thread
+GpsPlusSlamJs_AppFramework/src/ar/depth-unprojection.ts
+Comment on lines
++51
+to
++54
+const proj = mat4.fromValues(
+...(projectionMatrix as Parameters<typeof mat4.fromValues>)
+);
+const invProj = mat4.invert(mat4.create(), proj);
+gemini-code-assist
+Bot
+Jun 12, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Avoid using mat4.fromValues with the spread operator on projectionMatrix. Since gl-matrix functions like mat4.invert accept any ArrayLike<number> (which matches Matrix4), you can pass projectionMatrix directly to mat4.invert. This avoids the overhead of the spread operator and creating an intermediate matrix.
+```
+  const invProj = mat4.invert(mat4.create(), projectionMatrix as unknown as mat4);
+```
+cs-util
+closed this pull request by merging all changes
+into
+main
+in
+ad59c2b
+Jun 12, 2026
+github-actions
+Bot
+locked and limited conversation to collaborators
+Jun 12, 2026
+cs-util
+deleted the
+r/114
+branch
+June 24, 2026 16:54
+Sign up for free
+to subscribe to this conversation on GitHub.
+Already have an account?
+Sign in.
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

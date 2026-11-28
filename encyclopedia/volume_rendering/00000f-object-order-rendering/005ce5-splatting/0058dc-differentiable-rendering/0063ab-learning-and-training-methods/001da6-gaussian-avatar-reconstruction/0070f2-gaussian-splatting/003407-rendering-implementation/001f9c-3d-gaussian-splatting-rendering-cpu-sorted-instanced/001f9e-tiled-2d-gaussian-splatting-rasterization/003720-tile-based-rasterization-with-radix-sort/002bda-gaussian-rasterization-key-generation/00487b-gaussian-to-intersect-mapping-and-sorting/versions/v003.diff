@@ -1,0 +1,281 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method is a CUDA-based preprocessing pipeline that culls invisible Gaussians, maps 3D Gaussian projections to tile-based intersection IDs, and sorts them for depth-ordered rendering [S1, S2, unofficial]. It generates key-value pairs for all Gaussian-tile overlaps to enable efficient tile-based rasterization [S1, S2, unofficial]. Unlike differentiable rendering steps, this mapping and sorting process is not differentiable to any input [S2, unofficial].
++This method is a CUDA-based preprocessing pipeline that culls invisible Gaussians via view frustum testing, generates tile-key/value pairs for bounding tile overlaps, and identifies contiguous tile ranges in a depth-sorted Gaussian list [S1, unofficial]. It maps each 2D Gaussian projection to a unique tile ID and depth value for sorting during rasterization [S2, unofficial]. Unlike differentiable rendering steps, this mapping and sorting process is not differentiable to any input [S2, unofficial].
+ 
+ ## How it works
+@@ -59,5 +59,4 @@
+ ```python
+ import torch
+-import math
+ 
+ def gaussian_to_intersect_mapping_and_sorting(
+@@ -70,152 +69,48 @@
+     block_size: int
+ ) -> tuple:
+-    """
+-    Maps 2D Gaussian projections to tile-based intersection IDs, sorts them,
+-    and computes tile bins for efficient rendering.
+-    
+-    Note: This implementation assumes CUDA kernels are available or simulated.
+-    The core logic follows the steps described in the sources.
+-    """
+-    
+-    # Step 1: Frustum Culling (Simulated)
+-    # In reality, checkFrustum kernel runs on GPU.
+-    # present = check_frustum_kernel(num_points, ...)
+-    # For this text-only implementation, we assume all are present or filtered externally.
+-    present = torch.ones(num_points, dtype=torch.bool)
++    # Step 1: Frustum Culling
++    # Launch checkFrustum kernel with P threads. Tests each Gaussian against view frustum.
++    # Writes boolean result to present[idx].
++    present = torch.ones(num_points, dtype=torch.bool) # Kernel launch omitted
+     
+     # Step 2: Covariance and Radius Computation
+-    # compute_cov2d_bounds asserts shape ends in 3 and num_points > 0
+     assert cov2d.shape[-1] == 3
+     assert num_points > 0
+-    
+-    # Simulate compute_cov2d_bounds
+-    # Returns conic and radii. Radii might be updated or computed here.
+-    # Source says radii is an input, but also returned. We assume input radii are valid.
+-    conic = cov2d  # Placeholder for actual conic computation
+-    # radii = compute_radii(cov2d) # Not explicitly defined in sources, assume input radii are used
++    # Source does not provide compute_cov2d_bounds implementation.
++    conic, radii = compute_cov2d_bounds(cov2d)
+     
+     # Step 3: Key/Value Generation
+-    # duplicateWithKeys kernel
+-    # For each Gaussian with radii[idx] > 0:
+-    #   Compute bounding tile rect (rect_min, rect_max)
+-    #   For each tile (x, y) in rect:
+-    #     key = (y * grid.x + x) << 32 | depth
+-    #     store key and idx
+-    
+-    # Simulate key generation
+-    tile_width, tile_height, num_tiles = tile_bounds
+-    grid_x = tile_width # Assuming grid.x corresponds to tile width in pixels? 
+-                        # Source says "grid.x", likely number of tiles in x dimension.
+-                        # Let's assume tile_bounds provides num_tiles_x, num_tiles_y.
+-                        # Re-reading: tile_bounds is (tile_width, tile_height, num_tiles) OR (tiles.x, tiles.y, 1).
+-                        # Let's assume standard tiling: num_tiles_x, num_tiles_y.
+-                        # If tile_bounds is (W, H, N), we need to derive grid.
+-                        # Let's assume tile_bounds is (num_tiles_x, num_tiles_y, 1) for simplicity in simulation.
+-                        # Or use the first interpretation: tile_width, tile_height, num_tiles.
+-                        # Let's stick to the source's "grid.x" which implies a grid dimension.
+-                        # We will simulate the loop.
+-    
+-    keys_unsorted = []
+-    values_unsorted = []
+-    
+-    # Simulate grid dimensions. If tile_bounds is (W, H, N), we need more info.
+-    # Let's assume tile_bounds is (num_tiles_x, num_tiles_y, 1) as per one source note.
+-    if len(tile_bounds) == 3 and tile_bounds[2] == 1:
+-        num_tiles_x, num_tiles_y, _ = tile_bounds
+-    else:
+-        # Fallback: assume tile_bounds is (tile_width_px, tile_height_px, num_tiles)
+-        # This is ambiguous. We'll assume the source meant num_tiles_x, num_tiles_y.
+-        num_tiles_x, num_tiles_y = tile_bounds[0], tile_bounds[1]
+-        
++    # Launch duplicateWithKeys kernel with P threads.
++    gaussian_keys_unsorted = []
++    gaussian_values_unsorted = []
++    off = 0
++    grid_x = tile_bounds[0]
+     for idx in range(num_points):
+         if radii[idx] <= 0:
+             continue
+-            
+-        # Get tile coordinates for the Gaussian center
+-        # xys[idx] is in pixel coordinates
+-        cx, cy = xys[idx]
++        # Source does not provide getRect implementation.
++        tile_x, tile_y = get_tile_indices(xys[idx], radii[idx], tile_bounds)
++        key = ((tile_y * grid_x + tile_x) << 32) | depths[idx].item()
++        gaussian_keys_unsorted.append(key)
++        gaussian_values_unsorted.append(idx)
++        off += 1
+         
+-        # Compute bounding tile rectangle
+-        # This requires knowing the Gaussian's 2D extent (radii)
+-        # getRect(cx, cy, radii[idx], tile_width_px, tile_height_px) -> (min_x, min_y, max_x, max_y)
+-        # We don't have pixel tile dimensions explicitly, but we have num_tiles.
+-        # Assume image size is known or derived. For simulation, we just map to tile IDs.
+-        # Let's assume the Gaussian falls into specific tiles.
+-        # In reality, this is done in CUDA.
+-        
+-        # Simulate: Gaussian covers tiles (tx, ty)
+-        # tx = floor(cx / tile_width_px)
+-        # ty = floor(cy / tile_height_px)
+-        # We need tile_width_px and tile_height_px.
+-        # Let's assume they are 1 for simplicity in this abstract simulation, 
+-        # or that the Gaussian covers a set of tiles.
+-        
+-        # To make the code valid Python without undefined helpers, we simulate the output.
+-        # We assume the Gaussian covers 1 tile for simplicity, or we iterate.
+-        # Let's assume it covers a small rectangle.
+-        
+-        # Simulated tile coverage
+-        # In real code: rect_min, rect_max = getRect(...)
+-        # for y in range(rect_min.y, rect_max.y + 1):
+-        #     for x in range(rect_min.x, rect_max.x + 1):
+-        #         key = (y * num_tiles_x + x) << 32 | depths[idx]
+-        #         keys_unsorted.append(key)
+-        #         values_unsorted.append(idx)
+-        
+-        # Since we can't simulate getRect without image dimensions, we assume 1 tile per Gaussian for structure.
+-        # This is a placeholder for the actual CUDA logic.
+-        # A real implementation would require image_width, image_height to compute tile indices.
+-        # We will assume the Gaussian is in tile (0,0) for the sake of valid Python.
+-        # This is a gap filled by [G].
+-        
+-        # [G] Assuming image dimensions are needed to compute tile indices from pixel coordinates.
+-        # Without them, we cannot compute rect_min/max. We assume the Gaussian maps to tile (0,0).
+-        tile_x = 0
+-        tile_y = 0
+-        
+-        key = ((tile_y * num_tiles_x + tile_x) << 32) | depths[idx].item()
+-        keys_unsorted.append(key)
+-        values_unsorted.append(idx)
+-        
+-    if not keys_unsorted:
+-        # Handle case with no visible Gaussians
+-        return (
+-            torch.empty(0, dtype=torch.float32),
+-            torch.empty(0, dtype=torch.float32),
+-            torch.empty(0, dtype=torch.int32),
+-            conic,
+-            radii
+-        )
+-        
+-    gaussian_keys_unsorted = torch.tensor(keys_unsorted, dtype=torch.uint64)
+-    gaussian_values_unsorted = torch.tensor(values_unsorted, dtype=torch.uint32)
++    gaussian_keys_unsorted = torch.tensor(gaussian_keys_unsorted, dtype=torch.uint64)
++    gaussian_values_unsorted = torch.tensor(gaussian_values_unsorted, dtype=torch.uint32)
+     
+     # Step 4: Cumulative Sum
+-    # num_tiles_hit is the number of tiles each Gaussian covers.
+-    # In our simulation, each Gaussian covers 1 tile.
+-    num_tiles_hit = torch.ones(num_points, dtype=torch.int32)
+-    # But we only kept those with radii > 0.
+-    # Let's recalculate num_tiles_hit for the kept Gaussians.
+-    # In simulation, it's 1 per kept Gaussian.
+-    num_tiles_hit_kept = torch.ones(len(keys_unsorted), dtype=torch.int32)
+-    cum_tiles_hit = torch.cumsum(num_tiles_hit_kept, dim=0)
++    num_tiles_hit = torch.ones(len(gaussian_keys_unsorted), dtype=torch.int32)
++    cum_tiles_hit = torch.cumsum(num_tiles_hit, dim=0)
++    num_intersects = int(cum_tiles_hit[-1]) if len(cum_tiles_hit) > 0 else 0
+     
+     # Step 5: Sorting
+-    # Sort keys and values together
+     sorted_keys, sorted_indices = torch.sort(gaussian_keys_unsorted)
+     gaussian_values_sorted = gaussian_values_unsorted[sorted_indices]
+     
+     # Step 6: Tile Range Identification
+-    # identifyTileRanges kernel
+-    # L = len(sorted_keys)
++    # Launch identifyTileRanges kernel with L threads.
+     L = len(sorted_keys)
+-    ranges = torch.zeros((num_tiles_x * num_tiles_y, 2), dtype=torch.int32)
+-    
+-    # Simulate identifyTileRanges
+-    # For each idx, read currtile = key >> 32
+-    # If idx == 0, ranges[currtile].x = 0
+-    # If currtile != prevtile, ranges[prevtile].y = idx, ranges[currtile].x = idx
+-    # If idx == L-1, ranges[currtile].y = L
+-    
++    num_tiles = grid_x * tile_bounds[1] if len(tile_bounds) > 1 else grid_x
++    ranges = torch.zeros((num_tiles, 2), dtype=torch.int32)
+     prevtile = -1
+     for idx in range(L):
+@@ -232,20 +127,8 @@
+         
+     # Step 7: Intersection ID Mapping
+-    # map_gaussian_to_intersects kernel
+-    # Returns isect_ids and gaussian_ids
+-    # isect_ids: unique IDs in form (tile | depth id)
+-    # gaussian_ids: mapping back to cum_tiles_hit
+-    
+-    # Simulate map_gaussian_to_intersects
+-    # In reality, this maps the sorted keys to unique intersection IDs.
+-    # We assume isect_ids are just the sorted keys' tile components or similar.
+-    # Source says isect_ids is (tile | depth id).
+-    # Let's assume isect_ids are the sorted keys.
+-    isect_ids = sorted_keys.float() # Placeholder
+-    
+-    # gaussian_ids maps back to cum_tiles_hit
+-    # Source says gaussian_ids is shape (cum_tiles_hit, 1)
+-    # We use the sorted values (original indices)
+-    gaussian_ids = gaussian_values_sorted.float() # Placeholder
++    # Source does not provide map_gaussian_to_intersects implementation.
++    isect_ids, gaussian_ids = map_gaussian_to_intersects(
++        num_points, num_intersects, xys, depths, radii, cum_tiles_hit, tile_bounds, block_size
++    )
+     
+     # Step 8: Sorting Intersection IDs
+@@ -256,53 +139,15 @@
+     
+     # Step 10: Tile Bin Computation
+-    # get_tile_bin_edges
+-    # Returns tile_bins: shape (num_intersects, 2)
+-    # tile_bins[tile_idx] returns range (lower, upper) of Gaussian IDs that hit tile_idx
++    # Source does not provide get_tile_bin_edges implementation.
++    tile_bins = get_tile_bin_edges(num_intersects, isect_ids_sorted, tile_bounds)
+     
+-    # Simulate get_tile_bin_edges
+-    # Expects isect_ids_sorted to be sorted by increasing tile ID.
+-    # Our isect_ids_sorted is sorted by the full key (tile << 32 | depth), so it is sorted by tile ID first.
+-    
+-    num_intersects = len(isect_ids_sorted)
+-    tile_bins = torch.zeros((num_intersects, 2), dtype=torch.int32)
+-    
+-    # We need to map tile IDs to bin ranges.
+-    # The ranges tensor from Step 6 already has the start/end indices for each tile.
+-    # tile_bins should reflect this.
+-    # Source says tile_bins[tile_idx] returns range.
+-    # We can populate tile_bins from ranges.
+-    # But tile_bins shape is (num_intersects, 2). This seems to be per-intersect, not per-tile.
+-    # Re-reading: "tile_bins, a tensor where tile_bins[tile_idx] returns the range..."
+-    # This implies tile_bins is indexed by tile_idx.
+-    # But shape is (num_intersects, 2). This is contradictory.
+-    # Let's assume tile_bins is indexed by tile ID, and shape is (num_tiles, 2).
+-    # Or, tile_bins is per-intersect, storing the tile range for that intersect?
+-    # Source: "tile_bins[tile_idx] returns the range". This implies indexing by tile_idx.
+-    # If shape is (num_intersects, 2), then tile_idx must be an intersect ID?
+-    # Let's assume tile_bins is (num_tiles, 2) for consistency with ranges.
+-    # But source says shape (num_intersects, 2).
+-    # We will follow the source's shape.
+-    
+-    # If tile_bins is (num_intersects, 2), and tile_bins[tile_idx] returns range,
+-    # then tile_idx must be an intersect ID.
+-    # This is confusing. Let's assume tile_bins is the same as ranges, but indexed by intersect ID?
+-    # No, ranges is indexed by tile ID.
+-    # Let's assume tile_bins is (num_tiles, 2) and the source note has a typo in shape.
+-    # Or, tile_bins is per-intersect, and each intersect belongs to a tile, so it stores the tile's range.
+-    
+-    # We will output ranges as tile_bins, assuming the source note's shape is for a different structure.
+-    # Actually, let's just return the computed ranges as tile_bins, reshaped if necessary.
+-    # We'll return ranges as tile_bins, assuming num_intersects == num_tiles for simplicity in simulation.
+-    
+-    tile_bins = ranges[:num_intersects] # Truncate or pad if needed
+-    
+-    return (
+-        isect_ids_sorted,
+-        gaussian_ids_sorted,
+-        tile_bins,
+-        conic,
+-        radii
+-    )
++    return isect_ids_sorted, gaussian_ids_sorted, tile_bins, conic, radii
+ ```
++
++**Pitfalls:**
++*   Invisible Gaussians (`radii <= 0`) must be skipped during key/value generation to avoid emitting invalid or zero-sized tile overlaps [S1, unofficial].
++*   Tile range boundaries must correctly handle the first and last elements of the sorted list to ensure all tiles have valid start/end indices [S1, unofficial].
++*   Input `cov2d` must have a shape ending in 3 (upper triangular values). An assertion error is raised if this condition is not met [S2, unofficial].
++*   The mapping functions are not differentiable to any input. Gradients must be handled separately or these steps excluded from the differentiable graph [S2, unofficial].
+ 
+ ## Operating characteristics

@@ -1,0 +1,162 @@
+# NRFF
+
+Also called: Neural Radiance Feature Field
+
+## Overview
+NRFF is a method for encoding view-dependent specular effects in neural radiance fields by replacing the positional encoding and explicit illumination models of Ref-NeRF with a latent-space representation based on Anisotropic Spherical Gaussians (ASG) [S1]. It differs from its siblings by predicting ASG features via a spatial MLP and compressing them into a bottleneck vector processed by a Rendering Equation Encoding (REE) function before entering the directional MLP, rather than using standard roughness or Image-Based Lighting (IBL) parameters [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D position $\mathbf{x}$, viewing direction $\mathbf{d}$, and camera pose parameters.
+*   **Output:** Color $\mathbf{c}$, density $\sigma$, and auxiliary features.
+
+**Data Structures:**
+1.  **Spatial MLP:** Uses Multiscale Tensor Decomposition (MTD) for coarse-to-fine scene representation [S1].
+2.  **ASG Features:** A vector of 128 values representing $N = 8 \times 16$ lobes of ASGs on a unit sphere [S1].
+3.  **Bottleneck Vector:** An anisotropic reflections vector $\mathbf{a}$ of length 2 [S1].
+4.  **Scalar Coefficients:** $\lambda$ and $\mu$, modeling ASG shape in orthogonal directions [S1].
+5.  **REE Vector:** An $8 \times 16 \times 2$ vector resulting from the REE function [S1].
+
+**Steps:**
+1.  **Spatial Encoding:** The spatial MLP processes $\mathbf{x}$ using MTD instead of Positional Encoding (PE) [S1].
+2.  **ASG Feature Prediction:** The spatial MLP predicts ASG features for each point, resulting in a 128-dimensional vector [S1].
+3.  **Bottleneck Compression:** An auxiliary ASG MLP converts the 128 ASG features into:
+    *   A bottleneck vector $\mathbf{a}$ of length 2.
+    *   Two scalar coefficients $\lambda$ and $\mu$ [S1].
+4.  **Rendering Equation Encoding (REE):** Compute the REE vector for the reflection direction $\boldsymbol{\omega}_r$ using the formula below [S1].
+5.  **Directional Processing:** The directional MLP ingests the $8 \times 16 \times 2$ REE vector (replacing the roughness and IDE inputs of Ref-NeRF) along with $\mathbf{x}$ and $\mathbf{d}$ to predict color and density [S1].
+6.  **Regularization:** Apply the feature regularization loss $L_f$ to encourage sparse feature representations [S1].
+
+**Formulas:**
+The Rendering Equation Encoding (REE) is defined as [S1]:
+$$
+\text{REE}(\boldsymbol{\omega}_r, \mathbf{a}, \lambda, \mu) = \sum_{i=0}^{N-1} a_i S(\boldsymbol{\omega}_r; \boldsymbol{\omega}_i) \exp\left(-\lambda_i (\boldsymbol{\omega}_r \cdot \boldsymbol{\omega}_{\lambda_i})^2 - \mu_i (\boldsymbol{\omega}_r \cdot \boldsymbol{\omega}_{\mu_i})^2\right)
+$$
+Where:
+*   $N = 8 \times 16$ is the number of ASG lobes [S1].
+*   $a_i$ is the bottleneck coefficient of the $i$-th ASG [S1].
+*   $S(\boldsymbol{\omega}_r; \boldsymbol{\omega}_i) = \max(\boldsymbol{\omega}_r \cdot \boldsymbol{\omega}_i, 0)$ is a smooth term [S1].
+*   $\lambda_i, \mu_i > 0$ are bandwidth coefficients related to orthogonal axes $\boldsymbol{\omega}_{\lambda_i}, \boldsymbol{\omega}_{\mu_i}$ [S1].
+*   $\boldsymbol{\omega}_i$ covers the unit sphere (360 degrees) [S1].
+
+The feature regularization loss is [S1]:
+$$
+L_f = \frac{\beta}{M} \sum_{i=0}^{M-1} \frac{|F_\tau^i|}{\tau}
+$$
+Where:
+*   $M$ is the number of features in the density field representation [S1].
+*   $F_\tau$ is the density field feature map [S1].
+*   $\beta$ is a coefficient [S1].
+
+**Parameters:**
+*   $N$: Number of ASG lobes, set to $8 \times 16$ [S1].
+*   $\mathbf{a}$: Anisotropic reflections bottleneck vector, length 2 [S1].
+*   $\lambda, \mu$: Scalar coefficients, must be $> 0$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   $\lambda$ and $\mu$ must be constrained to be positive to ensure valid ASG bandwidths [S1].
+*   The REE function integrates specular contributions in the latent space; incorrect normalization of $\boldsymbol{\omega}_r$ may affect the dot products [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nrff_forward(x, d, camera_pose):
+    # 1. Spatial MLP with MTD
+    # MTD replaces standard PE for coarse-to-fine representation
+    spatial_features = spatial_mlp_mtd(x)
+    
+    # 2. Predict ASG features (128 values: 8x16 lobes)
+    asg_features = predict_asg_features(spatial_features)
+    
+    # 3. Auxiliary ASG MLP to get bottleneck and coefficients
+    # Outputs: a (length 2), lambda (scalar), mu (scalar)
+    a, lambda_coeffs, mu_coeffs = asg_mlp(asg_features)
+    
+    # 4. Compute REE vector
+    # N = 8 * 16
+    N = 128
+    ree_vector = zeros((8, 16, 2))
+    
+    for i in range(N):
+        # Get direction omega_i for the i-th lobe
+        omega_i = get_asg_direction(i)
+        
+        # Calculate smooth term S(omega_r; omega_i)
+        # omega_r is derived from d and camera_pose
+        omega_r = compute_reflection_direction(d, camera_pose)
+        s_term = max(dot(omega_r, omega_i), 0)
+        
+        # Get orthogonal axes omega_lambda_i, omega_mu_i
+        omega_lambda_i = get_orthogonal_axis_lambda(i)
+        omega_mu_i = get_orthogonal_axis_mu(i)
+        
+        # Get bandwidth coefficients for this lobe
+        lambda_i = lambda_coeffs[i]
+        mu_i = mu_coeffs[i]
+        
+        # Calculate exponential term
+        exp_term = exp(
+            -lambda_i * dot(omega_r, omega_lambda_i)**2 -
+            mu_i * dot(omega_r, omega_mu_i)**2
+        )
+        
+        # Get bottleneck coefficient a_i
+        a_i = a[i]
+        
+        # Accumulate into REE vector
+        # Map index i to 8x16 grid
+        row = i // 16
+        col = i % 16
+        ree_vector[row, col, 0] += a_i * s_term * exp_term
+        ree_vector[row, col, 1] += a_i * s_term * exp_term # Placeholder for second channel if needed
+        
+    # 5. Directional MLP
+    # Ingests 8x16x2 REE vector, replacing roughness and IDE
+    color, density = directional_mlp(ree_vector, x, d)
+    
+    return color, density
+
+def compute_loss(color_pred, color_gt, density_pred, density_gt, feature_map, tau, beta):
+    # Standard NeRF loss components (e.g., L_c, L_o from Ref-NeRF)
+    loss_color = mse(color_pred, color_gt)
+    loss_density = mse(density_pred, density_gt)
+    
+    # NRFF specific feature regularization
+    M = feature_map.shape[0]
+    loss_f = (beta / M) * sum(abs(feature_map[i]) / tau for i in range(M))
+    
+    return loss_color + loss_density + loss_f
+```
+
+## Subtopics
+
+### [Multi-Space Neural Radiance Field (MS-NeRF)](11707-multi-space-neural-radiance-field-ms-nerf.md)
+Uses multiple coordinate spaces to handle large scenes; choose when scene scale is a primary concern.
+
+### [Semantic and Feature Branches](12095-semantic-and-feature-branches.md)
+Adds separate branches for semantic labels; choose when semantic segmentation is required.
+
+### [NeRF for Object Segmentation](12404-nerf-for-object-segmentation.md)
+Focuses on object-level segmentation masks; choose for instance-level tasks.
+
+### [Semantic-NeRF](14889-semantic-nerf.md)
+Integrates semantic information into the radiance field; choose for semantic-aware rendering.
+
+### [Augmented Features (Avg, Var, Color)](15000-augmented-features-avg-var-color.md)
+Predicts statistical features like mean and variance; choose when uncertainty estimation is needed.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** NRFF shows proficiency in encoding view-dependent effects, enabling superior rendering quality on diverse datasets compared to Ref-NeRF [S1].
+*   **Strengths:** Efficient scene representation via MTD; effective modeling of specular effects via ASG and REE; sparse feature representation enhances interpretability and mitigates overfitting [S1].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** When high-quality specular rendering is required and computational efficiency in scene representation is a priority [S1].
+*   **When not to use:** When semantic or geometric features other than specular appearance are the primary goal [S1].
+
+## Background
+NRFF was proposed by Albert Barreiro, Roger Marı́, Rafael Redondo, Gloria Haro, Carles Bosch, and David Berga from Eurecat and Universitat Pompeu Fabra [S1]. The method was submitted on 2024–07–09, accepted on 2025–01–17, and published in *Image Processing On Line* on 2025–03–12 [S1]. It builds on the Ref-NeRF architecture, introducing architectural improvements to better handle view-dependent effects [S1].
+
+## Sources
+[S1] Specularity in NeRFs: A Comparative Study of Ref-NeRF and NRFF, https://doi.org/10.5201/ipol.2025.562, fetched 2026-10-26

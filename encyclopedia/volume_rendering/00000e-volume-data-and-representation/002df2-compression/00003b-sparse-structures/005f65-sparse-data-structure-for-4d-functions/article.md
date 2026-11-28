@@ -1,0 +1,158 @@
+# Sparse Data Structure for 4D Functions
+
+Also called: Cloud of points representation, Dedicated sparse data structure
+
+## Overview
+This method provides a memory-efficient data structure for storing and accessing compressed 4D function values by treating the function as a cloud of points with implicit spatial relations [S1, unofficial]. It solves the problem of high memory consumption in point-connectivity representations for large multidimensional scalar fields by organizing data into a two-level hierarchy: a coarse regular grid and fine cells [S1, unofficial]. It sets itself apart from its siblings by using a hybrid dense/sparse cell strategy based on a filling ratio threshold, optimizing for interactive reconstruction performance rather than just static storage [S1, unofficial].
+
+## How it works
+**Inputs:** A 4D function $f_c$ defined on a structured mesh or discretization domain.
+**Outputs:** A memory layout consisting of a coarse level array $C$, a fine level reference array $F$, and allocated cells (dense or sparse).
+
+**Data Structures:**
+1.  **Coarse Level ($C$):** A regular 4D array storing function values at resolution levels $0 \le j \le l < n$. These points represent an undersampling of the initial discretization [S1, unofficial].
+2.  **Fine Level Reference ($F$):** An array of references (pointers/indices) to allocated fine cells. Each reference corresponds to a spatial "brick" between coarse points [S1, unofficial].
+3.  **Fine Cells:** Allocated only if the cell is non-empty. Two types exist:
+    *   **Dense Cell:** Stores $f_c$ values in a regular 4D array. Supports $O(1)$ random access.
+    *   **Sparse Cell:** Stores a lexicographically sorted array of points. Each point consists of 4 integer indices (coordinates) and one 4-byte float value ($f_c$). Supports $O(\log M)$ random access, where $M$ is the number of points in the cell [S1, unofficial].
+
+**Algorithm:**
+1.  **Partitioning:** Divide the 4D domain into bricks defined by the coarse grid points.
+2.  **Classification:** For each brick, determine the number of points $M$ belonging to the fine level (points not in the coarse grid).
+3.  **Cell Type Selection:** Calculate the filling ratio. If the filling ratio is below 50%, allocate a **Sparse Cell**. Otherwise, allocate a **Dense Cell** [S1, unofficial].
+    *   *Note:* The 50% threshold is derived from the cost of storing 4-byte integer indices versus 4-byte float values in a dense array [S1, unofficial].
+4.  **Storage:**
+    *   If **Dense**: Store all $f_c$ values in the regular 4D array layout.
+    *   If **Sparse**: Store the $M$ points as a list of tuples `(idx1, idx2, idx3, idx4, value)`. Sort this list lexicographically by indices [S1, unofficial].
+5.  **Reference:** Store a reference to the allocated cell in the fine level array $F$ at the corresponding brick index. If the brick is empty, store a null reference [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def allocate_cell(points, cell_type):
+    """
+    Allocates and populates a cell.
+    points: List of tuples (i, j, k, l, value)
+    cell_type: 'dense' or 'sparse'
+    """
+    if cell_type == 'dense':
+        # Determine dimensions of the dense grid for this brick
+        # Assuming uniform brick size D x D x D x D
+        # In a real implementation, dimensions are fixed per brick
+        dense_grid = [0.0] * (D**4) 
+        for (i, j, k, l, val) in points:
+            # Map local indices to flat index in dense grid
+            idx = i * (D**3) + j * (D**2) + k * D + l
+            dense_grid[idx] = val
+        return dense_grid
+    else: # sparse
+        # Sort points lexicographically
+        sorted_points = sorted(points, key=lambda p: (p[0], p[1], p[2], p[3]))
+        return sorted_points
+
+def build_structure(domain_points, coarse_resolution, brick_size):
+    """
+    domain_points: List of (i, j, k, l, value) for all points in the function
+    coarse_resolution: Resolution of the coarse grid C
+    brick_size: Size of each fine cell brick
+    """
+    # 1. Identify coarse points
+    coarse_points = set()
+    coarse_values = {}
+    
+    # Determine which points fall on the coarse grid
+    # Assuming coarse grid is a subsample of the full domain
+    for (i, j, k, l, val) in domain_points:
+        if is_coarse_point(i, j, k, l, coarse_resolution):
+            coarse_points.add((i, j, k, l))
+            coarse_values[(i, j, k, l)] = val
+            
+    # 2. Initialize Coarse Level C
+    # C is a regular 4D array. Size depends on coarse_resolution
+    C = create_4d_array(coarse_resolution)
+    for (i, j, k, l), val in coarse_values.items():
+        C[i][j][k][l] = val
+        
+    # 3. Initialize Fine Level Reference F
+    # F stores references to cells. Size matches the number of bricks
+    num_bricks = calculate_num_bricks(coarse_resolution, brick_size)
+    F = [None] * num_bricks
+    
+    # 4. Process Fine Points
+    fine_points_by_brick = {}
+    
+    for (i, j, k, l, val) in domain_points:
+        if (i, j, k, l) not in coarse_points:
+            # Determine which brick this point belongs to
+            brick_idx = get_brick_index(i, j, k, l, coarse_resolution, brick_size)
+            
+            if brick_idx not in fine_points_by_brick:
+                fine_points_by_brick[brick_idx] = []
+            
+            fine_points_by_brick[brick_idx].append((i, j, k, l, val))
+            
+    # 5. Allocate Cells
+    for brick_idx, points in fine_points_by_brick.items():
+        M = len(points)
+        
+        # Calculate filling ratio
+        # Dense cell stores all possible points in the brick
+        # Assuming brick is fully populated for max capacity calculation
+        max_points_in_brick = brick_size ** 4 
+        filling_ratio = M / max_points_in_brick
+        
+        # Threshold: 50%
+        if filling_ratio < 0.5:
+            cell_type = 'sparse'
+        else:
+            cell_type = 'dense'
+            
+        cell = allocate_cell(points, cell_type)
+        F[brick_idx] = cell
+        
+    return C, F
+
+def is_coarse_point(i, j, k, l, coarse_res):
+    # Placeholder for specific subsampling logic
+    # Typically checks if indices are multiples of a stride
+    return (i % coarse_res == 0 and j % coarse_res == 0 and 
+            k % coarse_res == 0 and l % coarse_res == 0)
+
+def get_brick_index(i, j, k, l, coarse_res, brick_size):
+    # Map global coordinates to brick index
+    # Brick index is determined by the coarse grid cell containing the point
+    # This requires mapping the point's position relative to the coarse grid
+    pass # Implementation detail depends on specific grid alignment
+```
+
+**Parameters:**
+*   **Filling Ratio Threshold:** 50%. Below this, use sparse cells; above, use dense cells [S1, unofficial].
+*   **Data Types:** 4-byte integer indices, 4-byte float values [S1, unofficial].
+
+**Edge Cases:**
+*   **Empty Cells:** Consume no memory. The reference in $F$ is null [S1, unofficial].
+*   **Precision:** The method relies on integer indices for coordinates. Ensure indices fit within the chosen integer type [G].
+
+## Subtopics
+
+### [Hierarchical Finite Element Compression Scheme](17906-hierarchical-finite-element-compression-scheme.md)
+A uniform 4D compression method that replaces traditional quantization with this sparse structure, using non-overlapping basis functions for efficient hyperslice reconstruction.
+
+### [Interval Set Algorithm](18372-interval-set-algorithm.md)
+Reduces memory by storing only "interesting" values in a sorted list, filtering out background data.
+
+## Operating characteristics
+*   **Time Complexity:** Random access in dense cells is $O(1)$. Random access in sparse cells is $O(\log M)$, where $M$ is the number of points in the cell [S1, unofficial].
+*   **Memory Complexity:** Memory usage is proportional to the number of non-empty cells and the number of points stored. Empty cells consume zero memory [S1, unofficial].
+*   **Strengths:** Enables loading the entire compressed function into core memory while maintaining interactive reconstruction performance [S1, unofficial].
+*   **Limitations:** The $O(\log M)$ access in sparse cells is slower than dense cells. The structure is optimized for 4D functions specifically [S1, unofficial].
+
+## Background
+This structure was designed to address the memory consumption of point-connectivity representations in 4D structured meshes, where 1 point requires 4 indices and 1 element requires 81 points [S1, unofficial]. It treats the function $f_c$ as a cloud of points with implicit relations, organizing them into coarse and fine levels to achieve efficient random access for reconstruction algorithms [S1, unofficial].
+
+## Sources
+[S1] A dedicated Compression Scheme for Large Multidimensional Functions Visualization, https://inria.hal.science/inria-00591076v1, fetched 2026-10-26 (unofficial)

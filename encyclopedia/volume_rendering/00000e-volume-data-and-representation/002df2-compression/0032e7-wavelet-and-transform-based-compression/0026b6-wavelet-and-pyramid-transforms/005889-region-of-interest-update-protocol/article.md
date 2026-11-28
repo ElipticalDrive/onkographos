@@ -1,0 +1,75 @@
+# Region of Interest Update Protocol
+
+Also called: Dynamic resolution update
+
+## Overview
+The Region of Interest (ROI) Update Protocol is a multiresolution visualization technique that renders a user-specified sub-volume at a higher resolution while subsampling the remainder of the dataset [S1, unofficial]. It separates the high-resolution region from the low-resolution background using wavelet transforms and localized inverse transforms to manage the resolution boundary [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar volume $V$, a user-specified low-resolution level $l$, a user-specified high-resolution level $h$ (where $l > h$), and a rectangular region of interest (ROI) defined within the volume [S1, unofficial].
+*   **Output:** A rendered isosurface or volume visualization where the ROI is rendered at resolution $2^h$ and the background at resolution $2^l$ [S1, unofficial].
+
+**Data Structures:**
+The method relies on the wavelet coefficient tree generated from the full dataset [S1, unofficial]. Key regions are defined as:
+*   **High-Resolution Region ($H$):** The spatial area corresponding to the ROI at the finest resolution level $h$ [S1, unofficial].
+*   **Cushion Region ($C$):** A boundary layer surrounding $H$ required to prevent artifacts during the inverse transform at the resolution boundary [S1, unofficial].
+*   **Low-Resolution Region:** The remainder of the volume, processed down to level $l$ [S1, unofficial].
+
+**Steps:**
+1.  **Initialization (Forward Transform):** Perform $l$ iterations of the forward wavelet transform on the full data set $V$ to bring it down to the user-specified low-resolution level [S1, unofficial].
+2.  **Cushion Management:** Identify the coefficients corresponding to the cushion region $C$ surrounding the target high-resolution region $H$, store them, and modify them [S1, unofficial].
+3.  **Local Inverse Transform:** Perform $(l - h)$ iterations of the inverse wavelet transform only on the high-resolution region $H$ [S1, unofficial].
+4.  **Boundary Modification:** After each iteration of the inverse transform in Step 3, modify the data points located at the center of the boundary faces between the high-resolution region and the low-resolution background [S1, unofficial].
+5.  **Rendering:** Perform isosurface extraction or volume rendering [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def roi_update_protocol(volume, l, h, roi_region):
+    # Step 1: Forward transform to low resolution
+    coeffs = forward_wavelet_transform(volume, iterations=l)
+    # Step 2: Identify and modify cushion coefficients
+    cushion_coeffs = extract_region(coeffs, roi_region.cushion)
+    modify_cushion_coefficients(cushion_coeffs) # Implementation details referenced as Section 3.2 in the source [S1, unofficial]
+    # Step 3 & 4: Local inverse transform with boundary modification
+    high_res_data = inverse_wavelet_transform(coeffs, region=roi_region.high_res, iterations=l - h)
+    for i in range(l - h):
+        modify_boundary_faces(high_res_data, roi_region.boundary)
+    # Step 5: Rendering
+    isosurface = extract_isosurface(high_res_data)
+    return isosurface
+```
+
+**Optimization for ROI Movement:**
+If the ROI is moved or resized, isosurface extraction need be done only in the region $(H \setminus H') \cup (C' \setminus C) \cup C \cup C'$, where $H$ and $H'$ are the old and new high-resolution regions, and $C$ and $C'$ are the old and new cushions [S1, unofficial]. The source notes that this optimization feature was not implemented in the reported evaluation [S1, unofficial].
+
+**Parameters:**
+*   $l$: User-specified low-resolution level (number of levels subsampled) [S1, unofficial].
+*   $h$: User-specified high-resolution level [S1, unofficial].
+*   $l'$: New low-resolution level [S1, unofficial].
+*   $h'$: New high-resolution level [S1, unofficial].
+*   Constraint: $l > h$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Artifacts:** Failure to modify data points at the center of boundary faces after each inverse iteration will result in visible seams between the high and low-resolution regions [S1, unofficial].
+*   **Cushion Modification:** The exact algorithm for modifying cushion coefficients is referenced as Section 3.2 in the source [S1, unofficial].
+
+## Subtopics
+
+### [Region Adaptive Hierarchical Transform (RAHT)](18506-region-adaptive-hierarchical-transform-raht.md)
+Region Adaptive Hierarchical Transform (RAHT) is a bottom-up transform that reorganizes color or scalar attributes along an octree by pairing neighboring voxels to produce low-frequency (DC) and high-frequency coefficients.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Timings were recorded on a two-processor SGI Octane with an Mx14 graphics board and 256 MB RAM, and a two-processor Intel PIII 400 MHz with 512 MB RAM [S1, unofficial].
+*   **Strengths:** Not given in the sources.
+*   **Limitations:** The ROI movement optimization was not implemented in the source's evaluation, though a reduction in isosurface extraction time was anticipated [S1, unofficial].
+
+## Background
+The method was developed by researchers at the ASCI/Center for Astrophysical Thermonuclear Flashes at the University of Chicago [S1, unofficial].
+
+## Sources
+[S1] Seamless Multiresolution Isosurfaces Using Wavelets, https://digital.library.unt.edu/ark:/67531/metadc702274/, fetched 2026-10-26 (unofficial)

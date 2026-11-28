@@ -1,0 +1,180 @@
+Dear all, I am trying to generate a .zfp file with a header using CUDA. Using the zfp util on the command line, a serial test gives: zfp -f -3 201 201 2412 -r 4 -x serial -i snaps.bin -z test.zfp -h test.zfp has size 50188912 and can be ...
+
+ZFP header for GPU compression · Issue #77 · llnl/zfp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+ZFP header for GPU compression #77
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+ZFP header for GPU compression#77
+Copy link
+Labels
+bug
+Description
+vkrGitHub
+opened on Oct 28, 2019
+Issue body actions
+Dear all,
+I am trying to generate a .zfp file with a header using CUDA. Using the zfp util on the command line, a serial test gives:
+```
+zfp -f -3 201 201 2412 -r 4 -x serial -i snaps.bin -z test.zfp -h
+```
+test.zfp has size 50188912 and can be correctly decompressed using:
+```
+zfp -h -z test.zfp -o test.bin
+```
+But doing the same with the cuda flag, i.e.:
+```
+zfp -f -3 201 201 2412 -r 4 -x cuda -i snaps.bin -z test.zfp -h
+```
+Now test.zfp has size 50188896, and
+```
+zfp -h -z test.zfp -o test.bin
+```
+gives incorrect or missing header. When doing the decompression with all the parameters, it works perfectly. How could I put this header when doing the compression on the GPU?
+Thanks in advance,
+Victor
+Activity
+lindstro commented on Oct 28, 2019
+lindstro
+on Oct 28, 2019
+Member
+More actions
+I can confirm this incorrect behavior. Let us look into it and see if we can get you a patch.
+lindstro commented on Oct 28, 2019
+lindstro
+on Oct 28, 2019
+Member
+More actions
+A quick inspection reveals that internal::setup_device_stream ignores the positioning of the bit stream pointer and in effect rewinds the stream, resulting in the header being overwritten. Although fixing this should in principle be easy, the CUDA implementation currently starts encoding on a word-aligned address, and the header is not necessarily a whole number of words. I suspect that this will require some nontrivial re-engineering of the CUDA code.
+Although this should clearly be fixed, a short-term solution might be to address this in the zfp utility or by making some additional memory copies on the host to concatenate the compressed stream to any data already written to the stream. Let me think about this.
+Of course, another workaround is to not use headers with CUDA. Depending on your application, that may or may not be a satisfactory interim solution.
+lindstro
+added
+bug
+on Oct 28, 2019
+vkrGitHub commented on Oct 30, 2019
+vkrGitHub
+on Oct 30, 2019
+Last edited by vkrGitHub
+Author
+More actions
+Thanks for the quick response @lindstro
+Indeed for the application I am working on a header is not strictly necessary (although it would be the most elegant solution).
+I was currently working on something in the ways of the short term solution you mentioned, but was unsuccessful.
+As simply copying the raw d_stream device2host and decompressing by specifying the parameters works perfectly, I will go in the direction of the workaround you mentioned. It will need an extra file containing the parameters.
+Thanks again for confirming this behaviour, I will go with the last workaround, and if a patch comes up I'll incorporate it to the wrappers.
+lindstro commented on Oct 30, 2019
+lindstro
+on Oct 30, 2019
+Member
+More actions
+@vkrGitHub I think the decompression issue you're seeing may have something to do with word alignment. Does this issue occur also if you generate the compressed file (with a header) on the host?
+Either way, we are working the issue but it will likely take a couple of weeks until we have a fix.
+vkrGitHub commented on Nov 3, 2019
+vkrGitHub
+on Nov 3, 2019
+Last edited by vkrGitHub
+Author
+More actions
+Sorry for the late reply. I can confirm it does not occur when using a header to compress/decompress using host functions.
+lindstro commented on Nov 4, 2019
+lindstro
+on Nov 4, 2019
+Member
+More actions
+My apologies--my question wasn't very precise. What happens if you perform compression (including generation of a header) on the host and then perform decompression on the device?
+vkrGitHub commented on Nov 6, 2019
+vkrGitHub
+on Nov 6, 2019
+Author
+More actions
+I see. My application (seismic snapshots) now only needs modules for compressing on the GPU and decompressing on the host. As of now I only made wrappers for host compress/decompress and GPU compress (no decompress yet). As they are based on zfp.c from the util folder, there is probably no difference in using the command-line zfp or a (soon-to-be implemented GPU decompress) wrapper; so, finally answering your question, compressing on the host with
+```
+zfp -f -3 201 201 2412 -r 4 -x serial -i snaps.bin -z test11_com.zfp -h
+```
+outputs
+```
+type=float nx=201 ny=201 nz=2412 nw=1 raw=389788848 zfp=50188912 ratio=7.77 rate=4.12
+```
+Decompressing on the GPU with
+```
+zfp -h -x cuda -z test11_com.zfp -o test11_com.bin
+```
+outputs
+```
+type=float nx=201 ny=201 nz=2412 nw=1 raw=389788848 zfp=50188912 ratio=7.77 rate=4.12
+```
+and produces a .bin with the correct size but the results are very weird (diff on the left, com/dec on the center, original on the right):
+On the other hand, decompressing this same file with
+```
+zfp -h -x serial -z test11_com.zfp -o test11_com.bin
+```
+outputs the same and produces a .bin with the correct size and more expected results (diff on the left, com/dec on the center, original on the right):
+lindstro commented on Nov 6, 2019
+lindstro
+on Nov 6, 2019
+Member
+More actions
+@vkrGitHub Thanks for sharing these results. Yeah, I believe both the compressor and decompressor ignore the current bit stream offset and start (de)compression at offset zero. It's akin to implementing fread and fwrite by first forcing a rewind on the file. When a header is prepended, the bit stream offset will be nonzero.
+Are you OK with calling zfp_compress yourself instead of using the command-line tool? If so, then you can concatenate the header (written on the host) and the compressed data (written on the device). The return value of zfp_write_header is the number of header bits written and should always be a whole number of bytes. Because the CUDA code currently works only with 64-bit words, you need to ensure that compression begins on a 64-bit aligned address, right after the header. You can trick zfp by determining on what bit offset to begin the header so that it ends on a 64-bit boundary (by calling zfp_write_header twice; once to determine the size, then calling stream_wseek to position the bit stream offset, and then calling zfp_write_header again). At this point, you can create a new bitstream object by calling stream_open with buffer pointing to the end of the header and zfp_stream_set_bitstream to associate the compressed stream with this "new" bit stream.
+Not very clean, but a temporary workaround.
+vkrGitHub commented on Nov 13, 2019
+vkrGitHub
+on Nov 13, 2019
+Author
+More actions
+Thank you for the suggested workaround, @lindstro . I managed to do what I was supposed to do by using a custom header prepended to raw .zfp files (saved with no header, by the CPU or GPU).
+I tried the workaround but did not manage to make it work. Right now, and as the problem is fixed, I don't have the time (probably the time+skill) to dig deeper into the proposed solution. Below is my (hacky) attempt, just for the discussion's sake... If a solution pops up quickly, please share; but if not, I think the issue can be closed. Thanks again.
+On main.c, test2() is intended to compress data on the GPU. It does so by first creating the necessary zfp struct and parameters on host and device with function cuda_set_zfp3D_struct ; it then compresses the data with function cuda_zfp_compress; finally it saves it as a file with cuda_zfp_compressed_to_zfpfile.
+Because the CUDA code currently works only with 64-bit words, you need to ensure that compression begins on a 64-bit aligned address, right after the header. You can trick zfp by determining on what bit offset to begin the header so that it ends on a 64-bit boundary (by calling zfp_write_header twice; once to determine the size, then calling stream_wseek to position the bit stream offset, and then calling zfp_write_header again).
+I tried to do this on function cuda_set_zfp3D_struct2
+At this point, you can create a new bitstream object by calling stream_open with buffer pointing to the end of the header and zfp_stream_set_bitstream to associate the compressed stream with this "new" bit stream.
+I tried to do this on function cuda_zfp_compressed_to_zfpfile3
+Obs1: I used a 3D data cube of sizes 201x201x2412
+Obs2: the mentioned custom header functions were not included for better clarity
+attempt.zip
+lindstro commented on Nov 13, 2019
+lindstro
+on Nov 13, 2019
+Member
+More actions
+I took a quick look at your code, and I see several issues.
+First, hdrsize in cuda_set_zfp3D_struct2 is not used correctly. The idea is to ensure that the offset, begin, that the header begins on (in the 2nd zfp_write_header call) is such that begin + hdrsize is a multiple of 64 bits. You therefore want to call stream_wseek(cuBitstream, begin).
+Second, in cuda_zfp_compressed_to_zfpfile3, you're writing 16 bytes unconditionally. You need to write the exact number of bytes occupied by the header and from where the header begins. If the header takes 12 bytes, then it should be stored at byte offset 4 (i.e., begin = 4 * 8 = 32 bits) and then written as 12 bytes.
+Third, I see only a call to write the header in cuda_zfp_compressed_to_zfpfile3. The idea is to create a new bitstream object with a buffer argument that points to where the header ends (on a 64-bit boundary). You then use this bitstream when performing compression.
+Finally, looking at test2, it appears that compression is done once before the header is written. It wasn't obvious to me how the compressed data is accessed and written to file in cuda_zfp_compressed_to_zfpfile3.
+lindstro commented on Nov 14, 2019
+lindstro
+on Nov 14, 2019
+Member
+More actions
+Before investing more time in this workaround, we will be working on fixing this bug over the next few days. Once we have a fix, it will initially appear on the develop branch. The next official release is still a couple of months away.
+👍React with 👍1Reacted by vkrGitHub
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bug
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,136 @@
+# Half-Precision Float Conversion
+
+Also called: SPZ Half-Float to Float Conversion, float32 to binary16 conversion, floatToHalf, halfToFloat, packHalf2x16
+
+## Overview
+This method converts between 32-bit IEEE 754 single-precision floats and 16-bit binary16 half-precision floats, and vice versa [S2, S3, unofficial]. It reduces memory bandwidth and storage for volume data while avoiding undefined behavior from type punning [S3, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A 32-bit IEEE 754 single-precision floating-point number or its raw bit pattern [S2, S3, unofficial].
+*   **Output:** A 16-bit binary16 half-precision floating-point number [S2, S3, unofficial].
+*   **Inverse:** Input `uint16_t`, Output `float` [S1, S3, unofficial].
+
+### Data Structures
+*   **IEEE 754 Single (32-bit):** 1 sign bit, 8 exponent bits (bias 127), 23 mantissa bits [G].
+*   **IEEE 754 Half (16-bit):** 1 sign bit, 5 exponent bits (bias 15), 10 mantissa bits [G].
+
+### Conversion: Float to Half
+The conversion extracts components from the 32-bit float, adjusts the exponent, rounds the mantissa, and packs the result [S2, S3, unofficial]. Undefined behavior from type punning is avoided by using `memcpy` or bitwise operations on unsigned integers [S3, unofficial].
+
+1.  **Extract Bits:** Copy the float bits to a `uint32_t` using `memcpy` [S2, S3, unofficial]. Extract sign `s = (x >> 31) & 1`, exponent `e32 = (x >> 23) & 0xFF`, and mantissa `m32 = x & 0x7FFFFF` [S3, unofficial].
+2.  **Handle Special Cases (Inf/NaN):** If `e32 == 0xFF`, the value is Inf or NaN [S2, S3, unofficial]. Set the result sign bit `s`, exponent bits to `0x1F` (31), and mantissa to `m32 >> 13` to preserve the NaN payload [S2, S3, unofficial].
+3.  **Calculate New Exponent:** Compute the unbiased exponent adjustment: $e = e_{32} - 127 + 15$ [S2, unofficial].
+4.  **Handle Overflow:** If $e \ge 31$ (0x1F), the value overflows to Infinity [S2, unofficial]. Return `s << 15 | 0x7C00` [S2, unofficial].
+5.  **Handle Subnormal/Zero/Underflow:** If $e \le 0$: If $e < -10$, the value underflows to zero [S2, unofficial]. Otherwise, it is a subnormal number [S2, unofficial]. Calculate shift `shift = 14 - e` [S2, unofficial]. Add the implicit leading 1 to the mantissa (`m32 |= 0x800000`), then right-shift by `shift` bits [S2, unofficial]. Round if necessary [S2, unofficial].
+6.  **Handle Normal Range:** If $0 < e < 31$: Right-shift the mantissa by 13 bits to reduce from 23 to 10 bits: `m16 = m32 >> 13` [S2, S3, unofficial]. Check the bit at position 13 (the first dropped bit) [S2, unofficial]. If it is 1, add 1 to `m16` to round up [S2, unofficial]. If rounding causes `m16` to overflow (i.e., `m16 & 0x400` is non-zero), reset `m16` to 0 and increment the exponent $e$ by 1 [S2, unofficial].
+7.  **Pack Result:** Combine sign, exponent, and mantissa: `(s << 15) | (e << 10) | (m16 & 0x3FF)` [S3, unofficial].
+
+### Conversion: Half to Float
+The conversion extracts components from the 16-bit half, adjusts the exponent, and reconstructs the 32-bit float [S1, S3, unofficial].
+
+1.  **Extract Bits:** Extract sign `sgn = (h >> 15) & 0x1`, exponent `exponent = (h >> 10) & 0x1F`, and mantissa `mantissa = h & 0x3FF` [S1, unofficial].
+2.  **Handle Special Cases:** If `exponent == 31`: If `mantissa != 0`, return NaN [S1, unofficial]. Else, return signed infinity (`sgn ? -inf : +inf`) [S1, unofficial]. If `exponent == 0`: If `mantissa == 0`, return signed zero [S1, unofficial]. Else, it is a subnormal number [S1, unofficial]. Calculate value as $sgn \times 2^{-14} \times \frac{mantissa}{1024}$ [S1, unofficial].
+3.  **Handle Normal Numbers:** Calculate the sign multiplier: `signMul = (sgn == 1) ? -1.0 : 1.0` [S1, unofficial]. Calculate the unbiased exponent: $E = exponent - 15$ [S1, unofficial]. Calculate the significand: $M = 1 + \frac{mantissa}{1024}$ [S1, unofficial]. Result: $signMul \times M \times 2^E$ [S1, unofficial].
+
+### Pseudocode: Float to Half
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import struct
+
+def float_to_uint32_bits(f: float) -> int:
+    return struct.unpack('I', struct.pack('f', f))[0]
+
+def float_to_half(f: float) -> int:
+    x = float_to_uint32_bits(f)
+    sign = (x >> 31) & 1
+    e32 = (x >> 23) & 0xFF
+    m32 = x & 0x7FFFFF
+
+    if e32 == 0xFF:
+        return (sign << 15) | (0x1F << 10) | (m32 >> 13)
+
+    e = e32 - 127 + 15
+
+    if e >= 31:
+        return (sign << 15) | (0x1F << 10)
+
+    if e <= 0:
+        if e < -10:
+            return sign << 15
+        shift = 14 - e
+        m32 |= 0x800000
+        m16 = m32 >> shift
+        if (m32 >> (shift - 1)) & 1:
+            m16 += 1
+        return (sign << 15) | (m16 & 0x3FF)
+
+    m16 = m32 >> 13
+    if (m32 >> 13) & 1:
+        m16 += 1
+
+    if m16 & 0x400:
+        m16 = 0
+        e += 1
+
+    return (sign << 15) | (e << 10) | (m16 & 0x3FF)
+```
+
+### Pseudocode: Half to Float
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def half_to_float(h: int) -> float:
+    sgn = (h >> 15) & 0x1
+    exponent = (h >> 10) & 0x1F
+    mantissa = h & 0x3FF
+
+    if exponent == 31:
+        if mantissa != 0:
+            return float('nan')
+        return float('-inf') if sgn else float('inf')
+
+    if exponent == 0:
+        if mantissa == 0:
+            return float('-0.0') if sgn else 0.0
+        signMul = -1.0 if sgn else 1.0
+        return signMul * (2.0 ** -14) * (mantissa / 1024.0)
+
+    signMul = -1.0 if sgn else 1.0
+    E = exponent - 15
+    M = 1.0 + (mantissa / 1024.0)
+    return signMul * M * (2.0 ** E)
+```
+
+### Parameters and Edge Cases
+*   **Rounding:** The standard implementation rounds to nearest even or truncates depending on the bit dropped [G]. The provided method rounds up if the dropped bit is 1 [S2, unofficial].
+*   **Precision:** Half-precision has 10 bits of mantissa compared to 23 in single [G].
+*   **Subnormals:** Half-precision subnormals start at $2^{-14}$, while single starts at $2^{-126}$ [G].
+
+## Subtopics
+
+### IBM 32-bit Float Conversion
+Converts between IBM 32-bit floating-point format and IEEE 754 single-precision [S4, unofficial].
+*   **IBM to IEEE:** If input is 0, return 0 [S4, unofficial]. Extract sign (bit 31), exponent (bits 24-30, 7 bits, bias 64), and fraction (bits 0-23, 24 bits) [S4, unofficial]. Compute mantissa as `fraction / 0x01000000` [S4, unofficial]. Value is `mant * 16^(exponent - 64)` [S4, unofficial].
+*   **IEEE to IBM:** If input is 0, return 0 [S4, unofficial]. Extract sign [S4, unofficial]. Normalize the absolute value to range $[1/16, 1)$ by dividing/multiplying by 16 and adjusting exponent (initial 64) [S4, unofficial]. If exponent $\le 0$, return 0 (underflow) [S4, unofficial]. Compute fraction as `round(value * 0x01000000)` [S4, unofficial]. Clamp fraction to `0x00FFFFFF` if overflow [S4, unofficial]. Combine sign, exponent, fraction [S4, unofficial].
+*   **Pitfall:** IEEE to IBM conversion is an approximation, sufficient for SEG-Y software reconstruction but not exact [S4, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per conversion [G]. The operations are bitwise shifts, masks, and simple arithmetic [G].
+*   **Memory Complexity:** $O(1)$ [G]. No additional memory is allocated during conversion [G].
+*   **Performance:** Extremely fast, suitable for real-time preprocessing of volume data [G]. Avoiding type punning (using `memcpy` or bitwise ops) ensures portability and avoids undefined behavior in strict-aliasing environments [S3, unofficial].
+*   **Strengths:** Reduces memory footprint by 50% for volume textures [G]. Standardized format (binary16) ensures compatibility across hardware and software [G].
+*   **Limitations:** Limited dynamic range and precision compared to single precision [G].
+
+## Background
+Half-precision floating-point format (binary16) was introduced by IEEE 754-2008 standard [G]. It is widely used in graphics and volume rendering to reduce memory bandwidth and storage costs [G]. The IBM 32-bit format is a legacy format from IBM mainframes, still encountered in seismic data (SEG-Y) [S4, unofficial].
+
+## Sources
+[S1] mkkellogg/GaussianSplats3D, https://github.com/mkkellogg/GaussianSplats3D, fetched 2026-10-27 (unofficial)
+[S2] splat-ros/RVizSplat, https://github.com/splat-ros/RVizSplat, fetched 2026-10-27 (unofficial)
+[S3] liaozhangsheng/gsplat-opengl, https://github.com/liaozhangsheng/gsplat-opengl, fetched 2026-10-28 (unofficial)
+[S4] SeismicDataCompressor, https://github.com/rubensrudio/SeismicDataCompressor, fetched 2026-10-28 (unofficial)

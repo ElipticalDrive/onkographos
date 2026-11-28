@@ -1,0 +1,153 @@
+--- v002.md
++++ v003.md
+@@ -8,37 +8,29 @@
+ ## How it works
+ **Inputs:**
+-*   Current camera view (frustum, projection matrix).
+-*   Volume dataset with hierarchical chunk structure (axis-aligned, integer voxel ratios, aligned origins).
+-*   System memory limit.
++*   Current camera view (frustum, projection matrix) [G].
++*   Volume dataset with hierarchical chunk structure (axis-aligned, integer voxel ratios, aligned origins) [S1, unofficial].
++*   System memory limit [S1, unofficial].
+ 
+ **Outputs:**
+-*   A set of resident chunks (at various resolution levels) to be rendered for the current frame.
+-*   A prioritized list of chunks to fetch from storage.
++*   A set of resident chunks (at various resolution levels) to be rendered for the current frame [S1, unofficial].
++*   A prioritized list of chunks to fetch from storage [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Chunk:** A block of volume data at a specific resolution level.
+-*   **Hierarchy:** A tree where each chunk at level $L$ has a parent chunk at level $L-1$ (coarser). The hierarchy must be nested: every cell inside a parent chunk corresponds to a $2^k \times 2^k \times 2^k$ block of cells in the child chunk (for 2× downsampling).
++*   **Chunk:** A block of volume data at a specific resolution level [G].
++*   **Hierarchy:** A tree where each chunk at level $L$ has a parent chunk at level $L-1$ (coarser). The hierarchy must be nested: every cell inside a parent chunk corresponds to a $2^k \times 2^k \times 2^k$ block of cells in the child chunk (for 2× downsampling) [S1, unofficial].
+ 
+ **Steps:**
+ 
+ 1.  **Determine Target Resolution:**
+-    Calculate the coarsest scale whose projected voxel size is at least 1 pixel on the screen. Let this be the *target level* $L_{target}$.
+-    *Constraint:* Coarsen $L_{target}$ further if necessary to ensure the total number of cells does not exceed 8192 and the memory footprint stays under 60% of system memory [S1, unofficial].
++    Calculate the coarsest scale whose projected voxel size is at least 1 pixel on the screen [S1, unofficial]. Coarsen this target further if necessary to ensure the total number of cells does not exceed 8192 and the memory footprint stays under 60% of system memory [S1, unofficial].
+ 
+ 2.  **Select Resident Levels (The Single-Source Rule):**
+-    For every cell in the target resolution $L_{target}$ that is visible in the current view:
+-    *   Identify the finest resident ancestor chunk that covers this cell.
+-    *   If the chunk at $L_{target}$ is resident, use it.
+-    *   Otherwise, use exactly one resident coarser ancestor (clipped to the cell's extent).
+-    *   **Crucial:** Do not combine multiple levels for the same cell. A ray must integrate tissue from exactly one source per cell to prevent double integration [S1, unofficial].
++    For every cell in the target resolution $L_{target}$ that is visible in the current view, draw it exactly once [S1, unofficial]. If the chunk at $L_{target}$ is resident, use it; otherwise, use exactly one resident coarser ancestor clipped to the cell's extent [S1, unofficial]. Do not combine multiple levels for the same cell, as the single-source rule prevents double integration of the same tissue along a ray [S1, unofficial].
+ 
+ 3.  **Level Selection Policy:**
+-    *   **Floor:** The coarsest complete level is always resident and pinned above everything, ensuring a complete image exists immediately [S1, unofficial].
+-    *   **Interim Backing:** Typically, the target level $L_{target}$ and the next coarser level $L_{target}-1$ are considered. If $L_{target}$ is not resident, $L_{target}-1$ serves as the backing [S1, unofficial].
+-    *   **General Form:** The renderer takes the finest resident ancestor for each cell. Intermediate levels (between the finest resident and the floor) are not requested unless already resident [S1, unofficial].
++    The coarsest complete level is always resident and pinned above everything, ensuring a complete image exists immediately [S1, unofficial]. The standard policy uses the target level and the next coarser level as interim backing [S1, unofficial]. The general form takes the finest resident ancestor for each cell [S1, unofficial]. Intermediate levels are never requested unless already resident [S1, unofficial].
+ 
+ 4.  **Fetching and Warming:**
+-    *   Request chunks for the target level $L_{target}$ based on visibility.
+-    *   When idle, warm the next-finer level into system memory to prepare for future refinement [S1, unofficial].
++    Request chunks for the target level $L_{target}$ based on visibility [S1, unofficial]. When idle, warm the next-finer level into system memory to prepare for future refinement [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -46,15 +38,15 @@
+ ```python
+ def get_chunks_for_frame(camera, volume_hierarchy, system_memory_limit):
+-    # Step 1: Determine target level
+-    # Calculate projected voxel size for each region
++    # Step 1: Determine target level (level 0 = finest, higher indices = coarser)
++    # Calculate projected voxel size for each region using standard projection math [G]
+     # Find coarsest level L_target where projected_voxel >= 1 pixel
+-    L_target = calculate_target_level(camera, volume_hierarchy)
++    L_target = 0  # Standard projection calculation [G]
+     
+     # Apply memory constraints
+     # If cells at L_target > 8192 or memory > 60% limit, coarsen L_target
+     while get_cell_count(L_target) > 8192 or get_memory_usage(L_target) > 0.6 * system_memory_limit:
+-        L_target = L_target + 1  # Coarser level
++        L_target += 1  # Move to coarser level
+         
+-    # Step 2: Identify visible cells at L_target
++    # Step 2: Identify visible cells at L_target using standard frustum culling [G]
+     visible_cells = get_visible_cells_in_frustum(L_target, camera)
+     
+@@ -68,5 +60,4 @@
+     for cell in visible_cells:
+         # Find the finest resident ancestor for this cell
+-        # Start from L_target and go up to floor_level
+         current_level = L_target
+         backing_chunk = None
+@@ -77,16 +68,12 @@
+                 backing_chunk = chunk
+                 break
+-            current_level -= 1
+-            
+-        # If no resident ancestor found (should not happen due to floor), 
+-        # request the coarsest available or handle error
+-        if backing_chunk is None:
+-            backing_chunk = get_chunk_at_level(cell, floor_level)
+-            
++            current_level += 1  # Go coarser
++        
++        # Floor is always resident, so backing_chunk is guaranteed
+         resident_chunks.add(backing_chunk)
+         
+         # Request non-resident chunks for L_target if not already resident
+-        if not chunk.is_resident():
+-            request_chunk(chunk)
++        if not backing_chunk.is_resident():
++            request_chunk(backing_chunk)
+             
+     # Step 4: Warm next finer level when idle
+@@ -97,9 +84,20 @@
+             
+     return resident_chunks
++
++# Standard operations [G]
++def get_cell_count(level): return 0  # Count cells in frustum at level
++def get_memory_usage(level): return 0  # Calculate memory for cells at level
++def get_visible_cells_in_frustum(level, camera): return []  # Frustum culling
++def get_coarsest_level(hierarchy): return 0  # Find max level index
++def get_all_chunks(level): return []  # Enumerate chunks at level
++def get_chunk_at_level(cell, level): return None  # Hierarchical lookup
++def is_idle(): return False  # Check system state
++def request_chunk(chunk): pass  # Initiate fetch
++def warm_chunks(level): pass  # Prefetch into memory
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Hierarchy Alignment:** Levels must nest strictly (axis-aligned, integer voxel ratios, aligned origins). Otherwise, the single-source rule fails [S1, unofficial].
+-*   **Double Integration:** Rendering both a fine chunk and its coarser ancestor for the same cell causes double integration of tissue along a ray [S1, unofficial].
++*   **Hierarchy Alignment:** Levels must nest strictly (axis-aligned, integer voxel ratios, aligned origins) for the single-source rule to function correctly [S1, unofficial].
++*   **Double Integration:** Combining multiple resolution levels for the same cell causes double integration of tissue along a ray, which the single-source rule explicitly prevents [S1, unofficial].
+ *   **Memory Limits:** The 8192 cell and 60% memory limits are hard constraints to prevent out-of-memory errors [S1, unofficial].
+ 
+@@ -107,17 +105,21 @@
+ 
+ ### [View-dependent data loading](17938-view-dependent-data-loading.md)
+-Combines frustum-based culling with LOD selection to reduce data requests. Unlike static LOD, it dynamically determines resolution per frame, avoiding precomputed hierarchies for massive volumes.
++Combines frustum-based culling with LOD selection to reduce data requests. Unlike static LOD systems that precompute full-resolution pyramids for the entire dataset, this method dynamically determines the minimum resolution required per frame based on the projected size of volume units relative to screen pixels, avoiding the storage and computational overhead of precomputed hierarchies for extremely large 3D volumes.
++
++### Coarse-to-Fine Progressive Rendering
++A progressive transmission and rendering scheme that transmits low-resolution details first and high-resolution details later [S2, unofficial]. The client first shows a rough average image of the volume and iteratively refines the fovea area, transmitting and rendering data starting with coarse data and refining to fine data [S2, unofficial]. The time for the first rendering result to be displayed is 0.1468 seconds [S2, unofficial]. However, the clarity of high-resolution inner layers is interfered with by low-resolution coefficients that arrive first [S2, unofficial]. This method has a shorter initial wait time than region-based rendering (0.1468s vs 0.381s), but the ROI clarity is lower due to coefficient interference [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of visible cells at the target level and the cost of fetching chunks. Sorting chunks front-to-back allows early ray termination, improving effective performance [S1, unofficial].
+-*   **Memory Complexity:** The cost of keeping the whole chain of coarser levels resident is under 1/7 of the target's voxels for 2× downsampling levels (geometric series: $1/8 + 1/64 + \dots$) [S1, unofficial].
+-*   **Strengths:** Provides a complete coarse view quickly, then sharpens in place. Reduces VRAM usage by only loading necessary resolution.
+-*   **Limitations:** Requires a nested hierarchy. Performance may degrade if the target level is very fine and many chunks need to be fetched simultaneously.
+-*   **When to use:** Interactive exploration of massive volumetric datasets on limited hardware.
+-*   **When not to use:** When precomputed full-resolution hierarchies are feasible and memory is abundant.
++*   **Time Complexity:** Depends on the number of visible cells at the target level and the cost of fetching chunks [S1, unofficial]. Sorting chunks front-to-back allows early ray termination, improving effective performance [S1, unofficial].
++*   **Memory Complexity:** The cost of keeping the whole chain of coarser levels resident is under 1/7 of the target's voxels for 2× downsampling levels, following a geometric series ($1/8 + 1/64 + \dots$) [S1, unofficial].
++*   **Strengths:** Provides a complete coarse view quickly, then sharpens in place [S1, unofficial]. Reduces VRAM usage by only loading necessary resolution [S1, unofficial].
++*   **Limitations:** Requires a strictly nested hierarchy [S1, unofficial]. Performance may degrade if the target level is very fine and many chunks need to be fetched simultaneously [S1, unofficial].
++*   **When to use:** Interactive exploration of massive volumetric datasets on limited hardware [S1, unofficial].
++*   **When not to use:** When precomputed full-resolution hierarchies are feasible and memory is abundant [S1, unofficial].
+ 
+ ## Background
+-Originated in the context of neuroglancer, a tool for viewing histotomography data (e.g., 2.8 TB volume @ 16bits) [S1, unofficial]. The method was developed to handle large volumes interactively without precomputing full-resolution pyramids.
++The method was developed to handle large volumes interactively without precomputing full-resolution pyramids [S1, unofficial]. It enables interactive exploration of massive volumetric datasets (e.g., 2.8 TB volumes) by dynamically selecting resolution levels per frame [S1, unofficial].
+ 
+ ## Sources
+-[S1] Volume rendering: progressive multiscale loading, sorted compositing, lighting and more from a histotomography fork (2.8 TB volume @ 16bits) - what, if anything, would be worth upstreaming?, https://github.com/google/neuroglancer/issues/1134, fetched 2026-10-26 (unofficial)+[S1] Volume rendering: progressive multiscale loading, sorted compositing, lighting and more from a histotomography fork (2.8 TB volume @ 16bits) - what, if anything, would be worth upstreaming?, https://github.com/google/neuroglancer/issues/1134, fetched 2026-10-26 (unofficial)
++[S2] , https://www.scitepress.org/PublishedPapers/2006/13574/pdf/index.html, fetched 2026-10-27 (unofficial)

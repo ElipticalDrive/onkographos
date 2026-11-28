@@ -1,0 +1,112 @@
+--- v006.md
++++ v007.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Mixed Precision Training (MPT) accelerates the optimization of radiance fields by utilizing lower-precision data types (typically FP16) for forward and backward passes while maintaining a master copy of weights in higher precision (FP32) to preserve numerical stability [S1, unofficial][S2, unofficial]. Unlike standard FP32 training, MPT reduces memory bandwidth requirements and increases throughput, though it requires careful handling of gradient scaling to prevent underflow in low-precision arithmetic [S1, unofficial][S2, unofficial].
++Mixed Precision Training accelerates radiance field optimization on CUDA devices by executing forward and backward passes in lower precision while maintaining a master weight copy in higher precision to preserve numerical stability [G]. It reduces memory bandwidth requirements and increases throughput compared to standard FP32 training, requiring gradient scaling to prevent underflow in low-precision arithmetic [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+@@ -18,5 +18,5 @@
+ 
+ **Numbered Steps:**
+-1. **Initialization:** Create the model and optimizer. Initialize a `GradScaler` instance [S1, unofficial]. Set model to training mode [S2, unofficial].
++1. **Initialization:** Create the model and optimizer. Initialize a `GradScaler` instance [S1, unofficial][S2, unofficial]. Set model to training mode [S2, unofficial].
+ 2. **Autocast Context:** Wrap the forward pass in `torch.amp.autocast('cuda')` (or `torch.cuda.amp.autocast()` for older PyTorch versions) to automatically cast operations to FP16 where supported [S1, unofficial][S2, unofficial].
+ 3. **Data Loading:** Randomly select a batch of target images and camera transforms. Move data to the GPU device [S2, unofficial].
+@@ -36,17 +36,22 @@
+ import numpy as np
+ 
+-def run_one_iter_of_tinynerf(model, target_tform_cam2world, height, width, focal_length, near_thresh, far_thresh, depth_samples_per_ray):
++def run_one_iter_of_tinynerf(height, width, focal_length, target_tform_cam2world, near_thresh, far_thresh, depth_samples_per_ray, get_minibatches):
+     """
+     Renders predicted RGB images for a batch of camera poses.
+     """
+-    # Generate rays from camera poses
+-    ray_origins, ray_directions = generate_rays_from_cameras(target_tform_cam2world, height, width, focal_length)
+-    # Sample depths
++    ray_origins, ray_directions = generate_rays_from_cameras(height, width, focal_length, target_tform_cam2world)
+     depth_values = sample_depths(ray_origins, near_thresh, far_thresh, depth_samples_per_ray)
+-    # Forward pass through model
+-    rgb_predicted = model(ray_origins, ray_directions, depth_values)
++    # Chunked forward pass to avoid OOM
++    batches_pos = get_minibatches(ray_origins, chunksize=256)
++    batches_dir = get_minibatches(ray_directions, chunksize=256)
++    rgb = []
++    for pos, dir in zip(batches_pos, batches_dir):
++        color, _ = model(pos, dir)
++        rgb.append(color)
++    rgb_flattened = torch.cat(rgb, dim=0)
++    rgb_predicted = torch.reshape(rgb_flattened, (height, width, 3))
+     return rgb_predicted
+ 
+-def train_step(model, optimizer, scaler, batch_data, device):
++def train_step(model, optimizer, scaler, batch_data, device, height, width, focal_length, near_thresh, far_thresh, depth_samples_per_ray):
+     """
+     Performs one training step using mixed precision.
+@@ -61,7 +66,6 @@
+     with torch.amp.autocast('cuda'):
+         rgb_predicted = run_one_iter_of_tinynerf(
+-            model, target_tform_cam2world, 
+-            height=256, width=256, focal_length=500.0,
+-            near_thresh=0.01, far_thresh=100.0, depth_samples_per_ray=128
++            height, width, focal_length, target_tform_cam2world, 
++            near_thresh, far_thresh, depth_samples_per_ray, get_minibatches
+         )
+         if rgb_predicted.dim() > 3:
+@@ -76,5 +80,5 @@
+     return loss.item()
+ 
+-def train_loop(model, optimizer, scaler, dataset, num_iters, save_every, checkpoint_dir):
++def train_loop(model, optimizer, scaler, scheduler, dataset, start_iter, num_iters, save_every, checkpoint_dir):
+     """
+     Main training loop with mixed precision.
+@@ -83,10 +87,12 @@
+     epoch_history = []
+     
+-    for i in range(num_iters):
++    for i in range(start_iter, num_iters):
+         indices = np.random.choice(dataset.images.shape[0], 4)
+         batch_images = dataset.images[indices]
+         batch_cam2world = dataset.cam2world[indices]
+         
+-        loss = train_step(model, optimizer, scaler, (batch_images, batch_cam2world), 'cuda')
++        loss = train_step(model, optimizer, scaler, (batch_images, batch_cam2world), 'cuda', 256, 256, 500.0, 0.01, 100.0, 128)
++        
++        scheduler.step()
+         
+         if i % save_every == 0:
+@@ -99,6 +105,8 @@
+                 'iteration': i,
+                 'scaler_state_dict': scaler.state_dict(),
++                'scheduler_state_dict': scheduler.state_dict(),
+             }
+             torch.save(checkpoint, f"{checkpoint_dir}/checkpoint_{i}.pt")
++            plot_figures(epoch_history, loss_history)
+ ```
+ 
+@@ -109,5 +117,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **NaN/Inf Gradients:** FP16 has a smaller dynamic range than FP32. Gradients can underflow to zero or overflow to NaN. The scaler handles this by detecting NaNs and reducing the scale factor [S1, unofficial].
++- **NaN/Inf Gradients:** FP16 has a smaller dynamic range than FP32 [G]. Gradients can underflow to zero or overflow to NaN [G]. The scaler handles this by detecting NaNs and reducing the scale factor [S1, unofficial].
+ - **Compatibility:** Older PyTorch versions use `torch.cuda.amp` instead of `torch.amp` [S1, unofficial].
+ 
+@@ -124,13 +132,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Training time is reduced compared to FP32 on GPUs with Tensor Cores [S1, unofficial][S2, unofficial].
+-- **Memory Complexity:** Memory usage is reduced for activations and gradients, allowing for larger batch sizes or higher resolution scenes [S1, unofficial][S2, unofficial].
+-- **Measured Performance:** On standard NeRF datasets (Blender, LLFF), MPT achieves similar PSNR/SSIM to FP32 but with significantly faster convergence per epoch [S1, unofficial][S2, unofficial].
+-- **Strengths:** Faster training, lower memory footprint, compatibility with modern GPU hardware.
++- **Time Complexity:** Training time is reduced on GPUs with Tensor Cores [S1, unofficial].
++- **Memory Complexity:** Memory usage is reduced for activations and gradients, allowing for larger batch sizes or higher resolution scenes [G].
++- **Strengths:** Faster training, lower memory footprint, compatibility with modern GPU hardware [S1, unofficial].
+ - **Limitations:** Potential for numerical instability if not properly scaled [S1, unofficial].
+ - **When to Use:** Standard for training large NeRF models on modern GPUs [S1, unofficial].
+ 
+ ## Background
+-Mixed Precision Training was popularized in deep learning for training large neural networks on GPUs [S1, unofficial]. In the context of NeRF and volume rendering, it has become a standard optimization procedure due to the high computational cost of differentiable rendering [S1, unofficial][S2, unofficial]. It is widely used in modern NeRF implementations (e.g., Instant-NGP, 3DGS) to accelerate training [S1, unofficial][S2, unofficial].
++Mixed Precision Training was popularized in deep learning for training large neural networks on GPUs [S1, unofficial]. In the context of NeRF and volume rendering, it has become a standard optimization procedure due to the high computational cost of differentiable rendering [S1, unofficial][S2, unofficial]. It is widely used in modern NeRF implementations to accelerate training [S1, unofficial][S2, unofficial].
+ 
+ ## Sources

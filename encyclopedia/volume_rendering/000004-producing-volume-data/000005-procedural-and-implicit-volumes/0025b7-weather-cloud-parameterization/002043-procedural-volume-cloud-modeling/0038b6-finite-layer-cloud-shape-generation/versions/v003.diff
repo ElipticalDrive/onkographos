@@ -1,0 +1,398 @@
+--- v002.md
++++ v003.md
+@@ -4,73 +4,114 @@
+ 
+ ## Overview
+-Finite Layer Cloud Shape Generation is a procedural method for constructing the 3D volume shapes of layer cloud types (Cirrus, Altostratus, Nimbostratus, Stratocumulus, Stratus) by assembling a chain of connected 3D ellipsoidal lobes [S1, unofficial]. It solves the problem of generating realistic, non-cylindrical cloud boundaries by ensuring vertical presence variation and horizontal tapering, avoiding the artifact of simply extruding a 2D contour into a column [S1, unofficial]. It differs from its siblings by focusing on horizontal layering and lobe chaining for flat cloud structures, whereas [Cumulonimbus and Cumulus Shape Generation](8296-cumulonimbus-and-cumulus-shape-generation.md) uses distinct lobe strategies for vertical development and irregular tops [S1, unofficial].
++Finite Layer Cloud Shape Generation is a procedural method for constructing the 3D volume shapes of stratiform cloud types (Cirrus, Altostratus, Nimbostratus, Stratocumulus, Stratus) by assembling a chain of connected 3D ellipsoidal lobes [S1, unofficial]. It solves the problem of generating natural-looking cloud edges without degenerating into a simple extruded cylinder along the vertical Z-axis, which is a common artifact when using simple 2D contour extrusion [S1, unofficial]. It differs from its sibling [Cumulonimbus and Cumulus Shape Generation](8296-cumulonimbus-and-cumulus-shape-generation.md), which uses hierarchical particle-based turbulence for convective shapes, by relying on deterministic geometric lobes with controlled vertical presence variation [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Cloud type ID (`type_id`): Integer identifying the cloud type, used to select shape profiles and persistent support values [S1, unofficial].
+-- Coordinate arrays: `x`, `y`, `z` arrays of shape `(H, W, D)` representing the 3D volume space [S1, unofficial].
+-- Random state: For procedural variation [S1, unofficial].
+-
+-**Outputs:**
+-- Density field: A `float32` array of shape `(H, W, D)` representing the organic cloud density [S1, unofficial].
+-
+-**Data Structures:**
+-- `lobe_spec`: Tuple `(center_x, center_y, radius_x, radius_y, weight, lobe_z, lobe_z_radius)` [S1, unofficial].
+-- `shape_profile`: Tuple `(center_z, half_height, top_wobble, bottom_wobble, thickness_variance, cap_taper, side_edge_variation)` [S1, unofficial].
+-
+-**Parameters:**
+-- `LAYER_CLOUD_TYPE_IDS`: `frozenset((3, 5, 6, 7, 8))` defining which cloud types use the finite layer shape profile logic [S1, unofficial].
+-- Persistent support values (map `type_id` to float): `{3: 0.36, 5: 0.40, 6: 0.50, 7: 0.24, 8: 0.44}` [S1, unofficial].
+-- Type 6 (Nimbostratus) profile defaults: `center=-0.03`, `half=0.58`, `top_wobble=0.180`, `bottom_wobble=0.285`, `thickness_variance=0.40`, `cap_taper=0.39`, `side_edge_variation=1.10` [S1, unofficial].
+-
+-**Steps:**
+-
+-1. **Generate Lobe Specifications:**
+-   a. Determine `major_angle = uniform(-π, π)` [S1, unofficial].
+-   b. Calculate `direction = (cos(major_angle), sin(major_angle))` and `perpendicular = (-direction[1], direction[0])` [S1, unofficial].
+-   c. Set `major_length = uniform(0.45, 0.72)` and `cross_width = uniform(0.22, 0.46)` [S1, unofficial].
+-   d. Get `shape_profile` for `type_id`. If `type_id` is not in `LAYER_CLOUD_TYPE_IDS`, use profile ID 5 [S1, unofficial]. Extract `center_z` and `half_height` [S1, unofficial].
+-   e. Generate `count` positions (uniformly 7–13) along the major axis: `positions_along = linspace(-0.88, 0.88, count) + normal(0.0, 0.09, size=count)` [S1, unofficial].
+-   f. For each `position_along`:
+-      - `along = position_along * major_length` [S1, unofficial].
+-      - `cross = normal(0.0, cross_width * 0.62)` [S1, unofficial].
+-      - `position = (center_x, center_y) + direction * along + perpendicular * cross` [S1, unofficial].
+-      - `radius_x = uniform(0.14, 0.30)`, `radius_y = uniform(0.12, 0.28)` [S1, unofficial].
+-      - `lobe_z = center_z + uniform(-0.48, 0.48) * half_height` [S1, unofficial].
+-      - `lobe_z_radius = uniform(0.58, 1.04) * half_height` [S1, unofficial].
+-      - `weight = uniform(0.54, 0.98)` [S1, unofficial].
+-      - Append `(position[0], position[1], radius_x, radius_y, weight, lobe_z, lobe_z_radius)` to `edge_lobe_specs` [S1, unofficial].
+-   g. Add 1–3 side lobes to prevent degeneracy:
+-      - `along = uniform(-0.58, 0.58) * major_length` [S1, unofficial].
+-      - `cross = choice(-1, 1) * uniform(0.60, 1.18) * cross_width` [S1, unofficial].
+-      - Generate `position` similarly to step f, using same radius/weight distributions [S1, unofficial].
+-
+-2. **Evaluate Density Field:**
+-   a. Rotate coordinates: `local_x, local_y = _rotated_xy(x, y, variation)` where `variation` is derived from `shape_profile` [S1, unofficial].
+-   b. Initialize `lobe_field = zeros_like(x, dtype=float32)` [S1, unofficial].
+-   c. For each `spec` in `edge_lobe_specs` (`center_x, center_y, radius_x, radius_y, weight, lobe_z, lobe_z_radius`):
+-      - Rotate lobe center: `lobe_center_x = cos(variation) * center_x + sin(variation) * center_y`, `lobe_center_y = -sin(variation) * center_x + cos(variation) * center_y` [S1, unofficial].
+-      - Calculate 2D lobe: `lobe = exp(-(((local_x - lobe_center_x) / (radius_x * 1.15))**2 + ((local_y - lobe_center_y) / (radius_y * 1.15))**2))` [S1, unofficial].
+-      - Calculate vertical presence:
+-        - `persistent_support = persistent_support_map[type_id]` [S1, unofficial].
+-        - `vertical_presence = persistent_support + (1.0 - persistent_support) * exp(-((z - lobe_z) / max(lobe_z_radius, 0.001))**2)` [S1, unofficial].
+-      - Add to field: `lobe_field += float32(weight * vertical_presence) * lobe` [S1, unofficial].
+-   d. Calculate horizontal taper:
+-      - Get `center_z, half_height, _, _, _, horizontal_taper, side_variation` from `shape_profile` [S1, unofficial].
+-      - `normalized_height = abs(z - center_z) / max(half_height, 0.001)` [S1, unofficial].
+-      - `cap_taper = horizontal_taper * smoothstep((normalized_height - 0.12) / 0.88)` [S1, unofficial].
+-   e. Calculate contour:
+-      - `edge_noise`: Not defined in sources. [G] Assume a uniform random noise field in [0, 1] or a specific noise function provided by the parent context.
+-      - `contour = lobe_field + (edge_noise - 0.5) * (0.62 + 0.30 * side_variation) - cap_taper` [S1, unofficial].
+-   f. Apply smoothstep: `organic = smoothstep((contour - 0.30) / 0.48)` [S1, unofficial].
+-   g. Apply final edge guard:
+-      - `screen_distance = min(x + 1.0, 1.0 - x, y + 1.0, 1.0 - y)` [S1, unofficial].
+-      - `final_guard = safe_edge_fade(screen_distance, 0.0, 0.045)` [S1, unofficial].
+-   h. Return `organic * final_guard` [S1, unofficial].
+-
+-**Pitfalls:**
+-- The final guard clears only the outermost voxels; the main contour naturally goes to zero before reaching this boundary [S1, unofficial].
+-
+-**Pseudocode:**
++The method operates in two phases: **Lobe Specification** (generating the geometric primitives) and **Density Evaluation** (compositing them into a final field).
++
++### Inputs and Outputs
++*   **Inputs**:
++    *   `type_id`: Integer identifier for the cloud type. Must be in `LAYER_CLOUD_TYPE_IDS` (defined as `{3, 5, 6, 7, 8}`) [S1, unofficial].
++    *   `resolution`: 2D grid dimensions $(W, H)$ for the output field [S1, unofficial].
++    *   `rng`: A random number generator instance [S1, unofficial].
++    *   `x, y, z`: Coordinate arrays of shape $(H, W)$ representing the spatial domain [S1, unofficial].
++*   **Outputs**:
++    *   `density_field`: A 2D array of shape $(H, W)$ with `float32` dtype, representing the final cloud density/opacity [S1, unofficial].
++
++### Data Structures
++*   **Lobe Spec Tuple**: A 7-tuple `(center_x, center_y, radius_x, radius_y, weight, lobe_z, lobe_z_radius)` [S1, unofficial].
++    *   `center_x, center_y`: 2D position in the XY plane [S1, unofficial].
++    *   `radius_x, radius_y`: Ellipse semi-axes in XY [S1, unofficial].
++    *   `weight`: Contribution scalar [S1, unofficial].
++    *   `lobe_z`: Vertical center of the lobe [S1, unofficial].
++    *   `lobe_z_radius`: Vertical spread scalar [S1, unofficial].
++*   **Shape Profile**: A tuple `(center_z, half_height, top_wobble, bottom_wobble, thickness_variance, cap_taper, side_edge_variation)` retrieved based on `type_id` [S1, unofficial].
++
++### Parameters
++*   `LAYER_CLOUD_TYPE_IDS`: `frozenset((3, 5, 6, 7, 8))` [S1, unofficial].
++*   **Persistent Support Values** (vertical base density):
++    *   Type 3: 0.36
++    *   Type 5: 0.40
++    *   Type 6: 0.50
++    *   Type 7: 0.24
++    *   Type 8: 0.44 [S1, unofficial].
++*   **Typical Values for Type 6 (Nimbostratus)**:
++    *   `center_z`: -0.03
++    *   `half_height`: 0.58
++    *   `top_wobble`: 0.180
++    *   `bottom_wobble`: 0.285
++    *   `thickness_variance`: 0.40
++    *   `cap_taper`: 0.39
++    *   `side_edge_variation`: 1.10 [S1, unofficial].
++
++### Steps
++
++#### Phase 1: Lobe Specification
++1.  **Determine Orientation**:
++    *   `major_angle = rng.uniform(-np.pi, np.pi)`
++    *   `direction = (cos(major_angle), sin(major_angle))`
++    *   `perpendicular = (-direction[1], direction[0])` [S1, unofficial].
++2.  **Set Dimensions**:
++    *   `major_length = rng.uniform(0.45, 0.72)`
++    *   `cross_width = rng.uniform(0.22, 0.46)` [S1, unofficial].
++3.  **Get Profile**:
++    *   If `type_id` in `LAYER_CLOUD_TYPE_IDS`, retrieve profile for `type_id`. Else, use profile for type 5 [S1, unofficial].
++    *   Extract `center_z` and `half_height` from profile [S1, unofficial].
++4.  **Generate Main Chain**:
++    *   `count = rng.integers(7, 14)` (uniform integer in [7, 13]) [S1, unofficial].
++    *   `positions_along = linspace(-0.88, 0.88, count) + rng.normal(0.0, 0.09, count)` [S1, unofficial].
++    *   For each `p` in `positions_along`:
++        *   `along = p * major_length`
++        *   `cross = rng.normal(0.0, cross_width * 0.62)`
++        *   `position = (center_x, center_y) + direction * along + perpendicular * cross`
++        *   `radius_x = rng.uniform(0.14, 0.30)`
++        *   `radius_y = rng.uniform(0.12, 0.28)`
++        *   `lobe_z = center_z + rng.uniform(-0.48, 0.48) * half_height`
++        *   `lobe_z_radius = rng.uniform(0.58, 1.04) * half_height`
++        *   `weight = rng.uniform(0.54, 0.98)`
++        *   Append `(position[0], position[1], radius_x, radius_y, weight, lobe_z, lobe_z_radius)` to `main_lobe_specs` [S1, unofficial].
++5.  **Generate Side Lobes**:
++    *   `side_count = rng.integers(1, 4)` (uniform integer in [1, 3]) [S1, unofficial].
++    *   For each side lobe:
++        *   `along = rng.uniform(-0.58, 0.58) * major_length`
++        *   `cross_sign = choice([-1, 1])`
++        *   `cross = cross_sign * rng.uniform(0.60, 1.18) * cross_width`
++        *   `position = (center_x, center_y) + direction * along + perpendicular * cross`
++        *   Generate `radius_x, radius_y, weight, lobe_z, lobe_z_radius` using same distributions as main chain [S1, unofficial].
++        *   Append to `side_lobe_specs` [S1, unofficial].
++6.  **Combine**: `edge_lobe_specs = main_lobe_specs + side_lobe_specs` [S1, unofficial].
++
++#### Phase 2: Density Evaluation
++1.  **Rotate Coordinates**:
++    *   Compute rotation matrix from `major_angle` (or `variation` parameter in evaluation context).
++    *   `local_x, local_y = rotated_xy(x, y, major_angle)` [S1, unofficial].
++2.  **Initialize Field**:
++    *   `lobe_field = zeros_like(x, dtype=float32)` [S1, unofficial].
++3.  **Composite Lobes**:
++    *   For each `(cx, cy, rx, ry, w, lz, lzz)` in `edge_lobe_specs`:
++        *   Rotate lobe center: `lcx, lcy = rotated_xy(cx, cy, major_angle)` [S1, unofficial].
++        *   Calculate 2D Gaussian lobe:
++            $$ lobe = \exp\left( - \left( \frac{local\_x - lcx}{rx \cdot 1.15} \right)^2 - \left( \frac{local\_y - lcy}{ry \cdot 1.15} \right)^2 \right) $$
++        *   Calculate Vertical Presence:
++            *   `persistent_support` from lookup table based on `type_id` [S1, unofficial].
++            *   $$ vertical\_presence = persistent\_support + (1.0 - persistent\_support) \cdot \exp\left( - \left( \frac{z - lz}{\max(lzz, 0.001)} \right)^2 \right) $$
++        *   Accumulate:
++            $$ lobe\_field += w \cdot vertical\_presence \cdot lobe $$
++4.  **Horizontal Taper**:
++    *   Retrieve `cap_taper` from profile [S1, unofficial].
++    *   $$ normalized\_height = \frac{|z - center\_z|}{\max(half\_height, 0.001)} $$
++    *   $$ cap\_taper\_value = cap\_taper \cdot smoothstep\left( \frac{normalized\_height - 0.12}{0.88} \right) $$
++    *   Where `smoothstep(t)` is 0 if $t<0$, 1 if $t>1$, and $3t^2 - 2t^3$ otherwise [S1, unofficial].
++5.  **Contour Calculation**:
++    *   $$ contour = lobe\_field + (edge\_noise - 0.5) \cdot (0.62 + 0.30 \cdot side\_variation) - cap\_taper\_value $$
++    *   Where `edge_noise` is a noise texture/value and `side_variation` is from profile [S1, unofficial].
++6.  **Final Shaping**:
++    *   $$ organic = smoothstep\left( \frac{contour - 0.30}{0.48} \right) $$ [S1, unofficial].
++7.  **Edge Guard**:
++    *   $$ screen\_distance = \min(x+1, 1-x, y+1, 1-y) $$
++    *   $$ final\_guard = safe\_edge\_fade(screen\_distance, 0.0, 0.045) $$
++    *   Return $$ organic \cdot final\_guard $$ [S1, unofficial].
++
++### Pseudocode
++
+ ```python
+ import numpy as np
+@@ -80,104 +121,105 @@
+     return t * t * (3.0 - 2.0 * t)
+ 
+-def safe_edge_fade(distance, min_val, max_val):
+-    # Fades from 1.0 at max_val to 0.0 at min_val to clear outermost voxels
+-    t = np.clip((distance - min_val) / (max_val - min_val), 0.0, 1.0)
+-    return 1.0 - smoothstep(t)
+-
+-def _rotated_xy(x, y, variation):
+-    cos_v = np.cos(variation)
+-    sin_v = np.sin(variation)
+-    local_x = cos_v * x + sin_v * y
+-    local_y = -sin_v * x + cos_v * y
++def rotated_xy(x, y, angle):
++    cos_a = np.cos(angle)
++    sin_a = np.sin(angle)
++    local_x = x * cos_a - y * sin_a
++    local_y = x * sin_a + y * cos_a
+     return local_x, local_y
+ 
+-def generate_finite_layer_cloud(x, y, z, type_id, rng):
+-    LAYER_CLOUD_TYPE_IDS = frozenset((3, 5, 6, 7, 8))
+-    persistent_support_map = {3: 0.36, 5: 0.40, 6: 0.50, 7: 0.24, 8: 0.44}
+-    
+-    # 1. Determine profile
+-    profile_type_id = type_id if type_id in LAYER_CLOUD_TYPE_IDS else 5
+-    
+-    # Default profile for type 6 if not provided by external function
+-    center_z = -0.03
+-    half_height = 0.58
+-    horizontal_taper = 0.39
+-    side_variation = 1.10
+-    
+-    # 2. Generate lobe specs
++def safe_edge_fade(dist, min_val, max_val):
++    # Assuming linear fade from 0 to max_val, clamped to 1.0
++    fade = np.clip(dist / max_val, 0.0, 1.0)
++    return fade
++
++def generate_finite_layer_cloud_shape(type_id, x, y, z, rng):
++    # 1. Determine Orientation
+     major_angle = rng.uniform(-np.pi, np.pi)
+     direction = np.array([np.cos(major_angle), np.sin(major_angle)])
+     perpendicular = np.array([-direction[1], direction[0]])
+     
++    # 2. Set Dimensions
+     major_length = rng.uniform(0.45, 0.72)
+     cross_width = rng.uniform(0.22, 0.46)
+     
+-    count = rng.integers(7, 14)  # 7-13 inclusive
++    # 3. Get Profile
++    # Simplified profile lookup; in practice, this returns a tuple of parameters
++    # For demonstration, we assume a function get_profile(type_id) exists
++    profile = get_profile(type_id)
++    center_z, half_height, _, _, _, cap_taper, side_variation = profile
++    
++    # 4. Generate Main Chain
++    count = rng.integers(7, 14)
+     positions_along = np.linspace(-0.88, 0.88, count) + rng.normal(0.0, 0.09, size=count)
+     
+-    edge_lobe_specs = []
+-    center_x, center_y = 0.0, 0.0  # Base center for lobe placement
+-    
+-    # Main chain
+-    for pos_along in positions_along:
+-        along = pos_along * major_length
++    main_lobe_specs = []
++    for p in positions_along:
++        along = p * major_length
+         cross = rng.normal(0.0, cross_width * 0.62)
+-        position = np.array([center_x, center_y]) + direction * along + perpendicular * cross
++        position = direction * along + perpendicular * cross
+         
+         radius_x = rng.uniform(0.14, 0.30)
+         radius_y = rng.uniform(0.12, 0.28)
+-        
+         lobe_z = center_z + rng.uniform(-0.48, 0.48) * half_height
+         lobe_z_radius = rng.uniform(0.58, 1.04) * half_height
+         weight = rng.uniform(0.54, 0.98)
+         
+-        edge_lobe_specs.append((position[0], position[1], radius_x, radius_y, weight, lobe_z, lobe_z_radius))
+-        
+-    # Side lobes
+-    num_side_lobes = rng.integers(1, 4)  # 1-3
+-    for _ in range(num_side_lobes):
++        main_lobe_specs.append((position[0], position[1], radius_x, radius_y, weight, lobe_z, lobe_z_radius))
++        
++    # 5. Generate Side Lobes
++    side_count = rng.integers(1, 4)
++    side_lobe_specs = []
++    for _ in range(side_count):
+         along = rng.uniform(-0.58, 0.58) * major_length
+         cross_sign = rng.choice([-1, 1])
+         cross = cross_sign * rng.uniform(0.60, 1.18) * cross_width
+-        
+-        position = np.array([center_x, center_y]) + direction * along + perpendicular * cross
++        position = direction * along + perpendicular * cross
+         
+         radius_x = rng.uniform(0.14, 0.30)
+         radius_y = rng.uniform(0.12, 0.28)
+-        
+         lobe_z = center_z + rng.uniform(-0.48, 0.48) * half_height
+         lobe_z_radius = rng.uniform(0.58, 1.04) * half_height
+         weight = rng.uniform(0.54, 0.98)
+         
+-        edge_lobe_specs.append((position[0], position[1], radius_x, radius_y, weight, lobe_z, lobe_z_radius))
+-
+-    # 3. Evaluate field
+-    variation = 0.0  # Derived from shape_profile in full implementation
+-    local_x, local_y = _rotated_xy(x, y, variation)
+-    
++        side_lobe_specs.append((position[0], position[1], radius_x, radius_y, weight, lobe_z, lobe_z_radius))
++        
++    edge_lobe_specs = main_lobe_specs + side_lobe_specs
++    
++    # 6. Density Evaluation
++    local_x, local_y = rotated_xy(x, y, major_angle)
+     lobe_field = np.zeros_like(x, dtype=np.float32)
+     
+-    for spec in edge_lobe_specs:
+-        center_x, center_y, radius_x, radius_y, weight, lobe_z, lobe_z_radius = spec
+-        
+-        lobe_center_x = np.cos(variation) * center_x + np.sin(variation) * center_y
+-        lobe_center_y = -np.sin(variation) * center_x + np.cos(variation) * center_y
+-        
+-        lobe = np.exp(-(((local_x - lobe_center_x) / (radius_x * 1.15))**2 + ((local_y - lobe_center_y) / (radius_y * 1.15))**2))
+-        
+-        persistent_support = persistent_support_map.get(type_id, 0.40)
+-        vertical_presence = persistent_support + (1.0 - persistent_support) * np.exp(-((z - lobe_z) / max(lobe_z_radius, 0.001))**2)
+-        
+-        lobe_field += np.float32(weight * vertical_presence) * lobe
+-        
++    persistent_supports = {3: 0.36, 5: 0.40, 6: 0.50, 7: 0.24, 8: 0.44}
++    persistent_support = persistent_supports.get(type_id, 0.40) # Default fallback
++    
++    for cx, cy, rx, ry, w, lz, lzz in edge_lobe_specs:
++        lcx, lcy = rotated_xy(cx, cy, major_angle)
++        
++        # 2D Lobe
++        dx = (local_x - lcx) / (rx * 1.15)
++        dy = (local_y - lcy) / (ry * 1.15)
++        lobe = np.exp(-(dx**2 + dy**2))
++        
++        # Vertical Presence
++        z_diff = z - lz
++        lobe_z_radius_safe = max(lzz, 0.001)
++        vertical_presence = persistent_support + (1.0 - persistent_support) * np.exp(-(z_diff / lobe_z_radius_safe)**2)
++        
++        lobe_field += w * vertical_presence * lobe
++        
++    # Horizontal Taper
+     normalized_height = np.abs(z - center_z) / max(half_height, 0.001)
+-    cap_taper = horizontal_taper * smoothstep((normalized_height - 0.12) / 0.88)
+-    
+-    # edge_noise is not defined in sources. [G] Using uniform noise for demonstration
+-    edge_noise = rng.uniform(0.0, 1.0, size=x.shape)
+-    contour = lobe_field + (edge_noise - 0.5) * (0.62 + 0.30 * side_variation) - cap_taper
+-    
++    cap_taper_value = cap_taper * smoothstep((normalized_height - 0.12) / 0.88)
++    
++    # Contour
++    # edge_noise is assumed to be a pre-generated noise field of same shape
++    # side_variation is from profile
++    edge_noise = get_edge_noise(x, y) # Placeholder for noise generation
++    contour = lobe_field + (edge_noise - 0.5) * (0.62 + 0.30 * side_variation) - cap_taper_value
++    
++    # Final Shaping
+     organic = smoothstep((contour - 0.30) / 0.48)
+     
++    # Edge Guard
+     screen_distance = np.minimum.reduce([x + 1.0, 1.0 - x, y + 1.0, 1.0 - y])
+     final_guard = safe_edge_fade(screen_distance, 0.0, 0.045)
+@@ -186,14 +228,38 @@
+ ```
+ 
++### Edge Cases and Pitfalls
++*   **Degeneracy**: The method explicitly adds 1-3 side lobes to prevent the cloud shape from degenerating into a simple cylinder or ellipse along the Z-axis [S1, unofficial].
++*   **Precision**: Division by zero is guarded using `max(..., 0.001)` for `lobe_z_radius` and `half_height` [S1, unofficial].
++*   **Boundary**: The final edge guard clears only the outermost voxels; the main contour naturally decays to zero before reaching this boundary, so the guard is a safety net rather than the primary shape determinant [S1, unofficial].
++*   **Type ID Mapping**: If the provided `type_id` is not in `LAYER_CLOUD_TYPE_IDS`, the method defaults to using the shape profile of type 5 [S1, unofficial].
++
+ ## Subtopics
+ 
+ ### [Cumulonimbus and Cumulus Shape Generation](8296-cumulonimbus-and-cumulus-shape-generation.md)
+-Procedural generation of non-spherical, multi-lobed cloud shapes for Cumulus (type 9) and Cumulonimbus (type 10) clouds, creating irregular tops and bases rather than simple spheres. It differs from its parent [Finite Layer Cloud Shape Generation](8292-finite-layer-cloud-shape-generation.md) by using distinct lobe generation strategies for vertical development (Cumulonimbus) and flat, multi-lobed structures (Cumulus), whereas the parent method focuses on horizontal layering for other cloud types.
++Generates irregular, multi-lobed 3D shapes for convective clouds using a hierarchical particle-based approach. Choose this for Cumulus (type 9) and Cumulonimbus (type 10) clouds where turbulent, vertical structures are required.
++
++### [Cumulus Cloud Rendering Configuration](2897-cumulus-cloud-rendering-configuration.md)
++Configuration parameters for rendering cumulus clouds.
++
++### [IsimCloudTexture density evaluation](3530-isimcloudtexture-density-evaluation.md)
++Density evaluation using IsimCloudTexture.
++
++### [Procedural Gas Modeling via Turbulence](3551-procedural-gas-modeling-via-turbulence.md)
++Procedural gas modeling using turbulence.
++
++### [Cloud Density Sampling](4806-cloud-density-sampling.md)
++Sampling techniques for cloud density.
+ 
+ ## Operating characteristics
+-Not given in the sources.
++*   **Time Complexity**: Linear with respect to the number of pixels $N$ and the number of lobes $L$. The evaluation phase iterates over $L$ lobes for each pixel, resulting in $O(N \cdot L)$ complexity. $L$ is small (typically 7-13 main + 1-3 side = 8-16 lobes) [S1, unofficial].
++*   **Memory Complexity**: $O(N)$ for the output density field. Intermediate arrays (lobe_field, local coordinates) also require $O(N)$ memory [S1, unofficial].
++*   **Performance**: The method is computationally lightweight as it avoids complex volumetric ray marching or high-resolution noise generation for the shape itself. It relies on simple Gaussian evaluations and arithmetic operations [S1, unofficial].
++*   **Strengths**: Produces natural-looking stratiform cloud shapes without cylindrical artifacts. Deterministic and reproducible given a seed. Simple to implement and integrate into procedural pipelines [S1, unofficial].
++*   **Limitations**: Limited to stratiform cloud types. Does not model internal density variations or complex convective structures. Relies on pre-generated noise for edge variation [S1, unofficial].
++*   **When to Use**: For generating base shapes of Cirrus, Altostratus, Nimbostratus, Stratocumulus, and Stratus clouds.
++*   **When Not to Use**: For convective clouds (Cumulus, Cumulonimbus) or when detailed internal density variation is required beyond the lobe composition [S1, unofficial].
+ 
+ ## Background
+-The method is part of the "Noise-Cloud" project, an unofficial implementation of procedural cloud generation for game engines [S1, unofficial].
++Finite Layer Cloud Shape Generation is part of the Noise-Cloud procedural cloud generation system. It was developed to address the limitations of simple extrusion methods in creating realistic stratiform cloud volumes. The method is documented in the unofficial source [S1, unofficial], which provides the specific algorithmic details and parameters used in the Noise-Cloud implementation.
+ 
+ ## Sources

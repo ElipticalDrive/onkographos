@@ -1,0 +1,202 @@
+--- v001.md
++++ v002.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method consists of a forward rasterization pass that computes pixel colors and a backward pass that computes gradients with respect to the input Gaussian parameters. The implementation described here is a Python/PyTorch reference that iterates over Gaussians, serving as a baseline before transitioning to CUDA kernels [S2, unofficial].
++The method consists of a forward rasterization pass that computes pixel colors and a backward pass that computes gradients with respect to the input Gaussian parameters [S2, unofficial]. The implementation described here is a Python/PyTorch reference that iterates over Gaussians, serving as a baseline before transitioning to CUDA kernels [S2, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -52,5 +52,5 @@
+ ### Forward Pass Steps
+ 
+-1.  **Input Validation**: Ensure exactly one of `shs` or `colors_precomp` is provided. Ensure exactly one of (`scales`, `rotations`) or `cov3D_precomp` is provided. Replace missing tensors with empty tensors of appropriate shape. If `features` is None, initialize as empty tensor matching `means3D` feature dimension [S1, unofficial].
++1.  **Input Validation**: Ensure exactly one of `shs` or `colors_precomp` is provided [S1, unofficial]. Ensure exactly one of (`scales`, `rotations`) or `cov3D_precomp` is provided [S1, unofficial]. Replace missing tensors with empty tensors of appropriate shape [S1, unofficial]. If `features` is None, initialize as empty tensor matching `means3D` feature dimension [S1, unofficial].
+ 2.  **Projection**: Project 3D camera-space centers `xyz_cam` to 2D pixel coordinates `means2D` using the perspective projection formula [S2, unofficial]:
+     $$
+@@ -86,45 +86,49 @@
+ 
+ ### Backward Pass Steps
+-The backward pass computes gradients with respect to `means3D`, `opacity`, `scales`, `rotations`, `colors_precomp`/`shs`, and `features` [S1, unofficial].
+-
+-1.  **Gradient Buffer Initialization**: Create a zero tensor matching `means3D` dtype/device with `requires_grad=True` to capture 2D mean gradients from the rasterizer [S1, unofficial].
+-2.  **Autograd Wrapper**: The forward pass is wrapped in a custom autograd function. During the forward pass, save `colors_precomp`, `means3D`, `features`, `scales`, `rotations`, `cov3Ds_precomp`, `radii`, `sh`, `geomBuffer`, `binningBuffer`, `imgBuffer` to the context [S1, unofficial].
+-3.  **Gradient Computation**: In the backward pass, restore saved tensors from context. Restructure backward arguments including `grad_out_color`, `grad_out_opacity`, `grad_out_depth`, `grad_out_feature`, `sh`, `sh_degree`, `campos`, `geomBuffer`, `num_rendered`, `binningBuffer`, `imgBuffer`, `backward_geometry`, `debug` [S1, unofficial].
+-4.  **Kernel Invocation**: Pass these arguments to the C++ backward kernel (or equivalent PyTorch gradient logic in the reference implementation) to compute gradients [S1, unofficial].
++The backward pass computes gradients with respect to input Gaussian parameters [S2, unofficial]. It is implemented via a custom autograd wrapper that restores context tensors and invokes a C++ backward kernel or equivalent PyTorch gradient logic [G].
+ 
+ ### Pseudocode
+ ```python
+ import torch
+-import torch.nn.functional as F
+-
+-def gaussian_rasterize_forward(means3D, opacity, scales, rotations, colors_precomp, shs, features, raster_settings):
++
++def gaussian_rasterizer_forward(means3D, opacity, scales, rotations, colors_precomp, shs, features, raster_settings):
+     """
+     Forward pass of the 3D Gaussian Splatting Differentiable Rasterizer.
+-    Note: This is a simplified Python reference. Production uses CUDA.
++    Implements projection, sorting, and alpha compositing loop.
+     """
+     H, W = raster_settings.image_height, raster_settings.image_width
+     bg = raster_settings.bg
++    cx, cy = raster_settings.cx, raster_settings.cy
+     scale_modifier = raster_settings.scale_modifier
+     
+-    # 1. Projection (Simplified: assumes means3D is already in camera space)
+-    # In practice, this involves view/proj matrices and perspective division
+-    # means2D = project(means3D, raster_settings.viewmatrix, raster_settings.projmatrix)
+-    # For this reference, we assume means2D is provided or computed externally
+-    # means2D shape: (N, 2)
+-    
+-    # 2. Covariance Computation (Simplified)
+-    # cov2d = compute_2d_covariance(means3D, scales, rotations, raster_settings)
++    # 1. Projection: Project 3D camera-space centers to 2D pixel coordinates [S2, unofficial]
++    # f is derived from focal length and image dimensions [S2, unofficial]
++    f = raster_settings.focal_length # [G] assumed available or computed from FOV
++    xyz_cam = means3D # Assume already in camera space
++    means2D_x = (xyz_cam[:, 0] * f / xyz_cam[:, 2]) + cx
++    means2D_y = (xyz_cam[:, 1] * f / xyz_cam[:, 2]) + cy
++    means2D = torch.stack([means2D_x, means2D_y], dim=-1) # (N, 2)
++    
++    # 2. Covariance Computation: Compute 2D covariance matrices [G]
+     # cov2d shape: (N, 2, 2)
+-    
+-    # 3. Sorting
+-    # Sort by depth (z-coordinate in camera space)
+-    # depths = means3D[:, 2]
+-    # sorted_indices = torch.argsort(depths, descending=True)
+-    # means2D = means2D[sorted_indices]
+-    # opacity = opacity[sorted_indices]
+-    # colors = colors[sorted_indices]
+-    # cov2d = cov2d[sorted_indices]
+-    
+-    # 4. Initialization
++    # cov2d = compute_2d_covariance(means3D, scales, rotations, raster_settings) # [G]
++    cov2d = torch.zeros((means3D.shape[0], 2, 2), device=means3D.device) # Placeholder for implementation
++    
++    # 3. Color Assembly: Select colors from precomputed or SH coefficients [G]
++    if colors_precomp is not None:
++        colors = colors_precomp
++    else:
++        # colors = evaluate_sh(shs, raster_settings.sh_degree) # [G]
++        colors = torch.zeros_like(means3D[:, :3]) # Placeholder for implementation
++        
++    # 4. Sorting: Sort Gaussians by depth (z) in descending order [S2, unofficial]
++    depths = xyz_cam[:, 2]
++    sorted_indices = torch.argsort(depths, descending=True)
++    means2D = means2D[sorted_indices]
++    cov2d = cov2d[sorted_indices]
++    colors = colors[sorted_indices]
++    opacity = opacity[sorted_indices]
++    
++    # 5. Initialization: Canvas and transmittance buffer [S2, unofficial]
+     canvas = torch.zeros((H, W, 3), device=means3D.device)
+     T = torch.ones((H, W, 1), device=means3D.device)
+@@ -132,14 +136,10 @@
+     N = means2D.shape[0]
+     
+-    # 5. Rasterization Loop
++    # 6. Rasterization Loop: Iterate through sorted Gaussians [S2, unofficial]
+     for i in range(N):
+-        # Get Gaussian parameters
+-        mean_2d = means2D[i] # (2,)
+-        opac = opacity[i] # (1,) or scalar
+-        cov_inv = torch.inverse(cov2d[i]) # (2, 2)
+-        color = colors[i] # (3,)
+-        
+-        # Compute displacement for all pixels
+-        # pixel_centers shape: (H, W, 2)
++        # Covariance Inverse [S2, unofficial]
++        inv_cov = torch.inverse(cov2d[i]) # (2, 2)
++        
++        # Displacement vector d from pixel center to Gaussian mean [S2, unofficial]
+         pixel_centers = torch.stack(torch.meshgrid(
+             torch.arange(W, device=means3D.device), 
+@@ -147,59 +147,26 @@
+             indexing='ij'
+         ), dim=-1).float()
+-        
+-        d = pixel_centers - mean_2d # (H, W, 2)
+-        
+-        # Power calculation
+-        # power = -0.5 * (d_x^2 * inv_cov_00 + d_y^2 * inv_cov_11 + 2 * d_x * d_y * inv_cov_01)
++        d = pixel_centers - means2D[i] # (H, W, 2)
++        
++        # Power Calculation [S2, unofficial]
+         power = -0.5 * (
+-            d[:, :, 0]**2 * cov_inv[0, 0] + 
+-            d[:, :, 1]**2 * cov_inv[1, 1] + 
+-            2 * d[:, :, 0] * d[:, :, 1] * cov_inv[0, 1]
++            d[:, :, 0]**2 * inv_cov[0, 0] + 
++            d[:, :, 1]**2 * inv_cov[1, 1] + 
++            2 * d[:, :, 0] * d[:, :, 1] * inv_cov[0, 1]
+         ) # (H, W)
+         
+-        # Alpha computation
+-        alpha = torch.clamp(torch.exp(power).unsqueeze(-1) * opac, max=0.99) # (H, W, 1)
+-        
+-        # Color update
+-        canvas = canvas + color * alpha * T
+-        
+-        # Transmittance update
++        # Alpha Computation [S2, unofficial]
++        alpha = torch.clamp(torch.exp(power).unsqueeze(-1) * opacity[i], max=0.99) # (H, W, 1)
++        
++        # Color Update [S2, unofficial]
++        canvas = canvas + colors[i] * alpha * T
++        
++        # Transmittance Update [S2, unofficial]
+         T = T * (1 - alpha)
+         
+-    # 6. Final Composition
++    # 7. Final Composition: Add background weighted by final transmittance [S2, unofficial]
+     rendered_image = canvas + bg * T
+     
+     return rendered_image, T
+-
+-class GaussianRasterizer(torch.autograd.Function):
+-    @staticmethod
+-    def forward(ctx, means3D, opacity, scales, rotations, colors_precomp, shs, features, raster_settings):
+-        # Save tensors for backward pass
+-        ctx.save_for_backward(means3D, opacity, scales, rotations, colors_precomp, shs, features)
+-        ctx.raster_settings = raster_settings
+-        
+-        # Call forward function
+-        rendered_image, T = gaussian_rasterize_forward(means3D, opacity, scales, rotations, colors_precomp, shs, features, raster_settings)
+-        
+-        return rendered_image
+-
+-    @staticmethod
+-    def backward(ctx, grad_out_color):
+-        # Restore tensors
+-        means3D, opacity, scales, rotations, colors_precomp, shs, features = ctx.saved_tensors
+-        raster_settings = ctx.raster_settings
+-        
+-        # Compute gradients (simplified placeholder for actual gradient logic)
+-        # In practice, this involves complex chain rule through projection, covariance, and alpha blending
+-        grad_means3D = torch.zeros_like(means3D)
+-        grad_opacity = torch.zeros_like(opacity)
+-        grad_scales = torch.zeros_like(scales)
+-        grad_rotations = torch.zeros_like(rotations)
+-        grad_colors = torch.zeros_like(colors_precomp)
+-        
+-        # Example: simple gradient flow for color
+-        grad_colors = grad_out_color.mean(dim=(0, 1)) # Placeholder
+-        
+-        return grad_means3D, grad_opacity, grad_scales, grad_rotations, grad_colors, None, None, None
+ ```
+ 
+@@ -214,4 +181,5 @@
+ *   **Alpha Clamping**: Alpha values are clamped to a maximum of 0.99 to prevent division by zero in transmittance updates and ensure numerical stability [S2, unofficial].
+ *   **Sorting Order**: Incorrect sorting (e.g., front-to-back) will result in incorrect alpha compositing and visual artifacts [S2, unofficial].
++*   **Performance**: Not suitable for real-time rendering or large-scale scenes without CUDA optimization [S2, unofficial].
+ 
+ ## Subtopics
+@@ -243,5 +211,5 @@
+ *   **Measured Performance**: The reference implementation is capped by consumer-grade VRAM limits and the interpreter-bound nature of the custom rendering loop, preventing dense point-cloud representation typical of production-level 3DGS [S2, unofficial].
+ *   **Strengths**: Provides a clear, differentiable reference implementation for understanding the 3DGS pipeline. Easy to debug and modify.
+-*   **Limitations**: Slow due to Python loops. Not suitable for real-time rendering or large-scale scenes without CUDA optimization.
++*   **Limitations**: Slow due to Python loops. Not suitable for real-time rendering or large-scale scenes without CUDA optimization [S2, unofficial].
+ *   **When to Use**: For educational purposes, debugging, or as a baseline for developing optimized CUDA kernels [S2, unofficial].
+ *   **When Not to Use**: For production applications requiring real-time performance or large-scale scene rendering [S2, unofficial].

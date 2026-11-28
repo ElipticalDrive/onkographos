@@ -1,0 +1,215 @@
+# NeRF-Det
+
+Also called: NeRF-then-Det
+
+## Overview
+NeRF-Det is a method for indoor 3D object detection using posed RGB images that explicitly models scene geometry as an opacity field by jointly training a Neural Radiance Field (NeRF) branch with a 3D detection pipeline [S1]. It solves the problem of decoupled training in joint NeRF-and-detection systems by enabling gradient flow from the NeRF branch to the detection branch through a shared geometry-based Multi-Layer Perceptron (G-MLP), thereby propagating multi-view consistency constraints to the detector . This distinguishes it from "NeRF-then-Det" approaches like NeRF-RPN, where the NeRF and detection modules are trained independently or where consistency constraints do not reach the detection backbone, resulting in significantly higher latency and lower accuracy [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $T$ posed RGB frames $I_i \in \mathbb{R}^{H_i \times W_i \times 3}$ with known intrinsic matrices $K \in \mathbb{R}^{3 \times 3}$ and extrinsic matrices $R_i \in \mathbb{R}^{3 \times 4}$ for $i = 1, \dots, T$ [S1].
+*   **Output:** 3D bounding boxes for objects in the scene [S1].
+
+**Data Structures:**
+1.  **2D Feature Maps ($F_i$):** Extracted from input images using a Feature Pyramid Network (FPN) [S1].
+    *   Layout: $F_i \in \mathbb{R}^{C \times \frac{H}{4} \times \frac{W}{4}}$, where $C$ is the channel dimension, and $H, W$ are the original image dimensions [S1].
+2.  **3D Voxel Grid:** A uniform grid of $N_x \times N_y \times N_z$ voxels.
+    *   Coordinate System: The z-axis denotes height; x- and y-axes denote horizontal dimensions [S1].
+    *   Voxel Center: $p = (x, y, z)^T$ [S1].
+3.  **3D Volume Features ($V_i(p)$):** Features assigned to each voxel from each view [S1].
+4.  **Aggregated Volume Features ($V_{avg}(p)$):** The mean of effective multi-view features [S1].
+5.  **Density Field ($\sigma(p)$):** Predicted by the shared G-MLP [S1].
+
+**Numbered Steps:**
+
+1.  **2D Feature Extraction:** Pass each input image $I_i$ through a 2D image backbone (FPN) to extract high-resolution features $F_i \in \mathbb{R}^{C \times \frac{H}{4} \times \frac{W}{4}}$ [S1].
+
+2.  **3D-to-2D Projection:** For each voxel center $p = (x, y, z)^T$ in the 3D grid, project it into view $i$ to obtain 2D coordinates $(u_i, v_i)$ [S1].
+    *   Compute homogeneous coordinates: $\begin{pmatrix} u'_i, v'_i, d_i \end{pmatrix}^T = K' \times R_i \times \begin{pmatrix} \mathbf{p}, 1 \end{pmatrix}^T$ [S1].
+    *   Here, $K'$ is the scaled intrinsic matrix accounting for feature map downsampling [S1].
+    *   Calculate pixel coordinates: $(u_i, v_i) = (u'_i / d_i, v'_i / d_i)$ [S1].
+
+3.  **Feature Assignment:** Assign 3D features $V_i(p)$ by nearest neighbor interpolation of $F_i$ at location $(u_i, v_i)$ [S1]:
+    $$V_i(p) = \text{interpolate}((u_i, v_i), F_i)$$
+    *   **Edge Case:** If $p$ is projected outside the image boundary or behind the image plane ($d_i \le 0$), discard the feature and set $V_i(p) = 0$ [S1].
+
+4.  **Multi-View Aggregation:** Aggregate features from all $T$ views. Let $M_p$ be the number of effective 2D projections (views where $V_i(p) \neq 0$) [S1]. Compute the average volume feature:
+    $$V_{avg}(p) = \frac{1}{M_p} \sum_{i=1}^{M_p} V_i(p)$$
+    *   **Note:** The source notes that sampling features from multi-view 2D image features yields better performance (+0.7 mAP@0.25) than sampling from 3D volume features [S1].
+
+5.  **Geometry Prediction (Shared G-MLP):** Feed the voxel coordinates $p$ into a shared geometry MLP (G-MLP) to predict the volume density $\sigma(p)$ [S1].
+    *   Activation for density: ReLU [S1].
+    *   This G-MLP is shared between the NeRF branch and the detection branch, allowing gradients from the NeRF branch to back-propagate to the image features and benefit the detection branch [S1].
+
+6.  **Opacity Field Generation:** Transform the density field $\sigma(p)$ into an opacity field $\alpha(p)$. The source states the density field is transformed into an opacity field and multiplied with the volume features [S1]. While the exact functional form of $\alpha(\sigma)$ is not explicitly defined as the standard $\alpha = 1 - e^{-\sigma \delta}$ in the text, the operation is described as transforming density to opacity to reduce weights of empty space [S1].
+
+7.  **Geometry-Aware Volume Features:** Multiply the opacity field with the aggregated volume features to reduce the weights of empty space:
+    $$V_{geo}(p) = \alpha(p) \cdot V_{avg}(p)$$
+    *   **Additional Features:** The method optionally incorporates variance features. Introducing variance features improves performance by over 0.7 mAP@.25 and 0.6 mAP@.50 compared to using only average features [S1]. The variance is calculated across the multi-view projections $V_i(p)$ [S1].
+
+8.  **3D Detection:** Feed the geometry-aware volume features $V_{geo}(p)$ (and optionally variance features) to the detection head for 3D bounding box regression [S1].
+
+9.  **Inference:** During inference, remove the NeRF branch (the G-MLP and associated rendering losses) to minimize additional overhead to the original detector [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def nerf_det_forward(images, intrinsics, extrinsics, voxel_grid, g_mlp, detection_head):
+    """
+    Forward pass for NeRF-Det.
+    
+    Args:
+        images: List of T RGB images, shape (T, H, W, 3).
+        intrinsics: Intrinsic matrix K, shape (3, 3).
+        extrinsics: List of T extrinsic matrices R_i, shape (T, 3, 4).
+        voxel_grid: 3D grid of voxel centers p, shape (Nx, Ny, Nz, 3).
+        g_mlp: Shared geometry MLP predicting density.
+        detection_head: 3D detection head.
+        
+    Returns:
+        boxes: 3D bounding boxes.
+    """
+    T = len(images)
+    H, W = images[0].shape[0], images[0].shape[1]
+    
+    # Step 1: Extract 2D features
+    # F_i shape: (T, C, H/4, W/4)
+    F = extract_features(images) 
+    
+    # Scale intrinsic matrix for feature map downsampling (factor of 4)
+    K_prime = intrinsics * 0.25
+    
+    # Step 2 & 3: Project voxels and assign features
+    # V_i shape: (T, Nx, Ny, Nz, C)
+    V = np.zeros((T, *voxel_grid.shape[:-1], F.shape[1]))
+    
+    for t in range(T):
+        R_t = extrinsics[t]
+        # Project all voxel centers to view t
+        # p_hom: (Nx*Ny*Nz, 4)
+        p_hom = np.hstack([voxel_grid.reshape(-1, 3), np.ones((voxel_grid.shape[0]*voxel_grid.shape[1]*voxel_grid.shape[2], 1))])
+        
+        # u'_t, v'_t, d_t: (Nx*Ny*Nz, 3)
+        proj = K_prime @ (R_t @ p_hom.T)
+        u_prime = proj[0, :]
+        v_prime = proj[1, :]
+        d = proj[2, :]
+        
+        # Pixel coordinates
+        u = u_prime / d
+        v = v_prime / d
+        
+        # Nearest neighbor interpolation
+        # Clip coordinates to valid range [0, H/4-1] x [0, W/4-1]
+        u_int = np.clip(np.round(u).astype(int), 0, F.shape[2] - 1)
+        v_int = np.clip(np.round(v).astype(int), 0, F.shape[3] - 1)
+        
+        # Gather features
+        # F[t] shape: (C, H/4, W/4)
+        # We need to gather for each voxel
+        flat_idx = u_int * F.shape[3] + v_int
+        features_t = F[t, :, u_int, v_int].transpose(1, 2, 3, 0) # Shape: (Nx, Ny, Nz, C)
+        
+        # Set to 0 if behind image plane or out of bounds (handled by clip, but d<=0 check needed)
+        valid_mask = d > 0
+        # Reshape mask to match features
+        valid_mask_3d = valid_mask.reshape(voxel_grid.shape[:-1])
+        features_t[~valid_mask_3d] = 0
+        
+        V[t] = features_t
+
+    # Step 4: Aggregate multi-view features
+    # V_avg shape: (Nx, Ny, Nz, C)
+    # Count effective projections
+    effective_count = np.sum(V != 0, axis=0) # Shape: (Nx, Ny, Nz, C) - element-wise non-zero check
+    # To be precise, Mp is the number of views where V_i(p) is not zero vector.
+    # Assuming non-zero vector check:
+    is_valid = np.any(V != 0, axis=-1) # Shape: (T, Nx, Ny, Nz)
+    Mp = np.sum(is_valid, axis=0) # Shape: (Nx, Ny, Nz)
+    
+    # Avoid division by zero
+    Mp_safe = np.maximum(Mp, 1)
+    
+    V_avg = np.sum(V, axis=0) / Mp_safe.reshape(1, 1, 1, 1) # Broadcasting
+    
+    # Step 5: Predict density with shared G-MLP
+    # Flatten voxel grid for MLP input
+    p_flat = voxel_grid.reshape(-1, 3)
+    sigma_flat = g_mlp(p_flat) # Shape: (Nx*Ny*Nz,)
+    sigma = sigma_flat.reshape(voxel_grid.shape[:-1])
+    
+    # Activation for density: ReLU
+    sigma = np.maximum(sigma, 0)
+    
+    # Step 6: Transform density to opacity
+    # Source says "transform the density field into an opacity field"
+    # Standard volume rendering opacity: alpha = 1 - exp(-sigma * delta)
+    # Since delta is not specified, we assume unit delta or standard conversion
+    # Note: The source does not specify the exact formula for alpha(sigma).
+    # We use the standard conversion as a placeholder for the "transformation" [G].
+    alpha = 1 - np.exp(-sigma)
+    
+    # Step 7: Geometry-aware volume features
+    V_geo = alpha.reshape(1, 1, 1, -1) * V_avg # Broadcasting over channels
+    
+    # Optional: Variance features
+    # Variance across views
+    V_var = np.var(V, axis=0) # Shape: (Nx, Ny, Nz, C)
+    
+    # Combine V_geo and V_var? Source says "introducing variance features improves performance"
+    # It implies they are used as input to the detection head.
+    # We concatenate them.
+    V_input = np.concatenate([V_geo, V_var], axis=-1)
+    
+    # Step 8: Detection
+    boxes = detection_head(V_input)
+    
+    return boxes
+
+def extract_features(images):
+    """
+    Placeholder for FPN feature extraction.
+    Returns features F_i in R^{C x H/4 x W/4}.
+    """
+    # Implementation depends on specific FPN backbone [S1]
+    # Not given in the sources.
+    pass
+```
+
+**Parameters:**
+*   **Density Activation:** ReLU [S1].
+*   **Color Activation:** Sigmoid (used in the NeRF branch for color prediction $c(p, d)$, though the color branch is removed at inference) [S1].
+*   **Interpolation:** Nearest neighbor [S1].
+
+**Pitfalls:**
+*   **Depth Estimation Errors:** Using predicted depth maps from external geometry reconstruction (e.g., NeuralRecon) significantly degrades detection performance by 2.3 mAP@.50 compared to plain ImVoxelNet, demonstrating that depth estimation errors propagate inaccuracy through the detection pipeline [S1].
+*   **Detection Branch Impact on NeRF:** The detection branch negatively impacts the NeRF branch's novel view synthesis quality. Disabling the detection branch brings a 0.43dB improvement in PSNR, suggesting the detection branch is prone to erasing low-level details required for NeRF rendering [S1].
+*   **Boundary Conditions:** Voxels projected outside the image boundary or behind the image plane must be handled by setting their features to 0 [S1].
+
+## Subtopics
+
+### [Shared G-MLP](15003-shared-g-mlp.md)
+The Shared G-MLP is a component of the NeRF-Det architecture that links the Neural Radiance Field (NeRF) branch with the 3D object detection branch using a shared geometry-based Multi-Layer Perceptron. It solves the problem of decoupled training in joint NeRF-and-detection systems by enabling gradient flow from the NeRF branch to the detection branch, thereby propagating multi-view consistency constraints to the detector. This distinguishes it from "NeRF-to-Det" approaches where the NeRF and detection modules are trained independently or where consistency constraints do not reach the detection backbone.
+
+## Operating characteristics
+*   **Time Complexity:** The method is significantly faster than "NeRF-then-Det" approaches. NeRF-Det has a latency of 0.554s on one V100, compared to NeRF-RPN's ~846.8s latency [S1]. This is because NeRF-Det is a joint training paradigm that generalizes to unseen scenes without per-scene optimization, whereas NeRF-RPN requires per-scene optimization [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:**
+    *   Improves state-of-the-art by 3.9 mAP on ScanNet and 3.1 mAP on ARKITScenes benchmarks [S1].
+    *   On ScanNet, NeRF-Det-R50 achieves 35.13 AP50 [S1].
+    *   Achieves an average PSNR of 20+ for novel view synthesis and an RMSE of 0.756 for depth estimation on 312 scenes in the validation set, without per-scene training [S1].
+*   **Scaling:** The method leverages augmented image features as priors to enhance the generalizability of the NeRF-MLP, avoiding the heavy overhead of per-scene optimization [S1].
+*   **Strengths:** Explicitly models scene geometry as an opacity field, improving 3D detection performance. Joint training allows multi-view consistency constraints to benefit the detector. Fast inference due to no per-scene optimization.
+*   **Limitations:** The detection branch can degrade the NeRF branch's novel view synthesis quality by erasing low-level details [S1]. Relies on posed RGB images.
+*   **When to use:** Indoor 3D object detection with posed RGB images where generalization to unseen scenes is required without per-scene optimization.
+*   **When not to use:** When high-fidelity novel view synthesis is the primary goal and the detection branch's interference with low-level details is unacceptable. When depth sensors are available and accurate depth estimation is preferred over learned geometry (though the method can optionally use depth for training, inference does not require it) [S1].
+
+## Background
+NeRF-Det was introduced by Chenfeng et al. from Meta [S1]. The work was done when Chenfeng was an intern at Meta [S1]. It was published in 2023 at ICCV [S1]. The method addresses the limitations of existing indoor 3D detection methods that struggle to model scene geometry and the high latency of per-scene NeRF optimization [S1]. It builds on the baseline NeRF architecture [Parent](3065-nerf-hyperparameters.md) and ImVoxelNet [S1].
+
+## Sources
+[S1] NeRF-Det: Learning Geometry-Aware Volumetric Representation for Multi-View 3D Object Detection, https://doi.org/10.1109/iccv51070.2023.02131, fetched 2026-10-30

@@ -1,0 +1,329 @@
+# Sparsesat-NeRF
+Also called: SpS-NeRF
+
+## Overview
+Sparsesat-NeRF is a neural radiance field optimization method designed for sparse-view satellite imagery that integrates dense depth supervision derived from Semi-Global Matching (SGM) to resolve ambiguities inherent in few-view reconstruction. Unlike standard NeRF or Sat-NeRF which rely on hierarchical coarse/fine models with importance sampling, Sparsesat-NeRF employs a single coarse network with a hybrid ray sampling strategy: random samples for global structure and guided Gaussian samples around depth priors for local geometry. It distinguishes itself by explicitly modeling input depth uncertainty to weight the depth loss and control the sampling distribution, enabling robust training with as few as two or three input images.
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   $N$ input satellite images with refined RPC camera poses.
+*   $N$ low-resolution depth maps (downsampled by factor $2^{-2}$) and corresponding cross-correlation similarity maps generated via SGM.
+*   Scene envelope defined by near ($t_n$) and far ($t_f$) planes.
+
+**Outputs:**
+*   Optimized neural radiance field parameters (density $\sigma$ and color $c$).
+*   Novel view images and depth maps.
+
+### Data Structures
+The method does not define unique persistent data structures beyond standard neural network weights and the pre-computed depth/similarity maps. The depth map $D_{input}$ and similarity map $C_{input}$ are indexed by pixel coordinates $(u, v)$.
+
+### Numbered Steps
+
+1.  **Pre-processing:**
+    *   Refine RPC camera poses using bundle adjustment [S1].
+    *   For each of the $N$ input images, run an independent SGM algorithm to generate a low-resolution depth map $D_{input}(u,v)$ and a cross-correlation similarity map $corr(u,v)$ [S1].
+    *   If SGM depths are unavailable, substitute with a coarse global DEM (e.g., SRTM) and set $corr(u,v)$ to a constant value [S1].
+
+2.  **Ray Casting and Sampling:**
+    *   For each training ray $r$, divide the total samples into two groups of equal cardinality $N_{sample} = 64$ [S1].
+    *   **Group 1 (Random):** Sample $N_{sample}$ points uniformly at random within the scene envelope $[t_n, t_f]$ [S1].
+    *   **Group 2 (Guided):** Sample $N_{sample}$ points based on a Gaussian distribution centered on a depth prior [S1].
+        *   If the pixel has valid input depth (training): Draw from $\mathcal{N}(D_{input}(r), \Sigma(r))$ [S1].
+        *   If the pixel lacks input depth (occlusion) or during testing: Draw from $\mathcal{N}(D(r), S(r))$, where $D(r)$ is the predicted depth and $S(r)$ is the predicted standard deviation [S1].
+
+3.  **Network Query:**
+    *   Query the coarse neural network at each sample point $x_i$ along ray $r$ to obtain density $\sigma_i$ and color $c_i$ [S1].
+
+4.  **Volume Rendering:**
+    *   Compute opacity $\alpha_i$ and transmittance $T_i$ for each sample [S1]:
+        $$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
+        $$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+        where $\delta_i = t_{i+1} - t_i$ is the distance between samples [S1].
+    *   Render the final color $C(r)$:
+        $$ C(r) = \sum_{i=1}^{N} T_i \alpha_i c_i $$
+        [S1]
+
+5.  **Depth Prediction and Uncertainty Estimation:**
+    *   Compute the predicted depth $D(r)$ along the ray:
+        $$ D(r) = \sum_{i=1}^{N} T_i \alpha_i t_i $$
+        [S1]
+    *   Compute the predicted standard deviation $S(r)$ of the sample distribution:
+        $$ S(r)^2 = \sum_{i=1}^{N} T_i \alpha_i (t_i - D(r))^2 $$
+        [S1]
+    *   Compute the input uncertainty $\Sigma(r)$ from the similarity map:
+        $$ \Sigma(r) = \gamma \cdot (1 - corr(r)) + m $$
+        where $\gamma = 1.0$ and $m = 10^{-4}$ [S1].
+
+6.  **Loss Computation:**
+    *   **Color Loss:** Compute the mean squared error between rendered color $C(r)$ and ground truth color $\hat{C}(r)$ over all rays $R$ [S1]:
+        $$ L_{color}(r) = \| C(r) - \hat{C}(r) \|^2 $$
+        $$ L_{color} = \sum_{r \in R} L_{color}(r) $$
+        [S1]
+    *   **Depth Loss:** Define a subregion $R_{sub}$ for each ray where the loss is active. The condition for inclusion in $R_{sub}$ is:
+        $$ S(r) > \Sigma(r) \quad \text{OR} \quad |D(r) - D_{input}(r)| > \Sigma(r) $$
+        [S1]
+        *Note: The source text states "either of the two conditions are satisfied" for the bounds, but clarifies that outside this region the loss is inactive. The standard formulation in cited work (Roessle et al.) typically clips the loss or restricts the domain. The source explicitly defines $R_{sub}$ based on these conditions [S1].*
+        
+        Compute the weighted depth loss over $R_{sub}$:
+        $$ L_{depth}(r) = \sum_{r \in R_{sub}} corr(r) (D(r) - D_{input}(r))^2 $$
+        [S1]
+    *   **Total Loss:**
+        $$ L = L_{color} + \lambda L_{depth} $$
+        where $\lambda = 31$ for urban areas and $\lambda = 50$ for rural areas [S1].
+
+7.  **Optimization:**
+    *   Update network parameters using gradient descent.
+    *   Repeat for 30,000 iterations [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+def compute_uncertainty(corr_map, gamma=1.0, m=1e-4):
+    """
+    Compute input uncertainty Sigma from cross-correlation similarity.
+    corr_map: Tensor of shape (H, W) with values in [0, 1].
+    """
+    return gamma * (1.0 - corr_map) + m
+
+def sample_guided_points(ray_origin, ray_direction, depth_prior, std_dev, num_samples):
+    """
+    Sample points from a Gaussian distribution along the ray.
+    depth_prior: Scalar depth value D(r) or D_input(r).
+    std_dev: Scalar standard deviation S(r) or Sigma(r).
+    """
+    # Sample from 1D Gaussian
+    z = torch.randn(num_samples)
+    # Map to ray coordinates: t = depth_prior + z * std_dev
+    t_samples = depth_prior + z * std_dev
+    # Clamp to scene bounds [t_n, t_f] if necessary, though Gaussian tails may exceed
+    # The source implies drawing from N, so we assume the network handles out-of-bounds or they are clamped.
+    # For implementation safety, we clamp to valid range.
+    t_samples = torch.clamp(t_samples, min=t_n, max=t_f)
+    points = ray_origin + t_samples.unsqueeze(1) * ray_direction
+    return points, t_samples
+
+def volume_render(points, network, t_samples):
+    """
+    Query network and perform volume rendering.
+    network: The coarse MLP.
+    t_samples: Tensor of shape (N,) containing t_i.
+    """
+    # Query network
+    sigma, color = network(points)
+    
+    # Compute deltas
+    # t_samples is sorted. delta_i = t_{i+1} - t_i
+    # Add a dummy end point for the last delta
+    t_extended = torch.cat([t_samples, t_samples[-1:] + 0.1]) # 0.1 is arbitrary small step for last delta
+    deltas = t_extended[1:] - t_extended[:-1]
+    
+    # Compute opacity
+    alpha = 1.0 - torch.exp(-sigma * deltas)
+    
+    # Compute transmittance
+    # T_i = product_{j=1}^{i-1} (1 - alpha_j)
+    # T_1 = 1.0
+    transmittance = torch.cumprod(1.0 - alpha, dim=0)
+    transmittance = torch.cat([torch.ones_like(transmittance[:1]), transmittance[:-1]])
+    
+    # Render color
+    weights = transmittance * alpha
+    rendered_color = torch.sum(weights.unsqueeze(-1) * color, dim=0)
+    
+    # Render depth
+    rendered_depth = torch.sum(weights * t_samples, dim=0)
+    
+    # Render depth variance (S^2)
+    # S^2 = sum T_i alpha_i (t_i - D(r))^2
+    depth_var = torch.sum(weights * (t_samples - rendered_depth)**2, dim=0)
+    
+    return rendered_color, rendered_depth, depth_var
+
+def train_step(images, depth_maps, corr_maps, rpc_cameras, network, optimizer):
+    """
+    Single training step.
+    """
+    optimizer.zero_grad()
+    
+    total_color_loss = 0.0
+    total_depth_loss = 0.0
+    
+    # Parameters
+    N_random = 64
+    N_guided = 64
+    lambda_depth = 31 # Example value, depends on scene type
+    
+    for i, (image, depth_map, corr_map) in enumerate(zip(images, depth_maps, corr_maps)):
+        # Get ray origins and directions for this image
+        rays_o, rays_d = get_rays_from_image(image, rpc_cameras[i])
+        
+        # Pre-compute uncertainty
+        sigma_input = compute_uncertainty(corr_map)
+        
+        # Group 1: Random samples
+        t_random = torch.rand(N_random) * (t_f - t_n) + t_n
+        points_random = rays_o + t_random.unsqueeze(1) * rays_d
+        
+        # Group 2: Guided samples
+        # Use input depth D_input and uncertainty Sigma for training pixels
+        # Note: depth_map might have NaNs for occlusions.
+        # We need to handle pixels without depth separately or use predicted depth.
+        # The source says: "N(D_bar(r), Sigma(r)) for pixels with input depth... N(D(r), S(r)) for pixels without"
+        # This implies a mask is needed.
+        
+        valid_depth_mask = ~torch.isnan(depth_map)
+        
+        # For simplicity in pseudocode, we assume we process valid pixels.
+        # In practice, one might batch valid pixels only or use a mask.
+        
+        # Guided samples for valid pixels
+        if valid_depth_mask.any():
+            d_input = depth_map[valid_depth_mask]
+            s_input = sigma_input[valid_depth_mask]
+            
+            # Sample around D_input with width Sigma
+            # We need to generate samples for each ray.
+            # Let's assume we process rays in a batch.
+            # For each ray with valid depth:
+            guided_points_valid, t_guided_valid = sample_guided_points(
+                rays_o[valid_depth_mask], 
+                rays_d[valid_depth_mask], 
+                d_input, 
+                s_input, 
+                N_guided
+            )
+            
+            # For rays without valid depth (occlusions), use predicted depth?
+            # But predicted depth requires a forward pass. 
+            # The source says "during training... N(D(r), S(r)) for pixels without input depth".
+            # This creates a dependency cycle if D(r) is not yet known.
+            # Usually, this implies using the *previous* iteration's prediction or a coarse estimate.
+            # However, Sat-NeRF/SpS-NeRF often uses the input depth if available, else falls back.
+            # Let's assume for the "no input" case, we might use a fallback or skip guided sampling for those specific rays in this step, 
+            # or use a coarse global DEM depth. The source mentions fallback to coarse DEM.
+            # For the pseudocode, we will assume we only guide rays with valid input depth for Group 2, 
+            # and fill the rest with random or previous prediction if strictly following "N(D(r), S(r))".
+            # Given the constraint "implement from text", and the text says "N(D(r), S(r)) for pixels without input depth",
+            # we must have D(r). This usually implies an iterative refinement or using the depth from the *previous* step.
+            # We will assume D_prev is available from the previous iteration.
+            
+            # For rays without input depth:
+            invalid_depth_mask = ~valid_depth_mask
+            if invalid_depth_mask.any():
+                # Use previous iteration's depth prediction D_prev
+                # This is an implementation detail [G] required to resolve the dependency.
+                d_prev = get_previous_depth_prediction() 
+                s_prev = get_previous_std_prediction()
+                
+                guided_points_invalid, t_guided_invalid = sample_guided_points(
+                    rays_o[invalid_depth_mask],
+                    rays_d[invalid_depth_mask],
+                    d_prev,
+                    s_prev,
+                    N_guided
+                )
+                
+                # Combine points
+                guided_points = torch.cat([guided_points_valid, guided_points_invalid])
+                t_guided = torch.cat([t_guided_valid, t_guided_invalid])
+            else:
+                guided_points = guided_points_valid
+                t_guided = t_guided_valid
+
+        # Combine all points
+        all_points = torch.cat([points_random, guided_points], dim=0)
+        all_t = torch.cat([t_random, t_guided], dim=0)
+        
+        # Render
+        rendered_color, rendered_depth, depth_var = volume_render(all_points, network, all_t)
+        
+        # Compute Losses
+        # Color Loss
+        gt_color = image
+        color_loss = torch.mean((rendered_color - gt_color)**2)
+        
+        # Depth Loss
+        # Define R_sub
+        # Condition: S(r) > Sigma(r) OR |D(r) - D_input(r)| > Sigma(r)
+        # Note: Sigma(r) is per-pixel. D_input(r) is per-pixel.
+        # We need to mask out pixels without input depth for the depth loss term involving D_input.
+        
+        depth_loss_val = 0.0
+        if valid_depth_mask.any():
+            # Calculate per-pixel depth loss
+            # D_input is depth_map
+            diff = rendered_depth - depth_map
+            # Weight by correlation
+            weight = corr_map
+            
+            # Mask for R_sub
+            # S(r) is sqrt(depth_var)
+            s_r = torch.sqrt(depth_var + 1e-8)
+            sigma_r = sigma_map # Precomputed
+            
+            # Condition: S > Sigma OR |D - D_input| > Sigma
+            # The source says "bounds ray termination within 1*Sigma from depth priors".
+            # And "Outside this region, the depth loss is inactive or clipped".
+            # This implies we only sum over rays satisfying the condition.
+            
+            mask_sub = (s_r > sigma_r) | (torch.abs(diff) > sigma_r)
+            
+            # Apply mask
+            if mask_sub.any():
+                # Clip or select? "Inactive or clipped". Usually means zero out or restrict domain.
+                # Equation 6 sums over r in R_sub.
+                active_diff = diff[mask_sub]
+                active_weight = weight[mask_sub]
+                active_sigma = sigma_r[mask_sub] # Not used in formula 6 directly, but defines R_sub
+                
+                # Formula 6: sum corr(r) (D(r) - D(r))^2
+                # Note: The source uses D(r) for input depth in the formula text, but D_bar(r) in the sampling text.
+                # Equation 6 uses D(r) - D(r). One is predicted, one is input.
+                depth_loss_val = torch.sum(active_weight * (active_diff**2))
+        
+        total_color_loss += color_loss
+        total_depth_loss += depth_loss_val
+        
+        # Total Loss
+        loss = color_loss + lambda_depth * depth_loss_val
+        loss.backward()
+        optimizer.step()
+```
+
+### Parameters
+*   **SGM Resolution Scale:** $2^{-2}$ (depth maps downsampled by factor of 4) [S1].
+*   **Uncertainty Scaling $\gamma$:** $1.0$ [S1].
+*   **Uncertainty Shift $m$:** $10^{-4}$ [S1].
+*   **Depth Loss Weight $\lambda$:** $31$ for urban areas, $50$ for rural areas [S1].
+*   **Initial Random Samples:** $64$ [S1].
+*   **Guided Samples:** $64$ [S1].
+*   **Batch Size:** $1024$ [S1].
+*   **Training Iterations:** $30,000$ [S1].
+*   **Learning Rate:** $10^{-5}$ (inherited from Sat-NeRF backbone) [S1].
+*   **Learning Rate Decay:** $0.9$ [S1].
+
+### Edge Cases and Pitfalls
+*   **Depth Loss Inactivity:** The depth loss is inactive or clipped outside the subregion $R_{sub}$ defined by $S(r) > \Sigma(r)$ or $|D(r) - D_{input}(r)| > \Sigma(r)$. This prevents the optimizer from being biased by inaccurate depth priors in occluded or low-texture regions [S1].
+*   **Missing Depth:** If SGM depths are unavailable, the method falls back to a coarse global DEM (e.g., SRTM) with a constant similarity metric. This reduces the effectiveness of the uncertainty weighting [S1].
+*   **High-Resolution Depth Bias:** Using high-resolution SGM depths is avoided to prevent biasing the NeRF towards the SGM solution and to mitigate incomplete depth information at challenging surfaces (e.g., low texture) [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training takes approximately 2 hours on an NVIDIA GPU with 40GB RAM for 30,000 iterations [S1].
+*   **Memory Complexity:** Uses a single coarse network, reducing memory overhead compared to hierarchical NeRF models that require coarse and fine networks [S1].
+*   **Strengths:** Efficiently handles sparse satellite views by leveraging external depth priors. The guided sampling reduces the number of samples needed to resolve geometry compared to pure random sampling.
+*   **Limitations:** Relies on the quality of the input SGM depth maps. Performance degrades if depth maps are missing or inaccurate. The method uses only a coarse model, potentially lacking the fine-detail resolution of hierarchical NeRFs [S1].
+*   **When to Use:** Suitable for sparse-view satellite imagery reconstruction where dense depth maps can be generated via SGM.
+*   **When Not to Use:** Unsuitable for scenarios requiring high-frequency detail resolution that might require a fine model, or where SGM depth generation is not feasible.
+
+## Background
+Sparsesat-NeRF was introduced in 2023 by researchers presenting at the ISPRS Geospatial Week. It builds upon the Sat-NeRF architecture but adapts it for sparse satellite imagery by integrating dense depth supervision. The method draws inspiration from Roessle et al. (2022) for guided sampling and depth loss formulation. It is specifically designed to address the challenges of photo-realistic novel view synthesis from very few satellite images (2-3 views) [S1].
+
+## Sources
+[S1] Sparsesat-Nerf Dense Depth Supervised Neural Radiance Fields for Sparse Satellite Images, https://doi.org/10.5194/isprs-annals-X-1-W1-2023-895-2023, fetched 2026-10-26

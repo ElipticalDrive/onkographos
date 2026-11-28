@@ -1,0 +1,119 @@
+# Rotating Volumetric Display
+
+Also called: Helical Screen Volumometric Sweep, Helical slicing display
+
+## Overview
+A Rotating Volumetric Display renders 3D images by sweeping a helical screen surface through space while projecting synchronized 2D slices, creating a continuous volumetric illusion via temporal integration [S1, unofficial][S2]. It differs from linear reciprocating displays by using rotational motion to achieve higher frame rates, though it introduces a central "dead spot" where surface velocity is insufficient for the persistence of vision [S1, unofficial]. It builds on [Rotating Rigid Screen with Projector](22705-rotating-rigid-screen-with-projector.md) by replacing the flat or curved rigid screen with a helical geometry and employing a helical slicing algorithm.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel model or volume dataset.
+*   **Output:** A continuous 3D volumetric image visible to the observer.
+*   **Hardware Inputs:** Angular position from a rotary encoder; control signals to a DC motor.
+
+**Data Structures:**
+*   **Helical Screen Geometry:** Defined by radius $R$ and height $H$ per revolution. The screen consists of $N$ blades (typically $N=3$) [S2].
+*   **Projection Buffer:** A 2D image buffer corresponding to the projector's resolution. For binary-frame-warping systems, this may be a preloaded binary image containing geometric markers (e.g., three bright circles) [S2].
+*   **Transformation Parameters:** Affine or homography matrices mapping 3D world coordinates to 2D screen coordinates based on the current rotation angle [S1, unofficial][S2].
+
+**Numbered Steps:**
+1.  **Helical Slicing:** Instead of linear slicing, compute the intersection of the 3D volume with the helical surface at the current rotation angle $\theta$. This determines which voxel data maps to which pixel on the screen [S1, unofficial].
+2.  **Coordinate Mapping:** Map the 3D world coordinates of the voxel to 2D screen coordinates $(u, v)$ and a specific frame index corresponding to the rotation angle $\theta$ [S1, unofficial].
+3.  **Image Generation:** Generate the 2D projection image for the current slice.
+    *   *Standard Projector:* Render the slice directly to the projector buffer.
+    *   *Binary-Frame-Warping:* Update the preloaded binary image using an affine transformation derived from the coordinate transformation parameters [S2].
+4.  **Keystone Calibration:** Align multiple projectors (e.g., Red, Green, Blue) into the same physical space to ensure color registration [S1, unofficial].
+5.  **Synchronization:** Drive the DC motor using PID control based on feedback from the rotary encoder to maintain precise angular velocity [S2].
+6.  **Temporal Integration:** The screen rotates at speed $\omega$ such that the persistence of vision blends the discrete 2D slices into a continuous 3D volume [G]. The sweep frequency $f_{sweep}$ is the product of the blade count $N$ and the rotation frequency $f_{rot}$:
+    $$ f_{sweep} = N \times f_{rot} $$
+7.  **Observer Interaction:** The image is viewed via reflection from a half-mirror or directly, depending on the configuration [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_rotating_volumetric_display(volume_data, helix_params, motor_state):
+    """
+    Renders a frame for a rotating helical volumetric display.
+    
+    Args:
+        volume_data: 3D array of voxel intensities.
+        helix_params: Object containing radius R, height H, blade count N.
+        motor_state: Object containing current angle theta, angular velocity omega.
+        
+    Returns:
+        projected_image: 2D array representing the projector input.
+    """
+    # 1. Determine current slice geometry based on rotation angle
+    # The helical surface is defined by z = (H / 2pi) * theta + k * (H/N) for blade k
+    # Map 3D voxel coordinates to the helical surface at current theta
+    slice_geometry = compute_helical_intersection(volume_data, helix_params, motor_state.theta)
+    
+    # 2. Generate 2D projection for this slice
+    # For standard projectors, render directly.
+    # For binary-frame-warping, compute affine transform parameters.
+    if use_binary_warping:
+        # Preloaded binary image contains markers (e.g., 3 circles)
+        # Update markers using affine transformation based on coordinate mapping
+        affine_params = compute_affine_transform(slice_geometry, helix_params)
+        projected_image = apply_affine_to_binary_image(preloaded_binary_image, affine_params)
+    else:
+        # Standard rendering: map voxels to screen pixels
+        projected_image = render_slice_to_projector(slice_geometry, helix_params)
+        
+    # 3. Apply keystone correction if using multiple projectors
+    # This step is hardware/calibration dependent and often results in fringing
+    projected_image = apply_keystone_correction(projected_image)
+    
+    return projected_image
+
+def control_motor(target_speed, encoder_feedback):
+    """
+    PID control loop for the DC motor.
+    """
+    error = target_speed - encoder_feedback.angular_velocity
+    integral += error
+    derivative = error - last_error
+    output = Kp * error + Ki * integral + Kd * derivative
+    last_error = error
+    set_motor_voltage(output)
+```
+
+**Parameters:**
+*   **Helical Screen Blade Count ($N$):** 3 [S2].
+*   **Rotation Speed ($f_{rot}$):** 5 rps (revolutions per second) [S2].
+*   **Sweep Frequency ($f_{sweep}$):** 15 Hz [S2].
+*   **Helix Radius ($R$):** 120 mm [S2].
+*   **Helix Height ($H$):** 160 mm [S2].
+*   **Motor:** Maxon A-MAX32 DC motor [S2].
+*   **Encoder:** Autonics E40S-6-3600-3-N-24 rotary encoder [S2].
+*   **Control Method:** PID control [S2].
+*   **Projector Types:** ViaLUX V-7001 or binary-frame-warping projector (2469 Hz max update) [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Dead Spot:** A vortex-like hole appears in the center of the image where the surface velocity is too low to maintain the persistence of vision illusion. Content must be created with this central void in mind [S1, unofficial].
+*   **Keystone Fringing:** Complex keystone calibration for multi-projector alignment can result in color fringing (e.g., pink fringing around icons) [S1, unofficial].
+*   **Precision:** Misalignment between screen position and projected frame index results in Z-depth distortion [8515-multi-planar-volumetric-3d-display.md].
+
+## Subtopics
+
+### Binary-Frame-Warping Projector
+Uses preloaded binary images and affine transformations for high-speed updates (up to 2469 Hz) with reduced latency, sacrificing arbitrary image projection capability [S2].
+
+### Standard High-Speed Projector
+Projects arbitrary images but at lower frame rates (e.g., ViaLUX V-7001), offering more flexibility in content but potentially higher latency [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Dependent on the complexity of the helical slicing algorithm and the affine transformation calculations. Binary-frame-warping reduces computational load by only sending affine parameters [S2].
+*   **Memory Complexity:** Requires storage for the 3D volume data and the preloaded binary image (if using binary-warping) [S2].
+*   **Measured Performance:** Achieves a sweep frequency of 15 Hz with a 5 rps rotation speed and 3 blades [S2]. Binary-frame-warping projector supports up to 2469 Hz updates [S2].
+*   **Scaling:** Rotating displays deliver higher frame rates than reciprocating displays but are harder to scale up due to the mechanical difficulty of moving large glass screens at sufficient speeds for a solid illusion [S1, unofficial].
+*   **Strengths:** Higher frame rates compared to reciprocating systems; compelling volumetric illusion; unedited physical hardware (no CGI/compositing required) [S1, unofficial].
+*   **Limitations:** Central dead spot; complex keystone calibration; mechanical complexity and scaling limits [S1, unofficial].
+
+## Background
+The Rotating Volumetric Display was developed by Voxon Photonics as an alternative to their linear "glass shaker" technology, aiming to overcome scaling limitations of reciprocating motion [S1, unofficial]. The concept involves a screen resembling a drill bit with ramps and drop-offs, allowing projectors to be positioned above the display [S1, unofficial]. A specific implementation using a helical screen with PID-controlled DC motor and rotary encoder was detailed in a 2024 ACM paper, demonstrating low-latency performance using binary-frame-warping techniques [S2].
+
+## Sources
+[S1] Voxon hologram volumetric display (2019), https://newatlas.com/vr/voxon-photonics-3d-hologram-volumetric-displays/, fetched 2026-10-26 (unofficial)
+[S2] A Low-Latency Volumetric Display and Its Application to an ..., https://dl.acm.org/doi/full/10.1145/3756884.3765980, fetched 2026-10-29

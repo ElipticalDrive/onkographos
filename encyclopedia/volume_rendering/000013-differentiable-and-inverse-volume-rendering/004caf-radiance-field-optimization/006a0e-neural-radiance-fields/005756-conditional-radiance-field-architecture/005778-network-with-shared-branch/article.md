@@ -1,0 +1,105 @@
+# Network with Shared Branch
+
+Also called: EditNeRF architecture
+
+## Overview
+A modular conditional radiance field architecture that incorporates a shape branch shared across object instances to capture part semantics and improve shape reconstruction accuracy [S1]. It sets itself apart from sibling methods like CodeNeRF, which learns separate embeddings for each instance, by enforcing an inductive bias that encourages a common representation across different objects of the same class [S2]. This shared structure enhances shape editing consistency and generalization [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** 3D position $\mathbf{x}$, viewing direction $\mathbf{d}$, instance-specific shape code $\mathbf{z}^{(s)}$, and instance-specific color code $\mathbf{z}^{(c)}$ [S1].
+*   **Outputs:** Scalar density $\sigma$ and radiance (color) $\mathbf{c}$ [S1].
+
+**Data Structures:**
+The network is composed of modular parts to disentangle shape and color [S1].
+*   **Shape Branch:** A sub-network that takes $\mathbf{x}$ and $\mathbf{z}^{(s)}$ as input. This branch is **shared** across all object instances in the training set [S1].
+*   **Color Branch:** A sub-network that takes the output of the shape branch, $\mathbf{d}$, and $\mathbf{z}^{(c)}$ to produce color [S1].
+*   **Codes:** $\mathbf{z}^{(s)}$ and $\mathbf{z}^{(c)}$ are latent vectors specific to each object instance [S1].
+
+**Numbered Steps:**
+1.  **Shape Encoding:** The input position $\mathbf{x}$ and the shape code $\mathbf{z}^{(s)}$ are passed through the shared shape branch. This branch implicitly biases the network to encode a shared representation whenever possible, improving shape reconstruction [S1].
+2.  **Color Prediction:** The output from the shape branch, combined with the viewing direction $\mathbf{d}$ and the color code $\mathbf{z}^{(c)}$, is passed through the color branch to predict the radiance $\mathbf{c}$ [S1].
+3.  **Density Prediction:** Density $\sigma$ is predicted, typically from the shape branch or a joint representation, to facilitate volume rendering [S1].
+4.  **Rendering:** The final pixel color $\hat{C}$ is computed via volume rendering using the predicted $\sigma$ and $\mathbf{c}$ [S1].
+
+**Formulas:**
+The rendered pixel color $\hat{C}(\mathbf{r}, \mathbf{z}^{(s)}, \mathbf{z}^{(c)})$ along a ray $\mathbf{r}$ is the weighted sum of colors at $N$ sampled points [S1]:
+
+$$
+\hat{C}(\mathbf{r}, \mathbf{z}^{(s)}, \mathbf{z}^{(c)}) = \sum_{i=1}^{N} c_i \alpha_i \exp \left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right)
+$$
+
+Where:
+*   $c_i$ is the radiance at sample $i$.
+*   $\sigma_j$ is the density at sample $j$.
+*   $\delta_j$ is the distance between samples $j$ and $j+1$.
+*   $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the opacity [S1].
+
+**Parameters:**
+*   **Shared Shape Branch:** The weights of this branch are updated during both shape and color editing, but the architecture ensures they capture general shape priors [S1].
+*   **Latent Codes:** $\mathbf{z}^{(s)}$ and $\mathbf{z}^{(c)}$ are static during training but can be optimized during editing [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def forward(x, d, z_s, z_c, shared_shape_net, color_net):
+    """
+    Forward pass for Network with Shared Branch.
+    
+    Args:
+        x: 3D position (float32, [3])
+        d: Viewing direction (float32, [3])
+        z_s: Shape code (float32, [K])
+        z_c: Color code (float32, [L])
+        shared_shape_net: Neural network module for shape (shared across instances)
+        color_net: Neural network module for color
+        
+    Returns:
+        sigma: Scalar density (float32, [1])
+        c: Radiance/color (float32, [3])
+    """
+    # Step 1: Encode shape using the shared branch
+    # The shape branch takes position and shape code
+    shape_features = shared_shape_net(x, z_s)
+    
+    # Step 2: Predict density (often from shape features)
+    # Implementation detail: density is typically predicted from the shape branch output
+    sigma = predict_density(shape_features)
+    
+    # Step 3: Predict color using color branch
+    # The color branch takes shape features, viewing direction, and color code
+    c = predict_color(shape_features, d, z_c)
+    
+    return sigma, c
+```
+
+**Edge Cases and Pitfalls:**
+*   **Disentanglement:** If the shape and color branches are not properly regularized, the shared shape branch may overfit to specific appearance details, reducing generalization [S1].
+*   **Editing Consistency:** The shared branch ensures that edits to the shape code affect the geometry consistently across instances, but improper updates to the shared weights can degrade the general shape prior [S1].
+
+## Subtopics
+
+### Hybrid Updates for Editing
+A strategy where shape codes are updated during shape editing, and network weights are updated during color editing, providing a computational speed-up. [Hybrid Updates for Editing](15974-hybrid-updates-for-editing.md)
+
+### Conditional Radiance Field Editing
+General techniques for editing conditional radiance fields, including the use of editing losses. [Conditional Radiance Field Editing](15977-conditional-radiance-field-editing.md)
+
+### CodeNeRF
+A sibling method that learns separate embeddings for each instance without a shared shape branch [S2]. [Conditional Radiance Field Architecture](15951-conditional-radiance-field-architecture.md)
+
+## Operating characteristics
+*   **Time Complexity:** Editing is computationally efficient because only a subset of network components (later layers) are updated during editing, leading to a significant speed-up compared to updating the entire network [S1].
+*   **Memory Complexity:** Requires storing latent codes $\mathbf{z}^{(s)}$ and $\mathbf{z}^{(c)}$ for each instance, but the shared shape branch reduces the total number of parameters compared to fully independent networks [S1].
+*   **Strengths:** Improves shape reconstruction accuracy by encoding a shared representation; enables consistent edits across different viewpoints; supports editing over an entire shape class (e.g., "chairs") rather than a single scene [S1].
+*   **Limitations:** Requires a collection of 3D objects for training to learn the shared shape prior; may struggle with objects that deviate significantly from the shared shape prior [S1].
+*   **When to Use:** When editing a class of objects with consistent geometry but varying appearance, and when computational efficiency during editing is important [S1].
+*   **When Not to Use:** For single-scene editing where a shared prior is not beneficial, or for objects with highly diverse shapes that do not share common parts [S1].
+
+## Background
+The Network with Shared Branch was introduced in the paper "Editing Conditional Radiance Fields" (2021) by the authors of EditNeRF [S1]. It was developed to address the limitations of previous NeRF-based editing methods that lacked the ability to generalize edits across a class of objects. The method builds upon the conditional radiance field framework and draws inspiration from CodeNeRF and other approaches that use latent codes [S1, S2]. It is used in applications requiring consistent 3D editing of object classes, such as virtual try-on or product visualization [S1].
+
+## Sources
+[S1] Editing Conditional Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00572, fetched 2026-10-26
+[S2] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27

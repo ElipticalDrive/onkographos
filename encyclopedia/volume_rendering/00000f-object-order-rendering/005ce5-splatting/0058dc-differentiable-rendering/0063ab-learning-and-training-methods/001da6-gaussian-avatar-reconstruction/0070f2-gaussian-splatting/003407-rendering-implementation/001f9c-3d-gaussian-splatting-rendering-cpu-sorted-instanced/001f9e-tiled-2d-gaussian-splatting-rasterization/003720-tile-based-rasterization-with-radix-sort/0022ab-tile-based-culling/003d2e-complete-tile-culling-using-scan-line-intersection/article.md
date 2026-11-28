@@ -1,0 +1,129 @@
+# Complete tile culling using scan-line intersection
+
+Also called: Exact scan-line intersection culling, Closed-form ellipse-tile intersection
+
+## Overview
+A method to compute exact intersections between screen-space Gaussian ellipses and rendering tiles, eliminating the false-positive and false-negative errors inherent in distance-based, bounding-box, or compact box culling approaches [S1, unofficial]. It sets itself apart by providing a branchless, closed-form solution that precisely determines tile overlap without the memory overhead of separate culling passes [S1, unofficial].
+
+## How it works
+**Inputs:** Screen-space Gaussian parameters (center, covariance-derived ellipse coefficients $a, b, c$, opacity threshold $\tau$), tile grid dimensions, and tile boundaries.
+**Outputs:** A list of intersecting tile indices for each Gaussian, or a visibility mask for warp-level culling.
+
+**Data Structures:**
+*   **Gaussian Ellipse Coefficients:** Derived from the projected covariance matrix. The screen-space ellipse equation is $a\tilde{x}^2 + 2b\tilde{x}\tilde{y} + c\tilde{y}^2 = \tau$, where $\tilde{x}, \tilde{y}$ are coordinates relative to the Gaussian center [S2, unofficial].
+*   **Tile Buffer:** Stores tile-depth pairs or tile indices. In the projection-forward pass, the number of intersecting tiles is computed per Gaussian [S1, unofficial]. A separate pass fills the buffer with these pairs [S1, unofficial].
+
+**Steps:**
+1.  **Select Shorter Dimension:** Pick the shorter dimension of the screen-space Gaussian ellipse (e.g., vertical) to minimize the number of rows/columns to process [S1, unofficial].
+2.  **Compute Global Extremes:** Determine the global extreme points of the ellipse along the selected axis. For the vertical axis, this involves finding the maximum vertical radius $d_y$ [S2, unofficial]:
+    $$ d_y = \sqrt{\frac{a\tau}{ac - b^2}} $$
+    This assumes the conic matrix is positive-definite ($a > 0$) [S2, unofficial].
+3.  **Determine Vertical Span:** Calculate the continuous vertical span $[y_{min}, y_{max}]$ of the ellipse. If the ellipse is rotated, the peak vertex location depends on the horizontal clipping interval $[\tilde{x}_0, \tilde{x}_1]$ relative to the tile column [S2, unofficial].
+    *   Case A (Peak Inside): If the peak vertex falls within the horizontal bounds, the max displacement is derived from the quadratic profile [S2, unofficial].
+    *   Case B (Peak Outside): If the peak is outside, the maximum displacement occurs at the boundary closest to the peak [S2, unofficial].
+4.  **Intersect with Tile Boundary:** For each row (or column) of tiles, intersect the continuous vertical span $[y_{min}, y_{max}]$ with the tile's vertical boundary $[y_{tile\_min}, y_{tile\_max}]$ to yield the valid range $[y_{start}, y_{end}]$ [S2, unofficial]:
+    $$ y_{start} = \max(y_{tile\_min}, \lceil y_{min} \rceil) $$
+    $$ y_{end} = \min(y_{tile\_max}, \lfloor y_{max} \rfloor) $$
+    [S2, unofficial]
+5.  **Discretize and Count:**
+    *   If $y_{start} \le y_{end}$, the Gaussian intersects the tile row.
+    *   Round down the minimum coordinate and round up the maximum coordinate toward the tile boundary to efficiently count or iterate through tiles [S1, unofficial].
+    *   For warp-level culling, map the span to discrete warp indices using bitwise right shifts (since each warp covers 2 pixel rows) [S2, unofficial]:
+        $$ w_{start} = (y_{start} - y_{tile\_min}) \gg 1 $$
+        $$ w_{end} = (y_{end} - y_{tile\_min}) \gg 1 $$
+        [S2, unofficial]
+6.  **Construct Visibility Mask:** Create an 8-bit unsigned integer mask $M_i$ where each bit represents the visibility of a 16x2 warp sub-region [S2, unofficial]:
+    $$ M_i = ((1 \ll (w_{end} - w_{start} + 1)) - 1) \ll w_{start} $$
+    If $y_{start} > y_{end}$, then $M_i = 0$ [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_tile_intersection(gaussian, tile_grid):
+    """
+    Computes exact tile intersections for a Gaussian using scan-line intersection.
+    gaussian: object with attributes .a, .b, .c, .tau, .center_x, .center_y
+    tile_grid: object with attributes .width, .height, .tile_width, .tile_height
+    """
+    # 1. Compute ellipse coefficients and extremes
+    # Note: a, b, c are derived from projected covariance. 
+    # For simplicity, assume they are pre-computed as per [S2, unofficial].
+    discriminant = gaussian.a * gaussian.c - gaussian.b ** 2
+    
+    # 2. Compute vertical radius dy [S2, unofficial]
+    dy = math.sqrt((gaussian.a * gaussian.tau) / discriminant)
+    
+    # 3. Determine global vertical span [y_min, y_max]
+    # Assuming axis-aligned for simplicity or using peak vertex logic from [S2, unofficial]
+    y_min = gaussian.center_y - dy
+    y_max = gaussian.center_y + dy
+    
+    intersecting_tiles = []
+    
+    # 4. Iterate over tile rows (shorter dimension assumed vertical)
+    for tile_row in range(tile_grid.height // tile_grid.tile_height):
+        y_tile_min = tile_row * tile_grid.tile_height
+        y_tile_max = (tile_row + 1) * tile_grid.tile_height
+        
+        # 5. Intersect with tile boundary [S2, unofficial]
+        y_start = max(y_tile_min, math.ceil(y_min))
+        y_end = min(y_tile_max, math.floor(y_max))
+        
+        if y_start <= y_end:
+            # 6. Discretize to tile indices
+            # Round down min, round up max toward tile boundary [S1, unofficial]
+            tile_idx_start = math.floor(y_start / tile_grid.tile_height)
+            tile_idx_end = math.ceil(y_end / tile_grid.tile_height) - 1
+            
+            for t_idx in range(tile_idx_start, tile_idx_end + 1):
+                intersecting_tiles.append(t_idx)
+                
+    return intersecting_tiles
+
+def construct_warp_mask(y_start, y_end, y_tile_min):
+    """
+    Constructs 8-bit visibility mask for warp-level culling [S2, unofficial].
+    """
+    if y_start > y_end:
+        return 0
+    
+    # Map span to discrete warp indices (2 pixels per warp row) [S2, unofficial]
+    w_start = (y_start - y_tile_min) >> 1
+    w_end = (y_end - y_tile_min) >> 1
+    
+    # Construct mask [S2, unofficial]
+    if w_end < w_start:
+        return 0
+        
+    mask = ((1 << (w_end - w_start + 1)) - 1) << w_start
+    return mask
+```
+
+**Parameters:**
+*   **Opacity Threshold ($\tau$):** Determines the extent of the ellipse. Typical values depend on the rendering engine's opacity cutoff.
+*   **Subgroup Size:** Used to round up the batch size $S$ to balance performance and hardware occupancy, capped at 128 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Ellipses:** If $ac - b^2 \le 0$, the ellipse is degenerate or invalid. The method assumes a positive-definite conic matrix ($a > 0$) [S2, unofficial].
+*   **Precision:** Rounding operations ($\lceil \cdot \rceil, \lfloor \cdot \rfloor$) must be handled carefully to avoid off-by-one errors at tile boundaries [S1, unofficial].
+*   **False Positives/Negatives:** Prior methods using bounding boxes suffer from these; this method eliminates them by using the exact ellipse equation [S1, unofficial].
+
+## Subtopics
+
+### Warp Visibility Mask Construction
+A technique to convert continuous geometric clipping of a Gaussian primitive against a tile column into a hardware-friendly 8-bit discrete warp mask, where each bit represents the visibility of a 16x2 warp sub-region [S2, unofficial]. It serves as a front-end jump barrier to trigger hardware uniform branches, bypassing downstream instruction sequences for culled warps [S2, unofficial]. Choose this when optimizing for GPU warp scheduler efficiency and reducing pipeline bubbles [S2, unofficial]. See [Warp-Level Culling for Efficient Blending in 3D Gaussian Splatting](12278-warp-level-culling-for-efficient-blending-in-3d-gaussian-spl.md).
+
+## Operating characteristics
+*   **Time Complexity:** The intersection computation is $O(1)$ per Gaussian per tile row, as it uses closed-form solutions [S1, unofficial]. The overall rasterization latency is proportional to the product of the number of batches and Gaussians traversed per batch, minimized by a batch size $S \approx \sqrt{NP}$ [S1, unofficial].
+*   **Memory Complexity:** Requires a separate buffer to store tile-depth pairs, introducing VRAM usage overhead compared to in-place culling [S1, unofficial].
+*   **Performance:** Eliminates false positives/negatives, improving rendering accuracy [S1, unofficial]. The branchless implementation reduces instruction divergence [S1, unofficial]. Warp-level culling mitigates pipeline bubbles by utilizing hardware uniform branches [S2, unofficial].
+*   **Strengths:** Exact intersection detection, high performance on modern GPUs due to branchless code and warp-level optimization [S1, S2, unofficial].
+*   **Limitations:** Requires additional VRAM for the tile buffer [S1, unofficial]. Computationally more intensive than simple bounding box checks, though still efficient due to closed-form nature [S1, unofficial].
+
+## Background
+Originated in the context of high-performance 3D Gaussian Splatting rendering, specifically addressing the limitations of prior culling methods that suffered from false positives or negatives [S1, unofficial]. The scan-line approach was inspired by earlier works [HTL* 25, LWC* 25] [S1, unofficial]. The warp-level mask construction was introduced in Local-GS to accelerate rendering via tile-local warp coherence [S2, unofficial].
+
+## Sources
+[S1] VkSplat: High-Performance 3DGS Training in Vulkan Compute, https://doi.org/10.2312/egs.20261024, fetched 2026-10-29 (unofficial)
+[S2] Local-GS: Accelerating 3D Gaussian Splatting via Tile-Local Warp Coherence, https://doi.org/10.48550/arXiv.2606.16566, fetched 2026-10-29 (unofficial)

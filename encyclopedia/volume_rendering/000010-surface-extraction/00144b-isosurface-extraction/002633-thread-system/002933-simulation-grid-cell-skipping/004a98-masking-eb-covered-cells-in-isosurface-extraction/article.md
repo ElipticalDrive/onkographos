@@ -1,0 +1,87 @@
+# Masking EB-covered cells in isosurface extraction
+
+Also called: EB cell masking, Volume fraction masking
+
+## Overview
+This method excludes simulation grid cells fully covered by an Embedded Boundary (EB) from isosurface extraction by checking the volume fraction field, ensuring the extracted surface respects the boundary geometry defined by volume fractions [S1, unofficial]. It differs from sibling optimizations like [Simulation Grid Cell Skipping](4474-simulation-grid-cell-skipping.md) by specifically targeting EB-covered cells (volume fraction == 0) rather than just empty or fully occupied cells, and it requires specific ghost cell handling to avoid artifacts at AMR coarse/fine boundaries [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Plotfile distribution map containing the `volFrac` field [S1, unofficial].
+- Boolean flag `USE_EB` [S1, unofficial].
+
+**Outputs:**
+- Isosurface mesh excluding triangles from cells where `volFrac == 0` [S1, unofficial].
+
+**Data Structures:**
+- `volFrac`: A scalar field on the simulation grid, where each cell stores the fraction of its volume occupied by the fluid (1.0) or solid (0.0) [S1, unofficial].
+- `USE_EB`: A boolean configuration parameter [S1, unofficial].
+
+**Steps:**
+1. Check if `USE_EB` is TRUE. If FALSE, proceed with standard extraction without EB masking [S1, unofficial].
+2. Read the `volFrac` field from the plotfile distribution map [S1, unofficial].
+3. Fill the ghost cells of `volFrac` using `FillPatch` from the coarser level with piecewise constant interpolation [S1, unofficial]. This step is critical for handling coarse/fine boundaries in Adaptive Mesh Refinement (AMR) [S1, unofficial].
+4. Iterate over all cells in the domain [S1, unofficial].
+5. For each cell, read its `volFrac` value [S1, unofficial].
+6. If `volFrac == 0`, exclude the cell from the surface extraction process [S1, unofficial].
+7. If `volFrac > 0`, include the cell in the extraction process [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def extract_isosurface_with_eb_masking(plotfile, use_eb, grid_dims):
+    if not use_eb:
+        # Standard extraction without EB masking [G]
+        return standard_isosurface_extraction(plotfile)
+    
+    # Read volume fraction field from plotfile distribution map [S1, unofficial]
+    volFrac = plotfile.read_field("volFrac")
+    
+    # Fill ghost cells using FillPatch with piecewise constant interpolation [S1, unofficial]
+    # This handles coarse/fine boundaries correctly by propagating values from coarser levels [G]
+    fill_patch_ghost_cells(volFrac, coarser_level=True, interpolation="piecewise_constant")
+    
+    triangles = []
+    
+    # Iterate over all cells (untiled loop to match development behavior) [S1, unofficial]
+    for i in range(grid_dims[0]):
+        for j in range(grid_dims[1]):
+            for k in range(grid_dims[2]):
+                cell_idx = (i, j, k)
+                
+                # Check volume fraction [S1, unofficial]
+                if volFrac[cell_idx] == 0:
+                    # Fully covered by EB, skip extraction [S1, unofficial]
+                    continue
+                
+                # Extract surface for this cell [G]
+                # Standard isosurface extraction (e.g., Marching Cubes) is performed here [G]
+                cell_triangles = extract_cell_surface(cell_idx, plotfile)
+                triangles.extend(cell_triangles)
+                
+    return triangles
+```
+
+**Parameters:**
+- `USE_EB`: Boolean flag. When TRUE, enables EB-specific logic including `volFrac` reading and masking [S1, unofficial]. Default value not specified in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Ghost Cell Handling:** If ghost cells are filled only with `FillBoundary` instead of `FillPatch`, ghost cells at coarse/fine boundaries remain 0 [S1, unofficial]. This causes every cell touching them to be masked, creating a crack along the coarse/fine boundary [S1, unofficial]. In a two-level test with `volFrac = 1`, this resulted in 377 missing triangles (-4% area) [S1, unofficial].
+- **Tiling:** The element-extraction loop must be untiled [S1, unofficial]. Using a tiled loop (e.g., `MFIter(states[lev], TilingIfNotGPU())`) processes boxes larger than one tile several times, causing extra elements and a slightly different area [S1, unofficial]. With 32³ boxes, this gave 3 extra elements [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not specified in the sources.
+- **Memory Complexity:** Not specified in the sources.
+- **Performance:** In a two-level test with `volFrac = 1`, using `FillPatch` for ghost cells resulted in byte-identical output to the development baseline for both non-EB and EB cases with 3D boxes of size 16³ and 32³, with refinement ratios of 2 and 4 [S1, unofficial].
+- **Hardware Support:** Not supported on GPU because the extraction and output operations are implemented as host loops over device memory [S1, unofficial].
+- **Strengths:** Ensures surface geometry respects EB boundary geometry defined by volume fractions [S1, unofficial].
+- **Limitations:** CPU-only implementation; requires careful ghost cell handling to avoid artifacts at AMR boundaries [S1, unofficial].
+- **When to Use:** When extracting isosurfaces from simulations using Embedded Boundary methods and accurate boundary representation is required [S1, unofficial].
+- **When Not to Use:** When GPU acceleration is needed or when EB boundary geometry is not relevant to the extraction [S1, unofficial].
+
+## Background
+This method was introduced in PR #93 (Part 8 of 9) of the PeleAnalysis repository by terencelehmann on September 30, 2026 [S1, unofficial]. It addresses the need to correctly handle Embedded Boundaries in isosurface extraction, ensuring that fully covered cells are excluded from the surface mesh [S1, unofficial]. The method was developed to fix artifacts caused by incorrect ghost cell handling at coarse/fine boundaries in AMR simulations [S1, unofficial].
+
+## Sources
+[S1] [8/9] isosurface: mask EB-covered cells, https://github.com/ITV-RWTH/PeleAnalysis/pull/93, fetched 2026-10-27 (unofficial)

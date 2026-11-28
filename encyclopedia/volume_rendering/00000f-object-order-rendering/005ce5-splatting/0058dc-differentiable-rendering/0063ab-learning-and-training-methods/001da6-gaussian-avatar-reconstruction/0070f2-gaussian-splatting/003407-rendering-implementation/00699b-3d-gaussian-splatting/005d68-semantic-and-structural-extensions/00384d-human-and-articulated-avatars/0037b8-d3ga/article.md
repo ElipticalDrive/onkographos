@@ -1,0 +1,38 @@
+# D3GA
+
+Also called: D3GA
+
+## Overview
+D3GA creates animatable human avatars using drivable 3D Gaussians and tetrahedral cages for full-body modeling [S1][S2, unofficial]. It addresses dynamic human reconstruction from multi-view videos by providing promising geometry and appearance modeling [S1][S2, unofficial]. It sets itself apart from head-only siblings like [GaussianHead](8051-gaussianhead.md), [GART](8093-gart.md), and [HeadGas](17293-headgas.md) by extending the drivable Gaussian representation to the full body [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:** Not given in the sources.
+
+**Data Structures:** Drivable 3D Gaussians are initialized in a canonical space [S1][S2, unofficial]. Each Gaussian $i$ stores position $\mathbf{p}_i$, rotation $\mathbf{q}_i$, scale $\mathbf{s}_i$, opacity $\alpha_i$, and color $\mathbf{c}_i$ [G]. A tetrahedral cage encloses the human body to drive deformation [S1][S2, unofficial]. The exact mesh layout (vertices, connectivity) is not specified in the sources [G].
+
+**Steps:**
+1. Initialize 3D Gaussians in a canonical reference pose [G: Based on Shared principles].
+2. Construct a tetrahedral cage around the canonical human geometry to serve as the deformation driver [S1][S2, unofficial].
+3. Deform canonical Gaussians to the target pose using the cage and pose parameters $\theta$. The position maps as $\mathbf{p}_i^{\text{target}} = D(\mathbf{p}_i^{\text{canonical}}, \theta)$ [G]. Rotation and scale are similarly transformed to maintain physical consistency [G].
+4. Render deformed Gaussians via differentiable alpha-blending. For pixel $p$, $\mathbf{C}(p) = \sum_{i \in \mathcal{O}_p} \mathbf{c}_i \cdot \alpha_i \cdot \prod_{j=1}^{i-1} (1 - \alpha_j)$, where $\mathbf{c}_i$ is color, $\alpha_i$ is opacity, and the product is transmittance [S1][S2, unofficial].
+
+**Parameters:** Not given in the sources.
+
+**Edge Cases and Pitfalls:** Not given in the sources.
+
+## Subtopics
+
+## Operating characteristics
+* **Time and Memory Complexity:** Not given in the sources.
+* **Measured Performance:** Not given in the sources.
+* **Scaling:** Not given in the sources.
+* **Strengths and Limitations:** Provides promising geometry and appearance modeling for full-body human avatars [S1][S2, unofficial].
+* **When to use it:** When reconstructing dynamic humans from multi-view videos with a need for drivable 3D Gaussian representation [S1][S2, unofficial].
+* **When not:** Not given in the sources.
+
+## Background
+D3GA was introduced in the context of recent advances in 3D Gaussian splatting for digital human creation [S1]. It is cited as the first method to create animatable human avatars using drivable 3D Gaussians and tetrahedral cages [S1][S2, unofficial]. It is referenced in the survey "Recent advances in 3D Gaussian splatting" [S1].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

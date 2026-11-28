@@ -1,0 +1,217 @@
+Godot Engine – Multi-platform 2D and 3D game engine - Fix tangent/bitagent encoding when computing vertex skinning by Gaktan · Pull Request #120901 · godotengine/godot
+
+Fix tangent/bitagent encoding when computing vertex skinning by Gaktan · Pull Request #120901 · godotengine/godot · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Gaktan
+commented
+Jul 3, 2026
+Copy link
+Copy Markdown
+Contributor
+What problem(s) does this PR solve?
+Proper fix for Normalmap inverts at certain angles on mesh rotated by bone. #81446
+Additional information
+My previous PR #117401 had some caveats. For instance, it did not take the binormal sign encoding into account.
+The way it works is that the binormal sign is encoded in Oct.y. Oct.y is encoded as UNORM16, so values > 0.5 means positive, and values < 0.5 means negative. Since UNORM16 encoding does not allow a value of exactly 0.5 (aka zero once unpacked), the binormal sign was flip-flopping between positive and negative.
+The fix is to clamp the Oct.Y value between [1.0/65535.0; 1-(1.0/65535.0)]. This also avoids the issue with compression detection altogether (what PR #117401 tried to fix).
+I also removed usage of some sign function as its not very efficient on the GPU because it handles many different cases (+/-INF and zero). It's a lot simpler to just check if >= 0
+Gaktan
+requested a review
+from a team
+as a code owner
+July 3, 2026 16:36
+Nintorch
+added
+bug
+topic:rendering
+labels
+Jul 3, 2026
+Nintorch
+added this to the
+4.x milestone
+Jul 3, 2026
+Gaktan
+force-pushed
+the
+fix-skeleton-binormal-sign-encoding
+branch
+from
+3bdc078 to
+a5ca958
+Compare
+July 3, 2026 16:46
+fire
+requested a review
+from a team
+July 5, 2026 16:32
+fire
+commented
+Jul 5, 2026
+Copy link
+Copy Markdown
+Member
+@lyuma @TokageItLab since this is pretty important for animated 3d meshes would prefer a review
+clayjohn
+requested changes
+Jul 5, 2026
+View reviewed changes
+Comment thread
+servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+servers/rendering/renderer_rd/shaders/skeleton.glsl
+Comment on lines
+-114
+to
+-119
+if (oct.x == 0.0 && oct.y == 1.0) {
+// (1, 1) and (0, 1) decode to the same value, but (0, 1) messes with our compression detection.
+// So we sanitize here.
+oct.x = 1.0;
+}
+clayjohn
+Jul 5, 2026
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Why is this no longer needed? It seems unrelated to the binormal change?
+Gaktan
+Jul 5, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The (0, 1) case (tangent compression detection) cannot exist anymore because of clamp(oct.y, 1.0 / 65535.0, 65534.0 / 65535.0).
+So the clamp does 2 things now: prevent the 0.5 value, and prevent the (0, 1) case.
+The other compression detection tests in the code are left as-is for now, but they could also use the clamp instead.
+clayjohn
+Jul 5, 2026
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Hmmmm, I'm not sure this is the right fix then. oct.y == 1.0 is a valid result. If you clamp oct.y to 65534.0 / 65535.0 then you can't fully represent all normal values.
+Gaktan
+Jul 6, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+All normal values cannot be represented with Octahedral encoding anyway.
+According to this paper: https://jcgt.org/published/0003/02/01/paper.pdf
+Oct32 (Oct 2x16bits) has a mean error of 0.00131° and a max error of 0.0037°. Worst case scenario, this would introduce an error of 0.0074° (max error x2 since we remove two non-adjacent possible values out of 65535).
+I believe this is more than acceptable for a normal encoding. From my own investigations, I found that 2x12 bits is more than enough to represent a normal vector accurately with no visible artifacts.
+Besides, the modified code here is only used for tangent encoding, which requires even less precision in theory.
+The other alternative to clamping is to check the 0.5 value case specifically, but floating point comparison is always a pain. I find my method more elegant than this + the encoding detection from before, although a bit more convoluted perhaps.
+clayjohn
+Jul 6, 2026
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The problem is not the total amount of precision. The problem is that you introduce artifacts for any direction which encodes to a value of oct.y == 1.0. The mean error of octahedral encoding is not relevant.
+Gaktan
+Jul 6, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Yes only the max error is relevant. And is approximately 0.0074° as stated.
+Gaktan
+Jul 22, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I did a test in python to validate my assumptions. Interestingly, I don't get the same result as from the paper, I believe this is because I am comparing directions against a 64bits vector reference, whereas the paper compares against 32 bits as the reference.
+How to read this graph:
+I am generating 1 million unit vector directions using a Fibonacci distribution for better uniformity. This direction is encoded in a Vector3 with 64bits per channel. From this reference vector, I compute a Vector3 with 32bits per channel (float32). From this 32 bit vector, I compute the octahedral encoding, quantize it in 16bits per channel (Oct32), then decode it to a Vector3 again to measure the angle error from the encoding/quantization/decoding.
+I do the same thing again, but clamping the quantized result before decoding (Oct32_clamped).
+All the graphs here represent the error compared to the reference 64 bits Vector, measured in degrees.
+Top left is a histogram representing the distribution of the error angle
+Top right is a box plot of the same data, showing mean value and standard deviation
+Finally a table that shows precise values
+As you can see, there is no difference between the clamped/unclamped encoding, suggesting that the error between the two is minimal.
+In good faith, I also tried with Oct30 (15 bits per channel, since Godot uses 1 bit for the binormal sign), and I get similar results.
+I also did another test, which is actually closer to what is happening with my proposed fix, by using the Oct32 decoded result as a reference:
+You can see the max error is negligible with 0.0442 degrees. Again, we are talking about a TANGENT vector, so the error is far less important than the normal error.
+I can provided the code for my test if needed.
+Fix bitagent sign encoding when computing vertex skinning
+5ae0617
+Gaktan
+force-pushed
+the
+fix-skeleton-binormal-sign-encoding
+branch
+from
+a5ca958 to
+5ae0617
+Compare
+July 5, 2026 19:11
+Gaktan
+requested a review
+from clayjohn
+July 5, 2026 19:14
+zeux
+mentioned this pull request
+Jul 8, 2026
+Fix tangent transformation for meshes with non-uniform scale
+#121012
+Merged
+fire
+commented
+Jul 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+#121012 is related
+jitspoe
+commented
+Jul 11, 2026
+Copy link
+Copy Markdown
+Contributor
+So just out of curiosity -- any idea why this issue is only occurring for me with .blend/gltf import, and not with FBX? Also, if I import with force disable compression on the .blend file, I still get the problem. Isn't this specifically to fix compression?
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+bug
+topic:rendering
+5 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

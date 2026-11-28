@@ -1,0 +1,136 @@
+# Occupancy Prediction Task
+
+Also called: Occupancy Field Learning, Occupancy Network Training
+
+## Overview
+The Occupancy Prediction Task is a supervised learning objective where a neural network predicts the binary occupancy status (inside or outside) of 3D points to represent a shape's occupancy field [S1]. It solves the problem of fitting an implicit 3D representation to a target geometry by minimizing the discrepancy between predicted occupancy probabilities and ground truth labels [S1]. Unlike methods that predict signed distance fields (SDF) or continuous density, this task explicitly models the indicator function of the shape's volume [S1]. It differs from its sibling, Dichotomy-based Triggering for Occupancy Field, which focuses on optimizing the sampling strategy for the occupancy grid rather than the network's core training objective [10014-dichotomy-based-triggering-for-occupancy-field.md].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D query points $x \in \mathbb{R}^3$.
+*   **Output:** A scalar occupancy probability $y \in [0, 1]$ for each point, representing the likelihood that the point lies inside the shape.
+
+**Data Structures:**
+The specific data structures depend on the variant. For the baseline ACORN variant, the network consists of:
+1.  **Coordinate Encoder:** A ReLU MLP with 4 hidden layers, 512 units each. It outputs a feature cube of $C=18$ channels with spatial dimensions $N_1=N_2=N_3=12$.
+2.  **Feature Decoder:** A single hidden layer MLP with 64 units.
+3.  **Block Index Storage:** Global block indices normalized to $[-1, 1]$.
+
+**Ground Truth Computation:**
+Ground truth occupancy $y_{GT}$ is computed using the even–odd rule [S1]. For a query point $x$, cast a ray in an arbitrary direction; if the ray intersects the mesh an odd number of times, $y_{GT}=1$ (inside), otherwise $y_{GT}=0$ (outside) [S1].
+
+**Sampling Strategy:**
+Points are sampled with a 50/50 split [S1]:
+1.  Half of the points are sampled near the mesh surface (perturbed surface points).
+2.  Half of the points are sampled uniformly within the bounding volume of the shape [S1].
+
+**Loss Function:**
+The network is trained using Binary Cross-Entropy (BCE) loss [S1]:
+$$ \ell(y, y_{GT}) = -[y_{GT} \cdot \log(y) + (1 - y_{GT}) \cdot \log(1 - y)] $$
+where $y$ is the network's predicted occupancy and $y_{GT} \in \{0, 1\}$ is the ground truth label [S1].
+
+**Algorithm (ACORN Variant):**
+The following pseudocode describes the training loop for the ACORN variant [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_acorn_occupancy(mesh, max_iterations=84000, lr=1e-3):
+    # Initialize network parameters
+    coord_encoder = ReLU_MLP(layers=[512, 512, 512, 512], output_channels=18, spatial_dims=12)
+    feature_decoder = MLP(layers=[64], output_dim=1)
+    optimizer = Adam(params=concat(coord_encoder, feature_decoder), lr=lr)
+    
+    # Initialize block partition
+    # Max octants N_B = 1024. Initial block indices normalized to [-1, 1].
+    blocks = initialize_blocks(N_B=1024)
+    
+    for iteration in range(1, max_iterations + 1):
+        # 1. Sample points
+        # Sample 64 points per active octant
+        points = []
+        for block in blocks:
+            points.extend(sample_points_in_octant(block, count=64))
+        
+        # 2. Compute Ground Truth
+        # Use even-odd rule for all points
+        y_GT = compute_even_odd_occupancy(points, mesh)
+        
+        # 3. Forward Pass
+        # Encode coordinates
+        # Normalize block indices to [-1, 1] and apply positional encoding (6 freqs)
+        block_indices = get_block_indices(points)
+        encoded_indices = positional_encoding(block_indices, num_frequencies=6)
+        
+        # Get feature cube from coordinate encoder
+        # The encoder takes the encoded indices and outputs a feature cube
+        feature_cube = coord_encoder(encoded_indices)
+        
+        # Decode occupancy
+        # The decoder takes the feature cube values at the specific block locations
+        y_pred = feature_decoder(feature_cube, points)
+        
+        # 4. Compute Loss
+        loss = binary_cross_entropy(y_pred, y_GT)
+        
+        # 5. Backpropagate
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        # 6. Periodic Optimization
+        if iteration % 1000 == 0:
+            # Optimize block partition with alpha=0.2, beta=0.02 unless pruning
+            optimize_block_partition(blocks, points, y_pred, alpha=0.2, beta=0.02)
+            
+        if iteration % 4000 == 0:
+            # Prune octants
+            prune_blocks(blocks, threshold_error=1e-3, threshold_max_occ=5e-5)
+            
+    return coord_encoder, feature_decoder, blocks
+```
+
+**Parameters:**
+*   **Coordinate Encoder:** 4 hidden layers, 512 units/layer, ReLU activation. Output: 18-channel feature cube ($12 \times 12 \times 12$) [S1].
+*   **Feature Decoder:** 1 hidden layer, 64 units [S1].
+*   **Positional Encoding:** 6 frequencies [S1].
+*   **Optimizer:** Adam, learning rate $1 \times 10^{-3}$ [S1].
+*   **Block Partition Optimization:** $\alpha = 0.2$, $\beta = 0.02$ [S1].
+*   **Pruning Thresholds:** Average sample error $< 1 \times 10^{-3}$ AND max predicted occupancy $< 5 \times 10^{-5}$ [S1].
+*   **Resolution:** The occupancy prediction cube resolution is cited as $1024^3$ in general descriptions, though the ACORN variant uses an adaptive block decomposition with a max of $N_B=1024$ octants [S1].
+
+**Edge Cases and Pitfalls:**
+*   **IoU Drops:** Large drops in Intersection over Union (IoU) can occur during training due to block reshuffling. This is a known pitfall but reallocation improves long-term quality [S1].
+*   **Pruning:** Octants must be pruned carefully based on error and occupancy thresholds to avoid removing critical surface details [S1].
+
+## Subtopics
+
+### ACORN 3D Occupancy Prediction
+A specific implementation of the Occupancy Prediction Task using adaptive coordinate networks. It differs from standard grid-based methods by using an adaptive block decomposition (octree) with continuous coordinate networks rather than a fixed discrete grid. It is chosen when high-fidelity reconstruction of complex shapes with thin features is required with limited GPU memory. It trains and converges faster than Convolutional Occupancy Networks and SIREN [S1].
+
+### Convolutional Occupancy Networks Baseline
+A fully-convolutional architecture for scalable implicit 3D representation. It differs from ACORN by using sliding-window training/inference on voxel crops and a discrete grid encoding. It is chosen when a fixed-resolution grid approach is preferred over adaptive decomposition. It requires sampling 2048 query points per $25 \times 25 \times 25$ voxel crop (voxel size 0.01) and uses 5 million input surface points with Gaussian noise (std 0.05) [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **ACORN:** Uses approximately 17 million parameters. Training the Thai Statue model took 4.25 hours using 1.7 GB GPU memory. Training the Engine model took 7.77 hours using 1.7 GB GPU memory [S1].
+*   **Convolutional Occupancy Networks:** Requires 9.1 GB GPU memory and 100 hours of training time for comparable tasks [S1].
+*   **SIREN:** Requires 14.3 GB GPU memory and 29.28 hours of training time [S1].
+
+**Measured Performance:**
+*   **Thai Statue (ACORN):** IoU 0.999, Chamfer-$L_1$ $1.55 \times 10^{-5}$, Precision 0.999, Recall 0.999, F-Score 0.999 [S1].
+*   **Engine (ACORN):** IoU 0.987, Chamfer-$L_1$ $8.46 \times 10^{-5}$, Precision 0.992, Recall 0.994, F-Score 0.993 [S1].
+*   **Comparison:** ACORN achieves higher IoU and faster convergence than SPSR, Convolutional Occupancy Networks, and SIREN [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** High memory efficiency (1.7 GB vs 9-14 GB for baselines), fast convergence, and ability to handle complex thin features (e.g., Engine model) [S1].
+*   **Limitations:** Training instability (IoU drops) due to block reshuffling requires careful monitoring [S1].
+
+**When to Use:**
+Use ACORN for high-quality 3D shape reconstruction with limited GPU resources. Use Convolutional Occupancy Networks when a fixed-grid sliding window approach is necessary. Avoid SIREN if memory is constrained, as it requires significantly more VRAM [S1].
+
+## Background
+The Occupancy Prediction Task was benchmarked in the ACORN paper (2021) to evaluate neural scene representations [S1]. It builds on the concept of occupancy fields introduced by Mescheder et al. (2019) [S1]. The task is used to fit implicit 3D representations to detailed 3D models, such as the Thai Statue and a Top Fuel drag-racing engine, demonstrating the ability to capture thin features and hard edges [S1].
+
+## Sources
+[S1] ACORN: Adaptive Coordinate Networks for Neural Scene Representation, https://doi.org/10.48550/arxiv.2105.02788, fetched 2026-10-26

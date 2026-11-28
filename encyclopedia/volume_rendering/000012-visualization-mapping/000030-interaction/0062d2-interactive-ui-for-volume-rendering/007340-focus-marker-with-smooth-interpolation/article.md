@@ -1,0 +1,262 @@
+# Focus Marker with Smooth Interpolation
+
+Also called: Focus Marker Animation, Smooth Focus Transition
+
+## Overview
+This method provides a system to maintain a visible focus marker in 3D volume rendering and linked 2D slices, using fractional coordinates for interpolation and smooth animation between target positions [S1, unofficial]. It sets itself apart from sibling methods like [Interactive Editing with Proxy Plane Manipulation](19238-interactive-editing-with-proxy-plane-manipulation.md) by decoupling the logical position (fractional) from the display coordinate (world mm), ensuring alignment during orbit, zoom, resize, and PNG export, whereas proxy planes typically manipulate the view volume directly [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** User interaction events (mouse wheel, clicks) providing target positions; current volume dimensions.
+*   **Output:** Updated `current` focus position; redrawn 3D volume and 2D slices with updated crosshairs/markers.
+
+**Data Structures:**
+The core state is held in a `FocusLocation` object [S1, unofficial]:
+*   `mm`: `number[]` — World coordinates in millimeters.
+*   `frac`: `number[]` — Fractional coordinates, range $[0, 1]$.
+*   `visible`: `boolean` — Visibility flag for the marker.
+
+**Parameters:**
+*   `duration`: Animation duration in milliseconds. Typical value: $110$ ms [S1, unofficial].
+*   `notifyInterval`: Minimum time between listener notifications in milliseconds. Typical value: $45$ ms [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialization:** Set `current` and `target` positions to $[0.5, 0.5, 0.55]$ [S1, unofficial].
+2.  **Rendering Hook:** Override the core scene drawing function (e.g., `drawSceneCore`) to call `drawMarkers()` if the marker is enabled and volumes exist [S1, unofficial].
+3.  **Trigger:** On a location change event, call the `moveTo` function with the desired fractional coordinates [S1, unofficial].
+4.  **Cancel Previous:** Inside `moveTo`, cancel any existing animation frame to prevent queueing [S1, unofficial].
+5.  **Capture Start:** Calculate the `from` position as the current `current` value [S1, unofficial].
+6.  **Set Target:** Update the `target` position. Clamp the input fractional coordinates to $[0, 1]$ [S1, unofficial].
+7.  **Accessibility Check:** If the `reducedMotion` flag is true, set `current = target` immediately and skip animation [S1, unofficial].
+8.  **Start Animation:** Otherwise, start a `requestAnimationFrame` loop with the specified `duration` [S1, unofficial].
+9.  **Progress Calculation:** In each tick, calculate progress:
+    $$ progress = \min\left(1, \frac{now - started}{duration}\right) $$
+    where `now` is the current timestamp and `started` is the animation start time [S1, unofficial].
+10. **Easing:** Apply cubic ease-out:
+    $$ eased = 1 - \text{Math.pow}(1 - progress, 3) $$
+    [S1, unofficial].
+11. **Interpolation:** Update `current` using linear interpolation with the eased factor:
+    $$ current = from + (target - from) \times eased $$
+    [S1, unofficial].
+12. **Apply:** Call `apply()` to update the crosshair positions in the 3D and 2D views based on the new `current` [S1, unofficial].
+13. **Notify:** Notify listeners every $45$ ms or at completion of the animation [S1, unofficial].
+
+**Wheel Scrolling Logic:**
+1.  Check for modifier keys (ctrl, meta, alt, shift) or if `deltaY` is zero; return immediately if present [S1, unofficial].
+2.  Get the canvas rect and calculate pixel coordinates relative to the tile [S1, unofficial].
+3.  Get the tile index and tile object [S1, unofficial].
+4.  Return if the tile is null or `axCorSag > 2` [S1, unofficial].
+5.  Determine the axis from `axCorSag` using the mapping `[2, 1, 0][axCorSag]` [S1, unofficial].
+6.  Calculate voxel movement:
+    $$ voxels = \frac{pixels}{50} $$
+    Clamp `voxels` to $[-4, 4]$ [S1, unofficial].
+7.  **World Mode (`isSliceMM` is true):**
+    *   Convert current `target` to world mm.
+    *   Add `direction * voxels` to the axis component.
+    *   Convert back to fractional coordinates.
+    *   Check bounds: if the new fractional position is outside $[0, 1]$ (i.e., $< 0$ or $> 1$), abort the move to prevent invalid states [S1, unofficial].
+    *   Call `moveTo` with the new fractional coordinates [S1, unofficial].
+8.  **Fractional Mode (`isSliceMM` is false):**
+    *   Update the fractional coordinate directly.
+    *   Clamp to $[0.5/dim, 1 - 0.5/dim]$ where `dim` is the dimension size [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import time
+import math
+
+class FocusMarker:
+    def __init__(self, volume_dims):
+        # volume_dims: list of int, e.g., [512, 512, 100]
+        self.volume_dims = volume_dims
+        self.current = [0.5, 0.5, 0.55]
+        self.target = [0.5, 0.5, 0.55]
+        self.animation_id = None
+        self.last_notify_time = 0
+        self.duration = 110  # ms
+        self.notify_interval = 45  # ms
+        self.reduced_motion = False
+        self.is_slice_mm = False
+
+    def draw_scene_core(self, draw_markers_enabled, volumes_exist):
+        if draw_markers_enabled and volumes_exist:
+            self.draw_markers()
+
+    def draw_markers(self):
+        # Implementation specific to renderer (e.g., NiiVue)
+        # Updates crosshairs based on self.current
+        pass
+
+    def apply(self):
+        # Updates the visual representation of the focus marker
+        # and synchronizes with peer views if necessary
+        pass
+
+    def notify_listeners(self, now):
+        if now - self.last_notify_time >= self.notify_interval:
+            # Trigger UI update or event dispatch
+            self.last_notify_time = now
+
+    def move_to(self, new_frac_coords):
+        # Cancel existing animation
+        if self.animation_id is not None:
+            cancelAnimationFrame(self.animation_id)
+            self.animation_id = None
+
+        # Clamp target to [0, 1]
+        clamped_target = [max(0.0, min(1.0, c)) for c in new_frac_coords]
+        self.target = clamped_target
+        from_pos = list(self.current)
+
+        # Accessibility: reduced motion
+        if self.reduced_motion:
+            self.current = list(self.target)
+            self.apply()
+            self.notify_listeners(time.time() * 1000)
+            return
+
+        # Start animation
+        started = time.time() * 1000  # ms
+        self.animation_id = requestAnimationFrame(lambda now_ms: self.tick(from_pos, started, now_ms))
+
+    def tick(self, from_pos, started, now):
+        progress = min(1.0, (now - started) / self.duration)
+        eased = 1.0 - math.pow(1.0 - progress, 3)
+        
+        # Linear interpolation with eased factor
+        self.current = [from_pos[i] + (self.target[i] - from_pos[i]) * eased for i in range(3)]
+        
+        self.apply()
+        self.notify_listeners(now)
+
+        if progress < 1.0:
+            self.animation_id = requestAnimationFrame(lambda now_ms: self.tick(from_pos, started, now_ms))
+        else:
+            self.current = list(self.target)
+            self.apply()
+            self.notify_listeners(now)
+            self.animation_id = None
+
+    def handle_wheel(self, event, canvas_rect, tile, ax_cor_sag):
+        # Check modifiers and deltaY
+        if event.ctrlKey or event.metaKey or event.altKey or event.shiftKey or event.deltaY == 0:
+            return
+        
+        # Get pixel coordinates relative to tile
+        # Assuming event provides clientX/Y and tile provides offset/size
+        # pixels = (event.clientX - tile.offsetX) / tile.scale ... (simplified)
+        # For this implementation, we assume 'pixels' is calculated as delta in pixels
+        pixels = event.deltaY 
+        
+        # Check tile validity
+        if tile is None or ax_cor_sag > 2:
+            return
+
+        # Determine axis: [2, 1, 0][ax_cor_sag]
+        axis_map = [2, 1, 0]
+        axis = axis_map[ax_cor_sag]
+        
+        # Calculate voxel movement
+        voxels = pixels / 50.0
+        voxels = max(-4.0, min(4.0, voxels))
+        
+        direction = 1.0 if voxels > 0 else -1.0
+        abs_voxels = abs(voxels)
+
+        if self.is_slice_mm:
+            # Convert current target to world mm
+            # Assuming volume has spacing and origin, or we map frac to mm
+            # frac_to_mm is a helper not defined in source, assumed to exist
+            world_pos = self.fraction_to_mm(self.target)
+            
+            # Add direction * voxels to axis
+            world_pos[axis] += direction * abs_voxels
+            
+            # Convert back to frac
+            new_frac = self.mm_to_fraction(world_pos)
+            
+            # Check bounds
+            if new_frac[axis] < 0 or new_frac[axis] > 1:
+                return # Abort move
+            
+            self.move_to(new_frac)
+        else:
+            # Update fractional coordinate directly
+            # Clamp to 0.5/dim and 1 - 0.5/dim
+            dim = self.volume_dims[axis]
+            min_frac = 0.5 / dim
+            max_frac = 1.0 - 0.5 / dim
+            
+            current_frac = self.target[axis]
+            step = direction * abs_voxels # Note: voxels here is in voxel units, but we are in frac mode?
+            # Source says "update fractional coordinate directly with clamping".
+            # It implies the 'voxels' calculated from pixels is added to the frac coordinate?
+            # Or is 'voxels' converted to frac?
+            # Source: "Calculate voxel movement: pixels / 50... If not isSliceMM, update fractional coordinate directly"
+            # It does not explicitly state conversion from voxels to frac for the non-MM case.
+            # However, adding raw voxel count to fractional coordinate [0,1] is dimensionally inconsistent.
+            # Given the clamp is 0.5/dim, it suggests the step size might be normalized or 'voxels' is actually a frac delta.
+            # Re-reading: "Calculate voxel movement: pixels / 50... If not isSliceMM, update fractional coordinate directly with clamping..."
+            # It is likely that 'voxels' in the non-MM case is treated as a fractional step or the source implies a direct addition 
+            # where the magnitude is small enough or normalized. 
+            # Let's assume the 'voxels' value is added directly to the fractional coordinate as per the literal instruction, 
+            # though this is physically ambiguous without a scale factor. 
+            # However, looking at the MM case, it adds 'direction * voxels' to mm.
+            # In the non-MM case, it updates frac. 
+            # Let's assume the 'voxels' variable holds the delta in the respective unit system.
+            # But 'pixels/50' is pixels. 
+            # Pitfall note: "When scrolling in world millimeters...". This implies the other case is fractional.
+            # Let's assume the step size in frac is derived from the pixel delta.
+            # Since no conversion formula is given for non-MM, we assume the 'voxels' value is used as the delta in frac space?
+            # Or perhaps 'voxels' is converted to frac by dividing by dim?
+            # Source does not give the conversion. 
+            # We will implement the literal "update fractional coordinate directly" with the calculated 'voxels' value,
+            # but this is a likely gap. 
+            # Actually, looking at the clamp: 0.5/dim. If dim=512, clamp is ~0.001. 
+            # If voxels=4, adding 4 to 0.5 is impossible. 
+            # Therefore, 'voxels' must be converted to fractional units. 
+            # Standard conversion: frac_delta = voxel_delta / dim.
+            # We will add this assumption [G] as it is necessary for implementation.
+            
+            frac_step = direction * abs_voxels / dim
+            
+            new_frac_val = self.target[axis] + frac_step
+            new_frac_val = max(min_frac, min(max_frac, new_frac_val))
+            
+            new_frac = list(self.target)
+            new_frac[axis] = new_frac_val
+            self.move_to(new_frac)
+
+    def fraction_to_mm(self, frac_coords):
+        # Helper to convert frac to world mm
+        # Assumes volume origin and spacing are available
+        # Not defined in source, assumed to be a standard utility
+        return [0.0, 0.0, 0.0] # Placeholder for implementation detail
+
+    def mm_to_fraction(self, mm_coords):
+        # Helper to convert world mm to frac
+        return [0.0, 0.0, 0.0] # Placeholder for implementation detail
+```
+
+**Subtopics:**
+*   **Interactive Editing with Proxy Plane Manipulation:** Manipulates the view volume directly using proxy planes. Choose when direct view volume control is preferred over marker-based navigation. [Link](19238-interactive-editing-with-proxy-plane-manipulation.md)
+*   **Omniview View Volume Control:** Controls the view volume across multiple views simultaneously. Choose when synchronized multi-view volume adjustment is required. [Link](22730-omniview-view-volume-control.md)
+
+## Operating characteristics
+*   **Time Complexity:** Animation is frame-rate dependent via `requestAnimationFrame`. Notification overhead is bounded by `notifyInterval` (45 ms).
+*   **Memory Complexity:** Constant space for `FocusLocation` and animation state.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** The use of fractional coordinates ensures that the marker remains aligned with the volume data regardless of orbit, zoom, resize, or PNG export operations [S1, unofficial].
+*   **Strengths:** Smooth user experience via cubic ease-out; robust handling of accessibility (reduced motion); prevents invalid states by clamping and aborting out-of-bounds moves in world mode.
+*   **Limitations:** Animation duration is fixed at 110 ms in the source implementation; world mode requires conversion between fractional and millimeter coordinates which depends on volume metadata.
+*   **When to use:** When a smooth, animated focus marker is needed for both 3D and linked 2D slice views.
+*   **When not:** When immediate, non-animated position changes are required, or when proxy plane manipulation is the preferred interaction model.
+
+## Background
+This method is implemented in the OpenMRI application, an open-source tool for viewing and comparing MRI studies [S1, unofficial]. It was developed by lev1nson and is part of the interactive UI components for volume rendering [S1, unofficial]. The system uses NiiVue for rendering and SimpleITK for registration [S1, unofficial].
+
+## Sources
+[S1] lev1nson/OpenMRI, https://github.com/lev1nson/OpenMRI, fetched 2026-10-26 (unofficial)

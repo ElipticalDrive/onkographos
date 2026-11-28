@@ -1,0 +1,1723 @@
+# 体渲染传递函数编辑器 (Transfer Function Editor)
+
+这是一个用于医学三维可视化领域中**体渲染传递函数（Transfer Function）编辑器**的实现。
+
+---
+
+## 📁 项目整体架构
+
+```
+tfeditor/
+├── main.cpp                    # 程序入口，窗口和渲染循环管理
+├── imgui/                      # ImGui 库（UI框架）
+├── shaders/                    # OpenGL 着色器
+│   ├── ui2d.vert              # 2D UI 顶点着色器
+│   └── ui2d.frag              # 2D UI 片段着色器
+└── src/
+    ├── tf/                     # 传递函数核心模块
+    │   ├── tf_editor.h/.cpp   # TF编辑器核心类
+    │   └── tf_gl.h/.cpp       # OpenGL LUT纹理管理
+    └── ui/                     # UI渲染模块
+        ├── ui_types.h         # 基础类型定义
+        ├── input_state.h/.cpp # 输入状态管理
+        └── ui_renderer2d.h/.cpp # 2D渲染器
+```
+
+---
+
+## 🔑 核心组件分析
+
+### 1. TFEditor 类 (`src/tf/tf_editor.h`)
+
+这是传递函数编辑器的核心类，负责管理：
+
+| 数据结构 | 说明 |
+|---------|------|
+| `AlphaPoint` | 不透明度控制点 `{x: 0~1, a: 0~1}` |
+| `ColorPoint` | 颜色控制点 `{x: 0~1, c: RGB}` |
+| `std::vector<glm::vec4> mLUT` | 最终的查找表（RGBA） |
+
+**主要功能：**
+
+- **initDefault()**: 初始化默认控制点（两端点）
+- **sampleAlpha/sampleColor()**: 线性插值采样
+- **buildLUT()**: 根据控制点生成 LUT
+- **drawImGui()**: 使用 ImGui 绘制完整的编辑器 UI
+
+### 2. UI 渲染架构
+
+项目实现了 **双重 UI 系统**：
+
+| 系统 | 用途 |
+|------|------|
+| **UIRenderer2D** | 原生 OpenGL 2D 渲染（fillRect/line/point） |
+| **ImGui** | 高级交互式 UI（当前主要使用） |
+
+### 3. LUT 纹理管理 (`src/tf/tf_gl.h`)
+
+```cpp
+GLuint createLUTTexture2D_RGBA16F(int N);   // 创建 RGBA16F 格式的 1D 纹理
+void uploadLUTTexture2D_RGBA16F(...);       // 上传 LUT 数据到 GPU
+```
+
+---
+
+## 🎨 传递函数编辑器 UI 布局
+
+根据 `drawImGui()` 实现，UI 分为三个区域：
+
+```
+┌─────────────────────────────────────┐
+│  Color + Alpha (RGBA over checker)  │  ← 颜色渐变条 + 透明度叠加
+│  ○────────○────────○                │    （带棋盘格背景）
+├─────────────────────────────────────┤
+│         Opacity Curve               │  ← 不透明度曲线编辑区
+│           ○                         │    （可选直方图背景）
+│         /   \                       │
+│       ○       ○                     │
+├─────────────────────────────────────┤
+│  Inspector                          │  ← 控制点属性面板
+│  Alpha #1:  X [____] A [____]       │
+│  Color #2:  X [____] [Color Picker] │
+│  Combined: rgb=(0.5 0.5 0.5) a=0.7  │
+└─────────────────────────────────────┘
+```
+
+---
+
+## 🔄 数据流
+
+```
+用户交互 (鼠标/键盘)
+      ↓
+TFEditor::drawImGui()
+  - 控制点增删改
+  - 拖拽移动
+      ↓
+buildLUT() → mLUT (RGBA数组)
+      ↓
+uploadLUTTexture2D_RGBA16F() → GPU 纹理
+      ↓
+体渲染着色器采样 LUT
+```
+
+---
+
+## 🛠️ 交互功能
+
+| 操作 | 功能 |
+|------|------|
+| **双击** | 在曲线/渐变条上添加新控制点 |
+| **拖拽** | 移动控制点位置 |
+| **Delete 键** | 删除选中的中间控制点 |
+| **数值输入** | Inspector 面板精确编辑 X/Alpha/RGB |
+| **ColorPicker** | 选择颜色 |
+
+---
+
+## 📋 技术栈
+
+- **图形 API**: OpenGL 3.3 Core Profile
+- **窗口管理**: GLFW
+- **OpenGL 加载**: glad
+- **UI 框架**: Dear ImGui
+- **数学库**: GLM
+
+---
+
+## 📝 主要文件说明
+
+### `main.cpp`
+
+程序入口，负责：
+- GLFW 窗口初始化
+- OpenGL 上下文创建
+- ImGui 初始化和渲染循环
+- 左侧 Dock 面板（TF编辑器）+ 右侧 Viewport（3D视图）布局
+- 可拖拽的分割条实现
+
+### `src/tf/tf_editor.h/.cpp`
+
+传递函数编辑器核心实现：
+
+```cpp
+struct AlphaPoint { float x; float a; };     // 0..1, 0..1
+struct ColorPoint { float x; glm::vec3 c; }; // 0..1, rgb 0..1
+
+class TFEditor {
+    std::vector<AlphaPoint> alpha;   // 不透明度控制点
+    std::vector<ColorPoint> colors;  // 颜色控制点
+    std::vector<glm::vec4> mLUT;     // 生成的查找表
+    
+    // 核心方法
+    void initDefault();              // 初始化默认TF
+    void buildLUT();                 // 生成LUT
+    bool drawImGui(...);             // ImGui界面绘制
+    float sampleAlpha(float x);      // 采样不透明度
+    glm::vec3 sampleColor(float x);  // 采样颜色
+};
+```
+
+### `src/tf/tf_gl.h/.cpp`
+
+OpenGL 纹理管理：
+- 创建 RGBA16F 格式的 LUT 纹理
+- 将 CPU 端 LUT 数据上传至 GPU
+
+### `src/ui/ui_types.h`
+
+基础类型定义：
+- `Rect`: 矩形区域（屏幕空间像素坐标）
+- `Vertex2D`: 2D 顶点（位置 + 颜色）
+- `clamp01()`: 值域裁剪辅助函数
+
+### `src/ui/input_state.h/.cpp`
+
+输入状态管理：
+- 鼠标位置、按键状态
+- 双击检测
+- Shift/Ctrl 修饰键
+- Delete 键检测
+
+### `src/ui/ui_renderer2d.h/.cpp`
+
+原生 OpenGL 2D 渲染器：
+- 矩形填充
+- 线段绘制
+- 圆点绘制
+
+### `shaders/ui2d.vert` & `shaders/ui2d.frag`
+
+简单的 2D UI 着色器：
+- 顶点着色器：MVP 变换
+- 片段着色器：顶点颜色直接输出
+
+---
+
+## 🔧 当前状态
+
+项目已具备**完整的传递函数编辑功能**，包括：
+
+- ✅ Alpha 曲线编辑
+- ✅ 颜色渐变编辑  
+- ✅ 控制点的增删改查
+- ✅ LUT 生成与 GPU 上传
+- ✅ 直方图可视化支持
+- ✅ 精确数值输入
+- ✅ RGBA 叠加预览（带棋盘格背景）
+
+---
+
+## 🚀 待扩展
+
+右侧 Viewport 目前是演示三角形，需要替换为实际的体渲染器来使用传递函数：
+
+```cpp
+// main.cpp 中的 TODO
+renderViewportDemo(solidProg, triVAO); // TODO: replace with your volume renderer
+```
+
+体渲染器需要：
+1. 加载 3D 体数据（如 CT/MRI DICOM）
+2. 使用光线投射（Ray Casting）或其他体渲染算法
+3. 在着色器中采样 TF 纹理进行颜色和透明度映射
+
+---
+
+## 📦 构建说明
+
+项目使用 Visual Studio 解决方案 (`tfeditor.sln`)：
+
+1. 打开 `tfeditor.sln`
+2. 选择 Release/Debug x64 配置
+3. 构建并运行
+
+**依赖项：**
+- GLFW（窗口管理）
+- glad（OpenGL 加载）
+- GLM（数学库）
+- Dear ImGui（已包含在 `imgui/` 目录）
+
+### tfeditor/main.cpp
+```
+﻿// main.cpp (GLFW + glad + ImGui + OpenGL3)
+// Left dock with draggable splitter, TF editor with numeric input, LUT upload.
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_glfw.h"
+#include "imgui/imgui_impl_opengl3.h"
+
+#include <vector>
+#include <algorithm>
+#include <iostream>
+
+// 你的 TF 代码（保留 buildLUT/lut/sample...）
+#include "src/tf/tf_editor.h"
+#include "src/tf/tf_gl.h"
+
+// ----- demo "3D viewport" triangle (replace with your volume renderer) -----
+static GLuint makeSolidProgram() {
+	const char* vs = R"(
+    #version 330 core
+    layout(location=0) in vec2 aPos;
+    void main(){ gl_Position = vec4(aPos,0,1); }
+    )";
+	const char* fs = R"(
+    #version 330 core
+    out vec4 FragColor;
+    uniform vec4 uColor;
+    void main(){ FragColor = uColor; }
+    )";
+	auto compile = [](GLenum t, const char* s)->GLuint {
+		GLuint sh = glCreateShader(t);
+		glShaderSource(sh, 1, &s, nullptr);
+		glCompileShader(sh);
+		GLint ok = 0; glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+		if (!ok) { char log[2048]; glGetShaderInfoLog(sh, 2048, nullptr, log); std::cerr << log << "\n"; }
+		return sh;
+	};
+	GLuint v = compile(GL_VERTEX_SHADER, vs);
+	GLuint f = compile(GL_FRAGMENT_SHADER, fs);
+	GLuint p = glCreateProgram();
+	glAttachShader(p, v); glAttachShader(p, f);
+	glLinkProgram(p);
+	glDeleteShader(v); glDeleteShader(f);
+	return p;
+}
+
+static void renderViewportDemo(GLuint prog, GLuint vao) {
+	glUseProgram(prog);
+	glUniform4f(glGetUniformLocation(prog, "uColor"), 0.2f, 0.6f, 0.9f, 1.0f);
+	glBindVertexArray(vao);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glBindVertexArray(0);
+}
+
+// ----- optional fake histogram -----
+static std::vector<float> makeFakeHistogram(int bins) {
+	std::vector<float> h(bins, 0.f);
+	for (int i = 0; i < bins; i++) {
+		float x = (float)i / (float)(bins - 1);
+		auto gauss = [&](float mu, float s) { float d = (x - mu); return std::exp(-0.5f*d*d / (s*s)); };
+		h[i] = gauss(0.25f, 0.02f)*0.8f + gauss(0.75f, 0.06f)*0.5f;
+	}
+	float mx = 1e-6f; for (float v : h) mx = std::max(mx, v);
+	for (float& v : h) v /= mx;
+	return h;
+}
+
+// ---------------------------------------------------------
+// 你需要在 TFEditor 里新增一个函数：drawImGui()
+// 下面 main 里会直接调用 tf.drawImGui("TF", &hist);
+// ---------------------------------------------------------
+
+int main() {
+	if (!glfwInit()) return 1;
+
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+	GLFWwindow* win = glfwCreateWindow(1280, 720, "TF Editor (ImGui) - Final", nullptr, nullptr);
+	if (!win) return 1;
+	glfwMakeContextCurrent(win);
+	glfwSwapInterval(1);
+
+	if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) return 1;
+
+	// ---- ImGui init ----
+#ifdef IMGUI_CHECKVERSION
+	IMGUI_CHECKVERSION();
+#endif
+	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO();
+	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+	ImGui::StyleColorsDark();
+
+	// Bigger UI (pick one or both)
+	io.FontGlobalScale = 1.0f;
+	// Optional: load a larger TTF font for sharper text (path must exist)
+	// io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/consola.ttf", 20.0f);
+	// ImGui::GetStyle().ScaleAllSizes(1.10f);
+
+	ImGui_ImplGlfw_InitForOpenGL(win, true);
+	ImGui_ImplOpenGL3_Init("#version 330");
+
+	// ---- TF init ----
+	TFEditor tf;
+	tf.initDefault();
+	tf.setLUTSize(512);
+
+	GLuint tfTex = createLUTTexture2D_RGBA16F(512);
+	uploadLUTTexture2D_RGBA16F(tfTex, tf.lut());
+
+	std::vector<float> hist = makeFakeHistogram(256);
+
+	// ---- demo viewport resources ----
+	GLuint solidProg = makeSolidProgram();
+	GLuint triVAO = 0, triVBO = 0;
+	{
+		float verts[] = { -0.6f,-0.4f,  0.6f,-0.4f,  0.0f,0.7f };
+		glGenVertexArrays(1, &triVAO);
+		glGenBuffers(1, &triVBO);
+		glBindVertexArray(triVAO);
+		glBindBuffer(GL_ARRAY_BUFFER, triVBO);
+		glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+		glBindVertexArray(0);
+	}
+
+	// ---- Dock splitter state ----
+	float dockW = 420.0f;
+	const float dockMinW = 280.0f;
+	const float viewMinW = 480.0f;
+
+	while (!glfwWindowShouldClose(win)) {
+		glfwPollEvents();
+
+		int fbW = 0, fbH = 0;
+		glfwGetFramebufferSize(win, &fbW, &fbH);
+
+		// ---- start ImGui frame ----
+		ImGui_ImplOpenGL3_NewFrame();
+		ImGui_ImplGlfw_NewFrame();
+		ImGui::NewFrame();
+
+		// Fullscreen main window
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2((float)fbW, (float)fbH));
+		ImGui::Begin("Main", nullptr,
+			ImGuiWindowFlags_NoDecoration |
+			ImGuiWindowFlags_NoMove |
+			ImGuiWindowFlags_NoSavedSettings);
+
+		// clamp dock width
+		dockW = std::max(dockMinW, std::min(dockW, (float)fbW - viewMinW));
+
+		// ------------- Left Dock -------------
+		ImGui::BeginChild("Dock", ImVec2(dockW, 0), true);
+
+		bool changed = tf.drawImGui("TF", &hist);
+		if (changed) {
+			uploadLUTTexture2D_RGBA16F(tfTex, tf.lut());
+		}
+
+		// IMPORTANT: ensure Dock background covers full height (prevents "lower half black" look)
+		ImGui::Dummy(ImVec2(1.0f, ImGui::GetContentRegionAvail().y));
+
+		ImGui::EndChild();
+
+		// ------------- Splitter -------------
+		ImGui::SameLine();
+		ImGui::InvisibleButton("Splitter", ImVec2(6.0f, ImGui::GetContentRegionAvail().y));
+		if (ImGui::IsItemActive()) {
+			dockW += io.MouseDelta.x;
+		}
+		if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+			ImDrawList* dl = ImGui::GetWindowDrawList();
+			ImVec2 a = ImGui::GetItemRectMin();
+			ImVec2 b = ImGui::GetItemRectMax();
+			dl->AddRectFilled(a, b, IM_COL32(90, 90, 105, 255));
+		}
+
+		// ------------- Right Viewport -------------
+		ImGui::SameLine();
+		ImGui::BeginChild("Viewport", ImVec2(0, 0), true);
+
+		// Child rect in screen coords
+		ImVec2 vpPos = ImGui::GetWindowPos();
+		ImVec2 vpSize = ImGui::GetWindowSize();
+
+		// Convert to framebuffer pixel coords (handle DPI)
+		ImVec2 scale = io.DisplayFramebufferScale;
+		int vx = (int)(vpPos.x * scale.x);
+		int vy = (int)((fbH - (vpPos.y + vpSize.y)) * scale.y); // OpenGL origin: bottom-left
+		int vw = (int)(vpSize.x * scale.x);
+		int vh = (int)(vpSize.y * scale.y);
+
+		// Render 3D only inside viewport child
+		glEnable(GL_SCISSOR_TEST);
+		glViewport(vx, vy, vw, vh);
+		glScissor(vx, vy, vw, vh);
+
+		glClearColor(0.10f, 0.10f, 0.14f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+
+		renderViewportDemo(solidProg, triVAO); // TODO: replace with your volume renderer
+
+		glDisable(GL_SCISSOR_TEST);
+
+		// ******** KEY FIX ********
+		// Restore full-screen viewport immediately after custom viewport rendering.
+		// Otherwise later ImGui drawing can be clipped/mis-positioned (often looks like lower half black).
+		glViewport(0, 0, fbW, fbH);
+		glDisable(GL_SCISSOR_TEST);
+
+		ImGui::Text("Viewport: %dx%d", vw, vh);
+		ImGui::EndChild();
+
+		ImGui::End(); // Main
+
+		// ---- render ImGui ----
+		ImGui::Render();
+
+		// Another safety restore before ImGui backend draw
+		glViewport(0, 0, fbW, fbH);
+		glDisable(GL_SCISSOR_TEST);
+		glDisable(GL_DEPTH_TEST);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+		glfwSwapBuffers(win);
+	}
+
+	// cleanup
+	glDeleteTextures(1, &tfTex);
+	glDeleteProgram(solidProg);
+	glDeleteBuffers(1, &triVBO);
+	glDeleteVertexArrays(1, &triVAO);
+
+	ImGui_ImplOpenGL3_Shutdown();
+	ImGui_ImplGlfw_Shutdown();
+	ImGui::DestroyContext();
+
+	glfwDestroyWindow(win);
+	glfwTerminate();
+	return 0;
+}
+```
+
+### tfeditor/shaders/ui2d.frag
+```
+#version 330 core
+in vec4 vColor;
+out vec4 FragColor;
+void main() {
+    FragColor = vColor;
+}
+```
+
+### tfeditor/shaders/ui2d.vert
+```
+#version 330 core
+layout(location=0) in vec2 aPos;
+layout(location=1) in vec4 aColor;
+uniform mat4 uMVP;
+out vec4 vColor;
+void main() {
+    vColor = aColor;
+    gl_Position = uMVP * vec4(aPos, 0.0, 1.0);
+}
+```
+
+### tfeditor/src/tf/tf_editor.cpp
+```
+﻿#include "tf_editor.h"
+#include <algorithm>
+#include <cmath>
+
+#include "../../imgui/imgui.h"
+#include <cmath>
+#include <algorithm>
+
+
+glm::vec2 TFEditor::toScreen(const Rect& r, float x01, float y01) {
+    return glm::vec2( r.x + x01 * r.w, r.y + y01 * r.h );
+}
+
+glm::vec2 TFEditor::toNorm(const Rect& r, float sx, float sy) {
+    return glm::vec2( (sx - r.x)/r.w, (sy - r.y)/r.h );
+}
+
+void TFEditor::initDefault() {
+	alpha.clear();
+	alpha.push_back(AlphaPoint{ 0.f, 0.f });
+	alpha.push_back(AlphaPoint{ 1.f, 1.f });
+
+	colors.clear();
+	colors.push_back(ColorPoint{ 0.f, glm::vec3(0.f, 0.f, 0.f) });
+	colors.push_back(ColorPoint{ 1.f, glm::vec3(1.f, 1.f, 1.f) });
+
+    activeAlpha = activeColor = -1;
+    draggingAlpha = draggingColor = false;
+    buildLUT();
+}
+
+void TFEditor::setLUTSize(int n) {
+    mLUTSize = std::max(16, n);
+    buildLUT();
+}
+
+void TFEditor::sortAlpha() {
+    std::sort(alpha.begin(), alpha.end(), [](const AlphaPoint& a, const AlphaPoint& b){ return a.x < b.x; });
+    if (!alpha.empty()) {
+        alpha.front().x = 0.f;
+        alpha.back().x  = 1.f;
+    }
+}
+
+void TFEditor::sortColor() {
+    std::sort(colors.begin(), colors.end(), [](const ColorPoint& a, const ColorPoint& b){ return a.x < b.x; });
+    if (!colors.empty()) {
+        colors.front().x = 0.f;
+        colors.back().x  = 1.f;
+    }
+}
+
+int TFEditor::findNearestAlpha(float x) const {
+    int best = 0; float bd = 1e9f;
+    for (int i=0;i<(int)alpha.size();++i) {
+        float d = std::abs(alpha[i].x - x);
+        if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+}
+
+int TFEditor::findNearestColor(float x) const {
+    int best = 0; float bd = 1e9f;
+    for (int i=0;i<(int)colors.size();++i) {
+        float d = std::abs(colors[i].x - x);
+        if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+}
+
+int TFEditor::pickAlphaPoint(const Rect& r, float mx, float my, float radiusPx) const {
+    for (int i=0;i<(int)alpha.size();++i) {
+        glm::vec2 p = toScreen(r, alpha[i].x, alpha[i].a);
+        float dx = mx - p.x, dy = my - p.y;
+        if (dx*dx + dy*dy <= radiusPx*radiusPx) return i;
+    }
+    return -1;
+}
+
+int TFEditor::pickColorPoint(const Rect& r, float mx, float my, float radiusPx) const {
+    float yMid = r.y + r.h * 0.5f;
+    for (int i=0;i<(int)colors.size();++i) {
+        glm::vec2 p{ r.x + colors[i].x * r.w, yMid };
+        float dx = mx - p.x, dy = my - p.y;
+        if (dx*dx + dy*dy <= radiusPx*radiusPx) return i;
+    }
+    return -1;
+}
+
+bool TFEditor::handleAlphaInteraction(const InputState& in, const Rect& r) {
+    bool changed = false;
+    const float pickR = 8.f;
+
+    bool inside = pointInRect((float)in.mx, (float)in.my, r);
+
+    if (in.lPressed && inside) {
+        int idx = pickAlphaPoint(r, (float)in.mx, (float)in.my, pickR);
+        if (idx >= 0) {
+            activeAlpha = idx;
+            draggingAlpha = true;
+        } else if (in.doubleClick) {
+            glm::vec2 n = toNorm(r, (float)in.mx, (float)in.my);
+            AlphaPoint p{ clamp01(n.x), clamp01(n.y) };
+            alpha.push_back(p);
+            sortAlpha();
+            activeAlpha = findNearestAlpha(p.x);
+            draggingAlpha = true;
+            changed = true;
+        } else {
+            activeAlpha = -1;
+        }
+    }
+
+    if (in.lReleased) draggingAlpha = false;
+
+    if (draggingAlpha && in.lDown && activeAlpha >= 0) {
+        glm::vec2 n = toNorm(r, (float)in.mx, (float)in.my);
+        float newX = clamp01(n.x);
+        float newA = clamp01(n.y);
+
+        bool isEnd = (activeAlpha == 0 || activeAlpha == (int)alpha.size()-1);
+        if (!isEnd) {
+            float left  = alpha[activeAlpha-1].x + 1e-4f;
+            float right = alpha[activeAlpha+1].x - 1e-4f;
+            newX = std::max(left, std::min(right, newX));
+            alpha[activeAlpha].x = newX;
+        }
+        alpha[activeAlpha].a = newA;
+        changed = true;
+    }
+
+    return changed;
+}
+
+bool TFEditor::handleColorInteraction(const InputState& in, const Rect& rampRect, const Rect& inspectorRect) {
+    // If mouse is in inspector, let sliders handle input
+    if (pointInRect((float)in.mx, (float)in.my, inspectorRect)) return false;
+
+    bool changed = false;
+    const float pickR = 8.f;
+
+    bool inside = pointInRect((float)in.mx, (float)in.my, rampRect);
+
+    if (in.lPressed && inside) {
+        int idx = pickColorPoint(rampRect, (float)in.mx, (float)in.my, pickR);
+        if (idx >= 0) {
+            activeColor = idx;
+            draggingColor = true;
+        } else if (in.doubleClick) {
+            float x01 = clamp01((float)((in.mx - rampRect.x) / rampRect.w));
+			colors.push_back(ColorPoint{ x01, glm::vec3(1.f, 1.f, 1.f) });
+            sortColor();
+            activeColor = findNearestColor(x01);
+            draggingColor = true;
+            changed = true;
+        } else {
+            activeColor = -1;
+        }
+    }
+
+    if (in.lReleased) draggingColor = false;
+
+    if (draggingColor && in.lDown && activeColor >= 0) {
+        float x01 = clamp01((float)((in.mx - rampRect.x) / rampRect.w));
+        bool isEnd = (activeColor == 0 || activeColor == (int)colors.size()-1);
+        if (!isEnd) {
+            float left  = colors[activeColor-1].x + 1e-4f;
+            float right = colors[activeColor+1].x - 1e-4f;
+            x01 = std::max(left, std::min(right, x01));
+            colors[activeColor].x = x01;
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
+bool TFEditor::deleteActivePoint(const InputState& in) {
+    if (!in.delPressed) return false;
+
+    bool changed = false;
+    if (activeAlpha > 0 && activeAlpha < (int)alpha.size()-1) {
+        alpha.erase(alpha.begin() + activeAlpha);
+        activeAlpha = -1;
+        changed = true;
+    }
+    if (activeColor > 0 && activeColor < (int)colors.size()-1) {
+        colors.erase(colors.begin() + activeColor);
+        activeColor = -1;
+        changed = true;
+    }
+    return changed;
+}
+
+void TFEditor::drawHistogram(UIRenderer2D& ui, const Rect& r, const std::vector<float>& hist) {
+    if (hist.empty()) return;
+    int bins = (int)hist.size();
+    float binW = r.w / (float)bins;
+    for (int i=0;i<bins;++i) {
+        float h = hist[i] * r.h;
+        Rect b{ r.x + i*binW, r.y, binW, h };
+        ui.fillRect(b, glm::vec4(0.15f,0.15f,0.15f,1));
+    }
+}
+
+void TFEditor::drawAlphaCurve(UIRenderer2D& ui, const Rect& r) {
+    for (int i=0;i<(int)alpha.size()-1;++i) {
+        glm::vec2 a = toScreen(r, alpha[i].x, alpha[i].a);
+        glm::vec2 b = toScreen(r, alpha[i+1].x, alpha[i+1].a);
+        ui.line(a, b, 2.f, glm::vec4(0.9f,0.9f,0.2f,1));
+    }
+    for (int i=0;i<(int)alpha.size();++i) {
+        glm::vec2 p = toScreen(r, alpha[i].x, alpha[i].a);
+        glm::vec4 col = (i==activeAlpha) ? glm::vec4(1,0.4f,0.2f,1) : glm::vec4(0.95f,0.95f,0.4f,1);
+        ui.point(p, 5.f, col);
+    }
+}
+
+glm::vec3 TFEditor::sampleColor(float x) const {
+    if (colors.empty()) return glm::vec3(1,1,1);
+    if (x <= colors.front().x) return colors.front().c;
+    if (x >= colors.back().x)  return colors.back().c;
+    for (int i=0;i<(int)colors.size()-1;++i) {
+        if (x >= colors[i].x && x <= colors[i+1].x) {
+            float t = (x - colors[i].x) / (colors[i+1].x - colors[i].x);
+            return (1-t)*colors[i].c + t*colors[i+1].c;
+        }
+    }
+    return glm::vec3(1,1,1);
+}
+
+float TFEditor::sampleAlpha(float x) const {
+    if (alpha.empty()) return 0.f;
+    if (x <= alpha.front().x) return alpha.front().a;
+    if (x >= alpha.back().x)  return alpha.back().a;
+    for (int i=0;i<(int)alpha.size()-1;++i) {
+        if (x >= alpha[i].x && x <= alpha[i+1].x) {
+            float t = (x - alpha[i].x) / (alpha[i+1].x - alpha[i].x);
+            return (1-t)*alpha[i].a + t*alpha[i+1].a;
+        }
+    }
+    return 0.f;
+}
+
+void TFEditor::drawColorRamp(UIRenderer2D& ui, const Rect& r) {
+    // MVP: draw gradient as many small rects. (Recommended improvement: draw from LUT texture)
+    const int steps = 128;
+    float sw = r.w / steps;
+    for (int i=0;i<steps;++i) {
+        float x0 = (float)i/steps;
+        float x1 = (float)(i+1)/steps;
+        glm::vec3 c = sampleColor((x0+x1)*0.5f);
+        Rect s{ r.x + i*sw, r.y, sw+1.f, r.h };
+        ui.fillRect(s, glm::vec4(c.r,c.g,c.b,1));
+    }
+
+    float yMid = r.y + r.h * 0.5f;
+    for (int i=0;i<(int)colors.size();++i) {
+        glm::vec2 p{ r.x + colors[i].x * r.w, yMid };
+        glm::vec4 col = (i==activeColor) ? glm::vec4(1,0.4f,0.2f,1) : glm::vec4(0.9f,0.9f,0.9f,1);
+        ui.point(p, 5.f, col);
+    }
+}
+
+bool TFEditor::sliderFloat01(UIRenderer2D& ui, const InputState& in,
+                             const Rect& r, float& v01, SliderState& st,
+                             const glm::vec4& fillCol, const glm::vec4& bgCol,
+                             const glm::vec4& knobCol)
+{
+    bool changed = false;
+
+    ui.fillRect(r, bgCol);
+
+    Rect fill{ r.x, r.y, r.w * clamp01(v01), r.h };
+    ui.fillRect(fill, fillCol);
+
+    float kx = r.x + r.w * clamp01(v01);
+    Rect knob{ kx - 4.f, r.y - 2.f, 8.f, r.h + 4.f };
+    ui.fillRect(knob, knobCol);
+
+    if (in.lPressed && pointInRect((float)in.mx, (float)in.my, r)) {
+        st.dragging = true;
+        float t = (float)((in.mx - r.x) / r.w);
+        float nv = clamp01(t);
+        if (nv != v01) { v01 = nv; changed = true; }
+    }
+    if (in.lReleased) st.dragging = false;
+
+    if (st.dragging && in.lDown) {
+        float t = (float)((in.mx - r.x) / r.w);
+        float nv = clamp01(t);
+        if (in.shift) {
+            float delta = (nv - v01) * 0.2f;
+            nv = clamp01(v01 + delta);
+        }
+        if (nv != v01) { v01 = nv; changed = true; }
+    }
+
+    return changed;
+}
+
+bool TFEditor::drawColorInspector(UIRenderer2D& ui, const InputState& in, const Rect& panelRect) {
+    if (activeColor < 0 || activeColor >= (int)colors.size()) return false;
+
+    bool changed = false;
+
+    ui.fillRect(panelRect, glm::vec4(0.10f,0.10f,0.10f,1));
+
+    glm::vec3 c = colors[activeColor].c;
+    Rect swatch{panelRect.x + 12, panelRect.y + panelRect.h - 44, 60, 28};
+    ui.fillRect(swatch, glm::vec4(c.r,c.g,c.b,1));
+
+    float sx = panelRect.x + 90;
+    float sy = panelRect.y + panelRect.h - 38;
+    float sw = panelRect.w - 110;
+    float sh = 14;
+
+    Rect rR{sx, sy,        sw, sh};
+    Rect rG{sx, sy - 22.f, sw, sh};
+    Rect rB{sx, sy - 44.f, sw, sh};
+
+    float& R = colors[activeColor].c.r;
+    float& G = colors[activeColor].c.g;
+    float& B = colors[activeColor].c.b;
+
+    changed |= sliderFloat01(ui, in, rR, R, sliderR,
+                             glm::vec4(1,0,0,1), glm::vec4(0.2f,0.2f,0.2f,1), glm::vec4(0.9f,0.9f,0.9f,1));
+    changed |= sliderFloat01(ui, in, rG, G, sliderG,
+                             glm::vec4(0,1,0,1), glm::vec4(0.2f,0.2f,0.2f,1), glm::vec4(0.9f,0.9f,0.9f,1));
+    changed |= sliderFloat01(ui, in, rB, B, sliderB,
+                             glm::vec4(0,0,1,1), glm::vec4(0.2f,0.2f,0.2f,1), glm::vec4(0.9f,0.9f,0.9f,1));
+
+    colors[activeColor].c = glm::clamp(colors[activeColor].c, glm::vec3(0), glm::vec3(1));
+    return changed;
+}
+
+void TFEditor::buildLUT() {
+    mLUT.resize(mLUTSize);
+    for (int i=0;i<mLUTSize;++i) {
+        float x = (mLUTSize==1) ? 0.f : (float)i / (float)(mLUTSize - 1);
+        float a = sampleAlpha(x);
+        glm::vec3 c = sampleColor(x);
+        mLUT[i] = glm::vec4(c, a);
+    }
+}
+
+bool TFEditor::updateAndDraw(UIRenderer2D& ui,
+                             const InputState& in,
+                             const Rect& curveRect,
+                             const Rect& rampRect,
+                             const Rect& inspectorRect,
+                             const std::vector<float>* hist)
+{
+    bool changed = false;
+
+    ui.fillRect(curveRect, glm::vec4(0.08f,0.08f,0.08f,1));
+    ui.fillRect(rampRect,  glm::vec4(0.08f,0.08f,0.08f,1));
+
+    if (hist && !hist->empty()) drawHistogram(ui, curveRect, *hist);
+
+    changed |= handleAlphaInteraction(in, curveRect);
+    changed |= handleColorInteraction(in, rampRect, inspectorRect);
+    changed |= deleteActivePoint(in);
+
+    drawAlphaCurve(ui, curveRect);
+    drawColorRamp(ui, rampRect);
+
+    // show inspector if a color point is selected
+    changed |= drawColorInspector(ui, in, inspectorRect);
+
+    if (changed) buildLUT();
+    return changed;
+}
+
+
+static float clamp01f(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
+static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+static ImU32 toU32(float r, float g, float b, float a) {
+	return IM_COL32((int)(r * 255.f), (int)(g * 255.f), (int)(b * 255.f), (int)(a * 255.f));
+}
+
+static float dist2(ImVec2 a, ImVec2 b) {
+	float dx = a.x - b.x, dy = a.y - b.y;
+	return dx * dx + dy * dy;
+}
+
+bool TFEditor::drawImGui(const char* label, const std::vector<float>* hist) {
+    bool changed = false;
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // ---------------- Compact style (local) ----------------
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 3));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 2));
+
+    auto tightGap = []() { ImGui::Dummy(ImVec2(0, 2)); };
+
+    // ---------------- Header ----------------
+    if (label && label[0]) {
+        ImGui::TextUnformatted(label);
+        tightGap();
+    }
+
+    // ===================== Color Ramp Canvas =====================
+    ImGui::TextUnformatted("Color + Alpha (RGBA over checkerboard)");
+
+    const float rampH = 28.0f;
+    ImVec2 rampSize(ImGui::GetContentRegionAvail().x, rampH);
+    if (rampSize.x < 50) rampSize.x = 50;
+
+    ImGui::InvisibleButton("##ramp_canvas", rampSize, ImGuiButtonFlags_MouseButtonLeft);
+    bool rampHovered = ImGui::IsItemHovered();
+    ImVec2 rMin = ImGui::GetItemRectMin();
+    ImVec2 rMax = ImGui::GetItemRectMax();
+    ImVec2 rSize = ImVec2(rMax.x - rMin.x, rMax.y - rMin.y);
+
+    // ramp background
+    dl->AddRectFilled(rMin, rMax, IM_COL32(20, 20, 24, 255), 4.0f);
+
+    // checkerboard
+    {
+        const float tile = 8.0f;
+        for (float y = rMin.y; y < rMax.y; y += tile) {
+            for (float x = rMin.x; x < rMax.x; x += tile) {
+                int cx = (int)((x - rMin.x) / tile);
+                int cy = (int)((y - rMin.y) / tile);
+                bool odd = ((cx + cy) & 1) != 0;
+                ImU32 c = odd ? IM_COL32(70, 70, 75, 255) : IM_COL32(120, 120, 128, 255);
+                ImVec2 a(x, y);
+                ImVec2 b(std::min(x + tile, rMax.x), std::min(y + tile, rMax.y));
+                dl->AddRectFilled(a, b, c);
+            }
+        }
+        dl->AddRectFilled(rMin, rMax, IM_COL32(0, 0, 0, 70), 4.0f);
+    }
+
+    // draw RGBA ramp: color(x) with alpha(x)
+    {
+        const int seg = 256;
+        float x0 = rMin.x;
+        float y0 = rMin.y;
+        float w = rSize.x;
+        float h = rSize.y;
+
+        for (int i = 0; i < seg; ++i) {
+            float t0 = (float)i / (float)seg;
+            float t1 = (float)(i + 1) / (float)seg;
+            float xA = x0 + t0 * w;
+            float xB = x0 + t1 * w;
+
+            float xm = (t0 + t1) * 0.5f;
+            float a = sampleAlpha(xm);
+            glm::vec3 c = sampleColor(xm);
+
+            ImU32 col = toU32(c.r, c.g, c.b, a);
+            dl->AddRectFilled(ImVec2(xA, y0), ImVec2(xB + 1.0f, y0 + h), col);
+        }
+        dl->AddRect(rMin, rMax, IM_COL32(0, 0, 0, 140), 4.0f, 0, 1.0f);
+    }
+
+    auto ramp_to_screen_x = [&](float x01) {
+        return rMin.x + clamp01f(x01) * rSize.x;
+        };
+    auto ramp_mouse_to_x01 = [&]() {
+        float x01 = (io.MousePos.x - rMin.x) / (rSize.x > 1e-6f ? rSize.x : 1.0f);
+        return clamp01f(x01);
+        };
+
+    // pick color point
+    auto pickColor = [&](float radiusPx) -> int {
+        float best = radiusPx * radiusPx;
+        int bestIdx = -1;
+        for (int i = 0; i < (int)colors.size(); ++i) {
+            float sx = ramp_to_screen_x(colors[i].x);
+            float sy = (rMin.y + rMax.y) * 0.5f;
+            float d2 = dist2(ImVec2(sx, sy), io.MousePos);
+            if (d2 <= best) { best = d2; bestIdx = i; }
+        }
+        return bestIdx;
+        };
+
+    // ramp interactions
+    if (rampHovered) {
+        // delete
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+            if (activeColor > 0 && activeColor < (int)colors.size() - 1) {
+                colors.erase(colors.begin() + activeColor);
+                activeColor = -1;
+                changed = true;
+            }
+        }
+
+        // click / double click
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            int hit = pickColor(8.0f);
+            if (hit >= 0) {
+                activeColor = hit;
+                draggingColor = true;
+            }
+        }
+
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            int hit = pickColor(8.0f);
+            if (hit < 0) {
+                float x01 = ramp_mouse_to_x01();
+                ColorPoint p;
+                p.x = x01;
+                p.c = sampleColor(x01);
+
+                colors.push_back(p);
+                sortColor();
+                activeColor = findNearestColor(x01);
+                draggingColor = true;
+                changed = true;
+            }
+        }
+    }
+
+    // dragging color point along x
+    if (draggingColor) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            draggingColor = false;
+        }
+        else if (activeColor >= 0 && activeColor < (int)colors.size()) {
+            float x01 = ramp_mouse_to_x01();
+
+            // endpoints fixed
+            if (activeColor == 0) x01 = 0.0f;
+            if (activeColor == (int)colors.size() - 1) x01 = 1.0f;
+
+            // neighbor constraints for middle points
+            if (activeColor > 0 && activeColor < (int)colors.size() - 1) {
+                float eps = 1e-4f;
+                float lo = colors[activeColor - 1].x + eps;
+                float hi = colors[activeColor + 1].x - eps;
+                x01 = clampf(x01, lo, hi);
+            }
+
+            if (std::fabs(colors[activeColor].x - x01) > 1e-6f) {
+                colors[activeColor].x = x01;
+                changed = true;
+            }
+        }
+    }
+
+    // draw color control points
+    {
+        float cy = (rMin.y + rMax.y) * 0.5f;
+        for (int i = 0; i < (int)colors.size(); ++i) {
+            float cx = ramp_to_screen_x(colors[i].x);
+
+            float a = sampleAlpha(colors[i].x);
+            glm::vec3 c = colors[i].c;
+            ImU32 fill = toU32(c.r, c.g, c.b, 1.0f);
+            ImU32 outline = (i == activeColor) ? IM_COL32(255, 255, 255, 255) : IM_COL32(0, 0, 0, 200);
+
+            // outer ring indicates alpha at that x
+            dl->AddCircle(ImVec2(cx, cy), 7.0f, IM_COL32(255, 255, 255, (int)(a * 255)), 0, 2.0f);
+            dl->AddCircleFilled(ImVec2(cx, cy), 5.0f, fill);
+            dl->AddCircle(ImVec2(cx, cy), 5.0f, outline, 0, 1.5f);
+        }
+    }
+
+    tightGap();
+
+    // ===================== Height budget: Inspector first =====================
+    // From here we still need: "Opacity Curve" title + curve canvas + spacing + separator + inspector block
+    float availY = ImGui::GetContentRegionAvail().y;
+
+    const float lineH = ImGui::GetTextLineHeightWithSpacing();
+    const float frameH = ImGui::GetFrameHeightWithSpacing();
+    const float sepH = 1.0f + ImGui::GetStyle().ItemSpacing.y;
+
+    // We keep "Combined at X ..." line
+    float inspectorNeed =
+        lineH * 1.0f +   // "Inspector"
+        lineH * 1.0f +   // "Alpha #..."
+        frameH * 1.0f +  // Alpha inputs row (X + A)
+        sepH * 1.0f +    // separator between alpha/color
+        lineH * 1.0f +   // "Color #..."
+        frameH * 1.0f +  // Color row (X + ColorEdit)
+        lineH * 1.0f +   // "Combined at X ..." line
+        frameH * 0.6f +  // small preview line/space
+        8.0f;            // slack
+
+    // lower bound (avoid too tiny)
+    if (inspectorNeed < 130.0f) inspectorNeed = 130.0f;
+
+    // curve height gets the remainder (can shrink if needed)
+    const float curveMinH = 60.0f;
+    float curveTitleNeed = lineH; // "Opacity Curve"
+    float afterCurveOverhead = (sepH + 6.0f); // spacing + separator area before inspector
+
+    float curveH = availY - curveTitleNeed - inspectorNeed - afterCurveOverhead;
+    if (curveH < curveMinH) {
+        curveH = curveMinH;
+
+        // if still not enough room, compress curve further (down to 30) to satisfy inspector fully
+        float needCurve = availY - curveTitleNeed - inspectorNeed - afterCurveOverhead;
+        curveH = std::max(30.0f, needCurve);
+        // If window is extremely small, there is no way to show everything without scroll.
+        // But for typical layouts, this keeps inspector fully visible.
+    }
+
+    // ===================== Opacity Curve Canvas (auto-shrinkable) =====================
+    ImGui::TextUnformatted("Opacity Curve");
+
+    ImVec2 curveSize(ImGui::GetContentRegionAvail().x, curveH);
+    if (curveSize.x < 50) curveSize.x = 50;
+
+    ImGui::InvisibleButton("##curve_canvas", curveSize, ImGuiButtonFlags_MouseButtonLeft);
+    bool curveHovered = ImGui::IsItemHovered();
+    ImVec2 cMin = ImGui::GetItemRectMin();
+    ImVec2 cMax = ImGui::GetItemRectMax();
+    ImVec2 cSize = ImVec2(cMax.x - cMin.x, cMax.y - cMin.y);
+
+    // curve background
+    dl->AddRectFilled(cMin, cMax, IM_COL32(20, 20, 24, 255), 4.0f);
+    dl->AddRect(cMin, cMax, IM_COL32(0, 0, 0, 140), 4.0f, 0, 1.0f);
+
+    auto curve_to_screen = [&](float x01, float a01) -> ImVec2 {
+        float x = cMin.x + clamp01f(x01) * cSize.x;
+        float y = cMax.y - clamp01f(a01) * cSize.y;
+        return ImVec2(x, y);
+        };
+    auto curve_mouse_to_norm = [&]() {
+        float x01 = (io.MousePos.x - cMin.x) / (cSize.x > 1e-6f ? cSize.x : 1.0f);
+        float a01 = (cMax.y - io.MousePos.y) / (cSize.y > 1e-6f ? cSize.y : 1.0f);
+        return ImVec2(clamp01f(x01), clamp01f(a01));
+        };
+
+    // histogram (optional)
+    if (hist && !hist->empty()) {
+        int bins = (int)hist->size();
+        float barW = cSize.x / (float)bins;
+        for (int i = 0; i < bins; ++i) {
+            float v = (*hist)[i];
+            v = clamp01f(v);
+            float x0 = cMin.x + i * barW;
+            float x1 = x0 + barW;
+            float y0 = cMax.y;
+            float y1 = cMax.y - v * cSize.y;
+            dl->AddRectFilled(ImVec2(x0, y1), ImVec2(x1, y0), IM_COL32(80, 80, 90, 110));
+        }
+    }
+
+    // draw alpha polyline
+    {
+        for (int i = 0; i < (int)alpha.size() - 1; ++i) {
+            ImVec2 p0 = curve_to_screen(alpha[i].x, alpha[i].a);
+            ImVec2 p1 = curve_to_screen(alpha[i + 1].x, alpha[i + 1].a);
+            dl->AddLine(p0, p1, IM_COL32(220, 220, 230, 255), 2.0f);
+        }
+    }
+
+    // pick alpha point
+    auto pickAlpha = [&](float radiusPx) -> int {
+        float best = radiusPx * radiusPx;
+        int bestIdx = -1;
+        for (int i = 0; i < (int)alpha.size(); ++i) {
+            ImVec2 p = curve_to_screen(alpha[i].x, alpha[i].a);
+            float d2 = dist2(p, io.MousePos);
+            if (d2 <= best) { best = d2; bestIdx = i; }
+        }
+        return bestIdx;
+        };
+
+    // curve interactions
+    if (curveHovered) {
+        // delete
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+            if (activeAlpha > 0 && activeAlpha < (int)alpha.size() - 1) {
+                alpha.erase(alpha.begin() + activeAlpha);
+                activeAlpha = -1;
+                changed = true;
+            }
+        }
+
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            int hit = pickAlpha(8.0f);
+            if (hit >= 0) {
+                activeAlpha = hit;
+                draggingAlpha = true;
+            }
+        }
+
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            int hit = pickAlpha(8.0f);
+            if (hit < 0) {
+                ImVec2 na = curve_mouse_to_norm();
+                AlphaPoint p;
+                p.x = na.x;
+                p.a = na.y;
+
+                alpha.push_back(p);
+                sortAlpha();
+                activeAlpha = findNearestAlpha(p.x);
+                draggingAlpha = true;
+                changed = true;
+            }
+        }
+    }
+
+    // dragging alpha point
+    if (draggingAlpha) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            draggingAlpha = false;
+        }
+        else if (activeAlpha >= 0 && activeAlpha < (int)alpha.size()) {
+            ImVec2 na = curve_mouse_to_norm();
+            float x01 = na.x;
+            float a01 = na.y;
+
+            // endpoints fixed in x
+            if (activeAlpha == 0) x01 = 0.0f;
+            if (activeAlpha == (int)alpha.size() - 1) x01 = 1.0f;
+
+            // neighbor constraints for x of middle points
+            if (activeAlpha > 0 && activeAlpha < (int)alpha.size() - 1) {
+                float eps = 1e-4f;
+                float lo = alpha[activeAlpha - 1].x + eps;
+                float hi = alpha[activeAlpha + 1].x - eps;
+                x01 = clampf(x01, lo, hi);
+            }
+
+            a01 = clamp01f(a01);
+
+            if (std::fabs(alpha[activeAlpha].x - x01) > 1e-6f ||
+                std::fabs(alpha[activeAlpha].a - a01) > 1e-6f) {
+                alpha[activeAlpha].x = x01;
+                alpha[activeAlpha].a = a01;
+                changed = true;
+            }
+        }
+    }
+
+    // draw alpha points
+    {
+        for (int i = 0; i < (int)alpha.size(); ++i) {
+            ImVec2 p = curve_to_screen(alpha[i].x, alpha[i].a);
+            ImU32 fill = IM_COL32(240, 240, 245, 220);
+            ImU32 outline = (i == activeAlpha) ? IM_COL32(255, 255, 255, 255) : IM_COL32(0, 0, 0, 200);
+            dl->AddCircleFilled(p, 5.0f, fill);
+            dl->AddCircle(p, 5.0f, outline, 0, 1.5f);
+        }
+    }
+
+    tightGap();
+
+    // ===================== Inspector (no scrollbar; must fully fit) =====================
+    ImGui::Separator();
+
+    // Use the exact needed height (or remaining if it's smaller)
+    // We prefer full display -> shrink curve earlier; here just ensure non-negative.
+    float inspectorH = std::min(inspectorNeed, ImGui::GetContentRegionAvail().y);
+    if (inspectorH < 80.0f) inspectorH = ImGui::GetContentRegionAvail().y;
+
+    ImGui::BeginChild("##tf_inspector", ImVec2(0, inspectorH), true,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+    ImGui::TextUnformatted("Inspector");
+
+    // ---- Alpha inspector (compact row: X + A) ----
+    if (activeAlpha >= 0 && activeAlpha < (int)alpha.size()) {
+        ImGui::Text("Alpha #%d", activeAlpha);
+
+        float x = alpha[activeAlpha].x;
+        float a = alpha[activeAlpha].a;
+
+        ImGui::PushID("alpha_edit");
+        ImGui::PushItemWidth(110);
+
+        bool editX = ImGui::InputFloat("X", &x, 0.01f, 0.1f, "%.4f");
+        ImGui::SameLine();
+        bool editA = ImGui::InputFloat("A", &a, 0.01f, 0.1f, "%.4f");
+
+        ImGui::PopItemWidth();
+        ImGui::PopID();
+
+        if (editX) {
+            x = clamp01f(x);
+            if (activeAlpha == 0) x = 0.0f;
+            if (activeAlpha == (int)alpha.size() - 1) x = 1.0f;
+            if (activeAlpha > 0 && activeAlpha < (int)alpha.size() - 1) {
+                float eps = 1e-4f;
+                float lo = alpha[activeAlpha - 1].x + eps;
+                float hi = alpha[activeAlpha + 1].x - eps;
+                x = clampf(x, lo, hi);
+            }
+            if (std::fabs(alpha[activeAlpha].x - x) > 1e-6f) {
+                alpha[activeAlpha].x = x;
+                changed = true;
+            }
+        }
+
+        if (editA) {
+            a = clamp01f(a);
+            if (std::fabs(alpha[activeAlpha].a - a) > 1e-6f) {
+                alpha[activeAlpha].a = a;
+                changed = true;
+            }
+        }
+    }
+    else {
+        ImGui::TextDisabled("No alpha point selected.");
+    }
+
+    ImGui::Separator();
+
+    // ---- Color inspector (compact row: X + ColorEdit) ----
+    if (activeColor >= 0 && activeColor < (int)colors.size()) {
+        ImGui::Text("Color #%d", activeColor);
+
+        float x = colors[activeColor].x;
+        float rgb[3] = { colors[activeColor].c.r, colors[activeColor].c.g, colors[activeColor].c.b };
+
+        ImGui::PushID("color_edit");
+        ImGui::PushItemWidth(110);
+        bool editX = ImGui::InputFloat("X", &x, 0.01f, 0.1f, "%.4f");
+        ImGui::PopItemWidth();
+
+        ImGui::SameLine();
+        bool editC = ImGui::ColorEdit3("##RGB", rgb,
+            ImGuiColorEditFlags_Float |
+            ImGuiColorEditFlags_NoInputs |   // critical to keep height small
+            ImGuiColorEditFlags_NoLabel);
+
+        ImGui::PopID();
+
+        if (editX) {
+            x = clamp01f(x);
+            if (activeColor == 0) x = 0.0f;
+            if (activeColor == (int)colors.size() - 1) x = 1.0f;
+            if (activeColor > 0 && activeColor < (int)colors.size() - 1) {
+                float eps = 1e-4f;
+                float lo = colors[activeColor - 1].x + eps;
+                float hi = colors[activeColor + 1].x - eps;
+                x = clampf(x, lo, hi);
+            }
+            if (std::fabs(colors[activeColor].x - x) > 1e-6f) {
+                colors[activeColor].x = x;
+                changed = true;
+            }
+        }
+
+        if (editC) {
+            glm::vec3 c(clamp01f(rgb[0]), clamp01f(rgb[1]), clamp01f(rgb[2]));
+            if (glm::length(colors[activeColor].c - c) > 1e-8f) {
+                colors[activeColor].c = c;
+                changed = true;
+            }
+        }
+
+        // Combined at X (keep)
+        float aa = sampleAlpha(colors[activeColor].x);
+        glm::vec3 cc = sampleColor(colors[activeColor].x);
+        ImGui::Text("Combined at X:  rgb=(%.3f %.3f %.3f)  a=%.3f", cc.r, cc.g, cc.b, aa);
+        ImGui::ColorButton("RGBA Preview",
+            ImVec4(cc.r, cc.g, cc.b, aa),
+            ImGuiColorEditFlags_NoTooltip,
+            ImVec2(60, 16));
+    }
+    else {
+        ImGui::TextDisabled("No color point selected.");
+    }
+
+    ImGui::EndChild(); // inspector
+
+    // ---------------- Apply changes ----------------
+    if (changed) {
+        sortAlpha();
+        sortColor();
+        buildLUT();
+    }
+
+    ImGui::PopStyleVar(2);
+    return changed;
+}
+```
+
+### tfeditor/src/tf/tf_editor.h
+```
+#pragma once
+#include <vector>
+#include <glm/glm.hpp>
+
+#include "../ui/ui_types.h"
+#include "../ui/input_state.h"
+#include "../ui/ui_renderer2d.h"
+
+struct AlphaPoint { float x; float a; };     // 0..1, 0..1
+struct ColorPoint { float x; glm::vec3 c; }; // 0..1, rgb 0..1
+
+struct SliderState {
+    bool dragging = false;
+};
+
+class TFEditor {
+public:
+    void initDefault();
+    void setLUTSize(int n);
+
+    // hist may be nullptr
+    // returns true if TF changed (upload LUT)
+    bool updateAndDraw(UIRenderer2D& ui,
+                       const InputState& in,
+                       const Rect& curveRect,
+                       const Rect& rampRect,
+                       const Rect& inspectorRect,
+                       const std::vector<float>* hist);
+
+    const std::vector<glm::vec4>& lut() const { return mLUT; }
+	// ImGui UI
+	bool drawImGui(const char* label, const std::vector<float>* hist);
+
+
+private:
+    // data
+    std::vector<AlphaPoint> alpha;
+    std::vector<ColorPoint> colors;
+
+    // selection/drag
+    int activeAlpha = -1;
+    int activeColor = -1;
+    bool draggingAlpha = false;
+    bool draggingColor = false;
+
+    // sliders for activeColor
+    SliderState sliderR, sliderG, sliderB;
+
+    // LUT
+    int mLUTSize = 512;
+    std::vector<glm::vec4> mLUT;
+
+private:
+    // helpers
+    static glm::vec2 toScreen(const Rect& r, float x01, float y01);
+    static glm::vec2 toNorm(const Rect& r, float sx, float sy);
+
+    void sortAlpha();
+    void sortColor();
+    int  findNearestAlpha(float x) const;
+    int  findNearestColor(float x) const;
+
+    int  pickAlphaPoint(const Rect& r, float mx, float my, float radiusPx) const;
+    int  pickColorPoint(const Rect& r, float mx, float my, float radiusPx) const;
+
+    bool handleAlphaInteraction(const InputState& in, const Rect& r);
+    bool handleColorInteraction(const InputState& in, const Rect& rampRect, const Rect& inspectorRect);
+
+    bool deleteActivePoint(const InputState& in);
+
+    void drawHistogram(UIRenderer2D& ui, const Rect& r, const std::vector<float>& hist);
+    void drawAlphaCurve(UIRenderer2D& ui, const Rect& r);
+    void drawColorRamp(UIRenderer2D& ui, const Rect& r);
+
+    bool drawColorInspector(UIRenderer2D& ui, const InputState& in, const Rect& inspectorRect);
+
+    static bool sliderFloat01(UIRenderer2D& ui, const InputState& in,
+                              const Rect& r, float& v01, SliderState& st,
+                              const glm::vec4& fillCol, const glm::vec4& bgCol,
+                              const glm::vec4& knobCol);
+
+    float sampleAlpha(float x) const;
+    glm::vec3 sampleColor(float x) const;
+    void buildLUT();
+};
+```
+
+### tfeditor/src/tf/tf_gl.cpp
+```
+#include "tf_gl.h"
+
+GLuint createLUTTexture2D_RGBA16F(int N) {
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, N, 1, 0, GL_RGBA, GL_FLOAT, nullptr);
+    return tex;
+}
+
+void uploadLUTTexture2D_RGBA16F(GLuint tex, const std::vector<glm::vec4>& lut) {
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)lut.size(), 1, GL_RGBA, GL_FLOAT, lut.data());
+}
+```
+
+### tfeditor/src/tf/tf_gl.h
+```
+#pragma once
+#include <vector>
+#include <glad/glad.h>
+#include <glm/glm.hpp>
+
+GLuint createLUTTexture2D_RGBA16F(int N);
+void uploadLUTTexture2D_RGBA16F(GLuint tex, const std::vector<glm::vec4>& lut);
+```
+
+### tfeditor/src/ui/input_state.cpp
+```
+#include "input_state.h"
+#include <GLFW/glfw3.h>
+void updateInput(GLFWwindow* win, InputState& in, int framebufferH) {
+    in.lPressed = false;
+    in.lReleased = false;
+    in.doubleClick = false;
+
+    double x, y;
+    glfwGetCursorPos(win, &x, &y);
+    // GLFW cursor pos is top-left origin; convert to bottom-left
+    in.mx = x;
+    in.my = (double)framebufferH - y;
+
+    bool nowDown = glfwGetMouseButton(win, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    if (nowDown && !in.lDown) {
+        in.lPressed = true;
+        double t = glfwGetTime();
+        if (t - in.lastClickTime < 0.25) in.doubleClick = true;
+        in.lastClickTime = t;
+    }
+    if (!nowDown && in.lDown) in.lReleased = true;
+    in.lDown = nowDown;
+
+    in.shift =
+        glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+        glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+
+    in.ctrl =
+        glfwGetKey(win, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+        glfwGetKey(win, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
+
+    in.delPressed =
+        glfwGetKey(win, GLFW_KEY_DELETE) == GLFW_PRESS ||
+        glfwGetKey(win, GLFW_KEY_BACKSPACE) == GLFW_PRESS;
+}
+```
+
+### tfeditor/src/ui/input_state.h
+```
+#pragma once
+//#include <GLFW/glfw3.h>
+struct GLFWwindow;   // forward declaration
+struct InputState {
+    double mx = 0, my = 0;     // bottom-left origin (we convert)
+    bool lDown = false;
+    bool lPressed = false;
+    bool lReleased = false;
+    bool doubleClick = false;
+
+    bool shift = false;
+    bool ctrl = false;
+    bool delPressed = false;
+
+    double lastClickTime = 0.0;
+};
+
+void updateInput(GLFWwindow* win, InputState& in, int framebufferH);
+```
+
+### tfeditor/src/ui/ui_renderer2d.cpp
+```
+#include "ui_renderer2d.h"
+#include <glm/gtc/matrix_transform.hpp>
+
+void UIRenderer2D::init(int screenW, int screenH, GLuint program) {
+    mW = screenW; mH = screenH; mProg = program;
+
+    glGenVertexArrays(1, &mVAO);
+    glGenBuffers(1, &mVBO);
+
+    glBindVertexArray(mVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, mVBO);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(mMaxVerts * sizeof(Vertex2D)), nullptr, GL_DYNAMIC_DRAW);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex2D), (void*)offsetof(Vertex2D, pos));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex2D), (void*)offsetof(Vertex2D, color));
+
+    glBindVertexArray(0);
+}
+
+void UIRenderer2D::shutdown() {
+    if (mVBO) glDeleteBuffers(1, &mVBO);
+    if (mVAO) glDeleteVertexArrays(1, &mVAO);
+    mVBO = mVAO = 0;
+}
+
+void UIRenderer2D::beginFrame(int screenW, int screenH) {
+    mW = screenW; mH = screenH;
+    mVerts.clear();
+}
+
+void UIRenderer2D::pushTri(const glm::vec2& a, const glm::vec2& b, const glm::vec2& c, const glm::vec4& col) {
+    if (mVerts.size() + 3 > mMaxVerts) return;
+    mVerts.push_back({a, col});
+    mVerts.push_back({b, col});
+    mVerts.push_back({c, col});
+}
+
+void UIRenderer2D::fillRect(const Rect& r, const glm::vec4& c) {
+    glm::vec2 p0{r.x,     r.y};
+    glm::vec2 p1{r.x+r.w, r.y};
+    glm::vec2 p2{r.x+r.w, r.y+r.h};
+    glm::vec2 p3{r.x,     r.y+r.h};
+    pushTri(p0,p1,p2,c);
+    pushTri(p0,p2,p3,c);
+}
+
+void UIRenderer2D::line(const glm::vec2& a, const glm::vec2& b, float thicknessPx, const glm::vec4& c) {
+    glm::vec2 d = b - a;
+    float len = glm::length(d);
+    if (len < 1e-5f) return;
+    glm::vec2 n = glm::vec2(-d.y, d.x) / len;
+    glm::vec2 t = n * (thicknessPx * 0.5f);
+    glm::vec2 p0 = a - t, p1 = a + t, p2 = b + t, p3 = b - t;
+    pushTri(p0,p1,p2,c);
+    pushTri(p0,p2,p3,c);
+}
+
+void UIRenderer2D::point(const glm::vec2& p, float radiusPx, const glm::vec4& c) {
+    Rect r{p.x - radiusPx, p.y - radiusPx, radiusPx*2.f, radiusPx*2.f};
+    fillRect(r, c);
+}
+
+void UIRenderer2D::endFrame() {
+    glUseProgram(mProg);
+
+    glm::mat4 proj = glm::ortho(0.0f, (float)mW, 0.0f, (float)mH);
+    GLint loc = glGetUniformLocation(mProg, "uMVP");
+    glUniformMatrix4fv(loc, 1, GL_FALSE, &proj[0][0]);
+
+    glBindVertexArray(mVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, mVBO);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(mVerts.size() * sizeof(Vertex2D)), mVerts.data());
+    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)mVerts.size());
+    glBindVertexArray(0);
+}
+```
+
+### tfeditor/src/ui/ui_renderer2d.h
+```
+#pragma once
+#include <vector>
+#include <glad/glad.h>
+#include <glm/glm.hpp>
+#include "ui_types.h"
+
+class UIRenderer2D {
+public:
+    void init(int screenW, int screenH, GLuint program);
+    void shutdown();
+
+    void beginFrame(int screenW, int screenH);
+    void endFrame(); // flush draw
+
+    void fillRect(const Rect& r, const glm::vec4& c);
+    void line(const glm::vec2& a, const glm::vec2& b, float thicknessPx, const glm::vec4& c);
+    void point(const glm::vec2& p, float radiusPx, const glm::vec4& c);
+
+private:
+    void pushTri(const glm::vec2& a, const glm::vec2& b, const glm::vec2& c, const glm::vec4& col);
+
+    GLuint mVAO = 0;
+    GLuint mVBO = 0;
+    GLuint mProg = 0;
+
+    int mW = 0, mH = 0;
+    std::vector<Vertex2D> mVerts;
+    size_t mMaxVerts = 1 << 20; // ~1M verts
+};
+```
+
+### tfeditor/src/ui/ui_types.h
+```
+#pragma once
+#include <glm/glm.hpp>
+
+struct Rect {
+    float x, y, w, h; // screen space pixels (origin: bottom-left)
+};
+
+inline bool pointInRect(float px, float py, const Rect& r) {
+    return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
+}
+
+struct Vertex2D {
+    glm::vec2 pos;
+    glm::vec4 color;
+};
+
+inline float clamp01(float v) {
+    return (v < 0.f) ? 0.f : (v > 1.f) ? 1.f : v;
+}
+```

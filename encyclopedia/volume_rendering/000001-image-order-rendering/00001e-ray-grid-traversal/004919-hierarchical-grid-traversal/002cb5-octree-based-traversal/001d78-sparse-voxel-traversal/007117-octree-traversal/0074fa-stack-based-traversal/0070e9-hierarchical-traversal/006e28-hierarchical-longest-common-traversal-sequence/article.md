@@ -1,0 +1,100 @@
+# Hierarchical Longest Common Traversal Sequence
+
+
+## Overview
+HLCTS is a hierarchical extension of the Single Longest Common Traversal Sequence (SLCTS) method [S1, unofficial]. It matches traversal histories to create a common traversal history for multiple rays, allowing the incremental construction of common sequences [S1, unofficial]. It sets itself apart from SLCTS by supporting the accumulation of coherence across more than two rays, enabling the reuse of traversal state for a growing group of rays rather than just a pair [S1, unofficial].
+
+## How it works
+**Inputs:** A set of rays with similar origins or directions; a previously constructed common traversal sequence (HLCTS).
+**Outputs:** An updated common traversal sequence that covers the new ray and the existing group.
+
+**Data Structures:**
+The HLCTS is represented as a sequence of traversal steps. Each step references a node in the acceleration structure (e.g., an octree or BSP tree). The sequence has a `head` and a `tail` [S1, unofficial].
+
+**Steps:**
+1.  **Initial Pair Matching:** Match the traversal histories of two rays, $R_1$ and $R_2$, to create the first common traversal history, $HLCTS_1 = HLCTS(R_1, R_2)$ [S1, unofficial]. This involves finding the longest common subsequence of nodes visited by both rays [S1, unofficial].
+2.  **Incremental Extension:** To add a new ray $R_3$, match its traversal history against the existing $HLCTS_1$ to construct $HLCTS_2$ [S1, unofficial].
+    *   The traversal of $R_3$ is compared against the sequence stored in $HLCTS_1$.
+    *   The result is a new common sequence that is a subsequence of both $HLCTS_1$ and the history of $R_3$ [S1, unofficial].
+3.  **Initial Leaf Handling:** When constructing the initial leaf sequence for an HLCTS, the initial leaf nodes need not be matched against each other; they are simply copied into the common sequence [S1, unofficial]. This optimization applies specifically to HLCTS [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def match_traversal_histories(history_a, history_b):
+    """
+    Finds the longest common subsequence of traversal steps between two histories.
+    Returns a new sequence containing the common steps in order.
+    """
+    # Implementation details for LCS are not provided in the source.
+    # This function returns the common nodes visited by both rays.
+    pass
+
+def build_hlcts(ray_a, ray_b):
+    """
+    Creates the first HLCTS from two rays.
+    """
+    history_a = ray_a.get_traversal_history()
+    history_b = ray_b.get_traversal_history()
+    
+    # Match the two histories
+    common_seq = match_traversal_histories(history_a, history_b)
+    
+    # Apply initial leaf optimization: copy initial leaves without matching
+    # [G] Assuming initial leaves are at the start of the history
+    initial_leaves_a = get_initial_leaves(history_a)
+    initial_leaves_b = get_initial_leaves(history_b)
+    
+    # The source states initial leaf nodes are copied only, not matched.
+    # We prepend the common initial leaves to the sequence.
+    # [G] Exact logic for merging initial leaves is not specified, 
+    # but they are included in the final HLCTS.
+    common_seq.prepend(initial_leaves_a) # Or intersection/union as per specific impl
+    
+    return common_seq
+
+def extend_hlcts(existing_hlcts, new_ray):
+    """
+    Extends an existing HLCTS with a new ray's traversal history.
+    """
+    history_new = new_ray.get_traversal_history()
+    
+    # Match the existing HLCTS (which is a sequence of nodes) 
+    # with the new ray's history.
+    # Note: existing_hlcts is a sequence, history_new is a sequence.
+    updated_hlcts = match_traversal_histories(existing_hlcts, history_new)
+    
+    return updated_hlcts
+```
+
+**Parameters:**
+*   **Ray Similarity:** The method assumes rays exhibit similarities in their traversal paths [S1, unofficial].
+*   **Initial Leaf Copying:** Initial leaf nodes are copied rather than matched [S1, unofficial].
+
+**Edge Cases:**
+*   **Degenerate Rays:** If rays have no common traversal steps, the common sequence may be empty or minimal [G].
+*   **Precision:** Not given in the sources.
+
+## Subtopics
+
+### LCTS for Hidden Surface Removal
+*   **Definition:** Application of LCTS (including HLCTS) to Hidden Surface Removal where rays exhibit similarities [S1, unofficial].
+*   **Performance:** The number of traversal steps decreases typically by more than 60% [S1, unofficial]. Time devoted to ray shooting decreases typically by 20% [S1, unofficial].
+*   **Comparison:** The speedup achieved is scene and resolution dependent [S1, unofficial].
+*   **When to choose:** Use when rendering scenes with hidden surface removal where rays are spatially coherent (e.g., scanlines or patches) [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** In Hidden Surface Removal applications, traversal steps decrease by >60% and ray shooting time decreases by ~20% [S1, unofficial].
+*   **Strengths:** Reduces redundant traversal steps by exploiting coherence among multiple rays [S1, unofficial].
+*   **Limitations:** Speedup is dependent on scene content and resolution [S1, unofficial]. Requires rays to exhibit similarities [S1, unofficial].
+*   **When to use:** When rendering with ray grids or patches where rays are similar [S1, unofficial].
+*   **When not:** When rays are highly divergent or incoherent [G].
+
+## Background
+HLCTS was introduced by Vlastimil Havran and Jiří Bittner in their work on "LCTS: Ray Shooting using Longest Common Traversal Sequences" [S1, unofficial]. It is part of a broader concept of traversal coherence introduced in that work, which is not restricted to BSP trees only [S1, unofficial]. The method builds upon SLCTS and is designed to handle larger groups of rays hierarchically [S1, unofficial].
+
+## Sources
+[S1] LCTS: Ray Shooting using Longest Common Traversal Sequences, https://www.slideserve.com/liam/vlastimil-havran, fetched 2026-10-26 (unofficial)

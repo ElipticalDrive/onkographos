@@ -1,0 +1,193 @@
+--- v001.md
++++ v002.md
+@@ -4,120 +4,106 @@
+ 
+ ## Overview
+-Y-Bucket Parallelization is a two-pass parallel algorithm for direct volume rendering that processes polygonal representations of isosurfaces or volume slices by grouping them into scanline-based "y-buckets" [S1]. It solves the problem of efficiently rendering irregular and multiple grids in software by maximizing spatial coherence and avoiding the computational difficulties associated with ray-casting intersecting cells [S1]. Unlike tile-based parallelization methods that break scanlines and lose coherence, this method parallelizes on a scanline basis to limit duplication [S1].
++Y-Bucket Parallelization is a two-pass parallel algorithm designed for direct volume rendering of irregular or multiple grids, specifically addressing the inefficiencies of ray-casting intersecting cells [S1]. It solves the problem of rendering irregular polygonal data by grouping polygons into scanline-based "y-buckets" to maximize spatial coherence and avoid the duplication inherent in tile-based parallelization [S1]. Unlike [Tiled Parallel Compositing](1192-tiled-parallel-compositing.md) which breaks scanlines, this method parallelizes on a scanline basis to maintain front-to-back visibility order efficiently [S1].
+ 
+ ## How it works
+-The method operates on polygonal data representing volume slices or isosurfaces. The polygons are stored in counter-clockwise order when viewed from outside the grid, allowing the system to easily recognize boundaries and the last polygon in its grid within the visibility order [S1].
++The method processes polygons representing isosurfaces or volume slices. It assumes polygons are stored in counter-clockwise order when viewed from outside the grid, allowing easy recognition of boundaries and visibility order [S1].
+ 
+ **Inputs:**
+ - A set of polygons representing the volume data.
+-- A set of processors (or threads).
+-- The image resolution (width and height).
++- A number of processors $P$.
++- The image resolution (width $W$, height $H$).
+ 
+ **Outputs:**
+-- A rendered image.
++- A rendered image buffer.
+ 
+ **Data Structures:**
+-1.  **Y-Bucket Array:** An array indexed by scanline (y-coordinate). Each entry stores the count of polygons intersecting that scanline.
+-2.  **Output Array:** A common output array partitioned to store the final pixel values.
+-3.  **X-Bucket Structures:** Associated with the leftmost pixel of a polygon's bounding box on a scanline. Contains a linked list of active polygons in front-to-back visibility order.
++1.  **Y-Bucket Array:** An array of size $H$, where each entry corresponds to a scanline (y-coordinate). It stores a list of polygons intersecting that scanline.
++2.  **Output Array:** A common output array partitioned to hold the final pixel contributions for each y-bucket.
++3.  **X-Bucket:** A data structure associated with the leftmost pixel of a polygon on a scanline. It contains a linked list of active polygons in front-to-back visibility order.
+ 
+ **Steps:**
+ 
+-1.  **First Pass: Polygon Distribution**
+-    -   Each processor iterates through the input polygons.
+-    -   For each polygon, determine the range of scanlines (y-coordinates) it intersects.
+-    -   Increment the counter in the Y-Bucket Array for each intersected scanline.
+-    -   Store the polygon in a temporary structure associated with its corresponding y-bucket, marking it as processed.
++1.  **Pass 1: Polygon Distribution**
++    - Each processor distributes polygons into the Y-Bucket Array based on their y-coordinate range.
++    - This step identifies which polygons belong to which scanlines.
+ 
+-2.  **Second Pass: Bucket Allocation and Structure Creation**
+-    -   Access the Y-Bucket Array to determine the number of polygons belonging to each y-bucket.
+-    -   Allocate space for each y-bucket by partitioning the common output array.
+-    -   Partition the space for one y-bucket further into space for each processor to fill within that y-bucket.
+-    -   Each processor creates appropriate y-bucket structures for all polygons it processed in the first pass, excluding any that were invalidated.
+-    -   *Note:* The work per processor in this step is proportional to the number of scanlines, not the number of polygons [S1].
++2.  **Pass 2: Bucket Allocation and Structure Creation**
++    - The number of polygons belonging to each y-bucket is determined by accessing the Y-Bucket Array.
++    - Space for each y-bucket is allocated by partitioning the common output array.
++    - The space for one y-bucket is further partitioned into space for each processor to fill within that y-bucket.
++    - Each processor creates appropriate y-bucket structures for all polygons it processed in Pass 1, excluding any invalidated polygons.
++    - *Note:* While this step can be parallelized, its work per processor is proportional to the number of scanlines, not the number of polygons [S1].
+ 
+-3.  **Third Pass: Scanline Processing**
+-    -   Process each scanline in order from bottom to top.
+-    -   For each scanline, transfer information for each active polygon to an x-bucket data structure associated with the leftmost pixel in which the polygon appears.
+-    -   Maintain a linked list of these x-bucket structures in front-to-back visibility order.
+-    -   Perform the compositing computation for the pixels in the scanline using the active polygons in the x-buckets.
++3.  **Pass 3: Scanline Processing (X-Bucket Construction)**
++    - Process each scanline in order from bottom to top.
++    - For each active polygon on the scanline, transfer information to an X-Bucket data structure associated with the leftmost pixel where the polygon appears.
++    - Maintain a linked list of these X-Buckets in front-to-back visibility order.
++    - Perform the bulk of the rendering computation (e.g., compositing) using the active polygon lists.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Assume global variables:
+-# num_scanlines: int, number of scanlines (image height)
+-# num_processors: int, number of available processors
+-# polygons: list of Polygon objects
+-# output_array: array of size num_scanlines * image_width
+-
+-# Step 1: First Pass - Count polygons per scanline
+-y_bucket_counts = [0] * num_scanlines
+-polygon_buckets = [[] for _ in range(num_scanlines)]
+-
+-for poly in polygons:
+-    y_min, y_max = poly.get_y_range()
+-    for y in range(y_min, y_max + 1):
+-        y_bucket_counts[y] += 1
+-        polygon_buckets[y].append(poly)
+-
+-# Step 2: Second Pass - Allocate space and create structures
+-# Partition output_array based on y_bucket_counts
+-# This step is simplified as it involves memory management details not fully specified
+-# Each processor creates y-bucket structures for its assigned polygons
+-# Work is proportional to num_scanlines
+-
+-# Step 3: Third Pass - Process scanlines
+-for y in range(num_scanlines):
+-    # Get polygons for this scanline
+-    active_polygons = polygon_buckets[y]
++def y_bucket_parallelization(polygons, num_processors, image_height):
++    # Pass 1: Distribute polygons into Y-Buckets
++    # Each processor handles a subset of polygons
++    y_buckets = [ [] for _ in range(image_height) ]
+     
+-    # Group by x-bucket (leftmost pixel)
+-    x_buckets = {}
+-    for poly in active_polygons:
+-        x_start = poly.get_leftmost_x()
+-        if x_start not in x_buckets:
+-            x_buckets[x_start] = []
+-        x_buckets[x_start].append(poly)
++    for poly in polygons:
++        # Determine which scanlines (y-coordinates) the polygon intersects
++        y_min, y_max = get_y_range(poly)
++        for y in range(y_min, y_max + 1):
++            y_buckets[y].append(poly)
++            
++    # Pass 2: Allocate output space and create structures
++    # Partition common output array based on y-bucket sizes
++    output_array = allocate_output_array(y_buckets)
+     
+-    # Sort x-buckets by x_start
+-    sorted_x_starts = sorted(x_buckets.keys())
+-    
+-    for x_start in sorted_x_starts:
+-        # Maintain front-to-back visibility order in linked list
+-        # This requires sorting polygons by depth or z-order
+-        # For simplicity, assume polygons are already in correct order or sorted here
+-        sorted_polys = sort_by_visibility(x_buckets[x_start])
++    # Each processor creates y-bucket structures for its polygons
++    # Work is proportional to number of scanlines, not polygons
++    for y in range(image_height):
++        # Partition space for this y-bucket among processors
++        # Create structures for polygons in y_buckets[y]
++        pass # Implementation details for partitioning omitted as per source focus on logic
+         
+-        # Process pixels for this x-bucket
+-        for x in range(x_start, poly.get_rightmost_x() + 1):
+-            # Compositing logic using sorted_polys
+-            # Update output_array[y * image_width + x]
+-            pass
++    # Pass 3: Process scanlines bottom-to-top
++    for y in range(image_height):
++        # Initialize X-Buckets for this scanline
++        x_buckets = {}
++        
++        # Get polygons for this scanline
++        active_polys = y_buckets[y]
++        
++        # Sort polygons by depth/visibility order if not already sorted
++        # Create linked lists in X-Buckets in front-to-back order
++        for poly in active_polys:
++            x_start = get_leftmost_pixel_x(poly)
++            if x_start not in x_buckets:
++                x_buckets[x_start] = Linkedlist()
++            x_buckets[x_start].append(poly)
++            
++        # Perform bulk computation (compositing) using X-Buckets
++        for x_start, bucket in x_buckets.items():
++            render_scanline_segment(x_start, bucket)
+ ```
+ 
+-**Parameters:**
+--   Number of processors: Determined by hardware.
+--   Image resolution: Determines the size of the Y-Bucket Array.
+-
+ **Edge Cases and Pitfalls:**
+--   The second pass is a transitional step and can be parallelized by standard techniques, but its work per processor is only proportional to the number of scanlines, not the number of polygons [S1].
+--   Invalidated polygons must be excluded in the second pass.
++- Invalidated polygons must be excluded in Pass 2 [S1].
++- The second pass is a transitional step; parallelizing it further yields diminishing returns as work is scanline-proportional [S1].
+ 
+ ## Subtopics
+ 
+ ### [Parallel Direct Volume Rendering with Y-Buckets and X-Buckets](2123-parallel-direct-volume-rendering-with-y-buckets-and-x-bucket.md)
+-This method is a parallel direct volume rendering algorithm that processes polygons representing isosurfaces or volume slices by grouping them into scanline-based 'y-buckets' and processing pixels within those buckets using 'x-buckets' and 'x-actives' lists to maintain front-to-back visibility order. It solves the problem of rendering irregular and multiple grids efficiently in software by maximizing coherence and avoiding the difficulties of ray-casting intersecting cells. Unlike tile-based parallelization methods that break scanlines and lose coherence, this method parallelizes on a scanline basis to limit duplication.
++Extends the Y-Bucket method by introducing X-Buckets and X-Actives lists to process pixels within buckets, maintaining front-to-back visibility order. Chosen when rendering irregular grids in software to maximize coherence.
+ 
+ ## Operating characteristics
+--   **Time Complexity:** The first pass is proportional to the number of polygons. The second pass is proportional to the number of scanlines. The third pass is proportional to the number of active polygons per scanline.
+--   **Memory Complexity:** Proportional to the number of scanlines and the number of polygons.
+--   **Strengths:** Maximizes coherence by processing scanlines, limiting duplication compared to tile-based methods. Efficient for irregular and multiple grids.
+--   **Limitations:** The second pass is a transitional step. Requires careful management of polygon visibility order.
+--   **When to Use:** When rendering irregular and multiple grids in software, and maximizing coherence is critical.
+--   **When Not to Use:** When hardware acceleration is available and tile-based methods are more suitable.
++- **Time Complexity:** Pass 2 work per processor is proportional to the number of scanlines, not the number of polygons [S1]. Pass 3 involves processing each scanline, with computation proportional to the number of active polygons per scanline.
++- **Memory Complexity:** Requires storage for the Y-Bucket Array and the Output Array. Space is partitioned per y-bucket and per processor within each bucket.
++- **Strengths:** Maximizes coherence by processing scanlines; avoids difficulties of ray-casting intersecting cells; efficient for irregular and multiple grids [S1].
++- **Limitations:** Pass 2 is a transitional step with limited parallelism benefits; requires careful management of polygon distribution and validity [S1].
++- **When to Use:** Software rendering of irregular/multiple grids where ray-casting is inefficient.
++- **When Not to Use:** When hardware-accelerated ray-casting or tile-based methods are preferred for regular grids.
+ 
+ ## Background
+-The method was introduced in 1996 by [S1]. It was designed to address the challenges of rendering irregular and multiple grids efficiently in software.
++The method was introduced in 1996 by the authors of "Hierarchical and parallelizable direct volume rendering for irregular and multiple grids" [S1]. It was developed to address the challenges of rendering irregular and multiple grids efficiently in software, where traditional ray-casting methods struggle with intersecting cells and lack of coherence.
+ 
+ ## Sources

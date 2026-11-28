@@ -1,0 +1,515 @@
+## DIVeR: Real-time and Accurate Neural Radiance Fields with Deterministic Integration for Volume Rendering
+
+Liwen Wu Jae Yong Lee Anand Bhattad Yu-Xiong Wang David Forsyth University of Illinois at Urbana-Champaign
+
+{liwenwu2, lee896, bhattad2, yxw, daf}@illinois.edu
+
+## Abstract
+
+DIVeR builds on the key ideas of NeRF and its variants – density models and volume rendering – to learn 3D object models that can be rendered realistically from small numbers of images. In contrast to all previous NeRF methods, DIVeR uses deterministic rather than stochastic estimates of the volume rendering integral. DIVeR's representation is a voxel based field of features. To compute the volume rendering integral, a ray is broken into intervals, one per voxel; components of the volume rendering integral are estimated from the features for each interval using an MLP, and the components are aggregated. As a result, DIVeR can render thin translucent structures that are missed by other integrators. Furthermore, DIVeR's representation has semantics that is relatively exposed compared to other such methods – moving feature vectors around in the voxel space results in natural edits. Extensive qualitative and quantitative comparisons to current state-of-the-art methods show that DIVeR produces models that (1) render at or above stateof-the-art quality, (2) are very small without being baked, (3) render very fast without being baked, and (4) can be edited in natural ways. Our real-time code is available at: 
+
+# 1. Introduction
+
+Turning a small set of images into a renderable model of a scene is an important step in scene generation, appearance modeling, relighting, and computational photography. The task is well-established and widely studied; what form the model should take is still very much open, with models ranging from explicit representations of geometry and material through plenoptic function models [1]. Plenoptic functions are hard to smooth, but neural radiance field (NeRF) [26] demonstrates that a Multi Layer Perceptron (MLP) with positional encoding is an exceptionally good smoother, resulting in an explosion of variants (details in related work). All use one key trick: the scene is modeled as density and color functions, rendered using stochastic estimates of volume rendering integrals. We describe an alternative approach, deterministic integration for volume rendering (DIVeR), which is competitive in speed and accuracy with the state of the art.
+
+
+
+Figure 1. Monte Carlo vs. feature integration. Methods like NeRF [26] and PlenOctrees [56] that use Monte Carlo (stochastic) integrators fail to render the translucent drumhead; it is thin, and so is hit by few samples. NeRF's estimator will not model it with practical numbers of samples. In contrast, our method uses a deterministic integrator which directly estimates the section of volume rendering integral near the drum plane through feature integration (Sec. 4.2\); this uses fewer calls to the integrator and still successfully models the transparency.
+
+We use a deterministic integrator because stochastic estimates of integrals present problems. Samples may miss important effects (Fig. 1\). Fixing this by increasing the sampling rate is costly: accuracy improves slowly in the number of samples N, (for Monte Carlo methods, standard deviation goes as 1/ √ N [5]), but the cost of computation grows linearly. In contrast, our integrator combines per-voxel estimates of the volume rendering integral into a single estimate using alpha blending (Sec. 4.2\).
+
+Like NSVF [22], we use a voxel based representation of the color and density. Rather than represent functions, we provide a feature vector at each voxel vertex. The feature vectors at the vertices of a given voxel are used by an MLP to compute the deterministic integrator estimate for the section of any ray passing through the voxel. Mainly, a model is
+
+learned by gradient descent on feature vectors and MLP parameters to minimize the prediction error for the training views; it is rendered by querying the resulting structure with new rays. Sec. 4 provides the details.
+
+Given similar computational resources, our model is efficient to train, likely because the deterministic integration can fit the integral better, and there is no gradient noise produced by stochastic integral estimates. As Sec. 5 shows, the procedure results in very small models (∼ 64MB) which render very fast (∼ 50 FPS on a single 1080 Ti GPU) and have comparable PSNR with the best NeRF models.
+
+## 2. Background
+
+NeRF [26] represents 3D scenes with a density field σ(x) and a color field c(x, d) which are functions of 3D position x and view direction d encoded by an MLP with weights w. To render a pixel, a ray r(t) = o + dt is shot from the camera center o through the pixel center in direction d and follows the volume rendering equation [15] to accumulate the radiance:
+
+
+$$\hat{\mathbf{c}}(\mathbf{r}) = \int_0^\infty e^{-\int_0^t \sigma(\mathbf{r}(\tau)) d\tau} \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t), \mathbf{d}) dt. \quad (1)$$
+
+Closed-form solutions for Eq. 1 are not available, so NeRF uses Monte Carlo integration by randomly sampling n points xi = r(ti), i = 1, . . . , n along the ray from eye to far with their radiance and density values (ci , σi) = MLPw(xi , di). The radiance and density function is then treated as constant in every interval [ti−1, ti ], and an approximation of the volume rendering equation is given as:
+
+$$\hat{\mathbf{c}}(\mathbf{r}) = \sum_{i=1}^n \prod_{j=1}^{i-1} (1 - \alpha_j) \alpha_i \mathbf{c}_i \quad (2)$$
+
+$$\alpha_i = 1 - e^{-\sigma_i \delta_i}, \quad (3)$$
+
+where αi denotes the accumulated alpha values along the interval and δi = ∥xi+1−xi∥2 is the interval length. During training, NeRF learns to adjust the density and color fields to produce training images, which is achieved by optimizing weights w in respect to squared error between rendered pixel and its ground truth:
+
+
+$$L = \sum_k \|\hat{\mathbf{c}}(\mathbf{r}_k) - \hat{\mathbf{c}}_{\text{gt}}(\mathbf{r}_k)\|_2^2. \quad (4)$$
+
+# 3. Related Work
+
+Novel view synthesis: All scene modeling methods attempt to exploit regularities in the plenoptic function (the spectral radiance traveling in any direction at any point) of a scene. One approach is to compute an explicit geometric representations (point clouds [2, 49]; meshes [37, 38, 47]) usually obtained from some 3D reconstruction algorithms (e.g. COLMAP [40]). The geometry can then carry deep
+
+features, which are projected and then processed by neural networks to get the image. Building an end-to-end optimizable pipeline is hard, however. Alternatively, one could use voxel grids [23, 35, 42], where scene observations are encoded as 3D features and processed by 3D, 2D Convolutional Neural Networks (CNNs) to get the rendered images, yielding cleaner training but a very memory intensive model which is unsuitable for high resolution rendering.
+
+Multi-plane images (MPIs) [25, 45, 52, 60] offer novel views without requiring a precise geometry proxy. One represents a scene as a set of parallel RGBA images and synthesizes a novel view by warping the images to the target view and then alpha blending them; this fails when the view changes are too large. Image based rendering (IBR) approaches [7, 8, 50] render a view by interpolating the nearby observations directly. Most IBR methods generalize well to unseen data, such that a new scene in an IBR model can be rendered off-the-shelf or with a few epochs of fine-tuning.
+
+An alternative is to represent proxies for the plenoptic function using neural networks, and then raycast. [16,43,55] use signed distance field like functions, and [29,39] represent the scene geometry as an occupancy field. NeRF [26] models the plenoptic function using an MLP to encode a density field (of position) and a color field (of position and direction). The radiance at a point in a direction is given by a volume rendering integral [15]. Training is done by adjusting the MLP parameters to produce the right answer for a given set of images. The method can produce photo-realistic rendering on complex scenes, including rendering transparent surfaces and view dependent effects, but takes a long time to train and evaluate.
+
+NeRF has resulted in a rich collection of variants. [4, 44, 59] modify the NeRF to allow control of surface materials and lighting; NeRF-W [24] augments the inputs with image features to help resolve ambiguity between photos in the wild. [30, 31, 33] show how to model deformation, and [11, 12, 19, 20, 53] apply NeRF to 4D videos. Finally, [7, 8, 46, 50,57] try to improve the generalizability and training speed, and [6, 28, 36, 41, 48] adopt the architecture to generative models.
+
+Rendering NeRF faster: NeRF's stochastic integrator not only misses thin structures (which are hard to find with samples, Figure 1\), but also presents efficiency problems. The main strategy for improving the efficiency of NeRF (as in any MC integrator) is coming up with better importance functions [5]. NSVF [22] significantly reduces the number of samples (equivalently, MLP calls; render time) by imposing a voxel grid on the density, and then pruning voxels with empty density at training time. An alternative is a depth oracle that ensures that MLP samples occur only close to points with high density [27]. AutoInt [21] further offers a more efficient estimator for the volume rendering integral by constructing an approximate antiderivative (though the absorption integral must still be approximated), which allows fewer MLP queries at rendering time. In contrast to these
+
+
+
+
+
+Figure 2. Rendering pipeline overview of our DIVeR. To render a ray, we first find its intersection with voxels. For each voxel, features at its eight vertices represent a trilinear function. We integrate this trilinear function from the ray's intersection at the entry to exit, passing the result to an MLP that decodes to color and alpha values for the voxel. We obtain the final integral estimate for the ray by accumulating color and alpha values along the ray.
+
+methods, we use a deterministic integral estimator.
+
+But pure importance based methods cannot render in realtime, because they rely on MLPs that are relatively expensive to evaluate. FastNeRF [13] discretizes continuous fields into bins and caches the bins that have been evaluated for subsequent frames. PlenOctrees [56] and SNeRG [14] pre-bake the results of the NeRF into sparse voxels and use efficient ray marching to achieve interactive frame rate. These methods achieve real-time rendering at a cost of noticeable loss in quality (ours does not), or of requiring a high-resolution voxel grid and so a large storage cost (ours does not). Alternative strategies include: caching MLP calls into MPIs (Nex [52]); and speeding up MLP evaluation by breaking one MLP into many small local specialist MLPs (KiloNeRF [34]). In contrast, we use the representation and MLP obtained at training time.
+
+# 4. Method
+
+As shown in the overall rendering pipeline (Fig. 2\), our DIVeR method differs from the NeRF style models in two important ways: (1) we represent the fields as a voxel grid of feature vectors fijk, and (2) we use a decoder MLP with learnable weight w (Fig. 6\) to design a deterministic integrator to estimate partial integrals of any fields of the scene. To estimate the volume rendering integral for a particular ray, we decompose it into intervals corresponding to the voxels the ray passes through. We then let each interval report an approximate estimate of the voxel's contribution and accumulate them to the rendering result. The learning of the fields is done by adjusting fijk and w to produce close approximations of the observed images.
+
+Figure 3. The simple voxel model overfits: Training a model with independent fijk has a strong tendency to overfit. In this example, the model has interpreted a gloss feature as empty space. Our regularization procedure is explained in the text.
+
+
+
+Figure 4. The implicit MLP generates correlated vertex features by taking a positional encoding of vertex location and producing a feature vector.
+
+## 4.1. Voxel based deep implicit fields
+
+As in NSVF [22], the feature vectors are placed at vertices of the voxel grid; feature values inside each voxel are given by the trilinear interpolation of the voxel's eight corners, which yields a piecewise trilinear feature function f(x). The voxel grid can be thought of as a 3D cache of intermediate sums of NeRF's MLP, which explains why inference should be fast (Sec. 5.3\) but still can model complicated spatial behaviors compactly (Sec. 5.2\). Because voxels in the empty space make no contribution to the volume rendering, the voxel grid can also be stored in a sparse representation (Sec. 4.5\), which further speeds up the rendering and reduces the storage cost (Sec. 5.3\).
+
+Initializing voxel features using implicit MLP: If each fijk is trained independently and randomly initialized, our representation scheme tends to overfit during the training (Fig. 3\). This suggests that the optimization of each fijk should be correlated, but it is not obvious which correlation strategy should be applied. Instead, we take an MLP that accepts the positional encoded vertex position on the voxel grid to output the feature vector at that position (the implicit MLP, with parameters wr; see Fig. 4\) to correlate each feature vector implicitly. Although an MLP can in principle approximate any function, there is overwhelming experimental evidence that the approximated function tends to be smooth (e.g. [52]), which makes it unsuitable for rendering high frequency details. Therefore, we first train the implicit MLP to generate a reasonable initialization of fijk placed in the corresponding voxel grid vertex, then discard the regularization MLP and directly optimize on fijk explicitly. Experiments show this 'implicit-explicit' strategy prevents overfitting while preserving high-frequency contents.
+
+
+
+Figure 5. Integration strategy comparison. Monte Carlo method fills an interval by a constant; Feature integration fits the interval with trilinear functions that are analytically integratable and blends them using an MLP.
+
+#### 4.2. Feature integration
+
+Intersecting a ray with the voxel grid yields a set of intervals, which are processed separately by our integrator. Write (t in 1 , tout 1 ), . . . ,(t in n , tout n ) for parameter values defining these intervals, from eye to far end. For interval i, we obtain density σi and radiance ci by passing the normalized integral of f(x) along the interval to the MLP. Let f i 1 , . . . ,f i 8 be the feature vectors at corners of the voxel the interval passes through and χ1(x), . . . , χ8(x) be the corresponding trilinear interpolation weights, so:
+
+$$(\sigma_i, \mathbf{c}_i) = \text{MLP}_{\mathbf{w}} \left( \int_{t_i^{\text{in}}}^{t_i^{\text{out}}} \hat{\mathbf{f}}(\mathbf{r}(t)) dt, \mathbf{d} \right) \quad (5)$$
+
+$$\int_{t_i^{\text{in}}}^{t_i^{\text{out}}} \sum_{k=1}^8 f_i^k \frac{\chi_k(\mathbf{r}(t))}{|t_i^{\text{out}} - t_i^{\text{in}}|} dt = \sum_{k=1}^8 f_i^k \int_{t_i^{\text{in}}}^{t_i^{\text{out}}} \frac{\chi_k(\mathbf{r}(t))}{|t_i^{\text{out}} - t_i^{\text{in}}|} dt. \quad (6)$$
+
+Here w are the learnable weights of the MLP, and we incorporate viewing direction d to model the view dependent effect. These approximations are accumulated into a single value of the integral by
+
+$$\hat{\mathbf{c}}(\mathbf{r}) = \sum_{i=1}^n \prod_{j=1}^{i-1} (1 - \alpha_j) \alpha_i \mathbf{c}_i \quad (7)$$
+
+$$\sigma_i = \int_{t_{ij}^1}^{t_{ij}^{\text{out}}} \sigma(\mathbf{r}(t)) dt, \mathbf{c}_i = \int_{t_{ij}^1}^{\text{out}} \mathbf{c}(\mathbf{r}(t), \mathbf{d}) dt \quad (9)$$
+
+(which is an approximation of Eq. 1, see the supplementary). Notice that, if the MLP had no hidden layers, and the integrand was a known function, we would be adjusting components of a basis function expansion of the integrand to produce the approximation.
+
+Our integrator has two advantages over MC. First, we get a slightly better estimate per interval (the MC estimate assumes fields inside an interval are constant; ours fits them using an MLP; see Fig. 5\), and this manifests in better rendering quality (Sec. 5.4\). Second, because the integrator is
+
+
+
+Figure 6. Decoder architecture. DIVeR64 has around 8K parameters; DIVeR32 has around 4k parameters. Both MLPs take integrated features and positional encoded viewing direction as inputs and output corresponding integrated density and color.
+
+deterministic, the error in integral estimates is deterministic, and so is the gradient, which may help learning; our experience has been that our method has vanishing gradients less often than standard NeRF, and is less sensitive to the choice of learning rate.
+
+## 4.3. Architecture
+
+$$\text{where } \int_{t_i^{\text{in}}}^{t_i^{\text{out}}} \hat{\mathbf{f}}(\mathbf{r}(t)) dt =$$
+
+We choose the feature dimension to be 32, and the voxel grid size varies according to the target image resolution. The grid is relatively coarse and can be represented very efficiently with a sparse representation (Sec. 5.1\). As shown in Fig. 6, we investigate two different MLP decoders: DIVeR32 and DIVeR64. Similar to [26], we apply positional encoding to the viewing direction d, but we directly pass the integrated feature f into the MLP without positional encoding. We use 10 bands for positional encoding in the implicit regularization MLP and 4 bands in the decoder MLP. Because the architectures are tiny, one call of MLP takes less than 1ms, which allows MLP evaluation to happen in real time.
+
+## 4.4. Training
+
+$$\alpha_i = 1 - e^{-\sigma_i} \quad (8)$$
+
+We optimize fijk, w, and wr for each scene. During a training step, we randomly sample a batch of rays from the training set and follow the procedure described in Sec. 4.2 to render the color, and then apply gradient descent on fijk and w using Eq. 4. We want the voxel grid to be sparse, and so discourage the model from predicting background color in empty space using the regularization loss of [14]:
+
+$$L_{\text{sparsity}} = \lambda_s \sum_i \log(1 + \frac{\sigma_i^2}{0.5}), \quad (10)$$
+
+where σi denotes the ith accumulated density; λs is the regularization weight. In contrast to NeRF, we do not need hierarchical volume sampling because we use deterministic integration.
+
+Coarse to fine: We speed up training with a coarse to fine procedure. Early in training, it is sufficient to use coarse resolution images to determine whether particular regions are empty using the culling strategy discussed in Sec. 4.5. Based on the coarse occupancy map, we then train high resolution images and efficiently skip the empty space. When we do so, we discard the features and MLP weights trained on the coarse images (which are trained to ignore fine details).
+
+### 4.5. Inference time optimization
+
+To avoid querying voxels that have no effect on the image (empty voxels; occluded voxels), we follow [56] by recording maximum blended alpha Qi−1 j=1(1−αj )αi for each voxel from training views, and then culling all voxels with maximum blended alphas below the threshold τvis = 0.01. This culls 98% of voxels on average but preserves transparent surfaces. We cull after the coarse training step (to accelerate fine-scale training) and then again after fine-scale training.
+
+To avoid working on voxels occluded to a certain camera view, we evaluate intervals from the eye and stop working on a ray when a transmittance estimate Q i (1 − αi) falls below a threshold (τt = 0.01). Furthermore, if an interval's alpha is below τt , there is no need to evaluate color.
+
+In contrast to other voxel based real-time applications, we do not need to convert the trained model (so there is no precision loss, etc. from discretizing the model). While in principle, our inference time optimizations must result in loss of accuracy, the results of Sec. 5.3 suggest that this loss is negligible.
+
+# 5. Experiments
+
+We evaluate using both the offline rendering task (FPS≤20) and the real-time rendering task (FPS>20). We use the NeRF-synthetic dataset [26] (synthetic images of size 800 × 800 with camera poses); a subset of the Tanks and Temples dataset [18] and the BlendedMVS dataset [54] (chosen by NSVF authors [22]). Tanks and Temples images are 1920 × 1080; BlendedMVS images are 768 × 576. Backgrounds in both datasets are cropped by NSVF. The qualitative results of our experiments can be seen in Fig. 7 and Fig. 8. In all quantitative measurements, we mark the best result by bold font and second best by italic font with underline.
+
+## 5.1. Implementation detail
+
+Training: We use PyTorch [32] for network optimization and customized CUDA kernels to accelerate ray-voxel intersection. For high resolution image training, both implicit and explicit models use a voxel grid of size 2563 for NeRFsynthetic and BlendedMVS, and 3203 for Tanks and Temples. For coarse model training, we take the voxel grid and images at 1/4 of the fine model scale. We follow NSVF's [22] strategy to sample rays from the training set, and we choose a batch size of 1024 pixels for coarse training, 6144 for fine
+
+
+
+|                        | Method | PSNR  | ↑ SSIM | ↑ LPIPS ↓ |
+|------------------------|--------|-------|--------|-----------|
+| NeRF                   | [26]   | 31.00 | 0.947  | 0.081     |
+| JaxNeRF NeRF-Synthetic | [10]   | 31.65 | 0.952  | 0.051     |
+| AutoInt                | [21]   | 25.55 | 0.911  | 0.170     |
+| NSVF                   | [22]   | 31.74 | 0.953  | 0.047     |
+| DIVeR64                |        | 32.32 | 0.960  | 0.032     |
+| NeRF                   | [26]   | 24.15 | 0.828  | 0.192     |
+| JaxNeRF BlendedMVS     | [10]   |       |        |           |
+| AutoInt                | [21]   |       |        |           |
+| NSVF                   | [22]   | 26.90 | 0.898  | 0.113     |
+| DIVeR64                |        | 27.25 | 0.910  | 0.073     |
+| Tanks & Temples        |        |       |        |           |
+| NeRF                   | [26]   | 25.78 | 0.864  | 0.198     |
+| JaxNeRF                | [10]   | 27.94 | 0.904  | 0.168     |
+| AutoInt                | [21]   |       |        |           |
+| NSVF                   | [22]   | 28.40 | 0.900  | 0.153     |
+| DIVeR64                |        | 28.18 | 0.912  | 0.116     |
+
+Table 1. Quantitative results on different benchmarks show ours (DIVeR64) is overall the best compared with NeRF and its variant for offline rendering. '-' means no publicly available results. (Best; Second best).
+
+training of Tanks and Temples, and 8192 for fine training of other datasets. The coarse model is trained for 5 epochs first explicitly, and then we train the model with implicit MLP until the validation loss has almost converged. Finally, we train the explicit grid initialized from the implicit model and stop the training when the total training time reaches 3 days. In total, the peak GPU memory usage is around 40GB. We use the Adam [17] optimizer with a learning rate of 5e-4 for the fine model, 1e-3 for the coarse model, and λs =1e-5 in the sparsity regularization loss.
+
+Real-time application: Our real-time application is implemented by using CUDA and Python, with all the operations being parallelized per image pixel. For each frame and each pixel, ray marching finds a fixed number of hits on the voxel grid; the MLP is evaluated for each hit, and the result is then blended to the image buffer. This sequence is repeated until the ray termination criteria is reached (Sec. 4.5\).
+
+Storage: Because the voxel grid is sparse, we need to store only: indices and values of feature vectors for non-empty voxels; a binary occupancy mask; and the MLP weight. At inference, we keep feature vectors in a 1D array and then build a dense 3D array that stores the indices to the specific feature value, thereby reducing GPU memory demand without much sacrifice of performance.
+
+## 5.2. Offline rendering
+
+We evaluate the offline model by measuring the similarity between rendered and ground truth images using PSNR, SSIM [51], and LPIPS [58]. We use our DIVeR64 model for all scenes.
+
+Baselines: We compare with original NeRF [26]; the reimplementation in Jax [10]; AutoInt [21]; and NSVF [22]
+
+
+
+Figure 7. Qualitative rendering results show that our method successfully models fine and translucent structures (shrouds and ratlines on the ship; studs on lego; drumhead) which NeRF and PlenOctrees find hard. Our method is slightly slower than PlenOctrees (real-time) but much smaller; NeRF runs offline.
+
+
+
+| Method   |      | PSNR  | ↑ SSIM | ↑ LPIPS ↓ |
+|----------|------|-------|--------|-----------|
+| NeRF-SH  | [56] | 31.57 | 0.952  | 0.063     |
+| JaxNeRF+ | [14] | 33.00 | 0.962  | 0.038     |
+| NeRF     | [26] | 31.00 | 0.947  | 0.081     |
+| DIVeR32  |      | 32.16 | 0.958  | 0.032     |
+
+Table 2. Image quality comparisons to real-time pre-trained models on NeRF-synthetic strongly support our method (almost as good as JaxNeRF+). In Tab. 3, we show the performance of their corresponding baked real-time applications.
+
+(which uses similar voxel grid features). Pre-trained models from real-time NeRF variants produce good rendering quality but are trained and evaluated on very large computational resources (for example, JaxNeRF+ [14] doubles the feature size of NeRF's MLP and takes 5 times more samples for volume rendering, which is impractical for evaluation on a standard GPU). Therefore, we exclude them from the baseline models.
+
+Results: DIVeR rendering quality is comparable with other offline baselines, while its architecture is much simpler (Tab. 1\). Our PSNR is only slightly worse than that of NSVF on Tanks and Temples; but we use a much simpler decoder MLP.
+
+
+
+| Method           | PSNR ↑ | SSIM ↑ | LPIPS ↓ | FPS ↑   | MB ↓ | GPU GB ↓    |
+|------------------|--------|--------|---------|---------|------|-------------|
+| PlenOctrees [56] | 31.71  | 0.958  | 0.053   | 76 ± 66 | 1930 | 1.65 ± 1.09 |
+| SNeRG [14]       | 30.38  | 0.950  | 0.050   | 98 ± 37 | 84   | 1.73 ± 1.48 |
+| FastNeRF [13]    | 29.97  | 0.941  | 0.053   |         |      |             |
+| KiloNeRF [34]    | 31.00  | 0. 950 | 0.030   | 28 ± 12 | 161  | 1.68 ± 0.27 |
+| DIVeR32(RT)      | 32.12  | 0.958  | 0.033   | 47 ± 20 | 68   | 1.07 ± 0.06 |
+
+Table 3. Comparisons to other real-time variants on NeRFsynthetic show that our method produces small models with very low GPU demand and renders very fast with very strong image quality metrics. PlenOctrees is baked from NeRF-SH; SNeRG is baked from JaxNeRF+; KiloNeRF and FastNeRF directly convert from the original NeRF. Performance measurements of FastNeRF are not publicly available.
+
+#### 5.3. Real-time rendering
+
+For the real-time rendering task, we use our DIVeR32 model with the inference time optimization described in Sec. 4.5. Besides rendering quality, we show the inference time efficiency by running all the models on a GTX1080 GPU and recording their FPS and GPU memory usage. To compare the compactness of the architecture, we report the average memory usage for storing a scene. As most real-time models are converted from some pre-trained models, we also show the rendering quality of those models and compare the precision loss after the conversion. For the models that have
+
+
+
+Figure 8. Qualitative rendering results of Tanks and Temples and BlendedMVS data show our method successfully models real-world fine structures.
+
+variants based on quality-speed trade-off, we report their variants with the best rendering quality.
+
+Baselines: For our real-time rendering baselines, we compare with PlenOctrees [56], SNeRG [14], FastNeRF [13], and KiloNeRF [34]. Since SNeRG did not provide their pre-trained models, we directly report the measurements from their paper. For the same reason, we report only the rendering quality for the FastNeRF as reported in their paper. For KiloNeRF, we measure the performance of those scenes for which their model was made available (chair, lego, and ship).
+
+Results: Our rendering quality is either best (Tab. 3\) or second best (Tab. 2\), but our method achieves very high frame rates for very small models. All other methods must (1) convert to achieve a real-time form and then (2) fine-tune to recover precision loss after conversion. Fine-tuning is crucial for these models; for example, if SNeRG is not finetuned, its PSNR degrades dramatically to 26.68. In contrast, our model is evaluated as trained without conversion or finetuning. Early ray termination (Sec. 4.5\) causes the mild degradation in quality observed in our real-time methods.
+
+#### 5.4. Ablation study
+
+Architecture: We perform all our ablation studies on the NeRF-synthetic dataset. In Tab. 4, we show the performance trade-off between different network architectures. Without any real-time optimization, our model still runs faster than regular NeRF that takes minutes to run a single frame; if we use a smaller decoder for speed, there is a minor loss of quality but speed doubles (because DIVeR32 uses half as many registers as DIVeR64, allowing more threads to run in the CUDA kernel). Further economy with acceptable PSNR can be obtained by reducing the voxel grid size (compare
+
+
+
+| N   | Decoder | RT  | PSNR  | ↑ FPS ↑ | MB ↓ |
+|-----|---------|-----|-------|---------|------|
+| 256 | DIVeR64 | No  | 32.32 | 0.62    | 62   |
+| 256 | DIVeR32 | No  | 32.16 | 0.62    | 68   |
+| 128 | DIVeR64 | No  | 30.72 | 0.62    | 12   |
+| 128 | DIVeR32 | No  | 30.53 | 0.62    | 12   |
+| 256 | DIVeR64 | Yes | 32.30 | 26 ± 9  | 62   |
+| 256 | DIVeR32 | Yes | 32.12 | 47 ± 20 | 68   |
+| 128 | DIVeR64 | Yes | 30.64 | 37 ± 20 | 12   |
+| 128 | DIVeR32 | Yes | 30.52 | 82 ± 37 | 12   |
+
+Table 4. Ablation study on network architecture shows that real-time optimization (RT) and smaller MLPs (Decoder) involve minimal loss of rendering quality but huge speedups; going to a coarser grid (N) involves a larger loss of quality, for further very large speedup and improvement in model size.
+
+
+
+
+
+Figure 9. Qualitative comparison of different architectures shows larger voxel grid can better model the fine texture on the chair surface; switching to a smaller MLP does not affect the quality too much.
+
+DIVeR32 at 128 voxels yielding 30.42 PSNR for an about 12MB model to PlenOctree's variant with 30.7 PSNR, about 400MB). Fig. 9 compares different MLP sizes and voxel grid sizes qualitatively.
+
+
+
+Figure 10. Our representation admits useful editing in a straightforward way. Left: shows a composite of pretrained models, obtained by blending voxel grids. Right: the mustard on the plate (first hot-dog) is replaced with ketchup (second hot-dog); this edit is preserved under view change (third hot-dog).
+
+
+
+| Integrator | Regularization | Data type | PSNR  | ↑ MB ↓ |
+|------------|----------------|-----------|-------|--------|
+| Det        | Im-Ex          | float32   | 35.52 | 64     |
+| Rand       | Im-Ex          | float32   | 33.89 | 67     |
+| Det        | Im-Ex          | uint8     | 35.44 | 19     |
+| Det        | Im             | float32   | 34.69 | 64     |
+| Det        | Ex             | float32   | 34.02 | 64     |
+
+Table 5. Ablation study on training strategy. Implicit (Im) MLP initialization with explicit (Ex) training gives the best rendering quality. Mapping feature vectors with tanh allows features to be stored more efficiently (uint8) with acceptable loss of rendering qualities.
+
+Training strategy: Tab. 5 shows the effect of different training strategies on the lego scene trained with our DIVeR64 model. The deterministic integrator is important: using a random integrator (implemented with sampling strategy of NSVF [22]) in train and test causes a notable loss of quality. The implicit-explicit training strategy is important: replacing it either with a pure implicit model or with no implicit MLP initialization (compare Fig. 3\) results in a less significant loss of quality. A lower precision representation of the feature vectors (trained with a tanh mapping; converted to unit8) results in a minor loss of quality, but the model size is reduced by a factor of 3.
+
+Editability: The voxel based representation allows us to perform some basic scene manipulations. We can composite scenes by blending their voxel grids and then using the corresponding decoder for rendering. Because feature vectors incorporate high level information of the local appearance, we can extract the segmentation of an object from a selected area by using k-mean clustering on the feature vectors, which allows us to swap objects without noticeable artifacts. Fig. 10 shows some examples.
+
+# 6. Limitations
+
+Training NeRF-like representations is expensive, and our method does not speed up training in any natural way. Aliasing error in a deterministic integrator tends to be patterned, whereas a stochastic integrator breaks it up [9]. In turn, rays near tangent to voxels or accumulated error in the intersection routine can cause problems (Fig. 11\). A mixed
+
+
+
+
+
+Figure 11. Intersection errors can cause aliasing problems, typically for structures near the scale of the voxel grid and rays near tangent to voxel faces. Worse, our current intersection routine, while efficient, can accumulate intersection errors, occasionally producing blocky aliasing artifacts at some view directions and scales (the scale of the blocky artifacts in each case is close to the scale of the voxel grid).
+
+
+
+Figure 12. NeRF variants fail to extrapolate view dependent effect that is unseen from the training set. Neither ours nor other NeRF variants are able to model the reflection on the shovel correctly.
+
+stochastic-deterministic method (say, jittering voxel positions) may help. Our method, like NeRF, can fail to model view dependent effects correctly (Fig. 12\); more physical modeling might help. Our method does not currently apply to unbounded scenes, and our editing abilities are currently quite limited.
+
+Acknowledgements: We thank Sara Aghajanzadeh, Derek Hoiem, Shenlong Wang, and Zhen Zhu for their detailed and valuable comments on our paper.
+
+# References
+
+[1] Edward H. Adelson and James R. Bergen. The plenoptic function and the elements of early vision. In Computational Models of Visual Processing, 1991. 1
+
+- [2] Kara-Ali Aliev, Artem Sevastopolsky, Maria Kolos, Dmitry Ulyanov, and Victor Lempitsky. Neural point-based graphics, 2020. 2 [3] John Amanatides and Andrew Woo. A fast voxel traversal algorithm for ray tracing. In Eurographics, 1987. 12 [4] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T. Barron, Ce Liu, and Hendrik P.A. Lensch. Nerd: Neural reflectance decomposition from image collections. In ICCV, 2021. 2 [5] Phelim P. Boyle. Options: A monte carlo approach. Journal of Financial Economics, 4(3):323–338, 1977. 1, 2 [6] Eric Chan, Marco Monteiro, Petr Kellnhofer, Jiajun Wu, and Gordon Wetzstein. pi-gan: Periodic implicit generative adversarial networks for 3d-aware image synthesis. In CVPR, 2021. 2 [7] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang, Fanbo Xiang, Jingyi Yu, and Hao Su. Mvsnerf: Fast generalizable radiance field reconstruction from multi-view stereo, 2021. 2 [8] Julian Chibane, Aayush Bansal, Verica Lazova, and Gerard Pons-Moll. Stereo radiance fields (srf): Learning view synthesis from sparse views of novel scenes. In CVPR, 2021. 2 [9] Robert L. Cook. Stochastic sampling in computer graphics. ACM Transactions on Graphics, 5(1):51–72, 1986. 8 [10] Boyang Deng, Jonathan T. Barron, and Pratul P. Srinivasan. JaxNeRF: an efficient JAX implementation of NeRF, 2020. 5 [11] Yilun Du, Yinan Zhang, Hong-Xing Yu, Joshua B. Tenenbaum, and Jiajun Wu. Neural radiance flow for 4d view synthesis and video processing. In ICCV, 2021. 2 [12] Chen Gao, Ayush Saraf, Johannes Kopf, and Jia-Bin Huang. Dynamic view synthesis from dynamic monocular video. In ICCV, 2021. 2 [13] Stephan J. Garbin, Marek Kowalski, Matthew Johnson, Jamie Shotton, and Julien Valentin. Fastnerf: High-fidelity neural rendering at 200fps, 2021. 3, 6, 7 [14] Peter Hedman, Pratul P. Srinivasan, Ben Mildenhall, Jonathan T. Barron, and Paul Debevec. Baking neural radiance fields for real-time view synthesis, 2021. 3, 4, 6, 7 [15] James T. Kajiya and Brian P Von Herzen. Ray tracing volume densities. SIGGRAPH Comput. Graph., 18(3):165–174, Jan. 1984. 2 [16] Petr Kellnhofer, Lars Jebe, Andrew Jones, Ryan Spicer, Kari Pulli, and Gordon Wetzstein. Neural lumigraph rendering. In CVPR, 2021. 2 [17] Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization. CoRR, abs/1412.6980, 2015. 5 [18] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking large-scale scene reconstruction. ACM Trans. Graph., 36(4), July 2017. 5 [19] Tianye Li, Mira Slavcheva, Michael Zollhoefer, Simon Green, Christoph Lassner, Changil Kim, Tanner Schmidt, Steven Lovegrove, Michael Goesele, and Zhaoyang Lv. Neural 3d video synthesis, 2021. 2 [20] Zhengqi Li, Simon Niklaus, Noah Snavely, and Oliver Wang. Neural scene flow fields for space-time view synthesis of dynamic scenes. In CVPR, 2021. 2 [21] David B. Lindell, Julien N. P. Martel, and Gordon Wetzstein. Autoint: Automatic integration for fast neural volume rendering. In CVPR, 2021. 2, 5 [22] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt. Neural sparse voxel fields. In NeurIPS, 2020. 1, 2, 3, 5, 8 [23] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural volumes: Learning dynamic renderable volumes from images. ACM Trans. Graph., 38(4):65:1–65:14, July 2019. 2 [24] Ricardo Martin-Brualla, Noha Radwan, Mehdi S. M. Sajjadi, Jonathan T. Barron, Alexey Dosovitskiy, and Daniel Duckworth. NeRF in the Wild: Neural Radiance Fields for Unconstrained Photo Collections. In CVPR, 2021. 2 [25] Ben Mildenhall, Pratul P. Srinivasan, Rodrigo Ortiz Cayon, Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and Abhishek Kar. Local light field fusion. ACM Transactions on Graphics (TOG), 38:1 – 14, 2019. 2 [26] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 1, 2, 4, 5, 6, 8 [27] T. Neff, P. Stadlbauer, M. Parger, A. Kurz, J. H. Mueller,
+  - C. R. A. Chaitanya, A. Kaplanyan, and M. Steinberger. Donerf: Towards real-time rendering of compact neural radiance fields using depth oracle networks. Computer Graphics Forum, 40(4):45–59, 2021. 2 [28] Michael Niemeyer and Andreas Geiger. Giraffe: Representing scenes as compositional generative neural feature fields. In CVPR, 2021. 2 [29] Michael Niemeyer, Lars M. Mescheder, Michael Oechsle, and Andreas Geiger. Differentiable volumetric rendering: Learning implicit 3d representations without 3d supervision. In CVPR, pages 3501–3512, 2020. 2 [30] Keunhong Park, Utkarsh Sinha, Jonathan T. Barron, Sofien Bouaziz, Dan B Goldman, Steven M. Seitz, and Ricardo Martin-Brualla. Nerfies: Deformable neural radiance fields. In ICCV, 2021. 2 [31] Keunhong Park, Utkarsh Sinha, Peter Hedman, Jonathan T. Barron, Sofien Bouaziz, Dan B Goldman, Ricardo Martin-Brualla, and Steven M. Seitz. Hypernerf: A higherdimensional representation for topologically varying neural radiance fields. arXiv preprint arXiv:2106.13228, 2021. 2 [32] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Kopf, Edward Yang, Zachary DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala. Pytorch: An imperative style, high-performance deep learning library. In H. Wallach, H. Larochelle, A. Beygelzimer, F. d'Alche-Buc, E. ´ Fox, and R. Garnett, editors, Advances in Neural Information Processing Systems 32, pages 8024–8035. Curran Associates, Inc., 2019. 5 [33] Albert Pumarola, Enric Corona, Gerard Pons-Moll, and Francesc Moreno-Noguer. D-NeRF: Neural Radiance Fields for Dynamic Scenes. In CVPR, 2020. 2 [34] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas Geiger. Kilonerf: Speeding up neural radiance fields with thousands of tiny mlps, 2021. 3, 6, 7 [35] Konstantinos Rematas and Vittorio Ferrari. Neural voxel renderer: Learning an accurate and controllable rendering tool. In CVPR, 2020. 2
+
+[36] Konstantinos Rematas, Ricardo Martin-Brualla, and Vittorio Ferrari. Sharf: Shape-conditioned radiance fields from a single view. In ICML, 2021. 2 [37] Gernot Riegler and Vladlen Koltun. Free view synthesis. In ECCV, 2020. 2 [38] Gernot Riegler and Vladlen Koltun. Stable view synthesis. In CVPR, 2021. 2 [39] Shunsuke Saito, Zeng Huang, Ryota Natsume, Shigeo Morishima, Angjoo Kanazawa, and Hao Li. Pifu: Pixel-aligned implicit function for high-resolution clothed human digitization. In ICCV, pages 2304–2314, 2019. 2 [40] Johannes Lutz Schonberger and Jan-Michael Frahm. ¨ Structure-from-motion revisited. In CVPR, 2016. 2 [41] Katja Schwarz, Yiyi Liao, Michael Niemeyer, and Andreas Geiger. Graf: Generative radiance fields for 3d-aware image synthesis. In NeurIPS, 2020. 2 [42] Vincent Sitzmann, Justus Thies, Felix Heide, Matthias Nießner, Gordon Wetzstein, and Michael Zollhofer. Deep- ¨ voxels: Learning persistent 3d feature embeddings. In CVPR, 2019. 2 [43] Vincent Sitzmann, Michael Zollhofer, and Gordon Wetzstein. ¨ Scene representation networks: Continuous 3d-structureaware neural scene representations. In NeurIPS, 2019. 2 [44] Pratul P. Srinivasan, Boyang Deng, Xiuming Zhang, Matthew Tancik, Ben Mildenhall, and Jonathan T. Barron. Nerv: Neural reflectance and visibility fields for relighting and view synthesis. In CVPR, 2021. 2 [45] Pratul P. Srinivasan, Richard Tucker, Jonathan T. Barron, Ravi Ramamoorthi, Ren Ng, and Noah Snavely. Pushing the boundaries of view extrapolation with multiplane images. In CVPR, pages 175–184, 2019. 2 [46] Matthew Tancik, Ben Mildenhall, Terrance Wang, Divi Schmidt, Pratul P. Srinivasan, Jonathan T. Barron, and Ren Ng. Learned initializations for optimizing coordinate-based neural representations. In CVPR, 2021. 2 [47] Justus Thies, Michael Zollhofer, and Matthias Nießner. De- ¨ ferred neural rendering: Image synthesis using neural textures. ACM Trans. Graph., 38(4), July 2019. 2 [48] Alex Trevithick and Bo Yang. Grf: Learning a general radiance field for 3d scene representation and rendering. In arXiv:2010.04595, 2020. 2 [49] Cen Wang, Minye Wu, Ziyu Wang, Liao Wang, Hao Sheng, and Jingyi Yu. Neural opacity point cloud. IEEE Transactions on Pattern Analysis and Machine Intelligence, 42(7):1570– 1581, 2020. 2 [50] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul P. Srinivasan, Howard Zhou, Jonathan T. Barron, Ricardo Martin-Brualla, Noah Snavely, and Thomas A. Funkhouser. Ibrnet: Learning multi-view image-based rendering. In CVPR, 2021. 2 [51] Zhou Wang, A.C. Bovik, H.R. Sheikh, and E.P. Simoncelli. Image quality assessment: from error visibility to structural similarity. IEEE Transactions on Image Processing, 13(4):600–612, 2004. 5 [52] Suttisak Wizadwongsa, Pakkapon Phongthawee, Jiraphon Yenphraphai, and Supasorn Suwajanakorn. Nex: Real-time view synthesis with neural basis expansion. In CVPR, 2021. 2, 3 [53] Wenqi Xian, Jia-Bin Huang, Johannes Kopf, and Changil Kim. Space-time neural irradiance fields for free-viewpoint video. In CVPR, pages 9421–9431, 2021. 2 [54] Yao Yao, Zixin Luo, Shiwei Li, Jingyang Zhang, Yufan Ren, Lei Zhou, Tian Fang, and Long Quan. Blendedmvs: A largescale dataset for generalized multi-view stereo networks. In CVPR, 2020. 5 [55] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan Atzmon, Basri Ronen, and Yaron Lipman. Multiview neural surface reconstruction by disentangling geometry and appearance. In NeurIPS, volume 33, 2020. 2 [56] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa. PlenOctrees for real-time rendering of neural radiance fields. In ICCV, 2021. 1, 3, 5, 6, 7 [57] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. pixelnerf: Neural radiance fields from one or few images, 2020. 2 [58] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of deep features as a perceptual metric. In CVPR, 2018. 5 [59] Xiuming Zhang, Pratul P. Srinivasan, Boyang Deng, Paul E. Debevec, William T. Freeman, and Jonathan T. Barron. Nerfactor: Neural factorization of shape and reflectance under an unknown illumination. ArXiv, abs/2106.01970, 2021. 2 [60] Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe, and Noah Snavely. Stereo magnification. ACM Transactions on Graphics (TOG), 37:1 – 12, 2018. 2
+
+## A. Additional Implementation Details
+
+#### A.1. Volume rendering approximation
+
+Given a ray r(t) = x + dt and its intersection with the voxel grid (t in 1 , tout 1 ), . . . ,(t in n , tout n ) for parameter values from eye to far end and using the notation from the main text, the volume rendering equation can be decomposed to:
+
+$$\begin{aligned} \hat{\mathbf{c}}(\mathbf{r}) &= \int_0^\infty e^{-\int_0^t \sigma(\mathbf{r}(\tau)) d\tau} \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t), \mathbf{d}) dt. \\ &= \sum_{i=1}^n \int_{t_i^{\text{in}}}^{t_i^{\text{out}}} e^{-\int_0^t \sigma(\mathbf{r}(\tau)) d\tau} \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t)) dt \\ &= \sum_{i=1}^n e^{-\sum_{j=1}^{i-1} \int_{t_i^{\text{in}}}^{t_j^{\text{out}}} \sigma(\mathbf{r}(t)) dt} \\ &\quad \times \int_{t_i^{\text{in}}}^{t_i^{\text{out}}} e^{-\int_{t_i^{\text{in}}}^t \sigma(\mathbf{r}(\tau)) d\tau} \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t)) dt \\ &= \sum_{i=1}^n \prod_{j=1}^{i-1} (1 - \alpha_j) \\ &\quad \times \int_{t_i^{\text{in}}}^{t_i^{\text{out}}} e^{-\int_{t_i^{\text{in}}}^t \sigma(\mathbf{r}(\tau)) d\tau} \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t)) dt. \end{aligned} \tag{11}$$
+
+By applying Holder's inequality to the nested integration, we have:
+
+$$\begin{aligned} & \int_{t_i^{\text{in}}}^{t_i^{\text{out}}} e^{-\int_{t_i^{\text{in}}}^t \sigma(\mathbf{r}(\tau)) d\tau} \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t)) dt \\ & \leq \int_{t_i^{\text{in}}}^{t_i^{\text{out}}} e^{-\int_{t_i^{\text{in}}}^t \sigma(\mathbf{r}(\tau)) d\tau} \sigma(\mathbf{r}(t)) dt \int_{t_i^{\text{in}}}^{t_i^{\text{out}}} \mathbf{c}(\mathbf{r}(t)) dt \\ & = \mathbf{c}_i \int_{t_i^{\text{in}}}^{t_i^{\text{out}}} e^{-\int_{t_i^{\text{in}}}^t \sigma(\mathbf{r}(\tau)) d\tau} d \left( \int_{t_i^{\text{in}}}^t \sigma(\mathbf{r}(\tau)) d\tau \right) \\ & = \mathbf{c}_i \left( -e^{-\int_{t_i^{\text{in}}}^t \sigma(\mathbf{r}(\tau)) d\tau} \Big|_{t=t_i^{\text{in}}} \right) \\ & = \mathbf{c}_i \left( 1 - e^{-\int_{t_i^{\text{in}}}^{t_i^{\text{out}}} \sigma(\mathbf{r}(\tau)) d\tau} \right) \\ & = \alpha_i \mathbf{c}_i. \end{aligned}$$
+(12)
+
+Therefore, we have:
+
+$$\hat{\mathbf{c}}(\mathbf{r}) \leq \sum_{i=1}^n \prod_{j=1}^{i-1} (1 - \alpha_j) \alpha_i \mathbf{c}_i. \quad (13)$$
+
+### A.2. Feature integration
+
+Assume the size of every voxel is 1 × 1 × 1 and a voxel has feature vectors f1, . . . ,f8 placed at its eight corners. In the voxel's local coordinate system, the feature value inside the voxel at x = (x, y, z) is then given by
+
+$$\mathbf{f}(x, y, z) = \sum_{k=1}^8 \mathbf{f}_k \chi_k(x, y, z), \quad (14)$$
+
+where:
+
+| $\chi_8(x, y, z) = xyz$                   |      |
+|-------------------------------------------|------|
+| $\chi_7(x, y, z) = (1 - x)yz$             |      |
+| $\chi_6(x, y, z) = x(1 - y)z$             |      |
+| $\chi_5(x, y, z) = (1 - x)(1 - y)z$       | (15) |
+| $\chi_4(x, y, z) = xy(1 - z)$             |      |
+| $\chi_3(x, y, z) = (1 - x)y(1 - z)$       |      |
+| $\chi_2(x, y, z) = x(1 - y)(1 - z)$       |      |
+| $\chi_1(x, y, z) = (1 - x)(1 - y)(1 - z)$ |      |
+
+Let x0 = (x0, y0, z0), x1 = (x1, y1, z1) be the voxel's intersection with a ray at entry and exit. It defines a ray segment x(t):
+
+| $\mathbf{x}(t) = (x(t), y(t), z(t))$ |      |
+|--------------------------------------|------|
+| $= (x_0, y_0, z_0)(1 - t)$           | (16) |
+| $+ (x_1, y_1, z_1)t, t \in [0, 1].$  |      |
+
+We want the interpolation function (basis) to be normalized given fixed x0, x1; the normalized f(x(t)) along the ray is:
+
+$$\begin{aligned} \hat{\mathbf{f}}(\mathbf{x}(t)) &= \frac{\mathbf{f}(\mathbf{x}(t))}{\int_{\mathbf{x}_0}^{\mathbf{x}_1} \sum_{k=1}^8 \chi_k(\mathbf{x}(t)) dt} \\ &= \frac{\mathbf{f}(\mathbf{x}(t))}{\int_0^1 \sum_{k=1}^8 \chi_k(x(t), y(t), z(t)) \|\mathbf{x}'(t)\|_2 dt} \quad (17) \\ &= \frac{\mathbf{f}(\mathbf{x}(t))}{\|\mathbf{x}_1 - \mathbf{x}_0\|_2}, \end{aligned}$$
+
+which gives normalized feature integration:
+
+$$\begin{aligned} \int_{\mathbf{x}_0}^{\mathbf{x}_1} \hat{\mathbf{f}}(\mathbf{x}(t)) dt &= \int_0^1 \frac{\mathbf{f}(x(t), y(t), z(t))}{\|\mathbf{x}_1 - \mathbf{x}_0\|_2} \|\mathbf{x}'(t)\| dt \\ &= \int_0^1 \sum_{k=1}^8 \mathbf{f}_k \chi_k(x(t), y(t), z(t)) dt \\ &= \sum_{k=1}^8 \mathbf{f}_k \int_0^1 \chi_k(x(t), y(t), z(t)) dt \\ &= \sum_{k=1}^8 \mathbf{f}_k X_k(\mathbf{x}_0, \mathbf{x}_1). \end{aligned} \quad (18)$$
+
+The integration of each interpolation function only depends on the entry and exit that produces a polynomial. In our CUDA implementation, we factorize Xk(x0, x1) as:
+
+$$\left\{ \begin{array}{l} X_8(\mathbf{x}_0, \mathbf{x}_1) = \frac{2x_0y_0z_0+2x_1y_1z_1+abc}{12} \\ X_7(\mathbf{x}_0, \mathbf{x}_1) = -X_8(\mathbf{x}_0, \mathbf{x}_1) + d \\ X_6(\mathbf{x}_0, \mathbf{x}_1) = \frac{ac+x_0z_0+x_1z_1}{6} - X_8(\mathbf{x}_0, \mathbf{x}_1) \\ X_5(\mathbf{x}_0, \mathbf{x}_1) = \frac{c}{2} - X_6(\mathbf{x}_0, \mathbf{x}_1) - d \\ X_4(\mathbf{x}_0, \mathbf{x}_1) = -X_8(\mathbf{x}_0, \mathbf{x}_1) + e \\ X_3(\mathbf{x}_0, \mathbf{x}_1) = \frac{b}{2} - X_7(\mathbf{x}_0, \mathbf{x}_1) - e \\ X_2(\mathbf{x}_0, \mathbf{x}_1) = \frac{a}{2} - X_6(\mathbf{x}_0, \mathbf{x}_1) - e \\ X_1(\mathbf{x}_0, \mathbf{x}_1) = 1 - \frac{a+b}{2} - X_5(\mathbf{x}_0, \mathbf{x}_1) + e \end{array} \right., \quad (19)$$
+
+where:
+
+$$\begin{cases} a = x_0 + x_1 \\ b = y_0 + y_1 \\ c = z_0 + z_1 \\ d = \frac{bc + y_0 z_0 + y_1 z_1}{6} \\ e = \frac{ab + x_0 y_0 + x_1 y_1}{6} \end{cases} \quad (20)$$
+
+#### A.3. Real-time ray-voxel intersection
+
+For each ray, we first find its closest hit on the voxel grid, and then ray marching to a fixed number of voxels in each iteration of MLP evaluation. For closest hit calculation, we build an octree from the occupancy map as a list of 3D arrays by max pooling and traverse in the octree to speed up the calculation. For ray marching after the closest hit, we do not use the octree and use the algorithm described in [3].
+
+## A.4. Real-time MLP evaluation
+
+Because weights and biases of the decoder MLP are globally shared, we upload them to CUDA constant memory to speed up the memory read. Additionally, we refactor two linear layers in the MLP to reduce calculations. We use the DIVeR32 decoder architecture for the illustration, which can be easily extended to DIVeR64.
+
+Pre-multiplication of the first layer: Because there is no activation (ReLU) between the integrated feature and the first layer of the MLP, the weight of the first layer can be pre-multiplied to the feature vectors. Given the weight and bias of the first linear layer as W1, b1, the first layer's output e1 (without activation) is:
+
+$$\begin{aligned} \mathbf{e}_1 &= \mathbf{W}_1 \int_{\mathbf{x}_0}^{\mathbf{x}_1} \hat{\mathbf{f}}(\mathbf{x}(t)) dt + \mathbf{b}_1 \\ &= \mathbf{W}_1 \sum_{k=1}^8 \mathbf{f}_k \mathbf{X}_k(\mathbf{x}_0, \mathbf{x}_1) + \mathbf{b}_1 \\ &= \sum_{k=1}^8 \mathbf{f}'_k \mathbf{X}_k(\mathbf{x}_0, \mathbf{x}_1) + \mathbf{b}_1 \\ &= \int_{\mathbf{x}_0}^{\mathbf{x}_1} \hat{\mathbf{f}}'(\mathbf{x}(t)) dt + \mathbf{b}_1, \end{aligned} \tag{21}$$
+
+where:
+
+$$\mathbf{f}'_k = \mathbf{W}_1 \mathbf{f}_k. \quad (22)$$
+
+By pre-multiplying the weight to each feature vector after the training and using Eq. 21 during inference time, the operation needed for evaluating the first layer is reduced to a vector add.
+
+Composition of the third and fourth layers: Similarly, the hidden feature h3 of the third layer is not mapped with ReLU, such that weights in the third and fourth layers can be composited. Let W3, b3 denote the weight and bias of the third layer, and W4, b4 denote the weight and bias of the fourth layer. Given the hidden feature of the second layer h2
+
+and the positional encoded viewing direction γ(d), we have:
+
+$$\begin{aligned} \begin{bmatrix} \sigma \\ \mathbf{h}_3 \end{bmatrix} &= \mathbf{W}_3 \mathbf{h}_2 + \mathbf{b}_3 \\ &= \begin{bmatrix} \mathbf{W}_3^\sigma \\ \mathbf{W}_3^\mathbf{h} \end{bmatrix} \mathbf{h}_2 + \begin{bmatrix} \mathbf{b}_3^\sigma \\ \mathbf{b}_3^\mathbf{h} \end{bmatrix} \end{aligned} \quad (23)$$
+
+$$\begin{aligned} \mathbf{e}_4 &= \mathbf{W}_4 \begin{bmatrix} \gamma(\mathbf{d}) \\ \mathbf{h}_3 \end{bmatrix} + \mathbf{b}_4 \\ &= \begin{bmatrix} \mathbf{W}_4^{\text{d}} & \mathbf{W}_4^{\text{h}} \end{bmatrix} \begin{bmatrix} \gamma(\mathbf{d}) \\ \mathbf{h}_3 \end{bmatrix} + \mathbf{b}_4 \\ &= \mathbf{W}_4^{\text{d}} \gamma(\mathbf{d}) + \mathbf{W}_4^{\text{h}} \mathbf{h}_3 + \mathbf{b}_4 \\ &= \mathbf{W}_4^{\text{d}} \gamma(\mathbf{d}) + \mathbf{W}_4^{\text{h}} (\mathbf{W}_4^{\text{h}} \mathbf{h}_2 + \mathbf{b}_3) + \mathbf{b}_4 \\ &= \mathbf{W}_4^{\text{d}} \gamma(\mathbf{d}) + (\mathbf{W}_4^{\text{h}} \mathbf{W}_4^{\text{h}} \mathbf{h}_2) + (\mathbf{W}_4^{\text{h}} \mathbf{b}_3^{\text{h}} + \mathbf{b}_4). \end{aligned} \quad (24)$$
+
+Therefore, the density σ and hidden feature of the fourth layer e4 (without activation) could be directly calculated from γ(d) and h2 without evaluating h3:
+
+$$\sigma = W_3^\sigma h_2 + b_3^\sigma \quad (25)$$
+
+$$\mathbf{e}_4 = \mathbf{W}_4^{\text{d}} \gamma(\mathbf{d}) + \mathbf{W}_4' \mathbf{h}_2 + \mathbf{b}_4' \quad (26)$$
+
+$$\mathbf{W}'_4 = \mathbf{W}_4^{\text{h}} \mathbf{W}_3^{\text{h}} \text{ and } \mathbf{b}'_4 = \mathbf{W}_4^{\text{h}} \mathbf{b}_3^{\text{h}} + \mathbf{b}_4, \quad (27)$$
+
+which avoids one 32 × 32 matrix multiplication and one 32 dimension vector add.
+
+## A.5. Object swapping
+
+We use two cuboids to mark the objects to be swapped and run k-mean clustering for each region to get the fine segmentation. Feature vectors that belong to the largest cluster are treated as the background; the rest of the features are treated as the foreground objects to be swapped. In the hot-dog scene, we use 12 clusters.
+
+# B. Experiment Details
+
+In Tab. 6, we show the per-scene rendering quality comparison on the NeRF-synthetic dataset for all the baselines we compared with (offline, real-time pre-trained, and realtime applications). Tab. 7 shows the per-scene offline rendering quality on the Tanks and Temple and BlendedMVS datasets, and Tab. 8 shows the per-scene real-time performance on the NeRF-synthetic dataset. For ablation on the network architecture, we also show the per-scene performance and rendering quality in Tab. 9.
+
+
+
+|             | Chair | Drums | Ficus | PSNR Hotdog | ↑ Lego | Materials | Mic   | Ship  | Mean  |
+|-------------|-------|-------|-------|-------------|--------|-----------|-------|-------|-------|
+| NeRF        | 33.00 | 25.01 | 30.13 | 36.18       | 32.54  | 29.62     | 32.91 | 28.65 | 31.00 |
+| JaxNeRF     | 33.88 | 25.08 | 30.15 | 36.91       | 33.24  | 30.03     | 34.52 | 29.07 | 31.64 |
+| AutoInt     | 25.60 | 20.78 | 22.47 | 32.33       | 25.09  | 25.90     | 28.10 | 24.15 | 25.55 |
+| NSVF        | 33.19 | 25.18 | 31.23 | 37.14       | 32.29  | 32.68     | 34.27 | 27.93 | 31.74 |
+| NeRF-SH     | 3.98  | 25.17 | 30.72 | 36.75       | 32.77  | 29.95     | 34.04 | 29.21 | 31.57 |
+| JaxNeRF+    | 35.35 | 25.65 | 32.77 | 37.58       | 35.35  | 30.29     | 36.52 | 30.48 | 33.00 |
+| PlenOctrees | 34.66 | 25.31 | 30.79 | 36.79       | 32.95  | 29.76     | 33.97 | 29.42 | 31.71 |
+| SNeRG       | 33.24 | 24.57 | 29.32 | 34.33       | 33.82  | 27.21     | 32.60 | 27.97 | 30.38 |
+| FastNeRF    | 32.32 | 23.75 | 27.79 | 34.72       | 32.28  | 28.89     | 31.77 | 27.69 | 29.97 |
+| KiloNeRF    |       |       |       |             |        |           |       |       | 31.00 |
+| DIVeR64     | 34.34 | 25.39 | 31.77 | 36.83       | 35.52  | 29.63     | 34.58 | 30.50 | 32.32 |
+| DIVeR32     | 34.10 | 25.40 | 32.03 | 36.50       | 35.27  | 29.25     | 34.56 | 30.17 | 32.16 |
+| DIVeR32(RT) | 34.09 | 25.40 | 32.02 | 36.35       | 35.17  | 29.24     | 34.53 | 30.14 | 32.12 |
+|             |       |       |       | SSIM        | ↑      |           |       |       |       |
+|             | Chair | Drums | Ficus | Hotdog      | Lego   | Materials | Mic   | Ship  | Mean  |
+| NeRF        | 0.967 | 0.925 | 0.964 | 0.974       | 0.961  | 0.949     | 0.980 | 0.856 | 0.947 |
+| JaxNeRF     | 0.974 | 0.927 | 0.967 | 0.979       | 0.968  | 0.952     | 0.987 | 0.865 | 0.952 |
+| AutoInt     | 0.928 | 0.861 | 0.898 | 0.974       | 0.900  | 0.930     | 0.948 | 0.852 | 0.911 |
+| NSVF        | 0.968 | 0.931 | 0.973 | 0.980       | 0.960  | 0.973     | 0.987 | 0.854 | 0.953 |
+| NeRF-SH     | 0.974 | 0.927 | 0.968 | 0.978       | 0.966  | 0.951     | 0.985 | 0.866 | 0.952 |
+| JaxNeRF+    | 0.982 | 0.936 | 0.980 | 0.983       | 0.979  | 0.956     | 0.991 | 0.887 | 0.962 |
+| PlenOctrees | 0.981 | 0.933 | 0.970 | 0.982       | 0.971  | 0.955     | 0.987 | 0.884 | 0.958 |
+| SNeRG       | 0.975 | 0.929 | 0.967 | 0.971       | 0.973  | 0.938     | 0.982 | 0.865 | 0.950 |
+| FastNeRF    | 0.966 | 0.913 | 0.954 | 0.973       | 0.964  | 0.947     | 0.977 | 0.805 | 0.941 |
+| KiloNeRF    |       |       |       |             |        |           |       |       | 0.950 |
+| DIVeR64     | 0.978 | 0.933 | 0.975 | 0.981       | 0.980  | 0.951     | 0.987 | 0.893 | 0.960 |
+| DIVeR32     | 0.977 | 0.932 | 0.977 | 0.979       | 0.979  | 0.946     | 0.987 | 0.886 | 0.958 |
+| DIVeR32(RT) | 0.977 | 0.932 | 0.977 | 0.978       | 0.978  | 0.946     | 0.987 | 0.885 | 0.958 |
+|             |       |       |       | LPIPS       | ↓      |           |       |       |       |
+|             | Chair | Drums | Ficus | Hotdog      | Lego   | Materials | Mic   | Ship  | Mean  |
+| NeRF        | 0.046 | 0.091 | 0.044 | 0.121       | 0.050  | 0.063     | 0.028 | 0.206 | 0.081 |
+| JaxNeRF     | 0.027 | 0.070 | 0.033 | 0.030       | 0.030  | 0.048     | 0.013 | 0.156 | 0.051 |
+| AutoInt     | 0.141 | 0.224 | 0.148 | 0.080       | 0.175  | 0.136     | 0.131 | 0.323 | 0.170 |
+| NSVF        | 0.043 | 0.069 | 0.017 | 0.025       | 0.029  | 0.021     | 0.010 | 0.162 | 0.047 |
+| NeRF-SH     | 0.037 | 0.087 | 0.039 | 0.041       | 0.041  | 0.060     | 0.021 | 0.177 | 0.063 |
+| JaxNeRF+    | 0.017 | 0.057 | 0.018 | 0.022       | 0.017  | 0.041     | 0.008 | 0.123 | 0.038 |
+| PlenOctree  | 0.022 | 0.076 | 0.038 | 0.032       | 0.034  | 0.059     | 0.017 | 0.144 | 0.053 |
+| SNeRG       | 0.025 | 0.061 | 0.028 | 0.043       | 0.022  | 0.052     | 0.016 | 0.156 | 0.050 |
+| FastNeRF    | 0.032 | 0.083 | 0.031 | 0.031       | 0.022  | 0.034     | 0.022 | 0.192 | 0.053 |
+| KiloNeRF    |       |       |       |             |        |           |       |       | 0.030 |
+| DIVeR64     | 0.014 | 0.057 | 0.020 | 0.017       | 0.010  | 0.032     | 0.010 | 0.093 | 0.032 |
+| DIVeR32     | 0.014 | 0.058 | 0.020 | 0.019       | 0.010  | 0.035     | 0.011 | 0.102 | 0.034 |
+| DIVeR32(RT) | 0.014 | 0.058 | 0.020 | 0.019       | 0.010  | 0.034     | 0.011 | 0.100 | 0.033 |
+
+Table 6. Rendering quality on the NeRF-synthetic dataset.
+
+
+
+|         | Barn  | Caterpillar | Family | Ignatius | PSNR Truck | ↑ Mean | Jade  | Fountain | Char  | Statues | Mean  |
+|---------|-------|-------------|--------|----------|------------|--------|-------|----------|-------|---------|-------|
+| NeRF    | 24.05 | 23.75       | 30.29  | 25.43    | 25.36      | 25.78  | 21.65 | 25.59    | 25.87 | 23.48   | 24.15 |
+| JaxNeRF | 27.39 | 25.24       | 32.47  | 27.95    | 26.66      | 27.94  |       |          |       |         |       |
+| NSVF    | 27.16 | 26.44       | 33.58  | 27.91    | 26.92      | 28.40  | 26.96 | 27.73    | 27.95 | 24.97   | 26.90 |
+| DIVeR64 | 27.31 | 25.64       | 33.40  | 27.80    | 26.74      | 28.18  | 26.52 | 28.30    | 28.81 | 25.36   | 27.25 |
+|         |       |             |        |          | SSIM       | ↑      |       |          |       |         |       |
+|         | Barn  | Caterpillar | Family | Ignatius | Truck      | Mean   | Jade  | Fountain | Char  | Statues | Mean  |
+| NeRF    | 0.750 | 0.860       | 0.932  | 0.920    | 0.860      | 0.864  | 0.750 | 0.860    | 0.900 | 0.800   | 0.828 |
+| JaxNeRF | 0.842 | 0.892       | 0.951  | 0.940    | 0.896      | 0.904  |       |          |       |         |       |
+| NSVF    | 0.832 | 0.900       | 0.954  | 0.930    | 0.895      | 0.900  | 0.901 | 0.913    | 0.921 | 0.858   | 0.898 |
+| DIVeR64 | 0.850 | 0.903       | 0.960  | 0.941    | 0.904      | 0.912  | 0.900 | 0.918    | 0.948 | 0.873   | 0.910 |
+|         |       |             |        |          | LPIPS      | ↓      |       |          |       |         |       |
+|         | Barn  | Caterpillar | Family | Ignatius | Truck      | Mean   | Jade  | Fountain | Char  | Statues | Mean  |
+| NeRF    | 0.395 | 0.196       | 0.098  | 0.111    | 0.192      | 0.198  | 0.264 | 0.149    | 0.149 | 0.206   | 0.192 |
+| JaxNeRF | 0.286 | 0.189       | 0.092  | 0.102    | 0.173      | 0.168  |       |          |       |         |       |
+| NSVF    | 0.307 | 0.141       | 0.063  | 0.106    | 0.148      | 0.153  | 0.094 | 0.113    | 0.074 | 0.171   | 0.113 |
+| DIVeR64 | 0.209 | 0.121       | 0.050  | 0.082    | 0.119      | 0.116  | 0.076 | 0.069    | 0.037 | 0.110   | 0.073 |
+
+Table 7. Rendering quality on the Tanks & Temple and BlendedMVS datasets.
+
+FPS ↑
+
+Chair Drums Ficus Hotdog Lego Materials Mic Ship Range
+
+PlenOctrees 143 78 23 15 45 13 76 10 76±66 SNeRG - - - - - - - - 98±37 FastNeRF - - - - - - - - - KiloNeRF 40 - - - 40 - - 16 28±12 DIVeR32(RT) 59 40 39 44 67 29 66 27 47±20
+
+MB ↓
+
+Chair Drums Ficus Hotdog Lego Materials Mic Ship Mean
+
+PlenOctrees 832 1239 1792 2683 2068 3686 443 2693 1930 SNeRG - - - - - - - - 84 FastNeRF - - - - - - - - - KiloNeRF 204 - - - 108 - - 173 161 DIVeR32(RT) 55 56 47 84 64 62 24 151 68
+
+GPU GB ↓
+
+Chair Drums Ficus Hotdog Lego Materials Mic Ship Range
+
+PlenOctrees 0.94 1.34 1.87 2.73 2.19 3.70 0.56 2.74 1.65±1.09 SNeRG - - - - - - - - 1.73±1.48 FastNeRF - - - - - - - - - KiloNeRF 1.94 - - - 1.41 - - 1.78 1.68±0.27 DIVeR32(RT) 1.04 1.04 1.03 1.06 1.04 1.04 1.01 1.13 1.07±0.06
+
+
+
+| N   | Decoder     | Chair | Drums | Ficus | PSNR Hotdog | ↑ Lego | Materials | Mic   | Ship  | Mean    |
+|-----|-------------|-------|-------|-------|-------------|--------|-----------|-------|-------|---------|
+| 256 | DIVeR64(RT) | 34.35 | 25.38 | 31.76 | 36.76       | 35.49  | 29.61     | 34.57 | 30.48 | 32.30   |
+| 256 | DIVeR32(RT) | 34.09 | 25.40 | 32.02 | 36.35       | 35.17  | 29.24     | 34.53 | 30.14 | 32.12   |
+| 128 | DIVeR64(RT) | 31.98 | 24.74 | 30.12 | 35.54       | 32.57  | 28.96     | 32.15 | 29.02 | 30.63   |
+| 128 | DIVeR32(RT) | 31.54 | 24.75 | 30.25 | 35.42       | 32.61  | 28.82     | 31.97 | 28.80 | 30.52   |
+|     |             |       |       |       | FPS ↑       |        |           |       |       |         |
+| N   | Decoder     | Chair | Drums | Ficus | Hotdog      | Lego   | Materials | Mic   | Ship  | Range   |
+| 256 | DIVeR64(RT) | 31    | 25    | 18    | 19          | 28     | 16        | 35    | 17    | 26 ± 9  |
+| 256 | DIVeR32(RT) | 59    | 40    | 39    | 44          | 67     | 29        | 66    | 27    | 47 ± 20 |
+| 128 | DIVeR64(RT) | 57    | 38    | 29    | 33          | 41     | 28        | 53    | 17    | 37 ± 20 |
+| 128 | DIVeR32(RT) | 108   | 82    | 61    | 84          | 99     | 67        | 119   | 45    | 82 ± 37 |
+|     |             |       |       |       | MB ↓        |        |           |       |       |         |
+| N   | Decoder     | Chair | Drums | Ficus | Hotdog      | Lego   | Materials | Mic   | Ship  | Mean    |
+| 256 | DIVeR64(RT) | 55    | 42    | 49    | 80          | 64     | 62        | 24    | 118   | 62      |
+| 256 | DIVeR32(RT) | 55    | 56    | 47    | 84          | 64     | 62        | 24    | 151   | 68      |
+| 128 | DIVeR64(RT) | 9.2   | 8.2   | 8.5   | 15          | 12     | 9.6       | 4.7   | 30    | 12      |
+| 128 | DIVeR32(RT) | 9.7   | 8.9   | 9.3   | 16          | 13     | 9.8       | 4.5   | 28    | 12      |
+
+Table 9. Architecture ablation on the NeRF-synthetic dataset.

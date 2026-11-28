@@ -1,0 +1,124 @@
+# Regular Octree Construction
+Also called: Geometric centre subdivision, Octree volume subdivision, Standard octree subdivision
+
+## Overview
+Regular octree construction is a method for building adaptive hierarchical grids by recursively subdividing nodes based on a mass threshold criterion, using the geometric center of each node as the subdivision point [S1]. It solves the problem of efficiently discretizing non-uniform density distributions (such as dusty media) for numerical simulations, ensuring that no single cell contains more than a specified fraction of the total system mass [S1]. It is distinguished from its sibling [Topology-Adapted Octree Construction](19929-topology-adapted-octree-construction.md) by its reliance on geometric symmetry rather than topological constraints to determine subdivision, and from [Barycentric Octree Construction](#barycentric-octree-construction) by its use of the geometric center instead of the mass-weighted center [S1].
+
+## How it works
+**Inputs:**
+- A cuboidal root node enclosing the entire domain (e.g., a dusty medium) [S1].
+- The total dust mass of the system, $M_{tot}$, estimated via Monte Carlo integration [S1].
+- A maximum mass fraction parameter, $\delta_{max}$ [S1].
+
+**Outputs:**
+- An octree structure where leaf nodes represent actual dust cells [S1].
+
+**Data Structures:**
+- **Node List:** A dynamic list (queue) storing nodes to be processed. Initially contains only the root node. Subdivided children are appended to the end of this list [S1].
+- **Node Object:** Represents a cuboidal volume. Fields include spatial bounds (`min_coord`, `max_coord`) and estimated mass $M$ [S1].
+
+**Steps:**
+1. Initialize the `Node List` with the cuboidal root node [S1].
+2. While the `Node List` is not empty:
+    a. Pop the next node $N$ from the list [S1].
+    b. Estimate the dust mass $M$ contained within node $N$ using Monte Carlo integration [S1].
+    c. Calculate the mass ratio $\delta$:
+       $$ \delta = \frac{M}{M_{tot}} $$
+    d. If $\delta < \delta_{max}$:
+       - Mark $N$ as a leaf node (actual dust cell) [S1].
+    e. Else ($\delta \ge \delta_{max}$):
+       - Partition $N$ into eight equal-sized subnodes using the geometric center of $N$ as the subdivision point [S1].
+       - Append the eight new subnodes to the end of the `Node List` [S1].
+3. Terminate when the list is exhausted [S1].
+
+**Parameters:**
+- $\delta_{max}$: The maximum fraction of total dust mass allowed in a leaf node. Typical values are not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Density Gradients:** In regions with large density gradients, regular subdivision may concentrate nearly all dust mass in only one of the eight subnodes, leading to frequent nested subdivision in that specific branch while others remain empty or sparse [S1].
+- **Precision:** Mass estimation relies on Monte Carlo integration, which introduces statistical noise; however, the sources do not specify error bounds or convergence criteria for this estimation [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Node:
+    def __init__(self, min_coord, max_coord):
+        self.min_coord = list(min_coord)
+        self.max_coord = list(max_coord)
+    def get_geometric_center(self):
+        return [(self.min_coord[i] + self.max_coord[i]) / 2.0 for i in range(3)]
+
+def regular_octree_construction(root_node, total_mass, max_mass_fraction):
+    """
+    Constructs an octree using regular subdivision based on mass threshold.
+    
+    Args:
+        root_node: Cuboidal node enclosing the entire domain.
+        total_mass: Total dust mass M_tot in the system.
+        max_mass_fraction: Maximum allowed mass fraction delta_max for a leaf node.
+        
+    Returns:
+        List of leaf nodes representing the final dust cells.
+    """
+    node_list = [root_node]
+    leaf_nodes = []
+    while node_list:
+        current_node = node_list.pop(0)
+        estimated_mass = estimate_mass_monte_carlo(current_node)
+        delta = estimated_mass / total_mass
+        if delta < max_mass_fraction:
+            leaf_nodes.append(current_node)
+        else:
+            subnodes = subdivide_node_geometric(current_node)
+            node_list.extend(subnodes)
+    return leaf_nodes
+
+def subdivide_node_geometric(node):
+    """
+    Divides a cuboidal node into 8 equal subnodes using its geometric center.
+    """
+    center = node.get_geometric_center()
+    subnodes = []
+    for i in range(2):
+        for j in range(2):
+            for k in range(2):
+                new_min = [
+                    node.min_coord[0] if i == 0 else center[0],
+                    node.min_coord[1] if j == 0 else center[1],
+                    node.min_coord[2] if k == 0 else center[2]
+                ]
+                new_max = [
+                    center[0] if i == 0 else node.max_coord[0],
+                    center[1] if j == 0 else node.max_coord[1],
+                    center[2] if k == 0 else node.max_coord[2]
+                ]
+                subnodes.append(Node(new_min, new_max))
+    return subnodes
+
+def estimate_mass_monte_carlo(node):
+    # [G] Standard Monte Carlo integration: sample N points uniformly in node volume,
+    # evaluate density function at each point, average and multiply by volume.
+    # Not given in the sources.
+    return 0.0
+```
+
+## Subtopics
+
+### Barycentric Octree Construction
+An octree construction method where the subdivision point is chosen as the barycentre (mass-weighted centre) of the node rather than the geometric centre, aiming to divide mass distribution equally among subnodes [S1]. It is chosen when one wants to "zoom in faster on high density regions" and avoid the inefficiency of regular subdivision in areas with large density gradients [S1]. It requires fewer levels of subdivision compared to regular subdivision for a fixed maximum cell mass threshold criterion [S1]. The memory penalty and computational cost for calculating the barycentre are minimal compared to the complete simulation memory requirement and run time [S1].
+
+## Operating characteristics
+- **Time Complexity:** Not explicitly given in Big-O notation, but the sources note that regular octree grid simulations are 10 to 20% more efficient in run time than barycentric grid simulations, even when barycentric grids contain fewer cells [S1].
+- **Memory Complexity:** Depends on the total number of grid cells, which varies with the geometry of the model [S1]. Regular subdivision may result in more cells due to frequent nested subdivision in high-gradient regions [S1].
+- **Performance:** When paired with neighbour list traversal methods, regular subdivision yields the most efficient structure for Monte Carlo radiative transfer simulations, cutting grid traversal time by 20% compared to top-down methods [S1].
+- **Strengths:** Simple implementation; faster run time compared to barycentric approaches; efficient for Monte Carlo radiative transfer when combined with neighbour lists [S1].
+- **Limitations:** Inefficient in regions with large density gradients, potentially leading to excessive subdivision depth in one subnode while others are underutilized [S1].
+- **When to use:** When run time efficiency is prioritized over subdivision balance, and when the simulation involves Monte Carlo radiative transfer [S1].
+- **When not to use:** When the density distribution has extreme gradients that would cause severe imbalance in subnode masses, potentially requiring deeper trees than necessary [S1].
+
+## Background
+The method was implemented in the SKIRT Monte Carlo radiative transfer code, building on earlier work by Baes et al. (2003, 2011) [S1]. It follows the standard approach used in most other radiative transfer codes with octrees, such as those by Kurosawa & Hillier (2001), Wolf (2003), Harries et al. (2004), and Bianchi (2008) [S1]. The specific comparison between regular and barycentric subdivision was detailed in a study by Baes et al. (2013) [S1].
+
+## Sources
+[S1] Using hierarchical octrees in Monte Carlo radiative transfer simulations, https://doi.org/10.1051/0004-6361/201220854, fetched 2026-10-24

@@ -1,0 +1,105 @@
+# N3-Tree
+
+Also called: N-ary Octree, Octree / N3-Tree
+
+## Overview
+The N3-Tree is a sparse pointer octree data structure designed for GPU-based traversal, originally introduced for surface texture encoding and later adapted for volume rendering [S1, unofficial]. It distinguishes itself by enforcing a strict binary state for every node: a node is either a leaf containing data values or an internal node containing pointers to exactly $N^3$ children (typically $N=2$, resulting in 8 children) [S1, unofficial]. This regular subdivision simplifies memory layout and reduces indirections compared to general sparse octrees, making it suitable for storing regular data bricks [S2, unofficial].
+
+## How it works
+### Inputs and Outputs
+*   **Input:** A volumetric dataset represented as a sparse octree [S1, unofficial].
+*   **Output:** Traversal state (current node, ray position) or rendered color/opacity values [G].
+
+### Data Structures
+The tree is stored in RGBA 3D textures [S1, unofficial].
+*   **Internal Nodes:** The RGB channels encode pointers to child nodes [S1, unofficial].
+*   **Leaf Nodes:** The RGB channels encode data values (e.g., density, color) [S1, unofficial].
+*   **Flag Convention:** The Alpha channel distinguishes between internal nodes and leaf nodes [S1, unofficial]. Specific bit values for the flag are not detailed in the sources [S1, unofficial].
+
+### Traversal Algorithm
+Traversal is performed in a fragment shader [S1, unofficial]. The algorithm follows the ray through the tree, resolving pointers from internal nodes until a leaf node is reached [G].
+1.  **Initialize:** Start at the root node. Determine the initial ray origin and direction [G].
+2.  **Sample Node:** Read the RGBA value of the current node from the 3D texture [S1, unofficial].
+3.  **Check Type:** Inspect the Alpha channel [G].
+    *   If Alpha indicates **Leaf**: Sample the volumetric data from the RGB channels [S1, unofficial]. Perform shading/compositing [G]. Terminate traversal for this ray segment [G].
+    *   If Alpha indicates **Internal**: Decode the child pointer from the RGB channels [S1, unofficial]. Determine which of the 8 children the ray intersects [G]. Update the current node to the child node [G]. Update the ray's local coordinates or bounding box relative to the child [G]. Repeat from Step 2 [G].
+4.  **Boundary Check:** If the ray exits the tree bounds, terminate [G].
+
+### Formulas
+*   **Child Index:** $i = \lfloor z \cdot 4 \rfloor + \lfloor y \cdot 2 \rfloor + \lfloor x \cdot 1 \rfloor$, where $x, y, z \in [0, 1)$ are the normalized local coordinates of the ray origin relative to the current node's bounds [G].
+*   **Child Offset:** $\Delta = \frac{S}{2}$, where $S$ is the current node's side length. The child's base position is $P_{child} = P_{parent} + (i \bmod 2)\Delta \hat{x} + (\lfloor i/2 \rfloor \bmod 2)\Delta \hat{y} + (\lfloor i/4 \rfloor \bmod 2)\Delta \hat{z}$ [G].
+*   **Local Coordinate Update:** $L_{new} = L_{old} - \Delta \cdot \text{sign}(L_{old})$ [G].
+
+### Parameters and Edge Cases
+*   **N:** The number of subdivisions per axis. Typically $N=2$ (octree). $N$ is an arbitrary integer [S1, unofficial].
+*   **Precision:** Pointer encoding in RGB channels may limit the maximum tree depth or addressable memory space [G].
+*   **Empty Space:** The structure distinguishes between internal nodes (pointers) and leaves (values). Empty space handling is not explicitly detailed, but the binary nature suggests that missing children might be represented by null pointers or specific flag values [S1, unofficial].
+*   **Boundary Artifacts:** Normalized coordinates must be clamped to $[0, 0.9999]$ to prevent off-by-one child index selection at node edges [G].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_n3_tree(ray_origin, ray_direction, root_size, max_depth):
+    # Initialize ray parameters relative to root
+    current_node_pos = [0.0, 0.0, 0.0]
+    current_ray_local = ray_origin
+
+    for depth in range(max_depth):
+        # Sample the current node from the 3D texture
+        # RGB = pointer (internal) or value (leaf)
+        # A = flag (internal vs leaf)
+        node_data = sample_3d_texture(current_node_pos)
+        alpha = node_data.a
+
+        if alpha > 0.5:  # Leaf node flag
+            density = node_data.rgb
+            return density * 0.8  # Simplified shading [G]
+        else:  # Internal node
+            child_pointer = node_data.rgb
+            # Compute normalized local coordinates
+            nx = current_ray_local.x / root_size
+            ny = current_ray_local.y / root_size
+            nz = current_ray_local.z / root_size
+            # Clamp to [0, 1) to avoid boundary artifacts
+            nx = max(0.0, min(nx, 0.9999))
+            ny = max(0.0, min(ny, 0.9999))
+            nz = max(0.0, min(nz, 0.9999))
+            # Determine child index (0-7)
+            child_idx = int(nz * 4) + int(ny * 2) + int(nx * 1)
+            # Compute child node position
+            child_size = root_size / 2.0
+            offset_x = (child_idx & 1) * child_size
+            offset_y = (child_idx & 2) * child_size
+            offset_z = (child_idx & 4) * child_size
+            current_node_pos = [child_pointer + offset_x, child_pointer + offset_y, child_pointer + offset_z]
+            current_ray_local = [current_ray_local.x - offset_x, current_ray_local.y - offset_y, current_ray_local.z - offset_z]
+            # Check if ray is still within the child node bounds
+            if not is_within_bounds(current_ray_local, child_size / 2.0):
+                break
+    return [0.0, 0.0, 0.0, 1.0]  # Background color [G]
+
+def sample_3d_texture(pos):
+    # Standard 3D texture lookup returning vec4
+    return texture3D(pos)
+
+def is_within_bounds(local_pos, half_size):
+    return all(-half_size <= p <= half_size for p in local_pos)
+```
+
+## Subtopics
+
+### [N^3 Tree with Node/Brick Pools](20711-n-3-tree-with-node-brick-pools.md)
+This method accelerates sparse voxel traversal by decoupling the tree structure from the voxel data, storing them in separate memory pools. It solves the memory overhead and cache inefficiency of storing full child and neighbor pointers for every node. Unlike the general N3-Tree, which discusses the standard pointer structure, this variant specifically implements the node/brick pool architecture introduced by Crassin et al..
+
+## Operating characteristics
+*   **Memory:** Compact storage due to the regular structure. Internal nodes store only one pointer (to the first child) if children are stored successively, or 8 pointers if not. Crassin et al. store all eight child nodes in successive regions, allowing one pointer per internal node, but require storing the first node marked as empty, which requires the same memory as storing eight pointers per node [S1, unofficial].
+*   **Performance:** Traversal in fragment shaders benefits from deep pipelining and identical processing of fragments [S2, unofficial]. Reduced indirections improve memory locality [S2, unofficial].
+*   **Limitations:** The structure is considered a special case of Kd-Trees, and specific algorithms to exploit its regularity for ray traversal acceleration are not widely proposed in the literature [S2, unofficial].
+
+## Background
+The N3-Tree was introduced by Lefebvre et al. for surface texture encoding [S1, unofficial]. It was later used by Crassin et al. for volume rendering, where internal nodes are stored in a node pool and leaf nodes in a brick pool [S1, unofficial]. Octrees and N3-trees are considered a special case of Kd-Trees, offering regular subdivision and compact storage [S2, unofficial].
+
+## Sources
+[S1] Eine adaptive, hybride Datenstruktur für Volumen Datensätze auf der GPU, https://doi.org/10.34726/hss.2016.26562, fetched 2026-10-26 (unofficial)
+[S2] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,109 @@
+--- v003.md
++++ v004.md
+@@ -23,5 +23,5 @@
+ 
+ **Formulas:**
+-The contribution of a splat to a pixel is determined by the rasterized footprint. The final pixel color $C$ accumulates splat contributions:
++The contribution of a splat to a pixel is determined by the rasterized footprint [G]. The final pixel color $C$ accumulates splat contributions using front-to-back alpha compositing:
+ $$ C = \sum_{k} \alpha_k \cdot c_k \cdot \prod_{j=1}^{k-1} (1 - \alpha_j) $$
+ where $\alpha_k$ is the alpha value of the $k$-th splat at the pixel, and $c_k$ is its color [G]. The alpha value $\alpha_k$ derives from the density and the kernel footprint approximation [S1, unofficial].
+@@ -38,34 +38,66 @@
+ **Pseudocode:**
+ ```python
++import math
++
+ def render_triangle_mesh_splats(splats, camera, screen):
+-    meshes = []
++    # 1. Approximation & 2. Transformation
+     for splat in splats:
+-        mesh = generate_triangle_mesh(splat.kernel, splat.position)
+-        meshes.append(mesh)
+-    for mesh in meshes:
+-        clip_vertices = transform_to_clip_space(mesh.vertices, camera.mvp_matrix)
+-        fragments = rasterize(clip_vertices, screen.resolution)
++        mesh = generate_triangle_mesh(splat.kernel_width, splat.position)
++        clip_vertices = [transform_vertex(v, camera.mvp_matrix) for v in mesh.vertices]
++        # 3. Rasterization
++        fragments = rasterize_triangle(clip_vertices, screen.resolution)
++        # 4 & 5. Fragment Processing & Compositing
+         for frag in fragments:
+-            weight = interpolate_attribute(frag, mesh.attributes)
+-            alpha = compute_alpha(weight, mesh.density)
+-            blend_pixel(screen, frag.x, frag.y, mesh.color, alpha)
++            weight = interpolate_barycentric(frag, mesh.attributes)
++            alpha = compute_alpha(weight, splat.density)
++            blend_pixel(screen, frag.x, frag.y, splat.color, alpha)
+ 
+-def generate_triangle_mesh(kernel, position):
++def generate_triangle_mesh(kernel_width, position):
+     # Approximates kernel footprint with a triangle mesh [G]
+-    return Mesh(vertices=[position], attributes=[1.0], density=1.0, color=(1.0, 1.0, 1.0))
++    s = kernel_width / 2.0
++    return {
++        "vertices": [
++            (position[0] - s, position[1] - s, position[2]),
++            (position[0] + s, position[1] - s, position[2]),
++            (position[0], position[1] + s, position[2])
++        ],
++        "attributes": [1.0, 1.0, 1.0]
++    }
+ 
+-def transform_to_clip_space(vertices, mvp_matrix):
++def transform_vertex(vertex, mvp_matrix):
+     # Standard homogeneous transformation [G]
+-    return [mvp_matrix @ v for v in vertices]
++    v = vertex + (1.0,)
++    transformed = tuple(sum(mvp_matrix[i][j] * v[j] for j in range(4)) for i in range(4))
++    w = transformed[3]
++    if w == 0.0: return None
++    return (transformed[0]/w, transformed[1]/w, transformed[2]/w)
+ 
+-def rasterize(clip_vertices, resolution):
++def rasterize_triangle(clip_vertices, resolution):
+     # Standard hardware scan-conversion returns covered pixels [G]
+-    return [Fragment(x, y) for x in range(resolution.x) for y in range(resolution.y) if point_in_triangle(x, y, clip_vertices)]
++    fragments = []
++    min_x, max_x = max(0, int(min(v[0] for v in clip_vertices))), min(resolution[0], int(max(v[0] for v in clip_vertices)))
++    min_y, max_y = max(0, int(min(v[1] for v in clip_vertices))), min(resolution[1], int(max(v[1] for v in clip_vertices)))
++    for x in range(min_x, max_x + 1):
++        for y in range(min_y, max_y + 1):
++            if point_in_triangle(x, y, clip_vertices):
++                fragments.append({"x": x, "y": y})
++    return fragments
+ 
+ def point_in_triangle(px, py, verts):
+     # Barycentric coordinate test [G]
+-    return True
++    v0 = (verts[2][0]-verts[0][0], verts[2][1]-verts[0][1])
++    v1 = (verts[1][0]-verts[0][0], verts[1][1]-verts[0][1])
++    v2 = (px-verts[0][0], py-verts[0][1])
++    dot00 = v0[0]*v0[0] + v0[1]*v0[1]
++    dot01 = v0[0]*v1[0] + v0[1]*v1[1]
++    dot02 = v0[0]*v2[0] + v0[1]*v2[1]
++    dot11 = v1[0]*v1[0] + v1[1]*v1[1]
++    dot12 = v1[0]*v2[0] + v1[1]*v2[1]
++    inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01)
++    u = (dot11 * dot02 - dot01 * dot12) * inv_denom
++    v = (dot00 * dot12 - dot01 * dot02) * inv_denom
++    return (u >= 0.0) and (v >= 0.0) and (u + v <= 1.0)
+ 
+-def interpolate_attribute(frag, attributes):
++def interpolate_barycentric(frag, attributes):
+     return attributes[0]
+ 
+@@ -75,5 +107,5 @@
+ def blend_pixel(screen, x, y, color, alpha):
+     existing = screen.get_pixel(x, y)
+-    screen.set_pixel(x, y, color * alpha + existing * (1.0 - alpha))
++    screen.set_pixel(x, y, tuple(c * alpha + e * (1.0 - alpha) for c, e in zip(color, existing)))
+ ```
+ 
+@@ -84,6 +116,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of splats and the complexity of the triangle meshes. Hardware rasterization provides efficient scan-conversion [S1, unofficial].
+-*   **Memory Complexity:** Depends on the number of splats and the resolution of the triangle meshes [G].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** Fast due to hardware acceleration [S1, unofficial].
+ *   **Strengths:** Leverages existing graphics hardware; efficient scan-conversion [S1, unofficial].

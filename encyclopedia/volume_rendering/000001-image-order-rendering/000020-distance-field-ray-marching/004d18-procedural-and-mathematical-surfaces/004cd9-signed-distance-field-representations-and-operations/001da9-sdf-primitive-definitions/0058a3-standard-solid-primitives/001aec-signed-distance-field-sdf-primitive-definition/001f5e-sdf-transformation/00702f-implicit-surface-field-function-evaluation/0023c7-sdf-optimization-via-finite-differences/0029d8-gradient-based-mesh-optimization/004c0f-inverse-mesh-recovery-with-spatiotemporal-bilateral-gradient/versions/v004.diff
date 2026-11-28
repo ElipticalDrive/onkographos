@@ -1,0 +1,282 @@
+--- v003.md
++++ v004.md
+@@ -4,191 +4,125 @@
+ 
+ ## Overview
+-This method is a gradient-based optimization technique for recovering mesh geometry from multi-view images by optimizing vertex positions [S1]. It solves the problem of slow convergence and loss of sharp features (silhouettes, thin structures) in inverse rendering, which occurs when standard Laplacian smoothing dilutes sparse silhouette gradients [S1]. It sets itself apart from its parent [Gradient-Based Mesh Optimization](4628-gradient-based-mesh-optimization.md) by replacing the Laplacian postfilter with an edge-aware cross-bilateral filter that preserves values on silhouettes, enabling faster convergence on models with thin structures or many silhouettes [S1].
++This method reconstructs unknown mesh geometry by optimizing vertex positions to minimize geometric differences between rendered multi-view images and a reference mesh. It sets itself apart from its sibling [Gradient-Based Mesh Optimization](4628-gradient-based-mesh-optimization.md) by replacing the standard Laplacian postfilter with a mesh cross-bilateral filter, which preserves sharp edges and silhouettes better than Laplacian smoothing, leading to faster convergence on thin structures [S1].
+ 
+ ## How it works
+-The method follows the Large Steps framework [S1], but replaces the postfilter on the intermediate variable $m_t$ with a mesh cross-bilateral filter. The optimization minimizes the geometric difference between the rendered views of the current mesh and the reference multi-view images [S1].
+-
+ **Inputs:**
+-- Reference multi-view images (depth/mask or photometric data) [S1].
+-- Initial mesh geometry (typically a sphere) [S1].
+-- Hyperparameters: learning rate $\alpha$, Adam momentum $\beta_1, \beta_2$, regularization $\lambda$, bilateral filter range parameters $\sigma_\phi, \sigma_d$ [S1].
++- A reference mesh (e.g., a cube or dragon model).
++- A set of $N$ camera views (10 views for the cube, 25 views for the dragon).
++- Initial mesh geometry (sphere with ~10k vertices).
+ 
+ **Outputs:**
+-- Optimized mesh vertex positions [S1].
++- Optimized mesh vertex positions.
+ 
+ **Data Structures:**
+-- **Mesh:** Defined by vertex positions $V \in \mathbb{R}^{3 \times N}$ and connectivity [S1].
+-- **Vertex Normals:** $\hat{n} \in \mathbb{R}^{3 \times N}$, computed from mesh geometry [S1].
+-- **Gradient Vectors:** $h \in \mathbb{R}^N$ (scalar field to be filtered, e.g., displacement or loss gradient) [S1].
+-- **Laplacian Matrix:** $L \in \mathbb{R}^{N \times N}$, the standard cotangent Laplacian [S1].
++- **Mesh:** Defined by vertices $V$ and connectivity.
++- **Intermediate Variables:** $m_t$ (current parameter state), $v_t$ (intermediate variable for filtering).
++- **Gradients:** $\nabla L$ computed via differentiable rendering.
+ 
+ **Parameters:**
+-- $\alpha$ (learning rate): $1 \times 10^{-2}$ for cube, $3 \times 10^{-2}$ for dragon [S1].
+-- $\beta_1, \beta_2$ (Adam momentum): $0.9, 0.99$ [S1].
+-- $\lambda$ (regularization weight): $19$ [S1].
+-- $\sigma_\phi$ (photometric range parameter): $0.4$ [S1].
+-- $\sigma_d$ (spatial distance parameter): $0.5$ [S1].
+-- $N_{samples}$: 16 samples per pixel for forward rendering, 1 sample per pixel for gradient [S1].
++- Learning rate $\alpha$: $1 \cdot 10^{-2}$ for cube, $3 \cdot 10^{-2}$ for dragon [S1].
++- Adam momentum $\beta_1 = 0.9$, $\beta_2 = 0.99$ [S1].
++- Regularization weight $\lambda = 19$ [S1].
++- Cross-bilateral filter range parameter $\sigma_\phi = 0.4$ [S1].
++- Cross-bilateral filter spatial distance parameter $\sigma_d = 0.5$ [S1].
++- Learning rate scheduler: Exponential reduction to factor 0.6 at the end of optimization [S1].
+ 
+-**Algorithm Steps:**
++**Steps:**
++1. **Initialization:** Initialize the mesh as a sphere with approximately 10,000 vertices [S1].
++2. **Iteration Loop:** For each optimization iteration $t$:
++    a. **Upsampling (Conditional):** If optimizing the dragon model, upsample the mesh at iterations 10, 30, and 60 by remeshing to reduce the average edge length by a factor of 2. The cube does not require remeshing [S1].
++    b. **Rendering:** Render all $N$ views. Use 16 samples per pixel for forward rendering and 1 sample per pixel for gradient computation [S1].
++    c. **Loss Computation:** Compute the loss $L$ using the L1 norm between the rendered images and the reference images [S1].
++    d. **Gradient Computation:** Compute the gradient $\nabla L$ with respect to vertex positions [S1].
++    e. **Optimizer Step:** Update parameters using the UniformAdam optimizer with the infinity norm, using $\alpha$, $\beta_1$, and $\beta_2$ [S1].
++    f. **Filtering:** Apply the spatiotemporal bilateral filtering to the gradients/parameters as described below.
++3. **Termination:** Stop when the learning rate scheduler completes or convergence criteria are met.
+ 
+-1.  **Initialization:** Initialize the mesh as a sphere with approximately 10,000 vertices [S1].
+-2.  **Iteration Loop:** For each optimization step $t$:
+-    a.  **Rendering:** Render all views using the current mesh. Use 16 samples per pixel for the forward pass and 1 sample per pixel for the gradient computation [S1].
+-    b.  **Loss Computation:** Compute the loss using the L1 norm between the rendered output and the reference [S1].
+-    c.  **Gradient Update:** Compute the gradient of the loss with respect to the mesh parameters. Update the vertex positions using the UniformAdam optimizer with parameters $\beta_1=0.9, \beta_2=0.99$ and learning rate $\alpha$ [S1].
+-    d.  **Prefiltering:** Apply a Laplacian prefilter to the gradient/parameter update. This step is crucial for diffusing silhouette gradients [S1].
+-    e.  **Postfiltering (Cross-Bilateral Filter):** Apply the mesh cross-bilateral filter to the intermediate variable $m_t$ (the update or state being filtered). This replaces the Laplacian smoothing used in Large Steps [S1].
+-        i.  Sample $N=32$ directions $s_i \in S^2$ on the unit sphere using the Sobol sequence [S1].
+-        ii. Compute diagonal data matrices $W_i$ and partition of unity matrices $\Phi_i$ for each direction $s_i$ [S1].
+-        iii. Construct the matrix $M$ by concatenating vectors $W_i h$ and $W_i \mathbf{1}$ [S1].
+-        iv. Solve the linear system $(I + \lambda L) X = M$ for $X$ [S1].
+-        v.  Compute the filtered result $\tilde{h}$ using component-wise operations on $X$ [S1].
+-    f.  **Optional Postfilter on $v_t$:** In ablation studies, applying a bilateral filter on the intermediate variable $v_t$ (along with UniformAdam infinity norm) was found to perform well, though it may cause small cracks on sharp edges [S1].
+-    g.  **Learning Rate Schedule:** Apply an exponential learning rate scheduler that reduces the learning rate to a factor of 0.6 at the end of the optimization [S1].
+-3.  **Upsampling (Conditional):** For models with thin structures (e.g., dragon), upsample the mesh at specific iterations (10, 30, 60) by remeshing to reduce the average edge length by a factor of 2. Models with sharp edges but no thin structures (e.g., cube) do not require remeshing [S1].
++**Filtering Procedure (Spatiotemporal Bilateral Gradient Filtering):**
++The method follows the Large Steps framework (Algorithm 3) but replaces the postfilter on $m_t$ with a mesh cross-bilateral filter [S1]. The optimal configuration identified is a Laplacian prefilter and a bilateral postfilter on $m_t$, while keeping the UniformAdam infinity norm [S1].
+ 
+-**Cross-Bilateral Filter Formula:**
+-The filtered vector $\tilde{h}$ is computed as:
+-$$
+-\tilde{h} = \frac{\sum_{i=1}^N \Phi(\hat{n}, s_i) (I + \lambda L)^{-1} W(\hat{n}, s_i) h}{\sum_{i=1}^N \Phi(\hat{n}, s_i) (I + \lambda L)^{-1} W(\hat{n}, s_i) \mathbf{1}}
+-$$
+-where:
+-- $h$ is the vector to be filtered.
+-- $\mathbf{1}$ is the vector of ones.
+-- $W_i = W(\hat{n}, s_i)$ is the diagonal data matrix with elements $\exp(\hat{n} \cdot s_i / \sigma_d)$ [S1].
+-- $\Phi_i = \Phi(\hat{n}, s_i)$ is the diagonal partition of unity matrix with elements $\exp(\hat{n} \cdot s_i / \sigma_\phi)$ [S1].
+-- $L$ is the Laplacian matrix [S1].
+-- $\lambda$ is the regularization parameter [S1].
+-- $N=32$ is the number of sampled directions [S1].
+-
+-**Efficient Implementation:**
+-To avoid $N$ separate matrix solves, concatenate the vectors $W_i h$ and $W_i \mathbf{1}$ into a single matrix $M \in \mathbb{R}^{N \times 2N}$:
+-$$
+-M = \left[ \begin{array}{c|c} W_1 h & W_1 \mathbf{1} \\ \vdots & \vdots \\ W_N h & W_N \mathbf{1} \end{array} \right]
+-$$
+-Compute $X = (I + \lambda L)^{-1} M$ using a single matrix solve (e.g., Cholesky decomposition) [S1]. The final $\tilde{h}$ is obtained by component-wise division of the first $N$ columns of $X$ by the second $N$ columns, weighted by $\Phi_i$ [S1].
+-
+-**Pitfalls:**
+-- Laplacian preconditioning smooths gradients at silhouettes, causing them to be diluted. This is problematic for models with thin structures and many silhouettes (e.g., dragon), as vertices near but not on silhouettes receive no silhouette gradients, and Laplacian smoothing dilutes the values on the silhouette vertices [S1].
+-- Using a bilateral filter on $v_t$ can cause small cracks in the edges due to aggressive updates, although it provides comparable convergence to the proposed method on cubes [S1].
++1. **Prefiltering (Laplacian):** Apply a Laplacian prefilter to the gradient or intermediate state to provide initial smoothing. This step is crucial as a bilateral prefilter alone is not sufficient to diffuse silhouette gradients [S1].
++2. **Postfiltering (Cross-Bilateral):** Apply the mesh cross-bilateral filter to $m_t$. This filter uses vertex normals to guide smoothing, preserving sharp edges and silhouettes [S1].
++   - The filter weights are determined by the photometric difference (range parameter $\sigma_\phi = 0.4$) and the spatial distance (distance parameter $\sigma_d = 0.5$) [S1].
++   - Unlike Laplacian smoothing, which dilutes silhouette gradients, this edge-aware filter retains values on silhouettes, interpolating gradients in the interior using values on the silhouettes [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+-import torch
+-
+-def compute_cross_bilateral_filter(h, normals, L, lambda_reg, sigma_phi, sigma_d, num_directions=32):
+-    """
+-    Compute the mesh cross-bilateral filter efficiently using a single matrix solve.
++def inverse_mesh_recovery(reference_mesh, camera_views, initial_sphere_vertices, num_iterations):
++    # Initialize mesh
++    mesh = Mesh(initial_sphere_vertices, connectivity=get_default_connectivity(10000))
+     
+-    Args:
+-        h: Tensor (V,) - vector to be filtered (m_t)
+-        normals: Tensor (V, 3) - vertex normals
+-        L: Tensor (V, V) - Laplacian matrix
+-        lambda_reg: float - regularization parameter
+-        sigma_phi: float - photometric range parameter
+-        sigma_d: float - spatial distance parameter
+-        num_directions: int - number of Sobol directions (default 32)
++    # Optimizer setup
++    optimizer = UniformAdam(mesh.vertices, lr=alpha, beta1=0.9, beta2=0.99, norm='infinity')
++    
++    # Learning rate scheduler
++    scheduler = ExponentialLR(optimizer, gamma=0.6)
++    
++    for t in range(num_iterations):
++        # Conditional upsampling for dragon model
++        if is_dragon_model and t in [10, 30, 60]:
++            mesh = remesh(mesh, target_edge_reduction_factor=2)
+         
+-    Returns:
+-        h_tilde: Tensor (V,) - filtered vector
+-    """
+-    V = h.shape[0]
+-    
+-    # 1. Sample directions on unit sphere using Sobol sequence [S1]
+-    sobol = torch.quasirandom.SobolEngine(3, scramble=True)
+-    raw = sobol.draw(num_directions)
+-    directions = raw * 2 - 1  # Map to [-1, 1]
+-    directions = directions / (torch.norm(directions, dim=1, keepdim=True) + 1e-8)  # Normalize
+-    
+-    # 2. Compute weights for each direction [S1]
+-    # normals: (V, 3), directions: (num_directions, 3) -> dots: (V, num_directions)
+-    dots = torch.matmul(normals, directions.T)
+-    
+-    # W_i diagonal elements: exp(n_hat . s_i / sigma_d)
+-    W = torch.exp(dots / sigma_d)
+-    
+-    # Phi_i diagonal elements: exp(n_hat . s_i / sigma_phi)
+-    Phi = torch.exp(dots / sigma_phi)
+-    
+-    # 3. Construct matrix M = [W_1 h ... W_N h | W_1 1 ... W_N 1]
+-    # W_h: (V, num_directions) where col i = W[:, i] * h
+-    W_h = h.unsqueeze(1) * W
+-    # W_1: (V, num_directions) where col i = W[:, i]
+-    W_1 = W
+-    M = torch.cat([W_h, W_1], dim=1)
+-    
+-    # 4. Solve (I + lambda * L) * X = M using Cholesky [S1]
+-    A = torch.eye(V, device=h.device) + lambda_reg * L
+-    try:
+-        L_chol = torch.linalg.cholesky(A)
+-        X = torch.linalg.cho_solve((L_chol, True), M)
+-    except RuntimeError:
+-        X = torch.linalg.solve(A, M)
++        # Rendering
++        rendered_images = []
++        for view in camera_views:
++            # Forward render with 16 samples
++            img_forward = render(mesh, view, samples_per_pixel=16)
++            rendered_images.append(img_forward)
+         
+-    # 5. Compute h_tilde = sum(Phi_i * X[:, i]) / sum(Phi_i * X[:, N+i])
+-    numerator = torch.sum(Phi * X[:, :num_directions], dim=1)
+-    denominator = torch.sum(Phi * X[:, num_directions:], dim=1)
+-    denominator = torch.clamp(denominator, min=1e-8)
+-    
+-    return numerator / denominator
+-
+-def optimize_mesh(vertices, normals, L, views, alpha, beta1, beta2, lambda_reg, sigma_phi, sigma_d, max_iters, upsample_iters=None):
+-    """
+-    Main optimization loop for inverse mesh recovery.
+-    """
+-    optimizer = torch.optim.Adam([vertices], lr=alpha, betas=(beta1, beta2))
+-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.6**(1/max_iters))
+-    
+-    for t in range(max_iters):
+-        # Render all views using current mesh [S1]
+-        # loss = compute_loss(vertices, views)  # L1 norm [S1]
++        # Loss computation (L1 norm)
++        loss = 0
++        for rendered, reference in zip(rendered_images, reference_mesh.images):
++            loss += L1_norm(rendered, reference)
++        loss = loss / len(camera_views)
+         
+-        # Backpropagate & Update with UniformAdam [S1]
+-        optimizer.zero_grad()
+-        # loss.backward()
+-        # grad = vertices.grad
+-        # optimizer.step()
++        # Gradient computation (1 sample per pixel for gradient)
++        gradients = compute_gradients(mesh, camera_views, samples_per_pixel=1)
+         
+-        # Prefilter (Laplacian) [S1]
+-        # grad_prefiltered = torch.linalg.solve(torch.eye(V) + lambda_reg * L, grad)
++        # Optimizer step
++        optimizer.step(gradients)
+         
+-        # Postfilter (Cross-Bilateral) on the update m_t [S1]
+-        m_t = compute_cross_bilateral_filter(
+-            grad_prefiltered, normals, L, lambda_reg, sigma_phi, sigma_d
++        # Spatiotemporal Filtering
++        # 1. Laplacian Prefilter (crucial for diffusion)
++        m_t_prefiltered = laplacian_filter(mesh.vertices)
++        
++        # 2. Cross-Bilateral Postfilter on m_t
++        # Uses sigma_phi=0.4 and sigma_d=0.5
++        mesh.vertices = cross_bilateral_filter(
++            m_t_prefiltered, 
++            mesh.vertices, 
++            mesh.normals, 
++            sigma_phi=0.4, 
++            sigma_d=0.5
+         )
+-        vertices.data += m_t
+         
+-        # Optional Postfilter on v_t (ablation) [S1]
+-        # if use_vt_filter:
+-        #     v_t = compute_cross_bilateral_filter(v_t, normals, L, lambda_reg, sigma_phi, sigma_d)
+-        
+-        # Upsampling (Conditional) [S1]
+-        if upsample_iters and t in upsample_iters:
+-            # mesh.remesh(edge_length_factor=0.5)
+-            pass
+-            
++        # Update scheduler
+         scheduler.step()
+         
+-    return vertices
++    return mesh
+ ```
++
++**Edge Cases and Pitfalls:**
++- **Silhouette Gradient Dilution:** Laplacian preconditioning smooths gradients at silhouettes, causing them to be diluted. This is problematic for models with thin structures and many silhouettes (e.g., dragon), as vertices near but not on silhouettes receive no silhouette gradients, and Laplacian smoothing dilutes the values on the silhouette vertices [S1].
++- **Cracks with Bilateral on $v_t$:** Using a bilateral filter on $v_t$ (intermediate variable) can cause small cracks in the edges due to aggressive updates, although it provides comparable convergence to the proposed method on cubes [S1].
++- **Spatial Coherence Assumption:** The method assumes that parameters exhibit piecewise smoothness spatially. It is unclear whether the method is helpful when parameters lack obvious spatial coherence [S1].
+ 
+ ## Subtopics
+ 
+-### Bilateral gradient filtering for meshes
+-This is the core filtering mechanism used in the method. It replaces the postfilter on $m_t$ with a cross-bilateral filter using vertex normals $\hat{n}$ for the data term. It samples $N=32$ directions $s_i \in S^2$ on the unit sphere using the Sobol sequence. It computes the filter efficiently by concatenating vectors $W(\hat{n}, s_i)h$ and $W(\hat{n}, s_i)\mathbf{1}$ into matrix $M = [W(\hat{n}, s_1)h \dots W(\hat{n}, s_N)h \mid W(\hat{n}, s_1)\mathbf{1} \dots W(\hat{n}, s_N)\mathbf{1}]$, then computing $(I + \lambda L)^{-1} M$ using a single matrix solve. The filtered result is $\tilde{h} = \frac{\sum_{i=1}^N \Phi(\hat{n}, s_i) (I+\lambda L)^{-1} W(\hat{n}, s_i) h}{\sum_{i=1}^N \Phi(\hat{n}, s_i) (I+\lambda L)^{-1} W(\hat{n}, s_i) \mathbf{1}}$. The diagonal elements of $W_i$ are computed using the von Mises-Fisher kernel $\exp(\hat{n} \cdot s_i / \sigma_d)$, and $\Phi_i$ using $\exp(\hat{n} \cdot s_i / \sigma_\phi)$ [S1].
++### [Bilateral gradient filtering for meshes](13142-bilateral-gradient-filtering-for-meshes.md)
++This method replaces the standard Laplacian postfilter in inverse mesh recovery with a cross-bilateral filter that preserves sharp edges and silhouettes. It sets itself apart from its sibling [Inverse Mesh Recovery with Spatiotemporal Bilateral Gradient Filtering](13136-inverse-mesh-recovery-with-spatiotemporal-bilateral-gradient.md) by using vertex normals to guide the smoothing, preventing the over-smoothing of thin structures and leading to faster convergence.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The cross-bilateral filter requires solving a linear system $(I + \lambda L)^{-1} M$. The overhead over Large Steps (which uses Laplacian smoothing) is minor (<10%) [S1].
+-- **Memory Complexity:** Requires storing the Laplacian matrix $L$ and the matrix $M$ of size $N \times 2K$ [S1].
+-- **Performance:** On an NVIDIA GeForce RTX 3080 GPU, the method converges faster than Large Steps on models with thin structures and many silhouettes (e.g., dragon) [S1].
+-- **Strengths:** Preserves sharp edges and silhouettes better than Laplacian smoothing. Faster convergence on thin structures. Low overhead [S1].
+-- **Limitations:** Introduces two new hyperparameters ($\sigma_\phi, \sigma_d$) that require tuning. Assumes spatial coherence in parameters. Bilateral filtering on $v_t$ can cause small cracks on sharp edges [S1].
+-- **When to use:** When recovering meshes with thin structures, many silhouettes, or sharp edges where Laplacian smoothing dilutes gradients [S1].
+-- **When not to use:** When parameters lack obvious spatial coherence [S1].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** No extra storage is required beyond the mesh and intermediate variables [S1].
++- **Measured Performance:** The method enables faster convergence and improves recovery, especially at low sample counts, compared to Large Steps [S1]. It performs best on models with thin structures and many silhouettes (e.g., dragon) and sharp edges (e.g., cube) [S1].
++- **Scaling:** The method introduces two new hyperparameters ($\sigma_\phi$ and $\sigma_d$) that require tuning, which can be tedious [S1].
++- **Strengths:** Preserves sharp edges and silhouettes; faster convergence on thin structures; no extra storage; very little overhead [S1].
++- **Limitations:** Assumes spatial coherence of parameters; hyperparameter tuning is tedious; bilateral filtering on $v_t$ can cause cracks [S1].
++- **When to use:** When recovering meshes with thin structures, many silhouettes, or sharp edges where Laplacian smoothing would dilute gradients.
++- **When not to use:** When parameters lack obvious spatial coherence.
+ 
+ ## Background
+-The method was introduced in the paper "Spatiotemporal Bilateral Gradient Filtering for Inverse Rendering" [S1]. It builds on the Large Steps framework [S1], which uses Laplacian smoothing and an infinity norm as filters. The authors found that Laplacian preconditioning smooths gradients at silhouettes, causing them to be diluted, which is problematic for models with thin structures [S1]. The proposed method replaces the postfilter with a mesh cross-bilateral filter, inspired by the generalized bilateral filter from Solomon et al. [2014] [S1]. The implementation uses PyTorch [Paszke et al. 2019] and Mitsuba 3 [Jakob et al. 2022] [S1].
++The method was presented in the paper "Spatiotemporal Bilateral Gradient Filtering for Inverse Rendering" [S1]. It builds on the Large Steps framework [S1]. The work was supported by NSF grants and gifts from Adobe, Qualcomm, and Google [S1]. The method is implemented in the paper's framework and compared against Large Steps using the Mitsuba 3 renderer [S1].
+ 
+ ## Sources

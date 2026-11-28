@@ -1,0 +1,82 @@
+# Multi-MLP Linear Layer
+
+Also called: ECNR Linear Layer
+
+## Overview
+The Multi-MLP Linear Layer (also called ECNR Linear Layer) is a linear transformation implementation for the Efficient Compressive Neural Representation (ECNR) that supports parallel training of multiple MLPs by using 3D tensors for weights and biases, indexed by MLP ID [S1]. Unlike conventional linear layers that represent weights and biases as two 2D matrices, this layer uses 3D tensors where the extra dimension denotes which MLP to use, allowing parallel training of all MLPs simultaneously without complex coding [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A tensor of shape $(m, N, F_{in})$, where $m$ is the number of MLPs, $N$ is the number of voxels in one block, and $F_{in}$ is the input feature dimension [S1].
+- **Indices:** An array of length $m$ containing integer indices in the range $[0, m-1]$, specifying which MLP's parameters to use for each row in the input batch [S1].
+- **Output:** A tensor of shape $(m, N, F_{out})$, where $F_{out}$ is the output feature dimension [S1].
+
+**Data Structures:**
+The layer maintains two learnable parameters stored as 3D tensors:
+1. **Weight Tensor ($W$):** Shape $(m, F_{in}, F_{out})$. The first dimension indexes the MLP ID. The second and third dimensions correspond to the standard weight matrix dimensions [S1].
+2. **Bias Tensor ($B$):** Shape $(m, 1, F_{out})$. The first dimension indexes the MLP ID [S1].
+
+**Parameters:**
+- $m$: Number of MLPs [S1].
+- $F_{in}$: Input feature dimension [S1].
+- $F_{out}$: Output feature dimension [S1].
+- $N$: Number of voxels in one block [S1].
+- Typical values: Not given in the sources [S1].
+
+**Algorithm:**
+1. **Initialization:** Initialize $W$ with shape $(m, F_{in}, F_{out})$ and $B$ with shape $(m, 1, F_{out})$ [S1].
+2. **Parameter Selection:** Given an input tensor $X$ of shape $(m, N, F_{in})$ and an indices array $I$ of length $m$, select the specific weight and bias tensors for each MLP by indexing the first dimension of $W$ and $B$ with $I$ [S1].
+3. **Matrix Multiplication:** Compute the batch matrix multiplication of the input $X$ and the selected weights $W_{sel}$ [S1]. The result $Y$ has shape $(m, N, F_{out})$ [S1].
+4. **Bias Addition:** Add the selected biases $B_{sel}$ to the result $Y$ [S1].
+5. **Return:** Return the final output tensor $Y$ [S1].
+
+**Formulas:**
+Let $b \in [0, m-1]$ index the MLP, $n \in [0, N-1]$ index the voxel, and $k \in [0, F_{out}-1]$ index the output feature. Let $i_b = I[b]$ be the selected MLP index for batch element $b$. The output is computed as:
+$$Y_{b,n,k} = \sum_{j=0}^{F_{in}-1} X_{b,n,j} \cdot W_{i_b,j,k} + B_{i_b,0,k}$$
+where $X$ is the input tensor, $W$ is the weight tensor, and $B$ is the bias tensor [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class ECNRLinearLayer:
+    def __init__(self, Fin, Fout, m):
+        # Initialize weight and bias as 3D parameters with dimensions (m, Fin, Fout) and (m, 1, Fout) respectively [S1]
+        self.weight = Parameter(m, Fin, Fout)
+        self.bias = Parameter(m, 1, Fout)
+
+    def forward(self, input_tensor, mlp_indices):
+        # Select parameters for the forward pass by indexing the weight and bias tensors with the MLPs indices array [S1]
+        selected_weights = self.weight[mlp_indices, :, :]
+        selected_bias = self.bias[mlp_indices, :, :]
+        # Compute batch matrix multiplication: output[b, n, k] = sum_{j=0}^{Fin-1} input_tensor[b, n, j] * selected_weights[b, j, k] [S1]
+        output = empty(m, N, Fout)
+        for b in range(m):
+            for n in range(N):
+                for k in range(Fout):
+                    output[b, n, k] = sum(input_tensor[b, n, j] * selected_weights[b, j, k] for j in range(Fin))
+        return output + selected_bias
+```
+
+**Edge Cases and Pitfalls:**
+- **Index Bounds:** The `mlp_indices` must contain only valid integers in the range $[0, m-1]$ [S1].
+- **Dimension Mismatch:** The input tensor's first dimension must match the length of `mlp_indices` and the batch size expected by the matrix multiplication. The second dimension of the input ($N$) must match the second dimension of the weight tensor ($F_{in}$) for the summation to be valid [S1].
+- **Precision:** Standard floating-point accumulation is used for the inner summation; no special precision handling is specified [G].
+
+## Subtopics
+
+### [HyperNetwork Conditioning](12585-hypernetwork-conditioning.md)
+A method that generates MLP parameters dynamically using a hypernetwork, contrasting with the static parameter storage of the Multi-MLP Linear Layer. Choose this when parameter sharing or conditioning on external inputs is required [G].
+
+## Operating characteristics
+- **Performance:** The method leverages batch matrix multiplication for parallel training, avoiding complex coding overhead. It is suitable for scenarios requiring simultaneous optimization of multiple neural fields, such as time-varying volumetric datasets [S1].
+- **Strengths:** Parallel training of multiple MLPs, simple implementation using standard batch matrix multiplication.
+- **Limitations:** Requires all MLPs to share the same architecture ($F_{in}, F_{out}$).
+- **Time Complexity:** Not given in the sources [S1].
+- **Memory Complexity:** Not given in the sources [S1].
+
+## Background
+The Multi-MLP Linear Layer was introduced in the Efficient Compressive Neural Representation (ECNR) framework for time-varying volumetric datasets [S1]. It was proposed to enable efficient parallel training of multiple MLPs, with the implementation details detailed in the appendix of the ECNR paper [S1].
+
+## Sources
+[S1] ECNR: Efficient Compressive Neural Representation of Time-Varying Volumetric Datasets, https://doi.org/10.1109/pacificvis60374.2024.00017, fetched 2026-10-26

@@ -1,0 +1,118 @@
+# Volume Texture Setup
+Also called: AtmosphereManager CPU-side Dispatch
+
+## Overview
+Volume Texture Setup configures GPU-accessible 3D texture resources with specific memory layouts, sampling parameters, and lifecycle states to prepare volumetric data for rendering [S1, S2, S3, S4, S5, S6, unofficial]. It solves the problem of translating host-side volumetric representations into optimized GPU textures that support efficient ray marching or voxel cone tracing [S3, S4, S5, S6, unofficial]. It differs from [3D Texture Upload](4419-3d-texture-upload.md) by focusing on texture object configuration (filters, wrap modes, mipmaps) rather than raw data transfer, and from [Sparse Volume Texture Setup](7432-sparse-volume-texture-setup.md) by targeting dense grid textures rather than sparse tile-based structures [S3, S4, S5, S6, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs**: Volumetric data buffer, dimensions (width, height, depth), internal format (e.g., `GL_RGBA32F`, `GL_RED`, `depth32float`), sampling parameters (wrap mode, filter mode), and lifecycle flags (SRGB, mipmaps, compression, streaming) [S2, S3, S4, S5, S6, unofficial].
+*   **Outputs**: Configured GPU texture object(s) ready for shader sampling [S3, S4, S5, S6, unofficial].
+
+**Data Structures and Layouts**
+*   **Dense 3D Texture**: Format `GL_RGBA32F` or `GL_RED`, dimensions $W \times H \times D$ voxels [S3, S4, unofficial].
+*   **VRDF Label-Weighted**: Label Texture (`Texture3D`, point filter), Weight Texture (`Texture3D`, bilinear filter), LUT (`Texture2D`), Control Texture (`256x1 RGBAFloat`) [S6, unofficial].
+*   **WebGPU Shadow/Noise**: Size $512 \times 512$, format `depth32float`, usages `RENDER_ATTACHMENT` and `TEXTURE_BINDING` [S5, unofficial].
+
+**Numbered Steps**
+1.  Generate a texture ID using the graphics API [S3, unofficial].
+2.  Bind the texture to the `GL_TEXTURE_3D` target and/or a specific texture unit [S3, S1, unofficial].
+3.  Set wrap modes for S, T, R coordinates to `GL_REPEAT` or `GL_CLAMP_TO_EDGE` [S3, S4, unofficial].
+4.  Set minification and magnification filters to `GL_LINEAR` or `GL_NEAREST` [S3, S4, S5, S6, unofficial].
+5.  Disable mipmap generation if not required (`TMGS_NoMipmaps` or `GL_TEXTURE_MAX_LEVEL = 0`) [S2, unofficial].
+6.  Disable sRGB conversion for linear data (`SRGB = false`) [S2, unofficial].
+7.  Disable texture compression (`CompressionNone = true`) to preserve data integrity [S2, unofficial].
+8.  Prevent texture streaming (`NeverStream = true`) to ensure data residency [S2, unofficial].
+9.  Allocate GPU memory and upload host data using `glTexImage3D` or equivalent [S3, S4, S5, unofficial].
+10. Update the resource state on the rendering thread (`UpdateResource()`) [S2, unofficial].
+11. Bind the texture to a read-write image unit or texture unit for shader access [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def setup_volume_texture(width, height, depth, data, internal_format, wrap_mode, min_filter, mag_filter):
+    # 1. Generate texture ID
+    texture_id = glGenTextures(1)
+    # 2. Bind texture to GL_TEXTURE_3D target
+    glBindTexture(GL_TEXTURE_3D, texture_id)
+    # 3. Configure sampling parameters
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, wrap_mode)
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, wrap_mode)
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, wrap_mode)
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, min_filter)
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, mag_filter)
+    # 4. Disable mipmaps
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, 0)
+    # 5. Allocate memory and upload data
+    glTexImage3D(GL_TEXTURE_3D, 0, internal_format, width, height, depth, 0, internal_format, GL_FLOAT, data)
+    # 6. Configure lifecycle flags (API-specific implementation)
+    texture_object.SRGB = False
+    texture_object.MipGenSettings = "TMGS_NoMipmaps"
+    texture_object.CompressionNone = True
+    texture_object.NeverStream = True
+    # 7. Finalize resource state
+    texture_object.UpdateResource()
+    return texture_id
+```
+
+**Formulas**
+*   **Data Normalization** (if required before upload):
+    $$
+    v_{norm} = \frac{v - v_{min}}{v_{max} - v_{min}}
+    $$
+    where $v$ is the voxel value, $v_{min}$ and $v_{max}$ are the global minimum and maximum values [S4, unofficial].
+
+**Parameters and Typical Values**
+*   **Format**: `GL_RGBA32F` for high-precision scientific data; `GL_RED` for single-channel density; `depth32float` for shadow maps [S3, S4, S5, unofficial].
+*   **Filter**: `GL_LINEAR` for smooth noise or density; `GL_NEAREST` for discrete labels or WebGPU samplers; point filter for VRDF labels [S3, S4, S5, S6, unofficial].
+*   **Wrap**: `GL_REPEAT` for periodic noise; `GL_CLAMP_TO_EDGE` for bounded volumes [S3, S4, unofficial].
+*   **Dimensions**: Often cubic ($N \times N \times N$) for noise textures; arbitrary for medical/scientific data [S3, S4, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Precision**: Using integer formats for continuous data causes quantization artifacts. Use `GL_FLOAT` or `GL_RGBA32F` [S3, S4, unofficial].
+*   **Boundaries**: Incorrect wrap modes can cause artifacts at volume edges. Use `GL_CLAMP_TO_EDGE` for bounded volumes [S4, unofficial].
+*   **SRGB**: Enabling sRGB conversion for linear data (e.g., density) causes incorrect lighting calculations. Disable sRGB for linear data [S2, unofficial].
+
+## Subtopics
+
+### [3D Texture Upload](4419-3d-texture-upload.md)
+This method uploads a 3D voxel volume buffer from host memory to GPU memory as a `GL_TEXTURE_3D` object, preparing it for ray marching or volume rendering. It solves the problem of mapping discrete volumetric data into the contiguous memory layout required by OpenGL texture upload functions like `glTexImage3D` or `glTexSubImage3D`. It differs from its parent [Volume Texture Setup](4055-volume-texture-setup.md) by handling the actual data transformation and buffer upload, and from [3D Texture Initialization](13158-3d-texture-initialization.md) by focusing on the data layout and content population rather than the lifecycle of texture object creation and parameter configuration.
+
+### [VRDF Texture Construction for Label-Weighted Volumes](6959-vrdf-texture-construction-for-label-weighted-volumes.md)
+This method constructs GPU-accessible 3D textures for Unity volume rendering when the input data is in 'anatomy_label_weighted' mode with 2 channels. It separates discrete labels and continuous weights into distinct 3D textures with specific filtering modes to support weighted raymarching. It serves as the runtime counterpart to the VRDF file export logic, ensuring that the label and weight data are sampled correctly for opacity modulation.
+
+### [Sparse Volume Texture Setup](7432-sparse-volume-texture-setup.md)
+Sparse Volume Texture Setup is a method for importing and configuring large, sparse volumetric datasets (up to ~6 gigavoxels) into Unreal Engine 5 using Sparse Volume Textures (SVT). It solves the problem of rendering massive volumetric data without chunking artifacts by storing data in sparse tiles within a single large volume texture, thereby circumventing the DirectX 12 API limit of 2048 voxels per dimension. Unlike debug viewers or fog-specific renderers, it supports full lighting, emission, and color, making it suitable for scientific data visualization. It builds on [Volume Texture Setup](4055-volume-texture-setup.md) by defining the specific material and actor workflow required to visualize the data.
+
+### [Voxel Volume Initialization & Binding](12429-voxel-volume-initialization-binding.md)
+Voxel Volume Initialization & Binding prepares a dense 3D texture for voxel cone tracing by allocating GPU memory, configuring sampling parameters, and establishing read/write bindings for compute shaders. It solves the problem of transitioning from raw scene data to a structured, mipmapped voxel grid ready for lighting injection. Unlike [3D Texture Upload](4419-3d-texture-upload.md) which focuses on data transfer, this method handles the OpenGL resource lifecycle and binding state. It differs from [Sparse Volume Texture Setup](7432-sparse-volume-texture-setup.md) by using a dense `GL_TEXTURE_3D` with fixed dimensions rather than sparse binding extensions.
+
+### [Volume Texture Mapping with ROI](12595-volume-texture-mapping-with-roi.md)
+Volume Texture Mapping with ROI is a technique for rendering volumetric data by mapping a Data Region of Interest (ROI) within the source memory buffer to a Geometry ROI in world space, enabling the rendering of sub-volumes without copying data. It differs from full-volume rendering methods by allowing efficient access to specific data subsets via coordinate mapping and clipping, and from sparse methods by operating on dense grid textures managed by the OpenGL pipeline.
+
+### Texture Setup
+This variant focuses on creating 2D textures for specific purposes like shadow maps or noise lookup tables. It involves loading texture data from files (e.g., `"./LDR_LLL1_16.png"`) and configuring samplers with specific address modes and filters [S5, unofficial]. It creates a texture with size $512 \times 512$, format `"depth32float"`, and usages `"RENDER_ATTACHMENT"` and `"TEXTURE_BINDING"` [S5, unofficial].
+
+### VRDF Runtime Volume Rendering Setup
+This variant handles the runtime behavior of the VolumeDVR component, parsing VRDF files, building GPU textures, and setting up shader uniforms for real-time 3D raymarched volume rendering with weight-driven transparency [S6, unofficial]. It involves reading the VRDF magic header `'VRDF0001'`, building label and weight textures, and injecting shader uniforms (`_VolumeTexLabels`, `_VolumeTexWeights`, `_HasWeights`, `_TFTex`, `_LabelCtrlTex`) plus affine matrices and volume dimensions [S6, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(N)$ where $N$ is the number of voxels for data upload. Configuration is $O(1)$ [S3, S4, unofficial].
+*   **Memory Complexity**: $O(N)$ for dense textures [S3, S4, unofficial].
+*   **Performance**: Dense textures offer fast, hardware-accelerated sampling [S3, S4, unofficial].
+*   **Strengths**: Hardware compatibility, fast sampling, support for mipmaps (if enabled) [S3, S4, unofficial].
+*   **Limitations**: High memory usage for large dense volumes, fixed resolution limits [S3, S4, unofficial].
+*   **When to Use**: Small to medium volumes, real-time rendering, when hardware sampling is preferred [S3, S4, unofficial].
+*   **When Not to Use**: Very large sparse volumes (use sparse textures), when memory is extremely constrained [S3, S4, unofficial].
+
+## Background
+Volume texture setup is a fundamental technique in GPU-based volume rendering, evolving with the capabilities of graphics APIs like OpenGL, DirectX, and WebGPU [S3, S4, S5, unofficial]. Early implementations relied on OpenGL's `glTexImage3D`, while modern approaches utilize more flexible APIs like WebGPU's `queue.write_texture` or Vulkan's buffer-to-texture copies [S5, unofficial]. The method has been adapted for various domains, including medical imaging, scientific visualization, and real-time game engines, with specific variants emerging to handle sparse data, label-weighted volumes, and regions of interest [S1, S2, S3, S4, S5, S6, unofficial].
+
+## Sources
+[S1] Enhance volumetric clouds system with precomputed density, 3D AO and shadow transmittance, https://github.com/ricecake/boidsish/pull/708, fetched 2026-10-27 (unofficial)
+[S2] JI20/unreal-splat, https://github.com/JI20/unreal-splat, fetched 2026-10-27 (unofficial)
+[S3] Depersonalizc/volumetric-clouds, https://github.com/Depersonalizc/volumetric-clouds, fetched 2026-10-27 (unofficial)
+[S4] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)
+[S5] Ne0nWinds/WebGPU-Volumetrics-Demo, https://github.com/Ne0nWinds/WebGPU-Volumetrics-Demo, fetched 2026-10-27 (unofficial)
+[S6] guillaume-schneider/vrdf-sdk, https://github.com/guillaume-schneider/vrdf-sdk, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,51 @@
+# Optimization-based Downsampling
+Also called: SGGX-based volume downsampling, Zhao, Wu et al. downsampling
+
+## Overview
+Optimization-based downsampling is a method for generating low-resolution microflake volume representations that preserve the visual appearance of the reference high-resolution volume, specifically accounting for microscopic self-shadowing effects [S1]. It distinguishes itself from simple max-pooling or linear resampling by iteratively optimizing scattering parameters via large-scale training rendering to match the target appearance [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A high-resolution microflake volume dataset containing scattering parameters (e.g., normal distributions, density) and a target lower resolution.
+*   **Output:** A low-resolution voxel grid where each voxel contains optimized scattering parameters that approximate the appearance of the corresponding high-resolution region.
+
+**Data Structures:**
+The method operates on a voxel grid. To manage the high dimensionality of the optimization problem, low-resolution voxels are grouped into clusters. Each cluster shares a common set of scattering parameters [S1].
+*   **Voxel Cluster:** A group of low-resolution voxels.
+*   **Scattering Parameters:** The variables being optimized (e.g., SGGX parameters for normal distributions) [S1].
+
+**Algorithm Steps:**
+1.  **Clustering:** Assign low-resolution voxels to a limited number of clusters to reduce the dimensionality of the optimization problem [S1].
+2.  **Initialization:** Initialize the scattering parameters for each cluster.
+3.  **Training Rendering:** Perform large-scale rendering of the current low-resolution volume representation [S1].
+4.  **Error Calculation:** Compute the image-space error between the rendered low-resolution appearance and the reference high-resolution appearance [S1].
+5.  **Optimization:** Iteratively update the scattering parameters to minimize the image-space error [S1].
+6.  **Convergence Check:** Stop when the appearance of the low-resolution volume matches the reference volume within a specified tolerance [S1].
+
+**Formulas and Parameters:**
+*   The optimization minimizes an image-space error metric $E$ between the rendered image $I_{LoD}$ and the reference image $I_{Ref}$:
+    $$ \min_{\theta} E(I_{LoD}(\theta), I_{Ref}) $$
+    where $\theta$ represents the scattering parameters for the clusters [S1].
+*   The method relies on a simplified self-shadowing model for microflakes [S1].
+*   Specific parameter values for the optimization (learning rate, tolerance) are not given in the sources.
+
+**Pitfalls and Edge Cases:**
+*   **Intractability:** The enormous number of parameters makes the problem intractable without voxel clustering [S1].
+*   **Artifacts:** Voxel clustering can lead to artifacts when the input dataset has spatially varying scattering parameters [S1].
+*   **Semi-transparent/Dense Mix:** The optimization assumes that each pixel value depends mostly on the first non-empty voxels seen directly. It is unclear how the algorithm adapts to semi-transparent datasets or datasets with both transparent and very dense voxels [S1].
+
+## Subtopics
+
+### SGGX-based Downsampling
+A method for downsampling microflakes normal distributions introduced by Heitz et al. [HDCD15]. Zhao, Wu et al. [ZWDR16] built on this work for downsampling microflakes volumes taking into account shadowing effects. It serves as the foundational technique for the optimization-based approach [S1].
+
+## Operating characteristics
+*   **Complexity:** The method is computationally expensive due to the need for large-scale training rendering and iterative optimization [S1].
+*   **Accuracy:** Produces accurate LoDs for challenging datasets, including complex multi-fiber fabrics [S1].
+*   **Limitations:** Struggles with spatially varying scattering parameters due to clustering artifacts and is not clearly adaptable to semi-transparent or mixed-density datasets [S1].
+
+## Background
+The method was proposed by Zhao, Wu et al. [ZWDR16] and builds upon the work of Heitz et al. [HDCD15] on downsampling microflakes normal distributions. It addresses the problem of generating low-resolution microflake volumes while preserving appearance at all scales [S1].
+
+## Sources
+[S1] A new microflake model with microscopic self-shadowing for accurate volume downsampling, https://doi.org/10.1111/cgf.13346, fetched 2026-10-26

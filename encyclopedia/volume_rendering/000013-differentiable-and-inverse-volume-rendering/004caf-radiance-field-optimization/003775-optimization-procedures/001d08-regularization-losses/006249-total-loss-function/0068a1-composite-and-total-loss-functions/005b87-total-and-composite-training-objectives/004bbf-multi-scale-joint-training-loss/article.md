@@ -1,0 +1,123 @@
+# Multi-scale Joint Training Loss
+
+Also called: Coarse-Fine Joint Loss, Joint Loss, Multi-scale Joint Loss
+
+## Overview
+Multi-scale joint training loss is a composite objective function used in radiance field optimization to balance low-frequency structural consistency with high-frequency detail fidelity [S2]. It addresses noise interference and detail loss during iterative refinement or dynamic network growth by simultaneously optimizing outputs from multiple network stages or scales [S1, S2].
+
+## How it works
+The method operates in two distinct formulations depending on the specific implementation context: a coarse-fine balance for image refinement [S2] and a multi-stage summation for dynamic network growth [S1].
+
+### Inputs and Outputs
+*   **Inputs:** Network parameters $\theta$, input images (or latent representations), ground truth images, and query coordinates [S1, S2].
+*   **Outputs:** A scalar loss value $\mathcal{L}$ or $\sigma$ used to update $\theta$ via gradient descent [S1, S2].
+
+### Data Structures
+Standard tensor representations for images, network weights, and uncertainty maps are used [G]. The method relies on the output tensors from multiple network layers or stages [S1, S2].
+
+### Formulas and Parameters
+
+**1. Coarse-Fine Joint Loss (Refinement Stage)**
+Used to refine denoised or coarse inputs by balancing low-frequency agreement and high-frequency fidelity [S2].
+
+$$ L(\theta) = \alpha L_{coarse}(\theta) + (1-\alpha) L_{fine}(\theta) $$
+
+*   $\alpha \in [0, 1]$: Weight balancing coarse and fine terms [S2].
+*   $L_{coarse}(\theta)$: Low-frequency consistency term. Compares input and output after smoothing to preserve tone and large-scale structure [S2].
+*   $L_{fine}(\theta)$: Detail consistency term. Composed of:
+    *   Pixel-level robust distance (suppresses outlier noise) [S2].
+    *   Structural Similarity (SSIM) term (aligns textures/contours) [S2].
+    *   Gradient consistency term (matches edge direction/strength) [S2].
+    *   Chroma consistency term (reduces color shifts) [S2].
+
+**2. Multi-Stage Joint Loss (Dynamic Growth)**
+Used when the network grows dynamically, aggregating losses from all current stages [S1].
+
+$$ \mathcal{L} = \sum_{i=1}^D \beta_1 \mathcal{L}_{MSE}^i + \beta_2 \mathcal{L}_{unct}^i $$
+
+*   $D$: Current number of stages (or network depth) [S1].
+*   $\mathcal{L}_{MSE}^i$: Mean Squared Error loss of the output image from layer $i$ [S1].
+*   $\mathcal{L}_{unct}^i$: Uncertainty loss of the output image from layer $i$ [S1].
+*   $\beta_1, \beta_2$: Weights. Typical values: $\beta_1 = 1.0, \beta_2 = 0.1$ [S1].
+*   All query coordinates are output through all outlets during training [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_multi_scale_joint_loss(outputs, targets, uncertainty_maps, params):
+    """
+    Computes the multi-scale joint training loss.
+    
+    Args:
+        outputs: List of tensors, where outputs[i] is the rendered image 
+                 from stage/layer i. Length is D.
+        targets: List of tensors, where targets[i] is the ground truth 
+                 corresponding to outputs[i].
+        uncertainty_maps: List of tensors, uncertainty maps for each stage.
+        params: Dictionary containing:
+            - 'method': 'coarse_fine' or 'multi_stage'
+            - 'alpha': float, weight for coarse term (if coarse_fine)
+            - 'beta1': float, weight for MSE term (if multi_stage)
+            - 'beta2': float, weight for uncertainty term (if multi_stage)
+    
+    Returns:
+        scalar loss value.
+    """
+    method = params.get('method', 'multi_stage')
+    if method == 'coarse_fine':
+        alpha = params['alpha']
+        coarse_loss = compute_low_freq_consistency(outputs[0], targets[0])
+        fine_loss = compute_detail_consistency(outputs[0], targets[0])
+        return alpha * coarse_loss + (1 - alpha) * fine_loss
+    elif method == 'multi_stage':
+        beta1 = params['beta1']
+        beta2 = params['beta2']
+        total_loss = 0.0
+        D = len(outputs)
+        for i in range(D):
+            mse_loss = compute_mse(outputs[i], targets[i])
+            unct_loss = compute_uncertainty_loss(outputs[i], targets[i], uncertainty_maps[i])
+            total_loss += beta1 * mse_loss + beta2 * unct_loss
+        return total_loss
+
+def compute_mse(pred, gt):
+    return torch.mean((pred - gt) ** 2)
+
+def compute_low_freq_consistency(pred, gt):
+    # [G] Apply Gaussian smoothing to pred and gt, then compute MSE
+    pass  # [G] Exact smoothing kernel and loss type not specified in sources
+
+def compute_detail_consistency(pred, gt):
+    # [G] Sum of robust distance, SSIM, gradient consistency, and chroma consistency terms [S2]
+    pass  # [G] Exact formulas for sub-terms not provided in sources
+
+def compute_uncertainty_loss(pred, gt, uncertainty):
+    # [G] Multiply element-wise error by uncertainty map and average
+    pass  # [G] Exact formula not provided in sources
+```
+
+### Edge Cases and Pitfalls
+*   **Degenerate Input:** If the network has not grown yet ($D=1$), the multi-stage loss reduces to a single-stage loss [S1].
+
+## Subtopics
+
+### Coarse-Fine Refinement
+Focuses on balancing low-frequency structure and high-frequency detail in a single-stage refinement context [S2]. Choose when refining denoised inputs [S2].
+
+### Multi-Stage Dynamic Growth
+Aggregates losses across multiple network depths during adaptive growth [S1]. Choose when using dynamically growing neural networks [S1].
+
+## Operating characteristics
+*   **Memory Complexity:** Requires storing outputs from all active stages in the multi-stage formulation [S1].
+*   **Strengths:** Preserves geometric variations while reducing noise [S2]; ensures consistency across scales [S1].
+*   **Limitations:** Requires careful tuning of multiple hyperparameters ($\alpha, \beta_1, \beta_2$) [S1, S2].
+*   **When to use:** During the second round of training for refinement [S2] or during dynamic network growth phases [S1].
+
+## Background
+The concept originates from methods that employ iterative refinement or dynamic network growth for radiance field optimization [S1, S2]. The coarse-fine joint loss was introduced in Denoise-GS for self-supervised denoising in sparse-view 3D Gaussian Splatting [S2]. The multi-stage joint loss was proposed in Recursive-NeRF for efficient, dynamically growing neural radiance fields [S1].
+
+## Sources
+[S1] Recursive-NeRF: An Efficient and Dynamically Growing NeRF, https://doi.org/10.1109/tvcg.2022.3204608, fetched 2026-10-26
+[S2] Denoise-GS: Self-Supervised Denoising for Sparse-View 3D Gaussian Splatting., https://doi.org/10.3390/s26020651, fetched 2026-10-26

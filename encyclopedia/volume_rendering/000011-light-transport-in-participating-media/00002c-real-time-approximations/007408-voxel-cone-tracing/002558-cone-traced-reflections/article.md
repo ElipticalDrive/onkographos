@@ -1,0 +1,150 @@
+# Cone Traced Reflections
+
+Also called: Voxel Cone Traced Reflections, Indirect Specular Cone Tracing
+
+## Overview
+Cone Traced Reflections is a real-time global illumination technique that approximates indirect specular lighting by tracing cones through a voxelized scene representation, adapting the cone aperture based on surface roughness. It solves the problem of computing environment reflections for rough materials without the high cost of ray tracing or the limited view volume of screen-space reflections. It differs from diffuse cone tracing by using a narrower cone aperture for smooth surfaces to preserve mirror-like clarity, while widening the cone for rough surfaces to simulate diffuse scattering, and typically requires a higher-resolution voxel grid than diffuse GI to prevent aliasing in specular highlights.
+
+## How it works
+The method extends the diffuse voxel cone tracing pipeline by modifying the cone sampling parameters to account for material specular properties. It assumes a pre-existing voxelized scene representation (typically an octree or sparse voxel grid) and material roughness data.
+
+**Inputs:**
+*   Voxel grid data (diffuse and/or specular channels).
+*   Surface position ($P$), view direction ($V$), and surface normal ($N$).
+*   Material roughness ($\alpha$), typically from a PBR material texture.
+*   Voxel grid resolution ($R$) and maximum tracing depth.
+
+**Outputs:**
+*   Indirect specular radiance ($L_{spec}$) at the surface point.
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D texture or sparse structure storing radiance. For reflections, a separate or distinct channel from diffuse GI is recommended to allow independent resolution and update frequencies [S1, unofficial].
+*   **Material Properties:** Roughness value $\alpha \in [0, 1]$.
+
+**Algorithm Steps:**
+
+1.  **Reflect View Direction:** Calculate the reflected view direction $R_{dir}$ using the surface normal $N$ and view direction $V$:
+    $$ R_{dir} = \text{reflect}(V, N) = 2(N \cdot V)N - V $$
+    [S2, unofficial]
+
+2.  **Determine Cone Aperture:** Calculate the angular aperture of the cone based on the material roughness $\alpha$.
+    *   For smooth surfaces (low $\alpha$), the cone aperture is small, approximating a ray.
+    *   For rough surfaces (high $\alpha$), the cone aperture widens, approaching the size used for diffuse cone tracing.
+    *   The exact mapping from $\alpha$ to aperture angle $\theta$ is not explicitly defined in the sources, but it is described as a variable control for clarity [S2, unofficial]. A common implementation maps roughness to a cone radius or solid angle.
+
+3.  **Cone Tracing Loop:** Trace the cone through the voxel grid starting from $P$ in direction $R_{dir}$.
+    *   Initialize current position $pos = P$.
+    *   Initialize current mip level $m = 0$ (highest resolution).
+    *   While $pos$ is within the voxel grid bounds and maximum iterations are not reached:
+        a.  **Sample Voxel:** Sample the voxel grid at $pos$ using the current mip level $m$. Let the sampled radiance be $C_m$.
+        b.  **Accumulate:** Add $C_m$ to the accumulated radiance $L_{spec}$, weighted by the cone's contribution at this step.
+        c.  **Advance:** Move $pos$ along $R_{dir}$ by a step size $d$.
+        d.  **Adjust Step Size/Mip Level:**
+            *   The step size $d$ and mip level $m$ are adjusted based on roughness.
+            *   For smooth surfaces, increase mip level $m$ slowly (keep high resolution longer) to maintain sharpness.
+            *   For rough surfaces, the cone size approaches the diffuse cone tracing size, allowing faster progression to higher mip levels (coarser resolution) as the cone widens.
+            *   The step size $d$ is typically proportional to the cone radius at the current distance to ensure the cone covers the voxel cell appropriately.
+
+4.  **Finalize:** Return the accumulated $L_{spec}$.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def trace_cone_reflection(pos, view_dir, normal, roughness, voxel_grid, max_depth):
+    # Reflect view direction
+    # Note: view_dir is typically from eye to surface, so reflection is about normal
+    # R = 2 * dot(N, V) * N - V
+    # If view_dir is normalized and points from surface to eye, use standard reflect
+    reflected_dir = reflect(view_dir, normal)
+    
+    accumulated_radiance = vec3(0.0)
+    current_pos = pos
+    current_mip = 0
+    
+    # Roughness to aperture mapping
+    # Sources do not specify exact formula, but roughness controls cone width
+    # Low roughness -> small cone (high mip 0)
+    # High roughness -> large cone (higher mip levels)
+    cone_aperture = map_roughness_to_aperture(roughness)
+    
+    for step in range(max_depth):
+        # Sample voxel grid at current position and mip level
+        # This function handles trilinear filtering and mip selection
+        radiance = voxel_grid.sample(current_pos, current_mip)
+        
+        # Accumulate radiance
+        # Weighting factor depends on cone contribution and distance
+        # Simplified accumulation
+        accumulated_radiance += radiance
+        
+        # Advance position
+        # Step size should relate to cone size to maintain coverage
+        # For simplicity, assume a fixed step or distance-based step
+        step_size = get_step_size(current_mip, cone_aperture)
+        current_pos += reflected_dir * step_size
+        
+        # Adjust mip level based on roughness and distance
+        # Smooth surfaces: keep mip low (high res) longer
+        # Rough surfaces: increase mip faster
+        current_mip = adjust_mip_level(current_mip, roughness, step_size)
+        
+        # Check bounds
+        if not voxel_grid.contains(current_pos):
+            break
+            
+    return accumulated_radiance
+
+def reflect(v, n):
+    # v and n are normalized vectors
+    # Returns reflected vector
+    return 2.0 * dot(n, v) * n - v
+
+def map_roughness_to_aperture(roughness):
+    # Placeholder for specific mapping
+    # Sources indicate: smooth -> small cone, rough -> large cone
+    # Not given in the sources. [G]
+    return roughness * MAX_CONE_ANGLE
+
+def get_step_size(mip, aperture):
+    # Step size typically scales with voxel size at mip level
+    # Not given in the sources. [G]
+    return BASE_STEP * (1 << mip)
+
+def adjust_mip_level(current_mip, roughness, step_size):
+    # Smooth surfaces: increase mip slowly
+    # Rough surfaces: increase mip faster
+    # Not given in the sources. [G]
+    if roughness < 0.5:
+        return current_mip + 1 if step_size > THRESHOLD else current_mip
+    else:
+        return current_mip + 2 if step_size > THRESHOLD else current_mip
+```
+
+**Edge Cases and Pitfalls:**
+*   **Resolution:** The voxel grid resolution for reflections may need to be finer than that used for diffuse GI to avoid blurry or aliased reflections [S1, unofficial].
+*   **Memory:** Using separate voxel data for diffuse and specular reflections increases memory footprint [S1, unofficial].
+*   **Update Frequency:** To optimize performance, diffuse and specular voxel data can be updated on alternating frames (e.g., diffuse on even frames, specular on odd frames) [S1, unofficial].
+*   **Fallback:** This method should be used as a fallback to Screen Space Reflections (SSR) if SSR is available, as SSR provides more accurate results for visible surfaces [S1, unofficial].
+
+## Subtopics
+
+### Voxel Cone Tracing Indirect Specular Illumination
+This is the specific application of cone tracing for indirect specular lighting. It uses a smaller specular cone in the viewing direction reflected about the normal, with an aperture based on PBR material roughness. A smaller cone creates clearer, mirror-like reflections for reflective materials, while a wider cone simulates diffuse scattering for rougher materials. The aperture is a variable based on material roughness, controlling the clarity of the mirrored reflection. [S2, unofficial]
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of cone steps and voxel sampling cost. Generally $O(N)$ where $N$ is the number of steps, which is influenced by roughness and grid resolution.
+*   **Memory Complexity:** Requires storing the voxel grid. Using separate grids for diffuse and specular doubles the memory requirement for the voxel data [S1, unofficial].
+*   **Performance:** Works on fast GPUs and has been used in games like *Rise of Tomb Raider* (for voxel AO) and *The Tomorrow Children* on consoles with aggressive optimization [S1, unofficial].
+*   **Strengths:** Provides view-independent indirect specular lighting, handles rough materials well, and can be optimized with sparse voxel structures and update frequency changes.
+*   **Limitations:** Requires a voxelized scene representation, which can be memory-intensive. Reflections may be blurry if the voxel grid resolution is too low. Not as accurate as SSR for visible surfaces.
+*   **When to use:** When view-independent indirect specular lighting is needed and SSR is not sufficient or available.
+*   **When not to use:** When high-fidelity reflections are required and SSR is available, or when memory constraints are tight.
+
+## Background
+Cone Traced Reflections is part of the Voxel Cone Tracing technique for real-time global illumination. It was developed as an extension of diffuse voxel cone tracing to handle specular reflections. The technique is discussed in the context of real-time applications and has been used in commercial games. The specific details on roughness-based aperture adjustment are attributed to PBR material properties. [S1, unofficial][S2, unofficial]
+
+## Sources
+[S1] Voxel-based Global Illumination – Wicked Engine, https://turanszkij.wordpress.com/2017/08/30/voxel-based-global-illumination/, fetched 2026-10-28 (unofficial)
+[S2] PDF Voxel Cone Tracing Evaluation for Real-Time Applications, https://kth.diva-portal.org/smash/get/diva2:1886204/FULLTEXT01.pdf, fetched 2026-10-27 (unofficial)

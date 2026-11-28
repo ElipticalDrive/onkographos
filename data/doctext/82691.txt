@@ -1,0 +1,445 @@
+## Voxelization_API
+
+## Voxelization on point clouds using cython wrapped CUDA/C++
+This code provides an API to voxelize input point clouds and outputs the occupied information of each voxel.
+
+#### Requirements:
+* cython (>=0.16)
+* CUDA
+
+YOU need to first ensure you have added environment settings in your ~/.bashrc:
+
+`export PATH="/usr/local/cuda/bin:$PATH"`
+
+`export LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"`
+
+#### Install:
+
+To inplace install:
+
+`$ python setup.py build_ext --inplace`
+or install
+`$ python setup.py install`
+
+to test:
+
+`$ python test.py`
+
+#### More sampling methods can be found in branches
+
+#### API Usage
+
+* **An example**:
+
+```
+#### Settings
+num_points = 4096
+size = num_points
+outsize = 2048
+num_y = 120
+num_x = 40
+num_height = 20
+max_height = 1  # max height
+max_length = 1  # max_length in xy direction (same for x and y)
+
+#### Usage for voxelization
+test_data = test_data.transpose()
+test_data = test_data.flatten()
+voxelizer = voxelocc.GPUTransformer(test_data, size, max_length, max_height, num_x, num_y, num_height, outsize)
+voxelizer.transform()
+point_t = voxelizer.retreive()
+point_t = point_t.reshape(-1,3)
+```
+
+### setup.py
+```
+# from future.utils import iteritems
+import os
+from os.path import join as pjoin
+from setuptools import setup
+from distutils.extension import Extension
+from Cython.Distutils import build_ext
+import numpy
+
+
+def find_in_path(name, path):
+    """Find a file in a search path"""
+
+    # Adapted fom http://code.activestate.com/recipes/52224
+    for dir in path.split(os.pathsep):
+        binpath = pjoin(dir, name)
+        if os.path.exists(binpath):
+            return os.path.abspath(binpath)
+    return None
+
+
+def locate_cuda():
+    """Locate the CUDA environment on the system
+
+    Returns a dict with keys 'home', 'nvcc', 'include', and 'lib64'
+    and values giving the absolute path to each directory.
+
+    Starts by looking for the CUDAHOME env variable. If not found,
+    everything is based on finding 'nvcc' in the PATH.
+    """
+
+    # First check if the CUDAHOME env variable is in use
+    if 'CUDAHOME' in os.environ:
+        home = os.environ['CUDAHOME']
+        nvcc = pjoin(home, 'bin', 'nvcc')
+    else:
+        # Otherwise, search the PATH for NVCC
+        nvcc = find_in_path('nvcc', os.environ['PATH'])
+        if nvcc is None:
+            raise EnvironmentError('The nvcc binary could not be '
+                'located in your $PATH. Either add it to your path, '
+                'or set $CUDAHOME')
+        home = os.path.dirname(os.path.dirname(nvcc))
+
+    cudaconfig = {'home': home, 'nvcc': nvcc,
+                  'include': pjoin(home, 'include'),
+                  'lib64': pjoin(home, 'lib64')}
+    for k, v in iter(cudaconfig.items()):
+        if not os.path.exists(v):
+            raise EnvironmentError('The CUDA %s path could not be '
+                                   'located in %s' % (k, v))
+
+    return cudaconfig
+
+
+def customize_compiler_for_nvcc(self):
+    """Inject deep into distutils to customize how the dispatch
+    to gcc/nvcc works.
+
+    If you subclass UnixCCompiler, it's not trivial to get your subclass
+    injected in, and still have the right customizations (i.e.
+    distutils.sysconfig.customize_compiler) run on it. So instead of going
+    the OO route, I have this. Note, it's kindof like a wierd functional
+    subclassing going on.
+    """
+
+    # Tell the compiler it can processes .cu
+    self.src_extensions.append('.cu')
+
+    # Save references to the default compiler_so and _comple methods
+    default_compiler_so = self.compiler_so
+    super = self._compile
+
+    # Now redefine the _compile method. This gets executed for each
+    # object but distutils doesn't have the ability to change compilers
+    # based on source extension: we add it.
+    def _compile(obj, src, ext, cc_args, extra_postargs, pp_opts):
+        if os.path.splitext(src)[1] == '.cu':
+            # use the cuda for .cu files
+            self.set_executable('compiler_so', CUDA['nvcc'])
+            # use only a subset of the extra_postargs, which are 1-1
+            # translated from the extra_compile_args in the Extension class
+            postargs = extra_postargs['nvcc']
+        else:
+            postargs = extra_postargs['gcc']
+
+        super(obj, src, ext, cc_args, postargs, pp_opts)
+        # Reset the default compiler_so, which we might have changed for cuda
+        self.compiler_so = default_compiler_so
+
+    # Inject our redefined _compile method into the class
+    self._compile = _compile
+
+
+# Run the customize_compiler
+class custom_build_ext(build_ext):
+    def build_extensions(self):
+        customize_compiler_for_nvcc(self.compiler)
+        build_ext.build_extensions(self)
+
+
+CUDA = locate_cuda()
+
+# Obtain the numpy include directory. This logic works across numpy versions.
+try:
+    numpy_include = numpy.get_include()
+except AttributeError:
+    numpy_include = numpy.get_numpy_include()
+
+
+ext = Extension('voxelocc',
+        sources = ['src/manager.cu', 'wrapper.pyx'],
+        library_dirs = [CUDA['lib64']],
+        libraries = ['cudart'],
+        language = 'c++',
+        runtime_library_dirs = [CUDA['lib64']],
+        # This syntax is specific to this build system
+        # we're only going to use certain compiler args with nvcc
+        # and not with gcc the implementation of this trick is in
+        # customize_compiler()
+        extra_compile_args= {
+            'gcc': [],
+            'nvcc': [
+                '-arch=sm_30', '--ptxas-options=-v', '-c',
+                '--compiler-options', "'-fPIC'", "-std=c++11"
+                ]
+            },
+            include_dirs = [numpy_include, CUDA['include'], 'src']
+        )
+
+
+setup(name = 'voxelocc',
+      author = 'Xuecheng Xu',
+      version = '0.1',
+      ext_modules = [ext],
+      cmdclass = {'build_ext': custom_build_ext},
+      # Since the package has c code, the egg cannot be zipped
+      zip_safe = False)
+```
+
+### test.py
+```
+import voxelocc
+import numpy as np
+import numpy.testing as npt
+import time
+import os
+import numpy.testing as npt
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+def load_pc_file(filename):
+    # returns Nx3 matrix
+    pc = np.fromfile(os.path.join("./", filename), dtype=np.float64)
+
+    if(pc.shape[0] != 4096*3):
+        print("Error in pointcloud shape")
+        return np.array([])
+
+    pc = np.reshape(pc,(pc.shape[0]//3, 3))    
+    return pc
+
+#### Test
+test_data = load_pc_file("test.bin")
+x = test_data[...,0]
+y = test_data[...,1]
+z = test_data[...,2]
+
+fig = plt.figure()
+ax = Axes3D(fig)
+ax.scatter(x, y, z)
+plt.show()
+plt.pause(0.1)
+plt.close()
+
+test_data = test_data.astype(np.float32)
+test_data = test_data[np.newaxis,:,...]
+
+#### Settings
+num_points = 4096
+size = num_points
+num_y = 120
+num_x = 40
+num_height = 20
+max_height = 1  # max height
+max_length = 1  # max_length in xy direction (same for x and y)
+num_in_voxel = 1 # Num points in a voxel, no use for occupied information
+
+#### Usage for voxelization
+test_data = test_data.transpose()
+test_data = test_data.flatten()
+transer = voxelocc.GPUTransformer(test_data, size, max_length, max_height, num_x, num_y, num_height, num_in_voxel)
+transer.transform()
+point_t = transer.retreive()
+point_t = point_t.reshape(-1,3)
+point_t = point_t.reshape(num_height, num_x, num_y, 3)
+
+#### Visualization
+for i in range(num_height):
+    plt.imshow(point_t[i,:,:,2])
+    plt.show()
+    plt.pause(0.3)
+```
+
+### src/kernel.cu
+```
+#include <stdio.h>
+#include <ctime>
+#include <cassert>
+#include <cmath>
+#include <utility>
+#include <vector>
+#include <algorithm> 
+#include <cstdlib>
+#include <memory>
+#include <iostream>
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+
+void __global__ point2gridmap(float* point, int* x_vec, int* y_vec, int* height, int d_size, int max_length, int max_height, int num_x, int num_y, int num_height) 
+{
+    int gid = threadIdx.x + blockDim.x*blockIdx.x;
+    
+    if(gid >= d_size) return;
+
+    float gap_x, gap_y, gap_height;
+
+    gap_x = 2.0 * (float)max_length / (float)num_x;
+    gap_y = 2.0 * (float)max_length/(float)num_y;
+    gap_height = 2.0 * (float)max_height/ (float)num_height;
+
+    float x, y, z;
+    x = point[gid];
+    y = point[gid + d_size];
+    z = point[gid + 2 * d_size];
+    
+    if(x == 0.0)
+        x = 0.0001;
+    if(y == 0.0)
+        y = 0.0001;
+    if(z == 0.0)
+        z = 0.0001;
+
+    if(x > 1.0)
+        x = 0.9999;
+    if(y > 1.0)
+        y = 0.9999;
+    if(z > 1.0)
+        z = 0.9999;
+
+    if(x < -1.0)
+        x = -0.9999;
+    if(y < -1.0)
+        y = -0.9999;
+    if(z < -1.0)
+        z = -0.9999;
+
+    int idx_ring = floor((x + 1.0) / gap_x);
+    int idx_sector = floor((y + 1.0) / gap_y);
+    int idx_height = floor((z + 1.0) / gap_height);
+
+    height[gid] = idx_height;
+    x_vec[gid] = idx_ring;
+    y_vec[gid] = idx_sector;
+    
+    __syncthreads();  
+}
+```
+
+### src/manager.cu
+```
+/*
+This is the central piece of code. This file implements a class
+(interface in manager.hh) that takes data in on the cpu side, copies
+it to the gpu, and exposes functions (increment and retreive) that let
+you perform actions with the GPU
+
+This class will get translated into python via swig
+*/
+
+#include <kernel.cu>
+#include <manager.hh>
+#include <assert.h>
+#include <iostream>
+#include <chrono>
+#include <thread>
+using namespace std;
+
+GPUTransformer::GPUTransformer (float* point_host_, int size_, int* x_, int* y_, int* height_, int max_length_, int max_height_, int num_x_, int num_y_, int num_height_, int enough_large_) {
+  point_host = point_host_;
+  h_max_length = max_length_;
+  h_max_height_ = max_height_;
+  h_num_height = num_height_;
+  enough_large = enough_large_;
+  
+  // grid size in x and y dir
+  h_num_x = num_x_;
+  h_num_y = num_y_;
+
+  size = size_* 3 * sizeof(float);
+  d_size = size_;
+
+  cudaMalloc((void**) &point_device, size);
+  cudaMalloc((void**) &x, d_size * sizeof(int));
+  cudaMalloc((void**) &y, d_size * sizeof(int));
+  cudaMalloc((void**) &height, d_size * sizeof(int));
+  
+  cudaMemcpy(point_device, point_host, size, cudaMemcpyHostToDevice);
+  cudaMemcpy(y, y_, d_size * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(height, height_, d_size * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(x, x_, d_size * sizeof(int), cudaMemcpyHostToDevice);
+}
+
+
+void GPUTransformer::transform() {
+  dim3 blockSize(256);
+  dim3 gridSize((d_size + blockSize.x - 1) / blockSize.x);
+  point2gridmap<<<gridSize, blockSize>>>(point_device, x, y, height, d_size, h_max_length, h_max_height_, h_num_x, h_num_y, h_num_height);
+  cudaDeviceSynchronize();
+}
+
+
+void GPUTransformer::retreive(float* point_transformed) {
+  int x_h[d_size] = {0};
+  int y_h[d_size] = {0};
+  int height_h[d_size] = {0};
+
+  cudaMemcpy(x_h, x, d_size * sizeof(int), cudaMemcpyDeviceToHost);
+  cudaMemcpy(y_h, y, d_size * sizeof(int), cudaMemcpyDeviceToHost);
+  cudaMemcpy(height_h, height, d_size * sizeof(int), cudaMemcpyDeviceToHost);
+
+  for (int i = 0; i < d_size; i++)
+  {
+    point_transformed[3*(y_h[i] + x_h[i] * h_num_y + height_h[i] * h_num_y * h_num_x) + 0] = point_host[i];
+    point_transformed[3*(y_h[i] + x_h[i] * h_num_y + height_h[i] * h_num_y * h_num_x) + 1] = point_host[i + d_size];
+    point_transformed[3*(y_h[i] + x_h[i] * h_num_y + height_h[i] * h_num_y * h_num_x) + 2] = 1; // 1 for occupied
+  }
+
+  cudaFree(point_device);
+  cudaFree(height);
+  cudaFree(y);
+  cudaFree(x);
+}
+
+
+GPUTransformer::~GPUTransformer() {
+  cudaFree(point_device);
+  cudaFree(height);
+  cudaFree(y);
+  cudaFree(x);
+}
+```
+
+### src/manager.hh
+```
+class GPUTransformer {
+  float* point_device;
+  float* point_host;
+
+  int h_max_length;
+  int h_max_height_;
+  int h_num_x;
+  int h_num_y;
+  int h_num_height;
+  int d_max_length;
+  int d_num_x;
+  int d_num_y;
+  int enough_large;
+
+  int* h_x;
+  int* h_y;
+
+  int* x;
+  int* y;
+  int* height;
+  int size;
+  int d_size;
+  int d_grid_size;
+
+public:
+
+  GPUTransformer(float* point_host_, int size_, int* x_, int* y_, int* height, int max_length_, int max_height_, int num_x_, int num_y_, int num_height_, int enough_large_); // constructor (copies to GPU)
+
+  ~GPUTransformer(); // destructor
+
+  void transform(); // does operation inplace on the GPU
+
+  void retreive(float* point_transformed); //gets results back from GPU, putting them in the memory that was passed in
+
+};
+```

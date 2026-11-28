@@ -1,0 +1,189 @@
+Steve's Game Library — Rust game-building libraries for AI coding agents - Design the game-authored irradiance volume with region updates by stevepryde · Pull Request #141 · stevepryde/sgl
+
+Design the game-authored irradiance volume with region updates by stevepryde · Pull Request #141 · stevepryde/sgl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+stevepryde
+commented
+Oct 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Design only (AR-9): amends specs/sgl3d-architecture.md for a game-authored irradiance volume with region updates, so a voxel game can light its world from a 3D light field it computes (sky and block light per metre cell), relight a torch or an opened cave as a small region write with no geometry replaced, no static edit and no texture re-installed, and keep caves dark beyond the shadow cascades. No code. Implementation follows after the AR-10 review.
+Part of #133
+Where it plugs in (AR-9)
+Stage order: no new stage and no pass. Region writes go through the queue when the game makes them; a scroll is one command buffer the scene submits at once; prepare uploads nothing for it; a frame uploads nothing.
+Reads/writes: one RGBA16F 3D texture in Bevy's six-face layout, owned by the scene and lent through lit group 0 (one sampled texture, filtered through the existing baked_sampler with Bevy's shader-side clamp) to every view that shades: the camera's opaque, masked and blended surfaces (receivers included), probe captures, world-space ray hits and the dynamic GI probes' hits. Frame carries its placement and a flag.
+Contracts touched: Scene content (an installed-whole placement with region writes from a Send prepared region, scroll semantics, fallback cells), Render origin (the volume's origin translates; cells do not), View and frame data, Bind groups (fragment floor 20 → 21; the world-space trace 19 → 20; the dynamic GI trace 12 → 13), G-buffer (the ambient target's alpha carries a(n)), Surface shading (the one determination gains a step; the instance bullets name it), the Opaque/AO, Reflections and Dynamic diffuse GI designs, and a new "Irradiance volume" design.
+Deletes: nothing. Ambient cubes, lightmaps and the atlas stay, as the DDGI design keeps them.
+Decisions
+Cell: an ambient cube (owner decision), six faces along +X, −X, +Y, −Y, +Z, −Z, the AmbientCube a moving instance already carries, sampled as Bevy samples: the three faces the shading normal points to, weighted by N² (irradiance_volume.wesl 59-73), the formula ambient_cube_irradiance already owns. Bevy's one 3D texture layout (Rx, 2Ry, 3Rz) (irradiance_volume.rs 36-57), three hardware trilinear taps, the edge-centre clamp (54-57).
+Face format: RGBA16F, not Bevy's RGB9E5. Each face holds rgb = its own light (E/π) and a = the sky's occlusion toward that face (1 − visibility, so a zero texel is the fallback). The sky-visibility split stays because (i) the sky changes with the frame: a baked sky rewrites every cell (78.6 MB at the consumer's scale) where a visibility rewrites none (Frostbite bakes sky visibility beside its lightmaps/volumes; Unreal bakes stationary sky-light occlusion so the colour changes at runtime); (ii) the owner's sky-specular occlusion needs the visibility apart from the colour; (iii) RGB9E5 has no fourth channel, so a visibility beside it costs a second texture and binding and either three more taps (per face, 30 B/cell) or its direction (per cell, 25 B/cell). RGBA16F holds both in one texture at three taps, 48 B/cell against Bevy's 24, the encoding every baked irradiance source shares (irradiance_half), 10-bit mantissa above RGB9E5's 9. RGBA8-sRGB under a game-declared maximum (24 B, Bevy's size) keeps dark precision (the curve spends its codes there, ~2.5 decades below the maximum); its real costs are the declared maximum (a placement field the game must choose, above which light clips) and the range beneath it, so it is not taken while memory allows and is the measured fallback if VRAM proves the limit (owner decision: RGBA16F). Bevy's 84-95 argument is against per-cell scales breaking the hardware filter, not against one scale for the volume. Visibility is per face, blended with the same N² weights (directional sky occlusion, Unreal's bent-normal practice), at no cost beyond the format.
+Place in the one determination: lightmap → atlas chart → irradiance volume → DDGI volume → moving instance's ambient cube → frame ambient. Owner decision: across its extent the volume covers DDGI and ambient cubes: authored light wins; unwritten cells read as the frame's ambient whole with no own light, so where a receiver's fallback is the ambient nothing changes, and where DDGI or a cube would light it the volume covers them with that ambient; a game wanting DDGI or cubes in a region leaves it uncovered. DDGI probe-ray hits take the volume whole (DYNAMIC_GI_BOUNCE damps only DDGI's own share).
+Composition: a lit receiver takes a(n) × ambient(n) + rgb(n) in place of the environment's diffuse and the hemisphere fill through the same path as the DDGI volume's irradiance, recorded apart as the ambient that AO weights (field = metres-scale visibility, GTAO = sub-metre; Godot occludes VoxelGI/SDFGI ambient by AO the same way). a(n) scales both ambient terms; the environment term keeps environment_scale, the hemisphere fill has none; rgb takes no environment_scale (as Light surfaces from a dynamic GI volume of probes #139's volume). Receivers it lights still take baked scene lights: a fixture written into the field is not also a scene light, or the game leaves the field's share of it out. It follows FrameInput::baked_lighting with the charts and cubes.
+Sky specular (owner decision): a(n) (the visibility blended at the normal) multiplies the visibility from which Lagarde specular occlusion is derived, for the sky's share of a lobe's environment specular only: probe specular keeps completion's AO-derived occlusion (a probe captured in the cave already shows the cave; Unreal's sky occlusion occludes the sky light, not reflection captures). source_specular_occlusion (today stages/reflections/source.wgsl:53) moves into shading/specular_lobes.wgsl so completion and shade_lit call one function (AR-1). Completion reads a(n) from the alpha of the ambient-apart target (gbuffer.rs AMBIENT, Rgba16Float), 1 where no volume lights the pixel (new G-buffer contract line); shade_lit applies it for captures, ray hits and blended surfaces, and in the sky's share of a receiver's fallback; captures and hits take the sky's visibility alone. It does not touch traced radiance (SSR, world-ray hits), direct light or emission. Practice: Frostbite's sky visibility, Unreal's baked sky occlusion, Lagarde & de Rousiers 2014 (Filament's SpecularAO_Lagarde, already ported); Bevy's volume touches no specular.
+API (content, S3D-6): Scene::set_irradiance_volume(&device, &queue, Option<IrradianceVolume { origin, cell_size: Vec3, cells: [u32; 3] }>) installs the placement whole (None removes; refused when the six-face texture would exceed maxTextureDimension3D); Scene::write_irradiance_cells(&queue, &PreparedIrradianceRegion) writes a box (x fastest, then y, then z), one write per face slab; the region is built by a pure Send preparation step from the least-corner position, cell counts and &[IrradianceCell { irradiance: AmbientCube, sky_visibility: [f32; 6] }] (both arrays in the cube's documented face order +X, −X, +Y, −Y, +Z, −Z), which validates and packs the halves on the game's worker threads (consistent with SGL3D: shared geometry buffers and off-thread mesh preparation #135's ModelMesh::prepare → PreparedMesh), so relight packing stays off the render-critical thread; typed refusals. Dimension caps beside the refusal: under the default maxTextureDimension3D 2048, cells.x ≤ 2048, cells.y ≤ 1024, cells.z ≤ 682. The game owns values, lattice, extent, scrolling and relight scheduling; SGL3D owns storage, encoding, layout, upload, sampling and composition.
+Extent and scrolling: one axis-aligned lattice in the render frame (as the DDGI volume). Re-installing with the same cell size and counts scrolls by the nearest whole number of cells: the cells that stay are copied to their new texels and the entering cells cleared, in one command buffer the scene submits at once so the game's following region writes land on the moved field (Godot's SDFGI scrolls its cascades' textures and probe history by a copy: sdfgi_preprocess.glsl MODE_SCROLL 174-183, gi.cpp 2121-2175). Not toroidal: the six faces share one texture whose hardware filter cannot wrap within a slab. Considered and not taken: stacking the faces along y alone, (Rx, 6Ry, Rz), so x and z could repeat and a horizontal scroll moved no cell; taken up only if PR C's measurements show the scroll copy hitching. Another size or count is a new placement (all fallback). Scene::move_origin translates the origin; a move is not a scroll.
+Sampling: the position is offset along the geometry normal by half a cell (the offset that lands a surface on a cell face at the adjacent cell's centre; Godot's SDFGI normal_bias is the precedent, 1.1 cells by default; VoxelGI's defaults to 0), clamped to the edge cells' centres (Bevy), three trilinear taps blended by the shading normal's N²; the share is 1 inside and fades to 0 over the one cell past each face through the DDGI volume's fade function (AR-2); Bevy's falloff (default 0, inside the cube) not taken.
+Bind groups / floors: one sampled texture: fragment floor 21 (from the 20 that Light surfaces from a dynamic GI volume of probes #139 landed; Dawn tiers 16/48, native ≥ 31, so no device sits between 17 and 21); world-space trace 20; DDGI trace 13. No new sampler. The change that lands it states the floor in S3D-1, README and docs.
+Browser (D-27): a filtered RGBA16F 3D texture written and copied by region is core WebGPU; the browser runs the same volume within maxTextureDimension3D (2048 default). No fallback needed.
+Fog: out of scope; Godot's volumetric fog samples its VoxelGI/SDFGI (volumetric_fog_process.glsl 705-760), the practice for a follow-up issue.
+Alternatives rejected
+Bevy's RGB9E5 faces exactly (24 B/cell): no channel for the sky visibility, so the sky is baked and a sky change rewrites the whole volume; no visibility for the owner's sky-specular occlusion.
+RGB9E5 faces + R8 visibility per cell (25 B, two textures, 4 taps): second binding (floor 22) and a second write per region; visibility loses its direction.
+RGB9E5 faces + R8 visibility per face (30 B, two textures, 6 taps): second binding and twice the taps for 18 bytes saved.
+RGBA8-sRGB faces + a game-declared maximum (24 B): keeps dark precision (~2.5 decades); costs a declared maximum the game must choose, clipping above it, and the range beneath it. Not taken while memory allows (owner decision: RGBA16F); it is the measured fallback if VRAM proves the limit.
+Toroidal storage with a repeat sampler: the six faces share one texture; hardware repeat wraps the texture, not a face's slab, so the seam reads another face. Six separate textures would wrap but bind six (floor 26, DDGI trace 18). Stacking along y alone, (Rx, 6Ry, Rz), wraps x and z but not y; recorded as the option if the scroll copy hitches in PR C.
+Several volumes with per-fragment blending (Bevy's iterator): no consumer needs several; one place in the determination.
+DDGI before the authored volume: would lose 1 m cave darkness where the player is; the owner decided authored light wins.
+Re-upload or game rewrite on scroll: the whole-texture install the issue avoids.
+Memory and cost at the consumer's scale
+Dense volume 160 × 128 × 160 m at 1 m = 3,276,800 cells (resident chunks 405–850 × 16³ = 1.66–3.48 M cells); the texture is 160 × 256 × 480 texels.
+Chosen (6 × RGBA16F)
+Bevy (6 × RGB9E5)
+6 × RGB9E5 + R8/cell
+6 × RGB9E5 + 6 × R8
+6 × RGBA8-sRGB + declared max (fallback)
+Bytes/cell
+48
+24
+25
+30
+24
+Volume
+157.3 MB
+78.6 MB
+81.9 MB
+98.3 MB
+78.6 MB
+27-chunk relight (110,592 cells)
+5.31 MB, 6 writes
+2.65 MB, 6 writes
+2.76 MB, 7 writes
+3.32 MB, 12 writes
+2.65 MB, 6 writes
+Sky-colour change
+0
+78.6 MB (every cell)
+0
+0
+0
+Taps per lit fragment
+3
+3
+4
+6
+3
+Textures / fragment floor
+1 / 21
+1 / 21
+2 / 22
+2 / 22
+1 / 21
+A region write is ~3.4 % of a whole-texture install (5.31 MB vs 157.3 MB); a one-chunk scroll copies up to the volume's size on the GPU (157 MB) and clears 16 × 128 × 160 cells. CPU: 24 f32→half packs per cell (≈2–3 ms single-threaded for a 27-chunk relight; a full install ≈ 80 M packs, tens of ms, a one-time cost the implementer may parallelise). GPU time is measured in the implementation PR (RD-6): three trilinear taps, below the DDGI sample's cost (eight probes, two taps each).
+Sources (revisions)
+Bevy 9d12036 (9d120361303727a66b62f31f0d053793af62417a, MIT OR Apache-2.0, registered in licenses/upstreams.json for sgl-3d at b56fc29): crates/bevy_pbr/src/light_probe/irradiance_volume.rs (layout 36-57, "Why ambient cubes?" 71-114, bindings 272-289, single-volume fallback 246-269), light_probe/irradiance_volume.wesl (sample 51-74, N² blend 59-73), light_probe.wesl (containing test and falloff weight 126-141), light_probe/mod.rs (MAX_VIEW_LIGHT_PROBES 48-56, RenderLightProbe 67-117), render/pbr_functions.wesl 683-711, bevy_light/src/probe.rs 28-31, 75-90 (LightProbe::falloff), 338-363 (IrradianceVolume). Mitchell, "Shading in Valve's Source Engine", SIGGRAPH 2006 (ambient cubes), as Bevy cites it.
+Godot ed1daf0 (4.7.2-stable), practice only: servers/rendering/renderer_rd/shaders/environment/gi.glsl 195 (SDFGI normal bias), 538 (VoxelGI normal_bias); scene/resources/environment.h 161 (sdfgi_normal_bias = 1.1); scene/3d/voxel_gi.h 52-53; servers/rendering/renderer_rd/shaders/environment/sdfgi_preprocess.glsl 174-183, 203-211 (MODE_SCROLL, MODE_SCROLL_OCCLUSION) and servers/rendering/renderer_rd/environment/gi.cpp 508-509, 2121-2175 (scroll by copy, probe history scroll); .../forward_clustered/scene_forward_clustered.glsl 1801-1979 (GI order), 2141 (ambient_light *= ao); .../environment/volumetric_fog_process.glsl 705-760 (fog samples VoxelGI/SDFGI).
+Wicked Engine 4323a33, practice only: WickedEngine/shaders/voxelConeTracingHF.hlsli 42-118 (anisotropic six-face voxels).
+O'Donnell, "Precomputed Global Illumination in Frostbite", GDC 2018, p. 4 (sky visibility baked beside lightmaps and irradiance volumes); Unreal Engine documentation, "Sky Lights" (stationary sky-light shadowing baked as a bent normal; colour changeable at runtime); Lagarde & de Rousiers, "Moving Frostbite to PBR", SIGGRAPH 2014 (specular occlusion from visibility; Filament's SpecularAO_Lagarde already ported); RTXGI's infinite scrolling volume (the DDGI design's scroll).
+Consumer reference (feature set and scale only): Stevecraft docs/architecture.md light-field sections, specs/engine-runtime.md VOX-16..19.
+Interactions
+Roadmap 11: Dynamic diffuse GI (DDGI) #21 / Light surfaces from a dynamic GI volume of probes #139 (DDGI, merged): determination order authored volume → DDGI; both share the IndirectDiffuse share composition and "in place of environment diffuse + hemisphere, recorded apart for AO"; DDGI probe-ray hits sample the authored volume whole; the floor statement builds on Light surfaces from a dynamic GI volume of probes #139's 20 (21 with the cell texture; world-space trace 20; DDGI trace 13); the implementation slots into surface_indirect_diffuse. Owner decision: the volume covers DDGI and ambient cubes across its extent.
+SGL3D: design how a render-origin change keeps motion and temporal history exact #17 / PR Move the scene's render origin without a cut #129 (render origin): move_origin translates the volume's origin (added to the translated list); cells are about the origin and do not change; a move is not a scroll. Region boxes are named by position in the render frame.
+SGL3D: blended surfaces that receive screen-space reflections #20 / PR Let blended surfaces receive screen-space reflections #128 (blended receivers): blended surfaces and receivers shade through shade_lit with lit group 0, so they sample the volume with no further change, and a receiver's fallback specular takes the sky occlusion; the traced lobe and surface contract are untouched.
+SGL3D: streamed and editable worlds at bounded cost #19 (streamed worlds): a relight is a region write, not a static edit: no ray BVH rebuild, no shadow-layer invalidation, no pending bounds.
+Proposed implementation sequence
+This PR: spec amendment; independent AR-10 review against the architecture.
+PR B (library): IrradianceVolume/IrradianceCell content types and validation; Scene::set_irradiance_volume / write_irradiance_cells with Bevy's six-face texture, zero-cleared on install, the scroll copy (a fresh texture or a staging stripe, the implementer's call; the scene submits it at once), move_origin; Frame fields and flag (layout test); lit group 0 texture and the floor statements (S3D-1, README, docs); irradiance_volume.wgsl sample (Bevy provenance header, the ambient_cube_irradiance blend) and the determination step in surface_indirect_diffuse; the sky occlusion into the specular lobes' occlusion (completion and shade_lit); tests that can fail at real boundaries: placement/region refusals, a cell written at a position read back through the shading sample at that position (after a scroll, and after move_origin), entered cells reading as the fallback, a receiver's environment specular occluded where a says; browser_smoke installs a small volume; README baked-diffuse section, docs/features.md, CHANGELOG (additive: no game-code changes). ≈ 800–1000 lines Rust/WGSL plus tests.
+PR C (example and measurements): examples/irradiance_volume.rs: a voxel-scale volume over static chunk instances with caves, a torch placed and removed as region writes, a moving instance sampling the field, day/night via the frame's ambient; per-pass GPU timings (RD-6) and the region-write-vs-whole-install measurement recorded in SGL3D: a game-authored irradiance volume with region updates #133. The owner judges the look (RD-5).
+Follow-up issue (not SGL3D: a game-authored irradiance volume with region updates #133): the fog's ambient share through the volume, after Godot's volumetric fog.
+Open risks
+157 MB at the consumer's dense volume (2× Bevy's format for the visibility channel, owner decision); if VRAM proves the limit on its route, the measured fallback is RGBA8-sRGB faces under a game-declared maximum (79 MB, same taps and bindings, ~2.5 decades of range, clipping above the maximum).
+The scroll copy moves up to the volume's size on the GPU per chunk crossing and, with a fresh texture, allocates it transiently (2× memory for that frame); a staging-stripe copy avoids the allocation if it hitches.
+Trilinear blending with dark solid cells at convex corners darkens edges (Minecraft's smooth-lighting look); the game can fill solid cells from their neighbours.
+The half-cell normal offset is a reasoned value, not a ported constant; the implementation checks seams and leaks against Godot's 1.1 cells.
+A full install packs 24 halves per cell (tens of ms at the consumer's scale); the Send prepared region lets the game run that on its worker threads and spread it over frames.
+Validation
+bun scripts/license-notices.ts check (pass) and bun test scripts (9 pass). Spec-only change; no Rust or WGSL touched.
+🤖 Generated with Claude Code
+stevepryde
+force-pushed
+the
+claude/issue-133
+branch
+4 times, most recently
+from
+5b3e9f2 to
+7ad638c
+Compare
+October 5, 2026 00:42
+Design the game-authored irradiance volume with region updates
+…
+1e90e3a
+```
+Amend the SGL3D architecture (AR-9) for a game-authored irradiance
+volume: an ambient cube per lattice cell in Bevy's six-face texture
+layout, each face an RGBA16F texel of its own light and the sky's
+occlusion, installed whole, written by region, scrolled by a copy,
+sampled by three trilinear taps blended by the normal in every view
+that shades, placed in the one diffuse determination after the charts
+and before the dynamic GI volume, covering the dynamic GI volume and
+ambient cubes across its extent, and occluding the sky's specular by
+its visibility. A port of Bevy's irradiance volume (9d12036) with the
+face format, single axis-aligned volume, copy-on-scroll and normal
+offset recorded as decisions. Design only.
+
+Part of #133
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+stevepryde
+force-pushed
+the
+claude/issue-133
+branch
+from
+7ad638c to
+1e90e3a
+Compare
+October 5, 2026 00:44
+stevepryde
+merged commit d7a8976
+into
+main
+Oct 5, 2026
+This was referenced Oct 5, 2026
+Offset shadow lookups along the geometry normal
+#149
+Merged
+Light surfaces from a game-authored irradiance volume written by region
+#153
+Merged
+Show the irradiance volume lighting a block world's cave, and scroll it in place
+#161
+Merged
+stevepryde
+deleted the
+claude/issue-133
+branch
+October 13, 2026 08:21
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

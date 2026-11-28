@@ -1,0 +1,184 @@
+# Opacity GAN
+Also called: Opacity Generator Network
+## Overview
+The Opacity GAN is a generative adversarial network designed to synthesize 64x64 opacity images for volume rendering by conditioning on a camera viewpoint and an opacity transfer function (TF) [S1]. It decomposes the synthesis task into two stages: first generating the general shape and silhouette via opacity, then translating to color [S1]. It is distinguished from sibling methods by its explicit design for introspection, allowing the network's inputs (viewpoint and TF) to be processed independently and analyzed post-training [S1].
+## How it works
+**Inputs and Outputs:**
+*   **Generator Input:** Camera viewpoint vector, opacity transfer function $t_o$ [S1].
+*   **Generator Output:** A 64x64 opacity image $I_{op}$ with values in $[-1, 1]$ [S1].
+*   **Discriminator Input:** Camera viewpoint, opacity transfer function $t_o$, and an image (real or generated) [S1].
+*   **Discriminator Output:** A scalar score in $[0, 1]$ indicating real/fake probability [S1].
+
+**Data Structures:**
+*   **Opacity TF ($t_o$):** Treated as a 1D signal [S1].
+*   **Viewpoint:** Treated as a vector [S1].
+*   **Latent Space:** An 8-dimensional vector representing the encoded opacity TF [S1].
+*   **Feature Vectors:** 512-dimensional vectors for fused view/TF features [S1].
+
+**Parameters:**
+*   Latent space dimension: 8 [S1].
+*   FC layer output dimension: 512 [S1].
+*   1D Convolution width: 5, stride: 2 [S1].
+*   2D Convolution width (Discriminator): 4, stride: 2 [S1].
+*   2D Convolution width (Generator): 3, stride: 1 [S1].
+*   Activation functions: Tanh (Generator output), Sigmoid (Discriminator output) [S1].
+*   Normalization: Batch normalization in all generator layers except the last [S1].
+
+**Algorithm:**
+
+The method consists of an Encoder, a Generator, a Decoder, and a Discriminator [S1]. The training objective combines adversarial loss with an autoencoder reconstruction loss [S1].
+
+1.  **Encoding:** The opacity TF $t_o$ is encoded into an 8-dimensional latent space $z$ using a series of 1D convolutions with width 5 and stride 2 [S1].
+    $$ z = G_{enc}(t_o) $$
+2.  **Feature Extraction:**
+    *   The viewpoint $v$ is processed through Fully Connected (FC) layers to produce a 512-dimensional feature vector $f_v$ [S1].
+    *   The encoded latent vector $z$ is processed through separate FC layers to produce a 512-dimensional feature vector $f_t$ [S1].
+3.  **Fusion:** The feature vectors $f_v$ and $f_t$ are concatenated and fed through an FC layer to produce a fused feature vector $f_{fuse}$ [S1].
+4.  **Image Synthesis (Generator):**
+    *   The fused feature $f_{fuse}$ is passed through a series of interleaved upsampling and 2D convolutional layers [S1].
+    *   Residual layers are used to ensure well-behaved gradients [S1].
+    *   Batch normalization is applied in all layers except the last [S1].
+    *   The final layer applies a 2D convolution (width 3, stride 1) followed by a Tanh activation to produce the opacity image $I_{op}$ with values in $[-1, 1]$ [S1].
+5.  **Decoding (Reconstruction):** The latent representation $z$ is decoded back to the original opacity TF $t_o'$ using two FC layers [S1].
+    $$ t_o' = G_{dec}(z) $$
+6.  **Discrimination:**
+    *   The viewpoint $v$ is processed through FC layers to produce $f_v'$ [S1].
+    *   The opacity TF $t_o$ is processed through 1D convolutions to produce $f_t'$ [S1].
+    *   The image $I$ (real or generated) is processed through a series of 2D convolutions (width 4, stride 2) that halve spatial resolution and increase channels successively [S1].
+    *   The transformed features $f_v'$, $f_t'$, and the processed image features are concatenated [S1].
+    *   The concatenated vector is fed through an FC layer and a Sigmoid activation to produce the real/fake score $S \in [0, 1]$ [S1].
+
+**Objective Function:**
+The generator $G$ and discriminator $D$ are trained using the following combined objective [S1]:
+
+$$ \min_G \max_D L_{adv}(G, D) + k \| G_{dec}(G_{enc}(t_o)) - t_o \|_2^2 $$
+
+Where:
+*   $L_{adv}(G, D)$ is the standard adversarial loss [S1].
+*   $G_{enc}$ is the encoder mapping $t_o$ to latent space [S1].
+*   $G_{dec}$ is the decoder mapping latent space back to $t_o$ [S1].
+*   $k$ is a weighting factor for the reconstruction loss [S1].
+*   The reconstruction loss ensures the latent space captures the opacity TF discriminatively, which is essential for the subsequent color translation stage [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class ResBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
+    def forward(self, x):
+        return x + torch.relu(self.bn2(self.conv2(torch.relu(self.bn1(self.conv1(x))))))
+
+class OpacityGAN:
+    def __init__(self, view_dim, tf_length):
+        # Encoder: 1D convs, width 5, stride 2 -> 8-dim latent
+        self.encoder = nn.Sequential(
+            nn.Conv1d(1, 16, kernel_size=5, stride=2),
+            nn.ReLU(),
+            nn.Conv1d(16, 32, kernel_size=5, stride=2),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten()
+        )
+        # Decoder: 2 FC layers
+        self.decoder = nn.Sequential(
+            nn.Linear(8, 256),
+            nn.ReLU(),
+            nn.Linear(256, tf_length)
+        )
+        # View Processor: FC to 512
+        self.view_fc = nn.Linear(view_dim, 512)
+        # TF (Latent) Processor: FC to 512
+        self.tf_fc = nn.Linear(8, 512)
+        # Fusion FC
+        self.fusion_fc = nn.Linear(1024, 512)
+        # Generator: Interleaved upsampling and 2D convs (width 3, stride 1)
+        self.gen_upsample = nn.Upsample(scale_factor=8, mode='nearest')
+        self.gen_conv1 = nn.Conv2d(512, 256, kernel_size=3, stride=1, padding=1)
+        self.gen_bn1 = nn.BatchNorm2d(256)
+        self.gen_res1 = ResBlock(256)
+        self.gen_conv2 = nn.Conv2d(256, 128, kernel_size=3, stride=1, padding=1)
+        self.gen_bn2 = nn.BatchNorm2d(128)
+        self.gen_res2 = ResBlock(128)
+        self.gen_conv3 = nn.Conv2d(128, 1, kernel_size=3, stride=1, padding=1)
+        # Discriminator: View FC, TF 1D Conv, Image 2D Conv (width 4, stride 2)
+        self.disc_view_fc = nn.Linear(view_dim, 512)
+        self.disc_tf_conv = nn.Sequential(
+            nn.Conv1d(1, 16, kernel_size=5, stride=2),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten()
+        )
+        self.disc_img_conv = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten()
+        )
+        self.disc_fusion = nn.Sequential(
+            nn.Linear(512 + 16 + 32, 1),
+            nn.Sigmoid()
+        )
+
+    def encode_tf(self, t_o):
+        return self.encoder(t_o)
+
+    def decode_tf(self, z):
+        return self.decoder(z)
+
+    def generate_opacity(self, viewpoint, t_o):
+        z = self.encode_tf(t_o)
+        f_v = self.view_fc(viewpoint)
+        f_t = self.tf_fc(z)
+        f_fuse = self.fusion_fc(torch.cat([f_v, f_t], dim=1))
+        f_fuse = f_fuse.view(f_fuse.size(0), 512, 1, 1)
+        x = self.gen_upsample(f_fuse)
+        x = torch.relu(self.gen_bn1(self.gen_conv1(x)))
+        x = self.gen_res1(x)
+        x = torch.relu(self.gen_bn2(self.gen_conv2(x)))
+        x = self.gen_res2(x)
+        I_op = torch.tanh(self.gen_conv3(x))
+        return I_op
+
+    def discriminate(self, viewpoint, t_o, image):
+        f_v = self.disc_view_fc(viewpoint)
+        f_t = self.disc_tf_conv(t_o)
+        f_img = self.disc_img_conv(image)
+        fused = torch.cat([f_v, f_t, f_img], dim=1)
+        score = self.disc_fusion(fused)
+        return score
+
+    def loss(self, viewpoint, t_o, real_image, generated_image, k):
+        d_real = self.discriminate(viewpoint, t_o, real_image)
+        d_fake = self.discriminate(viewpoint, t_o, generated_image)
+        adv_loss = -torch.mean(torch.log(d_real + 1e-9) + torch.log(1 - d_fake + 1e-9))
+        z = self.encode_tf(t_o)
+        t_o_rec = self.decode_tf(z)
+        recon_loss = torch.mean((t_o_rec - t_o) ** 2)
+        return adv_loss + k * recon_loss
+```
+
+## Operating characteristics
+*   **Resolution:** The generator produces a fixed 64x64 opacity image [S1].
+*   **Complexity:** The method uses Fully Connected layers and Convolutional layers [S1]. The specific computational complexity (FLOPs) is not given in the sources [S1].
+*   **Strengths:** The architecture enables introspection on inputs (viewpoint and TF) for analysis, which is a key differentiator from previous GAN approaches [S1]. The autoencoder loss ensures the latent space captures the TF discriminatively [S1].
+*   **Limitations:** GAN training is inherently unstable, especially if the generator's data distribution does not overlap with the discriminator's [S1]. The method breaks the problem into two GANs to mitigate resolution issues, but the first stage is limited to 64x64 resolution [S1].
+*   **When to use:** When a user needs to generate opacity silhouettes conditioned on specific transfer functions and viewpoints, particularly for analysis or as an intermediate step in a two-stage rendering pipeline [S1].
+*   **When not to use:** When high-resolution color images are needed directly without a second stage, or when the two-stage decomposition is unnecessary [S1].
+
+## Background
+The Opacity GAN was introduced in the paper "A Generative Model for Volume Rendering" [S1]. It decomposes volume rendering synthesis into two stages: first generating a 64x64 opacity image, then translating to color [S1]. The generator architecture is explicitly designed to enable introspection on its inputs for analysis, distinguishing it from previous GAN approaches [S1]. GAN training instability due to distribution mismatch is a known challenge that the two-stage design helps mitigate [S1].
+
+## Sources
+[S1] A Generative Model for Volume Rendering, https://doi.org/10.1109/tvcg.2018.2816059, fetched 2026-10-26

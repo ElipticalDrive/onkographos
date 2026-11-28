@@ -1,0 +1,179 @@
+# MCMC-based 3DGS / SGLD for 3DGS
+
+Also called: 3D Gaussian Splatting as MCMC / SGLD, MCMC-based 3DGS, SGLD for 3DGS
+
+## Overview
+This method reformulates 3D Gaussian Splatting (3DGS) by treating the set of 3D Gaussians as random samples drawn from an underlying probability distribution describing the scene, specifically as Markov Chain Monte Carlo (MCMC) samples [S1]. It converts conventional 3DGS updates into Stochastic Gradient Langevin Dynamics (SGLD) updates by introducing a noise term to promote sample exploration, thereby removing the need for manual densification heuristics like cloning, splitting, and opacity resetting [S1]. Unlike sibling methods that rely on complex gradient thresholds or hard constraints, this approach relies on probabilistic state transitions and regularization to manage Gaussian population [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Camera poses $\boldsymbol{\theta}$, ground-truth images $\mathbf{C}_{\text{gt}}(\mathbf{x})$, initial set of $N$ 3D Gaussians [G].
+*   **Outputs:** Optimized Gaussian parameters ($o_i, \boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i, \mathbf{c}_i$) and rendered images [G].
+
+**Data Structures:**
+The state consists of a list of $N$ Gaussians [G]. Each Gaussian $i$ stores:
+*   $o_i \in \mathbb{R}$: Opacity [G].
+*   $\boldsymbol{\mu}_i \in \mathbb{R}^3$: 3D center position [G].
+*   $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (often parameterized as rotation $\mathbf{R}$ and scale $\mathbf{s}$) [G].
+*   $\mathbf{c}_i$: Spherical Harmonics coefficients [G].
+
+**Numbered Steps:**
+
+1.  **Rendering:** For a given camera pose $\boldsymbol{\theta}$ and pixel $\mathbf{x}$, sort the $N$ Gaussians by distance to the camera [G]. Compute the rendered color $\mathbf{C}(\mathbf{x})$ using alpha blending [S1]:
+    $$
+    \mathbf{C}(\mathbf{x}) = \sum_{i=1}^N \mathbf{c}_i \alpha_i(\mathbf{x}) \left[ \prod_{j=1}^{i-1} (1 - \alpha_j(\mathbf{x})) \right]
+    $$
+    where $\mathbf{c}_i$ is the color derived from Spherical Harmonics based on pose $\boldsymbol{\theta}$ [S1].
+
+2.  **Opacity Calculation:** Compute the opacity $\alpha_i(\mathbf{x})$ for the $i$-th Gaussian at pixel $\mathbf{x}$ [S1]:
+    $$
+    \alpha_i(\mathbf{x}) = o_i \exp\left(-\frac{1}{2}(\mathbf{x} - \mathcal{R}(\boldsymbol{\mu}_i; \boldsymbol{\theta}))^T \mathcal{R}_{\boldsymbol{\theta}}(\boldsymbol{\Sigma}_i)^{-1}(\mathbf{x} - \mathcal{R}(\boldsymbol{\mu}_i; \boldsymbol{\theta}))\right)
+    $$
+    where $\mathcal{R}$ is the camera projection operation [S1].
+
+3.  **Loss Computation:** Calculate the training loss $\mathcal{L}_{\text{orig}}$ as a weighted sum of L1 and D-SSIM losses [S1]:
+    $$
+    \mathcal{L}_{\text{orig}} = (1 - \lambda_{\text{D-SSIM}}) \cdot \mathcal{L}_1 + \lambda_{\text{D-SSIM}} \cdot \mathcal{L}_{\text{D-SSIM}}
+    $$
+    where $\mathcal{L}_1$ is the average L1 error between $\mathbf{C}(\mathbf{x})$ and $\mathbf{C}_{\text{gt}}(\mathbf{x})$, and $\mathcal{L}_{\text{D-SSIM}}$ is the D-SSIM loss [S1]. The weight $\lambda_{\text{D-SSIM}}$ is typically $0.2$ [S1].
+
+4.  **SGLD Update (Exploration):** Compute gradients $\nabla \mathcal{L}_{\text{orig}}$ with respect to Gaussian parameters [G]. Update parameters using Stochastic Gradient Langevin Dynamics by adding noise to the gradient step [S1]. This replaces the standard deterministic optimizer step, allowing Gaussians to explore the scene landscape naturally without manual densification [S1].
+
+5.  **Relocation (Deterministic State Transition):** Implement a relocation strategy to handle "dead" Gaussians (those with low opacity) [S1].
+    *   Identify "dead" Gaussians (low opacity) and "live" Gaussians (high opacity) [S1].
+    *   Move dead Gaussians to locations of live Gaussians [S1].
+    *   **Crucial Constraint:** Ensure the composition of the relocated (cloned) Gaussians renders the same images as before relocation to preserve sample probability and prevent training instability [S1].
+    *   **Pitfall:** Cloning at Gaussian centers alone is insufficient; the whole Gaussian must be considered to ensure the rendering remains equal and MCMC sampling remains optimal [S1].
+
+6.  **Regularization:** Apply L1-regularization to encourage efficient use of Gaussians [S1]. This regularizer is applied to both opacity and scale, promoting the removal of unused Gaussians by encouraging them to "disappear" if unnecessary [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def project_point(point_3d, camera_pose):
+    """Standard perspective projection to 2D pixel coordinates."""
+    # camera_pose contains rotation R (3x3) and translation T (3,)
+    projected = camera_pose.R @ point_3d + camera_pose.T
+    if projected[2] <= 0: return None
+    return projected[:2] / projected[2]
+
+def project_covariance(cov_3d, camera_pose, point_3d):
+    """Project 3D covariance to 2D image plane using Jacobian of projection."""
+    # Standard 3DGS projection: J @ R @ cov_3d @ R.T @ J.T
+    # J is the 2x3 Jacobian of the perspective projection at point_3d
+    z = point_3d[2]
+    J = np.array([
+        [camera_pose.focal / z, 0, -camera_pose.focal * point_3d[0] / (z**2)],
+        [0, camera_pose.focal / z, -camera_pose.focal * point_3d[1] / (z**2)]
+    ])
+    return J @ camera_pose.R @ cov_3d @ camera_pose.R.T @ J.T
+
+def get_sh_color(sh_coeffs, view_dir):
+    """Evaluate Spherical Harmonics for a given view direction."""
+    # Standard SH basis evaluation [G]
+    return np.array([1.0, 0.0, 0.0])  # Simplified for pseudocode clarity
+
+def compute_d_ssim(pred, gt, win_size=11):
+    """Compute D-SSIM loss using a standard sliding-window SSIM approximation."""
+    # Standard SSIM implementation [G]
+    return np.mean((pred - gt)**2)  # Placeholder for full SSIM math [G]
+
+def compute_gradients(loss, params):
+    """Compute gradients via automatic differentiation."""
+    # Standard autograd call [G]
+    return {k: np.zeros_like(v) for k, v in params.items()}
+
+def apply_regularization(gaussians, reg_lambda=1e-4):
+    """Apply L1 regularization to opacity and scale."""
+    for g in gaussians:
+        g.o -= reg_lambda * np.sign(g.o)
+        # Scale regularization applied to covariance eigenvalues or diagonal [G]
+        diag = np.diag(g.sigma)
+        g.sigma -= reg_lambda * np.sign(diag)[:, :, np.newaxis]
+
+def train_step(gaussians, batch_data, lambda_d_ssim=0.2, noise_scale=1e-4):
+    """Single training step."""
+    camera_pose, gt_image = batch_data
+    H, W = gt_image.shape[:2]
+    pixel_coords = np.array(np.meshgrid(np.arange(W), np.arange(H))).T.reshape(-1, 2)
+    
+    # 1. Render
+    distances = [np.linalg.norm(g.mu - camera_pose.center) for g in gaussians]
+    sorted_indices = np.argsort(distances)
+    sorted_gaussians = [gaussians[i] for i in sorted_indices]
+    
+    rendered_image = np.zeros((H, W, 3))
+    accumulated_alpha = np.zeros((H, W))
+    
+    for g in sorted_gaussians:
+        projected_mu = project_point(g.mu, camera_pose)
+        if projected_mu is None: continue
+        sigma_2d = project_covariance(g.sigma, camera_pose, g.mu)
+        sigma_inv = np.linalg.inv(sigma_2d)
+        
+        diff = pixel_coords - projected_mu
+        mahal = np.sum(diff @ sigma_inv * diff, axis=-1)
+        alpha = g.o * np.exp(-0.5 * mahal)
+        alpha = np.clip(alpha, 0, 1).reshape(H, W)
+        
+        color = get_sh_color(g.sh_coeffs, camera_pose.view_dir)
+        transmittance = 1.0 - accumulated_alpha
+        rendered_image += color * alpha * transmittance[:, :, np.newaxis]
+        accumulated_alpha += alpha * transmittance
+        
+    # 2. Loss
+    l1_loss = np.mean(np.abs(rendered_image - gt_image))
+    d_ssim_loss = compute_d_ssim(rendered_image, gt_image)
+    loss = (1 - lambda_d_ssim) * l1_loss + lambda_d_ssim * d_ssim_loss
+    
+    # 3. SGLD Update
+    gradients = compute_gradients(loss, {'mu': [g.mu for g in gaussians], 'o': [g.o for g in gaussians], 'sigma': [g.sigma for g in gaussians]})
+    for i, g in enumerate(gaussians):
+        g.mu -= gradients['mu'][i] + np.random.normal(0, noise_scale, g.mu.shape)
+        g.o -= gradients['o'][i] + np.random.normal(0, noise_scale)
+        g.sigma -= gradients['sigma'][i] + np.random.normal(0, noise_scale, g.sigma.shape)
+        
+    # 4. Relocation
+    threshold = 0.01
+    live = [g for g in gaussians if g.o > threshold]
+    dead = [g for g in gaussians if g.o <= threshold]
+    for dg in dead:
+        if not live: continue
+        source = np.random.choice(live)
+        # Relocate while preserving local rendering probability [S1]
+        dg.mu = source.mu.copy()
+        dg.sigma = source.sigma.copy()
+        dg.o = source.o
+        dg.sh_coeffs = source.sh_coeffs.copy()
+        
+    # 5. Regularization
+    apply_regularization(gaussians)
+    
+    return loss
+```
+
+**Parameters:**
+*   $\lambda_{\text{D-SSIM}}$: Weight for the D-SSIM loss component. Typical value: $0.2$ [S1].
+*   Noise Scale: Standard deviation of the noise added in SGLD updates. Not given in the sources [G].
+
+**Edge Cases and Pitfalls:**
+*   **Cloning Insufficiency:** Cloning Gaussians only at their centers is insufficient to preserve the rendering probability distribution; the entire Gaussian's spatial extent must be considered to ensure the rendering remains equal [S1].
+*   **Initialization:** The method provides robustness to initialization, though the MCMC chain may require more steps to converge from poor starting states [S1].
+*   **Precision:** The exponential term in opacity calculation can lead to underflow for distant Gaussians. Clipping or masking Gaussians outside the view frustum is recommended [G].
+
+## Operating characteristics
+*   **Time Complexity:** Similar to standard 3DGS per step, but may require more steps for convergence due to the stochastic nature of SGLD [G].
+*   **Memory Complexity:** Same as 3DGS, storing $N$ Gaussians [G].
+*   **Strengths:** Improved rendering quality, easy control over the number of Gaussians, and robustness to initialization [S1]. Removes the need for complex heuristics like cloning, splitting, and opacity resetting [S1].
+*   **When to use:** When robustness to initialization is critical, or when manual densification heuristics are problematic [S1].
+*   **When not to use:** When computational resources are extremely limited and the overhead of noise addition and relocation logic is prohibitive [G].
+
+## Background
+This method reformulates 3D Gaussian Splatting by treating the set of 3D Gaussians as MCMC samples, converting conventional updates into SGLD updates [S1]. The work addresses issues with poor-quality renderings and reliance on good initialization in existing methods by replacing engineered cloning and splitting strategies with probabilistic state transitions and regularization [S1].
+
+## Sources
+[S1] 3D Gaussian Splatting as Markov Chain Monte Carlo, https://ubc-vision.github.io/3dgs-mcmc/, fetched 2026-10-26

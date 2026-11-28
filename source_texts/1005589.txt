@@ -1,0 +1,550 @@
+Summary
+
+add a first forward-renderer volume raymarch pipeline and WGSL shader for volume residency items
+composite SDF and volume raymarch passes with alpha blending and cover the new path in renderer/headless tests
+update README and rendering capability docs to reflect forward volume execution
+
+Closes #15
+
+Add first volume raymarch pass by disjukr · Pull Request #45 · disjukr/goldlight · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add first volume raymarch pass
+#45
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Merged
+disjukr
+merged 2 commits into
+main
+from
+automation/issue-15-volume-pass
+Mar 17, 2026
+Uh oh!
+There was an error while loading. Please reload this page.
+Merged
+Add first volume raymarch pass
+#45
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+2 commits
+Select commit
+Hold shift + click to select a range
+f333b06
+Add first volume raymarch pass
+disjukr Mar 17, 2026
+b3c63ba
+Preserve rotated volume raymarch bounds
+disjukr Mar 17, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Next
+Next commit
+Add first volume raymarch pass
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+disjukr
+committed
+Mar 17, 2026
+commit f333b068ac90218dfef06f56df9a2bf7d93c4410
+There are no files selected for viewing
+2 changes: 1 addition & 1 deletion
+2
+README.md
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -31,7 +31,7 @@ object-oriented API design.
+Implemented today:
+- BDL-driven `SceneIr` generation with drift checks in CI
+- mesh, texture, and first volume residency upload paths
+- mesh, texture, first volume residency upload paths, and first volume raymarch execution
+- forward rendering, first SDF raymarch execution, and headless snapshot readback
+- built-in unlit material registration, evaluated mesh transform uploads, base-color texture
+sampling, material parameter uploads, custom WGSL registration, and declared material texture
+Expand Down
+6 changes: 3 additions & 3 deletions
+6
+docs/specs/renderer-capabilities.md
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -77,12 +77,12 @@ The current forward renderer declares:
+- `mesh: supported`
+- `sdf: supported`
+- `volume: unsupported`
+- `volume: supported`
+- `builtInMaterialKinds: ['unlit']`
+- `customShaders: supported`
+This matches the implemented path: mesh draws and a first SDF raymarch pass are encoded, while
+volume rendering is still blocked at capability preflight.
+This matches the implemented path: mesh draws plus first SDF and volume raymarch passes are encoded
+in the forward renderer.
+### Deferred
+Expand Down
+3 changes: 2 additions & 1 deletion
+3
+docs/specs/rendering.md
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -36,6 +36,7 @@ The initial renderer uses a lightweight pass graph:
+- Forward rendering is the first concrete execution path and currently draws mesh residency items.
+- Forward rendering also encodes a dedicated SDF raymarch pass for supported sphere primitives.
+- Forward rendering also encodes a first volume raymarch pass for volume primitives with residency.
+- Built-in unlit WGSL is stored as a standalone shader file and imported as text.
+- Built-in unlit shading supports color-only meshes plus optional base-color texture sampling when
+UVs and texture residency are available.
+Expand Down
+Expand Up
+@@ -77,6 +78,6 @@ The initial renderer uses a lightweight pass graph:
+## Known Gaps
+- Deferred rendering is still at the planning-contract stage.
+- Volume rendering passes are not encoded yet; only their residency/extraction scaffolding exists.
+- Generalized texture-backed material binding for arbitrary custom programs is not implemented yet.
+- SDF execution currently supports sphere primitives only; broader graph/operator coverage is still
+pending.
+153 changes: 151 additions & 2 deletions
+153
+packages/renderer/src/renderer.ts
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -14,6 +14,9 @@ import builtInForwardTexturedShader from './shaders/built_in_forward_unlit_textu
+type: 'text',
+};
+import builtInSdfRaymarchShader from './shaders/built_in_sdf_raymarch.wgsl' with { type: 'text' };
+import builtInVolumeRaymarchShader from './shaders/built_in_volume_raymarch.wgsl' with {
+type: 'text',
+};
+export type RendererKind = 'forward' | 'deferred';
+export type PassKind =
+Expand Down
+Expand Up
+@@ -148,6 +151,7 @@ export type RendererCapabilityIssue = Readonly<{
+const builtInUnlitProgramId = 'built-in:unlit';
+const builtInTexturedUnlitProgramId = 'built-in:unlit-textured';
+const builtInSdfRaymarchProgramId = 'built-in:sdf-raymarch';
+const builtInVolumeRaymarchProgramId = 'built-in:volume-raymarch';
+const uniformUsage = 0x40;
+const bufferCopyDstUsage = 0x08;
+const maxSdfPassItems = 16;
+Expand Down
+Expand Up
+@@ -378,7 +382,7 @@ export const createForwardRenderer = (label = 'forward'): Renderer => ({
+capabilities: {
+mesh: 'supported',
+sdf: 'supported',
+volume: 'unsupported',
+volume: 'supported',
+builtInMaterialKinds: ['unlit'],
+customShaders: 'supported',
+},
+Expand Down
+Expand Up
+@@ -633,7 +637,71 @@ export const ensureSdfRaymarchPipeline = (
+fragment: {
+module: shader,
+entryPoint: 'fsMain',
+targets: [{ format }],
+targets: [{
+format,
+blend: {
+color: {
+srcFactor: 'src-alpha',
+dstFactor: 'one-minus-src-alpha',
+operation: 'add',
+},
+alpha: {
+srcFactor: 'one',
+dstFactor: 'one-minus-src-alpha',
+operation: 'add',
+},
+},
+}],
+},
+primitive: {
+topology: 'triangle-list',
+},
+});
+residency.pipelines.set(cacheKey, pipeline);
+return pipeline;
+};
+export const ensureVolumeRaymarchPipeline = (
+context: GpuRenderExecutionContext,
+residency: RuntimeResidency,
+format: GPUTextureFormat,
+): GPURenderPipeline => {
+const cacheKey = `${builtInVolumeRaymarchProgramId}:${format}`;
+const cached = residency.pipelines.get(cacheKey);
+if (cached) {
+return cached as GPURenderPipeline;
+}
+const shader = context.device.createShaderModule({
+label: cacheKey,
+code: builtInVolumeRaymarchShader,
+});
+const pipeline = context.device.createRenderPipeline({
+label: cacheKey,
+layout: 'auto',
+vertex: {
+module: shader,
+entryPoint: 'vsMain',
+},
+fragment: {
+module: shader,
+entryPoint: 'fsMain',
+targets: [{
+format,
+blend: {
+color: {
+srcFactor: 'src-alpha',
+dstFactor: 'one-minus-src-alpha',
+operation: 'add',
+},
+alpha: {
+srcFactor: 'one',
+dstFactor: 'one-minus-src-alpha',
+operation: 'add',
+},
+},
+}],
+},
+primitive: {
+topology: 'triangle-list',
+Expand All
+@@ -657,6 +725,27 @@ const createSdfUniformData = (items: readonly SdfPassItem[]): Float32Array => {
+return uniformData;
+};
+const createVolumeUniformData = (item: VolumePassItem): Float32Array => {
+const center = getMatrixTranslation(item.worldMatrix);
+const [scaleX, scaleY, scaleZ] = getMatrixScale(item.worldMatrix);
+const halfExtent = [
+Math.max(scaleX * 0.5, 0.001),
+Math.max(scaleY * 0.5, 0.001),
+Math.max(scaleZ * 0.5, 0.001),
+Comment thread
+disjukr marked this conversation as resolved.
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+] as const;
+return Float32Array.from([
+center[0],
+center[1],
+center[2],
+0,
+halfExtent[0],
+halfExtent[1],
+halfExtent[2],
+0,
+]);
+};
+const createMeshTransformUniformData = (worldMatrix: readonly number[]): Float32Array =>
+Float32Array.from(worldMatrix.slice(0, 16));
+Expand Down
+Expand Up
+@@ -707,6 +796,65 @@ export const renderSdfRaymarchPass = (
+return 1;
+};
+export const renderVolumeRaymarchPass = (
+context: GpuRenderExecutionContext,
+encoder: GPUCommandEncoder,
+binding: RenderContextBinding,
+residency: RuntimeResidency,
+evaluatedScene: EvaluatedScene,
+): number => {
+const items = extractVolumePassItems(evaluatedScene, residency);
+if (items.length === 0) {
+return 0;
+}
+const pipeline = ensureVolumeRaymarchPipeline(context, residency, binding.target.format);
+const pass = encoder.beginRenderPass({
+colorAttachments: [{
+view: acquireColorAttachmentView(binding),
+loadOp: 'load',
+storeOp: 'store',
+}],
+});
+pass.setPipeline(pipeline);
+for (const item of items) {
+const uniformData = createVolumeUniformData(item);
+const uniformBuffer = context.device.createBuffer({
+label: `${item.nodeId}:volume-raymarch-uniforms`,
+size: uniformData.byteLength,
+usage: uniformUsage | bufferCopyDstUsage,
+});
+context.queue.writeBuffer(uniformBuffer, 0, toBufferSource(uniformData));
+const bindGroup = context.device.createBindGroup({
+layout: pipeline.getBindGroupLayout(0),
+entries: [
+{
+binding: 0,
+resource: {
+buffer: uniformBuffer,
+},
+},
+{
+binding: 1,
+resource: item.residency.view,
+},
+Comment thread
+Comment on lines
++900
+to
++902
+chatgpt-codex-connector
+Bot
+Mar 17, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Guard unsupported volume formats before binding raymarch textures
+This pass binds item.residency.view/sampler unconditionally, but the new shader contract is fixed to texture_3d<f32> (packages/renderer/src/shaders/built_in_volume_raymarch.wgsl) while volume residency accepts any GPUTextureFormat via VolumeAsset.pixelFormat (packages/gpu/src/residency.ts). Scenes with non-float or unfilterable formats (for example rgba8uint or r32float) now pass capability preflight (volume: supported) and then fail at runtime with WebGPU bind-group validation errors when this path executes, so the renderer should reject or gate incompatible formats before encoding this bind group.
+Useful? React with 👍 / 👎.
+{
+binding: 2,
+resource: item.residency.sampler,
+},
+],
+});
+pass.setBindGroup(0, bindGroup);
+pass.draw(3, 1, 0, 0);
+}
+pass.end();
+return items.length;
+};
+const createDefaultMaterial = (): Material => ({
+id: 'built-in:default-unlit-material',
+kind: 'unlit',
+Expand Down
+Expand Up
+@@ -839,6 +987,7 @@ export const renderForwardFrame = (
+pass.end();
+drawCount += renderSdfRaymarchPass(context, encoder, binding, residency, evaluatedScene);
+drawCount += renderVolumeRaymarchPass(context, encoder, binding, residency, evaluatedScene);
+const commandBuffer = encoder.finish();
+context.queue.submit([commandBuffer]);
+Expand Down
+78 changes: 78 additions & 0 deletions
+78
+packages/renderer/src/shaders/built_in_volume_raymarch.wgsl
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -0,0 +1,78 @@
+struct VolumeUniforms {
+center: vec4<f32>,
+halfExtent: vec4<f32>,
+};
+struct VsOut {
+@builtin(position) position: vec4<f32>,
+@location(0) uv: vec2<f32>,
+};
+@group(0) @binding(0) var<uniform> volume: VolumeUniforms;
+@group(0) @binding(1) var volumeTexture: texture_3d<f32>;
+@group(0) @binding(2) var volumeSampler: sampler;
+@vertex
+fn vsMain(@builtin(vertex_index) vertexIndex: u32) -> VsOut {
+var positions = array<vec2<f32>, 3>(
+vec2<f32>(-1.0, -3.0),
+vec2<f32>(-1.0, 1.0),
+vec2<f32>(3.0, 1.0),
+);
+let position = positions[vertexIndex];
+var out: VsOut;
+out.position = vec4<f32>(position, 0.0, 1.0);
+out.uv = position;
+return out;
+}
+fn intersectBox(
+rayOrigin: vec3<f32>,
+rayDirection: vec3<f32>,
+boxMin: vec3<f32>,
+boxMax: vec3<f32>,
+) -> vec2<f32> {
+let inverseDirection = 1.0 / rayDirection;
+let t0 = (boxMin - rayOrigin) * inverseDirection;
+let t1 = (boxMax - rayOrigin) * inverseDirection;
+let tMin = min(t0, t1);
+let tMax = max(t0, t1);
+let enter = max(max(tMin.x, tMin.y), max(tMin.z, 0.0));
+let exit = min(tMax.x, min(tMax.y, tMax.z));
+return vec2<f32>(enter, exit);
+}
+@fragment
+fn fsMain(in: VsOut) -> @location(0) vec4<f32> {
+let cameraOrigin = vec3<f32>(0.0, 0.0, 2.5);
+let rayDirection = normalize(vec3<f32>(in.uv.x, -in.uv.y, -1.75));
+let boxMin = volume.center.xyz - volume.halfExtent.xyz;
+let boxMax = volume.center.xyz + volume.halfExtent.xyz;
+let hit = intersectBox(cameraOrigin, rayDirection, boxMin, boxMax);
+if (hit.x >= hit.y) {
+return vec4<f32>(0.0);
+}
+var accumulated = vec4<f32>(0.0);
+let steps = 24.0;
+let stepSize = (hit.y - hit.x) / steps;
+for (var step: u32 = 0u; step < 24u; step = step + 1u) {
+let travel = hit.x + (stepSize * (f32(step) + 0.5));
+let point = cameraOrigin + (rayDirection * travel);
+let uvw = ((point - boxMin) / (boxMax - boxMin));
+let density = textureSampleLevel(volumeTexture, volumeSampler, uvw, 0.0).r;
+let opacity = density * 0.2;
+let color = vec3<f32>(density * 0.35, density * 0.75, density);
+accumulated.rgb = accumulated.rgb + ((1.0 - accumulated.a) * color * opacity);
+accumulated.a = accumulated.a + ((1.0 - accumulated.a) * opacity);
+if (accumulated.a > 0.98) {
+break;
+}
+}
+return accumulated;
+}
+49 changes: 49 additions & 0 deletions
+49
+tests/forward_render_test.ts
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -281,6 +281,55 @@ Deno.test('renderForwardFrame encodes a dedicated sdf raymarch pass for supporte
+);
+});
+Deno.test('renderForwardFrame encodes a dedicated volume raymarch pass for volume nodes with residency', () => {
+const mocks = createRenderMocks();
+const runtimeResidency = createRuntimeResidency();
+let scene = createSceneIr('scene');
+scene = {
+...scene,
+volumePrimitives: [{
+id: 'volume-0',
+assetId: 'volume-asset-0',
+dimensions: { x: 4, y: 4, z: 4 },
+format: 'density:r8unorm',
+}],
+};
+scene = appendNode(scene, createNode('volume-node', { volumeId: 'volume-0' }));
+runtimeResidency.volumes.set('volume-0', {
+volumeId: 'volume-0',
+texture: {} as GPUTexture,
+view: { textureId: 0 } as unknown as GPUTextureView,
+sampler: { id: 0 } as unknown as GPUSampler,
+width: 4,
+height: 4,
+depth: 4,
+format: 'r8unorm',
+});
+const binding = createOffscreenContext({
+device: mocks.device as unknown as GPUDevice,
+target: createHeadlessTarget(64, 64),
+});
+const result = renderForwardFrame(
+mocks as unknown as GpuRenderExecutionContext,
+binding,
+runtimeResidency,
+evaluateScene(scene, { timeMs: 0 }),
+);
+assertEquals(result.drawCount, 1);
+assertEquals(result.submittedCommandBufferCount, 1);
+assertEquals(mocks.renderPassCount.current, 2);
+assertEquals(
+mocks.passActions.filter((action) => action.type === 'draw').length,
+1,
+);
+assertEquals(mocks.bindGroupEntries.length, 1);
+assertEquals(mocks.bindGroupEntries[0].map((entry) => entry.binding), [0, 1, 2]);
+});
+Deno.test('material registry resolves built-in and custom WGSL programs', () => {
+const registry = createMaterialRegistry();
+const customProgram = {
+Expand Down
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

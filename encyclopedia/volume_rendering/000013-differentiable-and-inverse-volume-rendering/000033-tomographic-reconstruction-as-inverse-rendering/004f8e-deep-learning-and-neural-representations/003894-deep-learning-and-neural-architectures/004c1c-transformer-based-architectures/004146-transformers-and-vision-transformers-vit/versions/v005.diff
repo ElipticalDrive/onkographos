@@ -1,0 +1,218 @@
+--- v004.md
++++ v005.md
+@@ -3,165 +3,73 @@
+ 
+ ## Overview
+-Transformers and Vision Transformers (ViT) are neural architectures that compute pairwise attention over input tokens to capture long-range dependencies that convolutions miss [S1, unofficial]. In volume rendering, they are applied to super-resolution and denoising, where their ability to attend across the full spatial extent of a subvolume helps recover large-scale structures that local convolutions miss [S1, unofficial]. Unlike convolutional operations that rely on local receptive fields, transformers compute pairwise interactions between all tokens, allowing the model to capture global structural context [S1, unofficial][S5, unofficial].
++Transformers compute pairwise attention over input tokens to capture long-range dependencies that local convolutions miss [S1, unofficial]. The Vision Transformer (ViT) adapts this architecture for image-like data by treating fixed-size patches as tokens [S1, unofficial]. In volume rendering, they are used for super-resolution and denoising, where attending across the full spatial extent of a subvolume helps recover large-scale structures [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A sequence of tokens representing image patches or volume features.
+-- Output: A sequence of transformed tokens with aggregated global context.
++*   Input: A sequence of $N$ tokens, where each token is a vector of dimension $d$. For ViT, tokens are derived by splitting an input image (or volume slice) into fixed-size patches and projecting them.
++*   Output: A sequence of $N$ transformed tokens of dimension $d$.
+ 
+ **Data Structures:**
+-- Tokens: Vectors of dimension $d$.
+-- Attention Weights: Matrix of shape $(N, N)$ where $N$ is the number of tokens.
++*   Tokens: A matrix $X \in \mathbb{R}^{N \times d}$.
++*   Learnable Parameters: Linear projection matrices $W_Q, W_K, W_V \in \mathbb{R}^{d \times d_k}$ (where $d_k$ is the key dimension, often $d_k = d$ or $d/h$ for multi-head attention), and a final output projection $W_O \in \mathbb{R}^{d \times d}$.
++*   Positional Embeddings: A learnable or fixed matrix $E_{pos} \in \mathbb{R}^{N \times d}$.
+ 
+ **Steps:**
+-1. **Tokenization:** Discretize input data (images, projections, or rays) into fixed-size patches [S1, unofficial][S5, unofficial].
+-2. **Linear Projection:** Project each patch into a token vector of dimension $d$ [S1, unofficial].
+-3. **Positional Encoding:** Add positional information to tokens to preserve spatial order [S1, unofficial][S5, unofficial].
+-4. **Self-Attention:** Compute attention weights using Query ($Q$), Key ($K$), and Value ($V$) projections:
+-   $$ \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V $$
+-   where $Q = XW_Q$, $K = XW_K$, $V = XW_V$ [S1, unofficial][S5, unofficial].
+-5. **Output Projection:** Combine attended values and project back to original dimension [S1, unofficial].
++1.  **Tokenization (ViT specific):** Split the input image of size $H \times W$ into non-overlapping patches of size $P \times P$. The number of patches is $N = (H/P) \times (W/P)$. Flatten each patch and project it to dimension $d$ using a linear layer.
++2.  **Add Positional Information:** Add positional embeddings to the patch tokens to preserve spatial order, as attention is permutation-invariant.
++    $$ X_{input} = X_{patches} + E_{pos} $$
++3.  **Linear Projections:** Compute Query, Key, and Value matrices for each token.
++    $$ Q = X_{input} W_Q, \quad K = X_{input} W_K, \quad V = X_{input} W_V $$
++4.  **Scaled Dot-Product Attention:** Compute attention scores and apply softmax.
++    $$ \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V $$
++    *   $QK^T$ computes pairwise similarity between all tokens.
++    *   $\sqrt{d_k}$ scales the dot products to prevent vanishing gradients in softmax.
++    *   Softmax normalizes scores to sum to 1.
++    *   The result is a weighted sum of Values.
++5.  **Multi-Head Attention (Optional but standard):** Repeat steps 3-4 with $h$ heads, where each head uses different projections to dimensions $d_k = d/h$. Concatenate the outputs and project back to $d$ using $W_O$.
++6.  **Residual Connection and Layer Normalization:** Add the input to the attention output and apply Layer Normalization.
++    $$ X_{out} = \text{LayerNorm}(X_{input} + \text{Attention}(Q, K, V)) $$
++7.  **Feed-Forward Network (FFN):** Apply a position-wise fully connected network to each token.
++    $$ \text{FFN}(x) = W_2 \cdot \text{GELU}(W_1 x + b_1) + b_2 $$
++    where $W_1 \in \mathbb{R}^{d_{ff} \times d}$ and $W_2 \in \mathbb{R}^{d \times d_{ff}}$.
++8.  **Residual Connection and Layer Normalization:**
++    $$ X_{final} = \text{LayerNorm}(X_{out} + \text{FFN}(X_{out})) $$
+ 
+ **Parameters:**
+-- Patch size: Typically $16 \times 16$ or $32 \times 32$ for images [S1, unofficial].
+-- Dimension $d$: Commonly 768, 1024, or 1536 [S1, unofficial].
+-- Number of heads: 12, 16, or 24 [S1, unofficial].
++*   $d$: Embedding dimension (e.g., 768, 1024).
++*   $h$: Number of attention heads.
++*   $d_k$: Key dimension ($d/h$).
++*   $P$: Patch size (e.g., 16, 32).
++*   $N$: Number of tokens ($N = HW/P^2$).
+ 
+ **Edge Cases and Pitfalls:**
+-- Precision: Use mixed precision for large batches to avoid memory overflow [G].
+-- Boundaries: Handle edge patches by padding or cropping [G].
+-- Degenerate Input: Ensure no zero-variance patches to avoid division by zero in softmax [G].
+-
+-**Pseudocode:**
+-```python
+-import torch
+-import torch.nn as nn
+-import math
+-
+-class ViT(nn.Module):
+-    def __init__(self, img_size=224, patch_size=16, in_channels=3, dim=768, num_heads=12, mlp_ratio=4.0, qkv_bias=True, drop_rate=0.0):
+-        super().__init__()
+-        self.img_size = img_size
+-        self.patch_size = patch_size
+-        self.num_patches = (img_size // patch_size) ** 2
+-        self.dim = dim
+-        
+-        # Patch embedding
+-        self.patch_embed = nn.Conv2d(in_channels, dim, kernel_size=patch_size, stride=patch_size)
+-        
+-        # Class token and positional embeddings
+-        self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
+-        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches + 1, dim))
+-        
+-        # Transformer blocks
+-        self.blocks = nn.ModuleList([
+-            TransformerBlock(dim, num_heads, mlp_ratio, qkv_bias, drop_rate)
+-            for _ in range(12)  # Standard ViT-B/16 uses 12 layers
+-        ])
+-        
+-        self.norm = nn.LayerNorm(dim)
+-        
+-        # Initialize weights
+-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+-        nn.init.trunc_normal_(self.cls_token, std=0.02)
+-        
+-    def forward(self, x):
+-        # x: (B, C, H, W)
+-        B = x.shape[0]
+-        
+-        # Patch embedding
+-        x = self.patch_embed(x)  # (B, dim, H/P, W/P)
+-        x = x.flatten(2).transpose(1, 2)  # (B, num_patches, dim)
+-        
+-        # Add class token
+-        cls_tokens = self.cls_token.expand(B, -1, -1)
+-        x = torch.cat((cls_tokens, x), dim=1)  # (B, num_patches + 1, dim)
+-        
+-        # Add positional embedding
+-        x = x + self.pos_embed
+-        
+-        # Transformer blocks
+-        for block in self.blocks:
+-            x = block(x)
+-            
+-        x = self.norm(x)
+-        return x[:, 0]  # Return class token representation
+-
+-class TransformerBlock(nn.Module):
+-    def __init__(self, dim, num_heads, mlp_ratio=4.0, qkv_bias=True, drop_rate=0.0):
+-        super().__init__()
+-        self.norm1 = nn.LayerNorm(dim)
+-        self.attn = Attention(dim, num_heads, qkv_bias, drop_rate)
+-        self.norm2 = nn.LayerNorm(dim)
+-        mlp_hidden_dim = int(dim * mlp_ratio)
+-        self.mlp = Mlp(dim, mlp_hidden_dim, drop_rate=drop_rate)
+-        
+-    def forward(self, x):
+-        x = x + self.attn(self.norm1(x))
+-        x = x + self.mlp(self.norm2(x))
+-        return x
+-
+-class Attention(nn.Module):
+-    def __init__(self, dim, num_heads=8, qkv_bias=True, drop_rate=0.0):
+-        super().__init__()
+-        self.num_heads = num_heads
+-        head_dim = dim // num_heads
+-        self.scale = head_dim ** -0.5
+-        
+-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+-        self.proj = nn.Linear(dim, dim)
+-        self.attn_drop = nn.Dropout(drop_rate)
+-        self.proj_drop = nn.Dropout(drop_rate)
+-        
+-    def forward(self, x):
+-        B, N, C = x.shape
+-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+-        q, k, v = qkv[0], qkv[1], qkv[2]  # (B, num_heads, N, head_dim)
+-        
+-        attn = (q @ k.transpose(-2, -1)) * self.scale
+-        attn = attn.softmax(dim=-1)
+-        attn = self.attn_drop(attn)
+-        
+-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+-        x = self.proj(x)
+-        x = self.proj_drop(x)
+-        return x
+-
+-class Mlp(nn.Module):
+-    def __init__(self, in_features, hidden_features=None, out_features=None, drop_rate=0.0):
+-        super().__init__()
+-        out_features = out_features or in_features
+-        hidden_features = hidden_features or in_features
+-        self.fc1 = nn.Linear(in_features, hidden_features)
+-        self.act = nn.GELU()
+-        self.fc2 = nn.Linear(hidden_features, out_features)
+-        self.drop = nn.Dropout(drop_rate)
+-        
+-    def forward(self, x):
+-        x = self.fc1(x)
+-        x = self.act(x)
+-        x = self.drop(x)
+-        x = self.fc2(x)
+-        x = self.drop(x)
+-        return x
+-```
++*   **Sequence Length:** $N$ grows quadratically with image resolution. For high-resolution volumes, this leads to high memory usage.
++*   **Positional Encoding:** Without positional embeddings, the model cannot distinguish spatial locations.
++*   **Patch Boundary Artifacts:** Fixed patch splitting may introduce discontinuities at patch boundaries if not handled by the projection layer.
+ 
+ ## Subtopics
+ 
+ ### [Fusion ViT](13080-fusion-vit.md)
+-Fusion ViT is a neural module designed to fuse multi-view features by performing all-to-all self-attention over encoded image patches or rendered feature vectors from multiple input views. It solves the problem of multi-view inconsistency and incomplete context in neural rendering and tomographic reconstruction by providing each view's features with full spatial and semantic context from all other views. It distinguishes itself from standard fusion methods by leveraging the Transformer's ability to model long-range dependencies across views, either at the patch level for global reconstruction or at the pixel level for lightweight synthesis.
++Fuses multi-view features via all-to-all self-attention to resolve inconsistencies.
++
++### [DuDoTrans](1409-dudotrans.md)
++Dual-domain Transformer for tomographic reconstruction.
++
++### [Generalizable Radiance Fields via Transformer Attention](8996-generalizable-radiance-fields-via-transformer-attention.md)
++Uses transformer attention for generalizable neural radiance fields.
++
++### [Transformer-based Tomographic Reconstruction](11047-transformer-based-tomographic-reconstruction.md)
++Applies transformers directly to tomographic reconstruction tasks.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N^2 \cdot d)$ per layer, where $N$ is the number of tokens and $d$ is the dimension. This is quadratic in sequence length, making it expensive for high-resolution volumes.
+-- **Memory Complexity:** $O(N^2 \cdot d)$ for attention matrix storage.
+-- **Measured Performance:** Transformers achieve state-of-the-art results in volume super-resolution and denoising, outperforming CNNs in recovering large-scale structures [S1, unofficial].
+-- **Scaling:** Performance scales with model size and data, but inference time grows quadratically with resolution.
+-- **Strengths:** Captures global context, handles long-range dependencies, robust to noise.
+-- **Limitations:** High computational cost, memory intensive, requires large datasets for training.
+-- **When to Use:** When global context is critical, such as in volume super-resolution or denoising [S1, unofficial].
+-- **When Not to Use:** For real-time applications or resource-constrained environments due to high computational demands.
++*   **Time Complexity:** $O(N^2 \cdot d)$ per layer due to pairwise attention. For ViT, $N = HW/P^2$, so complexity is $O((HW/P^2)^2 \cdot d)$.
++*   **Memory Complexity:** $O(N^2 \cdot d)$ to store attention matrices.
++*   **Strengths:** Captures global context; effective for recovering large-scale structures in volume super-resolution and denoising [S1, unofficial].
++*   **Limitations:** High computational cost for large $N$; sensitive to positional encoding choices.
++*   **When to use:** When long-range dependencies are critical (e.g., volume SR, denoising) and computational resources allow for quadratic attention [S1, unofficial].
++*   **When not to use:** For very high-resolution data where $N$ is extremely large, unless using efficient attention variants.
+ 
+ ## Background
+-The Transformer architecture was introduced by Vaswani et al. in 2017 for natural language processing [S1, unofficial]. The Vision Transformer (ViT) adapted this for images by treating fixed-size patches as tokens, proposed by Dosovitskiy et al. in 2020 [S1, unofficial]. Transformers have since been applied to volume rendering for super-resolution and denoising, leveraging their ability to attend across the full spatial extent of a subvolume [S1, unofficial].
++The Transformer was introduced by Vaswani et al. [146] for sequence modeling. The Vision Transformer (ViT) adapted this for images by Dosovitskiy et al. [25]. In scientific volume visualization, Transformers have been applied to super-resolution and denoising to leverage their ability to attend across the full spatial extent of subvolumes [S1, unofficial].
+ 
+ ## Sources

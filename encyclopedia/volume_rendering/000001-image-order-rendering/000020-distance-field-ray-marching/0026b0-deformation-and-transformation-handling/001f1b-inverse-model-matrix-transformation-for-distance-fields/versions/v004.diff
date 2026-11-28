@@ -1,0 +1,113 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method enables the application of rigid transformations (rotation, translation, and uniform scaling) to Signed Distance Field (SDF) primitives during ray marching by evaluating the base distance function in the primitive's local coordinate space rather than the world space [S1, S2, unofficial]. It solves the problem of animating or positioning individual scene objects without modifying the underlying geometric definitions or voxel grids [S1, S2, unofficial]. Unlike methods that transform the geometry data itself, this approach transforms the query point using the inverse of the object's model matrix, ensuring the distance metric remains valid for Euclidean distance fields [S2, unofficial].
++This method applies rigid transformations (rotation and translation) to Signed Distance Field (SDF) primitives during ray marching by evaluating the base distance function in the primitive's local coordinate space rather than world space [S1, S2, unofficial]. It enables animating or positioning individual scene objects without modifying the underlying geometric definitions or voxel grids [S1, S2, unofficial]. Unlike approaches that modify geometry data, this technique transforms the query point using the inverse of the object's model matrix [S2, unofficial].
+ 
+ ## How it works
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-*   **Inverse Model Matrix ($M^{-1}$):** A $4 \times 4$ homogeneous transformation matrix. In implementation, this is typically passed as a uniform variable to the shader or kernel [S2, unofficial]. The matrix encodes rotation, translation, and potentially uniform scaling [S2, unofficial].
++*   **Inverse Model Matrix ($M^{-1}$):** A $4 \times 4$ homogeneous transformation matrix. In implementation, this is typically passed as a uniform variable to the shader or kernel [S2, unofficial]. The matrix encodes rotation, translation, and uniform scaling [S2, unofficial].
+ 
+ **Steps:**
+@@ -24,50 +24,37 @@
+ 5.  **Handle Scaling:** If the model matrix includes uniform scaling by factor $s$, the distance value must be scaled to preserve the Euclidean distance property [S1, unofficial]:
+     $$ d_{final} = s \cdot d $$
+-    If non-uniform scaling is used, the Euclidean distance property is distorted unless the metric is adjusted, which is generally avoided in standard SDF ray marching [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Host-side (e.g., C# / Python)
+-def compute_inverse_model_matrix(translation, rotation, scale):
+-    """
+-    Constructs the model matrix M and returns its inverse.
+-    Assumes uniform scale for valid SDF distance preservation.
+-    """
+-    # Construct M = T * R * S
+-    # Note: Order of operations depends on convention (pre/post-multiply).
+-    # Standard Unity/OpenGL: M = Translation * Rotation * Scale
+-    M = translate(translation) @ rotate(rotation) @ scale_matrix(scale)
+-    
+-    # Compute inverse
+-    M_inv = inverse(M)
+-    return M_inv
++import math
+ 
+-# Shader-side (e.g., GLSL / HLSL / Shadertoy)
+-uniform float4x4 _MatTorus_InvModel; # Passed from host
++def transform_point(p, inv_model_matrix):
++    """Transforms a world-space point p using a 4x4 inverse model matrix."""
++    x, y, z = p
++    # Homogeneous multiplication: q = M_inv * [x, y, z, 1]^T
++    qx = inv_model_matrix[0][0]*x + inv_model_matrix[0][1]*y + inv_model_matrix[0][2]*z + inv_model_matrix[0][3]
++    qy = inv_model_matrix[1][0]*x + inv_model_matrix[1][1]*y + inv_model_matrix[1][2]*z + inv_model_matrix[1][3]
++    qz = inv_model_matrix[2][0]*x + inv_model_matrix[2][1]*y + inv_model_matrix[2][2]*z + inv_model_matrix[2][3]
++    return (qx, qy, qz)
+ 
+-float sdTorus(vec3 p, float2 torus_params) {
+-    // Base SDF implementation for a torus
+-    vec2 q = vec2(length(p.xz) - torus_params.x, p.y);
+-    return length(q) - torus_params.y;
+-}
++def sphere_sdf(p):
++    """Base SDF for a unit sphere at the origin."""
++    return math.sqrt(p[0]**2 + p[1]**2 + p[2]**2) - 1.0
+ 
+-float map(float3 p) {
+-    // Step 3: Transform point to local space
+-    // Homogeneous coordinate w=1 for translation/rotation
+-    float4 q_homogeneous = mul(_MatTorus_InvModel, float4(p, 1.0));
+-    vec3 q_local = q_homogeneous.xyz;
+-    
+-    // Step 4: Evaluate base SDF
+-    float dist = sdTorus(q_local, float2(1.0, 0.2));
+-    
+-    // Step 5: Scale distance if uniform scale was applied in M
+-    // Note: If M included scale 's', M_inv includes 1/s.
+-    // The distance in local space is correct, but must be scaled back to world space metric.
+-    // However, if M_inv is pre-computed, the scaling factor 's' must be known separately
+-    // or extracted from M_inv to scale the final distance value.
+-    // For uniform scale s, d_world = s * d_local.
+-    float scale_factor = ...; // Extracted from original M or passed separately
+-    return dist * scale_factor;
+-}
++def ray_march(origin, direction, inv_model_matrix, scale_factor=1.0, max_steps=100, max_dist=100.0, epsilon=1e-4):
++    """Standard SDF ray marcher using the inverse model matrix transformation."""
++    t = 0.0
++    for _ in range(max_steps):
++        p = (origin[0] + direction[0]*t, origin[1] + direction[1]*t, origin[2] + direction[2]*t)
++        q = transform_point(p, inv_model_matrix)
++        dist = sphere_sdf(q)
++        dist *= scale_factor
++        if abs(dist) < epsilon:
++            return t
++        step = max(dist, epsilon)
++        t += step
++        if t > max_dist:
++            return float('inf')
++    return float('inf')
+ ```
+ 
+@@ -76,7 +63,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Non-Uniform Scaling:** Applying non-uniform scaling distorts the distance field, breaking the Euclidean distance property. The resulting field is no longer a true SDF, leading to incorrect ray marching steps [S1, unofficial].
+-*   **Precision:** Computing the inverse matrix on the host side is preferred for performance and precision stability compared to inverting in the shader per-fragment [S2, unofficial].
+-*   **Homogeneous Coordinates:** Ensure the point is treated as a position (w=1) when multiplying by the transformation matrix, not a direction (w=0), to correctly apply translation [S2, unofficial].
++*   **Homogeneous Coordinates:** Ensure the point is treated as a position ($w=1$) when multiplying by the transformation matrix, not a direction ($w=0$), to correctly apply translation [S2, unofficial].
++*   **Non-Uniform Scaling:** Non-uniform scaling distorts the distance field metric and is generally avoided in standard SDF ray marching [G].
+ 
+ ## Subtopics
+@@ -100,7 +86,6 @@
+ *   **Time Complexity:** $O(1)$ per sample point evaluation, as it involves a single matrix-vector multiplication and one base SDF call [S1, S2, unofficial].
+ *   **Memory Complexity:** $O(1)$ additional memory for the inverse matrix uniform [S2, unofficial].
+-*   **Performance:** Highly efficient for rigid transformations. The cost is dominated by the base SDF evaluation and matrix multiplication, which are negligible compared to the ray marching loop [S1, S2, unofficial].
+ *   **Strengths:** Simple to implement; allows independent animation of scene parts; preserves the static nature of base SDF definitions [S1, S2, unofficial].
+-*   **Limitations:** Only supports rigid transformations (rotation, translation) and uniform scaling effectively. Non-rigid deformations require different approaches (e.g., [Per-fragment Deformation Evaluation](9846-per-fragment-deformation-evaluation.md)) [S1, S2, unofficial].
++*   **Limitations:** Only supports rigid transformations (rotation, translation) and uniform scaling effectively [S1, S2, unofficial].
+ *   **When to use:** Ideal for animating rigid objects in SDF scenes [S1, S2, unofficial].
+ *   **When not to use:** For non-rigid deformations or non-uniform scaling where metric preservation is critical [S1, unofficial].

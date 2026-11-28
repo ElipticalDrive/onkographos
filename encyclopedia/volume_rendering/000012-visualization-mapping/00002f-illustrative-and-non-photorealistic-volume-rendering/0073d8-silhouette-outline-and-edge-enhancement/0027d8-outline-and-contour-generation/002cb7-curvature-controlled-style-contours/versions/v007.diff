@@ -1,0 +1,257 @@
+--- v006.md
++++ v007.md
+@@ -4,176 +4,113 @@
+ 
+ ## Overview
+-Curvature-Controlled Style Contours is a non-photorealistic volume rendering technique that generates outline contours with consistent visual thickness by regulating the detection threshold based on the normal curvature along the view direction [S1]. Unlike standard dot-product contours, which produce uncontrolled thickness variations (too thick on flat surfaces, too thin on fine structures), this method ensures that contours remain perceptually uniform across varying surface geometries [S1]. It builds on [Outline and Contour Generation](4137-outline-and-contour-generation.md) by integrating curvature-aware edge detection with style transfer functions for color mapping [G].
++Curvature-Controlled Style Contours is a volume rendering technique that regulates contour thickness based on the normal curvature along the view direction to prevent the uncontrolled variation in thickness inherent in standard dot-product silhouette methods [S1]. While standard methods ($v \cdot n \approx 0$) produce contours that are too thick on flat surfaces and too thin on fine structures, this method uses curvature to maintain consistent visual weight across varying surface geometries [S1]. It builds on [Outline and Contour Generation](4137-outline-and-contour-generation.md) by integrating curvature-aware edge detection with style transfer functions.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volumetric dataset, view vector $\mathbf{v}$, user-defined thickness parameter $T$, and a style transfer function (e.g., lit sphere map) [S1].
+-*   **Output:** Rendered volume image with stylized contours [S1].
++- Input: Volumetric dataset, view vector $v$, user-defined thickness parameter $T$.
++- Output: Rendered image with stylized contours whose thickness is controlled by local curvature.
+ 
+ **Data Structures:**
+-*   **Volume Data:** 3D texture or grid storing scalar values and normals $\mathbf{n}$ [S1].
+-*   **Ray Casting State:** For each ray, maintain the previous sample's normal $\mathbf{n}_{prev}$ and position to estimate curvature [G].
++- Sample point: Position, normal vector $n$, previous normal vector $n_{prev}$ (from the previous sample along the ray).
++- Geometry: No pre-computed Hessian or geometry tensor textures are required [S1].
+ 
+ **Approximation of Normal Curvature ($\kappa_v$):**
+-Exact computation of $\kappa_v$ via the geometry tensor (derived from the Hessian matrix) is computationally prohibitive for fragment programs and requires significant pre-computation storage [S1]. Instead, $\kappa_v$ is approximated by the rate of change of the normal direction along the viewing ray [S1]:
+-$$ \kappa_v \approx \frac{\theta}{\Delta s} $$
+-where $\theta$ is the angle between the normal at the current sample point $\mathbf{n}_{curr}$ and the normal at the previous sample point $\mathbf{n}_{prev}$ along the viewing ray, and $\Delta s$ is the step size between samples [S1]. This approximation is sufficient given the finite resolution of volumetric data and introduces negligible additional cost since normals are already computed per sample [S1].
++Exact curvature requires the geometry tensor derived from the Hessian matrix, which is too expensive for fragment programs and requires two additional 3D textures for pre-computation [S1]. Instead, $\kappa_v$ is approximated using the rate of change of the normal along the viewing ray [S1].
++1. During ray casting, store the normal $n_{prev}$ at the previous sample point.
++2. Calculate the angle between the current normal $n$ and $n_{prev}$.
++3. Divide this angle by the step size $\Delta s$ between sample points:
++   $$ \kappa_v \approx \frac{\angle(n, n_{prev})}{\Delta s} $$
++   This approximation is coarse because the sampling occurs along the ray, not strictly along the iso-surface, but it is sufficient for finite-resolution volumes and introduces negligible computational cost [S1].
+ 
+ **Contour Detection Condition:**
+-A sample is classified as being on a contour if the following condition is met [S1]:
+-$$ |\mathbf{n} \cdot \mathbf{v}| \le \sqrt{T \kappa_v (2 - T \kappa_v)} $$
+-where:
+-*   $\mathbf{n}$ is the surface normal at the sample point [S1].
+-*   $\mathbf{v}$ is the view vector [S1].
+-*   $T$ is the user-defined thickness value [S1].
+-*   $\kappa_v$ is the approximated normal curvature along the view direction [S1].
++A sample is considered to be on a contour if the following condition is met [S1]:
++$$ |n \cdot v| \le \sqrt{T \kappa_v (2 - T \kappa_v)} $$
++Where:
++- $n$ is the surface normal at the current sample.
++- $v$ is the view vector.
++- $T$ is the user-defined thickness value.
++- $\kappa_v$ is the approximated normal curvature.
+ 
+-**Style Integration (Lit Sphere Map Adjustment):**
+-To allow contour color to vary based on style, the method adjusts the lookup coordinates for the style transfer function based on the curvature measure [S1]. If a sample falls below the contour threshold, the projected normal coordinates are pushed outwards along the radius of the sphere [S1].
+-
+-Let $r = |\mathbf{n}_{x,y}|$ be the length of the eye-space normal $\mathbf{n}$ projected onto the lit sphere map (the $x,y$ components) [S1]. The adjusted length $r'$ is calculated as [S1]:
+-$$ r' = \min(1, \delta r) $$
+-where the scaling factor $\delta$ is defined as [S1]:
+-$$ \delta = 1 - \min\left(1, \frac{\sqrt{T \kappa_v (2 - T \kappa_v)} - |\mathbf{n} \cdot \mathbf{v}|}{\sqrt{T \kappa_v (2 - T \kappa_v)}}\right) $$
+-The adjustment allows contour appearance to vary between different styles and based on normal direction while preserving the curvature-based thickness control [S1].
++**Style Integration (Lit Sphere Map):**
++To integrate contours with style transfer functions (e.g., lit sphere maps), the normal projection coordinates are adjusted based on the curvature measure [S1].
++1. Let $r = |n_{x,y}|$ be the length of the eye-space normal projected onto the lit sphere map.
++2. Calculate the adjustment factor $\delta$:
++   $$ \delta = 1 - \min\left(1, \frac{\sqrt{T \kappa_v (2 - T \kappa_v)} - |n \cdot v|}{\sqrt{T \kappa_v (2 - T \kappa_v)}}\right) $$
++3. Adjust the projected radius to $r'$:
++   $$ r' = \min(1, \delta r) $$
++   This pushes the coordinates outwards along the radius if the sample falls below the contour threshold, allowing the contour color to vary based on the normal direction and curvature [S1].
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-
+-def render_curvature_controlled_contours(volume, origin, direction, thickness_T, step_size, max_dist, style_map):
+-    """
+-    Renders volume with curvature-controlled style contours.
+-    Args:
+-        volume: 3D array supporting scalar and normal lookups.
+-        origin: Ray origin (x, y, z).
+-        direction: Ray direction (normalized).
+-        thickness_T: User-defined thickness parameter.
+-        step_size: Distance between ray casting samples.
+-        max_dist: Maximum ray length.
+-        style_map: Function taking (nx, ny) and returning (r, g, b).
+-    Returns:
+-        Image buffer (list of lists of [r, g, b, a]).
+-    """
+-    height, width = volume.dimensions
+-    image = [[[0.0, 0.0, 0.0, 0.0] for _ in range(width)] for _ in range(height)]
++def curvature_controlled_contour(ray_origin, ray_direction, volume, T):
++    # Initialize previous normal
++    n_prev = None
+     
+-    for y in range(height):
+-        for x in range(width):
+-            ray_color = [0.0, 0.0, 0.0, 0.0]
+-            alpha = 0.0
+-            prev_normal = None
+-            t = 0.0
++    # Ray casting loop
++    for sample in ray_cast(ray_origin, ray_direction, volume):
++        n = sample.normal
++        pos = sample.position
++        
++        # Calculate step size from previous position
++        if n_prev is not None:
++            dist = distance(pos, sample.previous_position)
++            # Approximate curvature: angle between normals divided by step size
++            # angle_between returns radians
++            kappa_v = angle_between(n, n_prev) / dist
++        else:
++            kappa_v = 0.0
+             
+-            while t < max_dist:
+-                sample_pos = (origin[0] + t * direction[0], 
+-                              origin[1] + t * direction[1], 
+-                              origin[2] + t * direction[2])
++        n_prev = n
++        
++        # Check contour condition
++        threshold = sqrt(T * kappa_v * (2 - T * kappa_v))
++        dot_product = abs(dot(n, ray_direction))
++        
++        is_contour = dot_product <= threshold
++        
++        if is_contour:
++            # Adjust lit sphere map coordinates for style transfer
++            r = length(n.xy) # Projected normal length
++            numerator = sqrt(T * kappa_v * (2 - T * kappa_v)) - dot_product
++            denominator = sqrt(T * kappa_v * (2 - T * kappa_v))
++            
++            # Avoid division by zero if threshold is 0
++            if denominator == 0:
++                delta = 1.0
++            else:
++                delta = 1.0 - min(1.0, numerator / denominator)
+                 
+-                if not volume.inside(sample_pos):
+-                    break
+-                
+-                scalar_val = volume.get_scalar(sample_pos)
+-                current_normal = volume.get_normal(sample_pos)
+-                
+-                # Approximate normal curvature kappa_v
+-                if prev_normal is not None:
+-                    dot_prod = max(-1.0, min(1.0, sum(p * c for p, c in zip(prev_normal, current_normal))))
+-                    angle = math.acos(dot_prod)
+-                    kappa_v = angle / step_size
+-                else:
+-                    kappa_v = 0.0
+-                
+-                # Check contour condition
+-                lhs = abs(sum(n * d for n, d in zip(current_normal, direction)))
+-                rhs_sq = thickness_T * kappa_v * (2 - thickness_T * kappa_v)
+-                
+-                is_contour = False
+-                if rhs_sq >= 0:
+-                    rhs = math.sqrt(rhs_sq)
+-                    if lhs <= rhs:
+-                        is_contour = True
+-                
+-                # Determine color and composite
+-                if is_contour:
+-                    nx, ny = current_normal[0], current_normal[1]
+-                    r = math.sqrt(nx*nx + ny*ny)
+-                    
+-                    if rhs > 0:
+-                        ratio = (rhs - lhs) / rhs
+-                        delta = 1.0 - min(1.0, ratio)
+-                    else:
+-                        delta = 1.0
+-                    
+-                    r_prime = min(1.0, delta * r)
+-                    # Reconstruct adjusted normal for style map lookup
+-                    if r > 0:
+-                        adj_nx = nx * (r_prime / r)
+-                        adj_ny = ny * (r_prime / r)
+-                    else:
+-                        adj_nx, adj_ny = 0.0, 0.0
+-                    
+-                    contour_color = style_map.lookup(adj_nx, adj_ny)
+-                    # Standard front-to-back compositing [G]
+-                    alpha_new = 1.0 - (1.0 - alpha) * 1.0
+-                    ray_color[0] = ray_color[0] * (1.0 - 1.0) + contour_color[0] * 1.0 * (1.0 - alpha)
+-                    ray_color[1] = ray_color[1] * (1.0 - 1.0) + contour_color[1] * 1.0 * (1.0 - alpha)
+-                    ray_color[2] = ray_color[2] * (1.0 - 1.0) + contour_color[2] * 1.0 * (1.0 - alpha)
+-                    alpha = alpha_new
+-                    break # Contours typically occlude behind them in this style
+-                else:
+-                    vol_color = volume.get_color(scalar_val)
+-                    vol_opacity = volume.get_opacity(scalar_val)
+-                    # Standard front-to-back compositing [G]
+-                    alpha_new = 1.0 - (1.0 - alpha) * (1.0 - vol_opacity)
+-                    ray_color[0] = ray_color[0] * (1.0 - vol_opacity) + vol_color[0] * vol_opacity * (1.0 - alpha)
+-                    ray_color[1] = ray_color[1] * (1.0 - vol_opacity) + vol_color[1] * vol_opacity * (1.0 - alpha)
+-                    ray_color[2] = ray_color[2] * (1.0 - vol_opacity) + vol_color[2] * vol_opacity * (1.0 - alpha)
+-                    alpha = alpha_new
+-                
+-                prev_normal = current_normal
+-                t += step_size
++            r_prime = min(1.0, delta * r)
+             
+-            image[y][x] = ray_color
++            # Use r_prime to lookup color in style transfer function
++            color = lookup_style(r_prime)
++        else:
++            color = lookup_style(r)
+             
+-    return image
++        accumulate_color(color)
+ ```
+ 
+ **Parameters:**
+-*   $T$: User-defined thickness value for the contours [S1].
++- $T$: User-defined thickness value for the contours [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The approximation of $\kappa_v$ using discrete steps is coarse but sufficient for finite-resolution volumes [S1].
+-*   **Boundary Conditions:** The first sample on a ray has no previous normal; $\kappa_v$ is set to $0.0$ [S1].
+-*   **Mathematical Validity:** The term under the square root, $T \kappa_v (2 - T \kappa_v)$, must be non-negative [S1]. If $T \kappa_v > 2$, the condition cannot be met, effectively disabling contours for extremely high curvature or large thickness values [S1].
++- If $\kappa_v$ is zero (flat surface), the threshold becomes zero, and the condition $|n \cdot v| \le 0$ implies only perfectly orthogonal normals are contours, which may result in no contours on flat regions if precision issues arise. However, the formula handles $T \kappa_v (2 - T \kappa_v)$; if $\kappa_v=0$, threshold is 0.
++- The approximation of $\kappa_v$ is not geometrically exact as it samples along the ray rather than the surface, but this is accepted as sufficient for the method's purpose [S1].
+ 
+ ## Subtopics
+ 
+ ### Curvature-Based Feature Contouring
+-A technique that uses transfer functions based on surface curvature to render feature contours with roughly constant image-space thickness [S2]. It is specifically applied to clarify the shape and position of individual bones in small animal imaging, such as mouse embryos [S2]. Unlike the general style transfer approach, it focuses on anatomical feature clarity and is often combined with opacity functions and depth cueing in a multi-dimensional transfer function [S2].
++A technique using transfer functions based on surface curvature to render feature contours with roughly constant image-space thickness, specifically applied to clarify the shape and position of individual bones in small animal imaging [S2]. It combines curvature-based opacity with depth cueing to enhance structural clarity [S2].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Time:** The approximation of $\kappa_v$ adds negligible computational cost compared to standard volume ray casting, as it only requires storing the previous normal and computing an angle [S1]. This allows for interactive performance, unlike exact curvature methods [S1].
+-*   **Memory:** No additional 3D textures are required for pre-computation (unlike the geometry tensor approach), making it memory-efficient [S1].
+-
+-**Measured Performance:**
+-*   The method enables interactive rendering speeds on standard hardware, as it avoids expensive Hessian matrix computations [S1].
+-*   It successfully renders complex structures like mouse embryo bones with clear feature separation [S2].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Provides constant visual thickness for contours regardless of surface flatness or fineness; computationally efficient; integrates well with style transfer functions [S1].
+-*   **Limitations:** The curvature approximation is not exact as it does not step along the iso-surface but along the viewing ray [S1]. It may produce artifacts if the step size is too large relative to the curvature changes [S1].
+-
+-**When to Use:**
+-*   Use when consistent contour thickness is critical for perceptual clarity, especially in volumes with mixed flat and fine structures [S1].
+-*   Use when interactive performance is required and exact curvature computation is too expensive [S1].
+-
+-**When Not to Use:**
+-*   Avoid if exact geometric curvature is required for scientific accuracy, as the approximation may deviate from true values [S1].
+-*   Not suitable if the volume resolution is extremely high and step sizes are very small, potentially leading to noisy curvature estimates [S1].
++- **Time Complexity:** Low overhead compared to exact curvature methods. The approximation requires only storing the previous normal and computing an angle, avoiding expensive Hessian calculations or additional texture lookups [S1].
++- **Memory Complexity:** Minimal additional memory (one previous normal per ray or tile). No pre-computed 3D textures for geometry tensors are needed [S1].
++- **Strengths:** Provides consistent contour thickness across varying surface curvatures, addressing the "too thick on flat, too thin on fine" problem of standard dot-product contours [S1]. Interactive performance is maintained [S1].
++- **Limitations:** The curvature approximation is coarse and not geometrically exact [S1]. It relies on the step size of the ray casting; varying step sizes may affect the consistency of $\kappa_v$ [S1].
++- **When to use:** When illustrative rendering requires consistent visual emphasis on edges regardless of local surface flatness or curvature, and interactive performance is required [S1].
++- **When not to use:** When exact geometric curvature is required for scientific measurement, or when pre-computed geometry tensors are already available and performance is not a constraint [S1].
+ 
+ ## Background
+-Curvature-Controlled Style Contours was proposed by Kindlmann et al. in 2003 [S1]. The method was introduced to address the limitations of standard dot-product contours in volume rendering, which suffer from uncontrolled thickness variations [S1]. It was further refined and implemented in the context of style transfer functions by Bruckner and Gröller in 2007 [S1]. The technique has been applied in scientific visualization, particularly in small animal imaging to clarify bone structures in embryos [S2].
++The method was proposed by Brückner and Gröller in 2007 as an improvement over the original curvature-controlled contours introduced by Kindlmann et al. in 2003 [S1]. Kindlmann et al. identified the thickness variation problem and proposed using the geometry tensor for exact curvature, but noted its high computational cost and memory requirements for volume rendering [S1]. Brückner and Gröller introduced the normal-angle approximation to make the method viable for direct volume rendering without pre-computation [S1]. The approach has been applied in scientific visualization, such as visualizing bone structures in small animal imaging [S2].
+ 
+ ## Sources

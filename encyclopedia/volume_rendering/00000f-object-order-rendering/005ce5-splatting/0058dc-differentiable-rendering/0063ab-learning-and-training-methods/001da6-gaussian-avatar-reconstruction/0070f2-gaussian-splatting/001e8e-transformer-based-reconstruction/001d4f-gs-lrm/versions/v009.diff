@@ -1,0 +1,148 @@
+--- v008.md
++++ v009.md
+@@ -1,46 +1,115 @@
+ # GS-LRM
+-Also called: Gaussian Large Reconstruction Model
++Also called: GS-LRM Transformer Architecture, Large Reconstruction Model for 3D Gaussian Splatting
+ ## Overview
+-GS-LRM is a feed-forward transformer-based method that reconstructs a 3D Gaussian Splatting (3DGS) representation from a small set of input images. It solves the problem of sparse-view 3D reconstruction by directly predicting Gaussian parameters from image tokens, bypassing iterative optimization. It differs from its siblings by using a transformer architecture to decode concatenated image and camera tokens into Gaussians, whereas [Flash3D](1481-flash3d.md) and [LRM](5959-large-reconstruction-model-lrm.md) typically target mesh or NeRF outputs, and [Reconstruction-based Generation](11811-reconstruction-based-generation.md) is a broader category.
++GS-LRM is a scalable large reconstruction model that predicts high-quality 3D Gaussian primitives from 2–4 posed sparse images in approximately 0.23 seconds on a single A100 GPU [S1]. It uses a transformer-based architecture to predict per-pixel Gaussians, enabling it to handle both object and scene captures with large variations in scale and complexity [S1]. It differs from its siblings by directly decoding concatenated image and Plücker ray tokens into Gaussian parameters via a feed-forward transformer, whereas [Flash3D](1481-flash3d.md) and [Large Reconstruction Model (LRM)](5959-large-reconstruction-model-lrm.md) typically target mesh or NeRF outputs, and [Reconstruction-based Generation](11811-reconstruction-based-generation.md) is a broader category [S1].
+ ## How it works
+-**Inputs:** A set of $N$ input images (typically $N=2$ to $4$) and their corresponding camera parameters (extrinsics and intrinsics).
+-**Outputs:** A set of 3D Gaussians defined by position, covariance, opacity, and spherical harmonics coefficients.
++**Inputs:** $N$ multi-view images $I_i \in \mathbb{R}^{H \times W \times 3}$ and their camera intrinsic and extrinsic parameters [S1].
++**Outputs:** A list of 3D Gaussians with position, RGB color, scale, rotation quaternion, and opacity, totaling $N \cdot H \cdot W$ Gaussians [S1].
+ 
+ **Data Structures:**
+-1.  **Image Tokens:** Each input image is processed through a vision encoder (e.g., ViT) to produce a sequence of feature tokens.
+-2.  **Camera Tokens:** Camera parameters are encoded into a fixed-size token embedding.
+-3.  **Concatenated Sequence:** Image tokens and camera tokens are concatenated along the sequence dimension to form a single input sequence for the transformer.
+-4.  **Transformer Block:** A standard transformer encoder processes the concatenated sequence.
+-5.  **Decoder:** The output tokens from the transformer are passed to a decoder network.
++1. **Per-view feature map:** Concatenated image RGB and Plücker ray coordinates, forming a 9-channel tensor $[b, n, H, W, 9]$ [S1].
++2. **Patch tokens:** Flattened 2D patches of size $p \times p$ mapped to dimension $d=1024$, shape $[b, n \cdot H/p \cdot W/p, d]$ [S1].
++3. **Transformer output tokens:** Processed sequence of the same shape as input tokens [S1].
++4. **Gaussian parameters:** 12-channel tensor per pixel $[b, n, H, W, 12]$ split into distance (1), RGB (3), scale (3), rotation (4), opacity (1) [S1].
+ 
+ **Steps:**
+-1.  **Tokenization:** Encode each of the $N$ input images into image tokens $T_{img}$. Encode the camera parameters into camera tokens $T_{cam}$.
+-2.  **Concatenation:** Form the input sequence $S = [T_{img}; T_{cam}]$.
+-3.  **Transformer Processing:** Pass $S$ through a transformer block to obtain output tokens $T_{out}$.
+-4.  **Decoding:** Decode $T_{out}$ into Gaussian parameters. This typically involves a linear projection or small MLP to predict the mean $\mu$, covariance $\Sigma$ (or rotation $R$ and scale $S$), opacity $\alpha$, and spherical harmonics coefficients $c_{SH}$ for each Gaussian.
+-5.  **Rendering:** The predicted Gaussians are rendered using standard differentiable rasterization to produce the output image, which can be used for training if ground truth is available.
++1. **Tokenize posed images:** Concatenate image RGBs and Plücker coordinates channel-wise to form a 9-channel tensor [S1]. Apply a convolution with kernel size 8 and stride 8 to downsample spatial dimensions by 8×, producing latent tokens of depth $d=1024$ [S1]. Flatten spatial and view dimensions into a single sequence dimension for transformer input [S1].
++2. **Process image tokens:** Feed the concatenated multi-view tokens through $L=24$ transformer blocks [S1]. Each block uses Pre-LayerNorm, multi-head self-attention (16 heads), and a two-layered MLP (hidden dim 4096, GeLU activation) with residual connections [S1]. Plücker coordinates naturally serve as spatial embeddings, so no positional embeddings are used [S1].
++3. **Decode output tokens:** Reshape tokens back to $[b, n, H/8, W/8, d]$ [S1]. Apply a transposed convolution with kernel size 8 and stride 8 to upsample spatial dimensions by 8×, outputting 12 channels per pixel [S1]. Flatten view and spatial dimensions to merge all Gaussians into a single list $[b, n \cdot H \cdot W, 12]$ [S1].
++4. **Split and parameterize:** Divide the 12-channel tensor into distance, RGB, scaling, rotation, and opacity [S1]. Convert distance to XYZ using $xyz = ray_o + ray_d \cdot (near \cdot (1 - w) + far \cdot w)$ where $w = \sigma(distance)$ [S1]. Compute scale as $\min(\exp(G_{scale} - 2.3), 0.3)$ [S1]. Normalize rotation quaternions to unit length [S1]. Compute opacity as $\sigma(G_{opacity} - 2.0)$ [S1]. Interpret RGB directly as zero-order spherical harmonics coefficients [S1].
++
++**Formulas:**
++- Tokenization: $\{T_{ij}\}_{j=1,\dots,HW/p^2} = \text{Linear}(\text{Patchify}_p(\text{Concat}(I_i, P_i)))$ [S1].
++- Transformer: $\{T_{ij}\}^0 = \{T_{ij}\}$, $\{T_{ij}\}^l = \text{TransformerBlock}^l(\{T_{ij}\}^{l-1})$ for $l=1,\dots,L$ [S1].
++- Scale: $\mathrm{scale} = \min\{\exp(G_{scale} - 2.3), 0.3\}$ [S1].
++- Opacity: $\mathrm{opacity} = \sigma(G_{opacity} - 2.0)$ where $\sigma(x) = 1/(1+\exp(-x))$ [S1].
+ 
+ **Parameters:**
+--   Number of input images: Typically 2-4 [S1, unofficial].
+--   Transformer depth/width: Not specified in sources.
+--   Decoder architecture: Not specified in sources.
++- Model size: 300M parameters [S1].
++- Transformer: 24 layers, hidden dimension 1024, 16 attention heads, MLP hidden dim 4096, patch size $p=8$ [S1].
++- Max token length: 16K [S1].
++- Optimizer: AdamW with $\beta_1=0.9$, $\beta_2=0.95$, weight decay 0.05 (except LayerNorm) [S1].
++- Learning rate: Cosine decay with linear warmup. 2000 steps warmup, peak LR $4\times10^{-4}$ for 256-res training; 500 steps warmup, peak LR $1\times10^{-4}$ for 512-res finetuning [S1].
++- Batch size: 8 objects/scenes per GPU for 256-res training; 2 per GPU for 512-res finetuning [S1].
++- Views per iteration: 4 input + 4 novel supervision views for objects; 2 input + 6 novel for scenes [S1].
++- Loss weight: $\lambda=0.5$ balancing MSE and Perceptual loss [S1].
++- Precision: BF16 mixed-precision training [S1].
+ 
+-**Edge Cases:**
+--   **Camera Pose Accuracy:** The method relies on known camera parameters. Incorrect poses may lead to misaligned Gaussians.
+--   **Sparse Views:** Performance may degrade with very few views or large view gaps, though it is designed for sparse inputs.
+--   **Scale Ambiguity:** Unlike methods like [NoPoSplat](11811-reconstruction-based-generation.md) which use canonical coordinates to resolve scale, GS-LRM assumes known camera intrinsics/extrinsics, which may carry scale ambiguity if not calibrated.
++**Edge cases and pitfalls:**
++- Large Gaussian scales can degenerate into long lines, spreading gradients and hurting training stability; handled by clipping scale to a maximum of 0.3 [S1].
++- CUDNN kernel shaping constraints require using Einops and Linear layers for patchify/unpatchify instead of conv/deconv, though they are conceptually equivalent [S1].
++- The method relies on known camera poses; incorrect poses lead to misaligned Gaussians [S1].
+ 
++**Pseudocode:**
++```python
++import torch
++import torch.nn.functional as F
++
++def gs_lrm(image, extrinsic, intrinsic, near, far):
++    # image: [b, n, h, w, 3]
++    # extrinsic: [b, n, 4, 4]
++    # intrinsic: [b, n, 4]
++    # near, far: scalar or [b, n, h, w]
++    rays_origin, rays_direction = rays_from_camera(extrinsic, intrinsic)  # [b, n, h, w, 3]
++    # Concatenate image, origin, and cross(origin, direction) -> 9 channels
++    cross_prod = torch.cross(rays_origin, rays_direction, dim=-1)
++    x = torch.cat([image, rays_origin, cross_prod], dim=-1)  # [b, n, h, w, 9]
++    
++    # Patchify: conv kernel=8, stride=8 -> [b, n, h/8, w/8, 1024]
++    x = F.conv2d(x.permute(0, 1, 4, 2, 3).reshape(-1, 9, x.shape[2], x.shape[3]), 
++                 weight=torch.randn(1024, 9, 8, 8), bias=None, stride=8)
++    x = x.reshape(x.shape[0], x.shape[1], 1024, x.shape[2], x.shape[3])
++    x = x.permute(0, 1, 3, 4, 2)  # [b, n, h/8, w/8, 1024]
++    
++    # Flatten spatial and view dims -> [b, n * h/8 * w/8, 1024]
++    b, n, h8, w8, d = x.shape
++    x = x.reshape(b, -1, d)
++    
++    # Transformer: Pre-LN, 24 blocks, MHA(16 heads), MLP(4096)
++    # x = transformer_block(x)  # Repeated 24 times with residual connections
++    # (Transformer block implementation omitted for brevity; follows standard Pre-LN architecture)
++    
++    # Reshape back -> [b, n, h/8, w/8, 1024]
++    x = x.reshape(b, n, h8, w8, d)
++    
++    # Unpatchify: transposed conv kernel=8, stride=8 -> [b, n, h, w, 12]
++    x = F.conv_transpose2d(x.permute(0, 1, 4, 2, 3).reshape(-1, 1024, x.shape[2], x.shape[3]),
++                           weight=torch.randn(12, 1024, 8, 8), bias=None, stride=8)
++    x = x.reshape(x.shape[0], x.shape[1], 12, x.shape[2], x.shape[3])
++    x = x.permute(0, 1, 3, 4, 2)  # [b, n, h, w, 12]
++    
++    # Merge all Gaussians -> [b, n * h * w, 12]
++    x = x.reshape(b, -1, 12)
++    
++    # Split into components
++    distance, rgb, scaling, rotation, opacity = torch.split(x, [1, 3, 3, 4, 1], dim=-1)
++    
++    # Parameterization
++    w = torch.sigmoid(distance)
++    xyz = rays_origin + rays_direction * (near * (1 - w) + far * w)
++    scaling = torch.clamp(torch.exp(scaling - 2.3), max=0.3)
++    rotation = rotation / torch.norm(rotation, dim=-1, keepdim=True)
++    opacity = torch.sigmoid(opacity - 2.0)
++    
++    return xyz, rgb, scaling, rotation, opacity
++```
+ ## Subtopics
++
++### [Large 4D Gaussian Model (L4GM)](5704-large-4d-gaussian-model-l4gm.md)
++A feed-forward 4D large reconstruction model that generates per-frame 3D Gaussian Splatting representations from a single-view video input in approximately one second. It addresses the limitation of previous 4D generation models restricted to object-centric scenes by enabling dynamic content reconstruction from monocular video. Unlike iterative optimization methods, L4GM performs inference in a single forward pass, utilizing temporal self-attention to upsample the output to higher frame rates for temporal smoothness.
++
++### [Gaussian Parameterization and Initialization](19070-gaussian-parameterization-and-initialization.md)
++Defines the decoding strategy and data preprocessing required to transform raw transformer output tokens into valid 3D Gaussian parameters for the GS-LRM architecture. It solves the problem of mapping unconstrained neural network outputs to physically meaningful Gaussian attributes (position, scale, rotation, opacity, color) while ensuring training stability through specific bias offsets and normalization constraints. It differs from sibling methods like L4GM by explicitly decoupling the parameterization into zero-order spherical harmonics for color and using a distance-based ray parameterization for XYZ coordinates, rather than direct 3D coordinate prediction.
++
+ ## Operating characteristics
+-**Time Complexity:** Feed-forward inference, typically fast (seconds per scene).
+-**Memory Complexity:** Depends on the number of Gaussians and transformer size.
+-**Strengths:** Fast inference, no iterative optimization, handles sparse views.
+-**Limitations:** Requires known camera poses, may lack detail compared to iterative methods.
+-**When to use:** When fast reconstruction from few views is needed and camera poses are known.
+-**When not to use:** When camera poses are unknown or high-fidelity detail is critical and iterative optimization is feasible.
+-
++**Time Complexity:** Feed-forward inference completes in approximately 0.23 seconds on a single A100 GPU [S1]. Training requires approximately 2 days on 64 A100 (40G VRAM) GPUs for 256-res training (80K iterations), plus 1 additional day for 512-res finetuning (20K iterations) [S1].
++**Memory Complexity:** Scales with input resolution and transformer token length (up to 16K) [S1]. Uses Flash-Attention-v2, gradient checkpointing, and deferred backpropagation for rendering to save GPU memory [S1].
++**Strengths:** Fast feed-forward inference, no iterative optimization required, handles both object and scene captures with large scale variations, outperforms previous methods by 4dB PSNR for objects and 2.2dB PSNR for scenes [S1].
++**Limitations:** Requires known camera poses, Gaussian count scales linearly with input resolution (unlike fixed-resolution triplanes), and large scales require explicit clipping to prevent degeneration [S1].
++**When to use:** When fast reconstruction from few views is needed and camera poses are known [S1].
++**When not to use:** When camera poses are unknown or high-fidelity detail is critical and iterative optimization is feasible [S1].
+ ## Background
+-GS-LRM was introduced as part of the trend towards large reconstruction models for 3D Gaussian Splatting. It builds on the success of transformer-based image-to-3D models like LRM but adapts the output to Gaussian Splatting representations. It is cited in tutorials on 3D Gaussian Splatting [S1, unofficial].
+-
++GS-LRM was introduced by Zhang et al. from Adobe Research and Cornell University [S1]. It builds on the success of transformer-based image-to-3D models but adapts the output to per-pixel Gaussian Splatting representations [S1]. The model is trained on Objaverse for object reconstruction and RealEstate10K for scene reconstruction [S1]. It was developed to overcome the fixed-resolution limitations of prior large reconstruction models that struggled with high-resolution inputs and large scale variations [S1].
+ ## Sources
+-[S1] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)+[S1] GS-LRM: Large Reconstruction Model for 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-72670-5_1, fetched 2026-10-26
++[S2] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)

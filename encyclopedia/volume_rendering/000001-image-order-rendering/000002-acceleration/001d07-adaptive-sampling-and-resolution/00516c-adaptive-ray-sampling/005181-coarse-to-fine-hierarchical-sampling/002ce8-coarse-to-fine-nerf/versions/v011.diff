@@ -1,0 +1,372 @@
+--- v010.md
++++ v011.md
+@@ -8,16 +8,16 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Ray origins $\mathbf{o} \in \mathbb{R}^3$, ray directions $\mathbf{d} \in \mathbb{R}^3$, near bound $t_{near}$, far bound $t_{far}$, number of coarse samples $N_c$, number of fine samples $N_f$.
+-*   **Outputs:** Rendered RGB color $\mathbf{C}(\mathbf{r})$, depth map, accumulated alpha, and weights for both coarse and fine passes.
++*   **Inputs:** Ray origins $\mathbf{o} \in \mathbb{R}^3$, ray directions $\mathbf{d} \in \mathbb{R}^3$, near bound $t_{near}$, far bound $t_{far}$, number of coarse samples $N_c$, number of fine samples $N_f$ [S4, unofficial].
++*   **Outputs:** Rendered RGB color $\mathbf{C}(\mathbf{r})$, depth map, accumulated alpha, and weights for both coarse and fine passes [S5, unofficial].
+ 
+ **Data Structures:**
+ *   **Networks:** Two separate Multi-Layer Perceptrons (MLPs), `network_coarse` and `network_fine`. Both share the same architecture (hidden dimensions, layers) but have distinct parameters [S3, unofficial].
+ *   **Positional Encoding:** Input coordinates are encoded using positional encoding with `pos_levels` (default 10) and view directions with `dir_levels` (default 4) [S3, unofficial].
+-*   **Raw Output Tensor:** For each sample, the network outputs a tensor of shape `(ray_count, sample_count, 4)`. The first 3 channels are RGB (sigmoided to $[0,1]$), and the 4th channel is the raw volume density $\sigma$ [S5, unofficial].
++*   **Raw Output Tensor:** For each sample, the network outputs a tensor of shape `(ray_count, sample_count, 4)` [S5, unofficial]. The first 3 channels are RGB (sigmoided to $[0,1]$), and the 4th channel is the raw volume density $\sigma$ [S5, unofficial].
+ 
+ **Parameters:**
+ *   `n_coarse`: Number of coarse samples per ray. Default: 64 [S4, unofficial].
+ *   `n_fine`: Number of fine samples per ray. Default: 128 [S4, unofficial].
+-*   `perturb`: Boolean flag to enable stratified jittering during coarse sampling. Default: True [S4, unofficial].
++*   `perturb`: Boolean flag to enable perturbation of uniform samples during the coarse pass to break symmetry and reduce aliasing. Default: True [S4, unofficial].
+ *   `raw_noise_std`: Standard deviation of uniform noise added to volume density before ReLU. Default: 0 [S5, unofficial].
+ *   `white_bkgd`: Boolean flag. If True, adds unaccounted transmittance to RGB assuming a white background [S5, unofficial].
+@@ -25,11 +25,11 @@
+ **Steps:**
+ 
+-1.  **Coarse Sampling:** Generate $N_c$ depth values $t_c$ uniformly spaced between $t_{near}$ and $t_{far}$. If `perturb` is True, apply stratified sampling by adding uniform noise $\mathcal{U}[0, 1]$ to break symmetry and reduce aliasing [S4, S5, unofficial].
+-2.  **Coarse Query:** Convert depth values to 3D points $\mathbf{p}_c = \mathbf{o} + t_c \mathbf{d}$. Query `network_coarse` with $\mathbf{p}_c$ and encoded directions to obtain raw outputs $\mathbf{raw}_c$ [S4, S5, unofficial].
+-3.  **Coarse Rendering:** Convert $\mathbf{raw}_c$ to alpha compositing weights $w_c$ using volume rendering equations. Compute the coarse RGB color $\mathbf{C}_c$ and depth [S5, unofficial].
+-4.  **Hierarchical Sampling:** Use the coarse weights $w_c$ to define a probability distribution. Sample $N_f$ new depth values $t_f$ from this distribution using inverse transform sampling (or `sample_pdf`) [S4, S5, unofficial].
+-    *   *Pitfall:* The sampling step is non-differentiable. Gradients must not flow back through this step to the coarse network. The coarse samples/weights used for fine sampling must be detached from the computation graph [S4, S5, unofficial].
+-5.  **Fine Sampling Preparation:** Concatenate coarse and fine depth values: $t_{fine\_all} = \text{sort}([t_c, t_f])$. Convert these to 3D points $\mathbf{p}_{fine\_all}$ [S4, S5, unofficial].
+-6.  **Fine Query:** Query `network_fine` with $\mathbf{p}_{fine\_all}$ and encoded directions to obtain $\mathbf{raw}_f$ [S5, unofficial].
++1.  **Coarse Sampling:** Generate $N_c$ depth values $t_c$ uniformly spaced between $t_{near}$ and $t_{far}$ [S4, S5, unofficial]. If `perturb` is True, apply perturbation to uniform samples to break symmetry and reduce aliasing [S4, unofficial].
++2.  **Coarse Query:** Convert depth values to 3D points $\mathbf{p}_c = \mathbf{o} + t_c \mathbf{d}$ [S5, unofficial]. Query `network_coarse` with $\mathbf{p}_c$ to obtain raw outputs $\mathbf{raw}_c$ [S4, S5, unofficial].
++3.  **Coarse Rendering:** Convert $\mathbf{raw}_c$ to alpha compositing weights $w_c$ using volume rendering equations [S5, unofficial]. Compute the coarse RGB color $\mathbf{C}_c$ and depth [S5, unofficial].
++4.  **Hierarchical Sampling:** Use the coarse weights $w_c$ to define a probability distribution [S4, S5, unofficial]. Sample $N_f$ new depth values $t_f$ from this distribution using inverse transform sampling (or `sample_pdf`) [S4, S5, unofficial].
++    *   *Pitfall:* The sampling step is non-differentiable [S4, S5, unofficial]. Gradients must not flow back through this step to the coarse network [S4, S5, unofficial]. The coarse samples/weights used for fine sampling must be detached from the computation graph [S4, S5, unofficial].
++5.  **Fine Sampling Preparation:** Concatenate coarse and fine depth values: $t_{fine\_all} = \text{sort}([t_c, t_f])$ [S4, S5, unofficial]. Convert these to 3D points $\mathbf{p}_{fine\_all}$ [S4, S5, unofficial].
++6.  **Fine Query:** Query `network_fine` with $\mathbf{p}_{fine\_all}$ to obtain $\mathbf{raw}_f$ [S5, unofficial].
+ 7.  **Fine Rendering:** Convert $\mathbf{raw}_f$ to weights $w_f$ and compute the final RGB color $\mathbf{C}_f$ [S5, unofficial].
+ 
+@@ -64,56 +64,93 @@
+ 
+ ```python
+-import torch
+-import torch.nn.functional as F
+-
+-def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False):
++import math
++import random
++
++def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0.0, white_bkgd=False):
+     """
+     Converts raw network outputs to radiance and weights.
+-    raw: (ray_count, sample_count, 4) -> RGB (0-1) and sigma
+-    z_vals: (ray_count, sample_count)
+-    rays_d: (ray_count, 3)
+-    """
++    raw: list of lists [ray_count][sample_count][4] -> RGB and sigma
++    z_vals: list of lists [ray_count][sample_count]
++    rays_d: list of lists [ray_count][3]
++    """
++    ray_count = len(z_vals)
++    sample_count = len(z_vals[0])
++    
+     # Calculate distances between samples
+-    dists = z_vals[..., 1:] - z_vals[..., :-1]
+-    # Append infinite distance for the last segment
+-    dists = torch.cat([dists, torch.full_like(dists[..., :1], 1e10)], dim=-1)
++    dists = []
++    for r in range(ray_count):
++        row = []
++        for i in range(sample_count - 1):
++            row.append(z_vals[r][i+1] - z_vals[r][i])
++        row.append(1e10)  # Infinite distance for last segment
++        dists.append(row)
++        
+     # Scale by ray direction norm
+-    dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
+-    
++    for r in range(ray_count):
++        norm = math.sqrt(rays_d[r][0]**2 + rays_d[r][1]**2 + rays_d[r][2]**2)
++        for i in range(sample_count):
++            dists[r][i] *= norm
++            
+     # Extract RGB and Sigma
+-    rgb = torch.sigmoid(raw[..., :3])
+-    sigma_raw = raw[..., 3]
++    rgb = [[raw[r][i][:3] for i in range(sample_count)] for r in range(ray_count)]
++    sigma_raw = [[raw[r][i][3] for i in range(sample_count)] for r in range(ray_count)]
+     
+     # Add noise to sigma if specified
+-    noise = 0.
+-    if raw_noise_std > 0.:
+-        noise = torch.randn_like(sigma_raw) * raw_noise_std
+-        
++    noise = [[0.0]*sample_count for _ in range(ray_count)]
++    if raw_noise_std > 0.0:
++        for r in range(ray_count):
++            for i in range(sample_count):
++                noise[r][i] = random.gauss(0, 1) * raw_noise_std
++                
+     # Apply ReLU and compute alpha
+-    sigma = F.relu(sigma_raw + noise)
+-    alpha = 1. - torch.exp(-sigma * dists)
+-    
++    alpha = [[0.0]*sample_count for _ in range(ray_count)]
++    for r in range(ray_count):
++        for i in range(sample_count):
++            sigma = max(0.0, sigma_raw[r][i] + noise[r][i])
++            alpha[r][i] = 1.0 - math.exp(-sigma * dists[r][i])
++            
+     # Compute transmittance T
+     # T_i = prod_{j<i} (1 - alpha_j)
+-    transmittance_prev = torch.cat([torch.ones_like(alpha[..., :1]), 
+-                                    1. - alpha + 1e-10], dim=-1)
+-    T = torch.cumprod(transmittance_prev, dim=-1)[..., :-1]
+-    
++    T = [[0.0]*sample_count for _ in range(ray_count)]
++    for r in range(ray_count):
++        prod = 1.0
++        for i in range(sample_count):
++            T[r][i] = prod
++            prod *= (1.0 - alpha[r][i] + 1e-10)
++            
+     # Compute weights
+-    weights = alpha * T
++    weights = [[alpha[r][i] * T[r][i] for i in range(sample_count)] for r in range(ray_count)]
+     
+     # Render RGB
+-    rgb_map = torch.sum(weights[..., None] * rgb, dim=-2)
+-    
++    rgb_map = []
++    for r in range(ray_count):
++        r_sum = [0.0, 0.0, 0.0]
++        for i in range(sample_count):
++            for c in range(3):
++                r_sum[c] += weights[r][i] * rgb[r][i][c]
++        rgb_map.append(r_sum)
++        
+     # Render Depth
+-    depth_map = torch.sum(weights * z_vals, dim=-1)
+-    
++    depth_map = []
++    for r in range(ray_count):
++        d_sum = 0.0
++        for i in range(sample_count):
++            d_sum += weights[r][i] * z_vals[r][i]
++        depth_map.append(d_sum)
++        
+     # Accumulated Alpha
+-    acc_map = torch.sum(weights, dim=-1)
+-    
++    acc_map = []
++    for r in range(ray_count):
++        a_sum = 0.0
++        for i in range(sample_count):
++            a_sum += weights[r][i]
++        acc_map.append(a_sum)
++        
+     # White background
+     if white_bkgd:
+-        rgb_map = rgb_map + (1. - acc_map[..., None])
+-        
++        for r in range(ray_count):
++            for c in range(3):
++                rgb_map[r][c] += (1.0 - acc_map[r])
++                
+     return rgb_map, depth_map, acc_map, weights
+ 
+@@ -121,18 +158,31 @@
+     """
+     Uniform stratified sampling along rays.
+-    Returns: pts (B, N_c, 3), dirs (B, N_c, 3), t_vals (B, N_c)
+-    """
+-    device = ray_o.device
+-    t_vals = torch.linspace(near, far, N_c, device=device)
+-    t_vals = t_vals.expand(*ray_o.shape[:-1], N_c)
+-    
++    Returns: pts [B][N_c][3], dirs [B][N_c][3], t_vals [B][N_c]
++    """
++    ray_count = len(ray_o)
++    t_vals = []
++    for r in range(ray_count):
++        t_vals.append([near + (far - near) * (i + 1) / N_c for i in range(N_c)])
++        
+     if perturb:
+-        mid = (t_vals[..., :-1] + t_vals[..., 1:]) / 2.0
+-        upper = torch.cat([mid, t_vals[..., -1:]], dim=-1)
+-        lower = torch.cat([t_vals[..., :1], mid], dim=-1)
+-        t_vals = lower + (upper - lower) * torch.rand_like(t_vals)
+-        
+-    pts = ray_o.unsqueeze(-2) + ray_d.unsqueeze(-2) * t_vals.unsqueeze(-1)
+-    dirs = ray_d.unsqueeze(-2).expand_as(pts)
++        for r in range(ray_count):
++            mid = [(t_vals[r][i] + t_vals[r][i+1]) / 2.0 for i in range(N_c - 1)]
++            upper = mid + [t_vals[r][-1]]
++            lower = [t_vals[r][0]] + mid
++            t_vals[r] = [lower[i] + (upper[i] - lower[i]) * random.random() for i in range(N_c)]
++        
++    pts = []
++    dirs = []
++    for r in range(ray_count):
++        pts_r = []
++        dirs_r = []
++        for i in range(N_c):
++            pts_r.append([ray_o[r][0] + t_vals[r][i]*ray_d[r][0],
++                          ray_o[r][1] + t_vals[r][i]*ray_d[r][1],
++                          ray_o[r][2] + t_vals[r][i]*ray_d[r][2]])
++            dirs_r.append(ray_d[r][:])
++        pts.append(pts_r)
++        dirs.append(dirs_r)
++        
+     return pts, dirs, t_vals
+ 
+@@ -140,54 +190,53 @@
+     """
+     Hierarchical sampling based on coarse weights.
+-    bins: (B, N_c) sorted depth values from coarse pass
+-    weights: (B, N_c) alpha compositing weights from coarse pass
+-    Returns: t_fine (B, N_f)
+-    """
+-    # Get midpoints of coarse bins for PDF definition
+-    # weights[i] corresponds to the segment between bins[i] and bins[i+1]
+-    # We need to handle the last segment or use the provided bins as boundaries
+-    
+-    # Calculate PDF from weights
+-    # weights shape: (B, N_c). bins shape: (B, N_c)
+-    # The weight w_i is for the interval [bins[i], bins[i+1]]? 
+-    # In standard NeRF implementation, weights are computed for samples at bins.
+-    # We construct a CDF from weights and sample from it.
+-    
+-    # Normalize weights to sum to 1 per ray
+-    weights = weights + 1e-5 # prevent NaN
+-    pdf = weights / torch.sum(weights, dim=-1, keepdim=True)
+-    cdf = torch.cumsum(pdf, dim=-1)
+-    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], dim=-1)
+-    
+-    # Sample uniform values
+-    u = torch.rand(*cdf.shape[:-1], N_f, device=weights.device)
+-    
+-    # Inverse transform sampling
+-    # Find indices where cdf < u
+-    indices = torch.searchsorted(cdf[..., :-1], u, right=True)
+-    # Clamp indices
+-    indices = torch.clamp(indices, 0, cdf.shape[-2] - 2)
+-    
+-    # Linear interpolation within bins
+-    g = indices.float()
+-    bin_low = bins[torch.arange(cdf.shape[0]).unsqueeze(-1), indices]
+-    bin_high = bins[torch.arange(cdf.shape[0]).unsqueeze(-1), indices + 1]
+-    
+-    # Normalize u to the bin's CDF range
+-    cdf_low = cdf[torch.arange(cdf.shape[0]).unsqueeze(-1), indices]
+-    cdf_high = cdf[torch.arange(cdf.shape[0]).unsqueeze(-1), indices + 1]
+-    
+-    t = bin_low + (bin_high - bin_low) * ((u - cdf_low) / (cdf_high - cdf_low + 1e-5))
+-    
+-    if perturb:
+-        # Add jitter
+-        dists = bin_high - bin_low
+-        t = t + torch.rand_like(t) * dists
+-        
+-    return t
++    bins: list of lists [B][N_c] sorted depth values from coarse pass
++    weights: list of lists [B][N_c] alpha compositing weights from coarse pass
++    Returns: t_fine [B][N_f]
++    """
++    ray_count = len(bins)
++    sample_count = len(bins[0])
++    t_fine = []
++    
++    for r in range(ray_count):
++        # Normalize weights to sum to 1 per ray
++        w_sum = sum(weights[r]) + 1e-5
++        pdf = [w / w_sum for w in weights[r]]
++        cdf = []
++        acc = 0.0
++        for p in pdf:
++            acc += p
++            cdf.append(acc)
++        cdf = [0.0] + cdf
++        
++        # Sample uniform values
++        u = [random.random() for _ in range(N_f)]
++        
++        # Inverse transform sampling
++        t_row = []
++        for val in u:
++            # Find bin index
++            idx = 0
++            while idx < len(cdf) - 1 and cdf[idx+1] < val:
++                idx += 1
++            idx = min(idx, len(cdf) - 2)
++            
++            # Linear interpolation within bins
++            bin_low = bins[r][idx]
++            bin_high = bins[r][idx+1]
++            cdf_low = cdf[idx]
++            cdf_high = cdf[idx+1]
++            
++            t = bin_low + (bin_high - bin_low) * ((val - cdf_low) / (cdf_high - cdf_low + 1e-5))
++            
++            if perturb:
++                t += random.random() * (bin_high - bin_low)
++            t_row.append(t)
++        t_fine.append(t_row)
++        
++    return t_fine
+ 
+ def render_rays(rays_o, rays_d, network_coarse, network_fine, 
+                 near, far, n_coarse=64, n_fine=128, 
+-                raw_noise_std=0, white_bkgd=False, perturb=True):
++                raw_noise_std=0.0, white_bkgd=False, perturb=True):
+     """
+     Full coarse-to-fine rendering pipeline.
+@@ -199,5 +248,4 @@
+     
+     # 2. Coarse Query
+-    # Assume network takes (pts, dirs) and returns raw (B, N, 4)
+     raw_coarse = network_coarse(pts_coarse, dirs_coarse)
+     
+@@ -209,16 +257,27 @@
+     # 4. Hierarchical Sampling
+     # Detach to prevent gradient flow from fine to coarse sampling logic
+-    weights_coarse_detached = weights_coarse.detach()
+-    t_coarse_detached = t_coarse.detach()
++    weights_coarse_detached = [[w for w in row] for row in weights_coarse]
++    t_coarse_detached = [[t for t in row] for row in t_coarse]
+     
+     t_fine = sample_pdf(t_coarse_detached, weights_coarse_detached, n_fine, perturb)
+     
+     # 5. Fine Sampling Preparation
+-    t_fine_all = torch.cat([t_coarse_detached, t_fine], dim=-1)
+-    t_fine_all, _ = torch.sort(t_fine_all, dim=-1)
+-    
+-    pts_fine_all = rays_o.unsqueeze(-2) + rays_d.unsqueeze(-2) * t_fine_all.unsqueeze(-1)
+-    dirs_fine_all = rays_d.unsqueeze(-2).expand_as(pts_fine_all)
+-    
++    t_fine_all = []
++    for r in range(len(t_coarse_detached)):
++        t_fine_all.append(sorted(t_coarse_detached[r] + t_fine[r]))
++        
++    pts_fine_all = []
++    dirs_fine_all = []
++    for r in range(len(t_fine_all)):
++        pts_r = []
++        dirs_r = []
++        for i in range(len(t_fine_all[r])):
++            pts_r.append([rays_o[r][0] + t_fine_all[r][i]*rays_d[r][0],
++                          rays_o[r][1] + t_fine_all[r][i]*rays_d[r][1],
++                          rays_o[r][2] + t_fine_all[r][i]*rays_d[r][2]])
++            dirs_r.append(rays_d[r][:])
++        pts_fine_all.append(pts_r)
++        dirs_fine_all.append(dirs_r)
++        
+     # 6. Fine Query
+     raw_fine = network_fine(pts_fine_all, dirs_fine_all)
+@@ -248,9 +307,9 @@
+ 
+ ### DONeRF PDF Sampling
+-A method used in DONeRF to translate depth oracle classification outputs into sample locations. It treats the classified depth output vector from a single oracle network evaluation as a piecewise-constant Probability Density Function (PDF) and samples from its Cumulative Distribution Function (CDF) [S8]. Unlike standard NeRF which builds a PDF from opacity outputs of a coarse shading network evaluated at multiple locations, this uses the oracle's direct output [S8].
++A method used in DONeRF to translate depth oracle classification outputs into sample locations [S8]. It treats the classified depth output vector from a single oracle network evaluation as a piecewise-constant Probability Density Function (PDF) and samples from its Cumulative Distribution Function (CDF) [S8]. Unlike standard NeRF which builds a PDF from opacity outputs of a coarse shading network evaluated at multiple locations, this uses the oracle's direct output [S8].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N_c + N_f)$ network queries per ray, where $N_c$ is coarse samples and $N_f$ is fine samples. Typically $N_c=64, N_f=128$ [S4, unofficial].
+-*   **Memory Complexity:** Stores outputs for both coarse and fine passes. The compute graph must be static; the coarse-to-fine edge is cut via `.detach()` to prevent cyclic definitions [S5, unofficial].
++*   **Time Complexity:** $O(N_c + N_f)$ network queries per ray, where $N_c$ is coarse samples and $N_f$ is fine samples [G]. Typically $N_c=64, N_f=128$ [S4, unofficial].
++*   **Memory Complexity:** Stores outputs for both coarse and fine passes [G]. The compute graph must be static; the coarse-to-fine edge is cut via `.detach()` to prevent cyclic definitions [S5, unofficial].
+ *   **Performance:** Improves detail learning by clustering samples near opaque regions, unlike evenly distributed sampling [S1, unofficial]. It prevents dense sampling at fine scales in empty space, improving computational efficiency compared to uniformly dense sampling [S2].
+ *   **Strengths:** Better reconstruction of high-frequency details; efficient use of samples by focusing on geometry.

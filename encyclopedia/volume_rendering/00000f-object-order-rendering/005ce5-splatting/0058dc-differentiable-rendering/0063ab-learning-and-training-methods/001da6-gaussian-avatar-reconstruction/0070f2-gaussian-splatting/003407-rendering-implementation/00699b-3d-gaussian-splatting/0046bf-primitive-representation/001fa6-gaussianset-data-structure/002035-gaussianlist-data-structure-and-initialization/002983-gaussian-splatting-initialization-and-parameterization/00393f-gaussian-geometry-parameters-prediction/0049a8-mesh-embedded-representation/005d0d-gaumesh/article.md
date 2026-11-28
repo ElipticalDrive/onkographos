@@ -1,0 +1,122 @@
+# GauMesh
+
+Also called: GauMesh [S2, unofficial]
+
+## Overview
+GauMesh is a hybrid representation for dynamic human head avatars that combines tracked textured triangle meshes with canonical 3D Gaussians [S1, unofficial]. It solves the problem of high-fidelity dynamic head reconstruction from few input views by jointly optimizing the mesh and Gaussians, using a learnable deformation field to handle temporal changes [S1, unofficial]. It sets itself apart from pure Gaussian splatting methods by maintaining explicit geometric structure via the mesh, which aids in deformation coherence and texture tracking [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A sequence of input views (images), a template triangle mesh $\mathcal{M}$ with vertices $V$, normals $n$, and faces $F$ [S2, unofficial].
+*   **Outputs:** Posed 3D Gaussians (mean $\mu$, covariance $\Sigma$, color $c$, opacity $\alpha$) and a deformed textured mesh for each frame [S1, unofficial].
+
+**Data Structures:**
+1.  **Triangle Mesh $\mathcal{M}$:** Stores vertex positions, per-vertex normals, and per-vertex quaternions $q$ for rotation interpolation [S2, unofficial].
+2.  **Gaussian Set:** Each Gaussian $i$ is defined by an embedding tuple $E_i = \{k, u, v, d\}$ [S2, unofficial]:
+    *   $k$: Integer index of the triangle $k \in F$ in the canonical mesh.
+    *   $(u, v)$: Barycentric coordinates within triangle $k$, constrained such that $u \ge 0, v \ge 0, u+v \le 1$ [S2, unofficial].
+    *   $d$: Scalar normal displacement along the interpolated surface normal [S2, unofficial].
+    *   Additional attributes: Canonical rotation $\bar{q}$, canonical scale $\bar{s}$, color $c$, and opacity $\alpha$ [S2, unofficial].
+
+**Canonical Position and Normal:**
+The canonical mean $\mu_{cano}$ and normal $n_{cano}$ are computed via Phong interpolation on the canonical mesh [S2, unofficial]:
+$$
+\mu_{cano} = \mathcal{V}(k, u, v) = u V_1 + v V_2 + (1 - u - v) V_3
+$$
+$$
+n_{cano} = \mathcal{N}(k, u, v) = u n_1 + v n_2 + (1 - u - v) n_3
+$$
+where $V_j$ and $n_j$ are the vertices and per-vertex normals of triangle $k$ [S2, unofficial].
+
+**Posed State Computation:**
+When the mesh is deformed by an animation function $\text{Deform}(\cdot)$, the posed position $\mu_{pose}$ is derived by applying the deformation to the displaced canonical position [S2, unofficial]:
+$$
+\mu_{pose} = \text{Deform}(\mu_{cano} + d \cdot n_{cano})
+$$
+The posed rotation $q_{pose}$ and scale $s_{pose}$ are derived from mesh attributes to maintain coherence [S2, unofficial]:
+*   **Rotation:** Per-vertex quaternions $q_1, q_2, q_3$ are interpolated using barycentric weights to get $\delta q$, which is then combined with the canonical rotation $\bar{q}$:
+    $$
+    q_{pose} = \delta q * \bar{q}, \quad \delta q = u q_1 + v q_2 + (1 - u - v) q_3
+    $$
+*   **Scale:** Scale is proportional to the area change of the embedded triangle relative to the canonical state:
+    $$
+    s_{pose} = \left( \frac{A_{pose}}{A_{cano}} \right) \bar{s}
+    $$
+    where $A_{pose}$ and $A_{cano}$ are the areas of the triangle in the posed and canonical states, respectively [S2, unofficial].
+
+**Deformation Network:**
+A multi-resolution Hexplane and a shallow MLP are used to get features for 3D Gaussians and deform each vertex in the mesh using a displacement vector to translate it to a new position [S2, unofficial].
+
+**Cross-Triangle Handling:**
+Barycentric coordinates are differentiable only within a single triangle. If optimization moves an embedding point across a boundary ($u < 0$, $v < 0$, or $u+v > 1$), the embedding must be re-expressed in the neighboring triangle to maintain differentiability [S2, unofficial]. Failure to handle this causes Gaussians to stick to boundaries and pile up [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_posed_gaussian(gaussian, mesh, pose_transform):
+    """
+    Computes the posed position, rotation, and scale for a single Gaussian.
+    
+    Args:
+        gaussian: Dict with keys 'k', 'u', 'v', 'd', 'q_canon', 's_canon'.
+        mesh: Dict with 'faces' (list of dicts with 'vertices', 'vertex_normals', 'vertex_quaternions').
+        pose_transform: Function that applies deformation to mesh vertices.
+        
+    Returns:
+        mu_pose: Posed mean position.
+        q_pose: Posed rotation quaternion.
+        s_pose: Posed scale vector.
+    """
+    k = gaussian['k']
+    u = gaussian['u']
+    v = gaussian['v']
+    d = gaussian['d']
+    
+    face = mesh.faces[k]
+    V1, V2, V3 = face['vertices']
+    n1, n2, n3 = face['vertex_normals']
+    
+    # Canonical position and normal
+    mu_cano = u * V1 + v * V2 + (1 - u - v) * V3
+    n_cano = u * n1 + v * n2 + (1 - u - v) * n3
+    
+    # Posed position
+    displaced_pos = mu_cano + d * n_cano
+    mu_pose = pose_transform(displaced_pos)
+    
+    # Posed rotation
+    q1, q2, q3 = face['vertex_quaternions']
+    delta_q = u * q1 + v * q2 + (1 - u - v) * q3
+    q_pose = delta_q * gaussian['q_canon']
+    
+    # Posed scale
+    V1_pose, V2_pose, V3_pose = pose_transform(V1), pose_transform(V2), pose_transform(V3)
+    A_pose = 0.5 * np.linalg.norm(np.cross(V2_pose - V1_pose, V3_pose - V1_pose))
+    A_cano = 0.5 * np.linalg.norm(np.cross(V2 - V1, V3 - V1))
+    s_pose = (A_pose / A_cano) * gaussian['s_canon']
+    
+    return mu_pose, q_pose, s_pose
+```
+
+## Subtopics
+
+### Graph Embedded Deformation
+Constructs a graph during precomputation, determining k-nearest control points for Gaussian endpoints and sampled points [S3]. Applies the same graph deformation to both the Gaussian radiance field and the vertices of the original mesh [S3]. Precomputation overhead (graph construction, sampling, k-nearest determination) typically requires 1 to 3 seconds for most datasets [S3].
+
+### Final Deformed Gaussian Update
+Updates logical coordinates $w'_i = w_i + \Delta w_i$ and vertex positions $v'_j = v_j + \Delta v_j$ [S4, unofficial]. Computes new mean position $\mu'_i = f(w'_i, v'_{j1}, v'_{j2}, v'_{j3}) + w'_{i3} n'_j l'_j$, where $n'_j$ is the deformed normal and $l'_j$ is the deformed scaling factor [S4, unofficial]. Updates covariance/scale $\sigma'_i = f(w'_i, \Delta \sigma_{j1}, \Delta \sigma_{j2}, \Delta \sigma_{j3}) \cdot \sigma_i$, color $c'_i = f(w'_i, \Delta c_{j1}, \Delta c_{j2}, \Delta c_{j3}) + c_i$, size $s'_i = \Delta l_j \cdot f(w'_i, \Delta s_{j1}, \Delta s_{j2}, \Delta s_{j3}) \cdot s_i$, and rotation $q'_i = \Delta n_j \cdot f(w'_i, \Delta q_{j1}, \Delta q_{j2}, \Delta q_{j3}) \cdot q_i$ [S4, unofficial]. Scaling factor change is $\Delta l_j = l'_j / l_j$ [S4, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+GauMesh was introduced as part of the recent advances in 3D Gaussian splatting for dynamic scene reconstruction [S1, unofficial]. It specifically targets high-fidelity head avatar learning from few input views [S1, unofficial]. The method was cited in surveys on dynamic scene reconstruction and real-time rendering [S2, unofficial].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)
+[S2] Dynamic Scene Reconstruction: Recent Advance in Real-time Rendering and Streaming, https://doi.org/10.48550/arXiv.2503.08166, fetched 2026-10-29 (unofficial)
+[S3] As-Rigid-As-Possible Deformation of Gaussian Radiance Fields, https://doi.org/10.1109/TVCG.2025.3555404, fetched 2026-10-30
+[S4] Reconstructing and Simulating Dynamic 3D Objects with Mesh-adsorbed Gaussian Splatting, https://doi.org/10.48550/arXiv.2406.01593, fetched 2026-10-30 (unofficial)

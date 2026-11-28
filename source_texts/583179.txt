@@ -1,0 +1,196 @@
+PaNTr (Polynomial And NURBS Toolkit)  is a pure Python library for geometric modeling and numerical analysis - feat(bspline): Mørken-Reimers spline root finder by knot insertion by pantolin · Pull Request #285 · FELIGN/pantr
+
+feat(bspline): Mørken-Reimers spline root finder by knot insertion by pantolin · Pull Request #285 · FELIGN/pantr · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+pantolin
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+Context
+pantr.bspline.find_roots(bspline, *, tol=None) returns every zero of a scalar univariate
+B-spline, working on the spline's own knot vector: the zero of the control polygon is
+inserted as a new knot, over and over, until the iterates stagnate. Every arithmetic
+operation is a convex combination (Boehm insertion), the iteration needs no starting value,
+and it converges for any spline. Compared with to_beziers() plus pantr.bezier.find_roots
+there is no extraction, no stitching of roots at segment boundaries, and a zero sitting
+exactly on a knot needs no special case.
+Named to match the sibling package, which already gives root finding the bare name
+(pantr.bezier.find_roots) while its approximation functions carry a _bezier suffix.
+Layering as elsewhere: find_roots (Layer 1), validation and tolerance derivation in
+_bspline_roots.py (Layer 2), Numba kernels in _bspline_roots_core.py (Layer 3).
+What the ticket got wrong
+Nine claims, measured before implementing. As with the ten tickets before it, the
+specification was precise and the numbers in it were not.
+"Asymptotically quadratic" is per degree - 1 insertions, not per insertion
+(Mørken–Reimers, Theorem 22). Sampling the error every d - 1 insertions gives an order
+of 2.14 and 2.03; per single insertion it oscillates around 2 ** (1/(d-1)),
+measured 1.19 at degree 5. This is what sets the insertion budget.
+The prescribed stopping rule |x_{k+1} - x_k| <= tol is absolute, so on a domain
+around 1e6 it sits below one ulp (1.2e-10) and can never fire; the iteration then runs
+until the knot interval collapses. The paper's rule is relative. Implemented as
+spread(last degree iterates) <= tol * max(|t_a|, |t_{a+degree}|, domain_length). The
+domain-length floor is added here: without it a fine knot vector near the origin makes
+the criterion unreachable in the other direction.
+The ticket's alternative rule, "the bracketing knot interval has width <= tol",
+can never fire either. Measured, the active knot bracket converges to a positive
+limit (0.700 at degrees 3 and 5), because one endpoint freezes at t_+ while the
+rest pile up at the zero (their Lemmas 8 and 16). The Greville gap likewise converges to
+(t_+ - t_-) / degree, not to zero.
+The prescribed cap of 64 insertions is degree-blind and too small. One simple zero at
+degree 25 needs 103 insertions, and the worst over random splines was 173. The
+budget is 64 + 8 * (degree - 1), that is 256 at degree 25: a 53-insertion
+bisection-grade linear phase plus six quadratic steps of degree - 1 insertions each.
+The prescribed residual bound coeff_scale * (p + 1) * 8 * eps is violated, measured
+1.5e-13 against a bound of 7.1e-15 on a domain at 1e3. It omits the term that
+dominates away from the origin. The bound that holds, and that the tests assert, is
+coeff_scale * (degree + 1) * 4 * eps + |f'| * 2 * tol * max(|x|, L): a root is located
+only to the parametric resolution the stopping rule stops at. Writing eps there instead
+of tol understates it by the factor between them (4.5 for the default
+get_strict(float64)), which goes unnoticed on the unit domain and fails by 6.8 times
+on a domain around 1e6. Worst ratio against the corrected bound, over five scales:
+0.91.
+"A run of >= p+1 zero coefficients" is not the disconnectedness test. What matters
+is a run of degree + 1 zeros aligned with a non-empty knot interval. Implemented that
+way; a spline that vanishes identically on an interval is rejected, since its zero set is
+not a set of isolated points.
+Zeros of even multiplicity cannot be certified from the control polygon at all — they
+have no sign change in the limit — so they are reported through the residual test only.
+pantr.bezier.find_roots does report them (measured), so parity with the sibling API
+required implementing this rather than declaring them out of scope.
+Also measured: pantr.bezier.find_roots reports a double root twice
+(0.5 and 0.499999995786 for (x - 1/2)^2 (x - 3/4)), so its deduplication leaks.
+Pre-existing and out of scope here; worth its own look.
+lepard has its own find_roots in lepard.implicit.algoim._roots_core. Different
+namespace, no collision with pantr.bspline.find_roots.
+Two defects found and fixed while validating
+Both appear only with repeated interior knots, which is why the paper's own examples and a
+first pass over simple knot vectors miss them: with simple interior knots the two routes
+agreed on 160 of 160 random splines, while multiplicities brought failures at about one per
+cent. Both carry a regression test with the exact spline that triggered them.
+A division by zero inside Boehm insertion. Splitting at a reported zero raised it to
+multiplicity degree and dropped everything strictly left of the run, which left one knot
+of the old spline hanging below the new domain: the remainder was no longer an open knot
+vector. A Greville abscissa is an average of degree knots and can round below its own
+smallest term once they have piled up to within a few ulp, and the span search, which
+walks right from the tracked coefficient index, then returned a span below degree.
+Boehm's loop indexed backwards past zero from there and read uninitialized memory. The
+split now raises the zero to multiplicity degree + 1, so the remainder is clamped and
+every later span search is structurally inside the buffer; the iterate is also clamped
+into the bracket the theory places it in.
+A lost root after a rejected sign change. Splitting pins the coefficient at the zero,
+but its right neighbour is only zero to within the rounding of a hundred knot insertions,
+which is coarser than the residual threshold (measured 2.6e-14 against a threshold of
+9.1e-15). So a spurious sign change survives beside the barrier and tracks straight back to
+the zero just reported. Rejecting it used to advance the scan past the whole knot run, and
+the genuine sign change bracketing the next zero sits inside that run. The scan now
+advances by exactly one index, which is already enough for the sweep to terminate.
+One more, found by the tests: a zero of multiplicity three or more was reported twice.
+The merge radius was capped at the value for multiplicity two, L * sqrt(zero_tol / coeff_scale), while a zero of multiplicity m has half-width (m! * zero_tol / |f^(m)|) ** (1/m). The cap now uses the highest multiplicity the space admits,
+L * (degree! * zero_tol / coeff_scale) ** (1/degree). A triple root came back as
+0.499997 and 0.500001 before, and as one root after.
+Verification
+4300 random splines with repeated interior knots, degrees 1 to 9, on domains at the
+origin and at 1e3, 1e6, [-5, 2] and 1e-3: the same zero set as extraction plus the
+Bernstein solver, every time. Worst positional disagreement 5.6e-16 on a unit domain.
+Polynomials with analytically known roots, built through their blossom from elementary
+symmetric polynomials (an oracle that shares nothing with the method under test): degrees
+1 to 5, recovered to within 2 ulp of the coordinate scale.
+Multiplicities 2, 3 and 4 each collapse to one root, accurate to zero_tol ** (1/m),
+which is the accuracy the problem allows rather than a safety factor.
+Residual bound above, at five scales.
+Working buffers reach 29 % of their capacity in the worst case measured, so the
+insertion budget rather than the memory is what binds.
+Coverage of the two new modules: 100 % and 99 %; the one uncovered branch is the
+buffer backstop, which the capacity is sized to make unreachable.
+Benchmark, cubic with 1000 elements and 101 zeros: 1.1 ms against 9.3 ms for
+extraction plus the Bernstein solver, so 8x.
+Notes
+A polynomial with roots away from the origin cannot be built in the power basis at all:
+at degree 5 on a domain around 1e3 the construction cancels terms of order 1e15 down to a
+result of order 1e-5 and loses every root. The tests build on the unit domain and move the
+knots, which is exact.
+No changelog entry, matching the ten merged PRs of this sweep; the public additions
+(boundary_dofs, Bspline.locate, prolongation_to_sparse, find_roots) are worth
+batching into one entry before the next release.
+Closes #261.
+🤖 Generated with Claude Code
+pantolin
+and others
+added 2 commits
+August 14, 2026 11:55
+feat(bspline): Mørken-Reimers spline root finder by knot insertion
+…
+f58d69f
+```
+Adds `pantr.bspline.find_roots`: every zero of a scalar B-spline, computed
+on the spline's own knot vector by repeatedly inserting the zero of the
+control polygon as a new knot. No extraction to Bézier segments, no
+starting value, no stitching of roots at segment boundaries, and
+convergence for any spline.
+
+Three layers as elsewhere: `find_roots` in `_bspline_roots.py` (Layer 1)
+with its validation and tolerance derivation (Layer 2), and the Numba
+kernels in `_bspline_roots_core.py` (Layer 3).
+
+Checked against extraction plus the Bernstein solver on 4300 random splines
+with repeated interior knots, degrees 1 to 9, on domains at the origin and
+at 1e3, 1e6 and 1e-3: the same zero set every time. On a cubic with 1000
+elements and 101 zeros it takes 1.1 ms against 9.3 ms for that route.
+
+Closes #261.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+test(bspline): derive the multiple-root tolerance from the root's own…
+…
+e06310c
+```
+… curvature
+
+The double-root assertion used the half-width of `(x - 1/2) ** 2`, but the
+case it guards is `(x - 1/4) (x - 1/2) ** 2`, whose second derivative at the
+double root is `2 * (1/2 - 1/4)` and whose indistinguishable interval is
+therefore four times wider. It passed on numpy 3.14 and failed on 3.11 by a
+factor of 1.2.
+
+That half-width is the physical limit rather than an estimate, so asserting
+against it bare leaves no margin and the assertion turns on where the
+iteration happens to stop: the same double root lands at 2.3e-8 under one
+numpy and 3.1e-8 under another. Both assertions now carry a stated factor of
+two, which leaves margins of 16, 16, 9.5 and 3.3 across the four cases.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Hide details
+View details
+pantolin
+merged commit 9ede41f
+into
+main
+Aug 14, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+pantolin
+deleted the
+feat/morken-reimers-roots
+branch
+August 20, 2026 21:44
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

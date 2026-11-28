@@ -1,0 +1,118 @@
+--- v001.md
++++ v002.md
+@@ -14,6 +14,6 @@
+ *   **Gaussian Parameters ($\mathbf{g}_j$):** Vector of dimension $C_1$ representing the geometric and appearance properties of the $j$-th Gaussian [S1].
+ *   **Hidden State ($z_j$):** Vector of dimension $C_0$ used to store recurrent context for the $j$-th Gaussian [S1].
+-*   **Rendering Error ($\hat{\mathbf{E}}^t$):** A tensor of shape $N \times \frac{H}{4} \times \frac{W}{4} \times C_2$, where $C_2=256$ [S1].
+-*   **Aggregated Error ($\mathbf{E}^t$):** A list of vectors $\{\mathbf{e}_j^t\}_{j=1}^{N \times \frac{HW}{16}}$, where each $\mathbf{e}_j^t \in \mathbb{R}^{C_2}$ [S1].
++*   **Rendering Error ($\hat{\mathbf{E}}^t$):** Tensor of shape $N \times \frac{H}{4} \times \frac{W}{4} \times C_2$, where $C_2=256$ [S1].
++*   **Aggregated Error ($\mathbf{E}^t$):** List of vectors $\{\mathbf{e}_j^t\}_{j=1}^{N \times \frac{HW}{16}}$, where each $\mathbf{e}_j^t \in \mathbb{R}^{C_2}$ [S1].
+ 
+ **Parameters:**
+@@ -76,11 +76,25 @@
+         Refined list of tuples (g_j, z_j)
+     """
+-    # Initialize current state
+     current_gaussians = list(initial_gaussians)
+     
+-    # Pre-compute feature extractor (ImageNet pre-trained ResNet-18)
+-    # Note: In implementation, this would be a loaded PyTorch model
+-    feature_extractor = load_resnet18_imagenet()
++    # Standard pre-trained backbone for feature extraction [G]
++    feature_extractor = ResNet18_ImageNet()
+     
++    # Projection layer: Linear(256->256) + LayerNorm [G]
++    proj_layer = nn.Linear(256, 256)
++    layer_norm = nn.LayerNorm(256)
++    
++    # Recurrent architecture: 4 kNN attention blocks (k=8) + 4-layer MLP head [G]
++    knn_blocks = [KNNAttentionBlock(k=8) for _ in range(4)]
++    mlp_head = nn.Sequential(
++        nn.Linear(256 + 256 + 256, 512),
++        nn.ReLU(),
++        nn.Linear(512, 512),
++        nn.ReLU(),
++        nn.Linear(512, 512),
++        nn.ReLU(),
++        nn.Linear(512, 256 + 256)
++    )
++
+     for t in range(num_iterations):
+         # 1. Render current Gaussians
+@@ -90,8 +104,7 @@
+         pixel_errors = [rendered - ground_truth for rendered, ground_truth in zip(rendered_views, input_views)]
+         # Downsample using pixel unshuffle (4x)
+-        pixel_errors_downsampled = [pixel_unshuffle(error, factor=4) for error in pixel_errors]
++        pixel_errors_down = [pixel_unshuffle(error, factor=4) for error in pixel_errors]
+         
+         # 3. Compute Feature-Space Error
+-        # Extract features for rendered and ground truth views
+         rendered_features = []
+         gt_features = []
+@@ -102,13 +115,10 @@
+             
+             # Resize all to 1/4 resolution
+-            r_feats_resized = [bilinear_resize(f, target_scale=0.25) for f in r_feats]
+-            g_feats_resized = [bilinear_resize(f, target_scale=0.25) for f in g_feats]
++            r_feats_resized = [bilinear_resize(f, scale=0.25) for f in r_feats]
++            g_feats_resized = [bilinear_resize(f, scale=0.25) for f in g_feats]
+             
+-            # Concatenate features
+-            r_feat_concat = concatenate_channels(r_feats_resized)
+-            g_feat_concat = concatenate_channels(g_feats_resized)
+-            
+-            rendered_features.append(r_feat_concat)
+-            gt_features.append(g_feat_concat)
++            # Concatenate features along channel dimension
++            rendered_features.append(torch.cat(r_feats_resized, dim=-1))
++            gt_features.append(torch.cat(g_feats_resized, dim=-1))
+             
+         # Compute difference
+@@ -117,5 +127,5 @@
+         # 4. Combine Errors
+         # Project pixel errors to feature space (Linear + LayerNorm)
+-        projected_pixel_errors = [layer_norm(linear_project(error)) for error in pixel_errors_downsampled]
++        projected_pixel_errors = [layer_norm(proj_layer(error)) for error in pixel_errors_down]
+         
+         # Element-wise addition
+@@ -123,11 +133,9 @@
+         
+         # Flatten errors to list of vectors e_hat_j
+-        # Shape: N x H/4 x W/4 x C2 -> List of N*H/4*W/4 vectors of dim C2
+-        flat_errors = flatten_spatial(combined_errors)
++        # Shape: (N, H/4, W/4, C2) -> (N*H/4*W/4, C2)
++        flat_errors = [error.flatten(0, 2) for error in combined_errors]
+         
+         # 5. Global Attention Propagation
+-        # Apply global attention to aggregate context
+-        # Input: flat_errors (list of vectors)
+-        # Output: aggregated_errors (list of vectors e_j)
++        # Apply global attention to aggregate context across all error tokens
+         aggregated_errors = global_attention(flat_errors)
+         
+@@ -139,10 +147,11 @@
+             
+             # Concatenate inputs
+-            input_vector = concatenate([g_j, z_j, e_j])
++            input_vector = torch.cat([g_j, z_j, e_j], dim=-1)
+             
+-            # Pass through kNN attention blocks (k=8) and MLP head
+-            # Note: kNN attention operates in 3D space based on Gaussian positions
+-            # This is a simplified representation of the recurrent block
+-            delta_g, delta_z = recurrent_block(input_vector, k=8)
++            # Pass through kNN attention blocks and MLP head
++            x = input_vector
++            for block in knn_blocks:
++                x = block(x)
++            delta_g, delta_z = mlp_head(x).chunk(2, dim=-1)
+             
+             updates.append((delta_g, delta_z))
+@@ -169,6 +178,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reconstruction time is significantly faster than 3DGS optimization. On DL3DV (8-view, 512×960), it is 100× faster than 3DGS optimization [S1]. On DL3DV (16-view, 540×960), reconstruction time is 1.2–1.7 seconds for 1–2 iterations [S1].
+-*   **Memory Complexity:** Compresses the number of Gaussians by 16× compared to previous per-pixel feed-forward models (e.g., MVSplat, DepthSplat), resulting in 4× faster rendering speed [S1]. For 8-view DL3DV, it uses 246K Gaussians; for 16-view DL3DV, it uses 518K Gaussians [S1].
++*   **Time Complexity:** Reconstruction time is significantly faster than 3DGS optimization [S1]. On DL3DV (8-view, 512×960), it is 100× faster than 3DGS optimization [S1]. On DL3DV (16-view, 540×960), reconstruction time is 1.2–1.7 seconds for 1–2 iterations [S1].
++*   **Memory Complexity:** Uses a spatial subsampling factor of 4× in 3D space and decodes 4 Gaussians per subsampled point, yielding 16× fewer Gaussians than previous per-pixel feed-forward models (e.g., MVSplat, DepthSplat) and 4× faster rendering speed [S1]. For 8-view DL3DV, it uses 246K Gaussians; for 16-view DL3DV, it uses 518K Gaussians [S1].
+ *   **Measured Performance:**
+     *   **DL3DV (8-view, 512×960):** 246K Gaussians, 100× faster than 3DGS optimization, 4× faster rendering than per-pixel models [S1].

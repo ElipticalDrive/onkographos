@@ -1,0 +1,827 @@
+SCION: Scene Composition with
+Instanced Neural Primitives
+Amogh Joshi Cyrus Vachha Cheng Zheng Felix Heide
+Princeton University
+{william.koch,amoghjoshi,cvachha,chengzh,fheide}@princeton.edu
+arXiv:2610.02322v2 [cs.CV] 5 Oct 2026
+William Koch
+Abstract
+Real-world scenes are compositional: bricks, blades of grass, pebbles, and tree
+leaves recur across human-built and natural environments. Existing neural scene
+representations model these elements independently. Most 3D Gaussian Splatting
+and follow-up abstraction and compression methods treat each element as unique,
+fitting millions of independent Gaussians per scene. Prior methods like Splat and
+Replace fit template objects, but they require mostly manual selection of repeated
+elements. As a result, these representations store redundant parameters and provide
+weak manipulation handles for downstream tasks. We introduce SCION, a hierarchical compositional scene representation that replaces independent Gaussians
+with a compact vocabulary of reusable primitives and lightweight world-space
+instances that place transformed copies throughout the scene. We fit this representation to multi-view captures via a joint optimization over discrete and continuous
+scene parameters, combining two-level densification over splats and instances with
+an adversarial loss that preserves detail across shared primitives. The recovered
+structure yields a compact, controllable representation while maintaining high
+quality even at 1.2 MB. SCION achieves rate-distortion favorable to existing
+Gaussian compression methods, and it enables instance-level scene editing and
+animation without retraining. Our results show that neural scene representations
+need not memorize scenes as independent primitives; they can discover reusable
+parts. Project webpage: https://light.princeton.edu/SCION
+1
+Introduction
+The natural and built world is full of repetition. A meadow is a few species of grass blade copied
+a million times; a brick wall is one brick under different poses; a forest canopy is a handful of leaf
+shapes scattered across branches. Traditionally, in computer graphics, we therefore do not manually
+handcraft every single leaf individually, but just a handful of templates which we then instantiate
+using a particle system or array [Prusinkiewicz and Lindenmayer, 1990, Stava et al., 2014]. This does
+more than save labor: the resulting scenes are much easier to animate, are faster to edit, and require
+significantly less memory.
+3D reconstruction deals with the inverse problem: going from images to a 3D representation. Neural
+radiance fields and related neural graphics primitives shifted reconstruction toward photorealistic
+view synthesis [Mildenhall et al., 2020, Müller et al., 2022]. However, because these scenes are
+represented as neural fields rather than physical structures, they are hard to integrate into graphics
+workflows. 3D Gaussian Splatting (3DGS) [Kerbl et al., 2023] in turn uses an explicit representation,
+which makes rendering and integration into other tools easier and more efficient. Yet 3DGS fits
+millions of independent Gaussians per scene, each carrying its own position, covariance, opacity,
+and color. The reconstructions are accurate but they are also large, and structureless: nothing in the
+representation tells us when the ten thousand splats covering a lawn are instances of the same few
+blades.
+Preprint.
+Lack of structure limits the downstream usefulness of these scenes in two ways. First, it makes
+edits hard to express: an intuitive operation such as placing grass on a surface requires manually
+instantiating and tuning thousands of individual splats, instead of inserting a few reusable primitives.
+Second, it makes animation hard: the user must deform an unstructured collection of Gaussians
+instead of transforming coherent objects. Semantic segmentation can isolate large objects, but it does
+not recover the fine-grained repeated structure of leaves, grass, or other repetitive elements.
+Recovering structure requires a representation that discovers repetition. Neural rendering has largely
+left this problem untouched. Prior codebook-style methods target compression [Takikawa et al., 2022,
+Lee et al., 2024, Durvasula et al., 2025]: they share parameters across distinct splats rather than
+building shared primitives. They identify repetition in parameters, not in geometry.
+Explicit repetition has mostly appeared in analysis or exemplar pipelines. Regularity detection analyzes input point clouds or meshes to discover similarity-group repetitions, rather than reconstructing
+them from images [Pauly et al., 2008]. The closest 3DGS work in this area, Splat and Replace, starts
+from an already trained 3DGS scene and relies on human-guided instance selection [Violante et al.,
+2025]. This makes it suitable for larger annotated objects, but difficult to scale to dense fine-grained
+repetitions.
+Identifying repetition creates two optimization challenges: choosing the unit of reuse, and tolerating
+variation across reused elements. A scene element can be represented as one instance of a large
+primitive containing many splats, or as many instances of a smaller primitive with fewer splats; the
+latter uses parameters more efficiently and yields a more structured representation, but is harder to
+optimize. This is a minimum description length problem. At the same time, real instances of the
+same element are not identical, so direct pixel-wise sharing drives templates toward blurry averages
+and erases high-frequency detail. It also means that there is no optimal solution to our minimum
+description length problem.
+We introduce SCION, which recovers a scene’s primitive decomposition end-to-end from multiview captures (Fig. 1). SCION represents a scene as a small library C = {ck }K
+k=1 of reusable
+primitives, each being a bundle of 3D Gaussians in a local frame, and a set of instances: lightweight
+world-space placements with pose (t, R), scale σ, opacity α, and assignment ai ∈ {1, . . . , K}. The
+representation scales primarily with the number of sparse lightweight instances N rather than the
+number of primitives K or splats S. This leads to better rate–distortion tradeoffs. The factorization
+into primitives furthermore gives the scene direct editing and animation handles. Recovering this
+factorization is challenging: each primitive aggregates gradients from all referencing instances, and
+averaged reconstruction losses (e.g., L1) drive templates toward blurry means, erasing high-frequency
+detail. We address this with primitive-local splat birth and relocation, world-space instance pruning,
+cloning, and subdivision, together with an adversarial patch loss that preserves per-instance sharpness
+while still enabling shared structure.
+We make the following contributions in this work
+• We introduce SCION, a hierarchical representation learning method for compositional scene
+reconstruction that replaces independent Gaussians with a reusable vocabulary of primitives
+and lightweight transformed instances. The resulting 3D scenes are compact, structured,
+and directly manipulable.
+• We learn repetitions with new densification strategies for primitive-local splats and worldspace instances, and integrate them in a joint optimization procedure that preserves sharpness
+across instance aggregation.
+• We demonstrate that the recovered structure has favorable rate–distortion tradeoffs over
+Gaussian compression methods at matched storage, while additionally enabling instancelevel editing and animation without retraining.
+2
+Related work
+SCION lies at the intersection of neural rendering, repeated-structure discovery, and controllable
+scene representations. We review each of these areas: Prior compression methods largely preserve
+independent splats while encoding them more efficiently; pattern-recognition methods often recover
+repeated objects under stronger priors; and editing methods usually add controls on top of unstructured
+2
+Instance
+Vocabulary
+Primitive
+Assembly
+Render
+GT
+RenderLorem ipsum
+assign
+Instance Loss
+3DGS parameterization
+Splat Loss
+Densification
+Differentiable
+Adversarial Loss
+Non-differentiable
+Figure 1: Overview of SCION. We initialize instances from a sparse point cloud, group them into
+reusable primitives, assemble the selected local splats for rendering, and update the representation
+through image losses, projected adversarial supervision, and active densification.
+primitives. In contrast, SCION makes repetition part of the representation itself by learning shared
+geometric primitives and lightweight instance assignments directly from multi-view images.
+Neural rendering & compression. 3D Gaussian Splatting [Kerbl et al., 2023] represents scenes
+with millions of independently parameterized anisotropic elements. Many variants improve this
+representation by modifying underlying geometry, optimization, or organization, e.g., surface-aligned
+disks or surfels [Huang et al., 2024a, Dai et al., 2024], mesh-attached Gaussians [Guédon and
+Lepetit, 2024], hierarchical levels of detail [Kerbl et al., 2024], or sampling-based densification and
+pruning [Kheradmand et al., 2024, Kim et al., 2025, Durvasula et al., 2025]. However, these methods
+largely preserve the per-splat parameterization.
+A large body of work compresses 3DGS by improving parameter encoding, entropy modeling,
+quantization, or predictive coding while keeping the underlying splat representation fixed [Lu et al.,
+2024, Chen et al., 2024, Zhan et al., 2025, Wang et al., 2024, Chen et al., 2025, Liu et al., 2025a, 2024,
+Xu et al., 2026, Chen et al., 2026, Liu et al., 2025b]. Other approaches modify the representation
+more directly through codebooks, residual quantization, distilled appearance, 2D projections, or
+alternative primitive elements such as textured surfels and billboards [Niedermayr et al., 2024, Lee
+et al., 2024, 2025, Fan et al., 2024, Morgenstern et al., 2025, Rong et al., 2025, Svitov et al., 2025].
+Related compression ideas also appear in NeRFs, neural fields, point clouds, and 3D-aware generative
+models, where shared networks, grids, latent codebooks, or local decoders reduce storage [Mildenhall
+et al., 2020, Müller et al., 2022, Tang et al., 2026, Watanabe and Umetani, 2026, Ma et al., 2021,
+Van Den Oord et al., 2017, Takikawa et al., 2022, You and Gao, 2021, Li et al., 2023, Schwarz
+et al., 2020, Niemeyer and Geiger, 2021]. Across these methods, the atomic unit is still typically an
+independently stored primitive, feature, or latent code. In contrast, SCION reduces the number of
+independent parameters by sharing concrete geometric primitives across many instances through a
+discrete vocabulary C, improving compression while preserving perceived quality across scenes.
+Instance and pattern recognition. Recovering repeated structure has a long history, but most
+previous methods assume existing geometry, manual inputs, or strong structural priors. Classical
+regularity detection fits similarity-group lattices and representative elements to point clouds or
+meshes [Pauly et al., 2008], while inverse procedural modeling fits authored grammars to curated
+exemplars such as polygonal tree scans [Stava et al., 2014] or pre-segmented part hierarchies [Li
+et al., 2017]. Splat and Replace is closer to ours in using 3DGS, but starts from a trained scene and
+human-guided instance selection, then registers and fuses object-scale repeats post hoc [Violante et al.,
+2025]. Gaussian splat instantiation has also been explored for tiling, but not reconstruction [Zeng
+et al., 2025].
+Recent multi-object reconstruction aggregates unaligned views of repeated objects, but still requires
+per-object segmentation [Wu et al., 2026]. Slot-based methods discover compositional radiance fields
+without masks [Yu et al., 2022]. Inverse-rendering approaches decompose scenes into geometry,
+materials, and lighting at urban scale [Wang et al., 2023]. However, both operate at object-level
+granularity. Feature uplifting transfers 2D foundation features into 3D for grouping [Marrie et al.,
+3
+x 98
+x 54
+x 86
+x 32
+Template
+Template Frequency Map
+Assembled Template
+Fully Assembled Render
+(a)
+(b)
+(c)
+(d)
+Figure 2: Neural primitive assembly. The (a) learned primitives are (b) instantiated multiple times
+throughout the scene, resulting in (c) assembled primitive structures that (d) construct the scene.
+2025, Siméoni et al., 2025], inheriting category bias and object-scale receptive fields. Categoryspecific pipelines further restrict scope to a single class, such as botanical trees [Li et al., 2021].
+In contrast, SCION learns a primitive vocabulary C and discrete instance assignments end-to-end
+from multi-view images. It requires no grammar, exemplar, or category prior, and as such, generalizes
+to any scene with repetitive structures in the wild.
+Controlling neural representations. Recent work adds control to 3DGS scenes by augmenting
+independently parameterized splats. Editing methods support brush- or patch-based authoring with
+diffusion inpainting [Pandey et al., 2025], test-time latent editors [Zheng et al., 2025b], or planar-prior
+anchoring for cleaner edits in textureless regions [Tibenský et al., 2025].
+For motion, graph-based hierarchies infer parent–child relations for ARAP-style deformation [Zheng
+et al., 2025a], while dynamic 3DGS methods deform canonical Gaussians with MLP or HexPlanestyle fields [Yang et al., 2024, Wu et al., 2024], but are typically not directly editable. Other
+controllable methods drive Gaussians using sparse control graphs, rigged face meshes, skinning,
+tracking, modal bases, or motion priors distilled from diffusion and spectral models [Huang et al.,
+2024b, Qian et al., 2024, Wimmer et al., 2025, Li et al., 2024]. These methods are often object-centric
+and add control on top of independent splats, rather than producing shared structures that are naturally
+animatable.
+SCION does not introduce a dedicated editing or animation system. Instead, its instance-based
+representation enables both implicitly. Edits or motions applied to a primitive propagate to all
+associated instances without per-splat handles. This is particularly effective in highly repetitive
+regimes, such as foliage, masonry, or tiled surfaces, where object-centric control is ill-defined.
+3
+Learning the scene composition
+SCION learns a factorized Gaussian scene representation from posed training images. The scene is
+stored as a reusable vocabulary of local primitives and a larger set of world-space instances: each
+instance selects one primitive and places a transformed copy into the scene. We jointly optimize the
+shared primitive parameters and the instance placements with both image and adversarial supervision,
+as well as a new vocabulary-aware density optimization.
+3.1
+Problem setup and representation
+Given posed RGB images {Iv } with calibrated cameras {πv }, our goal is to recover a compact scene
+representation that can render novel views while exposing repeated structure. SCION represents the
+W N
+scene by a vocabulary C = {ck }K
+k=1 and a set of instances Φ = {ϕi }i=1 . Primitive ck is a reusable
+L
+local-frame template containing Sk splats. The jth splat in ck has parameters θkj
+, and the ith instance
+W
+has parameters ϕi plus a discrete assignment ai selecting its template:
+
+L
+θkj
+= µLkj , q Lkj , sLkj , oLkj , cLkj ,
+L Sk
+ck = {θkj
+}j=1 ,
+
+W
+W W W
+ϕW
+i = µi , q i , si , oi , ai .
+4
+The superscripts mark the frame: local primitive coordinates (L) or world coordinates (W). Each
+local splat carries a position µLkj ∈ R3 , a unit-quaternion rotation q Lkj ∈ S 3 , an anisotropic log-scale
+sLkj ∈ R3 , an opacity logit oLkj ∈ R, and an RGB color cLkj ∈ R3 . Each instance carries a world-frame
+3
+W
+3
+W W
+position µW
+i ∈ R and rotation q i ∈ S , a scalar log-scale and opacity logit si , oi ∈ R, and a
+discrete primitive index ai ∈ {1, . . . , K}. We disable view-dependent appearance: We store only cLkj ,
+the RGB logit for the view-independent zeroth-order spherical-harmonic coefficient. Higher-order
+spherical-harmonic coefficients are omitted. When a later equation is unambiguous, we omit the
+frame superscript.
+Let nk = |{i : ai = k}| be the number of instances assigned to primitive k. Rendering composes the
+local splats of each assigned primitive with the instance transform. For each instance i and each local
+splat j ∈ {1, . . . , Sai } in its assigned primitive, we assemble a world-frame Gaussian
+ W
+
+W
+W
+µ̃W
+esi µLai j ,
+ij = µi + q i
+L
+W
+s̃W
+ij = sai j + si 1,
+W
+L
+q̃ W
+ij = q i ⊗ q ai j ,
+L
+W
+õW
+ij = oai j + oi ,
+(1)
+(2)
+(3)
+L
+c̃W
+ij = cai j .
+(4)
+where q(·) denotes the rotation of a vector by a quaternion, and ⊗ is quaternion composition. A
+PN
+P
+render materializes T = i=1 Sai = k nk Sk Gaussians as transient tensors.
+This factorization gives SCION a smaller representation space than a flat 3DGS scene [Kerbl et al.,
+PK
+1
+2023], which stores a separate parameter vector for every rendered Gaussian. If S̄ = K
+k=1 Sk is
+the average number of local splats per primitive, then the representation space complexity O(K S̄+N ).
+The first term stores the vocabulary, and the second stores the world-frame instance parameters and
+assignment indices.
+By contrast, an unshared representation with the same assembled Gaussians has
+P
+Mflat = O( i Sai ).
+The exact count only differs by fixed parameter dimensions. Let Psplat = 14 be the number of
+parameters per local splat, and let Pinstance = 10 be the number of parameters per instance, not
+counting the integer assignment. Note that while the rasterizer still grows with the number of
+assembled Gaussians, the stored representation only has a total number of parameters Bours =
+PK
+Psplat k=1 Sk + Pinstance N . The compression ratio relative to an unshared representation with
+P
+the same assembled Gaussians is CR = Bours / Psplat k nk Sk .
+We initialize instances from the sparse COLMAP point cloud [Schönberger and Frahm, 2016]
+and use frozen DINOv3 features [Siméoni et al., 2025] on the training images to assign them to
+primitives. During scene reconstruction, we keep this assignment fixed. Initialization details are
+given in Sec. S1.1.
+3.2
+Learning objective
+To ensure stability, we optimize splats and instances in two separate phases of an iteration. To avoid
+coupled gradients between primitive and instance parameters, each training iteration renders the same
+view twice. Let θ be the primitive’s splat parameters and let ϕ be the instance parameters. During the
+splat pass we detach ϕ, and vice-versa in the instance pass:
+Iˆθ = R(θ, sg(ϕ)),
+Iˆϕ = R(sg(θ), ϕ).
+Here R is the Gaussian rasterizer and sg stops gradients. The two RGB images match; only the
+autograd graph differs.
+For the image loss, we follow the 3DGS photometric objective [Kerbl et al., 2023], which combines
+L1 with SSIM [Wang et al., 2004], but add a scheduled LPIPS [Zhang et al., 2018] term:
+ˆ
+ˆ
+ˆ
+ˆ
+L(t)
+recon (I, I) = (1 − λssim )∥I − I∥1 + λssim (1 − SSIM(I, I)) + 1lpips (t) λlpips LPIPSvgg (I, I).
+5
+We add a regularization term that combines two standard 3DGS-style splat regularizers with three
+terms specific to the vocabulary–instance factorization:
+X
+1 X W
+2
+Lreg = Lscale + Lopac + λanch
+|si | + λcap
+[sW
+i − τcap ]+
+N i
+i
+(5)
+X 1 X
+1
+L
+L 2
++ λc
+∥µ
+−
+µ̄
+∥
+.
+kj
+k 2
+|C≥2 |
+Sk+ j∈A
+k∈C
+≥2
+k
+Lscale penalizes anisotropic local-frame splat scales and Lopac caps large local opacity logits; both
+follow standard 3DGS practice and are written out in Sec. S1.2. Ak is the active subset of primitive k,
+Sk+ = |Ak |, and C≥2 is the set of primitives with at least two active splats. The remaining three terms
+reflect the vocabulary–instance factorization. The λanch term anchors each instance’s log-scale near
+its initialization, since instances should place templates at their seeded footprint rather than rescale
+them. The λcap barrier caps positive instance log-scales to prevent runaway growth. The λc term
+keeps each primitive’s active splats close to their local-frame mean, preventing template drift away
+from the primitive’s local neighborhood.
+The full learning objective is
+
+  (t)
+
+(t)
+ˆ
+ˆ
+ˆ
+Ltotal = L(t)
+recon (Iθ , I) + Lreg + Lrecon (Iϕ , I) + Lreg + 1t≥tD λadv Ladv (Iθ , I).
+Photometric losses can average detail across repeated instances, so after a warmup step tD we add an
+adversarial loss [Goodfellow et al., 2014] on the splat-pass render. Similar to patch-level adversarial
+supervision for 3D-aware rendering [Schwarz et al., 2020], the discriminator compares randomly
+cropped real and rendered patches. We only apply this to the splat-pass render, so the discriminator
+learns to preserve sharpness across instance aggregation.
+3.3
+Vocabulary-aware density learning
+The default method keeps the primitive set fixed after initialization. Our densification modifies only
+local splats inside primitives and world-space instances. Both operators run on a refinement schedule
+and read gradients accumulated over the previous window.
+Gradient accumulation. The rasterizer provides screen-space absolute gradients at the projected
+means of assembled world Gaussians. Over a refinement window W, one primitive’s splat appears
+through many instances, so its signal is a scatter-add over all rendered copies:
+P
+P
+(v)
+L
+∥2
+v∈W
+(i,j): r=(ai ,j) ∥∇πv (µ̃W
+ij ) total
+P
+P
+ḡr =
+.
+(6)
+v∈W
+(i,j): r=(ai ,j) 1
+Instance gradients use the same scatter-add pattern, but group by instance:
+P
+PSai
+(v)
+L
+∥2
+j=1 ∥∇πv (µ̃W
+v∈W
+ij ) total
+P
+h̄i =
+.
+v∈W Sai
+(7)
+Splat density optimization. We use the MH-3DGS birth rule [Kim et al., 2025] as a row-allocation
+mechanism for the vocabulary, not as a global Gaussian sampler. We scope every proposal to one
+primitive: we fill a dead row in ck with an opacity-weighted alive donor from ck , and write any
+new child proposed from a parent in ck back into ck . This preserves the DINO-initialized primitive
+identity and avoids cross-template drift.
+Beyond this scoping, we make three vocabulary-specific adaptations. (i) The parent importance
+score is z-scored within each primitive (Eq. S3), so births respond to where a template is under-fit
+relative to its own rows rather than to the total rasterizer signal aggregated across many instances. (ii)
+Acceptance is divided by a same-primitive voxel density (Eq. S4) to prevent births from piling up in
+one part of a template. (iii) When a row is copied into ν overlapping instances, opacity and scale are
+corrected to preserve alpha-compositing mass (Eq. S5). Jitter, visit-count damping, and coarse/fine
+proposal annealing follow MH-3DGS; the full row update, free-list handling, and accumulator reset
+are given in Algorithm S1, and the three adaptation equations are collected in Sec. S1.4.
+6
+Instance density optimization. Instance densification changes world coverage while keeping the
+same primitive set. At each firing, we first remove instances whose opacity is below threshold or
+whose parameters are non-finite. We rank the remaining instances by h̄i from Eq. 7.
+W
+High-gradient instances split into two cases. We clone a small instance when its linear scale esi falls
+below the split threshold:
+
+
+W
+sW
+W W
+W W W
+i ξ,
+µW
+qW
+ξ ∼ N (0, I). (8)
+i′ = µi + ηclone e
+i′ , si′ , oi′ , ai′ = q i , si , oi , ai ,
+We subdivide a large instance into M children. Children inherit the parent rotation, assignment, and
+opacity; only position and scale change:
+1
+W
+log M,
+oW,′
+ϵm ∼ N (0, I). (9)
+i,m = oi ,
+3
+This differs from splat splitting. Instance children occupy different world positions, so they should
+not use the alpha-compositing correction from Eq. S5. Reducing opacity here, in addition to our
+rescaling of instances, would remove rendered mass from the scene. We cap both clone count and
+subdivide-parent count per firing, selecting the highest-gradient eligible instances first, and reset the
+accumulators after each update. The detailed procedure is in Algorithm S2.
+W
+W
+si
+µW,′
+ϵm ,
+i,m = µi + ηsub e
+4
+W
+sW,′
+i,m = si −
+Experiments
+We evaluate SCION as a compact and meaningful scene representation. We trade per-pixel fidelity
+for reusable structures with direct manipulation handles. We showcase the validity of our method in
+two ways: quantitative evaluation of reconstruction quality under matched storage budgets, as well as
+qualitative evaluation, showcasing the meaningfulness with downstream applications.
+4.1
+Evaluation protocol
+We evaluate on the Mip-NeRF 360 [Barron et al., 2022], Tanks & Temples [Knapitsch et al., 2017],
+Deep Blending [Hedman et al., 2018], and Synthetic-NeRF [Mildenhall et al., 2020] benchmarks
+using the standard training/test camera splits. Unless otherwise noted, SCION is trained for 30k
+iterations. We report PSNR, SSIM [Wang et al., 2004], LPIPS [Zhang et al., 2018], and on-disk
+model size in MB. Full per-benchmark results are deferred to Tab. S1 in the supplementary material.
+4.2
+Matched storage at 1-2 MB
+We compare how different representations behave around a 1.5 MB target on MipNeRF360, Table 1: Matched-storage comparison on MipNand qualitatively compare whether they preserve eRF360. Each baseline is rerun at the lowest availrepeated structure at that scale. We rerun state- able compression point point near our method.
+of-the-art 3DGS compression baselines at the
+Method
+PSNR↑ SSIM↑ LPIPS↓ MB↓
+lowest available operating points near our target:
+ContextGS
+20.79
+0.559
+0.511 1.760
+ContextGS [Wang et al., 2024], HAC++ [Chen
+HAC++
+26.51
+0.756
+0.299 1.699
+et al., 2025], and OMG [Lee et al., 2025]. We
+OMG
+26.25
+0.770
+0.271 1.353
+do not include methods that don’t provide budOurs-Small 22.01
+0.605
+0.431 1.204
+get levers, or cannot be reasonably compressed
+below 2 MB such as PCGS [Chen et al., 2026].
+Tab. 1 reports the model size and quality metrics,
+averaged over MipNeRF360 [Barron et al., 2022].
+Fig. 3 shows how each representation spends the same budget. Parameter-compression methods
+preserve a conventional 3DGS parameterization and encode independent Gaussians. SCION instead
+stores a reusable primitive vocabulary plus many cheap instances, so repeated scene elements remain
+coherent even when raw pixel metrics understate the perceptual quality.
+We also report the full-rate results of these methods, and others, in Tab. S1 which calibrates the cost
+of the factorization. SCION is not a drop-in replacement for high-fidelity Gaussian reconstructions:
+unstructured 3DGS compression methods achieve substantially better image metrics, as they do not
+share geometric primitives across the scene. For context, the best PSNR reported in Tab. S1 reaches
+27.62 dB / 0.237 LPIPS on MipNeRF360, 24.22 dB / 0.190 LPIPS on Tanks & Temples, 30.21 dB
+7
+Ground Truth
+SCION (Ours)
+OMG [Lee et. al, 2025]
+HAC++ [Chen et. al, 2025]
+ContextGS [Wang et. al, 2024]
+Figure 3: Qualitative matched-storage comparison. At approximately 1.5 MB, SCION retains
+coherent repeated structure as each reused primitive is represented once and instantiated many times.
+Table 2: Component ablation. Rows cumulatively add the active SCION components on the
+MipNeRF360 garden anchor scene. “DC” stands for density control.
+Ours-Small (n=3)
+Ablation
+Splat DC only
++ instance DC
++ LPIPS
+Full (+ adv)
+Ours-Large (n=3)
+PSNR↑
+SSIM↑
+LPIPS↓
+MB↓
+PSNR↑
+SSIM↑
+LPIPS↓
+MB↓
+21.98±0.07
+21.87±0.15
+21.90±0.08
+21.74±0.12
+0.56±0.00
+0.56±0.01
+0.56±0.00
+0.55±0.01
+0.45±0.01
+0.46±0.02
+0.45±0.01
+0.37±0.02
+1.48
+1.45
+1.45
+1.44
+23.23±0.02
+23.20±0.05
+23.09±0.07
+22.88±0.02
+0.65±0.00
+0.65±0.00
+0.65±0.00
+0.63±0.00
+0.34±0.00
+0.34±0.00
+0.33±0.00
+0.27±0.00
+3.81
+3.76
+3.76
+3.72
+/ 0.254 LPIPS on Deep Blending, and 33.80 dB / 0.031 LPIPS on Synthetic-NeRF at 12.68, 5.18,
+66.00, and 68.46 MB respectively. Ours-Small instead uses 1.20, 1.55, 0.73, and 0.16 MB on the
+same benchmark groups, however, with 22.00 dB / 0.432 LPIPS, 18.61 dB / 0.416 LPIPS, 24.02 dB /
+0.442 LPIPS, and 24.39 dB / 0.105 LPIPS. SCION trades raw PSNR for a structured representation
+that supports edits and animation no flat splat model can express (Sec. 4.4), while cutting storage
+by two to three orders of magnitude. Our learning objective harms PSNR and SSIM metrics while
+producing significantly better qualitative results, as described in Sec. 4.3.
+4.3
+Ablations
+We show the impact of the different components of our learning objective both quantitatively in Tab. 2
+and qualitatively in Fig. 4. For the starting point, we disable LPIPS and adversarial loss, as well as
+disable densification control for instances. While it still uses a shared representation, densification
+only occurs on splat-level. We add the additional components of our methods cumulatively.
+We observe a perceptual vs. reconstruction trade-off rather than a strict gain: the components improve
+LPIPS and qualitative results at a small cost in PSNR and SSIM. The biggest qualitative improvement
+is introduced by the adversarial training (see Fig. 4). It is worth pointing out that the performance
+delta on LPIPS is larger by adding adversarial training than by adding an LPIPS loss - the very
+metric we are comparing against. This suggests that reference-based loss terms alone lead to a local
+optimization minimum.
+We share additional results on the impact of the number of primitives and initial splats per primitive
+in Tab. S2.
+4.4
+Editability and animation
+Editability. The vocabulary representation exposes edit handles that are absent from a flat set
+of independent splats. We implement an editor that lets users add, remove, or replace recovered
+primitives through their instances. Because the initial vocabulary assignment carries instance-level
+DINO features, users can retrieve primitives with text queries and insert additional instances into the
+scene. Additional details and examples appear in Sec. S1.6 and the supplementary video.
+Animation. Animation benefits from the same factorization. A standard 3DGS scene must displace
+independent Gaussians; therefore, scene elements represented by many unrelated splats cannot move
+coherently. Fig. 5 visualizes flow maps after applying the same wind animation parameters to 3DGS
+and to our instance handles. In 3DGS, splats belonging to a single flower receive inconsistent
+local motion, breaking the shape of the element. With SCION, motion is applied through instance
+8
+Ground Truth
+Splat DC
++ Instance DC
++ LPIPS
++ Adversarial
+Figure 4: Component ablation renders. Example render of the Ours-Large variant of our method
+on the Garden scene from MipNeRF360. “DC” stands for density control.
+(a) 3DGS
+(b) Ours
+Figure 5: Animation. Flow maps for the same wind animation applied to (a) 3DGS and (b) SCION.
+Per-splat transformations in 3DGS produce incoherent local motion, while SCION moves repeated
+scene elements coherently through instance transforms.
+transforms, so all splats in a reused primitive share a coherent displacement and flowers retain their
+shape. Animation implementation details are given in Sec. S1.6, and we refer to the supplementary
+video for animations.
+5
+Conclusion
+SCION reconstructs a scene as a compact vocabulary of reusable primitives together with lightweight
+world-space instances that place transformed copies throughout the scene. The central challenge is
+fitting this shared, partly discrete structure directly from multi-view images: each primitive receives
+supervision through many placed copies, while each instance must select and position a template.
+We make this optimization practical with vocabulary-scoped splat birth and relocation, world-space
+instance pruning, cloning, and subdivision, detached primitive/instance optimization, and adversarial
+patch supervision that preserves detail under sharing. The resulting representation is compact,
+structured, editable, and animatable. Our experiments show that this structure can reduce storage by
+orders of magnitude and expose manipulation handles that flat Gaussian fields lack, while making the
+expected tradeoff in image-space metrics.
+Limitations. SCION is most appropriate when the captured scene contains real repetition. In
+scenes dominated by unique geometry or strong per-instance variation, sharing becomes a poor prior:
+the method either underfits or spends capacity on effectively one-off templates. The current hard
+primitive assignment ai ∈ {1, . . . , K} is fixed during reconstruction, which is stable but prevents
+gradients from moving an instance between plausible primitives. Training is also more expensive
+than vanilla 3DGS and many other methods because of the two-pass optimization, discriminator and
+LPIPS loss, as well as the additional density-control.
+Outlook. Direct extensions include soft or learned assignments, multi-class vocabularies for heterogeneous scenes, and generative models over instance pose, scale, opacity, and assignment. More
+broadly, compositional vocabularies are a natural target for neural reconstruction: structured enough
+to edit and animate, compact enough to ship, and expressive enough to fit real captures. SCION is a
+step toward making recovered repeated parts a first-class output, rather than an afterthought imposed
+on an unstructured Gaussian field.
+9
+References
+Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Mip-nerf
+360: Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 5470–5479, 2022.
+Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai. HAC: Hash-grid Assisted
+Context for 3D Gaussian Splatting Compression. In European Conference on Computer Vision,
+2024.
+Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai. HAC++: Towards 100X
+Compression of 3D Gaussian Splatting. IEEE Transactions on Pattern Analysis and Machine
+Intelligence, 2025.
+Yihang Chen, Mengyao Li, Qianyi Wu, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai. PCGS:
+Progressive compression of 3D gaussian splatting. In The 40th Annual AAAI Conference on
+Artificial Intelligence, 2026.
+Pinxuan Dai, Jiamin Xu, Wenxiang Xie, Xinguo Liu, Huamin Wang, and Weiwei Xu. High-quality
+surface reconstruction using gaussian surfels. In ACM SIGGRAPH 2024 Conference Papers.
+Association for Computing Machinery, 2024.
+Sankeerth Durvasula, Sharanshangar Muhunthan, Zain Moustafa, Richard Chen, Ruofan Liang,
+Yushi Guan, Nilesh Ahuja, Nilesh Jain, Selvakumar Panneer, and Nandita Vijaykumar. ContraGS:
+Codebook-Condensed and Trainable Gaussian Splatting for Fast, Memory-Efficient Reconstruction.
+In International Conference on Computer Vision, pages 28935–28945, 2025.
+Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang. LightGaussian:
+Unbounded 3D Gaussian Compression with 15x Reduction and 200+ FPS. Advances in neural
+information processing systems, 37:140138–140158, 2024.
+Ian J Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil Ozair,
+Aaron Courville, and Yoshua Bengio. Generative Adversarial Nets. Advances in neural information
+processing systems, 27, 2014.
+Antoine Guédon and Vincent Lepetit. SuGaR: Surface-Aligned Gaussian Splatting for Efficient 3D
+Mesh Reconstruction and High-Quality Mesh Rendering. CVPR, 2024.
+Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel Brostow.
+Deep Blending for Free-Viewpoint Image-Based Rendering. ACM transactions on graphics (proc.
+SIGGRAPH asia), 37(6):257:1–257:15, 2018.
+Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2D Gaussian Splatting
+for Geometrically Accurate Radiance Fields. In ACM SIGGRAPH 2024 Conference Papers, pages
+1–11, 2024a.
+Yi-Hua Huang, Yang-Tian Sun, Ziyi Yang, Xiaoyang Lyu, Yan-Pei Cao, and Xiaojuan Qi. SCGS: Sparse-Controlled Gaussian Splatting for Editable Dynamic Scenes. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4220–4230, 2024b.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3D Gaussian
+Splatting for Real-Time Radiance Field Rendering. ACM Transactions on Graphics, 42(4), July
+2023.
+Bernhard Kerbl, Andreas Meuleman, Georgios Kopanas, Michael Wimmer, Alexandre Lanvin, and
+George Drettakis. A Hierarchical 3D Gaussian Representation for Real-Time Rendering of Very
+Large Datasets. ACM Transactions on Graphics, 43(4), July 2024.
+Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Yang-Che Tseng, Hossam Isack,
+Abhishek Kar, Andrea Tagliasacchi, and Kwang Moo Yi. 3D Gaussian Splatting as Markov
+Chain Monte Carlo. In A. Globerson, L. Mackey, D. Belgrave, A. Fan, U. Paquet, J. Tomczak,
+and C. Zhang, editors, Advances in Neural Information Processing Systems, volume 37, pages
+80965–80986. Curran Associates, Inc., 2024. doi: 10.52202/079017-2573.
+10
+Hyunjin Kim, Haebeom Jung, and Jaesik Park. Metropolis-Hastings Sampling for 3D Gaussian
+Reconstruction, June 2025.
+Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM Transactions on Graphics, 36(4), 2017.
+Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. Compact 3D Gaussian
+Representation for Radiance Field, February 2024.
+Joo Chan Lee, Jong Hwan Ko, and Eunbyung Park. Optimized Minimal 3D Gaussian Splatting.
+arXiv preprint arXiv:2503.16924, 2025.
+Bosheng Li, Jacek Kałużny, Jonathan Klein, Dominik L. Michels, Wojtek Pałubicki, Bedrich Benes,
+and Sören Pirk. Learning to reconstruct botanical trees from single images. ACM Transactions
+on Graphics, 40(6):1–15, December 2021. ISSN 0730-0301, 1557-7368. doi: 10.1145/3478513.
+3480525.
+Jun Li, Kai Xu, Siddhartha Chaudhuri, Ersin Yumer, Hao Zhang, and Leonidas Guibas. GRASS:
+Generative Recursive Autoencoders for Shape Structures. ACM Transactions on Graphics, 36(4):
+1–12, August 2017. ISSN 0730-0301, 1557-7368. doi: 10.1145/3072959.3073613.
+Lingzhi Li, Zhen Shen, Zhongshu Wang, Li Shen, and Liefeng Bo. Compressing Volumetric Radiance
+Fields to 1 MB. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 4222–4231, 2023.
+Zhengqi Li, Richard Tucker, Noah Snavely, and Aleksander Holynski. Generative image dynamics.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+24142–24153, 2024.
+Lei Liu, Zhenghao Chen, and Dong Xu. 3D Gaussian Splatting Data Compression with Mixture of
+Priors. In Proceedings of the 33rd ACM International Conference on Multimedia, pages 8341–8350,
+2025a.
+Xiangrui Liu, Xinju Wu, Pingping Zhang, Shiqi Wang, Zhu Li, and Sam Kwong. CompGS: Efficient
+3D Scene Representation via Compressed Gaussian Splatting. In Proceedings of the 32nd ACM
+International Conference on Multimedia, 2024.
+Zhening Liu, Rui Song, Yushi Huang, Yingdong Hu, Xinjie Zhang, Jiawei Shao, Zehong Lin, and
+Jun Zhang. Feed-Forward 3D Gaussian Splatting Compression with Long-Context Modeling,
+November 2025b.
+Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. Scaffold-gs:
+Structured 3d gaussians for view-adaptive rendering. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 20654–20664, 2024.
+Shugao Ma, Tomas Simon, Jason Saragih, Dawei Wang, Yuecheng Li, Fernando De La Torre, and
+Yaser Sheikh. Pixel codec avatars. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 64–73, 2021.
+Juliette Marrie, Romain Menegaux, Michael Arbel, Diane Larlus, and Julien Mairal. LUDVIG:
+Learning-free Uplifting of 2d Visual features to Gaussian Splatting scenes. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision (ICCV), 2025.
+Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and
+Ren Ng. NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis. In ECCV,
+2020.
+Wieland Morgenstern, Florian Barthel, Anna Hilsmann, and Peter Eisert. Compact 3D Scene
+Representation via Self-Organizing Gaussian Grids. In Computer Vision – ECCV 2024, pages
+18–34, Cham, 2025. Springer Nature Switzerland. doi: 10.1007/978-3-031-73013-9_2.
+Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant Neural Graphics
+Primitives with a Multiresolution Hash Encoding. ACM Trans. Graph., 41(4):102:1–102:15, July
+2022. doi: 10.1145/3528223.3530127.
+11
+Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. Compressed 3D Gaussian Splatting
+for Accelerated Novel View Synthesis. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pages 10349–10358, June 2024.
+Michael Niemeyer and Andreas Geiger. GIRAFFE: Representing Scenes as Compositional Generative
+Neural Feature Fields. In Proc. IEEE Conf. on Computer Vision and Pattern Recognition (CVPR),
+2021.
+Karran Pandey, Anita Hu, Clement Fuji-Tsang, Or Perel, Karan Singh, and Maria Shugrina. Painting
+with 3D gaussian splat brushes. ACM SIGGRAPH 2025 conference papers, 2025.
+M. Pauly, N. J. Mitra, J. Wallner, H. Pottmann, and L. Guibas. Discovering Structural Regularity in
+3D Geometry. ACM Transactions on Graphics, 27(3):#43, 1–11, 2008.
+Przemyslaw Prusinkiewicz and Aristid Lindenmayer. The algorithmic beauty of plants. In The Virtual
+Laboratory, 1990.
+Shenhan Qian, Tobias Kirschstein, Liam Schoneveld, Davide Davoli, Simon Giebenhain, and Matthias
+Nießner. GaussianAvatars: Photorealistic Head Avatars with Rigged 3D Gaussians. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 20299–20309,
+2024.
+Victor Rong, Jan Held, Victor Chu, Daniel Rebain, Marc Van Droogenbroeck, Kiriakos N. Kutulakos,
+Andrea Tagliasacchi, and David B. Lindell. Nexels: Neurally-Textured Surfels for Real-Time
+Novel View Synthesis with Sparse Geometries, December 2025.
+Johannes Lutz Schönberger and Jan-Michael Frahm. Structure-from-motion revisited. In Conference
+on Computer Vision and Pattern Recognition (CVPR), 2016.
+Katja Schwarz, Yiyi Liao, Michael Niemeyer, and Andreas Geiger. GRAF: Generative radiance fields
+for 3D-aware image synthesis. Curran Associates, Inc., 2020.
+Oriane Siméoni, Huy V. Vo, Maximilian Seitzer, Federico Baldassarre, Maxime Oquab, Cijo Jose,
+Vasil Khalidov, Marc Szafraniec, Seungeun Yi, Michaël Ramamonjisoa, Francisco Massa, Daniel
+Haziza, Luca Wehrstedt, Jianyuan Wang, Timothée Darcet, Théo Moutakanni, Leonel Sentana,
+Claire Roberts, Andrea Vedaldi, Jamie Tolan, John Brandt, Camille Couprie, Julien Mairal, Hervé
+Jégou, Patrick Labatut, and Piotr Bojanowski. DINOv3, 2025.
+Ondrej Stava, Sören Pirk, Julian Kratt, Baoquan Chen, Radomír Měch, Oliver Deussen, and Bedrich
+Benes. Inverse procedural modelling of trees. In Computer Graphics Forum, volume 33, pages
+118–131. Wiley Online Library, 2014.
+David Svitov, Pietro Morerio, Lourdes Agapito, and Alessio Del Bue. BillBoard Splatting (BBSplat):
+Learnable Textured Primitives for Novel View Synthesis, March 2025.
+Towaki Takikawa, Alex Evans, Jonathan Tremblay, Thomas Müller, Morgan McGuire, Alec Jacobson,
+and Sanja Fidler. Variable bitrate neural fields. In ACM SIGGRAPH 2022 Conference Proceedings,
+pages 1–9, 2022.
+Zhenyu Tang, Chaoran Feng, Xinhua Cheng, Wangbo Yu, Junwu Zhang, Yuan Liu, Xiao-Xiao Long,
+Wenping Wang, and Li Yuan. Neuralgs: Bridging neural fields and 3d gaussian splatting for
+compact 3d representations. In Proceedings of the AAAI Conference on Artificial Intelligence,
+volume 40, pages 9493–9501, 2026.
+Šimon Tibenský, Gregor Rozinaj, Ivan Minárik, Marek Vančo, and Jaroslav Venjarski. AnchorGS:
+Anchoring Gaussian Splatting to Planar Priors for Robust 3D Reconstruction. IEEE Access, 13:
+176933–176941, 2025. ISSN 2169-3536. doi: 10.1109/ACCESS.2025.3620099.
+Aaron Van Den Oord, Oriol Vinyals, et al. Neural discrete representation learning. Advances in
+neural information processing systems, 30, 2017.
+Nicolás Violante, Andreas Meuleman, Alban Gauthier, Fredo Durand, Thibault Groueix, and George
+Drettakis. Splat and replace: 3D reconstruction with repetitive elements. In Proceedings of the
+Special Interest Group on Computer Graphics and Interactive Techniques Conference Conference
+Papers, pages 1–12, 2025.
+12
+Yufei Wang, Zhihao Li, Lanqing Guo, Wenhan Yang, Alex Kot, and Bihan Wen. ContextGS :
+Compact 3D Gaussian Splatting with Anchor Level Context Model. In The Thirty-eighth Annual
+Conference on Neural Information Processing Systems, 2024.
+Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: From
+error visibility to structural similarity. IEEE transactions on image processing, 13(4):600–612,
+2004.
+Zian Wang, Tianchang Shen, Jun Gao, Shengyu Huang, Jacob Munkberg, Jon Hasselgren, Zan Gojcic,
+Wenzheng Chen, and Sanja Fidler. Neural Fields meet Explicit Geometric Representations for
+Inverse Rendering of Urban Scenes. In The IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), June 2023.
+Haato Watanabe and Nobuyuki Umetani. Neural Gabor Splatting: Enhanced Gaussian Splatting with
+Neural Gabor for High-frequency Surface Reconstruction. 2026.
+Thomas Wimmer, Michael Oechsle, Michael Niemeyer, and Federico Tombari. Gaussians-to-life:
+Text-driven animation of 3D gaussian splatting scenes. In 2025 International Conference on 3D
+Vision (3DV), 2025.
+Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng Zhang, Wei Wei, Wenyu Liu, Qi Tian,
+and Xinggang Wang. 4D Gaussian Splatting for Real-Time Dynamic Scene Rendering. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+20310–20320, 2024.
+Qirui Wu, Yawar Siddiqui, Duncan Frost, Samir Aroudj, Armen Avetisyan, Richard Newcombe,
+Angel X. Chang, Jakob Engel, and Henry Howard-Jenkins. JRM: Joint Reconstruction Model for
+Multiple Objects without Alignment. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), 2026.
+Hao Xu, Xiaolin Wu, and Xi Zhang. Learning Hierarchical Sparse Transform Coding for 3DGS
+Compression, February 2026.
+Ziyi Yang, Xinyu Gao, Wen Zhou, Shaohui Jiao, Yuqing Zhang, and Xiaogang Jin. Deformable 3D
+Gaussians for High-Fidelity Monocular Dynamic Scene Reconstruction. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 20331–20341, 2024.
+Kang You and Pan Gao. Patch-Based Deep Autoencoder for Point Cloud Geometry Compression. In
+ACM Multimedia Asia, pages 1–7, December 2021. doi: 10.1145/3469877.3490611.
+Hong-Xing Yu, Leonidas J. Guibas, and Jiajun Wu. Unsupervised discovery of object radiance fields.
+In ICLR, 2022.
+Yunfan Zeng, Li Ma, and Pedro V. Sander. GSWT: Gaussian Splatting Wang Tiles. In SIGGRAPH
+Asia 2025 Conference Papers, SA ’25, Hong Kong, China, 2025. Association for Computing
+Machinery.
+Yu-Ting Zhan, Cheng-Yuan Ho, Hebi Yang, Yi-Hsin Chen, Jui Chiu Chiang, Yu-Lun Liu, and
+Wen-Hsiao Peng. CAT-3DGS: A context-adaptive triplane approach to rate-distortion-optimized
+3DGS compression. In Proceedings of the Thirteenth International Conference on Learning
+Representations (ICLR), 2025.
+Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The Unreasonable
+Effectiveness of Deep Features as a Perceptual Metric. In Proceedings of the IEEE Conference on
+Computer Vision and Pattern Recognition, pages 586–595, 2018.
+Cheng Zheng, William Koch, Baiang Li, and Felix Heide. HEIR: Learning graph-based motion
+hierarchies. In Advances in Neural Information Processing Systems (NeurIPS), 2025a.
+Yang Zheng, Hao Tan, Kai Zhang, Peng Wang, Leonidas Guibas, Gordon Wetzstein, and Wang
+Yifan. SplatPainter: Interactive Authoring of 3D Gaussians from 2D Edits via Test-Time Training,
+December 2025b.
+13

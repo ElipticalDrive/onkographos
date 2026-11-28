@@ -1,0 +1,235 @@
+--- v010.md
++++ v011.md
+@@ -4,90 +4,164 @@
+ 
+ ## Overview
+-This article defines the training configuration for NeRF-based models using the Nerfstudio library, specifically leveraging NerfAcc and Instant-NGP for fast convergence on static scenes [S2]. It also details the specific architectural and optimization setup of Control-NeRF, which replaces standard positional encoding of 3D positions with sampled feature vectors [S1]. The method solves the problem of efficient and editable scene representation by optimizing a coarse and fine network pair to render images from multi-view inputs [S1, S2]. It differs from standard NeRF by using pre-computed feature volumes and omitting positional encoding on those features, and differs from generic NeRF-GT baselines by utilizing specific acceleration libraries (NerfAcc/Instant-NGP) and feature-based inputs [S1, S2].
++This article defines the training configuration for NeRF-based models using the Nerfstudio library, specifically leveraging NerfAcc and Instant-NGP for fast convergence on static scenes [S2]. It also details the specific architectural and optimization setup of Control-NeRF, which replaces standard positional encoding of 3D positions with sampled feature vectors [S1]. The method solves the problem of efficiently training radiance fields by optimizing coarse and fine networks using ray sampling and specific loss functions, distinguishing itself from standard NeRF by its input representation and from other baselines by its reliance on specific libraries and hardware constraints [S1, S2].
+ 
+ ## How it works
++**Inputs and Outputs:**
++*   **Inputs:** Multi-view image datasets (e.g., LLFF, laparoscopic surgical videos), camera poses, and ground truth RGB images. For Control-NeRF, the input to the radiance function is a 64-dimensional sampled feature vector $\mathbf{v}_s$ [S1]. For Image-Based NeRF, inputs are RGB images [S3, unofficial].
++*   **Outputs:** Trained NeRF models (coarse and fine networks), rendered images, and scene representations [S1, S2][S3, unofficial].
+ 
+-### Inputs and Outputs
+-*   **Inputs:**
+-    *   Multi-view image datasets (e.g., LLFF datasets) [S1].
+-    *   Camera poses estimated via Structure-from-Motion (SfM) tools (e.g., COLMAP, HLOC) [S2].
+-    *   Pre-computed 3D feature volumes $V_s$ [S1].
+-    *   Ray bundles constructed from image pixels and camera poses [S2].
+-*   **Outputs:**
+-    *   Rendered RGB images and opacity values [S1, S2].
+-    *   Optimized network parameters for coarse ($\hat{C}_c$) and fine ($\hat{C}_f$) networks [S1].
++**Data Structures and Layout:**
++*   **Feature Vector ($\mathbf{v}_s$):** A 64-dimensional vector obtained via trilinear sampling $S(V_s, \mathbf{p})$ from a volume $V_s$ at point $\mathbf{p} \in \mathbb{R}^3$. No positional encoding is applied to $\mathbf{v}_s$ [S1].
++*   **Direction Encoding ($\gamma(\mathbf{d})$):** The direction vector $\mathbf{d} \in \mathbb{R}^3$ is encoded using positional encoding with depth $L=4$. The encoding for each dimension $p$ of $\mathbf{d}$ is:
++    $$
++    \gamma(p) = [\sin(2^0\pi p), \cos(2^0\pi p), \dots, \sin(2^{L-1}\pi p), \cos(2^{L-1}\pi p)]
++    $$
++    This results in a higher-dimensional space for the direction [S1].
++*   **Ray Bundle:** Constructed from random pixels and camera poses. Contains sample points along the ray [S3, unofficial].
+ 
+-### Data Structures
+-*   **Feature Vector ($\mathbf{v}_s$):** A 64-dimensional vector sampled from the volume $V_s$ at point $\mathbf{p} \in \mathbb{R}^3$ using trilinear sampling $S(V_s, \mathbf{p})$ [S1]. No positional encoding is applied to $\mathbf{v}_s$ [S1].
+-*   **Direction Encoding ($\gamma(\mathbf{d})$):** The direction vector $\mathbf{d} \in \mathbb{R}^3$ is encoded using positional encoding with depth $L=4$ [S1].
+-*   **Ray Bundle:** Contains ray origins, directions, and sampled depth values [S3, unofficial].
++**Numbered Steps:**
++1.  **Dataset Loading:** Load training and validation datasets using `get_nerf_datasets` [S3, unofficial]. For Control-NeRF, use LLFF multi-view image datasets scaled to $504 \times 378$ resolution [S1]. For surgical applications, extract equidistant frames from laparoscopic videos and estimate camera poses using COLMAP or HLOC [S2].
++2.  **Ray Sampling:** Sample rays from the input image and corresponding camera pose. Each ray passes through a pixel. Exclude specific regions (e.g., red lines in surgical masks) to prevent artifacts [S2]. For Control-NeRF, sample 1024 rays per batch [S1]. For Image-Based NeRF, sample random pixels to construct ray bundles [S3, unofficial].
++3.  **Coarse Network Optimization:** Optimize a coarse network $\hat{C}_c(\mathbf{r})$ that samples 64 points from evenly spaced bins along the ray length [S1].
++4.  **Fine Network Sampling:** Sample 64 additional points for a fine network $\hat{C}_f(\mathbf{r})$ using the coarse network's opacity results to sample from more relevant portions of the scene volume [S1].
++5.  **Feature Sampling (Control-NeRF specific):** For each point $\mathbf{p}$, obtain $\mathbf{v}_s = S(V_s, \mathbf{p})$ via trilinear sampling. Combine $\mathbf{v}_s$ with the direction encoding $\gamma(\mathbf{d})$ to form the input to the radiance function $F_\Theta$ [S1].
++6.  **Rendering:** Compute the rendered color $C(\mathbf{r})$ using the discretized approximation of the volume rendering integral:
++    $$
++    C(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i c_i
++    $$
++    where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$, $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, $\sigma_i$ is density, $c_i$ is color, and $\delta_i$ is segment length [S1][S3, unofficial].
++7.  **Loss Computation:**
++    *   **Photometric Loss:** Compute mean squared error (MSE) between predicted and ground truth colors [S1][S3, unofficial].
++    *   **Eikonal Loss (Image-Based NeRF):** Add Eikonal loss for geometry regularization, similar to SDF training [S3, unofficial].
++8.  **Optimization Step:** Update network weights using the computed loss. Update learning rate using a scheduler after each epoch [S3, unofficial].
+ 
+-### Numbered Steps
+-1.  **Data Loading:** Load training and validation datasets using `get_nerf_datasets` [S3, unofficial]. Extract video frames and estimate camera poses [S2].
+-2.  **Ray Sampling:** Sample rays from the input image and corresponding camera pose. Each ray passes through a pixel [S2]. For Control-NeRF, sample 1024 rays per batch from LLFF datasets scaled to $504 \times 378$ resolution [S1].
+-3.  **Feature Sampling:** For each point $\mathbf{p}$ along the ray, sample the 64-dimensional feature vector $\mathbf{v}_s = S(V_s, \mathbf{p})$ from the volume [S1].
+-4.  **Direction Encoding:** Apply positional encoding to the direction vector $\mathbf{d}$:
+-    $$ \gamma(\mathbf{p}) = [\sin(2^0\pi\mathbf{p}), \cos(2^0\pi\mathbf{p}), \dots, \sin(2^{L-1}\pi\mathbf{p}), \cos(2^{L-1}\pi\mathbf{p})] $$
+-    where $\mathbf{p}$ is each dimension of $\mathbf{d}$ and $L=4$ [S1].
+-5.  **Coarse Network Optimization:** Optimize the coarse network $\hat{C}_c(\mathbf{r})$ which samples 64 points from evenly spaced bins along the ray length [S1].
+-6.  **Fine Network Sampling:** Sample 64 additional points for the fine network $\hat{C}_f(\mathbf{r})$ using the coarse network's opacity results to focus on relevant scene portions [S1].
+-7.  **Implicit Function Evaluation:** Pass the feature vector $\mathbf{v}_s$ and encoded direction $\gamma(\mathbf{d})$ to the radiance function $F_\Theta$:
+-    $$ F_\Theta: (\mathbf{v}_s, \gamma(\mathbf{d})) \rightarrow (\mathbf{c}, \sigma) $$
+-    where $\mathbf{c}$ is color and $\sigma$ is density [S1].
+-8.  **Volume Rendering:** Compute the rendered color $C(\mathbf{r})$ using discretized approximation:
+-    $$ C(\mathbf{r}) = \sum_{i=1}^N T_i \sigma_i \mathbf{c}_i $$
+-    $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+-    where $\delta_j$ is the distance between samples [S1].
+-9.  **Loss Computation:**
+-    *   Compute color loss as mean squared error (MSE) between predicted and ground truth colors [S3, unofficial].
+-    *   Add Eikonal loss for geometry regularization [S3, unofficial].
+-10. **Optimization Update:** Update learning rate using a scheduler after each epoch and update network weights using an optimizer (e.g., Adam) [S3, unofficial].
++**Parameters:**
++*   **Positional Encoding Depth ($L$):** $L=4$ for direction encoding in Control-NeRF [S1]. (Note: Standard NeRF uses $L=10$ for position encoding [S1]).
++*   **Batch Size:** 1024 rays per batch [S1].
++*   **Image Resolution:** $504 \times 378$ for Control-NeRF experiments [S1]; $128 \times 128$ for Image-Based NeRF Lego dataset [S3, unofficial].
++*   **Epochs:** 250 epochs for Image-Based NeRF [S3, unofficial].
++*   **Hardware:** Single RTX A6000 GPU and 128 GB RAM [S2].
++*   **Scene Type:** Static scenes with minimal surgical tools, actions, and moving organs [S2].
+ 
+-### Formulas
+-*   **Positional Encoding:**
+-    $$ \gamma(\mathbf{p}) = [\sin(2^0\pi\mathbf{p}), \cos(2^0\pi\mathbf{p}), \dots, \sin(2^{L-1}\pi\mathbf{p}), \cos(2^{L-1}\pi\mathbf{p})] $$
+-    [S1]
+-*   **Volume Rendering Integral:**
+-    $$ C(\mathbf{r}) = \int_{t_n}^{t_f} T(t)\sigma(\mathbf{v}_s)\mathbf{c}(\mathbf{v}_s, \mathbf{d}) dt $$
+-    $$ T(t) = \exp\left(-\int_{t_n}^t \sigma(\mathbf{v}_s) ds\right) $$
+-    [S1]
++**Edge Cases and Pitfalls:**
++*   **Artifact Prevention:** In surgical video training, rays intersecting specific masked areas (e.g., red lines) must be excluded to prevent artifacts [S2].
++*   **Precision:** The discretized approximation of the integral assumes constant density and color within segments [S1].
++*   **Input Representation:** Control-NeRF omits positional encoding on the feature vector $\mathbf{v}_s$, unlike standard NeRF which encodes 3D position [S1].
+ 
+-### Parameters
+-*   **Positional Encoding Depth ($L$):** 4 for direction vector [S1].
+-*   **Samples per Ray:** 64 for coarse network, 64 for fine network [S1].
+-*   **Batch Size:** 1024 rays [S1].
+-*   **Image Resolution:** $504 \times 378$ for LLFF datasets [S1]; $128 \times 128$ for lego dataset in Image-Based NeRF [S3, unofficial].
+-*   **Epochs:** 250 for Image-Based NeRF [S3, unofficial].
+-*   **Hardware:** Single RTX A6000 GPU, 128 GB RAM [S2].
+-*   **Library:** Nerfstudio, including NerfAcc and Instant-NGP [S2].
++**Pseudocode:**
++```python
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
+ 
+-### Edge Cases and Pitfalls
+-*   **Scene Type:** The setup is designed for static scenes with minimal surgical tools, actions, and moving organs [S2]. Dynamic scenes may require different handling [S2].
+-*   **Ray Sampling Artifacts:** Excluding specific rays (e.g., red lines in Fig. 3 of [S2]) prevents artifacts at intersections [S2].
+-*   **Feature Vector Input:** Unlike standard NeRF which uses positionally encoded 3D positions ($L=10$, 60 parameters), Control-NeRF uses the 64-dim feature vector with no positional encoding [S1].
++def positional_encoding(d, L=4):
++    """
++    Apply positional encoding to direction vector d.
++    d: (B, 3) direction vector
++    L: encoding depth
++    Returns: (B, 3 * 2 * L) encoded vector
++    """
++    # d shape: (B, 3)
++    # Reshape for broadcasting: (B, 3, 1)
++    d = d.unsqueeze(-1)
++    # Frequencies: 2^0, 2^1, ..., 2^(L-1)
++    freq_bands = 2.0 ** torch.arange(L, device=d.device).float()
++    # Scale d by frequencies: (B, 3, L)
++    scaled_d = d * freq_bands * torch.pi
++    # Compute sin and cos: (B, 3, L)
++    sin_vals = torch.sin(scaled_d)
++    cos_vals = torch.cos(scaled_d)
++    # Concatenate and reshape: (B, 3 * 2 * L)
++    encoded = torch.cat([sin_vals, cos_vals], dim=-1).reshape(d.shape[0], -1)
++    return encoded
++
++def trilinear_sampling(volume, points):
++    """
++    Sample feature vector from volume using trilinear interpolation.
++    volume: (C, H, W, D) feature volume
++    points: (B, 3) normalized coordinates in [-1, 1]
++    Returns: (B, 64) feature vector
++    """
++    # Normalize points to [0, 1] if necessary, assuming points are in [-1, 1]
++    # Grid sample expects normalized coordinates in [-1, 1]
++    # points shape: (B, 3) -> (B, 1, 1, 3)
++    points_norm = points.unsqueeze(1).unsqueeze(1)
++    # Grid sample: (B, C, 1, 1)
++    sampled = F.grid_sample(volume.unsqueeze(0), points_norm, align_corners=True)
++    # Reshape to (B, C)
++    return sampled.squeeze(-1).squeeze(-1)
++
++def render_ray(coarse_network, fine_network, ray_bundle, volume=None):
++    """
++    Render a single ray using coarse and fine networks.
++    """
++    # Sample 64 points for coarse network
++    coarse_points = sample_points(ray_bundle, num_samples=64, distribution='uniform')
++    coarse_features = trilinear_sampling(volume, coarse_points) if volume is not None else coarse_points
++    coarse_directions = ray_bundle.directions.unsqueeze(1).expand(-1, 64, -1)
++    coarse_dir_enc = positional_encoding(coarse_directions, L=4)
++    
++    # Forward pass coarse network
++    # Input: (feature_vector, direction_encoding)
++    # Output: (density, color)
++    coarse_density, coarse_color = coarse_network(coarse_features, coarse_dir_enc)
++    
++    # Sample 64 points for fine network based on coarse opacity
++    fine_points = sample_points(ray_bundle, num_samples=64, distribution='importance', opacity=coarse_density)
++    fine_features = trilinear_sampling(volume, fine_points) if volume is not None else fine_points
++    fine_directions = ray_bundle.directions.unsqueeze(1).expand(-1, 64, -1)
++    fine_dir_enc = positional_encoding(fine_directions, L=4)
++    
++    # Forward pass fine network
++    fine_density, fine_color = fine_network(fine_features, fine_dir_enc)
++    
++    # Combine coarse and fine samples
++    all_points = torch.cat([coarse_points, fine_points], dim=0)
++    all_density = torch.cat([coarse_density, fine_density], dim=0)
++    all_color = torch.cat([coarse_color, fine_color], dim=0)
++    
++    # Compute weights and rendered color
++    # ... (standard volume rendering integration) ...
++    rendered_color = compute_volume_rendering(all_points, all_density, all_color, ray_bundle)
++    
++    return rendered_color
++
++def compute_loss(rendered_color, gt_color, density, points):
++    """
++    Compute photometric and Eikonal loss.
++    """
++    # Photometric loss (MSE)
++    photometric_loss = F.mse_loss(rendered_color, gt_color)
++    
++    # Eikonal loss (for geometry regularization)
++    # Compute gradient of density w.r.t. points
++    density.requires_grad_(True)
++    grad_density = torch.autograd.grad(
++        density.sum(), points, create_graph=True
++    )[0]
++    eikonal_loss = torch.mean((grad_density.norm(2, dim=-1) - 1.0) ** 2)
++    
++    total_loss = photometric_loss + eikonal_loss
++    return total_loss
++```
+ 
+ ## Subtopics
+ 
+ ### Image-Based NeRF Training
+-Trains a NeRF using RGB images as ground truth, optimizing both geometry (via Eikonal loss) and appearance (via color loss) [S3, unofficial]. It differs from the main setup by explicitly adding Eikonal loss for geometry regularization and running for a fixed number of epochs (250) on smaller images ($128 \times 128$) [S3, unofficial]. Choose this when geometry regularization is critical for the scene structure [S3, unofficial].
++Training a NeRF using RGB images as ground truth, optimizing both geometry (via Eikonal loss) and appearance (via color loss). It differs from Control-NeRF by not using feature volumes and instead relying on standard positional encoding or implicit functions. It is chosen for datasets where explicit feature volumes are not available or when geometry regularization is critical. It runs for 250 epochs on $128 \times 128$ images [S3, unofficial].
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity:** Fast convergence is achieved using NerfAcc and Instant-NGP [S2].
+-*   **Memory Complexity:** Depends on the feature volume size and network parameters [S1, S2].
+-*   **Measured Performance:** Trained on RTX A6000 GPU with 128 GB RAM [S2].
+-*   **Strengths:** Fast convergence, editable feature volumes, efficient ray sampling [S1, S2].
+-*   **Limitations:** Limited to static scenes with minimal dynamic elements [S2].
+-*   **When to Use:** Static scene rendering, especially in medical or controlled environments [S2].
+-*   **When Not to Use:** Highly dynamic scenes or scenes with significant occlusions not handled by ray exclusion [S2].
++*   **Time Complexity:** Depends on the number of rays per batch (1024) and the number of samples per ray (128 total: 64 coarse + 64 fine) [S1]. NerfAcc and Instant-NGP offer fast convergence [S2].
++*   **Memory Complexity:** Requires storing the feature volume (for Control-NeRF) or the network weights. Hardware: Single RTX A6000 GPU and 128 GB RAM [S2].
++*   **Performance:** PSNR, SSIM, and LPIPS metrics are reported for Control-NeRF on LLFF datasets (e.g., Fern, T-Rex) [S1].
++*   **Strengths:** Fast convergence with NerfAcc/Instant-NGP [S2]; ability to manipulate scenes via feature volumes (Control-NeRF) [S1].
++*   **Limitations:** Restricted to static scenes with minimal moving objects (surgical applications) [S2]; requires careful ray sampling to avoid artifacts [S2].
++*   **When to Use:** Static scene rendering, surgical video analysis, or when editable feature volumes are needed [S1, S2].
++*   **When Not to Use:** Dynamic scenes with significant motion, or when real-time performance on low-end hardware is required without acceleration techniques [S2].
+ 
+ ## Background
+-
+-*   **Origin:** Control-NeRF was introduced in 2022 [S1]. The use of Nerfstudio, NerfAcc, and Instant-NGP for surgical video rendering was described in 2023 [S2].
+-*   **History:** Developed to enable editable scene representations and fast training for specific applications like laparoscopic surgery [S1, S2].
+-*   **Usage:** Used in medical imaging for abdominal 3-D scene rendering from laparoscopy videos [S2].
++The NeRF Training Setup described here originates from the Control-NeRF paper, which introduced editable feature volumes for scene rendering and manipulation [S1]. It was applied to laparoscopic surgical videos to render static abdominal environments, leveraging the Nerfstudio library for efficiency [S2]. The Image-Based NeRF variant is based on standard practices in differentiable rendering, often involving Eikonal loss for geometry regularization [S3, unofficial].
+ 
+ ## Sources
+-
+ [S1] Control-NeRF: Editable Feature Volumes for Scene Rendering and Manipulation, https://arxiv.org/abs/2204.10850, fetched 2026-10-26
+ [S2] Towards Abdominal 3-D Scene Rendering from Laparoscopy Surgical Videos Using NeRFs, https://doi.org/10.1007/978-3-031-45673-2_9, fetched 2026-10-26

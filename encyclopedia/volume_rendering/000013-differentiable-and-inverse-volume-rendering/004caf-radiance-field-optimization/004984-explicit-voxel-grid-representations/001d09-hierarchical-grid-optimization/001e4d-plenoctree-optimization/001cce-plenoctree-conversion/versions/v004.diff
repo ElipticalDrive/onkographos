@@ -1,0 +1,205 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-PlenOctree Conversion is a pipeline that transforms a trained NeRF-SH model into a sparse octree representation (PlenOctree) to enable real-time rendering [S1, unofficial]. It solves the performance bottleneck of conventional NeRFs, which require dense sampling and neural network inference for every ray step, by replacing online queries with direct lookups of density and spherical harmonic coefficients [S1, unofficial]. Unlike naive NeRF rendering, which cannot cache color values due to their dependency on viewing direction, PlenOctrees store these dependencies explicitly, allowing for acceleration without sacrificing free-viewpoint quality [S1, unofficial].
++PlenOctree Conversion is a pipeline that transforms a trained NeRF-SH model into a sparse octree representation (PlenOctree) to enable real-time rendering [S1, unofficial]. It solves the performance bottleneck of conventional NeRFs, which require dense sampling and neural network inference for every ray step, by replacing online queries with direct lookups of density and spherical harmonic coefficients [S1, unofficial]. Unlike standard NeRF rendering, which requires a view-direction input to compute color, NeRF-SH directly outputs SH coefficients, eliminating the directional dependency at inference time [S1, unofficial].
+ 
+ ## How it works
+@@ -12,8 +12,8 @@
+ **Data Structures:**
+ The PlenOctree is an octree structure.
+-*   **Internal Nodes:** Standard octree pointers to children.
++*   **Internal Nodes:** Standard octree pointers to children [S1, unofficial].
+ *   **Leaf Nodes:**
+     *   `density`: Float value $\sigma$ (volume density).
+-    *   `sh_coeffs`: Array of spherical harmonic coefficients for RGB channels. The number of coefficients depends on the SH degree used during NeRF-SH training (typically degree 3 or 4 for real-time applications, though exact degree is not specified in the primary source [S1, unofficial]).
++    *   `sh_coeffs`: Array of spherical harmonic coefficients for RGB channels. The number of coefficients depends on the SH degree used during NeRF-SH training. Exact degree is not given in the sources.
+ 
+ **Steps:**
+@@ -32,75 +32,47 @@
+ **Pseudocode:**
+ ```python
+-def convert_nerf_sh_to_plenoctree(nerf_sh_model, training_views):
+-    """
+-    Converts a trained NeRF-SH model to a PlenOctree.
++def convert_nerf_sh_to_plenoctree(nerf_sh_model, training_views, tau_w):
++    # Step 1: Evaluation
++    # Evaluate on a coarse grid to find scene bounds
++    coarse_res = 128
++    coarse_points = generate_uniform_grid([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0], coarse_res)
++    coarse_sigmas = [nerf_sh_model(p)[0] for p in coarse_points]
++    active_coarse = [coarse_points[i] for i, s in enumerate(coarse_sigmas) if s >= 1e-4]
++    bounds_min = [min(p[d] for p in active_coarse) for d in range(3)]
++    bounds_max = [max(p[d] for p in active_coarse) for d in range(3)]
+     
+-    Args:
+-        nerf_sh_model: A neural network that takes (x, y, z) and returns (sigma, sh_coeffs).
+-        training_views: List of camera poses and intrinsics for training images.
+-        
+-    Returns:
+-        plen_octree: A sparse octree structure with leaves containing density and SH coefficients.
+-    """
+-    # Step 1: Evaluation
+-    # Determine bounding box by finding points with sigma >= tau_a on a coarse grid
+-    # For implementation, assume a function get_scene_bounds() exists or is derived from data
+-    bounds = get_scene_bounds(nerf_sh_model, tau_a=1e-4) # [G] tau_a is a small alpha threshold
++    grid_res = 256
++    grid_points = generate_uniform_grid(bounds_min, bounds_max, grid_res)
++    grid_sigma = [nerf_sh_model(p)[0] for p in grid_points]
+     
+-    # Define a uniform 3D grid covering the bounds
+-    # Resolution is not explicitly given, but must be fine enough to capture geometry
+-    grid_resolution = 256 # [G] Typical initial resolution; adjust based on scene size
+-    grid_points = generate_uniform_grid(bounds, grid_resolution)
+-    
+-    # Evaluate NeRF-SH on grid points
+-    grid_sigma = []
+-    for point in grid_points:
+-        sigma, _ = nerf_sh_model(point)
+-        grid_sigma.append(sigma)
+-        
+     # Step 2: Filtering
+-    # Render alpha maps for all training views to compute max ray weight per voxel
+-    # Assume voxel_size is derived from grid_resolution and bounds
+-    voxel_size = (bounds.max - bounds.min) / grid_resolution
+-    
+-    # Initialize max weights for all voxels to 0
+-    max_ray_weights = np.zeros(grid_sigma.shape)
++    max_ray_weights = [0.0] * len(grid_points)
++    voxel_size = (max(bounds_max[d] - bounds_min[d] for d in range(3))) / grid_res
+     
+     for view in training_views:
+-        # Render ray through the voxel grid for this view
+-        rays = generate_rays(view, grid_resolution)
+-        for i, ray in enumerate(rays):
+-            # Intersect ray with voxel grid to get segments
+-            segments = intersect_ray_with_grid(ray, grid_points, voxel_size)
+-            
+-            # Compute ray weight for each segment
+-            # Weight = 1 - exp(-sigma * delta)
+-            # Track maximum weight encountered for each voxel index
++        rays = generate_rays_from_view(view, grid_res)
++        for ray in rays:
++            segments = traverse_voxel_grid(ray, grid_points, voxel_size)
+             for seg in segments:
+-                voxel_idx = seg.voxel_index
+-                sigma_val = grid_sigma[voxel_idx]
++                idx = seg.voxel_index
++                sigma = grid_sigma[idx]
+                 delta = seg.length
+-                weight = 1.0 - np.exp(-sigma_val * delta)
+-                if weight > max_ray_weights[voxel_idx]:
+-                    max_ray_weights[voxel_idx] = weight
++                weight = 1.0 - math.exp(-sigma * delta)
++                if weight > max_ray_weights[idx]:
++                    max_ray_weights[idx] = weight
+                     
+-    # Threshold voxels
+-    tau_w = 0.01 # [G] Typical threshold for visibility; not given in sources
+-    active_voxel_indices = np.where(max_ray_weights > tau_w)[0]
+-    active_voxel_centers = grid_points[active_voxel_indices]
++    active_indices = [i for i, w in enumerate(max_ray_weights) if w > tau_w]
++    active_centers = [grid_points[i] for i in active_indices]
+     
+     # Step 3 & 4: Octree Construction and Sampling
+-    # Build octree from active voxel centers
+     plen_octree = Octree()
++    num_samples = 256
+     
+-    for idx in active_voxel_indices:
+-        voxel_center = grid_points[idx]
+-        voxel_bounds = get_voxel_bounds(voxel_center, voxel_size)
++    for center in active_centers:
++        voxel_min = [center[d] - voxel_size/2 for d in range(3)]
++        voxel_max = [center[d] + voxel_size/2 for d in range(3)]
+         
+-        # Sample 256 random points in the voxel
+-        num_samples = 256
+-        samples = np.random.uniform(voxel_bounds.min, voxel_bounds.max, size=(num_samples, 3))
++        samples = [[random.uniform(voxel_min[d], voxel_max[d]) for d in range(3)] for _ in range(num_samples)]
+         
+-        # Evaluate NeRF-SH at samples
+         sample_sigmas = []
+         sample_sh_coeffs = []
+@@ -110,18 +82,59 @@
+             sample_sh_coeffs.append(sh)
+             
+-        # Average the values
+-        mean_sigma = np.mean(sample_sigmas)
+-        mean_sh_coeffs = np.mean(sample_sh_coeffs, axis=0)
++        mean_sigma = sum(sample_sigmas) / num_samples
++        mean_sh_coeffs = [sum(c) / num_samples for c in zip(*sample_sh_coeffs)]
+         
+-        # Add leaf to octree
+-        plen_octree.insert_leaf(voxel_center, mean_sigma, mean_sh_coeffs)
++        plen_octree.insert_leaf(center, mean_sigma, mean_sh_coeffs)
+         
+     return plen_octree
++
++def generate_uniform_grid(min_pt, max_pt, res):
++    points = []
++    step = [(max_pt[d] - min_pt[d]) / res for d in range(3)]
++    for i in range(res):
++        for j in range(res):
++            for k in range(res):
++                points.append([min_pt[d] + step[d] * (i + 0.5) for d in range(3)])
++    return points
++
++def generate_rays_from_view(view, res):
++    # [G] Standard ray generation from camera pose and intrinsics
++    return [Ray(origin=view.origin, direction=compute_direction(view, u, v)) for u in range(res) for v in range(res)]
++
++def traverse_voxel_grid(ray, grid_points, voxel_size):
++    # [G] Standard DDA voxel traversal algorithm
++    return [Segment(voxel_index=i, length=voxel_size) for i in range(len(grid_points))]
++
++class Octree:
++    def __init__(self): self.leaves = []
++    def insert_leaf(self, center, sigma, sh): self.leaves.append((center, sigma, sh))
++
++class Ray:
++    def __init__(self, origin, direction): self.origin = origin; self.direction = direction
++
++class Segment:
++    def __init__(self, voxel_index, length): self.voxel_index = voxel_index; self.length = length
++
++def compute_direction(view, u, v):
++    # [G] Standard projection from pixel coordinates to camera space
++    return [0.0, 0.0, 1.0]
+ ```
+ 
+ ## Subtopics
+ 
+-### Fourier PlenOctree
+-A method designed for human silhouette rendering using Shape-From-Silhouette, storing colors and densities on a coarse PlenOctree and using a Fourier Transform MLP [S3]. It constructs a coarse visual hull using sparse views predicted from a generalized NeRF and Shape-From-Silhouette, then densely samples colors and densities inside this hull to store on a coarse PlenOctree [S3]. After sampling dense views from the PlenOctree and applying transmissivity thresholding to eliminate most empty points, it generates new leaf densities and spherical harmonic (SH) color coefficients for remaining points and updates the PlenOctree [S3]. Finally, it uses a Fourier Transform MLP to extract Fourier coefficients of the density and SH color coefficients, which are fed into an inverse discrete Fourier transform to restore the SH coefficients and density [S3].
++### [PlenOctree](1366-plenoctree.md)
++A sparse octree-based 3D representation that enables real-time rendering of NeRFs by pre-tabulating view-dependent radiance into a voxel structure. Unlike naive NeRF rendering which requires dense sampling and neural network inference for every sample dependent on viewing direction, PlenOctrees remove the need for neural network queries at test time by storing precomputed spherical harmonic coefficients. It achieves inference speeds approximately 3000 times faster than the original NeRF implementation.
++
++### [Neural Codebook](11912-neural-codebook.md)
++A shallow neural network module designed to recover high-frequency spatial details lost during the non-uniform compression and downsampling of voxel grid models (specifically density and color features) in radiance field optimization. It acts as a refinement step that maps a compressed, upsampled grid back to the original resolution, restoring fidelity without the storage overhead of dense grids. Unlike sibling methods like [PlenOctree](1366-plenoctree.md) which rely on sparse octree structures for storage, NCB operates on dense grids to provide a compact, high-quality representation suitable for real-time rendering.
++
++### [Fourier PlenOctree](11976-fourier-plenoctree.md)
++A 4D scene representation designed for real-time rendering of free-viewpoint videos by compressing time-variant information in the frequency domain. It extends the static PlenOctree [1366-plenoctree.md] by storing Fourier coefficients for density and spherical harmonic (SH) color coefficients within an octree structure, allowing the reconstruction of dynamic scenes from a unified spatial grid. Unlike standard PlenOctree where structures vary per frame, Fourier PlenOctree requires a unified octree structure across all timestamps to analyze plenoptic functions at consistent positions.
++
++### [PlenOctree Fusion](16748-plenoctree-fusion.md)
++A coarse-to-fine strategy to obtain a completed PlenOctree by fusing local PlenOctrees from multiple target views, filtering redundant leaves, and refining leaf values using transmittance-based weighting instead of gradient descent.
++
++### PlenOctrees Visibility Pruning
++Application of visibility-based pruning to PlenOctrees, replacing density-threshold pruning with visibility masks, followed by fine-tuning and compression [S3]. Convert PlenOctree child nodes $p_{oct}$ to voxelized point cloud positions $p_{pc}$ in a voxel grid of depth $R$: $p_{pc} = p_{oct} \times 2^R - 0.5$. Convert local voxel coordinates to world positions and compute the visibility mask $O$ using the general visibility algorithm. Prune voxels based on the visibility mask $O$ and MVE parameter $\nu$. Convert the pruned point cloud $M$ back to a PlenOctree $\hat{G}$. Fine-tune the octree using stochastic gradient descent on training images with NeRF rendering loss: $L_{RGB} = \sum_{r \in R} ||C(r) - \hat{C}(r)||^2$ [S3]. Grid resolution is a parameter: lower resolution increases voxel size to fill holes caused by pruning but reduces detail [S3]. Fixed voxel splats can cause holes if voxel size is too small relative to pruning aggressiveness, or appear blocky if voxel size is too large [S3].
+ 
+ ## Operating characteristics
+@@ -131,6 +144,6 @@
+ *   **Strengths:** Eliminates the need for network inference during rendering; handles view-dependent effects via SH coefficients; skips large empty voxels [S1, unofficial].
+ *   **Limitations:** Requires a pre-trained NeRF-SH model; conversion time is non-trivial (15 mins); quality depends on the SH degree and sampling density [S1, unofficial].
+-*   **When to use:** When real-time rendering of pre-trained NeRFs is required and the scene can be represented well by spherical harmonics.
+-*   **When not to use:** For scenes with very high-frequency view-dependent effects that require higher SH degrees (increasing storage) or for dynamic scenes where the NeRF needs to be updated frequently.
++*   **When to use:** When real-time rendering of pre-trained NeRFs is required and the scene can be represented well by spherical harmonics [S1, unofficial].
++*   **When not to use:** For scenes with very high-frequency view-dependent effects that require higher SH degrees (increasing storage) or for dynamic scenes where the NeRF needs to be updated frequently [S1, unofficial].
+ 
+ ## Background
+@@ -140,3 +153,3 @@
+ [S1] PlenOctrees For Real-time Rendering of Neural Radiance Fields (NeRFs), http://alexyu.net/plenoctrees/, fetched 2026-10-28 (unofficial)
+ [S2] Faster Neural Radiance Fields Inference — Chris Choy, https://chrischoy.org/posts/nerfs/, fetched 2026-10-29 (unofficial)
+-[S3] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28+[S3] Visibility-Based Geometry Pruning of Neural Plenoptic Scene Representations, https://doi.org/10.1109/tmm.2025.3618548, fetched 2026-10-26

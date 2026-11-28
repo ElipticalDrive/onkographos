@@ -1,0 +1,472 @@
+Summary
+
+add a focused video_to_3d_core::colmap module for sparse COLMAP scene-data contracts and text parsing
+keep the reusable COLMAP camera/image/point representation in video-to-3d-core, preserving one Rust scene-data authority
+parse only cameras.txt, images.txt, and points3D.txt; COLMAP execution remains reference/evidence tooling rather than product implementation
+preserve the full u64 point-ID domain while treating only literal -1 as COLMAP's missing-point sentinel
+add deterministic parser coverage for normal sparse input, filenames with spaces, empty observations, u64::MAX, invalid negative IDs, and malformed tracks
+
+Migration boundary
+This is the first implementation slice of moritzbrantner/rust-packages#179. It provides the exact sparse COLMAP surface needed to move spatial-media-explorer off historical moenarch-video-analysis-radiance-io without absorbing radiance-field, Nerfstudio, Gaussian-splatting, or unrelated legacy 3D semantics.
+The large reconstruction implementation is split into reconstruction.rs and included at the crate root so all established video-to-3d-core public paths remain unchanged while lib.rs becomes the composition point for the new core-owned contract.
+Acceptance
+
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+existing golden pose/COLMAP reference evidence remains green
+no Cargo.lock dependency expansion is required
+
+Add core-owned COLMAP text interoperability by moritzbrantner · Pull Request #17 · moritzbrantner/video-to-3d · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add core-owned COLMAP text interoperability
+#17
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Merged
+moritzbrantner
+merged 17 commits into
+main
+from
+migration/colmap-text-adapter
+Sep 11, 2026
+Uh oh!
+There was an error while loading. Please reload this page.
+Merged
+Add core-owned COLMAP text interoperability
+#17
+Changes from 1 commit
+Commits
+Show all changes
+17 commits
+Select commit
+Hold shift + click to select a range
+65f43d0
+feat(colmap): add focused text adapter crate
+moritzbrantner Sep 11, 2026
+9d3d06a
+feat(colmap): implement focused sparse text parser
+moritzbrantner Sep 11, 2026
+1181955
+feat(colmap): include text adapter in workspace
+moritzbrantner Sep 11, 2026
+f7b5730
+style(colmap): apply rustfmt output
+moritzbrantner Sep 11, 2026
+e26f2d3
+fix(colmap): satisfy strict Clippy chunk iteration
+moritzbrantner Sep 11, 2026
+2cdef76
+test(colmap): keep fixture support dependency-free
+moritzbrantner Sep 11, 2026
+9d30102
+test(colmap): use dependency-free isolated fixtures
+moritzbrantner Sep 11, 2026
+2b68231
+style(colmap): apply remaining rustfmt output
+moritzbrantner Sep 11, 2026
+1f65764
+refactor(colmap): own interchange scene contract in core
+moritzbrantner Sep 11, 2026
+1168b94
+refactor(core): keep COLMAP scene contracts in core
+moritzbrantner Sep 11, 2026
+191727b
+refactor(colmap): depend on core-owned interchange contract
+moritzbrantner Sep 11, 2026
+531d661
+fix(colmap): keep scene types in core and preserve u64 ids
+moritzbrantner Sep 11, 2026
+c6512a1
+refactor(core): own sparse COLMAP parser with scene contract
+moritzbrantner Sep 11, 2026
+2ad16d0
+refactor(colmap): keep interoperability inside core workspace package
+moritzbrantner Sep 11, 2026
+e7d3a5a
+refactor(colmap): remove temporary adapter crate
+moritzbrantner Sep 11, 2026
+382614f
+refactor(colmap): remove temporary adapter manifest
+moritzbrantner Sep 11, 2026
+876227f
+style(core): apply COLMAP rustfmt output
+moritzbrantner Sep 11, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+feat(colmap): implement focused sparse text parser
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+moritzbrantner
+committed
+Sep 11, 2026
+commit 9d3d06a76bbad250154134ffc38ea664895dabe0
+There are no files selected for viewing
+337 changes: 337 additions & 0 deletions
+337
+crates/video-to-3d-colmap/src/lib.rs
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -0,0 +1,337 @@
+//! Focused COLMAP text-format interoperability for `video-to-3d`.
+//!
+//! This crate owns parsing of COLMAP's sparse text interchange files. It does not
+//! own reconstruction algorithms, camera estimation, radiance fields, Gaussian
+//! splatting, or COLMAP execution.
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+#[derive(Debug, Error)]
+pub enum ColmapError {
+#[error("I/O error: {0}")]
+Io(#[from] std::io::Error),
+#[error("parse error in {path}:{line}: {message}")]
+Parse {
+path: PathBuf,
+line: usize,
+message: String,
+},
+}
+pub type Result<T> = std::result::Result<T, ColmapError>;
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vec2 {
+pub x: f32,
+pub y: f32,
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vec3 {
+pub x: f32,
+pub y: f32,
+pub z: f32,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColmapDataset {
+pub cameras: Vec<ColmapCamera>,
+pub images: Vec<ColmapImage>,
+pub points: Vec<ColmapPoint3d>,
+Comment thread
+moritzbrantner marked this conversation as resolved.
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColmapCamera {
+pub id: u32,
+pub raw_model: String,
+pub width: u32,
+pub height: u32,
+pub params: Vec<f32>,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColmapImage {
+pub id: u32,
+pub qw: f32,
+pub qx: f32,
+pub qy: f32,
+pub qz: f32,
+pub tx: f32,
+pub ty: f32,
+pub tz: f32,
+pub camera_id: u32,
+pub name: String,
+pub points2d: Vec<ColmapPoint2d>,
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColmapPoint2d {
+pub xy: Vec2,
+pub point3d_id: Option<u64>,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColmapPoint3d {
+pub id: u64,
+pub xyz: Vec3,
+pub color: [u8; 3],
+pub error: f32,
+pub track: Vec<ColmapTrackElement>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColmapTrackElement {
+pub image_id: u32,
+pub point2d_index: usize,
+}
+/// Reads the three COLMAP sparse text files from a directory.
+pub fn read_colmap_text_dir(path: impl AsRef<Path>) -> Result<ColmapDataset> {
+let path = path.as_ref();
+Ok(ColmapDataset {
+cameras: read_cameras(path.join("cameras.txt"))?,
+images: read_images(path.join("images.txt"))?,
+points: read_points(path.join("points3D.txt"))?,
+})
+}
+fn read_cameras(path: PathBuf) -> Result<Vec<ColmapCamera>> {
+data_lines(&path)?
+.into_iter()
+.map(|(line_number, line)| {
+let parts = line.split_whitespace().collect::<Vec<_>>();
+if parts.len() < 5 {
+return parse_error(&path, line_number, "camera line requires at least 5 fields");
+}
+Ok(ColmapCamera {
+id: parse(&path, line_number, parts[0], "camera id")?,
+raw_model: parts[1].to_string(),
+width: parse(&path, line_number, parts[2], "camera width")?,
+height: parse(&path, line_number, parts[3], "camera height")?,
+params: parts[4..]
+.iter()
+.map(|value| parse(&path, line_number, value, "camera parameter"))
+.collect::<Result<Vec<_>>>()?,
+})
+})
+.collect()
+}
+fn read_images(path: PathBuf) -> Result<Vec<ColmapImage>> {
+let file = File::open(&path)?;
+let mut lines = BufReader::new(file).lines().enumerate();
+let mut images = Vec::new();
+while let Some((metadata_index, line)) = lines.next() {
+let metadata = line?;
+let metadata = metadata.trim();
+if metadata.is_empty() || metadata.starts_with('#') {
+continue;
+}
+let metadata_line = metadata_index + 1;
+let parts = metadata.split_whitespace().collect::<Vec<_>>();
+if parts.len() < 10 {
+return parse_error(
+&path,
+metadata_line,
+"image metadata line requires at least 10 fields",
+);
+}
+let mut points_line = None;
+for (points_index, candidate) in lines.by_ref() {
+let candidate = candidate?;
+if candidate.trim_start().starts_with('#') {
+continue;
+}
+points_line = Some((points_index + 1, candidate));
+break;
+}
+let (points_line_number, points) = points_line.unwrap_or((metadata_line + 1, String::new()));
+images.push(ColmapImage {
+id: parse(&path, metadata_line, parts[0], "image id")?,
+qw: parse(&path, metadata_line, parts[1], "qw")?,
+qx: parse(&path, metadata_line, parts[2], "qx")?,
+qy: parse(&path, metadata_line, parts[3], "qy")?,
+qz: parse(&path, metadata_line, parts[4], "qz")?,
+tx: parse(&path, metadata_line, parts[5], "tx")?,
+ty: parse(&path, metadata_line, parts[6], "ty")?,
+tz: parse(&path, metadata_line, parts[7], "tz")?,
+camera_id: parse(&path, metadata_line, parts[8], "camera id")?,
+name: parts[9..].join(" "),
+points2d: parse_points2d(&path, points_line_number, &points)?,
+});
+}
+Ok(images)
+}
+fn parse_points2d(path: &Path, line_number: usize, line: &str) -> Result<Vec<ColmapPoint2d>> {
+let parts = line.split_whitespace().collect::<Vec<_>>();
+if parts.is_empty() {
+return Ok(Vec::new());
+}
+if parts.len() % 3 != 0 {
+return parse_error(path, line_number, "point2D line must contain x y point3D-id triples");
+}
+parts
+.chunks_exact(3)
+.map(|chunk| {
+let point3d_id: i64 = parse(path, line_number, chunk[2], "point3D id")?;
+Ok(ColmapPoint2d {
+xy: Vec2 {
+x: parse(path, line_number, chunk[0], "point2D x")?,
+y: parse(path, line_number, chunk[1], "point2D y")?,
+},
+point3d_id: u64::try_from(point3d_id).ok(),
+Comment thread
+moritzbrantner marked this conversation as resolved.
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+})
+})
+.collect()
+}
+fn read_points(path: PathBuf) -> Result<Vec<ColmapPoint3d>> {
+data_lines(&path)?
+.into_iter()
+.map(|(line_number, line)| {
+let parts = line.split_whitespace().collect::<Vec<_>>();
+if parts.len() < 8 {
+return parse_error(&path, line_number, "point3D line requires at least 8 fields");
+}
+if (parts.len() - 8) % 2 != 0 {
+return parse_error(
+&path,
+line_number,
+"point3D track must contain image-id/point2D-index pairs",
+);
+}
+let track = parts[8..]
+.chunks_exact(2)
+.map(|chunk| {
+Ok(ColmapTrackElement {
+image_id: parse(&path, line_number, chunk[0], "track image id")?,
+point2d_index: parse(
+&path,
+line_number,
+chunk[1],
+"track point2D index",
+)?,
+})
+})
+.collect::<Result<Vec<_>>>()?;
+Ok(ColmapPoint3d {
+id: parse(&path, line_number, parts[0], "point3D id")?,
+xyz: Vec3 {
+x: parse(&path, line_number, parts[1], "point3D x")?,
+y: parse(&path, line_number, parts[2], "point3D y")?,
+z: parse(&path, line_number, parts[3], "point3D z")?,
+},
+color: [
+parse(&path, line_number, parts[4], "red")?,
+parse(&path, line_number, parts[5], "green")?,
+parse(&path, line_number, parts[6], "blue")?,
+],
+error: parse(&path, line_number, parts[7], "reprojection error")?,
+track,
+})
+})
+.collect()
+}
+fn data_lines(path: &Path) -> Result<Vec<(usize, String)>> {
+let file = File::open(path)?;
+BufReader::new(file)
+.lines()
+.enumerate()
+.filter_map(|(index, line)| match line {
+Ok(line) if line.trim().is_empty() || line.trim_start().starts_with('#') => None,
+Ok(line) => Some(Ok((index + 1, line))),
+Err(error) => Some(Err(ColmapError::Io(error))),
+})
+.collect()
+}
+fn parse<T>(path: &Path, line: usize, value: &str, field: &str) -> Result<T>
+where
+T: std::str::FromStr,
+{
+value.parse().map_err(|_| ColmapError::Parse {
+path: path.to_path_buf(),
+line,
+message: format!("invalid {field}: {value}"),
+})
+}
+fn parse_error<T>(path: &Path, line: usize, message: impl Into<String>) -> Result<T> {
+Err(ColmapError::Parse {
+path: path.to_path_buf(),
+line,
+message: message.into(),
+})
+}
+#[cfg(test)]
+mod tests {
+use std::fs;
+use tempfile::tempdir;
+use super::*;
+#[test]
+fn reads_sparse_colmap_text_directory() {
+let directory = tempdir().expect("temp directory");
+fs::write(
+directory.path().join("cameras.txt"),
+"# cameras\n1 PINHOLE 640 480 500 501 320 240\n",
+)
+.expect("camera fixture");
+fs::write(
+directory.path().join("images.txt"),
+"# images\n1 1 0 0 0 0 0 0 1 frame_000001.png\n10 20 7 30 40 -1\n2 1 0 0 0 1 0 0 1 frame with spaces.png\n\n",
+)
+.expect("image fixture");
+fs::write(
+directory.path().join("points3D.txt"),
+"# points\n7 1 2 3 255 128 0 0.25 1 0 2 0\n",
+)
+.expect("point fixture");
+let dataset = read_colmap_text_dir(directory.path()).expect("COLMAP fixture parses");
+assert_eq!(dataset.cameras.len(), 1);
+assert_eq!(dataset.cameras[0].raw_model, "PINHOLE");
+assert_eq!(dataset.images.len(), 2);
+assert_eq!(dataset.images[0].points2d.len(), 2);
+assert_eq!(dataset.images[0].points2d[1].point3d_id, None);
+assert_eq!(dataset.images[1].name, "frame with spaces.png");
+assert!(dataset.images[1].points2d.is_empty());
+assert_eq!(dataset.points.len(), 1);
+assert_eq!(dataset.points[0].xyz, Vec3 { x: 1.0, y: 2.0, z: 3.0 });
+assert_eq!(dataset.points[0].track.len(), 2);
+}
+#[test]
+fn rejects_malformed_point_track() {
+let directory = tempdir().expect("temp directory");
+fs::write(directory.path().join("cameras.txt"), "1 PINHOLE 1 1 1 1 0 0\n")
+.expect("camera fixture");
+fs::write(directory.path().join("images.txt"), "").expect("image fixture");
+fs::write(
+directory.path().join("points3D.txt"),
+"7 1 2 3 255 128 0 0.25 1\n",
+)
+.expect("point fixture");
+let error = read_colmap_text_dir(directory.path()).expect_err("track must be rejected");
+assert!(error.to_string().contains("track"));
+}
+}
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

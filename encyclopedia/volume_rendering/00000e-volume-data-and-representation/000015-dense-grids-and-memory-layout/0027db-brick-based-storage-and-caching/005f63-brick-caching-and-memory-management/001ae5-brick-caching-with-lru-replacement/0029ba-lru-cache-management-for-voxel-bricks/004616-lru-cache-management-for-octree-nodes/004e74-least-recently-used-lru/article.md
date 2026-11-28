@@ -1,0 +1,73 @@
+# Least Recently Used (LRU)
+
+Also called: Least Recently Used Strategy
+
+## Overview
+Least Recently Used (LRU) is a demand-based page replacement algorithm used to manage the caching of octree nodes in volume rendering [LRU Cache Management for Octree Nodes](11658-lru-cache-management-for-octree-nodes.md). It operates by evicting the node that has not been accessed for the longest period, providing a good approximation to the optimal algorithm without requiring pre-paging or knowledge of future access patterns [LRU Cache Management for Octree Nodes](11658-lru-cache-management-for-octree-nodes.md). It is distinguished from its siblings by its simplicity and lack of application-specific logic, serving as a generic baseline for evaluating more complex prefetching strategies [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A sequence of octree node access requests. [G]
+- Output: Cache state updates (load, evict, update recency). [G]
+
+**Data Structures:**
+1. **Cache Set**: A collection of cached octree nodes. [G]
+2. **Recency Tracker**: A mapping from node ID to its last access timestamp or position in an ordered list. [G]
+3. **LRU List**: A doubly-linked list ordered by recency of access, where the head represents the most recently used node and the tail represents the least recently used node. [G]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Standard LRU cache implementation [G]
+class LRUCache:
+    def __init__(self, capacity):
+        self.cache = {}          # Maps node_id to node_data
+        self.order = []          # List simulating doubly-linked list; index 0 = MRU, -1 = LRU
+        self.capacity = capacity
+
+    def get(self, node_id):
+        if node_id in self.cache:
+            self.order.remove(node_id)
+            self.order.insert(0, node_id)
+            return self.cache[node_id]
+        return None
+
+    def put(self, node_id, node_data):
+        if node_id in self.cache:
+            self.order.remove(node_id)
+        elif len(self.cache) >= self.capacity:
+            evict_id = self.order.pop()
+            del self.cache[evict_id]
+        self.cache[node_id] = node_data
+        self.order.insert(0, node_id)
+```
+
+**Parameters:**
+- Cache Size: The maximum number of octree nodes to hold in memory. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Belady’s Anomaly**: LRU does not suffer from Belady’s anomaly, meaning increasing the cache size will never decrease performance [LRU Cache Management for Octree Nodes](11658-lru-cache-management-for-octree-nodes.md).
+- **Precision**: Timestamps must have sufficient precision to distinguish between recent and older accesses. [G] In practice, monotonic counters or high-resolution timers are used. [G]
+
+## Subtopics
+
+### Cache Retention Policy
+A cache policy that favors reusable prerequisite blocks by assigning retention scores based on near-future demand, shared base membership, dependency centrality, age, and size [S2, unofficial]. It is asymmetric, keeping lower-layer prerequisites more aggressively than transient higher-layer refinements [S2, unofficial]. It applies freshness, version, expiry, and digest checks before retention scoring to ensure reuse cannot silently mix stale blocks from different scene versions [S2, unofficial]. The retention score for block $r$ is calculated as:
+$$ H_x(r) = \beta_1 \rho_x(r) + \beta_2 1[r \in B_x] + \beta_3 \text{cent}(r) - \beta_4 \text{age}(r) - \beta_5 s(r) $$
+where $\rho_x(r)$ is near-future demand, $1[r \in B_x]$ is 1 if in shared base else 0, $\text{cent}(r)$ is dependency centrality, $\text{age}(r)$ is age, and $s(r)$ is size. All terms are normalized over the currently cached set [S2, unofficial].
+
+## Operating characteristics
+- **Strengths**: Simple to implement; does not suffer from Belady’s anomaly; provides a good approximation to the optimal algorithm [LRU Cache Management for Octree Nodes](11658-lru-cache-management-for-octree-nodes.md).
+- **Limitations**: Contains a very limited amount of application-specific logic, making it the most generic among considered out-of-core algorithms [S1].
+- **When to use**: As a baseline for evaluating other algorithms [S1].
+- **When not to use**: Not given in the sources.
+- **Time Complexity**: Not given in the sources.
+- **Memory Complexity**: Not given in the sources.
+
+## Background
+LRU is a simple memory management algorithm discussed extensively in many textbooks on operating systems [S1]. It is used in volume rendering research as a baseline for evaluating out-of-core prefetching strategies, such as Ray Driven Predictor (RDP), Access Path Predictor (APP), and History-based Access Predictor (HAP) [S1].
+
+## Sources
+[S1] Knowledge-Based Out-of-Core Algorithms for Data Management in Visualization, https://doi.org/10.2312/vissym/eurovis06/107-114, fetched 2026-10-26
+[S2] GaussCast: Dependency-Aware Shared Block Retrieval for Multi-User Layered 3D Gaussian Splatting, https://doi.org/10.21203/rs.3.rs-10239330/v1, fetched 2026-10-26 (unofficial)

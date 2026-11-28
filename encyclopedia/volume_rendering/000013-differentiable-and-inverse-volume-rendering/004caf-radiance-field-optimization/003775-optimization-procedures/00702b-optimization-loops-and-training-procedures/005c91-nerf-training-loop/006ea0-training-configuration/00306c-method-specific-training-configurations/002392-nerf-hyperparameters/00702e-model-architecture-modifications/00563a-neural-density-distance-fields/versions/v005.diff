@@ -1,0 +1,133 @@
+--- v004.md
++++ v005.md
+@@ -14,14 +14,14 @@
+ The network consists of two parallel MLP branches with a width of 256 neurons per hidden layer [S1, unofficial].
+ 1.  **Distance Branch:**
+-    *   Input: Concatenated positional encodings (size 144).
+-    *   Layers: Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(256) $\rightarrow$ Activation.
++    *   Input: Concatenated positional encodings (size 144) [S1, unofficial].
++    *   Layers: Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(256) $\rightarrow$ Activation [S1, unofficial].
+     *   Output: $D$ (scalar) and $\frac{\partial D}{\partial w}$ (scalar) [S1, unofficial].
+ 2.  **Color Branch:**
+-    *   Input: Concatenated positional encodings (size 144).
+-    *   Layers: Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(128) $\rightarrow$ Activation.
++    *   Input: Concatenated positional encodings (size 144) [S1, unofficial].
++    *   Layers: Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(128) $\rightarrow$ Activation [S1, unofficial].
+     *   Output: $\mathbf{c}$ (vector, size 3) [S1, unofficial].
+ 
+ **Positional Encoding (PE):**
+-Standard PE $\gamma(\mathbf{p})$ and damped PE $\gamma'(\mathbf{p})$ are used [S1, unofficial]. Let $L$ be the number of frequency bands.
++Standard PE $\gamma(\mathbf{p})$ and damped PE $\gamma'(\mathbf{p})$ are used [S1, unofficial]. Let $L$ be the number of frequency bands [S1, unofficial].
+ *   Standard PE $\gamma(\mathbf{p})$ (size $6L$):
+     $$ \gamma(\mathbf{p}) = [\sin(\mathbf{p}), \cos(\mathbf{p}), \dots, \sin(2^{L-1}\mathbf{p}), \cos(2^{L-1}\mathbf{p})]^T $$
+@@ -71,27 +71,32 @@
+ 
+ def positional_encoding(p, L):
++    """Standard positional encoding [S1, unofficial]."""
+     scales = np.array([2**i for i in range(L)])
+-    freqs = np.einsum('...c,d->...cd', p, scales)
+-    feats = np.stack([np.sin(freqs), np.cos(freqs)], axis=-1)
+-    return feats.reshape(*p.shape[:-1], -1)
++    freqs = p[..., None] * scales[None, None, :]
++    return np.concatenate([np.sin(freqs), np.cos(freqs)], axis=-1).reshape(p.shape[:-1], -1)
+ 
+ def damped_positional_encoding(p, L):
++    """Damped positional encoding [S1, unofficial]."""
+     scales = np.array([2**i for i in range(L)])
+-    freqs = np.einsum('...c,d->...cd', p, scales)
+-    feats = np.stack([np.sin(freqs), np.cos(freqs)], axis=-1)
+-    dampening = np.zeros_like(scales)
+-    dampening[-1] = 1.0 / (2**(L-1))
+-    feats_damped = feats * np.broadcast_to(dampening, feats.shape)
+-    return feats_damped.reshape(*p.shape[:-1], -1)
++    freqs = p[..., None] * scales[None, None, :]
++    feats = np.concatenate([np.sin(freqs), np.cos(freqs)], axis=-1)
++    # Dampen highest frequency band by 1/2^(L-1)
++    feats[..., -1, :] *= 1.0 / (2**(L-1))
++    return feats.reshape(p.shape[:-1], -1)
+ 
+ def tanh_exp(x):
++    """Activation function with continuous second derivative [S1, unofficial]."""
+     return np.tanh(x)
+ 
+ def compute_density(D, grad_D):
++    """Derive density from distance field and gradient [S1, unofficial]."""
+     norm_grad = np.linalg.norm(grad_D, axis=-1, keepdims=True)
+-    sigma = np.where((D > 1e-6) & (norm_grad < 1.0), (1.0 - norm_grad) / D, 0.0)
++    # Guard against division by zero and negative density [G]
++    mask = (D > 1e-6) & (norm_grad < 1.0)
++    sigma = np.where(mask, (1.0 - norm_grad) / D, 0.0)
+     return sigma
+ 
+ def numerical_gradient(func, x, eps=1e-4):
++    """Central difference gradient approximation [G]."""
+     grad = np.zeros_like(x)
+     for i in range(x.shape[-1]):
+@@ -102,4 +107,5 @@
+ 
+ def volume_render(ox, oy, oz, dx, dy, dz, t_n, t_f, num_samples, network_forward):
++    """Standard volumetric rendering along a ray [G]."""
+     ts = np.linspace(t_n, t_f, num_samples)
+     xs = ox + ts * dx
+@@ -111,6 +117,6 @@
+     sigma = compute_density(D, grad_D)
+     dt = (t_f - t_n) / (num_samples - 1)
+-    T = np.ones_like(sigma)
+-    C = np.zeros_like(colors)
++    T = np.ones(num_samples)
++    C = np.zeros((num_samples, 3))
+     for i in range(num_samples - 2, -1, -1):
+         T[i] = T[i+1] * np.exp(-sigma[i] * dt)
+@@ -119,6 +125,13 @@
+     return C[0]
+ 
++def network_forward(x):
++    """Placeholder for the trained NeDDF MLP [S1, unofficial].
++    In practice, this is the trained model with the architecture defined in the layout section."""
++    # Dummy forward pass for structural completeness
++    return np.zeros(x.shape[0]), np.zeros(x.shape[0]), np.zeros((x.shape[0], 3))
++
+ def train_step(positions, directions, observed_colors, camera_poses, 
+              lambda_const, alpha, lambda_D, lambda_c):
++    """Single training step computing losses [S1, unofficial]."""
+     pe = positional_encoding(positions, L=10)
+     pe_damp = damped_positional_encoding(positions, L=10)
+@@ -128,13 +141,18 @@
+     grad_D = numerical_gradient(lambda p: network_forward(p)[0], positions)
+     sigma = compute_density(D, grad_D)
+-    rendered_colors = volume_render(0,0,0, 1,0,0, 0, 10, 128, lambda p: network_forward(p))
++    rendered_colors = volume_render(0,0,0, 1,0,0, 0, 10, 128, network_forward)
+     photometric_loss = np.mean((rendered_colors - observed_colors)**2)
++    
+     norm_grad = np.linalg.norm(grad_D, axis=-1)
+     dD_dt = -norm_grad
+     beta = D * (dD_dt**2) * dD_dw
++    # d2D_dt_dw is not given in the sources; typically computed via automatic differentiation [G]
++    d2D_dt_dw = numerical_gradient(lambda p: network_forward(p)[0], positions) # Placeholder for actual computation
+     constraint_term = (d2D_dt_dw - (alpha / D) * dD_dw)**2
+     const_loss = lambda_const * np.mean(beta * constraint_term)
++    
+     grad_c = numerical_gradient(lambda p: network_forward(p)[2], positions)
+     blank_loss = np.mean(np.sum(grad_c * grad_D, axis=-1)**2)
++    
+     total_loss = photometric_loss + const_loss + blank_loss
+     return total_loss
+@@ -142,13 +160,13 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Cusps:** Distance fields are non-differentiable at cusps where the minimum distance direction switches, causing false densities. Mitigated by the auxiliary gradient $\frac{\partial D}{\partial w}$ [S1, unofficial].
+-*   **Zero Distance:** Density is undefined for $D \sim 0$ due to numerical instability. The approximation assumes $t_n$ is small [S1, unofficial].
++*   **Cusps:** Distance fields are non-differentiable at cusps where the minimum distance direction switches, causing false densities [S1, unofficial]. Mitigated by the auxiliary gradient $\frac{\partial D}{\partial w}$ [S1, unofficial].
++*   **Zero Distance:** Density is undefined for $D \sim 0$ due to numerical instability [S1, unofficial]. The approximation assumes $t_n$ is small [S1, unofficial].
+ *   **Interior Regions:** As a UDF-based method, it lacks distance field information inside objects, providing no helpful gradient directions in the interior [S1, unofficial].
+-*   **High-Frequency PE:** Standard PE amplifies high-frequency elements in the density derivative hierarchy by $2^{L-1}$, causing instability. Damped PE is required [S1, unofficial].
++*   **High-Frequency PE:** Standard PE amplifies high-frequency elements in the density derivative hierarchy by $2^{L-1}$, causing instability [S1, unofficial]. Damped PE is required [S1, unofficial].
+ *   **Color Reconstruction:** Color field reconstruction is worse than NeRF for the same network size because damped PE neglects high-frequency components in the non-derivative hierarchy [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+ *   **Performance:** Provides competitive novel view synthesis quality (PSNR slightly inferior to SOTA NeRF variants but better than NeuS on some metrics) and more stable meshes [S1, unofficial].
+ *   **Strengths:** Handles transparency and thin surfaces better than NeuS; supports reprojection-based camera pose localization; boundaryless scene representation [S1, unofficial].

@@ -1,0 +1,187 @@
+--- v009.md
++++ v010.md
+@@ -4,126 +4,85 @@
+ 
+ ## Overview
+-Computes the exact signed distance from a point to an octahedron centered at the origin with size parameter $s$. It solves the primitive distance query required for ray marching and collision detection. It is distinguished from other polyhedral primitives by its symmetry across all three axes and its reliance on a specific face-identification logic based on the sum of absolute coordinates [S1, unofficial].
++Computes the Euclidean signed distance from a query point to the surface of a regular octahedron centered at the origin. It differs from other polyhedral primitives by exploiting the octahedron's specific symmetry to reduce the computation to a few conditional branches and a single vector length calculation, avoiding the iterative folding used in more complex shapes like the dodecahedron.
+ 
+ ## How it works
+-**Inputs:** Point $p = (p_x, p_y, p_z)$; Size $s$ (distance from center to vertex along axes).
+-**Output:** Signed distance $d$. Negative inside, positive outside, zero on surface.
++**Inputs:** Query point $p = (p_x, p_y, p_z)$; size parameter $s$ (distance from center to vertex along axes).
++**Output:** Signed distance $d$. Negative inside, positive outside.
+ 
+-**Data Structures:**
+-- $p$: Input vector.
+-- $q$: Permuted and transformed vector used for distance calculation.
+-- $m$: Scalar intermediate value.
+-- $k$: Scalar clamp value.
+-
+-**Steps:**
+-1.  Compute absolute coordinates: $p' = (|p_x|, |p_y|, |p_z|)$.
+-2.  Compute $m = p'_x + p'_y + p'_z - s$.
+-3.  Check if the point is in the central region (closest to the origin relative to the face normals). If $3 p'_x < m$, $3 p'_y < m$, and $3 p'_z < m$, the point is inside the "core" region where the closest feature is not a single face but the center. In this case, return $d = m \cdot \tan(\pi/6)$ [S1, unofficial].
+-4.  Determine the closest face by comparing $3 p'_i$ to $m$. The face normal corresponds to the axis with the largest coordinate.
+-    -   If $3 p'_x < m$ is false, check $3 p'_y < m$.
+-    -   If $3 p'_y < m$ is false, check $3 p'_z < m$.
+-    -   The logic in [S1, unofficial] uses a specific permutation order to map the closest face to a canonical $q$ vector.
+-    -   Let $q$ be a permutation of $p'$ such that the component corresponding to the largest coordinate in $p'$ is handled last in the distance calculation. Specifically, the source code implies:
+-        -   If $3 p'_x < m$ is false (i.e., $p'_x$ is large), we might select a permutation. However, the GLSL code shows:
+-            -   If $3 p'_x < m$: $q = p'$
+-            -   Else if $3 p'_y < m$: $q = (p'_y, p'_z, p'_x)$
+-            -   Else if $3 p'_z < m$: $q = (p'_z, p'_x, p'_y)$
+-            -   Else: Central region (handled in step 3).
+-5.  Calculate $k = \text{clamp}(0.5 \cdot (q_z - q_y + s), 0, s)$.
+-6.  Calculate the distance vector: $v = (q_x, q_y - s + k, q_z - k)$.
+-7.  Return $d = \|v\|$.
++1.  **Symmetry Reduction**: Compute $q = |p|$. Map $p$ into the first octant where $q_x, q_y, q_z \ge 0$.
++2.  **Central Region Check**: Calculate $m = q_x + q_y + q_z - s$. If the point is in the central region (closest to the origin relative to the face normals), return $m \cdot \tan(\pi/6)$. Note: $\tan(\pi/6) \approx 0.57735027$.
++3.  **Face Identification**: Determine which of the three coordinate planes ($xy, yz, zx$) the closest face lies on by comparing $3q_i$ against $m$.
++    *   If $3q_x < m$, the closest face is in the $yz$ plane (relative to the folded space). Set $q' = (q_x, q_y, q_z)$.
++    *   Else if $3q_y < m$, the closest face is in the $xz$ plane. Set $q' = (q_y, q_z, q_x)$.
++    *   Else if $3q_z < m$, the closest face is in the $xy$ plane. Set $q' = (q_z, q_x, q_y)$.
++    *   *Note*: The central region check (Step 2) handles the case where no single face dominates in this specific branching logic, effectively covering the "else" case.
++4.  **Distance Calculation**:
++    *   Let $q'_x, q'_y, q'_z$ be the components of the selected $q'$.
++    *   Calculate $k = \text{clamp}(0.5 \cdot (q'_z - q'_y + s), 0.0, s)$.
++    *   Compute the vector $v = (q'_x, q'_y - s + k, q'_z - k)$.
++    *   Return $d = \|v\|$.
+ 
+ **Pseudocode:**
+ ```python
+-import math
++def sd_octahedron(p, s):
++    # 1. Symmetry reduction
++    q = abs(p)
++    qx, qy, qz = q.x, q.y, q.z
++    
++    # 2. Central region check
++    m = qx + qy + qz - s
++    if m >= 0.0: # Inside or on boundary of central region? 
++                 # Actually, m < 0 is inside. The source returns m * tan(pi/6) 
++                 # when the condition 3*p_i < m fails for all i.
++                 # Let's follow the source logic strictly.
++        pass
+ 
+-def sd_octahedron(p, s):
+-    """
+-    Signed distance to an octahedron of size s.
+-    p: tuple or list of 3 floats (x, y, z)
+-    s: float, size parameter
+-    """
+-    # Step 1: Absolute coordinates
+-    px, py, pz = abs(p[0]), abs(p[1]), abs(p[2])
++    # 3. Face identification
++    # The source uses: if 3*p.x < m ... else if 3*p.y < m ... else if 3*p.z < m ... else return m*tan(pi/6)
++    # This implies the "else" branch is the central region.
+     
+-    # Step 2: Calculate m
+-    m = px + py + pz - s
++    if 3.0 * qx < m:
++        q_prime = (qx, qy, qz)
++    elif 3.0 * qy < m:
++        q_prime = (qy, qz, qx)
++    elif 3.0 * qz < m:
++        q_prime = (qz, qx, qy)
++    else:
++        # Central region
++        return m * 0.57735027 # tan(pi/6)
++
++    # 4. Distance calculation
++    qx_p, qy_p, qz_p = q_prime
++    k = clamp(0.5 * (qz_p - qy_p + s), 0.0, s)
+     
+-    # Step 3: Check central region
+-    # The condition 3*p_i < m for all i implies the point is close to the center
+-    # relative to the face projections.
+-    if 3 * px < m and 3 * py < m and 3 * pz < m:
+-        return m * math.tan(math.pi / 6)
++    # Vector components
++    vx = qx_p
++    vy = qy_p - s + k
++    vz = qz_p - k
+     
+-    # Step 4: Determine permutation q
+-    # We need to find which coordinate is "largest" in the context of the face normal.
+-    # The GLSL logic:
+-    # if (3.0*p.x < m) q = p.xyz;
+-    # else if (3.0*p.y < m) q = p.yzx;
+-    # else if (3.0*p.z < m) q = p.zxy;
+-    # else return m*0.57735027; (This branch is unreachable if step 3 passed? 
+-    # Actually, the GLSL code returns in the 'else' of the if-else chain.
+-    # Let's re-read carefully.
+-    # The GLSL code:
+-    # if( 3.0*p.x < m ) q = p.xyz;
+-    # else if( 3.0*p.y < m ) q = p.yzx;
+-    # else if( 3.0*p.z < m ) q = p.zxy;
+-    # else return m*0.57735027;
+-    # This means if NONE of the conditions 3*p_i < m are true, it returns the central distance.
+-    # But wait, if 3*px < m is false, it goes to next. If 3*py < m is false, next. If 3*pz < m is false, else.
+-    # So the 'else' covers the case where 3*px >= m AND 3*py >= m AND 3*pz >= m.
+-    # This is the central region logic.
+-    
+-    # So, if we reach here, at least one condition was true.
+-    if 3 * px < m:
+-        qx, qy, qz = px, py, pz
+-    elif 3 * py < m:
+-        qx, qy, qz = py, pz, px
+-    elif 3 * pz < m:
+-        qx, qy, qz = pz, px, py
+-    else:
+-        # This should have been caught by the combined check in Step 3?
+-        # No, the GLSL code checks them sequentially.
+-        # If 3*px < m is false, it checks 3*py < m.
+-        # If that is false, it checks 3*pz < m.
+-        # If that is false, it returns.
+-        # So the 'else' in GLSL is the central region.
+-        # My Step 3 combined check is equivalent to the GLSL 'else' block.
+-        # So if we are here, we must have entered one of the if/elif blocks.
+-        pass 
+-        
+-    # Step 5: Calculate k
+-    k = max(0.0, min(s, 0.5 * (qz - qy + s)))
+-    
+-    # Step 6: Calculate distance vector
+-    vx = qx
+-    vy = qy - s + k
+-    vz = qz - k
+-    
+-    # Step 7: Return length
+-    return math.sqrt(vx*vx + vy*vy + vz*vz)
++    return sqrt(vx*vx + vy*vy + vz*vz)
+ ```
+ 
+ **Parameters:**
+-- $s$: Size of the octahedron. Typical values depend on scene scale.
++*   $s$: Size of the octahedron. Typically $s > 0$.
+ 
+ **Edge Cases:**
+-- $s=0$: Degenerate point at origin.
+-- Precision: Near the boundaries, floating point errors may cause slight artifacts. The clamp operation helps stability.
++*   $s=0$: Degenerate point at origin.
++*   Precision: Clamping $k$ prevents numerical instability when the point is exactly on the symmetry planes.
+ 
+ ## Subtopics
+ 
+ ### Equilateral Triangle Signed Distance Function
+-Computes the signed distance to an equilateral triangle with inscribed radius $r$. It transforms the point into a canonical frame, reflects it if necessary to handle symmetry, clamps to the triangle edges, and returns the distance. It is chosen when 2D triangular primitives are needed in SDF scenes [S2, unofficial].
++Computes the signed distance to an equilateral triangle with inscribed radius $r$. It transforms the 2D point into a fundamental domain using rotation and reflection, then computes the distance to the boundary. It is used for 2D cross-sections or planar primitives. Choose it when a 2D triangular shape is needed. Based on Inigo Quilez's exact function [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ constant time.
+-- **Memory Complexity:** $O(1)$ constant space.
+-- **Strengths:** Exact analytical solution, no iteration required, smooth gradients available for normal calculation.
+-- **Limitations:** Only applies to regular octahedra. Irregular octahedra require decomposition or approximation.
+-- **When to use:** When rendering or simulating octahedral shapes in ray marching or collision detection.
++*   **Time Complexity**: $O(1)$. Constant number of arithmetic operations and comparisons.
++*   **Memory Complexity**: $O(1)$. No auxiliary data structures.
++*   **Strengths**: Extremely fast evaluation, suitable for real-time ray marching. Simple branching logic.
++*   **Limitations**: Only applies to regular octahedra. Not suitable for irregular polyhedra without modification.
++*   **Scaling**: Linear with respect to $s$.
+ 
+ ## Background
+-The octahedron SDF is a standard primitive in the family of procedural SDFs popularized by Inigo Quilez and others in the demoscene and real-time graphics community. It is part of the broader set of polyhedral primitives used in signed distance field rendering. The specific implementation details are found in various online repositories and code snippets [S1, unofficial][S2, unofficial].
++The octahedron SDF is a standard primitive in procedural geometry and ray marching, popularized by Inigo Quilez's online articles on SDFs. It is part of the family of polyhedral primitives used in signed distance field rendering.
+ 
+ ## Sources

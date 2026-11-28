@@ -1,0 +1,134 @@
+# Lie Algebra (Tangent Plane) Pose Optimization
+
+Also called: Manifold Optimization, Pose Optimization on Tangent Plane, SE(3) Pose Tracking, Tangent Plane Optimization, se(3) Optimization
+
+## Overview
+This method estimates the current 6-DoF camera pose $T \in SE(3)$ by optimizing in the tangent space of the special Euclidean group (Lie algebra $\mathfrak{se}(3)$) while keeping voxel embeddings and implicit network parameters fixed [S1, S2]. It differs from direct optimization on the $SE(3)$ manifold, which is prone to incorrect estimation results due to noisy photometric loss landscapes [S2]. By solving for the incremental update $\xi \in \mathfrak{se}(3)$ on the tangent plane, the method achieves smoother and quicker convergence [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $T_0$: Initial pose estimate (typically from the previous frame or a zero-motion model) [S1, S2].
+    *   $K$: Camera intrinsic parameters [S2].
+    *   $R$: A sampled set of pixel coordinates (sparse set of $N_t$ pixels) from the input image [S1, S2].
+    *   $I(u)$: Observed image intensity at pixel $u$ [S2].
+    *   $\theta$: Fixed parameters of the implicit network (SDF decoder) and voxel embeddings [S1, S2].
+    *   $F(\cdot; \theta)$: The rendering/compositing function that maps 3D coordinates to image space [S2].
+*   **Outputs:**
+    *   $\hat{T}$: The optimized camera pose transformation from camera coordinates to world coordinates [S2].
+
+**Data Structures:**
+*   The optimization variable is $\xi \in \mathfrak{se}(3)$, a 6-dimensional vector representing the twist (3 for rotation, 3 for translation) [S1, S2].
+*   The pose $T$ is an element of $SE(3)$, typically represented as a $4 \times 4$ homogeneous transformation matrix [S1, S2].
+
+**Numbered Steps:**
+1.  **Initialization:** Initialize the pose of the new frame $T_0$ to be identical to the last tracked frame, assuming a zero motion model [S1]. Other motion models (e.g., constant motion) are applicable but zero motion is standard [S1].
+2.  **Sampling:** Sample a sparse set of $N_t$ pixels from the input images for tracking [S1].
+3.  **Loss Calculation:** Compute the photometric loss $L$ between the rendered image and the observed image [S2]. The loss is defined as:
+    $$ L = \sum_{u \in R} \| I(F(T K u; \theta)) - I(u) \|^2 $$
+    where $T$ is the current pose estimate, $K$ are intrinsics, $u$ are pixel coordinates, and $I(\cdot)$ is the compositing function [S2].
+4.  **Optimization:** Solve for the optimal tangent vector $\hat{\xi}$ that minimizes the loss:
+    $$ \hat{\xi} = \arg \min_{\xi \in \mathfrak{se}(3)} L(\xi | T_0, I, \theta) $$
+    This is performed via back-propagation [S1, S2].
+5.  **Pose Update:** Update the pose by exponentiating the optimal tangent vector and composing it with the initial pose:
+    $$ \hat{T} = \exp(\hat{\xi}) \hat{T}_0 $$
+    This represents applying the incremental transform $\exp(\hat{\xi})$ to the current estimate [S2].
+6.  **Iteration:** Repeat steps 3-5 until convergence [S1, S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lie_algebra_pose_optimization(T0, K, R, theta, num_iterations, learning_rate):
+    # T0: 4x4 initial pose matrix
+    # K: 3x3 intrinsic matrix
+    # R: list of pixel coordinates (u, v)
+    # theta: fixed network parameters
+    # num_iterations: int
+    # learning_rate: float
+    T = T0
+    for _ in range(num_iterations):
+        # [G] Volume rendering procedure is handled by the parent method.
+        rendered = render_image(T, K, R, theta)
+        loss = 0.0
+        for u in R:
+            diff = rendered[u] - observed_image[u]
+            loss += sum(d**2 for d in diff)
+        # [G] Automatic differentiation computes the gradient w.r.t. xi.
+        grad_xi = compute_gradient(loss, T, K, R, theta)
+        delta_xi = [-learning_rate * g for g in grad_xi]
+        T = mat_mul(exp_se3(delta_xi), T)
+    return T
+
+def exp_se3(xi):
+    omega = xi[:3]
+    delta = xi[3:]
+    theta = norm(omega)
+    if theta < 1e-6:
+        R = identity(3)
+        J = identity(3)
+    else:
+        w_hat = skew(omega)
+        R = identity(3) + sin(theta)/theta * w_hat + (1-cos(theta))/(theta**2) * mat_mul(w_hat, w_hat)
+        J = identity(3) + (1-cos(theta))/(theta**2) * w_hat + (theta-sin(theta))/(theta**3) * mat_mul(w_hat, w_hat)
+    T = identity(4)
+    T[:3, :3] = R
+    T[:3, 3] = mat_vec(J, delta)
+    return T
+
+def skew(v):
+    return [[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]]
+
+def identity(n):
+    return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
+
+def norm(v):
+    return sum(x**2 for x in v)**0.5
+
+def mat_mul(A, B):
+    return [[sum(A[i][k]*B[k][j] for k in range(len(B))) for j in range(len(B[0]))] for i in range(len(A))]
+
+def mat_vec(M, v):
+    return [sum(M[i][j]*v[j] for j in range(len(v))) for i in range(len(M))]
+
+def sin(x): return x - x**3/6 + x**5/120
+def cos(x): return 1 - x**2/2 + x**4/24
+
+def render_image(T, K, R, theta):
+    # [G] Handled by parent volume rendering method.
+    pass
+
+def compute_gradient(loss, T, K, R, theta):
+    # [G] Handled by automatic differentiation framework.
+    pass
+```
+
+**Parameters:**
+*   $N_t$: Number of sparse pixels sampled from input images for tracking [S1].
+*   $T_0$: Initial pose transformation from camera coordinates to world coordinates [S2].
+*   $K$: Camera intrinsic parameters [S2].
+*   $R$: A sampled set of pixel coordinates [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Interference from Mapping:** A copy of the SDF decoder and voxel embeddings must be kept for the tracking process, updated only when a new frame is fused into the map, to prevent interference from ongoing mapping updates [S1].
+*   **Local Minima:** Images are complex signals, making gradient descent prone to local minima [S2]. A truncated dynamic low-pass filter (TDLF) can be used to suppress high-frequency signals and escape local minima [S2].
+*   **Large Offsets:** Localization performance degrades when translation error reaches large values (e.g., 16m) and rotation error is significant (e.g., 16°), due to small overlap between observed and rendered images [S2].
+
+## Subtopics
+
+### [Error-state Camera Optimization](23094-error-state-camera-optimization.md)
+Error-state camera optimization refines camera poses and intrinsic parameters by optimizing residual corrections in the tangent space of the SE(3) manifold rather than updating the full transformation directly. It builds on Lie Algebra (Tangent Plane) Pose Optimization by specifically handling both extrinsic pose errors and intrinsic focal length perturbations within a differentiable rendering framework. This approach is distinct from direct manifold optimization by linearizing the update around a fixed initialization, ensuring smoother convergence for small residuals. [Error-state Camera Optimization](23094-error-state-camera-optimization.md)
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Memory usage is dominated by the voxel embeddings and implicit network parameters, which are kept fixed during tracking [S1]. The method requires back-propagation through the volume rendering function, which is computationally intensive [G].
+*   **Measured Performance:** In experiments with initial translation errors up to 16m, the method achieved translation errors as low as 0.02m and rotation errors as low as 0.09° when combined with TDLF [S2]. Direct manifold optimization (iNeRF) failed or produced large errors (e.g., 22.78m translation error) under similar conditions [S2].
+*   **Scaling:** The method scales with the number of sampled pixels $N_t$ and the complexity of the implicit network [S1, S2].
+*   **Strengths:** Smoother and quicker convergence compared to direct optimization on $SE(3)$ [S2]. Robust to local minima when combined with TDLF [S2].
+*   **Limitations:** Performance degrades with large initial pose errors due to limited overlap [S2]. Requires a copy of the network for tracking to avoid interference [S1].
+
+## Background
+The method builds on the principles of Lie group optimization, where updates are performed in the tangent space to maintain the manifold structure [S1, S2]. The specific formulation using the tangent plane for $SE(3)$ optimization was highlighted in [S2] as superior to direct manifold optimization for avoiding noisy photometric loss landscapes. The approach is used in systems like Vox-Fusion for dense tracking and mapping [S1] and LATITUDE for robotic global localization [S2].
+
+## Sources
+[S1] Vox-Fusion: Dense Tracking and Mapping with Voxel-based Neural Implicit Representation, https://doi.org/10.1109/ismar55827.2022.00066, fetched 2026-10-26
+[S2] LATITUDE: Robotic Global Localization with Truncated Dynamic Low-pass Filter in City-scale NeRF, https://doi.org/10.1109/icra48891.2023.10161570, fetched 2026-10-29

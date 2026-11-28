@@ -1,0 +1,52 @@
+# Dense Copy Ingestion
+## Overview
+Dense Copy Ingestion constructs a VDB grid from a dense 3D array, storing only values that differ from a specified background value as active voxels [S1, unofficial].
+## How it works
+**Inputs:** `array` (dense 3D array), `background` (scalar value representing empty space), `bbox_min` (world-space minimum coordinate of the grid, 3D vector), and `voxel_size` (physical size per voxel, scalar) [G].
+**Outputs:** A VDB grid object containing active voxels [S1, unofficial].
+**Data Structures:** The source `array` is indexed by integer coordinates `(ix, iy, iz)` [G]. The target VDB grid stores only non-background values as active voxels, with a separate background value [S1, unofficial]. Exact VDB internal bit packing is not given in the sources.
+**Steps:**
+1. Iterate through all integer indices `(ix, iy, iz)` of the input `array` [G].
+2. For each index, compare `array[ix, iy, iz]` to `background` [S1, unofficial].
+3. If they differ, compute the world-space center coordinate `c` using `bbox_min` and `voxel_size` [G].
+4. Store `(c, value)` in a temporary list `data` [G].
+5. Construct the VDB grid from `data` and `background` [S1, unofficial].
+**Formulas:** $c = \text{bbox\_min} + (\text{ix} + 0.5, \text{iy} + 0.5, \text{iz} + 0.5) \times \text{voxel\_size}$, where $c$ is the world-space center coordinate, $\text{bbox\_min}$ is the grid's minimum world coordinate, $(\text{ix}, \text{iy}, \text{iz})$ are integer array indices, and $\text{voxel\_size}$ is the physical dimension per voxel [G].
+**Parameters:** `background` must match the type of `array`; a typical value is `0.0` [G]. `voxel_size` typical values are not given in the sources [S1, unofficial].
+**Edge Cases:** If all values equal `background`, the resulting grid has no active voxels [S1, unofficial]. Degenerate input (empty or zero-sized array) returns an empty grid [G]. Precision issues may arise if `voxel_size` is extremely small or `bbox_min` is large, causing floating-point drift in coordinate computation [G].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dense_copy_ingestion(array, background, bbox_min, voxel_size):
+    data = []
+    for ix in range(array.shape[0]):
+        for iy in range(array.shape[1]):
+            for iz in range(array.shape[2]):
+                v = array[ix, iy, iz]
+                if v != background:
+                    c = (
+                        bbox_min[0] + (ix + 0.5) * voxel_size,
+                        bbox_min[1] + (iy + 0.5) * voxel_size,
+                        bbox_min[2] + (iz + 0.5) * voxel_size
+                    )
+                    data.append((c, v))
+    return build_vdb_grid(data, background)
+
+def build_vdb_grid(data, background):
+    # Construct VDB grid structure from active voxel list and background value [S1, unofficial]
+    return {"voxels": data, "background": background}
+```
+## Subtopics
+
+### [Sparse-to-Dense Grid Conversion](12676-sparse-to-dense-grid-conversion.md)
+Converts a sparse OpenVDB volume grid into a dense, contiguous float array with `LayoutXYZ` ordering, then exports it as a legacy VTK `STRUCTURED_POINTS` binary file. It bridges the gap between memory-efficient sparse representations and renderers requiring dense, contiguous memory layouts [G].
+
+## Operating characteristics
+Time and memory complexity: Not given in the sources [S1, unofficial].
+Measured performance: Not given in the sources [S1, unofficial].
+Strengths and limitations: Not given in the sources [S1, unofficial].
+## Background
+Origin: This method is part of the Lyr.jl volume rendering library, specifically wired into its preview kernel for building scene data from dense inputs [S1, unofficial].
+## Sources
+[S1] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)

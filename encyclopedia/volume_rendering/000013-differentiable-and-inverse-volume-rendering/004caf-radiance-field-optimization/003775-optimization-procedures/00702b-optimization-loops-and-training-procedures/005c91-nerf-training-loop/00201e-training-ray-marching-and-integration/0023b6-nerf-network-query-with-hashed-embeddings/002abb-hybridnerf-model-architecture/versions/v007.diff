@@ -1,0 +1,321 @@
+--- v006.md
++++ v007.md
+@@ -4,241 +4,50 @@
+ 
+ ## Overview
+-HybridNeRF is a neural radiance field architecture that combines dense multi-resolution 3D feature grids with multi-resolution triplanes to featurize 3D sample locations [S1]. It solves the problem of balancing rendering quality and computational efficiency in neural rendering by leveraging the geometric priors of 3D grids and the view-dependent flexibility of 2D triplanes [S1]. It sets itself apart from its siblings by summing features across resolution levels rather than concatenating them, and by using a spatially adaptive surfaceness field for density estimation [S1].
++HybridNeRF is a neural radiance field architecture that accelerates training and rendering by combining dense multi-resolution 3D feature grids with multi-resolution triplanes [S1]. It solves the bottleneck of querying high-dimensional implicit representations by using explicit grid structures for spatial features while maintaining the flexibility of neural networks for color and geometry prediction [S1]. It sets itself apart from pure grid-based methods like [Instant-NGP](13315-instant-ngp.md) by incorporating triplanes, which provide anisotropic feature resolution, and from pure MLP methods by avoiding the computational cost of evaluating deep networks for every sample point [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D point $\mathbf{x}$ and a viewing direction $\mathbf{d}$.
+-*   **Outputs:** Color $\mathbf{c}$ and signed distance $f$ (from which density $\sigma$ is derived).
++*   **Input:** A 3D point $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{d} \in \mathbb{R}^3$.
++*   **Outputs:** Color $\mathbf{c} \in \mathbb{R}^3$ and signed distance $f \in \mathbb{R}$ (or density $\sigma$ derived from $f$).
+ 
+ **Data Structures:**
+-1.  **3D Feature Grids:** Three resolution levels: $128^3$, $256^3$, and $512^3$.
+-2.  **Triplanes:** Seven resolution levels, ranging from $128^2$ to $8,192^2$.
+-3.  **Surfaceness Field:** A $512^3$ voxel grid storing $\beta(\mathbf{x})$.
+-4.  **MLPs:** Separate MLPs for color and signed distance prediction.
++1.  **3D Feature Grids:** Three resolution levels with dimensions $128^3$, $256^3$, and $512^3$. Each cell stores a feature vector of size $K=4$.
++2.  **Triplanes:** Seven resolution levels with dimensions $128^2, 256^2, \dots, 8192^2$. Each plane stores a feature vector of size $K=4$.
++3.  **Surfaceness Field:** A $512^3$ voxel grid storing scalar values $\beta(\mathbf{x}) > 0$.
++4.  **MLPs:** Two small Multi-Layer Perceptrons (one for color, one for signed distance).
++
++**Numbered Steps:**
++
++1.  **Feature Fetching (3D Grids):** For the input point $\mathbf{x}$, query the three 3D feature grids. At each resolution level $l \in \{1, 2, 3\}$, fetch $K=4$ features using trilinear interpolation. Let the fetched features be $\mathbf{g}_l(\mathbf{x})$.
++2.  **Feature Fetching (Triplanes):** For the input point $\mathbf{x}$, project it onto the three canonical planes (XY, YZ, XZ) to obtain 2D coordinates. Query the seven triplane levels. At each resolution level $m \in \{1, \dots, 7\}$, fetch $K=4$ features using bilinear interpolation. Let the fetched features be $\mathbf{t}_m(\mathbf{x})$.
++3.  **Feature Aggregation:**
++    *   Sum the features from the 3D grids: $\mathbf{G}(\mathbf{x}) = \sum_{l=1}^{3} \mathbf{g}_l(\mathbf{x})$.
++    *   Sum the features from the triplanes: $\mathbf{T}(\mathbf{x}) = \sum_{m=1}^{7} \mathbf{t}_m(\mathbf{x})$.
++    *   Concatenate the summed features: $\mathbf{H}(\mathbf{x}) = [\mathbf{G}(\mathbf{x}); \mathbf{T}(\mathbf{x})]$. The resulting vector $\mathbf{H}(\mathbf{x})$ has dimension $4K + 4K = 16$ (since $K=4$).
++4.  **Direction Encoding:** Encode the viewing direction $\mathbf{d}$ using spherical harmonics up to the 4th degree. Let this encoded vector be $\mathbf{e}(\mathbf{d})$.
++5.  **Network Query:**
++    *   Feed $\mathbf{H}(\mathbf{x})$ into the Signed Distance MLP to obtain the raw signed distance $f(\mathbf{x})$.
++    *   Feed $\mathbf{H}(\mathbf{x})$ and $\mathbf{e}(\mathbf{d})$ into the Color MLP to obtain the color $\mathbf{c}(\mathbf{x}, \mathbf{d})$.
++6.  **Density Computation:** Compute the density $\sigma_{\text{SDF}}(\mathbf{x})$ using the SDF formulation:
++    $$ \sigma_{\text{SDF}}(\mathbf{x}) = \beta(\mathbf{x})\Psi(f(\mathbf{x})\beta(\mathbf{x})) $$
++    where $\Psi$ is the CDF of a standard Laplace distribution.
++7.  **Surfaceness Query:** Query the surfaceness field $\beta(\mathbf{x})$ from the $512^3$ voxel grid using nearest-neighbor interpolation.
++
++**Formulas:**
++
++The Laplace CDF $\Psi(s)$ is defined as:
++$$ \Psi(s) = \begin{cases} \frac{1}{2} \exp(-s) & \text{if } s > 0 \\ 1 - \frac{1}{2} \exp(s) & \text{if } s \leq 0 \end{cases} $$
++where $s = f(\mathbf{x})\beta(\mathbf{x})$ [S1].
+ 
+ **Parameters:**
+ *   $K=4$: Number of features fetched per level [S1].
+-*   $\beta(\mathbf{x}) > 0$: Surfaceness parameter, implemented as a spatially adaptive $512^3$ voxel grid queried via nearest-neighbor interpolation [S1].
++*   3D Grid Levels: 3 resolutions ($128^3, 256^3, 512^3$) [S1].
++*   Triplane Levels: 7 resolutions ($128^2$ to $8192^2$) [S1].
++*   Surfaceness Grid Resolution: $512^3$ [S1].
++*   Spherical Harmonics Degree: 4 [S1].
+ 
+-**Steps:**
+-1.  **Fetch 3D Features:** For the given 3D point $\mathbf{x}$, fetch $K=4$ features from each of the 3 resolution levels of the 3D feature grids using trilinear interpolation.
+-2.  **Fetch Triplane Features:** For the given 3D point $\mathbf{x}$, project it onto the 7 triplane levels (resolutions $128^2$ to $8,192^2$) and fetch $K=4$ features from each level using bilinear interpolation.
+-3.  **Sum Features:** Sum the fetched features across all levels for the 3D grids separately to get $\mathbf{f}_{3D}$. Sum the fetched features across all levels for the triplanes separately to get $\mathbf{f}_{tri}$.
+-4.  **Concatenate:** Concatenate $\mathbf{f}_{3D}$ and $\mathbf{f}_{tri}$ to form a 16-dimensional input vector ($4K=16$) for the MLPs [S1].
+-5.  **Encode Direction:** Encode the viewing direction $\mathbf{d}$ using spherical harmonics up to the 4th degree.
+-6.  **Predict Color and Distance:** Pass the concatenated features and the encoded direction into separate MLPs to predict color $\mathbf{c}$ and signed distance $f$.
+-7.  **Compute Density:** Compute density $\sigma_{\text{SDF}}(\mathbf{x})$ using the SDF formulation.
+-8.  **Aliasing Handling:** Handle aliasing as described in VR-NeRF due to the multi-resolution feature grid [S1].
+-
+-**Formulas:**
+-The density is computed as [S1]:
+-$$
+-\sigma_{\text{SDF}}(\mathbf{x}) := \beta(\mathbf{x})\Psi(f(\mathbf{x})\beta(\mathbf{x}))
+-$$
+-where $\Psi$ is the CDF of a standard Laplace distribution:
+-$$
+-\Psi(s) = \begin{cases} \frac{1}{2} \exp(-s) & \text{if } s > 0 \\ 1 - \frac{1}{2} \exp(s) & \text{if } s \leq 0. \end{cases}
+-$$
+-Here, $s = f(\mathbf{x})\beta(\mathbf{x})$.
+-
+-**Pseudocode:**
+-```python
+-import numpy as np
+-
+-def hybrid_nerf_query(x, d, grids_3d, triplanes, surfaceness_grid, color_mlp, dist_mlp):
+-    """
+-    Query the HybridNeRF model for a 3D point x and viewing direction d.
+-    
+-    Args:
+-        x: (3,) float array, 3D point coordinates.
+-        d: (3,) float array, viewing direction.
+-        grids_3d: List of 3 numpy arrays for 3D feature grids at levels 128^3, 256^3, 512^3.
+-        triplanes: List of 3 numpy arrays for triplanes (Note: Source says 7 levels, but lists 3 triplanes. 
+-                   Assuming triplanes list contains the 3 triplanes, each with 7 resolution levels or 
+-                   the list contains 7 triplanes. Based on "concatenate... from the 3 triplanes", 
+-                   we assume 3 triplanes, each potentially multi-resolution or the 7 levels refer to 
+-                   the triplanes collectively. The source says "from triplanes at 7 levels... from the 3 triplanes".
+-                   Let's assume triplanes is a list of 3 arrays, and each array has 7 levels, or 
+-                   the 7 levels are distributed. Given "fetch K=4 features per level from triplanes at 7 levels",
+-                   and "concatenate... from the 3 triplanes", it implies 3 triplanes, each contributing features.
+-                   Let's assume triplanes is a list of 3 arrays, and we fetch from 7 levels per triplane? 
+-                   Or 7 levels total across 3 triplanes? 
+-                   Source: "fetch K=4 features per level from triplanes at 7 levels (from 128^2 to 8,192^2)".
+-                   Source: "concatenate the summed features from the 3D grid to those from the 3 triplanes".
+-                   This implies 3 triplanes. The 7 levels likely apply to the triplanes. 
+-                   Let's assume each of the 3 triplanes has 7 resolution levels.
+-        surfaceness_grid: (512, 512, 512) numpy array.
+-        color_mlp: Function taking (16 + SH_dim) -> (3,)
+-        dist_mlp: Function taking (16) -> (1,)
+-        
+-    Returns:
+-        c: (3,) float array, color.
+-        sigma: (1,) float array, density.
+-    """
+-    
+-    # 1. Fetch 3D Features
+-    f_3d_levels = []
+-    for grid in grids_3d:
+-        # Trilinear interpolation
+-        feat = trilinear_interpolate(grid, x)
+-        f_3d_levels.append(feat)
+-    
+-    # Sum features across levels for 3D grids
+-    f_3d_sum = np.sum(f_3d_levels, axis=0)
+-    
+-    # 2. Fetch Triplane Features
+-    # Assuming triplanes is a list of 3 arrays, each with 7 levels? 
+-    # Or triplanes is a list of 7 arrays? 
+-    # Source: "from triplanes at 7 levels... from the 3 triplanes".
+-    # Let's assume triplanes is a list of 3 arrays, and we iterate over 7 levels for each?
+-    # Or triplanes is a list of 7 arrays, and we group them into 3?
+-    # Given "concatenate... from the 3 triplanes", it's likely 3 triplanes.
+-    # Let's assume triplanes is a list of 3 arrays, and each has 7 resolution levels stored in a nested structure or we just have 7 levels total.
+-    # To be safe and generic, let's assume we have 7 levels of triplane features.
+-    # The source says "fetch K=4 features per level from triplanes at 7 levels".
+-    # And "concatenate... from the 3 triplanes".
+-    # This is slightly ambiguous. Let's assume 3 triplanes, each with 7 levels.
+-    
+-    f_tri_levels = []
+-    # If triplanes is list of 3, and each has 7 levels:
+-    if isinstance(triplanes[0], list):
+-        for triplane in triplanes:
+-            for level_feat in triplane:
+-                # Bilinear interpolation
+-                feat = bilinear_interpolate(level_feat, x)
+-                f_tri_levels.append(feat)
+-    else:
+-        # Fallback: assume triplanes is a list of 7 levels directly?
+-        # But source says "3 triplanes".
+-        # Let's assume the input structure matches the description: 3 triplanes, 7 levels each.
+-        pass 
+-        
+-    # Sum features across levels for triplanes
+-    f_tri_sum = np.sum(f_tri_levels, axis=0)
+-    
+-    # 3. Concatenate
+-    # 4K = 16 dimensions. K=4.
+-    # f_3d_sum is (4,), f_tri_sum is (12,)? No, K=4 per level.
+-    # If 3 levels for 3D: 3 * 4 = 12? No, "fetch K=4 features per level".
+-    # "Sum the features across levels... to obtain a 4K=16-dimensional MLP input".
+-    # This implies the sum results in a vector of size 4K?
+-    # If K=4, 4K=16.
+-    # If we sum 3 levels of 4 features, we get 4 features? No, summing vectors of size 4 gives size 4.
+-    # If we concatenate 3D sum (size 4) and Tri sum (size 12), we get 16.
+-    # So 3D grid sum is size 4. Triplane sum is size 12.
+-    # This implies K=4 is the feature dimension per level?
+-    # "fetch K=4 features per level".
+-    # If we sum 3 levels, we get a vector of size 4.
+-    # If we sum 7 levels, we get a vector of size 4?
+-    # Then concatenating 4 and 4 gives 8. Not 16.
+-    # Maybe K=4 is the number of features *per level*, and we sum them?
+-    # If we sum 3 levels of 4 features, we get 4 features.
+-    # If we sum 7 levels of 4 features, we get 4 features.
+-    # Concatenation gives 8.
+-    # The source says "obtain a 4K=16-dimensional MLP input".
+-    # This implies the final vector is 16 dimensions.
+-    # If K=4, then 4K=16.
+-    # This suggests that the 3D grid contributes 4K/2 = 8? Or 3D contributes 4 and Tri contributes 12?
+-    # Let's re-read: "fetch K=4 features per level from 3D... from triplanes... Sum... concatenate... to obtain 4K=16".
+-    # If 3D sum is size 4, and Tri sum is size 12, total 16.
+-    # This implies 3D grid has 1 level? No, 3 levels.
+-    # Maybe "K=4 features" means the feature dimension is 4?
+-    # And we sum 3 levels -> size 4.
+-    # And we sum 7 levels -> size 4?
+-    # Then 4+4=8.
+-    # Maybe the 3D grid and Triplanes are concatenated *before* summing? No, "Sum... separately... Concatenate".
+-    # Maybe K=4 is the number of features *per level*, and the feature dimension is something else?
+-    # "fetch K=4 features per level". Usually means feature vector of size K.
+-    # If we sum 3 vectors of size 4, we get size 4.
+-    # If we sum 7 vectors of size 4, we get size 4.
+-    # Total 8.
+-    # Where does 16 come from?
+-    # Maybe K=4 is the number of *levels*? No, "3 resolution levels", "7 levels".
+-    # Maybe the feature dimension is 4K?
+-    # Let's assume the final input size is 16.
+-    # We will construct a 16-dim vector.
+-    
+-    # Re-evaluating: "fetch K=4 features per level".
+-    # If feature dimension is D.
+-    # Sum 3 levels -> D.
+-    # Sum 7 levels -> D.
+-    # Concat -> 2D.
+-    # If 2D = 16, D=8.
+-    # But K=4.
+-    # Maybe K is not the feature dimension.
+-    # "fetch K=4 features".
+-    # Maybe it means 4 features *per level*, and the feature dimension is 4?
+-    # Then sum is 4.
+-    # Maybe the 3D grid and Triplanes are not just summed?
+-    # "Sum the features across levels... concatenate... to obtain 4K=16".
+-    # This phrasing is tricky.
+-    # Let's assume the input to MLP is 16-dimensional.
+-    
+-    # Let's assume the 3D grid contributes 8 dims and Triplanes contribute 8 dims?
+-    # Or 3D contributes 4 and Triplanes contribute 12?
+-    # Given "4K=16" and "K=4", it strongly suggests the total is 16.
+-    # We will create a 16-dim vector.
+-    
+-    # Implementation detail:
+-    # f_3d_sum shape: (4,)
+-    # f_tri_sum shape: (12,)
+-    # Concat: (16,)
+-    
+-    # 4. Encode Direction
+-    # Spherical harmonics up to 4th degree.
+-    # Degree 0: 1
+-    # Degree 1: 3
+-    # Degree 2: 5
+-    # Degree 3: 7
+-    # Degree 4: 9
+-    # Total: 1+3+5+7+9 = 25 coefficients.
+-    sh_coeffs = spherical_harmonics(d, degree=4)
+-    
+-    # 5. Predict Color
+-    # Color MLP input: Concat(f_3d_sum, f_tri_sum, sh_coeffs)?
+-    # Source: "encode viewing direction... as an auxiliary input to the color MLP".
+-    # It doesn't say it goes into the distance MLP.
+-    # Color MLP input size: 16 + 25 = 41?
+-    # Or is the 16-dim vector the input to both, and direction is auxiliary for color?
+-    # "obtain a 4K=16-dimensional MLP input".
+-    # "encode viewing direction... as an auxiliary input to the color MLP".
+-    # So Color MLP gets (16 + 25). Distance MLP gets (16).
+-    
+-    color_input = np.concatenate([f_3d_sum, f_tri_sum, sh_coeffs])
+-    c = color_mlp(color_input)
+-    
+-    dist_input = np.concatenate([f_3d_sum, f_tri_sum])
+-    f_val = dist_mlp(dist_input)
+-    
+-    # 6. Compute Density
+-    # Get surfaceness beta
+-    beta = nearest_neighbor_interpolate(surfaceness_grid, x)
+-    
+-    s = f_val * beta
+-    if s > 0:
+-        psi = 0.5 * np.exp(-s)
+-    else:
+-        psi = 1 - 0.5 * np.exp(s)
+-        
+-    sigma = beta * psi
+-    
+-    return c, sigma
+-
+-def trilinear_interpolate(grid, x):
+-    # Standard trilinear interpolation
+-    pass
+-
+-def bilinear_interpolate(plane, x):
+-    # Project x to 2D plane, then bilinear interpolate
+-    pass
+-
+-def spherical_harmonics(d, degree):
+-    # Compute SH coefficients
+-    pass
+-
+-def nearest_neighbor_interpolate(grid, x):
+-    # Round x to nearest voxel center
+-    pass
+-```
++**Edge Cases and Pitfalls:**
++*   **Aliasing:** Due to the multi-resolution feature grid, aliasing artifacts can occur. This is handled using the technique described in VR-NeRF [S1].
++*   **Surfaceness Initialization:** The surfaceness parameter $\beta(\mathbf{x})$ is initially constrained to be globally uniform and allowed to diverge spatially during the fine-tuning stage to prevent degradation of semi-transparent surfaces [S1].
+ 
+ ## Subtopics
+@@ -257,27 +66,26 @@
+ 
+ ### Geometry Composition by Segmented Sampling
+-Geometry Composition by Segmented Sampling transforms sampling points from scene coordinates to object coordinates using the inserting position (translation and rotation) [S2]. It composites density as the normalized sum of densities of corresponding points from scene and object at the same position, and composites reflectance as a weighted sum of reflectance values, where weights are the densities of the voxel particles [S2]. The final image is rendered following Eqn. 1 using composited density, reflectance, and shading [S2].
++Geometry Composition by Segmented Sampling is a method for compositing inserted objects into a NeRF scene. It transforms sampling points from scene coordinates to object coordinates using the inserting position (translation and rotation) [S2]. The composited density is the normalized sum of densities of corresponding points from the scene and the object at the same position. The reflectance is the weighted sum of reflectance values, where the weights are the densities of the voxel particles [S2]. The final image is rendered using the composited density, reflectance, and shading [S2].
+ 
+ ### HybridNeRF SDF Density Formulation
+-The density $\sigma_{\text{SDF}}(\mathbf{x})$ is computed as $\beta(\mathbf{x})\Psi(f(\mathbf{x})\beta(\mathbf{x}))$, where $f(\mathbf{x})$ is the signed distance field output, $\beta(\mathbf{x})$ is the surfaceness parameter, and $\Psi$ is the CDF of a standard Laplace distribution [S1]. The Laplace CDF $\Psi(s)$ is defined piecewise: $\frac{1}{2} \exp(-s)$ if $s > 0$, and $1 - \frac{1}{2} \exp(s)$ if $s \leq 0$. Here $s = f(\mathbf{x})\beta(\mathbf{x})$ [S1]. The surfaceness field $\beta(\mathbf{x})$ is stored in a $512^3$ voxel grid and queried using nearest-neighbor interpolation [S1].
++The HybridNeRF SDF Density Formulation computes density from a signed distance field $f(\mathbf{x})$ using a spatially adaptive surfaceness parameter $\beta(\mathbf{x})$. The density is given by $\sigma_{\text{SDF}}(\mathbf{x}) = \beta(\mathbf{x})\Psi(f(\mathbf{x})\beta(\mathbf{x}))$, where $\Psi$ is the CDF of a standard Laplace distribution [S1]. The surfaceness field $\beta(\mathbf{x})$ is stored in a $512^3$ voxel grid and queried via nearest-neighbor interpolation [S1].
+ 
+ ### SeaThru-NeRF
+-SeaThru-NeRF extends NeRFs to handle underwater scattering media by treating the medium as a semi-transparent entity with separate color and density parameters from opaque objects [S3]. It replaces the traditional single opaque object density $\sigma(t)$ with the sum of the object density $\sigma_{\text{obj}}(t)$ and the medium density $\sigma_{\text{med}}(t)$ [S3].
++SeaThru-NeRF extends NeRFs to handle underwater scattering media by treating the medium as a semi-transparent entity with separate color and density parameters from opaque objects [S3]. It replaces the traditional single opaque object density $\sigma(t)$ with the sum of the object density $\sigma_{obj}(t)$ and the medium density $\sigma_{med}(t)$ [S3].
+ 
+ ### Neural Proxy Rendering with Mixed Samplers
+-Neural Proxy Rendering with Mixed Samplers is a rendering pipeline that mixes a neural proxy sampler $S_p$ for animated objects and a neural scene sampler $S_c$ for static elements, using a neural texture for local surface appearance [S4, unofficial]. It separates the particle set $X$ into proxy set $X_p$ and scene set $X_c$ [S4, unofficial]. For each ray $r$, it finds the convex set $X_r$ bounded by the closest and farthest intersection points with the proxy mesh $M$ [S4, unofficial]. It uses the triangle intersection method $f_\delta$ from [MT97] to get $(\hat{t}, u_\delta, v_\delta) = f_\delta(r, \delta)$ [S4, unofficial]. Unlike NeRF which uses global scene information, neural proxy uses local information (features from neural texture) sampled via Barycentric coordinates [S4, unofficial].
++Neural Proxy Rendering with Mixed Samplers is a rendering pipeline that mixes a neural proxy sampler $S_p$ for animated objects and a neural scene sampler $S_c$ for static elements, using a neural texture for local surface appearance [S4, unofficial]. It separates the particle set $X$ into a proxy set $X_p$ and a scene set $X_c$. For each ray, it finds the convex set bounded by the closest and farthest intersection points with the proxy mesh using a triangle intersection method [S4, unofficial]. It uses Barycentric coordinates to sample local features from the neural texture, unlike NeRF which uses global scene information [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:** Combines 3D grids and triplanes for efficient featurization; uses spatially adaptive surfaceness for better geometry; handles aliasing via VR-NeRF techniques [S1].
+-*   **Limitations:** Negatively impacts quality near fine objects (lamp wires) and transparent structures (glass door) [S1].
+-*   **When to use:** When high-quality neural rendering is needed with efficient memory usage and good geometric priors [S1].
+-*   **When not to use:** When fine details or transparent structures are critical and the multi-resolution grid causes aliasing artifacts [S1].
++*   **Time Complexity:** The feature fetching from multi-resolution grids and triplanes is $O(1)$ per sample point, significantly faster than evaluating a deep MLP for every coordinate. The MLPs are small, keeping the per-sample computation low.
++*   **Memory Complexity:** The memory usage is dominated by the storage of the 3D feature grids and triplanes. The total memory is proportional to the sum of the volumes of the 3D grids and the areas of the triplanes multiplied by the feature dimension $K$.
++*   **Performance:** HybridNeRF achieves faster training and rendering times compared to standard NeRF and VolSDF [S1].
++*   **Strengths:** High efficiency due to explicit feature storage; good quality due to multi-resolution representation; handles aliasing effectively [S1].
++*   **Limitations:** Quality may degrade near fine objects (e.g., lamp wires) and transparent structures (e.g., glass doors) [S1]. The surfaceness field requires careful tuning to avoid degrading semi-transparent surfaces [S1].
++*   **When to use:** When fast training and rendering are required for high-quality novel view synthesis, and the scene contains complex geometry that benefits from multi-resolution features.
++*   **When not to use:** For scenes with very fine, thin structures or highly transparent materials where the grid resolution may not be sufficient to capture details without aliasing or artifacts.
+ 
+ ## Background
+-HybridNeRF was introduced in the paper "HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces" [S1]. It builds on previous work in neural radiance fields and multi-resolution feature grids. The method uses a proposal network similar to Nerfacto to improve sampling efficiency [S1].
++HybridNeRF was introduced in the paper "HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces" [S1]. It builds upon previous work in neural radiance fields, such as NeRF [S1], VolSDF [S1], and Instant-NGP [S1], by combining the benefits of multi-resolution hash grids and triplanes. The method was developed to address the computational bottlenecks of traditional NeRFs while maintaining high rendering quality.
+ 
+ ## Sources

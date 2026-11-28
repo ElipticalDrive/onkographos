@@ -1,0 +1,101 @@
+# 2D Skew-Normal Parameter Projection
+
+Also called: 2D Kernel Parameter Projection, SN2D Projection, Skew-Normal 2D Parameter Computation
+
+## Overview
+Computes the parameters of a 2D Skew-Normal distribution (SN2D) resulting from the linear projection of a 3D Skew-Normal kernel (SN3) onto the image plane [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D Skew-Normal kernel parameters $\mathcal{X} \sim \text{SN3}(\mu, \Omega, \alpha)$, where $\mu \in \mathbb{R}^3$ is the mean, $\Omega \in \mathbb{R}^{3 \times 3}$ is the covariance, and $\alpha \in \mathbb{R}^3$ is the skewness parameter [S1, unofficial].
+*   **Input:** Projection matrix $A \in \mathbb{R}^{2 \times 3}$ [S1, unofficial].
+*   **Output:** 2D Skew-Normal parameters $\mathcal{Y} \sim \text{SN2}(\mu_Y, \Omega_Y, \alpha_Y)$, where $\mu_Y \in \mathbb{R}^2$, $\Omega_Y \in \mathbb{R}^{2 \times 2}$, and $\alpha_Y \in \mathbb{R}^2$ [S1, unofficial].
+
+**Data Structures:**
+The 3D kernel is parameterized using a rotation matrix $R \in \mathbb{R}^{3 \times 3}$, a scale matrix $S \in \mathbb{R}^{3 \times 3}$ (diagonal), and a skewness vector $k \in \mathbb{R}^3$ [S1, unofficial]. The covariance is $\Omega = R S S^\top R^\top$ [S1, unofficial]. The skewness parameter is $\alpha = \omega R S^{-1} k$, where $\omega = (1 + k^\top k)^{-1/2}$ [S1, unofficial].
+
+**Steps:**
+1.  **Compute 2D Mean:**
+    $$ \mu_Y = A \mu $$
+2.  **Compute 2D Covariance:**
+    $$ \Omega_Y = A \Omega A^\top $$
+3.  **Compute Intermediate Vector $v$:**
+    Calculate the term $\omega \delta$ from the 3D parameters [S1, unofficial]:
+    $$ \omega \delta = \frac{R S k}{\sqrt{1 + k^\top k}} $$
+    Let $v = A (\omega \delta) = \frac{A R S k}{\sqrt{1 + k^\top k}}$ [S1, unofficial].
+4.  **Compute 2D Skewness $\alpha_Y$:**
+    The skewness parameter is derived from the projected intermediate vector and the 2D covariance [S1, unofficial]:
+    $$ \alpha_Y = \frac{\Omega_Y^{-1} v}{\sqrt{1 - v^\top \Omega_Y^{-1} v}} $$
+    (Note: The source derivation includes a normalization factor $\omega_Y$ in the numerator, which is absorbed or set to unity during the direct projection step to avoid circular dependency [S1, unofficial].)
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def project_skew_normal_3d_to_2d(mu_3d: np.ndarray, R: np.ndarray, S: np.ndarray, k: np.ndarray, A: np.ndarray) -> tuple:
+    """
+    Projects a 3D Skew-Normal kernel to 2D.
+    
+    Args:
+        mu_3d: (3,) array, 3D mean.
+        R: (3, 3) array, rotation matrix.
+        S: (3,) array, scale vector (diagonal elements of S matrix).
+        k: (3,) array, skewness vector.
+        A: (2, 3) array, projection matrix.
+        
+    Returns:
+        mu_2d: (2,) array, 2D mean.
+        Omega_2d: (2, 2) array, 2D covariance.
+        alpha_2d: (2,) array, 2D skewness parameter.
+    """
+    # 1. Compute 2D Mean
+    mu_2d = A @ mu_3d
+    
+    # 2. Compute 3D Covariance Omega = R * diag(S)^2 * R^T
+    S_mat = np.diag(S)
+    Omega_3d = R @ (S_mat @ S_mat.T) @ R.T
+    
+    # 3. Compute 2D Covariance
+    Omega_2d = A @ Omega_3d @ A.T
+    
+    # 4. Compute intermediate vector v = A * (R * S * k / sqrt(1 + k^T k))
+    k_norm_sq = np.dot(k, k)
+    scale_factor = 1.0 / np.sqrt(1.0 + k_norm_sq)
+    
+    # R @ (S @ k)
+    R_S_k = R @ (S * k)
+    
+    # v = A @ (scale_factor * R_S_k)
+    v = scale_factor * (A @ R_S_k)
+    
+    # 5. Compute alpha_2d
+    Omega_2d_inv = np.linalg.inv(Omega_2d)
+    
+    numerator = Omega_2d_inv @ v
+    denominator_term = v.T @ Omega_2d_inv @ v
+    denominator = np.sqrt(1.0 - denominator_term)
+    
+    alpha_2d = numerator / denominator
+    
+    return mu_2d, Omega_2d, alpha_2d
+```
+
+**Edge Cases and Pitfalls:**
+*   **Singularity:** If $\Omega_Y$ is singular (e.g., the kernel is viewed edge-on and collapses to a line), $\Omega_Y^{-1}$ does not exist. Regularization or culling is required [G].
+*   **Domain Error:** The term $1 - v^\top \Omega_Y^{-1} v$ must be positive to prevent imaginary results in the square root [S1, unofficial].
+
+## Subtopics
+
+### Skew-Normal CDF Evaluation
+Evaluating the Skew-Normal distribution requires computing the Cumulative Distribution Function (CDF) [S1, unofficial]. The implementation uses the `erf` function for mathematical precision [S1, unofficial]. Using the precise `erf` function incurs moderate penalties on rendering speed compared to faster analytic approximations [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Originated in the paper "3D Skew-Normal Splatting" [S1, unofficial]. The method extends the standard Gaussian Splatting framework by replacing the symmetric 3D Gaussian kernel with the Azzalini Skew-Normal distribution to model asymmetric structures [S1, unofficial]. The 2D projection formula is derived from the properties of the Skew-Normal distribution under linear transformations [S1, unofficial].
+
+## Sources
+[S1] 3D Skew-Normal Splatting, https://doi.org/10.48550/arxiv.2605.15010, fetched 2026-10-26 (unofficial)

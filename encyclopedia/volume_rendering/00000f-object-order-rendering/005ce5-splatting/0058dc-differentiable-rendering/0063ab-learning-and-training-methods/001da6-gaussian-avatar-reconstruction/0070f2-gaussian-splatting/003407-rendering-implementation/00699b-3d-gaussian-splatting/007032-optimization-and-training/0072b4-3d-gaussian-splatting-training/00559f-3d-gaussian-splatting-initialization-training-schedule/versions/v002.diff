@@ -1,0 +1,165 @@
+--- v001.md
++++ v002.md
+@@ -4,111 +4,72 @@
+ 
+ ## Overview
+-This method defines the initialization and iterative training schedule for 3D Gaussian Splatting (3DGS) models, specifically addressing robust initialization via LiDAR data and regularization via pseudo-view guidance. It solves the problem of poor initialization and training instability in sparse or unstructured scenes by combining geometric priors with diffusion-based regularization. It differs from standard 3DGS pipelines by explicitly integrating LiDAR point cloud processing for initialization and a staged pseudo-view sampling schedule for training stability [S1].
++This method defines a structured training schedule for 3D Gaussian Splatting that combines LiDAR-guided initialization with diffusion-based pseudo-view guidance to improve reconstruction quality and convergence speed [S1]. It addresses the ambiguity and noise inherent in RGB-only initialization by leveraging depth priors and regularizing the optimization trajectory using generative priors [S1]. It builds on [3D Gaussian Splatting Training](3761-3d-gaussian-splatting-training.md) by introducing specific initialization and scheduling protocols.
+ 
+ ## How it works
+-The method consists of two distinct phases: Initialization and Training Schedule. The specific implementation details vary between the LiDAR-guided approach [S1] and the improved optimization pipeline [S2].
++**Inputs:**
++- LiDAR point clouds (sparse depth/geometry).
++- RGB images (sparse views).
++- A pre-trained Diffusion Model (e.g., Stable Diffusion) with a VAE encoder/decoder [S1].
+ 
+-### Initialization (LiDAR-Guided)
+-The initialization process converts sparse LiDAR data into a dense set of 3D Gaussians [S1].
++**Outputs:**
++- Optimized 3D Gaussian parameters (position, covariance, opacity, spherical harmonics coefficients, color) [S1].
+ 
+-1.  **Color Assignment**: Project each LiDAR point from the frame to the corresponding image frame to retrieve its color.
+-2.  **Re-projection**: Re-project the colored LiDAR points back into 3D space to create a colored 3D point cloud.
+-3.  **Accumulation**: Accumulate point clouds from all available frames.
+-4.  **Voxel Downsampling**: Apply voxel downsampling to the accumulated points with a voxel size of $5$ to reduce density and remove outliers.
+-5.  **Gaussian Initialization**: Initialize the 3D Gaussian model parameters (positions $\mu$, covariances $\Sigma$, colors, opacity $\alpha$, and spherical harmonics coefficients) from the downsampled point cloud. [G] Covariances are typically initialized based on the local point density or a fixed small value, and opacity is set to a low initial value (e.g., 0.1) to allow for densification during training.
++**Data Structures:**
++- **3D Gaussian Model:** Standard 3DGS representation. Initialized with points derived from LiDAR [S1].
++- **Pseudo Views:** Rendered images from random camera poses, used as input to the diffusion model [S1].
+ 
+-### Training Schedule (LiDAR-Guided)
+-The training is performed using Stochastic Gradient Descent (SGD) for a total of 50,000 iterations [S1]. The schedule is divided into two phases:
++**Steps:**
+ 
+-1.  **Warm-up Phase**: Train for the first 500 iterations without sampling pseudo views. This allows the model to stabilize based on the real input images.
+-2.  **Guided Phase**: For every 10 iterations, sample 4 pseudo views. These pseudo views are rendered from the current 3DGS model and used to generate guidance images via a fine-tuned Diffusion Model.
+-    *   **Pseudo-view Generation**: Render random views not present in the training set.
+-    *   **Diffusion Guidance**: The rendered pseudo-view is encoded into a latent feature map by a VAE Encoder. Noise at level $t \sim [t_{min}, t_{max}]$ is added. The Diffusion Model denoises the latent feature from level $t$ to $t_{min}$, and the result is decoded to generate a guidance image.
+-    *   **Classifier-Free Guidance**: To enable classifier-free guidance, text prompts and reference images are set to empty with a 10% probability during training [S1].
+-    *   **Parameters**: Set $t_{max} = 10$ [S1].
++1.  **LiDAR-to-Color Projection:**
++    For each LiDAR frame, project the 3D LiDAR points onto the corresponding 2D image frame to assign RGB color values to each point [S1].
+ 
+-### Improved Optimization Pipeline
+-An alternative schedule uses Adam optimization with a Cosine Annealing Learning Rate schedule [S2].
++2.  **3D Reprojection:**
++    Reproject the now-colored LiDAR points back into 3D space to create a set of colored 3D points [S1].
+ 
+-1.  **Initialization**: Initialize Gaussians $G$ with positions $\mu$, covariances $\Sigma$, colors $C$, opacity $\alpha$, and SH coefficients. Set initial learning rate $LR_{initial}$ and CosineAnnealingLR schedule.
+-2.  **Iterative Loop**: Run for 30,000 iterations [S2].
+-3.  **Resolution Switching**:
+-    *   If iteration $t < 5,000$: Render at low resolution $R_t = (540, 960)$.
+-    *   If iteration $t \ge 5,000$: Render at high resolution $R_t = (1080, 1920)$.
+-4.  **Loss Computation**: Compute the total loss $L$ as a weighted sum of components [S2]:
+-    $$ L = \lambda_1 L_1 + \lambda_2 (1 - SSIM) + \lambda_3 VGG + \lambda_4 LPIPS $$
+-    where $\lambda_1, \lambda_2, \lambda_3, \lambda_4$ are the weights for L1, SSIM, VGG, and LPIPS losses respectively.
+-5.  **Gradient Update**: Compute gradients $\nabla L$ with respect to Gaussian parameters and update parameters using Adam and the current learning rate from the CosineAnnealingLR schedule.
+-6.  **Adaptive Pruning**: For each Gaussian $G_i$:
+-    *   If opacity $\alpha_i < 0.005$ or the size of covariance $\Sigma_i$ exceeds a threshold, remove $G_i$ from $G$.
+-7.  **Improved Densification**: For each Gaussian $G_i$:
+-    *   If gradient magnitude $\nabla L(G_i) > \tau$:
+-        *   If size of $\Sigma_i > \tau_S$: Split $G_i$ into $G_{new}$ with $\Sigma_{new} = 0.8 * \Sigma_i$.
+-        *   Else: Clone $G_{new}$ at $\mu_i + \text{noise}(\sigma)$.
+-        *   Add $G_{new}$ to $G$.
+-8.  **Optimized Spherical Harmonics**: Compute SH-to-RGB conversion outside the rasterizer for each $G_i$ to improve performance.
++3.  **Voxel Downsampling:**
++    Accumulate all colored point clouds from all frames. Perform voxel downsampling with a voxel size of 5 to reduce density and remove outliers [S1].
+ 
+-### Pseudocode (Combined LiDAR-Guided Schedule)
+-```python
+-def train_3dgs_lidar_guided(LiDAR_frames, Image_frames, DiffusionModel, VAE, num_iterations=50000):
+-    # 1. Initialization
+-    colored_points = []
+-    for frame in LiDAR_frames:
+-        # Project LiDAR to image to get color
+-        points_with_color = project_lidar_to_image(frame.LiDAR_points, frame.Image)
+-        # Re-project to 3D
+-        points_3d = reproject_to_3d(points_with_color)
+-        colored_points.extend(points_3d)
+-    
+-    # Voxel downsampling with voxel size 5
+-    initial_points = voxel_downsample(colored_points, voxel_size=5)
+-    
+-    # Initialize Gaussians from points
+-    gaussians = initialize_gaussians(initial_points)
+-    
+-    # 2. Training Schedule
+-    for t in range(1, num_iterations + 1):
+-        if t <= 500:
+-            # Warm-up phase: no pseudo views
+-            loss = compute_loss(gaussians, Image_frames)
+-        else:
+-            # Guided phase: sample 4 pseudo views every 10 iterations
+-            if t % 10 == 0:
+-                pseudo_views = sample_pseudo_views(gaussians, num_views=4)
+-                guidance_images = []
+-                for view in pseudo_views:
+-                    # Render pseudo view
+-                    rendered_latent = VAE.encode(render(view))
+-                    # Add noise
+-                    noisy_latent = add_noise(rendered_latent, t_noise=random.uniform(t_min, 10))
+-                    # Denoise and decode
+-                    denoised_latent = DiffusionModel.denoise(noisy_latent, t_noise)
+-                    guidance_image = VAE.decode(denoised_latent)
+-                    guidance_images.append(guidance_image)
+-                loss = compute_loss_with_guidance(gaussians, Image_frames, guidance_images)
+-            else:
+-                loss = compute_loss(gaussians, Image_frames)
+-        
+-        # Update parameters
+-        update_gaussians(gaussians, loss)
+-        
+-    return gaussians
+-```
++4.  **Warm-up Phase:**
++    Train the 3D Gaussian model for 500 iterations using only the RGB images and LiDAR-initialized points. Do **not** sample pseudo views during this phase to allow the geometry to stabilize [S1].
++
++5.  **Guided Phase:**
++    For the remaining iterations, sample 4 pseudo views every 10 iterations [S1].
++    - Render the current 3D Gaussian model from these random camera poses to obtain pseudo-view images [S1].
++    - Pass the rendered pseudo-view through the VAE Encoder to obtain a latent feature map [S1].
++    - Add noise at level $t$ to the latent feature, where $t \sim [t_{min}, t_{max}]$ [S1].
++    - Denoise the latent feature using the Diffusion Model from level $t$ down to $t_{min}$ [S1].
++    - Decode the denoised latent feature to obtain the generated guidance image [S1].
++    - Use the generated image to compute a loss term that regularizes the training [S1].
++
++6.  **Classifier-Free Guidance (Optional):**
++    During the first training stage, set both text prompts and reference images to empty with a 10% probability to enable classifier-free guidance [S1].
++
++**Parameters:**
++- **Voxel Size:** 5 [S1].
++- **Warm-up Iterations:** 500 [S1].
++- **Pseudo-view Sampling Frequency:** 4 views every 10 iterations [S1].
++- **Total Training Iterations:** 50,000 [S1].
++- **Diffusion Noise Level:** $t_{max} = 10$ [S1]. $t_{min}$ is not explicitly given in the sources [S1].
++
++**Edge Cases and Pitfalls:**
++- **LiDAR Registration:** The quality of initialization depends on the accurate projection of LiDAR points to image frames. Misalignment will propagate errors [S1].
++- **Diffusion Prior Strength:** The balance between the photometric loss and the diffusion guidance loss is critical. If the diffusion prior is too strong, it may hallucinate details not present in the input data [S1].
++- **Noise Level Selection:** The choice of $t_{min}$ and $t_{max}$ affects the fidelity of the guidance. Higher noise levels provide more structural guidance but less detail [S1].
+ 
+ ## Subtopics
+ 
+-### Improved 3D Gaussian Splatting Optimization Pipeline
+-A variant that replaces SGD with Adam and introduces a resolution switch and adaptive densification/pruning. It uses a total of 30,000 iterations, switching from low resolution (540x960) to high resolution (1080x1920) at iteration 5,000. It employs a composite loss function with L1, SSIM, VGG, and LPIPS components, and optimizes spherical harmonics computation outside the rasterizer [S2].
++### [Improved 3D Gaussian Splatting Optimization Pipeline](18760-improved-3d-gaussian-splatting-optimization-pipeline.md)
++This method defines a structured training schedule for 3D Gaussian Splatting that combines multi-scale rendering, adaptive densification, and optimized spherical harmonics evaluation to improve reconstruction quality and convergence speed.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The LiDAR-guided method adds an initialization cost proportional to the number of LiDAR points and frames. The training cost is dominated by the rasterization and diffusion guidance. Sampling pseudo views every 10 iterations adds a constant overhead. The improved pipeline reduces training time by using lower resolution for the first 5,000 iterations [S2].
+-*   **Memory Complexity**: Depends on the number of Gaussians. Voxel downsampling reduces initial memory usage [S1]. Adaptive pruning removes low-opacity Gaussians, reducing memory over time [S2].
+-*   **Strengths**: LiDAR initialization provides robust geometric priors, reducing artifacts in sparse regions. Pseudo-view guidance regularizes training, improving generalization to unseen views. Resolution switching accelerates early training [S1, S2].
+-*   **Limitations**: Requires LiDAR data for initialization in the LiDAR-guided variant. Diffusion guidance adds significant computational overhead during training. The schedule parameters (e.g., 500 warm-up, 10 iteration interval) are specific to the cited implementations and may need tuning for other datasets [S1, S2].
++- **Time Complexity:** The addition of diffusion model inference for pseudo views increases the per-iteration cost compared to standard 3DGS. However, the pseudo views are sampled sparsely (4 every 10 iterations), mitigating the overhead [S1].
++- **Memory Complexity:** Requires storing the diffusion model and VAE in memory, in addition to the 3D Gaussian model [S1].
++- **Performance:** Improves reconstruction quality, particularly in textureless or ambiguous regions, by leveraging LiDAR geometry and diffusion priors [S1].
++- **Strengths:** Robust initialization, better handling of sparse views, improved geometry consistency [S1].
++- **Limitations:** Requires LiDAR data for initialization, higher computational cost due to diffusion model [S1].
+ 
+ ## Background
+-The LiDAR-guided initialization and pseudo-view training schedule was introduced in "SGD: Street View Synthesis with Gaussian Splatting and Diffusion Prior" [S1]. The improved optimization pipeline with Adam and resolution switching was proposed in "Optimization of 3D Gaussian Splatting for Accurate Image Reconstruction" [S2]. These methods build upon the original 3D Gaussian Splatting framework [Parent](5325-training-pipeline.md) to address initialization quality and training efficiency.
++This method was introduced in "SGD: Street View Synthesis with Gaussian Splatting and Diffusion Prior" [S1]. It combines the strengths of 3D Gaussian Splatting for fast rendering with the generative capabilities of diffusion models for regularization. The use of LiDAR for initialization addresses the common issue of poor initialization in sparse-view scenarios [S1].
+ 
+ ## Sources
+-[S1] SGD: Street View Synthesis with Gaussian Splatting and Diffusion Prior, https://doi.org/10.1109/wacv61041.2025.00375, fetched 2026-10-27
+-[S2] Optimization of 3D Gaussian Splatting for Accurate Image Reconstruction, https://doi.org/10.59232/dst-v4i2p101, fetched 2026-10-26+[S1] SGD: Street View Synthesis with Gaussian Splatting and Diffusion Prior, https://doi.org/10.1109/wacv61041.2025.00375, fetched 2026-10-27

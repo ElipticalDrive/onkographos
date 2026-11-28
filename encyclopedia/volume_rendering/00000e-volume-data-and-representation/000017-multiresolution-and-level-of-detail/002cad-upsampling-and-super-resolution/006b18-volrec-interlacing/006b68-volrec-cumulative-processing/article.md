@@ -1,0 +1,81 @@
+# VolRec Cumulative Processing
+
+Also called: VolRec Interlacing with Convolved Volume
+
+## Overview
+VolRec Cumulative Processing is a variant of the VolRec interlacing method that improves temporal consistency by merging new low-resolution data with the previously convolved full-resolution volume rather than raw interlaced data. It solves the problem of error accumulation in raw data by ensuring that the input to the interlacing step is already spatially and temporally smoothed. It differs from its sibling [VolRec Non-Cumulative Processing](20869-volrec-non-cumulative.md) by using the final output of the previous epoch as the base for merging, whereas the non-cumulative variant uses the intermediate interlaced volume.
+
+## How it works
+**Inputs:**
+- `rawV`: Newly acquired raw volumetric data for the current epoch.
+- `exitV`: The full-resolution convolved volume from the previous epoch.
+
+**Outputs:**
+- `exitV`: The updated full-resolution convolved volume for the current epoch.
+
+**Data Structures:**
+- `preproV`: Low-resolution volume, same dimensions as the interlaced grid but sparse or downsampled depending on the preprocessing step.
+- `mergedV`: Full-resolution volume resulting from the interlacing operation.
+- `exitV`: Full-resolution volume resulting from the convolution operation.
+
+**Steps:**
+1. **Preprocess:** Convert `rawV` into a low-resolution volume `preproV`. This step typically involves filtering or downsampling to match the resolution of the interlaced grid's sparse samples [S1].
+2. **Interlace:** Merge `preproV` with `exitV` using the interlacing operation defined in [VolRec Interlacing](20802-volrec-interlacing.md). This produces `mergedV`. The key distinction is that `exitV` (the convolved volume) is used as the base, not the raw previous volume [S1].
+   $$ \text{mergedV} \leftarrow \text{interl}(\text{exitV}, \text{preproV}) $$
+3. **Convolve:** Apply a convolution kernel with both spatial and temporal weights to `mergedV` to generate the final full-resolution volume `exitV` for the current epoch [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volrec_cumulative_processing(rawV, exitV_prev):
+    """
+    Performs one epoch of VolRec Cumulative Processing.
+    
+    Args:
+        rawV: Raw volumetric data for the current epoch.
+        exitV_prev: Full-resolution convolved volume from the previous epoch.
+        
+    Returns:
+        exitV: Full-resolution convolved volume for the current epoch.
+    """
+    # Step 1: Preprocess raw data to low-resolution volume
+    # Implementation details of preprocessing depend on the specific sensor/model.
+    # It must produce a volume compatible with the interlacing stride.
+    preproV = preprocess(rawV)
+    
+    # Step 2: Interlace preproV with the previous full-resolution convolved volume
+    # This is the defining step of Cumulative Processing vs Non-Cumulative.
+    mergedV = interlacing_operation(exitV_prev, preproV)
+    
+    # Step 3: Convolve the interlaced volume to produce the final output
+    # The kernel includes spatial and temporal weights.
+    exitV = convolve(mergedV)
+    
+    return exitV
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Repeated convolution and interlacing can lead to blurring or loss of high-frequency details over time if the kernel is not carefully designed [S1].
+- **Initialization:** The first epoch requires an initial `exitV` (e.g., zero-filled or derived from the first raw frame).
+- **Temporal Weights:** The convolution kernel must account for the temporal decay of information from previous epochs to prevent ghosting [S1].
+
+## Subtopics
+
+### VolRec Non-Cumulative Processing
+A variant where the new low-resolution data is interlaced with the *interlaced full-resolution volume of the previous epoch* (called `mergedV` in Algorithm 3 of [S1]), rather than the final convolved volume. The steps are: 1) Preprocess raw data to low-resolution; 2) Interlace with previous `mergedV`; 3) Apply convolution kernel with temporal and spatial weights to produce the final volume. This method retains more raw information from previous epochs but may propagate interlacing artifacts more directly into the convolution step [S1].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the cost of preprocessing, interlacing, and convolution. The interlacing step is linear with respect to the volume size. Convolution is typically $O(N \cdot K)$ where $N$ is the number of voxels and $K$ is the kernel size.
+- **Memory Complexity:** Requires storage for `rawV`, `preproV`, `mergedV`, and `exitV`. Since `exitV` is carried over, memory usage is stable per epoch.
+- **Performance:** Evaluated on an NVIDIA 1080TI GPU (3584 CUDA-cores, 11 GB VRAM, 484.4 GB/s peak bandwidth) and Intel Xeon Gold 5218 CPU (32 cores/64 threads) [S1].
+- **Strengths:** Better temporal smoothness due to convolved input; reduces noise propagation from raw data.
+- **Limitations:** Potential for excessive blurring if the convolution kernel is too aggressive; latency in reflecting rapid changes due to reliance on previous convolved state.
+- **When to use:** When temporal consistency and noise reduction are prioritized over capturing instantaneous raw changes.
+- **When not to use:** When rapid, high-frequency temporal changes are critical and must be preserved without smoothing.
+
+## Background
+VolRec (4D real-time volumetric reconstruction) was developed for Optical Coherence Tomography (OCT) data, specifically to handle slow vs. fast eye movements in patient measurements. The cumulative processing variant was introduced as one of two evaluated alternatives (alongside non-cumulative processing) to improve reconstruction quality in real-time volumetric imaging [S1].
+
+## Sources
+[S1] VolRec: 4D real‑time volumetric reconstruction of OCT data, https://doi.org/10.1007/s11227-025-06969-6, fetched 2026-10-26

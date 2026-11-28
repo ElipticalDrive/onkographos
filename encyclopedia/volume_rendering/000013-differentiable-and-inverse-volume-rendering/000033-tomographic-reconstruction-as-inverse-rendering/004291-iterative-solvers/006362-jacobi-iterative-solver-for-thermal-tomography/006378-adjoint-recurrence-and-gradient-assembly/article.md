@@ -1,0 +1,183 @@
+# Adjoint Recurrence and Gradient Assembly
+
+Also called: Backward Pass for Thermal Tomography, Discrete Adjoint Method
+
+## Overview
+A method to compute exact gradients of the discrete objective $J_{disc}$ with respect to parameters $\theta$ by solving an adjoint recurrence backwards in time, avoiding the storage of the full computational graph [S1, unofficial]. It sets itself apart from naive backpropagation-through-time by reducing memory complexity from $O(K N_g N_t)$ to $O(N_g)$, where $K$ is the number of inner Jacobi iterations, $N_g$ is the grid size, and $N_t$ is the number of time steps [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Parameters $\theta$ (defining thermal conductivity $\alpha_\theta$ via an MLP), initial temperature $T_0$, time steps $n=1, \dots, N_t$, and observation indices $\{n_1, \dots, n_M\}$ with corresponding measurements $\hat{T}_i$.
+*   **Outputs:** Gradient $\frac{d J_{disc}}{d\theta}$.
+
+**Data Structures:**
+*   $T_n \in \mathbb{R}^{N_g}$: Temperature state at time step $n$.
+*   $\mu_n \in \mathbb{R}^{N_g}$: Adjoint variables (Lagrange multipliers) for the state residuals.
+*   $A(\alpha_\theta) \in \mathbb{R}^{N_g \times N_g}$: System matrix from the implicit Euler discretization. Note that $A(\alpha_\theta)^\top = A(\alpha_\theta)$ due to the specific boundary conditions (lateral periodic, adiabatic through-thickness, homogeneous Robin) [S1, unofficial].
+
+**Formulas:**
+1.  **State Residual:**
+    $$F_n(T_n, T_{n-1}, \alpha_\theta) := A(\alpha_\theta) T_n - T_{n-1} = 0, \quad n = 1, \dots, N_t$$ [S1, unofficial]
+2.  **Per-step Data Term:**
+    $$\ell_n(T_n) := \begin{cases} \|\Pi_\Gamma T_n - \hat{T}_i\|^2 & \text{if } n = n_i \in \{n_1, \dots, n_M\} \\ 0 & \text{otherwise} \end{cases}$$ [S1, unofficial]
+3.  **Augmented Lagrangian:**
+    $$\mathcal{L}(\theta; \{T_n\}, \{\mu_n\}) = \sum_{n=1}^{N_t} \ell_n(T_n) + \lambda R(\alpha_\theta) - \sum_{n=1}^{N_t} \mu_n^\top F_n(T_n, T_{n-1}, \alpha_\theta)$$ [S1, unofficial]
+4.  **Adjoint Recurrence:**
+    $$A(\alpha_\theta)^\top \mu_n = \frac{\partial \ell_n}{\partial T_n} + \mu_{n+1}, \quad \mu_{N_t+1} = 0$$ [S1, unofficial]
+5.  **Gradient Assembly:**
+    $$\frac{d J_{disc}}{d\theta} = \frac{\partial (\lambda R)}{\partial \theta} + \Delta t \sum_{n=1}^{N_t} \mu_n^\top \frac{\partial (L(\alpha_\theta) T_n)}{\partial \alpha_\theta} \frac{\partial \alpha_\theta}{\partial \theta}$$ [S1, unofficial]
+    Where $\frac{\partial F_n}{\partial \alpha_\theta} = -\Delta t \frac{\partial (L(\alpha_\theta) T_n)}{\partial \alpha_\theta}$ [S1, unofficial].
+
+**Parameters:**
+*   $\mu_n$: Adjoint variables, dimension $\mathbb{R}^{N_g}$ [S1, unofficial].
+*   $K$: Number of Jacobi iterations. Empirically $K=50$ suffices for typical grid resolutions and $\Delta t$ [S1, unofficial].
+
+**Steps:**
+1.  **Forward Sweep:** Compute $T_1, \dots, T_{N_t}$ using the Jacobi solver defined in [Jacobi Iterative Solver for Thermal Tomography](18867-jacobi-iterative-solver-for-thermal-tomography.md). Store all $T_n$ or manage memory for the backward pass.
+2.  **Backward Sweep:** Initialize $\mu_{N_t+1} = 0$. For $n = N_t$ down to $1$:
+    *   Compute $\frac{\partial \ell_n}{\partial T_n}$.
+    *   Solve $A(\alpha_\theta) \mu_n = \frac{\partial \ell_n}{\partial T_n} + \mu_{n+1}$ for $\mu_n$. (Note: $A^\top = A$) [S1, unofficial].
+3.  **Gradient Assembly:** Compute $\frac{d J_{disc}}{d\theta}$ using the accumulated $\mu_n$ and stored $T_n$. The term $\frac{\partial \alpha_\theta}{\partial \theta}$ is obtained by ordinary backpropagation through the MLP at each grid node [S1, unofficial]. The term $\frac{\partial (L(\alpha_\theta) T_n)}{\partial \alpha_\theta}$ is a sparse local stencil determined by harmonic-mean derivatives [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adjoint_recurrence_gradient_assembly(T_forward, alpha_theta, theta, N_t, N_g, K, lambda_reg, R_func, L_op, Pi_Gamma, T_hat_indices, T_hat_values, delta_t):
+    """
+    Computes the gradient of the discrete objective with respect to theta.
+    
+    Args:
+        T_forward: List of T_n for n=1..N_t, computed via Jacobi solver.
+        alpha_theta: Conductivity field computed from theta via MLP.
+        theta: Parameters of the MLP.
+        N_t: Number of time steps.
+        N_g: Grid size.
+        K: Number of Jacobi iterations (used for forward, not directly here).
+        lambda_reg: Regularization weight.
+        R_func: Regularization function R(alpha_theta).
+        L_op: Diffusion operator L(alpha_theta).
+        Pi_Gamma: Projection operator for observations.
+        T_hat_indices: List of time indices n_i where observations exist.
+        T_hat_values: Corresponding observed temperatures.
+        delta_t: Time step size.
+        
+    Returns:
+        grad_theta: Gradient of J_disc with respect to theta.
+    """
+    # Initialize adjoint variables
+    mu_next = np.zeros(N_g) # mu_{N_t+1} = 0
+    grad_theta = np.zeros_like(theta)
+    
+    # Gradient of regularization term w.r.t theta
+    # Note: R depends on alpha_theta, which depends on theta
+    # We compute dR/d_alpha * d_alpha/d_theta later or via autograd
+    # Here we accumulate the physics part first
+    
+    physics_grad_accum = np.zeros(N_g) # Accumulate sum over n of mu_n^T * d(L*T)/d_alpha * d_alpha/d_theta
+    
+    # Backward sweep
+    for n in range(N_t, 0, -1):
+        T_n = T_forward[n-1] # T_forward is 1-indexed in math, 0-indexed in list
+        
+        # 1. Compute data term gradient d(l_n)/d(T_n)
+        d_l_n_d_T = np.zeros(N_g)
+        if n in T_hat_indices:
+            idx = T_hat_indices.index(n)
+            T_hat = T_hat_values[idx]
+            # l_n = ||Pi_Gamma T_n - T_hat||^2
+            # d(l_n)/d(T_n) = 2 * Pi_Gamma^T (Pi_Gamma T_n - T_hat)
+            residual = Pi_Gamma @ T_n - T_hat
+            d_l_n_d_T = 2 * (Pi_Gamma.T @ residual)
+            
+        # 2. Solve adjoint recurrence: A^T mu_n = d(l_n)/d(T_n) + mu_{n+1}
+        # Since A^T = A, we solve A mu_n = rhs
+        rhs = d_l_n_d_T + mu_next
+        
+        # Solve linear system A mu_n = rhs
+        # A is SPD. Use the same Jacobi solver or a direct solver.
+        # For exactness, we assume A is solved exactly or to high tolerance.
+        mu_n = solve_linear_system(A=alpha_theta_matrix, b=rhs)
+        
+        # 3. Accumulate gradient contribution
+        # Term: delta_t * mu_n^T * d(L(alpha_theta) T_n) / d(alpha_theta) * d(alpha_theta)/d(theta)
+        # d(L(alpha_theta) T_n) / d(alpha_theta) is a sparse local stencil.
+        # Let's compute the vector v_n = d(L(alpha_theta) T_n) / d(alpha_theta)
+        # This is a tensor, but we contract with mu_n.
+        # mu_n^T * d(L T_n)/d(alpha) results in a vector w.r.t alpha_theta components.
+        
+        # Compute d(L(alpha_theta) T_n) / d(alpha_theta)
+        # L(alpha_theta) involves harmonic means of alpha.
+        # The derivative is non-zero only for neighbors.
+        # Let's assume a helper function for this sparse stencil application.
+        d_L_T_n_d_alpha = compute_diffusion_jacobian(L_op, alpha_theta, T_n)
+        
+        # Contract mu_n with this Jacobian to get gradient w.r.t alpha_theta
+        # mu_n is a vector, d_L_T_n_d_alpha is a matrix (N_g x N_g) where cols are alpha nodes
+        # Actually, L(alpha) T is linear in T but non-linear in alpha.
+        # The derivative w.r.t alpha_i is a vector.
+        # We need sum_i mu_n^T * (d(L T)/d alpha_i) * (d alpha_i / d theta)
+        
+        # Efficiently: compute vector g_alpha = sum_n mu_n^T * d(L T_n)/d alpha_theta
+        # This is a vector of size N_g (one per grid node alpha)
+        
+        # For each grid node j, compute mu_n^T * (d(L T_n)/d alpha_j)
+        # This is equivalent to (d(L T_n)/d alpha_j)^T mu_n
+        # Let's assume compute_diffusion_jacobian returns a matrix J_alpha where J_alpha[:, j] = d(L T_n)/d alpha_j
+        
+        J_alpha = compute_diffusion_jacobian(L_op, alpha_theta, T_n) # Shape (N_g, N_g)
+        
+        # Contract mu_n with J_alpha
+        # grad_alpha_contribution = J_alpha.T @ mu_n
+        grad_alpha_contribution = J_alpha.T @ mu_n
+        
+        # Accumulate into physics_grad_accum
+        physics_grad_accum += delta_t * grad_alpha_contribution
+        
+        # Update mu_next for next iteration
+        mu_next = mu_n
+
+    # Final gradient assembly
+    # dJ/dtheta = d(lambda R)/dtheta + d(physics_grad_accum)/dalpha_theta * dalpha_theta/dtheta
+    
+    # 1. Regularization gradient
+    # d(lambda R)/dtheta = lambda * dR/dalpha_theta * dalpha_theta/dtheta
+    # We can compute this via autograd if R is differentiable w.r.t alpha_theta
+    # Or manually if R is simple (e.g., L2 norm of alpha)
+    
+    # 2. Physics gradient
+    # d(alpha_theta)/dtheta is obtained by backprop through MLP
+    # Let's assume we have a function to get d(alpha)/dtheta
+    d_alpha_d_theta = get_mlp_jacobian(theta) # Shape (N_g, len(theta))
+    
+    # grad_theta_physics = d_alpha_d_theta.T @ physics_grad_accum
+    grad_theta_physics = d_alpha_d_theta.T @ physics_grad_accum
+    
+    # 3. Regularization gradient
+    # Assuming R(alpha) is differentiable
+    dR_d_alpha = compute_regularization_gradient(R_func, alpha_theta)
+    grad_theta_reg = d_alpha_d_theta.T @ (lambda_reg * dR_d_alpha)
+    
+    grad_theta = grad_theta_physics + grad_theta_reg
+    
+    return grad_theta
+```
+
+**Edge Cases and Pitfalls:**
+*   **Memory:** The naive approach stores the entire computational graph of $K$ unrolled Jacobi iterations at every time step, scaling as $O(K N_g N_t)$. The adjoint method requires only one current and one trailing temperature slice plus the running gradient accumulator in memory beyond the cost of a single forward solve, scaling as $O(N_g)$ [S1, unofficial].
+*   **Symmetry:** The recurrence uses $A^\top$. The method relies on $A(\alpha_\theta)^\top = A(\alpha_\theta)$, which holds for the specific boundary conditions (lateral periodic, adiabatic through-thickness, homogeneous Robin) [S1, unofficial]. If boundary conditions change, $A^\top \neq A$ and the backward solve must use $A^\top$.
+*   **Initial Conditions:** If $T_0$ is uncertain or learnable, additional terms appear in the gradient [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** One forward solve ($O(K N_g)$ per step, total $O(K N_g N_t)$) and one backward solve ($O(K N_g N_t)$ if using Jacobi, or $O(N_g)$ if using direct solver for the adjoint system, but typically the same iterative solver is used). Gradient assembly is $O(N_g N_t)$ for stencil computations.
+*   **Memory Complexity:** $O(N_g)$ for the adjoint method, compared to $O(K N_g N_t)$ for naive backpropagation [S1, unofficial].
+*   **Strengths:** Exact gradients of the discrete objective $J_{disc}$, avoiding approximations from discretizing the continuous adjoint [S1, unofficial]. Significant memory savings.
+*   **Limitations:** Requires storing $T_n$ or re-computing them (checkpointing) if memory is extremely constrained. The backward solve inherits the backward-parabolic structure, which can be sensitive to numerical errors if not handled carefully [S1, unofficial].
+*   **When to use:** When memory is a bottleneck for long time series ($N_t$ large) and exact gradients are required for optimization.
+*   **When not to use:** If $N_t$ is very small, the memory overhead of naive backprop might be acceptable, and the implementation complexity of the adjoint method may not be justified.
+
+## Background
+Originated in the context of differentiable physics simulation for thermal tomography [S1, unofficial]. The method is an application of the implicit function theorem in a sequential setting, providing exact gradients for the discrete objective rather than discretized gradients of the continuous adjoint [S1, unofficial]. It builds on the Jacobi Iterative Solver for Thermal Tomography [Jacobi Iterative Solver for Thermal Tomography](18867-jacobi-iterative-solver-for-thermal-tomography.md).
+
+## Sources
+[S1] [2603.11045] Neural Field Thermal Tomography: A Differentiable Physics ..., https://arxiv.org/abs/2603.11045, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,255 @@
+# Procedural Tree Voxel Generation
+
+Also called: L-system-like recursion, L-systems, Lindenmayer systems, Recursive Tree Branching, Tree Voxel Generation
+
+## Overview
+Procedural Tree Voxel Generation is a method for creating volumetric tree structures by recursively branching segments represented as spheres of varying thickness [S1, unofficial]. It adapts L-system principles to voxel space, where a single recursive rule generates complex, self-similar shapes by spawning sub-branches with random directional offsets and scaling factors [S2, unofficial]. Unlike shape grammars that output basic shapes directly, this method requires interpreting the recursive production rules to draw voxelized primitives [S2, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+- `root1`: Starting 3D position (vector) of the current segment [S1, unofficial].
+- `root2`: Ending 3D position (vector) of the current segment [S1, unofficial].
+- `thicknessA`: Radius of the sphere at `root1` [S1, unofficial].
+- `thicknessB`: Radius of the sphere at `root2` [S1, unofficial].
+- `iteration`: Current recursion depth (integer) [S1, unofficial].
+- `vx, vy, vz`: Dimensions of the voxel grid [S1, unofficial].
+- `voxel`: Bit-packed array storing occupancy [S1, unofficial].
+- `voxel_col1`, `voxel_col2`: Arrays storing color data [S1, unofficial].
+
+**Outputs:**
+- Modified `voxel` array containing the tree geometry [S1, unofficial].
+- Modified `voxel_col1` and `voxel_col2` arrays containing color data [S1, unofficial].
+
+### Data Structures
+The voxel data is stored in a bit-packed format to save memory [S1, unofficial].
+- `voxel`: `char*` array of size $(vx/8) \times vy \times vz$ bytes [S1, unofficial].
+- Each byte stores 8 voxels along the X-axis [S1, unofficial].
+- Bit $k$ in a byte corresponds to voxel coordinate $x$ where $k = x \pmod 8$ [S1, unofficial].
+- Offset calculation for voxel $(x, y, z)$:
+  $$ ofs = (x \gg 3) + y \cdot (vx \gg 3) + z \cdot ((vx \gg 3) \cdot vy) $$
+- `voxel_col1`, `voxel_col2`: `uchar*` arrays of size $vx \times vy \times vz$, storing color indices or values for each voxel [S1, unofficial].
+
+### Algorithm Steps
+
+1.  **Base Case Check**: If `iteration > 5` or `thicknessA < 2`, draw a leaf sphere at `root1` with radius 8 and color index 2, then return [S1, unofficial].
+2.  **Increment Iteration**: Increment `iteration` for the current recursive step [S1, unofficial].
+3.  **Calculate Midpoint**: Compute the midpoint between `root1` and `root2`, offset by a random vector scaled by half the segment length:
+    $$ mid = \frac{root1 + root2}{2} + random\_vector \cdot length \cdot 0.1 $$
+    where $length = \|root2 - root1\| \cdot 0.5$ [S1, unofficial].
+4.  **Calculate Midpoint Thickness**:
+    $$ thicknessM = \frac{thicknessA + thicknessB}{2} $$
+    Draw a sphere at `mid` with radius `thicknessM` [S1, unofficial].
+5.  **Add Detail Sphere**: Calculate an offset vector using sine and cosine of a detail index `iM`, then draw a smaller sphere at `mid + offset` with radius `thicknessM / 3` and color index 3 [S1, unofficial].
+6.  **Recursive Branching**: Loop `branches` from 0 to 3 [S1, unofficial].
+    - Generate a random direction vector `rnd` and normalize it [S1, unofficial].
+    - Adjust the Y component to bias upward based on iteration:
+      $$ rnd.y += 0.6 \cdot iteration - 0.5 $$
+    - Calculate the delta vector of the current segment:
+      $$ delta = root2 - root1 $$
+    - Scale and offset the branch vector:
+      $$ branch = rnd \cdot length + delta \cdot 0.6 $$
+      *(Note: Since `rnd` is normalized, $\|rnd\|=1$, making the division by `branch.length()` in the source equivalent to 1)* [S1, unofficial].
+    - Calculate new thickness for the child branch:
+      $$ thicknessNew = thicknessA \cdot 0.4 $$
+    - Recursively call `tree` with start point `root2`, end point `root2 + branch`, thickness `thicknessNew`, and incremented iteration [S1, unofficial].
+7.  **Decrement Iteration**: After the branching loop completes, decrement `iteration` if managed as a shared state [S1, unofficial].
+
+### Sphere Voxelization
+To draw a sphere at position `pos` with radius `r`:
+1.  Iterate $x$ from $\lfloor pos.x - r \rfloor$ to $\lceil pos.x + r \rceil$ [S1, unofficial].
+2.  Iterate $y$ from $\lfloor pos.y - r \rfloor$ to $\lceil pos.y + r \rceil$ [S1, unofficial].
+3.  Iterate $z$ from $\lfloor pos.z - r \rfloor$ to $\lceil pos.z + r \rceil$ [S1, unofficial].
+4.  Calculate squared distance:
+    $$ distSq = (x - pos.x)^2 + (y - pos.y)^2 + (z - pos.z)^2 $$
+5.  If $distSq \le r^2$:
+    - Set the bit in `voxel`:
+      $$ voxel[ofs] \ |= \ (1 \ll (x \pmod 8)) $$
+    - Set color in `voxel_col1` and `voxel_col2` at $(x, y, z)$ [S1, unofficial].
+
+### Mipmap Generation
+After the tree is generated, a mipmap level can be created [S1, unofficial].
+1.  Iterate over each voxel in the current tree level [S1, unofficial].
+2.  Check the 2x2x2 sub-voxels corresponding to the current voxel [S1, unofficial].
+3.  If any sub-voxel is set, set the corresponding bit in the mipmap voxel [S1, unofficial].
+4.  Copy color bits if present [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def draw_sphere(pos, radius, color_idx, voxel, voxel_col1, voxel_col2, vx, vy, vz):
+    """Draws a sphere into the voxel grid according to S1 specifications."""
+    r = radius
+    x_min = max(0, int(pos.x - r))
+    x_max = min(vx - 1, int(pos.x + r))
+    y_min = max(0, int(pos.y - r))
+    y_max = min(vy - 1, int(pos.y + r))
+    z_min = max(0, int(pos.z - r))
+    z_max = min(vz - 1, int(pos.z + r))
+    
+    r_sq = r * r
+    vx8 = vx >> 3
+    vx8vy = vx8 * vy
+    
+    for x in range(x_min, x_max + 1):
+        bit_mask = 1 << (x & 7)
+        for y in range(y_min, y_max + 1):
+            y_offset = y * vx8
+            for z in range(z_min, z_max + 1):
+                dx = x - pos.x
+                dy = y - pos.y
+                dz = z - pos.z
+                dist_sq = dx*dx + dy*dy + dz*dz
+                
+                if dist_sq <= r_sq:
+                    ofs = (x >> 3) + y_offset + z * vx8vy
+                    voxel[ofs] |= bit_mask
+                    voxel_col1[x + y * vx + z * vx * vy] = color_idx
+                    voxel_col2[x + y * vx + z * vx * vy] = color_idx
+
+def get_rnd():
+    """Generates a random 3D vector."""
+    return [random.uniform(-1, 1), random.uniform(-1, 1), random.uniform(-1, 1)]
+
+def normalize(v):
+    """Normalizes a vector."""
+    length = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+    if length == 0:
+        return [0.0, 0.0, 0.0]
+    return [v[0]/length, v[1]/length, v[2]/length]
+
+def tree(root1, root2, thicknessA, thicknessB, iteration, voxel, voxel_col1, voxel_col2, vx, vy, vz):
+    """
+    Recursive function to generate tree branches per S1.
+    """
+    # Base case
+    if iteration > 5 or thicknessA < 2:
+        draw_sphere(root1, 8.0, 2, voxel, voxel_col1, voxel_col2, vx, vy, vz)
+        return
+
+    # Increment iteration for children
+    next_iteration = iteration + 1
+    
+    # Calculate delta and half-length
+    delta = [root2[i] - root1[i] for i in range(3)]
+    delta_len = math.sqrt(delta[0]**2 + delta[1]**2 + delta[2]**2)
+    length = delta_len * 0.5
+    
+    # Calculate midpoint with random offset
+    rnd_mid = get_rnd()
+    rnd_mid = normalize(rnd_mid)
+    mid = [(root1[i] + root2[i]) / 2.0 + rnd_mid[i] * length * 0.1 for i in range(3)]
+    thicknessM = (thicknessA + thicknessB) / 2.0
+    
+    # Draw main segment sphere
+    draw_sphere(mid, thicknessM, 2, voxel, voxel_col1, voxel_col2, vx, vy, vz)
+    
+    # Add detail sphere
+    iM = iteration  # Deterministic detail index per source context
+    offset_x = math.sin(iM) * (thicknessM / 3.0)
+    offset_y = math.cos(iM) * (thicknessM / 3.0)
+    offset_z = math.sin(iM + 1) * (thicknessM / 3.0)
+    detail_pos = [mid[i] + [offset_x, offset_y, offset_z][i] for i in range(3)]
+    draw_sphere(detail_pos, thicknessM / 3.0, 3, voxel, voxel_col1, voxel_col2, vx, vy, vz)
+
+    # Recursive branching
+    for branches in range(4):
+        rnd = get_rnd()
+        rnd = normalize(rnd)
+        
+        # Adjust Y component
+        rnd[1] += 0.6 * iteration - 0.5
+        
+        # Scale and offset branch vector
+        branch_vec = [rnd[i] * length + delta[i] * 0.6 for i in range(3)]
+        
+        new_root2 = [root2[i] + branch_vec[i] for i in range(3)]
+        thicknessNew = thicknessA * 0.4
+        
+        tree(root2, new_root2, thicknessA, thicknessNew, next_iteration, voxel, voxel_col1, voxel_col2, vx, vy, vz)
+
+def generate_tree(vx, vy, vz):
+    """
+    Initializes voxel data and starts tree generation.
+    """
+    voxel_size = (vx // 8) * vy * vz
+    voxel = bytearray(voxel_size)
+    voxel_col1 = bytearray(vx * vy * vz)
+    voxel_col2 = bytearray(vx * vy * vz)
+    
+    root1 = [0.0, 0.0, 0.0]
+    root2 = [0.0, 10.0, 0.0]
+    thicknessA = 10.0
+    thicknessB = 8.0
+    iteration = 0
+    
+    tree(root1, root2, thicknessA, thicknessB, iteration, voxel, voxel_col1, voxel_col2, vx, vy, vz)
+    
+    return voxel, voxel_col1, voxel_col2
+```
+
+### Parameters
+- `iteration`: Static counter for recursion depth. Base case triggers if `iteration > 5` or `thickness < 2` [S1, unofficial].
+- `iso`: Isolation threshold for loading voxel data from file, default 168 [S1, unofficial].
+- `thicknessA`: Initial thickness of the trunk [S1, unofficial].
+- `thicknessB`: Thickness at the end of the trunk segment [S1, unofficial].
+- `branches`: Number of sub-branches spawned per node (fixed at 4 in the source loop) [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Precision**: Floating point errors in distance calculations may cause gaps or overlaps in sphere voxelization. Using squared distance comparisons avoids square roots [S1, unofficial].
+- **Boundary Checks**: Voxel coordinates must be clamped to the grid dimensions $[0, vx-1] \times [0, vy-1] \times [0, vz-1]$ to prevent out-of-bounds memory access [S1, unofficial].
+- **Degenerate Input**: If `root1` equals `root2`, the delta vector is zero, resulting in no branch direction. The normalization of `rnd` handles this, but the branch vector becomes purely random, potentially causing instability [S1, unofficial].
+
+## Subtopics
+
+### L-System Principles
+L-systems use production rules to model plant growth [S2, unofficial]. Unlike shape grammars, L-systems require interpretation of the output string to produce the final result [S2, unofficial]. They are well-suited for self-similar shapes like trees [S2, unofficial].
+
+### Self-Sensitive L-Systems
+Used in city layout generation, these L-systems change under local constraints to avoid overlapping streets or parallel roads [S2, unofficial]. This concept can be adapted for tree generation to prevent branch collision [S2, unofficial].
+
+### Mipmap Generation for Trees
+A post-processing step where 2x2x2 sub-voxels are checked to generate lower-resolution levels of the tree voxel data [S1, unofficial].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+- **Time**: $O(N)$ where $N$ is the number of voxels in the bounding box of the tree. The number of spheres drawn is proportional to the number of branches, which grows exponentially with `iteration` (base 4). Each sphere voxelization is $O(r^3)$ [S1, unofficial].
+- **Memory**: $O(vx \cdot vy \cdot vz / 8)$ for the bit-packed voxel array, plus $O(vx \cdot vy \cdot vz)$ for color arrays [S1, unofficial].
+
+### Measured Performance
+- Not given in the sources.
+
+### Scaling
+- The tree size scales with the initial thickness and the number of iterations. Increasing `iteration` exponentially increases the number of branches and voxels [S1, unofficial].
+
+### Strengths and Limitations
+- **Strengths**: Simple implementation, generates organic-looking structures, low memory footprint due to bit-packing [S1, unofficial].
+- **Limitations**: Limited to spherical primitives, no internal structure (hollow branches), random variation may lead to non-physical overlaps [S1, S2, unofficial].
+
+### When to Use
+- Use for background vegetation, low-poly trees, or when procedural generation is required without external assets [S1, S2, unofficial].
+
+## Background
+
+### Origin
+The method is based on L-systems, introduced by Aristid Lindenmayer in 1968 to model plant development [S3, unofficial].
+
+### History and Development
+L-systems have been widely used in procedural architectural modeling and city layout generation, such as by Parish & Müller (2001) [S2, unofficial]. The voxel-based approach adapts these concepts to volumetric rendering, using sphere splatting to represent branches [S1, unofficial].
+
+### Usage
+- Procedural vegetation in voxel-based games and simulations [S1, unofficial].
+- Architectural modeling and city layout generation using L-systems [S2, unofficial].
+
+## Sources
+
+[S1] sp4cerat/OpenGL-Voxel-Splatting, https://github.com/sp4cerat/OpenGL-Voxel-Splatting, fetched 2026-10-27 (unofficial)
+[S2] Procedural Generation of Voxel Worlds with Castles, https://researchcommons.waikato.ac.nz/entities/publication/70d98783-1629-43df-9d01-b973ddbb5d75, fetched 2026-10-28 (unofficial)
+[S3] Procedural Graphics: Noise, Fractals and Mathematical Art, https://www.mattcurrent.org/procedural-graphics-guide/, fetched 2026-10-27 (unofficial)

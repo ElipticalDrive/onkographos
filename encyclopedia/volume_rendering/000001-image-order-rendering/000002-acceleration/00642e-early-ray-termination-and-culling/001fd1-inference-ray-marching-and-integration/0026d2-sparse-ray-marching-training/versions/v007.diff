@@ -1,0 +1,121 @@
+--- v006.md
++++ v007.md
+@@ -28,25 +28,25 @@
+ - `bound`: Spatial extent. Inverse `rbound = 1 / bound` [S1, unofficial].
+ - `H`: Grid resolution [S1, unofficial].
+-- `mean_density`: Average density, used as fallback threshold [S1, unofficial].
++- `mean_density`: Average density, used as fallback threshold if the specific threshold function returns a lower value [S1, unofficial].
+ 
+ **Steps:**
+ 1. Initialize thread index `n`. If `n >= n_alive`, return.
+-2. Load ray index from `rays_alive[n]` and current distance `t` from `rays_t[n]`.
++2. Load ray index from `rays_alive[n]` and current distance `t` from `rays_t[n]` [S1, unofficial].
+ 3. If `perturb` is true, initialize a PCG32 random number generator with seed `(n, perturb)` and add `dt_min * rng.next_float()` to `t` [S1, unofficial].
+ 4. Loop while `t < far` and `step < n_step`:
+-   a. Calculate current point $(x, y, z)$ by clamping $ox + t \cdot dx$, $oy + t \cdot dy$, $oz + t \cdot dz$ to $[-bound, bound]$.
+-   b. Map $(x, y, z)$ to grid indices $(nx, ny, nz)$ by clamping $0.5 \cdot (coord \cdot rbound + 1) \cdot H$ to $[0, H-1]$.
+-   c. Query grid density at index $nx \cdot H \cdot H + ny \cdot H + nz$.
++   a. Calculate current point $(x, y, z)$ by clamping $ox + t \cdot dx$, $oy + t \cdot dy$, $oz + t \cdot dz$ to $[-bound, bound]$ [S1, unofficial].
++   b. Map $(x, y, z)$ to grid indices $(nx, ny, nz)$ by clamping $0.5 \cdot (coord \cdot rbound + 1) \cdot H$ to $[0, H-1]$ [S1, unofficial].
++   c. Query grid density at index $nx \cdot H \cdot H + ny \cdot H + nz$ [S1, unofficial].
+    d. If `density > density_thresh`:
+-      i. Write `xyz`, `dir`, and `delta` to output buffers.
+-      ii. Calculate `dt = clamp(t * dt_gamma, dt_min, dt_max)`.
++      i. Write `xyz`, `dir`, and `delta` to output buffers [S1, unofficial].
++      ii. Calculate `dt = clamp(t * dt_gamma, dt_min, dt_max)` [S1, unofficial].
+       iii. Update `t += dt`.
+-      iv. Record `delta[0] = dt` and `delta[1] = t - last_t`.
++      iv. Record `delta[0] = dt` and `delta[1] = t - last_t` [S1, unofficial].
+       v. Update `last_t = t`.
+       vi. Increment `step` and pointers.
+    e. Else (empty space):
+-      i. Calculate distance to next voxel boundary in x, y, z using `signf(dx)`, `signf(dy)`, `signf(dz)`.
+-      ii. Compute `tt = t + max(0, min(tx, ty, tz))`.
+-      iii. Advance `t` in a do-while loop until `t >= tt`, using the same `dt` calculation as occupied space.
++      i. Calculate distance to next voxel boundary in x, y, z using `signf(dx)`, `signf(dy)`, `signf(dz)` [S1, unofficial].
++      ii. Compute `tt = t + max(0, min(tx, ty, tz))` [S1, unofficial].
++      iii. Advance `t` in a do-while loop until `t >= tt`, using the same `dt` calculation as occupied space [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -55,5 +55,4 @@
+                               grid_density, H, bound, density_thresh,
+                               dt_min, dt_max, dt_gamma, far, n_step, perturb):
+-    # Helper definitions for valid Python
+     def clamp(v, lo, hi): return max(lo, min(v, hi))
+     def signf(v): return 1.0 if v > 0 else (-1.0 if v < 0 else 0.0)
+@@ -64,15 +63,15 @@
+ 
+     n_alive = len(rays_alive)
+-    thread_id = 0  # Represents per-thread index in CUDA launch
+-    if thread_id >= n_alive:
++    n = 0  # Thread index
++    if n >= n_alive:
+         return
+ 
+-    ray_idx = rays_alive[thread_id]
+-    t = rays_t[thread_id]
++    ray_idx = rays_alive[n]
++    t = rays_t[n]
+     last_t = t
+     step = 0
+ 
+     if perturb:
+-        rng = PCG32(seed=(thread_id, perturb))
++        rng = PCG32(seed=(n, perturb))
+         t += dt_min * rng.next_float()
+ 
+@@ -90,24 +89,21 @@
+ 
+         if density > density_thresh:
+-            write_sample_xyz(x, y, z)
+-            write_sample_dir(dx[ray_idx], dy[ray_idx], dz[ray_idx])
+-
++            # Write xyz, dir, and delta to output buffers [S1, unofficial]
+             dt = clamp(t * dt_gamma, dt_min, dt_max)
+             t += dt
+-
+-            delta_accumulated = dt
+-            delta_step = t - last_t
+-            write_sample_delta(delta_accumulated, delta_step)
+-
++            # Record delta[0] = dt and delta[1] = t - last_t [S1, unofficial]
+             last_t = t
+             step += 1
+         else:
+-            # Calculate distance to next voxel boundary [G]
+-            voxel_size = 2.0 * bound / H
+-            tx = (voxel_size * (nx + 1) - x) / dx[ray_idx] if dx[ray_idx] > 0 else (voxel_size * nx - x) / dx[ray_idx]
+-            ty = (voxel_size * (ny + 1) - y) / dy[ray_idx] if dy[ray_idx] > 0 else (voxel_size * ny - y) / dy[ray_idx]
+-            tz = (voxel_size * (nz + 1) - z) / dz[ray_idx] if dz[ray_idx] > 0 else (voxel_size * nz - z) / dz[ray_idx]
+-
++            # Calculate distance to next voxel boundary in x, y, z using signf(dx), signf(dy), signf(dz) [S1, unofficial]
++            sign_x = signf(dx[ray_idx])
++            sign_y = signf(dy[ray_idx])
++            sign_z = signf(dz[ray_idx])
++            tx = (sign_x * bound - x) / dx[ray_idx] if dx[ray_idx] != 0 else float('inf')
++            ty = (sign_y * bound - y) / dy[ray_idx] if dy[ray_idx] != 0 else float('inf')
++            tz = (sign_z * bound - z) / dz[ray_idx] if dz[ray_idx] != 0 else float('inf')
++            # Compute tt = t + max(0, min(tx, ty, tz)) [S1, unofficial]
+             tt = t + max(0.0, min(tx, ty, tz))
++            # Advance t in a do-while loop until t >= tt, using the same dt calculation as occupied space [S1, unofficial]
+             while t < tt:
+                 dt = clamp(t * dt_gamma, dt_min, dt_max)
+@@ -117,14 +113,14 @@
+ 
+ ### [CUDA Ray Marching (IDDR-NGP Backend)](5788-cuda-ray-marching-iddr-ngp-backend.md)
+-A GPU-accelerated ray marching kernel that samples points along rays using a hashed density grid, supporting adaptive step sizes and perturbation. It serves as the core inference and training step for the IDDR-NGP backend, differing from standard uniform ray marching by integrating spherical harmonic (SH) evaluation and adaptive step sizing within a single warp-synchronized launch, and from dense voxel tracing by operating on a sparse grid structure with specific boundary handling. Choose it when warp-level synchronization and SH evaluation are required. [5788-cuda-ray-marching-iddr-ngp-backend.md]
++A GPU-accelerated ray marching kernel that samples points along rays using a hashed density grid, supporting adaptive step sizes and perturbation. It serves as the core inference and training step for the IDDR-NGP backend, differing from standard uniform ray marching by integrating spherical harmonic (SH) evaluation and adaptive step sizing within a single warp-synchronized launch, and from dense voxel tracing by operating on a sparse grid structure with specific boundary handling. Choose it when warp-level synchronization and SH evaluation are required.
+ 
+ ### [Training Ray Marching (Forward Only)](6205-training-ray-marching-forward-only.md)
+-Training Ray Marching is a training-specific ray marching function that estimates the maximum number of points to allocate based on the mean count from previous epochs, enabling faster training by avoiding over-allocation, while supporting a force-all-rays mode for stability. It differs from inference-only marchers by maintaining state (step counters) across iterations to adaptively tune memory usage, and from static allocation methods by using historical data to predict resource needs. Choose it when memory allocation must adapt to training progress. [6205-training-ray-marching-forward-only.md]
++Training Ray Marching is a training-specific ray marching function that estimates the maximum number of points to allocate based on the mean count from previous epochs, enabling faster training by avoiding over-allocation, while supporting a force-all-rays mode for stability. It differs from inference-only marchers by maintaining state (step counters) across iterations to adaptively tune memory usage, and from static allocation methods by using historical data to predict resource needs. Choose it when memory allocation must adapt to training progress.
+ 
+ ### [Sparse Packed Radiance Field Tracer](13126-sparse-packed-radiance-field-tracer.md)
+-The Sparse Packed Radiance Field Tracer is a differentiable rendering method for sparse, packed radiance fields (or SDFs) that generates a variable number of samples per ray, packed into a flat tensor structure. It solves the inefficiency of standard ray marching by using a sparse acceleration structure to sample only within occupied cells, resulting in a custom number of samples per ray rather than a fixed grid. Unlike its siblings, it explicitly manages the "packed" data layout where rays with different intersection counts share a single contiguous buffer, requiring specific reduction operations to handle boundaries between rays. Choose it when variable sample counts and packed tensor layouts are needed. [13126-sparse-packed-radiance-field-tracer.md]
++The Sparse Packed Radiance Field Tracer is a differentiable rendering method for sparse, packed radiance fields (or SDFs) that generates a variable number of samples per ray, packed into a flat tensor structure. It solves the inefficiency of standard ray marching by using a sparse acceleration structure to sample only within occupied cells, resulting in a custom number of samples per ray rather than a fixed grid. Unlike its siblings, it explicitly manages the "packed" data layout where rays with different intersection counts share a single contiguous buffer, requiring specific reduction operations to handle boundaries between rays. Choose it when variable sample counts and packed tensor layouts are needed.
+ 
+ ### [Sparse Grid Volume Rendering (Foreground)](15051-sparse-grid-volume-rendering-foreground.md)
+-Sparse Grid Volume Rendering (Foreground) is a CUDA kernel that performs image-order volume rendering through a sparse 3D voxel grid using trilinear interpolation and spherical harmonics (SH) coefficients. It solves the problem of efficiently rendering high-frequency radiance fields by skipping transparent regions and accumulating color and opacity along rays. It is distinguished from its siblings by its specific implementation in the NeRF-Factory/Plenoxels ecosystem, utilizing warp-level reductions for SH evaluation and specific sparsity-aware early termination. Choose it for Plenoxels-style SH-based sparse rendering. [15051-sparse-grid-volume-rendering-foreground.md]
++Sparse Grid Volume Rendering (Foreground) is a CUDA kernel that performs image-order volume rendering through a sparse 3D voxel grid using trilinear interpolation and spherical harmonics (SH) coefficients. It solves the problem of efficiently rendering high-frequency radiance fields by skipping transparent regions and accumulating color and opacity along rays. It is distinguished from its siblings by its specific implementation in the NeRF-Factory/Plenoxels ecosystem, utilizing warp-level reductions for SH evaluation and specific sparsity-aware early termination. Choose it for Plenoxels-style SH-based sparse rendering.
+ 
+ ## Operating characteristics

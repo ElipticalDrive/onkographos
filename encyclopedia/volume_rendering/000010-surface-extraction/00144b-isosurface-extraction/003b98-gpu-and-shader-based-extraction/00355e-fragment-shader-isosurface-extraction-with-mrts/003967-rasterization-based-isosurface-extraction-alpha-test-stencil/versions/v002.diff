@@ -1,0 +1,158 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method extracts isosurfaces from unstructured grids by leveraging fixed-function rasterization hardware, specifically the alpha-test and stencil buffer, without relying on programmable fragment shaders [S1, S2, unofficial]. It solves the problem of computing plane-tetrahedron intersections by encoding scalar values in the alpha channel and using bitwise operations to isolate intersection fragments [S1, S2, unofficial]. Unlike modern shader-based approaches, it relies on legacy graphics pipeline states, making it suitable for hardware lacking programmable shading capabilities [S1, S2, unofficial].
++This method extracts isosurfaces from unstructured grids by leveraging fixed-function rasterization hardware, specifically the alpha-test and stencil buffer, without relying on programmable fragment shaders [S1, unofficial][S2, unofficial]. It computes plane-tetrahedron intersections by encoding scalar values in the alpha channel and combining back-face and front-face rasterization results using a bitwise XOR operation on the stencil buffer [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+@@ -12,97 +12,79 @@
+ 
+ **Data Structures**
+-*   **Stencil Buffer:** A per-pixel integer buffer used to store the XOR combination of front and back face results.
+-*   **Alpha Component:** The scalar value of the vertex is stored in the alpha channel of the fragment color.
++*   **Stencil Buffer:** A per-pixel integer buffer that accumulates the XOR combination of front and back face rasterization results [S1, unofficial][S2, unofficial].
++*   **Alpha Component:** The interpolated scalar value of the vertex is stored in the alpha channel of the fragment color [S1, unofficial][S2, unofficial].
+ 
+ **Steps**
+-1.  **Configure Alpha-Test:** Set the alpha test function to reject fragments with an alpha value less than the desired isovalue. This ensures only fragments where the interpolated scalar exceeds the isovalue are considered [S1, S2, unofficial].
++1.  **Configure Alpha-Test:** Set the alpha test function to reject fragments with an alpha value less than the desired isovalue [S1, unofficial][S2, unofficial].
+ 2.  **First Pass (Stencil Setup):**
+-    *   Draw the back faces of the tetrahedra. The scalar value is interpolated across the triangle and stored in the alpha component. The alpha test filters out fragments below the isovalue.
+-    *   Draw the front faces of the tetrahedra in the same manner.
+-    *   Configure the stencil buffer to perform a bitwise XOR operation on the stencil values for each fragment that passes the alpha test [S1, S2, unofficial].
+-3.  **Result Extraction:** The final isosurface is identified by pixels where the stencil buffer value is non-zero (specifically, where the XOR of the front and back face contributions results in a set bit) [S1, S2, unofficial].
++    *   Draw the back faces of a given cell with the interpolated scalar value in the alpha component.
++    *   Draw the front faces of the same cell in the same manner.
++    *   The rasterization hardware applies the alpha test and performs a bitwise XOR operation on the stencil buffer for each passing fragment [S1, unofficial][S2, unofficial].
++3.  **Result Extraction:** The final isosurface is identified by pixels where the stencil buffer value is non-zero, indicating an intersection between the plane and the tetrahedron [S1, unofficial][S2, unofficial].
+ 
+ **Pseudocode**
+ ```python
+-# Pseudocode for Rasterization-based Isosurface Extraction
+-# Note: This describes the pipeline configuration and drawing calls,
+-# as the method relies on fixed-function hardware states rather than
+-# explicit CPU-side computation.
+-
+-def extract_isosurface(tetrahedra, isovalue):
+-    # 1. Configure Alpha Test
+-    # Reject fragments where alpha < isovalue
+-    set_alpha_test_function(LESS_OR_EQUAL, isovalue)
+-    
+-    # 2. Configure Stencil Buffer
+-    # Enable stencil testing
+-    enable_stencil_test(True)
+-    
+-    # Set stencil operation to XOR for both front and back faces
+-    # This assumes the stencil buffer is initialized to 0
+-    set_stencil_op_front(FUNC_ALWAYS, KEEP, REPLACE, REPLACE)
+-    set_stencil_op_back(FUNC_ALWAYS, KEEP, REPLACE, REPLACE)
+-    
+-    # Note: The specific stencil function and reference value depend on
+-    # the exact hardware implementation of the XOR operation described
+-    # in the source. The source states "XOR operation and the stencil buffer".
+-    # A common implementation for this specific technique involves:
+-    # - Drawing back faces: stencil = stencil XOR 1 (if alpha > isovalue)
+-    # - Drawing front faces: stencil = stencil XOR 1 (if alpha > isovalue)
+-    # - Result: stencil != 0 indicates an intersection
+-    
+-    # 3. Draw Tetrahedra
++def extract_isosurface(tetrahedra, isovalue, width, height):
++    # Initialize stencil buffer to zero
++    stencil = [[0] * width for _ in range(height)]
++    # Pass 1: Set stencil buffer
+     for tet in tetrahedra:
+         # Draw back faces
+-        set_face_culling(BACK)
+-        draw_tetrahedron_faces(tet, scalar_to_alpha=tet.scalars)
+-        
++        for face in tet.back_faces:
++            rasterize_and_apply_stencil(face, isovalue, stencil)
+         # Draw front faces
+-        set_face_culling(FRONT)
+-        draw_tetrahedron_faces(tet, scalar_to_alpha=tet.scalars)
+-        
+-    # 4. Read Stencil Buffer
+-    # The isosurface is present where stencil buffer value is non-zero
+-    stencil_buffer = read_stencil_buffer()
+-    isosurface_pixels = stencil_buffer != 0
+-    
+-    return isosurface_pixels
++        for face in tet.front_faces:
++            rasterize_and_apply_stencil(face, isovalue, stencil)
++    # Pass 2: Read stencil buffer results
++    isosurface_mask = [[1 if stencil[y][x] != 0 else 0 for x in range(width)] for y in range(height)]
++    return isosurface_mask
+ 
+-def draw_tetrahedron_faces(tet, scalar_to_alpha):
+-    # For each face of the tetrahedron:
+-    #   Interpolate scalar values at vertices
+-    #   Store interpolated scalar in alpha component of fragment color
+-    #   Rasterize triangle
++def rasterize_and_apply_stencil(face, isovalue, stencil):
++    # Interpolate scalar values at vertices to fragment alpha
++    alpha_values = interpolate_scalars(face.vertices)
++    # Rasterize triangle to screen coordinates
++    for x, y in triangle_rasterization(face.screen_coords):
++        # Barycentric interpolation for alpha
++        alpha = barycentric_interpolate(alpha_values, face.screen_coords, x, y)
++        # Alpha test: reject fragments where alpha < isovalue
++        if alpha < isovalue:
++            continue
++        # Stencil XOR operation
++        stencil[y][x] ^= 1
++
++def interpolate_scalars(vertices):
++    return [v.scalar for v in vertices]
++
++def triangle_rasterization(screen_coords):
++    # Returns list of (x, y) pixel coordinates covered by the triangle
++    pass
++
++def barycentric_interpolate(values, coords, x, y):
++    # Returns interpolated scalar value at (x, y)
+     pass
+ ```
+ 
+ **Parameters**
+-*   **Isovalue:** The scalar threshold for isosurface extraction. Typical values depend on the data range [S1, S2, unofficial].
+-*   **Alpha Test Function:** Typically `LESS_OR_EQUAL` or `GREATER` depending on whether alpha represents the scalar value directly or its complement [S1, S2, unofficial].
++*   **Isovalue:** The scalar threshold for isosurface extraction [S1, unofficial][S2, unofficial].
+ 
+ **Edge Cases and Pitfalls**
+-*   **Precision:** Interpolation errors in the alpha channel may cause incorrect fragment rejection near the isovalue [S1, S2, unofficial].
+-*   **Degenerate Triangles:** The method may produce degenerate triangles if the isovalue coincides with vertex values, leading to undefined behavior in rasterization [S1, S2, unofficial].
+-*   **Stencil Buffer Overflow:** If the XOR operation is not properly managed, stencil values may overflow or wrap around, leading to incorrect results [S1, S2, unofficial].
++Not given in the sources.
+ 
+ ## Subtopics
+ 
+ ### Revised Version with Checkerboard Texture
+-An alternate solution that decomposes tetrahedra into smaller tetrahedra and uses 2D texturing hardware with a checkerboard texture to reduce the number of faces rendered per tetrahedron [S1, S2, unofficial]. This method projects back and front faces to either degenerate triangles or identical triangles, allowing intersection computation via texture sampling [S1, S2, unofficial].
+-
+-### Comparison with Shader-Based Methods
+-Unlike shader-based methods, this technique does not require programmable fragment shaders, making it compatible with older hardware [S1, S2, unofficial]. However, it is less flexible and may have lower precision [S1, S2, unofficial].
++An alternate solution that decomposes tetrahedra into smaller tetrahedra and uses 2D texturing hardware with a checkerboard texture to reduce the number of faces rendered per tetrahedron [S1, unofficial][S2, unofficial]. This method projects back and front faces to either degenerate triangles or identical triangles, allowing intersection computation via texture sampling [S1, unofficial][S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The algorithm runs in two passes, with the first pass setting the stencil buffer [S1, S2, unofficial].
+-*   **Memory Complexity:** Requires a stencil buffer and alpha channel storage [S1, S2, unofficial].
+-*   **Performance:** On average, renders 5 to 7 triangles per tetrahedron [S1, S2, unofficial].
+-*   **Strengths:** Efficient use of fixed-function hardware; no need for programmable shaders [S1, S2, unofficial].
+-*   **Limitations:** Limited to hardware with alpha-test and stencil buffer support; less flexible than shader-based methods [S1, S2, unofficial].
+-*   **When to Use:** Suitable for legacy hardware or scenarios where programmable shaders are unavailable [S1, S2, unofficial].
+-*   **When Not to Use:** Not recommended for modern hardware where shader-based methods offer greater flexibility and precision [S1, S2, unofficial].
++*   **Time Complexity:** Runs in two passes, with the first pass setting the stencil buffer [S1, unofficial][S2, unofficial].
++*   **Memory Complexity:** Requires a stencil buffer and an alpha channel for scalar storage [S1, unofficial][S2, unofficial].
++*   **Performance:** On average renders 5 to 7 triangles per tetrahedron [S1, unofficial][S2, unofficial].
++*   **Strengths:** Efficient use of fixed-function rasterization hardware without programmable shaders [S1, unofficial][S2, unofficial].
++*   **Limitations:** Limited to hardware supporting alpha-test and stencil buffer operations [S1, unofficial][S2, unofficial].
++*   **When to Use:** Suitable for early GPU architectures that lack programmable shading capabilities [S1, unofficial][S2, unofficial].
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-This technique was introduced in early work on GPU-based volume rendering, exploring the use of graphics hardware functionality without programmable shaders [S1, S2, unofficial]. It was proposed in [69] and later revised in [58] [S1, S2, unofficial]. The method is part of the broader field of GPU-based volume rendering of unstructured grids [S1, S2, unofficial].
++This technique was introduced in early work on GPU-based volume rendering, exploring the use of graphics hardware functionality without the power of programmable shaders [S1, unofficial][S2, unofficial]. It was proposed in [69] and later revised in [58] [S1, unofficial][S2, unofficial].
+ 
+ ## Sources

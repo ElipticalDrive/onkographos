@@ -1,0 +1,378 @@
+--- v005.md
++++ v006.md
+@@ -1,151 +1,264 @@
+ # Octree Insertion with Growth
+ 
++Also called: Dynamic Octree Insertion, Boundary-Handling Insertion
+ 
+ ## Overview
+-Octree Insertion with Growth is a method for constructing a Sparse Voxel Octree (SVO) by recursively inserting voxels while dynamically expanding the octree's spatial extent when a voxel falls outside the current root bounds [S1, unofficial]. It solves the problem of unknown scene bounds during incremental voxelization by ensuring the tree always covers the active data [S1, unofficial]. It builds on [Dynamic Octree Growth Algorithm](2375-dynamic-octree-growth-algorithm.md) by providing the recursive insertion logic that triggers boundary expansion [S1, unofficial].
++Octree Insertion with Growth is the core algorithm for inserting a voxel into a Sparse Voxel Octree (SVO) while dynamically handling spatial boundaries [S1, unofficial]. It solves the problem of maintaining a valid hierarchical structure when new voxels fall outside the current octree's defined range by expanding the tree's depth and spatial extent before insertion [S1, unofficial]. It differs from [Sparse Voxel Octree (Dynamic, Origin-Centered)](3622-sparse-voxel-octree-dynamic-origin-centered.md) by explicitly managing the coordinate range expansion logic, and from [Regular-Adaptive Octree Construction](6560-regular-adaptive-octree-construction.md) by focusing on the incremental insertion step rather than bulk construction [S1, S3, unofficial].
+ 
+ ## How it works
+-**Inputs:** A voxel $v$ (containing position $p$ and color/data), and an existing octree $o$ with root node $n$ and current depth $d$ [S1, unofficial].
+-**Outputs:** The updated octree $o'$ with the voxel inserted [S1, unofficial].
++**Inputs:**
++- $v$: The voxel to insert, containing position $p$ and data (e.g., color, density).
++- $o$: The current octree, containing a root node and current depth $d$.
++- $b$: The bitstream representation of the voxel's data or path, used for recursive descent [S1, unofficial].
++
++**Outputs:**
++- $o'$: The updated octree with the voxel inserted and the root potentially updated if growth occurred.
+ 
+ **Data Structures:**
+-The core node structure is a naive representation used for clarity in the primary source [S1, unofficial]:
+-* `Node` struct:
+-  * `children[8]`: Array of 8 pointers to child nodes (null if leaf).
+-  * `voxelColorIndex`: Integer index representing the voxel's color (valid only if `isLeaf` is true).
+-  * `isLeaf`: Boolean flag indicating if the node is a leaf.
+-* The naive node structure consumes 72 bytes on 64-bit processors or 40 bytes on 32-bit processors [S1, unofficial].
+-
+-**Algorithm Steps:**
+-1. **Extract Position and Depth:** Get the 3D position $p$ of the voxel $v$ and the current depth $d$ of the octree $o$ [S1, unofficial].
+-2. **Boundary Check:** Determine if $p$ is within the valid range of the current octree [S1, unofficial]. The valid range for depth $d$ is defined as $[-2^{d-1}, 2^{d-1})$ [S1, unofficial]. (Note: The source text contains a typo `[-2^(d-1), -2^(d-1))` which is corrected to a symmetric half-open interval [G]).
+-3. **Grow if Necessary:** If $p \notin [-2^{d-1}, 2^{d-1})$, call `grow(o)` to expand the octree's depth and spatial extent to encompass $p$ [S1, unofficial].
+-4. **Recursive Insertion:**
+-   * If $d = 0$, the current node is a leaf [S1, unofficial]. Create a new leaf node containing the voxel's color/index and return it [S1, unofficial].
+-   * If $d > 0$:
+-     * Calculate the child index using the bitstream of the voxel's position at the current depth [S1, unofficial]. The source uses `group(b, d, 3)` to extract 3 bits from the bitstream $b$ corresponding to depth $d$ [S1, unofficial].
+-     * Retrieve or create the child node $n'$ at this index [S1, unofficial]. If $n'$ is null ($\emptyset$), create a new empty node [S1, unofficial].
+-     * Recursively call `insert` on $n'$ with depth $d-1$ [S1, unofficial].
+-     * Set the child of the current node $n$ to the result of the recursive call [S1, unofficial].
+-5. **Return:** Return the updated octree with the root updated [S1, unofficial].
++The specific node layout depends on the implementation variant. A naive node structure is defined as [S1, unofficial]:
++```cpp
++struct Node {
++    Node* children[8]; // Pointers to 8 child nodes
++    int8_t voxelColorIndex; // Stored if leaf
++    bool isLeaf; // Boolean flag
++};
++```
++Other variants use compressed layouts, such as 28-byte nodes with child tile indices and neighbor offsets [S2, unofficial], or 16-byte leaf nodes with bit flags and normal counters [S2, unofficial]. The algorithm below assumes a generic recursive node structure.
++
++**Steps:**
++1.  **Extract Position and Depth:** Get the 3D position $p$ of voxel $v$ and the current depth $d$ of octree $o$.
++2.  **Boundary Check:** Determine if $p$ lies within the valid range defined by the current depth. The valid range is $[-2^{d-1}, 2^{d-1})$ [S1, unofficial]. Note: The source text contains a typo `[-2^(d-1), -2^(d-1))` which is logically inconsistent; the standard symmetric range for depth $d$ centered at origin is $[-2^{d-1}, 2^{d-1})$ [S1, unofficial].
++3.  **Grow if Necessary:** If $p \notin [-2^{d-1}, 2^{d-1})$, call `grow(o)` to expand the octree. This involves creating a new root, assigning the old root as a child, and updating the depth $d \leftarrow d + 1$ [S1, S4, unofficial].
++4.  **Recursive Insertion:** Call `insert_voxel(v, root(o), b, d)` to traverse the tree.
++    -   If $d = 0$, create a leaf node containing $v$ and return [S1, unofficial].
++    -   Calculate the child index $i$ from the bitstream $b$ at depth $d$ (e.g., `group(b, d, 3)` extracts 3 bits) [S1, unofficial].
++    -   If child $i$ does not exist ($\emptyset$), create a new empty node [S1, unofficial].
++    -   Recursively insert into child $i$ with depth $d-1$.
++    -   Set child $i$ of the current node to the result of the recursive call.
++    -   Return the current node [S1, unofficial].
++5.  **Update Root:** Set the root of the octree to the result of the insertion and return the updated octree [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-class Node:
+-    def __init__(self):
+-        self.children = [None] * 8
+-        self.voxel_color_index = 0
+-        self.is_leaf = False
+-
+-def group(bitstream: int, depth: int, bits: int) -> int:
+-    """Extracts 'bits' bits from the bitstream corresponding to the spatial position at the given depth."""
+-    return (bitstream >> (depth * bits)) & ((1 << bits) - 1)
+-
+-def voxel_pos_to_bitstream(pos, depth):
+-    """Converts 3D integer position to a Morton-like bitstream for the given depth."""
+-    x, y, z = pos.x, pos.y, pos.z
+-    code = 0
+-    for i in range(depth):
+-        code |= ((x & 1) << (3 * i)) | ((y & 1) << (3 * i + 1)) | ((z & 1) << (3 * i + 2))
+-        x >>= 1
+-        y >>= 1
+-        z >>= 1
+-    return code
+-
+-def grow(octree_depth: int) -> int:
+-    """Doubles the octree depth to encompass the voxel position."""
+-    return octree_depth + 1
+-
+-def insert_recursive(voxel_color_index: int, bitstream: int, depth: int, node: Node) -> Node:
+-    """Recursively inserts a voxel into the octree at the specified depth."""
++def insert_voxel_with_growth(voxel, octree):
++    """
++    Inserts a voxel into an octree, growing the tree if the position is out of bounds.
++    
++    Args:
++        voxel: Object with 'position' (vec3) and 'bitstream' (list of ints/bytes).
++        octree: Object with 'root' (Node) and 'depth' (int).
++        
++    Returns:
++        Updated octree.
++    """
++    p = voxel.position
++    d = octree.depth
++    
++    # Check boundary: valid range is [-2^(d-1), 2^(d-1))
++    # Note: Source [S1, unofficial] has a typo in the lower bound; standard symmetric range is used.
++    limit = 2**(d-1)
++    if not (-limit <= p.x < limit and -limit <= p.y < limit and -limit <= p.z < limit):
++        octree = grow_octree(octree)
++        d = octree.depth  # Depth increases after growth
++        
++    new_root = insert_recursive(voxel, octree.root, voxel.bitstream, d)
++    octree.root = new_root
++    return octree
++
++def insert_recursive(voxel, node, bitstream, depth):
++    """
++    Recursively inserts a voxel into the octree at the specified depth.
++    
++    Args:
++        voxel: The voxel data.
++        node: Current node in the traversal.
++        bitstream: The path bits for the voxel.
++        depth: Current depth level (starts at max depth, goes to 0).
++        
++    Returns:
++        Updated node.
++    """
+     if depth == 0:
+-        leaf = Node()
+-        leaf.is_leaf = True
+-        leaf.voxel_color_index = voxel_color_index
+-        return leaf
+-    child_idx = group(bitstream, depth, 3)
+-    child = node.children[child_idx]
+-    if child is None:
+-        child = Node()
+-        node.children[child_idx] = child
+-    node.children[child_idx] = insert_recursive(voxel_color_index, bitstream, depth - 1, child)
++        # Leaf node: store voxel data
++        return create_leaf_node(voxel)
++    
++    # Determine child index from bitstream at current depth
++    # Assuming bitstream is indexed such that we can extract 3 bits for x,y,z
++    # Implementation detail: group(b, d, 3) extracts bits for this level
++    child_idx = get_child_index(bitstream, depth)
++    
++    # Create child if it doesn't exist
++    if node.children[child_idx] is None:
++        node.children[child_idx] = create_empty_node()
++        
++    # Recurse
++    node.children[child_idx] = insert_recursive(
++        voxel, 
++        node.children[child_idx], 
++        bitstream, 
++        depth - 1
++    )
++    
+     return node
+ 
+-def insert_voxel(voxel_color_index: int, voxel_pos, octree_depth: int, root: Node) -> tuple:
+-    """
+-    Inserts a voxel into an octree, growing the tree if the position is out of bounds.
+-    Returns (new_root, new_depth).
+-    """
+-    if octree_depth <= 0:
+-        octree_depth = grow(octree_depth)
+-        new_root = Node()
+-        new_child_idx = group(voxel_pos_to_bitstream(voxel_pos, octree_depth), octree_depth, 3)
+-        new_root.children[new_child_idx] = root
+-        root = new_root
+-    limit = 1 << (octree_depth - 1)
+-    if not (-limit <= voxel_pos.x < limit and -limit <= voxel_pos.y < limit and -limit <= voxel_pos.z < limit):
+-        octree_depth = grow(octree_depth)
+-        new_root = Node()
+-        new_child_idx = group(voxel_pos_to_bitstream(voxel_pos, octree_depth), octree_depth, 3)
+-        new_root.children[new_child_idx] = root
+-        root = new_root
+-    new_root = insert_recursive(voxel_color_index, voxel_pos_to_bitstream(voxel_pos, octree_depth), octree_depth, root)
+-    return new_root, octree_depth
++def grow_octree(octree):
++    """
++    Expands the octree to accommodate out-of-bounds coordinates.
++    Creates a new root, makes the old root a child, and updates size/position.
++    """
++    old_root = octree.root
++    old_depth = octree.depth
++    
++    # Create new root node
++    new_root = create_empty_node()
++    
++    # Assign old root to the appropriate child of the new root
++    # The specific child index depends on the relative position of the 
++    # old root's center to the new root's center.
++    # Typically, if expanding uniformly, the old root becomes one of the 8 children.
++    # For a simple expansion where the range doubles, the old root is placed 
++    # in the child corresponding to its original position relative to the new center.
++    # [S4, unofficial] describes initializing child pointers and assigning old root to oldCornerIdx.
++    
++    # Determine which corner the old root occupies in the new, larger space.
++    # If the old range was [-L, L) and new is [-2L, 2L), the old root is at the center.
++    # However, dynamic growth often shifts the root. 
++    # Simplified: Assign old root to a specific child index (e.g., 0) and 
++    # initialize others to null, or use position-based logic [S4, unofficial].
++    
++    # [S4, unofficial] Logic: 
++    # 1. Initialize 8 child pointers to nullptr.
++    # 2. Assign old root to rootChildren[oldCornerIdx].
++    # 3. Create new empty node at rootChildren[newCornerIdx] if needed? 
++    #    Actually, [S4, unofficial] says "Create a new empty octree node at rootChildren[newCornerIdx]... 
++    #    Construct new OctreeChildren struct... replace root".
++    #    This implies the old root is moved, and a new empty slot is created? 
++    #    Or the old root becomes a child, and the new root is the parent.
++    
++    # Standard implementation:
++    # New root has 8 children. Old root becomes one of them.
++    # The position of the old root relative to the new root's center determines the index.
++    
++    # For this generic implementation, we assume a helper determines the index.
++    old_corner_idx = get_old_root_corner_index(old_root.position, octree.size * 2)
++    new_root.children[old_corner_idx] = old_root
++    
++    # Update octree properties
++    octree.root = new_root
++    octree.depth = old_depth + 1
++    octree.size *= 2 # Double the spatial extent
++    
++    return octree
++
++def get_child_index(bitstream, depth):
++    """
++    Extracts the 3-bit child index from the bitstream for the given depth.
++    """
++    # Placeholder for specific bitstream packing logic
++    # Typically: (bitstream[depth*3] << 2) | (bitstream[depth*3+1] << 1) | bitstream[depth*3+2]
++    return 0 # [G] Placeholder; implementation depends on bitstream format
++
++def get_old_root_corner_index(position, new_size):
++    """
++    Determines which of the 8 children the old root occupies in the new, larger octree.
++    """
++    # [G] Logic: Compare old root position to new root center (0,0,0).
++    # If position < 0, bit is 0; else 1.
++    # This assumes the new root is centered at 0,0,0 and the old root was 
++    # within the previous range.
++    x_bit = 1 if position.x >= 0 else 0
++    y_bit = 1 if position.y >= 0 else 0
++    z_bit = 1 if position.z >= 0 else 0
++    return (x_bit << 2) | (y_bit << 1) | z_bit
+ ```
+ 
+ **Parameters:**
+-* **Range Limit:** Defined by depth $d$ as $[-2^{d-1}, 2^{d-1})$ [S1, unofficial].
++-   **Range Limit:** Defined by depth $d$ as $[-2^{d-1}, 2^{d-1})$ [S1, unofficial].
++-   **Bitstream:** Format depends on implementation; typically 3 bits per level for x, y, z child selection [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-* **Precision:** The boundary check relies on integer arithmetic for powers of two. Floating-point position coordinates must be converted to integer grid coordinates before comparison [G].
+-* **Degenerate Input:** If the voxel position is exactly at the boundary $2^{d-1}$, it is outside the range (half-open interval) and triggers growth [S1, unofficial].
+-* **Bitstream Consistency:** The `group` function must consistently map the voxel's 3D position to the correct child index across all depths [S1, unofficial].
++-   **Boundary Precision:** The range check must handle the upper bound correctly (exclusive) to avoid off-by-one errors at power-of-two boundaries [S1, unofficial].
++-   **Growth Direction:** When growing, the new root's position and size must be updated consistently. [S4, unofficial] notes a potential bug where `xplus` offset calculation is unused, indicating careful handling of expansion direction (xminus, yminus, zminus) is required to update the root position correctly [S4, unofficial].
++-   **Empty Nodes:** Creating empty nodes during traversal can lead to memory bloat if not managed. Some implementations merge empty children back into full/empty nodes [S5, unofficial].
+ 
+ ## Subtopics
+ 
++### [Octree-based Mesh Voxelization](3071-octree-based-mesh-voxelization.md)
++Converts a 3D triangle mesh into a sparse hierarchical voxel representation by recursively subdividing the mesh's bounding volume. Unlike uniform grid voxelization, it wastes less memory on empty space. It differs from [Voxel Placement in Octree](3097-voxel-placement-in-octree.md) by focusing on initial construction from geometry rather than dynamic insertion, and from [Dynamic Sparse Voxel Octree with Morton Codes](4099-dynamic-sparse-voxel-octree-with-morton-codes.md) by using recursive subdivision rather than Morton-code-based spatial hashing for the initial fill.
++
++### [Voxel Placement in Octree](3097-voxel-placement-in-octree.md)
++The fundamental recursive operation that inserts a colored voxel into an SVO at a specific 3D coordinate, handling tree depth limits and node expansion. It solves the problem of dynamically maintaining a hierarchical spatial index where internal nodes may be collapsed and must be correctly expanded before further descent. It is distinct from [Octree Insertion with Growth](2387-octree-insertion-with-growth.md) which provides the broader context of boundary handling and tree growth, while [Dynamic Sparse Voxel Octree with Morton Codes](4099-dynamic-sparse-voxel-octree-with-morton-codes.md) focuses on linearization and cache efficiency rather than the raw recursive insertion logic.
++
++### [Dynamic Sparse Voxel Octree with Morton Codes](4099-dynamic-sparse-voxel-octree-with-morton-codes.md)
++A single-header C++ implementation of a dynamic SVO using integer coordinates and Morton codes, designed for micro-optimized CPU-based voxel physics simulations in chunked procedural game worlds. It distinguishes itself by providing bulk allocation and deallocation operations alongside point queries, optimized for high-throughput voxel manipulation rather than just static storage. It builds on [Octree Insertion with Growth](2387-octree-insertion-with-growth.md) by providing the concrete data structures and Morton code integration required for efficient spatial indexing.
++
++### [Octree Node Insertion and Parent Finding](12106-octree-node-insertion-and-parent-finding.md)
++Traverses a sparse voxel octree to locate or create the parent node for a specific coordinate $(x,y,z)$ at a given detail level, effectively growing the tree structure dynamically as needed. It differs from static voxelization by allocating nodes on-demand during insertion rather than pre-allocating a fixed grid, and it serves as the foundational traversal logic for the broader [Octree Insertion with Growth](2387-octree-insertion-with-growth.md) process.
++
+ ### Octree Building Pass
+-Builds the octree from a queue of voxel fragments, averaging leaf node values when multiple fragments fall into the same node [S2, unofficial].
+-* **Layout:** Octree node buffer stores 8 nodes per tile. Each node is 28 bytes: 4 bytes for child tile index, 24 bytes for neighbor node byte offset [S2, unofficial]. Leaf nodes are 16 bytes: 4 bytes for bit flags (e.g., static mesh indicator), 1 byte for a counter used with voxel normals for averaging [S2, unofficial]. A 3D texture stores reflected radiance and alpha, indexed by child tile index [S2, unofficial].
+-* **Source:** [S2, unofficial]
++Builds the octree using steps described in OpenGL Insights Chapter, averaging octree leaf node values when different voxels fall into the same node [S2, unofficial].
++**Layout:**
++-   **Octree Node Buffer:** Stores octree/voxel node data. 8 nodes are grouped into 1 tile. Each octree node is 28 bytes: first 4 bytes store child tile index, next 24 bytes store neighbor node byte offset from start of octree node buffer [S2, unofficial].
++-   **Octree Leaf Node:** Stores voxel data directly, using 16 bytes. First 4 bytes store bit flag indicating if voxel is from static mesh (not overwritten by dynamic). 1 byte counter stored with voxel normal for averaging when different voxel fragments fall into same voxel [S2, unofficial].
++-   **3D Texture:** Stores reflected radiance and alpha from direct lighting at that voxel. Assumes all surface reflect light diffusely, so only 1 3D texture is used (different from paper storing incoming radiance). Indexed by child node tile index [S2, unofficial].
+ 
+ ### Surfel Addition to Octree
+-Adds a surfel to the octree by recursively descending to leaf nodes and subdividing if the leaf exceeds `MAX_SURFEL_COUNT` [S3, unofficial].
+-* **Steps:** Check if the surfel is inside the node's bounding box. If not, return 0. If the node has children, loop over 8 children, recursively call add on each, sum results, increment `_surfelCount`, and return sum [S3, unofficial].
+-* **Source:** [S3, unofficial]
++Adds a surfel to the octree, recursively descending to leaf nodes, and subdividing if the leaf exceeds `MAX_SURFEL_COUNT` [S3, unofficial].
++**Steps:**
++1.  Check if surfel is inside node using `inside(obj)`; if not, return 0 [S3, unofficial].
++2.  If node has children, loop over 8 children, recursively call add on each, sum results, increment `_surfelCount`, and return sum [S3, unofficial].
+ 
+ ### Dynamic Octree Expansion
+-Explicitly handles the expansion of the octree root by creating a new root with 8 children, where one child is the old root and another is a new empty node in the expansion direction [S4, unofficial].
+-* **Steps:** Call `EnlargeCorners(dir)` to compute indices and offset. Initialize `rootChildren` array. Assign old root to `rootChildren[oldCornerIdx]`. Create new node at `rootChildren[newCornerIdx]` with size `m_size`, position `m_position + offset`, and depth 1. Construct `OctreeChildren` struct with bitmask. If expanding in negative direction, update root position. Double size (`m_size *= 2`) and replace root [S4, unofficial].
+-* **Pitfall:** The offset calculation for `xplus` uses `glm::vec3(m_size, 0, 0)` but is marked as unused in a comment, indicating a potential bug [S4, unofficial].
+-* **Source:** [S4, unofficial]
++Handles the structural expansion of the octree when boundaries are exceeded [S4, unofficial].
++**Steps:**
++1.  Call `EnlargeCorners(dir)` to compute `newCornerIdx`, `oldCornerIdx`, and offset based on the expansion direction [S4, unofficial].
++2.  Initialize an array of 8 child pointers (`rootChildren`) to `nullptr`, then assign the current root node to `rootChildren[oldCornerIdx]` [S4, unofficial].
++3.  Create a new empty octree node at `rootChildren[newCornerIdx]` with size `m_size`, position `m_position + offset`, and depth 1 [S4, unofficial].
++4.  Construct a new `OctreeChildren` struct with a bitmask containing only the old and new children, and the `rootChildren` array [S4, unofficial].
++5.  If expanding in a negative direction (xminus, yminus, or zminus), update the root position by adding the offset [S4, unofficial].
++6.  Double the octree size (`m_size *= 2`) and replace the root node with a new Octree initialized with the new children, updated size, and updated position [S4, unofficial].
++**Pitfall:** The offset calculation for `xplus` uses `glm::vec3(m_size, 0, 0)` but is marked as unused in a comment, indicating a potential bug or placeholder that should be zeroed or properly utilized [S4, unofficial].
+ 
+ ### Octree Node Management
+-Methods to add or remove blocks in a quadtree (2D analog), automatically splitting full nodes or merging empty children [S5, unofficial].
+-* **Steps:** In `add_block`, if node is full, return. If size is 1, set `is_full = true`. If leaf and not full, split it. Determine child index based on relative position. Recursively add. After recursion, if all children are full, merge: set `is_full = true`, `children = None` [S5, unofficial].
+-* **Layout:** `QuadtreeNode` struct: `is_full: bool`, `children: Option<[Box<QuadtreeNode>;4]>`, `size: i32`, `position: IVec2` [S5, unofficial].
+-* **Source:** [S5, unofficial]
++Methods to add or remove blocks (filled cells) in a quadtree, automatically splitting full nodes into children or merging empty children into a full/empty node [S5, unofficial].
++**Steps:**
++1.  In `add_block`, if node is full, return immediately [S5, unofficial].
++2.  If node size is 1, set `is_full = true` and return [S5, unofficial].
++3.  If node is a leaf (no children) and not full, split it by calling `devide(false)` (note typo in source), then recursively add to the correct child based on relative position [S5, unofficial].
++4.  Determine child index for position `pos`: calculate `rel_pos = pos - self.position`. Child 0 if `rel_pos.x < size/2 && rel_pos.y < size/2`. Child 1 if `rel_pos.x < size && rel_pos.y < size/2`. Child 2 if `rel_pos.x < size/2 && rel_pos.y < size`. Child 3 otherwise [S5, unofficial].
++5.  If node has children, recursively add to the correct child. After recursion, check if all children are full. If so, merge: set `is_full = true`, `children = None` [S5, unofficial].
++6.  If node size is 1, set `is_full = false` and return [S5, unofficial].
++**Layout:**
++-   **QuadtreeNode struct:** `is_full: bool`, `children: Option<[Box<QuadtreeNode>;4]>`, `size: i32`, `position: IVec2` [S5, unofficial].
+ 
+ ### Variable Error Octree Construction
+-An octree construction strategy using a variable error bound depending on distance to the surface, reducing memory consumption far from the surface [S6].
+-* **Formula:** Maximum allowed error is $\epsilon + \delta |f(x)|$, where $\epsilon$ is base error, $f$ is distance function, $x$ is position, $\delta$ is hyperparameter [S6].
+-* **Steps:** During sphere marching, move forward using $f(x)(1 - \delta)$ to ensure underestimation of real distance, preventing skipping the isosurface [S6].
+-* **Parameter:** $\delta$ controls the variable error term. Typical value: 0.1 [S6].
+-* **Source:** [S6]
++An octree construction strategy that uses a variable error bound depending on the distance to the surface, reducing memory consumption far from the surface while maintaining accuracy near it [S6].
++**Steps:**
++1.  During sphere marching, move forward using $f(x)(1 - \delta)$ to ensure the step size is an underestimation of the real distance, preventing skipping the isosurface [S6].
++**Formula:**
++The maximum allowed error is redefined as $\epsilon + \delta |f(x)|$, where $\epsilon$ is the base error, $f$ is the input distance function, $x$ is the current position, and $\delta$ is the hyperparameter [S6].
++**Parameter:**
++Hyperparameter $\delta$ controls the variable error term. Typical value: 0.1 [S6].
+ 
+ ### Voxel Tree Injection
+ Deterministically places voxel trees into chunks by stamping tree blocks, ensuring cross-chunk safety and gameplay consistency [S7, unofficial].
+-* **Steps:** Compute tree positions for the chunk and neighboring chunks within tree extent range. Filter by per-template placement rules (material, biome, slope, elevation). Stamp tree blocks only within the chunk's voxel bounds [S7, unofficial].
+-* **Layout:** `FVoxelTreeInstance`: BaseVoxel (FIntVector), TemplateIndex (int32), Seed (uint32). `FVoxelTreeVoxel`: GlobalVoxel (FIntVector), MaterialID (uint8), bTrunk (bool) [S7, unofficial].
+-* **Source:** [S7, unofficial]
++**Steps:**
++1.  Compute tree positions for the chunk and neighboring chunks within tree extent range. Filter by per-template placement rules (material, biome, slope, elevation). Stamp tree blocks only within the chunk's voxel bounds [S7, unofficial].
++**Layout:**
++-   **FVoxelTreeInstance:** BaseVoxel (FIntVector), TemplateIndex (int32), Seed (uint32) [S7, unofficial].
++-   **FVoxelTreeVoxel:** GlobalVoxel (FIntVector), MaterialID (uint8), bTrunk (bool) [S7, unofficial].
+ 
+ ## Operating characteristics
+-* **Time Complexity:** Insertion is $O(d)$ where $d$ is the depth of the octree, assuming constant-time child access [S1, G, unofficial].
+-* **Memory Complexity:** Proportional to the number of active voxels and the depth of the tree [S1, G, unofficial].
+-* **Strengths:** Handles unknown scene bounds dynamically and adapts resolution locally to reduce memory for sparse data [S1, G, unofficial].
+-* **Limitations:** The naive node structure is memory-heavy [S1, unofficial]. Frequent growth operations require careful root management to avoid fragmentation [S4, unofficial].
+-* **When to Use:** Incremental voxelization where scene bounds are not known a priori or change over time [S1, unofficial].
++-   **Time Complexity:** Insertion is $O(d)$ where $d$ is the depth of the octree, as it traverses from root to leaf. Growth operations are $O(1)$ if the new root is allocated directly, but may involve pointer updates.
++-   **Memory Complexity:** Depends on the sparsity of the voxel data. In the worst case (dense volume), memory is $O(N)$ where $N$ is the number of voxels. The naive node structure uses 72 bytes (64-bit) or 40 bytes (32-bit) per node [S1, unofficial]. Compressed variants (e.g., 28-byte nodes) reduce this significantly [S2, unofficial].
++-   **Measured Performance:** Not given in the sources.
++-   **Scaling:** Scales well with sparse data. Growth ensures the tree adapts to the scene's extent without pre-allocation.
++-   **Strengths:** Dynamic adaptation to scene extent; efficient storage for sparse data; simple recursive logic.
++-   **Limitations:** Potential for memory fragmentation if many empty nodes are created; growth operations may require careful handling of coordinate systems and parent pointers [S4, unofficial].
++-   **When to use:** When the scene extent is unknown or dynamic, and memory efficiency for sparse volumes is critical.
++-   **When not to use:** When the scene is dense and fits within a fixed, pre-allocated grid, a uniform grid may be faster due to cache locality and simpler indexing.
+ 
+ ## Background
+-The method originates from studies on Sparse Voxel Octree compression and global illumination calculation, specifically in the context of dynamic voxel insertion [S1, unofficial]. It is a fundamental building block for dynamic SVO construction, allowing for the incremental update of voxel data without rebuilding the entire structure [S1, unofficial]. Variants and related implementations appear in voxel cone tracing pipelines [S2, unofficial], surfel-based rendering [S3, unofficial], dynamic expansion routines [S4, unofficial], and procedural generation systems [S7, unofficial].
++The concept of inserting voxels into an octree with dynamic growth is foundational to Sparse Voxel Octree (SVO) construction. The specific algorithm described in [S1, unofficial] originates from a thesis on SVO compression and efficiency for global illumination calculation [S1, unofficial]. Variations of this algorithm are used in various implementations, such as the voxel cone tracing pipeline [S2, unofficial], procedural generation systems [S4, unofficial], and mesh voxelization tools [S3, unofficial]. The dynamic expansion logic, particularly the handling of corner indices and offsets, is detailed in implementations like [S4, unofficial]. The variable error bound approach for construction is described in [S6].
+ 
+ ## Sources

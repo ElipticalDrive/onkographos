@@ -1,0 +1,148 @@
+# Smoothing Function for Discontinuity Handling
+
+Also called: Activation Function, DiffeRT2d smoothing, Differentiable Ray Tracing Discontinuity Smoothing, Discontinuity Smoothing for Differentiable Ray Tracing, Smoothing Local Discontinuities
+
+## Overview
+This method replaces discontinuous Boolean checks, such as occlusion tests and convergence criteria in ray tracing, with continuous, differentiable approximations to enable gradient-based optimization [S1]. It differs from [Adelta (Autodiff for Discontinuous Programs)](20434-adelta-autodiff-for-discontinuous-programs.md) by modifying the forward function itself via parameterized smoothing rather than using a specialized backward pass or delta-rule approximation for the gradient [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A scalar value $x$ representing the difference in a comparison (e.g., distance residual, coordinate difference) and a smoothing parameter $\alpha \in \mathbb{R}^+$ [S1].
+- Output: A scalar value $s(x; \alpha) \in [0, 1]$ representing the smoothed probability or weight of the condition being true [S1].
+
+**Data Structures:**
+No specific complex data structures are required; the method operates on scalar values or element-wise on arrays. The parameter $\alpha$ is a positive scalar [S1].
+
+**Constraints:**
+The smoothing function $s(x; \alpha)$ must satisfy four constraints [S1]:
+1.  **Bounds (C1):** $\lim_{x \to -\infty} s(x; \alpha) = 0$ and $\lim_{x \to +\infty} s(x; \alpha) = 1$.
+2.  **Monotonicity (C2):** $s(\cdot; \alpha)$ must be monotonically increasing to prevent local minima in minimization problems [S1].
+3.  **Center (C3):** $s(0; \alpha) = 1/2$ [S1].
+4.  **Symmetry (C4):** $s(x; \alpha) - s(0; \alpha) = s(0; \alpha) - s(-x; \alpha)$, ensuring symmetry around the origin [S1].
+
+**Parameters:**
+- $\alpha$: A positive real parameter ($\alpha > 0$) controlling the sharpness of the transition [S1]. As $\alpha$ increases, the function approaches the discontinuous step function; small $\alpha$ provides heavy smoothing [S1].
+
+**Steps:**
+1.  Identify discontinuous functions in the ray tracing logic, such as occlusion conditions modeled by a unit step function $\theta(x)$, where $\theta(x) = 1$ if $x > 0$ and $0$ otherwise [S1].
+2.  Replace any conditional check (e.g., $x_0 > x_1$) with the smoothed function $s(x_0 - x_1; \alpha)$ [S1].
+3.  For convergence checks in iterative path finding, compare the loss function to zero using the smoothing function $s(\text{loss}; \alpha)$ instead of a strict zero-check [S1].
+4.  Select a base smoothing function $s$ that satisfies constraints C1-C4. Common choices include the sigmoid or hard sigmoid [S1].
+5.  Scale the input by $\alpha$ before applying the base function: $s(x; \alpha) = s(\alpha x)$ [S1].
+
+**Formulas:**
+The general scaling is defined as [S1]:
+$$ s(x; \alpha) = s(\alpha x) $$
+
+Two specific implementations are provided in the source [S1]:
+
+1.  **Sigmoid:**
+    $$ \text{sigmoid}(x; \alpha) = \frac{1}{1 + e^{-\alpha x}} $$
+    This function is smooth but computationally more expensive [S1].
+
+2.  **Hard Sigmoid:**
+    $$ \text{hard\_sigmoid}(x; \alpha) = \frac{\text{relu6}(\alpha x + 3)}{6} $$
+    where
+    $$ \text{relu6}(x) = \min(\max(0, x), 6) $$
+    This function is computationally cheaper but has a non-continuous derivative at $x = \pm 3/\alpha$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def relu6(x):
+    """Clamps x to the range [0, 6]."""
+    if x < 0:
+        return 0.0
+    elif x > 6:
+        return 6.0
+    else:
+        return x
+
+def hard_sigmoid(x, alpha):
+    """
+    Computes the hard sigmoid smoothing function.
+    
+    Args:
+        x (float): The input scalar value.
+        alpha (float): The smoothing parameter, must be > 0.
+        
+    Returns:
+        float: The smoothed value in [0, 1].
+    """
+    # Scale input by alpha
+    scaled_x = alpha * x
+    
+    # Apply relu6 to (scaled_x + 3)
+    # relu6(y) = min(max(0, y), 6)
+    y = scaled_x + 3.0
+    if y < 0:
+        val = 0.0
+    elif y > 6:
+        val = 6.0
+    else:
+        val = y
+        
+    # Divide by 6
+    return val / 6.0
+
+def sigmoid(x, alpha):
+    """
+    Computes the sigmoid smoothing function.
+    
+    Args:
+        x (float): The input scalar value.
+        alpha (float): The smoothing parameter, must be > 0.
+        
+    Returns:
+        float: The smoothed value in [0, 1].
+    """
+    import math
+    # 1 / (1 + exp(-alpha * x))
+    exponent = -alpha * x
+    # Handle potential overflow in exp for very large negative exponent
+    if exponent > 700: # Approximate limit for float64 exp
+        return 1.0
+    elif exponent < -700:
+        return 0.0
+    else:
+        return 1.0 / (1.0 + math.exp(exponent))
+
+def smooth_check(condition_value, alpha, method='hard_sigmoid'):
+    """
+    Replaces a discontinuous boolean check with a smooth approximation.
+    
+    Args:
+        condition_value (float): The value to check (e.g., x0 - x1).
+        alpha (float): Smoothing parameter.
+        method (str): 'sigmoid' or 'hard_sigmoid'.
+        
+    Returns:
+        float: Smoothed value.
+    """
+    if method == 'sigmoid':
+        return sigmoid(condition_value, alpha)
+    elif method == 'hard_sigmoid':
+        return hard_sigmoid(condition_value, alpha)
+    else:
+        raise ValueError("Unknown method")
+```
+
+**Edge Cases and Pitfalls:**
+- The hard sigmoid has a non-continuous derivative at $x = \pm 3/\alpha$, which may affect gradient quality compared to the smooth sigmoid [S1].
+- The parameter $\alpha$ must be positive [S1].
+- The output is interpreted as a Boolean via a threshold: values close to 1 map to true, values close to 0 to false, and intermediate values represent uncertainty [S1].
+
+## Operating characteristics
+- **Time Complexity:** The hard sigmoid is computationally cheaper than the sigmoid due to the absence of exponential operations [S1].
+- **Memory Complexity:** Minimal, as it operates on scalars [S1].
+- **Strengths:** Enables gradient-based optimization in ray tracing by eliminating zero-gradient regions caused by discontinuities [S1]. The parameter $\alpha$ allows progressive insertion of objects or refinement of the solution [S1].
+- **Limitations:** The hard sigmoid lacks continuous differentiability at specific points [S1]. The choice of smoothing function involves a trade-off between computational cost and gradient smoothness [S1].
+- **When to use:** When performing gradient-based optimization on ray tracing problems involving occlusion or convergence checks [S1].
+- **When not to use:** When exact differentiability is required at all points and computational cost is not a primary concern (use sigmoid instead) [S1].
+
+## Background
+The method originates from the work on Fully Differentiable Ray Tracing for radio network optimization [S1]. It was introduced in the paper "Fully Differentiable Ray Tracing via Discontinuity Smoothing for Radio Network Optimization" (2024) [S1]. The technique is implemented in the DiffeRT2d Python package and toolbox [S1]. The term "activation function" is used in the ML community and the DiffeRT2d package to refer to this smoothing function [S1]. The framework is applicable to both 2D and 3D scenes [S1].
+
+## Sources
+[S1] Fully Differentiable Ray Tracing via Discontinuity Smoothing for Radio Network Optimization, https://doi.org/10.23919/eucap60739.2024.10501570, fetched 2026-10-29

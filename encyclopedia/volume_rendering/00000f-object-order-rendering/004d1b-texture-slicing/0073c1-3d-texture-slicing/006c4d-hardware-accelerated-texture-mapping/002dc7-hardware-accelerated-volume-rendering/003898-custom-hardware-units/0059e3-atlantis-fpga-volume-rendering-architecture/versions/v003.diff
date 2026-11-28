@@ -1,0 +1,237 @@
+--- v002.md
++++ v003.md
+@@ -8,19 +8,19 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** 3D volume dataset (stored in external memory/subboard), ray parameters (origin, direction, length), transfer function (LUT), and reflectance map.
+-*   **Output:** Rendered 2D image (framebuffer).
++*   **Input:** 3D volume dataset (stored in external memory/subboard), ray parameters (origin, direction, length), transfer function (LUT), and reflectance map [S1].
++*   **Output:** Rendered 2D image (framebuffer) [S1].
+ 
+ **Data Structures and Layout:**
+-The system relies on a parameter RAM located within the FPGA fabric to store ray-specific data. For each ray in a multithreading bunch, the following fields are stored [S1]:
+-*   **Starting Point:** 3 components $\times$ 24 bits/component = 72 bits.
+-*   **Minimal Distance to Next Sampling Point:** 3 components $\times$ 16 bits/component = 48 bits.
+-*   **Maximal Ray Length:** 10 bits.
+-*   **Total per Ray:** 130 bits.
++The system relies on a parameter RAM located within the FPGA fabric to store ray-specific data [S1]. For each ray in a multithreading bunch, the following fields are stored [S1]:
++*   **Starting Point:** 3 components $\times$ 24 bits/component = 72 bits [S1].
++*   **Minimal Distance to Next Sampling Point:** 3 components $\times$ 16 bits/component = 48 bits [S1].
++*   **Maximal Ray Length:** 10 bits [S1].
++*   **Total per Ray:** 130 bits [S1].
+ 
+ **Configuration Modes:**
+ The system operates in four distinct configuration modes, each requiring a reconfiguration time between 35 ms and 140 ms depending on the number of FPGAs involved [S1]:
+-1.  **Initialization:** Loads data into registers and memory.
+-2.  **LUT and Reflectance Map Adjusting:** Configures transfer functions and shading parameters.
+-3.  **Distance Calculation:** Reconfigures an FPGA with a two-pass non-linear digital filter to compute distance transforms.
++1.  **Initialization:** Loads data into registers and memory [S1].
++2.  **LUT and Reflectance Map Adjusting:** Configures transfer functions and shading parameters [S1].
++3.  **Distance Calculation:** Reconfigures an FPGA with a two-pass non-linear digital filter to compute distance transforms [S1].
+ 4.  **Rendering Configuration:** Sets internal parameters for the shading process and voxel gray-value-to-opacity assignment [S1].
+ 
+@@ -30,15 +30,17 @@
+     *   One FPGA is reconfigured to execute a two-pass non-linear digital filter [S1].
+     *   This step optimizes the ray casting by identifying empty space to skip sampling [S1].
+-
+ 2.  **Rendering Configuration and Execution:**
+     *   The FPGA is reconfigured into the "Rendering configuration" mode [S1].
+     *   This mode executes three tasks in parallel [S1]:
+-        1.  **Downloading of Ray Parameters:** Transfers ray data from host to FPGA local storage.
+-        2.  **Implementation of the Rendering Algorithm:** Performs the actual volume ray casting.
+-        3.  **Upload of Rendering Results:** Sends the final pixel values back to the host.
+-
++        1.  **Downloading of Ray Parameters:** Transfers ray data from host to FPGA local storage [S1].
++        2.  **Implementation of the Rendering Algorithm:** Performs the actual volume ray casting [S1].
++        3.  **Upload of Rendering Results:** Sends the final pixel values back to the host [S1].
+ 3.  **Multithreading and Parallelism:**
+     *   The system uses a multithreading granularity of an $8 \times 8$ bunch of rays, totaling 64 rays [S1].
+     *   To overlap the latency of downloading parameters with the rendering time, an additional local storage (implemented within the FPGA) is utilized [S1].
++4.  **Compositing Formula:**
++    *   Front-to-back volume compositing is applied per sample $i$ along the ray [G]:
++        $$C_{out} = \sum_{i=0}^{N-1} c_i \alpha_i \prod_{j=0}^{i-1} (1 - \alpha_j)$$
++        where $c_i$ is the sampled color, $\alpha_i$ is the sampled opacity, and $N$ is the total number of samples traversed [G].
+ 
+ **Pseudocode:**
+@@ -48,34 +50,31 @@
+ # Actual hardware implementation involves parallel hardware blocks.
+ 
+-def atlantis_render(volume_data, transfer_function, reflectance_map, image_dimensions):
++def atlantis_render(volume_data, transfer_function, reflectance_map, distance_map, image_width, image_height, ray_step=0.5):
+     # 1. Initialization Phase
+-    # Reconfigure FPGA for Initialization mode (35-140ms)
+-    # Load volume data pointers and basic registers
++    # Reconfigure FPGA for Initialization mode (35-140ms) [S1]
++    # Load volume data pointers and basic registers [S1]
+     fpga_configure("INITIALIZATION")
+     
+     # 2. Transfer Function Setup
+-    # Reconfigure FPGA for LUT/Reflectance mode
+-    # Load Transfer Function (LUT) and Reflectance Map into memory
++    # Reconfigure FPGA for LUT/Reflectance mode [S1]
++    # Load Transfer Function (LUT) and Reflectance Map into memory [S1]
+     fpga_configure("LUT_AND_REFLECTANCE_ADJUSTING")
+-    load_transfer_function(transfer_function)
+-    load_reflectance_map(reflectance_map)
+     
+     # 3. Distance Transform Calculation
+-    # Reconfigure FPGA for Distance Calculation mode
+-    # Execute two-pass non-linear digital filter on volume data
+-    # Result: Distance map indicating transparent region extensions
++    # Reconfigure FPGA for Distance Calculation mode [S1]
++    # Execute two-pass non-linear digital filter on volume data [S1]
++    # Result: Distance map indicating transparent region extensions [S1]
+     fpga_configure("DISTANCE_CALCULATION")
+-    distance_map = compute_distance_transform(volume_data)
+     
+     # 4. Rendering Loop
+-    # Reconfigure FPGA for Rendering mode
++    # Reconfigure FPGA for Rendering mode [S1]
+     fpga_configure("RENDERING_CONFIGURATION")
+     
+-    # Initialize local storage for ray parameters
+-    ray_param_ram = allocate_fpga_ram()
+-    
+-    # Process rays in 8x8 bunches (64 rays)
+-    for y in range(0, image_dimensions.height, 8):
+-        for x in range(0, image_dimensions.width, 8):
++    # Initialize local storage for ray parameters [S1]
++    ray_param_ram = {}
++    
++    # Process rays in 8x8 bunches (64 rays) [S1]
++    for y in range(0, image_height, 8):
++        for x in range(0, image_width, 8):
+             ray_bunch = []
+             
+@@ -83,41 +82,94 @@
+             for dy in range(8):
+                 for dx in range(8):
+-                    ray = create_ray(x + dx, y + dy, volume_data, distance_map)
+-                    ray_bunch.append(ray)
++                    sx, sy = x + dx, y + dy
++                    # Calculate ray origin and direction based on camera model [G]
++                    origin = calculate_origin(sx, sy, image_width, image_height)
++                    direction = calculate_direction(sx, sy, image_width, image_height)
++                    
++                    # Determine minimal distance to next sampling point
++                    # and maximal ray length based on volume bounds [G]
++                    min_dist = calculate_min_dist(origin, direction, volume_data)
++                    max_len = calculate_max_len(origin, direction, volume_data)
++                    
++                    # Store in specific bit layout [S1]
++                    # Starting Point: 3x24 bit, Min Dist: 3x16 bit, Max Len: 10 bit
++                    ray_bunch.append({
++                        "origin": origin,
++                        "direction": direction,
++                        "min_dist": min_dist,
++                        "max_len": max_len
++                    })
+             
+             # Download parameters to FPGA local storage
+-            # Overlaps with rendering time
++            # Overlaps with rendering time [S1]
+             download_ray_parameters(ray_bunch, ray_param_ram)
+             
+             # Execute rendering algorithm on FPGA
+-            # Uses distance map to skip transparent regions
+-            rendered_block = execute_ray_casting(ray_bunch, volume_data, transfer_function)
++            # Uses distance map to skip transparent regions [S1]
++            rendered_block = execute_ray_casting(ray_bunch, volume_data, distance_map, transfer_function, reflectance_map, ray_step)
+             
+             # Upload results
+-            upload_results(rendered_block, image_dimensions, x, y)
+-
+-def create_ray(screen_x, screen_y, volume_data, distance_map):
+-    # Calculate ray origin and direction based on camera model
+-    origin = calculate_origin(screen_x, screen_y)
+-    direction = calculate_direction(screen_x, screen_y)
+-    
+-    # Determine minimal distance to next sampling point
+-    # and maximal ray length based on volume bounds
+-    min_dist = calculate_min_dist(origin, direction, volume_data)
+-    max_len = calculate_max_len(origin, direction, volume_data)
+-    
+-    # Store in specific bit layout [S1]
+-    # Starting Point: 3x24 bit
+-    # Min Dist: 3x16 bit
+-    # Max Len: 10 bit
+-    return {
+-        "origin": origin, # 3x24 bit
+-        "min_dist": min_dist, # 3x16 bit
+-        "max_len": max_len # 10 bit
+-    }
+-
+-def fpga_configure(mode):
+-    # Triggers FPGA bitstream reload
+-    # Time: 35ms to 140ms depending on mode and FPGA count [S1]
++            upload_results(rendered_block, image_width, image_height, x, y)
++
++def calculate_origin(screen_x, screen_y, width, height):
++    # Standard perspective/orthographic projection [G]
++    return [0.0, 0.0, 0.0]
++
++def calculate_direction(screen_x, screen_y, width, height):
++    # Standard perspective/orthographic projection [G]
++    return [0.0, 0.0, -1.0]
++
++def calculate_min_dist(origin, direction, volume_data):
++    # Compute distance to first voxel intersection [G]
++    return 0.0
++
++def calculate_max_len(origin, direction, volume_data):
++    # Compute distance to last voxel intersection [G]
++    return 100.0
++
++def download_ray_parameters(ray_bunch, ram):
++    # Transfer ray data from host to FPGA local storage [S1]
++    pass
++
++def execute_ray_casting(ray_bunch, volume_data, distance_map, transfer_function, reflectance_map, step):
++    results = []
++    for ray in ray_bunch:
++        origin = ray["origin"]
++        direction = ray["direction"]
++        min_dist = ray["min_dist"]
++        max_len = ray["max_len"]
++        
++        # Front-to-back compositing [G]
++        alpha = 0.0
++        color = [0.0, 0.0, 0.0]
++        t = min_dist
++        
++        while t < max_len:
++            # Use distance map to skip transparent regions [S1]
++            dist_to_next = distance_map.sample(origin + direction * t)
++            if dist_to_next == 0:
++                t += step
++                continue
++            
++            # Step through transparent region if distance is large
++            step_size = min(step, dist_to_next)
++            pos = origin + direction * t
++            
++            # Sample volume and apply transfer function [S1]
++            density = volume_data.sample(pos)
++            opacity, rgb = transfer_function.sample(density)
++            
++            # Compositing equation [G]
++            alpha_new = alpha + (1.0 - alpha) * opacity
++            color = color + (1.0 - alpha) * opacity * rgb
++            alpha = alpha_new
++            
++            t += step_size
++            
++        results.append([color[0], color[1], color[2], alpha])
++    return results
++
++def upload_results(results, width, height, start_x, start_y):
++    # Sends the final pixel values back to the host [S1]
+     pass
+ ```
+@@ -132,5 +184,5 @@
+ **Edge Cases and Pitfalls:**
+ *   **Reconfiguration Latency:** The need to reconfigure FPGAs for different modes introduces significant latency (35-140 ms) [S1]. This must be managed by overlapping configuration or task execution where possible, though the sources do not specify a mechanism for overlapping configuration *with* rendering, only parameter downloading [S1].
+-*   **Memory Bottleneck:** Performance is limited by memory speed (typically 100 MHz for FPGA devices), which is slower than contemporary SDRAM (150 MHz) or RDRAM (500 MHz) [S1]. This limits the potential throughput compared to ASICs if memory bandwidth were not the constraint.
++*   **Memory Bottleneck:** Performance is limited by memory speed (typically 100 MHz for FPGA devices), which is slower than contemporary SDRAM (150 MHz) or RDRAM (500 MHz) [S1]. This limits the potential throughput compared to ASICs if memory bandwidth were not the constraint [S1].
+ *   **Data Transfer Limits:** The PCI host interface is limited to 125 MB/s, which may become a bottleneck for transferring large volume datasets or high-resolution results [S1].
+ 

@@ -1,0 +1,124 @@
+# Volume Fairing via Signed Distance Functions
+
+Also called: ESDF interpolation, linear combination of SDFs
+
+## Overview
+Volume Fairing via Signed Distance Functions is a preprocessing technique that smooths material boundaries in segmented volumetric data, particularly addressing artifacts caused by slice gaps, misalignment, or temporal inconsistencies (e.g., different heart cycles in medical imaging) [S1]. It differs from sibling methods by computing Euclidean Signed Distance Functions (ESDFs) on individual 2D slices rather than a full 3D volume, enabling efficient interpolation and fairing of multiple material boundaries through convex combinations of these 2D fields [S1].
+
+## How it works
+**Inputs:** A stack of 2D binary or multi-material segmentation slices $I_i$. For multi-material volumes, each slice contains discrete material labels.
+**Outputs:** A smoothed (fairing) or interpolated stack of slices with continuous material boundaries.
+
+**Data Structures:**
+*   **ESDF Map ($s$):** A 2D grid of floating-point values, same dimensions as the input slice.
+    *   $s(x, y) < 0$: Interior of material.
+    *   $s(x, y) > 0$: Exterior of material.
+    *   $s(x, y) = 0$: Boundary.
+    *   Values are bounded within $[-d_{max}, d_{max}]$ [S1].
+
+**Parameters:**
+*   $\alpha$: Fairing constant, controlling the trade-off between smoothness and accuracy. Typical value: $0.1$. Range: $[0, 1/3]$ [S1].
+*   $d_{max}$: Maximum expected distance of features between adjacent slices. Used to bound ESDF values to prevent infinity for materials not present in all slices [S1].
+
+**Algorithm Steps:**
+
+1.  **ESDF Computation (Per Slice, Per Material):**
+    For each slice $i$ and each material $m$:
+    a.  Initialize boundary pixels (where material $m$ transitions to non-$m$) with distance $0$.
+    b.  Propagate the distance front iteratively from the boundary into the interior and exterior regions.
+    c.  Fill distance values using Euclidean distances: $1, \sqrt{2}, 2, \sqrt{5}, \dots$ [S1].
+    d.  Flip the sign for pixels inside the feature domain to create a signed map (negative inside, positive outside) [S1].
+    e.  Clamp values to $[-d_{max}, d_{max}]$ [S1].
+    Let $s_{m,i}$ denote the ESDF for material $m$ in slice $i$.
+
+2.  **Interpolation (Between Two Slices):**
+    To generate an intermediate slice between slice $0$ and slice $1$ with parameter $t \in [0, 1]$:
+    a.  Compute the linear combination for each material $m$:
+        $$s_{m,t}(x, y) = (1 - t) s_{m,0}(x, y) + t s_{m,1}(x, y)$$
+    b.  Assign the material $m^*$ to pixel $(x, y)$ such that $s_{m^*,t}(x, y)$ is negative and minimal among all materials [S1].
+    *Note: If a material is not present in a participating slice, its ESDF contribution is bounded by $d_{max}$ to avoid infinite values [S1].*
+
+3.  **Fairing (Smoothing a Middle Slice):**
+    To smooth slice $i$ using adjacent slices $i-1$ and $i+1$:
+    a.  For each material $m$, compute the faired ESDF:
+        $$s_{m,i}^{fair} = (1 - 2\alpha) s_{m,i} + \alpha (s_{m,i-1} + s_{m,i+1})$$
+    b.  Reconstruct the slice by assigning the material with the minimal negative distance at each pixel [S1].
+    *Note: This process shifts the material boundary by at most one slice distance $\epsilon_s$ [S1].*
+
+4.  **Topological Handling (Optional):**
+    If topological information indicates connected components composed of multiple materials (e.g., joining vessels):
+    a.  First pass: Treat the entire connected component as a single "dummy" material to eliminate internal feature lines.
+    b.  Second pass: Separate the participating materials within the component [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_esdf_2d(slice_data, material_id, d_max):
+    """
+    Computes the Euclidean Signed Distance Function for a specific material in a 2D slice.
+    Returns a 2D array of floats.
+    """
+    rows, cols = slice_data.shape
+    esdf = np.full((rows, cols), np.inf)
+    
+    # Identify boundary pixels
+    # Boundary is where pixel is material_id and neighbor is not, or vice versa
+    # Initialize boundary with 0
+    boundary_mask = np.zeros((rows, cols), dtype=bool)
+    # ... logic to find boundary pixels ...
+    esdf[boundary_mask] = 0.0
+    
+    # Propagate distances iteratively
+    # Standard 2D Euclidean distance propagation (e.g., using chamfer distances or BFS with sqrt(2))
+    # Values filled: 1, sqrt(2), 2, sqrt(5)...
+    # Sign flip: Inside material is negative, outside is positive
+    # This requires knowing the interior/exterior. 
+    # For a binary mask, flood fill from outside to determine interior.
+    interior = flood_fill_outside(slice_data == material_id)
+    
+    # Apply signs
+    esdf[interior] = -esdf[interior]
+    
+    # Clamp to d_max
+    esdf = np.clip(esdf, -d_max, d_max)
+    
+    return esdf
+
+def interpolate_slices(esdf_0, esdf_1, t):
+    """
+    Interpolates between two ESDF maps.
+    Returns the interpolated material map.
+    """
+    # Linear combination
+    esdf_t = (1 - t) * esdf_0 + t * esdf_1
+    
+    # Determine material for each pixel
+    # Find material with minimal negative distance
+    # If all distances are positive, background
+    # If multiple negative, pick the one with smallest value (closest to 0 from inside)
+    # Note: In multi-material, we compare s_m,t for all m
+    pass # Implementation depends on specific multi-material handling details not fully specified in source beyond "minimal distance"
+
+def fair_slice(esdf_prev, esdf_curr, esdf_next, alpha):
+    """
+    Fairing a middle slice using adjacent slices.
+    """
+    # Formula: s_i = (1 - 2*alpha) * s_i + alpha * (s_{i-1} + s_{i+1})
+    esdf_fair = (1 - 2 * alpha) * esdf_curr + alpha * (esdf_prev + esdf_next)
+    return esdf_fair
+```
+
+## Operating characteristics
+*   **Complexity:** Time complexity is dominated by the 2D ESDF propagation per slice, which is linear in the number of pixels per slice. Fairing/interpolation is linear in the number of pixels and materials.
+*   **Memory:** Requires storing ESDF maps for the current slice and its neighbors (or all slices if batch processing). Bounded by $d_{max}$ prevents overflow issues but requires careful initialization for missing materials [S1].
+*   **Strengths:** Efficient compared to full 3D SDF computation; handles multiple materials; reduces artifacts from slice misalignment and gaps [S1].
+*   **Limitations:** Boundary shifts are limited to one slice distance $\epsilon_s$; topological ambiguities may require manual intervention or a two-pass dummy material strategy [S1].
+*   **When to use:** When dealing with segmented volumes where slices are not simultaneous or have misalignment, and smooth transitions between materials are required [S1].
+
+## Background
+This method was introduced by Bertram et al. in 2005 as part of a pipeline for non-manifold mesh extraction from time-varying segmented volumes used for modeling a human heart [S1]. It builds on the concept of using SDFs for boundary reconstruction, as previously used by Jones/Chen [JC94] for 3D SDF zero-surface extraction, but adapts it for 2D slices to gain efficiency and handle multiple materials [S1].
+
+## Sources
+[S1] Non-manifold Mesh Extraction from Time-varying Segmented Volumes used for Modeling a Human Heart, https://doi.org/10.2312/vissym/eurovis05/199-206, fetched 2026-10-26

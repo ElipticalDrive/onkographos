@@ -1,0 +1,110 @@
+--- v002.md
++++ v003.md
+@@ -22,11 +22,11 @@
+ 
+ **Numbered Steps:**
+-1. **Compute Intersected Voxels:** Solve $3P$ ray-plane intersections to determine the set of voxels intersected by the ray. Using these intersection points, identify at most $3P$ intersected voxels [S1].
++1. **Compute Intersected Voxels:** Solve $3P$ ray-plane intersections to determine the set of voxels intersected by the ray [S1]. Using these intersection points, identify at most $3P$ intersected voxels [S1].
+ 2. **Prune Empty Voxels (Conditional):** Use the acceleration grid $G$ to prune voxels unlikely to contain geometry based on threshold $\tau_G = 0.1$ [S1].
+-   - **Training Stage 1 (First Quarter, $t < 0.25$):** Do not use $G$ for pruning. Keep all $3P$ intersected voxels and all $3P$ intersection points [S1].
+-   - **Training Stage 2 (Second Quarter, $0.25 \le t < 0.5$):** Use $G$ to remove empty voxels. Keep at most $3P/2$ non-empty voxels and the $3P/2$ intersection points closest to the camera [S1].
+-   - **Training Stage 3 (Rest of Training, $t \ge 0.5$):** Use $G$ to remove empty voxels. Keep at most $3P/4$ intersection points [S1].
++   - **Training Stage 1 (First Quarter, $t < 0.25$):** Do not use $G$ for pruning [S1]. Keep all $3P$ intersected voxels and all $3P$ intersection points [S1].
++   - **Training Stage 2 (Second Quarter, $0.25 \le t < 0.5$):** Use $G$ to remove empty voxels [S1]. Keep at most $3P/2$ non-empty voxels and the $3P/2$ intersection points closest to the camera [S1].
++   - **Training Stage 3 (Rest of Training, $t \ge 0.5$):** Use $G$ to remove empty voxels [S1]. Keep at most $3P/4$ intersection points [S1].
+    - **Batch Size Adjustment:** Double the training batch size each time the number of intersections is halved [S1].
+-3. **Compute Quadrature Points:** For each kept voxel, compute intersections between the ray and the faces of $M$ that are incident to the voxel’s vertex. This yields the final set of quadrature points [S1].
++3. **Compute Quadrature Points:** For each kept voxel, compute intersections between the ray and the faces of $M$ that are incident to the voxel’s vertex [S1]. This yields the final set of quadrature points [S1].
+ 4. **Special Case for Unbounded 360° Scenes:** For concentric boxes in unbounded 360° scenes, compute their intersections and keep all of them, bypassing the pruning steps above [S1].
+ 
+@@ -47,5 +47,5 @@
+ **Pseudocode:**
+ ```python
+-def regular_grid_mesh_intersection(ray_origin, ray_direction, mesh, accel_grid, P, training_progress, is_unbounded_360):
++def regular_grid_mesh_intersection(ray_origin, ray_direction, accel_grid, P, training_progress, is_unbounded_360):
+     """
+     Compute intersections between a ray and a regular-grid mesh.
+@@ -54,5 +54,4 @@
+         ray_origin: 3D vector, origin of the ray.
+         ray_direction: 3D vector, direction of the ray.
+-        mesh: Regular-grid mesh of size P x P x P.
+         accel_grid: 3D array of size P x P x P, values indicate geometry likelihood.
+         P: Integer, grid resolution.
+@@ -69,5 +68,5 @@
+     for axis in range(3):
+         for i in range(P):
+-            plane_coord = (i + 0.5) / P
++            plane_coord = i / P
+             denom = ray_direction[axis]
+             if abs(denom) > EPS:
+@@ -75,42 +74,41 @@
+                 if t > 0:
+                     point = ray_origin + t * ray_direction
+-                    voxel_idx = tuple(int(point[d] * P) for d in range(3))
++                    # Clamp voxel index to valid range [0, P-1]
++                    voxel_idx = tuple(min(int(point[d] * P), P - 1) for d in range(3))
+                     if voxel_idx not in intersected_voxels:
+                         intersected_voxels.append(voxel_idx)
+                         
+     kept_voxels = []
+-    if is_unbounded_360:
++    if is_unbounded_360 or training_progress < 0.25:
+         kept_voxels = intersected_voxels
+-    elif training_progress < 0.25:
+-        kept_voxels = intersected_voxels
+-    elif training_progress < 0.5:
+-        for v in intersected_voxels:
+-            if accel_grid[v] >= 0.1:
+-                kept_voxels.append(v)
+-        kept_voxels = kept_voxels[:int(1.5 * P)]
+     else:
+-        for v in intersected_voxels:
+-            if accel_grid[v] >= 0.1:
+-                kept_voxels.append(v)
+-        kept_voxels = kept_voxels[:int(0.75 * P)]
++        # Filter by acceleration grid threshold
++        filtered = [v for v in intersected_voxels if accel_grid[v] >= 0.1]
++        # Sort by distance to camera to keep closest points
++        filtered.sort(key=lambda v: sum((ray_origin[d] - v[d] / P) ** 2 for d in range(3)))
++        # Limit based on training stage
++        limit = int(1.5 * P) if training_progress < 0.5 else int(0.75 * P)
++        kept_voxels = filtered[:limit]
+         
+-    # Step 3: Compute quadrature points
++    # Step 3: Compute quadrature points by intersecting ray with voxel faces
+     quadrature_points = []
+     for voxel in kept_voxels:
+-        for face_normal in [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]:
+-            denom = sum(ray_direction[d] * face_normal[d] for d in range(3))
+-            if abs(denom) > EPS:
+-                plane_val = sum((voxel[d] + 0.5) * face_normal[d] for d in range(3))
+-                t = (plane_val - sum(ray_origin[d] * face_normal[d] for d in range(3))) / denom
+-                if t > 0:
+-                    point = ray_origin + t * ray_direction
+-                    valid = True
+-                    for d in range(3):
+-                        if face_normal[d] == 0:
+-                            if not (voxel[d] / P <= point[d] <= (voxel[d] + 1) / P):
+-                                valid = False
+-                                break
+-                    if valid:
+-                        quadrature_points.append(point)
++        for axis in range(3):
++            for boundary in (0, 1):
++                plane_coord = boundary / P
++                denom = ray_direction[axis]
++                if abs(denom) > EPS:
++                    t = (plane_coord - ray_origin[axis]) / denom
++                    if t > 0:
++                        point = ray_origin + t * ray_direction
++                        # Check if point lies within voxel bounds on other axes
++                        valid = True
++                        for d in range(3):
++                            if d != axis:
++                                if not (voxel[d] / P <= point[d] <= (voxel[d] + 1) / P):
++                                    valid = False
++                                    break
++                        if valid:
++                            quadrature_points.append(point)
+     return quadrature_points
+ ```

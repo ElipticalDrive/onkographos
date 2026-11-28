@@ -1,0 +1,103 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method establishes a uniform step size for volume rendering by normalizing the volume dataset's physical dimensions to a unit cube, ensuring consistent sampling density regardless of the volume's resolution or aspect ratio [S1, S2, unofficial]. It differs from adaptive methods by using a fixed step derived from the maximum dimension, which prevents aliasing artifacts like concentric "sampling rings" in Line-of-Sight (LOS) integral visualization [S2, unofficial].
++This method establishes a uniform step size for volume rendering by normalizing the volume dataset's physical dimensions to a unit cube, ensuring consistent sampling density regardless of resolution or aspect ratio [S1, S2, unofficial]. It computes a base step size from the maximum volume dimension and an optional axis-wise scaling factor to map arbitrary voxel grids into normalized space [S1, S2, unofficial].
+ 
+ ## How it works
+@@ -17,29 +17,36 @@
+ 
+ **Data Structures:**
+-*   `dimensions`: Vector or tuple of three integers $(W, H, D)$.
+-*   `aspectRatios`: Vector of three floats $(a_x, a_y, a_z)$.
++*   `dimensions`: Tuple of three integers $(W, H, D)$.
++*   `aspectRatios`: Tuple of three floats $(a_x, a_y, a_z)$.
+ *   `stepScale`: Single float.
+ 
+-**Steps:**
++**Numbered Steps:**
+ 1.  **Calculate Max Dimension:** Determine the largest dimension of the volume.
+     $$ M = \max(W, H, D) $$
+-    [S1, S2, unofficial]
+-
++    [S1, unofficial]
+ 2.  **Compute Base Step Size:** Calculate the inverse of the maximum dimension.
+     $$ \Delta_{base} = \frac{1}{M} $$
+     [S1, unofficial]
+-
+-3.  **Handle Aspect Ratios (Optional/Advanced):** If aspect ratios are provided to handle non-cubic volumes explicitly:
++3.  **Handle Aspect Ratios:** If aspect ratios are provided to handle non-cubic volumes explicitly:
+     *   Clamp aspect ratios to a minimum of $\mathbf{0}$ [S2, unofficial].
+     *   Compute the scaling factor $\mathbf{f}$ to map the volume into a unit cube coordinate system:
+         $$ \mathbf{f} = \frac{\mathbf{1}}{\left(\mathbf{1} \cdot M\right) / (\mathbf{d} \cdot \mathbf{a})} $$
+-        Where $\mathbf{1} = (1,1,1)$, $\mathbf{d} = (W,H,D)$, and $\mathbf{a} = (a_x, a_y, a_z)$. Division is component-wise [S2, unofficial].
+-    *   Note: Some implementations simply use $\Delta_{base}$ directly if aspect ratio normalization is handled via the scaling factor in the ray origin/direction rather than the step size itself [S1, S2, unofficial]. The source [S2, unofficial] suggests computing `stepSize` for each axis as $1.0 / (d_i \cdot (M/d_i))$, which simplifies to $1/M$, implying the aspect ratio adjustment primarily affects the spatial mapping (scale factor) rather than the step count itself in the simplest case. However, the explicit `scaleFactor` calculation is critical for correct coordinate mapping [S2, unofficial].
+-
++        Where $\mathbf{1} = (1,1,1)$, $\mathbf{d} = (W,H,D)$, and $\mathbf{a} = (a_x, a_y, a_z)$ [S2, unofficial]. Vector operations are component-wise [G]. The source computes per-axis step size as $1.0 / (d_i \cdot (M/d_i))$, which algebraically simplifies to $1/M$, confirming the step size remains uniform while the scaling factor adjusts the spatial mapping [S2, unofficial].
+ 4.  **Apply Step Scale:** Multiply the base step size by the user-defined scale factor, clamped to a minimum of $0.1$ [S2, unofficial].
+     $$ \Delta = \max(\Delta_{base} \cdot s_{scale}, 0.1) $$
+     [S2, unofficial]
++5.  **Pass to Shader:** Upload $\Delta$ (and $\mathbf{f}$ if used) as uniform variables to the ray marching shader [S1, S2, unofficial].
+ 
+-5.  **Pass to Shader:** Upload $\Delta$ (and $\mathbf{f}$ if used) as uniform variables to the ray marching shader [S1, S2, unofficial].
++**Parameters:**
++*   `stepScale`: Multiplier for the base step size during ray marching. Clamped to a minimum of $0.1$ [S2, unofficial].
++*   `aspectRatios`: Vector defining the relative scaling of volume axes. Clamped to a minimum of $\mathbf{0}$ [S2, unofficial].
++*   `_fovy`: Vertical field of view in radians (used in the Projection Factor variant) [S3, unofficial].
++*   `_pixelTolerance`: Desired pixel tolerance for step sizing (used in the Projection Factor variant) [S3, unofficial].
++*   `screenDivisor`: Resolution divisor, default $1.0$ or $8.0$ for min-depth pass (used in the Projection Factor variant) [S3, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Zero Dimensions:** If any dimension is $0$, the calculation would divide by zero; a guard clause returns a default step size of $1.0$ [G].
++*   **Zero Aspect Ratios:** Clamping to $0$ is specified in the source [S2, unofficial], but zero values in the denominator of the scale factor calculation will produce infinite scaling unless the renderer's coordinate mapping logic handles it [G].
++*   **Precision:** Using `float` for step size is standard in shaders; host-side calculations should match shader precision [G].
+ 
+ **Pseudocode:**
+@@ -78,5 +85,5 @@
+     
+     # Compute scale factor: vec3(1) / ((vec3(1) * maxSize) / (dimensions * aspectRatios)) [S2, unofficial]
+-    # Component-wise division
++    # Component-wise division [G]
+     scale_x = 1.0 / ((1.0 * max_dim) / (dimensions[0] * ax))
+     scale_y = 1.0 / ((1.0 * max_dim) / (dimensions[1] * ay))
+@@ -91,26 +98,25 @@
+ ```
+ 
+-**Edge Cases:**
+-*   **Zero Dimensions:** If any dimension is 0, the step size calculation fails. A guard clause should return a default step size (e.g., 1.0) or handle the empty volume case [G].
+-*   **Zero Aspect Ratios:** Clamping to 0 prevents division by zero in the scale factor calculation but may result in infinite scaling if not handled by the renderer's coordinate mapping logic [S2, unofficial].
+-*   **Precision:** Using `float` for step size is standard in shaders. Ensure the host-side calculation matches the shader precision [S1, S2, unofficial].
+-
+ ## Subtopics
+ 
+ ### [Uniform Ray Marching](4810-uniform-ray-marching.md)
+-Generates 3D sample positions using fixed spacing within an AABB. Chosen when dense uniform sampling is required to avoid aliasing artifacts like sampling rings, or as a fallback in environments lacking specialized libraries.
++Uniform Ray Marching generates 3D sample positions along rays within an Axis-Aligned Bounding Box (AABB) using a fixed spacing between samples. It serves as a fallback strategy for environments lacking adaptive libraries or as a debug mode that treats an atlas texture as the full volume without brick traversal. It replaces coarse sampling to avoid aliasing artifacts, such as concentric "sampling rings," caused by steep gradients near inner radius cuts.
++
++### Projection Factor Calculation
++Calculates a scaling factor for ray marching step sizes based on camera FOV and pixel tolerance to ensure consistent visual quality across resolutions [S3, unofficial]. The formula is $F = \frac{1}{2 \tan(\frac{\theta}{2})} \cdot \frac{W_y}{\text{pixelTolerance}}$ where $\theta$ is vertical FOV, $W_y$ is screen height, and pixelTolerance is in pixels [S3, unofficial]. Parameters include `_fovy` (vertical FOV in radians), `_pixelTolerance` (desired pixel tolerance), and `screenDivisor` (resolution divisor, default $1.0$ or $8.0$ for min-depth pass) [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ for step size calculation. Ray marching itself is $O(N)$ where $N$ is the number of steps, determined by the volume depth and step size.
+-*   **Memory Complexity:** $O(1)$ for the step size and scale factor variables.
+-*   **Performance:** Provides consistent rendering speed as step count is predictable. However, it may be less efficient than adaptive methods in sparse volumes because it samples empty space uniformly [S2, unofficial].
+-*   **Strengths:** Simple to implement; prevents aliasing artifacts associated with non-uniform sampling densities; robust across different volume resolutions [S1, S2, unofficial].
+-*   **Limitations:** Does not adapt to local detail; may over-sample in empty regions or under-sample in high-detail regions compared to adaptive methods [S2, unofficial].
+-*   **When to Use:** When consistent sampling density is critical (e.g., medical imaging, scientific visualization) or when hardware/software constraints prevent adaptive stepping [S2, unofficial].
++*   **Time Complexity:** $O(1)$ for step size calculation [G]. Ray marching traversal is $O(N)$ where $N$ is the step count [G].
++*   **Memory Complexity:** $O(1)$ for the step size and scale factor variables [G].
++*   **Performance:** Provides consistent rendering speed as step count is predictable [G].
++*   **Strengths:** Simple to implement; ensures consistent sampling density across different volume resolutions [S1, S2, unofficial].
++*   **Limitations:** Does not adapt to local detail [G].
++*   **When to Use:** When consistent sampling density is critical or when hardware/software constraints prevent adaptive stepping [S2, unofficial].
+ 
+ ## Background
+-This method is derived from practical implementations in open-source volume rendering projects, specifically `qt-viewer-pro` and `VolumeRendering` [S1, S2, unofficial]. It addresses the common problem of visual artifacts (such as concentric rings) that arise when ray marching through volumes with varying aspect ratios or resolutions using naive fixed steps [S2, unofficial].
++This method is derived from practical implementations in open-source volume rendering projects, specifically `qt-viewer-pro` and `VolumeRendering` [S1, S2, unofficial]. It addresses the common problem of visual artifacts that arise when ray marching through volumes with varying aspect ratios or resolutions using naive fixed steps [S2, unofficial]. A related variant calculates step scaling based on camera FOV and pixel tolerance to maintain visual quality across resolutions [S3, unofficial].
+ 
+ ## Sources
+ [S1] wpop/qt-viewer-pro, https://github.com/wpop/qt-viewer-pro, fetched 2026-10-27 (unofficial)
+-[S2] jose-villegas/VolumeRendering, https://github.com/jose-villegas/VolumeRendering, fetched 2026-10-27 (unofficial)+[S2] jose-villegas/VolumeRendering, https://github.com/jose-villegas/VolumeRendering, fetched 2026-10-27 (unofficial)
++[S3] RvanderLaan/SVDAG-Compression, https://github.com/RvanderLaan/SVDAG-Compression, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,219 @@
+--- v001.md
++++ v002.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs:**
+-- A scalar field grid $V$ with dimensions $N_x \times N_y \times N_z$.
++- A scalar field grid $V$.
+ - An isovalue $\alpha$.
+ - A parameter $\lambda \in [0, 0.5]$ determining the threshold for collapsing intersection points [S1].
+@@ -17,11 +17,11 @@
+ **Data Structures:**
+ - **Grid:** A 3D array of scalar values.
+-- **Cube Status:** A boolean flag for each cube indicating if it is "blocked" (preventing mesh improvement) [S1].
+-- **Intersection Points:** For each edge of a cube, the parametric position $t \in [0, 1]$ where the isosurface intersects the edge, or a flag indicating no intersection.
++- **Cube Status:** A boolean mask for each cube indicating if it is "blocked" (preventing mesh improvement) [S1].
++- **Intersection Data:** For each edge of a cube, the parametric position $t \in [0, 1]$ where the isosurface intersects the edge [S1].
+ 
+ **Steps:**
+ 
+ 1. **Grid Preprocessing:**
+-   Eliminate ambiguous configurations that cause non-manifold edges in the Chernyaev lookup table. Specifically, split faces at critical points where grid vertex scalar values equal the isovalue [S1]. The source proposes splitting all faces in the grid slice containing the problematic configuration to ensure robust handling [S1].
++   Eliminate ambiguous configurations that cause non-manifold edges in the Chernyaev lookup table by splitting faces at critical points where grid vertex scalar values equal the isovalue [S1]. The source proposes splitting all faces in the grid slice containing the problematic configuration to ensure robust handling [S1].
+ 
+ 2. **Scalar Field Modification (Labelle and Shewchuk Strategy):**
+@@ -29,16 +29,11 @@
+ 
+ 3. **Topology Verification (Blocking):**
+-   To prevent undesired topological changes caused by the scalar field modification, track isosurface topology changes in the interior of each cube [S1].
+-   - For each cube, determine if the modified scalar field $V'$ would result in a different topology than the original field $V$ relative to the Extended MC33 triangulation.
+-   - If a configuration is detected that could modify the global isosurface topology, mark the cube and its immediate neighbors as "blocked" [S1].
+-   - [G] The verification typically involves comparing the connectivity of the isosurface segments within the cube before and after modification, or checking for the emergence/disappearance of critical points.
++   To prevent undesired topological changes caused by the scalar field modification, track isosurface topology changes in the interior of each cube [S1]. If a configuration is detected that could modify the global isosurface topology, mark the cube and its immediate neighbors as "blocked" [S1].
+ 
+ 4. **Mesh Extraction:**
+-   Run the Marching Cubes 33 algorithm with the extended triangulation on the modified grid $V'$ [S1].
+-   - For cubes marked as "blocked", perform standard triangulation without applying the vertex collapsing logic from Step 2 (or revert to original field values for those cubes) to preserve topology [S1].
+-   - For non-blocked cubes, use the modified field $V'$ where intersections near vertices have been collapsed.
++   Run the Marching Cubes 33 algorithm with the extended triangulation on the modified grid $V'$ [S1]. Mesh improvements (triangle collapsing) are performed only in the cubes that are not in the neighborhood of the blocked cubes [S1].
+ 
+ 5. **Geometry Preservation:**
+-   Move each isosurface vertex located on a grid vertex (due to collapsing) to the location of the closest isosurface vertex in the original grid (from $V$) to preserve the original geometry [S1].
++   Move each isosurface vertex located on a grid vertex (due to collapsing) to the location of the closest isosurface vertex in the original grid to preserve the original geometry [S1].
+ 
+ **Quality Measure:**
+@@ -50,94 +45,98 @@
+ 
+ ```python
++import numpy as np
++
+ def topology_aware_mc33(grid, isovalue, lambda_param):
+     """
+-    grid: 3D array of scalar values
++    grid: 3D numpy array of scalar values
+     isovalue: float
+     lambda_param: float in [0, 0.5]
+     """
++    Nx, Ny, Nz = grid.shape
++    original_grid = grid.copy()
++    modified_grid = grid.copy()
++    blocked = np.zeros((Nx-1, Ny-1, Nz-1), dtype=bool)
++    vertices_to_collapse = set()
++
+     # Step 1: Preprocessing
+-    # Split faces at critical points to eliminate ambiguous configurations
+-    grid = preprocess_grid(grid, isovalue)
+-    
+-    # Step 2: Identify intersections and potential collapses
+-    # Store original grid for geometry preservation
+-    original_grid = copy(grid)
+-    
+-    # Detect intersected edges and mark vertices for collapse
+-    # A vertex is marked if an intersection on an adjacent edge is within lambda*L
+-    vertices_to_collapse = set()
+-    for each edge in grid_edges:
+-        t = intersect_parametric(edge, isovalue)
+-        if t is not None:
+-            dist_to_v0 = t * edge.length
+-            dist_to_v1 = (1 - t) * edge.length
+-            if dist_to_v0 < lambda_param * edge.length:
+-                vertices_to_collapse.add(edge.v0)
+-            if dist_to_v1 < lambda_param * edge.length:
+-                vertices_to_collapse.add(edge.v1)
+-                
+-    # Apply collapses to grid
+-    modified_grid = copy(grid)
++    # [G] Split faces at critical points where vertex values equal isovalue
++    # to resolve Chernyaev lookup table ambiguities.
++
++    # Step 2: Scalar Field Modification
++    for z in range(Nz - 1):
++        for y in range(Ny - 1):
++            for x in range(Nx - 1):
++                edges = [
++                    ((x, y, z), (x+1, y, z)), ((x, y, z), (x, y+1, z)), ((x, y, z), (x, y, z+1)),
++                    ((x+1, y, z), (x+1, y+1, z)), ((x+1, y, z), (x+1, y, z+1)),
++                    ((x, y+1, z), (x+1, y+1, z)), ((x, y+1, z), (x, y+1, z+1)),
++                    ((x, y, z+1), (x+1, y, z+1)), ((x, y, z+1), (x, y+1, z+1)),
++                    ((x+1, y, z+1), (x+1, y+1, z+1)), ((x+1, y, z+1), (x+1, y, z)),
++                    ((x, y+1, z+1), (x+1, y+1, z+1))
++                ]
++                for v0, v1 in edges:
++                    val0, val1 = grid[v0], grid[v1]
++                    if (val0 - isovalue) * (val1 - isovalue) < 0:
++                        t = (isovalue - val0) / (val1 - val0)
++                        if t < lambda_param:
++                            vertices_to_collapse.add(v0)
++                        if (1.0 - t) < lambda_param:
++                            vertices_to_collapse.add(v1)
++
+     for v in vertices_to_collapse:
+         modified_grid[v] = isovalue
+-        
+-    # Step 3: Topology Verification (Blocking)
+-    blocked_cubes = set()
+-    for each cube in grid_cubes:
+-        # Check if topology changes between original and modified grid
+-        # This requires evaluating the isosurface connectivity in the cube
+-        # interior for both grids and comparing them.
+-        if topology_differs(original_grid, modified_grid, cube, isovalue):
+-            blocked_cubes.add(cube)
+-            # Block neighbors
+-            for neighbor in get_neighbors(cube):
+-                blocked_cubes.add(neighbor)
+-                
+-    # Step 4: Mesh Extraction
+-    mesh = empty_mesh()
+-    for each cube in grid_cubes:
+-        if cube in blocked_cubes:
+-            # Use original grid for topological safety
+-            triangles = mc33_extended_triangulation(original_grid, cube, isovalue)
+-        else:
+-            # Use modified grid for quality improvement
+-            triangles = mc33_extended_triangulation(modified_grid, cube, isovalue)
+-        mesh.add_triangles(triangles)
+-        
+-    # Step 5: Geometry Preservation
+-    # Move vertices that were collapsed back to original isosurface location
+-    for triangle in mesh.triangles:
+-        for vertex in triangle.vertices:
+-            if vertex was_collapsed:
+-                # Find closest isosurface vertex in original grid
+-                original_pos = find_closest_isosurface_vertex(original_grid, vertex.grid_pos, isovalue)
+-                vertex.position = original_pos
+-                
++
++    # Step 3: Topology Verification
++    for z in range(Nz - 1):
++        for y in range(Ny - 1):
++            for x in range(Nx - 1):
++                # [G] Compare isosurface connectivity inside the cube between
++                # original_grid and modified_grid.
++                if topology_differs(original_grid, modified_grid, (x, y, z), isovalue):
++                    blocked[z, y, x] = True
++                    for dz in range(-1, 2):
++                        for dy in range(-1, 2):
++                            for dx in range(-1, 2):
++                                nz, ny, nx = z+dz, y+dy, x+dx
++                                if 0 <= nz < Nz-1 and 0 <= ny < Ny-1 and 0 <= nx < Nx-1:
++                                    blocked[nz, ny, nx] = True
++
++    # Step 4 & 5: Mesh Extraction & Geometry Preservation
++    mesh = []
++    for z in range(Nz - 1):
++        for y in range(Ny - 1):
++            for x in range(Nx - 1):
++                use_grid = original_grid if blocked[z, y, x] else modified_grid
++                tri = mc33_extended_triangulation(use_grid, (x, y, z), isovalue)
++                for v in tri.vertices:
++                    if v in vertices_to_collapse:
++                        v.pos = find_closest_isosurface_vertex(original_grid, v.grid_pos, isovalue)
++                mesh.extend(tri)
+     return mesh
+ 
+-def preprocess_grid(grid, isovalue):
+-    """
+-    Split faces at critical points.
+-    Implementation detail: If a face has vertices with values straddling isovalue
+-    and one vertex equals isovalue, split the face to resolve ambiguity.
+-    """
+-    # [G] Specific splitting logic depends on the exact definition of "ambiguous configuration"
+-    # in the Chernyaev table. Generally, this involves refining the grid or adjusting
+-    # vertex values to break symmetry at critical points.
+-    return grid
++def mc33_extended_triangulation(grid, cube_idx, isovalue):
++    # Standard MC33 lookup with extended triangulation for case 4
++    # [G] The sources do not provide the exact extended lookup table or
++    # triangle generation code. Implemented here as a standard MC33 fallback.
++    x, y, z = cube_idx
++    signs = [
++        grid[x, y, z] > isovalue, grid[x+1, y, z] > isovalue,
++        grid[x+1, y+1, z] > isovalue, grid[x, y+1, z] > isovalue,
++        grid[x, y, z+1] > isovalue, grid[x+1, y, z+1] > isovalue,
++        grid[x+1, y+1, z+1] > isovalue, grid[x, y+1, z+1] > isovalue
++    ]
++    case = sum(s << i for i, s in enumerate(signs))
++    # [G] Standard MC33 lookup table and triangle generation omitted for brevity;
++    # returns triangles based on `case` and interpolated edge points.
++    return []
+ 
+-def topology_differs(grid_a, grid_b, cube, isovalue):
+-    """
+-    Returns True if the isosurface topology inside the cube differs between grid_a and grid_b.
+-    """
+-    # [G] This is the core verification step. It likely involves checking if the
+-    # number of connected components or the connectivity of intersection points
+-    # on the cube faces changes.
+-    return False # Placeholder for specific topological check
++def topology_differs(grid_a, grid_b, cube_idx, isovalue):
++    # [G] The sources do not provide the exact topological verification algorithm.
++    # Typically involves comparing the number of connected components or
++    # intersection point connectivity on the cube faces before and after modification.
++    return False
+ ```
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The method adds a verification step per cube, increasing computational cost over standard MC33. The verification involves comparing topologies, which is constant per cube but adds overhead.
+-- **Memory Complexity:** Requires storing the original grid and a boolean mask for blocked cubes.
+ - **Performance:** In the Bonsai dataset with $\lambda=0.2$ and isovalue 39.5, only 0.63% of cubes intersected by the isosurface were blocked [S1]. For a randomly generated scalar field on a 6x6x6 grid, 6.73% of cubes were blocked for $\lambda=0.1$, and 31.1% were blocked for $\lambda=0.2$ [S1].
+ - **Strengths:** Correctly represents the topology of the trilinear interpolant even when $\lambda=0$ [S1]. Improves aspect ratio of triangles [S1].

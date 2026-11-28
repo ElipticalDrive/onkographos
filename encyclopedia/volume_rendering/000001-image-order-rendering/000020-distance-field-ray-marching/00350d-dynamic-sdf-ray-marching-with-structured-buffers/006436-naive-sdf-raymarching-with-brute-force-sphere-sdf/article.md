@@ -1,0 +1,127 @@
+# Naive SDF Raymarching with Brute-Force Sphere SDF
+
+Also called: Flat Array SDF Evaluation, Unoptimized Sphere SDF Raymarching
+
+## Overview
+This method renders a scene of spheres by evaluating the Signed Distance Field (SDF) for every sphere in a flat GPU buffer per fragment and returning the minimum distance to find the closest surface [S1, unofficial]. It differs from its parent [Dynamic SDF Ray Marching with Structured Buffers](7434-dynamic-sdf-ray-marching-with-structured-buffers.md) by skipping spatial acceleration structures (like trees or BVHs) and structured buffer optimizations, instead performing a linear scan over all sphere definitions in the fragment shader [S1, unofficial]. This approach is chosen for its implementation simplicity and suitability for scenes with a small, dynamic number of spheres, trading performance for code clarity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A flat buffer containing `num_sdf_spheres` sphere definitions. Each sphere has a `color` (Vec4), `center` (Vec3), and `radius` (f32).
+*   **Input:** Ray origin (camera position) and ray direction (computed in vertex shader).
+*   **Output:** Fragment color (sphere color modulated by diffuse lighting).
+
+**Data Structures:**
+The sphere data is stored in a flat array `SdfBuffer` [S1, unofficial]:
+1.  `num_spheres`: `u32`, the count of spheres.
+2.  `sdfs`: `Vec<SdfSphere>`, an array of sphere structs.
+    *   `SdfSphere` layout:
+        *   `color`: `Vec4` (RGBA).
+        *   `center`: `Vec3` (XYZ).
+        *   `radius`: `f32`.
+
+**Algorithm Steps:**
+1.  **Ray Setup:** In the vertex shader, compute the initial ray direction:
+    $$ \text{Initial\_Ray\_Direction} = \text{normalize}(\text{world\_position}.xyz - \text{Position}.xyz) $$
+    where $\text{world\_position} = \text{Model} \times \text{vec4}(\text{Vertex\_Position}, 1.0)$ and $\text{Position}$ is the camera position [S1, unofficial].
+2.  **SDF Evaluation Loop:** In the fragment shader, iterate through all spheres to find the minimum distance:
+    *   Initialize `min_dist` to $10000.0$ [S1, unofficial].
+    *   For each sphere $i$ from $0$ to $\text{num\_sdf\_spheres} - 1$:
+        *   Compute distance: $d_i = \| \mathbf{p} - \mathbf{c}_i \| - r_i$, where $\mathbf{p}$ is the current point (ray origin), $\mathbf{c}_i$ is the sphere center, and $r_i$ is the radius [S1, unofficial].
+        *   If $d_i < \text{min\_dist}$, update $\text{min\_dist} = d_i$ and store the closest sphere index [S1, unofficial].
+3.  **Normal Calculation:** Compute the surface normal at the ray origin using central finite differences with step $h = 0.0001$ and kernel $k = \text{vec2}(1, -1)$ [S1, unofficial]:
+    $$ \mathbf{n} = \text{normalize}\left( k_x \cdot \text{sdSphere}(\mathbf{p} + k_x \cdot h \cdot \mathbf{e}_x, r_{\text{closest}}) + k_y \cdot \text{sdSphere}(\mathbf{p} + k_y \cdot h \cdot \mathbf{e}_y, r_{\text{closest}}) + k_z \cdot \text{sdSphere}(\mathbf{p} + k_z \cdot h \cdot \mathbf{e}_z, r_{\text{closest}}) \right) $$
+    *Note: The source formula uses a specific kernel application `k.xyy`, `k.yyx`, etc., which implies a weighted sum of directional derivatives. The standard central difference for gradient $\nabla f$ at $\mathbf{p}$ is $\frac{f(\mathbf{p}+h\mathbf{e}_i) - f(\mathbf{p}-h\mathbf{e}_i)}{2h}$. The source code snippet `k.xyy * sdSphere(...)` suggests a specific implementation detail where `k` components are used as weights or signs for the finite difference approximation [S1, unofficial].*
+4.  **Lighting:** Calculate diffuse intensity:
+    $$ I = \max(0, \text{dot}(\text{normalize}(-\text{ray\_origin}), \mathbf{n})) $$
+5.  **Output:** Return $\text{color}_{\text{closest}} \times I$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+H = 0.0001
+K = vec2(1.0, -1.0) # Kernel for finite differences
+INF_DIST = 10000.0
+
+# Sphere SDF function
+def sd_sphere(p: vec3, center: vec3, radius: f32) -> f32:
+    return length(p - center) - radius
+
+# Normal calculation using finite differences
+def get_normal(p: vec3, center: vec3, radius: f32) -> vec3:
+    # Central finite differences
+    # Note: Source uses specific kernel application. Standard central diff:
+    # grad_x = (sd(p + h*e_x) - sd(p - h*e_x)) / (2*h)
+    # The source snippet: k.xyy * sdSphere((point + k.xyy * h) - center, radius)
+    # implies a direct weighted sum. We implement the standard central difference
+    # for clarity and correctness, as the source's specific kernel usage is ambiguous
+    # without the exact vector component mapping.
+    eps = H
+    dx = sd_sphere(p + vec3(eps, 0.0, 0.0), center, radius) - sd_sphere(p - vec3(eps, 0.0, 0.0), center, radius)
+    dy = sd_sphere(p + vec3(0.0, eps, 0.0), center, radius) - sd_sphere(p - vec3(0.0, eps, 0.0), center, radius)
+    dz = sd_sphere(p + vec3(0.0, 0.0, eps), center, radius) - sd_sphere(p - vec3(0.0, 0.0, eps), center, radius)
+    return normalize(vec3(dx, dy, dz) / (2.0 * eps))
+
+# Main fragment shader logic
+def render_fragment(ray_origin: vec3, spheres: list[SdfSphere]) -> vec4:
+    min_dist = INF_DIST
+    closest_idx = -1
+    
+    # Brute-force loop over all spheres
+    for i in range(len(spheres)):
+        sphere = spheres[i]
+        dist = sd_sphere(ray_origin, sphere.center, sphere.radius)
+        
+        # Floating point comparison instability mitigation [G]
+        # Using a small epsilon for comparison stability
+        if dist < min_dist - 1e-6:
+            min_dist = dist
+            closest_idx = i
+            
+    if closest_idx == -1:
+        return vec4(0.0, 0.0, 0.0, 1.0) # Background color
+        
+    closest_sphere = spheres[closest_idx]
+    
+    # Calculate normal at the ray origin (point on surface approximation)
+    # Note: The ray origin is the camera position. The normal is calculated
+    # at the point on the sphere closest to the ray origin.
+    # However, the source calculates normal at 'point' which is the ray origin.
+    # This implies the ray origin is assumed to be on or very close to the surface,
+    # or the normal is approximated at the camera position relative to the sphere.
+    # Given the context of "raymarching", usually we march along the ray.
+    # But this "naive" method seems to evaluate the SDF at the ray origin directly
+    # for a single-hit or billboard-like effect, or assumes the ray origin is the surface point.
+    # Based on source: "computes the normal at the ray origin"
+    normal = get_normal(ray_origin, closest_sphere.center, closest_sphere.radius)
+    
+    # Diffuse lighting
+    # Light direction is assumed to be -ray_origin (light at camera?) or normalized ray direction?
+    # Source: dot(normalize(-ray_origin), normal)
+    light_dir = normalize(-ray_origin)
+    intensity = max(0.0, dot(light_dir, normal))
+    
+    return closest_sphere.color * intensity
+```
+
+**Edge Cases and Pitfalls:**
+*   **Floating Point Instability:** Direct comparison of floats can be unstable. Mitigated by a custom `CmpFloat` wrapper using `partial_cmp` with `unwrap_or(Ordering::Equal)` [S1, unofficial].
+*   **Ray Origin on Surface:** The normal calculation assumes the ray origin is close to the sphere surface. If the ray origin is far away, the finite difference normal at the origin will be incorrect for the actual intersection point. This method is likely intended for simple visualizations or specific camera positions rather than full raymarching with multiple bounces [S1, unofficial].
+*   **Performance:** Linear scan $O(N)$ per fragment. Not suitable for large $N$ [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per fragment, where $N$ is the number of spheres. No acceleration structure build time.
+*   **Memory Complexity:** $O(N)$ for the flat buffer.
+*   **Performance:** Suitable for small scenes ($N < 100$). Performance degrades linearly with sphere count [S1, unofficial].
+*   **Strengths:** Simple implementation, no complex data structures, easy to debug, dynamic sphere addition/removal is trivial.
+*   **Limitations:** Poor scalability, no support for complex geometry beyond spheres, no shadowing/reflections beyond basic diffuse lighting.
+*   **When to Use:** Prototyping, educational purposes, or scenes with very few dynamic spheres.
+*   **When Not to Use:** Large scenes, complex geometries, or when performance is critical.
+
+## Background
+This technique is part of an attempt to create a game-ready SDF and raymarching-based graphics engine built on a traditional rasterization pipeline [S1, unofficial]. It leverages the work of Inigo Quilez on performant SDFs [S1, unofficial]. The specific implementation is from an unofficial GitHub repository `holger-kibur/sdf` [S1, unofficial].
+
+## Sources
+[S1] holger-kibur/sdf, https://github.com/holger-kibur/sdf, fetched 2026-10-27 (unofficial)

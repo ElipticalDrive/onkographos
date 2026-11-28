@@ -1,0 +1,150 @@
+# GPU-based Voxelization via Slice Rendering
+
+Also called: Hardware Rasterization Voxelization
+
+## Overview
+GPU-based Voxelization via Slice Rendering is a technique that computes the voxelization of a triangle mesh by leveraging hardware rasterization to fill a 3D grid [S1, S2, unofficial]. It solves the problem of converting surface representations into volumetric data by rendering the mesh slice-by-slice along a chosen axis, adjusting near and far clipping planes for each slice to correctly compute boundary voxels [S1, S2, unofficial]. Unlike CPU-based voxelization, all computation is handled on the GPU, and the result is stored directly in a 3D volume texture or structured buffer, allowing immediate use in hardware applications [S1, S2, unofficial]. It differs from [GPU Mesh Voxelization via Axis-Aligned Projection](2561-gpu-mesh-voxelization-via-axis-aligned-projection.md) by using explicit depth slicing and clipping planes rather than projecting triangles onto dominant axes [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A triangle mesh (vertices, normals, indices) and a target resolution (grid dimensions) [S1, S2, unofficial].
+*   **Output:** A 3D voxel grid. The grid can be stored as a 3D volume texture [S2, unofficial] or a bit-packed `std::vector<uint32_t>` [S1, unofficial].
+
+**Data Structures:**
+1.  **3D Volume Texture:** Stores volumetric data where each texel corresponds to a voxel. The origin is at the top-left corner. The center location of a voxel in camera coordinates is computed by transforming its texture coordinate [S2, unofficial].
+    *   *Example:* If voxel physical size is $0.5 \times 0.5 \times 0.5$, voxel indices $(1,1,0)$ and $(4,3,2)$ correspond to center positions $(0.75, 0.75, 0.25)$ and $(2.25, 1.75, 1.25)$ [S2, unofficial].
+2.  **Bit-Packed Grid (Alternative):** A `std::vector<uint32_t>` where each `uint32_t` contains the state of 32 voxals (1 bit per voxel) [S1, unofficial].
+    *   *Layout:* Grid dimensions must be multiples of 32 [S1, unofficial].
+    *   *Order:* `(X0,Y0,Z00-31) | (X1,Y0,Z00-31) | ... | (Xmax,Y0,Z00-31)` for the first Z-block, then `(X0,Y1,Z00-31) | ...` for the next Y, up to `(X0,Ymax,Z00-31)`. This pattern repeats for subsequent Z-blocks (Z32-63, etc.) [S1, unofficial].
+
+**Parameters:**
+*   `resolution`: The target resolution for the voxel grid [S1, unofficial].
+*   `_precision`: Default precision/resolution used in the Scene class, typically set to 32 [S1, unofficial].
+*   `voxel_physical_size`: Physical dimensions of each voxel (e.g., $0.5 \times 0.5 \times 0.5$) [S2, unofficial].
+
+**Algorithm Steps:**
+1.  **Compute Grid Dimensions:** Determine the optimal 3D grid dimensions based on the mesh bounds and target resolution [S1, unofficial].
+2.  **Transform Vertices:** Transform vertex positions into camera coordinates and compute the depth value $Z(v)$ for each vertex [S2, unofficial].
+3.  **Iterate Slices:** Fill the 3D grid by iterating through slices along a chosen axis [S1, unofficial].
+4.  **Determine Slice Range:** For each triangle, calculate the range of slices in the 3D volume texture that possibly intersect the triangle using the depth of all three vertices [S2, unofficial].
+5.  **Duplicate Triangles:** In the geometry shader, duplicate the triangle once for each slice in the possible range [S2, unofficial].
+6.  **Set Clipping Planes:** For each duplicated triangle instance destined for a specific slice index, set up the far and near clipping planes according to that slice index to correctly compute boundary voxels [S2, unofficial].
+7.  **Rasterize:** Render the clipped triangles. The hardware rasterizer fills the voxels corresponding to the projected area [S1, S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxelize_slice_rendering(mesh, resolution, axis='Z'):
+    """
+    Voxelize a mesh using slice rendering.
+    mesh: list of triangles, each triangle is [v0, v1, v2] where v is (x,y,z)
+    resolution: (dim_x, dim_y, dim_z)
+    axis: The axis along which to slice ('X', 'Y', or 'Z')
+    """
+    # 1. Compute grid dimensions
+    # Ensure dimensions are multiples of 32 if using bit-packing
+    grid_dims = align_to_32(resolution)
+    
+    # Initialize output structure
+    # Option A: 3D Texture (conceptual)
+    # Option B: Bit-packed vector
+    grid = [0] * (grid_dims[0] * grid_dims[1] * grid_dims[2] // 32)
+    
+    # 2. Transform vertices to camera coordinates
+    # Assume a standard camera looking down the slicing axis
+    # For simplicity, assume identity view/projection for this abstract step
+    # In practice, use viewProjMatrix
+    camera_vertices = []
+    for tri in mesh:
+        cam_tri = []
+        for v in tri:
+            # Transform v to camera space
+            v_cam = transform_to_camera(v)
+            cam_tri.append(v_cam)
+        camera_vertices.append(cam_tri)
+        
+    # 3. Iterate through slices along the chosen axis
+    for slice_idx in range(grid_dims[axis_index(axis)]):
+        
+        # Determine slice bounds in camera space
+        # The slice corresponds to a specific depth range
+        z_near, z_far = get_slice_depth_bounds(slice_idx, grid_dims, axis)
+        
+        # 4. & 5. Process triangles
+        for cam_tri in camera_vertices:
+            # Calculate depth of all three vertices
+            depths = [v[axis_index(axis)] for v in cam_tri]
+            min_depth = min(depths)
+            max_depth = max(depths)
+            
+            # Check if triangle intersects this slice
+            if max_depth >= z_near and min_depth <= z_far:
+                # 6. Set clipping planes
+                # Clip the triangle to the slice volume
+                clipped_tri = clip_triangle_to_slice(cam_tri, z_near, z_far)
+                
+                if clipped_tri is not None:
+                    # 7. Rasterize
+                    # The hardware rasterizer handles the rest
+                    # We conceptually mark the voxels
+                    rasterize_triangle_to_grid(clipped_tri, slice_idx, grid, grid_dims)
+                    
+    return grid
+
+def align_to_32(dim):
+    return (dim + 31) // 32 * 32
+
+def axis_index(axis):
+    if axis == 'X': return 0
+    if axis == 'Y': return 1
+    if axis == 'Z': return 2
+
+def get_slice_depth_bounds(slice_idx, grid_dims, axis):
+    # Assuming uniform voxel size of 1.0 for simplicity in this abstract
+    # In reality, scale by voxel_physical_size
+    voxel_size = 1.0
+    z_min = slice_idx * voxel_size
+    z_max = (slice_idx + 1) * voxel_size
+    return z_min, z_max
+
+def clip_triangle_to_slice(tri, z_near, z_far):
+    # Clip triangle against z_near and z_far planes
+    # Returns clipped polygon (list of vertices) or None
+    # Implementation details depend on specific clipping algorithm
+    # [G] Standard Sutherland-Hodgman or similar 3D clipping
+    pass
+
+def rasterize_triangle_to_grid(tri, slice_idx, grid, grid_dims):
+    # Project tri to 2D plane perpendicular to axis
+    # Mark voxels in grid
+    # [G] This step is handled by hardware rasterization in the actual GPU method
+    # Here we simulate the result
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   Grid dimensions must be multiples of 32 to align with the bit-packing scheme if using `uint32_t` storage [S1, unofficial].
+*   Precision issues may arise when computing boundary voxels if clipping planes are not set correctly [S2, unofficial].
+
+## Subtopics
+
+### GPU Voxelization via Stencil Buffer Slicing
+Converts high-poly convex/concave meshes into a 1024x1024x256 voxel format by slicing the scene into 256 depth slices and using the stencil buffer to generate silhouettes [S3, unofficial]. It renders slices on the GPU, downloads and processes stencil buffer contents on the CPU, and uploads processed data back to the GPU [S3, unofficial]. GPU memory footprint is ~4MB at any point [S3, unofficial]. Pitfalls include floodfilled voxels near mesh edges requiring the same normal as the voxels forming the edges, and the renderer being based on Bresenham, requiring extra work for 'inner' mesh voxels [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of triangles and slices. Each triangle is processed for each slice it intersects.
+*   **Memory Complexity:** Proportional to the grid size (3D texture or bit-packed array) [S1, S2, unofficial]. Stencil buffer variant uses ~4MB [S3, unofficial].
+*   **Performance:** Depends on GPU hardware rasterization speed. Slicing approach allows efficient use of GPU parallelism [S1, S2, unofficial].
+*   **Strengths:** All computation on GPU; result stored in 3D texture for direct hardware use; handles complex meshes via rasterization [S1, S2, unofficial].
+*   **Limitations:** Requires multiple passes (one per slice); potential for overdraw; stencil buffer variant requires CPU-GPU data transfer [S1, S2, S3, unofficial].
+*   **When to use:** When real-time voxelization is needed and GPU resources are available; when the result needs to be used directly in hardware rendering pipelines [S1, S2, unofficial].
+*   **When not to use:** When CPU-only processing is required; when memory bandwidth is a severe bottleneck due to large grid sizes [S1, S2, unofficial].
+
+## Background
+Originated from the need for efficient GPU-based voxelization for real-time applications [S1, S2, unofficial]. The technique leverages the graphics pipeline's ability to clip and rasterize geometry, adapting it for volumetric representation [S1, S2, unofficial]. It was developed as an alternative to CPU-based voxelization, offering significant performance gains by utilizing hardware rasterization [S1, unofficial]. The stencil buffer variant was explored for specific use cases like raytracing [S3, unofficial].
+
+## Sources
+[S1] piellardj/voxelizer-gpu, https://github.com/piellardj/voxelizer-gpu, fetched 2026-10-26 (unofficial)
+[S2] Real-time GPU-Based Voxelization and Applications, https://minds.wisc.edu/items/e8fdcf0a-3edc-4603-82ef-f91f70900877, fetched 2026-10-29 (unofficial)
+[S3] Forum archive / Ken Silverman / Real-time voxel raytracing, in development.., https://www.jonof.id.au/forum/topic-1433.html, fetched 2026-10-26 (unofficial)

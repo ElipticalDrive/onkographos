@@ -1,0 +1,75 @@
+# Soft Objects
+
+Also called: Wyvill Soft Objects
+
+## Overview
+Soft Objects are a class of implicit surface primitives defined by a bounded field function attributed to the Wyvill brothers [S1, unofficial]. They solve the problem of creating smooth, organic shapes that can be easily morphed and deformed by adjusting control primitive attributes [S1, unofficial]. Unlike Meta balls, which require square root computations for distance normalization, Soft Objects rely solely on squared distances, offering a slight computational advantage [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A query point $\vec{x}$ in 3D space, and parameters for a control primitive: scaling factor $a$ and maximum influence distance $b$ [S1, unofficial].
+*   **Output:** A scalar field value $f(\vec{x})$ representing the contribution of the primitive to the total volume field.
+
+**Data Structures:**
+No complex data structures are required for the primitive evaluation itself; the field is computed directly via formula [G].
+
+**Method:**
+The field function is derived from the first few terms of a series expansion of an exponential function, truncated to restrict the range of influence [S1, unofficial].
+
+1. Calculate the squared Euclidean distance $d^2$ between the query point $\vec{x}$ and the center of the control primitive $\vec{c}$:
+   $$ d^2 = \|\vec{x} - \vec{c}\|^2 $$
+2. Check if the distance exceeds the maximum influence range $b$. If $d^2 > b^2$, the contribution is zero:
+   $$ f(\vec{x}) = 0 $$
+3. Otherwise, compute the field value using the scaling factor $a$ and the squared distance. The exact closed-form expression is not provided in the sources.
+
+**Parameters:**
+*   $a$: Scaling factor. Determines the magnitude of the field contribution. Can be negative to turn the primitive into a subtractive volume [S1, unofficial].
+*   $b$: Maximum distance. The control primitive has no influence after distance $b$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The use of squared distances avoids the computational cost and potential precision issues of square roots required by Meta balls [S1, unofficial].
+*   **Boundaries:** The function is continuous and smoothly changing, ensuring no discontinuities at the boundary $d=b$ [S1, unofficial].
+*   **Subtraction:** Setting $a < 0$ turns the primitive into a subtractive volume, allowing for constructive geometry operations [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def soft_object_field(x, c, a, b):
+    # Calculate squared Euclidean distance
+    dx = x[0] - c[0]
+    dy = x[1] - c[1]
+    dz = x[2] - c[2]
+    d_squared = dx*dx + dy*dy + dz*dz
+
+    # Check if outside maximum influence range
+    b_squared = b * b
+    if d_squared > b_squared:
+        return 0.0
+
+    # Compute field value using scaling factor and squared distance
+    # Exact formula not specified in sources; typically a truncated exponential series
+    ratio = d_squared / b_squared
+    return a * (1.0 - ratio) * (1.0 - ratio)
+```
+
+## Subtopics
+
+### [Coral Growth Algorithm](20863-coral-growth-algorithm.md)
+A procedural method for generating organic, branching volume data by constructing a hierarchical tree of spheres. It distinguishes itself from generic tree generators by its specific use of "soft object" contouring and its strict layer-by-layer generation process governed by collision constraints based on genealogical proximity. It is chosen when complex, naturalistic coral geometries are required as implicit fields for soft object rendering.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Smooth, continuous surfaces; easy morphing and deformation by slowly changing control primitive attributes; computationally efficient due to avoidance of square roots; bounded support restricts influence range [S1, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
+
+## Background
+Soft Objects were investigated by the Wyvill brothers and their graduate students in Canada and New Zealand [S1, unofficial]. They explored approximations of Gaussians, animation, and other ideas related to implicit surfaces [S1, unofficial]. While similar to the "blobbies" or "metaballs" developed by others, the Wyvill group termed their creations "soft objects" [S1, unofficial]. The field function is based on a truncated exponential series expansion, providing a bounded influence range [S1, unofficial].
+
+## Sources
+[S1] Implicit surfaces - Paul Bourke, https://paulbourke.net/geometry/implicitsurf/, fetched 2026-10-28 (unofficial)

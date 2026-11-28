@@ -1,0 +1,126 @@
+--- v002.md
++++ v003.md
+@@ -1,4 +1,4 @@
+ # CUDA Execution Configuration Optimization
+-Also called: Block Size and Grid Size Tuning, GPU Occupancy Optimization
++Also called: Block Size and Grid Size Tuning, CUDA Thread Block Sizing, GPU Occupancy Optimization, Thread block size optimization, Warp utilization tuning
+ 
+ ## Overview
+@@ -7,16 +7,16 @@
+ ## How it works
+ **Inputs:**
+-- Volume dataset dimensions (e.g., $N_x, N_y, N_z$).
+-- Target resolution (image width $W$, height $H$).
+-- GPU hardware capabilities (max threads per block, max warps per SM, register file size).
+-- Algorithmic characteristics (branching density, early ray termination usage, memory access pattern).
++- Volume dataset dimensions ($N_x, N_y, N_z$) [G].
++- Target resolution (image width $W$, height $H$) [G].
++- GPU hardware capabilities (max threads per block, max warps per SM, register file size) [G].
++- Algorithmic characteristics (branching density, early ray termination usage, memory access pattern) [S2, unofficial].
+ 
+ **Outputs:**
+-- Optimal block dimensions $(B_x, B_y, B_z)$ such that $B_x \times B_y \times B_z$ is the total threads per block.
+-- Optimal grid dimensions $(G_x, G_y)$ such that $G_x \times G_y \ge W \times H$.
+-- Shared memory size (if applicable).
++- Optimal block dimensions $(B_x, B_y)$ such that $B_x \times B_y$ is the total threads per block [S1, S2, unofficial].
++- Optimal grid dimensions $(G_x, G_y)$ such that $G_x \times G_y \ge W \times H$ [G].
++- Shared memory size (if applicable) [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Execution Configuration:** A tuple $(B_x, B_y, B_z, G_x, G_y, S_{mem})$.
++- **Execution Configuration:** A tuple $(B_x, B_y, G_x, G_y, S_{mem})$ representing block size, grid size, and shared memory size [S1, unofficial].
+ - **Occupancy Metric:** $O = \frac{N_{active\_warps}}{N_{max\_warps\_per\_SM}}$ [S1, unofficial].
+ 
+@@ -28,10 +28,9 @@
+ 
+ **Steps:**
+-1. **Map Pixels to Threads:** Assign one thread per pixel. The grid size is calculated as $G_x = \lceil W / B_x \rceil$ and $G_y = \lceil H / B_y \rceil$ [S1, unofficial].
++1. **Map Pixels to Threads:** Assign one thread per pixel. The grid size is calculated as $G_x = \lceil W / B_x \rceil$ and $G_y = \lceil H / B_y \rceil$ [G].
+ 2. **Select Block Dimensions:** Choose $B_x, B_y$ from the set of candidate sizes. The product $B_{total} = B_x \times B_y$ determines the block size [S1, unofficial].
+-3. **Calculate Occupancy:** Use the CUDA occupancy calculator or hardware limits to determine the maximum number of warps per SM for the given kernel register and shared memory usage [S1, unofficial].
++3. **Calculate Occupancy:** Use hardware limits to determine the maximum number of warps per SM for the given kernel register and shared memory usage [S1, unofficial].
+ 4. **Benchmark Performance:** Render standard datasets (e.g., Bucky $32^3$, Engine $256^3$, Porsche $559\times1024\times347$) for each candidate configuration [S1, unofficial].
+-5. **Analyze Trade-offs:** Compare frames per second (FPS) against L2 cache miss rates and divergence metrics [S2, unofficial].
+-6. **Select Optimal Configuration:** Choose the configuration with the highest FPS, balancing warp saturation and cache utilization [S2, unofficial].
++5. **Select Optimal Configuration:** Choose the configuration with the highest FPS, balancing warp saturation and cache utilization [S2, unofficial].
+ 
+ **Formulas:**
+@@ -42,5 +41,5 @@
+ - Grid Dimensions:
+   $$ G_x = \left\lceil \frac{W}{B_x} \right\rceil, \quad G_y = \left\lceil \frac{H}{B_y} \right\rceil $$
+-  [S1, unofficial]
++  [G]
+ 
+ **Pitfalls:**
+@@ -52,5 +51,5 @@
+ **Pseudocode:**
+ ```python
+-def optimize_cuda_execution_config(volume_dims, image_dims, gpu_props):
++def optimize_cuda_execution_config(image_dims, gpu_props):
+     """
+     Determine optimal CUDA execution configuration for volume rendering.
+@@ -70,17 +69,20 @@
+         if Bx * By < 4:
+             continue
+-            
++                
+         # Calculate grid dimensions
+         Gx = (W + Bx - 1) // Bx
+         Gy = (H + By - 1) // By
+-        
++            
+         # Calculate occupancy based on GPU props (registers, shared mem)
+-        # This step typically uses CUDA Occupancy Calculator logic
+-        occupancy = calculate_occupancy(gpu_props, Bx * By)
+-        
++        max_warps_per_SM = gpu_props['max_warps_per_SM']
++        max_threads_per_SM = gpu_props['max_threads_per_SM']
++        active_warps = min(max_warps_per_SM, max_threads_per_SM // (Bx * By))
++        occupancy = active_warps / max_warps_per_SM
++            
+         # Benchmark rendering performance
+-        # In practice, this involves launching the kernel and measuring FPS
+-        fps = benchmark_rendering(Bx, By, Gx, Gy, volume_dims)
+-        
++        # The sources state that empirical benchmarking is required to select the optimal configuration [S1, unofficial]
++        # fps = launch_kernel_and_measure_fps(Bx, By, Gx, Gy)
++        fps = 0  # Empirical measurement step not given in sources
++            
+         if fps > max_fps:
+             max_fps = fps
+@@ -91,5 +93,5 @@
+                 'fps': fps
+             }
+-            
++                
+     return best_config
+ ```
+@@ -98,5 +100,5 @@
+ 
+ ### Shader Occupancy Optimization for DDA
+-Focuses on reducing register allocation and minimizing state carried across loops to allow more warps per SM. This is a prerequisite for effective execution configuration tuning, as it defines the register/shared memory constraints used in occupancy calculations [Parent].
++Focuses on reducing register allocation and minimizing state carried across loops to allow more warps per SM [Shader Occupancy Optimization for DDA](5225-shader-occupancy-optimization-for-dda.md). This defines the register/shared memory constraints used in occupancy calculations [Shader Occupancy Optimization for DDA](5225-shader-occupancy-optimization-for-dda.md).
+ 
+ ### Early Ray Termination (ERT)
+@@ -104,6 +106,6 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The optimization process itself is offline (benchmarking). The runtime cost of the kernel is $O(N)$ where $N$ is the number of pixels, but the constant factor varies significantly with configuration.
+-- **Memory Complexity:** Depends on shared memory usage and register allocation per thread. The configuration selection aims to maximize occupancy without exceeding hardware limits.
++- **Time Complexity:** The optimization process itself is offline (benchmarking) [G]. The runtime cost of the kernel is $O(N)$ where $N$ is the number of pixels, but the constant factor varies significantly with configuration [G].
++- **Memory Complexity:** Depends on shared memory usage and register allocation per thread [G]. The configuration selection aims to maximize occupancy without exceeding hardware limits [G].
+ - **Measured Performance:** On an NVIDIA GTX280 with an Intel Core 2 Quad 2.33GHz processor and 4GB memory:
+   - Bucky ($32\times32\times32$): 61 FPS with block sizes $4\times16, 4\times32, 8\times8, 8\times16, 8\times32$ [S1, unofficial].
+@@ -112,8 +114,8 @@
+   - The $16\times16$ block size yielded lower performance (21 FPS on Engine, 20 FPS on Porsche) compared to $8\times8/8\times16/8\times32$ (31 FPS on Engine, 21 FPS on Porsche) [S1, unofficial].
+ - **Performance Variation:** Performance varies by as much as 265% depending on thread block size [S2, unofficial].
+-- **Strengths:** Maximizes hardware utilization by aligning thread counts with warp scheduler capabilities and cache hierarchy.
+-- **Limitations:** Highly sensitive to dataset characteristics (ray length distribution) and algorithmic details (branching). Requires empirical benchmarking for each new dataset or algorithm variant.
+-- **When to Use:** When deploying ray-casting volume rendering on CUDA GPUs, especially for datasets with varying complexity or when enabling/disabling optimizations like ERT.
+-- **When Not to Use:** For simple, uniform workloads where a fixed, sub-optimal configuration is acceptable for simplicity, or when the overhead of benchmarking outweighs the performance gain.
++- **Strengths:** Maximizes hardware utilization by aligning thread counts with warp scheduler capabilities and cache hierarchy [G].
++- **Limitations:** Highly sensitive to dataset characteristics (ray length distribution) and algorithmic details (branching). Requires empirical benchmarking for each new dataset or algorithm variant [S2, unofficial].
++- **When to Use:** When deploying ray-casting volume rendering on CUDA GPUs, especially for datasets with varying complexity or when enabling/disabling optimizations like ERT [G].
++- **When Not to Use:** For simple, uniform workloads where a fixed, sub-optimal configuration is acceptable for simplicity, or when the overhead of benchmarking outweighs the performance gain [G].
+ 
+ ## Background

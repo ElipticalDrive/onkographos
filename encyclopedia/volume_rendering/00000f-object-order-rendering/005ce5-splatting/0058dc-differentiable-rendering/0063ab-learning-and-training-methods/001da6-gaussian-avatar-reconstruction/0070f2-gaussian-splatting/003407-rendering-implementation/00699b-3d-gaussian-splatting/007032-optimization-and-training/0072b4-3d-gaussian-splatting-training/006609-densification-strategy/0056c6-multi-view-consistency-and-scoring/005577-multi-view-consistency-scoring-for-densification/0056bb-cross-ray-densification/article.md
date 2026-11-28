@@ -1,0 +1,177 @@
+# Cross-ray Densification
+
+Also called: CRD, MVAD, Multi-view Cross-ray Densification, Multi-view Cross-ray Densification Strategy
+
+## Overview
+Cross-ray Densification is a strategy that selectively increases 3D Gaussian density in multi-view overlapped regions to enhance multi-view consistency during optimization [S1]. It is divided into Multi-view Augmented Densification (MVAD), which adapts the densification threshold based on camera geometry, and Cross-ray Densification, which uses ray tracing to identify 3D regions contributing significantly to multiple views [S1]. Unlike standard densification which relies solely on 2D gradient magnitude, this method leverages multi-view photometric loss and ray intersection geometry to target complex, texture-dense areas that are consistently observed across different camera perspectives [S1].
+
+## How it works
+The method consists of two coupled components: Multi-view Augmented Densification (MVAD) and Cross-ray Densification [S1]. MVAD adjusts the global densification threshold based on the geometric diversity of the training views, while Cross-ray Densification identifies specific 3D volumes for densification using 2D loss maps and ray casting [S1].
+
+### Inputs and Outputs
+**Inputs:**
+*   $M$: Number of training views.
+*   $L$: Set of multi-view loss maps, where $L_m$ is the loss map for view $m$.
+*   $\beta$: Original densification threshold.
+*   $\tau$: Predefined hyperparameter for discrepancy adjustment.
+*   $(h, w)$: Dimensions of the sliding window for region localization.
+*   $n_r$: Number of rays cast per window vertex (fixed at 4).
+*   $\mathcal{G}$: Set of 3D Gaussians to be evaluated for densification.
+
+**Outputs:**
+*   A subset of $\mathcal{G}$ located in identified multi-view overlapped regions, marked for densification [S1].
+
+### Data Structures
+*   **Loss Map ($L_m$):** A 2D array of photometric loss values for each pixel in view $m$ [S1].
+*   **Camera Poses:** For each view $m$, the translation vector $t_m$ and rotation matrix $R_m$ [S1].
+*   **Regions ($R$):** A list of 2D bounding box coordinates identified in the loss maps [S1].
+*   **Cuboids:** 3D volumes defined by the intersection of ray planes from multiple views [S1].
+
+### MVAD: Threshold Adjustment
+MVAD determines whether to enhance densification based on the geometric distinctness of the training views [S1].
+
+1.  **Normalize Camera Translations:** Normalize the translation vectors of all sampled views into a unit sphere to make the strategy scene-adaptive [S1].
+2.  **Compute Discrepancies:** Calculate the multi-view consistency discrepancies $\{r_i\}$ for all unique pairs of cameras [S1]. The number of pairs is $n = (M^2 - M)/2$ [S1].
+    *   $r_i$ is computed using the relative translation distance and the similarity of the rotation matrices between each camera pair [S1].
+3.  **Adjust Threshold:** Modify the densification threshold $\hat{\beta}$ using the Heaviside function $H(\cdot)$:
+    $$ \hat{\beta} = \beta - \frac{\beta}{2} H(\tau - r_i) $$
+    Where:
+    *   $H(x) = 1$ if $x \ge 0$, else $0$ [S1].
+    *   If discrepancies $r_i$ are large (specifically $r_i < \tau$), the term $H(\tau - r_i)$ becomes 1, reducing the threshold by half ($\hat{\beta} = \beta/2$) [S1]. This enhances densification in complex areas [S1].
+    *   If discrepancies are small ($r_i \ge \tau$), $H(\tau - r_i) = 0$, and $\hat{\beta} = \beta$, preventing over-densification in simple regions [S1].
+
+### Cross-ray Densification: Region Identification and Densification
+This step locates 3D regions containing Gaussians that contribute to multiple views by intersecting rays cast from high-loss 2D regions [S1].
+
+1.  **Loss Map Analysis:** For each view $m \in [1, M]$, calculate the loss map $L_m$ [S1].
+2.  **Region Localization:** For each loss map $L_m$, compute the average loss within a sliding window of size $(h, w)$ [S1]. Identify regions $R$ containing the largest average loss values [S1]. These regions correspond to texture-dense or high-error areas [S1].
+3.  **Ray Casting and Intersection:**
+    *   For each identified 2D region $r \in R$, cast $n_r = 4$ rays from each vertex of the region into the scene [S1].
+    *   Compute the intersection planes formed by rays originating from different camera perspectives [S1].
+    *   Treat the cuboids formed by these intersecting planes as the multi-view overlapped regions [S1]. These cuboids contain critical 3D Gaussians that significantly influence rendering from multiple views [S1].
+4.  **Densification:** Identify all 3D Gaussians located inside these identified cuboids and apply densification operations exclusively to them [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cross_ray_densification(loss_maps, camera_poses, M, beta, tau, window_size, num_rays=4, all_gaussians=None):
+    # Inputs: loss_maps (list of 2D arrays), camera_poses (list of (R, t)), M, beta, tau, window_size (h, w), num_rays, all_gaussians (list of 3D positions)
+    # Outputs: list of Gaussian indices to densify
+
+    # --- MVAD: Threshold Adjustment ---
+    # 1. Normalize camera translations to unit sphere
+    norm_trans = []
+    for m in range(M):
+        t = camera_poses[m][1]
+        norm_trans.append(t / max(1e-9, (t[0]**2 + t[1]**2 + t[2]**2)**0.5))
+
+    # 2. Compute discrepancies for all unique camera pairs
+    discrepancies = []
+    for i in range(M):
+        for j in range(i + 1, M):
+            # Relative translation distance
+            t_diff = [(norm_trans[i][k] - norm_trans[j][k])**2 for k in range(3)]
+            t_dist = (sum(t_diff))**0.5
+            # Rotation matrix similarity (Frobenius norm of difference)
+            R_diff = [(camera_poses[i][0][a][b] - camera_poses[j][0][a][b])**2
+                      for a in range(3) for b in range(3)]
+            r_dist = (sum(R_diff))**0.5
+            discrepancies.append(t_dist + r_dist)
+
+    # 3. Adjust threshold using Heaviside function H(x) = 1 if x >= 0 else 0
+    current_beta = beta
+    for r_i in discrepancies:
+        if tau - r_i >= 0:
+            current_beta = beta / 2.0
+            break
+
+    # --- Cross-ray Densification ---
+    densified_gaussians = []
+    high_loss_regions = []
+
+    # Step 1 & 2: Loss Map Analysis and Region Localization
+    for m in range(M):
+        L_m = loss_maps[m]
+        h, w = window_size
+        H_img, W_img = len(L_m), len(L_m[0])
+        # Compute sliding window average loss
+        avg_loss = [[0.0 for _ in range(W_img)] for _ in range(H_img)]
+        for i in range(H_img):
+            for j in range(W_img):
+                s, c = 0.0, 0
+                for di in range(h):
+                    for dj in range(w):
+                        ni, nj = i + di, j + dj
+                        if 0 <= ni < H_img and 0 <= nj < W_img:
+                            s += L_m[ni][nj]
+                            c += 1
+                avg_loss[i][j] = s / c if c > 0 else 0.0
+
+        # Identify regions R with largest average loss values
+        flat_avg = [(avg_loss[i][j], i, j) for i in range(H_img) for j in range(W_img)]
+        flat_avg.sort(key=lambda x: x[0], reverse=True)
+        # Select top regions; exact count not specified in sources [G]
+        top_k = max(1, len(flat_avg) // 10)
+        for k in range(top_k):
+            high_loss_regions.append((flat_avg[k][1], flat_avg[k][2]))
+
+    # Step 3: Ray Casting and Intersection
+    cuboids = []
+    for (r_i, r_j) in high_loss_regions:
+        # Define 2D vertices of the window region
+        vertices_2d = [
+            (r_i, r_j), (r_i, r_j + w - 1),
+            (r_i + h - 1, r_j), (r_i + h - 1, r_j + w - 1)
+        ]
+        # Cast nr rays per perspective from vertices, compute intersected planes across views
+        # Form cuboids from intersections
+        # Exact geometric construction of intersected planes is not detailed in sources [G]
+        cuboid = compute_cuboid_from_views(vertices_2d, camera_poses, num_rays)
+        if cuboid is not None:
+            cuboids.append(cuboid)
+
+    # Step 4: Densification
+    for cuboid in cuboids:
+        for g_idx, g_pos in enumerate(all_gaussians):
+            if point_in_cuboid(g_pos, cuboid):
+                densified_gaussians.append(g_idx)
+
+    return densified_gaussians
+
+def compute_cuboid_from_views(vertices_2d, camera_poses, num_rays):
+    # Project 2D vertices to 3D rays for each camera
+    # Compute intersection planes of rays across different views
+    # Return bounding box or plane list defining the cuboid [G]
+    return None
+
+def point_in_cuboid(point, cuboid):
+    return (cuboid[0] <= point[0] <= cuboid[3] and
+            cuboid[1] <= point[1] <= cuboid[4] and
+            cuboid[2] <= point[2] <= cuboid[5])
+```
+
+### Parameters
+*   $\beta$: Original densification threshold.
+*   $\tau$: Hyperparameter adjusting the extent of discrepancy between cameras.
+*   $(h, w)$: Dimensions of the sliding window.
+*   $n_r = 4$: Fixed number of rays cast per window vertex.
+
+### Edge Cases and Pitfalls
+*   **Adaptive Density Behavior:** When the threshold $\hat{\beta}$ remains equal to the original $\beta$, the method prevents over-densification in simple regions. When $\hat{\beta}$ is reduced to half the original threshold, it enhances 3D Gaussian fitting toward complex areas [S1].
+*   **Photometric Guidance:** The loss metric directly highlights texture-dense regions that require improvement, guiding the densification process effectively [S1].
+*   **Ray Intersection Degeneracy:** If rays from different views do not intersect or form degenerate cuboids (e.g., parallel rays), the densification region may be invalid. The source does not specify handling for non-intersecting rays [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
+*   **Strengths:** Enhances multi-view consistency by targeting regions that are consistently high-loss across views. Prevents over-densification in simple regions via adaptive thresholding [S1].
+*   **Limitations:** Computationally more expensive than standard gradient-based densification due to ray casting and multi-view processing [S1]. Performance depends on the quality of loss maps and camera pose accuracy [S1].
+*   **When to Use:** Use when multi-view consistency is critical and standard densification fails to capture complex, texture-dense regions observed from multiple angles [S1].
+*   **When Not to Use:** Avoid for single-view or very sparse-view scenarios where multi-view constraints cannot be reliably computed [S1].
+
+## Background
+Cross-ray Densification was proposed in the MVGS (Multi-view Regulated Learning) framework [S1]. It builds on the explicit nature of 3D Gaussian Splatting, aiming to improve novel view synthesis by enhancing multi-view constraints during optimization [S1]. The method was introduced to address challenges in scenes with insufficient observations, texture-less areas, and fine-scale details [S1].
+
+## Sources
+[S1] MVGS: Multi-view-regulated Gaussian Splatting for Novel View Synthesis, https://doi.org/10.48550/arXiv.2410.02103, fetched 2026-11-03

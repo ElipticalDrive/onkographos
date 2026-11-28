@@ -1,0 +1,228 @@
+# Instant-NGP
+
+Also called: Hash-based NeRF Rendering Pipeline, Instant NGP-accelerated NeRF, Instant Neural Graphics Primitives, Instant Neural Graphics Primitives with a Multiresolution Hash Encoding, Instant neural graphics primitive-accelerated NeRF, Instant-NGP Hash-Based Rendering Pipeline, InstantNGP, InstantNGP-based NeRF
+
+## Overview
+Instant-NGP is a method for accelerating the training and rendering of Neural Radiance Fields (NeRFs) by replacing conventional positional encodings with a multi-resolution hash encoding and employing an occupancy-grid-based ray marching scheme [S1, S3, S7]. It enables training times of seconds to minutes, representing a speedup of three orders of magnitude compared to vanilla NeRF, while maintaining high visual fidelity [S2, unofficial][S3, S6]. Unlike its siblings, which may focus on specific augmentation or alternative sparse representations, Instant-NGP achieves its performance through a tightly coupled combination of a fully-fused lightweight MLP, hash-table lookups, and explicit empty-space skipping [S7].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Camera parameters (intrinsics, extrinsics), viewing direction $\mathbf{d}$, and a set of training images.
+*   **Outputs:** Predicted RGB color $\mathbf{c}$ and volume density $\sigma$ for sampled points along rays, leading to rendered pixel colors.
+
+**Data Structures:**
+1.  **Multi-Resolution Hash Grids:** A set of $L$ hash tables. Each table $\ell \in \{1, \dots, L\}$ has a resolution defined by a grid size $N_\ell$. Each table contains $T$ entries (hash buckets). Each entry stores a trainable feature vector of dimension $F$. The total memory is proportional to $L \times T \times F$ [S5, unofficial][S7].
+2.  **Occupancy Grids:** A set of multiscale occupancy grids (one per resolution level or a shared coarse grid) storing a single bit per voxel indicating whether the space is occupied (non-empty) or empty. These are updated dynamically during training based on density predictions [S7].
+
+**Parameters:**
+*   $L$: Number of resolution levels.
+*   $T$: Number of feature vectors (hash table size) per level.
+*   $F$: Dimensionality of feature vectors.
+*   $N_\ell$: Grid resolution at level $\ell$ (typically increasing with $\ell$).
+*   MLP Architecture: Typically 4 layers with 64 neurons each (fully fused) [S7]. Note: Some implementations use 3 layers with 64, 80, and 64 neurons [S2, S5, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Ray Generation:** Generate rays $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ from camera origins $\mathbf{o}$ and directions $\mathbf{d}$ [S4].
+2.  **Occupancy-Based Sampling:**
+    *   Use the occupancy grids to identify empty space.
+    *   Skip sampling points in voxels marked as empty.
+    *   Skip sampling points behind high-density regions (early ray termination) [S7].
+    *   This increases sampling speed by 10–100x compared to naive uniform sampling [S7].
+3.  **Hash Encoding (for each sample point $\mathbf{x}$):**
+    *   For each resolution level $\ell$:
+        *   Identify the voxel containing $\mathbf{x}$ at resolution $N_\ell$.
+        *   Identify the 8 vertices of this voxel.
+        *   Hash each vertex coordinate to an index in the hash table for level $\ell$. The hash function maps the continuous coordinate to a discrete bucket index. A common implementation uses a hash function $h$ with a scaling factor related to the grid size [S3, S7].
+        *   Retrieve the 8 feature vectors $\mathbf{v}_1, \dots, \mathbf{v}_8$ from the hash table using these indices.
+        *   Perform trilinear interpolation of these 8 vectors based on $\mathbf{x}$'s position within the voxel to obtain the interpolated feature vector $\mathbf{f}_\ell$ [S3, S4, S7].
+    *   Concatenate the feature vectors from all $L$ levels: $\mathbf{f}_{concat} = [\mathbf{f}_1; \dots; \mathbf{f}_L]$ [S3, S7].
+    *   Encode the viewing direction $\mathbf{d}$ using spherical harmonics (or positional encoding) and concatenate it to $\mathbf{f}_{concat}$ [S7].
+4.  **MLP Inference:**
+    *   Feed the concatenated feature vector into a small, fully-fused MLP [S7].
+    *   The MLP outputs the density $\sigma$ and the RGB color $\mathbf{c}$ for the sample point [S4, S7].
+5.  **Volume Rendering:**
+    *   Integrate the samples along the ray using alpha compositing [S1, S4].
+    *   The color $\mathbf{C}(\mathbf{r})$ for a ray $\mathbf{r}$ is computed as:
+        $$ \mathbf{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - e^{-\sigma_i \delta_i}) \mathbf{c}_i $$
+        where $\delta_i$ is the distance between consecutive samples $s_{i+1}$ and $s_i$, $\sigma_i$ is the density, $\mathbf{c}_i$ is the color, and $T_i$ is the transmittance from the near plane to sample $i$:
+        $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+        [S4].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def hash_function(vertex_coord, table_size):
+    """
+    Maps a continuous 3D coordinate to a discrete hash index.
+    Simplified implementation: quantize and hash.
+    In practice, this involves scaling by grid resolution and a fast hash.
+    """
+    # Quantize to voxel index
+    voxel_idx = vertex_coord * table_size
+    # Hash the voxel index to a bucket in [0, T-1]
+    # Using a simple integer hash for illustration
+    h = int(voxel_idx[0] * 73856093) ^ int(voxel_idx[1] * 19349663) ^ int(voxel_idx[2] * 83492791)
+    return h % table_size
+
+def trilinear_interpolation(features, voxel_min, voxel_max, point):
+    """
+    Trilinearly interpolates 8 feature vectors based on the point's position in the voxel.
+    features: list of 8 vectors (F-dim)
+    voxel_min: 3D coord of voxel min corner
+    voxel_max: 3D coord of voxel max corner
+    point: 3D coord of query point
+    """
+    # Normalize point to [0, 1] within the voxel
+    t = (point - voxel_min) / (voxel_max - voxel_min)
+    t = np.clip(t, 0.0, 1.0)
+    
+    # Interpolate
+    # c000 = features[0], c100 = features[1], etc.
+    # Assuming features are ordered by binary index of corner
+    c000 = features[0]
+    c100 = features[1]
+    c010 = features[2]
+    c110 = features[3]
+    c001 = features[4]
+    c101 = features[5]
+    c011 = features[6]
+    c111 = features[7]
+    
+    # Interpolate along x
+    c00 = c000 * (1 - t[0]) + c100 * t[0]
+    c10 = c010 * (1 - t[0]) + c110 * t[0]
+    c01 = c001 * (1 - t[0]) + c101 * t[0]
+    c11 = c011 * (1 - t[0]) + c111 * t[0]
+    
+    # Interpolate along y
+    c0 = c00 * (1 - t[1]) + c10 * t[1]
+    c1 = c01 * (1 - t[1]) + c11 * t[1]
+    
+    # Interpolate along z
+    result = c0 * (1 - t[2]) + c1 * t[2]
+    return result
+
+def instant_ngp_forward(x, d, hash_tables, occupancy_grids, mlp):
+    """
+    Forward pass for a single sample point x and direction d.
+    hash_tables: list of L arrays, each of size T x F
+    occupancy_grids: list of L boolean grids or occupancy masks
+    mlp: the neural network function
+    """
+    features_concat = []
+    
+    for level in range(L):
+        # 1. Identify voxel and vertices
+        # Determine voxel bounds based on resolution N_level
+        # This step depends on the specific grid structure implementation
+        voxel_min, voxel_max, vertex_indices = get_voxel_info(x, level)
+        
+        # 2. Hash vertices and lookup features
+        vertex_features = []
+        for idx in vertex_indices:
+            # Hash the vertex coordinate to get table index
+            # Note: The hash function must be consistent with training
+            table_idx = hash_function(idx, T) 
+            feature = hash_tables[level][table_idx]
+            vertex_features.append(feature)
+            
+        # 3. Trilinear interpolation
+        f_level = trilinear_interpolation(vertex_features, voxel_min, voxel_max, x)
+        features_concat.append(f_level)
+        
+    # 4. Concatenate features and direction encoding
+    # Encode direction d (e.g., spherical harmonics)
+    d_encoded = encode_direction(d)
+    input_vector = np.concatenate(features_concat + [d_encoded])
+    
+    # 5. MLP Inference
+    sigma, color = mlp(input_vector)
+    
+    return sigma, color
+
+def render_ray(ray_origin, ray_direction, samples, hash_tables, occupancy_grids, mlp):
+    """
+    Renders a single ray using occupancy-based sampling and volume rendering.
+    """
+    # 1. Generate samples along the ray, skipping empty space
+    sample_points = []
+    sample_dists = []
+    
+    # Naive sampling with occupancy check
+    t_near, t_far = ray_bounds(ray_origin, ray_direction)
+    t = np.linspace(t_near, t_far, N_samples)
+    
+    for i, ti in enumerate(t):
+        x = ray_origin + ti * ray_direction
+        # Check occupancy grid
+        if is_empty(x, occupancy_grids):
+            continue
+        sample_points.append(x)
+        sample_dists.append(ti)
+        
+    # 2. Query MLP for each sample
+    sigmas = []
+    colors = []
+    for x in sample_points:
+        sigma, color = instant_ngp_forward(x, ray_direction, hash_tables, occupancy_grids, mlp)
+        sigmas.append(sigma)
+        colors.append(color)
+        
+    # 3. Volume Rendering
+    if not sigmas:
+        return np.zeros(3)
+        
+    sigmas = np.array(sigmas)
+    colors = np.array(colors)
+    
+    # Calculate delta distances
+    # Add a small epsilon to avoid division by zero or log(0) issues
+    deltas = np.diff(sample_dists, prepend=sample_dists[0])
+    # Note: The last delta might need special handling depending on t_far
+    
+    # Compute transmittance
+    # alpha = 1 - exp(-sigma * delta)
+    alphas = 1.0 - np.exp(-sigmas * deltas)
+    
+    # Transmittance T_i = exp(-sum_{j<i} sigma_j * delta_j)
+    # Cumulative sum of sigma * delta
+    accumulated_sigma_delta = np.cumsum(sigmas * deltas)
+    transmittance = np.exp(-np.concatenate([[0], accumulated_sigma_delta[:-1]]))
+    
+    # Color = sum_{i} T_i * alpha_i * c_i
+    contribution = transmittance * alphas * colors
+    pixel_color = np.sum(contribution, axis=0)
+    
+    return pixel_color
+```
+
+**Edge Cases and Pitfalls:**
+*   **Hash Collisions:** Hash collisions are not explicitly handled. Multiple vertices may map to the same hash index. Because the feature vectors are trainable, vertices with higher gradient importance will dominate the optimization of that feature vector [S7].
+*   **Precision:** Trilinear interpolation requires precise voxel boundary calculations. Floating-point precision errors in coordinate hashing can lead to artifacts [S3].
+*   **Empty Space:** If occupancy grids are not updated correctly, empty space may be sampled, wasting computation, or occupied space may be skipped, causing holes [S7].
+*   **High Reflectivity:** Artifacts may appear as minor noise or blurry reconstructions on highly reflective surfaces [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training is significantly faster than vanilla NeRF. Training times are reported as 5–30 seconds for typical scenes, or 6–7 minutes on low-power hardware (NVIDIA Jetson TX2) [S5, S2, unofficial]. Rendering is in the millisecond range [S5, unofficial].
+*   **Memory Complexity:** Memory usage is determined by $L \times T \times F$. The hash table size $T$ and feature dimension $F$ are key parameters. The occupancy grids add minimal overhead [S7].
+*   **Performance:** Achieves 300–400x faster training than NeRF with little to no difference in visual quality [S2, unofficial]. Overall speedup of 1000x compared to traditional MLP-based NeRFs [S7]. Rendering time is reduced to tens of milliseconds at 1920×1080 resolution [S6].
+*   **Strengths:** Extremely fast training and rendering; suitable for real-time applications and on-device training [S2, S5, unofficial][S7].
+*   **Limitations:** May struggle with consistent real-time performance (≥ 25 fps) at very high resolutions in complex scenes due to dense sampling requirements in non-empty space [S1]. Artifacts on reflective surfaces [S2, unofficial].
+
+## Background
+Instant-NGP (Instant Neural Graphics Primitives) was introduced by Müller et al. in 2022 [S5, unofficial][S7]. It was designed to address the computational bottleneck of NeRF training and rendering. The method combines three main innovations: multi-resolution hash encoding, a fully-fused lightweight MLP, and occupancy-grid-based ray marching [S7]. It has become a foundational technique for many subsequent neural rendering methods, including Nerfacto in Nerfstudio [S7].
+
+## Sources
+[S1] Optimization of 3D Gaussian Splatting for Accurate Image Reconstruction, https://doi.org/10.59232/dst-v4i2p101, fetched 2026-10-26
+[S2] 3D Reconstruction of Non-cooperative Resident Space Objects using Instant NGP-accelerated NeRF and D-NeRF, https://doi.org/10.48550/arxiv.2301.09060, fetched 2026-10-26 (unofficial)
+[S3] Review of Key Technologies and Application Scenarios of Neural Rendering, https://doi.org/10.54254/2755-2721/2026.36116, fetched 2026-10-26
+[S4] An Energy-Efficient Edge Coprocessor for Neural Rendering With Explicit Data Reuse Strategies, https://doi.org/10.1109/tvlsi.2025.3641653, fetched 2026-10-26
+[S5] Neural Rendering — Technologies & Tricks, https://www.chengjianglong.com/ml/3D-Neural_Rendering_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S6] Neural Rendering: Graphics Learned From Images, https://www.ultralytics.com/glossary/neural-rendering, fetched 2026-10-27
+[S7] Instant-NGP - nerfstudio, https://docs.nerf.studio/nerfology/methods/instant_ngp.html, fetched 2026-10-29
+[S8] RealFusion 360° Reconstruction of Any Object from a Single Image, https://doi.org/10.1109/cvpr52729.2023.00816, fetched 2026-10-30

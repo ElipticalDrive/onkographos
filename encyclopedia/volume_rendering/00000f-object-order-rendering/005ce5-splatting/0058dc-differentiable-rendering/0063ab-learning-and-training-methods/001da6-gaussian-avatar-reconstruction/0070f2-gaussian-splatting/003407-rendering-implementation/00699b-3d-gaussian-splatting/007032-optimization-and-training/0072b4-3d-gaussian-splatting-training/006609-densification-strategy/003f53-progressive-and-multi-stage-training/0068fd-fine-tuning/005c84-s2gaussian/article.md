@@ -1,0 +1,163 @@
+# S2Gaussian
+
+Also called: Sparse-View Super-Resolution 3D Gaussian Splatting
+
+## Overview
+S2Gaussian is a two-stage framework for reconstructing high-quality 3D scenes from sparse and low-resolution input views, addressing the joint challenge of deficient perspectives and clarity [S1]. Unlike methods that treat sparsity and low resolution as isolated problems, S2Gaussian handles this hybrid scenario by initializing high-resolution Gaussians from a densified low-resolution representation and refining them using super-resolved supervision [S1]. It sets itself apart from its parent [Fine-tuning](9138-fine-tuning.md) by introducing a specific "Gaussian Shuffle Split" densification strategy and a "Blur-Free Inconsistency Modeling" scheme to mitigate multi-view artifacts [S1].
+
+## How it works
+**Inputs:**
+- Sparse low-resolution input views (images).
+- Estimated depth information for the scene (used in Stage 1) [S1].
+- A pre-trained super-resolution model (used in Stage 2) [S1].
+
+**Outputs:**
+- A set of high-resolution 3D Gaussian primitives (positions, covariances, opacities, spherical harmonics coefficients) representing the scene [S1].
+
+**Data Structures:**
+- **Gaussian Primitive:** Standard 3DGS representation including mean position $\mu$, covariance matrix $\Sigma$ (or rotation $R$ and scale $S$), opacity $\alpha$, and spherical harmonics coefficients $c_{lm}$ [S1, G].
+- **Sub-Gaussians:** In the Gaussian Shuffle Split operation, one parent Gaussian is replaced by $N$ sub-Gaussians. The sources specify $N=6$ as optimal [S1]. These sub-Gaussians are symmetrically located along the three principal axes of the original Gaussian [S1].
+
+**Parameters:**
+- **Number of sub-Gaussians ($N$):** 6 is the optimal trade-off between detail modeling and complexity/memory overhead [S1].
+- **Resolution:** The method is designed for super-resolution tasks, e.g., training on low-resolution inputs (e.g., $252 \times 189$) and rendering at higher resolutions (e.g., $1008 \times 756$) [S1].
+
+**Steps:**
+
+1.  **Stage 1: HR GS Initialization**
+    1.  Optimize a low-resolution Gaussian representation using the sparse low-resolution views and the estimated depth information [S1]. This provides a reliable base structure and avoids overfitting to specific viewpoints [S1].
+    2.  Densify the optimized low-resolution Gaussians to initialize high-resolution Gaussians using the **Gaussian Shuffle Split** operation [S1].
+        - For each low-resolution Gaussian, generate $N$ sub-Gaussians.
+        - The sub-Gaussians are positioned symmetrically along the three principal axes of the parent Gaussian [S1].
+        - This creates more compact primitives to facilitate fine-grained detail reconstruction [S1].
+
+2.  **Stage 2: HR GS Optimization**
+    1.  Render pseudo-views from the initialized high-resolution Gaussians (derived from the low-resolution Gaussians) [S1].
+    2.  Generate super-resolved images from the original sparse views using the pre-trained super-resolution model [S1].
+    3.  Refine the high-resolution Gaussians by optimizing against both the original sparse views (super-resolved) and the pseudo-views [S1].
+    4.  Apply **Blur-Free Inconsistency Modeling** to mitigate multi-view inconsistency [S1].
+        - Explicitly model the inconsistency between the super-resolved images and the rendered pseudo-views [S1].
+        - Learn a blur kernel to reconstruct blur-free results with fine structural details, avoiding the blurring typically introduced by inconsistency modeling [S1].
+    5.  Apply **3D Robust Optimization** to eliminate erroneous updates [S1].
+        - This strategy prevents Gaussian primitives from simulating corrupted representations when training views are imperfect [S1].
+
+**Loss Function:**
+The final loss $L$ for high-resolution Gaussian optimization is defined as [S1]:
+
+$$
+L = L_{AUX} + L_{SR}
+$$
+
+Where:
+- $L_{SR}$ is the super-resolution loss, computed between the rendered high-resolution images and the super-resolved target images [S1].
+- $L_{AUX}$ is an auxiliary loss, likely related to the consistency with pseudo-views or depth regularization, though the exact formulation is not detailed in the provided notes [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def S2Gaussian_Train(sparse_lr_views, estimated_depth, sr_model):
+    # Stage 1: HR GS Initialization
+    # 1. Optimize low-res Gaussians
+    lr_gaussians = Initialize_Gaussians(sparse_lr_views)
+    lr_gaussians = Optimize_Gaussians(
+        gaussians=lr_gaussians,
+        views=sparse_lr_views,
+        depth=estimated_depth,
+        loss_fn=Depth_Regularized_Loss
+    )
+    
+    # 2. Densify via Gaussian Shuffle Split
+    # N=6 is optimal
+    N = 6
+    hr_gaussians = Gaussian_Shuffle_Split(lr_gaussians, N=N)
+    
+    # Stage 2: HR GS Optimization
+    # 3. Render pseudo-views from low-res Gaussians (or initial HR Gaussians)
+    # Note: Pseudo-views are rendered from the low-res representation to provide supervision
+    pseudo_views = Render_Gaussians(hr_gaussians, camera_poses)
+    
+    # 4. Generate super-resolved targets from sparse views
+    sr_targets = sr_model(sparse_lr_views)
+    
+    # 5. Optimize HR Gaussians
+    hr_gaussians = Optimize_Gaussians(
+        gaussians=hr_gaussians,
+        views=sr_targets,
+        pseudo_views=pseudo_views,
+        loss_fn=Combined_Loss,
+        blur_free_inconsistency=True,
+        robust_optimization=True
+    )
+    
+    return hr_gaussians
+
+def Gaussian_Shuffle_Split(gaussians, N=6):
+    """
+    Densifies each Gaussian into N sub-Gaussians.
+    Sub-Gaussians are symmetrically located along the three principal axes.
+    """
+    new_gaussians = []
+    for g in gaussians:
+        # Extract principal axes from covariance/rotation
+        axes = Get_Principal_Axes(g.rotation)
+        
+        # Generate N sub-Gaussians
+        # Symmetric placement along axes
+        # Example: 2 along X, 2 along Y, 2 along Z (or similar symmetric distribution)
+        # The exact displacement vector calculation is not fully specified in sources [G]
+        # Assuming symmetric offsets along axes
+        sub_gaussians = []
+        for i in range(N):
+            # Placeholder for specific symmetric offset calculation
+            # Based on "symmetrically located along the three principal axes"
+            offset = Calculate_Symmetric_Offset(i, axes, N)
+            sub_g = Copy_Gaussian(g)
+            sub_g.position += offset
+            # Scale/Opacity might be adjusted to preserve volume/intensity
+            sub_gaussians.append(sub_g)
+        new_gaussians.extend(sub_gaussians)
+    return new_gaussians
+
+def Combined_Loss(rendered, targets, pseudo_views, blur_kernel=None):
+    """
+    L = L_AUX + L_SR
+    L_SR: Super-resolution loss between rendered and super-resolved targets
+    L_AUX: Auxiliary loss, potentially involving pseudo-views and blur-free modeling
+    """
+    # L_SR: Loss between high-res render and super-resolved target
+    loss_sr = Image_Loss(rendered, targets)
+    
+    # L_AUX: Involves pseudo-views and blur-free inconsistency modeling
+    # Blur-Free Inconsistency Modeling: Learn blur kernel to handle inconsistency
+    # This part mitigates multi-view inconsistency without blurring the result
+    loss_aux = Blur_Free_Inconsistency_Loss(rendered, pseudo_views, blur_kernel)
+    
+    return loss_aux + loss_sr
+
+def Blur_Free_Inconsistency_Loss(rendered, pseudo_views, blur_kernel):
+    """
+    Models inconsistency explicitly via blur kernel learning.
+    """
+    # If blur_kernel is learned, apply it to rendered or pseudo views to match
+    # The goal is to reconstruct blur-free results with fine details
+    # Exact formula not provided in sources [G]
+    # Typically involves minimizing difference between blurred render and pseudo view
+    # or similar consistency term
+    return Consistency_Loss(rendered, pseudo_views, blur_kernel)
+```
+
+## Operating characteristics
+- **Time and Memory Complexity:** The Gaussian Shuffle Split operation increases the number of Gaussians by a factor of $N$. With $N=6$, the storage memory increases significantly (e.g., from 67M to 112M for 4 sub-Gaussians vs 6, on Mip-NeRF 360) [S1]. More sub-Gaussians increase optimization complexity and memory overhead [S1].
+- **Measured Performance:** On Mip-NeRF 360 $\times 4$ (24 views), S2Gaussian achieves 22.05 PSNR, 0.687 SSIM, 0.296 LPIPS, and 43.51 FID [S1]. It exceeds the top-performing combinatorial method FSGS+SRGS by 2.22 dB PSNR [S1].
+- **Strengths:** Handles both view sparsity and low resolution simultaneously; produces structure-accurate and detail-faithful 3D scenes; robust to corrupted training views via 3D Robust Optimization [S1].
+- **Limitations:** Prone to overfitting if high-resolution reconstruction is attempted directly from sparse low-resolution views without the two-stage approach [S1]; requires a pre-trained super-resolution model [S1]; increased memory usage due to densification [S1].
+- **When to use:** When reconstructing 3D scenes from sparse and low-resolution input views where both perspective deficiency and clarity are issues [S1].
+- **When not to use:** When high-resolution input views are available, or when computational resources are severely limited due to the increased number of Gaussians [S1].
+
+## Background
+S2Gaussian was proposed to address the challenging problem of reconstructing high-quality 3D scenes from sparse low-resolution views that simultaneously suffer from deficient perspectives and clarity [S1]. Existing methods typically handle either sparse views or low-resolution observations in isolation, failing in hybrid scenarios [S1]. The method was introduced in the paper "S2Gaussian: Sparse-View Super-Resolution 3D Gaussian Splatting" [S1].
+
+## Sources
+[S1] S2Gaussian: Sparse-View Super-Resolution 3D Gaussian Splatting, https://doi.org/10.1109/cvpr52734.2025.00075, fetched 2026-10-29

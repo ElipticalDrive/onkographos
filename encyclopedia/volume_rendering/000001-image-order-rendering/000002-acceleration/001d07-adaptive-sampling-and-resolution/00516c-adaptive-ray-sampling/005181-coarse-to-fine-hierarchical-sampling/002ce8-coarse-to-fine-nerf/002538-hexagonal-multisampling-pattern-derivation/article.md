@@ -1,0 +1,150 @@
+# Hexagonal Multisampling Pattern Derivation
+
+Also called: Conical frustum multisampling, Cylindrical multisampling pattern
+
+## Overview
+This method constructs a multisampling pattern for a conical frustum by first generating a zero-mean, identity-covariance pattern for a cylinder and then warping it to match the frustum's analytical mean and covariance [S1]. It ensures uniform distribution along the ray and in angles around the ray while minimizing the number of samples for efficiency [S1]. It differs from siblings like [DONeRF Depth Oracle Filtering](4472-donerf-depth-oracle-filtering.md) by explicitly matching statistical moments of the conical frustum rather than filtering depth estimates, and from [Hierarchical Sampling for Hemispherical Wavefronts](4691-hierarchical-sampling-for-hemispherical-wavefronts.md) by using a fixed hexagonal geometry derived from cylindrical symmetry rather than hemispherical wavefronts [S1].
+
+## How it works
+**Inputs:**
+- $n$: Number of samples (fixed to 6) [S1].
+- $\mathbf{c}$: Center of the conical frustum (mean position) [S1].
+- $\mathbf{\Sigma}$: Covariance matrix of the conical frustum [S1].
+- $\mathbf{R}$: Rotation matrix aligning the cylinder's local z-axis with the ray direction [S1].
+
+**Outputs:**
+- $\mathbf{x}_j \in \mathbb{R}^3$: The $j$-th sample position in world space, for $j = 0, \dots, n-1$ [S1].
+
+**Data Structures:**
+- `theta_1`: Array of 6 angles $[0, 2\pi/3, 4\pi/3, \pi, 5\pi/3, \pi/3]$ [S1].
+- `cyl_samples`: Array of 6 vectors $\mathbf{y}_j \in \mathbb{R}^3$ representing the canonical cylinder pattern [S1].
+
+**Steps:**
+
+1.  **Construct Canonical Cylinder Pattern:**
+    Generate $n=6$ points $\mathbf{y}_j$ in a local coordinate system where the cylinder axis aligns with the z-axis [S1]. The coordinates are defined as:
+    $$
+    \mathbf{y}_j = \begin{bmatrix} \cos (\theta_j)/\sqrt {3} \\ \sin (\theta_j)/\sqrt {3} \\ \frac {j - (n-1)/2}{\sqrt {n(n^2-1)/12}} \end{bmatrix}
+    $$
+    where $\theta_j$ are taken from `theta_1` [S1]. This pattern has a mean of $\mathbf{0}$ and a covariance of $I_3$ (identity matrix) [S1].
+
+2.  **Compute Warping Parameters:**
+    Determine the scaling and translation required to map the canonical cylinder to the target conical frustum [S1]. The target frustum has mean $\mathbf{c}$ and covariance $\mathbf{\Sigma}$ [S1]. The canonical cylinder has mean $\mathbf{0}$ and covariance $I_3$ [S1].
+
+3.  **Warp Samples:**
+    Transform each canonical sample $\mathbf{y}_j$ to the world space sample $\mathbf{x}_j$ [S1]. The transformation aligns the cylinder's principal axes with the eigenvectors of $\mathbf{\Sigma}$ and scales them by the square roots of the eigenvalues, then translates by $\mathbf{c}$ [S1]. Specifically, if $\mathbf{\Sigma} = \mathbf{Q} \mathbf{\Lambda} \mathbf{Q}^T$ is the eigendecomposition, the transformation is:
+    $$
+    \mathbf{x}_j = \mathbf{c} + \mathbf{Q} \mathbf{\Lambda}^{1/2} \mathbf{R} \mathbf{y}_j
+    $$
+    where $\mathbf{R}$ rotates the canonical cylinder's z-axis to align with the primary direction of the frustum (typically the ray direction) [G]. In the context of mip-NeRF, the frustum is oriented along the ray, so $\mathbf{R}$ aligns the local z-axis with the ray direction vector [S1].
+
+4.  **Return Samples:**
+    Return the set $\{\mathbf{x}_0, \dots, \mathbf{x}_{n-1}\}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def hexagonal_multisampling_pattern(n=6):
+    """
+    Generates the canonical hexagonal multisampling pattern for a cylinder.
+    Returns the n sample coordinates in local cylinder space.
+    """
+    # Angles from theta_1
+    theta_1 = np.array([0, 2*np.pi/3, 4*np.pi/3, np.pi, 5*np.pi/3, np.pi/3])
+    
+    samples = []
+    for j in range(n):
+        # x component
+        x = np.cos(theta_1[j]) / np.sqrt(3)
+        # y component
+        y = np.sin(theta_1[j]) / np.sqrt(3)
+        # z component (along the cylinder axis)
+        z = (j - (n - 1) / 2) / np.sqrt(n * (n**2 - 1) / 12)
+        samples.append([x, y, z])
+        
+    return np.array(samples)
+
+def warp_to_conical_frustum(cyl_samples, mean, cov, ray_direction):
+    """
+    Warps canonical cylinder samples to match a conical frustum defined by mean and covariance.
+    
+    Args:
+        cyl_samples: (n, 3) array of canonical cylinder samples.
+        mean: (3,) array, center of the frustum.
+        cov: (3, 3) array, covariance matrix of the frustum.
+        ray_direction: (3,) array, unit vector along the ray.
+        
+    Returns:
+        (n, 3) array of warped samples in world space.
+    """
+    # Eigendecomposition of the frustum covariance
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+    
+    # Square root of eigenvalues for scaling
+    sqrt_eigenvalues = np.sqrt(eigenvalues)
+    
+    # Construct scaling matrix
+    S = np.diag(sqrt_eigenvalues)
+    
+    # Rotation matrix to align canonical cylinder z-axis with ray direction
+    canonical_z = np.array([0, 0, 1])
+    
+    if np.allclose(ray_direction, canonical_z):
+        R = np.eye(3)
+    elif np.allclose(ray_direction, -canonical_z):
+        # Rotate 180 degrees around x-axis
+        R = np.diag([1, -1, -1])
+    else:
+        # General case: rotate canonical_z to ray_direction using Rodrigues' formula
+        v1 = canonical_z
+        v2 = ray_direction
+        cross = np.cross(v1, v2)
+        dot = np.dot(v1, v2)
+        skew = np.array([
+            [0, -cross[2], cross[1]],
+            [cross[2], 0, -cross[0]],
+            [-cross[1], cross[0], 0]
+        ])
+        R = np.eye(3) + skew + skew @ skew * (1 / (1 + dot))
+        
+    # Combined transformation matrix: T = Q * S * R
+    T = eigenvectors @ S @ R
+    
+    # Transform samples: x = mean + T @ y
+    warped_samples = (cyl_samples @ T.T) + mean
+    
+    return warped_samples
+```
+
+**Parameters:**
+- $n=6$: The number of samples. This is the smallest number that allows for a zero-mean, identity-covariance pattern with the specified angular distribution [S1].
+
+**Edge Cases and Pitfalls:**
+- No samples are placed exactly along the ray; they are distributed at a distance proportional to the cone radius [S1].
+- The full covariance matrices of the samples and the frustum are not necessarily identical, but variance along the ray and total variance perpendicular to the ray are equal [S1]. The mismatch goes to zero as $t \gg \dot{r}$ [S1].
+- The pattern relies on specific angular choices ($\theta_1$ or $\theta_2$) to maintain the zero-mean and identity-covariance property for $n=6$ [S1]. Using other angles or $n$ values will break these properties [S1].
+
+## Subtopics
+
+### [DONeRF Depth Oracle Filtering](4472-donerf-depth-oracle-filtering.md)
+Filters depth estimates to improve sampling. Choose when depth uncertainty is high and analytical covariance is less reliable [G].
+
+### [Hierarchical Sampling for Hemispherical Wavefronts](4691-hierarchical-sampling-for-hemispherical-wavefronts.md)
+Samples hemispherical wavefronts. Choose when rendering scenes with significant hemispherical illumination or when the conical frustum approximation is insufficient for large angles [G].
+
+## Operating characteristics
+- **Time Complexity:** $O(n)$ where $n=6$ [S1]. The warping involves a fixed number of matrix-vector multiplications [G].
+- **Memory Complexity:** $O(n)$ to store the samples [G].
+- **Strengths:** Efficient (only 6 samples), matches analytical moments of the conical frustum, ensures uniform angular and axial distribution [S1].
+- **Limitations:** Does not place samples on the ray axis, which may be suboptimal for some scenes [S1]. The covariance mismatch, though small, exists [S1].
+- **When to use:** When rendering with conical frustums and efficiency is critical, and the frustum is not extremely wide ($t \gg \dot{r}$) [S1].
+- **When not to use:** When high accuracy on the ray axis is required, or when the frustum is very wide and the covariance mismatch becomes significant [S1].
+
+## Background
+The method was introduced in the context of Mip-NeRF to improve the accuracy of volume rendering by better approximating the integral over a conical frustum [S1]. It is based on the Unscented Transform, which uses a minimal set of samples to capture the mean and covariance of a random variable [S1]. The specific hexagonal pattern was derived to satisfy the criteria of uniform distribution and moment matching with the smallest number of points [S1].
+
+## Sources
+[S1] Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01804, fetched 2026-10-26

@@ -1,0 +1,91 @@
+# Consensus-Inheritance Extension
+
+Also called: Consensus Inheritance, Consensus Weight Inheritance
+
+## Overview
+The Consensus-Inheritance Extension maintains correspondence between fixed consensus statistics and newly created Gaussian primitives during densification (splitting or cloning) in 3D Gaussian Splatting [S1, unofficial]. It prevents the breaking of the fixed-consensus protocol by allowing consensus statistics to evolve with the Gaussian population while retaining contamination-resistant properties [S1, unofficial].
+
+## How it works
+The method extends the standard 3D Gaussian Splatting training loop by introducing three specific behaviors: inheritance during creation, periodic re-estimation with validation, and synchronization with opacity resets [S1, unofficial].
+
+### Inputs and Outputs
+*   **Inputs**: Parent Gaussian primitive with consensus color $c^{\bullet}_p$ and consensus weight $w^{\bullet}_p$, current consensus statistics $c^{\bullet}$, iteration counter, and opacity reset magnitude $\Delta \alpha$ [S1, unofficial].
+*   **Outputs**: Child Gaussian with inherited consensus attributes, updated consensus statistics $c^{\bullet}_{new}$ (if accepted), and updated consensus weights for opacity-reset-affected Gaussians [S1, unofficial].
+
+### Data Structures
+The consensus statistics are maintained as a vector $c^{\bullet}$ (e.g., color or feature vector) and a scalar or vector weight $w^{\bullet}$ [S1, unofficial]. Exact layout, size, and bit-packing details are Not given in the sources.
+
+### Parameters
+*   $\text{inh}$: Inter-generation decay factor for consensus weight inheritance during split/clone. Range: $(0, 1)$. Candidate value: $0.5$ [S1, unofficial].
+*   $k$: Refresh interval in iterations. Candidate value: $1,000$ [S1, unofficial].
+*   $\tau$: MAD threshold multiplier for validating consensus updates. Candidate value: $3.0$ [S1, unofficial].
+
+### Steps
+1.  **Split/Clone Inheritance**: When a parent Gaussian $p$ is split or cloned to create a child Gaussian $c$, the child inherits the parent's consensus color $c^{\bullet}_c = c^{\bullet}_p$ and a decayed weight $w^{\bullet}_c = \text{inh} \times w^{\bullet}_p$ [S1, unofficial].
+2.  **Contamination-Resistant Periodic Re-estimation**: Every $k$ iterations, current Gaussian centers are reprojected and a candidate consensus $\tilde{c}^{\bullet}$ is recomputed [S1, unofficial]. The update is accepted only when the channel-wise deviation satisfies $\|\tilde{c}^{\bullet} - c^{\bullet}\|_{\infty} \leq \tau \times \text{MAD}$, otherwise the previous consensus is retained [S1, unofficial]. This prevents current rendering errors from being written back into the supervision target and preserves the anti-circular-dependency property [S1, unofficial].
+3.  **Opacity-Reset Synchronization**: After an opacity-reset event, the consensus weights of affected Gaussians are decayed in proportion to the reset magnitude [S1, unofficial]. The exact proportionality formula is Not given in the sources.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def consensus_inheritance_extension(parent_c, parent_w, current_c, iteration, k, tau, reset_magnitude, reset_weights):
+    """
+    Implements the Consensus-Inheritance Extension for 3D Gaussian Splatting.
+    """
+    inh = 0.5  # Candidate value [S1, unofficial]
+
+    # 1. Split/Clone Inheritance
+    child_c = parent_c
+    child_w = inh * parent_w
+
+    # 2. Contamination-Resistant Periodic Re-estimation
+    updated_c = current_c
+    if iteration % k == 0:
+        # Reproject centers and compute candidate consensus [S1, unofficial]
+        candidate_c = reproject_centers_and_compute_consensus()
+        # Channel-wise deviation
+        deviation = abs(candidate_c - current_c)
+        # Median Absolute Deviation of the deviation vector
+        mad = median_absolute_deviation(deviation)
+        # Accept if infinity norm of deviation <= tau * MAD
+        if max(deviation) <= tau * mad:
+            updated_c = candidate_c
+        # Otherwise retain current_c [S1, unofficial]
+
+    # 3. Opacity-Reset Synchronization
+    # Decay weights in proportion to reset magnitude [S1, unofficial]
+    # Exact proportionality formula not specified in sources [G]
+    for i in range(len(reset_weights)):
+        reset_weights[i] *= (1.0 - reset_magnitude)
+
+    return child_c, child_w, updated_c, reset_weights
+
+def reproject_centers_and_compute_consensus():
+    """Reproject current Gaussian centers and aggregate consensus color [G]."""
+    # Implementation depends on the specific rendering backend
+    pass
+
+def median_absolute_deviation(values):
+    """Compute MAD of a 1D array of values [G]."""
+    median_val = sorted(values)[len(values) // 2]
+    return sorted(abs(v - median_val) for v in values)[len(values) // 2]
+```
+
+### Edge Cases and Pitfalls
+*   **Precision**: The infinity norm $\|\cdot\|_{\infty}$ is used for deviation calculation, which may be sensitive to outliers in specific channels [S1, unofficial].
+*   **Boundaries**: The decay factor $\text{inh}$ is constrained to $(0, 1)$ [S1, unofficial].
+*   **Degenerate Input**: If the MAD is zero (e.g., all deviations are identical), the threshold check may fail or behave unexpectedly; a small epsilon guard is required [G].
+
+## Operating characteristics
+*   **Time Complexity**: The periodic re-estimation step adds overhead every $k$ iterations [S1, unofficial]. Exact complexity is Not given in the sources.
+*   **Memory Complexity**: No significant additional memory is required beyond storing the consensus statistics and weights for each Gaussian [S1, unofficial].
+*   **Performance**: The method is designed to maintain training stability by preventing contamination from rendering errors [S1, unofficial]. Specific performance metrics (PSNR, SSIM, training time) are Not given in the sources, as experiments were limited to parameter calibration on a single scene [S1, unofficial].
+*   **Strengths**: Preserves the anti-circular-dependency property; allows consensus to evolve with the population [S1, unofficial].
+*   **Limitations**: Relies on heuristic parameters ($\text{inh}$, $k$, $\tau$) that require calibration; opacity-reset synchronization details are not fully specified [S1, unofficial].
+
+## Background
+The Consensus-Inheritance Extension was introduced in the context of "Visibility-Aware Texture Consensus and Local Structural Constraints for 3D Gaussian Reconstruction in Texture-Degraded Scenes" [S1, unofficial]. It addresses the issue that default 3DGS configurations build consensus statistics once before training, which breaks correspondence when cloning and splitting alter the Gaussian population [S1, unofficial]. The method was calibrated using a $3 \times 3 \times 3$ full-factorial grid on the Drums scene with seed 17 for 3,000 iterations [S1, unofficial].
+
+## Sources
+[S1] Visibility-Aware Texture Consensus and Local Structural Constraints for 3D Gaussian Reconstruction in Texture-Degraded Scenes, https://doi.org/10.21203/rs.3.rs-10727268/v1, fetched 2026-10-26 (unofficial)

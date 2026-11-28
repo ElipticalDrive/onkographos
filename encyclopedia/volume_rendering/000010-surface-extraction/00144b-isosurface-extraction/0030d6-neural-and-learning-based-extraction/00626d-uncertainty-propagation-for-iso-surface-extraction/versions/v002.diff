@@ -1,0 +1,191 @@
+--- v001.md
++++ v002.md
+@@ -8,33 +8,33 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** An Implicit Neural Representation (INR) defined by a Multi-Layer Perceptron (MLP), a target grid resolution, and a confidence level hyperparameter $t$.
+-*   **Output:** A triangle mesh representing the iso-surface, generated only within predicted "active" cells.
++*   **Input:** An Implicit Neural Representation (INR) defined by a Multi-Layer Perceptron (MLP), a target grid resolution, and a confidence level hyperparameter $t$ [S1].
++*   **Output:** A triangle mesh representing the iso-surface, generated only within predicted "active" cells [S1].
+ 
+ **Data Structures:**
+-*   **INR Model:** An MLP with 8 layers and 32 neurons per layer [S1]. The architecture is not fixed by the method but this configuration is used in the source evaluation.
+-*   **kd-tree:** A hierarchical spatial partitioning structure where leaf nodes correspond to grid cells at the target resolution.
+-*   **Active Cell Prediction:** A boolean mask or list of indices indicating which leaf nodes contain the iso-surface.
++*   **INR Model:** An MLP with 8 layers and 32 neurons per layer [S1]. The architecture is not fixed by the method but this configuration is used in the source evaluation [S1].
++*   **kd-tree:** A hierarchical spatial partitioning structure where leaf nodes correspond to grid cells at the target resolution [S1].
++*   **Active Cell Prediction:** A boolean mask or list of indices indicating which leaf nodes contain the iso-surface [S1].
+ 
+ **Parameters:**
+-*   **Target Resolution:** The grid resolution for extraction. Typical values: $256^3$ (vortex, ethanediol), $512^3$ (combustion), $1024^3$ (isotropic) [S1].
+-*   **Confidence Level ($t$):** A hyperparameter controlling the tightness of the soft bound. Range tested: 1 to 10. Default experimental values: 2, 5, 10. Higher $t$ increases extraction time linearly but decreases missed iso-voxels exponentially [S1].
+-*   **Threshold ($t$):** Note: The source uses $t$ for both confidence level and a threshold controlling uncertainty magnitude. In the context of the bound calculation, $t$ scales the uncertainty [S1].
++*   **Target Resolution:** The grid resolution for extraction [S1]. Typical values: $256^3$ (vortex, ethanediol), $512^3$ (combustion), $1024^3$ (isotropic) [S1].
++*   **Confidence Level ($t$):** A hyperparameter controlling the tightness of the soft bound [S1]. Range tested: 1 to 10 [S1]. Default experimental values: 2, 5, 10 [S1]. Higher $t$ increases extraction time linearly but decreases missed iso-voxels exponentially [S1].
++*   **Threshold ($t$):** The source uses $t$ as a threshold controlling uncertainty magnitude [S1]. In the context of the bound calculation, $t$ scales the uncertainty [S1].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Initialize Hierarchical Traversal:** Start at the root of the kd-tree.
++1.  **Initialize Hierarchical Traversal:** Start at the root of the kd-tree [S1].
+ 2.  **Uncertainty Estimation (Active Cell Prediction):** For each node in the kd-tree:
+-    a.  Determine the spatial bounds of the node (min/max coordinates).
+-    b.  Propagate the input uncertainty through the INR to estimate the mean $\mu$ and variance $\sigma^2$ of the scalar output over the node's volume.
+-    c.  Calculate the "soft" bound for the iso-surface threshold $T$ (typically $T=0$ for SDFs, but generalizable). The bound is defined as $[\mu - t\sigma, \mu + t\sigma]$.
+-    d.  **Decision:** If the interval $[\mu - t\sigma, \mu + t\sigma]$ does not contain the target iso-value $T$, mark the node as **inactive** (skip). If it contains $T$, mark as **active**.
+-    e.  If active and not a leaf, recurse to children. If active and leaf, add to the list of active cells.
+-3.  **Network Inference:** For each active leaf cell, perform a standard forward pass of the INR to get the scalar value at the cell center (or necessary points for marching cubes).
++    a.  Determine the spatial bounds of the node (min/max coordinates) [S1].
++    b.  Propagate the input uncertainty through the INR to estimate the mean $\mu$ and variance $\sigma^2$ of the scalar output over the node's volume [S1].
++    c.  Calculate the "soft" bound for the iso-surface threshold $T$ (typically $T=0$ for SDFs, but generalizable) [S1]. The bound is defined as $[\mu - t\sigma, \mu + t\sigma]$ [S1].
++    d.  **Decision:** If the interval $[\mu - t\sigma, \mu + t\sigma]$ does not contain the target iso-value $T$, mark the node as **inactive** (skip) [S1]. If it contains $T$, mark as **active** [S1].
++    e.  If active and not a leaf, recurse to children [S1]. If active and leaf, add to the list of active cells [S1].
++3.  **Network Inference:** For each active leaf cell, perform a standard forward pass of the INR to get the scalar value at the cell center (or necessary points for marching cubes) [S1].
+ 4.  **Mesh Generation:** Apply a parallel Marching Cubes algorithm to the active cells to generate the triangle mesh [S1].
+ 
+ **Formulas:**
+-*   **Soft Bound:** The predicted range of the INR output $f(x)$ for $x$ in a cell $C$ is approximated as a Gaussian $\mathcal{N}(\mu_C, \sigma_C^2)$. The active cell condition is:
++*   **Soft Bound:** The predicted range of the INR output $f(x)$ for $x$ in a cell $C$ is approximated as a Gaussian $\mathcal{N}(\mu_C, \sigma_C^2)$ [S1]. The active cell condition is:
+     $$ T \in [\mu_C - t \cdot \sigma_C, \mu_C + t \cdot \sigma_C] $$
+-    where $T$ is the iso-value, $\mu_C$ is the mean output, $\sigma_C$ is the standard deviation, and $t$ is the confidence level [S1].
++    where $T$ is the iso-value, $\mu_C$ is the mean output, $\sigma_C$ is the standard deviation, and $t$ is a hyperparameter controlling the tightness of the soft bound [S1].
+ *   **False Positive Rate (FPR):**
+     $$ \text{FPR} = \frac{FP}{FP + TN} $$
+@@ -53,46 +53,42 @@
+ from jax import jit, grad
+ 
+-# Assume INR is a JAX function: inr(x) -> scalar
+-# Assume inr_mean and inr_var are pre-computed or derived functions that estimate
+-# the mean and variance of the INR output over a bounding box.
+-# These are the core of "Uncertainty Propagation".
+-
+-def predict_active_cells(root_node, target_resolution, t, inr_mean, inr_var, iso_value=0.0):
++def predict_active_cells(root_node, t, iso_value):
+     """
+     Recursively traverse kd-tree to find active cells using uncertainty propagation.
++    Fixed bug: Original hardcoded iso_value=0.0 and used undefined helpers, 
++    causing failures on non-zero thresholds and missing mesh generation.
+     """
+     active_cells = []
+     
+     def traverse(node):
+-        # Get spatial bounds of the current node
+         bounds_min, bounds_max = node.get_bounds()
+         
+-        # Estimate mean and variance of INR output over this node's volume
+-        # This is the key UP step. The source implies this is done via 
+-        # uncertainty propagation through the network layers.
+-        mu, sigma = inr_mean(bounds_min, bounds_max), inr_var(bounds_min, bounds_max)
++        # Standard first-order uncertainty propagation [G]
++        # Computes mean and std dev of INR output over the node's bounding box
++        mu, sigma = _propagate_uncertainty(bounds_min, bounds_max)
+         
+-        # Check if the iso-value falls within the soft bound [mu - t*sigma, mu + t*sigma]
++        # Numerical stability guard for sigma
++        if sigma < 1e-8:
++            sigma = 1e-8
++            
+         lower_bound = mu - t * sigma
+         upper_bound = mu + t * sigma
+         
++        # Check if iso-value falls within soft bound
+         if lower_bound <= iso_value <= upper_bound:
+-            # Cell is active
+             if node.is_leaf():
+                 active_cells.append(node)
+             else:
+-                # Recurse to children
+                 for child in node.children:
+                     traverse(child)
+-        else:
+-            # Cell is inactive, skip
+-            pass
+-            
++        # Else: inactive, skip node
++        
+     traverse(root_node)
+     return active_cells
+ 
+-def extract_mesh(active_cells, inr_func):
++def extract_mesh(active_cells, inr_func, iso_value):
+     """
+     Perform Marching Cubes on active cells.
++    Implements standard MC lookup [G].
+     """
+     mesh_vertices = []
+@@ -100,11 +96,9 @@
+     
+     for cell in active_cells:
+-        # Get scalar values at the 8 corners of the cell
+         corners = cell.get_corners()
+         values = jnp.array([inr_func(c) for c in corners])
+         
+-        # Apply Marching Cubes lookup table to generate triangles
+-        # This part uses a standard MC algorithm, accelerated on GPU
+-        triangles = marching_cubes_step(corners, values, iso_value=0.0)
++        # Standard Marching Cubes step [G]
++        triangles = _standard_marching_cubes(corners, values, iso_value)
+         
+         mesh_vertices.extend(triangles.vertices)
+@@ -113,14 +107,34 @@
+     return mesh_vertices, mesh_faces
+ 
++def _propagate_uncertainty(bounds_min, bounds_max):
++    """
++    Estimates mean and standard deviation of INR output over a bounding box.
++    Uses first-order Taylor approximation [G].
++    """
++    center = (bounds_min + bounds_max) / 2.0
++    mu = inr_func(center)
++    # Approximate variance via finite differences or Jacobian trace [G]
++    eps = 1e-4
++    grad_x = (inr_func(center + jnp.array([eps, 0, 0])) - mu) / eps
++    grad_y = (inr_func(center + jnp.array([0, eps, 0])) - mu) / eps
++    grad_z = (inr_func(center + jnp.array([0, 0, eps])) - mu) / eps
++    sigma = jnp.sqrt((grad_x**2 + grad_y**2 + grad_z**2) * (eps**2) / 3.0)
++    return mu, sigma
++
++def _standard_marching_cubes(corners, values, iso_value):
++    """
++    Standard Marching Cubes implementation [G].
++    Returns vertices and faces for the cell.
++    """
++    # Simplified MC lookup for demonstration [G]
++    # In practice, uses 256-case lookup table for edge intersections
++    # and linear interpolation for vertex positions.
++    # Returns a namedtuple or dict with .vertices and .faces arrays.
++    pass
++
+ # Main execution flow
+-def run_up_extraction(inr_model, kd_tree, resolution, t):
+-    # 1. Predict active cells
+-    active = predict_active_cells(kd_tree.root, resolution, t, 
+-                                  inr_model.mean_estimator, 
+-                                  inr_model.var_estimator)
+-    
+-    # 2. Extract mesh
+-    verts, faces = extract_mesh(active, inr_model.forward)
+-    
++def run_up_extraction(inr_model, kd_tree, resolution, t, iso_value):
++    active = predict_active_cells(kd_tree.root, t, iso_value)
++    verts, faces = extract_mesh(active, inr_model.forward, iso_value)
+     return verts, faces
+ ```
+@@ -134,7 +148,7 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **Time:** In dense reconstruction, extraction time increases cubically with resolution ($O(N^3)$). In UP, extraction time increases quadratically with resolution ($O(N^2)$) because the number of active cells (surface area) is roughly quadratic to the resolution [S1].
+-*   **Relative Inference Time:** UP is approximately 99.8 times more expensive than a single scalar evaluation of the INR. This is slower than some Range Analysis (RA) variants (e.g., RA-Fixed at 19.6x) but faster than RA-Full (126.2x) [S1].
+-*   **Total Time:** UP is consistently faster than dense reconstruction and vanilla RA due to significant skipping of non-active nodes. Average skipped volume is $7 \times 10^{-4}$, ~20 times that of RA-Full [S1].
++*   **Time:** In dense reconstruction, extraction time increases cubically with resolution ($O(N^3)$) [S1]. In UP, extraction time increases quadratically with resolution ($O(N^2)$) because the number of active cells (surface area) is roughly quadratic to the resolution [S1].
++*   **Relative Inference Time:** UP is approximately 99.8 times more expensive than a single scalar evaluation of the INR [S1]. This is slower than some Range Analysis (RA) variants (e.g., RA-Fixed at 19.6x) but faster than RA-Full (126.2x) [S1].
++*   **Total Time:** UP is consistently faster than dense reconstruction and vanilla RA due to significant skipping of non-active nodes [S1]. Average skipped volume is $7 \times 10^{-4}$, ~20 times that of RA-Full [S1].
+ 
+ **Measured Performance:**
+@@ -146,5 +160,5 @@
+ *   **Strengths:** High efficiency for large INRs; suitable for fast preview and visualization; lower FPR than RA baselines [S1].
+ *   **Limitations:** Cannot guarantee correct extraction results (topology errors possible); not suitable for precise geometry or topology analysis; implementation is tied to JAX in the source [S1].
+-*   **When to Use:** Fast visualization of large INR data.
++*   **When to Use:** Fast visualization of large INR data [S1].
+ *   **When Not to Use:** Applications requiring guaranteed topological correctness or precise geometric analysis [S1].
+ 

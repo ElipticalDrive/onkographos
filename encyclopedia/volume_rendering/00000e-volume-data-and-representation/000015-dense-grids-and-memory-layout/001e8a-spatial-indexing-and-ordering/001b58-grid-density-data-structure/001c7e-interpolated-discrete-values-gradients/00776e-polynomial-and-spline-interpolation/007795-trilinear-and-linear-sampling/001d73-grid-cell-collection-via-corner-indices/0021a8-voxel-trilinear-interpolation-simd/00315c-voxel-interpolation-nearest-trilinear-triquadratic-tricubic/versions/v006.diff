@@ -1,0 +1,287 @@
+--- v005.md
++++ v006.md
+@@ -1,23 +1,14 @@
+ # Voxel Interpolation (Nearest, Trilinear, Triquadratic, Tricubic)
+-
+-
+ ## Overview
+-Voxel interpolation samples values from a dense or sparse 3D volume grid at arbitrary floating-point coordinates using polynomial interpolation of varying orders (nearest, trilinear, triquadratic, tricubic) [S1, S2, unofficial]. It solves the problem of extracting continuous scalar or vector fields from discrete voxel representations, which is essential for volume rendering, signed distance field (SDF) evaluation, and spatial transformer networks [S1, S2, unofficial]. It sets itself apart from its parent [Voxel Trilinear Interpolation (SIMD)](2564-voxel-trilinear-interpolation-simd.md) by supporting multiple interpolation orders (0–3) and integrating with high-level tensor frameworks like PyTorch or low-level tree structures like OpenVDB/NanoVDB, rather than being limited to a single SIMD-optimized trilinear kernel [S1, S2, unofficial].
+-
++Voxel interpolation samples values from a dense or sparse 3D volume grid at arbitrary floating-point coordinates using polynomial interpolation of varying orders (nearest, trilinear, triquadratic, tricubic) [S1, unofficial][S2, unofficial]. It solves the problem of extracting continuous scalar or vector fields from discrete voxel representations, which is essential for volume rendering and signed distance field (SDF) evaluation [S1, unofficial][S2, unofficial]. It sets itself apart from its parent [Voxel Trilinear Interpolation (SIMD)](2564-voxel-trilinear-interpolation-simd.md) by supporting multiple interpolation orders (0–3) and integrating with high-level tensor frameworks like PyTorch or low-level tree structures like OpenVDB/NanoVDB [S1, unofficial][S2, unofficial][S3].
+ ## How it works
+-The method operates in two primary contexts: high-level tensor sampling (PyTorch) and low-level tree-based sampling (OpenVDB/NanoVDB). Both require coordinate normalization and boundary handling.
+-
+ ### Inputs and Outputs
+ **Inputs:**
+-1.  **Volume Grid:** A 3D array of values. In PyTorch, this is a tensor of shape `(D, H, W)` or `(1, 1, D, H, W)`. In OpenVDB/NanoVDB, this is a `Tree` or `Accessor` object [S1, S2, unofficial][S3].
+-2.  **Query Points:** A set of 3D coordinates. In PyTorch, a grid tensor of shape `(N, 3)` or `(1, N, 3)` containing normalized coordinates in `[-1, 1]`. In OpenVDB, a `Vec3f` or `Vec3d` coordinate [S1, S2, unofficial].
+-3.  **Interpolation Order:** An integer specifying the method:
+-    *   0: Nearest Neighbor [S1, S2, unofficial]
+-    *   1: Trilinear [S1, S2, unofficial]
+-    *   2: Triquadratic [S2, unofficial]
+-    *   3: Tricubic [S2, unofficial]
++1.  **Volume Grid:** A 3D array of values. In PyTorch, this is a tensor of shape `(D, H, W)` or `(1, 1, D, H, W)` [S1, unofficial]. In OpenVDB/NanoVDB, this is a `Tree` or `Accessor` object [S2, unofficial][S3].
++2.  **Query Points:** A set of 3D coordinates. In PyTorch, a grid tensor of shape `(N, 3)` or `(1, N, 3)` containing normalized coordinates in `[-1, 1]` [S1, unofficial]. In OpenVDB, a `Vec3f` or `Vec3d` coordinate [S2, unofficial].
++3.  **Interpolation Order:** An integer specifying the method: 0 = Nearest Neighbor, 1 = Trilinear, 2 = Triquadratic, 3 = Tricubic [S1, unofficial][S2, unofficial].
+ 
+ **Outputs:**
+-*   Sampled values at the query points. For PyTorch, a tensor of shape `(N,)` or `(1, N)`. For OpenVDB, a scalar or vector value [S1, S2, unofficial].
++*   Sampled values at the query points. For PyTorch, a tensor of shape `(N,)` or `(1, N)` [S1, unofficial]. For OpenVDB, a scalar or vector value [S2, unofficial].
+ 
+ ### Data Structures
+@@ -33,181 +24,116 @@
+ 
+ ### Steps
+-
+-#### 1. Coordinate Normalization (PyTorch Context)
+-If query points are given in physical space or voxel indices, they must be normalized to `[-1, 1]` [S1, unofficial].
+-1.  Calculate the bounding box center and extent:
+-    $$ \text{center} = \frac{\text{bbox}_{min} + \text{bbox}_{max}}{2} $$
+-    $$ \text{extent} = \frac{\text{bbox}_{max} - \text{bbox}_{min}}{2} $$
+-2.  Normalize the bounding box or query points:
+-    $$ \text{bbox}_{norm} = \frac{\text{bbox} - \text{center}}{\text{extent}} $$
+-    [S1, unofficial]
+-
+-#### 2. Sampler Creation (OpenVDB/NanoVDB Context)
+-1.  Obtain an accessor for the grid:
+-    ```python
+-    acc = grid.getAccessor()
+-    ```
+-    [S3]
+-2.  Create the sampler with the desired order:
+-    ```python
+-    # Example for Trilinear (Order 1)
+-    smp = createSampler<1>(acc)
+-    ```
+-    [S3]
+-
+-#### 3. Sampling Execution
+-
+-**PyTorch (`F.grid_sample`):**
+-1.  Reshape input volume to `(1, 1, D, H, W)` [S1, unofficial].
+-2.  Reshape grid to `(1, N, 3)` [S1, unofficial].
+-3.  Call `F.grid_sample(input, grid, mode='trilinear', padding_mode='zeros', align_corners=True)` [S1, unofficial].
+-    *   `mode`: 'nearest' or 'trilinear' (PyTorch's `F.grid_sample` does not natively support triquadratic/tricubic; higher orders require custom kernels or libraries like [S2, unofficial][S3]) [S1, unofficial].
+-    *   `padding_mode`: 'zeros' handles out-of-bounds queries by returning 0 [S1, unofficial].
+-4.  Squeeze output to remove batch/channel dimensions [S1, unofficial].
+-
+-**OpenVDB/NanoVDB:**
+-1.  Iterate over query points (e.g., using `tbb::parallel_for`) [S1, unofficial].
+-2.  Call the sampler with the coordinate:
+-    ```python
+-    value = smp.sample(xyz)
+-    ```
+-    [S2, unofficial][S3]
+-    *   For SDF grids, use `wsSample` for world-space sampling:
+-        ```python
+-        sdf[i] = sampler.wsSample(Vec3d(P(i, 0), P(i, 1), P(i, 2)))
+-        ```
+-        [S1, unofficial]
++1.  **Coordinate Normalization (PyTorch Context):** Normalize the bounding box or query points to `[-1, 1]` using `bbox_norm = (bbox - center) / extent`, where `center = bbox.sum(-1)/2` and `extent = (bbox[:,1]-bbox[:,0])/2` [S1, unofficial].
++2.  **Sampler Creation (OpenVDB/NanoVDB Context):** Obtain an accessor for the grid via `grid.getAccessor()`, then instantiate the sampler with `nanovdb::math::createSampler<Order>(acc)` [S3].
++3.  **Sampling Execution:**
++    *   **PyTorch:** Reshape input volume to `(1, 1, D, H, W)` and grid to `(1, N, 3)`, call the sampling routine, and squeeze output to remove batch/channel dimensions [S1, unofficial].
++    *   **OpenVDB/NanoVDB:** Iterate over query points (e.g., using `tbb::parallel_for`) and call the sampler with the coordinate, or use `wsSample` for world-space SDF evaluation [S1, unofficial][S2, unofficial].
+ 
+ ### Formulas
+ **Trilinear Interpolation (Order 1):**
+-For a query point $(x, y, z)$ within a voxel defined by corners $(i, j, k)$ to $(i+1, j+1, k+1)$, let $u, v, w$ be the fractional parts of $x, y, z$:
++For a query point $(x, y, z)$ within a voxel defined by integer corners $(i, j, k)$ to $(i+1, j+1, k+1)$, let $u, v, w$ be the fractional parts of $x, y, z$:
+ $$ u = x - i, \quad v = y - j, \quad w = z - k $$
+-The value $V$ is:
++The value $V$ is computed as:
+ $$ V = (1-u)(1-v)(1-w)V_{000} + u(1-v)(1-w)V_{100} + (1-u)v(1-w)V_{010} + u v (1-w)V_{110} + (1-u)(1-v)w V_{001} + u(1-v)w V_{101} + (1-u)v w V_{011} + u v w V_{111} $$
+-[S2, implied by standard trilinear definition and context, unofficial]
++[G]
+ 
+ **Nearest Neighbor (Order 0):**
+ $$ V = V_{\lfloor x \rfloor, \lfloor y \rfloor, \lfloor z \rfloor} $$
+-[S2, unofficial]
++[G]
+ 
+ ### Parameters
+ *   **Order:** 0 (Nearest), 1 (Trilinear), 2 (Triquadratic), 3 (Tricubic) [S2, unofficial].
+-*   **Mode (PyTorch):** 'nearest' or 'trilinear' [S1, unofficial].
+-*   **Padding Mode:** 'zeros' (default in examples) [S1, unofficial].
+-*   **Align Corners:** Boolean, affects coordinate mapping in PyTorch [S2, unofficial].
++*   **Mode:** 'nearest' or 'trilinear' [S1, unofficial].
+ *   **UseCache:** Boolean, default `true` (NanoVDB) [S3].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Out-of-Bounds:** Queries outside the volume bounds return 0 if `padding_mode='zeros'` is used [S1, unofficial]. In OpenVDB, boundary checks are handled by the tree traversal; inactive nodes return default values [S2, unofficial].
+-*   **Precision:** Use `Vec3d` for high-precision SDF sampling to avoid jitter [S1, unofficial].
+-*   **Axis Ordering:** PyTorch's `grid_sample` expects `(X, Y, Z)` order, but meshgrid generation may require axis reversal (XZY to ZXY to XYZ) depending on the source data layout [S1, unofficial].
+-*   **Sparse Volumes:** For sparse grids (OpenVDB), interpolation traverses the tree hierarchy; empty space is handled efficiently by skipping inactive nodes [S2, unofficial][S3].
++*   **Out-of-Bounds:** Queries outside the volume bounds must be clamped or return a default value (typically 0) [S1, unofficial].
++*   **Precision:** Use `Vec3d` for high-precision SDF sampling to avoid coordinate jitter [S1, unofficial].
++*   **Axis Ordering:** PyTorch's grid generation may require axis reversal (XZY to ZXY to XYZ) depending on the source data layout [S1, unofficial].
++*   **Sparse Volumes:** For sparse grids, interpolation traverses the tree hierarchy; empty space is handled efficiently by skipping inactive nodes [S2, unofficial][S3].
+ 
+ ### Pseudocode
++```python
++import math
+ 
+-```python
+-import torch
+-import torch.nn.functional as F
+-import numpy as np
+-
+-def sample_volume_pytorch(volume_tensor, query_points_xyz, bbox, interpolation_mode='trilinear'):
++def sample_volume(volume, query_points, bbox, order=1):
+     """
+-    Samples a dense volume at query points using PyTorch's grid_sample.
+-    
+-    Args:
+-        volume_tensor: np.array or torch.Tensor of shape (D, H, W)
+-        query_points_xyz: np.array of shape (N, 3) in physical/voxel coordinates
+-        bbox: np.array of shape (2, 3) with [min, max] bounds
+-        interpolation_mode: 'nearest' or 'trilinear'
+-        
+-    Returns:
+-        torch.Tensor of shape (N,)
++    Samples a 3D volume at query points using nearest or trilinear interpolation.
++    volume: list of lists of lists (D, H, W)
++    query_points: list of (x, y, z) tuples in physical/voxel coordinates
++    bbox: list of two tuples [(min_x, min_y, min_z), (max_x, max_y, max_z)]
++    order: 0 for nearest, 1 for trilinear
+     """
+     # 1. Normalize query points to [-1, 1]
+-    bbox = np.array(bbox)
+-    center = (bbox[0] + bbox[1]) / 2.0
+-    extent = (bbox[1] - bbox[0]) / 2.0
+-    
+-    # Avoid division by zero
+-    extent = np.where(extent == 0, 1.0, extent)
+-    
+-    normalized_points = (query_points_xyz - center) / extent
+-    
+-    # 2. Prepare tensors
+-    # PyTorch expects (1, N, 3)
+-    grid = torch.tensor(normalized_points, dtype=torch.float32).unsqueeze(0)
+-    
+-    # Volume must be (1, 1, D, H, W)
+-    volume = torch.tensor(volume_tensor, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+-    
+-    # 3. Sample
+-    # align_corners=True maps -1 to 1 exactly to the edge pixels
+-    sampled = F.grid_sample(
+-        volume, 
+-        grid, 
+-        mode=interpolation_mode, 
+-        padding_mode='zeros', 
+-        align_corners=True
+-    )
+-    
+-    # 4. Squeeze output
+-    return sampled.squeeze()
+-
+-def sample_volume_openvdb(grid_accessor, query_points_xyz, order=1):
+-    """
+-    Samples an OpenVDB/NanoVDB volume using a templated sampler.
+-    
+-    Args:
+-        grid_accessor: OpenVDB/NanoVDB accessor object
+-        query_points_xyz: list of Vec3f/Vec3d coordinates
+-        order: 0=Nearest, 1=Trilinear, 2=Triquadratic, 3=Tricubic
+-        
+-    Returns:
+-        list of sampled values
+-    """
+-    # 1. Create sampler
+-    # Note: This is pseudo-code for C++/NanoVDB syntax
+-    # sampler = createSampler<order>(grid_accessor)
++    bbox = list(bbox)
++    center = [(bbox[0][i] + bbox[1][i]) / 2.0 for i in range(3)]
++    extent = [(bbox[1][i] - bbox[0][i]) / 2.0 for i in range(3)]
++    extent = [1.0 if e == 0 else e for e in extent]
+     
+     results = []
+-    for xyz in query_points_xyz:
+-        # 2. Sample
+-        # value = sampler.sample(xyz)
+-        # For SDF, use wsSample
+-        # value = sampler.wsSample(xyz)
+-        results.append(0) # Placeholder for actual C++ implementation
++    for p in query_points:
++        normalized = [((p[i] - center[i]) / extent[i]) for i in range(3)]
++        
++        # 2. Map normalized [-1, 1] to voxel indices [0, D/H/W-1]
++        min_idx = [0, 0, 0]
++        max_idx = [len(volume) - 1, len(volume[0]) - 1, len(volume[0][0]) - 1]
++        
++        idx = [int(math.floor((normalized[i] + 1.0) / 2.0 * (max_idx[i] - min_idx[i]) + min_idx[i])) for i in range(3)]
++        idx = [max(min_idx[i], min(max_idx[i], idx[i])) for i in range(3)]
++        
++        frac = [(normalized[i] + 1.0) / 2.0 * (max_idx[i] - min_idx[i]) + min_idx[i] - idx[i] for i in range(3)]
++        
++        # 3. Interpolate
++        if order == 0:
++            results.append(volume[idx[0]][idx[1]][idx[2]])
++        elif order == 1:
++            u, v, w = frac
++            def get_val(x, y, z):
++                x = max(min_idx[0], min(max_idx[0], x))
++                y = max(min_idx[1], min(max_idx[1], y))
++                z = max(min_idx[2], min(max_idx[2], z))
++                return volume[x][y][z]
++                
++            v000 = get_val(idx[0], idx[1], idx[2])
++            v100 = get_val(idx[0]+1, idx[1], idx[2])
++            v010 = get_val(idx[0], idx[1]+1, idx[2])
++            v110 = get_val(idx[0]+1, idx[1]+1, idx[2])
++            v001 = get_val(idx[0], idx[1], idx[2]+1)
++            v101 = get_val(idx[0]+1, idx[1], idx[2]+1)
++            v011 = get_val(idx[0], idx[1]+1, idx[2]+1)
++            v111 = get_val(idx[0]+1, idx[1]+1, idx[2]+1)
++            
++            val = ((1-u)*(1-v)*(1-w)*v000 + u*(1-v)*(1-w)*v100 +
++                   (1-u)*v*(1-w)*v010 + u*v*(1-w)*v110 +
++                   (1-u)*(1-v)*w*v001 + u*(1-v)*w*v101 +
++                   (1-u)*v*w*v011 + u*v*w*v111)
++            results.append(val)
+     return results
+ ```
+-
++*Note: The OpenVDB/NanoVDB C++ factory pattern `createSampler<Order>(acc)` is a templated compile-time construct not directly translatable to Python; the Python implementation above provides the equivalent runtime logic.*
+ ## Subtopics
+ 
+ ### [Tricubic B-Spline Interpolation](8246-tricubic-b-spline-interpolation.md)
+-A GPU-accelerated interpolation method using uniform cubic B-splines to sample a 3D volume texture, providing smoother results than linear interpolation while being faster than full tricubic convolution. It sets itself apart from standard tricubic convolution by using a specific optimized weight grouping and coordinate transformation that reduces the number of texture fetches and arithmetic operations, making it suitable for real-time volume rendering on WebGL-compatible hardware.
++A GPU-accelerated method for sampling 3D volume textures using uniform cubic B-splines, providing smoother results than linear interpolation while being faster than full tricubic convolution. It sets itself apart from standard tricubic convolution by reducing the number of texture fetches through grouped weight calculations and optimized coordinate mapping, making it suitable for real-time volume rendering where visual fidelity is prioritized over the absolute minimal computational cost of trilinear interpolation.
+ 
+ ### [Bilinear Sampler](12826-bilinear-sampler.md)
+-The Bilinear Sampler is a differentiable operation that samples values from a spatial tensor (2D or 3D) at arbitrary floating-point coordinates using bilinear interpolation. It solves the problem of extracting feature maps or voxel data at non-integer locations, which is essential for spatial transformer networks and 3D reconstruction pipelines. It differs from its parent [Voxel Interpolation](6486-voxel-interpolation-nearest-trilinear-triquadratic-tricubic.md) by specifically implementing the 2D/3D bilinear case with a coordinate transformation pipeline (scaling and shifting) defined by the `align_corners` convention, rather than a generic templated interpolation order.
++The Bilinear Sampler is a differentiable operation that samples values from a dense grid (tensor) at arbitrary floating-point coordinates using bilinear interpolation. It solves the problem of extracting feature maps or voxel data at non-integer locations, which is essential for spatial transformer networks, deformable convolutions, and neural rendering pipelines. It distinguishes itself from nearest-neighbor sampling by providing smooth gradients and from higher-order splines by its computational efficiency and local support over a single cell. It builds on [Voxel Interpolation (Nearest, Trilinear, Triquadratic, Tricubic)](6486-voxel-interpolation-nearest-trilinear-triquadratic-tricubic.md) but is specialized for 2D spatial grids (and 3D spatiotemporal grids) with specific coordinate normalization conventions (`align_corners`) and padding modes.
+ 
+ ### Voxel Sampler Factory
+-Factory function that creates a voxel sampler of a specific polynomial order. It allows for compact syntax in C++ code. Parameters include `Order` (polynomial order) and `UseCache` (boolean, default true) [S3]. Example: `auto smp = nanovdb::math::createSampler<1>(acc)` [S3].
++Factory function that creates a voxel sampler of a specific polynomial order [S3]. It allows for compact syntax in C++ code [S3]. Parameters include `Order` (polynomial order) and `UseCache` (boolean, default true) [S3]. Example: `auto smp = nanovdb::math::createSampler<1>(acc)` [S3].
+ 
+ ### SDF Grid Sampling
+-Evaluates the signed distance field at arbitrary query points using different interpolation strategies. It uses `openvdb::tools::GridSampler` with modes: 1 (BoxSampler/trilinear), 2 (QuadraticSampler), or default (PointSampler/nearest) [S1, unofficial]. It supports parallel iteration over query points using TBB [S1, unofficial].
++Evaluates the signed distance field at arbitrary query points using different interpolation strategies [S1, unofficial]. It uses `openvdb::tools::GridSampler` with modes: 1 (BoxSampler/trilinear), 2 (QuadraticSampler), or default (PointSampler/nearest) [S1, unofficial]. It supports parallel iteration over query points using TBB [S1, unofficial].
++
++### Multi-resolution Interpolation
++An algorithm to interpolate values at boundaries of voxel blocks with different resolutions by searching for the common finest grid between neighbours [S4]. Initialisation of uninitialised fine voxels interpolates values from parent grids using extrapolation at block boundaries to avoid synchronisation issues [S4]. Given a 3D sampling point and scale, it converts to voxel coordinates, fetches 8-neighbour points at the finest resolution, checks resolution constraints, and repeats the search at a coarser scale if violated [S4]. If uniform, it performs interpolation at the target scale [S4].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:**
+-    *   Nearest Neighbor: $O(1)$ per query [S2, unofficial].
+-    *   Trilinear: $O(1)$ per query, requires 8 texture fetches or memory reads [S2, unofficial].
+-    *   Triquadratic/Tricubic: $O(1)$ per query, but requires more fetches (27 for tricubic) and arithmetic operations [S2, unofficial].
+-*   **Memory Complexity:** $O(1)$ auxiliary memory per query, plus cache overhead if `UseCache=true` [S3].
+-*   **Measured Performance:** Trilinear is the most common trade-off between speed and smoothness. Tricubic B-Spline is faster than full tricubic convolution on GPU due to optimized weight grouping [S1, unofficial].
+-*   **Strengths:** Supports multiple orders; integrates with high-level frameworks (PyTorch) and low-level libraries (OpenVDB); handles sparse and dense grids.
+-*   **Limitations:** PyTorch's `F.grid_sample` only supports nearest and trilinear natively; higher orders require custom implementations [S1, unofficial]. Out-of-bounds handling must be explicitly managed [S1, unofficial].
+-*   **When to Use:** Use trilinear for general volume rendering and SDF evaluation. Use nearest for speed-critical applications or when smoothness is not required. Use tricubic for high-quality smoothness where performance allows.
+-
++Time and memory complexity are not given in the sources. PyTorch's `F.grid_sample` natively supports nearest and trilinear modes, while higher orders require custom implementations [S1, unofficial]. Multi-resolution interpolation handles scale changes by falling back to coarser grids at block boundaries [S4]. Trilinear interpolation is the most common trade-off between speed and smoothness [S1, unofficial].
+ ## Background
+-Voxel interpolation is a fundamental technique in volume rendering and scientific visualization. The PyTorch implementation (`F.grid_sample`) is widely used in deep learning for spatial transformer networks and 3D reconstruction [S1, unofficial]. The OpenVDB/NanoVDB implementations are standard in VFX and scientific computing for handling large sparse volumes [S1, unofficial][S3]. The method evolved from basic nearest-neighbor sampling to higher-order polynomial interpolation to improve visual quality and numerical accuracy in SDF representations [S1, S2, unofficial].
+-
++The PyTorch implementation (`F.grid_sample`) is used for sampling dense volume grids at arbitrary query points [S1, unofficial]. The OpenVDB/NanoVDB implementations provide templated samplers for sparse voxel trees [S2, unofficial][S3]. SDF evaluation leverages these samplers with world-space coordinate transforms [S1, unofficial]. Multi-resolution rendering strategies handle adaptive voxel hierarchies by interpolating across scale boundaries [S4].
+ ## Sources
+ [S1] zzilch/Mesh2Volume, https://github.com/zzilch/Mesh2Volume, fetched 2026-10-26 (unofficial)
+ [S2] ZephirFXEC/HNanoSolver, https://github.com/ZephirFXEC/HNanoSolver, fetched 2026-10-27 (unofficial)
+-[S3] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24+[S3] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24
++[S4] Adaptive-resolution octree-based volumetric SLAM, https://www.doc.ic.ac.uk/~sleutene/publications/Vespa_3DV19.pdf, fetched 2026-10-29

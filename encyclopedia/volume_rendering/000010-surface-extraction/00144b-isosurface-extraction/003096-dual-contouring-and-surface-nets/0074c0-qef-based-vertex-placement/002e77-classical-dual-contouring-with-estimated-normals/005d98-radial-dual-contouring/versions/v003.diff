@@ -1,0 +1,197 @@
+--- v002.md
++++ v003.md
+@@ -13,5 +13,5 @@
+ *   Player position ($P$) [S1, unofficial].
+ *   World center ($C$) for the current mesh chunk [S1, unofficial].
+-*   Configuration parameters: $V_{min}$ (smallest voxel size), $V_{max}$ (largest voxel size limit), $R_{regen}$ (regeneration threshold), and tier specifications [S1, unofficial].
++*   Configuration parameters: $V_{min}$ (smallest voxel size), $V_{max}$ (largest voxel size limit), $R_{regen}$ (regeneration threshold), tier specifications, and candidate recenter points [S1, unofficial].
+ *   Density function definitions (e.g., Simplex noise octaves, Recipe Blocks) [S1, unofficial].
+ 
+@@ -33,8 +33,8 @@
+ 
+ #### 2. Regeneration Trigger Check
+-Determine if a new mesh center is required [S1, unofficial]. Let $D$ be the distance from the player $P$ to the current center $C$. Let $R_{max}$ be the radius of the high-detail area. If $D > \frac{1}{2} R_{max}$, a regeneration is triggered [S1, unofficial].
++Determine if a new mesh center is required [S1, unofficial]. Let $D$ be the distance from the player $P$ to the current center $C$. Let $R_{max}$ be the radius from the center to the edge of the high-detail area. If $D > \frac{1}{2} R_{max}$, a regeneration is triggered [S1, unofficial].
+ 
+ #### 3. Recentering
+-If regeneration is triggered, find a new center $C'$ [S1, unofficial]. Define a set of candidate recenter points (e.g., a $3 \times 3 \times 3$ grid of voxel centers surrounding the current region) [G]. Calculate the distance from $P$ to each candidate [G]. Select the candidate $C'$ with the minimum distance to $P$ [S1, unofficial].
++If regeneration is triggered, find a new center $C'$ [S1, unofficial]. Iterate through a set of candidate recenter points to find the one closest to $P$ [S1, unofficial]. Update the current center to $C'$ [S1, unofficial].
+ 
+ #### 4. Voxel Generation (Step 1)
+@@ -42,5 +42,5 @@
+ *   **Core Region:** Create voxels with size $V_{min}$ for the first $T_{core}$ tiers [S1, unofficial].
+ *   **Outer Region:** For tiers beyond $T_{core}$, increase voxel size with distance from $C'$ until $V_{max}$ is reached [S1, unofficial].
+-*   **Crack-Free Rule:** Ensure adjacent voxels share boundary vertices; the radial generation order and strict rules prevent gaps and duplication [S1, unofficial].
++*   **Crack-Free Rule:** Voxels are generated outwards from the detailed center using strict rules to ensure no cracks or duplication of work [S1, unofficial].
+ 
+ #### 5. Density Evaluation (Step 2)
+@@ -49,5 +49,5 @@
+     *   High $L_i$ (Core): Use multiple octaves of Simplex noise or complex Recipe Blocks [S1, unofficial].
+     *   Low $L_i$ (Outer): Use simpler functions or fewer noise octaves [S1, unofficial].
+-*   **Parallel Execution:** Each voxel's evaluation is independent and executed on a separate thread [S1, unofficial].
++*   **Parallel Execution:** Each voxel's evaluation is independent and executed on a separate thread spread across available cores [S1, unofficial].
+ 
+ #### 6. Mesh Data Generation (Step 3)
+@@ -55,5 +55,5 @@
+ 
+ #### 7. Mesh Assembly
+-Create the final `Mesh` object from the position, normal, UV, and triangle arrays. Return the mesh pointer and a completion boolean [S1, unofficial].
++Create the final `Mesh` object from the position, normal, UV, and triangle arrays [S1, unofficial]. Return the mesh pointer and a completion boolean [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -64,23 +64,54 @@
+ 
+ def radial_dc(player_pos, current_center, config):
+-    """
+-    Main entry point for Radial Dual Contouring.
+-    Returns (mesh, is_complete).
+-    """
++    # Step 1: Setup (parameters initialized in config)
++    # Step 2: Regeneration Trigger Check
+     dist_to_center = math.dist(player_pos, current_center)
+     threshold = config.regen_radius / 2.0
+-    
+-    new_center = current_center
+-    regenerate = False
+-    
+     if dist_to_center > threshold:
+-        new_center = find_closest_recenter_point(player_pos, config.candidate_points)
+-        regenerate = True
+-        
+-    if regenerate:
+-        current_center = new_center
+-        return generate_mesh_pipeline(current_center, player_pos, config)
+-    else:
+-        return config.existing_mesh, True
++        current_center = find_closest_recenter_point(player_pos, config.candidate_points)
++
++    # Step 3: Voxel Creation & Positioning (Single Core)
++    voxels = []
++    for layer in range(config.max_layers):
++        if layer <= config.core_tiers:
++            size = config.min_voxel_size
++        else:
++            size = min(config.min_voxel_size + (layer - config.core_tiers) * config.expansion_rate, config.max_voxel_size)
++        # [G] Standard grid iteration to place voxels at given size and layer
++        for x in range(-config.grid_radius, config.grid_radius + 1):
++            for y in range(-config.grid_radius, config.grid_radius + 1):
++                for z in range(-config.grid_radius, config.grid_radius + 1):
++                    pos = current_center + [x * size, y * size, z * size]
++                    voxels.append({'pos': pos, 'size': size, 'detail_level': layer})
++
++    # Step 4: Density Evaluation (Multi-threaded, Step 2)
++    voxel_results = []
++    lock = threading.Lock()
++    def eval_thread(v):
++        # Dynamic Voxel Density Evaluation
++        if v['detail_level'] <= config.core_tiers:
++            func = config.density_functions.complex
++        else:
++            func = config.density_functions.simple
++        # [G] Standard Dual Contouring: sample density at corners, compute normals, solve QEF, generate quad mesh
++        result = {'positions': [], 'normals': [], 'uvs': [], 'triangles': []}
++        with lock:
++            voxel_results.append(result)
++
++    threads = [threading.Thread(target=eval_thread, args=(v,)) for v in voxels]
++    for t in threads: t.start()
++    for t in threads: t.join()
++
++    # Step 5: Mesh Data Generation (Single Core, Step 3)
++    positions, normals, uvs, triangles = [], [], [], []
++    for res in voxel_results:
++        positions.extend(res['positions'])
++        normals.extend(res['normals'])
++        uvs.extend(res['uvs'])
++        triangles.extend(res['triangles'])
++
++    # Step 6: Mesh Assembly
++    mesh = type('Mesh', (), {'positions': positions, 'normals': normals, 'uvs': uvs, 'triangles': triangles})()
++    return mesh, True
+ 
+ def find_closest_recenter_point(player_pos, candidate_points):
+@@ -93,74 +124,14 @@
+             best_point = point
+     return best_point
+-
+-def generate_mesh_pipeline(center, player_pos, config):
+-    # Stage 1: Voxel Creation (Single Core)
+-    voxels = create_radial_voxels(center, config.min_voxel_size, config.max_voxel_size, 
+-                                  config.core_tiers, config.max_layers, config.expansion_rate)
+-    
+-    # Stage 2: Density Evaluation (Multi-threaded)
+-    voxel_results = []
+-    def eval_thread(v):
+-        voxel_results.append(evaluate_voxel(v, config.density_functions))
+-    threads = [threading.Thread(target=eval_thread, args=(v,)) for v in voxels]
+-    for t in threads: t.start()
+-    for t in threads: t.join()
+-    
+-    # Stage 3: Mesh Data Generation (Single Core)
+-    mesh_data = assemble_mesh_data(voxel_results)
+-    
+-    # Final Assembly
+-    mesh = create_mesh_object(mesh_data.positions, mesh_data.normals, mesh_data.uvs, mesh_data.triangles)
+-    return mesh, True
+-
+-def evaluate_voxel(voxel, density_functions):
+-    detail_level = voxel.detail_level
+-    if detail_level > config.core_tiers:
+-        func = density_functions.simple
+-    else:
+-        func = density_functions.complex
+-    # Perform Dual Contouring steps: sample density, compute normals, solve QEF, generate quad mesh
+-    return voxel
+-
+-def create_radial_voxels(center, min_size, max_size, core_tiers, max_layers, expansion_rate):
+-    voxels = []
+-    for layer in range(max_layers):
+-        if layer <= core_tiers:
+-            size = min_size
+-        else:
+-            size = min_size + (layer - core_tiers) * expansion_rate
+-            if size > max_size:
+-                size = max_size
+-        layer_voxels = generate_layer_voxels(center, size, layer)
+-        voxels.extend(layer_voxels)
+-    return voxels
+-
+-def generate_layer_voxels(center, size, layer):
+-    # Standard grid iteration to create voxels at given size and layer
+-    return []
+-
+-def assemble_mesh_data(voxel_results):
+-    positions, normals, uvs, triangles = [], [], [], []
+-    for v in voxel_results:
+-        positions.extend(v.positions)
+-        normals.extend(v.normals)
+-        uvs.extend(v.uvs)
+-        triangles.extend(v.triangles)
+-    return type('MeshData', (), {'positions': positions, 'normals': normals, 'uvs': uvs, 'triangles': triangles})()
+-
+-def create_mesh_object(positions, normals, uvs, triangles):
+-    return type('Mesh', (), {'positions': positions, 'normals': normals, 'uvs': uvs, 'triangles': triangles})()
+ ```
+ 
+ ### Edge Cases and Pitfalls
+ *   **Regeneration Timing:** Regeneration must occur off the main thread and before the player leaves the high-detail area to avoid loading screens or visual popping [S1, unofficial].
+-*   **Crack Prevention:** The radial generation order and strict rules for voxel sizing are critical. If outer voxels are not sized correctly relative to their neighbors, cracks will appear at boundaries [S1, unofficial].
+-*   **Unity Main Thread:** The implementation uses a "flow gate" style because Unity requires the main thread to run continuously. The main thread checks and advances the process once per frame [S1, unofficial].
++*   **Crack Prevention:** The radial generation order and strict rules for voxel sizing are critical to ensure no cracks or duplication of work at boundaries [S1, unofficial].
++*   **Unity Main Thread:** The implementation uses a "flow gate" style because Unity requires the main thread to run continuously; the main thread checks and advances the process once per frame [S1, unofficial].
+ 
+ ## Operating characteristics
+ *   **Performance:** Capable of generating a roughly 4-mile cube in 1-2 seconds [S1, unofficial].
+-*   **Complexity:**
+-    *   Time: $O(N \cdot C)$, where $N$ is the number of voxels and $C$ is the complexity of the density function for that voxel. Parallelization reduces wall-clock time significantly for Step 2 [S1, unofficial].
+-    *   Memory: Proportional to the number of voxels and the size of the mesh data arrays [S1, unofficial].
++*   **Complexity:** Not given in the sources.
+ *   **Strengths:**
+     *   Handles extremely large worlds efficiently [S1, unofficial].
+@@ -173,5 +144,5 @@
+ 
+ ## Background
+-Radial Dual Contouring was introduced by James Pardue as an extension of the Dual Contouring algorithm [S1, unofficial]. It was developed to address the limitations of standard Dual Contouring in large-scale world generation, specifically the inability to efficiently handle varying levels of detail across a massive grid. The method is implemented in the `RadialDualContouring` repository, often in the context of the Unity engine [S1, unofficial].
++Radial Dual Contouring was introduced by James Pardue as an extension of the Dual Contouring algorithm [S1, unofficial]. It was developed to address the limitations of standard Dual Contouring in large-scale world generation, specifically the inability to efficiently handle varying levels of detail across a massive grid [S1, unofficial]. The method is implemented in the `RadialDualContouring` repository, often in the context of the Unity engine [S1, unofficial].
+ 
+ ## Sources

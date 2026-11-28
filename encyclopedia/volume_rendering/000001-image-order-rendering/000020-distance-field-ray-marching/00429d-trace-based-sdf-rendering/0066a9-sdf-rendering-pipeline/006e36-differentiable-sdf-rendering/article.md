@@ -1,0 +1,245 @@
+# Differentiable SDF Rendering
+
+Also called: Differentiable SDF Rendering via Mitsuba 3/Dr.Jit, ReparamIntegrator
+
+## Overview
+Differentiable SDF Rendering is a method that computes pixel colors and their gradients with respect to Signed Distance Function (SDF) parameters or scene variables by wrapping SDF ray intersection in an automatic differentiation (AD) framework [S1, unofficial]. It builds on [SDF Rendering Pipeline](19703-sdf-rendering-pipeline.md) by replacing standard ray marching with a differentiable integrator that supports backpropagation through the intersection and shading steps [S1, unofficial]. Unlike traditional SDF rendering which produces static images, this method enables gradient-based optimization of the SDF geometry itself [S1, unofficial].
+
+## How it works
+The method implements a differentiable direct illumination integrator, typically within the Mitsuba 3 renderer using the Dr.Jit AD library [S1, unofficial]. It handles the forward pass to compute radiance and the backward pass to compute gradients of the loss with respect to SDF grid values or scene parameters [S1, unofficial].
+
+### Inputs and Outputs
+- **Inputs**: Camera parameters, SDF grid data (stored in a `Grid3d` structure), scene shapes, sample counts, and optimization configuration [S1, unofficial].
+- **Outputs**: Rendered image (RGB, Alpha, AOVs) and gradients with respect to SDF parameters [S1, unofficial].
+
+### Data Structures
+- **SurfaceInteraction3f (`si`, `si_d`)**: Standard Mitsuba structure storing intersection point $p$, normal $n$, UV coordinates $uv$, distance $t$, shape pointer, and differentiable variants for AD [S1, unofficial].
+- **PreliminaryIntersection3f (`pi`)**: Stores early bounding volume test results, shape index, and distance $t$ for fast culling before full intersection [S1, unofficial].
+- **Grid3d**: Custom class storing SDF values and implementing the ray intersection routine [S1, unofficial].
+
+### Parameters
+- `max_depth`: Maximum ray recursion depth. Default: 4 [S1, unofficial].
+- `weight_by_spp`: Flag to weight samples by samples-per-pixel. Default: False (explicitly unsupported) [S1, unofficial].
+- `use_mis`: Flag to enable Multiple Importance Sampling. Default: False [S1, unofficial].
+- `force_optix`: Forces OptiX backend usage regardless of scene complexity. Default: False [S1, unofficial].
+- `antithetic_sampling`: Enables mirrored pixel sampling for variance reduction. Default: False [S1, unofficial].
+- `sdf_filename`: Path to the SDF grid file. If empty, SDF is not loaded [S1, unofficial].
+- `sdf_to_world`: 4x4 transformation matrix applied to the SDF grid coordinates [S1, unofficial].
+
+### Algorithm Steps
+
+1. **Initialize Sampler and Film**:
+   Set the sample count. Compute the wavefront size as $\text{film\_area} \times \text{spp}$ (samples per pixel). Enforce a hard limit to prevent memory overflow: $0\text{x}ffffffff$ for LLVM backend or $0\text{x}40000000$ for CUDA backend [S1, unofficial]. If the computed wavefront size exceeds these limits, raise an exception [S1, unofficial].
+
+2. **Prepare SDF Shape**:
+   Scan scene shapes for an ID containing `'_sdf_'`. Gather these shapes into a Dr.Jit array. Enable OptiX backend only if `force_optix` is True or if more than one shape exists in the scene [S1, unofficial]. If no shape contains `'_sdf_'`, raise a `ValueError` because the SDF BSDF cannot be attached [S1, unofficial].
+
+3. **Generate Pixel Indices**:
+   Create a flat array of size $\text{film\_area} \times \text{spp}$. Optimize division by `spp` using bit-shift operations if `spp` is a power of two [S1, unofficial].
+
+4. **Compute 2D Image Plane Position**:
+   For each flat index `idx`:
+   $$ y = \lfloor \text{idx} / \text{width} \rfloor $$
+   $$ x = \text{idx} \pmod{\text{width}} $$
+   If border sampling is enabled, subtract the border offset. Add any crop offset to the coordinates [S1, unofficial].
+
+5. **Sample Ray**:
+   - Get aperture sample.
+   - Compute shutter time with optional jitter.
+   - Sample wavelength.
+   - Adjust pixel coordinate for crop.
+   - Call `sensor.sample_ray_differential`.
+   - Scale the differential by $1/\sqrt{\text{spp}}$ [S1, unofficial].
+
+6. **Intersect Ray**:
+   - If OptiX is active, test/intersect the scene using OptiX.
+   - If SDF is present, call `wf.ray_intersect` (wavefront SDF intersection).
+   - Merge results using the validity condition:
+     $$ \text{valid} = (\neg \text{use\_optix}) \mid (si_2.t < si.t) $$
+     This prefers SDF hits when OptiX is disabled or when the SDF intersection is closer than the OptiX intersection [S1, unofficial].
+
+7. **Compute Ray Weight and Reparameterize Gradient**:
+   - Evaluate sensor direction sample.
+   - Clamp ray weight to 1.0 if it is non-positive to avoid NaN propagation during backpropagation [S1, unofficial].
+   - Replace gradient using `dr.replace_grad` to stabilize backpropagation [S1, unofficial].
+
+8. **Accumulate AOVs**:
+   Store RGB channels, alpha ($1.0$ if valid ray else $0.0$), and determinant $\times$ ray_weight. Write to the film block [S1, unofficial].
+
+9. **Antithetic Sampling (Optional)**:
+   If enabled, mirror the pixel sample offset:
+   $$ \text{pos}_{\text{mirror}} = \text{pos} - \mathbf{r} + 1.0 $$
+   Clone the sampler and call `eval_sample` again to reduce pixel-level variance [S1, unofficial].
+
+10. **Backward Pass**:
+    Call `render` with `evaluate=False` and `mode=Backward`. Trigger Dr.Jit backward propagation from `image * grad_in` [S1, unofficial].
+
+11. **Forward Pass**:
+    Call `render` with `evaluate=False` and `mode=Forward`. Extract gradients via `dr.grad(image)` [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import drjit as dr
+import mitsuba as mi
+
+def differentiable_sdf_render(scene, camera, spp, max_depth=4, force_optix=False, antithetic_sampling=False):
+    """
+    Renders an SDF scene and computes gradients with respect to SDF parameters.
+    """
+    # 1. Initialize Sampler and Film
+    film = camera.film()
+    width = film.width()
+    height = film.height()
+    film_area = width * height
+    wavefront_size = film_area * spp
+    
+    # Enforce hard limits to prevent memory overflow
+    if dr.backend_is("llvm"):
+        limit = 0xffffffff
+    elif dr.backend_is("cuda"):
+        limit = 0x40000000
+    else:
+        limit = 0xffffffff # Default fallback
+        
+    if wavefront_size > limit:
+        raise ValueError(f"Wavefront size {wavefront_size} exceeds limit {limit}")
+
+    # 2. Prepare SDF Shape
+    shapes = scene.shapes()
+    sdf_shapes = [s for s in shapes if '_sdf_' in s.id()]
+    
+    if not sdf_shapes:
+        raise ValueError("No SDF shape found in scene (ID must contain '_sdf_')")
+        
+    use_optix = force_optix or (len(shapes) > 1)
+    
+    # 3. Generate Pixel Indices
+    # Create flat array of indices
+    indices = dr.arange(dr.uint32, wavefront_size)
+    
+    # Optimize division by SPP if power of two
+    if spp & (spp - 1) == 0:
+        spp_shift = dr.log2(spp)
+        pixel_indices = indices >> spp_shift
+    else:
+        pixel_indices = indices // spp
+        
+    # 4. Compute 2D Image Plane Position
+    y = pixel_indices // width
+    x = pixel_indices % width
+    
+    # Handle border/crop offsets (assuming border_offset and crop_offset are defined)
+    # border_offset = ...
+    # crop_offset = ...
+    # if border_sampling:
+    #     x -= border_offset
+    #     y -= border_offset
+    # x += crop_offset
+    # y += crop_offset
+    
+    # 5. Sample Ray
+    # Get aperture sample and shutter time
+    # aperture_sample = sampler.next_2d()
+    # shutter_time = sampler.next_1d()
+    
+    # Sample wavelength
+    # wavelength = sampler.next_1d()
+    
+    # Adjust pixel coordinate for crop
+    # pixel_coord = Vector2f(x, y)
+    
+    # Call sensor.sample_ray_differential
+    # ray, differential = camera.sensor().sample_ray_differential(pixel_coord, aperture_sample, shutter_time, wavelength)
+    
+    # Scale differential by 1/sqrt(spp)
+    # differential *= 1.0 / dr.sqrt(spp)
+    
+    # 6. Intersect Ray
+    si_optix = None
+    si_sdf = None
+    
+    if use_optix:
+        # Test/intersect scene using OptiX
+        # pi_optix = scene.intersect_optix(ray)
+        # si_optix = pi_optix.to_surface_interaction()
+        pass # Placeholder for OptiX specific call
+        
+    # Call wf.ray_intersect for SDF
+    # si_sdf = sdf_shapes[0].intersect(ray)
+    
+    # Merge results
+    # valid_sdf = si_sdf is not None
+    # valid_optix = si_optix is not None
+    
+    # valid = (not use_optix) | (si_sdf.t < si_optix.t)
+    # if valid:
+    #     si = si_sdf
+    # else:
+    #     si = si_optix
+        
+    # 7. Compute Ray Weight and Reparameterize Gradient
+    # ray_weight = sensor.direction_sample(ray)
+    
+    # Clamp weight to 1.0 if non-positive
+    if ray_weight <= 0.0:
+        ray_weight = 1.0
+        
+    # Replace gradient to stabilize backpropagation
+    # dr.replace_grad(ray_weight, 1.0) # Or similar stabilization technique
+        
+    # 8. Accumulate AOVs
+    # rgb = shading(ray, si)
+    # alpha = 1.0 if valid else 0.0
+    # determinant = ...
+    # aov = determinant * ray_weight
+    
+    # Write to film block
+    # film.block().set_rgb(rgb)
+    # film.block().set_alpha(alpha)
+    
+    # 9. Antithetic Sampling (Optional)
+    if antithetic_sampling:
+        # Mirror pixel sample offset
+        # pos_mirror = pos - r + 1.0
+        # sampler_clone = sampler.clone()
+        # eval_sample(sampler_clone, pos_mirror)
+        pass # Placeholder for antithetic logic
+        
+    # 10. Backward Pass
+    # dr.forward_mode(False)
+    # dr.backward_mode(True)
+    # render(...)
+    # dr.backward(image * grad_in)
+    
+    # 11. Forward Pass
+    # dr.forward_mode(True)
+    # dr.backward_mode(False)
+    # render(...)
+    # grads = dr.grad(image)
+    
+    return image, grads
+```
+
+### Edge Cases and Pitfalls
+- **Wavefront Size Limit**: If `film_dimensions * spp` exceeds the GPU/LLVM limit ($0\text{x}40000000$ for CUDA, $0\text{x}ffffffff$ for LLVM), the integrator raises an exception to prevent out-of-bounds memory access [S1, unofficial].
+- **Missing SDF Shape**: If no scene shape contains `'_sdf_'` in its ID, the integrator raises a `ValueError` because the SDF BSDF cannot be attached [S1, unofficial].
+- **Division by Zero in Ray Weight**: Ray weight is clamped to 1.0 when $\le 0.0$ before gradient replacement to avoid NaN propagation during backpropagation [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Linear with respect to the number of pixels and samples per pixel, plus the cost of SDF ray marching per sample.
+- **Memory Complexity**: Linear with respect to the SDF grid size and the wavefront size (limited by hardware constraints).
+- **Measured Performance**: Performance depends on the backend (CUDA vs LLVM). Raw CUDA PTX compilation leads to lower compilation times and better performance compared to OptiX for scenes with only SDFs [S1, unofficial].
+- **Scaling**: Scales with resolution and SPP, but limited by the wavefront size constraints.
+- **Strengths**: Enables gradient-based optimization of SDF geometry; supports differentiable shading and intersection.
+- **Limitations**: SDF sphere tracing is implemented in Python, which may reduce performance compared to C++ plugins; limited support for complex scenes with multiple shapes without OptiX; some features like disabling gradient propagation through pixel filter normalization are not supported in pre-built modules [S1, unofficial].
+- **When to use**: When optimizing SDF parameters to match target images or when differentiable rendering of distance fields is required.
+- **When not to use**: For non-differentiable rendering tasks where performance is critical and Python-based SDF tracing is too slow; for scenes requiring complex light transport beyond direct illumination without MIS support.
+
+## Background
+The method originates from the SIGGRAPH 2022 paper "Differentiable Signed Distance Function Rendering" by Delio Vicini, Sébastien Speierer, and Wenzel Jakob [S1, unofficial]. It was implemented as part of the Mitsuba 3 renderer using the Dr.Jit automatic differentiation framework [S1, unofficial]. The code repository provides a starting point for improved or alternative versions of differentiable SDF rendering and serves as an example of building a customized optimization pipeline [S1, unofficial].
+
+## Sources
+[S1] Differentiable Signed Distance Function Rendering, https://github.com/rgl-epfl/differentiable-sdf-rendering, fetched 2026-10-26 (unofficial)

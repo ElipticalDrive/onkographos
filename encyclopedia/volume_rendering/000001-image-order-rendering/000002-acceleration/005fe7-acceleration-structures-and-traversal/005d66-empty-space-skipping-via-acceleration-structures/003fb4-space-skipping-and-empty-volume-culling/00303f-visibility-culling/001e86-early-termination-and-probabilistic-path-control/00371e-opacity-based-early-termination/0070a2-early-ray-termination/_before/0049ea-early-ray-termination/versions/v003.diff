@@ -1,0 +1,208 @@
+--- v002.md
++++ v003.md
+@@ -4,100 +4,85 @@
+ 
+ ## Overview
+-Early Ray Termination (ERT) is an acceleration technique for front-to-back volume ray casting that terminates ray traversal when the accumulated opacity exceeds a predefined threshold, thereby skipping the computation of distant, occluded voxels [S3, S4, unofficial][S10]. It differs from its parent method, Opacity-based Early Termination, by specifically implementing this check within the per-ray traversal loop of image-order rendering, exploiting the physical property that once a ray becomes sufficiently opaque, subsequent samples contribute negligibly to the final pixel color [S1][S13, unofficial]. Unlike space-skipping methods that bypass empty regions, ERT handles semi-transparent and opaque surfaces by stopping only when visual contribution ceases, making it distinct from Maximum Intensity Projection (MIP) where the entire ray path must be traversed [S35, unofficial].
++Early Ray Termination (ERT) is a rendering optimization that halts front-to-back ray integration once the accumulated opacity exceeds a predefined threshold, thereby skipping samples that contribute negligibly to the final pixel color [S3, unofficial][S4, unofficial]. It differs from [Conservative Early Ray Termination](1949-conservative-early-ray-termination.md) by evaluating opacity per-pixel along the ray path rather than using subscreen aggregation during scan conversion [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, volume dataset $V$, transfer function $TF$, and termination threshold $\alpha_{thresh}$ (typically $0.95 \le \alpha_{thresh} \le 1.0$) [S4, S11, S18, unofficial].
+-*   **Output:** Final pixel color $C_{final}$ and accumulated opacity $\alpha_{final}$ [S1].
++**Inputs and Outputs**
++- **Inputs**: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, radiance field query function returning color $\mathbf{c}$ and density $\sigma$, maximum sample count $N_{\max}$, near/far planes $t_{\min}, t_{\max}$, step size $s$, and termination epsilon $\epsilon$ [S1].
++- **Outputs**: Final pixel color $\mathbf{C}_{\text{out}}$, accumulated opacity $\alpha_{\text{acc}}$, accumulated depth $D_{\text{acc}}$, and sample count $n$.
+ 
+-**Data Structures:**
+-*   **Accumulators:** Two scalar variables per ray: $C_{acc}$ (accumulated color, initialized to background color) and $\alpha_{acc}$ (accumulated opacity, initialized to 0.0) [S1, S10].
+-*   **Ray State:** Current position $\mathbf{p}$ along the ray, typically updated by $\mathbf{p} \leftarrow \mathbf{p} + \Delta t \cdot \mathbf{d}$, where $\Delta t$ is the step size [S10, S12].
++**Data Structures**
++- **Accumulators**: Floating-point variables for accumulated color $\mathbf{C}_{\text{out}}$, accumulated opacity $\alpha_{\text{acc}}$, and depth $D_{\text{acc}}$ [G].
++- **Ray Parameters**: $t_{\min}$, $t_{\max}$, step size $s$ [G].
+ 
+-**Numbered Steps:**
+-1.  Initialize $C_{acc} = C_{bg}$ and $\alpha_{acc} = 0.0$ [S1].
+-2.  Start ray traversal from the near plane of the volume bounding box [S10].
+-3.  For each sample step $i$:
+-    a.  Sample the volume at current position $\mathbf{p}_i$ to obtain density $\sigma_i$ and color $C_i$ [S1, S12].
+-    b.  Compute sample opacity $\alpha_i = 1 - e^{-\sigma_i \Delta t}$ [G] (standard volume rendering approximation).
+-    c.  Compute transmittance $T_i = e^{-\sigma_i \Delta t}$ [G].
+-    d.  Update accumulators:
+-        $$ C_{acc} \leftarrow C_{acc} + C_i \cdot \alpha_i \cdot (1 - \alpha_{acc}) $$
+-        $$ \alpha_{acc} \leftarrow \alpha_{acc} + \alpha_i \cdot (1 - \alpha_{acc}) $$
+-    e.  **Check Termination Condition:** If $\alpha_{acc} \ge \alpha_{thresh}$, break the loop [S1, S10][S18, unofficial].
+-    f.  If $\mathbf{p}_i$ is outside the volume bounding box, break the loop [S10].
+-4.  Return $C_{acc}$ as the final pixel color [S1].
++**Numbered Steps**
++1. **Initialization**: Initialize $\mathbf{C}_{\text{out}} = (0,0,0)$, $\alpha_{\text{acc}} = 0$, $D_{\text{acc}} = 0$, and $n = 0$ [G].
++2. **Loop Condition**: While $n < N_{\max}$ and $\alpha_{\text{acc}} < 1 - \epsilon$:
++   a. Compute sample position $\mathbf{p} = \mathbf{o} + t \cdot \mathbf{d}$.
++   b. Query radiance field for color $\mathbf{c}$ and density $\sigma$ at $\mathbf{p}$ [S1].
++   c. Compute transmittance $T = \exp(-\sigma \cdot s)$ [G].
++   d. Compute weight $w = (1 - T) \cdot (1 - \alpha_{\text{acc}})$ [G].
++   e. Update accumulators:
++      $$\mathbf{C}_{\text{out}} \leftarrow \mathbf{C}_{\text{out}} + \mathbf{c} \cdot w$$
++      $$\alpha_{\text{acc}} \leftarrow \alpha_{\text{acc}} + w$$
++      $$D_{\text{acc}} \leftarrow D_{\text{acc}} + t \cdot w$$
++   f. Increment $n$ and advance $t \leftarrow t + s$.
++3. **Termination Check**: If $\alpha_{\text{acc}} \ge 1 - \epsilon$, terminate early [S17, unofficial][S28].
++4. **Background**: If $\alpha_{\text{acc}} < 1$, blend with background color $\mathbf{C}_{\text{bg}}$: $\mathbf{C}_{\text{final}} = \mathbf{C}_{\text{out}} + \mathbf{C}_{\text{bg}} \cdot (1 - \alpha_{\text{acc}})$ [G].
+ 
+-**Formulas:**
+-The core termination condition is:
+-$$ \alpha_{acc} \ge \alpha_{thresh} $$
+-where $\alpha_{thresh}$ is a user-defined value close to 1.0 [S10][S18, unofficial]. Some implementations use a color-difference epsilon $\epsilon$ to define significance, terminating when $|C_{out} - C_{in}| \le \epsilon$ or $\alpha_{acc} \ge 1 - \epsilon$ [S17, unofficial].
++**Formulas**
++- **Termination Criterion**: The ray terminates when the accumulated opacity satisfies:
++  $$\alpha_{\text{acc}} \ge 1 - \epsilon$$
++  This threshold corresponds to the point where potential color change falls below $\epsilon$ [S17, unofficial].
+ 
+-**Parameters:**
+-*   **$\alpha_{thresh}$:** The opacity threshold. Common values are 0.95, 0.98, or 1.0 [S4, S11, unofficial][S28]. A value of 0.95 is often used because contributions beyond this point are visually negligible [S4, unofficial].
+-*   **$\epsilon$:** A small constant for color stability checks (e.g., $10^{-4}$) [S17, unofficial].
+-*   **Step Size:** Equidistant sampling steps, e.g., 0.5 voxels [S12].
++**Parameters**
++- $\epsilon$ (early_stop_eps): Default $10^{-4}$ [S1]. Controls precision vs. speed.
++- $N_{\max}$ (max_samples): Not given in the sources.
++- $s$ (render_step_size): Default $10^{-3}$ [S1].
++- $t_{\min}$ (near_plane): Default $0.0$ [S1].
++- $t_{\max}$ (far_plane): Default $10^{10}$ [S1].
++- Typical opacity thresholds range from $0.95$ to $0.99$ [S4, unofficial][S28].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Systematic Bias:** Using a fixed threshold introduces a systematic bias in the rendered image because rays are terminated before reaching full opacity (1.0), leading to an overall decrease in illumination and loss of high-frequency details [S9, S16, S24, unofficial].
+-*   **Unbiased Alternative:** To avoid bias, Russian Roulette can be used to probabilistically terminate rays, though this adds noise [S9, S16, unofficial].
+-*   **GPU Divergence:** On older GPUs, early loop exits could cause thread divergence. Modern GPUs (Shader Model 3+) handle `break` statements efficiently, but divergent execution remains a consideration [S5, S27, S32, unofficial].
+-*   **MIP Incompatibility:** ERT cannot be used with Maximum Intensity Projection, as the maximum value might lie behind the opaque region [S35, unofficial].
++**Edge Cases and Pitfalls**
++- **Bias**: The predefined threshold introduces a systematic bias in the rendered image [S9, unofficial][S24, unofficial]. Russian Roulette can remove this bias at the cost of added noise [S9, unofficial][S16, unofficial].
++- **Divergence**: Early loop exit is not always optimal on modern GPUs due to divergent execution, though it remains a standard optimization [S32, unofficial].
++- **Incompatibility**: Not applicable to Maximum Intensity Projection (MIP), which requires browsing the entire ray path [S35, unofficial].
++- **Order Dependency**: Requires front-to-back compositing order, which typically requires multiple passes to extract front and back faces if not precomputed [S26, unofficial].
+ 
+-**Pseudocode:**
++**Pseudocode**
+ ```python
+-def early_ray_termination(ray_origin, ray_direction, volume, transfer_function, alpha_threshold=0.99):
+-    """
+-    Renders a single ray using Early Ray Termination.
++def render_ray_early_termination(ray_origin, ray_direction, radiance_field, 
++                                 max_samples, t_min, t_max, step_size, epsilon, background_color):
++    accumulated_color = [0.0, 0.0, 0.0]
++    accumulated_opacity = 0.0
++    accumulated_depth = 0.0
++    num_samples = 0
+     
+-    Args:
+-        ray_origin: vec3, start of the ray.
+-        ray_direction: vec3, normalized direction vector.
+-        volume: VolumeData, provides sample() method.
+-        transfer_function: TF, maps density to color and opacity.
+-        alpha_threshold: float, opacity at which to stop (default 0.99).
+-        
+-    Returns:
+-        color: vec3, final composited color.
+-    """
+-    # Initialize accumulators
+-    acc_color = vec3(0.0)  # Background color, typically black or white depending on setup
+-    acc_alpha = 0.0
+-    
+-    # Ray parameters
+-    step_size = 0.5  # Example step size in voxels
+-    max_steps = 1000 # Safety limit to prevent infinite loops
+-    
+-    # Start at near plane (simplified for this example)
+-    current_pos = ray_origin
+-    
+-    for i in range(max_steps):
+-        # 1. Sample volume
+-        density = volume.sample(current_pos)
+-        
+-        # 2. Compute sample properties
+-        # Note: In practice, transfer function maps density to alpha and color
+-        sample_alpha, sample_color = transfer_function(density)
+-        
+-        # 3. Update accumulators (Front-to-Back)
+-        # Transmittance T = 1 - alpha_sample (approximation for small steps)
+-        # More accurately: T = exp(-density * step_size)
+-        # Here we use the standard compositing equation:
+-        contribution = sample_color * sample_alpha * (1.0 - acc_alpha)
+-        acc_color += contribution
+-        acc_alpha += sample_alpha * (1.0 - acc_alpha)
+-        
+-        # 4. Check Termination
+-        if acc_alpha >= alpha_threshold:
++    t = t_min
++    while num_samples < max_samples and accumulated_opacity < 1.0 - epsilon:
++        if t > t_max:
+             break
+             
+-        # 5. Advance ray
+-        current_pos += ray_direction * step_size
++        sample_pos = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
++        color, density = radiance_field.query(sample_pos)
+         
+-        # 6. Check bounds (simplified)
+-        if not volume.is_inside(current_pos):
+-            break
+-            
+-    return acc_color
++        transmittance = math.exp(-density * step_size)
++        weight = (1.0 - transmittance) * (1.0 - accumulated_opacity)
++        
++        accumulated_color[0] += color[0] * weight
++        accumulated_color[1] += color[1] * weight
++        accumulated_color[2] += color[2] * weight
++        accumulated_depth += t * weight
++        
++        accumulated_opacity += weight
++        
++        num_samples += 1
++        t += step_size
++        
++    if accumulated_opacity < 1.0:
++        accumulated_color[0] += background_color[0] * (1.0 - accumulated_opacity)
++        accumulated_color[1] += background_color[1] * (1.0 - accumulated_opacity)
++        accumulated_color[2] += background_color[2] * (1.0 - accumulated_opacity)
++        
++    return accumulated_color, accumulated_opacity, accumulated_depth, num_samples
+ ```
+ 
+@@ -105,26 +90,24 @@
+ 
+ ### [Conservative Early Ray Termination](1949-conservative-early-ray-termination.md)
+-Uses a lookup table and subscreen aggregation to prune cells during scan conversion without per-pixel state, suitable for parallel rasterization.
++An optimization for the scan conversion phase that prunes cell processing using a lookup table and subscreen aggregation, allowing visibility decisions without per-pixel overhead during parallel rasterization.
+ 
+ ### [Early Termination for Gaussian Splatting](4764-early-termination-for-gaussian-splatting.md)
+-Stops blending for 3D Gaussians when opacity thresholds are met, leveraging transmittance models for order-independent rendering.
++Stops front-to-back blending for 3D Gaussians once accumulated opacity or transmittance reaches a threshold, applicable to order-independent variants by leveraging physically grounded transmittance models.
+ 
+ ### [Early Ray Termination with Binary Mask](6641-early-ray-termination-with-binary-mask.md)
+-Combines ERT with a binary mask to skip empty cells and jump to non-empty regions, reducing sampling overhead.
++Uses a binary volume to skip fully transparent cells and terminates evaluation when accumulated transparency falls below a threshold, explicitly encoding opaque voxels into a bit-mask for direct jumps.
+ 
+ ### [Hybrid Surface-Volume Rendering with Masking and Early Ray Termination](8155-hybrid-surface-volume-rendering-with-masking-and-early-ray-t.md)
+-Accelerates hybrid rendering by combining ERT for volumes with spatial masking for surface instruments in surgical simulators.
++Combines ERT for volume data with spatial masking in sheared image space for surface instruments, limiting recomputation to affected pixels in surgical simulators.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces the dependence on depth complexity. For opaque-only environments, it eliminates depth complexity dependence, making cost nearly linear with image size [S14, unofficial]. Savings can be up to an order of magnitude for scenes with opaque/semi-transparent surfaces [S1].
+-*   **Memory Complexity:** Minimal overhead; requires only per-ray accumulators ($O(1)$ extra memory per ray) [S1].
+-*   **Performance:** Can reduce execution time by a factor of 5 to 11 depending on dataset density and threshold [S24, unofficial].
+-*   **Strengths:** Simple to implement, highly effective for opaque or semi-transparent surfaces, reduces redundant computation for occluded regions [S1][S4, unofficial].
+-*   **Limitations:** Introduces systematic bias (darkening) if threshold is too low; not applicable to MIP; potential GPU thread divergence on older hardware [S9, S16, S35, unofficial].
+-*   **When to Use:** Direct Volume Rendering (DVR) with opaque or semi-transparent structures where visual fidelity allows for minor bias or where Russian Roulette is not feasible [S1][S13, unofficial].
+-*   **When Not to Use:** MIP, or when unbiased illumination is strictly required without noise [S9, S35, unofficial].
++- **Time Complexity**: $O(N)$ worst-case where $N$ is the number of samples, but typically much less due to early termination [S14, unofficial]. For opaque-only environments, eliminates dependence on depth complexity, making cost nearly linear with image size [S14, unofficial].
++- **Memory Complexity**: $O(1)$ per ray [G].
++- **Performance**: Higher $\epsilon$ values reduce rendering time significantly but may introduce artifacts; lower $\epsilon$ values produce higher quality images at the cost of more samples [S17, unofficial]. Performance improvements can reduce execution time by a factor of 5 to 11 [S24, unofficial].
++- **Strengths**: Simple to implement, effective for opaque or semi-opaque volumes, exploits spatial and temporal coherence [S3, unofficial][S4, unofficial].
++- **Limitations**: Introduces systematic bias [S9, unofficial][S24, unofficial]. Divergent execution on modern GPUs can make early loop exit suboptimal [S32, unofficial]. Incompatible with MIP [S35, unofficial]. Requires front-to-back compositing order [S26, unofficial].
+ 
+ ## Background
+-The idea of adaptively terminating ray tracing was first proposed in [34] (Whitted 1980) [S1][S13, unofficial]. Many medical data algorithms stopped after the first surface or opaque voxel, reported in [15, 30, 32] [S1]. The specific technique of Early Ray Termination as known today was introduced by Krüger and Westermann in 2003 [S10]. It is widely used in GPU-based volume ray casting, leveraging modern shader capabilities to break out of loops efficiently [S5, S27, unofficial].
++Early termination was first proposed by Whitwell [S13, unofficial][S14, unofficial]. The technique was formally introduced as Early Ray Termination by Krüger and Westermann in 2003 [S10]. Older GPUs (pre-Shader Model 3) required multi-pass rendering with early-z testing; Shader Model 3+ enabled breaking out of the ray-casting loop directly [S5, unofficial][S32, unofficial]. The method is widely used in medical visualization and real-time rendering pipelines where performance is critical [S1][S24, unofficial].
+ 
+ ## Sources

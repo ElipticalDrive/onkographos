@@ -1,0 +1,237 @@
+# NeRF Pose and Appearance Optimization
+
+Also called: UP-NeRF, Unconstrained Pose-prior-Free Neural Radiance Fields
+
+## Overview
+This method jointly optimizes camera poses and neural scene representations for unconstrained image collections (varying illumination, transient occluders) without camera pose priors [S1, unofficial]. It sets itself apart from standard NeRF optimization by introducing a **candidate head** to handle "hard-pose" images and a **loss scheduling** mechanism to transition from candidate-specific to shared scene representations [S1, unofficial]. Unlike [RoDynRF](11988-rodynrf.md) which focuses on dynamic scenes, or [VMRF](12630-vmrf-view-matching-neural-radiance-fields.md) which uses view matching, this method explicitly decouples transient/hard-pose appearance from the global geometry via surrogate tasks [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ unconstrained images $\{I_i\}_{i=1}^N$ with unknown poses $\{p_i\}$, and known intrinsics (focal length $f$, principal point, resolution $W \times H$) [S1, unofficial]. Ground-truth colors $C(r)$ or deep feature maps $F(r)$ [S1, unofficial].
+*   **Outputs:** Optimized NeRF parameters $\Theta$ (shared MLPs), candidate embeddings $\{\ell_i\}$, and camera poses $\{p_i\}$ [S1, unofficial].
+
+**Data Structures:**
+1.  **Shared NeRF:** Two MLPs, $\Pi_{\theta_1}$ and $\Pi_{\theta_2}$, parameterizing the scene.
+    *   $\Pi_{\theta_1}$: Input $\gamma_x(r(t))$ (positional encoded 3D point), Output $[\sigma(t), z(t)]$ (density, intermediate feature).
+    *   $\Pi_{\theta_2}$: Input $[z(t), \gamma_d(d)]$ (feature, positional encoded direction), Output $c(t)$ (color).
+2.  **Candidate Head:** MLP $\Pi_{\theta_3}$.
+    *   Input $[z(t), \ell_i]$ (shared feature, image-specific embedding), Output $[\sigma_i(t), c_i(t)]$ (candidate density, candidate color).
+3.  **Camera Pose:** Each pose $p_i$ is parameterized as 6 degrees of freedom using the $se(3)$ Lie algebra [S1, unofficial].
+4.  **Candidate Embeddings:** Vector $\ell_i$ for each image $i$. Size is adjustable based on pose difficulty [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **Ray Casting:** For each pixel $(u,v)$ in image $i$, compute ray origin $\hat{o}_i$ and direction $\hat{d}_i$ using current pose estimate $p_i$ and intrinsics [G].
+    $$ \hat{o}_i = t_i $$
+    $$ \hat{d}_i = R_i \begin{pmatrix} (u - W/2)/f \\ -(v - H/2)/f \\ -1 \end{pmatrix} $$
+    where $p_i = (R_i, t_i)$ [G].
+
+2.  **Sampling:** Sample $K$ points $t_k$ along the ray $r(t) = \hat{o}_i + t\hat{d}_i$ using hierarchical sampling (coarse stratified, fine biased) [S1, unofficial].
+
+3.  **Shared Feature Extraction:** For each sample point $t_k$:
+    $$ [\sigma(t_k), z(t_k)] = \Pi_{\theta_1}(\gamma_x(r(t_k))) $$
+    $$ c(t_k) = \Pi_{\theta_2}(z(t_k), \gamma_d(\hat{d}_i)) $$
+
+4.  **Candidate Feature Extraction:** For each sample point $t_k$:
+    $$ [\sigma_i(t_k), c_i(t_k)] = \Pi_{\theta_3}(z(t_k), \ell_i) $$
+
+5.  **Joint Volumetric Rendering:** Compute candidate rendered color $\hat{C}_i(r)$ by combining shared and candidate densities/colors [S1, unofficial]:
+    $$ \hat{C}_i(r) = \sum_{k=1}^K T_i(t_k) \alpha(\sigma(t_k)\delta_k) c(t_k) + \alpha(\sigma_i(t_k)\delta_k) c_i(t_k) $$
+    where opacity $\alpha(\sigma \delta) = 1 - \exp(-\sigma \delta)$, distance $\delta_k = t_{k+1} - t_k$, and transmittance:
+    $$ T_i(t_k) = \exp\left( -\sum_{k'=1}^{k-1} (\sigma(t_{k'}) + \sigma_i(t_{k'})) \delta_{k'} \right) $$
+
+6.  **Shared Rendering:** Compute shared rendered color $\hat{C}(r)$ using only shared parameters (standard NeRF rendering) [S1, unofficial]:
+    $$ \hat{C}(r) = \sum_{k=1}^K T(t_k) \alpha(\sigma(t_k)\delta_k) c(t_k) $$
+    where $T(t_k) = \exp\left( -\sum_{k'=1}^{k-1} \sigma(t_{k'}) \delta_{k'} \right)$.
+
+7.  **Loss Scheduling:** Calculate training progress $l \in [0, 1]$. Compute weight $w_{u,v}(l)$ using hyperparameters $u, v \in [0, 1]$ [S1, unofficial]:
+    $$ w_{u,v}(l) = \begin{cases} 0 & \text{if } l < u \\ \frac{1 - \cos(\pi(l - u)/(v - u))}{2} & \text{if } u \le l < v \\ 1 & \text{if } l \ge v \end{cases} $$
+
+8.  **Total Loss:** Compute photometric loss $\mathcal{L}_{rgb}$ (MSE between ground truth $C(r)$ and rendered color) [S1, unofficial]:
+    $$ \mathcal{L} = w_{u,v} \mathcal{L}_{rgb}(\hat{C}|C) + (1 - w_{u,v}) \mathcal{L}_{rgb}(\hat{C}_i|C) $$
+    *   If $l < u$: $\mathcal{L} = \mathcal{L}_{rgb}(\hat{C}_i|C)$ (Candidate only).
+    *   If $l \ge v$: $\mathcal{L} = \mathcal{L}_{rgb}(\hat{C}|C)$ (Shared only).
+
+9.  **Optimization:** Update $\Theta$, $\{\ell_i\}$, and $\{p_i\}$ using an optimizer (e.g., Adam) minimizing $\mathcal{L}$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_candidate_rendering(ray_origin, ray_direction, candidate_embedding, shared_mlp1, shared_mlp2, candidate_mlp, num_samples):
+    """
+    Computes the candidate-specific rendered color for a single ray.
+    """
+    # 1. Sample points along ray
+    t = sample_points(ray_origin, ray_direction, num_samples) # Hierarchical sampling logic implied
+    points = ray_origin + t * ray_direction
+    
+    # 2. Extract shared features
+    # gamma_x and gamma_d are positional encoding functions
+    encoded_points = positional_encoding_3d(points)
+    sigma_shared, z = shared_mlp1(encoded_points)
+    encoded_dirs = positional_encoding_3d(ray_direction)
+    color_shared = shared_mlp2(concat(z, encoded_dirs))
+    
+    # 3. Extract candidate features
+    candidate_density, candidate_color = candidate_mlp(concat(z, candidate_embedding))
+    
+    # 4. Compute opacities and transmittance
+    # delta is distance between adjacent samples
+    deltas = t[1:] - t[:-1]
+    # Pad deltas for first sample if necessary, or assume t includes boundaries
+    # Standard NeRF assumes t is sorted. 
+    # Opacity alpha = 1 - exp(-sigma * delta)
+    alpha_shared = 1.0 - torch.exp(-sigma_shared * deltas)
+    alpha_candidate = 1.0 - torch.exp(-candidate_density * deltas)
+    
+    # Combined transmittance T_i(t_k) depends on sum of shared and candidate densities
+    # T_i(t_k) = exp(- sum_{k'<k} (sigma(t_k') + sigma_i(t_k')) * delta_k')
+    # We compute cumulative sum of combined density * delta
+    combined_density_delta = (sigma_shared + candidate_density) * deltas
+    # Cumulative sum from end to start for transmittance
+    # T_i(t_k) corresponds to transmittance BEFORE sample k
+    # Using torch.cumprod or manual loop
+    # T_i(t_1) = 1.0
+    # T_i(t_k) = T_i(t_{k-1}) * (1 - alpha_combined(t_{k-1}))
+    
+    alpha_combined = 1.0 - torch.exp(-combined_density_delta)
+    # Transmittance at sample k (before absorption at k)
+    # T_i(t_k) = product_{j=0}^{k-1} (1 - alpha_combined_j)
+    # Note: indices in formula are 1-based. In 0-based tensor:
+    # T[k] = prod_{j=0}^{k-1} (1 - alpha_combined[j])
+    
+    # Efficient computation:
+    # 1 - alpha_combined is the transmission factor for each segment
+    transmission = 1.0 - alpha_combined
+    # Cumulative product of transmissions
+    # T[k] is product of transmissions before k
+    # We need T[k] for each k. 
+    # T[0] = 1.0
+    # T[1] = transmission[0]
+    # T[2] = transmission[0] * transmission[1]
+    
+    # Using cumprod on shifted array
+    # Let's compute cumulative product of transmission
+    cum_trans = torch.cumprod(transmission, dim=0)
+    # T[k] = cum_trans[k-1] if k>0 else 1.0
+    # Prepend 1.0
+    T_i = torch.cat([torch.ones_like(transmission[0:1]), cum_trans[:-1]])
+    
+    # 5. Render
+    # Contribution from shared part: T_i(t_k) * alpha_shared(t_k) * color_shared(t_k)
+    # Contribution from candidate part: T_i(t_k) * alpha_candidate(t_k) * candidate_color(t_k)
+    # Note: Formula (5) in source uses alpha(sigma * delta) for shared and alpha(sigma_i * delta) for candidate
+    # and T_i uses sum of sigmas.
+    
+    term_shared = T_i * alpha_shared * color_shared
+    term_candidate = T_i * alpha_candidate * candidate_color
+    
+    rendered_color = torch.sum(term_shared + term_candidate, dim=0)
+    return rendered_color
+
+def compute_shared_rendering(ray_origin, ray_direction, shared_mlp1, shared_mlp2, num_samples):
+    """
+    Computes the shared NeRF rendered color.
+    """
+    t = sample_points(ray_origin, ray_direction, num_samples)
+    points = ray_origin + t * ray_direction
+    
+    encoded_points = positional_encoding_3d(points)
+    sigma, z = shared_mlp1(encoded_points)
+    encoded_dirs = positional_encoding_3d(ray_direction)
+    color = shared_mlp2(concat(z, encoded_dirs))
+    
+    deltas = t[1:] - t[:-1]
+    alpha = 1.0 - torch.exp(-sigma * deltas)
+    
+    # Transmittance T(t_k) = exp(- sum_{k'<k} sigma(t_k') * delta_k')
+    transmission = 1.0 - alpha
+    cum_trans = torch.cumprod(transmission, dim=0)
+    T = torch.cat([torch.ones_like(transmission[0:1]), cum_trans[:-1]])
+    
+    rendered_color = torch.sum(T * alpha * color, dim=0)
+    return rendered_color
+
+def train_step(images, gt_colors, poses, embeddings, shared_mlp1, shared_mlp2, candidate_mlp, u, v, progress):
+    """
+    Single training step.
+    """
+    # Initialize gradients
+    # ...
+    
+    total_loss = 0.0
+    
+    for i, (img, gt_color) in enumerate(zip(images, gt_colors)):
+        # Get current pose and embedding for image i
+        pose = poses[i]
+        embedding = embeddings[i]
+        
+        # Compute ray origins and directions from pose
+        ray_origins, ray_directions = get_rays(pose, img.shape)
+        
+        # Compute candidate rendering
+        cand_colors = []
+        for origin, direction in zip(ray_origins, ray_directions):
+            c = compute_candidate_rendering(origin, direction, embedding, shared_mlp1, shared_mlp2, candidate_mlp, num_samples)
+            cand_colors.append(c)
+        cand_colors = torch.stack(cand_colors)
+        
+        # Compute shared rendering
+        shared_colors = []
+        for origin, direction in zip(ray_origins, ray_directions):
+            s = compute_shared_rendering(origin, direction, shared_mlp1, shared_mlp2, num_samples)
+            shared_colors.append(s)
+        shared_colors = torch.stack(shared_colors)
+        
+        # Photometric losses
+        loss_cand = torch.mean((gt_color - cand_colors) ** 2)
+        loss_shared = torch.mean((gt_color - shared_colors) ** 2)
+        
+        # Loss scheduling weight
+        if progress < u:
+            w = 0.0
+        elif progress >= v:
+            w = 1.0
+        else:
+            w = (1.0 - torch.cos(torch.pi * (progress - u) / (v - u))) / 2.0
+            
+        loss = w * loss_shared + (1.0 - w) * loss_cand
+        total_loss += loss
+        
+    total_loss /= len(images)
+    return total_loss
+```
+
+**Parameters:**
+*   $u, v$: Loss scheduling hyperparameters. Typical values not given in sources.
+*   $\ell_i$ size: Adjustable based on pose difficulty [S1, unofficial].
+*   Learning rates: Separate or combined optimizers, often different rates for pose vs weights [G].
+
+**Edge Cases and Pitfalls:**
+*   **Hard-pose images:** Images with little overlap or unique details may converge to wrong poses if not handled by the candidate head [S1, unofficial].
+*   **Transient occluders:** The candidate head helps block their influence on pose estimation [S1, unofficial].
+*   **Precision:** Standard floating-point precision issues in ray marching and transmittance computation apply [G].
+
+## Subtopics
+
+### Coarse-to-Fine Positional Encoding
+A strategy to facilitate stable joint optimization, borrowed from BARF [S1, unofficial].
+
+### Feature-based Training
+Using deep feature maps $F$ instead of just color $C$ for training, allowing selective editing and robustness [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Higher than standard NeRF due to the candidate head and dual rendering paths per image [S1, unofficial].
+*   **Memory Complexity:** Increased by storing candidate embeddings $\ell_i$ for each image and the candidate head parameters [S1, unofficial].
+*   **Strengths:** Handles unconstrained internet photo collections (e.g., Phototourism dataset) with varying illumination and transient occluders without pose priors [S1, unofficial].
+*   **Limitations:** Requires careful tuning of $u, v$ and candidate embedding sizes. May be slower to converge than methods with known poses [S1, unofficial].
+*   **When to use:** When camera poses are unknown and images are unconstrained (transients, lighting changes).
+*   **When not to use:** When poses are known or images are clean/consistent (standard NeRF is faster and simpler) [S1, unofficial].
+
+## Background
+Originated in the paper "UP-NeRF: Unconstrained Pose-Prior-Free Neural Radiance Fields" [S1, unofficial]. It addresses limitations of prior NeRF pose estimation methods (like BARF) which struggle with unconstrained images containing transient occluders or varying illumination [S1, unofficial]. It builds on the concept of surrogate tasks and separate modules for transients [S1, unofficial].
+
+## Sources
+[S1] UP-NeRF: Unconstrained Pose-Prior-Free Neural Radiance Fields, https://arxiv.org/abs/2311.03784v2, fetched 2026-10-26 (unofficial)

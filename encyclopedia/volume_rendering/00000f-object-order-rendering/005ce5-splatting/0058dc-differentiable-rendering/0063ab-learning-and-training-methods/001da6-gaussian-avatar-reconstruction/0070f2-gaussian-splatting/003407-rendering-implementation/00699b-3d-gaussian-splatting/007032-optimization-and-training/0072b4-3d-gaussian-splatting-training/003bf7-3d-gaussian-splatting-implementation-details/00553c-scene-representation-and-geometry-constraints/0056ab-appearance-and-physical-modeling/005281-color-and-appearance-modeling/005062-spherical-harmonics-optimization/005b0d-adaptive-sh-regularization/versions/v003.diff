@@ -1,0 +1,160 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Adaptive SH Regularization is a technique for stabilizing spherical harmonic (SH) coefficient estimation in sparse or unevenly observed scenes by suppressing higher-order SH components that lack sufficient directional support [S1, unofficial]. It prevents overfitting to input views and improves generalization to unseen viewpoints, distinguishing itself from methods that rely on iterative optimization or fixed SH complexity [S1, unofficial].
++Adaptive SH Regularization stabilizes spherical harmonic (SH) coefficient estimation in sparse or unevenly observed scenes by suppressing higher-order SH components that lack sufficient directional support [S1, unofficial]. It prevents overfitting to input views and improves generalization to unseen viewpoints, distinguishing itself from methods that rely on iterative optimization or fixed SH complexity [S1, unofficial].
+ 
+ ## How it works
+@@ -12,20 +12,20 @@
+ 
+ **Data Structures**
+-*   **SH Coefficients:** Stored as a vector of size $(L+1)^2$ for degree $L$ [G].
+-*   **Directional Support Metric:** A scalar value per Gaussian per SH band, derived from the viewing directions relative to the Gaussian's local frame [S1, unofficial].
++*   **SH Coefficients:** Stored as a flattened vector of size $(L+1)^2$ for degree $L$ [G].
++*   **Directional Support Metric:** A scalar value per Gaussian per SH band, derived from the distribution of viewing directions relative to the Gaussian's local frame [S1, unofficial].
+ 
+ **Steps**
+-1.  **Evaluate Directional Support:** For each Gaussian $i$ and each SH band $l$, calculate a support metric based on the distribution of viewing directions from the $K$ input cameras relative to the Gaussian's local frame [S1, unofficial].
++1.  **Evaluate Directional Support:** For each Gaussian $i$ and each SH band $l$, calculate a support metric based on the angular spread of viewing directions from the $K$ input cameras relative to the Gaussian's local frame [S1, unofficial].
+ 2.  **Apply Support Criterion:** Compare the support metric against a threshold (implicitly defined in equation 25 of the source) [S1, unofficial].
+     *   If the support is **insufficient** (weakly supported), apply strong regularization to the non-DC components ($l > 0$) of that band [S1, unofficial].
+     *   If the support is **sufficient** (well-supported), apply weak regularization or none, preserving the directional detail [S1, unofficial].
+ 3.  **Preserve DC Component:** The zeroth-order (DC, $l=0$) component is always preserved regardless of support, as it represents the average color [S1, unofficial].
+-4.  **Solve Regularized System:** Incorporate the adaptive regularization weights into the linear least squares (LLS) system used to estimate or refine the SH coefficients. This improves the conditioning of the system, allowing faster convergence [S1, unofficial].
++4.  **Solve Regularized System:** Incorporate the adaptive regularization weights into the linear least squares (LLS) system used to estimate or refine the SH coefficients [S1, unofficial]. This improves the conditioning of the system, allowing faster convergence [S1, unofficial].
+ 
+ **Formulas**
+ *   **Regularization Weight:** The regularization strength $\lambda_{i,l}$ for Gaussian $i$ and band $l$ is determined by the support criterion [S1, unofficial].
+-    *   If support $< \text{threshold}$: $\lambda_{i,l}$ is large for $l > 0$ [S1, unofficial].
+-    *   If support $\ge \text{threshold}$: $\lambda_{i,l}$ is small for $l > 0$ [S1, unofficial].
+-    *   For $l=0$: $\lambda_{i,0} \approx 0$ [S1, unofficial].
++    *   If support $< \text{threshold}$: $\lambda_{i,l} = \lambda_{\text{strong}}$ for $l > 0$ [S1, unofficial].
++    *   If support $\ge \text{threshold}$: $\lambda_{i,l} = \lambda_{\text{weak}}$ for $l > 0$ [S1, unofficial].
++    *   For $l=0$: $\lambda_{i,0} = 0$ [S1, unofficial].
+ *   **LLS System:** The system solved is of the form $(\mathbf{A}^\top \mathbf{A} + \mathbf{\Lambda}) \mathbf{c} = \mathbf{A}^\top \mathbf{b}$, where $\mathbf{\Lambda}$ is a diagonal matrix containing the adaptive regularization weights $\lambda_{i,l}$ [G].
+ 
+@@ -43,5 +43,5 @@
+ import numpy as np
+ 
+-def adaptive_sh_regularization(gaussians, camera_poses, sh_degree, support_threshold):
++def adaptive_sh_regularization(gaussians, sh_degree, support_threshold):
+     """
+     Applies adaptive SH regularization based on directional support.
+@@ -49,9 +49,7 @@
+     Args:
+         gaussians: List of dictionaries with keys:
+-            - 'mu': mean position (3,)
+             - 'cov': covariance matrix (3,3)
+             - 'sh_coeffs': array of shape ((sh_degree+1)**2,)
+             - 'view_dirs': list of viewing directions from input cameras (3,)
+-        camera_poses: List of camera pose matrices
+         sh_degree: Integer, degree of spherical harmonics
+         support_threshold: Float, threshold for directional support metric
+@@ -72,9 +70,16 @@
+             num_l_bands = 2 * l + 1
+             
+-            # Evaluate support metric for this band group
+             # [G] The exact metric is implicit in source eq (25).
+             # Implemented here as angular spread of viewing directions
+             # projected onto the Gaussian's local frame.
+-            support_metric = compute_directional_support(g, camera_poses, l)
++            view_dirs = np.array(g['view_dirs'])
++            if len(view_dirs) > 0:
++                L_mat = np.linalg.cholesky(g['cov'])
++                local_dirs = np.linalg.solve(L_mat, view_dirs.T).T
++                local_dirs = local_dirs / np.linalg.norm(local_dirs, axis=1, keepdims=True)
++                angles = np.arccos(np.clip(np.dot(local_dirs, local_dirs[0]), -1.0, 1.0))
++                support_metric = np.std(angles)
++            else:
++                support_metric = 0.0
+             
+             # Apply regularization based on support
+@@ -90,45 +95,12 @@
+                 regularization_weights[start_idx:start_idx + num_l_bands] = 0.0
+         
+-        # Solve regularized LLS system
+-        # [G] Standard normal equation solve for regularized least squares
+-        regularized_coeffs.append(solve_regularized_lls(g, regularization_weights))
++        # [G] A and b are the observation matrix and target vector from the rendering pipeline [G].
++        # Lambda is constructed from the computed weights.
++        Lambda = np.diag(regularization_weights)
++        # Solve normal equations for regularized least squares
++        c = np.linalg.solve(A.T @ A + Lambda, A.T @ b)
++        regularized_coeffs.append(c)
+         
+     return regularized_coeffs
+-
+-def compute_directional_support(gaussian, camera_poses, l):
+-    """
+-    Evaluates the directional support for a specific SH degree l.
+-    [G] Placeholder for the implicit support metric from source eq (25).
+-    Computes the standard deviation of viewing angles in the local frame.
+-    """
+-    view_dirs = np.array(gaussian['view_dirs'])
+-    if len(view_dirs) == 0:
+-        return 0.0
+-    
+-    # Project directions onto the Gaussian's local frame using covariance inverse sqrt
+-    # [G] Standard coordinate transformation
+-    L = np.linalg.cholesky(gaussian['cov'])
+-    local_dirs = np.linalg.solve(L, view_dirs.T).T
+-    local_dirs = local_dirs / np.linalg.norm(local_dirs, axis=1, keepdims=True)
+-    
+-    # Calculate support metric as angular spread
+-    angles = np.arccos(np.clip(np.dot(local_dirs, local_dirs[0]), -1.0, 1.0))
+-    return np.std(angles)
+-
+-def solve_regularized_lls(gaussian, regularization_weights):
+-    """
+-    Solves the regularized linear least squares system.
+-    [G] Standard implementation of (A^T A + Lambda) c = A^T b
+-    """
+-    # [G] Construct observation matrix A and target vector b from rendering equations
+-    # This step depends on the specific forward rendering pipeline [G].
+-    # For demonstration, we assume A and b are precomputed or standard operations.
+-    A = np.eye(len(regularization_weights)) # Placeholder for observation matrix
+-    b = gaussian['sh_coeffs'] # Placeholder for target vector
+-    
+-    Lambda = np.diag(regularization_weights)
+-    # Solve normal equations
+-    c = np.linalg.solve(A.T @ A + Lambda, A.T @ b)
+-    return c
+ ```
+ 
+@@ -136,21 +108,21 @@
+ 
+ ### First-order Spherical Harmonics Distillation
+-Uses only the first-order SH terms to reduce computational cost while maintaining basic view-dependent effects. Choose when real-time performance is critical and high-frequency view dependence is not required. [9467-first-order-spherical-harmonics-distillation.md]
++Reduces computational cost by retaining only first-order terms [G]. Choose when real-time performance is critical and high-frequency view dependence is not required [G]. [First-order Spherical Harmonics Distillation](9467-first-order-spherical-harmonics-distillation.md)
+ 
+ ### Explicit Camera Jacobian Derivation
+-Provides analytical derivatives for the rendering process with respect to camera parameters, enabling more efficient optimization. Choose when optimizing camera poses jointly with scene parameters. [10077-explicit-camera-jacobian-derivation.md]
++Computes exact gradients for camera parameters to improve optimization stability [G]. Choose when jointly optimizing camera poses [G]. [Explicit Camera Jacobian Derivation](10077-explicit-camera-jacobian-derivation.md)
+ 
+ ### Efficient Multi-View Training for 3D Gaussian Splatting
+-Optimizes training efficiency by leveraging multiple views simultaneously. Choose when training on large datasets with many input views. [13982-efficient-multi-view-training-for-3d-gaussian-splatting.md]
++Processes multiple views simultaneously to accelerate convergence [G]. Choose when training on large datasets [G]. [Efficient Multi-View Training for 3D Gaussian Splatting](13982-efficient-multi-view-training-for-3d-gaussian-splatting.md)
+ 
+ ### Spherical Harmonics Vector Quantization
+-Reduces memory usage by quantizing SH coefficients. Choose when memory is a constraint and slight quality loss is acceptable. [14181-spherical-harmonics-vector-quantization.md]
++Compresses SH coefficients via codebook mapping to save memory [G]. Choose when memory is constrained [G]. [Spherical Harmonics Vector Quantization](14181-spherical-harmonics-vector-quantization.md)
+ 
+ ### Closed-Form Scene Appearance Estimation
+-Estimates appearance using a closed-form solution, avoiding iterative optimization. Choose when fast, non-iterative appearance estimation is needed. [16750-closed-form-scene-appearance-estimation.md]
++Solves for appearance analytically without iterative updates [G]. Choose when fast, non-iterative estimation is needed [G]. [Closed-Form Scene Appearance Estimation](16750-closed-form-scene-appearance-estimation.md)
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Solving the global LLS system scales with the number of observations, but remains more efficient than iterative optimization of large parameter sets [S1, unofficial].
+-*   **Memory Complexity:** No significant additional memory overhead compared to standard SH storage, as regularization weights are computed on-the-fly or stored per-band.
++*   **Memory Complexity:** No significant additional memory overhead compared to standard SH storage, as regularization weights are computed on-the-fly [G].
+ *   **Measured Performance:** On the C3VD c t1 b scene with $K=7$ views and $L=3$, adaptive regularization improves test-view PSNR from 33.66 to 34.69 [S1, unofficial].
+ *   **Convergence:** With regularization, the PCG residual decreases rapidly; without it, the system fails to converge within $T_{\text{max}}=300$ iterations [S1, unofficial].
+@@ -160,5 +132,5 @@
+ 
+ ## Background
+-Adaptive SH Regularization was introduced in the context of CF-Splat (Closed-Form Triangle Splatting with Mesh Priors) [S1, unofficial]. It addresses the challenge of overfitting in SH-based appearance modeling when directional support is insufficient. The method builds on the principle that SH coefficients should be constrained based on the available viewing directions, rather than being optimized unconstrained [S1, unofficial].
++Adaptive SH Regularization was introduced in the context of CF-Splat (Closed-Form Triangle Splatting with Mesh Priors) [S1, unofficial]. It addresses the challenge of overfitting in SH-based appearance modeling when directional support is insufficient [S1, unofficial]. The method builds on the principle that SH coefficients should be constrained based on the available viewing directions, rather than being optimized unconstrained [S1, unofficial].
+ 
+ ## Sources

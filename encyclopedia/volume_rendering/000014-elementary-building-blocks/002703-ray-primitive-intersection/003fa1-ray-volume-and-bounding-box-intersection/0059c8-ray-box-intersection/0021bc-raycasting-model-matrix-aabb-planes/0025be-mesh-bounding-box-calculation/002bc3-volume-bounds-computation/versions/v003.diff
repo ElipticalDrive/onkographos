@@ -1,0 +1,253 @@
+--- v002.md
++++ v003.md
+@@ -1,129 +1,145 @@
+ # Volume Bounds Computation
+ 
+-Also called: computeVolumeBounds
++Also called: computeVolumeBounds, Selective Bounding Volume (SBV), percentile-based AABB, silhouette-based bounding box estimation, octree-based bounding volume computation
+ 
+ ## Overview
+-Computes an Axis-Aligned Bounding Box (AABB) that encloses a set of 3D points, with optional padding [S1, unofficial]. Unlike [Mesh Bounding Box Calculation](3612-mesh-bounding-box-calculation.md), which operates on vertex coordinates of explicit geometry, this method operates on arbitrary point clouds or sample sets [S1, unofficial].
++Volume Bounds Computation identifies and extracts a Volume of Interest (VOI) or computes an Axis-Aligned Bounding Box (AABB) that encloses a set of 3D points or active voxels, ignoring blank regions or outliers to prevent them from dominating the spatial extent [S1][S2, S3, unofficial]. Unlike sibling methods such as [Bounding Cube Creation](4007-bounding-cube-creation.md) which may use fixed geometric primitives, or [Character Bounding Box Initialization](4016-character-bounding-box-initialization.md) tailored for specific skeletal structures, this method adapts to the data distribution, using techniques ranging from simple min/max iteration with padding to percentile clipping for 3D Gaussian Splatting (3DGS) or silhouette backprojection for novel view synthesis [S1][S2, S4, unofficial]. It serves as the foundational step for efficient raycasting, voxelization, and memory allocation by defining the tightest possible computational domain [S1][S3, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- `points`: An array of 3D points, where each point is a tuple `[x, y, z]` of floating-point numbers [S1, unofficial].
+-- `padding`: A scalar value representing the padding to add to all sides of the bounding box in world units [S1, unofficial].
++The method varies significantly based on the input data type (medical volumes, 3DGS splats, or silhouette masks) and the desired tightness of the bound. The following sections detail the three primary implementations found in the sources.
+ 
+-**Outputs:**
+-- `VolumeBounds`: An object containing:
+-  - `min`: `[number, number, number]` — The minimum coordinates of the AABB [S1, unofficial].
+-  - `max`: `[number, number, number]` — The maximum coordinates of the AABB [S1, unofficial].
+-  - `size`: `[number, number, number]` — The dimensions of the AABB (`max - min`) [S1, unofficial].
+-  - `center`: `[number, number, number]` — The center of the AABB (`(min + max) / 2`) [S1, unofficial].
++### Inputs and Outputs
++*   **Inputs:**
++    *   For Medical/Volume Data: A 3D image volume $X$ with dimensions $[x, y, z]$ [S1].
++    *   For 3DGS/Splat Data: An array of splat centers (X, Y, Z coordinates) [S2, unofficial].
++    *   For Silhouette Data: An array of training camera poses (intrinsics/extrinsics) and ground truth binary silhouette masks [S4, unofficial].
++    *   For Octree/SDF Data: A signed distance function (SDF) $f$ and an initial large bounding cube [S5].
++*   **Outputs:**
++    *   A `VolumeBounds` object containing:
++        *   `min`: $[min_x, min_y, min_z]$ [S3, unofficial].
++        *   `max`: $[max_x, max_y, max_z]$ [S3, unofficial].
++        *   `size`: $[size_x, size_y, size_z]$ [S3, unofficial].
++        *   `center`: $[center_x, center_y, center_z]$ [S3, unofficial].
++    *   Alternatively, an extracted VOI sub-volume or scene bounding parameters (`bbox_depth/width/height_min/max`) [S1][S4, unofficial].
+ 
+-**Data Structures:**
+-- `VolumeBounds`:
+-  - `min`: Array of 3 floats [S1, unofficial].
+-  - `max`: Array of 3 floats [S1, unofficial].
+-  - `size`: Array of 3 floats [S1, unofficial].
+-  - `center`: Array of 3 floats [S1, unofficial].
++### Data Structures
++*   **VolumeBounds:** An object with fields `min`, `max`, `size`, and `center`, each being a 3-element array of numbers [S3, unofficial].
++*   **temp_coordinates:** A 4-element integer array $[x_1, x_2, x_3, x_4]$ used to accumulate min/max row/column indices during slice processing [S1].
++*   **Coordinate Arrays:** Separate arrays for X, Y, and Z coordinates of all splat centers [S2, unofficial].
+ 
+-**Steps:**
+-1. Initialize `min` and `max` arrays to infinity and negative infinity, respectively, for all three axes (x, y, z) [G].
+-2. Iterate over all input points to find min and max x, y, z coordinates [S1, unofficial].
+-3. Apply configurable padding in world units to all sides [S1, unofficial].
+-4. Output `VolumeBounds` object containing `min`, `max`, `size`, and `center` [S1, unofficial].
++### Algorithm 1: Selective Bounding Volume (SBV) for Medical Images
++This method extends the 2D bounding box to 3D, specifically ignoring blank (null) slices at the foremost and end of the volume to prevent them from affecting the calculation [S1].
+ 
+-**Formulas:**
+-- $size[i] = max[i] - min[i]$ for each axis $i \in \{0, 1, 2\}$ [G].
+-- $center[i] = (min[i] + max[i]) / 2.0$ for each axis $i \in \{0, 1, 2\}$ [G].
++1.  **Get Dimensions:** Determine the size of the input 3D medical image $X$ as $[x, y, z]$ [S1].
++2.  **Initialize Variables:** Declare integer variables `RowMin`, `ColumnMin`, `RowMax`, `ColumnMax`. Initialize `temp_coordinates` $[x_1, x_2, x_3, x_4]$ to zero [S1].
++3.  **Identify Active Z-Slices:**
++    *   Iterate through all $z$-slices.
++    *   Search for zero-intensity slices (blank slices) [S1].
++    *   Identify $z_1$ as the starting non-zero slice and $z_2$ as the end non-zero slice [S1].
++4.  **Process Active Slices:**
++    *   For each slice $z$ from $z_1$ to $z_2$:
++        *   Apply 2D Bounding Box operations on the current slice to find local min/max row and column indices [S1].
++        *   Update `temp_coordinates` with the accumulated min/max values from all active slices [S1].
++5.  **Compute Global Bounds:**
++    *   `RowMin` $\leftarrow \text{Minimum}(x_1)$
++    *   `ColumnMin` $\leftarrow \text{Minimum}(x_2)$
++    *   `RowMax` $\leftarrow \text{Maximum}(x_3)$
++    *   `ColumnMax` $\leftarrow \text{Maximum}(x_4)$
++    *   These values define the spatial extent in the $x, y$ plane for the active $z$ range [S1].
++6.  **Extract VOI (Optional):**
++    *   Iterate $k$ from $z_1$ to $z_2$.
++    *   Iterate $i$ from `RowMin` to `RowMax`.
++    *   Iterate $j$ from `ColumnMin` to `ColumnMax`.
++    *   Assign $VOI \leftarrow X(i, j, k)$ [S1].
+ 
+-**Parameters:**
+-- `padding`: Configurable padding in world units. Default value not specified in the sources [S1, unofficial].
++### Algorithm 2: Percentile-Based AABB for 3DGS
++This method computes the bounding box for a 3D Gaussian Splatting scene by clipping outliers (distant 'floater' splats) using percentiles, preventing them from dominating the AABB [S2, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- Empty point set: If `points` is empty, `min` remains infinity and `max` remains negative infinity. The implementation should handle this case, potentially by returning a default bounds or raising an error. Not given in the sources [S1, unofficial].
+-- Precision: Use floating-point arithmetic consistent with the input data type. Not given in the sources [S1, unofficial].
++1.  **Collect Coordinates:** Collect all X, Y, and Z coordinates of the splat centers into separate arrays [S2, unofficial].
++2.  **Sort Coordinates:** Sort each coordinate array (X, Y, Z) in ascending order [S2, unofficial].
++3.  **Calculate Indices:**
++    *   Let $N$ be the number of splats.
++    *   Let $p$ be the `bboxPercentile` parameter (fraction of splats to clip from each end). Typical value: $0.02$ (clip outer 2%) [S2, unofficial].
++    *   Calculate lower index: $idx_{lower} = \lfloor p \cdot (N - 1) \rfloor$ [S2, unofficial].
++    *   Calculate upper index: $idx_{upper} = \lceil (1 - p) \cdot (N - 1) \rceil$ [S2, unofficial].
++4.  **Construct Bounds:**
++    *   For each axis (X, Y, Z), the minimum bound is the value at $idx_{lower}$ and the maximum bound is the value at $idx_{upper}$ in the sorted array [S2, unofficial].
++5.  **Apply Padding (Optional):** Apply configurable padding in world units to all sides of the computed min/max bounds [S3, unofficial].
++6.  **Output:** Return the `VolumeBounds` object [S3, unofficial].
+ 
+-**Pseudocode:**
+-```python
+-def compute_volume_bounds(points, padding):
+-    # Initialize min and max to extreme values
+-    min_coords = [float('inf'), float('inf'), float('inf')]
+-    max_coords = [float('-inf'), float('-inf'), float('-inf')]
+-    
+-    # Iterate over all input points to find min and max x, y, z coordinates
+-    for point in points:
+-        for i in range(3):
+-            if point[i] < min_coords[i]:
+-                min_coords[i] = point[i]
+-            if point[i] > max_coords[i]:
+-                max_coords[i] = point[i]
+-                
+-    # Apply configurable padding in world units to all sides
+-    for i in range(3):
+-        min_coords[i] = min_coords[i] - padding
+-        max_coords[i] = max_coords[i] + padding
+-        
+-    # Compute size and center
+-    size_coords = [max_coords[i] - min_coords[i] for i in range(3)]
+-    center_coords = [(min_coords[i] + max_coords[i]) / 2.0 for i in range(3)]
+-    
+-    # Output VolumeBounds object
+-    return {
+-        'min': min_coords,
+-        'max': max_coords,
+-        'size': size_coords,
+-        'center': center_coords
+-    }
+-```
++### Algorithm 3: Silhouette-Based Bounding Box Estimation
++This method computes a 3D bounding box by backprojecting silhouette masks from multiple training views, serving as an entry point when explicit scene geometry is unavailable [S1][S4, unofficial].
++
++1.  **Initialize:** Prepare to store bounds in `scene.bbox_depth/width/height_min/max` [S4, unofficial].
++2.  **Iterate Views:** Loop through the `train_cameras` array. Subsampling can be applied using `skipIndex` and `skips` [S4, unofficial].
++3.  **Extract Mask:** For each view, extract the binary silhouette mask from the corresponding `groundTruth` image [S4, unofficial].
++4.  **Backproject:** Backproject the mask pixels into 3D space using the camera's intrinsics and extrinsics to accumulate 3D points/volumes [S4, unofficial].
++5.  **Compute Min/Max:** Determine the minimum and maximum bounds along the X, Y, and Z axes from the accumulated 3D points [S4, unofficial].
++6.  **Expand:** Apply `silhouetteRadius` expansion to the computed bounds to account for occlusion and mask inaccuracies [S4, unofficial].
++7.  **Store:** Save the final bounds to the scene structure [S4, unofficial].
++
++### Algorithm 4: Octree-Based Bounding Volume for SDFs
++An alternative strategy for Signed Distance Fields (SDFs) that decomposes space into an octree to compute a convex hull from straddling cubes [S5].
++
++1.  **Start:** Begin with a large initial cube [S5].
++2.  **Recursive Subdivision:**
++    *   For each cube, evaluate the SDF value $f(c)$ at its center $c$ [S5].
++    *   If $f(c)$ is greater than the length of the diagonal of the cube, the surface does not straddle this cube; do not subdivide further for this branch [S5].
++    *   Otherwise, recursively subdivide the cube [S5].
++3.  **Identify Straddling Cubes:** Collect all cubes where the surface straddles the volume (i.e., the recursion stopped or the condition was met) [S5].
++4.  **Compute Convex Hull:** Compute the convex hull $H$ from the eight vertices of the detected straddling cubes [S5].
++5.  **Output:** The convex hull $H$ serves as the bounding volume [S5].
++
++### Parameters
++*   **bboxPercentile:** The fraction of splats to clip from each end of the distribution per axis. Typical value: $0.02$ [S2, unofficial].
++*   **Padding:** Configurable padding in world units applied to all sides of the AABB. Default/Not given in sources for specific value [S3, unofficial].
++*   **silhouetteRadius:** Radius parameter for expanding the silhouette-based bounds [S4, unofficial].
++*   **train_cameras:** Array of camera poses used for backprojection [S4, unofficial].
++*   **groundTruth:** Array of ground truth images containing masks [S4, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Blank Slices:** In medical volumes, blank (null) slices at the foremost and end of the volume must be ignored to prevent them from affecting the bounding volume calculation [S1].
++*   **Outliers:** In 3DGS, distant 'floater' splats can dominate the AABB if not clipped; percentile clipping is required [S2, unofficial].
++*   **Coplanar Points:** In Octree-based SDF bounding, the final point set may have numerous coplanar points, particularly when the SDF defines flat surface parts. This abundance of coplanar points can slow down convex hull computation, as all points may contribute to the convex envelope [S5].
++*   **Precision:** Sorting-based methods (3DGS) are sensitive to the exact distribution of points; percentile indices must be calculated carefully to handle edge cases where $N$ is small [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Silhouette-based Bounding Box Initialization](5448-silhouette-based-bounding-box-initialization.md)
+-Computes an Axis-Aligned Bounding Box (AABB) that encloses the visible geometry of a scene by projecting ground truth masks from training cameras. It serves as a robust initialization step for volume rendering, particularly when sparse representations are used, ensuring the bounding volume tightly fits the object of interest rather than the entire scene space. It differs from simple min-max point accumulation by using binary silhouette masks to determine visibility, making it resilient to background noise and sparse sampling artifacts.
+-
+-### Silhouette-Based Bounding Box Estimation
+-Computes a 3D bounding box for the scene by backprojecting silhouette masks from multiple training views to find the tightest volume containing all visible geometry [S2, unofficial]. It differs from the basic point-based computation by using camera projections to infer 3D extent from 2D masks.
+-
+-**Steps:**
+-1. Iterate over training views [S2, unofficial].
+-2. For each view, extract binary silhouette mask [S2, unofficial].
+-3. Backproject mask pixels into 3D space using camera intrinsics/extrinsics [S2, unofficial].
+-4. Accumulate 3D points/volumes [S2, unofficial].
+-5. Compute min/max bounds along x, y, z axes [S2, unofficial].
+-6. Apply `silhouetteRadius` expansion [S2, unofficial].
+-7. Store bounds in `scene.bbox_depth/width/height_min/max` [S2, unofficial].
+-
+-**Parameters:**
+-- `train_cameras`: Array of camera poses [S2, unofficial].
+-- `groundTruth`: Array of ground truth images with masks [S2, unofficial].
+-- `scene`: Object scene structure to store computed bounds [S2, unofficial].
+-- `datasetSize/viewCount`: Number of training views [S2, unofficial].
+-- `silhouetteRadius`: Radius parameter for silhouette expansion [S2, unofficial].
+-- `skipIndex/skips`: Indices and strides for subsampling views [S2, unofficial].
+-
+-### Octree-based Bounding Volume Computation
+-An alternative strategy to compute bounding volumes by decomposing space into an octree and computing the convex hull from straddling cubes [S3]. It differs from grid-based approaches by adaptively refining space only where the signed distance function indicates proximity to the surface.
+-
+-**Steps:**
+-1. Start from a large cube [S3].
+-2. Recursively subdivide the cube if the value $f(c)$ at its center $c$ is greater than the length of the diagonal of the cube [S3].
+-3. Compute the convex hull $H$ from the eight vertices of the detected straddling cubes [S3].
+-
+-**Pitfalls:**
+-- Coplanar points in the final point set can slow convex hull computation, as all points may contribute to the convex envelope [S3].
+-
+-**Comparison:**
+-- Requires significantly more signed distance function (SDF) evaluations than Sphere Carving for good convex hulls, but may converge faster for shapes with significant anisotropy in $f$ values [S3].
++Silhouette-based Bounding Box Initialization computes an Axis-Aligned Bounding Box (AABB) and initializes the adaptive learning rate using silhouette information from training cameras and ground truth masks. It serves as the entry point for volume bounds computation when explicit scene geometry is unavailable. Unlike methods that rely on explicit point clouds or voxel grids, it uses visibility information from 2D projections to infer 3D extent. It is chosen when only 2D training images are available and no 3D reconstruction has been performed yet. See [Silhouette-based Bounding Box Initialization](5448-silhouette-based-bounding-box-initialization.md).
+ 
+ ## Operating characteristics
+-- **Time Complexity:** O(N) for the basic method, where N is the number of points, due to a single pass over the input array [S1, unofficial]. Complexity for silhouette-based estimation depends on the number of views and pixels per mask, but exact bounds are not given in the sources [S2, unofficial].
+-- **Memory Complexity:** O(1) for the basic method, as it only stores min/max values and derived fields [S1, unofficial]. Silhouette-based estimation requires storing intermediate 3D points or volumes, but exact bounds are not given in the sources [S2, unofficial].
+-- **Strengths:** Simple, predictable performance for static datasets [S1, unofficial].
+-- **Limitations:** Basic method is sensitive to outliers in the point cloud, as it computes exact min/max without filtering [G]. Silhouette-based method requires accurate camera poses and masks [G].
+-- **When to use:** Use the basic method for known point clouds [G]. Use silhouette-based estimation when visibility from training views is the primary constraint [G].
++*   **Time Complexity:**
++    *   SBV (Medical): $O(V)$ where $V$ is the number of voxels, as it iterates through slices and pixels [S1].
++    *   Percentile (3DGS): $O(N \log N)$ due to sorting the coordinate arrays, where $N$ is the number of splats [S2, unofficial].
++    *   Silhouette: $O(C \cdot M)$ where $C$ is the number of cameras and $M$ is the number of pixels in masks, plus the cost of 3D accumulation and hull computation [S4, unofficial].
++    *   Octree: Depends on the depth of subdivision and the number of straddling cubes; typically requires significantly more SDF evaluations than Sphere Carving for good convex hulls [S5].
++*   **Memory Complexity:**
++    *   SBV: $O(1)$ auxiliary space if processing slice-by-slice, or $O(V)$ if storing the VOI [S1].
++    *   Percentile: $O(N)$ to store coordinate arrays [S2, unofficial].
++    *   Silhouette: $O(P)$ where $P$ is the number of 3D points accumulated from backprojection [S4, unofficial].
++    *   Octree: $O(K)$ where $K$ is the number of nodes in the octree [S5].
++*   **Strengths:**
++    *   SBV preserves all active portions in any slice, not discarding clinically significant background details [S1].
++    *   Percentile clipping effectively handles outliers in 3DGS, providing a tight bound for rendering [S2, unofficial].
++    *   Silhouette-based method works without explicit 3D geometry [S4, unofficial].
++*   **Limitations:**
++    *   SBV may be slow for very large medical volumes if not optimized [S1].
++    *   Percentile method assumes a relatively uniform distribution of splats; extreme outliers might still affect bounds if $N$ is small [S2, unofficial].
++    *   Octree method requires significantly more SDF evaluations than Sphere Carving for good convex hulls [S5].
++    *   Coplanar points in Octree method can slow convex hull computation [S5].
++*   **When to Use:**
++    *   Use SBV for medical image compression or VOI extraction [S1].
++    *   Use Percentile for 3DGS scene bounding to prevent floater artifacts [S2, unofficial].
++    *   Use Silhouette-based when only 2D training data is available [S4, unofficial].
++    *   Use Octree-based for SDF bounding volumes when anisotropy in $f$ values allows faster convergence than sphere carving [S5].
+ 
+ ## Background
+-Originated in the context of 3D IDW interpolation volume and voxel visualization [S1, unofficial]. The octree-based variant traces to adaptive space decomposition strategies for implicit surfaces [S3]. Not given in the sources for other historical details [S1, S2, unofficial][S3].
++The concept of Volume Bounds Computation originates from medical image processing, where the Selective Bounding Volume (SBV) method was proposed to overcome the limitations of existing object detection techniques by automatically identifying and extracting a Volume of Interest (VOI) while ignoring blank slices [S1]. The method was later adapted for 3D Gaussian Splatting (3DGS) to handle the unique challenge of 'floater' splats, using percentile clipping to compute tight bounding boxes for efficient rendering [S2, unofficial]. Silhouette-based approaches emerged in the context of novel view synthesis and NeRF/3DGS initialization, where explicit geometry is absent [S4, unofficial]. Octree-based bounding volume computation for SDFs was developed as an alternative to Sphere Carving, offering a way to compute convex hulls from straddling cubes in adaptive grids [S5].
+ 
+ ## Sources
+-[S1] feat: 3D IDW interpolation volume and voxel visualisation, https://github.com/darkmine-oss/baselode/pull/50, fetched 2026-10-27 (unofficial)
+-[S2] nortonBryan/Clear-plenoxels, https://github.com/nortonBryan/Clear-plenoxels, fetched 2026-10-27 (unofficial)
+-[S3] Sphere Carving: Bounding Volumes for Signed Distance Fields, https://doi.org/10.1145/3730845, fetched 2026-10-27+[S1] On a hybrid lossless compression technique for three‐dimensional medical images, https://doi.org/10.1002/acm2.12960, fetched 2026-11-08
++[S2] stevekwon211/splatcarve, https://github.com/stevekwon211/splatcarve, fetched 2026-10-27 (unofficial)
++[S3] feat: 3D IDW interpolation volume and voxel visualisation, https://github.com/darkmine-oss/baselode/pull/50, fetched 2026-10-27 (unofficial)
++[S4] nortonBryan/Clear-plenoxels, https://github.com/nortonBryan/Clear-plenoxels, fetched 2026-10-27 (unofficial)
++[S5] Sphere Carving: Bounding Volumes for Signed Distance Fields, https://doi.org/10.1145/3730845, fetched 2026-10-27

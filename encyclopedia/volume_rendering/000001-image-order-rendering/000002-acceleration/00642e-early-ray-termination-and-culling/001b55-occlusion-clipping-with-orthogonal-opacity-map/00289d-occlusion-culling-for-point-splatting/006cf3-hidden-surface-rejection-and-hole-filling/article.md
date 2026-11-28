@@ -1,0 +1,164 @@
+# Hidden Surface Rejection and Hole Filling
+Also called: Point Rejection and Hole Filling, Screen-space Point Rejection and Hole Filling
+
+## Overview
+Hidden Surface Rejection and Hole Filling is a post-processing technique applied to point-splatted volume renderings to improve visual quality by removing occluded points and filling the resulting gaps with surviving data [S1, unofficial]. It distinguishes itself from standard alpha blending by explicitly discarding points deemed occluded by closer neighbors in screen space, followed by a recursive expansion of valid pixels to eliminate holes, thereby creating a solid appearance from sparse point clouds [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A buffer of point splats containing color and depth attributes for each pixel, potentially with multiple points per pixel (accumulated via atomic operations).
+*   **Output:** A final color buffer where occluded points are removed and empty pixels are filled by expanding surviving points.
+
+**Data Structures:**
+*   **Attribute Buffer:** A texture at backbuffer resolution storing per-pixel color and depth. If multiple points project to the same pixel, their colors are averaged or accumulated, and a count of points is maintained [S1, unofficial].
+*   **Temporary Texture:** An intermediate buffer at backbuffer resolution used to store the result of the rejection and resolve pass [S1, unofficial].
+
+**Parameters:**
+*   **Neighbor Grid Size:** $7 \times 7$ pixels centered on the current pixel [S1, unofficial].
+*   **Hole Filling Iterations:** 3 iterations [S1, unofficial].
+*   **Occlusion Threshold:** A defined threshold for the calculated cone size; if the cone is smaller than this, the point is rejected [S1, unofficial].
+
+**Steps:**
+
+1.  **Point Rejection and Resolve:**
+    For each pixel in the attribute buffer:
+    a. Define a $7 \times 7$ grid of neighboring pixels centered on the current pixel.
+    b. Identify all pixels in this grid that contain points closer to the camera than the current point.
+    c. Calculate the largest cone around the current point's center that does not intersect any of the closer points in the grid.
+    d. If the calculated cone size is smaller than the defined threshold, mark the point as occluded and exclude it from the output.
+    e. If the point is not occluded, compute its final color by dividing its accumulated color data by the number of points added to the buffer at that pixel.
+    f. Write the valid color and depth to the temporary texture [S1, unofficial].
+
+2.  **Hole Filling (Recursive Expansion):**
+    a. Initialize the working buffer with the output from the Rejection and Resolve step.
+    b. For $i$ from 1 to 3 (iterations):
+        i. For every empty pixel (no valid color/depth) in the buffer:
+            - Identify neighboring pixels that have valid color data.
+            - Update the empty pixel's color and depth to the average of these valid neighbors.
+    c. The expansion continues until the bounds of the $7 \times 7$ grid used in rejection are effectively covered [S1, unofficial].
+
+3.  **Compositing:**
+    Blit the temporary render texture to the framebuffer. Perform a depth comparison to integrate the point cloud pixels with traditional polygon geometry before transparent rendering [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hidden_surface_rejection_and_hole_filling(attribute_buffer, backbuffer_resolution):
+    """
+    attribute_buffer: 2D array of structs {color: vec3, depth: float, count: int}
+    backbuffer_resolution: (width, height)
+    """
+    # Step 1: Point Rejection and Resolve
+    temp_texture = empty_texture(backbuffer_resolution)
+    
+    for y in range(backbuffer_resolution[1]):
+        for x in range(backbuffer_resolution[0]):
+            current_point = attribute_buffer[y, x]
+            
+            # If no point exists at this pixel, skip
+            if current_point.count == 0:
+                continue
+                
+            is_occluded = False
+            center_x, center_y = x, y
+            
+            # Evaluate 7x7 grid
+            for dy in range(-3, 4):
+                for dx in range(-3, 4):
+                    nx, ny = center_x + dx, center_y + dy
+                    
+                    # Check bounds
+                    if not (0 <= nx < backbuffer_resolution[0] and 0 <= ny < backbuffer_resolution[1]):
+                        continue
+                        
+                    neighbor_point = attribute_buffer[ny, nx]
+                    
+                    # Check if neighbor is closer to camera
+                    # Note: Depth convention assumed: smaller depth = closer
+                    if neighbor_point.count > 0 and neighbor_point.depth < current_point.depth:
+                        # Calculate largest cone around center that avoids neighbor
+                        # This is a geometric calculation based on screen-space positions
+                        # and the depth difference. If the cone is too small, it's occluded.
+                        cone_size = calculate_cone_size(current_point, neighbor_point)
+                        
+                        if cone_size < OCCLUSION_THRESHOLD:
+                            is_occluded = True
+                            break
+                if is_occluded:
+                    break
+            
+            if not is_occluded:
+                # Resolve color: divide by number of points
+                resolved_color = current_point.color / current_point.count
+                temp_texture[y, x] = {
+                    'color': resolved_color,
+                    'depth': current_point.depth
+                }
+            else:
+                # Mark as empty for hole filling
+                temp_texture[y, x] = {
+                    'color': None,
+                    'depth': None
+                }
+
+    # Step 2: Hole Filling
+    working_buffer = temp_texture
+    
+    for iteration in range(3): # 3 iterations as per source
+        new_buffer = copy(working_buffer)
+        for y in range(backbuffer_resolution[1]):
+            for x in range(backbuffer_resolution[0]):
+                pixel = working_buffer[y, x]
+                
+                # If pixel is empty, fill it
+                if pixel.color is None:
+                    valid_neighbors = []
+                    for dy in range(-1, 2):
+                        for dx in range(-1, 2):
+                            nx, ny = x + dx, y + dy
+                            if 0 <= nx < backbuffer_resolution[0] and 0 <= ny < backbuffer_resolution[1]:
+                                neighbor = working_buffer[ny, nx]
+                                if neighbor.color is not None:
+                                    valid_neighbors.append(neighbor)
+                    
+                    if valid_neighbors:
+                        avg_color = sum(n.color for n in valid_neighbors) / len(valid_neighbors)
+                        avg_depth = sum(n.depth for n in valid_neighbors) / len(valid_neighbors)
+                        new_buffer[y, x] = {
+                            'color': avg_color,
+                            'depth': avg_depth
+                        }
+        working_buffer = new_buffer
+
+    # Step 3: Compositing
+    # Blit working_buffer to framebuffer with depth comparison
+    return working_buffer
+
+def calculate_cone_size(current, neighbor):
+    """
+    Placeholder for the specific geometric cone calculation.
+    The source states: "a shader calculates the largest cone about the center 
+    that can exist without intersecting any of the other points."
+    [G] Implementation detail: This typically involves projecting the neighbor's 
+    screen-space position and depth difference to determine the angular or 
+    radial occlusion extent relative to the current point's footprint.
+    """
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels, with a constant factor determined by the $7 \times 7$ grid evaluation and 3 iterations of hole filling.
+*   **Memory Complexity:** Requires a temporary texture at backbuffer resolution [S1, unofficial].
+*   **Performance:** Merging the point rejection pass with the color resolve pass saves performance by avoiding an intermediate buffer write/read cycle [S1, unofficial].
+*   **Strengths:** Improves frame quality by removing occluded points and filling holes, making dense point clouds look solid [S1, unofficial].
+*   **Limitations:** Increasing the neighbor grid size makes rejection overly aggressive, removing visible points. Increasing hole filling iterations creates a "muddy mess" by over-filling rejected data [S1, unofficial].
+*   **When to use:** When rendering extremely large, dense point clouds where atomic operation bottlenecks and visual holes are problematic [S1, unofficial].
+*   **When not to use:** When preserving fine, sparse details is critical and aggressive hole filling would obscure them.
+
+## Background
+This method is described in the context of rendering extremely large unstructured raw point clouds. It builds on the paper "Real-time Rendering of Massive Unstructured Raw Point Clouds using Screen-space Operators" [S1, unofficial]. The implementation described combines the point rejection pass with the color resolve pass, differing from the referenced paper which likely separates them [S1, unofficial]. It is used in real-time rendering pipelines to handle overdraw and improve visual fidelity of point-based volume representations.
+
+## Sources
+[S1] How we render extremely large point clouds — Magnopus, https://www.magnopus.com/blog/how-we-render-extremely-large-point-clouds, fetched 2026-10-26 (unofficial)

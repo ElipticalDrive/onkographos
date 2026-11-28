@@ -1,0 +1,125 @@
+--- v004.md
++++ v005.md
+@@ -1,68 +1,79 @@
+ # Free-View Training (FVT)
+-
+-
+ ## Overview
+-Free-View Training (FVT) is a training strategy designed to disentangle the performance of generalizable 3D Gaussian Splatting (3DGS) from the specific number of input views [S1, S2]. It achieves this by adding geometrical constraints on the localization of 3D Gaussian primitives through supervising image renderings in broader view interpolations [S1]. Unlike methods that optimize for a fixed set of views, FVT enables robust view synthesis across broader view ranges regardless of the input view count [S2].
+-
++Free-View Training (FVT) is a training strategy designed to disentangle the performance of generalizable 3D Gaussian Splatting (3DGS) from the specific number of input views [S1, S2]. It achieves this by adding geometrical constraints on the localization of 3D Gaussian primitives through supervision on image renderings from broader view interpolations [S1]. Unlike methods that optimize for a fixed set of input views, FVT enables robust view synthesis across wider view ranges regardless of the input view count [S2].
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A sequence of images (context views) and their corresponding camera poses.
+-*   **Output:** Optimized 3D Gaussian primitives $\mathcal{G}$ (positions, covariances, opacities, SH coefficients) that generalize across varying numbers of input views.
++*   **Input:** A sequence of images (context views) $\tilde{\omega}_g$ and the current set of 3D Gaussians $\mathcal{G}$.
++*   **Output:** Updated Gaussian parameters (position, scale, rotation, opacity, SH coefficients) optimized for generalizable reconstruction.
+ 
+ **Data Structures:**
+-The method operates on the standard 3D Gaussian primitive set $\mathcal{G} = \{g_1, \dots, g_N\}$ defined in [Densification Strategy](6234-densification-strategy.md). No additional data structures are specified beyond the standard Gaussian attributes and the sampled context views.
++The method operates on the Gaussian set $\mathcal{G}$ defined in [Densification Strategy](6234-densification-strategy.md). No additional persistent data structures are required beyond the standard Gaussian attributes and the sampled view indices.
++
++**Parameters:**
++*   $T$: The number of context views randomly sampled during training. Typical value: $T \in [2, 8]$ [S1].
+ 
+ **Steps:**
+-1.  **Context View Sampling:** During training, randomly sample $T$ context views from the input sequence. The number of context views $T$ is a hyperparameter set between 2 and 8 in experiments [S1].
+-2.  **Long Sequence Training:** Train the model on long sequences. This step is made feasible by efficient feature extraction and aggregation, which leverages Gaussian density information [S1].
+-3.  **Supervision:** Supervise the image renderings generated from the sampled context views. The supervision is applied on full resolution to encourage high-resolution renderings, even if lower-resolution maps are used for intermediate unprojection [S1].
+-
+-**Parameters:**
+-*   $T$: The number of context views sampled during training. Typical value: 2 to 8 [S1].
++1.  **Context View Sampling:** During each training iteration, randomly sample $T$ context views from the available sequence. Let the set of sampled views be $\mathcal{V}_{sample}$.
++2.  **Rendering:** Render images from the sampled views $\mathcal{V}_{sample}$ using the current Gaussian set $\mathcal{G}$. This involves standard differentiable rasterization of 3D Gaussians.
++3.  **Supervision:** Compute the reconstruction loss between the rendered images and the ground-truth images of the sampled views. The supervision is applied on full resolution to encourage high-resolution renderings, even if intermediate feature extraction uses lower resolution maps [S1].
++4.  **Optimization:** Backpropagate the loss to update the Gaussian parameters. The long-sequence training is made feasible by efficient feature extraction and aggregation mechanisms [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def free_view_training(model, sequence, T=4, num_epochs=100):
++def free_view_training_step(Gaussians, Sequence, T):
+     """
+-    Implements Free-View Training for 3D Gaussian Splatting.
++    One step of Free-View Training.
+     
+     Args:
+-        model: The 3D Gaussian Splatting model instance.
+-        sequence: A list of image tensors and camera poses representing the scene.
+-        T: Number of context views to sample per training step (default 4).
+-        num_epochs: Number of training epochs.
++        Gaussians: Current set of 3D Gaussian primitives.
++        Sequence: List of available context views (images and poses).
++        T: Number of context views to sample (int, typically 2-8).
++        
++    Returns:
++        Updated Gaussians.
+     """
+-    for epoch in range(num_epochs):
+-        # Randomly sample T context views from the sequence
+-        # Note: The specific sampling distribution (uniform, etc.) is not detailed in sources [G]
+-        context_views = random_sample(sequence, T)
++    # Step 1: Randomly sample T context views
++    # Note: Implementation detail for sampling depends on the specific sequence 
++    # structure (e.g., sliding window or random subset).
++    sampled_views = random_sample(Sequence, count=T)
++    
++    # Step 2: Render images from sampled views
++    # This uses the standard differentiable rasterizer for 3DGS
++    rendered_images = []
++    for view in sampled_views:
++        rendered_img = render_3d_gaussians(Gaussians, view.pose, view.camera_params)
++        rendered_images.append(rendered_img)
+         
+-        for views in context_views:
+-            # Render images from the current Gaussian representation
+-            rendered_images = model.render(views)
+-            
+-            # Compute loss against ground truth views
+-            # Supervision is applied on full resolution [S1]
+-            loss = compute_loss(rendered_images, views.gt_images)
+-            
+-            # Backpropagate and update Gaussian parameters
+-            model.update(loss)
++    # Step 3: Compute loss against ground truth
++    # Supervision is on full resolution [S1]
++    total_loss = 0.0
++    for rendered_img, view in zip(rendered_images, sampled_views):
++        gt_img = view.image
++        # Standard photometric loss (e.g., L1 or LPIPS)
++        loss = compute_photometric_loss(rendered_img, gt_img)
++        total_loss += loss
++        
++    # Step 4: Backpropagate and update Gaussians
++    # The gradients flow through the rasterization to Gaussian attributes
++    Gaussians = optimize_gaussians(Gaussians, total_loss)
++    
++    return Gaussians
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Sequence Length:** The method relies on long sequences. If the sequence is too short, the "disentanglement" from specific view counts may not be effective [S2].
+-*   **Feature Extraction Efficiency:** The feasibility of long sequence training depends on efficient feature extraction. Inefficient implementations may lead to prohibitive computational costs [S1].
++*   **View Sparsity:** If $T$ is too small, the geometrical constraints may be insufficient to disentangle depth from scale effectively. If $T$ is too large, computational cost increases significantly. The range $[2, 8]$ is empirically determined [S1].
++*   **Sequence Length:** FVT is designed for long sequences. Training on short sequences may not fully realize the benefits of view-disentanglement [S2].
++*   **Redundancy:** Without additional mechanisms (like Pixel-wise Triplet Fusion in FreeSplat), FVT alone may not eliminate Gaussian redundancy in overlapping regions [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not explicitly given. However, the method relies on "efficient feature extraction and aggregation" to make long sequence training feasible [S1].
+-*   **Memory Complexity:** Not explicitly given.
+-*   **Performance:** Empirical results demonstrate state-of-the-art novel view synthesis performance in both color map quality and depth map accuracy across different numbers of input views [S2]. It significantly contributes to depth estimation and adapting to longer input sequences [S1].
+-*   **Strengths:** Disentangles generalizability from view count; robust across broader view ranges; reduces Gaussian redundancy in overlapping regions when combined with Pixel-wise Triplet Fusion [S2].
+-*   **Limitations:** Requires efficient feature extraction to be computationally feasible for long sequences [S1].
+-*   **When to use:** When the goal is generalizable 3DGS that works well with varying numbers of input views, particularly for indoor scene reconstruction [S2].
+-*   **When not to use:** When computational resources are extremely limited and efficient feature extraction is not available [S1].
++*   **Time Complexity:** Increases with the number of sampled views $T$ and the length of the training sequence. The efficiency relies on fast feature extraction and aggregation [S1].
++*   **Memory Complexity:** Standard 3DGS memory requirements. No significant additional memory overhead for the FVT strategy itself [S1, S2].
++*   **Strengths:** Improves depth estimation accuracy and adapts well to longer input sequences [S1]. Enables generalizable 3DGS that performs robustly across varying numbers of input views [S2].
++*   **Limitations:** Requires efficient feature extraction to be feasible on long sequences [S1]. Does not inherently solve Gaussian redundancy without complementary fusion strategies [S2].
++*   **When to use:** When the goal is generalizable reconstruction from a variable number of input views, especially in indoor scenes with long sequences [S1, S2].
++*   **When not to use:** When computational resources are extremely limited and $T$ cannot be kept small, or when the scene is very short and view-disentanglement is less critical.
+ 
+ ## Background
+-Free-View Training was introduced in the context of FreeSplat and FreeSplat++, which explore generalizable 3D Gaussian Splatting for efficient indoor scene reconstruction [S1, S2]. It was presented at NeurIPS 2024 [S2] and later in IEEE TPAMI [S1]. The method addresses the limitation of standard 3DGS, which often overfits to the specific number and arrangement of input views, by enforcing geometrical constraints through broader view interpolation supervision [S1, S2].
++Free-View Training was introduced in the context of generalizable 3D Gaussian Splatting for indoor scene reconstruction. It was first proposed in "FreeSplat: Generalizable 3D Gaussian Splatting Towards Free-View Synthesis of Indoor Scenes" (NeurIPS 2024) [S2] and further discussed in "FreeSplat++: Generalizable 3D Gaussian Splatting for Efficient Indoor Scene Reconstruction" (IEEE TPAMI 2026) [S1]. The method addresses the limitation of standard 3DGS, which often overfits to the specific number and arrangement of input views, by enforcing geometric constraints through multi-view supervision.
+ 
+ ## Sources

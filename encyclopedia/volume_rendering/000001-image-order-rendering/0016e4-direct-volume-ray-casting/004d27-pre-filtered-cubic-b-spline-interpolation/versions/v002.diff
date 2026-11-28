@@ -1,0 +1,156 @@
+--- v001.md
++++ v002.md
+@@ -1,111 +1,69 @@
+ # Pre-filtered Cubic B-spline Interpolation
++
+ Also called: Pre-filtered B-spline Interpolation
+ 
+ ## Overview
+-Pre-filtered Cubic B-spline Interpolation is an on-the-fly interpolation technique that improves sampling accuracy by pre-processing voxel data to account for the smoothing properties of cubic B-spline kernels, avoiding the need for larger storage or memory footprints [S1, unofficial]. It sets itself apart from standard cubic B-spline interpolation by correcting the bias introduced by the kernel's low-pass filtering effect during the pre-processing stage, and from tri-linear interpolation by offering higher-order continuity and reduced aliasing artifacts at the cost of increased computational complexity [S1, unofficial].
++Pre-filtered Cubic B-spline Interpolation is an on-the-fly interpolation technique that improves sampling accuracy in volume rendering by applying a pre-processing step to voxel data, thereby reducing aliasing artifacts without increasing memory footprint [S1, unofficial]. It distinguishes itself from standard cubic B-spline interpolation by decoupling the kernel convolution from the ray-casting phase, allowing for higher-quality reconstruction at the cost of increased computational overhead during ray evaluation [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Input:** A discrete 3D volume dataset $V_{raw}$ of size $N_x \times N_y \times N_z$.
+-*   **Output:** A pre-filtered volume dataset $V_{pf}$ of the same dimensions, used for ray casting.
++*   **Output:** A pre-filtered volume dataset $V_{pf}$ of the same dimensions, used for interpolation during ray casting.
+ 
+ **Data Structures:**
+-*   $V_{raw}$: Array of scalar values (e.g., float32).
+-*   $V_{pf}$: Array of scalar values, same layout as $V_{raw}$.
++The data structure is a 3D array of floating-point values. The layout is identical to the input volume, ensuring no additional memory allocation is required for the interpolation coefficients themselves, only for the pre-computed values [S1, unofficial].
+ 
+ **Method Steps:**
+-1.  **Pre-processing (Pre-filtering):** Transform the raw voxel values into pre-filtered values. This step compensates for the fact that standard cubic B-spline interpolation assumes the input samples are Dirac deltas, whereas volume data represents box filters or point samples. The pre-filtering effectively convolves the raw data with the inverse of the B-spline kernel's effect or adjusts coefficients such that the subsequent interpolation yields a more accurate approximation of the underlying continuous signal [S1, unofficial].
+-2.  **Ray Casting Evaluation:** For each ray sample point $\mathbf{p}$, compute the interpolated value using standard cubic B-spline interpolation on the pre-filtered data $V_{pf}$ [S1, unofficial].
++1.  **Pre-filtering (Offline/Pre-processing):**
++    The raw voxel values are convolved with the cubic B-spline kernel to produce the pre-filtered values. This step approximates the continuous signal by smoothing the discrete samples. For a voxel at index $(i, j, k)$, the pre-filtered value $V_{pf}[i, j, k]$ is computed by summing the weighted contributions of its neighbors using the cubic B-spline basis function $B(x)$.
++    
++    The cubic B-spline basis function $B(x)$ is defined as:
++    $$
++    B(x) = \begin{cases} 
++    \frac{2}{3} - |x|^2 + \frac{1}{2}|x|^3 & 0 \le |x| < 1 \\
++    \frac{1}{6}(2 - |x|)^3 & 1 \le |x| < 2 \\
++    0 & \text{otherwise}
++    \end{cases}
++    $$
++    
++    The pre-filtering operation effectively solves a linear system or applies a separable filter. In a separable implementation, the filter is applied along each axis sequentially. For a 1D signal $v$, the pre-filtered signal $v'$ satisfies the relation derived from the B-spline properties:
++    $$
++    v'[n] = \frac{1}{8}v[n-1] + \frac{6}{8}v[n] + \frac{1}{8}v[n+1]
++    $$
++    This specific coefficient set ($1/8, 6/8, 1/8$) is the inverse of the B-spline convolution matrix for cubic splines, ensuring that subsequent standard cubic B-spline interpolation yields the correct result [S1, unofficial]. *Note: The exact pre-filtering coefficients may vary based on the specific B-spline definition used, but the principle remains: pre-smoothing the data to match the interpolation kernel's frequency response.*
+ 
+-**Formulas:**
+-The cubic B-spline basis function $B(x)$ is defined as:
+-$$
+-B(x) = \begin{cases} 
+-\frac{2}{3} - |x|^2 + \frac{1}{2}|x|^3 & 0 \le |x| < 1 \\
+-\frac{1}{6}(2 - |x|)^3 & 1 \le |x| < 2 \\
+-0 & \text{otherwise}
+-\end{cases}
+-$$
+-The interpolated value $V(\mathbf{p})$ at position $\mathbf{p} = (x, y, z)$ is computed by summing the contributions of the $4 \times 4 \times 4 = 64$ neighboring voxels in $V_{pf}$:
+-$$
+-V(\mathbf{p}) = \sum_{i=-1}^{2} \sum_{j=-1}^{2} \sum_{k=-1}^{2} B(x - i) B(y - j) B(z - k) V_{pf}(x+i, y+j, z+k)
+-$$
+-where $x, y, z$ are the fractional coordinates within the voxel grid.
++2.  **Ray Casting and Interpolation (On-the-fly):**
++    During ray casting, for a query position $\mathbf{p}$, the standard cubic B-spline interpolation is performed using the pre-filtered values $V_{pf}$.
++    
++    The interpolated value $V(\mathbf{p})$ is calculated as:
++    $$
++    V(\mathbf{p}) = \sum_{i=-1}^{2} \sum_{j=-1}^{2} \sum_{k=-1}^{2} w_i(\delta_x) w_j(\delta_y) w_k(\delta_z) V_{pf}[x+i, y+j, z+k]
++    $$
++    where $\delta_x, \delta_y, \delta_z$ are the fractional parts of the coordinate $\mathbf{p}$, and $w$ are the cubic B-spline basis weights evaluated at the fractional distances.
+ 
+ **Parameters:**
+-*   Kernel order: Cubic (degree 3).
+-*   Neighborhood size: $4 \times 4 \times 4$ voxels.
++*   **Kernel Order:** Cubic (3rd degree).
++*   **Pre-filtering Coefficients:** Typically $[1/8, 6/8, 1/8]$ for the separable 1D pre-filter [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** Standard B-spline interpolation requires data outside the volume bounds. Common implementations use clamping, replication, or periodic boundary conditions. The pre-filtering step must be consistent with the chosen boundary handling to avoid edge artifacts [G].
+-*   **Precision:** Pre-filtering involves linear combinations of voxel values. Using single-precision floats may introduce quantization errors, especially if the pre-filtering coefficients are not exact powers of two.
+-*   **Performance:** The method incurs a performance penalty due to the pre-processing step and the higher computational cost of cubic interpolation compared to tri-linear [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def prefilter_volume(V_raw):
+-    """
+-    Pre-processes the raw volume data for cubic B-spline interpolation.
+-    Note: The exact mathematical formulation of the pre-filtering coefficients
+-    is not detailed in the source [S1, unofficial]. This placeholder indicates
+-    where the specific linear transformation of voxel values occurs.
+-    """
+-    # Implementation detail: Apply inverse kernel convolution or coefficient adjustment
+-    # to V_raw to produce V_pf.
+-    # The source states: "all voxel values are pre-processed" [S1, unofficial].
+-    V_pf = apply_pre_filter(V_raw)
+-    return V_pf
+-
+-def cubic_bspline_interpolate(V_pf, p):
+-    """
+-    Interpolates value at continuous position p using pre-filtered volume.
+-    """
+-    # Convert p to grid coordinates
+-    x, y, z = p
+-    ix, iy, iz = floor(x), floor(y), floor(z)
+-    fx, fy, fz = x - ix, y - iy, z - iz
+-    
+-    # Compute B-spline weights for one dimension
+-    def b_spline_weight(t):
+-        abs_t = abs(t)
+-        if abs_t < 1:
+-            return 2/3 - abs_t**2 + 0.5 * abs_t**3
+-        elif abs_t < 2:
+-            return (1/6) * (2 - abs_t)**3
+-        else:
+-            return 0
+-
+-    # Sum contributions from 4x4x4 neighborhood
+-    value = 0.0
+-    for i in range(-1, 3):
+-        for j in range(-1, 3):
+-            for k in range(-1, 3):
+-                # Handle boundary conditions (e.g., clamp)
+-                vx = clamp(ix + i, 0, V_pf.shape[0]-1)
+-                vy = clamp(iy + j, 0, V_pf.shape[1]-1)
+-                vz = clamp(iz + k, 0, V_pf.shape[2]-1)
+-                
+-                w = b_spline_weight(fx - i) * b_spline_weight(fy - j) * b_spline_weight(fz - k)
+-                value += w * V_pf[vx, vy, vz]
+-                
+-    return value
+-```
++*   **Boundary Conditions:** The pre-filtering step requires handling volume boundaries. Standard approaches include clamping, mirroring, or assuming zero values outside the volume. Incorrect boundary handling can introduce edge artifacts [S1, unofficial].
++*   **Precision:** The pre-filtering step involves floating-point arithmetic. Accumulation errors should be minimized by using sufficient precision during the pre-processing phase [G].
++*   **Performance:** The method incurs a performance penalty during ray casting compared to linear interpolation due to the larger kernel support (4x4x4 neighbors vs 2x2x2) and the complexity of cubic weight calculations [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Isogeometric Volume Rendering](14205-isogeometric-volume-rendering.md)
+-A method for interactive visualization of isogeometric analysis (IGA) results, ensuring correct, pixel-accurate geometry of the volume including its bounding surfaces. It extends classic volume rendering to isogeometric volumes where both geometry and scalar field are given in terms of splines (NURBS, B-splines).
++Isogeometric Volume Rendering is a method for the interactive visualization of isogeometric analysis (IGA) results, ensuring correct, pixel-accurate geometry of the volume including its bounding surfaces. It extends classic volume rendering to isogeometric volumes where both geometry and scalar field are given in terms of splines (NURBS, B-splines). Unlike voxelized methods which suffer from block-like structures and high memory demands, this method provides pixel-accurate outer surfaces and avoids the loss of geometrically exact representation.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Pre-processing is $O(N)$ where $N$ is the number of voxels. Ray casting evaluation is $O(1)$ per sample but with a higher constant factor than tri-linear interpolation due to 64 multiplications and additions per sample.
+-*   **Memory Complexity:** $O(N)$, same as the input volume. No additional storage for control points or larger grids is required [S1, unofficial].
+-*   **Performance:** Comes at a performance penalty compared to tri-linear interpolation [S1, unofficial].
+-*   **Strengths:** More accurate interpolations without larger data storage or memory footprint [S1, unofficial]. Reduces aliasing and artifacts associated with lower-order interpolation.
+-*   **Limitations:** Higher computational cost. Requires pre-processing step.
+-*   **When to use:** When high-quality, smooth interpolation is required and memory bandwidth/storage is a constraint, but computational resources allow for the extra cost.
+-*   **When not to use:** When real-time performance is critical and the visual improvement over tri-linear interpolation is negligible (e.g., high-resolution data sets where artifacts are spatially small) [S1, unofficial].
++*   **Time Complexity:** The pre-filtering step is $O(N)$ where $N$ is the number of voxels, performed once. During rendering, the interpolation complexity is higher than linear interpolation due to the 4x4x4 kernel support and cubic weight calculations, leading to lower frame rates [S1, unofficial].
++*   **Memory Complexity:** $O(N)$, same as the input volume. No additional storage is required for interpolation coefficients, as the pre-filtering modifies the existing data structure in-place or into a same-sized buffer [S1, unofficial].
++*   **Strengths:** Reduces aliasing and "jerky edges" artifacts common in standard tri-linear or naive cubic interpolation without increasing memory footprint [S1, unofficial].
++*   **Limitations:** Performance penalty during rendering compared to simpler methods like tri-linear interpolation [S1, unofficial].
++*   **When to Use:** When high visual quality is required and memory is constrained, but hardware acceleration for complex kernels is available.
++*   **When Not to Use:** When real-time performance is critical and the visual artifacts of linear interpolation are acceptable, or when memory bandwidth is the primary bottleneck.
+ 
+ ## Background
+-Pre-filtered cubic B-spline interpolation is discussed in the context of common artifacts in volume rendering, specifically addressing issues like jerky edges and aliasing that arise from standard sampling techniques [S1, unofficial]. It is cited as an advanced on-the-fly interpolation approach that replaces tri-linear interpolation to improve accuracy without increasing memory footprint [S1, unofficial].
++Pre-filtered cubic B-spline interpolation was introduced as an advanced on-the-fly interpolation approach to address artifacts in volume rendering, such as jerky edges and aliasing, which persist even with high-resolution data sets [S1, unofficial]. It builds upon the mathematical properties of B-splines, leveraging the fact that pre-filtering the data allows the use of standard interpolation kernels to achieve higher accuracy. The method is discussed in the context of common artifacts in volume rendering, highlighting its role in improving visual fidelity without the trade-off of increased memory usage associated with storing higher-order coefficients [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,123 @@
+# NeRF-HuGS
+
+Also called: Heuristics-Guided Segmentation
+
+## Overview
+NeRF-HuGS is a training procedure for Neural Radiance Fields (NeRF) that mitigates artifacts caused by transient distractors (e.g., moving objects, shadows) in non-static scenes [S1]. It solves the problem of distinguishing static geometry from transient elements by combining hand-crafted heuristics with the Segment Anything Model (SAM) [S1]. Unlike prior segmentation-based methods that require semantic class priors or heuristic-only methods that miss low-frequency static details, HuGS fuses Structure-from-Motion (SfM) features (high-frequency textures) and color residuals from a partially trained NeRF (low-frequency textures) to guide SAM in generating precise static masks [S1].
+
+## How it works
+**Inputs:** A set of unordered multi-view images $I = \{I_i \mid i = 1, 2, \dots, N_I\}$ containing transient distractors [S1].
+**Outputs:** A set of static maps $M = \{M_i \mid i = 1, 2, \dots, N_I\}$, where $M_i$ is a binary mask for image $I_i$ labeling pixels of static objects as 1 and transient objects as 0 [S1]. These maps are used as weights in the NeRF loss function [S1].
+
+**Data Structures:**
+*   **Image Set $I$:** List of 2D images [S1].
+*   **Feature Points $F_i$:** For each image $I_i$, a set of 2D local feature points $F_i = \{ (x_{ij}, f_{ij}) \mid j = 1, \dots, N_{F_i} \}$, where $x_{ij} \in \mathbb{R}^2$ is the coordinate and $f_{ij}$ is the appearance descriptor [S1].
+*   **Sparse Point Cloud $C$:** A 3D point cloud reconstructed from $F_i$ across all images, representing the static scene structure [S1].
+*   **Static Map $M_i$:** A 2D mask of the same resolution as $I_i$ [S1].
+
+**Parameters:**
+*   **SfM Heuristics:** Effective for static objects with high-frequency texture patterns [S1].
+*   **Residual Heuristics:** Derived from a partially trained NeRF (e.g., Nerfacto) after several thousand iterations; effective for static elements with low-frequency textures [S1].
+*   **Segmentation Model:** Segment Anything Model (SAM) [S1].
+
+**Steps:**
+
+1.  **Extract SfM Features:** For each image $I_i$, extract 2D local feature points $F_i$ using Structure-from-Motion (SfM) [S1].
+2.  **Reconstruct Sparse Cloud:** Use $F_i$ from all images to reconstruct a sparse point cloud $C$ [S1].
+3.  **Identify Static Features via SfM:** Identify static features as those reliably matched and triangulated across multiple views in the SfM pipeline [S1]. For each 2D feature point $(x_{ij}, f_{ij})$ in $I_i$, let $n_{ij}$ be the number of its matching points in the other images $I$ [S1]. Points with sufficient matches are considered static [S1].
+4.  **Train Partial NeRF:** Train a NeRF model (specifically Nerfacto) for several thousand iterations to obtain a partially trained model [S1].
+5.  **Compute Color Residuals:** Use the partially trained NeRF to render images and compute color residuals against the input images $I$ [S1]. High residuals indicate transient or poorly modeled regions [S1].
+6.  **Generate Initial SAM Masks (SfM-guided):** Use the static feature points identified in Step 3 as point prompts for SAM to generate dense masks for each image [S1].
+7.  **Fuse Heuristics:** Combine the SfM-based heuristics (from Step 3) and the Residual-based heuristics (from Step 5) to create a combined guidance signal [S1].
+8.  **Generate Final Static Maps:** Use the combined heuristics to guide SAM again, generating the final static map $M_i$ for each input image $I_i$ [S1].
+9.  **Train NeRF with Static Masks:** Train the final NeRF using the static maps $M_i$ as weights in the loss function to ignore transient pixels [S1].
+
+**Formulas:**
+
+The NeRF outputs color $c \in \mathbb{R}^3$ and density $\sigma \in \mathbb{R}$ for a 3D position $p \in \mathbb{R}^3$ and viewing direction $d \in S^2$:
+$$ (c, \sigma) = \text{MLP}(p, d; \theta) \quad [S1] $$
+
+The standard NeRF loss is:
+$$ L(r) = L_{\text{recon}}(\hat{C}(r), C(r)) \quad [S1] $$
+where $L_{\text{recon}}$ is a reconstruction loss (e.g., MSE or Charbonnier), $\hat{C}(r)$ is the rendered color, and $C(r)$ is the ground truth color [S1].
+
+The modified loss using the static map $M(r)$ (omitting image index $i$ for simplicity) is:
+$$ L(r) = M(r) L_{\text{recon}}(\hat{C}(r), C(r)) \quad [S1] $$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nerf_hugs(images):
+    # Step 1: Extract SfM features
+    feature_sets = []
+    for I_i in images:
+        F_i = compute_local_features(I_i) # Standard: e.g., SIFT/AKAZE extraction
+        feature_sets.append(F_i)
+
+    # Step 2: Reconstruct sparse cloud C
+    sparse_cloud = triangulate_3d_points(feature_sets) # Standard: SfM triangulation
+
+    # Step 3: Identify static features
+    static_prompts = []
+    for i, F_i in enumerate(feature_sets):
+        for x_ij, f_ij in F_i:
+            n_ij = count_cross_view_matches(x_ij, f_ij, feature_sets, exclude_index=i)
+            if n_ij > 0: # Reliably matched across multiple views [S1]
+                static_prompts.append((i, x_ij))
+
+    # Step 4: Partial NeRF training
+    partial_model = initialize_nerf(images)
+    for step in range(5000): # "several thousands of iterations" [S1]
+        rays = sample_rays(images)
+        colors = render_rays(partial_model, rays)
+        loss = compute_mse_loss(colors, ground_truth)
+        partial_model.step(loss)
+
+    # Step 5: Compute color residuals
+    residuals = []
+    for I_i in images:
+        rendered = render_image(partial_model, I_i)
+        residuals.append(compute_residual_map(I_i, rendered))
+
+    # Step 6: Initial SAM masks from SfM points
+    initial_masks = []
+    for i, I_i in enumerate(images):
+        prompts = [p for idx, p in static_prompts if idx == i]
+        masks = sam_segment(I_i, point_prompts=prompts)
+        initial_masks.append(masks)
+
+    # Step 7 & 8: Fuse heuristics and guide SAM again
+    final_masks = []
+    for i, I_i in enumerate(images):
+        guidance = combine_heuristics(initial_masks[i], residuals[i])
+        final_mask = sam_segment(I_i, guidance=guidance)
+        final_masks.append(final_mask)
+
+    return final_masks
+
+def train_final_nerf(images, masks, model):
+    for step in range(10000): # Not given in the sources [G]
+        for I_i, M_i in zip(images, masks):
+            rays = sample_rays(I_i)
+            rendered = render_rays(model, rays)
+            loss = 0.0
+            for r, c_hat, c_gt, m_val in zip(rays, rendered, ground_truth, M_i):
+                loss += m_val * charbonnier_loss(c_hat, c_gt)
+            model.step(loss)
+```
+
+## Operating characteristics
+*   **Time Complexity:** Requires two phases of NeRF optimization: a partial training phase (several thousand iterations) and the final training phase [S1]. SfM feature extraction and matching add preprocessing time [S1]. SAM inference adds per-image segmentation time [S1].
+*   **Memory Complexity:** Stores the sparse point cloud $C$, the partially trained NeRF weights, and the generated static masks $M_i$ [S1].
+*   **Strengths:** Robustly captures the full spectrum of static scene elements by combining high-frequency (SfM) and low-frequency (residual) cues [S1]. Avoids the need for semantic class priors required by other segmentation methods [S1].
+*   **Limitations:** Relies on the quality of SfM reconstruction (may fail in textureless regions) and the accuracy of the partially trained NeRF residuals [S1]. Computationally more expensive than standard NeRF training due to the heuristic generation and SAM steps [S1].
+*   **When to use:** Non-static scenes with transient distractors where static geometry needs to be preserved [G].
+*   **When not to use:** Static scenes (overhead of heuristic generation is unnecessary) or scenes with no transient distractors [G].
+
+## Background
+NeRF-HuGS was proposed to address the limitation of standard NeRF methods, which assume static scenes and suffer from artifacts when trained on data with transient distractors [S1]. The method was introduced in the paper "NeRF-HuGS: Improved Neural Radiance Fields in Non-static Scenes Using Heuristics-Guided Segmentation" [S1]. It builds on the use of SfM for camera pose estimation and scene initialization [S1] and leverages the Segment Anything Model (SAM) for precise boundary delineation [S1]. It contrasts with RobustNeRF, which uses heuristics alone and may ignore high-frequency static details [S1].
+
+## Sources
+[S1] NeRF-HuGS: Improved Neural Radiance Fields in Non-static Scenes Using Heuristics-Guided Segmentation, https://doi.org/10.1109/cvpr52733.2024.01838, fetched 2026-10-30

@@ -1,0 +1,230 @@
+--- v002.md
++++ v003.md
+@@ -4,35 +4,32 @@
+ 
+ ## Overview
+-Cached SDF accelerates Signed Distance Field queries by storing quantized distance values in a voxel grid, falling back to a ground truth SDF for points outside the cache [S2, unofficial]. It differs from standard SDF primitives by trading far-field precision for significant memory savings and query speed, using Int8 quantization to compress the field [S1, unofficial].
++Cached SDF accelerates Signed Distance Field queries by storing quantized distance values in a voxel grid, falling back to a ground truth SDF for points outside the cache [S1, unofficial]. It differs from standard SDF primitives by trading far-field precision for significant memory savings and query speed, using Int8 quantization to compress the field [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A ground truth SDF function $S_{gt}(p)$, a voxel grid resolution $VOXEL$ (or $resolution$), a bounding box defined by $range\_per\_dim$ with padding, and an out-of-bounds strategy [S1, S2, unofficial].
+-*   **Output:** A voxel grid storing quantized signed distances, and a query function returning $(d, \nabla d)$ for any point $p$ [S1, S2, unofficial].
++*   **Input:** A ground truth SDF function $S_{gt}(p)$, a voxel cell size $resolution$ (or $VOXEL$), a bounding box defined by $range\_per\_dim$ with padding, and an `out_of_bounds_strategy` [S1, unofficial].
++*   **Output:** A voxel grid storing quantized signed distances, and a query function returning $(d, \nabla d)$ for any point $p$ [S1, unofficial][S2, unofficial].
+ 
+ **Data Structures:**
+-The core structure is a 3D voxel grid of type `Int8` (8-bit signed integer).
+-*   **Grid Dimensions:** $W \times H \times D$, where dimensions are derived from the object's bounding box divided by $VOXEL$ [S1, S2, unofficial].
+-*   **Chunking:** In some implementations, the grid is divided into chunks of size $CHUNK \times CHUNK \times CHUNK$ (e.g., $32^3$) for memory management [S1, unofficial].
+-*   **Padding:** A border of $PAD$ voxels (e.g., 2) surrounds the active region to handle boundary conditions [S1, unofficial].
++The core structure is a 3D voxel grid of type `Int8` (8-bit signed integer) [S2, unofficial]. Grid dimensions $W \times H \times D$ are derived from the object's bounding box divided by $VOXEL$ [S1, unofficial]. A border of $PAD$ voxels (e.g., 2) surrounds the active region to handle boundary conditions [S2, unofficial]. Typical parameters include $VOXEL = 0.25$ meters, $SDF\_SCALE = 32$, $SDF\_MAX = 127$, and $CHUNK = 32$ voxels [S2, unofficial].
+ 
+ **Quantization Formula:**
+-The signed distance $d$ at a voxel center is quantized to an 8-bit integer $v$ using the scale factor $SDF\_SCALE$ [S1, unofficial]:
++The signed distance $d$ at a voxel center is quantized to an 8-bit integer $v$ using the scale factor $SDF\_SCALE$ [S2, unofficial]:
+ $$ v = \text{clamp}\left( \text{round}\left( \frac{d}{VOXEL} \times SDF\_SCALE \right), -128, 127 \right) $$
+ Decoding back to distance:
+ $$ d_{decoded} = \frac{v}{SDF\_SCALE} \times VOXEL $$
+-Typical parameters include $VOXEL = 0.25$ meters, $SDF\_SCALE = 32$, and $SDF\_MAX = 127$ [S1, unofficial].
++Precision is approximately $1/32$ of a voxel within $\pm 4$ voxels of the surface [S2, unofficial].
+ 
+ **Query Algorithm:**
+-1.  **Transform:** Convert query point $p$ from world frame to object frame using the inverse transformation matrix [S2, unofficial].
+-2.  **Grid Lookup:** Determine if $p$ lies within the cached voxel grid bounds.
+-    *   If **inside**:
+-        *   Perform trilinear interpolation of the 8 neighboring `Int8` values to get a floating-point distance $d_{cached}$ [S2, unofficial].
+-        *   Compute the gradient $\nabla d$ via finite differences of the interpolated values or by querying the ground truth SDF at the same point if gradient accuracy is critical [G].
+-    *   If **outside**:
+-        *   Apply the `out_of_bounds_strategy` [S2, unofficial].
+-        *   Default strategy: Compare $p$ against the object's bounding box. If outside, return a conservative under-approximation or a large constant distance [S2, unofficial].
+-        *   Alternative strategy (`LOOKUP_GT_SDF`): Query the ground truth SDF $S_{gt}(p)$ directly [S2, unofficial].
+-3.  **Return:** Return $(d, \nabla d)$.
++1. **Transform:** Convert query point $p$ from world frame to object frame using the inverse transformation matrix [S1, unofficial].
++2. **Grid Lookup:** Determine if $p$ lies within the cached voxel grid bounds [S1, unofficial].
++    * If **inside**:
++        * Perform trilinear interpolation of the 8 neighboring `Int8` values to get a floating-point distance $d_{cached}$ [G].
++        * Compute the gradient $\nabla d$ via finite differences of the interpolated values or by querying the ground truth SDF at the same point if gradient accuracy is critical [G].
++    * If **outside**:
++        * Apply the `out_of_bounds_strategy` [S1, unofficial].
++        * Default strategy: Compare $p$ against the object's bounding box [S1, unofficial].
++        * Alternative strategy (`LOOKUP_GT_SDF`): Query the ground truth SDF $S_{gt}(p)$ directly [S1, unofficial].
++3. **Return:** Return $(d, \nabla d)$.
+ 
+ **Pseudocode:**
+@@ -49,107 +46,102 @@
+         self.bounds_min = None
+         self.bounds_max = None
++        self.dims = None
+ 
+     def build(self, bounding_box_min, bounding_box_max):
+-        """Build the voxel grid from the ground truth SDF."""
+-        # Calculate grid dimensions
+         dims = np.ceil((bounding_box_max - bounding_box_min) / self.voxel_size).astype(int)
+-        # Add padding
+-        dims_padded = dims + 2 * self.padding
+-        self.grid = np.zeros(dims_padded, dtype=np.int8)
+-        
+-        # Define bounds for the active region (excluding padding)
++        self.dims = dims
+         self.bounds_min = bounding_box_min
+         self.bounds_max = bounding_box_max
+-        
+-        # Iterate over voxels and populate
+-        for x in range(dims_padded[0]):
+-            for y in range(dims_padded[1]):
+-                for z in range(dims_padded[2]):
+-                    # Convert voxel index to world coordinate
+-                    # Assuming origin at bounding_box_min - padding * voxel_size
+-                    p_world = bounding_box_min + (np.array([x, y, z]) - self.padding) * self.voxel_size
+-                    
+-                    # Transform to object frame (simplified: assume identity for object frame)
+-                    p_obj = p_world 
+-                    
+-                    # Query ground truth SDF
++        self.grid = np.zeros(dims, dtype=np.int8)
++        for x in range(dims[0]):
++            for y in range(dims[1]):
++                for z in range(dims[2]):
++                    p_world = bounding_box_min + np.array([x, y, z]) * self.voxel_size + self.voxel_size / 2.0
++                    p_obj = p_world
+                     d = self.sdf_gt(p_obj)
+-                    
+-                    # Quantize
+-                    # Formula: round(d / VOXEL * SDF_SCALE), clamped to [-128, 127]
+                     val = int(round(d / self.voxel_size * self.scale))
+                     val = np.clip(val, -128, 127)
+-                    
+                     self.grid[x, y, z] = val
+ 
+     def query(self, p_world):
+-        """Query the cached SDF for a point in world coordinates."""
+-        # Transform to object frame
+-        p_obj = p_world # Placeholder for actual transformation matrix application
+-        
+-        # Check if inside grid bounds
+-        # Calculate voxel coordinates
+-        # p_obj corresponds to index: (p_obj - bounds_min) / voxel_size + padding
+-        # We need to check if this index is within [0, dims_padded)
+-        
+-        # Simplified bounds check
+-        if not self._is_inside_grid(p_obj):
+-            # Out-of-bounds strategy
+-            # Default: under-approximate or use GT
+-            # For this implementation, we fallback to GT if outside
++        p_obj = p_world
++        coords = (p_obj - self.bounds_min) / self.voxel_size
++        ix, iy, iz = coords
++        if not (0 <= ix < self.dims[0] and 0 <= iy < self.dims[1] and 0 <= iz < self.dims[2]):
+             d, grad = self.sdf_gt(p_obj)
+             return d, grad
+-        
+-        # Interpolate from grid
+-        d_cached = self._trilinear_interpolate(p_obj)
+-        
+-        # Gradient approximation (finite difference)
++        ix0, iy0, iz0 = np.floor(coords).astype(int)
++        ix1, iy1, iz1 = np.clip(ix0 + 1, 0, self.dims[0]-1), np.clip(iy0 + 1, 0, self.dims[1]-1), np.clip(iz0 + 1, 0, self.dims[2]-1)
++        fx, fy, fz = coords - np.floor(coords)
++        c000 = self.grid[ix0, iy0, iz0]
++        c100 = self.grid[ix1, iy0, iz0]
++        c010 = self.grid[ix0, iy1, iz0]
++        c110 = self.grid[ix1, iy1, iz0]
++        c001 = self.grid[ix0, iy0, iz1]
++        c101 = self.grid[ix1, iy0, iz1]
++        c011 = self.grid[ix0, iy1, iz1]
++        c111 = self.grid[ix1, iy1, iz1]
++        d00 = c000 * (1 - fx) + c100 * fx
++        d01 = c010 * (1 - fx) + c110 * fx
++        d10 = c001 * (1 - fx) + c101 * fx
++        d11 = c011 * (1 - fx) + c111 * fx
++        d0 = d00 * (1 - fy) + d01 * fy
++        d1 = d10 * (1 - fy) + d11 * fy
++        d_cached = d0 * (1 - fz) + d1 * fz
++        d_cached = d_cached / self.scale * self.voxel_size
+         eps = self.voxel_size * 0.1
+-        dx = self._trilinear_interpolate(p_obj + np.array([eps, 0, 0])) - d_cached
+-        dy = self._trilinear_interpolate(p_obj + np.array([0, eps, 0])) - d_cached
+-        dz = self._trilinear_interpolate(p_obj + np.array([0, 0, eps])) - d_cached
+-        grad = np.array([dx, dy, dz]) / eps
+-        
++        dx = (self._interpolate(p_obj + np.array([eps, 0, 0])) - d_cached) / eps
++        dy = (self._interpolate(p_obj + np.array([0, eps, 0])) - d_cached) / eps
++        dz = (self._interpolate(p_obj + np.array([0, 0, eps])) - d_cached) / eps
++        grad = np.array([dx, dy, dz])
+         return d_cached, grad
+ 
+-    def _is_inside_grid(self, p_obj):
+-        # Check if p_obj is within the padded grid bounds
+-        # This requires knowing the exact mapping from world to grid indices
+-        # For brevity, assuming a helper exists that maps p_obj to (i,j,k)
+-        # and checks 0 <= i,j,k < grid.shape
+-        return True # Placeholder for actual bounds check logic
+-
+-    def _trilinear_interpolate(self, p_obj):
+-        # Convert p_obj to floating point voxel coordinates
+-        # i = (p_obj - bounds_min) / voxel_size + padding
+-        # Sample 8 neighbors and interpolate
+-        # Return decoded distance: val / scale * voxel_size
+-        return 0.0 # Placeholder for actual interpolation logic
++    def _interpolate(self, p_obj):
++        coords = (p_obj - self.bounds_min) / self.voxel_size
++        ix, iy, iz = coords
++        ix0, iy0, iz0 = np.floor(coords).astype(int)
++        ix1, iy1, iz1 = np.clip(ix0 + 1, 0, self.dims[0]-1), np.clip(iy0 + 1, 0, self.dims[1]-1), np.clip(iz0 + 1, 0, self.dims[2]-1)
++        fx, fy, fz = coords - np.floor(coords)
++        c000 = self.grid[ix0, iy0, iz0]
++        c100 = self.grid[ix1, iy0, iz0]
++        c010 = self.grid[ix0, iy1, iz0]
++        c110 = self.grid[ix1, iy1, iz0]
++        c001 = self.grid[ix0, iy0, iz1]
++        c101 = self.grid[ix1, iy0, iz1]
++        c011 = self.grid[ix0, iy1, iz1]
++        c111 = self.grid[ix1, iy1, iz1]
++        d00 = c000 * (1 - fx) + c100 * fx
++        d01 = c010 * (1 - fx) + c110 * fx
++        d10 = c001 * (1 - fx) + c101 * fx
++        d11 = c011 * (1 - fx) + c111 * fx
++        d0 = d00 * (1 - fy) + d01 * fy
++        d1 = d10 * (1 - fy) + d11 * fy
++        return d0 * (1 - fz) + d1 * fz
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision Loss:** Distances beyond $\pm 4$ voxels from the surface are saturated to $SDF\_MAX$ (127) or -128, losing precision for far-field queries [S1, unofficial].
+-*   **Out-of-Bounds:** The default bounding box comparison for out-of-bounds points always under-approximates the SDF value, which may be insufficient for collision detection requiring strict guarantees [S2, unofficial].
+-*   **Truncation:** Using a Truncated SDF (TSDF) variant reduces grid size significantly (e.g., 150x smaller) by only storing values within `truncation_distance` of the surface, but out-of-bounds points return the truncation value [S2, unofficial].
++*   **Precision Loss:** Distances beyond $\pm 4$ voxels from the surface are saturated to $SDF\_MAX$ (127) or -128, losing precision for far-field queries [S2, unofficial].
++*   **Out-of-Bounds:** The default bounding box comparison for out-of-bounds points always under-approximates the SDF value, but is empirically sufficient for most applications [S1, unofficial].
++*   **Truncation:** Using a Truncated SDF (TSDF) variant reduces grid size significantly (e.g., 150x smaller) by only storing values within `truncation_distance` of the surface, but out-of-bounds points return the truncation value [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### TSDF (Truncated SDF)
+-A variant where `truncation_distance` creates a smaller voxel grid covering only the near-surface region. Out-of-bounds points return the truncation value. Choose when memory is constrained and far-field accuracy is not needed [S2, unofficial].
++A variant where `truncation_distance` creates a smaller voxel grid covering only the near-surface region [S1, unofficial]. Out-of-bounds points return the truncation value [S1, unofficial].
+ 
+ ### Ground Truth SDF
+-The underlying analytic or high-resolution SDF used to populate the cache and handle out-of-bounds queries. Choose when exact precision is required for complex shapes [S2, unofficial].
++The underlying analytic or high-resolution SDF used to populate the cache and handle out-of-bounds queries [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Query time is $O(1)$ for in-bounds points (trilinear interpolation) and $O(1)$ for out-of-bounds if using bounding box check, or $O(N)$ if falling back to ground truth SDF [S2, unofficial].
+-*   **Memory Complexity:** $O(W \times H \times D)$ bytes, where $W,H,D$ are grid dimensions. Int8 quantization reduces memory by 8x compared to float32 [S1, unofficial].
+-*   **Performance:** Dramatically faster than using the ground truth SDF for out-of-bounds queries [S2, unofficial].
+-*   **Strengths:** Low memory footprint, fast query times, suitable for real-time applications [S1, S2, unofficial].
+-*   **Limitations:** Loss of precision for far-field queries, under-approximation for out-of-bounds points with default strategy [S1, S2, unofficial].
++*   **Time Complexity:** Query time is $O(1)$ for in-bounds points and $O(1)$ for out-of-bounds if using bounding box check, or $O(N)$ if falling back to ground truth SDF [S1, unofficial].
++*   **Memory Complexity:** $O(W \times H \times D)$ bytes, where $W,H,D$ are grid dimensions [S2, unofficial].
++*   **Performance:** Dramatically faster than using the ground truth SDF for out-of-bounds queries [S1, unofficial].
++*   **Strengths:** Low memory footprint, fast query times, suitable for real-time applications [S1, unofficial][S2, unofficial].
++*   **Limitations:** Loss of precision for far-field queries, under-approximation for out-of-bounds points with default strategy [S1, unofficial][S2, unofficial].
+ 
+ ## Background
+-Cached SDF was introduced as a method to optimize SDF queries in volumetric representations, particularly in robotics and simulation contexts where frequent distance queries are needed [S2, unofficial]. It leverages the spatial coherence of SDFs to store values in a voxel grid, reducing the computational cost of evaluating complex implicit surfaces [S1, unofficial].
++Cached SDF was introduced as a method to optimize SDF queries in volumetric representations, particularly in robotics and simulation contexts where frequent distance queries are needed [S1, unofficial]. It leverages the spatial coherence of SDFs to store values in a voxel grid, reducing the computational cost of evaluating complex implicit surfaces [S1, unofficial].
+ 
+ ## Sources
+-[S1] sh1ftmaker/voxel-wars, https://github.com/sh1ftmaker/voxel-wars, fetched 2026-10-28 (unofficial)
+-[S2] GitHub - UM-ARM-Lab/pytorch_volumetric: Volumetric structures such as ..., https://github.com/UM-ARM-Lab/pytorch_volumetric, fetched 2026-10-30 (unofficial)+[S1] GitHub - UM-ARM-Lab/pytorch_volumetric: Volumetric structures such as ..., https://github.com/UM-ARM-Lab/pytorch_volumetric, fetched 2026-10-30 (unofficial)
++[S2] sh1ftmaker/voxel-wars, https://github.com/sh1ftmaker/voxel-wars, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,4236 @@
+# RVizSplat
+
+RVizSplat is an RViz2 display plugin that provides end-to-end visualization of 3D Gaussian Splats in RViz.
+
+<p align="center">
+  <img src="images/rviz_splat.jpg" alt="RVizSplat" width="400">
+</p>
+
+### Build status
+
+[![Rolling](https://github.com/RVizSplat/RVizSplat/actions/workflows/rolling.yml/badge.svg)](https://github.com/RVizSplat/RVizSplat/actions/workflows/rolling.yml) &nbsp;&nbsp;&nbsp;
+[![Kilted](https://github.com/RVizSplat/RVizSplat/actions/workflows/kilted.yml/badge.svg)](https://github.com/RVizSplat/RVizSplat/actions/workflows/kilted.yml) &nbsp;&nbsp;&nbsp;
+[![Jazzy](https://github.com/RVizSplat/RVizSplat/actions/workflows/jazzy.yml/badge.svg)](https://github.com/RVizSplat/RVizSplat/actions/workflows/jazzy.yml)
+
+# How to build and run from source
+
+```bash
+mkdir -p ~/ros_ws/src
+cd ~/ros_ws/src
+git clone https://github.com/RVizSplat/RVizSplat.git
+cd ~/ros_ws
+rosdep update
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
+source install/setup.bash
+```
+
+# Installation via apt
+
+This feature is currently under development (See https://github.com/ros/rosdistro/pull/50909 for details)
+
+After sourcing your ROS 2 environment:
+
+```bash
+sudo apt-get install ros-$ROS_DISTRO-gsplat-rviz-plugin ros-$ROS_DISTRO-gsplat-publisher ros-$ROS_DISTRO-gsplat-msgs
+```
+
+# Examples
+
+## Rendering of a LeRobot SO-100 arm with a scene containing 6 million splats
+
+<p align="left">
+  <img src="images/le_robot_6mil.gif" alt="LeRobot SO-100 arm with 6 million splats" width="500">
+</p>
+
+## Rendering of transparent markers along with other gaussians
+
+<p align="left">
+  <img src="images/alpha_0_5_marker.gif" alt="Transparent markers rendered with gaussians" width="500">
+</p>
+
+# Using OIT for performance optimization
+
+If you have a resource constrained CPU and a weaker GPU (just integrated graphics), you might want to consider bypassing sorting entirely. For this use case, we provide OIT based implementations.
+
+To activate this, follow the "Advanced" options in the RViz plugin and select WBOIT.
+
+<p align="left">
+  <img src="images/rviz_wboit.png" alt="RViz WBOIT" width="400">
+</p>
+
+# Architecture
+
+Coming soon!
+
+# Evaluation
+
+The `gsplat_plugin_evaluation/eval.py` script computes image quality metrics (PSNR, SSIM, LPIPS) between a ref_folder and an eval_folder.
+
+Images are matched by the trailing 3-digit number in the filename (e.g. `img_001.png` in the ref_folder is paired with `*_001.png` in the eval_folder).
+
+### Usage
+
+```bash
+cd gsplat_plugin_evaluation
+python eval.py <ref_folder> <eval_folder> [--metrics psnr ssim lpips] [--lpips-net alex|vgg]
+```
+
+| Argument | Description |
+|---|---|
+| `ref_folder` | Folder containing reference (ground-truth) images |
+| `eval_folder` | Folder containing images to evaluate |
+| `--metrics` | Space-separated list of metrics to compute (default: all three) |
+| `--lpips-net` | Backbone network for LPIPS — `alex` (default) or `vgg` |
+
+### Examples
+
+Compute all metrics using the default AlexNet backbone:
+```bash
+python eval.py data/ref data/eval
+```
+
+Compute PSNR and LPIPS with VGG backbone:
+```bash
+python eval.py data/ref data/eval --metrics psnr lpips --lpips-net vgg
+```
+
+### Output
+
+The script prints a per-image table and a mean row at the bottom:
+
+```
+Image                    PSNR        SSIM       LPIPS
+--------------------------------------------------------
+img_001.png           32.1500      0.9210      0.0431
+img_002.png           29.8300      0.8970      0.0612
+--------------------------------------------------------
+Mean                  30.9900      0.9090      0.0522
+```
+
+### gsplat_plugin_evaluation/compute_lpips.py
+```
+"""LPIPS computation using torchvision pretrained features + official v0.1 linear weights.
+
+On first use per backbone, downloads the ~5 KB weight file from the official
+LPIPS repo (github.com/richzhang/PerceptualSimilarity) and caches it under
+~/.cache/lpips/v0.1/.  Subsequent calls use the cached file.
+
+The per-layer linear weights are 1x1 convs applied to the squared normalised
+feature differences — exactly what the lpips package does internally.
+"""
+
+import urllib.request
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.models as tvm
+from torchvision.models import AlexNet_Weights, VGG16_Weights
+
+
+_WEIGHT_URLS = {
+    "alex": "https://raw.githubusercontent.com/richzhang/PerceptualSimilarity/master/lpips/weights/v0.1/alex.pth",
+    "vgg":  "https://raw.githubusercontent.com/richzhang/PerceptualSimilarity/master/lpips/weights/v0.1/vgg.pth",
+}
+_CACHE_DIR = Path.home() / ".cache" / "lpips" / "v0.1"
+
+_models: dict[str, "_LPIPS"] = {}
+
+
+def _fetch_weights(net: str) -> Path:
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _CACHE_DIR / f"{net}.pth"
+    if not path.exists():
+        print(f"Downloading LPIPS {net} weights to {path} ...")
+        urllib.request.urlretrieve(_WEIGHT_URLS[net], path)
+    return path
+
+
+class _Extractor(nn.Module):
+    _LAYER_IDS = {
+        "alex": {1, 4, 7, 9, 11},
+        "vgg":  {3, 8, 15, 22, 29},
+    }
+
+    def __init__(self, net: str):
+        super().__init__()
+        if net == "alex":
+            self.features = tvm.alexnet(weights=AlexNet_Weights.DEFAULT).features
+        else:
+            self.features = tvm.vgg16(weights=VGG16_Weights.DEFAULT).features
+        self._ids = self._LAYER_IDS[net]
+        for p in self.parameters():
+            p.requires_grad_(False)
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        out = []
+        for i, layer in enumerate(self.features):
+            x = layer(x)
+            if i in self._ids:
+                out.append(x)
+        return out
+
+
+class _LPIPS(nn.Module):
+    def __init__(self, net: str):
+        super().__init__()
+        self.extractor = _Extractor(net)
+        weights = torch.load(_fetch_weights(net), map_location="cpu", weights_only=True)
+        # weights file: keys lin0.model.1.weight ... lin4.model.1.weight, shape [1, C, 1, 1]
+        self.lin_weights = nn.ParameterList([
+            nn.Parameter(weights[f"lin{i}.model.1.weight"], requires_grad=False)
+            for i in range(5)
+        ])
+        for p in self.parameters():
+            p.requires_grad_(False)
+
+    def forward(self, ref: torch.Tensor, ev: torch.Tensor) -> torch.Tensor:
+        ref_feats = self.extractor(ref)
+        ev_feats  = self.extractor(ev)
+        total = torch.zeros(1)
+        for w, rf, ef in zip(self.lin_weights, ref_feats, ev_feats):
+            diff = (_channel_norm(rf) - _channel_norm(ef)).pow(2)  # [1, C, H, W]
+            total = total + F.conv2d(diff, w).mean()               # weighted spatial mean
+        return total
+
+
+def _channel_norm(feat: torch.Tensor) -> torch.Tensor:
+    return feat / feat.norm(dim=1, keepdim=True).clamp(min=1e-10)
+
+
+def _get_model(net: str) -> _LPIPS:
+    if net not in _models:
+        _models[net] = _LPIPS(net).eval()
+    return _models[net]
+
+
+def _to_tensor(img: np.ndarray) -> torch.Tensor:
+    if img.ndim == 2:
+        img = np.stack([img, img, img], axis=2)
+    rgb = img[:, :, ::-1].copy()  # BGR -> RGB
+    t = torch.from_numpy(rgb).permute(2, 0, 1).float() / 127.5 - 1.0
+    return t.unsqueeze(0)
+
+
+def compute_lpips(ref: np.ndarray, ev: np.ndarray, net: str = "alex") -> float:
+    """
+    Args:
+        ref: reference image as uint8 numpy array (HxWxC BGR or HxW).
+        ev:  eval image, same shape/dtype.
+        net: 'alex' (default) or 'vgg'.
+    Returns:
+        LPIPS distance (lower is better).
+    """
+    model = _get_model(net)
+    with torch.no_grad():
+        return model(_to_tensor(ref), _to_tensor(ev)).item()
+```
+
+### gsplat_plugin_evaluation/compute_psnr.py
+```
+"""PSNR computation on numpy image arrays (uint8, HxWxC).
+Higher is better"""
+
+import numpy as np
+
+
+def compute_psnr(ref: np.ndarray, ev: np.ndarray) -> float:
+    mse = np.mean((ref.astype(np.float64) - ev.astype(np.float64)) ** 2)
+    if mse == 0:
+        return float("inf")
+    return 10.0 * np.log10(255.0**2 / mse)
+```
+
+### gsplat_plugin_evaluation/compute_ssim.py
+```
+"""SSIM computation on numpy image arrays (uint8, HxWxC or HxW). Pure numpy.
+Higher is better"""
+
+import numpy as np
+
+_WIN_SIZE = 11
+_SIGMA = 1.5
+_C1 = (0.01 * 255) ** 2
+_C2 = (0.03 * 255) ** 2
+
+
+def _make_gaussian_kernel(size: int, sigma: float) -> np.ndarray:
+    x = np.arange(size) - size // 2
+    k = np.exp(-(x ** 2) / (2.0 * sigma ** 2))
+    return k / k.sum()
+
+
+def _gaussian_filter2d(img: np.ndarray, kernel1d: np.ndarray) -> np.ndarray:
+    pad = len(kernel1d) // 2
+    row_filtered = np.apply_along_axis(
+        lambda row: np.convolve(np.pad(row, pad, mode="reflect"), kernel1d, mode="valid"),
+        axis=1, arr=img.astype(np.float64),
+    )
+    return np.apply_along_axis(
+        lambda col: np.convolve(np.pad(col, pad, mode="reflect"), kernel1d, mode="valid"),
+        axis=0, arr=row_filtered,
+    )
+
+
+def _ssim_channel(ref: np.ndarray, ev: np.ndarray, kernel1d: np.ndarray) -> float:
+    ref_f, ev_f = ref.astype(np.float64), ev.astype(np.float64)
+
+    mu1 = _gaussian_filter2d(ref_f, kernel1d)
+    mu2 = _gaussian_filter2d(ev_f, kernel1d)
+
+    mu1_sq, mu2_sq, mu1_mu2 = mu1 * mu1, mu2 * mu2, mu1 * mu2
+
+    sigma1_sq = _gaussian_filter2d(ref_f * ref_f, kernel1d) - mu1_sq
+    sigma2_sq = _gaussian_filter2d(ev_f * ev_f, kernel1d) - mu2_sq
+    sigma12   = _gaussian_filter2d(ref_f * ev_f, kernel1d) - mu1_mu2
+
+    numerator   = (2.0 * mu1_mu2 + _C1) * (2.0 * sigma12   + _C2)
+    denominator = (mu1_sq + mu2_sq + _C1) * (sigma1_sq + sigma2_sq + _C2)
+
+    return float(np.mean(numerator / denominator))
+
+
+def compute_ssim(ref: np.ndarray, ev: np.ndarray) -> float:
+    kernel1d = _make_gaussian_kernel(_WIN_SIZE, _SIGMA)
+    if ref.ndim == 2:
+        return _ssim_channel(ref, ev, kernel1d)
+    return float(np.mean([_ssim_channel(ref[..., c], ev[..., c], kernel1d) for c in range(ref.shape[2])]))
+```
+
+### gsplat_plugin_evaluation/eval.py
+```
+"""Evaluate image quality metrics between a reference folder and an eval folder.
+
+Usage:
+    python eval.py <ref_folder> <eval_folder> [--metrics psnr ssim lpips] [--lpips-net alex|vgg]
+
+Images are matched by the trailing 3-digit number in the stem (e.g. abc_001.png matches img_001.png).
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+SUPPORTED_METRICS = ("psnr", "ssim", "lpips")
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
+
+
+def find_pairs(ref_dir: Path, eval_dir: Path):
+    ref_images = sorted(p for p in ref_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS)
+    eval_by_digits = {
+        p.stem[-3:]: p
+        for p in eval_dir.iterdir()
+        if p.suffix.lower() in IMAGE_EXTS and p.stem[-3:].isdigit()
+    }
+    pairs, missing = [], []
+    for ref_p in ref_images:
+        key = ref_p.stem[-3:]
+        if key.isdigit() and key in eval_by_digits:
+            pairs.append((ref_p, eval_by_digits[key]))
+        else:
+            missing.append(ref_p.name)
+    return pairs, missing
+
+
+def load_image(path: Path) -> np.ndarray | None:
+    img = cv2.imread(str(path))
+    return img
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Compute image quality metrics between two folders")
+    parser.add_argument("ref_folder", type=Path, help="Reference image folder")
+    parser.add_argument("eval_folder", type=Path, help="Eval image folder")
+    parser.add_argument(
+        "--metrics",
+        nargs="+",
+        choices=SUPPORTED_METRICS,
+        default=list(SUPPORTED_METRICS),
+        metavar="METRIC",
+        help=f"Metrics to compute (default: all). Choices: {SUPPORTED_METRICS}",
+    )
+    parser.add_argument(
+        "--lpips-net",
+        choices=("alex", "vgg"),
+        default="alex",
+        help="Backbone for LPIPS (default: alex)",
+    )
+    args = parser.parse_args()
+
+    if not args.ref_folder.is_dir():
+        sys.exit(f"Error: ref_folder '{args.ref_folder}' is not a directory")
+    if not args.eval_folder.is_dir():
+        sys.exit(f"Error: eval_folder '{args.eval_folder}' is not a directory")
+
+    # Lazy imports so unused metric deps are never loaded
+    compute_fns = {}
+    if "psnr" in args.metrics:
+        from compute_psnr import compute_psnr
+        compute_fns["psnr"] = lambda r, e: compute_psnr(r, e)
+    if "ssim" in args.metrics:
+        from compute_ssim import compute_ssim
+        compute_fns["ssim"] = lambda r, e: compute_ssim(r, e)
+    if "lpips" in args.metrics:
+        from compute_lpips import compute_lpips
+        compute_fns["lpips"] = lambda r, e: compute_lpips(r, e, net=args.lpips_net)
+
+    pairs, missing = find_pairs(args.ref_folder, args.eval_folder)
+    if not pairs:
+        sys.exit("Error: no matching image pairs found")
+    if missing:
+        snip = missing[:5]
+        tail = "..." if len(missing) > 5 else ""
+        print(f"Warning: {len(missing)} ref image(s) not found in eval folder: {snip}{tail}")
+
+    accumulated: dict[str, list[float]] = {m: [] for m in args.metrics}
+
+    header = f"{'Image':<20}" + "".join(f"{m.upper():>12}" for m in args.metrics)
+    print(header)
+    print("-" * len(header))
+
+    for ref_p, ev_p in pairs:
+        ref_img = load_image(ref_p)
+        ev_img = load_image(ev_p)
+        if ref_img is None:
+            print(f"Warning: could not read {ref_p.name}, skipping")
+            continue
+        if ev_img is None:
+            print(f"Warning: could not read {ev_p.name}, skipping")
+            continue
+        if ref_img.shape != ev_img.shape:
+            print(f"Warning: shape mismatch for {ref_p.name} ({ref_img.shape} vs {ev_img.shape}), skipping")
+            continue
+
+        row = f"{ref_p.name:<20}"
+        for metric, fn in compute_fns.items():
+            val = fn(ref_img, ev_img)
+            accumulated[metric].append(val)
+            row += f"{val:>12.4f}"
+        print(row)
+
+    print("-" * len(header))
+    mean_row = f"{'Mean':<20}"
+    for metric in args.metrics:
+        vals = accumulated[metric]
+        finite = [v for v in vals if v != float("inf")]
+        mean_val = np.mean(finite) if finite else float("inf")
+        mean_row += f"{mean_val:>12.4f}"
+    print(mean_row)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### gsplat_plugin_evaluation/monitor_process.py
+```
+#!/usr/bin/env python3
+"""Monitor CPU, RAM, GPU, and GPU memory usage of a process by PID.
+
+Usage:
+    python monitor_process.py <PID> [--interval 1.0] [--output stats.csv] [--duration 60]
+
+Requires: psutil. Optional: pynvml (for NVIDIA GPU metrics).
+    pip install psutil nvidia-ml-py
+"""
+
+import argparse
+import csv
+import signal
+import sys
+import time
+from datetime import datetime
+
+import psutil
+
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    NVML_AVAILABLE = True
+    NUM_GPUS = pynvml.nvmlDeviceGetCount()
+except Exception as e:
+    NVML_AVAILABLE = False
+    NUM_GPUS = 0
+    print(f"[warn] NVML unavailable, GPU metrics disabled: {e}", file=sys.stderr)
+
+
+def get_gpu_stats(pid):
+    """Return (gpu_util_percent, gpu_mem_bytes) summed across all GPUs for pid.
+
+    gpu_util_percent is the SM utilization sample reported by NVML for this
+    process (sum across GPUs if the process spans multiple). Returns
+    (None, None) when NVML is unavailable, or (0.0, 0) when the pid is not
+    using any GPU.
+    """
+    if not NVML_AVAILABLE:
+        return None, None
+    total_mem = 0
+    total_util = 0.0
+    found = False
+    for i in range(NUM_GPUS):
+        handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+        for getter in (
+            pynvml.nvmlDeviceGetComputeRunningProcesses,
+            pynvml.nvmlDeviceGetGraphicsRunningProcesses,
+        ):
+            try:
+                for p in getter(handle):
+                    if p.pid == pid and p.usedGpuMemory is not None:
+                        total_mem += p.usedGpuMemory
+                        found = True
+            except pynvml.NVMLError:
+                pass
+        try:
+            for u in pynvml.nvmlDeviceGetProcessUtilization(handle, 0):
+                if u.pid == pid:
+                    total_util += u.smUtil
+                    found = True
+        except pynvml.NVMLError:
+            # No recent samples for this device.
+            pass
+    if not found:
+        return 0.0, 0
+    return total_util, total_mem
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Sample CPU/RAM/GPU usage of a process and write to CSV."
+    )
+    parser.add_argument("pid", type=int, help="PID of the process to monitor.")
+    parser.add_argument(
+        "--interval", type=float, default=1.0,
+        help="Sampling interval in seconds (default: 1.0).",
+    )
+    parser.add_argument(
+        "--output", "-o", default=None,
+        help="Output CSV path (default: proc_<pid>_usage_<timestamp>.csv).",
+    )
+    parser.add_argument(
+        "--duration", type=float, default=None,
+        help="Optional total duration in seconds; otherwise runs until the "
+             "process exits or Ctrl+C.",
+    )
+    args = parser.parse_args()
+
+    try:
+        proc = psutil.Process(args.pid)
+    except psutil.NoSuchProcess:
+        print(f"No process with PID {args.pid}", file=sys.stderr)
+        sys.exit(1)
+
+    output = args.output or (
+        f"proc_{args.pid}_usage_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    )
+
+    # Prime cpu_percent so the first real reading isn't 0.0.
+    proc.cpu_percent(interval=None)
+
+    fields = [
+        "timestamp",
+        "elapsed_s",
+        "cpu_percent",
+        "ram_rss_mb",
+        "ram_percent",
+        "gpu_util_percent",
+        "gpu_mem_mb",
+    ]
+
+    stop = False
+
+    def handle_sig(signum, frame):
+        nonlocal stop
+        stop = True
+
+    signal.signal(signal.SIGINT, handle_sig)
+    signal.signal(signal.SIGTERM, handle_sig)
+
+    start = time.time()
+    print(
+        f"Monitoring PID {args.pid} every {args.interval}s -> {output}. "
+        f"Ctrl+C to stop."
+    )
+
+    try:
+        with open(output, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            while not stop:
+                if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+                    print(f"Process {args.pid} is no longer running. Stopping.")
+                    break
+                tick = time.time()
+                try:
+                    cpu = proc.cpu_percent(interval=None)
+                    rss_mb = proc.memory_info().rss / (1024 * 1024)
+                    ram_pct = proc.memory_percent()
+                except psutil.NoSuchProcess:
+                    print(f"Process {args.pid} exited. Stopping.")
+                    break
+
+                gpu_util, gpu_mem = get_gpu_stats(args.pid)
+                gpu_mem_mb = gpu_mem / (1024 * 1024) if gpu_mem is not None else None
+
+                writer.writerow({
+                    "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+                    "elapsed_s": round(tick - start, 3),
+                    "cpu_percent": round(cpu, 2),
+                    "ram_rss_mb": round(rss_mb, 2),
+                    "ram_percent": round(ram_pct, 2),
+                    "gpu_util_percent": "" if gpu_util is None else round(gpu_util, 2),
+                    "gpu_mem_mb": "" if gpu_mem_mb is None else round(gpu_mem_mb, 2),
+                })
+                f.flush()
+
+                if args.duration is not None and (tick - start) >= args.duration:
+                    break
+
+                # Compensate for sampling cost so we stay close to `interval`.
+                time.sleep(max(0.0, args.interval - (time.time() - tick)))
+    finally:
+        if NVML_AVAILABLE:
+            try:
+                pynvml.nvmlShutdown()
+            except Exception:
+                pass
+
+    print(f"Saved {output}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### gsplat_publisher/setup.py
+```
+import glob
+import os
+
+from setuptools import find_packages, setup
+
+package_name = 'gsplat_publisher'
+
+splats_dir = os.path.join(os.path.dirname(__file__), '..', 'splats')
+ply_files = glob.glob(os.path.join(splats_dir, '*.ply'))
+
+setup(
+    name=package_name,
+    version='1.0.0',
+    packages=find_packages(exclude=['test']),
+    data_files=[
+        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'splats'), ply_files),
+    ],
+    install_requires=['setuptools'],
+    zip_safe=True,
+    maintainer='user',
+    maintainer_email='user@example.com',
+    description='Publishes latched SplatArray messages loaded from a PLY file.',
+    license='Apache-2.0',
+    tests_require=['pytest'],
+    entry_points={
+        'console_scripts': [
+            'ply_splat_publisher = gsplat_publisher.ply_splat_publisher:main',
+        ],
+    },
+)
+```
+
+### gsplat_publisher/gsplat_publisher/__init__.py
+```
+
+```
+
+### gsplat_publisher/gsplat_publisher/ply_reader.py
+```
+"""Minimal PLY vertex reader for 3DGS-format files.
+
+Returns a numpy structured array of the vertex element's scalar properties.
+Supports binary_little_endian and ASCII formats; list properties and non-vertex
+elements are skipped. No external deps beyond numpy — avoids the plyfile
+dependency, which has no rosdep rule and therefore isn't buildfarm-supported.
+"""
+
+import numpy as np
+
+
+# Little-endian field codes matching PLY scalar property types. Forcing '<'
+# keeps binary parsing correct on big-endian hosts too.
+_PLY_TYPE_TO_NP_LE = {
+    'float':   '<f4', 'float32': '<f4',
+    'double':  '<f8', 'float64': '<f8',
+    'char':    '<i1', 'int8':    '<i1',
+    'uchar':   '<u1', 'uint8':   '<u1',
+    'short':   '<i2', 'int16':   '<i2',
+    'ushort':  '<u2', 'uint16':  '<u2',
+    'int':     '<i4', 'int32':   '<i4',
+    'uint':    '<u4', 'uint32':  '<u4',
+}
+
+
+def read_ply_vertex(path: str) -> np.ndarray:
+    """Return the vertex element of *path* as a numpy structured array.
+
+    Raises ValueError on malformed or unsupported files.
+    """
+    with open(path, 'rb') as f:
+        if f.readline().strip() != b'ply':
+            raise ValueError(f'Not a PLY file: {path}')
+
+        fmt = None
+        vertex_count = 0
+        in_vertex = False
+        props: list[tuple[str, str]] = []  # (name, ply_type) in declaration order
+
+        while True:
+            line = f.readline()
+            if not line:
+                raise ValueError('Unexpected end of PLY header')
+            tokens = line.strip().decode('ascii', errors='replace').split()
+            if not tokens:
+                continue
+            head = tokens[0]
+            if head == 'end_header':
+                break
+            if head == 'format':
+                if tokens[1] == 'binary_little_endian':
+                    fmt = 'binary_le'
+                elif tokens[1] == 'ascii':
+                    fmt = 'ascii'
+                else:
+                    raise ValueError(f'Unsupported PLY format: {tokens[1]}')
+            elif head == 'element':
+                in_vertex = (tokens[1] == 'vertex')
+                if in_vertex:
+                    vertex_count = int(tokens[2])
+            elif head == 'property' and in_vertex:
+                if tokens[1] == 'list':
+                    continue  # list properties aren't used by 3DGS files
+                ty, name = tokens[1], tokens[2]
+                if ty not in _PLY_TYPE_TO_NP_LE:
+                    raise ValueError(f'Unsupported PLY property type: {ty}')
+                props.append((name, ty))
+
+        if fmt is None:
+            raise ValueError('PLY format not specified')
+        if vertex_count <= 0:
+            raise ValueError('PLY vertex count is 0 or missing')
+        if not props:
+            raise ValueError('PLY has no vertex properties')
+
+        dtype = np.dtype([(n, _PLY_TYPE_TO_NP_LE[t]) for (n, t) in props])
+
+        if fmt == 'binary_le':
+            need = dtype.itemsize * vertex_count
+            buf = f.read(need)
+            if len(buf) < need:
+                raise ValueError('Unexpected end of PLY binary data')
+            return np.frombuffer(buf, dtype=dtype, count=vertex_count).copy()
+
+        # ASCII: one vertex per whitespace-separated line.
+        arr = np.zeros(vertex_count, dtype=dtype)
+        names = dtype.names
+        for i in range(vertex_count):
+            line = f.readline()
+            if not line:
+                raise ValueError(
+                    f'Unexpected end of ASCII PLY data at vertex {i}')
+            toks = line.strip().decode('ascii', errors='replace').split()
+            if len(toks) < len(names):
+                raise ValueError(
+                    f'Too few values at ASCII vertex {i}')
+            for j, name in enumerate(names):
+                arr[name][i] = float(toks[j])
+        return arr
+```
+
+### gsplat_publisher/gsplat_publisher/ply_splat_publisher.py
+```
+#!/usr/bin/env python3
+"""Publishes a latched SplatArray message loaded from a PLY file."""
+
+import math
+import os
+
+import numpy as np
+import rclpy
+from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import PoseWithCovarianceStamped
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from gsplat_msgs.msg import Splat, SplatArray
+
+from gsplat_publisher.ply_reader import read_ply_vertex
+
+
+def _sigmoid_vec(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def _compute_covariance(scales: np.ndarray, quats: np.ndarray) -> np.ndarray:
+    """Return (n, 6, 6) covariance matrices with 3D Gaussian cov in top-left 3x3.
+
+    scales : (n, 3)  actual scale (not log-space)
+    quats  : (n, 4)  normalized quaternion [w, x, y, z]
+    """
+    n = scales.shape[0]
+    qw, qx, qy, qz = quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3]
+
+    R = np.zeros((n, 3, 3))
+    R[:, 0, 0] = 1 - 2 * (qy * qy + qz * qz)
+    R[:, 0, 1] = 2 * (qx * qy - qw * qz)
+    R[:, 0, 2] = 2 * (qx * qz + qw * qy)
+    R[:, 1, 0] = 2 * (qx * qy + qw * qz)
+    R[:, 1, 1] = 1 - 2 * (qx * qx + qz * qz)
+    R[:, 1, 2] = 2 * (qy * qz - qw * qx)
+    R[:, 2, 0] = 2 * (qx * qz - qw * qy)
+    R[:, 2, 1] = 2 * (qy * qz + qw * qx)
+    R[:, 2, 2] = 1 - 2 * (qx * qx + qy * qy)
+
+    s2 = scales ** 2  # (n, 3)
+    # Σ[r,c] = Σ_k R[r,k] * s2[k] * R[c,k]
+    A = R * s2[:, np.newaxis, :]   # (n, 3, 3)
+    cov3 = np.einsum('nrk,nck->nrc', A, R)  # (n, 3, 3)
+
+    cov36 = np.zeros((n, 36))
+    for r in range(3):
+        for c in range(3):
+            cov36[:, r * 6 + c] = cov3[:, r, c]
+    return cov36
+
+
+def _load_splat_array(ply_path: str, sh_degree: int, stamp, frame_id: str) -> SplatArray:
+    verts = read_ply_vertex(ply_path)
+    n = len(verts)
+    prop_names = set(verts.dtype.names)
+
+    n_rest = sum(1 for p in prop_names if p.startswith('f_rest_'))
+    # nrc: rest SH coefficients per channel (channel-major layout in PLY)
+    nrc = n_rest // 3
+    file_degree = 3 if nrc >= 15 else (2 if nrc >= 8 else (1 if nrc >= 3 else 0))
+    actual_degree = min(sh_degree, file_degree)
+    # Number of rest coefficients per channel to include for actual_degree
+    nrc_to_use = (actual_degree + 1) ** 2 - 1
+
+    # --- positions
+    xs = verts['x'].astype(np.float64)
+    ys = verts['y'].astype(np.float64)
+    zs = verts['z'].astype(np.float64)
+
+    # --- quaternions [w, x, y, z] (PLY convention: rot_0=w)
+    quats = np.stack([
+        verts['rot_0'].astype(np.float64),
+        verts['rot_1'].astype(np.float64),
+        verts['rot_2'].astype(np.float64),
+        verts['rot_3'].astype(np.float64),
+    ], axis=1)
+    qnorms = np.linalg.norm(quats, axis=1, keepdims=True)
+    quats = np.where(qnorms > 1e-6, quats / qnorms, quats)
+
+    # --- scales (actual, not log)
+    scales = np.stack([
+        np.exp(verts['scale_0'].astype(np.float64)),
+        np.exp(verts['scale_1'].astype(np.float64)),
+        np.exp(verts['scale_2'].astype(np.float64)),
+    ], axis=1)
+
+    # --- covariance (n, 36)
+    cov36 = _compute_covariance(scales, quats)
+
+    # --- opacity as uint8
+    raw_opacity = verts['opacity'].astype(np.float64)
+    opacity_u8 = np.clip(_sigmoid_vec(raw_opacity) * 255.0, 0, 255).astype(np.uint8)
+
+    # --- SH coefficients: interleaved RGB, coefficient-major
+    # DC term (degree 0)
+    sh_dc = np.stack([
+        verts['f_dc_0'].astype(np.float32),
+        verts['f_dc_1'].astype(np.float32),
+        verts['f_dc_2'].astype(np.float32),
+    ], axis=1)  # (n, 3)
+
+    # Higher-order rest terms (PLY stores channel-major: R block, G block, B block)
+    sh_parts = [sh_dc]
+    for ci in range(nrc_to_use):
+        r_key = f'f_rest_{ci}'
+        g_key = f'f_rest_{ci + nrc}'
+        b_key = f'f_rest_{ci + 2 * nrc}'
+        r_col = verts[r_key].astype(np.float32) if r_key in prop_names else np.zeros(n, np.float32)
+        g_col = verts[g_key].astype(np.float32) if g_key in prop_names else np.zeros(n, np.float32)
+        b_col = verts[b_key].astype(np.float32) if b_key in prop_names else np.zeros(n, np.float32)
+        sh_parts.append(np.stack([r_col, g_col, b_col], axis=1))  # (n, 3)
+
+    sh_all = np.concatenate(sh_parts, axis=1)  # (n, 3*(1+nrc_to_use))
+
+    # --- build message
+    array_msg = SplatArray()
+    for i in range(n):
+        splat = Splat()
+
+        pose = PoseWithCovarianceStamped()
+        pose.header.stamp = stamp
+        pose.header.frame_id = frame_id
+        pose.pose.pose.position.x = float(xs[i])
+        pose.pose.pose.position.y = float(ys[i])
+        pose.pose.pose.position.z = float(zs[i])
+        pose.pose.pose.orientation.w = float(quats[i, 0])
+        pose.pose.pose.orientation.x = float(quats[i, 1])
+        pose.pose.pose.orientation.y = float(quats[i, 2])
+        pose.pose.pose.orientation.z = float(quats[i, 3])
+        pose.pose.covariance = cov36[i].tolist()
+        splat.pose = pose
+
+        splat.opacity = int(opacity_u8[i])
+        splat.harmonics_deg = actual_degree
+        splat.spherical_harmonics = sh_all[i].tolist()
+
+        array_msg.splats.append(splat)
+
+    return array_msg
+
+
+class PlySplatPublisher(Node):
+    def __init__(self):
+        super().__init__('gsplat_publisher')
+
+        self.declare_parameter('ply_path', '')
+        self.declare_parameter('sh_degree', 3)
+
+        ply_path = self.get_parameter('ply_path').get_parameter_value().string_value
+        sh_degree = self.get_parameter('sh_degree').get_parameter_value().integer_value
+
+        if not ply_path:
+            pkg_share = get_package_share_directory('gsplat_publisher')
+            ply_path = os.path.join(pkg_share, 'splats', 'only_bonsai.ply')
+
+        sh_degree = max(0, min(3, sh_degree))
+
+        if not os.path.isfile(ply_path):
+            self.get_logger().fatal(f'PLY file not found: {ply_path}')
+            raise FileNotFoundError(ply_path)
+
+        qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self._pub = self.create_publisher(SplatArray, 'gaussian_splats', qos)
+
+        self.get_logger().info(f'Loading {ply_path} (SH degree {sh_degree}) …')
+        stamp = self.get_clock().now().to_msg()
+        msg = _load_splat_array(ply_path, sh_degree, stamp, frame_id='map')
+
+        self._pub.publish(msg)
+        self.get_logger().info(
+            f'Published {len(msg.splats)} splats on /gaussian_splats (latched)'
+        )
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = PlySplatPublisher()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/perf_monitor.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__PERF_MONITOR_HPP_
+#define GSPLAT_RVIZ_PLUGIN__PERF_MONITOR_HPP_
+
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
+namespace gsplat_rviz_plugin
+{
+class PerfMonitor
+{
+public:
+  static PerfMonitor & instance();
+
+  // Record the current wall-clock instant as a completed rendered frame.
+  void recordFrame();
+
+  // Named CPU timer pair. stopTimer() stores the elapsed duration so it
+  // appears in the next logAll() call. Multiple concurrent keys are supported.
+  void startTimer(const std::string & key);
+  void stopTimer(const std::string & key);
+
+  // Update GPU buffer size stats. Call once after each TBO (re)upload.
+  void setBufferStats(
+    uint32_t    splat_count,
+    std::size_t tbo_bytes,
+    std::size_t sh_tbo_bytes);
+
+  // Emit one throttled ROS INFO line containing all accumulated metrics.
+  void logAll();
+
+  PerfMonitor(const PerfMonitor &) = delete;
+  PerfMonitor & operator=(const PerfMonitor &) = delete;
+
+private:
+  PerfMonitor() = default;
+
+  static constexpr std::size_t         kFpsWindow   = 60;
+  static constexpr std::chrono::seconds kLogInterval{2};
+
+  mutable std::mutex mutex_;
+
+  // FPS sliding window
+  std::deque<std::chrono::steady_clock::time_point> frame_times_;
+
+  // Named timers
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point> timer_starts_;
+  std::unordered_map<std::string, double>                                 timer_last_ms_;
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point> timer_last_updated_;
+  // Per-key throttle for the immediate log emitted by stopTimer().
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point> timer_last_logged_;
+
+  // Buffer stats
+  uint32_t    splat_count_   = 0;
+  std::size_t tbo_bytes_     = 0;
+  std::size_t sh_tbo_bytes_  = 0;
+
+  std::chrono::steady_clock::time_point last_log_{};
+};
+
+}  // namespace gsplat_rviz_plugin
+
+#endif  // GSPLAT_RVIZ_PLUGIN__PERF_MONITOR_HPP_
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/splat_cloud.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__SPLAT_CLOUD_HPP_
+#define GSPLAT_RVIZ_PLUGIN__SPLAT_CLOUD_HPP_
+
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+#include <OgreAxisAlignedBox.h>
+#include <OgreMaterial.h>
+#include <OgreMovableObject.h>
+#include <OgreRenderable.h>
+#include <OgreRenderObjectListener.h>
+#include <OgreRenderOperation.h>
+#include <OgreVector3.h>
+
+#include "gsplat_rviz_plugin/splat_gpu.hpp"
+#include "gsplat_rviz_plugin/visibility_control.hpp"
+
+namespace Ogre
+{
+class RenderQueue;
+class SceneManager;
+class SceneNode;
+}
+
+namespace gsplat_rviz_plugin
+{
+
+class ISplatSorter;
+
+// Single MovableObject+Renderable that draws all Gaussian splats in one
+// instanced draw call.  Per-splat data lives in a GL_RGBA32F TBO; a
+// per-instance VBO holds the sorted splat indices (back-to-front).
+//
+// Architecture:
+//   quad VBO  (source 0, 4 verts, ±2 corners)  ─┐
+//   index VBO (source 1, N floats, sorted idx) ─┤─► glDrawElementsInstanced(N)
+//   IBO       (6 indices, two triangles)        ─┘
+//   TBO       (N × 2 RGBA32UI texels = packed SplatGPU data, 32 B/splat)
+class GSPLAT_RVIZ_PLUGIN_PUBLIC SplatCloud
+  : public Ogre::MovableObject,
+    public Ogre::Renderable,
+    public Ogre::RenderObjectListener
+{
+public:
+  explicit SplatCloud(Ogre::SceneNode * parent_node);
+  ~SplatCloud() override;
+
+  // Transfer ownership of the depth-sort backend. SplatCloud drives the
+  // sorter from an internal worker thread; all uploadCenters()/sort()
+  // calls happen on that thread. Pass nullptr to disable sorting.
+  void setSorter(std::unique_ptr<ISplatSorter> sorter);
+
+  // Upload new splat data.  Safe to call from the main thread; TBO
+  // creation is deferred to the first notifyRenderSingleObject() call
+  // so the GL context is guaranteed to be current. The centres are
+  // also forwarded to the sort worker.
+  void setSplats(std::vector<SplatGPU> splats, int sh_degree);
+  void clear();
+
+  // Change the active SH degree at runtime (clamped to [0, max available]).
+  void setShDegree(int d);
+  int  getMaxShDegree() const { return max_sh_degree_; }
+
+  void setAlphaThreshold(float t) { alpha_threshold_ = t; }
+
+  uint32_t getSplatCount() const { return splat_count_; }
+
+  // Write sorted indices into the per-instance VBO.
+  void applySort(const float * indices, uint32_t count);
+
+  // Axis-aligned clip box in the scene_node_'s local frame.  Splats whose
+  // centre falls outside [min, max] are culled at the vertex stage.
+  void setClipEnabled(bool v) { clip_enabled_ = v; }
+  void setClipBox(const Ogre::Vector3 & mn, const Ogre::Vector3 & mx)
+  {
+    clip_min_ = mn;
+    clip_max_ = mx;
+  }
+
+  // Switch between Sorted (false, default) and WBOIT (true) transparency.
+  // Setting this true triggers a deferred WBOIT-compositor attach on the
+  // next render pass (once a viewport is known); setting it false detaches.
+  // The per-frame depth sort is skipped while WBOIT is active since WBOIT
+  // is order-independent.
+  void setOitEnabled(bool v) { oit_enabled_ = v; }
+
+  // WBOIT weight-function knobs, pushed as fragment uniforms each frame.
+  void setWboitWeightScale(float v)    { wboit_weight_scale_    = v; }
+  void setWboitWeightExponent(float v) { wboit_weight_exponent_ = v; }
+  void setWboitAlphaDiscard(float v)   { wboit_alpha_discard_   = v; }
+
+  // ── Ogre::MovableObject ────────────────────────────────────────────
+  const Ogre::String & getMovableType() const override;
+  const Ogre::AxisAlignedBox & getBoundingBox() const override { return bounds_; }
+  Ogre::Real getBoundingRadius() const override;
+  void _updateRenderQueue(Ogre::RenderQueue * queue) override;
+  void visitRenderables(Ogre::Renderable::Visitor * visitor, bool debugRenderables = false) override;
+
+  // ── Ogre::Renderable ──────────────────────────────────────────────
+  const Ogre::MaterialPtr & getMaterial() const override { return material_; }
+  void getRenderOperation(Ogre::RenderOperation & op) override;
+  void getWorldTransforms(Ogre::Matrix4 * xform) const override;
+  Ogre::Real getSquaredViewDepth(const Ogre::Camera * cam) const override;
+  const Ogre::LightList & getLights() const override;
+
+  // ── Ogre::RenderObjectListener ────────────────────────────────────
+  // Binds the TBO to texture unit 0 immediately before the draw call.
+  void notifyRenderSingleObject(
+    Ogre::Renderable * rend,
+    const Ogre::Pass * pass,
+    const Ogre::AutoParamDataSource * source,
+    const Ogre::LightList * pLightList,
+    bool suppressRenderStateChanges) override;
+
+private:
+  void buildQuadGeometry();
+  void destroyTBO();
+  void uploadTBO();       // must be called with GL context current
+  void buildIndexVBO();   // allocates the per-instance index VBO
+
+  Ogre::MaterialPtr material_;
+  Ogre::RenderOperation render_op_;
+  Ogre::AxisAlignedBox bounds_;
+  Ogre::SceneManager * scene_manager_ = nullptr;
+
+  std::vector<SplatGPU> pending_splats_;
+  bool upload_pending_ = false;
+  int max_sh_degree_    = 0;  // highest degree available in the loaded data
+  int active_sh_degree_ = 0;  // degree currently sent to the shader (user-controlled)
+  float alpha_threshold_ = 0.05f;
+  int texels_per_splat_ = 0;  // compact base TBO = 2 uvec4 texels/splat (32 B)
+  uint32_t splat_count_ = 0;
+
+  // Raw GL handles (GLuint = uint32_t)
+  uint32_t tbo_buf_ = 0;
+  uint32_t tbo_tex_ = 0;
+  uint32_t sh_tbo_buf_ = 0;   // RGBA16F TBO of non-DC SH coefficients (empty when active_sh_degree_ == 0)
+  uint32_t sh_tbo_tex_ = 0;
+  int      sh_coeffs_per_splat_ = 0;   // (active_sh_degree_+1)² - 1
+
+  Ogre::HardwareVertexBufferSharedPtr index_vbo_;  // per-instance sorted indices
+
+  // Centres kept so the sorter can be swapped without re-loading splat data.
+  std::vector<Ogre::Vector3> centers_cache_;
+
+  class SortScheduler;
+  std::unique_ptr<SortScheduler> scheduler_;
+
+  // ROI clip state (pushed as uniforms each frame).
+  bool          clip_enabled_ = false;
+  Ogre::Vector3 clip_min_{-1e9f, -1e9f, -1e9f};
+  Ogre::Vector3 clip_max_{ 1e9f,  1e9f,  1e9f};
+
+  // Transparency state. The compositor that implements WBOIT is owned by
+  // the Display (which can reach the viewport on the Qt main thread,
+  // between renders); this class only gates the per-frame queue group
+  // and uniform pushes on `oit_enabled_`.
+  bool  oit_enabled_           = false;
+  float wboit_weight_scale_    = 5.0f;
+  float wboit_weight_exponent_ = 2.0f;
+  float wboit_alpha_discard_   = 0.01f;
+};
+
+}  // namespace gsplat_rviz_plugin
+
+#endif  // GSPLAT_RVIZ_PLUGIN__SPLAT_CLOUD_HPP_
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/splat_gpu.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__SPLAT_GPU_HPP_
+#define GSPLAT_RVIZ_PLUGIN__SPLAT_GPU_HPP_
+
+#include <cstddef>
+#include <cstdint>
+
+namespace gsplat_rviz_plugin
+{
+
+// GPU representation of one Gaussian splat packed for a GL_RGBA32F TBO.
+// Each splat occupies exactly 19 vec4 texels (304 bytes).
+//
+//  Byte offset │ Field      │ TBO texel (base + N)
+//  ────────────┼────────────┼─────────────────────
+//    0         │ center[3]  │ base+0  .xyz
+//   12         │ alpha      │ base+0  .w
+//   16         │ covA[3]    │ base+1  .xyz   {v11, v12, v13}
+//   28         │ _pad0      │ base+1  .w
+//   32         │ covB[3]    │ base+2  .xyz   {v22, v23, v33}
+//   44         │ _pad1      │ base+2  .w
+//   48         │ sh[16][4]  │ base+3 … base+18  (RGB per coeff, w=0)
+//  304         │ end        │
+struct alignas(4) SplatGPU
+{
+  float center[3];
+  float alpha;
+  float covA[3];   // {v11, v12, v13}
+  float _pad0;
+  float covB[3];   // {v22, v23, v33}
+  float _pad1;
+  float sh[16][4]; // sh[i][0..2] = RGB, sh[i][3] = 0
+};
+
+static_assert(sizeof(SplatGPU) == 304, "SplatGPU size mismatch");
+static_assert(offsetof(SplatGPU, covA) == 16, "covA offset");
+static_assert(offsetof(SplatGPU, covB) == 32, "covB offset");
+static_assert(offsetof(SplatGPU, sh)   == 48, "sh offset");
+
+}  // namespace gsplat_rviz_plugin
+
+#endif  // GSPLAT_RVIZ_PLUGIN__SPLAT_GPU_HPP_
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/visibility_control.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__VISIBILITY_CONTROL_HPP_
+#define GSPLAT_RVIZ_PLUGIN__VISIBILITY_CONTROL_HPP_
+
+#if defined _WIN32 || defined __CYGWIN__
+  #ifdef __GNUC__
+    #define GSPLAT_RVIZ_PLUGIN_EXPORT __attribute__ ((dllexport))
+    #define GSPLAT_RVIZ_PLUGIN_IMPORT __attribute__ ((dllimport))
+  #else
+    #define GSPLAT_RVIZ_PLUGIN_EXPORT __declspec(dllexport)
+    #define GSPLAT_RVIZ_PLUGIN_IMPORT __declspec(dllimport)
+  #endif
+  #ifdef GSPLAT_RVIZ_PLUGIN_BUILDING_LIBRARY
+    #define GSPLAT_RVIZ_PLUGIN_PUBLIC GSPLAT_RVIZ_PLUGIN_EXPORT
+  #else
+    #define GSPLAT_RVIZ_PLUGIN_PUBLIC GSPLAT_RVIZ_PLUGIN_IMPORT
+  #endif
+  #define GSPLAT_RVIZ_PLUGIN_LOCAL
+#else
+  #define GSPLAT_RVIZ_PLUGIN_EXPORT __attribute__ ((visibility("default")))
+  #define GSPLAT_RVIZ_PLUGIN_IMPORT
+  #if __GNUC__ >= 4
+    #define GSPLAT_RVIZ_PLUGIN_PUBLIC __attribute__ ((visibility("default")))
+    #define GSPLAT_RVIZ_PLUGIN_LOCAL  __attribute__ ((visibility("hidden")))
+  #else
+    #define GSPLAT_RVIZ_PLUGIN_PUBLIC
+    #define GSPLAT_RVIZ_PLUGIN_LOCAL
+  #endif
+#endif
+
+#endif  // GSPLAT_RVIZ_PLUGIN__VISIBILITY_CONTROL_HPP_
+```
+
+### gsplat_rviz_plugin/src/gsplat_rviz_plugin/perf_monitor.cpp
+```
+#include "gsplat_rviz_plugin/perf_monitor.hpp"
+
+#include <rclcpp/logging.hpp>
+
+namespace gsplat_rviz_plugin
+{
+
+PerfMonitor & PerfMonitor::instance()
+{
+  static PerfMonitor p;
+  return p;
+}
+
+void PerfMonitor::recordFrame()
+{
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lock(mutex_);
+  frame_times_.push_back(now);
+  if (frame_times_.size() > kFpsWindow) {
+    frame_times_.pop_front();
+  }
+}
+
+void PerfMonitor::startTimer(const std::string & key)
+{
+  const auto t = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lock(mutex_);
+  timer_starts_[key] = t;
+}
+
+void PerfMonitor::stopTimer(const std::string & key)
+{
+  const auto end = std::chrono::steady_clock::now();
+
+  double ms         = 0.0;
+  bool   should_log = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = timer_starts_.find(key);
+    if (it == timer_starts_.end()) return;
+    ms = std::chrono::duration<double, std::milli>(end - it->second).count();
+    timer_last_ms_[key]      = ms;
+    timer_last_updated_[key] = end;
+    timer_starts_.erase(it);
+
+    auto & last = timer_last_logged_[key];
+    if (end - last >= kLogInterval) {
+      last       = end;
+      should_log = true;
+    }
+  }
+
+  if (should_log) {
+    RCLCPP_INFO(
+      rclcpp::get_logger("gsplat_rviz_plugin"),
+      "[perf] %s: %.3f ms", key.c_str(), ms);
+  }
+}
+
+void PerfMonitor::setBufferStats(
+  uint32_t    splat_count,
+  std::size_t tbo_bytes,
+  std::size_t sh_tbo_bytes)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  splat_count_  = splat_count;
+  tbo_bytes_    = tbo_bytes;
+  sh_tbo_bytes_ = sh_tbo_bytes;
+}
+
+void PerfMonitor::logAll()
+{
+  const auto now = std::chrono::steady_clock::now();
+
+  float       fps         = 0.0f;
+  double      sort_ms     = 0.0;
+  double      render_ms   = 0.0;
+  bool        sort_cuda   = false;
+  uint32_t    splat_count;
+  std::size_t tbo_bytes, sh_tbo_bytes;
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (now - last_log_ < kLogInterval) return;
+    last_log_ = now;
+
+    // Sliding-window FPS: (frames - 1) events span the window duration.
+    if (frame_times_.size() >= 2) {
+      const double dt =
+        std::chrono::duration<double>(
+          frame_times_.back() - frame_times_.front()).count();
+      if (dt > 0.0) {
+        fps = static_cast<float>((frame_times_.size() - 1) / dt);
+      }
+    }
+
+    auto last_ms = [&](const std::string & key) -> double {
+      auto it = timer_last_ms_.find(key);
+      return (it != timer_last_ms_.end()) ? it->second : 0.0;
+    };
+    auto last_updated = [&](const std::string & key) -> std::chrono::steady_clock::time_point {
+      auto it = timer_last_updated_.find(key);
+      return (it != timer_last_updated_.end()) ? it->second
+                                               : std::chrono::steady_clock::time_point{};
+    };
+
+    // Always use whichever sort backend was written most recently to avoid
+    // reporting a stale value from a previously active backend.
+    const bool cuda_newer =
+      last_updated("cuda_sort") >= last_updated("cpu_sort") &&
+      last_updated("cuda_sort") != std::chrono::steady_clock::time_point{};
+    sort_cuda = cuda_newer;
+    sort_ms   = cuda_newer ? last_ms("cuda_sort") : last_ms("cpu_sort");
+
+    // If the selected sort backend hasn't been measured within the current
+    // FPS sliding window, the sort isn't actually running this frame —
+    // WBOIT mode (order-independent) skips it. Report 0 so the log
+    // reflects current cost rather than a cached value from whenever sort
+    // was last active.
+    const auto sort_updated = cuda_newer
+      ? last_updated("cuda_sort") : last_updated("cpu_sort");
+    const auto window_start =
+      frame_times_.empty() ? now : frame_times_.front();
+    if (sort_updated < window_start) sort_ms = 0.0;
+
+    render_ms = last_ms("render");
+
+    splat_count  = splat_count_;
+    tbo_bytes    = tbo_bytes_;
+    sh_tbo_bytes = sh_tbo_bytes_;
+  }
+
+  RCLCPP_INFO(
+    rclcpp::get_logger("gsplat_rviz_plugin"),
+    "[perf] FPS: %.1f  splats: %u"
+    "  |  sort (%s): %.3f ms  render: %.3f ms"
+    "  |  TBO: %.2f MB  SH-TBO: %.2f MB",
+    fps, splat_count,
+    sort_cuda ? "cuda" : "cpu", sort_ms, render_ms,
+    static_cast<double>(tbo_bytes)    / (1024.0 * 1024.0),
+    static_cast<double>(sh_tbo_bytes) / (1024.0 * 1024.0));
+}
+
+}  // namespace gsplat_rviz_plugin
+```
+
+### gsplat_rviz_plugin/src/gsplat_rviz_plugin/splat_cloud.cpp
+```
+#include "gsplat_rviz_plugin/splat_cloud.hpp"
+
+// GLEW must be included before any other OpenGL header.
+#include <GL/glew.h>
+
+#include <algorithm>
+#include <condition_variable>
+#include <cstring>
+#include <limits>
+#include <mutex>
+#include <numeric>
+#include <optional>
+#include <string>
+#include <thread>
+
+#include <OgreAutoParamDataSource.h>
+#include <OgreCamera.h>
+#include <OgreHardwareBufferManager.h>
+#include <OgreMaterialManager.h>
+#include <OgreRenderQueue.h>
+#include <OgreSceneManager.h>
+#include <OgreSceneNode.h>
+#include <OgreTechnique.h>
+#include <OgreVertexIndexData.h>
+#include <OgreViewport.h>
+
+#include "gsplat_rviz_plugin/sorters/i_splat_sorter.hpp"
+#include "gsplat_rviz_plugin/perf_monitor.hpp"
+
+namespace gsplat_rviz_plugin
+{
+
+static const Ogre::String MOT_SPLAT_CLOUD = "SplatCloud";
+
+// ── SortScheduler ─────────────────────────────────────────────────────────────
+//
+// Owns a worker thread and drives an ISplatSorter from it. All sorter methods
+// (including construction's companion uploadCenters, actual sort, and the
+// sorter's destructor) run on this thread — which keeps CUDA context usage
+// confined to a single thread and isolates the render thread from sort cost.
+//
+// Render thread posts commands (setSorter, setCenters, requestSort) and
+// picks up completed sorts with takeResult(). Sort requests are latest-wins;
+// unconsumed results are dropped when centres change.
+class SplatCloud::SortScheduler
+{
+public:
+  SortScheduler()
+  {
+    worker_ = std::thread(&SortScheduler::workerMain, this);
+  }
+
+  ~SortScheduler()
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      shutdown_ = true;
+    }
+    cv_.notify_all();
+    if (worker_.joinable()) worker_.join();
+  }
+
+  void setSorter(std::unique_ptr<ISplatSorter> sorter)
+  {
+    std::string n = sorter ? sorter->name() : "";
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      pending_new_sorter_     = std::move(sorter);
+      has_pending_new_sorter_ = true;
+      sort_pending_           = false;   // stale wrt new sorter's data
+      latest_result_.reset();
+      name_                   = std::move(n);
+    }
+    cv_.notify_all();
+  }
+
+  void setCenters(std::vector<Ogre::Vector3> centers)
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      pending_centers_ = std::move(centers);
+      sort_pending_    = false;          // stale wrt new centres
+      latest_result_.reset();
+    }
+    cv_.notify_all();
+  }
+
+  void requestSort(const Ogre::Vector3 & cam_fwd)
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      sort_fwd_     = cam_fwd;
+      sort_pending_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  std::unique_ptr<SortResult> takeResult()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return std::move(latest_result_);
+  }
+
+  std::string name() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return name_;
+  }
+
+private:
+  void workerMain()
+  {
+    // Sorter lives on this stack frame so it's destroyed on the worker thread.
+    std::unique_ptr<ISplatSorter> sorter;
+
+    while (true) {
+      std::unique_ptr<ISplatSorter> new_sorter;
+      std::optional<std::vector<Ogre::Vector3>> centers;
+      bool do_sort = false;
+      Ogre::Vector3 fwd;
+
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] {
+          return shutdown_ || has_pending_new_sorter_ ||
+                 pending_centers_.has_value() || sort_pending_;
+        });
+
+        if (shutdown_) break;
+
+        if (has_pending_new_sorter_) {
+          new_sorter              = std::move(pending_new_sorter_);
+          has_pending_new_sorter_ = false;
+        } else if (pending_centers_.has_value()) {
+          centers = std::move(pending_centers_);
+          pending_centers_.reset();
+        } else if (sort_pending_) {
+          fwd           = sort_fwd_;
+          sort_pending_ = false;
+          do_sort       = true;
+        }
+      }
+
+      if (new_sorter) {
+        // Old sorter (if any) is destroyed here, on this thread.
+        sorter = std::move(new_sorter);
+      }
+      if (centers) {
+        if (sorter) sorter->uploadCenters(*centers);
+      }
+      if (do_sort && sorter) {
+        SortResult r = sorter->sort(fwd);
+        if (r.count != 0) {
+          auto out = std::make_unique<SortResult>(std::move(r));
+          std::lock_guard<std::mutex> lock(mutex_);
+          latest_result_ = std::move(out);
+        }
+      }
+    }
+
+    // Destroy sorter on this thread before exiting.
+    sorter.reset();
+  }
+
+  mutable std::mutex      mutex_;
+  std::condition_variable cv_;
+  std::thread             worker_;
+  bool                    shutdown_ = false;
+
+  std::unique_ptr<ISplatSorter>             pending_new_sorter_;
+  bool                                      has_pending_new_sorter_ = false;
+  std::optional<std::vector<Ogre::Vector3>> pending_centers_;
+  bool                                      sort_pending_ = false;
+  Ogre::Vector3                             sort_fwd_;
+
+  std::unique_ptr<SortResult>               latest_result_;
+  std::string                               name_;
+};
+
+// IEEE 754 float32 → binary16. Round-to-nearest-even, saturates to inf on overflow.
+static inline uint16_t floatToHalf(float f)
+{
+  uint32_t x;
+  std::memcpy(&x, &f, 4);
+  const uint32_t sign = (x >> 16) & 0x8000u;
+  const uint32_t e32  = (x >> 23) & 0xFFu;
+  const uint32_t m32  = x & 0x7FFFFFu;
+
+  if (e32 == 0xFFu) {                          // Inf / NaN
+    return uint16_t(sign | 0x7C00u | (m32 ? 0x200u : 0u));
+  }
+  int e = int(e32) - 127 + 15;
+  if (e >= 0x1F) return uint16_t(sign | 0x7C00u);  // overflow → inf
+  if (e <= 0) {                                // subnormal / zero / underflow
+    if (e < -10) return uint16_t(sign);
+    const uint32_t m = m32 | 0x800000u;
+    const uint32_t shift = uint32_t(14 - e);
+    const uint32_t half  = (m >> shift) + ((m >> (shift - 1)) & 1u);
+    return uint16_t(sign | half);
+  }
+  uint32_t m = (m32 >> 13) + ((m32 >> 12) & 1u);
+  if (m & 0x400u) { m = 0; ++e; if (e >= 0x1F) return uint16_t(sign | 0x7C00u); }
+  return uint16_t(sign | (uint32_t(e) << 10) | m);
+}
+
+static inline uint32_t packHalf2x16(float a, float b)
+{
+  return uint32_t(floatToHalf(a)) | (uint32_t(floatToHalf(b)) << 16);
+}
+
+// DC SH coefficient (Y_0^0). RGB = SH_C0 * sh[0] + 0.5, clamp [0,1].
+static constexpr float kShC0 = 0.28209479177387814f;
+
+static inline uint32_t packDCColor(const float sh0[3], float alpha)
+{
+  auto quant = [](float v) {
+    v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+    return uint32_t(v * 255.0f + 0.5f) & 0xFFu;
+  };
+  const uint32_t r = quant(kShC0 * sh0[0] + 0.5f);
+  const uint32_t g = quant(kShC0 * sh0[1] + 0.5f);
+  const uint32_t b = quant(kShC0 * sh0[2] + 0.5f);
+  const uint32_t a = quant(alpha);
+  return r | (g << 8) | (b << 16) | (a << 24);
+}
+
+SplatCloud::SplatCloud(Ogre::SceneNode * parent_node)
+  : scheduler_(std::make_unique<SortScheduler>())
+{
+  scene_manager_ = parent_node->getCreator();
+
+  buildQuadGeometry();
+
+  material_ = Ogre::MaterialManager::getSingleton().getByName(
+    "gsplat_rviz_plugin/GaussianSplat", "rviz_rendering");
+  material_->load();
+
+  parent_node->attachObject(this);
+  scene_manager_->addRenderObjectListener(this);
+}
+
+SplatCloud::~SplatCloud()
+{
+  if (scene_manager_) {
+    scene_manager_->removeRenderObjectListener(this);
+  }
+  if (auto * node = getParentSceneNode()) {
+    node->detachObject(this);
+  }
+  destroyTBO();
+
+  delete render_op_.vertexData;
+  delete render_op_.indexData;
+
+  // scheduler_'s dtor joins its worker, which destroys the sorter on that
+  // thread (important for CUDA-context safety).
+}
+
+void SplatCloud::setSorter(std::unique_ptr<ISplatSorter> sorter)
+{
+  scheduler_->setSorter(std::move(sorter));
+  if (!centers_cache_.empty()) {
+    scheduler_->setCenters(centers_cache_);
+  }
+}
+
+// ── Geometry ──────────────────────────────────────────────────────────────────
+
+void SplatCloud::buildQuadGeometry()
+{
+  // Four quad corners; gl_Vertex.xy in the shader reads these as the ±scale
+  // factors for the projected 2D Gaussian eigenvectors.
+  static constexpr float kVerts[] = {
+    -2.0f, -2.0f,
+     2.0f, -2.0f,
+     2.0f,  2.0f,
+    -2.0f,  2.0f,
+  };
+  static constexpr uint16_t kIdx[] = {0, 1, 2, 0, 2, 3};
+
+  render_op_.operationType = Ogre::RenderOperation::OT_TRIANGLE_LIST;
+  render_op_.useIndexes    = true;
+
+  render_op_.vertexData = new Ogre::VertexData();
+  render_op_.vertexData->vertexStart = 0;
+  render_op_.vertexData->vertexCount = 4;
+
+  // Source 0: per-vertex quad position (VES_POSITION → Ogre GL attribute "vertex", location 0)
+  // Source 1: per-instance sorted index (VES_TEXTURE_COORDINATES[0] → "uv0", location 8)
+  render_op_.vertexData->vertexDeclaration->addElement(
+    0, 0, Ogre::VET_FLOAT2, Ogre::VES_POSITION);
+  render_op_.vertexData->vertexDeclaration->addElement(
+    1, 0, Ogre::VET_FLOAT1, Ogre::VES_TEXTURE_COORDINATES, 0);
+
+  auto & bm = Ogre::HardwareBufferManager::getSingleton();
+
+  auto quad_vbo = bm.createVertexBuffer(
+    2 * sizeof(float), 4, Ogre::HardwareBuffer::HBU_STATIC_WRITE_ONLY);
+  quad_vbo->writeData(0, quad_vbo->getSizeInBytes(), kVerts, true);
+  render_op_.vertexData->vertexBufferBinding->setBinding(0, quad_vbo);
+
+  auto ibuf = bm.createIndexBuffer(
+    Ogre::HardwareIndexBuffer::IT_16BIT, 6,
+    Ogre::HardwareBuffer::HBU_STATIC_WRITE_ONLY);
+  ibuf->writeData(0, ibuf->getSizeInBytes(), kIdx, true);
+
+  render_op_.indexData = new Ogre::IndexData();
+  render_op_.indexData->indexBuffer = ibuf;
+  render_op_.indexData->indexCount  = 6;
+  render_op_.indexData->indexStart  = 0;
+}
+
+// ── TBO lifecycle ─────────────────────────────────────────────────────────────
+
+void SplatCloud::destroyTBO()
+{
+  if (tbo_tex_)    { glDeleteTextures(1, &tbo_tex_);    tbo_tex_ = 0; }
+  if (tbo_buf_)    { glDeleteBuffers(1, &tbo_buf_);     tbo_buf_ = 0; }
+  if (sh_tbo_tex_) { glDeleteTextures(1, &sh_tbo_tex_); sh_tbo_tex_ = 0; }
+  if (sh_tbo_buf_) { glDeleteBuffers(1, &sh_tbo_buf_);  sh_tbo_buf_ = 0; }
+  sh_coeffs_per_splat_ = 0;
+}
+
+void SplatCloud::uploadTBO()
+{
+  destroyTBO();
+  if (pending_splats_.empty()) return;
+
+  // Compact base TBO: 2 uvec4 texels per splat (32 B total).
+  //   texel 0: center.xyz as float-bits, packHalf2x16(cov00, cov01)
+  //   texel 1: packHalf2x16(cov02, cov11), packHalf2x16(cov12, cov22),
+  //            packUnorm4x8(DC-baked RGBA), reserved
+  texels_per_splat_ = 2;
+  std::vector<uint32_t> packed(static_cast<size_t>(splat_count_) * 8);
+  for (uint32_t i = 0; i < splat_count_; ++i) {
+    const SplatGPU & s = pending_splats_[i];
+    uint32_t * d = packed.data() + static_cast<size_t>(i) * 8;
+
+    std::memcpy(&d[0], &s.center[0], 4);
+    std::memcpy(&d[1], &s.center[1], 4);
+    std::memcpy(&d[2], &s.center[2], 4);
+    // Covariance upper-triangle: covA = {v11,v12,v13}, covB = {v22,v23,v33}
+    d[3] = packHalf2x16(s.covA[0], s.covA[1]);  // v11, v12
+    d[4] = packHalf2x16(s.covA[2], s.covB[0]);  // v13, v22
+    d[5] = packHalf2x16(s.covB[1], s.covB[2]);  // v23, v33
+    d[6] = packDCColor(s.sh[0], s.alpha);
+    d[7] = 0u;
+  }
+
+  glGenBuffers(1, &tbo_buf_);
+  glBindBuffer(GL_TEXTURE_BUFFER, tbo_buf_);
+  glBufferData(
+    GL_TEXTURE_BUFFER,
+    static_cast<GLsizeiptr>(packed.size() * sizeof(uint32_t)),
+    packed.data(),
+    GL_STATIC_DRAW);
+  glBindBuffer(GL_TEXTURE_BUFFER, 0);
+
+  glGenTextures(1, &tbo_tex_);
+  glBindTexture(GL_TEXTURE_BUFFER, tbo_tex_);
+  glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32UI, tbo_buf_);
+  glBindTexture(GL_TEXTURE_BUFFER, 0);
+
+  // ── Optional SH TBO for non-DC coefficients (GL_RGBA16F, 8 B/coeff) ──
+  sh_coeffs_per_splat_ =
+    (active_sh_degree_ + 1) * (active_sh_degree_ + 1) - 1;  // excludes DC
+  if (sh_coeffs_per_splat_ > 0) {
+    // Each non-DC coefficient packs into one RGBA16F texel: (R, G, B, 0).
+    // Layout is [splat0_c1, splat0_c2, …, splat1_c1, splat1_c2, …].
+    std::vector<uint16_t> sh_packed(
+      static_cast<size_t>(splat_count_) * sh_coeffs_per_splat_ * 4);
+    for (uint32_t i = 0; i < splat_count_; ++i) {
+      const SplatGPU & s = pending_splats_[i];
+      uint16_t * d = sh_packed.data() +
+        static_cast<size_t>(i) * sh_coeffs_per_splat_ * 4;
+      for (int c = 0; c < sh_coeffs_per_splat_; ++c) {
+        // SplatGPU::sh[0] is DC; non-DC starts at sh[1].
+        d[c * 4 + 0] = floatToHalf(s.sh[c + 1][0]);
+        d[c * 4 + 1] = floatToHalf(s.sh[c + 1][1]);
+        d[c * 4 + 2] = floatToHalf(s.sh[c + 1][2]);
+        d[c * 4 + 3] = 0;
+      }
+    }
+
+    glGenBuffers(1, &sh_tbo_buf_);
+    glBindBuffer(GL_TEXTURE_BUFFER, sh_tbo_buf_);
+    glBufferData(
+      GL_TEXTURE_BUFFER,
+      static_cast<GLsizeiptr>(sh_packed.size() * sizeof(uint16_t)),
+      sh_packed.data(),
+      GL_STATIC_DRAW);
+    glBindBuffer(GL_TEXTURE_BUFFER, 0);
+
+    glGenTextures(1, &sh_tbo_tex_);
+    glBindTexture(GL_TEXTURE_BUFFER, sh_tbo_tex_);
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA16F, sh_tbo_buf_);
+    glBindTexture(GL_TEXTURE_BUFFER, 0);
+  }
+
+  // 2 uvec4 texels × 4 bytes each = 32 B/splat for the base TBO.
+  const std::size_t tbo_b    = static_cast<std::size_t>(splat_count_) * 32;
+  // RGBA16F = 8 B per non-DC SH coefficient per splat.
+  const std::size_t sh_tbo_b = static_cast<std::size_t>(splat_count_) *
+                                static_cast<std::size_t>(sh_coeffs_per_splat_) * 8;
+  PerfMonitor::instance().setBufferStats(splat_count_, tbo_b, sh_tbo_b);
+}
+
+// ── Per-instance index VBO ────────────────────────────────────────────────────
+
+void SplatCloud::buildIndexVBO()
+{
+  if (splat_count_ == 0) { index_vbo_.reset(); return; }
+
+  auto & bm = Ogre::HardwareBufferManager::getSingleton();
+  index_vbo_ = bm.createVertexBuffer(
+    sizeof(float), splat_count_,
+    Ogre::HardwareBuffer::HBU_DYNAMIC_WRITE_ONLY_DISCARDABLE);
+
+  // Identity sort: instance i draws splat i
+  std::vector<float> ids(splat_count_);
+  std::iota(ids.begin(), ids.end(), 0.0f);
+  index_vbo_->writeData(0, index_vbo_->getSizeInBytes(), ids.data(), true);
+
+  index_vbo_->setIsInstanceData(true);
+  index_vbo_->setInstanceDataStepRate(1);
+
+  render_op_.vertexData->vertexBufferBinding->setBinding(1, index_vbo_);
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+void SplatCloud::setSplats(std::vector<SplatGPU> splats, int sh_degree)
+{
+  splat_count_      = static_cast<uint32_t>(splats.size());
+  max_sh_degree_    = sh_degree;
+  active_sh_degree_ = std::min(1, sh_degree);  // default: SH1 if available, else 0
+  pending_splats_   = std::move(splats);
+  upload_pending_   = true;
+
+  // Rebuild bounds + centres cache from splat data.
+  bounds_.setNull();
+  centers_cache_.resize(pending_splats_.size());
+  for (size_t i = 0; i < pending_splats_.size(); ++i) {
+    const auto & s = pending_splats_[i];
+    const Ogre::Vector3 c(s.center[0], s.center[1], s.center[2]);
+    centers_cache_[i] = c;
+    bounds_.merge(c);
+  }
+
+  buildIndexVBO();
+  scheduler_->setCenters(centers_cache_);
+
+  if (auto * node = getParentSceneNode()) {
+    node->needUpdate();
+  }
+}
+
+void SplatCloud::clear()
+{
+  splat_count_      = 0;
+  max_sh_degree_    = 0;
+  active_sh_degree_ = 0;
+  texels_per_splat_ = 0;
+  pending_splats_.clear();
+  centers_cache_.clear();
+  upload_pending_ = false;
+  destroyTBO();
+  index_vbo_.reset();
+  bounds_.setNull();
+
+  scheduler_->setCenters({});
+
+  if (auto * node = getParentSceneNode()) {
+    node->needUpdate();
+  }
+}
+
+void SplatCloud::setShDegree(int d)
+{
+  const int clamped = std::clamp(d, 0, max_sh_degree_);
+  if (clamped == active_sh_degree_) return;
+  active_sh_degree_ = clamped;
+  upload_pending_   = true;  // triggers re-pack + re-upload in notifyRenderSingleObject
+}
+
+void SplatCloud::applySort(const float * indices, uint32_t count)
+{
+  if (!index_vbo_ || count == 0 || count != splat_count_) return;
+  PerfMonitor::instance().startTimer("vbo_upload");
+  index_vbo_->writeData(0, count * sizeof(float), indices, true);
+  PerfMonitor::instance().stopTimer("vbo_upload");
+}
+
+// ── MovableObject ─────────────────────────────────────────────────────────────
+
+const Ogre::String & SplatCloud::getMovableType() const { return MOT_SPLAT_CLOUD; }
+
+Ogre::Real SplatCloud::getBoundingRadius() const
+{
+  return bounds_.isNull() ? 0.0f : bounds_.getHalfSize().length();
+}
+
+void SplatCloud::_updateRenderQueue(Ogre::RenderQueue * queue)
+{
+  if (splat_count_ == 0) return;
+
+  // FPS counter moved to notifyRenderSingleObject — _updateRenderQueue
+  // fires once per RENDERSCENE compositor pass (3× per real frame in WBOIT
+  // mode), so counting here over-reports WBOIT FPS by a factor equal to
+  // the number of compositor scene passes.
+
+  auto * vp = scene_manager_->getCurrentViewport();
+
+  // WBOIT is order-independent; skip the sort when it's active. The
+  // compositor that implements WBOIT is owned by GsplatDisplay (it's
+  // attached/detached on the Qt main thread, between renders; doing
+  // that here would be mid-render-chain-walk and Ogre's chain walker
+  // does not tolerate chain mutations in that context — symptom is a
+  // blank viewport on the next frame).
+  if (!oit_enabled_ && vp) {
+    if (const Ogre::Camera * cam = vp->getCamera()) {
+      scheduler_->requestSort(cam->getDerivedDirection());
+      if (auto result = scheduler_->takeResult()) {
+        applySort(result->indices.data(), result->count);
+      }
+    }
+  }
+
+  // Move the splat out of the opaque range when WBOIT is active so its
+  // pass-1 opaque scene (lastRenderQueue=94) skips the splats and passes
+  // 2-3 (first/last=95) pick them up with the right scheme.
+  const uint8_t queue_group = oit_enabled_ ? 95u : 50u;
+  queue->addRenderable(this, queue_group, mRenderQueuePriority);
+
+  PerfMonitor::instance().logAll();
+}
+
+void SplatCloud::visitRenderables(Ogre::Renderable::Visitor * visitor, bool /*debug*/)
+{
+  if (splat_count_ > 0) {
+    visitor->visit(this, 0, false);
+  }
+}
+
+// ── Renderable ────────────────────────────────────────────────────────────────
+
+void SplatCloud::getRenderOperation(Ogre::RenderOperation & op)
+{
+  op = render_op_;
+  op.numberOfInstances = splat_count_;
+}
+
+void SplatCloud::getWorldTransforms(Ogre::Matrix4 * xform) const
+{
+  auto * node = getParentSceneNode();
+  *xform = node ? node->_getFullTransform() : Ogre::Matrix4::IDENTITY;
+}
+
+Ogre::Real SplatCloud::getSquaredViewDepth(const Ogre::Camera * cam) const
+{
+  if (bounds_.isNull()) return 0.0f;
+  return (bounds_.getCenter() - cam->getDerivedPosition()).squaredLength();
+}
+
+const Ogre::LightList & SplatCloud::getLights() const { return queryLights(); }
+
+// ── RenderObjectListener ──────────────────────────────────────────────────────
+
+void SplatCloud::notifyRenderSingleObject(
+  Ogre::Renderable * rend,
+  const Ogre::Pass * pass,
+  const Ogre::AutoParamDataSource * source,
+  const Ogre::LightList *,
+  bool)
+{
+  if (rend != this) return;
+
+  // FPS counted here so WBOIT mode reports the same number as RViz's
+  // status-bar (which counts real frames). notifyRenderSingleObject
+  // fires once per render dispatch of this Renderable — once per frame
+  // in sorted mode, and twice per frame in WBOIT mode (the accum and
+  // reveal passes both draw the splats). We skip the reveal pass so
+  // each frame is counted exactly once. The default sorted technique's
+  // scheme name is Ogre's MaterialManager::DEFAULT_SCHEME_NAME
+  // ("Default"); WBOIT passes use the explicit scheme names declared
+  // in the material script.
+  if (pass) {
+    const Ogre::String & scheme = pass->getParent()->getSchemeName();
+    if (scheme != "wboit_reveal") {
+      PerfMonitor::instance().recordFrame();
+    }
+  }
+
+  if (upload_pending_) {
+    uploadTBO();
+    upload_pending_ = false;
+  }
+
+  // Time the steady-state per-frame work: shader param upload + TBO binding.
+  PerfMonitor::instance().startTimer("render");
+
+  // Splat-tight forward-z range in view space — WBOIT's weight function needs
+  // a meaningful [0,1] depth range instead of the ~[0.98, 0.9998] cluster you
+  // get from raw gl_FragCoord.z. Sentinel (far = -1) → shader falls back to
+  // gl_FragCoord.z. Computed only in WBOIT mode since Sorted ignores it.
+  float splat_z_near = 0.0f;
+  float splat_z_far  = -1.0f;
+  if (oit_enabled_ && source && !bounds_.isNull()) {
+    const Ogre::Matrix4 & view = source->getViewMatrix();
+    const auto corners = bounds_.getAllCorners();
+    float z_min =  std::numeric_limits<float>::max();
+    float z_max = -std::numeric_limits<float>::max();
+    for (int i = 0; i < 8; ++i) {
+      const Ogre::Vector3 vc = view * corners[i];
+      const float fwd = -vc.z;   // Ogre view space: -Z forward
+      if (fwd < z_min) z_min = fwd;
+      if (fwd > z_max) z_max = fwd;
+    }
+    if (z_max > z_min + 1e-3f) {
+      const float span = z_max - z_min;
+      splat_z_near = std::max(0.0f, z_min - 0.05f * span);
+      splat_z_far  = z_max + 0.05f * span;
+    }
+  }
+
+  // Use the pass being rendered so this works for both the default (sorted)
+  // pass and the WBOIT accum/reveal passes. setIgnoreMissingParams lets us
+  // fire the whole bundle regardless of which shader declares what.
+  if (pass->hasVertexProgram()) {
+    auto params = pass->getVertexProgramParameters();
+    if (params) {
+      params->setIgnoreMissingParams(true);
+      params->setNamedConstant("sh_degree",      active_sh_degree_);
+      params->setNamedConstant("u_clip_enabled", clip_enabled_ ? 1 : 0);
+      const Ogre::Vector4 cmin(clip_min_.x, clip_min_.y, clip_min_.z, 0.0f);
+      const Ogre::Vector4 cmax(clip_max_.x, clip_max_.y, clip_max_.z, 0.0f);
+      params->setNamedConstant("u_clip_min",     cmin);
+      params->setNamedConstant("u_clip_max",     cmax);
+      params->setNamedConstant("u_splat_z_near", splat_z_near);
+      params->setNamedConstant("u_splat_z_far",  splat_z_far);
+    }
+  }
+  if (pass->hasFragmentProgram()) {
+    auto fp = pass->getFragmentProgramParameters();
+    if (fp) {
+      fp->setIgnoreMissingParams(true);
+      fp->setNamedConstant("wboit_weight_scale",    wboit_weight_scale_);
+      fp->setNamedConstant("wboit_weight_exponent", wboit_weight_exponent_);
+      fp->setNamedConstant("wboit_alpha_discard",   wboit_alpha_discard_);
+    }
+  }
+
+  if (pass->hasFragmentProgram()) {
+    auto params = pass->getFragmentProgramParameters();
+    if (params && params->_findNamedConstantDefinition("u_alpha_threshold", false)) {
+      params->setNamedConstant("u_alpha_threshold", alpha_threshold_);
+    }
+  }
+
+  if (tbo_tex_) {
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_BUFFER, tbo_tex_);
+  }
+
+  // Bind SH TBO on unit 1 when it exists; otherwise leave whatever is there —
+  // the shader only samples it when sh_degree > 0.
+  glActiveTexture(GL_TEXTURE1);
+  glBindTexture(GL_TEXTURE_BUFFER, sh_tbo_tex_);
+  glActiveTexture(GL_TEXTURE0);
+
+  PerfMonitor::instance().stopTimer("render");
+}
+
+}  // namespace gsplat_rviz_plugin
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/displays/gsplat_display.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__DISPLAYS__GSPLAT_DISPLAY_HPP_
+#define GSPLAT_RVIZ_PLUGIN__DISPLAYS__GSPLAT_DISPLAY_HPP_
+
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+#include <OgreVector3.h>
+
+#include "rviz_common/display.hpp"
+#include "rviz_common/properties/bool_property.hpp"
+#include "rviz_common/properties/enum_property.hpp"
+#include "rviz_common/properties/file_picker_property.hpp"
+#include "rviz_common/properties/float_property.hpp"
+#include "rviz_common/properties/int_property.hpp"
+#include "rviz_common/properties/property.hpp"
+#include "rviz_common/properties/ros_topic_property.hpp"
+#include "rviz_common/properties/string_property.hpp"
+#include "rviz_common/properties/vector_property.hpp"
+#include "gsplat_rviz_plugin/splat_loaders/i_splat_source.hpp"
+#include "gsplat_rviz_plugin/visibility_control.hpp"
+
+namespace Ogre
+{
+class Viewport;
+}
+
+namespace gsplat_rviz_plugin
+{
+class SplatCloud;
+
+namespace displays
+{
+
+class GSPLAT_RVIZ_PLUGIN_PUBLIC GsplatDisplay : public rviz_common::Display
+{
+  Q_OBJECT
+
+public:
+  GsplatDisplay();
+  ~GsplatDisplay() override;
+
+protected:
+  void onInitialize() override;
+  void onEnable() override;
+  void onDisable() override;
+  void reset() override;
+
+private Q_SLOTS:
+  void onSourceModeChanged();
+  void onSplatPathChanged();
+  void onShDegreeChanged();
+  void onAlphaThresholdChanged();
+  void onTopicChanged();
+  void onSorterKindChanged();
+  void onClipChanged();
+  void onTransparencyModeChanged();
+  void onWboitTuningChanged();
+  void onCaptureTriggerChanged();
+
+private:
+  enum class SourceKind { None, File, Topic };
+  enum class SourceMode { File = 0, Topic = 1 };
+
+  void rebuildSorter();
+  void installSource(std::unique_ptr<ISplatSource> source, SourceKind kind);
+  void onLoadResult(LoadResult result, SourceKind kind, uint64_t gen);
+  SourceMode currentMode() const;
+  void captureScreenshot(const std::string & path);
+
+  // Push transparency_mode_property_ → SplatCloud::setOitEnabled and
+  // attach/detach the WBOIT compositor on the current viewport. Called
+  // from property slots on the Qt main thread, which is safe (Ogre
+  // chain mutations here run between render frames, not during a chain
+  // walk).
+  void applyTransparencyMode();
+
+  // Resolve the Ogre viewport RViz is rendering to, or nullptr if it
+  // isn't ready yet (can happen very early during onInitialize). The
+  // view controller is created by RViz before Displays, so this is
+  // non-null from any property-slot call.
+  Ogre::Viewport * resolveViewport() const;
+
+  // UI construction — builds the "Advanced" group (SH degree, alpha
+  // threshold, sort backend, clip box, WBOIT sub-group) and parents it
+  // under this display. Members that live inside Advanced (sh_degree_,
+  // alpha_threshold_, sorter_kind_, clip_*, transparency_mode_, wboit_*)
+  // are assigned by this helper.
+  void buildAdvancedGroup();
+
+  // Top-level (always visible).
+  rviz_common::properties::EnumProperty *       source_mode_property_;
+  rviz_common::properties::FilePickerProperty * splat_path_property_;
+  rviz_common::properties::RosTopicProperty *   topic_property_;
+
+  // Under "Advanced" group.
+  rviz_common::properties::IntProperty *        sh_degree_property_;
+  rviz_common::properties::FloatProperty *      alpha_threshold_property_;
+  rviz_common::properties::EnumProperty *       sorter_kind_property_;
+
+  // Under "Advanced" group — ROI clip AABB in the scene's local frame.
+  rviz_common::properties::BoolProperty *       clip_enabled_property_;
+  rviz_common::properties::VectorProperty *     clip_min_property_;
+  rviz_common::properties::VectorProperty *     clip_max_property_;
+
+  // Under "Advanced / WBOIT" sub-group. Sorted is the default transparency
+  // mode; WBOIT is an order-independent approximation for cases where the
+  // sort is the bottleneck.
+  rviz_common::properties::EnumProperty *       transparency_mode_property_;
+  rviz_common::properties::FloatProperty *      wboit_weight_scale_property_;
+  rviz_common::properties::FloatProperty *      wboit_weight_exponent_property_;
+  rviz_common::properties::FloatProperty *      wboit_alpha_discard_property_;
+
+  // Under "Advanced / Scene Capture" sub-group.
+  rviz_common::properties::StringProperty *     capture_path_property_;
+  rviz_common::properties::BoolProperty *       capture_trigger_property_;
+
+  std::unique_ptr<SplatCloud>   splat_cloud_;
+  std::unique_ptr<ISplatSource> source_;
+  SourceKind                    source_kind_ = SourceKind::None;
+  // Bumped each time source_ is (re)assigned or cleared. Queued main-thread
+  // deliveries from a prior source compare the captured generation against
+  // the current one and drop if stale — prevents an in-flight callback from
+  // clobbering state after the user switches topic/file.
+  uint64_t                      source_gen_  = 0;
+
+  // WBOIT compositor attach state. compositor_viewport_ stays set once
+  // the compositor is attached to the viewport, even after a "disable"
+  // toggle — Ogre's chain entry is kept, only the enabled flag flips.
+  // Only cleared on destruction, where we fully detach.
+  Ogre::Viewport * compositor_viewport_{nullptr};
+  bool             wboit_compositor_active_{false};
+};
+
+}  // namespace displays
+}  // namespace gsplat_rviz_plugin
+
+#endif  // GSPLAT_RVIZ_PLUGIN__DISPLAYS__GSPLAT_DISPLAY_HPP_
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/sorters/cpu_sorter.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__CPU_SORTER_HPP_
+#define GSPLAT_RVIZ_PLUGIN__CPU_SORTER_HPP_
+
+#include <cstdint>
+#include <vector>
+
+#include <OgreVector3.h>
+
+#include "gsplat_rviz_plugin/sorters/i_splat_sorter.hpp"
+
+namespace gsplat_rviz_plugin
+{
+
+// Synchronous CPU depth-sort (pdqsort). No threading — whichever thread the
+// caller invokes sort() from runs the work.
+class CpuSorter : public ISplatSorter
+{
+public:
+  CpuSorter() = default;
+  ~CpuSorter() override = default;
+
+  void uploadCenters(const std::vector<Ogre::Vector3> & centers) override;
+  SortResult sort(const Ogre::Vector3 & cam_fwd) override;
+  const char * name() const override { return "CPU"; }
+
+private:
+  std::vector<Ogre::Vector3> centers_;
+  std::vector<float>         depth_keys_;
+  std::vector<uint32_t>      sort_indices_;  // retained across frames → near-sorted input
+};
+
+}  // namespace gsplat_rviz_plugin
+
+#endif  // GSPLAT_RVIZ_PLUGIN__CPU_SORTER_HPP_
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/sorters/cuda_splat_sorter.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__CUDA_SPLAT_SORTER_HPP_
+#define GSPLAT_RVIZ_PLUGIN__CUDA_SPLAT_SORTER_HPP_
+
+#include <memory>
+#include <vector>
+
+#include <OgreVector3.h>
+
+#include "gsplat_rviz_plugin/sorters/i_splat_sorter.hpp"
+
+namespace gsplat_rviz_plugin
+{
+
+// Synchronous CUB-based GPU depth-sort. No threading — sort() blocks on
+// cudaStreamSynchronize on the caller's thread. For CUDA-context safety
+// callers should invoke all methods from a single thread.
+class CudaSplatSorter : public ISplatSorter
+{
+public:
+  CudaSplatSorter();
+  ~CudaSplatSorter() override;
+
+  void uploadCenters(const std::vector<Ogre::Vector3> & centers) override;
+  SortResult sort(const Ogre::Vector3 & cam_fwd) override;
+  const char * name() const override { return "CUDA"; }
+
+private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace gsplat_rviz_plugin
+
+#endif  // GSPLAT_RVIZ_PLUGIN__CUDA_SPLAT_SORTER_HPP_
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/sorters/i_splat_sorter.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__I_SPLAT_SORTER_HPP_
+#define GSPLAT_RVIZ_PLUGIN__I_SPLAT_SORTER_HPP_
+
+#include <cstdint>
+#include <vector>
+
+#include <OgreVector3.h>
+
+namespace gsplat_rviz_plugin
+{
+
+struct SortResult
+{
+  std::vector<float> indices;  // back-to-front splat indices cast to float
+  uint32_t count = 0;
+};
+
+// Synchronous depth-sort backend. Implementations only sort — they do not
+// own threads or schedule work. Callers decide what thread these methods
+// run on (see SplatCloud's internal SortScheduler).
+class ISplatSorter
+{
+public:
+  virtual ~ISplatSorter() = default;
+
+  // Upload splat centres. Pass an empty vector to release all state.
+  virtual void uploadCenters(const std::vector<Ogre::Vector3> & centers) = 0;
+
+  // Blocking sort. Returns back-to-front indices. Empty result on error
+  // or when no centres have been uploaded.
+  virtual SortResult sort(const Ogre::Vector3 & cam_fwd) = 0;
+
+  // Short label for logs / status (e.g. "CPU", "CUDA").
+  virtual const char * name() const = 0;
+};
+
+}  // namespace gsplat_rviz_plugin
+
+#endif  // GSPLAT_RVIZ_PLUGIN__I_SPLAT_SORTER_HPP_
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/sorters/sorter_factory.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__SORTER_FACTORY_HPP_
+#define GSPLAT_RVIZ_PLUGIN__SORTER_FACTORY_HPP_
+
+#include <memory>
+
+#include "gsplat_rviz_plugin/sorters/i_splat_sorter.hpp"
+
+namespace gsplat_rviz_plugin
+{
+
+enum class SorterKind
+{
+  Cpu  = 0,
+  Cuda = 1,   // falls back to CPU if no device / no CUDA build
+};
+
+// Create a sorter of the requested kind. Falls back to CPU if CUDA was
+// requested but no device is available or the build was made without CUDA.
+std::unique_ptr<ISplatSorter> makeSorter(SorterKind kind);
+
+// True if the build includes the CUDA backend AND a CUDA device is detected.
+bool cudaAvailable();
+
+}  // namespace gsplat_rviz_plugin
+
+#endif  // GSPLAT_RVIZ_PLUGIN__SORTER_FACTORY_HPP_
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/splat_loaders/i_splat_source.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__I_SPLAT_SOURCE_HPP_
+#define GSPLAT_RVIZ_PLUGIN__I_SPLAT_SOURCE_HPP_
+
+#include <functional>
+#include <string>
+#include <vector>
+
+#include "gsplat_rviz_plugin/splat_gpu.hpp"
+
+namespace gsplat_rviz_plugin
+{
+
+struct LoadResult
+{
+  std::vector<SplatGPU> splats;
+  int sh_degree = 0;
+  std::string error;  // non-empty on failure
+
+  bool ok() const { return error.empty(); }
+};
+
+class ISplatSource
+{
+public:
+  using Callback = std::function<void(LoadResult)>;
+
+  virtual ~ISplatSource() = default;
+
+  virtual void start(Callback cb) = 0;
+};
+
+}  // namespace gsplat_rviz_plugin
+
+#endif  // GSPLAT_RVIZ_PLUGIN__I_SPLAT_SOURCE_HPP_
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/splat_loaders/ply_file_source.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__PLY_FILE_SOURCE_HPP_
+#define GSPLAT_RVIZ_PLUGIN__PLY_FILE_SOURCE_HPP_
+
+#include <string>
+
+#include "gsplat_rviz_plugin/splat_loaders/i_splat_source.hpp"
+
+namespace gsplat_rviz_plugin
+{
+
+// Synchronous PLY loader. start() parses the file on the calling thread and
+// invokes the callback exactly once before returning.
+class PlyFileSource : public ISplatSource
+{
+public:
+  explicit PlyFileSource(const std::string & path);
+  ~PlyFileSource() override = default;
+
+  void start(Callback cb) override;
+
+private:
+  std::string path_;
+};
+
+}  // namespace gsplat_rviz_plugin
+
+#endif  // GSPLAT_RVIZ_PLUGIN__PLY_FILE_SOURCE_HPP_
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/splat_loaders/ply_loader.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__PLY_LOADER_HPP_
+#define GSPLAT_RVIZ_PLUGIN__PLY_LOADER_HPP_
+
+#include <string>
+#include <vector>
+
+#include "gsplat_rviz_plugin/splat_gpu.hpp"
+#include "gsplat_rviz_plugin/visibility_control.hpp"
+
+namespace gsplat_rviz_plugin
+{
+
+// Load all Gaussian splats from a 3DGS-format PLY file into GPU-ready structs.
+// sh_degree is set to 0/1/2/3 based on the number of f_rest_* properties found.
+// Returns an empty vector and sets error_msg on failure.
+GSPLAT_RVIZ_PLUGIN_PUBLIC
+std::vector<SplatGPU> loadPly(
+  const std::string & path,
+  std::string & error_msg,
+  int & sh_degree);
+
+}  // namespace gsplat_rviz_plugin
+
+#endif  // GSPLAT_RVIZ_PLUGIN__PLY_LOADER_HPP_
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/splat_loaders/ros_topic_source.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__ROS_TOPIC_SOURCE_HPP_
+#define GSPLAT_RVIZ_PLUGIN__ROS_TOPIC_SOURCE_HPP_
+
+#include <string>
+
+#include <rclcpp/rclcpp.hpp>
+#include <gsplat_msgs/msg/splat_array.hpp>
+
+#include "gsplat_rviz_plugin/splat_loaders/i_splat_source.hpp"
+
+namespace gsplat_rviz_plugin
+{
+
+class RosTopicSource : public ISplatSource
+{
+public:
+  RosTopicSource(
+    rclcpp::Node::SharedPtr node,
+    const std::string & topic);
+  ~RosTopicSource() override;
+
+  void start(Callback cb) override;
+
+private:
+  rclcpp::Node::SharedPtr node_;
+  std::string topic_;
+  Callback callback_;
+  rclcpp::Subscription<gsplat_msgs::msg::SplatArray>::SharedPtr subscription_;
+};
+
+}  // namespace gsplat_rviz_plugin
+
+#endif  // GSPLAT_RVIZ_PLUGIN__ROS_TOPIC_SOURCE_HPP_
+```
+
+### gsplat_rviz_plugin/include/gsplat_rviz_plugin/transparency/wboit_compositor.hpp
+```
+#ifndef GSPLAT_RVIZ_PLUGIN__TRANSPARENCY__WBOIT_COMPOSITOR_HPP_
+#define GSPLAT_RVIZ_PLUGIN__TRANSPARENCY__WBOIT_COMPOSITOR_HPP_
+
+namespace Ogre
+{
+class Viewport;
+}
+
+namespace gsplat_rviz_plugin
+{
+namespace transparency
+{
+
+// Lifecycle helpers for the WBOIT Ogre compositor.
+//
+// The separation between "attach / setEnabled" and "detach" is
+// load-bearing: `setEnabled(false)` is safe to call mid-render because
+// Ogre skips disabled compositors in the chain without mutating it.
+// `detach` actually removes the compositor from the chain and must
+// NOT be called during _updateRenderQueue / notifyRenderSingleObject
+// — doing so leaves the chain half-torn-down and produces a blank
+// viewport on the next frame. Reserve `detach` for destruction.
+namespace wboit_compositor
+{
+
+// Canonical compositor name used by the material schemes.
+extern const char * const kName;
+
+// Register the compositor definition with Ogre's CompositorManager.
+// Idempotent: second calls no-op.
+void ensureDefined();
+
+// Attach the compositor to `viewport` if it isn't already, and
+// enable it. Idempotent — safe to call every frame. Safe mid-render.
+void enable(Ogre::Viewport * viewport);
+
+// Disable the compositor on `viewport` without removing it from the
+// chain. Safe mid-render. The chain entry is kept so re-enabling is
+// a pure flag flip, not a chain mutation.
+void disable(Ogre::Viewport * viewport);
+
+// Remove the compositor from `viewport`'s chain entirely. Not safe
+// mid-render — call only from destruction paths where rendering on
+// this viewport has stopped.
+void detach(Ogre::Viewport * viewport);
+
+}  // namespace wboit_compositor
+}  // namespace transparency
+}  // namespace gsplat_rviz_plugin
+
+#endif  // GSPLAT_RVIZ_PLUGIN__TRANSPARENCY__WBOIT_COMPOSITOR_HPP_
+```
+
+### gsplat_rviz_plugin/ogre_media/materials/glsl120/splat.frag
+```
+#version 330 core
+
+uniform float u_alpha_threshold;
+
+in  vec4 vColor;
+in  vec2 vPosition;
+out vec4 frag_color;
+
+void main()
+{
+    float A = -dot(vPosition, vPosition);
+    float B = exp(A) * vColor.a;
+    if (B < u_alpha_threshold) discard;
+    // Pre-multiplied alpha: RGB already scaled, compositor blends with one/one_minus_src_alpha
+    frag_color = vec4(vColor.rgb * B, B);
+}
+```
+
+### gsplat_rviz_plugin/ogre_media/materials/glsl120/splat.vert
+```
+#version 330 core
+#extension GL_ARB_shading_language_packing : require
+
+// Source 0: quad corner (±2, ±2) — per-vertex
+layout(location = 0) in vec2 vertex;
+// Source 1: sorted splat index — per-instance (divisor = 1)
+layout(location = 8) in float uv0;
+
+// Compact base TBO: 2 uvec4 texels per splat (32 B).
+//   texel 0.xyz = uintBitsToFloat → center
+//   texel 0.w   = packHalf2x16(cov00, cov01)
+//   texel 1.x   = packHalf2x16(cov02, cov11)
+//   texel 1.y   = packHalf2x16(cov12, cov22)
+//   texel 1.z   = packUnorm4x8(r, g, b, a)   ← DC pre-baked to uint8
+//   texel 1.w   = reserved
+uniform usamplerBuffer u_splats;
+
+// Optional SH TBO: (sh_degree+1)² - 1 RGBA16F texels per splat, non-DC coeffs.
+// Bound only when sh_degree > 0; shader avoids sampling it otherwise.
+uniform samplerBuffer u_sh;
+
+uniform mat4          view_matrix;
+uniform mat4          projectionMatrix;
+uniform vec3          cam_view_dir;
+uniform int           sh_degree;
+
+// ROI clip box (axis-aligned, in the scene_node_'s local frame which is the
+// Reference Frame's coordinates on the host side).
+uniform int           u_clip_enabled;
+uniform vec3          u_clip_min;
+uniform vec3          u_clip_max;
+
+// Splat-tight forward-z warp bounds used by the WBOIT weight function.
+// Far = -1 signals "unset" → fragment shaders fall back to gl_FragCoord.z.
+uniform float         u_splat_z_near;
+uniform float         u_splat_z_far;
+
+out vec4  vColor;
+out vec2  vPosition;
+out float v_splat_z_warped;     // splat-center view-z warped into [0,1]
+
+// ── SH constants (Y_l^m coefficients) ──────────────────────────────────────
+const float SH_C1    =  0.4886025119029199;
+const float SH_C2_0  =  1.0925484305920792;
+const float SH_C2_1  = -1.0925484305920792;
+const float SH_C2_2  =  0.31539156525252005;
+const float SH_C2_3  = -1.0925484305920792;
+const float SH_C2_4  =  0.5462742152960396;
+const float SH_C3_0  = -0.5900435899266435;
+const float SH_C3_1  =  2.890611442640554;
+const float SH_C3_2  = -0.4570457994644658;
+const float SH_C3_3  =  0.3731763325901154;
+const float SH_C3_4  = -0.4570457994644658;
+const float SH_C3_5  =  1.445305721320277;
+const float SH_C3_6  = -0.5900435899266435;
+
+// Number of non-DC SH coefficients for a given degree.
+int shCoeffsNonDC(int d) { return (d + 1) * (d + 1) - 1; }
+
+vec3 fetchSH(int base, int k) { return texelFetch(u_sh, base + k).rgb; }
+
+// Evaluate SH orders 1..sh_degree at direction d, returning RGB increment
+// to add to the DC base colour.
+vec3 evalSHOrders1Plus(int splat_id, vec3 d)
+{
+    int base = splat_id * shCoeffsNonDC(sh_degree);
+    vec3 rgb = vec3(0.0);
+
+    // Order 1 (3 coeffs)
+    rgb += -SH_C1 * d.y * fetchSH(base, 0)
+         +  SH_C1 * d.z * fetchSH(base, 1)
+         + -SH_C1 * d.x * fetchSH(base, 2);
+
+    if (sh_degree >= 2) {
+        float xx = d.x * d.x, yy = d.y * d.y, zz = d.z * d.z;
+        float xy = d.x * d.y, yz = d.y * d.z, xz = d.x * d.z;
+        rgb += SH_C2_0 * xy               * fetchSH(base, 3)
+             + SH_C2_1 * yz               * fetchSH(base, 4)
+             + SH_C2_2 * (2.0*zz-xx-yy)   * fetchSH(base, 5)
+             + SH_C2_3 * xz               * fetchSH(base, 6)
+             + SH_C2_4 * (xx - yy)        * fetchSH(base, 7);
+
+        if (sh_degree >= 3) {
+            rgb += SH_C3_0 * d.y * (3.0*xx - yy)              * fetchSH(base, 8)
+                 + SH_C3_1 * d.z * xy                          * fetchSH(base, 9)
+                 + SH_C3_2 * d.y * (4.0*zz - xx - yy)          * fetchSH(base, 10)
+                 + SH_C3_3 * d.z * (2.0*zz - 3.0*xx - 3.0*yy)  * fetchSH(base, 11)
+                 + SH_C3_4 * d.x * (4.0*zz - xx - yy)          * fetchSH(base, 12)
+                 + SH_C3_5 * d.z * (xx - yy)                   * fetchSH(base, 13)
+                 + SH_C3_6 * d.x * (xx - 3.0*yy)               * fetchSH(base, 14);
+        }
+    }
+    return rgb;
+}
+
+void main()
+{
+    int splat_id = int(uv0);
+    int base     = splat_id * 2;
+
+    uvec4 t0 = texelFetch(u_splats, base + 0);
+    uvec4 t1 = texelFetch(u_splats, base + 1);
+
+    vec3 center = uintBitsToFloat(t0.xyz);
+
+    // ROI clip: reject splats whose centre is outside [Clip Min, Clip Max].
+    // z = 2 places the quad past the far plane → rasteriser discards.
+    if (u_clip_enabled != 0) {
+        if (any(lessThan(center, u_clip_min)) ||
+            any(greaterThan(center, u_clip_max))) {
+            gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+            return;
+        }
+    }
+
+    vec2 c0001 = unpackHalf2x16(t0.w);
+    vec2 c0211 = unpackHalf2x16(t1.x);
+    vec2 c1222 = unpackHalf2x16(t1.y);
+
+    float c00 = c0001.x, c01 = c0001.y;
+    float c02 = c0211.x, c11 = c0211.y;
+    float c12 = c1222.x, c22 = c1222.y;
+
+    vec4 rgba = unpackUnorm4x8(t1.z);
+    if (rgba.a < 0.4) {
+        gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+        return;
+    }
+
+    // ── Project center ────────────────────────────────────────────────────────
+    vec4 camspace = view_matrix * vec4(center, 1.0);
+    vec4 pos2d    = projectionMatrix * camspace;
+
+    float bounds = 1.2 * pos2d.w;
+    if (pos2d.z < -pos2d.w
+        || pos2d.x < -bounds || pos2d.x > bounds
+        || pos2d.y < -bounds || pos2d.y > bounds) {
+        gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+        return;
+    }
+
+    // ── EWA: 3D covariance → 2D screen covariance ─────────────────────────────
+    mat3 J = mat3(
+        -projectionMatrix[0][0] / camspace.z, 0.0,
+        (projectionMatrix[0][0] * camspace.x) / (camspace.z * camspace.z),
+        0.0, -projectionMatrix[1][1] / camspace.z,
+        (projectionMatrix[1][1] * camspace.y) / (camspace.z * camspace.z),
+        0.0, 0.0, 0.0
+    );
+
+    mat3 cov3d = mat3(
+        c00, c01, c02,
+        c01, c11, c12,
+        c02, c12, c22
+    );
+
+    mat3 R   = transpose(mat3(view_matrix));
+    mat3 T   = R * J;
+    mat3 cov = transpose(T) * cov3d * T;
+
+    vec3 vCenter = vec3(pos2d) / pos2d.w;
+
+    float d1 = cov[0][0], od = cov[0][1], d2 = cov[1][1];
+    float mid     = 0.5 * (d1 + d2);
+    float radius  = length(vec2((d1 - d2) * 0.5, od));
+    float lambda1 = mid + radius;
+    float lambda2 = mid - radius;
+    vec2 diag = normalize(vec2(od, lambda1 - d1));
+    vec2 v1   = sqrt(max(2. * lambda1, 0.0)) * diag;
+    vec2 v2   = sqrt(max(2. * lambda2, 0.0)) * vec2(diag.y, -diag.x);
+
+    // ── Colour: uint8 DC base, plus optional SH1..3 contribution ─────────────
+    vec3 rgb = rgba.rgb;
+    if (sh_degree > 0) {
+        rgb = clamp(rgb + evalSHOrders1Plus(splat_id, cam_view_dir), 0.0, 1.0);
+    }
+    vColor    = vec4(rgb, rgba.a);
+    vPosition = vertex;
+
+    // Splat-tight warped depth in [0,1]; sentinel -1 if bounds unset.  Ogre
+    // view space looks down -Z, so forward distance is -camspace.z.  All four
+    // quad vertices share this value, so it interpolates to a constant per
+    // splat — exactly the per-splat depth WBOIT's weight function wants.
+    float z_span = u_splat_z_far - u_splat_z_near;
+    v_splat_z_warped = (z_span > 1e-3)
+        ? clamp((-camspace.z - u_splat_z_near) / z_span, 0.0, 1.0)
+        : -1.0;
+
+    gl_Position = vec4(
+        vCenter.xy + vertex.x * v1 + vertex.y * v2,
+        vCenter.z, 1.0);
+}
+```
+
+### gsplat_rviz_plugin/ogre_media/materials/glsl120/wboit_accum.frag
+```
+#version 330 core
+
+// WBOIT accumulation pass (McGuire-Bavoil). Additive blend ONE/ONE.
+
+uniform float wboit_weight_scale;
+uniform float wboit_weight_exponent;
+uniform float wboit_alpha_discard;
+
+in  vec4  vColor;
+in  vec2  vPosition;
+in  float v_splat_z_warped;    // splat-tight warped depth [0,1]; -1 = use gl_FragCoord.z
+out vec4  frag_color;
+
+void main()
+{
+    float A = -dot(vPosition, vPosition);
+    if (A < -4.0) discard;
+    float alpha = exp(A) * vColor.a;
+    if (alpha < wboit_alpha_discard) discard;
+
+    // Weight uses splat-tight warped z. Raw gl_FragCoord.z for 3DGS clusters
+    // in ~[0.98, 0.9998] which gives no depth separation.
+    float z = (v_splat_z_warped >= 0.0) ? v_splat_z_warped : gl_FragCoord.z;
+    float w = clamp(
+        pow(alpha, wboit_weight_exponent) * exp(-wboit_weight_scale * z),
+        1e-2, 1e4);
+
+    frag_color = vec4(vColor.rgb * alpha * w, alpha * w);
+}
+```
+
+### gsplat_rviz_plugin/ogre_media/materials/glsl120/wboit_resolve.frag
+```
+#version 330 core
+
+uniform sampler2D scene_tex;
+uniform sampler2D accum_tex;
+uniform sampler2D reveal_tex;
+
+in  vec2 vTexCoord;
+out vec4 frag_color;
+
+void main()
+{
+    vec4  scene     = texture(scene_tex, vTexCoord);
+    vec4  accum     = texture(accum_tex, vTexCoord);
+    float revealage = texture(reveal_tex, vTexCoord).r;
+
+    // Average transparent color = weighted sum / total weight.
+    vec3 avg_color = accum.rgb / max(accum.a, 1e-5);
+
+    // Composite: transparent contribution * coverage + scene * transmittance
+    vec3 result = avg_color * (1.0 - revealage) + scene.rgb * revealage;
+
+    frag_color = vec4(result, 1.0);
+}
+```
+
+### gsplat_rviz_plugin/ogre_media/materials/glsl120/wboit_resolve.vert
+```
+#version 330 core
+
+layout(location = 0) in vec4 vertex;
+layout(location = 8) in vec2 uv0;
+
+uniform mat4 worldViewProj;
+
+out vec2 vTexCoord;
+
+void main()
+{
+    vTexCoord   = uv0;
+    gl_Position = worldViewProj * vertex;
+}
+```
+
+### gsplat_rviz_plugin/ogre_media/materials/glsl120/wboit_reveal.frag
+```
+#version 330 core
+
+// WBOIT revealage pass. Blend ZERO/ONE_MINUS_SRC_COLOUR against buffer
+// cleared to 1 → destination accumulates ∏(1 - alpha_i).
+
+in  vec4 vColor;
+in  vec2 vPosition;
+out vec4 frag_color;
+
+void main()
+{
+    float A = -dot(vPosition, vPosition);
+    if (A < -4.0) discard;
+    float alpha = exp(A) * vColor.a;
+    frag_color = vec4(alpha);
+}
+```
+
+### gsplat_rviz_plugin/src/gsplat_rviz_plugin/displays/gsplat_display.cpp
+```
+#include "gsplat_rviz_plugin/displays/gsplat_display.hpp"
+
+#include <algorithm>
+#include <utility>
+
+#include <QMetaObject>
+
+#include <OgreCamera.h>
+#include <OgreSceneManager.h>
+#include <OgreSceneNode.h>
+#include <OgreViewport.h>
+
+#include "pluginlib/class_list_macros.hpp"
+#include "rviz_common/display_context.hpp"
+#include "rviz_common/properties/status_property.hpp"
+#include "rviz_common/render_panel.hpp"
+#include "rviz_common/view_controller.hpp"
+#include "rviz_common/view_manager.hpp"
+#include "rviz_common/visualization_manager.hpp"
+#include "rviz_rendering/render_window.hpp"
+
+#include "gsplat_rviz_plugin/sorters/i_splat_sorter.hpp"
+#include "gsplat_rviz_plugin/sorters/sorter_factory.hpp"
+#include "gsplat_rviz_plugin/splat_loaders/ply_file_source.hpp"
+#include "gsplat_rviz_plugin/splat_loaders/ros_topic_source.hpp"
+#include "gsplat_rviz_plugin/splat_cloud.hpp"
+#include "gsplat_rviz_plugin/splat_gpu.hpp"
+#include "gsplat_rviz_plugin/transparency/wboit_compositor.hpp"
+
+namespace gsplat_rviz_plugin
+{
+namespace displays
+{
+
+GsplatDisplay::GsplatDisplay()
+{
+  // Top-level properties — data source, mode selector, SH degree. Always
+  // visible; the two load paths (file and topic) are mutually exclusive at
+  // runtime but both shown so users can switch without re-opening a sub-group.
+  source_mode_property_ = new rviz_common::properties::EnumProperty(
+    "Source", "PLY File",
+    "Where splats come from. Exactly one of the two source fields below is "
+    "active at a time.",
+    this, SLOT(onSourceModeChanged()), this);
+  source_mode_property_->addOption("PLY File", static_cast<int>(SourceMode::File));
+  source_mode_property_->addOption("Topic",    static_cast<int>(SourceMode::Topic));
+
+  splat_path_property_ = new rviz_common::properties::FilePickerProperty(
+    "Splat File", "",
+    "Path to a 3DGS-format PLY file to visualize.",
+    this, SLOT(onSplatPathChanged()),
+    this);
+
+  topic_property_ = new rviz_common::properties::RosTopicProperty(
+    "Topic", "",
+    "gsplat_msgs/msg/SplatArray",
+    "gsplat_msgs/SplatArray topic to subscribe to. Each message replaces "
+    "the currently displayed splats.",
+    this, SLOT(onTopicChanged()), this);
+  // Default mode is PLY File — hide the topic field until the user flips it.
+  topic_property_->hide();
+
+  buildAdvancedGroup();
+}
+
+// Advanced group layout (collapsed by default):
+//
+//   Advanced
+//   ├── SH Degree
+//   ├── Alpha Threshold
+//   ├── Sort Backend
+//   ├── Clip Box  (BoolProperty, expands to show Min/Max)
+//   │   ├── Clip Min
+//   │   └── Clip Max
+//   ├── WBOIT  (sub-group, collapsed)
+//   │   ├── Transparency Mode
+//   │   ├── WBOIT Weight Scale
+//   │   ├── WBOIT Weight Exponent
+//   │   └── WBOIT Alpha Discard
+//   └── Scene Capture  (sub-group, collapsed)
+//       ├── Save Path
+//       └── Capture
+void GsplatDisplay::buildAdvancedGroup()
+{
+  auto * advanced_group = new rviz_common::properties::Property(
+    "Advanced", QVariant(),
+    "SH degree, alpha threshold, sort backend, ROI clipping, transparency "
+    "fallback, and scene capture. Defaults are sensible for most scenes.",
+    this);
+  advanced_group->collapse();
+
+  sh_degree_property_ = new rviz_common::properties::IntProperty(
+    "SH Degree", 0,
+    "Spherical harmonics degree used for view-dependent colour (0 = DC only). "
+    "Lower values are faster; maximum is set by the loaded data.",
+    advanced_group, SLOT(onShDegreeChanged()), this);
+  sh_degree_property_->setMin(0);
+  sh_degree_property_->setMax(0);
+
+  alpha_threshold_property_ = new rviz_common::properties::FloatProperty(
+    "Alpha Threshold", 0.05f,
+    "Splat fragments with opacity below this value are discarded.",
+    advanced_group, SLOT(onAlphaThresholdChanged()), this);
+  alpha_threshold_property_->setMin(0.0f);
+  alpha_threshold_property_->setMax(1.0f);
+
+  sorter_kind_property_ = new rviz_common::properties::EnumProperty(
+    "Sort Backend", "CUDA",
+    "Depth-sort backend. CUDA falls back to CPU if no device is available.",
+    advanced_group, SLOT(onSorterKindChanged()), this);
+  sorter_kind_property_->addOption("CPU",  static_cast<int>(SorterKind::Cpu));
+  sorter_kind_property_->addOption("CUDA", static_cast<int>(SorterKind::Cuda));
+
+  // ROI clip — axis-aligned box in the scene's local frame.
+  clip_enabled_property_ = new rviz_common::properties::BoolProperty(
+    "Clip Box", false,
+    "Cull splats whose centre falls outside [Clip Min, Clip Max].",
+    advanced_group, SLOT(onClipChanged()), this);
+
+  clip_min_property_ = new rviz_common::properties::VectorProperty(
+    "Clip Min", Ogre::Vector3(-10.0f, -10.0f, -10.0f),
+    "Minimum corner of the clip AABB.",
+    clip_enabled_property_, SLOT(onClipChanged()), this);
+
+  clip_max_property_ = new rviz_common::properties::VectorProperty(
+    "Clip Max", Ogre::Vector3(10.0f, 10.0f, 10.0f),
+    "Maximum corner of the clip AABB.",
+    clip_enabled_property_, SLOT(onClipChanged()), this);
+
+  // WBOIT sub-group.
+  auto * wboit_group = new rviz_common::properties::Property(
+    "WBOIT", QVariant(),
+    "Order-independent transparency. Approximation; use when the sort is "
+    "a bottleneck (very large clouds, fast camera motion, streaming splats).",
+    advanced_group);
+  wboit_group->collapse();
+
+  transparency_mode_property_ = new rviz_common::properties::EnumProperty(
+    "Transparency Mode", "Sorted",
+    "Sorted = exact back-to-front. WBOIT = order-independent approximation.",
+    wboit_group, SLOT(onTransparencyModeChanged()), this);
+  transparency_mode_property_->addOption("Sorted", 0);
+  transparency_mode_property_->addOption("WBOIT",  1);
+
+  wboit_weight_scale_property_ = new rviz_common::properties::FloatProperty(
+    "WBOIT Weight Scale", 5.0f,
+    "Depth-discrimination strength in the WBOIT weight function.",
+    wboit_group, SLOT(onWboitTuningChanged()), this);
+  wboit_weight_scale_property_->setMin(0.1f);
+  wboit_weight_scale_property_->setMax(50.0f);
+
+  wboit_weight_exponent_property_ = new rviz_common::properties::FloatProperty(
+    "WBOIT Weight Exponent", 2.0f,
+    "Alpha-suppression power in the WBOIT weight function.",
+    wboit_group, SLOT(onWboitTuningChanged()), this);
+  wboit_weight_exponent_property_->setMin(0.5f);
+  wboit_weight_exponent_property_->setMax(6.0f);
+
+  wboit_alpha_discard_property_ = new rviz_common::properties::FloatProperty(
+    "WBOIT Alpha Discard", 0.01f,
+    "Fragment alpha cutoff in the WBOIT accumulation pass.",
+    wboit_group, SLOT(onWboitTuningChanged()), this);
+  wboit_alpha_discard_property_->setMin(0.0f);
+  wboit_alpha_discard_property_->setMax(0.1f);
+
+  // Scene Capture sub-group — save the current viewport to a PNG/JPEG on disk.
+  auto * capture_group = new rviz_common::properties::Property(
+    "Scene Capture", QVariant(),
+    "Capture the current RViz viewport to an image file.",
+    advanced_group);
+  capture_group->collapse();
+
+  capture_path_property_ = new rviz_common::properties::StringProperty(
+    "Save Path", "/tmp/gsplat_capture.png",
+    "Absolute file path for the captured image (PNG or JPEG, "
+    "determined by extension).",
+    capture_group, SLOT(onCaptureTriggerChanged()), this);
+
+  // BoolProperty acts as a momentary trigger: checking it fires the capture
+  // and the slot immediately resets it to false.
+  capture_trigger_property_ = new rviz_common::properties::BoolProperty(
+    "Capture", false,
+    "Check to save the current viewport to the path above.",
+    capture_group, SLOT(onCaptureTriggerChanged()), this);
+}
+
+GsplatDisplay::~GsplatDisplay()
+{
+  if (compositor_viewport_) {
+    transparency::wboit_compositor::detach(compositor_viewport_);
+    compositor_viewport_ = nullptr;
+    wboit_compositor_active_ = false;
+  }
+
+  ++source_gen_;
+  source_.reset();
+  source_kind_ = SourceKind::None;
+}
+
+void GsplatDisplay::onInitialize()
+{
+  rviz_common::Display::onInitialize();
+  splat_cloud_ = std::make_unique<SplatCloud>(scene_node_);
+
+  rebuildSorter();
+
+  topic_property_->initialize(context_->getRosNodeAbstraction());
+
+  // Seed uniforms from the initial property values.
+  onClipChanged();
+  onWboitTuningChanged();
+  applyTransparencyMode();
+}
+
+void GsplatDisplay::onEnable()
+{
+  if (currentMode() == SourceMode::Topic) {
+    onTopicChanged();
+  }
+  applyTransparencyMode();
+}
+
+void GsplatDisplay::onDisable()
+{
+  if (source_kind_ == SourceKind::Topic) {
+    ++source_gen_;
+    source_.reset();
+    source_kind_ = SourceKind::None;
+  }
+  if (wboit_compositor_active_) {
+    transparency::wboit_compositor::disable(compositor_viewport_);
+    wboit_compositor_active_ = false;
+  }
+  if (splat_cloud_) splat_cloud_->setOitEnabled(false);
+}
+
+void GsplatDisplay::reset()
+{
+  rviz_common::Display::reset();
+  if (splat_cloud_) splat_cloud_->clear();
+  sh_degree_property_->setMax(0);
+  sh_degree_property_->setValue(0);
+}
+
+void GsplatDisplay::onSplatPathChanged()
+{
+  if (currentMode() != SourceMode::File) return;
+  if (!splat_cloud_) return;
+
+  const QString path = splat_path_property_->getString();
+  if (path.isEmpty()) {
+    ++source_gen_;
+    source_.reset();
+    source_kind_ = SourceKind::None;
+    splat_cloud_->clear();
+    setStatus(
+      rviz_common::properties::StatusProperty::Warn,
+      "Splat File", "No file selected.");
+    return;
+  }
+
+  installSource(
+    std::make_unique<PlyFileSource>(path.toStdString()),
+    SourceKind::File);
+}
+
+void GsplatDisplay::onShDegreeChanged()
+{
+  if (splat_cloud_) {
+    splat_cloud_->setShDegree(sh_degree_property_->getInt());
+  }
+}
+
+void GsplatDisplay::onAlphaThresholdChanged()
+{
+  if (splat_cloud_) {
+    splat_cloud_->setAlphaThreshold(alpha_threshold_property_->getFloat());
+  }
+}
+
+void GsplatDisplay::onTopicChanged()
+{
+  if (currentMode() != SourceMode::Topic) return;
+
+  if (!isEnabled()) {
+    ++source_gen_;
+    source_.reset();
+    source_kind_ = SourceKind::None;
+    return;
+  }
+
+  const std::string topic = topic_property_->getTopicStd();
+  if (topic.empty()) {
+    ++source_gen_;
+    source_.reset();
+    source_kind_ = SourceKind::None;
+    setStatus(
+      rviz_common::properties::StatusProperty::Warn,
+      "Topic", "No topic selected.");
+    return;
+  }
+
+  auto node_abs = context_ ? context_->getRosNodeAbstraction().lock() : nullptr;
+  if (!node_abs) {
+    setStatus(
+      rviz_common::properties::StatusProperty::Error,
+      "Topic", "RViz ROS node unavailable.");
+    return;
+  }
+
+  installSource(
+    std::make_unique<RosTopicSource>(node_abs->get_raw_node(), topic),
+    SourceKind::Topic);
+}
+
+void GsplatDisplay::onSorterKindChanged()
+{
+  rebuildSorter();
+}
+
+GsplatDisplay::SourceMode GsplatDisplay::currentMode() const
+{
+  return source_mode_property_
+    ? static_cast<SourceMode>(source_mode_property_->getOptionInt())
+    : SourceMode::File;
+}
+
+void GsplatDisplay::onSourceModeChanged()
+{
+  ++source_gen_;
+  source_.reset();
+  source_kind_ = SourceKind::None;
+  if (splat_cloud_) splat_cloud_->clear();
+  sh_degree_property_->setMax(0);
+  sh_degree_property_->setValue(0);
+
+  const auto mode = currentMode();
+  splat_path_property_->setHidden(mode != SourceMode::File);
+  topic_property_->setHidden(mode != SourceMode::Topic);
+
+  deleteStatus(mode == SourceMode::File ? "Topic" : "Splat File");
+
+  if (mode == SourceMode::File) {
+    onSplatPathChanged();
+  } else {
+    onTopicChanged();
+  }
+}
+
+void GsplatDisplay::onClipChanged()
+{
+  if (!splat_cloud_) return;
+  splat_cloud_->setClipEnabled(clip_enabled_property_->getBool());
+  splat_cloud_->setClipBox(
+    clip_min_property_->getVector(),
+    clip_max_property_->getVector());
+  if (context_) context_->queueRender();
+}
+
+void GsplatDisplay::onTransparencyModeChanged()
+{
+  applyTransparencyMode();
+}
+
+void GsplatDisplay::onWboitTuningChanged()
+{
+  if (!splat_cloud_) return;
+  splat_cloud_->setWboitWeightScale(wboit_weight_scale_property_->getFloat());
+  splat_cloud_->setWboitWeightExponent(wboit_weight_exponent_property_->getFloat());
+  splat_cloud_->setWboitAlphaDiscard(wboit_alpha_discard_property_->getFloat());
+  if (context_) context_->queueRender();
+}
+
+void GsplatDisplay::onCaptureTriggerChanged()
+{
+  if (!capture_trigger_property_->getBool()) return;
+
+  // Reset the checkbox immediately so it behaves like a momentary button.
+  capture_trigger_property_->blockSignals(true);
+  capture_trigger_property_->setBool(false);
+  capture_trigger_property_->blockSignals(false);
+
+  const std::string path = capture_path_property_->getStdString();
+  if (path.empty()) {
+    setStatus(
+      rviz_common::properties::StatusProperty::Warn,
+      "Scene Capture", "Save path is empty.");
+    return;
+  }
+
+  captureScreenshot(path);
+  setStatus(
+    rviz_common::properties::StatusProperty::Ok,
+    "Scene Capture", QString("Saved to %1").arg(QString::fromStdString(path)));
+}
+
+void GsplatDisplay::applyTransparencyMode()
+{
+  const bool wboit = (transparency_mode_property_ &&
+                      transparency_mode_property_->getOptionInt() == 1);
+
+  if (splat_cloud_) splat_cloud_->setOitEnabled(wboit);
+
+  if (auto * vp = resolveViewport()) {
+    if (wboit) {
+      transparency::wboit_compositor::ensureDefined();
+      transparency::wboit_compositor::enable(vp);
+      compositor_viewport_ = vp;
+      wboit_compositor_active_ = true;
+    } else if (wboit_compositor_active_) {
+      transparency::wboit_compositor::disable(compositor_viewport_);
+      wboit_compositor_active_ = false;
+    }
+  }
+
+  if (context_) context_->queueRender();
+}
+
+Ogre::Viewport * GsplatDisplay::resolveViewport() const
+{
+  if (!context_) return nullptr;
+  auto * vm = context_->getViewManager();
+  if (!vm) return nullptr;
+  auto * vc = vm->getCurrent();
+  if (!vc) return nullptr;
+  auto * cam = vc->getCamera();
+  if (!cam) return nullptr;
+  return cam->getViewport();
+}
+
+void GsplatDisplay::rebuildSorter()
+{
+  if (!splat_cloud_) return;
+
+  const auto kind = static_cast<SorterKind>(
+    sorter_kind_property_ ? sorter_kind_property_->getOptionInt()
+                          : static_cast<int>(SorterKind::Cuda));
+  splat_cloud_->setSorter(makeSorter(kind));
+}
+
+void GsplatDisplay::installSource(
+  std::unique_ptr<ISplatSource> source, SourceKind kind)
+{
+  const uint64_t gen = ++source_gen_;
+  source_.reset();
+  source_kind_ = kind;
+  source_ = std::move(source);
+
+  source_->start(
+    [this, kind, gen](LoadResult r) {
+      QMetaObject::invokeMethod(
+        this,
+        [this, kind, gen, r = std::move(r)]() mutable {
+          onLoadResult(std::move(r), kind, gen);
+        });
+    });
+}
+
+void GsplatDisplay::onLoadResult(
+  LoadResult result, SourceKind kind, uint64_t gen)
+{
+  if (gen != source_gen_ || !splat_cloud_) return;
+
+  const char * status_key =
+    (kind == SourceKind::Topic) ? "Topic" : "Splat File";
+
+  if (!result.ok()) {
+    setStatus(
+      rviz_common::properties::StatusProperty::Error,
+      status_key, QString::fromStdString(result.error));
+    return;
+  }
+
+  const int count = static_cast<int>(result.splats.size());
+  const int sh_degree = result.sh_degree;
+
+  splat_cloud_->setSplats(std::move(result.splats), sh_degree);
+
+  sh_degree_property_->setMax(sh_degree);
+  if (kind == SourceKind::Topic) {
+    const int current = sh_degree_property_->getInt();
+    if (current > sh_degree) sh_degree_property_->setValue(sh_degree);
+  } else {
+    sh_degree_property_->setValue(std::min(1, sh_degree));
+  }
+
+  setStatus(
+    rviz_common::properties::StatusProperty::Ok,
+    status_key,
+    kind == SourceKind::Topic
+      ? QString("Received %1 gaussians (SH degree %2)").arg(count).arg(sh_degree)
+      : QString("Loaded %1 gaussians").arg(count));
+}
+
+void GsplatDisplay::captureScreenshot(const std::string & path)
+{
+  auto * vm = dynamic_cast<rviz_common::VisualizationManager *>(context_);
+  if (!vm) return;
+  auto * panel = vm->getRenderPanel();
+  if (!panel) return;
+  auto * win = panel->getRenderWindow();
+  if (!win) return;
+  win->captureScreenShot(path);
+}
+
+}  // namespace displays
+}  // namespace gsplat_rviz_plugin
+
+PLUGINLIB_EXPORT_CLASS(
+  gsplat_rviz_plugin::displays::GsplatDisplay,
+  rviz_common::Display)
+```
+
+### gsplat_rviz_plugin/src/gsplat_rviz_plugin/sorters/cpu_sorter.cpp
+```
+#include "gsplat_rviz_plugin/sorters/cpu_sorter.hpp"
+
+#include <numeric>
+
+#include <boost/sort/sort.hpp>
+
+#include "gsplat_rviz_plugin/perf_monitor.hpp"
+
+namespace gsplat_rviz_plugin
+{
+
+void CpuSorter::uploadCenters(const std::vector<Ogre::Vector3> & centers)
+{
+  centers_ = centers;
+  depth_keys_.assign(centers_.size(), 0.0f);
+  sort_indices_.resize(centers_.size());
+  std::iota(sort_indices_.begin(), sort_indices_.end(), 0u);
+}
+
+SortResult CpuSorter::sort(const Ogre::Vector3 & cam_fwd)
+{
+  const uint32_t count = static_cast<uint32_t>(centers_.size());
+  if (count == 0) return {};
+
+  PerfMonitor::instance().startTimer("cpu_sort");
+
+  for (uint32_t i = 0; i < count; ++i) {
+    depth_keys_[i] = cam_fwd.dotProduct(centers_[i]);
+  }
+
+  // sort_indices_ retains the previous frame's order so pdqsort only fixes
+  // the inversions caused by camera movement (near O(n) for small drags).
+  boost::sort::pdqsort(
+    sort_indices_.begin(), sort_indices_.end(),
+    [this](uint32_t a, uint32_t b) {
+      return depth_keys_[a] > depth_keys_[b];  // descending = back-to-front
+    });
+
+  SortResult r;
+  r.count = count;
+  r.indices.resize(count);
+  for (uint32_t i = 0; i < count; ++i) {
+    r.indices[i] = static_cast<float>(sort_indices_[i]);
+  }
+
+  PerfMonitor::instance().stopTimer("cpu_sort");
+  return r;
+}
+
+}  // namespace gsplat_rviz_plugin
+```
+
+### gsplat_rviz_plugin/src/gsplat_rviz_plugin/sorters/cuda_sorter.cu
+```
+#include "gsplat_rviz_plugin/sorters/cuda_splat_sorter.hpp"
+
+#include <algorithm>
+#include <cstdio>
+
+#include <cub/cub.cuh>
+#include <cuda_runtime.h>
+
+#include "gsplat_rviz_plugin/perf_monitor.hpp"
+
+namespace gsplat_rviz_plugin
+{
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+#define CUDA_CHECK(call)                                                        \
+  do {                                                                          \
+    cudaError_t _e = (call);                                                    \
+    if (_e != cudaSuccess) {                                                    \
+      fprintf(stderr,                                                           \
+        "[gsplat/cuda] %s:%d — %s failed: %s\n",                               \
+        __FILE__, __LINE__, #call, cudaGetErrorString(_e));                     \
+      return false;                                                             \
+    }                                                                           \
+  } while (0)
+
+#define CUDA_CHECK_VOID(call)                                                   \
+  do {                                                                          \
+    cudaError_t _e = (call);                                                    \
+    if (_e != cudaSuccess) {                                                    \
+      fprintf(stderr,                                                           \
+        "[gsplat/cuda] %s:%d — %s failed: %s\n",                               \
+        __FILE__, __LINE__, #call, cudaGetErrorString(_e));                     \
+    }                                                                           \
+  } while (0)
+
+// ── Kernels ───────────────────────────────────────────────────────────────────
+
+namespace {
+
+__global__ void computeDepthsKernel(
+  const float3 * __restrict__ centers,
+  float3 fwd,
+  float * __restrict__ keys,
+  uint32_t n)
+{
+  const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) {
+    keys[i] = centers[i].x * fwd.x + centers[i].y * fwd.y + centers[i].z * fwd.z;
+  }
+}
+
+__global__ void fillFloatIdentityKernel(float * __restrict__ d, uint32_t n)
+{
+  const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) {
+    d[i] = static_cast<float>(i);
+  }
+}
+
+}  // namespace
+
+// ── Impl ──────────────────────────────────────────────────────────────────────
+
+struct CudaSplatSorter::Impl
+{
+  float3 *     d_centers  = nullptr;
+  float *      d_keys_in  = nullptr;
+  float *      d_keys_out = nullptr;
+  float *      d_vals_in  = nullptr;  // identity permutation (set once)
+  float *      d_vals_out = nullptr;
+  float *      h_vals_out = nullptr;  // pinned host
+  void *       d_temp     = nullptr;
+  size_t       temp_bytes = 0;
+  uint32_t     capacity   = 0;
+  uint32_t     count      = 0;
+  cudaStream_t stream     = nullptr;
+  bool         result_ready = false;
+  bool         failed       = false;
+
+  void allocate(uint32_t n);
+  void release();
+  void upload(const float * xyz, uint32_t n);
+  bool sort(const float cam_fwd[3], uint32_t n);
+};
+
+void CudaSplatSorter::Impl::allocate(uint32_t n)
+{
+  capacity = n;
+  CUDA_CHECK_VOID(cudaStreamCreate(&stream));
+
+  CUDA_CHECK_VOID(cudaMalloc(&d_centers,  n * sizeof(float3)));
+  CUDA_CHECK_VOID(cudaMalloc(&d_keys_in,  n * sizeof(float)));
+  CUDA_CHECK_VOID(cudaMalloc(&d_keys_out, n * sizeof(float)));
+  CUDA_CHECK_VOID(cudaMalloc(&d_vals_in,  n * sizeof(float)));
+  CUDA_CHECK_VOID(cudaMalloc(&d_vals_out, n * sizeof(float)));
+  CUDA_CHECK_VOID(cudaMallocHost(&h_vals_out, n * sizeof(float)));
+
+  fillFloatIdentityKernel<<<(n + 255) / 256, 256, 0, stream>>>(d_vals_in, n);
+  CUDA_CHECK_VOID(cudaGetLastError());
+
+  CUDA_CHECK_VOID(cub::DeviceRadixSort::SortPairsDescending(
+    nullptr, temp_bytes,
+    d_keys_in, d_keys_out, d_vals_in, d_vals_out,
+    static_cast<int>(n), 0, 32, stream));
+  CUDA_CHECK_VOID(cudaMalloc(&d_temp, temp_bytes));
+
+  CUDA_CHECK_VOID(cudaStreamSynchronize(stream));
+}
+
+void CudaSplatSorter::Impl::release()
+{
+  if (h_vals_out) { cudaFreeHost(h_vals_out); h_vals_out = nullptr; }
+  if (d_centers)  { cudaFree(d_centers);  d_centers  = nullptr; }
+  if (d_keys_in)  { cudaFree(d_keys_in);  d_keys_in  = nullptr; }
+  if (d_keys_out) { cudaFree(d_keys_out); d_keys_out = nullptr; }
+  if (d_vals_in)  { cudaFree(d_vals_in);  d_vals_in  = nullptr; }
+  if (d_vals_out) { cudaFree(d_vals_out); d_vals_out = nullptr; }
+  if (d_temp)     { cudaFree(d_temp);     d_temp     = nullptr; }
+  if (stream) {
+    cudaStreamDestroy(stream);
+    stream = nullptr;
+  }
+  capacity     = 0;
+  count        = 0;
+  temp_bytes   = 0;
+  result_ready = false;
+  failed       = false;
+}
+
+void CudaSplatSorter::Impl::upload(const float * xyz, uint32_t n)
+{
+  CUDA_CHECK_VOID(cudaMemcpyAsync(
+    d_centers, xyz, n * sizeof(float3),
+    cudaMemcpyHostToDevice, stream));
+}
+
+bool CudaSplatSorter::Impl::sort(const float cam_fwd[3], uint32_t n)
+{
+  const float3 fwd{cam_fwd[0], cam_fwd[1], cam_fwd[2]};
+  computeDepthsKernel<<<(n + 255) / 256, 256, 0, stream>>>(
+    d_centers, fwd, d_keys_in, n);
+  CUDA_CHECK(cudaGetLastError());
+
+  CUDA_CHECK(cub::DeviceRadixSort::SortPairsDescending(
+    d_temp, temp_bytes,
+    d_keys_in, d_keys_out, d_vals_in, d_vals_out,
+    static_cast<int>(n), 0, 32, stream));
+
+  CUDA_CHECK(cudaMemcpyAsync(
+    h_vals_out, d_vals_out, n * sizeof(float),
+    cudaMemcpyDeviceToHost, stream));
+
+  CUDA_CHECK(cudaStreamSynchronize(stream));
+  return true;
+}
+
+// ── CudaSplatSorter ───────────────────────────────────────────────────────────
+
+CudaSplatSorter::CudaSplatSorter() : impl_(std::make_unique<Impl>()) {}
+
+CudaSplatSorter::~CudaSplatSorter() { impl_->release(); }
+
+void CudaSplatSorter::uploadCenters(const std::vector<Ogre::Vector3> & centers)
+{
+  impl_->release();
+  const uint32_t n = static_cast<uint32_t>(centers.size());
+  if (n == 0) return;
+
+  PerfMonitor::instance().startTimer("cuda_upload");
+  impl_->count = n;
+  impl_->allocate(n);
+  impl_->upload(&centers[0].x, n);
+  CUDA_CHECK_VOID(cudaStreamSynchronize(impl_->stream));
+  PerfMonitor::instance().stopTimer("cuda_upload");
+}
+
+SortResult CudaSplatSorter::sort(const Ogre::Vector3 & cam_fwd)
+{
+  if (impl_->count == 0 || impl_->failed) return {};
+
+  const float fwd[3] = {cam_fwd.x, cam_fwd.y, cam_fwd.z};
+  PerfMonitor::instance().startTimer("cuda_sort");
+  const bool ok = impl_->sort(fwd, impl_->count);
+  PerfMonitor::instance().stopTimer("cuda_sort");
+  if (!ok) {
+    impl_->failed = true;
+    return {};
+  }
+
+  SortResult r;
+  r.count = impl_->count;
+  r.indices.resize(impl_->count);
+  std::copy(impl_->h_vals_out, impl_->h_vals_out + impl_->count, r.indices.begin());
+  return r;
+}
+
+}  // namespace gsplat_rviz_plugin
+```
+
+### gsplat_rviz_plugin/src/gsplat_rviz_plugin/sorters/sorter_factory.cpp
+```
+#include "gsplat_rviz_plugin/sorters/sorter_factory.hpp"
+
+#include <rclcpp/logging.hpp>
+
+#include "gsplat_rviz_plugin/sorters/cpu_sorter.hpp"
+
+#ifdef GSPLAT_USE_CUDA
+#include <cuda_runtime.h>
+#include "gsplat_rviz_plugin/sorters/cuda_splat_sorter.hpp"
+#endif
+
+namespace gsplat_rviz_plugin
+{
+
+bool cudaAvailable()
+{
+#ifdef GSPLAT_USE_CUDA
+  int n = 0;
+  return cudaGetDeviceCount(&n) == cudaSuccess && n > 0;
+#else
+  return false;
+#endif
+}
+
+std::unique_ptr<ISplatSorter> makeSorter(SorterKind kind)
+{
+  if (kind == SorterKind::Cuda) {
+#ifdef GSPLAT_USE_CUDA
+    if (cudaAvailable()) {
+      return std::make_unique<CudaSplatSorter>();
+    }
+    RCLCPP_WARN(
+      rclcpp::get_logger("gsplat_rviz_plugin"),
+      "CUDA sort requested but no CUDA device is available — falling back to CPU sort.");
+#else
+    RCLCPP_WARN(
+      rclcpp::get_logger("gsplat_rviz_plugin"),
+      "CUDA sort requested but this build has no CUDA support — falling back to CPU sort.");
+#endif
+  }
+  return std::make_unique<CpuSorter>();
+}
+
+}  // namespace gsplat_rviz_plugin
+```
+
+### gsplat_rviz_plugin/src/gsplat_rviz_plugin/splat_loaders/ply_file_source.cpp
+```
+#include "gsplat_rviz_plugin/splat_loaders/ply_file_source.hpp"
+
+#include <utility>
+
+#include "gsplat_rviz_plugin/splat_loaders/ply_loader.hpp"
+
+namespace gsplat_rviz_plugin
+{
+
+PlyFileSource::PlyFileSource(const std::string & path) : path_(path) {}
+
+void PlyFileSource::start(Callback cb)
+{
+  if (!cb) return;
+  LoadResult r;
+  r.splats = loadPly(path_, r.error, r.sh_degree);
+  cb(std::move(r));
+}
+
+}  // namespace gsplat_rviz_plugin
+```
+
+### gsplat_rviz_plugin/src/gsplat_rviz_plugin/splat_loaders/ply_loader.cpp
+```
+#include "gsplat_rviz_plugin/splat_loaders/ply_loader.hpp"
+
+#include <cmath>
+#include <cstring>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace gsplat_rviz_plugin
+{
+namespace
+{
+
+struct PropEntry
+{
+  std::string type;
+  size_t byte_offset;
+  size_t value_index;
+};
+
+static size_t plyTypeBytes(const std::string & t)
+{
+  if (t == "float"  || t == "float32" || t == "int"  || t == "int32" ||
+      t == "uint"   || t == "uint32") return 4;
+  if (t == "double" || t == "float64" || t == "int64" || t == "uint64") return 8;
+  if (t == "short"  || t == "int16"   || t == "ushort"|| t == "uint16") return 2;
+  if (t == "char"   || t == "int8"    || t == "uchar" || t == "uint8") return 1;
+  return 4;
+}
+
+static float readBytesAsFloat(const char * ptr, const std::string & type)
+{
+  if (type == "float" || type == "float32") {
+    float v; std::memcpy(&v, ptr, 4); return v;
+  }
+  if (type == "double" || type == "float64") {
+    double v; std::memcpy(&v, ptr, 8); return static_cast<float>(v);
+  }
+  if (type == "uchar"  || type == "uint8")  { uint8_t  v; std::memcpy(&v, ptr, 1); return static_cast<float>(v); }
+  if (type == "char"   || type == "int8")   { int8_t   v; std::memcpy(&v, ptr, 1); return static_cast<float>(v); }
+  if (type == "ushort" || type == "uint16") { uint16_t v; std::memcpy(&v, ptr, 2); return static_cast<float>(v); }
+  if (type == "short"  || type == "int16")  { int16_t  v; std::memcpy(&v, ptr, 2); return static_cast<float>(v); }
+  if (type == "int"    || type == "int32")  { int32_t  v; std::memcpy(&v, ptr, 4); return static_cast<float>(v); }
+  if (type == "uint"   || type == "uint32") { uint32_t v; std::memcpy(&v, ptr, 4); return static_cast<float>(v); }
+  float v; std::memcpy(&v, ptr, 4); return v;
+}
+
+static float binGet(
+  const std::string & name,
+  const std::unordered_map<std::string, PropEntry> & props,
+  const char * vptr,
+  float def = 0.0f)
+{
+  auto it = props.find(name);
+  return (it == props.end()) ? def : readBytesAsFloat(vptr + it->second.byte_offset, it->second.type);
+}
+
+static float ascGet(
+  const std::string & name,
+  const std::unordered_map<std::string, PropEntry> & props,
+  const std::vector<float> & vals,
+  float def = 0.0f)
+{
+  auto it = props.find(name);
+  return (it == props.end() || it->second.value_index >= vals.size()) ? def : vals[it->second.value_index];
+}
+
+static inline float sigmoid(float x) { return 1.0f / (1.0f + std::exp(-x)); }
+static inline float clamp01(float x) { return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x); }
+
+static SplatGPU buildSplat(
+  float x, float y, float z,
+  float fdc0, float fdc1, float fdc2,
+  float raw_opacity,
+  float ls0, float ls1, float ls2,
+  float qw, float qx, float qy, float qz)
+{
+  SplatGPU g{};
+
+  g.center[0] = x; g.center[1] = y; g.center[2] = z;
+  g.alpha = sigmoid(raw_opacity);
+
+  const float sx = std::exp(ls0);
+  const float sy = std::exp(ls1);
+  const float sz = std::exp(ls2);
+
+  float qnorm = std::sqrt(qw*qw + qx*qx + qy*qy + qz*qz);
+  if (qnorm > 1e-6f) { qw /= qnorm; qx /= qnorm; qy /= qnorm; qz /= qnorm; }
+
+  const float R[3][3] = {
+    {1 - 2*(qy*qy + qz*qz),     2*(qx*qy - qw*qz),     2*(qx*qz + qw*qy)},
+    {    2*(qx*qy + qw*qz), 1 - 2*(qx*qx + qz*qz),     2*(qy*qz - qw*qx)},
+    {    2*(qx*qz - qw*qy),     2*(qy*qz + qw*qx), 1 - 2*(qx*qx + qy*qy)}
+  };
+  const float s2[3] = {sx*sx, sy*sy, sz*sz};
+
+  // Σ = R·diag(s²)·Rᵀ  →  {v11,v12,v13,v22,v23,v33}
+  float cov[6] = {};
+  const int idx[3][3] = {{0,1,2},{-1,3,4},{-1,-1,5}};
+  for (int r = 0; r < 3; ++r)
+    for (int c = r; c < 3; ++c) {
+      float val = 0.0f;
+      for (int k = 0; k < 3; ++k) val += R[r][k] * s2[k] * R[c][k];
+      cov[idx[r][c]] = val;
+    }
+
+  g.covA[0] = cov[0]; g.covA[1] = cov[1]; g.covA[2] = cov[2];
+  g.covB[0] = cov[3]; g.covB[1] = cov[4]; g.covB[2] = cov[5];
+
+  // DC SH term — higher-order filled by caller
+  g.sh[0][0] = fdc0; g.sh[0][1] = fdc1; g.sh[0][2] = fdc2; g.sh[0][3] = 0.0f;
+
+  (void)clamp01(0.0f);  // silence unused-function warning
+
+  return g;
+}
+
+}  // anonymous namespace
+
+std::vector<SplatGPU> loadPly(
+  const std::string & path, std::string & error_msg, int & sh_degree)
+{
+  error_msg.clear();
+  sh_degree = 0;
+
+  std::ifstream file(path, std::ios::binary);
+  if (!file.is_open()) { error_msg = "Cannot open file: " + path; return {}; }
+
+  std::string line;
+  std::getline(file, line);
+  if (line.rfind("ply", 0) != 0) { error_msg = "Not a PLY file"; return {}; }
+
+  enum class Format { Unknown, BinaryLE, ASCII } format = Format::Unknown;
+  int vertex_count = 0;
+  std::vector<std::pair<std::string, std::string>> prop_list;
+  bool in_vertex = false;
+
+  while (std::getline(file, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line == "end_header") break;
+    std::istringstream iss(line);
+    std::string tok; iss >> tok;
+    if (tok == "format") {
+      std::string fmt; iss >> fmt;
+      if (fmt == "binary_little_endian") format = Format::BinaryLE;
+      else if (fmt == "ascii")           format = Format::ASCII;
+      else { error_msg = "Unsupported PLY format: " + fmt; return {}; }
+    } else if (tok == "element") {
+      std::string elem; iss >> elem;
+      in_vertex = (elem == "vertex");
+      if (in_vertex) iss >> vertex_count;
+    } else if (tok == "property" && in_vertex) {
+      std::string type, name; iss >> type;
+      if (type == "list") continue;
+      iss >> name;
+      prop_list.push_back({name, type});
+    }
+  }
+
+  if (format == Format::Unknown) { error_msg = "PLY format not specified"; return {}; }
+  if (vertex_count <= 0)         { error_msg = "PLY vertex count is 0 or missing"; return {}; }
+
+  std::unordered_map<std::string, PropEntry> props;
+  size_t byte_off = 0;
+  for (size_t i = 0; i < prop_list.size(); ++i) {
+    const auto & [n, t] = prop_list[i];
+    props[n] = PropEntry{t, byte_off, i};
+    byte_off += plyTypeBytes(t);
+  }
+  const size_t stride = byte_off;
+
+  if (!props.count("x") || !props.count("y") || !props.count("z")) {
+    error_msg = "PLY missing x/y/z properties"; return {};
+  }
+
+  int num_rest_total = 0;
+  for (const auto & [n, t] : prop_list)
+    if (n.rfind("f_rest_", 0) == 0) ++num_rest_total;
+  const int nrc  = num_rest_total / 3;           // rest per channel
+  const int tpc  = 1 + nrc;                      // total per channel
+  sh_degree = (tpc >= 16) ? 3 : (tpc >= 9) ? 2 : (tpc >= 4) ? 1 : 0;
+
+  std::vector<SplatGPU> splats;
+  splats.reserve(static_cast<size_t>(vertex_count));
+
+  auto fillSH = [&](SplatGPU & g, auto get) {
+    // Higher-order SH (PLY is channel-major → reorder to coefficient-major)
+    for (int ci = 0; ci < nrc && (ci + 1) < 16; ++ci) {
+      g.sh[ci+1][0] = get("f_rest_" + std::to_string(ci));
+      g.sh[ci+1][1] = get("f_rest_" + std::to_string(ci + nrc));
+      g.sh[ci+1][2] = get("f_rest_" + std::to_string(ci + 2*nrc));
+      g.sh[ci+1][3] = 0.0f;
+    }
+  };
+
+  if (format == Format::BinaryLE) {
+    const size_t total = stride * static_cast<size_t>(vertex_count);
+    std::vector<char> data(total);
+    if (!file.read(data.data(), static_cast<std::streamsize>(total))) {
+      error_msg = "Unexpected end of file"; return {};
+    }
+    for (int i = 0; i < vertex_count; ++i) {
+      const char * vp = data.data() + i * stride;
+      auto get = [&](const std::string & n, float d = 0.0f) {
+        return binGet(n, props, vp, d);
+      };
+      SplatGPU g = buildSplat(
+        get("x"), get("y"), get("z"),
+        get("f_dc_0"), get("f_dc_1"), get("f_dc_2"),
+        get("opacity", 10.0f),
+        get("scale_0"), get("scale_1"), get("scale_2"),
+        get("rot_0", 1.0f), get("rot_1"), get("rot_2"), get("rot_3"));
+      fillSH(g, get);
+      splats.push_back(g);
+    }
+  } else {
+    for (int i = 0; i < vertex_count; ++i) {
+      if (!std::getline(file, line)) {
+        error_msg = "Unexpected end of ASCII data at vertex " + std::to_string(i);
+        return {};
+      }
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      std::istringstream vss(line);
+      std::vector<float> vals;
+      float v; while (vss >> v) vals.push_back(v);
+      if (vals.size() < prop_list.size()) {
+        error_msg = "Too few values at ASCII vertex " + std::to_string(i); return {};
+      }
+      auto get = [&](const std::string & n, float d = 0.0f) {
+        return ascGet(n, props, vals, d);
+      };
+      SplatGPU g = buildSplat(
+        get("x"), get("y"), get("z"),
+        get("f_dc_0"), get("f_dc_1"), get("f_dc_2"),
+        get("opacity", 10.0f),
+        get("scale_0"), get("scale_1"), get("scale_2"),
+        get("rot_0", 1.0f), get("rot_1"), get("rot_2"), get("rot_3"));
+      fillSH(g, get);
+      splats.push_back(g);
+    }
+  }
+
+  return splats;
+}
+
+}  // namespace gsplat_rviz_plugin
+```
+
+### gsplat_rviz_plugin/src/gsplat_rviz_plugin/splat_loaders/ros_topic_source.cpp
+```
+#include "gsplat_rviz_plugin/splat_loaders/ros_topic_source.hpp"
+
+#include <utility>
+
+namespace gsplat_rviz_plugin
+{
+namespace
+{
+
+// Convert a SplatArray message into the plugin's GPU-ready struct layout.
+//
+// Wire format (produced by gsplat_publisher/ply_splat_publisher.py):
+//   pose.pose.pose.position            →  center[3]
+//   opacity (uint8, 0..255)            →  alpha = opacity / 255
+//   pose.pose.covariance (6x6 r-major) →  covA/covB from top-left 3x3
+//   spherical_harmonics (coef-major,
+//     RGB-interleaved: [R0,G0,B0,R1,…])→  sh[k][0..2] = RGB_k
+//
+// Assumes publisher conformance: uniform harmonics_deg across all splats,
+// deg ≤ 3 (SplatGPU::sh holds 16 coefficients), and spherical_harmonics
+// length == 3·(deg+1)².
+LoadResult splatsFromMessage(const gsplat_msgs::msg::SplatArray & msg)
+{
+  LoadResult out;
+  out.sh_degree = msg.splats.empty()
+    ? 0
+    : static_cast<int>(msg.splats.front().harmonics_deg);
+  const int num_coefs = (out.sh_degree + 1) * (out.sh_degree + 1);
+  out.splats.reserve(msg.splats.size());
+
+  for (const auto & s : msg.splats) {
+    SplatGPU g{};
+
+    const auto & p = s.pose.pose.pose.position;
+    g.center[0] = static_cast<float>(p.x);
+    g.center[1] = static_cast<float>(p.y);
+    g.center[2] = static_cast<float>(p.z);
+
+    g.alpha = static_cast<float>(s.opacity) / 255.0f;
+
+    // 6x6 row-major → top-left 3x3
+    const auto & cov = s.pose.pose.covariance;
+    g.covA[0] = static_cast<float>(cov[0]);   // (0,0)
+    g.covA[1] = static_cast<float>(cov[1]);   // (0,1)
+    g.covA[2] = static_cast<float>(cov[2]);   // (0,2)
+    g.covB[0] = static_cast<float>(cov[7]);   // (1,1)
+    g.covB[1] = static_cast<float>(cov[8]);   // (1,2)
+    g.covB[2] = static_cast<float>(cov[14]);  // (2,2)
+
+    for (int k = 0; k < num_coefs; ++k) {
+      g.sh[k][0] = s.spherical_harmonics[3 * k + 0];
+      g.sh[k][1] = s.spherical_harmonics[3 * k + 1];
+      g.sh[k][2] = s.spherical_harmonics[3 * k + 2];
+      g.sh[k][3] = 0.0f;
+    }
+
+    out.splats.push_back(g);
+  }
+  return out;
+}
+
+}  // namespace
+
+RosTopicSource::RosTopicSource(
+  rclcpp::Node::SharedPtr node,
+  const std::string & topic)
+: node_(std::move(node)), topic_(topic) {}
+
+RosTopicSource::~RosTopicSource()
+{
+  subscription_.reset();
+}
+
+void RosTopicSource::start(Callback cb)
+{
+  if (!cb) return;
+  callback_ = std::move(cb);
+
+  if (!node_) {
+    LoadResult r; r.error = "ROS node unavailable.";
+    callback_(std::move(r));
+    return;
+  }
+  if (topic_.empty()) {
+    LoadResult r; r.error = "No topic selected.";
+    callback_(std::move(r));
+    return;
+  }
+
+  rclcpp::QoS qos(1);
+  qos.reliable().transient_local();
+
+  try {
+    subscription_ = node_->create_subscription<gsplat_msgs::msg::SplatArray>(
+      topic_, qos,
+      [this](gsplat_msgs::msg::SplatArray::ConstSharedPtr msg) {
+        callback_(splatsFromMessage(*msg));
+      });
+  } catch (const std::exception & e) {
+    LoadResult r; r.error = std::string("Subscription failed: ") + e.what();
+    callback_(std::move(r));
+  }
+}
+
+}  // namespace gsplat_rviz_plugin
+```
+
+### gsplat_rviz_plugin/src/gsplat_rviz_plugin/transparency/wboit_compositor.cpp
+```
+#include "gsplat_rviz_plugin/transparency/wboit_compositor.hpp"
+
+#include <OgreResource.h>
+#include <OgreCompositor.h>
+#include <OgreCompositorManager.h>
+#include <OgreCompositionPass.h>
+#include <OgreCompositionTargetPass.h>
+#include <OgreCompositionTechnique.h>
+#include <OgrePixelFormat.h>
+#include <OgreViewport.h>
+
+namespace gsplat_rviz_plugin
+{
+namespace transparency
+{
+namespace wboit_compositor
+{
+
+const char * const kName = "gsplat_rviz_plugin/WBOIT";
+
+void ensureDefined()
+{
+  auto & mgr = Ogre::CompositorManager::getSingleton();
+  if (mgr.getByName(kName)) return;
+
+  auto comp = mgr.create(kName,
+    Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME);
+  auto * tech = comp->createTechnique();
+
+  auto * scene_td = tech->createTextureDefinition("scene_tex");
+  scene_td->formatList.push_back(Ogre::PF_A8R8G8B8);
+
+  auto * accum_td = tech->createTextureDefinition("accum_tex");
+  accum_td->formatList.push_back(Ogre::PF_FLOAT16_RGBA);
+
+  auto * reveal_td = tech->createTextureDefinition("reveal_tex");
+  reveal_td->formatList.push_back(Ogre::PF_FLOAT16_RGBA);
+
+  // Pass 1: opaque scene. Explicit depth clear — all three targets share the
+  // viewport's depth buffer, so stale splat depth from frame N-1 would reject
+  // opaque geometry on frame N without this.
+  {
+    auto * tp = tech->createTargetPass();
+    tp->setInputMode(Ogre::CompositionTargetPass::IM_NONE);
+    tp->setOutputName("scene_tex");
+    auto * cl = tp->createPass(Ogre::CompositionPass::PT_CLEAR);
+    cl->setClearColour(Ogre::ColourValue(0, 0, 0, 0));
+    cl->setClearDepth(1.0f);
+    cl->setClearBuffers(Ogre::FBT_COLOUR | Ogre::FBT_DEPTH);
+    auto * rp = tp->createPass(Ogre::CompositionPass::PT_RENDERSCENE);
+    rp->setLastRenderQueue(94);
+  }
+
+  // Pass 2: accumulation (additive).
+  {
+    auto * tp = tech->createTargetPass();
+    tp->setInputMode(Ogre::CompositionTargetPass::IM_NONE);
+    tp->setOutputName("accum_tex");
+    tp->setMaterialScheme("wboit_accum");
+    auto * cl = tp->createPass(Ogre::CompositionPass::PT_CLEAR);
+    cl->setClearColour(Ogre::ColourValue(0, 0, 0, 0));
+    cl->setClearBuffers(Ogre::FBT_COLOUR);
+    auto * rp = tp->createPass(Ogre::CompositionPass::PT_RENDERSCENE);
+    rp->setFirstRenderQueue(95);
+    rp->setLastRenderQueue(95);
+  }
+
+  // Pass 3: revealage. Cleared to 1; each fragment multiplies by (1-alpha).
+  {
+    auto * tp = tech->createTargetPass();
+    tp->setInputMode(Ogre::CompositionTargetPass::IM_NONE);
+    tp->setOutputName("reveal_tex");
+    tp->setMaterialScheme("wboit_reveal");
+    auto * cl = tp->createPass(Ogre::CompositionPass::PT_CLEAR);
+    cl->setClearColour(Ogre::ColourValue(1, 1, 1, 1));
+    cl->setClearBuffers(Ogre::FBT_COLOUR);
+    auto * rp = tp->createPass(Ogre::CompositionPass::PT_RENDERSCENE);
+    rp->setFirstRenderQueue(95);
+    rp->setLastRenderQueue(95);
+  }
+
+  // Pass 4: resolve over opaque scene via a full-screen quad.
+  {
+    auto * tp = tech->getOutputTargetPass();
+    tp->setInputMode(Ogre::CompositionTargetPass::IM_NONE);
+    auto * q = tp->createPass(Ogre::CompositionPass::PT_RENDERQUAD);
+    q->setMaterialName("gsplat_rviz_plugin/WboitResolve");
+    q->setInput(0, "scene_tex");
+    q->setInput(1, "accum_tex");
+    q->setInput(2, "reveal_tex");
+  }
+
+  comp->load();
+}
+
+void enable(Ogre::Viewport * viewport)
+{
+  if (!viewport) return;
+  auto & mgr = Ogre::CompositorManager::getSingleton();
+  try {
+    // addCompositor is idempotent — returns the existing instance on
+    // repeat calls, so it's safe to run this every time WBOIT is
+    // requested.
+    if (!mgr.addCompositor(viewport, kName)) return;
+    mgr.setCompositorEnabled(viewport, kName, true);
+  } catch (const Ogre::Exception &) {
+    // Swallow — caller can surface the failure via its own status path.
+  }
+}
+
+void disable(Ogre::Viewport * viewport)
+{
+  // Toggle-only: keep the compositor in the viewport's chain but mark
+  // it disabled. Ogre skips disabled entries at no extra cost. Removing
+  // the compositor from the chain here would be unsafe: this function
+  // can be called mid-render (from SplatCloud::_updateRenderQueue) and
+  // Ogre's chain-walker does not tolerate chain mutations mid-walk —
+  // the symptom is a blank viewport on the very next frame.
+  if (!viewport) return;
+  auto & mgr = Ogre::CompositorManager::getSingleton();
+  try { mgr.setCompositorEnabled(viewport, kName, false); } catch (...) {}
+}
+
+void detach(Ogre::Viewport * viewport)
+{
+  // Disable then fully remove from the chain. Only safe from destruction
+  // paths (~SplatCloud) where no further rendering will happen on this
+  // viewport this frame.
+  if (!viewport) return;
+  auto & mgr = Ogre::CompositorManager::getSingleton();
+  try { mgr.setCompositorEnabled(viewport, kName, false); } catch (...) {}
+  try { mgr.removeCompositor(viewport, kName); } catch (...) {}
+}
+
+}  // namespace wboit_compositor
+}  // namespace transparency
+}  // namespace gsplat_rviz_plugin
+```

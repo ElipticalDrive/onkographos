@@ -1,0 +1,27 @@
+# Specific Model Architectures and Extensions
+
+Also called: Vanilla NeRF, Original NeRF
+
+## Overview
+This family represents a scene as a single MLP $f_\theta(\mathbf{x}, \mathbf{d}) \to (\mathbf{c}, \sigma)$ that maps a 3D position $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{d} \in S^2$ to an emitted color $\mathbf{c} \in \mathbb{R}^3$ and a volumetric density $\sigma \ge 0$ [S2, unofficial]. Rendering uses the classical volume rendering integral along rays cast from the camera, with no explicit geometry—geometry emerges from where $\sigma$ is high after photometric optimization on multi-view images [S2, unofficial]. It sets itself apart from its siblings by using a single, monolithic MLP without spatial partitioning or explicit geometric priors, relying entirely on positional encoding and hierarchical sampling to capture scene details [S2, unofficial]. Unlike [Mip-NeRF 360](3306-mip-nerf-360.md) which handles unbounded scenes via contraction, or [NeRF-FF](8669-nerf-ff.md) which addresses defocus, the original architecture operates within defined near and far ray bounds [S2, unofficial].
+
+## Shared principles
+All methods in this family share the mechanism of mapping 6D input coordinates (3D position $\mathbf{x}$ and 2D viewing direction $\mathbf{d}$) to 4D output values (density $\sigma$ and color $\mathbf{c}$) using a differentiable neural network, as detailed in [Scene Representation and Architecture](11368-scene-representation-and-architecture.md). The architecture relies on three key innovations: volume rendering as a differentiable encoding mechanism, positional encoding to overcome spectral bias [G], and hierarchical sampling [S2, unofficial]. Not given in the sources: specific network topology details (e.g., layer counts, activation functions, skip connection patterns) beyond the general MLP structure.
+
+## Subtopics
+
+### [Mip-NeRF 360](3306-mip-nerf-360.md)
+Extends NeRF quality to unbounded, 360-degree real-world scenes by combining anti-aliased cone-casting with a non-linear scene contraction parameterization. Sets itself apart by introducing a proposal network trained via online distillation and a distortion regularizer to prevent floaters. Choose when handling full 360-degree unbounded geometry.
+
+### [NeRF-FF](8669-nerf-ff.md)
+A plug-in strategy that mitigates reconstruction degradation from out-of-focus (defocus blurred) regions by estimating binary image masks to omit out-of-focus pixels during training. Sets itself apart by relying on static ray assumptions, making it compatible with runtime-optimized variants like Instant-NGP and splatfacto. Choose when training on partially blurred data.
+
+### [Drone-NeRF](8972-drone-nerf.md)
+Specialized for reconstructing large-scale 3D scenes from aerial drone imagery, addressing unbounded space representation and varying camera exposure. Sets itself apart by integrating view frustum sampling for anti-aliasing, a pose optimizer for joint pose refinement, and appearance embeddings to handle exposure discrepancies. Choose for large-scale aerial captures with exposure variations.
+
+## Background
+The specific model architectures described here originate from the foundational NeRF paper (Mildenhall et al., 2020), which introduced the concept of representing a scene as a single MLP $f_\theta(\mathbf{x}, \mathbf{d}) \to (\mathbf{c}, \sigma)$ [S2, unofficial]. This approach eliminated the need for explicit geometry, allowing geometry to emerge from high-density regions after photometric optimization on multi-view images [S2, unofficial]. The architecture relies on three key innovations: volume rendering as a differentiable encoding mechanism, positional encoding to overcome spectral bias, and hierarchical sampling [S2, unofficial]. Training the original architecture is computationally intensive, requiring 1–2 days on a V100 GPU for a single scene, with render speeds of 0.05–0.3 FPS at 1080p resolution [S2, unofficial]. While later variants like Instant-NGP or Zip-NeRF have significantly improved speed and quality (e.g., PSNR of 28.5+ on Mip-NeRF 360 vs. 25.4 for the original), the vanilla MLP architecture remains the conceptual baseline for understanding implicit neural representations in volume rendering [S2, unofficial].
+
+## Sources
+[S1] facebookresearch/NSVF, https://github.com/facebookresearch/NSVF, fetched 2026-10-27 (unofficial)
+[S2] NeRF — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-NeRF_SOTA_Updated.html, fetched 2026-10-29 (unofficial)

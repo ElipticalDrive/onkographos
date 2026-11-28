@@ -1,0 +1,101 @@
+# Z-Order and Hilbert Encoding/Decoding
+
+
+## Overview
+Z-Order (Morton) and Hilbert encoding convert $N$-dimensional spatial coordinates into a 1D linear index using space-filling curves to preserve spatial locality [G]. They solve the problem of scattered memory access in dense grids by ensuring that points close in Euclidean distance have close linear indices, optimizing cache performance compared to arithmetic strides [G]. Z-order uses bit-interleaving for $O(1)$ computation, while Hilbert uses recursive traversal to minimize the maximum distance between adjacent indices [G]. CPU and CUDA implementations exist for serialization and sorting [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+- **Inputs**: $N$-dimensional integer coordinates $\mathbf{c} = (c_0, c_1, \dots, c_{N-1})$ and the bit-width $B$ of each coordinate dimension [G].
+- **Outputs**: A 1D linear index $I$ (encoded) or the original coordinates $\mathbf{c}$ (decoded) [G].
+
+### Data Structures
+- **Encoded Index**: A single integer of size $N \times B$ bits [G].
+- **Decoded Coordinates**: An array of $N$ integers, each $B$ bits wide [G].
+
+### Algorithm: Z-Order (Morton) Encoding
+Z-order encoding interleaves the bits of the input coordinates [G]. For 3D coordinates $(x, y, z)$ with $B$ bits each:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def z_order_encode(x, y, z, B):
+    I = 0
+    for b in range(B):
+        xb = (x >> b) & 1
+        yb = (y >> b) & 1
+        zb = (z >> b) & 1
+        I |= (xb << (3 * b)) | (yb << (3 * b + 1)) | (zb << (3 * b + 2))
+    return I
+```
+[G]
+
+### Algorithm: Z-Order Decoding
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def z_order_decode(I, B):
+    x, y, z = 0, 0, 0
+    for b in range(B):
+        xb = (I >> (3 * b)) & 1
+        yb = (I >> (3 * b + 1)) & 1
+        zb = (I >> (3 * b + 2)) & 1
+        x |= (xb << b)
+        y |= (yb << b)
+        z |= (zb << b)
+    return x, y, z
+```
+[G]
+
+### Algorithm: Hilbert Encoding/Decoding
+Hilbert encoding requires a recursive approach or lookup tables for small bit widths due to the curve's rotational symmetry [G]. For dimension $D$ and bit width $B$, the standard iterative implementation uses quadrant/octant lookup tables to track rotations and offsets [G].
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hilbert_encode(x, y, z, B):
+    # Standard iterative Hilbert encode for 3D using quadrant lookup tables [G]
+    # Tables map (quadrant, current_orientation) -> (new_orientation, index_offset)
+    # Implementation uses precomputed tables for 8-bit blocks to handle rotations/reflections [G]
+    pass # [G] Standard iterative Hilbert encode/decode uses quadrant lookup tables to handle rotations and reflections.
+```
+[G]
+
+### Parameters
+- **Bit Width ($B$)**: Typically 8, 16, or 32 bits per dimension, depending on grid resolution [G].
+- **Dimensions ($N$)**: Typically 2 or 3 for volume rendering [G].
+
+### Edge Cases and Pitfalls
+- **Precision**: For large $B$, bit manipulation must use integer types wide enough to hold $N \times B$ bits (e.g., 64-bit or 128-bit integers for 3D with $B=32$) [G].
+- **Boundaries**: Coordinates must be within $[0, 2^B - 1]$. Out-of-bounds coordinates result in undefined behavior or incorrect indices [G].
+- **Hilbert Complexity**: Hilbert encoding/decoding is more complex than Z-order due to rotations. Lookup tables are often used for small $B$ to avoid branching [G].
+
+## Subtopics
+
+### [Morton Code Sorting for Brick Layout](9894-morton-code-sorting-for-brick-layout.md)
+Organizes sub-bricks into a global buffer to maximize spatial coherence and cache efficiency during volume rendering. It solves scattered memory access by sorting sub-bricks according to their Z-order codes within hierarchical groups. It sets itself apart by operating iteratively at each level of the brick hierarchy, using enumeration sort to guarantee the global buffer remains compact and spatially coherent as construction proceeds.
+
+### [Morton Order Storage Layout](15686-morton-order-storage-layout.md)
+Arranges volumetric data in memory according to the 3D Z-order curve to maximize spatial locality and cache efficiency during traversal. It differs from standard row-major layouts by ensuring that voxels with adjacent spatial coordinates are stored adjacently in linear memory, which is critical for minimizing cache misses in large-scale volume rendering pipelines.
+
+### [Hilbert Curve Volume Mapping](20371-hilbert-curve-volume-mapping.md)
+Maps 1D sequential data into a 3D volume grid using a space-filling Hilbert curve to maximize spatial coherence. Unlike naive scan-line traversal, which places distant 1D positions adjacent in 3D space, Hilbert mapping ensures that neighboring positions in the 1D sequence remain adjacent in 3D space, facilitating easier interpretation of data and visuals. It builds on Z-Order and Hilbert Encoding/Decoding by applying the encoding specifically to populate a volumetric dataset for rendering.
+
+### Serialized-Morton/ASTC
+A variant that rearranges voxel attributes into correlations to enable ASTC codec reuse, but requires mapping voxel locations to serialized attributes for random access [S2, unofficial]. Beyond removing 2D layouts, rearranging voxel attributes can weaken the spatial correlations available to the UV mapping alone [S2, unofficial].
+
+### Diamond Encoding via Central Vertex
+Encodes diamond hierarchies using the binary representation of a central vertex $v_c = [v_x, v_y, v_z]^T$ [S3]. The scale $\gamma$ is the minimum number of trailing zeros among the three coordinates of $v_c$ [S3]. The level is $l = N - \gamma$, equaling the depth in the DAG modulo 3 [S3]. The diamond type $\tau$ is encoded by the two bits at positions $\gamma+1$ and $\gamma+2$ in each coordinate, yielding 56 valid types corresponding to supercube edges [S3]. The congruence class $i$ is encoded by the number of zeros at position $\gamma+1$ of $v_c$ [S3]. The final $m = N - (\gamma + 2)$ bits in each coordinate encode the supercube origin $\sigma$ [S3]. Scale, type, and origin can be efficiently extracted via bit shifting [S3].
+
+## Operating characteristics
+- **Time Complexity**: Z-order encoding/decoding is $O(B)$ where $B$ is the bit width per dimension [G]. Hilbert encoding/decoding is also $O(B)$ but with a higher constant factor due to rotations [G].
+- **Memory Complexity**: $O(1)$ for the index itself [G].
+- **Performance**: Z-order is faster to compute than Hilbert. Hilbert provides better spatial locality for adjacent indices, which can improve cache performance in rendering [G].
+- **Strengths**: Preserves spatial locality, enabling efficient cache usage and parallel processing [G].
+- **Limitations**: Hilbert is more complex to implement. Z-order can have larger jumps between adjacent indices compared to Hilbert [G].
+
+## Background
+Z-order (Morton code) was introduced by G. M. Morton in 1966 [G]. Hilbert curves were introduced by David Hilbert in 1891 [G]. These methods are widely used in spatial indexing, database storage, and volume rendering to optimize memory access patterns [G]. CPU and CUDA implementations are available for serialization and sorting tasks [S1, unofficial].
+
+## Sources
+[S1] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)
+[S2] Beyond UV Mapping: Mesh Texture Compression via Surface-Aligned Texture Fields, https://doi.org/10.48550/arxiv.2609.23606, fetched 2026-10-26 (unofficial)
+[S3] Supercubes: A High-Level Primitive for Diamond Hierarchies, https://doi.org/10.1109/tvcg.2009.186, fetched 2026-10-28

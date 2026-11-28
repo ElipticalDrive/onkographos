@@ -1,0 +1,35 @@
+# Path Integral and Path-Space Differentiation
+
+Also called: Differentiable Path Tracing, Path-Space Gradients
+
+## Overview
+Path Integral and Path-Space Differentiation computes gradients of the rendering equation by differentiating the path integral formulation directly, rather than differentiating a discretized volume rendering approximation . It solves the problem of obtaining accurate gradients for complex light transport involving subsurface scattering and visibility discontinuities, where standard volume rendering gradients fail to account for boundary movements . It sets itself apart from [Differentiable Direct Volume Rendering (DVR)](8871-differentiable-direct-volume-rendering-dvr.md) by operating in continuous path space, allowing it to handle arbitrary participating media and surface interactions simultaneously, and from [Automatic Differentiation (Reverse/Adjoint Mode)](7151-automatic-differentiation-reverse-adjoint-mode.md) by providing explicit analytic forms for the gradient terms (interior and boundary) which can be more memory-efficient and physically interpretable .
+
+## Shared principles
+The core mechanism relies on the Reynolds Transport Theorem or the divergence theorem applied to the path integral . The rendering measurement $I$ is expressed as an integral over a path space $\hat{\Omega}$:
+$$
+I = \int_{\hat{\Omega}} \hat{f}(\vec{p}) d\mu(\vec{p})
+$$
+where $\hat{f}$ is the path contribution function and $\mu$ is the path measure . When differentiating with respect to a scene parameter $\pi$ (such as geometry or material properties), the derivative decomposes into two distinct terms :
+1.  **Interior Term:** The integral of the derivative of the path contribution function $\frac{\partial \hat{f}}{\partial \pi}$ over the fixed path space. This accounts for changes in the integrand (e.g., scattering coefficients, geometry derivatives at fixed path vertices) .
+2.  **Boundary Term:** The integral over the boundary of the path space $\partial \hat{\Omega}$, weighted by the velocity of the visibility boundaries $V_{\partial}$ . This accounts for the movement of the integration domain boundaries, such as silhouettes and shadow edges, as the scene parameters change .
+
+$$
+\frac{dI}{d\pi} = \int_{\hat{\Omega}} \frac{\partial \hat{f}}{\partial \pi} d\mu + \int_{\partial \hat{\Omega}} \hat{f} V_{\partial} d\mu_{\partial}
+$$
+The method requires mapping spatial paths to a fixed "material space" or "reference configuration" to handle domain deformation, ensuring the integration domain is independent of the parameter $\pi$ .
+
+## Subtopics
+
+### [Boundary Path Integral Formulation](3389-boundary-path-integral-formulation.md)
+Estimates gradients for translucent object shape parameters by converting interior volume integrals into boundary area integrals. It avoids expensive tetrahedralizations by assuming no refractive/reflective boundaries. Choose when optimizing the shape of translucent objects without complex refraction.
+
+### [Material-Form Differential Path Integral](8831-material-form-differential-path-integral.md)
+Transforms the integration domain from deforming spatial path space to a fixed material space. It reduces boundary terms to only visibility-related discontinuities (silhouettes), ignoring static mesh edges. Choose for subsurface scattering and implicit surfaces where domain deformation is significant.
+
+### [Monte Carlo Estimation of Differentiable Path Integrals](10814-monte-carlo-estimation-of-differentiable-path-integrals.md)
+Explicitly handles visibility discontinuities (silhouettes and shadow edges) in the gradient estimation. It distinguishes itself by sampling primary and secondary boundaries separately. Choose for accurate gradients in translucent or complex surface materials where visibility changes are critical.
+
+## Background
+The method originates from the application of calculus of variations and Reynolds Transport Theorem to rendering equations . It was developed to address the limitations of differentiating discrete volume rendering approximations, which do not capture the continuous nature of light transport in participating media . The approach is fundamental to differentiable rendering of complex scenes involving subsurface scattering and dynamic geometry .
+

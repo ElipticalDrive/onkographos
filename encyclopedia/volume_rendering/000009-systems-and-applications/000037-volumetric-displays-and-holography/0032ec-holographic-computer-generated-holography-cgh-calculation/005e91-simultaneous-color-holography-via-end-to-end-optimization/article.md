@@ -1,0 +1,109 @@
+# Simultaneous Color Holography via End-to-End Optimization
+
+Also called: Depth Division Holography, Depth division, Differentiable Hologram Optimization, Gradient Descent Hologram Synthesis, Optimization-based Simultaneous Color Hologram Generation, Simultaneous RGB Holography, Single SLM Pattern RGB Holography
+
+## Overview
+This method generates a full RGB hologram using a single Spatial Light Modulator (SLM) pattern illuminated simultaneously by red, green, and blue light sources, eliminating the need for field sequential color or multiple SLMs [S1]. It sets itself apart from Depth Division Multiplexing by directly optimizing the output hologram end-to-end rather than assigning colors to different depths, and from Bit Division Multiplexing by using a flexible framework with a perceptual loss function for direct optimization rather than a two-step lookup table process [S1].
+
+## How it works
+The method formulates hologram generation as an end-to-end differentiable optimization problem [S1]. It maps target RGB intensities to SLM voltage values by minimizing a perceptual loss function through gradient descent [S1].
+
+**Inputs and Outputs**
+*   **Input:** Target RGB intensity image $\hat{I}$; SLM physical parameters (wavelengths $\lambda_r, \lambda_g, \lambda_b$; phase range; learning rate; iteration count) [S1].
+*   **Output:** Optimized 8-bit digital SLM pattern $s$ [S1].
+
+**Data Structures**
+*   **SLM Pattern $s$:** 2D array of 8-bit integers controlling the SLM phase delay [S1].
+*   **Complex Wavefield $g_\lambda$:** 2D array of complex numbers representing the electric field at the SLM plane for each wavelength [S1].
+*   **Reconstructed Intensity $I_{z,\lambda}$:** 2D array of real numbers representing the intensity at the target plane $z$ for each wavelength [S1].
+
+**Steps**
+1.  **Initialization:** Choose a target depth $d_{target}$ and initialize the SLM pattern $s$ and optimization parameters (learning rate, number of iterations) [S1].
+2.  **SLM Modeling:** For each wavelength $\lambda \in \{r, g, b\}$, compute the wavelength-dependent phase delay $\phi_\lambda(s)$ using the SLM model, which maps voltage values to a complex field via a learned cross-talk kernel and a linear lookup table [S1].
+3.  **Field Generation:** Compute the electric field leaving the SLM for each wavelength: $g_\lambda = e^{i\phi_\lambda(s)}$ [S1].
+4.  **Propagation:** Propagate the electric field $g_\lambda$ to the target plane $z$ using the propagation function $f_{prop}$ to obtain the reconstructed intensity: $I_{z,\lambda} = f_{prop}(g_\lambda, z, \lambda)$ [S1]. The propagation model separates the zeroth and first diffraction orders and combines them through a U-Net architecture [S1].
+5.  **Loss Calculation:** Compute the total loss by comparing the reconstructed intensities $I_{z,\lambda}$ with the target intensities $\hat{I}_{z,\lambda}$ using a pixel-wise perceptual loss function that weights luminance and chrominance based on human visual acuity: $L = \sum_{\lambda \in \{r,g,b\}} \mathcal{L}_{perceptual}(\hat{I}_{z,\lambda}, I_{z,\lambda})$ [S1].
+6.  **Gradient Update:** Calculate gradients of the loss with respect to the SLM pattern $s$ using automatic differentiation and update $s$ via gradient descent: $s \leftarrow s - \eta \frac{\partial L}{\partial s}$ [S1].
+7.  **Iteration:** Repeat steps 2–6 until convergence or the maximum number of iterations is reached [S1].
+
+**Parameters**
+*   **SLM Phase Range:** The method leverages the extended phase range of Liquid Crystal on Silicon (LCoS) SLMs, up to $10\pi$, to create diversity in phase triplets for RGB [S1].
+*   **Perceptual Loss Weights:** Scalars weighting luminance and chrominance channels based on human visual acuity [S1].
+*   **Learning Rate ($\eta$):** Step size for gradient descent [G].
+*   **Optimization Iterations:** Number of optimization steps [G].
+
+**Pitfalls**
+*   **Depth Replicas:** Simultaneous color holography suffers from "depth replicas" artifacts due to the ambiguity between color and propagation distance. This is mitigated by using the extended phase range of the SLM [S1].
+*   **Wavelength Dependence:** The SLM response varies with wavelength, requiring accurate modeling in the SLM model step [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimize_slm(target_rgb, wavelengths, num_iterations, learning_rate):
+    # Initialize SLM pattern s as a 2D array of 8-bit values [S1]
+    s = random_uint8_array(target_rgb.shape[:2])
+    for iteration in range(num_iterations):
+        # Step 2 & 3: SLM Model and Field Generation per wavelength [S1]
+        fields_slm = {}
+        for lam in wavelengths:
+            phase = slm_phase_model(s, lam)
+            fields_slm[lam] = complex_exp(1j * phase)
+        # Step 4: Propagation to target plane z [S1]
+        intensities = {}
+        for lam in wavelengths:
+            field_sensor = propagation_model(fields_slm[lam], lam)
+            intensities[lam] = abs(field_sensor) ** 2
+        # Step 5: Perceptual Loss calculation [S1]
+        loss = 0.0
+        for idx, lam in enumerate(wavelengths):
+            loss += perceptual_loss(intensities[lam], target_rgb[:,:,idx])
+        # Step 6: Gradient Update [S1]
+        gradients = gradient(loss, s)
+        s = s - learning_rate * gradients
+    return s
+
+def slm_phase_model(s, lam):
+    # Maps 8-bit digital SLM pattern to wavelength-dependent phase delay
+    # using a learned cross-talk kernel and a linear lookup table [S1]
+    phase = apply_cross_talk_kernel(s, lam)
+    return phase + linear_lookup_table(lam)[s]
+
+def propagation_model(field_slm, lam):
+    # Propagates electric field to sensor plane using modified ASM model
+    # that separates zeroth and first diffraction orders and combines them via U-Net [S1]
+    orders = separate_diffraction_orders(field_slm)
+    return combine_diffraction_orders(orders)
+
+def perceptual_loss(recon, target):
+    # Computes pixel-wise loss weighting luminance and chrominance based on human visual acuity [S1]
+    return mean_squared_error(recon, target)
+
+def gradient(loss, variable):
+    # Standard automatic differentiation backpropagation [S1]
+    return compute_backward_pass(loss, variable)
+```
+
+## Subtopics
+
+### [Simultaneous Color Focal Stack Optimization](17716-simultaneous-color-focal-stack-optimization.md)
+Generates holograms for a full-color image across multiple depth planes using a single SLM pattern. It extends the base method by optimizing for a stack of target intensities at different depths instead of a single plane.
+
+### [Phase Range Optimization for Simultaneous Color](17722-phase-range-optimization-for-simultaneous-color.md)
+Determines the optimal phase modulation range for each color channel to overcome depth-wavelength ambiguity in the propagation kernel. It sets itself apart by focusing on the magnitude of phase excursion per channel rather than the loss function or focal stack geometry.
+
+### [Perceptual Loss Function for Color Holography](17766-perceptual-loss-function-for-color-holography.md)
+Addresses the overdetermined nature of single-SLM RGB holography by transforming the error metric into opponent color space and applying low-pass filters that mimic the human visual system's contrast sensitivity. It sets itself apart from standard RGB loss by shifting optimization error into imperceptible regions of the color space.
+
+## Operating characteristics
+*   **Time Complexity:** The optimization process is iterative and computationally expensive, scaling with the number of optimization iterations and the complexity of the U-Net propagation model [S1].
+*   **Memory Complexity:** Requires storing the SLM voltage matrix, complex wavefields at each step, and gradients for backpropagation [G].
+*   **Strengths:** Eliminates the need for field sequential color or multiple SLMs; allows for extended phase range utilization; improves color fidelity via perceptual loss [S1].
+*   **Limitations:** Computationally intensive optimization; sensitive to accurate SLM and propagation models; potential for depth replica artifacts if phase range is not sufficiently extended [S1].
+*   **When to use:** When a single SLM pattern is required for simultaneous RGB illumination, and computational resources for optimization are available [S1].
+
+## Background
+This method was introduced by researchers at Reality Labs Research, Meta, USA [S1]. It addresses the limitations of traditional color holography methods such as field sequential color, depth division multiplexing, and bit division multiplexing [S1]. The work builds on prior research in differentiable holography and perceptual loss functions for image optimization [S1]. It was validated experimentally on 2D and 3D content using a custom camera-calibrated model [S1].
+
+## Sources
+[S1] Simultaneous Color Computer Generated Holography, https://doi.org/10.48550/arxiv.2303.11287, fetched 2026-10-30

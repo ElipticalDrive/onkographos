@@ -1,0 +1,112 @@
+# Splat Cloud Loading
+
+Also called: Runtime Gaussian Splat Loading, SPZ Download & Processing Pipeline, SPZ/PLY Parsing, WorldLabsWorldManager Load Pipeline
+
+## Overview
+Splat Cloud Loading is an asynchronous method for loading 3D Gaussian Splat (3DGS) data from compressed files (`.spz` or `.ply`) off the main thread, returning `null` while the operation is in progress [S2, S3, unofficial]. It solves the problem of blocking the UI thread during large asset ingestion by handling network I/O, decompression, and binary parsing in the background [S2, S3, unofficial]. It is distinguished from sibling methods by its specific support for Niantic's `.spz` format versions 2–4 and its integration with the `SplatNode` composable, which automatically handles camera-relative sorting for the scene view [S2, S3, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** `fileLocation` (String) specifying the source of the splat data. Supported formats include asset paths (e.g., `"splats/scan.spz"`), absolute file paths, and URIs (`file://`, `content://`, `http(s)://`) [S2, S3, unofficial].
+*   **Output:** `SplatCloud?` (Nullable `SplatCloud` object). Returns `null` while loading or if the file cannot be read. Returns a non-empty `SplatCloud` instance upon successful completion [S2, S3, unofficial].
+
+**Data Structures**
+*   **SplatCloud:** The in-memory representation of the loaded splats. It contains a `count` property indicating the total number of splats and must be non-empty upon successful load [S2, S3, unofficial].
+
+**Steps**
+1.  **State Check:** Check if the world is already loaded or currently loading. If loaded, return the existing renderer immediately. If currently loading, log a warning and return `null` [S1, unofficial].
+2.  **Resource Cleanup:** Unload all previously loaded worlds except the default placeholder to free memory slots before starting the new load [S1, unofficial].
+3.  **URL Resolution (Optional/Contextual):** If loading from a remote source, resolve the download URL by mapping a preferred resolution enum to a string key (`"full_res"`, `"500k"`, or `"100k"`) and calling `GetUrl(key)` or falling back to `GetBestResolutionUrl()` [S1, unofficial].
+4.  **Asynchronous Download:** Download the file as binary bytes asynchronously. Report progress at intervals of `0.05f` (5%) [S1, unofficial].
+5.  **Background Processing:** Process the raw bytes on a background thread using `RuntimeSplatProcessing.ProcessSPZBytes`. Pass format parameters derived from the selected quality preset [S1, unofficial].
+6.  **Parsing:** Parse the binary data using pure Kotlin parsers (`SplatParser.fromSpz` or `SplatParser.fromPly`) which auto-detect the format. Supports `.spz` versions 2 and 3 (gzip compressed) and version 4 (ZSTD streams, the current Niantic format) [S2, S3, unofficial].
+7.  **Scene Integration:** Spawn a new `GameObject` named `World_{display_name}`, set its parent to `worldParent`, and apply a -180° rotation around the X axis [S1, unofficial].
+8.  **Renderer Attachment:** Attach a `GaussianSplatRenderer` component, assign required shaders, and load the processed runtime data into the renderer [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Kotlin-like pseudocode representing the composable logic
+@Composable
+fun rememberSplatCloud(fileLocation: String): SplatCloud? {
+    // State to hold the loaded cloud or null
+    var splatCloud by remember { mutableStateOf<SplatCloud?>(null) }
+    var isLoading by remember { mutableStateOf(false) }
+
+    // Trigger load on fileLocation change
+    LaunchedEffect(fileLocation) {
+        // Step 1: Check if already loading or loaded
+        if (isLoading) {
+            Log.warn("World is currently loading, returning null")
+            return@LaunchedEffect
+        }
+        
+        // Step 2: Cleanup previous worlds
+        unloadAllWorldsExceptDefault()
+
+        isLoading = true
+        try {
+            // Step 3 & 4: Resolve URL and Download
+            // Note: If fileLocation is a local asset/path, skip URL resolution
+            var bytes: ByteArray
+            if (fileLocation.startsWith("http")) {
+                val url = resolveUrl(fileLocation) // Maps resolution enum to key
+                bytes = downloadAsync(url, progressCallback = 0.05f)
+            } else {
+                bytes = loadAssetOrFile(fileLocation)
+            }
+
+            // Step 5 & 6: Parse on background thread
+            // SplatParser handles .spz (v2, v3, v4) and .ply
+            val cloud = withContext(Dispatchers.IO) {
+                SplatParser.parse(bytes)
+            }
+
+            // Step 7 & 8: Update state to trigger scene graph updates
+            // The actual GameObject/Renderer creation is handled by the SplatNode 
+            // or WorldManager integration when the cloud is non-null
+            splatCloud = cloud
+            
+        } catch (e: Exception) {
+            Log.error("Failed to load splat cloud: ${e.message}")
+            splatCloud = null
+        } finally {
+            isLoading = false
+        }
+    }
+
+    return splatCloud
+}
+```
+
+**Parameters**
+*   `fileLocation`: String. The source path or URI. Typical values: `"splats/raccoon_family.spz"` (asset), `"file:///path/to/cloud.ply"` [S2, S3, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Null Return:** The function returns `null` during the loading phase. The consumer must handle this, typically by checking for null before passing to `SplatNode` [S2, S3, unofficial].
+*   **Format Support:** Only `.spz` (v2, v3, v4) and `.ply` are supported. Other formats will fail during parsing [S2, S3, unofficial].
+*   **Concurrency:** The parsing is implemented in pure Kotlin to ensure compatibility across all target platforms (Android, iOS, Desktop, Web) [S3, unofficial].
+
+## Subtopics
+
+### SplatNode
+A composable UI component that renders a `SplatCloud`. It handles the back-to-front sorting of splats relative to the camera. If `cameraPositionProvider` is null, it sorts for the default scene camera, preventing popping during orbit [S2, S3, unofficial].
+
+### SplatParser
+The core parsing utility that reads raw bytes into a `SplatCloud`. It auto-detects `.spz` vs `.ply` and handles the specific decompression (gzip/ZSTD) for `.spz` versions [S2, S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by I/O and decompression. Parsing is linear with respect to the number of splats. The method is asynchronous, so it does not block the main thread [S2, S3, unofficial].
+*   **Memory Complexity:** Proportional to the size of the uncompressed splat cloud. The method unloads previous worlds to free memory slots before loading new ones [S1, unofficial].
+*   **Performance:** Parsing is performed in pure Kotlin, which may be slower than native C++ implementations but ensures cross-platform consistency [S3, unofficial].
+*   **Strengths:** Non-blocking UI, support for modern compressed formats (SPZ v4), automatic camera sorting in `SplatNode` [S2, S3, unofficial].
+*   **Limitations:** Returns `null` during load, requiring null-checks in the UI. Only supports specific file formats [S2, S3, unofficial].
+
+## Background
+This method is part of the SceneView library ecosystem, specifically introduced in commits related to sorting splats for the scene camera by default and adding the `rememberSplatCloud` composable [S2, S3, unofficial]. It integrates with the WorldLabs Unity plugin ecosystem concepts (referenced in [S1, unofficial]) but is implemented in Kotlin for the SceneView Android/JVM targets [S1, S2, S3, unofficial].
+
+## Sources
+[S1] nigelhartman/worldlabs_unity, https://github.com/nigelhartman/worldlabs_unity, fetched 2026-10-27 (unofficial)
+[S2] feat(sceneview): sort splats for the scene camera by default and add …, https://github.com/sceneview/sceneview/commit/e7e8fd42c0b46c8e9c62db902f6bb1e60474006f, fetched 2026-10-30 (unofficial)
+[S3] feat(sceneview): sort splats for the scene camera by default and add …, https://github.com/sceneview/sceneview/commit/5f2a4dd1f683ddb444669be54b78ce7913b55b70, fetched 2026-10-30 (unofficial)

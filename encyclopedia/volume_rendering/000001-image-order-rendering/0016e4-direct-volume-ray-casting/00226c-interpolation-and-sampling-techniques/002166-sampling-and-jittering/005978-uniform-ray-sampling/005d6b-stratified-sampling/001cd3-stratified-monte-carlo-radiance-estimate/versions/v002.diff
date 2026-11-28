@@ -1,0 +1,128 @@
+--- v001.md
++++ v002.md
+@@ -9,9 +9,9 @@
+ **Inputs and Outputs:**
+ - **Inputs:** Ray $\mathbf{r}$, near clipping plane $t_n$, far clipping plane $t_f$, number of samples $k$.
+-- **Outputs:** Radiance estimate $\hat{C}_{\text{IW}}(\mathbf{r})$, sample points $\tau_i$, sample lengths $(t_i - t_{i-1})$.
++- **Outputs:** Radiance estimate $\hat{C}_{\text{IW}}(\mathbf{r})$, sample points $\tau_i$, sample lengths $(t_i - t_{i-1})$ [S1, S2, unofficial].
+ 
+ **Data Structures:**
+-- `RayBundle.sample_lengths`: A tensor/array of size $k$ storing the length of each bin $(t_i - t_{i-1})$.
+-- `RayBundle.sample_points`: A tensor/array of size $k$ storing the sampled positions $\tau_i$ along the ray direction.
++- `RayBundle.sample_lengths`: A tensor/array of size $k$ storing the length of each bin $(t_i - t_{i-1})$ [S2, unofficial].
++- `RayBundle.sample_points`: A tensor/array of size $k$ storing the sampled positions $\tau_i$ along the ray direction [S2, unofficial].
+ 
+ **Steps:**
+@@ -36,4 +36,6 @@
+ **Pseudocode:**
+ ```python
++import random
++
+ def stratified_monte_carlo_radiance_estimate(ray_origin, ray_direction, near, far, k, randomize=True):
+     """
+@@ -41,6 +43,6 @@
+     
+     Args:
+-        ray_origin: (3,) tensor, origin of the ray.
+-        ray_direction: (3,) tensor, normalized direction of the ray.
++        ray_origin: (3,) tuple/list, origin of the ray.
++        ray_direction: (3,) tuple/list, normalized direction of the ray.
+         near: float, near clipping plane distance.
+         far: float, far clipping plane distance.
+@@ -50,42 +52,42 @@
+     Returns:
+         radiance_estimate: float, the estimated radiance.
+-        sample_points: (k, 3) tensor, 3D positions of samples.
+-        sample_lengths: (k,) tensor, lengths of each bin.
++        sample_points: list of (3,) tuples, 3D positions of samples.
++        sample_lengths: list of floats, lengths of each bin.
+     """
+     # Step 1: Create bin boundaries
+-    # linspace generates k+1 points from near to far
+-    bin_boundaries = torch.linspace(near, far, k + 1)
++    bin_boundaries = [near + i * (far - near) / k for i in range(k + 1)]
+     
+     # Step 2: Extract lower and upper bounds
+-    lower_bounds = bin_boundaries[:-1]  # shape (k,)
+-    upper_bounds = bin_boundaries[1:]   # shape (k,)
++    lower_bounds = bin_boundaries[:-1]
++    upper_bounds = bin_boundaries[1:]
+     
+     # Step 3: Sample points within each bin
+-    if randomize:
+-        # Generate k uniform random numbers in [0, 1]
+-        uniform_samples = torch.rand(k)
+-        # Sample uniformly within each bin
+-        samples = lower_bounds + uniform_samples * (upper_bounds - lower_bounds)
+-    else:
+-        # Use midpoint of each bin
+-        samples = 0.5 * (lower_bounds + upper_bounds)
+-        
++    samples = []
++    for l, u in zip(lower_bounds, upper_bounds):
++        if randomize:
++            u_i = random.uniform(0.0, 1.0)
++            samples.append(l + u_i * (u - l))
++        else:
++            samples.append(0.5 * (l + u))
++            
+     # Step 4: Compute sample lengths
+-    sample_lengths = upper_bounds - lower_bounds
++    sample_lengths = [u - l for l, u in zip(lower_bounds, upper_bounds)]
+     
+     # Step 5: Compute 3D sample points
+-    # sample_points = ray_origin + samples * ray_direction
+-    sample_points = ray_origin.unsqueeze(0) + samples.unsqueeze(1) * ray_direction.unsqueeze(0)
++    sample_points = [
++        (ray_origin[0] + s * ray_direction[0],
++         ray_origin[1] + s * ray_direction[1],
++         ray_origin[2] + s * ray_direction[2])
++        for s in samples
++    ]
+     
+     # Step 6: Compute radiance estimate
+-    # Note: c_r(tau_i) and dF_r/dt|_{t=tau_i} must be provided by the caller or a separate function
+-    # This pseudocode assumes these are computed externally or via a differentiable renderer
+-    # For the purpose of this method description, we return the samples and lengths
+-    # The actual radiance calculation requires the volume density and color at each sample point
+-    
+-    # Placeholder for the actual radiance calculation which depends on the specific volume representation
+-    # radiance_estimate = sum( (t_i - t_{i-1}) * c_r(tau_i) * dF_r/dt|_{t=tau_i} )
+-    
+-    return sample_points, sample_lengths
++    # The sources do not specify how c_r(tau_i) and dF_r/dt are evaluated [G]
++    radiance_estimate = 0.0
++    for i in range(k):
++        # c_r(tau_i) and dF_r/dt|_{t=tau_i} are assumed to be computed by the renderer
++        radiance_estimate += sample_lengths[i] * c_r(sample_points[i]) * dF_r(sample_points[i])
++        
++    return radiance_estimate, sample_points, sample_lengths
+ ```
+ 
+@@ -94,5 +96,4 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** When $k$ is large, the bin widths $(t_i - t_{i-1})$ become small, potentially leading to floating-point precision issues in the summation [S1, unofficial].
+ - **Degenerate Distributions:** The method is specifically noted to be effective for degenerate distributions, where uniform sampling performs poorly [S1, unofficial].
+ - **Boundary Conditions:** The bins are defined as $[t_{i-1}, t_i]$, ensuring full coverage of $[t_n, t_f]$ without gaps or overlaps [S1, unofficial].
+@@ -110,14 +111,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(k)$ per ray, where $k$ is the number of samples. The generation of bin boundaries and samples is linear in $k$ [S1, S3, unofficial].
+-- **Memory Complexity:** $O(k)$ per ray to store sample points and lengths [S2, unofficial].
+ - **Measured Performance:** In "Foggy" field experiments, $k=32$ stratified samples matched the accuracy of $k=256$ uniform samples, representing an 8x reduction in sample count [S1, unofficial]. In "Wall" field experiments, $k=4$ stratified samples matched the baseline, a 64x reduction [S1, unofficial].
+ - **Strengths:** Significantly reduces variance compared to uniform sampling, especially for degenerate distributions [S1, unofficial]. Unbiased estimate [S1, unofficial].
+-- **Limitations:** Requires knowledge of the interval $[t_n, t_f]$ to define bins [S1, unofficial]. Randomized sampling introduces variance from the random number generator [S3, unofficial].
+-- **When to Use:** When variance reduction is critical and the ray interval is well-defined. Particularly effective for scenes with degenerate opacity distributions [S1, unofficial].
+-- **When Not to Use:** When the ray interval is unknown or highly variable across rays, making bin definition difficult [S1, unofficial].
++- **Limitations:** Requires knowledge of the interval $[t_n, t_f]$ to define bins [S1, unofficial].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **When to Use:** Not given in the sources.
++- **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-The Stratified Monte Carlo Radiance Estimate was introduced in the context of differentiable rendering with reparameterized volume sampling [S1, unofficial]. It builds on the idea of inverse transform sampling, which requires only a few points for degenerate distributions [S1, unofficial]. The method was compared against baseline uniform sampling and inverse transform sampling, showing consistent variance reduction [S1, unofficial].
++The Stratified Monte Carlo Radiance Estimate was introduced in the context of differentiable rendering with reparameterized volume sampling [S1, unofficial]. It builds on the idea that inverse transform sampling requires only a few points for degenerate distributions [S1, unofficial]. The method was compared against a baseline uniform sampling estimate, showing consistent variance reduction [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,1796 @@
+# zazen
+3D sparse voxel octree engine
+
+![Rendered models](header.png)
+
+[Dissertation in Portuguese](https://repositorio.ufsc.br/bitstream/handle/123456789/202673/TCC.pdf?sequence=1&isAllowed=y)
+
+[Presentation in Portuguese](https://docs.google.com/presentation/d/1tApOPQa1h_Ap4Q5-Xljjrs0dZl0Z6xPQ2VvMCYRxZok/edit#slide=id.p)
+
+https://www.youtube.com/watch?v=cauwMJJkcEM
+
+### src/construct/construct.cpp
+```
+#pragma once
+
+#include "../render/voxel.cpp"
+#include "indexedleaf.cpp"
+#include "writer.cpp"
+#include <iostream>
+#include <cmath>
+
+struct Node {
+    union {
+        Voxel voxel;
+        Leaf leaf;
+    };
+
+    bool is_leaf;
+    bool is_valid;
+    explicit Node() : is_leaf(false), is_valid(false) {}
+    explicit Node(const Leaf& leaf) : leaf(leaf), is_leaf(true), is_valid(true) {}
+    explicit Node(const Voxel& voxel) : voxel(voxel), is_leaf(false), is_valid(true) {}
+};
+
+class NodeQueue {
+    Node data[8];
+    uint8_t size = 0;
+
+  public:
+    void push(const Node& node) {
+        data[size] = node;
+        size++;
+    }
+
+    bool full() const {
+        return size == 8;
+    }
+
+    bool empty() const {
+        return !size;
+    }
+
+    void clear() {
+        size = 0;
+    }
+
+    Node& operator[](uint8_t index) {
+        return data[index];
+    }
+
+    std::string s() {
+        std::string ret = "";
+        for (auto i = 0; i < 8; i++) {
+            if (i >= size)
+                ret += " ";
+            else if (data[i].is_leaf)
+                ret += "L";
+            else if (data[i].is_valid)
+                ret += "V";
+            else
+                ret += "_";
+        }
+        return ret;
+    }
+};
+
+class Builder {
+    NodeQueue* queues;
+    const unsigned int queue_count;
+    unsigned long long int stream_index = 0;
+    BlockWriter& writer;
+
+    void s() {
+        std::cout << "\nIndex " << stream_index << "\n";
+        for (unsigned int i = 0; i < queue_count; i++) 
+            std::cout << "|" << queues[i].s() << "|\n";
+        return;
+    }
+
+    void collapse(unsigned int i) {
+        /* Collapse full queue i to a voxel in queue (i + 1). */
+
+        /* Queue is not full, no need to collapse */
+        if (!queues[i].full()) return;
+
+        NodeQueue& child_queue = queues[i];
+
+        /* If parent is non-leaf, this voxel will be inserted. */
+        Voxel parent;
+        parent.valid = 0;
+        parent.leaf = 0;
+        parent.child = writer.pos();
+
+        /* True at the end when all 8 nodes are the same leaf.
+         * Therefore parent will also be that leaf.
+         */
+        bool parent_is_leaf = true;
+
+        for (unsigned int j = 0; j < 8; j++) {
+            /* For each node j in this queue: */
+
+            /* Alias for current node */
+            const Node& node = child_queue[j];
+
+            if (node.is_valid) {
+                /* Valid node, mark parent mask. */
+                parent.valid ^= 1 << j;
+            } else {
+                /* Invalid node, go to next iteration. */
+                parent_is_leaf = false;
+                continue;
+            }
+
+            if (node.is_leaf) {
+                /* Leaf node, mark parent mask. */
+                parent.leaf ^= 1 << j;
+
+                if (parent_is_leaf  && child_queue[0].leaf != node.leaf) {
+                    /* Node is a different leaf. */
+                    parent_is_leaf = false;
+                }
+            } else {
+                /* Non-leaf node, thus parent is not leaf. */
+                parent_is_leaf = false;
+            }
+        }
+        i++; /* Now working with the (i + 1) queue. */
+
+        Node to_push;
+        if (parent_is_leaf) {
+            /* Parent is leaf, enqueue leaf. */
+            to_push = Node(child_queue[0].leaf);
+        } else if (!parent.valid) {
+            /* No valid children, thus parent is invalid. */
+            to_push = Node();
+        } else {
+            /* Parent is valid and non-leaf, write children and 
+             * enqueue parent voxel. 
+             */
+            for (unsigned int j = 0; j < 8; j++) {
+                Node& node = child_queue[j];
+                if (node.is_leaf)
+                    writer << node.leaf;
+                else if (node.is_valid)
+                    writer << node.voxel;
+            }
+            to_push = Node(parent);
+        }
+
+        if (i < queue_count) push_at(to_push, i); // push to parent
+        else writer << to_push.voxel; // out of queues, push root voxel
+
+        /* All children have been collapsed, therefore clear. */
+        child_queue.clear();
+    }
+
+    inline void push_at(const Node& node, const uint8_t index) {
+        queues[index].push(node);
+        collapse(index);
+    }
+
+
+  public:
+    Builder(const unsigned int queue_count, BlockWriter& writer) 
+            : queue_count(queue_count), writer(writer) {
+        queues = new NodeQueue[queue_count];
+    }
+
+    ~Builder() {
+        delete[] queues;
+    }
+
+    void add_leaf(const IndexedLeaf& ileaf) {
+
+        unsigned int leaf_count = ileaf.index - stream_index;
+        while (leaf_count > 0) {
+            /* Push invalid nodes so the index catches up with the stream. */
+            unsigned int power = 0;
+
+            if (leaf_count >= 8) {
+                power = std::floor(std::log(leaf_count) / std::log(8));
+            }
+
+            unsigned int non_empty_i = queue_count;
+
+            for (unsigned int i = 0; i < 8; i++) {
+                if (!queues[i].empty()) {
+                    non_empty_i = i;
+                    break;
+                }
+            }
+
+            unsigned int insert_i = std::min(power, non_empty_i);
+            if (insert_i >= queue_count) {
+                std::cout 
+                << "\n\tERROR: completely homogenous model!" 
+                << "\n\tConstruction aborted.\n\n\a";
+                writer << ileaf.leaf;
+                throw "Homogenous model";
+            }
+
+            Node to_push = ileaf.leaf.valid() ? Node(ileaf.leaf) : Node();
+            push_at(to_push, insert_i);
+            leaf_count -= std::pow(8, insert_i);
+        } 
+
+        stream_index = ileaf.index;
+    }
+};
+```
+
+### src/construct/generate.cpp
+```
+#pragma once
+
+#include "model.cpp"
+#include <cmath>
+
+struct GenerateModel : Model {
+    GenerateModel(std::string name, 
+            unsigned int width, unsigned int height, unsigned int depth) 
+            : Model(name, width, height, depth) {}
+
+    Leaf at(int3 pos) const override {
+        const unsigned int mod = width / 8;
+        const float xx = (pos.x%mod)*2 / (float) mod - 1;
+        const float yy = (pos.y%mod)*2 / (float) mod - 1;
+        const float zz = (pos.z%mod)*2 / (float) mod - 1;
+        const float radius = (sin((pos.x/mod + pos.y/mod + pos.z/mod)/5)+1)*0.3;
+        if ((xx*xx + yy*yy + zz*zz > radius) || (std::sin((pos.x*16 + pos.y*20 + pos.z * 30) /(float)width) < 0)) {
+            return Leaf(0);
+        }
+
+        const uint8_t value = 0x20;
+        return Leaf(value*pos.x/mod, value*pos.y/mod, value*pos.z/mod, 0xff);
+    }
+
+    ~GenerateModel() override {}
+};
+```
+
+### src/construct/indexedleaf.cpp
+```
+#pragma once
+#include "../render/leaf.cpp"
+
+struct IndexedLeaf {
+    const Leaf leaf;
+    const unsigned long long int index;
+    IndexedLeaf(const Leaf leaf, const unsigned long long int index) 
+            : leaf(leaf), index(index) {}
+};
+```
+
+### src/construct/int3.cpp
+```
+#pragma once
+
+struct int3 {
+    unsigned int x, y, z;
+    int3(unsigned int x, unsigned int y, unsigned int z) : x(x), y(y), z(z) {}
+};
+```
+
+### src/construct/main.cpp
+```
+#include "construct.cpp"
+#include "zstream.cpp"
+#include "stanford.cpp"
+#include "generate.cpp"
+#include "sponge.cpp"
+#include "../render/block.cpp"
+
+StanfordModel* bunny() {
+    return new StanfordModel("bunny", "", 512, 316, 512);
+}
+
+StanfordModel* brain() {
+    return new StanfordModel("MRbrain", "MRbrain.", 256, 109, 256);
+}
+
+GenerateModel* generated() {
+    const unsigned int size = 512;
+    return new GenerateModel("generated", size, size, size);
+}
+
+SpongeModel* sponge() {
+    const unsigned int size = 243;
+    return new SpongeModel("sponge", size, size, size);
+}
+
+void save_model(Model* model) {
+    ZStream stream(model);
+    BlockWriter writer(model->name + ".zaz");
+    Builder builder(stream.power, writer);
+    unsigned int counter = 0;
+    while(stream.is_open()) {
+        builder.add_leaf(stream.next());
+        if (!(counter % 10000)) {
+            std::cout << "\r" << (int) (stream.progress() * 100) << "%"
+            << std::flush;
+        }
+        counter++;
+    }
+    std::cout << "\r";
+}
+
+int main() {
+    //GenerateModel* gen = generated();
+    //StanfordModel* bunny_model = bunny();
+    SpongeModel* sponge_model = sponge();
+    //StanfordModel* brain_model = brain();
+    //save_model(gen);
+    //save_model(bunny_model);
+    save_model(sponge_model);
+    //save_model(brain_model);
+    //delete gen;
+    //delete bunny_model;
+    delete sponge_model;
+    //delete brain_model;
+    return 0;
+}
+```
+
+### src/construct/model.cpp
+```
+#pragma once
+
+#include <cstddef>
+#include <iostream>
+#include "../render/leaf.cpp"
+#include "int3.cpp"
+
+struct Model {
+    const unsigned int width, height, depth;
+    const std::string name;
+
+    Model(std::string name, 
+            unsigned int width, unsigned int height, unsigned int depth) 
+            : width(width), height(height), depth(depth), name(name) {
+        std::cout << "Constructing model \"" << name << "\"...\n";
+    }
+    virtual ~Model() {}
+
+  //private:
+    size_t index;
+
+    virtual Leaf at(int3 pos) const = 0;
+    
+
+};
+```
+
+### src/construct/sep.cpp
+```
+#pragma once
+
+const char sep =
+#ifdef _WIN32
+                            '\\';
+#else
+                            '/';
+#endif
+```
+
+### src/construct/sponge.cpp
+```
+#pragma once
+
+#include "model.cpp"
+#include <cmath>
+
+
+struct SpongeModel : Model {
+    SpongeModel(std::string name, 
+            unsigned int width, unsigned int height, unsigned int depth) 
+            : Model(name, width, height, depth) {}
+
+    Leaf at(int3 pos) const override {
+        const bool reduced_palette = true;
+        bool filled = true;
+        if (pos.x >= width || pos.y >= height || pos.z >= depth) return Leaf();
+        for (unsigned int div = width / 3; div > 0; div /= 3) {
+            if (((pos.x / div) % 3 == 1) +
+                ((pos.y / div) % 3 == 1) +
+                ((pos.z / div) % 3 == 1) > 1) {
+                filled = false;
+                break;
+            }
+        }
+        return filled ? Leaf(0xff,
+                             pos.x * 0xff / width,
+                             pos.y * 0xff / height,
+                             0xff) : Leaf();
+    }
+
+    ~SpongeModel() override {}
+};
+```
+
+### src/construct/stanford.cpp
+```
+#pragma once
+
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include "model.cpp"
+#include "../render/leaf.cpp"
+#include "sep.cpp"
+
+const std::string base_path(std::string("..") + sep + std::string("models"));
+
+
+struct StanfordModel : Model {
+  public:
+    uint16_t** data;
+    StanfordModel(std::string name, std::string prefix,
+            unsigned int width, unsigned int height, unsigned int depth) 
+            : Model(name, width, height, depth) {
+        data = read_model(name, prefix, height);
+    }
+
+    Leaf at(int3 pos) const override {
+        pos.y = height - pos.y - 1;
+
+        if (pos.x >= width || pos.y >= height || pos.z >= depth) {
+            return Leaf();
+        }
+
+        uint16_t value = data[pos.y][pos.z * depth + pos.x];
+
+        // quantize values
+        value /= 256 * 16;
+        value *= 16;
+
+        if (value < 0xa0) value = 0;
+        return Leaf(value, value, value, value);
+    }
+
+    ~StanfordModel() override {
+        for (unsigned int i = 0; i < height; i++) {
+            delete[] data[i];
+        }
+        delete[] data;
+    }
+        
+  private:
+    uint16_t* read_slice(std::string model_name,
+                         std::string prefix,
+                         unsigned int slice) {
+
+        std::string path = base_path + sep + model_name + 
+                           sep + prefix + std::to_string(slice);
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        std::streamsize size = file.tellg();
+        if (size < 0) {
+            std::cerr << "File '" << path << "' does not exist!\n";
+            throw std::runtime_error("File does not exist.");
+        }
+        file.seekg(0, std::ios::beg);
+        char* buffer = new char[size];
+        if (file.read((char*) buffer, size)) {
+            return (uint16_t*) buffer;
+        }
+        throw std::runtime_error("Error reading file " + path);
+    }
+
+    uint16_t** read_model
+            (std::string model_name,
+             std::string prefix,
+             unsigned int num_slices) {
+        uint16_t** buffer = new uint16_t*[num_slices];
+        for (unsigned int i = 0; i < num_slices; i++) {
+            buffer[i] = read_slice(model_name, prefix, i+1);
+        }
+        return buffer;
+    }
+};
+```
+
+### src/construct/writer.cpp
+```
+#pragma once
+
+#include <fstream>
+#include <iostream>
+#include "../render/block.cpp"
+
+class BlockWriter {
+    std::string filename;
+    std::ofstream stream;
+    size_t byte_count = 0;
+    unsigned int element_count = 0;
+
+  public:
+    BlockWriter(std::string filename) : filename(filename) {
+        stream = std::ofstream(filename, std::ios::binary);
+    }
+
+    ~BlockWriter() {
+        std::cout << "File '" << filename << "' saved to disk.\n"
+        << byte_count << " bytes.\n"
+        << element_count << " elements.\n";
+    }
+
+    unsigned int pos() const {
+        return element_count;
+    }
+
+    template <typename T>
+    void operator<<(const T& node) {
+        stream.write((char*) &node, sizeof(T));
+        byte_count += sizeof(T);
+        element_count += sizeof(T) / Block::ELEMENT_SIZE;
+    }
+};
+```
+
+### src/construct/zstream.cpp
+```
+#include "int3.cpp"
+#include "indexedleaf.cpp"
+#include "model.cpp"
+#include <stack>
+#include <cstdint>
+#include <algorithm>
+#include <cmath>
+
+struct ZFrame {
+    const unsigned int size;
+    const int3 offset;
+    uint8_t i;
+
+    ZFrame(const unsigned int size, const int3 offset, uint8_t i) 
+            : size(size), offset(offset), i(i) {}
+};
+
+class ZStream {
+    const Model* model;
+    unsigned long long int index;
+    bool _open;
+    Leaf stream_leaf;
+    std::stack<ZFrame> stack;
+
+    int3 next_coords() {
+        if (stack.top().size == 1) {
+            int3 ret(stack.top().offset);
+            stack.pop();
+            while (!stack.empty() && stack.top().i >= 8) stack.pop();
+            if (stack.empty()) _open = false;
+            index++;
+            return ret;
+        }
+        const unsigned int size = stack.top().size / 2;
+        int3 offset(stack.top().offset);
+        if (stack.top().i & 4) offset.x += size;
+        if (stack.top().i & 2) offset.y += size;
+        if (stack.top().i & 1) offset.z += size;
+        stack.top().i++;
+        stack.push(ZFrame(size, offset, 0));
+        return next_coords();
+    }
+
+
+  public:
+    const unsigned int power;
+    const unsigned long long int stream_size;
+    ZStream(Model* model) : model(model), index(0), _open(true), 
+            power(std::ceil(std::log2(std::max({model->width, model->height, model->depth})))),
+            stream_size(std::pow(2, power * 3)) {
+        stack.push(ZFrame(1 << power, int3(0, 0, 0), 0));
+        stream_leaf = model->at(next_coords());
+    }
+
+    inline bool is_open() { return _open; }
+
+    inline float progress() {
+        return (float) index / stream_size;
+    }
+
+    IndexedLeaf next() {
+        Leaf prev_leaf = stream_leaf;
+        while (stream_leaf == prev_leaf) {
+            if (!is_open()) {
+                prev_leaf = stream_leaf;
+                index++;
+                break;
+            }
+            stream_leaf = model->at(next_coords());
+        }
+        return IndexedLeaf(prev_leaf, index - 1);
+    }
+};
+```
+
+### src/render/block.cpp
+```
+#pragma once
+#include <iostream>
+#include <fstream>
+
+struct Block {
+  private:
+    const size_t element_count;
+    char* _data = nullptr;
+    char* front = nullptr;
+    size_t front_index;
+
+  public:
+    static const std::size_t ELEMENT_SIZE = 4;
+    static const std::string EXTENSION;
+
+    Block(size_t element_count, bool full = false) :
+            element_count(element_count) {
+        const size_t size = element_count * ELEMENT_SIZE;
+        _data = new char[size];
+        if (full) { 
+            front = _data + size;
+            front_index = element_count;
+        } else {
+            front = _data;
+            front_index = 0;
+        }
+    }
+
+    ~Block() {
+        delete[] _data;
+    }
+
+    inline void read_from_stream(std::ifstream& stream, std::streamsize size) {
+        stream.read(_data, size);
+    }
+
+    void to_file(std::string filename) {
+        filename += EXTENSION;
+        std::ofstream stream(filename, std::ios::binary);
+        if (stream.good()) {
+            stream.write(_data, size() * ELEMENT_SIZE);
+            stream.write((char*) &front_index, sizeof(size_t));
+            std::cout << "File '" << filename << "' saved to disk.\n";
+        } else {
+            std::cout << "Could not open file '" << filename << ".\n";
+        }
+    }
+
+    template <typename T>
+    T& at(const int32_t index) const {
+        return *((T*) (_data + index * ELEMENT_SIZE));
+    }
+
+    template <typename T>
+    inline T& back() const {
+        return at<T>(size() - 1);
+    }
+
+    inline size_t size() const {
+        return front_index;
+    }
+
+    inline size_t byte_size() const {
+        return front_index * ELEMENT_SIZE;
+    }
+
+    inline size_t capacity() const {
+        return element_count;
+    }
+
+    inline char* data() const {
+        return _data;
+    }
+
+};
+
+const std::string Block::EXTENSION = ".zaz";
+
+Block* from_file(std::string filename) {
+    std::ifstream stream(filename, std::ios::binary | std::ios::ate);
+
+    std::streamsize size = stream.tellg();
+    stream.seekg(0, std::ios::beg);
+
+    Block* block = new Block(size / Block::ELEMENT_SIZE, true);
+    block->read_from_stream(stream, size);
+
+    std::cout << "File \"" << filename << "\" loaded from disk.\n";
+    return block;
+}
+```
+
+### src/render/leaf.cpp
+```
+#pragma once
+
+#include <cstdint>
+
+struct Leaf {
+    /* Leaf voxel. */
+
+    uint8_t rgba[4];
+
+    Leaf() = default;
+
+    Leaf(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+        : rgba{r, g, b, a} {}
+
+    Leaf(uint8_t v) : Leaf(v, v, v, v) {}
+
+    inline void set_color(unsigned char* pixel, const float lightness) const {
+        pixel[0] = rgba[0] * lightness;
+        pixel[1] = rgba[1] * lightness;
+        pixel[2] = rgba[2] * lightness;
+    }
+
+    inline bool valid() const {
+        return rgba[3] != 0x00;
+    }
+
+    inline bool operator!=(const Leaf& o) const {
+        return *((uint32_t*) rgba) != *((uint32_t*) o.rgba);
+    }
+
+    inline bool operator==(const Leaf& o) const {
+        return !operator!=(o);
+    }
+};
+```
+
+### src/render/main.cpp
+```
+#define SDL_MAIN_HANDLED
+#define GLEW_STATIC
+
+#include <fstream>
+#include <ctime>
+#include <iostream>
+#include <cmath>
+
+#include <glm/vec3.hpp>
+#include <glm/mat3x3.hpp>
+#include <glm/trigonometric.hpp>
+#include <glm/geometric.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+#include <GL/glew.h>
+
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_opengl.h>
+
+#include "ray.cpp"
+#include "block.cpp"
+
+unsigned int width, height, upscale;
+glm::vec3 camPosition(0.123, 0.213, -3.193);
+glm::mat3 camRotation(1.0);
+float crossSection = 1;
+
+const float camSpeed = 0.02;
+const float lookSpeed = 0.06;
+const float sectionSpeed = 0.002;
+float pitch = 0; // -89 to 89
+float yaw = 90; //  0  to 360
+
+std::string read_file(std::string filename) {
+    std::string content;
+    std::ifstream stream(filename, std::ios::in);
+
+    if(!stream.is_open()) {
+        std::cerr << "Could not read file "   << filename 
+                  << ". File does not exist." << std::endl;
+        return "";
+    }
+
+    std::string line = "";
+    while(!stream.eof()) {
+        std::getline(stream, line);
+        content.append(line + "\n");
+    }
+
+    return content;
+}
+
+bool compile_shader(GLuint shader, std::string filename) {
+    // Read shaders from file
+    std::string source_str = read_file(filename);
+    const char* source = source_str.c_str();
+
+    char buffer[512];
+    GLint status;
+
+    // Setup vertex shader
+    glShaderSource(shader, 1, &source, NULL);
+
+    glCompileShader(shader);
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+
+    glGetShaderInfoLog(shader, 512, NULL, buffer);
+
+    if (status != 1) {
+        std::cout << "Error compiling '" << filename << "':\n" << buffer;
+        return false;
+    }
+    return true;
+}
+
+void GLAPIENTRY glDebugOutput(
+        GLenum source,
+        GLenum type,
+        GLuint id,
+        GLenum severity,
+        GLsizei length,
+        const GLchar* message,
+        const void* userParam
+        ) {
+    //std::cout << message << std::endl;
+}
+
+void setup_tex(GLuint& texture, GLuint attachment, GLenum interp, GLenum format, GLenum internal) {
+    glGenTextures(1, &texture);
+    
+    glActiveTexture(GL_TEXTURE0 + attachment);
+    glBindTexture(GL_TEXTURE_2D, texture);
+
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        internal,
+        width  / upscale,
+        height / upscale,
+        0,
+        GL_RGBA,
+        format,
+        0
+    );
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, interp);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, interp);
+
+    glFramebufferTexture2D(
+        GL_FRAMEBUFFER,
+        GL_COLOR_ATTACHMENT0 + attachment,
+        GL_TEXTURE_2D,
+        texture,
+        0
+    );  
+}
+
+int main(int argc, char **argv) {
+    unsigned int arg = 1;
+    const std::string filename = arg >= argc ? "sponge.zaz" : argv[arg++];
+
+    Block* block = from_file(filename);
+
+    width = arg >= argc ? 1280 :  atoi(argv[arg++]);
+    height = arg >= argc ? 720 :  atoi(argv[arg++]);
+    upscale = arg >= argc ? 1 :  atoi(argv[arg++]);
+
+    SDL_Init(SDL_INIT_VIDEO);
+    atexit(SDL_Quit);
+
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+
+
+    SDL_Window* window = SDL_CreateWindow(
+            "zazen",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            width, height,
+            SDL_WINDOW_OPENGL
+    );
+
+    SDL_GLContext context = SDL_GL_CreateContext(window);
+    SDL_SetRelativeMouseMode(SDL_TRUE);
+
+    glewExperimental = GL_TRUE;
+    glewInit();
+
+    glEnable(GL_DEBUG_OUTPUT);
+    glDebugMessageCallback(glDebugOutput, 0);
+
+    float vertices[] = {
+        -1.0f, -1.0f, // Vertex 1 (X, Y)
+         3.0f, -1.0f, // Vertex 2 (X, Y)
+        -1.0f,  3.0f  // Vertex 3 (X, Y)
+    };
+
+    // Create Shader Storage Buffer Object that will store SVO data
+    GLuint ssbo;
+    glGenBuffers(1, &ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+    glBufferData(
+        GL_SHADER_STORAGE_BUFFER,
+        block->byte_size(),
+        block->data(),
+        GL_DYNAMIC_READ
+    );
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ssbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0); // Unbind
+
+    // Create vertex array object
+    GLuint vao;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+
+    // Create vertex buffer object
+    GLuint vbo;
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+    // Create intermediate frame buffer object
+    GLuint fbo;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+    GLenum drawBuffers[] = {GL_COLOR_ATTACHMENT0, GL_NONE, GL_NONE, GL_COLOR_ATTACHMENT3};
+    glDrawBuffers(4, drawBuffers);
+
+    // Attach textures to FBO
+    GLuint colorTexture;
+    GLuint positionTexture;
+
+    setup_tex(colorTexture, 0, GL_NEAREST, GL_UNSIGNED_BYTE, GL_RGBA);
+    setup_tex(positionTexture, 3, GL_NEAREST, GL_FLOAT, GL_RGBA32F);
+
+
+    if(glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        std::cout << "FBO incomplete!";
+        return 1;
+    }
+
+    // Allocate shaders and assemble program
+    GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
+    GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    GLuint lightShader = glCreateShader(GL_FRAGMENT_SHADER);
+
+    GLuint shaderProgram = glCreateProgram();
+    GLuint lightProgram = glCreateProgram();
+
+    glAttachShader(shaderProgram, vertexShader);
+    glAttachShader(shaderProgram, fragmentShader);
+
+    glAttachShader(lightProgram, vertexShader);
+    glAttachShader(lightProgram, lightShader);
+
+    if (
+        compile_shader(vertexShader, "svo.vert") &&
+        compile_shader(fragmentShader,  "svo.frag") &&
+        compile_shader(lightShader, "light.frag")
+    ) {
+        /*
+        glBindFragDataLocation(shaderProgram, 0, "outColor");
+        glBindFragDataLocation(shaderProgram, 1, "outPosition");
+        */
+        glLinkProgram(shaderProgram);
+        glLinkProgram(lightProgram);
+    }
+
+
+    // Specify position vertex attribute
+
+    glUseProgram(shaderProgram);
+    {
+        GLint posAttrib = glGetAttribLocation(shaderProgram, "position");
+        glVertexAttribPointer(posAttrib, 2, GL_FLOAT, GL_FALSE, 0, 0);
+        glEnableVertexAttribArray(posAttrib);
+    }
+
+    {
+        GLint viewportSize = glGetUniformLocation(shaderProgram, "viewportSize");
+        GLint modelSize = glGetUniformLocation(shaderProgram, "modelSize");
+        glUniform2ui(viewportSize, width / upscale, height / upscale);
+        glUniform1ui(modelSize, block->size());
+
+    }
+
+    GLint time = glGetUniformLocation(shaderProgram, "time");
+    GLint xSection = glGetUniformLocation(shaderProgram, "xSection");
+    GLint camPos = glGetUniformLocation(shaderProgram, "camPos");
+    GLint camRot = glGetUniformLocation(shaderProgram, "camRot");
+
+    glUseProgram(lightProgram);
+    {
+        GLint viewportSize = glGetUniformLocation(lightProgram, "viewportSize");
+        GLint upscaleLoc = glGetUniformLocation(lightProgram, "upscale");
+        GLint colorLoc = glGetUniformLocation(lightProgram, "colorTexture");
+        GLint positionLoc = glGetUniformLocation(lightProgram, "positionTexture");
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, colorTexture);
+        glUniform1i(colorLoc, 0);
+
+        glActiveTexture(GL_TEXTURE0 + 3);
+        glBindTexture(GL_TEXTURE_2D, positionTexture);
+        glUniform1i(positionLoc, 3);
+
+        glUniform2ui(viewportSize, width, height);
+        glUniform1ui(upscaleLoc, upscale);
+
+    }
+
+    glDisable(GL_DEPTH_TEST);
+
+    SDL_Event event;
+
+    bool running = true;
+    unsigned long long timer = clock();
+    glm::vec3 deltaCamPos(0);
+    float deltaSection = 0;
+
+    for (unsigned int tick = 0; running; tick++) {
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) {
+                running = false;
+            } else if (event.type == SDL_KEYDOWN) {
+                switch (event.key.keysym.sym) {
+                    case SDLK_UP:
+                    case SDLK_w:
+                        deltaCamPos.z = camSpeed;
+                        break;
+                    case SDLK_DOWN:
+                    case SDLK_s:
+                        deltaCamPos.z = -camSpeed;
+                        break;
+                    case SDLK_LEFT:
+                    case SDLK_a:
+                        deltaCamPos.x = -camSpeed;
+                        break;
+                    case SDLK_RIGHT:
+                    case SDLK_d:
+                        deltaCamPos.x = camSpeed;
+                        break;
+                    case SDLK_LSHIFT:
+                        deltaCamPos.y = -camSpeed;
+                        break;
+                    case SDLK_SPACE:
+                        deltaCamPos.y = camSpeed;
+                        break;
+                    case SDLK_q:
+                        deltaSection = -sectionSpeed;
+                        break;
+                    case SDLK_e:
+                        deltaSection = sectionSpeed;
+                        break;
+                }
+            } else if (event.type == SDL_KEYUP) {
+                switch (event.key.keysym.sym) {
+                    case SDLK_UP:
+                    case SDLK_DOWN:
+                    case SDLK_w:
+                    case SDLK_s:
+                        deltaCamPos.z = 0;
+                        break;
+                    case SDLK_LEFT:
+                    case SDLK_RIGHT:
+                    case SDLK_a:
+                    case SDLK_d:
+                        deltaCamPos.x = 0;
+                        break;
+                    case SDLK_LSHIFT:
+                    case SDLK_SPACE:
+                        deltaCamPos.y = 0;
+                        break;
+                    case SDLK_q:
+                    case SDLK_e:
+                        deltaSection = 0;
+                        break;
+                }
+            } else if (event.type == SDL_MOUSEMOTION) {
+                yaw += event.motion.xrel * lookSpeed;
+                pitch += event.motion.yrel * lookSpeed;
+                yaw = std::fmod(yaw, 360.0);
+                if (pitch < -89.0) pitch = -89.0;
+                if (pitch >  89.0) pitch =  89.0;
+                glm::vec3 pitchDir(
+                    0,
+                    sin(glm::radians(pitch)),
+                    cos(glm::radians(pitch))
+                );
+                pitchDir = glm::normalize(pitchDir);
+                glm::vec3 yawDir(
+                    cos(glm::radians(yaw)),
+                    0,
+                    sin(glm::radians(yaw))
+                );
+                yawDir = glm::normalize(yawDir);
+
+                camRotation = glm::lookAt(
+                    glm::vec3(0),
+                    yawDir,
+                    glm::vec3(0,1,0)
+                ) * glm::lookAt(
+                    glm::vec3(0),
+                    pitchDir,
+                    glm::vec3(0,1,0)
+                );
+            }
+        }
+
+        camPosition += camRotation * deltaCamPos;
+        crossSection += deltaSection;
+        if (crossSection < 0) crossSection = 0;
+        if (crossSection > 1) crossSection = 1;
+
+        // First pass
+        glUseProgram(shaderProgram);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+        glUniform1f(time, 0);
+        glUniform1f(xSection, crossSection);
+        glUniform3fv(camPos, 1, &camPosition[0]);
+        glUniformMatrix3fv(camRot, 1, GL_FALSE, &camRotation[0][0]);
+
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+
+        // Second pass
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+        glUseProgram(lightProgram);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+
+        SDL_GL_SwapWindow(window);
+
+        if (tick == 500 && false) {
+            timer = clock() - timer;
+            std::cout << timer << "\n";
+            std::cout << width << "X" << height << " " << upscale << "\n"
+            << "Average FPS of " << 500.0 / (float(timer) / CLOCKS_PER_SEC) << "\n\n";
+            break;
+        }
+
+    }
+
+    // Clean up and exit
+    SDL_GL_DeleteContext(context);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 0;
+}
+```
+
+### src/render/ray.cpp
+```
+#pragma once
+
+#include <limits>
+#include "vector.cpp"
+const float e = std::numeric_limits<float>::epsilon();
+struct Ray {
+    /* Simple container class for a ray. */
+    Vector origin, direction, negdir;
+
+    Ray() : origin(Vector()), direction(Vector()) {}
+
+    explicit Ray(const Vector& origin, Vector& direction) :
+        origin(origin), init_origin(origin) {
+            if (fabsf(direction.x) < e) direction.x = copysignf(e, direction.x);
+            if (fabsf(direction.y) < e) direction.y = copysignf(e, direction.y);
+            if (fabsf(direction.z) < e) direction.z = copysignf(e, direction.z);
+            this->direction = direction;
+        }
+
+    uint8_t octant_mask() {
+        uint8_t mask = 0;
+        if (direction.x >= 0) mask ^= 4;
+        if (direction.y >= 0) mask ^= 2;
+        if (direction.z >= 0) mask ^= 1;
+        return mask;
+    }
+
+    Ray march(float amount) {
+        Vector diff(direction.x * amount,
+                    direction.y * amount,
+                    direction.z * amount); 
+
+        origin += diff;
+        return *this;
+    }
+
+    inline float square_distance() {
+        return (origin - init_origin).squared();
+    }
+
+  private:
+    Vector init_origin;
+};
+```
+
+### src/render/render.cpp
+```
+#include <cmath>
+#include <new>
+#include <limits>
+#include <cstring>
+
+#include "leaf.cpp"
+#include "ray.cpp"
+#include "stack.cpp"
+#include "block.cpp"
+
+const unsigned int WIDTH = 1280;
+const unsigned int HEIGHT = 720;
+
+const float fov = 1.2; // 1 -> 90 degrees
+const Vector scale(1, 1, 1);
+Ray cam_center;
+
+Block* block = nullptr;
+
+void render(unsigned char* pixel, int i, int j) {
+    const float screen_x = (i * fov) / (float) WIDTH - 0.5;
+    const float screen_y = (j * fov) / (float) HEIGHT - 0.5;
+
+    /* Start traversing on root voxel. */
+    Vector direction(screen_x * scale.x, -1 * scale.y, screen_y * scale.z);
+
+    Ray ray(cam_center.origin, direction);
+
+    VoxelStack stack(20, 2.0);
+    stack.push_root(&block->back<Voxel>(), Vector(-1, -1, -1), ray);
+
+    pixel[0] = 0x33;
+    pixel[1] = 0x33;
+    pixel[2] = 0x00;
+
+    while (true) {
+
+        const uint8_t oct = stack->octant;
+        bool valid = (stack->voxel->valid >> oct) & 1;
+        bool leaf = (stack->voxel->leaf >> oct) & 1;
+        if (leaf) {
+            /* Ray origin is inside leaf voxel, render leaf. */
+            Leaf* leaf = &block->at<Leaf>(stack->voxel->address_of(oct));
+            float lightness = 1/(ray.square_distance() + 1);
+            leaf->set_color(pixel, lightness);
+            break;
+        } 
+
+        if (valid) {
+            /* Go a level deeper. */
+            stack.push(&block->at<Voxel>(stack->voxel->address_of(oct)), ray);
+
+            pixel[1] += (0xff - pixel[1]) / 64;
+
+        } else {
+            /* Ray origin is in invalid voxel, cast ray until it hits next
+             * voxel. 
+             */
+            Vector child_corner(stack->corner);
+
+            float child_size = stack.box_size * 0.5;
+            child_corner.adjust_corner(child_size, oct);
+            uint8_t mask = ray.octant_mask();
+
+            Vector mirror_origin = ray.origin.mirror(mask);
+            Vector mirror_direction = ray.direction.mirror(mask);
+            Vector mirror_corner = child_corner.mirror(mask);
+            mirror_corner.adjust_corner(-child_size, mask);
+
+            float tx = (mirror_corner.x - mirror_origin.x) / mirror_direction.x;
+            float ty = (mirror_corner.y - mirror_origin.y) / mirror_direction.y;
+            float tz = (mirror_corner.z - mirror_origin.z) / mirror_direction.z;
+            float t = std::numeric_limits<float>::infinity();
+
+            /* Detect which face hit. */
+            uint8_t hit_face = 0;
+
+            /* t is the smallest positive value of {tx, ty, tz} */
+            if (tx > 0) {
+                t = tx;
+                hit_face = 4;
+            }
+            if (ty > 0 && ty < t) {
+                t = ty;
+                hit_face = 2;
+            }
+            if (tz > 0 && tz < t) {
+                t = tz;
+                hit_face = 1;
+            }
+
+            /* Ray will start next step at the point of this intersection */
+            ray.march(t);
+
+            while (hit_face & ~(stack->octant ^ mask) && !stack.empty()) {
+                /* Hit face is at this voxel's boundary, search parent */
+                stack.pop();
+            }
+
+            if (stack.empty()) {
+                /* Ray is outside root octree. */
+
+                // EMPTY STACK AFTER LOOP - BLUE
+                pixel[2] = 0xc0;
+                break;
+            }
+            /* Loop end: found ancestral voxel with space on the hit axis.
+             * Transfer to sibling voxel, changing on the axis of the face
+             * that was hit.
+             */
+            stack->octant ^= hit_face;
+        }
+    }
+}
+```
+
+### src/render/stack.cpp
+```
+#pragma once
+
+#include "voxel.cpp"
+#include "vector.cpp"
+
+struct StackEntry {
+    Voxel* voxel;   // pointer to voxel in Block
+    uint8_t octant; // octant ray origin is in this voxel
+    Vector corner;  // inferior corner
+};
+
+struct VoxelStack {
+    StackEntry* entries;
+    size_t top;
+    float box_size;
+
+    explicit VoxelStack(const size_t size, const float init_box_size) {
+        entries = new StackEntry[size];
+        top = 0;
+        box_size = init_box_size;
+    }
+
+    ~VoxelStack() {
+        delete[] entries;
+    }
+
+    void push(Voxel* voxel, Ray ray) {
+        entries[top] = {voxel, 0, peek().corner};
+        box_size *= 0.5;
+        entries[top].corner.adjust_corner(box_size, peek().octant);
+        top++;
+        peek().octant = get_octant(ray);
+    }
+
+    void push_root(Voxel* voxel, Vector corner, Ray ray) {
+        entries[top] = {voxel, 0, corner};
+        top++;
+        peek().octant = get_octant(ray);
+    }
+
+    inline void pop() {
+        box_size *= 2;
+        top--;
+    }
+
+    inline StackEntry* operator->() const {
+        return entries + (top - 1);
+    }
+
+    inline StackEntry& peek() const {
+        return *operator->();
+    }
+
+    inline bool empty() {
+        return !top;
+    }
+
+    inline size_t size() {
+        return top;
+    }
+
+    inline uint8_t get_octant (const Ray& ray) const {
+        /* Returns which octant the vector resides inside box. */
+        uint8_t octant = 0;
+        const float oct_size = box_size * 0.5;
+        const Vector& corner = peek().corner;
+
+        if (ray.origin.x > corner.x + oct_size) octant ^= 4;
+        if (ray.origin.y > corner.y + oct_size) octant ^= 2;
+        if (ray.origin.z > corner.z + oct_size) octant ^= 1;
+        return octant;
+    }
+};
+```
+
+### src/render/vector.cpp
+```
+#pragma once
+
+#include <cstdint>
+#include <cmath>
+
+struct Vector {
+    /* Simple container struct for a 3D vector. */
+    float x, y, z;
+    Vector() = default;
+    explicit Vector(float x, float y, float z) :
+        x(x), y(y), z(z) {}
+
+    Vector(const Vector& v) : Vector(v.x, v.y, v.z) {}
+
+    inline float squared() const {
+        return x*x + y*y + z*z;
+    }
+
+    Vector& normalized() {
+        float invmag = 1 / sqrtf(squared());
+        x *= invmag;
+        y *= invmag;
+        z *= invmag;
+        return *this;
+    }
+
+    Vector mirror(uint8_t mask) const {
+        float mirror_x = mask & 4 ? -x : x;
+        float mirror_y = mask & 2 ? -y : y;
+        float mirror_z = mask & 1 ? -z : z;
+        return Vector(mirror_x, mirror_y, mirror_z);
+    }
+
+    Vector operator+(const Vector& v) const {
+        return Vector(v.x + x, v.y + y, v.z + z);
+    }
+
+    Vector operator-(const Vector& v) const {
+        return Vector(v.x - x, v.y - y, v.z - z);
+    }
+
+    Vector operator*(const float scalar) const {
+        return Vector(x * scalar, y * scalar, z * scalar);
+    }
+
+    Vector& operator+=(const Vector& v) {
+        x += v.x;
+        y += v.y;
+        z += v.z;
+        return *this;
+    }
+
+    Vector& operator-=(const Vector& v) {
+        x -= v.x;
+        y -= v.y;
+        z -= v.z;
+        return *this;
+    }
+
+
+
+    void adjust_corner(float size, uint8_t octant) {
+        if (octant & 4) x += size;
+        if (octant & 2) y += size;
+        if (octant & 1) z += size;
+    }
+};
+```
+
+### src/render/voxel.cpp
+```
+#pragma once
+
+#include <cstdint>
+
+struct Voxel {
+    /* Non-leaf voxel. */
+
+    uint32_t child;
+    uint8_t valid; // 8 flags of whether children are visible
+    uint8_t leaf;  // 8 flags of whether children are leaves
+
+    int32_t address_of(uint8_t octant) {
+        /* Get address in block of child octant. */
+        uint8_t mask = ~(0xff << octant);
+        return child + __builtin_popcount(mask & valid);
+    }
+
+};
+```
+
+### src/render/shaders/light.frag
+```
+#version 430 core
+
+out vec4 outColor;
+in vec4 gl_FragCoord;
+uniform uvec2 viewportSize;
+uniform uint upscale;
+layout (binding = 0) uniform sampler2D colorTexture;
+layout (binding = 3) uniform sampler2D positionTexture;
+
+void main() {
+    vec2 verts[3];
+    verts[0] = gl_FragCoord.xy / float(upscale);
+
+
+    bool lowerTri = fract(verts[0]).x > fract(verts[0]).y;
+    vec2 triOrientation = lowerTri ? vec2(1., 0.) : vec2(0., 1.);
+
+    verts[lowerTri?1:2] = verts[0] + vec2(1.);
+    verts[lowerTri?2:1] = verts[0] + triOrientation;
+
+    vec4 colors[3];
+    vec4 pos[3];
+
+    for (uint i = 0; i < 3; i++) {
+        verts[i] = (verts[i] * float(upscale)) / viewportSize;
+        colors[i] = texture(colorTexture, verts[i]);
+        pos[i] = texture(positionTexture, verts[i]);
+        if (pos[i].w == 0.0) {
+            /* Background color */
+            vec3 BG_COLORS[] = {
+                vec3(0.749, 0.784, 0.843),
+                vec3(0.886, 0.824, 0.824),
+                vec3(0.89, 0.886, 0.706),
+                vec3(0.635, 0.71, 0.624),
+            };
+            outColor = vec4(
+                mix(
+                    mix(BG_COLORS[0], BG_COLORS[1], pos[i].x),
+                    mix(BG_COLORS[1], BG_COLORS[2], pos[i].y),
+                    pos[i].z
+                ),
+                1.0
+            );
+            return;
+        }
+        if (all(equal(pos[0], pos[1])) && all(equal(pos[1], pos[2]))) {
+            /* Positions are equal, probably inside a leaf */
+            outColor = colors[0];
+            return;
+        }
+    }
+
+    vec3 normal = cross(
+        pos[2].xyz - pos[0].xyz,
+        pos[1].xyz - pos[0].xyz
+        );
+    normal = normalize(normal);
+
+    vec3 lampPos = vec3(0., 1., 0.);
+    vec3 lightDir = normalize(pos[0].xyz - lampPos);
+    float dist = length(pos[0].xyz);
+    float lightness = dot(lightDir, normal) * 0.6 * 1./(dist*dist) + 0.4;
+
+    outColor = colors[0] * 0.5 + colors[1] * 0.25 + colors[2] * 0.25 * lightness;
+}
+```
+
+### src/render/shaders/svo.frag
+```
+#version 430 core
+
+uniform uvec2 viewportSize;
+uniform vec3 camPos;
+uniform float time;
+uniform uint modelSize;
+uniform mat3 camRot;
+uniform float xSection;
+in vec4 gl_FragCoord;
+
+layout (location = 0) out vec4 outColor;
+layout (location = 3) out vec4 outPosition;
+
+layout (binding = 2, std430) buffer svo {
+    uint[] data;
+};
+
+uint whichOctant(in vec3 pos, in vec3 corner, in float size) {
+    /* Which of the eight octants does pos reside in the box (corner, size)? */
+    uint oct = 0;
+    float octSize = size / 2.;
+
+    if (pos.x > corner.x + octSize) oct ^= 4;
+    if (pos.y > corner.y + octSize) oct ^= 2;
+    if (pos.z > corner.z + octSize) oct ^= 1;
+    return oct;
+}
+
+vec3 octVec(in uint octant) {
+    /* Each resulting vector component is either one or zero depending on 
+     * octant's bits. */
+    vec3 vec = vec3(0.);
+    if (bool(octant & 4)) vec.x = 1.;
+    if (bool(octant & 2)) vec.y = 1.;
+    if (bool(octant & 1)) vec.z = 1.;
+    return vec;
+}
+
+void voxel(uint block_i, out uint child, out uint leaf, out uint valid) {
+    child = data[block_i];
+    leaf = data[block_i + 1] >> 8;
+    valid = data[block_i + 1] & 0xff;
+}
+
+vec4 leafColor(in uint block_i) {
+    uint rgba = data[block_i];
+    return vec4(
+        float(rgba & 0xff) / 256.,
+        float((rgba >> 8) & 0xff) / 256.,
+        float((rgba >> 16) & 0xff) / 256.,
+        float((rgba >> 24) & 0xff) / 256.
+    );
+}
+
+uint addressOf(in uint child, in uint leaf, in uint valid, in uint octant) {
+    /* Get address of a specific child inside a voxel. */
+    uint mask = ~(~0 << octant);
+    return child + bitCount(mask & valid) * 2 - bitCount(mask & leaf);
+}
+    
+void main() {
+    /* Initialize ray. */
+    float fov = 0.6;
+    vec2 uv = (gl_FragCoord.xy * 2. / viewportSize.y)  - vec2(1.);
+    vec3 direction = camRot * vec3(uv * fov, 1.);
+    vec3 position = camPos;
+
+    /* Set up stack. */
+    uint size = 1; // size of stack
+    float boxSize = 2.0; // size of box ray is currently in
+
+    /* Stack attributes */
+    uint child[10];
+    uint leaf[10];
+    uint valid[10];
+    vec3 corner[10];
+    uint octant[10];
+
+    /* Set root stack entry */
+    voxel(modelSize - 2, child[0], leaf[0], valid[0]);
+    corner[0] = vec3(-1);
+
+    /* Assume ray direction does not change during execution 
+     * (no refraction / reflection) 
+     */
+    uint mask = 0;
+    vec3 invdir = 1. / direction;
+    if (invdir.x >= 0) mask ^= 4;
+    if (invdir.y >= 0) mask ^= 2;
+    if (invdir.z >= 0) mask ^= 1;
+    vec3 maskVec = octVec(mask);
+    vec3 mirror = vec3(1.) - maskVec * 2.;
+
+    float cutSize = boxSize * xSection;
+    if (any(lessThan(position, corner[0]))
+     || any(greaterThan(position, corner[0] + vec3(cutSize)))) {
+        /* Before the first iteration, if the camera is outside the scenes's
+         * bounding box, the traversal starts at the intersection between the
+         * ray and the box.
+         */
+        vec3 lowCorner = corner[0] + cutSize * (vec3(1.) - maskVec);
+        vec3 highCorner = corner[0] + cutSize * maskVec;
+        vec3 tMin = (lowCorner  - position) * invdir;
+        vec3 tMax = (highCorner - position) * invdir;
+
+        if (any(greaterThan(tMin, tMax.zxy)) 
+         || any(greaterThan(tMin, tMax.yzx))) {
+            /* No intersection */
+            outColor = vec4(0.);
+            outPosition = vec4(0.);
+            return;
+        }
+
+        float t = max(max(tMin.x, tMin.y), tMin.z);
+        position += direction * t;
+
+        if (t < 0.) {
+            outColor = vec4(0.);
+            outPosition = vec4(0.);
+            return;
+        }
+    }
+
+    octant[0] = whichOctant(position, vec3(-1), boxSize);
+
+    while (true) {
+        uint oct = octant[size-1];
+        if (bool((leaf[size-1] >> oct) & 1)) {
+            /* Ray origin is inside leaf voxel, render leaf. */
+            outColor = leafColor(
+                addressOf(
+                    child[size-1],
+                    leaf [size-1],
+                    valid[size-1],
+                    oct
+                )
+            );
+            outPosition = vec4(position, 1.0);
+            return;
+        } 
+
+        if (bool((valid[size-1] >> oct) & 1)) {
+            /* Go a level deeper. */
+
+            // PUSH
+            voxel(
+                addressOf(
+                    child[size-1],
+                    leaf [size-1],
+                    valid[size-1],
+                    oct
+                ),
+                child[size],
+                leaf[size],
+                valid[size]
+            );
+
+            boxSize *= 0.5;
+            corner[size] = corner[size-1] + boxSize * octVec(oct);
+            octant[size] = whichOctant(
+                position,
+                corner[size],
+                boxSize
+            );
+
+            size++;
+
+        } else {
+            /* Ray origin is in invalid voxel, cast ray until it hits the next
+             * voxel. 
+             */
+
+            float childSize = boxSize * 0.5;
+            vec3 childCorner = corner[size-1] + childSize * octVec(oct);
+
+            vec3 adjustedCorner = childCorner - maskVec * childSize * mirror;
+
+            vec3 t = (adjustedCorner - position) * invdir;
+            float amount = 99999999999.; // Distance ray will traverse
+
+            /* Detect which face hit. */
+            uint hitFace = 0;
+
+            /* amount will be the minimum positive component of t. */
+
+            if (t.x > 0.) {
+                amount = t.x;
+                hitFace = 4;
+            }
+            if (t.y > 0. && t.y < amount) {
+                amount = t.y;
+                hitFace = 2;
+            }
+            if (t.z > 0. && t.z < amount) {
+                amount = t.z;
+                hitFace = 1;
+            }
+
+            /* Ray will start next step at the point of this intersection. */
+            position += direction * amount;
+
+            while (
+                bool(hitFace & ~(octant[size-1] ^ mask)) && 
+                size > 0
+            ) {
+                /* Hit face is at this voxel's boundary, search parent */
+
+                // POP
+                size--;
+                boxSize *= 2.;
+            }
+
+            if (size == 0) {
+                /* Ray is outside root octree. */
+                outColor = vec4(0.0);
+                outPosition = vec4(direction, 0.);
+                return;
+            }
+            /* Loop end: found ancestral voxel with space on the hit axis.
+             * Transfer to sibling voxel, changing on the axis of the face
+             * that was hit.
+             */
+            octant[size-1] ^= hitFace;
+        }
+    }
+}
+```
+
+### src/render/shaders/svo.vert
+```
+#version 430 core
+in vec2 position;
+
+void main() {
+    gl_Position = vec4(position, 0.0, 1.0);
+}
+```

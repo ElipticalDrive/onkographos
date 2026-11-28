@@ -1,0 +1,143 @@
+Legacy ID: SLAM-2 (was sub-phase 6.I; proposed). Chunked extract-and-stitch or a non-Open3D mesher, to get past BUG-053 (marching cubes crashes above ~260k blocks) so Detailed can run finer than 10 mm voxels on room-sized captures. Detai...
+
+Lift the mesh-extraction ceiling · Issue #111 · hellosamblack/lidar-roomscanner · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Lift the mesh-extraction ceiling #111
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Lift the mesh-extraction ceiling#111
+Copy link
+Labels
+area/host-slamhost/roomscan SLAM pipelinehost/roomscan SLAM pipelinepriority/laterParked/proposed — revisit after the now/next tiers clearParked/proposed — revisit after the now/next tiers clearstatus/in-progressA session is actively working this issue (set by session-start, cleared by session-end)A session is actively working this issue (set by session-start, cleared by session-end)work-itemForward-looking work item migrated from ROADMAP.md's Work-item registerForward-looking work item migrated from ROADMAP.md's Work-item register
+Description
+hellosamblack
+opened on Aug 11, 2026
+Issue body actions
+Legacy ID: SLAM-2
+(was sub-phase 6.I; proposed). Chunked
+extract-and-stitch or a non-Open3D mesher, to get past BUG-053 (marching cubes crashes above
+~260k blocks) so Detailed can run finer than 10 mm voxels on room-sized captures. Detail: "Sub-phase 6.I".
+Migrated from ROADMAP.md#work-item-register. Full legacy-ID -> issue mapping: https://github.com/hellosamblack/lidar-roomscanner/blob/main/docs/issue-migration-map.md
+Activity
+hellosamblack
+added
+work-itemForward-looking work item migrated from ROADMAP.md's Work-item registerForward-looking work item migrated from ROADMAP.md's Work-item register
+area/host-slamhost/roomscan SLAM pipelinehost/roomscan SLAM pipeline
+on Aug 11, 2026
+hellosamblack
+changed the title [-]SLAM-2: Lift the mesh-extraction ceiling[/-] [+]Lift the mesh-extraction ceiling[/+] on Aug 11, 2026
+hellosamblack
+added
+priority/laterParked/proposed — revisit after the now/next tiers clearParked/proposed — revisit after the now/next tiers clear
+on Aug 11, 2026
+hellosamblack commented on Aug 12, 2026
+hellosamblack
+on Aug 12, 2026
+OwnerAuthor
+More actions
+Implementation plan
+Design
+Keep Open3D’s existing marching-cubes implementation, but run it against spatially partitioned temporary VoxelBlockGrids:
+Read active block coordinates from the source TSDF.
+Partition them into fixed spatial chunks with a one-block halo.
+Copy only each chunk’s TSDF, weight, and color attributes into a temporary CPU grid.
+Extract each chunk below the 250k-block crash ceiling.
+Keep triangles owned by that chunk, concatenate the results, weld boundary vertices, remove duplicate/degenerate triangles, and recompute normals.
+This preserves current Open3D geometry and color semantics without adding another meshing dependency.
+Code changes
+Add host/src/roomscan/slam/chunked_mesher.py.
+Snapshot active block keys once.
+Transfer voxel attributes to CPU one chunk at a time.
+Guarantee every temporary grid remains safely below _MAX_SAFE_EXTRACT_BLOCKS.
+Support negative block coordinates and sparse rooms.
+Return the existing host-resident o3d.t.geometry.TriangleMesh type.
+Update host/src/roomscan/slam/tsdf.py.
+Split extraction-limit failures from integration/rehash capacity failures.
+Add an extraction strategy to TsdfMap.mesh():
+open3d: existing guarded behavior.
+auto: existing extractor below the ceiling, chunked extraction above it.
+Leave point_cloud() unchanged unless a demonstrated caller also needs chunking.
+Preserve the current default so live SLAM cannot unexpectedly start a long CPU extraction.
+Update host/src/roomscan/slam/mapper.py.
+Forward the selected mesh strategy to TsdfMap.
+Update host/src/roomscan/slam/showcase.py.
+Continue using fast Open3D extraction for intermediate Detailed previews.
+Once the map exceeds the ceiling, stop attempting intermediate extraction, retain the last good preview, and continue integrating frames.
+Use auto for the final mesh so the build completes through the chunked path.
+Keep integration/rehash failures terminal and preserve the “never commit a partial sidecar” behavior.
+Update host/src/roomscan/slam/cli.py.
+Use automatic chunked extraction for the CLI’s final mesh output as well.
+Re-enable the 5 mm Detailed preset only after the full-room validation gate passes.
+Measure the complete 5 mm active-block count first.
+Preallocate sufficient GPU capacity to avoid Open3D’s destructive rehash path when it fits safely.
+Otherwise expose a Detailed-only CPU-device setting; chunked extraction fixes meshing capacity, but it must not conceal a separate TSDF integration-capacity failure.
+Tests
+Partitioning tests covering negative coordinates, empty chunks, halos, and the per-chunk block ceiling.
+Small-map parity test comparing standard and chunked extraction bounds, colors, and surface distance.
+Plane/corner fixtures crossing chunk boundaries, asserting no cracks, duplicate triangles, or degenerate faces.
+Lower the ceiling in a unit test so a small synthetic map exercises the chunked fallback without allocating 250k blocks.
+Verify PostProcessWorker continues processing after intermediate extraction reaches the ceiling and performs one final chunked extraction.
+Verify live SlamWorker retains its current last-good-mesh freeze behavior.
+Verify a failed final extraction still produces no PLY/TUM/manifest commit.
+Full-room acceptance gate
+Run DebugCapB1.bin at 5 mm and require:
+all 4,808 frames are processed;
+active blocks exceed the old 250k ceiling;
+no segfault, CUDA illegal access, or unsafe rehash;
+a non-empty, reloadable PLY and current manifest are written;
+chunk peak memory remains bounded independently of total map size;
+seams are absent under boundary-edge and nearest-surface checks;
+a prefix below 250k blocks agrees with normal Open3D extraction within a small fraction of one voxel.
+The 10 mm default should remain in place until this gate passes; then changing it back to 5 mm will intentionally invalidate older Detailed sidecars through the existing preset fingerprint.
+hellosamblack commented on Aug 19, 2026
+hellosamblack
+on Aug 19, 2026
+OwnerAuthor
+More actions
+Design spec written (2026-08-19, Refs #206): docs/superpowers/specs/2026-08-19-slam-mesh-ceiling-design.md.
+Decision order: (1) re-bisect on the newest Open3D first — an upstream fix voids the whole issue; (2) build the still-missing subprocess bisector as an MCP tool (the failure mode is a segfault, so an in-process harness dies with it); (3) chunked extract-and-stitch as the primary fix (keeps Open3D and all downstream consumers, makes extraction incremental — also attacks BUG-052's per-extraction cost); (4) 10 mm-tracking / 5 mm-map voxel decoupling rides along; (5) nvblox (#114) and per-node meshing (#150) are escalation paths only, not parallel work.
+Headline gate: DebugCapB1.bin at 5 mm produces a complete mesh (today impossible past frame 2625). Correctness gate framed so a null can't be explained away: zero boundary-edge-count delta along partition planes after welding. Kill criteria: newest-Open3D success closes the issue with the bisect evidence; the chunked path dies on visible seams or if its blocking cost (via slam_stall_profile tick_share) exceeds whole-grid extraction; 5 mm reconstruction dies if splat_compare shows no quality gain over 10 mm.
+hellosamblack
+added a commit that references this issue on Aug 20, 2026
+docs(host-slam,host-offline): design specs for the priority/later res…
+...
+589172b
+hellosamblack
+added
+status/in-progressA session is actively working this issue (set by session-start, cleared by session-end)A session is actively working this issue (set by session-start, cleared by session-end)
+on Sep 2, 2026
+hellosamblack commented on Sep 2, 2026
+hellosamblack
+on Sep 2, 2026
+OwnerAuthor
+More actions
+Session start — fleet run fleet-20260902-2137, wave 2 (orchestrator: Claude Fable 5.1; worker: fleet-worker in its own worktree)
+Scope this wave: first slice of docs/superpowers/specs/2026-08-19-slam-mesh-ceiling-design.md: a standalone chunked extractor — block partitioning with halo + seam weld — in a new host/src/roomscan/slam/chunked_mesher.py, with the partitioning / parity / seam unit tests the spec lists in a new host/tests/test_chunked_mesher.py. Wiring into tsdf.py::mesh() only if it can be done without touching mapper.py (owned by #150 this wave); mapper.py/cli.py/showcase.py integration is deferred.
+Files in scope: host/src/roomscan/slam/chunked_mesher.py (new), host/tests/test_chunked_mesher.py (new), host/src/roomscan/slam/tsdf.py (extraction path only). Not mapper.py, odometry.py, config.py (wave-1 owned).
+Worker commits Refs #111 on branch issue-111; the orchestrator lands it and applies doc deltas at the end of the run.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area/host-slamhost/roomscan SLAM pipelinehost/roomscan SLAM pipelinepriority/laterParked/proposed — revisit after the now/next tiers clearParked/proposed — revisit after the now/next tiers clearstatus/in-progressA session is actively working this issue (set by session-start, cleared by session-end)A session is actively working this issue (set by session-start, cleared by session-end)work-itemForward-looking work item migrated from ROADMAP.md's Work-item registerForward-looking work item migrated from ROADMAP.md's Work-item register
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

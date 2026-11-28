@@ -1,0 +1,133 @@
+# Largest Contour Segmentation
+
+Also called: Local Isosurface Extraction, Peak-Enclosing Surface Extraction
+
+## Overview
+Largest Contour Segmentation is a region-growing technique that extracts maximal contours containing exactly one local maximum, primarily used for detecting structures like cell organelles where peaks are more important than specific isovalues [S1]. It differs from general flexible isosurfaces by constraining each contour to a single local maximum, and from the original definition by Manders et al. by generating smaller surfaces if the isosurface splits before joining another surface [S1].
+
+## How it works
+**Inputs:** A scalar field $f$ defined on a grid, and a pre-computed contour tree of the field [S1].
+**Outputs:** A set of disjoint isosurfaces, each enclosing exactly one local maximum [S1].
+
+**Data Structures:**
+*   **Scalar Field:** A 3D grid of values.
+*   **Contour Tree:** A graph structure representing the topological evolution of contours as the isovalue varies, composed of superarcs and supernodes [S1].
+*   **Local Maxima:** Identified peaks in the scalar field.
+*   **Display Lists:** Each extracted contour is stored in a separate display list for efficient rendering [S1].
+
+**Steps:**
+1.  **Identify Local Maxima:** Locate all local maxima in the scalar field. These serve as the seeds for the segmentation [S1].
+2.  **Initialize Surfaces:** Enclose each local maximum in a small initial surface. This forms the basis for the region growing process [S1].
+3.  **Region Growing:** Grow the surface independently from each local maximum. The growth proceeds by propagating along the isosurface [S1].
+    *   The propagation is modified to strictly follow one surface per cell, rather than propagating to all adjacent cubes [S1].
+    *   Growth terminates when a saddle point is detected [S1].
+4.  **Handle Splitting:** If the surface developing downwards from a local maximum splits into two surfaces before joining another surface, the resulting local isosurface is smaller than the "largest contour" defined by Manders et al. [S1]. Otherwise, the surfaces are identical to the largest contour segmentation [S1].
+5.  **Layout (Optional):** To visualize the contour tree in a contour spectrum, assign x-coordinates by taking the sum of the vertex coordinates in three dimensions: $x = x_v + y_v + z_v$. Allow user adjustment of horizontal positions for clarity [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def largest_contour_segmentation(scalar_field, contour_tree):
+    """
+    Extracts maximal contours containing exactly one local maximum.
+    
+    Args:
+        scalar_field: 3D array of scalar values.
+        contour_tree: Pre-computed contour tree structure.
+        
+    Returns:
+        list of surfaces: Each surface is a mesh enclosing one local maximum.
+    """
+    # Step 1: Identify local maxima
+    local_maxima = find_local_maxima(scalar_field)
+    
+    surfaces = []
+    
+    for peak in local_maxima:
+        # Step 2: Initialize surface around the peak
+        # Create a small initial surface enclosing the peak
+        current_surface = initialize_surface_around_peak(peak, scalar_field)
+        
+        # Step 3: Region growing
+        # Grow the surface until a saddle point is detected
+        # Propagate strictly along one surface per cell
+        while not is_saddle_point(current_surface.boundary, scalar_field):
+            next_boundary = propagate_surface(current_surface.boundary, scalar_field)
+            current_surface.boundary = next_boundary
+            
+        # Step 4: Finalize surface
+        # If the surface split, it remains smaller than Manders' largest contour
+        # Otherwise, it matches the largest contour
+        surfaces.append(current_surface)
+        
+    return surfaces
+
+def find_local_maxima(scalar_field):
+    """
+    Finds all local maxima in the scalar field.
+    A point is a local maximum if its value is greater than all its neighbors.
+    """
+    maxima = []
+    # Implementation depends on grid topology (6-connectivity or 26-connectivity)
+    # [G] Standard neighbor comparison
+    for voxel in scalar_field:
+        if voxel.value > all_neighbors(voxel).value:
+            maxima.append(voxel)
+    return maxima
+
+def is_saddle_point(boundary, scalar_field):
+    """
+    Checks if the current boundary of the surface corresponds to a saddle point.
+    A saddle point is a critical point that is neither a maximum nor a minimum.
+    """
+    # [G] Check if the boundary vertices correspond to critical points of index 1 (saddles)
+    # This requires access to the gradient or Hessian, or the contour tree structure
+    return boundary.contains_saddle_point()
+
+def propagate_surface(boundary, scalar_field):
+    """
+    Propagates the surface boundary one step.
+    Modified to propagate strictly along one surface per cell.
+    """
+    # [G] Use the contour tree or gradient flow to determine the next boundary
+    # Ensure only one surface is propagated per cell
+    new_boundary = []
+    for edge in boundary:
+        next_edge = find_next_edge_along_surface(edge, scalar_field)
+        if next_edge:
+            new_boundary.append(next_edge)
+    return new_boundary
+```
+
+**Parameters:**
+*   **Connectivity:** Not explicitly defined in the sources, but standard 6-connectivity or 26-connectivity is implied for neighbor checks [G].
+*   **User Adjustment:** Horizontal position of vertices can be adjusted for clarity in visualization [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Splitting Surfaces:** If a surface splits before joining another, the resulting surface is smaller than the "largest contour" definition by Manders et al. [S1].
+*   **Performance:** Frame rates depend on the number of contours and the complexity of the contour tree. Noisy sampled images have larger contour trees and longer path lengths, reducing performance [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given, but depends on the size of the contour tree and the number of local maxima. The contour tree construction is a prerequisite [S1].
+*   **Memory Complexity:** Not explicitly given, but requires storage for the scalar field, contour tree, and display lists for each contour [S1].
+*   **Measured Performance:**
+    *   Hardware: Dual 1 GHz Macintosh, 1 GB RAM, 64 MB GeForce video card, Mac OS X 10.1.5 [S1].
+    *   3dhead (7,143,424 samples): Initial frame rate ~0.5 Hz, peak ~1.5 Hz after deleting surfaces [S1].
+    *   3dknee (8,323,072 samples): Frame rate range 0.5 - 1.64 Hz [S1].
+*   **Strengths:**
+    *   Effective for detecting structures where peaks are more important than specific isovalues (e.g., cell organelles) [S1].
+    *   Allows interactive manipulation of contours using display lists [S1].
+*   **Limitations:**
+    *   Performance can be low on large, noisy datasets with complex contour trees [S1].
+    *   The method generates smaller surfaces than Manders' largest contour segmentation if splitting occurs [S1].
+*   **When to Use:** When the goal is to isolate individual peaks and their immediate surrounding structures, and when the topological relationship of contours is important [S1].
+*   **When Not to Use:** When specific isovalues are more important than peaks, or when the "largest possible" contour around a peak is required regardless of splitting [S1].
+
+## Background
+*   **Origin:** The technique is based on the work of Manders et al., who used largest contour segmentation to detect organelles in individual cells [S1].
+*   **Development:** It is presented as a special case of flexible isosurfaces in the context of exploratory visualization using topology [S1].
+*   **Applications:** Cell biology (detecting organelles), and other fields where peaks are significant features [S1].
+
+## Sources
+[S1] Path Seeds and Flexible Isosurfaces Using Topology for Exploratory Visualization, https://doi.org/10.2312/vissym/vissym03/049-058, fetched 2026-10-30

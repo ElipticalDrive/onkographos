@@ -1,0 +1,120 @@
+--- v001.md
++++ v002.md
+@@ -1,7 +1,5 @@
+ # SRDF-SDF Consistency Loss
+-
+-
+ ## Overview
+-The SRDF-SDF Consistency Loss enforces sign consistency between a predicted Signed Ray Distance Function (SRDF) and a Signed Distance Function (SDF), ensuring both indicate the same spatial occupancy (positive outside, negative inside) [S1]. It addresses the issue where separate network branches predict SRDF and SDF without guaranteeing aligned signs [S1]. Unlike the [Density Consistency Loss](17213-density-consistency-loss.md), which focuses on density field alignment, this method operates directly on the geometric distance fields to penalize sign discrepancies [S1].
++The SRDF-SDF Consistency Loss enforces sign consistency between a predicted Signed Ray Distance Function (SRDF) and a Signed Distance Function (SDF), ensuring both indicate the same spatial occupancy (positive outside, negative inside) [S1]. It addresses the issue where separate network branches predict SRDF and SDF without guaranteeing aligned signs [S1]. The method uses a sigmoid function to approximate the non-differentiable sign function, enabling gradient-based optimization of the geometric fields [S1].
+ 
+ ## How it works
+@@ -11,11 +9,11 @@
+ 
+ **Data Structures:**
+-- $\tilde{d}_{\Omega}$: Tensor of SRDF values.
+-- $d_{\Omega}$: Tensor of SDF values.
+-- $M_{con}$: Binary mask tensor where $M_{con} = 1$ if $\tilde{d}_{\Omega} \cdot d_{\Omega} < 0$, else $0$.
++- $\tilde{d}_{\Omega}$: Tensor or array of SRDF values.
++- $d_{\Omega}$: Tensor or array of SDF values.
++- $M_{con}$: Binary mask where $M_{con} = 1$ if $\tilde{d}_{\Omega} \cdot d_{\Omega} < 0$, else $0$.
+ - $N_r$: Count of points where $M_{con} = 1$.
+ 
+ **Parameters:**
+-- $k$: Hyperparameter controlling the slope of the sigmoid function used to approximate the sign function [S1]. Typical values are not specified in the sources.
++- $k$: Hyperparameter controlling the slope of the sigmoid function used to approximate the sign function [S1]. Typical values are not given in the sources.
+ 
+ **Steps:**
+@@ -35,8 +33,10 @@
+ **Pitfalls:**
+ - The sign function is non-differentiable, so the sigmoid approximation is necessary for back-propagation [S1].
+-- $N_r$ must be non-zero; if no points have opposite signs, the loss is undefined or zero depending on implementation [G].
++- $N_r$ must be non-zero for the loss to be defined; the sources do not specify a fallback behavior when $N_r = 0$ [G].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
+ def srdf_sdf_consistency_loss(tilde_d, d, k):
+     """
+@@ -44,42 +44,29 @@
+     
+     Args:
+-        tilde_d: Tensor of SRDF values.
+-        d: Tensor of SDF values.
+-        k: Hyperparameter for sigmoid slope.
++        tilde_d: list/array of SRDF values.
++        d: list/array of SDF values.
++        k: hyperparameter controlling the slope of the sigmoid function.
+         
+     Returns:
+-        Loss scalar.
++        Scalar loss value.
+     """
+-    # Check for opposite signs
+-    opposite_sign_mask = (tilde_d * d) < 0
++    # 1. Identify points with opposite signs
++    opposite_sign_mask = [1.0 if (t * s) < 0 else 0.0 for t, s in zip(tilde_d, d)]
+     
+-    # Count points with opposite signs
+-    N_r = opposite_sign_mask.sum()
++    # 2. Count points with opposite signs
++    N_r = sum(opposite_sign_mask)
+     
+-    # Avoid division by zero
++    # Handle edge case where no points have opposite signs
+     if N_r == 0:
+-        return torch.tensor(0.0, device=tilde_d.device)
++        return 0.0
+     
+-    # Approximate sign using sigmoid
+-    # Sigmoid(k * d) approximates sign(d)
+-    sig_tilde = torch.sigmoid(k * tilde_d)
+-    sig_d = torch.sigmoid(k * d)
++    # 3. Compute differentiable sign approximation: sigmoid(k * d)
++    sig_tilde = [1.0 / (1.0 + math.exp(-k * t)) for t in tilde_d]
++    sig_d = [1.0 / (1.0 + math.exp(-k * s)) for s in d]
+     
+-    # Compute L2 norm of difference in sign approximations
+-    # Note: The formula uses ||...||_2 inside the sum, but the derivative uses ||...||_1.
+-    # The source formula (6) shows ||...||_2. We follow the source formula for the loss value.
+-    diff = sig_tilde - sig_d
+-    loss_per_point = torch.norm(diff, p=2) # Element-wise L2 norm for scalars is absolute value, but source implies vector norm if multi-dimensional. 
+-    # However, d and tilde_d are scalars per point. ||a - b||_2 for scalars is |a - b|.
+-    # The source notation ||...||_2 likely refers to the Euclidean norm of the vector of differences if summed, 
+-    # but the formula has sum_{p,r} outside. Let's assume element-wise absolute difference for scalar fields.
+-    # Re-reading source: "||\varsigma (\tilde{d}_{\Omega })-\varsigma (d_{\Omega })||_2". 
+-    # If these are scalars, L2 norm is absolute value.
+-    
+-    # Mask the loss
+-    masked_loss = opposite_sign_mask.float() * torch.abs(diff)
+-    
+-    # Sum and normalize
+-    loss = masked_loss.sum() / N_r
++    # 4 & 5. Compute L2 norm of difference (scalar case reduces to absolute value)
++    # and apply mask, then average over N_r
++    diff = [abs(st - sd) for st, sd in zip(sig_tilde, sig_d)]
++    loss = sum(m * d_val for m, d_val in zip(opposite_sign_mask, diff)) / N_r
+     
+     return loss
+@@ -90,14 +77,14 @@
+ ### SRDF Consistency Energy
+ This variant enforces consistency across multiple cameras by minimizing an energy function $E$ based on SRDF values [S2]. It computes the energy at sample locations along viewing rays and back-propagates gradients to update depth maps [S2]. The SRDF for camera $j$ at point $X$ is defined as $SRDF_j(X) = D_j(X) - Z_j(X)$, where $D_j(X)$ is the depth in the depth map and $Z_j(X)$ is the distance from $X$ to camera $j$ [S2]. The energy is:
+-$$ E(\{X\}, D, I) = \prod_{j} \exp \left( -\frac{SRDF_j(X)^2}{\sigma_d} \right) + \Gamma_{SRDF} $$
++$$ E(\{X\}, D, I) = \prod_j \exp \left( -\frac{SRDF_j(X)^2}{\sigma_d} \right) + \Gamma_{SRDF} $$
+ [S2]
+ Parameters: $\sigma_d$ controls the decay rate of probabilities as SRDF deviates from zero; $\Gamma_{SRDF}$ prevents the product from canceling out due to occlusions, interpreted as the probability of occlusion [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of sampled points $N_r$ [S1].
+-- **Memory Complexity:** Linear with respect to the number of sampled points to store $\tilde{d}_{\Omega}$, $d_{\Omega}$, and masks [S1].
+-- **Strengths:** Provides a differentiable approximation of sign consistency, allowing gradient-based optimization of geometric fields [S1]. It adjusts penalties based on the extent of sign discrepancy [S1].
+-- **Limitations:** Relies on the sigmoid approximation, which may introduce bias depending on $k$ [S1]. Requires $N_r > 0$ for non-zero loss [G].
+-- **When to use:** When SRDF and SDF are predicted by separate branches and sign alignment is critical [S1].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Strengths:** Adjusts penalties according to the extent of sign discrepancy between SRDF and SDF, rather than assigning a uniform penalty [S1].
++- **Limitations:** Relies on a sigmoid approximation for the non-differentiable sign function, which requires careful selection of the slope hyperparameter $k$ [S1].
++- **When to use:** When SRDF and SDF are predicted by separate network branches and sign alignment is critical [S1].
+ 
+ ## Background

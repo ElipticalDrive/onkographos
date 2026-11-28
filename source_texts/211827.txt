@@ -1,0 +1,288 @@
+Motion Planning Environment. Contribute to tesseract-robotics/tesseract development by creating an account on GitHub.
+
+refactor(SDF): Query SDFs in place from the Bullet backend rather than constructing a btMiniSDF by Joelkang · Pull Request #1387 · tesseract-robotics/tesseract · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Joelkang
+commented
+Oct 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+note: This is part of a larger stack tekton-dynamics#1 to support multi-resolution, sparse SDFs. But since this is a fundamental change, I wanted to put it up first
+Motivation
+tesseract::geometry::SignedDistanceField lets the contact managers check a robot against an environment described as a distance field rather than meshes. FCL already queries the field through the shared implicit SDF solver. Bullet instead copied every field into a btMiniSDF first: about 32 node indices and 7 doubles per grid sample, built through a hash map. On real scans of 2.9 M and 6.0 M samples that took 3.3 s and 7.1-7.8 s and 2.5 GB and 5.0 GB of extra memory, and it crashes above about 8.7 M samples (a 1 mm field of a single real part is 11-34 M samples). The copy added no accuracy: its cells are filled from the field's trilinear interpolant, which they reproduce exactly.
+What changes
+Bullet queries the field in place. Every SignedDistanceField (grid-backed or function-backed) becomes a TesseractSdfCollisionShape, a concave shape of Bullet's SDF type that holds the field and reports its scaled domain as its AABB. The convex-SDF and SDF-SDF algorithms collide it through the same implicit solver FCL uses (makeImplicitSDFShape). convertSDFToBt and the btMiniSDF copy are removed. On the scans above, adding a field now takes 0.2 ms with no extra memory, and queries run about 2x faster.
+Normals only where needed. For hulls without an implicit form, Bullet samples the field at the hull's vertices. It now reads a vertex's distance first and its normal only when the vertex is within the contact threshold.
+Scaling. Stock btSdfCollisionShape ignores local scaling, so a scaled field was collided unscaled. The shape now applies the field's own scale, and a non-uniform scale is rejected with std::invalid_argument when the field is added, as FCL already does.
+The field's own gradient. SignedDistanceField gains getGradient() and getDistanceAndGradient(). A grid-backed field returns the exact gradient of its trilinear interpolant, from the same eight samples getDistance() reads; a function-backed field takes central differences of its function in one batched call. The implicit solver uses it instead of numerical differences of the distance, for both Bullet and FCL.
+Docs. page_geometry.dox and the SignedDistanceField header now describe in-place queries, and list FCL alongside Bullet as a backend that consumes signed distance fields.
+Behaviour changes
+Bullet contacts can move slightly. On the scans above, 98.7% of probe distances are within 0.01 mm of before;
+the rest moved, in both directions, by up to 1.4 mm where the solver converged on a different point.
+Function-backed fields are not sampled by Bullet any more. A field made from a distance function
+(createSignedDistanceField) used to be sampled onto a grid once when Bullet built its shape. It is now evaluated
+at every query, as FCL already did. Results are exact, but an expensive function (for example, distance to a mesh)
+can make Bullet much slower; sample it up front with createDiscreteSignedDistanceField instead. The docs say so.
+A non-uniform scale is rejected when the field is added to a Bullet manager.
+Tests
+Bullet and FCL contacts for spheres, capsules, boxes, cylinders and cones against a field, SDF-SDF pairs, scaled
+fields, and a convex hull through the per-vertex path.
+The vertex path reads the normal only within the threshold and gives the same answer as a full query.
+Bullet rejects a non-uniform scale, and collides a function-backed field without sampling it.
+getGradient() matches finite differences of getDistance() and approximates the surface normal.
+🤖 Generated with Claude Code
+Joelkang
+and others
+added 2 commits
+October 27, 2026 18:49
+Query signed distance fields in place from the Bullet backend
+…
+1907431
+```
+Bullet's SDF narrowphase already runs the backend-neutral implicit solver,
+but createShapePrimitive first transcoded the field into a btMiniSDF blob:
+32 node indices plus about 7 double nodes per grid sample, built through a
+hash map. On real 2.9M and 6.0M sample scans that took 3.3 s and 7.1-7.8 s and
+2.5 GB and 5.0 GB of extra memory, for no accuracy gain: the tricubic cells
+were filled from the field's trilinear interpolant, which they reproduce
+exactly.
+
+Replace btSdfCollisionShape with TesseractSdfCollisionShape, a concave shape
+of Bullet's SDF type that holds the field and reports its scaled domain as
+its AABB. The convex-SDF and SDF-SDF algorithms build the field's implicit
+shape with makeImplicitSDFShape, as the FCL backend does, and the polyhedral
+vertex fallback samples it the same way. On the same scans, adding the field
+now takes 0.2 ms with no extra memory, queries run about 2x faster, and 98.7%
+of probe distances are within 0.01 mm of before; the rest moved both ways, by
+up to 1.4 mm, where the solver converged on a different point.
+
+A function-backed field is now collided without being sampled at all. A field
+with nonuniform scale is rejected when it is added, as in FCL, instead of
+being transcoded.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Give signed distance fields their own gradient; read Bullet normals o…
+…
+04d89bb
+```
+…nly near contact
+
+SignedDistanceField gains getGradient and getDistanceAndGradient. A
+grid-backed field returns the exact gradient of its trilinear interpolant,
+from the same eight samples getDistance reads; a function-backed field takes
+central differences of its sampler in one batched call of six points. The
+implicit solver now uses the field's gradient instead of numerical
+differences of its distance: the exact derivative of the distance it
+minimises, from one lookup instead of six distance evaluations.
+
+Bullet's convex-vs-SDF vertex path asks querySdfShapeContact, which reads a
+vertex's distance first and its normal only when the vertex is within the
+contact threshold; most hull vertices are beyond it. The scale check moves to
+createShapePrimitive, which rejects a non-uniform scale with
+std::invalid_argument before the narrowphase can see it.
+
+The docs now describe in-place queries, note that a function-backed field
+calls its function at every collision query (sample an expensive one up front
+with createDiscreteSignedDistanceField), and list FCL alongside Bullet as an
+SDF backend.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Joelkang
+mentioned this pull request
+Oct 27, 2026
+Read sparse NanoVDB signed distance fields in place
+tekton-dynamics/tesseract#1
+Open
+Joelkang
+changed the title
+Query signed distance fields in place from the Bullet backend
+refactor(SDF): Query SDFs in place from the Bullet backend rather than constructing a btMiniSDF
+Oct 27, 2026
+codecov
+Bot
+commented
+Oct 27, 2026
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 70.54795% with 43 lines in your changes missing coverage. Please review.
+✅ Project coverage is 93.73%. Comparing base (b303c29) to head (04d89bb).
+Files with missing lines
+Patch %
+Lines
+...ision/bullet/src/tesseract_sdf_collision_shape.cpp
+55.17%
+39 Missing ⚠️
+geometry/src/geometries/signed_distance_field.cpp
+92.30%
+3 Missing ⚠️
+...t/collision/bullet/tesseract_sdf_collision_shape.h
+0.00%
+1 Missing ⚠️
+Additional details and impacted files
+```
+@@            Coverage Diff             @@
+##           master    #1387      +/-   ##
+==========================================
+- Coverage   93.79%   93.73%   -0.06%     
+==========================================
+  Files         286      288       +2     
+  Lines       22820    22835      +15     
+==========================================
++ Hits        21403    21404       +1     
+- Misses       1417     1431      +14     
+```
+Files with missing lines
+Coverage Δ
+collision/bullet/src/bullet_utils.cpp
+95.51% <100.00%> (-0.33%)
+⬇️
+...sion/bullet/src/tesseract_convex_sdf_algorithm.cpp
+93.81% <100.00%> (+24.14%)
+⬆️
+...llision/bullet/src/tesseract_sdf_sdf_algorithm.cpp
+92.30% <100.00%> (-1.93%)
+⬇️
+...llision/core/src/implicit_sdf_collision_solver.cpp
+96.76% <100.00%> (-0.28%)
+⬇️
+...de/tesseract/geometry/impl/signed_distance_field.h
+100.00% <ø> (ø)
+...t/collision/bullet/tesseract_sdf_collision_shape.h
+0.00% <0.00%> (ø)
+geometry/src/geometries/signed_distance_field.cpp
+95.48% <92.30%> (-1.07%)
+⬇️
+...ision/bullet/src/tesseract_sdf_collision_shape.cpp
+55.17% <55.17%> (ø)
+... and 3 files with indirect coverage changes
+🚀 New features to boost your workflow:
+❄️ Test Analytics: Detect flaky tests, report on failures, and find test suite problems.
+Levi-Armstrong
+requested a balanced review from Copilot
+October 29, 2026 17:22
+Copilot started reviewing on behalf of
+Levi-Armstrong
+October 29, 2026 17:22
+View session
+Copilot
+AI
+reviewed
+Oct 29, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+Eagerly sampled fields still invoke the source callback during collision queries, and gradient probes can leave the declared domain, risking failures for valid boundary queries.
+2 open issues
+Discrete field still invokes source sampler during collision queries · New
+Keep gradient probes inside domain for boundary queries · New
+What changed in this PR
+This PR replaces Bullet’s copied btMiniSDF representation with direct signed-distance-field queries through the shared collision solver used by FCL.
+Changes:
+Adds a Bullet SDF shape with scaled bounds and rejects non-uniform field scaling.
+Adds field gradient APIs and skips unnecessary normal queries on the convex-hull vertex path.
+Extends collision and gradient tests and documents in-place queries and function-backed field costs.
+File
+Description
+geometry/​test/​tesseract_geometry_unit.cpp
+Adds grid and function-backed gradient tests.
+geometry/​src/​geometries/​signed_distance_field.cpp
+Implements gradient and combined distance-gradient queries.
+geometry/​include/​tesseract/​geometry/​impl/​signed_distance_field.h
+Declares gradient APIs and documents direct queries.
+docs/​page_geometry.dox
+Documents backend support and function-backed query costs.
+collision/​test/​collision_signed_distance_field_unit.cpp
+Adds scaling, direct-query, and convex-hull coverage.
+collision/​core/​src/​implicit_sdf_collision_solver.cpp
+Uses gradients supplied by the field.
+collision/​core/​include/​tesseract/​collision/​implicit_sdf_collision_solver.h
+Documents shared Bullet and FCL adapter usage.
+collision/​bullet/​src/​tesseract_sdf_sdf_algorithm.cpp
+Routes SDF pairs through the shared adapter.
+collision/​bullet/​src/​tesseract_sdf_collision_shape.cpp
+Implements the direct-query Bullet shape and helpers.
+collision/​bullet/​src/​tesseract_convex_sdf_algorithm.cpp
+Adopts direct queries and threshold-gated normals.
+collision/​bullet/​src/​bullet_utils.cpp
+Removes SDF copying and validates field scaling.
+collision/​bullet/​include/​tesseract/​collision/​bullet/​tesseract_sdf_collision_shape.h
+Declares the new shape and query helpers.
+collision/​bullet/​include/​tesseract/​collision/​bullet/​tesseract_convex_sdf_algorithm.h
+Updates narrowphase documentation.
+collision/​bullet/​CMakeLists.txt
+Includes the new shape implementation in the build.
+Review effort: Balanced
+Comment thread
+collision/bullet/src/bullet_utils.cpp
+Comment on lines
++385
+to
++387
+// Bullet queries the field in place (grid-backed or function-backed): no transcode to btMiniSDF.
+auto collision_shape = std::make_shared<BulletCollisionShape>();
+collision_shape->top_level = sdf; // children stays empty
+collision_shape->top_level = std::make_shared<TesseractSdfCollisionShape>(geom); // children stays empty
+Comment thread
+geometry/src/geometries/signed_distance_field.cpp
+Comment on lines
++166
+to
++181
+std::vector<Eigen::Vector3d> probes;
+probes.reserve(6);
+for (Eigen::Index axis = 0; axis < 3; ++axis)
+{
+Eigen::Vector3d offset = Eigen::Vector3d::Zero();
+offset[axis] = step;
+probes.emplace_back(point + offset);
+probes.emplace_back(point - offset);
+}
+const std::vector<double> sampled = sampler_(probes);
+if (sampled.size() != probes.size())
+throw std::runtime_error("SignedDistanceField: sampler returned " + std::to_string(sampled.size()) +
+" values for " + std::to_string(probes.size()) + " sample points");
+for (Eigen::Index axis = 0; axis < 3; ++axis)
+gradient[axis] = (sampled[static_cast<std::size_t>(2 * axis)] - sampled[static_cast<std::size_t>(2 * axis) + 1]) /
+(2.0 * step);
+Levi-Armstrong
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+@Joelkang I am good with these changes; do you mind fixing the CI and reviewing the copilot comments?
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

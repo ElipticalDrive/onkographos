@@ -1,0 +1,262 @@
+# MPI Parallelization for Volume Rendering
+
+Also called: MPI Decomposition of AMRKDTree, Parallel AMRKDTree Traversal, yt MPI volume rendering
+
+## Overview
+This method parallelizes direct volume ray casting by decomposing the Adaptive Mesh Refinement (AMR) data structure (specifically the AMRKDTree) across multiple MPI processes, allowing each process to traverse only its assigned portion of the volume. It differs from sibling methods like [OpenMP Parallelization](18350-openmp-parallelization.md), which parallelizes ray traversal within a single process, by distributing the spatial data domain itself. The method is characterized by a tree-reduction compositing step where each process renders a full image plane, which are then alpha-blended together.
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   AMR dataset (hierarchical grid structure).
+    *   Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$, image resolution).
+    *   Transfer function $T(V) \rightarrow (\mathbf{c}, \alpha)$.
+    *   Number of MPI tasks $P$.
+*   **Outputs**:
+    *   Final composited image plane (RGB + Alpha).
+
+### Data Structures
+*   **AMRKDTree**: A hierarchical tree structure representing the AMR volume. The tree is decomposed such that each MPI task $p$ is assigned a disjoint subset of the tree nodes (bricks).
+*   **Image Plane**: A 2D array of size $W \times H$ (width $\times$ height) storing accumulated color and opacity. Each MPI task holds a **full** copy of this image plane in memory.
+
+### Algorithm Steps
+
+1.  **Task Count Validation**:
+    Let $P$ be the number of available MPI tasks.
+    If $P$ is not a power of 2, set $P_{eff} = 2^{\lfloor \log_2 P \rfloor}$.
+    The remaining $P - P_{eff}$ tasks are marked as idle and do not participate in rendering [S1, S2].
+
+2.  **Parallel AMRKDTree Construction and Decomposition**:
+    *   The global AMRKDTree is constructed in parallel.
+    *   The tree is decomposed into $P_{eff}$ balanced partitions.
+    *   Each MPI task $p \in [0, P_{eff}-1]$ receives the subset of tree nodes assigned to it.
+    *   Each task only needs to know about the part of the tree it will traverse [S1, S2].
+
+3.  **Local Ray Casting**:
+    For each pixel $(x, y)$ in the image plane:
+    *   Define ray $r(t) = \mathbf{o} + t\mathbf{d}$.
+    *   Intersect ray with the bounding box of the volume.
+    *   Traverse the local AMRKDTree partition assigned to task $p$.
+    *   For each intersected brick/node:
+        *   Sample the volume data $V(\mathbf{p})$ at intersection points.
+        *   Compute optical properties $(\mathbf{c}, \alpha)$ using the transfer function.
+        *   Perform front-to-back compositing into the local image plane buffer.
+    *   Note: Each task reads data **only** for the portion of the volume assigned to it [S1, S2].
+
+4.  **Tree Reduction (Compositing)**:
+    After all local bricks are processed, each task holds a complete image plane representing the contribution of its assigned volume partition. These partial images must be combined.
+    *   Use a binary tree reduction algorithm over the $P_{eff}$ tasks.
+    *   In each reduction step, pairs of tasks exchange their current image planes.
+    *   Perform alpha blending of the two image planes:
+        $$
+        \mathbf{C}_{combined} = \mathbf{C}_A + (1 - \alpha_A) \mathbf{C}_B
+        $$
+        $$
+        \alpha_{combined} = \alpha_A + (1 - \alpha_A) \alpha_B
+        $$
+        where $(\mathbf{C}_A, \alpha_A)$ and $(\mathbf{C}_B, \alpha_B)$ are the color and opacity from the two participating tasks.
+    *   Repeat until a single final image plane remains [S1, S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from mpi4py import MPI
+
+def mpi_volume_rendering(comm, amr_data, camera, transfer_function, image_width, image_height):
+    """
+    Parallel volume rendering using MPI decomposition of AMRKDTree.
+    
+    Args:
+        comm: MPI communicator
+        amr_data: AMR dataset object
+        camera: Camera parameters (origin, direction, etc.)
+        transfer_function: Function mapping scalar value to (color, opacity)
+        image_width: Width of the output image
+        image_height: Height of the output image
+        
+    Returns:
+        final_image: numpy array of shape (image_height, image_width, 4)
+    """
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+    
+    # Step 1: Task Count Validation
+    # If size is not a power of 2, calculate effective size
+    if size == 0:
+        return np.zeros((image_height, image_width, 4))
+    
+    import math
+    p_eff = 2 ** int(math.floor(math.log2(size)))
+    
+    # If this rank is not part of the effective power-of-2 group, it is idle
+    if rank >= p_eff:
+        # Idle task: do nothing or wait for barrier if necessary
+        # In a real implementation, this process might exit or wait
+        return None
+
+    # Step 2: Parallel AMRKDTree Construction and Decomposition
+    # The AMRKDTree is constructed. The decomposition logic assigns
+    # a subset of tree nodes to each rank in [0, p_eff).
+    # This part is typically handled by the yt library's internal parallel
+    # tree construction routines.
+    local_tree_partition = construct_and_decompose_amrkd_tree(amr_data, rank, p_eff)
+    
+    # Step 3: Local Ray Casting
+    # Initialize local image plane: (R, G, B, A)
+    local_image = np.zeros((image_height, image_width, 4), dtype=np.float32)
+    
+    # Iterate over all pixels
+    for y in range(image_height):
+        for x in range(image_width):
+            # Define ray for this pixel
+            ray_origin, ray_direction = camera.get_ray(x, y)
+            
+            # Initialize accumulators for front-to-back compositing
+            acc_color = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            acc_alpha = 0.0
+            
+            # Traverse the local tree partition
+            # This function handles ray-brick intersection and sampling
+            # It updates acc_color and acc_alpha based on the volume data
+            # assigned to this rank.
+            traverse_and_composite_ray(
+                ray_origin, ray_direction, 
+                local_tree_partition, 
+                transfer_function,
+                acc_color, acc_alpha
+            )
+            
+            # Store result in local image plane
+            local_image[y, x, 0] = acc_color[0]
+            local_image[y, x, 1] = acc_color[1]
+            local_image[y, x, 2] = acc_color[2]
+            local_image[y, x, 3] = acc_alpha
+
+    # Step 4: Tree Reduction
+    # Combine all local images using alpha blending in a binary tree fashion
+    final_image = tree_reduce_alpha_blend(comm, local_image, p_eff, rank)
+    
+    return final_image
+
+def traverse_and_composite_ray(ray_origin, ray_direction, tree_partition, tf, acc_color, acc_alpha):
+    """
+    Traverses the local tree partition for a single ray and updates accumulators.
+    This is a placeholder for the specific ray-casting logic defined in the parent
+    article [Direct volume ray casting](19-direct-volume-ray-casting.md).
+    """
+    # 1. Intersect ray with volume bounding box to get t_near, t_far
+    # 2. Discretize into samples
+    # 3. For each sample:
+    #    a. Check if sample is inside a brick in tree_partition
+    #    b. If yes, sample volume value V
+    #    c. Map V to (c, alpha) via tf
+    #    d. Update acc_color and acc_alpha using front-to-back equation
+    pass
+
+def tree_reduce_alpha_blend(comm, local_image, p_eff, rank):
+    """
+    Performs a binary tree reduction to alpha-blend images from all active ranks.
+    """
+    # Buffer for sending/receiving images
+    send_buffer = local_image.copy()
+    recv_buffer = None
+    
+    # Binary tree reduction: log2(p_eff) steps
+    for step in range(int(math.log2(p_eff))):
+        # Determine partner rank in this step
+        # In a standard binary tree reduction on a linear communicator:
+        # Rank r participates with rank r ^ (2^step)
+        partner = rank ^ (1 << step)
+        
+        if partner < p_eff:
+            if rank < partner:
+                # Sender
+                comm.Send(send_buffer, dest=partner, tag=0)
+                # Receiver waits
+                recv_buffer = np.zeros_like(send_buffer)
+                comm.Recv(recv_buffer, source=partner, tag=0)
+                
+                # Blend recv_buffer (B) into send_buffer (A)
+                # A = send_buffer, B = recv_buffer
+                alpha_a = send_buffer[:, :, 3:4]
+                alpha_b = recv_buffer[:, :, 3:4]
+                color_a = send_buffer[:, :, :3]
+                color_b = recv_buffer[:, :, :3]
+                
+                # Formula: C_out = C_A + (1 - alpha_A) * C_B
+                #          alpha_out = alpha_A + (1 - alpha_A) * alpha_B
+                weight_b = 1.0 - alpha_a
+                new_color = color_a + weight_b * color_b
+                new_alpha = alpha_a + weight_b * alpha_b
+                
+                send_buffer[:, :, :3] = new_color
+                send_buffer[:, :, 3:4] = new_alpha
+            else:
+                # Receiver
+                recv_buffer = np.zeros_like(send_buffer)
+                comm.Recv(recv_buffer, source=partner, tag=0)
+                
+                # Blend recv_buffer (B) into send_buffer (A)
+                alpha_a = send_buffer[:, :, 3:4]
+                alpha_b = recv_buffer[:, :, 3:4]
+                color_a = send_buffer[:, :, :3]
+                color_b = recv_buffer[:, :, :3]
+                
+                weight_b = 1.0 - alpha_a
+                new_color = color_a + weight_b * color_b
+                new_alpha = alpha_a + weight_b * alpha_b
+                
+                send_buffer[:, :, :3] = new_color
+                send_buffer[:, :, 3:4] = new_alpha
+        else:
+            # Partner is outside the active set (should not happen in valid p_eff logic)
+            pass
+            
+    return send_buffer
+```
+
+### Parameters and Typical Values
+*   **Image Resolution**: Typically $1024 \times 1024$ to $2048 \times 2048$. Resolutions $> 2048^2$ cause significant memory pressure [S1, S2].
+*   **MPI Tasks**: Must be a power of 2 ($1, 2, 4, 8, \dots$). Non-power-of-2 counts result in idle cores [S1, S2].
+
+### Edge Cases and Pitfalls
+*   **Non-Power-of-2 Tasks**: If the number of available MPI processes is not a power of 2, the system uses the largest power of 2 less than or equal to the count. The remaining cores remain idle [S1, S2].
+*   **Memory Bottleneck**: Each MPI task holds the **entire** image plane in memory. For large resolutions (e.g., $> 2048^2$), this can exhaust available RAM, limiting the maximum number of MPI tasks that can be used simultaneously [S1, S2].
+*   **Communication Overhead**: The tree reduction step requires exchanging full image planes between tasks. For very large images, this communication cost can become significant.
+
+## Operating characteristics
+
+*   **Time Complexity**:
+    *   Ray casting: $O(N_{pixels} \cdot N_{samples} \cdot N_{bricks\_intersected})$ per task, where $N_{bricks\_intersected}$ is reduced by domain decomposition.
+    *   Reduction: $O(\log P_{eff})$ communication steps, each transferring $O(W \cdot H)$ data.
+*   **Memory Complexity**:
+    *   Per task: $O(W \cdot H)$ for the image plane + $O(V_{local})$ for the local volume data.
+    *   Total: $O(P \cdot W \cdot H + V_{total})$.
+*   **Strengths**:
+    *   Efficient I/O: Each task reads only its assigned portion of the volume, reducing disk bandwidth contention [S1, S2].
+    *   Scalability: Good scaling for large AMR datasets where I/O is a bottleneck.
+*   **Limitations**:
+    *   Memory bound: The requirement for each task to hold the full image plane limits scalability to high resolutions or large task counts [S1, S2].
+    *   Rigid task count: The power-of-2 constraint can lead to resource underutilization on clusters with arbitrary core counts [S1, S2].
+*   **When to use**:
+    *   Large AMR datasets where I/O bandwidth is the primary bottleneck.
+    *   Clusters with a power-of-2 number of available cores.
+    *   Resolutions $\le 2048^2$ to avoid memory exhaustion.
+*   **When not to use**:
+    *   Very high-resolution rendering ($> 2048^2$) on memory-constrained nodes.
+    *   Clusters with non-power-of-2 core counts where efficiency is critical.
+
+## Background
+
+*   **Origin**: This method is implemented in the `yt` framework, a Python-based analysis and visualization toolkit for astrophysical simulations.
+*   **History**: The parallelization strategy was developed to handle the massive datasets generated by adaptive mesh refinement simulations in astrophysics. It leverages the AMRKDTree structure, which is native to `yt`'s data handling.
+*   **Usage**: Primarily used in scientific visualization of astrophysical fluid dynamics, where AMR data is common and I/O performance is critical.
+
+## Sources
+
+[S1] 3D Visualization and Volume Rendering, https://yt-project.org/doc/visualizing/volume_rendering.html, fetched 2026-10-28
+[S2] https://yt-project.org/docs/dev/visualizing/volume_rendering.html#volume-rendering-components, https://yt-project.org/docs/dev/visualizing/volume_rendering.html, fetched 2026-10-29

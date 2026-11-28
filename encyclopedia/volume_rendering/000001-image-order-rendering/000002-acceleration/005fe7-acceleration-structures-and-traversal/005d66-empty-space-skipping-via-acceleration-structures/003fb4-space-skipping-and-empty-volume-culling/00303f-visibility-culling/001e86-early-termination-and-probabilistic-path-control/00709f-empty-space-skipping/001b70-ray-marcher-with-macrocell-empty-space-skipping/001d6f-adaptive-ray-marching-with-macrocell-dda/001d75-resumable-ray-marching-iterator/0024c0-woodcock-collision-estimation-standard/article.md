@@ -1,0 +1,95 @@
+# Woodcock Collision Estimation (Standard)
+Also called: castRayWoodcock
+## Overview
+A ray marching technique for volume rendering that uses Woodcock collision estimation (delta tracking) to skip empty space, avoiding the need for spatial acceleration structures for sampling but requiring a global maximum density estimate [S1, unofficial]. It differs from sibling methods like [Adaptive Ray Marching with Voxel Skipping](3870-adaptive-ray-marching-with-voxel-skipping.md) by avoiding the need for spatial acceleration structures for sampling, instead relying on probabilistic step sizing based on a global maximum density estimate [S1, unofficial].
+## How it works
+**Inputs:** Ray origin, ray direction, ray near clip, ray far clip, volume's octree bounding box, global maximum density (or its inverse `invMaxDensity`), transfer function returning color and opacity `out`, random number generator `sampler`, settings `stepSize` and `densityScale`, and epsilon `dT = 0.0001` [S1, unofficial].
+**Outputs:** Boolean indicating if a collision occurred, and the intersection position `pos` if true [S1, unofficial].
+
+**Data Structures:**
+Standard ray and sampler structures are assumed [G].
+*   `Ray`: fields `origin`, `direction`, `near_clip`, `far_clip` [G].
+*   `Sampler`: method `next_float()` returning uniform random float in $[0, 1)$ [G].
+*   `Settings`: fields `step_size`, `density_scale` [G].
+*   `out`: structure with color and opacity field `w` [G].
+
+**Steps:**
+1. Compute the bounding box intersection of the ray with the volume's octree bounding box. If invalid, return false [S1, unofficial].
+2. Calculate the initial ray parameter `minT` by clamping the ray's near clip to the bounding box near intersection, then adding a random offset: `minT += (-std::log(sampler.nextFloat())) * settings.stepSize` [S1, unofficial].
+3. Loop while `minT <= maxT` (where `maxT` is the bounding box far intersection clamped to ray far clip) [S1, unofficial].
+4. Calculate position `pos = ray.origin + ray.direction * minT` [S1, unofficial].
+5. Sample the volume density at `pos` into `coef`. Evaluate the transfer function to get color and opacity `out` [S1, unofficial].
+6. Perform the collision test: if `sampler.nextFloat() < out.w * invMaxDensity * settings.densityScale * settings.stepSize`, record the intersection at `pos` and return true [S1, unofficial].
+7. If no collision, advance `minT` by a random step size scaled by `invMaxDensity`: `minT += (-std::log(sampler.nextFloat())) * invMaxDensity * settings.stepSize` [S1, unofficial].
+8. If the loop completes without a collision, return false [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def castRayWoodcock(ray_origin, ray_direction, ray_near_clip, ray_far_clip,
+                    bbox_min, bbox_max, inv_max_density, settings, sampler, dT=0.0001):
+    # 1. Compute bounding box intersection of the ray with the volume's octree bounding box.
+    # If invalid, return false.
+    # [G] Standard ray-AABB intersection (slab method)
+    t_min = (bbox_min[0] - ray_origin[0]) / max(abs(ray_direction[0]), dT)
+    t_max = (bbox_max[0] - ray_origin[0]) / max(abs(ray_direction[0]), dT)
+    if t_min > t_max: t_min, t_max = t_max, t_min
+    for i in range(1, 3):
+        t1 = (bbox_min[i] - ray_origin[i]) / max(abs(ray_direction[i]), dT)
+        t2 = (bbox_max[i] - ray_origin[i]) / max(abs(ray_direction[i]), dT)
+        if t1 > t2: t1, t2 = t2, t1
+        t_min = max(t_min, t1)
+        t_max = min(t_max, t2)
+    if t_min > t_max:
+        return False
+
+    # 2. Calculate initial ray parameter minT by clamping the ray's near clip to the bounding box near intersection,
+    # then adding a random offset.
+    min_t = max(ray_near_clip, t_min)
+    min_t += (-math.log(sampler.next_float())) * settings.step_size
+
+    # maxT is the bounding box far intersection clamped to ray far clip.
+    max_t = min(ray_far_clip, t_max)
+
+    # 3. Loop while minT <= maxT.
+    while min_t <= max_t:
+        # 4. Calculate position
+        pos = [ray_origin[i] + ray_direction[i] * min_t for i in range(3)]
+
+        # 5. Sample the volume density at pos into coef.
+        # [G] Volume density sampling at pos
+        coef = sample_volume_density(pos)
+
+        # Evaluate the transfer function to get color and opacity out.
+        # [G] Transfer function evaluation
+        out_w = evaluate_transfer_function(coef)
+
+        # 6. Perform the collision test.
+        if sampler.next_float() < out_w * inv_max_density * settings.density_scale * settings.step_size:
+            return True
+
+        # 7. If no collision, advance minT by a random step size scaled by invMaxDensity.
+        min_t += (-math.log(sampler.next_float())) * inv_max_density * settings.step_size
+
+    # 8. If the loop completes without a collision, return false.
+    return False
+```
+
+**Parameters:**
+*   `dT`: A small epsilon value used to prevent infinite loops or precision issues, set to 0.0001 [S1, unofficial].
+*   `invMaxDensity`: The inverse of the maximum density in the volume, initialized to 1.0f. Used to normalize the sampling probability against the global maximum [S1, unofficial].
+*   `settings.stepSize`: Base step size setting.
+*   `settings.densityScale`: Density scale setting.
+
+**Edge Cases:**
+*   `invMaxDensity` must be strictly positive to avoid division by zero during the collision test and step advancement [G].
+*   `dT` is provided but its exact application point is not specified in the sources; it is typically used as a small additive guard to `minT` or `maxT` to prevent precision-related infinite loops [G].
+## Operating characteristics
+Not given in the sources.
+## Background
+Not given in the sources.
+## Sources
+[S1] thewildnath/PathTracer, https://github.com/thewildnath/PathTracer, fetched 2026-10-26 (unofficial)

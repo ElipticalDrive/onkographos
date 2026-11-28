@@ -1,0 +1,94 @@
+# Magnetosheath Draped Field Line Generation
+Also called: draped IMF field lines
+
+## Overview
+Generates draped field line samples within the magnetosheath region, bounded by the bow shock and the magnetopause [S1, unofficial]. Unlike the parent method which traces single lines from ionospheric footpoints, this method seeds lines randomly in the dayside magnetosheath to capture the draped topology of the solar wind magnetic field [S1, unofficial]. It is distinct from general stream line tracing by its specific geometric constraints (dayside-only seeding) and reliance on external magnetosheath field models [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `n_lines`: Number of field lines to generate [S1, unofficial].
+- `n_pts`: Maximum number of sample points per field line [S1, unofficial].
+- `magnetopause_radius(theta)`: Callable returning the radial distance of the magnetopause surface for a given polar angle `theta` [S1, unofficial].
+- `bow_shock_radius(theta)`: Callable returning the radial distance of the bow shock surface for a given polar angle `theta` [S1, unofficial].
+- `magnetosheath_field(x, y, z)`: Callable returning the magnetic field vector $(B_x, B_y, B_z)$ at position $(x, y, z)$ [S1, unofficial].
+
+**Outputs:**
+- A flat list of dictionaries [S1, unofficial].
+- Each record contains keys: `x`, `y`, `z` (float position coordinates), `Bx`, `By`, `Bz` (float magnetic field components), `intensity` (float magnitude $|B|$), and `source` (string `'magnetosheath'`) [S1, unofficial].
+
+**Parameters:**
+- `step`: Fixed Euler integration step size, set to $0.20$ Earth radii ($R_E$) [S1, unofficial].
+- `theta_max`: Polar angle upper bound for seeding, set to $1.4$ radians [S1, unofficial].
+- `cos_clamp`: Lower bound for $\cos(\theta)$, set to $-0.98$ [S1, unofficial].
+- `boundary_margin`: Offset from surface boundaries for seeding, set to $0.3$ [S1, unofficial].
+
+**Algorithm:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def generate_magnetosheath_lines(n_lines, n_pts, magnetopause_radius, bow_shock_radius, magnetosheath_field):
+    records = []
+    for _ in range(n_lines):
+        # Seed selection
+        phi = random.uniform(0.0, 2.0 * math.pi)
+        theta = random.uniform(0.0, 1.4)
+        t_cos = max(math.cos(theta), -0.98)
+        mp_r = magnetopause_radius(math.acos(t_cos))
+        bs_r = bow_shock_radius(math.acos(t_cos))
+        r_seed = random.uniform(mp_r + 0.3, bs_r - 0.3)
+        if r_seed <= mp_r:
+            continue
+
+        # Initialization
+        x = r_seed * math.sin(theta) * math.cos(phi)
+        y = r_seed * math.sin(theta) * math.sin(phi)
+        z = r_seed * math.cos(theta)
+        step = 0.20
+
+        # Tracing loop
+        for _ in range(n_pts):
+            theta_sun = math.atan2(math.sqrt(y**2 + z**2), max(x, -40.0))
+            mp_r2 = magnetopause_radius(theta_sun)
+            bs_r2 = bow_shock_radius(theta_sun)
+            r2 = math.sqrt(x**2 + y**2 + z**2)
+            if r2 < mp_r2 or r2 > bs_r2:
+                break
+
+            Bx, By, Bz = magnetosheath_field(x, y, z)
+            mag = math.sqrt(Bx**2 + By**2 + Bz**2)
+            if mag < 1e-9:
+                break
+
+            records.append({
+                "x": x, "y": y, "z": z,
+                "Bx": Bx, "By": By, "Bz": Bz,
+                "intensity": mag,
+                "source": "magnetosheath"
+            })
+
+            x += step * Bx / mag
+            y += step * By / mag
+            z += step * Bz / mag
+    return records
+```
+
+**Edge Cases and Pitfalls:**
+- **Dayside Restriction**: The method enforces a dayside-only generation by limiting $\theta$ to $[0, 1.4]$ radians and clamping $\cos(\theta)$ to $\ge -0.98$ [S1, unofficial]. This prevents seeding in the nightside magnetosheath [S1, unofficial].
+- **Boundary Precision**: The boundary check uses the current position's projected angle $\theta_{\text{sun}}$ to query surface radii [S1, unofficial]. If the field line crosses the boundary between steps, it may be recorded outside the valid region before the next check breaks the loop [S1, unofficial].
+- **Zero Field**: If the field magnitude drops below $10^{-9}$, tracing stops to avoid division by zero [S1, unofficial].
+- **Seeding Gap**: The seed radius is restricted to $(r_{mp} + 0.3, r_{bs} - 0.3)$ [S1, unofficial]. If $r_{bs} - r_{mp} \le 0.6$, no valid seeds exist for that angle [S1, unofficial]. The code checks `if r_seed <= mp_r` but relies on the uniform distribution to naturally fail if the interval is invalid or empty [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot P)$, where $N$ is `n_lines` and $P$ is `n_pts` [S1, unofficial]. Each step requires a field evaluation and boundary checks [S1, unofficial].
+- **Memory Complexity**: $O(N \cdot P)$ to store the output records [S1, unofficial]. The source implementation truncates the output to 5,000 records if the total count exceeds this limit [S1, unofficial].
+- **Strengths**: Simple to implement; captures the general draped structure of the magnetosheath field; efficient random seeding avoids bias towards specific regions [S1, unofficial].
+- **Limitations**: Does not trace lines back to their source (solar wind) or footpoints; relies on external functions for magnetopause/bow shock shapes and field values; fixed step size may lead to inaccuracies in high-gradient regions [S1, unofficial].
+
+## Background
+This method is part of a pipeline for volumetric visualization of astrophysical vector fields, specifically focusing on Earth's magnetosphere [S1, unofficial]. It builds on [Magnetosphere Field Line Tracing](12012-magnetosphere-field-line-tracing.md) by providing complementary data for the magnetosheath region, which is not covered by ionospheric footpoint tracing [S1, unofficial].
+
+## Sources
+[S1] VitorFigueiredoResearch/AstroSplat-Browser-native-volumetric-visualization-for-astrophysical-vector-fields, https://github.com/VitorFigueiredoResearch/AstroSplat-Browser-native-volumetric-visualization-for-astrophysical-vector-fields, fetched 2026-10-26 (unofficial)

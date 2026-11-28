@@ -1,0 +1,149 @@
+# Barycentric Splat Parameterization
+
+Also called: GeoSplatting Face-Sampling, Heuristic Gaussian sampling from triangles, Mesh-Gaussian binding via midpoints, Splat center derivation from mesh faces
+
+## Overview
+Barycentric Splat Parameterization constrains 2D Gaussian Splat centers to lie on triangular mesh faces using barycentric coordinates, allowing splats to move freely on the face while preserving per-splat attributes [S1]. It differs from standard 3D Gaussian Splatting by deriving geometry directly from mesh topology rather than learning unconstrained centers, and from [Oriented Gaussian Splatting](9621-oriented-gaussian-splatting.md) by explicitly binding splat scales and orientations to local mesh edge vectors and face area [S2].
+
+## How it works
+**Inputs:**
+- Triangular mesh face $F_i$ with vertices $v_1, v_2, v_3$ [S1].
+- Vertex attributes: Position $\mathbf{P}_i = (\mathbf{p}_{i1}, \mathbf{p}_{i2}, \mathbf{p}_{i3})$, Normal $\mathbf{N}_i = (\mathbf{n}_{i1}, \mathbf{n}_{i2}, \mathbf{n}_{i3})$ [S2].
+- Barycentric coordinates $u, w$ for the center, and $u, v$ for midpoints [S1, S2].
+- Hyperparameters: $u=0.07, v=0.22, \alpha_{jk}, \beta_{jk}, \delta_{jk}$ [S2].
+
+**Outputs:**
+- Gaussian parameters: center position $\mathbf{c}$, normal $\mathbf{n}$, scaling vector $\mathbf{s}$, rotation basis vectors $\mathbf{r}_x, \mathbf{r}_y, \mathbf{r}_z$ [S2].
+
+**Data Structures:**
+- Barycentric coordinates are scalars $u, w, v \in [0, 1]$ satisfying $u+w \le 1$ for centers, and specific values for midpoints [S1, S2].
+
+**Steps:**
+
+1. **Define Barycentric Interpolation:**
+   For any attribute vector $\mathbf{A}_i = (\mathbf{a}_{i1}, \mathbf{a}_{i2}, \mathbf{a}_{i3})$ defined at triangle vertices and barycentric weights $(q_1, q_2, q_3)$, compute the interpolated value:
+   $$ \mathbf{A}_i \odot (q_1, q_2, q_3) = q_1 \mathbf{a}_{i1} + q_2 \mathbf{a}_{i2} + q_3 \mathbf{a}_{i3} $$
+   [S2]
+
+2. **Compute Splat Center (General):**
+   If deriving a single center per face using general barycentric coordinates $u, w$:
+   $$ \mathbf{m} = u \cdot \mathbf{v}_1 + w \cdot \mathbf{v}_2 + (1 - u - w) \cdot \mathbf{v}_3 $$
+   where $\mathbf{v}_k$ are the vertex positions. [S1]
+
+3. **Compute Midpoints for Heuristic Sampling:**
+   Define six midpoints $\mathbf{m}_{jk}$ on the edges of the triangle using specific barycentric weights derived from hyperparameters $u$ and $v$ [S2]:
+   - Edge 1-2: $\mathbf{m}_{12} = (\frac{1-u}{2}, \frac{1-u}{2}, u)$
+   - Edge 2-3: $\mathbf{m}_{23} = (\frac{1-u}{2}, \frac{1-u}{2}, u)$
+   - Edge 3-1: $\mathbf{m}_{31} = (\frac{1-u}{2}, u, \frac{1-u}{2})$
+   - Edge 4-5 (Edge 1-2 variant): $\mathbf{m}_{45} = (\frac{1-v}{2}, \frac{1-v}{2}, v)$
+   - Edge 5-6 (Edge 2-3 variant): $\mathbf{m}_{56} = (\frac{1-v}{2}, \frac{1-v}{2}, v)$
+   - Edge 6-4 (Edge 3-1 variant): $\mathbf{m}_{64} = (\frac{1-v}{2}, v, \frac{1-v}{2})$
+   The actual 3D position is obtained by interpolating vertex attributes with these weights: $\mathbf{pos} = \mathbf{m}_{jk} \odot \mathbf{P}_i$ [S2].
+
+4. **Sample Gaussian Parameters for Each Midpoint $\mathbf{m}_{jk}$:**
+   For each midpoint $\mathbf{m}_{jk}$, calculate the Gaussian parameters [S2]:
+   
+   a. **Center Position:**
+      $$ \mathbf{c} = \mathbf{m}_{jk} \odot \mathbf{P}_i $$
+   
+   b. **Normal:**
+      $$ \mathbf{n} = \mathbf{m}_{jk} \odot \mathbf{N}_i $$
+   
+   c. **Edge Vector:**
+      Let $\mathbf{b}_k$ be the vertex index of the "end" of the edge corresponding to $k$ (e.g., for edge 1-2, $k=2$). The vector from the midpoint to the vertex is:
+      $$ \mathbf{e} = (\mathbf{b}_k \odot \mathbf{P}_i) - \mathbf{m}_{jk} \odot \mathbf{P}_i $$
+   
+   d. **Scaling X:**
+      $$ s_x = \alpha_{jk} \|\mathbf{e}\|_2 $$
+   
+   e. **Rotation X:**
+      $$ \mathbf{r}_x = \frac{\mathbf{e}}{\|\mathbf{e}\|_2} $$
+   
+   f. **Scaling Y:**
+      $$ s_y = \frac{\text{Area}(F_i)}{\beta_{jk} \|\mathbf{e}\|_2} $$
+      where $\text{Area}(F_i)$ is the area of the triangular face [S2].
+   
+   g. **Rotation Y:**
+      $$ \mathbf{r}_y = \mathbf{n} \times \mathbf{r}_x $$
+   
+   h. **Scaling Z:**
+      $$ s_z = \delta_{jk} $$
+   
+   i. **Rotation Z:**
+      $$ \mathbf{r}_z = \mathbf{n} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def barycentric_splat_param(face_verts, face_normals, u, v, alpha, beta, delta):
+    # face_verts: list of 3 vectors [v1, v2, v3]
+    # face_normals: list of 3 vectors [n1, n2, n3]
+    # alpha, beta, delta: dicts mapping edge_id -> scalar
+    
+    gaussians = []
+    # Define barycentric weights for the 6 midpoints
+    midpoints_bc = {
+        12: ((1-u)/2, (1-u)/2, u),
+        23: ((1-u)/2, (1-u)/2, u),
+        31: ((1-u)/2, u, (1-u)/2),
+        45: ((1-v)/2, (1-v)/2, v),
+        56: ((1-v)/2, (1-v)/2, v),
+        64: ((1-v)/2, v, (1-v)/2)
+    }
+    
+    for edge_id, (q1, q2, q3) in midpoints_bc.items():
+        # Interpolate position and normal
+        pos = q1*face_verts[0] + q2*face_verts[1] + q3*face_verts[2]
+        normal = q1*face_normals[0] + q2*face_normals[1] + q3*face_normals[2]
+        
+        # Determine end vertex index for the edge vector
+        # Mapping edge_id to end vertex index (1-based for logic, 0-based for array)
+        end_idx = {12: 1, 23: 2, 31: 0, 45: 1, 56: 2, 64: 0}[edge_id]
+        end_pos = face_verts[end_idx]
+        
+        # Edge vector
+        e = end_pos - pos
+        e_norm = np.linalg.norm(e)
+        
+        # Guard against degenerate edges
+        if e_norm < 1e-8:
+            continue
+            
+        # Scaling and Rotation
+        s_x = alpha[edge_id] * e_norm
+        r_x = e / e_norm
+        s_y = np.cross(face_verts[1]-face_verts[0], face_verts[2]-face_verts[0]).sum() / (2 * beta[edge_id] * e_norm) # Area via cross product
+        r_y = np.cross(normal, r_x)
+        s_z = delta[edge_id]
+        r_z = normal
+        
+        gaussians.append({'center': pos, 'normal': normal, 'scale': [s_x, s_y, s_z], 'rot': [r_x, r_y, r_z]})
+        
+    return gaussians
+```
+
+**Parameters:**
+- Hyperparameters for generalized geometric alignment [S2]:
+  - $u = 0.07$
+  - $v = 0.22$
+  - $\alpha_{12}=\alpha_{23}=\alpha_{31}=0.80$
+  - $\alpha_{45}=\alpha_{56}=\alpha_{64}=2.08$
+  - $\beta_{12}=\beta_{23}=\beta_{31}=15.0$
+  - $\beta_{45}=\beta_{56}=\beta_{64}=13.0$
+  - $\delta_{12}=\delta_{23}=\delta_{31}=\delta_{45}=\delta_{56}=\delta_{64}=4.5 \times 10^{-5}$
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Triangles/Edges:** If $\|\mathbf{e}\|_2 \approx 0$ (midpoint coincides with vertex), normalization of $\mathbf{r}_x$ fails. [G] Guard against division by zero by clamping $\|\mathbf{e}\|_2$ to a small epsilon or skipping such splats.
+- **Face Removal:** When a mesh face is removed, all splats mapped to it must be identified and flagged for removal [S1].
+- **Scale Bounds:** To prevent discrepancies between Gaussian scales and mesh face scales, scales can be bounded via $s = s_{rel} \odot s_0$ where $s_{rel} \in [s_{min}, s_{max}]^2$ [S1].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Originating from GeoSplatting [S2] and OMeGa [S1], this method addresses the lack of inherent geometry boundaries in standard 3D Gaussian Splatting by binding splats to explicit mesh surfaces. It constrains splat centers to mesh faces using barycentric coordinates to preserve per-splat attributes and achieve generalized geometric alignment [S1, S2].
+
+## Sources
+[S1] OMeGa: Joint Optimization of Explicit Meshes and Gaussian Splats for Robust Scene-Level Surface Reconstruction, https://doi.org/10.1109/WACV61042.2026.00427, fetched 2026-10-30
+[S2] GeoSplatting: Towards Geometry Guided Gaussian Splatting for Physically-Based Inverse Rendering, https://doi.org/10.1109/ICCV51701.2025.02692, fetched 2026-10-30

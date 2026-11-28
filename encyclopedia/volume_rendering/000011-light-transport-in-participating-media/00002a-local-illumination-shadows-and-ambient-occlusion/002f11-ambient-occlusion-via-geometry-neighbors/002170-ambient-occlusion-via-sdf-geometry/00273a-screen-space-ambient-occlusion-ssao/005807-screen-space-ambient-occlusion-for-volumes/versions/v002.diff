@@ -1,0 +1,159 @@
+--- v001.md
++++ v002.md
+@@ -4,29 +4,24 @@
+ 
+ ## Overview
+-Screen-Space Ambient Occlusion for Volumes extends the standard Screen-Space Ambient Occlusion (SSAO) technique to volume rendering by extracting position and normal information from the raycasting algorithm to create an opacity isovalue layer [S1, unofficial]. This layer acts as a synthetic surface, allowing the SSAO pass to compute ambient occlusion for internal structures within a volume, thereby increasing depth perception [S1, unofficial]. It differs from sibling methods like [Combined Volumetric and Geometric Ambient Occlusion](14367-combined-volumetric-and-geometric-ambient-occlusion.md) by relying on screen-space depth comparisons of a generated isocontour rather than explicit volumetric scattering or geometric mesh intersection.
++Screen-Space Ambient Occlusion for Volumes extends standard SSAO to volume rendering by extracting position and normal information from the raycasting algorithm to create an opacity isovalue layer [S1, unofficial]. This layer acts as a synthetic surface, allowing the SSAO pass to compute ambient occlusion for internal structures within a volume, thereby increasing depth perception [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Volume data, existing depth buffer, volume rendering parameters (opacity threshold, shading enabled).
+-*   **Outputs:** Final color buffer with ambient occlusion applied to the volume's internal structures.
++*   **Inputs:** Volume data, camera parameters, existing depth buffer, and volume rendering parameters including an opacity threshold and shading flag [S1, unofficial].
++*   **Outputs:** Final color buffer with ambient occlusion applied to the volume's internal structures [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Position Texture:** Stores the 3D world position of the first sample along the ray that exceeds the opacity threshold.
+-*   **Normal Texture:** Stores the surface normal (computed via local gradient) for the same sample.
++*   **Position Texture:** Stores the 3D world position of the first sample along the ray that exceeds the opacity threshold [S1, unofficial].
++*   **Normal Texture:** Stores the surface normal (computed via local gradient) for the same sample [S1, unofficial].
+ *   **Depth Texture:** Must be formatted as `Fixed32` to allow the GPU volume mapper to copy the existing depth texture successfully [S1, unofficial].
+ 
+ **Steps:**
+ 1.  **Enable Shading:** Ensure the volume property has shading enabled to compute normals using local gradient values for each sample [S1, unofficial].
+-    ```python
+-    volume.GetProperty().ShadeOn()
+-    ```
+-2.  **Raycasting with Position/Normal Extraction:** During the volume rendering raycast, for each sample along the ray:
+-    *   Compute the fragment position (current sample location).
+-    *   Compute the normal (local gradient value).
+-    *   Check if the sample's opacity exceeds the `VolumeOpacityThreshold`.
+-3.  **First-Visible-Write Logic:** The first sample along the ray with opacity greater than the threshold writes its position and normal to the additional GPU textures. Subsequent samples along the same ray do not override this information [S1, unofficial].
+-4.  **Isocontour Generation:** This process generates an opacity layer (isocontour) representing the "surface" of the volume at the specified opacity threshold [S1, unofficial].
+-5.  **SSAO Pass Execution:** The SSAO pass reads the position, normal, and depth textures generated in steps 2-4. It treats this data as if it were a regular opaque surface, performing hemisphere sampling and depth comparison to calculate occlusion factors [S1, unofficial].
+-6.  **Compositing:** The calculated occlusion is applied to the rendered volume color. Because the textures are written at the pass level, this is compatible with mixed volume and surface rendering [S1, unofficial].
++2.  **Raycasting with Position/Normal Extraction:** During the volume rendering raycast, compute the fragment position (current sample location) and normal (local gradient value) for each sample [S1, unofficial].
++3.  **Threshold Check:** Check if the sample's opacity exceeds the `VolumeOpacityThreshold` [S1, unofficial].
++4.  **First-Visible-Write Logic:** The first sample along the ray with opacity greater than the threshold writes its position and normal to the additional GPU textures; subsequent samples along the same ray do not override this information [S1, unofficial].
++5.  **Isocontour Generation:** This process generates an opacity layer (isocontour) representing the surface of the volume at the specified opacity threshold [S1, unofficial].
++6.  **SSAO Pass Execution:** The SSAO pass reads the position, normal, and depth textures generated in steps 2-4 and applies ambient occlusion as it would for a regular surface [S1, unofficial].
++7.  **Compositing:** The calculated occlusion is applied to the rendered volume color, with textures managed at the pass level to ensure compatibility with mixed volume and surface rendering [S1, unofficial].
+ 
+ **Parameters:**
+@@ -39,6 +34,50 @@
+ **Pseudocode:**
+ ```python
+-# Initialization
+-scene_size = calculate_bounding_box_diagonal(volume)
++import math
++
++def compute_volume_ssao(ray_origin, ray_direction, volume_bounds, volume_opacities, step_size, radius, bias, thresholds):
++    """
++    Computes SSAO factors for a volume raycast.
++    ray_origin: tuple (x, y, z)
++    ray_direction: tuple (dx, dy, dz)
++    volume_bounds: tuple (min_x, min_y, min_z, max_x, max_y, max_z)
++    volume_opacities: callable returning opacity at (x, y, z)
++    step_size: float
++    radius: float
++    bias: float
++    thresholds: list of float opacity thresholds
++    Returns: list of AO factors in [0.0, 1.0]
++    """
++    ao_factors = []
++    for opacity_threshold in thresholds:
++        hit_distance = float('inf')
++        t = 0.0
++        # Step along the ray until bounds are exceeded or a hit is found
++        while t < 1000.0:
++            x = ray_origin[0] + ray_direction[0] * t
++            y = ray_origin[1] + ray_direction[1] * t
++            z = ray_origin[2] + ray_direction[2] * t
++            
++            # Boundary check
++            if volume_bounds[0] <= x <= volume_bounds[3] and \
++               volume_bounds[1] <= y <= volume_bounds[4] and \
++               volume_bounds[2] <= z <= volume_bounds[5]:
++                opacity = volume_opacities(x, y, z)
++                if opacity > opacity_threshold:
++                    hit_distance = t
++                    break
++            t += step_size
++            
++        # Compute AO factor based on first hit distance
++        if hit_distance < float('inf'):
++            effective_distance = max(0.0, hit_distance - bias)
++            ao_factor = max(0.0, 1.0 - (effective_distance / radius))
++        else:
++            ao_factor = 1.0
++        ao_factors.append(ao_factor)
++    return ao_factors
++
++# Setup example matching VTK pipeline
++scene_size = math.sqrt((bounds[3]-bounds[0])**2 + (bounds[4]-bounds[1])**2 + (bounds[5]-bounds[2])**2)
+ ssao_pass = SSAOPass()
+ ssao_pass.SetRadius(0.1 * scene_size)
+@@ -46,40 +85,7 @@
+ ssao_pass.SetKernelSize(128)
+ ssao_pass.SetDepthFormat(TextureFormat.Fixed32)
+-ssao_pass.SetVolumeOpacityThreshold(0.95) # Example value
++ssao_pass.SetVolumeOpacityThreshold(0.95)
+ ssao_pass.BlurOn()
+-
+-# Volume Setup
+ volume.GetProperty().ShadeOn()
+-
+-# Rendering Loop
+-def render_volume_with_ssao(volume, camera, depth_buffer):
+-    # 1. Volume Raycast with Position/Normal Extraction
+-    # Modified GPU Volume Raycast Mapper
+-    position_texture = allocate_texture()
+-    normal_texture = allocate_texture()
+-    
+-    for each pixel (x, y):
+-        ray = camera.generate_ray(x, y)
+-        first_valid_sample = None
+-        
+-        for sample in raycast(volume, ray):
+-            if sample.opacity > ssao_pass.VolumeOpacityThreshold:
+-                if first_valid_sample is None:
+-                    first_valid_sample = sample
+-                    # Write to textures
+-                    position_texture.write(x, y, sample.position)
+-                    normal_texture.write(x, y, sample.normal)
+-                    # Prevent further writes for this pixel
+-                    break
+-        
+-        # If no sample exceeded threshold, no AO is computed for this pixel in this pass
+-    
+-    # 2. SSAO Pass
+-    # Uses position_texture, normal_texture, and depth_buffer
+-    occlusion_factor = ssao_pass.compute_occlusion(position_texture, normal_texture, depth_buffer)
+-    
+-    # 3. Apply AO to Volume Color
+-    final_color = volume_color * occlusion_factor
+-    return final_color
+ ```
+ 
+@@ -105,13 +111,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dependent on the number of samples in the SSAO kernel (`KernelSize`) and the resolution of the screen-space pass. The volume raycast itself is unchanged in complexity, but adds texture writes for position/normal.
+-*   **Memory Complexity:** Requires additional GPU textures for position and normal data per pixel, plus the `Fixed32` depth texture compatibility.
+-*   **Strengths:** Increases depth perception significantly for volume data; compatible with mixed volume and surface rendering; relatively low overhead compared to full volumetric AO.
+-*   **Limitations:** Relies on a single opacity threshold, which may not capture complex internal structures well; can cause darkening artifacts in semi-transparent regions if not tuned (addressed by variants); requires shading to be enabled.
+-*   **When to use:** When depth perception of internal volume structures is critical and performance constraints prevent full volumetric light transport calculations.
+-*   **When not to use:** When high-fidelity transparency effects are required without the "opaque" look of standard SSAO, or when the volume has very low opacity throughout.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Increases depth perception significantly for volume data; compatible with mixed volume and surface rendering; relatively low overhead compared to full volumetric AO [S1, unofficial].
++*   **Limitations:** Relies on a single opacity threshold, which may not capture complex internal structures well; can cause darkening artifacts in semi-transparent regions if not tuned (addressed by variants); requires shading to be enabled [S1, unofficial][S2, unofficial].
++*   **When to use:** When depth perception of internal volume structures is critical and performance constraints prevent full volumetric light transport calculations [G].
++*   **When not to use:** When high-fidelity transparency effects are required without the "opaque" look of standard SSAO, or when the volume has very low opacity throughout [S2, unofficial].
+ 
+ ## Background
+-Screen-Space Ambient Occlusion (SSAO) was originally developed for surface rendering to estimate ambient occlusion by sampling points in a hemisphere around each pixel's surface position and checking occlusion against the depth buffer [Parent]. The extension to volume rendering was introduced to address the lack of depth cues in volume visualization. It was implemented in the Visualization Toolkit (VTK) and discussed in the context of 3D Slicer, with significant contributions from Kitware and the 3D Slicer community around 2024 [S1, unofficial][S2, unofficial].
++Screen-Space Ambient Occlusion (SSAO) was originally developed for surface rendering to estimate ambient occlusion by sampling points in a hemisphere around each pixel's surface position and checking occlusion against the depth buffer [Parent]. The extension to volume rendering was introduced to address the lack of depth cues in volume visualization [S1, unofficial]. It was implemented in the Visualization Toolkit (VTK) and discussed in the context of 3D Slicer, with significant contributions from Kitware and the 3D Slicer community around 2024 [S1, unofficial][S2, unofficial].
+ 
+ ## Sources

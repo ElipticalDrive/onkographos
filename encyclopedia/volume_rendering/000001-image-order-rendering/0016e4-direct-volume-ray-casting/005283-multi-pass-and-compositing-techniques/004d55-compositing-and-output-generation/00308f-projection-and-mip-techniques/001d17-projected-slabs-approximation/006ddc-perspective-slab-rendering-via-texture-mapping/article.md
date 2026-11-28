@@ -1,0 +1,83 @@
+# Perspective Slab Rendering via Texture Mapping
+
+Also called: Cube-4/VolumePro Perspective Rendering via Slabbing
+
+## Overview
+Perspective Slab Rendering via Texture Mapping is a method for performing perspective volume rendering on hardware originally designed for parallel projection, such as the Cube-4/VolumePro architecture [S1, unofficial]. It solves the problem of perspective distortion in volume data by partitioning the volume into slabs and using graphics card texture mapping to handle the perspective scaling of each slab individually [S1, unofficial]. It sets itself apart from its sibling, Projected Slabs Approximation, by relying on hardware texture mapping for perspective correction rather than analytical error bounds for parallel projection approximation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset, a perspective camera definition, and a partitioning strategy for slabs.
+*   **Output:** A final composited image in the framebuffer.
+
+**Data Structures:**
+*   **Slab:** A subset of volume slices aligned either along a major volume axis or parallel to the image plane [S1, unofficial].
+*   **Slab Image:** A 2D RGB image rendered from the slab data [S1, unofficial].
+*   **Geometry Plane:** A polygon used to map the slab image onto the screen [S1, unofficial].
+
+**Steps:**
+1.  **Partition Volume:** Divide the volume into slabs of slices. Alignment is chosen along a major volume axis or parallel to the image plane [S1, unofficial].
+2.  **Render Slab Images:** For each slab, compute the RGB slab image. This step typically involves volume rendering techniques suitable for the hardware [S1, unofficial].
+3.  **Perspective Scaling via Texture Mapping:** Map each computed slab image onto a geometry plane using the graphics card's texture mapping unit. The texture mapping handles the perspective scaling required for that specific slab [S1, unofficial].
+4.  **Depth Positioning:** Set the depth position of each slab's geometry plane to the center of the slab it represents [S1, unofficial].
+5.  **Compositing:** Draw the slab images from back to front. Blend them into the framebuffer using channel compositing [S1, unofficial].
+
+**Parameters:**
+*   **Slab Thickness:** Determines the number of slabs. Thinner slabs reduce perspective distortion but increase rendering cost. A large number of thin slabs are required when perspective distortion is great [S1, unofficial].
+*   **Number of Planes (for artifact elimination):** The number of geometric planes used to map a single slab image to reduce artifacts at oblique angles [S1, unofficial].
+
+**Pitfalls:**
+*   **Perspective Distortion:** If slabs are too thick, significant perspective distortion artifacts occur, especially at oblique viewing angles [S1, unofficial].
+*   **Fill Rate:** Using multiple planes for artifact elimination increases texture mapping fill rate on the geometry processing side [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def perspective_slab_rendering(volume, camera, slab_thickness):
+    # Partition volume into slabs
+    slabs = partition_volume(volume, slab_thickness)
+    
+    # Sort slabs back-to-front relative to camera
+    slabs = sort_back_to_front(slabs, camera)
+    
+    # Initialize framebuffer
+    framebuffer = initialize_framebuffer()
+    
+    for slab in slabs:
+        # Render slab image
+        slab_image = render_slab_image(slab)
+        
+        # Determine geometry plane for texture mapping
+        # Depth is set to the center of the slab
+        plane = create_geometry_plane(slab.center, slab.image_plane)
+        
+        # Apply perspective scaling via texture mapping
+        # The hardware handles the perspective projection
+        mapped_image = texture_map(slab_image, plane, camera)
+        
+        # Composite into framebuffer
+        framebuffer = channel_composite(framebuffer, mapped_image)
+        
+    return framebuffer
+```
+
+## Subtopics
+
+### Slab Artifacts Elimination via Multi-Plane Texture Mapping
+A method to eliminate artifacts caused by viewing slabs at oblique angles (where adjacent slabs project more than one pixel apart) by texture mapping the slab image onto multiple geometric planes, without increasing the burden on the volume rendering hardware [S1, unofficial]. It reduces the values of the computed RGB slab image and modifies the values of the slab polygon during texture mapping to compensate for the reduced image values [S1, unofficial]. The tradeoffs are evaluated based on ultimate frame rate to determine both slab thickness and the number of planes for texture mapping [S1, unofficial]. This technique increases texture mapping fill rate on the geometry processing side, but is only used when slabs are more oblique so that slab images project to smaller areas on the screen [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of slabs and pixels per slab. The number of slabs is inversely proportional to slab thickness.
+*   **Memory Complexity:** Linear with respect to the volume size and slab count.
+*   **Performance:** Achieves real-time performance on specialized hardware like Cube-4/VolumePro [S1, unofficial].
+*   **Strengths:** Enables perspective rendering on parallel projection hardware; leverages hardware texture mapping for efficiency.
+*   **Limitations:** Requires many thin slabs for high perspective accuracy, increasing fill rate; artifacts at oblique angles if not mitigated.
+*   **When to Use:** When perspective volume rendering is needed on hardware with strong texture mapping capabilities but limited perspective volume rendering support.
+*   **When Not to Use:** When high accuracy at extreme oblique angles is required without the overhead of multi-plane mapping; when hardware lacks efficient texture mapping.
+
+## Background
+This method is associated with the Cube-4/VolumePro hardware and the CTK (CtK) software framework [S1, unofficial]. It was developed to enable perspective volume rendering on hardware originally designed for parallel projection, addressing the limitations of parallel projection approximations in perspective scenarios [S1, unofficial]. It is used in applications such as virtual colonoscopy, where real-time navigation and high-resolution volume rendering are critical [S1, unofficial].
+
+## Sources
+[S1] Real-Time Volume Rendering, https://cfcs.pku.edu.cn/baoquan/docs/20180622110335231616.pdf, fetched 2026-10-30 (unofficial)

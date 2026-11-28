@@ -1,0 +1,118 @@
+# Refiner
+
+**Turn messy 3D-generation point clouds into clean quad meshes.**
+
+Image/text→3D generators (Hunyuan3D, TripoSR, Gaussian splats), photogrammetry,
+and depth scans all spit out the same thing: a dense, noisy **point cloud** or a
+soup of tiny triangles. That's useless for editing, sculpting, UVs, rigging, or
+subdivision. Refiner walks it the whole way to clean, even, **quad-dominant**
+topology:
+
+```
+point cloud → oriented normals → watertight surface (Screened Poisson)
+            → cleanup / island removal → re-topology → quads → export
+```
+
+On the built-in test shapes it produces **100% quad** output.
+
+| ![blob](samples/blob_clean.png) | ![torus](samples/torus_clean.png) |
+|---|---|
+| lumpy blob — 7.5k quads | torus (genus-1) — 5.7k quads |
+
+---
+
+## Install
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+Runs headless on CPU. The heavy lifting is [`pymeshlab`](https://pymeshlab.readthedocs.io)
+(bundled MeshLab — Screened Poisson, isotropic remeshing, tri→quad pairing). No
+GPU, no Blender required.
+
+## Quick start
+
+```powershell
+# make a noisy test cloud that mimics generator output
+python make_sample.py blob -o samples/blob.ply -n 45000 --noise 0.012
+
+# refine it
+python refiner.py samples/blob.ply -o out.obj --tier clean
+
+# look at the topology
+python preview.py out.obj -o out.png
+```
+
+## Quality tiers
+
+```powershell
+python refiner.py cloud.ply -o out.obj --tier fast    # default
+python refiner.py cloud.ply -o out.obj --tier clean
+```
+
+- **fast** — Screened Poisson → cleanup → smart tri→quad pairing.
+  Quad-dominant, preserves detail, ~15–20 s. Good enough for most cleanup.
+- **clean** — adds a **curvature-adaptive isotropic remesh** before pairing, so
+  quads are uniform and follow the surface. Sculpt / subdivision ready. ~10–15 s.
+
+## Common knobs
+
+| flag | what it does | default |
+|---|---|---|
+| `--tier {fast,clean}` | quality tier | `fast` |
+| `--target N` | triangle budget before quadding (`-1`=auto, `0`=full res) | `-1` |
+| `--depth N` | Poisson octree depth — `8` balanced, `9–10` detailed | `8` |
+| `--edge P` | *(clean)* remesh edge length, % of bbox diagonal — lower = denser/smoother | `1.0` |
+| `--smooth N` | Taubin denoise iterations (kills generator surface noise) | `3` |
+| `--point-weight W` | Poisson fit — higher hugs the points tighter | `4.0` |
+| `--knn N` | neighbors for normal estimation | `16` |
+| `--flip` | flip normals if the surface comes out inside-out | off |
+
+`python refiner.py --help` lists everything.
+
+## How it actually wins (and the gotchas)
+
+Getting to **100% quads** took fixing two non-obvious traps in MeshLab's pipeline:
+
+1. **Density trimming opens the mesh — and open boundaries kill quad pairing.**
+   The classic Poisson cleanup ("delete low-density vertices") leaves a big
+   boundary loop. MeshLab's smart tri→quad pairing then collapses to ~1% quads
+   on the bordered mesh, and the damage *survives a full remesh*. So density
+   trim is **off by default** (`--density-trim 0`); it's only for partial scans
+   where you accept a triangle result.
+
+2. **Pairing is ~quadratic.** On a raw 200k-face Poisson mesh it took **150 s**.
+   Each tier now decimates to a sane budget first (`--target -1` auto), cutting
+   that to ~15 s with no visible quality loss — and nobody wants 200k-face
+   "clean topology" anyway.
+
+3. **A mesh input can be a lie.** 3D generators often emit a "mesh" that's
+   actually a shattered shell — e.g. one real model came in with **1,437
+   disconnected islands and 25% open-boundary edges**. Retopologising those
+   triangles in place just makes quad-shaped garbage (it looks hollow / you can
+   see through it in Blender). Refiner now runs `get_topological_measures` on
+   every mesh input and, if it's broken (>10 components, or >3% boundary edges,
+   or non-manifold), **discards the triangles and rebuilds a watertight surface
+   from the points** before retopo. Override with `--trust-mesh`.
+
+Reported quad ratios are counted from the **actual written file**, not from a
+filter that can lie about bordered meshes. (Likewise, `trimesh` over-counts
+components on a quad OBJ — pymeshlab's `get_topological_measures` is the source
+of truth: the rebuilt model is **1 component, 0 boundary edges**.)
+
+## Files
+
+- `refiner.py` — the engine + CLI
+- `make_sample.py` — generate noisy test clouds (`sphere` / `torus` / `blob`)
+- `preview.py` — render a quad-wireframe PNG of any OBJ
+- `samples/` — generated clouds, refined meshes, preview renders
+
+## Roadmap
+
+- **Field-aligned pure quads** (Instant Meshes / QuadriFlow flow following
+  principal curvature) as a third `--tier pro`. The current `clean` tier gets
+  uniform quads via adaptive remeshing; true field-aligned edge flow needs an
+  external solver (no Python 3.14 wheel yet — would shell out to a binary).
+- Glob / batch mode for whole folders of generator output.
+- Auto normal-orientation via camera positions when available.

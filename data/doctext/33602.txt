@@ -1,0 +1,1024 @@
+ComputeMarchingCubes
+====================
+
+![gif](https://user-images.githubusercontent.com/343936/121985718-420d6d80-cdd0-11eb-9f2f-04ed15d925c5.gif)
+![gif](https://user-images.githubusercontent.com/343936/121985721-43d73100-cdd0-11eb-89e4-3801387ac88d.gif)
+
+**ComputeMarchingCubes** is a Unity sample project that reconstructs
+isosurfaces of scalar volume data using a compute shader and the [new mesh API]
+graphics buffer direct access).
+
+[new mesh API]:
+  https://docs.google.com/document/d/1_YrJafo9_ZsFm4-8K2QlD0k3RgwZ_49tSA84paobfcY/edit#heading=h.cvw3aojqmyd2
+
+It uses the classic [marching cubes] algorithm for isosurface reconstruction.
+The implementation is based on Paul Bourke's article but partially modified for
+GPU optimization.
+
+[marching cubes]: https://en.wikipedia.org/wiki/Marching_cubes
+[Paul Bourke's article]: http://paulbourke.net/geometry/polygonise/
+
+System requirements
+-------------------
+
+- Unity 6
+- Compute shader capable system
+
+What's inside
+-------------
+
+This project contains two sample scenes:
+
+- **NoiseField**: Visualizes a simple animating noise field.
+- **VolumeData**: Visualizes a CT scan dataset from the
+  [Stanford volume data archive].
+
+[Stanford volume data archive]: https://graphics.stanford.edu/data/voldata/
+
+Note that the configuration of the volume data is hardcoded in the sample
+script/shader. You have to implement a data parser to support a specific volume
+data format.
+
+### Assets/MarchingCubes/MarchingCubes.compute
+```
+#pragma kernel MeshReconstruction
+#pragma kernel ClearUnused
+
+// Workaround for the absence of sizeof operator in HLSL
+#define SIZEOF_UINT 4
+#define SIZEOF_FLOAT3 12
+
+// Parameters
+uint3 Dims;
+uint MaxTriangle;
+float Scale;
+float Isovalue;
+
+// Grid space to object space transformation
+float3 TransformPoint(float3 p)
+{
+    return (p + 0.5 - Dims / 2) * Scale;
+}
+
+//
+// "Triangle table" that contains triangle lists for each cube configuration
+//
+
+StructuredBuffer<uint2> TriangleTable;
+
+uint EdgeIndexFromTriangleTable(uint2 data, uint index)
+{
+    return 0xfu & (index < 8 ? data.x >> ((index + 0) * 4) :
+                               data.y >> ((index - 8) * 4));
+}
+
+//
+// Input voxels
+//
+
+StructuredBuffer<float> Voxels;
+
+float VoxelValue(uint x, uint y, uint z)
+{
+    return Voxels[x + Dims.x * (y + Dims.y * z)];
+}
+
+// Voxel value with calculated gradient
+float4 VoxelValueWithGradient(uint3 i)
+{
+    uint3 i_n = max(i, 1) - 1;
+    uint3 i_p = min(i + 1, Dims - 1);
+    float v = VoxelValue(i.x, i.y, i.z);
+    float v_nx = VoxelValue(i_n.x, i.y, i.z);
+    float v_px = VoxelValue(i_p.x, i.y, i.z);
+    float v_ny = VoxelValue(i.x, i_n.y, i.z);
+    float v_py = VoxelValue(i.x, i_p.y, i.z);
+    float v_nz = VoxelValue(i.x, i.y, i_n.z);
+    float v_pz = VoxelValue(i.x, i.y, i_p.z);
+    return float4(v_px - v_nx, v_py - v_ny, v_pz - v_nz, v);
+}
+
+//
+// Output buffer and counter
+//
+
+RWByteAddressBuffer VertexBuffer;
+RWByteAddressBuffer IndexBuffer;
+RWStructuredBuffer<uint> Counter; // used only for counting
+
+// Vertex buffer accessor
+void WriteVertex(uint offset, float3 p, float3 n)
+{
+    uint addr_p = offset * SIZEOF_FLOAT3 * 2;
+    uint addr_n = addr_p + SIZEOF_FLOAT3;
+    VertexBuffer.Store3(addr_p, asuint(p));
+    VertexBuffer.Store3(addr_n, asuint(n));
+}
+
+// Index buffer accessor
+void WriteIndices(uint offset, uint3 indices)
+{
+    IndexBuffer.Store3(offset * SIZEOF_UINT, indices);
+}
+
+//
+// Cube geometry/topology
+//
+
+// This must match one defined in Paul Bourke's article:
+// http://paulbourke.net/geometry/polygonise/
+
+uint3 CubeVertex(uint index)
+{
+    bool x = index & 1;
+    bool y = index & 2;
+    bool z = index & 4;
+    return uint3(x ^ y, y, z);
+}
+
+uint2 EdgeVertexPair(uint index)
+{
+    // (0, 1) (1, 2) (2, 3) (3, 0)
+    // (4, 5) (5, 6) (6, 7) (7, 4)
+    // (0, 4) (1, 5) (2, 6) (3, 7)
+    uint v1 = index & 7;
+    uint v2 = index < 8 ? ((index + 1) & 3) | (index & 4) : v1 + 4;
+    return uint2(v1, v2);
+}
+
+//
+// Marching cube mesh reconstruction kernel
+//
+
+[numthreads(4, 4, 4)]
+void MeshReconstruction(uint3 id : SV_DispatchThreadID)
+{
+    // Boundary check
+    if (any(id + 1 >= Dims.xyz)) return;
+
+    // Voxel samples at each cube vertex
+    float4 samples[8];
+    for (uint i = 0; i < 8; i++)
+        samples[i] = VoxelValueWithGradient(id + CubeVertex(i));
+
+    // Cube configuration selector
+    // (initialized as a bit field of vertex binary states)
+    uint selector = 0;
+    for (i = 0; i < 8; i++)
+        selector |= (samples[i].w < Isovalue) << i;
+
+    // Special case for empty cubes; Exit ealy if there is no intersection.
+    if (selector == 0 || selector == 0xff) return;
+
+    // Intersection points on each edge
+    // We do this in a GPU-oriented way; Do the calculation on all the edges
+    // including ones without an intersection.
+    float3 vertices[12];
+    float3 normals[12];
+    for (i = 0; i < 12; i++)
+    {
+        uint2 pair = EdgeVertexPair(i);
+        float4 sample1 = samples[pair.x];
+        float4 sample2 = samples[pair.y];
+        float3 vertex1 = id + CubeVertex(pair.x);
+        float3 vertex2 = id + CubeVertex(pair.y);
+        float param = (Isovalue - sample1.w) / (sample2.w - sample1.w);
+        vertices[i] = TransformPoint(lerp(vertex1, vertex2, param));
+        normals[i] = -normalize(lerp(sample1.xyz, sample2.xyz, param));
+    }
+
+    // Output triangles in the selected cube configuration.
+    uint2 tri_data = TriangleTable[selector];
+    for (i = 0; i < 15; i += 3)
+    {
+        uint e1 = EdgeIndexFromTriangleTable(tri_data, i);
+        uint e2 = EdgeIndexFromTriangleTable(tri_data, i + 1);
+        uint e3 = EdgeIndexFromTriangleTable(tri_data, i + 2);
+        if (e1 == 15) return;
+
+        uint count = Counter.IncrementCounter();
+        if (count >= MaxTriangle) return;
+
+        uint vidx = count * 3;
+        WriteVertex(vidx + 0, vertices[e1], normals[e1]);
+        WriteVertex(vidx + 1, vertices[e2], normals[e2]);
+        WriteVertex(vidx + 2, vertices[e3], normals[e3]);
+        WriteIndices(vidx, uint3(vidx, vidx + 1, vidx + 2));
+    }
+}
+
+//
+// Cleanup kernel that clears the unused area of the buffers
+//
+
+[numthreads(64, 1, 1)]
+void ClearUnused(uint id : SV_DispatchThreadID)
+{
+    while (true)
+    {
+        uint count = Counter.IncrementCounter();
+        if (count >= MaxTriangle) break;
+        uint vidx = count * 3;
+        WriteVertex(vidx + 0, 0, 0);
+        WriteVertex(vidx + 1, 0, 0);
+        WriteVertex(vidx + 2, 0, 0);
+        WriteIndices(vidx, uint3(0, 0, 0));
+    }
+}
+```
+
+### Assets/MarchingCubes/MeshBuilder.cs
+```
+using UnityEngine;
+using UnityEngine.Rendering;
+
+namespace MarchingCubes {
+
+//
+// Isosurface mesh builder with the marching cubes algorithm
+//
+sealed class MeshBuilder : System.IDisposable
+{
+    #region Public members
+
+    public Mesh Mesh => _mesh;
+
+    public MeshBuilder(int x, int y, int z, int budget, ComputeShader compute)
+      => Initialize((x, y, z), budget, compute);
+
+    public MeshBuilder(Vector3Int dims, int budget, ComputeShader compute)
+      => Initialize((dims.x, dims.y, dims.z), budget, compute);
+
+    public void Dispose()
+      => ReleaseAll();
+
+    public void BuildIsosurface(ComputeBuffer voxels, float target, float scale)
+      => RunCompute(voxels, target, scale);
+
+    #endregion
+
+    #region Private members
+
+    (int x, int y, int z) _grids;
+    int _triangleBudget;
+    ComputeShader _compute;
+
+    void Initialize((int, int, int) dims, int budget, ComputeShader compute)
+    {
+        _grids = dims;
+        _triangleBudget = budget;
+        _compute = compute;
+
+        AllocateBuffers();
+        AllocateMesh(3 * _triangleBudget);
+    }
+
+    void ReleaseAll()
+    {
+        ReleaseBuffers();
+        ReleaseMesh();
+    }
+
+    void RunCompute(ComputeBuffer voxels, float target, float scale)
+    {
+        _counterBuffer.SetCounterValue(0);
+
+        // Isosurface reconstruction
+        _compute.SetInts("Dims", _grids);
+        _compute.SetInt("MaxTriangle", _triangleBudget);
+        _compute.SetFloat("Scale", scale);
+        _compute.SetFloat("Isovalue", target);
+        _compute.SetBuffer(0, "TriangleTable", _triangleTable);
+        _compute.SetBuffer(0, "Voxels", voxels);
+        _compute.SetBuffer(0, "VertexBuffer", _vertexBuffer);
+        _compute.SetBuffer(0, "IndexBuffer", _indexBuffer);
+        _compute.SetBuffer(0, "Counter", _counterBuffer);
+        _compute.DispatchThreads(0, _grids);
+
+        // Clear unused area of the buffers.
+        _compute.SetBuffer(1, "VertexBuffer", _vertexBuffer);
+        _compute.SetBuffer(1, "IndexBuffer", _indexBuffer);
+        _compute.SetBuffer(1, "Counter", _counterBuffer);
+        _compute.DispatchThreads(1, 1024, 1, 1);
+
+        // Bounding box
+        var ext = new Vector3(_grids.x, _grids.y, _grids.z) * scale;
+        _mesh.bounds = new Bounds(Vector3.zero, ext);
+    }
+
+    #endregion
+
+    #region Compute buffer objects
+
+    ComputeBuffer _triangleTable;
+    ComputeBuffer _counterBuffer;
+
+    void AllocateBuffers()
+    {
+        // Marching cubes triangle table
+        _triangleTable = new ComputeBuffer(256, sizeof(ulong));
+        _triangleTable.SetData(PrecalculatedData.TriangleTable);
+
+        // Buffer for triangle counting
+        _counterBuffer = new ComputeBuffer(1, 4, ComputeBufferType.Counter);
+    }
+
+    void ReleaseBuffers()
+    {
+        _triangleTable.Dispose();
+        _counterBuffer.Dispose();
+    }
+
+    #endregion
+
+    #region Mesh objects
+
+    Mesh _mesh;
+    GraphicsBuffer _vertexBuffer;
+    GraphicsBuffer _indexBuffer;
+
+    void AllocateMesh(int vertexCount)
+    {
+        _mesh = new Mesh();
+
+        // We want GraphicsBuffer access as Raw (ByteAddress) buffers.
+        _mesh.indexBufferTarget |= GraphicsBuffer.Target.Raw;
+        _mesh.vertexBufferTarget |= GraphicsBuffer.Target.Raw;
+
+        // Vertex position: float32 x 3
+        var vp = new VertexAttributeDescriptor
+          (VertexAttribute.Position, VertexAttributeFormat.Float32, 3);
+
+        // Vertex normal: float32 x 3
+        var vn = new VertexAttributeDescriptor
+          (VertexAttribute.Normal, VertexAttributeFormat.Float32, 3);
+
+        // Vertex/index buffer formats
+        _mesh.SetVertexBufferParams(vertexCount, vp, vn);
+        _mesh.SetIndexBufferParams(vertexCount, IndexFormat.UInt32);
+
+        // Submesh initialization
+        _mesh.SetSubMesh(0, new SubMeshDescriptor(0, vertexCount),
+                         MeshUpdateFlags.DontRecalculateBounds);
+
+        // GraphicsBuffer references
+        _vertexBuffer = _mesh.GetVertexBuffer(0);
+        _indexBuffer = _mesh.GetIndexBuffer();
+    }
+
+    void ReleaseMesh()
+    {
+        _vertexBuffer.Dispose();
+        _indexBuffer.Dispose();
+        Object.Destroy(_mesh);
+    }
+
+    #endregion
+}
+
+} // namespace MarchingCubes
+```
+
+### Assets/MarchingCubes/TriangleTable.cs
+```
+namespace MarchingCubes {
+
+static class PrecalculatedData
+{
+    // Generated from Paul Bourke's table
+    // http://paulbourke.net/geometry/polygonise/
+    public static ulong [] TriangleTable =
+    {
+        0xffffffffffffffffUL,
+        0xfffffffffffff380UL,
+        0xfffffffffffff910UL,
+        0xffffffffff189381UL,
+        0xfffffffffffffa21UL,
+        0xffffffffffa21380UL,
+        0xffffffffff920a29UL,
+        0xfffffff89a8a2382UL,
+        0xfffffffffffff2b3UL,
+        0xffffffffff0b82b0UL,
+        0xffffffffffb32091UL,
+        0xfffffffb89b912b1UL,
+        0xffffffffff3ab1a3UL,
+        0xfffffffab8a801a0UL,
+        0xfffffff9ab9b3093UL,
+        0xffffffffffb8aa89UL,
+        0xfffffffffffff874UL,
+        0xffffffffff437034UL,
+        0xffffffffff748910UL,
+        0xfffffff137174914UL,
+        0xffffffffff748a21UL,
+        0xfffffffa21403743UL,
+        0xfffffff748209a29UL,
+        0xffff4973727929a2UL,
+        0xffffffffff2b3748UL,
+        0xfffffff40242b74bUL,
+        0xfffffffb32748109UL,
+        0xffff1292b9b49b74UL,
+        0xfffffff487ab31a3UL,
+        0xffff4b7401b41ab1UL,
+        0xffff30bab9b09874UL,
+        0xfffffffab99b4b74UL,
+        0xfffffffffffff459UL,
+        0xffffffffff380459UL,
+        0xffffffffff051450UL,
+        0xfffffff513538458UL,
+        0xffffffffff459a21UL,
+        0xfffffff594a21803UL,
+        0xfffffff204245a25UL,
+        0xffff8434535235a2UL,
+        0xffffffffffb32459UL,
+        0xfffffff594b802b0UL,
+        0xfffffffb32510450UL,
+        0xffff584b82852512UL,
+        0xfffffff45931ab3aUL,
+        0xffffab81a8180594UL,
+        0xffff30bab5b05045UL,
+        0xfffffffb8aa85845UL,
+        0xffffffffff975879UL,
+        0xfffffff375359039UL,
+        0xfffffff751710870UL,
+        0xffffffffff753351UL,
+        0xfffffff21a759879UL,
+        0xffff37503505921aUL,
+        0xffff25a758528208UL,
+        0xfffffff7533525a2UL,
+        0xfffffff2b3987597UL,
+        0xffffb72029279759UL,
+        0xffff751871810b32UL,
+        0xfffffff51771b12bUL,
+        0xffffb3a31a758859UL,
+        0xf0aba010b7905075UL,
+        0xf07570805a30b0abUL,
+        0xffffffffff5b75abUL,
+        0xfffffffffffff56aUL,
+        0xffffffffff6a5380UL,
+        0xffffffffff6a5109UL,
+        0xfffffff6a5891381UL,
+        0xffffffffff162561UL,
+        0xfffffff803621561UL,
+        0xfffffff620609569UL,
+        0xffff823625285895UL,
+        0xffffffffff56ab32UL,
+        0xfffffff56a02b80bUL,
+        0xfffffff6a5b32910UL,
+        0xffffb892b92916a5UL,
+        0xfffffff315356b36UL,
+        0xffff6b51505b0b80UL,
+        0xffff9505606306b3UL,
+        0xfffffff89bb96956UL,
+        0xffffffffff8746a5UL,
+        0xfffffffa56374034UL,
+        0xfffffff7486a5091UL,
+        0xffff49737179156aUL,
+        0xfffffff874156216UL,
+        0xffff743403625521UL,
+        0xffff620560509748UL,
+        0xf962695923497937UL,
+        0xfffffff56a4872b3UL,
+        0xffffb720242746a5UL,
+        0xffff6a5b32874910UL,
+        0xf6a54b7b492b9129UL,
+        0xffff6b51535b3748UL,
+        0xfb404b7b016b5b15UL,
+        0xf74836b630560950UL,
+        0xffff9b7974b96956UL,
+        0xffffffffffa4694aUL,
+        0xfffffff380a946a4UL,
+        0xfffffff04606a10aUL,
+        0xffffa16468618138UL,
+        0xfffffff462421941UL,
+        0xffff462942921803UL,
+        0xffffffffff624420UL,
+        0xfffffff624428238UL,
+        0xfffffff32b46a94aUL,
+        0xffff6a4a94b82280UL,
+        0xffffa164606102b3UL,
+        0xf1b8b12184a16146UL,
+        0xffff36b319639469UL,
+        0xf14641916b0181b8UL,
+        0xfffffff4600636b3UL,
+        0xffffffffff86b846UL,
+        0xfffffffa98a876a7UL,
+        0xffffa76a907a0370UL,
+        0xffff0818717a176aUL,
+        0xfffffff37117a76aUL,
+        0xffff768981861621UL,
+        0xf937390976192962UL,
+        0xfffffff206607087UL,
+        0xffffffffff276237UL,
+        0xffff76898a86ab32UL,
+        0xf7a9a76790b72702UL,
+        0xfb32a767a1871081UL,
+        0xffff17616a71b12bUL,
+        0xf63136b619768698UL,
+        0xffffffffff76b190UL,
+        0xffff06b0b3607087UL,
+        0xfffffffffffff6b7UL,
+        0xfffffffffffffb67UL,
+        0xffffffffff67b803UL,
+        0xffffffffff67b910UL,
+        0xfffffff67b138918UL,
+        0xffffffffff7b621aUL,
+        0xfffffff7b6803a21UL,
+        0xfffffff7b69a2092UL,
+        0xffff89a38a3a27b6UL,
+        0xffffffffff726327UL,
+        0xfffffff026067807UL,
+        0xfffffff910732672UL,
+        0xffff678891681261UL,
+        0xfffffff73171a67aUL,
+        0xffff801781a7167aUL,
+        0xffff7a69a0a70730UL,
+        0xfffffff9a88a7a67UL,
+        0xffffffffff68b486UL,
+        0xfffffff640603b63UL,
+        0xfffffff109648b68UL,
+        0xffff63b139369649UL,
+        0xfffffff1a28b6486UL,
+        0xffff640b60b03a21UL,
+        0xffff9a2920b648b4UL,
+        0xf36463b34923a39aUL,
+        0xfffffff264248328UL,
+        0xffffffffff264240UL,
+        0xffff834642432091UL,
+        0xfffffff642241491UL,
+        0xffff1a6648168318UL,
+        0xfffffff40660a01aUL,
+        0xf39a9303a6834364UL,
+        0xffffffffff4a649aUL,
+        0xffffffffffb67594UL,
+        0xfffffff67b594380UL,
+        0xfffffffb67045105UL,
+        0xffff51345343867bUL,
+        0xfffffffb6721a459UL,
+        0xffff594380a217b6UL,
+        0xffff204a24a45b67UL,
+        0xf67b25a523453843UL,
+        0xfffffff945267327UL,
+        0xffff786260680459UL,
+        0xffff045051673263UL,
+        0xf851584812786826UL,
+        0xffff73167161a459UL,
+        0xf459078701671a61UL,
+        0xfa737a6a305a4a04UL,
+        0xffffa84a458a7a67UL,
+        0xfffffff98b9b6596UL,
+        0xffff590650360b63UL,
+        0xffffb65510b508b0UL,
+        0xfffffff1355363b6UL,
+        0xffff65b8b9b59a21UL,
+        0xfa21965690b603b0UL,
+        0xf52025a50865b58bUL,
+        0xffff35a3a25363b6UL,
+        0xffff283265825985UL,
+        0xfffffff260069659UL,
+        0xf826283865081851UL,
+        0xffffffffff612651UL,
+        0xf698965683a61631UL,
+        0xffff06505960a01aUL,
+        0xffffffffffa65830UL,
+        0xfffffffffffff65aUL,
+        0xffffffffffb57a5bUL,
+        0xfffffff03857ba5bUL,
+        0xfffffff091ba57b5UL,
+        0xffff1381897ba57aUL,
+        0xfffffff15717b21bUL,
+        0xffffb27571721380UL,
+        0xffff7b2209729579UL,
+        0xf289823295b27257UL,
+        0xfffffff573532a52UL,
+        0xffff52a578258028UL,
+        0xffff2a37353a5109UL,
+        0xf25752a278129289UL,
+        0xffffffffff573531UL,
+        0xfffffff571170780UL,
+        0xfffffff735539309UL,
+        0xffffffffff795789UL,
+        0xfffffff8ba8a5485UL,
+        0xffff03bba50b5405UL,
+        0xffff54aba8a48910UL,
+        0xf41314943b54a4baUL,
+        0xffff8548b2582152UL,
+        0xfb151b2b543b0b40UL,
+        0xf58b8545b2950520UL,
+        0xffffffffff3b2549UL,
+        0xffff483543253a52UL,
+        0xfffffff0244252a5UL,
+        0xf910854583a532a3UL,
+        0xffff2492914252a5UL,
+        0xfffffff153358548UL,
+        0xffffffffff501540UL,
+        0xffff530509358548UL,
+        0xfffffffffffff549UL,
+        0xfffffffba9b947b4UL,
+        0xffffba97b9794380UL,
+        0xffffb470414b1ba1UL,
+        0xf4bab474a1843413UL,
+        0xffff219b294b97b4UL,
+        0xf3801b2b197b9479UL,
+        0xfffffff04224b47bUL,
+        0xffff42343824b47bUL,
+        0xffff947732972a92UL,
+        0xf70207872a4797a9UL,
+        0xfa040a1a472a3a73UL,
+        0xffffffffff4782a1UL,
+        0xfffffff317714194UL,
+        0xffff178180714194UL,
+        0xffffffffff347304UL,
+        0xfffffffffffff784UL,
+        0xffffffffff8ba8a9UL,
+        0xfffffffa9bb93903UL,
+        0xfffffffba88a0a10UL,
+        0xffffffffffa3ba13UL,
+        0xfffffff8b99b1b21UL,
+        0xffff9b2921b93903UL,
+        0xffffffffffb08b20UL,
+        0xfffffffffffffb23UL,
+        0xfffffff98aa82832UL,
+        0xffffffffff2902a9UL,
+        0xffff8a1810a82832UL,
+        0xfffffffffffff2a1UL,
+        0xffffffffff819831UL,
+        0xfffffffffffff190UL,
+        0xfffffffffffff830UL,
+        0xffffffffffffffffUL
+    };
+}
+
+} // namespace MarchingCubes
+```
+
+### Assets/MarchingCubes/Util.cs
+```
+using UnityEngine;
+
+namespace MarchingCubes {
+
+static class ComputeShaderExtensions
+{
+    public static void SetInts
+      (this ComputeShader compute, string name, (int x, int y, int z) t)
+      => compute.SetInts(name, t.x, t.y, t.z);
+
+    public static void SetInts
+      (this ComputeShader compute, string name, Vector3Int v)
+      => compute.SetInts(name, v.x, v.y, v.z);
+
+    public static void DispatchThreads
+      (this ComputeShader compute, int kernel, int x, int y, int z)
+    {
+        uint xc, yc, zc;
+        compute.GetKernelThreadGroupSizes(kernel, out xc, out yc, out zc);
+
+        x = (x + (int)xc - 1) / (int)xc;
+        y = (y + (int)yc - 1) / (int)yc;
+        z = (z + (int)zc - 1) / (int)zc;
+
+        compute.Dispatch(kernel, x, y, z);
+    }
+
+    public static void DispatchThreads
+      (this ComputeShader compute, int kernel, (int x, int y, int z) t)
+      => DispatchThreads(compute, kernel, t.x, t.y, t.z);
+
+    public static void DispatchThreads
+      (this ComputeShader compute, int kernel, Vector3Int v)
+      => DispatchThreads(compute, kernel, v.x, v.y, v.z);
+}
+
+} // namespace MarchingCubes
+```
+
+### Assets/NoiseField/NoiseFieldGenerator.compute
+```
+#pragma kernel NoiseFieldGenerator
+
+#include "Packages/jp.keijiro.noiseshader/Shader/SimplexNoise3D.hlsl"
+
+uint3 Dims;
+float Scale;
+float Time;
+RWStructuredBuffer<float> Voxels;
+
+[numthreads(8, 8, 8)]
+void NoiseFieldGenerator(uint3 id : SV_DispatchThreadID)
+{
+    float3 p = Scale * (id + 0.5 - Dims / 2);
+    float value = -p.y;
+    value += SimplexNoise(p * 0.83 + float3(-0.37, -0.12, 0) * Time) * 0.5;
+    value += SimplexNoise(p * 0.72 + float3(0.21, +0.07, 0) * Time) * 0.5;
+    Voxels[id.x + Dims.x * (id.y + Dims.y * id.z)] = value;
+}
+```
+
+### Assets/NoiseField/NoiseFieldVisualizer.cs
+```
+using UnityEngine;
+
+namespace MarchingCubes {
+
+sealed class NoiseFieldVisualizer : MonoBehaviour
+{
+    #region Editable attributes
+
+    [SerializeField] Vector3Int _dimensions = new Vector3Int(64, 32, 64);
+    [SerializeField] float _gridScale = 4.0f / 64;
+    [SerializeField] int _triangleBudget = 65536;
+    [SerializeField] float _targetValue = 0;
+
+    #endregion
+
+    #region Project asset references
+
+    [SerializeField, HideInInspector] ComputeShader _volumeCompute = null;
+    [SerializeField, HideInInspector] ComputeShader _builderCompute = null;
+
+    #endregion
+
+    #region Private members
+
+    int VoxelCount => _dimensions.x * _dimensions.y * _dimensions.z;
+
+    ComputeBuffer _voxelBuffer;
+    MeshBuilder _builder;
+
+    #endregion
+
+    #region MonoBehaviour implementation
+
+    void Start()
+    {
+        _voxelBuffer = new ComputeBuffer(VoxelCount, sizeof(float));
+        _builder = new MeshBuilder(_dimensions, _triangleBudget, _builderCompute);
+    }
+
+    void OnDestroy()
+    {
+        _voxelBuffer.Dispose();
+        _builder.Dispose();
+    }
+
+    void Update()
+    {
+        // Noise field update
+        _volumeCompute.SetInts("Dims", _dimensions);
+        _volumeCompute.SetFloat("Scale", _gridScale);
+        _volumeCompute.SetFloat("Time", Time.time);
+        _volumeCompute.SetBuffer(0, "Voxels", _voxelBuffer);
+        _volumeCompute.DispatchThreads(0, _dimensions);
+
+        // Isosurface reconstruction
+        _builder.BuildIsosurface(_voxelBuffer, _targetValue, _gridScale);
+        GetComponent<MeshFilter>().sharedMesh = _builder.Mesh;
+    }
+
+    #endregion
+}
+
+} // namespace MarchingCubes
+```
+
+### Assets/UI/DragReceiver.cs
+```
+using UnityEngine;
+using UnityEngine.UIElements;
+
+namespace MarchingCubes {
+
+public sealed class DragReceiver : PointerManipulator
+{
+    #region Constructor
+
+    public delegate void DragCallback(Vector2 delta);
+
+    public DragReceiver(DragCallback callback)
+    {
+        _callback = callback;
+        activators.Add(new ManipulatorActivationFilter{button = MouseButton.LeftMouse});
+    }
+
+    #endregion
+
+    #region Private variables
+
+    DragCallback _callback;
+    int _pointerID = -1;
+    Vector3 _position;
+
+    #endregion
+
+    #region PointerManipulator implementation
+
+    bool IsActive => _pointerID >= 0;
+
+    protected override void RegisterCallbacksOnTarget()
+    {
+        target.RegisterCallback<PointerDownEvent>(OnPointerDown);
+        target.RegisterCallback<PointerMoveEvent>(OnPointerMove);
+        target.RegisterCallback<PointerUpEvent>(OnPointerUp);
+    }
+
+    protected override void UnregisterCallbacksFromTarget()
+    {
+        target.UnregisterCallback<PointerDownEvent>(OnPointerDown);
+        target.UnregisterCallback<PointerMoveEvent>(OnPointerMove);
+        target.UnregisterCallback<PointerUpEvent>(OnPointerUp);
+    }
+
+    #endregion
+
+    #region Pointer callbacks
+
+    void OnPointerDown(PointerDownEvent e)
+    {
+        if (IsActive)
+        {
+            e.StopImmediatePropagation();
+        }
+        else if (CanStartManipulation(e))
+        {
+            _position = e.position;
+            target.CapturePointer(_pointerID = e.pointerId);
+            e.StopPropagation();
+        }
+    }
+
+    void OnPointerMove(PointerMoveEvent e)
+    {
+        if (!IsActive || !target.HasPointerCapture(_pointerID)) return;
+
+        _callback(e.position - _position);
+        _position = e.position;
+
+        e.StopPropagation();
+    }
+
+    void OnPointerUp(PointerUpEvent e)
+    {
+        if (!IsActive || !target.HasPointerCapture(_pointerID)) return;
+
+        if (CanStopManipulation(e))
+        {
+            _pointerID = -1;
+            target.ReleaseMouse();
+            e.StopPropagation();
+        }
+    }
+
+    #endregion
+}
+
+} // namespace MarchingCubes
+```
+
+### Assets/UI/PivotController.cs
+```
+using UnityEngine;
+using UnityEngine.UIElements;
+using Unity.Mathematics;
+using Klak.Math;
+
+namespace MarchingCubes {
+
+public sealed class PivotController : MonoBehaviour
+{
+    [field:SerializeField] public float2 Speed { get; set; } = 0.02f;
+
+    quaternion _rotation;
+
+    void OnPointerDrag(Vector2 delta)
+    {
+        var rx = quaternion.RotateY(delta.x * Speed.x);
+        var ry = quaternion.RotateX(delta.y * Speed.y);
+        _rotation = math.mul(_rotation, math.mul(rx, ry));
+    }
+
+    void Start()
+    {
+        _rotation = transform.localRotation;
+        FindFirstObjectByType<UIDocument>().rootVisualElement.
+          Q("empty-area").AddManipulator(new DragReceiver(OnPointerDrag));
+    }
+
+    void Update()
+      => transform.localRotation =
+           ExpTween.Step(transform.localRotation, _rotation, 12);
+}
+
+} // namespace MarchingCubes
+```
+
+### Assets/VolumeData/VolumeDataConverter.compute
+```
+#pragma kernel VolumeDataConverter
+
+uint3 Dims;
+ByteAddressBuffer Source;
+RWStructuredBuffer<float> Voxels;
+
+[numthreads(8, 8, 8)]
+void VolumeDataConverter(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x + Dims.x * (id.y + Dims.y * id.z);
+
+    // Source voxel fetch
+    uint data = Source.Load((index / 2) * 4);
+
+    // ushort -> uint
+    data = (index & 1) ? (data >> 16) : (data & 0xffffu);
+
+    // byte order swap
+    data = ((data & 0xff) << 8) + (data >> 8);
+
+    // uint -> float
+    Voxels[index] = 20.0 * data / 0xffff;
+}
+```
+
+### Assets/VolumeData/VolumeDataVisualizer.cs
+```
+using UnityEngine;
+using UnityEngine.UIElements;
+using Unity.Properties;
+
+namespace MarchingCubes {
+
+sealed class VolumeDataVisualizer : MonoBehaviour
+{
+    #region Editable attributes
+
+    [SerializeField] TextAsset _volumeData = null;
+    [SerializeField] Vector3Int _dimensions = new Vector3Int(256, 256, 113);
+    [SerializeField] float _gridScale = 4.0f / 256;
+    [SerializeField] int _triangleBudget = 65536 * 16;
+
+    #endregion
+
+    #region Project asset references
+
+    [SerializeField, HideInInspector] ComputeShader _converterCompute = null;
+    [SerializeField, HideInInspector] ComputeShader _builderCompute = null;
+
+    #endregion
+
+    #region Target isovalue
+
+    [CreateProperty] public float TargetValue { get; set; } = 0.4f;
+    float _builtTargetValue;
+
+    #endregion
+
+    #region Private members
+
+    int VoxelCount => _dimensions.x * _dimensions.y * _dimensions.z;
+
+    ComputeBuffer _voxelBuffer;
+    MeshBuilder _builder;
+
+    #endregion
+
+    #region MonoBehaviour implementation
+
+    void Start()
+    {
+        _voxelBuffer = new ComputeBuffer(VoxelCount, sizeof(float));
+        _builder = new MeshBuilder(_dimensions, _triangleBudget, _builderCompute);
+
+        // Voxel data conversion (ushort -> float)
+        using var readBuffer = new ComputeBuffer(VoxelCount / 2, sizeof(uint));
+        readBuffer.SetData(_volumeData.bytes);
+
+        _converterCompute.SetInts("Dims", _dimensions);
+        _converterCompute.SetBuffer(0, "Source", readBuffer);
+        _converterCompute.SetBuffer(0, "Voxels", _voxelBuffer);
+        _converterCompute.DispatchThreads(0, _dimensions);
+
+        // UI data source
+        FindFirstObjectByType<UIDocument>().rootVisualElement.dataSource = this;
+    }
+
+    void OnDestroy()
+    {
+        _voxelBuffer.Dispose();
+        _builder.Dispose();
+    }
+
+    void Update()
+    {
+        // Rebuild the isosurface only when the target value has been changed.
+        if (TargetValue == _builtTargetValue) return;
+
+        _builder.BuildIsosurface(_voxelBuffer, TargetValue, _gridScale);
+        GetComponent<MeshFilter>().sharedMesh = _builder.Mesh;
+
+        _builtTargetValue = TargetValue;
+    }
+
+    #endregion
+}
+
+} // namespace MarchingCubes
+```

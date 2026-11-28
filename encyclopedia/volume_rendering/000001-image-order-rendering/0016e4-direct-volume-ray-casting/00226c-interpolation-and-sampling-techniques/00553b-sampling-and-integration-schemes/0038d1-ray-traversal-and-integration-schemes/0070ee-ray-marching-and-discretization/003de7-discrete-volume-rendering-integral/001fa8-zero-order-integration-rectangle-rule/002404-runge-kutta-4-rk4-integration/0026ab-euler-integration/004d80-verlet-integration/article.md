@@ -1,0 +1,92 @@
+# Verlet Integration
+
+Also called: Position-Based Dynamics Integration, Störmer-Verlet, Velocity Verlet
+
+## Overview
+Verlet Integration is a numerical integration method for particle dynamics that updates positions based on current and previous positions without explicitly storing velocity [S1, S2, unofficial]. It is time-reversible and unconditionally stable, distinguishing it from Euler Integration by implicitly handling velocity through position differences [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Current position $pos$
+- Previous position $oldPos$
+- Acceleration $acc$ (accumulated from forces)
+- Mass $mass$
+- Damping factor $damping$ (scalar, default 0.99) [S1, unofficial]
+- Scaled gravity vector $scaledGravity$ [S2, unofficial]
+- Squared timestep $sqTimestep$ ($dt^2$) [S2, unofficial]
+- Pinned status $pinned$ (boolean) [S1, unofficial]
+
+**Outputs:**
+- New position $newPos$
+- Updated $oldPos$
+- Reset $acc$ to zero
+
+**Data Structures:**
+Each particle stores:
+- `pos`: Vec3 (current position)
+- `oldPos`: Vec3 (previous position)
+- `acc`: Vec3 (accumulated acceleration)
+- `mass`: float
+- `pinned`: bool
+
+**Steps:**
+1. If $pinned$ is true, return immediately without updating [S1, unofficial].
+2. Apply forces to calculate acceleration: $acc = acc + force / mass$ [S1, unofficial].
+3. Store current position in temporary variable: $tempPos = pos$ [S2, unofficial].
+4. Update position using the Verlet scheme:
+   $$newPos = pos + (pos - oldPos) \times damping + acc \times sqTimestep + scaledGravity$$
+   Note: [S1, unofficial] includes damping on the velocity term $(pos - oldPos)$, while [S2, unofficial] adds scaled gravity separately. Both use $sqTimestep$ for acceleration scaling.
+5. Update previous position: $oldPos = tempPos$ [S2, unofficial].
+6. Reset acceleration: $acc = 0$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def verlet_step(particle, force, damping, scaledGravity, sqTimestep):
+    if particle.pinned:
+        return
+
+    # Apply forces to acceleration
+    particle.acc = particle.acc.addScaled(force, 1.0 / particle.mass)
+
+    # Store current position
+    tempPos = particle.pos.clone()
+
+    # Calculate velocity term (pos - oldPos)
+    velocity = particle.pos.sub(particle.oldPos)
+
+    # Scale velocity by damping
+    dampedVelocity = velocity.scale(damping)
+
+    # Scale acceleration by squared timestep
+    accelTerm = particle.acc.scale(sqTimestep)
+
+    # Update position
+    particle.pos = particle.pos.add(dampedVelocity).add(accelTerm).add(scaledGravity)
+
+    # Update old position
+    particle.oldPos = tempPos
+
+    # Reset acceleration
+    particle.acc.set(0, 0, 0)
+```
+
+**Parameters:**
+- `damping`: Scalar multiplier for velocity term, default 0.99 [S1, unofficial].
+- `scaledGravity`: Gravity vector pre-scaled for timestep [S2, unofficial].
+- `sqTimestep`: Squared time step value ($dt^2$) [S2, unofficial].
+
+**Edge Cases:**
+- Pinned particles do not update position or apply forces [S1, unofficial].
+- Precision issues may arise if $sqTimestep$ is too large, affecting stability despite unconditional stability claims [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Verlet Integration originates from particle dynamics simulations. It is used in physics engines for its stability and lack of explicit velocity storage [S1, S2, unofficial].
+
+## Sources
+[S1] arguskern/lumina-graphics-lab, https://github.com/arguskern/lumina-graphics-lab, fetched 2026-10-26 (unofficial)
+[S2] GitHub - zalo/MathUtilities: A collection of some of the neat math and physics tricks that I've collected over the last y..., https://github.com/zalo/MathUtilities, fetched 2026-10-30 (unofficial)

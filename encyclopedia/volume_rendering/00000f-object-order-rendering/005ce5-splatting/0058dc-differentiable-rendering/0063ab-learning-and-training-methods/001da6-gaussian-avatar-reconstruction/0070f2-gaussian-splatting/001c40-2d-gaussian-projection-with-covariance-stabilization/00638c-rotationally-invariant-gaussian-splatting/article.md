@@ -1,0 +1,50 @@
+# Rotationally Invariant Gaussian Splatting
+Also called: Westover Gaussian Splat
+
+## Overview
+Rotationally Invariant Gaussian Splatting is a volume rendering technique that uses a Gaussian weighting function to achieve rotational symmetry, thereby avoiding the need for separate integration for each new orientation in perspective projection [S1, unofficial]. It sets itself apart from its siblings by providing a closed-form analytic solution for the 2D projection of a 3D Gaussian kernel, which simplifies the handling of varying orientations within a single frame [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D Gaussian kernel $h(u,v,w)$ defined in local coordinates, where the viewing ray aligns with the $w$-axis.
+*   **Output:** A 2D texture map $f(u,v)$ representing the integrated density along the viewing ray.
+
+**Data Structures:**
+*   **Texture Map:** A 2D array of size $N \times N$ (where $N$ is determined by the truncation threshold). Each cell stores the integrated weight value.
+
+**Method:**
+1.  **Define the 3D Kernel:** Use the rotationally symmetric Gaussian function:
+    $$h(u,v,w) = \exp\left(-\frac{u^2 + v^2 + w^2}{\theta^2}\right)$$
+    where $\theta$ is the scale parameter [S1, unofficial].
+2.  **Integrate Along the Ray:** Compute the 2D projection by integrating the 3D kernel along the viewing ray ($w$-axis). The integral is:
+    $$f(u, v) = \int_{-\infty}^{\infty} h(u, v, w) \, dw$$
+3.  **Apply Closed-Form Solution:** Substitute the Gaussian definition into the integral. The result is:
+    $$f(u, v) = \theta \sqrt{\pi} \exp\left(-\frac{u^2 + v^2}{\theta^2}\right)$$
+    Note: The source text presents the formula as $f(u, v) = \frac{w}{\theta} h \exp (-(u^2 + v^2)/\theta^2)$, but standard integration of a Gaussian $\exp(-x^2/\sigma^2)$ yields $\sigma\sqrt{\pi}\exp(-x^2/\sigma^2)$. The source text likely contains a typo or specific notation where $w$ and $h$ are constants or placeholders for $\theta\sqrt{\pi}$. Given the context of "simple integral" and standard Gaussian properties, the term $\theta \sqrt{\pi}$ is the correct normalization factor for the projection [S1, unofficial].
+4.  **Truncate:** Since the Gaussian function does not have compact support, truncate the function at a threshold where the value becomes negligible (e.g., $3\theta$ or $4\theta$) to create a reasonable-sized texture map [S1, unofficial].
+5.  **Sample:** Use the truncated 2D function as a texture map during splatting.
+
+**Parameters:**
+*   $\theta$: The width/scale of the Gaussian. Typical values depend on the voxel size and desired smoothness. Not given in the sources.
+
+**Pitfalls:**
+*   **Truncation:** The Gaussian function does not have compact support. Failure to truncate appropriately leads to infinite texture sizes or significant aliasing artifacts at the edges [S1, unofficial].
+*   **Summation Constant:** A rotationally symmetric splat cannot maintain a constant sum (unity) when tiled, unlike trilinear interpolation. This may lead to visible seams if splats are not blended carefully [S1, unofficial].
+
+## Subtopics
+
+### Piecewise Linear Gaussian Approximation
+An approximation of the Gaussian splat using a piecewise linear function, rendered by compositing triangles with linearly varying color and opacity using standard scan conversion hardware [S1, unofficial]. It sets itself apart by allowing rendering without texture mapping, leveraging standard rasterization hardware [S1, unofficial]. Choose this when hardware lacks texture mapping support or for simplicity in basic renderers. Pitfall: Visible Mach bands appear at the edges of the triangles used in the compositing process [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ for evaluating the 2D projection function per pixel if precomputed, or $O(N^2)$ to generate the texture map.
+*   **Memory Complexity:** $O(N^2)$ for the texture map, where $N$ is the truncation radius.
+*   **Strengths:** Avoids complex integration for every orientation; simple analytic form [S1, unofficial].
+*   **Limitations:** Does not sum to a constant when tiled, potentially causing artifacts; requires truncation [S1, unofficial].
+*   **When to use:** When rotational symmetry is desired and perspective projection orientations vary significantly [S1, unofficial].
+
+## Background
+Originated from Westover's work on texture mapping for volume rendering, proposing the Gaussian function for its rotational symmetry and simple integral [S1, unofficial]. Laur and Hanrahan later approximated this with piecewise linear functions for hardware rasterization [S1, unofficial].
+
+## Sources
+[S1] Applications of texture mapping to volume and flow visualization, https://digital.library.unt.edu/ark:/67531/metadc626633/?q=volume splatting, fetched 2026-10-28 (unofficial)

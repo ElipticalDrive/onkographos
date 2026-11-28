@@ -1,0 +1,230 @@
+--- v003.md
++++ v004.md
+@@ -58,5 +58,4 @@
+ import torch
+ import torch.nn as nn
+-import torch.nn.functional as F
+ 
+ class PositionalEncoding(nn.Module):
+@@ -64,27 +63,15 @@
+         super().__init__()
+         self.L = L
+-
+     def forward(self, p):
+-        # p shape: (..., 1)
+-        # Output shape: (..., 2*L)
+         freq_bands = 2.0 ** torch.arange(self.L, device=p.device).float() * torch.pi
+-        # sin(2^k pi p), cos(2^k pi p)
+-        sin_vals = torch.sin(freq_bands * p)
+-        cos_vals = torch.cos(freq_bands * p)
+-        return torch.cat([sin_vals, cos_vals], dim=-1)
++        return torch.cat([torch.sin(freq_bands * p), torch.cos(freq_bands * p)], dim=-1)
+ 
+ class DeformationNetwork(nn.Module):
+     def __init__(self, D=8, W=256, L_x=10, L_t=6):
+         super().__init__()
+-        self.D = D
+-        self.W = W
+-        self.L_x = L_x
+-        self.L_t = L_t
+-        
+-        # Input dim: 2*L_x + 2*L_t
++        self.pe_x = PositionalEncoding(L_x)
++        self.pe_t = PositionalEncoding(L_t)
+         input_dim = 2 * L_x + 2 * L_t
+-        # Output dim: 3 (pos) + 4 (quat) + 3 (scale) = 10
+-        output_dim = 10 
+-        
++        output_dim = 10 # 3 pos + 4 quat + 3 scale
+         layers = []
+         for _ in range(D):
+@@ -94,119 +81,85 @@
+         layers.append(nn.Linear(W, output_dim))
+         self.net = nn.Sequential(*layers)
+-        
+-        self.pe_x = PositionalEncoding(L_x)
+-        self.pe_t = PositionalEncoding(L_t)
+ 
+-    def forward(self, x, t, iteration, total_iterations, beta=0.1, delta_t=1.0, tau=20000):
+-        """
+-        x: canonical position (..., 3)
+-        t: time (..., 1)
+-        iteration: current training iteration
+-        total_iterations: total training iterations (for AST decay)
+-        """
+-        # Stop gradient on position to prevent gradient flow into canonical space from deformation
++    def forward(self, x, t, iteration, tau, beta=0.1, delta_t=1.0):
+         x_detached = x.detach()
+-        
+-        # Positional Encoding
+-        pe_x = self.pe_x(x_detached) # (..., 2*L_x)
+-        pe_t = self.pe_t(t)          # (..., 2*L_t)
+-        
+-        # AST Noise
+-        # X(i) = N(0,1) * beta * delta_t * (1 - i/tau)
+-        # Note: In implementation, noise is usually added per batch/sample
++        pe_x = self.pe_x(x_detached)
++        pe_t = self.pe_t(t)
+         noise_scale = beta * delta_t * (1.0 - iteration / tau)
+         noise = torch.randn_like(t) * noise_scale
+-        
+         t_noisy = t + noise
+         pe_t_noisy = self.pe_t(t_noisy)
+-        
+-        # Concatenate inputs
+         input_feat = torch.cat([pe_x, pe_t_noisy], dim=-1)
+-        
+-        # MLP Forward
+-        offsets = self.net(input_feat) # (..., 10)
+-        
+-        # Split offsets
+-        delta_x = offsets[..., :3]
+-        delta_r = offsets[..., 3:7]
+-        delta_s = offsets[..., 7:10]
+-        
+-        return delta_x, delta_r, delta_s
+-
+-def render_gaussians(gaussians, camera_params, deformation_net, iteration, total_iters, beta=0.1, delta_t=1.0, tau=20000):
+-    """
+-    gaussians: dict with keys 'x', 'r', 's', 'sigma', 'sh_coeffs'
+-    camera_params: view matrix V, projection info for Jacobian J
+-    """
+-    # 1. Get Deformation Offsets
+-    delta_x, delta_r, delta_s = deformation_net(
+-        gaussians['x'], 
+-        gaussians['t'], 
+-        iteration, 
+-        total_iters, 
+-        beta, 
+-        delta_t, 
+-        tau
+-    )
+-    
+-    # 2. Deform Gaussians
+-    # Note: Quaternion addition is not simple vector addition. 
+-    # In practice, delta_r is often treated as a small rotation vector or 
+-    # added to the quaternion via exponential map or simple addition if small.
+-    # The source states r + delta_r. We assume standard vector addition for simplicity 
+-    # or that delta_r is in a local frame. For strict implementation, 
+-    # one might need quaternion multiplication. However, source says "r + delta_r".
+-    r_deformed = gaussians['r'] + delta_r
+-    s_deformed = gaussians['s'] + delta_s
+-    x_deformed = gaussians['x'] + delta_x
+-    
+-    # 3. Compute Covariance
+-    # R from r_deformed, S from s_deformed
+-    R = quaternion_to_rotation_matrix(r_deformed)
+-    S = torch.diag_embed(s_deformed) # Assuming s is 3D scale vector
+-    Sigma = R @ S @ S.transpose(-2, -1) @ R.transpose(-2, -1)
+-    
+-    # 4. Project to 2D
+-    # Sigma' = J V Sigma V^T J^T
+-    # V is view matrix from camera_params
+-    # J is Jacobian of affine approximation of projective transform
+-    V = camera_params['view_matrix']
+-    J = compute_jacobian(camera_params, x_deformed)
+-    
+-    Sigma_prime = J @ V @ Sigma @ V.transpose(-2, -1) @ J.transpose(-2, -1)
+-    
+-    # 5. Rasterize
+-    # Compute alpha: alpha_i = sigma_i * exp(-0.5 * (p - mu_i)^T Sigma'^-1 (p - mu_i))
+-    # mu_i is projected center
+-    mu = project_to_screen(x_deformed, camera_params)
+-    
+-    # Perform tile-based rasterization and alpha blending
+-    # C(p) = sum(T_i * alpha_i * c_i)
+-    image = differentiable_gaussian_rasterize(
+-        mu=mu, 
+-        Sigma_prime=Sigma_prime, 
+-        sigma=gaussians['sigma'], 
+-        sh_coeffs=gaussians['sh_coeffs'],
+-        image_width=camera_params['width'],
+-        image_height=camera_params['height']
+-    )
+-    
+-    return image
++        offsets = self.net(input_feat)
++        return offsets[..., :3], offsets[..., 3:7], offsets[..., 7:10]
+ 
+ def quaternion_to_rotation_matrix(q):
+-    # Standard conversion from quaternion (x,y,z,w) or (w,x,y,z) to 3x3 matrix
+-    # Implementation details omitted for brevity, standard math operation
+-    pass
++    # q: (..., 4) in w, x, y, z order
++    w, x, y, z = q[..., 0:1], q[..., 1:2], q[..., 2:3], q[..., 3:4]
++    t = 1.0 / (w*w + x*x + y*y + z*z)
++    R = torch.zeros_like(q).expand(-1, -1, 3, 3)
++    R[..., 0, 0] = 1.0 - 2.0 * (y*y + z*z) * t
++    R[..., 0, 1] = 2.0 * (x*y - w*z) * t
++    R[..., 0, 2] = 2.0 * (x*z + w*y) * t
++    R[..., 1, 0] = 2.0 * (x*y + w*z) * t
++    R[..., 1, 1] = 1.0 - 2.0 * (x*x + z*z) * t
++    R[..., 1, 2] = 2.0 * (y*z - w*x) * t
++    R[..., 2, 0] = 2.0 * (x*z - w*y) * t
++    R[..., 2, 1] = 2.0 * (y*z + w*x) * t
++    R[..., 2, 2] = 1.0 - 2.0 * (x*x + y*y) * t
++    return R
+ 
+-def compute_jacobian(camera_params, x):
+-    # Jacobian of the affine approximation of the projective transformation
+-    # Implementation details omitted for brevity, standard math operation
+-    pass
++def render_frame(gaussians, P, V, width, height):
++    x = gaussians['x']
++    r = gaussians['r']
++    s = gaussians['s']
++    sigma = gaussians['sigma']
++    sh = gaussians['sh_coeffs']
+ 
+-def differentiable_gaussian_rasterize(mu, Sigma_prime, sigma, sh_coeffs, image_width, image_height):
+-    # Tile-based rasterization with alpha blending
+-    # C(p) = sum_{i in N} T_i alpha_i c_i
+-    # T_i = prod_{j=1}^{i-1} (1 - alpha_j)
+-    pass
++    R = quaternion_to_rotation_matrix(r)
++    S = torch.diag_embed(s)
++    Sigma = R @ S @ S.transpose(-2, -1) @ R.transpose(-2, -1)
++
++    X_h = torch.cat([x, torch.ones_like(x[..., :1])], dim=-1)
++    X_cam = (V @ X_h.unsqueeze(-1)).squeeze(-1)
++    X_proj = (P @ X_cam.unsqueeze(-1)).squeeze(-1)
++    mu = X_proj[..., :2] / X_proj[..., 2:3]
++    J = P[:, :2, :] @ V[:3, :]
++    Sigma_prime = J @ Sigma @ J.transpose(-2, -1)
++
++    depth = X_proj[..., 2]
++    indices = torch.argsort(depth, dim=-1)
++    sorted_mu = mu[indices]
++    sorted_Sigma_prime = Sigma_prime[indices]
++    sorted_sigma = sigma[indices]
++    sorted_sh = sh[indices]
++
++    image = torch.zeros((height, width, 3), device=x.device)
++    transmittance = torch.ones((height, width), device=x.device)
++
++    for i in range(len(indices)):
++        g_mu = sorted_mu[i]
++        g_Sigma = sorted_Sigma_prime[i]
++        g_sigma = sorted_sigma[i]
++        g_sh = sorted_sh[i]
++
++        # Compute alpha for each pixel in the image
++        # Standard math operation: alpha = sigma * exp(-0.5 * (p - mu)^T Sigma^{-1} (p - mu))
++        # Implemented via broadcasting over pixel grid [G]
++        pixel_coords = torch.stack(torch.meshgrid(torch.arange(height), torch.arange(width), indexing='ij'), dim=-1).float()
++        diff = pixel_coords - g_mu # (height, width, 2)
++        inv_Sigma = torch.inverse(g_Sigma) # (2, 2)
++        quad_form = torch.sum((diff @ inv_Sigma) * diff, dim=-1) # (height, width)
++        alphas = g_sigma * torch.exp(-0.5 * quad_form)
++        alphas = torch.clamp(alphas, 0.0, 1.0)
++
++        # Evaluate SH coefficients for base color (standard graphics operation) [G]
++        colors = g_sh[..., 0] # Base color coefficient
++
++        alpha = alphas * transmittance
++        image = image * (1.0 - alpha.unsqueeze(-1)) + colors.unsqueeze(-1) * alpha.unsqueeze(-1)
++        transmittance = transmittance * (1.0 - alphas)
++
++    return image
+ ```
+ 

@@ -1,0 +1,211 @@
+# Hard Prediction Pipeline
+
+Also called: SHARP Gaussian Generation with Hard Depth Anchor (contextual alias from sibling list), LingBot Fusion Pipeline
+
+## Overview
+The Hard Prediction Pipeline generates 3D Gaussian primitives from a monocular depth predictor and refines their geometry to strictly match a target depth map, particularly within occlusion holes or missing regions [S1, unofficial]. It differs from standard differentiable rendering pipelines by enforcing a "hard" constraint on camera-space Z-coordinates for specific pixels, ensuring that the generated Gaussians do not violate the authoritative depth data while preserving lateral ray positions [S1, unofficial]. This method is designed to integrate external depth priors (referred to as "LingBot" in the source) with a target depth map, using a transition zone to avoid depth cliffs without altering the unmodified background [S1, unofficial].
+
+## How it works
+The method takes an input RGB image, a predicted depth map (from a monodepth network), a target depth map (often containing holes), and camera intrinsics. It outputs a set of 3D Gaussians (means, scales, rotations, opacities, and SH coefficients) and diagnostic metrics.
+
+### Inputs and Outputs
+- **Inputs**:
+  - `rgb`: Input image (H, W, 3).
+  - `predicted_depth`: Output from a monodepth predictor (disparity or depth).
+  - `target_depth`: Reference depth map, potentially with holes (NaN or invalid values).
+  - `hole_mask`: Boolean mask indicating invalid regions in `target_depth`.
+  - `intrinsic`: Camera intrinsic matrix $K$ (3x3).
+  - `args`: Configuration parameters (see Parameters).
+- **Outputs**:
+  - `gaussians`: 3D Gaussian parameters (means, scales, rotations, opacities, colors).
+  - `metrics`: Depth error metrics, rendering quality, and diagnostic flags.
+
+### Data Structures
+The core data structure is a flattened list of Gaussians, typically stored in a PLY file format for compatibility with standard 3D Gaussian Splatting renderers. Each Gaussian is defined by:
+- **Mean**: $(x, y, z)$ in camera space.
+- **Scale**: $(s_x, s_y, s_z)$ or singular values.
+- **Rotation**: Quaternion $(w, x, y, z)$ or rotation matrix.
+- **Opacity**: Scalar $\alpha$.
+- **SH Coefficients**: For spherical harmonics representation of color.
+
+### Parameters
+- `internal`: Tuple `(1536, 1536)`, fixed internal resolution for model inference [S1, unofficial].
+- `surface_tangent_sigma`: In $(0, 2]$ [S1, unofficial].
+- `surface_normal_min_ratio`, `surface_normal_max_ratio`: In $[0, 1]$ with $\le 1.0$ [S1, unofficial].
+- `surface_max_stretch`: $\ge 1.0$ [S1, unofficial].
+- `edge_blend_pixels`: Default 16.0 [S1, unofficial].
+- `max_boundary_p95`: Default 0.035 [S1, unofficial].
+- `max_plane_angle_deg`: Default 5.0 [S1, unofficial].
+- `max_hole_plane_p95`: Default 0.035 [S1, unofficial].
+- `planar_ring_p95`: Default 0.12 [S1, unofficial].
+- `max_nonplanar_calibration_p95`: Default 0.50 [S1, unofficial].
+- `max_nonplanar_gradient_ratio`: Default 6.0 [S1, unofficial].
+- `nonplanar_depth_envelope_margin`: Default 0.75 [S1, unofficial].
+
+### Steps
+
+1. **Preprocessing and Validation**:
+   - Validate input files exist and CUDA is available [S1, unofficial].
+   - Load `rgb`, `target_depth`, `hole_mask`, and `camera_json` (extracting $K$ and focal length) [S1, unofficial].
+   - Validate dimensions match. Ensure `target_depth` is dense, finite, and $> 1.0 \times 10^{-3}$ where valid [S1, unofficial].
+   - Resize `rgb` and `target_depth` to `internal` resolution $(1536, 1536)$ using bilinear interpolation [S1, unofficial].
+
+2. **Monodepth Processing**:
+   - Compute `monodepth` from the predictor's output:
+     $$ \text{monodepth} = \frac{\text{disparity\_factor}}{\text{monodepth\_output.disparity}} $$
+     where $\text{disparity\_factor} = \frac{\text{focal}}{\text{width}}$. Clamp `monodepth` to $[10^{-4}, 10^4]$ [S1, unofficial].
+   - If `monodepth` has 2 channels, compute ratio:
+     $$ \text{ratio} = \frac{\text{monodepth}[:, 1:2]}{\text{monodepth}[:, 0:1]} $$
+     Clamp `ratio` to $[1.01, 2.0]$. Create `injected_depth` as $[\text{target\_resized}, \text{target\_resized} \times \text{ratio}]$ [S1, unofficial].
+
+3. **Initial Gaussian Generation**:
+   - Run `init_model` on `image_resized` and `injected_depth` to get `init_output` [S1, unofficial].
+   - Extract features using `feature_model` with `init_output.feature_input` and `monodepth_output.output_features` [S1, unofficial].
+   - Predict delta using `prediction_head`, then compose `gaussians_grid` using `gaussian_composer` with `delta`, `base_values`, and `global_scale` [S1, unofficial].
+
+4. **Hard Depth Anchoring (Refinement)**:
+   - Interpolate `target_resized` to the grid resolution of `gaussians_grid` (matching opacities shape) to get `target_grid` [S1, unofficial].
+   - Compute `depth_ratio`:
+     $$ \text{depth\_ratio} = \frac{\text{target\_grid}}{\max(\text{old\_means}[:, 2], 10^{-6})} $$
+     where `old_means` are the Z-coordinates of the initially generated Gaussians [S1, unofficial].
+   - Update means:
+     $$ \text{means}[:, :, 0] = \text{old\_means} \times \text{depth\_ratio}[:, \text{None}] $$
+     $$ \text{means}[:, 2, 0] = \text{target\_grid} $$
+     This preserves lateral ray positions (X, Y) and sets the camera Z exactly to `target_grid` [S1, unofficial].
+   - Scale singular values:
+     $$ \text{singular\_values}[:, :, 0] = \text{singular\_values}[:, :, 0] \times \text{depth\_ratio}[:, \text{None}] $$
+   - If multiple layers are used, set `opacities[:, 1:] = 0.0` to disable unsupervised layers [S1, unofficial].
+   - Create `anchored_grid` with updated means, singular values, and opacities. Flatten to `gaussians_ndc` [S1, unofficial].
+
+5. **Unprojection and Surface Jacobian**:
+   - Unproject `gaussians_ndc` to camera space using the identity view matrix and `intrinsic_resized` (scaled by `internal/width` and `internal/height`) [S1, unofficial].
+   - Compute `surface_camera` from `surface_ndc` ($\text{target\_grid} \times \text{base\_x}, \text{target\_grid} \times \text{base\_y}, \text{target\_grid}$) and the unprojection matrix [S1, unofficial].
+   - If `covariance_mode` is `'surface_jacobian'`, call `surface_jacobian_covariance` with `gaussians`, `surface_camera`, and parameters [S1, unofficial].
+
+6. **LingBot Fusion (Hole Filling)**:
+   - *Note: The source describes a separate but related process for "LingBot" calibration. The Hard Prediction Pipeline integrates this via the `hard_predict` function which likely encapsulates the fusion logic.*
+   - Calibrate the predicted depth (LingBot) to the observed camera-Z in the surrounding context ring using robust affine transformation [S1, unofficial].
+   - Perform robust plane fitting on the context ring and hole points to ensure geometric consistency [S1, unofficial].
+   - Fill missing hole depth by smoothly extrapolating calibrated values inside the hole, avoiding depth cliffs [S1, unofficial].
+   - Blend boundary pixels using a polynomial easing function:
+     $$ \text{blend} = \text{clip}\left(\frac{\text{distance}}{\text{edge\_blend\_pixels}}, 0.0, 1.0\right) $$
+     $$ \text{blend} = \text{blend}^2 (3 - 2 \cdot \text{blend}) $$
+     $$ \text{hole\_depth} = \text{nearest\_source} \cdot (1 - \text{blend}) + \text{calibrated} \cdot \text{blend} $$
+   - Ensure bit-exact preservation of depth outside the hole mask [S1, unofficial].
+
+7. **Evaluation and Output**:
+   - Compute error metrics: `error = abs(camera_grid_cpu - target_grid_cpu)` [S1, unofficial].
+   - Render Gaussians using the standard 3DGS renderer to get `rgb_render`, `depth_render`, `alpha_render` [S1, unofficial].
+   - Compute depth metrics (relative error, hole coverage) and alpha quality [S1, unofficial].
+   - Save Gaussians to PLY and rendered images. Check against failure thresholds (e.g., `layer0_center_absolute_error_p99 > 0.005`) [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import cv2
+from scipy import ndimage
+
+def hard_prediction_pipeline(rgb, predicted_depth, target_depth, hole_mask, intrinsic, args):
+    """
+    Main entry point for the Hard Prediction Pipeline.
+    """
+    # 1. Preprocessing
+    internal_res = (1536, 1536)
+    rgb_resized = cv2.resize(rgb, internal_res, interpolation=cv2.INTER_LINEAR)
+    target_resized = cv2.resize(target_depth, internal_res, interpolation=cv2.INTER_LINEAR)
+    
+    # 2. Monodepth Processing
+    disparity_factor = intrinsic[0, 0] / rgb.shape[1]
+    monodepth = disparity_factor / predicted_depth
+    monodepth = np.clip(monodepth, 1e-4, 1e4)
+    
+    # Handle 2-channel monodepth if present
+    if monodepth.shape[2] == 2:
+        ratio = monodepth[:, :, 1:2] / monodepth[:, :, 0:1]
+        ratio = np.clip(ratio, 1.01, 2.0)
+        injected_depth = np.stack([target_resized, target_resized * ratio], axis=2)
+    else:
+        injected_depth = target_resized
+    
+    # 3. Initial Gaussian Generation
+    init_output = init_model(rgb_resized, injected_depth)
+    features = feature_model(init_output.feature_input, predicted_depth.output_features)
+    delta = prediction_head(features)
+    gaussians_grid = gaussian_composer(delta, base_values, global_scale)
+    
+    # 4. Hard Depth Anchoring
+    target_grid = cv2.resize(target_resized, gaussians_grid.opacities.shape[:2], interpolation=cv2.INTER_LINEAR)
+    old_z = np.clip(gaussians_grid.means[:, 2], 1e-6, None)
+    depth_ratio = target_grid / old_z
+    
+    # Update means: preserve lateral, set Z
+    gaussians_grid.means[:, 0] = gaussians_grid.means[:, 0] * depth_ratio[:, None]
+    gaussians_grid.means[:, 2] = target_grid.flatten()
+    
+    # Scale singular values
+    gaussians_grid.singular_values[:, 0] = gaussians_grid.singular_values[:, 0] * depth_ratio[:, None]
+    
+    # Disable unsupervised layers
+    if gaussians_grid.opacities.ndim > 1 and gaussians_grid.opacities.shape[1] > 1:
+        gaussians_grid.opacities[:, 1:] = 0.0
+        
+    gaussians_ndc = gaussians_grid.flatten()
+    
+    # 5. Unprojection
+    intrinsic_resized = intrinsic.copy()
+    intrinsic_resized[0, :] *= internal_res[0] / rgb.shape[1]
+    intrinsic_resized[1, :] *= internal_res[1] / rgb.shape[0]
+    
+    gaussians_camera = unproject_ndc(gaussians_ndc, intrinsic_resized)
+    
+    # Surface Jacobian Covariance
+    if args.covariance_mode == 'surface_jacobian':
+        surface_ndc = np.stack([
+            target_grid * gaussians_grid.base_x,
+            target_grid * gaussians_grid.base_y,
+            target_grid
+        ], axis=-1).flatten()
+        surface_camera = unproject_ndc(surface_ndc, intrinsic_resized)
+        gaussians_camera = surface_jacobian_covariance(gaussians_camera, surface_camera, args)
+        
+    # 6. LingBot Fusion (Simplified representation of the complex calibration)
+    # This step involves robust affine calibration of predicted depth to target depth
+    # in the context ring, followed by hole filling.
+    calibrated_depth, calibrated_valid = calibrate_lingbot(predicted_depth, target_depth, hole_mask, intrinsic, args)
+    filled_depth = fill_holes(calibrated_depth, calibrated_valid, hole_mask, args)
+    
+    # Re-anchor Gaussians to filled depth if necessary (or use filled depth for metrics)
+    # The core "Hard" aspect is the Z-anchoring in step 4.
+    
+    # 7. Evaluation
+    error = np.abs(gaussians_camera.means[:, 2] - filled_depth.flatten())
+    rgb_render, depth_render, alpha_render = render(gaussians_camera, intrinsic, rgb.shape)
+    
+    metrics = compute_depth_metrics(depth_render, alpha_render, filled_depth, hole_mask, args)
+    save_ply(gaussians_camera, args.output_dir)
+    
+    return gaussians_camera, metrics
+```
+
+## Operating characteristics
+- **Time Complexity**: Dominated by the monodepth inference and the initial Gaussian generation model. The refinement step is linear in the number of pixels.
+- **Memory Complexity**: Proportional to the number of Gaussians generated, which is typically one per pixel or a fixed density grid.
+- **Strengths**:
+  - Ensures geometric consistency with authoritative depth maps, especially in occlusion holes [S1, unofficial].
+  - Avoids depth cliffs by using a smooth transition zone [S1, unofficial].
+  - Preserves lateral ray positions, maintaining image alignment [S1, unofficial].
+- **Limitations**:
+  - Relies on the quality of the monodepth predictor and the target depth map.
+  - Requires careful calibration of the "LingBot" depth to the camera space [S1, unofficial].
+  - The hard constraint may lead to artifacts if the target depth is noisy or incorrect [S1, unofficial].
+- **When to use**: When high-fidelity geometry is required in specific regions (e.g., holes, occlusions) and a reliable depth prior is available.
+- **When not to use**: When the depth prior is unreliable or when real-time performance is critical and the overhead of the refinement step is prohibitive.
+
+## Background
+The Hard Prediction Pipeline is part of the SplatMend project, an unofficial implementation that integrates "LingBot" depth priors with 3D Gaussian Splatting [S1, unofficial]. It addresses the challenge of generating 3D Gaussians that strictly adhere to a target depth map, particularly in regions where the depth is known (e.g., from a sensor or a high-quality prediction) but the initial Gaussian generation might deviate. The method uses a "hard" anchoring technique to enforce Z-coordinates, ensuring that the rendered depth matches the target depth exactly in those regions.
+
+## Sources
+[S1] zjllllllllll/SplatMend, https://github.com/zjllllllllll/SplatMend, fetched 2026-10-27 (unofficial)

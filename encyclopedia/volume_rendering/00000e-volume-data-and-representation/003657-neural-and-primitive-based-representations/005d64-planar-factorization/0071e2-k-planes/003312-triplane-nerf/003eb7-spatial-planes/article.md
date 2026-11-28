@@ -1,0 +1,41 @@
+# Spatial Planes
+
+
+## Overview
+Spatial Planes is a static 3D representation that extends [TriPlane NeRF](6932-triplane-nerf.md) by utilizing three axis-aligned feature planes ($P_{XY}, P_{XZ}, P_{YZ}$) to encode volumetric information [S1]. It serves as an ablation variant of HexPlane, designed to evaluate the impact of breaking symmetry in feature plane configurations [S1]. Unlike TriPlane NeRF, which typically uses $XY, XZ, YZ$ planes for static scenes, Spatial Planes explicitly isolates these three spatial projections without temporal components, making it incapable of representing dynamic scenes on its own [S1].
+
+## How it works
+**Inputs and Outputs:** The method takes multi-view images of a static scene as input [S1]. It outputs a radiance field defined by the three feature planes, enabling novel view synthesis via volume rendering [G].
+
+**Data Structures:** The representation consists of three learnable 2D feature planes: $P_{XY}$, $P_{XZ}$, and $P_{YZ}$ [S1]. Each plane stores features aligned with the corresponding coordinate axes [G].
+
+**Method:** For a query 3D point $\mathbf{p} = (x, y, z)$, the feature vector is obtained by projecting $\mathbf{p}$ onto each plane and interpolating the features [G]:
+1. Project $\mathbf{p}$ onto $P_{XY}$ to get coordinates $(x, y)$ [G].
+2. Project $\mathbf{p}$ onto $P_{XZ}$ to get coordinates $(x, z)$ [G].
+3. Project $\mathbf{p}$ onto $P_{YZ}$ to get coordinates $(y, z)$ [G].
+4. Sample features $f_{XY}, f_{XZ}, f_{YZ}$ using bilinear interpolation from the respective planes [G].
+5. Concatenate or sum the features to form the final representation for density and color prediction [G].
+
+**Parameters:** Plane resolution and channel dimension are not given in the sources.
+
+**Edge Cases and Pitfalls:** The method cannot represent dynamic scenes alone because it lacks temporal planes [S1]. Using only three spatial planes breaks the symmetry present in HexPlane, resulting in lower performance metrics compared to symmetric variants [S1].
+
+## Subtopics
+
+### Spatial-Temporal Planes
+Spatial-Temporal Planes is a variant that contains the three spatial-temporal planes [S1]. It sets itself apart from sibling variants by incorporating temporal dimensions into the plane projections, enabling motion modeling [S1]. It is chosen when dynamic scene representation is required, though it still cannot represent dynamic scenes alone [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:** Memory complexity is not given in the sources. Training time is 9 minutes and 2 seconds on the D-NeRF dataset [S1].
+
+**Measured Performance:** On the D-NeRF dataset, Spatial Planes achieves a PSNR of 20.369, SSIM of 0.879, LPIPS of 0.148, and a training time of 9m 02s [S1].
+
+**Strengths and Limitations:** Strengths include a simple structure with only three planes and fast training time compared to more complex variants like HexPlane [S1]. Limitations include lower performance metrics compared to HexPlane and DoublePlane variants, and the inability to represent dynamic scenes [S1].
+
+**When to Use:** It is used as an ablation baseline to understand the contribution of spatial planes in larger frameworks like HexPlane [S1].
+
+## Background
+Spatial Planes was introduced as part of the HexPlane framework, which proposes a fast representation for dynamic scenes using spatial-temporal planes [S1]. It was designed to ablate the effect of plane symmetry and composition in HexPlane, showing that breaking symmetry by using only spatial planes reduces performance but simplifies the model [S1].
+
+## Sources
+[S1] HexPlane: A Fast Representation for Dynamic Scenes, https://doi.org/10.1109/cvpr52729.2023.00021, fetched 2026-10-26

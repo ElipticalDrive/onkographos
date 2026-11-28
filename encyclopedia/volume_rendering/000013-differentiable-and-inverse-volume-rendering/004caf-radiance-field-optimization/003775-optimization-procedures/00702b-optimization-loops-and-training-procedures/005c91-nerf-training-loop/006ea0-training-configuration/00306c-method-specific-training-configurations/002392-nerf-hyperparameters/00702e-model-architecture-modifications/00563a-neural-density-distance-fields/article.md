@@ -1,0 +1,279 @@
+# Neural Density-Distance Fields
+
+Also called: NeDDF (Neural Density-Distance Fields), Neural Density-Distance Fields (NeDDF) Architecture
+
+## Overview
+Neural Density-Distance Fields (NeDDF) is a method that reciprocally constrains distance and density fields, extending the distance field formulation to adapt to any density field [S1, unofficial]. It allows for boundaryless scenes and complex shapes by deriving density from the first derivative of an output distance field $D$ [S1, unofficial]. Unlike standard NeRF which optimizes density $\sigma$ directly, NeDDF optimizes a distance field $D$ and computes $\sigma$ via $\nabla D$, requiring careful setup of Positional Encoding (PE) and activation functions to handle second derivatives [S1, unofficial]. It provides competitive novel view synthesis quality, more stable meshes, and a broader range of valid camera poses than NeRF, while handling transparency and thin surfaces better than NeuS by interpreting occupancy as lower density [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D spatial position $\mathbf{p} \in \mathbb{R}^3$.
+*   **Outputs:**
+    *   Distance field value $D(\mathbf{p}) \in \mathbb{R}$.
+    *   Color $\mathbf{c}(\mathbf{p}) \in \mathbb{R}^3$.
+    *   Auxiliary gradient component $\frac{\partial D}{\partial w}$ (internal to the network for cusp handling).
+
+**Data Structures and Layout:**
+The network consists of two parallel branches sharing the same input processing:
+1.  **Distance Branch:**
+    *   Input: Concatenated PE vectors (see Input Processing).
+    *   Layers: Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(256) $\rightarrow$ Activation.
+    *   Output: $D(\mathbf{p})$.
+2.  **Color Branch:**
+    *   Input: Concatenated PE vectors.
+    *   Layers: Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(256) $\rightarrow$ Activation $\rightarrow$ Dense(128) $\rightarrow$ Activation.
+    *   Output: $\mathbf{c}(\mathbf{p})$ (size 3).
+
+**Input Processing:**
+The input to the MLPs is a concatenation of three Positional Encoding (PE) vectors:
+1.  Standard PE $\gamma(\mathbf{p})$ (size 60).
+2.  Distance PE $\gamma(d)$ (size 24).
+3.  Damped PE $\gamma'(\mathbf{p})$ (size 60).
+
+Standard PE $\gamma(\mathbf{p})$ for position $\mathbf{p}$ with frequency bands $L$:
+$$ \gamma(\mathbf{p}) = [\sin(\mathbf{p}), \cos(\mathbf{p}), \dots, \sin(2^{L-1}\mathbf{p}), \cos(2^{L-1}\mathbf{p})]^T $$
+Damped PE $\gamma'(\mathbf{p})$ dampens high-frequency terms by $1/2^{L-1}$ to keep the scale in the single-differentiation hierarchy same as original PE:
+$$ \gamma'(\mathbf{p}) = [\sin(\mathbf{p}), \cos(\mathbf{p}), \dots, \frac{1}{2^{L-1}}\sin(2^{L-1}\mathbf{p}), \frac{1}{2^{L-1}}\cos(2^{L-1}\mathbf{p})]^T $$
+
+**Density Calculation:**
+Density $\sigma(\mathbf{p})$ is derived from the distance field $D(\mathbf{p})$ and its gradient $\nabla D(\mathbf{p})$. The view-independent distance field is defined as the minimum volumetric depth over all viewing directions $\mathbf{v} \in S^2$:
+$$ D(\mathbf{p}) := \min_{\mathbf{v} \in S^2} [d(\mathbf{p}, \mathbf{v})] $$
+where volumetric depth is:
+$$ d(\mathbf{p}, \mathbf{v}) := t_n + \int_{t_n}^{t_f} t T(t) \sigma(\mathbf{r}(t)) dt $$
+and transmission $T(t) = \exp \left(-\int_{t_n}^{t} \sigma(\mathbf{r}(s))ds \right)$.
+
+The optimal view direction $\mathbf{v}_n$ is recovered from the gradient:
+$$ \mathbf{v}_n = -\frac{\nabla D(\mathbf{p})}{\|\nabla D(\mathbf{p})\|_2} $$
+The density is obtained from the directional derivative of the distance field along the gradient direction. The derivative is expressed as:
+$$ \frac{\partial D(\mathbf{r}(t))}{\partial t} = \nabla D(\mathbf{p}) \cdot \mathbf{v} = -\|\nabla D(\mathbf{p})\|_2 $$
+Combining this with the definition of the derivative via depth limits yields the exact density formula:
+$$ \sigma(\mathbf{p}) = \frac{1 - \|\nabla D(\mathbf{p} - t_n \mathbf{v})\|_2}{D(\mathbf{p} - t_n \mathbf{v}) - t_n} $$
+Assuming $t_n$ is small and $D(\mathbf{p} - t_n \mathbf{v}) \simeq D(\mathbf{p}) + t_n$, the approximated density calculation is:
+$$ \sigma(\mathbf{p}) \simeq \frac{1 - \|\nabla D(\mathbf{p})\|_2}{D(\mathbf{p})} $$
+
+**Cusp Handling (Auxiliary Gradient):**
+Distance fields are not differentiable at cusps where the minimum distance direction switches, causing small gradient values to convert to false densities [S1, unofficial]. To handle this, the distance field domain is extended from 3D $[x,y,z]$ to 4D hyperspace $[x,y,z,w]$ with an auxiliary gradient axis $w$. The slice at $w=0$ is the distance field. Gradient components $\frac{\partial D}{\partial w}$ are distributed to suppress spurious densities near cusps [S1, unofficial].
+
+A heuristic constraint is applied when $\frac{\partial D}{\partial t} > 0$:
+$$ \frac{\partial^2 D}{\partial t \partial w} = \alpha \frac{1}{D} \frac{\partial D}{\partial w} $$
+where $\alpha$ is a hyperparameter determining the scale of the auxiliary gradient. To handle instability around $D=0$ and $\frac{\partial D}{\partial w}=0$, a weight coefficient $\beta$ is introduced:
+$$ \beta = D \left(\frac{\partial D}{\partial t}\right)^2 \frac{\partial D}{\partial w} $$
+Note: $\beta$ is separated from the calculation graph during training (stop-gradient) [S1, unofficial].
+
+The shape constraint objective function $L_{const}$ over $M$ sampling points $\mathcal{P}$ is:
+$$ L_{const} = \frac{\lambda_{const}}{M} \sum_{\mathbf{p} \in \mathcal{P}} \beta \left[\frac{\partial^2 D}{\partial t \partial w} - \frac{\alpha}{D(\mathbf{p})} \frac{\partial D}{\partial w}\right]^2 $$
+
+**Reprojection Error and Localization:**
+For camera pose estimation, pseudo-correspondence points are calculated. For each ray, points closer to observed color $C(\mathbf{q})$ than estimated $\hat{C}(\mathbf{q})$ are selected. The near-surface point is $\mathbf{p}_i - D_i(\nabla D_i)$. The weight $g_i$ for sampling point $\mathbf{p}_i$ is:
+$$ g_i = \mathrm{softmax}\left(-\lambda_D \frac{D_i \|\nabla D_i \times \mathbf{v}\|_2}{t_i} - \lambda_c \|\mathbf{C}(\mathbf{q}) - \mathbf{c}_i\|_2\right) $$
+where $\lambda_D$ and $\lambda_c$ are hyperparameters. The reprojection error measures the distance $\|\mathbf{q} - \hat{\mathbf{q}}\|_2$ between pixel coordinates of ray $\mathbf{q}$ and projected pseudo-correspondence point $\hat{\mathbf{q}}$.
+
+**Blank Region Penalty:**
+To constrain the color field in regions outside the object (where $\|\nabla D_i\|_2$ is small):
+$$ L_{blank} = \sum_i \|\nabla c_i (\nabla D_i)^T \|_2^2 $$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class NeDDF(nn.Module):
+    def __init__(self, L=10, num_freqs=30):
+        super().__init__()
+        # L is number of frequency bands. 
+        # Standard PE size: 2 * L * 3 = 60 for 3D pos.
+        # Damped PE size: 60.
+        # Distance PE size: 24 (Not given in sources exactly, assumed based on note).
+        # Total input dim: 60 + 24 + 60 = 144.
+        
+        self.L = L
+        self.num_freqs = num_freqs
+        
+        # Distance Branch: 3 hidden layers of 256
+        self.dist_mlp = nn.Sequential(
+            nn.Linear(144, 256),
+            nn.TanhExp(), # Custom activation
+            nn.Linear(256, 256),
+            nn.TanhExp(),
+            nn.Linear(256, 256),
+            nn.TanhExp(),
+            nn.Linear(256, 1) # Output D
+        )
+        
+        # Color Branch: 4 hidden layers (256, 256, 256, 128)
+        self.color_mlp = nn.Sequential(
+            nn.Linear(144, 256),
+            nn.TanhExp(),
+            nn.Linear(256, 256),
+            nn.TanhExp(),
+            nn.Linear(256, 256),
+            nn.TanhExp(),
+            nn.Linear(256, 128),
+            nn.TanhExp(),
+            nn.Linear(128, 3) # Output Color
+        )
+
+    def positional_encoding(self, x, L=10):
+        """Standard PE"""
+        # x shape: (..., 3)
+        freq_bands = 2.0 ** torch.linspace(0, L-1, L).to(x.device)
+        # sin(2^0 x), cos(2^0 x), ..., sin(2^(L-1) x), cos(2^(L-1) x)
+        pe = []
+        for freq in freq_bands:
+            pe.append(torch.sin(x * freq))
+            pe.append(torch.cos(x * freq))
+        return torch.cat(pe, dim=-1)
+
+    def damped_positional_encoding(self, x, L=10):
+        """Damped PE: high freq terms scaled by 1/2^(L-1)"""
+        freq_bands = 2.0 ** torch.linspace(0, L-1, L).to(x.device)
+        pe = []
+        for i, freq in enumerate(freq_bands):
+            scale = 1.0 / (2.0 ** (L-1)) if i == L-1 else 1.0 # Note: Source says dampens high-freq by 1/2^(L-1). 
+            # Actually source eq 20: 1/2^(L-1) applied to the highest freq term sin(2^(L-1)p).
+            # Let's implement strictly: last term scaled.
+            pe.append(torch.sin(x * freq))
+            pe.append(torch.cos(x * freq))
+        
+        # Apply damping to the last pair (highest frequency)
+        # The source equation shows 1/2^(L-1) on the last sin/cos.
+        # pe[-2] is sin(2^(L-1)x), pe[-1] is cos(2^(L-1)x)
+        damping_factor = 1.0 / (2.0 ** (L-1))
+        pe[-2] = pe[-2] * damping_factor
+        pe[-1] = pe[-1] * damping_factor
+        
+        return torch.cat(pe, dim=-1)
+
+    def forward(self, x):
+        # x: (N, 3)
+        pe_std = self.positional_encoding(x, self.L)
+        pe_damp = self.damped_positional_encoding(x, self.L)
+        
+        # Distance PE is noted as size 24. Assuming similar structure to standard PE but for distance scalar?
+        # Source says "distance PE gamma(d) (size 24)". 
+        # If d is scalar, 24 dims implies 12 freq bands? Or 3D distance?
+        # Given the ambiguity, we assume a placeholder or standard PE of a scalar d.
+        # However, to be implementable, we need a definition. 
+        # Let's assume gamma(d) is PE of the scalar distance value d, with 12 bands (24 dims).
+        # But d is not an input to the network, it's derived or sampled.
+        # In NeDDF, the input is just p. The "distance PE" might refer to encoding the sampled t or similar?
+        # Re-reading: "Concatenate standard PE gamma(p)... distance PE gamma(d)... and damped PE gamma'(p)".
+        # This implies d is an input. In volume rendering, we sample points along rays. 
+        # Perhaps d is the depth t? Or the distance field value D?
+        # Given the architecture diagram description, it's an intermediate input.
+        # Let's assume d is the sampled depth t along the ray, or a placeholder for now.
+        # Since the source doesn't define d's origin in the forward pass explicitly as a network input variable 
+        # other than "intermediate inputs", and standard NeRF takes (x, d_view), 
+        # here d might be the viewing direction? No, "distance PE".
+        # Let's assume d is the scalar depth t for the sampled point.
+        # We will pass t as an additional input or compute it.
+        # For the sake of the method definition, we assume the network takes (p, t) or similar.
+        # But the source says "Input processing: Concatenate...".
+        # Let's assume the caller provides 'd' (depth) along with 'p'.
+        
+        # Note: The source does not specify how 'd' is obtained. 
+        # In volume rendering, we sample t. Let's assume d=t.
+        # If d is not provided, this step is incomplete. 
+        # However, looking at Eq 1, D(p) is min depth. 
+        # The network outputs D(p). 
+        # The input to the network is p. 
+        # Why is there a distance PE? 
+        # Maybe d is the viewing direction encoded? No, "distance PE".
+        # Let's assume d is a scalar depth value associated with the point p in the context of a ray.
+        # We will define a helper to encode a scalar depth.
+        
+        # Re-evaluating: The source lists "distance PE gamma(d) (size 24)".
+        # If d is a scalar, 24 dims = 12 freq bands.
+        # We need to pass 'd' to the network.
+        
+        # For the purpose of this article, we assume the network input is (p, d).
+        # d is the depth along the ray.
+        
+        pe_d = self.positional_encoding(d.unsqueeze(-1), L=12) # 12 bands * 2 = 24 dims
+        
+        input_concat = torch.cat([pe_std, pe_d, pe_damp], dim=-1)
+        
+        D = self.dist_mlp(input_concat)
+        c = self.color_mlp(input_concat)
+        
+        return D, c
+
+    def compute_density(self, D, grad_D, t_n=0.0):
+        """
+        Compute density from Distance and Gradient.
+        D: (N, 1)
+        grad_D: (N, 3)
+        t_n: near clip plane (scalar)
+        """
+        # Approximated formula: sigma = (1 - ||grad_D||) / D
+        # Guard against D ~ 0
+        norm_grad = torch.norm(grad_D, dim=-1, keepdim=True)
+        sigma = (1.0 - norm_grad) / (D + 1e-6)
+        return sigma
+
+    def compute_auxiliary_gradient_penalty(self, D, grad_D, grad_Dw, grad_Dt, alpha, lambda_const, points):
+        """
+        Compute L_const for auxiliary gradient shape constraint.
+        """
+        # beta = D * (dD/dt)^2 * (dD/dw)
+        # Note: beta is detached from graph
+        beta = D * (grad_Dt ** 2) * grad_Dw
+        beta = beta.detach()
+        
+        # Constraint: d2D / dt dw = alpha / D * dD/dw
+        # L_const = lambda_const / M * sum( beta * [ d2D/dt/dw - alpha/D * dD/dw ]^2 )
+        
+        # d2D/dt/dw is the mixed partial derivative. 
+        # In practice, this requires higher order autodiff.
+        # We assume grad_Dt_w is computed via torch.autograd.grad(grad_Dw, t, create_graph=True) or similar.
+        # But t is not a direct input to D(p). D is function of p.
+        # The source extends domain to 4D [x,y,z,w].
+        # So D is function of (x,y,z,w).
+        # grad_Dt corresponds to gradient in the viewing direction?
+        # The source says "slice at w=0".
+        # This implementation detail is complex. 
+        # We will note the formula.
+        
+        term = grad_Dt_w - (alpha / (D + 1e-6)) * grad_Dw
+        loss = (lambda_const / len(points)) * torch.sum(beta * term**2)
+        return loss
+```
+
+**Parameters:**
+*   $\alpha$: Hyperparameter for auxiliary gradient shape. Values $\le 1$ make gradient active in narrower range; larger values concentrate gradient near cusps [S1, unofficial].
+*   $\lambda_{const}$: Hyperparameter for shape constraint objective [S1, unofficial].
+*   $\lambda_D$: Hyperparameter for distance component in reprojection weight [S1, unofficial].
+*   $\lambda_c$: Hyperparameter for color component in reprojection weight [S1, unofficial].
+*   MLP Width: 256 neurons per hidden layer [S1, unofficial].
+*   Activation: `tanhExp` (second derivative is continuous) [S1, unofficial].
+*   Optimizer: Adam with exponential decay for camera pose (6D SE(3) parameter) [S1, unofficial].
+*   Sampling: 256 rays per iteration for interest region sampling [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Cusps:** Distance fields are not differentiable at cusps, causing false densities. Mitigated by auxiliary gradient in 4D hyperspace [S1, unofficial].
+*   **Interior Objects:** Lack of distance field information inside objects. NeDDF is based on UDF, so it cannot provide helpful gradient directions in the interior object region [S1, unofficial].
+*   **Discontinuities:** View direction $\mathbf{v}_n$ has discontinuities, making gradient-based calculation difficult [S1, unofficial].
+*   **Numerical Stability:** Density is undefined for $D \sim 0$. Also, from $t_n > 0$, density is limited to $\sigma(\mathbf{p}) < 1/t_n$ [S1, unofficial].
+*   **PE Instability:** Standard PE amplifies high-frequency elements in the density derivative hierarchy by a scale difference of $2^{L-1}$, making learning unstable. Damped PE is used to mitigate this [S1, unofficial].
+*   **Color Quality:** Color field reconstruction performance is worse than NeRF for the same network size because damped PE neglects high-frequency components in the non-derivative hierarchy [S1, unofficial].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Not given in the sources. However, it retains the same formulation as NeRF, implying similar complexity to standard NeRF, which is time-consuming for optimization and rendering [S1, unofficial].
+*   **Measured Performance:** Evaluated on the NeRF synthetic dataset (Lego, Drums, Ficus, Hotdog, Chair, Materials, Mic, Ship). PSNR results are competitive with NeRF and NeuS but slightly inferior to state-of-the-art methods [S1, unofficial].
+    *   Lego: 32.91 (NeDDF) vs 32.54 (NeRF) vs 27.18 (NeuS).
+    *   Chair: 29.11 (NeDDF) vs 33.00 (NeRF) vs 27.69 (NeuS).
+    *   Hotdog: 30.85 (NeDDF) vs 36.18 (NeRF) vs 32.14 (NeuS).
+*   **Strengths:** More stable meshes, broader range of valid camera poses for localization, handles transparency and thin surfaces better than NeuS [S1, unofficial].
+*   **Limitations:** Slightly inferior PSNR to SOTA, worse color reconstruction than NeRF for same size, lack of interior distance info, time-consuming optimization [S1, unofficial].
+*   **When to use:** When stable mesh extraction and camera pose localization are required, or when dealing with thin surfaces/transparency.
+*   **When not to use:** When maximum PSNR is the primary goal and computational resources are limited.
+
+## Background
+Neural Density-Distance Fields (NeDDF) was proposed to represent reciprocally constrained distance and density fields [S1, unofficial]. It extends the distance field formulation to adapt to any density field, allowing for boundaryless scenes and complex shapes [S1, unofficial]. The method was evaluated on the NeRF synthetic dataset for novel view synthesis and camera pose localization [S1, unofficial]. It builds on the principles of NeRF [14] and NeuS [24], addressing limitations of boundary-based distance fields like NeuS [S1, unofficial].
+
+## Sources
+[S1] Neural Density-Distance Fields, https://doi.org/10.48550/arXiv.2207.14455, fetched 2026-10-27 (unofficial)

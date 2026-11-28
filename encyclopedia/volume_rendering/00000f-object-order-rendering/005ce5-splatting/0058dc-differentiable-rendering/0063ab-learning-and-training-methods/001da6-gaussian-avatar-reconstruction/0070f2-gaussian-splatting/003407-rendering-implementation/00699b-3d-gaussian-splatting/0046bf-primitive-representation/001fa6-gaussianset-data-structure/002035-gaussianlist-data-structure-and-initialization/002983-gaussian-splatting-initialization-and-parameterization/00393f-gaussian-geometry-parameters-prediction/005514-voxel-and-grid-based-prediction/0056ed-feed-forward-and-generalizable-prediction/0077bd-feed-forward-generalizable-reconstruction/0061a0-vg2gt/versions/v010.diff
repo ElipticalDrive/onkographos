@@ -1,0 +1,228 @@
+--- v009.md
++++ v010.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-VG2GT is a feed-forward, non-pixel-aligned 3D Gaussian Splatting (3DGS) reconstruction framework that directly regresses geometrically accurate Gaussian scenes and camera parameters from an arbitrary number of unposed and uncalibrated images [S1, unofficial]. It solves the problem of uneven Gaussian distributions and cross-view inconsistencies inherent in pixel-aligned methods by introducing a multi-scale differentiable voxel module that aggregates point-cloud features into a structured representation [S1, unofficial]. Unlike siblings such as [AnySplat Pipeline](12847-anysplat-pipeline.md), which first regresses pixel-aligned primitives and then aggregates them, VG2GT directly decodes Gaussian primitives from structured voxel features, avoiding the intermediate pixel-aligned representation [S1, unofficial].
++VG2GT is a feed-forward, non-pixel-aligned 3D Gaussian Splatting (3DGS) reconstruction framework that directly regresses geometrically accurate Gaussian scenes and camera parameters from an arbitrary number of unposed and uncalibrated images [S1, unofficial]. It distinguishes itself from sibling methods like AnySplat by avoiding the intermediate step of regressing pixel-aligned primitives; instead, it decodes Gaussian primitives directly from structured voxel features, thereby mitigating the uneven distributions and cross-view inconsistencies inherent in pixel-aligned formulations [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** An arbitrary number $N$ of unposed and uncalibrated RGB images $\{\mathbf{I}_i\}_{i=1}^N$.
+-*   **Output:** A set of 3D Gaussian primitives $\mathcal{G}$ (defined by mean $\mu$, covariance $\Sigma$, opacity $\alpha$, and color $c$) and camera pose representations $\mathbf{C}_i$ [S1, unofficial].
++*   **Input:** A set of $N$ unposed and uncalibrated RGB images $\{\mathbf{I}_i\}_{i=1}^N$.
++*   **Output:** A set of 3D Gaussian primitives (position, covariance, opacity, spherical harmonics coefficients) and camera pose representations $\mathbf{C}_i$.
+ 
+ **Data Structures:**
+@@ -17,106 +17,131 @@
+     *   Depth maps $\mathbf{D}_i \in \mathbb{R}^{H \times W \times 1}$.
+     *   Camera pose representations $\mathbf{C}_i \in \mathbb{R}^9$.
+-2.  **Voxel Features:** Structured 3D grid features resulting from the voxelization of global point-cloud features.
++2.  **Voxel Features:** A structured 3D voxel grid containing refined geometric features, derived from point-cloud features via voxelization.
++3.  **Gaussian Primitives:** Defined by position $\mathbf{x}$, covariance matrix $\Sigma$ (parameterized by rotation $\mathbf{R}$ and scale $\mathbf{s}$), opacity $\alpha$, and spherical harmonics coefficients $\mathbf{c}$.
+ 
+ **Numbered Steps:**
+ 
+-1.  **Feature Encoding (Frozen Backbone):**
+-    The framework builds on the frozen pretrained visual foundation model VGGT [36]. The VGGT backbone $\mathcal{F}_\phi$ jointly encodes the $N$ input images. It uses a ViT-based encoder (e.g., DINO [26]) with alternating attention, where patch tokens are downsampled by a factor of 14. It produces pixel-aligned point maps, depth maps, and camera pose representations [S1, unofficial]:
++1.  **Joint Encoding:** The frozen VGGT backbone $\mathcal{F}_\phi$ jointly encodes the input images to produce initial geometric cues:
+     $$ \mathcal{F}_\phi (\{\mathbf{I}_i\}_{i=1}^N) = \{\mathbf{P}_i, \mathbf{D}_i, \mathbf{C}_i\}_{i=1}^N $$
+-    [S1, unofficial]
++    The backbone uses a ViT-based encoder (e.g., DINO) with alternating attention, where patch tokens are downsampled by a factor of 14 [S1, unofficial].
+ 
+ 2.  **Coarse-Scale Feature Enhancement:**
+-    At the coarse scale, PointTransformer [47] and trilinear interpolation are used to compute complementary geometric features from the point maps. These features are injected into the patch tokens to enhance global scene understanding [S1, unofficial].
++    *   PointTransformer [47] and trilinear interpolation are used to compute complementary geometric features from the point maps $\mathbf{P}_i$.
++    *   These features are injected into the patch tokens of the VGGT backbone to enhance global scene understanding [S1, unofficial].
+ 
+ 3.  **Fine-Scale Voxelization:**
+-    At the fine scale, a DPT head [28] extracts global point-cloud features. These features are voxelized into a structured 3D representation. This step aggregates point-cloud features into structured voxel features to reduce the uneven distribution of Gaussian primitives [S1, unofficial].
++    *   A DPT head [28] extracts global point-cloud features from the enhanced tokens.
++    *   These features are voxelized into a structured 3D voxel representation [S1, unofficial].
+ 
+-4.  **Voxel Refinement:**
+-    The resulting voxel features are refined by a PointMLP network [S1, unofficial].
++4.  **Voxel Refinement and Decoding:**
++    *   The voxel features are refined by a PointMLP network.
++    *   A self-splitting Gaussian head decodes the refined voxel features to predict the parameters of the Gaussian primitives (position, covariance, opacity, SH coefficients) [S1, unofficial].
+ 
+-5.  **Gaussian Primitive Decoding:**
+-    A self-splitting Gaussian head decodes the refined voxel features to predict the Gaussian primitive parameters ($\mu, \Sigma, \alpha, c$). This directly produces non-pixel-aligned Gaussian primitives [S1, unofficial].
++5.  **Rendering and Supervision:**
++    *   Standard 3DGS rasterization is replaced with **stochastic solid volume rendering** during training.
++    *   This formulation models Gaussian primitives as continuous stochastic solids and renders them along camera rays, improving the quality of synthesized Gaussian depth maps and strengthening geometric reconstruction accuracy [S1, unofficial].
++    *   The rendered images and depth maps are compared against ground truth (or pseudo-ground truth from the VGGT outputs) to compute loss.
+ 
+-6.  **Rendering and Supervision:**
+-    During training, standard 3DGS rasterization is replaced with stochastic solid volume rendering to supervise scene geometry. This formulation models Gaussian primitives as continuous stochastic solids and renders them along camera rays [25]. The rendered image $\mathbf{I}_i(\mathbf{p})$ at pixel $\mathbf{p}$ is computed using depth-ordered $\alpha$-blending:
+-    $$ \mathbf{I}_i(\mathbf{p}) = \sum_{g \in \Omega(\mathbf{p})} \left( \prod_{j < g} (1 - o_j^{(i)}(\mathbf{p})) \right) c_g o_g^{(i)}(\mathbf{p}) $$
+-    where $o_g^{(i)}(\mathbf{p})$ is the effective opacity of the $g$-th Gaussian [S1, unofficial].
++6.  **Optimization:**
++    *   The original VGGT components (backbone, depth head, camera head) are kept **fully frozen**.
++    *   Only the multi-scale voxel module (PointTransformer, DPT, PointMLP) and the Gaussian primitive decoding head are optimized [S1, unofficial].
++
++**Pseudocode:**
++
++```python
++def vg2gt_forward(images, vggt_backbone, voxel_module, gaussian_head):
++    """
++    Forward pass of VG2GT.
++    
++    Args:
++        images: List of N RGB images [H, W, 3].
++        vggt_backbone: Frozen VGGT model (ViT-based encoder + DPT heads).
++        voxel_module: Multi-scale differentiable voxel module (PointTransformer, PointMLP).
++        gaussian_head: Self-splitting Gaussian head.
++        
++    Returns:
++        gaussians: List of Gaussian primitive parameters.
++        camera_poses: List of camera pose representations.
++    """
++    # Step 1: Joint Encoding with Frozen VGGT
++    # VGGT produces pixel-aligned point maps, depth maps, and camera poses
++    point_maps, depth_maps, camera_poses = vggt_backbone(images)
++    
++    # Step 2: Coarse-Scale Feature Enhancement
++    # Compute geometric features using PointTransformer and trilinear interpolation
++    # Inject into patch tokens to enhance global understanding
++    # Note: VGGT backbone is frozen, so this likely involves external feature injection
++    # or modifying the input to the frozen backbone's attention layers if supported.
++    # Assuming the 'voxel_module' handles the interaction with the frozen backbone's features.
++    enhanced_features = voxel_module.coarse_enhance(point_maps, depth_maps)
++    
++    # Step 3: Fine-Scale Voxelization
++    # Extract global point-cloud features via DPT (part of VGGT or separate head?)
++    # The source says "DPT head extracts... and voxelizes". 
++    # Since VGGT is frozen, we assume the DPT head used for feature extraction 
++    # is either part of the frozen VGGT or a separate frozen component, 
++    # but the voxelization and refinement are trainable.
++    # Clarification from source: "Only the multi-scale voxel module and Gaussian primitive 
++    # decoding head are optimized."
++    # Thus, the DPT head extracting features might be frozen or part of the VGGT output.
++    # We assume point_maps/depth_maps are sufficient or enhanced features are used.
++    
++    # Voxelize point-cloud features into structured representation
++    voxel_features = voxel_module.voxelize(point_maps, enhanced_features)
++    
++    # Step 4: Refine and Decode
++    # Refine voxel features with PointMLP
++    refined_voxel_features = voxel_module.refine(voxel_features)
++    
++    # Decode Gaussian primitive parameters
++    gaussians = gaussian_head.decode(refined_voxel_features)
++    
++    return gaussians, camera_poses
++
++def vg2gt_render(gaussians, camera_poses, pixel_coords):
++    """
++    Stochastic solid volume rendering.
++    
++    Args:
++        gaussians: List of Gaussian primitives.
++        camera_poses: Camera poses for each view.
++        pixel_coords: 2D pixel coordinates to render.
++        
++    Returns:
++        rendered_image: Rendered RGB image.
++        rendered_depth: Rendered depth map.
++    """
++    # Replace standard 3DGS rasterization with stochastic solid volume rendering
++    # This models Gaussians as continuous stochastic solids
++    rendered_image = stochastic_solid_volume_render(gaussians, camera_poses, pixel_coords)
++    rendered_depth = compute_depth_from_gaussians(gaussians, camera_poses, pixel_coords)
++    
++    return rendered_image, rendered_depth
++```
+ 
+ **Parameters:**
+-*   **VGGT Backbone:** Frozen. Uses DINO-based ViT with alternating attention. Patch tokens downsampled by factor 14 [S1, unofficial].
+-*   **Optimized Components:** Only the multi-scale voxel module and the Gaussian primitive decoding head are optimized. The original VGGT backbone, depth head, and camera head remain fully frozen [S1, unofficial].
++*   **VGGT Backbone:** Uses a ViT-based encoder (e.g., DINO) with alternating attention. Patch tokens are downsampled by a factor of 14 [S1, unofficial].
++*   **Training:** The VGGT backbone, depth head, and camera head are frozen. Only the voxel module and Gaussian head are trained [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Pixel-Aligned Artifacts:** Standard feed-forward methods using pixel-aligned Gaussian primitives impose a one-to-one correspondence between 2D pixels and 3D points. This leads to uneven Gaussian distributions and cross-view inconsistencies because the same 3D point can be visible from multiple pixels and viewpoints [S1, unofficial]. VG2GT mitigates this by using structured voxel features.
+-*   **Training Cost:** By freezing the VGGT backbone, the method substantially reduces training cost compared to methods that train the full network [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-# VG2GT Reconstruction Pipeline
+-# Inputs: N unposed/uncalibrated RGB images I_1...I_N
+-# Outputs: Gaussian primitives G, Camera poses C
+-
+-def vg2gt_reconstruct(images):
+-    # 1. Frozen VGGT Backbone Encoding
+-    # F_phi is the frozen VGGT model (ViT-based, DINO backbone)
+-    # Outputs: Point maps P, Depth maps D, Camera poses C
+-    P, D, C = frozen_vggT_backbone(images)
+-    
+-    # 2. Coarse-Scale Feature Enhancement
+-    # Compute complementary geometric features using PointTransformer
+-    # and trilinear interpolation
+-    coarse_features = point_transformer_and_trilinear(P)
+-    
+-    # Inject features into patch tokens (handled internally by VGGT's 
+-    # token structure or explicit injection if specified by implementation)
+-    # Note: The source states features are "injected into patch tokens"
+-    # to enhance global scene understanding.
+-    enhanced_tokens = inject_into_tokens(coarse_features)
+-    
+-    # 3. Fine-Scale Voxelization
+-    # DPT head extracts global point-cloud features from enhanced tokens
+-    global_point_features = dpt_head(enhanced_tokens)
+-    
+-    # Voxelize global features into structured 3D representation
+-    voxel_features = voxelize(global_point_features)
+-    
+-    # 4. Voxel Refinement
+-    # Refine voxel features using PointMLP
+-    refined_voxels = point_mlp(voxel_features)
+-    
+-    # 5. Gaussian Primitive Decoding
+-    # Self-splitting Gaussian head decodes parameters
+-    G = gaussian_head(refined_voxels)
+-    
+-    return G, C
+-
+-def stochastic_solid_rendering(G, camera_params):
+-    """
+-    Replaces standard 3DGS rasterization.
+-    Models Gaussians as continuous stochastic solids.
+-    """
+-    # Render image using depth-ordered alpha blending
+-    # I(p) = sum_g ( prod_{j<g} (1 - o_j(p)) ) * c_g * o_g(p)
+-    rendered_image = render_alpha_blend(G, camera_params)
+-    return rendered_image
+-```
++**Pitfalls:**
++*   **Pixel-Aligned Artifacts:** Pixel-aligned Gaussian primitives impose a one-to-one correspondence between 2D pixels and 3D points. In real multi-view observations, the same 3D point can be visible from multiple pixels and viewpoints. Aggregating these observations is essential for compact, coherent, and geometrically consistent scene representations. Pixel-aligned formulations tend to produce uneven Gaussian distributions and cross-view inconsistencies [S1, unofficial]. VG2GT avoids this by using a non-pixel-aligned voxel-based approach.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method is feed-forward, allowing reconstruction within seconds [S1, unofficial]. It avoids per-scene gradient descent optimization, which is typical for standard 3DGS [16746-feed-forward-generalizable-reconstruction.md].
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Performance:** VG2GT achieves state-of-the-art performance on the DTU, Replica, TAT, and ScanNet datasets [S1, unofficial].
++*   **Time Complexity:** Not given in the sources. However, as a feed-forward method, it avoids the iterative optimization loop of standard 3DGS, implying significantly faster inference/training time compared to optimization-based methods [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources. The voxel module introduces additional memory overhead compared to direct pixel-aligned decoding, but the frozen VGGT backbone reduces the need for large trainable parameters [S1, unofficial].
++*   **Measured Performance:** VG2GT achieves state-of-the-art performance on the DTU, Replica, TAT, and ScanNet datasets [S1, unofficial].
+ *   **Strengths:**
+-    *   Handles arbitrary numbers of unposed and uncalibrated images.
+-    *   Avoids pixel-aligned artifacts and cross-view inconsistencies.
+-    *   Substantially reduces training cost by freezing the VGGT backbone.
+-    *   Can be plugged into patch-feature-based Visual Foundation Models [S1, unofficial].
++    *   Feed-forward: No iterative optimization required.
++    *   Non-pixel-aligned: Avoids uneven Gaussian distributions and cross-view inconsistencies.
++    *   Frozen Backbone: Substantially reduces training cost and allows plugging into patch-feature-based VFMs [S1, unofficial].
++    *   Geometric Accuracy: Stochastic solid volume rendering improves depth map quality and geometric reconstruction accuracy [S1, unofficial].
+ *   **Limitations:**
+     *   Relies on the quality of the frozen VGGT backbone.
+     *   Not given in the sources.
+-*   **When to use:** When fast, geometrically accurate, and multi-view consistent 3DGS reconstruction is required from unposed/uncalibrated images, and training cost is a concern.
+-*   **When not to use:** When per-scene optimization is acceptable and higher fidelity is needed than what the frozen backbone allows, or when pixel-aligned representations are sufficient.
++*   **When to Use:** When fast, geometrically accurate 3D reconstruction from unposed/uncalibrated images is required, and high multi-view consistency is critical.
++*   **When Not to Use:** When iterative optimization is acceptable and higher fidelity is needed for specific scenes, or when the VGGT backbone is not suitable for the domain.
+ 
+ ## Background
+-VG2GT was proposed as a feed-forward alternative to existing Visual Foundation Models (VFMs) that often produce pixel-aligned Gaussian primitives, leading to non-uniform distributions and multi-view inconsistencies [S1, unofficial]. It builds on VGGT [36], a large-scale visual Transformer that consolidates camera estimation, depth estimation, and point-map prediction. The method was developed to address the limitations of methods like AnySplat [12], which still rely on an intermediate pixel-aligned representation. VG2GT introduces a multi-scale voxel-based feature enhancement strategy to split and refine features for direct Gaussian regression [S1, unofficial].
++VG2GT was proposed by Zhao et al. in 2026 (preprint) [S1, unofficial]. It builds on the VGGT visual foundation model [36] and addresses the limitations of existing feed-forward 3DGS methods that use pixel-aligned Gaussian primitives [S1, unofficial]. The method is designed to be plugged into patch-feature-based VFMs, reducing training cost and improving geometric reasoning through a multi-scale differentiable voxel module [S1, unofficial].
+ 
+ ## Sources

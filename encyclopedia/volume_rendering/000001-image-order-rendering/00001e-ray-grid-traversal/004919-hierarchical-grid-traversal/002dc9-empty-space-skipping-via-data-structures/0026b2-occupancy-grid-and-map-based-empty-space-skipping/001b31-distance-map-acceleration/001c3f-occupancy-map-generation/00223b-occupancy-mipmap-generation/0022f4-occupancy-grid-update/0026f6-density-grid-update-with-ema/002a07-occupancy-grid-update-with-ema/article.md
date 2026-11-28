@@ -1,0 +1,135 @@
+# Occupancy Grid Update with EMA
+
+Also called: Dynamic Space Occupancy Grids
+
+## Overview
+This method maintains a dynamic occupancy grid to accelerate ray-marching by skipping empty space during differentiable volume rendering [S1, unofficial][S2]. It updates the occupancy estimator using an Exponential Moving Average (EMA) of density estimates derived from a 3D scene representation, adaptively guiding point sampling along rays [S1, unofficial][S2]. Unlike static occupancy grids, this approach continuously refines the empty-space map during training, improving efficiency by skipping voxels deemed empty based on the EMA history [S1, unofficial]. It builds on [Density Grid Update with EMA](3884-density-grid-update-with-ema.md) by applying similar EMA principles to occupancy rather than density values directly.
+
+## How it works
+**Inputs:**
+- `step`: Current training step (integer).
+- `self.training`: Boolean flag indicating training mode.
+- `self.resolution`: Resolution of the occupancy grid (integer).
+- `self.cells_per_lvl`: Number of cells per level (integer).
+- `self.grid_coords`: Tensor of grid coordinates (shape: `[N, 3]`, integer).
+- `self.binaries`: Binary occupancy grid tensor (shape: `[m, resx, resy, resz]`).
+- `self.aabbs`: Axis-aligned bounding boxes for grids (shape: `[m, 6]`).
+- `occ_eval_fn`: Callable taking sample locations `(N, 3)` and returning occupancy values `(N, 1)`.
+- `occ_thre`: Threshold for binarizing occupancy (float, default: `1e-2`).
+- `ema_decay`: Decay rate for EMA (float, default: `0.95`).
+- `warmup_steps`: Steps to sample all cells (integer, default: `256`).
+- `n`: Update interval in steps (integer, default: `16`).
+- `alpha`: EMA smoothing factor (float, default: `0.05` from [S2]).
+
+**Outputs:**
+- Updated `self.binaries` occupancy grid.
+
+**Data Structures:**
+- `self.binaries`: Binary tensor representing occupancy. `1` indicates occupied, `0` empty.
+- `self.grid_coords`: Tensor storing 3D coordinates of grid cells.
+
+**Steps:**
+1. Check if `self.training` is `False`. If so, raise `RuntimeError` [S1, unofficial].
+2. If `step % n == 0` and `self.training` is `True`, call `_update(step, occ_eval_fn, occ_thre, ema_decay, warmup_steps)` [S1, unofficial].
+3. In `_update`:
+   a. If `step < warmup_steps`:
+      i. Get all cell indices using `self._get_all_cells()` [S1, unofficial].
+   b. If `step >= warmup_steps`:
+      i. Set `N = self.cells_per_lvl // 4` [S1, unofficial].
+      ii. Sample cells using `self._sample_uniform_and_occupied_cells(N)` [S1, unofficial]. This samples 1/4 of cells uniformly and 1/4 from occupied regions [S1, unofficial].
+   c. For each level `lvl` and indices in `lvl_indices`:
+      i. Get `grid_coords = self.grid_coords[indices]` [S1, unofficial].
+      ii. Compute sample positions `x = (grid_coords + torch.rand_like(grid_coords, dtype=torch.float32)) / self.resolution` [S1, unofficial]. This adds uniform noise to sample within the voxel [G].
+      iii. Evaluate densities at `x` using `occ_eval_fn(x)` to get `Dg` [S2].
+      iv. For each grid `g`, define point set `Xg` containing the center and 8 vertices of grid `g` [S2].
+      v. Get predicted densities `Dg = {σig ∈ R+}_{i=1}^9` for these 9 points [S2].
+      vi. Calculate density `σg` as `max(Dg)` [S2].
+      vii. Update occupancy `oEMA_g` using EMA: `oEMA_g ← max(σg, α(σg - oEMA_g) + oEMA_g)` where `α = 0.05` [S2].
+      viii. Binarize `oEMA_g` using `occ_thre` to update `self.binaries` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_occupancy_grid(step, self, occ_eval_fn, occ_thre=1e-2, ema_decay=0.95, warmup_steps=256, n=16, alpha=0.05):
+    if not self.training:
+        raise RuntimeError("Occupancy grid update only supported during training")
+    
+    if step % n == 0:
+        _update(step, self, occ_eval_fn, occ_thre, ema_decay, warmup_steps, alpha)
+
+def _update(step, self, occ_eval_fn, occ_thre, ema_decay, warmup_steps, alpha):
+    if step < warmup_steps:
+        indices = self._get_all_cells()
+    else:
+        N = self.cells_per_lvl // 4
+        indices = self._sample_uniform_and_occupied_cells(N)
+    
+    for lvl in self.levels:
+        lvl_indices = indices[lvl]
+        grid_coords = self.grid_coords[lvl_indices]
+        
+        # Add uniform noise to sample within voxel
+        x = (grid_coords + torch.rand_like(grid_coords, dtype=torch.float32)) / self.resolution
+        
+        # Evaluate densities at sample points
+        # occ_eval_fn returns occupancy values (N, 1)
+        densities = occ_eval_fn(x)
+        
+        # For each grid, we need to evaluate 9 points (center + 8 vertices)
+        # This part requires expanding grid_coords to 9 points per grid
+        # Assuming grid_coords is already expanded to 9 points per grid for simplicity
+        # In practice, this involves generating 9 points per grid cell
+        
+        # Calculate max density for each grid
+        # densities shape: [num_grids * 9, 1]
+        # Reshape to [num_grids, 9, 1] and take max over 9 points
+        densities_reshaped = densities.view(-1, 9, 1)
+        sigma_g = torch.max(densities_reshaped, dim=1).values  # [num_grids, 1]
+        
+        # Update EMA occupancy
+        # oEMA_g is stored in self.occupancy_ema
+        oEMA_g = self.occupancy_ema[lvl_indices]
+        new_oEMA = torch.max(sigma_g, alpha * (sigma_g - oEMA_g) + oEMA_g)
+        self.occupancy_ema[lvl_indices] = new_oEMA
+        
+        # Binarize occupancy
+        binaries = (new_oEMA > occ_thre).float()
+        self.binaries[lvl_indices] = binaries
+```
+
+**Parameters:**
+- `step`: Current training step [S1, unofficial].
+- `occ_eval_fn`: Callable for occupancy evaluation [S1, unofficial].
+- `occ_thre`: Threshold for binarization, default `1e-2` [S1, unofficial].
+- `ema_decay`: Decay rate for EMA, default `0.95` [S1, unofficial].
+- `warmup_steps`: Steps to sample all cells, default `256` [S1, unofficial].
+- `n`: Update interval, default `16` [S1, unofficial].
+- `alpha`: EMA smoothing factor, default `0.05` [S2].
+
+**Edge Cases and Pitfalls:**
+- Precision: EMA updates may suffer from precision issues if `alpha` is very small [S2].
+- Boundaries: Ensure `grid_coords` are within valid range before sampling [G].
+- Degenerate Input: If `occ_eval_fn` returns NaN or Inf, handle gracefully [G].
+
+## Subtopics
+
+### [Dynamic Occupancy Grid Sampling](20666-dynamic-occupancy-grid-sampling.md)
+Dynamic Occupancy Grid Sampling is a ray-marching acceleration technique that partitions the 3D scene into a fixed-resolution grid of occupancy voxels to skip empty space during differentiable volume rendering. It improves training efficiency by adaptively guiding point sampling along rays, skipping voxels deemed empty based on an Exponential Moving Average (EMA) of density estimates, whereas ordinary sampling processes all points along the ray regardless of occupancy.
+
+## Operating characteristics
+- Time Complexity: O(N) per update, where N is the number of sampled cells [S1, unofficial].
+- Memory Complexity: O(M) for storing occupancy grid, where M is total number of cells [S1, unofficial].
+- Measured Performance: Not given in the sources.
+- Scaling: Scales with grid resolution and number of levels [S1, unofficial].
+- Strengths: Adaptive empty-space skipping, efficient during training [S1, unofficial][S2].
+- Limitations: Requires careful tuning of `alpha` and `occ_thre` [S2].
+- When to Use: During training of neural radiance fields or implicit surfaces [S1, unofficial][S2].
+- When Not to Use: During inference or when static occupancy is sufficient [S1, unofficial].
+
+## Background
+Originated in the context of dynamic occupancy grids for accelerating ray-marching in neural rendering [S1, unofficial][S2]. Developed to improve training efficiency by adaptively guiding point sampling [S2]. Used in methods like HelixSurf for robust neural implicit surface learning [S2].
+
+## Sources
+[S1] Yosshi999/faster-occgrid, https://github.com/Yosshi999/faster-occgrid, fetched 2026-10-24 (unofficial)
+[S2] HelixSurf: A Robust and Efficient Neural Implicit Surface Learning of Indoor Scenes with Iterative Intertwined Regularization, https://arxiv.org/abs/2302.14340v2, fetched 2026-10-26

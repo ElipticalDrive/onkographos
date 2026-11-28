@@ -1,0 +1,186 @@
+--- v002.md
++++ v003.md
+@@ -1,3 +1,4 @@
+ # Dynamic Diffuse Global Illumination (DDGI)
++
+ 
+ ## Overview
+@@ -6,91 +7,103 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Scene geometry (for surfel generation), active probe locations, ray tracing acceleration structure (BVH).
+-*   **Output:** A probe atlas containing irradiance data (color) and depth information for each probe, used during shading to interpolate indirect lighting.
++*   **Input:** Scene geometry, active probe locations, ray tracing acceleration structure (BVH).
++*   **Output:** A probe atlas containing irradiance data and depth information for each probe, used during shading to interpolate indirect lighting [S1, unofficial].
+ 
+ **Data Structures:**
+ *   **Probe Atlas:** A 3D grid array of cubemaps. Each probe consists of two very low-resolution cubemaps (e.g., $4 \times 4$ resolution) [S2, unofficial].
+-    *   **Irradiance Cubemap:** Stores the accumulated indirect diffuse lighting.
+-    *   **Depth Cubmap:** Stores the distance to the nearest surface hit from the probe center, used to prevent light/shadow leaks [S2, unofficial].
++    *   **Irradiance Cubemap:** Stores the accumulated indirect diffuse lighting [S2, unofficial].
++    *   **Depth Cubemap:** Stores the distance to the nearest surface hit from the probe center, used to prevent light/shadow leaks [S2, unofficial].
+ *   **Surfel G-Buffer:** A structure storing position and normal data for geometry hits intersected by probe rays [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-The method operates in two main phases: Probe Building and Shading.
+-
+-1.  **Ray Tracing and Surfel Generation:**
+-    For each of the $m$ active probes, generate and trace $n$ rays into the scene [S1, unofficial]. The rays can be generated via cone tracing (if hardware RT is unavailable) or hardware-accelerated ray tracing (RTX/DXR/RadeonRays) [S2, unofficial]. Store all geometry hits in a G-Buffer structure as surfels, recording their position and normal vectors [S1, unofficial].
+-
+-2.  **Surfel Shading:**
+-    Shade each surfel with direct illumination (sun, sky) and indirect illumination [S1, unofficial]. This step calculates the radiance contribution of the hit surface.
+-
+-3.  **Probe Update (Blending):**
+-    Update the texels in the active probes by blending the results from the intersected surfels [S1, unofficial]. For each surfel hit by a ray from a probe:
+-    *   Calculate the distance $d$ and squared distance $d^2$ from the probe center to the surfel.
+-    *   Blend the surfel's shading, distance, and square-distance results into the corresponding texel of the probe's irradiance and depth cubemaps [S1, unofficial].
+-    *   This blending process allows the probe data to adapt to changes in scene geometry over time [S1, unofficial].
+-
+-4.  **Interpolation:**
+-    During rendering, interpolate probe depth information and irradiance data from the grid to the shading point to determine the indirect illumination [S1, unofficial].
++1.  **Ray Tracing and Surfel Generation:** Generate and trace $n$ rays from each of the $m$ active probes [S1, unofficial]. Rays can be generated via cone tracing (if hardware RT is unavailable) or hardware-accelerated ray tracing (RTX/DXR/RadeonRays) [S2, unofficial]. Store all geometry hits in a G-Buffer structure as surfels, recording their position and normal vectors [S1, unofficial].
++2.  **Surfel Shading:** Shade each surfel with direct and indirect illumination [S1, unofficial].
++3.  **Probe Update (Blending):** Update the texels in the active probes by blending in updated shading, distance, and square-distance results for each intersected surfel [S1, unofficial].
++4.  **Interpolation and Adaptation:** Blend each frame's updated raytraced illumination into the probe atlas and interpolate probe depth information to adapt to scene geometry changes [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++import math
++from dataclasses import dataclass
++from typing import List, Tuple
++
++@dataclass
++class Surfel:
++    position: Tuple[float, float, float]
++    normal: Tuple[float, float, float]
++    distance: float
++    shading: Tuple[float, float, float]
++
++def cosine_sample_hemisphere(normal: Tuple[float, float, float]) -> Tuple[float, float, float]:
++    # Standard hemisphere sampling relative to the surface normal
++    # Returns a direction vector in world space
++    return normal
++
++def trace_ray(origin: Tuple[float, float, float], direction: Tuple[float, float, float], bvh) -> object:
++    # Standard BVH traversal returning a hit object or None
++    return None
++
++def world_to_cubemap(direction: Tuple[float, float, float]) -> Tuple[int, Tuple[float, float]]:
++    # Maps a direction vector to a cubemap face index and normalized UV coordinates
++    return 0, (0.5, 0.5)
++
++def blend(current: Tuple[float, float, float], new: Tuple[float, float, float], weight: float) -> Tuple[float, float, float]:
++    return tuple(c * (1.0 - weight) + n * weight for c, n in zip(current, new))
++
++def compute_direct_irradiance(position: Tuple[float, float, float], normal: Tuple[float, float, float]) -> Tuple[float, float, float]:
++    # [G] Standard direct lighting calculation (sun/sky contribution * albedo)
++    return (0.8, 0.8, 0.8)
++
++def get_surrounding_probes(grid, point) -> List[object]:
++    # Finds probes in the 3D grid spatially near the shading point
++    return []
++
++def interpolate_cubemaps(probes, point) -> Tuple[float, float, float]:
++    # Interpolates irradiance values from surrounding probes
++    return (0.0, 0.0, 0.0)
++
++def interpolate_depths(probes, point) -> float:
++    # Interpolates depth values from surrounding probes
++    return 0.0
++
+ def update_ddgi_probes(probes, scene_bvh, num_rays_per_probe):
+-    """
+-    Updates the DDGI probe atlas by tracing rays and blending surfel data.
+-    """
+     for probe in probes:
+-        # 1. Generate and trace rays
+         hits = []
+-        for i in range(num_rays_per_probe):
+-            ray_direction = cosine_sample_hemisphere(probe.normal)
+-            ray_origin = probe.position
+-            hit = trace_ray(ray_origin, ray_direction, scene_bvh)
+-            if hit.is_valid():
++        # Step 1: Generate and trace rays
++        for _ in range(num_rays_per_probe):
++            ray_dir = cosine_sample_hemisphere(probe.normal)
++            hit = trace_ray(probe.position, ray_dir, scene_bvh)
++            if hit is not None:
+                 hits.append(Surfel(
+                     position=hit.point,
+                     normal=hit.normal,
+-                    distance=distance(probe.position, hit.point)
++                    distance=math.dist(probe.position, hit.point),
++                    shading=(0.0, 0.0, 0.0)
+                 ))
+         
+-        # 2. Shade surfels (Direct + Indirect)
+-        # Note: Indirect here refers to the contribution from the surfel itself
+-        # which is then blended into the probe.
++        # Step 2 & 3: Shade surfels and blend into probe
+         for surfel in hits:
+-            direct_light = compute_direct_irradiance(surfel.position, surfel.normal)
+-            # Indirect contribution from this specific hit is calculated based on
+-            # the surfel's material and direct lighting, then blended into probe.
+-            surfel_radiance = direct_light * surfel.material.albedo
++            surfel.shading = compute_direct_irradiance(surfel.position, surfel.normal)
++            face, uv = world_to_cubemap(surfel.position - probe.position)
++            d = surfel.distance
++            d2 = d * d
++            weight = 1.0 / (1.0 + d2)
+             
+-            # 3. Blend into probe atlas
+-            # Map hit direction to cubemap face and texel
+-            face, uv = world_to_cubemap(surfel.position - probe.position)
+-            
+-            # Blend irradiance
+             probe.irradiance_cubemap[face][uv] = blend(
+                 probe.irradiance_cubemap[face][uv],
+-                surfel_radiance,
+-                weight=surfel.distance # Distance-based weighting
++                surfel.shading,
++                weight=weight
+             )
+-            
+-            # Blend depth (to prevent leaks)
+-            probe.depth_cubemap[face][uv] = blend_depth(
++            probe.depth_cubemap[face][uv] = blend(
+                 probe.depth_cubemap[face][uv],
+-                surfel.distance
++                d,
++                weight=weight
+             )
+ 
+ def shade_with_ddgi(probe_grid, shading_point):
+-    """
+-    Retrieves indirect illumination for a shading point by interpolating probes.
+-    """
+-    # Find surrounding probes in the 3D grid
+-    surrounding_probes = get_surrounding_probes(probe_grid, shading_point)
+-    
+-    # Interpolate irradiance and depth from surrounding probes
+-    irradiance = interpolate_cubemaps(surrounding_probes, shading_point)
+-    depth = interpolate_depths(surrounding_probes, shading_point)
+-    
+-    # Use depth to mask out invalid or leaking samples if necessary
+-    # [G] Specific masking logic depends on implementation details not fully specified in sources.
+-    
++    # Step 4: Interpolate probe data for shading
++    surrounding = get_surrounding_probes(probe_grid, shading_point)
++    irradiance = interpolate_cubemaps(surrounding, shading_point)
++    depth = interpolate_depths(surrounding, shading_point)
+     return irradiance
+ ```
+@@ -111,5 +124,5 @@
+ 
+ ## Operating characteristics
+-*   **Complexity:** Rendering complexity is $O(1)$, as shading requires only interpolation from the probe grid [S2, unofficial]. Probe building complexity depends on the number of probes $m$ and rays $n$, but is performed asynchronously or in a separate pass.
++*   **Complexity:** Rendering complexity is $O(1)$, as shading requires only interpolation from the probe grid [S2, unofficial].
+ *   **Memory:** Consumes far less memory than Voxel Cone Tracing (VCT) due to the use of very low-resolution cubemaps instead of a dense voxel grid [S2, unofficial].
+ *   **Performance:** Ideal for real-time applications due to $O(1)$ shading cost. Building probes can be accelerated significantly using hardware ray tracing (RTX/DXR) compared to rasterization or cone tracing [S2, unofficial].
+@@ -118,5 +131,5 @@
+ 
+ ## Background
+-DDGI was presented by McGuire et al. [S1, unofficial]. It builds upon prior work by McGuire et al. [41] (cited in [S1, unofficial]) and extends classic irradiance probes to compactly encode the full irradiance field. The technique was developed to address performance issues with sparse octrees and light/shadow leaks in previous global illumination approaches [S1, unofficial]. It is often implemented in two stages: first using Voxel Cone Tracing (VCT) to build probes (without hardware RT), and later migrating to hardware-accelerated ray tracing (RTX/DXR/RadeonRays) for faster and more accurate probe building [S2, unofficial].
++DDGI was presented by McGuire et al. [S1, unofficial]. It builds upon prior work by McGuire et al. [41] to extend classic irradiance probes and compactly encode the full irradiance field [S1, unofficial]. The technique was developed to address performance issues with sparse octrees and light/shadow leaks in previous global illumination approaches [S1, unofficial]. It is often implemented in two stages: first using Voxel Cone Tracing (VCT) to build probes (without hardware RT), and later migrating to hardware-accelerated ray tracing (RTX/DXR/RadeonRays) for faster and more accurate probe building [S2, unofficial].
+ 
+ ## Sources

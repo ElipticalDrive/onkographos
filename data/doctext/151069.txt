@@ -1,0 +1,925 @@
+LiTe-GS: Oracle-Efficient Next Best View Selection for 3D Gaussian Splatting
+Vivek Pandey
+Amirhossein Mollaei Khass
+Nader Motee
+arXiv:2609.30393v1 [cs.CV] 24 Sep 2026
+Abstract
+Selecting informative camera views is critical for efficient
+training and adaptive refinement in 3D Gaussian Splatting, where each observation significantly influences model
+parameters. However, information-driven view-selection
+strategies can require repeated evaluations of expensive
+information-gain oracles as the number of candidate views
+increases. We propose LiTe-GS, an oracle-efficient method
+for next best view selection in 3D Gaussian Splatting.
+LiTe-GS reduces the number of information-oracle evaluations by performing randomized subset evaluation of candidate views rather than exhaustively scoring the full candidate pool. The resulting approach achieves expected
+O(M log(1/ϵ)) oracle complexity with respect to the number of candidate views M , independent of the selection
+cardinality K, while providing an explicit trade-off between oracle efficiency and approximation quality through
+ϵ. We provide theoretical guarantees on oracle complexity
+and approximation performance under the proposed selection scheme. Experiments on Blender and Mip-NeRF 360
+demonstrate that LiTe-GS maintains reconstruction quality comparable to Fisher-information-based baselines while
+substantially reducing the number of Fisher-oracle evaluations across different acquisition settings.
+1. Introduction
+Volumetric rendering has become a fundamental paradigm
+for photorealistic novel-view synthesis in computer vision
+and robotics, enabling scene reconstruction by modeling
+light transport along camera rays. Recent advances have
+enabled high-quality reconstruction from multi-view imagery using both implicit and explicit scene representations. Neural Radiance Fields (NeRF) [23] demonstrated
+high-fidelity reconstruction using implicit neural scene parameterizations, while subsequent works such as Instant
+Neural Graphics Primitives [25], Plenoxels [7], and MipNeRF 360 [1] improved scalability and optimization efficiency through accelerated volumetric representations. Despite these advances, volumetric rendering methods remain
+computationally demanding for latency-sensitive applica-
+(a) Random
+(b) POP-GS
+(c) Ours
+(d) Ground Truth
+Figure 1. Setup 1: Qualitative comparison of rendered images on
+the Blender dataset. Results obtained using Random sampling,
+POP-GS [34], and LiTe-GS are shown alongside the corresponding ground-truth images.
+tions common in robotics and real-time perception tasks
+such as autonomous navigation and simultaneous localization and mapping (SLAM).
+The seminal work on 3D Gaussian Splatting
+(3DGS) [16] introduced a fundamentally explicit and
+anisotropic representation using millions of 3D Gaussianseach with optimized position, orientation, scaling, opacity,
+and spherical harmonics-paired with a fast, differentiable,
+visibility-aware rasterization pipeline. By avoiding volumetric sampling in empty space and leveraging efficient
+GPU splatting, 3DGS achieves reconstruction quality
+comparable to or exceeding NeRF and Plenoxels while
+drastically reducing training time and enabling real-time
+rendering. These properties make 3DGS particularly
+attractive for robotics applications [43], where efficient,
+high-fidelity 3D scene modeling from sequential or
+multi-view observations supports tasks such as real-time
+mapping and SLAM [3, 15, 21, 40], obstacle avoidance and
+risk aware navigation [4, 17, 20], and robotic manipulation [32, 36]. By providing rich geometric and appearance
+information at low latency, 3DGS can enhance spatial
+understanding in autonomy pipelines.
+Figure 2. Overview of the LiTe-GS pipeline. Given a small set of seed views, we first build an initial 3D Gaussian Splatting (3DGS)
+reconstruction and define a pool of M candidate viewpoints. We then perform iterative view selection (K views) to refine the reconstruction. We compare POP-GS [34], which evaluates the full Fisher oracle over all candidates, with LiTe-GS, which uses an ε-constrained
+randomized strategy that evaluates only a subset of views for efficient selection. The pipeline proceeds in four stages: seed views and initial
+reconstruction, candidate view generation, view selection, and final refinement using the selected views.
+Despite its efficiency, accurate scene reconstruction with
+3D Gaussian Splatting (3DGS) [16] still requires a sufficiently informative set of training images selected from a
+potentially large pool of candidate viewpoints. In practical
+view acquisition settings, processing all available views is
+computationally expensive and often introduces redundant
+observations with limited additional information gain. Consequently, view selection becomes critical for identifying
+frames that most effectively reduce uncertainty in the underlying 3DGS model parameters while maintaining computational efficiency.
+Recent works have explored information-driven view selection and next-best-view strategies for training Gaussian
+splatting models. FisherRF [14] formulates view selection through information gain maximization, while POPGS [34] extends this perspective using principles from
+optimal experimental design. Despite these advances,
+information-driven view selection still entails a trade-off between the number of candidate-oracle evaluations and the
+quality of the resulting selection. Exhaustive greedy evaluation queries the full candidate set at each acquisition step,
+whereas reducing the number of evaluations generally requires restricting the candidates considered. This motivates
+an oracle-efficient selection strategy that controls this tradeoff explicitly through randomized candidate sampling.
+Building upon the foundations of FisherRF [14] and
+POP-GS [34], we introduce LiTe-GS, an oracle-efficient
+next best view selection framework that balances efficiency
+and information gain while providing provable approximation guarantees.
+Our main contributions are:
+• We formulate active next best view (NBV) selection in
+3DGS as a binary optimization problem, explicitly linking view selection to uncertainty reduction in model pa-
+rameters.
+• We propose LiTe-GS, an oracle-efficient view selection
+algorithm that reduces the number of Fisher oracle evaluations through randomized subset selection.
+• We provide theoretical analysis characterizing the oracle complexity and approximation guarantees of the proposed algorithm, as well as the efficiency-approximation
+quality trade-off controlled by ϵ.
+2. Related Works
+This section reviews recent advances in 3D Gaussian Splatting (3DGS), followed by active view selection and nextbest-view planning methods.
+2.1. 3D Gaussian Splatting
+Recent advances in novel view synthesis have led to a variety of neural scene representations, including implicit radiance fields [1, 23], voxel-based methods [7], point-based
+representations [38], and hybrid approaches [25, 30]. While
+these methods achieve strong rendering quality, many incur
+high training and rendering costs.
+Recently, 3D Gaussian Splatting (3DGS) [16] has
+emerged as an efficient explicit representation for novel
+view synthesis [22, 27, 37]. Unlike implicit radiance field
+methods, 3DGS represents a scene as a set of anisotropic
+3D Gaussians parameterized by position, covariance, opacity, and appearance attributes. The representation is optimized via differentiable rasterization enabling high-quality
+reconstruction with real-time rendering performance.
+The efficiency and explicit geometric structure of 3DGS
+have also motivated research in robotics [6], particularly in
+SLAM [3, 21, 42]. Several works integrate Gaussian representations into SLAM pipelines: Photo-SLAM [13] combines Gaussians with ORB-SLAM, while GS-ICP SLAM
+[9] and RTG-SLAM [28] leverage ICP-based registration
+for robust tracking and mapping. In addition, recent approaches incorporate LiDAR measurements into Gaussianbased mapping frameworks [12, 18, 31], demonstrating
+the adaptability of Gaussian representations across sensing
+modalities.
+While most existing works assume a fixed set of input
+views for training and focus on downstream tasks, view selection for efficient Gaussian reconstruction remains less
+explored. This work considers this direction by exploring
+an uncertainty-aware view selection strategy for 3D Gaussian Splatting.
+2.2. Active View Selection and Next-Best-View
+Planning
+Driven by the need to reduce training costs and enable active view acquisition for 3D Gaussian Splatting (3DGS), recent works have explored selecting informative viewpoints
+based on cues extracted from trained models, existing observations, and candidate views.
+A central theme across these methods is either black box
+evaluation [29] or the estimation and exploitation of uncertainty [35, 39]. FisherRF [14] formulates next-best-view
+selection as maximizing expected information gain derived
+from the Fisher Information Matrix (FIM) over candidate
+views. However, explicitly storing the full Fisher information matrix is impractical due to memory constraints. To address this, FisherRF adopts a diagonal approximation of the
+FIM, improving efficiency while trading off approximation
+fidelity. POP-GS [34] further develops this formulation using a block-diagonal approximation, improving estimation
+accuracy while maintaining tractability. More recently, [19]
+extends next-best-view selection to dynamic 3D Gaussian
+Splatting settings.
+Despite these advances, candidate-view selection still requires repeated Fisher-information evaluations across the
+candidate set. This motivates an oracle-efficient selection
+strategy that reduces the number of evaluations while retaining the information-driven objective and exposing a direct trade-off between oracle expenditure and approximation quality. To this end, we propose a lightweight active
+next-best-view selection framework, LiTe-GS.
+3. View Selection Formulation
+We consider the problem of informative view selection for
+efficient training in 3D Gaussian Splatting (3DGS). Given a
+large pool of candidate viewpoints, the problem is to select
+an informative subset of views in an efficient manner. We
+formalize this as an uncertainty reduction problem in the
+estimation of 3DGS parameters.
+We first briefly review the parameterized representation
+used in 3D Gaussian Splatting.
+3.1. 3D Gaussian Splatting
+3D Gaussian Splatting represents a scene using a collection
+of anisotropic Gaussian primitives. Let G = {gi }N
+i=1 denote
+a set of N Gaussians, where each Gaussian is parameterized
+by
+θi = {µi , qi , si , αi , ci },
+(1)
+where µi ∈ R3 denotes the 3D mean position, qi ∈ S 3 represents rotation using a unit quaternion, si ∈ R3 denotes
+anisotropic scaling parameters, αi ∈ R is the opacity, and
+ci ∈ R3SH corresponds to spherical harmonic (SH) coefficients encoding view-dependent RGB radiance.
+Collectively, the parameters of the scene are given by
+Θ = {θi }N
+i=1 .
+(2)
+Given a set of training views V, 3DGS estimates Θ through
+gradient based optimization as follows:
+X
+Θ̂ = arg min
+L(v; Θ),
+(3)
+Θ
+v∈V
+where L(·, ·) = (1 − λ)L1 + λLSSIM denotes the weighted
+sum of L1 loss and SSIM loss between rendered image and
+ground truth image.
+Each 3D Gaussian defines a density over 3D space as
+
+(4)
+Gi (x) = exp − 12 (x − µi )⊤ Π−1
+i (x − µi ) ,
+where x ∈ R3 is a spatial point and Πi ∈ S3+ is the covariance matrix controlling the spatial extent and orientation of
+the Gaussian.
+For differentiable optimization, the covariance is parameterized as
+Πi = Ri Si Si⊤ Ri⊤ ,
+(5)
+where Ri ∈ SO(3) is a rotation matrix and Si is a scaling
+matrix.
+Under a camera transformation, the covariance is
+mapped to image space via
+Π′i = JW Πi W ⊤ J ⊤ ,
+(6)
+where W is the viewing transformation and J is the Jacobian of the projective transformation.
+Finally, the rendered color at a pixel is obtained through
+alpha blending of ordered Gaussian contributions:
+X
+Y
+C=
+ci αi (1 − αj ),
+(7)
+i∈N
+j<i
+where N denotes the set of Gaussians along the pixel’s
+viewing ray (i.e., those that project onto the pixel), and ci
+and αi denote the color and opacity induced by the projected Gaussian in image space.
+3.2. Uncertainty Reduction in Active View Selection
+We consider an active next best view selection setting where
+images are not initially available and observations are acquired only after selecting viewpoints from a candidate set
+V. An initial set of seed views V0 ⊂ V is first used to obtain
+a prior estimate of the 3DGS parameters Θ̂. Assuming locally Gaussian behavior around the optimum, the posterior
+covariance can be approximated [2] as
+
+−1
+Σ(Θ) ≈ H(Θ̂) + Σ−1
+,
+0
+(8)
+where Σ0 denotes prior uncertainty obtained after initial
+training and H(Θ̂) corresponds to the Fisher Information
+of the selected views.
+The rendered observation from view v is modeled as
+yv = fv (Θ) + ηv ,
+ηv ∼ N (0, σ 2 I),
+Each candidate viewpoint contributes additive information to the parameter estimate as follows:
+HS :=
+X
+Hv ,
+(13)
+v∈S
+where Hv denotes the information contribution associated
+with candidate viewpoint v, and S ⊆ Vc represents the selected set of views.
+To quantify uncertainty reduction, we consider a scalar
+uncertainty metric ψ(·) defined over the accumulated information matrix. The view selection problem can therefore be
+written as
+
+!−1 
+X
+ s.t. |S| = K, (14)
+min ψ  H0 +
+Hv
+S⊆Vc
+v∈S
+(9)
+where
+where fv (Θ) denotes the differentiable rendering function
+induced by the 3D Gaussian representation described above,
+and ηv models isotropic measurement noise.
+Assuming a local linearization around the current estimate Θ̂, we have
+fv (Θ) ≈ fv (Θ̂) + Jv (Θ − Θ̂),
+(10)
+v
+where Jv = ∂f
+∂Θ Θ̂ is the Jacobian of the rendering model
+with respect to the Gaussian parameters.
+The Fisher Information of a set of views V̄ ⊆ V is calculated as
+X
+Jv⊤ Jv ,
+(11)
+HV̄ (Θ̂) ≈ σ −2
+v∈V̄
+where Jv denotes the Jacobian of rendered observations
+with respect to the Gaussian parameters for view v.
+However, the full information matrix scales with the total number of Gaussian parameters, which can reach millions in large scenes, resulting in prohibitive memory. for
+tractability, we adopt a block-diagonal approximation (suggested in [10, 11, 34]) of the information matrix across
+Gaussian primitives,
+Hv := Hv (Θ̂) ≈ blkdiag(Hv (θ̂1 ), Hv (θ̂2 ), . . . , Hv (θ̂N )),
+(12)
+where each block Hv (θ̂i ), corresponds to the parameters associated with an individual Gaussian i ∈ {1, . . . , N }. This
+approximation preserves intra-splat information while making storage and incremental updates tractable.
+3.3. View Selection as Binary Optimization
+Let Vc = V \ V0 = {v1 , . . . , vM } denote a pool of candidate viewpoints available for acquisition. The problem is to
+select a subset of informative views that maximally reduces
+the uncertainty of the estimated 3DGS parameters.
+X
+H0 1 := Σ−1
+0 =
+X
+Hv0 = σ −2
+v0 ∈V0
+Jv⊤0 Jv0 ,
+(15)
+v0 ∈V0
+denotes the prior block diagonal information matrix, obtained from training 3DGS with initial training set and K
+is the view cardinality, denoting the number of views to be
+selected in a batch. Equivalently, introducing binary decision variables xv ∈ {0, 1} indicating whether a candidate
+viewpoint is selected, the view selection problem can be expressed as
+
+min
+xv ∈{0,1}
+ψ  H0 +
+!−1 
+X
+v∈Vc
+xv Hv
+
+s.t.
+X
+xv = K.
+v∈Vc
+(16)
+The resulting problem is a combinatorial optimization
+over binary variables and is generally intractable to solve
+exactly. This motivates the use of efficient approximation
+algorithms.
+4. Methodology
+The binary optimization problem formulated in (16) is typically solved using greedy algorithms. However, classical
+greedy strategies [26] require exhaustive evaluation over the
+entire candidate set, resulting in substantial latency.
+To address this, we propose LiTe-GS, an oracle-efficient
+next best view selection framework for 3D Gaussian Splatting. Specifically, we leverage stochastic submodular optimization techniques [24] to design an efficient active-view
+selection strategy capable of balancing estimation accuracy
+with oracle efficiency.
+1 To address potential ill-conditioning, we precondition the matrix as
+H0 ← H0 + δI, where δ > 0 is a small regularization parameter.
+Algorithm 1 LiTe-GS: Oracle-Efficient NBV Selection
+1: Input: H0 , candidate views Vc with |Vc | = M , view
+cardinality K, accuracy parameter ε
+ρ({v}|Sq ) := ρ(Sq ∪ {v}) − ρ(Sq ).
+2: Output: Selected set S
+3: S ← ∅,
+H ← H0
+4: Initialize marginal gains γv ← ∞ for all v ∈ Vc
+5: for q = 1 to K do
+
+1
+6:
+Sample subset P ⊂ (Vc \ S) of size p = M
+K log ε
+7:
+Initialize max-priority queue Q over v ∈ P using
+8:
+9:
+10:
+gains γv
+repeat
+Pop view v with the largest cached gain from Q
+Oracle evaluation:
+recompute the true
+marginal gain
+(19)
+We define an oracle evaluation as the computation
+of ρ(v | Sq ) for a candidate view v. This computation constructs and accumulates the corresponding Fisherinformation contribution and is the basic computational unit
+analyzed in our information-driven view-selection framework.
+4.2. Performance Analysis
+We analyze the performance of Algorithm 1 with respect to
+oracle complexity and theoretical optimality guarantees.
+4.2.1. Oracle Efficiency Analysis
+∆v = ρ({v} | S)
+11:
+Update cached gain γv ← ∆v
+12:
+Re-insert v into Q with updated priority γv
+13:
+until γv = maxu∈P γu
+14:
+S ← S ∪ {v}, H ← H + Hv
+15: end for
+16: return S
+An overview of the proposed pipeline and its comparison with POP-GS [34] is shown in Fig. 2. LiTe-GS retains the same Fisher-information-based view-selection objective as POP-GS and modifies only the candidate evaluation within the view-selection module. Specifically, the
+Fisher-information evaluation of a candidate view serves as
+the oracle, and LiTe-GS reduces the number of such oracle
+evaluations through randomized candidate sampling. The
+subsequent 3DGS optimization is unchanged. Thus, our
+efficiency analysis concerns the information-driven viewselection module, rather than end-to-end 3DGS training
+time.
+4.1. Uncertainty Metric
+Uncertainty in the estimated Gaussian parameters is characterized through the posterior covariance matrix. A natural
+measure of uncertainty for multivariate Gaussian distributions is the differential entropy[5], which is a monotonically
+increasing function of the log-determinant of its covariance
+matrix. This objective function in (14) can be written as:
+!
+X
+ψ(S) = − log det H0 +
+Hv .
+(17)
+v∈S
+To measure the reduction in uncertainty relative to the prior,
+we instead define the set function:
+ρ(S) = ψ(∅) − ψ(S).
+By construction, ρ(∅) = 0. We define the marginal gain of
+adding a candidate view v to a set Sq ⊂ S as:
+(18)
+The classical greedy algorithm for submodular maximization requires O(M K) oracle evaluations to select K views
+from a candidate pool of size M , since all remaining candidates must be evaluated at each iteration.
+In contrast, Algorithm 1 employs randomized sampling
+together with lazy marginal evaluation. At each iteration,
+1
+only p = M
+K log ε candidate views are evaluated. Over K
+iterations, the total number of oracle evaluations becomes
+
+
+1
+O M log
+,
+(20)
+ε
+which is independent of the view cardinality K.
+4.2.2. Approximation Guarantees
+We now characterize the approximation performance of Algorithm 1 relative to the optimal solution S ∗ of the optimization problem in (14).
+Theorem 1 Let ρ(·) be a normalized, non-negative, monotone submodular
+function. For a sampling size p =
+
+M
+1
+,
+Algorithm
+1 achieves
+log
+K
+ε
+
+
+E[ρ(S)] ≥ 1 − e−(1−ε) ρ(S ∗ ),
+(21)
+
+using only O M log 1ε oracle evaluations.
+Theorem 1 establishes that the proposed method
+achieves a near-optimal solution in expectation while maintaining oracle complexity independent of cardinality K, and
+depending only on accuracy parameter ε. The full proof and
+detailed analysis of Theorem 1 are provided in the supplementary material.
+Most importantly, ε provides a tunable parameter that explicitly controls the trade-off between oracle efficiency and
+approximation quality. Increasing ε reduces the number of
+oracle evaluations in (20) at the expense of a weaker approximation guarantee in Theorem 1. In contrast, POP-GS
+performs exhaustive oracle evaluations and therefore does
+not offer such a trade-off.
+Methods
+Setup 1
+Setup 2
+Methods
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+Random
+POP-GS
+Ours
+19.52
+22.10
+21.97
+0.830
+0.857
+0.856
+0.150
+0.118
+0.119
+24.42
+25.25
+25.31
+0.893
+0.901
+0.902
+0.096
+0.090
+0.089
+Setup 1
+Setup 3
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+Random
+POP-GS
+Ours
+16.71
+17.72
+17.54
+0.381
+0.449
+0.446
+0.461
+0.420
+0.423
+17.68
+18.82
+19.01
+0.414
+0.502
+0.506
+0.437
+0.397
+0.398
+Table 1. Quantitative Comparison of rendered images across
+Blender scenes. Metrics are averaged over the three evaluated
+scenes.
+Table 2. Quantitative comparison of rendered images across MipNeRF 360 scenes. Metrics are averaged over the three evaluated
+scenes.
+5. Experiments
+training iterations.
+In this section, we evaluate the proposed LiTe-GS algorithm, describing the dataset, baseline comparisons, experimental setup, and evaluation metrics, followed by a detailed
+analysis of both qualitative and quantitative results. For all
+experiments, we set ε = 0.1 in Algorithm 1, unless otherwise stated. Our experimental framework is built upon
+the FisherRF repository [14], which we extend to incorporate our proposed algorithm, including the block-diagonal
+approximation of the Fisher Information (12).
+5.1.2. Setup 2
+5.1. Experimental Setup and Dataset
+The training process is initialized with three images. Subsequently, four images are added per acquisition step until the
+training set reaches 15 images. After each acquisition step,
+the model is trained for 100v iterations. The total training
+step consists of 11,000 training iterations, and is conducted
+exclusively on the Mip-NeRF 360 dataset.
+We evaluate the proposed approach on two widely used
+benchmarks for novel view synthesis and 3D scene reconstruction. The first is the Blender dataset [23], which consists of eight synthetically rendered scenes, each containing 100 training images and 200 test images. The second
+is the Mip-NeRF 360 dataset [1], which comprises highresolution real-world scenes with significantly greater geometric and visual complexity. Together, these datasets
+enable evaluation across both controlled synthetic environments and realistic scenes.
+We compare our method with the D-Optimality criterion
+implemented POP-GS [34], along with random selection as
+baselines. We do not include FisherRF [14] as a separate
+baseline because it uses a diagonal Fisher approximation.
+Under the diagonal approximation, the POP-GS formulation reduces to the FisherRF formulation, making FisherRF
+a special case of the same Fisher-information framework.
+The comparison metrics are Peak Signal-to-Noise Ratio
+(PSNR) [8], Structural Similarity Index (SSIM) [33], and
+Learned Perceptual Image Patch Similarity (LPIPS) [41].
+To assess the proposed method under different operating
+conditions, we consider the following three experimental
+setups:
+5.1.1. Setup 1
+The training process is initialized with a seed set of two
+images. Subsequently, three images are selected and added
+at each iteration until the training set contains a total of 11
+images. After each acquisition step, the model is trained
+for 100v iterations, where v denotes the current number of
+training images. The total training step consists of 11,000
+The training process is initialized with five images. At each
+acquisition step, four additional images are selected until
+the training set reaches 21 images. Between acquisition
+steps, the model is trained for 300v iterations, where v is
+the current training-set size. The total training step consists
+of 21,000 training iterations. This experiment is conducted
+exclusively on the Blender dataset.
+5.1.3. Setup 3
+5.2. Results
+We now present both qualitative and quantitative evaluations of the proposed method 2 .
+5.2.1. Rendered Image Quality
+Figures 1 and 3 show qualitative comparisons of the rendered images against ground truth for Blender and MipNeRF360 dataset respectively. Visually, our method produces reconstructions that are highly comparable to those
+obtained with POP-GS. This observation is further supported by the quantitative results reported in Tables 1 and 2
+for Blender and Mip-NeRF 360 dataset respectively. Each
+table reports average performance over the three scenes
+considered for each dataset. Across most scenes, LiTe-GS
+achieves performance comparable to POP-GS in terms of
+PSNR, SSIM, and LPIPS, while consistently outperforming
+random selection, which serves as a lower-bound baseline.
+In some cases, our method even outperforms POP-GS.
+This improvement is particularly interesting given that our
+algorithm evaluates only a randomly sampled subset of candidate views at each iteration. While deterministic greedy
+selection always makes the locally optimal choice, such decisions may be suboptimal from a global perspective. In
+2 Please refer to the supplementary material for detailed and additional
+results.
+(a) Random
+(b) POP-GS
+(c) Ours
+(d) Ground Truth
+Figure 3. Setup 1: Qualitative comparison of rendered images on the Mip-NeRF 360 dataset. Results obtained using Random sampling,
+POP-GS [34], and LiTe-GS are shown alongside the corresponding ground-truth images.
+contrast, the randomized selection strategy introduces controlled stochasticity, which can occasionally escape locally
+optimal yet globally inferior selections. Although LiTe-GS
+is not expected to systematically outperform POP-GS in
+reconstruction quality, occasional improvements can arise
+from stochastic candidate sampling. These cases illustrate
+the potential benefit of exploring different candidate subsets, rather than constituting a claimed quality advantage
+over POP-GS.
+Next, we analyze the oracle efficiency of LiTe-GS.
+Setup
+POP-GS
+LiTe-GS
+Reductions(%)
+1(Blender)
+1(Mip-NeRF 360)
+2
+3
+282
+403
+350
+522
+215
+300
+200
+302
+23.76
+25.56
+42.86
+42.15
+Table 3. Oracle efficiency comparison across different view acquisition setups. We report the number of Fisher information (oracle)
+evaluations for POP-GS and LiTe-GS, along with the corresponding percentage reduction achieved by LiTe-GS relative to POP-GS.
+5.2.2. Oracle Efficiency Results
+We measure the efficiency of information-driven view selection by the number of Fisher-information (oracle) evaluations. This oracle-based measure is independent of hardware and implementation details and directly quantifies the
+number of information queries required by the selection algorithm.
+We compare LiTe-GS against POP-GS in terms of
+the percentage reduction in oracle evaluations. For each
+dataset, the reduction is computed relative to POP-GS, and
+the final reported value is obtained by averaging across
+datasets. As shown in Table 3, LiTe-GS achieves substantial
+reductions in the number of Fisher oracle evaluations across
+all experimental settings. This reduction directly reflects the
+effectiveness of the proposed subset-based evaluation strategy, which avoids exhaustive scoring of all candidate views
+at each iteration. In contrast to POP-GS, which evaluates
+all candidate views at every iteration, the proposed method
+restricts oracle evaluations to a sampled subset whose size
+depends on the accuracy parameter ε, thereby improving
+oracle efficiency. For conservative oracle accounting, we
+count all sampled candidates as oracle evaluations, without
+crediting the additional savings from lazy evaluation.
+We additionally evaluate the dependence of LiTe-GS on
+the selection cardinality K and ε in Setup 4. Training is
+initialized with three images, followed by K ∈ {3, 4, 6}
+images added at each acquisition step until reaching 15 images; each stage uses 300v training iterations, for a total
+of 15,000 iterations. As shown in Table 4, increasing K
+from 3 to 6 increases POP-GS oracle evaluations from 275
+to 549, whereas LiTe-GS remains nearly constant (210, 209,
+and 208), increasing the oracle reduction from 23.64 % to
+62.11 %. Thus, the experiment directly demonstrates the
+predicted K-independence of LiTe-GS oracle complexity.
+For fixed K = 6, increasing ε further reduces LiTe-GS oracle evaluations from 208 to 108 and 44, yielding 80.42%
+and 91.99% reductions, respectively, while incurring the expected approximation-quality trade-off.
+K
+ε
+PSNR ↑
+POP-GS
+SSIM ↑ LPIPS ↓
+3
+4
+0.1
+0.1
+0.1
+0.3
+0.6
+25.63
+24.63
+0.832
+0.823
+25.45
+0.830
+6
+# Oracle
+PSNR ↑
+LiTe-GS
+SSIM ↑ LPIPS ↓
+0.162
+0.164
+275
+366
+0.154
+549
+25.43
+25.49
+25.07
+24.62
+23.75
+0.834
+0.830
+0.820
+0.824
+0.811
+# Oracle
+Oracle Reduction
+210
+209
+208
+108
+44
+23.64%
+42.90%
+62.11%
+80.42%
+91.99%
+0.160
+0.158
+0.160
+0.160
+0.169
+Table 4. Effect of selection cardinality K and approximation parameter ε on oracle efficiency and reconstruction quality on Blender (Ship
+scene). The first three rows fix ε = 0.1 and vary K; the last three rows fix K = 6 and vary ε.
+LiTe-GS
+ε
+0.60
+0.40
+0.25
+0.20
+0.10
+SSG
+LiTe-GS
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+24.35
+24.18
+25.04
+25.47
+25.49
+0.819
+0.816
+0.823
+0.827
+0.830
+0.166
+0.168
+0.162
+0.159
+0.158
+22.11
+24.11
+25.40
+25.17
+25.38
+0.805
+0.821
+0.829
+0.832
+0.829
+0.181
+0.166
+0.158
+0.158
+0.158
+Table 5. Effect of dynamic randomized resampling on the Blender
+(Ship scene). LiTe-GS dynamically resamples candidate subsets
+at each acquisition step, whereas Static-Subset Greedy (SSG) uses
+a fixed subset sampled once per stage. Both use the same subset
+size determined by ε. The training protocol follows Setup 4 with
+K = 4.
+ε
+0.60
+0.50
+0.40
+0.25
+SSG
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+20.42
+20.37
+20.33
+20.50
+0.563
+0.558
+0.558
+0.555
+0.407
+0.406
+0.406
+0.408
+19.82
+20.25
+20.17
+19.92
+0.533
+0.548
+0.541
+0.555
+0.437
+0.433
+0.436
+0.410
+Table 6. Effect of dynamic randomized resampling on the MipNeRF 360 (Garden scene). LiTe-GS dynamically resamples candidate subsets at each acquisition step, whereas Static-Subset
+Greedy (SSG) uses a fixed subset sampled once per stage. Both
+use the same subset size determined by ε. Training is initialized
+with two images, followed by three images added at each acquisition step until reaching 11 images; each stage uses 300v training
+iterations, for a total of 78,00 iterations.
+5.3. Ablation Study
+We study the effect of dynamic randomized resampling
+by comparing LiTe-GS with a Static-Subset Greedy (SSG)
+baseline. For each ε, both methods use the same subset
+size determined by the sampling rule; LiTe-GS resamples
+the candidate subset at each acquisition step, whereas SSG
+samples once per stage and keeps the subset fixed. Thus,
+the comparison directly isolates dynamic versus static candidate restriction.
+Table 5 reports results on Blender (Ship). A fixed subset
+can occasionally be favorable, allowing SSG to outperform
+LiTe-GS for a particular setting. This is expected: SSG can
+benefit from a favorable subset realization, but remains permanently restricted to it. LiTe-GS instead continues to explore different candidate subsets at each acquisition step, reducing dependence on any single subset realization. Table 6
+reports the same comparison on Mip-NeRF 360 (Garden),
+where LiTe-GS consistently outperforms SSG across the
+evaluated ε values. Together, the two studies illustrate that
+dynamic resampling is not guaranteed to improve reconstruction quality for every individual realization, but provides a more robust candidate-exploration mechanism than
+permanent restriction to a fixed subset.
+The ablation also illustrates the accuracy-efficiency
+trade-off characterized by Theorem 1: increasing ε re-
+duces candidate evaluations while permitting a controlled
+approximation-quality trade-off. Unlike exhaustive POPGS selection, LiTe-GS therefore provides an explicit mechanism for tuning oracle expenditure to the desired accuracy
+level.
+6. Conclusion
+We presented LiTe-GS, an oracle-efficient active view selection framework for 3D Gaussian Splatting. We formulate next-best-view selection as cardinality-constrained
+maximization of Fisher-information gain, enabling efficient
+approximate view selection. We proposed a randomized
+strategy, which reduces the number of oracle evaluations
+by restricting computation to sampled subsets at each iteration. This results in efficient selection with provable approximation guarantees. Experimental results demonstrate
+that LiTe-GS achieves reconstruction quality comparable to
+state-of-the-art, while significantly reducing the number of
+Fisher information oracle evaluations. Overall, LiTe-GS
+provides an efficient framework for active view selection
+in 3D Gaussian Splatting.
+References
+[1] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields. In Proc. 2022 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 5470–5479. IEEE, 2022. 1, 2, 6
+[2] Christopher M. Bishop. Pattern Recognition and Machine
+Learning. Springer, 2006. 4
+[3] Luca Carlone, Ayoung Kim, Timothy Barfoot, Daniel Cremers, and Frank Dellaert. Slam handbook: From Localization and Mapping to Spatial Intelligence. Cambridge University Press, 2025. 1, 2
+[4] Timothy Chen, Ola Shorinwa, Joseph Bruno, Aiden Swann,
+Javier Yu, Weijia Zeng, Keiko Nagami, Philip Dames, and
+Mac Schwager. Splat-nav: Safe real-time robot navigation
+in gaussian splatting maps. IEEE Transactions on Robotics,
+pages 2765–2784, 2025. 1
+[5] Thomas M. Cover and Joy A. Thomas. Elements of Information Theory. Wiley-Interscience, Hobboken, NJ, USA, 2nd
+edition, 2006. 5
+[6] Ben Fei, Jingyi Xu, Rui Zhang, Qingyuan Zhou, Weidong
+Yang, and Ying He. 3d gaussian splatting as new era: A
+survey. IEEE Transactions on Visualization and Computer
+Graphics, 31(8):4429–4449, 2024. 2
+[7] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. In Proc.
+2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 5501–5510. IEEE, 2022. 1,
+2
+[8] Rafael C. Gonzalez and Richard E. Woods. Digital Image
+Processing. Pearson, Upper Saddle River, NJ, USA, 3rd edition, 2008. 6
+[9] Seongbo Ha, Jiung Yeon, and Hyeonwoo Yu. Rgbd gs-icp
+slam. In European Conference on Computer Vision (ECCV),
+2024. 3
+[10] Alex Hanson, Allen Tu, Geng Lin, Vasu Singla, Matthias
+Zwicker, and Tom Goldstein. Speedy-splat: Fast 3d gaussian
+splatting with sparse pixels and sparse primitives. In Proc.
+2025 Computer Vision and Pattern Recognition Conference
+(CVPR), pages 21537–21546, 2025. 4
+[11] Alex Hanson, Allen Tu, Vasu Singla, Mayuka Jayawardhana,
+Matthias Zwicker, and Tom Goldstein. Pup 3d-gs: Principled uncertainty pruning for 3d gaussian splatting. In Proc.
+2025 Computer Vision and Pattern Recognition Conference
+(CVPR), pages 5949–5958, 2025. 4
+[12] Sheng Hong, Geng Yuan, Chunran Jiang, Jing Yao, Zheng
+Jiang, Boxuan Zhao, and Guanzhong Wang. Liv-gaussmap:
+Lidar-inertial-visual fusion for real-time 3d radiance field
+map rendering. IEEE Robotics and Automation Letters, 9
+(10):8912–8919, 2024. 3
+[13] Huajian Huang, Longwei Li, Hui Cheng, and Sai-Kit Yeung.
+Photo-slam: Real-time simultaneous localization and photorealistic mapping for monocular, stereo, and rgb-d cameras. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 21584–
+21593, 2024. 2
+[14] Wen Jiang, Boshu Lei, and Kostas Daniilidis. Fisherrf: Active view selection and uncertainty quantification for radiance fields using fisher information. arXiv, 2023. 2, 3, 6
+[15] Nikhil Keetha, Jay Karhade, Krishna Murthy Jatavallabhula, Gengshan Yang, Sebastian Scherer, Deva Ramanan,
+and Jonathon Luiten. Splatam: Splat, track & map 3d gaussians for dense rgb-d slam. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 21357–21366, 2024. 1
+[16] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. ACM Transactions on Graphics, 42
+(4), 2023. 1, 2
+[17] Amirhossein Mollaei Khass, Guangyi Liu, Vivek Pandey,
+Wen Jiang, Boshu Lei, Kostas Daniilidis, and Nader Motee.
+Active next-best-view optimization for risk-averse path planning. arXiv preprint arXiv:2510.06481, 2025. 1
+[18] Xiaolei Lang, Laijian Li, Chenming Wu, Chen Zhao, Lina
+Liu, Yong Liu, Jiajun Lv, and Xingxing Zuo. Gaussian-lic:
+Real-time photo-realistic slam with gaussian splatting and
+lidar-inertial-camera fusion. In IEEE International Conference on Robotics and Automation (ICRA), pages 8500–8507,
+2025. 3
+[19] Yiqian Li, Wen Jiang, and Kostas Daniilidis. Next best view
+selections for semantic and dynamic 3d gaussian splatting.
+In 2026 International Conference on 3D Vision (3DV), pages
+1916–1926. IEEE, 2026. 3
+[20] Guangyi Liu, Wen Jiang, Boshu Lei, Vivek Pandey, Kostas
+Daniilidis, and Nader Motee. Beyond uncertainty: Riskaware active view acquisition for safe robot navigation
+and 3d scene understanding with fisherrf. arXiv preprint
+arXiv:2403.11396, 2024. 1
+[21] Hidenobu Matsuki, Riku Murai, Paul HJ Kelly, and Andrew J
+Davison. Gaussian splatting slam. In Proc. 2024 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 18039–18048, 2024. 1, 2
+[22] Andreas Meuleman, Ishaan Shah, Alexandre Lanvin, Bernhard Kerbl, and George Drettakis. On-the-fly reconstruction
+for large-scale novel view synthesis from unposed images.
+ACM Trans. Graph., 44(4), 2025. 2
+[23] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2022. 1,
+2, 6
+[24] Baharan Mirzasoleiman, Ashwinkumar Badanidiyuru, Amin
+Karbasi, Jan Vondrak, and Andreas Krause. Lazier than lazy
+greedy. In Proc. Twenty-Ninth AAAI Conference on Artificial
+Inteliigence, pages 1812–1818, 2015. 4
+[25] Thomas Müller, Alex Evans, Christopher Schied, and
+Alexander Keller. Instant neural graphics primitives with
+a multiresolution hash encoding. ACM Transactions on
+Graphics, 41(4):1–15, 2022. 1, 2
+[26] G.L. Nemhauser, L.A. Wolsley, and M.L. Fischer. An
+analysis of approximations for maximizing submodular
+set functions-i. Mathematical Programming, 14(1):40–53,
+1978. 4
+[27] Avinash Paliwal, Wei Ye, Jinhui Xiong, Dmytro Kotovenko,
+Rakesh Ranjan, Vikas Chandra, and Nima Khademi Kalantari. Coherentgs: Sparse novel view synthesis with coherent
+3d gaussians. In European conference on computer vision,
+pages 19–37. Springer, 2024. 2
+[28] Zhexi Peng, Tianjia Shao, Liu Yong, Jingke Zhou, Yin Yang,
+Jingdong Wang, and Kun Zhou. Rtg-slam: Real-time 3d reconstruction at scale using gaussian splatting. In ACM SIGGRAPH Conference Proceedings, 2024. 3
+[29] Konstantinos D. Polyzos, Athanasios Bacharis, Saketh Madhuvarasu, Nikos Papanikolopoulos, and Tara Javidi. Activeinitsplat: How active image selection helps gaussian
+splatting, 2025. 3
+[30] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel
+grid optimization: Super-fast convergence for radiance fields
+reconstruction. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+5459–5469, 2022. 2
+[31] Lisong C. Sun, Neel P. Bhatt, Jonathan C. Liu, Zhiwen Fan,
+Zhangyang Wang, Todd E. Humphreys, and Ufuk Topcu.
+Mm3dgs slam: Multi-modal 3d gaussian splatting for slam
+using vision, depth, and inertial measurements. In IEEE/RSJ
+International Conference on Intelligent Robots and Systems
+(IROS), pages 10159–10166. IEEE, 2024. 3
+[32] Aiden Swann, Matthew Strong, Won Kyung Do, Gadiel Sznaier Camps, Mac Schwager, and Monroe Kennedy. Touchgs: Visual-tactile supervised 3d gaussian splatting. In
+Proc. 2024 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS), pages 10511–10518. IEEE,
+2024. 1
+[33] Zhou Wang, Alan C. Bovik, Hamid R. Sheikh, and Eero P.
+Simoncelli. Image quality assessment: From error visibility
+to structural similarity. IEEE Transactions on Image Processing, 13(4):600–612, 2004. 6
+[34] Joey Wilson, Marcelino Almeida, Sachit Mahajan, Martin Labrie, Maani Ghaffari, Omid Ghasemalizadeh, Min
+Sun, Cheng-Hao Kuo, and Arnab Sen. Pop-gs: Next best
+view in 3d-gaussian splatting with p-optimality. In Proc.
+2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 3646–3655. IEEE, 2025. 1,
+2, 3, 4, 5, 6, 7
+[35] Joey Wilson, Marcelino Almeida, Min Sun, Sachit Mahajan, Maani Ghaffari, Parker Ewen, Omid Ghasemalizadeh,
+Cheng-Hao Kuo, and Arnie Sen. Modeling uncertainty in
+3d gaussian splatting through continuous semantic splatting.
+In 2025 IEEE International Conference on Robotics and Automation (ICRA), pages 3284–3290. IEEE, 2025. 3
+[36] Yuxuan Wu, Lei Pan, Wenhua Wu, Guangming Wang, Yanzi
+Miao, Fan Xu, and Hesheng Wang. Rl-gsbridge: 3d gaussian
+splatting based real2sim2real method for robotic manipulation learning. In Proc. 2025 IEEE International Conference
+on Robotics and Automation (ICRA), pages 192–198. IEEE,
+2025. 1
+[37] Jiacong Xu, Yiqun Mei, and Vishal Patel. Wild-gs: Realtime novel view synthesis from unconstrained photo collections. In Advances in Neural Information Processing Systems, pages 103334–103355. Curran Associates, Inc., 2024.
+2
+[38] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin
+Shu, Kalyan Sunkavalli, and Ulrich Neumann. Point-nerf:
+Point-based neural radiance fields. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 5438–5448, 2022. 2
+[39] Shangjie Xue, Jesse Dill, Dhruv Ahuja, Frank Dellaert,
+Panagiotis Tsiotras, and Danfei Xu. Uncertainty-driven 3d
+gaussian splatting active mapping via anisotropic visibility
+field. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5014–5026,
+2026. 3
+[40] Chi Yan, Delin Qu, Dan Xu, Bin Zhao, Zhigang Wang, Dong
+Wang, and Xuelong Li. Gs-slam: Dense visual slam with
+3d gaussian splatting. In Proc. 2024 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+19595–19604, 2024. 1
+[41] Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness
+of deep features as a perceptual metric. In Proc. 2018
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 586–595, 2018. 6
+[42] Daniil Zhu, Holmes Connor, and Steven. Waslander. Niceslam: Neural implicit scalable encoding for slam. In Conference on Robots and Vision, pages 37–44, 2023. 2
+[43] Siting Zhu, Guangming Wang, Xin Kong, Dezhi Kong, and
+Hesheng Wang. 3d gaussian splatting in robotics: A survey,
+2024. 1

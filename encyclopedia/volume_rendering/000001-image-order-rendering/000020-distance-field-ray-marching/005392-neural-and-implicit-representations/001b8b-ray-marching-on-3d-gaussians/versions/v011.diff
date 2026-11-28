@@ -1,0 +1,215 @@
+--- v010.md
++++ v011.md
+@@ -1,5 +1,4 @@
+ # Ray-marching on 3D Gaussians
+ 
+-Also called: 3D Gaussian Ray Marching, Gaussian Volume Integration
+ 
+ ## Overview
+@@ -8,111 +7,122 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A set of $N$ 3D Gaussians, each defined by a mean position $\boldsymbol{\mu}_i$, a covariance matrix $\mathbf{\Sigma}_i$ (or scale $\mathbf{s}_i$ and rotation $\mathbf{q}_i$), an opacity $\alpha_i$, and a color/density value.
+-*   **Input:** Camera ray $r(t) = \mathbf{o} + t\mathbf{d}$ for each pixel.
+-*   **Output:** Final pixel color $C$ and accumulated opacity $A$.
++*   **Input:** A set of $N$ 3D Gaussians, each defined by a mean position, a covariance matrix (or scale and rotation), an opacity, and a color value [S1].
++*   **Input:** Camera ray $r(t) = \mathbf{o} + t\mathbf{d}$ for each pixel [G].
++*   **Output:** Final pixel color and accumulated opacity [S1].
+ 
+ **Data Structures**
+ The method reuses the standard 3DGS data structures [S1]:
+-*   **Tensors:** Arrays storing positions ($\mathbb{R}^3$), scales ($\mathbb{R}^3$), rotations ($\mathbb{R}^4$, quaternions), opacities ($\mathbb{R}$), and colors ($\mathbb{R}^3$ or SH coefficients).
+-*   **Bounding Volumes:** Axis-aligned bounding boxes (AABBs) or other bounding primitives are used to cull Gaussians that do not intersect the ray's bounding frustum or tile [S1, S2].
++*   **Tensors:** Arrays storing positions, scales, rotations (quaternions), opacities, and colors [S1].
+ 
+ **Algorithm Steps**
+-1.  **Culling:** For each ray, identify the subset of Gaussians whose bounding volumes intersect the ray's path within the near/far clipping planes [S1].
+-2.  **Adaptive Sampling:** Determine sample points along the ray. Unlike fixed-step marching, adaptive sampling increases density in regions where the Gaussian mixture field changes rapidly (e.g., near Gaussian centers or boundaries) to accurately resolve overlap [S1].
+-3.  **Field Evaluation:** At each sample point $t_k$, evaluate the Gaussian mixture. The density $\sigma(t_k)$ and color $c(t_k)$ are computed by aggregating contributions from all active Gaussians $i$:
+-    $$ \sigma(t_k) = \sum_{i \in \text{active}} \alpha_i \cdot \mathcal{N}(r(t_k); \boldsymbol{\mu}_i, \mathbf{\Sigma}_i) $$
+-    $$ c(t_k) = \frac{\sum_{i \in \text{active}} \alpha_i \cdot \mathcal{N}(r(t_k); \boldsymbol{\mu}_i, \mathbf{\Sigma}_i) \cdot c_i}{\sigma(t_k) + \epsilon} $$
+-    where $\mathcal{N}$ is the Gaussian probability density function, and $\epsilon$ is a small constant to prevent division by zero [S1].
+-4.  **Integration:** Perform volumetric integration using the evaluated density and color. The standard volume rendering integral is discretized:
++1.  **Adaptive Sampling:** Determine sample points along the ray. Unlike fixed-step marching, adaptive sampling increases density in regions where the Gaussian mixture field changes rapidly to accurately resolve overlap [S1].
++2.  **Field Evaluation:** At each sample point $t_k$, evaluate the Gaussian mixture. The density $\sigma(t_k)$ and color $c(t_k)$ are computed by aggregating contributions from all active Gaussians $i$:
++    $$ \sigma(t_k) = \sum_{i} \alpha_i \exp\left(-\frac{1}{2} d_i^2(t_k)\right) $$
++    $$ c(t_k) = \frac{\sum_{i} \alpha_i \exp\left(-\frac{1}{2} d_i^2(t_k)\right) c_i}{\sigma(t_k) + \epsilon} $$
++    where $d_i^2(t_k)$ is the squared Mahalanobis distance from the ray point to the Gaussian center, $\alpha_i$ is the Gaussian opacity, $c_i$ is the color, and $\epsilon$ prevents division by zero [G].
++3.  **Integration:** Perform volumetric integration using the evaluated density and color. The standard volume rendering integral is discretized:
+     $$ C = \sum_{k} T_k \cdot (1 - e^{-\sigma(t_k) \Delta t_k}) \cdot c(t_k) $$
+     $$ T_{k+1} = T_k \cdot e^{-\sigma(t_k) \Delta t_k} $$
+-    where $\Delta t_k$ is the step size, $T_k$ is the transmittance at step $k$, and $T_0 = 1$ [S1].
+-5.  **Compositing:** Accumulate the color and opacity for the final pixel.
++    where $\Delta t_k$ is the step size between samples, $T_k$ is the transmittance at step $k$, and $T_0 = 1$ [G].
++4.  **Compositing:** Accumulate the color and opacity for the final pixel [S1].
+ 
+ **Parameters**
+-*   **Sample Count:** The number of samples per ray. Higher counts improve accuracy but increase computational cost [S1].
+-*   **Adaptive Threshold:** The tolerance for step size adjustment based on field gradient [S1].
++*   **Sample Count:** The number of samples per ray, governing integration precision [S1].
+ 
+ **Edge Cases and Pitfalls**
+ *   **Precision:** Floating-point precision errors can accumulate during long ray marches or when evaluating very small Gaussian contributions [G].
+ *   **Boundary Handling:** Gaussians truncated at their support radius may cause artifacts if the ray passes near the boundary without sufficient sampling [S1].
+-*   **Performance:** Naive evaluation of all Gaussians per sample is $O(N \cdot M)$ where $M$ is sample count, requiring efficient spatial indexing (e.g., BVH or grid) [S1, S2].
+ 
+ **Pseudocode**
+ ```python
++import math
++
+ def ray_march_gaussians(ray_origin, ray_direction, gaussians, max_samples=1000):
+     """
+     Ray-marches through a set of 3D Gaussians.
+-    gaussians: List of Gaussian objects with attributes:
+-        - center: (x, y, z)
+-        - cov3d: 3x3 covariance matrix
+-        - opacity: float
+-        - color: (r, g, b)
++    ray_origin: (x, y, z)
++    ray_direction: (x, y, z), normalized
++    gaussians: List of dicts with keys: 'center' (3,), 'cov_inv' (3x3 list of lists), 'opacity' (float), 'color' (3,)
+     """
+-    # 1. Culling: Filter gaussians intersecting the ray's bounding box
+-    # [G] Implementation detail: Use AABB intersection test
+-    active_gaussians = [g for g in gaussians if intersects_ray(g.bbox, ray_origin, ray_direction)]
++    # 1. Adaptive Sampling: Collect ray bounds from Gaussian extents and subdivide
++    bounds = []
++    for g in gaussians:
++        # Project Gaussian center to ray
++        diff = (g['center'][0] - ray_origin[0], g['center'][1] - ray_origin[1], g['center'][2] - ray_origin[2])
++        t_center = diff[0]*ray_direction[0] + diff[1]*ray_direction[1] + diff[2]*ray_direction[2]
++        # Approximate radius from scale (simplified 3-sigma bound)
++        r = math.sqrt(g['scale'][0]**2 + g['scale'][1]**2 + g['scale'][2]**2)
++        bounds.append(max(0.0, t_center - r))
++        bounds.append(t_center + r)
+     
+-    if not active_gaussians:
++    bounds = sorted(set(bounds))
++    if not bounds:
+         return (0.0, 0.0, 0.0), 0.0
+ 
+-    # 2. Adaptive Sampling: Generate sample points
+-    # [G] Implementation detail: Determine t_min and t_max from bounding boxes
+-    # Generate adaptive t values based on Gaussian density gradients
+-    t_samples = generate_adaptive_samples(ray_origin, ray_direction, active_gaussians, max_samples)
+-    
++    # Subdivide intervals for adaptive refinement
++    t_points = []
++    for i in range(len(bounds) - 1):
++        t_start, t_end = bounds[i], bounds[i+1]
++        t_points.append(t_start)
++        t_points.append((t_start + t_end) / 2.0)
++    t_points.append(bounds[-1])
++    t_points = sorted(set(t_points))
++
+     accumulated_color = [0.0, 0.0, 0.0]
+     accumulated_opacity = 0.0
+     transmittance = 1.0
+-    
+-    for i in range(len(t_samples) - 1):
+-        t_start = t_samples[i]
+-        t_end = t_samples[i+1]
++
++    for i in range(len(t_points) - 1):
++        t_start = t_points[i]
++        t_end = t_points[i+1]
++        if t_end <= t_start:
++            continue
+         t_mid = (t_start + t_end) / 2.0
+         delta_t = t_end - t_start
+-        
+-        # 3. Field Evaluation at midpoint
++
++        # 2. Field Evaluation at midpoint
+         density = 0.0
+         weighted_color = [0.0, 0.0, 0.0]
+-        
+-        point = ray_origin + ray_direction * t_mid
+-        
+-        for g in active_gaussians:
+-            # Evaluate Gaussian PDF at point
+-            # [G] Use Mahalanobis distance: d2 = (p - mu)^T Sigma^-1 (p - mu)
+-            dist_sq = mahalanobis_squared(point, g.center, g.cov3d)
+-            
+-            # Truncate if outside support radius
+-            if dist_sq > g.support_radius_sq:
++        point = (ray_origin[0] + ray_direction[0]*t_mid, 
++                 ray_origin[1] + ray_direction[1]*t_mid, 
++                 ray_origin[2] + ray_direction[2]*t_mid)
++
++        for g in gaussians:
++            diff = (point[0] - g['center'][0], point[1] - g['center'][1], point[2] - g['center'][2])
++            # Mahalanobis distance squared: d^2 = diff^T Sigma^-1 diff
++            dist_sq = 0.0
++            for r_idx in range(3):
++                row_sum = 0.0
++                for c_idx in range(3):
++                    row_sum += g['cov_inv'][r_idx][c_idx] * diff[c_idx]
++                dist_sq += diff[r_idx] * row_sum
++                
++            # Truncate if outside support radius (e.g., 3 sigma -> dist_sq > 9)
++            if dist_sq > 9.0:
+                 continue
+                 
+-            pdf = gaussian_pdf(dist_sq, g.cov3d)
+-            contribution = g.opacity * pdf
+-            
+-            density += contribution
+-            weighted_color[0] += contribution * g.color[0]
+-            weighted_color[1] += contribution * g.color[1]
+-            weighted_color[2] += contribution * g.color[2]
+-        
++            weight = g['opacity'] * math.exp(-0.5 * dist_sq)
++            density += weight
++            weighted_color[0] += weight * g['color'][0]
++            weighted_color[1] += weight * g['color'][1]
++            weighted_color[2] += weight * g['color'][2]
++
+         if density < 1e-6:
+             continue
+-            
++
+         # Normalize color
+         color = [c / density for c in weighted_color]
+-        
+-        # 4. Integration
+-        # Alpha = 1 - exp(-density * delta_t)
++
++        # 3. Integration
+         alpha = 1.0 - math.exp(-density * delta_t)
+-        
+         accumulated_color[0] += transmittance * alpha * color[0]
+         accumulated_color[1] += transmittance * alpha * color[1]
+         accumulated_color[2] += transmittance * alpha * color[2]
+-        
+         accumulated_opacity += transmittance * alpha
+         transmittance *= (1.0 - alpha)
+-        
++
+         if transmittance < 1e-4:
+             break
+-            
++
+     return accumulated_color, accumulated_opacity
+ ```
+@@ -133,5 +143,5 @@
+ 
+ ### [Two-Stage Optimization Pipeline](15284-two-stage-optimization-pipeline.md)
+-The Two-Stage Optimization Pipeline is a post-processing refinement method for 3D Gaussian Splatting (3DGS) that decouples geometric alignment from material/lighting optimization to improve reconstruction quality and enable relighting. It addresses the limitations of coarse geometry from initial regressors and accumulated pose errors by first correcting camera poses and refining geometry, then locking geometry to optimize material and lighting parameters using pre-computed visibility. It differs from standard 3DGS by introducing explicit normal vectors and a visibility pre-computation step, and from pose-free methods like [CF3DGS](1036-ray-marching-on-3d-gaussians.md) by using a dedicated pose correction stage.
++The Two-Stage Optimization Pipeline is a post-processing refinement method for 3D Gaussian Splatting (3DGS) that decouples geometric alignment from material/lighting optimization to improve reconstruction quality and enable relighting. It addresses the limitations of coarse geometry from initial regressors and accumulated pose errors by first correcting camera poses and refining geometry, then locking geometry to optimize material and lighting parameters using pre-computed visibility. It differs from standard 3DGS by introducing explicit normal vectors and a visibility pre-computation step, and from pose-free methods by using a dedicated pose correction stage.
+ 
+ ### 3DGS Marcher
+@@ -145,5 +155,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot M)$ for naive evaluation, where $N$ is the number of Gaussians and $M$ is the number of samples per ray. With spatial acceleration structures (BVH/Grid), this can be reduced to $O(K \cdot M)$ where $K$ is the number of active Gaussians per ray [S1, S2].
++*   **Time Complexity:** Naive evaluation scales linearly with the number of Gaussians and samples per ray. Spatial acceleration structures can reduce active evaluations per ray [S1, S2].
+ *   **Memory Complexity:** $O(N)$ to store Gaussian parameters [S1].
+ *   **Performance:** Significantly slower than rasterization-based 3DGS due to the per-ray evaluation and lack of GPU-friendly parallelism in early implementations [S1]. Stochastic subsampling can improve speed but still trails 3DGS by ~3× [S2].
+@@ -152,5 +162,5 @@
+ 
+ ## Background
+-The method was introduced to systematically analyze the approximations made in 3D Gaussian Splatting (3DGS), specifically regarding spatial overlap and sorting [S1]. It was developed as part of the work "Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?" [S1]. The study demonstrated that while 3DGS approximations have negligible impact on still images with many Gaussians, accurate ray-marching is essential for understanding the underlying volumetric physics and for applications requiring high fidelity [S1]. Subsequent works like Condor and GRay have explored ray-tracing variants for performance and physical accuracy [S2].
++The method was introduced to systematically analyze the approximations made in 3D Gaussian Splatting (3DGS), specifically regarding spatial overlap and sorting [S1]. It was developed as part of the work "Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?" [S1]. The study demonstrated that while 3DGS approximations have negligible impact on still images with many Gaussians [S1]. Subsequent works like Condor have explored ray-tracing variants for performance and physical accuracy [S2].
+ 
+ ## Sources

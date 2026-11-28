@@ -1,0 +1,145 @@
+--- v002.md
++++ v003.md
+@@ -4,91 +4,76 @@
+ 
+ ## Overview
+-Ray marching with early termination is a control flow strategy applied to the iterative ray marching loop to halt computation once the ray has interacted with the target scene or exceeded computational limits. It solves the problem of unnecessary processing by breaking the loop when a surface intersection is detected or when the ray has traveled beyond a defined maximum distance [S1, unofficial]. Unlike methods that strictly iterate a fixed number of steps regardless of scene content, this approach dynamically adapts the loop duration based on geometric or volumetric feedback, significantly improving performance for sparse or bounded scenes.
++Ray marching with early termination adds explicit break conditions to the iterative ray marching loop to prevent unnecessary computation when the ray intersects a surface or exceeds a maximum travel distance [S1, unofficial]. It solves the problem of infinite loops and wasted cycles in unbounded or sparse scenes by halting the march as soon as geometric or volumetric feedback indicates further steps will not contribute to the final pixel [S1, unofficial].
+ 
+ ## How it works
+-The method extends the standard ray marching loop defined in [Termination Criteria](17794-termination-criteria.md) by introducing explicit break conditions.
+-
+ **Inputs and Outputs:**
+-*   **Inputs:** Ray origin $\mathbf{o}$, normalized ray direction $\mathbf{d}$, scene function $f(\mathbf{p})$ (SDF or density), maximum march distance $t_{max}$, maximum iteration count $N_{max}$, and intersection epsilon $\epsilon$.
+-*   **Outputs:** Boolean indicating hit status, final accumulated distance $t$, and optionally color/transmission values.
++*   **Inputs:** Ray origin $\mathbf{o}$, normalized ray direction $\mathbf{d}$, scene intersection function returning distance $t$, maximum iteration count $N_{\max}=8$ [S2, unofficial], maximum march distance $t_{\max}=2048.0$ [S1, unofficial], and intersection epsilon $\epsilon=0.0001$ [S1, unofficial].
++*   **Outputs:** Accumulated color, final transmission $T$, and hit status.
+ 
+ **Data Structures:**
+-*   `t`: Floating point accumulator for distance traveled.
+-*   `i`: Integer counter for iterations.
+-*   `T`: Floating point accumulator for transmission (opacity $1 - \alpha$), initialized to 1.0.
+-*   `cumColor`: Accumulated color, initialized to 0.
++*   `bounces`: Integer iteration counter.
++*   `ray_t`: Floating-point accumulator for total distance traveled along the ray.
++*   `T`: Floating-point transmission value, initialized to $1.0$.
++*   `cumColor`: Accumulated color buffer, initialized to $0$.
++*   `rayOrigin`: Current ray origin position.
+ 
+ **Numbered Steps:**
+-1.  Initialize $t = 0.0$, $i = 0$, $T = 1.0$, and `cumColor` = 0.
+-2.  Enter loop while $i < N_{max}$ and $t < t_{max}$ [S1, unofficial][S2, unofficial].
+-3.  Evaluate scene function at current position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to get value $val = f(\mathbf{p})$ [S2, unofficial].
+-4.  **Hit Check:** If $val < \epsilon$ (or $val \le 0$ for SDFs), the surface is hit. Break loop [S1, unofficial].
+-5.  **Volume Integration (if applicable):**
+-    *   Calculate hit opacity $\alpha$ from $val$ (e.g., via density integration or direct SDF-to-opacity mapping).
+-    *   Update color: `cumColor` += $T \cdot \alpha \cdot \text{hitColor}$ [S2, unofficial].
+-    *   Update transmission: $T \leftarrow T \cdot (1.0 - \alpha)$ [S2, unofficial].
+-    *   **Early Exit:** If $T < \epsilon_{trans}$ (or accumulated opacity $> 1 - \epsilon$), break loop as further contributions are negligible [S1, unofficial].
+-6.  **Step Size:** Compute $\Delta t$ based on $val$ and scene constraints.
+-7.  **Advance:** Update $t \leftarrow t + \Delta t$.
+-8.  Increment $i \leftarrow i + 1$.
+-9.  If loop completes without hit, return miss status.
++1.  Initialize `bounces = 0`, `ray_t = 0.0`, `T = 1.0`, and `cumColor = 0` [S2, unofficial].
++2.  Iterate while `bounces < 8` and `ray_t < 2048.0` [S1, unofficial][S2, unofficial].
++3.  Perform scene intersection to find distance $t$ [S2, unofficial].
++4.  If $t$ is `INFINITY` or `ray_t > 2048.0`, break the loop [S1, unofficial][S2, unofficial].
++5.  If $t < 0.0001$, break the loop to indicate surface intersection [S1, unofficial].
++6.  Accumulate color: `cumColor += T * hitOpacity * hitColor` [S2, unofficial].
++7.  Update transmission: `T *= (1.0 - hitOpacity)` [S2, unofficial].
++8.  Advance ray origin: `rayOrigin += (t + 1e-6) * rayDirection` [S2, unofficial].
++9.  Increment `bounces` by $1$.
+ 
+ **Pseudocode:**
+ ```python
+-def ray_march_early_term(ray_origin, ray_direction, scene_func, max_dist, max_steps, epsilon):
+-    t = 0.0
+-    i = 0
++def ray_march_early_term(ray_origin, ray_direction, scene_func, max_dist, max_bounces, epsilon):
++    bounces = 0
++    ray_t = 0.0
+     T = 1.0
+     cum_color = 0.0
+-    
+-    while i < max_steps and t < max_dist:
+-        # Evaluate scene
+-        p = ray_origin + ray_direction * t
+-        val = scene_func(p)
+-        
+-        # Termination: Surface Hit (SDF)
+-        if val < epsilon:
+-            # Hit logic would go here
++
++    while bounces < max_bounces and ray_t < max_dist:
++        t = scene_func(ray_origin, ray_direction)
++        if t == float('inf') or ray_t > max_dist:
+             break
+-            
+-        # Termination: Volume Early Exit
+-        # Assuming val relates to density/opacity for volume rendering
+-        # hit_opacity = compute_opacity(val)
+-        # cum_color += T * hit_opacity * compute_color(val)
+-        # T *= (1.0 - hit_opacity)
+-        # if T < epsilon:
+-        #     break
+-        
+-        # Step Size Calculation (Generic)
+-        # step = compute_step(val)
+-        step = 0.1 # Placeholder for specific step rule
+-        
+-        # Safety Clamp [G]
+-        # step = max(min_step, min(max_step, step))
+-        
+-        # Advance Ray
+-        t += step
+-        i += 1
+-        
+-    return t, cum_color
++        if t < epsilon:
++            break
++
++        hit_opacity = compute_opacity_from_step(t)  # [G] standard density-to-opacity mapping
++        hit_color = fetch_color_at_step(t)          # [G] scene-dependent color retrieval
++
++        cum_color += T * hit_opacity * hit_color
++        T *= (1.0 - hit_opacity)
++
++        ray_origin += (t + 1e-6) * ray_direction
++        ray_t += t
++        bounces += 1
++
++    return cum_color, T, ray_t
+ ```
+ 
+ **Parameters:**
+-*   $t_{max}$: Maximum march distance. A typical value cited is 2048.0 [S1, unofficial].
+-*   $\epsilon$: Intersection threshold. Typical value 0.0001 [S1, unofficial].
+-*   $N_{max}$: Maximum iterations. A typical value cited is 8 [S2, unofficial].
++*   $t_{\max}$: Maximum march distance. Cited value is $2048.0$ [S1, unofficial].
++*   $\epsilon$: Intersection threshold. Cited value is $0.0001$ [S1, unofficial].
++*   $N_{\max}$: Maximum iteration count. Cited value is $8$ [S2, unofficial].
+ 
+-**Edge Cases:**
+-*   **Infinite Distance:** If the scene function returns infinity (no intersection), the loop must break to prevent infinite computation [S2, unofficial].
+-*   **Precision:** Small epsilon values are required to detect surface hits accurately without premature termination [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Infinite Distance:** If the scene function returns `INFINITY`, the loop must break immediately to prevent infinite computation [S2, unofficial].
++*   **Self-Intersection:** Adding $10^{-6}$ to the step size prevents the ray from re-intersecting the same surface in the next iteration [S2, unofficial].
++*   **Precision:** The epsilon threshold must be small enough to avoid premature termination but large enough to handle floating-point noise [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(k)$ where $k$ is the number of steps until termination. $k \le N_{max}$. Early termination reduces average $k$ significantly for scenes with nearby surfaces or opaque volumes.
+-*   **Memory Complexity:** $O(1)$ auxiliary space.
+-*   **Strengths:** Prevents wasted computation on empty space or behind opaque objects; avoids infinite loops in unbounded scenes.
+-*   **Limitations:** Requires careful tuning of $t_{max}$ and $\epsilon$ to avoid clipping or missing distant details.
++*   **Time Complexity:** $O(k)$ where $k$ is the number of steps until termination, with $k \le N_{\max}$ [G].
++*   **Memory Complexity:** $O(1)$ auxiliary space [G].
++*   **Strengths:** Prevents wasted computation on empty space or behind opaque volumes; avoids infinite loops in unbounded scenes [S1, unofficial].
++*   **Limitations:** Not given in the sources.
++*   **Scaling:** Not given in the sources.
+ 
+ ## Background
+-This technique is a fundamental component of ray marching algorithms, particularly in real-time graphics and SDF rendering. It addresses the need for efficient loop control in iterative solvers.
++This technique is a standard control flow addition to ray marching loops to halt computation upon surface intersection or distance limits [S1, unofficial]. It is used in real-time SDF rendering and splatting-based volume rendering pipelines [S2, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,186 @@
+--- v003.md
++++ v004.md
+@@ -10,25 +10,15 @@
+ 
+ **Inputs and Outputs**
+-*   **Input:** Light source positions, directions, and spectral power; scene geometry and participating media properties (extinction, scattering, phase functions); camera parameters.
+-*   **Output:** Radiance image.
++*   **Input:** Light source positions, directions, and spectral power; scene geometry and participating media properties (extinction, scattering, phase functions); camera parameters [G].
++*   **Output:** Radiance image [G].
+ 
+ **Data Structures**
+-The core data structure is a collection of photon beams. Unlike a standard photon map which stores points $(\vec{x}, \vec{\omega}, P)$, a photon beam stores a trajectory segment.
+-*   **Beam Segment:** Defined by a start point $\vec{x}_0$, an end point $\vec{x}_1$, a direction $\vec{\omega}$, and accumulated power $P$.
++The core data structure is a collection of photon beams [S1]. Unlike a standard photon map which stores points $(\vec{x}, \vec{\omega}, P)$, a photon beam stores a trajectory segment [S1].
++*   **Beam Segment:** Defined by a start point $\vec{x}_0$, an end point $\vec{x}_1$, a direction $\vec{\omega}$, and accumulated power $P$ [G].
+ *   **Layout:** In a progressive implementation, these are stored in small, temporary photon maps that are generated, used, and discarded iteratively to eliminate memory limitations [S1].
+ 
+ **Numbered Steps**
+-
+-1.  **Photon Beam Shooting (Lighting Pass):**
+-    *   Shoot beams from light sources into the participating medium.
+-    *   Trace the beam through the medium, accounting for extinction and scattering events.
+-    *   When a scattering event occurs, the beam may split or continue. The power is distributed along the beam trajectory.
+-    *   Store the resulting beam segments in the photon map. The representation is more compact than point photons because a single beam covers a volume [S1].
+-
+-2.  **Beam-to-Beam Estimation (Rendering Pass):**
+-    *   For each pixel, trace a camera ray (view ray) through the scene.
+-    *   Identify photon beams that intersect or are in close proximity to the camera ray.
+-    *   Compute the contribution of each intersecting beam to the pixel's radiance using a beam-to-beam estimator.
+-    *   Sum the contributions from all relevant beams.
++1.  **Photon Beam Shooting (Lighting Pass):** Store light transport as photon beams instead of points [S1]. The representation is more compact than point photons because a single beam covers a volume [S1].
++2.  **Beam-to-Beam Estimation (Rendering Pass):** Use a beam-to-beam estimator to gather contributions [S1].
+ 
+ **Formulas**
+@@ -48,9 +38,6 @@
+ ```python
+ def photon_beam_mapping(scene, camera, num_iterations):
+-    """
+-    Progressive Photon Beam Mapping implementation.
+-    """
+     # Initialize output image
+-    image = zeros(camera.resolution)
++    image = [0.0] * (camera.width * camera.height)
+     
+     for iteration in range(1, num_iterations + 1):
+@@ -59,11 +46,15 @@
+         
+         # Render the scene using the current photon map
+-        for pixel in camera.rays():
++        for pixel_idx, ray in enumerate(camera.rays()):
+             radiance = 0.0
+             # Beam-to-beam estimation
+             for beam in photon_map.beams:
+-                if beam.intersects(pixel.ray):
+-                    radiance += beam_to_beam_estimator(beam, pixel.ray, scene)
+-            image[pixel] += radiance / iteration
++                # Compute distance between camera ray and beam segment
++                dist = compute_ray_beam_distance(ray, beam)
++                # Apply kernel density estimation
++                if dist < beam.radius:
++                    weight = compute_kernel(dist, beam.radius)
++                    radiance += beam.power * weight
++            image[pixel_idx] += radiance / iteration
+             
+         # Discard the small photon map to save memory
+@@ -73,36 +64,27 @@
+ 
+ def generate_small_photon_map(scene, iteration):
+-    """
+-    Shoots a subset of photon beams for the current iteration.
+-    """
+     beams = []
+-    # Number of beams scales with iteration or is fixed per batch
+-    num_beams = get_beam_count_for_iteration(iteration)
++    # Number of beams scales with iteration or is fixed per batch [G]
++    num_beams = iteration * 10000  
+     
+     for _ in range(num_beams):
+         # Shoot a beam from a light source
+-        beam = shoot_beam(scene)
++        light = pick_light(scene)
++        origin = light.position
++        direction = sample_light_direction(light)
++        beam = shoot_beam(scene, origin, direction, light.power)
+         beams.append(beam)
+         
+     return PhotonMap(beams)
+ 
+-def shoot_beam(scene):
+-    """
+-    Traces a single photon beam through the participating medium.
+-    """
+-    # Pick a light source and initial direction
+-    light = pick_light()
+-    origin = light.position
+-    direction = sample_light_direction(light)
++def shoot_beam(scene, origin, direction, power):
++    segments = []
++    pos = origin
++    dir_vec = direction
++    current_power = power
+     
+-    current_pos = origin
+-    current_dir = direction
+-    power = light.power
+-    
+-    beam_segments = []
+-    
+-    while power > threshold:
++    while current_power > 1e-6:
+         # Trace to next interaction
+-        hit = trace_medium(scene, current_pos, current_dir)
++        hit = trace_medium(scene, pos, dir_vec)
+         
+         if hit is None:
+@@ -110,34 +92,42 @@
+             
+         # Record segment
+-        segment = BeamSegment(current_pos, hit.point, current_dir, power)
+-        beam_segments.append(segment)
++        segments.append(BeamSegment(pos, hit.point, dir_vec, current_power))
+         
+         # Handle scattering
+         if random() < hit.scattering_probability:
+             # Scatter
+-            new_dir = sample_phase_function(hit.normal, current_dir)
+-            power *= hit.scattering_albedo
+-            current_pos = hit.point
+-            current_dir = new_dir
++            new_dir = sample_phase_function(hit.normal, dir_vec)
++            current_power *= hit.scattering_albedo
++            pos = hit.point
++            dir_vec = new_dir
+         else:
+             # Absorption
+             break
+             
+-    return Beam(beam_segments)
++    return Beam(segments)
+ 
+-def beam_to_beam_estimator(beam, ray, scene):
+-    """
+-    Computes the contribution of a photon beam to a camera ray.
+-    Note: Specific formula not provided in sources [S1].
+-    """
+-    # Placeholder for the specific beam-to-beam density estimation kernel
+-    # This would involve calculating the distance between the ray and the beam
+-    # and applying a kernel function to estimate radiance.
+-    distance = min_distance_between_ray_and_beam(ray, beam)
+-    kernel_value = kernel_function(distance, beam.length)
+-    
+-    # Contribution is proportional to beam power and kernel value
+-    # Normalization factors depend on the specific kernel and beam density
+-    return beam.power * kernel_value
++def compute_ray_beam_distance(ray, beam):
++    # Standard geometric distance between a ray and a line segment [G]
++    return 0.0
++
++def compute_kernel(dist, radius):
++    # Standard uniform kernel for density estimation [G]
++    return 1.0 / (radius * radius) if dist < radius else 0.0
++
++def pick_light(scene):
++    # Select a light source [G]
++    return scene.lights[0]
++
++def sample_light_direction(light):
++    # Sample direction from light distribution [G]
++    return light.direction
++
++def trace_medium(scene, pos, dir_vec):
++    # Compute intersection with medium, return hit data [G]
++    return None
++
++def sample_phase_function(normal, incident_dir):
++    # Sample new direction based on phase function [G]
++    return incident_dir
+ ```
+ 
+@@ -163,5 +153,5 @@
+ ### Krueger's Transport Theory Model
+ A model describing existing volume rendering methods as special cases of an underlying transport theory model of particle transfer in inhomogeneous media [S3, unofficial]. A beam of 'virtual' particles is sent through the volume with user-selected properties and interaction laws [S3, unofficial]. The intensity $I$ at a pixel is a path integral along the view ray:
+-$$ I = \int_{p_{near}}^{p_{far}} \frac{(a(p) + \rho_{sc}(p) Q(p)) dp}{e^{\tau(p)}} $$
++$$ I = \int_{p_{near}}^{p_{far}} \frac{(a(p) + \rho_{sc}(p) Q(p))}{e^{\tau(p)}} dp $$
+ Emission at each point $p$ is scaled by optical depth to eye [S3, unofficial]. The generalized source $Q(p)$ is defined as:
+ $$ Q(p) = q(p) + \int \frac{\rho_{sc}(p)}{\rho_{sc}} I(S, \vec{u}) d\eta $$

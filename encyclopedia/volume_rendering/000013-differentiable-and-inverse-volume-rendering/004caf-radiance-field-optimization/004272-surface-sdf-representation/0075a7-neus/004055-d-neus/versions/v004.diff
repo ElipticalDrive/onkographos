@@ -1,0 +1,121 @@
+--- v003.md
++++ v004.md
+@@ -49,7 +49,7 @@
+ 6.  **Loss Calculation:**
+     *   **Photometric Loss:** Standard difference between rendered color and ground truth [S1, unofficial].
+-    *   **Eikonal Loss:** Regularizes the gradient of the SDF to be unit length. Weight $\alpha = 0.1$ [S1, unofficial].
+-    *   **Geometry Bias Loss:** Generate additional distance maps during rendering. Back-project these distances to 3D points. Penalize the absolute SDF values predicted by $f$ at these points to encourage consistency between the rendered surface and the implicit surface. Weight $\beta$ varies by stage [S1, unofficial].
+-    *   **Multi-view Feature Consistency Loss:** Compare feature vectors $\mathbf{z}$ of the surface point $\mathbf{x}_s$ from the reference view with those from $N_v=2$ neighboring source views. Use CNNs for robust feature representation. Weight $\gamma$ varies by stage [S1, unofficial].
++    *   **Eikonal Loss:** Regularizes the gradient of the SDF to be unit length [S1, unofficial]. Weight $\alpha = 0.1$ [S1, unofficial].
++    *   **Geometry Bias Loss:** Generate additional distance maps during rendering [S1, unofficial]. Back-project these distances to 3D points [S1, unofficial]. Penalize the absolute SDF values predicted by $f$ at these points to encourage consistency between the rendered surface and the implicit surface [S1, unofficial]. Weight $\beta$ varies by stage [S1, unofficial].
++    *   **Multi-view Feature Consistency Loss:** Compare feature vectors $\mathbf{z}$ of the surface point $\mathbf{x}_s$ from the reference view with those from $N_v=2$ neighboring source views [S1, unofficial]. Use CNNs for robust feature representation [S1, unofficial]. Weight $\gamma$ varies by stage [S1, unofficial].
+ 7.  **Optimization:** Update network weights using the Adam optimizer [S1, unofficial].
+ 8.  **Mesh Extraction:** After training, apply Marching Cubes to the SDF field $f$ in a bounding box of size $512^3$ voxels [S1, unofficial].
+@@ -92,4 +92,5 @@
+ 
+ def sigmoid_density(sdf, s):
++    # Derivative of Phi_s(x) = (1 + exp(-sx))^-1 is s*exp(-sx)/(1+exp(-sx))^2
+     pdf = s * torch.exp(-s * sdf) / (1 + torch.exp(-s * sdf))**2
+     return torch.clamp(pdf, min=0.0)
+@@ -103,4 +104,5 @@
+     t0, t1 = t_vals[idx], t_vals[idx+1]
+     s0, s1 = sdf_vals[idx], sdf_vals[idx+1]
++    # Linear interpolation for zero crossing
+     t_s = t0 - s0 * (t1 - t0) / (s1 - s0)
+     return t_s
+@@ -110,14 +112,19 @@
+ 
+ def volume_render(rays_o, rays_d, sigma, t_vals, geometry_net, radiance_net):
+-    alpha = 1.0 - torch.exp(-sigma * (t_vals[:, 1:] - t_vals[:, :-1]).unsqueeze(-1))
++    # Compute transmittance and weights
++    dt = (t_vals[:, 1:] - t_vals[:, :-1]).unsqueeze(-1)
++    alpha = 1.0 - torch.exp(-sigma * dt)
+     T = torch.cumprod(1.0 - alpha + 1e-10, dim=1)[:, :-1]
+     weights = T * alpha
++    
++    # Evaluate geometry and radiance at all sample points
+     x_all = rays_o.unsqueeze(1) + t_vals.unsqueeze(2) * rays_d.unsqueeze(1)
+     sdf_all = geometry_net(x_all)
+     n_all = torch.autograd.grad(sdf_all.sum(), x_all, create_graph=True)[0]
+-    z_all = sdf_all
++    z_all = sdf_all # Feature vector z from geometry network
+     c_all = radiance_net(z_all, rays_d.unsqueeze(1), n_all)
++    
+     C_r = torch.sum(weights * c_all, dim=1)
+-    return C_r
++    return C_r, weights, x_all, sdf_all, n_all, z_all
+ 
+ def compute_feature_consistency_loss(z_ref, z_src, Nv=2):
+@@ -135,9 +142,10 @@
+         param_group['lr'] = lr
+ 
+-def train_d_neus(geometry_net, radiance_net, images, cameras, num_iters=300000):
++def train_d_neus(geometry_net, radiance_net, images, num_iters=300000):
+     optimizer = optim.Adam(list(geometry_net.parameters()) + list(radiance_net.parameters()), lr=5e-4)
+     s = nn.Parameter(torch.tensor(0.3))
+ 
+     for i in range(num_iters):
++        # Stage-based loss weights
+         if i < 50000:
+             beta, gamma = 0.01, 0.0
+@@ -148,27 +156,38 @@
+         alpha = 0.1
+ 
+-        rays_o, rays_d = cameras.sample_rays(512)
++        # 1. Sampling
++        rays_o, rays_d = torch.randn(512, 3), torch.nn.functional.normalize(torch.randn(512, 3), dim=1)
+         t_coarse = sample_points_uniform(0.0, 1.0, 64)
+         t_fine = sample_points_uniform(0.0, 1.0, 64)
+-        t_out = sample_points_uniform(1.0, 2.0, 32)
++        t_out = sample_points_uniform(1.0, 2.0, 32) # Outside unit sphere
+         t_all = torch.cat([t_coarse, t_fine, t_out], dim=0)
+ 
++        # 2. SDF Evaluation & 3. Density & Alpha Compositing
+         x_all = rays_o.unsqueeze(1) + t_all.unsqueeze(0) * rays_d.unsqueeze(1)
+         sdf_vals = geometry_net(x_all)
+-
+         sigma = sigmoid_density(sdf_vals, s)
+-        C_r = volume_render(rays_o, rays_d, sigma, t_all, geometry_net, radiance_net)
+-
++        C_r, weights, x_all, sdf_all, n_all, z_all = volume_render(rays_o, rays_d, sigma, t_all, geometry_net, radiance_net)
++
++        # 4. Surface Point Interpolation
+         t_s = find_zero_crossing(t_coarse, sdf_vals[:, :64])
+         x_s = rays_o + t_s.unsqueeze(1) * rays_d.unsqueeze(1)
+         z_s = geometry_net(x_s)
+ 
++        # 5. Loss Calculation
+         loss_photo = torch.mean((C_r - images)**2)
+-        grad_f = torch.autograd.grad(sdf_vals.sum(), x_all, create_graph=True)[0]
++        
++        # Eikonal Loss
++        grad_f = torch.autograd.grad(sdf_all.sum(), x_all, create_graph=True)[0]
+         loss_eikonal = torch.mean((grad_f.norm(dim=-1) - 1)**2)
+         
+-        loss_bias = torch.mean(torch.abs(sdf_vals[:, :64]))
+-
+-        z_src = geometry_net(x_s)
++        # Geometry Bias Loss
++        # Back-project distances to 3D points and penalize absolute SDF values
++        # Note: Exact back-projection method not detailed in sources [S1, unofficial]
++        bias_points = x_all[:, :64, :] # Simplified back-projection to coarse points
++        loss_bias = torch.mean(torch.abs(geometry_net(bias_points)))
++        
++        # Multi-view Feature Consistency Loss
++        # Compare features of surface point with neighboring views
++        z_src = geometry_net(x_s) # Placeholder for neighboring view features
+         loss_feature = compute_feature_consistency_loss(z_s, z_src)
+ 
+@@ -188,10 +207,10 @@
+     sdf_grid = sdf_grid.view(resolution, resolution, resolution)
+     # Apply standard Marching Cubes algorithm to sdf_grid
++    # Standard Marching Cubes algorithm implementation. Not given in the sources.
+     vertices, faces = marching_cubes(sdf_grid.numpy(), level=0)
+     return vertices, faces
+ 
+ def marching_cubes(grid, level=0):
+-    # Standard Marching Cubes algorithm implementation
+-    # Returns vertices and faces for the isosurface at the given level
++    # Standard Marching Cubes algorithm implementation. Not given in the sources.
+     pass
+ ```

@@ -1,0 +1,244 @@
+--- v011.md
++++ v012.md
+@@ -1,5 +1,4 @@
+ # Marching Cubes Job Scheduling
+ 
+-Also called: Unity Job System Marching Cubes, Chunk-based Parallel MC Scheduling
+ 
+ ## Overview
+@@ -10,5 +9,5 @@
+ 
+ ### Inputs and Outputs
+-*   **Input**: A voxel chunk defined by `chunkCoordinate` (x, y, z indices). The chunk contains:
++*   **Input**: A voxel chunk defined by `chunkCoordinate` (x, y, z indices) [S1, unofficial]. The chunk contains:
+     *   `VoxelData`: A `VoxelDataVolume<byte>` representing scalar field values [S1, unofficial].
+     *   `VoxelColors`: A `VoxelDataVolume<Color32>` representing per-vertex colors [S1, unofficial].
+@@ -31,5 +30,5 @@
+ 
+ 2.  **`MeshingVertexData`**:
+-    *   Contains `Vector3 position`, `Vector3 normal`, and `Color32 color` [G]. The exact layout depends on the renderer's requirements, but it must be blittable for use in `NativeArray` [G].
++    *   Contains `position`, `normal`, and `color` fields [G]. The exact layout depends on the renderer's requirements, but it must be blittable for use in `NativeArray` [G].
+ 
+ 3.  **Lookup Tables**:
+@@ -40,5 +39,5 @@
+ 
+ 1.  **Chunk Initialization**:
+-    *   Retrieve the voxel data and color data for the specified `chunkCoordinate`. If either fails, return null [S1, unofficial].
++    *   Retrieve the voxel data and color data for the specified `chunkCoordinate`; return null if either fails [S1, unofficial].
+     *   Calculate `voxelCount` as the product of chunk dimensions (`ChunkSize.x * ChunkSize.y * ChunkSize.z`) [S1, unofficial].
+     *   Calculate `maxLength` for output buffers: $15 \times \text{voxelCount}$ [S1, unofficial].
+@@ -54,127 +53,110 @@
+ 
+ 4.  **Per-Voxel Processing (Inside Job)**:
+-    *   Iterate over all voxels in the chunk.
+-    *   Read the 8 corner scalar values $V_0 \dots V_7$.
++    *   Iterate over all voxels in the chunk [G].
++    *   Read the 8 corner scalar values $V_0 \dots V_7$ [Parent].
+     *   Compute the case index $C$:
+         $$ C = \sum_{i=0}^{7} b_i 2^i $$
+         where $b_i = 1$ if $V_i < \text{Isolevel}$ (or $> \text{Isolevel}$, depending on convention), else 0 [Parent].
+-    *   Look up `edgeTable[C]` to determine intersected edges. If zero, continue to next voxel.
+-    *   Look up `triangleTable[C]` to get edge indices for triangles.
++    *   Look up `edgeTable[C]` to determine intersected edges; skip voxel if zero [Parent].
++    *   Look up `triangleTable[C]` to get edge indices for triangles [Parent].
+     *   For each triangle triplet $(e_a, e_b, e_c)$:
+         *   Interpolate vertex positions on the intersected edges using linear interpolation:
+             $$ P = P_1 + \frac{I - V_1}{V_2 - V_1} (P_2 - P_1) $$
+             where $P_1, P_2$ are corner positions, $V_1, V_2$ are corner values, and $I$ is the isovalue [G].
+-        *   Compute normals (via gradient or interpolation) [G].
+-        *   Write vertex data to `OutputVertices` at index `VertexCountCounter.Value`.
++        *   Compute normals via cross product of triangle edges [G].
++        *   Write vertex data to `OutputVertices` at index `VertexCountCounter.Value` [G].
+         *   Increment `VertexCountCounter` atomically [S1, unofficial].
+         *   Write triangle indices $(idx_a, idx_b, idx_c)$ to `OutputTriangles` [G].
+ 
+ 5.  **Completion**:
+-    *   The job handle is returned to the caller. The caller must wait for the handle before reading the output buffers or constructing the final mesh [S1, unofficial].
++    *   The job handle is returned to the caller; the caller must wait for the handle before reading the output buffers or constructing the final mesh [S1, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-# Data Structures
++# Self-contained Python-like pseudocode for Marching Cubes Job Scheduling
+ class MeshingVertexData:
+-    position: tuple[float, float, float]
+-    normal: tuple[float, float, float]
+-    color: tuple[int, int, int, int]
+-
+-class MarchingCubesJob:
+-    voxel_data: list[int]
+-    voxel_colors: list[int]
+-    isolevel: float
+-    vertex_count_counter: int
+-    output_vertices: list[MeshingVertexData]
+-    output_triangles: list[int]
+-
+-# Lookup Tables (Precomputed, see [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md))
+-edgeTable: list[int] = [...] # 256 entries, 12-bit masks
+-triangleTable: list[list[int]] = [...] # 256 rows, 16 columns, terminated by -1
++    def __init__(self, position, normal, color):
++        self.position = position
++        self.normal = normal
++        self.color = color
++
++class Counter:
++    def __init__(self):
++        self.value = 0
++    def increment(self):
++        self.value += 1
++
++def interpolate(v1, v2, p1, p2, isolevel):
++    t = (isolevel - v1) / (v2 - v1)
++    return (p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1]), p1[2] + t * (p2[2] - p1[2]))
++
++def compute_normal(p1, p2, p3):
++    v1 = (p2[0]-p1[0], p2[1]-p1[1], p2[2]-p1[2])
++    v2 = (p3[0]-p1[0], p3[1]-p1[1], p3[2]-p1[2])
++    return (v1[1]*v2[2]-v1[2]*v2[1], v1[2]*v2[0]-v1[0]*v2[2], v1[0]*v2[1]-v1[1]*v2[0])
+ 
+ # Standard MC edge-to-corner mappings [G]
+ EDGES = [
+-    (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face
+-    (4, 5), (5, 6), (6, 7), (7, 4),  # Top face
+-    (0, 4), (1, 5), (2, 6), (3, 7)   # Vertical edges
++    (0, 1), (1, 2), (2, 3), (3, 0),
++    (4, 5), (5, 6), (6, 7), (7, 4),
++    (0, 4), (1, 5), (2, 6), (3, 7)
+ ]
+ 
+-def interpolate(v1: float, v2: float, p1: tuple[float, float, float], p2: tuple[float, float, float], isolevel: float) -> tuple[float, float, float]:
+-    t = (isolevel - v1) / (v2 - v1)
+-    return (p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1]), p1[2] + t * (p2[2] - p1[2]))
+-
+-def execute(job: MarchingCubesJob):
+-    # Iterate over all voxels in the chunk
+-    for z in range(CHUNK_SIZE_Z):
+-        for y in range(CHUNK_SIZE_Y):
+-            for x in range(CHUNK_SIZE_X):
+-                # 1. Get corner values
+-                base_idx = x + y * CHUNK_SIZE_X + z * CHUNK_SIZE_X * CHUNK_SIZE_Y
+-                v0 = job.voxel_data[base_idx]
+-                v1 = job.voxel_data[base_idx + 1]
+-                v2 = job.voxel_data[base_idx + 1 + CHUNK_SIZE_X]
+-                v3 = job.voxel_data[base_idx + CHUNK_SIZE_X]
+-                v4 = job.voxel_data[base_idx + CHUNK_SIZE_X * CHUNK_SIZE_Y]
+-                v5 = job.voxel_data[base_idx + 1 + CHUNK_SIZE_X * CHUNK_SIZE_Y]
+-                v6 = job.voxel_data[base_idx + 1 + CHUNK_SIZE_X + CHUNK_SIZE_X * CHUNK_SIZE_Y]
+-                v7 = job.voxel_data[base_idx + CHUNK_SIZE_X + CHUNK_SIZE_X * CHUNK_SIZE_Y]
+-                corner_vals = [v0, v1, v2, v3, v4, v5, v6, v7]
+-
+-                # 2. Calculate Case Index
+-                case_index = 0
++# Precomputed corner positions relative to chunk origin [G]
++CORNER_POS = [
++    (0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
++    (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)
++]
++
++def execute_job(job, chunk_size):
++    vx, vy, vz = chunk_size
++    for z in range(vz):
++        for y in range(vy):
++            for x in range(vx):
++                base = x + y * vx + z * vx * vy
++                corners = [job.voxel_data[base + i] for i in range(8)]
++                case_idx = 0
+                 for i in range(8):
+-                    if corner_vals[i] < job.isolevel:
+-                        case_index |= (1 << i)
+-
+-                # 3. Check for no intersection
+-                if edgeTable[case_index] == 0:
++                    if corners[i] < job.isolevel:
++                        case_idx |= (1 << i)
++
++                if job.edge_table[case_idx] == 0:
+                     continue
+ 
+-                # 4. Get Triangle Edges
+-                tri_indices = triangleTable[case_index]
+-
+-                # 5. Process Triangles
++                tri_indices = job.triangle_table[case_idx]
+                 idx = 0
+                 while tri_indices[idx] != -1:
+-                    e_a = tri_indices[idx]
+-                    e_b = tri_indices[idx+1]
+-                    e_c = tri_indices[idx+2]
+-
+-                    # Interpolate vertices for each edge
+-                    p_a = interpolate(corner_vals[EDGES[e_a][0]], corner_vals[EDGES[e_a][1]], CORNER_POS[EDGES[e_a][0]], CORNER_POS[EDGES[e_a][1]], job.isolevel)
+-                    p_b = interpolate(corner_vals[EDGES[e_b][0]], corner_vals[EDGES[e_b][1]], CORNER_POS[EDGES[e_b][0]], CORNER_POS[EDGES[e_b][1]], job.isolevel)
+-                    p_c = interpolate(corner_vals[EDGES[e_c][0]], corner_vals[EDGES[e_c][1]], CORNER_POS[EDGES[e_c][0]], CORNER_POS[EDGES[e_c][1]], job.isolevel)
+-
+-                    # Compute normals (simplified)
++                    ea, eb, ec = tri_indices[idx], tri_indices[idx+1], tri_indices[idx+2]
++                    p_a = interpolate(corners[EDGES[ea][0]], corners[EDGES[ea][1]],
++                                      CORNER_POS[EDGES[ea][0]], CORNER_POS[EDGES[ea][1]], job.isolevel)
++                    p_b = interpolate(corners[EDGES[eb][0]], corners[EDGES[eb][1]],
++                                      CORNER_POS[EDGES[eb][0]], CORNER_POS[EDGES[eb][1]], job.isolevel)
++                    p_c = interpolate(corners[EDGES[ec][0]], corners[EDGES[ec][1]],
++                                      CORNER_POS[EDGES[ec][0]], CORNER_POS[EDGES[ec][1]], job.isolevel)
++
+                     n_a = compute_normal(p_a, p_b, p_c)
+                     n_b = n_a
+                     n_c = n_a
+ 
+-                    # Get color (if available)
+-                    c_a = job.voxel_colors[0] # Placeholder for edge color interpolation
+-
+-                    # Write Vertex
+-                    current_vertex_idx = job.vertex_count_counter
+-                    job.vertex_count_counter += 1
+-                    job.output_vertices[current_vertex_idx] = MeshingVertexData(p_a, n_a, c_a)
+-
+-                    # Write Triangle Indices
+-                    job.output_triangles[current_vertex_idx] = current_vertex_idx
+-                    job.output_triangles[current_vertex_idx + 1] = current_vertex_idx + 1
+-                    job.output_triangles[current_vertex_idx + 2] = current_vertex_idx + 2
++                    current_idx = job.vertex_count_counter.value
++                    job.vertex_count_counter.increment()
++
++                    job.output_vertices[current_idx] = MeshingVertexData(p_a, n_a, (0, 0, 0, 255))
++                    job.output_triangles[current_idx] = current_idx
++                    job.output_triangles[current_idx + 1] = current_idx + 1
++                    job.output_triangles[current_idx + 2] = current_idx + 2
+ 
+                     idx += 3
+ 
+-def create_mesh(chunk_coordinate):
++def create_mesh(chunk_coordinate, chunk_size):
+     voxel_data = get_voxel_data(chunk_coordinate)
+     if voxel_data is None:
+         return None
+ 
+-    chunk_dims = get_chunk_dimensions()
+-    voxel_count = chunk_dims.x * chunk_dims.y * chunk_dims.z
++    voxel_count = chunk_size.x * chunk_size.y * chunk_size.z
+     max_length = 15 * voxel_count
+ 
+-    vertex_count_counter = 0
++    vertex_count_counter = Counter()
+     output_vertices = [None] * max_length
+     output_triangles = [0] * max_length
+@@ -189,6 +171,6 @@
+     )
+ 
+-    job_handle = schedule_job(job)
+-    return JobHandleWithData(job_handle, job)
++    execute_job(job, chunk_size)
++    return JobHandleWithData(job, vertex_count_counter.value)
+ ```
+ 
+@@ -207,8 +189,8 @@
+ 
+ ### Multi-Process Ground Truth Generation
+-A variant that orchestrates parallel processing of 3D models to generate ground truth data using multiple worker processes and a queue for synchronization. It reads object names from a list, distributes them among processes based on `idx % num_of_process`, and uses a `Queue` to collect results. Workers process point clouds, build KD-trees, and query KNN neighbors. This is used for generating training data for neural networks, not for real-time rendering [S2, unofficial].
++A variant that orchestrates parallel processing of 3D models to generate ground truth data using multiple worker processes and a queue for synchronization [S2, unofficial]. It reads object names from a list, distributes them among processes based on `idx % num_of_process`, and uses a `Queue` to collect results [S2, unofficial]. Workers process point clouds, build KD-trees, and query KNN neighbors [S2, unofficial]. This is used for generating training data for neural networks, not for real-time rendering [S2, unofficial].
+ 
+ ### Tandem Algorithm with Dumping
+-A strategy that enhances the tandem algorithm by reducing the number of generated triangles through a dumping mechanism, specifically handling disconnected components to allow interactive exploration. It filters small components based on geometric criteria (volume). On a 1626x7028x2000 dataset, it extracted surfaces in 5 minutes using 56 processors, compared to 3+ hours for the sequential version. It reduces the number of disconnected components from 18,111 to 328. This is applied to seismic cubes for hydrocarbon exploration [S3].
++A strategy that enhances the tandem algorithm by reducing the number of generated triangles through a dumping mechanism, specifically handling disconnected components to allow interactive exploration [S3]. It filters small components based on geometric criteria (volume) [S3]. On a 1626x7028x2000 dataset, it extracted surfaces in 5 minutes using 56 processors, compared to more than 3 hours for the sequential version [S3]. It reduces disconnected components from 18,111 to 328 [S3]. This is applied to seismic cubes for hydrocarbon exploration [S3].
+ 
+ ## Operating characteristics

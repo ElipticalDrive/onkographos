@@ -1,0 +1,232 @@
+--- v001.md
++++ v002.md
+@@ -1,117 +1,141 @@
+ # Shell Method for Volume Rendering
+-
+ Also called: Shell Rendering, Shell idea for volume rendering
+ 
+ ## Overview
+-The Shell Method is a software-based hybrid of surface and volume rendering that utilizes a compact data structure called a "shell," defined as a set of non-transparent voxels located near an extracted object boundary, with associated attributes for visualization [S1]. It solves the problem of efficiently rendering complex volumetric data by focusing computational resources on the object's periphery, effectively bridging the gap between crisp surface rendering and full volume rendering [S1]. Unlike its siblings, it explicitly constructs a boundary-centric data structure rather than operating on the raw volume or pre-computed isosurfaces alone [S1, S2].
++The Shell Method is a surface-based splatting technique that extracts a thin or thick surface or contour from a volume (often using segmentation) and represents it as a closed shell of points, discarding the original volume data [S1, unofficial][S3]. It solves the problem of efficiently visualizing specific object boundaries by combining the geometric precision of surface rendering with the visual richness of volume rendering [S2]. Unlike standard volume exploration via transfer functions, which offers flexibility, the Shell Method provides a fixed geometric representation optimized for speed and cache coherence [S1, unofficial]. It builds on the [Ghosting and Cutaway Techniques](8497-ghosting-and-cutaway-techniques.md) family by focusing on the **Selection** object's boundary while implicitly handling occlusion through the compact shell structure.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scene (binary or continuous) and a segmentation or extraction criterion defining the object boundary.
+-*   **Output:** A rendered image of the object, where the shell region is visualized using volume rendering techniques [S1].
++*   **Input:** A 3D volume dataset (binary or continuous) and optionally a segmentation mask.
++*   **Output:** A rendered image of the object boundary.
+ 
+ **Data Structures:**
+-The core data structure is the **Shell**, which stores:
+-1.  **Voxel Data:** A subset of the 3D grid containing only non-transparent voxels near the boundary.
+-2.  **Attributes:** Associated visualization attributes for each voxel in the shell [S1].
+-The shell can store either the entire 3D scene data or only the hard (binary) boundary information [S1].
++The core data structure is the **Shell**, defined as a set of non-transparent voxels near the extracted object boundary [S2]. Each voxel in the shell stores associated attributes for visualization [S2].
++*   **Hard Boundary Shell:** Contains only voxels exactly on the object surface. This degenerates to Surface Rendering (SR) [S2].
++*   **Fuzzy Boundary Shell:** Contains voxels in the vicinity of the extracted surface. This is identified as Digital Volume Rendering (DVR) [S2].
++*   **Storage:** The shell can store the entire 3D scene or only the hard boundary [S2].
+ 
+-**Algorithm Steps:**
+-1.  **Scene Filtering:** If starting from a binary scene, filter the shape-interpolated binary scene to create a "grey scene" (a continuous representation of the structure) [S2].
+-2.  **Grey Segmentation:** Grey segment the grey scene to create the shell. This step essentially creates a shell around the object boundary by identifying voxels in the vicinity of the extracted surface [S2].
+-    *   For a **hard boundary**, the shell is crisp and contains only voxels on the object surface. In this case, the method degenerates to Surface Rendering (SR) [S1].
+-    *   For a **fuzzy boundary**, the shell includes voxels in the vicinity of the extracted surface. Here, the method is identified as Digital Volume Rendering (DVR) [S1].
+-3.  **Volume Rendering:** Render the shell using volume rendering techniques (e.g., raycasting) [S1, S2].
+-
+-**Formulas and Parameters:**
+-The method is conceptually linked to expression 15d and 18c in the source literature, which describe combining filtering ($F$), structure interpolation ($G_o, G_b$), and opacity ($O_s$) to prepare the structure for rendering [S2]. Specifically, expression 18c represents an interesting volume rendering method using this shell approach [S2]. Exact mathematical formulations for the grey segmentation and rendering compositing are not provided in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Extraction Errors:** Explicit surface extraction can introduce errors [S1].
+-*   **Mitigation:** To address extraction errors, segmented object boundaries can be selectively dilated along all axes to visualize a fuzzy shell with raycasting [S1].
+-*   **Boundary Type:** The choice between SR and DVR behavior depends strictly on whether the boundary is defined as hard or fuzzy [S1].
++**Steps:**
++1.  **Preprocessing (Optional):** For continuous or noisy data, filter the shape-interpolated binary scene to create a "grey scene" [S3].
++2.  **Segmentation/Extraction:** Grey-segment the grey scene (or segment the original volume) to identify the object boundary [S3].
++3.  **Shell Construction:** Create a shell around the object boundary.
++    *   If a hard boundary is used, the shell is crisp [S2].
++    *   If a fuzzy boundary is used, the shell includes voxels in the vicinity of the surface [S2].
++    *   *Pitfall Handling:* Explicit surface extraction can create errors. To address this, segmented object boundaries can be selectively dilated along all axes to visualize a fuzzy shell with raycasting [S2].
++4.  **Rendering:** Volume render the shell data structure [S3].
++    *   The rendering leverages the compact nature of the shell.
++    *   Optimizations include adding shear-warp factorization to the shell data structure [S2] or using splat-like elliptical Gaussians to compute voxel contribution energy [S2].
+ 
+ **Pseudocode:**
+ ```python
+-def shell_rendering(scene, boundary_type="fuzzy"):
++def shell_render(volume, segmentation=None):
+     """
+-    Renders a 3D scene using the Shell Method.
++    Renders a volume using the Shell Method.
++    volume: 3D array of voxel values.
++    segmentation: Optional binary mask or labels. If None, assumes volume contains boundary info.
++    """
++    # Step 1: Preprocessing (if needed for fuzzy boundaries)
++    # If volume is binary and we want a fuzzy shell, filter it.
++    # Note: Source [S3] suggests filtering shape-interpolated binary scene to create grey scene.
++    if segmentation is None and not is_binary(volume):
++        grey_scene = filter_shape_interpolated(volume)
++    else:
++        grey_scene = volume if segmentation is None else volume
++
++    # Step 2: Extract Boundary / Create Shell
++    # The shell is a set of non-transparent voxels near the boundary.
++    shell_voxels = []
+     
+-    Args:
+-        scene: 3D array representing the input volume (binary or continuous).
+-        boundary_type: 'hard' for crisp surface rendering, 'fuzzy' for volume rendering.
++    # Determine boundary type
++    if segmentation is not None:
++        # Use segmentation to find boundary
++        boundary_voxels = find_boundary(segmentation)
+         
+-    Returns:
+-        rendered_image: 2D array representing the final image.
++        # Pitfall: Explicit extraction errors. Dilate if fuzzy shell desired.
++        # This creates a "fuzzy shell" for DVR-like appearance.
++        shell_voxels = dilate_along_axes(boundary_voxels, axes=[0, 1, 2])
++    else:
++        # Hard boundary: crisp shell, degenerates to SR
++        shell_voxels = find_surface_voxels(grey_scene)
++
++    # Step 3: Render Shell
++    # The shell data structure has high cache coherence [S1, unofficial].
++    # Rendering can be done via raycasting or splatting.
++    image = render_shell(shell_voxels)
++    
++    return image
++
++def find_boundary(segmentation):
++    """Identifies voxels that are on the surface of the segmented object."""
++    boundary = []
++    for voxel in segmentation:
++        if is_surface(voxel, segmentation):
++            boundary.append(voxel)
++    return boundary
++
++def is_surface(voxel, segmentation):
++    """Checks if a voxel is on the boundary of the segmentation."""
++    # Implementation detail: Check neighbors. If at least one neighbor is background/empty, it is surface.
++    # [G] Standard boundary detection logic.
++    return any(not segmentation[neighbor] for neighbor in get_neighbors(voxel))
++
++def dilate_along_axes(voxels, axes):
++    """Dilates a set of voxels along specified axes to create a fuzzy shell."""
++    # [G] Morphological dilation operation.
++    dilated = set()
++    for voxel in voxels:
++        dilated.add(voxel)
++        for axis in axes:
++            dilated.add(voxel + offset(axis, 1))
++            dilated.add(voxel - offset(axis, 1))
++    return list(dilated)
++
++def render_shell(shell_voxels):
+     """
+-    # Step 1: Filter shape-interpolated binary scene to create grey scene
+-    # Note: If input is already continuous/grey, this step may be skipped or identity.
+-    grey_scene = filter_shape_interpolated(scene)
+-    
+-    # Step 2: Grey segment the grey scene to create a shell
+-    # This identifies voxels near the object boundary.
+-    shell_data, shell_attributes = grey_segment(grey_scene, boundary_type)
+-    
+-    # Step 3: Volume render the shell
+-    # If boundary_type is 'hard', this degenerates to Surface Rendering.
+-    # If 'fuzzy', it performs DVR.
+-    rendered_image = volume_render_shell(shell_data, shell_attributes)
+-    
+-    return rendered_image
++    Renders the shell voxels.
++    Optimizations from sources:
++    - Shear-warp factorization [S2]
++    - Splat-like elliptical Gaussians [S2]
++    """
++    # [G] Standard volume rendering loop over shell_voxels.
++    # Since the original volume is discarded, only these voxels are processed.
++    image = create_empty_image()
++    for voxel in shell_voxels:
++        color = get_voxel_color(voxel)
++        opacity = get_voxel_opacity(voxel)
++        # Compositing logic (e.g., front-to-back)
++        composite_pixel(image, voxel.position, color, opacity)
++    return image
++```
+ 
+-def filter_shape_interpolated(binary_scene):
+-    """
+-    Filters a binary scene to create a grey scene.
+-    Implementation detail: Not given in the sources.
+-    """
+-    # Placeholder for specific filtering algorithm (e.g., Gaussian smoothing,
+-    # shape-based interpolation) as referenced in [S2].
+-    return apply_smoothing(binary_scene)
++**Parameters:**
++*   **Boundary Type:** Hard (crisp) or Fuzzy (dilated). Typical value: Fuzzy for DVR-like appearance, Hard for SR-like appearance [S2].
++*   **Dilation Radius:** Number of voxels to dilate along axes. Not given in the sources.
++*   **Rendering Optimization:** Shear-warp factorization or Gaussian splatting. Not given in the sources.
+ 
+-def grey_segment(grey_scene, boundary_type):
+-    """
+-    Segments the grey scene to extract the shell.
+-    """
+-    if boundary_type == "hard":
+-        # Extract crisp boundary voxels
+-        shell_voxels = extract_surface(grey_scene)
+-        shell_attrs = compute_surface_attributes(shell_voxels)
+-    elif boundary_type == "fuzzy":
+-        # Extract voxels in the vicinity of the surface
+-        # May involve dilation to address extraction errors [S1]
+-        shell_voxels = extract_fuzzy_boundary(grey_scene)
+-        shell_attrs = compute_volume_attributes(shell_voxels)
+-    else:
+-        raise ValueError("Unknown boundary type")
+-        
+-    return shell_voxels, shell_attrs
+-
+-def volume_render_shell(shell_data, shell_attributes):
+-    """
+-    Renders the shell data.
+-    """
+-    # Perform raycasting or other volume rendering technique
+-    # on the shell_data using shell_attributes.
+-    # Implementation detail: Not given in the sources.
+-    return cast_rays(shell_data, shell_attributes)
+-```
++**Edge Cases and Pitfalls:**
++*   **Extraction Errors:** Explicit surface extraction can introduce errors. Mitigation: Selective dilation of boundaries [S2].
++*   **Loss of Flexibility:** Because the original volume is discarded, the method does not support dynamic transfer function exploration [S1, unofficial].
++*   **Cache Coherence:** The method relies on the compact data structure for performance. If the shell is too sparse or scattered, cache benefits may diminish. Not given in the sources.
+ 
+ ## Subtopics
+ 
+-### Real-time shell space rendering
+-A technique for real-time rendering of arbitrary volumetric geometry into a polygonal mesh's shell space, which is a layer of variable thickness on top or below the polygonal mesh [S3, abstract only]. It computes view ray shell geometry intersections in a pixel shader and uses a 3D distance map to skip empty space in the shell volume, minimizing ray tracing steps [S3, abstract only]. The shell volume is defined by a pre-computed tetrahedra mesh, where tetrahedra subdivide prisms extruded from the polygonal base mesh [S3, abstract only]. A vertex shader computes tetrahedron face plane distances to generate per-pixel tetrahedron thickness using non-linear interpolation [S3, abstract only]. It includes local lighting and reduces rendering artifacts for shallow view angles [S3, abstract only]. It overcomes shortcomings of previous approaches: Wang et al. [2004] had high storage requirements and involved per-vertex computations, while Policarpo and Oliveira [2006] had low shell geometry depth complexity and mapping distortions [S3, abstract only].
++### [Real-time shell space rendering](11590-real-time-shell-space-rendering.md)
++A technique for real-time rendering of arbitrary volumetric geometry into a polygonal mesh's shell space, which is a layer of variable thickness on top or below the polygonal mesh. It differs by applying the shell concept to polygonal meshes rather than voxel volumes.
+ 
+ ## Operating characteristics
+-*   **Complexity:** Not given in the sources.
+-*   **Performance:** Acceleration techniques have been added, such as shear-warp factorization [S1] and splat-like elliptical Gaussian computation for voxel contribution energy [S1].
+-*   **Strengths:** Provides a compact data structure for visualization; allows for both crisp surface rendering and fuzzy volume rendering depending on boundary definition [S1].
+-*   **Limitations:** Explicit surface extraction can create errors [S1].
+-*   **When to use:** When a hybrid of surface and volume rendering is desired, particularly for segmented structures like vessels and arteries [S1].
++*   **Time Complexity:** Fast. The number of points is minimized compared to full volume rendering [S1, unofficial].
++*   **Memory Complexity:** Low. Only the shell voxels are stored, not the entire volume [S1, unofficial].
++*   **Performance:** High cache coherence due to the compact data structure [S1, unofficial].
++*   **Strengths:** Speed, efficient memory usage, good for visualizing specific boundaries [S1, unofficial][S2].
++*   **Limitations:** No flexibility for volume exploration via transfer functions; original volume is discarded [S1, unofficial].
++*   **When to use:** When the primary interest is the object boundary and performance is critical.
++*   **When not to use:** When internal volume structure or variable opacity transfer is required.
+ 
+ ## Background
+-The Shell Method was introduced as a software-based hybrid approach [S1]. Key contributors include Udupa and Odhner, who provided detailed descriptions of the algorithm [S1]. Applications include rendering segmented structures of vessels and arteries in contrast-enhanced magnetic resonance angiography images [S1]. Improvements were made by Falcão and colleagues (shear-warp factorization) [S1], Botha and Post (elliptical Gaussian splatting) [S1], and Grevera et al. (T-shell element for isosurface rendering) [S1]. The method is conceptually related to expressions in the work of [S2], particularly 15d and 18c.
++The Shell Method was introduced as a software-based hybrid of surface and volume rendering [S2]. It is based on a compact data structure called a shell, which consists of non-transparent voxels near the extracted object boundary [S2]. The method was developed to address the need for efficient visualization of segmented structures, such as vessels and arteries in medical imaging [S2]. Improvements included the addition of shear-warp factorization [S2] and the use of elliptical Gaussians for splatting [S2]. The "shell idea" is also discussed in the context of imaging transforms for visualizing surfaces and volumes, where it is described as filtering a binary scene to create a grey scene, grey-segmenting it to create a shell, and then volume rendering it [S3].
+ 
+ ## Sources
+-[S1] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+-[S2] Imaging transforms for visualizing surfaces and volumes, https://doi.org/10.1007/bf03168529, fetched 2026-10-29
+-[S3] Real-time shell space rendering of volumetric geometry, https://doi.org/10.1145/1174429.1174477, fetched 2026-10-26 (abstract only)+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
++[S2] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
++[S3] Imaging transforms for visualizing surfaces and volumes, https://doi.org/10.1007/bf03168529, fetched 2026-10-29

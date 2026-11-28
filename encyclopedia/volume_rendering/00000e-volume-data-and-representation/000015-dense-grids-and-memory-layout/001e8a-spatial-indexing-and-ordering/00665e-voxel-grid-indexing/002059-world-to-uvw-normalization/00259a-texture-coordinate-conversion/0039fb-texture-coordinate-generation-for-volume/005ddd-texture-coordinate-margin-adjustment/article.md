@@ -1,0 +1,72 @@
+# Texture Coordinate Margin Adjustment
+
+Also called: Texture coordinate biasing, UV margin adjustment
+
+## Overview
+Texture Coordinate Margin Adjustment is a technique to fix white artifacts (empty texture spots) caused by rounding errors in shader texture lookups by modifying texture coordinates to add a small margin, preventing lookups outside the texture bounds [S1, unofficial]. It addresses the issue where floating-point precision errors cause sampled coordinates to fall just outside the valid $[0, 1]$ range, resulting in sampling from empty or undefined regions, particularly in voxel engines using large texture atlases [S1, unofficial]. Unlike [UV Contraction for Z-fighting Prevention](22185-uv-contraction-for-z-fighting-prevention.md), which shrinks the UV footprint to prevent bleed between atlas tiles, this method expands the valid lookup region slightly inward to tolerate boundary errors without altering the visual footprint of the texture [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Original texture coordinates $(u, v)$ for a fragment, typically in the range $[0, 1]$.
+- Output: Adjusted texture coordinates $(u', v')$ that include a safety margin.
+
+**Data Structures:**
+- No specific data structures are required. The adjustment is performed per-fragment in the shader.
+
+**Steps:**
+1. Define a small margin value $\epsilon$. This value must be large enough to cover the maximum expected floating-point rounding error but small enough to not cause visible sampling from adjacent atlas tiles.
+2. Calculate the adjusted coordinates:
+   $$ u' = u \cdot (1 - 2\epsilon) + \epsilon $$
+   $$ v' = v \cdot (1 - 2\epsilon) + \epsilon $$
+   This formula maps the original $[0, 1]$ range to $[\epsilon, 1-\epsilon]$, effectively shrinking the valid coordinate space by $\epsilon$ on each side.
+3. Use $(u', v')$ for texture sampling.
+
+**Parameters:**
+- $\epsilon$: The margin size. Typical values depend on the texture resolution and precision. For 32-bit floats, a value like $1/2048$ or $1/4096$ is often sufficient to cover rounding errors in standard rasterization pipelines [S1, unofficial]. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- If $\epsilon$ is too large, it may cause visible sampling from adjacent textures in an atlas, leading to visual artifacts [S1, unofficial].
+- If $\epsilon$ is too small, it may not fully eliminate the white artifacts caused by rounding errors [S1, unofficial].
+- This method assumes the texture coordinates are normalized to $[0, 1]$. If they are not, they must be normalized first.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adjust_texture_coordinates(u, v, epsilon):
+    """
+    Adjusts texture coordinates to add a margin for safety against rounding errors.
+    
+    Args:
+        u (float): Original u coordinate in [0, 1].
+        v (float): Original v coordinate in [0, 1].
+        epsilon (float): Margin size, e.g., 1/2048.
+        
+    Returns:
+        tuple: Adjusted (u', v') coordinates.
+    """
+    # Map [0, 1] to [epsilon, 1-epsilon]
+    u_adjusted = u * (1.0 - 2.0 * epsilon) + epsilon
+    v_adjusted = v * (1.0 - 2.0 * epsilon) + epsilon
+    
+    return u_adjusted, v_adjusted
+```
+
+## Subtopics
+
+### [UV Contraction for Z-fighting Prevention](22185-uv-contraction-for-z-fighting-prevention.md)
+UV Contraction is a mesh preprocessing technique that scales the UV coordinates of mesh vertices inward toward the center of their texture space to prevent sampling errors, such as seams, sparkly dots, or z-fighting artifacts, at texture boundaries.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per fragment. The adjustment involves a few floating-point multiplications and additions.
+- **Memory Complexity:** $O(1)$. No additional memory is required.
+- **Strengths:** Simple to implement, effective at eliminating white artifacts caused by rounding errors in voxel rendering [S1, unofficial].
+- **Limitations:** Requires careful tuning of $\epsilon$ to balance artifact removal and atlas bleed. It is a workaround for floating-point precision issues rather than a fundamental fix [S1, unofficial].
+- **When to use:** When using large texture atlases in voxel engines or similar applications where rounding errors cause sampling outside valid texture bounds [S1, unofficial].
+- **When not to use:** When using integer-based texture lookup methods in modern GLSL, which can avoid these issues entirely [S1, unofficial].
+
+## Background
+The technique is discussed in the context of voxel engine development, specifically addressing artifacts seen in games like Minecraft that use large texture atlases [S1, unofficial]. It was proposed as a solution to white pixel artifacts caused by floating-point rounding errors in shader texture lookups [S1, unofficial]. An alternative solution mentioned is using integer-based texture lookup methods in recent GLSL versions [S1, unofficial].
+
+## Sources
+[S1] Voxel engine artifacts, https://gamedev.stackexchange.com/questions/51173/voxel-engine-artifacts, fetched 2026-10-26 (unofficial)

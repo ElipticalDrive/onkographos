@@ -1,0 +1,188 @@
+--- v001.md
++++ v002.md
+@@ -1,9 +1,9 @@
+ # SDF Edge Regularization Loss
+ ## Overview
+-A loss function that penalizes Signed Distance Function (SDF) values at mesh edges where the sign changes, encouraging sharp features or correct topology at boundaries [S1, unofficial]. It differs from general curvature penalties by focusing specifically on the discrete edge connectivity of the underlying representation (e.g., FlexiCubes) to enforce zero-crossing consistency [S1, unofficial].
++A loss function that penalizes Signed Distance Function (SDF) values at mesh edges where the sign changes, encouraging sharp features or correct topology at boundaries [S1, unofficial]. It differs from general curvature penalties by focusing specifically on discrete edge connectivity to enforce zero-crossing consistency [S1, unofficial].
+ ## How it works
+ **Inputs:**
+-- `sdf`: Tensor of SDF values at vertices. Shape depends on the mesh representation (e.g., `[V]` or `[B, V]`).
+-- `all_edges`: Tensor of edge indices. Shape `[E, 2]` or `[B, E, 2]`, where `E` is the number of edges.
++- `sdf`: Tensor of SDF values at vertices. Shape not given in the sources.
++- `all_edges`: Tensor of edge indices. Shape not given in the sources.
+ 
+ **Outputs:**
+@@ -11,121 +11,52 @@
+ 
+ **Data Structures:**
+-- `sdf_f1x6x2`: Intermediate tensor storing SDF values at edge endpoints.
++- `sdf_edges`: Intermediate tensor storing SDF values at edge endpoints.
+ - `mask`: Boolean tensor identifying edges with sign changes.
+ 
+ **Steps:**
+-1. Gather SDF values at edge endpoints:
+-   $$ \text{sdf}_{\text{edges}} = \text{sdf}[\text{all\_edges}] $$
+-   Reshape to `[E, 2]` (or `[B, E, 2]` for batched).
+-2. Create a mask for edges where signs differ:
+-   $$ \text{mask} = \text{sign}(\text{sdf}_{\text{edges}}[:, 0]) \neq \text{sign}(\text{sdf}_{\text{edges}}[:, 1]) $$
+-   Note: $\text{sign}(0)$ is typically treated as positive or handled via strict inequality.
+-3. Filter SDF values to only those edges with sign changes:
+-   $$ \text{sdf}_{\text{filtered}} = \text{sdf}_{\text{edges}}[\text{mask}] $$
+-4. Compute binary cross-entropy loss between the first endpoint and the boolean second endpoint, and vice versa. Specifically, treat one endpoint's sign as the target and the other's value (normalized or raw) as the prediction, or use a hinge-like penalty. The source describes computing BCE between the first endpoint and boolean second endpoint, and vice versa [S1, unofficial].
++1. Gather SDF values at edge endpoints: `sdf_edges = sdf[all_edges]`. Reshape to `[E, 2]` (or `[B, E, 2]` for batched).
++2. Create a mask for edges where signs differ: `mask = sign(sdf_edges[:, 0]) != sign(sdf_edges[:, 1])`.
++3. Filter SDF values to only those edges with sign changes: `sdf_filtered = sdf_edges[mask]`.
++4. Compute binary cross-entropy loss between the first endpoint and the boolean second endpoint, and vice versa. Specifically, treat one endpoint's sign as the target and the other's sign as the prediction, or use a hinge-like penalty [G]. The source describes computing BCE between the first endpoint and boolean second endpoint, and vice versa [S1, unofficial].
+ 5. Return the computed loss.
+ 
+ **Pseudocode:**
+ ```python
++import torch
++
+ def sdf_edge_regularization_loss(sdf, all_edges):
+-    """
+-    Computes SDF edge regularization loss.
+-    
+-    Args:
+-        sdf: Tensor of shape [V] or [B, V] containing SDF values at vertices.
+-        all_edges: Tensor of shape [E, 2] or [B, E, 2] containing edge indices.
+-        
+-    Returns:
+-        loss: Scalar tensor.
+-    """
+-    # Gather SDF values at edge endpoints
+-    # Handle batched or unbatched case
+-    if sdf.dim() == 1:
+-        sdf_edges = sdf[all_edges]  # Shape [E, 2]
+-    else:
+-        # Assuming all_edges is broadcastable or batched
+-        sdf_edges = sdf[all_edges]  # Shape [B, E, 2]
+-        
+-    # Determine sign of SDF values
+-    # sign(0) is usually 1 or 0; here we assume standard sign function
++    # 1. Gather SDF values at edge endpoints
++    sdf_edges = sdf[all_edges]  # Shape [E, 2] or [B, E, 2]
++
++    # 2. Create mask for edges where signs differ
+     signs = torch.sign(sdf_edges)  # Shape [E, 2] or [B, E, 2]
+-    
+-    # Create mask for edges where signs differ
+-    # Using != to detect sign changes (e.g., +1 vs -1)
+     mask = signs[:, 0] != signs[:, 1]  # Shape [E] or [B, E]
+-    
+-    # Filter SDF values to only those edges with sign changes
++
++    # 3. Filter SDF values to only those edges with sign changes
+     sdf_filtered = sdf_edges[mask]  # Shape [K, 2] where K is number of crossing edges
+-    
++
+     if sdf_filtered.numel() == 0:
+         return torch.tensor(0.0, device=sdf.device)
+-        
+-    # Compute binary cross-entropy loss
+-    # Treat first endpoint as target, second as prediction (and vice versa)
+-    # Note: BCE expects probabilities in [0, 1]. 
+-    # The source implies a direct BCE between "first endpoint" and "boolean second endpoint".
+-    # This likely means converting signs to 0/1 targets and using raw SDF values or normalized values as logits/probs.
+-    # However, standard BCE on raw SDF values is unstable. 
+-    # A common interpretation in this context (FlexiCubes) is to penalize the magnitude of SDF at the crossing 
+-    # or ensure the signs are consistent with a binary classification.
+-    # Given the source description "binary cross-entropy loss between first endpoint and boolean second endpoint",
+-    # we interpret this as:
+-    # Target: sign(sdf[:, 0]) mapped to {0, 1}
+-    # Prediction: sigmoid(sdf[:, 1]) or similar, OR simply using the sign of the second as the target and the value as the loss?
+-    # Re-reading [S1, unofficial]: "Compute binary cross-entropy loss between first endpoint and boolean second endpoint, and vice versa."
+-    # This phrasing is ambiguous. A more robust interpretation for SDF regularization is to minimize the SDF value at the zero crossing.
+-    # However, we must follow the source. Let's assume the source implies a classification loss on the signs.
+-    # Let's map signs to 0/1.
+-    target_0 = (signs[:, 0] > 0).float()  # Shape [E] or [B, E]
++
++    # 4. Compute binary cross-entropy loss between first endpoint and boolean second endpoint, and vice versa
++    # Map signs to 0/1 targets
++    target_0 = (signs[:, 0] > 0).float()
+     target_1 = (signs[:, 1] > 0).float()
+-    
+-    # Use the SDF values themselves as logits for BCE? Or normalized?
+-    # Without explicit normalization in source, we use raw values passed through sigmoid if treating as logits,
+-    # or just the values if the source implies a specific formulation.
+-    # Given "binary cross-entropy", we need probabilities.
+-    # Let's assume the source uses the SDF values directly in a BCE formulation, which is non-standard.
+-    # A safer implementation of "BCE between first and boolean second" might be:
+-    # Loss = BCE(target=sign(sdf0), input=sdf1) ? No, input must be prob.
+-    # Let's assume the source meant: Minimize |sdf| at crossing edges, but implemented via a classification-like loss.
+-    # Since the source is vague, we implement the most literal interpretation:
+-    # BCE with targets being the signs (0/1) and inputs being the SDF values (assumed to be in [0,1] or passed through sigmoid).
+-    # If SDF is not in [0,1], we must sigmoid it.
+-    
+-    # Reshape for BCE if batched
+-    if sdf_filtered.dim() == 2:
+-        # [K, 2]
+-        target_0_f = target_0[mask]
+-        target_1_f = target_1[mask]
+-        sdf_0_f = sdf_filtered[:, 0]
+-        sdf_1_f = sdf_filtered[:, 1]
+-        
+-        # Apply sigmoid to convert SDF values to probabilities
+-        prob_0 = torch.sigmoid(sdf_0_f)
+-        prob_1 = torch.sigmoid(sdf_1_f)
+-        
+-        # BCE between first endpoint (as prob) and second endpoint's boolean target, and vice versa
+-        loss_01 = torch.nn.functional.binary_cross_entropy(prob_0, target_1_f)
+-        loss_10 = torch.nn.functional.binary_cross_entropy(prob_1, target_0_f)
+-        
+-        loss = (loss_01 + loss_10) / 2.0
+-    else:
+-        # Unbatched case
+-        target_0_f = target_0[mask]
+-        target_1_f = target_1[mask]
+-        sdf_0_f = sdf_filtered[:, 0]
+-        sdf_1_f = sdf_filtered[:, 1]
+-        
+-        prob_0 = torch.sigmoid(sdf_0_f)
+-        prob_1 = torch.sigmoid(sdf_1_f)
+-        
+-        loss_01 = torch.nn.functional.binary_cross_entropy(prob_0, target_1_f)
+-        loss_10 = torch.nn.functional.binary_cross_entropy(prob_1, target_0_f)
+-        
+-        loss = (loss_01 + loss_10) / 2.0
+-        
++
++    # Apply sigmoid to convert SDF values to probabilities for BCE [G]
++    prob_0 = torch.sigmoid(sdf_filtered[:, 0])
++    prob_1 = torch.sigmoid(sdf_filtered[:, 1])
++
++    # Compute BCE
++    loss_01 = torch.nn.functional.binary_cross_entropy(prob_0, target_1)
++    loss_10 = torch.nn.functional.binary_cross_entropy(prob_1, target_0)
++
++    loss = (loss_01 + loss_10) / 2.0
+     return loss
+ ```
++
+ **Parameters:**
+ - None explicitly defined in sources.
++
+ **Edge Cases:**
+ - No edges with sign changes: Return 0 loss.
+@@ -138,15 +69,15 @@
+ Formula:
+ $$ L_{dec} = \sum_{zhw} \exp(-2|S_{zhw}|) $$
+-where $S_{zhw}$ are SDF values from the low-resolution probe (192x128x128), $z$ refers to the sample index, and $h,w$ to pixel [S2].
++where $S_{zhw}$ are SDF values from the low-resolution probe ($192 \times 128 \times 128$), $z$ refers to the sample index, and $h,w$ to pixel [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of edges with sign changes.
+-- **Memory Complexity:** Linear with respect to the number of edges.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Strengths:** Enforces sharp features and correct topology at boundaries [S1, unofficial].
+ - **Limitations:** Only applies to edges with sign changes, potentially ignoring smooth regions [S1, unofficial].
+-- **When to use:** When using discrete representations like FlexiCubes that rely on edge connectivity [S1, unofficial].
++- **When to use:** Not given in the sources.
+ 
+ ## Background
+-Originated in the context of differentiable volume rendering and mesh extraction, specifically associated with the FlexiCubes method [S1, unofficial]. It is used to improve the geometric quality of extracted meshes by ensuring consistent SDF signs across edges [S1, unofficial].
++Originated in the context of differentiable volume rendering and mesh extraction, specifically associated with the FlexiCubes implementation [S1, unofficial]. It is used to improve the geometric quality of extracted meshes by ensuring consistent SDF signs across edges [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,26 @@
+# Camera and Pose Optimization
+
+Also called: Joint Camera Optimization, Trainable Camera Parameters
+
+## Overview
+This family of methods optimizes camera intrinsic and extrinsic parameters jointly with the neural radiance field (NeRF) during training, addressing scenarios where Structure-from-Motion (SfM) pipelines like COLMAP fail, such as small camera motion videos or narrow-baseline structured light fields [S1, unofficial]. It distinguishes itself from methods that optimize all frame poses independently (such as BARF) by leveraging known reference trajectories or initializing residuals from prior estimates, thereby reducing the number of optimized parameters or ensuring convergence from a good starting point [S1, unofficial].
+
+## Shared principles
+The core mechanism involves treating camera parameters (extrinsics $P$, intrinsics $f$, or time offsets $\delta$) as trainable variables alongside the NeRF weights $\Theta$. Rays are regenerated each step based on current pose estimates. The optimization minimizes a loss function comparing rendered outputs (RGB, depth) to ground truth, updating both scene and camera parameters via gradient descent.
+
+## Subtopics
+
+### [Joint Optimization of Scene and Calibration Parameters](21724-joint-optimization-of-scene-and-calibration-parameters.md)
+Performs multi-sensor spatiotemporal calibration by jointly optimizing implicit neural scene parameters and sensor calibration parameters (extrinsics and time offsets) using multimodal data, specifically RGB images and LiDAR depth [21724-joint-optimization-of-scene-and-calibration-parameters.md]. It distinguishes itself from methods that optimize all frame poses independently (such as BARF) by leveraging a known reference sensor trajectory to constrain the optimization to only the relative extrinsics and time offsets between sensors, thereby reducing the number of optimized parameters [21724-joint-optimization-of-scene-and-calibration-parameters.md]. Choose this when calibrating multiple sensors (e.g., RGB-LiDAR) with a known reference trajectory.
+
+### [Trainable Camera Parameters](21772-trainable-camera-parameters.md)
+Optimizes camera intrinsic and extrinsic parameters jointly with the neural radiance field (NeRF) during training to handle scenarios where Structure-from-Motion (SfM) pipelines like COLMAP fail, such as small camera motion videos or narrow-baseline structured light fields [21772-trainable-camera-parameters.md]. Unlike methods that train camera parameters from scratch, this approach initializes residuals from a prior estimate (e.g., RCVD) and optimizes additive or multiplicative corrections [21772-trainable-camera-parameters.md]. Choose this when SfM fails but a rough prior exists.
+
+### Self-Calibrating NeRF
+A method that jointly optimizes the NeRF MLP and input camera poses, bypassing the need for structure-from-motion preprocessing for forward facing scenes [S1, unofficial]. It distinguishes itself by removing the SfM dependency entirely for specific scene types. Choose this for forward-facing scenes where SfM is unnecessary or unreliable.
+
+## Background
+The concept of jointly optimizing camera poses with NeRF was introduced by Self-Calibrating Neural Radiance Fields [JAC∗ 21] and NeRF [WWX∗ 21], which bypassed SfM preprocessing for forward-facing scenes [S1, unofficial]. Bundle-Adjusting Neural Radiance Fields (BARF) [LMTL21] extended this by applying a coarse-to-fine annealing schedule to positional encoding frequencies to smooth the optimization trajectory [S1, unofficial]. However, these early methods struggled with wide-baseline 360-degree captures, leading to approaches like GNeRF [MCL∗ 21] that use cycle-consistent networks [S1, unofficial]. Recent developments focus on multi-sensor calibration and robust initialization for challenging baselines [21724-joint-optimization-of-scene-and-calibration-parameters.md][21772-trainable-camera-parameters.md].
+
+## Sources
+[S1] Advances in Neural Rendering, https://doi.org/10.48550/arxiv.2111.05849, fetched 2026-10-26 (unofficial)

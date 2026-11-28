@@ -1,0 +1,201 @@
+# Multi-Isosurface and Generalized Contouring
+
+Also called: Multi-Isosurface Extraction, Generalized Marching Cubes, 4D Marching Cubes, STEVE
+
+## Overview
+This family extends the standard Marching Cubes algorithm to handle multiple distinct isovalue thresholds simultaneously or to generalize the topological construction to higher dimensions (4D+) [G]. It solves the problem of visualizing complex scalar fields with multiple material boundaries or analyzing time-evolving volumetric data in a single coherent framework [G]. It differs from single-isosurface methods by managing independent triangle lists for each threshold [Multi-Isosurface Extraction](1162-multi-isosurface-extraction.md), dynamically selecting isovales based on adjacent material types [Generalized Marching Cubes](8320-generalized-marching-cubes.md), or transforming boundary hyper-octants into higher-dimensional simplices to prevent topological ambiguities [STEVE (Space-Time-Enclosing Volume Extraction)](10398-steve-space-time-enclosing-volume-extraction.md).
+
+## Shared principles
+All children build on [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md), which provides the `edgeTable` and `triangleTable` derived from the 256 possible binary configurations of a voxel's eight corner signs relative to an isovalue [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md). Beyond this shared foundation, the children diverge into distinct mechanisms: iterative threshold application, material-pair boundary detection, and 4D protomesh construction [G]. The core mechanism relies on precomputed lookup tables and linear edge interpolation:
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_case_index(values, isovalue):
+    case_index = 0
+    for i in range(8):
+        if values[i] < isovalue:
+            case_index |= (1 << i)
+    return case_index
+
+def extract_triangles(case_index, edge_table, triangle_table, edge_intersections):
+    triangles = []
+    edge_mask = edge_table[case_index]
+    tri_indices = triangle_table[case_index]
+    for i in range(0, len(tri_indices), 3):
+        if tri_indices[i] == -1:
+            break
+        e1, e2, e3 = tri_indices[i], tri_indices[i+1], tri_indices[i+2]
+        p1 = edge_intersections[e1]
+        p2 = edge_intersections[e2]
+        p3 = edge_intersections[e3]
+        triangles.append((p1, p2, p3))
+    return triangles
+```
+
+## Subtopics
+
+### [Multi-Isosurface Extraction](1162-multi-isosurface-extraction.md)
+A technique for extracting and rendering multiple distinct isosurfaces from the same scalar volume data simultaneously by invoking the Marching Cubes algorithm for each selected isovalue [Multi-Isosurface Extraction](1162-multi-isosurface-extraction.md). It sets itself apart from single-isosurface methods by managing multiple independent triangle lists and rendering states, allowing distinct materials or colors for different density thresholds [Multi-Isosurface Extraction](1162-multi-isosurface-extraction.md). Choose this when visualizing complex scalar fields with multiple material boundaries in a single pass. See [Multi-Isosurface Extraction](1162-multi-isosurface-extraction.md).
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_isosurface_extraction(dataset, isovalues, resolutions=None, edge_table=None, triangle_table=None):
+    if resolutions is None:
+        resolutions = {v: 1 for v in isovalues}
+    if edge_table is None or triangle_table is None:
+        raise ValueError("edge_table and triangle_table must be provided from Marching Cubes Lookup and Configuration.")
+    
+    all_triangle_lists = {}
+    X, Y, Z = dataset.shape
+    
+    for iso_value in isovalues:
+        inc = resolutions.get(iso_value, 1)
+        triangle_list = []
+        
+        for i in range(0, X - inc, inc):
+            for j in range(0, Y - inc, inc):
+                for k in range(0, Z - inc, inc):
+                    corners = [
+                        dataset[i, j, k], dataset[i + inc, j, k], dataset[i + inc, j + inc, k], dataset[i, j + inc, k],
+                        dataset[i, j, k + inc], dataset[i + inc, j, k + inc], dataset[i + inc, j + inc, k + inc], dataset[i, j + inc, k + inc]
+                    ]
+                    positions = [
+                        (i, j, k), (i + inc, j, k), (i + inc, j + inc, k), (i, j + inc, k),
+                        (i, j, k + inc), (i + inc, j, k + inc), (i + inc, j + inc, k + inc), (i, j + inc, k + inc)
+                    ]
+                    
+                    config = 0
+                    for idx, val in enumerate(corners):
+                        if val > iso_value:
+                            config |= (1 << idx)
+                    
+                    edge_indices = edge_table[config]
+                    if edge_indices == 0:
+                        continue
+                    
+                    tri_indices = triangle_table[config]
+                    for t in range(0, len(tri_indices), 3):
+                        if tri_indices[t] == -1:
+                            break
+                        e1, e2, e3 = tri_indices[t], tri_indices[t+1], tri_indices[t+2]
+                        p1 = interpolate_edge(corners, positions, e1, iso_value)
+                        p2 = interpolate_edge(corners, positions, e2, iso_value)
+                        p3 = interpolate_edge(corners, positions, e3, iso_value)
+                        triangle_list.append(Triangle(p1, p2, p3))
+        all_triangle_lists[iso_value] = triangle_list
+    return all_triangle_lists
+
+def interpolate_edge(corners, positions, edge_idx, iso_value):
+    edge_map = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7)
+    ]
+    c1_idx, c2_idx = edge_map[edge_idx]
+    v1, v2 = corners[c1_idx], corners[c2_idx]
+    p1, p2 = positions[c1_idx], positions[c2_idx]
+    denom = v2 - v1
+    t = 0.5 if denom == 0 else (iso_value - v1) / denom
+    return (p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1]), p1[2] + t * (p2[2] - p1[2]))
+```
+
+### [Generalized Marching Cubes](8320-generalized-marching-cubes.md)
+A method for extracting triangulated mesh surfaces from volumetric data containing multiple distinct materials, rather than a single scalar field [Generalized Marching Cubes](8320-generalized-marching-cubes.md). It sets itself apart from standard Marching Cubes by dynamically selecting isovales based on the specific materials adjacent to a voxel edge, enabling the generation of non-manifold meshes where multiple materials meet [Generalized Marching Cubes](8320-generalized-marching-cubes.md). Choose this when identifying boundaries between different material types in multi-material volumes. See [Generalized Marching Cubes](8320-generalized-marching-cubes.md).
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generalized_marching_cubes(volume, material_labels, isovalue_map):
+    vertices = []
+    faces = []
+    vert_offset = 0
+    nx, ny, nz = volume.shape
+    edges = [
+        (0, 1), (1, 3), (3, 2), (2, 0),
+        (4, 5), (5, 7), (7, 6), (6, 4),
+        (0, 4), (1, 5), (3, 7), (2, 6)
+    ]
+    for x in range(nx - 1):
+        for y in range(ny - 1):
+            for z in range(nz - 1):
+                corners = [
+                    (x, y, z), (x+1, y, z), (x, y+1, z), (x+1, y+1, z),
+                    (x, y, z+1), (x+1, y, z+1), (x, y+1, z+1), (x+1, y+1, z+1)
+                ]
+                mats = [material_labels[c] for c in corners]
+                vals = [volume[c] for c in corners]
+                edge_vertices = []
+                for e_idx, (i1, i2) in enumerate(edges):
+                    mat1, mat2 = mats[i1], mats[i2]
+                    val1, val2 = vals[i1], vals[i2]
+                    if mat1 != mat2:
+                        pair = tuple(sorted((mat1, mat2)))
+                        iso = isovalue_map.get(pair)
+                        if iso is None:
+                            iso = (val1 + val2) / 2.0
+                        denom = val2 - val1
+                        t = 0.5 if abs(denom) < 1e-12 else (iso - val1) / denom
+                        p1, p2 = corners[i1], corners[i2]
+                        v = ((1 - t) * p1[0] + t * p2[0], (1 - t) * p1[1] + t * p2[1], (1 - t) * p1[2] + t * p2[2])
+                        edge_vertices.append(vert_offset)
+                        vertices.append(v)
+                        vert_offset += 1
+                    else:
+                        edge_vertices.append(None)
+                # Sources do not provide the exact N-material triangle generation logic; 
+                # typically handled by pairwise extraction or dual contouring [G].
+                # For a complete implementation, a generalized lookup table or 
+                # pairwise manifold extraction would map edge_vertices to faces.
+                pass 
+    return vertices, faces
+```
+
+### [STEVE (Space-Time-Enclosing Volume Extraction)](10398-steve-space-time-enclosing-volume-extraction.md)
+A 4D protomesh-based iso-hypersurface construction algorithm that generates iso-hypersurfaces from 4D volumetric data by transforming boundary cube octants into tetrahedrons [STEVE (Space-Time-Enclosing Volume Extraction)](10398-steve-space-time-enclosing-volume-extraction.md). It sets itself apart from template-based methods by using a single 4D building block and propagating interior/exterior information to prevent topological ambiguities and accidental rifts in the final hypersurfaces [STEVE (Space-Time-Enclosing Volume Extraction)](10398-steve-space-time-enclosing-volume-extraction.md). Choose this for 4D volumetric data (e.g., time-series) where topological consistency across the fourth dimension is critical. See [STEVE (Space-Time-Enclosing Volume Extraction)](10398-steve-space-time-enclosing-volume-extraction.md).
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def steve_extract_4d_hypersurface(data, isovalue, resolution_mode):
+    # 1. Identify boundary cubes and initial octants
+    # [G] Implementation detail: Iterate over grid, check sign changes relative to isovalue.
+    boundary_octants = []
+    for i in range(data.shape[0]-1):
+        for j in range(data.shape[1]-1):
+            for k in range(data.shape[2]-1):
+                for l in range(data.shape[3]-1):
+                    if (data[i,j,k,l] - isovalue) * (data[i+1,j,k,l] - isovalue) < 0:
+                        boundary_octants.append((i,j,k,l))
+    
+    # 2. Initialize directed vector paths
+    # Storage requirement: 192 directed vector paths for 4D
+    # [G] Implementation detail: Define the 192 paths based on normalized normal vectors
+    paths = [None] * 192 
+    
+    # 3. Construct protomesh and transform to tetrahedrons
+    tetrahedrons = []
+    for octant in boundary_octants:
+        # [G] Implementation detail: Apply the single 4D building block transformation
+        tetra = transform_octant_to_tetrahedron(octant, paths, resolution_mode)
+        tetrahedrons.append(tetra)
+        
+    # 4. Handle weak connectivity (vertex/edge contact)
+    # [G] Implementation detail: Check for toxels connected only by vertex or edge.
+    tetrahedrons = resolve_weak_connectivity(tetrahedrons)
+    
+    # 5. Propagate interior/exterior information
+    # [G] Implementation detail: Assign orientation/normal direction to each tetrahedron
+    tetrahedrons = propagate_interior_exterior_info(tetrahedrons)
+    return tetrahedrons
+```
+
+### 4D Marching Cubes
+An extension of Marching Cubes into the fourth dimension. The look-up table, following the removal of symmetrical configurations, requires 222 separate configurations [S1, unofficial]. Ambiguous configurations are handled using a mathematical proof of correctness to verify that the generated topological structures are valid [S1, unofficial]. It is used to present volume data with a time dimension by selecting three-dimensional slices of the hyper-volume [S1, unofficial].
+
+## Background
+The concept of multi-isosurface extraction was developed to address the need for visualizing multiple thresholds from a single dataset, as described in early implementations using node-based linked lists for triangle storage [Multi-Isosurface Extraction](1162-multi-isosurface-extraction.md). Generalized contouring into higher dimensions was explored by Bhaniramka et al. [S1, unofficial]. At the time of their report, work on isosurfaces beyond the third dimension was limited [S1, unofficial]. They demonstrated that extending Marching Cubes to 4D required a look-up table with 222 configurations after symmetry removal and provided a mathematical proof for the validity of the topological structures in ambiguous cases [S1, unofficial]. An alternative approach to contour information, the "topological landscape," was proposed by Weber et al., using the contour tree to build a 3D terrain model to harness human understanding of terrain structure [S1, unofficial].
+
+## Sources
+[S1] Chapter Topological Visualisation Techniques for Volume Multifield Data, https://archive.org/details/oapen-20.500.12657-49310, fetched 2026-10-27 (unofficial)

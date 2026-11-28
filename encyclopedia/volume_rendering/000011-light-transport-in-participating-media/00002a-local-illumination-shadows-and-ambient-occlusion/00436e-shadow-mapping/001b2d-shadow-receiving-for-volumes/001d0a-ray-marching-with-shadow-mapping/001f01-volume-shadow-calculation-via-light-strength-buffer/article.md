@@ -1,0 +1,125 @@
+# Volume Shadow Calculation via Light Strength Buffer
+
+Also called: 2D Shadow Buffer for Volumetric Shadows, 3D Light Strength Buffer Shadow Casting, 3D Shadow Casting, Light Strength Buffer Method, Williams 1978 two-pass approach (3D variant)
+
+## Overview
+Volume Shadow Calculation via Light Strength Buffer is a shadow casting method that stores shadow information in a 3D light strength buffer instead of a 2D shadow depth buffer, allowing correct rendering of penumbras, semi-transparent object shadows, and self-shadows for volumetric objects [S2, S3, unofficial]. It differs from [Shadow Volume Rendering](1556-shadow-volume-rendering.md) by using continuous light strength values rather than binary depth comparisons, and from [Deep Shadow Maps](2166-deep-shadow-maps.md) by storing attenuation in a full 3D volume rather than a depth distribution [S2, S3, unofficial].
+
+## How it works
+**Inputs:**
+- Volumetric data (voxel grid with opacity and color properties) [S3, unofficial].
+- Polygonal geometry (optional, for hybrid scenes) [S3, unofficial].
+- Light source definitions (position, initial strength) [S3, unofficial].
+
+**Outputs:**
+- A 3D light strength buffer storing attenuation values [S3, unofficial].
+- Composite color and opacity volumes for final rendering [S3, unofficial].
+
+**Data Structures:**
+1. **Volumetric Data:** A 3D grid of voxels storing material properties (opacity $\alpha$, color $C$) [S3, unofficial].
+2. **3D Light Strength Buffer:** A 3D grid aligned with the volumetric data, storing a scalar fractional light strength $P$ at each location [S2, S3, unofficial].
+3. **Composite Color/Opacity Arrays:** 3D grids storing $c_t$ (total color) and $o_c$ (composite opacity) for each voxel [S3, unofficial].
+
+**Steps:**
+1. Shade and classify the volumetric data, shade and scan-convert polygons, and use volume matting operators to yield composite colors $C_i$ and opacity $O_c$ for each voxel for each light source $i$ [S3, unofficial].
+2. Cast parallel illumination rays from each light source into the data volume [S3, unofficial].
+3. For each ray, assume an initial light strength, draw samples at equally spaced positions, compute opacity at each location by tri-linearly interpolating from the nearest eight voxels, and attenuate the ray strength [S3, unofficial].
+4. Store the set of light strengths $P_{i,j}$ computed at each sample position along each ray in the 3D light strength buffer [S3, unofficial].
+5. Compute total color $c_t$ for each voxel as the weighted sum of light strengths mapped from voxel indices into the coordinate system of each light source $i$, tri-linearly interpolating from the nearest eight light strength values [S3, unofficial].
+6. Ray trace, resample, and composite the arrays of total color $c_t$ and composite opacity $o_c$ [S3, unofficial].
+
+**Formula:**
+$$ P_{i,j+k} = P_{i,j} \left(1 - \frac{k_{i,j}}{d^2}\right) $$
+where:
+- $P_{i,j}$ is the light strength approaching the sample [S3, unofficial].
+- $P_{i,j+k}$ is the light strength leaving the sample [S3, unofficial].
+- $k_{i,j}$ is a constant for linear approximation of square-law attenuation [S3, unofficial].
+- $d$ is the distance from the light source to the sample location [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_light_strength_buffer(volumetric_data, light_sources, grid_shape):
+    # Initialize 3D light strength buffer for each light source
+    buffers = {}
+    for light in light_sources:
+        buffers[light.id] = [[[0.0 for _ in range(grid_shape[2])] for _ in range(grid_shape[1])] for _ in range(grid_shape[0])]
+        # Standard parallel ray generation covering the grid from light.position
+        for ray in standard_parallel_ray_generator(light.position, grid_shape):
+            current_strength = light.initial_strength
+            for sample_pos in ray.sample_points:
+                # Standard tri-linear interpolation from nearest 8 voxels
+                opacity = standard_trilinear_interpolate(volumetric_data, sample_pos)
+                dx = sample_pos.x - light.position.x
+                dy = sample_pos.y - light.position.y
+                dz = sample_pos.z - light.position.z
+                d = (dx*dx + dy*dy + dz*dz) ** 0.5
+                k = 1.0
+                if d > 0:
+                    attenuation = 1.0 - (k / (d * d))
+                    current_strength *= max(0.0, attenuation)
+                # Standard world-to-grid coordinate mapping
+                idx = standard_world_to_grid_index(sample_pos, grid_shape)
+                buffers[light.id][idx] = current_strength
+    return buffers
+
+def compute_total_color(volumetric_data, buffers, light_sources, grid_shape):
+    total_color = [[[0.0 for _ in range(grid_shape[2])] for _ in range(grid_shape[1])] for _ in range(grid_shape[0])]
+    composite_opacity = [[[0.0 for _ in range(grid_shape[2])] for _ in range(grid_shape[1])] for _ in range(grid_shape[0])]
+    for x in range(grid_shape[0]):
+        for y in range(grid_shape[1]):
+            for z in range(grid_shape[2]):
+                voxel_pos = (x, y, z)
+                ct = 0.0
+                oc = 0.0
+                for light in light_sources:
+                    # Map voxel index into light source coordinate system
+                    # and tri-linearly interpolate light strength from buffer
+                    P = standard_trilinear_interpolate(buffers[light.id], voxel_pos)
+                    ct += P * volumetric_data.color(x, y, z)
+                    oc += volumetric_data.opacity(x, y, z)
+                total_color[x][y][z] = ct
+                composite_opacity[x][y][z] = oc
+    return total_color, composite_opacity
+
+def standard_parallel_ray_generator(light_position, grid_shape):
+    # Standard routine: generates rays covering the grid volume from light_position
+    # Each ray contains a list of sample_points spaced equally along the ray direction
+    pass # Standard ray generation routine
+
+def standard_trilinear_interpolate(volume, pos):
+    # Standard routine: weights the 8 nearest voxels by distance to compute interpolated value
+    pass # Standard interpolation routine
+
+def standard_world_to_grid_index(world_pos, grid_shape):
+    # Standard routine: scales world coordinates to integer grid indices
+    pass # Standard coordinate mapping routine
+```
+
+**Edge Cases and Pitfalls:**
+- **Self-Shadowing Aliasing:** Surfaces in volumetric data (thickness of several voxels) tend to partially shadow themselves [S3, unofficial]. Solution: Translate the 3-D light strength volume a few voxels away from the light source before computing $c_t$ [S3, unofficial]. This reduces accuracy within small objects but avoids distracting aliasing artifacts [S3, unofficial].
+
+## Subtopics
+
+### [Half-Angle Slicing for Incremental Lighting](3446-half-angle-slicing-for-incremental-lighting.md)
+Half-Angle Slicing for Incremental Lighting is a multipass technique that computes volumetric shadows by accumulating light attenuation in an off-screen pixel buffer, thereby avoiding the memory overhead and leakage artifacts associated with volumetric shadow maps. It differs from its parent method, [Volume Shadow Calculation via Light Strength Buffer](1914-volume-shadow-calculation-via-light-strength-buffer.md), by decoupling the light transport sampling from the data volume resolution and using a single 2D buffer instead of a 3D volume.
+
+### [Shadow Mapping for Volumes](11153-shadow-mapping-for-volumes.md)
+Shadow Mapping for Volumes adapts the standard image-based shadow mapping technique to participate in light transport within volumetric data. It solves the problem of determining whether a sample point along a view ray is occluded by the volume itself when viewed from a light source. Unlike methods that compute exact volumetric occlusion integrals, this approach provides a binary shadow decision based on depth comparisons, offering a performance trade-off where speed is prioritized over physically accurate attenuation.
+
+## Operating characteristics
+- **Memory Complexity:** High. The 3D light strength buffer requires memory proportional to the volume of the scene, which is significantly greater than 2D shadow depth buffers [S2, S3, unofficial].
+- **Time Complexity:** Proportional to the number of light sources and the number of samples per ray [S3, unofficial].
+- **Strengths:** Correctly renders penumbras, semi-transparent shadows, and self-shadows for volumetric objects [S2, S3, unofficial]. Avoids shadow aliasing problems associated with 2D shadow maps [S2, S3, unofficial]. Handles shadows cast by polygons on volumetric objects and vice versa [S2, S3, unofficial].
+- **Limitations:** High memory consumption [S2, S3, unofficial]. Reduced accuracy within small objects due to the self-shadowing mitigation technique (translating the buffer) [S3, unofficial].
+- **When to Use:** When physically accurate volumetric shadows, including penumbras and semi-transparency, are required and memory is not a constraint [S2, S3, unofficial].
+- **When Not to Use:** When memory is limited or real-time performance is critical and approximate binary shadows are acceptable [S2, S3, unofficial].
+
+## Background
+The method employs a two-pass approach originally by Williams (1978), but stores shadow information in a 3D light strength buffer instead of a 2D shadow depth buffer to handle mixtures of geometric and volumetric data [S2, S3, unofficial]. It addresses the difficulty that light intensity is attenuated as light traverses the volume, generating accurate shadows with low storage requirements relative to full volumetric integration [S1, unofficial]. The technique is cited in surveys of shadow casting algorithms [S3, unofficial].
+
+## Sources
+[S1] Advanced volume rendering on shadows, flows and high-dimensional rendering, http://rave.ohiolink.edu/etdc/view?acc_num=osu1143150322, fetched 2026-10-26 (unofficial)
+[S2] DTIC ADA208091: Interactive Visualization of 3D Medical Data, https://archive.org/details/DTIC_ADA208091, fetched 2026-10-26 (unofficial)
+[S3] DTIC ADA208085: Rendering Mixtures of Geometric and Volumetric Data, https://archive.org/details/DTIC_ADA208085, fetched 2026-10-26 (unofficial)

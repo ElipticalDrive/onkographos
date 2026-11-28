@@ -1,0 +1,111 @@
+--- v002.md
++++ v003.md
+@@ -4,50 +4,63 @@
+ 
+ ## Overview
+-Indirect Argument Preparation is a GPU compute shader that prepares indirect dispatch and draw arguments from the visible splat count [S1, unofficial]. It translates raw visibility data into the specific argument structures required by the graphics API for subsequent rendering and sorting kernels, differing from sibling methods by focusing on argument buffer population rather than data compaction or scheduling [S1, unofficial].
++Indirect Argument Preparation is a GPU compute shader that prepares indirect dispatch and draw arguments from the visible splat count [S1, unofficial]. It differs from sibling methods by focusing on argument buffer population rather than data compaction or scheduling [G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: `VisibleSplatCount` (`StructuredBuffer<uint>`) [S1, unofficial].
+-*   Output 1: `IndirectDispatchArgs` (`RWStructuredBuffer<uint>`, `uint3` storing `numGroupsX`, `numGroupsY`, `numGroupsZ`) [S1, unofficial].
+-*   Output 2: `IndirectDrawArgs` (`RWStructuredBuffer<uint>`, 5 `uint`s for `DrawIndexedIndirect`) [S1, unofficial].
+-*   Output 3: `SortIndirectArgs` (`RWStructuredBuffer<uint>`, `uint3` storing `NumTiles`, `1`, `1`) [S1, unofficial].
+-*   Output 4: `SortParamsBuffer` (`RWStructuredBuffer<uint>`, `uint2` storing `SortCount`, `NumTiles`) [S1, unofficial].
++* Input: `VisibleSplatCount` (`StructuredBuffer<uint>`) [S1, unofficial].
++* Output 1: `IndirectDispatchArgs` (`RWStructuredBuffer<uint>`, `uint3` storing `numGroupsX`, `numGroupsY`, `numGroupsZ`) [S1, unofficial].
++* Output 2: `IndirectDrawArgs` (`RWStructuredBuffer<uint>`, 5 `uint`s for `DrawIndexedIndirect`) [S1, unofficial].
++* Output 3: `SortIndirectArgs` (`RWStructuredBuffer<uint>`, `uint3` storing `NumTiles`, `1`, `1`) [S1, unofficial].
++* Output 4: `SortParamsBuffer` (`RWStructuredBuffer<uint>`, `uint2` storing `SortCount`, `NumTiles`) [S1, unofficial].
++
++**Data Structures:**
++All buffers use 32-bit unsigned integers (`uint`) with standard row-major memory layout [G]. `IndirectDispatchArgs` and `SortIndirectArgs` occupy 12 bytes each (3 × 4 bytes). `IndirectDrawArgs` occupies 20 bytes (5 × 4 bytes). `SortParamsBuffer` occupies 8 bytes (2 × 4 bytes) [G].
++
++**Numbered Steps:**
++1. Sum the `VisibleSplatCount` buffer to obtain the total visible splat count for the frame [G].
++2. Compute the number of work groups by dividing the total splat count by `ComputeThreadGroupSize`, rounding up to the nearest integer [G].
++3. Write the computed group counts into `IndirectDispatchArgs` as a `uint3` (`numGroupsX`, `numGroupsY`, `numGroupsZ`) [G].
++4. Write the total splat count and standard API defaults into `IndirectDrawArgs` (5 `uint`s for `DrawIndexedIndirect`) [G].
++5. Write `NumTiles` and fixed `1` values into `SortIndirectArgs` [G].
++6. Write `SortCount` and `NumTiles` into `SortParamsBuffer` [G].
++
++**Formulas:**
++* Total splats: $N = \sum_{i=0}^{M-1} \text{VisibleSplatCount}[i]$, where $M$ is the buffer length [G].
++* Work groups: $G = \lceil N / S \rceil = (N + S - 1) // S$, where $S$ is `ComputeThreadGroupSize` [G].
+ 
+ **Parameters:**
+-*   `ComputeThreadGroupSize` (`uint32`): Thread group size for compute shaders [S1, unofficial].
++* `ComputeThreadGroupSize` (`uint32`): Thread group size for compute shaders [S1, unofficial]. Typical values are powers of two (e.g., 64 or 128) [G].
+ 
+-**Steps:**
+-1.  Read the `VisibleSplatCount` buffer to determine the total number of visible splats for the current frame.
+-2.  Calculate the number of work groups required by dividing the total splat count by `ComputeThreadGroupSize`, rounding up to the nearest integer.
+-3.  Populate `IndirectDispatchArgs` with the calculated group counts for X, Y, and Z axes.
+-4.  Populate `IndirectDrawArgs` with the five `uint` parameters required by `DrawIndexedIndirect` (index count, start index location, start vertex location, start instance location, instance count).
+-5.  Populate `SortIndirectArgs` with `NumTiles` and fixed `1` values for Y and Z axes.
+-6.  Populate `SortParamsBuffer` with `SortCount` and `NumTiles`.
++**Edge Cases and Pitfalls:**
++* Zero splats: If $N = 0$, $G = 0$ and dispatches should be skipped to avoid invalid API calls [G].
++* Buffer alignment: Structured buffers require 4-byte alignment; all argument structures naturally satisfy this [G].
++* Derivation of `NumTiles` and `SortCount`: The sources do not specify how these values are computed; they are treated as precomputed inputs or derived from scene resolution [G].
+ 
+ **Pseudocode:**
+ ```python
+-def PrepareIndirectArgsCS(visible_splat_count: list[int], compute_thread_group_size: int) -> dict:
+-    # Input: visible_splat_count (StructuredBuffer<uint>)
+-    # Parameter: compute_thread_group_size (uint32)
++def PrepareIndirectArgs(visible_splat_counts: list[int], compute_thread_group_size: int, num_tiles: int, sort_count: int) -> dict:
++    # Inputs: visible_splat_counts (StructuredBuffer<uint>), compute_thread_group_size (uint32)
++    # Parameters: num_tiles (int), sort_count (int) [G: derivation not given in sources]
+     # Outputs: IndirectDispatchArgs, IndirectDrawArgs, SortIndirectArgs, SortParamsBuffer
+ 
+-    # Step 1: Compute total visible splats [G]
+-    total_splats = sum(visible_splat_count)
++    # Step 1: Compute total visible splats
++    total_splats = sum(visible_splat_counts)
+ 
+-    # Step 2: Calculate dispatch group counts [G]
++    # Step 2: Calculate dispatch group counts (ceiling division)
+     num_groups = (total_splats + compute_thread_group_size - 1) // compute_thread_group_size
+ 
+     # Step 3: IndirectDispatchArgs (uint3: numGroupsX, numGroupsY, numGroupsZ)
++    # Sources do not specify axis distribution; defaulting to 1D dispatch [G]
+     indirect_dispatch_args = [num_groups, 1, 1]
+ 
+-    # Step 4: IndirectDrawArgs (5 uints for DrawIndexedIndirect) [G]
+-    # Standard Direct3D/Vulkan layout: index_count, start_index_location, start_vertex_location, start_instance_location, instance_count
++    # Step 4: IndirectDrawArgs (5 uints for DrawIndexedIndirect)
++    # Standard layout: index_count, start_index_location, start_vertex_location, start_instance_location, instance_count [G]
+     indirect_draw_args = [total_splats, 0, 0, 0, 0]
+ 
+     # Step 5: SortIndirectArgs (uint3: NumTiles, 1, 1)
+-    sort_indirect_args = [1, 1, 1]
++    sort_indirect_args = [num_tiles, 1, 1]
+ 
+     # Step 6: SortParamsBuffer (uint2: SortCount, NumTiles)
+-    sort_params_buffer = [total_splats, 1]
++    sort_params_buffer = [sort_count, num_tiles]
+ 
+     return {
+@@ -62,5 +75,5 @@
+ 
+ ### [Indirect Dispatch Orchestration](15194-indirect-dispatch-orchestration.md)
+-A GPU compute shader that finalizes the parallel volume building process by synchronizing atomic counters and configuring indirect dispatch parameters for subsequent rendering passes. It acts as a single-thread compute shader that clamps counters to their allocated limits to prevent out-of-bounds execution, bridging the gap between parallel work generation and sequential GPU submission. It differs from Indirect Argument Preparation by focusing specifically on the data preparation and boundary clamping logic rather than the broader scheduling strategy. Choose this variant when precise counter synchronization and out-of-bounds protection are required before sequential GPU submission.
++A GPU compute shader that finalizes the parallel volume building process by synchronizing atomic counters and configuring indirect dispatch parameters for subsequent rendering passes. It acts as a single-thread compute shader that clamps counters to their allocated limits to prevent out-of-bounds execution, bridging the gap between parallel work generation and sequential GPU submission. It differs from Indirect Argument Preparation by focusing specifically on the data preparation and boundary clamping logic rather than the broader scheduling strategy. Choose this variant when precise counter synchronization and out-of-bounds protection are required before sequential GPU submission [G].
+ 
+ ## Operating characteristics
+@@ -69,5 +82,5 @@
+ 
+ **Measured Performance:**
+-Specific performance metrics for Indirect Argument Preparation alone are not provided in the sources. However, related performance data from the OpenSplat4D plugin indicates that optimizing the overall pipeline, including sorting intervals, can yield significant FPS gains (e.g., ~60% increase on an RTX 4090 for a 57-million-splat scene) [S1, unofficial].
++Specific performance metrics for Indirect Argument Preparation alone are not provided in the sources [S1, unofficial]. Related pipeline optimizations in the OpenSplat4D plugin, such as configuring sort intervals, yield significant FPS gains (e.g., ~60% increase on an RTX 4090 for a 57-million-splat scene) [S1, unofficial].
+ 
+ **Strengths and Limitations:**
+@@ -78,5 +91,5 @@
+ 
+ ## Background
+-Indirect Argument Preparation is part of the rendering pipeline for Gaussian Splatting, specifically within the OpenSplat4D plugin ecosystem [S1, unofficial]. The method is implemented as a compute shader (`FPrepareIndirectArgsCS`) and is used in conjunction with other compute kernels for map, vertex, triangle, and index generation. The broader context includes the use of Nanite-like precision settings and sort intervals to optimize performance in large-scale Gaussian Splatting scenes [S1, unofficial].
++Indirect Argument Preparation is part of the rendering pipeline for Gaussian Splatting, specifically within the OpenSplat4D plugin ecosystem [S1, unofficial]. It is implemented as a compute shader (`FPrepareIndirectArgsCS`) [S1, unofficial]. The broader pipeline context includes Nanite-like precision settings and sort intervals to optimize performance in large-scale Gaussian Splatting scenes [S1, unofficial].
+ 
+ ## Sources

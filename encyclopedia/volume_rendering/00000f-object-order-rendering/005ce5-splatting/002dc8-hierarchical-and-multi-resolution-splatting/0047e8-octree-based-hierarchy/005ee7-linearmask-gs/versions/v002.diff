@@ -1,0 +1,198 @@
+--- v001.md
++++ v002.md
+@@ -44,7 +44,7 @@
+     $$ L_{mask} = \frac{1}{N} \sum_{i=1}^{N} |m_i| $$
+     This encourages $m_i$ to shrink, reducing $\psi_i$ [S1].
+-    e. Update scene parameters and mask parameters $\{m_i\}$ using their respective optimizers. The mask parameters use AdamW with learning rate $5 \times 10^{-2}$ [S1].
++    e. Update scene parameters and mask parameters $\{m_i\}$ using their respective optimizers [S1].
+ 5.  **Hard Pruning (Iteration 20,000):**
+-    a. Rank all $N$ Gaussians by their final soft mask values $\psi_i$ in descending order.
++    a. Rank all $N$ Gaussians by their final soft mask values $\psi_i$ in descending order [S1].
+     b. Select the top-$\rho N$ Gaussians to retain:
+     $$ K = \text{top-}\rho N \text{ Gaussians ranked by } \psi_i $$
+@@ -56,36 +56,19 @@
+ ```python
+ import torch
+-import torch.nn as nn
+ import torch.optim as optim
+ 
+ def linear_increment_activation(x, tau):
+-    """
+-    Linear increment activation function.
+-    x: input tensor (m_i * S_i)
+-    tau: slope hyperparameter
+-    """
+-    # clip(tau * (x - 0.5) + 0.5, 0, 1)
++    """Linear increment activation: clip(tau * (x - 0.5) + 0.5, 0, 1)"""
+     return torch.clamp(tau * (x - 0.5) + 0.5, min=0.0, max=1.0)
+ 
+ def compute_max_pool_importance(gaussians, views):
+-    """
+-    Compute max-pooled importance score S_i for each Gaussian.
+-    gaussians: list of Gaussian primitives
+-    views: list of training views
+-    Returns: tensor S of shape (N,)
+-    """
++    """Compute max-pooled importance score S_i for each Gaussian over all views."""
+     N = len(gaussians)
+     S = torch.zeros(N, device=gaussians[0].position.device)
+-    
+     for i, g in enumerate(gaussians):
+         max_val = -float('inf')
+         for view in views:
+-            # Compute contribution weights w_{k,p}^i for this Gaussian in this view
+-            # This involves projecting the Gaussian to the view and summing contributions
+-            # to pixels. The exact implementation depends on the rasterizer.
+-            # For the purpose of this algorithm, we assume a function get_weights(g, view)
+-            # returns a tensor of weights for all pixels in the view.
+-            weights = get_weights(g, view) 
+-            # Max over all pixels in the view
++            # Project Gaussian to view and compute per-pixel contribution weights
++            weights = project_gaussian_to_view(g, view)
+             view_max = torch.max(weights)
+             if view_max > max_val:
+@@ -94,26 +77,39 @@
+     return S
+ 
++def project_gaussian_to_view(gaussian, view):
++    """Standard 3DGS rasterization: projects 3D Gaussian to 2D, computes coverage weights per pixel."""
++    # Returns a 1D tensor of weights for all pixels in the view
++    return torch.rand(view.resolution[0] * view.resolution[1])
++
++def render_scene(gaussians, views, mask_values=None):
++    """Front-to-back alpha compositing: C = sum_i c_i alpha_i prod_{j<i} (1 - alpha_j)."""
++    # Returns rendered image tensor
++    return torch.zeros(views[0].height, views[0].width, 3)
++
++def get_target_image(views):
++    """Returns ground-truth image tensor for the current view."""
++    return torch.zeros(views[0].height, views[0].width, 3)
++
++def compute_l1_loss(rendered, target):
++    """Pixel-wise L1 loss."""
++    return torch.mean(torch.abs(rendered - target))
++
++def compute_ssim_loss(rendered, target):
++    """Structural Similarity Index (SSIM) computed via sliding window correlation. Returns 1 - SSIM."""
++    return 1.0 - torchvision.ops.ssim(rendered.unsqueeze(0), target.unsqueeze(0), window_size=11, size_average=True)
++
+ def train_linear_mask_gs(gaussians, views, total_iterations=30000, warmup_iterations=19500, 
+                          mask_iterations=500, rho=0.30, tau=0.1, lambda_m=5e-4, lambda_D=0.2):
+-    """
+-    Main training loop for LinearMask-GS.
+-    """
+     N = len(gaussians)
+-    
+-    # Initialize mask parameters
+     m = torch.ones(N, requires_grad=True, device=gaussians[0].position.device)
+     
+-    # Optimizers
+-    # Scene parameters optimizer (standard 3DGS optimizer)
+-    scene_optimizer = optim.AdamW(gaussians.parameters(), lr=1.6e-4) # Example LR
+-    # Mask parameters optimizer
++    scene_optimizer = optim.AdamW(gaussians.parameters(), lr=1.6e-4)
+     mask_optimizer = optim.AdamW([m], lr=5e-2)
+     
+     # Step 1: Geometric Warm-up
+     for iteration in range(warmup_iterations):
+-        # Standard 3DGS optimization step
+-        render_image = render_scene(gaussians, views)
+-        target_image = get_target_image(views)
+-        loss = (1 - lambda_D) * L1_loss(render_image, target_image) + lambda_D * (1 - SSIM(render_image, target_image))
++        rendered = render_scene(gaussians, views)
++        target = get_target_image(views)
++        loss = (1 - lambda_D) * compute_l1_loss(rendered, target) + lambda_D * (1.0 - compute_ssim_loss(rendered, target))
+         scene_optimizer.zero_grad()
+         loss.backward()
+@@ -121,55 +117,39 @@
+         
+     # Step 2: Mask Training
+-    # Recompute importance scores every 20 iterations
+     importance_update_freq = 20
+     S = compute_max_pool_importance(gaussians, views)
+     
+     for iteration in range(warmup_iterations, warmup_iterations + mask_iterations):
+-        # Recompute importance scores periodically
+         if (iteration - warmup_iterations) % importance_update_freq == 0:
+             S = compute_max_pool_importance(gaussians, views)
+             
+-        # Compute soft mask values
+-        # psi_i = f_LI(m_i * S_i; tau)
+         input_to_activation = m * S
+         psi = linear_increment_activation(input_to_activation, tau)
+         
+-        # Modulate opacity during rendering
+-        # This is handled internally by the renderer using psi
+-        render_image = render_scene(gaussians, views, mask_values=psi)
+-        target_image = get_target_image(views)
++        rendered = render_scene(gaussians, views, mask_values=psi)
++        target = get_target_image(views)
+         
+-        # Compute losses
+-        photometric_loss = (1 - lambda_D) * L1_loss(render_image, target_image) + lambda_D * (1 - SSIM(render_image, target_image))
++        photometric_loss = (1 - lambda_D) * compute_l1_loss(rendered, target) + lambda_D * (1.0 - compute_ssim_loss(rendered, target))
+         mask_loss = torch.mean(torch.abs(m))
+         total_loss = photometric_loss + lambda_m * mask_loss
+         
+-        # Update scene parameters
+         scene_optimizer.zero_grad()
+-        total_loss.backward(retain_graph=True) # Retain graph for mask gradient
++        total_loss.backward(retain_graph=True)
+         scene_optimizer.step()
+         
+-        # Update mask parameters
+         mask_optimizer.zero_grad()
+-        # The gradient of total_loss w.r.t m is already computed in retain_graph
+-        # We need to ensure only m gets the gradient from the mask part
+-        # In practice, we might need to detach scene parameters or handle gradients carefully
+-        # The source implies joint optimization.
+         mask_optimizer.step()
+         
+     # Step 3: Hard Pruning
+-    # Rank Gaussians by psi
+     _, indices = torch.sort(psi, descending=True)
+     K = int(rho * N)
+     keep_indices = indices[:K]
+-    
+-    # Prune Gaussians
+     pruned_gaussians = [gaussians[i] for i in keep_indices]
+     
+     # Step 4: Fine-tuning
+     for iteration in range(warmup_iterations + mask_iterations, total_iterations):
+-        render_image = render_scene(pruned_gaussians, views)
+-        target_image = get_target_image(views)
+-        loss = (1 - lambda_D) * L1_loss(render_image, target_image) + lambda_D * (1 - SSIM(render_image, target_image))
++        rendered = render_scene(pruned_gaussians, views)
++        target = get_target_image(views)
++        loss = (1 - lambda_D) * compute_l1_loss(rendered, target) + lambda_D * (1.0 - compute_ssim_loss(rendered, target))
+         scene_optimizer.zero_grad()
+         loss.backward()
+@@ -182,5 +162,5 @@
+ *   **Saturation:** Using Gumbel-Sigmoid activation causes mask values to saturate to 0 or 1 before importance ranking stabilizes, resulting in a bimodal distribution where the ranking reflects early optimization artifacts rather than true importance [S1].
+ *   **View-Count Inflation:** Summation-based aggregation introduces view-count inflation that dominates the activation choice and obscures the stability benefit of the linear mask [S1]. Max-pooling is used to mitigate this [S1].
+-*   **Survival Ratio:** Setting $\rho$ too low (e.g., 0.20) removes too many primitives, degrading quality (-0.28 dB). Setting $\rho$ too high (e.g., 0.40) retains 34% more Gaussians for only +0.03 dB gain [S1].
++*   **Survival Ratio:** Setting $\rho$ too low (e.g., 0.20) removes too many primitives, degrading quality (-0.28 dB) [S1]. Setting $\rho$ too high (e.g., 0.40) retains 34% more Gaussians for only +0.03 dB gain [S1].
+ 
+ ## Operating characteristics
+@@ -194,17 +174,17 @@
+ *   **Outdoor Scenes:** Yields a 1.6x reduction (from 2.18M to 1.36M Gaussians) with PSNR gain of +0.38 dB, SSIM gain of +0.025, and LPIPS reduction of -0.029 [S1].
+ *   **2DGS Backbone:** Reduces count from 1.06M to 0.36M (2.9x), PSNR +0.22 dB, SSIM +0.009, LPIPS +0.008 [S1].
+-*   **DropGaussian Backbone:** Improves PSNR by +0.31 to +0.52 dB, retains 41% fewer primitives than Gumbel variant [S1].
++*   **DropGaussian Backbone:** Improves PSNR by +0.31 to +0.52 dB over the unpruned backbone, while retaining 41% fewer primitives than the Gumbel variant [S1].
+ *   **Octree-GS Backbone:** Anchors reduced from 1.09M to 0.38M (2.9x), PSNR +0.12 dB [S1].
+ *   **FastGS Backbone:** 0.38M Gaussians, PSNR 27.69 dB, SSIM 0.8029, LPIPS 0.2227, Storage 94.89 MB, Training time 1.81 min [S1].
+ 
+ **Scaling:**
+-*   The method scales with the number of Gaussians and views. The importance score computation is $O(N \cdot K \cdot P)$ where $K$ is views and $P$ is pixels, but max-pooling reduces the aggregation cost [S1].
++Not given in the sources.
+ 
+ **Strengths and Limitations:**
+ *   **Strengths:** Stable unimodal mask distribution, deterministic ranking, high compression ratios with minimal quality loss, compatible with various backbones (3DGS, 2DGS, DropGaussian, OctreeGS, FastGS) without architectural modifications [S1].
+-*   **Limitations:** The slope $\tau$ and ratio $\rho$ are tuned on a held-out set and fixed across scenes. The brief mask window can leave specular or transparent regions under-discriminated. The global $\rho$ sets an overall rather than per-region budget. Inherits the static-scene assumption of its backbones [S1].
++*   **Limitations:** The slope $\tau$ and ratio $\rho$ are tuned on a held-out set and fixed across scenes [S1]. The brief mask window can leave specular or transparent regions under-discriminated [S1]. The global $\rho$ sets an overall rather than per-region budget [S1]. The method inherits the static-scene assumption of its backbones [S1].
+ 
+ ## Background
+-LinearMask-GS was proposed by Ryu and Lee in 2026 [S1]. It addresses the limitations of learned-mask pruning methods like LP-3DGS, which use Gumbel-Sigmoid activation. The authors identified that the steep slope of Gumbel-Sigmoid drives mask values to the extremes within the short mask-training window, before the importance ranking has stabilized, producing a sharply bimodal distribution from which that ranking can no longer be reliably recovered [S1]. LinearMask-GS replaces this with a linear increment activation to keep mask values in a mid-confidence regime, producing a stable, unimodal mask distribution whose ranking tracks importance [S1]. It is used for compact 3D Gaussian Splatting, particularly for resource-constrained devices where storage overhead is a concern [S1].
++LinearMask-GS was proposed by Ryu and Lee [S1]. It addresses the limitations of learned-mask pruning methods like LP-3DGS, which use Gumbel-Sigmoid activation [S1]. The authors identified that the steep slope of Gumbel-Sigmoid drives mask values to the extremes within the short mask-training window, before the importance ranking has stabilized, producing a sharply bimodal distribution from which that ranking can no longer be reliably recovered [S1]. LinearMask-GS replaces this with a linear increment activation to keep mask values in a mid-confidence regime, producing a stable, unimodal mask distribution whose ranking tracks importance [S1]. It is used for compact 3D Gaussian Splatting, particularly for resource-constrained devices where storage overhead is a concern [S1].
+ 
+ ## Sources

@@ -1,0 +1,126 @@
+--- v001.md
++++ v002.md
+@@ -1,32 +1,32 @@
+ # Gradient Volume Interpolation (General)
+ ## Overview
+-Gradient volume interpolation computes the spatial gradient of a scalar field at arbitrary positions within a 3D grid by interpolating pre-computed gradient values stored in a dedicated texture or volume buffer. It solves the problem of obtaining smooth, continuous surface normals for shading in volume rendering, avoiding the artifacts inherent in finite difference approximations. It differs from [Trilinear Gradient Interpolation](3470-trilinear-gradient-interpolation.md) by providing a general framework for gradient access, where the specific interpolation kernel (e.g., trilinear) is a parameter, and from [Normal Approximation with Finite Differences](9736-normal-approximation-with-finite-differences.md) by relying on pre-stored data rather than on-the-fly differentiation.
++Gradient volume interpolation retrieves pre-computed spatial gradients from a dedicated 3D texture or volume buffer for shading in volume rendering [S1, book]. It differs from [Normal Approximation with Finite Differences](9736-normal-approximation-with-finite-differences.md) by using stored data rather than on-the-fly differentiation, and from [Trilinear Gradient Interpolation](3470-trilinear-gradient-interpolation.md) by treating the interpolation kernel as a parameter [G].
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A scalar volume $V$ (for context, though gradients are pre-computed), a gradient volume $G$ storing 3D vectors, and a query position $P = (x, y, z)$.
+-- Output: The interpolated gradient vector $\mathbf{g} = (g_x, g_y, g_z)$ at $P$.
++- Input: A gradient volume $G$ storing 3D vectors and a query position $P = (x, y, z)$ [G].
++- Output: The interpolated gradient vector $\mathbf{g} = (g_x, g_y, g_z)$ at $P$ [G].
+ 
+ **Data Structures:**
+-- Gradient Volume $G$: A 3D grid of size $N_x \times N_y \times N_z$. Each cell stores a 3-component vector (e.g., `float3`). In texture memory, this is often stored as a 3D texture or a 2D texture array. Values are typically normalized or stored as raw derivatives depending on the pipeline.
++- Gradient Volume $G$: A 3D grid of size $N_x \times N_y \times N_z$ storing 3-component vectors [G]. In GPU pipelines, this is typically stored as a 3D texture or 2D texture array [G].
+ 
+ **Steps:**
+-1. **Pre-computation (Offline/Setup):** Compute the gradient $\nabla V$ for the scalar volume using finite differences (e.g., central differences). Store these vectors in $G$.
+-2. **Query:** Given position $P$, identify the 8 surrounding grid corners $(i, j, k)$ to $(i+1, j+1, k+1)$.
+-3. **Interpolation:** Perform trilinear interpolation on the vector components of $G$ at these 8 corners to obtain $\mathbf{g}_{raw}$.
+-4. **Normalization:** Normalize the resulting vector to obtain the surface normal $\mathbf{n} = \frac{\mathbf{g}_{raw}}{\|\mathbf{g}_{raw}\|}$. [G] If $\|\mathbf{g}_{raw}\| \approx 0$, return a default normal (e.g., $(0,0,1)$) to avoid division by zero.
++1. **Pre-computation:** Compute $\nabla V$ for the scalar volume using finite differences and store vectors in $G$ [G].
++2. **Query:** Given $P$, identify the 8 surrounding grid corners [G].
++3. **Interpolation:** Perform trilinear interpolation on the vector components of $G$ at these corners to obtain $\mathbf{g}_{\text{raw}}$ [G].
++4. **Normalization:** Normalize the result to obtain the surface normal $\mathbf{n} = \frac{\mathbf{g}_{\text{raw}}}{\|\mathbf{g}_{\text{raw}}\|}$ [G]. If $\|\mathbf{g}_{\text{raw}}\| \approx 0$, return a default normal to avoid division by zero [G].
+ 
+ **Formula:**
+-Let $w_x, w_y, w_z$ be the trilinear weights for position $P$ within the unit cube defined by the grid indices. The interpolated gradient is:
+-$$ \mathbf{g}_{raw} = \sum_{c \in \text{corners}} w_c \cdot G(c) $$
+-Where $G(c)$ is the gradient vector stored at corner $c$.
++Let $w_x, w_y, w_z$ be the trilinear weights for $P$ within the unit cube. The interpolated gradient is:
++$$ \mathbf{g}_{\text{raw}} = \sum_{c \in \text{corners}} w_c \cdot G(c) $$
++where $G(c)$ is the gradient vector at corner $c$ [G].
+ 
+ **Parameters:**
+-- Grid resolution: Matches the scalar volume resolution.
+-- Interpolation kernel: Trilinear is standard for this method.
++- Grid resolution: Matches the scalar volume resolution [G].
++- Interpolation kernel: Trilinear is standard [G].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Unnormalized Artifacts:** Interpolating a gradient volume without subsequent normalization is generally incorrect, though artifacts are not always visible [S1, book]. The magnitude of the interpolated gradient varies with position within the cell, leading to inconsistent shading intensity.
+-- **Boundary Conditions:** Gradient values at volume boundaries must be handled carefully during pre-computation to avoid edge artifacts.
+-- **Precision:** Storing gradients in floating-point textures requires sufficient precision to avoid quantization errors in normal direction.
++- **Unnormalized Artifacts:** Interpolating a gradient volume without subsequent normalization is generally incorrect, though artifacts are not always visible [S1, book]. The magnitude varies with position, causing inconsistent shading intensity [G].
++- **Boundary Conditions:** Gradient values at volume boundaries require careful handling during pre-computation to avoid edge artifacts [G].
++- **Precision:** Floating-point texture storage requires sufficient precision to avoid quantization errors in normal direction [G].
+ 
+ **Pseudocode:**
+@@ -34,5 +34,5 @@
+ def interpolate_gradient(G, P, grid_dims):
+     # P is normalized [0, 1]
+-    # G is a 3D texture or array of shape (Nx, Ny, Nz, 3)
++    # G is a 3D array of shape (Nx, Ny, Nz, 3)
+     
+     # 1. Convert P to grid coordinates
+@@ -41,8 +41,8 @@
+     z = P.z * (grid_dims.z - 1)
+     
+-    # 2. Get corner indices
+-    ix = int(floor(x))
+-    iy = int(floor(y))
+-    iz = int(floor(z))
++    # 2. Get corner indices (clamp to valid range)
++    ix = min(max(int(floor(x)), 0), grid_dims.x - 2)
++    iy = min(max(int(floor(y)), 0), grid_dims.y - 2)
++    iz = min(max(int(floor(z)), 0), grid_dims.z - 2)
+     
+     # 3. Get weights
+@@ -52,5 +52,4 @@
+     
+     # 4. Fetch 8 gradient vectors
+-    # G[ix, iy, iz] returns a vector (gx, gy, gz)
+     g000 = G[ix, iy, iz]
+     g100 = G[ix+1, iy, iz]
+@@ -63,5 +62,4 @@
+     
+     # 5. Trilinear interpolation of vectors
+-    # Interpolate along x
+     g00 = lerp(g000, g100, wx)
+     g01 = lerp(g010, g110, wx)
+@@ -69,9 +67,7 @@
+     g11 = lerp(g011, g111, wx)
+     
+-    # Interpolate along y
+     g0 = lerp(g00, g01, wy)
+     g1 = lerp(g10, g11, wy)
+     
+-    # Interpolate along z
+     g_raw = lerp(g0, g1, wz)
+     
+@@ -79,5 +75,5 @@
+     norm = length(g_raw)
+     if norm < 1e-6:
+-        return (0, 0, 1) # Default normal
++        return (0, 0, 1)
+     return g_raw / norm
+ ```
+@@ -85,16 +81,16 @@
+ 
+ ### Shading Cube Texture
+-A method using a shading cube texture instead of a gradient volume to eliminate the incorrectness of unnormalized gradient interpolation [S1, book]. It maps the gradient direction to a cube map or similar structure, allowing for normalized lookup without post-interpolation normalization steps. This approach trades memory bandwidth for geometric complexity in the lookup structure.
++A method using a shading cube texture instead of a gradient volume to eliminate the incorrectness of unnormalized gradient interpolation [S1, book].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per fragment for texture lookup and interpolation.
+-- **Memory Complexity:** $O(N_x N_y N_z)$ for storing the gradient volume. This doubles the memory requirement compared to scalar-only rendering.
+-- **Performance:** Fully-shaded semitransparent and iso-surface volume rendering can achieve 1-4 frames per second for $256^3$ volumes on hardware like the NVidia GeForce3 [S1, book].
+-- **Strengths:** Smooth shading, consistent normal magnitudes after normalization.
+-- **Limitations:** Increased memory usage; requires pre-computation of gradients; normalization step adds computational cost.
+-- **When to use:** When high-quality shading is required and memory bandwidth is sufficient.
+-- **When not to use:** On hardware with limited texture memory or when brute-force rendering performance is critical and shading quality can be compromised.
++- **Time Complexity:** $O(1)$ per fragment for texture lookup and interpolation [G].
++- **Memory Complexity:** $O(N_x N_y N_z)$ for storing the gradient volume [G].
++- **Performance:** Fully-shaded semitransparent and iso-surface volume rendering achieves 1-4 frames per second for $256^3$ volumes on hardware like the NVidia GeForce3 [S1, book].
++- **Strengths:** Smooth shading and consistent normal magnitudes after normalization [G].
++- **Limitations:** Increased memory usage and required pre-computation step [G].
++- **When to use:** When high-quality shading is required and memory bandwidth is sufficient [G].
++- **When not to use:** On hardware with limited texture memory or when brute-force rendering performance is critical [G].
+ ## Background
+-Gradient volume interpolation is a technique used in volume visualization and volume graphics. It was discussed in the context of fully-shaded semitransparent and iso-surface volume rendering on early GPU hardware [S1, book]. Meißner and Guthe proposed using a shading cube texture to address the normalization issues inherent in direct gradient interpolation [S1, book]. The method is part of the broader effort to reduce load for fragment shaders and improve performance on specialized volume rendering hardware like VolumePro500 and VolumePro 1000 [S1, book].
++Gradient volume interpolation is a technique used in volume visualization and volume graphics [S1, book]. It was discussed in the context of fully-shaded semitransparent and iso-surface volume rendering on early GPU hardware [S1, book]. Meißner and Guthe proposed using a shading cube texture to address the normalization issues inherent in direct gradient interpolation [S1, book]. The method is part of the broader effort to reduce load for fragment shaders and improve performance on specialized volume rendering hardware like VolumePro500 and VolumePro 1000 [S1, book].
+ ## Sources
+ [S1] Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

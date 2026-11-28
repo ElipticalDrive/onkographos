@@ -1,0 +1,364 @@
+This article will describe the rendering of the sky and atmosphere, covering theory and implementation based on physics.
+
+Sky and Atmosphere rendering: A physical approach - CPP Rendering - Antoine MORRIER
+Skip to content
+Sky and Atmosphere rendering: A physical approach
+May 10, 2025
+OpenGL, Rendering, Volume Rendering, Vulkan
+Sky colors have fascinated people for years. I propose a physically based sky and atmosphere rendering method. We will dive into the physics of the sky and go to the implementation. At the end of this article, you should be able to:
+Understand maths and physics about volume rendering
+Render a physical atmosphere, knowing your planet’s absorption and scattering coefficients.
+Here are the expected result(the sun has been enlarged purposefully):
+Basics of rendering
+First, here are some basic notations:
+$x$ is the position
+$\omega$ is the direction
+$L(x, \omega)$ is the luminance arriving in $x$ from the $\omega$ direction in $cd\cdot m^{-2}$. It is the quantity of light traveling from $x$ to the camera (or in a given direction).
+$E(x)$ is the illuminance received by a surface at $x$ in $lux$. It is the quantity of light arriving to $x$.
+When light travels through a participating medium, different events can happen. Basically, a medium is filled with particles with which the light can interact.
+No Event
+In this case, no event occurs. It means that the luminance (or radiance) is not affected.
+$$\frac{dL(x, \omega)}{dx} = 0$$
+Absorption
+In this case, the medium absorbs the beam of light, leading to a reduction in luminance. The probability of such an event is $\sigma_a(x)$. $\sigma_a(x)$ is called the absorption coefficient. We then have:
+$$\frac{dL(x, \omega)}{dx} = -\sigma_a(x)\cdot L(x, \omega)$$
+Out-scattering
+In this case, when the light meets the particle, it is not absorbed but deviated. Thus, from the output perspective, the luminance is reduced as well. The probability of such an event is $\sigma_s(x)$. $\sigma_s(x)$ is called the scattering coefficient. As for the absorption, the differential equation is:
+$$\frac{dL(x, \omega)}{dx} = -\sigma_s(x)\cdot L(x, \omega)$$
+Emission
+In this case, the participating medium is a light source (like a fire). It will increase the luminance from the output perspective. The amount of emitted light is proportional to the absorbance coefficient of the participating medium.
+$$\frac{dL(x, \omega)}{dx} = \sigma_a(x)\cdot Le(x, \omega)$$
+In-scattering
+This is one of the most interesting events possible. A beam of light comes through the medium, meets a particle, and miraculously gets scattered into the output direction. The probability of a beam of light being redirected into a given direction is called the phase function. The phase function integrates to one on a full sphere.
+$$\int_{4\pi} P(\omega, \omega’) d\omega’ = 1$$
+Since light can come from each direction, we must use an integral to determine its impact on the luminance.
+$$\frac{dL(x, \omega)}{dx} = \sigma_s(x)\int_{4\pi}P(\omega, \omega’)Li(x, \omega’)d\omega’$$
+The Radiative Transfer Equation
+If we gather all of the information we had before, we can lay out the full Radiative Transfer Equation (RTE). This equation shows the change of luminance along a path.
+$$\frac{dL(x, \omega)}{dx} = -(\underbrace{\sigma_s(x) + \sigma_a(x)}_{\sigma_t(x)})L(x, \omega) + \sigma_a(x)\cdot Le(x, \omega) + \sigma_s(x)\int_{4\pi}P(\omega, \omega’)Li(x, \omega’)d\omega’$$
+$\sigma_t(x)$ is called the extinction coefficient and is the summation of absorption and in-scattering. It is worth noting that $\sigma$ coefficients are expressed in units of $m^{-1}$.
+Simplify the equation in the case of the sky and atmosphere rendering
+Here are the hypotheses we will use to simplify the RTE.
+Atmosphere does not emit any light. It just scatters the sunlight into the camera.
+The sun is very far (rays are parrallels) and is the only light source to participate. It is visible as a little disk in the sky. We will not consider the ground’s reflectance into the atmosphere, even if an ultra-realistic sky should do it.
+The 1) leads us to: $Le(x, \omega) = 0$.
+The 2) leads us to simplify the integral expression into:
+$$\sigma_s(x)\int_{4\pi}P(\omega, \omega’)Li(x, \omega’)d\omega’ \approx \underbrace{\sigma_s(x)\cdot P(\omega, \omega_{sun}) L_{sun}(x)\underbrace{\int_{SolarDisk}d\omega}_{\Omega_{Sun}}}_{j(x)}$$
+Thus, the RTE simplified is:
+$$\frac{dL(x, \omega)}{dx} = -\sigma_t(x)\cdot L(x, \omega) + j(x)$$
+Computing the different members of our simplified RTE
+Computing $\Omega_{sun}$
+$\Omega_{sun}$ is the solid angle of the sun in the Earth’s sky, basically the sun’s surface projected into the Earth’s sky (to be more accurate it is on unit sphere).
+First, we need to compute the angular radius of the sun in the sky:
+Basic trigonometry tells us:
+$$tan(\theta_{sun}) = \frac{Radius_{sun}}{Distance_{EarthSun}}\approx \frac{700 \cdot 10^6m}{150\cdot 10^9m}\approx 0.0046$$
+$$\Rightarrow \theta_{sun} = atan(0.0046) \approx 0.0046 rad \approx 0.265 deg$$
+We know that the angular diameter is around 0.53 degrees in the sky.
+Thus we can compute the solid angle. Instead of applying the integral over all the sphere, we just compute it over the solar disk. Hence:
+$$\int_{SolarDisk}d\omega = \int_{0}^{2\pi}\int_{0}^{\theta_{sun}}\sin(\theta)d\theta d\phi = -2\pi \cos(\theta)\Big|_0^{\theta_{sun}}=2\pi (1 – \cos(\theta_{sun})) \approx 0.0000664 sr$$
+$$\Rightarrow \Omega_{sun}\approx 0.0000664 sr$$
+Computing $L_{sun}(x)$
+As you can see in the above image, $L_{sun}(x)$ is the luminance at $x$ given by the sun after traversing all the atmosphere from the top of the atmosphere to $x$. $L_{outerspace}$ is the luminance at the top of the atmosphere. Absorption and out-scattering have an effect on the luminance at x. In-scattering does not kick in because we are already looking at the sun directly. Taking the equation we saw earlier, we can compute $L_{sun}(x)$
+$$\begin{align*}
+\frac{dL(x, \omega)}{dx} &= -\sigma_t(x)\cdot L(x)\\
+\Rightarrow \frac{dL(x, \omega)}{L(x)} &= -\sigma_t(x)dx\\
+\Rightarrow \ln(L(x, \omega)) – \ln(L_{outerspace}) &= -\int_{outerspace}^{x}\sigma_t(t)dt\\
+\Rightarrow \ln(\frac{L(x, \omega)}{L_{outerspace}}) &= -\int_{outerspace}^{x}\sigma_t(t)dt\\
+\Rightarrow L(x, \omega) &= L_{outerspace}\cdot \underbrace{e^{-\int_{outerspace}^{x}\sigma_t(t)dt}}_{Tr(outerspace \rightarrow x)}\\
+\Rightarrow L(x, \omega) &= L_{outerspace}\cdot Tr(outerspace \rightarrow x)
+\end{align*}$$
+The $Tr$ function is the transmittance function. If the extinction coefficient is constant, you will notice it is the equivalent to the Beer-Lambert law: $Tr(a \rightarrow b) = e^{-\sigma_t \cdot distance(a, b)}$.
+Let’s compute $L_{outerspace}$. We know that the illuminance at ground from the sun at zenith is around 120000 $lux$. We know the value of $\Omega_{sun}$, so:
+$$\begin{align*}
+E_{ground}&=L_{ground}\cdot \Omega_{sun}\\
+\Rightarrow L_{ground}&=\frac{E_{ground}}{\Omega_{sun}}=\frac{120000}{0.0000664}\approx 1.8\cdot 10^9
+\end{align*}$$
+Nevertheless, we don’t want $L_{ground}$ but $L_{outerspace}$. However, it is easy to compute it.
+$$\begin{align*}
+L_{ground}&=L_{outerspace}\cdot Tr(outerspace \rightarrow ground)\\
+\Rightarrow L_{outerspace}&=\frac{L_{ground}}{Tr(outerspace \rightarrow ground)}
+\end{align*}$$
+Solve the RTE
+Now that we have almost every term, except for the phase function, absorption, and scattering coefficients, we can begin to solve the Radiative Transfer Equation (RTE).
+Let’s introduce the function M respecting the following property:
+$$\frac{dM(x)}{dx} = M(x)\sigma_t(x)$$
+Solving the RTE is integrating it from the atmosphere to the camera, with $L_{atmosphere}=0$ since the main contribution is from the sun.
+$$\begin{align*}
+\frac{dL(x, \omega)}{dx} &= -\sigma_t(x)\cdot L(x, \omega) + j(x)\\
+\Rightarrow \frac{dL(x, \omega)}{dx} + \sigma_t(x)\cdot L(x, \omega) &= j(x)\\
+\Rightarrow M(x)\frac{dL(x, \omega)}{dx} + M(x)\sigma_t(x)\cdot L(x, \omega) &= M(x)\cdot j(x)\\
+\Rightarrow M(x)\frac{dL(x, \omega)}{dx} + \frac{dM(x)}{dx}L(x, \omega)&= M(x)\cdot j(x)\\
+\Rightarrow \frac{d(M(x)L(x, \omega))}{dx} &= M(x)\cdot j(x)\\
+\Rightarrow M(camera)L(camera, \omega) – \underbrace{L_{atmosphere}}_{0}M(atmosphere) &= \int_{atmosphere}^{camera}M(x)j(x)dx\\
+\Rightarrow L(camera, \omega) &= \frac{\int_{atmosphere}^{camera}M(x)j(x)dx}{M(camera)}\\
+\end{align*}$$
+We now need to solve the differential equation of M, and we lay $M(atmosphere) = 1$:
+$$\begin{align*}
+\frac{dM(x)}{dx} &= M(x)\sigma_t(x)\\
+\ln(M(camera)) – \ln(M(atmosphere)) &= \int_{atmosphere}^{camera}\sigma_t(t)dt \\
+M(camera) &= e^{\int_{atmosphere}^{camera}\sigma_t(t)dt}
+\end{align*}$$
+Reinjecting it into the earlier equation gives:
+$$\begin{align*}
+\Rightarrow L(camera, \omega) &= \frac{\int_{atmosphere}^{camera}M(x)j(x)dx}{M(camera)}\\
+\Rightarrow L(camera, \omega) &= e^{-\int_{atmosphere}^{camera}\sigma_t(t)dt}\int_{atmosphere}^{camera}e^{\int_{atmosphere}^{x}\sigma_t(t)dt}j(x)dx\\
+\Rightarrow L(camera, \omega) &=\int_{atmosphere}^{camera}e^{-\int_{x}^{camera}\sigma_t(t)dt}j(x)dx\\
+\Rightarrow L(camera, \omega) &=\int_{atmosphere}^{camera}Tr(x \rightarrow camera)j(x)dx\\
+\end{align*}$$
+This equation is beautiful because it reads naturally. Indeed, the camera captures the luminance as the sum of all light sources (represented by j) scattered along its path, while the medium attenuates that light.
+Absorption, Scattering and phase functions of the atmosphere
+I’ll be quick on this part since the literature already provides full explanations of these phenomena, especially of Mie and Rayleigh scattering.
+Rayleigh
+Rayleigh scattering theory explains why the sky is blue at zenith, and red at sunset and sunrise. It tries to describe how light interacts with particles of the same size as the light’s wavelength(between 320 $nm$ and 720 $nm$). At sea level, these coefficients are, for red, green, and blue wavelengths: $\sigma_s(sea) = (5.8,\ 13.5, \ 33.1)\cdot 10^{-6}m$. These small-sized particles don’t absorb light; they only scatter it. The density of these particles in the atmosphere decreases exponentially with the altitude, thus: $\sigma_s(h) = \sigma_s(sea)e^{-\frac{h}{8km}}$.
+The function phase from rayleigh is: $p(\theta)=\frac{3}{16\pi}(1 + \cos^2(\theta))$.
+Mie
+Mie scattering theory describes the interaction between light and large particles, like pollution and aerosols. At sea level, the coefficient is $\sigma_s(sea) \geq 21 \cdot 10^{-6}m$. Same as for Rayleigh scattering, the density decreases exponentially with the altitude: thus $\sigma_s(h) = \sigma_s(sea)e^{-\frac{h}{1200m}}$.
+The Mie phase function derives from the Henyey-Greenstein phase function: $p(\theta) = \frac{1 – g^2}{4\pi \left(1 + g^2 – 2g \cos\theta \right)^{1.5}}$ with $g=0.76$.
+Mie scattering has little absorption, giving $\sigma_t(x)=1.11\cdot \sigma_s(x)$.
+Ozone
+Ozone is a gaz that is present in the atmosphere. It absorbs a lot green and red wavelengths. Its density is a bit complex. For the sake of simplicity, we will approximate it with the density of rayleigh. The coefficient is: $\sigma_s(x) = \sigma_a(sea) \cdot e^{-\frac{h}{8km}}$ with $\sigma_a(sea) = (3.426, \ 8.298, \ 0.356) \cdot 0.06 \cdot 10^{−5}m$.
+Implementation
+Here we will show the implementation of the sky and atmosphere rendering in glsl. First, we need some little helpers:
+```
+layout(set = 0, binding = 0, std140) uniform Block {
+    mat4 perspective;
+    mat4 view;
+    float angle;
+};
+
+vec3 get_world_pos(vec4 clipPosition)
+{
+    mat4 invMatrix = inverse(perspective * view);
+    vec4 world = invMatrix * clipPosition;
+    world /= world.w;
+    return world.xyz;
+}
+
+vec3 get_view_direction() {
+    vec3 near = get_world_pos(vec4(in_position, 0.0, 1.0));
+    vec3 far = get_world_pos(vec4(in_position, 1.0, 1.0));
+    return normalize(far - near);
+}
+
+float intersectRaySphereFromInside(const vec3 rayOrigin,
+                                   const vec3 rayDir, float radius) {
+    float b = dot(rayOrigin, rayDir);
+    float c = dot(rayOrigin, rayOrigin) - radius * radius;
+    float discriminant = b * b - c;
+    float t = -b + sqrt(discriminant);
+    return t;
+}
+```
+We retrieve the view direction represented by $\omega$ in our equations with one function and we compute the intersection of a ray with the atmosphere with another one.
+Now we will put all the constant we got from physics.
+```
+const float PI = 3.14159265359;
+const float Hr = 8000;
+const float Hm = 1200;
+const float Ho = 8000;
+
+const vec3 rayleigh = vec3(5.8, 13.5, 33.1) * 1e-6;
+const vec3 mie = vec3(21, 21, 21) * 1e-6;
+const vec3 ozone = vec3(3.426, 8.298, 0.356) * 0.06 * 1e-5;
+const float radiusEarth = 6360e3;
+const float radiusAtmo = 6420e3;
+const float ZenithH = radiusAtmo - radiusEarth;
+const vec3 origin_view = vec3(0, radiusEarth + 1, 0);
+const float originH = origin_view.y - radiusEarth;
+const int STEPS = 8;
+```
+Now we retranscript the different $\sigma$ function in GLSL and the phase one:
+```
+float rayleigh_phase(vec3 view_dir, vec3 sun_dir) {
+    const float mu = dot(view_dir, sun_dir);
+    return (3.0 / (16.0 * PI)) * (1.f + mu * mu);
+}
+
+float mie_phase(vec3 view_dir, vec3 sun_dir) {
+    float mu = dot(view_dir, sun_dir);
+    float g = 0.76;
+    float denom = 1.0 + g * g - 2.0 * g * mu;
+    return (1.0 - g * g) / (4.0 * PI * pow(denom, 1.5));
+}
+
+vec3 sigma_s_rayleigh(vec3 position) {
+    const float h = length(position) - radiusEarth;
+    return rayleigh * exp(-h / Hr);
+}
+
+vec3 sigma_s_mie(vec3 position) {
+    const float h = length(position) - radiusEarth;
+    return mie * exp(-h / Hm);
+}
+
+vec3 sigma_a_ozone(vec3 position) {
+    const float h = length(position) - radiusEarth;
+    return ozone * exp(-h / Ho);
+}
+
+vec3 sigma_t(vec3 position) {
+    return sigma_s_rayleigh(position) + 
+           1.11 * sigma_s_mie(position) +
+           sigma_a_ozone(position);
+}
+```
+We remind the expression of the transmittance: $Tr(a\rightarrow b) = e^{-\int_a^b{\sigma_t(x)dx}}$ We can approximate it with:
+$$Tr(a\rightarrow b) = e^{-\sum_{s=a}^b \sigma_t(s)\Delta s}$$
+Then we can write the code for the transmittance function:
+```
+vec3 integrate_sigma_t(vec3 from, vec3 to) {
+    const vec3 ds = (to - from) / float(STEPS);
+    vec3 accumulation = vec3(0, 0, 0);
+
+    for (int i = 0; i < STEPS; ++i) {
+        const vec3 s = from + (i + 0.5) * ds;
+        accumulation += sigma_t(s);
+    }
+
+    return accumulation * length(ds);
+}
+
+vec3 transmittance(vec3 from, vec3 to) {
+    const vec3 integral = integrate_sigma_t(from, to);
+    return exp(-integral);
+}
+```
+Thanks to transmittance function, we can compute the $L_{outerspace}$ we saw in the theory part.
+```
+const float radius_size = radians(0.53 / 2.0);
+const float sun_solid_angle = 2 * PI * (1 - cos(radius_size));
+
+//vec3 TrZenith = transmittance(origin_view, vec3(0, radiusEarth + ZenithH, 0));
+const vec3 TrZenith = exp(-(rayleigh * Hr * (exp(-originH / Hr) - exp(-ZenithH / Hr)) +
+                            mie * Hm * (exp(-originH / Hm) - exp(-ZenithH / Hm)) + 
+                            ozone * Ho * (exp(-originH / Ho) - exp(-ZenithH / Ho))));
+
+vec3 illuminanceGround = 120000 * (vec3(1.0, 1.0, 1.0));
+vec3 L_outerspace = (illuminanceGround / sun_solid_angle) / TrZenith;
+```
+I have put the analytical solution of the transmittance function from the ground to the zenith. If your renderer cannot display physical values that large yet, you may replace the 120000 by $2\pi$. This gives an illuminance of $2\pi$ at the ground, giving a luminance of $1$ for a Lambertian surface with an albedo of $0.5$.
+We remind that the formula for the luminance at camera is:
+$$L(camera, \omega) =\int_{atmosphere}^{camera}Tr(x \rightarrow camera)\cdot j(x)dx$$
+with $j(x)=\sigma_s(x)\cdot P(\omega, \omega_{sun})\cdot L_{sun}(x)\cdot \Omega_{Sun}$ and $L_{sun}(x)=L_{outerspace}\cdot Tr(outerspace \rightarrow x)$
+The code for $j(x)$ is:
+```
+vec3 j(vec3 position, vec3 view_dir, vec3 sun_dir) {
+    const float distance_out_atmosphere =
+        intersectRaySphereFromInside(position, sun_dir, radiusAtmo);
+    const vec3 out_atmosphere = position + sun_dir * distance_out_atmosphere;
+    
+    const vec3 trToSun = transmittance(position, out_atmosphere);
+    const vec3 rayleigh_diffusion = sigma_s_rayleigh(position) * rayleigh_phase(view_dir, sun_dir);
+    const vec3 mie_diffusion = sigma_s_mie(position) * mie_phase(view_dir, sun_dir);
+    
+    return L_outerspace * trToSun * sun_solid_angle * (rayleigh_diffusion + mie_diffusion);
+}
+```
+Then the integral code is:
+```
+vec3 compute_luminance(vec3 out_atmosphere, vec3 sun_dir) {
+    const vec3 ds = (out_atmosphere - origin_view) / STEPS;
+    const vec3 direction = normalize(ds);
+    vec3 acc = vec3(0.0);
+
+    for (int i = 0; i < STEPS; ++i) {
+        const vec3 s = origin_view + (i + 0.5) * ds;
+        acc += transmittance(origin_view, s) * j(s, direction, sun_dir);
+    }
+
+    return acc * length(ds);
+}
+```
+And if we want to take into account the sun as a direct light (when you look at the solar disk for example): it’s just the luminance from outerspace attenuated by the atmosphere:
+```
+vec3 direct_light_from_sun(vec3 direction, vec3 out_atmosphere, vec3 sun_dir) {
+    float cos_theta = dot(direction, sun_dir);
+
+    const float angle = acos(cos_theta);
+    float disk = 1.0 - smoothstep(radius_size * 0.95, radius_size * 1.05, angle);
+
+    return disk * L_outerspace * transmittance(origin_view, out_atmosphere); 
+}
+```
+Then you just have to write the main which is:
+```
+void main() {
+    const vec3 view_direction = get_view_direction();
+    const vec3 sun_dir = normalize(vec3(cos(radians(angle)), sin(radians(angle)), 0.0));
+
+    const float distance_out =
+        intersectRaySphereFromInside(origin_view, view_direction, radiusAtmo);
+    const vec3 view_out = origin_view + view_direction * distance_out;
+
+    vec3 luminance = compute_luminance(view_out, sun_dir);
+    luminance += direct_light_from_sun(view_direction, view_out, sun_dir);
+
+    out_color = vec4(luminance, 1.0);
+}
+```
+Conclusion
+We saw how to go from physics to render a physically based sky. I hope it was nice to read and that you learned something. Now, what can you do to go further:
+Improve performance by removing redundant computation
+Improve performance using Look Up Transmittance (LUT)
+Improve rendering, taking into account multiple scattering
+Reference
+Course from Sébastien Hillaire 2016
+Paper from Sébastien Hillaire 2020
+Scratch a Pixel: Simulating sky
+Share this:
+Share on X (Opens in new window)
+X
+Share on Facebook (Opens in new window)
+Facebook
+Share on LinkedIn (Opens in new window)
+LinkedIn
+Share on Reddit (Opens in new window)
+Reddit
+Like this:
+Like Loading…
+Atmosphere OpenGL pbr rendering Sky sky rendering
+Comments
+8 responses to “Sky and Atmosphere rendering: A physical approach”
+May 10, 2025
+Felipe
+Very thorough, thanks for this
+Loading…
+Reply
+May 11, 2025
+Antoine MORRIER
+Thanks, it’s a pleasure to see you liked it
+Loading…
+Reply
+September 24, 2025
+ai remove watermarks
+This article provides a clear and detailed explanation of radiative transfer in atmospheric rendering, making complex physics concepts accessible. The step-by-step derivation and GLSL implementation are particularly helpful for practitioners.
+Loading…
+Reply
+September 25, 2025
+metal injection molding
+这篇文章写得真清晰，把复杂的光线传播和大气散射讲得头头是道。我特别喜欢从物理原理推导出积分公式的过程，一步步解释得很到位，特别是Mie和Rayleigh散射的理论部分，让我终于明白了天空为什么是蓝色的。代码实现部分也很直观，用GLSL把数学公式转化成可执行的代码，这种理论与实践结合的方式太棒了。不过有个小疑问，文章提到忽略地面反射，但实际天空颜色可能受地面影响，这点或许可以再讨论下。总体来说，这是篇很有启发性的文章，对学渲染和物理的人都超有帮助！
+Loading…
+Reply
+October 12, 2025
+đồng hồ đếm ngược
+This is a delightful dive into atmospheric radiative transfer with a charmingly old-school vibe—like using a slide rule to calculate the phase function for ozone. The meticulous derivation of constants like the suns solid angle feels like recalculating π for the umpteenth time, but with more exponents. The GLSL implementation part, however, is the real Beam me up, Scotty moment—turning complex physics into shader code is pure sorcery for geeks. Just wish theyd used LaTeX for the math; all those sigmas looked a bit cramped!hẹn giờ online
+Loading…
+Reply
+October 12, 2025
+quay may mắn
+This is a brilliant, if slightly mad, dive into atmospheric rendering physics. The meticulous derivation of $L_{sun}(x)$ and the sheer joy of calculating $Omega_{sun}$ (like solving a cosmic trigonometry puzzle) is impressive. However, explaining phase functions with Ill be quick on this part feels like telling someone the secret ingredients are just magic powder – a delightful but ultimately unsatisfying cliffhanger for the theoretically inclined! Kudos to the author for tackling such complex topics with clarity, even if the phase functions are left as an exercise for the truly obsessive reader.quay random
+Loading…
+Reply
+October 13, 2025
+deltarune the prophecy
+This is a delightful dive into the physics of sky rendering, complete with integrals, phase functions, and a GLSL implementation that feels like solving a cosmic crossword puzzle. The detailed breakdown of Rayleigh, Mie, and ozone effects is mind-bendingly precise – youd need a PhD and a weather forecast to render the sky accurately. The step-by-step derivation of the RTE feels like guiding a spectral snail up a mountain of equations. And the GLSL code? It’s like translating quantum mechanics into pixels. Kudos to the author for turning atmospheric optics into a high-brow, numerically intensive art form. Now, where’s my virtual thesaurus when I need it?deltarune the prophecy
+Loading…
+Reply
+October 13, 2025
+MIM
+This is quite the deep dive into radiative transfer with a sun thats basically a tiny disk floating in space, ignoring the grounds reflectance for simplicity – a bold choice! The meticulous calculation of the suns solid angle and the atmospheric transmittance function feels like solving a cosmic crossword puzzle. While the math is impressively detailed, from computing angular radii to phase functions, its a bit like explaining how to make a perfect cup of tea using quantum physics – elegant but perhaps overcomplicating the morning ritual. The GLSL implementation section turns it into a digital sky recipe, which is a fun twist. All in all, a fascinating, if math-heavy, exploration of rendering a realistic sky, like dissecting a starry egg to get at the light inside.MIM
+Loading…
+Reply
+Leave a ReplyCancel reply
+Loading Comments...
+%d

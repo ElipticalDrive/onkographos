@@ -1,0 +1,115 @@
+# Multi-view Point Splatting with 1+1 Pass PBR
+
+Also called: Multi-view PBR algorithm, Multi-view splatting algorithm
+
+## Overview
+This method extends the [Single-pass vertex-based multi-view PBR](23102-single-pass-vertex-based-multi-view-pbr.md) algorithm to support auto-stereoscopic displays with multiple views (e.g., 8 views) by using a 1+1 pass rendering approach. It solves the problem of rendering non-overlapping point groups to multiple view-specific textures and compositing them according to a wavelength-selective filter mask. It differs from single-view splatting by requiring enlarged image-aligned quads (due to view-dependent bounding boxes) and from multi-pass rendering by grouping points via graph coloring to reduce overdraw and texture lookups.
+
+## How it works
+**Inputs:** Point set $S$ with positions, radii, normals, colors, and weights; wavelength-selective filter mask parameters (pattern size, view count $N$); display resolution.
+**Outputs:** Final composite image.
+
+**Data Structures:**
+- Point Group $S_k$: Subset of points with no self-overlap.
+- Texture $I_k$: 32-bit floating point texture for group $k$.
+  - R channel: Averaged depth $c_d(f)_k$.
+  - G channel: Packed color values of 3 views as unsigned bytes.
+  - B channel: Packed weight values of first 2 views as half floats.
+  - W channel: Weight value of the 3rd view.
+
+**Steps:**
+1. **Preprocessing:** Partition $S$ into non-self-overlapping groups $S_k$ using a minimal graph coloring algorithm [S1].
+2. **Geometry Pass:** For each group $S_k$:
+   a. Clear $I_k$ (z-depth and color).
+   b. Render $S_k$ to $I_k$.
+      - Vertex Shader: Calculate quad corners using Equation 6 (view-dependent). Input: splat center, radius, normal, color, corner index.
+      - Fragment Shader:
+        - Determine sub-pixel views for fragment $(x,y)$ using mask offsets.
+        - Perform ray-splat intersection (parametrized or per-pixel).
+        - Calculate colors, kernel weights, depth.
+        - Pack and output data to $I_k$.
+3. **Image Compositing Pass:** Combine all $I_k$ into final image.
+   - For each fragment $f$:
+     - Initialize $c_{rgb}(f) = 0$, $w_{rgb}(f) = 0$.
+     - Find min depth $d = \min_k(c_d(f)_k)$.
+     - For each $k$: if $c_d(f)_k \leq d + \epsilon$, unpack and accumulate colors/weights.
+     - Normalize color by weight.
+
+**Formulas:**
+- Mask Offsets [S1]:
+  $$x_{offset} = (3 \cdot x) \% 8 \quad (7)$$
+  $$y_{offset} = (screenHeight - y) \% 12 \quad (8)$$
+- View Indices [S1]:
+  $$v_R = \left( \frac{1 + yoffset + \lfloor \frac{yoffset}{3} \rfloor}{2} + xoffset \right) \% 8 \quad (9)$$
+  $$v_G = (v_R + 1) \% 8, \quad v_B = (v_R + 2) \% 8$$
+
+**Parameters:**
+- Mask Pattern Size: $8 \times 12$ [S1].
+- Number of Views: $N=8$ (tested) [S1].
+
+**Edge Cases:**
+- Point sprites are insufficient for enlarged quads due to square shape limitation [S1].
+- Parametrized intersection requires vertex shader calculation for all $N$ views; per-pixel intersection moves full ray-disk test to fragment shader for up to 3 views [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Preprocessing
+groups = graph_coloring(points)
+
+# Geometry Pass
+for group in groups:
+    clear_texture(I_k)
+    for point in group:
+        # Vertex Shader
+        corners = calculate_quad_corners(point, equation_6)
+        for corner in corners:
+            transform_and_project(corner)
+            # Fragment Shader
+            x, y = fragment_position()
+            x_offset = (3 * x) % 8
+            y_offset = (screen_height - y) % 12
+            v_R = ((1 + y_offset + floor(y_offset / 3)) / 2 + x_offset) % 8
+            v_G = (v_R + 1) % 8
+            v_B = (v_R + 2) % 8
+            
+            # Ray-Splat Intersection (Per-Pixel Example)
+            for v in [v_R, v_G, v_B]:
+                if ray_splat_intersection(point, v, x, y):
+                    color, weight, depth = calculate_fragment_data(point, v)
+                    pack_and_store(color, weight, depth, I_k)
+
+# Image Compositing Pass
+for fragment in final_image:
+    c_rgb = 0
+    w_rgb = 0
+    min_depth = min(I_k.depth for I_k in textures)
+    for I_k in textures:
+        if I_k.depth <= min_depth + epsilon:
+            unpacked_color, unpacked_weight = unpack(I_k)
+            c_rgb += unpacked_color
+            w_rgb += unpacked_weight
+    fragment.color = c_rgb / w_rgb
+```
+
+## Subtopics
+
+### Parametrized Splat Intersection
+Calculates parametric coordinates for all $N$ views in the vertex shader; fragment shader performs simple $r^2 + s^2 \leq R^2$ test. Choose when vertex shader load is acceptable.
+
+### Per-Pixel Ray-Disk Intersection
+No vertex shader calculation beyond quad generation; fragment shader performs full ray-splat intersection for up to 3 views. Choose for simpler vertex shader and potentially better performance on modern GPUs.
+
+## Operating characteristics
+- **Time Complexity:** Depends on graph coloring efficiency and number of groups. Per-pixel intersection is more expensive per fragment than parametrized test.
+- **Memory Complexity:** Requires storing multiple textures $I_k$ and compositing results.
+- **Performance:** Tested on NVIDIA GeForce 7800GTX with 8 views at 1900x1200 resolution. Outperforms standard multi-pass (8 MV) rendering [S1].
+- **Strengths:** Reduces overdraw via graph coloring; supports auto-stereoscopic displays.
+- **Limitations:** Requires enlarged quads; complex output packing; limited to specific filter mask patterns.
+
+## Background
+Originated from [Zhang and Pajarola 2006b; Zhang and Pajarola 2006a] and presented in [S1]. Developed for auto-stereoscopic displays with wavelength-selective filter arrays.
+
+## Sources
+[S1] Multi-view point splatting, https://doi.org/10.1145/1174429.1174479, fetched 2026-11-03

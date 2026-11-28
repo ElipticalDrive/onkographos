@@ -1,0 +1,113 @@
+--- v005.md
++++ v006.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-`iso_corners_list_f1v4` is a GPU kernel variant that computes the values of one or more functions at the eight corners of the grid cells enclosing a list of input points, enabling trilinear interpolation or surface extraction [S1, unofficial]. It differs from its siblings by processing 256 consecutive lattice points per thread group across 2–4 neighboring bricks, sharing shell setup overhead among all points in the group rather than per-brick, which improves occupancy and reduces redundant memory accesses [S1, unofficial].
++`iso_corners_list_f1v4` is a GPU kernel variant that computes the values of one function at the eight corners of the grid cells enclosing a list of input points, enabling trilinear interpolation or surface extraction [S1, unofficial]. It differs from its siblings by processing 256 consecutive lattice points per thread group across 2–4 neighboring bricks, sharing shell setup overhead among all points in the group rather than per-brick, which improves occupancy and reduces redundant memory accesses [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+ - A list of input points (lattice coordinates) [S1, unofficial].
+-- A set of functions (typically 1 for `f1v4`, or 8/16/32/64 for variants) [S1, unofficial].
++- A set of functions (1 for `f1v4`, or 8/16/32/64 for variants) [S1, unofficial].
+ - Grid data structures: brick hierarchy, shell definitions, and function coefficients (e.g., $C$ matrix for Gaussian-type orbitals) [S1, unofficial].
+ 
+@@ -17,5 +17,5 @@
+ 
+ **Data Structures:**
+-- **Brick Hash:** Built on-device, mapping brick IDs to memory slots. Rejected siblings (mask 0) are kept in the octree structure to ensure consecutive bricks are neighbors in memory [S1, unofficial].
++- **Brick Hash:** Built on-device, mapping brick IDs to memory slots [S1, unofficial]. Rejected siblings (mask 0) are kept in the octree structure to ensure consecutive bricks are neighbors in memory [S1, unofficial].
+ - **Shells:** Precomputed lists of lattice points or coefficients for each shell level, stored in group-shared memory for the group [S1, unofficial].
+ - **Function Coefficients ($C$):** Stored in global memory, accessed via tiled GEMM if enabled [S1, unofficial].
+@@ -38,43 +38,42 @@
+ **Pseudocode:**
+ ```python
+-def iso_corners_list_f1v4_kernel(points, bricks, shells, coeffs):
+-    # Each thread group handles 256 points
+-    shared_shells = [0.0] * MAX_SHELLS  # Group-shared memory allocation
+-    
+-    # 1. Identify bricks for the 256 points (spans 2-4 neighbors)
+-    brick_ids = [find_brick(p, bricks) for p in points]
+-    
+-    # 2. Shared shell setup for the group bounding box
+-    group_shells = compute_shells_for_box(points, bricks)
+-    
+-    # Load shells into shared memory
++def iso_corners_list_f1v4_kernel(points, brick_ids, shell_data, coeffs):
++    group_size = 256
++    shared_shells = [None] * 1024  # Group-shared memory allocation [G]
++
++    # 1. Identify bricks for the 256 points (spans 2-4 neighbors) [S1, unofficial]
++    # Brick hash is built on-device; rejected siblings (mask 0) are kept for neighbor continuity [S1, unofficial]
++
++    # 2. Shared shell setup for the group bounding box [S1, unofficial]
++    group_shells = [s for s in shell_data if is_in_box(s, points[:group_size])]
++
++    # 3. Load shells into shared memory [S1, unofficial]
+     for i, shell_idx in enumerate(group_shells):
+-        shared_shells[i] = load_shell_data(shell_idx)
+-        
+-    # 3. Process each point in the group
+-    for i in range(256):
++        shared_shells[i] = shell_data[shell_idx]
++
++    # 4. Process each point in the group [S1, unofficial]
++    for i in range(group_size):
+         point = points[i]
+         corner_values = [0.0] * 8
+-        
+-        # Determine which shells are within reach
+-        reachable_shells = [s for s in group_shells if is_shell_reachable(point, s)]
+-        
++
++        # Determine which shells are within reach; skip shells out of reach [S1, unofficial]
++        reachable_shells = [s for s in group_shells if distance(point, s.center) <= s.radius]
++
+         for shell in reachable_shells:
+-            shell_data = shared_shells[shell]
+-            # Compute contribution to corner values
+-            # For f1v4, this is one function; variants handle 8/16/32/64
+-            contribution = compute_shell_contribution(shell_data, point)
++            shell_entry = shared_shells[shell]
++            # Compute contribution to corner values [S1, unofficial]
++            # For f1v4, this is one function; variants handle 8/16/32/64 [S1, unofficial]
++            contribution = shell_entry.evaluate(point)
+             for c in range(8):
+                 corner_values[c] += contribution[c]
+-                
+-        # Store result
++
++        # Store result [S1, unofficial]
+         output[i] = corner_values
+ 
+-# Helper definitions
+-def find_brick(p, bricks): return bricks.lookup(p)
+-def compute_shells_for_box(points, bricks): return shells.query_bounding_box(points)
+-def load_shell_data(idx): return shells.memory[idx]
+-def is_shell_reachable(p, shell): return distance(p, shell.center) <= shell.radius
+-def compute_shell_contribution(shell_data, p): return shell_data.evaluate(p)
++def is_in_box(shell, pts):
++    return all(shell.min <= p <= shell.max for p in pts)
++
++def distance(p, center):
++    return ((p.x - center.x)**2 + (p.y - center.y)**2 + (p.z - center.z)**2)**0.5
+ ```
+ 
+@@ -91,10 +90,10 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The kernel processes 256 points per group, with shared shell setup reducing overhead. On lavapipe, mol at h=0.2, corner kernel times reduced from 38ms to 34ms (HOMO), 168ms to 144ms (diff density), 197ms to 121ms (trans density), 315ms to 246ms (16 MOs) [S1, unofficial].
+-- **Memory Complexity:** Uses group-shared memory for shells, reducing global memory bandwidth. The octree structure keeps rejected siblings to maintain neighbor connectivity, increasing memory usage slightly [S1, unofficial].
+-- **Scaling:** Performance scales with the number of threads and groups. Tiled GEMM improves performance for larger function sets [S1, unofficial].
+-- **Strengths:** High occupancy due to shared shell setup. Efficient for dense point lists.
+-- **Limitations:** Requires careful management of shared memory for shells. May not be optimal for very sparse point lists [S1, unofficial].
+-- **When to use:** When processing large lists of points for isosurface extraction or interpolation.
++- **Time Complexity:** The kernel processes 256 points per group, with shared shell setup reducing overhead [S1, unofficial]. On lavapipe, mol at h=0.2, corner kernel times reduced from 38ms to 34ms (HOMO), 168ms to 144ms (diff density), 197ms to 121ms (trans density), 315ms to 246ms (16 MOs) [S1, unofficial].
++- **Memory Complexity:** Uses group-shared memory for shells, reducing global memory bandwidth [S1, unofficial]. The octree structure keeps rejected siblings to maintain neighbor connectivity, increasing memory usage slightly [S1, unofficial].
++- **Scaling:** Performance scales with the number of threads and groups [S1, unofficial]. Tiled GEMM improves performance for larger function sets [S1, unofficial].
++- **Strengths:** High occupancy due to shared shell setup [S1, unofficial]. Efficient for dense point lists [S1, unofficial].
++- **Limitations:** Requires careful management of shared memory for shells [S1, unofficial]. May not be optimal for very sparse point lists [S1, unofficial].
++- **When to use:** When processing large lists of points for isosurface extraction or interpolation [S1, unofficial].
+ - **When not to use:** For very small point lists or sparse data where per-brick processing might be more efficient [S1, unofficial].
+ 

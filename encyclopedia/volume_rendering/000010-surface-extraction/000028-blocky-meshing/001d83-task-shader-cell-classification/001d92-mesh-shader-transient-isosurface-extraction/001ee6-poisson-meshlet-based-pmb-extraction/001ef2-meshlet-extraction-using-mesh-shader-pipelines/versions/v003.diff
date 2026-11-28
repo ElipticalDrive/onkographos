@@ -1,0 +1,126 @@
+--- v002.md
++++ v003.md
+@@ -14,5 +14,4 @@
+ *   **Min-Max Volume:** Precomputed volume storing min/max scalar values for each block, used to cull empty blocks [S1, unofficial].
+ *   **Global Memory Buffers:** Dense arrays for meshlet descriptors, index buffers, and vertex attribute buffers (positions, normals) [S1, unofficial].
+-*   **Occupied Block Indices:** A dense array aligned with occupied block indices, storing the index of the first meshlet and the count of meshlets per block [S1, unofficial].
+ 
+ **Parameters:**
+@@ -38,14 +37,11 @@
+ # Task Shader Workgroup (One per occupied block)
+ def task_shader_workgroup(block_id, block_cells, isovalue, min_max_volume, vertex_limit, index_limit):
+-    # T = 32 threads, R = 8 cells per thread, beta = 256 cells per block [S1, unofficial]
+     T = 32
+     R = 8
+     beta = 256
++    # Shared memory for subgroup communication [G]
++    shared_counts = [[0, 0] for _ in range(3)]
+ 
+-    # Shared memory for subgroup communication [G]
+-    shared_counts = [[0, 0] for _ in range(3)]  # [level, (v_count, t_count)]
+-
+-    # Each thread analyzes R cells in Morton order [S1, unofficial]
+-    thread_id = get_thread_id()  # [G] standard hardware intrinsic
++    thread_id = get_thread_id()
+     start_cell = thread_id * R
+     end_cell = start_cell + R
+@@ -58,70 +54,45 @@
+     for i in range(start_cell, end_cell):
+         cell_idx = block_cells[i]
+-        # Check occupancy using min-max volume or scalar value [S1, unofficial]
+         if is_occupied(cell_idx, isovalue, min_max_volume):
+-            # Count vertices and triangles for this cell [S1, unofficial]
+             v, t = count_geometry(cell_idx)
+             local_v_count += v
+             local_t_count += t
+-
+-            # Store cell index [S1, unofficial]
+             local_core_indices.append(cell_idx)
+-
+-            # Determine padding status for each partition level using modulo [S1, unofficial]
+             for level in range(3):
+                 if is_padding_cell(cell_idx, level, R):
+                     local_padding_indices[level].append(cell_idx)
+ 
+-    # Subgroup reduction to sum counts across threads [S1, unofficial]
+-    total_v = sum(local_v_count for _ in range(T))  # [G] simplified subgroup sum
++    # Subgroup reduction to sum counts across threads [G]
++    total_v = sum(local_v_count for _ in range(T))
+     total_t = sum(local_t_count for _ in range(T))
+ 
+-    # Determine partitioning strategy [S1, unofficial]
+-    # Check if whole block fits in one meshlet
++    # Hierarchical partitioning [S1, unofficial]
++    partitions = []
+     if fits_in_meshlet(total_v, total_t, vertex_limit, index_limit):
+-        partition = [0]  # Level 0: whole block
++        partitions.append(0)
+     else:
+-        # Check 4x4x4 subblocks (4 subblocks) [S1, unofficial]
+-        subblock_partitions = []
+         for subblock_id in range(4):
+-            # Aggregate counts for this 4x4x4 subblock using subgroup communication [S1, unofficial]
+             sub_v, sub_t = aggregate_subblock_counts(subblock_id, local_v_count, local_t_count, shared_counts)
+             if fits_in_meshlet(sub_v, sub_t, vertex_limit, index_limit):
+-                subblock_partitions.append(1)  # Level 1
++                partitions.append(1)
+             else:
+-                # Partition into 2x2x2 subblocks (8 per 4x4x4) [S1, unofficial]
+-                for inner_subblock_id in range(8):
+-                    inner_v, inner_t = aggregate_inner_subblock_counts(subblock_id, inner_subblock_id, local_v_count, local_t_count, shared_counts)
+-                    if fits_in_meshlet(inner_v, inner_t, vertex_limit, index_limit):
+-                        subblock_partitions.append(2)  # Level 2
+-                    else:
+-                        # Should not happen given block size constraints [S1, unofficial]
+-                        pass
+-        partition = subblock_partitions
++                for inner_id in range(8):
++                    inner_v, inner_t = aggregate_inner_subblock_counts(subblock_id, inner_id, local_v_count, local_t_count, shared_counts)
++                    # 2x2x2 subblocks trivially guarantee not to exceed constraints [S1, unofficial]
++                    partitions.append(2)
+ 
+-    # Reserve space in global buffers [S1, unofficial]
+-    num_meshlets = len(partition)
++    num_meshlets = len(partitions)
+     offset = reserve_global_buffers(num_meshlets)
+ 
+-    # Store metadata [S1, unofficial]
+-    occupied_block_metadata[block_id].first_meshlet_index = offset
+-    occupied_block_metadata[block_id].num_meshlets = num_meshlets
++    # Store metadata for rendering culling [S1, unofficial]
++    block_metadata[block_id] = (offset, num_meshlets)
+ 
+-    # Launch mesh shader workgroups [S1, unofficial]
+-    for meshlet_id, subblock_type in enumerate(partition):
+-        if subblock_type != -1:  # -1 represents empty
+-            launch_mesh_shader_workgroup(
+-                block_id=block_id,
+-                meshlet_id=meshlet_id,
+-                subblock_type=subblock_type,
+-                global_buffer_offset=offset + meshlet_id
+-            )
++    for meshlet_id, subblock_type in enumerate(partitions):
++        if subblock_type != -1:
++            launch_mesh_shader_workgroup(block_id, meshlet_id, subblock_type, offset + meshlet_id)
+ 
+ # Mesh Shader Workgroup (One per subblock)
+ def mesh_shader_workgroup(block_id, meshlet_id, subblock_type, global_buffer_offset, block_cells):
+-    # Extract meshlet from the assigned subblock using PMB kernel [S1, unofficial]
+     meshlet = pmb_extract_meshlet(subblock_type, block_cells)
+-
+-    # Write to global buffers [S1, unofficial]
+     write_meshlet_descriptor(global_buffer_offset, meshlet)
+     write_index_buffer(global_buffer_offset, meshlet.indices)
+@@ -136,5 +107,5 @@
+ 
+ def count_geometry(cell_idx):
+-    return 1, 1  # [G] placeholder for PMB kernel geometry count logic
++    return 1, 1  # [G] simplified PMB kernel geometry count logic
+ 
+ def is_padding_cell(cell_idx, level, R):
+@@ -182,5 +153,4 @@
+ *   **Limitations:** Requires hardware support for task and mesh shaders; relies on convex subblocks for efficient core/padding cell identification [S1, unofficial].
+ *   **When to use:** When real-time isosurface extraction is required and hardware supports mesh shader pipelines, especially when PMB's lack of size constraint control is a bottleneck [S1, unofficial].
+-*   **When not:** When hardware lacks task/mesh shader support or when scene complexity does not benefit from reduced TLD [S1, unofficial].
+ 
+ ## Background

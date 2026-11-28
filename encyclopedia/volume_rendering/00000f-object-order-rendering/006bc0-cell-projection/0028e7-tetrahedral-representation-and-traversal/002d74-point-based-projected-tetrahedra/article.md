@@ -1,0 +1,122 @@
+# Point-based Projected Tetrahedra
+
+Also called: Hardware-Assisted Point-Based Volume Rendering, Point-Based Volume Rendering of Tetrahedral Meshes, Point-based footprint rendering
+
+## Overview
+Point-based Projected Tetrahedra (PBVR) is a technique for rendering large, unstructured tetrahedral meshes by approximating each tetrahedron with a single point primitive [S1]. It solves the problem of efficiently visualizing complex volumetric data at interactive rates by decoupling footprint generation from compositing, thereby eliminating the need for connectivity processing and convolution operations [S1]. Unlike sibling methods that reconstruct geometry or rely on hierarchical partitioning, PBVR represents each cell as a single rasterized square carrying a single scalar value, reshaped via affine transformations to minimize overdraw [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An unstructured tetrahedral mesh with vertex-centered or cell-centered scalar data [S1].
+*   **Output:** A 2D image with correct back-to-front compositing [S1].
+
+**Data Structures:**
+1.  **Point Representation:** Each tetrahedron $T_i$ is represented by a single point $v_i$ [S1].
+    *   **Position:** The centroid of the tetrahedron [S1].
+    *   **Scalar Value:**
+        *   If vertex-centered: The mean of the scalar values at the tetrahedron's four vertices [S1].
+        *   If cell-centered: The scalar value assigned to the cell [S1].
+    *   **Transformation Matrix $T_i$:** A $4 \times 4$ affine transformation matrix that maps a regular unit tetrahedron $\hat{\sigma}$ (inscribed in the unit sphere, centered at the origin) to the target tetrahedron $\sigma_i$ [S1].
+    *   **Ellipsoid Parameters (for Ellipsoidal Footprints):** Center and radius in screen space, passed via texture coordinates to the fragment shader [S1].
+
+**Preprocessing (CPU):**
+1.  For each tetrahedron $T_i$:
+    *   Compute the affine transformation $T_i$ such that $T_i(\hat{\sigma}) = \sigma_i$ [S1].
+    *   Calculate the centroid $v_i$ by transforming the barycenter of $\hat{\sigma}$ by $T_i$ [S1].
+    *   Assign the scalar value $s_i$ (mean of vertices or cell value) to $v_i$ [S1].
+    *   (Optional) Calculate gradients from the scalar field to gather normal information for shading models [S1].
+    *   (Optional) Compute the minimum-volume enclosing ellipsoid for $T_i$ by applying $T_i$ to the unit sphere, which is the min-volume ellipsoid of $\hat{\sigma}$ [S1].
+
+**Per-Frame Rendering:**
+1.  **Sorting (CPU):** Sort the points front-to-back based on the depth of their centroids relative to the current viewpoint [S1].
+2.  **LOD Selection (CPU):** Determine the Level-of-Detail (LOD) for the current frame [S1]. During camera interaction, a lower LOD may be selected to maintain interactive framerates, and full quality is restored after interaction stops [S1].
+3.  **Vertex Shader (GPU):**
+    *   For each point $v_i$, use the precomputed transformation $T_i$ to determine the size and shape of the point primitive [S1].
+    *   The point size is determined by the size of the tetrahedron and the distance from the viewpoint [S1].
+    *   Pass necessary parameters (e.g., ellipsoid center/radius for culling) to the fragment shader via texture coordinates [S1].
+4.  **Fragment Shader (GPU):**
+    *   **Culling:** Cull fragments based on the shape of the approximating element [S1].
+        *   *Circular Footprint:* Cull fragments outside the radius $r$ from the center $c$: if $\|p - c\| > r$, discard [S1].
+        *   *Ellipsoidal Footprint:* Cull fragments outside the ellipsoid defined by the transformation to minimize overdraw [S1].
+    *   **Compositing:**
+        *   Keep one fragment in a texture [S1].
+        *   Composite the ray-gap between two fragments using a pre-integrated table [S1].
+        *   Compositing is performed based on fragment distances (depth) rather than pre-assigned alpha values to mitigate over-representation error [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def preprocess_mesh(tetrahedra, data_type):
+    points = []
+    for tet in tetrahedra:
+        # Compute affine transformation T mapping unit tetrahedron to target tetrahedron
+        # Solves a 4x4 linear system for the affine matrix [G]
+        T = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+        
+        # Transform barycenter of unit tetrahedron to get point position v
+        barycenter = [0.25, 0.25, 0.25, 1.0]
+        v = [sum(T[r][c] * barycenter[c] for c in range(4)) for r in range(4)]
+        
+        # Assign scalar value
+        if data_type == "vertex_centered":
+            s = sum(tet.vertex_scalars) / len(tet.vertex_scalars)
+        else:
+            s = tet.cell_scalar
+            
+        # Compute min-volume enclosing ellipsoid parameters by applying T to unit sphere
+        # Not given in the sources.
+        ellipsoid_params = None
+        
+        points.append({'position': v, 'scalar': s, 'transform': T, 'ellipsoid': ellipsoid_params})
+    return points
+
+def render_frame(points, viewpoint, lod_strategy):
+    # Sort points front-to-back based on centroid depth relative to viewpoint
+    sorted_points = sorted(points, key=lambda p: dot(p['position'] - viewpoint.camera_position, viewpoint.forward))
+    
+    # Determine LOD for current frame
+    active_points = lod_strategy.select_points(sorted_points, viewpoint)
+    
+    # GPU Vertex Shader: resize point primitive using T based on tetrahedron size and distance
+    # GPU Fragment Shader: cull fragments outside footprint, composite using pre-integrated table
+    for point in active_points:
+        # Cull fragments outside circular or ellipsoidal footprint
+        # Composite ray-gap between fragments using pre-integrated table based on depth
+        # Not given in the sources.
+        pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Sub-pixel Tetrahedra:** Standard triangular/quadrilateral primitives are inefficient for sub-pixel areas due to connectivity overhead [S1]. PBVR handles this well by using single points [S1].
+*   **Boundary Quality:** Because a single point represents the entire tetrahedron, scalar interpolation across the cell is lost [S1]. This limits accurate pixel values when depth complexity is low, particularly at volume borders [S1].
+*   **Malformed Tetrahedra:** Unlike Hardware-Assisted Visibility Sorting (HAVS), which fails on malformed tetrahedra, PBVR remains robust and does not fail under these conditions [S1].
+*   **Wide Size Variation:** If tetrahedra sizes vary widely, large tetrahedra generate many fragments that must be culled, potentially causing performance issues due to branching in the fragment shader [S1].
+
+## Subtopics
+
+### Parallelized Accurate Sorting for Projected Tetrahedra
+Uses parallel sorting algorithms to improve the efficiency of the back-to-front ordering required for compositing [G]. Choose when sorting is the bottleneck. [Link](1128-parallelized-accurate-sorting-for-projected-tetrahedra.md)
+
+### Sorting-free Pre-integrated Projected Tetrahedra
+Eliminates the need for explicit sorting by using pre-integrated textures and specific compositing rules [G]. Choose when sorting overhead is prohibitive. [Link](7491-sorting-free-pre-integrated-projected-tetrahedra.md)
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the sorting step $O(N \log N)$ on the CPU and rasterization/compositing on the GPU [G]. The method is designed for interactive framerates [S1].
+*   **Memory Complexity:** $O(N)$ for storing point data and transforms [G]. No connectivity information is stored, reducing memory overhead compared to direct face rendering [S1].
+*   **Performance:** Achieves interactive rates on large datasets (e.g., Heart, SPX, F16) [S1]. Performance scales with the number of fragments generated; ellipsoidal footprints reduce overdraw compared to circular or square footprints, improving quality but requiring more complex culling logic [S1].
+*   **Strengths:**
+    *   No connectivity processing or storage required [S1].
+    *   Robust to malformed tetrahedra [S1].
+    *   Easy implementation of Level-of-Detail (LOD) strategies [S1].
+    *   Avoids convolution operations used in splatting [S1].
+*   **Limitations:**
+    *   Approximation error: Single-point representation lacks internal scalar interpolation, leading to visible artifacts at boundaries [S1].
+    *   Overdraw: Even with reshaping, fragments outside the true projection may be generated and must be culled, which can be expensive if branching is heavy [S1].
+    *   Accuracy vs. Speed Trade-off: Higher approximation complexity (e.g., ellipsoidal vs. circular) yields better quality but increases fragment generation and processing cost [S1].
+
+## Background
+The method was introduced in the paper "Hardware-Assisted Point-Based Volume Rendering of Tetrahedral Meshes" [S1]. It addresses the limitations of direct volume rendering and existing splatting techniques for unstructured tetrahedral meshes [S1]. Previous methods like HAVS struggled with malformed cells, and splatting required convolution [S1]. PBVR was developed to provide a fast, effective method for visualizing large datasets interactively, leveraging GPU hardware shaders for compositing [S1].
+
+## Sources
+[S1] Hardware-Assisted Point-Based Volume Rendering of Tetrahedral Meshes, https://www.sci.utah.edu/~eranders/papers/pbvr.pdf, fetched 2026-10-28

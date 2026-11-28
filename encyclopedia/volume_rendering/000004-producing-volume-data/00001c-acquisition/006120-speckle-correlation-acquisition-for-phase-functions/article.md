@@ -1,0 +1,182 @@
+# Speckle Correlation Acquisition for Phase Functions
+
+Also called: Direct Phase Function Acquisition via Speckle Correlation, Direct acquisition, Direct acquisition of volumetric scattering phase function using speckle correlations, Direct material acquisition using speckle correlations, Empirical Speckle Correlation Acquisition, Phase function from speckles, Speckle Correlation Phase Function Measurement
+
+## Overview
+This method extracts the volumetric scattering phase function $\rho$ directly from measured speckle correlations, avoiding the computational cost of inverse rendering optimization [S1]. It isolates single-scattering light paths by capturing speckle images under two different illumination directions and computing their spatial correlation, allowing accurate phase function estimation even in thick media where ground-truth single-scattering references are unavailable [S1]. Unlike naive intensity profiling which assumes thin samples, this correlation-based approach yields higher anisotropy parameters and remains valid for optical depths (OD) up to 7–8 [S1].
+
+## How it works
+**Inputs:**
+- Coherent laser source (wavelength $\lambda$, e.g., 632nm).
+- Scattering sample of known thickness, sandwiched between parallel glass slides.
+- 4f optical system (two lenses, focal length $f$).
+- 2D sensor (camera) at the focal plane of the second lens.
+- Motorized translation stages for the source and sample.
+
+**Outputs:**
+- Estimated phase function $\rho(\tau)$, typically fitted to a parametric model like Henyey-Greenstein.
+
+**Data Structures:**
+- Image $I_{\hat{i}}(\hat{v})$: 2D array of pixel intensities corresponding to viewing directions $\hat{v}$ for a specific illumination direction $\hat{i}$.
+- Window $W$: A local region of pixels (e.g., $100 \times 100$) used for spatial averaging.
+
+**Parameters:**
+- Focal length $f$: 10.5 cm [S1].
+- Beam diameter: 3 mm [S1].
+- Speckle grain size: 1–2 pixels [S1].
+- Window size $w$: 100 $\times$ 100 pixels (balance between noise reduction and spatial resolution) [S1].
+- Max measurable scattering angle: ~8 degrees (limited by lens aperture) [S1].
+
+**Steps:**
+
+1.  **Setup Optical System:**
+    Construct a 4f system. Place two lenses of focal length $f$ separated by distance $2f$. Place the scattering sample halfway between them (at the Fourier plane of the imaging lens). Place a coherent point source (fibered laser) at the focal plane of the first lens. Place the 2D sensor at the focal plane of the second lens [S1].
+
+2.  **Sample Preparation:**
+    Cast the target material between two microscope glass slides using spacing stickers (e.g., 250$\mu$m thickness) to ensure parallelism and uniform thickness. For optically thick materials requiring thinner samples, use tape layers (~40$\mu$m), noting reduced uniformity [S1].
+
+3.  **Illumination Variation:**
+    Translate the point source laterally on a 2D stage at the first lens's focal plane. This generates collimated beams at different angles $\hat{i}$. The source translation allows tilting the illumination beam [S1].
+
+4.  **Image Capture:**
+    Capture speckle images $I_{\hat{i}_1}(\hat{v})$ and $I_{\hat{i}_2}(\hat{v})$ for two distinct illumination directions $\hat{i}_1$ and $\hat{i}_2$. To improve statistics, capture multiple images by shifting the sample on a motorized stage to illuminate different locations on the sample area [S1].
+
+5.  **Image Filtering:**
+    Reject bad images by analyzing the maximal energy of the ballistic term. Reject images where the ballistic term's energy deviates significantly from the median, indicating sample defects (e.g., air bubbles) or non-uniformity [S1].
+
+6.  **Registration and Global Shift:**
+    Detect the strongest pixel in each image to determine the illumination directions $\hat{i}_1$ and $\hat{i}_2$. Compute the global displacement vector $\mathbf{\Delta} = \hat{i}_2 - \hat{i}_1$. Globally shift the second image $I_{\hat{i}_2}$ by $\mathbf{\Delta}$ to align speckle features, resulting in $I_{\hat{i}_2}(\hat{v} + \mathbf{\Delta})$ [S1].
+
+7.  **Local Registration (Distortion Correction):**
+    Due to optical aberrations, global shift is insufficient. For every local window (e.g., $100 \times 100$), locally shift the windows by a few pixels to maximize correlation, accounting for lens distortions [S1].
+
+8.  **Covariance Estimation:**
+    Compute the correlation $C(\tau)$ for a scattering angle displacement $\tau$ using spatial averaging over a local window $W$ around $\tau$. The estimator is:
+    $$ C(\tau) = \frac{1}{N} \sum_{\zeta \in W} \left[ I_1(\hat{i}_1 + \tau + \zeta) \cdot I_2(\hat{i}_1 + \tau + \zeta + \mathbf{\Delta}) \right] - \left( \frac{1}{N} \sum_{\zeta \in W} I_1(\hat{i}_1 + \tau + \zeta) \right) \left( \frac{1}{N} \sum_{\zeta \in W} I_2(\hat{i}_1 + \tau + \zeta + \mathbf{\Delta}) \right) $$
+    where $N$ is the number of pixels in window $W$. This avoids noisy single-pixel products [S1].
+
+9.  **Direction Selection (Optional Optimization):**
+    For rotationally invariant phase functions, select measurement directions $\tau$ orthogonal to the illuminator displacement $\mathbf{\Delta}$ (i.e., $\mathbf{\Delta} \cdot \tau = 0$) to maximize correlation strength [S1].
+
+10. **Averaging:**
+    Average the correlations produced by pairs of images from multiple samples or multiple locations of the same material to further reject noise [S1].
+
+11. **Model Fitting:**
+    Fit the estimated correlation values (proportional to the phase function) to a parametric model, such as the Henyey-Greenstein model, to extract parameters like the anisotropy factor $g$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def speckle_correlation_acquisition(images, delta_global, window_size=100):
+    """
+    Estimate phase function from speckle correlations.
+    
+    Args:
+        images: List of tuples (I1, I2, local_shifts). 
+                I1, I2 are 2D numpy arrays (images).
+                local_shifts is a list of (dx, dy) for each window position to correct distortion.
+        delta_global: Global shift vector (dx, dy) to align I2 to I1.
+        window_size: Size of the local window for correlation estimation.
+        
+    Returns:
+        correlation_map: 2D array of correlation values C(tau).
+    """
+    # Assume images are pre-registered globally and filtered
+    # I1 and I2 are the primary pair for this calculation
+    I1 = images[0][0]
+    I2 = images[0][1]
+    
+    H, W = I1.shape
+    correlation_map = np.zeros((H, W))
+    
+    # Define window boundaries
+    half_w = window_size // 2
+    
+    for y in range(half_w, H - half_w):
+        for x in range(half_w, W - half_w):
+            # Determine local shift for this window to correct aberrations
+            # In practice, this is found by maximizing correlation locally
+            # Here we assume local_shifts provides the correction for the window centered at (x,y)
+            # If not provided, assume 0 for simplicity, but note this is a critical step [S1]
+            dx_local, dy_local = 0, 0 
+            if 'local_shifts' in images[0]:
+                 # Placeholder for retrieving pre-computed local shifts
+                 # In real implementation, this would be a lookup or optimization
+                 pass 
+            
+            # Define window region in I1
+            y1, y2 = y - half_w, y + half_w
+            x1, x2 = x - half_w, x + half_w
+            
+            # Define corresponding region in I2
+            # Apply global shift and local shift
+            y2_shift = y2 + int(delta_global[1]) + int(dy_local)
+            x2_shift = x2 + int(delta_global[0]) + int(dx_local)
+            y1_shift = y1 + int(delta_global[1]) + int(dy_local)
+            x1_shift = x1 + int(delta_global[0]) + int(dx_local)
+            
+            # Extract windows
+            # Handle boundary checks
+            if not (0 <= y1_shift < H and 0 <= y2_shift <= H and 
+                    0 <= x1_shift < W and 0 <= x2_shift <= W):
+                continue
+                
+            win1 = I1[y1:y2, x1:x2]
+            win2 = I2[y1_shift:y2_shift, x1_shift:x2_shift]
+            
+            # Compute correlation C(tau) for tau = (x, y) relative to center
+            # Formula: E[I1*I2] - E[I1]*E[I2]
+            N = win1.size
+            
+            term1 = np.mean(win1 * win2)
+            term2 = np.mean(win1) * np.mean(win2)
+            
+            correlation_map[y, x] = term1 - term2
+            
+    return correlation_map
+
+def estimate_phase_function(correlation_map, window_size=100):
+    """
+    Fit Henyey-Greenstein model to the correlation map.
+    Note: The correlation is proportional to the phase function.
+    """
+    # Normalize correlation map
+    # ... (normalization steps)
+    
+    # Fit Henyey-Greenstein
+    # rho(theta) = (1-g^2) / (4*pi * (1 + g^2 - 2g*cos(theta))^(3/2))
+    # This requires mapping pixel coordinates to scattering angles theta.
+    # Given the 4f system, theta is related to pixel position.
+    # This step is implementation-specific based on calibration.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Ballistic Light Saturation:** Ballistic light focuses on a small number of pixels, causing high saturation that corrupts scattered values. This prevents measurement of small $\tau$ values (small angles) [S1]. HDR capture and Jinc subtraction are impractical due to sample non-uniformity and optical flare [S1].
+- **Angular Range Limit:** The lens aperture limits the maximal measurable scattering angle to about 8 degrees [S1].
+- **High OD Noise:** For very thick samples (e.g., OD > 10), the correlation is too noisy for practical usage [S1].
+- **Window Size Trade-off:** Smaller windows are noisy; very large windows over-smooth the phase function. Typical value is 100x100 pixels [S1].
+
+## Subtopics
+
+### [Signal-to-Noise Ratio (SNR) Analysis for Covariance Estimation](21065-signal-to-noise-ratio-snr-analysis-for-covariance-estimation.md)
+Quantifies the statistical reliability of estimating the covariance between two complex speckle fields. It derives the expected SNR for the estimator $X$ of the cross-covariance term $|C_{12}|^2$, guiding the selection of window sizes and the number of averaged frames to balance noise reduction against spatial blurring.
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of pixels $N$ in the window and the number of windows. The correlation computation is $O(N_{windows} \cdot N_{pixels})$.
+- **Memory Complexity:** Requires storing the input images and the correlation map.
+- **Performance:** Validated on materials like silica beads, polystyrene, lotion, honey, wax, toothpaste, milk, mustard, conditioner, and clay [S1].
+- **Strengths:** Directly extracts phase function without inverse rendering optimization. Works for thick samples (OD up to 7-8) where naive intensity profiling fails. Yields higher anisotropy parameters $g$ than intensity profiles (e.g., Lotion: 0.90 vs 0.85) [S1].
+- **Limitations:** Limited angular range (~8 degrees). Ballistic saturation corrupts small angles. High OD samples produce noisy results. Requires precise optical alignment and calibration for distortion correction [S1].
+- **When to Use:** When direct measurement of phase function is needed for thick, turbid media, and computational inverse rendering is prohibitive or inaccurate.
+- **When Not to Use:** When full angular range is required, or for very high OD samples where noise dominates.
+
+## Background
+The method was introduced by Marina Alterman, Evgeniia Saiko, and Anat Levin in 2022 [S1]. It builds on the principle that speckle correlations serve as a gating mechanism to isolate single-scattering light paths. Previous methods relied on inverse rendering optimization [Gkioulekas et al. 2013] or naive intensity profiling which assumed thin samples [S1]. This approach allows direct acquisition even in medium-thickness volumes [S1].
+
+## Sources
+[S1] Direct acquisition of volumetric scattering phase function using speckle correlations, https://zenodo.org/records/7660182, fetched 2026-10-26

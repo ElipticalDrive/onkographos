@@ -1,0 +1,168 @@
+# Binned Raster Traversal
+
+Also called: Binned CUDA Rasterization
+
+## Overview
+Binned Raster Traversal is a GPU-accelerated rasterization method for Gaussian splatting that replaces the global depth-sorted scan of the baseline with a tile-local, bin-based linear scan [S1]. It solves the performance bottleneck of global sorting by partitioning the pair stream into coarse bins per tile, allowing each CUDA thread block to process a contiguous interval of pre-ordered data without per-bin branching [S1]. Unlike the baseline which scans a single globally depth-sorted range, this method scans the concatenation of $K$ coarse bins laid out back to back in front-to-back bin order [S1].
+
+## How it works
+**Inputs:**
+*   Repaired pair stream $P$ (containing Gaussian IDs and sidecar data) [S1].
+*   Bin offsets array `binOffsets[t, k]` for each tile $t$ and bin index $k \in [0, K]$ [S1].
+*   Optional flat-ID sidecar [S1].
+*   Gaussian attributes (position, covariance, color, opacity) [S1].
+*   Image and tile dimensions [S1].
+
+**Outputs:**
+*   Rendered colors, alphas, and last contributing IDs for each pixel [S1].
+
+**Data Structures:**
+*   `binOffsets`: A 2D array of size $T \times (K+1)$, where $T$ is the number of tiles and $K$ is the number of coarse bins per tile. `binOffsets[t, k]` stores the start index in the pair stream for the $k$-th bin of tile $t$ [S1]. The interval for tile $t$ is $[binOffsets[t, 0], binOffsets[t, K])$ [S1].
+*   Shared memory: Used for candidate Gaussian IDs and optionally for staging candidate colors [S1].
+
+**Parameters:**
+*   $K$: Number of coarse bins per tile. Default: 64 [S1].
+*   Early-termination threshold: Transmittance $T_p$ below which a pixel is marked inactive [S1].
+*   Tile-alpha culling threshold: Minimum contribution threshold for tile-level culling [S1].
+*   Configuration flags: `color_staging` (enabled by default), `tile_alpha_culling` (enabled by default), `traversal_profiling` (disabled by default) [S1].
+
+**Steps:**
+1.  Launch one CUDA block per tile in parallel [S1].
+2.  Determine tile pixel coordinates and skip masked tiles [S1].
+3.  For all pixels $p$ in tile $t$: Initialize color accumulator $C_p \leftarrow 0$ and transmittance accumulator $T_p \leftarrow 1$ [S1].
+4.  Set scan interval $[a, b) \leftarrow [binOffsets[t, 0], binOffsets[t, K])$ [S1].
+5.  Iterate through batches within the interval $[a, b)$: If all pixels in the tile have terminated, break the loop [S1].
+6.  Load candidate Gaussian IDs into shared memory [S1].
+7.  If tile-alpha culling is enabled, remove candidates below the tile-level contribution threshold [S1].
+8.  If color staging is enabled, stage candidate colors cooperatively in shared memory [S1].
+9.  For all Gaussians $g$ in the surviving batch order, iterate over all active pixels $p$ in the tile [S1].
+10. If traversal profiling is enabled, count candidate visits [S1].
+11. Evaluate the same opacity/conic test as the baseline [S1].
+12. Update $C_p$ and $T_p$ using baseline alpha compositing [S1].
+13. If $T_p$ reaches the early-termination threshold, mark pixel $p$ as inactive [S1].
+14. Write final color, alpha, and last contributing ID for each pixel [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def binned_raster_traversal(repaired_pair_stream, bin_offsets, gaussian_attrs, tile_dims, K=64, batch_size=256, early_termination_threshold=1e-4, tile_alpha_culling_enabled=True, tile_alpha_threshold=0.01, color_staging_enabled=True, traversal_profiling_enabled=False):
+    # Constants [G]
+    EARLY_TERMINATION_THRESHOLD = early_termination_threshold
+    TILE_ALPHA_THRESHOLD = tile_alpha_threshold
+    candidate_visits = 0
+
+    # 1. Launch one CUDA block per tile in parallel [S1]
+    for tile_t in range(num_tiles):
+        # 2. Determine tile pixel coordinates; skip masked tiles [S1]
+        if tile_t.is_masked:
+            continue
+        tile_pixels = tile_t.get_pixel_coordinates()
+
+        # 3. Initialize accumulators for all pixels in the tile [S1]
+        for p in tile_pixels:
+            p.Cp = 0.0
+            p.Tp = 1.0
+            p.is_active = True
+
+        # 4. Set scan interval [S1]
+        a = bin_offsets[tile_t.id, 0]
+        b = bin_offsets[tile_t.id, K]
+
+        # 5. Iterate through batches within the interval [a, b) [S1]
+        batch_start = a
+        while batch_start < b:
+            # Check if all pixels terminated [S1]
+            if not any(p.is_active for p in tile_pixels):
+                break
+
+            # Determine batch end [G]
+            batch_end = min(batch_start + batch_size, b)
+
+            # 6. Load candidate Gaussian IDs into shared memory [S1]
+            candidate_ids = []
+            for idx in range(batch_start, batch_end):
+                candidate_ids.append(repaired_pair_stream[idx].gaussian_id)
+
+            # 7. Tile-alpha culling [S1]
+            if tile_alpha_culling_enabled:
+                surviving_ids = []
+                for gid in candidate_ids:
+                    g = gaussian_attrs[gid]
+                    # Estimate tile-level contribution [G]
+                    contribution = g.opacity * g.scale_factor
+                    if contribution >= TILE_ALPHA_THRESHOLD:
+                        surviving_ids.append(gid)
+                candidate_ids = surviving_ids
+
+            # 8. Color staging [S1]
+            if color_staging_enabled:
+                staged_colors = [gaussian_attrs[gid].color for gid in candidate_ids]
+
+            # 9. For all Gaussians g in surviving batch order, iterate over all active pixels p [S1]
+            for g_id in candidate_ids:
+                g = gaussian_attrs[g_id]
+                for p in tile_pixels:
+                    if not p.is_active:
+                        continue
+
+                    # 10. Traversal profiling [S1]
+                    if traversal_profiling_enabled:
+                        candidate_visits += 1
+
+                    # 11. Evaluate opacity/conic test [S1]
+                    alpha = compute_alpha(p, g)
+                    if alpha < 1e-6:
+                        continue
+
+                    # 12. Update Cp and Tp using baseline alpha compositing [S1]
+                    color = compute_color(p, g)
+                    p.Cp += color * alpha * p.Tp
+                    p.Tp *= (1.0 - alpha)
+
+                    # 13. Early termination [S1]
+                    if p.Tp < EARLY_TERMINATION_THRESHOLD:
+                        p.is_active = False
+
+                batch_start = batch_end
+
+        # 14. Write final results [S1]
+        for p in tile_pixels:
+            p.final_color = p.Cp
+            p.final_alpha = 1.0 - p.Tp
+            p.last_contributing_id = candidate_ids[-1] if candidate_ids else -1
+
+# Standard baseline operations [G]
+def compute_alpha(pixel, gaussian):
+    # Evaluates opacity/conic test as in baseline rasterization
+    return gaussian.opacity * gaussian.scale_factor
+
+def compute_color(pixel, gaussian):
+    # Computes projected color contribution as in baseline rasterization
+    return gaussian.color
+```
+
+**Edge Cases and Pitfalls:**
+*   **Bin Order:** Entries within a bin are not depth-sorted unless selective exact repair has restored the order. The method relies on the concatenation of bins being in front-to-back bin order, not necessarily within each bin [S1].
+*   **Precision:** Standard floating-point precision is used for accumulators. Early termination thresholds must be chosen carefully to avoid visual artifacts from premature culling [G].
+*   **Boundaries:** The scan interval $[a, b)$ is exclusive of $b$. Ensure `binOffsets` array is sized correctly to avoid out-of-bounds access [G].
+
+## Subtopics
+
+### [CUDA Tile-and-Bin Implementation](13681-cuda-tile-and-bin-implementation.md)
+The CUDA Tile-and-Bin Implementation is a parallelization strategy for computing the forward and backward passes of 2D bitmap primitive rendering on a GPU. It partitions the image plane into tiles and assigns primitives to the tiles they overlap, using one CUDA thread block per tile to achieve complete pixel-level parallelism. It sets itself apart from parent [Binned Raster Traversal](10295-binned-raster-traversal.md) by explicitly managing the tile-to-primitive assignment on the CPU and staging primitive parameters in shared memory for cooperative compositing within the block, rather than relying on a linear scan of a pre-binned pair stream.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of candidates in the tile's concatenated bins [S1].
+*   **Memory Complexity:** Requires storage for the pair stream, bin offsets, and Gaussian attributes, plus shared memory for candidate IDs and optionally colors [S1].
+*   **Measured Performance:** Evaluated on an RTX 4090 with a synthetic scale-up diagnostic from 5M to 30M Gaussians [S1]. Not given in the sources.
+*   **Strengths:** Eliminates global sorting overhead; enables efficient tile-local processing; supports early termination [S1].
+*   **Limitations:** Performance depends on the quality of binning; poor binning can lead to unbalanced workloads [G].
+*   **When to Use:** Suitable for high-resolution rendering with large numbers of Gaussians where global sorting is a bottleneck [G].
+*   **When Not to Use:** For small scenes or low Gaussian counts where global sorting overhead is negligible [G].
+
+## Background
+Binned Raster Traversal was introduced in the TileGS paper, which proposes tile-local depth binning for Gaussian splatting rasterization [S1]. It addresses the scalability issues of previous methods by leveraging tile-local processing and binning strategies [S1].
+
+## Sources
+[S1] TileGS: Tile-Local Depth Binning for Gaussian Splatting Rasterization, https://doi.org/10.2312/pg.20261013, fetched 2026-10-29

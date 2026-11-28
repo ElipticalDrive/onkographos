@@ -1,0 +1,228 @@
+# Incremental Preconditioned Gradient Method
+
+Also called: Incremental ART, Incremental Preconditioned Gradient Method for Reflective Tomography, Online Learning for Reflective Tomography
+
+## Overview
+The Incremental Preconditioned Gradient Method is an online learning algorithm for reflective tomography that incrementally updates a voxel model $\phi \in \mathbb{R}^N$ to minimize modeling error against a sequence of observed frames [S1]. It solves the global least-squares optimization problem by applying preconditioned gradient descent steps to individual data frames one at a time [S1]. It distinguishes itself from batch solvers by processing data sequentially (frame-driven) and using a specific preconditioner derived from the projection matrix structure to prioritize high-frequency spatial information (surfaces) [S1].
+
+## How it works
+**Inputs:**
+- Training dataset: A set of $S$ camera configurations $\{C_s\}_{s=1}^S$ and corresponding observed images $\{g_s\}_{s=1}^S$, where $g_s \in \mathbb{R}^{M_s}$ and $M_s$ is the number of pixels in frame $s$ [S1].
+- Voxel grid: Defined by a bounding box with corners $a, b \in \mathbb{R}^3$ and voxel side length $h$ [S1].
+- Parameters: Learning rate $\omega$, regularization $\sigma$, inner solver tolerance, stopping criteria [S1].
+
+**Outputs:**
+- Updated voxel model $\phi \in \mathbb{R}^N$, where $N$ is the number of voxels [S1].
+
+**Data Structures:**
+- $\phi$: Vector of size $N$, storing voxel values. Initialized to zero [S1].
+- $g_s$: Vector of size $M_s$, storing pixel intensities for frame $s$ [S1].
+- $X_C$: Linear projection operator mapping $\phi$ to image space [S1]. In implementation, this is handled via ray-tracing backprojection and projection steps [S1].
+
+**Formulas:**
+The cost function $J$ for a single occurrence $(C, g)$ is defined as [S1]:
+$$ J(\phi, C, g) = \frac{1}{2} (X_C X_C^* + \sigma I)^{-\frac{1}{2}} (X_C \phi - g) $$
+where $\sigma > 0$ is a regularization parameter [S1].
+
+The gradient of $J$ with respect to $\phi$ is [S1]:
+$$ \frac{\partial J}{\partial \phi}(\phi, C, g) = X_C^* (X_C X_C^* + \sigma I)^{-1} (X_C \phi - g) $$
+
+The model update for iteration $k$, using frame $s_k$, is [S1]:
+$$ \phi^{(k+1)} = \phi^{(k)} - \omega \frac{\partial J}{\partial \phi}(\phi^{(k)}, C_{s_k}, g_{s_k}) $$
+where $\omega > 0$ is the learning rate [S1].
+
+The global problem solved incrementally is [S1]:
+$$ \inf_{\phi \in \mathbb{R}^N} \sum_{s=1}^S J(\phi, C_s, g_s) $$
+
+**Parameters:**
+- $\omega$: Relaxation parameter. Suggested value $\omega = 0.5$ for reflective tomography to prioritize high-frequency spatial information (surfaces) [S1]. Standard ART uses smaller values like $0.05$ [S1].
+- $\sigma$: Regularization parameter. Chosen on the order of $Lh$, where $L$ is the characteristic length of the box (e.g., diagonal $L = \|b-a\|$) and $h$ is the voxel side length [S1].
+- Inner solver tolerance: For the conjugate gradient solver used to approximate the inverse terms, a relative residual tolerance of $1\%$ and a maximum bound of $10$ iterations are used [S1].
+- Stopping criterion: Either a fixed number of cycles $\kappa$ (e.g., $\kappa=2$) or a decay rate threshold $\tau$ (e.g., $\tau=5\%$) on the RMSE between successive cycles, with a safety bound $\kappa_{max}$ (e.g., $\kappa_{max}=8$) [S1].
+- Ray ordering: To simulate random ordering, use a step $p$ relatively prime to $S$: $s_{k+1} - 1 = (s_k + p - 1) \pmod S$, starting with $s_0 = 1$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def incremental_preconditioned_gradient_method(S, cameras, images, box_corners, voxel_size, 
+                                               omega, sigma, kappa_max, tau_threshold):
+    """
+    S: Total number of training frames
+    cameras: List of camera configurations C_s
+    images: List of observed images g_s
+    box_corners: Tuple (a, b) defining the bounding box
+    voxel_size: h, side length of voxels
+    omega: Learning rate
+    sigma: Regularization parameter
+    kappa_max: Maximum number of cycles
+    tau_threshold: Threshold for RMSE decay rate
+    """
+    # 1. Initialize voxel model
+    N = calculate_voxel_count(box_corners, voxel_size)
+    phi = zeros(N)
+    
+    # 2. Determine ray ordering step
+    # Choose p relatively prime to S. For simplicity, if S is odd, p=2; else p=1 (though p=1 is not relatively prime to even S, 
+    # the source suggests p and S are relatively prime. A safe generic choice for implementation if not specified:
+    # find smallest p > 1 such that gcd(p, S) == 1. If S=1, p=1.
+    p = find_relatively_prime_step(S)
+    
+    current_frame_index = 0 # s_0 = 1 implies index 0 in 0-based list, but formula uses 1-based indexing for s_k
+    # Formula: s_{k+1} - 1 = (s_k + p - 1) mod S. 
+    # Let idx_k be 0-based index. s_k = idx_k + 1.
+    # idx_{k+1} + 1 - 1 = (idx_k + 1 + p - 1 - 1) mod S ? 
+    # Source: s_{k+1} - 1 = (s_k + p - 1) mod S.
+    # If s_k is 1-based index, then s_k - 1 is 0-based index.
+    # Let idx = s - 1.
+    # idx_{k+1} = ( (idx_k + 1) + p - 1 - 1 ) mod S ? No.
+    # s_{k+1} = (s_k + p - 1) mod S + 1 ? 
+    # Let's stick to the source formula strictly: s_{k+1} - 1 = (s_k + p - 1) mod S.
+    # If s_k is 1..S, then s_k - 1 is 0..S-1.
+    # Let u_k = s_k - 1.
+    # u_{k+1} = ( (u_k + 1) + p - 1 - 1 ) mod S ? 
+    # Source: s_{k+1} - 1 = (s_k + p - 1) mod S.
+    # Example: S=5, p=2. s_0=1.
+    # k=0: s_1 - 1 = (1 + 2 - 1) mod 5 = 2 mod 5 = 2 => s_1 = 3.
+    # k=1: s_2 - 1 = (3 + 2 - 1) mod 5 = 4 mod 5 = 4 => s_2 = 5.
+    # k=2: s_3 - 1 = (5 + 2 - 1) mod 5 = 6 mod 5 = 1 => s_3 = 2.
+    # k=3: s_4 - 1 = (2 + 2 - 1) mod 5 = 3 mod 5 = 3 => s_4 = 4.
+    # k=4: s_5 - 1 = (4 + 2 - 1) mod 5 = 5 mod 5 = 0 => s_5 = 1.
+    # Sequence: 1, 3, 5, 2, 4.
+    
+    s_k = 1 # 1-based index
+    prev_rmse = infinity
+    cycle_count = 0
+    
+    while cycle_count < kappa_max:
+        # 3. Iterate through all S frames
+        for iteration in range(S):
+            # Select frame s_k
+            # Convert 1-based s_k to 0-based index for array access
+            idx = s_k - 1
+            C = cameras[idx]
+            g = images[idx]
+            
+            # 4. Compute residual and gradient
+            # Project model to image space: r = X_C phi - g
+            # Note: X_C phi is computed via forward projection (ray tracing)
+            # X_C^* v is computed via backprojection
+            # The term (X_C X_C^* + sigma I)^{-1} requires solving a linear system
+            # Let v = X_C phi - g
+            # We need to solve (X_C X_C^* + sigma I) y = v for y
+            # Then gradient = X_C^* y
+            
+            v = forward_projection(phi, C) - g
+            
+            # Solve (X_C X_C^* + sigma I) y = v using Conjugate Gradient
+            # Inner solver tolerance: 1% relative residual, max 10 iterations
+            y = conjugate_gradient_solve(X_C_X_C_star_plus_sigma_I, v, tolerance=0.01, max_iter=10)
+            
+            # Compute gradient
+            gradient = backprojection(y, C)
+            
+            # 5. Update model
+            phi = phi - omega * gradient
+            
+            # 6. Select next frame
+            # s_{k+1} - 1 = (s_k + p - 1) mod S
+            s_k = ((s_k + p - 1) % S) + 1
+            
+        # End of one cycle (S iterations)
+        cycle_count += 1
+        
+        # 7. Check stopping criterion
+        # Compute RMSE for the current cycle
+        # RMSE is computed over the test set or training set? 
+        # Source mentions RMSE for test set S^{[i]} in cross-validation context.
+        # For stopping criterion, it says "decay rate of the RMSE between two successive cycles".
+        # This implies computing RMSE on the training data or a validation set.
+        # Assuming training data for the loop control as per "successive cycles" in training.
+        current_rmse = compute_rmse(phi, cameras, images)
+        
+        if cycle_count > 1:
+            decay_rate = (prev_rmse - current_rmse) / prev_rmse
+            if decay_rate <= tau_threshold:
+                break
+        
+        prev_rmse = current_rmse
+
+    return phi
+
+def find_relatively_prime_step(S):
+    if S <= 1:
+        return 1
+    for p in range(2, S):
+        if gcd(p, S) == 1:
+            return p
+    return 1 # Should not happen for S > 1
+
+def forward_projection(phi, C):
+    # Ray tracing to compute X_C phi
+    # Returns vector of size M_s
+    pass
+
+def backprojection(v, C):
+    # Backprojection to compute X_C^* v
+    # Returns vector of size N
+    pass
+
+def conjugate_gradient_solve(A, b, tolerance, max_iter):
+    # Solves Ax = b
+    # A is implicitly (X_C X_C^* + sigma I)
+    # Matrix-vector product for A:
+    # def matvec(x):
+    #    temp = forward_projection(backprojection(x, C), C) # X_C X_C^* x
+    #    return temp + sigma * x
+    pass
+
+def compute_rmse(phi, cameras, images):
+    # Computes RMSE over all training frames
+    # eta = sqrt( (1 / sum(M_s)) * sum( ||X_C phi - g||^2 ) )
+    total_sq_error = 0
+    total_pixels = 0
+    for C, g in zip(cameras, images):
+        pred = forward_projection(phi, C)
+        diff = pred - g
+        total_sq_error += dot(diff, diff)
+        total_pixels += len(g)
+    return sqrt(total_sq_error / total_pixels)
+```
+
+**Edge Cases and Pitfalls:**
+- Precision: The method relies on double precision for $\phi$ to maintain accuracy, consuming $8N$ bytes [S1].
+- Boundary Conditions: The bounding box must contain the scene; voxel size $h$ should satisfy $h \ge r$ (object space resolution) to ensure well-resolved MIP images [S1].
+- Degenerate Input: If $S=1$, the ordering step $p$ is trivial. The regularization $\sigma$ must be non-zero to ensure invertibility of $(X_C X_C^* + \sigma I)$ [S1].
+
+## Subtopics
+
+### [CGLS Solver (Conjugate Gradient Least Squares)](3285-cgls-solver-conjugate-gradient-least-squares.md)
+A batch solver using conjugate gradients on the normal equations. Choose when memory allows loading all data and a single global solution is preferred over incremental updates.
+
+### [Partially Learned Gradient Descent](3771-partially-learned-gradient-descent.md)
+A variant that may use learned parameters. Choose when adaptive learning rates are needed beyond the fixed $\omega$.
+
+### [SGD with Positive t-Distribution](5809-sgd-with-positive-t-distribution.md)
+Uses a different sampling distribution for noise or updates. Choose for robustness against outliers in a stochastic setting.
+
+### [Newton's Method](6442-newton-s-method.md)
+Uses second-order derivatives. Choose when the Hessian is available and the problem is well-conditioned, accepting higher per-iteration cost.
+
+### [Inexact Line Search Optimization](7741-inexact-line-search-optimization.md)
+Dynamically adjusts step size. Choose when a fixed $\omega$ is insufficient for convergence stability.
+
+## Operating characteristics
+- **Time Complexity:** One cycle of $S$ iterations costs $O(M n)$ operations, where $M = S m^2$ is the total number of pixels and $n$ estimates the number of diagonal voxels (or contributing voxels per ray) [S1]. One iteration costs $O(22 m^2 n)$ [S1].
+- **Memory Complexity:** Dominated by the unknown $\phi \in \mathbb{R}^N$, requiring $8N$ bytes for double precision [S1]. Total RAM usage is approximately $16N$ bytes including intermediate steps [S1].
+- **Performance:** The method is efficient for large-scale tomography due to its frame-driven approach, loading only one image at a time [S1].
+- **Strengths:** Handles large datasets incrementally; preconditioning improves convergence for reflective tomography by emphasizing surfaces [S1].
+- **Limitations:** Requires careful tuning of $\omega$ and $\sigma$; convergence depends on the ordering of frames [S1].
+- **When to use:** Reflective tomography reconstruction where data arrives sequentially or memory is limited [S1].
+- **When not to use:** When exact global solutions are required without iterative approximation, or when the problem is not ill-conditioned in a way that benefits from the specific preconditioner [S1].
+
+## Background
+The Incremental Preconditioned Gradient Method was introduced in the context of flexible algebraic techniques for multiview reconstruction [S1]. It is based on the work of [S1] (2019), which proposes an online learning approach for reflective tomography using a preconditioned gradient descent on a least-squares cost function [S1]. The method adapts the Algebraic Reconstruction Technique (ART) by incorporating a preconditioner derived from the projection matrix structure [S1].
+
+## Sources
+[S1] Flexible algebraic technique for multiview reconstruction: incremental learning in reflective tomography, https://doi.org/10.1117/1.OE.58.10.103102, fetched 2026-10-26

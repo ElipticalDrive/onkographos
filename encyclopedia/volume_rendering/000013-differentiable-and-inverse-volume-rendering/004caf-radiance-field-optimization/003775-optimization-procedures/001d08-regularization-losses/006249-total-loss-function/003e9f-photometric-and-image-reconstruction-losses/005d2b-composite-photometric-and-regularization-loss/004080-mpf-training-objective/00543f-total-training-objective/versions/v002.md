@@ -1,0 +1,56 @@
+# Total Training Objective
+Also called: OMeGa Loss
+## Overview
+The Total Training Objective is a composite loss function minimized during optimization to jointly reconstruct explicit meshes and Gaussian splats for robust scene-level surface reconstruction [S1]. It produces geometrically consistent 3D structures by combining photometric reconstruction with geometric regularization [S1]. It is distinguished from its parent, the [MPF Training Objective](10247-mpf-training-objective.md), by its specific inclusion of Laplacian smooth, normal consistency, and monocular normal losses rather than near-surface or free-space regularizers [S1].
+## How it works
+The method minimizes a weighted sum of four loss terms to optimize network parameters [S1]. The loss takes rendered images, predicted mesh geometry, and monocular normal estimates as inputs, and outputs a scalar value for gradient-based optimization [S1].
+
+The total loss $L$ is defined as [S1]:
+$$
+L = L_{img} + \lambda_{lap} L_{lap} + \lambda_{nc} L_{nc} + \lambda_n L_n
+$$
+
+Where:
+*   $L_{img}$ is the photometric loss measuring pixel-wise color difference between rendered and target views [S1].
+*   $L_{lap}$ is the Laplacian smooth loss, encouraging surface smoothness [S1].
+*   $L_{nc}$ is the normal consistency loss, ensuring normals are consistent across different views [S1].
+*   $L_n$ is the monocular normal loss, aligning predicted normals with estimates from monocular foundational models [S1].
+*   $\lambda_{lap}, \lambda_{nc}, \lambda_n$ are scalar hyperparameters controlling the weight of each geometric regularizer [S1].
+
+**Monocular Normal Loss ($L_n$) Details:**
+The monocular normal loss uses a margin-based hinge formulation to handle inconsistencies inherent in monocular predictions [S1]. It is calculated as:
+$$
+L_n = \sum \max(\| \mathbf{N} - \hat{\mathbf{N}} \| - m, 0)
+$$
+Where:
+*   $\mathbf{N}$ is the predicted surface normal [S1].
+*   $\hat{\mathbf{N}}$ is the monocular estimated normal [S1].
+*   $m$ is a small margin hyperparameter that tolerates minor inconsistencies between views [S1].
+
+**Implementation Steps:**
+1.  Render images and surface normals from the current network state [S1].
+2.  Compute photometric loss $L_{img}$ against ground truth target views [S1].
+3.  Compute Laplacian smooth loss $L_{lap}$ on the mesh geometry [S1].
+4.  Compute normal consistency loss $L_{nc}$ by comparing normals of corresponding points across multiple views [S1].
+5.  Compute monocular normal loss $L_n$ by comparing predicted normals $\mathbf{N}$ with monocular estimates $\hat{\mathbf{N}}$ using the margin $m$ [S1].
+6.  Combine losses using weights $\lambda_{lap}, \lambda_{nc}, \lambda_n$ to form $L$ [S1].
+7.  Backpropagate $L$ to update network parameters [S1].
+
+**Parameters:**
+*   $\lambda_{lap}, \lambda_{nc}, \lambda_n$: Weights for geometric regularizers. Numerical values are not provided in the sources [S1].
+*   $m$: Margin for monocular normal loss. Described as "small" but no exact value is provided [S1].
+
+**Edge Cases:**
+*   Monocular normal inconsistency: The margin $m$ in $L_n$ is specifically designed to handle inherent normal inconsistencies across different views produced by monocular foundational models [S1].
+## Subtopics
+
+### Composite Photometric and MAC Loss
+A variant of the total training objective used in MAC-Splat, combining photometric reconstruction with Multi-Attribute Consistency (MAC) loss to train Gaussian prediction heads and residual fusion modules [S2]. The formula is $L_{total} = L_{photo} + \lambda_{MAC} L_{MAC}$ [S2]. $L_{photo}$ is a weighted sum of an $\ell_2$ reconstruction term and an LPIPS term applied to rendered target views [S2]. The MASt3R correspondence loss weight is set to zero in reported results [S2]. This variant is chosen when using Gaussian Splatting with multi-attribute consistency constraints rather than explicit mesh regularization [S2].
+
+## Operating characteristics
+The method requires computing multiple geometric regularizers (Laplacian, normal consistency, monocular) in addition to standard photometric loss, increasing computational overhead per iteration compared to photometric-only training [S1]. The sources do not provide specific time or memory complexity metrics, hardware performance data, or resolution scaling characteristics [S1, S2].
+## Background
+The Total Training Objective originates from the OMeGa framework for joint optimization of explicit meshes and Gaussian splats for robust scene-level surface reconstruction [S1]. It was developed to address geometric artifacts and improve surface quality in sparse-view reconstructions by introducing specific geometric regularizers [S1].
+## Sources
+[S1] OMeGa: Joint Optimization of Explicit Meshes and Gaussian Splats for Robust Scene-Level Surface Reconstruction, https://doi.org/10.1109/WACV61042.2026.00427, fetched 2026-10-30
+[S2] MAC-Splat: Multi-Attribute Consistency for High-Fidelity Sparse-View Reconstruction, https://doi.org/10.1007/978-3-032-37023-5_36, fetched 2026-10-26

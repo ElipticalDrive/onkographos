@@ -1,0 +1,145 @@
+# Radiance Surface Loss (Stochastic Background Expectation)
+
+Also called: Appendix A loss, NeRF-form loss
+
+## Overview
+Radiance Surface Loss computes the expected local rendering loss at a candidate point by analytically integrating over a probability distribution of background surfaces located behind it, rather than relying on naive stochastic sampling of perturbed backgrounds [S1]. This method provides an efficient, non-local perturbation formulation that maintains the structural simplicity of standard NeRF loss functions while accounting for uncertainty in the scene geometry behind the sampled points [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A set of $m$ sample points $\{p_i\}_{i=1}^m$ along a ray, where each point $p_i$ is at distance $t_i$. For each point, the occupancy $\alpha_i$ (probability of absorption) and color $L_i$ are queried from the radiance field. A target image color $L_{\text{target}}$ is provided for loss computation. The background surface probability density function $f_b(t)$ is assumed to be a free-flight distribution where $\int_0^{t_{\max}} f_b(t) dt = 1$ [S1].
+*   **Outputs:** The total ray loss $\mathcal{L}_{\text{ray}}$, which is the sum of expected local losses for all candidates along the ray [S1].
+
+**Data Structures**
+*   **Samples:** An array of size $m$ containing tuples $(t_i, \alpha_i, L_i)$.
+*   **Loss Function:** A differentiable metric $\ell(L)$, typically the mean squared error or L1 distance between the rendered color $L$ and the target color $L_{\text{target}}$ [S1].
+
+**Mathematical Derivation**
+The continuous expectation of the loss at a candidate position $p$ at distance $t_p$ is derived by integrating the local loss over the background distribution $f_b(t)$ for all $t > t_p$ [S1]:
+
+$$
+\mathbb{E}[\mathcal{L}(p)] = \int_{t_p}^{t_{\max}} (\alpha_p \ell(L_p) + (1 - \alpha_p) \ell(L_t)) f_b(t) dt
+$$
+
+This integral separates into two terms:
+$$
+\mathbb{E}[\mathcal{L}(p)] = \left( 1 - \int_0^{t_p} f_b(t) dt \right) \alpha_p \ell(L_p) + (1 - \alpha_p) \int_{t_p}^{t_{\max}} \ell(L_t) f_b(t) dt
+$$
+
+Defining $\mathbb{E}_{t > t_p}[\ell(L_t)]$ as the expected error of surfaces behind $p$, the equation is factored into a weight term and a candidate term [S1]:
+
+$$
+\mathbb{E}[\mathcal{L}(p)] = \underbrace{\left( 1 - \int_0^{t_p} f_b(t) dt \right)}_{\text{weight}} \underbrace{\left( \alpha_p \ell(L_p) + (1 - \alpha_p) \mathbb{E}_{t > t_p}[\ell(L_t)] \right)}_{\text{candidate}}
+$$
+
+The weight term represents the probability that the background surface is located behind the candidate $p$. The candidate term combines the direct loss at $p$ with the expected loss of the background if $p$ is transparent [S1].
+
+**Discrete Implementation**
+In practice, the ray is discretized into $m$ samples. The continuous integrals are replaced by discrete sums. The total ray loss is the sum of expected losses for all $m$ points [S1]:
+
+$$
+\mathcal{L}_{\text{ray}} = \sum_{i=1}^m \left[ \left( \prod_{k=1}^{i-1} (1 - \alpha_k) \right) (\alpha_i \ell(L_i) + (1 - \alpha_i) \hat{\mathbb{E}}_{t > t_i}[\ell(L_t)]) \right]
+$$
+
+where the discrete background expectation $\hat{\mathbb{E}}_{t > t_i}[\ell(L_t)]$ is computed as:
+
+$$
+\hat{\mathbb{E}}_{t > t_i}[\ell(L_t)] = \sum_{j=i+1}^m \left( \prod_{t=i+1}^{j-1} (1 - \alpha_t) \right) \alpha_j \ell(L_j)
+$$
+
+Here, the product term $\prod_{t=i+1}^{j-1} (1 - \alpha_t)$ represents the transmittance from sample $i+1$ to $j-1$, ensuring that the background expectation accounts for occlusion by intermediate samples [S1].
+
+**Algorithm Steps**
+1.  **Sample Points:** For each ray, sample $m$ points $p_i$ at distances $t_i$. Query the radiance field to obtain occupancy $\alpha_i$ and color $L_i$ for each point.
+2.  **Compute Local Losses:** Calculate the local loss $\ell(L_i)$ for each sample against the target image color.
+3.  **Compute Background Expectations:** For each sample $i$, compute the discrete background expectation $\hat{\mathbb{E}}_{t > t_i}[\ell(L_t)]$ by summing over all future samples $j > i$. The contribution of each future sample $j$ is weighted by the transmittance from $i+1$ to $j-1$ and the occupancy at $j$:
+    $$ \hat{\mathbb{E}}_{t > t_i}[\ell(L_t)] = \sum_{j=i+1}^m \left( \prod_{t=i+1}^{j-1} (1 - \alpha_t) \right) \alpha_j \ell(L_j) $$
+4.  **Compute Ray Loss:** Sum the weighted expected losses for all samples $i=1$ to $m$. The weight for sample $i$ is the accumulated transmittance from the ray origin to $i-1$:
+    $$ \mathcal{L}_{\text{ray}} = \sum_{i=1}^m \left[ \left( \prod_{k=1}^{i-1} (1 - \alpha_k) \right) (\alpha_i \ell(L_i) + (1 - \alpha_i) \hat{\mathbb{E}}_{t > t_i}[\ell(L_t)]) \right] $$
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def radiance_surface_loss(samples, target_colors):
+    """
+    samples: list of tuples (alpha, color) for m points along a ray.
+    target_colors: list of target colors for the ray (or broadcasted).
+    Returns: scalar loss value.
+    """
+    m = len(samples)
+    total_loss = 0.0
+    
+    # Precompute local losses
+    local_losses = []
+    for i in range(m):
+        alpha_i, color_i = samples[i]
+        # Compute error metric, e.g., MSE
+        loss_i = mean_squared_error(color_i, target_colors[i])
+        local_losses.append(loss_i)
+        
+    # Compute background expectations for each point
+    # bg_expectations[i] stores E[l(L_t)] for t > t_i
+    bg_expectations = [0.0] * m
+    
+    for i in range(m - 1, -1, -1):
+        if i == m - 1:
+            # No points behind the last sample
+            bg_expectations[i] = 0.0
+        else:
+            # Sum over j > i
+            exp_val = 0.0
+            transmittance = 1.0
+            for j in range(i + 1, m):
+                alpha_j, _ = samples[j]
+                # Weight is transmittance from i+1 to j-1 * alpha_j
+                # Note: transmittance accumulates as we iterate j
+                # Product term: prod_{t=i+1}^{j-1} (1 - alpha_t)
+                # We can update transmittance incrementally
+                # Before processing j, transmittance is prod_{t=i+1}^{j-1} (1 - alpha_t)
+                weight = transmittance * alpha_j
+                exp_val += weight * local_losses[j]
+                
+                # Update transmittance for next j (j+1)
+                # New transmittance should be prod_{t=i+1}^{j} (1 - alpha_t)
+                transmittance *= (1.0 - alpha_j)
+                
+            bg_expectations[i] = exp_val
+
+    # Compute total ray loss
+    accumulated_transmittance = 1.0
+    for i in range(m):
+        alpha_i, _ = samples[i]
+        
+        # Weight term: prob of background being behind i
+        # In discrete case, this is the accumulated transmittance from origin to i-1
+        weight = accumulated_transmittance
+        
+        # Candidate term
+        candidate_term = (alpha_i * local_losses[i]) + \
+                         ((1.0 - alpha_i) * bg_expectations[i])
+        
+        total_loss += weight * candidate_term
+        
+        # Update accumulated transmittance for next sample
+        accumulated_transmittance *= (1.0 - alpha_i)
+        
+    return total_loss
+```
+
+**Parameters and Edge Cases**
+*   **Number of samples ($m$):** Determines the resolution of the ray discretization. Higher $m$ improves accuracy but increases computational cost [S1].
+*   **Detached Gradients:** The weight term $\prod_{k=1}^{i-1} (1 - \alpha_k)$ and the background expectation $\hat{\mathbb{E}}_{t > t_i}[\ell(L_t)]$ must be detached from the computational graph during backpropagation. They are treated as constants to avoid altering the loss landscape [S1].
+*   **Boundary Conditions:** For the last sample $i=m-1$, the background expectation is zero because there are no future samples [S1].
+
+## Operating characteristics
+*   **Complexity:** The computation of the background expectation for each sample $i$ requires iterating over all subsequent samples $j > i$, leading to an $O(m^2)$ complexity per ray. This can be optimized to $O(m)$ by computing the expectation in reverse order and maintaining a running sum, as shown in the pseudocode.
+*   **Memory:** Requires storing $O(m)$ local losses and background expectations.
+*   **Strengths:** Avoids the inefficiency of naive stochastic background sampling by analytically integrating over all possible backgrounds. It provides a stable, non-local perturbation that is structurally similar to standard NeRF loss, making it easy to integrate into existing pipelines [S1].
+*   **Limitations:** The $O(m^2)$ naive implementation is computationally expensive for large $m$. The assumption of a free-flight background distribution may not hold for all scenes [S1].
+
+## Background
+The Radiance Surface Loss was introduced in the paper "Radiance Surfaces: Optimizing Surface Representations with a 5D Radiance Field Loss" [S1]. It addresses the limitations of naive stochastic background sampling in differentiable volume rendering by providing an analytic expectation over background surfaces. The method is derived in Appendix A of the source paper, where it is referred to as the "NeRF-form" loss due to its structural similarity to the original NeRF loss function [S1].
+
+## Sources
+[S1] Radiance Surfaces: Optimizing Surface Representations with a 5D Radiance Field Loss, https://doi.org/10.1145/3721238.3730713, fetched 2026-10-26

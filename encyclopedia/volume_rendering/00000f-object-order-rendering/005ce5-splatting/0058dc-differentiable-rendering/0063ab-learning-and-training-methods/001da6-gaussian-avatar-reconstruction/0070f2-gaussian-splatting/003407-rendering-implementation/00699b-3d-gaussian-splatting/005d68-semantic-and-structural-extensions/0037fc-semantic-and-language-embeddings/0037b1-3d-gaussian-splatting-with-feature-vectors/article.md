@@ -1,0 +1,156 @@
+# 3D Gaussian Splatting with Feature Vectors
+
+Also called: Semantic-Extended 3D Gaussian Splatting Rendering
+
+## Overview
+This method extends 3D Gaussian Splatting by attaching a high-dimensional semantic embedding vector to each primitive, enabling simultaneous photometric and semantic rasterization within a unified alpha-compositing pipeline [S2]. It solves the problem of decoupled geometry and semantics by ensuring that the blending weights for semantic features are identical to those for color, thereby hard-coding alignment between visual and semantic boundaries [S2]. Unlike standard 3D Gaussian Splatting which renders only color, this approach produces feature maps suitable for segmentation or CLIP comparison [S1, unofficial]. It builds on [Semantic and Language Embeddings](8130-semantic-and-language-embeddings.md) by utilizing the shared differentiable alpha-blending accumulation principle.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D Gaussian primitives, each parameterized by position, scale, rotation, opacity, spherical harmonic (SH) coefficients for color, and a semantic embedding vector. Camera parameters (view and projection matrices) are required for projection.
+*   **Output:** For each pixel $p$, a color value $\mathbf{C}(p)$ and a semantic feature vector $\mathbf{F}(p)$.
+
+**Data Structures:**
+Each primitive $i$ stores the following attributes contiguously for rasterization [S2]:
+*   `position`: 3D vector $\mathbf{p}_i \in \mathbb{R}^3$.
+*   `scale`: 3D vector $\mathbf{s}_i \in \mathbb{R}^3$.
+*   `rotation`: Quaternion $\mathbf{q}_i \in \mathbb{R}^4$.
+*   `opacity`: Scalar $\alpha_i \in \mathbb{R}$.
+*   `sh_coefficients`: Set of coefficients for view-dependent color.
+*   `semantic_embedding`: Vector $\mathbf{f}_i \in \mathbb{R}^d$ (typically $d=512$) [S2].
+
+**Steps:**
+1.  **Parameterization:** Define each 3D Gaussian primitive with its position, scale, rotation, opacity, SH coefficients, and semantic embedding vector [S2].
+2.  **Projection:** Project the 3D Gaussians to the 2D image plane using an affine approximation of the perspective transformation. This yields 2D Gaussians with a transformed mean and a 2D covariance matrix [S2].
+3.  **Sorting:** Sort the projected 2D Gaussians front-to-back according to their depth relative to the camera [S2]. Let $\mathcal{O}_p$ be the ordered list of overlapping Gaussians for pixel $p$.
+4.  **Alpha Compositing:** Compute the final pixel values by iterating over $\mathcal{O}_p$. For each Gaussian $i \in \mathcal{O}_p$:
+    *   Evaluate the spherical harmonics to get the view-dependent color $\mathbf{c}_i$.
+    *   Compute the transmittance $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$.
+    *   Accumulate color and feature vector using the same alpha weights [S2]:
+        $$
+        \mathbf{C}(p) = \sum_{i \in \mathcal{O}_p} \mathbf{c}_i \cdot \alpha_i \cdot T_i
+        $$
+        $$
+        \mathbf{F}(p) = \sum_{i \in \mathcal{O}_p} \mathbf{f}_i \cdot \alpha_i \cdot T_i
+        $$
+    *   If $\mathcal{O}_p$ is empty, $\mathbf{F}(p) = \mathbf{0}$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_semantic_gaussians(primitives, camera):
+    """
+    primitives: List of Gaussian objects with attributes:
+        - pos: (3,) position
+        - scale: (3,) scale
+        - rot: (4,) quaternion
+        - opacity: scalar
+        - sh_coeffs: SH coefficients
+        - feat: (d,) semantic embedding vector
+    camera: Camera object with view and projection matrices
+    """
+    # 1. Project 3D Gaussians to 2D
+    # Using affine approximation of perspective transformation
+    projected_gaussians = []
+    for prim in primitives:
+        # Compute 2D mean and covariance from 3D parameters and camera matrix
+        # This step involves Jacobian of perspective projection
+        mean_2d, cov_2d, depth = project_3d_to_2d(prim.pos, prim.scale, prim.rot, camera)
+        projected_gaussians.append({
+            'mean': mean_2d,
+            'cov': cov_2d,
+            'opacity': prim.opacity,
+            'color': eval_sh(prim.sh_coeffs, camera.view_direction),
+            'feat': prim.feat,
+            'depth': depth
+        })
+
+    # 2. Sort front-to-back by depth
+    projected_gaussians.sort(key=lambda g: g['depth'])
+
+    # 3. Rasterize to image
+    height, width = camera.image_size
+    feature_map = np.zeros((height, width, prim.feat.shape[0]))
+    color_map = np.zeros((height, width, 3))
+
+    for prim in projected_gaussians:
+        # Determine bounding box for this Gaussian on the image plane
+        bbox = get_bounding_box(prim['mean'], prim['cov'])
+        clip_bbox = clip_to_image(bbox, height, width)
+        
+        for y in range(clip_bbox.y_min, clip_bbox.y_max):
+            for x in range(clip_bbox.x_min, clip_bbox.x_max):
+                # Evaluate 2D Gaussian PDF at pixel (x, y)
+                dist = np.array([x - prim['mean'][0], y - prim['mean'][1]])
+                alpha = prim['opacity'] * np.exp(-0.5 * dist.T @ np.linalg.inv(prim['cov']) @ dist)
+                alpha = np.clip(alpha, 0, 1)
+                
+                if alpha < 1e-5:
+                    continue
+                
+                # Alpha compositing
+                # Note: In a real implementation, this is done in parallel on GPU
+                # Here we simulate the accumulation logic for a single pixel
+                # We need to track the accumulated transmittance for this pixel
+                # However, since we iterate primitives, we update the pixel buffer
+                pass 
+                
+    # Simplified accumulation logic for demonstration of the formula
+    # In practice, this is done via a rasterizer kernel
+    for prim in projected_gaussians:
+        bbox = get_bounding_box(prim['mean'], prim['cov'])
+        clip_bbox = clip_to_image(bbox, height, width)
+        for y in range(clip_bbox.y_min, clip_bbox.y_max):
+            for x in range(clip_bbox.x_min, clip_bbox.x_max):
+                dist = np.array([x - prim['mean'][0], y - prim['mean'][1]])
+                alpha = prim['opacity'] * np.exp(-0.5 * dist.T @ np.linalg.inv(prim['cov']) @ dist)
+                alpha = np.clip(alpha, 0, 1)
+                
+                # Get current accumulated transmittance at (x,y)
+                # This requires storing intermediate state or using a depth buffer
+                # For the sake of the formula representation:
+                # T_prev = product of (1 - alpha_j) for all j < i at (x,y)
+                # This is handled by the rasterizer's accumulation buffer
+                
+                # Update color and feature
+                # C_new = C_old + c_i * alpha_i * T_prev
+                # F_new = F_old + f_i * alpha_i * T_prev
+                pass
+
+    return feature_map, color_map
+```
+*Note: The pseudocode above illustrates the logical flow. A production implementation uses a GPU rasterizer that maintains an accumulation buffer for transmittance to avoid $O(N^2)$ complexity.*
+
+**Parameters:**
+*   Semantic embedding dimension $d$: Typically 512 [S2].
+*   SH degree: Determined by the base 3DGS configuration.
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Bleeding:** If geometry and semantics are decoupled, boundary bleeding occurs between visual and semantic regions. This is eliminated in this method because geometric parameters (position, scale, rotation, opacity) dictate the blending weights for both color and semantic rendering, ensuring hard-coded alignment [S2].
+*   **Precision:** High-dimensional feature vectors may require careful handling of numerical precision during accumulation to avoid saturation or underflow, especially with many overlapping primitives.
+
+## Subtopics
+
+### Scale-Aware Semantic Feature Gating
+A mechanism to modulate rendered semantic features based on scale, using learned or fixed gate vectors derived from sampled scales [S3, unofficial]. It is chosen when scale-dependent semantic accuracy is required. The steps are:
+1.  Map the distribution of sampled scales to a Gaussian distribution using `self.q_trans(sampled_scales)` [S3, unofficial].
+2.  If `scale_aware_dim <= 0` or `scale_aware_dim >= 32`, compute gates by passing sampled scales through `self.scale_gate`: `gates = self.scale_gate(sampled_scales.unsqueeze(-1))` [S3, unofficial].
+3.  Otherwise, discretize scales to integers: `int_sampled_scales = ((1 - sampled_scales.squeeze()) * scale_aware_dim).long()`, then lookup pre-computed gates: `gates = self.fixed_scale_gate[int_sampled_scales].detach()` [S3, unofficial].
+4.  Repeat rendered features for each sampled scale: `feature_with_scale = rendered_features.unsqueeze(0).repeat([sampled_scales.shape[0], 1, 1, 1])` [S3, unofficial].
+5.  Multiply features by gate vectors: `feature_with_scale = feature_with_scale * gates.unsqueeze(-1).unsqueeze(-1)` [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Same as standard 3D Gaussian Splatting rasterization, $O(N)$ where $N$ is the number of primitives, assuming constant-time feature vector operations. The addition of feature vectors increases memory bandwidth usage but not asymptotic complexity.
+*   **Memory Complexity:** Increases by $O(N \cdot d)$ where $d$ is the feature dimension (e.g., 512 bytes per primitive for $d=512$ float32).
+*   **Performance:** Real-time rendering is maintained due to the efficiency of the alpha-blending rasterizer [S1, unofficial].
+*   **Strengths:** Unified optimization of geometry and semantics; no boundary bleeding; real-time open-vocabulary segmentation [S1, unofficial][S2].
+*   **Limitations:** Requires high-dimensional feature storage; semantic quality depends on the 2D feature extractor used during training (e.g., CLIP) [S1, unofficial].
+
+## Background
+The method was pioneered by Feature-3DGS [102] and LangSplat [103] by adding high-dimensional feature vectors to Gaussians for real-time open-vocabulary semantic segmentation [S1, unofficial]. Language Embedded 3D Gaussians [104] expanded this to full scene understanding [S1, unofficial]. The specific formulation with semantic embedding vectors and cross-modal alignment is detailed in [S2].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] Open-World 3D Vision-Language Scene Representation with Gaussian Splatting and Cross-Modal Alignment, https://doi.org/10.66238/jaiec72, fetched 2026-10-26
+[S3] yzslab/gaussian-splatting-lightning, https://github.com/yzslab/gaussian-splatting-lightning, fetched 2026-10-27 (unofficial)

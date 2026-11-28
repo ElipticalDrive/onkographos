@@ -1,0 +1,149 @@
+--- v003.md
++++ v004.md
+@@ -4,37 +4,38 @@
+ 
+ ## Overview
+-Computes the exponent term of the 2D Gaussian probability density function at given 2D points, used for rasterization or shading [S1, unofficial]. It builds on [2D Gaussian Probability Density (Conic)](3475-2d-gaussian-probability-density-conic.md) by calculating the quadratic form required to determine the unnormalized density value before applying the exponential function.
++Computes the exponent term of the 2D Gaussian probability density function at given 2D points, used for rasterization or shading [S1, unofficial]. It evaluates the quadratic form of the difference vector against the inverse covariance matrix to determine the decay magnitude before applying the exponential function.
+ 
+ ## How it works
+ **Inputs:**
+ - `points_2D`: Tensor of shape $(N, 2)$ containing the 2D query coordinates.
+-- `means_2D`: Tensor of shape $(M, 2)$ containing the 2D means of the Gaussians.
+-- `cov_2D_inv`: Tensor of shape $(M, 2, 2)$ containing the inverse covariance matrices for each Gaussian.
++- `means_2D`: Tensor of shape $(N, 2)$ containing the 2D Gaussian means.
++- `cov_2D`: Tensor of shape $(N, 2, 2)$ containing the 2D covariance matrices.
+ 
+ **Outputs:**
+-- `power`: Tensor of shape $(N, M)$ containing the exponent values $P$ for each point-Gaussian pair.
++- `power`: Tensor of shape $(N,)$ containing the exponent values $P$.
+ 
+ **Data Structures:**
+-- `xm`: Difference vector tensor.
+-- `xm_col`: Column vector tensor for batched multiplication.
+-- `xm_row`: Row vector tensor for batched multiplication.
+-- `cov_2D_inv`: Inverse covariance matrix tensor.
++- Tensors are batched. `points_2D`, `means_2D` are 2D vectors. `cov_2D` is a $2 \times 2$ matrix per Gaussian.
+ 
+ **Steps:**
+ 1. Compute the difference vector between query points and 2D means: $\mathbf{x}_m = \text{points\_2D} - \text{means\_2D}$.
+ 2. Reshape the difference vector for batched matrix multiplication:
+-   - $\mathbf{x}_m^{\text{col}} = \text{unsqueeze}(\mathbf{x}_m, -1)$
+-   - $\mathbf{x}_m^{\text{row}} = \text{unsqueeze}(\mathbf{x}_m, -2)$
+-3. Ensure `cov_2D_inv` is unsqueezed for broadcasting: $\mathbf{C}_{2D}^{-1} = \text{unsqueeze}(\text{cov\_2D\_inv}, 1)$.
++   - $\mathbf{x}_m^{\text{col}} = \text{unsqueeze}(\mathbf{x}_m, \text{dim}=-1)$, shape $(N, 2, 1)$.
++   - $\mathbf{x}_m^{\text{row}} = \text{unsqueeze}(\mathbf{x}_m, \text{dim}=-2)$, shape $(N, 1, 2)$.
++3. Compute the inverse of the 2D covariance matrix and unsqueeze for broadcasting:
++   - $C_{2D}^{-1} = \text{inverse}(\text{cov\_2D})$, shape $(N, 2, 2)$.
++   - $C_{2D}^{-1}_{\text{batch}} = \text{unsqueeze}(C_{2D}^{-1}, \text{dim}=1)$, shape $(N, 1, 2, 2)$.
+ 4. Compute the quadratic form and scale by $-0.5$:
+-   $$ P = -0.5 \times (\mathbf{x}_m^{\text{row}} @ \mathbf{C}_{2D}^{-1} @ \mathbf{x}_m^{\text{col}}).\text{squeeze}(-1).\text{squeeze}(-1) $$
++   - $Q = \mathbf{x}_m^{\text{row}} \times C_{2D}^{-1}_{\text{batch}} \times \mathbf{x}_m^{\text{col}}$.
++   - The result $Q$ has shape $(N, 1, 1)$.
++   - $P = -0.5 \times \text{squeeze}(Q, \text{dim}=(-1, -2))$.
+ 
+ **Formula:**
+-$$ P = -\frac{1}{2} (\mathbf{x}_m^T \mathbf{C}_{2D}^{-1} \mathbf{x}_m) $$
+-where $\mathbf{x}_m$ is the $2 \times 1$ difference vector, $\mathbf{C}_{2D}^{-1}$ is the $2 \times 2$ inverse covariance, and $P$ is the exponent value [S1, unofficial].
++$$P = -\frac{1}{2} (\mathbf{x}_m^T C_{2D}^{-1} \mathbf{x}_m)$$
++where $\mathbf{x}_m$ is the $2 \times 1$ difference vector, $C_{2D}^{-1}$ is the $2 \times 2$ inverse covariance, and $P$ is the exponent value [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def evaluate_2d_gaussian(points_2d, means_2d, cov_2d_inv):
++def evaluate_2d_gaussian(points_2d, means_2d, cov_2d):
+     """
+     Computes the exponent term of the 2D Gaussian PDF.
+@@ -42,46 +43,35 @@
+     Args:
+         points_2d: Tensor of shape (N, 2)
+-        means_2d: Tensor of shape (M, 2)
+-        cov_2d_inv: Tensor of shape (M, 2, 2)
++        means_2d: Tensor of shape (N, 2)
++        cov_2d: Tensor of shape (N, 2, 2)
+         
+     Returns:
+-        power: Tensor of shape (N, M)
++        power: Tensor of shape (N,)
+     """
+-    # Step 1: Compute difference vector
+-    # Broadcasting: points_2d (N, 2) - means_2d (1, M, 2) -> (N, M, 2)
+-    # Note: Assuming means_2d is broadcastable or expanded to match points_2d
+-    # If means_2d is (M, 2), we need to expand it to (1, M, 2) for broadcasting with (N, 2)
+-    xm = points_2d.unsqueeze(1) - means_2d.unsqueeze(0)  # Shape: (N, M, 2)
++    # Step 1: Difference vector
++    xm = points_2d - means_2d  # (N, 2)
+     
+     # Step 2: Reshape for batched matrix multiplication
+-    xm_col = xm.unsqueeze(-1)  # Shape: (N, M, 2, 1)
+-    xm_row = xm.unsqueeze(-2)  # Shape: (N, M, 1, 2)
++    xm_col = xm.unsqueeze(-1)  # (N, 2, 1)
++    xm_row = xm.unsqueeze(-2)  # (N, 1, 2)
+     
+-    # Step 3: Prepare covariance inverse for broadcasting
+-    # cov_2d_inv is (M, 2, 2). We need it to be (1, M, 2, 2) to broadcast with (N, M, ...)
+-    cov_2d_inv_expanded = cov_2d_inv.unsqueeze(0)  # Shape: (1, M, 2, 2)
++    # Step 3: Inverse covariance with broadcasting dimension
++    cov_2d_inv = torch.inverse(cov_2d)  # (N, 2, 2)
++    cov_2d_inv_batch = cov_2d_inv.unsqueeze(1)  # (N, 1, 2, 2)
+     
+-    # Step 4: Compute quadratic form
+-    # xm_row (N, M, 1, 2) @ cov_2d_inv_expanded (1, M, 2, 2) -> (N, M, 1, 2)
+-    temp = torch.matmul(xm_row, cov_2d_inv_expanded)
+-    # temp (N, M, 1, 2) @ xm_col (N, M, 2, 1) -> (N, M, 1, 1)
+-    power = torch.matmul(temp, xm_col)
++    # Step 4: Quadratic form and scaling
++    # Matrix multiplication: (N, 1, 2) @ (N, 1, 2, 2) @ (N, 2, 1) -> (N, 1, 1)
++    quadratic_form = torch.matmul(xm_row, torch.matmul(cov_2d_inv_batch, xm_col))
+     
+-    # Squeeze the last two dimensions
+-    power = power.squeeze(-1).squeeze(-1)  # Shape: (N, M)
+-    
+-    # Scale by -0.5
+-    power = -0.5 * power
++    # Squeeze out the last two dimensions to get (N,)
++    power = -0.5 * quadratic_form.squeeze(-1).squeeze(-1)
+     
+     return power
+ ```
+ 
+-**Parameters:**
+-- Typical values: Not given in the sources.
+-
+-**Edge cases and pitfalls:**
+-- Precision: Matrix inversion for `cov_2D_inv` should be handled with care to avoid numerical instability if the covariance matrix is near-singular.
+-- Boundaries: Ensure that `points_2D` and `means_2D` are in the same coordinate system.
+-- Degenerate input: If `cov_2D_inv` is not valid (e.g., due to singular covariance), the result will be undefined or NaN.
++**Edge Cases and Pitfalls:**
++- **Singular Covariance:** If `cov_2d` is singular, `torch.inverse` will fail or produce NaNs. Ensure covariance matrices are positive definite [G].
++- **Precision:** Matrix inversion can be numerically unstable for near-singular matrices. Using Cholesky decomposition or solving linear systems might be more stable [G].
++- **Batching:** The implementation assumes batched inputs. Ensure dimensions align correctly for broadcasting.
+ 
+ ## Subtopics
+@@ -90,18 +80,15 @@
+ Generalized Gaussian Particles replace the standard quadratic exponent in the 2D Gaussian probability density function with a power-law exponent controlled by a degree parameter $n$. This modification allows for steeper and narrower density fall-off, enabling denser particle packing and finer control over the trade-off between rendering quality and computational speed compared to standard Gaussians.
+ 
++### [2D Gaussian Evaluation (Rotated/Anisotropic)](12462-2d-gaussian-evaluation-rotated-anisotropic.md)
++This method computes the alpha component of a rotated, anisotropic 2D Gaussian function at specific 2D texture coordinates, primarily for generating brush-stroke textures in stroke-based splatting. It differs from standard isotropic splatting by applying a rotation matrix to the coordinate system before evaluating the decay, allowing for directional brush strokes. It builds on [2D Gaussian Evaluation](4728-2d-gaussian-evaluation.md) by adding explicit rotational transformation of the input coordinates.
++
+ ## Operating characteristics
+-- Time complexity: $O(N \cdot M)$ for $N$ points and $M$ Gaussians, due to the matrix multiplications.
+-- Memory complexity: $O(N \cdot M)$ to store the intermediate tensors.
+-- Measured performance: Not given in the sources.
+-- Scaling: Scales linearly with the number of points and Gaussians.
+-- Strengths: Efficient batched computation using matrix operations.
+-- Limitations: High memory usage for large $N$ and $M$.
+-- When to use: When rasterizing or shading with 2D Gaussians.
+-- When not to use: When memory is constrained or $N$ and $M$ are very large.
++- **Time Complexity:** $O(N)$ for $N$ Gaussians, dominated by matrix inversion and multiplication.
++- **Memory Complexity:** $O(N)$ for storing intermediate tensors.
++- **Strengths:** Efficient batched computation suitable for GPU acceleration.
++- **Limitations:** Sensitive to singular covariance matrices.
+ 
+ ## Background
+-Origin: Not given in the sources.
+-History and development: Not given in the sources.
+-Where it is used: Used in 3D Gaussian Splatting for rendering [S1, unofficial].
++Originated in the context of 3D Gaussian Splatting for real-time novel view synthesis [S1, unofficial]. The method is a core component of the rasterization pipeline, where 3D Gaussians are projected to 2D and their contributions are evaluated.
+ 
+ ## Sources

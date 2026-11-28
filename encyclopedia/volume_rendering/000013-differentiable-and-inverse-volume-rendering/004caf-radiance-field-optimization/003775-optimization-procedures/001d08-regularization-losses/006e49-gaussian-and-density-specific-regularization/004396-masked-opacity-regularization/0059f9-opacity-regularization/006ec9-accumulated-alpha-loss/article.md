@@ -1,0 +1,74 @@
+# Accumulated Alpha Loss
+
+Also called: Lopacity, Opacity Regularizer
+
+## Overview
+Accumulated Alpha Loss is a regularization term applied to the accumulated alpha value (opacity) along each ray to discourage optimization from unnecessarily filling empty space and improve foreground/background separation [S1, unofficial]. It sets itself apart from its parent, Opacity Regularization, by targeting the final accumulated opacity sum rather than individual opacity logits or mean opacity values, thereby directly penalizing the "filling" of empty volume during the rendering process [S1, unofficial].
+
+## How it works
+**Inputs and outputs:**
+*   **Input:** The rendering weights $w_i$ for each sample $i$ along a ray. These weights are derived from the volume rendering integral, typically $w_i = T_i \alpha_i \prod_{j<i} (1-\alpha_j)$, where $\alpha_i$ is the opacity and $T_i$ is the transmittance.
+*   **Output:** A scalar loss value $L_{opacity}$ for the ray.
+
+**Data structures:**
+*   No specific data structures are required beyond the list of rendering weights $w_i$ for the current ray.
+
+**Steps:**
+1.  Sum the rendering weights $w_i$ for all samples $i$ along the ray to compute the total accumulated alpha (opacity). Let this sum be $S = \sum_i w_i$.
+2.  Square the sum: $S^2$.
+3.  Add a small constant bias of $0.01$.
+4.  The loss is $L_{opacity} = S^2 + 0.01$.
+
+**Formula:**
+$$L_{opacity} = \left(\sum_i w_i\right)^2 + 0.01$$
+where $w_i$ are the rendering weights [S1, unofficial].
+
+**Parameters:**
+*   **Weight ($\lambda_{opacity}$):** The multiplier for this loss term in the total objective function. Reasonable range is $[10^{-3}, 5 \times 10^{-3}]$ [S1, unofficial].
+
+**Edge cases and pitfalls:**
+*   The constant $0.01$ ensures the loss is non-zero even if the accumulated opacity is zero, preventing vanishing gradients in completely empty rays [S1, unofficial].
+*   Since the loss is squared, it penalizes large accumulated opacities more heavily, encouraging the model to keep the sum of weights low in empty regions.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def accumulated_alpha_loss(rendering_weights):
+    """
+    Computes the Accumulated Alpha Loss for a single ray.
+    
+    Args:
+        rendering_weights (list[float]): List of rendering weights w_i for each sample along the ray.
+        
+    Returns:
+        float: The accumulated alpha loss value.
+    """
+    # Sum the rendering weights to get the total accumulated opacity
+    total_opacity = sum(rendering_weights)
+    
+    # Square the sum and add the small constant bias
+    loss = (total_opacity ** 2) + 0.01
+    
+    return loss
+```
+
+## Subtopics
+
+### Blending Weight Regularization
+A regularization term to penalize pixels where the total blending weight $T$ is less than 1, ensuring all pixels are rendered [S2]. It is defined as $R_T = -\log(T + \epsilon)$, where $T$ is the sum of blending weights $\omega_i$ and $\epsilon$ is a small constant [S2]. This variant is used in contexts like LE3D where ensuring full pixel coverage is critical for real-world scenarios [S2].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples, due to the summation. This is negligible compared to the rendering pass itself.
+*   **Memory Complexity:** $O(1)$ additional memory per ray, as it only requires the sum of weights.
+*   **Strengths:** Effectively prevents the model from "filling" empty space with low-opacity volumes, leading to cleaner background separation and sharper foregrounds [S1, unofficial].
+*   **Limitations:** If the weight is too high, it may overly suppress opacity, potentially causing the object to shrink or disappear if not balanced with other losses [S1, unofficial].
+*   **When to use:** When training NeRF-like models or Gaussian Splatting variants where background separation is important and empty space is being unnecessarily occupied by the optimization [S1, unofficial].
+*   **When not to use:** When the scene is fully dense with no empty space, or when the primary goal is not to enforce sparsity in the background.
+
+## Background
+Originated in the DreamFusion paper, which introduced text-to-3D generation using 2D diffusion models [S1, unofficial]. The authors applied this loss to prevent unintended local minima where the generated object shrinks or disappears, and to improve foreground/background separation [S1, unofficial]. It is part of a suite of regularization techniques including orientation loss and view-dependent prompting [S1, unofficial].
+
+## Sources
+[S1] DreamFusion: Text-to-3D using 2D Diffusion, https://doi.org/10.48550/arxiv.2209.14988, fetched 2026-10-27 (unofficial)
+[S2] Lighting Every Darkness with 3DGS: Fast Training and Real-Time Rendering for HDR View Synthesis, https://doi.org/10.52202/079017-2549, fetched 2026-10-26

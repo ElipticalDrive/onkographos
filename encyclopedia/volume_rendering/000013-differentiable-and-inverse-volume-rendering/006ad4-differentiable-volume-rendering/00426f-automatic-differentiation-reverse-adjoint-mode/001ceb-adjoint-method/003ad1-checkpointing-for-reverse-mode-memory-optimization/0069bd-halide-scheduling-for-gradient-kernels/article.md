@@ -1,0 +1,180 @@
+# Halide Scheduling for Gradient Kernels
+
+Also called: Halide AD Scheduling, Register-aware Checkpointing Scheduling
+
+## Overview
+Halide Scheduling for Gradient Kernels is a heuristic-based strategy for optimizing reverse-mode automatic differentiation (AD) programs on GPUs, specifically within the Halide compiler framework. It addresses the trade-off between register spilling and memory I/O overhead by splitting gradient computation into multiple smaller kernels. Unlike standard checkpointing which focuses solely on recomputation vs. storage, this method explicitly manages register pressure by selecting which intermediate values to checkpoint based on a linear cost model, ensuring efficient utilization of GPU hardware resources.
+
+## How it works
+The method operates on a forward-pass program and its corresponding reverse-mode AD gradient program. The core challenge is that Halide’s common sub-expression elimination (CSE) pass prevents fine-grained control over recomputation within a single kernel [S1]. To work around this, the scheduling strategy splits the gradient program into multiple sub-kernels and decides for each intermediate value in the forward pass whether to checkpoint it (write to memory) or recompute it (risk register spilling) [S1].
+
+### Inputs and Outputs
+- **Input**: The forward-pass computation graph (represented as a sequence of nodes), hardware register limits, and discrete scheduling options.
+- **Output**: A compiled Halide schedule consisting of multiple kernels, a `logged_trace` list of checkpoint nodes, and potentially a separate `cont_logged_trace` for non-Dirac parameters.
+
+### Data Structures
+- **`logged_trace`**: A list of node indices or identifiers from the forward pass that are designated as checkpoints. These values are stored in memory during the forward pass and read during the reverse pass.
+- **`cont_logged_trace`**: A strict subset of `logged_trace` used specifically for computing gradients with respect to non-Dirac parameters.
+- **Cost Model**: An approximate linear model estimating register usage by counting the number of intermediate computations for each node in the forward pass.
+
+### Discrete Scheduling Options
+The backward pass can be split into sub-programs based on two discrete choices [S1]:
+1.  **`separate_cont`**: If `True`, the gradient with respect to non-Dirac parameters is computed in a separate reverse-mode AD sub-program. This sub-program reads from `cont_logged_trace` instead of `logged_trace`. Since this sub-program is typically smaller, it may have more available register space for recomputation, potentially saving memory I/O.
+2.  **`separate_sample`**: Determines how gradient approximations for Dirac parameters are split. Dirac parameter gradients involve pre-filtering four different kernels (left and right kernels on image coordinates $x$ and $y$) [S1].
+    -   `'axis'`: Computes the gradient approximation for each sampling axis (left/right on $x$, left/right on $y$) in a different sub-program.
+    -   `'kernel'`: Separates the approximation to each pre-filtering kernel into different parts.
+
+### Algorithm: Autoscheduling
+The scheduling space is combinatorial and too large for exhaustive search. An autoscheduler uses a greedy heuristic search to find an optimal `logged_trace` [S1].
+
+1.  **Initialize Cost Model**: Build an approximate linear cost model by counting intermediate computations for each node in the forward pass. This model estimates register usage.
+2.  **Greedy Search for Potential Checkpoints**:
+    -   Start with an empty potential checkpoint list.
+    -   Iteratively add nodes to this list.
+    -   Selection Criterion: A newly added node should approximately halve the current maximum cost among all nodes in the graph.
+    -   Update the cost model after every iteration based on the current potential list.
+3.  **Search for Optimal `logged_trace`**:
+    -   Let the nodes added in the greedy search be ordered as $n_1, n_2, \dots, n_m$.
+    -   Search for an integer $k$ ($1 \le k \le m$) such that checkpointing every node found before iteration $k$ (i.e., $\{n_1, \dots, n_k\}$) yields the best profiled runtime.
+    -   Set `logged_trace` to this optimal subset.
+4.  **Determine `cont_logged_trace`**:
+    -   Choose between the optimal `logged_trace` and a default checkpointing list.
+    -   Select the one that provides the best runtime for the non-Dirac gradient sub-program.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def halide_gradient_schedule(forward_nodes, hardware_register_limit):
+    """
+    forward_nodes: List of node objects, each having:
+        - id: unique identifier
+        - comp_count: number of intermediate computations (for cost model)
+    hardware_register_limit: int, max registers available per thread/block
+    """
+    
+    # Step 1: Initialize Cost Model
+    # The cost model estimates register usage based on comp_count.
+    # For simplicity, assume cost(node) = node.comp_count
+    # Max cost is the maximum register pressure if no nodes are checkpointed.
+    
+    current_max_cost = max(node.comp_count for node in forward_nodes)
+    potential_checkpoints = []
+    
+    # Step 2: Greedy Search
+    # We iterate through nodes, potentially adding them to checkpoints
+    # if they significantly reduce the max cost.
+    # Note: The exact definition of "halve the current maximum cost" 
+    # implies a reduction in the peak register pressure of the remaining 
+    # uncheckpointed computation graph.
+    
+    # Since the source describes an iterative process where the model is 
+    # updated, we simulate the selection of nodes that offer the best 
+    # reduction-to-cost ratio or simply the largest reduction until 
+    # the marginal gain is insufficient.
+    
+    # Simplified greedy approach based on source description:
+    # "newly added nodes should approximately halve the current maximum cost"
+    
+    uncheckpointed_nodes = list(forward_nodes)
+    
+    while uncheckpointed_nodes:
+        # Find the node that, if checkpointed, reduces the max cost 
+        # of the remaining uncheckpointed nodes the most.
+        best_node = None
+        best_reduction = 0
+        
+        for node in uncheckpointed_nodes:
+            # Estimate new max cost if this node is checkpointed
+            remaining_costs = [n.comp_count for n in uncheckpointed_nodes if n != node]
+            if not remaining_costs:
+                new_max_cost = 0
+            else:
+                new_max_cost = max(remaining_costs)
+            
+            reduction = current_max_cost - new_max_cost
+            if reduction > best_reduction:
+                best_reduction = reduction
+                best_node = node
+        
+        # Check if the reduction is significant (approx. halving)
+        # Source says: "newly added nodes should approximately halve..."
+        # We interpret this as: if the new max cost is <= half of the old max cost.
+        if best_node and (current_max_cost - best_reduction) <= current_max_cost / 2:
+            potential_checkpoints.append(best_node)
+            uncheckpointed_nodes.remove(best_node)
+            current_max_cost = current_max_cost - best_reduction
+        else:
+            break
+            
+    # Step 3: Search for optimal k
+    # Checkpointing every node found before iteration k
+    # We profile or estimate runtime for k from 0 to len(potential_checkpoints)
+    
+    best_k = 0
+    best_runtime = infinity
+    
+    # In practice, this involves compiling and running the kernel with 
+    # different checkpoint sets. Here we assume a runtime estimation function.
+    for k in range(len(potential_checkpoints) + 1):
+        current_checkpoint_set = set(potential_checkpoints[:k])
+        # Estimate runtime based on memory I/O (proportional to len(checkpoints))
+        # and register pressure (proportional to max cost of uncheckpointed)
+        # This is a placeholder for the actual profiling step described in [S1]
+        runtime = estimate_runtime(current_checkpoint_set, forward_nodes)
+        if runtime < best_runtime:
+            best_runtime = runtime
+            best_k = k
+            
+    logged_trace = potential_checkpoints[:best_k]
+    
+    # Step 4: Determine cont_logged_trace
+    # Choose between optimal logged_trace or default list for non-Dirac params
+    default_checkpoint_list = get_default_checkpoints(forward_nodes)
+    
+    runtime_cont_optimal = estimate_runtime(logged_trace, forward_nodes, mode='cont')
+    runtime_cont_default = estimate_runtime(default_checkpoint_list, forward_nodes, mode='cont')
+    
+    if runtime_cont_optimal < runtime_cont_default:
+        cont_logged_trace = logged_trace
+    else:
+        cont_logged_trace = default_checkpoint_list
+        
+    return logged_trace, cont_logged_trace
+
+def estimate_runtime(checkpoint_set, nodes, mode='full'):
+    """
+    Placeholder for profiling. 
+    In the actual implementation, this would compile the Halide schedule 
+    and measure execution time.
+    """
+    # Heuristic: Runtime ~ Memory I/O + Compute
+    # Memory I/O increases with checkpoint size
+    # Compute increases with register pressure (uncheckpointed nodes)
+    mem_io = len(checkpoint_set)
+    
+    uncheckpointed_costs = [n.comp_count for n in nodes if n not in checkpoint_set]
+    register_pressure = max(uncheckpointed_costs) if uncheckpointed_costs else 0
+    
+    # Simple linear model for estimation
+    return mem_io * 10 + register_pressure * 5
+```
+
+### Edge Cases and Pitfalls
+-   **Register Spilling**: If the cost model underestimates register usage, the generated kernels may spill to local memory, drastically reducing performance. The heuristic aims to prevent this by aggressively checkpointing nodes with high computational cost.
+-   **Memory I/O Overhead**: Over-checkpointing leads to excessive memory reads/writes. The autoscheduler balances this by stopping the greedy search when the reduction in register pressure no longer justifies the memory cost.
+-   **CSE Interference**: Halide’s CSE pass can merge computations, making it difficult to isolate specific nodes for recomputation. Splitting into multiple kernels mitigates this by isolating the gradient computations [S1].
+-   **Discrete Choice Impact**: The choice of `separate_sample` affects the granularity of the kernels. `'axis'` may lead to more balanced register usage across axes, while `'kernel'` might be better if certain kernels have significantly different computational profiles.
+
+## Operating characteristics
+-   **Time Complexity**: The autoscheduler uses a greedy search, which is polynomial in the number of nodes, but the profiling step (finding optimal $k$) requires multiple compilations and runs, making the scheduling phase itself expensive. The runtime of the generated kernel depends on the balance between memory I/O and register pressure.
+-   **Memory Complexity**: Reduced compared to storing all intermediates, as only nodes in `logged_trace` are stored. The size of `logged_trace` is determined by the autoscheduler.
+-   **Performance**: Measured performance depends on the specific GPU hardware and the complexity of the gradient kernels. The method is designed to minimize register spilling, which is critical for high-performance GPU execution.
+-   **Strengths**: Explicitly handles register pressure, which is often overlooked in standard checkpointing. Works well within the Halide framework.
+-   **Limitations**: The autoscheduler requires profiling, which adds to the compilation time. The heuristic may not find the global optimum.
+
+## Background
+This method was introduced in the context of differentiable volume rendering, specifically for optimizing the gradient computation of raymarching loops with Dirac delta parameters. It builds on the principles of reverse-mode automatic differentiation and checkpointing [S1]. The work is part of the "A $\delta$" paper, which focuses on differentiable rendering with discontinuities [S1].
+
+## Sources
+[S1] A $\delta$, https://doi.org/10.1145/3528223.3530125, fetched 2026-10-30

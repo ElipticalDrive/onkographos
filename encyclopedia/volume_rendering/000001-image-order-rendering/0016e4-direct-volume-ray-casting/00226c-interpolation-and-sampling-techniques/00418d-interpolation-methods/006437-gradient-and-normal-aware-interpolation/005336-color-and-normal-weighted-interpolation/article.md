@@ -1,0 +1,118 @@
+# Color and Normal Weighted Interpolation
+
+Also called: Volume rendering method based on color weighted interpolation and normal vector interpolation
+
+## Overview
+Color and Normal Weighted Interpolation is a volume rendering technique that reduces per-resampling-point computational cost by minimizing lighting calculations and relying on interpolated attributes [S1]. It solves the problem of high computational load in direct volume ray casting for complex explosion fields and shock waves by reducing lighting operations from eight to one per sample point [S1]. Unlike standard trilinear interpolation which may suffer from interface color confusion, this method improves microstructure display accuracy and corrects interface artifacts without affecting translucent media rendering [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input**: A 3D data field containing multiple media types (e.g., steel bars, projectiles, air, concrete) represented by discrete grid values [S1].
+*   **Output**: A 2D image with corrected interface colors and accurate microstructure display [S1].
+
+**Data Structures**
+The source describes a data field with dimensions such as $439 \times 439 \times 439$ [S1]. The data contains media type identifiers: 1 for steel bars, 2 for projectile, 3 for air, and 4 for concrete [S1].
+
+**Parameters**
+*   **Default Opacities**: Air = 0, Projectile = 1.0, Steel bars = 1.0, Concrete = adjustable [S1].
+*   **Evaluation Metrics**: Image mean ($U$), standard deviation ($Std$), image entropy ($H$), and mean gradient ($G$) are used to quantitatively analyze visual quality [S1].
+
+**Algorithm Steps**
+For each resampling point along the ray, the method performs three sequential calculations: transfer function calculation, lighting model calculation, and interpolation calculation [S1].
+
+1.  **Lighting Calculation Limit**: The method restricts the lighting model calculation to exactly one operation per resampling point [S1].
+2.  **Interpolation Operations**: The method performs exactly seven interpolation operations per resampling point covering color, opacity, and normal vector [S1].
+3.  **Transfer Function**: Applied to map the interpolated scalar/vector attributes to final color and opacity values [S1].
+
+**Pseudocode**
+The following pseudocode implements the per-resampling point logic described in the source. Standard front-to-back compositing and trilinear sampling are used where the source does not specify the exact mathematical formulation [G].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def trilinear_interpolate(grid, x, y, z):
+    # [G] Standard trilinear interpolation from 8 neighboring voxels
+    ix, iy, iz = int(x), int(y), int(z)
+    fx, fy, fz = x - ix, y - iy, z - iz
+    # Clamp indices to grid bounds
+    def clamp(v, dim): return max(0, min(v, dim - 1))
+    v000 = grid[clamp(ix, grid.dims[0]), clamp(iy, grid.dims[1]), clamp(iz, grid.dims[2])]
+    v100 = grid[clamp(ix+1, grid.dims[0]), clamp(iy, grid.dims[1]), clamp(iz, grid.dims[2])]
+    v010 = grid[clamp(ix, grid.dims[0]), clamp(iy+1, grid.dims[1]), clamp(iz, grid.dims[2])]
+    v110 = grid[clamp(ix+1, grid.dims[0]), clamp(iy+1, grid.dims[1]), clamp(iz, grid.dims[2])]
+    v001 = grid[clamp(ix, grid.dims[0]), clamp(iy, grid.dims[1]), clamp(iz+1, grid.dims[2])]
+    v101 = grid[clamp(ix+1, grid.dims[0]), clamp(iy, grid.dims[1]), clamp(iz+1, grid.dims[2])]
+    v011 = grid[clamp(ix, grid.dims[0]), clamp(iy+1, grid.dims[1]), clamp(iz+1, grid.dims[2])]
+    v111 = grid[clamp(ix+1, grid.dims[0]), clamp(iy+1, grid.dims[1]), clamp(iz+1, grid.dims[2])]
+    c00 = v000 * (1-fx) + v100 * fx
+    c10 = v010 * (1-fx) + v110 * fx
+    c01 = v001 * (1-fx) + v101 * fx
+    c11 = v011 * (1-fx) + v111 * fx
+    c0 = c00 * (1-fy) + c10 * fy
+    c1 = c01 * (1-fy) + c11 * fy
+    return c0 * (1-fz) + c1 * fz
+
+def render_resampling_point(ray_origin, ray_direction, grid_data, transfer_function, step_size):
+    # [G] Standard front-to-back volume rendering compositing loop
+    t = 0.0
+    accumulated_alpha = 0.0
+    accumulated_color = [0.0, 0.0, 0.0]
+    max_dist = max(grid_data.dims) * 1.5
+    dx, dy, dz = ray_direction
+
+    while t < max_dist:
+        x, y, z = ray_origin[0] + t * dx, ray_origin[1] + t * dy, ray_origin[2] + t * dz
+        # Boundary check to prevent out-of-bounds access
+        if not (0 <= x < grid_data.dims[0] and 0 <= y < grid_data.dims[1] and 0 <= z < grid_data.dims[2]):
+            break
+
+        # 1. Perform exactly seven interpolation operations per resampling point
+        # [G] Source specifies 7 interpolations covering color, opacity, and normal vector.
+        color_r = trilinear_interpolate(grid_data.color, x, y, z)
+        color_g = trilinear_interpolate(grid_data.color, x, y, z)
+        color_b = trilinear_interpolate(grid_data.color, x, y, z)
+        opacity = trilinear_interpolate(grid_data.opacity, x, y, z)
+        normal_x = trilinear_interpolate(grid_data.normal, x, y, z)
+        normal_y = trilinear_interpolate(grid_data.normal, x, y, z)
+        normal_z = trilinear_interpolate(grid_data.normal, x, y, z)
+
+        # 2. Perform exactly one lighting model calculation
+        # [G] Source limits lighting to one operation per point; standard diffuse model applied.
+        normal = [normal_x, normal_y, normal_z]
+        light_dir = [0.0, 1.0, 0.0]
+        diffuse = max(0.0, normal[0]*light_dir[0] + normal[1]*light_dir[1] + normal[2]*light_dir[2])
+        lighting_value = diffuse
+
+        # 3. Transfer function calculation
+        # [G] Source does not specify the exact transfer function mapping; standard alpha compositing applied.
+        final_color, final_opacity = transfer_function([color_r, color_g, color_b], opacity, lighting_value)
+
+        # Front-to-back compositing
+        alpha_contribution = final_opacity * (1.0 - accumulated_alpha)
+        accumulated_color[0] += final_color[0] * alpha_contribution
+        accumulated_color[1] += final_color[1] * alpha_contribution
+        accumulated_color[2] += final_color[2] * alpha_contribution
+        accumulated_alpha += alpha_contribution
+
+        t += step_size
+
+    return accumulated_color, accumulated_alpha
+```
+
+**Edge Cases and Pitfalls**
+*   Continuous body rendering of multiple data files for animation remains slow; the method requires further efficiency improvements for dynamic simulation visualization [S1].
+*   Rendering a single 10-million-grid data file takes hundreds of seconds [S1].
+
+## Operating characteristics
+*   Time complexity is reduced by limiting lighting calculations to one per resampling point and performing seven interpolations, compared to eight lighting calculations in previous methods [S1].
+*   Measured performance on an i3-4010U CPU (1.70 GHz, 8 GB RAM, R5 M230 GPU, Win7 64-bit) shows rendering times for five data groups ranging from 8.93 s to 144.00 s, with improvement rates of 31% to 39% over the previous method [S1].
+*   CPU occupancy is approximately 30% and memory occupancy is approximately 60% during cut-away map drawing and visualization angle rotation [S1].
+*   Rendering time increases smoothly with file size and number of meshes (tens of thousands to tens of millions), demonstrating scalability potential for larger datasets [S1].
+*   Strengths include improved visualization efficiency without GPU acceleration or parallel computing, corrected interface color confusion, and improved microstructure display accuracy [S1].
+*   Limitations include slow continuous animation rendering for large datasets and the need for further efficiency improvements for dynamic simulation [S1].
+
+## Background
+The method was proposed in a 2024 study published in *AIP Advances* [S1]. It was developed to address the visualization needs of explosion field computational domains, specifically for phenomena such as rigid projectile penetration into reinforced concrete, concrete splashing, and stress wave propagation [S1]. The method was evaluated using objective indicators (image mean, standard deviation, entropy, mean gradient) and subjective visual effects [S1].
+
+## Sources
+[S1] A volume rendering visualization method oriented to explosion field features, https://doi.org/10.1063/5.0226283, fetched 2026-10-26

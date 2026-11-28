@@ -1,0 +1,105 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Mirror-NeRF is a neural rendering framework that learns accurate mirror geometry and reflection by unifying the radiance field and tracing rays according to Whitted-style light transport, enabling novel view synthesis and scene manipulation [S1]. Unlike NeRF and NeRFReN, which treat mirror reflections as separate virtual scenes or interpolate memorized reflections, Mirror-NeRF uses a unified radiance field with explicit reflection probability and Whitted-style ray tracing to synthesize physically consistent reflections from novel viewpoints [S1].
++Mirror-NeRF is a neural rendering framework that learns accurate mirror geometry and reflection by unifying the radiance field and tracing rays according to Whitted-style light transport, enabling novel view synthesis and scene manipulation [S1]. Unlike NeRF and NeRFReN, which treat mirror reflections as separate virtual scenes or interpolate memorized reflections, Mirror-NeRF uses a unified radiance field with explicit reflection probability and Whitted-style ray tracing to synthesize physically consistent reflections from novel viewpoints [S1]. The method builds on [Application-Specific Methods](13294-application-specific-methods.md) by introducing domain-specific physical priors for mirror surfaces.
+ 
+ ## How it works
+@@ -56,5 +56,5 @@
+         pe.append(math.sin(freq * x))
+         pe.append(math.cos(freq * x))
+-    return sum(pe)  # Concatenation of sin/cos terms
++    return pe
+ 
+ def query_fields(x, F_geo, F_sigma, F_c, F_n, F_m, d):
+@@ -65,61 +65,52 @@
+     n = F_n(f_geo)
+     m = F_m(f_geo)
+-    return sigma, c, n, m, f_geo
++    return sigma, c, n, m
+ 
+ def render_ray(ray_o, ray_d, N_samples, near, far, F_geo, F_sigma, F_c, F_n, F_m):
+-    # 1. Sample points along ray
+     t_vals = [i / (N_samples - 1) for i in range(N_samples)]
+     z_vals = [near + t * (far - near) for t in t_vals]
+     points = [[ray_o[k] + ray_d[k] * z for k in range(3)] for z in z_vals]
+-    
+-    # 2. Query fields at each sample
++
+     sigma_list, c_list, n_list, m_list = [], [], [], []
+     for i in range(N_samples):
+-        s, c, n, m, _ = query_fields(points[i], F_geo, F_sigma, F_c, F_n, F_m, ray_d)
++        s, c, n, m = query_fields(points[i], F_geo, F_sigma, F_c, F_n, F_m, ray_d)
+         sigma_list.append(s)
+         c_list.append(c)
+         n_list.append(n)
+         m_list.append(m)
+-        
+-    sigma = sigma_list
+-    c = c_list
+-    n = n_list
+-    m = m_list
+-    
+-    # 3. Compute deltas, transmittance, opacity
++
+     deltas = [z_vals[i+1] - z_vals[i] for i in range(N_samples - 1)]
+-    deltas.append(1e10)  # Last interval is infinite
+-    alpha = [1.0 - math.exp(-sigma[i] * deltas[i]) for i in range(N_samples)]
+-    
+-    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
++    deltas.append(1e10)
++    alpha = [1.0 - math.exp(-sigma_list[i] * deltas[i]) for i in range(N_samples)]
++
+     T = [1.0]
+     for i in range(1, N_samples):
+-        T.append(T[-1] * math.exp(-sigma[i-1] * deltas[i-1]))
+-        
+-    # 4. Direct color accumulation
++        T.append(T[-1] * math.exp(-sigma_list[i-1] * deltas[i-1]))
++
+     weights = [T[i] * alpha[i] for i in range(N_samples)]
+-    C_direct = [sum(weights[i] * c[i][k] for i in range(N_samples)) for k in range(3)]
+-    
+-    # 5. Mirror hit detection & reflection
+-    # Find point with highest combined reflection probability and density
+-    hit_idx = max(range(N_samples), key=lambda i: m[i] * sigma[i])
+-    m_hit = m[hit_idx]
+-    n_hit = n[hit_idx]
+-    T_hit = T[hit_idx]
+-    
+-    # Reflect ray direction: r' = r - 2(r.n)n
++    C_direct = [sum(weights[i] * c_list[i][k] for i in range(N_samples)) for k in range(3)]
++
++    hit_idx = -1
++    max_m = 0.0
++    for i in range(N_samples):
++        if sigma_list[i] > 1e-4 and m_list[i] > max_m:
++            max_m = m_list[i]
++            hit_idx = i
++
++    if hit_idx == -1 or max_m < 0.5:
++        return C_direct
++
++    m_hit = m_list[hit_idx]
++    n_hit = n_list[hit_idx]
+     dot_val = sum(ray_d[k] * n_hit[k] for k in range(3))
+     ray_d_reflect = [ray_d[k] - 2.0 * dot_val * n_hit[k] for k in range(3)]
+-    ray_o_reflect = points[hit_idx]
+-    
+-    # Trace reflected ray (simplified to one bounce)
+-    C_refl = render_reflected_ray(ray_o_reflect, ray_d_reflect, N_samples, near, far, F_geo, F_sigma, F_c, F_n, F_m)
+-    
+-    # 6. Blend direct and reflected colors
++    t_hit = z_vals[hit_idx]
++
++    C_refl = render_reflected_ray(ray_o, ray_d_reflect, N_samples, t_hit + 1e-4, far, F_geo, F_sigma, F_c, F_n, F_m)
++
+     C_final = [(1.0 - m_hit) * C_direct[k] + m_hit * C_refl[k] for k in range(3)]
+     return C_final
+ 
+ def render_reflected_ray(ray_o, ray_d, N_samples, near, far, F_geo, F_sigma, F_c, F_n, F_m):
+-    # Reuses render_ray logic for the reflected ray direction
+     return render_ray(ray_o, ray_d, N_samples, near, far, F_geo, F_sigma, F_c, F_n, F_m)
+ ```

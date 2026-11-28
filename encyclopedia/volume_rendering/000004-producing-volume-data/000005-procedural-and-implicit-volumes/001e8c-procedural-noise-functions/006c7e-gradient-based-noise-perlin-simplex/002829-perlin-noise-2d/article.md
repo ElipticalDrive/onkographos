@@ -1,0 +1,154 @@
+# Perlin Noise 2D
+
+Also called: 2D Perlin Noise, Classic Noise, Gradient Noise, Noise (Perlin), Perlin Noise (Improved), Perlin Noise Generation, Perlin's noise function
+
+## Overview
+Perlin Noise 2D is a lattice gradient noise function that generates smooth, pseudo-random scalar values by interpolating dot products of gradient vectors and distance vectors at the corners of the integer lattice cell containing the query point [S1][S10, unofficial]. It solves the problem of creating continuous, coherent procedural textures for volumetric data (such as clouds, terrain, or smoke) without the repeating patterns of simple value noise [S2, unofficial]. It sets itself apart from its sibling [Simplex Noise](978-simplex-noise.md) by using a square grid topology and quintic interpolation, whereas Simplex uses a triangular grid to reduce directional artifacts [S8, unofficial]. It is distinguished from [Improved Perlin Noise (4D)](3723-improved-perlin-noise-4d.md) by operating in two dimensions, resulting in lower computational cost but potentially higher grid-oriented artifacts [S1].
+
+## How it works
+**Inputs:**
+- Query point coordinates $(X, Y)$ as floating-point values [S3, unofficial][S4, unofficial].
+- A permutation table $P$ of size 512 (see Data structures) [S2, unofficial].
+
+**Outputs:**
+- A scalar noise value $N(X, Y)$, typically in the range $[-1, 1]$ or $[0, 1]$ [S2, unofficial].
+
+**Data structures:**
+- **Permutation Table ($P$):** An array of 512 bytes (`uint8`) [S2, unofficial]. It is constructed by shuffling the integers $0 \dots 255$ and duplicating the result to handle boundary conditions without modulo operations [S2, unofficial].
+  - Layout: $P[i] = \text{Shuffle}(i \pmod{256})$ for $0 \le i < 512$.
+  - Initialization: The table is seeded using a random stream (e.g., Fisher-Yates shuffle) to ensure reproducibility [S2, unofficial].
+
+**Formulas:**
+1.  **Fade Function:** A quintic polynomial used to smooth the interpolation and ensure $C^1$ continuity [S1][S2, unofficial]:
+    $$ f(t) = 6t^5 - 15t^4 + 10t^3 $$
+2.  **Gradient Function:** Computes the dot product of a gradient vector and the distance vector [G]. For 2D, the gradient is selected from 8 directions based on the hash bits [S2, unofficial]:
+    $$ \text{Grad}(h, x, y) = \begin{cases} x + y & \text{if } h \& 7 == 0 \\ x - y & \text{if } h \& 7 == 1 \\ -x + y & \text{if } h \& 7 == 2 \\ -x - y & \text{if } h \& 7 == 3 \\ x & \text{if } h \& 7 == 4 \\ -x & \text{if } h \& 7 == 5 \\ y & \text{if } h \& 7 == 6 \\ -y & \text{otherwise} \end{cases} $$
+3.  **Linear Interpolation:**
+    $$ \text{Lerp}(t, a, b) = a + t(b - a) $$
+
+**Algorithm Steps:**
+1.  **Grid Coordinates:** Compute the integer coordinates of the cell containing $(X, Y)$ and the fractional coordinates within the cell:
+    $$ XI = \lfloor X \rfloor \& 255, \quad YI = \lfloor Y \rfloor \& 255 $$
+    $$ XF = X - \lfloor X \rfloor, \quad YF = Y - \lfloor Y \rfloor $$
+    *Note: The bitwise AND with 255 handles the modulo for the doubled permutation table, so indices $XI+1$ and $YI+1$ are accessed directly via $P$ without explicit modulo in the hot loop [S2, unofficial].*
+2.  **Hashing:** Compute the permutation indices for the four corners of the cell using the permutation table $P$:
+    $$ AA = P[P[XI] + YI] $$
+    $$ AB = P[P[XI] + YI + 1] $$
+    $$ BA = P[P[XI + 1] + YI] $$
+    $$ BB = P[P[XI + 1] + YI + 1] $$
+3.  **Fade:** Compute the fade values for the fractional coordinates:
+    $$ U = f(XF), \quad V = f(YF) $$
+4.  **Gradient Contributions:** Compute the dot product contributions for each corner:
+    $$ \text{Contribution}_{AA} = \text{Grad}(AA, XF, YF) $$
+    $$ \text{Contribution}_{BA} = \text{Grad}(BA, XF - 1, YF) $$
+    $$ \text{Contribution}_{AB} = \text{Grad}(AB, XF, YF - 1) $$
+    $$ \text{Contribution}_{BB} = \text{Grad}(BB, XF - 1, YF - 1) $$
+5.  **Interpolation:** Interpolate along the X axis, then the Y axis:
+    $$ X_1 = \text{Lerp}(U, \text{Contribution}_{AA}, \text{Contribution}_{BA}) $$
+    $$ X_2 = \text{Lerp}(U, \text{Contribution}_{AB}, \text{Contribution}_{BB}) $$
+    $$ N(X, Y) = \text{Lerp}(V, X_1, X_2) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def fade(t):
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+def lerp(t, a, b):
+    return a + t * (b - a)
+
+def grad(hash_val, x, y):
+    h = hash_val & 7
+    if h == 0: return x + y
+    if h == 1: return x - y
+    if h == 2: return -x + y
+    if h == 3: return -x - y
+    if h == 4: return x
+    if h == 5: return -x
+    if h == 6: return y
+    return -y
+
+def perlin_2d(x, y, perm_table):
+    # 1. Grid and Fractional Coordinates
+    xi = math.floor(x) & 255
+    yi = math.floor(y) & 255
+    
+    xf = x - math.floor(x)
+    yf = y - math.floor(y)
+    
+    # 2. Hashing Corners
+    aa = perm_table[perm_table[xi] + yi]
+    ab = perm_table[perm_table[xi] + yi + 1]
+    ba = perm_table[perm_table[xi + 1] + yi]
+    bb = perm_table[perm_table[xi + 1] + yi + 1]
+    
+    # 3. Fade
+    u = fade(xf)
+    v = fade(yf)
+    
+    # 4. Gradient Contributions
+    contrib_aa = grad(aa, xf, yf)
+    contrib_ba = grad(ba, xf - 1.0, yf)
+    contrib_ab = grad(ab, xf, yf - 1.0)
+    contrib_bb = grad(bb, xf - 1.0, yf - 1.0)
+    
+    # 5. Interpolation
+    x1 = lerp(u, contrib_aa, contrib_ba)
+    x2 = lerp(u, contrib_ab, contrib_bb)
+    
+    return lerp(v, x1, x2)
+```
+
+**Parameters:**
+- **Persistence:** Not applicable to a single octave. Used in [Fractal Brownian Motion (fBm) with Perlin Noise](4253-fractal-brownian-motion-fbm-with-perlin-noise.md) to control amplitude decay (default 0.5) [S7].
+- **Output Range:** The raw output is in $[-1, 1]$. It is often remapped to $[0, 1]$ by $N_{norm} = \frac{N + 1}{2}$ [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Lattice Zeroes:** The noise value is exactly zero at every integer lattice point, which can cause artifacts in the amplitude distribution [S6].
+- **Grid Artifacts:** Original Perlin noise exhibited grid-oriented artifacts; the improved version uses fixed gradient directions and the quintic fade function to mitigate this [S1]. However, some axis-aligned anisotropy may remain due to hash correlation [S6].
+- **Boundary Conditions:** The permutation table must be doubled to 512 entries to handle indices $XI+1$ and $YI+1$ when $XI=255$ or $YI=255$, avoiding expensive modulo operations [S2, unofficial].
+- **Periodicity:** Standard Perlin noise is non-periodic. To create tileable textures, axis wrapping or specific periodic permutation tables must be used [S1][S2, unofficial].
+
+## Subtopics
+
+### [Fractal Brownian Motion (fBm) with Perlin Noise](4253-fractal-brownian-motion-fbm-with-perlin-noise.md)
+Fractal Brownian Motion (fBm) with Perlin Noise is a procedural technique that generates complex, self-similar noise patterns by summing multiple octaves of a base gradient noise function (typically Perlin Noise) with increasing frequency and decreasing amplitude. It solves the problem of creating natural-looking, detailed volumetric structures (such as terrain, smoke, or clouds) that simple Perlin noise cannot provide due to its lack of multi-scale detail. Unlike standard Perlin noise, which produces a single scale of variation, fBm mimics natural fractal phenomena by layering fine details over coarse structures.
+
+### [Wavelet Noise](16942-wavelet-noise.md)
+Wavelet noise is an explicit noise function introduced by Cook and DeRose that generates values by representing the noise field as a quadratic B-spline surface, achieving near-perfect band-limiting to solve the aliasing and detail loss inherent in weakly band-limited methods like [Perlin Noise 2D](4211-perlin-noise-2d.md). It differs from siblings such as [Fractal Brownian Motion (fBm) with Perlin Noise](4253-fractal-brownian-motion-fbm-with-perlin-noise.md) by providing strict spectral control via a weighted sum and supporting solid noise with isotropic filtering.
+
+### [CDF Normalization via Normal Distribution Approximation](17206-cdf-normalization-via-normal-distribution-approximation.md)
+This method compensates for mean shifts introduced by non-linear transformations on Perlin noise by approximating the noise distribution as a normal distribution, mapping it to a uniform distribution via the Cumulative Distribution Function (CDF), applying the desired transformation, and normalizing the result. It sets itself apart from sibling methods like [Symmetric Function Transformation](17210-symmetric-function-transformation.md) by allowing arbitrary transformation functions $f(x)$ rather than requiring specific symmetry conditions, and from [Fractal Brownian Motion (fBm) with Perlin Noise](4253-fractal-brownian-motion-fbm-with-perlin-noise.md) by operating on the statistical distribution of values rather than frequency composition.
+
+### M-Noise
+M-Noise is a procedural shader algorithm that increases realism by interpolating pre-calculated gradient vectors to construct values varying pseudorandomly over space and time, applied to flame pixels for local turbulence [S13]. It is preferred over standard Perlin Noise on GPUs because it avoids chained table look-ups that cause bottlenecks, making it faster and better suited for 3D/4D noise not easily stored in textures [S13]. It is applied to each pixel in the volumetric rendering step to provide local turbulent detail via pseudorandom gradients [S13].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per sample for a single octave [G]. The cost is dominated by a fixed number of arithmetic operations and table lookups [G]. Improved Perlin Noise requires approximately 64 instructions per octave on GPU hardware [S9, unofficial].
+- **Memory Complexity:** $O(1)$ storage for the permutation table (512 bytes) [S2, unofficial]. This is significantly lower than explicit noise methods which require $O(N^d)$ storage [S6].
+- **Performance:** Perlin noise is generally faster than sparse convolution noise, wavelet noise, and better gradient noise, but slower than anisotropic noise [S6]. It requires many computation cycles, so it is often precomputed on the CPU for large textures or optimized for GPU shaders [S2, unofficial].
+- **Strengths:** Fast, simple, continuous ($C^1$), and produces natural-looking textures. It supports solid noise and isotropic filtering [S7].
+- **Limitations:** It is only weakly band-pass, which can lead to aliasing and detail loss [S6]. It does not have a Gaussian amplitude distribution and exhibits some axis-aligned anisotropy [S6]. It does not support anisotropic filtering or setup-free surface noise [S7].
+- **When to use:** When computational efficiency is critical and high-frequency band-limiting is not required [S6][S7]. Ideal for general-purpose procedural textures in real-time applications [S2, unofficial].
+- **When not to use:** When strict band-limiting is needed to prevent aliasing (use Wavelet Noise) or when Gaussian amplitude distribution is required [S6][S7].
+
+## Background
+Perlin noise was introduced by Ken Perlin in 1985 [S6]. Perlin received an Academy Award for his work on this function [S2, unofficial]. The "Improved Perlin Noise" variant, which uses the quintic fade function and fixed gradient vectors, was described by Green in 2005 in "Implementing improved perlin noise" (GPU Gems 2) [S9, unofficial]. It has become the workhorse of the graphics industry due to its speed and simplicity [S1]. It is widely used in film, commercials, and computer graphics for simulating natural phenomena [S2, unofficial].
+
+## Sources
+[S1] A Survey of Procedural Noise Functions, https://doi.org/10.1111/j.1467-8659.2010.01827.x, fetched 2026-10-27
+[S2] DTIC ADA427539: Simulating Clouds with Procedural Texturing Techniques Using the GPU, https://archive.org/details/DTIC_ADA427539, fetched 2026-10-26 (unofficial)
+[S3] Manolo94/UE5MinecraftClone, https://github.com/Manolo94/UE5MinecraftClone, fetched 2026-10-26 (unofficial)
+[S4] vittoboa/procedural-terrain-generation, https://github.com/vittoboa/procedural-terrain-generation, fetched 2026-10-27 (unofficial)
+[S5] MProgramingUnityCsharp/VoxelCoreEngine, https://github.com/MProgramingUnityCsharp/VoxelCoreEngine, fetched 2026-10-27 (unofficial)
+[S6] PDF A Survey of Procedural Noise Functions, https://www.cs.umd.edu/~zwicker/publications/SurveyProceduralNoise-CGF10.pdf, fetched 2026-10-27
+[S7] PDF State of the Art in Procedural Noise Functions, https://www-sop.inria.fr/reves/Basilic/2010/LLCDDELPZ10/LLCDDELPZ10STARPNF.pdf, fetched 2026-10-27
+[S8] Procedural Graphics: Noise, Fractals and Mathematical Art, https://www.mattcurrent.org/procedural-graphics-guide/, fetched 2026-10-27 (unofficial)
+[S9] PDF Real-time Procedural Volumetric Fire - UC Davis, https://web.cs.ucdavis.edu/~hamann/FullerKrishnanMahrousHamannJoyFirePaperFor_I3D2007AsSubmitted11012006.pdf, fetched 2026-10-27 (unofficial)
+[S10] PDF Real-Time Volumetric Rendering of Fire in a Production System ..., https://clas.iusb.edu/math-compsci/_prior-thesis/YVanzine_thesis.pdf, fetched 2026-10-27 (unofficial)
+[S11] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)
+[S12] GitHub Repo for VoxelEngine, https://github.com/TheSlabby/VoxelEngine, fetched 2026-10-29 (unofficial)
+[S13] Pseudorandom Noise for Real-Time Volumetric Rendering of Fire in a Production System, https://doi.org/10.2312/vg/vg-pbg08/129-136, fetched 2026-10-26

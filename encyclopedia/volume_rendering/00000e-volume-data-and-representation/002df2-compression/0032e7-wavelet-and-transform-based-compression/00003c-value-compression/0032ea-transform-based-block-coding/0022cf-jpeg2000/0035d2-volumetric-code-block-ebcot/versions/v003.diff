@@ -1,0 +1,164 @@
+--- v002.md
++++ v003.md
+@@ -12,13 +12,8 @@
+ 
+ **Data Structures:**
+-- **Code-Block:** A 3D array of wavelet coefficients. The dimensions are defined as Width ($W$), Height ($H$), and Depth ($D$) [S1].
++- **Code-Block:** A 3D array of wavelet coefficients with dimensions Width ($W$), Height ($H$), and Depth ($D$) [S1].
+ - **Bit-Plane Coding Contexts:** Standard EBCOT contexts are used, but the spatial neighborhood for context modeling includes coefficients from adjacent slices (depth dimension) in addition to the current slice [G].
+ 
+-**Parameters:**
+-- **Code-Block Size:** The dimensions $W \times H \times D$ [S1].
+-- **Typical Values:** For medical volumetric data, the optimal size is $32 \times 32 \times 32$ coefficients [S1].
+-- **Decomposition Structure:** The experiments in the source used a $(4, 4, 2)$ decomposition structure [S1].
+-
+-**Steps:**
++**Numbered Steps:**
+ 1. **Partitioning:** Partition the 3D wavelet subbands into 3D code-blocks of size $W \times H \times D$ [S1].
+ 2. **Bit-Plane Generation:** For each code-block, generate bit-planes from the most significant bit (MSB) to the least significant bit (LSB) [G].
+@@ -27,4 +22,13 @@
+ 5. **Rate-Distortion Optimization (RDO):** Determine the truncation point for each code-block to maximize the rate-distortion performance. The granularity of this optimization is affected by the code-block size [S1].
+ 6. **Bitstream Formatting:** Assemble the coded bits into the final bitstream, including headers for each code-block [G].
++
++**Formulas:**
++- Bit-rate reduction gain from increasing block size is measured in decibels (dB) using Bjøntegaard delta PSNR (BD-PSNR) [S1].
++- Coefficient count per code-block: $N = W \times H \times D$ [S1].
++
++**Parameters:**
++- **Code-Block Size:** The dimensions $W \times H \times D$ [S1].
++- **Typical Values:** For medical volumetric data, the optimal size is $32 \times 32 \times 32$ coefficients [S1].
++- **Decomposition Structure:** The experiments in the source used a $(4, 4, 2)$ decomposition structure [S1].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -38,22 +42,32 @@
+     Encodes 3D wavelet subbands using volumetric EBCOT.
+     Args:
+-        wavelet_subbands: A 3D array of wavelet coefficients (D, H, W).
++        wavelet_subbands: A 3D array of wavelet coefficients (depth_in, height_in, width_in).
+         block_size: Tuple (W, H, D) defining the code-block dimensions.
+     Returns:
+         compressed_bitstream: List of encoded bit-blocks.
+     """
+-    W, H, D = block_size
++    block_w, block_h, block_d = block_size
++    depth_in, height_in, width_in = wavelet_subbands.shape
+     compressed_bitstream = []
+-    max_abs = max(abs(c) for c in wavelet_subbands.flat)
++    
++    # Determine number of bit-planes
++    max_abs = 0
++    for z in range(depth_in):
++        for y in range(height_in):
++            for x in range(width_in):
++                val = abs(wavelet_subbands[z, y, x])
++                if val > max_abs:
++                    max_abs = val
+     num_levels = max_abs.bit_length() if max_abs > 0 else 1
+     
+-    for z_start in range(0, D, D):
+-        for y_start in range(0, H, H):
+-            for x_start in range(0, W, W):
+-                z_end = min(z_start + D, D)
+-                y_end = min(y_start + H, H)
+-                x_end = min(x_start + W, W)
+-                block = wavelet_subbands[z_start:z_end, y_start:y_end, x_start:x_end]
+-                bd, bh, bw = block.shape
++    for z_start in range(0, depth_in, block_d):
++        for y_start in range(0, height_in, block_h):
++            for x_start in range(0, width_in, block_w):
++                z_end = min(z_start + block_d, depth_in)
++                y_end = min(y_start + block_h, height_in)
++                x_end = min(x_start + block_w, width_in)
++                bd = z_end - z_start
++                bh = y_end - y_start
++                bw = x_end - x_start
+                 
+                 # Initialize significance map
+@@ -62,15 +76,15 @@
+                 
+                 for bit_pos in range(num_levels - 1, -1, -1):
+-                    # Significance Pass
++                    # Pass 1: Significance Propagation
+                     for z in range(bd):
+                         for y in range(bh):
+                             for x in range(bw):
+                                 if not sig[z][y][x]:
+-                                    # Check 3D neighborhood
+                                     has_significant_neighbor = False
+                                     for dz in (-1, 0, 1):
+                                         for dy in (-1, 0, 1):
+                                             for dx in (-1, 0, 1):
+-                                                if dz == 0 and dy == 0 and dx == 0: continue
++                                                if dz == 0 and dy == 0 and dx == 0:
++                                                    continue
+                                                 nz, ny, nx = z + dz, y + dy, x + dx
+                                                 if 0 <= nz < bd and 0 <= ny < bh and 0 <= nx < bw:
+@@ -78,12 +92,45 @@
+                                                         has_significant_neighbor = True
+                                                         break
+-                                            if has_significant_neighbor: break
+-                                        if has_significant_neighbor: break
++                                                if has_significant_neighbor:
++                                                    break
++                                        if has_significant_neighbor:
++                                            break
+                                     
+                                     if has_significant_neighbor:
+                                         sig[z][y][x] = True
+                                         block_bits.append(1)  # Significance bit
+-                                        block_bits.append(abs(block[z][y][x]) >> bit_pos & 1)  # Magnitude bit
+-                                        block_bits.append(0 if block[z][y][x] >= 0 else 1)  # Sign bit
++                                        block_bits.append(abs(wavelet_subbands[z_start + z, y_start + y, x_start + x]) >> bit_pos & 1)  # Magnitude bit
++                                        block_bits.append(0 if wavelet_subbands[z_start + z, y_start + y, x_start + x] >= 0 else 1)  # Sign bit
++                    # Pass 2: Magnitude Refinement
++                    for z in range(bd):
++                        for y in range(bh):
++                            for x in range(bw):
++                                if sig[z][y][x]:
++                                    block_bits.append(abs(wavelet_subbands[z_start + z, y_start + y, x_start + x]) >> bit_pos & 1)
++                    # Pass 3: Cleanup
++                    for z in range(bd):
++                        for y in range(bh):
++                            for x in range(bw):
++                                if not sig[z][y][x]:
++                                    has_significant_neighbor = False
++                                    for dz in (-1, 0, 1):
++                                        for dy in (-1, 0, 1):
++                                            for dx in (-1, 0, 1):
++                                                if dz == 0 and dy == 0 and dx == 0:
++                                                    continue
++                                                nz, ny, nx = z + dz, y + dy, x + dx
++                                                if 0 <= nz < bd and 0 <= ny < bh and 0 <= nx < bw:
++                                                    if sig[nz][ny][nx]:
++                                                        has_significant_neighbor = True
++                                                        break
++                                                if has_significant_neighbor:
++                                                    break
++                                        if has_significant_neighbor:
++                                            break
++                                    if has_significant_neighbor:
++                                        sig[z][y][x] = True
++                                        block_bits.append(1)
++                                        block_bits.append(abs(wavelet_subbands[z_start + z, y_start + y, x_start + x]) >> bit_pos & 1)
++                                        block_bits.append(0 if wavelet_subbands[z_start + z, y_start + y, x_start + x] >= 0 else 1)
+                 
+                 compressed_bitstream.append(block_bits)
+@@ -99,13 +146,13 @@
+ - **Time Complexity:** Not explicitly given, but depends on the number of coefficients and the arithmetic coding overhead [G].
+ - **Memory Complexity:** Proportional to the code-block size. A $32 \times 32 \times 32$ block requires storing significance maps and contexts for 32,768 coefficients [G].
+-- **Measured Performance:** For medical volumetric data, switching from $16 \times 16 \times 1$ to $32 \times 32 \times 1$ improves compression efficiency by about 0.7 dB or 10% in bit-rate reduction. Switching to $64 \times 64 \times 1$ improves it by about 1 dB. The optimal size $32 \times 32 \times 32$ provides the best BD-PSNR across kernels [S1].
+-- **Scaling:** Performance gains are observed with larger block sizes up to $32 \times 32 \times 32$. Beyond this, performance drops due to loss of truncation granularity [S1].
+-- **Strengths:** Significant compression improvements (2 dB or more) compared to JPEG 2000 Part 1 for medical images. Better adaptation of the arithmetic coder to 3D statistical properties [S1].
+-- **Limitations:** Not compatible with standard JPEG 2000 decoders. Requires JP3D support. Larger blocks reduce random access granularity [S1].
++- **Measured Performance:** For medical volumetric data, switching from $16 \times 16 \times 1$ to $32 \times 32 \times 1$ improves compression efficiency by about 0.7 dB or 10% in bit-rate reduction [S1]. Switching to $64 \times 64 \times 1$ improves it by about 1 dB [S1]. The optimal size $32 \times 32 \times 32$ provides the best BD-PSNR across kernels [S1].
++- **Scaling:** Performance gains are observed with larger block sizes up to $32 \times 32 \times 32$ [S1]. Beyond this, performance drops due to loss of truncation granularity [S1].
++- **Strengths:** Significant compression improvements (2 dB or more) compared to JPEG 2000 Part 1 for medical images [S1]. Better adaptation of the arithmetic coder to 3D statistical properties [S1].
++- **Limitations:** Not compatible with standard JPEG 2000 decoders [S1]. Requires JP3D support [S1]. Larger blocks reduce random access granularity [S1].
+ - **When to use:** When compressing volumetric medical data and JP3D support is available [S1].
+ - **When not to use:** When compatibility with standard JPEG 2000 is required or when random access granularity is critical and block sizes must be small [S1].
+ 
+ ## Background
+-Volumetric Code-Block EBCOT is a technique developed for the compression of volumetric medical images. It is part of the JP3D standard, which extends JPEG 2000 to support 3D data. The method leverages the 3D wavelet transform to exploit correlations between slices, and the EBCOT algorithm to provide embedded bitstreams with rate-distortion optimization. The specific findings on optimal block sizes and performance gains are from a study on wavelet-based volumetric medical image compression [S1].
++Volumetric Code-Block EBCOT is a technique developed for the compression of volumetric medical images [S1]. It is part of the JP3D standard, which extends JPEG 2000 to support 3D data [S1]. The method leverages the 3D wavelet transform to exploit correlations between slices, and the EBCOT algorithm to provide embedded bitstreams with rate-distortion optimization [S1]. The specific findings on optimal block sizes and performance gains are from a study on wavelet-based volumetric medical image compression [S1].
+ 
+ ## Sources

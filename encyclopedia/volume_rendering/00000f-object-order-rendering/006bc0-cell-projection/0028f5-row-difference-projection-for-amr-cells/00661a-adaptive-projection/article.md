@@ -1,0 +1,177 @@
+# Adaptive Projection
+
+Also called: Cascading Refinement Projection, Line Integral Projection
+
+## Overview
+Adaptive Projection is an algorithm for generating line integrals (sums or weighted averages) along a sight-line in adaptive mesh refinement (AMR) data, returning a list of finest-resolution data points rather than a fixed-resolution array [S1]. It solves the problem of high storage requirements and redundant computation in AMR volume rendering by ensuring that every returned point contains data from the finest available resolution, excluding any coarser data that is superseded by finer cells [S1]. Unlike simple 2D image arrays of fixed resolution filled by all overlapping cells, this method returns a sparse list of finest-resolution points, requiring less than 1% of the storage for high-resolution projections (e.g., Santa Fe Light Cone dataset) [S1].
+
+## How it works
+**Inputs:**
+- A hierarchy of AMR grids, each defined by refinement level, spatial extent, and data fields (value $v$ and weight $w$).
+- Projection direction (axis of projection).
+- Refinement factor $r$ (typically integer, e.g., 2).
+- Mode: Weighted average or unweighted integration.
+
+**Outputs:**
+- A list of points $(x_p, y_p, v)$, where $(x_p, y_p)$ are the projected coordinates and $v$ is the computed value. Each point corresponds to the finest resolution available at that location.
+
+**Data Structures:**
+- **Grids:** Each grid has a refinement level $L$, and arrays for x/y positions, data values $v_{ijn}$, and weights $w_{ijn}$.
+- **Child Mask:** A boolean mask for the current grid, indicating which cells have finer data available.
+- **Accumulators:** $V_{ij}$ and $W_{ij}$ for the current grid being processed.
+
+**Steps:**
+1. **Iterate Grids:** Process grids in order of refinement level, starting from the coarsest ($L=0$) to the finest.
+2. **Initialize Accumulators:** For the current grid, initialize $V_{ij}$ and $W_{ij}$ for all cells.
+   - If weighted average: Evaluate sums $V_{ij} = \sum_n v_{ijn} w_{ijn} dl$ and $W_{ij} = \sum_n w_{ijn} dl$.
+   - If unweighted: Set $W_{ij} = 1.0$ (or $dl=1$) and $V_{ij} = \sum_n v_{ijn} dl$.
+   - Note: $dl$ is the path length through a single cell. Since this is constant within a grid, it can be moved outside the sum [S1].
+3. **Identify Finer Data:** Create a mask of cells where finer data exists. Reduce this mask with a logical 'and' operation along the axis of projection. Any cell where this mask is 'False' has higher refinement level data available [S1].
+4. **Same-Level Comparison:** Compare the current grid against all other grids on the same refinement level that overlap. Compare flattened x and y position arrays via integer indexing and combine any collisions (e.g., by summing values/weights) [S1].
+5. **Coarser-Level Comparison:** Repeat the comparison process with data from coarser grids identified as having subsequent data available. Add each coarse cell to the $r^2$ cells on the current level, where $r$ is the refinement factor. This effectively distributes the coarse data to its finer children [S1].
+6. **Filter Output:** Remove all cells in the current level's data array where the reduced child mask is 'True' (as they are part of the final output and will be handled by finer grids). Retain cells where the child mask is 'False' for processing on the next level. This creates a cascading refinement process where only two levels of refinement are compared at a given time [S1].
+7. **Final Division:** After processing the entire hierarchy, divide the accumulated values to construct the output:
+   $$v(x, y) = \frac{V(x, y)}{W(x, y)}$$
+   For unweighted projection, the denominator reduces to $dl$ (unity) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_projection(grids, projection_axis, refinement_factor, weighted=True):
+    """
+    grids: List of Grid objects, sorted by refinement level ascending.
+    projection_axis: 'x', 'y', or 'z'.
+    refinement_factor: Integer r.
+    weighted: Boolean, if False, performs unweighted integration.
+    """
+    # Initialize global accumulators for the final output
+    # Using a dictionary or sparse structure for (x, y) -> (V, W)
+    final_accumulators = {} 
+
+    for grid in grids:
+        level = grid.level
+        # Step 2: Initialize local accumulators for this grid
+        local_V = zeros_like(grid.data)
+        local_W = zeros_like(grid.data)
+        
+        if weighted:
+            for n in range(grid.num_cells):
+                v_val = grid.data[n]
+                w_val = grid.weight[n]
+                dl = grid.path_length[n] # Constant per grid
+                local_V[n] += v_val * w_val * dl
+                local_W[n] += w_val * dl
+        else:
+            for n in range(grid.num_cells):
+                v_val = grid.data[n]
+                dl = grid.path_length[n]
+                local_V[n] += v_val * dl
+                local_W[n] = 1.0 # Or dl, depending on definition. Source says W=1.0 for unweighted.
+
+        # Step 3: Identify cells with finer data
+        # Mask is True if a finer child exists in the projection direction
+        # This requires knowledge of the grid hierarchy. 
+        # For simplicity, assume grid.has_finer_child(cell_index) is available.
+        child_mask = array([grid.has_finer_child(i) for i in range(grid.num_cells)])
+        
+        # Reduce mask along projection axis
+        # If projection_axis is 'z', reduce along z-dimension
+        if projection_axis == 'z':
+            reduced_mask = all(child_mask, axis=2) # Example for 3D
+        elif projection_axis == 'y':
+            reduced_mask = all(child_mask, axis=1)
+        else:
+            reduced_mask = all(child_mask, axis=0)
+
+        # Step 4: Compare with same-level overlapping grids
+        # This step handles collisions between grids at the same level.
+        # We assume a spatial index or grid list for same-level grids.
+        same_level_grids = get_grids_at_level(level)
+        for other_grid in same_level_grids:
+            if other_grid is grid:
+                continue
+            if grids_overlap(grid, other_grid):
+                # Combine collisions
+                # This is complex in 2D/3D. Source mentions "flattened x and y position arrays 
+                # are compared via integer indexing".
+                # We map grid coordinates to a common 2D plane perpendicular to projection_axis.
+                common_cells = find_overlapping_cells(grid, other_grid)
+                for cell_idx in common_cells:
+                    # Accumulate values from other_grid into grid's local accumulators
+                    # Or vice versa, depending on implementation. 
+                    # Source says "any collisions are combined".
+                    # Assuming we add other_grid's contribution to the current grid's accumulator
+                    # for the overlapping region.
+                    local_V[cell_idx] += other_grid.local_V[cell_idx]
+                    local_W[cell_idx] += other_grid.local_W[cell_idx]
+
+        # Step 5: Compare with coarser grids
+        # Add coarse cell data to r^2 finer cells
+        if level > 0:
+            coarser_grids = get_grids_at_level(level - 1)
+            for coarser_grid in coarser_grids:
+                if grids_overlap(coarser_grid, grid):
+                    # Distribute coarser data to finer children
+                    # Each coarse cell maps to r^2 finer cells
+                    for coarse_cell in coarser_grid.cells:
+                        finer_children = get_finer_children(coarse_cell, grid)
+                        for fine_child in finer_children:
+                            # Add coarse contribution to fine child
+                            # Note: Source says "each coarse cell is then added to the r^2 cells"
+                            # This implies adding the coarse value to the fine accumulator
+                            local_V[fine_child] += coarser_grid.data[coarse_cell] * coarser_grid.weight[coarse_cell] * dl_coarse
+                            local_W[fine_child] += coarser_grid.weight[coarse_cell] * dl_coarse
+
+        # Step 6: Filter output
+        # Remove cells where child_mask is True (they are handled by finer grids)
+        # Retain cells where child_mask is False
+        output_cells = [i for i in range(grid.num_cells) if not child_mask[i]]
+        
+        # Step 7: Add to final accumulators
+        for i in output_cells:
+            x, y = grid.projected_coordinates(i)
+            key = (x, y)
+            if key not in final_accumulators:
+                final_accumulators[key] = [0.0, 0.0]
+            final_accumulators[key][0] += local_V[i]
+            final_accumulators[key][1] += local_W[i]
+
+    # Final Division
+    results = []
+    for (x, y), (V, W) in final_accumulators.items():
+        if W != 0:
+            v = V / W
+        else:
+            v = 0.0 # Or handle as invalid
+        results.append((x, y, v))
+    
+    return results
+```
+
+**Parameters:**
+- Refinement factor $r$: Typically 2.
+- Weight field: Optional. If not provided, use unweighted integration.
+
+**Edge Cases:**
+- **Precision:** Floating-point accumulation order may affect precision. Source does not specify.
+- **Boundaries:** Cells on the edge of the domain may have fewer neighbors. Source does not specify handling.
+- **Degenerate Input:** Empty grids or grids with no data. Source does not specify.
+
+## Subtopics
+
+### [Spatial Decomposition for Adaptive Projection](19604-spatial-decomposition-for-adaptive-projection.md)
+A parallelization strategy for adaptive projection that decomposes the image plane rather than the data domain, ensuring non-overlapping results and minimizing communication overhead.
+
+## Operating characteristics
+- **Time Complexity:** The method iterates over all grids and performs comparisons between overlapping grids. The source notes that the initial projection process takes longer than simple fixed-resolution methods because it must identify and process the finest points [S1].
+- **Memory Complexity:** The output is a list of finest-resolution points, requiring less than 1% of the storage of a full-resolution 2D image array (e.g., $230^2$ pixels) [S1].
+- **Performance:** For the Santa Fe Light Cone dataset, this method significantly reduces storage requirements [S1].
+- **Strengths:** Efficient storage, instant image construction for any field of view, handles AMR data naturally.
+- **Limitations:** Slower initial projection time, complex implementation for overlapping grids at the same level.
+
+## Background
+Adaptive Projection was introduced in the context of the `yt` toolkit for astrophysical simulation data analysis [S1]. It is designed to handle the multi-scale nature of AMR calculations, allowing for efficient visualization of large datasets [S1]. The method was developed to address the limitations of fixed-resolution projections, which are inefficient for AMR data [S1].
+
+## Sources
+[S1] YT: A Multi-Code Analysis Toolkit for Astrophysical Simulation Data, https://digital.library.unt.edu/ark:/67531/metadc834104/?q=fluid simulation volume rendering, fetched 2026-10-28

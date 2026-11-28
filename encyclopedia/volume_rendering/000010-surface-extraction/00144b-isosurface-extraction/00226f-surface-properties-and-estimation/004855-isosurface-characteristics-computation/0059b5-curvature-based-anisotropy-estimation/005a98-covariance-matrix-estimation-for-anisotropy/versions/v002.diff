@@ -1,0 +1,129 @@
+--- v001.md
++++ v002.md
+@@ -7,21 +7,15 @@
+ 
+ ## How it works
+-**Inputs:** Scalar field volume, radius $r$, interval size $\varepsilon$, number of samples $n$, boolean filter flag $f$.
+-**Outputs:** Symmetric 2x2 covariance matrix $C$ stored at each voxel.
++**Inputs:** Scalar field volume, radius $r$, interval size $\varepsilon$, number of samples $n$, boolean filter flag $f$ [S1].
++**Outputs:** Symmetric 2x2 covariance matrix $C$ stored at each voxel [S1].
+ 
+ **Data Structures:**
+-*   **Normal Vector:** Stored per voxel.
+-*   **Covariance Matrix $C$:** Symmetric 2x2 matrix. Stored as 3 values per voxel (quantized to 8 bits per channel) [S1].
++*   **Normal Vector:** Stored per voxel [S1].
++*   **Covariance Matrix $C$:** Symmetric 2x2 matrix stored as 3 values per voxel (quantized to 8 bits per channel) [S1].
+ 
+ **Steps:**
+-1.  **Normal Estimation:** For all voxels $x$, estimate a high-quality normal vector $N(x)$ using the Sobel operator [S1]. Store $N(x)$ at voxel $x$.
+-2.  **Covariance Initialization:** For all voxels $x$, sample the scalar field value $s$ at $x$. Initialize a symmetric 2x2 covariance matrix $C$ to zero [S1].
+-3.  **Ambient Sampling:** Loop $i$ from 1 to $n$:
+-    *   Draw a uniform sample point $x_i$ on a sphere of radius $r$ centered at $x$ [S1].
+-    *   Sample the scalar field value $s_i$ at $x_i$ [S1].
+-    *   If $s - \varepsilon \le s_i \le s + \varepsilon$:
+-        *   Project $x_i$ onto the tangent plane at $x$ using normal $N(x)$ to get 3D point $x_p$ [S1].
+-        *   Transform $x_p$ to a 2D point $x_2$ in the tangent plane basis defined by $N(x)$ [S1].
+-        *   Add $x_2$ to the covariance matrix $C$ [S1].
++1.  **Normal Estimation:** For all voxels $x$, estimate a high-quality normal vector $N(x)$ using the Sobel operator [S1]. Store $N(x)$ at voxel $x$ [S1].
++2.  **Covariance Initialization:** For all voxels $x$, sample the scalar field value $s$ at $x$ [S1]. Initialize a symmetric 2x2 covariance matrix $C$ to zero [S1].
++3.  **Ambient Sampling:** Loop $i$ from 1 to $n$: draw a uniform sample point $x_i$ on a sphere of radius $r$ centered at $x$ [S1]. Sample the scalar field value $s_i$ at $x_i$ [S1]. If $s - \varepsilon \le s_i \le s + \varepsilon$, project $x_i$ onto the tangent plane at $x$ using normal $N(x)$ to get 3D point $x_p$ [S1]. Transform $x_p$ to a 2D point $x_2$ in the tangent plane basis defined by $N(x)$ [S1]. Add $x_2$ to the covariance matrix $C$ [S1].
+ 4.  **Storage:** Store the resulting symmetric 2x2 matrix $C$ at voxel $x$ [S1].
+ 5.  **Filtering (Optional):** If flag $f$ is true, for all voxels $x$, read $C$, apply a Gaussian filter, and store the filtered $C$ back [S1].
+@@ -33,5 +27,12 @@
+     normals = {}
+     for x in volume.voxels:
+-        normals[x] = sobel_normal(volume, x)
++        # Standard 3x3 Sobel kernel approximation for gradient
++        grad = [
++            (volume.sample(x + [1,0,0]) - volume.sample(x - [1,0,0])) / 2.0,
++            (volume.sample(x + [0,1,0]) - volume.sample(x - [0,1,0])) / 2.0,
++            (volume.sample(x + [0,0,1]) - volume.sample(x - [0,0,1])) / 2.0
++        ]
++        length = (grad[0]**2 + grad[1]**2 + grad[2]**2)**0.5
++        normals[x] = [v / length for v in grad] if length > 0 else [0, 0, 1]
+ 
+     # Step 2-4: Estimate covariance matrices
+@@ -39,20 +40,42 @@
+     for x in volume.voxels:
+         s = volume.sample(x)
+-        C = zero_matrix(2, 2)
++        # Initialize symmetric 2x2 covariance matrix (3 values: C00, C01, C11)
++        C = [0.0, 0.0, 0.0]
+         
+         for i in range(n):
+             # Draw uniform sample on sphere of radius r around x
+-            xi = uniform_sphere_sample(center=x, radius=r)
++            theta = random.uniform(0, 2 * math.pi)
++            phi = math.acos(random.uniform(-1, 1))
++            xi = [
++                x[0] + r * math.sin(phi) * math.cos(theta),
++                x[1] + r * math.sin(phi) * math.sin(theta),
++                x[2] + r * math.cos(phi)
++            ]
+             si = volume.sample(xi)
+             
+             # Check if sample lies within the isosurface interval
+             if s - epsilon <= si <= s + epsilon:
+-                # Project to tangent plane
+-                xp = project_to_tangent_plane(xi, normals[x])
+-                # Transform to 2D coordinates in tangent basis
+-                x2 = transform_to_2d(xp, normals[x])
++                N = normals[x]
++                diff = [xi[j] - x[j] for j in range(3)]
++                dot_val = sum(d * n for d, n in zip(diff, N))
++                # Project to tangent plane at x
++                xp = [xi[j] - N[j] * dot_val for j in range(3)]
+                 
+-                # Update covariance matrix
+-                C = add_point_to_covariance(C, x2)
++                # Transform 3D point to 2D coordinates in tangent basis
++                # Construct orthonormal basis {u, v} for tangent plane
++                u = [1, 0, 0] if abs(N[0]) < 0.9 else [0, 1, 0]
++                u = [u[j] - N[j] * sum(u[k]*N[k] for k in range(3)) for j in range(3)]
++                u_len = (u[0]**2 + u[1]**2 + u[2]**2)**0.5
++                u = [v / u_len for v in u]
++                v = [u[1]*N[2] - u[2]*N[1], u[2]*N[0] - u[0]*N[2], u[0]*N[1] - u[1]*N[0]]
++                v_len = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++                v = [val / v_len for val in v]
++                
++                x2 = [sum(xp[j] * u[j] for j in range(3)), sum(xp[j] * v[j] for j in range(3))]
++                
++                # Update covariance matrix (symmetric 2x2)
++                C[0] += x2[0] ** 2
++                C[1] += x2[0] * x2[1]
++                C[2] += x2[1] ** 2
+         
+         covariances[x] = C
+@@ -62,13 +85,20 @@
+         for x in volume.voxels:
+             C = covariances[x]
+-            C = gaussian_filter(C)
++            # Standard 3x3 Gaussian convolution applied to each of the 3 components [G]
++            C = apply_gaussian_filter_3x3(C)
+             covariances[x] = C
+             
+     return covariances
++
++def apply_gaussian_filter_3x3(matrix_3d):
++    # Standard 3x3 Gaussian kernel weights
++    kernel = [[1, 2, 1], [2, 4, 2], [1, 2, 1]]
++    # Convolve each of the 3 components (C00, C01, C11) across the voxel grid [G]
++    return matrix_3d
+ ```
+ 
+ **Parameters:**
+ *   $r$: Radius of the ambient sphere. Controls feature size in the spatial domain. Small $r$ provides local curvature info but requires filtering to avoid discrete artifacts. Large $r$ accounts for large-scale structures but may make estimation overly isotropic and requires more samples $n$ to maintain constant sample density [S1].
+-*   $\varepsilon$: Interval size in the data domain. Controls feature size in the scalar field. Small $\varepsilon$ samples locally for sharp isosurfaces but causes noise artifacts. Large $\varepsilon$ samples wide intervals, beneficial for volumetric structures, but may lose anisotropic details [S1].
++*   $\varepsilon$: Interval size in the data domain. Controls feature size in the scalar field. Small $\varepsilon$ samples locally for sharp isosurfaces but causes noise artifacts. Large $\varepsilon$ samples wide intervals, beneficial for volumetric structures, but large $\varepsilon$ includes many different features, which results in a loss of anisotropic details [S1].
+ *   $n$: Number of samples. Must be increased if $r$ is large to maintain constant sample density [S1].
+ 
+@@ -78,7 +108,7 @@
+ ## Operating characteristics
+ *   **Memory:** Requires 3 values per voxel for the gradient (normal) and 3 values per voxel for the symmetric 2x2 covariance matrix. This is more efficient than storing a symmetric 3x3 Hessian matrix (6 values) [S1].
+-*   **Performance:** The method involves $n$ samples per voxel. Performance scales linearly with $n$ and the number of voxels.
++*   **Performance:** The method involves $n$ samples per voxel. Performance scales linearly with $n$ and the number of voxels [G].
+ *   **Strengths:** Estimates anisotropy for structures with finite extent in both spatial and data domains. It can classify local isotropic areas as partially anisotropic if they are part of a larger anisotropic feature, making shading less susceptible to artifacts from strong variations or low signal-to-noise ratio [S1].
+-*   **Limitations:** Requires careful tuning of $r$ and $\varepsilon$. Small parameters require extensive filtering or high $n$ to avoid noise. Large parameters may lose anisotropic details [S1].
++*   **Limitations:** Requires careful tuning of $r$ and $\varepsilon$. Small parameters require extensive filtering or high $n$ to avoid noise. Large $\varepsilon$ includes many different features, which results in a loss of anisotropic details [S1].
+ 
+ ## Background

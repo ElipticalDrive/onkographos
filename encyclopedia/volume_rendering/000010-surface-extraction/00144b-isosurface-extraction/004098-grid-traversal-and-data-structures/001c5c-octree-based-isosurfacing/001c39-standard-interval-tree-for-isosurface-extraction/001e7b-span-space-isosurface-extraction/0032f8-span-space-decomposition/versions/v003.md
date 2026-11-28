@@ -1,0 +1,41 @@
+# Span Space Decomposition
+
+Also called: Span-Space Value Indexing, span space techniques
+
+## Overview
+Span space decomposition is a value-based partitioning strategy that minimizes isosurface extraction time by reorganizing volumetric data into a two-dimensional space defined by field value ranges rather than spatial coordinates [S2]. It solves the problem of rapidly locating cells intersecting an isosurface in large datasets by mapping each cell to a point $(x, y)$ where $x$ is the minimum and $y$ is the maximum value spanned by that cell, allowing efficient querying via structures like kd-trees or interval trees [S1, S2].
+
+## Shared principles
+The core mechanism of span space decomposition involves projecting every cell in the volume dataset into a 2D point based on its extreme field values.
+
+**Mapping:**
+Each cell $c$ is mapped to a point $P_c = (x_c, y_c)$ in span space, where:
+$$ x_c = \min_{v \in c} f(v) $$
+$$ y_c = \max_{v \in c} f(v) $$
+Here, $f(v)$ is the scalar field value at vertex $v$. By definition, $y_c \ge x_c$, so all points lie on or above the line $y = x$ [S1].
+
+**Intersection Condition:**
+For a given isovalue $v$, a cell intersects the isosurface if and only if the isovalue lies strictly within the range of values spanned by the cell. In span space, this corresponds to the condition:
+$$ x_c < v \quad \text{AND} \quad y_c > v $$
+Geometrically, the cells intersecting the isosurface form a region in span space bounded by the vertical line $x = v$ and the horizontal line $y = v$ [S1].
+
+**Data Structure:**
+Instead of organizing cells by spatial coordinates, optimized data structures are built over the set of points in span space [S2]. Common structures include kd-trees and interval trees, which allow the algorithm to prune large portions of the dataset that do not satisfy the intersection condition [S1, S2].
+
+## Subtopics
+
+### [NOISE](1751-noise.md)
+Uses a kd-tree overlaid on the span space points to achieve $O(\sqrt{n} + k)$ worst-case search complexity. It organizes points such that only one extreme value needs testing at each node.
+
+### [ISSUE](1752-issue.md)
+Improves upon NOISE by subdividing the span space into an axis-aligned lattice where each tile contains approximately the same number of cells, enabling parallel extraction.
+
+### [Interval Tree Based Methods](1753-interval-tree.md)
+Uses interval trees to manage the span space, offering efficient range queries for isosurface extraction.
+
+## Background
+The concept of span space was introduced by Livnat et al. in the NOISE algorithm [S1, S2]. The approach was developed to address the performance bottlenecks of traditional spatial traversal methods on large datasets, such as MRI and CT scans, where seed set construction can become computationally expensive [S1]. Subsequent work, such as ISSUE, focused on improving parallelism and cache efficiency by restructuring the span space into a lattice [S2].
+
+## Sources
+[S1] A Case Study of Isosurface Extraction Algorithm Performance, https://doi.org/10.1007/978-3-7091-6783-0_26, fetched 2026-10-26
+[S2] Modeling and Visualization Approaches for Time-Varying Volumetric Data, https://doi.org/10.1007/978-3-540-89646-3_100, fetched 2026-10-30

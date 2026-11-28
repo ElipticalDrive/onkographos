@@ -1,0 +1,168 @@
+# Render State Machine
+## Overview
+The Render State Machine is a threaded control mechanism that manages rendering resolution and interruption based on camera movement and user actions to maintain a target frame rate [S1, unofficial]. It distinguishes itself from sibling methods by explicitly handling interruption via Python trace functions to discard incomplete outputs, ensuring viewer consistency [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Inputs**: Camera state, user actions, current render state, target FPS, maximum resolution, visibility ray budget [S1, unofficial].
+- **Outputs**: Rendered image (uint8), updated render state, interrupt flags [S1, unofficial].
+
+**Data Structures**
+- **Transitions Table**: A dictionary mapping current states to action-based next states [S1, unofficial].
+  - Type: `Dict[RenderStates, Dict[RenderActions, RenderStates]]` [S1, unofficial].
+  - Layout: Nested dictionaries [S1, unofficial].
+  - Default: All transitions map to the current state (self-transition) [S1, unofficial].
+  - Overrides: `low_move` + `static` → `low_static`; `low_static` + `static` → `high`; `low_static` + `step` → `high`; `low_static` + `move` → `low_move`; `high` + `move` → `low_move`; `high` + `rerender` → `low_static` [S1, unofficial].
+- **RenderStates**: Literal type with values `'low_move'`, `'low_static'`, `'high'` [S1, unofficial].
+- **RenderActions**: Literal type with values `'rerender'`, `'move'`, `'static'`, `'step'` [S1, unofficial].
+
+**Parameters**
+- `target_fps`: Target frames per second for low-resolution rendering. Default: 24 [S1, unofficial].
+- `vis_rays_per_sec`: Visibility rays per second budget. Default: 100,000 if not initialized or not in global buffer [S1, unofficial].
+- `max_res`: Maximum resolution height from control panel [S1, unofficial].
+
+**Steps**
+1. **Initialize Transitions**: Create an empty dictionary for each state [S1, unofficial]. Set all actions to self-transition [S1, unofficial]. Override specific transitions as defined in the Transitions Table [S1, unofficial].
+2. **Interrupt Logic**: If the current state is `'high'` and the next action is `'move'` or `'rerender'`, set `interrupt_render_flag` to `True` and trigger `render_trigger` [S1, unofficial].
+3. **Interrupt Check**: In a Python trace function, if the event is `'line'` and `interrupt_render_flag` is `True`, reset the flag and raise `IOChangeException` [S1, unofficial].
+4. **Image Resolution Calculation**: If `aspect_ratio` is 0, set it to 0.001 [S1, unofficial]. Get `max_res` from the control panel [S1, unofficial]. If state is `'high'`, set `height` to `max_res` [S1, unofficial]. Set `width` to `height * aspect_ratio`, capped at `max_res` [S1, unofficial]. If state is `'low_move'` or `'low_static'`, calculate `num_vis_rays` as `vis_rays_per_sec / target_fps` [S1, unofficial]. Calculate `height` as `sqrt(num_vis_rays / aspect_ratio)`, rounded to the nearest 10, clamped between 30 and `max_res` [S1, unofficial]. Set `width` to `height * aspect_ratio`, capped at `max_res` [S1, unofficial].
+5. **Rendering**: Update render AABB [S1, unofficial]. Calculate image resolution [S1, unofficial]. Get camera [S1, unofficial]. Generate rays [S1, unofficial]. If model is `GaussianSplattingModel` or `DepthGSModel`, use `get_outputs_for_camera`; else use `get_outputs_for_camera_ray_bundle` [S1, unofficial]. If `crop_viewport` is true, set background color and use `background_color_override_context`; otherwise, no background override [S1, unofficial]. Evaluate model, render with `torch.no_grad()`, then set model to train mode [S1, unofficial].
+6. **Output Sending**: Get output keys [S1, unofficial]. If changed, send output options message and update control panel [S1, unofficial]. Get selected output render [S1, unofficial]. Apply colormap [S1, unofficial]. If split mode, get split output, apply colormap, calculate split index, concatenate selected and split outputs with a divider line at `split_index` [S1, unofficial]. Convert to uint8 [S1, unofficial]. Send as background image [S1, unofficial].
+
+**Pitfalls**
+- If `IOChangeException` is raised during render, the output is discarded and not sent to the viewer [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+from contextlib import contextmanager
+
+class IOChangeException(Exception):
+    pass
+
+class GaussianSplattingModel: pass
+class DepthGSModel: pass
+
+@contextmanager
+def background_color_override_context(bg_color):
+    # [G] Standard context manager to override background color during evaluation
+    yield
+
+def generate_rays(camera, width, height):
+    # [G] Standard ray generation creates a ray bundle for each pixel
+    return {"origin": camera.position, "direction": camera.direction, "width": width, "height": height}
+
+def evaluate_model(model, ray_bundle):
+    # [G] Standard model forward pass
+    return {"color": torch.zeros(3, dtype=torch.float32), "background_color": torch.zeros(3, dtype=torch.float32)}
+
+def apply_colormap(tensor):
+    # [G] Standard colormap application
+    return tensor
+
+def convert_to_uint8(tensor):
+    # [G] Standard uint8 conversion
+    return (tensor.clamp(0, 1) * 255).to(torch.uint8)
+
+def get_split_output():
+    # [G] Retrieves secondary output for split view
+    return torch.zeros(3, dtype=torch.float32)
+
+def calculate_split_index(width, height):
+    # [G] Calculates divider position
+    return width // 2
+
+def concatenate_with_divider(img1, img2, split_index):
+    # [G] Concatenates images with a vertical divider line
+    divider = torch.zeros(1, img1.shape[1], dtype=torch.uint8)
+    return torch.cat([img1[:, :split_index], divider, img2], dim=1)
+
+class RenderStateMachine:
+    def __init__(self, target_fps=24, vis_rays_per_sec=100000, max_res=1080):
+        self.target_fps = target_fps
+        self.vis_rays_per_sec = vis_rays_per_sec
+        self.max_res = max_res
+        self.current_state = 'low_move'
+        self.interrupt_render_flag = False
+        self.transitions = {
+            state: {action: state for action in ['rerender', 'move', 'static', 'step']}
+            for state in ['low_move', 'low_static', 'high']
+        }
+        self.transitions['low_move']['static'] = 'low_static'
+        self.transitions['low_static']['static'] = 'high'
+        self.transitions['low_static']['step'] = 'high'
+        self.transitions['low_static']['move'] = 'low_move'
+        self.transitions['high']['move'] = 'low_move'
+        self.transitions['high']['rerender'] = 'low_static'
+
+    def set_action(self, action):
+        next_state = self.transitions[self.current_state][action]
+        if self.current_state == 'high' and action in ['move', 'rerender']:
+            self.interrupt_render_flag = True
+            # render_trigger() would be called here
+        self.current_state = next_state
+
+    def calculate_resolution(self, aspect_ratio):
+        if aspect_ratio == 0:
+            aspect_ratio = 0.001
+        if self.current_state == 'high':
+            height = self.max_res
+            width = min(height * aspect_ratio, self.max_res)
+        else:
+            num_vis_rays = self.vis_rays_per_sec / self.target_fps
+            height = math.sqrt(num_vis_rays / aspect_ratio)
+            height = round(height / 10) * 10
+            height = max(30, min(height, self.max_res))
+            width = min(height * aspect_ratio, self.max_res)
+        return int(width), int(height)
+
+    def render(self, model, camera, crop_viewport=False, split_mode=False):
+        # Interrupt check is handled by Python trace function raising IOChangeException
+        if self.interrupt_render_flag:
+            # In actual implementation, trace function raises IOChangeException
+            pass
+
+        width, height = self.calculate_resolution(camera.aspect_ratio)
+
+        if isinstance(model, (GaussianSplattingModel, DepthGSModel)):
+            outputs = model.get_outputs_for_camera(camera)
+        else:
+            ray_bundle = generate_rays(camera, width, height)
+            outputs = model.get_outputs_for_camera_ray_bundle(ray_bundle)
+
+        if crop_viewport:
+            with background_color_override_context(outputs.get("background_color", torch.zeros(3))):
+                rendered = evaluate_model(model, outputs)
+        else:
+            rendered = evaluate_model(model, outputs)
+
+        with torch.no_grad():
+            final_image = apply_colormap(rendered)
+            if split_mode:
+                split_output = get_split_output()
+                split_colormap = apply_colormap(split_output)
+                split_index = calculate_split_index(width, height)
+                final_image = concatenate_with_divider(final_image, split_colormap, split_index)
+            final_image_uint8 = convert_to_uint8(final_image)
+
+        model.train()
+        return final_image_uint8
+```
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources [S1, unofficial].
+- **Memory Complexity**: Not given in the sources [S1, unofficial].
+- **Measured Performance**: Maintains target FPS (default 24) during low-resolution states by limiting visibility rays [S1, unofficial].
+- **Strengths**: Not given in the sources [S1, unofficial].
+- **Limitations**: Not given in the sources [S1, unofficial].
+- **When to use**: Not given in the sources [S1, unofficial].
+- **When not to use**: Not given in the sources [S1, unofficial].
+
+## Background
+The Render State Machine is part of the Gaussian-Splatting-Toolkit, an unofficial toolkit for Gaussian Splatting [S1, unofficial]. It was developed to address the need for responsive interactive rendering in 3D Gaussian Splatting, where high-resolution rendering can be computationally expensive and slow down interaction [S1, unofficial].
+
+## Sources
+[S1] Gaussian-Splatting-Toolkit/Gaussian-Splatting-Toolkit, https://github.com/Gaussian-Splatting-Toolkit/Gaussian-Splatting-Toolkit, fetched 2026-10-27 (unofficial)

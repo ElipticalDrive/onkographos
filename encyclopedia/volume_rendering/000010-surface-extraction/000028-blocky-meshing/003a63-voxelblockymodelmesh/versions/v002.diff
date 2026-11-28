@@ -1,0 +1,286 @@
+--- v001.md
++++ v002.md
+@@ -1,148 +1,164 @@
+ # VoxelBlockyModelMesh
+ 
+-
++Also called: Mesh model
+ ## Overview
+-VoxelBlockyModelMesh generates a voxel model from a custom 3D mesh rather than requiring primitive cubes, allowing versatile model creation using standard 3D editor meshes with UV-mapping [S1]. It differs from [Cuberille Method](1718-cuberille-method.md) by accepting arbitrary triangulated geometry confined to a unit bounding box, and from [Greedy Meshing](8935-greedy-face-merging.md) by focusing on per-voxel side culling and cutouts rather than global face merging [S1].
++VoxelBlockyModelMesh is a surface extraction method that generates voxel geometry from a user-defined custom mesh resource rather than a primitive cube. It solves the problem of creating non-cubic, complex voxel shapes (such as trees, rocks, or furniture) while retaining the performance benefits of blocky meshing, including face culling and greedy merging. It differs from sibling methods like [Voxel Block Placement with Face Culling](923-voxel-block-placement-with-face-culling.md) by decoupling the visual geometry from the logical voxel unit, allowing arbitrary mesh shapes to be tiled into a voxel grid.
+ 
+ ## How it works
++### Inputs and Outputs
+ **Inputs:**
+-- `mesh`: A non-empty, indexed triangle mesh object [S1].
+-- `mesh_ortho_rotation_index`: Integer specifying orthogonal rotation during baking (GridMap tile convention) [S1].
+-- `side_cutout_enabled`: Boolean flag for occlusion-based side cutting [S1].
+-- `side_vertex_tolerance`: Float margin for side classification (default 0.001) [S1].
++1.  **Source Mesh:** A 3D mesh resource (typically OBJ format) imported into the engine.
++    *   Must be indexed (e.g., via `SurfaceTool.index`).
++    *   Must consist of triangles.
++    *   Must be confined within a bounding box from $(0,0,0)$ to $(1,1,1)$.
++    *   The mesh origin must be at its lower corner $(0,0,0)$.
++    *   Vertices should preferably lie within the $0..1$ range in all directions.
++    *   Supports up to 2 surfaces (materials); surfaces beyond the second are ignored [S2].
++2.  **Configuration Parameters:**
++    *   `mesh_ortho_rotation_index`: Integer specifying orthogonal rotation (GridMap convention) [S2].
++    *   `side_cutout_enabled`: Boolean flag for occlusion culling [S2].
++    *   `side_vertex_tolerance`: Float margin for side classification (default $0.001$) [S2].
+ 
+ **Outputs:**
+-- A voxel model data structure compatible with the VoxelBlockyModel hierarchy [S1].
++*   A set of mesh instances placed in the voxel grid, with faces culled based on neighbor occlusion and merged where possible.
+ 
+-**Data Structures:**
+-The source mesh must be indexed and consist of triangles [S1]. The mesh is expected to be confined within a bounding box from $(0,0,0)$ to $(1,1,1)$ [S1].
++### Data Structures
++The method relies on the engine's native mesh resource structure. The source mesh is stored as a collection of indexed triangle surfaces. Each surface contains vertex positions, normals, and UV coordinates. The UV coordinates must be assigned within the 3D modeler, as the engine does not generate them procedurally for custom meshes [S1].
+ 
+-**Steps:**
+-1. **Validation**: Ensure `mesh` is not empty and is indexed (e.g., via `SurfaceTool.index`) [S1]. If the mesh has more than 2 surfaces (materials), all surfaces after the second are ignored [S1].
+-2. **Rotation**: Apply the orthogonal rotation specified by `mesh_ortho_rotation_index` to the mesh geometry [S1].
+-3. **Side Classification**: For each triangle in the mesh, determine if it lies on one of the 6 sides of the unit cubic area. A triangle is considered to be on a specific side if its vertices are within `side_vertex_tolerance` of that side's plane [S1]. Only triangles on the sides of the cubic area are used for neighbor side culling [S1].
+-4. **Culling/Cutout**: If `side_cutout_enabled` is true, check for occlusion from neighbor voxels. If a neighbor voxel partially covers a side of the current voxel, the occluded geometry on that side is cut away [S1]. This optimization only functions if the shape of both interacting sides is a rectangle [S1].
+-5. **Generation**: Generate the voxel model using the processed geometry [S1].
++### Steps
++1.  **Preparation:** The source mesh is prepared in a 3D editor (e.g., Blender) such that it is confined in a bounding box from $(0,0,0)$ to $(1,1,1)$ and uses classic UV-mapping [S2].
++2.  **Import:** The mesh is exported in OBJ format and imported into the engine as a Mesh resource [S1].
++3.  **Assignment:** The Mesh resource is assigned to the `VoxelBlockyModelMesh` configuration.
++4.  **Rotation:** If `mesh_ortho_rotation_index` is non-zero, the mesh is rotated according to the GridMap tile convention before baking [S2].
++5.  **Placement:** The mesh is instantiated at each voxel position in the grid.
++6.  **Side Classification:** For each voxel, triangles are classified as belonging to one of the 6 sides of the unit cube. A triangle is considered to be on a specific side if its vertices are within `side_vertex_tolerance` of that side's plane [S2].
++7.  **Culling:**
++    *   **Neighbor Culling:** If `side_cutout_enabled` is true, the mesher checks neighboring voxels. If a neighbor partially covers a side of the current voxel, the occluded geometry on that side is cut away [S2].
++    *   **Constraint:** Side cutout only functions if the shape of both interacting sides is a rectangle [S2].
++    *   **Transparency:** Face culling uses the model's overall transparency properties. If a model is defined as non-transparent, its sides will be culled even if the middle is transparent [S1].
++8.  **Assembly:** The remaining visible geometry is assembled into the final mesh.
+ 
+-**Pseudocode:**
++### Pseudocode
+ ```python
+-def generate_voxel_blocky_model_mesh(mesh, mesh_ortho_rotation_index, side_cutout_enabled, side_vertex_tolerance):
+-    # Step 1: Validation
+-    if mesh is empty:
+-        raise Error("Mesh must not be empty")
+-    if not mesh.is_indexed():
+-        mesh = mesh.index() # Ensure indexed
+-    if mesh.num_surfaces() > 2:
+-        # Ignore surfaces after the second
+-        mesh = mesh.slice_surfaces(0, 2)
++def generate_voxel_mesh(source_mesh, config):
++    """
++    Generates voxel geometry from a custom mesh.
+     
+-    # Step 2: Rotation
+-    # Apply orthogonal rotation based on GridMap tile convention
+-    rotated_mesh = apply_orthogonal_rotation(mesh, mesh_ortho_rotation_index)
++    Args:
++        source_mesh: Indexed triangle mesh, confined to 0..1 bounding box.
++        config: Dictionary containing:
++            - mesh_ortho_rotation_index: int
++            - side_cutout_enabled: bool
++            - side_vertex_tolerance: float (default 0.001)
++            
++    Returns:
++        List of mesh instances or merged mesh data.
++    """
++    # Step 1: Validate and prepare source mesh
++    if source_mesh.is_empty():
++        raise ValueError("Mesh must not be empty")
+     
+-    # Step 3: Side Classification
+-    # Identify triangles on the 6 sides of the unit cube (0..1)
+-    side_triangles = {}
+-    for triangle in rotated_mesh.triangles:
+-        for side in [LEFT, RIGHT, BOTTOM, TOP, FRONT, BACK]:
+-            if is_triangle_on_side(triangle, side, side_vertex_tolerance):
+-                side_triangles.setdefault(side, []).append(triangle)
++    # Ensure mesh is indexed
++    if not source_mesh.is_indexed():
++        source_mesh = source_mesh.index()
++        
++    # Limit to first 2 surfaces
++    surfaces = source_mesh.get_surfaces()[:2]
+     
+-    # Step 4: Culling/Cutout
+-    if side_cutout_enabled:
+-        # Cut away occluded geometry if neighbor partially covers side
+-        # Only works if side shapes are rectangles
+-        for side, triangles in side_triangles.items():
+-            neighbor_side = get_opposite_side(side)
+-            if neighbor_side in side_triangles:
+-                cutout_geometry = compute_occlusion_cutout(triangles, side_triangles[neighbor_side])
+-                triangles = apply_cutout(triangles, cutout_geometry)
+-                side_triangles[side] = triangles
++    # Step 2: Apply rotation if specified
++    if config['mesh_ortho_rotation_index'] != 0:
++        rotation_matrix = get_gridmap_rotation(config['mesh_ortho_rotation_index'])
++        source_mesh = apply_rotation(source_mesh, rotation_matrix)
++        
++    # Step 3: Classify triangles by side
++    # A triangle is on a side if its vertices are within tolerance of that side's plane
++    tolerance = config['side_vertex_tolerance']
++    sides = ['left', 'right', 'bottom', 'top', 'front', 'back']
++    classified_triangles = classify_triangles_by_side(surfaces, tolerance, sides)
+     
+-    # Step 5: Generation
+-    # Combine processed triangles into voxel model
+-    voxel_model = VoxelBlockyModel()
+-    voxel_model.add_geometry(side_triangles)
+-    return voxel_model
++    # Step 4: Process voxel grid
++    voxel_data = []
++    for voxel in voxel_grid:
++        if voxel.is_occupied():
++            # Create instance of the mesh
++            instance = create_mesh_instance(source_mesh)
++            
++            # Step 5: Apply side cutout if enabled
++            if config['side_cutout_enabled']:
++                # Check neighbors for occlusion
++                # Note: This only works if both sides are rectangular
++                for side in sides:
++                    neighbor = voxel.get_neighbor(side)
++                    if neighbor and neighbor.is_occupied():
++                        # Cut away occluded geometry on this side
++                        # This may increase triangle count if cutouts are complex
++                        instance = cut_occluded_geometry(instance, side, neighbor, tolerance)
++            
++            voxel_data.append(instance)
++            
++    # Step 6: Merge and return
++    return merge_meshes(voxel_data)
+ 
+-def is_triangle_on_side(triangle, side, tolerance):
+-    # Check if triangle vertices are within tolerance of the side plane
+-    # Side planes are at x=0, x=1, y=0, y=1, z=0, z=1
+-    # Returns True if triangle is considered on that side
+-    pass # Implementation detail: compare vertex coordinates to side bounds
++def classify_triangles_by_side(surfaces, tolerance, sides):
++    """
++    Classifies triangles based on proximity to the 6 sides of the 1x1x1 cube.
++    Only triangles on the sides are considered for culling.
++    """
++    classified = {side: [] for side in sides}
++    
++    for surface in surfaces:
++        for triangle in surface.triangles:
++            # Check if triangle vertices are within tolerance of any side plane
++            for side in sides:
++                if is_on_side(triangle, side, tolerance):
++                    classified[side].append(triangle)
++                    break # Assume a triangle belongs to one primary side for culling logic
++                    
++    return classified
+ 
+-def apply_orthogonal_rotation(mesh, rotation_index):
+-    # Apply rotation based on GridMap convention
+-    # Helper method not provided in sources, assumed to be standard rotation
+-    pass # [G] Standard 90-degree rotation around axes based on index
++def is_on_side(triangle, side, tolerance):
++    """
++    Checks if a triangle is located within tolerance of a specific side of the unit cube.
++    """
++    # Implementation depends on engine's vector math library
++    # For example, for 'left' side (x=0), check if min(triangle.vertices.x) < tolerance
++    pass
+ 
+-def compute_occlusion_cutout(triangles, neighbor_triangles):
+-    # Compute geometry to cut away due to neighbor occlusion
+-    # Only valid if side shapes are rectangles
+-    pass # [G] Geometric intersection and subtraction logic
++def get_gridmap_rotation(index):
++    """
++    Returns the rotation matrix corresponding to the GridMap tile convention.
++    """
++    # Mapping from integer index to Basis/Rotation
++    # Specific implementation details are engine-dependent
++    pass
+ ```
+ 
+-**Parameters:**
+-- `mesh_ortho_rotation_index`: Integer, default 0 [S1].
+-- `side_cutout_enabled`: Boolean, default false [S1].
+-- `side_vertex_tolerance`: Float, default 0.001 [S1].
++### Parameters
++*   `mesh`: The source Mesh object. Must not be empty. Must be indexed. Must consist of triangles. Only triangles within the 0..1 area are considered; specifically, only those on the sides of the cubic area are used for neighbor side culling [S2].
++*   `mesh_ortho_rotation_index`: Integer specifying the orthogonal rotation applied to the mesh during baking. Values follow the GridMap tile convention [S2].
++*   `side_cutout_enabled`: Boolean flag. When true, occluded geometry on a voxel side is cut away if a neighbor voxel partially covers it. This optimization only functions if the shape of both interacting sides is a rectangle [S2].
++*   `side_vertex_tolerance`: Float margin (default 0.001). Triangles located within this distance from one of the 6 sides of the voxel are considered to be on that side for the purpose of culling decisions against neighbor sides [S2].
+ 
+-**Edge Cases and Pitfalls:**
+-- If the mesh has more than 2 surfaces, all surfaces after the second are ignored [S1].
+-- Enabling `side_cutout_enabled` can result in a higher triangle count compared to when it is disabled [S1].
+-- `side_cutout_enabled` only functions if the shape of both interacting sides is a rectangle [S1].
+-
+-## Subtopics
+-
+-### [Boolean Voxel Meshing](971-boolean-voxel-meshing.md)
+-Combines voxel models using boolean operations. Choose when you need to merge or subtract complex shapes.
+-
+-### [Task Shader Cell Classification](1535-task-shader-cell-classification.md)
+-Classifies voxels on the GPU using task shaders. Choose for high-performance, parallel voxelization.
+-
+-### [Cuberille Method](1718-cuberille-method.md)
+-Generates voxel meshes from scalar fields using cube primitives. Choose for simple, blocky terrain.
+-
+-### [Block face vertex layout](2374-block-face-vertex-layout.md)
+-Defines the vertex structure for block faces. Choose when defining low-level mesh data.
+-
+-### [Block Mesh Alpha Rendering](3569-block-mesh-alpha-rendering.md)
+-Renders transparent block meshes. Choose for alpha-blended voxel materials.
+-
+-### [GPU Face Extraction](3760-gpu-face-extraction.md)
+-Extracts faces on the GPU. Choose for real-time, GPU-accelerated mesh generation.
+-
+-### [Face Culling and Visibility Optimization](3861-face-culling-and-visibility-optimization.md)
+-Optimizes visibility by culling hidden faces. Choose to reduce draw calls.
+-
+-### [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md)
+-Generates meshes from voxel faces. Choose for general voxel mesh creation.
+-
+-### [Mesh Assembly and Data Structure](6268-mesh-assembly-and-data-structure.md)
+-Assembles meshes into data structures. Choose for managing large voxel datasets.
+-
+-### [Greedy face merging](8935-greedy-face-merging.md)
+-Merges adjacent faces to reduce triangle count. Choose for optimizing mesh size.
+-
+-### [Block Subdivision](8959-block-subdivision.md)
+-Subdivides blocks for higher detail. Choose for multi-resolution voxel rendering.
+-
+-### [Greedy Meshing UV Recomputation & Gradient Stabilization](10572-greedy-meshing-uv-recomputation-gradient-stabilization.md)
+-Recomputes UVs after greedy meshing. Choose to maintain texture quality after merging.
++### Edge Cases and Pitfalls
++*   **Coordinate Systems:** Godot is Y-up, while Blender is Z-up. Ensure exported meshes do not go into negative coordinates when imported [S1].
++*   **Performance:** Faces lying on the sides of the 1x1x1 unit cube are the only faces that can be culled. They must line up perfectly; otherwise, dramatic slowdowns occur due to unculled geometry [S1].
++*   **Complexity:** Keep models low-poly. Performance decreases quickly if complex models appear frequently [S1].
++*   **Transparency:** A second material can be used for meshes with both transparent and opaque parts (two surfaces). However, face culling uses model properties regardless. If a model is defined as non-transparent, its sides will be culled even if the middle is transparent [S1].
++*   **Physics Export:** If using mesh-based physics and exporting with 'Export as dedicated server', ensure meshes in VoxelBlockyModelMesh are not stripped, as mesh data is required at runtime to generate colliders [S1].
++*   **Side Cutout Overhead:** Enabling `side_cutout_enabled` can result in a higher triangle count compared to when it is disabled [S2].
++*   **Material Limits:** If the mesh has more than 2 surfaces (materials), all surfaces after the second are ignored during generation [S2].
+ 
+ ## Operating characteristics
+-Time and memory complexity: Not given in the sources.
+-Measured performance: Not given in the sources.
+-Scaling: Not given in the sources.
+-Strengths: Versatile model creation using standard 3D editor meshes with UV-mapping [S1].
+-Limitations: Only supports up to 2 materials; side cutout only works for rectangular sides; enabling cutout may increase triangle count [S1].
+-When to use: When you need to voxelize custom, non-cubic meshes from 3D editors [S1].
+-When not: When you need more than 2 materials or non-rectangular side shapes for cutouts [S1].
++*   **Time Complexity:** Not given in the sources. However, performance is heavily dependent on mesh complexity and the number of occurrences. Complex models appearing frequently cause dramatic slowdowns if geometry is not perfectly aligned for culling [S1].
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Versatile workflow allowing assignment of a mesh resource instead of cube geometry. Allows creation of complex shapes using standard 3D editor meshes with UV-mapping [S1, S2].
++*   **Limitations:** Requires manual UV assignment in a 3D modeler. Performance degrades with high-poly meshes. Side cutout optimization has constraints (rectangular sides only) and can increase triangle count.
++*   **When to use:** When voxel shapes need to be non-cubic and complex (e.g., trees, furniture).
++*   **When not to use:** When simple cubic voxels are sufficient, or when high-poly meshes are required and performance is critical.
+ 
+ ## Background
+-Origin: VoxelBlockyModelMesh is part of the Voxel Tools documentation [S1].
+-History: Not given in the sources.
+-Usage: Used in Voxel Tools for generating voxel models from custom meshes [S1].
++VoxelBlockyModelMesh is part of the Voxel Tools suite for the Godot Engine. It was developed to provide a more versatile workflow for voxel terrain and object creation, moving beyond simple cube-based geometry. The method leverages Godot's mesh resource system and integrates with the existing blocky meshing infrastructure, including face culling and greedy merging.
+ 
+ ## Sources
+-[S1] VoxelBlockyModelMesh - Voxel Tools documentation, https://voxel-tools.readthedocs.io/en/latest/api/VoxelBlockyModelMesh/, fetched 2026-10-27+[S1] Blocky terrains - Voxel Tools documentation, https://voxel-tools.readthedocs.io/en/latest/blocky_terrain/, fetched 2026-10-27
++[S2] VoxelBlockyModelMesh - Voxel Tools documentation, https://voxel-tools.readthedocs.io/en/latest/api/VoxelBlockyModelMesh/, fetched 2026-10-27

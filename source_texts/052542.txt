@@ -1,0 +1,443 @@
+3D Engine with Blender Integration. Contribute to armory3d/armory development by creating an account on GitHub.
+
+Fix voxel GI/AO cone tracing by e2002e · Pull Request #3343 · armory3d/armory · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+e2002e
+commented
+Oct 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+@luboslenco You'll notice that this commit is made by claude. I have reviewed and tested it, there is no issues with copyrights and everything works.
+This pull request fixes issues with voxels (normalization / readbacks of aggregations).
+It also fixes the specular being set at 0 with newest blender, and fixes the nishita sky (it just needs to be passed the new name).
+The reason for opening this pull request and closing the old one is that you told me to keep things reviewable so this is the minimum fix I can do. It simply makes voxels work, provided you merge the Kha fix and patch Kore.
+e2002e
+and others
+added 6 commits
+October 8, 2026 23:18
+Fix voxel GI/AO cone tracing
+…
+d1ba2a6
+```
+Rework the voxel path to trace cones directly in the mesh shaders instead
+of resolving GI into screen-space buffers, and drop the parts that this
+makes redundant.
+
+Renderer:
+- Trace diffuse/specular/AO/refraction from conetrace.glsl in the forward
+  base pass, removing the voxels_diffuse/voxels_specular/voxels_ao
+  screen-space resolve round trip and its pre-clear bookkeeping.
+- Remove the voxelsLight bounce pass (voxel_light.comp.glsl) and the
+  voxel_resolve_refraction/voxel_resolve_shadows compute shaders.
+- Remove the _VoxelShadow path: it is not emitted any more, so drop the
+  voxels_shadows target, its sampleLight/cluster plumbing and the UI
+  toggle.
+- Bind the shadow map before drawMeshes("voxel") so voxelization sees
+  direct light; add sampleLightVoxels() for it.
+- Weight voxel diffuse by cone coverage and by Fresnel (F), and feed the
+  Bayer dither with the screen-space motion vector so the temporal pass
+  has something to reproject.
+- Use standard texture formats (R8/R16/R32) for the voxel targets and
+  split gbuffer_refraction out of the rp_ssrefr block so voxel refraction
+  can share it.
+- Add std/aabb.glsl and std/constants.glsl (cone directions, apertures),
+  replacing std/voxels_constants.glsl.
+
+Fixes found while separating these changes out:
+- Restore the sun term in make_forward_base: direct += lambertDiffuseBRDF
+  + specularBRDF was dropped, silently removing sun lighting from the
+  forward renderer.
+- Declare a zero velocity fallback when _Veloc is absent. traceSpecular
+  and traceRefraction always take it, so Voxel GI without TAA or object
+  motion blur failed to compile.
+- Keep indirect = envl for Voxel AO. The condition tested '_VoxelAO',
+  which only matches as a substring of '_VoxelAOvar', so AO mode zeroed
+  indirect and discarded the AO-attenuated ambient.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Support Blender 5.x sky models (single/multiple scattering)
+…
+c0f6680
+```
+Blender 5.0 removed the 'NISHITA' sky type and split it into
+'SINGLE_SCATTERING' and 'MULTIPLE_SCATTERING'; a 5.2 node reports
+sky_type enum items ['SINGLE_SCATTERING', 'MULTIPLE_SCATTERING',
+'PREETHAM', 'HOSEK_WILKIE']. parse_tex_sky() matched only 'NISHITA',
+so every Blender 5.x world using the default sky fell through to
+"Unsupported sky model!" and returned black. World shader generation
+then aborted, leaving no World_<name> shader for the render path to
+load.
+
+Route both new identifiers to the existing Nishita parser, keeping
+'NISHITA' so the file still works on Blender 4.x. Both models are
+approximated by the one implementation.
+
+Blender 5.0 also renamed the node's 'dust_density' property to
+'aerosol_density' ('dust_density' no longer exists), so read whichever
+is present when filling arm_nishita_density.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Use float formats for the voxel radiance atlas and SDF
+…
+887052c
+```
+The render target formats in Inc.initGI did not match the layout()
+qualifiers the compute shaders declare for the same images. In OpenGL
+an image unit's declared format must match the texture's internal
+format, so these accesses were undefined.
+
+- voxelsOut / voxelsOutB (Voxel GI) were RGBA32, which iron maps to
+  RGBA8, while voxel_temporal and voxel_offsetprev declare them
+  rgba8. Both move to RGBA64 / rgba16f: the atlas stores radiance,
+  which is HDR and must not be clamped to [0,1].
+- voxelsOut / voxelsOutB (Voxel AO) were R8 against an r8 declaration;
+  both move to R16 / r16f.
+- voxelsSDF / voxelsSDFtmp were R8, which iron maps to L8 (8-bit
+  normalized), while voxel_temporal and voxel_sdf_jumpflood declare
+  them r16f. The SDF holds a world-space distance (voxelSize * 2 *
+  res) that cannot be represented in [0,1]. Restored to R16, as
+  upstream had it.
+
+Only traceSpecular and traceRefraction pass use_sdf = true, so the SDF
+format corrupted specular and refraction cone marching while leaving
+diffuse untouched.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+texture formats
+5bf9b90
+Merge branch 'fix_sky_blender5' into voxels_only
+09b4964
+Merge https://github.com/armory3d/armory into voxels_only
+3d8066e
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/blender/arm/material/cycles_nodes/nodes_shader.py
+if len(node.inputs) >= 21:
+state.out_opacity = c.parse_value_input(node.inputs[21])
+if bpy.app.version > (4, 1, 0):
+if bpy.app.version > (4, 1, 0) and bpy.app.version < (5, 0, 0):
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+the following will fix specular being set to 0 for every materials
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/blender/arm/material/cycles_nodes/nodes_texture.py
+return parse_sky_hosekwilkie(node, state)
+elif node.sky_type == 'NISHITA':
+elif node.sky_type in ('NISHITA', 'SINGLE_SCATTERING', 'MULTIPLE_SCATTERING'):
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+this is obviously for the sky
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/blender/arm/material/make_mesh.py
+sh.add_uniform('vec3 eye', '_cameraPosition')
+sh.write('eyeDir = eye - wposition;')
+# Voxel cone tracing reprojects the previous frame, so it needs the screen-space motion vector
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+added and commented by claude after review
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/blender/arm/material/make_mesh.py
+if '_Brdf' in wrd.world_defs:
+frag.add_uniform('sampler2D senvmapBrdf', link='$brdf.png')
+frag.write('vec2 envBRDF = texelFetch(senvmapBrdf, ivec2(vec2(dotNV, 1.0 - roughness) * 256.0), 0).xy;')
+frag.write('vec3 F = f0 * envBRDF.x + envBRDF.y;')
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+by claude also
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/blender/arm/material/make_voxel.py
+frag.write(' clipmaps[clipmapLevel * 10 + 5],')
+frag.write(' clipmaps[clipmapLevel * 10 + 6]);')
+frag.write('vec3 voxel_aabb[2];')
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+aabb mechanism speeds up voxelization a lot.
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/blender/arm/material/make_voxel.py
+frag.write('if (direction_weights.x > 0) {')
+frag.write(' vec4 basecol_direction = vec4(min(basecol * direction_weights.x, vec3(1.0)), opacity);')
+frag.add_include('std/light.glsl')
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+we do lighting in voxelizer and pack the light value to the voxels render target to use it later.
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/blender/arm/material/make_voxel.py
+frag.write(' imageAtomicAdd(voxels, ivec3(writecoords + ivec3(face_offsets.x, 0, voxelgiResolution.x * 12)), uint(light_direction.r * 1024));')
+frag.write(' imageAtomicAdd(voxels, ivec3(writecoords + ivec3(face_offsets.x, 0, voxelgiResolution.x * 13)), uint(light_direction.g * 1024));')
+frag.write(' imageAtomicAdd(voxels, ivec3(writecoords + ivec3(face_offsets.x, 0, voxelgiResolution.x * 14)), uint(light_direction.b * 1024));')
+frag.write(' imageAtomicAdd(voxels, ivec3(writecoords + ivec3(face_offsets.x, 0, voxelgiResolution.x * 15)), uint(1));')
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+this is the crucial change and the reason for the pull request.
+if not writing this, we can't normalize in voxels_temporal and result is messy
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/blender/arm/props_renderpath.py
+('Voxel GI', 'Voxel GI', 'Voxel GI'),
+('Voxel AO', 'Voxel AO', 'Voxel AO')
+('Voxel GI', 'Voxel GI', 'Voxel GI')
+#('Voxel AO', 'Voxel AO', 'Voxel AO')
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+there are issues with AO that I can't fix. GI is very cheap and result is good though
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/Shaders/std/conetrace.glsl
+float clipmap_blend = fract(lod);
+vec3 p0 = start_pos + dir * dist;
+float voxelSize = float(clipmaps[int(clipmap_index * 10)]);
+vec3 p0 = (origin + n * voxelSize * 2.0) + dir * dist;
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+another crucial change for lod transitions, the offset for starting the cone must be dynamic.
+I got this changed into wickedEngine too.
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/Shaders/std/conetrace.glsl
+#else
+float
+#endif
+traceConeShadow(
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+will not be used, shadows can't work on an anisotropic voxels grid.
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/Shaders/std/light.glsl
+}
+#ifdef _VoxelGI
+vec3 sampleLightVoxels(const vec3 p, const vec3 n, const vec3 v, const float dotNV, const vec3 lp, const vec3 lightCol,
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+this is for lighting in voxels, it permits a simpler function.
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/Shaders/voxel_resolve_ao/voxel_resolve_ao.comp.glsl
+uniform sampler2D gbufferD;
+uniform sampler2D gbuffer0;
+uniform layout(r8) image2D voxels_ao;
+uniform layout(rgba8) image2D voxels_ao;
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+disabled
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/Shaders/voxel_resolve_diffuse/voxel_resolve_diffuse.comp.glsl
+envl.rgb *= envmapStrength * occspec.x;
+vec4 trace = traceDiffuse(P, n, voxels, clipmaps);
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+here we'r able to render the diffuse + sky probe for cones that don't hit anything. This makes it possible to get kind of shadows from the sky (very coarse).
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/Shaders/voxel_temporal/voxel_temporal.comp.glsl
+basecol.g = float(imageLoad(voxels, src + ivec3(0, 0, voxelgiResolution.x))) / 1024;
+basecol.b = float(imageLoad(voxels, src + ivec3(0, 0, voxelgiResolution.x * 2))) / 1024;
+basecol.a = float(imageLoad(voxels, src + ivec3(0, 0, voxelgiResolution.x * 3))) / 1024;
+basecol /= count;
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+the readback fo the first crucial change
+e2002e
+commented
+Oct 18, 2026
+View reviewed changes
+Comment thread
+armory/Sources/armory/renderpath/RenderPathForward.hx
+#if (rp_voxels == "Voxel GI")
+Inc.computeVoxelsLight();
+#if rp_shadowmap
+e2002e
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+bind the shadowmaps for the voxelizer
+e2002e
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@luboslenco I have explained pretty much every change so that it should be easy for you to go through it.
+@MoritzBrueckner I'm pinging you also in case you'r more available than lubos.
+Merge branch 'armory3d:main' into voxels_only
+4de3c89
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

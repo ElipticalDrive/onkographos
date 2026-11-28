@@ -1,0 +1,139 @@
+# Self-Intersection Removal via Mesh Deformation
+
+Also called: Self-Intersection Resolving via Winding Number Energy
+
+## Overview
+This method detects and resolves self-intersections in a triangle mesh by optimizing a voxelized representation of the mesh's smoothed winding number field [S1]. It minimizes an energy functional that penalizes voxels where the winding number exceeds one, using gradient descent to deform the mesh vertices [S1]. Unlike binary occupancy voxelization, this approach leverages the continuous gradient of the smoothed winding number to provide closed-form derivatives with respect to vertex positions, enabling differentiable collision resolution [S1, S2]. It sets itself apart from sibling methods by operating directly on the volumetric winding number field rather than geometric primitives, allowing it to handle complex overlaps that are difficult to detect via standard mesh intersection tests [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A triangle mesh defined by vertices $V$ and faces $F$, and a pre-computed voxelization $W \in \mathbb{R}^{n \times n \times n}$ of resolution $n$ representing the smoothed winding number field of the mesh [S1].
+*   **Output:** Deformed vertex positions $\tilde{\mathbf{V}}$ such that the resulting mesh has no self-intersections (winding number $\le 1$ everywhere) [S1].
+
+**Data Structures**
+*   **Voxel Grid $W$:** A 3D array of shape $(n, n, n)$ storing floating-point winding number values for each voxel [S1].
+*   **Mesh Vertices $V$:** A list of 3D coordinates $\mathbf{v}_i$ [S1].
+*   **Mesh Faces $F$:** A list of triangle indices [S1].
+*   **Half-edges $\mathcal{N}(i)$:** For each vertex $i$, the set of all "spokes and rims" half-edges connecting $i$ to its neighbors and their neighbors [S1]. Specifically, $\mathbf{e}_{jk} = \mathbf{v}_j - \mathbf{v}_k$ represents the edge vector between vertices $j$ and $k$ [S1].
+
+**Parameters**
+*   **Resolution $n$:** The dimension of the voxel grid. Not given in the sources.
+*   **Threshold $\epsilon$:** Numerical tolerance for detecting self-intersections. Value: $0.001$ [S1].
+*   **Regularization Weight $\alpha$:** Weight for the ARAP energy term. Value: $0.005$ [S1].
+*   **Learning Rate:** Step size for the Adam optimizer. Value: $10^{-2}$ [S1].
+
+**Formulas**
+The total energy $E$ to be minimized is:
+$$ E = E_{\text{sect}} + \alpha E_{\text{arap}} $$
+
+1.  **Self-Intersection Energy ($E_{\text{sect}}$):**
+    Sum of squared winding numbers for voxels exceeding the threshold $1 + \epsilon$:
+    $$ E_{\text{sect}} = \sum_{W_{ijk} > 1 + \epsilon} W_{ijk}^2 $$
+    This term penalizes regions where the surface overlaps itself [S1].
+
+2.  **ARAP Regularization Energy ($E_{\text{arap}}$):**
+    Ensures the deformation remains as rigid as possible:
+    $$ E_{\text{arap}}(\tilde{\mathbf{V}}) = \min_{\mathbf{R}_i \in SO(3)} \sum_{i \in V} \sum_{(j,k) \in \mathcal{N}(i)} w_{jk} ||\mathbf{e}_{jk} - \mathbf{R}_i \tilde{\mathbf{e}}_{jk}||^2 $$
+    where $\mathbf{R}_i$ is the optimal rotation matrix for vertex $i$'s star, found via Singular Value Decomposition (SVD) [S1]. The weights $w_{jk}$ and edge definitions follow standard ARAP formulations [S1, Sorkine and Alexa 2007].
+
+**Steps**
+1.  **Initialize:** Start with the original mesh vertices $V$ as the initial guess for $\tilde{\mathbf{V}}$ [S1].
+2.  **Compute Gradient:** Calculate the gradient of $E$ with respect to $\tilde{\mathbf{V}}$. This requires the gradient of the voxelization $W$ with respect to vertex positions (provided by the parent method, Differentiable Voxelization via Smoothed Winding Numbers) and the gradient of the ARAP energy [S1].
+3.  **Optimize:** Use the Adam optimizer with a learning rate of $10^{-2}$ to update $\tilde{\mathbf{V}}$ [S1].
+4.  **Check Convergence:** After each iteration, check if all voxels satisfy $W_{ijk} \le 1$ (or $W_{ijk} \le 1 + \epsilon$) [S1].
+5.  **Terminate:** Stop when all self-intersections are resolved or a maximum iteration count is reached [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def remove_self_intersections(mesh_V, mesh_F, voxel_grid_W, resolution_n, alpha=0.005, epsilon=0.001, lr=1e-2, max_iters=1000):
+    """
+    Resolves self-intersections in a mesh by deforming vertices to minimize winding number > 1.
+    
+    Args:
+        mesh_V: Initial vertex positions (N, 3)
+        mesh_F: Face indices (M, 3)
+        voxel_grid_W: Initial winding number voxelization (n, n, n)
+        resolution_n: Voxel grid resolution
+        alpha: ARAP regularization weight
+        epsilon: Threshold for self-intersection detection
+        lr: Learning rate for Adam
+        max_iters: Maximum optimization iterations
+        
+    Returns:
+        Deformed vertex positions (N, 3)
+    """
+    # Initialize optimized vertices
+    V_opt = mesh_V.clone()
+    V_opt.requires_grad = True
+    
+    # Initialize Adam optimizer
+    optimizer = Adam([V_opt], lr=lr)
+    
+    for step in range(max_iters):
+        optimizer.zero_grad()
+        
+        # 1. Re-voxelize the deformed mesh to get current winding numbers
+        # This calls the differentiable voxelization from the parent method
+        # Input: V_opt, mesh_F, resolution_n
+        # Output: W_current (n, n, n)
+        W_current = differentiable_voxelization(V_opt, mesh_F, resolution_n)
+        
+        # 2. Compute Self-Intersection Energy
+        # Mask for voxels with winding number > 1 + epsilon
+        mask = W_current > (1.0 + epsilon)
+        # Sum of squared winding numbers for masked voxels
+        E_sect = torch.sum(W_current[mask] ** 2)
+        
+        # 3. Compute ARAP Regularization Energy
+        # Calculate edge vectors for deformed mesh
+        # e_jk = v_j - v_k
+        edges = V_opt[mesh_F[:, 1:]] - V_opt[mesh_F[:, :-1]] # Simplified for demonstration
+        # Note: Full ARAP requires computing optimal rotations R_i for each vertex star
+        # and summing over all half-edges in the star.
+        # E_arap = min_{R_i} sum_i sum_{(j,k) in N(i)} w_jk ||e_jk - R_i * e_jk_opt||^2
+        # This part is computed using the standard ARAP gradient implementation.
+        E_arap = compute_arap_energy(V_opt, mesh_F)
+        
+        # 4. Total Energy
+        E_total = E_sect + alpha * E_arap
+        
+        # 5. Backpropagate and Update
+        E_total.backward()
+        optimizer.step()
+        
+        # Check convergence
+        if not torch.any(W_current > 1.0):
+            break
+            
+    return V_opt.detach()
+```
+
+**Edge Cases and Pitfalls**
+*   **Half-Empty Voxels:** Self-intersections occurring in voxels that are only partially occupied by the mesh may not be penalized because the energy integrates the winding number over the entire voxel volume. Overlaps hidden by voxel averaging can escape the objective [S1, S2].
+*   **Negative Winding Numbers:** Volume inversions can cause negative winding numbers, which may hide self-intersections in the optimization objective [S1, S2].
+*   **Approximate Resolution:** The method resolves self-intersections only approximately at voxel resolution [S1, S2].
+
+## Subtopics
+
+### Differentiable Voxelization via Smoothed Winding Numbers
+The parent method that provides the gradient of the winding number with respect to vertex positions, enabling this optimization. [Differentiable Voxelization via Smoothed Winding Numbers](2325-differentiable-voxelization-via-smoothed-winding-numbers.md)
+
+### ARAP Surface Deformation
+The regularization technique used to preserve local rigidity during deformation. [As-Rigid-As-Possible Surface Deformation](https://doi.org/10.1145/1276310.1276492)
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of optimization iterations and the cost of differentiable voxelization per iteration. Not given in the sources.
+*   **Memory Complexity:** Proportional to the voxel grid size $n^3$ and the mesh size. Not given in the sources.
+*   **Strengths:** Provides a differentiable way to resolve self-intersections without explicit collision detection. Integrates seamlessly with gradient-based shape optimization. [S1]
+*   **Limitations:** Approximate resolution due to voxelization. May miss intersections in half-empty voxels or those masked by negative winding numbers. [S1, S2]
+*   **When to Use:** When optimizing mesh shapes where self-intersections are undesirable and differentiable gradients are available. [S1]
+*   **When Not to Use:** When exact geometric intersection resolution is required, or when the mesh is too large for the voxel grid resolution to capture details. [S1, S2]
+
+## Background
+The method was introduced in "Differentiable Voxelization of Surface Representations" (2026) by the authors of the parent paper [S1, S2]. It builds upon the concept of smoothed winding numbers for voxelization and extends it to differentiable mesh deformation. The ARAP regularization is based on the work of Sorkine and Alexa (2007) [S1]. The method is applicable to various geometric optimization tasks, including shape deformation for manufacturing (e.g., bandsaw cutting) and space-filling tiling [S1, S2].
+
+## Sources
+[S1] Differentiable Voxelization of Surface Representations, https://doi.org/10.1145/3799902.3811203, fetched 2026-10-27
+[S2] Differentiable Voxelization of Surface Representations, https://www.alphaxiv.org/abs/2608.15934, fetched 2026-10-29

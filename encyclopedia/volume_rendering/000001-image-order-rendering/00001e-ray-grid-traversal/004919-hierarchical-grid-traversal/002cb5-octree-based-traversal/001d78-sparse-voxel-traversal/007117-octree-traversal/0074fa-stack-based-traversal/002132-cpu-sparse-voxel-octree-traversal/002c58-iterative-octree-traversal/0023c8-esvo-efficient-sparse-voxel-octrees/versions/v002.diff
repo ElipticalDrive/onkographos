@@ -1,0 +1,214 @@
+--- v001.md
++++ v002.md
+@@ -4,130 +4,99 @@
+ 
+ ## Overview
+-ESVO is a GPU-based ray casting algorithm that uses a Sparse Voxel Octree (SVO) to reduce voxel storage costs and enable real-time rendering of large scenes [S2]. It sets itself apart from sibling methods by using a compact 4-byte node encoding with a depth-first (z-curve) memory layout, which optimizes for localized memory access patterns on the GPU [S1, unofficial]. Unlike [Hierarchical Ray Marching](5238-hierarchical-ray-marching.md) which may use larger leaf nodes or different traversal strategies, ESVO relies on a near 1:1 port of the original implementation with specific pointer encoding changes to facilitate buffer-less tree construction [S1, unofficial].
++ESVO is a GPU-based ray casting algorithm that uses a Sparse Voxel Octree (SVO) to reduce voxel storage costs and enable real-time rendering of large scenes [S2]. It sets itself apart from sibling methods by using a compact 4-byte node encoding with a depth-first (z-curve) memory layout, which optimizes for localized memory access patterns on the GPU [S1, unofficial]. Unlike [Hierarchical Ray Marching](5238-hierarchical-ray-marching.md) which may use larger leaf nodes or different traversal strategies, ESVO relies on a near 1:1 port of the original implementation with specific pointer encoding changes to facilitate buffer-less tree construction [S1, unofficial]. It builds on [Iterative Octree Traversal](2618-iterative-octree-traversal.md) by adapting the traversal loop to the specific memory layout and pointer resolution rules of the SVO.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A Sparse Voxel Octree structure representing the voxel scene, camera parameters (origin, direction, near/far planes), and optionally a lower-resolution distance image for beam optimization.
+-- Output: A rendered image (color and/or depth) for the given camera view.
++- Input: A Sparse Voxel Octree structure representing the voxel scene and camera parameters (origin, direction, near/far planes) [S1, unofficial]. This port specifically excludes contour generation and beam optimization features [S1, unofficial].
++- Output: A rendered image (color and/or depth) for the given camera view [S2].
+ 
+ **Data Structures:**
+-The SVO consists of nodes stored in a linear array.
++The SVO consists of nodes stored in a linear array [S1, unofficial].
+ - **Node Layout**: Each node is 4 bytes (32 bits) [S1, unofficial].
+ - **Content**: The node contains pointers to child nodes and potentially voxel data (density/color) if it is a leaf. The exact bit-field layout for children vs. data is not fully specified in the provided notes, but the total size is fixed at 4 bytes [S1, unofficial].
+-- **Pointer Encoding**:
+-    - Pointers are relative [S1, unofficial].
+-    - "Backwards" relative pointers are used, meaning parent nodes appear after their children in the memory layout. This allows the tree to be built without intermediate buffers [S1, unofficial].
+-    - Far pointers (pointing to nodes outside the immediate local range) are signaled by a reserved upper range of pointer values, rather than using a dedicated bit flag [S1, unofficial].
+-- **Memory Layout**: The nodes are stored in a depth-first order, resulting in a Z-curve (Morton code) layout [S1, unofficial]. This locality helps mitigate memory bandwidth issues despite the small node size [S1, unofficial].
++- **Pointer Encoding**: Pointers are relative [S1, unofficial]. "Backwards" relative pointers are used, meaning parent nodes appear after their children in the memory layout, allowing the tree to be built without intermediate buffers [S1, unofficial]. Far pointers are signaled by a reserved upper range of pointer values rather than a dedicated bit flag [S1, unofficial].
++- **Memory Layout**: Nodes are stored in depth-first order, resulting in a Z-curve (Morton code) layout [S1, unofficial]. This locality helps mitigate memory bandwidth issues despite the small node size [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1. **Beam Optimization (Optional)**: If enabled, render a lower-resolution distance image first [S2].
+-2. **Ray Initialization**: For each pixel, compute the ray origin and direction [S2].
+-3. **Ray Start Adjustment**: If beam optimization was performed, adjust the ray's starting position based on the distance image to skip empty space and begin marching closer to surfaces [S2].
+-4. **Octree Traversal**:
+-    - Start at the root node.
+-    - Use a DDA-like approach to traverse the octree [S1, unofficial].
+-    - At each node, determine which child (if internal) or voxel (if leaf) the ray intersects.
+-    - Update the ray position and continue traversal until a leaf is reached or the ray exits the scene [S1, unofficial].
+-    - Note: The traversal involves ascending and descending the tree, which can require many iterations [S1, unofficial].
+-5. **Voxel Sampling**: At leaf nodes, sample the voxel data (density/color) and accumulate the result along the ray [S2].
+-6. **Image Composition**: Composite the accumulated color and depth into the final image [S2].
++1. Initialize ray parameters from camera origin, direction, and near/far planes [S2].
++2. Start traversal at the root node [S1, unofficial].
++3. At each node, determine which child (if internal) or voxel (if leaf) the ray intersects [S1, unofficial].
++4. Update the ray position and continue traversal until a leaf is reached or the ray exits the scene [S1, unofficial].
++5. At leaf nodes, sample the voxel data and accumulate the result along the ray [S2].
+ 
+ **Pseudocode:**
+ ```python
+-def render_esvo(scene, camera, use_beam_optimization=False, distance_image=None):
++def render_esvo(scene, origin, direction, near, far):
+     """
+     Render a scene using ESVO.
+-    scene: The SVO structure (array of 4-byte nodes).
+-    camera: Contains origin, direction, near, far.
+-    distance_image: Optional lower-res distance map for beam optimization.
++    scene: list of node dicts. Each node: {'type': 0|1, 'children': [None]*8, 'data': None}
++    origin: (ox, oy, oz)
++    direction: (dx, dy, dz)
++    near, far: float
+     """
+-    image = empty_image(camera.resolution)
++    # Handle zero direction components for DDA
++    inv_dir = [1.0 / d if d != 0.0 else float('inf') for d in direction]
++    step = [1 if d > 0 else -1 for d in direction]
+     
+-    # Step 1: Beam Optimization (Optional)
+-    if use_beam_optimization and distance_image is None:
+-        distance_image = render_low_res_distance(scene, camera)
++    t_min = near
++    t_max = far
++    
++    # DDA initialization
++    t_max_edge = [(far - origin[i]) * inv_dir[i] for i in range(3)]
++    t_delta = [abs(inv_dir[i]) for i in range(3)]
++    t_tmax = [min(t_max_edge[i], t_max) for i in range(3)]
++    
++    current_node = 0  # Root index
++    acc_color = [0.0, 0.0, 0.0]
++    acc_alpha = 0.0
++    
++    while t_min < t_max and current_node is not None:
++        node = scene[current_node]
+         
+-    for y in range(camera.resolution.height):
+-        for x in range(camera.resolution.width):
+-            # Step 2: Ray Initialization
+-            ray_origin, ray_direction = camera.get_ray(x, y)
+-            t_min = camera.near
+-            t_max = camera.far
++        # Determine octant based on ray direction
++        octant = 0
++        for i in range(3):
++            if step[i] > 0:
++                octant |= (1 << i)
++        
++        if node['type'] == 0:  # Internal node
++            child_idx = node['children'][octant]
++            if child_idx is None:
++                current_node = None
++                break
++            current_node = child_idx
++            # Advance to next grid boundary
++            t_min = t_tmax[0] if t_tmax[0] < t_tmax[1] else t_tmax[1]
++            t_min = t_min if t_min < t_tmax[2] else t_tmax[2]
++            for i in range(3):
++                if t_tmax[i] == t_min:
++                    t_tmax[i] += t_delta[i]
++        else:  # Leaf node
++            color = node['data']['color']
++            alpha = node['data']['alpha']
++            # Front-to-back compositing
++            new_alpha = acc_alpha + (1.0 - acc_alpha) * alpha
++            acc_color = [acc_color[i] + color[i] * (1.0 - acc_alpha) * alpha for i in range(3)]
++            acc_alpha = new_alpha
++            if acc_alpha >= 1.0:
++                break
++            # Advance to next leaf
++            t_min = t_tmax[0] if t_tmax[0] < t_tmax[1] else t_tmax[1]
++            t_min = t_min if t_min < t_tmax[2] else t_tmax[2]
++            for i in range(3):
++                if t_tmax[i] == t_min:
++                    t_tmax[i] += t_delta[i]
++            current_node = None
+             
+-            # Step 3: Ray Start Adjustment
+-            if use_beam_optimization and distance_image is not None:
+-                dist = distance_image.get_distance(x, y)
+-                # Adjust start position to skip empty space
+-                ray_origin = ray_origin + ray_direction * dist
+-                t_min = dist
+-                
+-            # Step 4: Octree Traversal
+-            current_node = scene.root
+-            accumulated_color = vec3(0.0)
+-            accumulated_alpha = 0.0
+-            
+-            while current_node is not None and t_min < t_max:
+-                # Determine intersection with current node's bounding box or children
+-                # This involves DDA-like advancement
+-                hit_node, t_hit = traverse_node(current_node, ray_origin, ray_direction, t_min, t_max)
+-                
+-                if hit_node is None:
+-                    break # Ray exited scene or node
+-                    
+-                t_min = t_hit
+-                current_node = hit_node
+-                
+-                # If leaf, sample voxel
+-                if is_leaf(current_node):
+-                    color, alpha = sample_voxel(current_node, ray_origin, ray_direction, t_min, t_max)
+-                    accumulated_color, accumulated_alpha = composite(accumulated_color, accumulated_alpha, color, alpha)
+-                    if accumulated_alpha >= 1.0:
+-                        break # Fully opaque
+-                
+-            image.set_pixel(x, y, accumulated_color)
+-            
+-    return image
+-
+-def traverse_node(node, ray_origin, ray_direction, t_min, t_max):
+-    """
+-    Traverse a single node. Returns the next node to visit and the t-value.
+-    Uses relative pointers and Z-curve layout.
+-    """
+-    # Decode node to get child pointers or voxel data
+-    # Since pointers are relative and backwards, calculate absolute addresses if needed
+-    # For simplicity, assume node provides a method to find the next child along the ray
+-    
+-    # Determine which octant the ray enters
+-    octant = get_ray_octant(ray_origin, ray_direction, node.bbox)
+-    
+-    if node.is_internal:
+-        # Get pointer to the child in the specified octant
+-        # Pointer is relative; adjust for backwards layout if necessary
+-        child_ptr = node.get_child_pointer(octant)
+-        if child_ptr is valid:
+-            # Calculate t for intersection with child's bbox
+-            t_hit = intersect_bbox(child_ptr.bbox, ray_origin, ray_direction)
+-            if t_hit >= t_min and t_hit < t_max:
+-                return child_ptr, t_hit
+-            else:
+-                # Ray misses this child, try other children or exit
+-                # This part is complex due to the specific ESVO traversal logic
+-                # which may involve backtracking or checking multiple children
+-                pass
+-        return None, t_max
+-    else:
+-        # Leaf node, return itself to be sampled
+-        return node, t_min
++    return acc_color
+ ```
+ 
+ **Parameters:**
+-- **Beam Optimization**: Boolean flag to enable/disable the two-pass rendering [S2].
+ - **Node Size**: Fixed at 4 bytes [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Performance**: The traversal can be slow due to the many iterations required to ascend and descend the tree and advance positions by DDA [S1, unofficial].
+-- **Memory Bandwidth**: Although nodes are small (4 bytes), the performance can be underwhelming on integrated GPUs due to memory bandwidth limitations [S1, unofficial].
+-- **Pointer Encoding**: The use of "backwards" relative pointers and reserved upper ranges for far pointers requires careful implementation to avoid invalid memory accesses [S1, unofficial].
++- **Performance**: The traversal can be slow because it takes many extra iterations to ascend and descend the tree and advance positions by DDA [S1, unofficial].
++- **Memory Bandwidth**: Although nodes are small (4 bytes), performance can be underwhelming on integrated GPUs due to memory bandwidth limitations [S1, unofficial].
++- **Pointer Encoding**: The use of "backwards" relative pointers and reserved upper ranges for far pointers requires careful implementation to resolve addresses correctly [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -145,9 +114,4 @@
+         - Iterations per ray: 147.1 [S1, unofficial].
+         - Clocks per iteration: 147.1 [S1, unofficial].
+-    - On Forest Lake 2k (807k * $8^3$ voxels) on an integrated GPU:
+-        - Primary rays: 60.6 Mrays/s [S1, unofficial].
+-        - Primary + 1 diffuse bounce: 31.4 Mrays/s [S1, unofficial].
+-        - Iterations per ray: 119.7 [S1, unofficial].
+-        - Clocks per iteration: 101.1 [S1, unofficial].
+ - **Scaling**: Performance is expected to improve 5-10x on real hardware compared to integrated GPUs [S1, unofficial].
+ - **Strengths**: Low memory footprint (4 bytes/node), localized memory access (Z-curve layout), supports real-time rendering [S2].

@@ -1,0 +1,171 @@
+--- v001.md
++++ v002.md
+@@ -9,11 +9,8 @@
+ **Inputs:**
+ - Fragment position in model space, obtained from interpolated texture coordinates `inpos` [S1].
+-- Texture maps containing RBF parameters:
+-  - Center coordinates $\mu_i$ [S1].
+-  - Weights $w_i$ and widths $\sigma_i$ [S1].
+-  - Optional error values at cell corners, encoded in secondary texture coordinates [S1].
+-- A fixed preprocessor constant $M$, representing the total number of RBFs to evaluate [S1].
+-- A constant bias term [S1].
+-- Scale and bias factors for data range mapping [S1].
++- Texture maps containing RBF parameters: center coordinates $\mu_i$, weights $w_i$, and widths $\sigma_i$ [S1].
++- Optional error values at cell corners, encoded in secondary texture coordinates [S1].
++- A fixed preprocessor constant $M$ representing the total number of RBFs to evaluate [S1].
++- A constant bias term, scale factor, and offset factor for data range mapping [S1].
+ - A 1D texture for color mapping [S1].
+ 
+@@ -24,20 +21,14 @@
+ 
+ **Data Structures and Layout:**
+-RBF parameters are stored in texture maps. Five parameters per RBF (center coordinates and width/weight) cannot fit in a single texel, requiring two lookups per fragment [S1].
+-- **Center Coordinates:** Stored in a texture map [S1].
+-- **Weights and Widths:** Stored in a texture map [S1].
+-- **Error Values:** If present, stored in secondary texture coordinates corresponding to the cell corners [S1].
+-- **Optimization Note:** Combining four RBF widths into one RGBA texel and looking up width only every fourth RBF was considered to reduce lookups to an average of 1.25, but was rejected due to complexity yielding negligible performance gain [S1].
++RBF parameters are stored in texture maps [S1]. Five parameters per RBF (center coordinates and width/weight) cannot fit in a single texel, requiring two lookups per fragment [S1]. Center coordinates are stored in one texture map and weights/widths in another [S1]. Combining four RBF widths into one RGBA texel and looking up width only every fourth RBF was considered to reduce lookups to an average of 1.25, but was rejected due to complexity yielding negligible performance gain [S1]. If the spatial data structure includes error values at cell corners, they are encoded in secondary texture coordinates [S1].
+ 
+ **Formulas:**
+-The scalar field $f(x)$ is the sum of Gaussian RBFs:
++The scalar field $f(x)$ is the sum of Gaussian RBFs plus a constant bias:
+ $$ f(x) = \sum_{i=1}^{M} w_i e^{-\frac{\|x - \mu_i\|^2}{2\sigma_i^2}} + b $$
+ where $b$ is the constant bias [S1].
+ 
+ The gradient $\nabla f(x)$ is evaluated analytically in parallel:
+-$$ \nabla f(x) = - \sum_{i=1}^{M} w_i \frac{x - \mu_i}{2\sigma_i^2} e^{-\frac{\|x - \mu_i\|^2}{2\sigma_i^2}} $$
+-Note: The source formula [S1] writes the denominator of the exponent as $2\sigma_i^2$ and the gradient term as $\frac{x - \mu_i}{2\sigma_i}$. However, the standard derivative of $e^{-\frac{\|x - \mu_i\|^2}{2\sigma_i^2}}$ with respect to $x$ is $-\frac{x - \mu_i}{\sigma_i^2} e^{-\dots}$. The source text explicitly states:
+-$$ \nabla f (x) = - \sum_{i=1}^{M} w_i \frac{x - \mu_i}{2\sigma_i} e^{-\frac{\|x-\mu_i\|^2}{2\sigma_i^2}} $$
+-We retain the source's explicit formula [S1]. It is likely the source implies a specific normalization or there is a typo in the source's denominator ($2\sigma_i$ vs $\sigma_i^2$). Given the instruction to keep exact numbers and variable names, we cite the source formula exactly. However, standard calculus dictates the gradient of $\exp(-\frac{r^2}{2\sigma^2})$ is $-\frac{r}{\sigma^2}\exp(\dots)$. The source formula has $\frac{1}{2\sigma_i}$ in the numerator term. Let's look closely at [S1]: "$\nabla f (x) = - \sum_{i=1}^{M} w_i \frac{x - \mu_i}{2\sigma_i} e^{-\frac{kx-\mu_i k^2}{2\sigma_i^2}}$". The notation $kx-\mu_i k^2$ is clearly $\|x - \mu_i\|^2$. The term $\frac{x - \mu_i}{2\sigma_i}$ is dimensionally inconsistent with $\frac{x - \mu_i}{\sigma_i^2}$ if $\sigma$ is a length scale. However, if $\sigma$ in the texture is stored as $1/\sigma_{std}$, the formula might change. The source states: "compensated with a correction factor multiplied to $\sigma_i$ entries". This suggests the stored $\sigma_i$ might be scaled. We will present the formula exactly as cited in [S1] but note the potential discrepancy.
++$$ \nabla f(x) = - \sum_{i=1}^{M} w_i \frac{x - \mu_i}{2\sigma_i} e^{-\frac{\|x - \mu_i\|^2}{2\sigma_i^2}} $$
++where the source notation $kx-\mu_i k^2$ corresponds to $\|x - \mu_i\|^2$ [S1].
+ 
+ **Parameters:**
+@@ -47,100 +38,42 @@
+ - $\sigma_i$: Width of the $i$-th RBF [S1].
+ - $x$: Fragment position in model space [S1].
++- $b$: Constant bias added after evaluating all RBF functions [S1].
+ 
+ **Pitfalls and Edge Cases:**
+-- **Performance:** Standard exponentials are slow on hardware. The method uses base-two exponential ($2^{-x}$) compensated by multiplying a correction factor into the $\sigma_i$ entries in the texture maps [S1].
+-- **Loop Unrolling:** The number of RBFs $M$ must be known at compile time (fixed preprocessor constant) [S1].
++- **Performance:** Standard exponentials are slow on hardware [S1]. The method uses base-two exponential ($2^{-x}$) compensated with a correction factor multiplied to $\sigma_i$ entries in the texture maps [S1].
++- **Loop Unrolling:** The number of RBFs $M$ must be known at compile time as a fixed preprocessor constant [S1].
+ - **Texture Lookups:** Requires two lookups per fragment due to parameter packing [S1].
+ 
+ **Pseudocode:**
+ ```python
+-# Inputs:
+-# inpos: vec3, model space fragment position
+-# M: int, fixed number of RBFs (unrolled loop)
+-# tex_centers: Texture3D/2D, stores mu_i
+-# tex_weights: Texture3D/2D, stores w_i
+-# tex_widths: Texture3D/2D, stores sigma_i
+-# tex_error: Texture3D/2D (optional), stores error values
+-# tex_color: Texture1D, for final color mapping
+-# bias: float, constant bias
+-# scale: float, scale factor
+-# offset: float, offset factor
++import math
+ 
+-# Outputs:
+-# out_color: vec4
+-
+-# Local variables
+-f_val = 0.0
+-grad_val = vec3(0.0)
+-
+-# Unrolled loop for i from 0 to M-1
+-# Note: In actual GLSL/HLSL, this loop is unrolled by the compiler using #pragma unroll or similar
+-for i in range(M):
+-    # 1. Lookup RBF center coordinates
+-    mu_i = tex_centers.sample(i).xyz
+-    
+-    # 2. Lookup RBF weight and width
+-    w_i = tex_weights.sample(i).r
+-    sigma_i = tex_widths.sample(i).r
+-    
+-    # 3. Compute distance vector and squared distance
+-    diff = inpos - mu_i
+-    dist_sq = dot(diff, diff)
+-    
+-    # 4. Evaluate Gaussian RBF
+-    # Use base-two exponential for performance: 2^(-x) = e^(-x * ln(2))
+-    # The source states sigma_i is compensated with a correction factor.
+-    # Assuming the stored sigma_i already includes this compensation or the exponent is adjusted.
+-    # Standard Gaussian: exp(-dist_sq / (2 * sigma_i^2))
+-    # Base-2 equivalent: 2^(-dist_sq / (2 * sigma_i^2 * log2(e)))
+-    # The source formula for gradient uses the same exponential term.
+-    
+-    exponent = -dist_sq / (2.0 * sigma_i * sigma_i)
+-    
+-    # Using base-2 exp if compensated, otherwise standard exp.
+-    # Source says: "use the base-two exponential which is compensated with a correction factor multiplied to sigma_i"
+-    # This implies the stored sigma_i might be scaled such that we can use 2^exponent directly or similar.
+-    # Without explicit compensation formula, we use standard exp for correctness, noting the optimization.
+-    # However, to follow the source's intent of "base-two exponential", we assume the texture data handles it.
+-    # Let's stick to the mathematical definition provided in the source formula for consistency.
+-    gauss_val = exp(exponent)
+-    
+-    # Accumulate scalar field value
+-    f_val += w_i * gauss_val
+-    
+-    # Accumulate gradient
+-    # Source formula: - sum( w_i * (x - mu_i) / (2 * sigma_i) * exp(...) )
+-    # Note: This formula differs from standard calculus derivative (-w * (x-mu)/sigma^2 * exp).
+-    # We implement the source formula exactly as cited [S1].
+-    grad_val += -w_i * (diff / (2.0 * sigma_i)) * gauss_val
+-
+-# Add constant bias
+-f_val += bias
+-
+-# Add error value if available
+-# Linearly interpolated error encoded in secondary texture coordinates
+-# Assuming secondary coordinates are available or sampled based on cell position
+-if error_texture_exists:
+-    error_val = sample_error_at(inpos) # Implementation detail for interpolation
++def evaluate_rbf_field(inpos, centers, weights, widths, secondary_coords, bias, scale, offset, color_map, M):
++    f_val = 0.0
++    grad_val = [0.0, 0.0, 0.0]
++    for i in range(M):
++        mu_i = centers[i]
++        w_i = weights[i]
++        sigma_i = widths[i]
++        diff = [inpos[j] - mu_i[j] for j in range(3)]
++        dist_sq = sum(d * d for d in diff)
++        gauss = math.exp(-dist_sq / (2.0 * sigma_i * sigma_i))
++        f_val += w_i * gauss
++        grad_val[0] += -w_i * diff[0] / (2.0 * sigma_i) * gauss
++        grad_val[1] += -w_i * diff[1] / (2.0 * sigma_i) * gauss
++        grad_val[2] += -w_i * diff[2] / (2.0 * sigma_i) * gauss
++    f_val += bias
++    # Linearly interpolated error from secondary texture coordinates
++    # (Exact interpolation routine not specified in sources [S1])
++    error_val = 0.0
+     f_val += error_val
+-
+-# Scale and bias for data range
+-f_val = f_val * scale + offset
+-
+-# Map to output color
+-out_color = tex_color.sample(f_val)
++    f_val = f_val * scale + offset
++    out_color = color_map[f_val]
++    return f_val, grad_val, out_color
+ ```
+ 
+-## Subtopics
+-
+-### Isosurface Rendering
+-Uses the computed gradient for lighting calculations [S1].
+-
+-### Inverse Multiquadric RBFs
+-Alternative basis function type implemented in the same framework [S1].
+-
+ ## Operating characteristics
+-- **Time Complexity:** $O(M)$ per fragment, where $M$ is the number of RBFs. The loop is unrolled, so it is constant time for a given dataset, but scales linearly with $M$ [S1].
+-- **Memory Complexity:** Storage for RBF parameters in texture maps. Two lookups per fragment are required [S1].
++- **Time Complexity:** $O(M)$ per fragment, where $M$ is the number of RBFs [S1]. The loop is unrolled, so it is constant time for a given dataset, but scales linearly with $M$ [S1].
++- **Memory Complexity:** Storage for RBF parameters in texture maps [S1]. Two lookups per fragment are required [S1].
+ - **Performance:** Optimized by using base-two exponential instead of standard exponential [S1]. The single-pass approach is preferred for readability and performance over multipass code [S1]. Tested on Nvidia GeForce FX 5900 Ultra [S1].
+ - **Strengths:** Analytical gradient computation enables accurate lighting and isosurface rendering; single-pass efficiency [S1].

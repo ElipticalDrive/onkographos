@@ -1,0 +1,318 @@
+--- v008.md
++++ v009.md
+@@ -1,174 +1,176 @@
+ # 2D Texture-Based Volume Rendering
+ 
+-Also called: 2D Texture Slicing, 2D-Texture Approach, Stack of 2D textures, VR Basado en Texturas 2D
++Also called: 2D Texture Mapping Volume Rendering, 2D Texture Slicing, 2D Texture Volume Rendering, Stack of 2D textures, Texture Plane Volume Rendering, Texture mapped planes, VR Basado en Texturas 2D
+ 
+ ## Overview
+-2D Texture-Based Volume Rendering is an object-order technique that renders volumetric data by decomposing the volume into a stack of 2D texture slices aligned with the object's coordinate axes (X, Y, or Z) [S4, S5, unofficial][S22]. It solves the problem of rendering 3D scalar fields on hardware that lacks native 3D texture support or to exploit the high performance of 2D texture mapping units [S4, unofficial][S17]. Unlike view-aligned 3D texture methods which require trilinear interpolation and per-frame geometry regeneration, this method uses object-aligned slices and bilinear interpolation, trading visual accuracy for compatibility and speed [S4, S21, unofficial]. It is a hybrid approach combining backward projection (generating slices) and forward projection (blending into the frame buffer) [S1, unofficial][S2].
++2D Texture-Based Volume Rendering is a hybrid object-order technique that renders volumetric data by decomposing the volume into a stack of 2D texture slices aligned with the object's coordinate axes, projecting them onto the image plane, and compositing them back-to-front using hardware alpha blending [S1, S4, S5, S6, S13, S14, S24, unofficial]. It solves the problem of rendering 3D scalar fields on graphics hardware that lacks native 3D texture support or requires compatibility with older OpenGL implementations by substituting trilinear interpolation with bilinear interpolation within 2D textures [S6, unofficial][S17, S18][S21, unofficial][S22]. Unlike [3D Texture-Based Volume Rendering](9841-3d-texture-based-volume-rendering.md), which stores the entire volume in a single 3D texture and allows for view-aligned slicing with trilinear interpolation, this method requires pre-computing three separate stacks of 2D textures (one for each major axis) and selecting the stack most perpendicular to the viewing direction to minimize gaps [S4, S7, S10, unofficial][S12]. It differs from [Shear-Warp Rendering](9840-shear-warp-rendering.md) by avoiding the explicit matrix decomposition (shear and warp) and instead relying on the graphics pipeline's automatic transformation of object-aligned quads, though both share the back-to-front compositing strategy [S6, unofficial][S22].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scalar volume dataset (dimensions $X_{dim} \times Y_{dim} \times Z_{dim}$), a viewing direction vector, and a transfer function mapping scalar values to RGBA [S13, S14, unofficial].
+-*   **Output:** A 2D image buffer (frame buffer) containing the composited volume [S14, unofficial].
++*   **Input:** A 3D scalar volume dataset $V$ with dimensions $X \times Y \times Z$. A viewing direction vector $\vec{v}$ derived from the camera's model-view matrix. A transfer function $TF$ mapping scalar values to RGBA color and opacity.
++*   **Output:** A 2D image buffer (framebuffer) containing the composited volume.
+ 
+ **Data Structures:**
+-The method requires three stacks of 2D textures, one for each major axis (X, Y, Z) [S4, unofficial][S12].
+-*   **Texture Stack:** For each axis, there are $N$ textures, where $N$ corresponds to the dimension size along that axis (e.g., $Z_{dim}$ textures for the Z-stack) [S13, unofficial].
+-*   **Texture Format:** Typically `GL_LUMINANCE` or `GL_RGBA` [S23, S6, unofficial].
+-    *   If `GL_LUMINANCE`: Stores a single component representing voxel opacity or density [S23, unofficial].
+-    *   If `GL_RGBA`: Stores emission coefficient $I_{emit}$ in RGB and inverse absorption coefficient $(1 - \vartheta_k)$ in Alpha [S6, unofficial].
+-*   **Proxy Geometry:** A list of polygons (quads or triangle fans) representing the intersection of slicing planes with the volume bounding box [S8, S23, unofficial]. Each polygon has vertices with 3D texture coordinates [S11, unofficial].
++The method requires storing the volume data in three sets of 2D textures, one set for each axis-aligned slicing direction.
++*   **Texture Stacks:** Three arrays of 2D texture IDs: $\text{texX}$, $\text{texY}$, $\text{texZ}$.
++    *   $\text{texX}[i]$ contains the slice at $x=i$, stored as a 2D texture of size $Y \times Z$ (or padded to power-of-two, e.g., $256 \times 256$) [S13, S24, unofficial].
++    *   $\text{texY}[j]$ contains the slice at $y=j$, stored as $X \times Z$ [S13, unofficial].
++    *   $\text{texZ}[k]$ contains the slice at $z=k$, stored as $X \times Y$ [S13, unofficial].
++*   **Texture Format:** Each texel stores RGBA values. The RGB components store the emission coefficient $I_{emit}$ (color), and the Alpha component stores the inverse absorption coefficient $(1 - \vartheta_k)$ [S6, unofficial]. The data is typically loaded as `GL_LUMINANCE` or `GL_RGBA` depending on hardware support, with single-component data stored in the red channel or luminance [S13, S24, unofficial].
++*   **Slice Geometry:** Each slice is represented as a quad (or triangle fan) defined by four vertices. The vertices are computed by intersecting the slicing plane with the volume's bounding box [S8, S11, unofficial].
++
++**Parameters:**
++*   **Number of Slices ($N$):** Typically matches the dimension of the volume along the slicing axis. Some implementations use a formula such as $N = 2 \cdot (10 + \text{max\_planes} \cdot q^3)$ to determine slice count based on quality factor $q$ and maximum planes [S8, unofficial].
++*   **Slicing Axis Selection:** The axis is chosen such that its normal is within $\pm 45^\circ$ of the viewing direction [S12, S17, S18, S19, S20].
++*   **Opacity Correction:** An optional parameter to scale slice alpha based on the Euclidean distance between slices along the viewing ray to prevent brightness changes [S4, S8, unofficial]. Default is often OFF [S8, unofficial].
+ 
+ **Steps:**
+ 
+ 1.  **Preprocessing (Texture Generation):**
+-    *   Decompose the 3D volume into three sets of 2D slices, perpendicular to the X, Y, and Z axes respectively [S12, S20].
+-    *   Load each slice into a 2D texture object [S5, unofficial].
+-    *   If using RGBA textures, apply the transfer function to map scalar values to color and opacity [S6, unofficial].
+-    *   *Note:* This step is performed once per volume dataset [S20].
+-
+-2.  **Viewing Direction Analysis:**
+-    *   Extract the rotation component from the model-view matrix [S6, unofficial].
+-    *   Transform the initial viewing direction vector (e.g., $\{0.0, 0.0, -1.0\}$ in OpenGL camera space) by the rotation matrix [S6, unofficial].
+-    *   Find the absolute maximum component of the resulting vector ($v_x, v_y, v_z$) [S13, unofficial].
+-    *   Select the texture stack corresponding to the axis with the largest absolute component [S6, S13, unofficial].
+-        *   If $|v_x|$ is max, select X-stack.
+-        *   If $|v_y|$ is max, select Y-stack.
+-        *   If $|v_z|$ is max, select Z-stack [S13, unofficial].
+-    *   Determine rendering order:
+-        *   If the component is positive, render from back to front (increasing coordinate index if the axis aligns with view, or based on camera position) [S13, unofficial].
+-        *   If negative, render front to back or reverse the loop [S13, unofficial].
+-        *   *Constraint:* The chosen stack's normal must be within $\pm 45^\circ$ of the viewing direction to avoid seeing through slice edges [S12, S22].
++    *   Decompose the 3D volume into three stacks of 2D slices parallel to the X, Y, and Z axes [S4, unofficial][S12, S20].
++    *   Apply the transfer function to map scalar values to RGBA. Store emission in RGB and inverse absorption in Alpha [S6, S13, S14, unofficial].
++    *   Upload these slices to GPU memory as 2D textures [S24, unofficial].
++    *   *Note:* This step is performed once per volume or when the volume data changes [S20].
++
++2.  **View Direction Analysis:**
++    *   Extract the rotation component from the current Model-View matrix [S6, unofficial].
++    *   Transform the initial viewing direction vector $\vec{v}_{init} = (0, 0, -1)$ by this rotation to get $\vec{v}_{world}$ [S6, unofficial].
++    *   Find the component of $\vec{v}_{world}$ with the largest absolute value: $n_{max} = \text{argmax}_i |v_i|$ [S6, unofficial].
++    *   Select the corresponding texture stack ($\text{texX}$, $\text{texY}$, or $\text{texZ}$) and the direction (positive or negative) based on the sign of the dominant component [S6, S13, unofficial].
+ 
+ 3.  **Geometry Generation (Per Frame):**
+-    *   For each slice in the selected stack:
+-        *   Define a plane perpendicular to the selected axis at the slice's position [S23, unofficial].
+-        *   Compute the intersection of this plane with the volume's bounding box [S8, S11, unofficial].
+-        *   Tessellate the intersection polygon into triangles or triangle fans [S8, unofficial].
+-        *   Assign 3D texture coordinates to the vertices. For a slice at index $i$ in the Z-stack, the texture coordinate $z$ is fixed, while $x$ and $y$ vary across the quad [S11, unofficial].
+-        *   *Optimization:* Use instanced drawing to render all slices with a single draw call, passing slice positions via an Array Buffer Object [S10, unofficial].
+-
+-4.  **Rendering and Compositing:**
+-    *   Enable alpha blending with the equation:
+-        $$ C_{dest} = C_{src} \cdot A_{src} + C_{dest} \cdot (1 - A_{src}) $$
+-        where $C_{src}$ is the color from the texture sample and $A_{src}$ is the opacity [S3, S6, unofficial].
+-    *   Set the front face winding order (CW or CCW) based on the viewing direction to ensure correct back-to-front rasterization [S13, unofficial].
+-    *   Iterate through the slices in the correct depth order (farthest to closest) [S23, unofficial].
+-    *   Bind the current slice's 2D texture.
+-    *   Render the proxy geometry for the slice [S7, unofficial].
+-    *   The hardware performs bilinear interpolation on the 2D texture [S6, unofficial].
+-    *   Composite the result into the frame buffer [S1, unofficial].
++    *   For the selected axis, generate proxy geometry (quads) for each slice index $i$ from $0$ to $D-1$ (where $D$ is the dimension along that axis) [S13, unofficial].
++    *   Compute the world-space position of each slice plane. The distance $dist$ between slices is determined by the step size along the viewing direction [S13, unofficial].
++    *   *Alternative:* Use instanced rendering with an Array Buffer Object containing slice positions and texture coordinates [S10, unofficial].
++
++4.  **Rendering Loop:**
++    *   Determine the rendering order: Back-to-Front relative to the camera [S13, unofficial][S18, S20].
++    *   Disable depth testing to allow correct alpha blending [S26, unofficial].
++    *   Set the blend function to `GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA` [S6, unofficial].
++    *   For each slice $i$ in the selected stack:
++        *   Bind the texture $\text{tex}[i]$ [S13, unofficial].
++        *   Set the texture coordinates for the quad vertices to map the 2D texture correctly to the slice plane [S20].
++        *   Draw the quad (e.g., using `glDrawArraysInstanced` or immediate mode) [S10, S13, unofficial].
++        *   The hardware rasterizer performs bilinear interpolation on the 2D texture [S6, S21, unofficial].
++        *   The fragment shader/compositor blends the result into the framebuffer using the alpha blending equation:
++            $$ C_{dest} = C_{src} \cdot A_{src} + C_{dest} \cdot (1 - A_{src}) $$
++            where $C_{src}$ is the sampled color (emission) and $A_{src}$ is the sampled alpha (inverse absorption) [S6, S14, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def render_2d_texture_volume(volume_data, view_matrix, transfer_function):
+-    # 1. Preprocessing (Assume textures are pre-loaded into texX, texY, texZ arrays)
+-    # volume_data shape: (X, Y, Z)
+-    # texX[i] is the 2D texture for the slice at x=i
+-    # texY[j] is the 2D texture for the slice at y=j
+-    # texZ[k] is the 2D texture for the slice at z=k
+-    
+-    # 2. Select Stack
+-    # Extract rotation from view_matrix (16x4 matrix)
+-    rotation = extract_rotation(view_matrix)
+-    
+-    # Initial view direction in camera space (OpenGL: -Z)
+-    view_dir_cam = [0.0, 0.0, -1.0]
+-    
+-    # Transform to object space
+-    view_dir_obj = mat_vec_multiply(rotation, view_dir_cam)
+-    
+-    # Find dominant axis
+-    abs_x = abs(view_dir_obj[0])
+-    abs_y = abs(view_dir_obj[1])
+-    abs_z = abs(view_dir_obj[2])
+-    
+-    if abs_x >= abs_y and abs_x >= abs_z:
+-        axis = 'X'
++def render_2d_texture_volume(volume_data, model_view_matrix, transfer_function):
++    # 1. Preprocessing: Generate texture stacks (done once or on data change)
++    # volume_data: 3D array (X, Y, Z)
++    # texX, texY, texZ: lists of 2D texture IDs
++    texX = []
++    texY = []
++    texZ = []
++    
++    for x in range(volume_data.shape[0]):
++        slice_data = volume_data[x, :, :]
++        rgba_slice = transfer_function(slice_data)
++        texX.append(create_2d_texture(rgba_slice))
++        
++    for y in range(volume_data.shape[1]):
++        slice_data = volume_data[:, y, :]
++        rgba_slice = transfer_function(slice_data)
++        texY.append(create_2d_texture(rgba_slice))
++        
++    for z in range(volume_data.shape[2]):
++        slice_data = volume_data[:, :, z]
++        rgba_slice = transfer_function(slice_data)
++        texZ.append(create_2d_texture(rgba_slice))
++
++    # 2. View Direction Analysis
++    rotation_matrix = extract_rotation(model_view_matrix)
++    view_vector = mat_vec_multiply(rotation_matrix, [0.0, 0.0, -1.0])
++    
++    abs_view = [abs(v) for v in view_vector]
++    max_idx = argmax(abs_view)
++    max_val = abs_view[max_idx]
++    
++    # Select stack and direction
++    if max_idx == 0: # X axis
+         stack = texX
+-        dim_size = volume_data.shape[0]
+-        dist_step = volume_data.shape[0] / dim_size # Normalized step
+-    elif abs_y >= abs_x and abs_y >= abs_z:
+-        axis = 'Y'
++        if view_vector[0] > 0:
++            order = range(len(texX)) # Positive X
++        else:
++            order = range(len(texX) - 1, -1, -1) # Negative X
++    elif max_idx == 1: # Y axis
+         stack = texY
+-        dim_size = volume_data.shape[1]
+-        dist_step = volume_data.shape[1] / dim_size
+-    else:
+-        axis = 'Z'
++        if view_vector[1] > 0:
++            order = range(len(texY))
++        else:
++            order = range(len(texY) - 1, -1, -1)
++    else: # Z axis
+         stack = texZ
+-        dim_size = volume_data.shape[2]
+-        dist_step = volume_data.shape[2] / dim_size
+-
+-    # Determine order
+-    # If view_dir_obj[axis] > 0, we are looking in positive direction.
+-    # Back-to-front means rendering highest index first (farthest) to lowest (closest)
+-    # assuming the camera is at -infinity or origin looking down axis.
+-    # Simplified: Render from dim_size-1 down to 0 if positive, 0 to dim_size-1 if negative.
+-    # Note: Exact geometry placement depends on the specific bounding box intersection logic.
+-    
++        if view_vector[2] > 0:
++            order = range(len(texZ))
++        else:
++            order = range(len(texZ) - 1, -1, -1)
++
++    # 3. Rendering Setup
+     enable_blending()
+     set_blend_func(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+-    
+-    for i in range(dim_size - 1, -1, -1): # Back-to-front
+-        bind_texture(stack[i])
+-        
+-        # Generate proxy geometry for slice i
+-        # This involves intersecting plane at axis=i with volume bounds
+-        # and creating a quad/triangle fan.
+-        # Texture coordinates are mapped to [0,1]x[0,1] for the slice plane.
+-        # The 3rd coordinate is fixed to i/dim_size.
+-        
+-        geometry = generate_slice_geometry(axis, i, volume_bounds)
+-        
+-        # Set front face winding based on view direction to ensure correct culling/depth
+-        if view_dir_obj[axis] > 0:
+-            set_front_face(GL_CW)
+-        else:
+-            set_front_face(GL_CCW)
+-            
+-        draw_geometry(geometry)
++    disable_depth_test() # Or use depth test with depth write off
++    
++    # 4. Render Slices Back-to-Front
++    for i in order:
++        texture_id = stack[i]
++        bind_texture(texture_id)
++        
++        # Compute slice position and vertices
++        # dist is the distance along the viewing ray for this slice
++        dist = compute_slice_distance(i, stack, view_vector)
++        
++        # Generate quad vertices for the slice plane
++        # Vertices are in world space, transformed by model-view
++        vertices = generate_slice_quad(i, dist, volume_bounds)
++        
++        # Set texture coordinates
++        # Texcoords map the 2D texture to the quad
++        texcoords = compute_texcoords(i, stack, volume_bounds)
++        
++        draw_quad(vertices, texcoords)
+ ```
+ 
+-**Parameters:**
+-*   **Number of Slices ($N$):** Typically equal to the dimension size of the volume along the slicing axis [S18, S19].
+-*   **Opacity Correction:** Optional. Scales slice alpha to compensate for varying Euclidean distance between slices along a light ray depending on viewing angle [S4, S8, unofficial]. Default is OFF [S8, unofficial].
+-*   **Max Planes:** Cap on the number of slices rendered per frame to maintain performance [S8, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-*   **45-Degree Artifacts:** When the viewing direction is close to $45^\circ$ relative to the slice normal, the viewer sees through the edges of the slices, causing visible gaps and artifacts [S4, unofficial][S12]. The algorithm must switch stacks at this threshold [S4, unofficial].
+-*   **Bilinear Interpolation Artifacts:** Since 2D textures only support bilinear interpolation, the third dimension is not interpolated, leading to aliasing and "banding" artifacts, especially when zooming in [S5, S21, S23, unofficial].
+-*   **Switching Artifacts:** Abrupt switching between texture stacks causes visible popping artifacts due to changes in sampling positions and interpolation artifacts [S6, S23, unofficial].
+-*   **Memory Limit:** Requires storing three full copies of the volume data in texture memory (one per axis), which limits the maximum volume size based on available VRAM [S6, S7, unofficial].
+-*   **VTK OIT Conflict:** In VTK 9+, Order-Independent Translucency (OIT) breaks slice compositing by averaging colors. It must be disabled (`UseOITOff`) to use legacy alpha blending [S8, unofficial].
+-*   **Negative Values:** If the transfer function involves logarithmic transformations (e.g., `np.log`), zero or negative voxel values result in NaN or `-inf`, causing rendering errors [S14, S15, unofficial].
++*   **Stack Switching Artifacts:** When the viewing direction crosses the $45^\circ$ threshold between axes, the method switches texture stacks. This causes visible "popping" artifacts due to abrupt changes in sampling positions and interpolation artifacts [S1, S6, S24, unofficial].
++*   **Bilinear Interpolation Artifacts:** Since only bilinear interpolation is used within slices, and the third dimension is sampled discretely, severe aliasing and lack of spatial interpolation occur, especially when zooming in [S5, S6, S21, unofficial][S22].
++*   **Viewing Angle Limitations:** If the view is close to $45^\circ$ relative to the slice normal, the viewer sees through the edges of the slices, causing gaps and artifacts [S4, unofficial][S17, S18, S19, S20].
++*   **Opacity Correction:** Without opacity correction, the apparent brightness changes as the viewing angle changes because the Euclidean distance between slices along the ray varies [S4, unofficial][S22].
++*   **Memory Usage:** Requires storing three copies of the volume data in texture memory, which can be prohibitive for large datasets [S3, S6, S7, unofficial].
++*   **VTK OIT Conflict:** In VTK 9, Order-Independent Translucency (OIT) breaks the back-to-front compositing, resulting in an X-ray look. It must be disabled [S8, unofficial].
++*   **Negative Values:** Applying logarithmic transfer functions to data with zero or negative values results in NaN or -inf, causing rendering errors [S14, S15, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Novel Sampling Scheme for Slice Based Volume Rendering](953-novel-sampling-scheme-for-slice-based-volume-rendering.md)
+-A technique that generates proxy geometry using multiple object-aligned 2D texture stacks clipped by planes extending from the front-facing edges of the volume's bounding box in the viewing direction. It eliminates stack-switching and jagged boundary artifacts by rendering multiple clipped stacks simultaneously, approximating uniform ray-casting sampling without the geometry overhead of spherical shells.
++A variant that renders multiple clipped stacks simultaneously to eliminate stack-switching and jagged boundary artifacts. It approximates uniform ray-casting sampling more closely than spherical shell approaches while avoiding their geometry overhead.
+ 
+ ### [Interpolation of Arbitrary Slices (Multi-Texture Blending)](2089-interpolation-of-arbitrary-slices-multi-texture-blending.md)
+-Renders arbitrary slicing planes by interpolating between two adjacent object-aligned texture slices using multi-texturing hardware. It decomposes the arbitrary slice into polygon strips spanning only two 2D textures, reducing polygon count by half compared to single-texture approaches, though constrained by memory bandwidth.
++Renders arbitrary slicing planes by interpolating between two adjacent object-aligned texture slices using multi-texturing hardware. It reduces polygon count by half compared to single-texture approaches but is constrained by memory bandwidth.
+ 
+ ### [Multi-Texture Interpolation](2200-multi-texture-interpolation.md)
+-Enables real trilinear interpolation by computing intermediate slices on the fly using hardware combiners. It corrects bilinear artifacts by weighted blending of adjacent fixed slices, providing a constant sampling rate and allowing supersampling, differing from Novel Sampling Scheme by relying on hardware combiners rather than novel sampling patterns.
++Enables real trilinear interpolation by computing intermediate slices on the fly using hardware combiners. It corrects bilinear artifacts by weighted blending of adjacent fixed slices, providing a constant sampling rate and supersampling capabilities.
+ 
+ ### [Slice-Based Volume Rendering with HSV Transfer Function](4329-slice-based-volume-rendering-with-hsv-transfer-function.md)
+-A GPU-accelerated technique that maps scalar values to color in HSV space rather than using a pre-baked 1D RGB texture lookup. It uses a texture array (sprite sheet) to simulate 3D trilinear filtering, differing from Novel Sampling Scheme by using fixed sprite-sheet indexing and from Interpolation of Arbitrary Slices by using a single texture array with calculated intra-slice coordinates.
++Uses a GPU-accelerated object-order technique with an HSV transfer function. It manages a texture array (sprite sheet) to simulate 3D trilinear filtering and computes color in HSV space rather than using a pre-baked 1D RGB texture lookup.
+ 
+ ### SGI Octane2 Volume Rendering Pipeline
+-A rendering pipeline for the SGI Octane2 with V series graphics cards that uses 3D pixel textures via `glDrawPixels()` or `glCopyPixels()` to handle multi-dimensional transfer functions and shading. It renders slices from the VGH data volume, pixel textures them, renders a 'Shade' slice, modulates it with the classified slice, and blends into the frame buffer. Unlike GeForce3, it requires a scratch/auxiliary buffer because pixel texture does not occur directly on a per-fragment basis during rasterization [S25].
++A pipeline for SGI Octane2 with V series graphics cards using 3D pixel textures via `glDrawPixels()` or `glCopyPixels()` to handle multi-dimensional transfer functions and shading. It renders slices, pixel textures them, renders a 'Shade' slice, modulates it with the classified slice, and blends into the framebuffer. It requires a scratch/auxiliary buffer because pixel texture does not occur directly on a per-fragment basis [S27].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of slices and $P$ is the number of pixels per slice (image resolution). The complexity depends on image size, not scene complexity [S9, S11, unofficial].
+-*   **Memory Complexity:** $O(3 \cdot V)$, where $V$ is the volume size, as three stacks of 2D textures are required [S6, S7, unofficial]. For a $181 \times 217 \times 181$ volume, this can require ~37 MB for main memory creation alone [S23, unofficial].
+-*   **Performance:** Historically much faster than ray casting, achieving near-interactive frame rates (e.g., 1.6 fps for Blunt-fin dataset on Pentium-IV/QuadroFX 3400) [S1, S11, unofficial]. Performance scales with GPU texture throughput (Giga-texels/s) [S5, unofficial].
+-*   **Strengths:** Compatible with older hardware lacking 3D texture support; high performance due to hardware-accelerated bilinear interpolation and rasterization; simple implementation [S4, S6, unofficial].
+-*   **Limitations:** Lower image quality than ray casting or 3D texture methods due to lack of trilinear interpolation; visible artifacts at oblique viewing angles (45 degrees); high memory usage; popping artifacts during stack switching [S4, S6, S11, S23, unofficial].
+-*   **When to Use:** Real-time visualization on hardware without 3D texture support; when performance is prioritized over visual accuracy; for static or slowly rotating volumes where stack switching is infrequent [S4, S11, unofficial].
+-*   **When Not to Use:** When high visual fidelity is required (e.g., medical diagnosis); when the volume is viewed from many arbitrary angles (causing frequent stack switches and artifacts); when memory is constrained [S4, S6, unofficial].
++*   **Time Complexity:** Rendering time is proportional to the number of slices $N$ and the image resolution, independent of scene complexity [S9, S11, unofficial].
++*   **Memory Complexity:** Requires $3 \times X \times Y \times Z$ texels (or padded equivalents) to store the three texture stacks [S3, S6, S7, unofficial]. For a $181 \times 217 \times 181$ volume padded to $256 \times 256$, this results in 579 textures and ~37.9 MB of memory [S24, unofficial].
++*   **Performance:** Provides high performance on hardware with fast 2D texturing and blending units, often achieving interactive frame rates on standard PC hardware [S4, S7, S21, unofficial]. Performance improves significantly with subsampling (e.g., factor of 2 in all dimensions yields 8x speedup) [S26, unofficial].
++*   **Strengths:** Compatible with older graphics hardware lacking 3D texture support; simple implementation; leverages hardware acceleration for interpolation and blending [S4, S6, S7, unofficial].
++*   **Limitations:** Poor image quality due to bilinear interpolation and fixed sampling rate; visible artifacts at stack switches and edge-on views; high memory consumption; cannot easily model refracting volumes or viewing rays that change direction [S5, S6, S11, unofficial][S17, S18, S19][S21, unofficial][S22].
++*   **When to Use:** Real-time visualization on older hardware or when 3D texture support is unavailable; moderate quality requirements where speed is prioritized over accuracy [S4, S6, S7, unofficial].
++*   **When Not to Use:** High-quality medical visualization requiring trilinear interpolation; scenes with frequent view angle changes near $45^\circ$ thresholds; large volumes where memory is constrained [S5, S6, S21, unofficial][S22].
+ 
+ ## Background
+-The method was pioneered by Cabral et al. in 1994, who were among the first to demonstrate that the texture capabilities of graphics boards could be used directly for rendering volumetric data sets [S2][S1, unofficial]. It was developed as a solution to render volumes on hardware that did not support 3D textures, exploiting the mature 2D texture mapping pipeline [S17, S18]. The approach is closely related to the Shear-Warp algorithm, which also decomposes the volume into slices, but 2D texture mapping performs the interpolation in hardware rather than software [S6, S21, unofficial]. Later improvements included pre-integrated volume rendering by Engel et al. (2001) to handle non-linear transfer functions [S2], and various multi-texture interpolation techniques to mitigate bilinear artifacts [S5, S6, unofficial].
++The method was pioneered by Cabral et al. in 1994, who demonstrated that the texture capabilities of graphics boards could be used directly for rendering volumetric data sets [S1, unofficial][S2][S5, unofficial]. It was one of the first techniques to exploit hardware texturing for volume rendering, preceding widespread 3D texture support [S2][S5, unofficial]. The approach is closely related to the Shear-Warp algorithm but avoids the explicit matrix decomposition by using object-aligned slices and hardware transformations [S6, unofficial][S22]. Later improvements included pre-integrated volume rendering by Engel et al. in 2001, which improved quality by handling transfer function integration [S2][S5, unofficial]. The method was widely used in early GPU-based volume rendering applications due to its compatibility with OpenGL 1.x and early 2D texture hardware [S4, S7, unofficial][S17, S18, S19, S20].
+ 
+ ## Sources
+@@ -195,5 +197,7 @@
+ [S21] Interactive Volume Rendering On PC Hardware (PDF), http://gd.tuwien.ac.at/visual/OpenQVis/Publ.2000.5.pdf, fetched 2026-10-27 (unofficial)
+ [S22] Interactive Volume Rendering on Standard PC Graphics ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/VolVisforPCHardware.pdf, fetched 2026-10-28
+-[S23] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29 (unofficial)
+-[S24] NodeVolumeTextureRender (MIPAV API Documentation), https://mipav.cit.nih.gov/documentation/api/gov/nih/mipav/view/renderer/J3D/surfaceview/NodeVolumeTextureRender.html, fetched 2026-10-30
+-[S25] PDF Interactive Volume Rendering Using Multi-Dimensional Transfer Functions ..., https://collections.lib.utah.edu/dl_files/d4/e4/d4e47bfc09e54eee9f532e4f22b17e9214f4c755.pdf, fetched 2026-10-27+[S23] GPU-Based Large-Scale Scientific Visualization, https://johanna-b.github.io/LargeSciVis2018/slides/LargeScaleVisualization_Architectures.pdf, fetched 2026-10-29 (unofficial)
++[S24] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29 (unofficial)
++[S25] NodeVolumeTextureRender (MIPAV API Documentation), https://mipav.cit.nih.gov/documentation/api/gov/nih/mipav/view/renderer/J3D/surfaceview/NodeVolumeTextureRender.html, fetched 2026-10-30
++[S26] Hardware accelerated volume rendering, https://paulbourke.net/miscellaneous/glvol/index.html, fetched 2026-10-30 (unofficial)
++[S27] PDF Interactive Volume Rendering Using Multi-Dimensional Transfer Functions ..., https://collections.lib.utah.edu/dl_files/d4/e4/d4e47bfc09e54eee9f532e4f22b17e9214f4c755.pdf, fetched 2026-10-27

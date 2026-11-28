@@ -1,0 +1,459 @@
+The LLVM Project is a collection of modular and reusable compiler and toolchain technologies. - [ConstantFolding][X86] Fold constant vcvtps2ph intrinsics by ParkHanbum · Pull Request #233379 · llvm/llvm-project
+
+[ConstantFolding][X86] Fold constant vcvtps2ph intrinsics by ParkHanbum · Pull Request #233379 · llvm/llvm-project · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ParkHanbum
+commented
+Oct 19, 2026
+Copy link
+Copy Markdown
+Contributor
+Convert constant float vectors to half-precision bit patterns with
+APFloat, honoring the immediate rounding mode and zeroing the upper
+four lanes of the 128-bit form. With MXCSR rounding, fold only conversions
+that return opOK. Leave strictfp calls unchanged.
+Fixes #215070
+Assisted-by: GPT 6
+ParkHanbum
+added 2 commits
+October 19, 2026 18:08
+[X86][NFC] Add constant-folding tests for vcvtps2ph
+…
+7a536ce
+```
+Cover constant lane extraction, both vector widths, immediate and MXCSR
+rounding, special values, overflow, underflow, and strictfp calls.
+
+Related to llvm#215070.
+```
+[ConstantFolding][X86] Fold constant vcvtps2ph intrinsics
+…
+3cdd7fd
+```
+Convert constant float vectors to half-precision bit patterns with
+APFloat, honoring the immediate rounding mode and zeroing the upper
+four lanes of the 128-bit form. With MXCSR rounding, fold only conversions
+that return opOK. Leave strictfp calls unchanged.
+
+Clang already evaluates these builtins in constant expressions, but LLVM
+also needs to fold calls whose inputs become constant after inlining or
+constant propagation.
+
+Fixes llvm#215070.
+```
+llvmorg-github-actions
+Bot
+added
+llvm:instcombine
+Covers the InstCombine, InstSimplify and AggressiveInstCombine passes
+llvm:analysis
+Includes value tracking, cost tables and constant folding
+llvm:transforms
+labels
+Oct 19, 2026
+llvmorg-github-actions
+Bot
+commented
+Oct 19, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+@llvm/pr-subscribers-llvm-transforms
+@llvm/pr-subscribers-llvm-analysis
+Author: hanbeom (ParkHanbum)
+Changes
+Convert constant float vectors to half-precision bit patterns with
+APFloat, honoring the immediate rounding mode and zeroing the upper
+four lanes of the 128-bit form. With MXCSR rounding, fold only conversions
+that return opOK. Leave strictfp calls unchanged.
+Fixes #215070
+Assisted-by: GPT 6
+Full diff: https://github.com/llvm/llvm-project/pull/233379.diff
+2 Files Affected:
+(modified) llvm/lib/Analysis/ConstantFolding.cpp (+66)
+(added) llvm/test/Transforms/InstCombine/X86/x86-vcvtps2ph.ll (+208)
+```
+diff --git a/llvm/lib/Analysis/ConstantFolding.cpp b/llvm/lib/Analysis/ConstantFolding.cpp
+index 5169450936dc3..ee73ec3f6e97c 100644
+--- a/llvm/lib/Analysis/ConstantFolding.cpp
++++ b/llvm/lib/Analysis/ConstantFolding.cpp
+@@ -1969,6 +1969,8 @@ static bool canConstantFoldIntrinsic(Intrinsic::ID ID, bool IsStrictFP) {
+   case Intrinsic::amdgcn_fma_legacy:
+   case Intrinsic::amdgcn_fract:
+   case Intrinsic::amdgcn_sin:
++  case Intrinsic::x86_vcvtps2ph_128:
++  case Intrinsic::x86_vcvtps2ph_256:
+   // The intrinsics below depend on rounding mode in MXCSR.
+   case Intrinsic::x86_sse_cvtss2si:
+   case Intrinsic::x86_sse_cvtss2si64:
+@@ -4473,6 +4475,70 @@ static Constant *ConstantFoldFixedVectorCall(
+   Type *Ty = FVTy->getElementType();
+ 
+   switch (IntrinsicID) {
++  case Intrinsic::x86_vcvtps2ph_128:
++  case Intrinsic::x86_vcvtps2ph_256: {
++    Constant *SrcVec = Operands[0];
++    auto *Imm = dyn_cast<ConstantInt>(Operands[1]);
++    if (!Imm)
++      return nullptr;
++
++    const auto *SrcVTy = cast<FixedVectorType>(SrcVec->getType());
++    unsigned SrcNumElems = SrcVTy->getNumElements();
++    unsigned DstNumElems = FVTy->getNumElements();
++    const fltSemantics &HalfSem = APFloat::IEEEhalf();
++
++    unsigned ImmVal = Imm->getZExtValue();
++    bool UseMXCSR = (ImmVal & 4) != 0;
++
++    RoundingMode RM;
++    if (!UseMXCSR) {
++      switch (ImmVal & 3) {
++      case 0:
++        RM = RoundingMode::NearestTiesToEven;
++        break;
++      case 1:
++        RM = RoundingMode::TowardNegative;
++        break;
++      case 2:
++        RM = RoundingMode::TowardPositive;
++        break;
++      case 3:
++        RM = RoundingMode::TowardZero;
++        break;
++      default:
++        llvm_unreachable("Invalid immediate rounding mode");
++      }
++    } else {
++      RM = RoundingMode::NearestTiesToEven;
++    }
++
++    for (unsigned I = 0; I < SrcNumElems; ++I) {
++      auto *Elt =
++          dyn_cast_if_present<ConstantFP>(SrcVec->getAggregateElement(I));
++      if (!Elt)
++        return nullptr;
++
++      APFloat SrcVal = Elt->getValueAPF();
++
++      bool LostInfo;
++      APFloat::opStatus St = SrcVal.convert(HalfSem, RM, &LostInfo);
++
++      // With dynamic rounding, only fold conversions that are exact.
++      if (UseMXCSR && St != APFloat::opOK)
++        return nullptr;
++
++      Result[I] = ConstantInt::get(Ty, SrcVal.bitcastToAPInt());
++    }
++
++    // The 128-bit intrinsic zeros the upper four elements of its result.
++    if (DstNumElems > SrcNumElems) {
++      Constant *Zero = ConstantInt::get(Ty, 0);
++      for (unsigned I = SrcNumElems; I < DstNumElems; ++I)
++        Result[I] = Zero;
++    }
++
++    return ConstantVector::get(Result);
++  }
+   case Intrinsic::masked_load: {
+     auto *SrcPtr = Operands[0];
+     auto *Mask = Operands[1];
+diff --git a/llvm/test/Transforms/InstCombine/X86/x86-vcvtps2ph.ll b/llvm/test/Transforms/InstCombine/X86/x86-vcvtps2ph.ll
+new file mode 100644
+index 0000000000000..651f1ac6619e2
+--- /dev/null
++++ b/llvm/test/Transforms/InstCombine/X86/x86-vcvtps2ph.ll
+@@ -0,0 +1,208 @@
++; NOTE: Assertions have been autogenerated by utils/update_test_checks.py UTC_ARGS: --version 6
++; RUN: opt < %s -passes=instcombine -S | FileCheck %s
++
++declare <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float>, i32 immarg)
++declare <8 x i16> @llvm.x86.vcvtps2ph.256(<8 x float>, i32 immarg)
++
++; Regression test for https://github.com/llvm/llvm-project/issues/215070.
++define i16 @constant_lane_zero() {
++; CHECK-LABEL: define i16 @constant_lane_zero() {
++; CHECK-NEXT:    ret i16 15360
++;
++  %packed = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 1.0, float 0.0, float 0.0, float 0.0>, i32 0)
++  %lane0 = extractelement <8 x i16> %packed, i64 0
++  ret i16 %lane0
++}
++
++define <8 x i16> @exact_128() {
++; CHECK-LABEL: define <8 x i16> @exact_128() {
++; CHECK-NEXT:    ret <8 x i16> <i16 15360, i16 -17408, i16 0, i16 -32768, i16 0, i16 0, i16 0, i16 0>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 1.0, float -1.0, float 0.0, float -0.0>, i32 0)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @exact_256() {
++; CHECK-LABEL: define <8 x i16> @exact_256() {
++; CHECK-NEXT:    ret <8 x i16> <i16 15360, i16 -17408, i16 0, i16 -32768, i16 31743, i16 -1025, i16 1024, i16 1>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.256(<8 x float> <float 1.0, float -1.0, float 0.0, float -0.0, float 65504.0, float -65504.0, float 0x3F10000000000000, float 0x3E70000000000000>, i32 0)
++  ret <8 x i16> %r
++}
++
++; Halfway values between adjacent half-precision numbers, of both signs.
++define <8 x i16> @round_nearest_128() {
++; CHECK-LABEL: define <8 x i16> @round_nearest_128() {
++; CHECK-NEXT:    ret <8 x i16> <i16 15360, i16 -17408, i16 15362, i16 -17406, i16 0, i16 0, i16 0, i16 0>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 1.00048828125, float -1.00048828125, float 1.00146484375, float -1.00146484375>, i32 0)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @round_nearest_256() {
++; CHECK-LABEL: define <8 x i16> @round_nearest_256() {
++; CHECK-NEXT:    ret <8 x i16> <i16 15360, i16 -17408, i16 15362, i16 -17406, i16 15360, i16 -17408, i16 0, i16 -32768>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.256(<8 x float> <float 1.00048828125, float -1.00048828125, float 1.00146484375, float -1.00146484375, float 1.0, float -1.0, float 0.0, float -0.0>, i32 0)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @round_down_128() {
++; CHECK-LABEL: define <8 x i16> @round_down_128() {
++; CHECK-NEXT:    ret <8 x i16> <i16 15360, i16 -17407, i16 15361, i16 -17406, i16 0, i16 0, i16 0, i16 0>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 1.00048828125, float -1.00048828125, float 1.00146484375, float -1.00146484375>, i32 1)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @round_down_256() {
++; CHECK-LABEL: define <8 x i16> @round_down_256() {
++; CHECK-NEXT:    ret <8 x i16> <i16 15360, i16 -17407, i16 15361, i16 -17406, i16 15360, i16 -17408, i16 0, i16 -32768>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.256(<8 x float> <float 1.00048828125, float -1.00048828125, float 1.00146484375, float -1.00146484375, float 1.0, float -1.0, float 0.0, float -0.0>, i32 1)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @round_up_128() {
++; CHECK-LABEL: define <8 x i16> @round_up_128() {
++; CHECK-NEXT:    ret <8 x i16> <i16 15361, i16 -17408, i16 15362, i16 -17407, i16 0, i16 0, i16 0, i16 0>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 1.00048828125, float -1.00048828125, float 1.00146484375, float -1.00146484375>, i32 2)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @round_up_256() {
++; CHECK-LABEL: define <8 x i16> @round_up_256() {
++; CHECK-NEXT:    ret <8 x i16> <i16 15361, i16 -17408, i16 15362, i16 -17407, i16 15360, i16 -17408, i16 0, i16 -32768>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.256(<8 x float> <float 1.00048828125, float -1.00048828125, float 1.00146484375, float -1.00146484375, float 1.0, float -1.0, float 0.0, float -0.0>, i32 2)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @round_zero_128() {
++; CHECK-LABEL: define <8 x i16> @round_zero_128() {
++; CHECK-NEXT:    ret <8 x i16> <i16 15360, i16 -17408, i16 15361, i16 -17407, i16 0, i16 0, i16 0, i16 0>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 1.00048828125, float -1.00048828125, float 1.00146484375, float -1.00146484375>, i32 3)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @round_zero_256() {
++; CHECK-LABEL: define <8 x i16> @round_zero_256() {
++; CHECK-NEXT:    ret <8 x i16> <i16 15360, i16 -17408, i16 15361, i16 -17407, i16 15360, i16 -17408, i16 0, i16 -32768>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.256(<8 x float> <float 1.00048828125, float -1.00048828125, float 1.00146484375, float -1.00146484375, float 1.0, float -1.0, float 0.0, float -0.0>, i32 3)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @ignored_immediate_bits() {
++; CHECK-LABEL: define <8 x i16> @ignored_immediate_bits() {
++; CHECK-NEXT:    ret <8 x i16> <i16 15360, i16 -17408, i16 15362, i16 -17406, i16 0, i16 0, i16 0, i16 0>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 1.00048828125, float -1.00048828125, float 1.00146484375, float -1.00146484375>, i32 248)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @mxcsr_exact_128() {
++; CHECK-LABEL: define <8 x i16> @mxcsr_exact_128() {
++; CHECK-NEXT:    ret <8 x i16> <i16 15360, i16 -17408, i16 0, i16 -32768, i16 0, i16 0, i16 0, i16 0>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 1.0, float -1.0, float 0.0, float -0.0>, i32 4)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @mxcsr_exact_256() {
++; CHECK-LABEL: define <8 x i16> @mxcsr_exact_256() {
++; CHECK-NEXT:    ret <8 x i16> <i16 15360, i16 -17408, i16 0, i16 -32768, i16 31743, i16 -1025, i16 1024, i16 1>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.256(<8 x float> <float 1.0, float -1.0, float 0.0, float -0.0, float 65504.0, float -65504.0, float 0x3F10000000000000, float 0x3E70000000000000>, i32 7)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @mxcsr_inexact_128() {
++; CHECK-LABEL: define <8 x i16> @mxcsr_inexact_128() {
++; CHECK-NEXT:    [[R:%.*]] = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float f0x3F801000, float f0xBF801000, float f0x3F803000, float f0xBF803000>, i32 4)
++; CHECK-NEXT:    ret <8 x i16> [[R]]
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 1.00048828125, float -1.00048828125, float 1.00146484375, float -1.00146484375>, i32 4)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @mxcsr_inexact_256() {
++; CHECK-LABEL: define <8 x i16> @mxcsr_inexact_256() {
++; CHECK-NEXT:    [[R:%.*]] = call <8 x i16> @llvm.x86.vcvtps2ph.256(<8 x float> <float 1.000000e+00, float -1.000000e+00, float 0.000000e+00, float -0.000000e+00, float f0x3F801000, float f0xBF801000, float f0x3F803000, float f0xBF803000>, i32 7)
++; CHECK-NEXT:    ret <8 x i16> [[R]]
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.256(<8 x float> <float 1.0, float -1.0, float 0.0, float -0.0, float 1.00048828125, float -1.00048828125, float 1.00146484375, float -1.00146484375>, i32 7)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @special_values() {
++; CHECK-LABEL: define <8 x i16> @special_values() {
++; CHECK-NEXT:    ret <8 x i16> <i16 31744, i16 -1024, i16 32265, i16 -503, i16 0, i16 0, i16 0, i16 0>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 0x7FF0000000000000, float 0xFFF0000000000000, float 0x7FF82468A0000000, float 0xFFF02468A0000000>, i32 0)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @extreme_nearest() {
++; CHECK-LABEL: define <8 x i16> @extreme_nearest() {
++; CHECK-NEXT:    ret <8 x i16> <i16 31744, i16 -1024, i16 0, i16 -32768, i16 0, i16 0, i16 0, i16 0>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 0x47EFFFFFE0000000, float 0xC7EFFFFFE0000000, float 0x3E60000000000000, float 0xBE60000000000000>, i32 0)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @extreme_down() {
++; CHECK-LABEL: define <8 x i16> @extreme_down() {
++; CHECK-NEXT:    ret <8 x i16> <i16 31743, i16 -1024, i16 0, i16 -32767, i16 0, i16 0, i16 0, i16 0>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 0x47EFFFFFE0000000, float 0xC7EFFFFFE0000000, float 0x3E60000000000000, float 0xBE60000000000000>, i32 1)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @extreme_up() {
++; CHECK-LABEL: define <8 x i16> @extreme_up() {
++; CHECK-NEXT:    ret <8 x i16> <i16 31744, i16 -1025, i16 1, i16 -32768, i16 0, i16 0, i16 0, i16 0>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 0x47EFFFFFE0000000, float 0xC7EFFFFFE0000000, float 0x3E60000000000000, float 0xBE60000000000000>, i32 2)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @extreme_zero() {
++; CHECK-LABEL: define <8 x i16> @extreme_zero() {
++; CHECK-NEXT:    ret <8 x i16> <i16 31743, i16 -1025, i16 0, i16 -32768, i16 0, i16 0, i16 0, i16 0>
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 0x47EFFFFFE0000000, float 0xC7EFFFFFE0000000, float 0x3E60000000000000, float 0xBE60000000000000>, i32 3)
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @strict_128() strictfp {
++; CHECK-LABEL: define <8 x i16> @strict_128(
++; CHECK-SAME: ) #[[ATTR1:[0-9]+]] {
++; CHECK-NEXT:    [[R:%.*]] = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float f0x3F801000, float f0xBF801000, float f0x3F803000, float f0xBF803000>, i32 0) #[[ATTR1]]
++; CHECK-NEXT:    ret <8 x i16> [[R]]
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> <float 1.00048828125, float -1.00048828125, float 1.00146484375, float -1.00146484375>, i32 0) strictfp
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @strict_256() strictfp {
++; CHECK-LABEL: define <8 x i16> @strict_256(
++; CHECK-SAME: ) #[[ATTR1]] {
++; CHECK-NEXT:    [[R:%.*]] = call <8 x i16> @llvm.x86.vcvtps2ph.256(<8 x float> <float 1.000000e+00, float -1.000000e+00, float 0.000000e+00, float -0.000000e+00, float 6.550400e+04, float -6.550400e+04, float f0x38800000, float f0x33800000>, i32 4) #[[ATTR1]]
++; CHECK-NEXT:    ret <8 x i16> [[R]]
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.256(<8 x float> <float 1.0, float -1.0, float 0.0, float -0.0, float 65504.0, float -65504.0, float 0x3F10000000000000, float 0x3E70000000000000>, i32 4) strictfp
++  ret <8 x i16> %r
++}
++
++define <8 x i16> @nonconstant(<4 x float> %a) {
++; CHECK-LABEL: define <8 x i16> @nonconstant(
++; CHECK-SAME: <4 x float> [[A:%.*]]) {
++; CHECK-NEXT:    [[R:%.*]] = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> [[A]], i32 0)
++; CHECK-NEXT:    ret <8 x i16> [[R]]
++;
++  %r = call <8 x i16> @llvm.x86.vcvtps2ph.128(<4 x float> %a, i32 0)
++  ret <8 x i16> %r
++}
+```
+ParkHanbum
+commented
+Oct 19, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+I checked why Clang's existing constant evaluation does not eliminate these calls in all cases.
+Clang already supports constant evaluation of these builtins in clang/lib/AST/ExprConstant.cpp. For example, a constexpr initializer can evaluate the conversion and produce a constant vector.
+There is a separate limitation in ordinary builtin CodeGen. CodeGenFunction::EmitBuiltinExpr in CGBuiltin.cpp attempts constant evaluation through EvaluateAsRValue, but that path currently only emits scalar integer and floating-point results. A successfully evaluated vector result falls through to the normal builtin lowering, which emits the LLVM intrinsic. Extending this path to handle vector results would therefore be a useful Clang improvement.
+However, that frontend improvement would not cover inputs that become constant during LLVM optimization. Consider:
+```
+typedef float v4f __attribute__((vector_size(16)));
+typedef short v8h __attribute__((vector_size(16)));
+
+static v8h convert(v4f a) {
+  return __builtin_ia32_vcvtps2ph(a, 0);
+}
+
+short caller() {
+  return convert((v4f){1.0f, 0.0f, 0.0f, 0.0f})[0];
+}
+```
+When Clang emits the builtin inside convert, its input is a function parameter. The builtin cannot be evaluated as a constant at that point. After LLVM inlines convert into caller and propagates the argument, the intrinsic has a constant input vector. Folding it now requires support in LLVM's constant folder.
+I checked this example by emitting IR with LLVM passes disabled and then running default<O3> with the original and patched optimizers. The original optimizer leaves the llvm.x86.vcvtps2ph.128 call and the lane extraction. With this change, the function reduces to:
+```
+ret i16 15360
+```
+The same need arises when constants become available through other propagation passes or when the IR comes from another producer. The issue's IR reproducer is also independently optimizable, regardless of which frontend path originally produced it.
+So these are complementary improvements: Clang can make better use of vector results it has already evaluated, while LLVM needs to fold these intrinsics when their operands become constant at the IR level. The conversion logic in this patch follows Clang's existing implementation, with conservative handling of runtime MXCSR rounding and strict FP.
+ParkHanbum
+requested review from
+RKSimon,
+antoniofrighetto,
+arsenm and
+dtcxzyw
+October 19, 2026 11:33
+cardigan1008
+mentioned this pull request
+Oct 19, 2026
+Miscompilation found in LLVM PR #233379
+cuhk-s3/Archer#36
+Open
+ParkHanbum
+requested a review
+from phoebewang
+October 21, 2026 13:13
+ParkHanbum
+mentioned this pull request
+Oct 28, 2026
+Task submission
+dtcxzyw/llvm-opt-benchmark-nightly#2
+Open
+zyw-bot
+mentioned this pull request
+Oct 28, 2026
+pre-commit (diff): 233379
+dtcxzyw/llvm-opt-benchmark-nightly#1880
+Open
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+llvm:analysis
+Includes value tracking, cost tables and constant folding
+llvm:instcombine
+Covers the InstCombine, InstSimplify and AggressiveInstCombine passes
+llvm:transforms
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,368 @@
+This issue is to discuss the format for voxel data. High level voxel data description I propose that in order to handle sparsity we allow a single voxel object to be divided up into volumes (for example Minecraft map chunks). If we use g...
+
+Voxel data format · Issue #4 · enkisoftware/OpenVoxelFileFormat · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Voxel data format #4
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Voxel data format#4
+Copy link
+Description
+dougbinks
+opened on Nov 28, 2025
+Issue body actions
+This issue is to discuss the format for voxel data.
+High level voxel data description
+I propose that in order to handle sparsity we allow a single voxel object to be divided up into volumes (for example Minecraft map chunks). If we use glTF these would likely be specified in the JSON part as extensions to the spec.
+Voxel Volume (was Voxel Object) a set of Voxel Primitives (was Voxel Volume), much like a Mesh is a set of primitives.
+Attributes (or do we move this to the voxel volume below as a way to support non-interleaved data?)
+Volume AABB min: 3 integers (or doubles?)
+Volume AABB max: 3 integers (or doubles?)
+Voxel Volume Primitives (was Voxel Volume) a set of Voxels occupying a 3D box volume.
+Offset coordinates: 3 integers
+Volume dimensions: 3 unsigned integers. We may want to limit this size.
+Material Type (indexed palette or single material)
+Material (integer index to palette or material depending on above)
+Buffer View (buffer, offset and length)
+Encoding (this could be moved into the voxel object)
+If we use JSON the integers above will have precision equal to that of a double maximum, but implementations of gltf readers may differ.
+The names Voxel Object and Voxel Volume are tbd, and already changed to Voxel Volume (voxelVolumes array in JSON) and Voxel Volume Primitives (voxelVolumes.primitives array in JSON) to match glTF naming.
+Voxel Volume Buffer Encoding
+Run length encoded or other simple format?
+Bit-depth of count for RLE and for integer values may need to be specified.
+If we RLE encode do we do so as rows, Morton ordered, or NxN blocks?
+Do we add bits to encode data presence (i.e. data has certain attributes, is it a single voxel or has a count, see below)
+Mesh Optimizer may be useful as a pass over the final data (see references below)
+Data Presence
+Essentially imagine you have two voxel attributes, MATERIAL_INDEX and DENSITY plus we have the RLE_LENGTH. The first bits of the encoding will thus be 3 bits to encode whether these exist in the following data. So 111 would mean we have all, and 110 would mean we have a single voxel with both MATERIAL_INDEX and DENSITY but no RLE_LENGTH, thus making random voxels more efficient than if we needed to encode all. This is similar to the description for the voxel Disk format in Roblox, except there Arseny uses the term occupancy rather than density.
+So for the following voxel attributes (bit depth, usage, and type etc. described in Attibutes property as above):
+MATERIAL_INDEX: 8bit uint (we can allow lower bit depths as some volumes will have fewer materials etc.)
+DENSITY: 8bit uint normalized
+with also an RLE_LENGTH : 8bits.
+Presence (3bits)
+if Presence 0 (8bits)
+if Presence 1 (8bits)
+if Presence 2 (8bits)
+012
+MATERIAL_INDEX
+DENSITY
+RLE_LENGTH-2
+Note that since we never see 0 voxels, and 1 voxel is encoded with the RLE_LENGTH a value of 0 in the RLE_LENGTH field can be used to represent 2 voxels.
+Example bit pattern for a single voxel with no density (where M is material bits):
+100 MMMMMMMM
+Example bit pattern for 2 voxels with both material index and density (where M is material bits, D density):
+111 MMMMMMMM DDDDDDDD00000000
+Example bit pattern for 258 empty voxels:
+001 11111111
+References:
+https://zeux.io/2017/03/27/voxel-terrain-storage/
+https://aras-p.info/blog/2023/02/02/Float-Compression-4-Mesh-Optimizer/
+https://github.com/zeux/meshoptimizer?tab=readme-ov-file#mesh-compression
+Your thoughts are appreciated below!
+Reactions are currently unavailable
+Activity
+scallyw4g commented on Nov 29, 2025
+scallyw4g
+on Nov 29, 2025
+Last edited by scallyw4g
+More actions
+I think the voxel object / voxel volume pairing makes sense.
+I don't like bike-shedding about naming .. but.. I'm not the biggest fan of the name voxel object. Mostly because shorthands (VObject, Object) make it sound like something OOP-y, and the name Object is pretty overloaded at this point. I propose "Volume Group" ..?
+We could also consider using the word Chunk instead of Volume .. "Voxel Chunk" & "Chunk Group" ..? Just some thoughts, I don't have particularly strong opinions on names.
+For this comment, I'll use Chunk and VGroup to refer to the things you named "Voxel Volume" and "Voxel Object", respectively, cause that's what my brain instinctively went to while typing this comment.
+Random thoughts on encoding, in order of appearance:
+1.a VGroup Attributes
+Specifying the Attrs on the VGroup does preclude the possibility of heterogeneous Chunks within a group. One example would be having a fluid sim (which may have, for example, a density attribute), in the same group as regular material-indexed voxel data. I believe this to be an uncommon case.
+Specifying Attrs on the Chunk skirts this problem, at the cost of increased data storage size & parsing time, which would be redundant in the common case.
+With these two ideas in mind, I would support specifying attrs on the VGroup for three reasons:
+We still support heterogenous Chunk types; they just have to be in different Groups. (fluid sims have their own groups, regular world data has different groups)
+I prefer to avoid adding bloat to the format to support the uncommon case of heterogenous VGroups
+In a future revision of the format, if we decide we do want to specify attrs on Chunks, I claim it is slightly easier to broadcast attrs from VGroup->Chunk, rather than if we decided to go the other way and split VGroups based on their Chunk attrs.
+As far as supporting non-interleaved (hereafter, contiguous) channel data goes, I propose we could support this in two ways, or leave it unsupported:
+Method 1 : A VGroup can be either:
+a group of contiguous channel buffers that form a many-to-one mapping, creating a "Logical Chunk"
+or
+a group of interleaved channel buffers with a 1:1 mapping of buffer:Chunk
+Method 2: We could choose to additionally add "nested VGroups" to the above, which would allow composing contiguous channel "Logical Chunks" into VGroups in the same way we would use interleaved-channel Chunks.
+Personally, I see significant complexity and little tangible benefit for supporting contiguous attribute arrays and "Logical" Chunks. I would vote we only support interleaved chunk data for V0, and add contiguous later if we care to. Open to suggestions here if I'm over-complicating it..
+It's kinda weird that Chunk dimensions are encoded as Min/Dim and VGroup are Min/Max. Is there a reason for that?
+I have a minor preference here for Min/Dim because it avoids the failure mode of the Max being less than the Min; it's easier to spot a negative Dim (visually) than it is to spot Max < Min.
+I'm not fussy about which choice here, but I do think they should be the same .. unless they're different for a reason that I didn't think of, of course.
+2.5 Buffer View
+Can you elaborate on this? I'm not clear on exactly what this means.
+Voxel Volume Buffer Encoding
+RLE seems like a reasonable place to start. Easy enough to support future compression codecs by doing:
+```
+{ compression_type: "RLE", compressed_bytes: [...] }
+```
+I do not have good intuition on an appropriate bit depth for the RLE count. I would imagine it probably varies pretty wildly by application. 8-bit seems like a fine start? Or maybe less? We could always do some quick tests to see what compresses some MC maps the best.. I guess..
+I'd vote to default to rows, maybe add compression_type: "RLE_Morton" in the future? This is strictly because I don't have a morton-ordering iterator in my engine and I'm being lazy. Surely others will want to be lazy if they're writing their own exporters, too.
+Not totally sure what you're getting at here
+Is this just compression_type: "meshopt" ?
+I didn't read the zeux.io link, but it looks pretty good. I'll read it later when I've got a bit more mental energy and put thoughts here
+dougbinks commented on Nov 29, 2025
+dougbinks
+on Nov 29, 2025
+Last edited by dougbinks
+MemberAuthor
+More actions
+Naming
+Happy to iterate on this, but I'd prefer not to use the term group as this is usually used for a collection of objects, but in this case we want it to be a single object with a sparse representation.
+Perhaps:
+Voxel Grid: This defines the voxel scale, size and orientation
+Voxel Array: This has the voxel data.
+Now renamed to Voxel Volume (voxelVolumes array in JSON) and Voxel Volume Primitives (voxelVolumes.primitives array in JSON) to match glTF naming.
+Voxel Attributes
+I agree that I'd prefer these higher in the hierarchy.
+Non-interleaved data
+I would be happy with only supporting interleaved data to start with, and then expanding if needed.
+Dimensions
+The difference was just a mistake - I started with Min/Dim which is my preference then changed to Min/Max after re-reading the glTF spec and remembering that's what they tend to use. I'd prefer Min/Dim.
+2.5 Buffer View
+This is a view into a buffer, as per the glTF spec on Buffer View. For our purposes we need:
+The buffer where the data is (in glTF this is an index into the array of buffers)
+byte offset for the start of the voxel data in the buffer
+byte length of the voxel data in the buffer
+glTF adds other data which we can initially ignore.
+Voxel Volume Buffer Encoding
+Agree, start with RLE, specify encoding so future additions can be made
+Agree, 8-bit is likely a good start
+We could add a Morton iterator in the reference implementation, but I'd be happy to start with a simpler format of rows.
+I'll revise the description to clarify this. Essentially imagine you have two voxel attributes, MATERIAL_INDEX and DENSITY plus we have the RLE_LENGTH. The first bits of the encoding will thus be 3 bits to encode whether these exist in the following data. So 111 would mean we have all, and 110 would mean we have a single voxel with both MATERIAL_INDEX and DENSITY but no RLE_LENGTH, thus making random voxels more efficient than if we needed to encode all. This is similar to the description for the voxel Disk format in Roblox, except there Arseny uses the term occupancy rather than density.
+Yes, see mesh Optimizer Mesh compression for more information. Amusingly this is also by Arseny.
+Longor1996 commented on Nov 29, 2025
+Longor1996
+on Nov 29, 2025
+Last edited by Longor1996
+More actions
+I'd define things roughly like this, in no particular order:
+Node: A thing that has some transform and references|embeds either a Grid or Chunk.
+Part of the scene description, thus irrelevant here, only for completeness.
+Grid: Defines a relative-scale and optional bounds (min+dim); references|embeds either a single Chunk, a collection of positioned/blittable Chunks, or a continuous sparse volume (supervolume? region? idk) of Chunks.
+Also ought to be part of the scene description.
+Chunk: A finite volume of some dimension with metadata/props and internal axis-order, referencing|embedding one-or-more Bricks.
+Brick: A finite flat(!) storage of voxel samples with a given referenced|embedded Layout, a set of referenced|embedded Palettes as the Layout defines/requires, an optional sample Packing method, and a referenced Buffer{-view} that actually holds the Samples.
+Layout: A descriptor of attributes/channels, defining how a single voxel Sample is encoded.
+Any attribute/channel may, if it's base-type is an unsigned integer, mark itself as using a Palette index.
+Packing: A method (RLE, DEFLATE, ZSTD, etc.) for tightly packing/compressing a series of Samples.
+Sample: A single voxel as defined by a Layout.
+Palette: A homogenous list of things (materials, colors, etc.).
+Buffer{-view}: Same as glTF, but allows for 64-bit sizes and indexing.
+dougbinks commented on Nov 29, 2025
+dougbinks
+on Nov 29, 2025
+Last edited by dougbinks
+MemberAuthor
+More actions
+Thanks!
+However to reduce the bike-shedding I'm going to use glTF terminology from now on in the spec.
+Here's the definition of a the mesh from the glTF file of a simple box:
+```
+    "meshes": [
+        {
+            "primitives": [
+                {
+                    "attributes": {
+                        "NORMAL": 1,
+                        "POSITION": 2
+                    },
+                    "indices": 0,
+                    "mode": 4,
+                    "material": 0
+                }
+            ],
+            "name": "Mesh"
+        }
+    ],
+```
+So meshes is an array of meshes each containing an array of primitives. Following this naming for voxels we would have an array of voxelVolumes with an array of primitives (full name is voxelVolumes.primitives)
+Here I have a single voxel volume comprised of two sets of voxel primitives.
+```
+    "voxelVolumes": [
+        {
+            "attributes" : [
+                        { 
+                                "semantic" : "MATERIAL_INDEX",
+                                "componentType" : 5123  // 5123, is `UNSIGNED_BYTE`.
+                        },
+                        { 
+                                "semantic" : "DENSITY",
+                                "componentType" : 5123,
+                                "normalized" : true
+                        },
+            ],
+            "position" : [ 0, 0, 0 ],
+            "size" : [ 256, 256, 256 ],
+            "primitives": [
+                {
+                        "position" : [ 0, 0, 0 ],
+                        "size" : [ 128, 128, 128],
+                        "materialType" : "PALETTE_INDEX", // The material index is into a palette array of material indices.
+                        "material" : 0,
+                        "bufferView" : 0,
+                        "encoding" : {
+                                "type" : "RLE",
+                                 "bits" : [ 4, 8 ] // 4 bits for the first attribute, 8 for second. Only unsigned integer components can have lower bit types
+                      }
+                },
+                {
+                        "position" : [ 128, 128, 128 ],
+                        "size" : [ 128, 128, 128],
+                        "materialType" : "PALETTE_INDEX",
+                        "material" : 1,
+                        "bufferView" : 1,
+                        "encoding" : {
+                                "type" : "RLE",
+                                 "bits" : [ 2, 8 ]
+                      }
+                }
+            ]
+        }
+    ],
+```
+🚀React with 🚀1Reacted by Jesse Hughes
+scallyw4g commented on Nov 29, 2025
+scallyw4g
+on Nov 29, 2025
+More actions
+Naming
+Very good, I'm happy with voxelVolumes and primitives.
+BufferView
+Okay, I'm seeing how it's all linked together now.
+The voxelVolume.primitives.bufferView is an index into the bufferViews array (not pictured), which in turn has an index into the buffers array, which stores the actual data. Seems fine.
+Voxel Volume Buffer Encoding
+Data Presence
+Okay, I get it after reading the Roblox paper. I tend to err on the side of "do the simplest possible thing first, then collect data to guide improvements". I'd rather decide to do this because we did an experiment ourselves and came up with "it improves compression ratio by X% for our data", rather than "we read a blog post and Roblox does it". For the record, I'm pro including this; it sounds like a good idea, but I'd prefer to have data to back that up, and have "basic RLE" working first.
+In other news, something that occurred to me is we're putting a fair bit of stuff on the "do it later" pile already. Which is great, I like having a little to do now and lots to pick from later. But that begs the questions:
+What's the strategy on versioning?
+What's the strategy on backwards compatibility?
+Do we know of any special considerations for marshalling old versions forward?
+Do we ever need to be able to marshal newer versions backwards?
+My thoughts:
+I like the "semver" majorVersion.minorVersion style, where breaking changes are encoded as a majorVersion change, anything else is a minorVersion change. Otherwise, a monotonically increasing integer is also fine.
+I like being backwards compatible, and usually try my best to make decisions which at least consider backwards compatibility.
+None that I can think of right now. So far we've talked mostly about adding different compression codecs, which seems easy enough. The other thing we've talked about is contiguous channel data and "logical" primitives, which I believe would be a strict superset of the features we're imagining here. Parsers targeting older versions would just ignore the 'logical' primitives. Seems like that might actually just be another type, and someone has an extra property that groups several primitives together. Unclear what else we may add in the future.
+I don't think we care about this .. do we?
+Seems like this is a pretty good start and probably enough to begin a reference implementation?
+scallyw4g commented on Nov 29, 2025
+scallyw4g
+on Nov 29, 2025
+Last edited by scallyw4g
+More actions
+One clarification on semantics:
+but I'd prefer not to use the term group as this is usually used for a collection of objects, but in this case we want it to be a single object with a sparse representation
+The only real reason we want a voxel volume to be a logically singular object is because it will share transform & animation data with all of it's child primitives .. correct? Said another way, if we exported a scene with no animations, all possible voxel volume groupings of primitive elements are semantically identical. Correct?
+EDIT: Oh, I realized that's not totally true because the volume has a position transform which affects it's children, but .. hopefully my point comes through.
+dougbinks commented on Nov 29, 2025
+dougbinks
+on Nov 29, 2025
+MemberAuthor
+More actions
+Data Presence
+I think I'll do some experiments, and might start without using this.
+Versioning
+At the moment I have given no thought to this. The glTF approach is mainly to define a spec and then have extensions which modify it, rather than to have a version. There is a glTF version, with v1.0 (not widely used), and the current 2.0 spec.
+If we follow this approach there would likely be an encoding spec (or more) and then encoding extensions which modify the spec.
+In my own internal formats I use a monotonically increasing integer. For code releases I prefer something similar to Semantic Versioning 2.0.0, and for exes I use that plus a monotonically incrementing build number so I can just use simple comparison operators.
+Semantics
+The only real reason we want a voxel volume to be a logically singular object is because it will share transform & animation data with all of it's child primitives .. correct?
+Yes.
+aid another way, if we exported a scene with no animations, all possible voxel volume groupings of primitive elements are semantically identical. Correct?
+Only if they share the same transforms or have no transforms (no animation does not imply no transform, and I think glTF requires a transform). Since the transform affects the scale, orientation and fractional position of voxelVolumes these are not semantically equivalent to voxelVolumes.primitives.
+Another way to think about it is that voxelVolumes.primitives of one voxelVolume are locked to the same grid and it is guaranteed they can be serialized into a 3D array of the size of the voxelVolume which has first been cleared and then serialized back out & in and the resulting 3D array would contain the same data. There is no such guarantee for multiple voxelVolumes .
+scallyw4g commented on Nov 29, 2025
+scallyw4g
+on Nov 29, 2025
+More actions
+Very good, we can ruminate on the versioning. Mirroring the glTF method with extensions seems reasonable.
+We're on the same page with the rest.
+dougbinks commented on Nov 30, 2025
+dougbinks
+on Nov 30, 2025
+MemberAuthor
+More actions
+I plan to do some tests on voxel data sets compression in future using a few of the techniques we've discussed, along with open sourcing the code and assets. I don't currently have any decent floating point datasets, but we can likely use some open source OpenVDB datasets.
+With Avoyd I have assets with 16bit (or can reduce to 8bit) material ID and 8bit density (can be removed for pure block voxels).
+For assets see: https://github.com/enkisoftware/voxel-models
+👍React with 👍1Reacted by Jesse Hughes
+scallyw4g commented on Nov 30, 2025
+scallyw4g
+on Nov 30, 2025
+More actions
+along with open sourcing the code and assets
+Does this mean you're getting started on a reference implementation? I'm a little ways behind; I'll have to write json and glTF serializers after I finish up the editor stuff I'm working on.
+dougbinks commented on Nov 30, 2025
+dougbinks
+on Nov 30, 2025
+MemberAuthor
+More actions
+Does this mean you're getting started on a reference implementation?
+No my intention is to do some experimentation with the voxel compression part. This won't have the scene description, just the binary data for the voxels. I'm going to test just using MeshOptimizer compression on the raw data vs simple RLE, and if I have time vs a bitstream RLE with minimal bitdepth and vs RLE bitstream with data presence.
+I'm a little ways behind; I'll have to write json and glTF serializers after I finish up the editor stuff I'm working on.
+I was thinking of extending cgltf once we get around to a reference implementation. I'm currently using tinygltf but a C interface is probably the way to go for wider adoption.
+👍React with 👍1Reacted by Jesse Hughes
+scallyw4g commented on Nov 30, 2025
+scallyw4g
+on Nov 30, 2025
+Last edited by scallyw4g
+More actions
+Alrighty, good luck with the compression experiments.
+As a matter of opinion, cgltf looks pretty reasonable.
+I'm allergic to anything (tinygltf) that includes https://github.com/nlohmann/json on principal .. see https://github.com/jart/json.cpp. TL;DR, Justine's library runs 3x faster, compiles 10x faster, contains 10x less code, while being more compliant.
+That said .. I'm pretty unbothered by what the reference implementation looks like; I'll write my own implementation from scratch. I've written a metaprogramming language which makes the glTF serializer basically trivial once I've got a json serializer. I've written lots of serializers at this point.. what's one more 😆
+What do you think of having a repository (or directory in this repo?) which contains a dataset similar in spirit to this : https://github.com/nst/JSONTestSuite/ ?
+I was thinking that having a set of .vox models that we convert into the new format (.ovff?) might be a good place to start.
+dougbinks commented on Dec 1, 2025
+dougbinks
+on Dec 1, 2025
+Last edited by dougbinks
+MemberAuthor
+More actions
+I'm allergic to anything...
+I chose tinygltf as my experience with the developers code has been pretty decent, and it came with a wealth of examples which helped me get up to speed understanding the layout of a glTF scene. I usually stay well away from modern C++. I would not propose using tinygltf as the basis of a voxel format implementation, but it was quick and easy way to implement glTF. The json performance is not an issue, but the compilation time might be (though I've not noticed it).
+What do you think of having a repository (or directory in this repo?) which contains a dataset similar in spirit to this : https://github.com/nst/JSONTestSuite/ ?
+Yes that would be a good idea. I don't think it should be a directory in this repo as if we end up with the code here it will make a clone that much slower.
+I was thinking that having a set of .vox models that we convert into the new format (.ovff?) might be a good place to start.
+We probably only need a few .vox models as the format is very restrictive and so may not show up that many issues.
+I'm holding off on creating a repository for these for now, but I'd be interested in finding models from people who use other data than just 8bit material indices.
+EDIT: I'm going to be busy for a couple of weeks so may not get much time to dedicated to the experiments until after then.
+👍React with 👍1Reacted by Jesse Hughes
+scallyw4g commented on Dec 1, 2025
+scallyw4g
+on Dec 1, 2025
+More actions
+I chose tinygltf ...
+Fair enoough .. sometimes we optimize for programmer cycles; that's fine by me.
+We probably only need a few .vox models as the format is very restrictive
+Yeah, that was my thought too, and for getting started that's kind of a nice feature. Start with the very basics and go from there.
+I'm going to be busy for a couple of weeks
+Sounds good -- I've got work for the next week at least. I'll ping you when I've got some time to start on a prototype.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

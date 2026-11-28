@@ -1,0 +1,97 @@
+# GS-Scale Host Offloading
+
+Also called: host offloading, hybrid training
+
+## Overview
+**GS-Scale** is a training framework for 3D Gaussian Splatting that reduces GPU memory usage by storing all Gaussian parameters and optimizer states in host (CPU) memory, transferring only a necessary subset to the GPU on demand for each forward and backward pass [S1, unofficial]. It sets itself apart from GPU-Only training by preventing Out-of-Memory (OOM) errors on large scenes, and from naive host offloading by achieving significantly faster training speeds through system-level optimizations [S1, unofficial].
+
+## How it works
+**Inputs:** 3D Gaussian parameters (position, scale, rotation, SH coefficients, opacity) and optimizer states (e.g., Adam moments) stored in host memory; camera poses and image data.
+**Outputs:** Rendered images and gradients for optimization.
+
+**Data Structures:**
+*   **Host Memory:** Stores the full set of $N$ Gaussians. Each Gaussian $i$ contains:
+    *   Position: $\mathbf{p}_i \in \mathbb{R}^3$
+    *   Scale: $\mathbf{s}_i \in \mathbb{R}^3$
+    *   Rotation: $\mathbf{q}_i \in \mathbb{R}^4$ (quaternion)
+    *   SH Coefficients: $\mathbf{c}_i \in \mathbb{R}^{3 \times K}$ (where $K$ depends on degree)
+    *   Opacity: $\alpha_i \in \mathbb{R}$
+    *   Optimizer States: Momentum and variance buffers for each parameter, sized identically to the parameters.
+*   **Device Memory (GPU):** Contains only the subset of Gaussians currently being processed for a specific view or split.
+
+**Algorithm Steps:**
+1.  **Initialization:** Initialize all Gaussian parameters and optimizer states in host memory. [S1, unofficial]
+2.  **View Selection:** For each training iteration, select a camera view. [S1, unofficial]
+3.  **Subset Selection:** Identify the subset of Gaussians that contribute to the current view (e.g., those within the viewing frustum or with significant overlap). [S1, unofficial]
+4.  **Data Transfer:** Transfer the selected subset of Gaussian parameters and their corresponding optimizer states from host memory to GPU memory. [S1, unofficial]
+5.  **Forward Pass:** Perform differentiable rasterization on the GPU using the transferred subset to render the image. [S1, unofficial]
+6.  **Backward Pass:** Compute gradients on the GPU for the transferred subset. [S1, unofficial]
+7.  **Gradient Update:** Transfer the computed gradients back to host memory. Update the optimizer states and Gaussian parameters in host memory. [S1, unofficial]
+8.  **Split Mode (Optional):** If split mode is enabled, check if the number of Gaussians required for the current image exceeds `split_threshold * total_gaussians`. If so, split the image processing into smaller batches to further reduce peak GPU memory usage. [S1, unofficial]
+
+**Parameters:**
+*   `split_threshold`: A float controlling the split mode threshold. Default value is 0.3. If an image consumes more Gaussians than `split_threshold * total_gaussians`, the image is split. [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Host memory storage
+host_params = initialize_gaussians_in_host_memory()
+host_optimizer_states = initialize_optimizer_states_in_host_memory()
+
+# Configuration
+split_threshold = 0.3
+total_gaussians = len(host_params)
+
+def train_iteration(camera, image_gt):
+    # 1. Identify relevant Gaussians for this camera view
+    # This could be based on frustum culling or distance
+    relevant_indices = get_relevant_gaussian_indices(camera, host_params)
+    
+    # 2. Check split mode condition
+    num_relevant = len(relevant_indices)
+    if split_mode_enabled and num_relevant > split_threshold * total_gaussians:
+        # Split the processing into smaller chunks
+        chunk_size = calculate_chunk_size(num_relevant, split_threshold, total_gaussians)
+        indices_chunks = split_list(relevant_indices, chunk_size)
+        
+        for chunk_indices in indices_chunks:
+            process_chunk(chunk_indices, camera, image_gt)
+    else:
+        # Process all relevant Gaussians at once
+        process_chunk(relevant_indices, camera, image_gt)
+
+def process_chunk(indices, camera, image_gt):
+    # 3. Transfer subset to GPU
+    device_params = transfer_to_gpu(host_params[indices])
+    device_optimizer_states = transfer_to_gpu(host_optimizer_states[indices])
+    
+    # 4. Forward pass
+    rendered_image = rasterize(device_params, camera)
+    
+    # 5. Loss computation
+    loss = compute_loss(rendered_image, image_gt)
+    
+    # 6. Backward pass
+    gradients = compute_gradients(loss, device_params)
+    
+    # 7. Transfer gradients back to host
+    host_gradients = transfer_to_host(gradients)
+    
+    # 8. Update host memory
+    update_optimizer_states(host_optimizer_states[indices], host_gradients)
+    update_params(host_params[indices], host_gradients)
+```
+
+## Operating characteristics
+*   **Memory Reduction:** Reduces GPU memory usage by 3.3-5.6x compared to GPU-Only systems, enabling training on consumer-grade GPUs [S1, unofficial].
+*   **Performance:** Slower than GPU-Only training for small scenes due to data transfer overhead, but significantly faster than naive host offloading [S1, unofficial].
+*   **Scalability:** Enables training on large-scale scenes that would otherwise cause OOM errors on standard GPUs [S1, unofficial].
+*   **Split Mode:** Further reduces memory usage at the cost of potential speed reduction if `split_threshold` is set low [S1, unofficial].
+
+## Background
+GS-Scale was introduced by SNU-ARC as a solution to the memory bottlenecks in large-scale 3D Gaussian Splatting training [S1, unofficial]. It builds on the principles of host offloading but incorporates optimizations to mitigate the performance penalties typically associated with CPU-GPU data transfers [S1, unofficial].
+
+## Sources
+[S1] SNU-ARC/GS-Scale, https://github.com/SNU-ARC/GS-Scale, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,438 @@
+# Eschallot: Comprehensive Package for the Simulation and Optimization of Spherical Particles
+
+![](logo.png)
+
+Eschallot is an optimization and simulation tool for light scattering by stratified spherical nano-and microparticles, inspired by the needle optimization algorithm used for multilayer thin-film design **[1-3]**. The algorithm alternates between **(a) Shape Optimization** (optimizing the layer boundary positions by gradient descent) and **(b) Topology Nucleation** (optimizing the materials and the number of layers by nucleating an infinitesimal layer at an optimal location) to minimize a user-defined cost function based on the particle's far-field scattering quantities (cross-sections, phase function, etc.). These quantities are computed in each iteration using the transfer matrix method formulation of Mie scattering for multi-shell particles **[4-5]**.
+
+![](flowchart.png)
+
+**If you have found this package helpful in your research, please cite this [work](https://doi.org/10.1016/j.cpc.2025.109966):**
+
+```bibtex
+@article{min2025eschallot,
+    title={Eschallot: A topology nucleation algorithm for designing stratified, spherically symmetric systems that exhibit complex angular scattering of electromagnetic waves},
+    author={Seokhwan Min, Jonghwa Shin},
+    journal={Comput. Phys. Commun.},
+    volume={},
+    number={},
+    pages={},
+    year={2025}
+}
+```
+
+**References:**
+
+**[1]** A. V. Tikhonravov, M. K. Trubetskov, G. W. DeBell, Application of the needle optimization technique to the design of optical coatings, Appl. Opt. 35, 5493-5508 (1996).
+
+**[2]** S. Larouche, L. Martinu, OpenFilters: open-source software for the design, optimization, and synthesis of optical filters, Appl. Opt. 47, C219-C230 (2008).
+
+**[3]** M. Trubetskov, Deep search methods for multilayer coating design, 59, A75-A82 (2020).
+
+**[4]** A. Moroz, A recursive transfer-matrix solution for a dipole radiating inside and outside a stratified sphere, Ann. Phys. 315, 352-418 (2005).
+
+**[5]** I. Rasskazov, P. Carney, A. Moroz, STRATIFY: a comprehensive and versatile MATLAB code for a multilayered sphere, OSA Contin. 3, 2290 (2020).
+
+# Requirements
+
+- NumPy
+
+- SciPy
+
+- Numba
+
+- mpi4py
+
+# Installation
+
+```
+pip install eschallot
+```
+
+# Tutorial
+
+1. [Example 1-1](./runfiles/run_topology_optimization_mse_Qsca.py): Optimization of the Scattering Cross Section Spectrum
+
+```python
+import os
+directory = os.path.dirname(os.path.realpath(__file__))
+
+import numpy as np
+from scipy.ndimage import gaussian_filter1d
+import eschallot.optimization.topology_optimization as topopt
+import time
+import resource
+from mpi4py import MPI
+comm = MPI.COMM_WORLD
+
+import warnings
+warnings.filterwarnings('ignore')
+
+# Materials
+mat_profile = np.array(['Air','TiO2_Sarkar']) # Outer(including embedding medium) to inner
+mat_needle = np.array(['SiO2_bulk','TiO2_Sarkar','Si_Schinke','Ag_palik']) # 'TiO2_Sarkar','Au_JC','Si_Schinke','Ag_palik', etc.
+
+# Wavelength & angle ranges over which the cost function is defined
+lam_cost = np.linspace(400, 550, 16)
+theta_cost = np.linspace(0, 180, 2)*np.pi/180 # 0: forward, 180: backward
+phi_cost = np.array([0,90])*np.pi/180
+
+# Wavelength & angle ranges over which to compute the final efficiencies and phase function
+lam_plot = np.linspace(400, 550, 301)
+theta_plot = np.linspace(0, 180, 2)*np.pi/180 # 0: forward, 180: backward
+phi_plot = np.array([0,90])*np.pi/180
+```
+
+* Materials
+  - All materials are specified using the name of the corresponding text file containing the refractive index spectrum. The list of all materials available by default may be found [here](./eschallot/material_data). The user can also set up a separate directory for their own material data which can be provided as a parameter to the optimizer (explained in more detail below).
+  - **mat_profile**: specifies the materials in the following order -> embedding medium > outermost shell > n-th shell > core
+  - **mat_needle**: specifies the materials that may be used as layers for the multi-shell particle. Order does not matter.
+  - Note that it is recommended to initialize the optimization with a single-layer homogeneous particle (TiO2 in the above example).
+
+* Wavelengths & Angles
+  - **lam_cost**: defines the wavelength points that are used to define the cost function
+  - **lam_plot**: defines the wavelength points over which the far field quantities are computed for the final output
+  - Having a coarser sampling grid for **lam_cost** is beneficial for reducing computation cost. The same holds for the angle sampling. In this case, the cost function only depends on the scattering efficiency spectrum, so the angles are sampled minimally.
+
+* Unit Conventions
+  - Wavelength: nm
+  - Angle: rad
+  - Radius: nm
+
+```python
+class cost_obj:
+    def __init__(self, Q_sca_tgt):
+        self.Q_sca_tgt = Q_sca_tgt
+    
+    def cost(self, Q_sca, Q_abs, Q_ext, p, diff_CS, t_El, t_Ml, r):
+        cost = np.mean((Q_sca - self.Q_sca_tgt)**2)
+    
+        return cost
+    
+    def gradient(self, Q_sca, Q_abs, Q_ext, p, diff_CS, t_El, t_Ml, dQ_sca, dQ_abs, dQ_ext, dp, d_diff_CS, dt_El, dt_Ml, r):
+        jac = np.mean(2*(Q_sca - self.Q_sca_tgt)[:,np.newaxis]*dQ_sca, axis=0)
+    
+        return jac
+
+# Define Cost Function
+n_seed = 0
+np.random.seed(n_seed)
+Q_sca_tgt = gaussian_filter1d(np.random.rand(39), 3)
+Q_sca_tgt = 2*(Q_sca_tgt - np.min(Q_sca_tgt))/np.ptp(Q_sca_tgt)
+Q_sca_tgt = Q_sca_tgt[12:28]
+
+np.savez(directory + '/mse_Q_sca_tgt_seed' + str(n_seed), Q_sca_tgt=Q_sca_tgt)
+
+custom_cost = cost_obj(Q_sca_tgt=Q_sca_tgt)
+```
+
+* Cost Function
+  - The cost function has the following requirements:
+    - It must be a defined as a Python class with methods **cost** and **gradient**
+    - The **cost** method must take arguments **Q_sca, Q_abs, Q_ext, p, diff_CS, t_El, t_Ml, r** (even if not all are used in the computation of the cost) and output a scalar
+    - The **gradient** method must take arguments **Q_sca, Q_abs, Q_ext, p, diff_CS, t_El, t_Ml, dQ_sca, dQ_abs, dQ_ext, dp, d_diff_CS, dt_El, dt_Ml, r** and output a 1D array or a scalar (when **N_params** == 1)
+  - **dQ_sca, dQ_abs**, etc. indicate the derivatives of **Q_sca, Q_abs**, etc. with respect to the radial positions of layer interfaces, which are computed internally and provided as parameters. The user must provide the code for the gradient of the cost function with respect to the radial positions in terms of **dQ_sca, dQ_abs**, etc.
+  - The arguments for **cost** and **gradient** have the following indexing convention:
+    - **Q_sca, Q_abs, Q_ext**: (wavelength)
+    - **p, diff_CS**: (wavelength, theta, phi)
+    - **t_El, t_Ml**: (wavelength, order)
+    - **dQ_sca, dQ_abs, dQ_ext**: (wavelength, layer interfaces)
+    - **dp, d_diff_CS**: (wavelength, theta, phi, layer interfaces)
+    - **dt_El, dt_Ml**: (wavelength, order, layer interfaces)
+    - **r**: (layer interfaces)
+
+```python
+# Sweep Settings
+r_min = 10
+r_max = 1000
+N_sweep = int(r_max - r_min) + 1
+d_low = 5
+max_layers = None
+
+if 'Ag_palik' in mat_needle:
+    output_filename = directory + '/topopt_result_mse_Qsca_lossy_' + str(mat_profile[1]) + '_rmax' + str(r_max) + '_seed' + str(n_seed)
+else:
+    output_filename = directory + '/topopt_result_mse_Qsca_lossless_' + str(mat_profile[1]) + '_rmax' + str(r_max) + '_seed' + str(n_seed)
+
+t1 = time.time()
+topopt.radius_sweep(output_filename,
+                    r_min,
+                    r_max,
+                    N_sweep,
+                    d_low,
+                    max_layers,
+                    mat_profile,
+                    mat_needle,
+                    lam_cost,
+                    theta_cost,
+                    phi_cost,
+                    lam_plot,
+                    theta_plot,
+                    phi_plot,
+                    custom_cost,
+                    mat_data_dir=None,
+                    lmax=None,
+                    N_final=10,
+                    verbose=0,
+                    )
+t2 = time.time()
+
+max_mem_kb_proc = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+max_mem_kb = comm.reduce(max_mem_kb_proc, op=MPI.SUM, root=0)
+
+if comm.rank == 0:
+    print('### Time Elapsed: ' + str(np.round(t2 - t1, 3)) + ' s', flush=True)
+    print('### Maximum Memory Usage: ' +str(np.round(max_mem_kb/1024**2, 3)) + ' GB', flush=True)
+```
+
+* Radius Sweep Settings
+  - Since the shape optimization subroutine uses gradient descent, the final optimized design depends heavily on the initial parameters. Therefore, the algorithm optimizes multiple particles with different radii in parallel. A total of **N_sweep** particles are optimized that have initial radii between **r_min** and **r_max** with equal incrementation.
+  - After an initial shape optimization step, multiple particles can converge to the same radii. These redundant particles are removed before the algorithm proceeds with the full topology optimization of all remaining candidates.
+  - **d_low**: minimum layer thickness allowed in the final design
+  - **max_layers**: maximum number of layers allowed in the final design
+
+* Quality of Life Features
+  - **r_min** and **r_max** are used as the minimum and maximum overall radii for the final designs.
+  - A custom material directory may be passed to the optimizer using the **mat_data_dir** parameter.
+  - **lmax** specifies the maximum order of the multipoles used in the Mie scattering computation (can be used to reduce computation cost at the expense of accuracy).
+  - The top **N_final** designs are saved into an .npz file (adjust if output file is too large).
+  - **verbose** (*note*: use single-processing when **verbose** > 0 for better readability):
+    - 0: only prints optimization progress information
+    - 1: additionally prints design parameters at every iteration
+    - 2: additionally prints topology nucleation details
+    - 3: enables verbose outputs from the **minimize** and **minimize_scalar** solvers from **scipy.optimize**.
+
+```python
+import os
+directory = os.path.dirname(os.path.realpath(__file__))
+
+import numpy as np
+import eschallot.mie.simulate_particle as sim
+import eschallot.util.read_mat_data as rmd
+
+import warnings
+warnings.filterwarnings('ignore')
+
+# Wavelength & angle ranges over which to compute the final efficiencies and phase function
+lam_plot = np.linspace(400, 550, 301)
+theta_plot = np.linspace(0, 180, 2)*np.pi/180 # 0: forward, 180: backward
+phi_plot = np.array([0,90])*np.pi/180
+
+identifier = 'mse_Qsca_lossy_TiO2_Sarkar_rmax1000_seed0'
+
+with np.load(directory + '/topopt_result_' + identifier + '.npz') as data:
+    idx = 0
+    N_layer = data['N_layer'][idx]
+    r = data['r'][idx,:int(N_layer)]
+    
+    # Create n
+    mat_profile = np.array(['Air','Ag_palik','SiO2_bulk','Ag_palik','TiO2_Sarkar'])
+    mat_type = list(set(mat_profile))
+    raw_wavelength, mat_dict_plot = rmd.load_all(lam_plot, 'n_k', mat_type)
+    
+    n = np.zeros((np.size(lam_plot,0), np.size(mat_profile,0))).astype(complex)
+    count = 0
+    for mat in mat_profile:
+        n[:,count] = mat_dict_plot[mat]
+        count += 1
+
+Q_sca, Q_abs, Q_ext, p, diff_CS, t_El, t_Ml, Q_sca_mpE, Q_sca_mpM,\
+    S1_mpE, S1_mpM, S2_mpE, S2_mpM = sim.simulate(lam_plot, theta_plot, phi_plot, r, n)
+```
+
+* [Example 1-2](./runfiles/run_analysis_mse_Qsca.py): Multipole Analysis
+  - Multipole decomposition of optimized results can be done using **eschallot.mie.simulate_particle.simulate**
+  - Output variables:
+    - **Q_sca, Q_abs, Q_ext**: scattering, absorption, and extinction cross sections
+    - **p, diff_CS**: scattering phase function and differential cross section
+    - **t_El, t_Ml**: electric and magnetic Mie coefficients
+    - **Q_sca_mpE, Q_sca_mpM**: scattering cross sections of each multipole mode (Eq. (27) in [ref.](https://doi.org/10.1016/j.cpc.2025.109966))
+    - **S1_mpE, S1_mpM, S2_mpE, S2_mpM**: complex scattering amplitudes of each multipole mode (function of wavelength and angle) (Eq. (8) in [ref.](https://doi.org/10.1016/j.cpc.2025.109966))
+
+* Optimization Results
+
+![](ex1_fig1.png)
+
+2. [Example 2-1](./runfiles/run_topology_optimization_linAttCoeff.py): Optimization of a Particle with High Linear Attenuation Coefficient
+
+```python
+# Wavelength & angle ranges over which the cost function is defined
+lam_cost = np.array([450])
+theta_cost = np.linspace(0, 180, 2)*np.pi/180 # 0: forward, 180: backward
+phi_cost = np.array([0,90])*np.pi/180
+
+# Wavelength & angle ranges over which to compute the final efficiencies and phase function
+lam_plot = np.linspace(400, 500, 201)
+theta_plot = np.linspace(0, 180, 2)*np.pi/180 # 0: forward, 180: backward
+phi_plot = np.array([0,90])*np.pi/180
+
+class cost_obj:
+    def __init__(self):
+        pass
+    
+    def cost(self, Q_sca, Q_abs, Q_ext, p, diff_CS, t_El, t_Ml, r):
+        cost = Q_ext/r[0]
+    
+        return -1e3*np.sum(cost)
+    
+    def gradient(self, Q_sca, Q_abs, Q_ext, p, diff_CS, t_El, t_Ml, dQ_sca, dQ_abs, dQ_ext, dp, d_diff_CS, dt_El, dt_Ml, r):
+        if dQ_ext.size == Q_ext.size*r.size:
+            dr_dr0 = np.zeros((Q_ext.size, r.size))
+            dr_dr0[:,0] = 1
+
+            jac = dQ_ext/r[0] - (Q_ext[:,np.newaxis]/r[0]**2)*dr_dr0
+        else:
+            jac = dQ_ext/r[0]
+    
+        return -1e3*np.sum(jac, axis=0)
+
+# Define Cost Function
+custom_cost = cost_obj()
+```
+
+* Cost Function
+  - This example demonstrates the construction of a cost function that directly involves the outer radius of the particle. The objective is to maximize the linear attenuation coefficient of a particle-embedded random medium. The linear attenuation coefficient is defined as:
+  ```math
+  \alpha = \frac{f_\text{vol} A_\text{particle} Q_\text{ext}}{V_\text{particle}} = \frac{3 f_\text{vol} \pi r^2 Q_\text{ext}}{4 \pi r^3} \propto \frac{Q_\text{ext}}{r}
+  ```
+  - The gradient can be constructed using the product rule as shown in the example. Note that **dr_dr0** is the derivative of the outer radius with respect to the radius vector. Note that the first component is 1 for shape derivatives, but 0 for topology nucleation derivatives (nucleation of a zero-thickness layer and subsequent movement of its interfaces do not affect the outer radius).
+
+* [Example 2-2](./runfiles/run_analysis_linAttCoeff.py): Multipole Analysis
+  - Multipole decomposition shows that the optimized particle achieves high extinction through the electric dipole resonance.
+
+* Optimization Results
+
+![](ex2_fig1.png)
+
+3. [Example 3](./runfiles/run_topology_optimization_arbitrary_phase_fct.py): Optimization of the Scattering Phase Function
+
+```python
+# Wavelength & angle ranges over which the cost function is defined
+lam_cost = np.array([450])
+theta_cost = np.linspace(0, 180, 181)*np.pi/180 # 0: forward, 180: backward
+phi_cost = np.array([0,90])*np.pi/180
+
+# Wavelength & angle ranges over which to compute the final efficiencies and phase function
+lam_plot = np.array([450])
+theta_plot = np.linspace(0, 180, 361)*np.pi/180 # 0: forward, 180: backward
+phi_plot = np.array([0,90])*np.pi/180
+
+class cost_obj:
+    def __init__(self, phase_fct_tgt, ind_exclude):
+        self.phase_fct_tgt = phase_fct_tgt
+        self.ind_exclude = ind_exclude
+    
+    def cost(self, Q_sca, Q_abs, Q_ext, p, diff_CS, t_El, t_Ml, r):
+        cost = 1e2*np.mean((p[0,self.ind_exclude:,:] - self.phase_fct_tgt[self.ind_exclude:,:])**2)
+        
+        return cost
+    
+    def gradient(self, Q_sca, Q_abs, Q_ext, p, diff_CS, t_El, t_Ml, dQ_sca, dQ_abs, dQ_ext, dp, d_diff_CS, dt_El, dt_Ml, r):
+        jac = 2*(p[0,self.ind_exclude:,:] - self.phase_fct_tgt[self.ind_exclude:,:])[:,:,np.newaxis]*dp[0,self.ind_exclude:,:,:]/self.phase_fct_tgt.size
+        jac = 1e2*np.sum(jac, axis=(0,1))
+    
+        return jac
+
+## Define Cost Function
+n_seed = 0
+np.random.seed(n_seed)
+pf_tgt = np.random.rand(theta_cost.size*phi_cost.size)
+pf_tgt[0] *= 10
+np.random.seed()
+pf_tgt = gaussian_filter(pf_tgt, 10, mode='wrap', axes=0)
+pf_tgt = np.vstack((pf_tgt[:theta_cost.size], np.flipud(pf_tgt[theta_cost.size:]))).T
+pf_tgt[0,:] = pf_tgt[0,0]
+pf_tgt[-1,:] = pf_tgt[-1,0]
+pf_tgt = (np.tanh(8*(2*pf_tgt - 1)) + 1)/2
+pf_norm = np.sum(np.pi*trapezoid(pf_tgt*np.sin(theta_cost)[:,np.newaxis], theta_cost, axis=0))
+pf_tgt *= 0.3/pf_norm
+np.savez(directory + '/phase_fct_tgt_seed_scale0_3' + str(n_seed), pf_tgt=pf_tgt)
+
+custom_cost = cost_obj(pf_tgt, 16)
+```
+
+* Cost Function
+  - The optimization objective is to match a target phase function at a specific wavelength (450 nm). A randomly generated target phase function is smoothed and projected. It is then normalized such that its integration over the entire solid angle equals one. Angles below $16^\circ$ are excluded from the cost function in order to allow large particles with high forward scattering. The entire phase function is also scaled down by a factor of 0.3 to further allow more scattering intensity in the forward direction.
+
+* Optimization Results
+
+![](ex3_fig1.png)
+
+4. [Example 4-1](./runfiles/run_topology_optimization_kerker_conditions.py): Optimization of Mie Coefficients
+
+```python
+# Wavelength & angle ranges over which the cost function is defined
+lam_cost = np.array([450])
+theta_cost = np.array([0])*np.pi/180 # 0: forward, 180: backward
+phi_cost = np.array([0])*np.pi/180
+
+# Wavelength & angle ranges over which to compute the final efficiencies and phase function
+lam_plot = np.array([450])
+theta_plot = np.linspace(0, 180, 361)*np.pi/180 # 0: forward, 180: backward
+phi_plot = np.array([0,90])*np.pi/180
+
+class cost_obj:
+    def __init__(
+            self,
+            weight_tgt,
+            weight_mag,
+            weight_high_order,
+            dpsi_tgt,
+        ):
+        
+        self.weight_tgt = weight_tgt
+        self.weight_mag = weight_mag
+        self.weight_high_order = weight_high_order
+        self.dpsi_tgt = dpsi_tgt
+    
+    def cost(self, Q_sca, Q_abs, Q_ext, p, diff_CS, t_El, t_Ml, r):
+        cost_tgt = np.abs(t_El[0,0] - t_Ml[0,0]*np.exp(1j*self.dpsi_tgt))**2
+        cost_mag = -(np.abs(t_El[0,0])**2 + np.abs(t_Ml[0,0])**2)
+        cost_high_order = np.sum(np.abs(t_El[:,1:])**2 + np.abs(t_Ml[:,1:])**2)
+        
+        cost = self.weight_tgt*cost_tgt + self.weight_mag*cost_mag + self.weight_high_order*cost_high_order
+        
+        return cost
+    
+    def gradient(self, Q_sca, Q_abs, Q_ext, p, diff_CS, t_El, t_Ml, dQ_sca, dQ_abs, dQ_ext, dp, d_diff_CS, dt_El, dt_Ml, r):
+        jac_tgt = 2*(np.real(t_El[0,0] - t_Ml[0,0]*np.exp(1j*self.dpsi_tgt))*np.real(dt_El[0,0,:] - dt_Ml[0,0,:]*np.exp(1j*self.dpsi_tgt)) \
+                   + np.imag(t_El[0,0] - t_Ml[0,0]*np.exp(1j*self.dpsi_tgt))*np.imag(dt_El[0,0,:] - dt_Ml[0,0,:]*np.exp(1j*self.dpsi_tgt)))
+        
+        jac_mag = 2*(np.real(t_El[0,0])*np.real(dt_El[0,0]) + np.imag(t_El[0,0])*np.imag(dt_El[0,0]) \
+                   + np.real(t_Ml[0,0])*np.real(dt_Ml[0,0]) + np.imag(t_Ml[0,0])*np.imag(dt_Ml[0,0]))
+        
+        jac_high_order = 2*np.sum(np.real(np.expand_dims(t_El[:,1:], axis=-1))*np.real(dt_El[:,1:,:]) + np.imag(np.expand_dims(t_El[:,1:], axis=-1))*np.imag(dt_El[:,1:,:]) \
+                                + np.real(np.expand_dims(t_Ml[:,1:], axis=-1))*np.real(dt_Ml[:,1:,:]) + np.imag(np.expand_dims(t_Ml[:,1:], axis=-1))*np.imag(dt_Ml[:,1:,:]))
+        
+        jac = self.weight_tgt*jac_tgt + self.weight_mag*jac_mag + self.weight_high_order*jac_high_order
+    
+        return jac
+
+## Define Cost Function
+weight_tgt = 1e3
+weight_mag = 0 #1e2
+weight_high_order = 1e3
+dpsi_tgt = np.pi/4
+
+custom_cost = cost_obj(
+    weight_tgt=weight_tgt,
+    weight_mag=weight_mag,
+    weight_high_order=weight_high_order,
+    dpsi_tgt=dpsi_tgt,
+)
+```
+
+* Cost Function
+  - The optimization objective is to design particles that satisfy certain amplitude and phase relations between multipole modes (ED and MD in this example).
+  - Four different particles were designed:
+    1. 1st Kerker Condition: equal amplitude, in-phase
+    2. 2nd Kerker Condition: equal amplitude, out-of-phase
+    3. Equal Foward-Backward Scattering: equal amplitude, $\Delta \psi = \pi/2$
+    4. Near-Zero Backward Scattering: equal amplitude, $\Delta \psi = \pi/4$
+  - For case #2, **weight_mag = 1e2** to prevent optimization from converging to the trivial solution ($t_{\text{E}1} = t_{\text{M}1} = 0$).
+
+* [Example 4-2](./runfiles/run_analysis_kerker_conditions.py): Multipole Analysis
+  - Multipole analysis to obtain ED and MD Mie coefficients.
+
+* Optimization Results
+
+![](ex4_fig1.png)

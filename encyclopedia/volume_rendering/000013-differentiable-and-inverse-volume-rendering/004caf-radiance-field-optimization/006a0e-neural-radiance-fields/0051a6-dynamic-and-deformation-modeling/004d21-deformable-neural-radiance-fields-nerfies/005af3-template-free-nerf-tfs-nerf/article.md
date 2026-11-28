@@ -1,0 +1,108 @@
+# Template-Free NeRF (TFS-NeRF)
+
+Also called: TFS-NeRF
+
+## Overview
+TFS-NeRF is a template-free 3D semantic NeRF method for reconstructing dynamic scenes from sparse or single-view RGB videos, specifically handling interactions between two or more entities (rigid, non-rigid, or deformable) [S1]. It distinguishes itself from sibling methods like Nerfies by explicitly disentangling the motions of interacting entities and from LBS-based approaches like TAVA by using an Invertible Neural Network (INN) to predict Linear Blend Skinning (LBS) weights directly, thereby bypassing computationally expensive root-finding optimizations [S1]. This enables time-efficient training and semantically separable geometry reconstruction without relying on pre-defined template models (e.g., SMPL) or latent codes [S1].
+
+## How it works
+**Inputs:** Sparse or single-view RGB video frames and corresponding 2D semantic segmentation masks [S1].
+**Outputs:** A composite scene rendering and semantically separable Signed Distance Fields (SDFs) for deformable and non-deformable entities [S1].
+
+**Data Structures:**
+*   **Canonical Space:** A static reference frame where geometry is defined independently of time and pose [G].
+*   **Deformed/View Space:** The coordinate system of the observed frame at a specific timestamp [G].
+*   **Bone Transformation Matrices ($B$):** A set of $n_b$ rigid transformation matrices representing the bones of the deformable entity [S1].
+*   **Skining Weights ($w(x_c)$):** A function mapping a canonical point $x_c$ to a weight vector, predicted by the INN [S1].
+*   **SDF Networks ($F_{c \to \Omega}^{(\theta)}$):** Two independent neural networks (MLPs) parameterized by $\theta$, one for deformable entities ($j=d$) and one for non-deformable entities ($j=nd$), predicting canonical SDFs [S1].
+
+**Formulas:**
+The forward Linear Blend Skinning (LBS) computes the deformed point $x_v$ in view space from a canonical point $x_c$ using skinning weights $w(x_c)$ and bone transformation matrices $B$:
+$$
+x_v = \text{LBS}(w(x_c), B, x_c) = \sum_{b=1}^{n_b} w(x_c)_b \cdot B_b \cdot x_c
+$$
+where $n_b$ is the total number of bones [S1].
+
+**Steps:**
+1.  **Semantic-Aware Ray Sampling:** Given a 2D semantic segmentation mask for the current frame, shoot two distinct sets of rays from the camera: one set samples 3D points $\{x_d^v\}$ corresponding to deformable entities, and another set samples 3D points $\{x_v\}$ corresponding to non-deformable entities [S1].
+2.  **Inverse Warping to Canonical Space:** Transform the sampled points from the deformed/view space to their respective canonical spaces using inverse warping enabled by the learned forward LBS [S1]. This is achieved by inverting the forward LBS mapping via the INN, avoiding the iterative root-finding procedures used in prior work [S1].
+3.  **Individual Geometry Prediction:** At the canonical space, use two independent SDF prediction networks $F_{c \to \Omega}^{(\theta)}$ to predict the Signed Distance Fields: $F_{c \to \Omega}^{(\theta, d)}$ predicts the SDF for the deformable entity, and $F_{c \to \Omega}^{(\theta, nd)}$ predicts the SDF for the non-deformable entity [S1].
+4.  **Joint Optimization:** Optimize both branches (deformable and non-deformable) jointly using the RGB reconstruction loss to generate the composite scene rendering [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def tfs_nerf_forward(frame_rgb, semantic_mask, camera_intrinsics, camera_extrinsics, inn_model, sdf_net_deform, sdf_net_nondeform, bones, num_samples):
+    # 1. Semantic-Aware Ray Sampling
+    rays_o, rays_d = generate_rays(camera_intrinsics, camera_extrinsics, frame_rgb.shape)
+    rays_deform = rays_o[semantic_mask == DEFORMABLE_CLASS], rays_d[semantic_mask == DEFORMABLE_CLASS]
+    rays_nondeform = rays_o[semantic_mask == NONDEFORMABLE_CLASS], rays_d[semantic_mask == NONDEFORMABLE_CLASS]
+    points_deform_v = sample_depth(rays_deform, num_samples)
+    points_nondeform_v = sample_depth(rays_nondeform, num_samples)
+
+    # 2. Inverse Warping to Canonical Space
+    points_deform_c = inn_model.inverse(points_deform_v)
+    points_nondeform_c = points_nondeform_v
+
+    # 3. Individual Geometry Prediction
+    sdf_deform = sdf_net_deform(points_deform_c)
+    sdf_nondeform = sdf_net_nondeform(points_nondeform_c)
+
+    # 4. Volume Rendering & Loss
+    rendered_color = volume_render_sdf(sdf_deform, sdf_nondeform, rays_deform, rays_nondeform)
+    loss = mean_squared_error(rendered_color, frame_rgb)
+    return rendered_color, loss
+
+def generate_rays(intrinsics, extrinsics, img_shape):
+    u, v = np.meshgrid(np.arange(img_shape[1]), np.arange(img_shape[0]))
+    rays_o = extrinsics[:3, 3]
+    rays_d = np.stack([(u - intrinsics[0, 2]) / intrinsics[0, 0],
+                       (v - intrinsics[1, 2]) / intrinsics[1, 1],
+                       np.ones_like(u)], axis=-1)
+    rays_d = rays_d @ extrinsics[:3, :3].T
+    return rays_o, rays_d
+
+def sample_depth(rays_o, rays_d, num_samples):
+    t = np.linspace(0.0, 1.0, num_samples)
+    return rays_o + rays_d * t[:, np.newaxis]
+
+def volume_render_sdf(sdf_deform, sdf_nondeform, rays_deform, rays_nondeform):
+    # Standard differentiable volume rendering from SDFs [G]
+    # Accumulates color and opacity along rays using SDF-derived densities
+    return np.zeros_like(rays_deform[0])
+
+def mean_squared_error(pred, target):
+    return np.mean((pred - target) ** 2)
+```
+
+**Parameters:**
+*   **Number of Bones ($n_b$):** Total number of bones in the deformable entity. Not given in the sources.
+*   **Semantic Mask:** Required input for ray sampling. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Occlusions:** Complex interactions between entities can cause occlusions, which the method handles by disentangling motions [S1].
+*   **Topological Variations:** The method is designed for dynamic scenes but does not explicitly handle topological changes within a frame (unlike Tensor4D which also lacks this) [S1].
+*   **Precision:** The use of INN avoids the numerical instability and convergence issues associated with Broyden’s method used in prior LBS-based NeRFs [S1].
+
+## Subtopics
+
+### Linear Blend Skinning (LBS) Prediction via INN
+A technique where an Invertible Neural Network predicts skinning weights directly, replacing iterative root-finding [S1]. It sets itself apart by offering time-efficient training compared to methods like TAVA [S1]. Choose this when training speed is critical and the scene involves deformable entities with known bone structures [G]. [Link to TFS-NeRF](52-tfs-nerf.md).
+
+### Semantic-Aware Ray Sampling
+A sampling strategy that uses 2D semantic masks to separate rays into deformable and non-deformable categories [S1]. It sets itself apart by enabling independent optimization of interacting entities [S1]. Choose this when semantic separation of dynamic and static parts is required [G]. [Link to TFS-NeRF](52-tfs-nerf.md).
+
+## Operating characteristics
+*   **Time Efficiency:** TFS-NeRF is significantly more time-efficient than LBS-based approaches like TAVA [28] because it bypasses the computationally demanding root-finding optimization (e.g., Broyden’s method) for LBS inversion [S1].
+*   **Memory:** Not given in the sources.
+*   **Performance:** Produces high-quality reconstructions of both deformable and non-deformable objects in complex interactions (e.g., human-object, hand-object) [S1].
+*   **Strengths:** Template-free (no need for SMPL or similar priors), semantically separable, handles interactions between multiple entities, efficient training [S1].
+*   **Limitations:** Requires 2D semantic segmentation masks as input. Relies on LBS, which assumes a skeletal structure for deformable entities [S1].
+*   **Scaling:** Not given in the sources.
+
+## Background
+TFS-NeRF was introduced in the paper "TFS-NeRF: Template-Free NeRF for Semantic 3D Reconstruction of Dynamic Scene" [S1]. It builds upon prior work such as TAVA [28], which used computationally expensive root-finding for LBS, and addresses the challenge of reconstructing dynamic scenes with interacting entities without relying on template models like SMPL [S1]. The method was developed to handle sparse or single-view RGB videos, extending the capabilities of NeRFies [Parent] by adding semantic separation and efficient LBS prediction via INN [S1].
+
+## Sources
+[S1] TFS-NeRF: Template-Free NeRF for Semantic 3D Reconstruction of Dynamic Scene, https://arxiv.org/abs/2409.17459v4, fetched 2026-10-26

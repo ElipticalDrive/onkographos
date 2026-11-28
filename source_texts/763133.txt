@@ -1,0 +1,41 @@
+CPE 570: Parallel Ray Tracer
+Home
+Features
+Pictures
+Errors
+Features
+Bounding Volume Heirarchy
+The implementation of a BVH in CUDA was not trivial. It involved a lot of memory, a lot of stacks, and some intuitive thinking about structure. Not having inheritance in CUDA royals BLOWS. It makes the idea of a "node" that contains a "shape" a much harder abstraction to create. What is a "shape"? CUDA doesn't know. That said, my BVH produced MASSIVE efficiency boosts. Great stuff.
+I construct my BVH on the CPU, because it is a fast process, even for thousands of balls, and doing it in CUDA is infinitely more complicated.
+Photon Mapping!
+So, this is really hard with CUDA. There is code in place to create photons, scatter them, bounce them, and store the attenuated flux all on the GPU. From there, everything is copied back to the CPU, where I create a balanced KD-tree, which I then flatten into an array and send back to the GPU. With that array, I can do quick kNearestNeighbor searches (the algorithm I have written, and I believe to be working as intended) to find an array of the k nearest photons to any intersection, and add their color, dividing it by the area of the disc necessary to find k photons. This is used for global illumination purposes only to reduce the photon count requirement to create high quality GI effects. Direct illumination is still done with Phong or Cook-Torrance. The problem is CUDA times out somewhere. It's going to take some time to figure this one out, but it'll happen!
+Some Fancy CUDA memory magic!
+Below is a chunk of memory magic I taught myself. It took quite a while to wrap my head around, and I actually managed this with a third level of depth, but that was especially ugly, and I solved a design problem to avoid it. Essentially what this does is give me a nice scene structure in CUDA. I have one scene object that has all the shapes, lights, camera, ect. But moving a complex data struct like this from one memory space to another is not trivial. Notice the h_nvScene struct. It really boils down to pointer magic.
+HANDLE_ERROR(cudaMalloc(&nvScene, sizeof(CudaScene)));
+HANDLE_ERROR(cudaMalloc(&nvTree, sizeof(BVHNode) * treeSize));
+HANDLE_ERROR(cudaMalloc(&h_nvScene.spheres, scene.spheres.size() * sizeof(Sphere)));
+HANDLE_ERROR(cudaMalloc(&h_nvScene.planes, scene.planes.size() * sizeof(Plane)));
+HANDLE_ERROR(cudaMalloc(&h_nvScene.triangles, scene.triangles.size() * sizeof(Triangle)));
+HANDLE_ERROR(cudaMalloc(&h_nvScene.boxes, scene.boxes.size() * sizeof(Box)));
+HANDLE_ERROR(cudaMalloc(&h_nvScene.lights, scene.lights.size() * sizeof(PointLight)));
+HANDLE_ERROR(cudaMalloc(&h_nvScene.count, sizeof(SceneCount)));
+HANDLE_ERROR(cudaMalloc(&nvPhotons, g_numPhotons * g_numPhotons * count.numLights * PHOTONBOUNCES * sizeof(Photon)));
+HANDLE_ERROR(cudaMalloc(&nvRands, sizeof(int) * g_numPhotons * g_numPhotons));
+HANDLE_ERROR(cudaMemcpy(nvScene, &h_nvScene, sizeof(CudaScene), cudaMemcpyHostToDevice));
+HANDLE_ERROR(cudaMemcpy(h_nvScene.spheres, &scene.spheres[0], scene.spheres.size() * sizeof(Sphere),cudaMemcpyHostToDevice));
+HANDLE_ERROR(cudaMemcpy(h_nvScene.planes, &scene.planes[0], scene.planes.size() * sizeof(Plane), cudaMemcpyHostToDevice));
+HANDLE_ERROR(cudaMemcpy(h_nvScene.triangles, &scene.triangles[0], scene.triangles.size() * sizeof(Triangle), cudaMemcpyHostToDevice));
+HANDLE_ERROR(cudaMemcpy(h_nvScene.boxes, &scene.boxes[0], scene.boxes.size() * sizeof(Box), cudaMemcpyHostToDevice));
+HANDLE_ERROR(cudaMemcpy(h_nvScene.lights, &scene.lights[0], scene.lights.size() * sizeof(PointLight),cudaMemcpyHostToDevice));
+HANDLE_ERROR(cudaMemcpy(h_nvScene.count, &count, sizeof(SceneCount), cudaMemcpyHostToDevice));
+HANDLE_ERROR(cudaMemcpy(nvTree, &flatTree[0], sizeof(BVHNode) * treeSize, cudaMemcpyHostToDevice));
+HANDLE_ERROR(cudaMemcpy(nvRands, &rands[0], sizeof(int) * g_numPhotons * g_numPhotons, cudaMemcpyHostToDevice));
+Reflections
+Pic Specs: 100 spheres, 6 ray bounces, 2 lights, 1024x1024 image, ~10fps
+Reflections were the first secondary ray implemented. The initial implementation simple grabbed a fraction of the color from the first object intersected with the reflected ray. This was made more correct after adding refractions, and finding the actual reflectance cooeficient with Fresnel's equations.
+Refractions
+Pic Specs: 100 spheres, 3 ray bounces, 2 lights, 1024x1024 image, ~30fps
+Step 1 is to use Snell's law to find the direction of the refracted ray. You then need to travel through the medium (the sphere) and intersect with it from the inside. Using Snell's once again gives you the outgoing ray which can collide with the world and give you your refraction color. Fresnel's equation tells you how much color comes from reflections vs. refractions. Refractions caused me a good deal of trouble (wish I had error pics).
+Depth of Field
+Pic Specs: 50 spheres, 2 ray bounces, 2 lights, 512x512 image, ~5fps
+This is an attempt to model how cameras have a certain focal length out of which things are blurred. To model this, for every ray cast from the eye, I actually cast several rays from slightly displaced points along the screen plane (read: REALLY EXPENSIVE). The amount of displacement alters how extreme the blurriness becomes as you move from the focal point. The most visible artifacts are the small dots visible along sharp edges of changing color, because depending on how the rays get cast, it pulls more of one color over the other. This diminishes as ray count increases. Implementing depth of field had it's own set of problems (with error pics this time! Check out the error page).

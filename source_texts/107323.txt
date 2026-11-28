@@ -1,0 +1,196 @@
+Motion Planning Environment. Contribute to tekton-dynamics/tesseract development by creating an account on GitHub.
+
+Read sparse NanoVDB signed distance fields in place by Joelkang · Pull Request #1 · tekton-dynamics/tesseract · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Joelkang
+commented
+Oct 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Read sparse NanoVDB signed distance fields in place
+Stacked PR. This builds on the Bullet in-place PR (tesseract-robotics#1387, this PR's base branch) and on tesseract-robotics#1386, whose tinyvdb update is the first commit here. Review from Read sparse NanoVDB signed distance fields in place.
+A sparse field holds exactly one grid in this PR. The API (SignedDistanceFieldLayer, the constructor taking a list
+of layers, band_clamps) is already in its final form; the next PR lets the list hold several resolutions of one
+surface and adds no other signatures.
+Motivation
+Distance fields from tools like NanoVDB and fVDB are sparse: only voxels near a surface (a "narrow band") are stored. readSignedDistanceFieldNVDB expanded such a file into a full box of doubles, and refused boxes over 256 M voxels. This PR keeps the grid in its stored form and reads it in place, so memory follows the surface rather than a box around it.
+Terms
+Band clamp: the distance at which a narrow-band grid's values saturate. Past its band a grid holds a constant,
+which says only "at least this far". The clamp is also the distance reported where the grid has no data.
+What changes
+Sparse field (geometry)
+SignedDistanceField can be built from a NanoVDB FloatGrid (SignedDistanceFieldLayer: the grid and its band clamp).
+Queries read the voxels around the point through PNanoVDB; nothing is densified. Bullet and FCL query it like any other field.
+A read is answered only where every voxel it uses is active. An inactive voxel holds the grid's background value, which is not a distance (fVDB writes 0, which would read as surface).
+Where the grid has no data, the distance is its band clamp (or infinity when 0), signed by the value the grid stores there: a level set stores -background in its interior tiles, so a point deep inside an object still reads inside.
+The domain is the grid's exact active bounds, computed from its leaf masks and recorded in the stored grid's root.
+At load a grid must be NanoVDB major version 32, not a fog (density) volume, and have every node array inside its buffer. It is stored once, as its uncompressed grid buffer, and read in place.
+Interpolation
+setInterpolation(): trilinear (the default; results unchanged) or tricubic Catmull-Rom, for grid-backed and sparse fields. Tricubic passes through the samples and has a continuous gradient, so contact directions no longer jump at cell faces.
+setGradientInterpolation() reads the direction with a different method from the distance, for example a trilinear distance (never overshoots the samples) with a tricubic direction (continuous, which suits gradient-based optimisers).
+getDistanceAndGradient() returns both from one lookup.
+I/O
+New: readSparseSignedDistanceFieldNVDB(bytes, band_clamps, scale) reads a NanoVDB file as a sparse field. The clamp travels beside the file, not in it. readSignedDistanceFieldNVDB still reads one dense grid, and writeSignedDistanceFieldNVDB writes a sparse field's grid as stored.
+The URDF signed-distance-field element gains an optional band_clamps="..." attribute next to scale. Without it,
+the file is read as a dense field, as before.
+BREAKING CHANGE: serialization
+The cereal archive for SignedDistanceField gains an explicit format version (1) and stores the interpolation settings; a sparse field is stored as its grid. Archives written before this change no longer load, and unknown versions are rejected.
+Benchmark
+collision_sdf_interpolation_benchmark (a test target, not part of the libraries) compares the interpolation methods
+through the helpers Bullet's SDF algorithms use: accuracy against exact geometry (a sphere, a bore, a box's edges and creases, and a 90 degree inside corner), direction smoothness, probe contact error, build time, memory and query cost.
+Given a real .nvdb field it measures what can be measured without ground truth. On a real scanned part (a 1 mm grid, 474 x 470 x 144 samples):
+load
+memory
+dense
+0.40 s
+257 MB
+sparse, read in place
+0.11 s
+149 MB
+Dense and sparse agree to 5e-14 mm over 200,000 points near the surface. Along 10 mm walks 2 mm off the surface,
+trilinear directions jump 9.6 times per walk at cell faces; tricubic, and trilinear distance with tricubic direction,
+do not jump at all.
+Tests
+Sparse vs dense agreement (values and gradients), the all-voxels-active rule, the stored sign where the grid has no
+data, and the band clamp.
+NanoVDB round trips; malformed, fog, wrong-version and multi-layer input is rejected.
+Interpolation methods and the distance/direction split.
+Cereal round trips, including the interpolation settings; unknown archive versions are rejected.
+URDF band_clamps parsing and writing.
+Bullet and FCL contacts for sparse fields, sparse-dense pairs and scaled sparse fields.
+🤖 Generated with Claude Code
+Joelkang
+and others
+added 3 commits
+October 27, 2026 19:09
+Read BLOSC-compressed NanoVDB files written by NanoVDB and fVDB
+…
+3fece8c
+```
+readSignedDistanceFieldNVDB returned garbage, or a misleading domain error,
+for NanoVDB files from real producers. The vendored tinyvdb snapshot
+(c0ecb7d) predates upstream's rewrite of its NanoVDB reader, and one of our
+local patches to it was itself wrong:
+
+- Blosc was never compiled in, and the fallback reported success for data it
+  could not decode.
+- The grid and tree headers were parsed before decompression, i.e. from the
+  compressed bytes.
+- Our local patch skipped a name terminator that libnanovdb already counts in
+  the name size, misaligning every field after the name.
+
+Re-vendor tinyvdb from syoyo/tinyvdb e68fdc5, whose reader handles all
+three and treats the grid buffer as authoritative, and drop both local
+reader patches. Only the sources the build compiles and the headers they
+include are kept; the reader now needs tinyvdb_tree.c, tinyvdb_sdf_tree.c and
+tinyvdb_thread.c, built with the serial task backend so no thread library is
+needed. Link Blosc when it is found. The snapshot carries no local changes,
+and its sources build with MSVC (no unguarded GCC builtins).
+
+Reading the grid buffer exposed a writer bug that the old reader hid by trusting
+the file's metadata: tvdb_grid_to_nanovdb_float wrote node-extent bboxes, so a
+7x6x5 SDF written by writeSignedDistanceFieldNVDB read back as 128^3. The fix is
+upstream (syoyo/tinyvdb 95d4385) and included in this snapshot. The converter
+now also writes the NanoVDB1 grid magic instead of the legacy NanoVDB0.
+
+NanoVDB files written by Tesseract before this change used tinyvdb's old,
+non-standard name layout and are now rejected; libnanovdb misreads them too.
+Without Blosc a BLOSC-compressed file is rejected. Adds a small fVDB-written
+fixture and a test that checks its domain and every sample, or the rejection
+when Blosc is unavailable.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Read sparse NanoVDB signed distance fields in place
+…
+19c1826
+```
+A SignedDistanceField can now be built from a NanoVDB FloatGrid
+(SignedDistanceFieldLayer: the grid plus its band clamp) and kept in its
+stored sparse form. Queries read the voxels around the point with PNanoVDB's
+cached accessor; nothing is densified, so memory follows the surface rather
+than a box around it. Bullet and FCL query it in place like any other field.
+
+- A read is answered only where every voxel it uses is active: an inactive
+  voxel holds the grid's background value, which is not a distance. Where the
+  grid has no data, the distance is its band clamp (or infinity when 0), with
+  the sign of the value the grid stores there, so a point deep inside a
+  narrow-band level set still reads inside.
+- The domain is the grid's exact active voxel bounds, computed from its leaf
+  value masks, and recorded in the stored grid's root box.
+- At load a grid must be NanoVDB major version 32, not a fog volume, and have
+  every node array inside its buffer. The grid is stored once, as its bare
+  uncompressed buffer, and read in place.
+- setInterpolation chooses trilinear (the default; results unchanged) or
+  tricubic Catmull-Rom for grid-backed and sparse fields; tricubic passes
+  through the samples with a continuous gradient. setGradientInterpolation
+  reads the direction with a different method from the distance, for example
+  a trilinear distance with a tricubic gradient. getDistanceAndGradient
+  returns both from one lookup.
+- readSparseSignedDistanceFieldNVDB(bytes, band_clamps, scale) reads a
+  NanoVDB file as a sparse field; the clamp travels beside the file, not in
+  it. readSignedDistanceFieldNVDB still reads one dense grid, and
+  writeSignedDistanceFieldNVDB writes a sparse field's grid as stored. The
+  URDF element gains an optional band_clamps attribute next to scale.
+- The cereal archive gains an explicit format version (1) and stores the
+  interpolation settings; a sparse field is stored as its layer. Unversioned
+  archives no longer load.
+
+The layered constructor takes exactly one layer for now.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Benchmark how signed distance fields are read
+…
+286509e
+```
+collision_sdf_interpolation_benchmark (a report, not a test) compares the
+interpolation methods through the helpers Bullet's SDF algorithms use:
+accuracy against exact geometry (a sphere, a bore, a box's edges and
+creases, and a 90 degree inside corner), direction smoothness, probe contact
+error, build time, memory and query cost, for grid-backed and sparse fields.
+
+Given a real millimetre NanoVDB field instead, it reports load time and
+memory dense and sparse, their agreement, query / hull / probe timings per
+method, and direction smoothness along the surface, with each discontinuity
+classed as an interpolation jump (distance continuous) or a data jump (the
+edge of the grid's data).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Joelkang
+mentioned this pull request
+Oct 27, 2026
+Layer sparse signed distance fields by resolution
+#2
+Open
+Joelkang
+added this pull request to stack #3
+October 27, 2026 19:20
+Joelkang
+mentioned this pull request
+Oct 27, 2026
+refactor(SDF): Query SDFs in place from the Bullet backend rather than constructing a btMiniSDF
+tesseract-robotics/tesseract#1387
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

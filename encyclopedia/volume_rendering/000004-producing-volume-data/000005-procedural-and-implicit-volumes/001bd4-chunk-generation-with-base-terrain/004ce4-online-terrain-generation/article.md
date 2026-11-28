@@ -1,0 +1,99 @@
+# Online Terrain Generation
+
+Also called: Online approach, Terrain extension
+
+## Overview
+An algorithm to extend an already existing terrain by generating new chunks adjacent to the original plot, preserving the density of veins and caves [S1]. Unlike offline generation where layer composition and properties are calculated during generation, online generation calculates the composition and properties of layers beforehand [S1]. This architectural difference allows the method to extend terrain without regenerating the entire volume [S1].
+
+## How it works
+**Inputs:**
+*   Existing terrain data (original plot), specifically the count of veins and caves [S1].
+*   Target dimensions for the new terrain plot (e.g., chunk size) [G].
+*   Input parameters for layer density used to initialize the first plot's vein and cave density [S1].
+
+**Outputs:**
+*   A new terrain plot consisting of stacked layers, veins, and caves, compatible with the existing terrain [S1].
+
+**Data Structures:**
+*   **Terrain Plot:** A 3D volume composed of a vertical stack of elements [G].
+*   **Element Types:** Layers defined by material composition and properties, veins as procedural structures, and caves as procedural voids [S1].
+*   **Stack:** An ordered list of elements from bottom to top [S1].
+
+**Steps:**
+1.  **Determine Element Counts:** Calculate the number of veins and caves for the new terrain plot [S1]. This value is obtained randomly between $0.5$ and $1.5$ times the number of veins and caves in the original plot [S1]. This scaling preserves the density of elements across the whole terrain [S1].
+2.  **Determine Positions:** Determine the position of veins and caves between the layers using a completely random process [S1]. The result is a stack of layers, veins, and caves [S1].
+3.  **Generate Layers:** Generate elements of the stack beginning from the bottom [S1]. Extend layers in the horizontal plane (along X and Z coordinates) obtaining new heights using the Perlin noise algorithm [S1]. The composition and properties of the layer are already calculated in this step [S1].
+4.  **Generate Veins and Caves:** Generate veins and caves following the same steps as the offline generation process [S1].
+5.  **Convert to Volume:** If converting the terrain to a volume representation, multiply the thickness by the blend value of each layer to determine the transition height with the last layer, removing sharp frontiers [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+import math
+
+def generate_online_terrain(existing_terrain, target_chunk_size):
+    # Step 1: Determine number of veins and caves randomly between 0.5 and 1.5 times original count [S1]
+    new_vein_count = int(existing_terrain.count_veins() * random.uniform(0.5, 1.5))
+    new_cave_count = int(existing_terrain.count_caves() * random.uniform(0.5, 1.5))
+
+    # Step 2: Determine positions using a completely random process [S1]
+    stack = []
+    for _ in range(target_chunk_size.total_elements):
+        r = random.random()
+        if r < 0.5:
+            stack.append({"type": "layer", "properties": existing_terrain.layer_properties})
+        elif r < 0.75:
+            stack.append({"type": "vein"})
+        else:
+            stack.append({"type": "cave"})
+
+    # Step 3: Generate elements from bottom up [S1]
+    for element in stack:
+        if element["type"] == "layer":
+            # Extend layers in horizontal plane (X, Z) using Perlin noise [S1]
+            element.heights = generate_layer_heights_perlin(element, target_chunk_size)
+        elif element["type"] == "vein":
+            # Generate veins following the same steps as the offline generation process [S1]
+            pass # See offline generation algorithm [S1]
+        elif element["type"] == "cave":
+            # Generate caves following the same steps as the offline generation process [S1]
+            pass # See offline generation algorithm [S1]
+
+    return stack
+
+def generate_layer_heights_perlin(layer, chunk_size):
+    # Standard 2D Perlin noise algorithm [G]
+    heights = [[0.0 for _ in range(chunk_size.z)] for _ in range(chunk_size.x)]
+    for x in range(chunk_size.x):
+        for z in range(chunk_size.z):
+            heights[x][z] = perlin_noise_2d(x, z, layer.seed)
+    return heights
+
+def perlin_noise_2d(x, y, seed):
+    # Standard 2D Perlin noise implementation [G]
+    return (math.sin(x * 0.1 + seed) + math.cos(y * 0.1 + seed)) / 2.0
+```
+
+**Parameters:**
+*   **Random Factor Range:** $[0.5, 1.5]$ for vein and cave counts [S1].
+*   **Noise Algorithm:** Perlin noise for layer height generation [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Density Preservation:** The random scaling factor must be applied to the original plot's counts to ensure density is preserved along the whole terrain, not just the current chunk [S1].
+*   **Composition Calculation:** In online mode, layer composition and properties must be calculated beforehand, unlike offline generation where they are calculated during generation [S1]. Failure to pre-calculate these will break the online extension logic [G].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly defined in terms of Big-O [S1]. Measured performance shows online generation times are comparable to offline generation [S1].
+*   **Measured Performance:** On an Intel Core i7 950 CPU (3.07GHz), generating 100 terrains of 5x5x5 chunks of 10x10x10 voxels: Offline average time ranges from 319.14 ms to 354.30 ms with standard deviations between 41.94 ms and 75.01 ms [S1]. Online average time ranges from 309.24 ms to 342.84 ms with standard deviations between 32.20 ms and 60.35 ms [S1]. A baseline Perlin Noise generation takes 61.25 ms with a standard deviation of 14.46 ms [S1].
+*   **Strengths:** The method can generate terrains with complex material configurations online and preserves vein and cave density [S1]. Performance is similar to offline generation [S1].
+*   **Limitations:** Generating terrains with caves increases computing overhead, and vein generation is the most time-consuming configurable feature [S1].
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
+
+## Background
+The method was proposed by Aitor Santamaría-Ibirika et al. in the paper "Procedural approach to volumetric terrain generation" [S1]. It is part of a broader procedural approach to volumetric terrain generation that includes offline generation, online extension, and conversion to volume representations [S1]. The method was tested on an Intel Core i7 950 CPU [S1].
+
+## Sources
+[S1] Procedural approach to volumetric terrain generation, https://zenodo.org/records/18429902, fetched 2026-10-27

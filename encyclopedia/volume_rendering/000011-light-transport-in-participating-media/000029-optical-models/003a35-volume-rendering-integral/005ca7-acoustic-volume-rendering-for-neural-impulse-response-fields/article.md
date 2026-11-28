@@ -1,0 +1,163 @@
+# Acoustic Volume Rendering for Neural Impulse Response Fields
+
+Also called: AVR
+
+## Overview
+Acoustic Volume Rendering (AVR) computes the acoustic impulse response (RIR) of a 3D scene by treating sound propagation as a volume rendering problem, summing contributions from specular reflections, scattering, and diffraction along cast rays [S1]. It distinguishes itself from sibling methods like [Continuous-Wave ToF Phasor Model](9486-continuous-wave-tof-phasor-model.md) and [Neumann Series Expansion](14596-neumann-series-expansion.md) by explicitly modeling frequency-dependent material attenuation and multiple bounces within a unified quadrature framework, outperforming baselines such as NAF, INRAS, and AV-NeRF on standard datasets [S1].
+
+## How it works
+**Inputs:**
+*   Scene geometry and material properties (reflection coefficient $\beta$, scattering coefficient $\alpha$) [S1].
+*   Source position and orientation [S1].
+*   Receiver position and orientation [S1].
+*   Simulation parameters: number of cast rays $N_\phi$, number of angular samples $N$, maximum bouncing depth $K_{max}$, number of volume steps $N_r$ [S1].
+
+**Outputs:**
+*   Frequency response $H[f]$ for each source-receiver pair [S1].
+*   Time-domain impulse response $h(t)$ via direct path summation [S1].
+
+**Data Structures:**
+*   **Material Properties:** A lookup table mapping material names to frequency-dependent coefficients $\beta(\omega)$ and $\alpha(\omega)$ [S1].
+*   **Ray Segment:** Defined by near endpoint $u_n$ and far endpoint $u_f$ [S1].
+*   **Volume Step:** Defined by position $u_m$ along the ray [S1].
+
+**Formulas:**
+1.  **Ray Sampling:** The position of the $m$-th sample point $p(u_m)$ along a ray segment from $u_n$ to $u_f$ is:
+    $$ p(u_m) = p_l + (u_n + m \Delta u) \hat{\omega} $$
+    where $p_l$ is the ray origin, $\hat{\omega}$ is the unit direction vector, and $u_n, u_f$ are the near and far endpoints of the ray segment [S1].
+2.  **Step Size:**
+    $$ \Delta u = \frac{u_f - u_n}{N_r} $$
+    where $N_r$ is the number of samples per ray [S1].
+3.  **Transmittance:** The transmittance $T_m$ to the $m$-th sample is:
+    $$ T_m = \exp \left( -\sum_{x=1}^{m-1} \frac{u_f - u_n}{\sigma_x} \Delta u \right) $$
+    where $\sigma_x$ is the extinction coefficient at step $x$ [S1].
+4.  **Frequency Response per Ray:** The contribution $H_\omega[f]$ for a specific frequency $\omega$ is approximated by quadrature:
+    $$ H_\omega[f] = \sum_{m=1}^{N_r} T_m \sigma_x \Delta u $$
+    where the source notation $v$ denotes the number of volume steps and equals $N_r$ [S1].
+5.  **Total Frequency Response:** The total response $H[f]$ sums over all rays $i$ and angular samples $j$:
+    $$ H[f] = \sum_{i=1}^{N_\phi} \sum_{j=1}^{N} G(\omega_{ij}) H_{\omega_{ij}}[f] $$
+    where $G(\omega_{ij})$ is a weighting function [S1].
+6.  **Impulse Response (Time Domain):** The impulse response $h(t)$ is formulated as:
+    $$ h(t) = \sum_{n=1}^{N} \frac{A}{d_n} \delta_{LP}\left(t - \frac{d_n}{v}\right) \prod_{k=1}^{K} (1 - \alpha_{n,k})(-\beta_{n,k}) $$
+    where $N$ is the number of paths, $A$ is a constant, $d_n$ is the accumulated path length of the $n$-th path, $v$ is the speed of sound, $\alpha_{n,k}$ and $\beta_{n,k}$ are the scattering and reflection coefficients for the $k$-th reflection of the $n$-th path, and $\delta_{LP}$ is a windowed sinc function [S1].
+7.  **Energy Update:** For each reflection, the reflected wave's energy $E'$ and scattered energy $E''$ are updated as:
+    $$ E' = (1 - \alpha)\beta E $$
+    $$ E'' = \alpha\beta E $$
+    where $E$ is the energy before interaction [S1].
+
+**Parameters:**
+*   Maximum bouncing depth: 30 [S1].
+*   Number of cast rays: $10^6$ (1e6) [S1].
+*   Grid size for loudness visualization: 0.1m [S1].
+*   RIR duration: 0.32s [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def dot(v1, v2):
+    return sum(a * b for a, b in zip(v1, v2))
+
+def compute_acoustic_volume_rendering(scene, source, receiver, params):
+    """
+    Computes the acoustic impulse response using AVR.
+    
+    Args:
+        scene: Object containing geometry and material lookup table.
+        source: Source position and orientation.
+        receiver: Receiver position and orientation.
+        params: Dictionary with keys:
+            - N_phi: Number of cast rays (default 1e6)
+            - K_max: Maximum bouncing depth (default 30)
+            - v: Speed of sound
+            - A: Amplitude constant
+            
+    Returns:
+        h_t_final: Time-domain impulse response array.
+    """
+    h_t = []
+    N_phi = params.get('N_phi', 1000000)
+    K_max = params.get('K_max', 30)
+    v_sound = params['v']
+    A = params.get('A', 1.0)
+
+    for i in range(N_phi):
+        # Generate ray direction uniformly over sphere
+        theta = (i % 360) * math.pi / 180.0
+        phi = (i // 360) * math.pi / 180.0
+        ray_dir = [math.sin(phi)*math.cos(theta), math.sin(phi)*math.sin(theta), math.cos(phi)]
+        ray_origin = source.position
+
+        path_length = 0.0
+        attenuation = 1.0
+        current_pos = ray_origin
+        hit_receiver = False
+
+        for k in range(K_max):
+            # Ray intersection with scene geometry
+            hit = scene.ray_intersect(current_pos, ray_dir)
+            if hit is None:
+                break
+
+            dist = hit.distance
+            path_length += dist
+            material = scene.get_material(hit.object_name)
+            alpha = material.scattering_coefficient
+            beta = material.reflection_coefficient
+
+            # Update attenuation: E' = (1 - alpha) * beta * E
+            # Negative beta accounts for phase inversion upon reflection [S1]
+            attenuation *= (1 - alpha) * (-beta)
+
+            if hit.object_name == receiver.name:
+                hit_receiver = True
+                break
+
+            # Update ray direction for next bounce (specular reflection)
+            normal = hit.normal
+            ray_dir = [ray_dir[j] - 2 * dot(ray_dir, normal) * normal[j] for j in range(3)]
+            current_pos = [current_pos[j] + ray_dir[j] * 1e-6 for j in range(3)]
+
+        if hit_receiver:
+            time_delay = path_length / v_sound
+            amplitude = A / path_length
+            final_amp = amplitude * attenuation
+            impulse = generate_windowed_sinc(final_amp, time_delay, v_sound)
+            h_t.append(impulse)
+
+    h_t_final = sum(h_t)
+    return h_t_final
+
+def generate_windowed_sinc(amplitude, time_delay, speed):
+    """
+    Generates a windowed sinc impulse for acoustic simulation [G].
+    """
+    window_len = 1024
+    t = [i / speed for i in range(window_len)]
+    window = [0.5 * (1 - math.cos(2 * math.pi * i / window_len)) for i in range(window_len)]
+    sinc_vals = [math.sin(math.pi * (i - time_delay * speed)) / (math.pi * (i - time_delay * speed)) if i != time_delay * speed else 1.0 for i in range(window_len)]
+    return [amplitude * w * s for w, s in zip(window, sinc_vals)]
+```
+
+**Edge Cases and Pitfalls:**
+*   **Scattering/Diffraction:** The base equation assumes purely specular reflection. If scattering or diffraction occurs, the reflection term must be replaced with the corresponding scattering or diffraction attenuation [S1].
+*   **Boundary Conditions:** The ray tracing must correctly handle intersections with scene geometry to determine material properties [S1].
+
+## Subtopics
+
+### [Acoustic Volume Rendering](19659-acoustic-volume-rendering.md)
+Adapts volume rendering techniques to model acoustic impulse responses (IRs) as time-series signals using frequency-domain rendering and spherical integration to fit IR measurements. It represents a scene as a field where a network outputs acoustic volume density and a time-varying signal for any point and direction, solving the problem of modeling complex sound interactions (absorption, reflection, scattering) by accumulating signals along a ray. Unlike light volume rendering, AVR handles time delays as phase shifts in the frequency domain and integrates over a sphere to account for omnidirectional microphone capture, distinguishing it from [Neural Impulse Response Fields](17205-acoustic-volume-rendering-for-neural-impulse-response-fields.md) by explicitly modeling the acoustic wave propagation physics (time delay and energy decay) within the rendering integral. Choose when omnidirectional capture and explicit wave physics are required over neural field approximations.
+
+## Operating characteristics
+*   **Time Complexity:** Scales approximately linearly with the number of rays and the number of points sampled along each ray [S1].
+*   **Performance:** On the RAF-Furnished dataset with a 0.32s RIR duration, AVR outperforms NAF, INRAS, and AV-NeRF across metrics including Phase, Amp, Env, T60, C50, and EDT errors [S1].
+*   **Strengths:** Captures sound level differences caused by geometry occlusion and provides smoother spatial variation of loudness [S1].
+*   **Limitations:** High computational cost due to the large number of rays ($10^6$) required for comprehensive path searching [S1].
+
+## Background
+Acoustic Volume Rendering (AVR) is based on the work presented in "Acoustic Volume Rendering for Neural Impulse Response Fields" [S1]. It builds upon the Volume Rendering Integral [8682-volume-rendering-integral.md] and extends it to acoustic domains [S1]. The method is implemented in the AcoustiX platform, which is built on the Sionna ray tracing engine and supports reflection, scattering, and diffraction [S1]. Room models are created with Blender and exported in XML formats using the Mitsuba blender Add-on [S1].
+
+## Sources
+[S1] Acoustic Volume Rendering for Neural Impulse Response Fields, https://doi.org/10.52202/079017-1417, fetched 2026-10-26

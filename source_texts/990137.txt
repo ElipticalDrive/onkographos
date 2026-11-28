@@ -1,0 +1,328 @@
+Adding one work-group batched radix sort as described in #2845.
+Multiple segments can pack into a workgroup.  Subgroups may only work on a single segment, and are padded out accordingly.
+Refactors some of onesweeps code to be reused.
+
+[KT] Batched Stable Sort: single group radix sort by danhoeflinger · Pull Request #2859 · uxlfoundation/oneDPL · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[KT] Batched Stable Sort: single group radix sort
+#2859
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Open
+danhoeflinger
+wants to merge
+17
+commits into
+main
+from
+dev/dhoeflin/autoperf/batched_radix_sort_one_wg
+Uh oh!
+There was an error while loading. Please reload this page.
+Open
+[KT] Batched Stable Sort: single group radix sort
+#2859
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+17 commits
+Select commit
+Hold shift + click to select a range
+1150daa
+Batched stable sort: radix_single_group_tag with a one work-group kernel
+danhoeflinger Oct 20, 2026
+1256d20
+dispatch to 1WG radix sort from sycl_radix_sort when it fits within d…
+danhoeflinger Oct 13, 2026
+ec982f0
+fix bad rebase
+danhoeflinger Oct 29, 2026
+5117d1d
+remove one_wg sort from sycl_radix_sort (automatically when it fits)
+danhoeflinger Oct 29, 2026
+117eaef
+adding comment about radix bits support
+danhoeflinger Oct 29, 2026
+600aa5e
+merging layers which provide little on their own
+danhoeflinger Oct 29, 2026
+93bbba2
+extracting and reusing subcomponents between one_wg and onesweep
+danhoeflinger Oct 29, 2026
+f068090
+consolidate tag checks
+danhoeflinger Oct 29, 2026
+461f6a0
+improving macro guards
+danhoeflinger Oct 30, 2026
+b16f899
+missing is_active_check
+danhoeflinger Oct 30, 2026
+fd57d26
+fix guards to be specific to individual implementation
+danhoeflinger Oct 30, 2026
+53707cd
+properly guard tests
+danhoeflinger Oct 30, 2026
+21823e7
+removing extra barrier for last stage
+danhoeflinger Oct 30, 2026
+5fc4d8f
+clarifying comment
+danhoeflinger Oct 30, 2026
+a75a47e
+making static assert more readable
+danhoeflinger Oct 30, 2026
+463f355
+address feedback
+danhoeflinger Nov 4, 2026
+925855f
+formatting
+danhoeflinger Nov 5, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Next
+Next commit
+Batched stable sort: radix_single_group_tag with a one work-group kernel
+```
+radix_single_group_tag sorts segments which fit in one work-group tile with
+a one work-group radix sort kernel, which packs several segments per
+work-group at sub-group granularity and needs no temporary global memory.
+It accepts any work-group size that is a multiple of the sub-group size, up
+to 1024. The sub-group ranking of the onesweep kernel is extracted so that
+both kernels share it.
+
+Signed-off-by: Dan Hoeflinger <dan.hoeflinger@intel.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+danhoeflinger
+and
+claude
+committed
+Nov 5, 2026
+commit 1150daa92cc1ef755e441753a93ca43d60cf8dc6
+There are no files selected for viewing
+45 changes: 39 additions & 6 deletions
+45
+include/oneapi/dpl/experimental/kt/batched_stable_sort.h
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -31,6 +31,13 @@ namespace oneapi::dpl::experimental::kt::gpu
+// Sort configurations: each selects one algorithm and carries its specific parameters
+//-----------------------------------------------------------------------------
+// One work-group radix sort; requires __segment_size <= data_per_workitem * workgroup_size
+template <std::uint8_t __radix_bits = 8>
+struct radix_single_group_tag
+{
+static constexpr std::uint8_t radix_bits = __radix_bits;
+};
+// Modified OneSweep radix sort; any __segment_size
+template <std::uint8_t __radix_bits = 8>
+struct radix_many_groups_tag
+Expand All
+@@ -41,6 +48,15 @@ struct radix_many_groups_tag
+namespace __impl
+{
+template <typename _SortConfig>
+struct __is_radix_single_group_tag : std::false_type
+{
+};
+template <std::uint8_t __radix_bits>
+struct __is_radix_single_group_tag<radix_single_group_tag<__radix_bits>> : std::true_type
+{
+};
+template <typename _SortConfig>
+struct __is_radix_many_groups_tag : std::false_type
+{
+Expand All
+@@ -55,8 +71,15 @@ template <typename _SortConfig, typename _KernelParam>
+constexpr void
+__check_batched_sort_config()
+{
+static_assert(__is_radix_many_groups_tag<_SortConfig>::value,
+"Unsupported _SortConfig: only radix_many_groups_tag is currently implemented");
+static_assert(__is_radix_single_group_tag<_SortConfig>::value || __is_radix_many_groups_tag<_SortConfig>::value,
+"Unsupported _SortConfig: only radix_single_group_tag and radix_many_groups_tag are currently "
+"implemented");
+if constexpr (__is_radix_single_group_tag<_SortConfig>::value)
+{
+static_assert(_SortConfig::radix_bits == 8, "radix_single_group_tag currently requires 8 radix bits");
+static_assert(_KernelParam::workgroup_size % 32 == 0 && _KernelParam::workgroup_size <= 1024,
+"radix_single_group_tag requires a multiple of 32 and at most 1024 work-items in a work-group");
+Comment thread
+SergeyKopienko marked this conversation as resolved.
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+}
+if constexpr (__is_radix_many_groups_tag<_SortConfig>::value)
+{
+__check_sycl_onesweep_kernel_params<_SortConfig::radix_bits, _KernelParam::data_per_workitem,
+Expand All
+@@ -75,7 +98,8 @@ __batched_stable_sort_bytes_req(std::size_t __segment_size, std::size_t __total_
+__check_batched_sort_config<_SortConfig, _KernelParam>();
+assert(__segment_size > 0 && "The segment size must be greater than zero");
+assert(__total_size % __segment_size == 0 && "The number of elements must be a multiple of the segment size");
+if (__total_size == 0)
+// The one work-group radix sort needs no temporary global memory
+if (__total_size == 0 || __is_radix_single_group_tag<_SortConfig>::value)
+return 0;
+return __onesweep_temp_bytes<_KeyT, _ValT, _SortConfig::radix_bits, _KernelParam::data_per_workitem,
+_KernelParam::workgroup_size>(__total_size, __segment_size);
+Expand All
+@@ -89,9 +113,18 @@ __batched_stable_sort(sycl::queue __q, _RngPack1&& __pack_in, _RngPack2&& __pack
+{
+__check_batched_sort_config<_SortConfig, _KernelParam>();
+#if _ONEDPL_ENABLE_SYCL_RADIX_SORT_KT
+return __batched_onesweep<__is_ascending, _SortConfig::radix_bits, __in_place>(
+__q, std::forward<_RngPack1>(__pack_in), std::forward<_RngPack2>(__pack_out), __segment_size, __param,
+__temp_storage);
+if constexpr (__is_radix_single_group_tag<_SortConfig>::value)
+{
+return __batched_single_group<__is_ascending, _SortConfig::radix_bits>(
+__q, std::forward<_RngPack1>(__pack_in), std::forward<_RngPack2>(__pack_out),
+__segment_size, __param);
+}
+else
+{
+return __batched_onesweep<__is_ascending, _SortConfig::radix_bits, __in_place>(
+__q, std::forward<_RngPack1>(__pack_in), std::forward<_RngPack2>(__pack_out),
+__segment_size, __param, __temp_storage);
+}
+#else
+__sycl_radix_sort_unsupported_msg<_SortConfig>();
+#endif
+Expand Down
+42 changes: 42 additions & 0 deletions
+42
+include/oneapi/dpl/experimental/kt/internal/radix_sort_dispatchers.h
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -22,6 +22,9 @@
+#include "../../../pstl/hetero/dpcpp/utils_ranges_sycl.h"
+#include "radix_sort_submitters.h"
+#if _ONEDPL_ENABLE_SYCL_RADIX_SORT_KT
+# include "sycl_batched_one_wg_radix_sort_kernels.h"
+#endif
+namespace oneapi::dpl::experimental::kt::gpu::__impl
+{
+Expand Down
+Expand Up
+@@ -434,6 +437,24 @@ __onesweep(_KtTag __kt_tag, sycl::queue __q, _RngPack1&& __pack, _RngPack2&& __p
+return __event_chain;
+}
+#if _ONEDPL_ENABLE_SYCL_RADIX_SORT_KT
+// Sorts each consecutive run of __segment_size elements, each of which must fit in a work-group tile
+template <bool __is_ascending, std::uint8_t __radix_bits, typename _KernelParam, typename _RngPack1,
+typename _RngPack2>
+sycl::event
+__batched_one_wg(sycl::queue& __q, _RngPack1&& __pack_in, _RngPack2&& __pack_out, std::size_t __n,
+std::size_t __segment_size)
+{
+using _KernelName = oneapi::dpl::__par_backend_hetero::__internal::__kernel_name_provider<
+__batched_radix_sort_one_wg<std::decay_t<_RngPack1>, std::decay_t<_RngPack2>,
+typename _KernelParam::kernel_name>>;
+return __batched_one_wg_radix_sort_submitter<__is_ascending, __radix_bits, _KernelParam::data_per_workitem,
+_KernelParam::workgroup_size, _KernelName>()(
+__q, std::forward<_RngPack1>(__pack_in), std::forward<_RngPack2>(__pack_out), __n,
+static_cast<std::uint32_t>(__segment_size));
+}
+#endif
+// TODO: allow calling it only for all_view (accessor) and guard_view (USM) ranges, views::subrange and sycl_iterator
+template <bool __is_ascending, std::uint8_t __radix_bits, bool __in_place, typename _KtTag, typename _RngPack1,
+typename _RngPack2, typename _KernelParam>
+Expand Down
+Expand Up
+@@ -497,6 +518,27 @@ __batched_onesweep(sycl::queue __q, _RngPack1&& __pack_in, _RngPack2&& __pack_ou
+__segment_size, __temp_storage);
+}
+#if _ONEDPL_ENABLE_SYCL_RADIX_SORT_KT
+// Batched sort: each consecutive run of __segment_size elements, which must fit in a work-group tile, is sorted
+// independently by the one work-group kernel
+template <bool __is_ascending, std::uint8_t __radix_bits, typename _KtTag, typename _RngPack1, typename _RngPack2,
+typename _KernelParam>
+sycl::event
+__batched_single_group(_KtTag, sycl::queue __q, _RngPack1&& __pack_in, _RngPack2&& __pack_out,
+std::size_t __segment_size, _KernelParam)
+{
+static_assert(std::is_same_v<_KtTag, __sycl_tag>, "The batched radix sort is only implemented in SYCL");
+const std::size_t __n = __pack_in.__keys_rng().size();
+assert(__n > 0);
+assert(__segment_size <= std::size_t(_KernelParam::data_per_workitem) * _KernelParam::workgroup_size &&
+"radix_single_group_tag requires the segment size not to exceed data_per_workitem * workgroup_size");
+Comment thread
+SergeyKopienko marked this conversation as resolved.
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+_PRINT_INFO_IN_DEBUG_MODE(__q);
+return __batched_one_wg<__is_ascending, __radix_bits, _KernelParam>(
+__q, std::forward<_RngPack1>(__pack_in), std::forward<_RngPack2>(__pack_out), __n, __segment_size);
+}
+#endif
+} // namespace oneapi::dpl::experimental::kt::gpu::__impl
+#endif // _ONEDPL_KT_RADIX_SORT_DISPATCHERS_H
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

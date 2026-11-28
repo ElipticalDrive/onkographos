@@ -1,0 +1,30 @@
+# Region-growing and Advancing Front
+
+Also called: Boundary tracking, front propagation
+
+## Overview
+Region-growing and Advancing Front methods extract isosurfaces by propagating a boundary or front from seed points, rather than processing the volume in a fixed spatial order like Marching Cubes. This family solves the problem of topological ambiguity and noise sensitivity in complex or noisy volumetric data by explicitly managing connectivity and surface continuity during extraction . It differs from its siblings by prioritizing geometric coherence and feature preservation over local cube-based lookup, allowing for adaptive mesh density and robust handling of disjoint components .
+
+## Shared principles
+All methods in this family operate on a discretized domain, typically a regular grid (Cartesian, octree, or tetrahedral) where each cell contains scalar values or occupancy states at its vertices or centers [G].
+
+The core mechanism involves:
+1.  **Seeding:** Identifying initial points on the target iso-surface, often based on feature strength or random sampling in unsegmented data.
+2.  **Propagation:** Expanding the surface by adding new geometric primitives (triangles, edges, or faces) to a growing front or boundary set.
+3.  **Consistency/Topology Management:** Enforcing constraints to ensure the resulting mesh is manifold, hole-free, and topologically correct. This may involve normal consistency checks, Delaunay sphere validation, or explicit front merging/splitting operations.
+4.  **Termination:** Stopping when the front is empty, all components are extracted, or a coverage criterion is met.
+
+## Subtopics
+
+### [Advancing Front Framework for Implicit Surfaces](819-advancing-front-framework-for-implicit-surfaces.md)
+Extracts triangulated meshes from implicit functions by growing a front from a seed, explicitly handling front self-intersection and merging as topological operations. It differs from Region-growing Iso-surface Extraction by maintaining a distinct boundary front rather than a filled volume, and from Surface Modeling via Boundary Tracking by operating on general implicit functions without predefined volume components.
+
+### [Region-growing Iso-surface Extraction](7568-region-growing-iso-surface-extraction.md)
+Generates high-quality, curvature-adaptive semi-regular meshes while preserving sharp features and extracting all disjoint components. It improves upon Marching Triangles by introducing a normal consistency constraint that guarantees the intersection of the Delaunay sphere and the iso-surface is a topological disk, solving topological ambiguity and hole-generation problems.
+
+### [Surface Modeling via Boundary Tracking and Marching Cubes](14379-surface-modeling-via-boundary-tracking-and-marching-cubes.md)
+Constructs compact, hole-free boundary surfaces for extracted features in volumetric data, followed by optional smoothing. It addresses the failure of standard binary isosurface extraction on noisy data by first using region growing to segment the volume, then tracking the boundary of segmented voxels to create a precise volumetric feature representation before applying Marching Cubes.
+
+## Background
+The concept of region growing for image segmentation and surface extraction originated in the early days of computer vision and medical imaging, where connectivity-based propagation was necessary to handle noise and discontinuities . The specific application of advancing front techniques to implicit surface meshing was formalized in the late 1990s and early 2000s to address the limitations of grid-based methods like Marching Cubes in handling complex topologies and adaptive resolution . Boundary tracking algorithms, such as those by Artzy et al., have been used for decades to identify interfaces in binary volumes, forming the basis for hybrid approaches that combine segmentation with isosurface extraction .
+

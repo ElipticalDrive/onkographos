@@ -1,0 +1,131 @@
+# Gradient-Based Diffuse Shading
+
+Also called: Smooth gradient shading using interpolation
+
+## Overview
+Gradient-Based Diffuse Shading computes the diffuse lighting intensity for a voxel by estimating the local surface normal via finite differences and applying a dot product with a light direction vector [S1, unofficial]. It sets itself apart from standard volume rendering by explicitly deriving surface geometry from the density gradient to simulate diffuse reflection, rather than relying solely on opacity or color transfer functions [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: A 3D voxel grid (CT scan data) with dimensions `height`, `width`, `depth`. A current voxel position $(x, y, z)$ and its density value `currentVoxel`. The previous voxel's density `prevVoxel` and position `prevRay` (for interpolation). A light source position defined by `lightSourceX`, `LIGHT_SOURCE_Y`, and `LIGHT_SOURCE_Z`. A boolean flag `isGradientInterpolation`.
+- **Output**: A scalar diffuse lighting value in the range $[0, 1]$.
+
+**Data Structures**
+- The voxel data is accessed via a 3D array or linearized memory layout.
+- `BONE_VALUE`: A threshold constant representing the density value of bone or the surface boundary [S1, unofficial].
+
+**Steps**
+1. **Estimate Surface Normal**: Compute the surface normal $\mathbf{n}$ at $(x, y, z)$ using a finite difference method on the local density field. The specific implementation is encapsulated in `getSurfaceNormal(view, x, y, z, height, width, depth)` [S1, unofficial].
+2. **Light Source Position**: Define the light source position $\mathbf{L}_{pos}$:
+   - $L_x = \text{lightSourceX}$ (controlled by a user slider) [S1, unofficial].
+   - $L_y = \text{ctScan.getCT\_z\_axis()} / 4$ [S1, unofficial].
+   - $L_z = \text{ctScan.getCT\_x\_axis()}$ [S1, unofficial].
+3. **Light Direction**: Calculate the light direction vector $\mathbf{l}$ from the intersection point $\mathbf{I}$ to the light source:
+   $$ \mathbf{l} = \mathbf{L}_{pos} - \mathbf{I} $$
+   Normalize $\mathbf{l}$ and $\mathbf{n}$:
+   $$ \hat{\mathbf{l}} = \frac{\mathbf{l}}{\|\mathbf{l}\|}, \quad \hat{\mathbf{n}} = \frac{\mathbf{n}}{\|\mathbf{n}\|} $$
+4. **Gradient Interpolation (Optional)**: If `isGradientInterpolation` is true, `currentVoxel` $\neq$ `BONE_VALUE`, and $z > 0$:
+   - Find the exact intersection $z$-coordinate $z_{exact}$ via linear interpolation between `prevVoxel` and `currentVoxel` along `prevRay`:
+     $$ z_{exact} = \text{linearInterpolationPosition}(\text{BONE\_VALUE}, \text{prevVoxel}, \text{currentVoxel}, \text{prevRay}, z) $$
+   - Recalculate the surface normal $\mathbf{n}'$ and intersection point $\mathbf{I}'$ at $z_{exact}$ [S1, unofficial].
+   - Update $\mathbf{l}$ using $\mathbf{I}'$ and re-normalize [S1, unofficial].
+5. **Compute Diffuse Intensity**: Calculate the diffuse lighting value $D$:
+   $$ D = \max(0, \hat{\mathbf{n}} \cdot \hat{\mathbf{l}}) $$
+   Return $D$ [S1, unofficial].
+
+**Parameters**
+- `lightSourceX`: X-axis position of the light source, controlled by a slider [S1, unofficial].
+- `isGradientInterpolation`: Boolean flag enabling smooth gradient shading via sub-voxel intersection estimation [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- If `currentVoxel` equals `BONE_VALUE`, gradient interpolation is skipped [S1, unofficial].
+- If $z \le 0$, gradient interpolation is skipped [S1, unofficial].
+- The normal estimation `getSurfaceNormal` must handle boundary conditions where neighbors are out of bounds [G].
+- The light source position depends on the CT scan's axis definitions, which may vary between datasets [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gradient_based_diffuse_shading(view, x, y, z, height, width, depth, 
+                                   currentVoxel, prevVoxel, prevRay, 
+                                   lightSourceX, isGradientInterpolation, 
+                                   BONE_VALUE):
+    # Step 1: Estimate surface normal
+    surfaceNormal = getSurfaceNormal(view, x, y, z, height, width, depth)
+    
+    # Step 2: Define light source position
+    # ctScan.getCT_z_axis() and ctScan.getCT_x_axis() are assumed to be 
+    # methods returning the respective axis dimensions or offsets.
+    lightSourceY = ctScan.getCT_z_axis() / 4
+    lightSourceZ = ctScan.getCT_x_axis()
+    lightSourceX_pos = lightSourceX
+    
+    # Intersection point I (initially the current voxel position)
+    intersectionX = x
+    intersectionY = y
+    intersectionZ = z
+    
+    # Step 3 & 4: Gradient Interpolation if enabled
+    if isGradientInterpolation and currentVoxel != BONE_VALUE and z > 0:
+        # Find exact intersection z via linear interpolation
+        exactZ = linearInterpolationPosition(BONE_VALUE, prevVoxel, currentVoxel, prevRay, z)
+        
+        # Recalculate surface normal and intersection at exactZ
+        # Note: The exact X, Y coordinates for the new intersection are not specified 
+        # in the source, so we assume they are derived from the ray path at exactZ.
+        # This is a gap filled with [G].
+        intersectionZ = exactZ
+        intersectionX, intersectionY = getRayIntersectionXY(prevRay, exactZ)
+        
+        surfaceNormal = getSurfaceNormal(view, intersectionX, intersectionY, intersectionZ, 
+                                         height, width, depth)
+    
+    # Step 3: Compute light direction
+    lightDirectionX = lightSourceX_pos - intersectionX
+    lightDirectionY = lightSourceY - intersectionY
+    lightDirectionZ = lightSourceZ - intersectionZ
+    
+    # Normalize light direction
+    lightLength = sqrt(lightDirectionX**2 + lightDirectionY**2 + lightDirectionZ**2)
+    if lightLength == 0:
+        return 0.0
+    lightDirX = lightDirectionX / lightLength
+    lightDirY = lightDirectionY / lightLength
+    lightDirZ = lightDirectionZ / lightLength
+    
+    # Normalize surface normal
+    normalLength = sqrt(surfaceNormal.x**2 + surfaceNormal.y**2 + surfaceNormal.z**2)
+    if normalLength == 0:
+        return 0.0
+    normalX = surfaceNormal.x / normalLength
+    normalY = surfaceNormal.y / normalLength
+    normalZ = surfaceNormal.z / normalLength
+    
+    # Step 5: Compute diffuse intensity
+    dotProduct = normalX * lightDirX + normalY * lightDirY + normalZ * lightDirZ
+    diffuse = max(0.0, dotProduct)
+    
+    return diffuse
+```
+
+## Subtopics
+
+### [Binary Gradient Shading](16370-binary-gradient-shading.md)
+Binary Gradient Shading is a technique for computing diffuse or specular lighting on binary voxel models by approximating surface normals using 6-connected (face-adjacent) neighbors. It sets itself apart from general gradient shading by restricting normal estimation to binary data, allowing for a compact 5-bit encoding of the 26 possible normal directions and enabling hardware-accelerated lookup table (LUT) based lighting calculations.
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per voxel for normal estimation and lighting calculation, assuming constant-time neighbor access and interpolation [S1, unofficial].
+- **Memory Complexity**: $O(1)$ additional memory per voxel for storing intermediate vectors and flags [S1, unofficial].
+- **Measured Performance**: Not given in the sources.
+- **Scaling**: Performance scales linearly with the number of voxels rendered [S1, unofficial].
+- **Strengths**: Provides smooth, continuous shading by using sub-voxel interpolation, reducing the "blocky" appearance of standard voxel rendering [S1, unofficial].
+- **Limitations**: Requires access to previous voxel data for interpolation, increasing memory traffic. The light source position is fixed relative to the CT scan axes, which may not be optimal for all viewing angles [S1, unofficial].
+- **When to use**: When smooth, diffuse lighting is desired for volumetric data, particularly in medical imaging contexts where surface geometry is inferred from density gradients [S1, unofficial].
+- **When not to use**: When binary voxel data is used (prefer [Binary Gradient Shading](16370-binary-gradient-shading.md)) or when hardware-accelerated LUT-based lighting is required [S1, unofficial].
+
+## Background
+The method originates from the `joshcodd/volume-rendering` project, an unofficial implementation of volume rendering techniques [S1, unofficial]. It is part of a broader effort to enhance the visual quality of volume-rendered CT scans by incorporating surface-based shading models [S1, unofficial].
+
+## Sources
+[S1] joshcodd/volume-rendering, https://github.com/joshcodd/volume-rendering, fetched 2026-10-26 (unofficial)

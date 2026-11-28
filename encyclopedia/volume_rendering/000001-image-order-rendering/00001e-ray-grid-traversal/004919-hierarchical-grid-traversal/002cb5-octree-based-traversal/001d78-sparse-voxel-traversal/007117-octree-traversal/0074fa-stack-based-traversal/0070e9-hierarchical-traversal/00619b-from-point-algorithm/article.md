@@ -1,0 +1,82 @@
+# From-Point Algorithm
+
+Also called: Implicit Occluder Occlusion Culling, Implicit Occluders
+
+## Overview
+The From-Point Algorithm is a visibility culling method for volume rendering that uses an octree of scalar field data to generate screen-space occluders, allowing the culling of invisible octree nodes before isosurface extraction [S1, unofficial]. It identifies regions where the scalar field function does not change sign relative to an isovalue to determine occlusion, exploiting the continuity of the field to define conservative visibility bounds implicitly [S1, unofficial]. Unlike sibling methods that may rely on cached polygonal meshes or complex ray-tree traversals, this approach builds occluders from coarse-to-fine traversal of the multiresolution representation, enabling interactive modification of isovalues with reduced memory consumption [S1, unofficial]. It builds on [Hierarchical Traversal](896-hierarchical-traversal.md).
+
+## How it works
+The algorithm divides into three parts: 1) Build screen-space per-pixel occluders, 2) Use hardware occlusion-culling queries to prune invisible parts of the octree, 3) Compute and render the isosurface for remaining visible nodes [S1, unofficial].
+
+### Inputs and Outputs
+*   **Input**: An octree representation of a volume where each node stores the minimum ($fc_{min}$) and maximum ($fc_{max}$) values of the scalar field within the corresponding voxels [S1, unofficial]. An isovalue $w$ [S1, unofficial].
+*   **Output**: A set of visible octree nodes for which the isosurface is computed and rendered [S1, unofficial].
+
+### Data Structures
+*   **Octree Node**: Stores $fc_{min}$ and $fc_{max}$ [S1, unofficial].
+*   **Occlusion Map**: Implemented as a depth buffer storing the depth of the 'far envelope' of sign changes [S1, unofficial].
+*   **Stencil Buffer**: One-bit buffer used to track which pixels were covered by 'below' nodes in Pass 1 [S1, unofficial].
+
+### Parameters
+*   **Isovalue ($w$)**: The scalar field threshold value [S1, unofficial].
+*   **Build Depth**: The octree depth level used to generate the implicit occluders. A level above the maximum depth can be chosen to save construction time but may lower coverage area [S1, unofficial].
+*   **Cull Depth**: The octree depth level up to which nodes are tested for occlusion [S1, unofficial].
+
+### Steps
+
+1.  **Classification**: Classify octree nodes as fully above ($fc_{min} > w$) or fully below ($fc_{max} < w$) the isosurface query value $w$ [S1, unofficial].
+2.  **Occluder Generation**: During the coarse-to-fine traversal, generate occluders as soon as it is established that a cell $A$ is entirely above $w$ ($f(A) > 0$) and a cell $B$ is entirely below $w$ ($f(B) < 0$) (or vice versa) [S1, unofficial]. Any ray intersecting both must intersect the isosurface between them [S1, unofficial].
+3.  **Pass 1 (Below Regions)**: Render all octree nodes where $fc_{max} < w$. Set depth function to `GL_LESS` to keep closest fragments. Set stencil operation to `GL_REPLACE` on both fail and zpass to flag pixels covered by these 'below' regions [S1, unofficial].
+4.  **Pass 2 (Above Regions)**: Render all octree nodes where $fc_{min} > w$. Traverse nodes front-to-back (no actual sorting required, just traversal order). Set depth function to `GL_GREATER`. Set stencil function to `GL_NOTEQUAL` with mask 1, so only pixels not covered in Pass 1 are updated [S1, unofficial].
+5.  **Reset Incomplete Pixels**: Render a polygon lying behind the octree (e.g., a slightly expanded root node) to reset depth values for pixels that were covered by 'below' nodes in Pass 1 but not by any 'above' node in Pass 2. These pixels have no sign change and thus no occluder [S1, unofficial].
+6.  **Occlusion Query**: For each octree node to be rendered, test if its bounding volume is visible using hardware occlusion queries. Only render nodes determined to be visible [S1, unofficial].
+7.  **Isosurface Extraction**: For visible nodes, compute the isosurface using an output-sensitive algorithm. Perform a top-down traversal using min-max info to avoid nodes without the isosurface. Use Marching Cubes on visible nodes [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+glClearDepth(1)
+glClearStencil(0)
+glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)
+glStencilOp(GL_KEEP, GL_REPLACE, GL_REPLACE)
+
+# Pass 1: Render 'below' regions (fc_max < w)
+glDepthFunc(GL_LESS)
+glStencilFunc(GL_ALWAYS, 1, 1)
+render_nodes_with_fc_max_less_than_w()
+
+# Pass 2: Render 'above' regions (fc_min > w)
+glDepthFunc(GL_GREATER)
+glStencilFunc(GL_NOTEQUAL, 0, 1)
+render_nodes_with_fc_min_greater_than_w()
+
+# Reset incomplete pixels (pixels covered by below but not above)
+# Render a polygon behind the octree (e.g., expanded root node)
+render_background_polygon()
+
+# Occlusion Culling and Rendering
+for node in octree:
+    if is_node_visible(node):
+        extract_and_render_isosurface(node)
+```
+
+### Edge Cases and Pitfalls
+*   **Conservative Estimate**: The occluder estimate may be too conservative to provide a practical advantage depending on the input data [S1, unofficial].
+*   **Refinement Cost**: Excessive refinement of the octree for occluder generation can be more expensive than computing and rendering a few additional invisible isosurface faces [S1, unofficial].
+*   **Low Build Depth**: If the build depth is too low (e.g., 4), no non-trivial occlusion may be found, resulting in no culling benefit [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: The algorithm accelerates isosurface extraction by skipping subtrees where the range $[fc_{min}, fc_{max}]$ does not contain $w$ [S1, unofficial].
+*   **Memory**: Reduces memory consumption compared to caching polygonal meshes [S1, unofficial].
+*   **Performance**: On a synthetic dataset ($f(x,y,z) = \sin(xyz/8) + \cos((x-2)(y-2)(z-2))$ over $[-5,5]^3$, zero isosurface, 2,023,877 triangles), average time without occlusion was 7.01 seconds. With Implicit Occluders (depth 7 build, adaptive traversal), it was more than twice as fast [S1, unofficial]. On an MRI Head dataset (493,932 triangles), time reduced from 1.12 seconds to 0.43 seconds (38% of original) with 7/6 build/cull depth, reducing faces to 69,663 (14% of total) [S1, unofficial]. On the Neghip dataset (246,194 triangles), time reduced from 0.63 seconds to 0.29 seconds [S1, unofficial].
+*   **Strengths**: Allows interactive modification of isovalues; very fast rendering path for occlusion map (disabling lighting/texturing); single triangle fans for octree cells [S1, unofficial].
+*   **Limitations**: More computationally expensive per frame than caching polygonal meshes; occluder estimate may be too conservative [S1, unofficial].
+
+## Background
+The From-Point Algorithm was proposed as a new efficient visibility algorithm that exploits visibility queries commonly available on graphics hardware to speed up the extraction and rendering of an isosurface by early elimination of large occluded regions [S1, unofficial]. It explores the framework of Wilhelms and Van Gelder with ideas similar to Livnat and Hansen [S1, unofficial]. The concept of Implicit Occluders was developed independently by Tsai et al. [S1, unofficial]. The prototype implementation was presented in C++ using OpenGL, tested on an Nvidia FX 1000 card, Pentium 4 2.8 GHz, 1.5 GB RAM, RedHat 9 [S1, unofficial].
+
+## Sources
+[S1] Implicit Occluders, https://digital.library.unt.edu/ark:/67531/metadc1411304/?q=marching cubes, fetched 2026-10-28 (unofficial)

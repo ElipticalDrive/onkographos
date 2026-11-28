@@ -1,0 +1,224 @@
+--- v001.md
++++ v002.md
+@@ -1,112 +1,138 @@
+ # GPU Laplacian Scale-Space Maxima Detection
+-
+-Also called: GPU Scale-Space Computation and Maxima Detection, Laplacian pyramid computation, Scale abstraction generation
++Also called: GPU Scale-Space Computation, GPU Scale-Space Computation and Maxima Detection, Laplacian pyramid computation, Per-iteration scale detection, Scale abstraction generation
+ 
+ ## Overview
+-This method computes a scale abstraction for volume data by detecting local maxima of the Laplacian response across a scale space on a GPU [S1, unofficial]. It solves the problem of identifying characteristic feature sizes in volumetric datasets by encoding temporal derivative information into RGBA channels, allowing maxima detection and diffusion to occur in a single pass without multiple neighbor comparisons [S1, unofficial]. It builds on [Laplacian Grid Computation](3160-laplacian-grid-computation.md) by extending the spatial Laplacian into a temporal scale-space domain.
++This method detects local maxima of the Laplacian $\nabla^2 f$ across a scale space to identify blob-like structures in volumetric data, encoding the results as a scale abstraction [S1][S2, unofficial]. It differs from sibling methods like [Scale Field Computation](6538-scale-field-computation.md) by merging the scale-space diffusion and maxima detection into a single per-iteration pass, avoiding the storage of the full scale-space pyramid in GPU memory [S1]. This approach solves the memory bottleneck associated with storing full-resolution scale fields for large volumes [S1][S2, unofficial].
+ 
+ ## How it works
+-**Inputs:** A 3D texture slice representing the current diffusion state of the volume data.
+-**Outputs:** A scale abstraction (list of maxima locations and their associated scales) and the updated 3D texture for the next iteration.
++**Inputs and Outputs:**
++*   **Input:** A 3D volume texture representing the current iteration's scalar field.
++*   **Output:** A set of 3D coordinates (and associated scale values) denoting scale maxima, stored as the "scale abstraction" on the CPU [S1][S2, unofficial].
+ 
+ **Data Structures:**
+-The algorithm uses a ping-pong buffer approach with two 3D textures to avoid simultaneous read/write conflicts. Each voxel in the texture is stored as a 4-channel pixel (RGBA). The channels encode the following values at iteration $t$:
+-*   **Red (R):** $L(x; t+1)$ — The Laplacian value at the next iteration (computed via diffusion).
+-*   **Green (G):** $\nabla^2 L(x; t+1)$ — The second derivative (Laplacian) at the next iteration.
++The algorithm uses a 3D texture for the scalar field and a 4-channel pixel buffer (RGBA) to encode state for maxima detection. The pixel encoding layout is fixed as follows [S1][S2, unofficial]:
++*   **Red (R):** $L(x; t+1)$ — The scalar value at the next iteration.
++*   **Green (G):** $\nabla^2 L(x; t+1)$ — The Laplacian at the next iteration.
+ *   **Blue (B):** $\nabla^2 L(x; t)$ — The Laplacian at the current iteration.
+ *   **Alpha (A):** $\nabla^2 L(x; t-1)$ — The Laplacian at the previous iteration.
+ 
+-**Parameters:**
+-*   $t$: The current iteration index, representing the scale level. It is incremented after each pass.
+-*   Resolution: The method may operate on a subsampled resolution (e.g., factor of 4) to fit within GPU texture memory limits [S1, unofficial].
++Here, $x$ is the spatial coordinate, $t$ is the current iteration index (scale level), and $L(x;t)$ is the diffused scalar value at iteration $t$.
+ 
+-**Steps:**
+-1.  **Initialization:** Load the initial volume data into the texture. Compute the initial Laplacian $\nabla^2 L(x; 0)$ and store it in the Blue channel. Initialize Alpha and Green channels with appropriate boundary values or zeros [G]. Set $t=1$.
+-2.  **Diffusion and Derivative Computation:** For each voxel in the current texture slice:
+-    *   Compute the diffused Laplacian value $L(x; t+1)$ using the diffusion equation.
+-    *   Compute the second spatial derivative $\nabla^2 L(x; t+1)$ using the 6-point stencil defined in [Laplacian Grid Computation](3160-laplacian-grid-computation.md).
+-    *   Shift existing values: The current $\nabla^2 L(x; t)$ (Blue) becomes the previous $\nabla^2 L(x; t-1)$ (Alpha). The newly computed $\nabla^2 L(x; t+1)$ is stored in Green. The new diffused value $L(x; t+1)$ is stored in Red.
+-3.  **Maxima Detection:** Compare the Laplacian value at the current iteration (Blue channel, $\nabla^2 L(x; t)$) against the Laplacian values of its spatial neighbors at iterations $t-1$ (Alpha), $t$ (Blue), and $t+1$ (Green).
+-    *   If $\nabla^2 L(x; t)$ is the maximum among these values, the voxel is identified as a scale-space maximum.
+-    *   Write the location and scale ($t$) of this maximum to the output scale abstraction.
+-4.  **Iteration:** Increment $t$. Swap the ping-pong buffers. Repeat steps 2-3 until the desired scale range is covered.
+-5.  **Backprojection (Optional):** For each detected scale-space blob, generate small slices proportional to their radii. Compute weighted contributions using blending and normalize by dividing by the sum of weights stored in a separate channel [S1, unofficial].
++**Algorithm Steps:**
++1.  **Initialization:** Load the input volume into a 3D texture. Initialize the iteration counter $t = 0$.
++2.  **Diffusion and Derivative Computation:** For each active voxel, solve the diffusion equation (Eq. 4 in [S1]) to compute the new scalar value $L(x; t+1)$ and its second spatial derivatives (Laplacian $\nabla^2 L(x; t+1)$) [S1][S2, unofficial]. This is implemented in a pixel shader [S1].
++3.  **State Encoding:** Write the computed values into the 4-channel pixel buffer according to the layout defined above. The previous iteration's Laplacian ($\nabla^2 L(x; t-1)$) is already present in the Alpha channel from the previous step, and the current Laplacian ($\nabla^2 L(x; t)$) is in the Blue channel [S1][S2, unofficial].
++4.  **Maxima Detection:** Compare the current Laplacian value (Blue channel) against the Laplacian values of its spatial neighbors at iterations $t-1$ (Alpha), $t$ (Blue), and $t+1$ (Green) [S1][S2, unofficial].
++    *   If $\nabla^2 L(x; t)$ is the maximum among these values, the pixel is identified as a scale maximum.
++    *   Write the coordinate and scale information to an output buffer [S1][S2, unofficial].
++5.  **Ping-Pong Swap:** Use a ping-pong approach with two 3D textures to avoid simultaneous read/write conflicts on the same texture slice [S1][S2, unofficial]. The output of the current iteration becomes the input for the next.
++6.  **Iteration:** Increment $t$ and repeat steps 2–5 until the desired scale range is covered [S1][S2, unofficial].
++7.  **Readback:** Read the pixels denoting scale maxima back to the CPU and store them as the scale abstraction [S1][S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def gpu_laplacian_scale_space(volume_texture, num_iterations, subsample_factor=1):
+-    # Initialize ping-pong buffers
+-    # Buffer A and Buffer B are 3D textures with RGBA channels
+-    # Initial state: Blue = Laplacian(t=0), others = 0
+-    buf_a = initialize_texture(volume_texture, subsample_factor)
+-    buf_b = create_empty_texture(buf_a.shape)
++# Assume input_volume is a 3D texture
++# output_maxima is a list of (x, y, z, t) tuples
++# scale_field is a 3D texture used for ping-pong buffering
++# prev_laplacian_texture is a 3D texture storing Laplacian values from t-1
++
++t = 0
++# Initialize prev_laplacian_texture with zeros or boundary conditions
++# Initialize scale_field with input_volume
++
++while t < max_iterations:
++    # Create temporary textures for current and next iteration
++    curr_laplacian_texture = new_3d_texture()
++    next_scalar_texture = new_3d_texture()
+     
+-    current_buf = buf_a
+-    next_buf = buf_b
+-    
+-    scale_abstraction = []
+-    
+-    for t in range(1, num_iterations + 1):
+-        # Compute next state in next_buf based on current_buf
+-        for each voxel x in current_buf:
+-            # 1. Compute diffused Laplacian L(x; t+1)
+-            # This requires the diffusion kernel and previous L values
+-            # [G] Assuming a standard Gaussian diffusion step
+-            L_next = diffuse(current_buf[x].R, current_buf.neighbors())
++    # Process each voxel in parallel (simulated here as a loop)
++    for each voxel x in volume:
++        # 1. Solve diffusion equation to get L(x; t+1)
++        # Eq. 4 from [S1] implies a Gaussian blur or heat equation step
++        L_next = solve_diffusion(scale_field[x], prev_laplacian_texture[x])
++        
++        # 2. Compute Laplacian at t+1
++        # Using 6-point stencil from parent [Laplacian Grid Computation](3160-laplacian-grid-computation.md)
++        Lap_next = compute_laplacian(next_scalar_texture, x)
++        
++        # 3. Retrieve Laplacian at t (current) and t-1 (previous)
++        # Note: In the first iteration, Lap_current might be the Laplacian of the input
++        Lap_current = compute_laplacian(scale_field, x)
++        Lap_prev = prev_laplacian_texture[x]
++        
++        # 4. Encode into RGBA buffer for next step's comparison
++        # R: L(x; t+1), G: Lap_next, B: Lap_current, A: Lap_prev
++        pixel_buffer[x] = (L_next, Lap_next, Lap_current, Lap_prev)
++        
++        # 5. Maxima Detection
++        # Check if Lap_current is max among neighbors in t-1, t, t+1
++        # Neighbors in space are checked against their respective temporal Laplacians
++        is_max = True
++        for neighbor in spatial_neighbors(x):
++            # Get Laplacian of neighbor at t-1 (Alpha), t (Blue), t+1 (Green)
++            # Note: The source [S1][S2, unofficial] implies comparing the center pixel's 
++            # current Laplacian against the neighbors' Laplacians across time.
++            # Specifically: "maximum of the Laplacian of the neighbors in iterations t-1, t and t+1"
++            # This phrasing is slightly ambiguous. Standard scale-space maxima detection 
++            # compares L(x,t) against L(x',t) for spatial neighbors x' and L(x,t') for temporal neighbors t'.
++            # The source says: "value of the Laplacian at a given iteration (Blue) is the maximum 
++            # of the Laplacian of the neighbors in iterations t-1, t and t+1 (GBA channels)".
++            # This implies a 3D spatial neighborhood check where each neighbor's temporal history is available.
+             
+-            # 2. Compute spatial Laplacian of the diffused field
+-            # Uses the 6-point stencil from Laplacian Grid Computation
+-            laplacian_next = compute_laplacian_stencil(L_next, current_buf.neighbors())
++            # Retrieve neighbor's Laplacians from the encoded buffer of the neighbor
++            n_Lap_t_minus_1 = pixel_buffer[neighbor].A
++            n_Lap_t = pixel_buffer[neighbor].B
++            n_Lap_t_plus_1 = pixel_buffer[neighbor].G
+             
+-            # 3. Shift channels
+-            # New Red: L(x; t+1)
+-            # New Green: Laplacian(x; t+1)
+-            # New Blue: Laplacian(x; t) (from current Blue)
+-            # New Alpha: Laplacian(x; t-1) (from current Alpha)
+-            next_buf[x].R = L_next
+-            next_buf[x].G = laplacian_next
+-            next_buf[x].B = current_buf[x].B
+-            next_buf[x].A = current_buf[x].A
++            # The center pixel's current Laplacian is pixel_buffer[x].B
++            # The condition is that pixel_buffer[x].B is the maximum among 
++            # the set of Laplacians: {n_Lap_t_minus_1, n_Lap_t, n_Lap_t_plus_1} for all spatial neighbors?
++            # Or does it mean L(x,t) > L(x_neighbor, t) AND L(x,t) > L(x, t+1) AND L(x,t) > L(x, t-1)?
++            # Source [S1]: "maximum of the Laplacian of the neighbors in iterations t-1, t and t+1"
++            # This suggests comparing the center's current Laplacian against the neighbors' Laplacians at all three time steps.
+             
+-            # 4. Detect Maxima
+-            # Check if Blue (current Laplacian) is max among neighbors' G, B, A
+-            is_max = True
+-            for neighbor in x.neighbors():
+-                if next_buf[neighbor].G > next_buf[x].B:
+-                    is_max = False
+-                    break
+-                if next_buf[neighbor].B > next_buf[x].B:
+-                    is_max = False
+-                    break
+-                if next_buf[neighbor].A > next_buf[x].B:
+-                    is_max = False
+-                    break
++            if pixel_buffer[x].B < n_Lap_t_minus_1 or \
++               pixel_buffer[x].B < n_Lap_t or \
++               pixel_buffer[x].B < n_Lap_t_plus_1:
++                is_max = False
++                break
++        
++        if is_max:
++            output_maxima.append((x, t))
+             
+-            if is_max:
+-                scale_abstraction.append((x, t))
+-        
+-        # Swap buffers
+-        current_buf, next_buf = next_buf, current_buf
+-        
+-    return scale_abstraction
++    # Update textures for next iteration
++    prev_laplacian_texture = curr_laplacian_texture # Or store Lap_current
++    scale_field = next_scalar_texture
++    t += 1
++
++# Readback output_maxima to CPU
+ ```
++*[G] The pseudocode clarifies the "neighbors in iterations" logic. Standard scale-space maxima detection usually compares $L(x,t)$ against $L(x',t)$ for spatial neighbors $x'$ and $L(x,t')$ for temporal neighbors $t'$. The source text explicitly mentions comparing the Blue channel (current Laplacian) against GBA channels (next, current, previous Laplacians) of the *neighbors*. This implies a 3D spatial neighborhood where each neighbor's temporal history is used. If the source meant comparing the center pixel's temporal history against its spatial neighbors' current values, the encoding would be different. Given the explicit channel mapping, the implementation checks if the center's current Laplacian is greater than the neighbors' Laplacians at $t-1, t, t+1$.]*
++
++**Parameters:**
++*   $t$: Iteration variable representing the current scale level [S2, unofficial].
++*   Resolution: The scale field may be computed at a lower resolution (e.g., subsampled by a factor of 4) to fit in GPU memory [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory Limitations:** A full-resolution $512^3$ scale field cannot fit in current GPU texture memory [S1, unofficial]. The method must be run at a lower resolution (e.g., subsampled by a factor of 4) or on sub-regions [S1, unofficial].
+-*   **Resolution Bias:** Subsampling restricts detectable feature sizes to the resolution of the scale field. Features smaller than the subsampling factor (e.g., 1-4 voxels for factor 4) are collectively detected as the smallest size [S1, unofficial].
+-*   **Boundary Conditions:** Proper handling of boundaries is required for the diffusion and Laplacian computations, especially when analyzing sub-regions [S1, unofficial].
++*   **Memory Limitations:** A full-precision $512^3$ scale field cannot fit in current GPU texture memory [S2, unofficial]. Solution: Compute at lower resolution or analyze sub-regions [S2, unofficial].
++*   **Resolution Limits:** Subsampling by a factor of 4 restricts detectable sizes; features smaller than the subsampling factor (e.g., 1-4 voxels) cannot be discerned [S2, unofficial].
++*   **Simultaneous Read/Write:** Requires a ping-pong approach to avoid conflicts [S1][S2, unofficial].
++
++## Subtopics
++
++### Feature Detectors in Scale Space
++A method to detect blobs by analyzing the behavior of derivatives of the scale space along the scale dimension, specifically detecting Laplacian maxima in both scale and space [S1]. The scale $t$ at which the blob is detected serves as the representative scale of the blob, allowing a Gaussian blob of width $t$ centered at the detected point to describe the structure's size and location [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of voxels and iterations. Each iteration involves a single pass over the volume for diffusion, Laplacian computation, and maxima detection.
+-*   **Memory Complexity:** Requires storage for two 3D textures (ping-pong buffers) plus the scale abstraction. Memory usage is proportional to the resolution of the scale field.
+-*   **Performance:** The method is designed for real-time implementation and embedding in the volume rendering process [S1, unofficial]. On an Intel Core 2 Duo 2.4 GHz with 2GB RAM and an nVidia GeForce 8800, it provides timing results comparable to CPU versions but with potential for higher throughput on GPU [S1, unofficial].
+-*   **Strengths:** Efficient single-pass computation of scale-space maxima. Avoids multiple passes for neighbor comparison by encoding temporal derivatives in RGBA channels.
+-*   **Limitations:** Limited by GPU texture memory, requiring subsampling or sub-region analysis. Subsampling reduces the ability to detect small features.
+-*   **When to Use:** When real-time or near-real-time scale-space analysis is needed for volume exploration and transfer function design. Suitable for large datasets where full-resolution scale fields are infeasible.
+-*   **When Not to Use:** When precise detection of very small features (sub-voxel or few-voxel scale) is critical and cannot be approximated by subsampling.
++*   **Time Complexity:** Linear with respect to the number of voxels and iterations, as each iteration processes the volume in a single pass [S1].
++*   **Memory Complexity:** $O(N)$ where $N$ is the number of voxels, as only one temporary volume is stored at a time, avoiding the $O(N \times S)$ cost of storing the full scale space ($S$ scales) [S1].
++*   **Performance:** Implemented on an nVidia GeForce 8800 GTX with an Intel Core 2 Duo 2.4 GHz CPU [S1].
++*   **Strengths:** Real-time capability; avoids prohibitive memory usage for large volumes [S1][S2, unofficial].
++*   **Limitations:** Detectable sizes are restricted by the resolution of the scale field if subsampled; sub-voxel detection requires analyzing sub-regions [S2, unofficial].
+ 
+ ## Background
+-The method was introduced in the paper "Size-based Transfer Functions: A New Volume Exploration Technique" [S1, unofficial]. It was developed to enable real-time scale-space computation embedded within the volume rendering pipeline. The approach leverages GPU texture memory and parallel processing to compute the scale abstraction efficiently. The authors implemented a comparable CPU version for timing comparison, demonstrating the potential of GPU acceleration for this task [S1, unofficial]. The technique encourages multi-scale exploration of large datasets by addressing the memory limitations of full-resolution scale fields through subsampling and sub-region analysis [S1, unofficial].
++The method is based on the work of Correa and Silva (2008) in "Size-based Transfer Functions: A New Volume Exploration Technique" [S1][S2, unofficial]. It builds on the principle that feature detectors can be obtained by looking at the derivatives of the scale space along the scale dimension [S1]. Unlike pyramids which subsample space and scale, this method maintains spatial resolution while varying scale through diffusion [S1].
+ 
+ ## Sources
+-[S1] Size-based Transfer Functions: A New Volume Exploration Technique, https://www.researchgate.net/publication/23456199_Size-based_Transfer_Functions_A_New_Volume_Exploration_Technique, fetched 2026-10-30 (unofficial)+[S1] Size-based Transfer Functions: A New Volume Exploration Technique, http://carloscorrea.com/docs/vis08.pdf, fetched 2026-10-29
++[S2] Size-based Transfer Functions: A New Volume Exploration Technique, https://www.researchgate.net/publication/23456199_Size-based_Transfer_Functions_A_New_Volume_Exploration_Technique, fetched 2026-10-30 (unofficial)

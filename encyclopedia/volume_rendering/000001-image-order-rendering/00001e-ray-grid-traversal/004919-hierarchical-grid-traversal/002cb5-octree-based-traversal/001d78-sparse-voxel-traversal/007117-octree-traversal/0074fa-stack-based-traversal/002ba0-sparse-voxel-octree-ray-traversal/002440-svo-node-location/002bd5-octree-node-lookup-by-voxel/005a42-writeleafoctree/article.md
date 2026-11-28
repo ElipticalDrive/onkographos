@@ -1,0 +1,134 @@
+# WriteLeafOctree
+
+Also called: Leaf Node Traversal, Brick Population
+
+## Overview
+WriteLeafOctree is a compute shader that traverses a Sparse Voxel Octree (SVO) to locate the leaf node for each input voxel, then maps the voxel's attributes into a 3D brick pool texture [S1, unofficial]. It differs from its parent, [Octree Node Lookup by Voxel](5120-octree-node-lookup-by-voxel.md), by actively populating a structured brick-based texture memory with the voxel data rather than merely returning the leaf index [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A flat fragment list (`fragmentsList`) containing voxel position and attributes (color, normal, irradiance) [S1, unofficial].
+*   **Input:** An SVO node pool (`nodesPool`) representing the tree structure [S1, unofficial].
+*   **Input:** Constant buffers (`cbInfo`, `cbBrickInfo`, `cbGroupInfo`) providing traversal parameters, brick dimensions, and thread group sizes [S1, unofficial].
+*   **Output:** Brick pool textures (`bricksPool_color`, `bricksPool_normal`, `bricksPool_irradiance`) storing the mapped voxel attributes [S1, unofficial].
+
+**Data Structures:**
+*   **Node:** `struct Node { uint brickPtr; uint childPtr; }` [S1, unofficial].
+    *   `brickPtr`: Linear index of the leaf brick in the pool [S1, unofficial].
+    *   `childPtr`: Linear index of the child node stored in the lower 30 bits; the top 2 bits are unused or serve as flags [S1, unofficial].
+*   **Voxel:** `struct Voxel { float3 pos; uint normal; uint color; }` [S1, unofficial].
+    *   `pos`: 3D position of the voxel [S1, unofficial].
+    *   `normal`: Encoded normal vector [S1, unofficial].
+    *   `color`: Encoded color value [S1, unofficial].
+
+**Parameters:**
+*   `curLevel`, `totalLevel`: Control traversal depth; `totalLevel` defines the maximum depth of the octree [S1, unofficial].
+*   `sumVoxels`: Total number of voxels to process [S1, unofficial].
+*   `curNode`: Passed via `cbInfo` but unused in the traversal initialization [S1, unofficial].
+*   `brickExtent`: 3D dimensions of each brick in the pool, passed via `cbBrickInfo` [S1, unofficial].
+*   `groupSize`: Thread group dimensions, passed via `cbGroupInfo` [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Thread Indexing:** Calculate the local voxel index for the current thread: `voxelIndex = DTid.x + DTid.y * groupSize.x * 16` [S1, unofficial].
+2.  **Bounds Check:** If `voxelIndex >= sumVoxels`, terminate the shader invocation [S1, unofficial].
+3.  **Load Voxel:** Retrieve the voxel data from the input list: `voxel = fragmentsList[voxelIndex]` [S1, unofficial].
+4.  **Initialize Traversal:** Set the current node index to the root: `index = 0` [S1, unofficial].
+5.  **Tree Traversal:** Iterate from level 0 to `totalLevel - 2` (inclusive) to navigate down the octree [S1, unofficial].
+    *   Compute the scaling factor: `tt = 2^level` [S1, unofficial].
+    *   Determine the child index along each axis using the fractional part of the scaled position: `x = floor(frac(voxel.pos.x * tt) * 2)`, `y = floor(frac(voxel.pos.y * tt) * 2)`, `z = floor(frac(voxel.pos.z * tt) * 2)` [S1, unofficial].
+    *   Update the node index by extracting the child pointer and adding the offset for the child $(x, y, z)$: `index = extractPos(nodesPool[index].childPtr) + x + y * 2 + z * 4` [S1, unofficial].
+    *   `extractPos` retrieves the lower 30 bits of `childPtr` [S1, unofficial].
+6.  **Locate Leaf Brick:** After the loop, the current `index` points to the leaf node. Extract the brick pointer: `brickIndex = nodesPool[index].brickPtr` [S1, unofficial].
+7.  **Decode Brick Coordinates:** Decompose `brickIndex` into brick-local coordinates $(bx, by, bz)$ using `brickExtent`: `bz = floor(brickIndex / (brickExtent.x * brickExtent.y))`, `brickIndex = brickIndex % (brickExtent.x * brickExtent.y)`, `by = floor(brickIndex / brickExtent.x)`, `bx = brickIndex % brickExtent.x` [S1, unofficial].
+8.  **Compute Voxel Offset within Brick:** Determine the position of the voxel within its 2x2x2 brick using `totalLevel`: `ttt = 2^(totalLevel - 2)`, `vx = floor(frac(voxel.pos.x * ttt) * 2)`, `vy = floor(frac(voxel.pos.y * ttt) * 2)`, `vz = floor(frac(voxel.pos.z * ttt) * 2)` [S1, unofficial].
+9.  **Write Attributes:** Write the voxel's attributes to the brick pool textures at the computed global brick-local coordinate $(bx \times 2 + vx, by \times 2 + vy, bz \times 2 + vz)$: `bricksPool_color[uint3(bx*2+vx, by*2+vy, bz*2+vz)] = voxel.color`, repeated for normal and irradiance [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def frac(x):
+    return x - math.floor(x)
+
+class uint3:
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+
+def extractPos(childPtr):
+    return childPtr & 0x3FFFFFFF
+
+def main(DTid, nodesPool, fragmentsList, bricksPool_color, bricksPool_normal, bricksPool_irradiance, cbInfo, cbBrickInfo, cbGroupInfo):
+    # 1. Calculate thread-local voxel index
+    voxelIndex = DTid.x + DTid.y * cbGroupInfo.groupSize.x * 16
+    
+    # 2. Check bounds
+    if voxelIndex >= cbInfo.sumVoxels:
+        return
+
+    # 3. Load voxel data
+    voxel = fragmentsList[voxelIndex]
+    
+    # 4. Initialize octree traversal index to root
+    index = 0
+    
+    # 5. Iterate through octree levels to find leaf node
+    for level in range(cbInfo.totalLevel - 1):
+        tt = 2 ** level
+        x = int(frac(voxel.pos.x * tt) * 2)
+        y = int(frac(voxel.pos.y * tt) * 2)
+        z = int(frac(voxel.pos.z * tt) * 2)
+        
+        # Update index: extract child pointer and add offset
+        index = extractPos(nodesPool[index].childPtr) + x + y * 2 + z * 4
+        
+    # 6. Extract leaf brick pointer
+    brickIndex = nodesPool[index].brickPtr
+    
+    # 7. Decode brick coordinates from brickIndex using brickExtent
+    bx_extent = cbBrickInfo.brickExtent.x
+    by_extent = cbBrickInfo.brickExtent.y
+    bz = brickIndex // (bx_extent * by_extent)
+    brickIndex %= (bx_extent * by_extent)
+    by = brickIndex // bx_extent
+    bx = brickIndex % bx_extent
+    
+    # 8. Compute voxel position within the brick using totalLevel
+    ttt = 2 ** (cbInfo.totalLevel - 2)
+    vx = int(frac(voxel.pos.x * ttt) * 2)
+    vy = int(frac(voxel.pos.y * ttt) * 2)
+    vz = int(frac(voxel.pos.z * ttt) * 2)
+    
+    # 9. Write voxel attributes to brick pool textures
+    target = uint3(bx * 2 + vx, by * 2 + vy, bz * 2 + vz)
+    bricksPool_color[target] = voxel.color
+    bricksPool_normal[target] = voxel.normal
+    bricksPool_irradiance[target] = 11111
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The use of `frac` and floating-point multiplication can introduce precision errors for voxels near brick boundaries or at high octree depths [G]. Ensure that `voxel.pos` is normalized or consistently scaled relative to the octree's world space to avoid misalignment [G].
+*   **Boundary Conditions:** The loop runs up to `totalLevel - 1` [S1, unofficial]. If `totalLevel` is 0 or 1, the loop may not execute as expected, potentially leaving `index` at the root [G]. Validate that `totalLevel` is sufficient to reach leaf nodes for the given voxel resolution [G].
+*   **Hardcoded Irradiance:** The irradiance value is hardcoded to `11111` in the source implementation [S1, unofficial].
+*   **Child Pointer Flags:** The top 2 bits of `childPtr` are ignored [S1, unofficial]. If these bits are used for flags (e.g., "is leaf"), the traversal logic must account for them to avoid misinterpreting internal nodes as leaves or vice versa [G]. The current implementation assumes `childPtr` always points to a valid child node for internal nodes [G].
+
+## Subtopics
+
+### [Voxel Color Aggregation into Brick Faces](18621-voxel-color-aggregation-into-brick-faces.md)
+Aggregates per-voxel color data from a flat fragment list into the specific geometric positions (corners, edges, faces, and center) of a 3D texture brick representing a leaf node in an SVO. It builds on [WriteLeafOctree](16593-writeleafoctree.md), which maps voxel attributes to brick coordinates. Unlike simple accumulation, this method computes averaged colors for all topological elements of a voxel unit to support higher-order interpolation or ray-tracing queries that sample these intermediate positions.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \times D)$, where $N$ is the number of voxels and $D$ is the depth of the octree (`totalLevel`) [G]. Each voxel requires a traversal from root to leaf [G].
+*   **Memory Complexity:** $O(N)$ for the input voxel list and output brick textures [G]. The SVO node pool is $O(M)$, where $M$ is the number of nodes [G].
+*   **Performance:** Performance is heavily dependent on the efficiency of the compute shader dispatch and memory bandwidth for writing to the brick textures [S1, unofficial]. The use of a fixed 2x2x2 brick size simplifies the offset calculation but may lead to fragmentation if the voxel distribution is irregular [G].
+*   **Strengths:** Simple implementation, parallelizable across voxels, efficient for dense regions where many voxels map to nearby bricks [G].
+*   **Limitations:** Requires a pre-constructed SVO [G]. The hardcoded irradiance value limits its general applicability [S1, unofficial]. Precision issues with floating-point arithmetic may cause artifacts in high-resolution scenes [G].
+
+## Background
+WriteLeafOctree originates from the provided source code [S1, unofficial]. It serves as a bridge between the sparse tree structure and the brick-based rendering pipeline, allowing for efficient storage and access of voxel attributes in a texture-friendly format [S1, unofficial].
+
+## Sources
+[S1] Throbbing/SVODemo, https://github.com/Throbbing/SVODemo, fetched 2026-10-26 (unofficial)

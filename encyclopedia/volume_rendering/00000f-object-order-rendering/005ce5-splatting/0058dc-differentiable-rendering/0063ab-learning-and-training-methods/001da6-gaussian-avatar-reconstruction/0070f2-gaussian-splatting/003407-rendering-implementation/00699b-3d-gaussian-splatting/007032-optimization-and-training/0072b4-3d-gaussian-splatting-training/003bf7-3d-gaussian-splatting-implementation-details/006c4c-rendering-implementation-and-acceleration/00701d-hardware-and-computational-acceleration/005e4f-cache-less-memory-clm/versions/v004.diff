@@ -1,0 +1,247 @@
+--- v003.md
++++ v004.md
+@@ -3,159 +3,117 @@
+ 
+ ## Overview
+-Cache-Less Memory (CLM) is a system design that enables the training and rendering of large or highly detailed 3D Gaussian Splatting scenes on a single consumer-grade GPU by offloading Gaussian parameters and optimizer computation to the CPU [S1]. It solves the problem of GPU memory exhaustion in large-scale scenes by leveraging sparsity and spatial locality to minimize GPU-CPU communication overhead [S1]. Unlike sibling methods that rely on complex multi-GPU sharding or SSD-based tiering, CLM focuses on algorithmic optimizations like attribute-wise offloading, microbatch pipelining, and precise caching to hide latency and reduce active memory footprint [S1][S2, unofficial].
++Cache-Less Memory (CLM) is a system design that enables the training and rendering of large or highly detailed 3D Gaussian Splatting scenes on a single consumer-grade GPU by offloading Gaussian parameters and optimizer computation to the CPU [S1]. It solves the problem of GPU memory exhaustion in large-scene training by leveraging sparsity and spatial locality to minimize GPU-CPU communication overhead [S1]. Unlike sibling methods that focus on sorting or tiling acceleration, CLM specifically addresses memory capacity limits through attribute-wise offloading and microbatch pipelining [S1].
+ 
+ ## How it works
+-CLM operates by splitting Gaussian attributes based on their necessity for frustum culling and by overlapping communication with computation through microbatching [S1].
++CLM operates by splitting Gaussian attributes based on their necessity for frustum culling, storing only selection-critical attributes on the GPU while keeping non-critical attributes and optimizer states on the CPU [S1]. The training loop is divided into microbatches (single images) to allow overlapping communication and computation [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A set of training images/views, 3D Gaussian primitives (mean $\mu$, covariance $\Sigma$, opacity $\alpha$, spherical harmonic coefficients for color), and optimizer state (e.g., Adam moments).
+-*   **Outputs:** Updated Gaussian parameters and rendered images for the training batch.
++*   **Input:** A set of training images/views; 3D Gaussian primitives defined by position, rotation, scale, color (spherical harmonics), and opacity [S1].
++*   **Output:** Updated Gaussian parameters and rendered images [S1].
+ 
+ ### Data Structures and Layout
+-Gaussian attributes are partitioned into two sets based on memory location and access frequency [S1]:
+-1.  **Selection-Critical Attributes (GPU Memory):** Position ($\mu$), rotation ($q$), and scale ($s$). These are required for frustum culling and constitute less than 20% (10 out of 59 floats) of a Gaussian's memory footprint [S1]. They are never swapped out to CPU memory.
+-2.  **Non-Critical Attributes (CPU Memory):** Color (spherical harmonic coefficients) and opacity ($\alpha$). These are loaded into GPU memory only when required for rasterization [S1].
++Gaussian attributes are split into two sets [S1]:
++1.  **Selection-critical attributes:** Position (3 floats), Rotation (4 floats), Scale (3 floats). These are stored in GPU memory for all Gaussians to enable frustum culling without loading all Gaussians [S1]. These constitute less than 20% (10 out of 59 floats) of a Gaussian's memory footprint [S1].
++2.  **Non-critical attributes:** Color and Opacity. These are stored in CPU memory and loaded into GPU memory only when required [S1].
+ 
+-Optimizer state (Adam moments) is stored on the CPU [S1].
++### Steps
++1.  **Attribute-Wise Offload:** Store selection-critical attributes (position, rotation, scale) in GPU memory. Store non-critical attributes (color, opacity) in CPU memory [S1].
++2.  **Frustum Culling:** Run frustum culling on the GPU using only the selection-critical attributes. A Gaussian is culled if it is outside 3 standard deviations ($3\sigma$) of its distribution [S1]. This determines the set of active Gaussians $S_i$ for microbatch $i$ [S1].
++3.  **Precise Gaussian Caching:** When preparing microbatch $i+1$, identify the intersection of active Gaussians from the previous microbatch $S_i$ and the current microbatch $S_{i+1}$ [S1].
++    *   Copy Gaussians in $S_i \cap S_{i+1}$ from microbatch $i$'s GPU tensors (already in GPU memory) [S1].
++    *   Load Gaussians in $S_{i+1} \setminus S_i$ from CPU memory [S1].
++4.  **Forward/Backward Pass:** Perform forward and backward passes for microbatch $i+1$ [S1].
++5.  **Gradient Caching:** After microbatch $i$ finishes:
++    *   Transfer gradients only for Gaussians in $S_i \setminus S_{i+1}$ to CPU [S1].
++    *   Copy gradients for Gaussians in $S_i \cap S_{i+1}$ into microbatch $i+1$'s gradient buffer for accumulation [S1].
++6.  **CPU Adam Update:** Perform Adam optimizer updates on the CPU for Gaussians that are no longer active in subsequent microbatches (i.e., those in $S_i \setminus S_{i+1}$ or finalized) [S1]. This overlaps with the forward/backward GPU computation of subsequent microbatches [S1].
++7.  **Pipeline Order Optimization:** Schedule microbatches to maximize spatial locality (overlap) between consecutive microbatches [S1].
+ 
+-### Algorithm Steps
+-
+-1.  **Attribute-Wise Offload and Frustum Culling:**
+-    *   Store selection-critical attributes (position, rotation, scale) for all Gaussians in GPU memory [S1].
+-    *   Perform frustum culling on the GPU using only these attributes. A Gaussian is considered "in-frustum" if its ellipsoid (derived from scale and rotation) intersects the view frustum and is within 3 standard deviations ($3\sigma$) of the Gaussian's distribution [S1]. This threshold is standard in 3DGS implementations [S1].
+-    *   Identify the set of active Gaussians $S_i$ for the current microbatch $i$.
+-
+-2.  **Microbatch Pipelining:**
+-    *   Divide the training batch into microbatches, where each microbatch consists of a single image [S1].
+-    *   Use double-buffering to overlap communication and computation. Start the forward pass for microbatch $i+1$ as soon as the backward pass for microbatch $i$ completes [S1].
+-    *   This reduces activation memory requirements to that of a single image and hides communication overhead [S1].
+-
+-3.  **Precise Gaussian Caching (Forward Pass):**
+-    *   When loading Gaussians for microbatch $i+1$, determine the intersection $S_i \cap S_{i+1}$ and the difference $S_{i+1} \setminus S_i$ [S1].
+-    *   Copy non-critical attributes (color, opacity) for Gaussians in $S_i \cap S_{i+1}$ from microbatch $i$'s GPU tensors (which are already in GPU memory) [S1].
+-    *   Load non-critical attributes for Gaussians in $S_{i+1} \setminus S_i$ from CPU memory to GPU memory [S1].
+-    *   This avoids redundant copies and does not require additional memory beyond the double-buffering allocation [S1].
+-
+-4.  **Gradient Caching (Backward Pass):**
+-    *   After microbatch $i$ finishes, compute gradients for all active Gaussians $S_i$ [S1].
+-    *   Transfer gradients only for Gaussians in $S_i \setminus S_{i+1}$ (those not active in the next microbatch) to CPU memory [S1].
+-    *   Copy gradients for Gaussians in $S_i \cap S_{i+1}$ into microbatch $i+1$'s gradient buffer to be accumulated [S1].
+-
+-5.  **Overlapped CPU Adam Update:**
+-    *   Perform Adam optimizer updates on the CPU for Gaussians that are no longer active (i.e., in $S_i \setminus S_{i+1}$) [S1].
+-    *   This CPU computation overlaps with the forward/backward GPU computation of subsequent microbatches [S1].
+-
+-6.  **Pipeline Order Optimization:**
+-    *   Schedule microbatches to maximize spatial locality (overlap) between consecutive microbatches [S1].
+-    *   Formulate as a Traveling Salesman Problem (TSP) where nodes are microbatches and the distance between microbatch $i$ and $j$ is the symmetric difference $|S_i \oplus S_j|$ (number of non-overlapping Gaussians) [S1].
+-    *   Use stochastic local search with a greedy heuristic to find a schedule that minimizes this distance, thereby maximizing overlap and finalizing Gaussians early [S1].
++### Formulas and Parameters
++*   **Culling Threshold:** Gaussians are culled if outside $3\sigma$ of the Gaussian's distribution [S1].
++*   **TSP Formulation:** The scheduling problem is formulated as a Traveling Salesman Problem (TSP) where nodes are microbatches and the distance between microbatch $i$ and $j$ is the symmetric difference $|S_i \oplus S_j|$ [S1].
++*   **Memory Overhead:** The memory overhead of double-buffering for pipelining is independent of scene and batch size [S1].
+ 
+ ### Pseudocode
++```python
++# Initialization
++# Store selection-critical attributes (pos, rot, scale) in GPU memory for all Gaussians
++# Store non-critical attributes (color, opacity) in CPU memory
++# Initialize optimizer states on CPU
++# Define batch of images/views
++# Schedule microbatches using TSP heuristic to maximize overlap
+ 
+-```python
+-def clm_training_loop(gaussians, views, optimizer_state):
+-    # 1. Pre-compute selection-critical attributes on GPU
+-    # Selection-critical: position, rotation, scale (10 floats)
+-    # Non-critical: color, opacity (49 floats)
+-    gpu_selection_attrs = load_to_gpu(gaussians.selection_critical)
+-    cpu_non_critical_attrs = gaussians.non_critical
++for each microbatch i in batch:
++    # 1. Frustum Culling (GPU)
++    # Use selection-critical attributes in GPU memory
++    S_i = frustum_cull_gpu(selection_critical_attributes_gpu, camera_params)
+     
+-    # 2. Optimize view order using TSP heuristic
+-    # Distance metric: |S_i XOR S_j|
+-    view_order = optimize_view_order(views, gpu_selection_attrs)
++    # 2. Precise Gaussian Caching (Data Transfer)
++    # Identify intersection with previous microbatch
++    if i > 0:
++        S_prev = S_{i-1}
++        S_common = S_i ∩ S_prev
++        S_new = S_i \ S_common
++        
++        # Copy common Gaussians from previous GPU tensors
++        gpu_params_gpu[S_common] = gpu_params_prev_gpu[S_common]
++        
++        # Load new Gaussians from CPU
++        gpu_params_gpu[S_new] = cpu_params_cpu[S_new]
++    else:
++        # Load all active Gaussians from CPU
++        gpu_params_gpu[S_i] = cpu_params_cpu[S_i]
++        
++    # 3. Forward and Backward Pass (GPU)
++    # Process single image
++    loss, gradients_gpu = forward_backward_gpu(gpu_params_gpu[S_i], camera_params, image_i)
+     
+-    # 3. Initialize double buffers for GPU
+-    # Buffer A and Buffer B for non-critical attributes
+-    gpu_buffer_a = allocate_gpu_buffer(len(gaussians))
+-    gpu_buffer_b = allocate_gpu_buffer(len(gaussians))
+-    current_buffer = gpu_buffer_a
+-    next_buffer = gpu_buffer_b
+-    
+-    # 4. Process microbatches (single images)
+-    for i, view in enumerate(view_order):
+-        # A. Frustum Culling on GPU using selection-critical attrs
+-        active_indices = frustum_cull(gpu_selection_attrs, view.camera)
+-        S_i = set(active_indices)
++    # 4. Gradient Caching (Data Transfer)
++    if i > 0:
++        S_prev = S_{i-1}
++        S_common = S_i ∩ S_prev
++        S_to_cpu = S_prev \ S_common
+         
+-        # B. Prepare Non-Critical Attributes for Forward Pass
+-        if i == 0:
+-            # Load initial non-critical attrs for S_0 from CPU
+-            load_from_cpu_to_gpu(cpu_non_critical_attrs, S_i, current_buffer)
+-        else:
+-            # Precise Caching: Copy intersection from previous buffer
+-            # S_{i-1} is the active set of the previous microbatch
+-            intersection = S_i.intersection(S_prev)
+-            difference = S_i.difference(S_prev)
+-            
+-            # Copy overlapping Gaussians from previous buffer to current
+-            copy_gpu_to_gpu(S_prev, intersection, prev_buffer, current_buffer)
+-            
+-            # Load new Gaussians from CPU for the difference set
+-            load_from_cpu_to_gpu(cpu_non_critical_attrs, difference, current_buffer)
+-            
+-            # Swap buffers for next iteration
+-            prev_buffer = current_buffer
+-            current_buffer = next_buffer
+-            
+-        # C. Forward Pass (Rasterization)
+-        # Uses selection-critical (GPU) and non-critical (current_buffer)
+-        render_image = rasterize(view, gaussians, current_buffer)
++        # Transfer gradients for Gaussians not in next microbatch to CPU
++        cpu_gradients_cpu[S_to_cpu] = gradients_gpu[S_to_cpu]
+         
+-        # D. Backward Pass (Gradient Computation)
+-        gradients = compute_gradients(render_image, view.target, gaussians, current_buffer)
++        # Copy gradients for common Gaussians to next microbatch's buffer
++        gradients_next_buffer[S_common] = gradients_gpu[S_common]
++    else:
++        # Transfer all gradients to CPU
++        cpu_gradients_cpu[S_i] = gradients_gpu[S_i]
+         
+-        # E. Gradient Caching and Transfer
+-        if i < len(view_order) - 1:
+-            next_view = view_order[i+1]
+-            next_active_indices = frustum_cull(gpu_selection_attrs, next_view.camera)
+-            S_next = set(next_active_indices)
+-            
+-            # Transfer gradients for Gaussians leaving the active set
+-            leaving = S_i.difference(S_next)
+-            transfer_gradients_to_cpu(gradients, leaving)
+-            
+-            # Accumulate gradients for Gaussians staying in the active set
+-            staying = S_i.intersection(S_next)
+-            accumulate_gradients_in_buffer(gradients, staying, next_buffer)
+-        else:
+-            # Last microbatch: transfer all remaining gradients
+-            transfer_gradients_to_cpu(gradients, S_i)
+-            
+-        # F. CPU Adam Update (Overlapped)
+-        # Update parameters for Gaussians that are no longer active
+-        # This happens in parallel with the next microbatch's forward pass
+-        update_optimizer_on_cpu(optimizer_state, leaving)
++    # 5. CPU Adam Update (CPU)
++    # Update parameters for Gaussians that are finalized or not in next microbatch
++    # This overlaps with the next microbatch's GPU computation
++    if i == last_microbatch or S_to_cpu is not empty:
++        cpu_optimizer_update(cpu_params_cpu[S_to_cpu], cpu_gradients_cpu[S_to_cpu])
+         
+-        S_prev = S_i
+-
+-    # Finalize remaining updates
+-    update_optimizer_on_cpu(optimizer_state, S_prev)
++    # Prepare for next microbatch
++    gpu_params_prev_gpu = gpu_params_gpu
++    S_{i-1} = S_i
+ ```
+ 
+-### Parameters
+-*   **Frustum Culling Threshold:** $3\sigma$ (3 standard deviations) of the Gaussian distribution [S1].
+-*   **Microbatch Size:** 1 image per microbatch [S1].
+-
+ ### Edge Cases and Pitfalls
+-*   **Precision:** The method relies on accurate frustum culling; errors here affect the working set size and caching efficiency [S1].
+-*   **Boundaries:** The TSP scheduling is an approximation using stochastic local search; suboptimal schedules may reduce overlap benefits [S1].
+-*   **Degenerate Input:** If views are spatially disjoint, overlap $|S_i \cap S_{i+1}|$ approaches zero, increasing CPU-GPU transfer overhead [S1].
++*   **Precision:** Not given in the sources.
++*   **Boundaries:** Frustum culling relies on the $3\sigma$ threshold; deviations from this standard practice may affect culling accuracy [S1].
++*   **Degenerate Input:** Not given in the sources.
+ 
+ ## Subtopics
+ 
+ ### CPU–GPU tiering
+-A data placement strategy for scenes exceeding GPU capacity, keeping geometric data for culling on the GPU and attributes/optimizer arrays on the CPU [S2, unofficial]. CLM implements this by using microbatching, prefetching, and caching to manage the transfer [S2, unofficial]. Other variants like GS-Scale coordinate transfers through parameter forwarding and deferred updates, while TideGS uses SSD storage to load the working set onto the GPU, overlapping prefetch, computation, and writeback [S2, unofficial].
++A data placement strategy for scenes exceeding GPU capacity, keeping geometric data for culling on the GPU and attributes/optimizer arrays on the CPU [S2, unofficial]. CLM implements this by keeping geometric data on the GPU and attributes/optimizer arrays on the CPU, using microbatching, prefetching, and caching [S2, unofficial]. GS-Scale coordinates CPU–GPU transfers through parameter forwarding and deferred updates [S2, unofficial]. TideGS uses SSD storage, loading the needed working set onto the GPU and overlapping prefetch, computation, and writeback [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The scheduling problem is NP-hard (TSP), but solved heuristically in practice [S1]. The per-microbatch complexity is dominated by rasterization and gradient computation, with communication overhead hidden by pipelining [S1].
+-*   **Memory Complexity:** Memory overhead of double-buffering is independent of scene and batch size [S1]. Total GPU memory usage is proportional to the number of selection-critical attributes (all Gaussians) plus the active working set of non-critical attributes [S1].
+-*   **Measured Performance:** Allows training on single consumer-grade GPUs for scenes that would otherwise require multi-GPU setups [S1].
+-*   **Strengths:** Reduces GPU memory requirements significantly; hides communication latency; leverages spatial locality [S1].
+-*   **Limitations:** Requires efficient CPU-GPU transfer; performance depends on spatial coherence of views [S1].
+-*   **When to use:** Large-scale 3DGS training on single GPU with limited VRAM [S1].
+-*   **When not to use:** Scenes with very low spatial coherence between views, or when CPU computation is a bottleneck [S1].
++*   **Time and Memory Complexity:** The memory overhead of double-buffering for pipelining is independent of scene and batch size [S1].
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Allows training/rendering on a single consumer-grade GPU for large scenes [S1].
++*   **Strengths:** Reduces GPU memory requirements by offloading non-critical attributes and optimizer computation to the CPU; overlaps communication with computation [S1].
++*   **Limitations:** Requires CPU computation for Adam updates; relies on spatial locality for caching effectiveness [S1].
++*   **When to use:** When GPU memory is insufficient to hold all Gaussian parameters for large scenes [S1].
++*   **When not:** When CPU-GPU communication bandwidth is a bottleneck or when scenes lack spatial locality [S1].
+ 
+ ## Background
+-CLM was introduced in the paper "CLM: Removing the GPU Memory Barrier for 3D Gaussian Splatting" [S1]. It addresses the memory limitations of 3D Gaussian Splatting by offloading computation and storage to the CPU while maintaining performance through algorithmic optimizations [S1]. The design is backend-agnostic and can be ported to Vulkan [S1]. It is part of a broader effort to scale 3DGS to larger scenes, alongside methods like RoofGS, Tile-Based Comparison-Free Sorting, and Distributed Training [S1][S2, unofficial].
++CLM was introduced in the paper "CLM: Removing the GPU Memory Barrier for 3D Gaussian Splatting" [S1]. It extends effective GPU memory capacity by offloading Gaussian parameters and optimizer computation to the CPU, while leveraging observations from previous sections to reduce overhead from GPU-CPU communication and CPU computation [S1]. The design is agnostic to the rendering backend and can be ported to the Vulkan platform [S1].
+ 
+ ## Sources

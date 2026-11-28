@@ -1,0 +1,109 @@
+--- v007.md
++++ v008.md
+@@ -4,73 +4,51 @@
+ 
+ ## Overview
+-Hierarchical Gaussian Merging generates multiple levels of detail (LOD) for 3D Gaussian Splatting by iteratively clustering and averaging Gaussian parameters to reduce scene complexity [S1]. It differs from moment-matching approaches by using simple arithmetic averaging for position, opacity, and color, while preserving individual scales to maintain local geometric fidelity [S1]. This method supports virtual memory paging, allowing only relevant LOD levels to be loaded into GPU memory [S1].
++Hierarchical Gaussian Merging generates multi-resolution representations of 3D Gaussian Splatting scenes by iteratively reducing the Gaussian count through averaging-based merging [S1]. It solves the problem of rendering large Gaussian sets at varying distances by creating a hierarchy of simplified LOD levels, where each level contains half the Gaussians of the previous one [S1]. Unlike moment-matching approaches that preserve spatial covariance structure, this method uses simple arithmetic averaging for most properties, prioritizing computational simplicity and unified buffer formats over geometric fidelity [S1][S2, unofficial].
+ 
+ ## How it works
+-**Inputs:** A set of 3D Gaussians $G = \{G_i\}$, each defined by position $\mathbf{t}_i$, covariance matrix $\mathbf{\Sigma}_i$ (derived from scale $\mathbf{s}_i$ and rotation $\mathbf{R}_i$), opacity $\alpha_i$, and spherical harmonic coefficients $c_i$. A target page size $N_{max}$ and a maximum LOD depth $L_{max}$.
+-
+-**Outputs:** A hierarchy of Gaussian sets $\{G^{(0)}, G^{(1)}, \dots, G^{(L_{max})}\}$, where $G^{(0)}$ is the original set and $|G^{(l)}| \approx |G^{(l-1)}| / 2$.
++**Inputs and Outputs:**
++*   **Input:** A set of 3D Gaussians $G^{(0)}$ at Level 0, and a target maximum page size $N_{max}$ for spatial grouping.
++*   **Output:** A sequence of Gaussian sets $G^{(0)}, G^{(1)}, \dots, G^{(L)}$, where $|G^{(l+1)}| \approx \frac{1}{2}|G^{(l)}|$ [S1].
+ 
+ **Data Structures:**
++Gaussians are grouped into "pages" to manage memory and visibility checks [S1].
+ *   **Page:** A container holding up to $N_{max}$ Gaussians.
+-*   **LOD Level:** A list of Pages.
+-*   **Gaussian:** Struct containing $\mathbf{t} \in \mathbb{R}^3$, $\mathbf{s} \in \mathbb{R}^3$, $\mathbf{q} \in \mathbb{R}^4$ (quaternion), $\alpha \in \mathbb{R}$, $c \in \mathbb{R}^K$ (SH coefficients).
++*   **Gaussian:** Defined by position $\mathbf{t}$, scale $\mathbf{s}$, rotation $\mathbf{q}$, opacity $\alpha$, and color coefficients $c$ [S1][S2, unofficial].
++*   **Unified Buffer:** LOD splats use the same memory format as original splats to facilitate efficient rendering [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Page Assignment:** Assign each Gaussian in $G^{(0)}$ to a page based on spatial proximity to mesh faces or spatial hashing [S1]. If a page exceeds $N_{max}$, subdivide the underlying mesh geometry to redistribute Gaussians [S1].
+-2.  **LOD Generation Loop:** For each level $l$ from 1 to $L_{max}$:
+-    a. Group Gaussians from level $l-1$ into clusters $C_k$. The number of clusters is approximately half the number of Gaussians in $l-1$. Clustering is typically spatial [S1][S2, unofficial].
+-    b. For each cluster $C_k$, compute the merged Gaussian $G'_k$:
+-       - Position: $\mathbf{t}'_k = \frac{1}{|C_k|} \sum_{G_i \in C_k} \mathbf{t}_i$ [S1].
+-       - Opacity: $\alpha'_k = \frac{1}{|C_k|} \sum_{G_i \in C_k} \alpha_i$ [S1].
+-       - Color/SH: $c'_k = \frac{1}{|C_k|} \sum_{G_i \in C_k} c_i$ [S1].
+-       - Scale: The source states merging is done with an average for all properties *but* their scale [S1]. This implies scales are either preserved individually (not merged) or handled via a different rule not specified in the text. Given the context of "merging," preserving individual scales in a multi-resolution context is ambiguous. However, standard LOD generation usually requires a single representative. If scales are not averaged, the representative Gaussian retains the scale of one member or the maximum scale. The text explicitly excludes scale from the averaging rule [S1]. We assume the scale is either not merged (keeping multiple scales per cluster, which contradicts the single Gaussian output) or the text implies scale is handled separately. Given the constraint "average for all properties but their scale," and the goal of a single Gaussian, the most logical implementation for a *single* representative is to either keep the scale of the centroid Gaussian or average it. However, strict adherence to "average... but scale" suggests scale is *not* averaged. In many LOD systems, scale is also averaged. The source is specific. We note this ambiguity [S1]. *Correction*: If the output is a single Gaussian, and scale is not averaged, the method is ill-defined unless a selection rule is applied. The source does not provide a selection rule. We state that scale handling is not defined by averaging [S1].
+-    c. Store $G'_k$ in level $l$.
++1.  **Page Assignment:**
++    *   Initially, assign each mesh face a separate page [S1].
++    *   Assign each Gaussian to the page of the nearest mesh face [S1].
++    *   If a page exceeds $N_{max}$, subdivide the corresponding mesh face (e.g., by adding a vertex at an edge midpoint) and reassign Gaussians [S1].
++    *   Repeat subdivision until all pages are within capacity. To prevent thin triangles, rotate the vertex order and choose different edges for subsequent subdivisions [S1].
+ 
+-**Pseudocode:**
+-```python
+-def generate_lod(gaussians, max_page_size, max_levels):
+-    lod_levels = [gaussians]
+-    current_gaussians = gaussians
+-    
+-    for level in range(1, max_levels + 1):
+-        # Cluster Gaussians spatially
+-        clusters = spatial_cluster(current_gaussians, target_count=len(current_gaussians) // 2)
+-        
+-        next_level_gaussians = []
+-        for cluster in clusters:
+-            # Arithmetic average for position, opacity, color
+-            t_avg = mean([g.t for g in cluster])
+-            alpha_avg = mean([g.alpha for g in cluster])
+-            c_avg = mean([g.c for g in cluster])
+-            
+-            # Scale handling: Source says "average for all properties but their scale" [S1]
+-            # Implementation detail: Scale is not averaged. 
+-            # [G] Assuming scale is taken from the Gaussian closest to the centroid 
+-            # or the maximum scale to preserve visibility, as no rule is given.
+-            # This is a gap in the source definition.
+-            s_rep = cluster[0].s 
+-            
+-            # Construct merged Gaussian
+-            merged_g = Gaussian(t=t_avg, s=s_rep, alpha=alpha_avg, c=c_avg)
+-            next_level_gaussians.append(merged_g)
+-            
+-        lod_levels.append(next_level_gaussians)
+-        current_gaussians = next_level_gaussians
+-        
+-    return lod_levels
+-```
++2.  **LOD Generation (Merging):**
++    *   For each level $l$ from $0$ to $L-1$:
++        *   Group Gaussians from $G^{(l)}$ into clusters (typically one cluster per page or spatial unit) [S1].
++        *   For each cluster, compute the representative Gaussian $G'_{new}$ for $G^{(l+1)}$ by averaging properties [S1]:
++            *   Position: $\mathbf{t}' = \frac{1}{N} \sum_{i=1}^{N} \mathbf{t}_i$
++            *   Opacity: $\alpha' = \frac{1}{N} \sum_{i=1}^{N} \alpha_i$
++            *   Color: $c' = \frac{1}{N} \sum_{i=1}^{N} c_i$
++            *   Rotation: $\mathbf{q}' = \text{Normalize}\left(\frac{1}{N} \sum_{i=1}^{N} \mathbf{q}_i\right)$ [G] (Standard quaternion averaging for unit quaternions)
++            *   Scale: **Not averaged.** The source explicitly states merging is done with an average for all properties *but their scale* [S1]. The specific handling of scale is not given in the sources. [G] (Typically, scale might be averaged or kept from the largest child, but this is unspecified).
++
++**Parameters:**
++*   $N_{max}$: Maximum Gaussians per page. Not given in the sources.
++*   $L$: Number of LOD levels. Determined by the halving process until a minimum count is reached.
+ 
+ **Edge Cases:**
+-*   **Scale Ambiguity:** The exclusion of scale from averaging requires a fallback strategy (e.g., max, min, or centroid selection) [S1].
+-*   **Page Subdivision:** Repeated subdivision can create thin triangles, requiring vertex rotation strategies [S1].
++*   **Scale Ambiguity:** The method explicitly excludes scale from averaging [S1]. The implementation must define how scale is derived (e.g., max, mean, or inherited). [G]
++*   **Page Subdivision:** Repeated subdivision can create degenerate thin triangles. The algorithm must manage vertex rotation and edge selection to maintain mesh quality [S1].
+ 
+ ## Operating characteristics
+-*   **Complexity:** Clustering is $O(N \log N)$ or $O(N)$ with spatial hashing. Merging is $O(N)$. Total generation is $O(N \cdot L)$.
+-*   **Memory:** Reduces memory footprint by half per LOD level [S1].
+-*   **Performance:** Faster rendering at distance due to fewer splats [S1].
+-*   **Limitations:** Arithmetic averaging can cause blurring or loss of high-frequency detail compared to moment-matching [S1]. Scale handling is not optimized [S1].
++*   **Time Complexity:** LOD generation is linear with respect to the number of Gaussians for the averaging step, plus the cost of mesh subdivision for page balancing [S1].
++*   **Memory Complexity:** Requires storing $L$ levels of Gaussians. Since each level halves the count, total memory is roughly $2 \times |G^{(0)}|$ [S1].
++*   **Strengths:** Simple implementation; unified buffer format allows efficient GPU memory management [S2, unofficial]; fast generation [S1].
++*   **Limitations:** Arithmetic averaging of position and rotation can introduce geometric artifacts and blurring, especially for large clusters or heterogeneous regions [S1]. Scale handling is undefined, potentially leading to visual inconsistencies [S1].
++*   **When to use:** When rendering performance and memory bandwidth are critical, and visual fidelity of merged splats is secondary to simplicity [S1].
+ 
+ ## Background
+-Originated in the context of virtual memory management for 3D Gaussian Splatting to enable streaming of large scenes [S1]. It provides a unified buffer approach for LOD splats [S2, unofficial].
++This method is described in the context of "Virtual memory for 3D Gaussian Splatting," which introduces page-based memory management for 3DGS [S1]. It is also referenced in the OpenSplat4D project [S2, unofficial].
+ 
+ ## Sources

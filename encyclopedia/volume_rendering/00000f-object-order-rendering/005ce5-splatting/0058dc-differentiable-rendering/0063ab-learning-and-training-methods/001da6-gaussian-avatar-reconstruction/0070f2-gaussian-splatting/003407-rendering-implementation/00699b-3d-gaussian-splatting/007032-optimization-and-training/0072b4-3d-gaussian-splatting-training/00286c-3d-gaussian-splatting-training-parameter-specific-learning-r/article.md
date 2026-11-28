@@ -1,0 +1,158 @@
+# 3D Gaussian Splatting Training > Parameter-Specific Learning Rates
+
+Also called: Per-parameter group learning rates, Adam parameter learning rates, Gaussian Optimizer Configuration, Adam Optimizer Configuration, Adam with Specific Learning Rates, 3DGS-CT Backbone Configuration, Parameter-Specific Learning Rates
+
+## Overview
+Parameter-Specific Learning Rates configures the Adam optimizer with distinct learning rates for each Gaussian attribute group to stabilize training and prevent rapid divergence [S4, unofficial][S1]. Unlike a uniform learning rate, this method assigns higher rates to attributes requiring aggressive adaptation (e.g., colours) and lower rates to stable geometric parameters (e.g., means), addressing the varying sensitivity of different Gaussian properties during differentiable rasterization [S4, unofficial].
+
+## How it works
+**Inputs:**
+- Gaussian parameters $\theta$: means $\mathbf{p}$, opacities $\alpha$, scales $\mathbf{s}$, colours $\mathbf{c}$, and optionally rotations $\mathbf{q}$ or spherical harmonics coefficients [S4, unofficial][S1].
+- Optimizer hyperparameters: base Adam settings $\beta_1=0.9$, $\beta_2=0.999$, $\epsilon=1\times10^{-15}$ [S1][S4, unofficial].
+
+**Outputs:**
+- Updated Gaussian parameters $\theta'$ after an optimization step [G].
+
+**Data Structures:**
+The optimizer maintains separate first and second moment state buffers for each parameter group. Groups are defined as lists of tensors, where each tensor contains the attribute values for all active Gaussians [G].
+
+**Numbered Steps:**
+1. **Initialization:** Initialize the Adam optimizer with a base learning rate of $0.0$ (rates are handled per group) and $\epsilon=1\times10^{-15}$ [S4, unofficial][S1]. Set $\beta_1=0.9$ and $\beta_2=0.999$ [S1].
+2. **Parameter Group Definition:** Define parameter groups with specific learning rates. The standard configuration assigns: opacities $0.00085$, scales $0.001$, colours $0.02$, means $0.00015$ [S4, unofficial]. Some implementations use pre-activation values for opacities and scales with a learning rate of $0.05$ [S4, unofficial].
+3. **Trainability Check:** Verify that all required parameters are marked as trainable. In isotropic mode, quaternions are excluded from optimization; attempting to optimize them raises a `RuntimeError` [S4, unofficial].
+4. **Optimizer Step:** For each training iteration: compute gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ via the backward pass of the differentiable rasterizer, execute `optimizer.step()`, then call `optimizer.zero_grad(set_to_none=True)` [S6, unofficial][S4, unofficial].
+5. **Cache Management:** Immediately after the optimizer step, call `torch.cuda.empty_cache()` to release unused GPU memory back to the system [S6, unofficial].
+
+**Formulas:**
+The Adam update for a parameter group $g$ with learning rate $lr_g$ is:
+$$
+\mathbf{m}_t = \beta_1 \mathbf{m}_{t-1} + (1 - \beta_1) \mathbf{g}_t
+$$
+$$
+\mathbf{v}_t = \beta_2 \mathbf{v}_{t-1} + (1 - \beta_2) \mathbf{g}_t^2
+$$
+$$
+\hat{\mathbf{m}}_t = \frac{\mathbf{m}_t}{1 - \beta_1^t}, \quad \hat{\mathbf{v}}_t = \frac{\mathbf{v}_t}{1 - \beta_2^t}
+$$
+$$
+\theta_{t+1} = \theta_t - lr_g \cdot \frac{\hat{\mathbf{m}}_t}{\sqrt{\hat{\mathbf{v}}_t} + \epsilon}
+$$
+Where $\mathbf{g}_t$ is the gradient for the group, and $\theta_t$ represents the parameters in that group (e.g., all means, all colours) [G].
+
+**Parameters with Typical Values:**
+- **Standard 3DGS [S4, unofficial]:** $lr_\alpha=0.00085$, $lr_\mathbf{s}=0.001$, $lr_\mathbf{c}=0.02$, $lr_\mathbf{p}=0.00015$.
+- **X-Gaussian Variant [S1]:** Position $lr$ starts at $1.9\times10^{-4}$ and decays exponentially to $1.9\times10^{-6}$. Point feature $lr=2\times10^{-3}$. Opacity $lr=8\times10^{-3}$. Scaling $lr=5\times10^{-3}$. Rotation $lr=1\times10^{-3}$.
+- **Gaussian-Flow Variant [S2]:** Position $lr=4\times10^{-4}$ with exponential decay of $8\times10^{-7}$. Rotation $lr=0.002$. DDDM parameters $lr=4\times10^{-4}$. Weight decay $8\times10^{-7}$ applied to all parameters.
+- **2D Gaussian Variant [S7, unofficial]:** Image-space coordinates $lr=0.001 \times \text{mean}(\text{width}, \text{height})$. Colour $lr=0.01$. Opacity $lr=0.02$. Scale $lr=0.001$. Rotation angle $lr=0.02$.
+- **Gaussian Radiance Field Variant [S9]:** Rotation $lr=2\times10^{-3}$, scaling $lr=5\times10^{-3}$, opacity $lr=1\times10^{-1}$, spherical harmonics $lr=1\times10^{-4}$. Position $lr$ exponentially interpolated between $3.2\times10^{-4}$ and $6.4\times10^{-6}$.
+
+**Edge Cases and Pitfalls:**
+- **Isotropic Mode:** If the Gaussian representation is isotropic, rotation parameters (quaternions) are not optimized. The training code must check `check_if_trainable()` to avoid `RuntimeError` [S4, unofficial].
+- **Precision:** The epsilon value is set to $1\times10^{-15}$ to prevent division by zero in the Adam update, which is critical for small gradients in opacity or scale [S1][S4, unofficial].
+- **Memory:** Frequent optimizer steps without cache management can lead to OOM errors; `torch.cuda.empty_cache()` is recommended after each step [S6, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.optim as optim
+
+def setup_optimizer(gaussians, config):
+    """
+    Setup parameter-specific Adam optimizer for 3D Gaussian Splatting.
+    
+    Args:
+        gaussians: Object containing trainable parameters (means, opacities, scales, colors, rotations).
+        config: Dictionary containing hyperparameters.
+        
+    Returns:
+        optimizer: Adam optimizer instance.
+    """
+    means = gaussians.get_means()
+    opacities = gaussians.get_opacities()
+    scales = gaussians.get_scales()
+    colors = gaussians.get_colors()
+    
+    if gaussians.is_isotropic():
+        rotations = None
+    else:
+        rotations = gaussians.get_rotations()
+        
+    lr_means = 0.00015
+    lr_opacities = 0.00085
+    lr_scales = 0.001
+    lr_colors = 0.02
+    lr_rotations = 0.001
+    
+    param_groups = [
+        {'params': means, 'lr': lr_means},
+        {'params': opacities, 'lr': lr_opacities},
+        {'params': scales, 'lr': lr_scales},
+        {'params': colors, 'lr': lr_colors},
+    ]
+    
+    if rotations is not None:
+        param_groups.append({'params': rotations, 'lr': lr_rotations})
+        
+    optimizer = optim.Adam(param_groups, lr=0.0, eps=1e-15, betas=(0.9, 0.999))
+    
+    return optimizer
+
+def training_step(gaussians, optimizer, loss):
+    """
+    Perform one optimization step.
+    """
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+    torch.cuda.empty_cache()
+    
+    return loss
+```
+
+## Subtopics
+
+### [BOGausS Optimizer](9298-bogauss-optimizer.md)
+BOGausS (Better Optimized Gaussian Splatting) is a modified Stochastic Gradient Descent optimizer designed to ensure unbiased state estimation for sparsely-viewed and split Gaussians in 3D Gaussian Splatting training. It addresses the performance degradation caused by biased moment estimates in standard Adam when Gaussians are occluded or rarely updated. It sets itself apart by using Gaussian-dependent time steps and precision-aware scaling factors derived from reconstruction confidence intervals, rather than global iteration counts and uniform learning rates.
+
+### Optimizer Step & GPU Cache Management
+This variant emphasizes the operational sequence of the optimizer step and memory management. It specifies that `gaussians.optimizer.step()` must be followed immediately by `gaussians.optimizer.zero_grad(set_to_none=True)` and `torch.cuda.empty_cache()` to release unused GPU memory back to the system [S6, unofficial].
+
+### 2D Gaussian Optimization
+This variant optimizes 2D Gaussian primitives in image space using the Adam optimizer [S7, unofficial]. It adds 20% of new Gaussian primitives every 200 iterations and prunes those with opacity below 0.005 or covering fewer than 25 pixels [S7, unofficial]. Learning rates are scaled by image dimensions: coordinates $lr = 0.001 \times \text{mean}(\text{width}, \text{height})$, colour $lr = 0.01$, opacity $lr = 0.02$, scale $lr = 0.001$, and rotation angle $lr = 0.02$ [S7, unofficial].
+
+### 2D Gaussian Primitive Optimization
+A specific implementation of 2D Gaussian optimization that includes clustering of sampling pixels to remove foreground/background before projection [S7, unofficial]. It calculates the initial value of parameter $T$ for supplementary Gaussians as $T = \frac{7\bar{\theta}_i}{\pi}$, constrained to $[0.01, 1.0]$ [S7, unofficial].
+
+### Direct Gradient Descent Refinement (Adam)
+This variant keeps Gaussian centers fixed during all updates and uses a single Adam learning rate of $0.01$ [S8, unofficial]. On ETH3D, Adam refinement improves PSNR by $0.02$ dB compared to the feed-forward baseline [S8, unofficial].
+
+### Gaussian Radiance Field Optimization Configuration
+This variant uses weights $\lambda_1=1, \lambda_2=99$ and applies sigmoid activation to opacity and exponential activation to scaling to enhance optimization stability [S9]. It converges after 100 iterations and runs on a single GPU with 8GB VRAM [S9].
+
+### Gaussian Optimization with Activation Constraints
+This variant applies a sigmoid activation function to the opacity of Gaussians and an exponential activation function to the scaling of Gaussians to enhance optimization stability, as employed in the vanilla 3DGS [S9]. It uses spatial hashing to fast update spatial relations with sample points during deformation iterations [S9].
+
+## Operating characteristics
+- **Time Complexity:** The optimization step is $O(N)$ with respect to the number of Gaussians $N$, as Adam updates are element-wise operations on the parameter tensors [G].
+- **Memory Complexity:** $O(N)$ for storing the parameters and their first/second moment estimates. The use of `set_to_none=True` in `zero_grad` helps mitigate memory fragmentation [S6, unofficial].
+- **Performance:** Using distinct learning rates stabilizes training, preventing the rapid divergence often seen with uniform high learning rates on sensitive parameters like colours or scales [S4, unofficial].
+- **Strengths:** Improves convergence stability; allows fine-tuning of geometric vs. photometric attributes independently [S4, unofficial][S1].
+- **Limitations:** Requires careful tuning of per-group rates; different variants (e.g., X-Gaussian vs. Standard 3DGS) use significantly different values, making transfer of settings non-trivial [S1][S4, unofficial].
+- **When to use:** Standard 3DGS training where stability is prioritized over speed; scenes with high dynamic range or complex lighting where colour convergence is slow [S4, unofficial].
+- **When not to use:** When using variants like BOGausS that require adaptive, Gaussian-dependent learning rates [S1].
+
+## Background
+Parameter-specific learning rates were adopted in 3D Gaussian Splatting implementations to handle the disparate convergence speeds of different Gaussian attributes [S4, unofficial]. The Adam optimizer with $\beta_1=0.9, \beta_2=0.999, \epsilon=10^{-15}$ serves as the standard baseline [S1]. Variants like X-Gaussian [S1], Gaussian-Flow [S2], and 2D Gaussian methods [S7, unofficial] adapt these rates for specific domains, while activation constraints (sigmoid for opacity, exponential for scaling) are applied to enhance optimization stability [S9].
+
+## Sources
+[S1] Radiative Gaussian Splatting for Efficient X-Ray Novel View Synthesis, https://doi.org/10.1007/978-3-031-73232-4_16, fetched 2026-10-26
+[S2] Gaussian-Flow: 4D Reconstruction with Dynamic 3D Gaussian Particle, https://doi.org/10.1109/cvpr52733.2024.01997, fetched 2026-10-26
+[S3] Projection-Volume Fidelity Divergence: Diagnosing and Controlling Optimization Drift in Sparse-View 3D Gaussian Tomography, https://doi.org/10.48550/arXiv.2606.22525, fetched 2026-10-27 (unofficial)
+[S4] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)
+[S5] Material and Lighting Reconstruction for Complex Indoor Scenes with Texture-space Differentiable Rendering, https://doi.org/10.2312/sr.20211292, fetched 2026-10-29
+[S6] Yang-SyZng/AVM-GS, https://github.com/Yang-SyZng/AVM-GS, fetched 2026-10-27 (unofficial)
+[S7] Augmented Radiance Field: A General Framework for Enhanced Gaussian Splatting, https://doi.org/10.48550/arXiv.2602.19916, fetched 2026-10-30 (unofficial)
+[S8] InfiniSplat v2: Analyzing and Improving Feed-Forward 3DGS from Any Views, https://arxiv.org/abs/2610.20341, fetched 2026-10-29 (unofficial)
+[S9] As-Rigid-As-Possible Deformation of Gaussian Radiance Fields, https://doi.org/10.1109/TVCG.2025.3555404, fetched 2026-10-30

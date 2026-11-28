@@ -1,0 +1,300 @@
+--- v006.md
++++ v007.md
+@@ -4,168 +4,165 @@
+ 
+ ## Overview
+-Camera Pose Transformation constructs the spatial relationship between a camera and a scene by applying rotation and translation operations to define the camera's extrinsic parameters. It solves the problem of mapping points from world coordinates to camera coordinates (or vice versa) by establishing the viewing geometry. It differs from [View Matrix Construction](1644-view-matrix-construction.md) by focusing on the specific algebraic manipulation of pose vectors and matrices (often within the Lie group SE(3)) rather than the geometric construction of basis vectors from look-at parameters. It differs from [General Perspective Transformation](1845-general-perspective-transformation.md) by handling the rigid-body motion (SE3) rather than the projective mapping to image plane.
++Camera Pose Transformation applies rigid body transformations—specifically rotation and translation—to camera coordinates or scene points to define the camera's position and orientation in 3D space. It solves the problem of mapping between different coordinate systems (e.g., world-to-camera vs. camera-to-world) and adjusting camera parameters for specific rendering pipelines. It differs from [View Matrix Construction](1644-view-matrix-construction.md) by focusing on the algebraic manipulation of pose components (rotation matrices and translation vectors) rather than constructing the final view matrix from basis vectors. It differs from [Rigid Body Transformation (SE3)](11475-rigid-body-transformation-se3.md) by often operating on specific subsets of the transformation (e.g., rotation only or translation only) or handling format conversions between pose representations.
+ 
+ ## How it works
+-**Inputs:**
+-1.  **Pose Representation:** A camera pose $P$, typically represented as a $3 \times 4$ matrix $[R_p \ t_p]$ where $R_p \in SO(3)$ is the rotation matrix and $t_p \in \mathbb{R}^3$ is the translation vector [S1]. Alternatively, inputs may be raw rotation angles and translation offsets [S2, S3, unofficial].
+-2.  **Transformation Parameters:**
+-    *   Rotation angle $\theta$ (e.g., around Y-axis) [S2, S3, unofficial].
+-    *   Translation offset vector $\vec{d}$ [S3, unofficial].
+-    *   Or, continuous time-dependent angular velocity $\omega(t)$ and linear velocity $v(t)$ for dynamic poses [S5].
+-    *   Or, world-to-camera parameters $(R_{wc}, t_{wc})$ requiring conversion to camera-to-world [S6].
++The method encompasses several distinct operations depending on the context: basic axis-aligned rotation, coordinate offsetting, and format conversion between world-to-camera and camera-to-world representations.
+ 
+-**Outputs:**
+-*   A transformed camera pose matrix $P'$ (usually $3 \times 4$ or $4 \times 4$ homogeneous) [S1, S6].
+-*   Transformed coordinates in object/camera space [S4, S3, unofficial].
++### Inputs and Outputs
++- **Inputs**: 
++  - A point $p \in \mathbb{R}^3$ or a pose matrix $P \in \mathbb{R}^{3 \times 4}$ [S1][S3, unofficial].
++  - Rotation angle $\theta \in \mathbb{R}$ [S2, unofficial].
++  - Translation vector $t \in \mathbb{R}^3$ [S1][S3, unofficial].
++  - Rotation matrix $R \in SO(3)$ [S1, S5].
++- **Outputs**: 
++  - Transformed point $p' \in \mathbb{R}^3$ [S3, unofficial].
++  - Transformed pose $P' \in \mathbb{R}^{3 \times 4}$ [S1, S5].
+ 
+-**Data Structures:**
+-*   **SE(3) Pose:** Defined as the Lie group $SE(3) = \left\{ \begin{bmatrix} R & t \\ 0^T & 1 \end{bmatrix} \in \mathbb{R}^{4 \times 4} \mid R \in SO(3), t \in \mathbb{R}^3 \right\}$ [S1]. In practice, the last row is often dropped, storing $P = [R_p \ t_p] \in \mathbb{R}^{3 \times 4}$ [S1].
+-*   **Skew-Symmetric Matrix:** For velocity integration, $[\omega(t)]_\times \in \mathbb{R}^{3 \times 3}$ is constructed from $\omega(t) = [\omega_x, \omega_y, \omega_z]^T$:
+-    $$ [\omega]_\times = \begin{bmatrix} 0 & -\omega_z & \omega_y \\ \omega_z & 0 & -\omega_x \\ -\omega_y & \omega_x & 0 \end{bmatrix} $$ [S5].
++### Data Structures
++- **Pose Representation**: Camera poses are described by the Lie group $SE(3)$, defined as:
++  $$ SE(3) = \left\{ \begin{bmatrix} R & t \\ 0^T & 1 \end{bmatrix} \in \mathbb{R}^{4 \times 4} \mid R \in SO(3), t \in \mathbb{R}^3 \right\} $$
++  where $R$ is the rotation matrix and $t$ is the translation vector [S1].
++- **Compact Pose**: The last row of the Lie group is dropped, so camera poses $P$ are represented as:
++  $$ P = \{ [R_p \ t_p] \in \mathbb{R}^{3 \times 4} \mid R_p \in SO(3), t_p \in \mathbb{R}^3 \} $$
++  [S1].
+ 
+-**Steps:**
++### Steps and Formulas
+ 
+-1.  **Initialize Pose:** Start with the base pose $P$. If using Lie algebra noise or incremental updates, initialize $R$ and $t$ [S1].
+-2.  **Apply Rotation:**
+-    *   *Explicit Angle:* If rotating by angle $\theta$ around a specific axis (e.g., Y-axis), apply the standard 2D rotation matrix to the relevant components of the point or rotation matrix [S2, S3, unofficial]. For a Y-rotation of a point $p$:
+-        $$ p'_y = \cos(\theta) p_y + \sin(\theta) p_z $$
+-        $$ p'_z = -\sin(\theta) p_y + \cos(\theta) p_z $$ [S3, unofficial].
+-    *   *Matrix Composition:* If composing poses, multiply the rotation matrices. Note that order matters (pre-multiply for world-to-camera, post-multiply for camera-to-world relative motions) [S5, S6].
+-3.  **Apply Translation:**
+-    *   *Offset:* Add the translation vector $t$ to the position. In some coordinate systems (e.g., raymarching origins), this may involve subtracting the camera position from the world point to get object space: $p_{obj} = p_{world} - t$ [S3, S4, unofficial].
+-    *   *Conversion:* If converting from world-to-camera $(R, t)$ to camera-to-world $(R', t')$, compute $R' = R^T$ and $t' = -R^T t$ [S6].
+-4.  **Continuous Motion Integration (Optional):** If modeling continuous motion over time interval $\Delta t$ from $t$ to $t+l$:
+-    *   Predict velocities $\omega(t), v(t)$ using a network or function [S5].
+-    *   Integrate rotation using Euler method: $R_{t \to t+l} = \prod_{u=0}^{U-1} \psi(\omega(t+u\Delta t)\Delta t)$, where $\psi$ converts angle to rotation matrix [S5].
+-    *   Integrate translation: $t_{t \to t+l} = \sum_{u=0}^{U-1} v(t+u\Delta t)\Delta t$ [S5].
+-5.  **Coordinate Space Transformation (Optional):** To transform camera direction/position into object space for shaders:
+-    *   Compute inverse model matrix $M_{inv}$ [S4, unofficial].
+-    *   Apply $M_{inv}$ to world-space camera direction and position vectors [S4, unofficial].
++#### 1. Axis-Aligned Rotation (RotateX/Y/Z)
++Rotates a shape or point around a specific axis (e.g., x-axis) in the plane perpendicular to that axis [S2, unofficial].
+ 
+-**Pseudocode:**
++**Steps**:
++1. Take input point $p = [x, y, z]^T$ and rotation angle $\theta$ [S2, unofficial].
++2. Apply the 2D rotation matrix to the components perpendicular to the rotation axis. For rotation around the Y-axis by angle $\theta$ (as seen in [S3, unofficial]):
++   $$ y' = \cos(\theta) y + \sin(\theta) z $$
++   $$ z' = -\sin(\theta) y + \cos(\theta) z $$
++   $$ x' = x $$
++   [S3, unofficial].
++3. Return transformed point $p'$ [S3, unofficial].
+ 
++**Pseudocode**:
+ ```python
+-import math
+-import numpy as np
+-
+-def rotate_y_axis(point, angle):
++def rotate_y(p, theta):
+     """
+-    Rotates a 3D point around the Y-axis by a given angle.
+-    Based on [S3, unofficial].
++    Rotates point p around the Y-axis by angle theta.
++    p: list or array of 3 floats [x, y, z]
++    theta: float, rotation angle in radians
+     """
+-    x, y, z = point
+-    cos_a = math.cos(angle)
+-    sin_a = math.sin(angle)
++    x, y, z = p
++    cos_t = math.cos(theta)
++    sin_t = math.sin(theta)
+     
+-    # Apply 2D rotation to y and z components
+-    new_y = cos_a * y + sin_a * z
+-    new_z = -sin_a * y + cos_a * z
++    # Apply rotation to y and z components
++    y_new = cos_t * y + sin_t * z
++    z_new = -sin_t * y + cos_t * z
+     
+-    return [x, new_y, new_z]
+-
+-def transform_pose_to_camera_space(world_to_camera_R, world_to_camera_t):
+-    """
+-    Converts world-to-camera pose parameters to camera-to-world pose parameters.
+-    Based on [S6].
+-    Input: R (3x3), t (3x1) representing world-to-camera.
+-    Output: R_cam_to_world (3x3), t_cam_to_world (3x1).
+-    """
+-    # Inverse of rotation is transpose
+-    R_cam_to_world = np.transpose(world_to_camera_R)
+-    
+-    # Translation conversion: t' = -R^T * t
+-    t_cam_to_world = -np.dot(R_cam_to_world, world_to_camera_t)
+-    
+-    return R_cam_to_world, t_cam_to_world
+-
+-def integrate_continuous_motion(omega_t, v_t, dt):
+-    """
+-    Integrates continuous camera motion over a small time step dt.
+-    Based on [S5].
+-    """
+-    # Construct skew-symmetric matrix for omega
+-    omega = np.array(omega_t)
+-    omega_skew = np.array([
+-        [0, -omega[2], omega[1]],
+-        [omega[2], 0, -omega[0]],
+-        [-omega[1], omega[0], 0]
+-    ])
+-    
+-    # Update rotation: dR/dt = [omega]_x * R
+-    # Euler step: R_new = (I + [omega]_x * dt) * R_old
+-    # Note: For small dt, this approximates the exponential map
+-    I = np.eye(3)
+-    R_increment = I + np.dot(omega_skew, dt)
+-    
+-    # Update translation: dt/dt = v
+-    t_increment = np.array(v_t) * dt
+-    
+-    return R_increment, t_increment
+-
+-def apply_camera_offset(point, offset_vector):
+-    """
+-    Offsets a point by a specific vector to position the camera/scene origin.
+-    Based on [S3, unofficial].
+-    """
+-    # p = p + offset
+-    return [point[i] + offset_vector[i] for i in range(3)]
++    return [x, y_new, z_new]
+ ```
+ 
+-**Parameters:**
+-*   `angle`: Float, rotation angle in radians [S2, S3, unofficial]. Typical values depend on scene scale (e.g., 0.3 radians in [S3, unofficial]).
+-*   `offset_vector`: Float array $[x, y, z]$. Example: $[0, -1, -2.2]$ [S3, unofficial].
+-*   `noise_coefficient`: Float, magnitude of Lie algebra noise added to poses. Example: 0.35 [S1].
+-*   `dt`: Float, time step for integration [S5].
++#### 2. Translation / Offset
++Offsets a point by a constant vector to position the camera or scene origin [S3, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Coordinate System Convention:** Confusion between world-to-camera and camera-to-world matrices is common. Ensure $t' = -R^T t$ is used when inverting [S6].
+-*   **Rotation Order:** Matrix multiplication is not commutative. Pre-multiplying vs. post-multiplying rotations changes the axis of rotation relative to the camera or world frame [S5].
+-*   **Singularity:** Euler angles can suffer from gimbal lock; using rotation matrices or quaternions (or Lie algebra integration as in [S5]) avoids this.
+-*   **Precision:** When applying small offsets (e.g., $0.02 \cos(...)$ in [S3, unofficial]), floating-point precision may affect subtle visual effects like "blobbing" or aliasing in raymarching.
++**Steps**:
++1. Take input point $p$ and offset vector $o$ [S3, unofficial].
++2. Compute $p' = p + o$ [S3, unofficial].
++3. Return $p'$ [S3, unofficial].
++
++**Example**: Offset by $[0, -1, -2.2]$ [S3, unofficial].
++
++#### 3. World-to-Camera to Camera-to-World Conversion
++Converts COLMAP's world-to-camera pose parameters into the camera-to-world transformation matrix required by formats like LLFF [S5].
++
++**Steps**:
++1. Input world-to-camera rotation $R$ and translation $t$ [S5].
++2. Compute the camera-to-world translation $t'$ using the transpose of the rotation matrix $R$ (since $R^{-1} = R^T$ for orthogonal matrices):
++   $$ t' = -R^T \cdot t $$
++   [S5].
++3. Construct the camera-to-world matrix $M$:
++   $$ M = \begin{bmatrix} R^T & t' \\ 0 & 1 \end{bmatrix} $$
++   Note: The rotation part of the camera-to-world matrix is $R^T$ [S5].
++4. Return $M$ [S5].
++
++**Pseudocode**:
++```python
++def convert_world_to_camera_to_camera_to_world(R_wc, t_wc):
++    """
++    Converts world-to-camera pose (R_wc, t_wc) to camera-to-world pose.
++    R_wc: 3x3 numpy array, rotation matrix from world to camera.
++    t_wc: 3x1 numpy array, translation vector from world to camera.
++    Returns:
++    R_cw: 3x3 numpy array, rotation matrix from camera to world.
++    t_cw: 3x1 numpy array, translation vector from camera to world.
++    """
++    # Inverse of rotation is its transpose
++    R_cw = R_wc.T
++    
++    # Translation conversion: t_cw = -R_cw * t_wc
++    # Derived from t' = -R^T * t in source [S5]
++    t_cw = -np.dot(R_cw, t_wc)
++    
++    return R_cw, t_cw
++```
++
++### Parameters
++- **angle**: A float input representing the angle of rotation in radians [S2, unofficial].
++- **offset**: A 3D vector $[x, y, z]$ for translation [S3, unofficial].
++- **noise coefficient**: In noisy pose optimization, a scalar (e.g., 0.35) used to generate 6-dimensional random normal distribution noise in the Lie algebra $se(3)$ [S1].
++
++### Edge Cases and Pitfalls
++- **Precision**: When composing poses with noise, the noise $n \in se(3)$ is generated as $n = \sigma N(0, I) \in \mathbb{R}^6$ [S1]. This corresponds to an average deviation of $30.4^\circ$ in rotation and $0.56$ in translation for $\sigma=0.35$ [S1].
++- **Cheating with Offsets**: Offsetting points in distance functions (like in [S3, unofficial]) can make the distance function mathematically incorrect for strict raymarching, requiring careful handling [S3, unofficial].
++- **Matrix Inversion**: The conversion relies on $R$ being orthogonal, such that $R^{-1} = R^T$. If $R$ is not orthogonal (e.g., due to numerical error), the conversion may be inaccurate [S5].
+ 
+ ## Subtopics
+ 
+ ### [Pose Recentering](1786-pose-recentering.md)
+-Pose Recentering transforms a set of camera poses so that their average pose becomes the identity transformation, effectively centering the scene at the origin and aligning the coordinate axes. It is chosen when the scene's coordinate system is arbitrary or misaligned with the rendering view, ensuring numerical stability and consistent lighting. Link: [Pose Recentering](1786-pose-recentering.md).
++Pose Recentering transforms a set of camera poses so that their average pose becomes the identity transformation, effectively centering the scene at the origin and aligning the coordinate axes.
+ 
+ ### [Rotation Transformation](2279-rotation-transformation.md)
+-Rotation Transformation constructs a 4×4 homogeneous rotation matrix to rotate a shape or vector around a specified axis by a given angle. It sets itself apart from [Quaternion Rotation](2302-quaternion-rotation.md) by yielding an explicit matrix representation rather than using quaternion algebra, and from [SE2 Lie Group Implementation](3144-se2-lie-group-implementation.md) by operating in 3D space rather than 2D [G]. It is used when explicit matrix composition is required for shader uniforms or GPU buffers. Link: [Rotation Transformation](2279-rotation-transformation.md).
++Rotation Transformation constructs a 4x4 homogeneous rotation matrix to rotate points or shapes around a specified axis by a given angle. It serves as a fundamental building block for constructing camera poses and deforming Signed Distance Fields (SDFs) [G]. Unlike [Quaternion Rotation](2302-quaternion-rotation.md), which operates in 3D space with unit quaternions to avoid gimbal lock, this method explicitly constructs orthogonal matrices for single axes or composes them sequentially [G]. Unlike [Rigid Body Transformation (SE3)](11475-rigid-body-transformation-se3.md), it handles orientation only, leaving translation to sibling methods like [Translation Transformation](2281-translation-transformation.md).
+ 
+ ### [Translation Transformation](2281-translation-transformation.md)
+-A geometric transformation that moves a shape by a given vector. It adjusts positional offsets without altering orientation, distinguishing it from rotation transformations [G]. It is used for simple camera positioning or shifting the scene origin. Link: [Translation Transformation](2281-translation-transformation.md).
++A geometric transformation that moves a shape by a given vector. It adjusts positional offsets without altering orientation, distinguishing it from rotation transformations [G].
+ 
+ ### [C-Arm to Camera Parameters Conversion](2589-c-arm-to-camera-parameters-conversion.md)
+-This method converts C-arm X-ray geometric parameters (Source-to-Image Distance, AP angle, lateral angle, center point, and table translation) into a camera pose defined by position, look-at point, and up vector in RAS (Right-Anterior-Superior) coordinates. It solves the problem of generating physically plausible camera matrices for digital tomosynthesis or projection rendering from high-level interventional radiology acquisition settings. It differs from generic [Rigid Body Transformation (SE3)](11475-rigid-body-transformation-se3.md) by explicitly modeling the kinematic constraints of a C-arm gantry (rotation around specific axes relative to the patient table) rather than applying arbitrary SE3 transformations. Link: [C-Arm to Camera Parameters Conversion](2589-c-arm-to-camera-parameters-conversion.md).
++This method converts C-arm X-ray geometric parameters (Source-to-Image Distance, AP angle, lateral angle, center point, and table translation) into a camera pose defined by position, look-at point, and up vector in RAS (Right-Anterior-Superior) coordinates. It solves the problem of generating physically plausible camera matrices for digital tomosynthesis or projection rendering from high-level interventional radiology acquisition settings. It differs from generic [Rigid Body Transformation (SE3)](11475-rigid-body-transformation-se3.md) by explicitly modeling the kinematic constraints of a C-arm gantry (rotation around specific axes relative to the patient table) rather than applying arbitrary SE3 transformations.
+ 
+ ### [Camera Matrix Decomposition](3164-camera-matrix-decomposition.md)
+-Decomposes a 3×4 projection matrix into an intrinsic matrix $K$, a rotation matrix $R$, and a translation vector $t$. It separates the camera's internal optical properties from its external physical pose. It is used when extracting pose from a calibrated projection matrix. Link: [Camera Matrix Decomposition](3164-camera-matrix-decomposition.md).
++Decomposes a 3×4 projection matrix into an intrinsic matrix $K$, a rotation matrix $R$, and a translation vector $t$. It separates the camera's internal optical properties from its external physical pose.
+ 
+ ### [CameraMover](8734-cameramover.md)
+-CameraMover is a utility class for constructing and incrementally updating a 4x4 extrinsic camera transformation matrix ($M_{ext}$) using sequential translations and rotations. It solves the problem of maintaining a consistent camera pose in world space by applying incremental changes to position and orientation, which are then used to generate world-space ray directions for volume rendering. It differs from sibling methods like [RotateY](1720-rotatey.md) or [Translation Transformation](2281-translation-transformation.md) by encapsulating the entire state management and matrix composition logic into a single class that supports both axis-aligned incremental moves and aiming at specific world positions. Link: [CameraMover](8734-cameramover.md).
++CameraMover is a utility class for constructing and incrementally updating a 4x4 extrinsic camera transformation matrix ($M_{ext}$) using sequential translations and rotations. It solves the problem of maintaining a consistent camera pose in world space by applying incremental changes to position and orientation, which are then used to generate world-space ray directions for volume rendering. It differs from sibling methods like [RotateY](1720-rotatey.md) or [Translation Transformation](2281-translation-transformation.md) by encapsulating the entire state management and matrix composition logic into a single class that supports both axis-aligned incremental moves and aiming at specific world positions.
+ 
+ ### [Rigid Body Transformation (SE3)](11475-rigid-body-transformation-se3.md)
+-Represents the group of rigid body motions in 3D space, combining rotation and translation. It is the mathematical foundation for camera pose representation in many SLAM and NeRF systems. Link: [Rigid Body Transformation (SE3)](11475-rigid-body-transformation-se3.md).
++Rigid Body Transformation (SE3) applies a rotation and translation to 3D points or vectors without altering their relative distances or angles, preserving the shape of the object. It solves the problem of unifying rotation and translation into a single linear operation, which is essential for composing complex camera poses and scene transforms in volume rendering. It differs from [Rotation Transformation](2279-rotation-transformation.md) and [Translation Transformation](2281-translation-transformation.md) by combining both operations into a single $4 \times 4$ matrix multiplication rather than separating them into sequential vector additions and rotations.
+ 
+-#### Camera-to-Object Space Transformation & MVP Computation
+-Precomputes model-view-projection (MVP) matrix and transforms camera direction/position into object space for use in shaders, supporting both perspective and orthographic projections. It is used in real-time rendering pipelines (e.g., Three.js/WebGL) to pass camera state to fragment shaders. It differs from standard pose transformation by integrating projection logic and shader uniform management. Steps include checking camera type (perspective/orthographic), updating shader defines, and applying the inverse model matrix to world-space camera vectors. Link: [Camera-to-Object Space Transformation & MVP Computation](2589-c-arm-to-camera-parameters-conversion.md) (Note: No specific article link provided in prompt for this variant, so it is listed as a minor variant without a child link, or linked to parent if applicable. The prompt lists it under "Minor variants". I will leave the link blank or reference the parent if no specific file is given. The prompt says "Children (for Subtopics)" and then "Minor variants". I will treat Minor Variants as subtopics without their own article links if not provided, or link to the most relevant existing one. Since no specific file name is given for this minor variant in the "Children" list, I will omit the link or use a placeholder if forced, but the instruction says "Links to other articles use the file names given below". No file name is given for this minor variant. I will omit the link.) *Correction*: The prompt structure for Subtopics says "one entry per child... and its link". For minor variants, it says "write each one under Subtopics as a '### <Name>' entry...". It does not explicitly require a link for minor variants if no article exists. I will provide the description and cite.
++### [Camera-to-Object Space Transformation & MVP Computation](12391-camera-to-object-space-transformation-mvp-computation.md)
++Precomputes model-view-projection (MVP) matrix and transforms camera direction/position into object space for use in shaders, supporting both perspective and orthographic projections.
+ 
+-#### Continuous Camera Motion Modeling
+-A method to model camera motion as continuous time-dependent angular velocity $\omega(t)$ and linear velocity $v(t)$ instead of discrete camera-to-world poses, enabling the handling of large motions by integrating relative motions over time. It is used in dynamic NeRF or video-based 3D reconstruction where camera motion is learned continuously. It differs from static pose transformation by using differential equations and integration. Link: [Continuous Camera Motion Modeling](2589-c-arm-to-camera-parameters-conversion.md) (No specific file name provided in prompt for this minor variant. I will omit the link).
++### Continuous Camera Motion Modeling
++A method to model camera motion as continuous time-dependent angular velocity $\omega(t)$ and linear velocity $v(t)$ instead of discrete camera-to-world poses, enabling the handling of large motions by integrating relative motions over time [S4].
++- **Steps**:
++  1. Predict angular velocity $\omega(t)$ and linear velocity $v(t)$ at time $t$ using an MLP $\phi_v$: $\omega(t), v(t) = \phi_v(t)$ [S4].
++  2. Obtain the camera transformation $P$ between any two frames by integrating the learned continuous camera motion ($\omega$ and $v$) over time [S4].
++- **Formula**: The relationship between camera transformation (rotation $R$, position $t$) and velocities is defined by the differential equations:
++  $$ \frac{dR}{dt} = [\omega(t)]_\times R $$
++  $$ \frac{dt}{dt} = v(t) $$
++  where $[\omega(t)]_\times \in so(3)$ is the skew-symmetric matrix of $\omega(t)$ [S4].
++- **Parameters**: $\omega(t), v(t) \in \mathbb{R}^3$: The angular velocity and linear velocity vectors at time $t$ [S4].
+ 
+-#### LLFF Camera Pose Conversion
+-A procedure to convert COLMAP's world-to-camera pose parameters into the camera-to-world transformation matrix required by the LLFF dataset format. It is used when preparing data for NeRF training with LLFF-style datasets. It specifically handles the inversion of the transformation matrix $M = \begin{bmatrix} R^T & -R^T t \\ 0 & 1 \end{bmatrix}$. Link: [LLFF Camera Pose Conversion](2589-c-arm-to-camera-parameters-conversion.md) (No specific file name provided. I will omit the link).
++### LLFF Camera Pose Conversion
++A procedure to convert COLMAP's world-to-camera pose parameters into the camera-to-world transformation matrix required by the LLFF dataset format [S5].
++- **Formula**: The translation vector in world-to-camera format $t$ is converted to camera-to-world format $t'$ using the transpose of the rotation matrix $R$: $t' = -R^T \cdot t$ [S5].
++- **Layout**: LLFF dataset components: (1) Image sequences, (2) Camera intrinsic parameters, (3) Camera extrinsic parameters (rotation matrix $R^T$ and translation vector $t'$) [S5].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ for basic rotation/translation of a single pose. $O(N)$ for processing $N$ poses. Integration of continuous motion is $O(U)$ where $U$ is the number of integration steps [S5].
+-*   **Memory Complexity:** $O(1)$ for storing a single pose ($3 \times 4$ matrix). $O(N)$ for a sequence of poses.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Scales linearly with the number of cameras/frames. Continuous motion modeling requires storing or computing velocity functions, which may increase memory if the function $\phi_v$ is complex [S5].
+-*   **Strengths:** Mathematically rigorous (SE3), handles both static and dynamic scenes, compatible with standard graphics APIs.
+-*   **Limitations:** Discrete poses may not capture smooth motion well without interpolation; continuous modeling requires training/learning of velocity fields [S5].
+-*   **When to use:** When defining camera positions for ray generation, preparing data for NeRF, or animating camera paths.
+-*   **When not to use:** When only intrinsic parameters are needed, or when using quaternions for smoother interpolation (though SE3 can be converted).
++- **Time Complexity**: Basic rotation and translation are $O(1)$ per point. Matrix conversions are $O(1)$ for fixed-size $3 \times 3$ or $3 \times 4$ matrices. Continuous motion modeling requires integration steps, scaling with the number of time steps [S4].
++- **Memory Complexity**: $O(1)$ for storing a single pose ($3 \times 4$ matrix) [S1].
++- **Strengths**: Simple and efficient for standard pose adjustments. The Lie group formulation provides a robust mathematical framework for handling noisy poses [S1].
++- **Limitations**: Discrete pose transformations may struggle with large motions in video sequences compared to continuous modeling [S4]. Offset-based transformations in SDFs can break distance function properties [S3, unofficial].
++- **When to use**: Use for standard camera positioning, coordinate system conversions (e.g., COLMAP to LLFF), and basic scene transformations. Use continuous modeling for video-based NeRF with significant camera motion [S4].
+ 
+ ## Background
+-Camera pose transformation is fundamental to computer graphics and vision. The representation of poses using the Lie group SE(3) was formalized in robotics and vision literature, with specific applications in NeRF optimization highlighted in recent works like CBARF [S1]. The use of continuous camera motion modeling for video-based 3D reconstruction was introduced in CVPR 2025 [S5]. The conversion of COLMAP outputs to LLFF format is a standard preprocessing step in the NeRF community [S6]. Early raymarching techniques used simple offset and rotation transformations for procedural geometry [S2, S3, unofficial].
++The concept of camera poses as elements of the Lie group $SE(3)$ is widely used in computer vision and robotics for representing rigid body transformations [S1]. The specific application of transforming poses for NeRF training, such as handling noisy poses (CBARF) [S1] or converting between dataset formats like LLFF [S5], has become standard in neural rendering pipelines. The use of continuous camera motion modeling for video NeRF was introduced to handle large motions that discrete pose estimation struggles with [S4]. Basic rotation and translation operations are fundamental to raymarching and SDF rendering, as demonstrated in early interactive raymarching examples [S2, S3, unofficial].
+ 
+ ## Sources
+@@ -173,5 +170,4 @@
+ [S2] PDF COS 426 Final Project Writeup Raymarching with Signed Distance Fields, https://jbaum98.github.io/cos426_final_project/writeup.pdf, fetched 2026-10-27 (unofficial)
+ [S3] Introduction to Raymarching Distance Functions, https://observablehq.com/@gre/introduction-to-raymarching-distance-functions, fetched 2026-10-29 (unofficial)
+-[S4] vidartf/unray, https://github.com/vidartf/unray, fetched 2026-10-27 (unofficial)
+-[S5] Joint Optimization of Neural Radiance Fields and Continuous Camera Motion from a Monocular Video, https://doi.org/10.1109/cvpr52734.2025.01071, fetched 2026-10-26
+-[S6] High-fidelity 3D Reconstruction of Plants using Neural Radiance Field, https://arxiv.org/abs/2311.04154v1, fetched 2026-10-27+[S4] Joint Optimization of Neural Radiance Fields and Continuous Camera Motion from a Monocular Video, https://doi.org/10.1109/cvpr52734.2025.01071, fetched 2026-10-26
++[S5] High-fidelity 3D Reconstruction of Plants using Neural Radiance Field, https://arxiv.org/abs/2311.04154v1, fetched 2026-10-27

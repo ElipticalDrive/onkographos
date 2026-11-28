@@ -1,0 +1,251 @@
+--- v001.md
++++ v002.md
+@@ -1,8 +1,8 @@
+ # SparseLeap Rasterization
+ 
+-Also called: SparseLeap, SparseLeap rasterization details
++Also called: SparseLeap rasterization details
+ 
+ ## Overview
+-SparseLeap is a method for efficient empty space skipping in very large, sparse volume data, such as terabyte-sized microscopy volumes, by exploiting hardware-accelerated rasterization to avoid hierarchy traversal on the GPU [S2, unofficial]. It solves the problem of fragmented space subdivisions making empty regions hard to skip and the infeasibility of pre-computing well-adapted space subdivisions due to frequent changes in active objects [S2, unofficial]. Unlike standard octree empty space skipping, SparseLeap scales better to large, sparse data by moving the major cost of empty space skipping into a rasterization stage that produces per-pixel lists of non-empty ray segments [S2, unofficial]. It is agnostic of the underlying data structure used for managing volume data, such as page-table hierarchies or octrees [S1, unofficial].
++SparseLeap is a method for efficient empty space skipping in very large, sparse volume data, such as terabyte-sized microscopy volumes [S2, unofficial]. It solves the problem of fragmented space subdivisions making empty regions hard to skip and the infeasibility of pre-computing well-adapted space subdivisions due to frequent changes in active objects [S2, unofficial]. It sets itself apart from its siblings by exploiting hardware-accelerated rasterization to create per-pixel ray segment lists, thereby avoiding hierarchy traversal on the GPU during the ray-casting stage [S1, unofficial]. Unlike standard octree empty space skipping, SparseLeap scales better to large, sparse data [S2, unofficial]. It is agnostic of the underlying data structure used for managing volume data (e.g., page-table hierarchies or octrees) [S1, unofficial].
+ 
+ ## How it works
+@@ -10,140 +10,124 @@
+ 
+ **Inputs and Outputs:**
+-*   **Input:** A lazily constructed occupancy-histogram tree where each node is classified as empty, non-empty, or unknown [S1, unofficial]. A set of fine-grained, view-independent bounding boxes representing the non-empty regions [S2, unofficial].
+-*   **Output:** A per-pixel ordered list of non-empty ray segments (stabbing boundary faces) for the ray-casting stage [S2, unofficial].
++*   **Input:** An occupancy-histogram tree where each node has an occupancy class (empty, non-empty, or unknown) [S1, unofficial]. The tree is lazily constructed [S1, unofficial].
++*   **Output:** A set of ray segment lists, one per pixel, identifying non-empty regions along the viewing ray [S2, unofficial].
+ 
+ **Data Structures:**
+-*   **Occupancy-Histogram Tree:** Each node holds an occupancy class:
+-    *   `empty`: The node is completely empty.
+-    *   `non-empty`: The node contains non-empty data.
+-    *   `unknown`: Information is not yet known [S1, unofficial].
+-*   **Bounding Boxes:** View-independent bounding boxes generated from the non-empty nodes of the tree [S2, unofficial].
+-*   **Ray Segment List:** For each pixel, an ordered list of bounding box faces that the viewing ray stabs, representing non-empty regions along the ray [S2, unofficial].
++1.  **Occupancy-Histogram Tree:** A hierarchical structure where each node stores an occupancy class. Leaf nodes store the class directly; non-leaf nodes determine their class via a majority vote over their occupancy histogram (the class occurring most often in all leaf nodes of its sub-tree) [S3, unofficial].
++2.  **Occupancy Geometry:** An array of bounding boxes extracted from the tree. Each emitted box stores:
++    *   Center coordinates.
++    *   Size (dimensions).
++    *   Node's occupancy class.
++    *   Parent's occupancy class [S3, unofficial].
++3.  **Ray Segment List:** A per-pixel list of ray events (entry/exit) defining intervals (segments) with associated occupancy classes [S1, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Generate Occupancy Geometry:** Construct the occupancy-histogram tree lazily during rendering. Identify nodes classified as `non-empty` [S1, unofficial].
+-2.  **Create Bounding Boxes:** Generate fine-grained, view-independent bounding boxes for the `non-empty` nodes [S2, unofficial].
+-3.  **Rasterization Stage:**
+-    *   Transform the bounding boxes into screen space [S2, unofficial].
+-    *   Rasterize the bounding boxes using hardware-accelerated rasterization [S2, unofficial].
+-    *   For each pixel, compute an ordered list of the stabbing boundary faces [S2, unofficial]. This list identifies non-empty regions along the ray [S2, unofficial].
++1.  **Occupancy Geometry Generation:**
++    *   Traverse the occupancy-histogram tree in breadth-first order, visiting child nodes in a fixed order (not visibility order) [S3, unofficial].
++    *   For the root node, set the parent occupancy class to invalid (not equal to any other class). The root always emits its bounding box [S3, unofficial].
++    *   For each visited non-leaf node, determine its occupancy class by taking the majority vote over its occupancy histogram [S3, unofficial].
++    *   For leaf nodes, use the occupancy class already stored in the node [S3, unofficial].
++    *   Compare the node's occupancy class with its parent's occupancy class.
++        *   If they are the same, skip emission.
++        *   If they are different, emit a bounding box containing the node's center, size, its own occupancy class, and its parent's occupancy class [S3, unofficial].
++    *   If the number of emitted bounding boxes exceeds a prespecified optional resource limit, stop traversal [S3, unofficial].
++
++2.  **Rasterization (Object-Order Stage):**
++    *   Rasterize the set of fine-grained, view-independent bounding boxes generated in Step 1 using hardware-accelerated rasterization [S2, unofficial].
++    *   For each pixel, compute an ordered list of stabbing boundary faces [S2, unofficial].
++    *   Convert this into a ray segment list where consecutive ray segments of the same occupancy class are merged [S3, unofficial]. This creates singly-linked lists of ray events per pixel [S1, unofficial].
+     *   Exploit frame coherence by re-using the same bounding boxes unless the set of active objects changes [S2, unofficial].
+-4.  **Ray-Casting Stage:**
++
++3.  **Ray-Casting (Image-Order Stage):**
+     *   Perform ray casting independently for each pixel [S2, unofficial].
+-    *   Use the pre-computed ray segment list to leap over empty space without hierarchy traversal [S2, unofficial].
+-    *   Sample the non-empty volume data only within the regions identified by the ray segment list [S2, unofficial].
+-5.  **Color Calculation:** Apply a simple analytical lighting model to each intersection of the ray and cell [S2, unofficial].
++    *   Use the pre-computed ray segment lists to identify non-empty regions along the ray [S2, unofficial].
++    *   Leap over empty space without hierarchy traversal by skipping segments marked as empty [S2, unofficial].
++    *   Sample the non-empty volume data only within the non-empty segments [S2, unofficial].
++
++4.  **Color Calculation:**
++    *   Apply a simple analytical lighting model to each intersection of the ray and the volume cell [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# SparseLeap Rasterization
+-
+-class OccupancyNode:
+-    def __init__(self):
+-        self.classification = "unknown" # "empty", "non-empty", "unknown"
+-
+-class SparseLeapRenderer:
+-    def __init__(self, volume_data, resolution):
+-        self.volume_data = volume_data
+-        self.resolution = resolution
+-        self.occupancy_tree = self._build_occupancy_tree()
+-        self.bounding_boxes = []
+-        self.pixel_ray_segments = []
+-
+-    def _build_occupancy_tree(self):
+-        # Lazily construct occupancy-histogram tree
+-        # Nodes are classified as empty, non-empty, or unknown
+-        # [S1, unofficial]
+-        tree = {}
+-        # Implementation details for lazy construction are not given in sources
+-        return tree
+-
+-    def _generate_bounding_boxes(self):
+-        # Generate fine-grained, view-independent bounding boxes
+-        # for non-empty nodes in the occupancy tree
+-        # [S2, unofficial]
+-        boxes = []
+-        for node in self.occupancy_tree.nodes:
+-            if node.classification == "non-empty":
+-                boxes.append(node.bounding_box)
+-        return boxes
+-
+-    def rasterize_stage(self, camera):
+-        # Exploit frame coherence: reuse bounding boxes if active objects unchanged
+-        # [S2, unofficial]
+-        if not self.bounding_boxes or self.active_objects_changed():
+-            self.bounding_boxes = self._generate_bounding_boxes()
+-
+-        # Transform bounding boxes to screen space
+-        screen_boxes = [box.transform_to_screen(camera) for box in self.bounding_boxes]
+-
+-        # Rasterize to create per-pixel ray segment lists
+-        # Compute ordered list of stabbing boundary faces for each pixel
+-        # [S2, unofficial]
+-        self.pixel_ray_segments = []
+-        for pixel in self.resolution:
+-            stabbing_faces = []
+-            for box in screen_boxes:
+-                if box.stabs_pixel(pixel):
+-                    stabbing_faces.append(box.face)
+-            stabbing_faces.sort() # Order by distance along ray
+-            self.pixel_ray_segments.append(stabbing_faces)
+-
+-    def ray_casting_stage(self, camera):
+-        # Perform ray casting independently for each pixel
+-        # Leap over empty space using pre-computed ray segment lists
+-        # [S2, unofficial]
+-        for pixel_idx, ray_segments in enumerate(self.pixel_ray_segments):
+-            ray = camera.get_ray(pixel_idx)
+-            color = Color(0, 0, 0)
+-            for segment in ray_segments:
+-                # Sample non-empty volume data in this segment
+-                # [S2, unofficial]
+-                sample = self.volume_data.sample(ray, segment.start, segment.end)
+-                # Apply simple analytical lighting model
+-                # [S2, unofficial]
+-                light_color = self.analytical_lighting(sample, ray)
+-                color = self.blend(color, light_color)
+-            self.output_image.set_pixel(pixel_idx, color)
+-
+-    def analytical_lighting(self, sample, ray):
+-        # Simple analytical lighting model
+-        # [S2, unofficial]
+-        # Implementation details not given in sources
+-        return sample.intensity
+-
+-    def active_objects_changed(self):
+-        # Check if the set of active objects has changed
+-        # [S2, unofficial]
+-        # Implementation details not given in sources
+-        return False
++def sparse_leap_render(occupancy_tree, camera, volume_data):
++    # Step 1: Generate Occupancy Geometry
++    bounding_boxes = []
++    stack = [(occupancy_tree.root, None)] # (node, parent_class)
++    
++    while stack:
++        node, parent_class = stack.pop(0) # Breadth-first traversal
++        
++        # Determine current node's class
++        if node.is_leaf:
++            current_class = node.occupancy_class
++        else:
++            current_class = get_majority_vote(node.occupancy_histogram)
++            
++        # Geometry Emission Rule
++        if current_class != parent_class:
++            box = {
++                'center': node.center,
++                'size': node.size,
++                'my_class': current_class,
++                'parent_class': parent_class
++            }
++            bounding_boxes.append(box)
++            
++        # Add children to stack
++        for child in node.children:
++            stack.append((child, current_class))
++            
++    # Step 2: Rasterization
++    # Hardware rasterization of bounding_boxes produces per-pixel ray segment lists
++    # This step is typically handled by the GPU rasterizer, not explicit CPU code
++    ray_segment_lists = hardware_rasterize(bounding_boxes, camera)
++    
++    # Step 3 & 4: Ray Casting and Color Calculation
++    for pixel in pixels:
++        segments = ray_segment_lists[pixel]
++        color = vec3(0.0)
++        
++        for segment in segments:
++            if segment.occupancy_class == 'empty':
++                continue # Leap over empty space
++            
++            # Sample volume data in non-empty segment
++            sample = sample_volume(segment.ray, volume_data)
++            
++            # Apply analytical lighting model
++            light_color = calculate_lighting(sample, segment.ray)
++            color += light_color
++            
++        pixel.color = color
+ ```
+ 
++**Parameters:**
++*   **Resource Limit:** An optional prespecified maximum number of bounding boxes. If exceeded, traversal stops [S3, unofficial]. Not given in the sources.
++
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Not given in the sources.
+-*   **Boundaries:** Not given in the sources.
+-*   **Degenerate Input:** Not given in the sources.
++*   **Fragmentation:** Some fragmentation of space still remains in the occupancy geometry, which is resolved during the subsequent rasterization of ray segment lists where consecutive ray segments of the same occupancy class are merged [S3, unofficial].
++*   **Active Objects:** The method relies on frame coherence. If the set of active objects changes frequently, the bounding boxes must be regenerated, incurring preprocessing cost [S2, unofficial].
+ 
+ ## Subtopics
+ 
+-### Rasterizing Bounding Geometry for Empty Space Skipping
+-The parent method that exploits hardware-accelerated rasterization to skip over empty space by rasterizing bounding geometries. SparseLeap is a specific implementation of this approach. [Rasterizing Bounding Geometry for Empty Space Skipping](5141-rasterizing-bounding-geometry-for-empty-space-skipping.md)
++### Occupancy Geometry Generation
++A view-independent process that extracts nested bounding boxes from an occupancy histogram tree to represent space occupancy, reducing spatial fragmentation compared to standard octrees. It traverses the tree in breadth-first order, emitting boxes only when the occupancy class differs from the parent's class. It allows for an optional resource limit to cap the number of emitted boxes. See [Occupancy Geometry Generation](9798-ray-segment-list-generation.md) for details on the subsequent conversion to ray segment lists.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** SparseLeap scales better to large, sparse data than standard octree empty space skipping [S2, unofficial].
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:** Efficient empty space skipping in very large, sparse volume data; agnostic of the underlying data structure; exploits frame coherence; avoids hierarchy traversal on the GPU [S1, unofficial][S2, unofficial].
+-*   **Limitations:** Not given in the sources.
+-*   **When to Use:** Large, sparse volume data with fine structures and frequently changing active objects [S2, unofficial].
+-*   **When Not to Use:** Not given in the sources.
++*   **Time Complexity:** The preprocessing stage (occupancy geometry generation) is linear with respect to the number of nodes in the occupancy-histogram tree [S3, unofficial]. The rasterization stage is hardware-accelerated and efficient [S2, unofficial]. The ray-casting stage is proportional to the number of non-empty samples, avoiding traversal of empty space [S2, unofficial].
++*   **Memory Complexity:** Depends on the size of the occupancy-histogram tree and the number of emitted bounding boxes [S3, unofficial]. The ray segment lists are stored per pixel [S2, unofficial].
++*   **Measured Performance:** SparseLeap scales better to large, sparse data than standard octree empty space skipping [S2, unofficial]. It optimizes both the number of look-ups into the data structure used for empty-space skipping and the number of samples along each viewing ray [S1, unofficial].
++*   **Strengths:** Agnostic of the underlying data structure (e.g., page-table hierarchies, octrees) [S1, unofficial]. Efficient for very large, sparse volumes with fine structures [S2, unofficial].
++*   **Limitations:** Requires hardware rasterization capabilities [S2, unofficial]. Performance may degrade if the set of active objects changes frequently, requiring regeneration of bounding boxes [S2, unofficial].
++*   **When to use:** Large, sparse volume data (e.g., terabyte-sized microscopy volumes) where empty space skipping is critical and the active regions change frequently [S2, unofficial].
++*   **When not to use:** Small, dense volumes where standard traversal is sufficient, or hardware rasterization is not available [S2, unofficial].
+ 
+ ## Background
+-SparseLeap was proposed by Markus Hadwiger, Ali K Al-Awami, Johanna Beyer, and Hanspeter Pfister in 2017 [S2, unofficial]. It addresses the challenges of rendering terabyte-sized microscopy volumes, which often contain many fine and intricate structures, making efficient empty space skipping crucial [S2, unofficial]. The method was developed to handle fragmented space subdivisions and frequent changes in active objects, which make pre-computing well-adapted space subdivisions unfeasible [S2, unofficial].
++SparseLeap was introduced by Markus Hadwiger, Ali K Al-Awami, Johanna Beyer, and Hanspeter Pfister in 2017 [S2, unofficial]. It addresses the challenges of volume rendering for very high-resolution, large-size data, such as terabyte-sized microscopy volumes, which contain many fine and intricate structures [S2, unofficial]. The method moves the major cost of empty space skipping out of the ray-casting stage and into a hybrid strategy that balances computational load between determining empty ray segments in a rasterization (object-order) stage and sampling non-empty volume data in the ray-casting (image-order) stage [S2, unofficial].
+ 
+ ## Sources
+ [S1] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)
+-[S2] Faster RTX-Accelerated Empty Space Skipping using ... - ResearchGate, https://www.researchgate.net/publication/351428822_Faster_RTX-Accelerated_Empty_Space_Skipping_using_Triangulated_Active_Region_Boundary_Geometry, fetched 2026-11-03 (unofficial)+[S2] Faster RTX-Accelerated Empty Space Skipping using ... - ResearchGate, https://www.researchgate.net/publication/351428822_Faster_RTX-Accelerated_Empty_Space_Skipping_using_Triangulated_Active_Region_Boundary_Geometry, fetched 2026-11-03 (unofficial)
++[S3] SparseLeap: Efficient Empty Space Skipping, https://vcg.seas.harvard.edu/publications/20180101-sparseleap-efficient-empty-space-skipping-for-large-scale-volume-rendering/paper, fetched 2026-10-24 (unofficial)

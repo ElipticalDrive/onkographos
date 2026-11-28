@@ -1,0 +1,205 @@
+c++ - How to send an array of int to my shader - Stack Overflow
+This site uses cookies to deliver our services and to show you relevant ads and job listings.
+By using our site, you acknowledge that you have read and understand our Cookie Policy, Privacy Policy, and our Terms of Service.
+Your use of Stack Overflow’s Products and Services, including the Stack Overflow Network, is subject to these policies and terms.
+Join Stack Overflow to learn, share knowledge, and build your career.
+Email Sign Up
+or sign in with
+Google
+Facebook
+How to send an array of int to my shader
+Ask Question
+up vote
+-1
+down vote
+favorite
+I'm making a voxel engine and I can render a chunk. I'm using instanced rendering, meaning that I can render all of the chunk with a single draw call. Every blocks of a chunk has a single int (From 0 to 4095) that defines his block type (0 for air, 1 for dirt, etc...). I wanna be able to render my block by applying the good texture in my fragment shader. My chunk contains a tri-dimensionnal array :
+```
+uint8_t blocks[16][16][16]
+```
+The problem is that I can't find a way to send my array of int to the shader. I tried using a VBO but it makes no-sense (I didn't get any result). I also tried to send my array with glUniform1iv() but I failed.
+Is it possible to send an array of int to a shader with glUniformX() ?
+In order to prevent storing big data, can I set a byte (uint8_t) instead of int with glUniformX() ?
+Is there a good way to send that much data to my shader ?
+Is instanced drawing a good way to draw the same model with different textures/types of blocks.
+c++ opengl shader vbo voxel
+share|improve this question
+edited May 22 at 23:22
+genpfault
+40.3k85093
+asked May 22 at 21:22
+Adrien Givry
+555
+Could you show some of the code that you used to attempt this transfer of data? It's very easy to transfer this kind of data between the host and the GPU, but it's also very easy to write the code responsible for this transfer wrongly.
+– Xirema
+May 22 at 21:25
+@Xirema Well, I have erased that code.... For the moment I'm searching a good way to proceed, then I'll be sure that it's the good direction and I'll implement it
+– Adrien Givry
+May 22 at 21:27
+Please show the declaration of the function you are attempting to call, as well as the code you are calling it with and any errors (either compiler errors or runtime) that you may be receiving. Otherwise we're all simply guessing at what you're doing.
+– Tas
+May 22 at 21:38
+add a comment |
+2 Answers
+2
+active
+oldest
+votes
+up vote
+3
+down vote
+accepted
+For all purposes and intents, data of this type should be treated like texture data. This doesn't mean literally uploading it as texture data, but rather that that's the frame of thinking you should be using when considering how to transfer it.
+Or, in more basic terms: don't try to pass this data as uniform data.
+If you have access to OpenGL 4.3+ (which is a reasonably safe bet for most hardware no older than 6-8 years), then Shader Storage Buffers are going to be the most laconic solution:
+```
+//GLSL:
+layout(std430, binding = 0) buffer terrainData
+{
+    int data[16][16][16];
+};
+
+void main() {
+    int terrainType = data[voxel.x][voxel.y][voxel.z];
+    //Do whatever
+}
+
+//HOST:
+struct terrain_data {
+    int data[16][16][16];
+};
+
+//....
+
+terrain_data data = get_terrain_data();
+GLuint ssbo;
+GLuint binding = 0;//Should be equal to the binding specified in the shader code
+glGenBuffers(1, &ssbo);
+glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
+glBufferData(GL_SHADER_STORAGE_BUFFER, GLsizeiptr size​, data.data​, GLenum usage);
+glBindBufferBase(GL_SHADER_STORAGE_BUFFER, binding, ssbo);
+glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+```
+Any point after this where you need to update the data, simply bind ssbo, call glBufferData (or your preferred method for updating buffer data), and then you're good to go.
+If you're limited to older hardware, you do have some options, but they quickly get clunky:
+You can use Uniform Buffers, which behave very similarly to Shader Storage Buffers, but
+Have limited storage space (65kb in most implementations)
+Have other restrictions that may or may not be relevant to your use case
+You can use textures directly, where you convert the terrain data to floating point values (or use as integers, if the hardware supports integer formats internally), and then convert back inside the shader
+Compatible with almost any hardware
+But requires extra complexity and calculations in your shader code
+share|improve this answer
+edited May 23 at 14:12
+answered May 22 at 21:42
+Xirema
+11.2k11140
+add a comment |
+up vote
+1
+down vote
+I do second the approach as laid out in @Xirema's answer, but come to a slightly different recommendation. Since your original data type is just uint8_t, using an SSBO or UBO directly will require to either waste 3 bytes per element or to manually pack 4 elements into a single uint. From @Xirema's answer:
+For all purposes and intents, data of this type should be treated like texture data. This doesn't mean literally uploading it as texture data, but rather that that's the frame of thinking you should be using when considering how to transfer it.
+I totally agree to that. Hence I recommend the use of a Texture Buffer Object (TBO), (a.k.a. "Buffer Texture").
+Using glTexBuffer() you can basically re-interpret a buffer object as a texture. In your case, you can just pack the uint8_t[16][16][16] array into a buffer and interpret it as GL_R8UI "texture" format, like this:
+```
+//GLSL:
+uniform usamplerBuffer terrainData;
+
+void main() {
+    uint terrainType = texelFetch(terrainData, voxel.z * (16*16) + voxel.y * 16 + voxel.x).r
+    //Do whatever
+}
+
+//HOST:
+struct terrain_data {
+    uint8_t data[16][16][16];
+};
+
+//....
+
+terrain_data data = get_terrain_data();
+GLuint tbo;
+GLuint tex;
+glGenBuffers(1, &tbo);
+glBindBuffer(GL_TEXTURE_BUFFER, tbo);
+glBufferData(GL_TEXTURE_BUFFER, sizeof(terrain_data)​, data.data​, usage);
+glGenTextures(1, &tex);
+glBindTexture(GL_TEXTURE_BUFFER, tex);
+glTexBuffer(GL_TEXTURE_BUFFER, GL_R8UI, tbo);
+```
+Note that this will not copy the data to some texture object. Accessing the texture means directly accessing the memory of the buffer.
+TBOs also have the advantage that they are available since OpenGL 3.1.
+share|improve this answer
+answered May 23 at 19:56
+derhass
+29k22540
+That's a very good idea !! I'll try to implement it, thanks !
+– Adrien Givry
+May 24 at 12:59
+Well, I tried this and every chunks are 180 degrees flipped. It means that the data is stored a certain way and they are get in another order. Do you have any idea about that, do I need to flip something somewhere ?
+– Adrien Givry
+May 24 at 18:03
+Well, it is hard to tell without seeing the exact code. One thing is my 3D to 1D mapping terrainData, voxel.z * (16*16) + voxel.y * 16 + voxel.x. This assumes you're using standard C conventions, where you would access data[z][y][x] on the host. If you use data[x][y][z], then you also have to flip that calculation.
+– derhass
+May 24 at 18:23
+I used z,y,x like in your example, it was my bad, I thought it was for a x,y,z array. I corrected this, thanks !
+– Adrien Givry
+May 24 at 18:28
+add a comment |
+Not the answer you're looking for? Browse other questions tagged c++ opengl shader vbo voxel or ask your own question.
+asked
+22 days ago
+viewed
+75 times
+active
+21 days ago
+Visit Chat
+Related
+962
+What is the difference between const int*, const int * const, and int const *?
+1180
+Easiest way to convert int to string in C++
+3
+WebGL pass array shader
+1
+How to speed up sandbox lwjgl game?
+21419
+Why is it faster to process a sorted array than an unsorted array?
+0
+Creating a voxel chunk with a single VBO - How to translate the coordinates of each block and add it to the VBO chunk?
+0
+Voxel rendering optimization with geometry shader
+0
+Texture UVs not sent to shaders correctly
+0
+OpenGL Voxel engine Face Merging vs Per-Vertex Ambient occlusion
+1
+Drawing a chunk with OpenGL
+Hot Network Questions
+A mosque on Mars?
+Why did F1 become the Help Key?
+Compilation error: "! Argument of " has an extra }"
+Is it acceptable to use words like "heaven" and "god" when the narrator is agnostic?
+Boats for really tall people
+Moon that changes color with phase
+Spanish for "patterned" (i.e. something that has a pattern)?
+How to do real life stuff in d&d 5e combat?
+Is momentary physical access dangerous?
+Meaning of 'high-level overview' in a Maths talk?
+Medieval ways to tell time, without a sun or stars
+Was King Harold born a human or a frog?
+Preparation/tips for 50 mile ride
+Reduce gap between anchor points of a tikz picture when using a macro
+Can you change your mind about how a multi-target burn spell assigns damage after casting it?
+Is the spell Giant Insect affected by a Shepherd Druid's Mighty Summoner and Guardian Spirit abilities?
+Does this layout look okay?
+In the American west—the world of cowboys and cowhands—was ammunition traded for alcoholic “shots” of a drink?
+If a database only ever has one insert, is it bad to index every possible column combination?
+Why does the Falcon 9 use RP-1/LOx and not LH2/LOx?
+Designer vs client: portfolio rights?
+'Earth-based' adjective counterpart to 'Lunar' or 'Solar'
+How to write [sp+local_variable] in radare2
+Responding to people questioning my single status?
+more hot questions
+question feed
+lang-cpp

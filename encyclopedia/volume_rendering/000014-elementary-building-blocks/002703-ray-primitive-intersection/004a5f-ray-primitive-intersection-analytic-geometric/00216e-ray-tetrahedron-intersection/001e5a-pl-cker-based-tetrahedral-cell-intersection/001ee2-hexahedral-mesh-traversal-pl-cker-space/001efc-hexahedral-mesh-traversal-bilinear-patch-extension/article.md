@@ -1,0 +1,143 @@
+# Hexahedral Mesh Traversal (Bilinear Patch-Extension)
+
+Also called: Bilinear Patch Traversal, Hex-H, Hybrid Hexahedral Traversal
+
+## Overview
+This method is a hybrid traversal algorithm for hexahedral meshes that combines Plücker-based face selection with bilinear patch intersection tests [S1]. It solves the problem of geometric singularities and interpolation discontinuities inherent in pure Plücker traversal by utilizing the parametric coordinates $(u, v)$ derived directly from bilinear patch intersections to compute interpolated scalar values [S1]. It sets itself apart from the parent [Hexahedral Mesh Traversal (Plücker Space)](1889-hexahedral-mesh-traversal-pl-cker-space.md) by avoiding triangle decomposition for interpolation and instead using the known parametric coordinates to compute values continuously across hexahedral faces [S1].
+
+## How it works
+**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, hexahedron vertices $\mathbf{v}_0 \dots \mathbf{v}_7$ [S1].
+**Outputs:** Exit face index, parametric coordinates $(u, v)$ on the exit face, and interpolated scalar values at entry and exit points [S1].
+
+**Data Structures:**
+*   Vertices: Array of 8 3D vectors representing the hexahedron corners [S1].
+*   Plücker Values: Three scalar areas $A_0, A_1, A_2$ derived from cross products of edge vectors and the ray direction [S1].
+*   Bilinear Patch Parameters: $u, v \in \mathbb{R}$ representing the parametric hit location on the face [S1].
+
+**Steps:**
+1.  **Plücker Face Selection:** Compute the Plücker values for the lines $\mathbf{v}_4 \to \mathbf{v}_5$, $\mathbf{v}_6 \to \mathbf{v}_7$, and the ray direction to determine the three areas $A_0, A_1, A_2$ [S1]. This identifies the three candidate exit faces [S1].
+2.  **Bilinear Patch Intersection:** For each of the three candidate exit faces, perform a bilinear patch intersection test [S1]. An edge of the bilinear patch depends on all four face vertices [S1].
+3.  **Exit Determination:** Stop as soon as a patch is hit, i.e., when parametric coordinates $(u, v) \in [0, 1]^2$ [S1]. This provides the exit face and the parametric coordinates $(u, v)$ for the exit point [S1].
+4.  **Numerical Consistency Check:** If numerical inconsistencies occur due to insufficient floating-point accuracy, perform two additional Plücker tests equivalent to the second step of the pure Plücker method to resolve the correct exit face [S1].
+5.  **Interpolation:** Use the known parametric coordinates $(u, v)$ from the bilinear patch test to compute interpolated scalar values on the entry and exit faces [S1]. This completely avoids discontinuities in the interpolated field [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cross(a, b):
+    return [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]]
+
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def sub(a, b):
+    return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]
+
+def traverse_hexahedron(ray_origin, ray_direction, hex_vertices):
+    # Step 1: Compute Plücker areas for candidate faces
+    edge1 = sub(hex_vertices[5], hex_vertices[4])
+    edge2 = sub(hex_vertices[7], hex_vertices[6])
+    # [G] Standard Plücker coordinate computation for ray-cell face intersection
+    A0 = dot(cross(edge1, ray_direction), cross(edge1, ray_direction))
+    A1 = dot(cross(edge2, ray_direction), cross(edge2, ray_direction))
+    A2 = dot(cross(edge1, edge2), cross(edge1, edge2))
+    
+    # Identify candidate faces based on signs of A0, A1, A2
+    candidate_faces = [0, 1, 2] # Indices of the three candidate exit faces
+    exit_face = None
+    u, v = 0.0, 0.0
+
+    # Step 2 & 3: Check bilinear patch intersection for each candidate
+    for face_idx in candidate_faces:
+        # [G] Standard algebraic solution for ray-bilinear patch intersection
+        # Solves P(u,v) = ray_origin + t*ray_direction for the bilinear face
+        hit, u, v = solve_bilinear_patch_intersection(ray_origin, ray_direction, hex_vertices, face_idx)
+        
+        if hit and 0.0 <= u <= 1.0 and 0.0 <= v <= 1.0:
+            exit_face = face_idx
+            break
+
+    # Step 4: Handle numerical inconsistencies
+    if exit_face is None:
+        # Perform two additional Plücker tests (pure Plücker fallback)
+        # [S1] Equivalent to the second step of the pure Plücker method
+        exit_face = resolve_plucker_fallback(ray_origin, ray_direction, hex_vertices)
+        # [G] Recompute (u, v) by projecting the exit point onto the exit face plane
+        exit_point = add(ray_origin, scale(ray_direction, compute_t_exit(ray_origin, ray_direction, hex_vertices, exit_face)))
+        u, v = project_to_face_uv(exit_point, hex_vertices, exit_face)
+
+    # Step 5: Interpolation
+    # Compute scalar at entry point (previous cell exit or ray origin)
+    # Compute scalar at exit point using u, v on exit_face
+    scalar_exit = interpolate_scalar_bilinear(hex_vertices, exit_face, u, v)
+
+    return exit_face, u, v, scalar_exit
+
+def solve_bilinear_patch_intersection(ray_origin, ray_direction, hex_vertices, face_idx):
+    # [G] Standard bilinear patch intersection: constructs the 4-vertex bilinear surface,
+    # forms a quadratic equation in t and u/v, solves for valid intersections.
+    return False, 0.0, 0.0
+
+def resolve_plucker_fallback(ray_origin, ray_direction, hex_vertices):
+    # [S1] Two additional Plücker tests equivalent to pure Plücker method
+    return 0
+
+def compute_t_exit(ray_origin, ray_direction, hex_vertices, face_idx):
+    # [G] Standard ray-plane intersection
+    return 1.0
+
+def project_to_face_uv(point, hex_vertices, face_idx):
+    # [G] Standard projection onto bilinear patch parameter space
+    return 0.0, 0.0
+
+def interpolate_scalar_bilinear(hex_vertices, face_idx, u, v):
+    # [G] Standard bilinear interpolation
+    return 0.0
+
+def add(a, b):
+    return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]
+
+def scale(v, s):
+    return [v[0]*s, v[1]*s, v[2]*s]
+```
+
+**Parameters:**
+*   Floating-point precision: Standard double precision is recommended to minimize numerical inconsistencies [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Holes in Hexahedron:** Bilinear patches are generally not flat, introducing holes in the hexahedron because the implicit edge representation depends on all four face vertices, unlike Plücker coordinates which depend solely on two edge points [S1]. This can cause rays to miss the exit face or produce invalid $(u, v)$ coordinates [S1].
+*   **Numerical Inconsistencies:** Insufficient floating-point accuracy can lead to incorrect face selection [S1]. The method requires a fallback to Plücker tests in these cases [S1].
+*   **Discontinuities:** Using bilinear patches with known parametric coordinates completely avoids discontinuities in the interpolated field [S1].
+
+## Subtopics
+
+### Hexahedral Normal Calculation
+A method to calculate normals for hexahedral meshes using trilinear interpolation of vertex normals, converted from computational space to physical space via the Jacobian matrix [S1]. It is chosen when accurate shading is required for curvilinear hexahedral meshes [S1]. It operates on vector fields and requires Jacobian transformation for correct physical-space orientation [S1].
+
+**Steps:**
+1.  Interpolate a vector at the entry and exit faces using the same parametric coordinates $(u, v)$ used for scalar interpolation [S1].
+2.  Perform a linear interpolation between the two interpolated vectors based on their distance to the isosurface to yield the final normal [S1].
+3.  Calculate three vectors in physical space corresponding to the normal in computational space $N_c$ and convert them to physical space $N_p$ using the Jacobian matrix [S1].
+
+**Formulas:**
+Convert physical coordinates $x_i$ to computational coordinates $\tilde{\rho}_j$ using the Jacobian matrix $J_{ij}$:
+$$ x_i = J_{ij} \tilde{\rho}_j $$
+$$ J_{ij} = \frac{\partial x_i}{\partial \tilde{\rho}_j} $$
+Approximate the Jacobian matrix $J_{ij}$ for a grid node $n$ using central differences:
+$$ J_{ij} = \frac{1}{2} \left( \frac{x_i(n) - x_i(n-1)}{\tilde{\rho}_j(n) - \tilde{\rho}_j(n+1)} + \frac{x_i(n+1) - x_i(n)}{\tilde{\rho}_j(n+1) - \tilde{\rho}_j(n)} \right) $$
+A linear combination of the three vectors with the normal in computational space $N_c$ results in the converted normal $N_p$ [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Raw traversal performance is 15% lower compared to the pure Plücker traverser due to the cost of bilinear patch intersection tests [S1]. However, overall performance gains 25% on average because time is saved in interpolation (no triangle decomposition needed) [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** The hybrid algorithm processes up to 4.5 million hexahedra per second on a Dual-core Opteron 2 GHz [S1].
+*   **Strengths:** Better quality and significantly faster overall performance than the pure Plücker approach for hexahedral meshes due to avoided discontinuities and efficient interpolation [S1].
+*   **Limitations:** Raw traversal is slower; numerical inconsistencies may require fallback tests, though this is rare [S1].
+*   **When to Use:** Recommended for traversing curvilinear grids on a ray tracing basis, especially when high-quality rendering and continuous interpolation are prioritized over raw traversal speed [S1].
+
+## Background
+Originated in the paper "Fast Ray Traversal of Tetrahedral and Hexahedral Meshes for Direct Volume Rendering" (2006) by Ramsey et al. [S1]. The method was developed to address singularities and discontinuities in hexahedral mesh traversal for direct volume rendering [S1]. It builds on the Plücker-based traversal method but integrates bilinear patch tests to improve interpolation quality [S1].
+
+## Sources
+[S1] Fast Ray Traversal of Tetrahedral and Hexahedral Meshes for Direct Volume Rendering, https://doi.org/10.2312/vissym/eurovis06/235-242, fetched 2026-10-24

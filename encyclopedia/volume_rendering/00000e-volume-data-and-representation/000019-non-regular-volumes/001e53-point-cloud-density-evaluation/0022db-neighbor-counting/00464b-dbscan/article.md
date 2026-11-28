@@ -1,0 +1,100 @@
+# DBSCAN
+
+Also called: Density-Based Spatial Clustering of Applications with Noise
+
+## Overview
+DBSCAN is a density-based clustering algorithm that identifies arbitrary-shaped clusters and is robust to noise and data heterogeneity [S1, unofficial]. It groups spatial points into dense regions without requiring a pre-specified number of clusters [S1, unofficial]. It builds on [Neighbor Counting](2905-neighbor-counting.md) by using range-queries to evaluate local point density [G].
+
+## How it works
+**Inputs:** A dataset $P$ of points, a search radius $\varepsilon$ (eps), and a minimum number of points $minPts$ [S1, unofficial].
+**Outputs:** A label for each point in $P$: a cluster ID (integer $\ge 0$) or NOISE [G].
+
+**Data Structures:**
+- $P$: List of points.
+- $labels$: Array of size $|P|$, initialized to UNCLASSIFIED.
+- $S$: A list or queue of points to be expanded.
+
+**Definitions:**
+- **Core-point:** A point $p$ is a core-point if the number of points in its $\varepsilon$-neighborhood $V_\varepsilon(p)$ is $\ge minPts$ [S1, unofficial].
+- **Border-point:** A point $p_a$ is a border-point if it is reachable from a core-point $p_b$ but $|V_\varepsilon(p_a)| < minPts$ [S1, unofficial].
+- **Noise:** Points that are neither core-points nor border-points [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dbscan(P, eps, minPts):
+    labels = [UNCLASSIFIED] * len(P)
+    clusterID = 0
+    for p in range(len(P)):
+        if labels[p] != UNCLASSIFIED:
+            continue
+        if expand_cluster(p, eps, minPts, P, labels, clusterID):
+            clusterID += 1
+    return labels
+
+def expand_cluster(p, eps, minPts, P, labels, clusterID):
+    neighbors = range_query(P, p, eps)
+    if len(neighbors) < minPts:
+        labels[p] = NOISE
+        return False
+    labels[p] = clusterID
+    S = [q for q in neighbors if q != p]
+    while S:
+        q = S.pop()
+        if labels[q] == NOISE:
+            labels[q] = clusterID
+        if labels[q] != UNCLASSIFIED:
+            continue
+        labels[q] = clusterID
+        neighbors_q = range_query(P, q, eps)
+        if len(neighbors_q) >= minPts:
+            for r in neighbors_q:
+                if labels[r] == UNCLASSIFIED:
+                    S.append(r)
+    return True
+
+def range_query(P, center, eps):
+    return [i for i, pt in enumerate(P) if distance(pt, center) <= eps]
+```
+
+**Parameters:**
+- $\varepsilon$ (eps): The search radius for range-queries [S1, unofficial]. Typical values: Not given in the sources.
+- $minPts$: The minimum number of points required to form a dense region [S1, unofficial]. Typical values: Not given in the sources.
+
+**Edge Cases:**
+- Precision issues in distance calculations near the boundary $\varepsilon$ can affect core-point classification [G].
+- If $minPts$ is too high, most points may be labeled NOISE [G].
+
+## Subtopics
+
+### [Density-based Clustering with Weighted Dissimilarity](17596-density-based-clustering-with-weighted-dissimilarity.md)
+This method is a density-based clustering algorithm designed to identify similar phases or states across multiple simulation sequences by treating segmented time steps as data points. It distinguishes itself from standard DBSCAN by employing a weighted dissimilarity measure that incorporates temporal indices and sequence identifiers, allowing it to group similar temporal progressions even when they are not strictly synchronous. It builds on [DBSCAN](11722-dbscan.md) but modifies the distance metric and neighborhood density calculation to account for the hierarchical structure of simulation data.
+
+### HDBSCAN
+HDBSCAN is a hierarchical density-based clustering algorithm. It constructs a cluster hierarchy using a minimum spanning tree of the mutual reachability graph.
+**Steps:**
+1. Check if the `hdbscan` package is available; raise `ImportError` if not [S2, unofficial].
+2. Construct keyword arguments dictionary with `min_cluster_size`; add `min_samples` if not None; add `cluster_selection_epsilon` if `eps` is not None [S2, unofficial].
+3. Instantiate `hdbscan.HDBSCAN` with the constructed kwargs [S2, unofficial].
+4. Fit the clusterer to features and predict labels [S2, unofficial].
+5. Cast labels to `np.int32` and return [S2, unofficial].
+**Parameters:**
+- `min_cluster_size`: int, the minimum number of samples in a group for that group to be considered a cluster [S2, unofficial].
+- `min_samples`: int | None, optional parameter passed to HDBSCAN [S2, unofficial].
+- `eps`: float | None, mapped to `cluster_selection_epsilon` in HDBSCAN [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Identifies arbitrary-shaped clusters; robust to noise; does not require specifying the number of clusters; handles data heterogeneity well [S1, unofficial].
+- **Limitations:** Sensitive to parameter selection ($\varepsilon$, $minPts$) [S1, unofficial].
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
+
+## Background
+DBSCAN was proposed by Ester et al. in 1996 [S1, unofficial]. It is applied in volume exploration and clustering of point clouds [S1, unofficial]. The algorithm was selected for its efficient computation and low sensitivity to data heterogeneity [S1, unofficial].
+
+## Sources
+[S1] A volume exploration approach based on clustering and dimensional reduction to support the definition of multidimensional transfer functions, http://hdl.handle.net/11449/153618, fetched 2026-10-26 (unofficial)
+[S2] cilix-ai/gs-embedding, https://github.com/cilix-ai/gs-embedding, fetched 2026-10-27 (unofficial)

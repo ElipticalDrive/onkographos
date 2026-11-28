@@ -1,0 +1,31 @@
+# View-Dependent and Appearance Modeling
+
+Also called: View-Dependent Appearance, Anisotropic Reflective Modeling
+
+## Overview
+This family extends 3D Gaussian Splatting to model complex, view-dependent lighting effects such as specular highlights and anisotropic reflections, which standard isotropic spherical Gaussians cannot capture accurately. It sets itself apart from standard 3DGS by replacing or augmenting the static spherical harmonic color representation with physically based rendering (PBR) models or directional anisotropic functions, enabling faithful reproduction of shiny and metallic surfaces [S1, unofficial].
+
+## Shared principles
+All methods in this family share the goal of decomposing appearance into geometric and directional components to support view-dependent shading.
+
+1.  **Primitive Representation:** Gaussians are augmented with parameters beyond position, covariance, and opacity. These include material properties (roughness, metallic, albedo) or directional spread parameters (sharpness, bandwidths) [S1, unofficial].
+2.  **Directional Evaluation:** The contribution of a Gaussian to a pixel is modulated by the viewing direction relative to the primitive's orientation. This is achieved either through Anisotropic Spherical Gaussians (ASG) or neural networks predicting view-dependent attributes [S1, unofficial].
+3.  **Physical or Approximate Shading:** Colors are computed using PBR models (diffuse + specular) or directional basis functions, rather than simple SH evaluation [S1, unofficial].
+4.  **Differentiable Optimization:** All parameters are optimized via gradient descent using a photometric loss, requiring differentiable rendering of the directional components [S1, unofficial].
+
+## Subtopics
+
+### [Anisotropic Reflective Spherical 3D Gaussian Splatting](17311-anisotropic-reflective-spherical-3d-gaussian-splatting.md)
+ARS-GS embeds Anisotropic Spherical Gaussians (ASG) within a Physically Based Rendering (PBR) pipeline, aligning them with GGX microfacet models to model environmental illumination and enable accurate mesh reconstruction via light-transport simulation. Unlike Spec-Gaussian, which uses ASG primarily for appearance fitting, ARS-GS strictly embeds ASG within a PBR pipeline by aligning it with GGX microfacet models. It solves the problem of vanishing gradients in highly reflective regions by introducing a shortcut connection mechanism that links spatial coordinates directly to ASG color attributes, enabling rapid updates of specular reflections when primitives undergo positional changes. See [Anisotropic Reflective Spherical 3D Gaussian Splatting](17311-anisotropic-reflective-spherical-3d-gaussian-splatting.md).
+
+### [Spec-Gaussian](17362-spec-gaussian.md)
+Spec-Gaussian is a method that utilizes anisotropic spherical Gaussians to approximate 3D scene appearance, specifically designed to handle complex shading such as specular and anisotropic components. It sets itself apart from standard 3D Gaussian Splatting by replacing isotropic spherical Gaussians with anisotropic variants to better model directional reflectance properties. See [Spec-Gaussian](17362-spec-gaussian.md).
+
+### View-Dependent Gaussian Splatting (VDGS)
+VDGS produces more faithful view-dependent effects by modeling 3DGS to represent 3D shapes and predicting attributes like view-dependent color and opacity with a NeRF-like neural network instead of spherical harmonic coefficients [S1, unofficial]. On the MipNeRF 360 dataset, it achieves a PSNR of 27.66, SSIM of 0.809, and LPIPS of 0.223 [S1, unofficial].
+
+## Background
+Standard 3D Gaussian Splatting uses spherical harmonics to encode view-dependent color, which struggles with high-frequency specularities and anisotropic reflections. Recent advances introduced anisotropic representations and PBR integration to address these limitations. ARS-GS and Spec-Gaussian leverage Anisotropic Spherical Gaussians (ASG) to model directional reflectance, with ARS-GS specifically integrating GGX microfacet models for physical accuracy [S1, unofficial]. VDGS employs a neural network to predict view-dependent attributes, offering an alternative to explicit directional basis functions [S1, unofficial]. These methods are used in high-fidelity 3D reconstruction, digital twins, and virtual production where realistic lighting interactions are critical.
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

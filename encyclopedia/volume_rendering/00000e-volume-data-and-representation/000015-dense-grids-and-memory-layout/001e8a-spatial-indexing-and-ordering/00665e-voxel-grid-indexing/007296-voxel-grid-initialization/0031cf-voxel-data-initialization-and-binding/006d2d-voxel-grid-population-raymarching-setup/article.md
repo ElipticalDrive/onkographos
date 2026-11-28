@@ -1,0 +1,162 @@
+# Voxel Grid Population & Raymarching Setup
+
+Also called: Voxel Grid Population and Raymarching Setup
+
+## Overview
+This method populates a dense 3D voxel grid with distance field data and configures the GPU compute pipeline for volumetric raymarching. It bridges the gap between abstract voxel objects and the shader-executable texture buffers, solving the problem of translating spatially scattered voxel data into a contiguous memory layout suitable for efficient 3D texture sampling. It differs from its parent, [Voxel Data Initialization and Binding](6606-voxel-data-initialization-and-binding.md), by handling the specific algorithmic mapping of voxel coordinates to grid indices and the explicit dispatch of the rendering compute shader.
+
+## How it works
+**Inputs:** A list of `Voxel` objects containing `LocalPosition` (Vector3) and `VoxelDistance` (float); global bounds (`GlobalBounds`); voxel scale (`m_voxelScale`); and rendering parameters (`SmokeSettings`).
+**Outputs:** A populated `RWBuffer<float>` (voxel grid), `RWTexture2DArray<float4>` (smoke color/alpha), and `RWTexture2DArray<float>` (depth).
+
+**Data Structures:**
+1.  **Voxel Grid Buffer:** A 1D `RWBuffer<float>` of size $N_{total} = N_x \times N_y \times N_z$. Each element stores the `VoxelDistance` of the corresponding grid cell.
+2.  **Global Bounds:** A `Bounds` structure defining the axis-aligned bounding box (AABB) of the entire voxel volume.
+3.  **Resolution:** Integer dimensions $(N_x, N_y, N_z)$ derived from bounds and scale.
+
+**Steps:**
+
+1.  **Calculate Resolution:**
+    Compute the integer dimensions of the voxel grid based on the global bounding box size and the voxel scale.
+    $$ N_x = \lceil \frac{\text{GlobalBounds.size.x}}{\text{m\_voxelScale}} \rceil + 1 $$
+    $$ N_y = \lceil \frac{\text{GlobalBounds.size.y}}{\text{m\_voxelScale}} \rceil + 1 $$
+    $$ N_z = \lceil \frac{\text{GlobalBounds.size.z}}{\text{m\_voxelScale}} \rceil + 1 $$
+    Allocate a `VoxelsGrid` array of size $N_x \times N_y \times N_z$.
+
+2.  **Populate Voxel Grid:**
+    For each voxel in the scene:
+    a. Compute the world position relative to the global bounds minimum:
+       $$ \text{voxelPos} = (\text{m\_center} + \text{voxel.LocalPosition}) - \text{GlobalBounds.min} $$
+    b. Convert to integer grid coordinates:
+       $$ \text{boxPos} = (\lfloor \text{voxelPos.x} \rfloor, \lfloor \text{voxelPos.y} \rfloor, \lfloor \text{voxelPos.z} \rfloor) $$
+    c. Calculate the linear index in the 1D buffer using row-major ordering:
+       $$ \text{yOffset} = \text{boxPos.y} \times N_x $$
+       $$ \text{zOffset} = \text{boxPos.z} \times N_x \times N_y $$
+       $$ \text{index} = \text{boxPos.x} + \text{yOffset} + \text{zOffset} $$
+    d. Store the voxel's distance value:
+       $$ \text{VoxelsGrid}[\text{index}] = \text{voxel.VoxelDistance} $$
+
+3.  **Update GPU Buffers:**
+    Upload the `VoxelsGrid` array to a `ComputeBuffer` of type `RWBuffer<float>`. Set this buffer as a shader resource.
+
+4.  **Configure Shader Parameters:**
+    In the render pass, set the following parameters on the compute shader:
+    -   **Camera Data:** Camera position, camera-to-world matrix.
+    -   **Grid Data:** Voxel grid buffer, bounds min/max (float3), smoke array index (int).
+    -   **Raymarching Control:**
+        -   `marchSteps`: Number of steps per pixel (default: 100) [S1, unofficial].
+        -   `lightmarchSteps`: Number of steps for light transport (default: 4) [S1, unofficial].
+        -   `stepSize`: Distance between raymarch steps (default: 0.1) [S1, unofficial].
+        -   `lightStepSize`: Distance between light transport steps (default: 1.0) [S1, unofficial].
+        -   `transmitThreshold`: Opacity threshold to terminate raymarching (default: 0.535) [S1, unofficial].
+    -   **Material Properties:**
+        -   `densityMultiplier`: Scales density (default: 2.8) [S1, unofficial].
+        -   `densityOffset`: Base density offset (default: 13.23) [S1, unofficial].
+        -   `densityFalloff`: Density falloff rate (default: 1.0) [S1, unofficial].
+        -   `noiseAmplitude`: Amplitude of noise function (default: 2.8) [S1, unofficial].
+        -   `scatterColor`: Color of scattered light [S1, unofficial].
+        -   `brightness`: Light intensity multiplier (default: 0.426) [S1, unofficial].
+        -   `inScatterMultiplier`: In-scattering coefficient (default: 0.611) [S1, unofficial].
+        -   `outScatterMultiplier`: Out-scattering coefficient (default: 0.447) [S1, unofficial].
+        -   `forwardScatter`: Phase function forward coefficient (default: 0.686) [S1, unofficial].
+        -   `backwardScatter`: Phase function backward coefficient (default: 0.564) [S1, unofficial].
+        -   `scatterMultiplier`: Overall scattering multiplier (default: 1.0) [S1, unofficial].
+        -   `cloudSpeed`: Velocity vector for animation (default: (0.2, 0.0, 0.1)) [S1, unofficial].
+    -   **Output Textures:** Set `SmokesArrayResult` (RWTexture2DArray<float4>) and `SmokeDepthResult` (RWTexture2DArray<float>) as render targets.
+
+5.  **Dispatch Compute Shader:**
+    Dispatch the compute shader with thread groups covering the output resolution.
+    $$ \text{threadsX} = \lceil \frac{\text{rt.width}}{8} \rceil $$
+    $$ \text{threadsY} = \lceil \frac{\text{rt.height}}{8} \rceil $$
+    $$ \text{threadsZ} = 1 $$
+    Call `Dispatch(0, threadsX, threadsY, threadsZ)`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def populate_voxel_grid(voxels, global_bounds, voxel_scale):
+    # Step 1: Calculate Resolution
+    size_x = global_bounds.size.x
+    size_y = global_bounds.size.y
+    size_z = global_bounds.size.z
+    
+    res_x = ceil(size_x / voxel_scale) + 1
+    res_y = ceil(size_y / voxel_scale) + 1
+    res_z = ceil(size_z / voxel_scale) + 1
+    
+    total_voxels = res_x * res_y * res_z
+    voxel_grid = [0.0] * total_voxels
+    
+    # Step 2: Populate Voxel Grid
+    for voxel in voxels:
+        # Compute world position relative to global bounds min
+        world_pos = voxel.local_position + voxel.center
+        relative_pos = world_pos - global_bounds.min
+        
+        # Convert to integer grid coordinates
+        box_pos_x = floor(relative_pos.x)
+        box_pos_y = floor(relative_pos.y)
+        box_pos_z = floor(relative_pos.z)
+        
+        # Calculate linear index
+        y_offset = box_pos_y * res_x
+        z_offset = box_pos_z * res_x * res_y
+        index = box_pos_x + y_offset + z_offset
+        
+        # Store distance
+        voxel_grid[index] = voxel.voxel_distance
+        
+    return voxel_grid, res_x, res_y, res_z
+
+def setup_raymarching(voxel_grid_buffer, settings, rt_width, rt_height):
+    # Step 4: Configure Shader Parameters
+    shader_params = {
+        "marchSteps": settings.marchSteps,
+        "lightmarchSteps": settings.lightmarchSteps,
+        "stepSize": settings.stepSize,
+        "lightStepSize": settings.lightStepSize,
+        "transmitThreshold": settings.transmitThreshold,
+        "densityMultiplier": settings.densityMultiplier,
+        "densityOffset": settings.densityOffset,
+        "densityFalloff": settings.densityFalloff,
+        "noiseAmplitude": settings.noiseAmplitude,
+        "scatterColor": settings.scatterColor,
+        "brightness": settings.brightness,
+        "inScatterMultiplier": settings.inScatterMultiplier,
+        "outScatterMultiplier": settings.outScatterMultiplier,
+        "forwardScatter": settings.forwardScattering,
+        "backwardScatter": settings.backwardScattering,
+        "scatterMultiplier": settings.scatterMultiplier,
+        "cloudSpeed": settings.cloudSpeed
+    }
+    
+    # Step 5: Dispatch Compute Shader
+    threads_x = ceil(rt_width / 8)
+    threads_y = ceil(rt_height / 8)
+    threads_z = 1
+    
+    dispatch_compute_shader(
+        buffer=voxel_grid_buffer,
+        params=shader_params,
+        thread_groups=(threads_x, threads_y, threads_z)
+    )
+```
+
+**Edge Cases and Pitfalls:**
+-   **Precision:** Floating-point errors in `boxPos` calculation may cause voxels near boundaries to be misaligned. Using `floor` is standard, but ensure `GlobalBounds.min` is accurately computed from the voxel data [S1, unofficial].
+-   **Boundary Conditions:** If a voxel's position falls outside the calculated `GlobalBounds`, it will not be mapped to the grid. Ensure `GlobalBounds` encapsulates all voxels before population [S1, unofficial].
+-   **Memory Layout:** The 1D buffer assumes row-major ordering (X varies fastest, then Y, then Z). Mismatched ordering between CPU population and GPU sampling will cause visual artifacts.
+
+## Operating characteristics
+-   **Time Complexity:** Population is $O(V)$, where $V$ is the number of voxels. Raymarching is $O(P \times S)$, where $P$ is the number of pixels and $S$ is the number of march steps.
+-   **Memory Complexity:** $O(N_x \times N_y \times N_z)$ for the voxel grid buffer.
+-   **Performance:** Depends heavily on `marchSteps` and `stepSize`. Higher resolution and more steps increase memory bandwidth and compute load linearly.
+-   **Strengths:** Simple data structure; efficient for dense volumes; easy to implement on GPU.
+-   **Limitations:** Memory usage grows cubically with resolution; inefficient for sparse volumes compared to sparse voxel octrees.
+
+## Background
+This method is derived from the implementation details of the "VolumetricSmoke" project by Voltonik [S1, unofficial]. It represents a standard approach to dense voxel rendering in real-time graphics, particularly within the Unity engine ecosystem, utilizing compute shaders for data population and raymarching.
+
+## Sources
+[S1] Voltonik/VolumetricSmoke, https://github.com/Voltonik/VolumetricSmoke, fetched 2026-10-28 (unofficial)

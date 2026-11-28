@@ -1,0 +1,141 @@
+# Surface and Volume Training Position Sampling
+
+Also called: Efficient Sampling of 3D Training Positions
+
+## Overview
+A method to distribute training positions for neural implicit surface reconstruction by combining uniform volume samples, uniform surface samples, and perturbed surface samples to ensure coverage of the object and its immediate vicinity [S1].
+
+## How it works
+**Inputs:** A triangle mesh, its bounding radius $r$, and a total count $N$ of training positions [S1].
+**Outputs:** An array of $N$ 3D positions [S1].
+**Data Structures:**
+1. **Triangle CDF Array:** A 1D array of size $T$ (number of triangles) [S1]. The $i$-th element stores the cumulative sum of normalized triangle areas [S1]. Let $A_i$ be the area of triangle $i$. The CDF at index $i$ is $C_i = \frac{\sum_{j=0}^{i} A_j}{\sum_{k=0}^{T-1} A_k}$ [S1].
+2. **Random Number Generator:** A GPU-compatible PRNG, specifically PCG32 [S1].
+**Parameters:**
+* Volume sample ratio: $1/8$ of $N$ [S1].
+* Surface sample ratio: $4/8$ of $N$ [S1].
+* Perturbed surface sample ratio: $3/8$ of $N$ [S1].
+* Logistic distribution standard deviation: $\sigma = r/1024$ [S1].
+**Steps:**
+1. **Generate Uniform Volume Samples:** Generate $N/8$ positions uniformly distributed in the unit cube $[0,1]^3$ using the PCG32 PRNG [S1].
+2. **Preprocess Mesh for Surface Sampling:** Compute the area $A_i$ for each triangle $i$ in the mesh [S1]. Normalize these areas to form a probability distribution and compute the Cumulative Distribution Function (CDF) array $C$ [S1].
+3. **Generate Uniform Surface Samples:** For $4N/8$ samples:
+   a. Draw a uniform random number $u \in [0,1]$ from the PRNG [S1].
+   b. Perform a binary search on the CDF array $C$ to find the triangle index $t$ such that $C_{t-1} < u \le C_t$ (with $C_{-1}=0$) [S1]. This selects a triangle proportional to its area [S1].
+   c. Sample a uniformly random position on triangle $t$ using standard sample warping [S1].
+4. **Generate Perturbed Surface Samples:** For $3N/8$ samples:
+   a. Repeat steps 3a-3c to select a base position $x_{base}$ on the mesh surface [S1].
+   b. Draw three independent random values $d_x, d_y, d_z$ from a logistic distribution with standard deviation $\sigma = r/1024$ [S1].
+   c. Compute the perturbed position $x = x_{base} + (d_x, d_y, d_z)$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+from typing import List, Tuple
+
+# Minimal PCG32 implementation for self-containment [G]
+class PCG32:
+    def __init__(self, state: int = 12345, inc: int = 67891):
+        self.state = state
+        self.inc = inc | 1
+    def next(self) -> float:
+        x = self.state
+        self.state = (x * 6364136223846793005 + self.inc) & 0xFFFFFFFFFFFFFFFF
+        y = (x ^ (x >> 22) ^ (x >> 17) ^ (x >> 7)) & 0xFFFFFFFFFFFFFFFF
+        return (y >> 33) / (1 << 31)
+
+def triangle_area(v0: Tuple[float, float, float], v1: Tuple[float, float, float], v2: Tuple[float, float, float]) -> float:
+    # Cross product magnitude of two triangle edges [G]
+    e1 = (v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2])
+    e2 = (v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2])
+    cross = (
+        e1[1]*e2[2] - e1[2]*e2[1],
+        e1[2]*e2[0] - e1[0]*e2[2],
+        e1[0]*e2[1] - e1[1]*e2[0]
+    )
+    return 0.5 * math.sqrt(cross[0]**2 + cross[1]**2 + cross[2]**2)
+
+def sample_triangle_uniform(v0: Tuple[float, float, float], v1: Tuple[float, float, float], v2: Tuple[float, float, float], rng: PCG32) -> Tuple[float, float, float]:
+    # Standard sample warping for uniform triangle sampling [G]
+    u = rng.next()
+    v = rng.next()
+    if u + v > 1.0:
+        u = 1.0 - u
+        v = 1.0 - v
+    return (
+        v0[0] + u * (v1[0] - v0[0]) + v * (v2[0] - v0[0]),
+        v0[1] + u * (v1[1] - v0[1]) + v * (v2[1] - v0[1]),
+        v0[2] + u * (v1[2] - v0[2]) + v * (v2[2] - v0[2])
+    )
+
+def generate_training_positions(triangle_mesh: List, bounding_radius: float, N: int) -> List[Tuple[float, float, float]]:
+    rng = PCG32()
+    areas = [triangle_area(tri.v0, tri.v1, tri.v2) for tri in triangle_mesh]
+    total_area = sum(areas)
+    cdf = []
+    current_sum = 0.0
+    for area in areas:
+        current_sum += area / total_area
+        cdf.append(current_sum)
+
+    n_volume = N // 8
+    n_surface = 4 * (N // 8)
+    n_perturbed = 3 * (N // 8)
+    positions = []
+
+    # 1. Uniform Volume Samples
+    for _ in range(n_volume):
+        positions.append((rng.next(), rng.next(), rng.next()))
+
+    # Helper for binary search on CDF
+    def select_triangle_index(u: float) -> int:
+        low, high = 0, len(cdf) - 1
+        while low < high:
+            mid = (low + high) // 2
+            if cdf[mid] < u:
+                low = mid + 1
+            else:
+                high = mid
+        return low
+
+    # 2. Uniform Surface Samples
+    for _ in range(n_surface):
+        u = rng.next()
+        tri_idx = select_triangle_index(u)
+        tri = triangle_mesh[tri_idx]
+        positions.append(sample_triangle_uniform(tri.v0, tri.v1, tri.v2, rng))
+
+    # 3. Perturbed Surface Samples
+    sigma = bounding_radius / 1024.0
+    for _ in range(n_perturbed):
+        u = rng.next()
+        tri_idx = select_triangle_index(u)
+        tri = triangle_mesh[tri_idx]
+        base_pos = sample_triangle_uniform(tri.v0, tri.v1, tri.v2, rng)
+        
+        # Inverse CDF for logistic distribution [G]
+        u1, u2, u3 = rng.next(), rng.next(), rng.next()
+        dx = sigma * math.log(u1 / (1.0 - u1))
+        dy = sigma * math.log(u2 / (1.0 - u2))
+        dz = sigma * math.log(u3 / (1.0 - u3))
+        
+        positions.append((base_pos[0] + dx, base_pos[1] + dy, base_pos[2] + dz))
+
+    return positions
+```
+
+## Subtopics
+
+### Octree Sampling for NGLOD
+A specialized sampling routine for NeRF-based methods (NGLOD) that ensures training positions are generated within octree leaf nodes to avoid invalid queries, replacing the uniform unit cube sampling [S1]. It works by rejection sampling a uniformly random leaf node from the array of all octree nodes, then generating a uniform random position within the voxel of the selected leaf node [S1]. A key pitfall is that perturbed surface samples might fall outside the octree leaf nodes; this is handled by using the small perturbation standard deviation ($r/1024$), which is small enough to almost never leave the octree, so the surface sampling routine does not need modification [S1].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Originated in the "Instant Neural Graphics Primitives with a Multiresolution Hash Encoding" paper by Mueller et al. [S1].
+
+## Sources
+[S1] Instant Neural Graphics Primitives with a Multiresolution Hash Encoding, https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Mueller22.pdf, fetched 2026-10-28

@@ -1,0 +1,101 @@
+# OGN Decoder for 3D Shape Generation
+
+Also called: OGN-Decoder, Octree Generating Network (OGN), Shapenet/FAUST/BlendSwap Decoder
+
+## Overview
+The Octree Generating Network (OGN) is a deep convolutional decoder architecture that generates volumetric 3D outputs in a compute- and memory-efficient manner by using an octree representation [S1]. It learns to predict both the structure of the octree (which cells to subdivide) and the occupancy values of individual cells [S1]. Unlike standard decoders acting on regular voxel grids which have cubic complexity, the OGN does not have cubic complexity, allowing representing much higher resolution outputs with a limited memory budget [S1]. It maps a latent vector to a hierarchical octree representation of a 3D shape, supporting multiple output resolutions (64^3, 128^3, 256^3, 512^3) [S1].
+
+## How it works
+The OGN decoder consists of a dense block followed by an arbitrary number of hash-table-based octree blocks [S1]. The dense block is a set of conventional 3D convolutional and up-convolutional layers producing a feature map of size $d_1 \times d_2 \times d_3 \times c$ [S1]. The regular-grid-based feature map produced by the dense block is converted to a set of index-value pairs stored as a hash table (with values being feature vectors) and is further processed in this format [S1].
+
+Octree-based layers are organized in blocks, each responsible for predicting the structure and the content of a single level of the generated octree [S1]. Input to an octree block is a sparse hash-table-based convolutional feature map $F_{l-1}$ of resolution $(d_1 \cdot 2^{l-1}, d_2 \cdot 2^{l-1}, d_3 \cdot 2^{l-1})$ produced by the previous block [S1]. The input feature map is processed with a series of custom convolutional layers and one up-convolutional layer with stride 2, all followed by non-linearities [S1]. This yields a new feature map $\bar{F}_l$ of resolution $(d_1 \cdot 2^l, d_2 \cdot 2^l, d_3 \cdot 2^l)$ [S1].
+
+Based on $\bar{F}_l$, the content of level $l$ is predicted [S1]. For each cell, a two-fold decision is made: should it be kept at level $l$, and if yes, what should be the signal value? This is formulated as classifying the cell into one of three states: 'empty', 'filled', or 'mixed' [S1]. The prediction is made using a convolutional layer with 1/3 filters followed by a three-way softmax [S1]. This classifier is trained in a supervised manner with targets provided by the ground truth octree [S1]. If the output resolution has not been reached, features from $\bar{F}_l$ that correspond to 'mixed' cells are propagated to the next layer and serve as an input feature map $F_l$ to the next block [S1].
+
+Binary occupancy values $v \in \{0, 1\}$ are used in this work, though the framework can be extended to support arbitrary signals [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ogn_decoder(latent_vector, target_resolution_level):
+    """
+    Generates an octree representation of a 3D shape.
+    
+    Args:
+        latent_vector: Input latent code.
+        target_resolution_level: The highest level L to generate.
+        
+    Returns:
+        octree: A hierarchical structure containing occupancy and signal values.
+    """
+    # 1. Dense Block
+    # Encoder: 3 fully connected layers. Output size of last encoder layer 
+    # is identical to input size of decoder.
+    encoded = fully_connected(latent_vector, size=1024)
+    encoded = fully_connected(encoded, size=1024)
+    encoded = fully_connected(encoded, size=4**3 * 80) # Example for 64^3 output
+    
+    # Dense block: Conventional 3D conv and up-conv layers
+    # Produces feature map F_dense of size d1 x d2 x d3 x c
+    # For 64^3 output, initial dense block might produce 4^3 x 80
+    feature_map_dense = deconvolution_2(encoded)
+    feature_map_dense = convolution_3(feature_map_dense)
+    
+    # 2. Convert to Hash Table
+    # Convert regular-grid-based feature map to index-value pairs
+    hash_table = dense_to_hash(feature_map_dense)
+    
+    # 3. Octree Blocks
+    # Process blocks for levels l = 1 to target_resolution_level
+    current_hash_table = hash_table
+    
+    for level in range(1, target_resolution_level + 1):
+        # Process with custom conv layers and one up-conv with stride 2
+        # Yields feature map F_bar_l of resolution (d1*2^l, d2*2^l, d3*2^l)
+        # Note: Implementation uses OGN-Conv which operates on hash tables
+        feature_map_bar = ogn_conv_block(current_hash_table)
+        
+        # Predict content of level l
+        # Classify each cell into 'empty', 'filled', or 'mixed'
+        # Using convolutional layer with 1/3 filters followed by softmax
+        classification = predict_cell_state(feature_map_bar)
+        
+        # Extract features for 'mixed' cells to propagate to next level
+        mixed_indices = get_indices_where_state_is_mixed(classification)
+        next_hash_table = propagate_features(feature_map_bar, mixed_indices)
+        
+        # Store level l structure and content in octree
+        store_level_in_octree(level, classification, feature_map_bar)
+        
+        # Prepare for next iteration
+        current_hash_table = next_hash_table
+        
+    return octree
+```
+
+### Parameters
+- **Batch Size**: Training batch sizes scale inversely with resolution: 64^3 and 128^3 use batch size 16; 256^3 uses batch size 4; 512^3 uses batch size 1 [S1].
+- **Output Resolutions**: 64^3, 128^3, 256^3, 512^3 [S1].
+
+### Pitfalls
+- For FAUST and BlendSwap datasets, 256^3 output octrees use four levels instead of five. The dense block compensates by adding an extra deconvolution-convolution layer pair instead of one octree block [S1].
+- For 512^3 output on BlendSwap, the decoder requires one extra octree block with 32 output channels appended to the standard architecture [S1].
+
+## Subtopics
+
+### OGN Autoencoder Architecture
+A convolutional autoencoder using Octree Generating Network (OGN) layers to encode and decode 3D shapes into hierarchical octree representations [S1]. Training batch size is 16 for all networks [S1]. The layer sequence for the autoencoder is: Input -> Conv(2^3) -> Conv(4^3) -> InvConv -> Conv(3) -> Conv(3) -> Conv(3) -> FC[1024] -> FC[1024] -> FC[4^3×80] -> Deconv(2) -> Conv(3)→l1 -> OGNProp -> OGNConv(2^3)→l2 -> OGNProp -> OGNConv(2^3)→l3 -> OGNProp -> OGNConv(2^3)→l2 -> OGNConv(4^3)→l2 -> OGNConv(2^3) -> OGNConv*(3^3)→l2 -> OGNProp -> OGNConv(2^3)→l3 -> OGNConv(4^3)→l3 -> OGNConv(2^3) -> OGNConv*(3^3)→l3 [S1]. Note: OGNConv denotes up-convolution, OGNConv* denotes convolution. '→ lk' indicates level k of an octree is predicted by a classifier attached to this layer [S1]. A dense baseline uses identical layer configuration but replaces OGN-Conv with standard convolutions and makes predictions only after the final network layer [S1].
+
+## Operating characteristics
+- **Complexity**: Unlike standard decoders acting on regular voxel grids which have cubic complexity, the OGN does not have cubic complexity, allowing representing much higher resolution outputs with a limited memory budget [S1].
+- **Performance**: The implementation can generate volumes as large as 512^3 voxels on a modern GPU in a single forward pass [S1].
+- **Strengths**: Memory efficiency for high-resolution outputs; ability to generate hierarchical representations.
+- **Limitations**: Requires custom hash-table-based convolutional layers; training requires ground truth octree targets for supervised classification.
+
+## Background
+The Octree Generating Network (OGN) was introduced by Maxim Tatarchenko, Alexey Dosovitskiy, and Thomas Brox from the University of Freiburg and Intel Labs [S1]. It was presented at the IEEE International Conference on Computer Vision (ICCV) in 2017 [S1]. The method is used for 3D convolutional autoencoders, generation of objects and whole scenes from high-level representations, and shape from a single image [S1].
+
+## Sources
+[S1] Octree Generating Networks: Efficient Convolutional Architectures for High-resolution 3D Outputs, https://doi.org/10.1109/iccv.2017.230, fetched 2026-10-26

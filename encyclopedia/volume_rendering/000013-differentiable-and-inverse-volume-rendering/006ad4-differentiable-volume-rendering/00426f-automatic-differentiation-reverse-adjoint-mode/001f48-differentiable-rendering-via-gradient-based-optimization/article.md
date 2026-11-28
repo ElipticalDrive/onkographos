@@ -1,0 +1,165 @@
+# Differentiable Rendering via Gradient-Based Optimization
+
+Also called: Gradient-based optimization through a renderer, AD-based gradient computation, Density Reconstruction via Gradient Descent, Differentiable Ray Tracing with Automatic Differentiation, Image-Based Optimization, Inverse Rendering with Mitsuba 3, Source-to-source AD in Julia
+
+## Overview
+Differentiable rendering via gradient-based optimization is an iterative inverse rendering technique that recovers scene parameters (such as volumetric density, albedo, geometry, or illumination) by minimizing the difference between rendered images and observed reference images [S1, S2, S3]. It solves the problem of non-differentiable rendering pipelines by integrating automatic differentiation (AD) into the forward rendering process, allowing gradients of a loss function to flow from the image space back to the scene parameters [S3]. Unlike finite-difference methods, which require multiple forward passes per parameter, AD computes exact gradients in a single backward pass, reducing wall-clock time by approximately 60% for scenes with more than 50 optimized parameters and lowering approximation error by two orders of magnitude [S4]. It sets itself apart from [Adjoint Method](789-adjoint-method.md) by relying on source-to-source AD tools rather than hand-coded adjoint equations, and from [Forward-Mode Automatic Differentiation](853-forward-mode-automatic-differentiation.md) by being more efficient for high-dimensional parameter spaces [S4].
+
+## How it works
+The method formulates inverse rendering as a constrained optimization problem. The goal is to find parameters $\theta$ (e.g., density field $\rho$, albedo $a$, pose $\theta_{pose}$) that minimize a loss function $L$ between the rendered image $I_R(\theta)$ and a reference image $I$ [S2, S3].
+
+### Inputs and Outputs
+*   **Inputs:** Reference image $I$ (high-quality, low-noise); initial scene parameters $\theta_0$ (e.g., initial density field, albedo values); scene geometry and lighting definitions [S1, S3].
+*   **Outputs:** Optimized parameters $\theta^*$; final rendered image $I_R(\theta^*)$ [S3].
+
+### Data Structures
+*   **Scene Parameters:** Stored in a traversable structure or a flat array of tensors, with each parameter explicitly marked for gradient tracking [S4][S5, unofficial].
+*   **Optimizer State:** Maintains moving averages of gradients (e.g., Adam) and learning rate schedules [S5, unofficial].
+*   **Gradient Buffer:** Accumulates gradients $\frac{\partial L}{\partial \theta}$ computed during the backward pass [S3].
+
+### Numbered Steps
+
+1.  **Setup:**
+    *   Initialize the rendering engine with an AD-supporting variant (e.g., `cuda_ad_rgb`) [S5, unofficial].
+    *   Load the scene description (XML or programmatic) [S5, unofficial].
+    *   Render a high-quality reference image $I_{ref}$ using a high sample count (e.g., $spp=512$) to minimize noise-induced optimization instability [S5, unofficial].
+    *   Initialize the optimizer (e.g., Adam with learning rate $lr=0.05$) and assign target parameters to it [S5, unofficial].
+
+2.  **Forward Pass (Rendering):**
+    *   For each pixel $(i, j)$ in the image dimensions $(ImgW, ImgH)$:
+        *   Cast a single ray $(x, \boldsymbol{u})$ per pixel [S4]. *Note: Single-ray-per-pixel is required to avoid stochastic sampling non-differentiability* [S4].
+        *   Compute radiance $L_{out}(x, \boldsymbol{u})$ using the differentiable renderer [S1].
+        *   If the ray hits geometry, compute color based on barycentric coordinates and interpolated surface normals [S4].
+        *   If the ray misses, return background color (gradients are zero) [S4].
+        *   *Edge Case:* At geometric boundaries (edges shared by triangles), apply a deterministic tie-breaking rule (prefer lower face index) to ensure a well-defined computational graph, accepting potentially biased gradients for the selected path [S4].
+
+3.  **Loss Computation:**
+    *   Compute the loss $L$ using the Mean Squared Error (MSE) between the current rendered image $I_{curr}$ and the reference image $I_{ref}$ [S5, unofficial]:
+        $$ L = \text{MSE}(I_{curr}, I_{ref}) = \frac{1}{N} \sum_{k=1}^{N} (I_{curr}[k] - I_{ref}[k])^2 $$
+        where $N$ is the number of pixels [S5, unofficial].
+    *   Alternatively, for formulations involving geometry $\theta$, illumination $L$, and albedo $a$:
+        $$ L(\theta, L, a_{0,...,n}) = ||I_R(\theta, L, a_{0,...,n}) - I||^2_2 $$
+        where $I_R(\theta, L, a_{0,...,n}) = R(B(\theta x_0), ..., B(\theta x_n), P)$ [S3].
+
+4.  **Backward Pass (Gradient Computation):**
+    *   Call the automatic differentiation engine to compute gradients $\frac{\partial L}{\partial \theta}$ for all tracked parameters [S5, unofficial].
+    *   The AD engine traverses the computational graph from the loss variable, applying the chain rule to sum gradient variables [Parent].
+
+5.  **Parameter Update:**
+    *   Perform an optimizer step (e.g., Adam step) [S5, unofficial].
+    *   Clip parameters to valid ranges (e.g., albedo $[0.0, 1.0]$) [S5, unofficial].
+    *   Update the scene state with the new parameters [S5, unofficial].
+    *   *Volumetric Specific:* For density field reconstruction, accumulate density gradients and update voxel positions $v_p$:
+        $$ \text{densityGrad}[v_p] \leftarrow \text{densityGrad}[v_p] + 2 \times diff \times grad $$
+        $$ \rho[v_p] \leftarrow \rho[v_p] - LR \times \text{densityGrad}[v_p] $$
+        where $diff = I[i, j] - L_{out}(x, \boldsymbol{u})$ [S1].
+
+6.  **Iteration:**
+    *   Repeat steps 2–5 for a fixed number of iterations (e.g., 50) [S5, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+scene = load_scene('scene.xml', resolution=128, integrator='prb')
+reference_image = render_scene(scene, samples_per_pixel=512)
+parameters = traverse_scene(scene)
+target_key = 'red.reflectance.value'
+param_reference = parameters[target_key]
+parameters[target_key] = random_color()
+optimizer = Adam(parameters[target_key], learning_rate=0.05)
+parameters.update(optimizer)
+
+def mean_squared_error(current_image, reference_image):
+    return mean(square(current_image - reference_image))
+
+# Optimization Loop
+for iteration in range(50):
+    # 1. Forward Pass
+    current_image = render_scene(scene, parameters, samples_per_pixel=4)
+    
+    # 2. Loss Computation
+    loss = mean_squared_error(current_image, reference_image)
+    
+    # 3. Backward Pass
+    gradients = backward_pass(loss)
+    
+    # 4. Parameter Update
+    optimizer_step(optimizer, gradients)
+    parameters[target_key] = clip(parameters[target_key], 0.0, 1.0)
+    parameters.update(optimizer)
+    
+    # 5. Monitoring
+    error = sum(square(param_reference - parameters[target_key]))
+    print(f"Iteration {iteration}: Error = {error}")
+```
+
+### Parameters
+*   **Learning Rate:** 0.05 for Adam is typical [S5, unofficial].
+*   **Sample Count (spp):** Reference image: 512 spp [S5, unofficial]. Optimization render: 4 spp [S5, unofficial].
+*   **Integrator:** 'prb' (Path Replay Backpropagation) is recommended for static scenes [S5, unofficial].
+*   **Backend Variant:** Must contain `_ad` (e.g., `cuda_ad_rgb`) [S5, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Geometric Boundaries:** Intersection at triangle edges is non-differentiable. A deterministic tie-breaking rule (lower face index) is used, which makes the graph well-defined but may produce biased gradients [S4].
+*   **Visibility Discontinuities:** Near occlusion boundaries, small parameter changes cause rays to hit or miss geometry, creating discontinuities. Gradients are zero only far from boundaries [S4].
+*   **Monte Carlo Noise:** Noise in the rendered image during optimization can dominate the loss signal. Using a high-quality reference image and clipping parameters mitigates this [S5, unofficial].
+*   **Non-Convexity:** The objective function is non-convex; gradients may lead to local minima [S7, unofficial].
+
+## Subtopics
+
+### [Albedo-based Parameterization for Extinction](2015-albedo-based-parameterization-for-extinction.md)
+Albedo-based parameterization decouples scattering coefficient ($\sigma_s$) from extinction coefficient ($\sigma_t$) by representing scattering as $\sigma_s = \alpha \sigma_t$, where $\alpha$ is albedo. This solves numerical instability in direct parameterization where gradients of $\sigma_s$ w.r.t $\sigma_t$ become undefined as extinction approaches zero. It sets itself apart from [Single-Scattering Differentiable Volume Rendering](4143-single-scattering-differentiable-volume-rendering.md) and [Differential Ratio Tracing](4231-differential-ratio-tracing.md) by explicitly structuring the scene graph to expose albedo as a differentiable primitive alongside $\sigma_t$, ensuring stable optimization gradients in heterogeneous media.
+
+### [Single-Scattering Differentiable Volume Rendering](4143-single-scattering-differentiable-volume-rendering.md)
+A differentiable renderer that reconstructs smoke density fields using a single-scattering assumption, enabling analytical gradient computation with respect to density $\rho$. It solves the inverse problem of recovering volumetric density from multi-view images by computing gradients directly via the differential form of the Radiative Transfer Equation (RTE). It sets itself apart from Differential Ray Tracing (DRT) by pre-computing view-independent radiance terms, achieving a 50-100x speedup, and from full multiple-scattering methods by trading absolute accuracy for interactive reconstruction speeds.
+
+### [Differential Ratio Tracing](4231-differential-ratio-tracing.md)
+A sampling strategy for estimating gradients of the radiative transfer equation with respect to medium density in differentiable volume rendering. It solves the problem of biased and high-variance gradients produced by standard volumetric free-flight sampling (e.g., delta tracking) by sampling distances proportional to the unweighted transmittance rather than extinction-weighted transmittance. Unlike [Single-Scattering Differentiable Volume Rendering](4143-single-scattering-differentiable-volume-rendering.md), which relies on pre-computed view-independent terms, DRT is a Monte Carlo estimator that must recompute gradients for each view. It is designed for physically-based scattering and absorbing volumes, as opposed to NeRF-style emissive volumes.
+
+### [RAN Training Procedure](14632-ran-training-procedure.md)
+An unsupervised training procedure using a Reconstruction Adversarial Network (RAN) and pix2pix networks to find an internal representation that minimizes content-wise changes while translating between image spaces. It distinguishes itself from sibling methods like [Single-Scattering Differentiable Volume Rendering](4143-single-scattering-differentiable-volume-rendering.md) by relying on adversarial learning and cycle-consistency across multiple image domains rather than direct physical scattering models.
+
+### Differentiable 3D Microscopy Rendering
+A differentiable 3D renderer for fluorescence microscopy that formulates shape inference as an inverse problem. It simulates image formation by integrating a parameterized point spread function (PSF) with a triangle mesh-based representation of biological structures, optimizing both shape and optical parameters to align synthetic and real microscopy images [S6, unofficial]. The image formation is modeled as a convolution: $I = \text{Mesh} * h$, where $I$ is the smooth image, the mesh represents the fluorophore distribution, and $h$ is the translation-invariant PSF [S6, unofficial]. It uses a basic Gaussian kernel for the PSF model, though experimental models are supported [S6, unofficial]. Input is a triangle mesh and parameterized PSF; output is a 3D intensity map on domain $[0, 1]^3$ [S6, unofficial]. It uses a GPU-accelerated Fourier transform for triangle meshes and narrow-band spectral filtering to ensure scalability [S6, unofficial].
+
+### Density Parameterized Rendering
+A forward pass approximation method that reinterprets scene parameters to ensure differentiability by preventing discontinuities at hard object boundaries [S7, unofficial]. It defines each object by a density parameter which has maximum opaqueness at the object’s center and becomes transparent towards the boundaries [S7, unofficial]. This ensures the rendering result is blurry and smooth towards the edges, removing sharp corners from scene parameters to ensure differentiability [S7, unofficial].
+
+### Gradient-Based Material Calibration
+Adjusting supported transport and sensor parameters (materials, scattering, antenna patterns) so simulated observations better match measurements using gradient descent [S8, unofficial]. It calibrates materials, scattering, and antenna patterns against channel-sounder measurements (e.g., DICHASUS, Univ. of Stuttgart) [S8, unofficial]. A key pitfall is that learned values absorb geometry and model error; they are the best-predicting parameters, not certified physical constants [S8, unofficial]. In measurement calibration, ITU-default materials missed measured channel gain by 4.93 dB on average; gradient-calibrated materials cut it to 2.16 dB; neural materials to 1.00 dB [S8, unofficial]. Described in Sionna RT documentation 'Calibrating Material Parameters Through Gradient Descent' and paper arXiv:2311.18558 [S8, unofficial].
+
+### Hybrid Optimization Strategy
+A two-phase optimization strategy that combines global gradient guidance with local refinement by alternating between two derivative computation methods [S9]. It executes the first 75% of optimization iterations using RGBXY derivatives to capture global and long-range relationships, and the remaining 25% using standard derivatives to fine-tune parameters for accurate reconstruction [S9]. It outperforms a randomized strategy that randomly selects one derivative type per iteration, which shows no benefits [S9].
+
+### Gradient-Based Design Optimization
+Moving sources or sensors, tuning patterns, or searching continuous design parameters against a task loss [S8, unofficial]. It performs gradient ascent on a transmitter's orientation to maximize received power in a chosen map region, and optimizes RIS phase and amplitude profiles using gradient-based optimization [S8, unofficial]. Demo described in Sionna RT paper and arXiv:2303.11103 (material learning, transmitter-orientation optimization) [S8, unofficial].
+
+### Two-Stage Training Scheme
+A multi-step training procedure for intrinsic indoor scene reconstruction via raytracing in neural SDFs [S10]. Stage 2 trains material ($F_a, F_\rho$) and emission ($L[\cdot]$) fields while $F_d, F_c, F_e$ are fixed, using loss $L_{mreg} + L_{rgb}$ [S10]. Step 1 (Warm-up) sets $\lambda_5 = 0$ (no bubble loss) to reconstruct coarse geometry and initialize PDF maps [S10]. Step 2 (Bubble) enables adaptive sampling and bubble loss ($\lambda_5 > 0$) while disabling Eikonal and smoothness ($\lambda_1, \lambda_4 = 0$) to prevent contradictions [S10]. Step 3 (Smooth) disables bubble loss ($\lambda_5 = 0$) and re-enables Eikonal and smoothness ($\lambda_1, \lambda_4 > 0$) to restore SDF smoothness and stability [S10].
+
+## Operating characteristics
+*   **Time Complexity:** AD-based gradient computation achieves a 60% reduction in wall-clock time compared to central finite differences for scenes with more than 50 optimized parameters [S4].
+*   **Memory Complexity:** Requires storing the computational graph for backpropagation, increasing memory usage compared to standard rendering [S4].
+*   **Measured Performance:** Rendering a 512x512 image of the Utah Teapot (~1,500 triangles) takes approximately 85ms without BVH and 52ms with BVH acceleration on Intel Xeon E5-1650 v4, 32GB RAM [S4].
+*   **Scaling:** Performance scales with scene complexity (number of triangles and optimized parameters) [S4].
+*   **Strengths:** Exact gradients without approximation error, efficient for high-dimensional parameter spaces, integrates directly with machine learning ecosystems (e.g., PyTorch, Julia/Flux) [S2, S4].
+*   **Limitations:** Non-convex optimization landscape prone to local minima, sensitivity to Monte Carlo noise, non-differentiable visibility and geometric boundaries require heuristic handling [S4][S7, unofficial].
+*   **When to Use:** Inverse rendering, material calibration, and shape reconstruction from images [S2][S8, unofficial].
+*   **When Not to Use:** Real-time rendering where gradient computation overhead is prohibitive, or when certified physical constants are required since learned parameters may absorb model errors [S8, unofficial].
+
+## Background
+Originated from the need to overcome the discrete, non-differentiable structure of classical rendering pipelines for gradient-based parameter recovery [S4]. Key implementations include RayTracer.jl, a Julia engine designed for integration with the Flux machine learning ecosystem via Zygote AD [S4], and Mitsuba 3, which uses Dr.Jit for source-to-source AD [S5, unofficial]. The approach has been applied to fluid reconstruction [S1], inverse shadow computation [S2], and 3D fluorescence microscopy [S6, unofficial].
+
+## Sources
+[S1] Physics-Based Differentiable Rendering for Efficient and Plausible Fluid Modeling from Monocular Video, https://doi.org/10.3390/e25091348, fetched 2026-10-26
+[S2] PSDR-Room: Single Photo to Scene using Differentiable Rendering, https://doi.org/10.1145/3610548.3618165, fetched 2026-11-08
+[S3] Efficient and Differentiable Shadow Computation for Inverse Problems, https://doi.org/10.1109/iccv48922.2021.01286, fetched 2026-11-01
+[S4] Optimizing 3D Scene Reconstruction with Differentiable Ray Tracing, https://doi.org/10.31224/5014, fetched 2026-10-29
+[S5] Official Mitsuba tutorial Gradient-based inverse rendering Optimization through a renderer ↗, https://mitsuba.readthedocs.io/en/latest/src/inverse_rendering/gradient_based_opt.html, fetched 2026-10-29 (unofficial)
+[S6] Differentiable Rendering for 3D Fluorescence Microscopy, https://doi.org/10.48550/arxiv.2303.10440, fetched 2026-10-27 (unofficial)
+[S7] Differentiable Rendering: A Survey, https://doi.org/10.48550/arxiv.2006.12057, fetched 2026-10-26 (unofficial)
+[S8] Differentiable ray tracing — from paths to gradients | Bai Liping, https://bailiping.com/differentiable-ray-tracing/, fetched 2026-10-28 (unofficial)
+[S9] Differentiable Rendering Using RGBXY Derivatives and Optimal Transport, https://doi.org/10.1145/3550454.3555479, fetched 2026-10-27
+[S10] I 2 -SDF: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs, https://doi.org/10.1109/cvpr52729.2023.01202, fetched 2026-11-01

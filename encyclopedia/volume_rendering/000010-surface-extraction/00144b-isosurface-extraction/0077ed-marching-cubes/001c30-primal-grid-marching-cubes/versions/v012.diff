@@ -1,0 +1,86 @@
+--- v011.md
++++ v012.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Primal Grid Marching Cubes is a GPU-accelerated isosurface extraction technique that processes a 3D scalar volume grid using compute shaders to output a triangle mesh [S1, S2, unofficial][S3, unofficial]. It solves the problem of converting discrete volumetric data into a continuous geometric representation suitable for rasterization or ray tracing [S3, unofficial]. Unlike direct volume rendering, which visualizes the volume directly, this method creates an intermediate polygonal mesh [S3, unofficial]. It differs from its parent [Isosurface extraction](30-isosurface-extraction.md) by explicitly constructing a triangle mesh via lookup tables and atomic counters rather than just traversing the grid [S1, unofficial], and from [Dual Marching Cubes](906-dual-marching-cubes.md) by operating on primal grid vertices rather than dual grid cell centers .
++Primal Grid Marching Cubes is a GPU-accelerated isosurface extraction technique that processes a 3D scalar volume grid using compute shaders to output a triangle mesh [S1, S2, unofficial][S3, unofficial]. It solves the problem of converting discrete volumetric data into a continuous geometric representation suitable for rasterization or ray tracing [S3, unofficial]. Unlike direct volume rendering, which visualizes the volume directly, this method creates an intermediate polygonal mesh [S3, unofficial]. It differs from its parent [Isosurface extraction](30-isosurface-extraction.md) by explicitly constructing a triangle mesh via lookup tables and atomic counters rather than just traversing the grid [S1, unofficial], and from [Dual Marching Cubes](906-dual-marching-cubes.md) by operating on primal grid vertices rather than dual grid cell centers [G].
+ 
+ ## How it works
+@@ -23,5 +23,5 @@
+ 2.  **Dispatch:** A compute shader kernel (`MeshReconstruction`) is launched with a thread group size of `[4, 4, 4]` (or similar), mapping global thread IDs to voxel coordinates $(i, j, k)$ [S1, S2, unofficial][S3, unofficial].
+ 3.  **Boundary Check:** Each thread checks if its voxel coordinate is within bounds. If `id` exceeds grid dimensions in any component, the thread returns immediately [S1, unofficial].
+-4.  **Sample Vertices:** For the current voxel cube, sample the scalar values and gradients at the 8 vertices. For vertex index $i \in [0, 7]$, calculate the grid coordinate `id + CubeVertex(i)`. `CubeVertex(i)` returns `uint3(x, y, z)` where $x, y, z$ are the bits of $i$. Store results in `float4 samples[8]`, where `xyz` is the gradient and `w` is the scalar value [S1, unofficial].
++4.  **Sample Vertices:** For the current voxel cube, sample the scalar values and gradients at the 8 vertices. For vertex index $i \in [0, 7]$, calculate the grid coordinate `id + CubeVertex(i)`. `CubeVertex(i)` returns `uint3(x^y, y, z)` where $x, y, z$ are the bits of $i$. Store results in `float4 samples[8]`, where `xyz` is the gradient and `w` is the scalar value [S1, unofficial].
+ 5.  **Calculate Case Index:** Compute the cube configuration selector (bitmask) $C$. For each vertex $i$, if `samples[i].w < Isovalue`, set bit $i$ in the selector:
+     $$ C = \sum_{i=0}^{7} \mathbb{I}(\text{samples}[i].w < \text{Isovalue}) \cdot 2^i $$
+@@ -56,9 +56,9 @@
+     samples = [float4(0.0, 0.0, 0.0, 0.0)] * 8
+     for i in range(8):
+-        x = (i >> 0) & 1
++        x = i & 1
+         y = (i >> 1) & 1
+         z = (i >> 2) & 1
+-        # Standard primal grid vertex mapping
+-        offset = uint3(x, y, z)
++        # Standard primal grid vertex mapping per [S1, unofficial]
++        offset = uint3(x ^ y, y, z)
+         coord = id + offset
+         samples[i] = VoxelValueWithGradient(coord, Dims)
+@@ -142,20 +142,19 @@
+         current_tri += 1
+ 
+-# Helper: CubeVertex maps bit index i to grid offset (x, y, z)
++# Helper: CubeVertex maps bit index i to grid offset (x^y, y, z) per [S1, unofficial]
+ def CubeVertex(i: uint) -> uint3:
+     x = i & 1
+     y = (i >> 1) & 1
+     z = (i >> 2) & 1
+-    return uint3(x, y, z)
+-
+-# Helper: EdgeVertexPair maps edge index to vertex indices
++    return uint3(x ^ y, y, z)
++
++# Helper: EdgeVertexPair maps edge index to vertex indices per [S1, unofficial]
+ def EdgeVertexPair(edge_idx: uint) -> tuple:
+-    if edge_idx < 4:
+-        return edge_idx, (edge_idx + 1) & 3
+-    elif edge_idx < 8:
+-        return edge_idx, (edge_idx + 1) & 7 if edge_idx < 7 else 4
++    v1 = edge_idx & 7
++    if edge_idx < 8:
++        v2 = ((edge_idx + 1) & 3) | (edge_idx & 4)
+     else:
+-        v = edge_idx - 8
+-        return v, v + 4
++        v2 = v1 + 4
++    return v1, v2
+ 
+ # Helper: GetEdgeIndex extracts 4-bit edge index from packed uint2
+@@ -170,5 +169,5 @@
+         return (val >> shift) & 0xF
+ 
+-# Helper: VoxelValueWithGradient samples scalar and gradient
++# Helper: VoxelValueWithGradient samples scalar and gradient per [S1, unofficial]
+ def VoxelValueWithGradient(coord: uint3, Dims: uint3) -> float4:
+     # Clamp coordinates to grid bounds for gradient calculation
+@@ -185,5 +184,5 @@
+     return float4(v_px - v_nx, v_py - v_ny, v_pz - v_nz, v)
+ 
+-# Helper: TransformPoint maps grid coordinates to object space
++# Helper: TransformPoint maps grid coordinates to object space per [S1, unofficial]
+ def TransformPoint(grid_coord: uint3, Dims: uint3, Scale: float) -> float3:
+     p = float3(grid_coord)
+@@ -237,9 +236,9 @@
+ *   **Strengths:** Deterministic memory usage due to fixed-size buffers; GPU-friendly parallelism; supports both precomputed tensors and on-the-fly implicit function evaluation [S1, S2, unofficial].
+ *   **Limitations:** Atomic counter contention and potential for buffer overflow if `MaxTriangle` is underestimated [S1, unofficial]; topological ambiguities in standard MC configurations [S7].
+-*   **When to Use:** When real-time or high-performance isosurface extraction from volumetric data is required on a GPU.
+-*   **When Not to Use:** When memory is extremely constrained and the triangle count is unpredictable (use hierarchical methods); when topological correctness in ambiguous cases is critical (use Dual Marching Cubes or Ambiguous Case Resolvers).
++*   **When to Use:** When real-time or high-performance isosurface extraction from volumetric data is required on a GPU [S1, S2, unofficial].
++*   **When Not to Use:** When memory is extremely constrained and the triangle count is unpredictable (use hierarchical methods); when topological correctness in ambiguous cases is critical (use Dual Marching Cubes or Ambiguous Case Resolvers) [G].
+ 
+ ## Background
+-The method is based on the classic Marching Cubes algorithm by Lorensen and Cline , adapted for GPU compute shaders. The triangle table data is sourced from Paul Bourke's 'Polygonise' geometry reference, which is attributed to the original MC paper [S2, S1, unofficial]. The specific implementation details (atomic counters, buffer layout) are derived from Unity's ComputeMarchingCubes sample and CUDA extensions like CuMCubes [S1, S2, unofficial].
++The method implements the classic Marching Cubes algorithm, adapted for GPU compute shaders [S1, S3, unofficial]. The triangle table data is sourced from Paul Bourke's 'Polygonise' geometry reference, which is attributed to the original MC paper [S2, S1, unofficial]. The specific implementation details (atomic counters, buffer layout) are derived from Unity's ComputeMarchingCubes sample and CUDA extensions like CuMCubes [S1, S2, unofficial].
+ 
+ ## Sources

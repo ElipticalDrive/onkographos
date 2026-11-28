@@ -1,0 +1,139 @@
+# Mass-Spring System Simulation
+Also called: Mass-Spring Deformation, Mass-Spring System, Physically-based Simulation via Mass-Spring System
+## Overview
+A deformation method where a coarse tetrahedral mesh serves as a geometric proxy for simulation, configured as a mass-spring system to balance computational efficiency with accurate representation of complex deformations [S1]. It sets itself apart from its sibling [FEM-based Force Computation](21395-fem-based-force-computation.md) by utilizing simple spring constants between nodes rather than element stiffness matrices, resulting in lower computational overhead at the cost of less precise triangle representation [S1].
+## How it works
+**Inputs and Outputs:**
+- Input: A coarse tetrahedral mesh defining the geometry.
+- Output: Deformed vertex positions satisfying physical constraints.
+
+**Data Structures:**
+- **Mesh:** A collection of vertices and edges. Each vertex acts as a mass point. Each edge acts as a spring connecting two mass points.
+- **Constraints:**
+  1. **Spring Length Constraint:** Maintains the invariance of the distance between connected vertices.
+  2. **Tetrahedral Volume Constraint:** Maintains the invariance of the volume of each tetrahedron formed by four connected vertices.
+
+**Steps:**
+1. **Configuration:** Configure each vertex of the coarse tetrahedral mesh as a mass point.
+2. **Physics Implementation:** Implement the XPBD simulation loop using a programming language such as Taichi to simulate the physics of the mass-spring system [S1].
+3. **Constraint Enforcement:**
+   - Enforce spring length constraints to maintain the invariance of spring length between connected vertices.
+   - Enforce tetrahedral volume constraints to maintain the invariance of the volume of the tetrahedra.
+
+**Parameters:**
+- Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- The method may suffer from ill-shaped tetrahedra within the mesh, which can lead to artifacts in accumulation maps or density predictions [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Mass-Spring System Simulation using XPBD
+# Note: Specific XPBD solver details are assumed to be provided by the XPBD Simulation Loop article.
+
+def simulate_mass_spring_system(mesh):
+    """
+    Simulates deformation on a coarse tetrahedral mesh configured as a mass-spring system.
+    
+    Args:
+        mesh: A data structure containing vertices and edges.
+              vertices: List of vertex objects with position, mass, velocity.
+              edges: List of edge objects connecting two vertex indices.
+              tetrahedra: List of tetrahedra objects defined by four vertex indices.
+    
+    Returns:
+        Updated vertex positions after constraint enforcement.
+    """
+    # Step 1: Initialize state (assumed done by XPBD loop setup)
+    # Each vertex is a mass point. Each edge is a spring.
+    
+    # Step 2: Apply external forces (e.g., gravity, user interaction)
+    # This is part of the XPBD integration step, not detailed here.
+    
+    # Step 3: Enforce Constraints via XPBD projections
+    # The XPBD loop handles the iterative projection of constraints.
+    
+    # Constraint 1: Spring Length Invariance
+    for edge in mesh.edges:
+        v1, v2 = mesh.vertices[edge.v1], mesh.vertices[edge.v2]
+        # Calculate current length
+        current_length = distance(v1.position, v2.position)
+        # Desired length (rest length) is stored in the edge or derived from initial mesh
+        rest_length = edge.rest_length
+        # XPBD constraint projection adjusts v1.position and v2.position
+        # to satisfy |v1.position - v2.position| == rest_length
+        enforce_length_constraint(v1, v2, rest_length)
+        
+    # Constraint 2: Tetrahedral Volume Invariance
+    for tet in mesh.tetrahedra:
+        v1, v2, v3, v4 = [mesh.vertices[i] for i in tet.vertex_indices]
+        # Calculate current volume
+        current_volume = compute_tetrahedron_volume(v1.position, v2.position, v3.position, v4.position)
+        # Desired volume (rest volume) is stored in the tetrahedron or derived from initial mesh
+        rest_volume = tet.rest_volume
+        # XPBD constraint projection adjusts v1, v2, v3, v4 positions
+        # to satisfy volume == rest_volume
+        enforce_volume_constraint(v1, v2, v3, v4, rest_volume)
+        
+    return mesh.vertices
+
+def distance(p1, p2):
+    return sqrt(sum((a-b)**2 for a, b in zip(p1, p2)))
+
+def compute_tetrahedron_volume(p1, p2, p3, p4):
+    # Volume of tetrahedron defined by 4 points
+    # V = |(p2-p1) . ((p3-p1) x (p4-p1))| / 6
+    v1 = [p2[i]-p1[i] for i in range(3)]
+    v2 = [p3[i]-p1[i] for i in range(3)]
+    v3 = [p4[i]-p1[i] for i in range(3)]
+    cross = cross_product(v2, v3)
+    dot = sum(a*b for a, b in zip(v1, cross))
+    return abs(dot) / 6.0
+
+def cross_product(v1, v2):
+    return [
+        v1[1]*v2[2] - v1[2]*v2[1],
+        v1[2]*v2[0] - v1[0]*v2[2],
+        v1[0]*v2[1] - v1[1]*v2[0]
+    ]
+
+def enforce_length_constraint(v1, v2, rest_length):
+    # Placeholder for XPBD projection logic
+    # This function modifies v1.position and v2.position in place
+    # to satisfy the length constraint.
+    pass
+
+def enforce_volume_constraint(v1, v2, v3, v4, rest_volume):
+    # Placeholder for XPBD projection logic
+    # This function modifies v1.position, v2.position, v3.position, v4.position in place
+    # to satisfy the volume constraint.
+    pass
+```
+## Subtopics
+
+### [FEM-based Force Computation](21395-fem-based-force-computation.md)
+FEM-based Force Computation is a deformation method that computes internal forces on a tetrahedral mesh using Finite Element Method principles, chosen over mass-spring systems to provide a more precise representation of triangles by accounting for all surface contributions. It sets itself apart from its parent [Mass-Spring System Simulation](21252-mass-spring-system-simulation.md) by utilizing element stiffness matrices and local frame rotations rather than simple spring constants between nodes, resulting in physically more plausible deformation forces.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- The method uses a coarse tetrahedral mesh to reduce computational overhead [S1].
+- Memory usage varies by scene complexity. For example, in one implementation, mesh storage size ranged from 248.88 KB to 110.85 MB, with single-stage memory usage between 9.79 GB and 12.01 GB [S1].
+
+**Measured Performance:**
+- The method exhibits fewer artifacts in accumulation maps compared to methods suffering from ill-shaped tetrahedra, suggesting more precise prediction and depiction of densities [S1].
+
+**Strengths and Limitations:**
+- Strengths: Balance between computational efficiency and ability to accurately represent complex deformations; reduced computational overhead [S1].
+- Limitations: Ill-shaped tetrahedra can lead to artifacts in accumulation maps [S1].
+
+**When to Use:**
+- Use when a balance between computational efficiency and deformation accuracy is required, and when the mesh quality is sufficient to avoid ill-shaped tetrahedra [S1].
+
+**When Not to Use:**
+- Avoid when high precision in triangle representation is critical, in which case [FEM-based Force Computation](21395-fem-based-force-computation.md) may be preferred [S1].
+## Background
+The method is used in the context of Deformable NeRF, where a coarse tetrahedral mesh serves as a geometric proxy for simulation [S1]. It was implemented using the Taichi programming language to simulate the physics of the mass-spring system [S1].
+## Sources
+[S1] Deformable NeRF using Recursively Subdivided Tetrahedra, https://doi.org/10.1145/3664647.3681019, fetched 2026-10-26

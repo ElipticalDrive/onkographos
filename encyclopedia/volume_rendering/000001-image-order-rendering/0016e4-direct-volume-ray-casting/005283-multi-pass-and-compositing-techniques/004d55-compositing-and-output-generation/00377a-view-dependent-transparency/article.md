@@ -1,0 +1,166 @@
+# View-Dependent Transparency
+
+Also called: Angle-Based Transparency, Image fading with incidence angle, Incidence angle fading
+
+## Overview
+View-Dependent Transparency (VDT) is a compositing technique that modulates sample opacity based on the geometric relationship between the surface normal and the viewer's direction, rather than relying solely on intrinsic material properties [S2, S3]. It solves the problem of visual clutter in integral surface rendering by making regions orthogonal to the viewer more transparent and regions curving towards or away from the viewer more opaque, thereby improving the readability of nested structures and silhouettes [S3]. It differs from standard Direct Volume Rendering (DVR) by introducing view-dependent opacity modulation to enhance shape perception [S2], and from billboard-based fading which suffers from ghosting artifacts when moving around complex objects [S1].
+
+## How it works
+The method operates on the output of the ray casting loop, specifically modifying the opacity $\alpha_i$ of each sample before or during the compositing step [S3]. Two primary variants are defined: Angle-Based Transparency and Normal-Variation Transparency [S3].
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Surface normal vector $\mathbf{n}$ at the sample point [S3].
+    *   Normalized view vector $\mathbf{v}$ from the camera to the sample point [S3].
+    *   Pixel coordinates $(i, j)$ for image-space derivatives [S3].
+    *   Parameter $\gamma \in [0, 1]$ for Normal-Variation Transparency [S3].
+    *   User-adjustable transparency range $[\alpha_{min}, \alpha_{max}]$ [S3].
+*   **Outputs**:
+    *   Modified view-dependent opacity $\alpha_{view}$ or final opacity $\alpha$ [S3].
+
+### Data Structures
+No specific complex data structures are required beyond the standard sample attributes $(c_i, \alpha_i, \mathbf{n}_i, \mathbf{v}_i)$ [S3]. The normal $\mathbf{n}$ must be available in the same coordinate space as $\mathbf{v}$ (typically view space or world space, provided they are consistent) [G].
+
+### Steps and Formulas
+
+#### 1. Angle-Based Transparency
+This method computes transparency based on the incidence angle between the surface normal and the view vector [S3].
+
+1.  Compute the dot product of the surface normal $\mathbf{n}$ and the normalized view vector $\mathbf{v}$:
+    $$ d = \mathbf{n} \cdot \mathbf{v} $$
+2.  Apply the arccosine function to the dot product result to obtain the angle $\theta \in [0, \pi]$:
+    $$ \theta = \arccos(d) $$
+3.  Scale the result by $2/\pi$ to normalize the transparency to the range $[0, 1]$:
+    $$ \alpha_{view} = \frac{2}{\pi} \arccos(\mathbf{n} \cdot \mathbf{v}) $$
+    
+    *Interpretation*: The source refers to $\alpha_{view}$ as "transparency", but notes that transparency "decreases as the object silhouette is approached" [S3]. At the silhouette, $\mathbf{n} \perp \mathbf{v}$, so $\mathbf{n} \cdot \mathbf{v} = 0$, $\arccos(0) = \pi/2$, and $\alpha_{view} = 1$ [S3]. In standard alpha blending, $\alpha=1$ is opaque [G]. Therefore, $\alpha_{view}$ functions as the opacity contribution in the compositing equation, where regions orthogonal to the viewer ($\alpha_{view} \approx 1$) are actually opaque, and front-facing regions ($\alpha_{view} \approx 0$) are transparent, matching the source's description of decreasing transparency at the silhouette [S3].
+
+#### 2. Normal-Variation Transparency
+This method approximates local surface curvature perpendicular to the viewer using image-space partial derivatives [S3].
+
+1.  Retrieve the surface normal $\mathbf{n}(i,j)$ at pixel $(i,j)$ and extract its z-component $n_z$ (assuming view space where z is the view direction) [S3].
+2.  Compute the partial derivatives of $n_z$ with respect to pixel coordinates $i$ and $j$:
+    $$ \frac{\partial n_z}{\partial i}, \quad \frac{\partial n_z}{\partial j} $$
+3.  Calculate the base view-dependent term $\alpha_{view}$:
+    $$ \alpha_{view} = \left( \left(\frac{\partial n_z}{\partial i}\right)^2 + \left(\frac{\partial n_z}{\partial j}\right)^2 \right)^{\gamma/2} $$
+    *Note*: The source states that $\alpha_{view}$ is not necessarily limited to the unit interval and must be clamped before $\gamma$ is applied [S3]. In practice, the gradient magnitude $B = \sqrt{(\partial n_z/\partial i)^2 + (\partial n_z/\partial j)^2}$ is clamped to $[0, 1]$ before raising to the power of $\gamma/2$ to ensure valid opacity values.
+4.  Constrain the final opacity $\alpha$ to the user-adjustable interval $[\alpha_{min}, \alpha_{max}]$:
+    $$ \alpha = (1 - \alpha_{view}) \cdot \alpha_{min} + \alpha_{view} \cdot \alpha_{max} $$
+    This linear interpolation assumes $\alpha_{view}$ is normalized to $[0,1]$ after clamping [S3].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+PI = 3.141592653589793
+
+def angle_based_vdt(n: list, v: list) -> float:
+    """
+    Computes view-dependent opacity using the angle between normal and view vector.
+    n: Surface normal [nx, ny, nz] (normalized).
+    v: View vector [vx, vy, vz] (normalized).
+    Returns: Opacity alpha_view in [0, 1].
+    """
+    dot_product = n[0]*v[0] + n[1]*v[1] + n[2]*v[2]
+    dot_product = max(-1.0, min(1.0, dot_product))
+    angle = math.acos(dot_product)
+    alpha_view = (2.0 / PI) * angle
+    return max(0.0, min(1.0, alpha_view))
+
+def compute_normal_derivatives(n_buffer: list, i: int, j: int) -> tuple:
+    """
+    Computes finite differences for the z-component of normals at pixel (i, j).
+    n_buffer: 2D array of normals [n_x, n_y, n_z] indexed by (row, col).
+    """
+    # Assuming n_buffer is indexed as n_buffer[row][col]
+    # For simplicity, assume row corresponds to j and col to i
+    nz_curr = n_buffer[j][i][2]
+    nz_right = n_buffer[j][i+1][2] if i+1 < len(n_buffer[j]) else nz_curr
+    nz_down = n_buffer[j+1][i][2] if j+1 < len(n_buffer) else nz_curr
+    d_nz_di = nz_right - nz_curr
+    d_nz_dj = nz_down - nz_curr
+    return d_nz_di, d_nz_dj
+
+def normal_variation_vdt(d_nz_di: float, d_nz_dj: float, gamma: float, alpha_min: float, alpha_max: float) -> float:
+    """
+    Computes view-dependent opacity using pre-computed normal derivatives.
+    """
+    grad_mag = math.sqrt(d_nz_di**2 + d_nz_dj**2)
+    grad_mag = max(0.0, min(1.0, grad_mag))
+    alpha_view = grad_mag ** (gamma / 2.0)
+    alpha = (1.0 - alpha_view) * alpha_min + alpha_view * alpha_max
+    return alpha
+
+def compositing_with_vdt(samples, background_color, vdt_method, gamma=1.0, alpha_min=0.1, alpha_max=0.9):
+    """
+    Standard front-to-back compositing with View-Dependent Transparency.
+    samples: list of dicts with keys 'color', 'opacity', 'normal', 'view_vector', 'pixel_coords'
+    """
+    C_acc = [0.0, 0.0, 0.0]
+    alpha_acc = 0.0
+    
+    for sample in samples:
+        c_i = sample['color']
+        alpha_raw = sample['opacity']
+        n = sample['normal']
+        v = sample['view_vector']
+        i, j = sample['pixel_coords']
+        
+        if vdt_method == "angle":
+            alpha_vdt = angle_based_vdt(n, v)
+        elif vdt_method == "normal_variation":
+            # In a real implementation, n_buffer would be populated from the ray-casting pass.
+            # Here we assume a helper buffer is available.
+            d_nz_di, d_nz_dj = compute_normal_derivatives(n_buffer, i, j)
+            alpha_vdt = normal_variation_vdt(d_nz_di, d_nz_dj, gamma, alpha_min, alpha_max)
+        else:
+            alpha_vdt = alpha_raw
+
+        alpha_i = alpha_raw * alpha_vdt
+        
+        transmittance = 1.0 - alpha_acc
+        C_acc[0] += transmittance * alpha_i * c_i[0]
+        C_acc[1] += transmittance * alpha_i * c_i[1]
+        C_acc[2] += transmittance * alpha_i * c_i[2]
+        alpha_acc = alpha_acc + transmittance * alpha_i
+        
+        if alpha_acc >= 1.0:
+            break
+            
+    bg = background_color
+    C_acc[0] += (1.0 - alpha_acc) * bg[0]
+    C_acc[1] += (1.0 - alpha_acc) * bg[1]
+    C_acc[2] += (1.0 - alpha_acc) * bg[2]
+    return C_acc
+```
+
+### Edge Cases and Pitfalls
+*   **Ghosting and Transparency Variation Artifacts**: When using billboard-based fading (a related technique), moving the camera causes ghosting (duplicated features) and transparency variation artifacts because blending two half-faded textures is not equivalent to a single opaque texture [S1].
+*   **Flat Surface Opacity**: In Angle-Based Transparency, large, almost flat parts of the integral surface result in high opacity, which can obscure the layers below [S3].
+*   **Unbounded Values**: In Normal-Variation Transparency, $\alpha_{view}$ is not necessarily limited to the unit interval and must be clamped before the exponent $\gamma$ is applied [S3].
+*   **Derivative Calculation**: Normal-Variation Transparency requires accurate image-space partial derivatives of the normal's z-component [S3].
+
+## Subtopics
+
+### Normal-Variation Transparency
+A transparency variation technique that approximates local surface curvature perpendicular to the viewer using image-space partial derivatives of the normal's z-component, making the surface more opaque where it curves away and more transparent when oriented perpendicular to the viewer [S3]. It is chosen when the goal is to emphasize surface details like creases and small features, or when viewing nested structures (e.g., flow tubes) where curvature indicates depth [S3]. It differs from Angle-Based Transparency by providing stronger opacity gradients at silhouettes and being less dependent on the global view direction, allowing curved features to be identified even when viewed frontally [S3].
+
+## Operating characteristics
+*   **Time Complexity**: Angle-Based Transparency is $O(1)$ per sample, requiring only a dot product and arccosine. Normal-Variation Transparency requires computing image-space derivatives, which adds overhead for neighbor lookups and derivative calculations, potentially requiring a post-processing pass or specific buffer layouts [S3].
+*   **Memory Complexity**: Minimal additional memory for Angle-Based. Normal-Variation requires storing normals and potentially neighbor normals or derivative buffers [S3].
+*   **Performance**: Angle-Based is very cheap. Normal-Variation is also cheap but depends on derivative accuracy [S3]. Billboard fading is 2-3 times slower than single texture fetches and requires blending multiple textures [S1].
+*   **Strengths**: Improves readability of complex shapes and nested structures; highlights silhouettes and curvature [S3].
+*   **Limitations**: Can obscure layers below if surfaces are large and flat (Angle-Based); prone to ghosting artifacts if implemented via billboards [S1]; requires accurate normals [S3].
+*   **When to use**: When visualizing integral surfaces or volumes where shape perception and layer separation are critical [S2, S3].
+*   **When not to use**: When real-time performance is critical and derivative computation is too expensive, or when the geometry is highly fragmented (billboard artifacts) [S1].
+
+## Background
+View-Dependent Transparency was introduced to improve the readability of volumetric and integral surface visualizations. Bruckner and Gröller (2007) cited it as a composition strategy for direct volume rendering to enhance shape perception [S2]. The specific Angle-Based and Normal-Variation formulas were proposed in the context of the IRIS (Illustrative Rendering for Integral Surfaces) system, which aimed to provide cheap, effective transparency variation for large surfaces [S3]. Earlier work by Jakobsen (2000) discussed fading billboards based on incidence angle, noting the associated artifacts [S1].
+
+## Sources
+[S1] Rendering Forest Scenes in Real-Time, https://doi.org/10.2312/egwr/egsr04/093-102, fetched 2026-10-26
+[S2] Towards Advanced Volumetric Display of the Human Musculoskeletal System, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/021-025, fetched 2026-10-26
+[S3] IRIS: Illustrative Rendering for Integral Surfaces, https://doi.org/10.1109/tvcg.2010.173, fetched 2026-10-27

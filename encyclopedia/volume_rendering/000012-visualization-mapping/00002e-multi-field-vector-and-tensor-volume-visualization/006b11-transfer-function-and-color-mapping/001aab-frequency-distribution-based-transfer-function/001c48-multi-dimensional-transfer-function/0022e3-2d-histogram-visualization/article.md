@@ -1,0 +1,110 @@
+# 2D Histogram Visualization
+
+Also called: Joint Histogram
+
+## Overview
+2D Histogram Visualization is a precomputed visual aid that maps voxel counts in a two-dimensional feature space to color to convey sparse regions of the range space [S1]. It replaces continuous scatterplots with discrete bins to simplify interactive transfer function design [S1].
+
+## How it works
+**Inputs:** Two scalar fields sampled over the same domain, represented as a list of value pairs $(s_1, s_2)$ [G].
+**Outputs:** A 2D image where each pixel's color encodes the number of samples falling into the corresponding bin [G].
+
+**Data Structures:**
+*   **Histogram Grid:** A 2D array of size $W \times H$, where $W$ and $H$ are the number of bins for the first and second dimensions, respectively [G].
+*   **Bin Counts:** Each cell stores an integer count of samples [G].
+*   **Color Map:** A mapping from count values to RGBA colors [G].
+
+**Steps:**
+1.  **Initialize:** Create a 2D array `hist` of size $W \times H$ initialized to zero [G].
+2.  **Compute:** For each sample $(s_1, s_2)$ in the dataset:
+    *   Quantize $s_1$ to bin index $i = \lfloor (s_1 - \min_1) / (\max_1 - \min_1) \times W \rfloor$, clamped to $[0, W-1]$ [G].
+    *   Quantize $s_2$ to bin index $j = \lfloor (s_2 - \min_2) / (\max_2 - \min_2) \times H \rfloor$, clamped to $[0, H-1]$ [G].
+    *   Increment `hist[j][i]` [G].
+3.  **Color:** For each bin $(i, j)$ in `hist`:
+    *   Let $c = \text{hist}[j][i]$ [G].
+    *   Map $c$ to a color using a color map (e.g., grayscale or heat map) where higher counts are brighter or more opaque [G].
+    *   Set the pixel at $(i, j)$ in the output image to this color [G].
+
+**Formulas:**
+Bin indices are computed as $i = \text{clamp}(\lfloor (s_1 - \min_1) \cdot W / (\max_1 - \min_1) \rfloor, 0, W-1)$ and $j = \text{clamp}(\lfloor (s_2 - \min_2) \cdot H / (\max_2 - \min_2) \rfloor, 0, H-1)$, where $\min_k, \max_k$ are the global minimum and maximum of scalar field $k$ [G].
+
+**Parameters:**
+*   $W, H$: Number of bins per dimension. Typical values are not given in the sources.
+*   Bin boundaries: Determined by the global range of each scalar field [G].
+
+**Edge Cases:**
+*   **Sparse Regions:** The discrete binning explicitly highlights sparse regions that continuous scatterplots may obscure [S1].
+*   **Precision Limits:** Floating-point errors can affect quantization when scalar ranges are extremely small or discretization is fine-grained [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_2d_histogram(scalar_pairs, num_bins_1, num_bins_2):
+    # Initialize histogram grid
+    hist = [[0] * num_bins_1 for _ in range(num_bins_2)]
+    
+    # Determine ranges for normalization
+    min_s1 = min(s for s, _ in scalar_pairs)
+    max_s1 = max(s for s, _ in scalar_pairs)
+    min_s2 = min(s2 for _, s2 in scalar_pairs)
+    max_s2 = max(s2 for _, s2 in scalar_pairs)
+    
+    # Compute bin counts
+    for s1, s2 in scalar_pairs:
+        # Quantize to bin indices
+        i = int((s1 - min_s1) / (max_s1 - min_s1) * (num_bins_1 - 1))
+        j = int((s2 - min_s2) / (max_s2 - min_s2) * (num_bins_2 - 1))
+        
+        # Clamp indices to valid range
+        i = max(0, min(i, num_bins_1 - 1))
+        j = max(0, min(j, num_bins_2 - 1))
+        
+        # Increment bin count
+        hist[j][i] += 1
+        
+    return hist
+
+def color_histogram(hist, num_bins_1, num_bins_2):
+    # Create output image
+    image = [[(0, 0, 0, 0)] * num_bins_1 for _ in range(num_bins_2)]
+    
+    # Find max count for normalization
+    max_count = 0
+    for row in hist:
+        for count in row:
+            if count > max_count:
+                max_count = count
+                
+    # Color each bin
+    for j in range(num_bins_2):
+        for i in range(num_bins_1):
+            count = hist[j][i]
+            # Simple grayscale mapping: higher count = brighter
+            intensity = count / max_count if max_count > 0 else 0.0
+            color = (intensity, intensity, intensity, 1.0)
+            image[j][i] = color
+            
+    return image
+```
+
+## Subtopics
+
+### [Line-based Histogram for 2D Scalar Pairs](6702-line-based-histogram-for-2d-scalar-pairs.md)
+A visualization technique for the domain of the Lighting Transfer Function (LTF) that uses lines connecting two parallel axes to represent scalar value pairs $(S_1, S_2)$ sampled along the gradient direction, making material boundaries intuitive to select. It differs from standard 2D histograms, which are unintuitive because both axes represent the same data type (scalar value), making it difficult to distinguish homogeneous regions from boundaries. It also differs from [Sorted Histogram Visualization](10660-sorted-histogram-visualization.md) by preserving the spatial relationship of the scalar pairs via parallel axes rather than sorting bins.
+
+### [Sorted Histogram Visualization](10660-sorted-histogram-visualization.md)
+Sorted Histogram Visualization is a Multi-Dimensional Transfer Function (MDTF) design tool that displays a 2D histogram where voxels are sorted by a second attribute value within each intensity bin. It solves the problem that traditional 2D histograms obscure the primary intensity distribution and smear intensity peaks across the second dimension, making it difficult to assess voxel counts at a glance. Unlike traditional 2D histograms, which can be cluttered in medical imaging, sorted histograms maintain a consistent 1D histogram shape when changing the second attribute, facilitating an exploratory workflow.
+
+## Operating characteristics
+**Time Complexity:** $O(N)$, where $N$ is the number of voxels [S1].
+**Memory Complexity:** Not given in the sources.
+**Performance:** Histogram computation is generally on the order of seconds for large datasets [S1]. It is not a bottleneck and can be computed simultaneously alongside other preprocessing steps like macrocell computation [S1].
+**Strengths:** Discrete histograms are easier to implement than continuous scatterplots and better convey sparse regions of the range space [S1].
+**Limitations:** The source does not explicitly list limitations, but implies that continuous scatterplots are an alternative that might be more intuitive but harder to implement [S1].
+
+## Background
+Originated in the context of direct multifield volume ray casting of fiber surfaces [S1]. The method was introduced as an improvement over continuous scatterplots used in the original fiber surface paper [S1]. It is used in the Fiber Surface Control Polygon (FSCP) editor to visualize the distribution of scalar value pairs [S1].
+
+## Sources
+[S1] Direct Multifield Volume Ray Casting of Fiber Surfaces, https://doi.org/10.1109/tvcg.2016.2599040, fetched 2026-10-26

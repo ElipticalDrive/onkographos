@@ -1,0 +1,130 @@
+# Supplementing Points for Camera Motion Blur
+
+Also called: Adding extra points, Point densification via extent-based calculation
+
+## Overview
+This method supplements an initial sparse point cloud with additional 3D Gaussian primitives to prevent the failure to model tiny objects or sparse representations during camera motion blur reconstruction [S1]. It differs from standard initialization by dynamically calculating the number of new points based on the spatial extent of the existing cloud and initializing their color features via interpolation from nearest neighbors rather than random assignment [S1].
+
+## How it works
+**Inputs:**
+- Existing set of 3D Gaussians $G_{existing}$, each with mean position $\mu_i$.
+- Constant $c = 1.1$ [S1].
+- Maximum number of supplementing points $N_{max} = 200,000$ [S1].
+
+**Outputs:**
+- Updated set of 3D Gaussians $G_{new} = G_{existing} \cup G_{supplement}$.
+
+**Data Structures:**
+The method operates on the mean positions $\mu_i \in \mathbb{R}^3$ of the existing Gaussians. The supplementing points $G_{supplement}$ are initialized with:
+- Mean $\mu$: Uniformly sampled within the bounding box of $G_{existing}$ [G].
+- Covariance $\Sigma$: Identity matrix $I_3$ [G].
+- Opacity $\alpha$: $0.01$ [G].
+- Color $C_{dc}$: Interpolated from the nearest neighbor in $G_{existing}$ [S1].
+- Spherical Harmonics coefficients $C_{ac}$: Zero vector of size 12 [G].
+
+**Steps:**
+1. **Calculate Bounding Box:** Determine the minimum and maximum coordinates of the existing Gaussians' means along each axis. Let $Q_{min} \in \mathbb{R}^3$ and $Q_{max} \in \mathbb{R}^3$ be these vectors, where $Q_{min}[k] = \min_i (\mu_i[k])$ and $Q_{max}[k] = \max_i (\mu_i[k])$ for $k \in \{x, y, z\}$ [S1].
+2. **Calculate Supplement Count:** Compute the number of points to add, $N_p$, using the volume of the bounding box and the stability constant $c$ [S1]:
+   $$ N_p = \min\left( \frac{\text{prod}(Q_{max} - Q_{min})}{c^3}, N_{max} \right) $$
+   where $\text{prod}(\cdot)$ returns the product of all values in the input vector [S1]. If $N_p = 0$, terminate.
+3. **Generate Positions:** Sample $N_p$ new positions uniformly within the bounding box defined by $Q_{min}$ and $Q_{max}$ [G].
+4. **Initialize Colors:** For each new position, find the nearest neighbor in $G_{existing}$ based on Euclidean distance and copy its color feature $C_{dc}$ [S1].
+5. **Initialize Other Attributes:** Assign standard sparse initialization values to the new Gaussians: $\Sigma = I_3$, $\alpha = 0.01$, and $C_{ac} = \mathbf{0}_{12}$ [G].
+6. **Merge:** Combine $G_{existing}$ and $G_{supplement}$ into the final set [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def supplement_points_for_motion_blur(existing_gaussians, c=1.1, n_max=200000):
+    """
+    Supplements existing 3D Gaussians with new points to handle camera motion blur.
+    
+    Args:
+        existing_gaussians: List of dicts with keys 'mu' (np.array [3]), 'C_dc' (np.array).
+        c: Stability constant (default 1.1).
+        n_max: Maximum number of points to add (default 200,000).
+        
+    Returns:
+        Updated list of Gaussians.
+    """
+    if not existing_gaussians:
+        return existing_gaussians
+
+    # 1. Calculate Bounding Box
+    positions = np.array([g['mu'] for g in existing_gaussians])
+    q_min = np.min(positions, axis=0)
+    q_max = np.max(positions, axis=0)
+    
+    # 2. Calculate Supplement Count
+    extent = q_max - q_min
+    volume = np.prod(extent)
+    n_p = int(volume / (c ** 3))
+    n_p = min(n_p, n_max)
+    
+    if n_p == 0:
+        return existing_gaussians
+
+    # 3. Generate New Positions
+    new_positions = np.random.uniform(low=q_min, high=q_max, size=(n_p, 3))
+    
+    # 4. Initialize Colors via Nearest Neighbor Interpolation
+    existing_colors = np.array([g['C_dc'] for g in existing_gaussians])
+    
+    # Calculate distances: (n_p, n_existing)
+    # new_positions[:, np.newaxis, :] shape: (n_p, 1, 3)
+    # existing_positions[np.newaxis, :, :] shape: (1, n_existing, 3)
+    dists = np.sqrt(np.sum((new_positions[:, np.newaxis, :] - existing_positions[np.newaxis, :, :]) ** 2, axis=2))
+    nearest_indices = np.argmin(dists, axis=1)
+    new_colors = existing_colors[nearest_indices]
+    
+    # 5. Initialize Other Attributes
+    new_gaussians = []
+    for i in range(n_p):
+        new_g = {
+            'mu': new_positions[i],
+            'sigma': np.eye(3),
+            'alpha': 0.01,
+            'C_dc': new_colors[i],
+            'C_ac': np.zeros(12)
+        }
+        new_gaussians.append(new_g)
+        
+    # 6. Merge
+    return existing_gaussians + new_gaussians
+```
+
+**Parameters:**
+- $c$: Stability constant, set to $1.1$ [S1].
+- $N_{max}$: Maximum number of supplementing points, set to $200,000$ [S1].
+
+**Edge Cases and Pitfalls:**
+- If the bounding box volume is small relative to $c^3$, $N_p$ may be zero, resulting in no supplementation [S1].
+- Directly using a sparse point cloud without this densification results in objects being represented by a small number of points or failing to model tiny objects entirely [S1].
+- Randomly initializing color features for added points leads to inferior reconstruction quality compared to interpolating colors from neighboring points [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The complexity is dominated by the nearest neighbor search, which is $O(N_p \cdot N_{existing})$ if performed naively as shown in the pseudocode, where $N_p$ is the number of new points and $N_{existing}$ is the number of existing Gaussians [S1]. Memory usage increases by the storage required for $N_p$ new Gaussian primitives [S1].
+
+**Measured Performance:**
+In ablation studies on camera motion blur datasets, using this method with interpolated colors yielded a PSNR of 23.73 and SSIM of 0.7474 [S1]. This compares favorably to adding no extra points (PSNR 23.34, SSIM 0.7374) and randomly initializing colors (PSNR 23.46, SSIM 0.7411) [S1].
+
+**Strengths and Limitations:**
+- **Strengths:** Prevents failure to model tiny objects in sparse representations; improves quantitative metrics (PSNR/SSIM) by providing valid initial color features [S1].
+- **Limitations:** Increases the total number of Gaussians, potentially impacting training time and memory, though the method is noted to be more efficient than prior works generating kernels and applying convolutions [S1].
+
+## Background
+**Origin:**
+The method was introduced in "Deblurring 3D Gaussian Splatting" by B. Lee et al. [S1].
+
+**History and Development:**
+The technique addresses the limitation of standard 3D Gaussian Splatting, which hardly models camera motion blur due to sparse initial representations [S1]. It was developed as part of a pipeline to handle real defocus and camera motion blur datasets, achieving state-of-the-art performance under the LPIPS metric [S1].
+
+**Usage:**
+It is used in the context of differentiable rendering for deblurring scenes with camera motion, specifically within the Gaussian Splatting framework [S1].
+
+## Sources
+[S1] Deblurring 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-73636-0_8, fetched 2026-10-26

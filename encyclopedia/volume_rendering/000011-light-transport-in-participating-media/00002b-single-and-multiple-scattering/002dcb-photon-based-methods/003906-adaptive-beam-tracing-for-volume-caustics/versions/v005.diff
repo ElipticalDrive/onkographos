@@ -1,0 +1,141 @@
+--- v004.md
++++ v005.md
+@@ -59,4 +59,37 @@
+ ```python
+ import math
++from dataclasses import dataclass
++from typing import List, Tuple
++
++@dataclass
++class Vertex:
++    pos: Tuple[float, float, float]
++    normal: Tuple[float, float, float]
++
++@dataclass
++class Triangle:
++    v0: Vertex
++    v1: Vertex
++    v2: Vertex
++
++@dataclass
++class Beam:
++    base: Triangle
++    directions: List[Tuple[float, float, float]]
++    lengths: List[float]
++    bounding_volume: List[List[Tuple[float, float, float]]]
++
++@dataclass
++class Fragment:
++    x: int
++    y: int
++    ray_origin: Tuple[float, float, float]
++    ray_dir: Tuple[float, float, float]
++
++@dataclass
++class Intersection:
++    length: float
++    path_length: float
++    point: Tuple[float, float, float]
+ 
+ def adaptive_beam_tracing(scene, light, camera, media):
+@@ -105,9 +138,9 @@
+         fragments = rasterize(beam.bounding_volume, camera)
+         for frag in fragments:
+-            intersection = intersect_camera_ray_with_beam(frag.ray, beam)
++            intersection = intersect_camera_ray_with_beam(frag.ray_origin, frag.ray_dir, beam)
+             if intersection is not None:
+                 delta_x = intersection.length
+                 s1_s2 = intersection.path_length
+-                omega = frag.ray.direction
++                omega = frag.ray_dir
+                 omega_prime = beam.direction_at(intersection.point)
+                 L_in = beam.intensity_at(intersection.point)
+@@ -119,45 +152,55 @@
+ 
+ def is_undersampled(tri, light_gbuffer):
+-    # Heuristic based on geometric discontinuities and contribution
++    # Heuristic based on geometric discontinuities and contribution [G]
+     return tri.area < threshold or tri.contribution < min_contribution
+ 
+ def split_triangle(tri):
+-    # Split into smaller triangles
++    # Split into smaller triangles [G]
+     return [tri.subdivide()]
+ 
+ def compute_refraction_direction(vertex, light, material):
+-    # Compute reflection/refraction direction using surface normal and material properties
+-    return vertex.normal.reflect(light.direction) if material.reflective else vertex.normal.refract(light.direction, material.ior)
++    # Compute reflection/refraction direction using surface normal and material properties [G]
++    if material.reflective:
++        return vertex.normal.reflect(light.direction)
++    else:
++        return vertex.normal.refract(light.direction, material.ior)
+ 
+ def compute_extrusion_length(vertex, direction, camera, scene):
+-    # Intersect ray with view frustum and scene geometry
++    # Intersect ray with view frustum and scene geometry to handle occlusion [G]
+     min_t = intersect_ray_frustum(vertex, direction, camera)
+     for obj in scene.geometry:
+         t = intersect_ray_object(vertex, direction, obj)
+-        if t > 0 and t < min_t:
++        if 0 < t < min_t:
+             min_t = t
+     return min_t
+ 
+ def create_tight_bounding_volume(tri, d0, d1, d2, L0, L1, L2):
+-    # Construct 6-triangle mesh: base, tip, and three side triangles
+-    tip_v0 = tri.v0 + L0 * d0
+-    tip_v1 = tri.v1 + L1 * d1
+-    tip_v2 = tri.v2 + L2 * d2
+-    return Mesh([tri, Mesh([tip_v0, tip_v1, tip_v2]), Mesh([tri.v0, tri.v1, tip_v1, tip_v0]), Mesh([tri.v1, tri.v2, tip_v2, tip_v1]), Mesh([tri.v2, tri.v0, tip_v0, tip_v2])])
++    # Construct 6-triangle mesh: base, tip, and three side triangles [G]
++    tip_v0 = tri.v0.pos + L0 * d0
++    tip_v1 = tri.v1.pos + L1 * d1
++    tip_v2 = tri.v2.pos + L2 * d2
++    return [
++        [tri.v0.pos, tri.v1.pos, tri.v2.pos],
++        [tip_v0, tip_v1, tip_v2],
++        [tri.v0.pos, tri.v1.pos, tip_v1, tip_v0],
++        [tri.v1.pos, tri.v2.pos, tip_v2, tip_v1],
++        [tri.v2.pos, tri.v0.pos, tip_v0, tip_v2]
++    ]
+ 
+ def rasterize(mesh, camera):
+-    # Rasterize mesh to screen space, returning list of fragments
+-    return [Fragment(screen_x, screen_y, ray) for screen_x, screen_y, ray in screen_projection(mesh, camera)]
+-
+-def intersect_camera_ray_with_beam(ray, beam):
+-    # Transform ray to beam local space and intersect with warped volume
+-    local_ray = transform_to_beam_local(ray, beam)
+-    intersection = intersect_ray_triangle(local_ray, beam.base)
+-    if intersection:
+-        return Intersection(length=beam.cross_section_area(intersection.point), path_length=ray.length_to(intersection.point))
++    # Rasterize mesh to screen space, returning list of fragments [G]
++    return [Fragment(screen_x, screen_y, ray_origin, ray_dir) for screen_x, screen_y, ray_origin, ray_dir in screen_projection(mesh, camera)]
++
++def intersect_camera_ray_with_beam(ray_origin, ray_dir, beam):
++    # Transform ray to beam local space and intersect with warped volume [G]
++    local_ray_origin, local_ray_dir = transform_to_beam_local(ray_origin, ray_dir, beam)
++    # Use 2D ray-triangle edge intersection to find Δx [G]
++    delta_x = compute_2d_ray_triangle_edge_intersection(local_ray_origin, local_ray_dir, beam.base)
++    if delta_x > 0:
++        return Intersection(length=delta_x, path_length=ray_dir.length_to(beam.base.midpoint()), point=beam.base.midpoint())
+     return None
+ 
+ def phase_function(omega, omega_prime):
+-    # Standard phase function evaluation
++    # Standard phase function evaluation [G]
+     return 1.0 / (4.0 * math.pi)
+ ```
+@@ -185,9 +228,9 @@
+ *   **Strengths:** Handles two-sided refractions, inhomogeneous participating media, and multi-bounce light-surface interactions. Computes tighter bounding volumes than previous methods (e.g., Ernst et al. [2005]), supporting multiple bounces and handling occlusions without CPU assistance [S1].
+ *   **Limitations:** Limited to single-scattering participating media in the core description. Requires approximate ray tracing for beam intersections [S1].
+-*   **When to use:** Real-time rendering of caustics in participating media where high-frequency light transport patterns are important.
++*   **When to use:** Real-time rendering of caustics in participating media where high-frequency light transport patterns are important [S1].
+ *   **When not to use:** Multi-scattering media (requires different approach), or when offline quality is required and performance is not a constraint (path tracing may be more accurate) [S1].
+ 
+ ## Background
+-Originated by Gábor Liktor and Carsten Dachsbacher at the Karlsruhe Institute of Technology, published in 2011 [S1]. It builds on adaptive beam tracing [Heckbert and Hanrahan 1984] and caustic mapping techniques. It improves upon Liktor and Dachsbacher [2010] by adding adaptive beam generation and tighter bounding volumes, and addresses limitations of Ernst et al. [2005] by handling occlusions and multiple bounces [S1].
++Originated by Gábor Liktor and Carsten Dachsbacher at the Karlsruhe Institute of Technology, published in 2011 [S1]. It builds on adaptive beam tracing [Heckbert and Hanrahan 1984] and caustic mapping techniques [S1]. It improves upon Liktor and Dachsbacher [2010] by adding adaptive beam generation and tighter bounding volumes, and addresses limitations of Ernst et al. [2005] by handling occlusions and multiple bounces [S1].
+ 
+ ## Sources

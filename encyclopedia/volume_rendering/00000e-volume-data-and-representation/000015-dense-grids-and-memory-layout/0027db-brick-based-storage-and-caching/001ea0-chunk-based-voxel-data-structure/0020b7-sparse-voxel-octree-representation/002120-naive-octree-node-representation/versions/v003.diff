@@ -1,0 +1,379 @@
+--- v002.md
++++ v003.md
+@@ -4,237 +4,189 @@
+ 
+ ## Overview
+-The Naive Octree Node Representation is a direct memory layout for hierarchical spatial partitioning where each non-leaf node explicitly stores pointers to its eight children, and leaf nodes store a single data value (typically a voxel color or density). It solves the problem of implementing a standard octree with minimal abstraction overhead by mapping the tree structure directly to heap-allocated objects. It differs from its siblings, such as [Sparse Voxel Octree with Bricks](2354-sparse-voxel-octree-with-bricks.md) which packs nodes into fixed-size blocks for cache efficiency, and [SVRaster](2464-svraster.md) which optimizes for rasterization traversal, by prioritizing implementation simplicity and direct pointer dereferencing over memory density or hardware-specific traversal optimizations.
++The Naive Octree Node Representation is a direct memory layout for hierarchical voxel data structures where each node explicitly stores pointers to its eight children and metadata for leaf status or voxel values [S1, S3, unofficial]. It solves the problem of implementing a standard octree with minimal abstraction overhead, serving as the baseline for more complex sparse voxel representations [S1, S3, unofficial]. Unlike compressed variants like [Bitmask Leaf Compression](3603-bitmask-leaf-compression.md) or layout-optimized structures like [Octree Data Structure Layout](4518-octree-data-structure-layout.md), this method prioritizes implementation simplicity and direct pointer access over memory efficiency [S1, S3, unofficial].
+ 
+ ## How it works
+-### Inputs and Outputs
+-- **Input**: A spatial domain defined by bounds (e.g., $[-2^{d-1}, 2^{d-1})$), a target depth $d$, and a set of voxel updates (position, value).
+-- **Output**: A root node pointer representing the octree, allowing $O(1)$ access to leaf values if the path is known, or $O(d)$ traversal to find/set values.
++**Inputs and Outputs:**
++*   **Input:** A 3D voxel grid (implicitly defined by the root node's bounds and depth) and voxel values (color/intensity) to be inserted.
++*   **Output:** A tree of `OctreeNode` structures representing the sparse volume.
+ 
+-### Data Structures
+-The core structure is the `OctreeNode`. The layout varies slightly by source, but the canonical naive representation uses explicit pointers for children and a union or separate fields for leaf data.
++**Data Structures:**
++The core structure is the `OctreeNode`. Sources provide two slightly different field layouts, but both follow the same logical grouping:
+ 
+-**Layout A (Canonical Naive) [S1, unofficial]:**
+-```cpp
+-struct Node {
+-    Node* children[8]; // Array of 8 pointers to child nodes
+-    int8_t voxelColorIndex; // Stored only if isLeaf is true
+-    bool isLeaf; // True if this node is a leaf
+-};
+-```
+-- **Memory Cost**: 72 Bytes on a 64-bit processor (8 pointers $\times$ 8 bytes + 1 byte index + 1 byte bool + 6 bytes padding) and 40 Bytes on a 32-bit processor (8 pointers $\times$ 4 bytes + 1 byte index + 1 byte bool + 4 bytes padding) [S1, unofficial].
++1.  **Pointer-based Layout (S1, S3):**
++    *   `children`: An array of 8 pointers (`Node*` or `OctreeNode*`) to child nodes.
++    *   `isLeaf`: A boolean flag indicating if the node is a leaf.
++    *   `value` / `voxelColorIndex`: If `isLeaf` is true, this stores the voxel data (e.g., `uint32_t` color or `int8_t` index). If `isLeaf` is false, this field is often unused or repurposed in specific implementations, though S3 implies `value` is only valid for leaves.
++    *   `centerX`, `centerY`, `centerZ`: Coordinates defining the spatial center of the node's bounding box.
++    *   `depth`: The current depth in the octree hierarchy.
+ 
+-**Layout B (Extended State) [S3, unofficial]:**
+-```cpp
+-struct OctreeNode {
+-    bool isLeaf;
+-    uint32_t value; // Stores the voxel value if leaf, or acts as a flag
+-    OctreeNode* children; // Pointer to an array of 8 children, allocated only if !isLeaf
+-    uint8_t centerX, centerY, centerZ; // Spatial center coordinates
+-    uint8_t depth; // Current depth in the tree
+-};
+-```
+-- **Memory Order**: Matches declaration order [S3, unofficial].
+-- **Note**: [S3, unofficial] uses a single `value` field which can store either the leaf data or potentially a pointer in other contexts, but here it stores the voxel value. The `children` pointer is allocated dynamically as an array of 8 `OctreeNode` objects when the node splits [S3, unofficial].
++    *Memory Cost:* 72 Bytes on a 64-bit processor (8 pointers × 8 bytes + 1 bool + 1 int8_t + 1 uint32_t + 3 uint8_t + 1 uint8_t + padding) and 40 Bytes on a 32-bit processor (8 pointers × 4 bytes) [S1, unofficial].
+ 
+-**Layout C (Template-based) [S2, unofficial]:**
+-```cpp
+-template <typename Scalar>
+-struct branch_tree_node : tree_node<Scalar> {
+-    std::array<base_type*, 8> children_;
+-};
+-```
+-- Inherits from a base `tree_node` which likely contains the leaf data and status flags [S2, unofficial].
++2.  **Template-based Layout (S2):**
++    *   Inherits from a base `tree_node`.
++    *   `children_`: `std::array<base_type*, 8>` storing child pointers.
++    *   This structure is part of a larger template system (`branch_tree_node<Scalar>`) but retains the core 8-pointer child structure.
+ 
+-### Numbered Steps
++**Numbered Steps:**
+ 
+-#### 1. Initialization
+-- **Root Node [S3, unofficial]**:
+-  - Set `depth = 0`.
+-  - Set `isLeaf = true`.
+-  - Set `value = 0`.
+-  - Set `centerX = centerY = centerZ = 0`.
+-- **Non-Root Node [S3, unofficial]**:
+-  - Set `depth` based on parent.
+-  - Set `isLeaf = true`.
+-  - Set `value = 0`.
+-  - Calculate `childDepth = depth - 1`.
+-  - Calculate `childSize = 1 << childDepth`.
+-  - Set `centerX = x + childSize`, `centerY = y + childSize`, `centerZ = z + childSize` (where $x,y,z$ are the node's base coordinates).
++1.  **Root Initialization:**
++    *   Set `depth = 0`.
++    *   Set `isLeaf = true`.
++    *   Set `value = 0` (or default color).
++    *   Set `centerX = centerY = centerZ = 0` (or root bounds center) [S3, unofficial].
+ 
+-#### 2. Insertion (SetVoxel)
+-To set a voxel value at $(x, y, z)$ with value $v$:
+-1. If `depth == 0`, set `this->value = v` and return. This is the base case [S3, unofficial].
+-2. If `isLeaf` is true:
+-   - If `this->value == v`, return (no change needed) [S3, unofficial].
+-   - Call `initChildren()` to split the leaf into 8 children [S3, unofficial].
+-   - Copy `this->value` to all 8 children (propagate existing data) [S3, unofficial].
+-3. Compute `childIndex` using `GetChildIndex(x, y, z)` [S3, unofficial].
+-4. Recurse: `children[childIndex].SetVoxel(x, y, z, v)` [S3, unofficial].
+-5. Call `TryCollapse()` to check if the node can be merged back into a leaf if all children are identical [S3, unofficial].
++2.  **Non-Root Initialization (for new nodes):**
++    *   Set `depth` based on parent + 1.
++    *   Set `isLeaf = true`.
++    *   Set `value = 0`.
++    *   Calculate `childDepth = depth - 1`.
++    *   Calculate `childSize = 1 << childDepth` (power of 2).
++    *   Set `centerX`, `centerY`, `centerZ` based on the node's spatial position [S3, unofficial].
+ 
+-#### 3. Retrieval (GetValue)
+-To get the value at $(x, y, z)$:
+-1. If `isLeaf` is true, return `value` [S3, unofficial].
+-2. Compute `childIndex` using `GetChildIndex(x, y, z)` [S3, unofficial].
+-3. Return `children[childIndex].GetValue(x, y, z)` [S3, unofficial].
++3.  **Insert Voxel (`SetVoxel`):**
++    *   **Base Case:** If `depth == 0`, set `this->value = value` and return [S3, unofficial].
++    *   **Leaf Optimization:** If `isLeaf` is true and `this->value == value`, return (no change needed) [S3, unofficial].
++    *   **Split Leaf:** If `isLeaf` is true but `this->value != value`:
++        *   Call `initChildren()` to allocate and initialize 8 child nodes.
++        *   Copy `this->value` to all 8 children (to preserve existing data).
++        *   Set `isLeaf = false`.
++    *   **Recurse:**
++        *   Compute `childIndex` using `GetChildIndex(x, y, z)` based on the voxel's position relative to the node's center [S3, unofficial].
++        *   Recursively call `children[childIndex].SetVoxel(x, y, z, value)` [S3, unofficial].
++    *   **Collapse Check:** Call `TryCollapse()` to merge children if they are identical leaves (implementation detail not fully specified in sources) [S3, unofficial].
+ 
+-#### 4. Splitting (initChildren)
+-When a leaf node must split:
+-1. Set `childDepth = depth - 1` [S3, unofficial].
+-2. Set `childSize = 1 << childDepth` [S3, unofficial].
+-3. Allocate `children = new OctreeNode[8]` (or equivalent dynamic array) [S3, unofficial].
+-4. Compute base coordinates: `baseX = centerX - childSize`, `baseY = centerY - childSize`, `baseZ = centerZ - childSize` [S3, unofficial].
+-5. Initialize the 8 children with offsets relative to the base:
+-   - Indices 0-7 correspond to the 8 octants.
+-   - Offsets: $(0,0,0), (childSize,0,0), (0,childSize,0), (childSize,childSize,0), (0,0,childSize), (childSize,0,childSize), (0,childSize,childSize), (childSize,childSize,childSize)$ [S3, unofficial].
+-   - Each child is initialized with its specific depth, center, and `isLeaf = true` [S3, unofficial].
++4.  **Retrieve Voxel (`GetValue`):**
++    *   If `isLeaf` is true, return `value` [S3, unofficial].
++    *   Else, compute `childIndex` using `GetChildIndex(x, y, z)`.
++    *   Return `children[childIndex].GetValue(x, y, z)` [S3, unofficial].
+ 
+-#### 5. Child Index Calculation (GetChildIndex)
+-*Note: The specific formula is not explicitly provided in the snippets, but standard octree logic applies [S3, unofficial].*
+-Given coordinates $(x, y, z)$ relative to the node's center or bounds:
+-1. Determine the sign or offset of $x, y, z$ relative to the node's center.
+-2. Map to an index $0..7$. Typically:
+-   $$ \text{index} = 4 \cdot \text{bit}_x + 2 \cdot \text{bit}_y + 1 \cdot \text{bit}_z $$
+-   where $\text{bit}_x$ is 1 if $x$ is in the positive half, 0 otherwise.
++5.  **Initialize Children (`initChildren`):**
++    *   Set `childDepth = depth - 1`.
++    *   Set `childSize = 1 << childDepth`.
++    *   Allocate `children = new OctreeNode[8]` (or equivalent dynamic array) [S3, unofficial].
++    *   Calculate base coordinates: `baseX = centerX - childSize`, `baseY = centerY - childSize`, `baseZ = centerZ - childSize` [S3, unofficial].
++    *   Initialize each of the 8 children with offsets corresponding to the 8 octants:
++        *   Indices 0-7 correspond to combinations of `(±childSize, ±childSize, ±childSize)` added to the base coordinates [S3, unofficial].
+ 
+-#### 6. Collapse (TryCollapse)
+-*Note: Implementation details are not provided in the snippets [S3, unofficial].*
+-1. Check if all 8 children are leaves.
+-2. Check if all 8 children have the same `value`.
+-3. If true, deallocate children, set `isLeaf = true`, set `this->value` to the common child value, and return true.
++**Pseudocode:**
+ 
+-### Pseudocode
+ ```python
+ class OctreeNode:
+-    def __init__(self, depth=0, x=0, y=0, z=0):
++    def __init__(self, depth=0, centerX=0, centerY=0, centerZ=0):
+         self.depth = depth
+-        self.is_leaf = True
+-        self.value = 0
+-        self.children = None
+-        self.center_x = x
+-        self.center_y = y
+-        self.center_z = z
++        self.centerX = centerX
++        self.centerY = centerY
++        self.centerZ = centerZ
++        self.isLeaf = True
++        self.value = 0  # uint32_t or similar
++        self.children = [None] * 8  # Array of 8 pointers
+ 
+     def init_children(self):
+-        """Splits this leaf node into 8 children."""
++        """Allocates and initializes 8 child nodes."""
+         child_depth = self.depth - 1
+-        child_size = 1 << child_depth
++        child_size = 1 << child_depth  # 2^child_depth
+         
+-        # Calculate base coordinates for children
+-        base_x = self.center_x - child_size
+-        base_y = self.center_y - child_size
+-        base_z = self.center_z - child_size
++        # Base coordinates for the children's bounding boxes
++        base_x = self.centerX - child_size
++        base_y = self.centerY - child_size
++        base_z = self.centerZ - child_size
+         
+-        # Allocate 8 children
+-        self.children = [None] * 8
+-        self.is_leaf = False
+-        
+-        # Initialize children with offsets
+-        # Order: x,y,z bits mapping to index 0-7
+-        # Standard octree ordering: 
+-        # 0: (-,-,-), 1: (+,-,-), 2: (-,+,-), 3: (+,+,-), 
+-        # 4: (-,-,+), 5: (+,-,+), 6: (-,+,+), 7: (+,+,+)
+-        # Note: S3 specifies offsets explicitly. We map them to indices.
+-        offsets = [
+-            (0, 0, 0), (child_size, 0, 0), (0, child_size, 0), (child_size, child_size, 0),
+-            (0, 0, child_size), (child_size, 0, child_size), (0, child_size, child_size), (child_size, child_size, child_size)
+-        ]
+-        
++        # Initialize 8 children with appropriate offsets
+         for i in range(8):
+-            ox, oy, oz = offsets[i]
+-            # Create child at base + offset
+-            # The child's center is base + offset + child_size/2? 
+-            # S3 says: centerX = x + childSize. 
+-            # If base is center - childSize, then base + offset + childSize/2 is the new center.
+-            # Let's follow S3's init logic: 
+-            # Child center = (base_x + ox) + child_size? No, S3 says centerX = x + childSize.
+-            # Let's assume the child's local coordinate system starts at base.
+-            child = OctreeNode(depth=child_depth, x=base_x + ox, y=base_y + oy, z=base_z + oz)
++            # Determine offset based on bit representation of i
++            # Bit 0: X, Bit 1: Y, Bit 2: Z
++            offset_x = (i & 1) * child_size
++            offset_y = (i & 2) * child_size
++            offset_z = (i & 4) * child_size
++            
++            child = OctreeNode(
++                depth=child_depth,
++                centerX=base_x + offset_x + child_size,
++                centerY=base_y + offset_y + child_size,
++                centerZ=base_z + offset_z + child_size
++            )
++            child.value = self.value  # Copy current leaf value to children
+             self.children[i] = child
+ 
+     def get_child_index(self, x, y, z):
+-        """Determines which child contains the point (x,y,z)."""
+-        # Assuming x,y,z are relative to the current node's center or bounds.
+-        # Standard mapping:
+-        # bit_x = 1 if x >= center_x else 0
+-        # bit_y = 1 if y >= center_y else 0
+-        # bit_z = 1 if z >= center_z else 0
+-        # index = (bit_x << 2) | (bit_y << 1) | bit_z
+-        # Note: Exact coordinate system (relative vs absolute) depends on implementation.
+-        # S3 implies relative computation.
+-        bit_x = 1 if x >= self.center_x else 0
+-        bit_y = 1 if y >= self.center_y else 0
+-        bit_z = 1 if z >= self.center_z else 0
+-        return (bit_x << 2) | (bit_y << 1) | bit_z
++        """Computes the index (0-7) of the child containing (x, y, z)."""
++        # Implementation depends on coordinate system relative to centerX/Y/Z
++        # Assuming x, y, z are absolute coordinates and children are split by center
++        idx = 0
++        if x >= self.centerX: idx |= 1
++        if y >= self.centerY: idx |= 2
++        if z >= self.centerZ: idx |= 4
++        return idx
+ 
+     def set_voxel(self, x, y, z, value):
++        """Inserts a voxel value at (x, y, z)."""
++        # Base case: depth 0
+         if self.depth == 0:
+             self.value = value
+             return
++
++        # If leaf and value is same, do nothing
++        if self.isLeaf and self.value == value:
++            return
++
++        # If leaf but value differs, split
++        if self.isLeaf:
++            self.init_children()
++            self.isLeaf = False
++
++        # Recurse into child
++        child_idx = self.get_child_index(x, y, z)
++        if self.children[child_idx] is None:
++            # This case should be handled by init_children if we came from a leaf split,
++            # or by explicit allocation if this is a new branch.
++            # For naive representation, we assume children are allocated when needed.
++            # If this node was not a leaf before, children should exist.
++            # If this node was a leaf, init_children allocated them.
++            # However, if we are traversing a sparse tree, we might need to allocate.
++            # Based on S3, init_children is called only when splitting a leaf.
++            # If we are in a non-leaf node, children must exist.
++            pass 
+         
+-        if self.is_leaf:
+-            if self.value == value:
+-                return
+-            self.init_children()
+-            # Copy old value to all children
+-            for child in self.children:
+-                child.value = self.value
++        self.children[child_idx].set_voxel(x, y, z, value)
++        
++        # Try to collapse children if they are identical (not fully specified in S3)
++        # self.try_collapse()
++
++    def get_value(self, x, y, z):
++        """Retrieves the voxel value at (x, y, z)."""
++        if self.isLeaf:
++            return self.value
+         
+         child_idx = self.get_child_index(x, y, z)
+-        self.children[child_idx].set_voxel(x, y, z, value)
+-        self.try_collapse()
+-
+-    def get_value(self, x, y, z):
+-        if self.is_leaf:
+-            return self.value
+-        child_idx = self.get_child_index(x, y, z)
+         return self.children[child_idx].get_value(x, y, z)
+-
+-    def try_collapse(self):
+-        """If all children are leaves with the same value, merge them."""
+-        if self.is_leaf:
+-            return
+-        
+-        # Check if all children are leaves
+-        if not all(c.is_leaf for c in self.children):
+-            return
+-            
+-        # Check if all values are the same
+-        first_val = self.children[0].value
+-        if all(c.value == first_val for c in self.children):
+-            self.value = first_val
+-            self.is_leaf = True
+-            self.children = None
+ ```
+ 
+-### Parameters
+-- **Memory Cost**: 72 Bytes per node on 64-bit systems, 40 Bytes on 32-bit systems [S1, unofficial].
+-- **Voxel Value Size**: Typically `uint32_t` or `int8_t` (color index) depending on implementation [S1, S3, unofficial].
+-- **Depth**: Determines the resolution. Depth 0 is the base case [S3, unofficial].
++**Parameters:**
++*   **Memory Cost:** 72 Bytes per node on 64-bit systems, 40 Bytes on 32-bit systems [S1, unofficial].
++*   **Depth:** Starts at 0 for the root [S3, unofficial].
+ 
+-### Edge Cases and Pitfalls
+-- **Depth 0 Base Case**: Attempting to recurse below depth 0 must be prevented. The `SetVoxel` method explicitly checks `depth == 0` before accessing children [S3, unofficial].
+-- **Undefined Helpers**: `GetChildIndex` and `TryCollapse` are referenced but not fully defined in the source snippets. Implementers must define the coordinate mapping for `GetChildIndex` and the merge logic for `TryCollapse` [S3, unofficial].
+-- **Memory Leaks**: Since children are dynamically allocated (`new OctreeNode[8]`), proper deallocation is required to avoid memory leaks, especially during collapse operations [S3, unofficial].
+-- **Precision**: Using `uint8_t` for coordinates limits the spatial resolution to $256^3$ units unless extended [S3, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Depth 0 Base Case:** Recursion must stop at `depth == 0` to prevent underflow or invalid memory access [S3, unofficial].
++*   **Undefined Helpers:** `GetChildIndex` and `TryCollapse` are referenced but not fully defined in the source snippets. Implementers must define the coordinate mapping logic and the collapse condition (e.g., all 8 children are identical leaves) [S3, unofficial].
++*   **Memory Allocation:** The naive representation allocates memory for all 8 children when a leaf splits, even if only one child will be used. This leads to significant memory overhead in sparse scenes [S1, unofficial].
+ 
+ ## Subtopics
+ 
++### [Bitmask Leaf Compression](3603-bitmask-leaf-compression.md)
++Eliminates leaf nodes by packing 8 voxels into a 64-bit integer in the parent, reducing memory usage for dense leaf regions.
++
+ ### [Octree Data Structure Layout](4518-octree-data-structure-layout.md)
+-This layout defines the memory organization of the root `Octree` class, which manages the hierarchical voxel data structure. It solves the problem of tracking the spatial bounds and storage locations of the octree nodes and associated voxel data. It differs from its parent [Naive Octree Node Representation](2445-naive-octree-node-representation.md) by encapsulating the global tree state (bounds, node list, data pointer) in a single class, rather than focusing on the internal fields of an individual node [4518-octree-data-structure-layout.md].
+-
+-### Bitmask Leaf Compression
+-A compression technique that eliminates leaf nodes at the last level by packing their information (8 voxels) into a 64-bit integer in their parent node. It stores the color of the 8 voxels as an index into a palette of 256 entries, using 8 bits per voxel (where 0 represents absence). The 8 voxels are packed into a single `int64_t` field in the parent node. The highest position child represents the leftmost 8-bit strip, and the lowest position child represents the rightmost strip. This reduces memory overhead compared to the naive representation by eliminating leaf nodes, avoiding a memory cost factor approaching 8 for deep trees [S1, unofficial].
++Encapsulates global tree state (bounds, node list) in a root class, separating management from individual node representation.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Insertion and retrieval are $O(d)$ where $d$ is the depth of the tree, as each operation traverses one node per level [S3, unofficial].
+-- **Memory Complexity**: $O(N)$ where $N$ is the number of nodes. However, the constant factor is high due to pointer overhead. For a full octree of depth $d$, the memory cost factor $mc$ approaches 8 compared to a dense grid, as each leaf node in the naive representation consumes significant memory (72 bytes) relative to the data it holds (1 byte) [S1, unofficial].
+-- **Strengths**: Simple to implement; direct pointer access allows for fast traversal if the path is known; supports arbitrary depth.
+-- **Limitations**: High memory overhead due to pointer storage and node headers; poor cache locality due to scattered heap allocations; not suitable for very deep trees or dense data without compression [S1, unofficial].
+-- **When to Use**: When implementation simplicity is prioritized over memory efficiency; for sparse data where the tree depth is moderate; in educational contexts or prototyping.
+-- **When Not to Use**: For real-time rendering with large scenes where memory bandwidth is a bottleneck; for dense data where a simple array would be more efficient; when cache performance is critical.
++*   **Time Complexity:** Insertion and retrieval are $O(d)$ where $d$ is the depth of the octree, as each operation traverses one node per level [S3, unofficial].
++*   **Memory Complexity:** $O(8^d)$ in the worst case (full octree), but significantly higher overhead for sparse data due to the allocation of 8 pointers per non-leaf node [S1, unofficial]. The memory cost per node is fixed at 72/40 bytes [S1, unofficial].
++*   **Strengths:** Simple implementation, direct pointer access, no complex bit-packing logic required for basic operations [S1, S3, unofficial].
++*   **Limitations:** High memory overhead for sparse voxels due to pointer arrays and separate leaf nodes. Not suitable for large-scale scenes without compression or alternative layouts [S1, unofficial].
++*   **When to Use:** Prototyping, small-scale volumes, or as a baseline for comparison with optimized structures [S1, S3, unofficial].
++*   **When Not to Use:** Large-scale sparse voxel rendering, real-time applications with memory constraints, or scenes with high sparsity [S1, unofficial].
+ 
+ ## Background
+-The naive octree node representation is a fundamental data structure in computer graphics and spatial data management. It originates from the standard definition of an octree, where each node has up to 8 children. The specific memory layout described in [S1, unofficial] and [S3, unofficial] is commonly used in academic and open-source implementations for its clarity. [S1, unofficial] discusses this representation in the context of global illumination compression, highlighting its memory inefficiency. [S3, unofficial] provides a concrete C++ implementation for terrain generation. [S2, unofficial] offers a template-based variant in a more complex geometry processing library.
++The naive octree node representation is a fundamental concept in spatial data structures, originating from standard computer science literature on octrees [S1, S2, S3, unofficial]. It is widely used in early implementations of sparse voxel octrees for global illumination and terrain generation [S1, S3, unofficial]. The specific memory cost figures (72/40 bytes) are cited from a thesis on SVO compression [S1, unofficial]. The template-based variant is seen in C++ libraries like `planaria/dmc` [S2, unofficial].
+ 
+ ## Sources

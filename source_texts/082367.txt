@@ -1,0 +1,683 @@
+A refreshingly simple data-driven game engine built in Rust - WIP: Nubis-based volumetric clouds by mate-h · Pull Request #26 · mate-h/bevy
+
+WIP: Nubis-based volumetric clouds by mate-h · Pull Request #26 · mate-h/bevy · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mate-h
+commented
+Oct 20, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Note
+This is a working branch, not the final diff intended for upstream Bevy. It still contains debugging and validation features (shader debug defines, a reference path tracer, GPU timing and readback dumps, and environment-variable switches in the example) that would be removed or split out before a PR to bevyengine/bevy main.
+Summary
+Volumetric clouds for the atmosphere plugin, combining several published techniques:
+Atmosphere and lighting: Hillaire 2020 (sky-view/aerial-perspective LUTs; its multiple-scattering transfer fraction, applied to clouds through a per-voxel escape probability). Frostbite (Hillaire 2016) energy-conserving integration and temporal reprojection.
+Shaping: Nubis Evolved (Schneider 2022) dimensional profile and Perlin-Worley shape noise; Nubis Cubed (2023) alligator detail noise and distance-adaptive stepping.
+Phase: cloud droplet Mie phase from Jendersie & d'Eon 2023.
+Shadows: UE5-style cloud shadow map (front depth, mean extinction, max optical depth), shared by the sky, ground and mesh lighting.
+Cirrus: a thin layer after Hogan & Kew 2005 (−5/3 fBm, log-normal ice water, fall streaks).
+API: VolumetricCloudLayer and ThinCloudLayer components on the atmosphere entity, with an AtmosphereWind profile.
+References
+S. Hillaire, A Scalable and Production Ready Sky and Atmosphere Rendering Technique, EGSR 2020.
+S. Hillaire, Physically Based Sky, Atmosphere and Cloud Rendering in Frostbite, SIGGRAPH 2016 Physically Based Shading course.
+S. Hillaire, Physically Based and Scalable Atmospheres in Unreal Engine, SIGGRAPH 2020 Physically Based Shading course; Unreal Engine volumetric cloud shadow map.
+A. Schneider, Nubis, Evolved: Real-Time Volumetric Clouds for Skies, Environments, and VFX, SIGGRAPH 2022 Advances in Real-Time Rendering.
+A. Schneider, Nubis³: Methods (and madness) to model and render immersive real-time voxel-based clouds, SIGGRAPH 2023 Advances in Real-Time Rendering.
+J. Jendersie, E. d'Eon, An Approximate Mie Scattering Function for Fog and Cloud Rendering, SIGGRAPH 2023 Talks.
+R. J. Hogan, S. F. Kew, A 3D stochastic cloud model for investigating the radiative properties of inhomogeneous cirrus clouds, Q. J. R. Meteorol. Soc. 131, 2005.
+Showcase
+AI disclosure
+This PR builds on my earlier work and research on atmosphere and cloud rendering. It was produced partly with AI assistance (Grok 4.7 and Claude Opus 5.5), under my direction:
+Papers as the reference: methods and constants come from the cited sources, with the papers and talks read directly. The aim is to derive physical quantities rather than fit them, with citations in the code.
+Visual iteration: bugs (banding, crawling, holes, shadow seams) were reproduced at fixed camera poses, fixed, and checked with before/after screenshots.
+Measured feedback: each change was checked against frame time (alternating A/B runs, per-pass GPU timings) and image regressions (pixel diffs against the previous build). Changes that did not pay off were reverted.
+Review: an independent audit of the branch and its adversarial re-review guide the remaining fixes.
+mate-h
+added 30 commits
+December 19, 2025 17:38
+Update example and test ssr
+337d13b
+Fix deferred and ssr rendering
+199fedf
+Volumetric fog atmosphere light attenuation, shader defs, example update
+b36b4c2
+Extracted atmosphere handling in rendering modules
+ea2dde7
+Update atmosphere example
+566ac54
+Backlit scene
+117c507
+Cloud scattering prototype
+9188730
+More physically accurate scattering
+90f7c7a
+Fix compile error after rebase
+3d10b6e
+Revert changes to ssr mod.rs
+1a16b42
+Update shaders and debugging
+b69c1af
+Add cloud shadow map
+f798884
+Add cloud shadow filtering
+9f236c1
+Fix cloud shadow calculations
+b36a1f2
+Global stratification for better performance and accuracy
+5ce8a47
+Add noise-based cumulus shaping and cloud density profiles
+f8d9a82
+Optional CloudLayer
+eae3f34
+Rever render_sky to use max_samples from settings
+664932c
+Add 3D Perlin-Worley noise generation for volumetric cloud details
+93615e3
+Cloud support in atmosphere environment map
+85f673a
+Merge branch 'main' into m/clouds
+24bfe68
+TAA support with STBN
+b8fc40b
+Cloud shaping improvements
+bb70c13
+Uncomment density multiplier
+9159113
+Add temporal filtering for cloud shadow maps
+81c61f6
+Merge branch 'main' into m/clouds
+227581a
+Merge branch 'main' into m/clouds
+2df3aec
+Fixed compiler error
+a31bd74
+Merge branch 'main' into m/clouds
+afe0a14
+Atmosphere entity cloud layers
+3fba8cb
+mate-h
+added 30 commits
+October 21, 2026 12:01
+Clouds: VolumetricCloudLayer::coverage scales the weather coverage
+…
+20e19fa
+```
+With the physical profiles, coverage times the vertical profile is the cloud
+fraction, so this one scale sets the cloud fraction everywhere. The atmosphere
+example's Left/Right now change it instead of the density multiplier, and
+ATMOSPHERE_CLOUD_COVERAGE sets its starting value.
+```
+Clouds: VolumetricCloudLayer::shape_noise_scale (6.4 km) sets the clo…
+…
+260ed63
+```
+…ud size
+
+The shape noise was tied to the weather tile (noise_scale / 8 = 4 km). That
+gave a cover-weighted cloud size of 340-430 m at 5-10 % cloud fraction,
+against the LES cumulus scale where cover peaks: 700 m in BOMEX, 400-1250 m
+across cases (Neggers et al. 2003, Table 2).
+
+Size scales linearly with the period. At 6.4 km it measures 590-760 m on the
+GPU noise dumps (.clouds-handoff/noise_study/sizes_tile.py), with a
+cloud-size density exponent of -1.55 to -1.60 (LES -1.70). The bubble weight
+follows the new detail/shape ratio. The weather tile is unchanged.
+```
+Atmosphere: per-view ownership of cloud state, textures and probes (a…
+…
+3701436
+```
+…udit 5, 9, 10, 39)
+
+- Each atmosphere view owns its persistent textures (the LUTs, the cloud field,
+  the shadow map and its history, the cloud and haze ping-pong targets), keyed
+  by retained view entity. TextureCache handed out the first free texture of a
+  descriptor, so equal-sized views could trade histories when the query order
+  changed. A texture is only reallocated when its descriptor changes.
+- History validity is checked by texture identity: the cloud, haze and shadow
+  histories must be the textures this view wrote last frame. A new view, a
+  reallocation or a resize starts from an invalid history.
+- The cloud-field rebuild stage and the LUT cache are per view. One system
+  counter split two views' stages between them, so neither built a complete
+  field. A view whose field textures are new builds all stages in its first
+  frame (also covers audit 20 for fresh views).
+- The shadow temporal state and its uniform are per view. Its light is light
+  0 of the view's GPU light array: directional lights sorted by (volumetric,
+  shadow maps, entity) and filtered by the view's render layers.
+- Each atmosphere probe is rendered by its own view: a camera's probe by that
+  camera, a LightProbe by one source view (lowest camera order, then entity),
+  with that view's uniforms, medium, LUTs and shadow map, refreshed every
+  frame.
+
+The example adds ATMOSPHERE_SECOND_CAMERA (a second, equal-sized offscreen
+camera) and ATMOSPHERE_SECOND_SCREENSHOT for testing, and ATMOSPHERE_IBL
+(replacing a commented-out line).
+
+Frozen two-camera test against single-camera renders: the second view now
+matches its own render (0.15 mean, 0.07 % of pixels over 10 levels; the old
+code differed across whole cloud bodies, 2 % of pixels). With IBL on, the
+main view's ground is still ~3 levels brighter with a second probe-bearing
+camera (old code: 7). That remainder is outside these findings.
+```
+Atmosphere debug dumps: real frame numbers, per-view file tags (audit…
+…
+b14e37a
+```
+… 31)
+
+CLOUD_DUMP_FRAMES counted render_sky invocations, which happen once per view.
+With two views, a frame's first view mapped its readback during the second
+view of the same frame, before submission, so its files were all zeros, and
+the numbers stopped matching frames. Dumps are now keyed by FrameCount and
+mapped in a later frame, every view dumps on the requested frame, and file
+names carry the camera order (<name>_c<order>_f<frame>). The view's raw
+atmosphere probe cube is dumped too (env_raw).
+
+With this fixed, a frozen IBL run gives a bit-identical main view with and
+without a second probe-bearing camera: the multiscattering and sky-view LUTs,
+the shadow map, the probe cube and the scene colour all match. The ~3-level
+ground offset reported in 3701436 was a harness artifact. The cloned
+camera shared the main camera's environment-map image, and the two-camera
+runs used the bare binary without BEVY_ASSET_ROOT (missing assets), while
+the single runs used cargo run.
+```
+Clouds: each air mass has its own cloud base; the physical layer span…
+…
+27598a7
+```
+…s them
+
+The physical lookups carry each type row's cloud base above the surface (A,
+km): stratocumulus 575 m, BOMEX 555 m, RICO 570 m and continental cumulus
+1675 m, the lifting condensation levels of the cases. Profiles are sampled at
+the height above that base. With CloudProfiles::Physical the cloud layer
+spans the set (physical_profile_bounds: 555 m to 4451 m), so marine bases are
+no longer clipped by bounds sized for one regime, and continental tops are
+no longer cut at 4 km. The other profiles keep the layer bounds.
+
+The type axis now orders the cases by cloud-top height (stratocumulus, BOMEX,
+RICO, CASS), so the base is flat over the marine cases and rises once. With
+CASS between the two marine cases, the base rose and fell over a third of
+the axis.
+
+The shear lean starts at each cloud's own base (the type at the unleaned
+position). From the bottom of the deeper layer, continental clouds started
+tilted, and the layer's mean shear grew 2x.
+
+Frame time is unchanged within noise (summed passes -1..-5 % over three
+views); clouds_raymarch costs +4..19 % for the 1.6x deeper layer.
+```
+Clouds: shape-noise mip offset by the shape tile size
+…
+a652494
+```
+The distance LOD (mip = log2(1 + d / 4 km)) was set for a 4 km shape tile.
+At the 6.4 km default, a texel at a given mip is 1.6x larger, about 250 m at
+16 km, three texels across a 700 m cloud. The shape noise now samples
+mip - log2(tile / 4 km), which keeps metres per texel at a given distance
+for any shape_noise_scale. Its distribution row follows the shape mip. The
+detail noise, its rows and the camera distance recovered from the mip keep
+the distance mip.
+
+Distant clouds resolve into separate puffs instead of blurred groups in a
+haze-free horizon view; clouds_raymarch +1..3 %.
+```
+Atmosphere: fair-weather wind profile from the shallow-cumulus LES cases
+…
+95e07c3
+```
+AtmosphereWind::fair_weather ramped from 8 to 15.8 m/s over the lowest
+1.5 km. Below the old 1.5 km cloud base that did not matter, but the
+physical layer now reaches down to the marine bases at 555 m, and the ramp
+ran through the marine cloud layer. The profile now follows BOMEX and RICO:
+uniform wind through a well-mixed subcloud layer up to 700 m (BOMEX, Siebesma
+et al. 2003, Table B1), then 1.9 m/s per km to 4.5 km (BOMEX 1.8, RICO 2.0
+m/s per km; van Zanten et al. 2011, Table 2). The upper levels toward the
+cirrus jet are unchanged.
+
+The layer's mean shear drops from 2.2e-3 to 1.8e-3 1/s, and the lean slope 1
+km above a marine base from 0.73 to 0.61.
+```
+Atmosphere: fold in bevyengine#26208 (LUT precision, per-view probe L…
+…
+dada993
+```
+…UTs)
+
+Pre-exposed sky-view and aerial-view LUTs, optical depth in the transmittance LUT, log
+multiscattering, and probe LUTs owned by the probe's view, with their migration guides.
+Also the Aerosol presets for ScatteringMedium::earth_with_aerosol; the example uses
+Aerosol::CONTINENTAL_CLEAN in place of its hand-scaled Mie term.
+```
+Clouds: cloud and haze passes cover the camera viewport (audit 37)
+…
+f7dbdcf
+```
+The cloud raymarch and the half-res haze prepass sized their pixel lattice from the depth
+texture, which covers the whole render target, while their targets cover the viewport, and read
+depth without the viewport origin. An inset camera traced the wrong part of the view and the
+wrong depths. Both now use view.viewport for the lattice and offset depth reads by its origin.
+
+atmosphere example: ATMOSPHERE_VIEWPORT=x,y,w,h renders the camera into a sub-rectangle.
+```
+Directional lights: sort volumetric and shadowed lights first, as doc…
+…
+8300f0a
+```
+…umented
+
+The sort key (volumetric, shadow_maps_enabled, entity) is ascending, so lights without these
+came first. A plain directional light then took index 0, the volumetric sun lost its
+VOLUMETRIC flag (its index was no longer below the volumetric count), and the cloud shadow
+map followed the plain light. Reverse the two flags; the atmosphere's CPU mirror of the order
+does the same.
+```
+Clouds: only the mapped light reads the cloud shadow map (audit 11)
+…
+e068465
+```
+The map is traced along the view's first directional light, but every consumer looked it up
+for each light in that light's own basis, so a second, nonparallel sun read the first one's
+optical depths as a displaced, wrongly oriented shadow. Other lights now march the cloud layer
+toward the light (cloud_far_transmittance) in the atmosphere passes. Meshes have no cloud
+bindings for that march and are unshadowed by clouds for those lights. Parallel lights still
+share the map.
+
+atmosphere example: ATMOSPHERE_SECOND_SUN=elev,az, ATMOSPHERE_SUN_AZ_DEG and
+ATMOSPHERE_SUN_SCALE.
+```
+Atmosphere: LUT cache follows in-place medium edits (audit 17)
+…
+37341aa
+```
+The transmittance and multiscattering LUT cache hashed the medium's handle, which an in-place
+asset edit keeps, so the LUTs went stale until a periodic rebuild every 240 frames while the
+sky-view and aerial LUTs already read the new medium (a washed-out sky for up to 4 s). Hash the
+prepared GPU medium's textures instead, which re-preparation replaces, and drop the periodic
+rebuild.
+
+atmosphere example: ATMOSPHERE_AEROSOL=urban and ATMOSPHERE_AEROSOL_EDIT_SECS=<t>.
+```
+Clouds: no sky from an unbuilt cloud field; history only from frames …
+…
+3af5329
+```
+…that wrote it (audit 20, 5)
+
+The cloud trace has its own readiness guard, so it could run while the field pipelines or
+bind groups were not ready and read a field that was never built: zeroed metadata and escape
+probabilities, f_ms/(1 - f_ms) ~ 3e6, blown-out white clouds until the first build.
+render_sky now skips a view, as for a pipeline that is not ready, until that view's field
+texture has had its full build (PerViewLutState is now a resource it reads).
+
+Skipped frames exposed the history bookkeeping: it assumed every prepared view wrote its
+cloud and haze targets, so the first frame after a skip reprojected zeroed history (dark cloud
+outlines). render_sky records what it actually wrote (CloudHistoryWrites), and the history is
+valid only if the view wrote these textures in the previous frame.
+```
+Clouds: one well-defined life cycle drives the shared weather map (au…
+…
+fe38db7
+```
+…dit 38)
+
+The weather map is shared by all views, and its life-cycle phase came from whichever cloud
+layer the query returned first: query order decided between atmospheres, a cirrus-only or
+static first layer froze the phase at 0.5, and turning the life cycle off kept the last
+evolving bake. The phase now comes from the cumulus layer with a life cycle on the
+lowest-order camera (then the lowest entity), turning every life cycle off re-bakes the static
+map, and VolumetricCloudLayer::lifetime documents the sharing.
+
+atmosphere example: ATMOSPHERE_CLOUD_LIFETIME, ATMOSPHERE_CLOUD_EVOLUTION and
+ATMOSPHERE_CLOUD_LIFETIME_OFF_SECS.
+```
+Clouds reference path tracer: valid majorants, per-view accumulators,…
+…
+9581bec
+```
+… space entry, opaque ground (audit 32-36)
+
+- Majorants (33): the air's from every texel of the medium's density LUT (33 probes + 5 % could
+  miss narrow peaks), the clouds' from cloud_density times the maxima of the profile's liquid
+  water ratio and the thermal magnitude and the mip-0 reshape (2.97 by default). The old bound,
+  cloud_density, did not cover the physical profiles (density up to ~3): sun ratio tracking went
+  negative, in 30 % of the pixels of a hero reference. About 3x the trace cost.
+- Accumulators (32): one per view, restarted whenever the view, its size, lights, exposure,
+  atmosphere, medium, cloud layers or settings change, then settling 120 frames; it was
+  process-global and keyed by byte size, so equal-size views shared sums and scene changes
+  kept averaging into the old scene.
+- Boundaries (36, 35): the atmosphere top from space is entry, not escape, and vacuum has no
+  collisions; boundaries are solved from the ray origin, as stepping 5 cm past one could land
+  back on it at float32 planetary precision and exhaust the segment budget. The ground is opaque
+  to the camera ray, and the sun disk no longer applies the air transmittance twice.
+- Scope (34): documented; CLOUD_TERMS=sun|amb and CLOUD_NO_HAZE warn that they are ignored,
+  and a view with a thin cloud layer warns that the reference omits it.
+```
+Cloud shadow map: history that holds a static map exactly (audit 1 va…
+…
+465ea42
+```
+…lidation)
+
+Validating the fixed shadow quadrature (audit 1) against a dense trace (512 samples) in a frozen
+scene found the shipped map far from its own trace at the default interleave of 4: transmittance
+0.145 too low on average, 0.155 mean error, against 0.025 for the trace itself. Three causes:
+
+- The reprojection of untraced texels interpolated optical depth linearly. Cumulus depths are
+  ~50, so a few percent of weight from a cloud texel darkened a clear neighbour, every frame
+  until its next trace. It now interpolates transmittance (mean-preserving).
+- The history blend mixed depths linearly too (darker than the mixed transmittances); it blends
+  transmittance as well, which also recovers faster from a history reset.
+- A static history still moved: the inverse warp's GPU sinh/asinh error shifted texels near
+  the rim by up to a tenth of a texel per frame, and the round trip through absolute positions
+  at planetary radius lost ~0.5 m. The reprojection is now anchor-relative and differential
+  (uv plus the change of the inverse warp), so a static map maps to itself.
+
+Converged (frame 1200), fixed quadrature: mean error 0.040, bias +0.02, flicker 0.0006.
+ATM_DBG_SHADOW_JITTER rotates the sample phases per texel and frame and blends optical depth
+(the unbiased average of noisy depth estimates): mean error 0.019 and 40 % of the edge error,
+with 0.02 frame-to-frame noise in edge transmittance. The fixed phases stay the default.
+```
+Clouds reference: continued null flights, deep roulette, realtime's m…
+…
+0d852d0
+```
+…edium, dump manifests (Q21-Q23)
+
+- Q21: a flight that uses up a segment's 8192 null-collision candidates continues from the last
+  one (exact) instead of treating the rest of the segment as empty, which 40 % of the samples of
+  a hero view needed; segments up to 64, sun-ray candidates up to 65536. Past 256 events each
+  event also survives with 0.99 (unbiased roulette): analog cloud events keep throughput 1, so
+  diffusion paths in thick clouds (~tau^2 events) ran into the 1024-bounce cap. With
+  ATM_DBG_REF_CAPS the tracer writes which budgets each sample hit: none in the hero view.
+- Q22: the reference samples the cloud field as the realtime march defines it for the camera,
+  at the LOD of each point's camera distance and ending at cloud_max_distance. Mip 0 everywhere
+  applied the near-camera reshape and high-frequency detail (< 150 m) to every cloud.
+- Q23: every CLOUD_DUMP_DIR gets a manifest.txt: commit, uncommitted changes, the ATMOSPHERE_*,
+  CLOUD_* and BEVY_* variables, dump frames and reference accumulator restarts (samples per
+  pixel = (frame - restart - 120) / 4). The scripts the audit found missing exist untracked in
+  .clouds-handoff/validation/sky.
+
+Audit 24 validation: ATM_DBG_NO_COARSE now marches fine from the ray start, and
+ATM_DBG_STEP_DIV4/16 shorten the view step. In a hero view the realtime cloud transmittance is
+0.086 above the reference's; quarter steps bring it to 0.055 and 1/16 to 0.051. The finite-step
+Beer bias (one density sample per 40-1800 m step) is about 0.035; the rest is not explained yet.
+```
+Clouds: density samples per long view step by quality preset (audit 24)
+…
+75c5fcb
+```
+One density sample per in-cloud view step made clouds too transparent where the density
+varies within the step: the mean of exp(-sigma dt) over the jitter exceeds exp of the mean
+optical depth, and the temporal reconstruction averages transmittance, not optical depth.
+
+VolumetricCloudSettings::step_samples (AtmosphereSettings::cloud_step_samples) takes that many
+evenly spaced density samples across each fine step longer than 100 m and uses their mean,
+also when the first sample is empty: averaging only steps whose first sample hit cloud
+removed the exit-side overcount but kept the entry-side undercount, and made clouds more
+transparent (+0.085 vs +0.078). Lighting stays one evaluation per step; sigma_s / sigma_t
+does not depend on density.
+
+Presets: Low and Medium 1 (unchanged, bit-identical output), High 2, Cinematic 4.
+
+Hero view, sun 35 deg, Apple M5, against a 16x finer march (which matches the reference
+within 0.0005), cloudy-pixel transmittance error and clouds_raymarch time:
+  1 sample        +0.078   4.64 ms
+  2 samples       +0.037   5.59 ms (+20 %)
+  4 samples       +0.018   7.27 ms (+57 %)
+  half steps      +0.032   6.36 ms (+37 %)
+  quarter steps   +0.012   9.51 ms (+105 %)
+A second pipeline with the count as a compile-time constant ran no faster than the uniform.
+
+ATM_DBG_STEP_DIV2 joins DIV4/DIV16 for step-size comparisons; the example reads
+ATMOSPHERE_CLOUD_STEP_SAMPLES.
+```
+Clouds: physical detail at every distance (multi-scale thermals, foot…
+…
+e6346bf
+```
+…print closure)
+
+The physical profiles' detail was Nubis's up-res with Nubis's art constants on top of the
+two-octave bubble scheme: it removed ~10 % of the cloud fraction, raised the mean liquid water by
+~22 % (pow 0.6), and added almost no surface roughness (D_s 2.09 vs 2.32).
+
+The scheme's moisture fluctuation is now Y = g + r (b1 + s b2 + s^2 b3): g the Gaussianized
+shape noise, b nine octaves of thermal bubbles (cells 1/8 .. 1/2048 of the shape tile) with
+amplitude size^(2/3), so level sets have dimension 3 - H = 7/3 (Siebesma & Jonker 2000). A baked
+128^3 texture (FbmNoiseTexture::scheme_noise, binding 35) holds g, its variance, b and its
+variance; its mips (moments downsample) hold the variance a footprint leaves unresolved, and the
+shader samples it at the tile and at 1/8 and 1/64 of it. Each sample stands for its pixel
+footprint: the Gaussian closure of the statistical scheme (Sommeria & Deardorff 1977),
+E[(mu + sigma Z - t)+], gives the footprint's mean liquid water; near the camera sigma -> 0 and
+it is the resolved threshold. The scheme table integrates the measured bubble distribution
+against g. Nubis and envelope profiles keep Nubis's up-res.
+
+Validation (GPU-baked texture, .clouds-handoff/noise_study/physical_detail):
+  cloud fraction vs the presence lookup within 1-3 %, mean excess within 1 %;
+  footprint-mean liquid water at 24-384 m: bias <= 2.5 %, rms <= 4 % (re-normalizing and
+  thresholding the filtered field: up to 51 % rms);
+  40 m grid, 12.8 km domain: D_s 2.19-2.40 (LES 2.32), size density -1.77..-1.80 (LES -1.70,
+  observed -1.9..-2.0), dominant size 460-840 m (BOMEX ~700 m), holes < 1 %;
+  projected / maximum cloud fraction 1.68-1.76 (BOMEX LES 1.98-2.54: still too vertically
+  coherent).
+Cost (Medium, M5): clouds_raymarch hero 4.7 -> 5.9 ms, in the layer 7.0 -> 7.3 ms; cloud_field
+1.1 -> 0.8 ms; with ~1.5x the screen cloud cover. The finer taps are fetched only near the
+cloud surface; the closure is zero beyond 3 sigma below the threshold.
+
+detail_noise_scale no longer affects the physical profiles; detail_strength scales the bubbles.
+Known: edges close up are softer than Nubis's sharpened ones (liquid water linear in the
+excess); needs an observed edge profile.
+```
+Clouds: mixed-shell liquid water at cumulus edges, fitted to aircraft…
+…
+ec420fc
+```
+… composites
+
+Liquid water linear in the scheme's excess made a tent across each cloud: along horizontal
+legs through clouds at least 200 m wide (the selection of Wang, Geerts & French 2009), it reached
+0.41 of the interior value at x* = -0.2 and 0.25 at -0.1, against 0.88 and 0.80 in their
+composite of 1624 aircraft penetrations of cumulus (J. Atmos. Sci. 66, 3660, Fig. 5a: flat in the
+interior, dropping within ~10 % of the radius of the edge).
+
+Liquid water is now min(Y - t, c)+ / c times a magnitude: linear in the excess over a mixed
+shell of depth c, flat in the core. c = 0.5 x the mean excess, fitted to the composite: rms 0.050
+over x* in [-0.3, 0] at cloud fractions 0.05-0.2 (0.414 for linear; 1 - exp(-e/e_s) best 0.079,
+tanh 0.067). The footprint closure stays exact: E[min(e, c)+] = E[(e)+] - E[(e - c)+]. The
+scheme row now holds (t, c, 1 / E[min(Y - t, c) / c], 1), so the in-cloud mean liquid water
+stays the lookup's (0.996-1.003 on the baked texture); the bubble moments move to the
+distribution rows. Core samples beyond the shell skip the finer taps.
+
+Close up, the look changes little: the remaining contrast to Nubis's sharpened density is mostly
+lighting (flatter shaded sides) and a fringe of tens of metres, as the composite has.
+GPU timing not re-measured (GPU shared with other work).
+```
+Clouds: cloud layers as related entities of the atmosphere; several t…
+…
+f132075
+```
+…hin layers
+
+CloudLayerOf(atmosphere) / CloudLayers (linked spawn): VolumetricCloudLayer and ThinCloudLayer
+on any entity related to an atmosphere are its layers; layer components on the atmosphere
+entity itself still count, so single-layer scenes are unchanged. Reverses the Oct 16 decision
+(components on the atmosphere only) now that layering is a feature.
+
+- Extraction gathers the atmosphere's own and related layers: one volumetric layer (the first;
+  warn on more, until the shadow map holds several depths) with its CloudProfiles, and up to
+  MAX_THIN_CLOUD_LAYERS (4) thin layers sorted by mid level.
+- GpuCloudLayers: the cirrus scalars become thin: [GpuThinCloudLayer; 4] + thin_count.
+  Compositing loops over the thin layers lowest first (above the camera: behind, nearest first;
+  below: in front, farthest first); the shadow map's alpha sums their similarity-reduced optical
+  depths; the generating field is shared, decorrelated per layer by an offset.
+- Wind: the atmosphere's AtmosphereWind for every layer (the layer kinds no longer require their
+  own, which would have shadowed it); advance_cloud_wind follows CloudLayerOf.
+- Temporal histories reproject thin-layer pixels with the lowest thin layer's motion.
+- Example: ATMOSPHERE_SECOND_THIN=1 adds a cirrostratus layer entity at 11.5 km.
+
+Default scene: bit-identical without cirrus; with cirrus within f16 rounding (reordered shadow
+sum: max 0.004 in the cloud buffer, mean 8e-7).
+```
+Clouds: per-view weather window around the camera (art and physical c…
+…
+6c1f677
+```
+…hannels)
+
+The weather map is one 512^2 tile repeated every 32 km: right for the statistically uniform
+procedural field, wrong for anything geographic (a coastline, a storm at a place). Each view now
+composes a 1024^2 window (64 km at the default 62.5 m texels) around its camera every frame
+(weather_window.wesl), the place where world-anchored sources will be added
+(.clouds-handoff/notes/weather_layers_design.md, A2):
+- A (art channels): the tiled map's texels, laid out in the map's own frame (advected by the
+  layer's offset, rotated 30 degrees) and snapped to its texel grid, so window texel j is map
+  texel origin + j;
+- B (physical channels): cloud-fraction scale 1, air mass = the map's type, droplet number
+  N_d = 299 cm^-3 (the layer's reference microphysics: LWC 1 g/m^3, r_e 10 um, k = 0.8; Martin,
+  Johnson & Spice 1994 via Wood 2000), base offset 0. Not read by the clouds yet.
+sample_weather reads the window inside it and the tiled map outside; the content matches texel
+for texel (checked on a dump), and the image differs only by the hardware's bilinear-weight
+rounding of the two coordinate paths: 0.03 % of pixels by more than 1 %, mean relative 7e-5,
+max transmittance 0.009. Bindings 36/37 in every cloud layout (and the probe's borrowed
+textures); GpuCloudLayers carries the window origin (set per view at extraction) and the default
+droplet number. The window is also in the CLOUD_DUMP_DIR dumps (weather_window_art).
+```
+Clouds: CloudInfluence, world-anchored weather edits composed into th…
+…
+8d26241
+```
+…e weather window
+
+A CloudInfluence on an entity with a Transform edits the weather around its position: a
+rectangle or ellipse (local x/z, yaw from the transform) with a feathered edge, a blend mode
+(Normal, Add, Subtract, Multiply, Max, Min; mix(base, mode(base, value), opacity x mask)), an
+order, and optional channel values: art (coverage, type, density scale) and physical
+(cloud-fraction scale, air mass, droplet number, base offset). Influences are anchored in the
+world: the compose pass maps each window texel back from the weather map's rotated, advected
+frame to the world point it feeds, so the procedural weather drifts with the wind underneath a
+fixed hole or region. Up to 16 per view (sorted by order, warn beyond), extracted into
+ExtractedCloudInfluences and packed per view into the compose pass's uniform in atmosphere space.
+Everything that samples the weather (clouds, shadow map, cloud field, LUTs, probes) sees them
+inside the 64 km window.
+
+Example: ATMOSPHERE_INFLUENCE=hole clears a 6 km hole 6 km ahead of the default camera.
+Image masks and the consumers of the physical channels come next (weather_layers_design.md A2,
+steps 3-5).
+```
+Clouds: physical weather channels drive the physical profiles (fracti…
+…
+79813df
+```
+…on, air mass, droplets)
+
+With the physical profiles every density function (fine, coarse bound, the lean's base) reads
+one column weather (cloud_column_weather): the weather window's physical channels scale the
+cloud fraction, choose the air mass (the profile row; it defaults to the map's type) and set the
+droplet number. At a fixed liquid water the extinction scales as (N_d / N_ref)^(1/3) relative to
+the layer's reference droplet number (sigma = 3 Q LWC / (4 rho_w r_e), r_e^3 ∝ LWC / (k N_d):
+Twomey; k ~ 0.8 maritime, 0.67 continental, Martin, Johnson & Spice 1994, cancelling within one
+air mass). Outside the window the defaults apply.
+
+Default scene: unchanged up to window/tile filtering rounding (0.3 % of pixels, mean relative
+2e-6). Example: ATMOSPHERE_INFLUENCE=coast puts a coastline 8 km ahead: maritime N_d 80 before
+it (0.64 x the reference extinction), continental 800 beyond (1.39 x).
+```
+Clouds: lighting debug flags (dense light march, sun optical depth an…
+…
+dfe23e8
+```
+…d escape output)
+
+ATM_DBG_LIGHT_BRUTE replaces the growing light taps with 256 x 30 m; ATM_DBG_OUT_SUN_OD writes
+(local sun optical depth, far-map transmittance, field escape probability, density) at each
+pixel's first in-cloud sample. Used to localise the realtime multiple-scattering deficit
+(.clouds-handoff/notes/lighting_ms_deficit.md): the light taps change single scatter by < 7 %.
+```
+Clouds: delta-Eddington diffusion for multiple scattering in thick cl…
+…
+a60c84c
+```
+…oud (experiment, off)
+
+The escape-series multiple scattering decays as exp(-(1-g) tau_sun) and leaves thick cloud dark
+on the shaded side (slab MC: ~0 below a reduced depth of a few; realtime multiple scattering at
+4-8 % of the reference's). cloud_diffuse_sun: the delta-Eddington diffusion solution of the
+vertical slab (Joseph, Wiscombe & Weinman 1976; Marshak boundaries), from the cloud field's
+columns, max with the series: 1.06-1.23 x the slab MC at tau 20-60.
+
+Behind ATM_DBG_MS_DIFFUSION: against the reference it lifts the shaded third from 0.56 to 0.91
+(hero) and the final cloudy pixels from 0.72 to 0.80, but the lit sides stay ~35 % short (the
+vertical slab lights only the layer top), so the clouds lose form. Next: diffusion from the
+nearest lit surface (SDF depth and normal). Notes: .clouds-handoff/notes/lighting_ms_deficit.md.
+```
+Atmosphere: cargo fmt node.rs and resources.rs (formatting only)
+6c8b4ed
+Clouds: 3D delta-Eddington diffusion solve on the cloud field for mul…
+…
+780c47b
+```
+…tiple scattering
+
+Multiply scattered sunlight in thick cloud from a diffusion solve on the cloud field grid
+(128 x 128 x 32): D = 1 / (3 sigma'), source (1 + g') sigma' T'_sun, Marshak flux at cloud
+faces and the grid edge, red-black SOR warm-started from the previous frame. Max with the
+escape series in the cloud pass (thin cloud). Validated on IPRT C2 cube Monte Carlo (0.82 of
+MC vs 0.44 for the series) and the reference views (cloud buffer 0.61 -> 0.64 hero, 0.59 ->
+0.62 backlit, shaded/lit contrast matching).
+
+Amortised per frame (~0.2 ms): source for 1/8 of the cells (2x2x2 interleave; sun depth
+marched through the field's extinction, the shadow map beyond the march), one SOR iteration
+over half-size dispatches, publish skipping far clear cells via the SDF. The shadow map alone
+underestimates in-cloud sun depth 5-10x (ATM_DBG_OUT_SUN_TAU), so it only covers beyond.
+ATM_DBG_MS_SERIES_ONLY turns the solve's contribution off.
+```
+Clouds: move the diffusion solution with the cloud field grid
+…
+152ada5
+```
+The field follows the camera in 375 m blocks. The warm-started diffusion solution and its
+source are indexed by cell, so after each shift the diffuse light sat two cells off the clouds
+and the whole image dipped and recovered over a few frames as the SOR re-converged (every
+~15 frames at 1.5 km/s: global frame-to-frame change 8x the solve-off case at its peak).
+
+When the extinction is rebuilt (stage 0) at a new cell, two passes move both volumes by the
+offset (via a temp volume; a 4-texel state holds the solution's cell and the pending offset, so
+no invocation reads what another writes). The publish pass reads the SDF at the cell's position
+in the SDF's own grid, which switches three frames after the extinction.
+
+Fly-through (inslab, 25 m/frame): global flicker median 0.0017 -> 0.0005, max 0.019 -> 0.002,
+same as with the solve off. Cost: two early-out passes once per 8 frames.
+```
+Clouds: index the ray-start jitter by the trace texel
+…
+7bc42b4
+```
+The checkerboard's half-res pixel sampled the jitter noise at a stride of 2 with a per-frame
+offset. With the IGN fallback (no bluenoise_texture feature, the example's default) that
+aliased into diagonal hatching in near-camera fog, visible when flying out of a cloud until
+the reconstruction averaged it out over several frames. The dense trace texel removes the
+hatch.
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

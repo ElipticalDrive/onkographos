@@ -1,0 +1,125 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,5 @@
+ # Transient-Aware Depth Prior
+ 
+-Also called: DPT depth supervision, monocular depth loss
++Also called: DPT depth supervision, monocular depth loss, Depth Regularization with Monocular Estimation
+ 
+ ## Overview
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** Training image $i$, camera pose, ray $r$ passing through pixel, pre-trained Monocular Depth Estimation (MDE) network (DPT), current NeRF model (shared density $\sigma$ and candidate density $\sigma^{(c)}$).
+-- **Outputs:** Depth loss value $L_{depth}$ for the current ray.
++- **Inputs:** Training image $i$, camera pose, ray $r$ passing through pixel, pre-trained Monocular Depth Estimation (MDE) network (DPT), current NeRF model (shared density $\sigma$ and candidate density $\sigma^{(c)}$) [S1, unofficial].
++- **Outputs:** Depth loss value $L_{depth}$ for the current ray [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Monocular Depth Prior:** Dense inverse depth map $D^{inv}_i$ predicted by DPT for image $i$.
+-- **Learnable Parameters:** Per-image scale $\eta_i$ and shift $\xi_i$.
+-- **NeRF Densities:** Shared density $\sigma$ (static geometry) and candidate density $\sigma^{(c)}$ (transient/uncertain geometry).
++- **Monocular Depth Prior:** Dense inverse depth map $D^{inv}_i$ predicted by DPT for image $i$ [S1, unofficial].
++- **Learnable Parameters:** Per-image scale $\eta_i$ and shift $\xi_i$ [S1, unofficial].
++- **NeRF Densities:** Shared density $\sigma$ (static geometry) and candidate density $\sigma^{(c)}$ (transient/uncertain geometry) [S1, unofficial].
+ 
+ **Steps:**
+@@ -24,8 +24,8 @@
+    $$ \hat{D}_i(r) = \sum_{k=1}^{K} T(t_k) \alpha(\sigma(t_k)\delta_k) t_k $$
+    where $t_k$ are sample points, $\delta_k$ is the distance between samples, $\alpha$ is the opacity, $T(t_k)$ is the transmittance, and $\sigma$ is the shared density [S1, unofficial].
+-4. **Calculate Transient Confidence Weight:** Determine the weight $W_{depth}(r)$ based on the ratio of candidate density to shared density. This weight indicates the likelihood that the ray passes through a transient object [S1, unofficial]:
++4. **Calculate Transient Confidence Weight:** Determine the weight $W_{depth}(r)$ based on the ratio of candidate density to shared density [S1, unofficial]:
+    $$ W_{depth}(r) = \sum_{k=1}^{K} T_i(t_k) \alpha(\sigma^{(c)}(t_k)\delta_k) $$
+-   where $T_i(t_k)$ is the transmittance computed using the candidate density $\sigma^{(c)}$ [S1, unofficial]. Note: $W_{depth}(r) \in [0, 1]$. High values indicate transient content [S1, unofficial].
+-5. **Compute Depth Loss:** Calculate the L1 loss between the aligned monocular depth and the rendered NeRF depth, weighted by the transient confidence. The loss is applied only to areas with low transient confidence (high static confidence) [S1, unofficial]:
++   where $T_i(t_k)$ is the transmittance computed using the candidate density $\sigma^{(c)}$ [S1, unofficial]. Note: $W_{depth}(r) \in [0, 1]$. High values of $W_{depth}(r)$ indicate high transient confidence, causing the $(1 - W_{depth}(r))$ factor to suppress the loss in those regions [S1, unofficial].
++5. **Compute Depth Loss:** Calculate the L1 loss between the aligned monocular depth and the rendered NeRF depth, weighted by the transient confidence [S1, unofficial]:
+    $$ L_{depth}(r) = (1 - W_{depth}(r)) \| D^*_i(r) - \hat{D}_i(r) \|_1 $$
+    [S1, unofficial].
+@@ -37,5 +37,7 @@
+ **Pseudocode:**
+ ```python
+-def compute_transient_aware_depth_loss(ray, image_idx, nerf_model, dpt_model, eta, xi):
++import math
++
++def compute_transient_aware_depth_loss(ray, image_idx, nerf_model, dpt_model, eta, xi, K=128):
+     """
+     ray: Ray object with origins and directions.
+@@ -45,44 +47,43 @@
+     eta: Learnable scale parameter for image_idx.
+     xi: Learnable shift parameter for image_idx.
++    K: Number of sample points along the ray.
+     """
+     # 1. Acquire monocular inverse depth from DPT
+-    # D_inv is a dense map for the image; we sample it at the ray's pixel coordinates
+     pixel_coords = ray.get_pixel_coordinates()
+     d_inv = dpt_model.predict_inverse_depth(image_idx, pixel_coords)
+     
+     # 2. Compute aligned monocular depth D*
+-    # D* = 1 / (eta * D_inv + xi)
+     d_mono = 1.0 / (eta * d_inv + xi)
+     
+     # 3. Render NeRF depth D_hat
+-    # Sample points along the ray
+-    t_samples = ray.sample_points(K=K_samples)
++    t_samples = ray.sample_points(K)
+     sigma_shared = nerf_model.get_shared_density(t_samples)
+     sigma_cand = nerf_model.get_candidate_density(t_samples)
+     
+-    # Compute opacity alpha and transmittance T
+-    # alpha = 1 - exp(-sigma * delta)
+-    deltas = t_samples[1:] - t_samples[:-1]
+-    # Handle last delta or edge case if necessary [G]
+-    deltas = np.append(deltas, deltas[-1]) 
++    # Compute deltas between consecutive samples
++    deltas = [t_samples[k+1] - t_samples[k] for k in range(len(t_samples) - 1)]
++    deltas.append(deltas[-1])  # Handle last delta [G]
+     
+-    alpha = 1.0 - np.exp(-sigma_shared * deltas)
++    # Compute opacity alpha = 1 - exp(-sigma * delta)
++    alpha = [1.0 - math.exp(-sigma_shared[k] * deltas[k]) for k in range(len(t_samples))]
+     
+-    # Transmittance T(t_k) = product of (1 - alpha_j) for j < k
+-    T = np.cumprod(np.concatenate([[1.0], 1.0 - alpha[:-1]]))
++    # Compute transmittance T(t_k) = product_{j<k} (1 - alpha_j)
++    T = [1.0]
++    for k in range(len(alpha) - 1):
++        T.append(T[-1] * (1.0 - alpha[k]))
+     
+     # Rendered depth D_hat = sum(T * alpha * t)
+-    d_hat = np.sum(T * alpha * t_samples)
++    d_hat = sum(T[k] * alpha[k] * t_samples[k] for k in range(len(t_samples)))
+     
+     # 4. Calculate transient confidence weight W_depth
+-    # W_depth = sum(T_cand * alpha_cand)
+     # Alpha_cand uses candidate density sigma_c
+-    alpha_cand = 1.0 - np.exp(-sigma_cand * deltas)
+-    T_cand = np.cumprod(np.concatenate([[1.0], 1.0 - alpha_cand[:-1]]))
+-    w_depth = np.sum(T_cand * alpha_cand)
++    alpha_cand = [1.0 - math.exp(-sigma_cand[k] * deltas[k]) for k in range(len(t_samples))]
++    T_cand = [1.0]
++    for k in range(len(alpha_cand) - 1):
++        T_cand.append(T_cand[-1] * (1.0 - alpha_cand[k]))
++    w_depth = sum(T_cand[k] * alpha_cand[k] for k in range(len(t_samples)))
+     
+     # 5. Compute weighted L1 loss
+-    # L_depth = (1 - W_depth) * |D* - D_hat|
+-    loss = (1.0 - w_depth) * np.abs(d_mono - d_hat)
++    loss = (1.0 - w_depth) * abs(d_mono - d_hat)
+     
+     return loss
+@@ -90,4 +91,7 @@
+ 
+ ## Subtopics
++
++### [Depth Regularization](18191-depth-regularization.md)
++Depth Regularization incorporates geometric priors from a monocular depth estimator (typically DPT) into the training of radiance fields or 3D Gaussian Splatting to enforce geometric consistency and suppress artifacts like floaters or geometry collapse.
+ 
+ ## Operating characteristics
+@@ -101,5 +105,5 @@
+ 
+ ## Background
+-The method was introduced in UP-NeRF (Unconstrained Pose-Prior-Free Neural Radiance Fields) [S1, unofficial]. It is inspired by NoPe-NeRF [S2], which also uses monocular depth regularization. However, UP-NeRF adapts the approach for unconstrained images by using per-image affine alignment and transient-aware weighting, whereas NoPe-NeRF originally focused on video sequences with inter-frame losses [S1, unofficial]. The DPT (Dense Prediction Transformer) model is used as the monocular depth estimator [S1, unofficial][S2].
++The method was introduced in UP-NeRF (Unconstrained Pose-Prior-Free Neural Radiance Fields) [S1, unofficial]. It is inspired by NoPe-NeRF, which also uses monocular depth regularization [S1, unofficial]. However, UP-NeRF adapts the approach for unconstrained images by using per-image affine alignment and transient-aware weighting, whereas NoPe-NeRF originally focused on video sequences with inter-frame losses [S1, unofficial]. The DPT (Dense Prediction Transformer) model is used as the monocular depth estimator [S1, unofficial].
+ 
+ ## Sources

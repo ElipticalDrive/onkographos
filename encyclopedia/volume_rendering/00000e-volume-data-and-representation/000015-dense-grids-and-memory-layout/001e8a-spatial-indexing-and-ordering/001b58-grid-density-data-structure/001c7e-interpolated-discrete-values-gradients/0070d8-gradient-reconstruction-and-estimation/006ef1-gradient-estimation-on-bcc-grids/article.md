@@ -1,0 +1,80 @@
+# Gradient Estimation on BCC Grids
+
+Also called: Gradient reconstruction schemes
+
+## Overview
+This method provides two specific algorithms for approximating volume gradients on a Body-Centered Cubic (BCC) grid to support volume rendering tasks [S1, unofficial]. It addresses the problem of computing accurate surface normals from discrete scalar field samples, which is critical for lighting calculations in ray casting and splatting [S1, unofficial]. The method is distinguished from its siblings by its specific adaptation to the BCC lattice topology, evaluating whether specialized BCC gradient estimators offer quality advantages over standard Cartesian central differences [S1, unofficial].
+
+## How it works
+**Inputs:**
+1.  Scalar field values $f(\mathbf{p})$ defined at BCC grid points.
+2.  Grid geometry parameters (unit cell size, orientation).
+3.  Target sampling point $\mathbf{p}$ (typically a grid point or interpolated position).
+
+**Outputs:**
+1.  Estimated gradient vector $\nabla f(\mathbf{p})$.
+2.  Normalized normal vector $\mathbf{n} = \frac{\nabla f(\mathbf{p})}{\|\nabla f(\mathbf{p})\|}$.
+
+**Data Structures:**
+The BCC grid is defined as a subset of a Cartesian lattice. A BCC lattice with spacing $h$ can be viewed as two interpenetrating simple cubic lattices offset by $(h/2, h/2, h/2)$. The neighbors of a point $\mathbf{p}_i$ at index $(i,j,k)$ include:
+*   8 nearest neighbors at distance $\frac{\sqrt{3}}{2}h$ (if $\mathbf{p}_i$ is a corner, these are body centers; if body center, these are corners).
+*   6 next-nearest neighbors at distance $h$ along the axes.
+
+**Method 1: Central Differences at Grid Point**
+This method computes the gradient using central differences along the primary Cartesian axes, treating the BCC grid points as if they were part of a rectilinear grid with spacing $h$ [S1, unofficial].
+
+Formula:
+$$
+\nabla f(\mathbf{p}) \approx \left[ \frac{f(x+h, y, z) - f(x-h, y, z)}{2h}, \frac{f(x, y+h, z) - f(x, y-h, z)}{2h}, \frac{f(x, y, z+h) - f(x, y, z-h)}{2h} \right]
+$$
+
+**Method 2: Average of Edge Central Differences**
+This method computes central differences at the vertices of the cube edges surrounding the sampling point and averages them [S1, unofficial]. This involves more complex neighbor lookups and arithmetic operations [S1, unofficial].
+
+Formula:
+Let $\mathbf{e}_1, \dots, \mathbf{e}_k$ be the vertices of the cube edges surrounding $\mathbf{p}$. Compute $\nabla f(\mathbf{e}_m)$ for each vertex using central differences, then:
+$$
+\nabla f(\mathbf{p}) \approx \frac{1}{k} \sum_{m=1}^{k} \nabla f(\mathbf{e}_m)
+$$
+*Note: The exact definition of "cube edges surrounding the sampling point" and the value of $k$ depends on the specific BCC indexing scheme used, but the source indicates this is computationally expensive [S1, unofficial].*
+
+**Evaluation Procedure:**
+1.  Generate analytical function values at BCC grid positions to avoid sampling errors [S1, unofficial].
+2.  Apply Method 1 and Method 2 to reconstruct gradients [S1, unofficial].
+3.  Compute the difference between reconstructed normals and analytically computed normals [S1, unofficial].
+4.  Record two error metrics:
+    *   Magnitude error: $| \|\mathbf{n}_{reconstructed}\| - \|\mathbf{n}_{analytical}\| |$
+    *   Angular error: $\arccos( \mathbf{n}_{reconstructed} \cdot \mathbf{n}_{analytical} )$ [S1, unofficial].
+5.  Analyze errors in xy-slices (constant z) [S1, unofficial].
+6.  Compare against central differences and linear filtering on regular rectilinear grids [S1, unofficial].
+
+**Parameters and Visual Error Mapping:**
+Error visualization uses a white (255) mapping for specific thresholds [S1, unofficial]:
+*   **Spherical function:** 15 degrees angular error, 30% amplitude error [S1, unofficial].
+*   **Sinc function:** 30 degrees angular error, 60% amplitude error [S1, unofficial].
+*   **Simplified Marschner-Lobb function:** 5 degrees angular error, 10% amplitude error [S1, unofficial].
+
+**Pitfalls:**
+*   **Method 2 Complexity:** Method 2 involves expensive operations (averaging central differences at cube edge vertices) [S1, unofficial].
+*   **Justification:** There are no large differences in quality between Method 1 and Method 2, making Method 2 unjustified due to its computational cost [S1, unofficial].
+*   **Boundary Conditions:** The source does not specify boundary handling for central differences on finite BCC grids [G]. Implementers should clamp indices or use one-sided differences at boundaries.
+
+## Subtopics
+
+### Interpolated SDF Gradient Calculation
+Computes gradients from Signed Distance Functions, often using trilinear interpolation of the SDF itself. Choose when smooth, continuous distance fields are available. [Link](12389-interpolated-sdf-gradient-calculation.md)
+
+## Operating characteristics
+*   **Time Complexity:** Method 1 is $O(1)$ per sample, requiring 6 neighbor lookups. Method 2 is $O(1)$ but with a higher constant factor due to averaging multiple gradient estimates [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory per sample.
+*   **Measured Performance:** Both methods are comparable in quality to central differencing and linear interpolation on regular Cartesian grids [S1, unofficial]. No significant quality loss is observed when using BCC grids compared to Cartesian grids for volume rendering [S1, unofficial].
+*   **Strengths:** Simple implementation (Method 1); maintains gradient quality comparable to standard Cartesian grids [S1, unofficial].
+*   **Limitations:** Method 2 is computationally expensive without quality gain [S1, unofficial]. BCC grids may introduce blurring in splatting compared to Cartesian grids for demanding datasets [S1, unofficial].
+*   **When to use:** Use Method 1 for gradient estimation on BCC grids. Avoid Method 2.
+*   **When not to use:** Do not use Method 2 if performance is a concern.
+
+## Background
+The method originates from research on volume rendering using Body-Centered Cubic (BCC) grids, specifically evaluating gradient reconstruction schemes for this lattice type [S1, unofficial]. The work compares BCC-based gradient estimation against standard Cartesian central differences and linear filtering [S1, unofficial]. The study concludes that BCC grids do not suffer from significant quality loss in gradient estimation compared to regular grids, supporting their use in volume rendering applications [S1, unofficial].
+
+## Sources
+[S1] Results, https://www.cg.tuwien.ac.at/research/vis/VolVis/BccGrids/ORVS/html/node5.htm, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,210 @@
+--- v005.md
++++ v006.md
+@@ -22,5 +22,5 @@
+ 
+ 1.  **Render Point Cloud:** Render the object's point cloud from all training views to obtain point locations $p = (x, y, z)$ [S1, unofficial].
+-2.  **Compute Normals:** Estimate the normal $\bar{n}$ for each point. Two methods are described:
++2.  **Compute Normals:** Estimate the normal $\bar{n}$ for each point using one of two methods [S1, unofficial]:
+     *   *Rasterization Locality:* For a point $p$, identify its horizontal screen-space neighbor $p_x$ and vertical neighbor $p_y$. Compute the normal as:
+         $$ \bar{n} = \frac{(p - p_x) \times (p - p_y)}{\|(p - p_x) \times (p - p_y)\|} $$
+@@ -43,128 +43,92 @@
+ ```python
+ import numpy as np
++from scipy.sparse import csr_matrix
++from scipy.sparse.linalg import spsolve
+ 
+ def poisson_mesh_export(gaussians, training_views, depth=12, epsilon=0.9, laplacian_iters=5):
+-    """
+-    Export a watertight mesh from 3D Gaussians using Poisson Surface Reconstruction.
+-    """
+-    positions = []
+-    normals = []
+-    colors = []
++    # Step 1: Render point cloud from training views
++    positions, colors = [], []
++    for view in training_views:
++        # Standard differentiable rasterization: project Gaussians, sample centers, get colors
++        pts, cols = rasterize_gaussians(gaussians, view)
++        positions.extend(pts)
++        colors.extend(cols)
++    positions, colors = np.array(positions), np.array(colors)
+ 
+-    # Step 1 & 2 & 3: Render points, compute normals, and filter
+-    for view in training_views:
+-        points, view_colors = render_point_cloud(gaussians, view)
+-        for i, p in enumerate(points):
+-            # Compute normal using Gaussian blending (preferred for view consistency)
+-            normal = compute_normals_gaussian(p, view, gaussians)
+-            
+-            # Quality filtering
+-            max_weight = get_max_gaussian_weight(p, view, gaussians)
+-            if max_weight <= epsilon:
+-                continue
+-                
+-            positions.append(p)
+-            normals.append(normal)
+-            colors.append(view_colors[i])
++    # Step 2: Compute normals
++    normals = compute_normals(positions, gaussians, training_views)
+ 
+-    if len(positions) == 0:
+-        return None
++    # Step 3: Quality filtering
++    weights = compute_max_weights(positions, gaussians, training_views)
++    valid_mask = weights > epsilon
++    positions, normals, colors = positions[valid_mask], normals[valid_mask], colors[valid_mask]
++    if len(positions) == 0: return None
+ 
+-    # Step 4: Solve Poisson Equation via sparse linear system
+-    mesh, densities = solve_poisson_sparse_system(positions, normals, depth)
++    # Step 4: Solve Poisson equation
++    # Constructs sparse linear system from oriented point cloud, solves with Dirichlet BCs
++    mesh, densities = solve_poisson_system(positions, normals, depth)
+ 
+-    # Step 5: Density Culling
++    # Step 5: Density culling
+     threshold = np.quantile(densities, 0.1)
+-    vertices_to_remove = densities < threshold
+-    mesh = remove_vertices_by_mask(mesh, vertices_to_remove)
++    remove_mask = densities < threshold
++    mesh = remove_vertices(mesh, remove_mask)
+ 
+-    # Step 6: Laplacian Smoothing
+-    mesh = laplacian_smooth_mesh(mesh, laplacian_iters)
++    # Step 6: Laplacian smoothing
++    mesh = laplacian_smooth(mesh, laplacian_iters)
+     mesh = compute_vertex_normals(mesh)
+-
+     return mesh
+ 
+-def render_point_cloud(gaussians, view):
+-    """
+-    Rasterize the implicit representation from a training view to get point locations and colors.
+-    Returns arrays of shape (N, 3) for positions and colors.
+-    """
+-    # Standard differentiable rasterization pipeline
+-    # Projects 3D Gaussians to screen space, samples centers, and retrieves colors
++def rasterize_gaussians(gaussians, view):
++    # Not given in the sources. Standard rasterization projects 3D Gaussians to screen space.
+     return np.empty((0, 3)), np.empty((0, 3))
+ 
+-def compute_normals_gaussian(point, view, gaussians):
+-    """
+-    Compute normal via alpha compositing of local Gaussian estimates.
+-    """
+-    contributing = get_contributing_gaussians(point, view, gaussians)
+-    if not contributing:
+-        return np.array([0.0, 0.0, 1.0]) # Fallback normal
++def compute_normals(positions, gaussians, views):
++    normals = []
++    for p in positions:
++        # Gaussian blending (preferred for view consistency)
++        contributing = get_contributing_gaussians(p, views)
++        if not contributing:
++            normals.append(np.array([0.0, 0.0, 1.0]))
++            continue
++        sorted_gs = sorted(contributing, key=lambda g: np.linalg.norm(g.center - views[0].origin))
++        blended = np.zeros(3)
++        total_alpha = 0.0
++        for g in sorted_gs:
++            v = views[0].direction
++            t_i = g.center_in_view_space
++            mu_i = g.mean
++            Sigma_inv = np.linalg.inv(g.covariance)
++            local_vec = np.dot(Sigma_inv, np.dot(v, t_i) - mu_i)
++            local_n = local_vec / np.linalg.norm(local_vec)
++            alpha = g.alpha
++            w = alpha * (1.0 - total_alpha)
++            blended = blended * (1.0 - w) + local_n * w
++            total_alpha += w
++            if total_alpha > 0.99: break
++        normals.append(blended / np.linalg.norm(blended))
++    return np.array(normals)
+ 
+-    total_alpha = 0.0
+-    blended_normal = np.array([0.0, 0.0, 0.0])
+-    
+-    # Sort by depth (front to back)
+-    sorted_gaussians = sort_by_depth(contributing, view)
+-    
+-    for g in sorted_gaussians:
+-        # Local normal estimate: n_i = Σ⁻¹(vt_i - μ_i) / ||...||
+-        v = view.direction
+-        t_i = g.center_in_view_space
+-        mu_i = g.mean
+-        Sigma_inv = np.linalg.inv(g.covariance)
+-        
+-        vec = np.dot(v, t_i) - mu_i
+-        local_normal_vec = np.dot(Sigma_inv, vec)
+-        local_normal = local_normal_vec / np.linalg.norm(local_normal_vec)
+-        
+-        # Alpha compositing
+-        alpha = g.alpha
+-        weight = alpha * (1.0 - total_alpha)
+-        blended_normal = blended_normal * (1.0 - weight) + local_normal * weight
+-        total_alpha += weight
+-        
+-        if total_alpha > 0.99:
+-            break
+-            
+-    return blended_normal / np.linalg.norm(blended_normal)
++def get_contributing_gaussians(point, views):
++    # Not given in the sources. Returns Gaussians projecting to the screen point.
++    return []
+ 
+-def get_max_gaussian_weight(point, view, gaussians):
+-    """
+-    Returns the maximum weight w_i of Gaussians contributing to the point.
+-    """
+-    contributing = get_contributing_gaussians(point, view, gaussians)
+-    if not contributing:
+-        return 0.0
+-    return max(g.weight for g in contributing)
++def compute_max_weights(positions, gaussians, views):
++    # Not given in the sources. Returns max weight w_i for each point.
++    return np.ones(len(positions))
+ 
+-def solve_poisson_sparse_system(positions, normals, depth):
+-    """
+-    Solves ∇·∇χ = ∇·V using a well-conditioned sparse linear system with Dirichlet boundary constraints.
+-    Returns a mesh object and an array of vertex densities.
+-    """
+-    # Constructs sparse matrix A and vector b from oriented point cloud
+-    # Solves Ax = b via conjugate gradient or direct sparse solver
+-    # Extracts mesh from indicator function level set
++def solve_poisson_system(positions, normals, depth):
++    # Not given in the sources. Solves ∇·∇χ = ∇·V via well-conditioned sparse linear system.
+     return None, np.array([])
+ 
+-def sort_by_depth(gaussians, view):
+-    """Sorts Gaussians by their distance to the camera."""
+-    return sorted(gaussians, key=lambda g: np.linalg.norm(g.center_in_view_space - view.origin))
+-
+-def get_contributing_gaussians(point, view, gaussians):
+-    """Returns list of Gaussians that project to the given screen point."""
+-    return [] # Placeholder for rasterization contribution logic
+-
+-def remove_vertices_by_mask(mesh, mask):
+-    """Removes vertices where mask is True."""
++def remove_vertices(mesh, mask):
++    # Not given in the sources. Removes vertices where mask is True.
+     return mesh
+ 
+-def laplacian_smooth_mesh(mesh, iterations):
+-    """Applies Laplacian smoothing to mesh vertices."""
++def laplacian_smooth(mesh, iterations):
++    # Not given in the sources. Applies Laplacian smoothing to mesh vertices.
+     return mesh
+ 
+ def compute_vertex_normals(mesh):
+-    """Computes per-vertex normals from face normals."""
++    # Not given in the sources. Computes per-vertex normals from face normals.
+     return mesh
+ ```
+@@ -186,5 +150,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Solving the Poisson equation involves sparse linear systems, which are generally efficient but scale with the number of points in the oriented point cloud [S1, unofficial].
+-*   **Memory Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources. [G]
+ *   **Strengths:** Produces watertight meshes and handles genus changes, which marching cubes cannot guarantee [S1, unofficial]. It does not require searching for an ideal level-set threshold [S1, unofficial].
+ *   **Limitations:** Rasterization locality normal estimation produces poor results on discontinuities [S1, unofficial]. Deeper Poisson tree depths amplify noise and artifacts [S1, unofficial]. The method is sensitive to hyperparameters like tree depth and weight thresholds [S4].

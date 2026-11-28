@@ -1,0 +1,98 @@
+# Surface Peeling
+
+Also called: Peeling Buffer
+
+## Overview
+Surface peeling is an interaction technique that exposes internal volumetric structures by skipping the first $N$ intersection points along rays within specific image plane regions, known as peeling windows [S1, unofficial]. Unlike view-independent methods such as [Brain Peeling](13890-brain-peeling.md) which rely on precomputed distance fields, surface peeling is view-dependent and operates by accumulating intersection counts against a per-pixel threshold, allowing users to interactively select which occluded layer to visualize [S1, unofficial]. It builds on [Isosurface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md), utilizing the computed intersection positions and normals for shading and selection [G].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A volume dataset, an isosurface value, a camera view, and a set of peeling windows defined on the image plane [S1, unofficial].
+*   **Output:** A rendered image where internal layers are visible in the peeling windows, while the rest of the image shows the outermost surface [S1, unofficial].
+
+**Data Structures**
+*   **Peeling Buffer:** An integer array initialized to 0, where each element corresponds to a pixel or region in the image plane [S1, unofficial]. The value stored at each index represents the number of intersection layers to skip for that pixel [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Initialize Buffer:** Create the peeling buffer and set all elements to 0 [S1, unofficial].
+2.  **Define Peeling Windows:** Identify regions on the image plane where peeling should occur [S1, unofficial]. Within each window, increment the corresponding buffer value by 1 for each layer the user wishes to expose [S1, unofficial].
+3.  **Ray Traversal and Intersection Counting:** For each pixel in the image plane, cast a ray through the volume and perform a ray-isosurface intersection search to find all intersection points along the ray [S1, unofficial]. Count the total number of intersections found for that ray [S1, unofficial].
+4.  **Peeling Decision:** For each intersection point ordered from near to far along the ray, compare its 1-based index $k$ against the peeling threshold $T$ stored in the buffer for that pixel [S1, unofficial]. If $k \le T$, skip the intersection and do not render it [S1, unofficial]. If $k > T$, render the intersection using standard isosurface shading techniques [G].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def surface_peeling(volume, camera, peeling_windows):
+    # 1. Initialize Peeling Buffer
+    width, height = camera.image_size
+    peeling_buffer = [[0 for _ in range(width)] for _ in range(height)]
+    
+    # 2. Define Peeling Windows
+    # Increment buffer values for pixels in specified windows
+    for window in peeling_windows:
+        for y in range(window.y_min, window.y_max):
+            for x in range(window.x_min, window.x_max):
+                peeling_buffer[y][x] += 1
+                
+    # 3. Render Image
+    image = [[0 for _ in range(width)] for _ in range(height)]
+    
+    for y in range(height):
+        for x in range(width):
+            ray = camera.cast_ray(x, y)
+            # Standard ray-casting step to find all isosurface intersections along the ray [G]
+            intersections = trace_volume_for_intersections(volume, ray)
+            
+            # Sort intersections by distance from ray origin (near to far)
+            intersections.sort(key=lambda p: p.distance)
+            
+            threshold = peeling_buffer[y][x]
+            
+            for k, point in enumerate(intersections):
+                # k is 0-based index; intersection number is k+1
+                intersection_number = k + 1
+                
+                # 4. Peeling Decision
+                if intersection_number <= threshold:
+                    continue # Skip this layer
+                
+                # Render the first visible layer after peeling
+                # Standard shading step to compute color from intersection point and volume [G]
+                color = compute_shading(point, volume)
+                image[y][x] = color
+                break # Stop after rendering the first visible surface
+                
+    return image
+
+def trace_volume_for_intersections(volume, ray):
+    # Standard ray-casting step to find all isosurface intersections along the ray [G]
+    return []
+
+def compute_shading(point, volume):
+    # Standard shading step to compute color from intersection point and volume [G]
+    return [0.0, 0.0, 0.0]
+```
+
+**Parameters and Edge Cases**
+*   **Peeling Value:** The number of layers to skip [S1, unofficial]. A value of 0 renders the outermost surface [S1, unofficial]. A value of 1 skips the outermost and renders the second layer [S1, unofficial].
+*   **Precision:** Accurate ray-traversal and ray-isosurface intersection search are critical to identify the exact intersecting voxel for each ray [S1, unofficial]. Inaccuracies may lead to incorrect layer identification [G].
+*   **Boundaries:** If the number of intersections along a ray is less than or equal to the peeling threshold, no surface is rendered for that pixel, potentially resulting in a transparent or background-colored pixel [S1, unofficial].
+
+## Subtopics
+
+### [Opacity Peeling](8428-opacity-peeling.md)
+Opacity peeling is an interaction technique that reveals internal volumetric structures by discarding the first $n$ layers of tissue along each ray before contributing to the final image. Unlike view-independent methods such as [Brain Peeling](13890-brain-peeling.md) which rely on precomputed distance fields, opacity peeling is view-dependent and operates by accumulating alpha values until specific thresholds are met, allowing users to interactively select which occluded layer to visualize. Choose this variant when volumetric transparency and alpha blending are required rather than discrete surface layer skipping [G].
+
+## Operating characteristics
+*   **Time Complexity:** The complexity is dominated by the ray traversal and intersection counting for each pixel [S1, unofficial]. Peeling adds a simple integer comparison per intersection, which is negligible compared to the intersection search itself [G].
+*   **Memory Complexity:** Requires an additional integer buffer where each element corresponds to a pixel or region in the image plane [S1, unofficial].
+*   **Strengths:** Provides intuitive, view-dependent exploration of internal structures without precomputing global distance fields [S1, unofficial]. Simple to implement on top of existing isosurface renderers [G].
+*   **Limitations:** Only exposes discrete layers and does not provide a smooth transition between layers [G]. Performance is similar to standard isosurface rendering, as all intersections must be found to count them accurately [S1, unofficial].
+*   **When to use:** When users need to quickly inspect specific internal layers of a volume without removing outer data physically or using complex clipping volumes [G].
+
+## Background
+Surface peeling was introduced as part of enhanced isosurface rendering techniques for efficient volume visualization [S1, unofficial]. It allows for brief exploration of internal structures by cropping and peeling, complementing standard cropping techniques that truncate the volume with a bounding box [S1, unofficial].
+
+## Sources
+[S1] Efficient and Effective Volume Visualization with Enhanced Isosurface Rendering, https://doi.org/10.48550/arxiv.1202.5360, fetched 2026-10-26 (unofficial)

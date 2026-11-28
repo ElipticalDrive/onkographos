@@ -1,0 +1,73 @@
+# MIP Scale Computation
+
+Also called: Gaussian Scale Factor Computation, MIP Scale
+
+## Overview
+Computes a per-Gaussian scale factor based on the Euclidean distance from the camera center and the camera's focal length, primarily used for anti-aliasing or level-of-detail adjustments in Gaussian splatting [S1, unofficial]. It differs from standard projected voxel size calculations by operating on parametric Gaussian primitives rather than volumetric voxels [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `viewpoint_camera`: Object containing `camera_center` (3D vector), `FoVx` (horizontal field of view), and `image_width` (pixel width) [S1, unofficial].
+- `pc`: Gaussian model object containing `get_xyz` (tensor of shape $[N, 3]$ representing Gaussian centers) [S1, unofficial].
+
+**Outputs:**
+- `scales`: Tensor of shape $[N, 1]$ containing the computed scale factor for each Gaussian [S1, unofficial].
+
+**Data Structures:**
+- `dist_pp`: Tensor of shape $[N, 1]$ storing Euclidean distances [S1, unofficial].
+- `focal`: Scalar value representing the focal length in pixels [S1, unofficial].
+
+**Steps:**
+1. Calculate the Euclidean distance from the camera center to each Gaussian center: $\text{dist\_pp}_i = \| \mathbf{p}_i - \mathbf{c} \|$ [S1, unofficial].
+2. Convert the horizontal field of view ($\text{FoV}_x$) and image width ($W$) to focal length ($f$) using a helper function [S1, unofficial].
+3. Compute the scale factor by dividing the distance by the focal length: $s_i = \frac{\text{dist\_pp}_i}{f}$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import math
+
+def fov2focal(fov, width):
+    """Convert horizontal field of view to focal length in pixels."""
+    return width / (2 * math.tan(fov / 2))
+
+def mip_scales(viewpoint_camera, pc):
+    """
+    Compute MIP scales for Gaussian splatting.
+    
+    Args:
+        viewpoint_camera: Object with attributes camera_center, FoVx, image_width.
+        pc: GaussianModel object with attribute get_xyz (tensor [N, 3]).
+        
+    Returns:
+        scales: Tensor [N, 1] of scale factors.
+    """
+    xyz = pc.get_xyz
+    camera_center = viewpoint_camera.camera_center
+    camera_center_expanded = camera_center.repeat(xyz.shape[0], 1)
+    dist_pp = torch.norm(xyz - camera_center_expanded, dim=1, keepdim=True)
+    focal = fov2focal(viewpoint_camera.FoVx, viewpoint_camera.image_width)
+    return dist_pp / focal
+```
+
+**Edge Cases and Pitfalls:**
+- **Zero Distance:** If a Gaussian center coincides with the camera center, the distance is zero, resulting in a scale of zero [G].
+- **FOV Units:** The `fov2focal` function assumes radians [G].
+- **Focal Length Zero:** If `FoVx` is 0, `tan(0)` is 0, leading to division by zero [G].
+
+## Subtopics
+
+### Mip-Splatting Renderer V2
+This variant retrieves pre-filtered 3D scales and opacities directly from the Gaussian model via `get_3d_filtered_scales_and_opacities()` rather than computing scale from camera distance alone [S2, unofficial]. It returns the squeezed scales and opacities [S2, unofficial]. It introduces a parameter `filter_2d_kernel_size: float = 0.1` [S2, unofficial]. Unlike the standard method, it may ignore standard opacity calculation in certain status returns, returning `None` for opacity in specific paths [S2, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The method originates from the Gaussian Splatting literature, specifically implementations dealing with multi-resolution pyramid (MIP) rendering to reduce aliasing [S1, unofficial].
+
+## Sources
+[S1] Fictionarry/DNGaussian, https://github.com/Fictionarry/DNGaussian, fetched 2026-10-27 (unofficial)
+[S2] yzslab/gaussian-splatting-lightning, https://github.com/yzslab/gaussian-splatting-lightning, fetched 2026-10-27 (unofficial)

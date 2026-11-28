@@ -1,0 +1,114 @@
+# VCP Ray-Casting Algorithm
+Also called: Vector-to-Closest-Point Ray Casting
+
+## Overview
+The VCP Ray-Casting Algorithm renders a smooth surface approximation from a dense point cloud by storing vector-valued data in a grid structure, rather than rendering discrete points or scalar distance fields directly [S1, unofficial]. It solves the problem of noisy rendering caused by sensor noise and calibration errors in real-world LiDAR data, where points do not strictly lie on the scene surface [S2]. Unlike standard closest-point ray casting which selects the single nearest point (z-buffer), VCP uses the length of an interpolated vector to determine step sizes and the vector direction as the surface normal, allowing for adaptive marching and smooth shading [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A VCP grid where each block stores either a scalar distance $d_{empty}$ (empty block) or a 3D vector $\vec{V}$ (non-empty block) [S1, unofficial].
+*   **Input:** Camera ray $r(t) = \mathbf{o} + t\mathbf{d}$ and threshold $\epsilon > 0$ [S1, unofficial].
+*   **Output:** Pixel color and surface normal at the intersection point [S1, unofficial].
+
+**Data Structures**
+The VCP grid stores per block:
+1.  **Empty Block:** Stores a scalar distance $d_{empty}$ representing the distance from the block center to the nearest surface point [S1, unofficial].
+2.  **Non-Empty Block:** Stores a 3D vector $\vec{V} = (V_x, V_y, V_z)$ pointing from the block center to the closest surface point; its length $|\vec{V}|$ is the distance to the surface [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Ray-AABB Intersection:** Compute entry $t_{near}$ and exit $t_{far}$ where the ray intersects the volume bounding box [S1, unofficial].
+2.  **Adaptive Marching:** Initialize $t = t_{near}$. At each sampling position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$, query the grid. If the block is empty, read $d = d_{empty}$. If non-empty, interpolate $\vec{V}$ from neighboring blocks and compute $d = |\vec{V}|$ [S1, unofficial].
+3.  **Step & Termination:** If $d < \epsilon$, assume a ray-surface intersection. Otherwise, use $d$ as the step size $\Delta t = d / |\mathbf{d}|$ (assuming unit direction, $\Delta t = d$) and advance $t \leftarrow t + \Delta t$ [S1, unofficial].
+4.  **Intersection Refinement:** When $d < \epsilon$, interpolate linearly between the previous sampling position $\mathbf{p}_{prev}$ (where distance was $d_{prev} \ge \epsilon$) and the current position $\mathbf{p}_{curr}$ to find $\mathbf{p}_{hit}$ where the distance equals exactly $\epsilon$ [S1, unofficial].
+5.  **Normal & Lighting:** The surface normal $\mathbf{n}$ at $\mathbf{p}_{hit}$ is the normalized interpolated VCP vector $\vec{V} / |\vec{V}|$. Evaluate a local lighting model using $\mathbf{n}$ to compute the final pixel color [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def vcp_ray_casting(ray_origin, ray_dir, vcp_grid, epsilon):
+    # 1. Intersect ray with AABB [G]
+    t_near, t_far = intersect_aabb(ray_origin, ray_dir, vcp_grid.bbox_min, vcp_grid.bbox_max)
+    if t_near > t_far:
+        return None
+
+    t = t_near
+    p_prev = add(ray_origin, scale(ray_dir, t))
+    d_prev, v_prev = sample_vcp_grid(p_prev, vcp_grid)
+
+    while t < t_far:
+        p_curr = add(ray_origin, scale(ray_dir, t))
+        d_curr, v_curr = sample_vcp_grid(p_curr, vcp_grid)
+
+        if d_curr < epsilon:
+            # 4. Refine intersection [S1, unofficial]
+            if d_prev == d_curr:
+                p_hit = p_curr
+            else:
+                lam = (d_prev - epsilon) / (d_prev - d_curr)
+                p_hit = add(p_prev, scale(sub(p_curr, p_prev), lam))
+            # Normal is normalized VCP vector at hit point [S1, unofficial]
+            _, v_hit = sample_vcp_grid(p_hit, vcp_grid)
+            normal = normalize(v_hit)
+            # Lighting model [G]
+            light_dir = normalize(vec(0.0, 1.0, 0.0))
+            color = max(0.0, dot(normal, light_dir))
+            return color
+
+        # 3. Advance using distance as step size [S1, unofficial]
+        step = d_curr
+        p_prev = p_curr
+        d_prev = d_curr
+        t += step
+
+    return None
+
+# Helper functions [G]
+def intersect_aabb(origin, direction, bbox_min, bbox_max):
+    t_min = sub(bbox_min, origin) / direction
+    t_max = sub(bbox_max, origin) / direction
+    t1 = comp_min(t_min, t_max)
+    t2 = comp_max(t_min, t_max)
+    return max(t1), min(t2)
+
+def sample_vcp_grid(p, grid):
+    # Query block containing p. If empty, return scalar distance d_empty.
+    # If non-empty, return length |V| and vector V from trilinear interpolation. [S1, unofficial]
+    # Grid traversal details depend on sparse/uniform layout [G]
+    pass # The sources do not specify the exact block lookup or interpolation implementation.
+
+def vec(x, y, z): return (x, y, z)
+def add(a, b): return (a[0]+b[0], a[1]+b[1], a[2]+b[2])
+def sub(a, b): return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
+def scale(v, s): return (v[0]*s, v[1]*s, v[2]*s)
+def dot(a, b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+def norm(v): return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+def normalize(v): n = norm(v); return (v[0]/n, v[1]/n, v[2]/n)
+def comp_min(a, b): return tuple(min(x, y) for x, y in zip(a, b))
+def comp_max(a, b): return tuple(max(x, y) for x, y in zip(a, b))
+def max(a, b): return a if a > b else b
+def min(a, b): return a if a < b else b
+```
+
+**Parameters**
+*   $\epsilon$: Threshold for surface intersection. Decreasing $\epsilon$ allows the rendered surface to come arbitrarily close to the exact surface [S1, unofficial]. Typical value: Not given in the sources.
+
+## Subtopics
+
+### First Peak Averaging (FPA) Raycasting
+FPA is a variant used in LiDAR rendering (e.g., PCGen) to handle noise where points do not strictly lie on the surface [S2]. Instead of selecting the single closest point (standard CP ray-casting), FPA averages multiple points within a certain distance threshold near the closest point, weighting them by their inverse distance [S2]. This reduces noise in the rendered range image [S2]. It is often combined with a Ray-drop MLP to model return probability $p = MLP(\theta', d, i)$, where $\theta'$ is the viewing direction, $d$ is distance, and $i$ is intensity [S2]. The MLP has 4 layers, width 128, trained with Adam (lr 5e-3) for 10k iterations [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the density of the point cloud and the step size; adaptive stepping can skip empty space, potentially speeding up rendering compared to fixed-step ray casting [S1, unofficial].
+*   **Memory Complexity:** Requires storing the VCP grid [S1, unofficial].
+*   **Strengths:** Produces smooth surfaces from noisy point clouds; provides explicit surface normals for lighting; adaptive stepping allows efficient traversal of empty space [S1, unofficial].
+*   **Limitations:** Accuracy depends on the choice of $\epsilon$ [S1, unofficial].
+*   **When to use:** When rendering surfaces from dense, noisy LiDAR point clouds where smooth shading and normals are required [S1, unofficial][S2].
+*   **When not to use:** Not given in the sources.
+
+## Background
+The VCP (Vector-to-Closest-Point) method was introduced in the paper "Vector-to-Closest-Point Octree for Surface Ray-Casting" [S1, unofficial]. It addresses the limitations of standard closest-point ray casting, which is sensitive to noise and produces jagged surfaces [S1, unofficial]. The method uses a grid structure to store vector data, allowing for efficient ray traversal and smooth surface reconstruction [S1, unofficial]. It has been applied in computer graphics for surface rendering from point clouds [S1, unofficial].
+
+## Sources
+[S1] Vector-to-Closest-Point Octree for Surface Ray-Casting, https://doi.org/10.2312/vmv.20151259, fetched 2026-10-26 (unofficial)
+[S2] LiDAR-NeRF: Novel LiDAR View Synthesis via Neural Radiance Fields, https://arxiv.org/abs/2304.10406v2, fetched 2026-10-26

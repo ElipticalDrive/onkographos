@@ -1,0 +1,82 @@
+# Learnable Point Light Optimization
+
+Also called: Light Source Optimization, Light source location optimization, Point Light Source Optimization
+
+## Overview
+Learnable Point Light Optimization is a test-time photometric optimization method that adjusts the 3D position and intensity of a point light source to match a target rendered image using only image-space supervision [S1, S2]. It differs from sibling methods like Inverse Manipulation by focusing specifically on optimizing the geometric properties (location) and intensity of a single point light source rather than inverting complex material or lighting distributions [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A target image $I_{target}$, a differentiable global illumination framework (e.g., Gaussian Surfels or neural radiance fields), an initial estimate of the light source location, and a rigid capture setup assumption where the camera and light positions are fixed relative to each other [S1, S2].
+*   **Outputs:** Optimized light source location (relative offset $\Delta_o$) and intensity $L$ [S1, S2].
+
+**Data Structures:**
+*   **Light Parameters:** A learnable relative offset vector $\Delta_o$ and a learnable scalar intensity $L$ [S2].
+*   **Scene Representation:** The scene geometry and material properties are represented by the underlying differentiable renderer (e.g., Gaussian Surfels with BRDF parameters $\Theta_d, \Theta_s, \Theta_r$) [S2].
+
+**Steps:**
+1.  **Initialize:** Set the initial light source location and intensity. Define the relative offset $\Delta_o$ as a learnable parameter [S1, S2].
+2.  **Render:** Compute the rendered image $I_{rendered}$ using the differentiable global illumination framework. The incident light direction $w_i(x)$ and intensity $L_i(w_i; x)$ for a surface point $x$ are calculated as [S2]:
+    $$ w_i(x) = \frac{(o + \Delta_o) - x}{\|(o + \Delta_o) - x\|} $$
+    $$ L_i(w_i; x) = \frac{L}{\|(o + \Delta_o) - x\|^2} $$
+    where $o$ is the camera center [S2].
+3.  **Visibility:** Compute visibility $f_v(w_i; x)$ to handle self-shadows. Sample $N$ points along the direction from $x$ to the light. Let $\alpha_j$ be the discrete opacity value at sample $j$. The visibility is [S2]:
+    $$ f_v(w_i; x) = 1 - \sum_{j=1}^{N} \alpha_j \prod_{k=1}^{j-1} (1 - \alpha_k) $$
+    This computation is performed online to allow joint optimization of geometry and light position [S2].
+4.  **Loss:** Calculate the L1 loss between the rendered image and the target image in image space [S1]:
+    $$ \mathcal{L} = \| I_{rendered} - I_{target} \|_1 $$
+5.  **Optimize:** Update the light source location (via $\Delta_o$) and intensity $L$ via gradient descent [S1, S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimize_point_light(scene, target_image, camera_center, initial_offset, initial_intensity, num_samples=100, learning_rate=0.01, num_iterations=1000):
+    # Initialize learnable parameters
+    delta_o = torch.nn.Parameter(torch.tensor(initial_offset, dtype=torch.float32, requires_grad=True))
+    L = torch.nn.Parameter(torch.tensor(initial_intensity, dtype=torch.float32, requires_grad=True))
+    
+    optimizer = torch.optim.Adam([delta_o, L], lr=learning_rate)
+    
+    for i in range(num_iterations):
+        optimizer.zero_grad()
+        
+        # Calculate light direction and intensity for each surface point x
+        # Note: In practice, this is done via the differentiable renderer's forward pass
+        # Light position = camera_center + delta_o
+        light_pos = camera_center + delta_o
+        
+        # Render the scene with current light parameters
+        # The renderer handles visibility computation and shading
+        rendered_image = scene.render(light_pos=light_pos, intensity=L)
+        
+        # Compute L1 loss
+        loss = torch.mean(torch.abs(rendered_image - target_image))
+        
+        # Backpropagate and update
+        loss.backward()
+        optimizer.step()
+        
+    return delta_o.detach(), L.detach()
+```
+
+**Edge Cases and Pitfalls:**
+*   **Rigid Setup Assumption:** The method assumes the relative positions of the camera and point lights are fixed across images. If this assumption is violated, optimization may fail [S2].
+*   **Visibility Sampling:** The number of samples $N$ for visibility computation affects accuracy and performance. Too few samples may lead to inaccurate shadows; too many increase computational cost [S2].
+*   **Local Minima:** Gradient descent may converge to local minima, especially if the initial light position is far from the true position [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The time cost of calculating light transport roughly increases linearly with the number of primitives in the scene [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Demonstrated on the "MaterialBalls" scene from the RenderCapture dataset [S1]. The method can effectively specify material attributes and achieve competitive results with as few as 5 different lighting conditions compared to a full setup with 50 conditions [S1].
+*   **Strengths:** Simple setup, differentiable, handles self-shadows [S1, S2].
+*   **Limitations:** Assumes rigid capture setup, single point light source [S1, S2].
+
+## Background
+*   **Origin:** The method is part of differentiable light transport frameworks, specifically demonstrated in the context of Gaussian Surfels [S1] and Photometric Inverse Rendering (PIR) [S2].
+*   **History:** The concept of optimizing light source locations using image-space supervision has been explored in various forms, with recent work focusing on differentiable rendering for efficient relighting and geometry reconstruction [S1, S2].
+*   **Usage:** Used in inverse rendering tasks where the goal is to match a target image by adjusting lighting parameters [S1, S2].
+
+## Sources
+[S1] Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction, https://doi.org/10.1145/3763305, fetched 2026-10-27
+[S2] PIR: Photometric Inverse Rendering with Shading Cues Modeling and Surface Reflectance Regularization, https://doi.org/10.1109/3dv66043.2025.00055, fetched 2026-10-26

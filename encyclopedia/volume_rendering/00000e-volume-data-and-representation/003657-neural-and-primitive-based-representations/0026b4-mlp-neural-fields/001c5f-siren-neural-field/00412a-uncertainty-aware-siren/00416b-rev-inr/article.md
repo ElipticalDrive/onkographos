@@ -1,0 +1,55 @@
+# REV-INR
+
+
+## Overview
+REV-INR is an uncertainty-aware implicit neural representation method that replaces deep ensembles of SIREN models with a single SIREN network to estimate both epistemic and aleatoric uncertainty [S1, unofficial]. It solves the high storage and computational costs associated with ensemble-based uncertainty quantification in neural fields by providing closed-form uncertainty estimates in a single forward pass [S1, unofficial]. Unlike deterministic INRs that output only point estimates, or ensembles that require multiple forward passes, REV-INR outputs distribution parameters directly, offering a trade-off of increased training time for inference speeds comparable to deterministic models [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Spatial coordinates $\mathbf{x} \in \mathbb{R}^3$.
+*   **Output:** Four scalar parameters representing a Normal Inverse-Gamma (NIG) distribution: the mean $\mu$, the precision scaling factor $\lambda$, the shape parameter $\alpha$, and the scale parameter $\beta$ [S1, unofficial].
+
+**Data Structures:**
+The network is a SIREN (Sinusoidal Representation Network) [S1, unofficial]. The final layer differs from standard SIRENs by having an output dimension of 4 instead of 1 [S1, unofficial]. No additional data structures are required beyond the standard network weights [G].
+
+**Algorithm Steps:**
+1.  **Network Architecture:** Construct a SIREN where all hidden layers use sinusoidal activation functions $\sin(\omega_0 \mathbf{W}\mathbf{x} + \mathbf{b})$ [S1, unofficial]. The final layer is a linear transformation that maps the hidden representation to a 4-dimensional vector $[\mu, \lambda, \alpha, \beta]$ [S1, unofficial].
+2.  **Forward Pass:** For a given input coordinate $\mathbf{x}$, compute the four parameters $\mu, \lambda, \alpha, \beta$ in a single forward pass [S1, unofficial].
+3.  **Uncertainty Estimation:** The predicted value is the mean $\mu$ [G]. The epistemic uncertainty (model uncertainty) and aleatoric uncertainty (data noise) are derived from the NIG distribution parameters [S1, unofficial]. The NIG distribution serves as a conjugate prior for the Gaussian likelihood, allowing closed-form calculation of predictive variance [G].
+4.  **Regularization Losses:** During training, apply two novel regularization losses in addition to the standard reconstruction loss:
+    *   **Epistemic Regularization:** Aligns the epistemic uncertainty with the prediction error [S1, unofficial]. This encourages the model to express higher uncertainty in regions where it makes large errors [S1, unofficial].
+    *   **Aleatoric Regularization:** Aligns the aleatoric uncertainty with the local gradient magnitude of the field [S1, unofficial].
+5.  **Training:** Optimize the network weights and NIG parameters using the combined loss function [S1, unofficial]. Note that this process takes 2–3× longer than training a deterministic INR due to the complexity of the evidential loss computation [S1, unofficial].
+
+**Formulas:**
+Let the output parameters be $\mu, \lambda, \alpha, \beta$ [S1, unofficial]. The predictive distribution is a Student's t-distribution (marginal of the NIG-Gaussian hierarchy) [G]. The variance (uncertainty) can be computed in closed form from these parameters [S1, unofficial]. Specific mathematical formulations for the regularization terms are not detailed in the source, but they enforce correlations between uncertainty metrics and error/gradient metrics respectively [S1, unofficial].
+
+**Parameters:**
+*   **Network Depth/Width:** Not given in the sources [S1, unofficial].
+*   **SIREN Frequency $\omega_0$:** Not given in the sources [S1, unofficial].
+*   **Loss Weights:** Not given in the sources [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Training Time:** Training is significantly slower (2–3×) compared to deterministic INRs [S1, unofficial].
+*   **Storage:** While better than ensembles, it requires storing four output channels instead of one [S1, unofficial].
+*   **Precision:** The source does not specify numerical stability issues with the NIG parameter estimation [S1, unofficial].
+
+## Subtopics
+
+### [E-SCRNet](12890-e-scrnet.md)
+E-SCRNet is a scene coordinate regression (SCR) network that utilizes deep evidential learning to predict 3D scene coordinates along with the hyperparameters of a Normal Inverse-Gamma (NIG) distribution, enabling closed-form estimation of epistemic uncertainty without sampling. Unlike standard regression networks that output point estimates, E-SCRNet models the uncertainty of predictions to evaluate information gain for novel view selection and to filter unreliable correspondences in downstream tasks like RANSAC-PnP. It builds on [REV-INR](10472-rev-inr.md) by applying similar evidential principles specifically to the coordinate regression task within a pipeline that augments training data using uncertainty-aware NeRF synthesis.
+
+## Operating characteristics
+*   **Time Complexity:** Inference is a single forward pass, comparable to a deterministic INR [S1, unofficial]. Training takes 2–3× longer than deterministic INRs due to evidential loss computation [S1, unofficial].
+*   **Memory Complexity:** Storage cost is significantly lower than deep ensembles (which require 10× the storage for 10 models) [S1, unofficial]. Exact multiplier relative to deterministic INR is not given, but it is a single model [S1, unofficial].
+*   **Performance:** On volumes up to $512^3$, REV-INR achieved the highest uncertainty-error correlation among three uncertainty-aware INR variants, with correlation coefficients ranging from 0.37 to 0.85 across six datasets [S1, unofficial].
+*   **Strengths:** High correlation between predicted uncertainty and actual reconstruction error; closed-form uncertainty estimation; inference speed comparable to deterministic models; lower storage than ensembles [S1, unofficial].
+*   **Limitations:** Slower training time; uncertainty correlation is not perfect (up to 0.85, not 1.0) [S1, unofficial].
+*   **When to use:** When uncertainty quantification is required for scientific volume visualization and storage/compute constraints prevent the use of deep ensembles, but training time is not the primary bottleneck [S1, unofficial].
+*   **When not to use:** When real-time training is required or when the highest possible reconstruction accuracy (PSNR) is prioritized over uncertainty calibration (other methods like RMDSRN may offer higher PSNR) [S1, unofficial].
+
+## Background
+REV-INR was proposed by Saklani et al. [120] as an improvement over Deep Ensembles and Monte Carlo Dropout methods for INR volume visualization [S1, unofficial]. It addresses the limitations of ensembles, which provide higher uncertainty-error correlation but at 10× the storage cost [S1, unofficial]. The method is part of the broader development of uncertainty-aware implicit neural representations for scientific volumes [S1, unofficial].
+
+## Sources
+[S1] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

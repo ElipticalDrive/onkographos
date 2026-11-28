@@ -1,0 +1,147 @@
+# Stochastic Ray-Casting Voxelization
+
+Also called: Probabilistic Inside-Outside Test, Randomized Direction Voxelization
+
+## Overview
+Stochastic Ray-Casting Voxelization determines the interior status of a voxel grid by casting multiple random rays from each voxel center and counting intersections with the input mesh triangles [S1, unofficial]. It differs from its siblings [Ray-Cast Style Voxel Filling](1502-ray-cast-style-voxel-filling.md) and [Tight Voxelization (Point-in-Mesh Test)](1709-tight-voxelization-point-in-mesh-test.md) by replacing the deterministic single-ray parity test with a probabilistic majority vote over randomized directions, which provides robustness against non-manifold, broken, or self-intersecting meshes where a single ray might fail [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A triangle mesh defined by a list of triangles [S1, unofficial].
+- A voxel grid resolution `dimX`, `dimY`, `dimZ` [S1, unofficial].
+- Parameter `samples`: Number of random rays cast per voxel. Default is often 1 (deterministic) or higher (e.g., 5, 11) for broken meshes. Controlled by command line option `-s` [S1, unofficial].
+- Parameter `double_thick`: Boolean flag. If true, the mesh is treated as double-thick (watertight), affecting the logic in the `inside` function. Controlled by command line option `-d` [S1, unofficial].
+
+**Outputs:**
+- A voxel grid where each voxel is marked as inside or outside [S1, unofficial].
+
+**Data Structures:**
+- `TriangleStruct`: Contains three `Vec3` members: `m_v1`, `m_v2`, `m_v3` [S1, unofficial].
+- `Vec3`: Struct with a union containing `precision_type m_pos[3]` and individual members `m_x`, `m_y`, `m_z`. `precision_type` is `float` by default (`USE_DOUBLE false`) [S1, unofficial].
+- `VoxelGrid`: Contains `bool *m_insideArray` of size `dimX * dimY * dimZ`. Accessor `isInside(i, j, k)` returns `m_insideArray[k*(m_dimX*m_dimY)+j*m_dimY + i]`. The layout is Z-major, where `k` is the most significant index in the linear array calculation [S1, unofficial].
+
+**Algorithm Steps:**
+1. Initialize `votes = 0` for the current voxel [S1, unofficial].
+2. Loop `samples` times (variable `j`):
+   a. Generate a random direction `dir` uniformly distributed on the unit sphere using polar-to-Euclidean conversion [S1, unofficial].
+   b. Initialize `intersections = 0` [S1, unofficial].
+   c. Loop over all triangles in the mesh (index `i` from 0 to `numTriangles`):
+      - Check if the ray starting at `pos` (voxel center) with direction `dir` intersects the triangle `triangles[i]` [S1, unofficial].
+      - If it intersects, increment `intersections` [S1, unofficial].
+   d. Determine if the voxel is inside based on the intersection count [S1, unofficial].
+      - If `double_thick` is true, check if `(intersections / 2) % 2 == 1` [S1, unofficial].
+      - If `double_thick` is false, check if `intersections % 2 == 1` [S1, unofficial].
+      - If the condition is true, increment `votes` [S1, unofficial].
+3. After all samples are processed, determine the final inside/outside status [S1, unofficial].
+   - If `votes > (samples / 2)`, set the voxel to inside (true) [S1, unofficial].
+   - Otherwise, set the voxel to outside (false) [S1, unofficial].
+
+**Formulas:**
+- Random direction generation on the unit sphere:
+  $\theta = u_1 \cdot 2\pi$
+  $z = 2u_2 - 1$
+  $r = \sqrt{1 - z^2}$
+  $dir.x = r \cos(\theta)$
+  $dir.y = r \sin(\theta)$
+  $dir.z = z$
+  where $u_1, u_2 \sim \mathcal{U}[0, 1)$ are independent uniform random numbers [S1, unofficial].
+
+**Parameters:**
+- `samples`: Number of random rays cast per voxel. Default is often 1 (deterministic) or higher (e.g., 5, 11) for broken meshes. Controlled by command line option `-s` [S1, unofficial].
+- `double_thick`: Boolean flag. If true, the mesh is treated as double-thick (watertight), affecting the logic in the `inside` function. Controlled by command line option `-d` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- The source implementation contains a bug in the z-component calculation of the random direction: it uses `cosf(theta)` instead of `z`. This results in a non-uniform distribution where the z-axis is biased towards the x-y plane projection of the angle theta, rather than being independent [S1, unofficial]. Implementers should use the correct spherical coordinate generation formula [G].
+- Broken or non-manifold meshes may require a higher number of samples to achieve a reliable majority vote [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def generate_random_direction():
+    u1 = random.random()
+    u2 = random.random()
+    theta = u1 * 2.0 * math.pi
+    z = 2.0 * u2 - 1.0
+    r = math.sqrt(1.0 - z * z)
+    return (r * math.cos(theta), r * math.sin(theta), z)
+
+def ray_triangle_intersect(origin, direction, v0, v1, v2):
+    # Standard Möller–Trumbore intersection test [G]
+    EPSILON = 1e-8
+    edge1 = (v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2])
+    edge2 = (v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2])
+    h = (direction[1]*edge2[2]-direction[2]*edge2[1],
+         direction[2]*edge2[0]-direction[0]*edge2[2],
+         direction[0]*edge2[1]-direction[1]*edge2[0])
+    a = direction[0]*edge1[0] + direction[1]*edge1[1] + direction[2]*edge1[2]
+    if a < EPSILON and a > -EPSILON:
+        return False
+    f = 1.0 / a
+    s = (origin[0]-v0[0], origin[1]-v0[1], origin[2]-v0[2])
+    u = f * (s[0]*edge1[0] + s[1]*edge1[1] + s[2]*edge1[2])
+    if u < 0.0 or u > 1.0:
+        return False
+    q = (s[1]*h[2]-s[2]*h[1], s[2]*h[0]-s[0]*h[2], s[0]*h[1]-s[1]*h[0])
+    v = f * (direction[0]*q[0] + direction[1]*q[1] + direction[2]*q[2])
+    if v < 0.0 or u + v > 1.0:
+        return False
+    t = f * (edge2[0]*q[0] + edge2[1]*q[1] + edge2[2]*q[2])
+    return t > EPSILON
+
+def is_inside_voxel(voxel_center, triangles, samples, double_thick):
+    votes = 0
+    for _ in range(samples):
+        dir = generate_random_direction()
+        intersections = 0
+        for tri in triangles:
+            if ray_triangle_intersect(voxel_center, dir, tri.m_v1, tri.m_v2, tri.m_v3):
+                intersections += 1
+        if double_thick:
+            if (intersections // 2) % 2 == 1:
+                votes += 1
+        else:
+            if intersections % 2 == 1:
+                votes += 1
+    return votes > (samples / 2.0)
+
+def voxelize(mesh_triangles, dimX, dimY, dimZ, samples, double_thick):
+    inside_array = [False] * (dimX * dimY * dimZ)
+    for k in range(dimZ):
+        for j in range(dimY):
+            for i in range(dimX):
+                pos_x = (i + 0.5) / dimX
+                pos_y = (j + 0.5) / dimY
+                pos_z = (k + 0.5) / dimZ
+                voxel_center = (pos_x, pos_y, pos_z)
+                if is_inside_voxel(voxel_center, mesh_triangles, samples, double_thick):
+                    index = k * (dimX * dimY) + j * dimY + i
+                    inside_array[index] = True
+    return inside_array
+```
+
+## Subtopics
+
+### [Solid Voxelization via 6-Direction Odd-Even Ray Parity](2320-solid-voxelization-via-6-direction-odd-even-ray-parity.md)
+This method converts a normalized, watertight mesh into a solid voxel volume by determining the inside/outside status of each voxel center. It sets itself apart from [Stochastic Ray-Casting Voxelization](1067-stochastic-ray-casting-voxelization.md) by using deterministic, axis-aligned rays instead of random directions, and from [Monte Carlo Voxelization with Ray-Casting Optimization](14300-monte-carlo-voxelization-with-ray-casting-optimization.md) by relying on a strict parity count rather than statistical sampling. It solves the problem of robustly filling the interior of a mesh for downstream assembly or growth operations.
+
+### [Monte Carlo Voxelization with Ray-Casting Optimization](14300-monte-carlo-voxelization-with-ray-casting-optimization.md)
+This method approximates the geometric similarity between a voxel and a 3D object by sampling points within the voxel using rays, avoiding full volumetric intersection tests. It builds on [Stochastic Ray-Casting Voxelization](1067-stochastic-ray-casting-voxelization.md) by organizing sampling into columns and optimizing the evaluation of occupancy and element membership, significantly reducing the computational cost of selecting the best approximating element from a palette.
+
+## Operating characteristics
+- **Time Complexity:** $O(V \cdot S \cdot T)$, where $V$ is the number of voxels, $S$ is the number of samples per voxel, and $T$ is the number of triangles in the mesh [G].
+- **Memory Complexity:** $O(V)$ for the voxel grid, plus $O(T)$ for the mesh storage [G].
+- **Performance:** GPU implementation is 400-2750 times faster than the provided CPU sample executable. For example, on an NVIDIA GTX970, it achieved a 396x speedup for a teapot (2464 tris, 64³) and a 2750x speedup for a bunny (69664 tris, 64³) [S1, unofficial].
+- **Strengths:** Robustness against non-manifold or broken meshes due to probabilistic sampling. GPU acceleration provides significant speedups [S1, unofficial].
+- **Limitations:** The stochastic nature means results may vary slightly between runs if the random seed is not fixed. The bug in the source code's random direction generation can lead to biased results if not corrected [S1, unofficial].
+- **When to use:** When dealing with non-watertight or broken meshes where deterministic ray casting might fail [S1, unofficial].
+- **When not to use:** When deterministic results are required and the mesh is known to be watertight and manifold, in which case deterministic methods like [Solid Voxelization via 6-Direction Odd-Even Ray Parity](2320-solid-voxelization-via-6-direction-odd-even-ray-parity.md) may be more appropriate [G].
+
+## Background
+Stochastic Ray-Casting Voxelization is a GPU-based voxelization technique that determines if a voxel center is inside a mesh by casting multiple random rays from the voxel center and counting intersections with mesh triangles [S1, unofficial]. The method is designed to handle non-manifold or broken meshes by using a majority vote over randomized directions rather than a single deterministic ray [S1, unofficial].
+
+## Sources
+[S1] kctess5/voxelizer, https://github.com/kctess5/voxelizer, fetched 2026-10-26 (unofficial)

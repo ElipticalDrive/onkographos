@@ -1,0 +1,294 @@
+# Coarse-Fine Dynamic Radiance Field
+
+Also called: Compositional Radiance Field with Coarse Voxel and Fine MLP, Hybrid Encoder-Decoder Radiance Field
+
+## Overview
+The Coarse-Fine Dynamic Radiance Field is a method for novel view synthesis of dynamic human heads that combines a discrete 3D voxel grid for efficient geometry estimation with a continuous MLP for high-frequency radiance modeling [S1]. It differs from standard NeRF by conditioning the continuous scene function on spatially-varying local animation codes retrieved from the voxel grid, and from Neural Volumes by using a hybrid coarse-fine representation to avoid the cubic memory complexity of a single high-resolution warped voxel grid [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A sparse set of camera views (typically 3 concatenated RGB images) and camera parameters (intrinsics, extrinsics).
+*   **Output:** A rendered RGB image $I_r$ and accumulated opacity $A_r$ for a given viewpoint.
+
+**Data Structures:**
+1.  **Global Animation Code ($z$):** A latent vector $z \in \mathbb{R}^{256}$ sampled from a Gaussian distribution.
+2.  **Coarse Voxel Grid ($G$):** A discrete 3D grid of dimensions $D \times D \times D \times F$, where $D=64$ and $F=68$. Each voxel at position $p$ stores:
+    *   Coarse color $e_{cp} \in \mathbb{R}^3$.
+    *   Differential opacity $\sigma_{ep} \in \mathbb{R}$.
+    *   View-independent local animation code $f_p \in \mathbb{R}^{32}$.
+    *   View-dependent local animation code $f_{vp} \in \mathbb{R}^{32}$.
+    *   *Note:* Values at continuous locations are obtained via trilinear interpolation [S1].
+3.  **Continuous Scene Function ($f$):** An MLP that takes positional encoded coordinates, view vector, and local animation codes to output fine color $c_p \in \mathbb{R}^3$ and differential opacity $\sigma_p \in \mathbb{R}$ [S1].
+
+**Numbered Steps:**
+
+1.  **Encoder (Global Code Generation):**
+    *   Concatenate $N_{views}$ input images (e.g., 3) along the channel axis.
+    *   Pass through a 2D convolutional network to predict parameters $\mu, \sigma \in \mathbb{R}^{256}$ of a diagonal Gaussian distribution.
+    *   Sample the global animation code $z \in \mathbb{R}^{256}$ using the reparameterization trick: $z = \mu + \epsilon \odot \sigma$, where $\epsilon \sim \mathcal{N}(0, I)$ [S1].
+
+2.  **Decoder (Coarse Grid Generation):**
+    *   The decoder consists of two 3D convolutional branches conditioned on $z$:
+        *   **Branch 1 (View-Independent):** Predicts $\sigma_{ep}$ and $f_p$. Conditioned only on $z$.
+        *   **Branch 2 (View-Dependent):** Predicts $e_{cp}$ and $f_{vp}$. Conditioned on $z$ and the viewpoint vector $v \in \mathbb{R}^3$.
+    *   Viewpoint $v$ is computed as the normalized difference between the camera location and the center of the scene [S1].
+    *   The output is the coarse voxel grid $G \in \mathbb{R}^{64 \times 64 \times 64 \times 68}$ [S1].
+
+3.  **Coarse Volumetric Rendering:**
+    *   For a ray $r$ from camera center $o$, sample $N$ points $p_i = o + d_i \cdot r$, where $d_i$ are uniformly sampled between near plane $d_{min}$ and far plane $d_{max}$ [S1].
+    *   Retrieve $\sigma_{ep}$ and $e_{cp}$ at $p_i$ via trilinear interpolation from $G$.
+    *   Compute accumulated opacity $A_e$ and color $I_{e0}$:
+        $$ A_e = \sum_{i=1}^N T_i \alpha_i $$
+        $$ I_{e0} = \sum_{i=1}^N T_i \alpha_i e_{cp_i} $$
+        where:
+        $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_{ep_j} \delta_j\right) $$
+        $$ \alpha_i = 1 - \exp(-\sigma_{ep_i} \delta_i) $$
+        $$ \delta_i = |d_{i+1} - d_i| $$
+    *   Compute final coarse rendering $I_e$:
+        $$ I_e = I_{e0} + (1 - A_e) I_{bg} $$
+        where $I_{bg}$ is the background color [S1].
+
+4.  **Efficient Sampling (Fine Depth Estimation):**
+    *   Compute coarse depth estimate $d_e$:
+        $$ d_e = \frac{1}{A_e} \sum_{i=1}^N T_i \alpha_i d_i $$
+    *   Sample fine depths $d$ from a uniform distribution centered at $d_e$ with range $\Delta d$:
+        $$ d \sim \mathcal{U}[d_e - \Delta d, d_e + \Delta d] $$
+        where $\Delta d = \frac{d_{max} - d_{min}}{k}$ and $k=10$ [S1].
+
+5.  **Fine Volumetric Rendering:**
+    *   For each fine sample point $p$, retrieve local animation codes $f_p$ and $f_{vp}$ from $G$ via trilinear interpolation.
+    *   Apply positional encoding $\phi(\cdot)$ to position $p$ and view vector $v$.
+    *   Evaluate the continuous scene function $f$:
+        $$ c_p, \sigma_p = f(\phi(p), \phi(v), f_p, f_{vp}) $$
+    *   Compute fine accumulated opacity $A_f$ and color $I_f$ using the same compositing equations as the coarse level (Eq. 2-3 in [S1]), substituting $\sigma_p$ for $\sigma_{ep}$ and $c_p$ for $e_{cp}$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class CoarseFineDynamicRadianceField:
+    def __init__(self, D=64, F=68, latent_dim=256, num_views=3, k=10):
+        self.D = D
+        self.F = F
+        self.latent_dim = latent_dim
+        self.num_views = num_views
+        self.k = k
+        
+        # Encoder: 2D CNN to predict mu and sigma
+        self.encoder = Encoder2D(latent_dim)
+        
+        # Decoder: Two 3D CNN branches
+        # Branch 1: View-independent (sigma_ep, f_p)
+        self.decoder_branch1 = Decoder3DViewIndep(F=68) # Outputs sigma_ep and f_p
+        # Branch 2: View-dependent (e_cp, f_vp)
+        self.decoder_branch2 = Decoder3DViewDep(F=68)   # Outputs e_cp and f_vp
+        
+        # Continuous Scene Function: MLP
+        self.scene_mlp = MLPSceneFunction()
+        
+        # Positional Encoding function
+        self.pos_enc = PositionalEncoding()
+
+    def encode(self, images):
+        """
+        images: Tensor of shape (B, num_views, C, H, W)
+        Returns: z (B, latent_dim), mu (B, latent_dim), sigma (B, latent_dim)
+        """
+        # Concatenate views along channel axis
+        x = images.view(images.size(0), -1, images.size(3), images.size(4))
+        mu, sigma = self.encoder(x)
+        # Reparameterization trick
+        epsilon = torch.randn_like(sigma)
+        z = mu + epsilon * sigma
+        return z, mu, sigma
+
+    def decode(self, z, viewpoint):
+        """
+        z: Global animation code (B, latent_dim)
+        viewpoint: Normalized camera direction (B, 3)
+        Returns: Voxel grid G (B, D, D, D, F)
+        """
+        # Branch 1: View-independent
+        # Note: In practice, decoder branches might share weights or be separate modules
+        # conditioned on z. The output is a 3D volume.
+        out1 = self.decoder_branch1(z) 
+        # out1 contains sigma_ep and f_p. Assuming layout: [sigma_ep, f_p]
+        # sigma_ep: (B, D, D, D, 1)
+        # f_p: (B, D, D, D, 32)
+        
+        # Branch 2: View-dependent
+        out2 = self.decoder_branch2(z, viewpoint)
+        # out2 contains e_cp and f_vp.
+        # e_cp: (B, D, D, D, 3)
+        # f_vp: (B, D, D, D, 32)
+        
+        # Concatenate to form G: [e_cp, sigma_ep, f_p, f_vp] -> F=3+1+32+32=68
+        G = torch.cat([out2['e_cp'], out1['sigma_ep'], out1['f_p'], out2['f_vp']], dim=-1)
+        return G
+
+    def render_coarse(self, G, rays_o, rays_d, d_min, d_max, N_samples):
+        """
+        G: Voxel grid (B, D, D, D, F)
+        rays_o: Ray origins (B, 3)
+        rays_d: Ray directions (B, 3)
+        Returns: I_coarse, A_coarse, d_coarse
+        """
+        # Sample depths uniformly
+        t_vals = torch.linspace(d_min, d_max, N_samples)
+        # Add noise for anti-aliasing (optional, standard in NeRF-like methods)
+        # For simplicity, using uniform samples as per source description
+        z_vals = t_vals.expand_as(rays_d[..., 0]) # (B, N)
+        
+        # Compute points
+        points = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals.unsqueeze(2) # (B, N, 3)
+        
+        # Interpolate voxel values at points
+        # G is (B, D, D, D, F). Need to normalize points to [-1, 1] for grid_sample or similar
+        # Assuming helper function to interpolate from 3D grid
+        sigma_ep, e_cp = interpolate_voxel(G, points) # (B, N, 1), (B, N, 3)
+        
+        # Compute deltas
+        deltas = z_vals[:, 1:] - z_vals[:, :-1]
+        delta_inf = torch.tensor(1e10).expand_as(deltas)
+        deltas = torch.cat([deltas, delta_inf], dim=1)
+        
+        # Compute alphas and transmittance
+        alpha = 1.0 - torch.exp(-sigma_ep.squeeze(-1) * deltas) # (B, N)
+        T = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :1]), 1.0 - alpha + 1e-10], dim=1), dim=1)[:, :-1] # (B, N)
+        
+        # Accumulate
+        weights = T * alpha # (B, N)
+        A_coarse = torch.sum(weights, dim=1) # (B,)
+        I_coarse = torch.sum(weights.unsqueeze(-1) * e_cp, dim=1) # (B, 3)
+        
+        # Coarse depth estimate
+        d_coarse = torch.sum(weights * z_vals, dim=1) / (A_coarse + 1e-10) # (B,)
+        
+        return I_coarse, A_coarse, d_coarse
+
+    def render_fine(self, G, rays_o, rays_d, d_min, d_max, N_samples_coarse, N_samples_fine, d_coarse, A_coarse):
+        """
+        Renders fine detail using efficient sampling around d_coarse.
+        """
+        # Efficient Sampling
+        delta_d = (d_max - d_min) / self.k
+        # Sample N_fine points uniformly in [d_coarse - delta_d, d_coarse + delta_d]
+        # z_vals_fine = torch.rand(B, N_fine) * 2 * delta_d + (d_coarse - delta_d)
+        # For deterministic implementation, use linspace or fixed samples
+        t_vals = torch.linspace(-delta_d, delta_d, N_samples_fine)
+        z_vals_fine = d_coarse.unsqueeze(1) + t_vals.expand_as(d_coarse) # (B, N_fine)
+        
+        # Compute points
+        points = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals_fine.unsqueeze(2) # (B, N_fine, 3)
+        
+        # Interpolate local animation codes
+        f_p, f_vp = interpolate_local_codes(G, points) # (B, N_fine, 32), (B, N_fine, 32)
+        
+        # Positional Encoding
+        pos_enc_p = self.pos_enc(points)
+        # View vector v is rays_d (normalized)
+        pos_enc_v = self.pos_enc(rays_d.unsqueeze(1).expand_as(points))
+        
+        # MLP Evaluation
+        # Concatenate features: pos_enc_p, pos_enc_v, f_p, f_vp
+        input_features = torch.cat([pos_enc_p, pos_enc_v, f_p, f_vp], dim=-1)
+        sigma_f, c_f = self.scene_mlp(input_features) # (B, N_fine, 1), (B, N_fine, 3)
+        
+        # Compute deltas for fine samples
+        deltas_fine = z_vals_fine[:, 1:] - z_vals_fine[:, :-1]
+        delta_inf = torch.tensor(1e10).expand_as(deltas_fine)
+        deltas_fine = torch.cat([deltas_fine, delta_inf], dim=1)
+        
+        # Compute alphas and transmittance
+        alpha_f = 1.0 - torch.exp(-sigma_f.squeeze(-1) * deltas_fine) # (B, N_fine)
+        T_f = torch.cumprod(torch.cat([torch.ones_like(alpha_f[:, :1]), 1.0 - alpha_f + 1e-10], dim=1), dim=1)[:, :-1] # (B, N_fine)
+        
+        # Accumulate
+        weights_f = T_f * alpha_f # (B, N_fine)
+        A_fine = torch.sum(weights_f, dim=1) # (B,)
+        I_fine = torch.sum(weights_f.unsqueeze(-1) * c_f, dim=1) # (B, 3)
+        
+        return I_fine, A_fine
+
+    def forward(self, images, rays_o, rays_d, d_min, d_max, N_coarse, N_fine):
+        # 1. Encode
+        z, mu, sigma = self.encode(images)
+        
+        # 2. Decode
+        # Viewpoint v is derived from rays_d or camera params. 
+        # Source says v is normalized difference between camera location and center.
+        # Assuming rays_d is normalized direction.
+        viewpoint = rays_d # Simplified, usually requires camera center
+        G = self.decode(z, viewpoint)
+        
+        # 3. Coarse Render
+        I_coarse, A_coarse, d_coarse = self.render_coarse(G, rays_o, rays_d, d_min, d_max, N_coarse)
+        
+        # 4. Fine Render
+        I_fine, A_fine = self.render_fine(G, rays_o, rays_d, d_min, d_max, N_coarse, N_fine, d_coarse, A_coarse)
+        
+        # 5. Background Compositing (for coarse)
+        # I_coarse_final = I_coarse + (1 - A_coarse) * I_bg
+        # I_fine_final = I_fine + (1 - A_fine) * I_bg
+        
+        return I_fine, A_fine, I_coarse, A_coarse, mu, sigma
+
+    def compute_loss(self, I_fine, A_fine, I_coarse, A_coarse, mu, sigma, I_gt, I_bg):
+        # Fine Rendering Loss
+        L_r = torch.mean((I_fine - I_gt) ** 2)
+        
+        # Coarse Rendering Loss
+        I_coarse_final = I_coarse + (1 - A_coarse.unsqueeze(-1)) * I_bg
+        L_er = torch.mean((I_coarse_final - I_gt) ** 2)
+        
+        # Opacity Prior Loss (for both fine and coarse)
+        # L_beta = sum(log(A) + log(1-A))
+        # Applied to accumulated opacities
+        L_beta_fine = torch.mean(torch.log(A_fine) + torch.log(1 - A_fine))
+        L_beta_coarse = torch.mean(torch.log(A_coarse) + torch.log(1 - A_coarse))
+        
+        # KL Divergence Loss
+        # L_KL = 0.5 * sum(exp(sigma) + mu^2 - 1 - sigma)
+        L_KL = torch.mean(0.5 * torch.sum(torch.exp(sigma) + mu**2 - 1 - sigma, dim=1))
+        
+        # Total Loss
+        # Lambda values not specified in source, assume placeholders or standard values
+        lambda_f = 1.0
+        lambda_c = 1.0
+        lambda_KL = 1.0
+        
+        L = L_r + L_er + lambda_f * L_beta_fine + lambda_c * L_beta_coarse + lambda_KL * L_KL
+        
+        return L
+```
+
+**Parameters:**
+*   $D=64$: Spatial dimension of the voxel grid [S1].
+*   $F=68$: Dimensionality of the field (3 color + 1 opacity + 32 view-indep local code + 32 view-dep local code) [S1].
+*   $k=10$: Factor for fine sampling range reduction ($\Delta d = (d_{max}-d_{min})/k$) [S1].
+*   Training Data: Multi-camera system with ~100 cameras, 2048x1334 resolution at 30Hz, downsampled to 1024x667 [S1].
+*   Dataset Split: Trained on $m=93$ cameras, tested on $q=33$ frames from $p=7$ other cameras [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The reparameterization trick requires stable gradients through the sampling of $z$.
+*   **Boundaries:** The efficient sampling range $\Delta d$ must be chosen carefully; if too small, fine details outside the coarse depth estimate are missed. If too large, computational cost increases.
+*   **Degenerate Input:** The encoder requires a sparse set of views (e.g., 3). Performance may degrade with fewer views or highly occluded scenes not covered by the input views.
+
+## Operating characteristics
+*   **Time Complexity:** Rendering involves two passes: coarse ray-marching on a $64^3$ grid and fine ray-marching on an MLP. The efficient sampling reduces the number of MLP queries compared to uniform sampling over the entire depth range.
+*   **Memory Complexity:** The voxel grid is $64^3 \times 68$ floats, which is significantly smaller than a high-resolution single grid (e.g., $128^3$ or $256^3$) used in methods like Neural Volumes. The MLP memory footprint is independent of scene resolution.
+*   **Strengths:** Captures fine-level detail better than pure voxel methods (like NV) while avoiding their memory constraints. Better generalization for dynamic scenes than pure MLP methods (like NeRF) due to the structured prior from the voxel grid.
+*   **Limitations:** Requires a multi-camera setup for training. The coarse grid resolution is fixed ($64^3$), limiting the maximum geometric detail that can be explicitly stored.
+*   **When to use:** Dynamic human head capture with multi-camera rigs where high-frequency detail (skin, hair) and animation are required.
+*   **When not to use:** Static scenes (NeRF is simpler), scenes with very large scale variations (voxel grid may not cover the volume efficiently), or single-view setups.
+
+## Background
+The method was introduced in "Learning Compositional Radiance Fields of Dynamic Human Heads" [S1]. It builds upon the concept of compositional representations, combining the strengths of discrete voxel-based methods (like Neural Volumes [S1]) and continuous neural rendering (like NeRF [S1]). The key innovation is the use of a hybrid coarse-fine structure conditioned on a global latent code and spatially-varying local animation codes, enabling efficient and high-quality rendering of dynamic human heads.
+
+## Sources
+[S1] Learning Compositional Radiance Fields of Dynamic Human Heads, https://arxiv.org/abs/2012.09955v1, fetched 2026-10-26

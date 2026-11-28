@@ -1,0 +1,32 @@
+# Multi-scale filtering
+Also called: Multi-scale Gaussian filtering, Resolution-adaptive Gaussian filtering
+## Overview
+Multi-scale filtering is a family of techniques in 3D Gaussian Splatting (3DGS) that mitigate aliasing artifacts and optimize rendering performance by adapting the Gaussian representation to the camera's viewing frequency or resolution [G]. It sets itself apart from standard 3DGS by explicitly managing the spectral content of the primitives—either through training-time aggregation, test-time covariance regularization, or runtime hierarchical pruning—to ensure the rendered image remains consistent across varying scales [G].
+## Shared principles
+All methods in this family address the mismatch between the discrete sampling of the image sensor and the continuous representation of 3D Gaussians [G]. The core mechanism involves modifying the projected 2D covariance matrix $\Sigma_{2D}$ to account for the sampling frequency or pixel size [G].
+1. **Covariance Regularization:** To prevent aliasing (high-frequency artifacts) when zooming out or rendering at low resolution, a low-pass filter is applied. This is achieved by adding a variance term $\sigma^2_{test}$ (derived from the pixel size or testing frequency) to the projected 2D covariance:
+$$ \Sigma_{reg} = \Sigma_{2D} + \sigma^2_{test} I $$
+where $I$ is the identity matrix [G].
+2. **Opacity Preservation:** Adding variance spreads the Gaussian, reducing its peak height. To preserve the integral (total mass/energy) of the Gaussian, the opacity $\alpha$ is scaled by a normalization factor $C$:
+$$ C = \frac{\sqrt{|\Sigma_{2D}|}}{\sqrt{|\Sigma_{reg}|}} $$
+$$ \alpha_{new} = \alpha_{old} \cdot C $$
+This ensures that the total contribution of the Gaussian remains constant despite the blurring [G].
+3. **Frequency Matching:** The filter parameters are tuned to match the Nyquist limit of the rendering resolution. For training-time methods, this involves constraining the 3D representation frequency to the training data's sampling rate. For test-time methods, it involves adapting to the specific camera distance and resolution [G].
+## Subtopics
+
+### [MIP-Splatting](6063-mip-splatting.md)
+MIP-Splatting eliminates aliasing by combining a 3D smoothing filter, a 2D Mip filter, and multi-scale Gaussian selection. It sets itself apart by constraining the 3D representation frequency to the training data's Nyquist limit during training and replacing the empirical dilation filter with a physics-based box filter approximation during rendering. It uses a 4-level hierarchy (1x, 4x, 16x, 64x) and aggregates small Gaussians into coarser levels to prevent missing parts in the rendered image. Choose this method when training a new scene and you need to prevent high-frequency artifacts during optimization and rendering at arbitrary scales.
+
+### [Scale-Adaptive Gaussian Splatting](8085-scale-adaptive-gaussian-splatting.md)
+Scale-Adaptive Gaussian Splatting (SA-GS) is a training-free, test-time plugin that improves anti-aliasing by applying 2D scale-adaptive filters. Unlike MIP-Splatting, which modifies training and uses filters unaware of testing frequency, SA-GS operates on any pretrained Gaussian field, ensuring consistent primitive distribution across different rendering resolutions and camera distances by dynamically adjusting the covariance based on the target resolution. Choose this method when you need a post-processing step that adapts to specific test-time resolutions without retraining.
+
+### [FilterGS](12631-filtergs.md)
+FilterGS is a rendering acceleration method for large-scale Level-of-Detail (LoD) 3D Gaussian Splatting. It eliminates inefficient serial tree traversal and reduces redundant Gaussian-tile pairs through parallel filtering and adaptive shrinking. It addresses the critical challenges of LoD methods by using a traversal-free, parallel filtering structure that selects a single scale for each Gaussian via a learned network, avoiding expensive tree traversal at render time. Choose this method when rendering large-scale hierarchical scenes and need to decouple computational cost from tree depth.
+
+### Progressive Low-Pass Filtering for 3DGS
+Progressively applies low-pass filtering to avoid 2D Gaussian projections becoming smaller than a pixel [S1].
+
+## Background
+The problem of aliasing in 3D Gaussian Splatting arises because standard 3DGS systematically underestimates the scale parameter during optimization, leading to erosion effects when zooming in and high-frequency artifacts when zooming out [G]. MIP-Splatting was introduced to address these resolution-dependent artifacts by integrating multi-scale representations. Subsequent works like SA-GS and FilterGS expanded the family to include test-time adaptations and performance optimizations. The theoretical basis relies on treating the camera sensor as a box filter and ensuring the Gaussian's spectral content does not exceed the Nyquist limit of the sampling grid [G].
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

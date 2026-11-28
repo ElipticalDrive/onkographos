@@ -1,0 +1,180 @@
+Consumer An RTS that puts 300–600 small figures on screen at once (brigade stands of 8–12 figures, generals at 1.6× scale) on phones, foldables and Steam Deck. First consumer of the 0.0.0-integration.dbf5374 prerelease from the Gitea reg...
+
+Miniature LOD: bake a recipe + pose set to decimated, instanceable meshes (VAT or shared-skeleton) · Issue #12 · jbcom/humanoid-kit · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Miniature LOD: bake a recipe + pose set to decimated, instanceable meshes (VAT or shared-skeleton) #12
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Miniature LOD: bake a recipe + pose set to decimated, instanceable meshes (VAT or shared-skeleton)#12
+Copy link
+Labels
+in-progressA lane agent is working thisA lane agent is working this
+Description
+jbdevprimary
+opened on Oct 10, 2026
+Issue body actions
+Consumer
+An RTS that puts 300–600 small figures on screen at once (brigade stands of 8–12 figures, generals at 1.6× scale) on phones, foldables and Steam Deck. First consumer of the 0.0.0-integration.dbf5374 prerelease from the Gitea registry.
+Problem
+The live path is per-figure: subdivision 0 is the full 19,158-vertex control mesh, with per-figure GPU skinning and fold textures (an adult surface's hip fold is ~25 MB). There is no LOD, no miniature mode and no instancing path, so a few hundred figures are out of reach on mobile.
+Budgets (target devices: Pixel 7 / iPhone 13 class, Galaxy Z Fold 5, Steam Deck)
+Budget
+Whole frame
+< 150 draw calls, < 600 k triangles, 60 fps target / 45 fps floor
+All figures together
+≤ 20 draw calls (one per archetype × LOD), ≤ 250 k triangles
+Per figure
+~1.5 k triangles near, ~400 far
+Animation
+vertex-animation textures ≤ 4 MB per archetype, or batched skinning on a shared skeleton
+Load
+an archetype's mesh + animations ≤ 1.5 MB transferred
+Request
+A bake API the kit owns, e.g.
+```
+bakeMiniature(recipe, {
+  outfit, hairOrHat,             // attachments baked in
+  clips: ['walk', 'idle', 'crouch', …],
+  lods: [{ triangles: 1500 }, { triangles: 400 }],
+  output: 'vat' | 'skinned',      // VAT textures or a decimated SkinnedMesh on a shared skeleton
+}): { geometry(lod), vat?, skeleton?, clipFrames }
+```
+Deterministic for a recipe + options (so it can run offline in a build step and be committed).
+Decimation that preserves silhouette at small screen size (head, hands, hat brim, coat skirts).
+Runs in a worker or headless browser page; returns transferable buffers.
+Works with outfits and hair so each archetype bakes once.
+The game will bake archetypes offline today with a game-side script against the current API; a kit-owned bake would replace that script.
+Activity
+jbdevprimary commented on Oct 11, 2026
+jbdevprimary
+on Oct 11, 2026
+ContributorAuthor
+More actions
+Narrowing this from the consumer side (prayers-of-the-blue-and-grey, kit 66c656d): the table's miniatures will be static castings. One posed stance per archetype is baked once, and the base slides, so neither VAT nor a shared skeleton is needed at runtime. What this needs from the kit is a single public call that returns a whole dressed figure posed by arbitrary BoneRotations (body masked by the outfit, plus every garment skinned), for example posedFigure(model, recipe, rotations) -> { parts: [{ id, kind, positions, normals, index, bodyRegion? }] }. Today the consumer composes it from evaluate + posedSurface + garmentTopology(id).skinIndex/skinWeight + skinPositions, which works but depends on the order of evaluation.garments matching outfit.order. Per-vertex body-region ids for garment vertices (so a one-piece suit can be painted coat versus trousers) would also help. Decimation can stay consumer-side (meshoptimizer).
+jbdevprimary commented on Oct 13, 2026
+jbdevprimary
+on Oct 13, 2026
+ContributorAuthor
+More actions
+In progress: an isolated worktree lane is working this on branch feat/miniature-lod (triage first, then design, docs, tests, code). A ready PR to integration follows; findings are posted here as they land.
+jbdevprimary
+added
+in-progressA lane agent is working thisA lane agent is working this
+on Oct 13, 2026
+jbdevprimary commented on Oct 13, 2026
+jbdevprimary
+on Oct 13, 2026
+ContributorAuthor
+More actions
+Design recorded in docs/MINIATURES.md (branch feat/miniature-lod). Summary:
+Use cases: static castings posed by arbitrary rotations (the narrowing above), animated crowds with per-figure phase, deterministic offline bakes with transferable buffers, silhouette at 40–120 px, per-instance scale and regiment tint, MakeHuman proxy parity, and a consumer-side posedFigure for custom pipelines.
+Options: (A) a decimated mesh per archetype with vertex-animation textures; (B) decimated SkinnedMesh on a shared skeleton with batched skinning; (C) MakeHuman's CC0 low-poly proxies (proxy741 1,460 tris, male1591, female1605) as the body source.
+Decision: C for the body, kit-owned decimation for the rest, A for the runtime.
+Proxy bodies become a core capability (packed by the existing compiler and licence gate; skin from the bound base vertices; masked under clothes by MakeHuman 2's hideApproxVertices rule). This covers assets first (ruling 2) and parity (ruling 3).
+posedFigure(model, recipe, rotations) returns body plus every garment in outfit.order, with a body region per vertex. That answers the comment above.
+The decimator does half-edge collapse only, so every LOD is a vertex subset (VAT frames are a gather, topology is identical across frames, nested LODs share one VAT). Quadric error is summed over sample poses, with fold-over refusal in every pose. Boundaries (hems, brims) and head/hands are weighted. It is deterministic.
+Colour is baked per vertex from skin tone, garment textures and painted hair. There are 4 tint channels (skin, upper garment, lower garment, hat/shoes) for per-instance regiment colours.
+Runtime: one InstancedMesh per archetype × LOD. VAT is sampled by per-instance clip, phase and speed. LODs are assigned nearest-first against the triangle budget (600 × 400 = 240 k means most of a full table is far).
+B was rejected because of per-frame bone upload/animation cost at 500 figures on phones, and because it would draw a different body (no DQ share or hip fold).
+The adult pack stays out: bakeMiniature refuses a model built with it.
+Stages: (1) proxies + posedFigure + decimator + bakeMiniature/binary; (2) instanced runtime + React; (3) numeric budget test; (4) 500-figure stress lab with capture and frame time.
+jbdevprimary commented on Oct 13, 2026
+jbdevprimary
+on Oct 13, 2026
+ContributorAuthor
+More actions
+Status: all four stages of the miniature design (docs/MINIATURES.md) are on branch feat/miniature-lod. It is not landed yet: the integration HOLD is in effect.
+Bake: MakeHuman's own proxy bodies (proxy741, male1591, female1605) are shipped in proxies.bin.gz. posedFigure poses them, a multi-pose quadric decimator lowers them, and bakeMiniature packs the result with encodeMiniature/decodeMiniature (half-float positions, octahedral normals).
+Runtime: MiniatureCrowd gives one InstancedMesh per archetype and LOD, with VAT sampling in the vertex shader, per-instance clip, phase and tints, frustum culling and triangle-budget LOD. <Miniatures> wraps it in React Three Fiber. A browser test checks the shader output.
+Budget test, 600 figures of 4 archetypes: 8 draws and 235k triangles, against a limit of 20 and 250k. VAT is about 1.0 MB per archetype (limit 4 MB). Each archetype's binary is 0.57 MB gzipped (limit 1.5 MB).
+Stress lab ?miniatures=500 plus e2e/miniatures.spec.ts: run headless on an M1 Pro over Metal, 500 figures took 8 draws and 204k triangles. Frames were 16.7 ms median and 20.5 ms p95, against 16.5 ms and 20.2 ms for a single figure.
+🤖 Generated with Claude Code
+jbdevprimary commented on Oct 13, 2026
+jbdevprimary
+on Oct 13, 2026
+ContributorAuthor
+More actions
+Lane resumed after a machine crash: feat/miniature-lod is mid-merge of integration (conflicts being resolved). Remaining: merge integration tip, rerun typecheck/biome, budget test and the 500-figure lab check, read the lab render, land and close with the numbers.
+jbdevprimary commented on Oct 13, 2026
+jbdevprimary
+on Oct 13, 2026
+ContributorAuthor
+More actions
+Landed on integration at 2e63150 (feat/miniature-lod).
+The bake takes a recipe and a pose set and produces decimated, instanceable meshes:
+Each archetype bakes to a deterministic "HKMB" binary.
+Each LOD is a vertex subset, made by multi-pose quadric decimation.
+Poses are stored as vertex animation textures (half-float positions, octahedral normals).
+At runtime, MiniatureCrowd and <Miniatures> draw one InstancedMesh per archetype per LOD, choose the LOD against a triangle budget and frustum-cull.
+There are four tint channels: skin, upper, lower and accessory.
+Bodies are the CC0 MakeHuman proxies only. The adult pack never enters this path.
+The design is in docs/MINIATURES.md and the API in docs/API.md.
+Budget test (tests/miniatureBudget.test.ts), 600 figures over 4 archetypes:
+Measure
+Result
+Budget
+Draws
+8
+at most 20
+Triangles
+about 235k
+at most 250k
+Animation textures per archetype
+about 1.0 MB
+under 4 MB
+Binary per archetype, gzipped
+about 0.57 MB
+under 1.5 MB
+The test asserts these budgets but does not print the values. The figures above are from the last time they were measured, before integration was merged in. The test passes against integration at 2a3716e.
+Stress lab (e2e/miniatures.spec.ts, ?miniatures=N), last run on an M2 Max with Metal (headless ANGLE):
+Figures
+Draws
+Triangles
+Median frame
+p95 frame
+500
+8
+203,902
+16.5 ms
+24.7 ms
+1
+2
+401
+16.6 ms
+22.8 ms
+At 500 figures the crowd draws 4 figures at the near LOD and 496 at the far one. Baking takes about 4 s. The 500-figure median stays at the frame pacing set by one figure.
+Checks after merging integration at 2a3716e:
+Typecheck and biome are clean.
+The six miniature unit test files pass (36 tests).
+The browser miniature test passes (3 tests).
+The full unit suite fails only on the four tests already tracked in Four unit failures on integration after the backlog reconcile (kneeFold, contactCompression, nailPlates, browserArrayComparison) #72.
+jbdevprimary
+closed this as completedon Oct 13, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+in-progressA lane agent is working thisA lane agent is working this
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

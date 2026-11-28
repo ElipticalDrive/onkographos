@@ -1,0 +1,173 @@
+--- v001.md
++++ v002.md
+@@ -4,112 +4,96 @@
+ 
+ ## Overview
+-View-Conditioned Rendering is a technique for modeling view-dependent appearance, such as specularities, by conditioning the RGB decoder network on the camera viewpoint [S1]. It solves the problem where standard volume rendering assumes Lambertian (view-independent) surfaces, leading to artifacts like incorrect semi-transparent voxels near object surfaces when trying to explain view-dependent phenomena [S1]. It sets itself apart from its sibling [View-Dependent MLP](2444-view-dependent-mlp.md) by specifically conditioning the *RGB* output branch on the view direction while keeping the alpha (opacity) branch view-independent, whereas the parent method focuses on the architectural capacity of the MLP itself [S1].
++View-Conditioned Rendering is a technique used in neural volume rendering to model view-dependent appearance effects, such as specularities, by conditioning the RGB decoder network on the camera viewpoint [S1]. It solves the problem where non-view-conditioned models incorrectly reconstruct extra semi-transparent voxels near the surface to explain angular variations in color, leading to artifacts like floaters [S1]. It sets itself apart from standard view-independent MLPs by explicitly appending encoded view directions to the positional encoding of 3D coordinates before network query, allowing the network to change the color of certain parts of the scene depending on the viewing angle [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: 3D spatial coordinates $\mathbf{x}$, view direction $\mathbf{v}$ (normalized), and positional encodings for both.
+-*   Output: RGB color values $\mathbf{c}$ and opacity $\alpha$.
++*   **Input:** 3D spatial coordinates $\mathbf{x}$, normalized view direction $\mathbf{v}$, and a positional encoding function $PE(\cdot)$.
++*   **Output:** RGB color value $\mathbf{c}$ and opacity $\alpha$.
+ 
+ **Data Structures:**
+-*   `embed_fn`: Positional encoding function for 3D coordinates $\mathbf{x}$.
+-*   `embeddirs_fn`: Positional encoding function for view directions $\mathbf{v}$ [S2, unofficial].
+-*   `network_fn`: The neural network (MLP or convolutional decoder) that maps encoded inputs to raw network outputs (raw color, raw density, etc.) [S2, unofficial].
+-*   `network_query_fn`: A wrapper that handles the concatenation of spatial and view encodings before calling `network_fn` [S2, unofficial].
+-
+-**Parameters:**
+-*   `use_viewdirs`: Boolean flag. If true, the model expects 5D input (3D position + 2D direction); if false, it expects 3D input [S2, unofficial].
+-*   `input_ch_views`: Number of channels for the view direction encoding [S2, unofficial].
++*   **Positional Encoding:** Standard Fourier features or hash grid encoding for 3D coordinates.
++*   **View Direction Encoding:** Separate positional encoding for the 2D spherical coordinates or 3D normalized vector of the view direction.
++*   **Decoder Architecture:** A Multi-Layer Perceptron (MLP) or convolutional branch structure. Crucially, the architecture uses separate branches for RGB and $\alpha$ [S1]. Only the RGB branch is conditioned on the view direction; the $\alpha$ branch typically depends only on spatial coordinates or the shared latent representation [S1].
+ 
+ **Steps:**
+-1.  **Check Configuration:** Determine if view conditioning is enabled via the `use_viewdirs` flag [S2, unofficial].
+-2.  **Encode Inputs:**
+-    *   Compute spatial encoding: $\mathbf{z} = \text{embed\_fn}(\mathbf{x})$ [S1].
+-    *   If `use_viewdirs` is true, compute view direction encoding: $\mathbf{z}_v = \text{embeddirs\_fn}(\mathbf{v})$ [S2, unofficial].
+-3.  **Concatenate:**
+-    *   If `use_viewdirs` is true, concatenate the encodings: $\mathbf{z}_{combined} = \text{concat}(\mathbf{z}, \mathbf{z}_v)$ [S2, unofficial].
+-    *   If false, $\mathbf{z}_{combined} = \mathbf{z}$ [S2, unofficial].
+-4.  **Query Network:** Pass $\mathbf{z}_{combined}$ to the `network_query_fn`, which internally calls the network function (e.g., `run_network`) [S2, unofficial].
+-5.  **Decode Outputs:**
+-    *   The network produces separate branches for RGB and $\alpha$ [S1].
+-    *   The RGB branch is conditioned on the view direction (via the concatenated input $\mathbf{z}_{combined}$) [S1].
+-    *   The $\alpha$ branch is *not* conditioned on the view direction (it uses only $\mathbf{z}$ or is derived from a view-independent path) [S1].
+-    *   Apply activation functions (e.g., sigmoid for RGB, softplus/exp for density) to produce final $\mathbf{c}$ and $\alpha$ [S1][S2, unofficial].
++1.  **Check Flag:** Determine if view conditioning is enabled via a boolean flag `use_viewdirs` [S2, unofficial].
++2.  **Encode Spatial Coordinates:** Apply positional encoding $PE_{xyz}$ to the 3D point $\mathbf{x}$ to get $\mathbf{z}_{xyz}$ [S2, unofficial].
++3.  **Encode View Direction:** If `use_viewdirs` is true, apply a separate positional encoding $PE_{dir}$ to the normalized view direction $\mathbf{v}$ to get $\mathbf{z}_{dir}$ [S2, unofficial].
++4.  **Concatenate:** Concatenate the encoded spatial features and encoded view direction features: $\mathbf{z}_{combined} = \text{concat}(\mathbf{z}_{xyz}, \mathbf{z}_{dir})$ [S2, unofficial].
++5.  **Query Decoder:** Pass $\mathbf{z}_{combined}$ to the RGB decoder network $V_{rgb}$ to predict color $\mathbf{c}$ [S1].
++6.  **Query Alpha Decoder:** Pass $\mathbf{z}_{xyz}$ (or the shared latent code derived from it) to the $\alpha$ decoder network $V_{\alpha}$ to predict opacity $\alpha$ [S1]. Note that $V_{\alpha}$ does *not* receive the view direction input [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def view_conditioned_rendering(x, v, use_viewdirs, embed_fn, embeddirs_fn, network_fn):
++def view_conditioned_render(x, v, use_viewdirs, embed_fn, embeddirs_fn, network_fn):
+     """
+-    x: Tensor of shape [..., 3], 3D coordinates.
+-    v: Tensor of shape [..., 3], normalized view directions.
+-    use_viewdirs: Boolean, whether to condition RGB on view direction.
+-    embed_fn: Function to encode 3D coordinates.
+-    embeddirs_fn: Function to encode view directions.
+-    network_fn: The neural network model.
++    x: 3D coordinates [B, 3]
++    v: Normalized view direction [B, 3]
++    use_viewdirs: Boolean flag
++    embed_fn: Function to encode 3D coordinates
++    embeddirs_fn: Function to encode view directions
++    network_fn: The RGB decoder MLP
+     """
+-    # 1. Encode spatial coordinates
++    # Step 1 & 2: Encode spatial coordinates
+     embedded = embed_fn(x)
+     
+-    # 2. Condition on view direction if enabled
++    # Step 3 & 4: Condition on view direction if enabled
+     if use_viewdirs:
+         embedded_dirs = embeddirs_fn(v)
+         # Concatenate spatial and view encodings
+         embedded = tf.concat([embedded, embedded_dirs], axis=-1)
++        
++    # Step 5: Predict RGB
++    # network_fn returns [B, 3] for RGB
++    rgb = network_fn(embedded)
+     
+-    # 3. Query the network
+-    # network_fn returns raw outputs (e.g., raw color, raw density)
+-    outputs = network_fn(embedded)
+-    
+-    # 4. Decode outputs
+-    # Note: The network architecture must separate RGB and alpha branches.
+-    # Only the RGB branch receives the view-conditioned input.
+-    raw_rgb, raw_alpha = decode_network_outputs(outputs)
+-    
+-    # Apply standard activations
+-    rgb = sigmoid(raw_rgb)
+-    alpha = softplus(raw_alpha) # or exp, depending on density representation
++    # Step 6: Predict Alpha (unconditional on view)
++    # In many implementations (like Neural Volumes), alpha is predicted 
++    # from a separate branch or the same network but without view input.
++    # Here we assume a separate call or branch for clarity based on [S1].
++    alpha = predict_alpha(x) # Implementation detail [G]
+     
+     return rgb, alpha
+ ```
+ 
++**Parameters:**
++*   `use_viewdirs`: Boolean flag to enable full 5D input (3D pos + 2D dir) instead of 3D [S2, unofficial].
++*   `input_ch_views`: Number of channels for view direction encoding (e.g., 3 for raw vector, or higher for Fourier features) [S2, unofficial].
++
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** View directions must be normalized before encoding to ensure consistent magnitude [S1].
+-*   **Boundaries:** The method assumes the view direction is well-defined (i.e., the ray origin and direction are valid) [S2, unofficial].
+-*   **Degenerate Input:** If `use_viewdirs` is true but view directions are not provided, the model will fail or produce undefined behavior [S2, unofficial].
++*   **Precision:** View directions must be normalized to unit length before encoding to ensure consistent magnitude in the positional encoding space [S1].
++*   **Degenerate Input:** If the view direction is zero (camera at origin with no direction), normalization fails. Guard against division by zero in normalization [G].
++*   **Overfitting:** Without sufficient data, view conditioning may overfit to specific viewpoints, causing artifacts in novel views [S1].
+ 
+ ## Subtopics
+ 
+ ### [View-Dependent Effects Preservation](13529-view-dependent-effects-preservation.md)
+-A method to preserve view-dependent information in pre-trained NeRFs by freezing weights of specific neurons in the last layer of the color MLP that exhibit view-dependent behavior [13529-view-dependent-effects-preservation.md]. It sets itself apart by focusing on *post-training* preservation rather than *training-time* conditioning. Choose this when you need to maintain view-dependent effects in a model that has already been trained without explicit view conditioning or when fine-tuning is not feasible. Link: [View-Dependent Effects Preservation](13529-view-dependent-effects-preservation.md).
++A technique used during the editing of pre-trained Neural Radiance Fields (NeRFs) to retain existing specularities and other view-dependent appearance effects that would otherwise be lost or distorted by global recoloring operations. It distinguishes itself from standard NeRF editing methods by automatically identifying and freezing specific neurons in the final color prediction layer that encode angular variation, thereby isolating geometry information from view-dependent appearance.
+ 
+ ### View-Dependent Feature MLP
+-Computes view-dependent features $F_i'$ by taking semantic features $F_i$ and relative view changes $\Delta v$ as inputs to model view-dependent effects like lighting and view direction. It sets itself apart by operating on *semantic features* from a point cloud rather than raw RGB from a volume, using relative view changes between input and target views. Choose this for point cloud-based novel view synthesis where geometric consistency across views is critical. Link: [View-Dependent Feature MLP](13529-view-dependent-effects-preservation.md) (Note: No separate article exists, so this is a minor variant described here).
+-
+-**Definition:** Computes view-dependent features $F_i'$ by taking semantic features $F_i$ and relative view changes $\Delta v$ as inputs to model view-dependent effects like lighting and view direction.
+-
+-**Steps:**
+-1.  Calculate relative view direction change $\Delta v$ based on normalized view directions $v_i$ and $v_t$ from the point to camera centers of input view $i$ and target view $t$.
+-2.  Map $\Delta v$ to a 32-dimension vector using a two-layer MLP $\delta$.
+-3.  Compute view-dependent feature $F_i'$ using a two-layer MLP $\psi$ on $F_i$ and $\delta(\Delta v)$.
+-
+-**Formula:**
+-$$ \Delta v = \left[ \frac{v_i - v_t}{\|v_i - v_t\|}, v_i \cdot v_t \right], v_i, v_t \in \mathbb{R}^3 $$
+-$$ F_i' = \psi(F_i, \delta(\Delta v)) $$
+-
+-**Parameters:**
+-*   MLP $\delta$: Two-layer MLP mapping $\Delta v$ to 32 dimensions.
+-*   MLP $\psi$: Two-layer MLP.
++Computes view-dependent features $F_i'$ by taking semantic features $F_i$ and relative view changes $\Delta v$ as inputs to model view-dependent effects like lighting and view direction [S3].
++*   **Definition:** Uses two-layer MLPs to map relative view changes to a feature vector, which is then combined with semantic features [S3].
++*   **Steps:**
++    1.  Calculate relative view direction change $\Delta v$ based on normalized view directions $v_i$ and $v_t$ from the point to camera centers of input view $i$ and target view $t$ [S3].
++    2.  Map $\Delta v$ to a 32-dimension vector using a two-layer MLP $\delta$ [S3].
++    3.  Compute view-dependent feature $F_i'$ using a two-layer MLP $\psi$ on $F_i$ and $\delta(\Delta v)$ [S3].
++*   **Formula:**
++    $$ \Delta v = \left[ \frac{v_i - v_t}{\|v_i - v_t\|}, v_i \cdot v_t \right], v_i, v_t \in \mathbb{R}^3 $$
++    $$ F_i' = \psi(F_i, \delta(\Delta v)) $$
++*   **Parameters:**
++    *   MLP $\delta$: Two-layer MLP mapping $\Delta v$ to 32 dimensions [S3].
++    *   MLP $\psi$: Two-layer MLP [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Adds minimal overhead to the rendering process, primarily the cost of encoding view directions and concatenating vectors [S2, unofficial]. The network inference time increases slightly due to the larger input dimension (5D vs 3D) [S2, unofficial].
+-*   **Memory Complexity:** Increases memory usage for the network weights slightly, as the first layer of the RGB decoder must accept a larger input dimension (3D pos + 2D dir) [S1][S2, unofficial].
+-*   **Measured Performance:** On a human face dataset, view conditioning reduced validation MSE from 117.8 to 85.7 [S1]. Training time was approximately 10 days on a single NVIDIA Tesla V100 for the full Neural Volumes model [S1].
+-*   **Scaling:** Scales with the complexity of the view-dependent effects; more complex specularities may require a larger network capacity [S1].
+-*   **Strengths:** Effectively models specularities and other view-dependent effects without specifying a functional form (e.g., Blinn-Phong) [S1]. Improves generalization to novel viewpoints [S1].
+-*   **Limitations:** Requires more training data to learn view-dependent effects accurately [S1]. Non-view-conditioned models may incorrectly reconstruct extra semi-transparent voxels to explain view-dependent phenomena, which this method avoids [S1].
+-*   **When to Use:** When the scene contains glossy, specular, or otherwise view-dependent materials [S1].
+-*   **When Not to Use:** When the scene is purely Lambertian and computational efficiency is paramount, as the added complexity may not be justified [S1].
++*   **Time Complexity:** Increases slightly compared to view-independent models due to the additional encoding step for view directions and the larger input dimension to the RGB decoder [S2, unofficial].
++*   **Memory Complexity:** Slightly higher due to the need to store and process view direction encodings, but the model size itself is comparable [S1].
++*   **Measured Performance:** On a human face dataset, view conditioning reduces validation MSE from 117.8 to 85.7 [S1]. Training time is approximately 10 days on a single NVIDIA Tesla V100, depending on dataset size [S1].
++*   **Strengths:** Better generalization to novel viewpoints; correctly models specularities without creating ghost geometry [S1].
++*   **Limitations:** Requires careful tuning of view direction encoding; may overfit if training data is sparse [S1].
++*   **When to use:** When the scene contains glossy or specular materials that change appearance with viewing angle [S1].
++*   **When not to use:** For purely diffuse, Lambertian surfaces where view dependence is negligible, as it adds unnecessary complexity [S1].
+ 
+ ## Background
+-Originated in the "Neural Volumes" paper by Lempitsky et al. (2019) [S1]. The method was developed to address the limitations of traditional volume rendering, which assumes view-independent appearance. It builds on the idea of using neural networks to represent volumetric functions, extending them to be view-dependent [S1]. It is used in neural rendering pipelines for dynamic and static scenes where view-dependent effects are prominent [S1].
++Originated in the "Neural Volumes" paper by Lempitsky et al. (2019) [S1]. The method was developed to address the limitations of earlier neural volume representations that could not capture view-dependent effects like specular highlights. It builds on the idea of conditioning neural networks on additional inputs (view direction) to expand their expressive power [S1]. The technique has been widely adopted in subsequent NeRF variants and neural rendering pipelines [S2, unofficial].
+ 
+ ## Sources

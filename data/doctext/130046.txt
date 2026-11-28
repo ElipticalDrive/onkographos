@@ -1,0 +1,3290 @@
+# GPU Sparse Voxel Octree
+
+<img src=".\assets\svo.png" alt="svo" style="zoom:33%;" />
+
+This repository contains a GPU-accelerated implementation of a sparse voxel octree (SVO) based on the techniques described in the papers *"Fast Parallel Surface and Solid Voxelization on GPUs"* ([ACM](https://dl.acm.org/doi/10.1145/1882261.1866201)) and *"Data-Parallel Octrees for Surface Reconstruction"* ([IEEE](https://ieeexplore.ieee.org/abstract/document/5473223)). The project leverages CUDA for parallel processing to efficiently voxelized given 3D models and structure them into an SVO using Morton codes.
+
+## Key Features
+
+- **Surface Voxelization**: Efficient GPU-based surface voxelization using the methodology outlined in [cuda_voxelizer](https://github.com/Forceflow/cuda_voxelizer).
+- **Sparse Voxel Octree Construction**: Constructs SVOs from voxelized data using a bottom-up approach with Morton codes for indexing and storage.
+- **Geometry Primitives Storage**: Utilizes Morton codes to store non-redundant geometric primitives - vertices, edges, and faces of voxels.
+
+## Prerequisites
+
+- NVIDIA GPU with CUDA Compute Capability 6.0 or higher.
+- CUDA Toolkit 11.6 or higher.
+- C++ compiler compatible with the CUDA version used. (C++17 at least)
+- CMake(>=3.18) for building the project.
+
+## Setup
+
+```bash
+git clone https://github.com/Alan-Leo-Wong/GPU-SVO.git
+cd GPU-SVO
+mkdir build && cd build
+cmake ..
+cmake --build . -j your-core-number
+```
+
+## Usage
+
+After compiling the project, you can run the executable using:
+
+```
+./main <input-mesh.obj> <resolution>
+```
+
+- `<input-mesh.obj>`: Path to the input .obj file.
+- `<resolution>`: Desired voxel resolution (e.g., 128).
+
+The output will be an .obj file named `<mesh_name>_depth_svo.obj`, which represents the constructed sparse voxel octree at the specified resolution.
+
+### main.cpp
+```
+﻿#include <string>
+#include <filesystem>
+#include "src/SVO.h"
+
+namespace fs = std::filesystem;
+
+int main(int argc, char **argv) {
+    const std::string inMesh = argc > 1 ? argv[1] : "bunny.obj";
+    const int res = argc > 2 ? std::stoi(argv[2]) : 64;
+    SparseVoxelOctree svo(inMesh, res, res, res);
+    svo.create();
+
+    const std::string inMeshName = fs::path(inMesh).stem().string();
+    svo.writeTree(inMeshName);
+
+    return 0;
+}
+```
+
+### src/BaseModel.cpp
+```
+#include "BaseModel.h"
+
+void BaseModel::loadOBJ(const std::string &in_file) {
+    std::ifstream in(in_file);
+    if (!in) {
+        std::cerr << "ERROR: loading obj:(" << in_file << ") file is not good" << std::endl;
+        exit(1);
+    }
+
+    float x, y, z;
+    int f0, _f0, f1, _f1, f2, _f2;
+    char buffer[256] = {0};
+    while (!in.getline(buffer, 255).eof()) {
+        if (buffer[0] == 'v' && (buffer[1] == ' ' || buffer[1] == 32)) {
+            if (sscanf_s(buffer, "v %f %f %f", &x, &y, &z) == 3)
+                modelPoints.emplace_back(Eigen::Vector3f{x, y, z});
+        } else if (buffer[0] == 'f' && (buffer[1] == ' ' || buffer[1] == 32)) {
+            if (sscanf_s(buffer, "f %d//%d %d//%d %d//%d", &f0, &_f0, &f1, &_f1, &f2, &_f2) == 6)
+                idx2Points.emplace_back(Eigen::Vector3i{f0 - 1, f1 - 1, f2 - 1});
+            else if (sscanf_s(buffer, "f %d/%d %d/%d %d/%d", &f0, &_f0, &f1, &_f1, &f2, &_f2) == 6)
+                idx2Points.emplace_back(Eigen::Vector3i{f0 - 1, f1 - 1, f2 - 1});
+            else if (sscanf_s(buffer, "f %d %d %d", &f0, &f1, &f2) == 3)
+                idx2Points.emplace_back(Eigen::Vector3i{f0 - 1, f1 - 1, f2 - 1});
+        }
+    }
+}
+```
+
+### src/BaseModel.h
+```
+#pragma once
+
+#include "CUDAUtil.h"
+#include <fstream>
+#include <stdint.h>
+#include <Eigen/Dense>
+
+// An Axis Aligned Box (AAB) of a certain type - to be initialized with a min and max
+template<typename Real>
+struct AABox {
+    Real min;
+    Real max;
+    Real width;
+
+    CUDA_CALLABLE_MEMBER
+
+    AABox() : min(Real()), max(Real()), width(Real()) {}
+
+    CUDA_CALLABLE_MEMBER
+
+    AABox(Real _min, Real _max) : min(_min), max(_max), width(_max - _min) {}
+};
+
+template<typename T>
+AABox<T> createMeshBBCube(AABox<T> box) {
+    AABox<T> answer(box.min, box.max); // initialize answer
+    Eigen::Vector3f lengths = box.max - box.min; // check length of given bbox in every direction
+    float max_length = fmaxf(lengths.x(), fmaxf(lengths.y(), lengths.z())); // find max length
+    for (unsigned int i = 0; i < 3; i++) { // for every direction (X,Y,Z)
+        if (max_length == lengths[i]) {
+            continue;
+        } else {
+            float delta =
+                    max_length - lengths[i]; // compute difference between largest length and current (X,Y or Z) length
+            answer.min[i] = box.min[i] - (delta / 2.0f); // pad with half the difference before current min
+            answer.max[i] = box.max[i] + (delta / 2.0f); // pad with half the difference behind current max
+        }
+    }
+
+    // Next snippet adresses the problem reported here: https://github.com/Forceflow/cuda_voxelizer/issues/7
+    // Suspected cause: If a triangle is axis-aligned and lies perfectly on a voxel edge, it sometimes gets counted / not counted
+    // Probably due to a numerical instability (division by zero?)
+    // Ugly fix: we pad the bounding box on all sides by 1/10001th of its total length, bringing all triangles ever so slightly off-grid
+    Eigen::Vector3f epsilon = (answer.max - answer.min) / 10001.0f;
+    answer.min -= epsilon;
+    answer.max += epsilon;
+    answer.width = answer.max - answer.min;
+    return answer;
+}
+
+class BaseModel {
+protected:
+    size_t nModelTris;
+    size_t nPoints;
+
+    std::vector<Eigen::Vector3i> idx2Points;
+    std::vector<Eigen::Vector3f> modelPoints;
+
+    AABox<Eigen::Vector3f> modelBBox;
+
+public:
+    BaseModel() {}
+
+    BaseModel(const std::string &filename) {
+        loadOBJ(filename);
+        nModelTris = idx2Points.size();
+        nPoints = modelPoints.size();
+        Eigen::Map <Eigen::Matrix<float, Eigen::Dynamic, 3, Eigen::RowMajor>> pointsMat(
+                reinterpret_cast<float *>(modelPoints.data()), modelPoints.size(), 3);
+        Eigen::Vector3f minPoint = pointsMat.colwise().minCoeff();
+        Eigen::Vector3f maxPoint = pointsMat.colwise().maxCoeff();
+        modelBBox = createMeshBBCube(AABox<Eigen::Vector3f>(minPoint, maxPoint));
+    }
+
+    void loadOBJ(const std::string &in_file);
+};
+```
+
+### src/CUDAUtil.h
+```
+#pragma once
+
+#include <stdio.h>
+#include <iostream>
+#include <Eigen/Dense>
+#include <cuda_runtime.h>
+#include <thrust/host_vector.h>
+#include <thrust/device_vector.h>
+#include <device_launch_parameters.h>
+
+#ifndef __CUDACC__
+#  define __CUDACC__
+#endif // !__CUDACC__
+
+#ifdef __CUDACC__
+#  define CUDA_CALLABLE_MEMBER __host__ __device__
+#else
+#  define CUDA_CALLABLE_MEMBER
+#endif
+
+#define CUDA_CHECK(call)                                                      \
+    do                                                                        \
+    {                                                                         \
+        const cudaError_t error_code = call;                                  \
+        if (error_code != cudaSuccess)                                        \
+        {                                                                     \
+            fprintf(stderr, "CUDA Error:\n");                                          \
+            fprintf(stderr, "    --File:       %s\n", __FILE__);                       \
+            fprintf(stderr, "    --Line:       %d\n", __LINE__);                       \
+            fprintf(stderr, "    --Error code: %d\n", error_code);                     \
+            fprintf(stderr, "    --Error text: %s\n", cudaGetErrorString(error_code)); \
+            exit(EXIT_FAILURE);                                                          \
+        }                                                                     \
+    } while (0);
+
+#define getLastCudaError(msg) __getLastCudaError(msg, __FILE__, __LINE__)
+inline void __getLastCudaError(const char* errorMessage, const char* file, const int line)
+{
+	const cudaError_t error_code = cudaGetLastError();
+
+	if (error_code != cudaSuccess)
+	{
+		fprintf(stderr, "%s(%d) : getLastCudaError() CUDA Error :"
+			" %s : (%d) %s.\n",
+			file, line, errorMessage, static_cast<int>(error_code), cudaGetErrorString(error_code));
+		exit(EXIT_FAILURE);
+	}
+}
+
+template<class T>
+static inline __host__ void getOccupancyMaxPotentialBlockSize(const uint32_t& dataSize,
+	int& minGridSize,
+	int& blockSize,
+	int& gridSize,
+	T      func,
+	size_t dynamicSMemSize = 0,
+	int    blockSizeLimit = 0)
+{
+	cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, func, dynamicSMemSize, blockSizeLimit);
+	gridSize = (dataSize + blockSize - 1) / blockSize;
+}
+
+template<class T>
+static inline __host__ void getOccupancyAvailableDynamicSMemPerBlock(const int& numBlocks,
+	const int& blockSize,
+	size_t& dynamicSmemSize,
+	T      func)
+{
+	cudaOccupancyAvailableDynamicSMemPerBlock(&dynamicSmemSize, func, numBlocks, blockSize);
+}
+
+inline CUDA_CALLABLE_MEMBER float fminf(float a, float b)
+{
+	return a < b ? a : b;
+}
+
+inline CUDA_CALLABLE_MEMBER float fmaxf(float a, float b)
+{
+	return a > b ? a : b;
+}
+
+inline CUDA_CALLABLE_MEMBER int mini(int a, int b)
+{
+	return a < b ? a : b;
+}
+
+inline CUDA_CALLABLE_MEMBER int maxi(int a, int b)
+{
+	return a > b ? a : b;
+}
+
+inline CUDA_CALLABLE_MEMBER Eigen::Vector3f fminf(Eigen::Vector3f a, Eigen::Vector3f b)
+{
+	return Eigen::Vector3f(fminf(a.x(), b.x()), fminf(a.y(), b.y()), fminf(a.z(), b.z()));
+}
+
+inline CUDA_CALLABLE_MEMBER Eigen::Vector3f fmaxf(Eigen::Vector3f a, Eigen::Vector3f b)
+{
+	return Eigen::Vector3f(fmaxf(a.x(), b.x()), fmaxf(a.y(), b.y()), fmaxf(a.z(), b.z()));
+}
+
+inline CUDA_CALLABLE_MEMBER float clamp(float f, float a, float b)
+{
+	return fmaxf(a, fminf(f, b));
+}
+
+inline CUDA_CALLABLE_MEMBER int clamp(int f, int a, int b)
+{
+	return maxi(a, mini(f, b));
+}
+
+inline CUDA_CALLABLE_MEMBER Eigen::Vector3f clamp(Eigen::Vector3f v, Eigen::Vector3f a, Eigen::Vector3f b)
+{
+	return Eigen::Vector3f(clamp(v.x(), a.x(), b.x()), clamp(v.y(), a.y(), b.y()), clamp(v.z(), a.z(), b.z()));
+}
+
+inline CUDA_CALLABLE_MEMBER Eigen::Vector3i clamp(Eigen::Vector3i v, Eigen::Vector3i a, Eigen::Vector3i b)
+{
+	return Eigen::Vector3i(clamp(v.x(), a.x(), b.x()), clamp(v.y(), a.y(), b.y()), clamp(v.z(), a.z(), b.z()));
+}
+
+//thrust::host_vector<Eigen::Vector3f>* h_triangleThrustVec;
+//thrust::device_vector<Eigen::Vector3f>* d_triangleThrustVec;
+//
+//float* meshToGPU_thrust(const std::vector<Eigen::Vector3i>& triPointsIdx,
+//	const std::vector<Eigen::Vector3f>& modelPoints) {
+//	// create vectors on heap 
+//	h_triangleThrustVec = new thrust::host_vector<Eigen::Vector3f>;
+//	d_triangleThrustVec = new thrust::device_vector<Eigen::Vector3f>;
+//	// fill host vector
+//	const size_t faces = triPointsIdx.size();
+//	for (int i = 0; i < faces; ++i)
+//	{
+//		h_triangleThrustVec->push_back(modelPoints[triPointsIdx[i].x()]);
+//		h_triangleThrustVec->push_back(modelPoints[triPointsIdx[i].y()]);
+//		h_triangleThrustVec->push_back(modelPoints[triPointsIdx[i].z()]);
+//	}
+//	*d_triangleThrustVec = *h_triangleThrustVec;
+//	//return ((*d_triangleThrustVec).data()->data());
+//	return (float*)thrust::raw_pointer_cast(&((*d_triangleThrustVec)[0]));
+//}
+
+template<typename T>
+void resizeThrust(thrust::device_vector<T>& d_vec, const size_t& dataSize)
+{
+	d_vec.resize(dataSize); d_vec.shrink_to_fit();
+}
+
+template<typename T>
+void resizeThrust(thrust::device_vector<T>& d_vec, const size_t& dataSize, const T& init)
+{
+	d_vec.resize(dataSize, init); d_vec.shrink_to_fit();
+}
+
+template<typename T>
+void cleanupThrust(thrust::device_vector<T>& d_vec)
+{
+	d_vec.clear(); d_vec.shrink_to_fit();
+}
+
+//void cleanup_thrust() {
+//    fprintf(stdout, "[Mesh] Freeing Thrust host and device vectors \n");
+//    if (d_triangleThrustVec) free(d_triangleThrustVec);
+//    if (h_triangleThrustVec) free(h_triangleThrustVec);
+//}
+```
+
+### src/IO.h
+```
+#pragma once
+
+#include <fstream>
+#include <Eigen/Dense>
+#include "MortonLUT.h"
+
+// Helper function to write single vertex to OBJ file
+static void write_vertex(std::ofstream &output, const Eigen::Vector3f &v) {
+    output << "v " << v.x() << " " << v.y() << " " << v.z() << std::endl;
+}
+
+// Helper function to write face
+static void write_face(std::ofstream &output, const Eigen::Vector3i &f) {
+    output << "f " << f.x() << " " << f.y() << " " << f.z() << std::endl;
+}
+
+// Helper function to write line
+static void write_line(std::ofstream &output, const Eigen::Vector2i &l) {
+    output << "l " << l.x() << " " << l.y() << std::endl;
+}
+
+// Helper function to write full cube (using relative vertex positions in the OBJ file - support for this should be widespread by now)
+void
+write_cube(const Eigen::Vector3f &nodeOrigin, const Eigen::Vector3f &unit, std::ofstream &output, size_t &faceBegIdx) {
+    //	   2-------1
+    //	  /|      /|
+    //	 / |     / |
+    //	7--|----8  |
+    //	|  4----|--3
+    //	| /     | /
+    //	5-------6
+    // Create vertices
+    Eigen::Vector3f v1 = nodeOrigin + Eigen::Vector3f(0, unit.y(), unit.z());
+    Eigen::Vector3f v2 = nodeOrigin + Eigen::Vector3f(0, 0, unit.z());
+    Eigen::Vector3f v3 = nodeOrigin + Eigen::Vector3f(0, unit.y(), 0);
+    Eigen::Vector3f v4 = nodeOrigin;
+    Eigen::Vector3f v5 = nodeOrigin + Eigen::Vector3f(unit.x(), 0, 0);
+    Eigen::Vector3f v6 = nodeOrigin + Eigen::Vector3f(unit.x(), unit.y(), 0);
+    Eigen::Vector3f v7 = nodeOrigin + Eigen::Vector3f(unit.x(), 0, unit.z());
+    Eigen::Vector3f v8 = nodeOrigin + Eigen::Vector3f(unit.x(), unit.y(), unit.z());
+
+    // write them in reverse order, so relative position is -i for v_i
+    write_vertex(output, v1);
+    write_vertex(output, v2);
+    write_vertex(output, v3);
+    write_vertex(output, v4);
+    write_vertex(output, v5);
+    write_vertex(output, v6);
+    write_vertex(output, v7);
+    write_vertex(output, v8);
+
+    // create faces
+#ifdef MESH_WRITE
+    // back
+    write_face(output, Eigen::Vector3i(faceBegIdx + 1, faceBegIdx + 3, faceBegIdx + 4));
+    write_face(output, Eigen::Vector3i(faceBegIdx + 1, faceBegIdx + 4, faceBegIdx + 2));
+// bottom
+    write_face(output, Eigen::Vector3i(faceBegIdx + 4, faceBegIdx + 3, faceBegIdx + 6));
+    write_face(output, Eigen::Vector3i(faceBegIdx + 4, faceBegIdx + 6, faceBegIdx + 5));
+// right
+    write_face(output, Eigen::Vector3i(faceBegIdx + 3, faceBegIdx + 1, faceBegIdx + 8));
+    write_face(output, Eigen::Vector3i(faceBegIdx + 3, faceBegIdx + 8, faceBegIdx + 6));
+// top
+    write_face(output, Eigen::Vector3i(faceBegIdx + 1, faceBegIdx + 2, faceBegIdx + 7));
+    write_face(output, Eigen::Vector3i(faceBegIdx + 1, faceBegIdx + 7, faceBegIdx + 8));
+// left
+    write_face(output, Eigen::Vector3i(faceBegIdx + 2, faceBegIdx + 4, faceBegIdx + 5));
+    write_face(output, Eigen::Vector3i(faceBegIdx + 2, faceBegIdx + 5, faceBegIdx + 7));
+// front
+    write_face(output, Eigen::Vector3i(faceBegIdx + 5, faceBegIdx + 6, faceBegIdx + 8));
+    write_face(output, Eigen::Vector3i(faceBegIdx + 5, faceBegIdx + 8, faceBegIdx + 7));
+#  else
+    write_line(output, Eigen::Vector2i(faceBegIdx + 1, faceBegIdx + 2));
+    write_line(output, Eigen::Vector2i(faceBegIdx + 2, faceBegIdx + 7));
+    write_line(output, Eigen::Vector2i(faceBegIdx + 7, faceBegIdx + 8));
+    write_line(output, Eigen::Vector2i(faceBegIdx + 8, faceBegIdx + 1));
+
+    write_line(output, Eigen::Vector2i(faceBegIdx + 3, faceBegIdx + 4));
+    write_line(output, Eigen::Vector2i(faceBegIdx + 4, faceBegIdx + 5));
+    write_line(output, Eigen::Vector2i(faceBegIdx + 5, faceBegIdx + 6));
+    write_line(output, Eigen::Vector2i(faceBegIdx + 6, faceBegIdx + 3));
+
+    write_line(output, Eigen::Vector2i(faceBegIdx + 3, faceBegIdx + 1));
+    write_line(output, Eigen::Vector2i(faceBegIdx + 4, faceBegIdx + 2));
+    write_line(output, Eigen::Vector2i(faceBegIdx + 5, faceBegIdx + 7));
+    write_line(output, Eigen::Vector2i(faceBegIdx + 6, faceBegIdx + 8));
+#endif
+
+    faceBegIdx += 8;
+}
+```
+
+### src/MortonLUT.h
+```
+#pragma once
+
+#include <stdint.h>
+#include <device_launch_parameters.h>
+
+#define E_MORTON_32_FLAG 0x80000000
+#define D_MORTON_32_FLAG 0x7FFFFFFF
+#define EIGHT_BIT_MASK 0x000000FF
+#define NINE_BIT_MASK 0x000001FF
+#define LOWER_3BIT_MASK 0x00000007
+
+// LUT tables to copy to GPU memory for quick morton decode / encode
+static constexpr uint32_t h_morton256_x[256] =
+        {
+                0x00000000,
+                0x00000001, 0x00000008, 0x00000009, 0x00000040, 0x00000041, 0x00000048, 0x00000049, 0x00000200,
+                0x00000201, 0x00000208, 0x00000209, 0x00000240, 0x00000241, 0x00000248, 0x00000249, 0x00001000,
+                0x00001001, 0x00001008, 0x00001009, 0x00001040, 0x00001041, 0x00001048, 0x00001049, 0x00001200,
+                0x00001201, 0x00001208, 0x00001209, 0x00001240, 0x00001241, 0x00001248, 0x00001249, 0x00008000,
+                0x00008001, 0x00008008, 0x00008009, 0x00008040, 0x00008041, 0x00008048, 0x00008049, 0x00008200,
+                0x00008201, 0x00008208, 0x00008209, 0x00008240, 0x00008241, 0x00008248, 0x00008249, 0x00009000,
+                0x00009001, 0x00009008, 0x00009009, 0x00009040, 0x00009041, 0x00009048, 0x00009049, 0x00009200,
+                0x00009201, 0x00009208, 0x00009209, 0x00009240, 0x00009241, 0x00009248, 0x00009249, 0x00040000,
+                0x00040001, 0x00040008, 0x00040009, 0x00040040, 0x00040041, 0x00040048, 0x00040049, 0x00040200,
+                0x00040201, 0x00040208, 0x00040209, 0x00040240, 0x00040241, 0x00040248, 0x00040249, 0x00041000,
+                0x00041001, 0x00041008, 0x00041009, 0x00041040, 0x00041041, 0x00041048, 0x00041049, 0x00041200,
+                0x00041201, 0x00041208, 0x00041209, 0x00041240, 0x00041241, 0x00041248, 0x00041249, 0x00048000,
+                0x00048001, 0x00048008, 0x00048009, 0x00048040, 0x00048041, 0x00048048, 0x00048049, 0x00048200,
+                0x00048201, 0x00048208, 0x00048209, 0x00048240, 0x00048241, 0x00048248, 0x00048249, 0x00049000,
+                0x00049001, 0x00049008, 0x00049009, 0x00049040, 0x00049041, 0x00049048, 0x00049049, 0x00049200,
+                0x00049201, 0x00049208, 0x00049209, 0x00049240, 0x00049241, 0x00049248, 0x00049249, 0x00200000,
+                0x00200001, 0x00200008, 0x00200009, 0x00200040, 0x00200041, 0x00200048, 0x00200049, 0x00200200,
+                0x00200201, 0x00200208, 0x00200209, 0x00200240, 0x00200241, 0x00200248, 0x00200249, 0x00201000,
+                0x00201001, 0x00201008, 0x00201009, 0x00201040, 0x00201041, 0x00201048, 0x00201049, 0x00201200,
+                0x00201201, 0x00201208, 0x00201209, 0x00201240, 0x00201241, 0x00201248, 0x00201249, 0x00208000,
+                0x00208001, 0x00208008, 0x00208009, 0x00208040, 0x00208041, 0x00208048, 0x00208049, 0x00208200,
+                0x00208201, 0x00208208, 0x00208209, 0x00208240, 0x00208241, 0x00208248, 0x00208249, 0x00209000,
+                0x00209001, 0x00209008, 0x00209009, 0x00209040, 0x00209041, 0x00209048, 0x00209049, 0x00209200,
+                0x00209201, 0x00209208, 0x00209209, 0x00209240, 0x00209241, 0x00209248, 0x00209249, 0x00240000,
+                0x00240001, 0x00240008, 0x00240009, 0x00240040, 0x00240041, 0x00240048, 0x00240049, 0x00240200,
+                0x00240201, 0x00240208, 0x00240209, 0x00240240, 0x00240241, 0x00240248, 0x00240249, 0x00241000,
+                0x00241001, 0x00241008, 0x00241009, 0x00241040, 0x00241041, 0x00241048, 0x00241049, 0x00241200,
+                0x00241201, 0x00241208, 0x00241209, 0x00241240, 0x00241241, 0x00241248, 0x00241249, 0x00248000,
+                0x00248001, 0x00248008, 0x00248009, 0x00248040, 0x00248041, 0x00248048, 0x00248049, 0x00248200,
+                0x00248201, 0x00248208, 0x00248209, 0x00248240, 0x00248241, 0x00248248, 0x00248249, 0x00249000,
+                0x00249001, 0x00249008, 0x00249009, 0x00249040, 0x00249041, 0x00249048, 0x00249049, 0x00249200,
+                0x00249201, 0x00249208, 0x00249209, 0x00249240, 0x00249241, 0x00249248, 0x00249249
+        };
+
+static constexpr uint32_t h_morton256_y[256] =
+        {
+                0x00000000,
+                0x00000002, 0x00000010, 0x00000012, 0x00000080, 0x00000082, 0x00000090, 0x00000092, 0x00000400,
+                0x00000402, 0x00000410, 0x00000412, 0x00000480, 0x00000482, 0x00000490, 0x00000492, 0x00002000,
+                0x00002002, 0x00002010, 0x00002012, 0x00002080, 0x00002082, 0x00002090, 0x00002092, 0x00002400,
+                0x00002402, 0x00002410, 0x00002412, 0x00002480, 0x00002482, 0x00002490, 0x00002492, 0x00010000,
+                0x00010002, 0x00010010, 0x00010012, 0x00010080, 0x00010082, 0x00010090, 0x00010092, 0x00010400,
+                0x00010402, 0x00010410, 0x00010412, 0x00010480, 0x00010482, 0x00010490, 0x00010492, 0x00012000,
+                0x00012002, 0x00012010, 0x00012012, 0x00012080, 0x00012082, 0x00012090, 0x00012092, 0x00012400,
+                0x00012402, 0x00012410, 0x00012412, 0x00012480, 0x00012482, 0x00012490, 0x00012492, 0x00080000,
+                0x00080002, 0x00080010, 0x00080012, 0x00080080, 0x00080082, 0x00080090, 0x00080092, 0x00080400,
+                0x00080402, 0x00080410, 0x00080412, 0x00080480, 0x00080482, 0x00080490, 0x00080492, 0x00082000,
+                0x00082002, 0x00082010, 0x00082012, 0x00082080, 0x00082082, 0x00082090, 0x00082092, 0x00082400,
+                0x00082402, 0x00082410, 0x00082412, 0x00082480, 0x00082482, 0x00082490, 0x00082492, 0x00090000,
+                0x00090002, 0x00090010, 0x00090012, 0x00090080, 0x00090082, 0x00090090, 0x00090092, 0x00090400,
+                0x00090402, 0x00090410, 0x00090412, 0x00090480, 0x00090482, 0x00090490, 0x00090492, 0x00092000,
+                0x00092002, 0x00092010, 0x00092012, 0x00092080, 0x00092082, 0x00092090, 0x00092092, 0x00092400,
+                0x00092402, 0x00092410, 0x00092412, 0x00092480, 0x00092482, 0x00092490, 0x00092492, 0x00400000,
+                0x00400002, 0x00400010, 0x00400012, 0x00400080, 0x00400082, 0x00400090, 0x00400092, 0x00400400,
+                0x00400402, 0x00400410, 0x00400412, 0x00400480, 0x00400482, 0x00400490, 0x00400492, 0x00402000,
+                0x00402002, 0x00402010, 0x00402012, 0x00402080, 0x00402082, 0x00402090, 0x00402092, 0x00402400,
+                0x00402402, 0x00402410, 0x00402412, 0x00402480, 0x00402482, 0x00402490, 0x00402492, 0x00410000,
+                0x00410002, 0x00410010, 0x00410012, 0x00410080, 0x00410082, 0x00410090, 0x00410092, 0x00410400,
+                0x00410402, 0x00410410, 0x00410412, 0x00410480, 0x00410482, 0x00410490, 0x00410492, 0x00412000,
+                0x00412002, 0x00412010, 0x00412012, 0x00412080, 0x00412082, 0x00412090, 0x00412092, 0x00412400,
+                0x00412402, 0x00412410, 0x00412412, 0x00412480, 0x00412482, 0x00412490, 0x00412492, 0x00480000,
+                0x00480002, 0x00480010, 0x00480012, 0x00480080, 0x00480082, 0x00480090, 0x00480092, 0x00480400,
+                0x00480402, 0x00480410, 0x00480412, 0x00480480, 0x00480482, 0x00480490, 0x00480492, 0x00482000,
+                0x00482002, 0x00482010, 0x00482012, 0x00482080, 0x00482082, 0x00482090, 0x00482092, 0x00482400,
+                0x00482402, 0x00482410, 0x00482412, 0x00482480, 0x00482482, 0x00482490, 0x00482492, 0x00490000,
+                0x00490002, 0x00490010, 0x00490012, 0x00490080, 0x00490082, 0x00490090, 0x00490092, 0x00490400,
+                0x00490402, 0x00490410, 0x00490412, 0x00490480, 0x00490482, 0x00490490, 0x00490492, 0x00492000,
+                0x00492002, 0x00492010, 0x00492012, 0x00492080, 0x00492082, 0x00492090, 0x00492092, 0x00492400,
+                0x00492402, 0x00492410, 0x00492412, 0x00492480, 0x00492482, 0x00492490, 0x00492492
+        };
+
+static constexpr uint32_t h_morton256_z[256] =
+        {
+                0x00000000,
+                0x00000004, 0x00000020, 0x00000024, 0x00000100, 0x00000104, 0x00000120, 0x00000124, 0x00000800,
+                0x00000804, 0x00000820, 0x00000824, 0x00000900, 0x00000904, 0x00000920, 0x00000924, 0x00004000,
+                0x00004004, 0x00004020, 0x00004024, 0x00004100, 0x00004104, 0x00004120, 0x00004124, 0x00004800,
+                0x00004804, 0x00004820, 0x00004824, 0x00004900, 0x00004904, 0x00004920, 0x00004924, 0x00020000,
+                0x00020004, 0x00020020, 0x00020024, 0x00020100, 0x00020104, 0x00020120, 0x00020124, 0x00020800,
+                0x00020804, 0x00020820, 0x00020824, 0x00020900, 0x00020904, 0x00020920, 0x00020924, 0x00024000,
+                0x00024004, 0x00024020, 0x00024024, 0x00024100, 0x00024104, 0x00024120, 0x00024124, 0x00024800,
+                0x00024804, 0x00024820, 0x00024824, 0x00024900, 0x00024904, 0x00024920, 0x00024924, 0x00100000,
+                0x00100004, 0x00100020, 0x00100024, 0x00100100, 0x00100104, 0x00100120, 0x00100124, 0x00100800,
+                0x00100804, 0x00100820, 0x00100824, 0x00100900, 0x00100904, 0x00100920, 0x00100924, 0x00104000,
+                0x00104004, 0x00104020, 0x00104024, 0x00104100, 0x00104104, 0x00104120, 0x00104124, 0x00104800,
+                0x00104804, 0x00104820, 0x00104824, 0x00104900, 0x00104904, 0x00104920, 0x00104924, 0x00120000,
+                0x00120004, 0x00120020, 0x00120024, 0x00120100, 0x00120104, 0x00120120, 0x00120124, 0x00120800,
+                0x00120804, 0x00120820, 0x00120824, 0x00120900, 0x00120904, 0x00120920, 0x00120924, 0x00124000,
+                0x00124004, 0x00124020, 0x00124024, 0x00124100, 0x00124104, 0x00124120, 0x00124124, 0x00124800,
+                0x00124804, 0x00124820, 0x00124824, 0x00124900, 0x00124904, 0x00124920, 0x00124924, 0x00800000,
+                0x00800004, 0x00800020, 0x00800024, 0x00800100, 0x00800104, 0x00800120, 0x00800124, 0x00800800,
+                0x00800804, 0x00800820, 0x00800824, 0x00800900, 0x00800904, 0x00800920, 0x00800924, 0x00804000,
+                0x00804004, 0x00804020, 0x00804024, 0x00804100, 0x00804104, 0x00804120, 0x00804124, 0x00804800,
+                0x00804804, 0x00804820, 0x00804824, 0x00804900, 0x00804904, 0x00804920, 0x00804924, 0x00820000,
+                0x00820004, 0x00820020, 0x00820024, 0x00820100, 0x00820104, 0x00820120, 0x00820124, 0x00820800,
+                0x00820804, 0x00820820, 0x00820824, 0x00820900, 0x00820904, 0x00820920, 0x00820924, 0x00824000,
+                0x00824004, 0x00824020, 0x00824024, 0x00824100, 0x00824104, 0x00824120, 0x00824124, 0x00824800,
+                0x00824804, 0x00824820, 0x00824824, 0x00824900, 0x00824904, 0x00824920, 0x00824924, 0x00900000,
+                0x00900004, 0x00900020, 0x00900024, 0x00900100, 0x00900104, 0x00900120, 0x00900124, 0x00900800,
+                0x00900804, 0x00900820, 0x00900824, 0x00900900, 0x00900904, 0x00900920, 0x00900924, 0x00904000,
+                0x00904004, 0x00904020, 0x00904024, 0x00904100, 0x00904104, 0x00904120, 0x00904124, 0x00904800,
+                0x00904804, 0x00904820, 0x00904824, 0x00904900, 0x00904904, 0x00904920, 0x00904924, 0x00920000,
+                0x00920004, 0x00920020, 0x00920024, 0x00920100, 0x00920104, 0x00920120, 0x00920124, 0x00920800,
+                0x00920804, 0x00920820, 0x00920824, 0x00920900, 0x00920904, 0x00920920, 0x00920924, 0x00924000,
+                0x00924004, 0x00924020, 0x00924024, 0x00924100, 0x00924104, 0x00924120, 0x00924124, 0x00924800,
+                0x00924804, 0x00924820, 0x00924824, 0x00924900, 0x00924904, 0x00924920, 0x00924924
+        };
+
+__constant__ uint32_t d_morton256_x[256] =
+        {
+                0x00000000,
+                0x00000001, 0x00000008, 0x00000009, 0x00000040, 0x00000041, 0x00000048, 0x00000049, 0x00000200,
+                0x00000201, 0x00000208, 0x00000209, 0x00000240, 0x00000241, 0x00000248, 0x00000249, 0x00001000,
+                0x00001001, 0x00001008, 0x00001009, 0x00001040, 0x00001041, 0x00001048, 0x00001049, 0x00001200,
+                0x00001201, 0x00001208, 0x00001209, 0x00001240, 0x00001241, 0x00001248, 0x00001249, 0x00008000,
+                0x00008001, 0x00008008, 0x00008009, 0x00008040, 0x00008041, 0x00008048, 0x00008049, 0x00008200,
+                0x00008201, 0x00008208, 0x00008209, 0x00008240, 0x00008241, 0x00008248, 0x00008249, 0x00009000,
+                0x00009001, 0x00009008, 0x00009009, 0x00009040, 0x00009041, 0x00009048, 0x00009049, 0x00009200,
+                0x00009201, 0x00009208, 0x00009209, 0x00009240, 0x00009241, 0x00009248, 0x00009249, 0x00040000,
+                0x00040001, 0x00040008, 0x00040009, 0x00040040, 0x00040041, 0x00040048, 0x00040049, 0x00040200,
+                0x00040201, 0x00040208, 0x00040209, 0x00040240, 0x00040241, 0x00040248, 0x00040249, 0x00041000,
+                0x00041001, 0x00041008, 0x00041009, 0x00041040, 0x00041041, 0x00041048, 0x00041049, 0x00041200,
+                0x00041201, 0x00041208, 0x00041209, 0x00041240, 0x00041241, 0x00041248, 0x00041249, 0x00048000,
+                0x00048001, 0x00048008, 0x00048009, 0x00048040, 0x00048041, 0x00048048, 0x00048049, 0x00048200,
+                0x00048201, 0x00048208, 0x00048209, 0x00048240, 0x00048241, 0x00048248, 0x00048249, 0x00049000,
+                0x00049001, 0x00049008, 0x00049009, 0x00049040, 0x00049041, 0x00049048, 0x00049049, 0x00049200,
+                0x00049201, 0x00049208, 0x00049209, 0x00049240, 0x00049241, 0x00049248, 0x00049249, 0x00200000,
+                0x00200001, 0x00200008, 0x00200009, 0x00200040, 0x00200041, 0x00200048, 0x00200049, 0x00200200,
+                0x00200201, 0x00200208, 0x00200209, 0x00200240, 0x00200241, 0x00200248, 0x00200249, 0x00201000,
+                0x00201001, 0x00201008, 0x00201009, 0x00201040, 0x00201041, 0x00201048, 0x00201049, 0x00201200,
+                0x00201201, 0x00201208, 0x00201209, 0x00201240, 0x00201241, 0x00201248, 0x00201249, 0x00208000,
+                0x00208001, 0x00208008, 0x00208009, 0x00208040, 0x00208041, 0x00208048, 0x00208049, 0x00208200,
+                0x00208201, 0x00208208, 0x00208209, 0x00208240, 0x00208241, 0x00208248, 0x00208249, 0x00209000,
+                0x00209001, 0x00209008, 0x00209009, 0x00209040, 0x00209041, 0x00209048, 0x00209049, 0x00209200,
+                0x00209201, 0x00209208, 0x00209209, 0x00209240, 0x00209241, 0x00209248, 0x00209249, 0x00240000,
+                0x00240001, 0x00240008, 0x00240009, 0x00240040, 0x00240041, 0x00240048, 0x00240049, 0x00240200,
+                0x00240201, 0x00240208, 0x00240209, 0x00240240, 0x00240241, 0x00240248, 0x00240249, 0x00241000,
+                0x00241001, 0x00241008, 0x00241009, 0x00241040, 0x00241041, 0x00241048, 0x00241049, 0x00241200,
+                0x00241201, 0x00241208, 0x00241209, 0x00241240, 0x00241241, 0x00241248, 0x00241249, 0x00248000,
+                0x00248001, 0x00248008, 0x00248009, 0x00248040, 0x00248041, 0x00248048, 0x00248049, 0x00248200,
+                0x00248201, 0x00248208, 0x00248209, 0x00248240, 0x00248241, 0x00248248, 0x00248249, 0x00249000,
+                0x00249001, 0x00249008, 0x00249009, 0x00249040, 0x00249041, 0x00249048, 0x00249049, 0x00249200,
+                0x00249201, 0x00249208, 0x00249209, 0x00249240, 0x00249241, 0x00249248, 0x00249249
+        };
+
+__constant__ uint32_t d_morton256_y[256] =
+        {
+                0x00000000,
+                0x00000002, 0x00000010, 0x00000012, 0x00000080, 0x00000082, 0x00000090, 0x00000092, 0x00000400,
+                0x00000402, 0x00000410, 0x00000412, 0x00000480, 0x00000482, 0x00000490, 0x00000492, 0x00002000,
+                0x00002002, 0x00002010, 0x00002012, 0x00002080, 0x00002082, 0x00002090, 0x00002092, 0x00002400,
+                0x00002402, 0x00002410, 0x00002412, 0x00002480, 0x00002482, 0x00002490, 0x00002492, 0x00010000,
+                0x00010002, 0x00010010, 0x00010012, 0x00010080, 0x00010082, 0x00010090, 0x00010092, 0x00010400,
+                0x00010402, 0x00010410, 0x00010412, 0x00010480, 0x00010482, 0x00010490, 0x00010492, 0x00012000,
+                0x00012002, 0x00012010, 0x00012012, 0x00012080, 0x00012082, 0x00012090, 0x00012092, 0x00012400,
+                0x00012402, 0x00012410, 0x00012412, 0x00012480, 0x00012482, 0x00012490, 0x00012492, 0x00080000,
+                0x00080002, 0x00080010, 0x00080012, 0x00080080, 0x00080082, 0x00080090, 0x00080092, 0x00080400,
+                0x00080402, 0x00080410, 0x00080412, 0x00080480, 0x00080482, 0x00080490, 0x00080492, 0x00082000,
+                0x00082002, 0x00082010, 0x00082012, 0x00082080, 0x00082082, 0x00082090, 0x00082092, 0x00082400,
+                0x00082402, 0x00082410, 0x00082412, 0x00082480, 0x00082482, 0x00082490, 0x00082492, 0x00090000,
+                0x00090002, 0x00090010, 0x00090012, 0x00090080, 0x00090082, 0x00090090, 0x00090092, 0x00090400,
+                0x00090402, 0x00090410, 0x00090412, 0x00090480, 0x00090482, 0x00090490, 0x00090492, 0x00092000,
+                0x00092002, 0x00092010, 0x00092012, 0x00092080, 0x00092082, 0x00092090, 0x00092092, 0x00092400,
+                0x00092402, 0x00092410, 0x00092412, 0x00092480, 0x00092482, 0x00092490, 0x00092492, 0x00400000,
+                0x00400002, 0x00400010, 0x00400012, 0x00400080, 0x00400082, 0x00400090, 0x00400092, 0x00400400,
+                0x00400402, 0x00400410, 0x00400412, 0x00400480, 0x00400482, 0x00400490, 0x00400492, 0x00402000,
+                0x00402002, 0x00402010, 0x00402012, 0x00402080, 0x00402082, 0x00402090, 0x00402092, 0x00402400,
+                0x00402402, 0x00402410, 0x00402412, 0x00402480, 0x00402482, 0x00402490, 0x00402492, 0x00410000,
+                0x00410002, 0x00410010, 0x00410012, 0x00410080, 0x00410082, 0x00410090, 0x00410092, 0x00410400,
+                0x00410402, 0x00410410, 0x00410412, 0x00410480, 0x00410482, 0x00410490, 0x00410492, 0x00412000,
+                0x00412002, 0x00412010, 0x00412012, 0x00412080, 0x00412082, 0x00412090, 0x00412092, 0x00412400,
+                0x00412402, 0x00412410, 0x00412412, 0x00412480, 0x00412482, 0x00412490, 0x00412492, 0x00480000,
+                0x00480002, 0x00480010, 0x00480012, 0x00480080, 0x00480082, 0x00480090, 0x00480092, 0x00480400,
+                0x00480402, 0x00480410, 0x00480412, 0x00480480, 0x00480482, 0x00480490, 0x00480492, 0x00482000,
+                0x00482002, 0x00482010, 0x00482012, 0x00482080, 0x00482082, 0x00482090, 0x00482092, 0x00482400,
+                0x00482402, 0x00482410, 0x00482412, 0x00482480, 0x00482482, 0x00482490, 0x00482492, 0x00490000,
+                0x00490002, 0x00490010, 0x00490012, 0x00490080, 0x00490082, 0x00490090, 0x00490092, 0x00490400,
+                0x00490402, 0x00490410, 0x00490412, 0x00490480, 0x00490482, 0x00490490, 0x00490492, 0x00492000,
+                0x00492002, 0x00492010, 0x00492012, 0x00492080, 0x00492082, 0x00492090, 0x00492092, 0x00492400,
+                0x00492402, 0x00492410, 0x00492412, 0x00492480, 0x00492482, 0x00492490, 0x00492492
+        };
+
+__constant__ uint32_t d_morton256_z[256] =
+        {
+                0x00000000,
+                0x00000004, 0x00000020, 0x00000024, 0x00000100, 0x00000104, 0x00000120, 0x00000124, 0x00000800,
+                0x00000804, 0x00000820, 0x00000824, 0x00000900, 0x00000904, 0x00000920, 0x00000924, 0x00004000,
+                0x00004004, 0x00004020, 0x00004024, 0x00004100, 0x00004104, 0x00004120, 0x00004124, 0x00004800,
+                0x00004804, 0x00004820, 0x00004824, 0x00004900, 0x00004904, 0x00004920, 0x00004924, 0x00020000,
+                0x00020004, 0x00020020, 0x00020024, 0x00020100, 0x00020104, 0x00020120, 0x00020124, 0x00020800,
+                0x00020804, 0x00020820, 0x00020824, 0x00020900, 0x00020904, 0x00020920, 0x00020924, 0x00024000,
+                0x00024004, 0x00024020, 0x00024024, 0x00024100, 0x00024104, 0x00024120, 0x00024124, 0x00024800,
+                0x00024804, 0x00024820, 0x00024824, 0x00024900, 0x00024904, 0x00024920, 0x00024924, 0x00100000,
+                0x00100004, 0x00100020, 0x00100024, 0x00100100, 0x00100104, 0x00100120, 0x00100124, 0x00100800,
+                0x00100804, 0x00100820, 0x00100824, 0x00100900, 0x00100904, 0x00100920, 0x00100924, 0x00104000,
+                0x00104004, 0x00104020, 0x00104024, 0x00104100, 0x00104104, 0x00104120, 0x00104124, 0x00104800,
+                0x00104804, 0x00104820, 0x00104824, 0x00104900, 0x00104904, 0x00104920, 0x00104924, 0x00120000,
+                0x00120004, 0x00120020, 0x00120024, 0x00120100, 0x00120104, 0x00120120, 0x00120124, 0x00120800,
+                0x00120804, 0x00120820, 0x00120824, 0x00120900, 0x00120904, 0x00120920, 0x00120924, 0x00124000,
+                0x00124004, 0x00124020, 0x00124024, 0x00124100, 0x00124104, 0x00124120, 0x00124124, 0x00124800,
+                0x00124804, 0x00124820, 0x00124824, 0x00124900, 0x00124904, 0x00124920, 0x00124924, 0x00800000,
+                0x00800004, 0x00800020, 0x00800024, 0x00800100, 0x00800104, 0x00800120, 0x00800124, 0x00800800,
+                0x00800804, 0x00800820, 0x00800824, 0x00800900, 0x00800904, 0x00800920, 0x00800924, 0x00804000,
+                0x00804004, 0x00804020, 0x00804024, 0x00804100, 0x00804104, 0x00804120, 0x00804124, 0x00804800,
+                0x00804804, 0x00804820, 0x00804824, 0x00804900, 0x00804904, 0x00804920, 0x00804924, 0x00820000,
+                0x00820004, 0x00820020, 0x00820024, 0x00820100, 0x00820104, 0x00820120, 0x00820124, 0x00820800,
+                0x00820804, 0x00820820, 0x00820824, 0x00820900, 0x00820904, 0x00820920, 0x00820924, 0x00824000,
+                0x00824004, 0x00824020, 0x00824024, 0x00824100, 0x00824104, 0x00824120, 0x00824124, 0x00824800,
+                0x00824804, 0x00824820, 0x00824824, 0x00824900, 0x00824904, 0x00824920, 0x00824924, 0x00900000,
+                0x00900004, 0x00900020, 0x00900024, 0x00900100, 0x00900104, 0x00900120, 0x00900124, 0x00900800,
+                0x00900804, 0x00900820, 0x00900824, 0x00900900, 0x00900904, 0x00900920, 0x00900924, 0x00904000,
+                0x00904004, 0x00904020, 0x00904024, 0x00904100, 0x00904104, 0x00904120, 0x00904124, 0x00904800,
+                0x00904804, 0x00904820, 0x00904824, 0x00904900, 0x00904904, 0x00904920, 0x00904924, 0x00920000,
+                0x00920004, 0x00920020, 0x00920024, 0x00920100, 0x00920104, 0x00920120, 0x00920124, 0x00920800,
+                0x00920804, 0x00920820, 0x00920824, 0x00920900, 0x00920904, 0x00920920, 0x00920924, 0x00924000,
+                0x00924004, 0x00924020, 0x00924024, 0x00924100, 0x00924104, 0x00924120, 0x00924124, 0x00924800,
+                0x00924804, 0x00924820, 0x00924824, 0x00924900, 0x00924904, 0x00924920, 0x00924924
+        };
+
+// LUT for Morton3D decode X
+static constexpr uint_fast8_t h_Morton3D_decode_x_512[512] = {
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7
+};
+
+// LUT for Morton3D decode Y
+static constexpr uint_fast8_t h_Morton3D_decode_y_512[512] = {
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7
+};
+
+// LUT for Morton3D decode Z
+static constexpr uint_fast8_t h_Morton3D_decode_z_512[512] = {
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7
+};
+
+// LUT for Morton3D decode X
+__constant__ uint_fast8_t d_Morton3D_decode_x_512[512] = {
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+        4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7
+};
+
+// LUT for Morton3D decode Y
+__constant__ uint_fast8_t d_Morton3D_decode_y_512[512] = {
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+        4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+        6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7
+};
+
+// LUT for Morton3D decode Z
+__constant__ uint_fast8_t d_Morton3D_decode_z_512[512] = {
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+        6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7
+};
+
+// Encode morton code using LUT table
+__host__ __device__ inline uint64_t mortonEncode_LUT(uint32_t x, uint32_t y, uint32_t z) {
+    /*uint64_t answer = 0;
+    answer = d_morton256_z[(z >> 16) & 0xFF] |
+        d_morton256_y[(y >> 16) & 0xFF] |
+        d_morton256_x[(x >> 16) & 0xFF];*/
+    uint64_t answer = 0;
+#if defined(__CUDA_ARCH__)
+    answer = answer << 48 |
+        d_morton256_z[(z >> 8) & 0xFF] |
+        d_morton256_y[(y >> 8) & 0xFF] |
+        d_morton256_x[(x >> 8) & 0xFF];
+    answer = answer << 24 |
+        d_morton256_z[(z) & 0xFF] |
+        d_morton256_y[(y) & 0xFF] |
+        d_morton256_x[(x) & 0xFF];
+#else
+    answer = answer << 48 |
+             h_morton256_z[(z >> 8) & 0xFF] |
+             h_morton256_y[(y >> 8) & 0xFF] |
+             h_morton256_x[(x >> 8) & 0xFF];
+    answer = answer << 24 |
+             h_morton256_z[(z) & 0xFF] |
+             h_morton256_y[(y) & 0xFF] |
+             h_morton256_x[(x) & 0xFF];
+#endif
+
+    return answer;
+}
+
+// Encode morton code using LUT table
+__host__ __device__ inline uint32_t mortonEncode_LUT(uint16_t x, uint16_t y, uint16_t z) {
+    uint32_t answer = 0;
+    for (unsigned int i = sizeof(uint16_t); i > 0; --i) {
+        unsigned int shift = (i - 1) * 8;
+#if defined(__CUDA_ARCH__)
+        answer =
+            answer << 24 |
+            (d_morton256_z[(z >> shift) & EIGHT_BIT_MASK] |
+                d_morton256_y[(y >> shift) & EIGHT_BIT_MASK] |
+                d_morton256_x[(x >> shift) & EIGHT_BIT_MASK]);
+#else
+        answer =
+                answer << 24 |
+                (h_morton256_z[(z >> shift) & EIGHT_BIT_MASK] |
+                 h_morton256_y[(y >> shift) & EIGHT_BIT_MASK] |
+                 h_morton256_x[(x >> shift) & EIGHT_BIT_MASK]);
+#endif
+    }
+    return answer;
+}
+
+template<typename morton, typename coord>
+__host__ __device__ inline coord
+morton3D_DecodeCoord_LUT256(const morton m, const uint_fast8_t *LUT, const unsigned int startshift) {
+    morton a = 0;
+    unsigned int loops = (sizeof(morton) <= 4) ? 4 : 7;
+    for (unsigned int i = 0; i < loops; ++i) {
+        a |= (morton) (LUT[(m >> ((i * 9) + startshift)) & NINE_BIT_MASK] << morton(3 * i));
+    }
+    return (coord) a;
+}
+
+template<typename morton, typename coord>
+__host__ __device__ inline void m3D_d_sLUT(const morton m, coord &x, coord &y, coord &z) {
+#if defined(__CUDA_ARCH__)
+    x = morton3D_DecodeCoord_LUT256<morton, coord>(m, d_Morton3D_decode_x_512, 0);
+    y = morton3D_DecodeCoord_LUT256<morton, coord>(m, d_Morton3D_decode_y_512, 0);
+    z = morton3D_DecodeCoord_LUT256<morton, coord>(m, d_Morton3D_decode_z_512, 0);
+#else
+    x = morton3D_DecodeCoord_LUT256<morton, coord>(m, h_Morton3D_decode_x_512, 0);
+    y = morton3D_DecodeCoord_LUT256<morton, coord>(m, h_Morton3D_decode_y_512, 0);
+    z = morton3D_DecodeCoord_LUT256<morton, coord>(m, h_Morton3D_decode_z_512, 0);
+#endif
+}
+
+__host__ __device__ inline void morton3D_32_decode(const uint_fast32_t morton, uint16_t &x, uint16_t &y, uint16_t &z) {
+    m3D_d_sLUT<uint_fast32_t, uint16_t>(morton, x, y, z);
+}
+
+__constant__ short int neighbor_LUTparent[8][27] = {
+        {0,  1,  1,  3,  4,  4,  3,  4,  4,
+                9,  10, 10, 12, 13, 13, 12, 13, 13,
+                9,  10, 10, 12, 13, 13, 12, 13, 13},
+
+        {1,  1,  2,  4,  4,  5,  4,  4,  5,
+                10, 10, 11, 13, 13, 14, 13, 13, 14,
+                10, 10, 11, 13, 13, 14, 13, 13, 14},
+
+        {3,  4,  4,  3,  4,  4,  6,  7,  7,
+                12, 13, 13, 12, 13, 13, 15, 16, 16,
+                12, 13, 13, 12, 13, 13, 15, 16, 16},
+
+        {4,  4,  5,  4,  4,  5,  7,  7,  8,
+                13, 13, 14, 13, 13, 14, 16, 16, 17,
+                13, 13, 14, 13, 13, 14, 16, 16, 17},
+
+        {9,  10, 10, 12, 13, 13, 12, 13, 13,
+                9,  10, 10, 12, 13, 13, 12, 13, 13,
+                18, 19, 19, 21, 22, 22, 21, 22, 22},
+
+        {10, 10, 11, 13, 13, 14, 13, 13, 14,
+                10, 10, 11, 13, 13, 14, 13, 13, 14,
+                19, 19, 20, 22, 22, 23, 22, 22, 23},
+
+        {12, 13, 13, 12, 13, 13, 15, 16, 16,
+                12, 13, 13, 12, 13, 13, 15, 16, 16,
+                21, 22, 22, 21, 22, 22, 24, 25, 25},
+
+        {13, 13, 14, 13, 13, 14, 16, 16, 17,
+                13, 13, 14, 13, 13, 14, 16, 16, 17,
+                22, 22, 23, 22, 22, 23, 25, 25, 26}
+};
+
+__constant__ short int neighbor_LUTchild[8][27] = {
+        {7, 6, 7, 5, 4, 5, 7, 6, 7,
+                3, 2, 3, 1, 0, 1, 3, 2, 3,
+                7, 6, 7, 5, 4, 5, 7, 6, 7},
+
+        {6, 7, 6, 4, 5, 4, 6, 7, 6,
+                2, 3, 2, 0, 1, 0, 2, 3, 2,
+                6, 7, 6, 4, 5, 4, 6, 7, 6},
+
+        {5, 4, 5, 7, 6, 7, 5, 4, 5,
+                1, 0, 1, 3, 2, 3, 1, 0, 1,
+                5, 4, 5, 7, 6, 7, 5, 4, 5,},
+
+        {4, 5, 4, 6, 7, 6, 4, 5, 4,
+                0, 1, 0, 2, 3, 2, 0, 1, 0,
+                4, 5, 4, 6, 7, 6, 4, 5, 4},
+
+        {3, 2, 3, 1, 0, 1, 3, 2, 3,
+                7, 6, 7, 5, 4, 5, 7, 6, 7,
+                3, 2, 3, 1, 0, 1, 3, 2, 3},
+
+        {2, 3, 2, 0, 1, 0, 2, 3, 2,
+                6, 7, 6, 4, 5, 4, 6, 7, 6,
+                2, 3, 2, 0, 1, 0, 2, 3, 2},
+
+        {1, 0, 1, 3, 2, 3, 1, 0, 1,
+                5, 4, 5, 7, 6, 7, 5, 4, 5,
+                1, 0, 1, 3, 2, 3, 1, 0, 1},
+
+        {0, 1, 0, 2, 3, 2, 0, 1, 0,
+                4, 5, 4, 6, 7, 6, 4, 5, 4,
+                0, 1, 0, 2, 3, 2, 0, 1, 0}
+};
+```
+
+### src/SVO.cu
+```
+﻿#include "IO.h"
+#include "SVO.h"
+#include "CUDAUtil.h"
+#include "MortonLUT.h"
+#include "libmorton/morton.h"
+#include <thrust/scan.h>
+#include <thrust/unique.h>
+#include <thrust/extrema.h>
+#include <thrust/device_vector.h>
+#include <cooperative_groups.h>
+#include <crt/device_functions.h>
+
+namespace cg = cooperative_groups;
+
+// Estimate best block and grid size using CUDA Occupancy Calculator
+int blockSize;   // The launch configurator returned block size 
+int minGridSize; // The minimum grid size needed to achieve the maximum occupancy for a full device launch 
+int gridSize;    // The actual grid size needed, based on input size 
+
+// Shift right by three bits, and set the highest flag bit to 1
+// (while ensuring the previous flag bit after the right shift is set to 0).
+CUDA_CALLABLE_MEMBER uint32_t getParentMorton(const uint32_t morton) {
+    return (((morton >> 3) & 0xfffffff));
+}
+
+CUDA_CALLABLE_MEMBER bool isSameParent(const uint32_t morton_1, const uint32_t morton_2) {
+    return getParentMorton(morton_1) == getParentMorton(morton_2);
+}
+
+template<typename T>
+struct scanMortonFlag : public thrust::unary_function<T, T> {
+    __host__ __device__ T operator()(const T &x) {
+        return (x >> 31) & 1;
+    }
+};
+
+__global__ void surfaceVoxelize(const int nTris,
+                                const Eigen::Vector3i *d_surfaceVoxelGridSize,
+                                const Eigen::Vector3f *d_gridOrigin,
+                                const Eigen::Vector3f *d_unitVoxelSize,
+                                float *d_triangle_data,
+                                uint32_t *d_voxelArray) {
+    size_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+    size_t stride = blockDim.x * gridDim.x;
+    int t_tid = tid;
+
+    const Eigen::Vector3i surfaceVoxelGridSize = *d_surfaceVoxelGridSize;
+    const Eigen::Vector3f unitVoxelSize = *d_unitVoxelSize;
+    const Eigen::Vector3f gridOrigin = *d_gridOrigin;
+    Eigen::Vector3f delta_p{unitVoxelSize.x(), unitVoxelSize.y(), unitVoxelSize.z()};
+    Eigen::Vector3i grid_max{surfaceVoxelGridSize.x() - 1, surfaceVoxelGridSize.y() - 1,
+                             surfaceVoxelGridSize.z() - 1}; // grid max (grid runs from 0 to gridsize-1)
+    while (tid < nTris) { // every thread works on specific triangles in its stride
+        size_t t = tid * 9; // triangle contains 9 vertices
+
+        // COMPUTE COMMON TRIANGLE PROPERTIES
+        // Move vertices to origin using modelBBox
+        Eigen::Vector3f v0 =
+                Eigen::Vector3f(d_triangle_data[t], d_triangle_data[t + 1], d_triangle_data[t + 2]) - gridOrigin;
+        Eigen::Vector3f v1 =
+                Eigen::Vector3f(d_triangle_data[t + 3], d_triangle_data[t + 4], d_triangle_data[t + 5]) - gridOrigin;
+        Eigen::Vector3f v2 =
+                Eigen::Vector3f(d_triangle_data[t + 6], d_triangle_data[t + 7], d_triangle_data[t + 8]) - gridOrigin;
+        // Edge vectors
+        Eigen::Vector3f e0 = v1 - v0;
+        Eigen::Vector3f e1 = v2 - v1;
+        Eigen::Vector3f e2 = v0 - v2;
+        // Normal vector pointing up from the triangle
+        Eigen::Vector3f n = e0.cross(e1).normalized();
+
+        // COMPUTE TRIANGLE BBOX IN GRID
+        // Triangle bounding box in world coordinates is min(v0,v1,v2) and max(v0,v1,v2)
+        AABox<Eigen::Vector3f> t_bbox_world(fminf(v0, fminf(v1, v2)), fmaxf(v0, fmaxf(v1, v2)));
+        // Triangle bounding box in voxel grid coordinates is the world bounding box divided by the grid unit vector
+        AABox<Eigen::Vector3i> t_bbox_grid;
+        t_bbox_grid.min = clamp(
+                Eigen::Vector3i((t_bbox_world.min.x() / unitVoxelSize.x()), (t_bbox_world.min.y() / unitVoxelSize.y()),
+                                (t_bbox_world.min.z() / unitVoxelSize.z())),
+                Eigen::Vector3i(0, 0, 0), grid_max
+        );
+        t_bbox_grid.max = clamp(
+                Eigen::Vector3i((t_bbox_world.max.x() / unitVoxelSize.x()), (t_bbox_world.max.y() / unitVoxelSize.y()),
+                                (t_bbox_world.max.z() / unitVoxelSize.z())),
+                Eigen::Vector3i(0, 0, 0), grid_max
+        );
+
+        // PREPARE PLANE TEST PROPERTIES
+        Eigen::Vector3f c(0.0f, 0.0f, 0.0f);
+        if (n.x() > 0.0f) { c.x() = unitVoxelSize.x(); }
+        if (n.y() > 0.0f) { c.y() = unitVoxelSize.y(); }
+        if (n.z() > 0.0f) { c.z() = unitVoxelSize.z(); }
+        float d1 = n.dot((c - v0));
+        float d2 = n.dot(((delta_p - c) - v0));
+
+        // PREPARE PROJECTION TEST PROPERTIES
+        // XY plane
+        Eigen::Vector2f n_xy_e0(-1.0f * e0.y(), e0.x());
+        Eigen::Vector2f n_xy_e1(-1.0f * e1.y(), e1.x());
+        Eigen::Vector2f n_xy_e2(-1.0f * e2.y(), e2.x());
+        if (n.z() < 0.0f) {
+            n_xy_e0 = -n_xy_e0;
+            n_xy_e1 = -n_xy_e1;
+            n_xy_e2 = -n_xy_e2;
+        }
+        float d_xy_e0 =
+                (-1.0f * n_xy_e0.dot(Eigen::Vector2f(v0.x(), v0.y()))) + fmaxf(0.0f, unitVoxelSize.x() * n_xy_e0[0]) +
+                fmaxf(0.0f, unitVoxelSize.y() * n_xy_e0[1]);
+        float d_xy_e1 =
+                (-1.0f * n_xy_e1.dot(Eigen::Vector2f(v1.x(), v1.y()))) + fmaxf(0.0f, unitVoxelSize.x() * n_xy_e1[0]) +
+                fmaxf(0.0f, unitVoxelSize.y() * n_xy_e1[1]);
+        float d_xy_e2 =
+                (-1.0f * n_xy_e2.dot(Eigen::Vector2f(v2.x(), v2.y()))) + fmaxf(0.0f, unitVoxelSize.x() * n_xy_e2[0]) +
+                fmaxf(0.0f, unitVoxelSize.y() * n_xy_e2[1]);
+        // YZ plane
+        Eigen::Vector2f n_yz_e0(-1.0f * e0.z(), e0.y());
+        Eigen::Vector2f n_yz_e1(-1.0f * e1.z(), e1.y());
+        Eigen::Vector2f n_yz_e2(-1.0f * e2.z(), e2.y());
+        if (n.x() < 0.0f) {
+            n_yz_e0 = -n_yz_e0;
+            n_yz_e1 = -n_yz_e1;
+            n_yz_e2 = -n_yz_e2;
+        }
+        float d_yz_e0 =
+                (-1.0f * n_yz_e0.dot(Eigen::Vector2f(v0.y(), v0.z()))) + fmaxf(0.0f, unitVoxelSize.y() * n_yz_e0[0]) +
+                fmaxf(0.0f, unitVoxelSize.z() * n_yz_e0[1]);
+        float d_yz_e1 =
+                (-1.0f * n_yz_e1.dot(Eigen::Vector2f(v1.y(), v1.z()))) + fmaxf(0.0f, unitVoxelSize.y() * n_yz_e1[0]) +
+                fmaxf(0.0f, unitVoxelSize.z() * n_yz_e1[1]);
+        float d_yz_e2 =
+                (-1.0f * n_yz_e2.dot(Eigen::Vector2f(v2.y(), v2.z()))) + fmaxf(0.0f, unitVoxelSize.y() * n_yz_e2[0]) +
+                fmaxf(0.0f, unitVoxelSize.z() * n_yz_e2[1]);
+        // ZX plane
+        Eigen::Vector2f n_zx_e0(-1.0f * e0.x(), e0.z());
+        Eigen::Vector2f n_zx_e1(-1.0f * e1.x(), e1.z());
+        Eigen::Vector2f n_zx_e2(-1.0f * e2.x(), e2.z());
+        if (n.y() < 0.0f) {
+            n_zx_e0 = -n_zx_e0;
+            n_zx_e1 = -n_zx_e1;
+            n_zx_e2 = -n_zx_e2;
+        }
+        float d_xz_e0 =
+                (-1.0f * n_zx_e0.dot(Eigen::Vector2f(v0.z(), v0.x()))) + fmaxf(0.0f, unitVoxelSize.z() * n_zx_e0[0]) +
+                fmaxf(0.0f, unitVoxelSize.x() * n_zx_e0[1]);
+        float d_xz_e1 =
+                (-1.0f * n_zx_e1.dot(Eigen::Vector2f(v1.z(), v1.x()))) + fmaxf(0.0f, unitVoxelSize.z() * n_zx_e1[0]) +
+                fmaxf(0.0f, unitVoxelSize.x() * n_zx_e1[1]);
+        float d_xz_e2 =
+                (-1.0f * n_zx_e2.dot(Eigen::Vector2f(v2.z(), v2.x()))) + fmaxf(0.0f, unitVoxelSize.z() * n_zx_e2[0]) +
+                fmaxf(0.0f, unitVoxelSize.x() * n_zx_e2[1]);
+
+        // test possible grid boxes for overlap
+        for (uint16_t z = t_bbox_grid.min.z(); z <= t_bbox_grid.max.z(); z++) {
+            for (uint16_t y = t_bbox_grid.min.y(); y <= t_bbox_grid.max.y(); y++) {
+                for (uint16_t x = t_bbox_grid.min.x(); x <= t_bbox_grid.max.x(); x++) {
+                    // TRIANGLE PLANE THROUGH BOX TEST
+                    Eigen::Vector3f p(x * unitVoxelSize.x(), y * unitVoxelSize.y(), z * unitVoxelSize.z());
+                    float nDOTp = n.dot(p);
+                    if ((nDOTp + d1) * (nDOTp + d2) > 0.0f) { continue; }
+
+                    // PROJECTION TESTS
+                    // XY
+                    Eigen::Vector2f p_xy(p.x(), p.y());
+                    if ((n_xy_e0.dot(p_xy) + d_xy_e0) < 0.0f) { continue; }
+                    if ((n_xy_e1.dot(p_xy) + d_xy_e1) < 0.0f) { continue; }
+                    if ((n_xy_e2.dot(p_xy) + d_xy_e2) < 0.0f) { continue; }
+
+                    // YZ
+                    Eigen::Vector2f p_yz(p.y(), p.z());
+                    if ((n_yz_e0.dot(p_yz) + d_yz_e0) < 0.0f) { continue; }
+                    if ((n_yz_e1.dot(p_yz) + d_yz_e1) < 0.0f) { continue; }
+                    if ((n_yz_e2.dot(p_yz) + d_yz_e2) < 0.0f) { continue; }
+
+                    // XZ
+                    Eigen::Vector2f p_zx(p.z(), p.x());
+                    if ((n_zx_e0.dot(p_zx) + d_xz_e0) < 0.0f) { continue; }
+                    if ((n_zx_e1.dot(p_zx) + d_xz_e1) < 0.0f) { continue; }
+                    if ((n_zx_e2.dot(p_zx) + d_xz_e2) < 0.0f) { continue; }
+
+                    //size_t mortonCode = mortonEncode_LUT(x, y, z);
+                    uint32_t mortonCode = mortonEncode_LUT(x, y, z);
+                    atomicExch(d_voxelArray + mortonCode, mortonCode |
+                                                          E_MORTON_32_FLAG); // Set the highest bit to 1 to indicate that this is a surface voxel.
+                }
+            }
+        }
+        tid += stride;
+    }
+}
+
+void SparseVoxelOctree::meshVoxelize(const Eigen::Vector3i *d_surfaceVoxelGridSize,
+                                     const Eigen::Vector3f *d_unitVoxelSize,
+                                     const Eigen::Vector3f *d_gridOrigin,
+                                     thrust::device_vector<uint32_t> &d_CNodeMortonArray) {
+    thrust::device_vector<Eigen::Vector3f> d_triangleThrustVec;
+    for (int i = 0; i < nModelTris; ++i) {
+        d_triangleThrustVec.push_back(modelPoints[idx2Points[i].x()]);
+        d_triangleThrustVec.push_back(modelPoints[idx2Points[i].y()]);
+        d_triangleThrustVec.push_back(modelPoints[idx2Points[i].z()]);
+    }
+    float *d_triangleData = (float *) thrust::raw_pointer_cast(&(d_triangleThrustVec[0]));
+    getOccupancyMaxPotentialBlockSize(nModelTris, minGridSize, blockSize, gridSize, surfaceVoxelize, 0, 0);
+    surfaceVoxelize << < gridSize, blockSize >> > (nModelTris, d_surfaceVoxelGridSize,
+            d_gridOrigin, d_unitVoxelSize, d_triangleData, d_CNodeMortonArray.data().get());
+    getLastCudaError("Kernel 'surfaceVoxelize' launch failed!\n");
+    cudaDeviceSynchronize();
+}
+
+__global__ void compactArray(const int n,
+                             const bool *d_isValidArray,
+                             const uint32_t *d_dataArray,
+                             const size_t *d_esumDataArray,
+                             uint32_t *d_pactDataArray) {
+    size_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (tid < n && d_isValidArray[tid])
+        d_pactDataArray[d_esumDataArray[tid]] = d_dataArray[tid];
+}
+
+// Calculate the total number of octree nodes corresponding to surface voxels
+// and set the Morton code array for the parent nodes.
+__global__ void cpNumNodes(const size_t n,
+                           const uint32_t *d_pactDataArray,
+                           size_t *d_nNodesArray,
+                           uint32_t *d_parentMortonArray) {
+    size_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (tid >= 1 && tid < n) {
+        if (isSameParent(d_pactDataArray[tid], d_pactDataArray[tid - 1])) d_nNodesArray[tid] = 0;
+        else {
+            const uint32_t parentMorton = getParentMorton(d_pactDataArray[tid]);
+            d_parentMortonArray[parentMorton] = parentMorton | E_MORTON_32_FLAG;
+            d_nNodesArray[tid] = 8;
+        }
+    }
+}
+
+__global__ void createNode_1(const size_t pactSize,
+                             const size_t *d_sumNodesArray,
+                             const uint32_t *d_pactDataArray,
+                             const Eigen::Vector3f *d_gridOrigin,
+                             const float *d_width,
+                             uint32_t *d_begMortonArray,
+                             SVONode *d_nodeArray) {
+    size_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+
+    uint16_t x, y, z;
+    if (tid < pactSize) {
+        const Eigen::Vector3f gridOrigin = *d_gridOrigin;
+        const float width = *d_width;
+
+        const int sumNodes = d_sumNodesArray[tid];
+        const uint32_t pactData = d_pactDataArray[tid];
+
+        const uint32_t key = pactData & LOWER_3BIT_MASK;
+        const uint32_t morton = pactData & D_MORTON_32_FLAG; // Actual Morton code with the sign bit removed.
+        // Get the actual storage location of the node corresponding to the Morton code.
+        const size_t address = sumNodes + key;
+
+        SVONode &tNode = d_nodeArray[address];
+        tNode.mortonCode = morton;
+        morton3D_32_decode(morton, x, y, z);
+        tNode.origin = gridOrigin + width * Eigen::Vector3f((float) x, (float) y, (float) z);
+        tNode.width = width;
+
+        d_begMortonArray[tid] = (morton / 8) * 8;
+    }
+}
+
+__global__ void createNode_2(const size_t pactSize,
+                             const size_t d_preChildDepthTreeNodes, // Number of nodes in all preceding levels of the child node level (exclusive scan), used to determine the position in the total node array.
+                             const size_t d_preDepthTreeNodes, // Number of nodes in all preceding levels of the current level (exclusive scan), used to determine the position in the total node array.
+                             const size_t *d_sumNodesArray, // Inclusive scan array for the number of nodes in this level.
+                             const uint32_t *d_pactDataArray,
+                             const Eigen::Vector3f *d_gridOrigin,
+                             const float *d_width,
+                             uint32_t *d_begMortonArray,
+                             SVONode *d_nodeArray,
+                             SVONode *d_childArray) {
+    size_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+
+    uint16_t x, y, z;
+    if (tid < pactSize) {
+        const Eigen::Vector3f gridOrigin = *d_gridOrigin;
+        const float width = *d_width;
+
+        const int sumNodes = d_sumNodesArray[tid];
+        const uint32_t pactData = d_pactDataArray[tid];
+
+        const uint32_t key = pactData & LOWER_3BIT_MASK;
+        const uint32_t morton = pactData & D_MORTON_32_FLAG;
+        const size_t address = sumNodes + key;
+
+        SVONode &tNode = d_nodeArray[address];
+        tNode.mortonCode = morton;
+        morton3D_32_decode(morton, x, y, z);
+        tNode.origin = gridOrigin + width * Eigen::Vector3f((float) x, (float) y, (float) z);
+        tNode.width = width;
+        tNode.isLeaf = false;
+
+        d_begMortonArray[tid] = (morton / 8) * 8;
+
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            tNode.childs[i] = d_preChildDepthTreeNodes + tid * 8 + i;
+            d_childArray[tid * 8 + i].parent = d_preDepthTreeNodes + sumNodes +
+                                               key; // +key is added because remaining nodes need to be constructed later.
+        }
+    }
+}
+
+__global__ void createRemainNode(const size_t nNodes,
+                                 const Eigen::Vector3f *d_gridOrigin,
+                                 const float *d_width,
+                                 const uint32_t *d_begMortonArray,
+                                 SVONode *d_nodeArray) {
+    extern __shared__ uint32_t sh_begMortonArray[];
+    size_t tid = threadIdx.x + blockIdx.x * blockDim.x;
+
+    uint16_t x, y, z;
+    if (tid < nNodes) {
+        sh_begMortonArray[threadIdx.x / 8] = d_begMortonArray[tid / 8];
+        __syncthreads();
+
+        if (d_nodeArray[tid].mortonCode == 0) {
+            const Eigen::Vector3f gridOrigin = *d_gridOrigin;
+            const float width = *d_width;
+
+            const uint32_t key = tid & LOWER_3BIT_MASK;
+            const uint32_t morton = sh_begMortonArray[threadIdx.x / 8] + key;
+
+            SVONode &tNode = d_nodeArray[tid];
+            tNode.mortonCode = morton;
+
+            morton3D_32_decode(morton, x, y, z);
+            tNode.origin = gridOrigin + width * Eigen::Vector3f((float) x, (float) y, (float) z);
+            tNode.width = width;
+        }
+    }
+}
+
+void SparseVoxelOctree::create() {
+    assert(surfaceVoxelGridSize.x() >= 1 && surfaceVoxelGridSize.y() >= 1 && surfaceVoxelGridSize.z() >= 1);
+    size_t gridCNodeSize = (size_t) mortonEncode_LUT((uint16_t) (surfaceVoxelGridSize.x() - 1),
+                                                     (uint16_t) (surfaceVoxelGridSize.y() - 1),
+                                                     (uint16_t) (surfaceVoxelGridSize.z() - 1)) + 1;
+    size_t gridTreeNodeSize = gridCNodeSize % 8 ? gridCNodeSize + 8 - (gridCNodeSize % 8) : gridCNodeSize;
+
+    Eigen::Vector3f unitVoxelSize = Eigen::Vector3f(modelBBox.width.x() / surfaceVoxelGridSize.x(),
+                                                    modelBBox.width.y() / surfaceVoxelGridSize.y(),
+                                                    modelBBox.width.z() / surfaceVoxelGridSize.z());
+    float unitNodeWidth = unitVoxelSize.x();
+
+    Eigen::Vector3i *d_surfaceVoxelGridSize;
+    CUDA_CHECK(cudaMalloc((void **) &d_surfaceVoxelGridSize, sizeof(Eigen::Vector3i)));
+    CUDA_CHECK(
+            cudaMemcpy(d_surfaceVoxelGridSize, &surfaceVoxelGridSize, sizeof(Eigen::Vector3i), cudaMemcpyHostToDevice));
+    Eigen::Vector3f *d_gridOrigin;
+    CUDA_CHECK(cudaMalloc((void **) &d_gridOrigin, sizeof(Eigen::Vector3f)));
+    CUDA_CHECK(cudaMemcpy(d_gridOrigin, &modelBBox.min, sizeof(Eigen::Vector3f), cudaMemcpyHostToDevice));
+    Eigen::Vector3f *d_unitVoxelSize;
+    CUDA_CHECK(cudaMalloc((void **) &d_unitVoxelSize, sizeof(Eigen::Vector3f)));
+    CUDA_CHECK(cudaMemcpy(d_unitVoxelSize, &unitVoxelSize, sizeof(Eigen::Vector3f), cudaMemcpyHostToDevice));
+    float *d_unitNodeWidth;
+    CUDA_CHECK(cudaMalloc((void **) &d_unitNodeWidth, sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(d_unitNodeWidth, &unitNodeWidth, sizeof(float), cudaMemcpyHostToDevice));
+
+    thrust::device_vector<uint32_t> d_CNodeMortonArray(gridCNodeSize, 0);
+    thrust::device_vector<bool> d_isValidCNodeArray;
+    thrust::device_vector<size_t> d_esumCNodesArray; // exclusive scan
+    thrust::device_vector<uint32_t> d_pactCNodeArray;
+    thrust::device_vector<size_t> d_numTreeNodesArray; // 节点数量记录数组
+    thrust::device_vector<size_t> d_sumTreeNodesArray; // inlusive scan
+    thrust::device_vector<size_t> d_esumTreeNodesArray; // 存储每一层节点数量的exclusive scan数组
+    thrust::device_vector<uint32_t> d_begMortonArray;
+    thrust::device_vector<SVONode> d_nodeArray; // 存储某一层的节点数组
+    thrust::device_vector<SVONode> d_SVONodeArray; // save all sparse octree nodes
+
+    // mesh voxelize
+    resizeThrust(d_CNodeMortonArray, gridCNodeSize, (uint32_t) 0);
+    meshVoxelize(d_surfaceVoxelGridSize, d_unitVoxelSize, d_gridOrigin, d_CNodeMortonArray);
+
+    // create octree
+    while (true) {
+        resizeThrust(d_isValidCNodeArray, gridCNodeSize);
+        resizeThrust(d_esumCNodesArray, gridCNodeSize);
+        thrust::transform(d_CNodeMortonArray.begin(), d_CNodeMortonArray.end(), d_isValidCNodeArray.begin(),
+                          scanMortonFlag<uint32_t>());
+        thrust::exclusive_scan(d_isValidCNodeArray.begin(), d_isValidCNodeArray.end(), d_esumCNodesArray.begin(),
+                               0); // 必须加init
+
+        size_t numCNodes = *(d_esumCNodesArray.rbegin()) + *(d_isValidCNodeArray.rbegin());
+        if (!numCNodes) {
+            printf("Sparse Voxel Octree depth: %d\n", treeDepth);
+            break;
+        }
+
+        treeDepth++;
+
+        // compact coarse node array
+        d_pactCNodeArray.clear();
+        resizeThrust(d_pactCNodeArray, numCNodes);
+        getOccupancyMaxPotentialBlockSize(gridCNodeSize, minGridSize, blockSize, gridSize, compactArray, 0, 0);
+        compactArray << < gridSize, blockSize >> > (gridCNodeSize, d_isValidCNodeArray.data().get(),
+                d_CNodeMortonArray.data().get(), d_esumCNodesArray.data().get(), d_pactCNodeArray.data().get());
+        getLastCudaError("Kernel 'compactArray' launch failed!\n");
+        vector<uint32_t> h_pactCNodeArray(numCNodes, 0);
+        CUDA_CHECK(cudaMemcpy(h_pactCNodeArray.data(), d_pactCNodeArray.data().get(), sizeof(uint32_t) * numCNodes,
+                              cudaMemcpyDeviceToHost));
+
+        // validate voxel generation
+#ifdef NDEBUG
+        if (treeDepth == 1)
+        {
+            vector<uint32_t> voxelArray;
+            voxelArray.resize(numCNodes);
+            CUDA_CHECK(cudaMemcpy(voxelArray.data(), d_pactCNodeArray.data().get(), sizeof(uint32_t) * numCNodes, cudaMemcpyDeviceToHost));
+            writeVoxel(voxelArray, "bunny", unitNodeWidth);
+        }
+#endif // !NDEBUG
+
+        // compute the number of (real)octree nodes by coarse node array, and set parent's morton code to 'd_CNodeMortonArray'
+        size_t numNodes = 1;
+        if (numCNodes > 1) {
+            resizeThrust(d_numTreeNodesArray, numCNodes, (size_t) 0);
+            d_CNodeMortonArray.clear();
+            resizeThrust(d_CNodeMortonArray, gridTreeNodeSize, (uint32_t) 0); // 此时用于记录父节点层的coarse node
+            getOccupancyMaxPotentialBlockSize(numCNodes, minGridSize, blockSize, gridSize, cpNumNodes, 0, 0);
+            const uint32_t firstMortonCode = getParentMorton(d_pactCNodeArray[0]);
+            d_CNodeMortonArray[firstMortonCode] = firstMortonCode | E_MORTON_32_FLAG;
+            cpNumNodes << <
+            gridSize, blockSize >> > (numCNodes, d_pactCNodeArray.data().get(), d_numTreeNodesArray.data().get(), d_CNodeMortonArray.data().get());
+            getLastCudaError("Kernel 'cpNumNodes' launch failed!\n");
+            resizeThrust(d_sumTreeNodesArray, numCNodes, (size_t) 0); // inlusive scan
+            thrust::inclusive_scan(d_numTreeNodesArray.begin(), d_numTreeNodesArray.end(), d_sumTreeNodesArray.begin());
+
+            numNodes = *(d_sumTreeNodesArray.rbegin()) + 8;
+            depthNumNodes.emplace_back(numNodes);
+        }
+
+        // set octree node array
+        d_nodeArray.clear();
+        resizeThrust(d_nodeArray, numNodes, SVONode());
+        uint32_t maxMortonCode = (*d_pactCNodeArray.rbegin()) & D_MORTON_32_FLAG;
+        d_begMortonArray.clear();
+        resizeThrust(d_begMortonArray, numCNodes);
+        if (treeDepth < 2) {
+            getOccupancyMaxPotentialBlockSize(numCNodes, minGridSize, blockSize, gridSize, createNode_1);
+            createNode_1 << < gridSize, blockSize >> > (numCNodes, d_sumTreeNodesArray.data().get(),
+                    d_pactCNodeArray.data().get(), d_gridOrigin, d_unitNodeWidth, d_begMortonArray.data().get(), d_nodeArray.data().get());
+            getLastCudaError("Kernel 'createNode_1' launch failed!\n");
+
+            d_esumTreeNodesArray.push_back(0);
+        } else {
+            getOccupancyMaxPotentialBlockSize(numCNodes, minGridSize, blockSize, gridSize, createNode_2);
+            createNode_2 << < gridSize, blockSize >> > (numCNodes, *(d_esumTreeNodesArray.rbegin() +
+                                                                     1), *(d_esumTreeNodesArray.rbegin()),
+                    d_sumTreeNodesArray.data().get(), d_pactCNodeArray.data().get(), d_gridOrigin, d_unitNodeWidth, d_begMortonArray.data().get(),
+                    d_nodeArray.data().get(), (d_SVONodeArray.data() + (*(d_esumTreeNodesArray.rbegin() + 1))).get());
+            getLastCudaError("Kernel 'createNode_2' launch failed!\n");
+        }
+        auto newEndOfBegMorton = thrust::unique(d_begMortonArray.begin(), d_begMortonArray.end());
+        resizeThrust(d_begMortonArray, newEndOfBegMorton - d_begMortonArray.begin());
+
+        blockSize = 256;
+        gridSize = (numNodes + blockSize - 1) / blockSize;
+        createRemainNode << < gridSize, blockSize, sizeof(uint32_t) * blockSize /
+                                                   8 >> > (numNodes, d_gridOrigin, d_unitNodeWidth,
+                d_begMortonArray.data().get(), d_nodeArray.data().get());
+        getLastCudaError("Kernel 'createRemainNode' launch failed!\n");
+
+        d_SVONodeArray.insert(d_SVONodeArray.end(), d_nodeArray.begin(), d_nodeArray.end());
+
+        d_esumTreeNodesArray.push_back(numNodes + (*d_esumTreeNodesArray.rbegin()));
+
+        //// special condition
+        uint32_t numParentCNodes = *thrust::max_element(d_CNodeMortonArray.begin(), d_CNodeMortonArray.end());
+        bool isValidMorton = (numParentCNodes >> 31) & 1;
+
+        // '+ isValidMorton' to prevent '(numParentNodes & D_MORTON_32_FLAG) = 0'同时正好可以让最后的大小能存储到最大的莫顿码
+        numParentCNodes = (numParentCNodes & D_MORTON_32_FLAG) + isValidMorton;
+        if (numParentCNodes != 0) {
+            resizeThrust(d_CNodeMortonArray, numParentCNodes);
+            unitNodeWidth *= 2.0;
+            CUDA_CHECK(cudaMemcpy(d_unitNodeWidth, &unitNodeWidth, sizeof(float), cudaMemcpyHostToDevice));
+            gridCNodeSize = numParentCNodes;
+            gridTreeNodeSize = gridCNodeSize % 8 ? gridCNodeSize + 8 - (gridCNodeSize % 8) : gridCNodeSize;
+            if (numNodes / 8 == 0) {
+                printf("Sparse Voxel Octree depth: %d\n", treeDepth);
+                break;
+            }
+        } else {
+            printf("Sparse Voxel Octree depth: %d\n", treeDepth);
+            break;
+        }
+    }
+    numTreeNodes = d_esumTreeNodesArray[treeDepth];
+    //TODO: copy to host
+    svoNodeArray.resize(numTreeNodes);
+    auto freeResOfCreateTree = [&]() {
+        cleanupThrust(d_CNodeMortonArray);
+        cleanupThrust(d_isValidCNodeArray);
+        cleanupThrust(d_esumCNodesArray);
+        cleanupThrust(d_pactCNodeArray);
+        cleanupThrust(d_numTreeNodesArray);
+        cleanupThrust(d_sumTreeNodesArray);
+        cleanupThrust(d_nodeArray);
+
+        CUDA_CHECK(cudaFree(d_surfaceVoxelGridSize));
+        CUDA_CHECK(cudaFree(d_gridOrigin));
+        CUDA_CHECK(cudaFree(d_unitNodeWidth));
+        CUDA_CHECK(cudaFree(d_unitVoxelSize));
+    };
+    freeResOfCreateTree();
+
+    constructNodeAtrributes(d_esumTreeNodesArray, d_SVONodeArray);
+    CUDA_CHECK(cudaMemcpy(svoNodeArray.data(), d_SVONodeArray.data().get(), sizeof(SVONode) * numTreeNodes,
+                          cudaMemcpyDeviceToHost));
+    cleanupThrust(d_numTreeNodesArray);
+    cleanupThrust(d_SVONodeArray);
+}
+
+__device__ size_t d_topNodeIdx;
+
+template<bool topFlag>
+__global__ void findNeighbors(const size_t nNodes,
+                              const size_t preESumTreeNodes,
+                              SVONode *d_nodeArray) {
+    if (topFlag) {
+        d_nodeArray[0].neighbors[13] = d_topNodeIdx;
+    } else {
+        size_t tid_x = threadIdx.x + blockIdx.x * blockDim.x;
+        size_t tid_y = threadIdx.y + blockIdx.y * blockDim.y;
+
+        if (tid_x < nNodes && tid_y < 27) {
+            SVONode t = d_nodeArray[preESumTreeNodes + tid_x];
+            SVONode p = d_nodeArray[t.parent];
+            const uint8_t key = (t.mortonCode) & LOWER_3BIT_MASK;
+            const unsigned int p_neighborIdx = p.neighbors[neighbor_LUTparent[key][tid_y]];
+            if (p_neighborIdx != UINT32_MAX) {
+                SVONode h = d_nodeArray[p_neighborIdx];
+                t.neighbors[tid_y] = h.childs[neighbor_LUTchild[key][tid_y]];
+            } else t.neighbors[tid_y] = UINT32_MAX;
+        }
+    }
+
+}
+
+void SparseVoxelOctree::constructNodeNeighbors(const thrust::device_vector<size_t> &d_esumTreeNodesArray,
+                                               thrust::device_vector<SVONode> &d_SVONodeArray) {
+    dim3 gridSize, blockSize;
+    blockSize.x = 32, blockSize.y = 32;
+    gridSize.y = 1;
+    // find neighbors(up to bottom)
+    if (treeDepth >= 2) {
+        const size_t idx = d_SVONodeArray.size() - 1;
+        CUDA_CHECK(cudaMemcpyToSymbol(d_topNodeIdx, &idx, sizeof(size_t)));
+        findNeighbors<true> << < 1, 1 >> > (1, 0, (d_SVONodeArray.data() + idx).get());
+        for (int i = treeDepth - 2; i >= 0; --i) {
+            const size_t nNodes = depthNumNodes[i];
+            gridSize.x = (nNodes + blockSize.x - 1) / blockSize.x;
+            findNeighbors<false> << <
+            gridSize, blockSize >> > (nNodes, d_esumTreeNodesArray[i], d_SVONodeArray.data().get());
+        }
+    }
+}
+
+__constant__ short int d_vertSharedLUT[64] =
+        {
+                0, 1, 3, 4, 9, 10, 12, 13,
+
+                1, 2, 4, 5, 10, 11, 13, 14,
+
+                3, 4, 6, 7, 12, 13, 15, 16,
+
+                4, 5, 7, 8, 13, 14, 16, 17,
+
+                9, 10, 12, 13, 18, 19, 21, 22,
+
+                10, 11, 13, 14, 19, 20, 22, 23,
+
+                12, 13, 15, 16, 21, 22, 24, 25,
+
+                13, 14, 16, 17, 22, 23, 25, 26
+        };
+
+__global__ void determineNodeVertex(const size_t nNodes,
+                                    const SVONode *d_nodeArray,
+                                    thrust::pair<Eigen::Vector3f, uint32_t> *d_nodeVertArray) {
+    size_t tid_x = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (tid_x < nNodes) {
+        uint16_t x, y, z;
+        Eigen::Vector3f origin = d_nodeArray[tid_x].origin;
+        float width = d_nodeArray[tid_x].width;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            morton3D_32_decode(i, x, y, z);
+            Eigen::Vector3f corner = width * Eigen::Vector3f((float) x, (float) y, (float) z);
+
+            uint32_t morton = UINT_MAX, idx = tid_x;
+            for (int j = 0; j < 8; ++j)
+                if (d_nodeArray[tid_x].neighbors[d_vertSharedLUT[i * 8 + j]] < morton)
+                    idx = d_nodeArray[tid_x].neighbors[d_vertSharedLUT[i * 8 + j]];
+
+            d_nodeVertArray[tid_x * 8 + i] = thrust::make_pair(corner, idx);
+        }
+    }
+}
+
+// edge: 02 23 31 10   46 67 75 54   04 26 37 15 
+__constant__ short int d_edgeSharedLUT[48] =
+        {
+                3, 4, 12, 13,
+                4, 7, 13, 16,
+                4, 5, 13, 14,
+                1, 4, 10, 13,
+
+                12, 13, 21, 22,
+                13, 16, 22, 25,
+                13, 14, 22, 23,
+                10, 13, 19, 22,
+
+                9, 10, 12, 13,
+                12, 13, 15, 16,
+                13, 14, 16, 17,
+                10, 11, 13, 14
+        };
+
+__global__ void determineNodeEdge(const size_t nNodes,
+                                  const SVONode *d_nodeArray,
+                                  thrust::pair<thrust_edge, uint32_t> *d_nodeEdgeArray) {
+    size_t tid_x = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (tid_x < nNodes) {
+        Eigen::Vector3f origin = d_nodeArray[tid_x].origin;
+        float width = d_nodeArray[tid_x].width;
+
+        thrust_edge edges[12] =
+                {
+                        thrust::make_pair(origin, origin + Eigen::Vector3f(0, width, 0)),
+                        thrust::make_pair(origin + Eigen::Vector3f(0, width, 0),
+                                          origin + Eigen::Vector3f(width, width, 0)),
+                        thrust::make_pair(origin + Eigen::Vector3f(width, width, 0),
+                                          origin + Eigen::Vector3f(width, 0, 0)),
+                        thrust::make_pair(origin + Eigen::Vector3f(width, 0, 0), origin),
+
+                        thrust::make_pair(origin + Eigen::Vector3f(0, 0, width),
+                                          origin + Eigen::Vector3f(0, width, width)),
+                        thrust::make_pair(origin + Eigen::Vector3f(0, width, width),
+                                          origin + Eigen::Vector3f(width, width, width)),
+                        thrust::make_pair(origin + Eigen::Vector3f(width, width, width),
+                                          origin + Eigen::Vector3f(width, 0, width)),
+                        thrust::make_pair(origin + Eigen::Vector3f(width, 0, width),
+                                          origin + Eigen::Vector3f(0, 0, width)),
+
+                        thrust::make_pair(origin, origin + Eigen::Vector3f(0, 0, width)),
+                        thrust::make_pair(origin + Eigen::Vector3f(0, width, 0),
+                                          origin + Eigen::Vector3f(0, width, width)),
+                        thrust::make_pair(origin + Eigen::Vector3f(width, width, 0),
+                                          origin + Eigen::Vector3f(width, width, width)),
+                        thrust::make_pair(origin + Eigen::Vector3f(width, 0, 0),
+                                          origin + Eigen::Vector3f(width, 0, width)),
+                };
+
+#pragma unroll
+        for (int i = 0; i < 12; ++i) {
+            thrust_edge edge = edges[i];
+
+            uint32_t morton = UINT_MAX, idx = tid_x;
+            for (int j = 0; j < 4; ++j)
+                if (d_nodeArray[tid_x].neighbors[d_edgeSharedLUT[i * 4 + j]] < morton)
+                    idx = d_nodeArray[tid_x].neighbors[d_edgeSharedLUT[i * 4 + j]];
+
+            d_nodeEdgeArray[tid_x * 12 + i] = thrust::make_pair(edge, idx);
+        }
+    }
+}
+
+template<typename T>
+struct uniqueVert : public thrust::binary_function<T, T, T> {
+    __host__ __device__ bool operator()(const T &a, const T &b) {
+        return a.first == b.first;
+    }
+};
+
+template<typename T>
+struct uniqueEdge : public thrust::binary_function<T, T, T> {
+    __host__ __device__
+    bool operator()(const T &a, const T &b) {
+        return ((a.first.first == b.first.first) && (a.first.second == b.first.second)) ||
+               ((a.first.first == b.first.second) && (a.first.second == b.first.first));
+    }
+};
+
+void SparseVoxelOctree::constructNodeVertexAndEdge(thrust::device_vector<SVONode> &d_SVONodeArray) {
+    cudaStream_t streams[2];
+    for (int i = 0; i < 2; ++i) CUDA_CHECK(cudaStreamCreate(&streams[i]));
+
+    thrust::device_vector<thrust::pair<Eigen::Vector3f, uint32_t>> d_nodeVertArray(numTreeNodes * 8);
+    getOccupancyMaxPotentialBlockSize(numTreeNodes, minGridSize, blockSize, gridSize, determineNodeVertex, 0, 0);
+    determineNodeVertex << <
+    gridSize, blockSize, 0, streams[0] >> > (numTreeNodes, d_SVONodeArray.data().get(), d_nodeVertArray.data().get());
+
+    thrust::device_vector<thrust::pair<thrust_edge, uint32_t>> d_nodeEdgeArray(numTreeNodes * 12);
+    getOccupancyMaxPotentialBlockSize(numTreeNodes, minGridSize, blockSize, gridSize, determineNodeEdge, 0, 0);
+    determineNodeEdge << <
+    gridSize, blockSize, 0, streams[1] >> > (numTreeNodes, d_SVONodeArray.data().get(), d_nodeEdgeArray.data().get());
+
+    cudaStreamSynchronize(streams[0]);
+    auto vertNewEnd = thrust::unique(d_nodeVertArray.begin(), d_nodeVertArray.end(),
+                                     uniqueVert<thrust::pair<Eigen::Vector3f, uint32_t>>());
+    const size_t numVerts = vertNewEnd - d_nodeVertArray.begin();
+    resizeThrust(d_nodeVertArray, numVerts);
+    nodeVertexArray.resize(numVerts);
+    CUDA_CHECK(cudaMemcpy(nodeVertexArray.data(), d_nodeVertArray.data().get(),
+                          sizeof(thrust::pair<Eigen::Vector3f, uint32_t>) * numVerts, cudaMemcpyDeviceToHost));
+
+    cudaStreamSynchronize(streams[1]);
+    auto edgeNewEnd = thrust::unique(d_nodeEdgeArray.begin(), d_nodeEdgeArray.end(),
+                                     uniqueEdge<thrust::pair<thrust_edge, uint32_t>>()); // error
+    const size_t numEdges = edgeNewEnd - d_nodeEdgeArray.begin();
+    resizeThrust(d_nodeEdgeArray, numEdges);
+    nodeEdgeArray.resize(numEdges);
+    CUDA_CHECK(cudaMemcpy(nodeEdgeArray.data(), d_nodeEdgeArray.data().get(),
+                          sizeof(thrust::pair<thrust_edge, uint32_t>) * numEdges, cudaMemcpyDeviceToHost));
+
+    for (int i = 0; i < 2; ++i) CUDA_CHECK(cudaStreamDestroy(streams[i]));
+}
+
+void SparseVoxelOctree::constructNodeAtrributes(const thrust::device_vector<size_t> &d_esumTreeNodesArray,
+                                                thrust::device_vector<SVONode> &d_SVONodeArray) {
+    constructNodeNeighbors(d_esumTreeNodesArray, d_SVONodeArray);
+
+    constructNodeVertexAndEdge(d_SVONodeArray);
+}
+
+void SparseVoxelOctree::writeTree(const std::string base_filename) {
+    std::string filename_output =
+            base_filename + std::string("_") + std::to_string(treeDepth) + std::string("_tree.obj");
+    std::ofstream output(filename_output.c_str(), std::ios::out);
+    assert(output);
+
+#ifndef SILENT
+    fprintf(stdout, "[I/O] Writing octree data in obj format to file %s \n", filename_output.c_str());
+#endif
+
+    size_t faceBegIdx = 0;
+    for (const auto &node: svoNodeArray) {
+        write_cube(node.origin, Eigen::Vector3f(node.width, node.width, node.width), output, faceBegIdx);
+    }
+
+    output.close();
+}
+
+void SparseVoxelOctree::writeVoxel(const vector<uint32_t> &voxelArray, const std::string &base_filename,
+                                   const float &width) {
+    std::string filename_output =
+            base_filename + std::string("_") + std::to_string(treeDepth) + std::string("_voxel.obj");
+    std::ofstream output(filename_output.c_str(), std::ios::out);
+    assert(output);
+
+#ifndef SILENT
+    fprintf(stdout, "[I/O] Writing data in obj voxels format to file %s \n", filename_output.c_str());
+#endif
+
+    size_t faceBegIdx = 0;
+    for (size_t i = 0; i < voxelArray.size(); ++i) {
+        const auto &morton = voxelArray[i];
+
+        uint16_t x, y, z;
+        morton3D_32_decode((morton & D_MORTON_32_FLAG), x, y, z);
+        const Eigen::Vector3f nodeOrigin = modelBBox.min + width * Eigen::Vector3f((float) x, (float) y, (float) z);
+        write_cube(nodeOrigin, Eigen::Vector3f(width, width, width), output, faceBegIdx);
+    }
+
+    output.close();
+}
+```
+
+### src/SVO.h
+```
+﻿#pragma once
+
+#include "BaseModel.h"
+#include <vector>
+#include <limits>
+#include <Eigen/Dense>
+
+using std::vector;
+
+#if defined(__clang__) || defined(__GNUC__)
+
+#define _FORCE_INLINE_ __attribute__((always_inline))
+
+#elif defined(_MSC_VER)
+
+#define _FORCE_INLINE_ __forceinline
+
+#endif
+
+struct SVONode {
+    uint32_t mortonCode = 0;
+    bool isLeaf = true;
+
+    Eigen::Vector3f origin;
+    float width;
+
+    unsigned int parent{UINT_MAX};
+    unsigned int childs[8]{UINT_MAX};
+    unsigned int neighbors[27]{UINT_MAX};
+
+    SVONode() {
+        for (int i = 0; i < 8; ++i) { childs[i] = UINT_MAX; };
+        for (int i = 0; i < 27; ++i) { neighbors[i] = UINT_MAX; };
+    }
+};
+
+using thrust_edge = thrust::pair<Eigen::Vector3f, Eigen::Vector3f>;
+
+struct SparseVoxelOctree : public BaseModel {
+private:
+    int treeDepth = 0;
+    size_t numTreeNodes;
+    Eigen::Vector3i surfaceVoxelGridSize;
+    vector<size_t> depthNumNodes;
+    vector<vector<SVONode>> SVONodes;
+
+    vector<SVONode> svoNodeArray;
+
+
+    vector<thrust::pair < Eigen::Vector3f, uint32_t>> nodeVertexArray;
+    vector<thrust::pair < thrust_edge, uint32_t>> nodeEdgeArray;
+
+public:
+    SparseVoxelOctree() : treeDepth(0) {}
+
+    SparseVoxelOctree(const std::string &filename,
+                      const Eigen::Vector3i &_gridSize) : BaseModel(filename), surfaceVoxelGridSize(_gridSize) {
+        //depthNodes.resize(_depth);
+    }
+
+    SparseVoxelOctree(const std::string &filename,
+                      const int &_grid_x,
+                      const int &_grid_y,
+                      const int &_grid_z) : BaseModel(filename),
+                                            surfaceVoxelGridSize(Eigen::Vector3i(_grid_x, _grid_y, _grid_z)) {
+        //depthNodes.resize(_depth);
+    }
+
+public:
+    void create();
+
+    void writeTree(const std::string base_filename);
+
+    void writeVoxel(const vector<uint32_t> &voxelArray, const std::string &base_filename, const float &width);
+
+private:
+    void meshVoxelize(const Eigen::Vector3i *d_surfaceVoxelGridSize,
+                      const Eigen::Vector3f *d_unitVoxelSize,
+                      const Eigen::Vector3f *d_gridOrigin,
+                      thrust::device_vector <uint32_t> &d_CNodeMortonArray); // construct nodes in `depth - 1`
+
+    void constructNodeNeighbors(const thrust::device_vector <size_t> &d_esumTreeNodesArray,
+                                thrust::device_vector <SVONode> &d_SVONodeArray);
+
+    void constructNodeVertexAndEdge(thrust::device_vector <SVONode> &d_SVONodeArray);
+
+    void constructNodeAtrributes(const thrust::device_vector <size_t> &d_esumTreeNodesArray,
+                                 thrust::device_vector <SVONode> &d_SVONodeArray);
+};
+```
+
+### include/libmorton/morton.h
+```
+#pragma once
+
+// This file will always contain inline functions which point to the fastest Morton encoding/decoding implementation
+// IF you just want to use the fastest method to encode/decode morton codes, include this header.
+
+// If you want to experiment with alternative methods (which might be slower, all depending on hardware / your data set)
+// check the individual headers below.
+
+#include "morton2D.h"
+#include "morton3D.h"
+
+#if defined(__BMI2__) || defined(__AVX2__)
+#include "morton_BMI.h"
+#elif defined(__AVX512BITALG__)
+#include "morton_AVX512BITALG.h"
+#endif
+
+namespace libmorton {
+	// Functions under this are stubs which will always point to fastest implementation at the moment
+	//-----------------------------------------------------------------------------------------------
+
+	// ENCODING
+#if defined(__BMI2__) || defined(__AVX2__)
+	inline CUDA_CALLABLE_MEMBER uint_fast32_t morton2D_32_encode(const uint_fast16_t x, const uint_fast16_t y) {
+		return m2D_e_BMI<uint_fast32_t, uint_fast16_t>(x, y);
+	}
+	inline CUDA_CALLABLE_MEMBER uint_fast64_t morton2D_64_encode(const uint_fast32_t x, const uint_fast32_t y) {
+		return m2D_e_BMI<uint_fast64_t, uint_fast32_t>(x, y);
+	}
+	inline CUDA_CALLABLE_MEMBER uint_fast32_t morton3D_32_encode(const uint_fast16_t x, const uint_fast16_t y, const uint_fast16_t z) {
+		return m3D_e_BMI<uint_fast32_t, uint_fast16_t>(x, y, z);
+	}
+	inline CUDA_CALLABLE_MEMBER uint_fast64_t morton3D_64_encode(const uint_fast32_t x, const uint_fast32_t y, const uint_fast32_t z) {
+		return m3D_e_BMI<uint_fast64_t, uint_fast32_t>(x, y, z);
+	}
+#elif defined(__AVX512BITALG__)
+	inline CUDA_CALLABLE_MEMBER uint_fast32_t morton2D_32_encode(const uint_fast16_t x, const uint_fast16_t y) {
+		return m2D_e_BITALG<uint_fast32_t, uint_fast16_t>(x, y);
+	}
+	inline CUDA_CALLABLE_MEMBER uint_fast64_t morton2D_64_encode(const uint_fast32_t x, const uint_fast32_t y) {
+		return m2D_e_BITALG<uint_fast64_t, uint_fast32_t>(x, y);
+	}
+	inline CUDA_CALLABLE_MEMBER uint_fast32_t morton3D_32_encode(const uint_fast16_t x, const uint_fast16_t y, const uint_fast16_t z) {
+		return m3D_e_BITALG<uint_fast32_t, uint_fast16_t>(x, y, z);
+	}
+	inline CUDA_CALLABLE_MEMBER uint_fast64_t morton3D_64_encode(const uint_fast32_t x, const uint_fast32_t y, const uint_fast32_t z) {
+		return m3D_e_BITALG<uint_fast64_t, uint_fast32_t>(x, y, z);
+	}
+#else
+	inline CUDA_CALLABLE_MEMBER uint_fast32_t morton2D_32_encode(const uint_fast16_t x, const uint_fast16_t y) {
+		return m2D_e_magicbits_combined(x, y);
+	}
+	inline CUDA_CALLABLE_MEMBER uint_fast64_t morton2D_64_encode(const uint_fast32_t x, const uint_fast32_t y) {
+		return m2D_e_sLUT<uint_fast64_t, uint_fast32_t>(x, y);
+	}
+	inline CUDA_CALLABLE_MEMBER uint_fast32_t morton3D_32_encode(const uint_fast16_t x, const uint_fast16_t y, const uint_fast16_t z) {
+		return m3D_e_sLUT<uint_fast32_t, uint_fast16_t>(x, y, z);
+	}
+	inline CUDA_CALLABLE_MEMBER uint_fast64_t morton3D_64_encode(const uint_fast32_t x, const uint_fast32_t y, const uint_fast32_t z) {
+		return m3D_e_sLUT<uint_fast64_t, uint_fast32_t>(x, y, z);
+	}
+#endif
+
+	// DECODING
+
+#if defined(__BMI2__) || defined(__AVX2__)
+	inline CUDA_CALLABLE_MEMBER void morton2D_32_decode(const uint_fast32_t morton, uint_fast16_t& x, uint_fast16_t& y) {
+		m2D_d_BMI<uint_fast32_t, uint_fast16_t>(morton, x, y);
+	}
+	inline CUDA_CALLABLE_MEMBER void morton2D_64_decode(const uint_fast64_t morton, uint_fast32_t& x, uint_fast32_t& y) {
+		m2D_d_BMI<uint_fast64_t, uint_fast32_t>(morton, x, y);
+	}
+	inline CUDA_CALLABLE_MEMBER void morton3D_32_decode(const uint_fast32_t morton, uint_fast16_t& x, uint_fast16_t& y, uint_fast16_t& z) {
+		m3D_d_BMI<uint_fast32_t, uint_fast16_t>(morton, x, y, z);
+	}
+	inline CUDA_CALLABLE_MEMBER void morton3D_64_decode(const uint_fast64_t morton, uint_fast32_t& x, uint_fast32_t& y, uint_fast32_t& z) {
+		m3D_d_BMI<uint_fast64_t, uint_fast32_t>(morton, x, y, z);
+	}
+#elif defined(__AVX512BITALG__)
+	inline CUDA_CALLABLE_MEMBER void morton2D_32_decode(const uint_fast32_t morton, uint_fast16_t& x, uint_fast16_t& y) {
+		m2D_d_BITALG<uint_fast32_t, uint_fast16_t>(morton, x, y);
+	}
+	inline CUDA_CALLABLE_MEMBER void morton2D_64_decode(const uint_fast64_t morton, uint_fast32_t& x, uint_fast32_t& y) {
+		m2D_d_BITALG<uint_fast64_t, uint_fast32_t>(morton, x, y);
+	}
+	inline CUDA_CALLABLE_MEMBER void morton3D_32_decode(const uint_fast32_t morton, uint_fast16_t& x, uint_fast16_t& y, uint_fast16_t& z) {
+		m3D_d_BITALG<uint_fast32_t, uint_fast16_t>(morton, x, y, z);
+	}
+	inline CUDA_CALLABLE_MEMBER void morton3D_64_decode(const uint_fast64_t morton, uint_fast32_t& x, uint_fast32_t& y, uint_fast32_t& z) {
+		m3D_d_BITALG<uint_fast64_t, uint_fast32_t>(morton, x, y, z);
+}
+#else
+	inline CUDA_CALLABLE_MEMBER void morton2D_32_decode(const uint_fast32_t morton, uint_fast16_t& x, uint_fast16_t& y) {
+		m2D_d_magicbits_combined(morton, x, y);
+	}
+	inline CUDA_CALLABLE_MEMBER void morton2D_64_decode(const uint_fast64_t morton, uint_fast32_t& x, uint_fast32_t& y) {
+		m2D_d_sLUT<uint_fast64_t, uint_fast32_t>(morton, x, y);
+	}
+	inline CUDA_CALLABLE_MEMBER void morton3D_32_decode(const uint_fast32_t morton, uint_fast16_t& x, uint_fast16_t& y, uint_fast16_t& z) {
+		m3D_d_sLUT<uint_fast32_t, uint_fast16_t>(morton, x, y, z);
+	}
+	inline CUDA_CALLABLE_MEMBER void morton3D_64_decode(const uint_fast64_t morton, uint_fast32_t& x, uint_fast32_t& y, uint_fast32_t& z) {
+		m3D_d_sLUT<uint_fast64_t, uint_fast32_t>(morton, x, y, z);
+	}
+#endif
+}
+```
+
+### include/libmorton/morton2D.h
+```
+#pragma once
+
+// Libmorton - Methods to encode/decode 64-bit morton codes from/to 32-bit (x,y) coordinates
+// Warning: morton.h will always point to the functions that use the fastest available method.
+
+#include <algorithm>
+#include <stdint.h>
+#include <math.h>
+#include "morton2D_LUTs.h"
+#include "morton_common.h"
+
+namespace libmorton {
+
+	// Encode methods
+	template<typename morton, typename coord> inline morton m2D_e_sLUT(const coord x, const coord y);
+	template<typename morton, typename coord> inline morton m2D_e_sLUT_ET(const coord x, const coord y);
+	template<typename morton, typename coord> inline morton m2D_e_LUT(const coord x, const coord y);
+	template<typename morton, typename coord> inline morton m2D_e_LUT_ET(const coord x, const coord y);
+	template<typename morton, typename coord> inline morton m2D_e_magicbits(const coord x, const coord y);
+	template<typename morton, typename coord> inline morton m2D_e_for(const coord x, const coord y);
+	template<typename morton, typename coord> inline morton m2D_e_for_ET(const coord x, const coord y);
+
+	// Decode methods
+	template<typename morton, typename coord> inline void m2D_d_sLUT(const morton m, coord& x, coord& y);
+	template<typename morton, typename coord> inline void m2D_d_sLUT_ET(const morton m, coord& x, coord& y);
+	template<typename morton, typename coord> inline void m2D_d_LUT(const morton m, coord& x, coord& y);
+	template<typename morton, typename coord> inline void m2D_d_LUT_ET(const morton m, coord& x, coord& y);
+	template<typename morton, typename coord> inline void m2D_d_magicbits(const morton m, coord& x, coord& y);
+	template<typename morton, typename coord> inline void m2D_d_for(const morton m, coord& x, coord& y);
+
+	// ENCODE 2D Morton code : Pre-shifted LookUpTable (sLUT)
+	template<typename morton, typename coord>
+	inline morton m2D_e_sLUT(const coord x, const coord y) {
+		morton answer = 0;
+		for (unsigned int i = sizeof(coord); i > 0; --i) {
+			unsigned int shift = (i - 1) * 8;
+			answer =
+				answer << 16 |
+				Morton2D_encode_y_256[(y >> shift) & EIGHT_BIT_MASK] |
+				Morton2D_encode_x_256[(x >> shift) & EIGHT_BIT_MASK];
+		}
+		return answer;
+	}
+
+	// ENCODE 2D Morton code : LookUpTable (LUT)
+	template<typename morton, typename coord>
+	inline morton m2D_e_LUT(const coord x, const coord y) {
+		morton answer = 0;
+		for (unsigned int i = sizeof(coord); i > 0; --i) {
+			unsigned int shift = (i - 1) * 8;
+			answer =
+				answer << 16 |
+				(Morton2D_encode_x_256[(y >> shift) & EIGHT_BIT_MASK] << morton(1)) |
+				(Morton2D_encode_x_256[(x >> shift) & EIGHT_BIT_MASK]);
+		}
+		return answer;
+	}
+
+	// HELPER METHOD for Early Termination LUT Encode
+	template<typename morton, typename coord>
+	inline morton compute2D_ET_LUT_encode(const coord c, const coord *LUT) {
+		unsigned long maxbit = 0;
+		if (findFirstSetBit<coord>(c, &maxbit) == 0) { return 0; }
+		morton answer = 0;
+		unsigned int i = 0;
+		while (maxbit >= i) {
+			answer |= ((morton)LUT[(c >> i) & EIGHT_BIT_MASK]) << i * 2;
+			i += 8;
+		}
+		return answer;
+	}
+
+	// ENCODE 2D Morton code : Pre-shifted LUT (Early termination version)
+	// This version tries to terminate early when there are no more bits to process
+	// Figuring this out is probably too costly in most cases.
+	template<typename morton, typename coord>
+	inline morton m2D_e_sLUT_ET(const coord x, const coord y) {
+		morton answer_x = compute2D_ET_LUT_encode<morton, coord>(x, Morton2D_encode_x_256);
+		morton answer_y = compute2D_ET_LUT_encode<morton, coord>(y, Morton2D_encode_y_256);
+		return answer_y | answer_x;
+	}
+
+	// ENCODE 2D Morton code : LUT (Early termination version)
+	template<typename morton, typename coord>
+	inline morton m2D_e_LUT_ET(const coord x, const coord y) {
+		morton answer_x = compute2D_ET_LUT_encode<morton, coord>(x, Morton2D_encode_x_256);
+		morton answer_y = compute2D_ET_LUT_encode<morton, coord>(y, Morton2D_encode_x_256);
+		return (answer_y << 1) | answer_x;
+	}
+
+	// Magicbits masks (2D encode)
+	static uint_fast32_t magicbit2D_masks32[6] = { 0xFFFFFFFF, 0x0000FFFF, 0x00FF00FF, 0x0F0F0F0F, 0x33333333, 0x55555555 };
+	static uint_fast64_t magicbit2D_masks64[6] = { 0x00000000FFFFFFFF, 0x0000FFFF0000FFFF, 0x00FF00FF00FF00FF, 0x0F0F0F0F0F0F0F0F, 0x3333333333333333, 0x5555555555555555 };
+
+	// HELPER METHOD for Magic bits encoding - split by 2
+	template<typename morton, typename coord>
+	inline morton morton2D_SplitBy2Bits(const coord a) {
+		const morton* masks = (sizeof(morton) <= 4) ? reinterpret_cast<const morton*>(magicbit2D_masks32) : reinterpret_cast<const morton*>(magicbit2D_masks64);
+		morton x = a;
+		if (sizeof(morton) > 4) { x = (x | (uint_fast64_t)x << 32) & masks[0]; }
+		x = (x | x << 16) & masks[1];
+		x = (x | x << 8) & masks[2];
+		x = (x | x << 4) & masks[3];
+		x = (x | x << 2) & masks[4];
+		x = (x | x << 1) & masks[5];
+		return x;
+	}
+
+	// ENCODE 2D Morton code : Magic bits
+	template<typename morton, typename coord>
+	inline morton m2D_e_magicbits(const coord x, const coord y) {
+		return morton2D_SplitBy2Bits<morton, coord>(x) | (morton2D_SplitBy2Bits<morton, coord>(y) << 1);
+	}
+
+	// ENCODE 2D 32-bit morton code - alternative version by JarkkoPFC - https://gist.github.com/JarkkoPFC/0e4e599320b0cc7ea92df45fb416d79a
+	// This uses the same technique as the magicbits method, but uses the upper part of a 64-bit type to split the y coordinate, 
+	// the lower part to split the x coordinate, then merges them back together.
+	inline uint_fast32_t m2D_e_magicbits_combined(uint_fast16_t x, uint_fast16_t y) {
+		uint_fast64_t m = x | (uint_fast64_t(y) << 32); // put Y in upper 32 bits, X in lower 32 bits
+		m = (m | (m << 8)) & magicbit2D_masks64[2];
+		m = (m | (m << 4)) & magicbit2D_masks64[3];
+		m = (m | (m << 2)) & magicbit2D_masks64[4];
+		m = (m | (m << 1)) & magicbit2D_masks64[5];
+		m = m | (m >> 31); // merge X and Y back together
+		// hard cut off to 32 bits, because on some systems uint_fast32_t will be a 64-bit type, and we don't want to retain split Y-version in the upper 32 bits.
+		m = m & 0x00000000FFFFFFFF; 
+		return uint_fast32_t(m);
+	}
+
+	// ENCODE 2D Morton code : For Loop
+	template<typename morton, typename coord>
+	inline morton m2D_e_for(const coord x, const coord y) {
+		morton answer = 0;
+		unsigned int checkbits = (unsigned int)floor(sizeof(morton) * 4.0f);
+		for (unsigned int i = 0; i < checkbits; ++i) {
+			morton mshifted = static_cast<morton>(0x1) << i; // Here we need to cast 0x1 to 64bits, otherwise there is a bug when morton code is larger than 32 bits
+			unsigned int shift = i; // because you have to shift back i and forth 2*i
+			answer |=
+				((x & mshifted) << shift)
+				| ((y & mshifted) << (shift + 1));
+		}
+		return answer;
+	}
+
+	// ENCODE 2D Morton code : For Loop (Early termination version)
+	template<typename morton, typename coord>
+	inline morton m2D_e_for_ET(const coord x, const coord y) {
+		morton answer = 0;
+		unsigned long x_max = 0, y_max = 0;
+		unsigned int checkbits = sizeof(morton) * 4;
+		findFirstSetBit<morton>(x, &x_max);
+		findFirstSetBit<morton>(y, &y_max);
+		checkbits = std::min(static_cast<unsigned long>(checkbits), std::max(x_max, y_max) + 1ul);
+		for (unsigned int i = 0; i < checkbits; ++i) {
+			morton m_shifted = static_cast<morton>(0x1) << i; // Here we need to cast 0x1 to 64bits, otherwise there is a bug when morton code is larger than 32 bits
+			unsigned int shift = i;
+			answer |= ((x & m_shifted) << shift)
+				| ((y & m_shifted) << (shift + 1));
+		}
+		return answer;
+	}
+
+	// HELPER METHODE for LUT decoding
+	template<typename morton, typename coord>
+	inline coord morton2D_DecodeCoord_LUT256(const morton m, const uint_fast8_t *LUT, const unsigned int startshift) {
+		morton a = 0;
+		unsigned int loops = sizeof(morton);
+		for (unsigned int i = 0; i < loops; ++i) {
+			a |= ((morton)LUT[(m >> ((i * 8) + startshift)) & EIGHT_BIT_MASK] << (4 * i));
+		}
+		return static_cast<coord>(a);
+	}
+
+	// DECODE 2D Morton code : Shifted LUT
+	template<typename morton, typename coord>
+	inline void m2D_d_sLUT(const morton m, coord& x, coord& y) {
+		x = morton2D_DecodeCoord_LUT256<morton, coord>(m, Morton2D_decode_x_256, 0);
+		y = morton2D_DecodeCoord_LUT256<morton, coord>(m, Morton2D_decode_y_256, 0);
+	}
+
+	// DECODE 2D 64-bit morton code : LUT
+	template<typename morton, typename coord>
+	inline void m2D_d_LUT(const morton m, coord& x, coord& y) {
+		x = morton2D_DecodeCoord_LUT256<morton, coord>(m, Morton2D_decode_x_256, 0);
+		y = morton2D_DecodeCoord_LUT256<morton, coord>(m, Morton2D_decode_x_256, 1);
+	}
+
+	// DECODE 2D Morton code : Shifted LUT (early termination)
+	template<typename morton, typename coord>
+	inline void m2D_d_sLUT_ET(const morton m, coord& x, coord& y) {
+		x = 0; y = 0;
+		unsigned long firstbit_location = 0;
+		if (!findFirstSetBit<morton>(m, &firstbit_location)) { return; }
+		unsigned int i = 0;
+		unsigned int shiftback = 0;
+		while (firstbit_location > i) {
+			morton m_shifted = (m >> i) & EIGHT_BIT_MASK;
+			x |= (coord)Morton2D_decode_x_256[m_shifted] << shiftback;
+			y |= (coord)Morton2D_decode_y_256[m_shifted] << shiftback;
+			shiftback += 4;
+			i += 8;
+		}
+	}
+
+	// DECODE 2D Morton code : LUT (early termination)
+	template<typename morton, typename coord>
+	inline void m2D_d_LUT_ET(const morton m, coord& x, coord& y) {
+		x = 0; y = 0;
+		unsigned long firstbit_location = 0;
+		if (!findFirstSetBit<morton>(m, &firstbit_location)) { return; }
+		unsigned int i = 0;
+		unsigned int shiftback = 0;
+		while (firstbit_location > i) {
+			x |= (coord)Morton2D_decode_x_256[(m >> i) & EIGHT_BIT_MASK] << shiftback;
+			y |= (coord)Morton2D_decode_x_256[(m >> (i + 1)) & EIGHT_BIT_MASK] << shiftback;
+			shiftback += 4;
+			i += 8;
+		}
+	}
+
+	// HELPER method for Magicbits decoding
+	template<typename morton, typename coord>
+	static inline coord morton2D_GetSecondBits(const morton m) {
+		morton* masks = (sizeof(morton) <= 4) ? reinterpret_cast<morton*>(magicbit2D_masks32) : reinterpret_cast<morton*>(magicbit2D_masks64);
+		morton x = m & masks[5];
+		x = (x ^ (x >> 1)) & masks[4];
+		x = (x ^ (x >> 2)) & masks[3];
+		x = (x ^ (x >> 4)) & masks[2];
+		x = (x ^ (x >> 8)) & masks[1];
+		if (sizeof(morton) > 4) x = (x ^ (x >> 16)) & masks[0];
+		return static_cast<coord>(x);
+	}
+
+	// DECODE 2D Morton code : Magic bits
+	// This method splits the morton codes bits by using certain patterns (magic bits)
+	template<typename morton, typename coord>
+	inline void m2D_d_magicbits(const morton m, coord& x, coord& y) {
+		x = morton2D_GetSecondBits<morton, coord>(m);
+		y = morton2D_GetSecondBits<morton, coord>(m >> 1);
+	}
+
+	// DECODE 2D 32-bit morton code - alternative version by JarkkoPFC - https://gist.github.com/JarkkoPFC/0e4e599320b0cc7ea92df45fb416d79a
+	inline void m2D_d_magicbits_combined(const uint_fast32_t morton, uint_fast16_t& x, uint_fast16_t& y) {
+		uint_fast64_t res = (morton | (uint_fast64_t(morton) << 31)) & magicbit2D_masks64[5];
+		res = (res | (res >> 1)) & magicbit2D_masks64[4];
+		res = (res | (res >> 2)) & magicbit2D_masks64[3];
+		res = (res | (res >> 4)) & magicbit2D_masks64[2];
+		res = res | (res >> 8);
+		x = uint_fast16_t(res) & 0xFFFF;
+		y = (uint_fast16_t(res >> 32)) & 0xFFFF;
+	}
+
+	// DECODE 2D morton code : For loop
+	template<typename morton, typename coord>
+	inline void m2D_d_for(const morton m, coord& x, coord& y) {
+		x = 0; y = 0;
+		unsigned int checkbits = sizeof(morton) * 4;
+		for (unsigned int i = 0; i <= checkbits; ++i) {
+			morton selector = 1;
+			unsigned int shift_selector = 2 * i;
+			x |= (m & (selector << shift_selector)) >> i;
+			y |= (m & (selector << (shift_selector + 1))) >> (i + 1);
+		}
+	}
+
+	// DECODE 3D Morton code : For loop (Early termination version)
+	template<typename morton, typename coord>
+	inline void m2D_d_for_ET(const morton m, coord& x, coord& y) {
+		x = 0; y = 0;
+		unsigned long firstbit_location = 0;
+		if (!findFirstSetBit<morton>(m, &firstbit_location)) return;
+		float defaultbits = sizeof(morton) * 4;
+		unsigned int checkbits = static_cast<unsigned int>(std::min(defaultbits, firstbit_location / 2.0f));
+		for (unsigned int i = 0; i <= checkbits; ++i) {
+			morton selector = 1;
+			unsigned int shift_selector = 2 * i;
+			x |= (m & (selector << shift_selector)) >> i;
+			y |= (m & (selector << (shift_selector + 1))) >> (i + 1);
+		}
+	}
+}
+```
+
+### include/libmorton/morton2D_LUTs.h
+```
+#pragma once
+
+#include <stdint.h>
+
+namespace libmorton {
+
+    // LUT for Morton2D encode X
+    static const uint_fast16_t Morton2D_encode_x_256[256] =
+            {
+                    0, 1, 4, 5, 16, 17, 20, 21,
+                    64, 65, 68, 69, 80, 81, 84, 85,
+                    256, 257, 260, 261, 272, 273, 276, 277,
+                    320, 321, 324, 325, 336, 337, 340, 341,
+                    1024, 1025, 1028, 1029, 1040, 1041, 1044, 1045,
+                    1088, 1089, 1092, 1093, 1104, 1105, 1108, 1109,
+                    1280, 1281, 1284, 1285, 1296, 1297, 1300, 1301,
+                    1344, 1345, 1348, 1349, 1360, 1361, 1364, 1365,
+                    4096, 4097, 4100, 4101, 4112, 4113, 4116, 4117,
+                    4160, 4161, 4164, 4165, 4176, 4177, 4180, 4181,
+                    4352, 4353, 4356, 4357, 4368, 4369, 4372, 4373,
+                    4416, 4417, 4420, 4421, 4432, 4433, 4436, 4437,
+                    5120, 5121, 5124, 5125, 5136, 5137, 5140, 5141,
+                    5184, 5185, 5188, 5189, 5200, 5201, 5204, 5205,
+                    5376, 5377, 5380, 5381, 5392, 5393, 5396, 5397,
+                    5440, 5441, 5444, 5445, 5456, 5457, 5460, 5461,
+                    16384, 16385, 16388, 16389, 16400, 16401, 16404, 16405,
+                    16448, 16449, 16452, 16453, 16464, 16465, 16468, 16469,
+                    16640, 16641, 16644, 16645, 16656, 16657, 16660, 16661,
+                    16704, 16705, 16708, 16709, 16720, 16721, 16724, 16725,
+                    17408, 17409, 17412, 17413, 17424, 17425, 17428, 17429,
+                    17472, 17473, 17476, 17477, 17488, 17489, 17492, 17493,
+                    17664, 17665, 17668, 17669, 17680, 17681, 17684, 17685,
+                    17728, 17729, 17732, 17733, 17744, 17745, 17748, 17749,
+                    20480, 20481, 20484, 20485, 20496, 20497, 20500, 20501,
+                    20544, 20545, 20548, 20549, 20560, 20561, 20564, 20565,
+                    20736, 20737, 20740, 20741, 20752, 20753, 20756, 20757,
+                    20800, 20801, 20804, 20805, 20816, 20817, 20820, 20821,
+                    21504, 21505, 21508, 21509, 21520, 21521, 21524, 21525,
+                    21568, 21569, 21572, 21573, 21584, 21585, 21588, 21589,
+                    21760, 21761, 21764, 21765, 21776, 21777, 21780, 21781,
+                    21824, 21825, 21828, 21829, 21840, 21841, 21844, 21845
+            };
+
+    // LUT for Morton2D encode Y
+    static const uint_fast16_t Morton2D_encode_y_256[256] =
+            {
+                    0, 2, 8, 10, 32, 34, 40, 42,
+                    128, 130, 136, 138, 160, 162, 168, 170,
+                    512, 514, 520, 522, 544, 546, 552, 554,
+                    640, 642, 648, 650, 672, 674, 680, 682,
+                    2048, 2050, 2056, 2058, 2080, 2082, 2088, 2090,
+                    2176, 2178, 2184, 2186, 2208, 2210, 2216, 2218,
+                    2560, 2562, 2568, 2570, 2592, 2594, 2600, 2602,
+                    2688, 2690, 2696, 2698, 2720, 2722, 2728, 2730,
+                    8192, 8194, 8200, 8202, 8224, 8226, 8232, 8234,
+                    8320, 8322, 8328, 8330, 8352, 8354, 8360, 8362,
+                    8704, 8706, 8712, 8714, 8736, 8738, 8744, 8746,
+                    8832, 8834, 8840, 8842, 8864, 8866, 8872, 8874,
+                    10240, 10242, 10248, 10250, 10272, 10274, 10280, 10282,
+                    10368, 10370, 10376, 10378, 10400, 10402, 10408, 10410,
+                    10752, 10754, 10760, 10762, 10784, 10786, 10792, 10794,
+                    10880, 10882, 10888, 10890, 10912, 10914, 10920, 10922,
+                    32768, 32770, 32776, 32778, 32800, 32802, 32808, 32810,
+                    32896, 32898, 32904, 32906, 32928, 32930, 32936, 32938,
+                    33280, 33282, 33288, 33290, 33312, 33314, 33320, 33322,
+                    33408, 33410, 33416, 33418, 33440, 33442, 33448, 33450,
+                    34816, 34818, 34824, 34826, 34848, 34850, 34856, 34858,
+                    34944, 34946, 34952, 34954, 34976, 34978, 34984, 34986,
+                    35328, 35330, 35336, 35338, 35360, 35362, 35368, 35370,
+                    35456, 35458, 35464, 35466, 35488, 35490, 35496, 35498,
+                    40960, 40962, 40968, 40970, 40992, 40994, 41000, 41002,
+                    41088, 41090, 41096, 41098, 41120, 41122, 41128, 41130,
+                    41472, 41474, 41480, 41482, 41504, 41506, 41512, 41514,
+                    41600, 41602, 41608, 41610, 41632, 41634, 41640, 41642,
+                    43008, 43010, 43016, 43018, 43040, 43042, 43048, 43050,
+                    43136, 43138, 43144, 43146, 43168, 43170, 43176, 43178,
+                    43520, 43522, 43528, 43530, 43552, 43554, 43560, 43562,
+                    43648, 43650, 43656, 43658, 43680, 43682, 43688, 43690
+            };
+
+    // LUT for Morton2D decode X
+    static const uint_fast8_t Morton2D_decode_x_256[256] = {
+            0, 1, 0, 1, 2, 3, 2, 3, 0, 1, 0, 1, 2, 3, 2, 3,
+            4, 5, 4, 5, 6, 7, 6, 7, 4, 5, 4, 5, 6, 7, 6, 7,
+            0, 1, 0, 1, 2, 3, 2, 3, 0, 1, 0, 1, 2, 3, 2, 3,
+            4, 5, 4, 5, 6, 7, 6, 7, 4, 5, 4, 5, 6, 7, 6, 7,
+            8, 9, 8, 9, 10, 11, 10, 11, 8, 9, 8, 9, 10, 11, 10, 11,
+            12, 13, 12, 13, 14, 15, 14, 15, 12, 13, 12, 13, 14, 15, 14, 15,
+            8, 9, 8, 9, 10, 11, 10, 11, 8, 9, 8, 9, 10, 11, 10, 11,
+            12, 13, 12, 13, 14, 15, 14, 15, 12, 13, 12, 13, 14, 15, 14, 15,
+            0, 1, 0, 1, 2, 3, 2, 3, 0, 1, 0, 1, 2, 3, 2, 3,
+            4, 5, 4, 5, 6, 7, 6, 7, 4, 5, 4, 5, 6, 7, 6, 7,
+            0, 1, 0, 1, 2, 3, 2, 3, 0, 1, 0, 1, 2, 3, 2, 3,
+            4, 5, 4, 5, 6, 7, 6, 7, 4, 5, 4, 5, 6, 7, 6, 7,
+            8, 9, 8, 9, 10, 11, 10, 11, 8, 9, 8, 9, 10, 11, 10, 11,
+            12, 13, 12, 13, 14, 15, 14, 15, 12, 13, 12, 13, 14, 15, 14, 15,
+            8, 9, 8, 9, 10, 11, 10, 11, 8, 9, 8, 9, 10, 11, 10, 11,
+            12, 13, 12, 13, 14, 15, 14, 15, 12, 13, 12, 13, 14, 15, 14, 15
+    };
+
+    // LUT for Morton2D decode Y
+    static const uint_fast8_t Morton2D_decode_y_256[256] = {
+            0, 0, 1, 1, 0, 0, 1, 1, 2, 2, 3, 3, 2, 2, 3, 3,
+            0, 0, 1, 1, 0, 0, 1, 1, 2, 2, 3, 3, 2, 2, 3, 3,
+            4, 4, 5, 5, 4, 4, 5, 5, 6, 6, 7, 7, 6, 6, 7, 7,
+            4, 4, 5, 5, 4, 4, 5, 5, 6, 6, 7, 7, 6, 6, 7, 7,
+            0, 0, 1, 1, 0, 0, 1, 1, 2, 2, 3, 3, 2, 2, 3, 3,
+            0, 0, 1, 1, 0, 0, 1, 1, 2, 2, 3, 3, 2, 2, 3, 3,
+            4, 4, 5, 5, 4, 4, 5, 5, 6, 6, 7, 7, 6, 6, 7, 7,
+            4, 4, 5, 5, 4, 4, 5, 5, 6, 6, 7, 7, 6, 6, 7, 7,
+            8, 8, 9, 9, 8, 8, 9, 9, 10, 10, 11, 11, 10, 10, 11, 11,
+            8, 8, 9, 9, 8, 8, 9, 9, 10, 10, 11, 11, 10, 10, 11, 11,
+            12, 12, 13, 13, 12, 12, 13, 13, 14, 14, 15, 15, 14, 14, 15, 15,
+            12, 12, 13, 13, 12, 12, 13, 13, 14, 14, 15, 15, 14, 14, 15, 15,
+            8, 8, 9, 9, 8, 8, 9, 9, 10, 10, 11, 11, 10, 10, 11, 11,
+            8, 8, 9, 9, 8, 8, 9, 9, 10, 10, 11, 11, 10, 10, 11, 11,
+            12, 12, 13, 13, 12, 12, 13, 13, 14, 14, 15, 15, 14, 14, 15, 15,
+            12, 12, 13, 13, 12, 12, 13, 13, 14, 14, 15, 15, 14, 14, 15, 15
+    };
+}
+```
+
+### include/libmorton/morton3D.h
+```
+#pragma once
+
+// Libmorton - Methods to encode/decode 64-bit morton codes from/to 32-bit (x,y,z) coordinates
+// Warning: morton.h will always point to the functions that use the fastest available method.
+
+#include <algorithm>
+#include <stdint.h>
+#include <math.h>
+#include "morton3D_LUTs.h"
+#include "morton_common.h"
+
+namespace libmorton {
+	// AVAILABLE METHODS FOR ENCODING
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER morton m3D_e_sLUT(const coord x, const coord y, const coord z);
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER morton m3D_e_sLUT_ET(const coord x, const coord y, const coord z);
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER morton m3D_e_LUT(const coord x, const coord y, const coord z);
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER morton m3D_e_LUT_ET(const coord x, const coord y, const coord z);
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER morton m3D_e_magicbits(const coord x, const coord y, const coord z);
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER morton m3D_e_for(const coord x, const coord y, const coord z);
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER morton m3D_e_for_ET(const coord x, const coord y, const coord z);
+
+	// AVAILABLE METHODS FOR DECODING
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER void m3D_d_sLUT(const morton m, coord& x, coord& y, coord& z);
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER void m3D_d_sLUT_ET(const morton m, coord& x, coord& y, coord& z);
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER void m3D_d_LUT(const morton m, coord& x, coord& y, coord& z);
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER void m3D_d_LUT_ET(const morton m, coord& x, coord& y, coord& z);
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER void m3D_d_magicbits(const morton m, coord& x, coord& y, coord& z);
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER void m3D_d_for(const morton m, coord& x, coord& y, coord& z);
+	template<typename morton, typename coord> inline CUDA_CALLABLE_MEMBER void m3D_d_for_ET(const morton m, coord& x, coord& y, coord& z);
+
+	// ENCODE 3D Morton code : Pre-Shifted LookUpTable (sLUT)
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER morton m3D_e_sLUT(const coord x, const coord y, const coord z) {
+		morton answer = 0;
+		for (unsigned int i = sizeof(coord); i > 0; --i) {
+			unsigned int shift = (i - 1) * 8;
+			answer =
+				answer << 24 |
+				(Morton3D_encode_z_256[(z >> shift) & EIGHT_BIT_MASK] |
+					Morton3D_encode_y_256[(y >> shift) & EIGHT_BIT_MASK] |
+					Morton3D_encode_x_256[(x >> shift) & EIGHT_BIT_MASK]);
+		}
+		return answer;
+	}
+
+	// ENCODE 3D Morton code : LookUpTable (LUT)
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER morton m3D_e_LUT(const coord x, const coord y, const coord z) {
+		morton answer = 0;
+		for (unsigned int i = sizeof(coord); i > 0; --i) {
+			unsigned int shift = (i - 1) * 8;
+			answer =
+				answer << 24 |
+				(Morton3D_encode_x_256[(z >> shift) & EIGHT_BIT_MASK] << morton(2)) |
+				(Morton3D_encode_x_256[(y >> shift) & EIGHT_BIT_MASK] << morton(1)) |
+				Morton3D_encode_x_256[(x >> shift) & EIGHT_BIT_MASK];
+		}
+		return answer;
+	}
+
+	// HELPER METHOD for ET LUT encode
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER morton compute3D_ET_LUT_encode(const coord c, const coord *LUT) {
+		unsigned long maxbit = 0;
+		if (findFirstSetBit<coord>(c, &maxbit) == 0) { return 0; }
+		morton answer = 0;
+		for (int i = (int)ceil((maxbit + 1) / 8.0f); i >= 0; --i) {
+			unsigned int shift = i * 8;
+			answer = answer << 24 | (LUT[(c >> shift) & EIGHT_BIT_MASK]);
+		}
+		return answer;
+	}
+
+	// ENCODE 3D Morton code : Pre-shifted LookUpTable (LUT) (Early Termination version)
+	// This version tries to terminate early when there are no more bits to process
+	// Figuring this out is probably too costly in most cases.
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER morton m3D_e_sLUT_ET(const coord x, const coord y, const coord z) {
+		morton answer_x = compute3D_ET_LUT_encode<morton, coord>(x, Morton3D_encode_x_256);
+		morton answer_y = compute3D_ET_LUT_encode<morton, coord>(y, Morton3D_encode_y_256);
+		morton answer_z = compute3D_ET_LUT_encode<morton, coord>(z, Morton3D_encode_z_256);
+		return answer_z | answer_y | answer_x;
+	}
+
+	// ENCODE 3D Morton code : LookUpTable (LUT) (Early termination version)
+	// This version tries to terminate early when there are no more bits to process
+	// Figuring this out is probably too costly in most cases.
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER morton m3D_e_LUT_ET(const coord x, const coord y, const coord z) {
+		morton answer_x = compute3D_ET_LUT_encode<morton, coord>(x, Morton3D_encode_x_256);
+		morton answer_y = compute3D_ET_LUT_encode<morton, coord>(y, Morton3D_encode_x_256);
+		morton answer_z = compute3D_ET_LUT_encode<morton, coord>(z, Morton3D_encode_x_256);
+		return (answer_z << 2) | (answer_y << 1) | answer_x;
+	}
+
+	// Magicbits masks (3D encode)
+	static __constant__ uint_fast32_t magicbit3D_masks32_encode[6] = { 0x000003ff, 0, 0x30000ff, 0x0300f00f, 0x30c30c3, 0x9249249 }; // we add a 0 on position 1 in this array to use same code for 32-bit and 64-bit cases
+	static __constant__ uint_fast64_t magicbit3D_masks64_encode[6] = { 0x1fffff, 0x1f00000000ffff, 0x1f0000ff0000ff, 0x100f00f00f00f00f, 0x10c30c30c30c30c3, 0x1249249249249249 };
+
+	// HELPER METHOD: Magic bits encoding (helper method)
+	template<typename morton, typename coord>
+	static inline CUDA_CALLABLE_MEMBER morton morton3D_SplitBy3bits(const coord a) {
+		const morton* masks = (sizeof(morton) <= 4) ? reinterpret_cast<const morton*>(magicbit3D_masks32_encode) : reinterpret_cast<const morton*>(magicbit3D_masks64_encode);
+		morton x = ((morton)a) & masks[0];
+		if (sizeof(morton) == 8) { x = (x | (uint_fast64_t)x << 32) & masks[1]; } // for 64-bit case
+		x = (x | x << 16) & masks[2];
+		x = (x | x << 8)  & masks[3];
+		x = (x | x << 4)  & masks[4];
+		x = (x | x << 2)  & masks[5];
+		return x;
+	}
+
+	// ENCODE 3D Morton code : Magic bits method
+	// This method uses certain bit patterns (magic bits) to split bits in the coordinates
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER morton m3D_e_magicbits(const coord x, const coord y, const coord z) {
+		return morton3D_SplitBy3bits<morton, coord>(x) | (morton3D_SplitBy3bits<morton, coord>(y) << 1) | (morton3D_SplitBy3bits<morton, coord>(z) << 2);
+	}
+
+	// ENCODE 3D Morton code : For loop
+	// This is the most naive way of encoding coordinates into a morton code
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER morton m3D_e_for(const coord x, const coord y, const coord z) {
+		morton answer = 0;
+		unsigned int checkbits = (sizeof(morton) * 8) / 3;
+		for (unsigned int i = 0; i < checkbits; ++i) {
+			morton mshifted = static_cast<morton>(1) << i; // Here we need to cast 0x1 to 64bits, otherwise there is a bug when morton code is larger than 32 bits
+			unsigned int shift = 2 * i; // because you have to shift back i and forth 3*i
+			answer |= ((x & mshifted) << shift)
+				| ((y & mshifted) << (shift + 1))
+				| ((z & mshifted) << (shift + 2));
+		}
+		return answer;
+	}
+
+	// ENCODE 3D Morton code : For loop (Early termination version)
+	// In case of the for loop, figuring out when to stop early has huge benefits.
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER morton m3D_e_for_ET(const coord x, const coord y, const coord z) {
+		morton answer = 0;
+		unsigned long x_max = 0, y_max = 0, z_max = 0;
+		unsigned int checkbits = (sizeof(morton) * 8) / 3;
+		findFirstSetBit<morton>(x, &x_max);
+		findFirstSetBit<morton>(y, &y_max);
+		findFirstSetBit<morton>(z, &z_max);
+		checkbits = std::min((unsigned long)checkbits, std::max(z_max, std::max(x_max, y_max)) + (unsigned long)1);
+		for (unsigned int i = 0; i < checkbits; ++i) {
+			morton m_shifted = static_cast<morton>(1) << i; // Here we need to cast 0x1 to 64bits, otherwise there is a bug when morton code is larger than 32 bits
+			unsigned int shift = 2 * i;
+			answer |= ((x & m_shifted) << shift)
+				| ((y & m_shifted) << (shift + 1))
+				| ((z & m_shifted) << (shift + 2));
+		}
+		return answer;
+	}
+
+	// HELPER METHOD for LUT decoding
+	// todo: wouldn't this be better with 8-bit aligned decode LUT?
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER coord morton3D_DecodeCoord_LUT256(const morton m, const uint_fast8_t *LUT, const unsigned int startshift) {
+		morton a = 0;
+		unsigned int loops = (sizeof(morton) <= 4) ? 4 : 7;
+		for (unsigned int i = 0; i < loops; ++i) {
+			a |= (morton)(LUT[(m >> ((i * 9) + startshift)) & NINE_BIT_MASK] << morton(3 * i));
+		}
+		return static_cast<coord>(a);
+	}
+
+	// DECODE 3D Morton code : Shifted LUT
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER void m3D_d_sLUT(const morton m, coord& x, coord& y, coord& z) {
+		x = morton3D_DecodeCoord_LUT256<morton, coord>(m, Morton3D_decode_x_512, 0);
+		y = morton3D_DecodeCoord_LUT256<morton, coord>(m, Morton3D_decode_y_512, 0);
+		z = morton3D_DecodeCoord_LUT256<morton, coord>(m, Morton3D_decode_z_512, 0);
+	}
+
+	// DECODE 3D Morton code : LUT
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER void m3D_d_LUT(const morton m, coord& x, coord& y, coord& z) {
+		x = morton3D_DecodeCoord_LUT256<morton, coord>(m, Morton3D_decode_x_512, 0);
+		y = morton3D_DecodeCoord_LUT256<morton, coord>(m, Morton3D_decode_x_512, 1);
+		z = morton3D_DecodeCoord_LUT256<morton, coord>(m, Morton3D_decode_x_512, 2);
+	}
+
+	// DECODE 3D Morton code : Shifted LUT (Early termination version)
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER void m3D_d_sLUT_ET(const morton m, coord& x, coord& y, coord& z) {
+		x = 0; y = 0; z = 0;
+		unsigned long firstbit_location = 0;
+		if (!findFirstSetBit<morton>(m, &firstbit_location)) { return; }
+		unsigned int i = 0;
+		unsigned int shiftback = 0;
+		while (firstbit_location > i) {
+			morton m_shifted = (m >> i) & NINE_BIT_MASK;
+			x |= (coord)Morton3D_decode_x_512[m_shifted] << shiftback;
+			y |= (coord)Morton3D_decode_y_512[m_shifted] << shiftback;
+			z |= (coord)Morton3D_decode_z_512[m_shifted] << shiftback;
+			shiftback += 3;
+			i += 9;
+		}
+		return;
+	}
+
+	// DECODE 3D Morton code : LUT (Early termination version)
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER void m3D_d_LUT_ET(const morton m, coord& x, coord& y, coord& z) {
+		x = 0; y = 0; z = 0;
+		unsigned long firstbit_location = 0;
+		if (!findFirstSetBit<morton>(m, &firstbit_location)) { return; }
+		unsigned int i = 0;
+		unsigned int shiftback = 0;
+		while (i < firstbit_location) {
+			x = x | (coord)Morton3D_decode_x_512[(m >> i) & NINE_BIT_MASK] << shiftback;
+			y = y | (coord)Morton3D_decode_x_512[(m >> (i + 1)) & NINE_BIT_MASK] << shiftback;
+			z = z | (coord)Morton3D_decode_x_512[(m >> (i + 2)) & NINE_BIT_MASK] << shiftback;
+			i += 9;
+			shiftback += 3;
+		}
+		return;
+	}
+
+	// Magicbits masks (3D decode)
+	static __constant__ uint_fast32_t magicbit3D_masks32_decode[6] = { 0, 0x000003ff, 0x30000ff, 0x0300f00f, 0x30c30c3, 0x9249249 }; // we add a 0 on position 0 in this array to use same code for 32-bit and 64-bit cases
+	static __constant__ uint_fast64_t magicbit3D_masks64_decode[6] = { 0x1fffff, 0x1f00000000ffff, 0x1f0000ff0000ff, 0x100f00f00f00f00f, 0x10c30c30c30c30c3, 0x1249249249249249 };
+
+	// HELPER METHOD for Magic bits decoding
+	template<typename morton, typename coord>
+	static inline CUDA_CALLABLE_MEMBER coord morton3D_GetThirdBits(const morton m) {
+		morton* masks = (sizeof(morton) <= 4) ? reinterpret_cast<morton*>(magicbit3D_masks32_decode) : reinterpret_cast<morton*>(magicbit3D_masks64_decode);
+		morton x = m & masks[5];
+		x = (x ^ (x >> 2)) & masks[4];
+		x = (x ^ (x >> 4)) & masks[3];
+		x = (x ^ (x >> 8)) & masks[2];
+		x = (x ^ (x >> 16)) & masks[1];
+		if (sizeof(morton) > 4) { x = (x ^ ((uint_fast64_t)x >> 32)) & masks[0]; }
+		return static_cast<coord>(x);
+	}
+
+	// DECODE 3D Morton code : Magic bits
+	// This method splits the morton codes bits by using certain patterns (magic bits)
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER void m3D_d_magicbits(const morton m, coord& x, coord& y, coord& z) {
+		x = morton3D_GetThirdBits<morton, coord>(m);
+		y = morton3D_GetThirdBits<morton, coord>(m >> 1);
+		z = morton3D_GetThirdBits<morton, coord>(m >> 2);
+	}
+
+	// DECODE 3D Morton code : For loop
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER void m3D_d_for(const morton m, coord& x, coord& y, coord& z) {
+		x = 0; y = 0; z = 0;
+		unsigned int checkbits = (sizeof(morton) * 8) / 3;
+		for (unsigned int i = 0; i <= checkbits; ++i) {
+			morton selector = 1;
+			unsigned int shift_selector = 3 * i;
+			unsigned int shiftback = 2 * i;
+			x |= (m & (selector << shift_selector)) >> (shiftback);
+			y |= (m & (selector << (shift_selector + 1))) >> (shiftback + 1);
+			z |= (m & (selector << (shift_selector + 2))) >> (shiftback + 2);
+		}
+	}
+
+	// DECODE 3D Morton code : For loop (Early termination version)
+	template<typename morton, typename coord>
+	inline CUDA_CALLABLE_MEMBER void m3D_d_for_ET(const morton m, coord& x, coord& y, coord& z) {
+		x = 0; y = 0; z = 0;
+		unsigned long firstbit_location = 0;
+		if (!findFirstSetBit<morton>(m, &firstbit_location)) return;
+		unsigned int defaultbits = (sizeof(morton) * 8) / 3;
+		unsigned int checkbits = static_cast<unsigned int>(std::min((float) defaultbits, firstbit_location / 3.0f));
+		for (unsigned int i = 0; i <= checkbits; ++i) {
+			morton selector = 1;
+			unsigned int shift_selector = 3 * i;
+			unsigned int shiftback = 2 * i;
+			x |= (m & (selector << shift_selector)) >> (shiftback);
+			y |= (m & (selector << (shift_selector + 1))) >> (shiftback + 1);
+			z |= (m & (selector << (shift_selector + 2))) >> (shiftback + 2);
+		}
+	}
+}
+```
+
+### include/libmorton/morton3D_LUTs.h
+```
+#pragma once
+
+#include "CUDAUtil.h"
+#include <cstdint>
+
+namespace libmorton {
+    // LUT for Morton3D encode X
+    static __constant__ uint_fast32_t Morton3D_encode_x_256[256] =
+            {
+                    0x00000000,
+                    0x00000001, 0x00000008, 0x00000009, 0x00000040, 0x00000041, 0x00000048, 0x00000049, 0x00000200,
+                    0x00000201, 0x00000208, 0x00000209, 0x00000240, 0x00000241, 0x00000248, 0x00000249, 0x00001000,
+                    0x00001001, 0x00001008, 0x00001009, 0x00001040, 0x00001041, 0x00001048, 0x00001049, 0x00001200,
+                    0x00001201, 0x00001208, 0x00001209, 0x00001240, 0x00001241, 0x00001248, 0x00001249, 0x00008000,
+                    0x00008001, 0x00008008, 0x00008009, 0x00008040, 0x00008041, 0x00008048, 0x00008049, 0x00008200,
+                    0x00008201, 0x00008208, 0x00008209, 0x00008240, 0x00008241, 0x00008248, 0x00008249, 0x00009000,
+                    0x00009001, 0x00009008, 0x00009009, 0x00009040, 0x00009041, 0x00009048, 0x00009049, 0x00009200,
+                    0x00009201, 0x00009208, 0x00009209, 0x00009240, 0x00009241, 0x00009248, 0x00009249, 0x00040000,
+                    0x00040001, 0x00040008, 0x00040009, 0x00040040, 0x00040041, 0x00040048, 0x00040049, 0x00040200,
+                    0x00040201, 0x00040208, 0x00040209, 0x00040240, 0x00040241, 0x00040248, 0x00040249, 0x00041000,
+                    0x00041001, 0x00041008, 0x00041009, 0x00041040, 0x00041041, 0x00041048, 0x00041049, 0x00041200,
+                    0x00041201, 0x00041208, 0x00041209, 0x00041240, 0x00041241, 0x00041248, 0x00041249, 0x00048000,
+                    0x00048001, 0x00048008, 0x00048009, 0x00048040, 0x00048041, 0x00048048, 0x00048049, 0x00048200,
+                    0x00048201, 0x00048208, 0x00048209, 0x00048240, 0x00048241, 0x00048248, 0x00048249, 0x00049000,
+                    0x00049001, 0x00049008, 0x00049009, 0x00049040, 0x00049041, 0x00049048, 0x00049049, 0x00049200,
+                    0x00049201, 0x00049208, 0x00049209, 0x00049240, 0x00049241, 0x00049248, 0x00049249, 0x00200000,
+                    0x00200001, 0x00200008, 0x00200009, 0x00200040, 0x00200041, 0x00200048, 0x00200049, 0x00200200,
+                    0x00200201, 0x00200208, 0x00200209, 0x00200240, 0x00200241, 0x00200248, 0x00200249, 0x00201000,
+                    0x00201001, 0x00201008, 0x00201009, 0x00201040, 0x00201041, 0x00201048, 0x00201049, 0x00201200,
+                    0x00201201, 0x00201208, 0x00201209, 0x00201240, 0x00201241, 0x00201248, 0x00201249, 0x00208000,
+                    0x00208001, 0x00208008, 0x00208009, 0x00208040, 0x00208041, 0x00208048, 0x00208049, 0x00208200,
+                    0x00208201, 0x00208208, 0x00208209, 0x00208240, 0x00208241, 0x00208248, 0x00208249, 0x00209000,
+                    0x00209001, 0x00209008, 0x00209009, 0x00209040, 0x00209041, 0x00209048, 0x00209049, 0x00209200,
+                    0x00209201, 0x00209208, 0x00209209, 0x00209240, 0x00209241, 0x00209248, 0x00209249, 0x00240000,
+                    0x00240001, 0x00240008, 0x00240009, 0x00240040, 0x00240041, 0x00240048, 0x00240049, 0x00240200,
+                    0x00240201, 0x00240208, 0x00240209, 0x00240240, 0x00240241, 0x00240248, 0x00240249, 0x00241000,
+                    0x00241001, 0x00241008, 0x00241009, 0x00241040, 0x00241041, 0x00241048, 0x00241049, 0x00241200,
+                    0x00241201, 0x00241208, 0x00241209, 0x00241240, 0x00241241, 0x00241248, 0x00241249, 0x00248000,
+                    0x00248001, 0x00248008, 0x00248009, 0x00248040, 0x00248041, 0x00248048, 0x00248049, 0x00248200,
+                    0x00248201, 0x00248208, 0x00248209, 0x00248240, 0x00248241, 0x00248248, 0x00248249, 0x00249000,
+                    0x00249001, 0x00249008, 0x00249009, 0x00249040, 0x00249041, 0x00249048, 0x00249049, 0x00249200,
+                    0x00249201, 0x00249208, 0x00249209, 0x00249240, 0x00249241, 0x00249248, 0x00249249
+            };
+
+    // LUT for Morton3D encode Y
+    static __constant__ uint_fast32_t Morton3D_encode_y_256[256] = {
+            0x00000000,
+            0x00000002, 0x00000010, 0x00000012, 0x00000080, 0x00000082, 0x00000090, 0x00000092, 0x00000400,
+            0x00000402, 0x00000410, 0x00000412, 0x00000480, 0x00000482, 0x00000490, 0x00000492, 0x00002000,
+            0x00002002, 0x00002010, 0x00002012, 0x00002080, 0x00002082, 0x00002090, 0x00002092, 0x00002400,
+            0x00002402, 0x00002410, 0x00002412, 0x00002480, 0x00002482, 0x00002490, 0x00002492, 0x00010000,
+            0x00010002, 0x00010010, 0x00010012, 0x00010080, 0x00010082, 0x00010090, 0x00010092, 0x00010400,
+            0x00010402, 0x00010410, 0x00010412, 0x00010480, 0x00010482, 0x00010490, 0x00010492, 0x00012000,
+            0x00012002, 0x00012010, 0x00012012, 0x00012080, 0x00012082, 0x00012090, 0x00012092, 0x00012400,
+            0x00012402, 0x00012410, 0x00012412, 0x00012480, 0x00012482, 0x00012490, 0x00012492, 0x00080000,
+            0x00080002, 0x00080010, 0x00080012, 0x00080080, 0x00080082, 0x00080090, 0x00080092, 0x00080400,
+            0x00080402, 0x00080410, 0x00080412, 0x00080480, 0x00080482, 0x00080490, 0x00080492, 0x00082000,
+            0x00082002, 0x00082010, 0x00082012, 0x00082080, 0x00082082, 0x00082090, 0x00082092, 0x00082400,
+            0x00082402, 0x00082410, 0x00082412, 0x00082480, 0x00082482, 0x00082490, 0x00082492, 0x00090000,
+            0x00090002, 0x00090010, 0x00090012, 0x00090080, 0x00090082, 0x00090090, 0x00090092, 0x00090400,
+            0x00090402, 0x00090410, 0x00090412, 0x00090480, 0x00090482, 0x00090490, 0x00090492, 0x00092000,
+            0x00092002, 0x00092010, 0x00092012, 0x00092080, 0x00092082, 0x00092090, 0x00092092, 0x00092400,
+            0x00092402, 0x00092410, 0x00092412, 0x00092480, 0x00092482, 0x00092490, 0x00092492, 0x00400000,
+            0x00400002, 0x00400010, 0x00400012, 0x00400080, 0x00400082, 0x00400090, 0x00400092, 0x00400400,
+            0x00400402, 0x00400410, 0x00400412, 0x00400480, 0x00400482, 0x00400490, 0x00400492, 0x00402000,
+            0x00402002, 0x00402010, 0x00402012, 0x00402080, 0x00402082, 0x00402090, 0x00402092, 0x00402400,
+            0x00402402, 0x00402410, 0x00402412, 0x00402480, 0x00402482, 0x00402490, 0x00402492, 0x00410000,
+            0x00410002, 0x00410010, 0x00410012, 0x00410080, 0x00410082, 0x00410090, 0x00410092, 0x00410400,
+            0x00410402, 0x00410410, 0x00410412, 0x00410480, 0x00410482, 0x00410490, 0x00410492, 0x00412000,
+            0x00412002, 0x00412010, 0x00412012, 0x00412080, 0x00412082, 0x00412090, 0x00412092, 0x00412400,
+            0x00412402, 0x00412410, 0x00412412, 0x00412480, 0x00412482, 0x00412490, 0x00412492, 0x00480000,
+            0x00480002, 0x00480010, 0x00480012, 0x00480080, 0x00480082, 0x00480090, 0x00480092, 0x00480400,
+            0x00480402, 0x00480410, 0x00480412, 0x00480480, 0x00480482, 0x00480490, 0x00480492, 0x00482000,
+            0x00482002, 0x00482010, 0x00482012, 0x00482080, 0x00482082, 0x00482090, 0x00482092, 0x00482400,
+            0x00482402, 0x00482410, 0x00482412, 0x00482480, 0x00482482, 0x00482490, 0x00482492, 0x00490000,
+            0x00490002, 0x00490010, 0x00490012, 0x00490080, 0x00490082, 0x00490090, 0x00490092, 0x00490400,
+            0x00490402, 0x00490410, 0x00490412, 0x00490480, 0x00490482, 0x00490490, 0x00490492, 0x00492000,
+            0x00492002, 0x00492010, 0x00492012, 0x00492080, 0x00492082, 0x00492090, 0x00492092, 0x00492400,
+            0x00492402, 0x00492410, 0x00492412, 0x00492480, 0x00492482, 0x00492490, 0x00492492
+    };
+
+    // LUT for Morton3D encode Z
+    static __constant__ uint_fast32_t Morton3D_encode_z_256[256] = {
+            0x00000000,
+            0x00000004, 0x00000020, 0x00000024, 0x00000100, 0x00000104, 0x00000120, 0x00000124, 0x00000800,
+            0x00000804, 0x00000820, 0x00000824, 0x00000900, 0x00000904, 0x00000920, 0x00000924, 0x00004000,
+            0x00004004, 0x00004020, 0x00004024, 0x00004100, 0x00004104, 0x00004120, 0x00004124, 0x00004800,
+            0x00004804, 0x00004820, 0x00004824, 0x00004900, 0x00004904, 0x00004920, 0x00004924, 0x00020000,
+            0x00020004, 0x00020020, 0x00020024, 0x00020100, 0x00020104, 0x00020120, 0x00020124, 0x00020800,
+            0x00020804, 0x00020820, 0x00020824, 0x00020900, 0x00020904, 0x00020920, 0x00020924, 0x00024000,
+            0x00024004, 0x00024020, 0x00024024, 0x00024100, 0x00024104, 0x00024120, 0x00024124, 0x00024800,
+            0x00024804, 0x00024820, 0x00024824, 0x00024900, 0x00024904, 0x00024920, 0x00024924, 0x00100000,
+            0x00100004, 0x00100020, 0x00100024, 0x00100100, 0x00100104, 0x00100120, 0x00100124, 0x00100800,
+            0x00100804, 0x00100820, 0x00100824, 0x00100900, 0x00100904, 0x00100920, 0x00100924, 0x00104000,
+            0x00104004, 0x00104020, 0x00104024, 0x00104100, 0x00104104, 0x00104120, 0x00104124, 0x00104800,
+            0x00104804, 0x00104820, 0x00104824, 0x00104900, 0x00104904, 0x00104920, 0x00104924, 0x00120000,
+            0x00120004, 0x00120020, 0x00120024, 0x00120100, 0x00120104, 0x00120120, 0x00120124, 0x00120800,
+            0x00120804, 0x00120820, 0x00120824, 0x00120900, 0x00120904, 0x00120920, 0x00120924, 0x00124000,
+            0x00124004, 0x00124020, 0x00124024, 0x00124100, 0x00124104, 0x00124120, 0x00124124, 0x00124800,
+            0x00124804, 0x00124820, 0x00124824, 0x00124900, 0x00124904, 0x00124920, 0x00124924, 0x00800000,
+            0x00800004, 0x00800020, 0x00800024, 0x00800100, 0x00800104, 0x00800120, 0x00800124, 0x00800800,
+            0x00800804, 0x00800820, 0x00800824, 0x00800900, 0x00800904, 0x00800920, 0x00800924, 0x00804000,
+            0x00804004, 0x00804020, 0x00804024, 0x00804100, 0x00804104, 0x00804120, 0x00804124, 0x00804800,
+            0x00804804, 0x00804820, 0x00804824, 0x00804900, 0x00804904, 0x00804920, 0x00804924, 0x00820000,
+            0x00820004, 0x00820020, 0x00820024, 0x00820100, 0x00820104, 0x00820120, 0x00820124, 0x00820800,
+            0x00820804, 0x00820820, 0x00820824, 0x00820900, 0x00820904, 0x00820920, 0x00820924, 0x00824000,
+            0x00824004, 0x00824020, 0x00824024, 0x00824100, 0x00824104, 0x00824120, 0x00824124, 0x00824800,
+            0x00824804, 0x00824820, 0x00824824, 0x00824900, 0x00824904, 0x00824920, 0x00824924, 0x00900000,
+            0x00900004, 0x00900020, 0x00900024, 0x00900100, 0x00900104, 0x00900120, 0x00900124, 0x00900800,
+            0x00900804, 0x00900820, 0x00900824, 0x00900900, 0x00900904, 0x00900920, 0x00900924, 0x00904000,
+            0x00904004, 0x00904020, 0x00904024, 0x00904100, 0x00904104, 0x00904120, 0x00904124, 0x00904800,
+            0x00904804, 0x00904820, 0x00904824, 0x00904900, 0x00904904, 0x00904920, 0x00904924, 0x00920000,
+            0x00920004, 0x00920020, 0x00920024, 0x00920100, 0x00920104, 0x00920120, 0x00920124, 0x00920800,
+            0x00920804, 0x00920820, 0x00920824, 0x00920900, 0x00920904, 0x00920920, 0x00920924, 0x00924000,
+            0x00924004, 0x00924020, 0x00924024, 0x00924100, 0x00924104, 0x00924120, 0x00924124, 0x00924800,
+            0x00924804, 0x00924820, 0x00924824, 0x00924900, 0x00924904, 0x00924920, 0x00924924
+    };
+
+    // LUT for Morton3D decode X
+    static __constant__ uint_fast8_t Morton3D_decode_x_512[512] = {
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7,
+            4, 5, 4, 5, 4, 5, 4, 5, 6, 7, 6, 7, 6, 7, 6, 7
+    };
+
+    // LUT for Morton3D decode Y
+    static __constant__ uint_fast8_t Morton3D_decode_y_512[512] = {
+            0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+            2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+            0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+            2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+            0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+            2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+            0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+            2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+            4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+            6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+            4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+            6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+            4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+            6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+            4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+            6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+            0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+            2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+            0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+            2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+            0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+            2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+            0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+            2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3, 2, 2, 3, 3,
+            4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+            6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+            4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+            6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+            4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+            6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7,
+            4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5, 4, 4, 5, 5,
+            6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7, 6, 6, 7, 7
+    };
+
+    // LUT for Morton3D decode Z
+    static __constant__ uint_fast8_t Morton3D_decode_z_512[512] = {
+            0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+            0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+            2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+            2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+            0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+            0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+            2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+            2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+            0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+            0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+            2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+            2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+            0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+            0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+            2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+            2, 2, 2, 2, 3, 3, 3, 3, 2, 2, 2, 2, 3, 3, 3, 3,
+            4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+            4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+            6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+            6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+            4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+            4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+            6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+            6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+            4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+            4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+            6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+            6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+            4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+            4, 4, 4, 4, 5, 5, 5, 5, 4, 4, 4, 4, 5, 5, 5, 5,
+            6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7,
+            6, 6, 6, 6, 7, 7, 7, 7, 6, 6, 6, 6, 7, 7, 7, 7
+    };
+}
+```
+
+### include/libmorton/morton_AVX512BITALG.h
+```
+#pragma once
+#if defined(__AVX512BITALG__)
+#include <immintrin.h>
+#include <stdint.h>
+
+namespace libmorton {
+
+	namespace bitalg_detail {
+		// "Zip" and interleave an m-vector of n-bit integers into a
+		// new n*m-bit integer
+		// 2D MORTONS
+		inline void bitunzip2D(const uint32_t morton, uint32_t& x, uint32_t& y) noexcept {
+			// Unpack bits into upper and lower half of 32-bit integer in parallel
+			// into 16-bit components
+			const uint32_t Unzipped = _cvtmask32_u32(
+				_mm256_bitshuffle_epi64_mask(
+					_mm256_set1_epi32(morton),
+					_mm256_set_epi8(
+						// Every odd bit
+						31, 29, 27, 25, 23, 21, 19, 17, 
+						15, 13, 11,  9,  7,  5,  3,  1, 
+						// Every even bit
+						30, 28, 26, 24, 22, 20, 18, 16, 
+						14, 12, 10,  8,  6,  4,  2,  0
+					)
+				)
+			);
+			x = static_cast<uint16_t>(Unzipped >>  0);
+			y = static_cast<uint16_t>(Unzipped >> 16);
+		}
+		inline void bitunzip2D(const uint64_t morton, uint64_t& x, uint64_t& y) noexcept {
+			// Unpack bits into upper and lower half of 64-bit integer in parallel
+			// into 32-bit components
+			const uint64_t Unzipped = _cvtmask64_u64(
+				_mm512_bitshuffle_epi64_mask(
+					_mm512_set1_epi64(morton),
+					_mm512_set_epi8(
+						// Every odd bit
+						63, 61, 59, 57, 55, 53, 51, 49, 
+						47, 45, 43, 41, 39, 37, 35, 33, 
+						31, 29, 27, 25, 23, 21, 19, 17, 
+						15, 13, 11,  9,  7,  5,  3,  1, 
+						// Every even bit
+						62, 60, 58, 56, 54, 52, 50, 48, 
+						46, 44, 42, 40, 38, 36, 34, 32, 
+						30, 28, 26, 24, 22, 20, 18, 16, 
+						14, 12, 10,  8,  6,  4,  2,  0
+					)
+				)
+			);
+			x = static_cast<uint32_t>(Unzipped >>  0);
+			y = static_cast<uint32_t>(Unzipped >> 32);
+		}
+		inline uint32_t bitzip2D(uint32_t x, uint32_t y) noexcept {
+			// Put both 32-bit integer into each 64-bit lane
+			const __m256i CoordVec = _mm256_set1_epi64x(
+				(static_cast<uint64_t>(y) << 32u) | x
+			);
+			// Interleave bits from 32-bit X and Y coordinate
+			const __mmask32 Interleave = _mm256_bitshuffle_epi64_mask(
+				CoordVec,
+				_mm256_set_epi16(
+					0x1000 + 0x0101 * 15, 0x1000 + 0x0101 * 14,
+					0x1000 + 0x0101 * 13, 0x1000 + 0x0101 * 12,
+					0x1000 + 0x0101 * 11, 0x1000 + 0x0101 * 10,
+					0x1000 + 0x0101 *  9, 0x1000 + 0x0101 *  8,
+					0x1000 + 0x0101 *  7, 0x1000 + 0x0101 *  6,
+					0x1000 + 0x0101 *  5, 0x1000 + 0x0101 *  4,
+					0x1000 + 0x0101 *  3, 0x1000 + 0x0101 *  2,
+					0x1000 + 0x0101 *  1, 0x1000 + 0x0101 *  0
+				)
+			);
+			return _cvtmask32_u32(Interleave);
+		}
+
+		inline uint64_t bitzip2D(uint64_t x, uint64_t y) noexcept {
+			const __m512i CoordVec = _mm512_set1_epi64(
+				(static_cast<uint64_t>(y) << 32u) | x
+			);
+			// Interleave bits from 32-bit X and Y coordinate
+			const __mmask64 Interleave = _mm512_bitshuffle_epi64_mask(
+				CoordVec,
+				_mm512_set_epi16(
+					0x2000 + 0x0101 * 31, 0x2000 + 0x0101 * 30,
+					0x2000 + 0x0101 * 29, 0x2000 + 0x0101 * 28,
+					0x2000 + 0x0101 * 27, 0x2000 + 0x0101 * 26,
+					0x2000 + 0x0101 * 25, 0x2000 + 0x0101 * 24,
+					0x2000 + 0x0101 * 23, 0x2000 + 0x0101 * 22,
+					0x2000 + 0x0101 * 21, 0x2000 + 0x0101 * 20,
+					0x2000 + 0x0101 * 19, 0x2000 + 0x0101 * 18,
+					0x2000 + 0x0101 * 17, 0x2000 + 0x0101 * 16,
+					0x2000 + 0x0101 * 15, 0x2000 + 0x0101 * 14,
+					0x2000 + 0x0101 * 13, 0x2000 + 0x0101 * 12,
+					0x2000 + 0x0101 * 11, 0x2000 + 0x0101 * 10,
+					0x2000 + 0x0101 *  9, 0x2000 + 0x0101 *  8,
+					0x2000 + 0x0101 *  7, 0x2000 + 0x0101 *  6,
+					0x2000 + 0x0101 *  5, 0x2000 + 0x0101 *  4,
+					0x2000 + 0x0101 *  3, 0x2000 + 0x0101 *  2,
+					0x2000 + 0x0101 *  1, 0x2000 + 0x0101 *  0
+				)
+			);
+			return _cvtmask64_u64(Interleave);
+		}
+		// 3D MORTONS
+		inline void bitunzip3D(const uint32_t morton, uint32_t& x, uint32_t& y, uint32_t& z) noexcept {
+			// Unpack 32-bit integer in parallel into 10-bit components, within 16-bit lanes
+			const uint64_t Unzipped = _cvtmask64_u64(
+				_mm512_bitshuffle_epi64_mask(
+					_mm512_set1_epi64(morton),
+					_mm512_set_epi8(
+						~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, 
+						~0, ~0, ~0, ~0, ~0, ~0, 29, 26, 23, 20, 17, 14, 11,  8,  5,  2,
+						~0, ~0, ~0, ~0, ~0, 31, 28, 25, 22, 19, 16, 13, 10,  7,  4,  1,
+						~0, ~0, ~0, ~0, ~0, 30, 27, 24, 21, 18, 15, 12,  9,  6,  3,  0
+					)
+				)
+			);
+			x = static_cast<uint16_t>(Unzipped >>  0);
+			y = static_cast<uint16_t>(Unzipped >> 16);
+			z = static_cast<uint16_t>(Unzipped >> 32);
+		}
+		inline void bitunzip3D(const uint64_t morton, uint64_t& x, uint64_t& y, uint64_t& z) noexcept {
+			// Unpack 64-bit integer in parallel into 21-bit components
+			const uint64_t Unzipped = _cvtmask64_u64(
+				_mm512_bitshuffle_epi64_mask(
+					_mm512_set1_epi64(morton),
+					_mm512_set_epi8(
+						~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, 61, 58, 55, 52, 49, 46, 43, 40, 37, 34, 31, 28, 25, 22, 19, 16, 13, 10, 7, 4, 1,
+						~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, ~0, 63, 60, 57, 54, 51, 48, 45, 42, 39, 36, 33, 30, 27, 24, 21, 18, 15, 12, 9, 6, 3, 0
+					)
+				)
+			);
+			x = static_cast<uint32_t>(Unzipped >>  0);
+			y = static_cast<uint32_t>(Unzipped >> 32);
+			z = bmi2_detail::pext(morton, 0x4924924924924924);
+			//z = static_cast<uint32_t>(Unzipped >> 64);
+		}
+		inline uint32_t bitzip3D(uint32_t x, uint32_t y, uint32_t z) noexcept {
+			const __m256i CoordVec = _mm256_broadcastsi128_si256(
+				_mm_set_epi32(0, z, y, x)
+			);
+			const __m256i ShuffleVec = _mm256_permutexvar_epi8(
+				_mm256_set_epi64x(
+					0xFFFFFFFFFF100800ul + 0x010101 * 1, // Lane 3 | ...000 | z[1] | y[1] | x[1]
+					0xFFFFFFFFFF100800ul + 0x010101 * 0, // Lane 2 | ...000 | z[0] | y[0] | x[0]
+					0xFFFFFFFFFF100800ul + 0x010101 * 0, // Lane 1 | ...000 | z[0] | y[0] | x[0]
+					0xFFFFFFFFFF100800ul + 0x010101 * 0  // Lane 0 | ...000 | z[0] | y[0] | x[0]
+				),
+				CoordVec
+			);
+			const __mmask32 Interleave = _mm256_bitshuffle_epi64_mask(
+				ShuffleVec,
+				_mm256_set_epi64x(
+					0x0202010101000000 + 0x0100020100020100 * 8,
+					0x0707070606060505 + 0x0201000201000201 * 8,
+					0x0504040403030302 + 0x0002010002010002 * 8,
+					0x0202010101000000 + 0x0100020100020100 * 8 
+				)
+			);
+			return _cvtmask32_u32(Interleave);
+		}
+		inline uint64_t bitzip3D(uint64_t x, uint64_t y, uint64_t z) noexcept {
+			// Put both 32-bit integers into each 64-bit lane
+			// Todo: _mm512_shuffle_epi8 version, 128-bit lane woes
+			const __m512i CoordVec = _mm512_set_epi64(
+				0, 0, 0, 0, 0, z, y, x
+			);
+			const __m512i ShuffleVec = _mm512_permutexvar_epi8(
+				_mm512_set_epi64(
+					0xFFFFFFFFFF100800ul + 0x010101 * 2, // Lane 7 | ...000 | z[2] | y[2] | x[2]
+					0xFFFFFFFFFF100800ul + 0x010101 * 2, // Lane 6 | ...000 | z[2] | y[2] | x[2]
+					0xFFFFFFFFFF100800ul + 0x010101 * 1, // Lane 5 | ...000 | z[1] | y[1] | x[1]
+					0xFFFFFFFFFF100800ul + 0x010101 * 1, // Lane 4 | ...000 | z[1] | y[1] | x[1]
+					0xFFFFFFFFFF100800ul + 0x010101 * 1, // Lane 3 | ...000 | z[1] | y[1] | x[1]
+					0xFFFFFFFFFF100800ul + 0x010101 * 0, // Lane 2 | ...000 | z[0] | y[0] | x[0]
+					0xFFFFFFFFFF100800ul + 0x010101 * 0, // Lane 1 | ...000 | z[0] | y[0] | x[0]
+					0xFFFFFFFFFF100800ul + 0x010101 * 0  // Lane 0 | ...000 | z[0] | y[0] | x[0]
+				),
+				CoordVec
+			);
+			// Interleave bits from 32-bit X and Y and Z coordinate
+			const __mmask64 Interleave = _mm512_bitshuffle_epi64_mask(
+				ShuffleVec,
+				_mm512_set_epi64(
+					0x0504040403030302 + 0x0002010002010002 * 8,
+					0x0202010101000000 + 0x0100020100020100 * 8,
+					0x0707070606060505 + 0x0201000201000201 * 8,
+					0x0504040403030302 + 0x0002010002010002 * 8,
+					0x0202010101000000 + 0x0100020100020100 * 8,
+					0x0707070606060505 + 0x0201000201000201 * 8,
+					0x0504040403030302 + 0x0002010002010002 * 8,
+					0x0202010101000000 + 0x0100020100020100 * 8 
+				)
+			);
+			return _cvtmask64_u64(Interleave);
+		}
+	}  // namespace bitalg_detail
+
+	template<typename morton, typename coord>
+	inline morton m2D_e_BITALG(const coord x, const coord y) {
+		return bitalg_detail::bitzip2D(
+			static_cast<coord>(x), static_cast<coord>(y)
+		);
+	}
+
+	template<typename morton, typename coord>
+	inline void m2D_d_BITALG(const morton m, coord& x, coord& y) {
+		bitalg_detail::bitunzip2D(m, x, y);
+	}
+
+	template<typename morton, typename coord>
+	inline morton m3D_e_BITALG(const coord x, const coord y, const coord z) {
+		return bitalg_detail::bitzip3D(
+			static_cast<coord>(x), static_cast<coord>(y),  static_cast<coord>(z)
+		);
+	}
+
+	template<typename morton, typename coord>
+	inline void m3D_d_BITALG(const morton m, coord& x, coord& y, coord& z) {
+		bitalg_detail::bitunzip3D(m, x, y, z);
+	}
+}
+#endif
+```
+
+### include/libmorton/morton_BMI.h
+```
+#pragma once
+#if defined(__BMI2__) || defined(__AVX2__)
+#include <immintrin.h>
+#include <stdint.h>
+
+namespace libmorton {
+
+	namespace bmi2_detail {
+		inline uint32_t pdep(uint32_t source, uint32_t mask) noexcept {
+			return _pdep_u32(source, mask);
+		}
+		inline uint64_t pdep(uint64_t source, uint64_t mask) noexcept {
+			return _pdep_u64(source, mask);
+		}
+		inline uint32_t pext(uint32_t source, uint32_t mask) noexcept {
+			return _pext_u32(source, mask);
+		}
+		inline uint64_t pext(uint64_t source, uint64_t mask) noexcept {
+			return _pext_u64(source, mask);
+		}
+	}  // namespace bmi2_detail
+
+#define BMI_2D_X_MASK 0x5555555555555555
+#define BMI_2D_Y_MASK 0xAAAAAAAAAAAAAAAA
+
+	template<typename morton, typename coord>
+	inline morton m2D_e_BMI(const coord x, const coord y) {
+		morton m = 0;
+		m |= bmi2_detail::pdep(static_cast<morton>(x), static_cast<morton>(BMI_2D_X_MASK))
+			| bmi2_detail::pdep(static_cast<morton>(y), static_cast<morton>(BMI_2D_Y_MASK));
+		return m;
+	}
+
+	template<typename morton, typename coord>
+	inline void m2D_d_BMI(const morton m, coord& x, coord& y) {
+		x = static_cast<coord>(bmi2_detail::pext(m, static_cast<morton>(BMI_2D_X_MASK)));
+		y = static_cast<coord>(bmi2_detail::pext(m, static_cast<morton>(BMI_2D_Y_MASK)));
+	}
+
+#define BMI_3D_X_MASK 0x9249249249249249
+#define BMI_3D_Y_MASK 0x2492492492492492
+#define BMI_3D_Z_MASK 0x4924924924924924
+
+	template<typename morton, typename coord>
+	inline morton m3D_e_BMI(const coord x, const coord y, const coord z) {
+		morton m = 0;
+		m |= bmi2_detail::pdep(static_cast<morton>(x), static_cast<morton>(BMI_3D_X_MASK))
+			| bmi2_detail::pdep(static_cast<morton>(y), static_cast<morton>(BMI_3D_Y_MASK))
+			| bmi2_detail::pdep(static_cast<morton>(z), static_cast<morton>(BMI_3D_Z_MASK));
+		return m;
+	}
+
+	template<typename morton, typename coord>
+	inline void m3D_d_BMI(const morton m, coord& x, coord& y, coord& z) {
+		x = static_cast<coord>(bmi2_detail::pext(m, static_cast<morton>(BMI_3D_X_MASK)));
+		y = static_cast<coord>(bmi2_detail::pext(m, static_cast<morton>(BMI_3D_Y_MASK)));
+		z = static_cast<coord>(bmi2_detail::pext(m, static_cast<morton>(BMI_3D_Z_MASK)));
+	}
+}
+#endif
+```
+
+### include/libmorton/morton_common.h
+```
+#pragma once
+
+// Libmorton - Common helper methods needed in Morton encoding/decoding
+#include "CUDAUtil.h"
+#include <cstdint>
+
+#if defined(_MSC_VER)
+
+#include <intrin.h>
+
+#endif
+
+namespace libmorton {
+    template<typename morton>
+    inline CUDA_CALLABLE_MEMBER bool findFirstSetBitZeroIdx(const morton x, unsigned long *firstbit_location) {
+#if defined(_MSC_VER) && !defined(_WIN64)
+        // 32 BIT on 32 BIT
+        if (sizeof(morton) <= 4) {
+            return _BitScanReverse(firstbit_location, x) != 0;
+        }
+        // 64 BIT on 32 BIT
+        else {
+            *firstbit_location = 0;
+            if (_BitScanReverse(firstbit_location, (x >> 32))) { // check first part
+                *firstbit_location += 32;
+                return true;
+            }
+            return _BitScanReverse(firstbit_location, (x & 0xFFFFFFFF)) != 0;
+        }
+#elif defined(_MSC_VER) && defined(_WIN64)
+        // 32 or 64 BIT on 64 BIT
+        return _BitScanReverse64(firstbit_location, x) != 0;
+#elif defined(__GNUC__)
+        if (x == 0) {
+            return false;
+        }
+        else {
+            *firstbit_location = static_cast<unsigned long>((sizeof(unsigned long long) * 8) - __builtin_clzll(x) - 1);
+            return true;
+        }
+#endif
+    }
+
+    template<typename morton>
+    inline CUDA_CALLABLE_MEMBER bool findFirstSetBit(const morton x, unsigned long *firstbit_location) {
+        if (findFirstSetBitZeroIdx(x, firstbit_location)) {
+            *firstbit_location += 1;
+            return true;
+        }
+        return false;
+    }
+}
+```

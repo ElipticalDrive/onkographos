@@ -1,0 +1,99 @@
+# WildGS-SLAM
+
+
+## Overview
+WildGS-SLAM is a robust monocular RGB 3D Gaussian Splatting SLAM system designed for dynamic "in-the-wild" scenes [S2, unofficial]. It addresses the failure mode of dynamic distractors by making the optimization residual uncertainty-aware, weighting photometric and geometric errors based on predicted uncertainty to suppress unreliable observations [S1]. Unlike standard Gaussian SLAM methods that treat all pixels as equally valid map constraints, WildGS-SLAM dynamically identifies and ignores moving objects, reconstructing a clean static Gaussian map [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Monocular RGB video stream; DINOv2 features extracted from input frames [S2, unofficial].
+*   **Output:** Static 3D Gaussian map $\mathcal{G}$; camera poses $T_{CW}$ [S2, unofficial].
+
+**Data Structures**
+*   **Gaussian Map:** Collection of $N$ 3D Gaussians $\mathcal{G} = \{g_1, \dots, g_N\}$, where each $g_i$ is defined by mean $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$ (parameterized by rotation $R_i$ and scale $S_i$), opacity $\alpha_i$, and spherical harmonics coefficients $c_{i,lm}$ [S1, G].
+*   **Uncertainty Map:** A per-pixel uncertainty weight $\beta(u)$ predicted by a shallow MLP [S2, unofficial].
+
+**Algorithm Steps**
+1.  **Feature Extraction:** Extract DINOv2 features from the current input frame [S2, unofficial].
+2.  **Uncertainty Prediction:** Pass DINOv2 features through a shallow MLP to predict an uncertainty map $\beta(u)$ for each pixel $u$ [S2, unofficial]. High uncertainty indicates dynamic objects or unreliable observations [S1].
+3.  **Loss Computation:** For each pixel $u$, compute:
+    *   Photometric loss $L_I(u)$ between rendered and observed color [S1].
+    *   Geometric loss $L_D(u)$ between rendered and observed depth/geometry [S1].
+    *   Isotropy loss $L_{iso}$ to regularize Gaussian scales [S1].
+4.  **Weighted Optimization:** Update the Gaussian map and camera pose by minimizing the uncertainty-aware mapping loss $L_{map}$ [S1]:
+    $$ L_{map} = \sum_u \frac{\lambda_I L_I(u) + \lambda_D L_D(u)}{\beta(u)^2} + \lambda_{iso} L_{iso} $$
+    where $\lambda_I, \lambda_D, \lambda_{iso}$ are hyperparameters [S1]. The term $\beta(u)^2$ acts as a variance weight; larger uncertainty suppresses the contribution of pixels likely arising from dynamic distractors [S1].
+5.  **Bundle Adjustment:** Perform dense bundle adjustment incorporating the weighted residuals [S2, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def wildgs_slam_step(frame, gaussian_map, camera_pose, dino_features):
+    # 1. Predict uncertainty from features
+    # MLP takes DINOv2 features, outputs per-pixel scalar uncertainty beta
+    beta = uncertainty_mlp(dino_features)
+    
+    # 2. Render current frame from Gaussian Map and Camera Pose
+    rendered_color, rendered_depth = render_gaussians(gaussian_map, camera_pose)
+    
+    # 3. Compute losses per pixel
+    # L_I: Photometric loss (e.g., L1 or SSIM)
+    # L_D: Geometric loss (e.g., depth consistency)
+    L_I = photometric_loss(rendered_color, frame.color)
+    L_D = geometric_loss(rendered_depth, frame.depth)
+    
+    # 4. Compute isotropy regularization
+    L_iso = isotropy_loss(gaussian_map.scales)
+    
+    # 5. Weight losses by inverse squared uncertainty
+    # Avoid division by zero; clamp beta to minimum epsilon
+    epsilon = 1e-6
+    weight = 1.0 / (beta + epsilon)**2
+    
+    # 6. Aggregate weighted loss
+    # Sum over all pixels u
+    weighted_photometric = sum(weight * L_I)
+    weighted_geometric = sum(weight * L_D)
+    
+    L_map = (lambda_I * weighted_photometric + 
+             lambda_D * weighted_geometric + 
+             lambda_iso * L_iso)
+             
+    # 7. Backpropagate to update Gaussians and Camera Pose
+    update_gaussians_and_pose(L_map)
+    
+    return gaussian_map, camera_pose
+```
+
+**Parameters**
+*   $\lambda_I, \lambda_D, \lambda_{iso}$: Loss weights. Not given in the sources.
+*   MLP Architecture: Shallow MLP. Not given in the sources.
+*   DINOv2 Features: Used as input to the uncertainty predictor [S2, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Dynamic Objects:** If $\beta(u)$ is not accurately predicted for fast-moving objects, they may be incorrectly included in the static map, causing ghosting or drift [S1].
+*   **Uncertainty Calibration:** The MLP must be trained to correlate feature ambiguity with dynamic motion; poor calibration leads to over-suppression of valid static details or under-suppression of dynamic noise [S2, unofficial].
+
+## Subtopics
+
+### Uncertainty-Aware Mapping
+Uses learned uncertainty to weight residuals, distinguishing it from methods that use fixed thresholds or RANSAC for outlier rejection. Choose when scenes contain significant dynamic distractors [S1].
+
+### DINOv2 Feature Integration
+Leverages semantic features for robustness, unlike methods relying solely on photometric or geometric consistency. Choose when texture is low or repetitive [S2, unofficial].
+
+## Operating characteristics
+*   **Performance:** On the monocular Crowd sequence, WildGS-SLAM processes frames at 1525.64 ms/frame (0.655 frames/s) [S1].
+*   **Accuracy:** Full-trajectory RMSE is 0.00665 m; keyframe RMSE is 0.00371 m [S1].
+*   **Model Size:** 9.78 MiB [S1].
+*   **Strengths:** Robust to dynamic in-the-wild scenes; produces clean static maps by ignoring moving distractors [S2, unofficial].
+*   **Limitations:** Lower throughput compared to some RGB-D methods due to MLP inference and uncertainty weighting; wrapped timing includes preprocessing, pose estimation, mapping, rendering, and finalization [S1].
+*   **Scaling:** Performance on longer sequences is demonstrated, but scaling to very large scenes is not detailed in the sources [S1].
+
+## Background
+WildGS-SLAM was introduced as a robust monocular RGB 3DGS-SLAM method for dynamic in-the-wild scenes [S2, unofficial]. It is marked as a 2026 SOTA update [S2, unofficial]. The method addresses the limitation of standard Gaussian SLAM systems that fail in dynamic environments by incorporating uncertainty-aware optimization [S1].
+
+## Sources
+[S1] Gaussian Splatting for real-time scene reconstruction: Methods, systems, and trade-offs, https://doi.org/10.1016/j.patcog.2026.115120, fetched 2026-10-26
+[S2] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

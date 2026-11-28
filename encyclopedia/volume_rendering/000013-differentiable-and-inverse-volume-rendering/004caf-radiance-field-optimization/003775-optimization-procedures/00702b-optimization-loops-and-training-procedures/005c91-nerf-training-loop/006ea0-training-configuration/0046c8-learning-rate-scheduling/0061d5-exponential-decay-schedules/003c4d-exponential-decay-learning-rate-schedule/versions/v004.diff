@@ -1,0 +1,123 @@
+--- v003.md
++++ v004.md
+@@ -4,63 +4,56 @@
+ 
+ ## Overview
+-An exponentially decaying schedule that transitions a learning rate from an initial value to a final value using a base raised to a normalized step exponent [S1, unofficial]. It differs from [Linear Learning Rate Schedule](11850-linear-learning-rate-schedule.md) by applying multiplicative reductions rather than additive ones, and from [Step Decay Learning Rate Schedule](11852-step-decay-learning-rate-schedule.md) by providing a continuous curve rather than discrete uniform reductions at specific boundaries [S2, unofficial].
++An exponentially decaying schedule computes a learning rate that transitions from an initial value toward zero using a base raised to a normalized step exponent, ensuring a continuous curve without discrete jumps [Parent]. It is commonly implemented via framework schedulers like PyTorch's `LambdaLR` [S2, unofficial] or applied manually in custom training loops [S3].
+ 
+ ## How it works
+-**Inputs:** Initial learning rate ($lr$), decay factor ($\gamma$), step size ($step\_size$), current epoch or iteration ($epoch$ or $step$).
+-**Outputs:** Adjusted learning rate ($lr_{current}$).
++**Inputs:** Initial learning rate ($lr_{initial}$), decay factor ($\gamma$), normalization interval ($T$), current step index ($t$).
++**Outputs:** Adjusted learning rate ($lr_t$).
+ 
+ **Data Structures:**
+-The implementation typically relies on a scheduler object (e.g., PyTorch's `LambdaLR`) or a manual update function. The state tracks the current epoch/step index.
++The scheduler maintains a state variable for the current step or epoch index. Framework implementations (e.g., `LambdaLR`) wrap the optimizer and apply a lambda function at each optimization step [S2, unofficial].
+ 
+ **Steps:**
+-1. Initialize the scheduler with the initial learning rate $lr$, the decay function $\lambda(epoch) = \gamma^{(epoch / step\_size)}$, and the starting epoch index (typically $start\_epoch - 1$ to align with zero-based indexing or pre-increment logic) [S2, unofficial].
+-2. At each optimization step, compute the decay factor using the formula:
+-   $$ lr(epoch) = lr \times \gamma^{\left(\frac{epoch}{step\_size}\right)} $$
++1. Initialize the optimizer with parameter groups and their respective initial learning rates [S3].
++2. Initialize the scheduler state with the starting step index, typically $t = 0$ or $t = start\_epoch - 1$ to align with zero-based indexing [S2, unofficial].
++3. At each optimization step, compute the decay factor using the formula:
++   $$ lr_t = lr_{initial} \times \gamma^{\frac{t}{T}} $$
+    where:
+-   - $lr$ is the initial learning rate [S2, unofficial].
+-   - $\gamma$ is the decay factor (e.g., 0.33) [S3].
+-   - $epoch$ is the current training step or epoch [S2, unofficial].
+-   - $step\_size$ is the interval at which the exponent increments (e.g., 10,000 steps) [S3].
+-3. Apply the computed $lr(epoch)$ to the optimizer's parameter groups [S3].
++   - $lr_{initial}$ is the base learning rate for a parameter group [S2, unofficial].
++   - $\gamma$ is the decay factor ($0 < \gamma < 1$) [S3].
++   - $t$ is the current training step or epoch [S2, unofficial].
++   - $T$ is the normalization interval or step size [S2, unofficial].
++4. Apply the computed $lr_t$ to the optimizer's parameter groups [S3].
++5. Increment the scheduler state index for the next step [G].
+ 
+ **Parameters:**
+-- Typical values for NeRF-style optimization include separate parameter groups: positions ($lr = 10^{-4}$), features ($lr = 5 \times 10^{-3}$), and MLP weights ($lr = 5 \times 10^{-5}$) [S3].
+-- Decay factor $\gamma = 0.33$ applied every $step\_size = 10,000$ steps after an initial warm-up or fixed iteration count (e.g., after 20,000 iterations) [S3].
++- Typical values for NeRF-style optimization use separate parameter groups: positions ($lr_{initial} = 10^{-4}$), features ($lr_{initial} = 5 \times 10^{-3}$), and MLP weights ($lr_{initial} = 5 \times 10^{-5}$) [S3].
++- Decay factor $\gamma = 0.33$ applied every $T = 10,000$ steps, often starting after a fixed iteration count (e.g., $t \ge 20,000$) [S3].
+ 
+ **Pitfalls:**
+-- Redundant execution paths may occur if the condition `step >= self.num_steps` is checked multiple times within the update logic, leading to unnecessary computations or state inconsistencies [S1, unofficial].
+-- Precision issues may arise if $\gamma^{(epoch / step\_size)}$ underflows for very large epochs or if $\gamma$ is too close to 0.
++- Precision underflow may occur if $\gamma^{(t/T)}$ becomes too small for very large $t$ or if $\gamma$ is excessively close to $0$ [G].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_exponential_lr(initial_lr, gamma, step_size, current_step):
++def compute_exponential_lr(initial_lr, gamma, step_size, current_step, start_step=0):
+     """
+     Compute the learning rate using exponential decay.
+     
+     Args:
+-        initial_lr (float): The starting learning rate.
++        initial_lr (float): The starting learning rate for a parameter group.
+         gamma (float): The decay factor (0 < gamma < 1).
+-        step_size (int): The number of steps between exponent increments.
+-        current_step (int): The current training step index.
++        step_size (int): The normalization interval T.
++        current_step (int): The current training step index t.
++        start_step (int): Optional offset to delay decay start (default 0).
+         
+     Returns:
+         float: The adjusted learning rate.
+     """
+-    # Calculate the exponent based on the step size
+-    exponent = current_step / step_size
++    # Apply optional start step offset to align with implementations that delay decay
++    t = max(0, current_step - start_step)
+     
+     # Compute the decayed learning rate
+-    lr = initial_lr * (gamma ** exponent)
++    lr = initial_lr * (gamma ** (t / step_size))
+     
+     return lr
+-
+-# Example usage in a training loop
+-initial_lr = 1e-3
+-gamma = 0.33
+-step_size = 10000
+-current_step = 25000
+-
+-lr = compute_exponential_lr(initial_lr, gamma, step_size, current_step)
+-# Apply lr to optimizer
+ ```
+ 
+@@ -70,18 +63,23 @@
+ A step-wise decay schedule that reduces a learning rate by a fixed multiplicative factor at regular intervals until a maximum number of decays is reached. It differs from the parent [Exponential Decay Learning Rate Schedule](9145-exponential-decay-learning-rate-schedule.md) by applying discrete, uniform reductions at specific step boundaries rather than a continuous exponential curve.
+ 
++### Logarithmic Decay Learning Rate Schedule
++Scales the learning rate for each Gaussian level using a logarithmic decay function dependent on the current frame/iteration ID to stabilize optimization across pyramid levels [S4, unofficial]. At each optimization step, the level iteration counter increments and the decay factor is computed as $factor = 1.0 / (1.0 + \log(frameid + 1))$, where $frameid$ is the current 0-based optimization iteration index and $\log$ is the natural logarithm [S4, unofficial]. The factor is applied to the model's learning rate via an update function [S4, unofficial].
++
++### Exponential Decay Scheduler for Training Hyperparameters
++Adjusts training hyperparameters (radii backward scaler and projection lambda) based on the current iteration count using exponential decay with lower limits [S5, unofficial]. The radii backward scaler follows $radii\_backward\_scaler = \max(init\_dss\_backward\_radii \times \gamma\_dss\_backward\_radii^{(it // steps\_dss\_backward\_radii)}, limit\_dss\_backward\_radii)$, and the projection lambda follows $\lambda\_dr\_proj = \min(\lambda\_dr\_proj \times \gamma\_proj^{(it // steps\_proj)}, limit\_proj)$, where $it$ is the current iteration [S5, unofficial]. Default parameters include $init\_dss\_backward\_radii=0$, $steps\_dss\_backward\_radii=-1$ (no update), $\gamma\_dss\_backward\_radii=0.99$, $limit\_dss\_backward\_radii=1.5$, $steps\_proj=-1$, $\gamma\_proj=5$, and $limit\_proj=1.0$ [S5, unofficial].
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per step for computing the decay factor, assuming exponentiation is constant time.
+-- **Memory Complexity:** $O(1)$ additional memory for storing the scheduler state (current step).
+-- **Performance:** Effective for stabilizing training in later stages of NeRF optimization, particularly when combined with adaptive optimizers like Adam [S3]. The continuous decay helps fine-tune high-frequency details without the abrupt changes associated with step decay.
+-- **Strengths:** Smooth transition of learning rates; easy to implement; widely supported in deep learning frameworks.
+-- **Limitations:** Requires careful tuning of $\gamma$ and $step\_size$ to avoid premature convergence or insufficient decay. The continuous nature may not be ideal for tasks requiring sharp phase transitions.
+-- **When to use:** Suitable for long-running training sessions where gradual refinement is needed, such as in radiance field optimization [S3].
+-- **When not to use:** Not ideal for tasks requiring sudden changes in learning rate or when the optimal decay rate is unknown and requires frequent adjustment.
++- **Time Complexity:** $O(1)$ per step for computing the decay factor, assuming exponentiation is constant time [G].
++- **Memory Complexity:** $O(1)$ additional memory for storing the scheduler state (current step) [G].
++- **Strengths:** Provides a smooth, continuous transition of learning rates that avoids the abrupt changes associated with step decay [Parent].
++- **Limitations:** Requires careful tuning of $\gamma$ and $T$ to balance convergence speed and stability [G].
+ 
+ ## Background
+-The exponential decay schedule is a classic learning rate scheduling technique used in optimization. In the context of volume rendering and NeRFs, it has been adopted from general deep learning practices and adapted for specific training regimes, such as those described in Instant NGP [S3]. The method is often implemented using framework-specific schedulers like PyTorch's `LambdaLR` [S2, unofficial].
++The method is widely used in differentiable volume rendering and NeRF optimization to gradually refine high-frequency details during training [S3]. It has been adopted in frameworks like Instant NGP, which applies a factor of $0.33$ every $10,000$ steps after $20,000$ iterations [S3]. Framework-specific implementations, such as PyTorch's `LambdaLR`, are commonly used to wrap optimizers and apply the schedule automatically [S2, unofficial].
+ 
+ ## Sources
+ [S1] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)
+ [S2] Shreyas120/l3d_assignment3, https://github.com/Shreyas120/l3d_assignment3, fetched 2026-10-26 (unofficial)
+-[S3] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26+[S3] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26
++[S4] DBauer15/gscache, https://github.com/DBauer15/gscache, fetched 2026-10-26 (unofficial)
++[S5] pbonazzi/guassian-diffusion, https://github.com/pbonazzi/guassian-diffusion, fetched 2026-10-28 (unofficial)

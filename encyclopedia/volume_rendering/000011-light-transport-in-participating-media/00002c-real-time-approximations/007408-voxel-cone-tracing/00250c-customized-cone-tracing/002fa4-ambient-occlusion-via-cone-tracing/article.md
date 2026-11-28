@@ -1,0 +1,103 @@
+# Ambient Occlusion via Cone Tracing
+Also called: Voxel Cone Tracing Ambient Occlusion
+
+## Overview
+Ambient Occlusion (AO) dampens indirect lighting to provide soft shadows in concave spaces, creases, and corners where indirect light has difficulty reaching [S1, unofficial]. This method approximates the AO integral by reusing the cones already traced for diffuse reflection, calculating an occlusion term $\delta$ that accumulates visibility losses along the cone path [S2, unofficial]. It is distinguished from sibling methods like [Multi-Cone Shading](5176-multi-cone-shading.md) by its specific focus on the single occlusion accumulation pass using the diffuse cone geometry, rather than generating multiple samples or distinct specular contributions.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The current cone radius $r$ at each trace step, the user-defined decay parameter $\lambda$, and the current accumulated occlusion value $\delta$.
+*   **Output:** The final ambient occlusion factor $\delta \in [0, 1]$, where 0 is fully occluded and 1 is fully open.
+
+**Data Structures:**
+*   $\delta$: A scalar float initialized to 0.0.
+*   $r$: A scalar float representing the cone radius at the current intersection point.
+*   $\lambda$: A scalar float controlling decay speed.
+
+**Parameters:**
+*   $\lambda$: User-defined value controlling how fast the weighting function decays along the traced distance. Typical values are not specified in the sources.
+
+**Algorithm:**
+1.  Initialize the ambient occlusion accumulator: $\delta \leftarrow 0.0$.
+2.  For each step $i$ in the cone trace:
+    a.  Determine the current cone radius $r_i$.
+    b.  Calculate the weighting function $f(r_i)$:
+        $$f(r_i) = \frac{1}{1 + \lambda r_i}$$
+    c.  Retrieve the occlusion value $\alpha_{2,i}$ for the current step. This value represents the fraction of the cone blocked by geometry at this step [S2, unofficial].
+    d.  Update the accumulated occlusion $\delta$:
+        $$\delta \leftarrow \delta + (1 - \delta)\alpha_{2,i}f(r_i)$$
+3.  Return $\delta$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_ambient_occlusion(lambda_param, cone_steps):
+    """
+    Computes ambient occlusion by accumulating occlusion values along cone steps.
+    
+    Args:
+        lambda_param (float): Decay control parameter.
+        cone_steps (list of dict): List of step data, each containing:
+            - 'r': float, current cone radius.
+            - 'alpha_2': float, occlusion value at this step.
+            
+    Returns:
+        float: The final ambient occlusion factor.
+    """
+    delta = 0.0
+    
+    for step in cone_steps:
+        r = step['r']
+        alpha_2 = step['alpha_2']
+        
+        # Calculate weighting function
+        # f(r) = 1 / (1 + lambda * r)
+        f_r = 1.0 / (1.0 + lambda_param * r)
+        
+        # Update accumulated occlusion
+        # delta = delta + (1 - delta) * alpha_2 * f(r)
+        delta = delta + (1.0 - delta) * alpha_2 * f_r
+        
+    return delta
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The multiplicative update $\delta + (1-\delta)\dots$ ensures $\delta$ remains bounded within $[0, 1]$ assuming $\alpha_2 \in [0, 1]$ and $f(r) > 0$.
+*   **Decay:** If $\lambda$ is too small, distant geometry contributes significantly, potentially washing out shadows. If $\lambda$ is too large, only very close geometry affects AO, leading to harsh, incorrect results.
+*   **Initialization:** $\delta$ must be initialized to 0.0. Starting with a non-zero value would incorrectly bias the result.
+
+## Subtopics
+
+### [Two-Bounce Indirect Illumination](4558-two-bounce-indirect-illumination.md)
+Extends AO by tracing secondary bounces. Choose when global illumination accuracy is needed over pure occlusion.
+
+### [Multi-Cone Shading](5176-multi-cone-shading.md)
+Uses multiple cones per sample for higher accuracy. Choose when visual quality is prioritized over the efficiency of single-cone reuse.
+
+### [Diffuse Cone Distribution](5677-diffuse-cone-distribution.md)
+Focuses on the angular distribution of diffuse cones. Choose when the shape of the diffuse lobe is critical.
+
+### [Specular Cone Tracing](5678-specular-cone-tracing.md)
+Traces cones for specular highlights. Choose when specular GI is required.
+
+### [CVCT Cascade Light Sampling & Blending](13876-cvct-cascade-light-sampling-blending.md)
+Uses cascades for varying resolutions. Choose for large scenes requiring LOD management.
+
+### [Indirect Diffuse Light and Ambient Occlusion Calculation](22793-indirect-diffuse-light-and-ambient-occlusion-calculation.md)
+Combines indirect diffuse and AO. Choose when both effects are needed in a single pass.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of cone steps. Since it reuses diffuse cones, the marginal cost is low compared to full GI.
+*   **Memory Complexity:** $O(1)$ additional memory per pixel for the accumulator $\delta$.
+*   **Strengths:** High performance due to reuse of existing cone traces; provides soft shadows in concavities.
+*   **Limitations:** Approximate; relies on the accuracy of the underlying cone tracing for $\alpha_2$; sensitive to $\lambda$ parameter.
+*   **When to use:** Real-time applications requiring soft shadows in crevices without the cost of full indirect lighting.
+*   **When not to use:** When physically accurate indirect lighting is required, or when cone tracing is not already being performed for diffuse/specular GI.
+
+## Background
+Ambient Occlusion is a technique to approximate how much of the environment's indirect light reaches a point, dampening lighting in crevices and corners [S1, unofficial]. The specific implementation using cone tracing for AO was detailed in the context of Deferred Voxel Shading for Real-Time Global Illumination [S2, unofficial]. It leverages the existing infrastructure of Voxel Cone Tracing, which evaluates light transport in participating media and real-time approximations.
+
+## Sources
+[S1] PDF Voxel Cone Tracing Evaluation for Real-Time Applications, https://kth.diva-portal.org/smash/get/diva2:1886204/FULLTEXT01.pdf, fetched 2026-10-27 (unofficial)
+[S2] Deferred Voxel Shading for Real Time Global Illumination, https://jose-villegas.github.io/post/deferred_voxel_shading/, fetched 2026-10-27 (unofficial)

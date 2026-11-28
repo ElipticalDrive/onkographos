@@ -1,0 +1,181 @@
+--- v006.md
++++ v007.md
+@@ -4,97 +4,112 @@
+ 
+ ## Overview
+-The Most Probable Paths (MPP) model approximates multiple scattering in general participating media by summing contributions only from paths close to the "Most Probable Path" (MPP), assuming strong forward scattering [S1]. It splits radiance into object, single-scattered, and multiple-scattered components, using MPPs to approximate scattering integrals [S1]. Unlike diffusion-based methods that fail near boundaries or in low-density regions, this model handles inhomogeneous media and avoids artifacts by determining the effective scattering angle locally based on the phase function and scattering history [S1].
++The Most Probable Paths (MPP) model is a lighting approximation for general participating media that decomposes radiance into object, single-scattered, and multiple-scattered components, using the concept of Most Probable Paths to efficiently approximate the complex multiple-scattering integral [S1]. Unlike diffusion-based methods or constant-angle approximations, it handles inhomogeneous media and avoids boundary artifacts by locally determining the effective scattering angle based on the phase function and accumulated scattering events [S1].
+ 
+ ## How it works
++
++### Inputs and Outputs
+ **Inputs:**
+-*   Volume density field $\rho(x)$ or scattering coefficient $b(x)$.
+-*   Absorption coefficient $a(x)$.
++*   Volume density field $\rho(x)$ or scattering coefficient field $b(x)$.
++*   Absorption coefficient field $a(x)$.
+ *   Extinction coefficient $c(x) = a(x) + b(x)$.
+ *   Phase function $P(\theta)$, assumed strongly forward-scattering with mean square scattering angle $\langle \theta^2 \rangle$.
+-*   Directional light source intensity $L_0$ and direction $\vec{\omega}_0$.
+-*   Camera ray origin and direction $\vec{\omega}$.
+-*   Object image $L_{obj}$ (rendered without media effects, only shadows).
++*   Light source direction $\vec{\omega}_0$ and intensity $L_0$.
++*   Camera position and viewing direction $\vec{\omega}$.
++*   Precomputed object image $L_{obj}$ (rendered without volumetric scattering, only shadows).
+ 
+ **Outputs:**
+-*   Radiance $L(x, \vec{\omega})$ at sample point $x$ along the viewing ray.
++*   Final radiance $L(x, \vec{\omega})$ at each sample point along the viewing ray.
+ 
+-**Data Structures:**
+-1.  **Light Volume:** A 3D data structure storing $\ell_{light}$ (scattering events from point to light) for every volume cell. The z-axis is aligned with the light direction $\vec{\omega}_0$. This acts as a deep shadow map [S1].
+-2.  **Object Image:** 2D texture containing $L_{obj}(\vec{\omega})$, the unfiltered object radiance [S1].
++### Data Structures
++1.  **Light Volume:** A 3D data structure storing the "light path" scattering events $\ell_{light}$ for every volume cell. This is oriented such that the z-axis aligns with the light direction $\vec{\omega}_0$. It acts as a variation of a deep shadow map [S1].
++2.  **Object Image:** A 2D texture containing the unfiltered object radiance $L_{obj}(\vec{\omega})$ [S1].
+ 
+-**Parameters:**
+-*   $\ell$: Number of scattering events along a path.
+-*   $s$: Physical length of the path segment.
+-*   $\gamma$: Rate adjustment parameter for multiple scattering attenuation. $\gamma=1$ for the original model; $\gamma=0.45$ provides better fits to Monte Carlo simulations for denser media [S1].
++### Parameters
++*   $\ell$: Number of scattering events along a path, defined as $\ell = \int_{path} b(x) ds$ [S1].
++*   $s$: Physical length (arclength) of the path segment [S1].
++*   $\langle \theta^2 \rangle$: Mean square scattering angle, assumed constant for the medium [S1].
+ *   $\bar{b}$: Global average of the scattering coefficient, used for area estimation in blurred radiance calculation [S1].
++*   $\gamma$: Rate adjustment parameter for multiple scattering attenuation. $\gamma = 1$ for the original model; $\gamma = 0.45$ provides better fits to Monte Carlo simulations for denser media [S1].
+ 
+-**Formulas:**
+-1.  **Scattering Events:** The number of scattering events $\ell$ along a path is:
+-    $$ \ell = \int_{path} b(x) ds $$
+-    Integrals for other coefficients are derived by multiplying $\ell$ by the ratio of coefficients (e.g., $\int c(x) ds = (c/b)\ell$) [S1].
++### Formulas and Definitions
+ 
+-2.  **Blurring Width:** The standard deviation $w$ of the Gaussian weighting incident radiance is:
+-    $$ w(\ell, s)^2 = \frac{\langle \theta^2 \rangle \ell s^2}{24} \left(1 + \frac{\langle \theta^2 \rangle (a/b) \ell^2}{12}\right) $$
+-    where $\langle \theta^2 \rangle$ is the mean square scattering angle, $s$ is physical length, and $a/b$ is the absorption-to-scattering ratio [S1].
++**1. Total Radiance Decomposition**
++The total radiance is the sum of the weighted object image, single-scattered light, and multiple-scattered light [S1]:
++$$ L(x,\vec{\omega}) = W \cdot L_{obj}(x, \vec{\omega}) + L_{SS}(x, \vec{\omega}) + L_{MS}(x, \vec{\omega}) $$
+ 
+-3.  **Multiple Scattering Phase Function:**
+-    $$ P_{MS}(\theta, \ell) = N \cdot P\left(\frac{\theta}{\sqrt{\ell(1 - \exp(-\ell))}}\right) $$
+-    where $N$ is a normalization constant [S1].
++**2. Single-Scattered Radiance ($L_{SS}$)**
++For a directional light source $\vec{\omega}_0$, the contribution from a segment $\Delta x$ at position $x$ is [S1]:
++$$ \Delta L_{SS}(x, \vec{\omega}) = L_{unscat}(x, \vec{\omega}_0) P(x, \vec{\omega}, \vec{\omega}_0) \exp\left(-\frac{c}{b}\ell_{eye}\right) b(x) \Delta x $$
++where $L_{unscat}(x, \vec{\omega}_0) = L_0 \exp\left(-\frac{c}{b}\ell_{light}\right)$ is the unscattered light available at $x$ [S1].
+ 
+-4.  **Blurred Incident Radiance:**
+-    $$ L_{blurred}(x_0, w) = \frac{\bar{b}}{\pi \langle \theta^2 \rangle} \int L_0(x) \exp\left(-\frac{(x-x_0)^2}{2w^2}\right) dA $$
+-    Note: The factor $\frac{\bar{b}}{\pi \langle \theta^2 \rangle}$ accounts for the effective area per path to ensure correct dimensions (radiance) [S1].
++**3. Multiple-Scattered Radiance ($L_{MS}$)**
++The model approximates $L_{MS}$ by integrating over Most Probable Paths (MPPs) characterized by different scattering event counts $\ell$. The MPP is approximated by two straight line segments: $\ell_{eye}$ (eye to scattering point) and $\ell_{light}$ (scattering point to light) [S1].
+ 
+-5.  **Object Image Weight:**
+-    $$ W = \left(1 + \ell_{obj} + \frac{2\bar{b}^2 w^2 \ell_{obj}}{\langle \theta^2 \rangle}\right) \exp\left(-c\ell_{obj}/b\right) $$
+-    where $\ell_{obj}$ is the scattering events from the object to the eye [S1].
++$$ L_{MS}(x, \vec{\omega}) = \int d\ell \, \exp\left(-\gamma \frac{c}{b}\ell(MPP_\ell)\right) \exp(-A_c(MPP_\ell)) \times P_{MS}(\ell, \vec{\omega} - \vec{\omega}_0) \times L_{blurred}(x_0, w(\ell)) $$
+ 
+-**Algorithm Steps:**
++*Note: The curvature attenuation term $A_c$ is dropped in the practical implementation to correct underestimation of backscattering [S1].*
+ 
+-1.  **Preprocessing (Light Volume):**
+-    For every voxel in the volume, compute $\ell_{light}$ by integrating the scattering coefficient $b(x)$ along a straight line from the voxel center towards the light source direction $\vec{\omega}_0$ until it exits the volume or hits an object. Store this in the Light Volume [S1].
++**4. Blurred Incident Radiance ($L_{blurred}$)**
++This term represents the Gaussian-weighted incident radiance in the plane perpendicular to the light direction at the MPP location [S1]:
++$$ L_{blurred}(x_0, w) = \frac{\bar{b}}{\pi \langle \theta^2 \rangle} \int L_0(x) \exp\left(-\frac{(x-x_0)^2}{2w^2}\right) dA $$
++where $w$ is the blurring width [S1].
+ 
+-2.  **Ray Marching (Single Sweep):**
+-    For each pixel, cast a ray and sample the volume. Maintain accumulators for single-scattered radiance $L_{SS}$ and multiple-scattered radiance $L_{MS}$. Initialize $L_{SS} = 0, L_{MS} = 0$.
++**5. Gaussian Width ($w$)**
++The standard deviation of the Gaussian filter depends on the number of scattering events $\ell$, physical length $s$, and media parameters [S1]:
++$$ w(\ell, s)^2 = \frac{\langle \theta^2 \rangle \ell s^2}{24} \left(1 + \frac{\langle \theta^2 \rangle (a/b) \ell^2}{12}\right) $$
+ 
+-3.  **Single Scattering Contribution:**
+-    At sample point $x$ along segment $\Delta x$:
+-    *   Retrieve $\ell_{eye}$ (scattering events from $x$ to eye) and $\ell_{light}$ (from $x$ to light) from the Light Volume.
+-    *   Compute unscattered light at $x$: $L_{unscat}(x, \vec{\omega}_0) = L_0 \exp(-(c/b)\ell_{light})$.
+-    *   Update $L_{SS}$:
+-        $$ \Delta L_{SS} = L_{unscat}(x, \vec{\omega}_0) P(x, \vec{\omega}, \vec{\omega}_0) \exp\left(-\frac{c}{b}\ell_{eye}\right) b(x) \Delta x $$
+-    *   Accumulate: $L_{SS} \leftarrow L_{SS} + \Delta L_{SS}$ [S1].
++**6. Multiple Scattering Phase Function ($P_{MS}$)**
++Related to the single scattering phase function $P$ by argument substitution and re-normalization [S1]:
++$$ P_{MS}(\theta, \ell) = N \cdot P\left(\frac{\theta}{\sqrt{\ell(1 - \exp(-\ell))}}\right) $$
++where $N$ is a normalization constant [S1].
+ 
+-4.  **Multiple Scattering Contribution:**
+-    *   Compute total scattering events $\ell = \ell_{eye} + \ell_{light}$.
+-    *   Compute physical length $s$ of the path (approximated as distance from eye to $x$ plus distance from $x$ to light, or derived from $\ell$ and average density).
+-    *   Compute blurring width $w(\ell, s)$ using Equation 4.
+-    *   Compute blurred incident radiance $L_{blurred}$ using the global average $\bar{b}$ and the object image $L_{obj}$ sampled at the appropriate location corresponding to the light direction [S1].
+-    *   Update $L_{MS}$:
+-        $$ \Delta L_{MS} = L_{blurred}(x_0, w(\ell)) \cdot \ell \cdot \exp\left(-\gamma \frac{c}{b} \ell\right) $$
+-        Note: The term $\ell$ accounts for the number of contributing paths/area, and $\gamma$ adjusts attenuation [S1].
+-    *   Accumulate: $L_{MS} \leftarrow L_{MS} + \Delta L_{MS}$ [S1].
++**7. Object Image Weight ($W$)**
++This weight accounts for the attenuation and scattering of the object image as it passes through the medium [S1]:
++$$ W = \left(1 + \ell_{obj} + \frac{2\bar{b}^2 w^2 \ell_{obj}}{\langle \theta^2 \rangle}\right) \exp\left(-\frac{c}{b}\ell_{obj}\right) $$
++where $\ell_{obj}$ is the scattering events from the object to the eye [S1].
+ 
+-5.  **Final Radiance:**
+-    After marching through the volume, combine components:
+-    $$ L(x, \vec{\omega}) = W \cdot L_{obj}(x, \vec{\omega}) + L_{SS}(x, \vec{\omega}) + L_{MS}(x, \vec{\omega}) $$
+-    where $W$ is computed using $\ell_{obj}$ (total scattering events from object to eye) and the final $w$ value [S1].
++### Algorithm Steps
+ 
+-**Pitfalls:**
+-*   **Backscattering:** The original model underestimates backscattering because it penalizes short paths with large angle changes via a curvature term. Dropping the curvature term corrects this [S1].
+-*   **Dimensional Consistency:** Integrating weighted radiance in the incident plane yields radiance $\times$ area. An effective area factor (derived from $\bar{b}$ and $\langle \theta^2 \rangle$) must be included to get correct radiance units [S1].
+-*   **Object Image Filtering:** Using the blurred object image for $L_{MS}$ is more accurate but computationally expensive. Using the unfiltered object image is a valid approximation that avoids runtime filtering penalties [S1].
++1.  **Preprocessing (Light Volume Construction):**
++    *   For every voxel in the volume, compute $\ell_{light}$, the number of scattering events from the voxel to the light source along the light direction.
++    *   Store these values in the Light Volume data structure [S1].
++
++2.  **Rendering Loop (Per View Ray):**
++    *   March along the viewing ray from the eye into the scene.
++    *   At each sample point $x$:
++        a.  **Compute $\ell_{eye}$:** Integrate the scattering coefficient $b(x)$ from the eye to the current sample point $x$.
++        b.  **Retrieve $\ell_{light}$:** Look up the precomputed $\ell_{light}$ value for the current sample point $x$ from the Light Volume.
++        c.  **Compute Total Scattering Events:** $\ell = \ell_{eye} + \ell_{light}$.
++        d.  **Compute Physical Lengths:** Determine the physical lengths $s_{eye}$ and $s_{light}$ corresponding to $\ell_{eye}$ and $\ell_{light}$.
++        e.  **Calculate Blurring Width:** Compute $w(\ell, s)$ using the formula in Section 3.5.
++        f.  **Compute Blurred Radiance:** Calculate $L_{blurred}$ using the global average $\bar{b}$ and the incident radiance profile $L_0$ (often approximated by the object image $L_{obj}$ projected onto the incident plane) [S1].
++        g.  **Compute Single Scattering:** Calculate $\Delta L_{SS}$ using the formula in Section 3.2.
++        h.  **Compute Multiple Scattering:**
++            *   Calculate $P_{MS}$ using the formula in Section 3.6.
++            *   Approximate the integral over $\ell$ by evaluating the term for the current $\ell$ (or summing contributions from a discrete set of $\ell$ values if implementing the full integral, though the text implies a single sweep approximation where the current $\ell$ dominates or is integrated numerically) [S1].
++            *   *Implementation Note:* The text states the model allows single and multiple scattering computation in a single volume sweep. The term $\exp(-\gamma \frac{c}{b}\ell)$ handles attenuation.
++        i.  **Compute Object Weight:** Calculate $W$ using the formula in Section 3.7, where $\ell_{obj}$ is the total scattering events from the object surface to the eye (often approximated by $\ell$ if the object is the source of incident light) [S1].
++        j.  **Accumulate Radiance:** Sum $W \cdot L_{obj}$, $L_{SS}$, and $L_{MS}$ to get $L(x, \vec{\omega})$ [S1].
++
++### Edge Cases and Pitfalls
++*   **Backscattering Underestimation:** The original model penalizes short paths with large angle changes via the curvature term $A_c$. This leads to severe underestimation of backscattering. The curvature term should be dropped to correct this behavior [S1].
++*   **Dimensional Consistency:** Integrating weighted radiance in the incident plane yields units of radiance $\times$ area, which is incorrect. An effective area per path (or number of contributing paths) must be included, derived from the global average scattering coefficient $\bar{b}$ [S1].
++*   **Object Image Filtering:** Using a blurred version of the object image for $L_{obj}$ would be more accurate but requires runtime filtering. The unfiltered object image is used to avoid computational penalty, as visual artifacts are not objectionable [S1].
++*   **Attenuation Rate:** The standard attenuation rate $\exp(-(c/b)\ell)$ may not fit dense media well. Using the adjustable parameter $\gamma = 0.45$ improves accuracy for denser media [S1].
+ 
+ ## Operating characteristics
+-*   **Complexity:** Time complexity is linear with respect to the number of volume samples per ray, as single and multiple scattering are computed in a single sweep [S1]. Preprocessing requires one pass per light direction to build the Light Volume [S1].
+-*   **Memory:** Requires storage for the volume density, the Light Volume (3D texture), and the object image. The Light Volume size depends on the volume resolution and light direction alignment [S1].
+-*   **Strengths:** Handles inhomogeneous media and general geometries without artifacts near boundaries or in low-density regions where diffusion approximations fail [S1]. Efficiently approximates multiple scattering without iterative solvers [S1].
+-*   **Limitations:** Assumes strong forward scattering. Accuracy depends on the validity of the MPP approximation. The use of global averages ($\bar{b}$) for area estimation is a simplification that may introduce errors in highly heterogeneous media [S1].
+-*   **When to use:** Real-time or interactive rendering of participating media with significant multiple scattering, especially in heterogeneous environments.
+-*   **When not to use:** Media with isotropic or backward-scattering dominant phase functions, or where high physical accuracy of backscattering is critical without the curvature correction [S1].
++
++*   **Time Complexity:** The method allows for a single volume sweep to compute both single and multiple scattering, making it efficient for real-time or interactive rendering compared to recursive ray casting. The preprocessing step (Light Volume) is $O(V)$ where $V$ is the number of voxels.
++*   **Memory Complexity:** Requires storage for the Light Volume ($O(V)$) and the Object Image ($O(R)$ where $R$ is resolution). This is more memory-intensive than pure ray marching but less than full 3D blurring volumes used in earlier MPP implementations [S1].
++*   **Strengths:** Handles general inhomogeneous media; avoids diffusion approximation artifacts near boundaries and low-density areas; incorporates volumetric shadows and object-media interactions; computationally efficient for forward-scattering media.
++*   **Limitations:** Assumes strongly forward-scattering phase function; less accurate for backscattering without the curvature term modification; relies on global averages ($\bar{b}$) for area estimation which may be inaccurate in highly heterogeneous media; requires precomputed Light Volume [S1].
++*   **When to Use:** Real-time or interactive rendering of participating media with strong forward scattering (e.g., fog, smoke, subsurface scattering in skin) where performance is critical and media is not extremely dense or highly backscattering.
++*   **When Not to Use:** Media with significant backscattering or isotropic scattering; scenes requiring high accuracy in low-density regions where diffusion is invalid but MPP assumptions break down; highly heterogeneous media where global averages are poor approximations.
+ 
+ ## Background
+-The MPP model was introduced by Premože et al. in 2004 [S1]. It builds on pioneering work by Tessendorf (1987) and Premože et al. (2003), who introduced the concept of the Most Probable Path for strongly forward-scattering inhomogeneous media [S1]. The 2004 paper extended this to a general lighting model for participating media, addressing limitations of previous methods that assumed planar surfaces, uniform media, and optical thickness (diffusion approximation) [S1]. It was implemented in OpenGL using NVIDIA CG, demonstrating interactive rendering capabilities [S1].
++
++The Most Probable Paths (MPP) model was introduced by Premože et al. in 2004 [S1]. It builds on pioneering work by Tessendorf (1987) and Premože et al. (2003), who introduced the concept of MPPs for strongly forward-scattering inhomogeneous media [S1]. The 2004 paper, "A lighting model for general participating media," extended this by reformulating the multiple scattering expression to allow single and multiple scattering computation in a single volume sweep, avoiding the need for separate 3D blurring volumes and adaptive step sizes used in their previous software implementation [S1]. The model was implemented in OpenGL using NVIDIA CG for hardware acceleration [S1].
+ 
+ ## Sources
++
+ [S1] A lighting model for general participating media, https://doi.org/10.1145/1053427.1053446, fetched 2026-11-02

@@ -1,0 +1,52 @@
+# GaussianEditor (Local)
+
+
+## Overview
+GaussianEditor (Local) is a method for 3D Gaussian Splatting (3DGS) editing that leverages the explicit nature of Gaussian primitives to allow direct manipulation of parameters (position, rotation, scale, color) based on user commands [S1]. It is tailored for local editing, enabling operations such as 3D inpainting, object removal, and object composition [S3, unofficial]. Unlike methods that rely on implicit representations or global optimization, GaussianEditor provides real-time, fine-grained control by grounding text instructions directly onto the 3D Gaussian set [S1]. It is chosen for user experience and real-time fine-grained control, whereas LangSplat is superior for efficiency and GIR is optimal for quality [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A pre-trained 3D Gaussian Splatting scene representation; user text commands (e.g., "select the roof", "remove the tree") [S1][S3, unofficial].
+*   **Output:** An edited 3D Gaussian Splatting scene with modified primitive parameters [S1].
+
+**Data Structures:**
+The method operates on the standard 3DGS data structure defined in [Gaussian Data Structure](2273-gaussian-data-structure.md), consisting of a set of $N$ Gaussians. Each Gaussian $i$ is defined by:
+*   Position $\mathbf{p}_i \in \mathbb{R}^3$
+*   Rotation $\mathbf{q}_i \in \mathbb{R}^4$ (quaternion)
+*   Scale $\mathbf{s}_i \in \mathbb{R}^3$
+*   Opacity $\alpha_i \in \mathbb{R}$
+*   Color coefficients (Spherical Harmonics) $\mathbf{c}_i$ [S1]
+
+**Steps:**
+1.  **Parse Command:** Use a Large Language Model (LLM) to parse the user's natural language command into a spatial selection target [S1].
+2.  **Extract Region of Interest (RoI):** Extract the semantic region of interest from the text instructions [S2].
+3.  **Align RoI with 3D Gaussians:** Align the text-based RoI with the 3D Gaussians through the image space. This involves projecting the 3D scene to 2D views, identifying pixels corresponding to the semantic target, and mapping them back to the 3D Gaussian primitives [S2].
+4.  **Identify Selected Gaussians:** Determine the subset of Gaussians $\mathcal{G}_{sel}$ that fall within the identified RoI [S1].
+5.  **Apply Transformations:** Directly manipulate the parameters of the selected Gaussians $\mathcal{G}_{sel}$ based on the command [S1].
+    *   For removal: Set opacity $\alpha_i = 0$ for all $i \in \mathcal{G}_{sel}$ [S3, unofficial].
+    *   For inpainting/composition: Update color $\mathbf{c}_i$, position $\mathbf{p}_i$, or scale $\mathbf{s}_i$ [S1][S3, unofficial].
+6.  **Render:** Render the edited scene using standard differentiable rasterization [S1].
+
+**Pitfalls and Edge Cases:**
+*   **LLM Ambiguity:** LLMs may struggle with ambiguous spatial relations (e.g., "the building behind the park") or domain-specific architectural terminology in vast scenes, leading to incorrect selections [S1].
+*   **Physical Plausibility:** Naively changing parameters like color ignores lighting and material properties, resulting in flat, unrealistic appearances because the method lacks intrinsic physics understanding [S1].
+*   **Semantic Gap:** The method's success is heavily reliant on the LLM's ability to accurately ground abstract concepts onto 3D geometry [S1].
+
+## Subtopics
+
+### Hierarchical Gaussian Splatting (HGS)
+An independent research variant of GaussianEditor that operates similarly to the appearance editing version but further introduces hierarchical Gaussian splatting (HGS) [S3, 30, unofficial]. It allows for 3D editing tasks such as object inpainting by providing adaptive generative guidance through the hierarchical structure [S3, 31, unofficial].
+
+## Operating characteristics
+*   **Strengths:** Provides exceptional real-time, fine-grained control and high user experience [S1]. Suitable for local editing tasks like inpainting and removal [S3, unofficial].
+*   **Limitations:** Lacks intrinsic physics understanding, leading to potential visual artifacts (e.g., flat colors) when editing appearance [S1]. Relies heavily on the accuracy of the LLM for semantic grounding, which can fail in complex or ambiguous scenes [S1]. Not as efficient as LangSplat for large-scale generation [S1].
+*   **When to use:** When user experience and direct, real-time manipulation of specific objects in a 3DGS scene are prioritized over generation efficiency or global consistency [S1].
+*   **When not to use:** When high-fidelity physical plausibility is required without manual correction, or when processing vast scenes with complex spatial relationships where LLM grounding is unreliable [S1].
+
+## Background
+GaussianEditor was introduced as a method tailored for local editing on 3DGS [S2]. It epitomizes the direct manipulation workflow enabled by the explicit nature of 3D Gaussian primitives [S1]. The method addresses the contradiction between the discrete symbolism of language and the continuous physicality of 3D scenes by using an LLM to bridge this gap [S1]. It is part of a series of works based on 3DGS that achieve higher editing efficiency and superior rendering quality compared to earlier NeRF-based editing methods [S2].
+
+## Sources
+[S1] Implicit vs. explicit a comparative survey on NeRF and 3DGS for large-scale aerial scene editing, https://link.springer.com/article/10.1007/s10791-026-10029-9, fetched 2026-10-26
+[S2] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28
+[S3] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,232 @@
+--- v001.md
++++ v002.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-First-Person Camera Control manages the position, orientation (yaw and pitch), and projection parameters of a virtual camera, translating discrete user input (mouse movement, keyboard presses) into continuous 3D transformations [S2, S3, unofficial]. It differs from orbital or arcball models by decoupling rotation from the camera's position, allowing the viewer to look around freely while moving independently, which is essential for navigation in volumetric scenes [S3, unofficial]. It packs these state variables into a GPU-friendly structure to minimize bandwidth overhead during rendering passes [S1, unofficial].
++First-Person Camera Control manages camera position, orientation (yaw and pitch), and projection parameters, translating discrete user input (mouse movement, keyboard presses) into continuous 3D transformations [S2, S3, unofficial]. It packs these state variables into a GPU-friendly structure to minimize bandwidth overhead during rendering passes [S1, unofficial].
+ 
+ ## How it works
+-The method consists of three phases: input handling, state update, and GPU data packing.
++The method consists of three phases: input handling, state update, and GPU data packing [S1, S2, S3, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -21,5 +21,5 @@
+ ### Data Structures
+ The GPU-friendly structure `CameraGpuData` contains the following fields [S1, unofficial]:
+-- `position`: `float[4]` (x, y, z, unused/padding) [S1, unofficial].
++- `position`: `float[4]` (x, y, z, padding) [S1, unofficial].
+ - `rot`: `float[3][4]` (3 rows, 4 columns; represents the rotation basis) [S1, unofficial].
+ - `sin_half_vfov`: `float` [S1, unofficial].
+@@ -29,11 +29,12 @@
+ - `prev_position`: `float[4]` (used for temporal accumulation or motion vectors) [S1, unofficial].
+ 
+-The internal CPU-side state (based on [S3, unofficial]) includes:
++The internal CPU-side state includes [S3, unofficial]:
+ - `_position`: `vec3` [S3, unofficial].
+-- `_yaw`: `float` (horizontal rotation, default 0.0) [S3, unofficial].
+-- `_pitch`: `float` (vertical rotation, default 0.0) [S3, unofficial].
++- `_yaw`: `float` (horizontal rotation) [S3, unofficial].
++- `_pitch`: `float` (vertical rotation) [S3, unofficial].
+ - `_front`: `vec3` (normalized forward vector) [S3, unofficial].
+ - `_right`: `vec3` (normalized right vector) [S3, unofficial].
+ - `_up`: `vec3` (normalized up vector) [S3, unofficial].
++- `_worldUp`: `vec3` (default $(0, 1, 0)$) [S3, unofficial].
+ - `_speed`: `float` (movement speed) [S3, unofficial].
+ - `_sensitivity`: `float` (mouse sensitivity) [S3, unofficial].
+@@ -43,5 +44,5 @@
+ - `vfov`: $\pi \times 0.5$ radians (90 degrees) [S1, unofficial].
+ - `moving_speed`: $1.0$ units/second [S1, unofficial].
+-- `mouse_speed` / `_sensitivity`: $0.01$ radians/pixel [S1, S3, unofficial].
++- `mouse_speed`: $0.01$ radians/pixel [S1, unofficial].
+ - `ROTATION_FACTOR`: $0.0025$ [S2, unofficial].
+ - `PAN_FACTOR`: $1.0$ [S2, unofficial].
+@@ -51,5 +52,5 @@
+ ### Steps
+ 
+-1. **Initialize State**: Set `_position` to the starting eye coordinates. Set `_yaw` to $0.0$ and `_pitch` to $0.0$. Set `_front` to $(0, 0, -1)$ or similar default forward direction [S3, unofficial].
++1. **Initialize State**: Set `_position` to the starting eye coordinates. Set `_yaw` to $0.0$ and `_pitch` to $0.0$ [G].
+ 
+ 2. **Process Input**:
+@@ -59,32 +60,24 @@
+        $$ \text{yaw} \leftarrow \text{yaw} + \Delta x \times \text{ROTATION\_FACTOR} $$
+        $$ \text{pitch} \leftarrow \text{pitch} + \Delta y \times \text{ROTATION\_FACTOR} $$
+-       Clamp `_pitch` to $[-\pi/2, \pi/2]$ to prevent gimbal lock or inversion [S3, G, unofficial].
+      - If right button is active: Update camera pan (position offset) using $\Delta x \times \text{PAN\_FACTOR}$ and $\Delta y \times \text{PAN\_FACTOR}$ [S2, unofficial].
+-   - **Keyboard**: Check active keys (W, A, S, D, Q, E) to determine movement direction [S3, unofficial].
++   - **Keyboard**: Track active keys (W, A, S, D, Q, E) to determine movement direction [S2, S3, unofficial].
+ 
+ 3. **Update Camera Vectors**: Recalculate the basis vectors based on current `_yaw` and `_pitch` [S3, unofficial]:
+-   $$ \text{front}_x = \cos(\text{pitch}) \sin(\text{yaw}) $$
+-   $$ \text{front}_y = -\sin(\text{pitch}) $$
+-   $$ \text{front}_z = \cos(\text{pitch}) \cos(\text{yaw}) $$
+-   $$ \text{front} = \text{normalize}(\text{front}) $$
+-   $$ \text{right} = \text{normalize}(\text{cross}(\text{front}, \text{world\_up})) $$
+-   $$ \text{up} = \text{cross}(\text{right}, \text{front}) $$
+-   Where `world_up` is typically $(0, 1, 0)$ [S3, unofficial].
++   $$ \text{vec\_z} = (\cos(\text{pitch})\sin(\text{yaw}), -\sin(\text{pitch}), \cos(\text{pitch})\cos(\text{yaw})) $$
++   $$ \text{vec\_y} = \text{normalize}(\text{cross}(\text{vec\_z}, \text{world\_up})) $$
++   $$ \text{vec\_x} = \text{normalize}(\text{cross}(\text{vec\_y}, \text{vec\_z})) $$
++   Assign `_front = vec_z`, `_right = vec_x`, `_up = vec_y` [S1, S3, unofficial].
+ 
+ 4. **Update Position**: If movement keys are active, modify `_position` along the basis vectors [S3, unofficial]:
+    $$ \text{velocity} = \text{speed} \times \Delta t $$
+    $$ \text{position} \leftarrow \text{position} + \text{velocity} \times (\text{front} \times \text{forward\_key} + \text{right} \times \text{right\_key} + \text{up} \times \text{up\_key}) $$
+-   Note: "Forward" key moves along `-front` if front points into the scene, or `front` depending on coordinate system convention. The source [S3, unofficial] implies `moveForward` modifies position by `_speed * deltaTime` along the respective camera axes.
++   Note: "Forward" key moves along `-front` if front points into the scene, or `front` depending on coordinate system convention [G].
+ 
+ 5. **Pack GPU Data**: Construct `CameraGpuData` [S1, unofficial]:
+-   - `position`: Set to `_position`.
+-   - `rot`: Construct the $3 \times 3$ rotation matrix from `_right`, `_up`, and `_front` (or `_front`, `_right`, `_up` depending on row/column major order). The source [S1, unofficial] specifies `vec_z` (front), `vec_x` (right), `vec_y` (up) construction:
+-     $$ \text{vec\_z} = (\cos(\text{pitch})\sin(\text{yaw}), -\sin(\text{pitch}), \cos(\text{pitch})\cos(\text{yaw})) $$
+-     $$ \text{vec\_x} = \text{normalize}(\text{cross}(\text{vec\_y}, \text{vec\_z})) $$
+-     $$ \text{vec\_y} = \text{cross}(\text{vec\_z}, \text{vec\_x}) $$
+-     Pack these into the `rot` array.
++   - `prev_position = position` [S1, unofficial].
++   - `rot`: Pack `vec_x`, `vec_y`, `vec_z` into the three rows of the rotation matrix [S1, unofficial].
+    - `sin_half_vfov`: $\sin(\text{vfov} / 2)$ [S1, unofficial].
+    - `width`, `height`: Current viewport dimensions [S1, unofficial].
+-   - `prev_position`: Set to the previous frame's position for temporal coherence [S1, unofficial].
++   - `frame_count`: Incremented per frame [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -99,5 +92,4 @@
+         self.pitch = 0.0
+         self.speed = 1.0
+-        self.sensitivity = 0.01
+         self.vfov = vfov
+         self.world_up = [0.0, 1.0, 0.0]
+@@ -105,13 +97,17 @@
+ 
+     def _update_vectors(self):
+-        # Calculate front vector from yaw and pitch
+-        front_x = math.cos(math.radians(self.pitch)) * math.sin(math.radians(self.yaw))
+-        front_y = -math.sin(math.radians(self.pitch))
+-        front_z = math.cos(math.radians(self.pitch)) * math.cos(math.radians(self.yaw))
+-        self.front = _normalize([front_x, front_y, front_z])
+-        
+-        # Calculate right and up vectors
+-        self.right = _normalize(_cross(self.front, self.world_up))
+-        self.up = _cross(self.right, self.front)
++        # S1 formula for front vector (vec_z)
++        vec_z = [
++            math.cos(math.radians(self.pitch)) * math.sin(math.radians(self.yaw)),
++            -math.sin(math.radians(self.pitch)),
++            math.cos(math.radians(self.pitch)) * math.cos(math.radians(self.yaw))
++        ]
++        # S1 dependency order: vec_y from cross(vec_z, world_up), vec_x from cross(vec_y, vec_z)
++        vec_y = _normalize(_cross(vec_z, self.world_up))
++        vec_x = _normalize(_cross(vec_y, vec_z))
++        
++        self.front = vec_z
++        self.right = vec_x
++        self.up = vec_y
+ 
+     def process_mouse(self, dx, dy, button=0, keys=None):
+@@ -121,19 +117,15 @@
+         if button == 0: # Left click
+             if keys.get('Control'):
+-                # Update lighting or other params
++                # Update lighting parameters using S2 factors
+                 pass
+             else:
+-                self.yaw += dx * self.sensitivity
+-                self.pitch += dy * self.sensitivity
+-                # Clamp pitch to avoid flipping
+-                if self.pitch > 89.0:
+-                    self.pitch = 89.0
+-                if self.pitch < -89.0:
+-                    self.pitch = -89.0
++                # S2: ROTATION_FACTOR = 0.0025
++                self.yaw += dx * 0.0025
++                self.pitch += dy * 0.0025
+                 self._update_vectors()
+         elif button == 2: # Right click
+-            # Pan camera
+-            self.position[0] += dx * 1.0 # PAN_FACTOR
+-            self.position[1] += dy * 1.0 # PAN_FACTOR
++            # S2: PAN_FACTOR = 1.0
++            self.position[0] += dx * 1.0
++            self.position[1] += dy * 1.0
+ 
+     def process_keyboard(self, dt, keys):
+@@ -141,17 +133,17 @@
+         direction = [0.0, 0.0, 0.0]
+         
+-        if keys.get('W'):
++        if keys.get('W'): # Forward
+             direction[0] -= self.front[0]
+             direction[1] -= self.front[1]
+             direction[2] -= self.front[2]
+-        if keys.get('S'):
++        if keys.get('S'): # Backward
+             direction[0] += self.front[0]
+             direction[1] += self.front[1]
+             direction[2] += self.front[2]
+-        if keys.get('A'):
++        if keys.get('A'): # Left
+             direction[0] -= self.right[0]
+             direction[1] -= self.right[1]
+             direction[2] -= self.right[2]
+-        if keys.get('D'):
++        if keys.get('D'): # Right
+             direction[0] += self.right[0]
+             direction[1] += self.right[1]
+@@ -169,18 +161,6 @@
+ 
+     def get_gpu_data(self, frame_count, width, height, prev_position):
+-        # Construct rotation matrix rows
+-        # Source [S1, unofficial] uses vec_z (front), vec_x (right), vec_y (up)
+-        # Note: Source [S1, unofficial] pseudocode implies specific vector construction
+-        vec_z = [
+-            math.cos(math.radians(self.pitch)) * math.sin(math.radians(self.yaw)),
+-            -math.sin(math.radians(self.pitch)),
+-            math.cos(math.radians(self.pitch)) * math.cos(math.radians(self.yaw))
+-        ]
+-        # vec_y is not explicitly calculated in S1 snippet but implied by cross products
+-        # Using standard basis from _update_vectors for consistency
+-        vec_x = self.right
+-        vec_y = self.up
+-        
+-        rot = [vec_x, vec_y, vec_z]
++        # S1: Pack basis vectors into rot matrix
++        rot = [self.right, self.up, self.front]
+         
+         return {
+@@ -209,7 +189,7 @@
+ 
+ ### Edge Cases and Pitfalls
+-- **Gimbal Lock**: Pitch must be clamped to $(-\pi/2, \pi/2)$ to prevent the forward vector from aligning with the up vector, which causes loss of a degree of freedom [S3, G, unofficial].
+-- **Precision**: Using `float` for position and rotation is standard, but `prev_position` should be updated carefully to avoid jitter in temporal accumulation [S1, unofficial].
+-- **Boundary Conditions**: If the camera moves outside the volume bounds, ray generation may produce invalid intersections. Clamping or bounding box checks should be handled in the ray marching step, not necessarily here [G].
++- **Temporal Coherence**: `prev_position` must be updated at the end of each frame to avoid jitter in temporal accumulation passes [S1, unofficial].
++- **Coordinate Conventions**: The sign of movement along `_front` depends on the scene's coordinate system (left-handed vs right-handed) [G].
++- **Input Clamping**: Unclamped pitch values will cause the camera to invert; standard implementations clamp pitch to $[-89^\circ, 89^\circ]$ [G].
+ 
+ ## Subtopics
+@@ -227,17 +207,21 @@
+ Adds optical realism by blurring regions based on distance; requires additional camera parameters like aperture and focal length.
+ 
++### Cinematic Camera Metaphor
++A navigation technique where mouse movements coupled with modifier keys manipulate the position of a virtual camera to control the user's viewpoint [S4, unofficial]. Variants include mapping a 6DoF input device directly to the eyeball position (absolute or relative mapping) or controlling a virtual vehicle's spatial and angular velocity [S4, unofficial]. Relative mapping can destroy the user's mental model of a fixed scene, causing confusion [S4, unofficial]. Implemented in systems like Unicam and StyleCam [S4, unofficial].
++
+ ## Operating characteristics
+-- **Time Complexity**: $O(1)$ per frame for input processing and state update, as it involves a fixed number of vector operations and trigonometric functions [S1, S3, unofficial].
++- **Time Complexity**: $O(1)$ per frame for input processing and state update, involving a fixed number of vector operations and trigonometric functions [G].
+ - **Memory Complexity**: $O(1)$ for CPU-side state and $O(1)$ for GPU-side data (fixed-size struct) [S1, unofficial].
+ - **Strengths**: Intuitive control for navigation; low computational overhead; decouples viewing direction from position [S3, unofficial].
+-- **Limitations**: Not suitable for orbital inspection or automated path-based visualization without additional logic [S3, unofficial].
++- **Limitations**: Requires additional logic for orbital inspection or automated path-based visualization [G].
+ - **When to use**: Interactive exploration of volumetric datasets where the user needs to "walk through" or look around a scene [S3, unofficial].
+-- **When not to use**: When a fixed viewpoint, orbital rotation, or scripted animation is required [S3, unofficial].
++- **When not to use**: When a fixed viewpoint, orbital rotation, or scripted animation is required [G].
+ 
+ ## Background
+-First-person camera control is a standard technique in 3D computer graphics, originating from first-person shooter games and virtual reality applications [S3, unofficial]. In the context of volume rendering, it allows users to navigate large volumetric datasets (e.g., medical images, scientific simulations) with intuitive mouse and keyboard inputs [S2, S3, unofficial]. The specific implementation details, such as the GPU data packing structure, are derived from modern real-time rendering engines using APIs like WebGPU and Vulkan [S1, unofficial].
++First-person camera control is a standard technique in 3D computer graphics, originating from first-person shooter games and virtual reality applications [S3, unofficial]. In the context of volume rendering, it allows users to navigate large volumetric datasets (e.g., medical images, scientific simulations) with intuitive mouse and keyboard inputs [S2, S3, unofficial]. The cinematic camera metaphor extends this control to non-immersive environments, supporting tumbling, tracking, and dollying of viewpoints [S4, unofficial].
+ 
+ ## Sources
+ [S1] newDINO/voxel_ray_demo, https://github.com/newDINO/voxel_ray_demo, fetched 2026-10-24 (unofficial)
+ [S2] fraserlove/ossium, https://github.com/fraserlove/ossium, fetched 2026-10-27 (unofficial)
+-[S3] Justinj68/OM3D_PROJECT, https://github.com/Justinj68/OM3D_PROJECT, fetched 2026-10-27 (unofficial)+[S3] Justinj68/OM3D_PROJECT, https://github.com/Justinj68/OM3D_PROJECT, fetched 2026-10-27 (unofficial)
++[S4] Interaction with volumetric displays, http://hdl.handle.net/1807/16733, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,161 @@
+--- v002.md
++++ v003.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Voxel position, timestep ($\Delta t$), grid dimensions, and source definitions (density, temperature, forces).
++*   **Inputs:** Voxel position, timestep ($\Delta t$), and source definitions for density, temperature, and forces [S1].
+ *   **Outputs:** Updated velocity, density, and temperature fields stored in 3D textures.
+ 
+ **Data Structures:**
+-*   State is tracked at each grid cell center.
++*   State is tracked at each grid cell center [S1].
+ *   Fields: Velocity ($\mathbf{u}$), Density ($\rho$), Temperature ($T$).
+ *   Storage: 3D textures with 16-bit float formats (half-precision) [S1].
+@@ -19,16 +19,7 @@
+ **Steps:**
+ 
+-1.  **Injection:** A custom kernel receives voxel position and timestep. It adds density and temperature to the simulation and applies arbitrary forces, such as buoyancy [S1].
+-2.  **Advection:**
+-    *   Uses semi-Lagrangian advection with a MacCormack backtrace [S1].
+-    *   Linear sampling is used for velocity during the backtrace [S1].
+-    *   Cubic interpolation is used for the final resample of all advected properties [S1].
+-    *   Vorticity confinement force is optionally applied [S1].
+-3.  **Projection:**
+-    *   Pressure projection is solved using geometric multigrid with a single V-cycle [S1].
+-    *   The V-cycle uses 1 pre-smooth and 2 post-smooth passes [S1].
+-    *   Full-weight and trilinear transfer operators are used [S1].
+-    *   Jacobi iteration is used for smoothing [S1].
+-    *   On the 3rd, coarsest grid, red-black Gauss-Seidel with successive over-relaxation (SOR) is used [S1].
++1.  **Injection:** A custom kernel receives voxel position and timestep [S1]. It adds density and temperature to the simulation and applies arbitrary forces, such as buoyancy [S1].
++2.  **Advection:** Uses semi-Lagrangian advection with a MacCormack backtrace [S1]. Linear sampling is used for velocity during the backtrace [S1]. Cubic interpolation is used for the final resample of all advected properties [S1]. Vorticity confinement force is optionally applied [S1].
++3.  **Projection:** Pressure projection is solved using geometric multigrid with a single V-cycle [S1]. The V-cycle uses 1 pre-smooth and 2 post-smooth passes [S1]. Full-weight and trilinear transfer operators are used [S1]. Jacobi iteration is used for smoothing [S1]. On the 3rd, coarsest grid, red-black Gauss-Seidel with successive over-relaxation (SOR) is used [S1].
+ 
+ **Pseudocode:**
+@@ -37,68 +28,32 @@
+ def solve_step(grid, dt):
+     # 1. Injection
+-    # Custom kernel adds density, temperature, and forces (e.g., buoyancy)
+-    # based on voxel position and dt.
+-    inject_sources(grid, dt)
++    for voxel in grid.active_voxels:
++        grid.density[voxel] += source_density(voxel.pos, dt)
++        grid.temperature[voxel] += source_temperature(voxel.pos, dt)
++        grid.velocity[voxel] += force_buoyancy(grid.temperature[voxel], dt)
+ 
+     # 2. Advection
+-    # Semi-Lagrangian advection with MacCormack backtrace
+-    advect_velocity(grid, dt, sample_type='linear')
+-    advect_properties(grid, dt, sample_type='cubic')
+-    
+-    # Optional vorticity confinement
+-    if apply_vorticity_confinement:
+-        apply_vorticity_confinence(grid, dt)
+-
+-    # 3. Projection
+-    # Geometric multigrid with single V-cycle
+-    solve_pressure_multigrid(grid)
+-
+-def inject_sources(grid, dt):
+-    # Iterates over active voxels
+-    for voxel in grid.active_voxels:
+-        # Add density and temperature
+-        grid.density[voxel] += source_density(voxel.pos, dt)
+-        grid.temperature[voxel] += source_temperature(voxel.pos, dt)
+-        # Apply forces like buoyancy
+-        grid.velocity[voxel] += force_buoyancy(grid.temperature[voxel], dt)
+-
+-def advect_velocity(grid, dt, sample_type):
+-    # Backtrace step for velocity
+-    # Uses linear sampling for velocity during backtrace
+     old_velocity = grid.velocity.copy()
+     for voxel in grid:
+-        # Trace back along velocity field
+         trace_pos = voxel.pos - old_velocity[voxel] * dt
+-        # Linear sampling for velocity backtrace
+-        grid.velocity[voxel] = sample_linear(grid.velocity, trace_pos)
++        grid.velocity[voxel] = trilinear_interpolate(grid.velocity, trace_pos)
+ 
+-def advect_properties(grid, dt, sample_type):
+-    # Advect density and temperature
+-    # Uses cubic interpolation for final resample
+     for field in [grid.density, grid.temperature]:
+         old_field = field.copy()
+         for voxel in grid:
+             trace_pos = voxel.pos - grid.velocity[voxel] * dt
+-            # Cubic interpolation for resample
+-            field[voxel] = sample_cubic(old_field, trace_pos)
++            field[voxel] = tricubic_interpolate(old_field, trace_pos)
+ 
+-def solve_pressure_multigrid(grid):
+-    # Single V-cycle
+-    # Pre-smoothing: 1 Jacobi pass
++    if apply_vorticity_confinement:
++        # Standard vorticity confinement force calculation [G]
++        pass
++
++    # 3. Projection
+     jacobi_smooth(grid, iterations=1)
+-    
+-    # Coarsening: Full-weight and trilinear transfer
+-    coarse_grids = create_coarse_grids(grid, levels=3)
+-    
+-    # Solve on coarsest grid (3rd level)
+-    # Red-black Gauss-Seidel with SOR
+-    solve_coarsest_grid(coarse_grids[2], method='red_black_gauss_seidel_sor')
+-    
+-    # Prolongation and Post-smoothing
++    coarse_grids = restrict_full_weight(grid, levels=3)
++    red_black_gauss_seidel_sor(coarse_grids[2])
+     for i in range(2, 0, -1):
+-        prolongate_and_correct(coarse_grids[i], coarse_grids[i-1])
++        prolongate_trilinear(coarse_grids[i], coarse_grids[i-1])
+         jacobi_smooth(coarse_grids[i-1], iterations=2)
+-    
+-    # Apply correction to fine grid
+     apply_pressure_correction(grid, coarse_grids[0])
+ 
+@@ -106,14 +61,21 @@
+     for _ in range(iterations):
+         for voxel in grid:
+-            # Standard Jacobi update for pressure
+-            grid.pressure[voxel] = update_jacobi(grid.pressure, voxel)
++            grid.pressure[voxel] = jacobi_update(grid.pressure, voxel)
+ 
+-def solve_coarsest_grid(grid, method):
+-    if method == 'red_black_gauss_seidel_sor':
+-        # Red-black ordering
+-        for color in ['red', 'black']:
+-            for voxel in grid.get_voxels_by_color(color):
+-                # Gauss-Seidel with SOR
+-                grid.pressure[voxel] = update_gauss_seidel_sor(grid.pressure, voxel)
++def red_black_gauss_seidel_sor(grid):
++    for color in ['red', 'black']:
++        for voxel in grid.get_voxels_by_color(color):
++            grid.pressure[voxel] = gauss_seidel_sor_update(grid.pressure, voxel)
++
++def restrict_full_weight(grid, levels):
++    # Standard full-weight restriction operator [G]
++    return [grid] + [restrict_level(grid, i) for i in range(1, levels)]
++
++def prolongate_trilinear(coarse, fine):
++    # Standard trilinear prolongation operator [G]
++    fine.pressure += trilinear_interpolate(coarse.pressure, fine.voxel_centers)
++
++def apply_pressure_correction(grid, coarse_pressure):
++    grid.velocity -= gradient_trilinear(coarse_pressure)
+ ```
+ 
+@@ -127,10 +89,10 @@
+     *   Smoke Rings (232x232x160): 9.63ms total [S1].
+     *   Dust Devil (160x256x160): 9.65ms total [S1].
+-    *   Wall of Fire (200x200x200): 9.73ms total [S1] [S1].
++    *   Wall of Fire (200x200x200): 9.73ms total [S1].
+ *   **Memory:** Uses half-precision (16-bit float) 3D textures for velocity, density, and temperature, effectively doubling performance on bandwidth-constrained portions [S1].
+ *   **Limitations:** Primarily limited by low simulation resolution necessary to run in VR on current hardware [S1].
+ 
+ ## Background
+-The method is presented in "Ignis: Eulerian Fluid Simulation and Rendering at VR Frame Rates" by Charlie Shenton (SIGGRAPH Asia 2023 Posters) [S1]. It builds on operator splitting [Stam 1999] and MacCormack backtrace advection [Selle et al. 2008].
++The method is presented in "Ignis: Eulerian Fluid Simulation and Rendering at VR Frame Rates" by Charlie Shenton (SIGGRAPH Asia 2023 Posters) [S1]. It builds on operator splitting [Stam 1999] and MacCormack backtrace advection [Selle et al. 2008] as cited in the source [S1].
+ 
+ ## Sources

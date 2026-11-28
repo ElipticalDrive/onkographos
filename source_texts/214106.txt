@@ -1,0 +1,2562 @@
+GradICON: Approximate Diffeomorphisms via Gradient Inverse Consistency
+Lin Tian∗1 Hastings Greer*1 François-Xavier Vialard2,3 Roland Kwitt4 Raúl San José Estépar5
+Richard Jarrett Rushmore6 Nikolaos Makris5 Sylvain Bouix7 Marc Niethammer1
+UNC Chapel Hill 2 LIGM, Université Gustave Eiffel 3 MOKAPLAN, INRIA Paris
+4
+University of Salzburg 5 Harvard Medical School 6 Boston University 7 ÉTS Montréal
+arXiv:2206.05897v4 [cs.CV] 10 Oct 2023
+1
+Abstract
+We present an approach to learning regular spatial transformations between image pairs in the context of medical
+image registration. Contrary to optimization-based registration techniques and many modern learning-based methods,
+we do not directly penalize transformation irregularities but
+instead promote transformation regularity via an inverse
+consistency penalty. We use a neural network to predict a
+map between a source and a target image as well as the map
+when swapping the source and target images. Different from
+existing approaches, we compose these two resulting maps
+and regularize deviations of the Jacobian of this composition from the identity matrix. This regularizer – GradICON –
+results in much better convergence when training registration models compared to promoting inverse consistency of
+the composition of maps directly while retaining the desirable implicit regularization effects of the latter. We achieve
+state-of-the-art registration performance on a variety of realworld medical image datasets using a single set of hyperparameters and a single non-dataset-specific training protocol.
+Code is available at https://github.com/uncbiag/ICON.
+1. Introduction
+Image registration is a key component in medical image
+analysis to estimate spatial correspondences between image
+pairs [14, 53]. Applications include estimating organ motion
+between treatment fractions in radiation therapy [25, 37],
+capturing disease progression [64], or allowing for localized
+analyses in a common coordinate system [19].
+Many different registration algorithms have been proposed over the last decades in medical imaging [10, 41, 44,
+63, 64] and in computer vision [21, 33]. Contributions have
+focused on different transformation models (i.e., what types
+of transformations are considered permissible), similarity
+measures (i.e., how “good alignment” between image pairs
+is quantified), and solution strategies (i.e., how transformation parameters are numerically estimated). The respective
+choices are generally based on application requirements as
+* Equal Contribution.
+OAI
+HCP
+COPDGene
+Figure 1. Example source (left), target (middle) and warped source
+(right) images obtained with our method, trained with a single
+protocol, using the proposed GradICON regularizer.
+well as assumptions about image appearance and the expected transformation space. In consequence, while reliable registration algorithms have been developed for transformation models ranging from simple parametric models
+(e.g., rigid and affine transformations) to significantly more
+complex nonparametric formulations [41, 44, 63] that allow
+highly localized control, practical applications of registration
+typically require many choices and rely on significant parameter tuning to achieve good performance. Recent image
+registration work has shifted the focus from solutions based
+on numerical optimization for a specific image pair to learning to predict transformations based on large populations of
+image pairs via neural networks [10, 15, 17, 34, 35, 56, 57, 68].
+However, while numerical optimization is now replaced by
+training a regression model which can be used to quickly predict transformations at test time, parameter tuning remains a
+key challenge as loss terms for these two types of approaches
+are highly related (and frequently the same). Further, one
+also has additional choices regarding network architectures.
+Impressive strides have been made in optical flow estimation as witnessed by the excellent performance of recent
+approaches [34] on Sintel [7]. However, our focus is medical
+image registration, where smooth and often diffeomorphic
+transformations are desirable; here, a simple-to-use learningbased registration approach, which can adapt to different
+types of data, has remained elusive. In particular, nonparametric registration approaches require a balance between
+image similarity and regularization of the transformation to
+assure good matching at a high level of spatial regularity,
+as well as choosing a suitable regularizer. This difficulty is
+compounded in a multi-scale approach where registrations
+at multiple scales are used to avoid poor local solutions.
+Instead of relying on a complex spatial regularizer, the
+recent ICON approach [23] uses only inverse consistency to
+regularize the sought-after transformation map, thereby dramatically reducing the number of hyperparameters to tune.
+While inverse consistency is not a new concept in image
+registration and has been explored to obtain transformations
+that are inverses of each other when swapping the source
+and the target images [11], ICON [23] has demonstrated that
+a sufficiently strong inverse consistency penalty, by itself, is
+sufficient for spatial regularity when used with a registration
+network. Further, as ICON does not explicitly penalize spatial
+gradients of the deformation field, it does not require preregistration (e.g., rigid or affine), unlike many other related
+works. However, while conceptually attractive, ICON suffers from the following limitations: 1) training convergence
+is slow, rendering models costly to train; and 2) enforcing
+approximate inverse consistency strictly enough to prevent
+folds becomes increasingly difficult at higher spatial resolutions, necessitating a suitable schedule for the inverse
+consistency penalty, which is not required for GradICON.
+Our approach is based on a surprisingly simple, but effective observation: penalizing the Jacobian of the inverse
+consistency condition instead of inverse consistency directly1
+applies zero penalty for inverse consistent transform pairs but
+1) yields significantly improved convergence, 2) no longer requires careful scheduling of the inverse consistency penalty,
+3) results in spatially regular maps, and 4) improves registration accuracy. These benefits facilitate a unified training
+protocol with the same network structure, regularization
+parameter, and training strategy across registration tasks.
+Our contributions are as follows:
+• We develop GradICON (Gradient Inverse CONsistency), a
+versatile regularizer for learning-based image registration
+that relies on penalizing the Jacobian of the inverse consis1 i.e., penalizing deviations from ∇(ΦAB ◦ ΦBA − Id) = 0 instead of
+θ
+θ
+deviations from ΦAB
+◦ ΦBA
+− Id = 0.
+θ
+θ
+tency constraint and results, empirically and theoretically,
+in spatially well-regularized transformation maps.
+• We demonstrate state-of-the-art (SOTA) performance of
+models trained with GradICON on three large medical
+datasets: a knee magnetic resonance image (MRI) dataset
+of the Osteoarthritis Initiative (OAI) [46], the Human Connectome Project’s collection of Young Adult brain MRIs
+(HCP) [60], and a computed tomography (CT) inhale/exhale lung dataset from COPDGene [47].
+2. Related work
+Nonparametric transformation models & regularization.
+There are various ways of modeling a transformation between image pairs. The most straightforward nonparametric
+approach is via a displacement field [59]. Different regularizers for displacement fields have been proposed [32],
+but they are typically only appropriate for small displacements [44] and cannot easily guarantee diffeomorphic transformations [2], which is our focus here for medical image
+registration. Fluid models, which parameterize a transformation by velocity fields instead, can capture large deformations
+and, given a suitably strong regularizer, result in diffeomorphic transformations. Popular fluid models are based on
+viscous fluid flow [12, 13], the large deformation diffeomorphic metric mapping (LDDMM) model [5], or its shooting
+variant [41, 63]. Simpler stationary fluid approaches, such
+as the stationary velocity field (SVF) approach [1, 61], have
+also been developed. While diffeomorphic transformations
+are not always desirable, they are often preferred due to
+their invertibility, which allows mappings between images
+to preserve object topologies and prevent foldings that are
+physically implausible. These models have initially been
+developed for pair-wise image registration where solutions
+are determined by numerical optimization, but have since,
+with minimal modifications, been integrated with neural
+networks [4, 52, 68]. In a learning-based formulation, the
+losses are typically the same as for numerical-optimization
+approaches, but one no longer directly optimizes over the
+parameters of the chosen transformation model but instead
+over the parameters of a neural network which, once trained,
+can quickly predict the transformation model parameters.
+Fluid registration models are computationally complex as
+they require solving a fluid equation (either greedily or via
+direct numerical integration [42], or via scaling and squaring [1]), but can guarantee diffeomorphic transformations.
+In contrast, displacement field models are computationally
+cheaper but make it more difficult to obtain diffeomorphic
+transformations. Solution regularity can be obtained for displacement field models by adding appropriate constraints
+on the Jacobian [24]. Alternatively, invertibility can be encouraged by adding inverse consistency losses, either for
+numerical optimization approaches [11] or in the context of
+registration networks as is the case for ICON [23]. Similar
+losses have also been used in computer vision to encourage cycle consistencies [6, 22, 67, 69] though they are, in
+general, not focused on spatial regularity. Most relevant to
+our approach, ICON [23] showed that inverse consistency
+alone is sufficient to approximately obtain diffeomorphic
+transformations when the displacement field is predicted by
+a neural network. Our work extends this approach by generalizing the inverse consistency loss to a gradient inverse
+consistency loss, which results in smooth transformations,
+faster convergence, and more accurate registration results.
+Multi-scale image registration. Finding good solutions for
+the optimization problems of image registration is challenging, and one might easily get trapped in an unfavorable local
+minimum. In particular, this might happen for self-similar
+images, such as lung vessels, where incorrect vessel alignment might be locally optimal. Further, if there is no overlap
+between vessels, a similarity measure might effectively be
+blind to misalignment, which is why it is important for a
+similarity measure to have a sufficient capture range2 .
+Multi-scale approaches have been proposed for
+optimization-based registration models [39, 55, 58, 70] to
+overcome these issues. For these approaches, the loss function is typically first optimized at a coarse resolution, and the
+image warped via the coarse transformation then serves as
+the input for the optimization at a finer resolution. This helps
+to avoid poor local optima, as solutions computed at coarser
+resolutions effectively increase capture range and focus on
+large-scale matching first rather than getting distracted by
+fine local details. Multi-scale approaches have also been
+used for learning-based registration [16, 18, 29, 36, 45, 52]
+and generally achieve better results than methods that
+only consider one scale [4]. These methods all use
+sub-networks operating at different scales but differ in how
+the multi-scale strategy is incorporated into the network
+structure and the training process. A key distinction is if
+source images are warped as they pass through the different
+sub-networks [16, 23, 29, 45] or if sub-networks always start
+from the unwarped, albeit downsampled, source image [18].
+The former approach simplifies capturing large deformations
+as sub-networks only need to refine a transformation rather
+than capturing it in its entirety. However, these methods
+compute the similarity measure and the regularizer losses
+at all scales, which requires balancing the weights of the
+losses across all scales and for each scale between the
+similarity measure and the regularizer. Hence, there are
+many parameters that are difficult to tune. To side-step the
+tuning issue, it is common to rely on a progressive training
+protocol to avoid tuning the weights between losses at all
+scales. We find that our multi-resolution approach trains
+2 Note that keypoint approaches [26] and approaches based on optimal
+transport [51] can overcome some of these issues. However, in this work,
+we focus on the registration of images with grid-based displacement fields.
+well when the loss and regularizer are applied only at the
+highest scale: the coarser components are effectively trained
+by gradients propagating back through the multi-scale steps.
+3. Gradient Inverse Consistency (GradICON)
+3.1. Preliminaries
+We denote by I A : Ω → R and I B : Ω→ R the source
+and the target images in our registration problem. By
+ΦAB : Rd → Rd we denote a transformation map with
+the intention that I A ◦ ΦAB ∼ I B . The map ΦAB is a diffeomorphism if it is differentiable, bijective and its inverse is
+differentiable as well3 . Optimization-based image registration approaches typically solve the optimization problem
+B
+τ ∗ = arg min Lsim (I A ◦ φ−1
+τ , I ) + λLreg (τ ) ,
+τ
+(1)
+where Lsim (·, ·) is the similarity measure, Lreg (·) is a regularizer, τ are the transformation parameters, and λ ≥ 0. In
+learning-based registration, one does not directly optimize
+over the transformation parameters of φ−1 , but instead over
+the parameters θ of a neural network Φθ that predicts φ−1
+given the source and target images. Such a network is trained
+over a set of image pairs I = {(IiA , IiB )}N
+i=1 by solving
+θ∗ = arg min N1
+θ
+PN
+i=1 Lsim
+
+B
+IiA ◦ ΦAB
+θ,i , Ii
+
++ λLreg (ΦAB
+θ,i ) (2)
+A B
+with ΦAB
+θ,i as shorthand for Φθ [Ii , Ii ] denoting the output
+of the network given the i-th input image pair. By training
+with (IiA , IiB ) and (IiB , IiA ) the loss is symmetric in expectation. For ease of notation, we omit the subscripts i or θ in
+cases where the dependency is clear from the context.
+3.2. Regularization
+Picking a good regularizer Lreg is essential as it implicitly
+expresses the class of transformations one considers plausible for a registration. Ideally, the space of plausible transformations should be known (e.g., based on physical principles)
+or learned from the data. As nonparametric image registration (at least for image pairs) is an ill-posed problem [20],
+regularization is required to obtain reasonable solutions.
+Regularizers frequently involve spatial derivatives of various orders to discourage spatial non-smoothness [32]. This
+typically requires picking a type of differential operator (or,
+conversely, a smoothing operator) as well as all its associated parameters. Most often, this regularizer is chosen for
+convenience and not learned from data. Instead of explicitly penalizing spatial non-smoothness, ICON [23] advocates
+using inverse consistency as a regularizer, which amounts
+to learning a transformation space from data in the class
+of (approximately) invertible transforms. When implementing inverse consistency, there is a choice of loss. The ICON
+3 Basically, we are interested in properties of ΦAB (Ω), as this is the
+region that can affect the image similarity, but since many maps (e.g.,
+translations) carry points outside of Ω, ΦBA must be defined at those points
+for ΦAB ◦ ΦBA to be defined on all of Ω. In practice, this is achieved for a
+displacement field D by ΦAB := x+interpolate(D, clip(x, [0, 1]d )).
+approach penalizes the sum-of-squares difference between
+the identity and the composition of the maps between images (I A , I B ) and (I B , I A ), i.e., the regularizer has the form
+AB
+BA
+2
+LICON
+reg = ∥Φθ ◦ Φθ − Id ∥2 , where Id denotes the identity
+transform. In [23], it is shown that this loss has an implicit
+regularization effect, similar to a sum-of-squares on the gradient of the transformation, i.e., an H 1 type of norm. In
+fact, it turns out that regular invertible maps can be learned
+without explicitly penalizing spatial gradients. Inspired by
+this observation, we propose to use the Jacobian (∇) of the
+composition of the maps instead, i.e.,
+
+
+2
+LGradICON
+= ∇ ΦAB
+◦ ΦBA
+−I F ,
+(3)
+reg
+θ
+θ
+where I the identity matrix, and ∥ · ∥2F is the squared Frobenius norm integrated over Ω. As we will see in Sec. 5, this
+loss equally leads to regular maps by exerting another form
+of implicit regularization, which we analyze in Sec. 3.3. To
+understand the implicit regularization of the ICON loss, one
+makes the modeling choice ΦAB
+= ΦAB + εnAB such that
+θ
+BA
+AB
+Φ (Φ ) = Id, i.e., the output of the network is inverse
+consistent up to a white noise term n with parameter ε > 0
+(artificially introduced to make the discussion clear). This
+white noise can be used to prove that the resulting maps are
+regularized via the square of a first-order Sobolev (semi-)
+norm. Further, [23] empirically showed that an approximate
+diffeomorphism can be obtained without the white noise
+when used in the context of learning a neural registration
+model: if inverse consistency is not exactly enforced, as
+suggested above, the inconsistency can be modeled by noise,
+and the observed smoothness is explained by the theoretical
+result. In our analysis, we follow a conceptually similar idea.
+3.3. Analysis
+Implicit H 1 type regularization. Since the GradICON loss
+of Eq. (3) is formulated in terms of the gradient, it is a
+natural assumption to put the white noise on the Jacobians
+themselves rather than on the maps, i.e., ∇ΦAB
+= ∇ΦAB +
+θ
+εN where N is a white noise. This model of randomness is
+motivated by the stochastic gradient scheme on the global
+population that drives the parameters of the networks. At the
+level of maps, we write ΦAB
+= ΦAB + εn where N = ∇n.
+θ
+Since integration is a low-pass filter, the noise n applies to
+the low frequencies of ΦAB
+θ . In addition, we expect the low
+frequencies of the noise to be dampened by the similarity
+measure between I A ◦ ΦAB and I B . Hence, we hypothesize
+that ∥n∥ ≪ ∥∇n∥, which will be used only once in our
+analysis. This comparison means that our estimates of the
+gradient ∇n and n on our grid satisfy this inequality. We
+assess this hypothesis Appendix A.1. We start by rewriting
+the GradICON regularizer , by applying the chain rule, as
+
+AB
+LGradICON
+= ∥ ∇ΦAB (ΦBA
+(ΦBA
+reg
+θ ) + ε∇n
+θ ) ·
+
+∇ΦBA + ε∇nBA − I∥2F , (4)
+using ∇ΦAB
+= ∇ΦAB + ε∇nAB and still omitting the
+θ
+integral sign. We now Taylor expand the loss w.r.t. ε and in
+particular expand the ∇ΦAB (ΦBA
+θ ) term from Eq. (4) as
+∇ΦAB (ΦBA
+θ )=
+∇ΦAB (ΦBA ) + ε∇2 ΦAB (ΦBA )nBA + o(ε) .
+(5)
+where ∥n∥ ≪ ∥∇n∥ implies that the approximation
+AB
+∇ΦAB (ΦBA
+(ΦBA ) + o(ε)
+θ ) = ∇Φ
+(6)
+holds as it is only compared with ∇n in the expansion. Using
+AB
+the first-order approximation ∇nAB (ΦBA
+(ΦBA ),
+θ )≈∇n
+see Appendix A.1, and simplifying Eq. (4), we obtain
+LGradICON
+≈ ε2 ∥∇nAB (ΦBA )∇ΦBA + ∇ΦAB (ΦBA )∇nBA ∥2F ,
+reg
+AB
+(7)
+BA −1
+BA
+as ∇Φ (Φ ) = [∇Φ ] (and selecting the first-order
+coefficients in ε). Expanding the square then yields
+LGradICON
+≈
+reg
+
+2
+
+−1
+2
+∇nBA
+ε2 ∇nAB (ΦBA )∇ΦBA F + ∇ΦBA
+F
+
+−1
++ 2⟨∇nAB (ΦBA )∇ΦBA , ∇ΦBA
+∇nBA ⟩F .
+(8)
+Under the assumption of independence of the white noises
+∇nAB and ∇nBA , the contribution of the last term in Eq. (8)
+vanishes in expectation. We are left with the following loss,
+at order ε2 , now taking expectation,
+"
+2
+E[LGradICON
+] ≈ ε2 E
+reg
+∇nAB (ΦBA )∇ΦBA F +
+2
+
+−1
+∇ΦBA
+∇nBA
+(9)
+#
+.
+F
+Note that the expectation is explicit due to the white noise
+assumption; thus, Eq. (9) can be further simplified to
+E[LGradICON
+] ≈ ε2
+reg
+2
+
+−1 q
+∇ΦAB
+Det(∇ΦAB )
+F
++
+
+∇Φ
+2
+
+BA −1
+!
+(10)
+.
+F
+Eq. (10) amounts to an L2 regularization of the inverse of
+the Jacobian maps on ΦAB and ΦBA which explains why
+we call it H 1 type of regularization, see Appendix A.1; yet,
+strictly speaking, it is not the standard H 1 norm [40].
+Comparison with ICON [23]. Interestingly, our analysis
+shows that GradICON is an H 1 type of regularization as for
+ICON, although we could have expected a second-order regularization from the model. Such higher-order terms appear
+when taking into account the magnitude of the noise n in the
+expansion. While there are several assumptions that can be
+formulated differently, such as the form of the noise and the
+fact that it is white noise for given pairs of images (I A , I B ),
+we believe that Eq. (10) is a plausible explanation of the observed regularity of the maps in practice. Importantly, since
+this regularization is implicit, GradICON, as well as ICON can
+learn based on a slightly more informative prior than this H 1
+regularization which relies on simplifying assumptions.
+Why GradICON performs better than ICON. In practice, we
+observe that learning a registration model via the GradICON
+regularizer of Eq. (3) shows a faster convergence than using the ICON regularizer, not only in the toy experiment of
+Sec. 5.4 but also on real data. While we do not yet have a
+clear explanation for this behavior, we provide insight based
+on the following key differences between the two variants.
+First, a difference by a translation is not penalized in the
+GradICON formulation, but implicitly penalized in the similarity measure, assuming images are not periodic. Second,
+using the Jacobian in Eq. (3) correlates the composition of
+the map between neighboring voxels. In a discrete (periodic)
+setting, this can be seen by expanding the squared norm.
+To shorten notations, define ψ(x) := ΦAB (ΦBA (x)) − Id
+considered as a discrete vector. Then, Eq. (3) is the sum over
+2
+P
+i )|
+, which can be rewritten as
+voxels i |ψ(xi +δ)−ψ(x
+δ2
+
+2 
+2∥ψ∥L2
+⟨ψ(·), ψ(· + δ)⟩
+GradICON
+Lreg
+=
+1−
+, (11)
+δ2
+∥ψ∥2L2
+where δ is the (hyper-)parameter for the finite difference
+estimation of the gradient. This shows that the GradICON
+regularizer includes more correlation than the ICON regularizer, which would only contain the first factor in Eq. (11).
+Lastly, it is known [9] that gradient descent on an H 1 energy
+rather than L2 energy is a preconditioning of the gradient
+flow, emphasizing high-frequencies over low-frequencies.
+In our case, however, high-frequencies are the dominant
+cause of folds. Consequently, as GradICON penalizes high
+frequencies but allows low frequencies of the composition of
+the maps to deviate from identity, this is beneficial to avoid
+folds4 . Overall, GradICON is more flexible than ICON while
+retaining the non-folding behavior of the resulting maps.
+4. Implementation
+To learn a registration model under Eq. (3), we use a
+neural network that predicts the transformation maps. In
+particular, we implement a multi-step (i.e., multiple steps
+within a forward pass), multi-resolution approach trained
+with a two-stage process, followed by optional instance optimization at test time. We will discuss these parts next.
+4.1. Network structure
+To succinctly describe our network structure, we henceforth omit θ and represent a registration neural network as Φ
+(or e.g. Ψ). The notation ΦAB (shorthand for Φ[I A , I B ])
+represents the output of this network (a transform from
+Rd → Rd ) for input images I A and I B . To combine such
+registration networks into a multistep, multiscale approach,
+we rely on the following combination operators from [23]:
+A
+B
+A
+B
+A
+B
+Down{Φ}[I , I ] := Φ[AvgPool(I , 2), AvgPool(I , 2)]
+A
+B
+A
+A
+B
+B
+TS{Φ, Ψ}[I , I ] := Φ[I , I ] ◦ Ψ[I ◦ Φ[I , I ], I ]
+4 Indeed, the neighborhood of identity of invertible maps is much larger
+for small-frequency perturbations than for high-frequency perturbations;
+what matters for invertibility is the norm of the gradient.
+Ψ1
+Down
+predict at 1/4 res.
+Ψ2
+TS
+predict correction to 1/2 res.
+Down
+predict at 1/2 res.
+Ψ3
+TS
+predict correction to full res.
+Ψ4
+TS
+Stage1
+Stage2
+Figure 2. Illustration of the combination steps to create our registration network, see Eq. (12), from the atomic registration networks
+(Ψi ) via the downsample (Down) and the two-step (TS) operator.
+The downsample operator (Down) is for predicting the warp
+between two high-resolution images using a network that
+operates on low-resolution images, and the two-step operator
+(TS) is for predicting the warp between two images in two
+steps, first capturing the coarse transform via Φ and then the
+residual transform via Ψ. We use these operators to realize a
+multi-resolution, multi-step network, see Fig. 2, via
+Stage1 = TS{Down{TS{Down{Ψ1 }, Ψ2 }}, Ψ3 }
+(12)
+Stage2 = TS{Stage1, Ψ4 }
+Our atomic (i.e., not composite) registration networks Ψi
+are each represented by a UNet instance5 from [23] taking
+as input two images and returning a displacement field D.
+These displacement fields are converted to functions x 7→ x+
+interpolate(D, x) since the above operators are defined
+on networks that return functions from Rd to Rd .
+4.2. Training
+We define a single training protocol that is applied to train
+a network on all the registration tasks of Sec. 5. For preprocessing, each image has its intensity clipped and rescaled to
+[0, 1], with clipping intensities appropriate for the modality
+and anatomy being registered. For modalities with region of
+interest (ROI) annotations (brain and lung), all values outside the region of interest are set to zero. For intra-subject
+registration, we have many fewer pairs to train on6 , so we
+perform augmentation via random flips along axes and small
+affine warps (see Appendix A.2). In all experiments, the
+image similarity measure is combined with the GradICON
+regularizer to yield the overall loss
+L =Lsim (I A ◦ Φ[I A , I B ], I B ) +
+Lsim (I B ◦ Φ[I B , I A ], I A ) +
+A
+B
+B
++ λ∥∇(Φ[I , I ] ◦ Φ[I , I
+AB
+(13)
+A
+]) − I∥2F
+.
+BA
+In our implementation, ∇(Φ
+◦ Φ ) is computed using
+one-sided finite differences with ∆x =1e-3, ∥·∥2F is computed by (uniform) random sampling over Ω with number of
+5 For reference, networks.tallUnet2 in the ICON source code.
+6 For intra-subject reg., N =(dataset size) instead of N =(dataset size2 ).
+samples equal to the number of voxels in the image /2d , and
+we use coordinates where Ω = [0, 1]3 .
+Multi-stage training. We train in two stages. Stage1: we
+train the multi-resolution network defined in Eq. (12) with
+the loss from Eq. (13). Stage2: we train with the same loss,
+jointly optimizing the parameters of Stage1 and Ψ4 .
+Instance optimization. We optionally optimize the loss of
+Eq. (13) for 50 iterations at test time [66]. This typically
+improves performance but also increases runtime.
+Unless noted otherwise, we use LNCC (local normalized
+cross-correlation) with a Gaussian kernel (std. of 5 voxels),
+computed as in [65], and GradICON with balancing parameter λ = 1.5. Stage1 and Stage2 are trained using ADAM
+at a learning rate of 5e-5 for 50,000 iterations each. This
+protocol remains fixed across all datasets, and any result
+obtained by exactly this protocol is marked by †; if instance
+optimization is included, results are marked by ‡.
+5. Experiments
+Ethics. We use one 2D synthetic (Triangles and Circles),
+one real 2D (DRIVE), and four real 3D datasets (OAI, HCP,
+COPDGene, DirLab). Acquisitions for all real datasets
+were approved by the respective Institutional Review Boards.
+5.1. Datasets
+Triangles and Circles. A synthetic 2D dataset introduced
+in [23] where images are either triangles or circles. We
+generate 2000 hollow images with size 128 × 128 which
+consist of the shape edges and use them as the training set.
+DRIVE [54]. This 2D dataset contains 20 retina images
+and the corresponding vessel segmentation masks. We use
+the segmentation masks to define a synthetic registration
+problem. In particular, we take downsampled segmentations
+as the source (/target) image and warp them with random
+deformations generated by ElasticDeform7 to obtain the corresponding target (/source) image. We generate 20 pairs per
+image, leading to 400 pairs at size 292×282 in total.
+OAI [46]. We use a subset of 2532 images from the full corpus of MR images of the Osteoarthritis Initiative (OAI8 ) for
+training and 301 pairs of images for testing. The images are
+normalized so that the 1th percentile and the 99th percentile
+of the intensity are mapped to 0 and 1, respectively. Then
+we clamp the normalized intensity to be in [0, 1]. We follow
+the train-test split9 used in [23, 52]. We downsample images
+from 160×384×384 to 80×192×192
+HCP [60]. We use a subset of T1-weighted and brainextracted images of size 260×311×260 from the Human
+Connectome Project’s (HCP) young adult dataset to assess
+inter-patient brain registration performance. We downsample images to 130×155×130 for training but evaluate the
+7 https://zenodo.org/badge/latestdoi/145003699
+8 https://nda.nih.gov/oai
+9 Available at https://github.com/uncbiag/ICON
+Backbone
+Res.
+2nd
+Opt.
+Aug.
+mTRE
+%|J|
+(in mm)
+UNet from [4]
+UNet from [23]
+1
+1
+3
+3
+3
+3
+3
+3
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+17.582
+5.412
+3.259
+2.587
+3.182
+1.378
+1.932†
+1.314‡
+0.01440
+0.00014
+0.00109
+0.00032
+0.00042
+0.00021
+0.00026
+0.00023
+Table 1. Ablation results for training on COPDGene and evaluating
+on Dirlab. We assess the effect of the backbone network, the
+number of resolutions (Res.), including Stage2 training (2nd),
+instance optimization (Opt.), and affine augmentation (Aug.).
+average Dice score for 28 manually segmented subcortical
+brain regions [49, 50]10 at the original resolution. We train
+on 1076 images, excluding the 44 images we use for testing.
+COPDGene [47]. We use a subset of 11 999 inspiratoryexpiratory lung CT pairs from the COPDGene study12 [47]
+with provided lung segmentation masks for training. The
+segmentation masks are computed automatically13 . CT images are first resampled to isotropic spacing (2mm) and
+cropped/padded evenly along each dimension to obtain a
+175×175×175 volume. Hounsfield units are clamped within
+[−1000, 0] and scaled linearly to [0, 1]. Then, the lung segmentations are applied to the images to extract the lung
+region of interest (ROI). Among the processed data, we use
+899 pairs for training and 100 pairs for validation.
+DirLab [8]. This dataset is only used to evaluate a trained
+network. It contains 10 pairs of inspiration-expiration lung
+CTs with 300 anatomical landmarks per pair, manually identified by an expert in thoracic imaging. We applied the same
+preprocessing and lung segmentation as for COPDGene.
+5.2. Ablation study
+In Table 1, we investigate 1) which UNet structure should
+be used and 2) how multi-resolution, multi-stage training,
+instance optimization, and data augmentation affect the registration results. To this end, we train on COPDGene and
+evaluate on DirLab using the same similarity measure, regularizer weight λ, and number of iterations. We report the
+mean target registration error (mTRE) on landmarks (in mm)
+and the percentage of voxels with negative Jacobian (%|J|).
+First, we observe that the UNet from [23] performs better
+than the UNet from [4]. Hence, in all experiments, we adopt
+the former as our backbone. Notably, this model has considerably more parameters than the variant from [4] (≈ 17M
+vs. 300k, see Appendix A.6), but uses less V-RAM as it
+concentrates parameters in the heavily downsampled layers
+10 https://doi.org/10.5281/zenodo.6967315
+11 The dataset contains 1000 pairs, but 1 pair is also in the DirLab
+challenge set, and so was excluded from training.
+12 https://www.ncbi.nlm.nih.gov/gap
+13 shorturl.at/ciEW6
+5.3. Comparison to other regularizers
+We study different regularizers in terms of the trade-off
+between transform regularity and image similarity on the
+training set when varying λ. We use Stage1 from Eq. (12)
+for all experiments, P
+setting the regularizer to either Bending Energy (Lreg = i ||∇2 ((ΦAB − Id)i )||2F ), Diffusion
+(Lreg = ||∇(ΦAB − Id)||2F ), ICON, or GradICON. SpecifiDRIVE
+Triangles and Circles
+1
+10
+-2
+10
+10
+-1
+10
+<latexit sha1_base64="acY/utLXuLQoLruobvx22ABhtHo=">AAACBHicbVDLSgMxFM3UV62vqks3wSK4KjNS1GXRjcsK9iHtUDKZTBuaZIbkjlCGbv0Bt/oH7sSt/+EP+B2m7Sxs64HA4Zx7uScnSAQ34LrfTmFtfWNzq7hd2tnd2z8oHx61TJxqypo0FrHuBMQwwRVrAgfBOolmRAaCtYPR7dRvPzFteKweYJwwX5KB4hGnBKz02BN2NCR9t1+uuFV3BrxKvJxUUI5Gv/zTC2OaSqaACmJM13MT8DOigVPBJqVealhC6IgMWNdSRSQzfjYLPMFnVglxFGv7FOCZ+ncjI9KYsQzspCQwNMveVPzP66YQXfsZV0kKTNH5oSgVGGI8/T0OuWYUxNgSQjW3WTEdEk0o2I4WrgC3gScY22K85RpWSeui6l1Wa/e1Sv0mr6iITtApOkceukJ1dIcaqIkokugFvaI359l5dz6cz/lowcl3jtECnK9fqCKYcA==</latexit>
+-3
+-4
+10
+1
+10
+%|J|
+%|J|
+10
+Bending energy (3.0e-04)
+Diffusion (5.0e+00)
+ICON (1.0e+03)
+GradICON (1.5e+00)
+identifies 0
+-2
+10
+10
+-5
+0.7
+0.8
+0.9
+Dissimilarity (1- LNCC)
+<latexit sha1_base64="acY/utLXuLQoLruobvx22ABhtHo=">AAACBHicbVDLSgMxFM3UV62vqks3wSK4KjNS1GXRjcsK9iHtUDKZTBuaZIbkjlCGbv0Bt/oH7sSt/+EP+B2m7Sxs64HA4Zx7uScnSAQ34LrfTmFtfWNzq7hd2tnd2z8oHx61TJxqypo0FrHuBMQwwRVrAgfBOolmRAaCtYPR7dRvPzFteKweYJwwX5KB4hGnBKz02BN2NCR9t1+uuFV3BrxKvJxUUI5Gv/zTC2OaSqaACmJM13MT8DOigVPBJqVealhC6IgMWNdSRSQzfjYLPMFnVglxFGv7FOCZ+ncjI9KYsQzspCQwNMveVPzP66YQXfsZV0kKTNH5oSgVGGI8/T0OuWYUxNgSQjW3WTEdEk0o2I4WrgC3gScY22K85RpWSeui6l1Wa/e1Sv0mr6iITtApOkceukJ1dIcaqIkokugFvaI359l5dz6cz/lowcl3jtECnK9fqCKYcA==</latexit>
+-3
+-4
+10
+0.6
+Bending energy (6.0e-04)
+Diffusion (1.5e+00)
+ICON (1.5e+03)
+GradICON (1.5e+00)
+identifies 0
+-1
+-5
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+Dissimilarity (1- LNCC)
+Figure 3. GradICON vs. other regularization techniques.
+cally, we pick λ0 for each regularizer such that %|J| is kept
+at roughly the same level and train multiple networks with
+λ = {λ0 · 2i | i ∈ [−6, 6], i ∈ Z} for the same number of
+iterations. Fig. 3 shows results on Triangles and Circles and
+DRIVE. We observe that all the regularizers lose a certain
+level of accuracy when increasing λ and GradICON in general has the least sacrifice in similarity. This is presumably
+because of the possible magnitude of deformation each regularizer allows. More results can be found in Appendix A.3.
+5.4. Empirical convergence analysis
+To demonstrate improved convergence when training
+models with our GradICON regularizer vs. models trained
+with the ICON regularizer of [23], we assess the corresponding loss curves under the same network architecture, in particular, the network described in Sec. 4. We are specifically
+interested in (training) convergence behavior when both models produce a similar level of map regularity. To this end, we
+choose λ to approximately achieve the same similarity loss
+under both regularizers and plot the corresponding curves
+for %|J|, see Fig. 4, for Triangles and Circles and DRIVE.
+Overall, we see that GradICON converges significantly
+faster than ICON. We hypothesize that this is due to the fact
+that maps produced by GradICON contain larger motions than
+GradICON (DRIVE)
+1.0
+ICON (DRIVE)
+GradICON (Triangles and Circles)
+10
+0.8
+10
+%|J|
+Dissimilarity (1 - LNCC)
+of the architecture. Second, we find that the multi-resolution
+approach, including Stage2 training, clearly improves performance, reducing the mTRE from 5.412mm to 3.259mm
+(1 vs. 3 res.) and further down to 3.182mm (with Stage2).
+In this setting, there is also a noticeable benefit of (affine)
+data augmentation, with the mTRE dropping to 1.932mm.
+This is not unexpected, though, as we only have 899 pairs
+of training images for this (inter-patient) registration task.
+While this is considered a large corpus for medical imaging
+standards, it is small from the perspective of training a large
+neural network. Finally, we highlight that adding instance
+optimization yields the overall best results, but the benefits
+are less noticeable in combination with augmentation.
+0.6
+0.4
+1,000
+Nr. of iterations
+2,000
+-3
+-4
+10
+0
+-1
+-2
+10
+10
+ICON (Triangles and Circles)
+-5
+0
+1,000
+Nr. of iterations
+2,000
+Figure 4. Comparison of the convergence speed (left), visualized
+as 1-LNCC (i.e., dissimilarity), for ICON and GradICON when λ is
+set to produce a similar level of map regularity (right).
+maps produced by ICON. I.e., for the same level of regularity,
+ICON more strongly limits deformations, effectively slowing
+down and resulting in less accurate image alignments.
+5.5. Inter-patient registration
+We evaluate inter-patient registration performance of our
+model with GradICON regularization on OAI and HCP. We
+report |%J| (as in Sec. 5.2) and the mean DICE score between warped and target image for the segmentations of the
+femoral and tibial cartilage (OAI), and of a set of 28 subcortical brain regions (HCP). Both measures, averaged over the
+evaluation data, are listed in Table 2. In particular, we compare GradICON to the methods reported in [52] and [23] on
+OAI, and compare to ANTs SyN [3] and SynthMorph [31]14
+(sm-shapes/brains) on HCP. Segmentations are not used
+during training and allow quantifying if the network yields
+semantically meaningful registrations. Table 2 shows that on
+the OAI dataset GradICON can significantly outperform the
+state-of-the-art with minimal parameter tuning and, just as
+ICON, without the need for affine pre-alignment (i.e., a step
+needed by many registration methods on OAI). On HCP,
+GradICON performs better than the standard non-learning approach (SyN) and matches SynthMorph while not requiring
+affine pre-alignment and producing much less folds.
+5.6. Intra-patient registration
+We demonstrate the ability of our model with GradICON
+regularization to predict large deformations between lung
+exhale (source)/inhale (target) pairs (within patient) from
+COPDGene. This dataset is challenging as deformations
+are complex and large. Motion is primarily visually represented by the deformation of lung vessels, which form a
+complex tree-like structure that creates capture-range and
+local minima challenges for registration. As in our ablation
+study (Sec. 5.2), we report %|J| and the mTRE (in mm) for
+manually annotated lung vessel landmarks [8] averaged over
+all 10 DirLab image pairs. We assess GradICON against
+traditional optimization-based methods and state-of-the-art
+(SOTA) learning-based methods. Among the learning-based
+methods, VM [4], LapIRN [45], Hering el al. [30] and
+PLOSL [66] are trained on a large dataset and evaluated
+14 Using SynthMorph networks trained on HCP aging data, which differs
+slightly from the HCP Young Adults data we use; see [27] for a comparison.
+Method
+Lreg
+Trans.
+Lsim
+DICE ↑ %|J| ↓
+OAI
+Initial
+7.6
+Demons [62]
+A,DVF
+Gaussian
+SyN [3]
+A,VF
+Gaussian
+NiftyReg [43]
+A,B-Spline
+BE
+NiftyReg [43]
+A,B-Spline
+BE
+vSVF-opt [52]
+A,vSVF m-Gauss
+VM [4]
+SVF
+Diff.
+VM [4]
+A,SVF
+Diff.
+AVSM [52]
+A,vSVF m-Gauss
+ICON* [23]
+DVF
+ICON
+Ours (MSE, λ=0.2)
+DVF
+GradICON
+Ours (MSE, λ=0.2, Opt.)
+DVF
+GradICON
+DVF
+GradICON
+Ours (std. protocol)
+DVF
+GradICON
+MSE
+LNCC
+NMI
+LNCC
+LNCC
+MSE
+MSE
+LNCC
+MSE
+MSE
+MSE
+LNCC
+LNCC
+63.5
+65.7
+59.7
+67.9
+67.4
+46.1
+66.1
+68.4
+65.1
+69.5
+70.5
+70.1†
+71.2‡
+0.0006
+0.0000
+0.0000
+0.0068
+0.0000
+0.0028
+0.0013
+0.0005
+0.0040
+0.0000
+0.0001
+0.0261
+0.0042
+HCP
+Initial
+FreeSurfer-Affine∗ [48]
+SyN∗ [3]
+sm-shapes∗ [31]
+sm-brains∗ [31]
+Ours (std. protocol)
+53.4
+A
+A,VF
+A,SVF
+A,SVF
+DVF
+DVF
+—
+Gaussian
+Diff.
+Diff.
+GradICON
+GradICON
+TB
+MI
+DICE
+DICE
+LNCC
+LNCC
+62.1
+75.8
+79.8
+78.4
+78.7†
+80.5‡
+0.0000
+0.0000
+0.2981
+0.0364
+0.0012
+0.0004
+DirLab
+Method
+Trans.
+Lreg
+Lsim mTRE ↓ %|J| ↓
+(in mm)
+Initial
+SyN [3]
+Elastix [38]
+NiftyReg [43]
+PTVReg [65]
+RRN [28]
+23.36
+A,VF
+Gaussian LNCC
+A,B-Spline
+BE
+MSE
+A,B-Spline
+BE
+MI
+DVF
+TV
+LNCC
+DVF
+TV
+LNCC
+VM∗ [4]
+LapIRN∗ [45]
+LapIRN∗ [45]
+A,SVF
+SVF
+DVF
+Hering et al. [30]
+DVF
+GraphRegNet [26]
+DV
+PLOSL [66]
+DVF
+PLOSL50 [66]
+DVF
+∗
+ICON [23]
+Ours (std. protocol)
+DVF
+DVF
+DVF
+Diff.
+Diff.
+Diff.
+NCC
+NCC
+NCC
+DICE
+Curv+VCC +KP
++NGF
+—
+MSE
+TVD
+Diff.
++VMD
+TVD
+Diff.
++VMD
+ICON
+LNCC
+GradICON LNCC
+GradICON LNCC
+1.79
+1.32
+2.19
+0.96
+0.83
+—
+—
+—
+—
+—
+9.88
+2.92
+4.24
+0.0000
+0.0000
+0.0105
+2.00
+0.0600
+1.34
+—
+3.84
+0.0000
+1.53
+0.0000
+7.04
+1.93†
+1.31‡
+0.3792
+0.0003
+0.0002
+Table 2. Results on OAI, HCP and DirLab. † and ‡ indicate
+results obtained using our standard training protocol (Sec. 4.2), w/o
+(†) and w/ (‡) instance optimization (Opt.). Only when GradICON
+is trained with MSE do we set λ = 0.2. Results marked with ∗
+are obtained using the official source code; otherwise, values are
+taken from the literature (see A.5). Top and bottom table parts denote non-learning and learning-based methods, resp. For DirLab,
+results are shown in the common inspiration→expiration direction.
+A: affine pre-registration, BE: bending energy, MI: mutual information, TB: Tukey’s biweight, DV: displacement vector of sparse
+key points, TV: total variation, Curv: curvature regularizer, VCC:
+volume change control, NGF: normalized gradient flow, TVD:
+sum of squared tissue volume difference, VMD: sum of squared
+vesselness measure difference, Diff: diffusion, VF: velocity field,
+SVF: stationary VF, DVF: displacement vector field. PLOSL50 :
+50 iterations of instance optimization with PLOSL.
+on the unseen test dataset. GraphRegNet [26] has been
+evaluated on a small dataset with 5-fold cross validation.
+PLOSL50 [66] is PLOSL with instance optimization, which
+is comparable to GradICON‡. Table 2 shows that our performance (1.93mm) in a single forward pass is the best of
+any one-forward-pass neural method that has been trained
+on a large dataset and is evaluated on an unseen test set.
+our approach with instance optimization (1.31mm) exceeds
+the SOTA for learning-based approaches of any sort and
+performs slightly worse than the best optimization-based
+methods.
+6. Conclusion
+We introduced and theoretically analyzed GradICON, a
+new regularizer to train deep image registration networks. In
+contrast to ICON [23], GradICON penalizes the Jacobian of
+the inverse consistency constraint. This has profound effects:
+we obtain dramatically faster training convergence, higher
+registration accuracy, do not require scale-dependent regularizer tuning, and retain desirable implicit regularization
+effects resulting in approximately diffeomorphic transformations. Remarkably, this allows us to train registration
+networks using GradICON regularization with one standard
+training protocol for a range of different registration tasks.
+In fact, using this standard training protocol, we match or
+outperform state-of-the-art registration methods on three
+challenging and diverse 3D datasets. This uniformly good
+performance without the need for dataset-specific tuning
+takes the pain out of training deep 3D registration networks
+and makes our approach highly practical.
+Limitations and future work. We only explored firstorder derivatives of the inverse-consistency constraint and
+intensity-based registration. This might have limited registration performance. Studying higher-order derivatives, more
+powerful image similarity measures (e.g., based on deep
+features), as well as extensions to piecewise diffeomorphic
+transformations would be interesting future work.
+7. Acknowledgements
+This work was supported by NIH grants 1R01AR072013,
+1R01HL149877,
+1R01EB028283,
+RF1MH126732,
+R41MH118845, R01MH112748, R01NS125307, and
+5R21LM013670. The work expresses the views of the authors, not of NIH. Roland Kwitt was supported in part by the
+Austrian Science Fund (FWF): project FWF P31799-N38
+and the Land Salzburg (WISS 2025) under project numbers
+20102- F1901166-KZP and 20204-WISS/225/197-2019.
+The knee imaging data were obtained from the controlled
+access datasets distributed from the Osteoarthritis Initiative
+(OAI), a data repository housed within the NIMH Data
+Archive. OAI is a collaborative informatics system created
+by NIMH and NIAMS to provide a worldwide resource
+for biomarker identification, scientific investigation and
+OA drug development. Dataset identifier: NIMH Data
+Archive Collection ID: 2343. The brain imaging data were
+provided by the Human Connectome Project, WU-Minn
+Consortium (Principal Investigators: David Van Essen and
+Kamil Ugurbil; 1U54MH091657) funded by the 16 NIH
+Institutes and Centers that support the NIH Blueprint for
+Neuroscience Research; and by the McDonnell Center for
+Systems Neuroscience at Washington University. The lung
+imaging data was provided by the COPDGene study.
+References
+[1] Vincent Arsigny, Olivier Commowick, Nicholas Ayache, and
+Xavier Pennec. A fast and log-Euclidean polyaffine framework for locally linear registration. J. Math. Imaging Vis.,
+33(2):222–238, 2009. 2
+[2] John Ashburner. A fast diffeomorphic image registration
+algorithm. Neuroimage, 38(1):95–113, 2007. 2
+[3] Brian B Avants, Charles L Epstein, Murray Grossman, and
+James C Gee. Symmetric diffeomorphic image registration
+with cross-correlation: evaluating automated labeling of elderly and neurodegenerative brain. MedIA, 12(1):26–41, 2008.
+7, 8, 22
+[4] Guha Balakrishnan, Amy Zhao, Mert R Sabuncu, John Guttag,
+and Adrian V Dalca. VoxelMorph: a learning framework for
+deformable medical image registration. TMI, 38(8):1788–
+1800, 2019. 2, 3, 6, 7, 8, 22, 23
+[5] M Faisal Beg, Michael I Miller, Alain Trouvé, and Laurent
+Younes. Computing large deformation metric mappings via
+geodesic flows of diffeomorphisms. IJCV, 61(2):139–157,
+2005. 2
+[6] Zhangxing Bian, Allan Jabri, Alexei A Efros, and Andrew
+Owens. Learning pixel trajectories with multiscale contrastive
+random walks. In CVPR, 2022. 3
+[7] Daniel J Butler, Jonas Wulff, Garrett B Stanley, and Michael J
+Black. A naturalistic open source movie for optical flow
+evaluation. In ECCV, 2012. 2
+[8] Richard Castillo, Edward Castillo, David Fuentes, Moiz Ahmad, Abbie M Wood, Michelle S Ludwig, and Thomas Guerrero. A reference dataset for deformable image registration spatial accuracy evaluation using the COPDgene study
+archive. Phys. Med. Biol., 58(9):2861, 2013. 6, 7
+[9] Guillaume Charpiat, Pierre Maurel, Jean-Philippe Pons, Renaud Keriven, and Olivier Faugeras. Generalized gradients:
+Priors on minimization flows. IJCV, 73:325–344, 07 2007. 5
+[10] Xiang Chen, Andres Diaz-Pinto, Nishant Ravikumar, and Alejandro F Frangi. Deep learning in medical image registration.
+Prog. biomed. eng., 3(1):012003, 2021. 1
+[11] Gary E Christensen and Hans J Johnson. Consistent image
+registration. TMI, 20(7):568–582, 2001. 2
+[12] Gary E Christensen, Richard D Rabbitt, and Michael I Miller.
+3D brain mapping using a deformable neuroanatomy. Phys.
+Med. Biol., 39(3):609, 1994. 2
+[13] Gary E Christensen, Richard D Rabbitt, and Michael I Miller.
+Deformable templates using large deformation kinematics.
+TMI, 5(10):1435–1447, 1996. 2
+[14] William R Crum, Thomas Hartkens, and DLG Hill. Nonrigid image registration: theory and practice. Brit. J. Radiol.,
+77(suppl_2):S140–S153, 2004. 1
+[15] Adrian V Dalca, Guha Balakrishnan, John Guttag, and Mert R
+Sabuncu. Unsupervised learning for fast probabilistic diffeomorphic registration. In MICCAI, 2018. 1
+[16] Bob D De Vos, Floris F Berendsen, Max A Viergever, Hessam
+Sokooti, Marius Staring, and Ivana Išgum. A deep learning
+framework for unsupervised affine and deformable image
+registration. MedIA, 52:128–143, 2019. 3
+[17] Alexey Dosovitskiy, Philipp Fischer, Eddy Ilg, Philip Hausser,
+Caner Hazirbas, Vladimir Golkov, Patrick Van Der Smagt,
+Daniel Cremers, and Thomas Brox. Flownet: Learning optical
+flow with convolutional networks. In CVPR, 2015. 1
+[18] Koen AJ Eppenhof, Maxime W Lafarge, Mitko Veta, and
+Josien PW Pluim. Progressively trained convolutional neural
+networks for deformable image registration. TMI, 39(5):1594–
+1604, 2019. 3
+[19] Alan C Evans, Andrew L Janke, D Louis Collins, and Sylvain
+Baillet. Brain templates and atlases. Neuroimage, 62(2):911–
+922, 2012. 1
+[20] Bernd Fischer and Jan Modersitzki. Ill-posed medicine—an
+introduction to image registration.
+Inverse problems,
+24(3):034008, 2008. 3
+[21] Denis Fortun, Patrick Bouthemy, and Charles Kervrann. Optical flow modeling and computation: A survey. Comput. Vis.
+Image Underst., 134:1–21, 2015. 1
+[22] Clément Godard, Oisin Mac Aodha, and Gabriel J Brostow.
+Unsupervised monocular depth estimation with left-right consistency. In CVPR, 2017. 3
+[23] Hastings Greer, Roland Kwitt, François-Xavier Vialard, and
+Marc Niethammer. ICON: Learning regular maps through
+inverse consistency. In ICCV, 2021. 2, 3, 4, 5, 6, 7, 8, 16, 17,
+22, 23
+[24] Eldad Haber and Jan Modersitzki. Image registration with
+guaranteed displacement regularity. IJCV, 71(3):361–372,
+2007. 2
+[25] Xu Han, Jun Hong, Marsha Reyngold, Christopher Crane,
+John Cuaron, Carla Hajj, Justin Mann, Melissa Zinovoy, Hastings Greer, Ellen Yorke, Gig Mageras, and Marc Niethammer. Deep-learning-based image registration and automatic
+segmentation of organs-at-risk in cone-beam CT scans from
+high-dose radiation treatment of pancreatic cancer. J. Med.
+Phys., 48(6):3084–3095, 2021. 1
+[26] Lasse Hansen and Mattias P Heinrich. GraphRegNet: Deep
+graph regularisation networks on sparse keypoints for dense
+registration of 3D lung CTs. TMI, 40(9):2246–2257, 2021. 3,
+8, 22
+[27] Michael P Harms, Leah H Somerville, Beau M Ances, Jesper Andersson, Deanna M Barch, Matteo Bastiani, Susan Y
+Bookheimer, Timothy B Brown, Randy L Buckner, Gregory C
+Burgess, Timothy S Coalson, Michael A Chappell, Mirella
+Dapretto, Gwenaëlle Douaud, Bruce Fischl, Matthew F
+Glasser, Douglas N Greve, Cynthia Hodge, Keith W Jamison, Saad Jbabdi, Sridhar Kandala, Xiufeng Li, Ross W
+Mair, Silvia Mangia, Daniel Marcus, Daniele Mascali, Steen
+Moeller, Thomas E Nichols, Emma C Robinson, David H
+Salat, Stephen M Smith, Stamatios N Sotiropoulos, Melissa
+Terpstra, Kathleen M Thomas, M Dylan Tisdall, Kamil Ugurbil, Andre van der Kouwe, Roger P. Woods, Lilla Zöllei,
+David C. Van Essen, and Essa Yacoub. Extending the human connectome project across ages: Imaging protocols for
+the lifespan development and aging projects. NeuroImage,
+183:972–984, 2018. 7
+[28] Xinzi He, Jia Guo, Xuzhe Zhang, Hanwen Bi, Sarah Gerard, David Kaczka, Amin Motahari, Eric Hoffman, Joseph
+Reinhardt, R Graham Barr, Elsa Angelini, and Andrew Laine.
+Recursive refinement network for deformable lung registration between exhale and inhale CT scans. arXiv preprint
+arXiv:2106.07608, 2021. 8, 22
+[29] Alessa Hering, Bram van Ginneken, and Stefan Heldmann.
+mlvirnet: Multilevel variational image registration network.
+In MICCAI, 2019. 3
+[30] Alessa Hering, Stephanie Häger, Jan Moltz, Nikolas Lessmann, Stefan Heldmann, and Bram van Ginneken. CNNbased lung CT registration with multiple anatomical constraints. MedIA, 72:102139, 2021. 7, 8, 22
+[31] Malte Hoffmann, Benjamin Billot, Douglas N Greve, Juan Eugenio Iglesias, Bruce Fischl, and Adrian V Dalca. Synthmorph: learning contrast-invariant registration without acquired images. TMI, 41(3):543–558, 2022. 7, 8, 16, 22
+[32] Mark Holden. A review of geometric transformations for
+nonrigid body registration. TMI, 27(1):111–128, 2007. 2, 3
+[33] Berthold KP Horn and Brian G Schunck. Determining optical
+flow. Artif. Intell., 17(1-3):185–203, 1981. 1
+[34] Zhaoyang Huang, Xiaoyu Shi, Chao Zhang, Qiang Wang,
+Ka Chun Cheung, Hongwei Qin, Jifeng Dai, and Hongsheng
+Li. Flowformer: A transformer architecture for optical flow.
+arXiv preprint arXiv:2203.16194, 2022. 1, 2
+[35] Eddy Ilg, Nikolaus Mayer, Tonmoy Saikia, Margret Keuper,
+Alexey Dosovitskiy, and Thomas Brox. Flownet 2.0: Evolution of optical flow estimation with deep networks. In CVPR,
+2017. 1
+[36] Zhuoran Jiang, Fang-Fang Yin, Yun Ge, and Lei Ren. A
+multi-scale framework with unsupervised joint training of
+convolutional neural networks for pulmonary deformable image registration. Phys. Med. Biol., 65(1):015011, 2020. 3
+[37] Marc L Kessler. Image registration and data fusion in radiation therapy. Brit. J. Radiol., 79(S1):S99–S108, 2006. 1
+[38] Stefan Klein, Marius Staring, Keelin Murphy, Max A
+Viergever, and Josien PW Pluim. Elastix: a toolbox for
+intensity-based medical image registration. TMI, 29(1):196–
+205, 2009. 8, 22
+[39] Frederik Maes, Dirk Vandermeulen, and Paul Suetens. Comparative evaluation of multiresolution optimization strategies
+for multimodality image registration by maximization of mutual information. MedIA, 3(4):373–386, 1999. 3
+[40] Andreas Mang and George Biros.
+Constrained H1regularization schemes for diffeomorphic image registration.
+SIAM J. Imaging Sci., 9:1154–1194, 08 2016. 4
+[41] Michael I Miller, Alain Trouvé, and Laurent Younes.
+Geodesic shooting for computational anatomy. J. Math. Imaging Vis., 24(2):209–228, 2006. 1, 2
+[42] Michael I Miller and Laurent Younes. Group actions, homeomorphisms, and matching: A general framework. IJCV,
+41(1):61–84, 2001. 2
+[43] Marc Modat, Gerard R Ridgway, Zeike A Taylor, Manja
+Lehmann, Josephine Barnes, David J Hawkes, Nick C Fox,
+and Sébastien Ourselin. Fast free-form deformation using graphics processing units. Comput. Methods Programs
+Biomed., 98(3):278–284, 2010. 8, 22
+[44] Jan Modersitzki. Numerical methods for image registration.
+OUP Oxford, 2003. 1, 2
+[45] Tony CW Mok and Albert Chung. Large deformation diffeomorphic image registration with Laplacian pyramid networks.
+In MICCAI, 2020. 3, 7, 8, 22
+[46] Michael C Nevitt, David T Felson, and Gayle Lester. The
+osteoarthritis initiative. Protocol for the cohort study, 1, 2006.
+2, 6
+[47] Elizabeth A Regan, John E Hokanson, James R Murphy,
+Barry Make, David A Lynch, Terri H Beaty, Douglas CurranEverett, Edwin K Silverman, and James D Crapo. Genetic
+epidemiology of COPD (COPDGene) study design. COPD:
+J. Chronic Obstr. Pulm. Dis., 7(1):32–43, 2011. 2, 6
+[48] Martin Reuter, H Diana Rosas, and Bruce Fischl. Highly
+accurate inverse consistent registration: a robust approach.
+Neuroimage, 53(4):1181–1196, 2010. 8, 16, 22
+[49] R. Jarrett Rushmore, Kyle Sutherland, Holly Carrington, Justine Chen, Michael Halle, Andras Lasso, George Papadimitriou, Nick Prunier, Elizabeth Rizzoni, Brynn Vessey, Peter
+Wilson-Braun, Yogesh Rathi, Marek Kubicki, Sylvain Bouix,
+Edward Yeterian, and Nikos Makris. Anatomically curated
+segmentation of human subcortical structures in high resolution magnetic resonance imaging: An open science approach.
+Front. Neuroanat., 16, 2022. 6
+[50] R. Jarrett Rushmore, Kyle Sutherland, Holly Carrington,
+Justine Chen, Michael Halle, Andras Lasso, George Papadimitriou, Nick Prunier, Elizabeth Rizzoni, Brynn Vessey,
+Peter Wilson-Braun, Yogesh Rathi, Marek Kubicki, Sylvain Bouix, Edward Yeterian, and Nikos Makris. HOA2/SubcorticalParcellations: release-50-subjects-1.1.0. Sept.
+2022. 6
+[51] Zhengyang Shen, Jean Feydy, Peirong Liu, Ariel H Curiale,
+Ruben San Jose Estepar, Raul San Jose Estepar, and Marc
+Niethammer. Accurate point cloud registration with robust
+optimal transport. In NeurIPS, 2021. 3
+[52] Zhengyang Shen, Xu Han, Zhenlin Xu, and Marc Niethammer. Networks for joint affine and non-parametric image
+registration. In CVPR, 2019. 2, 3, 6, 7, 8, 22
+[53] Aristeidis Sotiras, Christos Davatzikos, and Nikos Paragios.
+Deformable medical image registration: A survey. TMI,
+32(7):1153–1190, 2013. 1
+[54] Joes Staal, Michael D Abràmoff, Meindert Niemeijer, Max A
+Viergever, and Bram Van Ginneken. Ridge-based vessel
+segmentation in color images of the retina. TMI, 23(4):501–
+509, 2004. 6
+[55] Colin Studholme, Derek LG Hill, and David J Hawkes. Multiresolution voxel similarity measures for MR-PET registration. In IPMI, 1995. 3
+[56] Deqing Sun, Xiaodong Yang, Ming-Yu Liu, and Jan Kautz.
+Pwc-net: CNNs for optical flow using pyramid, warping, and
+cost volume. In CVPR, 2018. 1
+[57] Zachary Teed and Jia Deng. Raft: Recurrent all-pairs field
+transforms for optical flow. In ECCV, 2020. 1
+[58] Philippe Thévenaz and Michael Unser. Optimization of mutual information for multiresolution image registration. TMI,
+9(12):2083–2099, 2000. 3
+[59] Jean-Philippe Thirion. Image matching as a diffusion process:
+an analogy with Maxwell’s demons. MedIA, 2(3):243–260,
+1998. 2
+[60] David C Van Essen, Kamil Ugurbil, Edward Auerbach,
+Deanna Barch, Timothy EJ Behrens, Richard Bucholz, Acer
+Chang, Liyong Chen, Maurizio Corbetta, Sandra W Curtiss,
+Stefania Della Penna, David Feinberg, Matthew F Glasser,
+Noam Harel, Andrew C Heath, Linda Larson-Prior, Daniel
+Marcus, Georgios Michalareas, Steen Moeller, Robert Oostenfeld, Steve E Peterson, Fred Prior, Brad L Schlaggar,
+Stephen M Smith, Abraham Z Snyder, Junqian Xu, Essa
+Yacoub, and WU-Minn HCP Consortium. The human connectome project: a data acquisition perspective. Neuroimage,
+62(4):2222–2231, 2012. 2, 6
+[61] Tom Vercauteren, Xavier Pennec, Aymeric Perchant, and
+Nicholas Ayache. Symmetric log-domain diffeomorphic registration: A Demons-based approach. In MICCAI, 2008. 2
+[62] Tom Vercauteren, Xavier Pennec, Aymeric Perchant, and
+Nicholas Ayache. Diffeomorphic demons: Efficient nonparametric image registration. NeuroImage, 45(1):61–72,
+2009. 8, 22
+[63] François-Xavier Vialard, Laurent Risser, Daniel Rueckert,
+and Colin J Cotter. Diffeomorphic 3D image registration via
+geodesic shooting using an efficient adjoint calculation. IJCV,
+97(2):229–241, 2012. 1, 2
+[64] Max A Viergever, JB Antoine Maintz, Stefan Klein, Keelin
+Murphy, Marius Staring, and Josien PW Pluim. A survey of
+medical image registration. MedIA, 33:140–144, 2016. 1
+[65] Valery Vishnevskiy, Tobias Gass, Gabor Szekely, Christine
+Tanner, and Orcun Goksel. Isotropic total variation regularization of displacements in parametric image registration. TMI,
+36(2):385–395, 2017. 6, 8, 22
+[66] Di Wang, Yue Pan, Oguz C Durumeric, Joseph M Reinhardt,
+Eric A Hoffman, Joyce D Schroeder, and Gary E Christensen.
+PLOSL: Population learning followed by one shot learning
+pulmonary image registration using tissue volume preserving
+and vesselness constraints. MedIA, 79:102434, 2022. 6, 7, 8,
+22
+[67] Xiaolong Wang, Allan Jabri, and Alexei A. Efros. Learning
+correspondence from the cycle-consistency of time. In CVPR,
+2019. 3
+[68] Xiao Yang, Roland Kwitt, Martin Styner, and Marc Niethammer. Quicksilver: Fast predictive image registration–a deep
+learning approach. NeuroImage, 158:378–396, 2017. 1, 2
+[69] Zhichao Yin and Jianping Shi. GeoNet: Unsupervised learning of dense depth, optical flow and camera pose. In CVPR,
+2018. 3
+[70] Shengyu Zhao, Yue Dong, Eric I Chang, Yan Xu, et al. Recursive cascaded networks for unsupervised medical image
+registration. In CVPR, 2019. 3
+Overview
+The different sections of the supplementary material
+cover the following aspects of our GradICON approach.
+• Appendix A.1 provides a justification of our noise assumptions, details of the derivation of the regularization
+properties of GradICON, and additional insights on the
+convergence behavior of GradICON.
+• Appendix A.2 describes our affine data augmentation
+strategy in detail.
+• Appendix A.3 provides detailed comparisons of
+GradICON to other regularizers, including the loss
+curve and examples associated with the experiment
+in Sec. 5.3.
+chosen direction (indicated by the red arrow in the plots on
+the right-hand side).
+0.2 Test case 1
+0.1
+0.0
+-0.1
+-0.2
+nAB
+rnAB
+<latexit sha1_base64="Egt9sZOSGc93b+6tLjLP9Cicb4k=">AAACEXicbVDLSgNBEJyNrxhfUcGLl8EgeAq7EtRjjBePEcwDkhh6J5NkyOzsMtMrhDVf4R941R/wJl79Au9+iJPHwSQWNBRV3XRRfiSFQdf9dlIrq2vrG+nNzNb2zu5edv+gasJYM15hoQx13QfDpVC8ggIlr0eaQ+BLXvMHN2O/9si1EaG6x2HEWwH0lOgKBmildvaoGfVBYRgkCnwJI6oekuvSqJ3NuXl3ArpMvBnJkRnK7exPsxOyOOAKmQRjGp4bYSsBjYJJPso0Y8MjYAPo8YalCgJuWskk/4ieWqVDu6G2o5BO1L8XCQTGDAPfbgaAfbPojcX/vEaM3atWIlQUI1ds+qgbS4ohHZdBO0JzhnJoCTAtbFbK+qCBoa1s7gsKG3hci7dYwjKpnue9i3zhrpArlmYFpckxOSFnxCOXpEhuSZlUCCNP5IW8kjfn2Xl3PpzP6WrKmd0ckjk4X7+xIZ47</latexit>
+-0.3
+<latexit sha1_base64="7hbEdpCGUlLZE30QSZ/uHAYRbiQ=">AAACBnicbVDLSgNBEJyNrxhfUY9eBoPgKeyKqMcYLx4jmAcka+idTJIhs7PrTK8Qltz9A6/6A97Eq7/h3Q9x8jiYxIKGoqqbLiqIpTDout9OZmV1bX0ju5nb2t7Z3cvvH9RMlGjGqyySkW4EYLgUildRoOSNWHMIA8nrweBm7NefuDYiUvc4jLkfQk+JrmCAVvJbCgIJVD2k1+VRO19wi+4EdJl4M1IgM1Ta+Z9WJ2JJyBUyCcY0PTdGPwWNgkk+yrUSw2NgA+jxpqUKQm78dBJ6RE+s0qHdSNtRSCfq34sUQmOGYWA3Q8C+WfTG4n9eM8HulZ8KFSfIFZs+6iaSYkTHDdCO0JyhHFoCTAublbI+aGBoe5r7gsIGHtfiLZawTGpnRe+ieH53XiiVZwVlyRE5JqfEI5ekRG5JhVQJI4/khbySN+fZeXc+nM/pasaZ3RySOThfv2nqmcE=</latexit>
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+0.2 Test case 2
+0.1
+0.0
+-0.1
+-0.2
+nAB
+rnAB
+<latexit sha1_base64="Egt9sZOSGc93b+6tLjLP9Cicb4k=">AAACEXicbVDLSgNBEJyNrxhfUcGLl8EgeAq7EtRjjBePEcwDkhh6J5NkyOzsMtMrhDVf4R941R/wJl79Au9+iJPHwSQWNBRV3XRRfiSFQdf9dlIrq2vrG+nNzNb2zu5edv+gasJYM15hoQx13QfDpVC8ggIlr0eaQ+BLXvMHN2O/9si1EaG6x2HEWwH0lOgKBmildvaoGfVBYRgkCnwJI6oekuvSqJ3NuXl3ArpMvBnJkRnK7exPsxOyOOAKmQRjGp4bYSsBjYJJPso0Y8MjYAPo8YalCgJuWskk/4ieWqVDu6G2o5BO1L8XCQTGDAPfbgaAfbPojcX/vEaM3atWIlQUI1ds+qgbS4ohHZdBO0JzhnJoCTAtbFbK+qCBoa1s7gsKG3hci7dYwjKpnue9i3zhrpArlmYFpckxOSFnxCOXpEhuSZlUCCNP5IW8kjfn2Xl3PpzP6WrKmd0ckjk4X7+xIZ47</latexit>
+<latexit sha1_base64="7hbEdpCGUlLZE30QSZ/uHAYRbiQ=">AAACBnicbVDLSgNBEJyNrxhfUY9eBoPgKeyKqMcYLx4jmAcka+idTJIhs7PrTK8Qltz9A6/6A97Eq7/h3Q9x8jiYxIKGoqqbLiqIpTDout9OZmV1bX0ju5nb2t7Z3cvvH9RMlGjGqyySkW4EYLgUildRoOSNWHMIA8nrweBm7NefuDYiUvc4jLkfQk+JrmCAVvJbCgIJVD2k1+VRO19wi+4EdJl4M1IgM1Ta+Z9WJ2JJyBUyCcY0PTdGPwWNgkk+yrUSw2NgA+jxpqUKQm78dBJ6RE+s0qHdSNtRSCfq34sUQmOGYWA3Q8C+WfTG4n9eM8HulZ8KFSfIFZs+6iaSYkTHDdCO0JyhHFoCTAublbI+aGBoe5r7gsIGHtfiLZawTGpnRe+ieH53XiiVZwVlyRE5JqfEI5ekRG5JhVQJI4/khbySN+fZeXc+nM/pasaZ3RySOThfv2nqmcE=</latexit>
+-0.3
+• Appendix A.4 describes the details of the experiment
+in Sec. 5.4 with convergence speed demonstration on
+OAI dataset.
+• Appendix A.5 shows an expanded version of Table 2
+from the main manuscript. In particular, this table provides information on the provenance of these validation
+results.
+• Appendix A.6 provides details on inference times,
+memory use, and numbers of parameters for some key
+learning-based registration approaches.
+• Appendix B shows example registration results for the
+OAI, HCP, and COPDGene datasets.
+• Appendix C discusses potentials for negative societal
+impacts of our work.
+A. Supplementary material
+A.1. Analysis details
+Experiments on the main modeling hypothesis. The main
+modeling hypothesis in the implicit regularization analysis of Sec. 3.3 is that the noise term n can be neglected
+AB
+in the Taylor expansion ∇ΦAB (ΦBA
+(ΦBA ) +
+θ ) = ∇Φ
+2 AB
+BA
+BA
+ε∇ Φ (Φ )(n ) + o(ε). In this formula, we argue
+in the main text that the noise term nBA can be neglected
+with respect to ε, which is the scale of the noise on the Jacobian. Indeed, only the low-frequency noise should appear
+since integration is a low-pass filter, but we expect this lowfrequency noise to be dampened by the similarity measure,
+which is an L2 norm on the images. On the synthetic dataset,
+we checked that our hypothesis is valid as a first approxBA
+imation. From a given output of the network ΦAB
+θ , Φθ ,
+AB
+BA
+2
+we estimated the closest Φ , Φ
+in L norm to our data.
+Although this estimate is certainly biased, it is the first natural estimator to check our assumption. In Fig. 5, we plot
+the noise nAB and its corresponding gradient ∇nAB in one
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Figure 5. Two finite difference estimations of the noise nAB and
+the gradients ∇nAB on the synthetic dataset. The magnitude of
+the gradient is an order of magnitude higher which confirms our
+hypothesis.
+Derivation details. Some steps that were omitted in the main
+text are explained hereafter. Our main object of interest is
+the GradICON regularizer
+2
+BA
+LGradICON
+= ∇x [ΦAB
+reg
+θ (Φθ (x))] − I F .
+(14)
+In what follows, we use ∇ insteand of ∇x . Making the
+assumption that the neural network will try to be perfectly
+inverse consistent in order to minimize Eq. (14), but will
+make some error due to limited capacity or imprecision in
+the training process or just because of trying to balance the
+matching term and the inverse consistency, we decompose
+BA
+each neural network output ΦAB
+into two components,
+θ , Φθ
+a perfectly inverse consistent component ΦAB , and random
+noise εnAB , i.e.,
+2
+AB
+LGradICON
+= ∇[ΦAB (ΦBA
+(ΦBA
+reg
+θ ) + εn
+θ )] − I F .
+(15)
+By applying the chain rule, this can be rewritten as
+LGradICON
+= ((∇ΦAB )(ΦBA
+reg
+θ )+
+2
+BA
+ε(∇nAB )(ΦBA
++ ε∇nBA ) − I F .
+θ )) · (∇Φ
+(16)
+Next, we Taylor-expand the term ∇ΦAB (ΦBA
+θ ), i.e.,
+∇ΦAB (ΦBA + εnBA ) with respect to ε, yielding
+∇ΦAB (ΦBA
+θ )=
+∇ΦAB (ΦBA ) + ε∇2 ΦAB (ΦBA )nBA + o(ε) ,
+(17)
+where ∇2 ΦAB (ΦBA )nBA is the appropriate tensor product.
+It is clear that the last term can be dropped in the limit of
+small ε. Plugging this approximation into Eq. (16), we get
+LGradICON
+≈
+reg
+(∇Φ
+AB
+BA
+(Φ
+2
++ ε∇ Φ
++ ε(∇n
+AB
+AB
+Z
+)
+(Φ
+BA
+)n
+(18)
+)(ΦBA
+θ ))
+2
+LGradICON
+≈ ∇ΦAB (ΦBA ) · ∇ΦBA
+reg
++ ε∇ Φ
+AB
+(Φ
+BA
+)n
+BA
+· ∇Φ
+Ω
+(26)
+where, in the first and the last equation, we used the change
+of variable formula. This brings us to
+BA
+BA
++ ε(∇nAB )(ΦBA
+θ ) · ∇Φ
++ ∇ΦAB (ΦBA ) · ε∇nBA
+(19)
++ ε∇2 ΦAB (ΦBA )nBA · ε∇nBA
+BA
++ ε(∇nAB )(ΦBA
+θ ) · ε∇n
+2
+−I F .
+The first term equals I and so cancels with the last term.
+Further, by assuming small ε, we drop terms in ε2 , yielding
+LGradICON
+≈ ε∇2 ΦAB (ΦBA )nBA · ∇ΦBA
+reg
+BA
++ε(∇nAB )(ΦBA
+θ ) · ∇Φ
+AB
+BA
+∇nAB ((ΦBA
+θ (x))) · I(x) dx
+Z
+−1
+−1
+=
+∇nAB (x) · I([ΦBA
+(x)) Det(∇[ΦBA
+(x)) dx
+θ ]
+θ ]
+Ω
+Z
+−1
+=
+∇nAB (x) · I([ΦBA
+(x)) Det(∇[ΦBA ]−1 (x)) dx + O(ε)
+θ ]
+Ω
+Z
+=
+∇nAB (ΦBA ) · I(x) dx + O(ε) ,
+Ω
+BA
+· (∇ΦBA + ε∇nBA ) − I F .
+Upon distributing terms,
+2
+the image domain Ω, we have
+(20)
+2
+) · ε∇nBA F
++∇Φ (Φ
+.
+Following arguments above regarding the relative magnitudes of n and ∇n, the first term in Eq. (20) can be neglected,
+and also ε can be factored out to obtain
+BA
+LGradICON
+≈ ε2 ∥∇nAB (ΦBA
+reg
+θ )∇Φ
+(21)
++ ∇ΦAB (ΦBA )∇nBA ∥2F .
+Now, we justify and then use the approximation
+AB
+∇nAB (ΦBA
+(ΦBA ) + O(ε) .
+θ ) = ∇n
+(22)
+To proceed, we make the following remarks. Inversion of
+the map preserves a first-order expansion in ε, i.e.,
+−1
+[ΦAB
+= ΦBA − ε∇ΦBA (nAB (ΦBA )) + o(ε) , (23)
+θ ]
+which can be checked by composition. A similar first-order
+expansion holds for the Jacobian determinant, i.e.,
+−1
+Det(∇[ΦAB
+) = Det(∇[ΦAB ]−1 ) + O(ε) .
+θ ]
+(24)
+As a consequence, for a differentiable function (possibly
+vector valued) I, we have
+−1
+I([ΦBA
+(x)) = I([ΦBA ]−1 (x)) + O(ε) ,
+(25)
+θ ]
+by Eq. (23) and first-order Taylor expansion of I. We combine the three above equations in what follows. Since ∇nAB
+is a white noise, this formula is justified in the following
+sense. For a given vector-valued differentiable function I on
+LGradICON
+≈ ε2 ∥∇nAB (ΦBA )∇ΦBA
+reg
+(27)
++ ∇ΦAB (ΦBA )∇nBA ∥2F ,
+which is Eq. (7) in the main text. We now expand the square
+to get
+LGradICON
+≈ ε2 ( ∥∇nAB (ΦBA )∇ΦBA ∥2F
+reg
++ ∥∇ΦAB (ΦBA )∇nBA ∥2F
+
+
++ 2⟨∇nAB (ΦBA )∇ΦBA , ∇ΦAB (ΦBA )∇nBA ⟩F )
+(28)
+and an application of the fact that ΦAB and ΦBA are inverses
+of each other gives
+LGradICON
+≈
+reg
+
+2
+
+−1
+2
+ε2 ∇nAB (ΦBA )∇ΦBA F + ∇ΦBA
+∇nBA
+F
+
+
+AB
+BA
+BA
+BA −1
+BA
++ 2⟨∇n (Φ )∇Φ , ∇Φ
+∇n ⟩F .
+(29)
+When taking expectation in Eq. (9) of the main text, the
+white noise independence assumption implies that
+AB
+E[∇nBA
+i (y)∇nj (x)] = 0
+(30)
+for all coordinates i, j and x, y ∈ Ω; this explains that the
+cross-term vanishes. Thus, we arrive at
+h 
+2
+E[LGradICON
+] ≈ E ε2 ∇nAB (ΦBA )∇ΦBA F +
+reg
+2 i
+
+−1
+∇ΦBA
+∇nBA
+.
+F
+Now, to further simplify Eq. (9), we use the fact that
+AB
+E[∇nAB
+i (x)∇nj (x)] = δij where δij = 1 if i = j and
+δij = 0 if i ̸= j. A direct computation already gives the
+second term of Eq. (10) from the main text, i.e.,
+h 
+2
+E[LGradICON
+] ≈ E ε2 ∇nAB (ΦBA )∇ΦBA F +
+reg
+(31)
+
+−1 2 i
+∇ΦBA
+.
+F
+In order to obtain the first term of Eq. (10) from Eq. (9)
+in the main text, one needs to use a change of variables
+y = ΦAB (x) in space, which results in the appearance of the
+determinant of the Jacobian matrix, denoted by Det(∇ΦAB ),
+and then similarly use the white noise assumption. The first
+term of Eq. (10) has a square root since it is put inside the
+squared Frobenius norm. Overall, we arrive at Eq. (10) from
+the main text, i.e.,
+2
+
+−1 q
+Det(∇ΦAB )
+E[LGradICON
+] ≈ ε2
+∇ΦAB
+reg
+F
+
+−1 2
++ ∇ΦBA
+!
+(32)
+.
+F
+GradICON and preconditioning. Recall that in our notation
+ψ(x) = ΦAB (ΦBA (x)) − Id. The ICON formulation uses
+∥ψ∥2L2 , whereas the GradICON formulation uses ∥∇ψ∥2L2 .
+Our goal is to understand the effect of this change on the
+optimization scheme. The parameters of the neural networks encoding the map from A, B to ΦAB are optimized
+to minimize the overall loss but let us focus on the inverse
+consistency loss. For each pair A, B, automatic differentiation computes the gradient of the loss with respect to ψ,
+which is then backpropagated. Computing the gradient of
+the GradICON loss can be done by rewriting
+∥∇ψ∥2L2 = −⟨ψ, ∆ψ⟩L2 ,
+(33)
+where ∆ is the Laplacian. Hence, the gradient is −2∆ψ,
+which is also called change of metric or preconditioning.
+This gradient has a particularly clear formulation in Fourier
+space (denoting by fˆ(ω) the Fourier transform of f (x)) since
+it reads as
+d
+∆ψ(ω) = −|ω|2 ψ̂(ω)
+(34)
+and has to be compared with the gradient of the ICON loss
+which is ψ̂. Low frequencies are thus damped in comparison
+to high frequencies. For instance, the gradient flows (steepest
+descent in cont. time) of the two regularizers are
+∂t ψ(x) = −ψ(x) and
+(35)
+∂t ψ(x) = ∆ψ(x) .
+Please note ψ(x) on the top is the ψ in ICON loss while the
+one on the bottom corresponds to the ψ in GradICON loss. In
+Fourier space, these flows become
+∂t ψ̂(ω) = −ψ̂(ω) and
+(36)
+∂t ψ̂(ω) = −|ω|2 ψ̂(ω) .
+Here, the main difference is exponential convergence of
+the first gradient flow while for the second one (related to
+GradICON), the rate of exponential convergence depends
+on |ω|2 , i.e., faster convergence occurring for high spatial
+frequencies ω. We now still need to understand why such
+a preconditioning is beneficial for the overall goal of the
+diffeomorphic registration problem. From the discussion
+above, it is clear that low-frequency perturbations are less
+penalized than high-frequency perturbations. The simplest
+example is the case of constant perturbations which are not
+penalized at all by the penalty on the gradient.
+The purpose of inverse consistency is to encourage each
+one of the transformations ΦAB and ΦBA to be a bijective
+map. However, a relaxation of this loss (in the sense of a
+relaxation of a constraint) which still encourages invertible
+maps can be beneficial in the context of diffeomorphic registration. A possible idea consists in relaxing the constraint
+of ψ to be a deformation close to identity, while still being
+diffeomorphic. As a consequence, if both ΦAB (ΦBA ) and
+ΦBA (ΦAB ) are invertible, then both transformation are also
+invertible. In fact, constraining these two compositions to be
+any diffeomorphism also leads to the same conclusion.
+Further, it is well-known that perturbation of identity
+by a map with a small Lipschitz constant remains a diffeomorphism. It is the result of the inverse function theorem,
+explained in more detail below. Small variations around
+identity by a Lipschitz map can be written as Id +v with
+v : Rd → Rd Lipschitz. We want these perturbations of
+identity to remain diffeomorphic and, in particular, injective
+(equivalent to asking for no foldings). A sufficient condition
+to satisfy injectivity is that ∥v(x) − v(y)∥ ≤ ε∥x − y∥ (i.e.,
+v is ε-Lipschitz) with ε < 1. When v is C 1 , the Lipschitz inequality reduces to saying that ∥∇v(x)∥ ≤ ε for every point
+x in the domain. In fact, as shown by the inverse function
+theorem, this condition is also sufficient for Id +εv to be a
+diffeomorphism. Recall in our case, the deviation to identity
+is denoted by ψ. In view of this sufficient condition, one
+would ideally penalize the maximum value of ∥∇ψ(x)∥.
+To sum up, in order to control the invertibility of
+ΦAB (ΦBA (x)), it is better to control ∇ψ rather than ψ itself.
+Last, let us show on a concrete example that the ICON regularizer can be more constrained than the GradICON regularizer.
+To this end, note that constant shifts around identity are still
+invertible maps but ICON penalizes too large constant shifts,
+while GradICON does not at all. Also, having small ICON
+loss does not guarantee invertibility of the resulting maps.
+Indeed, there are maps v with a small L2 norm for which
+the magnitude of the gradient may be larger than 1, thereby
+potentially leading to folds. Penalizing the maximum value
+of the norm of the gradient of ψ is better suited to guarantee
+invertibility when the loss is less than 1. However, in practice, this loss has a lack of differentiability; using an L2 loss
+is much simpler, more convenient, and retains some of the
+nice properties mentioned above.
+A.2. Affine data augmentation details
+When we train using affine augmentation, first, we sample
+a new pair of images from the dataset. Then, we randomly
+choose whether the image is flipped along each axis: these
+choices are shared between images in the pair. Finally, independently for each image in the pair, we sample a 3 × 4
+matrix (with each entry i.i.d. from a standard Gaussian, denoted as N (3,4) (0, 1)) that represents an affine warp using
+homogeneous coordinates. This produces an augmented
+ˆ i.e.,
+image I,
+
+u1
+ˆ x) = I  0
+I(⃗
+0
+0
+u2
+0
+0
+0
+u3
+
+
+
+ 
+0
+⃗
+x
+
+0 + γ · N (3,4) (0, 1)
+1
+0
+where ui ∼ Uniform{±1} and γ = 0.05.
+A.3. Comparison to other regularizers
+In Sec. 5.3 of our main text, we conducted a comparison
+between different regularizers using displacement vector
+fields (DVF). However, Fig. 3 only shows aggregated results.
+In Fig. 6 and Fig. 7, we present one registration example from
+the Triangles and Circles and DRIVE data, respectively.
+Fig. 8 and Fig. 9 show the image similarity measure, the
+number of folds and the mean of the squared L2 -norm on
+the displacement vector field plotted over training iterations
+and with varying regularization weight.
+A.4. Convergence of Gradient Inverse Consistency
+We conduct the experiment in Sec. 5.4 based on our experimental result of Fig. 3. In particular, we draw a horizontal
+line in Fig. 3 at %|J| = 10−2 and find the closest point to
+the line on the GradICON and ICON curve. We then plot the
+loss curves associated with these points in Fig. 4.
+As can be seen from Fig. 4, there is a clear convergence
+speed difference between GradICON and ICON on the two
+2D datasets. While a similar study on actual 3D data would
+be interesting, training 13 models with varying λ is computationally challenging. Nevertheless, to obtain some intuition about convergence speed differences on 3D data, we
+present in Fig. 10 the training loss curve, as well as the transform magnitude and the (log) number of folds, of GradICON
+and ICON corresponding to the OAI dataset in Tab. 2. Figure 10 clearly supports our claim of faster convergence of
+models trained with GradICON regularization over models
+trained with ICON regularization. Further, it can be seen that
+GradICON exhibits lower similarity loss and shows larger
+transform magnitudes because it better captures the large
+deformations in the OAI dataset.
+A.5. Details for comparisons in Table 2
+In this section, we 1) present Table 3, which is a complete
+version of Table 2, and 2) describe the experimental details
+for comparisons in Table 2.
+sm-shapes and sm-brains. We evaluate the SynthMorph [31] model with pre-trained weights from its official
+repository15 on the same HCP test set we use for GradICON
+and follow the suggested testing protocol from the repository.
+We first run FreeSurfer-Affine (see the following FreesurferAffine paragraph) to align the source and target image to the
+reference image provided in the repository. Then, we run
+15 https://github.com/voxelmorph/voxelmorph
+SynthMorph-shapes (sm-shapes) and SynthMorph-brains
+(sm-brains) models to obtain the deformation between the
+pre-aligned source and target images. To compute the final
+transformation field used to warp the original source label
+map to the target label map, we first generate an identity map
+in the target image space and transform it via the target-toreference affine matrix. Then, we compose the transformed
+map with the deformation field computed by SynthMorph.
+Lastly, we transform the composed deformation field via
+the reference-to-source affine matrix (obtained by inverting
+the source-to-reference affine matrix). Eventually, we use
+the final computed deformation field to warp the original
+source label map and then compute the DICE between the
+warped label map and the target label map in the original
+target space.
+FreeSurfer-Affine. We report the affine pre-alignment result
+from our SynthMorph experiment and label it as FreeSurferAffine [48] in Table 2. FreeSurfer is run with the configuration recommended in the SynthMorph repository. For
+evaluation purposes, we compose the target-to-reference
+affine matrix and reference-to-source affine matrix the same
+way as we did in the SynthMorph experiment except that
+we skip the step to compose the deformation field computed
+by SynthMorph. Essentially, we simply assume that the
+non-parametric part that would have been obtained by SynthMorph is set to the identity transform thereby only leaving
+the affine registrations. This experiment differs from directly obtaining an affine transformation between the source
+and the target spaces as instead we go through the template
+space and compute two affine transformations. However, this
+choice of affine transform composition allows a more direct
+assessment of the improvements obtained by SynthMorph.
+ICON. We follow a similar design as described in [23] and, in
+particular, adopt the tallUNet2 architecture as the backbone
+network. Specifically, a composition of two such UNet’s
+is initially trained on half-resolution image pairs. This network is then composed with a third UNet, trained on fullresolution image pairs.
+VoxelMorph. We use the official code from the VoxelMorph
+repository15 and train on COPDGene. As VoxelMorph requires pre-registration, we train another neural network for
+affine pre-registration. Table 4 shows the registration accuracy of this affine registration network. For VoxelMorph,
+we use NCC as the similarity measure, set the learning rate
+to 1e-3, and the regularizer weight to 5. We keep all other
+settings at the provided default values. Since the official
+code provides the inverse transformation, the bi-directional
+registration result is obtained with the forward map and its
+inverse map is computed by the official code.
+LapIRN. We obtain the network from the official reposi-
+tory16 of LapIRN and train it on COPDGene. In particular,
+we train using the training script provided by the official
+repository with hyperparameter tuning for COPDGene data.
+We switched from LNCC to NCC because we observed
+unstable training with the LNCC implementation provided
+in the official LapIRN repository. For each resolution, we
+adjust the learning rate and λ to assure that the training converges. Table 5 provides the hyperparameters we used to
+obtain the results in Table 2. We randomly swap the source
+and target images during training so that the trained network
+can work for bi-directional registration.
+A.6. Model statistics
+We compute model statistics regarding the number of
+parameters, peak memory use, FLOPs, and inference time
+using built-in PyTorch17 functions and the thop18 package.
+This experiment is conducted using an NVIDIA GeForce
+RTX 3090 GPU with a batch size of 1 and randomly generated image pairs of size 175 × 175 × 175. We run the
+model 10 times and take the average of the elapsed time as
+the final measurement. In addition, the peak GPU memory
+usage is reported for each model. Table 6 and Table 7 list
+the statistics of models evaluated in Table 2 and the UNet
+used in our ablation study of Sec. 5.2. Working on 2-D
+convolutional networks builds a strong intuition that if, in
+a downsampling step, we double the number of channels
+and cut in half the resolution, the amount of computation
+stays roughly constant. This intuition is not correct for 3-D
+networks. In fact, for 3-D networks, doubling the number
+of channels and halving the resolution cuts the amount of
+computation by 1/2. As a result, large channel counts deep
+in the network are, from a computation time and VRAM
+perspective, free. The UNet from ICON approach [23] takes
+advantage of this effect to boost performance using a large
+parameter count while reducing runtime and VRAM usage
+compared to the standard VoxelMorph channel counts. We
+used the same approach for our registration networks using GradICON. Note that Table 6 illustrates that even though
+ICON and GradICON use about 50 times more parameters
+than LapIRN and roughly 150 times more parameters than
+VoxelMorph, memory consumption and inference times are
+in fact lower.
+B. Visualizations
+In Fig. 11 and Fig. 12, we show two example registration
+cases from OAI, Fig. 13 and Fig. 14 show two example
+registration cases on DirLab, and Fig. 15 and Fig. 16 show
+two example registration cases on HCP.
+In Fig. 17 we show a block diagram of the network structure described in Sec. 4, that is more detailed.
+16 https://github.com/cwmok/LapIRN
+17 https://pytorch.org/
+18 https://github.com/Lyken17/pytorch-OpCounter
+C. Potential negative societal impacts
+Image registration results might not be accurate or might
+even fail for certain image pairs in practice. Hence, careful
+quality control of the results should be performed when registrations are used for decision-support systems in a medical
+context.
+Source image
+<latexit sha1_base64="XLJXi+fMJHm3Oqrzts1k3CGxdPw=">AAACDHicbVDLTsJAFJ3iC/FVdOmmgZi4kbSEoEsSNy4xkUcCSKbDFCZMp83MrUqa/oJ/4FZ/wJ1x6z+490OcQhcCnuQmJ+fcm3ty3JAzBbb9beQ2Nre2d/K7hb39g8Mjs3jcVkEkCW2RgAey62JFORO0BQw47YaSYt/ltONOr1O/80ClYoG4g1lIBz4eC+YxgkFLQ7NYvY8v6kk/nGABgR8/JUOzbFfsOax14mSkjDI0h+ZPfxSQyKcCCMdK9Rw7hEGMJTDCaVLoR4qGmEzxmPY0FdinahDPoyfWmVZGlhdIPQKsufr3Isa+UjPf1Zs+hola9VLxP68XgXc1iJkII6CCLB55EbcgsNIerBGTlACfaYKJZDqrRSZYYgK6raUvwHTgtBZntYR10q5WnHqldlsrN0pZQXl0ikroHDnoEjXQDWqiFiLoEb2gV/RmPBvvxofxuVjNGdnNCVqC8fULkC2b5w==</latexit>
+<latexit sha1_base64="6oAz0SOi433RSED3woHNPhzxxXU=">AAACDHicbVDLSsNAFJ34rPWV6tJNaBHcWJJS1GXBjcsK9gFtLJPppB06mYSZG7WE/IJ/4FZ/wJ249R/c+yFO2ixs64ELh3Pu5R6OF3GmwLa/jbX1jc2t7cJOcXdv/+DQLB21VRhLQlsk5KHselhRzgRtAQNOu5GkOPA47XiT68zvPFCpWCjuYBpRN8AjwXxGMGhpYJZq98l5Pe1HYywgDJKndGBW7Ko9g7VKnJxUUI7mwPzpD0MSB1QA4VipnmNH4CZYAiOcpsV+rGiEyQSPaE9TgQOq3GQWPbVOtTK0/FDqEWDN1L8XCQ6Umgae3gwwjNWyl4n/eb0Y/Cs3YSKKgQoyf+TH3ILQynqwhkxSAnyqCSaS6awWGWOJCei2Fr4A04GzWpzlElZJu1Z1Lqr123qlUc4LKqATVEZnyEGXqIFuUBO1EEGP6AW9ojfj2Xg3PozP+eqakd8cowUYX7+M6Zvl</latexit>
+<latexit sha1_base64="xBfdaeQe2fdtuWDjj/7n+18UgSA=">AAACDHicbVDLSsNAFJ34rPWV6tJNaBHcWJJS1GXBjcsK9gFtLJPppB06mYSZG7WE/IJ/4FZ/wJ249R/c+yFO2ixs64ELh3Pu5R6OF3GmwLa/jbX1jc2t7cJOcXdv/+DQLB21VRhLQlsk5KHselhRzgRtAQNOu5GkOPA47XiT68zvPFCpWCjuYBpRN8AjwXxGMGhpYJZq98l5Le1HYywgDJKndGBW7Ko9g7VKnJxUUI7mwPzpD0MSB1QA4VipnmNH4CZYAiOcpsV+rGiEyQSPaE9TgQOq3GQWPbVOtTK0/FDqEWDN1L8XCQ6Umgae3gwwjNWyl4n/eb0Y/Cs3YSKKgQoyf+TH3ILQynqwhkxSAnyqCSaS6awWGWOJCei2Fr4A04GzWpzlElZJu1Z1Lqr123qlUc4LKqATVEZnyEGXqIFuUBO1EEGP6AW9ojfj2Xg3PozP+eqakd8cowUYX7+JpZvj</latexit>
+<latexit sha1_base64="jAjkLU+LLzlsMW8HRiQaCP4xGGA=">AAACC3icbVDLSsNAFJ34rPUVdekmtAiuSlKKuiy4cVnBPqCNZTKdtENnJmHmplhCP8E/cKs/4E7c+hHu/RAnbRa29cCFwzn3cg8niDnT4Lrf1sbm1vbObmGvuH9weHRsn5y2dJQoQpsk4pHqBFhTziRtAgNOO7GiWASctoPxbea3J1RpFskHmMbUF3goWcgIBiP1bbv6mFZnvXiEJUQifZr17bJbcedw1omXkzLK0ejbP71BRBJBJRCOte56bgx+ihUwwums2Es0jTEZ4yHtGiqxoNpP58lnzoVRBk4YKTMSnLn69yLFQuupCMymwDDSq14m/ud1Ewhv/JTJOAEqyeJRmHAHIierwRkwRQnwqSGYKGayOmSEFSZgylr6AswEzmrxVktYJ61qxbuq1O5r5XopL6iAzlEJXSIPXaM6ukMN1EQETdALekVv1rP1bn1Yn4vVDSu/OUNLsL5+ARnAm6w=</latexit>
+<latexit sha1_base64="bJQwRsuAQIDwpQjQvbCJG4ayn/0=">AAACC3icbVDLSsNAFJ34rPUVdekmtAiuSlKKuiy4cVnBPqCNZTKdtENnJmHmplhCP8E/cKs/4E7c+hHu/RAnbRa29cCFwzn3cg8niDnT4Lrf1sbm1vbObmGvuH9weHRsn5y2dJQoQpsk4pHqBFhTziRtAgNOO7GiWASctoPxbea3J1RpFskHmMbUF3goWcgIBiP1bbv6mNZmvXiEJUQifZr17bJbcedw1omXkzLK0ejbP71BRBJBJRCOte56bgx+ihUwwums2Es0jTEZ4yHtGiqxoNpP58lnzoVRBk4YKTMSnLn69yLFQuupCMymwDDSq14m/ud1Ewhv/JTJOAEqyeJRmHAHIierwRkwRQnwqSGYKGayOmSEFSZgylr6AswEzmrxVktYJ61qxbuq1O5r5XopL6iAzlEJXSIPXaM6ukMN1EQETdALekVv1rP1bn1Yn4vVDSu/OUNLsL5+AR0Em64=</latexit>
+<latexit sha1_base64="tBpKYVkvwLDPx9IWKt//pth7dH4=">AAACC3icbVDLSsNAFJ3UV62vqEs3oUVwVZJSqsuCG5cV7APaWCbTSTt0MgkzN8US8gn+gVv9AXfi1o9w74c4abOwrQcuHM65l3s4XsSZAtv+Ngpb2zu7e8X90sHh0fGJeXrWUWEsCW2TkIey52FFORO0DQw47UWS4sDjtOtNbzO/O6NSsVA8wDyiboDHgvmMYNDS0DRrj0kjHUQTLCAMkqd0aFbsqr2AtUmcnFRQjtbQ/BmMQhIHVADhWKm+Y0fgJlgCI5ympUGsaITJFI9pX1OBA6rcZJE8tS61MrL8UOoRYC3UvxcJDpSaB57eDDBM1LqXif95/Rj8GzdhIoqBCrJ85MfcgtDKarBGTFICfK4JJpLprBaZYIkJ6LJWvgDTgbNanPUSNkmnVnUa1fp9vdIs5wUV0QUqoyvkoGvURHeohdqIoBl6Qa/ozXg23o0P43O5WjDym3O0AuPrFyBIm7A=</latexit>
+<latexit sha1_base64="xaESZcPdQSh+GNLt+b9pJ5u4OgI=">AAACCHicbVDLTgIxFO3gC/GFunTTSExckRlC1CWJG5eYyCOBgXRKBxo67aS9YyQTfsAvcKtf4M649S/8AP/DArMQ8CQ3OTn33EdOEAtuwHW/ndzG5tb2Tn63sLd/cHhUPD5pGpVoyhpUCaXbATFMcMkawEGwdqwZiQLBWsH4dtZvPTJtuJIPMImZH5Gh5CGnBKzUq/TcbjwiElSUPk37xZJbdufA68TLSAllqPeLP92BoknEJFBBjOl4bgx+SjRwKti00E0MiwkdkyHrWCpJxIyfzr+e4gurDHCotC0JeK7+nUhJZMwkCqwzIjAySz3gdtV01T7z/WfvJBDe+CmXcQJM0sXtMBEYFJ6lggdcMwpiYgmhmtv3MR0RTSjY7Ao2F281hXXSrJS9q3L1vlqq4SyhPDpD5+gSeega1dAdqqMGokijF/SK3pxn5935cD4X1pyTzZyiJThfv2nnmns=</latexit>
+2 4
+2 2
+20
+22
+24
+26
+Target image
+GradICON (Ours)
+ICON
+Diffusion
+Bending energy
+2 6
+Figure 6. Illustration of one warped source image and the corresponding transformation maps for different regularizers across varying
+regularization strengths on Triangles and Circles. Best-viewed in color.
+<latexit sha1_base64="xaESZcPdQSh+GNLt+b9pJ5u4OgI=">AAACCHicbVDLTgIxFO3gC/GFunTTSExckRlC1CWJG5eYyCOBgXRKBxo67aS9YyQTfsAvcKtf4M649S/8AP/DArMQ8CQ3OTn33EdOEAtuwHW/ndzG5tb2Tn63sLd/cHhUPD5pGpVoyhpUCaXbATFMcMkawEGwdqwZiQLBWsH4dtZvPTJtuJIPMImZH5Gh5CGnBKzUq/TcbjwiElSUPk37xZJbdufA68TLSAllqPeLP92BoknEJFBBjOl4bgx+SjRwKti00E0MiwkdkyHrWCpJxIyfzr+e4gurDHCotC0JeK7+nUhJZMwkCqwzIjAySz3gdtV01T7z/WfvJBDe+CmXcQJM0sXtMBEYFJ6lggdcMwpiYgmhmtv3MR0RTSjY7Ao2F281hXXSrJS9q3L1vlqq4SyhPDpD5+gSeega1dAdqqMGokijF/SK3pxn5935cD4X1pyTzZyiJThfv2nnmns=</latexit>
+<latexit sha1_base64="XLJXi+fMJHm3Oqrzts1k3CGxdPw=">AAACDHicbVDLTsJAFJ3iC/FVdOmmgZi4kbSEoEsSNy4xkUcCSKbDFCZMp83MrUqa/oJ/4FZ/wJ1x6z+490OcQhcCnuQmJ+fcm3ty3JAzBbb9beQ2Nre2d/K7hb39g8Mjs3jcVkEkCW2RgAey62JFORO0BQw47YaSYt/ltONOr1O/80ClYoG4g1lIBz4eC+YxgkFLQ7NYvY8v6kk/nGABgR8/JUOzbFfsOax14mSkjDI0h+ZPfxSQyKcCCMdK9Rw7hEGMJTDCaVLoR4qGmEzxmPY0FdinahDPoyfWmVZGlhdIPQKsufr3Isa+UjPf1Zs+hola9VLxP68XgXc1iJkII6CCLB55EbcgsNIerBGTlACfaYKJZDqrRSZYYgK6raUvwHTgtBZntYR10q5WnHqldlsrN0pZQXl0ikroHDnoEjXQDWqiFiLoEb2gV/RmPBvvxofxuVjNGdnNCVqC8fULkC2b5w==</latexit>
+<latexit sha1_base64="6oAz0SOi433RSED3woHNPhzxxXU=">AAACDHicbVDLSsNAFJ34rPWV6tJNaBHcWJJS1GXBjcsK9gFtLJPppB06mYSZG7WE/IJ/4FZ/wJ249R/c+yFO2ixs64ELh3Pu5R6OF3GmwLa/jbX1jc2t7cJOcXdv/+DQLB21VRhLQlsk5KHselhRzgRtAQNOu5GkOPA47XiT68zvPFCpWCjuYBpRN8AjwXxGMGhpYJZq98l5Pe1HYywgDJKndGBW7Ko9g7VKnJxUUI7mwPzpD0MSB1QA4VipnmNH4CZYAiOcpsV+rGiEyQSPaE9TgQOq3GQWPbVOtTK0/FDqEWDN1L8XCQ6Umgae3gwwjNWyl4n/eb0Y/Cs3YSKKgQoyf+TH3ILQynqwhkxSAnyqCSaS6awWGWOJCei2Fr4A04GzWpzlElZJu1Z1Lqr123qlUc4LKqATVEZnyEGXqIFuUBO1EEGP6AW9ojfj2Xg3PozP+eqakd8cowUYX7+M6Zvl</latexit>
+<latexit sha1_base64="xBfdaeQe2fdtuWDjj/7n+18UgSA=">AAACDHicbVDLSsNAFJ34rPWV6tJNaBHcWJJS1GXBjcsK9gFtLJPppB06mYSZG7WE/IJ/4FZ/wJ249R/c+yFO2ixs64ELh3Pu5R6OF3GmwLa/jbX1jc2t7cJOcXdv/+DQLB21VRhLQlsk5KHselhRzgRtAQNOu5GkOPA47XiT68zvPFCpWCjuYBpRN8AjwXxGMGhpYJZq98l5Le1HYywgDJKndGBW7Ko9g7VKnJxUUI7mwPzpD0MSB1QA4VipnmNH4CZYAiOcpsV+rGiEyQSPaE9TgQOq3GQWPbVOtTK0/FDqEWDN1L8XCQ6Umgae3gwwjNWyl4n/eb0Y/Cs3YSKKgQoyf+TH3ILQynqwhkxSAnyqCSaS6awWGWOJCei2Fr4A04GzWpzlElZJu1Z1Lqr123qlUc4LKqATVEZnyEGXqIFuUBO1EEGP6AW9ojfj2Xg3PozP+eqakd8cowUYX7+JpZvj</latexit>
+2 4
+2 2
+<latexit sha1_base64="jAjkLU+LLzlsMW8HRiQaCP4xGGA=">AAACC3icbVDLSsNAFJ34rPUVdekmtAiuSlKKuiy4cVnBPqCNZTKdtENnJmHmplhCP8E/cKs/4E7c+hHu/RAnbRa29cCFwzn3cg8niDnT4Lrf1sbm1vbObmGvuH9weHRsn5y2dJQoQpsk4pHqBFhTziRtAgNOO7GiWASctoPxbea3J1RpFskHmMbUF3goWcgIBiP1bbv6mFZnvXiEJUQifZr17bJbcedw1omXkzLK0ejbP71BRBJBJRCOte56bgx+ihUwwums2Es0jTEZ4yHtGiqxoNpP58lnzoVRBk4YKTMSnLn69yLFQuupCMymwDDSq14m/ud1Ewhv/JTJOAEqyeJRmHAHIierwRkwRQnwqSGYKGayOmSEFSZgylr6AswEzmrxVktYJ61qxbuq1O5r5XopL6iAzlEJXSIPXaM6ukMN1EQETdALekVv1rP1bn1Yn4vVDSu/OUNLsL5+ARnAm6w=</latexit>
+20
+22
+<latexit sha1_base64="bJQwRsuAQIDwpQjQvbCJG4ayn/0=">AAACC3icbVDLSsNAFJ34rPUVdekmtAiuSlKKuiy4cVnBPqCNZTKdtENnJmHmplhCP8E/cKs/4E7c+hHu/RAnbRa29cCFwzn3cg8niDnT4Lrf1sbm1vbObmGvuH9weHRsn5y2dJQoQpsk4pHqBFhTziRtAgNOO7GiWASctoPxbea3J1RpFskHmMbUF3goWcgIBiP1bbv6mNZmvXiEJUQifZr17bJbcedw1omXkzLK0ejbP71BRBJBJRCOte56bgx+ihUwwums2Es0jTEZ4yHtGiqxoNpP58lnzoVRBk4YKTMSnLn69yLFQuupCMymwDDSq14m/ud1Ewhv/JTJOAEqyeJRmHAHIierwRkwRQnwqSGYKGayOmSEFSZgylr6AswEzmrxVktYJ61qxbuq1O5r5XopL6iAzlEJXSIPXaM6ukMN1EQETdALekVv1rP1bn1Yn4vVDSu/OUNLsL5+AR0Em64=</latexit>
+24
+<latexit sha1_base64="tBpKYVkvwLDPx9IWKt//pth7dH4=">AAACC3icbVDLSsNAFJ3UV62vqEs3oUVwVZJSqsuCG5cV7APaWCbTSTt0MgkzN8US8gn+gVv9AXfi1o9w74c4abOwrQcuHM65l3s4XsSZAtv+Ngpb2zu7e8X90sHh0fGJeXrWUWEsCW2TkIey52FFORO0DQw47UWS4sDjtOtNbzO/O6NSsVA8wDyiboDHgvmMYNDS0DRrj0kjHUQTLCAMkqd0aFbsqr2AtUmcnFRQjtbQ/BmMQhIHVADhWKm+Y0fgJlgCI5ympUGsaITJFI9pX1OBA6rcZJE8tS61MrL8UOoRYC3UvxcJDpSaB57eDDBM1LqXif95/Rj8GzdhIoqBCrJ85MfcgtDKarBGTFICfK4JJpLprBaZYIkJ6LJWvgDTgbNanPUSNkmnVnUa1fp9vdIs5wUV0QUqoyvkoGvURHeohdqIoBl6Qa/ozXg23o0P43O5WjDym3O0AuPrFyBIm7A=</latexit>
+26
+GradICON (Ours)
+ICON
+Diffusion
+Bending energy
+2 6
+1-LNCC
+Magnitude
+Folds
+Figure 7. Illustration of image (dis)similarity (i.e., 1 − LNCC), the number of folds (Folds), and the mean of the squared L2 norm of
+the displacement vector field (Magnitude) for different regularizers and across varying regularization strengths on Triangles and Circles.
+Best-viewed in color.
+Source image
+<latexit sha1_base64="xaESZcPdQSh+GNLt+b9pJ5u4OgI=">AAACCHicbVDLTgIxFO3gC/GFunTTSExckRlC1CWJG5eYyCOBgXRKBxo67aS9YyQTfsAvcKtf4M649S/8AP/DArMQ8CQ3OTn33EdOEAtuwHW/ndzG5tb2Tn63sLd/cHhUPD5pGpVoyhpUCaXbATFMcMkawEGwdqwZiQLBWsH4dtZvPTJtuJIPMImZH5Gh5CGnBKzUq/TcbjwiElSUPk37xZJbdufA68TLSAllqPeLP92BoknEJFBBjOl4bgx+SjRwKti00E0MiwkdkyHrWCpJxIyfzr+e4gurDHCotC0JeK7+nUhJZMwkCqwzIjAySz3gdtV01T7z/WfvJBDe+CmXcQJM0sXtMBEYFJ6lggdcMwpiYgmhmtv3MR0RTSjY7Ao2F281hXXSrJS9q3L1vlqq4SyhPDpD5+gSeega1dAdqqMGokijF/SK3pxn5935cD4X1pyTzZyiJThfv2nnmns=</latexit>
+<latexit sha1_base64="XLJXi+fMJHm3Oqrzts1k3CGxdPw=">AAACDHicbVDLTsJAFJ3iC/FVdOmmgZi4kbSEoEsSNy4xkUcCSKbDFCZMp83MrUqa/oJ/4FZ/wJ1x6z+490OcQhcCnuQmJ+fcm3ty3JAzBbb9beQ2Nre2d/K7hb39g8Mjs3jcVkEkCW2RgAey62JFORO0BQw47YaSYt/ltONOr1O/80ClYoG4g1lIBz4eC+YxgkFLQ7NYvY8v6kk/nGABgR8/JUOzbFfsOax14mSkjDI0h+ZPfxSQyKcCCMdK9Rw7hEGMJTDCaVLoR4qGmEzxmPY0FdinahDPoyfWmVZGlhdIPQKsufr3Isa+UjPf1Zs+hola9VLxP68XgXc1iJkII6CCLB55EbcgsNIerBGTlACfaYKJZDqrRSZYYgK6raUvwHTgtBZntYR10q5WnHqldlsrN0pZQXl0ikroHDnoEjXQDWqiFiLoEb2gV/RmPBvvxofxuVjNGdnNCVqC8fULkC2b5w==</latexit>
+<latexit sha1_base64="6oAz0SOi433RSED3woHNPhzxxXU=">AAACDHicbVDLSsNAFJ34rPWV6tJNaBHcWJJS1GXBjcsK9gFtLJPppB06mYSZG7WE/IJ/4FZ/wJ249R/c+yFO2ixs64ELh3Pu5R6OF3GmwLa/jbX1jc2t7cJOcXdv/+DQLB21VRhLQlsk5KHselhRzgRtAQNOu5GkOPA47XiT68zvPFCpWCjuYBpRN8AjwXxGMGhpYJZq98l5Pe1HYywgDJKndGBW7Ko9g7VKnJxUUI7mwPzpD0MSB1QA4VipnmNH4CZYAiOcpsV+rGiEyQSPaE9TgQOq3GQWPbVOtTK0/FDqEWDN1L8XCQ6Umgae3gwwjNWyl4n/eb0Y/Cs3YSKKgQoyf+TH3ILQynqwhkxSAnyqCSaS6awWGWOJCei2Fr4A04GzWpzlElZJu1Z1Lqr123qlUc4LKqATVEZnyEGXqIFuUBO1EEGP6AW9ojfj2Xg3PozP+eqakd8cowUYX7+M6Zvl</latexit>
+2 4
+<latexit sha1_base64="xBfdaeQe2fdtuWDjj/7n+18UgSA=">AAACDHicbVDLSsNAFJ34rPWV6tJNaBHcWJJS1GXBjcsK9gFtLJPppB06mYSZG7WE/IJ/4FZ/wJ249R/c+yFO2ixs64ELh3Pu5R6OF3GmwLa/jbX1jc2t7cJOcXdv/+DQLB21VRhLQlsk5KHselhRzgRtAQNOu5GkOPA47XiT68zvPFCpWCjuYBpRN8AjwXxGMGhpYJZq98l5Le1HYywgDJKndGBW7Ko9g7VKnJxUUI7mwPzpD0MSB1QA4VipnmNH4CZYAiOcpsV+rGiEyQSPaE9TgQOq3GQWPbVOtTK0/FDqEWDN1L8XCQ6Umgae3gwwjNWyl4n/eb0Y/Cs3YSKKgQoyf+TH3ILQynqwhkxSAnyqCSaS6awWGWOJCei2Fr4A04GzWpzlElZJu1Z1Lqr123qlUc4LKqATVEZnyEGXqIFuUBO1EEGP6AW9ojfj2Xg3PozP+eqakd8cowUYX7+JpZvj</latexit>
+2 2
+<latexit sha1_base64="jAjkLU+LLzlsMW8HRiQaCP4xGGA=">AAACC3icbVDLSsNAFJ34rPUVdekmtAiuSlKKuiy4cVnBPqCNZTKdtENnJmHmplhCP8E/cKs/4E7c+hHu/RAnbRa29cCFwzn3cg8niDnT4Lrf1sbm1vbObmGvuH9weHRsn5y2dJQoQpsk4pHqBFhTziRtAgNOO7GiWASctoPxbea3J1RpFskHmMbUF3goWcgIBiP1bbv6mFZnvXiEJUQifZr17bJbcedw1omXkzLK0ejbP71BRBJBJRCOte56bgx+ihUwwums2Es0jTEZ4yHtGiqxoNpP58lnzoVRBk4YKTMSnLn69yLFQuupCMymwDDSq14m/ud1Ewhv/JTJOAEqyeJRmHAHIierwRkwRQnwqSGYKGayOmSEFSZgylr6AswEzmrxVktYJ61qxbuq1O5r5XopL6iAzlEJXSIPXaM6ukMN1EQETdALekVv1rP1bn1Yn4vVDSu/OUNLsL5+ARnAm6w=</latexit>
+20
+22
+<latexit sha1_base64="bJQwRsuAQIDwpQjQvbCJG4ayn/0=">AAACC3icbVDLSsNAFJ34rPUVdekmtAiuSlKKuiy4cVnBPqCNZTKdtENnJmHmplhCP8E/cKs/4E7c+hHu/RAnbRa29cCFwzn3cg8niDnT4Lrf1sbm1vbObmGvuH9weHRsn5y2dJQoQpsk4pHqBFhTziRtAgNOO7GiWASctoPxbea3J1RpFskHmMbUF3goWcgIBiP1bbv6mNZmvXiEJUQifZr17bJbcedw1omXkzLK0ejbP71BRBJBJRCOte56bgx+ihUwwums2Es0jTEZ4yHtGiqxoNpP58lnzoVRBk4YKTMSnLn69yLFQuupCMymwDDSq14m/ud1Ewhv/JTJOAEqyeJRmHAHIierwRkwRQnwqSGYKGayOmSEFSZgylr6AswEzmrxVktYJ61qxbuq1O5r5XopL6iAzlEJXSIPXaM6ukMN1EQETdALekVv1rP1bn1Yn4vVDSu/OUNLsL5+AR0Em64=</latexit>
+24
+<latexit sha1_base64="tBpKYVkvwLDPx9IWKt//pth7dH4=">AAACC3icbVDLSsNAFJ3UV62vqEs3oUVwVZJSqsuCG5cV7APaWCbTSTt0MgkzN8US8gn+gVv9AXfi1o9w74c4abOwrQcuHM65l3s4XsSZAtv+Ngpb2zu7e8X90sHh0fGJeXrWUWEsCW2TkIey52FFORO0DQw47UWS4sDjtOtNbzO/O6NSsVA8wDyiboDHgvmMYNDS0DRrj0kjHUQTLCAMkqd0aFbsqr2AtUmcnFRQjtbQ/BmMQhIHVADhWKm+Y0fgJlgCI5ympUGsaITJFI9pX1OBA6rcZJE8tS61MrL8UOoRYC3UvxcJDpSaB57eDDBM1LqXif95/Rj8GzdhIoqBCrJ85MfcgtDKarBGTFICfK4JJpLprBaZYIkJ6LJWvgDTgbNanPUSNkmnVnUa1fp9vdIs5wUV0QUqoyvkoGvURHeohdqIoBl6Qa/ozXg23o0P43O5WjDym3O0AuPrFyBIm7A=</latexit>
+26
+Target image
+GradICON (Ours)
+ICON
+Diffusion
+Bending energy
+2 6
+Figure 8. Illustration of the residual error and the corresponding transformation maps between the warped source image and the target
+image for different regularizers across varying regularization strengths on DRIVE. Best-viewed in color.
+<latexit sha1_base64="xaESZcPdQSh+GNLt+b9pJ5u4OgI=">AAACCHicbVDLTgIxFO3gC/GFunTTSExckRlC1CWJG5eYyCOBgXRKBxo67aS9YyQTfsAvcKtf4M649S/8AP/DArMQ8CQ3OTn33EdOEAtuwHW/ndzG5tb2Tn63sLd/cHhUPD5pGpVoyhpUCaXbATFMcMkawEGwdqwZiQLBWsH4dtZvPTJtuJIPMImZH5Gh5CGnBKzUq/TcbjwiElSUPk37xZJbdufA68TLSAllqPeLP92BoknEJFBBjOl4bgx+SjRwKti00E0MiwkdkyHrWCpJxIyfzr+e4gurDHCotC0JeK7+nUhJZMwkCqwzIjAySz3gdtV01T7z/WfvJBDe+CmXcQJM0sXtMBEYFJ6lggdcMwpiYgmhmtv3MR0RTSjY7Ao2F281hXXSrJS9q3L1vlqq4SyhPDpD5+gSeega1dAdqqMGokijF/SK3pxn5935cD4X1pyTzZyiJThfv2nnmns=</latexit>
+<latexit sha1_base64="XLJXi+fMJHm3Oqrzts1k3CGxdPw=">AAACDHicbVDLTsJAFJ3iC/FVdOmmgZi4kbSEoEsSNy4xkUcCSKbDFCZMp83MrUqa/oJ/4FZ/wJ1x6z+490OcQhcCnuQmJ+fcm3ty3JAzBbb9beQ2Nre2d/K7hb39g8Mjs3jcVkEkCW2RgAey62JFORO0BQw47YaSYt/ltONOr1O/80ClYoG4g1lIBz4eC+YxgkFLQ7NYvY8v6kk/nGABgR8/JUOzbFfsOax14mSkjDI0h+ZPfxSQyKcCCMdK9Rw7hEGMJTDCaVLoR4qGmEzxmPY0FdinahDPoyfWmVZGlhdIPQKsufr3Isa+UjPf1Zs+hola9VLxP68XgXc1iJkII6CCLB55EbcgsNIerBGTlACfaYKJZDqrRSZYYgK6raUvwHTgtBZntYR10q5WnHqldlsrN0pZQXl0ikroHDnoEjXQDWqiFiLoEb2gV/RmPBvvxofxuVjNGdnNCVqC8fULkC2b5w==</latexit>
+<latexit sha1_base64="6oAz0SOi433RSED3woHNPhzxxXU=">AAACDHicbVDLSsNAFJ34rPWV6tJNaBHcWJJS1GXBjcsK9gFtLJPppB06mYSZG7WE/IJ/4FZ/wJ249R/c+yFO2ixs64ELh3Pu5R6OF3GmwLa/jbX1jc2t7cJOcXdv/+DQLB21VRhLQlsk5KHselhRzgRtAQNOu5GkOPA47XiT68zvPFCpWCjuYBpRN8AjwXxGMGhpYJZq98l5Pe1HYywgDJKndGBW7Ko9g7VKnJxUUI7mwPzpD0MSB1QA4VipnmNH4CZYAiOcpsV+rGiEyQSPaE9TgQOq3GQWPbVOtTK0/FDqEWDN1L8XCQ6Umgae3gwwjNWyl4n/eb0Y/Cs3YSKKgQoyf+TH3ILQynqwhkxSAnyqCSaS6awWGWOJCei2Fr4A04GzWpzlElZJu1Z1Lqr123qlUc4LKqATVEZnyEGXqIFuUBO1EEGP6AW9ojfj2Xg3PozP+eqakd8cowUYX7+M6Zvl</latexit>
+<latexit sha1_base64="xBfdaeQe2fdtuWDjj/7n+18UgSA=">AAACDHicbVDLSsNAFJ34rPWV6tJNaBHcWJJS1GXBjcsK9gFtLJPppB06mYSZG7WE/IJ/4FZ/wJ249R/c+yFO2ixs64ELh3Pu5R6OF3GmwLa/jbX1jc2t7cJOcXdv/+DQLB21VRhLQlsk5KHselhRzgRtAQNOu5GkOPA47XiT68zvPFCpWCjuYBpRN8AjwXxGMGhpYJZq98l5Le1HYywgDJKndGBW7Ko9g7VKnJxUUI7mwPzpD0MSB1QA4VipnmNH4CZYAiOcpsV+rGiEyQSPaE9TgQOq3GQWPbVOtTK0/FDqEWDN1L8XCQ6Umgae3gwwjNWyl4n/eb0Y/Cs3YSKKgQoyf+TH3ILQynqwhkxSAnyqCSaS6awWGWOJCei2Fr4A04GzWpzlElZJu1Z1Lqr123qlUc4LKqATVEZnyEGXqIFuUBO1EEGP6AW9ojfj2Xg3PozP+eqakd8cowUYX7+JpZvj</latexit>
+2 4
+<latexit sha1_base64="jAjkLU+LLzlsMW8HRiQaCP4xGGA=">AAACC3icbVDLSsNAFJ34rPUVdekmtAiuSlKKuiy4cVnBPqCNZTKdtENnJmHmplhCP8E/cKs/4E7c+hHu/RAnbRa29cCFwzn3cg8niDnT4Lrf1sbm1vbObmGvuH9weHRsn5y2dJQoQpsk4pHqBFhTziRtAgNOO7GiWASctoPxbea3J1RpFskHmMbUF3goWcgIBiP1bbv6mFZnvXiEJUQifZr17bJbcedw1omXkzLK0ejbP71BRBJBJRCOte56bgx+ihUwwums2Es0jTEZ4yHtGiqxoNpP58lnzoVRBk4YKTMSnLn69yLFQuupCMymwDDSq14m/ud1Ewhv/JTJOAEqyeJRmHAHIierwRkwRQnwqSGYKGayOmSEFSZgylr6AswEzmrxVktYJ61qxbuq1O5r5XopL6iAzlEJXSIPXaM6ukMN1EQETdALekVv1rP1bn1Yn4vVDSu/OUNLsL5+ARnAm6w=</latexit>
+20
+2 2
+<latexit sha1_base64="bJQwRsuAQIDwpQjQvbCJG4ayn/0=">AAACC3icbVDLSsNAFJ34rPUVdekmtAiuSlKKuiy4cVnBPqCNZTKdtENnJmHmplhCP8E/cKs/4E7c+hHu/RAnbRa29cCFwzn3cg8niDnT4Lrf1sbm1vbObmGvuH9weHRsn5y2dJQoQpsk4pHqBFhTziRtAgNOO7GiWASctoPxbea3J1RpFskHmMbUF3goWcgIBiP1bbv6mNZmvXiEJUQifZr17bJbcedw1omXkzLK0ejbP71BRBJBJRCOte56bgx+ihUwwums2Es0jTEZ4yHtGiqxoNpP58lnzoVRBk4YKTMSnLn69yLFQuupCMymwDDSq14m/ud1Ewhv/JTJOAEqyeJRmHAHIierwRkwRQnwqSGYKGayOmSEFSZgylr6AswEzmrxVktYJ61qxbuq1O5r5XopL6iAzlEJXSIPXaM6ukMN1EQETdALekVv1rP1bn1Yn4vVDSu/OUNLsL5+AR0Em64=</latexit>
+22
+<latexit sha1_base64="tBpKYVkvwLDPx9IWKt//pth7dH4=">AAACC3icbVDLSsNAFJ3UV62vqEs3oUVwVZJSqsuCG5cV7APaWCbTSTt0MgkzN8US8gn+gVv9AXfi1o9w74c4abOwrQcuHM65l3s4XsSZAtv+Ngpb2zu7e8X90sHh0fGJeXrWUWEsCW2TkIey52FFORO0DQw47UWS4sDjtOtNbzO/O6NSsVA8wDyiboDHgvmMYNDS0DRrj0kjHUQTLCAMkqd0aFbsqr2AtUmcnFRQjtbQ/BmMQhIHVADhWKm+Y0fgJlgCI5ympUGsaITJFI9pX1OBA6rcZJE8tS61MrL8UOoRYC3UvxcJDpSaB57eDDBM1LqXif95/Rj8GzdhIoqBCrJ85MfcgtDKarBGTFICfK4JJpLprBaZYIkJ6LJWvgDTgbNanPUSNkmnVnUa1fp9vdIs5wUV0QUqoyvkoGvURHeohdqIoBl6Qa/ozXg23o0P43O5WjDym3O0AuPrFyBIm7A=</latexit>
+24
+26
+GradICON (Ours)
+ICON
+Diffusion
+Bending energy
+2 6
+1-LNCC
+Magnitude
+Folds
+Figure 9. Illustration of image (dis)similarity (i.e., 1 − LNCC), the number of folds (Folds), and the mean of the squared L2 norm of the
+displacement vector field (Magnitude) for different regularizers and across varying regularization strengths on DRIVE. Best-viewed in color.
+GradICON (Ours)
+ICON
+Similarity (MSE)
+0.06
+0.05
+0.04
+0.03
+0.02
+0.01
+0
+25,000
+50,000
+75,000
+100,000
+125,000
+150,000
+175,000
+200,000
+Training iterations
+GradICON (Ours)
+ICON
+Number of folds
+1,000
+800
+600
+400
+200
+0
+0
+25,000
+50,000
+75,000
+100,000
+125,000
+150,000
+175,000
+200,000
+Figure 10. Image similarity and the number of folds, plotted over training iterations for the ICON and GradICON (MSE, λ = 0.2) entries in
+the OAI section of Tab. 3. ICON’s parity in similarity loss early in training is illusory, as unlike our approach it is trained progressively, and
+so during these iterations, it is still being trained at low resolution. This leads to a lower MSE during this phase, as the MSE demands more
+precise alignment on higher resolution (and hence not low-pass filtered) input images. Once both networks are training at the final resolution,
+the values are directly comparable. These results demonstrate the faster convergence rate, regularity, and final performance of GradICON.
+Method
+Trans.
+Lreg
+Lsim
+DICE ↑
+%|J| ↓
+Reported by
+0.0006
+0.0000
+0.0000
+0.0068
+0.0000
+0.0028
+0.0013
+0.0005
+0.0040
+0.0000
+0.0001
+0.0261
+0.0042
+[52]
+[52]
+[52]
+[52]
+[52]
+[52]
+[52]
+[52]
+∗
+∗
+∗
+∗
+∗
+∗
+∗
+∗
+∗
+∗
+∗
+OAI
+Initial
+Demons [62]
+SyN [3]
+NiftyReg [43]
+NiftyReg [43]
+vSVF-opt [52]
+VM [4]
+VM [4]
+AVSM [52]
+ICON [23]
+Ours (MSE, λ=0.2)
+Ours (MSE, λ=0.2, Opt.)
+Ours (std. protocol)
+7.6
+A,DVF
+A,VF
+A,B-Spline
+A,B-Spline
+A,vSVF
+SVF
+A,SVF
+A,vSVF
+DVF
+DVF
+DVF
+DVF
+DVF
+Gaussian
+Gaussian
+BE
+BE
+m-Gauss
+Diff.
+Diff.
+m-Gauss
+ICON
+GradICON
+GradICON
+GradICON
+GradICON
+MSE
+LNCC
+NMI
+LNCC
+LNCC
+MSE
+MSE
+LNCC
+MSE
+MSE
+MSE
+LNCC
+LNCC
+63.5
+65.7
+59.7
+67.9
+67.4
+46.1
+66.1
+68.4
+65.1
+69.5
+70.5
+70.1†
+71.2‡
+HCP
+Initial
+FreeSurfer-Affine [48]
+SyN [3]
+sm-shapes [31]
+sm-brains [31]
+Ours (std. protocol)
+53.4
+A
+A,VF
+A,SVF
+A,SVF
+DVF
+DVF
+—
+Gaussian
+Diff.
+Diff.
+GradICON
+GradICON
+TB
+MI
+DICE
+DICE
+LNCC
+LNCC
+62.1
+75.8
+79.8
+78.4
+78.7†
+80.5‡
+0.0000
+0.0000
+0.2981
+0.0364
+0.0012
+0.0004
+Lsim
+mTRE ↓
+%|J| ↓
+DirLab
+Method
+Trans.
+Lreg
+[mm]
+Initial
+SyN [3]
+Elastix [38]
+NiftyReg [43]
+PTVReg [65]
+RRN [28]
+VM [4]
+LapIRN [45]
+LapIRN [45]
+Hering et al. [30]
+GraphRegNet [26]
+PLOSL [66]
+PLOSL50 [66]
+ICON [23]
+Ours (std. protocol)
+23.36
+A,VF
+A,B-Spline
+A,B-Spline
+DVF
+DVF
+Gaussian
+BE
+BE
+TV
+TV
+LNCC
+MSE
+MI
+LNCC
+LNCC
+1.79
+1.32
+2.19
+0.96
+0.83
+—
+—
+—
+—
+—
+[26]
+[26]
+[26]
+[65]
+[28]
+A,SVF
+SVF
+DVF
+DVF
+DV
+DVF
+DVF
+DVF
+DVF
+DVF
+Diff.
+Diff.
+Diff.
+Curv+VCC
+—
+Diff.
+Diff.
+ICON
+GradICON
+GradICON
+NCC
+NCC
+NCC
+DICE+KP+NGF
+MSE
+TVD+VMD
+TVD+VMD
+LNCC
+LNCC
+LNCC
+9.88
+2.92
+4.24
+2.00
+1.34
+3.84
+1.53
+7.04
+1.93†
+1.31‡
+0
+0
+0.0105
+0.0600
+—
+0
+0
+0.3792
+0.0003
+0.0002
+∗
+∗
+∗
+[30]
+[26]
+[66]
+[66]
+∗
+∗
+∗
+Table 3. Full comparison on OAI, HCP and DirLab. † and ‡ indicate results from our standard training protocol, without (†) and with (‡)
+instance optimization (Sec. 4.2). Only when GradICON is trained with MSE, we set λ = 0.2. Top and bottom table parts denote non-learning
+and learning-based methods, resp. For DirLab, results are shown in the common inspiration→expiration direction. Results marked with ∗
+are reported by us using code from the official repository. A: affine pre-registration, BE: bending energy, MI: mutual information, DV:
+displacement vector of sparse key points, TV: total variation, Curv: curvature regularizer, VCC: volume change control, NGF: normalized
+gradient flow, TVD: sum of squared tissue volume difference, VMD: sum of squared vesselness measure difference, Diff: diffusion, VF:
+velocity field, SVF: stationary VF, DVF: displacement vector field. PLOSL50 : 50 iterations of instance optimization with PLOSL.
+Affine
+mTRE ↓
+DICE ↑
+13.715
+80.23
+Table 4. Registration performance measures of the pre-registration affine network for our VoxelMorph comparison on DirLab.
+LapIRN (disp)
+Resolution
+LR
+reg. weight
+−4
+1e
+5e−5
+1e−5
+1
+1/2
+1/4
+LapIRN (sVF)
+0.1
+0.1
+1
+LR
+reg. weight
+−4
+1e
+1e−4
+5e−5
+0.1
+0.1
+1
+Table 5. Learning rate (LR) and regularization weight (reg. weight) hyperparameters of LapIRN per resolution.
+Inference
+#Params
+VM (SVF)
+LapIRN (SVF)
+LapIRN (DV)
+ICON
+GradICON-Stage1
+GradICON-Stage1&Stage2
+Train
+Peak Mem. (MB)
+FLOPs
+Time (ms)
+Peak Mem. (MB)
+Time (ms)
+4548
+5578
+5576
+2918
+2934
+3122
+397.878G
+652.310G
+652.310G
+678.513G
+618.592G
+1.159T
+190.10
+253.87
+235.30
+96.36
+88.24
+160.59
+—
+—
+—
+8082
+9384
+13482
+—
+—
+—
+573.57
+727.77
+1162.54
+327,331
+923,748
+923.748
+53,010,687
+53,010,687
+70,680,916
+Table 6. Model statistics at inference (test) time. G denotes gigaFLOPS, T denotes teraFLOPS.
+UNet from [4]
+UNet from [23]
+#Params
+Peak Mem. (MB)
+FLOPs
+327,331
+17,670,229
+4182.0
+2244
+397.878G
+540.084G
+Table 7. Model statistics of the UNets used in our ablation study. G denotes gigaFLOPS.
+Source
+Target
+Source (warped)
+Source (warped) + Grid
+Figure 11. Example registration case A (from test set instances) performed using GradICON and our standard training protocol (†) w/o
+instance optimization on the OAI dataset. Best-viewed in color.
+Source
+Target
+Source (warped)
+Source (warped) + Grid
+Figure 12. Example registration case B (from test set instances) performed using GradICON and our standard training protocol (†) w/o
+instance optimization on the OAI dataset. Best-viewed in color.
+Source
+Target
+Source (warped)
+Source (warped) + Grid
+Figure 13. Example registrations case A performed using GradICON and our standard training protocol (†) w/o instance optimization on the
+Dirlab dataset. Best-viewed in color.
+Source
+Target
+Source (warped)
+Source (warped) + Grid
+Figure 14. Example registrations case B performed using GradICON and our standard training protocol (†) w/o instance optimization on the
+Dirlab dataset. Best-viewed in color.
+Source
+Target
+Source (warped)
+Source (warped) + Grid
+Figure 15. Example registration case A (from test set instances) performed using GradICON and our standard training protocol (†) w/o
+instance optimization on the HCP dataset. Best-viewed in color.
+Source
+Target
+Source (warped)
+Source (warped) + Grid
+Figure 16. Example registration case B (from test set instances) performed using GradICON and our standard training protocol (†) w/o
+instance optimization on the HCP dataset. Best-viewed in color.
+a)
+Coordinates
+Image A
+Φ
+ΦAB
+Displacement field
+ΦAB
+Convert to Func
+Displacement Field
+U-Net
+Image A
+Image B
+Interpolate
++
+Image B
+Warped Coordinates
+b)
+TwoStep[Φ,Ψ]
+Down[Φ]
+Stage1
+Φ
+Down[Φ](Image A, Image B)
+TwoStep
+Down
+AveragePool
+Stage2
+TwoStep
+Image B
+Stage1
+AveragePool
+ΨAB
+ΦAB
+Image B
+c)
+Image A
+Ψ
+TwoStep[Φ,Ψ](Image A, Image B)
+Function Composition
+Warp Image
+Image A
+Φ
+Ψ4
+TwoStep
+Down
+Ψ
+1
+d)
+Ψ2
+Ψ3
+GradICON Regularizer
+Image A
+Φ
+Sampled Coords
++Δx
++Δy
++Δz
+-Δy
+-Δz
+ΦAB
+Φ
+Image B
+ΦBA
+-Δx
+scaled
+squared
+difference
+scaled
+squared
+difference
+scaled
+squared
+difference
+Figure 17. Our approach is most succinctly described using equations, as done in Sec. 4 , but we also desire to respect the convention that
+neural network papers include a representation of the network as a block diagram. Our "atomic," or simplest component registration network
+is a U-Net outputting a deformation (a). ΦAB , the output of this component, is a python function that may be called on a tensor of coordinates.
+Components can be combined using the TwoStep and Down operators (b). The ’function composition’ block in this row is implemented by
+the python code lambda coords: phi_AB(psi_AB(coords)) , which is pleasing enough to justify our decision to represent deformations
+as functions. These parts are combined into the Stage1 and Stage2 networks we use for our general purpose registration approach (c). Finally,
+this network is regularized by a finite difference approximation of the gradient of the inverse consistency error (d)

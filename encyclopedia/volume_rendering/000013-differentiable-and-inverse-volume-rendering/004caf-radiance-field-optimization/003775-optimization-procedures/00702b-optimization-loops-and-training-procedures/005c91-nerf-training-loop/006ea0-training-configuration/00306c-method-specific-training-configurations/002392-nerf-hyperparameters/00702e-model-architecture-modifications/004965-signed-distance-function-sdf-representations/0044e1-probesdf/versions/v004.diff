@@ -1,0 +1,204 @@
+--- v003.md
++++ v004.md
+@@ -27,13 +27,13 @@
+ 
+ 1.  **Ray Marching and SDF Evaluation:**
+-    For a given camera ray, sample points $\mathbf{x}$ along the ray. Query the SDF grid to get $s(\mathbf{x})$. Compute the surface normal $\mathbf{n} = \nabla s(\mathbf{x}) / \|\nabla s(\mathbf{x})\|$ [Parent]. Convert the SDF value to volume density $\sigma(\mathbf{x})$ using a differentiable mapping that concentrates density near the zero-level set [G].
++    For a given camera ray, sample points $\mathbf{x}$ along the ray [S1]. Query the SDF grid to get $s(\mathbf{x})$ [S1]. Compute the surface normal $\mathbf{n} = \nabla s(\mathbf{x}) / \|\nabla s(\mathbf{x})\|$ [G]. Convert the SDF value to volume density $\sigma(\mathbf{x})$ using a differentiable mapping that concentrates density near the zero-level set [G].
+ 
+ 2.  **Spatial Feature Extraction ($F_s$):**
+-    For point $\mathbf{x}$, identify the containing $16^3$ tile. Retrieve the three orthogonal planes ($F_x, F_y, F_z$) for that tile. Compute the spatial feature vector via planar factorization (outer product):
++    For point $\mathbf{x}$, identify the containing $16^3$ tile [S1]. Retrieve the three orthogonal planes ($F_x, F_y, F_z$) for that tile [S1]. Compute the spatial feature vector via planar factorization (outer product):
+     $$F_s = F_x \otimes F_y \otimes F_z$$
+     This reduces dimensionality by storing three orthogonal planes per tile instead of a dense 3D grid [S1].
+ 
+ 3.  **Angular Feature Extraction ($F_a$):**
+-    Compute the reflected vector $\mathbf{r}$ based on the view direction $\mathbf{v}$ and surface normal $\mathbf{n}$ (typically $\mathbf{r} = 2(\mathbf{n} \cdot \mathbf{v})\mathbf{n} - \mathbf{v}$) [S1]. Retrieve the 8 corner probes of the containing tile in the angular grid. Tri-linearly interpolate the spherical harmonic coefficients from these 8 corners to obtain the angular feature vector $F_a(\mathbf{x}, \mathbf{r})$ [S1].
++    Compute the reflected vector $\mathbf{r}$ based on the view direction $\mathbf{v}$ and surface normal $\mathbf{n}$ (typically $\mathbf{r} = 2(\mathbf{n} \cdot \mathbf{v})\mathbf{n} - \mathbf{v}$) [S1]. Retrieve the 8 corner probes of the containing tile in the angular grid [S1]. Tri-linearly interpolate the spherical harmonic coefficients from these 8 corners to obtain the angular feature vector $F_a(\mathbf{x}, \mathbf{r})$ [S1].
+ 
+ 4.  **Incidence Angle Embedding:**
+@@ -43,5 +43,5 @@
+ 
+ 5.  **Radiance Decoding:**
+-    Concatenate $F_s$, $F_a$, and the incidence angle embeddings. Pass them through the tiny MLP to predict the outgoing radiance $C$:
++    Concatenate $F_s$, $F_a$, and the incidence angle embeddings [S1]. Pass them through the tiny MLP to predict the outgoing radiance $C$:
+     $$C = MLP(F_s(\mathbf{x}), F_a(\mathbf{x}, \mathbf{r}), (1 - \mathbf{n} \cdot \mathbf{v})^0, \dots, (1 - \mathbf{n} \cdot \mathbf{v})^5, \dots)$$
+     The MLP acts as a minimal BRDF decoder [S1].
+@@ -58,9 +58,26 @@
+ import numpy as np
+ 
+-def relu(x):
+-    return np.maximum(0, x)
++def trilinear_3d(grid, x, y, z):
++    """Trilinear interpolation on a 3D grid [G]."""
++    x0, y0, z0 = int(np.floor(x)), int(np.floor(y)), int(np.floor(z))
++    x1, y1, z1 = min(x0 + 1, grid.shape[0]-1), min(y0 + 1, grid.shape[1]-1), min(z0 + 1, grid.shape[2]-1)
++    dx, dy, dz = x - x0, y - y0, z - z0
++    c00 = grid[x0, y0, z0] * (1-dx) + grid[x1, y0, z0] * dx
++    c01 = grid[x0, y1, z0] * (1-dx) + grid[x1, y1, z0] * dx
++    c10 = grid[x0, y0, z1] * (1-dx) + grid[x1, y0, z1] * dx
++    c11 = grid[x0, y1, z1] * (1-dx) + grid[x1, y1, z1] * dx
++    return (c00 * (1-dy) + c01 * dy) * (1-dz) + (c10 * (1-dy) + c11 * dy) * dz
+ 
+-def sigmoid(x):
+-    return 1.0 / (1.0 + np.exp(-x))
++def bilinear_2d(plane, u, v):
++    """Bilinear interpolation on a 2D plane [G]."""
++    u0, v0 = int(np.floor(u)), int(np.floor(v))
++    u1, v1 = min(u0 + 1, plane.shape[0]-1), min(v0 + 1, plane.shape[1]-1)
++    du, dv = u - u0, v - v0
++    c0 = plane[u0, v0] * (1-du) + plane[u1, v0] * du
++    c1 = plane[u0, v1] * (1-du) + plane[u1, v1] * du
++    return c0 * (1-dv) + c1 * dv
++
++def relu(x): return np.maximum(0, x)
++def sigmoid(x): return 1.0 / (1.0 + np.exp(-x))
+ 
+ def sdf_to_density(s, scale=10.0):
+@@ -68,92 +85,62 @@
+     return scale * np.exp(-scale * np.abs(s))
+ 
+-def compute_normal(sdf_grid, x, eps=1e-4):
++def compute_normal(sdf_grid, x, y, z, eps=1e-4):
+     """Finite difference gradient of SDF [G]."""
+-    dx = np.array([eps, 0, 0])
+-    grad = np.array([
+-        sdf_grid.query(x + dx) - sdf_grid.query(x - dx),
+-        sdf_grid.query(x + dx * [0, 1, 0]) - sdf_grid.query(x - dx * [0, 1, 0]),
+-        sdf_grid.query(x + dx * [0, 0, 1]) - sdf_grid.query(x - dx * [0, 0, 1])
+-    ]) / (2 * eps)
++    grad_x = (trilinear_3d(sdf_grid, x+eps, y, z) - trilinear_3d(sdf_grid, x-eps, y, z)) / (2*eps)
++    grad_y = (trilinear_3d(sdf_grid, x, y+eps, z) - trilinear_3d(sdf_grid, x, y-eps, z)) / (2*eps)
++    grad_z = (trilinear_3d(sdf_grid, x, y, z+eps) - trilinear_3d(sdf_grid, x, y, z-eps)) / (2*eps)
++    grad = np.array([grad_x, grad_y, grad_z])
+     return grad / np.linalg.norm(grad)
+-
+-def get_tile_id(x, tile_size):
+-    """Return integer tile ID containing point x [G]."""
+-    return tuple(int(coord // tile_size) for coord in x)
+-
+-def get_local_coords(x, tile_size):
+-    """Return normalized coordinates [0, 1) within the tile [G]."""
+-    tile_id = get_tile_id(x, tile_size)
+-    tile_origin = np.array(tile_id) * tile_size
+-    return (x - tile_origin) / tile_size
+-
+-def interpolate_3d(plane, local_coords):
+-    """Trilinear interpolation on a 16x16 plane [G]."""
+-    # local_coords is (3,), but plane is 2D. We project to the dominant axis or use 2D bilinear.
+-    # For planar factorization, we typically interpolate on the 2D plane.
+-    # Simplified: assume interpolation on the first two dimensions.
+-    u, v = local_coords[0], local_coords[1]
+-    u_idx = u * 15
+-    v_idx = v * 15
+-    u0, v0 = int(np.floor(u_idx)), int(np.floor(v_idx))
+-    u1, v1 = min(u0 + 1, 15), min(v0 + 1, 15)
+-    du, dv = u_idx - u0, v_idx - v0
+-    val = (1-du)*(1-dv)*plane[u0, v0] + du*(1-dv)*plane[u1, v0] + (1-du)*dv*plane[u0, v1] + du*dv*plane[u1, v1]
+-    return val
+-
+-def get_tile_corners(tile_id):
+-    """Return 8 corner IDs of a tile [G]."""
+-    x, y, z = tile_id
+-    return [
+-        (x, y, z), (x+1, y, z), (x, y+1, z), (x+1, y+1, z),
+-        (x, y, z+1), (x+1, y, z+1), (x, y+1, z+1), (x+1, y+1, z+1)
+-    ]
+ 
+ def probe_sdf_render(ray_origin, ray_direction, sdf_grid, spatial_grid, angular_grid, 
+                      tile_size=16, ns=4, na=4, l=4, mlp_weights=None):
+-    """
+-    Renders a single ray using ProbeSDF appearance model.
+-    """
++    """Renders a single ray using ProbeSDF appearance model."""
+     num_samples = 256
+     dt = 0.01
+     color = np.zeros(3)
+     alpha_accum = 0.0
+-    
++
+     for t in range(num_samples):
+         x = ray_origin + t * ray_direction * dt
+-        s_val = sdf_grid.query(x)
+-        if s_val > 0.5: continue # Outside object
+-        n = compute_normal(sdf_grid, x)
++        gx, gy, gz = x / tile_size
++        s_val = trilinear_3d(sdf_grid, gx, gy, gz)
++        if s_val > 0.5: continue
++
++        n = compute_normal(sdf_grid, gx, gy, gz)
+         sigma = sdf_to_density(s_val)
+-        
+-        # Spatial Features
+-        tile_id = get_tile_id(x, tile_size)
++
++        # Spatial Features (Planar Factorization)
++        tile_id = (int(np.floor(gx)), int(np.floor(gy)), int(np.floor(gz)))
+         planes = spatial_grid[tile_id] # Shape (3, 16, 16, ns)
+-        local = get_local_coords(x, tile_size)
+-        F_x = interpolate_3d(planes[0], local)
+-        F_y = interpolate_3d(planes[1], local)
+-        F_z = interpolate_3d(planes[2], local)
++        local_u, local_v, local_w = gx - tile_id[0], gy - tile_id[1], gz - tile_id[2]
++        F_x = bilinear_2d(planes[0], local_u, local_v)
++        F_y = bilinear_2d(planes[1], local_u, local_v)
++        F_z = bilinear_2d(planes[2], local_u, local_v)
+         F_s = np.outer(np.outer(F_x, F_y), F_z).flatten()
+-        
+-        # Angular Features
++
++        # Angular Features (Trilinear interpolation of 8 corner probes)
+         v = ray_direction
+         r = 2 * np.dot(n, v) * n - v
+-        corner_ids = get_tile_corners(tile_id)
++        corner_ids = [
++            (tile_id[0], tile_id[1], tile_id[2]), (tile_id[0]+1, tile_id[1], tile_id[2]),
++            (tile_id[0], tile_id[1]+1, tile_id[2]), (tile_id[0]+1, tile_id[1]+1, tile_id[2]),
++            (tile_id[0], tile_id[1], tile_id[2]+1), (tile_id[0]+1, tile_id[1], tile_id[2]+1),
++            (tile_id[0], tile_id[1]+1, tile_id[2]+1), (tile_id[0]+1, tile_id[1]+1, tile_id[2]+1)
++        ]
+         corner_coeffs = [angular_grid[cid].flatten() for cid in corner_ids]
+-        
+-        # Trilinear interpolation weights for corners
+-        u, w, z = local
+         weights = [
+-            (1-u)*(1-w)*(1-z), u*(1-w)*(1-z), (1-u)*w*(1-z), u*w*(1-z),
+-            (1-u)*(1-w)*z, u*(1-w)*z, (1-u)*w*z, u*w*z
++            (1-local_u)*(1-local_v)*(1-local_w), local_u*(1-local_v)*(1-local_w),
++            (1-local_u)*local_v*(1-local_w), local_u*local_v*(1-local_w),
++            (1-local_u)*(1-local_v)*local_w, local_u*(1-local_v)*local_w,
++            (1-local_u)*local_v*local_w, local_u*local_v*local_w
+         ]
+         F_a = np.zeros(len(corner_coeffs[0]))
+         for i, c in enumerate(corner_coeffs):
+             F_a += weights[i] * c
+-            
++
+         # Incidence Angle Embedding
+         cos_theta = np.dot(n, v)
+         incidence = np.array([(1 - cos_theta)**i for i in range(6)])
+-        
++
+         # MLP Decoding
+         input_vec = np.concatenate([F_s, F_a, incidence])
+@@ -161,5 +148,5 @@
+         h2 = relu(np.dot(h1, mlp_weights['W2']) + mlp_weights['b2'])
+         C = sigmoid(np.dot(h2, mlp_weights['W3']) + mlp_weights['b3'])
+-        
++
+         # Volume Rendering
+         alpha = 1.0 - np.exp(-sigma * dt)
+@@ -168,5 +155,5 @@
+         alpha_accum += weight
+         if alpha_accum > 0.99: break
+-            
++
+     return color
+ ```
+@@ -174,5 +161,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Training converges in minutes (e.g., ~1 min for MVMannequins, ~150-160s for DTU, ~110-120s for BMVS, ~4 min for ActorsHQ) compared to hours for baselines like Voxurf or NeuS2 [S1]. Rendering achieves 200-300 Hz on DTU and 300-400 Hz on MVMannequins on an RTX A6000 GPU [S1].
+-*   **Memory Complexity:** Highly memory efficient. Probes require 1/6th of the memory taken by spatial features when $l=4$ and $n_s=n_a$ [S1]. Model sizes are small (e.g., 30MB for MVMannequins, 56-88MB for DTU, 57-232MB for ActorsHQ) [S1]. VRAM usage is low (e.g., 5GB for MVMannequins) [S1].
++*   **Memory Complexity:** Highly memory efficient [S1]. Probes require 1/6th of the memory taken by spatial features when $l=4$ and $n_s=n_a$ [S1]. Model sizes are small (e.g., 30MB for MVMannequins, 56-88MB for DTU, 57-232MB for ActorsHQ) [S1]. VRAM usage is low (e.g., 5GB for MVMannequins) [S1].
+ *   **Performance:**
+     *   **MVMannequins:** PSNR 36.81-36.90, Chamfer 1.03-1.04mm [S1].

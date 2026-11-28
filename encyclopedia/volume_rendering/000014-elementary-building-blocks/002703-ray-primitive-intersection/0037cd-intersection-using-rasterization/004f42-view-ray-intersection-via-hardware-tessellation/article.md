@@ -1,0 +1,101 @@
+# View-Ray Intersection via Hardware Tessellation
+
+## Overview
+This method computes the intersection points between view-rays and the boundary surfaces of volume blocks by reformulating the zero-finding problem as a surface approximation problem, utilizing GPU hardware tessellation for parallel efficiency [S1]. It differs from [Fragment Shader Volume Ray Casting](9618-fragment-shader-volume-ray-casting.md) by deferring the ray-marching computation to a later stage; instead, it focuses on generating precise entry and exit points for the volume blocks using rasterization primitives [S1].
+## How it works
+**Inputs:**
+*   Volume blocks $G_\alpha$, each defined by spline surfaces [S1].
+*   Camera parameters defining the view-rays [S1].
+
+**Outputs:**
+*   A texture buffer containing an unordered list of intersections per pixel, structured for subsequent depth-sorting [S1].
+
+**Data Structures:**
+*   **Intersection List Entry:** A linked list node stored in a texture buffer (populated via atomic operations) [S1]. Each entry contains:
+    *   Parameter value (position in the parameter domain) [S1].
+    *   Depth value (distance to the screen) [S1].
+    *   Block number ($\alpha$) [S1].
+    *   Orientation flag (front-facing or back-facing) [S1].
+
+**Steps:**
+1.  **Render Boundary Surfaces:** Render all boundary surfaces of all volume blocks $G_\alpha$ (6 surfaces per block) using a single-pass algorithm based on Hjelmervik [S1]. The algorithm uses hardware tessellation to create a view-dependent triangulation of the spline surfaces, guaranteeing water-tightness and satisfying the approximation error requirements for pixel-accurate rendering [S1].
+2.  **Store Intersections:** Store the resulting intersection data into a texture buffer [S1]. The rasterization process effectively finds all ray-surface intersections of the triangulation in parallel [S1].
+3.  **Populate Linked Lists:** For each pixel, populate a linked list of intersections using atomic operations in a single pass, adapted from order-independent transparency techniques [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Data structure for intersection entries
+class IntersectionEntry:
+    def __init__(self, param_value, depth, block_number, is_front_facing):
+        self.param_value = param_value
+        self.depth = depth
+        self.block_number = block_number
+        self.is_front_facing = is_front_facing
+        self.used = False
+
+def blockwise_depth_sort(intersection_lists):
+    """
+    Processes the unordered list of intersections per pixel according to Algorithm 2.
+    intersection_lists: dict mapping pixel coordinates to a list of IntersectionEntry.
+    """
+    for pixel, entries in intersection_lists.items():
+        # Continue until no unused entries remain
+        while any(not e.used for e in entries):
+            # 1) Find pOut: closest to screen (min depth), not used, not front facing
+            pOut = None
+            min_depth = float('inf')
+            for entry in entries:
+                if not entry.used and not entry.is_front_facing:
+                    if entry.depth < min_depth:
+                        min_depth = entry.depth
+                        pOut = entry
+
+            # 2) Exit if list is effectively empty (no valid pOut found)
+            if pOut is None:
+                break
+
+            # 3) Find pIn: closest to screen, not used, front facing, matches block number of pOut
+            pIn = None
+            min_depth = float('inf')
+            for entry in entries:
+                if not entry.used and entry.is_front_facing and entry.block_number == pOut.block_number:
+                    if entry.depth < min_depth:
+                        min_depth = entry.depth
+                        pIn = entry
+
+            # 4) Render volume between pIn and pOut
+            if pIn is not None:
+                render_volume_segment(pIn, pOut)
+
+            # 5) Mark pOut and pIn as used
+            pOut.used = True
+            if pIn is not None:
+                pIn.used = True
+
+def render_volume_segment(pIn, pOut):
+    """Conceptual step: composites the volume between the entry and exit points."""
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Neighboring Blocks:** In Isogeometric Analysis (IGA), surfaces of neighboring blocks match exactly, producing entries in the intersection list with approximately the same depth value [S1]. The depth-sorting algorithm ensures that paired entry and exit points correspond to the same block number to avoid incorrect pairing [S1].
+*   **Non-Convex Objects:** View-rays may intersect the geometry multiple times per block, leading to multiple entry and exit points [S1]. The linked list approach handles this by iterating through all entries [S1].
+*   **Multi-Block Objects:** Each volume block adds further intersections, requiring the block number check in the pairing logic [S1].
+## Subtopics
+
+### Blockwise Depth-Sorting of Intersections
+A method to pair entry and exit points from an unordered list of intersections per view-ray, handling non-convex objects and multi-block structures using atomic operations for linked lists [S1]. It differs from simple depth-sorting by explicitly checking block numbers to ensure pairs correspond to the same volume block, which is critical when neighboring blocks produce nearly identical depth values [S1]. Choose this method when dealing with multi-block volumes or non-convex geometries where simple front-to-back sorting is insufficient [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The intersection finding is performed in a single rasterization pass, leveraging parallel GPU hardware tessellation [S1]. The depth-sorting step requires iterating through the intersection list per pixel, which depends on the number of intersections determined by the view-angle, non-convexity, and multi-block structures [S1].
+*   **Memory Complexity:** Requires a texture buffer to store the intersection lists [S1].
+*   **Strengths:** Highly parallel and efficient due to hardware tessellation [S1]. Guarantees water-tightness and pixel-accurate approximation error [S1]. Single-pass intersection finding [S1].
+*   **Limitations:** Requires post-processing to sort and pair intersections [S1]. Precision issues may arise with neighboring blocks having identical surfaces, requiring careful block-number matching [S1].
+*   **When to use:** When pixel-accurate geometry is required for volume rendering, especially with spline-based volumes (IGA) [S1].
+*   **When not to use:** Not given in the sources.
+## Background
+The method originates from Interactive Isogeometric Volume Visualization with Pixel-Accurate Geometry [S1]. It builds on the work of Hjelmervik [11] for single-pass hardware tessellation and Yeo et al. [26] for view-dependent triangulation [S1]. The linked list approach for handling multiple intersections is adapted from order-independent transparency techniques by Yang et al. [25], Everitt [10], Carpenter and Ii [1], and Myers and Bavoil [20] [S1].
+## Sources
+[S1] Interactive Isogeometric Volume Visualization with Pixel-Accurate Geometry, https://doi.org/10.1109/tvcg.2015.2430337, fetched 2026-10-28

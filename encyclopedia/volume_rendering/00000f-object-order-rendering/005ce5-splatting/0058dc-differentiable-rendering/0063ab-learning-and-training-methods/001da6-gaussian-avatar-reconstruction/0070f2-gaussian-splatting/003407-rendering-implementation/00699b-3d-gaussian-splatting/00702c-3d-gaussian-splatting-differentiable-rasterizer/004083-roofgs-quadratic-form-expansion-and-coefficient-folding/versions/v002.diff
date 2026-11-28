@@ -1,0 +1,117 @@
+--- v001.md
++++ v002.md
+@@ -8,19 +8,14 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:**
+-    *   Pixel coordinates $(x, y)$ for the current thread's target pixel(s).
+-    *   Gaussian parameters: projected mean $(u, v)$, inverse 2D covariance matrix elements $(a, b, c)$ where $\Sigma'^{-1} = \begin{pmatrix} a & b/2 \\ b/2 & c \end{pmatrix}$, and opacity $o \in (0, 1]$.
+-*   **Outputs:**
+-    *   Unclamped opacity contribution $\tilde{\alpha}(x, y)$.
+-    *   Final clamped opacity $\alpha(x, y)$ (via external blending step).
++*   **Inputs:** Pixel coordinates $(x, y)$ for the current thread's target pixel(s) [S1, unofficial]. Gaussian parameters: projected mean $(u, v)$, inverse 2D covariance matrix elements $(a, b, c)$ where $\Sigma'^{-1} = \begin{pmatrix} a & b/2 \\ b/2 & c \end{pmatrix}$, and opacity $o \in (0, 1]$ [S1, unofficial].
++*   **Outputs:** Unclamped opacity contribution $\tilde{\alpha}(x, y)$ [S1, unofficial]. Final clamped opacity $\alpha(x, y)$ (via external blending step) [G].
+ 
+ **Data Structures:**
+-*   **Folded Coefficients:** A set of 6 pre-computed coefficients $(C_1, \dots, C_6)$ derived from the Gaussian's $(a, b, c, u, v, o)$. These are stored in registers or shared memory for reuse across the primitive loop.
+-*   **Hoisted Coordinates:** Pixel terms $(x^2, xy, y^2, x, y)$ stored in registers, invariant across the primitive loop for a fixed pixel.
++*   **Folded Coefficients:** A set of 6 pre-computed coefficients $(C_1, \dots, C_6)$ derived from the Gaussian's $(a, b, c, u, v, o)$ [S1, unofficial]. These are stored in registers or shared memory for reuse across the primitive loop [S1, unofficial].
++*   **Hoisted Coordinates:** Pixel terms $(x^2, xy, y^2, x, y)$ stored in registers, invariant across the primitive loop for a fixed pixel [S1, unofficial].
+ 
+ **Step-by-Step Method:**
+ 
+-1.  **Expand the Quadratic Form:**
+-    The baseline exponent $p(x, y)$ involves offsets $(x-u)$ and $(y-v)$. RoofGS expands the quadratic form $a(x - u)^2 + b(x - u)(y - v) + c(y - v)^2$ to separate variables [S1, unofficial]:
++1.  **Expand the Quadratic Form:** The baseline exponent $p(x, y)$ involves offsets $(x-u)$ and $(y-v)$ [S1, unofficial]. RoofGS expands the quadratic form $a(x - u)^2 + b(x - u)(y - v) + c(y - v)^2$ to separate variables [S1, unofficial]:
+     $$
+     a(x - u)^2 + b(x - u)(y - v) + c(y - v)^2 = ax^2 + bxy + cy^2 - (2au + bv)x - (2cv + bu)y + C_0
+@@ -31,6 +26,5 @@
+     $$
+ 
+-2.  **Fold Coefficients:**
+-    During the shared-memory loading stage, fold the constant factor $-0.5$ and the opacity term $\log o$ into the Gaussian coefficients to form $C_1$ through $C_6$ [S1, unofficial]:
++2.  **Fold Coefficients:** During the shared-memory loading stage, fold the constant factor $-0.5$ and the opacity term $\log o$ into the Gaussian coefficients to form $C_1$ through $C_6$ [S1, unofficial]:
+     $$
+     \begin{aligned}
+@@ -38,16 +32,14 @@
+     C_2 &= -0.5b \\
+     C_3 &= -0.5c \\
+-    C_4 &= au + 0.5bu \\
++    C_4 &= au + 0.5bv \\
+     C_5 &= cv + 0.5bu \\
+     C_6 &= -0.5C_0 + \log o
+     \end{aligned}
+     $$
+-    *Note: The source defines $C_4$ and $C_5$ with specific linear combinations. Specifically, $C_4 = au + 0.5bu$ and $C_5 = cv + 0.5bu$ [S1, unofficial].*
++    *Note: The source table contains a typo listing $C_4 = au + 0.5bu$; the algebraic expansion requires $C_4 = au + 0.5bv$ to match the $-(2au+bv)x$ term [S1, unofficial].*
+ 
+-3.  **Hoist Pixel Terms:**
+-    Since each active thread is assigned to a fixed pixel, compute and store the pixel-dependent terms $x^2, xy, y^2, x, y$ in registers. These remain invariant across all Gaussians processed by that thread [S1, unofficial].
++3.  **Hoist Pixel Terms:** Since each active thread is assigned to a fixed pixel, compute and store the pixel-dependent terms $x^2, xy, y^2, x, y$ in registers [S1, unofficial]. These remain invariant across all Gaussians processed by that thread [S1, unofficial].
+ 
+-4.  **Evaluate Folded Exponent:**
+-    For each Gaussian in the primitive list, evaluate the folded exponent $P(x, y)$ using a regular FMA sequence with the pre-folded coefficients [S1, unofficial]:
++4.  **Evaluate Folded Exponent:** For each Gaussian in the primitive list, evaluate the folded exponent $P(x, y)$ using a regular FMA sequence with the pre-folded coefficients [S1, unofficial]:
+     $$
+     P(x, y) = C_1 x^2 + C_2 xy + C_3 y^2 + C_4 x + C_5 y + C_6
+@@ -55,6 +47,5 @@
+     This formulation satisfies $P(x, y) = p(x, y) + \log o$, where $p(x, y)$ is the standard quadratic form exponent [S1, unofficial].
+ 
+-5.  **Compute Opacity:**
+-    Compute the unclamped opacity contribution directly from the folded exponent [S1, unofficial]:
++5.  **Compute Opacity:** Compute the unclamped opacity contribution directly from the folded exponent [S1, unofficial]:
+     $$
+     \tilde{\alpha}(x, y) = \exp(P(x, y))
+@@ -67,4 +58,6 @@
+ **Pseudocode:**
+ ```python
++import math
++
+ def roofgs_coefficient_folding(u, v, a, b, c, o, x, y):
+     """
+@@ -86,11 +79,8 @@
+     
+     # Step 2: Fold coefficients
+-    # Note: Source [S1, unofficial] defines C4 and C5 as:
+-    # C4 = au + 0.5bu
+-    # C5 = cv + 0.5bu
+     C1 = -0.5 * a
+     C2 = -0.5 * b
+     C3 = -0.5 * c
+-    C4 = a * u + 0.5 * b * u
++    C4 = a * u + 0.5 * b * v  # Corrected from source typo
+     C5 = c * v + 0.5 * b * u
+     C6 = -0.5 * C0 + math.log(o)
+@@ -117,7 +107,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Opacity $o$:** Must be in $(0, 1]$. If $o=0$, $\log o$ is undefined. In practice, Gaussians with negligible opacity are culled.
+-*   **Precision:** The folding of $\log o$ into $C_6$ requires careful handling of floating-point precision, especially for very small opacities, to avoid underflow or loss of significance in the exponent [S1, unofficial].
+-*   **Coordinate Invariance:** The optimization assumes $(x, y)$ are fixed for the thread. If a thread processes multiple pixels (e.g., vertically adjacent pixels $(x, y)$ and $(x, y+1)$), the hoisted terms must be updated or recomputed for the second pixel, though the Gaussian coefficients remain reusable [S1, unofficial].
++*   **Opacity $o$:** Must be in $(0, 1]$ [S1, unofficial]. If $o=0$, $\log o$ is undefined [G]. In practice, Gaussians with negligible opacity are culled [G].
++*   **Coordinate Invariance:** The optimization assumes $(x, y)$ are fixed for the thread [S1, unofficial]. If a thread processes multiple pixels (e.g., vertically adjacent pixels $(x, y)$ and $(x, y+1)$), the hoisted terms must be updated or recomputed for the second pixel, though the Gaussian coefficients remain reusable [S1, unofficial].
+ 
+ ## Subtopics
+@@ -130,14 +119,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces instruction count in the innermost loop by eliminating repeated coordinate subtractions and enabling efficient FMA sequences. The number of arithmetic operations per Gaussian per pixel is reduced.
+-*   **Memory Complexity:** Requires storage for 6 folded coefficients per Gaussian and 5 hoisted pixel terms per thread. No significant additional memory overhead compared to standard rasterization.
+-*   **Performance:** Improves instruction scheduling and reduces register pressure by hoisting invariant terms. Measured on hardware supporting efficient FMA operations. Specific performance metrics are not given in the sources.
+-*   **Strengths:** Reduced instruction overhead, better instruction scheduling, efficient use of registers.
+-*   **Limitations:** Requires careful handling of opacity folding and precision. Assumes fixed pixel assignment per thread.
+-*   **When to use:** When rendering 3D Gaussas with high throughput requirements and hardware supports efficient FMA operations.
+-*   **When not to use:** If pixel coordinates are not invariant within the primitive loop (e.g., dynamic pixel assignment).
++*   **Time Complexity:** Reduces instruction count in the innermost loop by eliminating repeated coordinate subtractions and enabling efficient FMA sequences [S1, unofficial]. The number of arithmetic operations per Gaussian per pixel is reduced [S1, unofficial].
++*   **Memory Complexity:** Requires storage for 6 folded coefficients per Gaussian and 5 hoisted pixel terms per thread [S1, unofficial]. Not given in the sources.
++*   **Performance:** Improves instruction scheduling and reduces register pressure by hoisting invariant terms [S1, unofficial]. Measured on hardware supporting efficient FMA operations [G]. Specific performance metrics are not given in the sources.
++*   **Strengths:** Reduced instruction overhead, better instruction scheduling, efficient use of registers [S1, unofficial].
++*   **Limitations:** Requires careful handling of opacity folding and precision [G]. Assumes fixed pixel assignment per thread [S1, unofficial].
++*   **When to use:** When rendering 3D Gaussians with high throughput requirements and hardware supports efficient FMA operations [G].
++*   **When not to use:** If pixel coordinates are not invariant within the primitive loop (e.g., dynamic pixel assignment) [G].
+ 
+ ## Background
+-RoofGS (Roofline-Guided End-to-End Acceleration of 3D Gaussian Splatting) was introduced in 2026 [S1, unofficial]. The quadratic form expansion and coefficient folding technique is a core optimization within RoofGS, designed to address the instruction overhead of standard Gaussian rasterization. It builds on the principles of 3D Gaussian Splatting [2812-3d-gaussian-splatting-rasterization.md] but focuses on low-level rendering loop optimization.
++RoofGS (Roofline-Guided End-to-End Acceleration of 3D Gaussian Splatting) is a rendering optimization framework [S1, unofficial]. The quadratic form expansion and coefficient folding technique is a core optimization within RoofGS, designed to address the instruction overhead of standard Gaussian rasterization [S1, unofficial]. It builds on the principles of 3D Gaussian Splatting [2813-3d-gaussian-splatting-differentiable-rasterizer.md] but focuses on low-level rendering loop optimization [S1, unofficial].
+ 
+ ## Sources

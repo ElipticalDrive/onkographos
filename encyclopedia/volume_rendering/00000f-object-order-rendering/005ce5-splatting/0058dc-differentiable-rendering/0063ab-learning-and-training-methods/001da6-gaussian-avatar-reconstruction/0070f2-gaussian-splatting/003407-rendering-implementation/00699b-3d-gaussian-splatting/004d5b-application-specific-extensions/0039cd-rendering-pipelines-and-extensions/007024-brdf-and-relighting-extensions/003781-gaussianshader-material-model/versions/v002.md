@@ -1,0 +1,67 @@
+# GaussianShader Material Model
+
+Also called: GaussianShader
+
+## Overview
+GaussianShader enhances 3D Gaussian Splatting (3DGS) by incorporating trainable material parameters—diffuse color, specular intensity, roughness, and surface normal—alongside a global environment map to enable physically-based rendering (PBR) [S1]. It distinguishes itself from standard 3DGS by binding these material properties directly to the Gaussian kernels, allowing for the accurate modeling of specular reflections and complex lighting interactions that standard opacity-based splatting cannot capture [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view images of a 3D scene; initial 3DGS parameters (position, covariance, opacity); background mask for foreground/background separation [S1].
+*   **Outputs:** Rendered images; optimized Gaussian parameters including material attributes [S1].
+
+**Data Structures:**
+Each Gaussian kernel $p$ stores the following trainable parameters:
+*   Position: $\mathbf{x}_p$
+*   Opacity: $\sigma_p$
+*   Covariance: $\mathbf{A}_p$
+*   Diffuse color: $\mathbf{d}_p$
+*   Specular intensity: $\mathbf{s}_p$
+*   Roughness: $\rho_p$
+*   Surface normal: $\mathbf{n}_p$ [S1]
+
+**Rendering Formula:**
+The color $\mathbf{c}_p$ of a kernel is computed by fusing diffuse and specular components based on the view direction $\mathbf{r}_i$ from the camera to pixel $i$:
+
+$$
+\mathbf{c}_p(\mathbf{r}_i) = \mathbf{d}_p + \mathbf{s}_p \odot \mathbf{L}_s(\mathbf{r}_i, \mathbf{n}_p, \rho_p)
+$$
+
+Where:
+*   $\odot$ denotes element-wise multiplication [S1].
+*   $\mathbf{L}_s(\mathbf{r}_i, \mathbf{n}_p, \rho_p)$ is the specular light contribution for the kernel along view direction $\mathbf{r}_i$, determined by the kernel's normal $\mathbf{n}_p$ and roughness $\rho_p$ [S1].
+*   $\mathbf{L}_s$ is pre-filtered into multiple mip maps to approximate the environment lighting efficiently [S1].
+
+**Algorithm Steps:**
+1.  **Preprocessing:** Separate foreground objects from the background in input images and extract the surface of masked objects [S1].
+2.  **Initialization:** Initialize 3D Gaussian kernels with position, covariance, and opacity. Assign initial material parameters $\{\mathbf{d}_p, \mathbf{s}_p, \rho_p, \mathbf{n}_p\}$ [S1].
+3.  **Shading:** For each Gaussian kernel, compute its color $\mathbf{c}_p$ using the PBR formula above, utilizing the global environment map for $\mathbf{L}_s$ [S1].
+4.  **Splatting:** Project the shaded Gaussians to 2D and splat them to the image plane, weighting by the 2D Gaussian weight $G_k(i)$ at pixel $i$ [S1].
+5.  **Loss Calculation:** Compare the rendered image with the ground truth training view. Compute a loss function (typically including photometric loss and potentially anisotropy loss to mitigate undesired splatting artifacts near surfaces) [S1].
+6.  **Optimization:** Back-propagate the loss to update all trainable parameters $\{\mathbf{x}_p, \sigma_p, \mathbf{A}_p, \mathbf{d}_p, \mathbf{s}_p, \rho_p, \mathbf{n}_p\}$ using differentiable rendering [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Over-stretching:** Gaussian kernels may become over-stretched during training, causing rendering artifacts near surfaces. An anisotropy loss is applied to mitigate this [S1].
+*   **Reflective Scenes:** Standard Gaussian orientation may fail in challenging reflective scenes. Normal orientation constraints are added to ensure physically plausible surface normals [S2, unofficial].
+
+## Subtopics
+
+### RelightableGaussian
+A method that separately models texture and lighting to enable independent editing [S2, unofficial]. It defines additional material parameters on each Gaussian to represent texture and approximates lighting using a learnable environment map [S2, unofficial].
+
+### GIR (Inverse Rendering with Gaussians)
+A method sharing the same disentanglement paradigm as GaussianShader by binding material parameters to 3D Gaussians [S2, unofficial]. It specifically addresses challenging reflective scenes by adding normal orientation constraints to Gaussians, similar to Ref-NeRF [S2, unofficial].
+
+## Operating characteristics
+*   **Complexity:** Rendering complexity is similar to 3DGS, dominated by the splatting process, but shading computation per kernel is higher due to PBR evaluation [S1].
+*   **Strengths:** Enables physically accurate specular reflections and material editing; supports simulation of interactions between solids and fluids by providing accurate visual attributes [S1].
+*   **Limitations:** Requires optimization of additional material parameters, increasing training complexity; sensitive to normal orientation in reflective scenes without constraints [S1][S2, unofficial].
+*   **When to use:** When physically-based material properties and specular reflections are required, or when simulating fluid-solid interactions where accurate shading is critical [S1].
+*   **When not to use:** For simple diffuse scenes where standard 3DGS suffices, or when computational resources for optimizing additional material parameters are limited.
+
+## Background
+GaussianShader was introduced to address the limitations of standard 3DGS in modeling specular reflections and complex lighting [S1]. It builds on the differentiable 3DGS pipeline and PBR principles, allowing material parameters to be optimized alongside geometric attributes [S1]. The approach is part of a broader trend in 3DGS research to disentangle texture and lighting for better control and physical accuracy [S2, unofficial].
+
+## Sources
+[S1] Gaussian Splashing: Unified Particles for Versatile Motion Synthesis and Rendering, https://doi.org/10.1109/CVPR52734.2025.00057, fetched 2026-10-29
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

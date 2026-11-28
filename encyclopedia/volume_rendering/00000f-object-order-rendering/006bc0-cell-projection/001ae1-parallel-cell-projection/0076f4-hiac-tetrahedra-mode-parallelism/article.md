@@ -1,0 +1,137 @@
+# HIAC Tetrahedra Mode Parallelism
+
+Also called: tetrahedra mode, tetrahedron only mode
+
+## Overview
+HIAC Tetrahedra Mode Parallelism is a parallel volume rendering method for meshes composed of tetrahedra, using Pthreads for shared-memory processing on SGI systems. It involves sorting cells by visibility, projecting them onto the view plane, decomposing projections into triangles, and rendering via OpenGL. It differs from its sibling, [Asynchronous Communication Task Management](3656-asynchronous-communication-task-management.md), by using a buffer-swapping mechanism with a dedicated Communicator thread rather than asynchronous task queues. It differs from its parent, [Parallel Cell Projection](875-parallel-cell-projection.md), by explicitly requiring tetrahedral decomposition and handling the specific geometry of tetrahedra projections.
+
+## How it works
+**Inputs and Outputs:**
+*   Input: A global array of tetrahedral cells, each with vertex positions, colors, and texture coordinates.
+*   Output: A rendered image via OpenGL calls.
+
+**Data Structures:**
+1.  **sort_projection buffers:** Two integer arrays used to transfer cell indices from the sort thread to projection threads. Access is restricted by semaphores.
+2.  **projection_render arrays:** Two arrays storing projection and rendering data. Access is restricted by semaphores. Each entry contains:
+    *   Shirley-Tuchman case identifier.
+    *   Vertex positions.
+    *   Color information.
+    *   Texture information.
+    *   Triangle decomposition data.
+
+**Steps:**
+1.  **Sort:** A single sort thread sorts the global array of cells in visibility order. It stores the sorted indices into one of the `sort_projection` buffers.
+2.  **Buffer Swap & Wake:** Once the `sort_projection` buffer is full, the buffers are swapped. A dedicated thread, the **Communicator**, wakes up the projection threads.
+3.  **Project:** Each projection thread pulls work from a non-overlapping section of the `sort_projection` buffer to gain locality of memory references.
+    *   The thread projects the tetrahedra onto the view plane.
+    *   The thread decomposes the projections into triangles.
+    *   For each tetrahedron, the thread records the Shirley-Tuchman case [S1, Ref 12] and all vertex, color, and texture information needed for rendering.
+    *   This information is stored in one of the two `projection_render` arrays.
+4.  **Render:** While projection threads fill one `projection_render` array, a render thread uses the information stored in the other array to issue OpenGL calls.
+
+**Parameters:**
+*   Optimal number of projection threads: 5 or 6 [S1].
+
+**Pitfalls:**
+*   Performance is limited by NUMA memory bandwidth when sending color and vertex information from projection threads to the rendering thread [S1]. This causes speedup curves to flatten out for fewer processors compared to zoo mode [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global state
+sort_projection_buffers = [Buffer(), Buffer()] # Two integer arrays
+projection_render_arrays = [Buffer(), Buffer()] # Two data arrays
+sort_semaphore = Semaphore(1)
+render_semaphore = Semaphore(1)
+buffer_swap_semaphore = Semaphore(1)
+current_sort_buffer_idx = 0
+current_render_buffer_idx = 0
+
+def sort_thread():
+    global current_sort_buffer_idx
+    sorted_cells = sort_global_cells_by_visibility()
+    buffer_idx = current_sort_buffer_idx
+    
+    # Fill the current sort_projection buffer
+    for cell in sorted_cells:
+        sort_projection_buffers[buffer_idx].append(cell.index)
+        if sort_projection_buffers[buffer_idx].is_full():
+            break
+            
+    if sort_projection_buffers[buffer_idx].is_full():
+        # Swap buffers
+        buffer_swap_semaphore.acquire()
+        current_sort_buffer_idx = 1 - current_sort_buffer_idx
+        buffer_swap_semaphore.release()
+        
+        # Wake up Communicator
+        wake_up_communicator()
+
+def communicator_thread():
+    while True:
+        wait_for_sort_buffer_full()
+        # Wake up projection threads
+        wake_up_projection_threads()
+
+def projection_thread(thread_id):
+    while True:
+        wait_for_wake_up()
+        
+        # Pull work from non-overlapping section for locality
+        start_idx, end_idx = get_non_overlapping_section(thread_id)
+        
+        for i in range(start_idx, end_idx):
+            cell_index = sort_projection_buffers[1 - current_sort_buffer_idx].get(i)
+            tetrahedron = get_tetrahedron(cell_index)
+            
+            # Project and decompose
+            case = compute_shirley_tuchman_case(tetrahedron)
+            triangles = decompose_projection(tetrahedron)
+            
+            # Gather data
+            data = {
+                'case': case,
+                'vertices': tetrahedron.vertices,
+                'colors': tetrahedron.colors,
+                'textures': tetrahedron.textures,
+                'triangles': triangles
+            }
+            
+            # Store in projection_render array
+            projection_render_arrays[current_render_buffer_idx].append(data)
+
+def render_thread():
+    while True:
+        wait_for_projection_data()
+        
+        # Use the OTHER buffer (the one not being filled)
+        render_buffer_idx = 1 - current_render_buffer_idx
+        
+        for data in projection_render_arrays[render_buffer_idx]:
+            issue_opengl_calls(data)
+            
+        # Swap render buffers when projection is done
+        buffer_swap_semaphore.acquire()
+        current_render_buffer_idx = 1 - current_render_buffer_idx
+        buffer_swap_semaphore.release()
+```
+
+## Subtopics
+
+### [HIAC Zoo-Mesh Mode Parallelism](23615-hiac-zoo-mesh-mode-parallelism.md)
+HIAC Zoo-Mesh Mode Parallelism is a parallel volume rendering method for meshes composed of arbitrary polyhedra ("zoo elements") that uses work quanta for load balancing between sort, projection, and render threads. It differs from its parent, [HIAC Tetrahedra Mode Parallelism](23614-hiac-tetrahedra-mode-parallelism.md), by supporting general cell geometry rather than requiring tetrahedral decomposition, thereby reducing the total triangle count at the cost of increased per-cell projection complexity.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** On a dataset with 299,000 hexahedral cells (308,190 after subdivision), using method M0 and classification, 1 projection thread took 81.6 seconds, while 18 threads took 7.6 seconds [S1].
+*   **Scaling:** Optimal number of projection threads is 5 or 6, resulting in run-time roughly half that of a single thread [S1].
+*   **Strengths:** Locality of memory references is gained by assigning non-overlapping sections of the sort buffer to each projection thread [S1].
+*   **Limitations:** Performance is limited by NUMA memory bandwidth when sending color and vertex information from projection threads to the rendering thread, causing speedup curves to flatten out for fewer processors compared to zoo mode [S1].
+
+## Background
+The method was developed for use on SGI systems using Pthreads for shared-memory processing [S1]. It is part of the HIAC (High Accuracy Hardware-Assisted) volume renderer family. The method relies on the Shirley-Tuchman case classification for tetrahedra projection [S1, Ref 12].
+
+## Sources
+[S1] Parallelizing a High Accuracy Hardware-Assisted Volume Renderer for Meshes with Arbitrary Polyhedra, https://digital.library.unt.edu/ark:/67531/metadc1406332/?q=texture slicing volume rendering, fetched 2026-10-28

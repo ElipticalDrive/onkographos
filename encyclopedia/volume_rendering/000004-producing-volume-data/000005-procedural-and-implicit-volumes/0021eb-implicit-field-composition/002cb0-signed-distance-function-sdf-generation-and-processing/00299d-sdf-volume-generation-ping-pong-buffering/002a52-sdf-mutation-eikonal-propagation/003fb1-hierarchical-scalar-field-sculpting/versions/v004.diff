@@ -1,0 +1,346 @@
+--- v003.md
++++ v004.md
+@@ -4,195 +4,185 @@
+ 
+ ## Overview
+-Hierarchical Scalar Field Sculpting is a method for interactive 3D modeling where the user modifies a scalar field representing material density using localized tools [S1]. It solves the trade-off between global resolution limits and interactive performance by using an adaptive hierarchical grid (ntree) that subdivides only where necessary [S1]. It differs from fixed-resolution sculpting by allowing local refinement to capture tool details, and from pure octree methods by using a fixed $n=4$ subdivision factor and direct subsampling of field values to ensure vertical independence between hierarchy levels [S1].
++Hierarchical Scalar Field Sculpting is a procedural volume modeling technique that allows interactive modification of a scalar field representing volumetric material density [S1]. It solves the trade-off between modeling detail and interactive performance by using an adaptive hierarchical grid that refines only where the sculpting tool influences the field [S1]. It sets itself apart from fixed-resolution voxel sculpting by dynamically adjusting sampling density based on tool proximity and field complexity, and from pure implicit surface modeling by maintaining an explicit, editable volume buffer that supports direct Boolean-like operations and localized updates [S1].
+ 
+ ## How it works
++**Inputs and Outputs:**
++*   **Input:** A hierarchical scalar field representation, a sculpting tool (defined by position, orientation, scale, and shape), and an action (defining how the tool modifies the field, e.g., Add, Subtract).
++*   **Output:** An updated scalar field with modified vertex values, gradients, and colors, potentially with a refined hierarchical structure.
+ 
+-### Inputs and Outputs
+-*   **Input:** A hierarchical scalar field representation (ntree), a Tool (scalar field function), and an Action (combination logic) [S1].
+-*   **Output:** Modified scalar field values, gradients, and colors at the vertices of the ntree structure [S1].
++**Data Structures:**
++1.  **Vertex:** Stores the scalar field value, field gradient, and color [S1].
++2.  **ntree Cell:** A hierarchical node structure. A Cell contains its own Vertices and a list of sub-cells (children) [S1]. The structure uses a constant subdivision factor $n=4$ per dimension [S1]. Unlike octrees, Cells are enriched with successors rather than replaced, resembling Recursive Grids [S1].
++3.  **Vertex Cache:** An STL hash map indexed by memory addresses of Vertices. It maps the Vertex state (field value, gradient, color) prior to the current tool's modification [S1]. One cache is created per Tool-Action application pair [S1].
+ 
+-### Data Structures
++**Parameters:**
++*   **Field Clamping Range:** $[0, 3]$ [S1]. Values are clamped to prevent negative fields (which block new material creation) and excessive positive fields (which block material removal) [S1].
++*   **Iso-value:** $1.5$ defines the object's surface [S1].
++*   **Min Resolution:** The largest cell size allowed, determined by the tool's minimum security cell size to capture features [S1].
++*   **Max Resolution:** The smallest cell size allowed, determined by a constant factor of the tool's scale to prevent infinite subdivision loops caused by discontinuities [S1].
++*   **Acceptable Discrepancy:** A threshold for `estimateDiscrepancy()` to determine if further subdivision is necessary [S1].
+ 
+-**Vertex Structure**
+-Stores the state of a sampling point in the regular grid basis [S1].
+-*   `field_value`: Scalar density value.
+-*   `gradient`: Vector gradient of the field.
+-*   `color`: Color attribute.
+-*   `timestamp`: Used to prevent redundant updates on shared vertices [S1].
+-
+-**ntree Cell Structure**
+-A hierarchical space partitioning structure resembling Recursive Grids [S1].
+-*   `children`: A set of sub-cells (successors). Unlike octrees where nodes are replaced, cells are enriched with children [S1].
+-*   `subdivision_factor`: Fixed at $n=4$ per dimension [S1].
+-*   `size`: Current cell dimension.
+-*   `vertices`: References to Vertex nodes. Vertices are shared among common faces or edges between adjacent Cells of the same level to reduce memory overhead [S1].
+-
+-**Vertex Cache**
+-*   Implemented as a hash map indexed by the memory addresses of Vertices [S1].
+-*   Maps the Vertex state (field value, gradient, color) *prior* to the current tool's modification [S1].
+-*   One cache is created per Tool-Action application couple to support interpolation during subdivision and undo operations [S1].
+-
+-### The Tool: Wyvill's Ellipsoidal Field
+-The tool is a scalar field $f(p)$ positioned, oriented, and scaled [S1]. The implementation uses Wyvill's field function, which is computationally cheap (uses squared distance), has a spatially limited domain of influence, and is bell-shaped with $C^1$ variations for smooth blending [S1].
+-
++**Tool Definition (Wyvill's Field Function):**
++The tool is an ellipsoidal scalar field based on Wyvill's function [S1]. For a query point $p$, let $d^2$ be the squared distance from the tool's center (normalized by the tool's scale) [S1]. The field value $f(p)$ is:
+ $$
+ f(p) = \begin{cases} 
+-0 & \text{if } d \ge 1 \\
+-3 \cdot \left( 1 - \frac{2}{9}d^2 + \frac{7}{9}d^4 - \frac{4}{9}d^6 \right) & \text{otherwise}
++0 & \text{if } d^2 \ge 1 \\
++3 \cdot \left( 1 - \frac{2}{9}d^2 + \frac{17}{9}d^4 - \frac{4}{9}d^6 \right) & \text{otherwise}
+ \end{cases}
+ $$
++This function is computationally cheap (uses squared distance), has a spatially limited domain of influence, and is bell-shaped with $C^1$ variations for smooth blending [S1].
+ 
+-Where $p$ is the query point and $d^2$ is the squared distance from the tool center, normalized by the tool's scale [S1].
++**Algorithm Steps:**
+ 
+-### The Action
+-An Action takes a Tool and a Vertex as arguments [S1]. It computes the tool's contribution at the vertex and combines it with current vertex attributes [S1].
+-*   **AddAction Example:**
+-    1.  Compute tool value $v_t = \text{Tool}(v.\text{position})$ [S1].
+-    2.  Compute new field value $v_{new} = v.\text{field\_value} + v_t$ [S1].
+-    3.  Clamp $v_{new}$ between 0 and 3 [S1].
+-    4.  Use $v.\text{field\_value}$ and $v_{new}$ as weights to sum up attributes (gradient, color) [S1].
+-    5.  Update vertex attributes [S1].
++1.  **Initialization:** Create a Vertex Cache for the current Tool-Action pair. Store the current state of all affected Vertices in the cache [S1].
++2.  **Apply Tool (Recursive):** Call `Cell::apply(Tool t, Action a)` on the root Cell [S1].
++    *   For each Vertex $v$ in the current Cell, call `a.update(t, v)` [S1].
++    *   If the Cell has no children, call `checkSubdivide(t)` [S1].
++    *   If the Cell has children, recursively call `child.apply(t, a)` for each child [S1].
++3.  **Subdivision Check:** In `Cell::checkSubdivide(Tool t)`:
++    *   If `Cell.size > t.getMinResolution()`, call `subdivide()` [S1].
++    *   Else, if `Cell.size < t.getMaxResolution()`:
++        *   If `estimateDiscrepancy() > acceptableDiscrepancy`, call `subdivide()` [S1].
++4.  **Subdivision Logic:**
++    *   Create sub-cells with subdivision factor $n=4$ [S1].
++    *   Share Vertex nodes among common faces or edges between adjacent Cells of the same level to minimize memory and update costs [S1].
++    *   Initialize new Vertices in sub-cells by interpolating the field values from the parent Cell's Vertices *as they were before the current tool application* (retrieved from the Vertex Cache) [S1]. This ensures the tool's modification is correctly added to the refined geometry [S1].
++5.  **Simplification Pass (Idle):** At idle moments, perform a simplification pass over the whole field [S1]. Destroy every Cell that does not cross the surface (iso-value 1.5) and whose children also do not cross the surface [S1]. This pass cannot be interleaved with subdivision because finer levels might add details that require coarser levels to remain [S1].
+ 
+-### Parameters
+-*   **Field Clamping Range:** $[0, 3]$. Prevents negative values (which would block material creation) and excessive positive values (which would block material removal) [S1].
+-*   **Iso-value:** 1.5. Defines the object's surface [S1].
+-*   **Min Resolution:** The smallest cell size to reach to capture tool features [S1].
+-*   **Max Resolution:** The largest cell size (smallest depth) not to overpass [S1]. Prevents infinite subdivision loops caused by subtractive tools creating discontinuities [S1]. Expressed as a constant factor depending on the tool's scale [S1].
+-
+-### Algorithm Steps
+-
+-1.  **Initialization:** Create a Vertex Cache storing the current state of all vertices in the affected region [S1].
+-2.  **Apply Tool (Recursive):**
+-    *   For the current Cell, iterate over all its Vertices [S1].
+-    *   Apply the Action: `a.update(t, v)` [S1].
+-    *   If the Cell has no children, test for subdivision (`checkSubdivide`) [S1].
+-    *   If the Cell has children, recursively apply the tool to all children [S1].
+-3.  **Subdivision Test (`checkSubdivide`):**
+-    *   If `Cell.size > t.getMinResolution()`: Subdivide the cell [S1].
+-    *   Else if `Cell.size < t.getMaxResolution()`:
+-        *   Estimate discrepancy. If `discrepancy > acceptableDiscrepancy`: Subdivide [S1].
+-    *   *Note:* Subdivision creates new vertices [S1]. These are initialized by interpolating the *cached pre-update* field values from the parent level to ensure the tool's modification is added correctly on top of the previous state [S1].
+-4.  **Simplification Pass (Idle):**
+-    *   Conducted separately at idle moments [S1].
+-    *   Destroys every Cell that does not cross the surface (iso-value 1.5) AND whose children do not cross the surface [S1].
+-    *   Cannot be done during active interaction because finer levels might add surface details that would be lost if coarser levels were simplified prematurely [S1].
+-
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
+-def apply_tool(cell, tool, action):
+-    """Recursively applies a tool to a cell and its children. Updates vertices first, then recurses to children."""
+-    for vertex in cell.vertices:
+-        action.update(tool, vertex)
+-    if not cell.has_children():
+-        check_subdivide(cell, tool)
+-    if cell.has_children():
+-        for child in cell.children:
+-            apply_tool(child, tool, action)
++class Vertex:
++    def __init__(self, field_value, gradient, color):
++        self.field_value = field_value
++        self.gradient = gradient
++        self.color = color
+ 
+-def check_subdivide(cell, tool):
+-    """Determines if a cell should be subdivided based on resolution limits and discrepancy estimation."""
+-    if cell.size > tool.get_min_resolution():
+-        subdivide(cell)
+-    elif cell.size < tool.get_max_resolution():
+-        if estimate_discrepancy(cell) > acceptable_discrepancy:
+-            subdivide(cell)
++class Cell:
++    def __init__(self, vertices, children=None):
++        self.vertices = vertices  # List of Vertex objects
++        self.children = children  # List of Child Cells
++        self.size = 1.0  # Placeholder for cell size
+ 
+-def subdivide(cell):
+-    """Subdivides a cell into n=4 sub-cells per dimension. Shares vertices on common faces/edges. Initializes new vertices using cached pre-update values."""
+-    # [G] Standard grid wiring: create 64 sub-cells and share vertex references on common faces/edges
+-    new_children = create_sub_cells(cell)
+-    wire_shared_vertices(new_children)
+-    
+-    # Initialize new vertices with interpolated pre-update values from the parent cell's state in the vertex cache
+-    for child in new_children:
+-        for vertex in child.vertices:
+-            if vertex.is_new:
+-                cached_state = vertex_cache[vertex.address]
+-                vertex.field_value = interpolate(cached_state, cell)
+-                vertex.gradient = interpolate_gradient(cached_state, cell)
+-                vertex.color = interpolate_color(cached_state, cell)
+-    cell.children = new_children
++    def apply(self, tool, action):
++        # Update current level vertices
++        for v in self.vertices:
++            action.update(tool, v)
++        
++        # Check subdivision if leaf
++        if not self.children:
++            self.check_subdivide(tool)
++        else:
++            # Recurse to children
++            for child in self.children:
++                child.apply(tool, action)
+ 
+-def simplify_field(root_cell):
+-    """Idle pass to remove unnecessary cells."""
+-    if not is_surface_crossing(root_cell):
+-        if not any(is_surface_crossing(child) for child in root_cell.children):
+-            destroy_cell(root_cell)
+-        else:
+-            for child in root_cell.children:
+-                simplify_field(child)
++    def check_subdivide(self, tool):
++        min_res = tool.get_min_resolution()
++        max_res = tool.get_max_resolution()
++        
++        if self.size > min_res:
++            self.subdivide()
++        elif self.size < max_res:
++            # Estimate discrepancy based on tool influence and field variation
++            discrepancy = self.estimate_discrepancy()
++            if discrepancy > tool.get_acceptable_discrepancy():
++                self.subdivide()
+ 
+-def destroy_cell(cell):
+-    """Removes the cell from its parent's children list and deletes references."""
+-    if cell.parent:
+-        cell.parent.children.remove(cell)
+-    del cell
++    def subdivide(self):
++        # Create 4x4x4 sub-cells (n=4)
++        new_children = []
++        # Interpolate initial values from parent vertices using cached pre-update state
++        # This step is implementation-specific but relies on Vertex Cache
++        for i in range(4):
++            for j in range(4):
++                for k in range(4):
++                    child_vertices = interpolate_from_cache(self.vertices, i, j, k)
++                    new_children.append(Cell(child_vertices))
++        
++        # Share vertices between adjacent new cells
++        share_vertices_between_adjacent_cells(new_children)
++        
++        self.children = new_children
++        self.size /= 4
+ 
+-# Helper definitions (standard operations or source comments)
+-def create_sub_cells(cell):
+-    """Creates 64 sub-cells (4x4x4) for the given cell."""
+-    return [Cell(size=cell.size/4, parent=cell) for _ in range(64)]
++class WyvillTool:
++    def __init__(self, position, scale):
++        self.position = position
++        self.scale = scale
++        self.min_resolution = scale * 0.1  # Example constant factor
++        self.max_resolution = scale * 0.01 # Example constant factor
++        self.acceptable_discrepancy = 0.1
+ 
+-def wire_shared_vertices(children):
+-    """Shares vertex references on common faces/edges between adjacent children."""
+-    # [G] Standard grid wiring: map vertex coordinates to shared instances to ensure updates propagate correctly
++    def get_field_value(self, point):
++        d_squared = squared_distance(point, self.position) / (self.scale ** 2)
++        if d_squared >= 1.0:
++            return 0.0
++        # Wyvill's polynomial
++        val = 3.0 * (1.0 - (2.0/9.0)*d_squared + (17.0/9.0)*(d_squared**2) - (4.0/9.0)*(d_squared**3))
++        return val
++
++    def get_min_resolution(self):
++        return self.min_resolution
++
++    def get_max_resolution(self):
++        return self.max_resolution
++
++    def get_acceptable_discrepancy(self):
++        return self.acceptable_discrepancy
++
++class AddAction:
++    def update(self, tool, vertex):
++        tool_val = tool.get_field_value(vertex.position)
++        # Combine tool contribution with current vertex attributes
++        # Use values as weights to sum up attributes like gradient and color
++        # Clamp field value between 0 and 3
++        new_field = vertex.field_value + tool_val
++        vertex.field_value = clamp(new_field, 0.0, 3.0)
++        # Update gradient and color based on tool_val as weight [S1]
++        # ... implementation details for gradient/color blending ...
++
++def clamp(value, min_val, max_val):
++    if value < min_val: return min_val
++    if value > max_val: return max_val
++    return value
++
++def squared_distance(p1, p2):
++    return sum((a - b) ** 2 for a, b in zip(p1, p2))
++
++def interpolate_from_cache(vertices, i, j, k):
++    # Retrieve pre-update values from Vertex Cache
++    # Interpolate spatially to create new vertex positions and initial field values
++    # This ensures the tool's modification is additive to the refined geometry
+     pass
+ 
+-def interpolate(cached_state, cell):
+-    """Linear interpolation of field value from parent cached state."""
+-    # [G] Standard barycentric/linear interpolation from parent vertices
+-    return cached_state.field_value
+-
+-def interpolate_gradient(cached_state, cell):
+-    """Linear interpolation of gradient from parent cached state."""
+-    # [G] Standard vector interpolation
+-    return cached_state.gradient
+-
+-def interpolate_color(cached_state, cell):
+-    """Linear interpolation of color from parent cached state."""
+-    # [G] Standard vector interpolation
+-    return cached_state.color
+-
+-def estimate_discrepancy(cell):
+-    # Not given in the sources. Standard practice computes field value variance or gradient magnitude across the cell's vertices.
+-    return 0.0  # [G] Placeholder value for implementation
+-
+-def is_surface_crossing(cell):
+-    # [G] Standard marching cubes/contour check: returns True if cell vertices bracket the iso-value 1.5
+-    return False
+-
+-acceptable_discrepancy = 0.1  # [G] Threshold constant
++def share_vertices_between_adjacent_cells(cells):
++    # Wire shared structures between adjacent cells
++    # Updates cost only a timestamp comparison
++    pass
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Irreversibility:** Field clamping makes the operation non-invertible. Reverse actions cannot simply subtract the tool value [S1]. The Vertex Cache is required to store pre-update states for correct interpolation during subdivision and for Undo operations [S1].
+-*   **Infinite Subdivision:** Subtractive tools can create discontinuities [S1]. The `Max Resolution` limit prevents infinite subdivision loops [S1].
+-*   **Shared Vertex Updates:** When subdividing, shared vertices between adjacent cells must be updated only once [S1]. A timestamp comparison prevents redundant computations [S1].
+-*   **Undo Mechanism:** Undo is treated as a special Action [S1]. Undo files store modified vertex addresses (not memory pointers, as vertices may be reallocated) [S1]. The undo action uses the current tool's contribution to weight the reversal, enabling "Progressive Undo" and "Local Undo" [S1].
++**Edge Cases and Pitfalls:**
++*   **Infinite Subdivision:** Subtractive tools can create discontinuities, leading to infinite subdivision. Mitigated by `Max Resolution` [S1].
++*   **Irreversibility:** Field clamping makes the tool application non-reversible. Mitigated by explicit Vertex Caching of pre-update states [S1].
++*   **Simplification Timing:** Simplification cannot occur during subdivision because finer levels might add details. It must be done in a separate pass at idle moments [S1].
++*   **Update Order:** Coarser levels must be updated first to provide interactive visual feedback. This requires careful initialization of new vertices from cached pre-update values [S1].
+ 
+ ## Subtopics
+ 
+-### Volume Sculpting
+-A free-form interactive modeling technique based on sculpting and painting a voxel-based solid material, allowing exploration of inner structures by gradually removing material [S2, unofficial]. Carving positions a pre-existing volume-sampled tool relative to the object and performs a Boolean subtraction between the two independent volume buffers [S2, unofficial]. Sawing generates a volume-sampled tool on-the-fly using a user interface to remove a whole chunk of material at once [S2, unofficial]. To prevent object space aliasing and achieve interactive speed during sawing, 3D splatting is employed [S2, unofficial]. Localized rendering is used to reproject only pixels affected by the localized sculpting actions (carving/sawing) [S2, unofficial].
++### [Volume Sculpting](11209-volume-sculpting.md)
++Volume sculpting is a free-form interactive modeling technique based on the metaphor of sculpting and painting a voxel-based solid material, such as a block of marble or wood. It solves the difficulty of modeling topologically complex and highly-detailed objects in traditional CAD systems and enables scientists and physicians to explore inner structures of volumetric datasets by gradually removing material. It sets itself apart from surface-based sculpting by operating directly on the volume buffer, allowing for localized rendering updates and Boolean operations between independent volume buffers.
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** Interactive visual feedback (updating coarse levels first), smooth blending ($C^1$ continuity), local detail capture [S1].
+-*   **Limitations:** Simplification is drastic (destroys non-surface cells), requires explicit caching for subdivision correctness, fixed subdivision factor ($n=4$) may not be optimal for all shapes [S1].
+-*   **When to use:** Interactive sculpting of organic shapes where local detail is needed without global high resolution [S1].
+-*   **When not to use:** When strict topological control is required (simplification is destructive), or when the scene is static and pre-computed [S1].
++*   **Time Complexity:** Depends on the number of active cells and vertices. Tool application is recursive, visiting only cells within the tool's domain of influence. Subdivision adds overhead but is bounded by resolution limits. Simplification is a global pass but occurs at idle moments [S1].
++*   **Memory Complexity:** Proportional to the number of vertices and cells in the active region. Vertex sharing reduces memory usage for adjacent cells [S1].
++*   **Performance:** Provides interactive visual feedback by updating coarser levels first [S1]. The use of Wyvill's function (squared distance) is computationally cheap [S1].
++*   **Strengths:** Adaptive resolution captures fine details where needed; direct volume manipulation allows for complex Boolean operations and inner structure exploration; smooth blending due to $C^1$ continuity of the tool function [S1].
++*   **Limitations:** Simplification is drastic and global; requires careful management of vertex caching for undo and subdivision initialization; not given in the sources for specific hardware performance metrics.
+ 
+ ## Background
+-
+-*   **Origin:** Proposed by Eric Ferley, Marie-Paule Cani, and Jean-Dominique Gascuel [S1].
+-*   **Paper:** "Resolution Adaptive Volume Sculpting" (2001/2002) [S1].
+-*   **History:** Builds on earlier work using hash-based grids for unlimited spatial extent. The method was developed to allow interactive editing of complex sculptures by adapting resolution to the tool's influence [S1].
+-*   **Usage:** Used in 3D modeling software for sculpting organic shapes, particularly in academic research on implicit surface modeling [S1].
++Hierarchical Scalar Field Sculpting, also known as Resolution Adaptive Volume Sculpting, was introduced by Eric Ferley, Marie-Paule Cani, and Jean-Dominique Gascuel [S1]. The method builds on earlier work in tool-guided sculpting and hierarchical scalar field representations [S1]. It addresses the limitations of fixed-resolution voxel grids in interactive modeling by introducing adaptive subdivision [S1]. The technique is used in volumetric modeling systems for creating complex sculptures and editing mesh-converted models [S1].
+ 
+ ## Sources
+-
+ [S1] Resolution Adaptive Volume Sculpting, https://doi.org/10.1006/gmod.2001.0558, fetched 2026-10-26
+-[S2] PDF Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)+[S2] Volume Sculpting, book, Not given in the sources.

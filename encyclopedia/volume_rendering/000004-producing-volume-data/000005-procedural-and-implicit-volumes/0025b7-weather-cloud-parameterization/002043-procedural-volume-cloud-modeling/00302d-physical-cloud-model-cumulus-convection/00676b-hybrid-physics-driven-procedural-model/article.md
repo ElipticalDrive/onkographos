@@ -1,0 +1,185 @@
+# Hybrid Physics-Driven Procedural Model
+
+Also called: Macro-Physics Micro-Rendering, Lagrangian Macro-Parcel Cloud Simulation, Lagrangian framework for clouds, Parcel-based cloud simulation
+
+## Overview
+The Hybrid Physics-Driven Procedural Model is a real-time method for simulating and rendering cumulus clouds on a landscape scale by combining macro-level Lagrangian physics with micro-level procedural rendering [S1, S2]. It solves the problem of generating physically plausible, animated cloud shapes and movement efficiently by representing the atmosphere implicitly and computing physics on a few large "macro parcels" rather than individual fluid elements [S1, S2]. Unlike pure procedural noise methods, it explicitly models buoyancy, condensation, and parcel interactions [S1]; unlike full fluid dynamics, it remains computationally inexpensive enough for real-time frame rates by decoupling the physics solver from the high-resolution renderer [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** User-defined atmospheric profiles (temperature and humidity as functions of altitude), initial mixing ratio, condensation level altitude, and saturation ratio [S1, S2].
+*   **Outputs:** A real-time rendered image of cumulus clouds over a landscape, driven by the positions, masses, and radii of simulated macro parcels [S1, S2].
+
+**Data Structures:**
+*   **Atmosphere Profile:** Implicit representation using curves or lookup tables providing temperature $T(z)$ and humidity $H(z)$ as a function of altitude $z$ [S1, S2].
+*   **Macro Parcel:** A Lagrangian entity representing a bulk volume of air. Key fields include:
+    *   Position $\mathbf{p}$ (3D vector)
+    *   Velocity $\mathbf{v}$ (3D vector)
+    *   Mass $m$ (scalar, specifically water mass content)
+    *   Radius $r$ (scalar)
+    *   Temperature $T$ (scalar)
+    *   Tessellation: A coarse mesh (e.g., $18 \times 9$) used for computing surface area exposed to the environment for mixing calculations [S2].
+*   **Cloud Map (Variant):** A precomputed texture of noise used to govern cloud shapes and coverage, projected from parcel attributes [S1].
+
+**Parameters:**
+*   **Environment Dimensions:** Default $10 \text{ km} \times 10 \text{ km} \times 10 \text{ km}$, but flexible and user-modifiable [S2].
+*   **Air Density ($\rho_0$):** Approximately $1.28 \text{ kg/m}^3$ [S2].
+*   **Stiffness Constant ($K$):** Set to $100$ [S2].
+*   **Viscosity Coefficient ($\mu$):** Approximately $0.01$ [S2].
+*   **Tessellation Resolution:** Coarse grid, e.g., $18 \times 9$ vertices, balancing accuracy and computational effort for area computation [S2].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Define the implicit atmospheric profile (temperature and humidity vs. altitude) and set user parameters (dewpoint altitude, saturation ratio, mixing ratio) [S1, S2].
+2.  **Parcel Generation:** The parcel generator creates new parcels with a frequency proportional to the local heat and humidity content of the region [S2]. Parcels are generated if the atmospheric state is physically plausible based on the temperature profile and condensation level [S2].
+3.  **Physics Update (CPU):** Physics is computed at the macro-level on the CPU for a small number of large parcels [S1, S2].
+    *   **Forces:** Calculate forces acting on each parcel:
+        *   **Buoyancy:** Driven by temperature differences between the parcel and the environment [S1, S2].
+        *   **Drag:** Accounts for friction with the surrounding atmosphere [S1].
+        *   **SPH Forces:** Parcel-parcel interactions are handled using Smoothed Particle Hydrodynamics (SPH) forces to model attraction and repulsion [S1].
+    *   **Integration:** Update parcel position and velocity using the net forces [S2].
+    *   **Mass and Radius Exchange (Mixing):**
+        *   Parcels exchange mass with the implicit environment via entrainment and detrainment [S1, S2].
+        *   **Entrainment:** Occurs throughout the parcel's lifetime [S2].
+        *   **Detrainment:** Begins at the condensation level [S2].
+        *   **Mixing Effect:** If mixing is enabled, the parcel loses water content, altering internal dynamics and temperature profile with each oscillation [S2]. The parcel radius grows as it ascends due to decreasing atmospheric pressure, but shrinks if mixing causes significant water loss and descent [S2]. If mixing is disabled, the parcel follows the same temperature trajectory during oscillations [S2].
+4.  **Rendering (GPU):** Real-time visualization is achieved by raytracing the procedural amplification of volumetric noise on the GPU [S2].
+    *   **Hypertexture/Cloud Map:**
+        *   *Standard:* Procedural noise is amplified within each parcel's volume [S2].
+        *   *Refined (Cloud Map):* Parcel physics attributes are projected onto a texture. A precomputed cloud map texture of noise is combined with this projected texture at runtime [S1].
+    *   **Raycasting:** Volume ray casting is performed in the shader using the combined density fields to generate the animated cloud cover [S1, S2].
+    *   **Normals:** Finite Difference Method (FDM) can be used to compute normals for voxel shading, though this is computationally expensive [S2].
+5.  **Shadow Casting (Optional):** Simplified shadows can be cast on the terrain by shooting rays from the light source to collect cloud opacities in a 2D texture, which is then blended with the scene [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+RHO_0 = 1.28  # Air density kg/m^3
+K = 100       # Stiffness constant
+MU = 0.01     # Viscosity coefficient
+TESS_ROWS = 18
+TESS_COLS = 9
+
+class AtmosphereProfile:
+    """Implicit representation of temperature and humidity vs altitude."""
+    def get_temperature(self, altitude):
+        # Returns T(z)
+        pass
+    def get_humidity(self, altitude):
+        # Returns H(z)
+        pass
+    def get_condensation_level(self):
+        # Returns altitude where condensation begins
+        pass
+
+class MacroParcel:
+    def __init__(self, position, velocity, mass, radius, temperature):
+        self.p = position
+        self.v = velocity
+        self.m = mass
+        self.r = radius
+        self.T = temperature
+        self.tessellation = create_coarse_sphere_mesh(TESS_ROWS, TESS_COLS)
+
+    def update_physics(self, dt, atmosphere, other_parcel_list):
+        # 1. Calculate Buoyancy
+        env_temp = atmosphere.get_temperature(self.p.y)
+        # Buoyancy force depends on density difference (simplified here)
+        # F_b = V * g * (rho_env - rho_parcel)
+        # rho_parcel approximated via ideal gas law or similar from T
+        buoyancy_force = compute_buoyancy(self.T, env_temp, self.r)
+        
+        # 2. Calculate Drag
+        drag_force = -MU * self.v # Simplified linear drag
+        
+        # 3. Calculate SPH Forces from neighbors
+        sph_force = Vector3(0,0,0)
+        for other in other_parcel_list:
+            dist = distance(self.p, other.p)
+            if dist < interaction_radius:
+                sph_force += compute_sph_force(self, other, dist)
+        
+        # 4. Net Force and Integration
+        net_force = buoyancy_force + drag_force + sph_force
+        acceleration = net_force / mass
+        self.v += acceleration * dt
+        self.p += self.v * dt
+        
+        # 5. Update Radius and Mass (Mixing)
+        env_pressure = compute_atmospheric_pressure(self.p.y)
+        # Radius grows due to pressure drop
+        self.r *= (1 + K * (1 - env_pressure / initial_pressure))
+        
+        # Mixing: Entrainment and Detrainment
+        condensation_level = atmosphere.get_condensation_level()
+        if self.p.y > condensation_level:
+            # Detrainment begins
+            self.m -= detrainment_rate * dt
+        else:
+            # Entrainment throughout
+            self.m += entrainment_rate * dt
+            
+        # If mixing enabled, temperature profile alters
+        if mixing_enabled:
+            self.T = update_temperature_with_mixing(self.T, env_temp, self.m)
+            
+        # Check for death: if mass exhausted
+        if self.m < threshold:
+            self.dead = True
+
+def render_clouds(parcels, atmosphere, camera, light):
+    # GPU Raycasting
+    for each pixel:
+        ray = cast_ray(camera, pixel)
+        density = 0.0
+        t = ray.origin
+        while t < ray.max_dist:
+            # Sample density from parcels
+            local_density = 0.0
+            for parcel in parcels:
+                if is_inside_parcel(parcel, t):
+                    # Procedural noise amplification
+                    noise_val = procedural_noise(parcel, t)
+                    local_density += parcel.mass * noise_val
+            density += local_density
+            t += ray.step_size
+        
+        # Color/Opacity based on density
+        color = map_density_to_color(density, atmosphere)
+        return color
+```
+
+## Subtopics
+
+### [Particle-Based Convective Cloud Simulation (Neyret)](19856-particle-based-convective-cloud-simulation-neyret.md)
+Particle-Based Convective Cloud Simulation is an early physics-driven procedural method for simulating cumulus clouds by modeling air parcels as 2D particles, or "bubbles". It solves the problem of generating realistic, animated cloud shapes and movement on a landscape scale by leveraging high-level physical variables such as buoyancy and condensation. Unlike later GPU-accelerated particle systems that use position-based dynamics or adaptive splitting/merging, this method explicitly models mixing dynamics, inter-particle attraction, and attached vortices to enhance small-scale shape and movement features.
+
+### Cloud Map Based Rendering (Refined Hybrid)
+Cloud Map Based Rendering refines the hybrid macro-physics and micro-amplification approach by incorporating a cloud map for governing cloud shapes and coverage over the landscape [S1]. It differs from the standard model by projecting parcel physics attributes onto a texture instead of generating hypertexture directly inside each parcel, and combining this with a precomputed noise texture at runtime [S1]. This variant is chosen when higher frame rates, more realistic cloud shapes, and better span toward the horizon are required [S1].
+
+### Implicit Atmosphere Interaction
+Implicit Atmosphere Interaction refers to the modeling technique where the atmosphere is represented as implicit curves rather than sampled transparent air, eliminating the need for explicit air volume simulation [S2]. It accounts for parcel-air interaction and mass exchange (entrainment/detrainment) directly through the physics solver [S2]. This approach is used when computational efficiency is prioritized over explicit fluid-air coupling, allowing for the simulation of mass loss and radius changes due to mixing with the environment [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Physics computation is lightweight, scaling with the number of parcels $N$ and their interactions (SPH). Rendering scales with the number of rays and the number of parcels intersected.
+*   **Memory Complexity:** Low memory footprint for physics (only storing parcel states). Rendering memory depends on the resolution of the cloud map or hypertexture generation.
+*   **Measured Performance:**
+    *   With 14 parcels: 6% physics time, 89% FDM normals render time, 77 fps with physics; 6% physics time, 91% FDM render time, 160 fps without physics [S2].
+    *   With 85 parcels: 9% physics time, 82% FDM normals render time, 7 fps with physics; 9% physics time, 88% FDM render time, 21 fps without physics [S2].
+    *   Rendering without finite differences normals is significantly faster [S2].
+    *   The most expensive part of physics is the computation of area exposed to the implicit environment on the tessellated sphere [S2].
+    *   Hypertexture production and raycasting take a larger share of computational time compared to physics [S2].
+*   **Strengths:** Real-time performance on landscape scales; physically plausible cloud shapes and movement; user-controllable parameters (temperature profile, condensation level); computationally inexpensive physics due to macro-parcel abstraction [S1, S2].
+*   **Limitations:** Clouds often die out in order of creation and depending on exposure to dry air [S2]; limited to cumulus-type clouds; simplified physics (no billowing or complex turbulence) [S2].
+*   **When to use:** Real-time applications requiring realistic cumulus clouds with physical behavior, such as games or interactive simulations [S2].
+*   **When not to use:** Applications requiring high-fidelity, large-scale weather systems with complex turbulence or non-cumulus cloud types [S2].
+
+## Background
+The Hybrid Physics-Driven Procedural Model was introduced by Goswami and Neyret in their 2015 paper "Real-time landscape-size convective clouds simulation" presented at I3D [S2]. It builds on earlier work in particle-based cloud simulation, such as Neyret's earlier methods, and refines the hybrid macro-physics/micro-amplification concept [S1]. The method is validated against aerology diagrams, specifically lapse rates (dry adiabatic $\approx -10^\circ\text{C/km}$, moist adiabatic $\approx -5^\circ\text{C/km}$) [S2]. It is used in real-time graphics applications where physical plausibility and performance are both critical [S2].
+
+## Sources
+[S1] A survey of modeling, rendering and animation of clouds in computer graphics, https://doi.org/10.1007/s00371-020-01953-y, fetched 2026-10-26
+[S2] Real-time Landscape-size Convective Clouds Simulation and Rendering, https://doi.org/10.2312/vriphys.20171078, fetched 2026-10-26

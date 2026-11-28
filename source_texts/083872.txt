@@ -1,0 +1,424 @@
+The backend algorithms and framework associated with DREAM3DNX, a data analysis program for materials science data analytics - FILT: Voxelize Point Cloud by nyoungbq · Pull Request #1724 · BlueQuartzSoftware/simplnx
+
+FILT: Voxelize Point Cloud by nyoungbq · Pull Request #1724 · BlueQuartzSoftware/simplnx · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+nyoungbq
+commented
+Aug 21, 2026
+Copy link
+Copy Markdown
+Contributor
+Fixes: #704
+Naming Conventions
+Naming of variables should descriptive where needed. Loop Control Variables can use i if warranted. Most of these conventions are enforced through the clang-tidy and clang-format configuration files. See the file simplnx/docs/Code_Style_Guide.md for a more in depth explanation.
+Filter Checklist
+The help file simplnx/docs/Porting_Filters.md has documentation to help you port or write new filters. At the top is a nice checklist of items that should be noted when porting a filter.
+Unit Testing
+The idea of unit testing is to test the filter for proper execution and error handling. How many variations on a unit test each filter needs is entirely dependent on what the filter is doing. Generally, the variations can fall into a few categories:
+1 Unit test to test output from the filter against known exemplar set of data
+1 Unit test to test invalid input code paths that are specific to a filter. Don't test that a DataPath does not exist since that test is already performed as part of the SelectDataArrayAction.
+Code Cleanup
+No commented out code (rare exceptions to this is allowed..)
+No API changes were made (or the changes have been approved)
+No major design changes were made (or the changes have been approved)
+Added test (or behavior not changed)
+Updated API documentation (or API not changed)
+Added license to new files (if any)
+Added example pipelines that use the filter
+Classes and methods are properly documented
+nyoungbq
+force-pushed
+the
+filt/voxel_mask_pc
+branch
+from
+84b8ca9 to
+e21b5df
+Compare
+August 21, 2026 14:10
+imikejackson
+commented
+Aug 24, 2026
+•
+edited by nyoungbq
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Review 1/5 — Correctness, crash & UB risks
+Harsh review of filt/voxel_mask_pc @ e21b5df. CI is green and clang-format passes, so everything below is behavioral, not build-breaking. Line numbers refer to the PR head.
+Blocking
+Wrong legacy UUID — belongs to a different filter. VoxelizePointCloudFilter.hpp:123 carries /* LEGACY UUID FOR THIS FILTER 52b2918a-4fb5-57aa-97d4-ccc084b89572 */. That UUID is AppendImageGeometryZSlice and is already claimed by AppendImageGeometryFilter.hpp:125, SimplnxCoreLegacyUUIDMapping.hpp:246 and LegacySimplFilterUuid.hpp:20. This is a copy/paste leftover. If it is ever wired into the legacy map it will hijack every legacy AppendImageGeometryZSlice pipeline. Delete the line.
+Remove FromSIMPLJson. VoxelizePointCloudFilter.cpp:145-149 returns default arguments unconditionally with the comment // No SIMPL implementation. There is no SIMPL predecessor (see above), so drop the declaration (.hpp:39) and the definition rather than shipping a stub that silently discards a user's legacy parameters.
+Unbounded / silently-overflowing grid allocation in the auto-size path. VoxelizePointCloud.cpp:122 computes dims from ceil(extent / spacing) where spacing is hard-wired to {1,1,1} by CreateImageGeometryAction (VoxelizePointCloudFilter.cpp:115-116) and is never validated. DataStore::resizeTuples then folds the shape with std::accumulate (DataStore.hpp:244) which wraps silently on overflow, and allocates new value_type[newSize]. CalculateImageVoxelMask still computes target from the un-wrapped dims, so the write at VoxelizePointCloud.cpp:61 goes out of bounds — heap corruption, not an exception. Even without overflow this is trivially reachable: a µm-scale point cloud spanning 1e4 units per axis is 1e12 voxels, i.e. an uncaught std::bad_alloc escaping executeImpl. Needed: overflow-checked product, an explicit voxel-count ceiling with a clear error message, and a user-settable spacing (see Review 3).
+static_cast<usize> of an unvalidated float is UB. VoxelizePointCloud.cpp:32, :43, :54 cast first and range-check second (if(xPos >= dims[0])). A coordinate that is NaN, Inf, or simply outside usize range produces an unspecified xPos that can pass the check and drive the OOB write at :61. NaN also slips the xRaw < 0.0f guard, since every comparison against NaN is false. Do the range test in the float domain — it rejects NaN for free and costs nothing:
+```
+const auto dimsXf = static_cast<float32>(dims[0]);
+const float32 xRaw = (verticesRef.getComponentValue(i, 0) - origin[0]) * xInv;
+if(!(xRaw >= 0.0f && xRaw < dimsXf)) { continue; } // also false for NaN
+const auto xPos = static_cast<usize>(xRaw);
+```
+Zero or non-finite spacing is not guarded. VoxelizePointCloud.cpp:19-21 computes 1.0f / spacing[i] with no validation. An existing Image Geometry with a zero spacing on any axis yields inf/NaN and feeds straight into the UB above. Validate spacing[i] > 0 on all three axes in preflightImpl and return a clean error.
+preflightImpl can throw instead of returning a Result. VoxelizePointCloudFilter.cpp:107 calls destGeometry.getCellDataPath(), which routes through IGridGeometry::getCellDataRef() and throws std::runtime_error when the grid geometry has no cell AttributeMatrix (IGridGeometry.cpp:42-48). Preflight must never throw. Check getCellData() != nullptr and return an error naming the geometry.
+executeImpl can throw on two more paths. VoxelizePointCloud.cpp:69-71 calls rectGrid->getXBoundsRef() etc., which throw when a bounds array is unset (RectGridGeom.cpp:192-195); :163/:173/:189 call getVerticesRef(), which throws when the selected node geometry has no shared vertex list (INodeGeometry0D.cpp:42-47). Both are reachable from imported/hand-built data structures. Validate in preflightImpl and return errors.
+Rect-grid bounds arrays are used without validation. VoxelizePointCloud.cpp:80, :85, :90 binary-search [begin(), end()) of each bounds array but never check getNumberOfTuples() == dims[i] + 1, nor that the values are monotonically increasing. std::upper_bound on an unsorted range is UB, and a bounds array shorter than dims+1 silently maps points into the wrong cells with no diagnostic. Validate size and monotonicity in preflight.
+High
+Planar / collinear point clouds are rejected rather than collapsed to thickness 1. VoxelizePointCloud.cpp:124-130: a zero side length gives zero padding, hence dims[k] == 0, hence error -45981. A single-slice or planar scan is an entirely ordinary input and this makes the auto-size mode unusable for it. Clamp each axis with std::max(usize{1}, ...) and keep -45981 only for the genuinely empty cloud. TC-A3 currently enshrines the bad behavior as expected — it needs to change with the fix.
+The 0.1% padding is defeated by float32 precision. VoxelizePointCloud.cpp:105-120: for a small cloud far from the origin (say max ≈ 1e7, side length ≈ 1e-2) the padding 1e-5 is below the float32 ULP at 1e7, so maxPoint + padding == maxPoint, distance collapses to 0, and the filter errors out with -45981. The doc's claim that the padding "guarantees that no input point lands on this boundary" (VoxelizePointCloudFilter.md:22) is therefore an overclaim. Do the bounding-box arithmetic in float64 and/or add an absolute epsilon floor alongside the relative one.
+Null-pointer dereference risk and style violation in preflight. VoxelizePointCloudFilter.cpp:109-110: const auto& cellData = dataStructure.getDataAs<AttributeMatrix>(maskParent); maskDims = cellData->getShape(); binds a const auto& to a raw pointer and dereferences it unchecked. Per .claude/CLAUDE.md ("DataStructure Access"), use the reference form: maskDims = destGeometry.getCellDataRef().getShape();.
+Unchecked dynamic_cast. VoxelizePointCloud.cpp:176-177 uses the RectGridGeom* result without a null check, relying on the parameter's AllowedTypes staying in sync with the algorithm forever. Switch on destGeom->getGeomType() and return an error for any unhandled IGridGeometry subclass.
+Vertex list component count is assumed to be 3. VoxelizePointCloud.cpp:27, :38, :49 index i * 3 + n against getNumberOfTuples(). Validate getNumberOfComponents() == 3 in preflight.
+Silent data loss with no diagnostic. Every out-of-range point is dropped without a word (:29/34/40/45/51/56 and :81/86/91). A user who picks a destination geometry with the wrong origin or spacing gets an all-zero mask and a "success" result. Count the skipped points and emit a warning: "N of M points fell outside the destination geometry and were not voxelized".
+Medium
+Reference captured before the resize it depends on. VoxelizePointCloud.cpp:182-189 obtains voxelMask before ResizeImageGeom resizes the cell AttributeMatrix. It happens to work because DataStore::resizeTuples reallocates behind the same DataArray, but it is an undocumented ordering dependency that the next store implementation can break. Move the getDataRefAs<UInt8Array> call after the resize.
+Helpers return Result<> but can never fail. CalculateImageVoxelMask and CalculateRectGridVoxelMask unconditionally return {}. Give them real error returns (they will need them for the spacing/bounds validation above) or make them void so the signature stops implying error handling that does not exist.
+imikejackson
+commented
+Aug 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Review 2/5 — CPU, memory & out-of-core compatibility
+Good news first: the algorithm is genuinely streaming on the input side. getBoundingBox() is an O(1)-memory scan (INodeGeometry0D.cpp:91-121), the voxelization loop holds no per-point state, and there is no std::vector sized by point count anywhere. The only O(n) allocation is the output mask itself, which is unavoidable. So there is no full-array buffering to remove — the problems are access-pattern and responsiveness ones.
+Out-of-core access patterns
+Random-order scatter writes into the mask store. VoxelizePointCloud.cpp:61 and :97 do voxelMaskStore.setValue(target, 1) in point order, which is arbitrary with respect to the mask's flat index space. In-core this is merely cache-hostile; against a chunked/out-of-core store each setValue can force a different chunk load plus write-back — worst case one I/O round trip per point, and it will thrash ChunkCache on any cloud that spans more than a few chunks. Fix with a bounded write-behind buffer, which keeps memory O(1) in the point count:
+```
+// capacity chosen for a fixed byte budget, e.g. 1-4 MiB of usize
+std::vector<usize> pendingTargets;
+pendingTargets.reserve(k_FlushCapacity);
+// ... push target instead of writing ...
+if(pendingTargets.size() == k_FlushCapacity) { flush(); } // sort ascending, then setValue in order
+```
+Writes then become chunk-monotonic within each flush window. Please capture before/after timings on a large cloud (see bluequartz-skills:optimize-filter-algorithm-for-ooc).
+Per-element virtual reads through the DataArray rather than the store. Both helpers take const INodeGeometry0D::SharedVertexList& and call pointCloud.getValue(i * 3 + n) — three virtual dispatches per point through the array wrapper. Hoist the store once, which also brings the code in line with the Ref suffix convention in .claude/CLAUDE.md:
+```
+const auto& verticesRef = pointCloud.getVerticesRef().getDataStoreRef();
+... verticesRef.getComponentValue(i, 0) ...
+```
+Make both helpers take stores so their signatures are consistent with the UInt8AbstractDataStore& mask parameter they already accept.
+Rect-grid bounds are re-searched through the store on every point. VoxelizePointCloud.cpp:80/85/90 runs three std::upper_bound per point where every operator* is a virtual getValue. The iterators are random_access (AbstractDataStore.hpp:188) so the complexity is fine, but for an OOC store that is ~3·log₂(n) store hits per point. Copy the three bounds arrays into local std::vector<float32> once before the loop — that is O(dims), not O(numPoints) — and binary-search the local copies.
+Search the declared extent, not the whole array. xBounds.end() should be begin() + dims[0] + 1. Combined with the size validation in Review 1, this makes a malformed bounds array an explicit error instead of a silent behavior change.
+resizeTuples on the cell matrix reallocates and copies. VoxelizePointCloud.cpp:136 resizes every array in the cell AttributeMatrix, and DataStore::resizeTuples allocates a fresh buffer and copies (DataStore.hpp:263-278). Harmless today because the freshly created geometry holds only the mask, but it doubles peak memory the moment the created path gains a sibling array. Adding the dims/spacing parameters requested in Review 3 would let preflight size the geometry correctly and remove the resize entirely.
+Responsiveness
+No progress messaging. m_MessageHandler is stored (VoxelizePointCloud.hpp:44) and never used. On a 1e8-point cloud the filter shows nothing for minutes. Add a throttled messenger over the point loop per bluequartz-skills:progress-messaging.
+No cancel checking. m_ShouldCancel is stored (VoxelizePointCloud.hpp:43) and never read, so the filter is uncancellable. Check it on an outer stride (e.g. every 1<<16 points), not in the inner per-point body.
+getCancel() is dead code. VoxelizePointCloud.hpp:38 / .cpp:155-158 is never called. Remove it, or start using m_ShouldCancel through it.
+Documentation of intent
+State why the loop is serial. Concurrent writes to a shared AbstractDataStore are not thread-safe (.claude/CLAUDE.md, "Thread Safety"), so serial is the correct choice here — but nothing in the code says so, and the next reader will see an embarrassingly parallel loop and reach for ParallelDataAlgorithm. Add a short comment.
+State why the auto-size path walks the vertex list twice. getBoundingBox() then the voxelization loop. This is inherent and O(1) memory; a comment prevents someone "fixing" it into an O(n) buffered single pass.
+imikejackson
+commented
+Aug 24, 2026
+•
+edited by nyoungbq
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Review 3/5 — Parameter keys, naming & API consistency
+Parameter keys: variable names and string values disagree with each other and with the repo
+VoxelizePointCloudFilter.hpp:28-32. The most serious one is k_NewGeometryPath_Key, whose value is output_image_geometry_path — so the variable name and the serialized key name say two different things, and grepping for either one misses the other. Separately, k_OutputGeometryPath_Key is not an output at all: it is a GeometrySelectionParameter that selects a pre-existing destination grid (.cpp:66-68). Naming a selection parameter Output.../output_... is actively misleading in saved pipelines.
+Repo conventions, confirmed by grep across src/Plugins: selected/existing geometries use k_Selected*GeometryPath_Key / k_Input*GeometryPath_Key with a value of input_*_geometry_path (k_InputGeometryPath_Key = "input_grid_geometry_path" is an exact precedent); created geometries use k_Created*GeometryPath_Key with output_*_geometry_path; and k_UseExistingGeometry_Key already exists spelled out, not abbreviated to Geom.
+Rename per the table below, keeping parametersVersion() at 1 since the filter has not shipped yet.
+Current variable
+Current value
+Problem
+Suggested variable
+Suggested value
+k_UseExistingGeom_Key
+use_existing_geom
+Geom/geom abbreviation; repo spells it out
+k_UseExistingGeometry_Key
+use_existing_geometry
+k_PointCloudGeometryPath_Key
+point_cloud_geometry_path
+input selection with no input_ prefix
+k_InputPointCloudGeometryPath_Key
+input_point_cloud_geometry_path
+k_OutputGeometryPath_Key
+output_geometry_path
+selects an existing geometry but is named as an output, in both the variable and the value
+k_SelectedGridGeometryPath_Key
+input_grid_geometry_path
+k_MaskName_Key
+mask_name
+created array name; repo uses *_array_name
+k_MaskArrayName_Key
+mask_array_name
+k_NewGeometryPath_Key
+output_image_geometry_path
+variable name does not match its own value
+k_CreatedImageGeometryPath_Key
+output_image_geometry_path
+Parameter types and layout
+Use DataObjectNameParameter, not StringParameter, for the mask name. VoxelizePointCloudFilter.cpp:65. 87 filters in SimplnxCore already use DataObjectNameParameter for created object names, and it is not cosmetic: DataObjectNameParameter::validateName (DataObjectNameParameter.cpp:74-88) rejects empty names and names failing DataObject::IsValidName (e.g. containing /). StringParameter validates nothing, so an empty or slash-bearing mask name currently reaches CreateArrayAction unchecked.
+"Destination Grid Geometry" is an input sitting under the output separator. VoxelizePointCloudFilter.cpp:64-68 puts a GeometrySelectionParameter under Output Parameter(s). Move it up under Input Parameter(s) and leave only the created geometry and the mask name in the output group. Nit while you are there: Output Data Object(s) is the more common label in this plugin (18 uses vs 12 for Output Parameter(s)).
+Missing user control over the created geometry — the main functional gap vs issue #704
+Issue #704 asks for two versions: V1 = "the user supplies the image geometry", V2 = "allow user to create the image geometry in the same way as the Partition Geometry filter". The auto-size path implements neither: it hard-codes origin {0,0,0} and spacing {1,1,1} in CreateImageGeometryAction (.cpp:115-116), and ResizeImageGeom only ever reads image->getSpacing() (VoxelizePointCloud.cpp:106) — it never calls setSpacing. There is no way for a user to choose the voxel resolution.
+This is what makes the overflow item in Review 1 so easy to hit: spacing is permanently 1.0 in whatever units the point cloud happens to use, so a millimetre- or micron-scale cloud produces an absurd voxel count with no recourse.
+Add spacing (and ideally origin/dimensions) parameters for the auto-size mode, following the Partition Geometry pattern named in ENH: Create voxel mask from point cloud #704 — either a spacing vector, or a per-axis voxel count, linked to the UseExistingGeometry == false branch. This also lets preflightImpl create the geometry at its true size and report correct dimensions to downstream filters (see Review 5).
+Consider defaulting k_UseExistingGeom_Key to true. .cpp:59 defaults it to false, i.e. the default mode is the less-specified auto-size one, whereas ENH: Create voxel mask from point cloud #704 lists "user supplies the image geometry" as Version 1.
+Cross-reference MapPointCloudToRegularGridFilter (af53ac60-092f-4e4a-9e13-57f0034ce2c7) in the docs. The two filters are duals rather than duplicates -- that one writes a uint64 cell index per point onto the vertex attribute matrix, this one writes a uint8 occupancy flag per cell onto the cell attribute matrix -- and having both is intentional. But they are easy to confuse and neither doc currently mentions the other, so each should link to the other and say in a sentence which question it answers.
+Code hygiene
+defaultTags() ships a TODO. VoxelizePointCloudFilter.cpp:47-49. The PR checklist has a "No commented out code" item. Resolve it and add real tags — "Voxelize", "Point Cloud", "Image Geometry", "Conversion", "Mapping" would all make the filter findable in the GUI search; {className(), "Core"} alone will not.
+0.001 should be 0.001f. VoxelizePointCloud.cpp:105 initializes a constexpr float32 from a double literal. CI does not flag it today, but d4b22b384 just went through this codebase cleaning up exactly this class of implicit conversion.
+Take geometries by const reference, not raw pointer. CalculateImageVoxelMask(..., const ImageGeom* image, ...), CalculateRectGridVoxelMask(..., const RectGridGeom* rectGrid, ...) and ResizeImageGeom(..., ImageGeom* image) all dereference unconditionally, so the pointer buys nothing but a null-check obligation nobody honors. Also apply the Geom suffix convention from .claude/CLAUDE.md (imageGeom, rectGridGeom, destGeom).
+Use getDataRefAs<T> where the object is guaranteed to exist. VoxelizePointCloud.cpp:168 and :181 use getDataAs<T> and dereference without a null check. Per .claude/CLAUDE.md, getDataAs is for objects that may be absent; these are guaranteed by the selection parameter and by the preflight action respectively.
+Document VoxelizePointCloudInputValues. VoxelizePointCloud.hpp:11-18 has no Doxygen on the struct or its members, and operator() (:36) has no @brief. The PR checklist has a "Classes and methods are properly documented" item.
+imikejackson
+commented
+Aug 24, 2026
+•
+edited by nyoungbq
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Review 4/5 — Test coverage
+Credit where due: VoxelizePointCloudTest.cpp is better than the norm for a new filter. The flat-index arithmetic is worked out in comments, the half-open interval semantics are pinned from both sides (TC-B6/TC-B7), idempotent double-hits are covered (TC-B5), and the rect-grid upper_bound tie-break is nailed down (TC-C4). The gaps below are about what is not exercised, not about the quality of what is.
+Structural gaps
+There is not a single preflight test. Every section calls filter.execute(...). Nothing calls filter.preflight(...), so none of the OutputActions are verified in isolation: not the CreateImageGeometryAction, not the CreateArrayAction shape, not the linked-parameter gating that lets MakeArgs(false) pass an empty DataPath{} for the inactive k_OutputGeometryPath_Key. Add a TEST_CASE that preflights each mode and asserts the created paths, DataType::uint8, and the mask tuple shape.
+Add error tests for every new preflight validation requested in Review 1 — zero spacing, grid geometry with no cell AttributeMatrix, node geometry with no shared vertex list, rect-grid bounds of the wrong length, non-monotonic rect-grid bounds, vertex list with a component count other than 3, empty/invalid mask name. Right now the only two error paths tested (-45980, -45981) are both raised at execute time; the PR checklist's "1 unit test to test invalid input code paths" is not met for preflight.
+Use SIMPLNX_RESULT_REQUIRE_INVALID. TC-A2 (:172-174) and TC-A3 (:185-187) hand-roll REQUIRE(result.invalid()); REQUIRE(!errors().empty()); REQUIRE(errors()[0].code == ...). The macro exists at UnitTestCommon.hpp:60; keep the explicit code check, drop the boilerplate.
+The tests force an in-core store, so the OOC preset never exercises OOC. CreatePointCloud (:30) and CreateRectGridGeom (:71) both use Float32Array::CreateWithStore<DataStore<float32>>, which pins the store type regardless of preset. Use the default creation path (or the UnitTest geometry helpers) so simplnx-ooc-* actually runs this filter against a chunked store — which is precisely where the scatter-write behavior in Review 2 matters.
+No exemplar-based test. The PR checklist's first unit-testing item is "1 unit test to test output from the filter against known exemplar set of data". All assertions here are hand-computed flat indices. That is genuinely good for pinning semantics and should stay, but it does not catch a whole-array regression. Add one exemplar .dream3d comparison using UnitTest::LoadDataStructure + UnitTest::CompareDataArrays<uint8> per bluequartz-skills:exemplar-testing, and publish the archive per the download_test_data() workflow in .claude/CLAUDE.md.
+No large / OOC-tier test. Nothing here has more than 4 points or 1331 voxels, so neither the progress messaging, the cancel checking, nor the chunk-access behavior can ever be observed. Add a Tier-1 test sized to span multiple chunks.
+Coverage gaps in what is asserted
+Every Image Geometry test uses origin = {0,0,0} and spacing = {1,1,1}. TC-B1 through TC-B8 all do. A sign error on the origin subtraction, a swapped xInv/yInv, or a units mistake would pass all eight. Add a section with a negative non-zero origin (e.g. {-5,-3,-1}) and anisotropic spacing (e.g. {0.5, 2.0, 0.25}).
+Every grid is a cube. {5,5,5}, {3,3,3}, {4,4,4}, {11,11,11} — the dims[0]/dims[1]/dims[2] and [Z,Y,X] vs [X,Y,Z] orderings are never distinguished. Add a non-cubic grid (e.g. {7,3,5}) so a transposed index is actually detectable. This is the single highest-value addition in this list.
+Only VertexGeom is tested as the point-cloud source. The parameter accepts Vertex, Edge, Triangle, Quad, Tetrahedral and Hexahedral (VoxelizePointCloudFilter.cpp:61-62). Add at least one test with a TriangleGeom source to prove INodeGeometry0D::getVerticesRef() is reached correctly for a higher-dimensional geometry.
+TC-A1 checks only getDimensions() on the created geometry. Add assertions on the created geometry's origin and spacing. The padded origin (≈ -0.01) is the whole point of ResizeImageGeom and is currently unverified, and the spacing assertion will become meaningful the moment the spacing parameter from Review 3 lands.
+The created mask's tuple shape is never checked, only getNumberOfTuples() == 1331. A {1331} shape and a {11,11,11} shape both pass. Assert the shape is {dims[2], dims[1], dims[0]}.
+No rect-grid test with a custom mask name, and no test that the rect-grid path honors a non-zero cell-data shape. TC-B8 covers the custom name only for the Image path.
+No test for re-running onto a path where the mask array already exists. CreateArrayAction should reject it; pin that behavior so a future change to the action does not silently start overwriting user data.
+Regression tests to add alongside the Review 1 fixes
+Planar point cloud (all Z equal) → after the clamp fix, expect dims[2] == 1 and success, not -45981. TC-A3 will need rewriting — it currently asserts the behavior being changed.
+Small cloud far from the origin (≈ 1e7 coordinates, ≈ 1e-2 extent) → must not collapse to zero extent.
+A vertex with a NaN coordinate, and one with +Inf → must be skipped, not produce an OOB write or a spurious mask bit.
+A destination Image Geometry with spacing = {0,1,1} → clean preflight error.
+A point cloud whose extent × 1/spacing overflows the voxel count → clean error, not bad_alloc or heap corruption.
+Nit
+CountMarked (:89) takes DataStructure& but only reads; make it const DataStructure&.
+imikejackson
+commented
+Aug 24, 2026
+•
+edited by nyoungbq
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Review 5/5 — Documentation
+VoxelizePointCloudFilter.md is clearly written and the index-mapping semantics are explained better than in most filter docs. Three structural deviations from the current convention, one factual overclaim, and a set of missing caveats.
+Structure
+The auto-generated parameter table marker is in the wrong place. It sits at line 36, mid-document, ahead of ## Notes and ## Error Codes. Convention in this plugin is that % Auto generated parameter table will be inserted here comes after all prose, immediately before ## Example Pipelines / ## License & Copyright — see ErodeDilateBadDataFilter.md:64, NearestPointFuseRegularGridsFilter.md:30, CropEdgeGeometryFilter.md:96. Move it down.
+## Notes and ## Error Codes are not conventional section names. Zero of the 161 docs in SimplnxCore/docs use an ## Error Codes section. Fold both into ###-level subsections of ## Description — there is precedent for exactly this content: ErodeDilateBadDataFilter.md:48 uses ### Preflight Errors. Keep the error table, it is useful; just put it where readers and the doc tooling expect it.
+### Required Input Sources is missing. This is the standard section (AppendImageGeometryFilter.md:98, MapPointCloudToRegularGridFilter.md:45) and per the plugin doc guidance it is the section that replaces hand-written input/output lists. Name the upstream filters that produce each input: a point cloud from Read CSV File → Create Geometry (Vertex), or Extract Vertex Geometry, or Read STL File; a destination grid from Create Geometry (Image/RectGrid) or Read DREAM3D File.
+No figure. A binary voxel mask over a point cloud is about as visual as a filter gets, and docs/filter-figure-style.md sets out the house style. A single before/after (point cloud → voxelized mask rendered in the 3D view) would carry more than the three prose subsections combined.
+## Example Pipelines is empty and no pipeline was added. The PR checklist has "Added example pipelines that use the filter". Add a .d3dpipeline under src/Plugins/SimplnxCore/pipelines/ and link it.
+Add an entry to docs/documentation_review_tracker.md so the new filter enters the review rotation rather than being invisible to it.
+Accuracy
+"The filter supports three operating modes selected by the Use Existing Grid Geometry toggle" (line 11) — a boolean cannot select three modes. There are two modes; the second has two destination-type behaviors. Reword.
+The padding guarantee is an overclaim. Line 22: "The 0.1% padding guarantees that no input point lands on this boundary after the bounding box is expanded." It does not — see Review 1, where float32 precision annihilates the padding for a small cloud far from the origin. Either soften the claim or, better, fix the arithmetic and then the claim becomes true.
+Line 19 needs to say the spacing is not user-controllable. "where spacing defaults to 1.0 in all axes" reads as if there is a parameter to change it. There is not (see Review 3). State plainly: the created geometry's spacing is always 1.0, in whatever units the point cloud coordinates are in, and there is no parameter to change it. The units clarification matters — a user with a micron-scale cloud needs to understand why they get a billion voxels.
+Missing caveats
+Points outside the destination grid are silently dropped with no warning and no count. Line 28 says "silently skipped" for the Image case and line 34 for the RectGrid case, which is honest, but the consequence needs spelling out: an all-zero mask is the expected result of a mismatched origin/spacing, and the filter will still report success. (Review 1 asks for a warning; the doc should describe it once it exists.)
+The mask is binary, not a count. Duplicate points and multiple points per voxel collapse to a single 1. Say so, and cross-reference Map Point Cloud to Regular Grid for users who need per-point voxel indices — the two filters are easy to confuse and neither doc currently mentions the other.
+Preflight reports the wrong dimensions in auto-size mode. Line 42 mentions the 1x1x1 placeholder, but not the user-visible consequence: because the real dimensions are only known at execute time, downstream filters preflight against a 1x1x1 geometry, so a pipeline built on top of this filter will show wrong array sizes and may fail preflight until it has been run once. This is the strongest argument for the dims/spacing parameters in Review 3, and until then it needs to be an explicit caveat.
+Degenerate (planar/collinear) point clouds currently error out. Line 24 documents this. It is the right thing to document but the wrong behavior (Review 1) — please delete this paragraph as part of the fix rather than leaving it as a documented limitation.
+Non-finite coordinates. State what happens to NaN/Inf vertices once Review 1's guard is in: skipped, and ideally counted in the same warning as out-of-range points.
+Performance / out-of-core behavior. Add a note that the mask is written in point order, so a spatially unsorted cloud produces scattered writes; with out-of-core storage this is I/O-bound, and pre-sorting the point cloud spatially will help. Update once Review 2's buffered flush lands.
+Rect-grid bounds must be monotonically increasing and sized dims + 1. Once validated in preflight, document the error.
+nyoungbq
+force-pushed
+the
+filt/voxel_mask_pc
+branch
+2 times, most recently
+from
+c38c443 to
+a570787
+Compare
+August 28, 2026 14:58
+nyoungbq
+force-pushed
+the
+filt/voxel_mask_pc
+branch
+from
+a570787 to
+27e43b3
+Compare
+September 4, 2026 20:14
+nyoungbq
+requested a review
+from imikejackson
+September 15, 2026 16:57
+imikejackson
+previously approved these changes
+Sep 17, 2026
+View reviewed changes
+nyoungbq
+force-pushed
+the
+filt/voxel_mask_pc
+branch
+from
+0acef0e to
+34b9dca
+Compare
+September 24, 2026 15:28
+imikejackson
+force-pushed
+the
+filt/voxel_mask_pc
+branch
+from
+34b9dca to
+5b0f715
+Compare
+September 28, 2026 21:54
+imikejackson
+dismissed
+their stale review
+September 28, 2026 22:04
+Approval withdrawn after a review of commit 5b0f715. See the new review for the requested changes.
+imikejackson
+requested changes
+Sep 28, 2026
+View reviewed changes
+imikejackson
+left a comment
+•
+edited by nyoungbq
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+PR 1724 Code Review — FILT: Voxelize Point Cloud
+Source: review of commit 5b0f715. Coverage: all 17 changed files.
+Findings
+[High] Basic mode: a planar point cloud away from zero gives a zero spacing and a divide by zero
+File: src/Plugins/SimplnxCore/src/SimplnxCore/utils/PartitionUtilities.hpp:154-155 and Filters/Algorithms/VoxelizePointCloud.cpp:182-183 (ResizeImageGeom)
+In Basic mode, preflight gets the spacing from CalculatePartitionLengthsByPartitionCount. That function pads the bounding box by an absolute 1e-6. For a zero-extent axis at a coordinate such as z = 100, 1e-6 is smaller than half of one float32 ULP (about 7.6e-6). The padded extent is then exactly 0, so the spacing is 0 (verified: (100.0f + 1e-6f) - (100.0f - 1e-6f) == 0). ResizeImageGeom then calculates ceil(distance / 0) = inf, and static_cast<usize>(inf) is undefined behavior. The result is a very large dimension, a bad_alloc (-45982), or an incorrect grid, depending on the platform. A 2D scan or a single slice at a non-zero Z is a normal input. TC-A4 does not find this problem because its plane is at z = 0, where 1e-6 is representable.
+Fix: in ResizeImageGeom, replace any spacing that is not larger than zero (or not finite) with a fallback value before the division. Also, give the axis one cell. As an alternative, make the Basic-mode preflight spacing always larger than zero. Add a test case for a planar cloud at z = 100.
+[High] Basic mode does not give the requested number of cells, and preflight shows different dimensions
+File: Filters/VoxelizePointCloudFilter.cpp:202-222, Filters/Algorithms/VoxelizePointCloud.cpp:260-266
+Preflight makes an N×N×N geometry with spacing extent/N. At execute time, ResizeImageGeom keeps that spacing, adds 0.1% of padding, and recalculates the dimensions as ceil(1.002·extent / (extent/N)). For N < 500, the result is N+1. The tests lock in this behavior: {10,10,10} gives 11×11×11 (TC-A1), and {2,2,2} gives 4×4×4 (TC-A5). The user sets "Number Of Cells Per Axis" but does not get that count. Also, the dimensions and origin in preflight do not agree with the output, so downstream preflight gets incorrect geometry information.
+Fix: choose one of these behaviors. (a) Keep N cells and make the spacing larger so that the padded extent fits in N cells: spacing = paddedExtent / N, calculated at preflight and at execute. (b) If the auto-fit behavior is necessary, stop showing "Number Of Cells Per Axis" for this mode and document the auto-fit rule. Then update TC-A1 through TC-A6 to match.
+[High] The filter documentation describes parameters that do not exist
+File: src/Plugins/SimplnxCore/docs/VoxelizePointCloudFilter.md:10-35, 43
+The page describes a Use Existing Grid Geometry true/false toggle. It says "Existing Image Geometry (default)" and "spacing defaults to 1.0 in all axes". The filter has none of these. It uses the shared Select the partitioning mode choice, which has four values: Basic (0, the default), Advanced (1), Bounding Box (2), and Existing Partition Grid (3). The Basic spacing is extent/N (see the finding above). The page does not document the Advanced mode or the Bounding Box mode. It also does not document error codes -3003 to -3008 and -3012 to -3014, which these modes can return and which TC-P7 to TC-P9 test. The test file also has old comments ("Path A — UseExistingGeom = false", lines near 2034/2214/2470 in the diff).
+Fix: rewrite the Description section around the four partitioning modes. Give one subsection for each mode that states which parameters it uses and how it calculates the origin, spacing, and dimensions. Keep the Image Geometry and RectGrid Geometry subsections under Existing Partition Grid. Add the shared -30xx error codes to the Errors table. Remove the "Use Existing Grid Geometry" and "spacing defaults to 1.0" text. Update the UseExistingGeom comments in VoxelizePointCloudTest.cpp.
+[Medium] Advanced and Bounding Box modes accept a zero cell size, and then skip every point
+File: utils/PartitionUtilities.hpp:107-139 (DataCheckCellLength, DataCheckBoundingBoxCoords)
+DataCheckCellLength rejects only negative values, and DataCheckBoundingBoxCoords rejects only min > max. A cell length of 0, or min == max on an axis, gives spacing 0. CalculateImageVoxelMask then calculates 1.0f / 0 = inf, so each coordinate becomes inf or NaN, and each point is skipped. The filter completes with a mask of all zeros and only a warning. This logic comes from PartitionGeometry (pre-existing behavior, now shared with a new filter).
+Fix: in the Voxelize preflight, reject a spacing that is not larger than zero, as the Existing Image Geometry path already does (-45983). Or make the shared checks use <= 0 and >=.
+[Medium] A negative "Number Of Cells Per Axis" passes validation
+File: Filters/VoxelizePointCloudFilter.cpp:170-173, utils/PartitionUtilities.hpp:90-105
+The int32 values are cast to usize before DataCheckNumberOfPartitions checks them against <= 0. A value of -1 becomes 2^64-1 and passes, so the geometry request is very large. (Pre-existing in PartitionGeometry, now shared.)
+Fix: check the int32 values before the cast, or change DataCheckNumberOfPartitions so it takes the VectorInt32Parameter::ValueType.
+[Low] The mask parameter text refers to "overlapped Geometries"
+File: Filters/VoxelizePointCloudFilter.cpp:71
+The default name "Shared Voxels Mask" and the help text "a mask of active voxels in the overlapped Geometries" do not describe this filter.
+Fix: use the default "Voxel Mask" and the help text "Name of the UInt8 array that is 1 for each voxel that contains one or more points and 0 for all other voxels."
+[Low] The first progress message reports 65536 points before any work
+File: Filters/Algorithms/VoxelizePointCloud.cpp:121-124 (and the Image loop)
+At i == 0, sendProgressMessage(k_ProgressInterval) adds a full interval before any point is processed. For clouds with fewer than 65536 points, the progress shows more than 100% at once.
+Fix: send the progress after each interval completes ((i + 1) % k_ProgressInterval == 0), and send the remainder after the loop.
+[Low] There is no example pipeline
+File: docs/VoxelizePointCloudFilter.md (the "Example Pipelines" section is empty)
+The PR checklist asks for an example pipeline for a new filter.
+C++ checks
+Memory and lifetime: no issues found. The references to m_InputValues and the data stores are safe for the whole life of the algorithm object.
+Thread safety: not applicable. The two loops are serial.
+Naming and const-correctness: no issues found.
+Missing or failed evidence
+clang-format is not installed on this machine, so the local read-only format check did not run. The clang_format_pr CI job passed at 5b0f715.
+The CI build jobs (macOS, Windows, Ubuntu clang/gcc) were pending at review time. I did not build the branch or run the tests locally.
+Confirmed correct
+The refactor of PartitionGeometryFilter keeps the parameter keys (partitioning_mode_index, number_of_partitions_per_axis, and the others), the choice indices, and the parameter linkage, so saved .d3dpipeline files still load. The only moved code is the helpers that went into PartitionUtilities.hpp.
+The Image Geometry mapping uses !(raw >= 0 && raw < dims), which rejects NaN, ±Inf, and out-of-range values before the usize cast. The half-open interval rule is correct (TC-B6, TC-B7, TC-B11).
+The RectGrid mapping uses std::upper_bound with guards for 0 and > dims. A point on an interior boundary goes to the upper cell, and a point on the last boundary is excluded. Preflight -45987 makes sure the bounds lengths are dims + 1 before the loop depends on them.
+The flat index z·nx·ny + y·nx + x agrees with the {nz, ny, nx} tuple shape. TC-B10 and TC-C6 use non-cubic grids, so a transposed index would fail.
+The nextafter expansion in ResizeImageGeom correctly includes the maximum corner at large coordinate values (TC-A5), but only when the spacing is not zero (see the first finding).
+Verdict
+REQUEST CHANGES. Basic mode has a divide-by-zero on realistic planar input, and it does not produce the cell count that the user requests. The documentation describes a parameter that does not exist and does not describe three of the four modes.
+nyoungbq
+added 8 commits
+September 30, 2026 15:30
+filter v1
+95a7cf1
+cleanup and optimization
+69dd9dd
+Review changes v1
+90ba0ae
+Clean up
+5e757ee
+shared partition utilities changes
+bf617dc
+add more test cases
+3ef8c8f
+post rebase patches
+70bf227
+Modify algorithm to auto size spacing in basic mode
+…
+02f4a59
+```
+Address edge cases introduced from the partition geom filter
+General cleanup and post rebase patching
+```
+nyoungbq
+force-pushed
+the
+filt/voxel_mask_pc
+branch
+from
+bfb922b to
+02f4a59
+Compare
+September 30, 2026 19:31
+imikejackson
+force-pushed
+the
+develop
+branch
+from
+bbd0e42 to
+9fbdaa6
+Compare
+October 22, 2026 19:19
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

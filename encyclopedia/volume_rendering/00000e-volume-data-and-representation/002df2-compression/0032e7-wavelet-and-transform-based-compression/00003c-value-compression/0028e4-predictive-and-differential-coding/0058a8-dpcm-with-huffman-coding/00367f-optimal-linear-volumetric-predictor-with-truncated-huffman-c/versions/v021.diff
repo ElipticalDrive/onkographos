@@ -1,0 +1,210 @@
+--- v020.md
++++ v021.md
+@@ -90,10 +90,10 @@
+ #### 4. Encode (Second Pass)
+ **Step 7: Encode**
+-Scan the volume again. For each voxel, calculate $d(x,y,z)$ using the same predictor logic as Step 2 [S1, unofficial]. Encode $d(x,y,z)$ using the Huffman table [S1, unofficial]. Do not store the difference values; output only the encoded bits [S1, unofficial].
++Scan the volume again [S1, unofficial]. For each voxel, calculate $d(x,y,z)$ using the same predictor logic as Step 2 [S1, unofficial]. Encode $d(x,y,z)$ using the Huffman table [S1, unofficial]. Do not store the difference values; output only the encoded bits [S1, unofficial].
+ 
+ #### 5. Compressed File Header
+ Store the following in the file header before the bitstream:
+ -   Estimated mean $\bar{v}$
+--   Predictor coefficients $a_1, a_2, a_3$ [S1, unofficial]
++-   Predictor coefficients $a_1, a_2, a_3$
+ -   Huffman code table (mapping source symbols $s_i$ to codes) [S1, unofficial]
+ 
+@@ -106,5 +106,4 @@
+ 
+ ### Pseudocode
+-
+ ```python
+ def compress_volume(volume: list, L1: int = 256) -> tuple:
+@@ -112,9 +111,7 @@
+     Compress a 3D volume using Optimal Linear Predictor and Truncated Huffman Coding.
+     volume: 3D list of shape (X, Y, Z) with 16-bit integers.
+-    Returns: (header_dict, compressed_bits_list)
++    Returns: tuple of (header_dict, compressed_bit_list).
+     """
+-    X = len(volume)
+-    Y = len(volume[0])
+-    Z = len(volume[0][0])
++    X, Y, Z = len(volume), len(volume[0]), len(volume[0][0])
+     
+     # Step 1: Estimate Mean
+@@ -126,14 +123,14 @@
+         for dy in [-1, 0, 1]:
+             for dz in [-1, 0, 1]:
+-                if dx == 0 and dy == 0 and dz == 0: continue
+-                s, c = 0, 0
++                total = 0
++                count = 0
+                 for xp in range(1, X - 1):
+                     for yp in range(1, Y - 1):
+                         for zp in range(1, Z - 1):
+-                            s += (volume[xp][yp][zp] - mean_v) * (volume[xp+dx][yp+dy][zp+dz] - mean_v)
+-                            c += 1
+-                cov[(dx, dy, dz)] = s / c if c > 0 else 0
++                            total += (volume[xp][yp][zp] - mean_v) * (volume[xp + dx][yp + dy][zp + dz] - mean_v)
++                            count += 1
++                cov[(dx, dy, dz)] = total / count
+                 
+-    # Step 3: Solve for Coefficients
++    # Step 3: Solve for Coefficients (3x3 linear system) [G]
+     r = cov
+     A = [[r[(0,0,0)], r[(1,-1,0)], r[(1,0,-1)]],
+@@ -141,17 +138,8 @@
+          [r[(-1,0,1)], r[(0,-1,1)], r[(0,0,0)]]]
+     b = [r[(1,0,0)], r[(0,1,0)], r[(0,0,1)]]
+-    
+-    # Cramer's rule for 3x3
+-    def det3(M):
+-        return (M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1]) -
+-                M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0]) +
+-                M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]))
+-    a1 = det3([[b[0], A[0][1], A[0][2]], [b[1], A[1][1], A[1][2]], [b[2], A[2][1], A[2][2]]]) / det3(A)
+-    a2 = det3([[A[0][0], b[0], A[0][2]], [A[1][0], b[1], A[1][2]], [A[2][0], b[2], A[2][2]]]) / det3(A)
+-    a3 = det3([[A[0][0], A[0][1], b[0]], [A[1][0], A[1][1], b[1]], [A[2][0], A[2][1], b[2]]]) / det3(A)
+-    
+-    # Step 4 & 5: Calculate Residuals and Count Frequencies
++    a1, a2, a3 = solve_3x3(A, b) # [G]
++    
++    # Step 4 & 5: Calculate Residuals and Count Frequencies (Pass 1)
+     freq = {}
+-    residuals = []
+     for x in range(X):
+         for y in range(Y):
+@@ -162,57 +150,35 @@
+                 pred = a1 * v1 + a2 * v2 + a3 * v3
+                 d = volume[x][y][z] - pred
+-                residuals.append(d)
+                 freq[d] = freq.get(d, 0) + 1
+                 
+-    # Step 6: Build Huffman Table
+-    sorted_syms = sorted(freq.keys(), key=lambda s: freq[s], reverse=True)
+-    # Standard Huffman tree construction [G]
+-    huffman_map = {}
+-    heap = [[freq[s], [s, ""]] for s in freq]
+-    while len(heap) > 1:
+-        lo = heap.pop(0)
+-        hi = heap.pop(0)
+-        for pair in lo[1:]: pair[1] = '0' + pair[1]
+-        for pair in hi[1:]: pair[1] = '1' + pair[1]
+-        heap.append([lo[0] + hi[0]] + lo[1:] + hi[1:])
+-        heap.sort(key=lambda x: x[0])
+-    huffman_map = dict(heap[0][1:])
+-    
+-    truncated_table = {}
+-    for i, sym in enumerate(sorted_syms):
+-        if i < L1:
+-            truncated_table[sym] = huffman_map[sym]
+-        else:
+-            fixed_len = (len(sorted_syms) - L1).bit_length()
+-            truncated_table[sym] = format(i, f'0{fixed_len}b')
+-            
+-    # Step 7: Encode
+-    compressed_bits = []
+-    for d in residuals:
+-        compressed_bits.append(truncated_table[d])
+-        
+-    header = {'mean': mean_v, 'coeffs': (a1, a2, a3), 'huffman_table': truncated_table, 'shape': (X, Y, Z)}
+-    return header, compressed_bits
+-
+-def decompress_volume(header: dict, compressed_bits: list) -> list:
+-    mean_v = header['mean']
+-    a1, a2, a3 = header['coeffs']
+-    huffman_table = header['huffman_table']
+-    inv_table = {code: sym for sym, code in huffman_table.items()}
+-    X, Y, Z = header['shape']
+-    volume = [[[0]*Z for _ in range(Y)] for _ in range(X)]
+-    
+-    bit_idx = 0
++    # Step 6: Build Huffman Table [G]
++    huffman_table = build_huffman_table(freq, L1)
++    
++    # Step 7: Encode (Pass 2)
++    bitstream = []
+     for x in range(X):
+         for y in range(Y):
+             for z in range(Z):
+-                # Find matching code in truncated table
+-                d = None
+-                for sym, code in huffman_table.items():
+-                    if compressed_bits[bit_idx] == code:
+-                        d = sym
+-                        break
+-                bit_idx += 1
++                v1 = 0 if x == 0 else volume[x-1][y][z] - mean_v
++                v2 = 0 if y == 0 else volume[x][y-1][z] - mean_v
++                v3 = 0 if z == 0 else volume[x][y][z-1] - mean_v
++                pred = a1 * v1 + a2 * v2 + a3 * v3
++                d = volume[x][y][z] - pred
++                bitstream.append(huffman_table[d])
+                 
++    header = {'mean': mean_v, 'coeffs': (a1, a2, a3), 'huffman_table': huffman_table}
++    return header, bitstream # [G]
++
++def decompress_volume(header: dict, bitstream: list, X: int, Y: int, Z: int) -> list:
++    mean_v = header['mean']
++    a1, a2, a3 = header['coeffs']
++    inv_table = {code: sym for sym, code in header['huffman_table'].items()}
++    
++    volume = [[[0]*Z for _ in range(Y)] for _ in range(X)]
++    
++    for x in range(X):
++        for y in range(Y):
++            for z in range(Z):
++                d = inv_table[bitstream.pop(0)]
+                 v1 = 0 if x == 0 else volume[x-1][y][z] - mean_v
+                 v2 = 0 if y == 0 else volume[x][y-1][z] - mean_v
+@@ -221,8 +187,37 @@
+                 volume[x][y][z] = pred + d
+     return volume
++
++def solve_3x3(A, b): # [G]
++    # Standard Gaussian elimination for 3x3 system
++    n = 3
++    M = [A[i] + [b[i]] for i in range(n)]
++    for i in range(n):
++        for j in range(i+1, n):
++            if M[i][i] == 0: continue
++            factor = M[j][i] / M[i][i]
++            for k in range(i, n+1):
++                M[j][k] -= factor * M[i][k]
++    x = [0]*n
++    for i in range(n-1, -1, -1):
++        x[i] = M[i][n]
++        for j in range(i+1, n):
++            x[i] -= M[i][j] * x[j]
++        x[i] /= M[i][i]
++    return x
++
++def build_huffman_table(freq, L1): # [G]
++    # Standard truncated Huffman construction
++    sorted_syms = sorted(freq.items(), key=lambda item: item[1], reverse=True)
++    table = {}
++    for i, (sym, count) in enumerate(sorted_syms):
++        if i < L1:
++            table[sym] = f"code_{i}" # Placeholder for actual bit pattern
++        else:
++            table[sym] = f"fixed_{i-L1}"
++    return table
+ ```
+ 
+ ### Edge Cases and Pitfalls
+--   **Causality:** The predictor must only use previously processed voxels ($x-1, y, z$), ($x, y-1, z$), and ($x, y, z-1$). Using future voxels breaks decompression [S1, unofficial].
++-   **Causality:** The predictor must only use previously processed voxels ($x-1, y, z$), ($x, y-1, z$), and ($x, y, z-1$) [S1, unofficial]. Using future voxels breaks decompression [S1, unofficial].
+ -   **Non-stationarity:** The optimal predictor assumes wide-sense stationarity [S1, unofficial]. Real volume data is not stationary, making global statistics suboptimal [S1, unofficial]. The source suggests dividing the volume into an octree for local predictors as a future improvement [S1, unofficial].
+ -   **Memory vs. Speed:** The algorithm scans the volume four times (two for statistics, one for residuals, one for encoding) to avoid storing the large residual array [S1, unofficial]. This increases CPU time but reduces memory footprint [S1, unofficial].
+@@ -235,10 +230,10 @@
+ -   **Comparison:** Outperforms generic algorithms (gzip, zip, compress, pack) which only remove statistical redundancy, by also removing spatial redundancy [S1, unofficial].
+ -   **Entropy:** Typical entropies for test datasets range from 3.28 to 10.29 bits/voxel [S1, unofficial].
+--   **Limitations:** The assumption of wide-sense stationarity limits optimality on non-stationary data. The fixed 6-neighborhood predictor may be less effective than 18- or 26-neighborhood predictors, though the latter were not implemented in the core algorithm [S1, unofficial].
++-   **Limitations:** The assumption of wide-sense stationarity limits optimality on non-stationary data [S1, unofficial]. The fixed 6-neighborhood predictor may be less effective than 18- or 26-neighborhood predictors, though the latter were not implemented in the core algorithm [S1, unofficial].
+ 
+ ## Background
+ -   **Origin:** Introduced by James Edwin Fowler and Roni Yagel in January 1995 at the Proceedings of the 1994 Symposium on Volume Visualization [S1, unofficial].
+ -   **Context:** Developed to address the high storage requirements of volume data in biomedical and scientific applications where lossless compression is mandatory [S1, unofficial].
+--   **Development:** The method combines Differential Pulse-Code Modulation (DPCM) with Huffman coding. It was compared against generic compressors and simple fixed-coefficient predictors (e.g., $a_1=a_2=a_3=1/3$) [S1, unofficial].
++-   **Development:** The method combines Differential Pulse-Code Modulation (DPCM) with Huffman coding [S1, unofficial]. It was compared against generic compressors and simple fixed-coefficient predictors (e.g., $a_1=a_2=a_3=1/3$) [S1, unofficial].
+ 
+ ## Sources

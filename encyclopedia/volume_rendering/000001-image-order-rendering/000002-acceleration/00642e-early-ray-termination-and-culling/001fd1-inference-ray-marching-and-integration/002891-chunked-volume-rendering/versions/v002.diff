@@ -1,0 +1,100 @@
+--- v001.md
++++ v002.md
+@@ -3,14 +3,14 @@
+ Also called: VolumeRendererChunk
+ ## Overview
+-Chunked Volume Rendering is a memory-management technique for image-order volume rendering that processes rays in fixed-size batches (chunks) to bound GPU memory usage during inference [S1, unofficial]. It solves the problem of out-of-memory errors when rendering high-resolution images or large ray bundles by decoupling the total ray count from the per-forward-pass memory footprint [S1, unofficial]. It differs from [Sparse Ray Marching (Training)](3890-sparse-ray-marching-training.md), which optimizes sampling density during training, and [Inference Ray Compositing](3790-inference-ray-compositing.md), which focuses on the compositing logic itself; Chunked Volume Rendering specifically addresses the *batching* of the entire ray processing pipeline [S1, unofficial].
++Chunked Volume Rendering is a memory-management technique for image-order volume rendering that processes rays in fixed-size batches (chunks) to bound GPU memory usage during inference [S1, unofficial]. It solves the problem of exceeding available VRAM when rendering high-resolution images or large ray bundles by decoupling the total ray count from the per-forward-pass memory footprint [S1, unofficial]. It differs from [Sparse Ray Marching (Training)](3890-sparse-ray-marching-training.md), which optimizes sampling density during training, and [Inference Ray Compositing](3790-inference-ray-compositing.md), which focuses on the compositing logic itself; Chunked Volume Rendering specifically addresses the *batching* of the entire ray processing pipeline [S1, unofficial].
+ ## How it works
+ ### Inputs and Outputs
+ - **Inputs**:
+-  - `ray_bundle`: A tensor containing ray origins and directions, with shape $(N, 3)$ for origins and $(N, 3)$ for directions, where $N$ is the total number of rays [S1, unofficial].
++  - `ray_bundle`: An object or tensor containing ray origins and directions [S1, unofficial].
+   - `chunk_size`: An integer specifying the maximum number of rays to process in a single forward pass [S1, unofficial].
+   - `sampler`: An object or function responsible for generating sample points along rays [S1, unofficial].
+   - `implicit_fn`: A function (e.g., a neural radiance field query) that returns density and color at given 3D coordinates [S1, unofficial].
+ - **Outputs**:
+-  - `feature`: A concatenated tensor of rendered features (e.g., RGB, opacity) for all $N$ rays [S1, unofficial].
++  - `feature`: A concatenated tensor of rendered features for all $N$ rays [S1, unofficial].
+   - `depth`: A concatenated tensor of depth values for all $N$ rays [S1, unofficial].
+ 
+@@ -23,13 +23,13 @@
+ 2. Determine the total number of rays $N$ from `ray_bundle.origins.shape[0]` [S1, unofficial].
+ 3. Iterate over the range of rays in steps of `chunk_size`:
+-   - For each `chunk_start` in `range(0, N, self.chunk_size)`:
++   - For each `chunk_start` in `range(0, N, chunk_size)`:
+      a. Slice the `ray_bundle` to extract rays for the current chunk:
+-        $$ \text{cur\_ray\_bundle} = \text{ray\_bundle}[\text{chunk\_start} : \text{chunk\_start} + \text{self.chunk\_size}] $$
++        $$ \text{cur\_ray\_bundle} = \text{ray\_bundle}[\text{chunk\_start} : \min(\text{chunk\_start} + \text{chunk\_size}, N)] $$
+      b. Call the parent class's forward method (e.g., from [Inference Ray Marching and Integration](2148-inference-ray-marching-and-integration.md)) to process this subset:
+         $$ \text{cur\_feature}, \text{cur\_depth} = \text{super().forward}(\text{sampler}, \text{implicit\_fn}, \text{cur\_ray\_bundle}) $$
+      c. Append `cur_feature` to `chunk_features` and `cur_depth` to `chunk_depths` [S1, unofficial].
+ 4. Concatenate all chunk outputs along dimension 0:
+-   $$ \text{feature} = \text{torch.cat}(\text{chunk\_features}, \text{dim}=0) $$
+-   $$ \text{depth} = \text{torch.cat}(\text{chunk\_depths}, \text{dim}=0) $$
++   $$ \text{feature} = \text{concatenate}(\text{chunk\_features}, \text{dim}=0) $$
++   $$ \text{depth} = \text{concatenate}(\text{chunk\_depths}, \text{dim}=0) $$
+ 5. Return `feature` and `depth` [S1, unofficial].
+ 
+@@ -46,5 +46,5 @@
+     # Process rays in chunks
+     for chunk_start in range(0, N, self.chunk_size):
+-        # Slice the current chunk of rays
++        # Slice the current chunk of rays, handling the final partial chunk
+         end_index = min(chunk_start + self.chunk_size, N)
+         cur_ray_bundle = ray_bundle[chunk_start:end_index]
+@@ -59,18 +59,25 @@
+         
+     # Concatenate all chunk results to form the full output
+-    feature = torch.cat(chunk_features, dim=0)
+-    depth = torch.cat(chunk_depths, dim=0)
++    feature = concatenate(chunk_features, dim=0)
++    depth = concatenate(chunk_depths, dim=0)
+     
+     return feature, depth
++
++def concatenate(tensors, dim=0):
++    # Concatenates a list of tensors along the specified dimension
++    # Implements standard tensor concatenation logic
++    if dim == 0:
++        return [val for t in tensors for val in t]
++    return standard_concatenate(tensors, dim)
+ ```
+ 
+ ### Parameters
+-- `chunk_size`: Integer. The maximum number of rays processed in a single forward pass. Typical values are not explicitly defined in the primary source, but it is chosen to fit within available GPU memory [S1, unofficial].
++- `chunk_size`: Integer. The maximum number of rays processed in a single forward pass to limit memory usage [S1, unofficial]. Typical values are not given in the sources.
+ 
+ ### Edge Cases and Pitfalls
+-- **Memory Limits**: If `chunk_size` is too large, the forward pass may exceed GPU memory, causing an OOM error. If too small, overhead from repeated kernel launches may reduce performance [S1, unofficial].
+-- **Boundary Conditions**: The slicing logic must handle the last chunk, which may contain fewer rays than `chunk_size`. The pseudocode uses `min(chunk_start + self.chunk_size, N)` to ensure no out-of-bounds access [S1, unofficial].
+-- **Concatenation Order**: Results must be concatenated in the same order as the input rays to maintain spatial correspondence. The loop iterates sequentially, ensuring this order [S1, unofficial].
+-
++- **Memory Limits**: `chunk_size` must be tuned to fit within available GPU memory; the sources do not specify exact thresholds [S1, unofficial].
++- **Boundary Conditions**: The slicing logic must handle the last chunk, which may contain fewer rays than `chunk_size`. The loop uses `min(chunk_start + self.chunk_size, N)` to prevent out-of-bounds access [S1, unofficial].
++- **Concatenation Order**: Results are appended sequentially and concatenated along dimension 0, preserving the original ray order [S1, unofficial].
++- **Measured Performance**: Not given in the sources.
+ ## Subtopics
+ 
+@@ -85,16 +92,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N)$, where $N$ is the total number of rays, as each ray is processed exactly once [S1, unofficial]. The constant factor depends on the overhead of chunking and concatenation, which is negligible compared to the ray marching cost [S1, unofficial].
+-- **Memory Complexity**: $O(C \cdot M)$, where $C$ is the `chunk_size` and $M$ is the memory required to process one ray (including intermediate buffers for sampling and compositing) [S1, unofficial]. This is significantly lower than the $O(N \cdot M)$ required for unchunked rendering [S1, unofficial].
++- **Time Complexity**: Not given in the sources.
++- **Memory Complexity**: Bounded by `chunk_size` rather than total rays $N$ [S1, unofficial].
+ - **Measured Performance**: Not given in the sources.
+-- **Scaling**: Scales linearly with the number of rays, but memory usage is bounded by `chunk_size` [S1, unofficial].
+-- **Strengths**: Prevents out-of-memory errors on high-resolution images or large ray bundles [S1, unofficial]. Allows rendering on hardware with limited VRAM [S1, unofficial].
+-- **Limitations**: Introduces slight overhead from chunk management and concatenation [S1, unofficial]. Requires tuning `chunk_size` for optimal performance [S1, unofficial].
++- **Scaling**: Memory usage scales with `chunk_size`, not total ray count [S1, unofficial].
++- **Strengths**: Enables rendering of large ray bundles that would otherwise exceed VRAM [S1, unofficial].
++- **Limitations**: Introduces overhead from chunk management and concatenation [S1, unofficial].
+ - **When to use**: When rendering high-resolution volumes or large ray bundles that exceed available GPU memory [S1, unofficial].
+ - **When not to use**: When memory is abundant and the overhead of chunking is undesirable, or when the ray count is small enough to fit in memory without chunking [S1, unofficial].
+-
+ ## Background
+ Chunked Volume Rendering was introduced in the context of neural volume rendering pipelines to enable inference on high-resolution images [S1, unofficial]. It is part of a broader effort to make neural rendering methods practical for real-time or near-real-time applications by managing memory efficiently [S1, unofficial]. The method builds on [Inference Ray Marching and Integration](2148-inference-ray-marching-and-integration.md), which provides the core ray processing logic [S1, unofficial].
+-
+ ## Sources
+ [S1] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)

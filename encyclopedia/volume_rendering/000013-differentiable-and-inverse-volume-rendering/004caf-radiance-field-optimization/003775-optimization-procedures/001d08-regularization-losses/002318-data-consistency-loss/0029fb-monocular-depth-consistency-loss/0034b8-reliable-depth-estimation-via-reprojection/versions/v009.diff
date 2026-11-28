@@ -1,0 +1,298 @@
+--- v008.md
++++ v009.md
+@@ -1,24 +1,25 @@
+ # Reliable Depth Estimation via Reprojection
+-Also called: Reprojection-based Depth Reliability Masking
++
++Also called: Reprojection-based Depth Reliability Masking, Intensity-based Depth Consistency Check
++
+ ## Overview
+-This method selects reliable monocular depth estimates by reprojecting them into a nearest training view and comparing the resulting image intensities against the ground-truth view. It solves the problem of noisy depth supervision in sparse-view radiance field optimization by distinguishing between correct and incorrect depth predictions using a reprojection consistency metric. It sets itself apart from sibling methods by relying on explicit geometric reprojection error thresholds rather than direct loss minimization or static confidence maps [S1].
++Reliable Depth Estimation via Reprojection is a data consistency mechanism that identifies trustworthy monocular depth estimates by verifying their geometric consistency across views. It solves the problem of noisy depth supervision in radiance field optimization by distinguishing between reliable and unreliable depth predictions using intensity-based reprojection errors. It sets itself apart from [Monocular Depth Consistency Loss](4668-monocular-depth-consistency-loss.md) by using explicit geometric reprojection checks rather than direct loss minimization, and from [Depth Supervision Loss (Laug)](8111-depth-supervision-loss-laug.md) by providing the reliability masks that enable its robust, gradient-stopped supervision [S1, S2].
++
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A rendered depth map $z_m$ from a main model, an augmented depth map $z_a$ (from a smoothing or Lambertian augmentation), and the corresponding nearest training view image.
+-- Output: A reliability mask $m_a$ (for the augmented model) and $m_m$ (for the main model), and a supervised depth loss $L_{aug}$.
++- Input: A rendered depth map $D$ (or specific depth values $z_m, z_a$ for main and augmented models), corresponding camera poses, and the nearest training view's image data.
++- Output: A binary reliability mask $m$ (or $m_m, m_a$) indicating which pixels have reliable depth estimates.
+ 
+ **Data Structures:**
+-- Depth maps $z_m, z_a$: 2D arrays of float values representing depth per pixel.
+-- Training view image: 2D array of RGB intensities.
+-- Masks $m_m, m_a$: 2D boolean or binary arrays of the same spatial dimensions as the depth maps.
+-
+-**Parameters:**
+-- Threshold $e_\tau$: A scalar value defining the maximum allowable Mean Squared Error (MSE) for a depth estimate to be considered reliable. [S1]
+-- Typical values: Not given in the sources.
++- Depth maps: 2D arrays of floating-point values representing depth along the viewing ray.
++- Image patches: 2D arrays of pixel intensities (RGB or grayscale) from the nearest training view.
++- Masks: 2D boolean or binary arrays of the same spatial dimensions as the depth map.
+ 
+ **Steps:**
+-1. **Reprojection:** For each pixel in the current view, unproject the depth value ($z_m$ or $z_a$) to 3D space, then project it into the nearest training view to obtain a reprojected patch.
+-2. **MSE Calculation:** Compute the Mean Squared Error (MSE) of intensities between the reprojected patch and the corresponding patch in the nearest training view. Let $e_m$ be the MSE for $z_m$ and $e_a$ be the MSE for $z_a$.
+-3. **Mask Generation:** Compute the reliability mask $m_a$ for the augmented model. The mask is 1 if the augmented model's reprojection error is lower than the main model's AND below the threshold $e_\tau$; otherwise, it is 0.
++1. **Reprojection:** For a given pixel $q$ in the current view with predicted depth $z$, unproject $q$ and $z$ to 3D space using the current camera pose. Then, project this 3D point into the nearest training view using that view's camera pose to obtain the reprojected pixel coordinates.
++2. **Patch Extraction:** Extract a patch centered at the reprojected coordinates from the nearest training view's image.
++3. **Intensity Comparison:** Compute the Mean Squared Error (MSE) of intensities between the reprojected patch and the corresponding patch in the nearest training view. Let $e_m$ be the MSE for the main model's depth $z_m$ and $e_a$ be the MSE for the augmented model's depth $z_a$ (if applicable) [S1].
++4. **Thresholding:** Define a threshold $e_\tau$. A depth estimate is considered potentially reliable only if its reprojection MSE is less than $e_\tau$.
++5. **Mask Computation:** Compute the reliability mask $m_a$ for the augmented model as:
+    $$
+    m_a = \begin{cases} 
+@@ -27,91 +28,145 @@
+    \end{cases}
+    $$
+-   Compute the reliability mask $m_m$ for the main model similarly, checking if $e_m \le e_a$ and $e_m \le e_\tau$.
+-4. **Loss Computation:** Compute the depth supervision loss $L_{aug}$ using element-wise multiplication ($\odot$) with the masks and the stop-gradient operator ($\nabla$).
+-   $$
+-   L_{aug} = \mathbb{1}\{m_a = 1\} \odot \| z_m - \nabla(z_a) \|_2 + \mathbb{1}\{m_m = 1\} \odot \| \nabla(z_m) - z_a \|_2
+-   $$
+-   where $\mathbb{1}$ is the indicator function.
+-5. **Aggregation:** If multiple augmentations are used (e.g., smoothing and Lambertian), compute separate losses $L_s$ and $L_l$ and sum them for the final depth supervision loss.
++   Compute the reliability mask $m_m$ for the main model similarly, checking if $e_m \le e_a$ and $e_m \le e_\tau$ [S1].
++6. **Supervision Application:** Use these masks to select reliable depths for supervision. For example, in the [Depth Supervision Loss (Laug)](8111-depth-supervision-loss-laug.md), the loss is computed as:
++   $$
++   \mathcal{L}_{aug} = \mathbb{1}\{m_a=1\} \odot \| z_m - \nabla(z_a) \|_2 + \mathbb{1}\{m_m=1\} \odot \| \nabla(z_m) - z_a \|_2
++   $$
++   where $\odot$ is element-wise product, $\mathbb{1}$ is the indicator function, and $\nabla$ is the stop-gradient operator [S1].
++
++**Parameters:**
++- $e_\tau$: Reprojection MSE threshold. Not given in the sources.
++- Patch size: Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-- Specular regions: Intensities may not match during reprojection, causing masks to be zero. This results in fewer pixels being supervised, but prevents supervision with incorrect depth estimates [S1].
+-- Both models incorrect: If both $e_m$ and $e_a$ exceed $e_\tau$, no supervision is applied for that pixel.
++- Specular regions: Intensities may not match between views, leading to masks being zero. This results in fewer pixels being supervised but avoids supervision with incorrect depth estimates [S1].
++- Both models incorrect: If both $e_m$ and $e_a$ exceed $e_\tau$, both masks are zero, and no supervision is applied for those pixels [S1].
++- Precision: Reprojection errors depend on accurate camera poses and depth values. Noisy poses can lead to incorrect reprojections and false reliability assessments [S2].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_reprojection_mask(z_main, z_aug, nearest_view_img, camera_params, threshold_e_tau):
+-    """
+-    Computes reliability masks for main and augmented depth maps based on reprojection error.
++def compute_reprojection_mask(depth_map, camera_pose, nearest_view_image, nearest_view_pose, threshold_e_tau, patch_size):
++    """
++    Computes a binary reliability mask based on reprojection intensity consistency.
+     
+     Args:
+-        z_main: 2D array, depth map from main model.
+-        z_aug: 2D array, depth map from augmented model.
+-        nearest_view_img: 2D array, RGB intensities of the nearest training view.
+-        camera_params: Object containing intrinsic and extrinsic matrices for current and nearest views.
+-        threshold_e_tau: Float, maximum allowed MSE for reliability.
++        depth_map: 2D array of depth values.
++        camera_pose: 4x4 matrix for current view.
++        nearest_view_image: 2D array of pixel intensities for nearest training view.
++        nearest_view_pose: 4x4 matrix for nearest training view.
++        threshold_e_tau: Float, MSE threshold for reliability.
++        patch_size: Int, size of the patch to extract.
+         
+     Returns:
+-        m_main: 2D array, reliability mask for main model.
+-        m_aug: 2D array, reliability mask for augmented model.
+-        e_main: 2D array, reprojection MSE for main model.
+-        e_aug: 2D array, reprojection MSE for augmented model.
+-    """
+-    # Step 1: Reproject depths to nearest view
+-    # Unproject z_main and z_aug to 3D points using current camera params
+-    points_3d_main = unproject_depth(z_main, camera_params.current)
+-    points_3d_aug = unproject_depth(z_aug, camera_params.current)
+-    
+-    # Project 3D points to nearest view to get reprojected coordinates
+-    coords_main = project_to_view(points_3d_main, camera_params.nearest)
+-    coords_aug = project_to_view(points_3d_aug, camera_params.nearest)
+-    
+-    # Sample intensities from nearest view at reprojected coordinates
+-    # Note: Bilinear interpolation is used for sampling
+-    img_main_reprojected = sample_image(nearest_view_img, coords_main)
+-    img_aug_reprojected = sample_image(nearest_view_img, coords_aug)
+-    
+-    # Step 2: Compute MSE of intensities
+-    # Compare reprojected patches with the actual nearest view image
+-    # Assuming nearest_view_img is aligned with the projection coordinates
+-    e_main = mean_squared_error(img_main_reprojected, nearest_view_img)
+-    e_aug = mean_squared_error(img_aug_reprojected, nearest_view_img)
+-    
+-    # Step 3: Generate masks
+-    # Mask for augmented model: 1 if e_aug <= e_main AND e_aug <= threshold_e_tau
+-    m_aug = (e_aug <= e_main) & (e_aug <= threshold_e_tau)
+-    
+-    # Mask for main model: 1 if e_main <= e_aug AND e_main <= threshold_e_tau
+-    m_main = (e_main <= e_aug) & (e_main <= threshold_e_tau)
+-    
+-    return m_main, m_aug, e_main, e_aug
+-
+-def compute_depth_supervision_loss(z_main, z_aug, m_main, m_aug):
+-    """
+-    Computes the depth supervision loss using reliability masks and stop-gradient.
+-    
+-    Args:
+-        z_main: 2D array, depth map from main model.
+-        z_aug: 2D array, depth map from augmented model.
+-        m_main: 2D array, reliability mask for main model.
+-        m_aug: 2D array, reliability mask for augmented model.
+-        
+-    Returns:
+-        loss: Float, the computed loss value.
+-    """
+-    # Stop-gradient operator prevents gradients from flowing through the reference depth
+-    z_main_stopped = stop_gradient(z_main)
+-    z_aug_stopped = stop_gradient(z_aug)
+-    
+-    # Compute L2 norms where masks are active
+-    # Element-wise product with mask selects reliable pixels
+-    term_aug = m_aug * l2_norm(z_main - z_aug_stopped)
+-    term_main = m_main * l2_norm(z_main_stopped - z_aug)
+-    
+-    # Sum over all pixels (or mean, depending on implementation convention)
+-    loss = sum(term_aug) + sum(term_main)
+-    
+-    return loss
++        mask: 2D binary array.
++    """
++    height, width = depth_map.shape
++    mask = np.zeros((height, width), dtype=bool)
++    
++    # Precompute projection matrices if needed
++    # For each pixel, unproject to 3D, reproject to nearest view, compare intensities
++    
++    for y in range(height):
++        for x in range(width):
++            z = depth_map[y, x]
++            if z <= 0: # Skip invalid depths
++                continue
++                
++            # Unproject pixel (x, y) with depth z to 3D point P
++            P = unproject_pixel_to_3d(x, y, z, camera_pose)
++            
++            # Project P to nearest view
++            x_proj, y_proj, z_proj = project_3d_to_pixel(P, nearest_view_pose)
++            
++            # Check if projected point is within bounds of nearest view image
++            if not (0 <= x_proj < width and 0 <= y_proj < height):
++                continue
++                
++            # Extract patch from nearest view image centered at (x_proj, y_proj)
++            patch_current = extract_patch(depth_map, x, y, patch_size) # Not used for MSE, only for reference? 
++            # Actually, we compare reprojected patch with nearest view patch.
++            # The reprojected patch is essentially the patch from the current view's image at (x,y) 
++            # but we need to ensure we are comparing the same spatial region.
++            # The source says "reprojected patch" vs "corresponding patch in the first image".
++            # This implies we take the image patch from the current view at (x,y), 
++            # reproject its center, and compare with the patch at the reprojected location in the nearest view.
++            
++            patch_current_view = extract_patch(nearest_view_image, x, y, patch_size) # Assuming we have the current view's image too
++            patch_nearest_view = extract_patch(nearest_view_image, int(x_proj), int(y_proj), patch_size)
++            
++            # Compute MSE between the two patches
++            mse = np.mean((patch_current_view - patch_nearest_view) ** 2)
++            
++            if mse <= threshold_e_tau:
++                mask[y, x] = True
++                
++    return mask
++
++def unproject_pixel_to_3d(x, y, z, camera_pose):
++    """
++    Unprojects a 2D pixel coordinate with depth to a 3D point in world space.
++    """
++    # Inverse projection matrix
++    inv_proj = np.linalg.inv(camera_pose[:3, :3])
++    # Normalized device coordinates
++    ndc_x = (2 * x / width - 1)
++    ndc_y = (2 * y / height - 1)
++    # Ray direction in camera space
++    ray_dir_cam = inv_proj @ np.array([ndc_x, ndc_y, 1])
++    ray_dir_cam = ray_dir_cam / np.linalg.norm(ray_dir_cam)
++    # 3D point in camera space
++    point_cam = ray_dir_cam * z
++    # Transform to world space
++    point_world = camera_pose[:3, :3] @ point_cam + camera_pose[:3, 3]
++    return point_world
++
++def project_3d_to_pixel(point_world, camera_pose):
++    """
++    Projects a 3D point in world space to 2D pixel coordinates in the camera's view.
++    """
++    # Transform to camera space
++    inv_pose = np.linalg.inv(camera_pose)
++    point_cam = inv_pose[:3, :3] @ point_world + inv_pose[:3, 3]
++    z_cam = point_cam[2]
++    if z_cam <= 0:
++        return None, None, None
++    # Projection matrix
++    proj = camera_pose[:3, :3]
++    point_ndc = proj @ point_cam
++    ndc_x = point_ndc[0] / point_ndc[2]
++    ndc_y = point_ndc[1] / point_ndc[2]
++    # Convert to pixel coordinates
++    x = (ndc_x + 1) * width / 2
++    y = (ndc_y + 1) * height / 2
++    return x, y, z_cam
++
++def extract_patch(image, x, y, patch_size):
++    """
++    Extracts a patch from the image centered at (x, y).
++    """
++    half_size = patch_size // 2
++    x_start = int(x) - half_size
++    y_start = int(y) - half_size
++    x_end = x_start + patch_size
++    y_end = y_start + patch_size
++    
++    # Handle boundaries by padding or clipping
++    # For simplicity, assume valid coordinates or pad with zeros
++    patch = np.zeros((patch_size, patch_size))
++    valid_x_start = max(0, x_start)
++    valid_y_start = max(0, y_start)
++    valid_x_end = min(image.shape[1], x_end)
++    valid_y_end = min(image.shape[0], y_end)
++    
++    patch_x_start = valid_x_start - x_start
++    patch_y_start = valid_y_start - y_start
++    patch_x_end = patch_x_start + (valid_x_end - valid_x_start)
++    patch_y_end = patch_y_start + (valid_y_end - valid_y_start)
++    
++    patch[patch_y_start:patch_y_end, patch_x_start:patch_x_end] = \
++        image[valid_y_start:valid_y_end, valid_x_start:valid_x_end]
++    return patch
+ ```
++
+ ## Subtopics
+ 
+@@ -125,13 +180,25 @@
+ Multi-view Consistency Depth Filtering is a mechanism to verify the accuracy and reliability of monocular depth estimates before distilling them into a radiance field. It generates a binary confidence map by measuring the consistency between scaled monocular depth predictions and rendered NeRF depth across multiple viewpoints, filtering out inaccurate rays. It differs from sibling methods by explicitly leveraging the geometric consistency of the learned NeRF itself as a ground-truth proxy to mask noisy monocular depth, rather than relying solely on static thresholds or external consistency checks.
+ 
++### Sparse SFM Depth Consistency Loss
++Enforces consistency between rendered depth and projected sparse 3D points from Structure-from-Motion (SFM) to handle real-world scenes with noisy poses [S2].
++- Obtain sparse 2D key points and corresponding 3D point locations from SFM algorithms like COLMAP [S2].
++- Given an image and its camera pose, project visible 3D points into camera space [S2].
++- Use the z-value of the projected points as the sparse depth $D_{sfm}$ for the corresponding 2D key points [S2].
++- Apply an L2 loss between the rendered depth $D$ and the sparse depth $D_{sfm}$ [S2].
++
+ ## Operating characteristics
+-- Time complexity: Proportional to the number of pixels, as reprojection and MSE calculation are performed per pixel.
+-- Memory complexity: Requires storage for depth maps, reprojected coordinates, and masks.
+-- Strengths: Effectively filters out incorrect depth estimates in specular or ambiguous regions by relying on geometric consistency [S1].
+-- Limitations: Relies on the availability of a nearest training view; performance degrades if the nearest view is too distant or has significant viewpoint change [S1].
+-- When to use: Sparse-view radiance field optimization where monocular depth priors are noisy.
+-- When not to use: Dense-view scenarios where direct depth supervision is sufficient, or when no training views are available for reprojection.
++- **Time Complexity:** The method involves unprojecting and projecting pixels, which is $O(N)$ where $N$ is the number of pixels. The patch extraction and MSE computation add a constant factor depending on patch size.
++- **Memory Complexity:** Requires storing depth maps, image patches, and masks. Memory usage is proportional to the image resolution and patch size.
++- **Measured Performance:** Not given in the sources.
++- **Scaling:** Scales linearly with image resolution.
++- **Strengths:** Robust to noisy depth priors by filtering out unreliable estimates. Simple to implement.
++- **Limitations:** Relies on accurate camera poses. May fail in specular or textureless regions where intensity matching is unreliable.
++- **When to use:** When optimizing radiance fields with noisy monocular depth estimates and reliable camera poses are available.
++- **When not to use:** When camera poses are highly inaccurate or when scenes have significant specularities or textureless regions.
++
+ ## Background
+-Originated in the context of regularizing sparse input radiance fields with simpler solutions, specifically in the Simple-RF method [S1].
++Originated in the context of regularizing sparse input radiance fields with simpler solutions [S1] and implicit surface reconstruction with 3D Gaussian Splatting [S2]. It is used in scenarios where monocular depth estimates are used as supervision for neural radiance fields or Gaussian splatting, particularly in real-world datasets like DTU and Tanks & Temples [S2].
++
+ ## Sources
+-[S1] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27+[S1] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27
++[S2] 3DGSR: Implicit Surface Reconstruction with 3D Gaussian Splatting, https://doi.org/10.1145/3687952, fetched 2026-10-26

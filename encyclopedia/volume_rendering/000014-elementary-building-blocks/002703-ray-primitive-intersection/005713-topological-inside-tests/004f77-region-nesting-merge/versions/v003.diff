@@ -1,0 +1,118 @@
+--- v002.md
++++ v003.md
+@@ -4,78 +4,75 @@
+ 
+ ## Overview
+-Region Nesting Merge is a post-processing step for topological ray operations that removes nested inner regions from a sorted list of ray samples. It solves the problem of redundant or invalid geometry resulting from boolean unions or subtractions, where one volume is entirely contained within another. It differs from [Ray Crossing Count (Winding Number)](915-ray-crossing-count-winding-number.md) by using a simple nesting depth counter based on normal direction rather than a cumulative winding number, making it suitable for specific sculpting and boolean contexts where only the outermost boundary of nested structures is required [S1].
++Region Nesting Merge is a post-processing step for topological ray operations that removes nested inner regions from a sorted list of ray samples. It solves the problem of redundant or invalid geometry resulting from boolean unions or subtractions, where one volumetric region is contained entirely within another. It differs from [Ray Crossing Count](915-ray-crossing-count-winding-number.md) by relying on the orientation of surface normals relative to the ray direction to determine nesting depth, rather than counting geometric intersections. It is a core component of [Ray Union](13991-region-nesting-merge.md) and [Ray Subtraction](14029-ray-subtraction.md).
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A ray structure $R$ containing a list of samples $R.list$ sorted by position along the ray (typically by $z$-value), and a ray direction vector $R.direction$. Each sample $s$ in the list contains a position and a normal vector $s.normal$.
+-*   **Output:** The ray structure $R$ with its list $R.list$ updated to contain only the samples defining the outer boundaries of the volume, with inner nested regions removed.
++**Inputs and Outputs**
++*   **Input**: A ray $R$ containing a list of samples $R.list$, sorted by their position along the ray (typically by $z$-value or distance from origin). Each sample $s$ has a position and a normal vector $s.normal$. The ray has a direction vector $R.direction$.
++*   **Output**: The ray $R$ with its list $R.list$ updated to contain only the samples defining the outermost boundaries of the volumetric regions, effectively removing any samples that define regions strictly inside other regions.
+ 
+-**Data Structures:**
+-*   **Ray $R$:**
+-    *   `direction`: 3D vector $(d_x, d_y, d_z)$.
+-    *   `list`: A list of Sample objects.
+-*   **Sample $s$:**
+-    *   `normal`: 3D vector $(n_x, n_y, n_z)$.
+-    *   (Position is implied by the sorted order of the list).
++**Data Structures**
++*   **Ray**: Contains a direction vector $\mathbf{d}$ and a list of samples.
++*   **Sample**: Contains a position (implicitly sorted) and a normal vector $\mathbf{n}$.
++*   **Temporary List $T$**: An empty list used to accumulate the surviving samples.
+ 
+-**Parameters:**
+-*   $R.direction$: The direction vector of the ray.
+-*   $s.normal$: The normal vector associated with the sample $s$.
++**Algorithm**
++The procedure iterates through the sorted samples, maintaining a nesting level counter. The logic assumes that a sample with a normal pointing against the ray direction represents an "entry" into a volume, while a normal pointing with the ray direction represents an "exit".
+ 
+-**Algorithm Steps:**
+ 1.  Initialize a nesting level counter $level = 0$.
+-2.  Initialize an empty temporary list $T$.
+-3.  Iterate through each sample $s$ in the input list $R.list$:
+-    a.  Compute the dot product $D = \text{Dot}(s.normal, R.direction)$.
+-    b.  If $D < 0$ (the normal points against the ray direction, indicating an "entering" boundary relative to the nesting logic):
++2.  Initialize an empty output list $T$.
++3.  For each sample $s$ in the sorted input list $R.list$:
++    a.  Calculate the dot product $D = \mathbf{n}_s \cdot \mathbf{d}_R$.
++    b.  If $D < 0$ (normal opposes ray direction, entering a region):
+         i.  Decrement $level$ by 1.
+-        ii. If $level == 0$, add sample $s$ to $T$.
+-    c.  Else ($D \ge 0$, indicating a "leaving" boundary):
+-        i.  If $level == 0$, add sample $s$ to $T$.
++        ii. If $level == 0$, add $s$ to $T$.
++    c.  Else ($D \ge 0$, normal aligns with ray direction, leaving a region):
++        i.  If $level == 0$, add $s$ to $T$.
+         ii. Increment $level$ by 1.
+ 4.  Replace $R.list$ with $T$.
+ 
+-**Pseudocode:**
++**Pseudocode**
+ ```python
+ def MergeRegion(Ray R):
+     level = 0
+     T = []
++    
++    # R.list is assumed to be sorted by position along the ray
+     for s in R.list:
+         # Dot product of sample normal and ray direction
+-        dot_product = s.normal.x * R.direction.x + \
+-                      s.normal.y * R.direction.y + \
+-                      s.normal.z * R.direction.z
++        dot_product = dot(s.normal, R.direction)
+         
+         if dot_product < 0:
++            # Entering a region (normal points against ray)
+             level = level - 1
+             if level == 0:
+                 T.append(s)
+         else:
++            # Leaving a region (normal points with ray)
+             if level == 0:
+                 T.append(s)
+             level = level + 1
++            
+     R.list = T
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Sorting:** The input list $R.list$ must be strictly sorted by position along the ray direction before calling this procedure. If the list is not sorted, the nesting logic fails [S1].
+-*   **Degenerate Normals:** The logic assumes normals are consistently oriented relative to the ray direction. Inconsistent normal orientations (e.g., mixed inside/outside definitions) will produce incorrect nesting levels.
+-*   **Precision:** Floating-point comparisons for $D < 0$ should handle cases where the normal is nearly perpendicular to the ray. [G] A small epsilon tolerance may be required in practice to avoid ambiguity when $D \approx 0$, though the source defines the strict inequality $< 0$.
++**Parameters**
++*   $R.direction$: The direction vector of the ray. Typically normalized.
++*   $s.normal$: The normal vector of the sample. Must be consistent with the topological definition of the volume (outward-facing for standard union logic).
++
++**Edge Cases and Pitfalls**
++*   **Sorting**: The input list $R.list$ must be strictly sorted by position along the ray. If samples are not sorted, the nesting logic fails.
++*   **Normal Consistency**: The algorithm relies on the convention that normals pointing against the ray direction denote entry. This convention must be maintained across all samples in the list. In [Ray Subtraction](14029-ray-subtraction.md), the normals of the subtracted volume are inverted before merging to satisfy this convention for the subtraction logic.
++*   **Degenerate Inputs**: If the list is empty, the output is empty. If the nesting level does not return to 0 at the end of the list, the input data is topologically inconsistent (e.g., an unpaired entry or exit). The algorithm as described does not explicitly check for this, but the resulting list may be topologically invalid for rendering.
+ 
+ ## Subtopics
+ 
+-### [Ray Subtraction](14029-ray-subtraction.md)
+-Ray Subtraction is a boolean operation that removes material from a target ray (Ray A) using a source ray (Ray B). It solves the problem of sculpting or editing volumetric data by defining the region to be removed via a second set of samples. It differs from [Ray Union](13991-region-nesting-merge.md) by inverting the normals of the source samples before merging, which effectively flips the inside/outside logic for the subtracted volume, allowing inner regions to be identified and excised by the subsequent [MergeRegion](13991-region-nesting-merge.md) step.
+-
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$, where $N$ is the number of samples in $R.list$. The algorithm performs a single pass through the sorted list.
+-*   **Memory Complexity:** $O(N)$ for the temporary list $T$. In the worst case (no inner regions), $T$ contains all samples.
+-*   **Strengths:** Simple implementation; efficient for removing nested volumes in boolean operations; does not require complex winding number accumulation.
+-*   **Limitations:** Only works correctly on pre-sorted lists; relies on consistent normal orientation; does not handle complex overlapping topologies that require winding numbers (e.g., non-nested overlapping shells) [S1].
+-*   **When to use:** When performing boolean unions or subtractions on volumetric rays where inner regions are redundant and only the outermost boundary is needed.
+-*   **When not to use:** When the topology requires preserving internal structures or when normals are inconsistent.
++*   **Time Complexity**: $O(N)$, where $N$ is the number of samples in $R.list$. The algorithm performs a single pass through the list.
++*   **Memory Complexity**: $O(N)$ in the worst case (if no regions are nested and all samples are kept), as a new list $T$ is created.
++*   **Strengths**: Simple, efficient, and robust for boolean operations on ray-based volumetric representations. It correctly handles nested structures by tracking depth.
++*   **Limitations**: It assumes a specific normal orientation convention. It does not handle complex self-intersections or non-manifold geometry that violates the entry/exit pairing assumption. It requires pre-sorted input.
+ 
+ ## Background
+-Region Nesting Merge was introduced in the context of detail sculpting using cubical marching squares. It serves as a helper procedure for the RayUnion and RaySubtraction algorithms, specifically designed to clean up the sample lists after merging operations to ensure topological correctness [S1].
++Region Nesting Merge was introduced in the context of detail sculpting using cubical marching squares. It serves as the core mechanism for resolving topological conflicts in ray-based boolean operations. The method is part of a family of topological inside tests that use normal orientation to determine volumetric inclusion.
+ 
+ ## Sources

@@ -1,0 +1,92 @@
+# Redshift Environment Object
+
+Also called: Environment Object, Redshift Volume Object (for homogeneous cases)
+
+## Overview
+The Redshift Environment Object is a procedural volume primitive that fills the entire scene or a height-limited layer with a homogeneous scattering medium, eliminating the need for voxel data [S1, unofficial][S2]. It is primarily used to simulate atmospheric haze, fog, and volumetric lighting effects such as god rays [S1, unofficial][S2]. Unlike the Redshift Clouds Object, which generates procedural sky volumes, the Environment Object provides a uniform background medium that interacts with light sources to create visible light shafts [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Scene geometry, light sources (specifically strong, partially blocked sources for god rays), and parameter values for scattering.
+*   **Output:** A rendered image with a uniform scattering medium affecting all rays passing through the defined volume.
+
+**Data Structures:**
+The object does not use voxel grids or point clouds. It defines a volume implicitly based on scene bounds or a height limit [S1, unofficial][S2].
+
+**Parameters:**
+*   **Scattering Value:** Controls the amount of scattering in the medium. Small values are sufficient to create visible effects [S1, unofficial].
+*   **Height Limit:** Defines whether the volume fills the entire scene or only a specific height layer [S1, unofficial][S2].
+
+**Steps:**
+1.  Create a Redshift Environment Object in the scene hierarchy [S1, unofficial][S2].
+2.  Configure the object to fill the scene or a height-limited layer [S1, unofficial][S2].
+3.  Set the **Scattering Value** to the desired intensity [S1, unofficial].
+4.  For god rays, add a strong, partially blocked light source (e.g., sun through a window) [S1, unofficial].
+5.  Render the scene; rays passing through the medium will scatter, making light beams visible [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for setting up a Redshift Environment Object for god rays
+def setup_environment_object(scattering_value=0.1, height_limit=None):
+    """
+    Creates a Redshift Environment Object with specified scattering.
+    
+    Args:
+        scattering_value (float): Amount of scattering. Small values are powerful.
+        height_limit (float or None): If set, limits volume to this height. 
+                                      If None, fills the entire scene.
+    """
+    # Create the object
+    env_obj = create_redshift_environment_object()
+    
+    # Set scattering
+    env_obj.set_parameter("scattering_value", scattering_value)
+    
+    # Set volume extent
+    if height_limit is not None:
+        env_obj.set_height_limit(height_limit)
+    else:
+        env_obj.set_full_scene_volume()
+        
+    return env_obj
+
+def create_god_rays_example():
+    """
+    Example setup for volumetric lighting (god rays).
+    """
+    # 1. Create environment object with small scattering
+    env = setup_environment_object(scattering_value=0.05)
+    
+    # 2. Add a strong, partially blocked light source
+    # (Implementation depends on host application, e.g., Cinema 4D)
+    light = create_light(type="sun")
+    light.set_intensity(10000)
+    
+    # 3. Add obstruction (e.g., window frame)
+    obstruction = create_geometry(type="window_frame")
+    
+    # 4. Render
+    render_scene()
+```
+
+**Edge Cases and Pitfalls:**
+*   **Performance:** Volumes are expensive because rays are sampled at many points and can scatter multiple times [S1, unofficial].
+*   **Density:** High density or high scattering values can significantly increase render times [S1, unofficial].
+*   **Lighting:** God rays require a strong, partially blocked light source; without obstruction, the effect may not be visible [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time increases with volume density and scattering value. Rays are sampled along their path, and multiple scattering events can occur in dense media [S1, unofficial].
+*   **Memory Complexity:** Low, as no voxel data is stored. The volume is defined procedurally [S1, unofficial][S2].
+*   **Strengths:** Simple setup for atmospheric effects; no need for external voxel data; effective for god rays [S1, unofficial][S2].
+*   **Limitations:** Only supports homogeneous volumes; cannot represent complex density variations without procedural noise (which is handled by the Clouds Object) [S1, unofficial][S2].
+*   **When to Use:** For atmospheric haze, fog, and volumetric lighting (god rays) [S1, unofficial][S2].
+*   **When Not to Use:** For complex, non-uniform volumes like clouds or smoke (use Redshift Clouds Object or VDB volumes) [S1, unofficial][S2].
+
+## Background
+The Redshift Environment Object is part of the Maxon Redshift renderer's volumetric rendering system [S1, unofficial][S2]. It was introduced to provide a simple way to add atmospheric effects without the complexity of voxel-based volumes [S1, unofficial][S2]. It is commonly used in architectural visualization and cinematic scenes to enhance realism through atmospheric perspective and volumetric lighting [S1, unofficial][S2].
+
+## Sources
+[S1] What Is Volumetric Rendering? Volume Shaders Explained, from ... - Maxon, https://www.maxon.net/en/article/volumetric-rendering, fetched 2026-10-26 (unofficial)
+[S2] Introduction to Volumetric Rendering, https://help.maxon.net/c4d/2027/en-us/Content/html/What_is_Volumetric_Rendering.html, fetched 2026-10-29

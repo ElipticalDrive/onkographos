@@ -1,0 +1,82 @@
+# Adaptive Voxel Size
+
+
+## Overview
+Adaptive Voxel Size is a hierarchical grid optimization technique where voxels are subdivided based on local detail requirements rather than using a uniform grid resolution [S1]. It solves the memory and performance bottlenecks of uniform high-resolution grids by allocating fine voxels only where necessary, achieving higher visual quality (LPIPS 0.200, PSNR 28.01) than uniform 512^3 grids while maintaining competitive rendering speeds (171 FPS) [S1]. Unlike uniform variants that subdivide all voxels to a fixed depth, this method dynamically adjusts granularity, outperforming fully-explicit voxel approaches like Plenoxels in both quality and speed [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Training views and an initial sparse voxel grid [G].
+- Output: A hierarchical voxel grid with variable resolution per region [S1].
+
+**Data Structures:**
+- The grid uses a sparse structure mapping spatial coordinates to voxel data [G].
+- Each voxel stores radiance field parameters (color, density) [G].
+- Voxels are ordered using 48-bit Morton codes (16 levels, 3 bits per dimension) for primitive sorting during rasterization [S1].
+
+**Steps:**
+1. Initialize a coarse voxel grid covering the scene bounding box [G].
+2. During training, evaluate reconstruction error or gradient magnitude for each voxel to determine detail requirements [G].
+3. Subdivide voxels that exceed the detail threshold, contrasting with uniform variants that subdivide all voxels at fixed training iterations until a target resolution is reached [S1].
+4. Optimize radiance field parameters for the newly created child voxels [G].
+5. Repeat steps 2–4 until convergence or a maximum depth is reached [G].
+
+**Parameters:**
+- Subdivision threshold: Not given in the sources.
+- Maximum depth: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Memory: Uniform 1024^3 grids cause Out Of Memory (OOM) on machines with 24GB GPU memory, whereas adaptive allocation mitigates this [S1].
+- Performance variation: Rendering FPS varies significantly across scenes due to scene-dependent factors like primitive count and sorting overhead [S1].
+- Sorting precision: The method sorts 48-bit Morton codes (16 levels, 3 bits each) for primitive ordering instead of 32-bit floats, which may affect sorting speed or precision [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_voxel_size(grid, views, max_depth, threshold):
+    current_depth = 0
+    while current_depth < max_depth:
+        # Estimate reconstruction error or gradient magnitude for each active voxel
+        errors = {v: compute_error(v, views) for v in grid.active_voxels}
+        
+        # Identify voxels exceeding the detail threshold
+        voxels_to_subdivide = [v for v, err in errors.items() if err > threshold]
+        
+        if not voxels_to_subdivide:
+            break
+            
+        # Subdivide marked voxels into 8 child voxels
+        for v in voxels_to_subdivide:
+            grid.subdivide(v)
+            
+        # Optimize radiance field parameters for new child voxels
+        optimize_radiance_field(grid, views)
+        
+        current_depth += 1
+    return grid
+
+# compute_error: Standard operation to render voxel and compare to training views [G]
+# optimize_radiance_field: Standard gradient descent on color and density parameters [G]
+```
+
+## Subtopics
+
+### Adaptive Brush Size
+A technique to maintain interactivity for large brushes in 3D painting by refining the grid only to a resolution sufficient for brush detail, and coarsening the center of the brush to merge color [S2, unofficial]. If a brush is applied to an already refined region, the grid is coarsened at the center of the brush conservatively to avoid destroying existing details [S2, unofficial]. The coarsest refinement level is roughly 10 voxels corresponding to the brush radius [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Adaptive allocation avoids Out Of Memory (OOM) errors that occur with uniform 1024^3 grids on 24GB GPUs [S1].
+- **Measured Performance:** On the MipNeRF-360 dataset, adaptive voxel size achieves LPIPS 0.200, PSNR 28.01, and FPS 171, compared to uniform 512^3 (LPIPS 0.326, PSNR 25.37, FPS 190) and uniform 256^3 (LPIPS 0.444, PSNR 23.98, FPS 457) [S1]. It outperforms Plenoxels (640^3 grid, LPIPS 0.452, PSNR 23.29, FPS <10) in both quality and speed [S1].
+- **Strengths:** Higher visual quality than uniform grids while maintaining competitive rendering speeds [S1].
+- **Limitations:** Rendering FPS varies significantly across scenes due to scene-dependent factors [S1].
+- **When to Use:** Not given in the sources.
+- **When Not to Use:** Not given in the sources.
+
+## Background
+Adaptive voxel size is a technique used in radiance field optimization to improve the efficiency and quality of volume rendering [S1]. It was introduced in the context of sparse voxel grid optimization, where uniform grids were found to be inefficient for scenes with varying detail levels [S1]. The method has been applied in various research contexts, including novel-view synthesis and 3D painting [S1][S2, unofficial].
+
+## Sources
+[S1] Sparse Voxels Rasterization: Real-time High-fidelity Radiance Field Rendering, https://doi.org/10.1109/cvpr52734.2025.01509, fetched 2026-10-26
+[S2] CanvoX: High-resolution VR Painting in Large Volumetric Canvas, https://archive.org/details/arxiv-1704.02724, fetched 2026-10-29 (unofficial)

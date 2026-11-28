@@ -1,0 +1,98 @@
+# Warp-level Culling
+
+Also called: Warp-level Splat Culling
+
+## Overview
+Warp-level Culling is a pre-computation optimization that rejects splats with no geometric overlap to a pixel's sub-tile before performing expensive alpha evaluation, reducing memory fetches and compute load while maintaining bit-identical output [S1]. It differs from standard blending by adding a cheap boolean bounding box overlap check before the expensive Gaussian alpha evaluation, reducing instruction count and memory traffic [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A batch of 32 splats containing bounding box data, and a sub-tile of 32 pixels arranged in an 8x4 grid [S1].
+*   **Output:** A 32-bit bitmask indicating which splats intersect the sub-tile, allowing threads to skip non-contributing splats during the rendering phase [S1].
+
+**Data Structures**
+*   **Splat Bounding Box:** Defined by minimum and maximum coordinates $(x_{min}, y_{min}, x_{max}, y_{max})$ in screen space [S1].
+*   **Sub-tile:** A rectangular region of 32 pixels, specifically an 8x4 grid [S1].
+*   **Bitmask:** A 32-bit integer where the $i$-th bit is set if the $i$-th splat in the batch intersects the sub-tile [S1].
+
+**Parameters**
+*   **Sub-tile size:** 32 pixels, arranged in an 8x4 grid [S1].
+*   **Batch processing unit:** 32 splats per warp iteration [S1].
+
+**Steps**
+1.  **Subdivision:** Subdivide the image tile into sub-tiles of 32 pixels (8x4 grid) and map each pixel in the sub-tile to a unique thread in a warp [S1].
+2.  **Batching:** Iterate through the splat batches in chunks of 32 splats, and map the 32 threads in the warp to the 32 splats in the current batch [S1].
+3.  **Geometric Intersection Test:** Each thread $i$ (corresponding to splat $i$) pulls the bounding box of its assigned splat and performs a boolean geometric intersection test between the splat's bounding box and the sub-tile's boundaries [S1].
+4.  **Bitmask Creation:** Threads share their intersection results using the ballot primitive to create a 32-bit bitmask where bit $i$ is 1 if splat $i$ intersects the sub-tile, and 0 otherwise [S1].
+5.  **Culling:** Each thread iterates through the 32 splats in the batch, and uses the bitmask to check if the bit corresponding to the current splat index is set [S1]. If the bit is 0, the thread skips loading the full splat data and skips the expensive alpha evaluation for that splat [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+WARP_SIZE = 32
+
+def warp_ballot(predicates):
+    # Simulates hardware warp ballot: returns a 32-bit integer where bit i is set if predicates[i] is true
+    mask = 0
+    for i in range(WARP_SIZE):
+        if predicates[i]:
+            mask |= (1 << i)
+    return mask
+
+def load_splat_data(splat):
+    # Fetches full splat attributes (position, covariance, opacity, etc.) from memory
+    return splat.attributes
+
+def evaluate_gaussian_alpha(attributes, pixel_coords):
+    # Computes the standard 3D Gaussian alpha value for the pixel
+    return compute_gaussian(attributes, pixel_coords)
+
+def warp_level_culling(thread_id, splat_batch, sub_tile_bounds):
+    # Step 1 & 2: Map thread to splat index (0-31)
+    splat_index = thread_id
+
+    # Step 3: Geometric Intersection Test
+    splat = splat_batch[splat_index]
+    sx_min, sy_min, sx_max, sy_max = splat.bounding_box
+    st_x_min, st_y_min, st_x_max, st_y_max = sub_tile_bounds
+
+    # Boolean overlap check for axis-aligned rectangles
+    x_overlap = (sx_min < st_x_max) and (sx_max > st_x_min)
+    y_overlap = (sy_min < st_y_max) and (sy_max > st_y_min)
+    intersects = x_overlap and y_overlap
+
+    # Step 4: Bitmask Creation
+    # In hardware, ballot(intersects) aggregates results across all 32 threads in lock-step
+    thread_intersects = [False] * WARP_SIZE
+    thread_intersects[thread_id] = intersects
+    bitmask = warp_ballot(thread_intersects)
+
+    # Step 5: Culling during rendering loop
+    for i in range(WARP_SIZE):
+        is_contributing = (bitmask >> i) & 1
+        if is_contributing:
+            splat_data = load_splat_data(splat_batch[i])
+            alpha = evaluate_gaussian_alpha(splat_data, thread_id)
+            # Perform blending with alpha
+        else:
+            # Skip full data load and alpha evaluation
+            pass
+```
+
+**Edge Cases and Pitfalls**
+*   **Synchronization Stalls:** The method avoids block-wide synchronization fences of the original blend stage by using warp-level lock-step execution [S1]. The ballot "fence" does not create stalls because threads in a warp progress in lock-step [S1].
+*   **Workload Imbalance:** Not all splats in a tile will overlap and contribute to a pixel [S1]. This creates an uneven distribution of work among threads [S1]. The method ingests splat batches 32-at-a-time to mitigate stalls at synchronization fences caused by this unevenness [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Reduces the number of expensive Gaussian alpha evaluations and memory fetches for non-contributing splats [S1]. The overhead is a cheap boolean bounding box check [S1].
+*   **Memory Complexity:** Reduces memory traffic by avoiding loading full splat data for culled splats [S1].
+*   **Performance:** Maintains bit-identical output to the baseline (Faster-GS) because it only optimizes the culling of non-contributing splats, not the rendering of contributing ones [S1].
+*   **Strengths:** Significant reduction in instruction count and memory traffic for sparse scenes or large tiles [S1].
+*   **Limitations:** Effectiveness depends on the sparsity of splats within the sub-tile [S1]. If most splats overlap, the overhead of the culling logic may not yield significant gains [S1].
+
+## Background
+Warp-level Culling was introduced in the context of optimizing 3D Gaussian Splatting rendering [S1]. It builds on the observation that many splats do not contribute to a given pixel, and that a cheap geometric check can preempt the expensive alpha evaluation [S1]. The method leverages the warp-level ballot primitive, a feature of GPU architectures like NVIDIA's CUDA, to efficiently aggregate intersection results across threads [S1].
+
+## Sources
+[S1] Warp-Level Culling for Efficient Blending in 3D Gaussian Splatting, https://doi.org/10.1145/3820019, fetched 2026-11-01

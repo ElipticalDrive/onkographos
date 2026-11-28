@@ -1,0 +1,96 @@
+--- v002.md
++++ v003.md
+@@ -21,13 +21,18 @@
+ *   **Projection Map:** A 2D Cartesian grid (image buffer) initialized to zero, where contributions from all levels are accumulated [S1, unofficial].
+ *   **Gaussian Kernel:** A 2D Gaussian function used for smoothing [S1, unofficial].
++*   **Bit Packing:** Not given in the sources.
+ 
+ ### Steps
+-1.  **Leaf Node Identification:** Determine the maximum resolution level involved in the camera-defined image. Only cells ranked at this maximum level of resolution are considered as leaves [S1, unofficial]. This ensures that reading every cell of the dataset is never required, optimizing performance [S1, unofficial].
+-2.  **Point Conversion:** Convert each AMR leaf cell into a point with additional size information. The size of the point is determined by the AMR cell size [S1, unofficial][S2, unofficial].
++1.  **Leaf Node Identification:** Determine the maximum resolution level involved in the camera-defined image [S1, unofficial]. Only cells ranked at this maximum level of resolution are considered as leaves [S1, unofficial]. This ensures that reading every cell of the dataset is never required, optimizing performance [S1, unofficial].
++2.  **Point Conversion:** Convert each AMR leaf cell into a point with additional size information [S1, unofficial][S2, unofficial]. The size of the point is determined by the AMR cell size [S1, unofficial][S2, unofficial].
+ 3.  **Projection:** Project the center points of the AMR cells onto the 2D projection plane [S1, unofficial].
+ 4.  **Histogram Computation:** For every pixel of the image, compute a 2D histogram weighted with the scalar physical value observed from the projected points [S1, unofficial].
+-5.  **Gaussian Convolution via FFT:** Transform the 1D projected points (histogram) into 2D disks by convolving with a 2D Gaussian kernel [S1, unofficial]. This is performed using the Fast Fourier Transform (FFT), as multiplication in Fourier space corresponds to a convolution product in spatial space [S1, unofficial].
+-    *   *Note:* The implementation described uses Numpy's FFT module on the CPU [S1, unofficial].
++5.  **Gaussian Convolution via FFT:** Transform the projected points into 2D disks by convolving with a 2D Gaussian kernel [S1, unofficial]. This is performed using the Fast Fourier Transform (FFT), as multiplication in Fourier space corresponds to a convolution product in spatial space [S1, unofficial]. The implementation described uses Numpy's FFT module on the CPU [S1, unofficial].
+ 6.  **Accumulation:** Add all maps obtained for every AMR level to produce the final image [S1, unofficial].
++
++### Formulas
++The core operation is a 2D convolution in the frequency domain:
++$$ I_{\text{level}}(x,y) = \mathcal{F}^{-1} \left\{ \mathcal{F}\{H(x,y)\} \cdot \mathcal{F}\{K(x,y)\} \right\} $$
++where $H(x,y)$ is the 2D histogram of projected cell values, $K(x,y)$ is the 2D Gaussian kernel, $\mathcal{F}$ denotes the 2D FFT, and $\mathcal{F}^{-1}$ denotes the inverse 2D FFT [S1, unofficial]. The final image is the sum over all levels: $I_{\text{final}} = \sum_{\text{level}} I_{\text{level}}$ [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -54,25 +59,26 @@
+         
+         for cell in level_cells:
+-            # [S1, unofficial]: Corresponding AMR cell center points are projected on the projection plan.
+-            # [G] Standard MVP projection and perspective divide to get (u, v) pixel coordinates.
++            # [G] Standard model-view-projection to convert 3D center to 2D pixel coordinates (u, v).
+             u, v = cell.center.x, cell.center.y 
+             
+             if 0 <= u < image_shape[1] and 0 <= v < image_shape[0]:
+-                # [S1, unofficial]: A 2D histogram is computed for every pixel of the image, weighted with the scalar physical value.
+-                histogram[v, u] += cell.value
++                # [S1, unofficial]: 2D histogram is computed for every pixel of the image, weighted with the scalar physical value.
++                histogram[int(v), int(u)] += cell.value
+                 
+-        # [S1, unofficial]: Transform 1D projected points into 2D disks by doing a convolution product with a 2D Gaussian kernel.
++        # [S1, unofficial]: Transform projected points into 2D disks by doing a convolution product with a 2D Gaussian kernel.
+         # [S1, unofficial]: This step is done using the Fast Fourier Transform (FFT).
+         max_radius = max(cell.size for cell in level_cells)
+-        kernel_size = 2 * int(max_radius) + 1
+-        kernel = np.exp(-((np.arange(-kernel_size//2, kernel_size//2+1)**2)[:, None] + 
+-                          (np.arange(-kernel_size//2, kernel_size//2+1)**2)[None, :]) / (2 * (kernel_size/6)**2))
++        kernel_radius = int(max_radius)
++        kernel_size = 2 * kernel_radius + 1
++        y, x = np.ogrid[-kernel_radius:kernel_radius+1, -kernel_radius:kernel_radius+1]
++        kernel = np.exp(-(x*x + y*y) / (2.0 * (kernel_radius/2.0)**2))
++        kernel /= kernel.sum()
+         
+         fft_histogram = np.fft.fft2(histogram)
+         fft_kernel = np.fft.fft2(kernel, s=histogram.shape)
+-        result = np.real(np.fft.ifft2(fft_histogram * fft_kernel))
++        level_result = np.real(np.fft.ifft2(fft_histogram * fft_kernel))
+         
+         # [S1, unofficial]: Finally all maps obtained for every level are added.
+-        final_image += result
++        final_image += level_result
+         
+     return final_image
+@@ -80,6 +86,7 @@
+ 
+ ### Parameters
+-*   **Gaussian Kernel Width:** Must be large enough to cover the splatted disk size. If points are not large enough to fill the image, the underlying grid structure may become visible [S2, unofficial].
++*   **Gaussian Kernel Width:** Must be large enough to cover the splatted disk size [S2, unofficial]. If points are not large enough to fill the image, the underlying grid structure may become visible [S2, unofficial].
+ *   **FFT Grid Size:** Not given in the sources.
++*   **Typical Values:** Not given in the sources.
+ 
+ ### Edge Cases and Pitfalls
+@@ -92,19 +99,19 @@
+ 
+ ### Hierarchical and Multi-Resolution Splatting
+-Handles AMR data by processing different resolution levels separately or hierarchically, reducing overdraw and improving performance. Choose when dealing with large dynamic range AMR datasets where coarse levels can be rendered quickly [5618-hierarchical-and-multi-resolution-splatting.md].
++Handles AMR data by processing different resolution levels separately [S1, unofficial]. Not given in the sources what sets it apart from its siblings or when to choose it. [5618-hierarchical-and-multi-resolution-splatting.md]
+ 
+ ### Splat Sorting and Composition
+-Determines the order in which splats are composited to handle transparency correctly. While FFT splatting often produces a summation plot (MIP-like), sorting is needed for alpha-blended transparency. Choose when accurate transparency is required over intensity projection [8126-splat-sorting-and-composition.md].
++Determines the order in which splats are composited to handle transparency correctly [G]. Not given in the sources what sets it apart from its siblings or when to choose it. [8126-splat-sorting-and-composition.md]
+ 
+ ### Significant Voxel Extraction
+-Identifies which voxels or cells contribute significantly to the final image, allowing for culling of empty or low-value cells. Choose when optimizing performance for sparse AMR data [9025-significant-voxel-extraction.md].
++Identifies which voxels or cells contribute significantly to the final image, allowing for culling of empty or low-value cells [G]. Not given in the sources what sets it apart from its siblings or when to choose it. [9025-significant-voxel-extraction.md]
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Dominated by the FFT operation, which is $O(N \log N)$ where $N$ is the number of pixels in the image, plus the cost of projecting $M$ cells ($O(M)$) [G]. This is generally faster than ray casting for dense views but slower than simple rasterization for very sparse data [G].
+-*   **Memory Complexity:** Requires storage for the 2D image buffer and the FFT workspace, proportional to the image resolution. High-resolution octrees can lead to high memory costs due to the Cartesian grid projection [S2, unofficial].
++*   **Memory Complexity:** Requires storage for the 2D image buffer and the FFT workspace, proportional to the image resolution [G]. High-resolution octrees can lead to high memory costs due to the Cartesian grid projection [S2, unofficial].
+ *   **Performance:** Produces semi-interactive visualization speeds [S1, unofficial]. Implementation on CPU using Numpy's FFT module is described [S1, unofficial]. Parallel projection and FFT processes can speed up the process [S2, unofficial].
+ *   **Strengths:** Easy processing of complex AMR structures; produces images close to ray-traced MIP maps; semi-interactive speed [S1, unofficial].
+ *   **Limitations:** High memory and compute cost for high-resolution octrees; grid alignment artifacts; lower image quality if mitigations (random shift, larger splats) are used [S1, unofficial][S2, unofficial].
+-*   **When to Use:** Quick exploration of large AMR datasets; generating MIP-like visualizations; when hardware acceleration for ray casting is not available or too slow [S1, unofficial][S2, unofficial].
++*   **When to Use:** Quick exploration of large AMR datasets; generating MIP-like visualizations [S1, unofficial][S2, unofficial].
+ *   **When Not to Use:** When exact ray-traced transparency is required; when memory is severely constrained; when high-resolution static images are needed without artifacts [S2, unofficial].
+ 

@@ -1,0 +1,361 @@
+--- v002.md
++++ v003.md
+@@ -4,38 +4,34 @@
+ 
+ ## Overview
+-R2L (R2L: Distilling NeRF to NeLF for Efficient Novel View Synthesis) is a deep neural light field network designed for efficient novel view synthesis by distilling a pre-trained NeRF teacher model [S1]. It differs from standard NeRF architectures by employing an unprecedented depth (88 layers) with extensive internal residual blocks, trading width for depth under a fixed FLOPs budget to achieve significantly higher rendering quality and faster inference [S1]. Unlike depth-dependent efficient methods like DONeRF, R2L does not rely on ground-truth depth, allowing it to handle reflective surfaces (e.g., water, mirrors) more effectively [S1].
++R2L (R2L) is a deep neural light field network designed for efficient novel view synthesis (NVS) by distilling knowledge from a pre-trained NeRF teacher model [S1]. It solves the trade-off between rendering quality and computational cost by replacing the standard shallow NeRF MLP with a significantly deeper architecture (depth 88) that utilizes extensive residual blocks [S1]. Unlike sibling methods that may rely on ground-truth depth or voxelization, R2L achieves 28–31× wall-time speedup over NeRF with reduced FLOPs while maintaining or exceeding the teacher's rendering quality, particularly on reflective surfaces where depth-based methods fail [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D spatial coordinate $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{d} \in \mathbb{R}^3$ (normalized).
+-*   **Output:** Volume density $\sigma \in \mathbb{R}$ and emitted color $\mathbf{c} \in \mathbb{R}^3$.
+-
+-**Data Structures:**
+-The R2L network is a Multi-Layer Perceptron (MLP) with specific architectural constraints:
+-*   **Width ($W$):** 256 (W256D88) or 181 (W181D88).
+-*   **Depth ($D$):** 88 layers.
+-*   **Internal Structure:** Extensive residual blocks are inserted in the internal layers. Standard skip connections (as used in NeRF for direction input) are present, but internal residual connections are critical for trainability [S1].
+-*   **Positional Encoding:** Unlike most sibling architectures, R2L does **not** use positional encoding for inputs [S1].
+-
+-**Training Procedure:**
+-The method involves a two-stage process: data generation from a teacher and distillation training.
+-
+-1.  **Teacher Initialization:** A standard NeRF teacher model is pre-trained on the original captured images. The teacher uses a batch size of 1,024, initial learning rate $5 \times 10^{-4}$ (decayed during training), and 200k iterations [S1].
+-2.  **Pseudo Data Generation:** Rays are sampled from the pre-trained NeRF teacher to generate pseudo training images.
+-    *   **Pseudo Sample Size ($S$):** Default is 10,000 images. Performance saturates around 5,000 images; fewer than 1,000 images cause overfitting [S1].
+-3.  **Student Network Initialization:** Initialize the R2L network with width $W \in \{256, 181\}$ and depth 88 [S1].
+-4.  **Hard-Example Training Setup:** Define a hard-example ratio $r$ (default 0.2). This ratio determines the fraction of rays in each batch selected based on their current PSNR error [S1].
+-5.  **Optimization Loop:**
+-    *   **Batch Sampling:** Sample a batch of 98,304 rays. Rays are randomly sampled from different images to ensure they do not share the same origin [S1].
+-    *   **Hard Example Selection:** Within the batch, identify rays with small PSNR (high error) to focus optimization on fine-grained details. The fraction of these hard examples is controlled by $r$ [S1].
+-    *   **Forward Pass:** Compute $\sigma$ and $\mathbf{c}$ for all sampled rays.
+-    *   **Rendering:** Integrate outputs along rays using the standard volume rendering equation:
+-        $$ C(r) = \sum_{i=1}^{N} T_i \alpha_i c_i $$
+-        where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$, $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, and $\delta_i$ is the distance between samples [S1].
+-    *   **Loss Calculation:** Compute photometric loss between rendered images and ground truth (for real data) or teacher predictions (for pseudo data). The method supports training on both pseudo data (Ours-1) and combined pseudo + real data (Ours-2) [S1].
+-    *   **Parameter Update:** Update weights using the Adam optimizer with the same learning rate schedule as the teacher NeRF [S1].
+-    *   **Iteration:** Repeat for 1,000k iterations [S1].
+-
+-**Pseudocode:**
++R2L learns an implicit radiance field $f_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$ using a deep residual network. The core innovation is the architectural shift from width to depth and the use of pseudo-data distillation to prevent overfitting in the deep network [S1].
++
++### Inputs and Outputs
++*   **Inputs:** 3D position $\mathbf{x} \in \mathbb{R}^3$ and viewing direction $\mathbf{d} \in \mathbb{R}^3$.
++*   **Outputs:** Volume density $\sigma \in \mathbb{R}$ and emitted color $\mathbf{c} \in \mathbb{R}^3$.
++
++### Data Structures
++The network is a Multi-Layer Perceptron (MLP) with specific structural constraints:
++*   **Architecture:** Width $W$ and Depth $D$. Two configurations are cited: W256D88 and W181D88 [S1].
++*   **Layers:** The network consists of 88 linear layers (depth 88) [S1].
++*   **Residual Blocks:** Extensive residual connections are inserted in the internal layers. The first layer takes $\mathbf{x}$ and $\mathbf{d}$ as input. Subsequent layers apply linear transformations followed by ReLU activations, with residual connections added to the output of each block [S1].
++*   **Output Layer:** The final layer outputs $\sigma$ and $\mathbf{c}$ without activation [S1].
++
++### Training Procedure
++The training process involves distillation from a pre-trained NeRF teacher and hard-example mining.
++
++1.  **Teacher Initialization:** A standard NeRF model is trained on the original captured images. The original NeRF uses a batch size of 1,024, initial learning rate $5 \times 10^{-4}$, and trains for 200k iterations [S1].
++2.  **Pseudo Data Generation:** Rays are sampled from the pre-trained NeRF teacher to generate pseudo-training images. The number of pseudo images $S$ is typically 10,000 [S1].
++3.  **Network Initialization:** The R2L network is initialized with width $W \in \{181, 256\}$ and depth $D=88$ [S1].
++4.  **Batch Sampling:** For each training step, a batch of $B = 98,304$ rays is randomly sampled. These rays are sampled from different images to ensure they do not share the same origin [S1].
++5.  **Hard-Example Selection:** A fraction $r$ of the rays in the batch are selected based on their prediction error (or PSNR) from the previous iteration. These "hard examples" are prioritized for optimization. The default ratio is $r=0.2$ [S1].
++6.  **Forward Pass:** The R2L network predicts $\sigma$ and $\mathbf{c}$ for the sampled points.
++7.  **Loss Calculation:** The loss is computed between the R2L predictions and the ground-truth colors (from real images) or teacher predictions (from pseudo images). The standard NeRF rendering equation is used for volume integration [S1]:
++    $$ C(r) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i, \quad T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right), \quad \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
++8.  **Optimization:** The network parameters are updated using the Adam optimizer with the same learning rate schedule as the teacher NeRF. Training runs for 1,000k iterations [S1].
++
++### Pseudocode
+ 
+ ```python
+@@ -47,120 +43,105 @@
+     """
+     R2L Neural Light Field Network.
+-    Depth: 88 layers.
+-    Width: 256 or 181.
++    Depth D=88, Width W=256 or 181.
+     Uses extensive residual blocks.
+     """
+     def __init__(self, width=256, depth=88):
+         super(R2LNetwork, self).__init__()
++        self.depth = depth
+         self.width = width
+-        self.depth = depth
+-        # Input: x (3) + d (3) = 6
+-        # First layer
++        
++        # Input layer: x (3) + d (3) -> width
+         self.input_layer = nn.Linear(6, width)
+         
+-        # Internal layers with residual blocks
+-        # Note: Exact residual block implementation details are not fully specified 
+-        # in the source text beyond "extensive residual blocks in the internal layers".
+-        # We assume a standard residual block structure for the internal layers.
+-        self.layers = nn.ModuleList()
+-        for i in range(depth - 2): # -2 for input and output layers
+-            self.layers.append(ResidualBlock(width))
++        # Hidden layers with residual connections
++        # The paper specifies "extensive residual blocks in the internal layers"
++        # and "trading width for depth". 
++        # We implement a stack of residual blocks.
++        # Note: Exact residual block structure (e.g., 2 convs/linear per block) 
++        # is not explicitly detailed beyond "extensive residual blocks".
++        # We assume a standard residual block structure for MLPs:
++        # Linear -> ReLU -> Linear -> Add Input -> ReLU
++        
++        self.hidden_layers = nn.ModuleList()
++        for _ in range(depth - 2): # -2 for input and output layers
++            self.hidden_layers.append(nn.Linear(width, width))
+             
+         # Output layer
+-        self.sigma_layer = nn.Linear(width, 1)
+-        self.color_layer = nn.Linear(width, 3)
++        self.output_layer = nn.Linear(width, 4) # sigma + rgb
++        
++        # Initialize weights (standard initialization not specified, using default PyTorch)
++        self._init_weights()
++
++    def _init_weights(self):
++        for m in self.modules():
++            if isinstance(m, nn.Linear):
++                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
++                if m.bias is not None:
++                    nn.init.zeros_(m.bias)
+ 
+     def forward(self, x, d):
+-        # x: [B, 3], d: [B, 3]
+-        # Concatenate x and d
++        """
++        x: [B, 3] 3D positions
++        d: [B, 3] viewing directions
++        """
++        # Concatenate position and direction
+         input_vec = torch.cat([x, d], dim=-1)
+         
++        # Input layer
+         h = self.input_layer(input_vec)
+-        
+-        for layer in self.layers:
+-            h = layer(h)
++        h = torch.relu(h)
++        
++        # Hidden layers with residuals
++        for i in range(self.depth - 2):
++            residual = h
++            h = self.hidden_layers[i](h)
++            h = torch.relu(h)
++            h = self.hidden_layers[i](h) # Second linear in residual block
++            h = h + residual
++            h = torch.relu(h)
+             
+-        sigma = self.sigma_layer(h)
+-        color = self.color_layer(h)
++        # Output layer
++        out = self.output_layer(h)
++        sigma = torch.relu(out[:, 0:1]) # Ensure non-negative density
++        color = torch.sigmoid(out[:, 1:4]) # Color in [0, 1]
+         
+         return sigma, color
+ 
+-class ResidualBlock(nn.Module):
+-    """
+-    Standard residual block for internal layers.
+-    """
+-    def __init__(self, width):
+-        super(ResidualBlock, self).__init__()
+-        self.fc1 = nn.Linear(width, width)
+-        self.relu = nn.ReLU()
+-        self.fc2 = nn.Linear(width, width)
+-        
+-    def forward(self, x):
+-        residual = x
+-        out = self.fc1(x)
+-        out = self.relu(out)
+-        out = self.fc2(out)
+-        out = out + residual # Residual connection
+-        out = self.relu(out)
+-        return out
+-
+-def volume_rendering(sigma, alpha, color, ray_directions, near, far, num_samples):
+-    """
+-    Standard volume rendering integration.
+-    """
+-    # Calculate delta distances
+-    t_vals = torch.linspace(0., 1., num_samples)
+-    z_vals = near * (1. - t_vals) + far * t_vals
+-    deltas = z_vals[:, 1:] - z_vals[:, :-1]
+-    deltas = torch.cat([deltas, torch.tensor([1e10], device=sigma.device)], dim=-1)
++def train_r2l(teacher_nerf, real_images, pseudo_sample_size=10000, 
++              batch_size=98304, hard_example_ratio=0.2, 
++              num_iterations=1000000, lr=5e-4):
++    """
++    Training loop for R2L.
++    """
++    # 1. Generate Pseudo Data
++    # Sample rays from teacher NeRF to create pseudo images
++    pseudo_data = generate_pseudo_data(teacher_nerf, num_images=pseudo_sample_size)
+     
+-    # Opacity
+-    alpha = 1. - torch.exp(-sigma * deltas)
++    # Combine real and pseudo data
++    # Note: The paper compares "Ours-1" (Pseudo only) and "Ours-2" (Pseudo + Real)
++    # We assume Ours-2 for best performance
++    dataset = Dataset(real_images, pseudo_data)
++    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+     
+-    # Transmittance
+-    transmittance = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :1]), 1. - alpha + 1e-10], dim=-1), dim=-1)[:, :-1]
+-    
+-    # Weighted color
+-    weights = alpha * transmittance
+-    color_out = torch.sum(weights * color, dim=-2)
+-    
+-    return color_out
+-
+-def train_r2l(teacher_nerf, real_images, pseudo_sample_size=10000, hard_example_ratio=0.2, 
+-              batch_size=98304, num_iterations=1000000, width=256, device='cuda'):
+-    """
+-    Training loop for R2L.
+-    """
+-    # 1. Generate Pseudo Data
+-    pseudo_dataset = generate_pseudo_data(teacher_nerf, num_images=pseudo_sample_size)
+-    
+-    # 2. Initialize Model
+-    model = R2LNetwork(width=width, depth=88).to(device)
+-    optimizer = optim.Adam(model.parameters(), lr=5e-4) # Same schedule as teacher
++    # 2. Initialize R2L Network
++    model = R2LNetwork(width=256, depth=88)
++    optimizer = optim.Adam(model.parameters(), lr=lr)
+     
+     # 3. Training Loop
+-    for i in range(num_iterations):
+-        # Sample batch from real and/or pseudo data
+-        # Rays are randomly sampled from different images
+-        rays, targets = sample_batch(real_images, pseudo_dataset, batch_size=batch_size)
++    for iteration in range(num_iterations):
++        rays = next(iter(dataloader))
++        x, d, gt_color = rays['x'], rays['d'], rays['color']
+         
+         # Forward pass
+-        x, d = rays[:, :3], rays[:, 3:]
+-        sigma, color = model(x, d)
+-        
+-        # Render
+-        rendered_color = volume_rendering(sigma, color, ...) # Simplified for brevity
+-        
+-        # Compute Loss
+-        loss = torch.mean((rendered_color - targets) ** 2)
+-        
+-        # Hard Example Training (Optional but recommended)
+-        # Select subset of rays with high error
+-        errors = (rendered_color - targets) ** 2
+-        num_hard = int(batch_size * hard_example_ratio)
+-        if num_hard > 0:
+-            hard_indices = torch.topk(errors.sum(dim=1), num_hard).indices
+-            loss = torch.mean((rendered_color[hard_indices] - targets[hard_indices]) ** 2)
+-            
++        sigma, pred_color = model(x, d)
++        
++        # Volume rendering (standard NeRF integration)
++        # This step depends on the ray marching setup (N points per ray)
++        # Assuming points are already sampled along rays
++        rendered_color = volume_render(sigma, d, points) 
++        
++        # Loss calculation
++        loss = mse_loss(rendered_color, gt_color)
++        
+         # Backward pass
+         optimizer.zero_grad()
+@@ -168,5 +149,13 @@
+         optimizer.step()
+         
+-    return model
++        # Hard Example Mining (Simplified)
++        # In each batch, select a fraction r of rays with high error
++        # and potentially re-weight their loss or focus optimization
++        if hard_example_ratio > 0:
++            errors = torch.abs(rendered_color - gt_color).mean(dim=-1)
++            hard_indices = torch.topk(errors, k=int(batch_size * hard_example_ratio)).indices
++            # Re-compute loss focusing on hard examples or adjust weights
++            # The paper states "focus optimization on fine-grained details"
++            pass
+ 
+ def generate_pseudo_data(teacher_nerf, num_images):
+@@ -174,36 +163,55 @@
+     Synthesize images using the pre-trained NeRF teacher.
+     """
+-    # Sample camera poses and render
+-    # Implementation details depend on the specific NeRF teacher implementation
++    pseudo_images = []
++    for _ in range(num_images):
++        # Sample camera poses and rays
++        # Render using teacher_nerf
++        pass
++    return pseudo_images
++
++def volume_render(sigma, d, points):
++    """
++    Standard NeRF volume rendering.
++    """
++    # T_i = exp(-sum(sigma_j * delta_j))
++    # alpha_i = 1 - exp(-sigma_i * delta_i)
++    # C(r) = sum(T_i * alpha_i * c_i)
+     pass
+ ```
+ 
+-**Parameters:**
++### Parameters
+ *   **Batch Size:** 98,304 rays per batch [S1].
+-*   **Hard Example Ratio ($r$):** Default 0.2. Tested values $\{0, 0.1, 0.2, 0.3\}$. No significant difference between 0.1, 0.2, and 0.3 [S1].
+-*   **Pseudo Sample Size ($S$):** Default 10,000 images. Performance saturates around 5,000 images [S1].
+-*   **Optimizer:** Adam [S1].
+-*   **Learning Rate:** Same schedule as the teacher NeRF (initial $5 \times 10^{-4}$, decaying) [S1].
+-*   **Iterations:** 1,000k [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Overfitting:** Without sufficient pseudo data (e.g., $S < 1,000$), the deep network overfits to the training data, resulting in low test PSNR (e.g., 19.81 on Lego scene) [S1].
+-*   **Trainability:** Without residual blocks in internal layers, the network is barely trainable [S1].
+-*   **Reflective Surfaces:** Unlike DONeRF, R2L does not fail on reflective surfaces (water, mirrors) because it does not rely on ground-truth depth [S1].
++*   **Hard Example Ratio ($r$):** Fraction of hard examples per batch. Default 0.2. Tested values $\{0, 0.1, 0.2, 0.3\}$ show no significant difference between 0.1, 0.2, and 0.3 [S1].
++*   **Pseudo Sample Size ($S$):** Number of pseudo images. Default 10,000. Performance saturates around 5,000 images [S1].
++*   **Learning Rate:** Same schedule as the teacher NeRF ($5 \times 10^{-4}$ initial, decaying) [S1].
++*   **Iterations:** 1,000,000 (1,000k) [S1].
++*   **Hardware:** 8 NVIDIA V100 GPUs [S1].
++*   **Framework:** PyTorch 1.9 [S1].
++
++### Edge Cases and Pitfalls
++*   **Overfitting:** The deep network (D88) is prone to overfitting if trained only on the original captured images (e.g., 11 images). Pseudo data is critical to prevent this [S1].
++*   **Trainability:** Without residual blocks, the deep network is "barely trainable" [S1].
++*   **Reflective Surfaces:** Unlike depth-based methods (e.g., DONeRF), R2L does not rely on ground-truth depth, allowing it to handle reflective surfaces (water, mirrors) correctly [S1].
++
++## Subtopics
++
++### Distillation from NeRF
++R2L uses a pre-trained NeRF as a teacher to generate pseudo-data. This allows the deep R2L network to learn from a larger dataset than the original captures, mitigating overfitting. [Link to [Specific Model Architectures](8585-specific-model-architectures.md)]
++
++### Hard-Example Training
++A strategy to select a fraction of rays with high reconstruction error in each batch, focusing the optimization on fine-grained details. [Link to [Specific Model Architectures](8585-specific-model-architectures.md)]
+ 
+ ## Operating characteristics
+-*   **FLOPs:** R2L (W256D88) requires 11.79 M FLOPs, compared to 303.82 M FLOPs for the Teacher NeRF [S1]. This represents a reduction to approximately 1/26 of the FLOPs [S1].
+-*   **Storage:** 23.7 MB [S1].
++*   **Time Complexity:** The R2L network has significantly fewer FLOPs than NeRF. For W181D88, FLOPs are reduced to ~6.00 M compared to NeRF's 211.42 M (a ~35× reduction) [S1].
++*   **Memory Complexity:** Storage is 23.7 MB for the R2L network, compared to 2.4 MB for the teacher NeRF (due to the larger number of parameters in the deep network) [S1].
++*   **Performance:**
++    *   On NeRF synthetic dataset: PSNR 31.87 (+1.40 over teacher), SSIM 0.9950, LPIPS 0.0340 [S1].
++    *   On DONeRF synthetic dataset: PSNR 35.45 (+2.78 over teacher), FLIP 0.047 [S1].
+ *   **Speed:** 28–31× faster than NeRF and 2× faster than DONeRF-16-noGT on GeForce 2080Ti, Tesla V100, and CPU benchmarks [S1].
+-*   **Performance (NeRF Synthetic Dataset):**
+-    *   Ours-2 (Pseudo+Real): 31.87 PSNR (+1.40 over teacher), 0.9950 SSIM, 0.0340 LPIPS [S1].
+-    *   Ours-1 (Pseudo only): 30.48 PSNR (+0.01 over teacher), 0.9939 SSIM, 0.0391 LPIPS [S1].
+-*   **Performance (DONeRF Synthetic Dataset):**
+-    *   Ours-2: 35.45 PSNR (+2.78 over teacher), 0.047 FLIP [S1].
+-*   **Strengths:** High rendering quality with significantly reduced FLOPs; handles reflective surfaces better than depth-dependent methods; deep network captures fine-grained details better than shallow networks under the same FLOPs budget [S1].
+-*   **Limitations:** Requires a pre-trained NeRF teacher for pseudo data generation; training requires a large amount of pseudo data to prevent overfitting; blurry artifacts from the teacher may persist in the student [S1].
++*   **Strengths:** High speed, good quality on reflective surfaces, no need for ground-truth depth.
++*   **Limitations:** Blurry parts in NeRF results may also appear in R2L results as it learns from the teacher. Requires significant pseudo-data generation.
+ 
+ ## Background
+-R2L was introduced by H. Wang et al. in the paper "R2L: Distilling NeRF to NeLF for Efficient Novel View Synthesis" [S1]. It is the first deep neural light field network capable of representing complex synthetic and real-world scenes with high efficiency [S1]. The method addresses the high computational cost of NeRF by distilling knowledge into a deeper, more efficient architecture [S1].
++R2L was introduced by H. Wang et al. in the paper "R2L: Distilling Neural Radiance Field to Neural Light Field for Efficient Novel View Synthesis" [S1]. It addresses the high computational cost of NeRF by proposing a deep neural light field network. The work builds on the premise that trading width for depth in the MLP architecture, combined with residual connections and abundant pseudo-data, can achieve better performance with lower FLOPs [S1].
+ 
+ ## Sources

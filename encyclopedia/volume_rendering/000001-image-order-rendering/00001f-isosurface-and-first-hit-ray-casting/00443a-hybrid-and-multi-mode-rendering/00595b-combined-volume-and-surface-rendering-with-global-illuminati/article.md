@@ -1,0 +1,202 @@
+# Combined Volume and Surface Rendering with Global Illumination Caching
+
+
+## Overview
+This method combines volume and surface rendering to enhance the display of isosurfaces within participating media while preserving physically realistic illumination [S1]. It solves the problem that modern null-collision-based volume rendering techniques efficiently handle participating media but lack the capability to efficiently render isosurfaces due to large discontinuities in density [S1]. The technique distinguishes itself by using volumetric path tracing to compute a global illumination volume, which is then blended with local shading models for the isosurface [S1]. Unlike full volumetric path tracing, it emphasizes surfaces within volumes better, and unlike the non-caching baseline, the caching variant is camera-view-independent [S1].
+
+## How it works
+The method consists of two variants: a non-caching baseline and a caching extension [S1]. Both variants share the same rendering pipeline for a single frame, but the caching variant precomputes global illumination [S1].
+
+### Inputs and Outputs
+**Inputs:**
+*   Volumetric data $V$ [S1].
+*   Isovalue $\rho$ defining the isosurface $S$ where $V(s) = \rho$ for $s \in S$ [S1].
+*   Camera parameters (position, orientation, projection) [S1].
+*   Light source definitions [S1].
+*   Local shading model parameters for the isosurface [S1].
+
+**Outputs:**
+*   Final pixel color for each pixel in the image [S1].
+*   (Caching variant only) A Global Illumination Volume storing precomputed global illumination for each voxel [S1].
+
+### Data Structures
+1.  **Volumetric Data ($V$):** The input scalar field representing the density or property values of the participating media [S1].
+2.  **Global Illumination Volume:** A data structure storing the precomputed global illumination for each voxel [S1]. This volume is camera-view-independent and is used to avoid recomputing the image when the camera view changes [S1]. The exact layout (e.g., grid resolution, bit depth, color channels) is not specified in the sources [S1].
+3.  **Local Illumination Data:** Information regarding the local shading of the isosurface at the extracted depth, passed to the path tracing module [S1].
+
+### Numbered Steps
+
+#### Non-Caching Variant
+1.  **Isosurface Depth Extraction:** For every pixel, cast a ray from the camera into the volume and extract the depth of the first intersection with the isosurface $S$ [S1]. This identifies the visible part of the isosurface [S1].
+2.  **Local Illumination Calculation:** Calculate the local illumination for the isosurface at the extracted depth using a local shading model [S1].
+3.  **Pass to Path Tracing:** Pass the isosurface depth and the calculated local illumination information to the path tracing module [S1].
+4.  **Ray Casting:** In the path tracing module, cast rays from the camera into the volume [S1].
+5.  **Light Gathering:** Gather light contributions from the path tracing module only up to the extracted isosurface depth [S1]. This involves computing the global illumination of the participating media along the ray segment from the camera to the isosurface [S1].
+6.  **Blending:** Blend the gathered light contributions (global illumination of the media) with the local isosurface illumination contribution to form the final pixel color [S1].
+
+#### Caching Variant
+The caching variant extends the non-caching method by precomputing the global illumination [S1].
+1.  **Precompute Global Illumination:** Compute the global illumination of each voxel in the volume using path tracing [S1]. This step is performed incrementally [S1].
+2.  **Store in Volume:** Store the computed global illumination in the Global Illumination Volume data structure [S1].
+3.  **Rendering:** During the rendering step (equivalent to steps 1-6 of the non-caching variant), take both the precomputed Global Illumination Volume and the local illumination contribution into account when accumulating illumination along the ray [S1]. Specifically, the global illumination contribution is retrieved from the volume rather than computed per-pixel per-frame [S1].
+
+### Formulas
+The sources describe the blending conceptually but do not provide explicit mathematical formulas for the blending function or the path tracing integrals [S1]. The isosurface is defined by the condition:
+$$ V(s) = \rho \quad \text{for } s \in S $$
+where $V$ is the volume data and $\rho$ is the isovalue [S1].
+
+### Parameters
+*   **Isovalue ($\rho$):** The threshold value defining the isosurface [S1].
+*   **Local Shading Models:** Models used for rendering the isosurface [S1]. The paper evaluates different local shading models, but specific models or their parameters are not detailed in the provided notes [S1].
+*   **Global Illumination Volume:** The data structure storing precomputed global illumination [S1].
+
+### Edge Cases and Pitfalls
+*   **Density Discontinuities:** Modern null-collision-based volume rendering techniques lack the capability of efficiently rendering isosurfaces because isosurfaces correspond to large discontinuities in density [S1]. This method addresses that by combining volume and surface rendering [S1].
+*   **Camera View Changes:** In the non-caching variant, the global illumination is computed incrementally per pixel, meaning the image must be recomputed when the camera view changes [S1]. The caching variant mitigates this by storing global illumination in a volume, making it camera-view-independent [S1].
+*   **Precision and Boundaries:** Not given in the sources [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_non_caching(volume, isovalue, camera, lights, shading_model):
+    """
+    Renders the scene using the non-caching combined volume and surface method.
+    Follows the 6-step pipeline from the sources [S1].
+    """
+    image = [[0.0, 0.0, 0.0] for _ in range(camera.height)]
+    for y in range(camera.height):
+        for x in range(camera.width):
+            # Step 1: Extract isosurface depth
+            ray = camera.get_ray(x, y)
+            depth = ray_march_isosurface(volume, ray, isovalue)
+            if depth is None:
+                image[y][x] = [0.0, 0.0, 0.0]
+                continue
+            # Step 2: Calculate local illumination
+            hit_pos = ray.origin + ray.direction * depth
+            normal = volume_gradient(volume, hit_pos)
+            local_illum = shading_model.compute(hit_pos, normal, lights)
+            # Step 3 & 4: Pass to path tracing and cast rays
+            # Step 5: Gather light contributions up to isosurface depth
+            gi = path_trace_volume(ray, volume, lights, max_t=depth)
+            # Step 6: Blend contributions
+            image[y][x] = [gi[i] + local_illum[i] for i in range(3)]
+    return image
+
+def ray_march_isosurface(volume, ray, isovalue):
+    """
+    Finds the first intersection of the ray with the isosurface defined by volume == isovalue [S1].
+    """
+    t = 0.0
+    step_size = 0.01 # [G] Fixed step size for marching
+    while t < 1.0: # [G] Normalized ray parameter range
+        val = volume.sample(ray.origin + ray.direction * t)
+        if val >= isovalue:
+            return t
+        t += step_size
+    return None
+
+def volume_gradient(volume, pos):
+    """
+    Estimates the surface normal at pos using central differences [G].
+    """
+    eps = 1e-3
+    dx = volume.sample(pos + [eps, 0, 0]) - volume.sample(pos - [eps, 0, 0])
+    dy = volume.sample(pos + [0, eps, 0]) - volume.sample(pos - [0, eps, 0])
+    dz = volume.sample(pos + [0, 0, eps]) - volume.sample(pos - [0, 0, eps])
+    mag = (dx*dx + dy*dy + dz*dz)**0.5
+    if mag == 0: return [0, 0, 1]
+    return [dx/mag, dy/mag, dz/mag]
+
+def path_trace_volume(ray, volume, lights, max_t):
+    """
+    Computes global illumination of the participating media along the ray up to max_t [S1].
+    """
+    t = 0.0
+    step_size = 0.01 # [G] Fixed step size for integration
+    accumulated = [0.0, 0.0, 0.0]
+    while t < max_t:
+        pos = ray.origin + ray.direction * t
+        density = volume.sample(pos)
+        # [G] Standard volumetric scattering contribution
+        contrib = [0.0, 0.0, 0.0]
+        for light in lights:
+            contrib = [contrib[i] + density * light.shade(pos)[i] for i in range(3)]
+        accumulated = [accumulated[i] + contrib[i] for i in range(3)]
+        t += step_size
+    return accumulated
+
+def render_caching(volume, isovalue, camera, lights, shading_model, gi_volume):
+    """
+    Renders the scene using the caching combined volume and surface method.
+    Follows the 6-step pipeline but samples the precomputed GI volume [S1].
+    """
+    image = [[0.0, 0.0, 0.0] for _ in range(camera.height)]
+    for y in range(camera.height):
+        for x in range(camera.width):
+            ray = camera.get_ray(x, y)
+            depth = ray_march_isosurface(volume, ray, isovalue)
+            if depth is None:
+                image[y][x] = [0.0, 0.0, 0.0]
+                continue
+            hit_pos = ray.origin + ray.direction * depth
+            normal = volume_gradient(volume, hit_pos)
+            local_illum = shading_model.compute(hit_pos, normal, lights)
+            # Step 5 replacement: Gather from precomputed volume
+            gi = sample_gi_volume(gi_volume, ray, max_t=depth)
+            # Step 6: Blend contributions
+            image[y][x] = [gi[i] + local_illum[i] for i in range(3)]
+    return image
+
+def sample_gi_volume(gi_volume, ray, max_t):
+    """
+    Samples the precomputed Global Illumination Volume along the ray up to max_t [S1].
+    """
+    t = 0.0
+    step_size = 0.01 # [G] Fixed step size for integration
+    accumulated = [0.0, 0.0, 0.0]
+    while t < max_t:
+        pos = ray.origin + ray.direction * t
+        gi_val = gi_volume.sample(pos)
+        accumulated = [accumulated[i] + gi_val[i] for i in range(3)]
+        t += step_size
+    return accumulated
+```
+
+## Subtopics
+
+### Multi-Mode Rendering with Iso-surfaces and Meshes
+Combines volume rendering with explicit mesh geometry. Choose when the scene contains both implicit volumes and explicit polygonal models. [Multi-Mode Rendering with Iso-surfaces and Meshes](2165-multi-mode-rendering-with-iso-surfaces-and-meshes.md)
+
+### Hybrid Isosurface/DVR Rendering
+Renders isosurfaces and direct volume rendering (DVR) together. Choose when you need to visualize both the boundary of a structure and its internal density variations simultaneously. [Hybrid Isosurface/DVR Rendering](8367-hybrid-isosurface-dvr-rendering.md)
+
+### Hybrid Implicit Isosurface Ray Tracing
+Uses ray tracing for isosurfaces and potentially other methods for volume. Choose when high-quality ray-traced isosurfaces are needed within a volume context. [Hybrid Implicit Isosurface Ray Tracing](11176-hybrid-implicit-isosurface-ray-tracing.md)
+
+### Hybrid Volume-Surface Rendering
+General hybrid approach for volume and surface data. Choose when combining different rendering paradigms for volume and surface components. [Hybrid Volume-Surface Rendering](11497-hybrid-volume-surface-rendering.md)
+
+### Mesh-based Neural Rendering
+Uses neural networks to render mesh-based geometry. Choose when neural rendering techniques are applied to explicit mesh surfaces. [Mesh-based Neural Rendering](11555-mesh-based-neural-rendering.md)
+
+### Sur2f
+A specific method for surface-to-field rendering. Choose when converting surface representations to field-based representations for rendering. [Sur2f](13145-sur2f.md)
+
+### Hybrid Rendering
+General hybrid rendering techniques. Choose when combining multiple rendering methods for a single scene. [Hybrid Rendering](15213-hybrid-rendering.md)
+
+## Operating characteristics
+*   **Time Complexity:** The non-caching variant computes global illumination incrementally per pixel, leading to higher per-frame cost, especially for complex scenes or high-quality path tracing [S1]. The caching variant precomputes global illumination, which adds an initial offline or incremental precomputation cost, but allows for faster per-frame rendering as the global illumination is retrieved from the volume [S1].
+*   **Memory Complexity:** The caching variant requires additional memory to store the Global Illumination Volume, which stores precomputed global illumination for each voxel [S1]. The non-caching variant does not require this storage [S1].
+*   **Measured Performance:** The caching and non-caching variants perform comparably well in terms of visual quality and overall performance metrics in the evaluation [S1].
+*   **Scaling:** The caching variant scales better with camera view changes because the global illumination is camera-view-independent and does not need to be recomputed [S1].
+*   **Strengths:** Enhances the display of surfaces within volumes better than full volumetric path tracing alone; preserves physically realistic illumination of participating media; the caching variant is camera-view-independent [S1].
+*   **Limitations:** Modern null-collision-based volume rendering techniques lack the capability of efficiently rendering isosurfaces due to large discontinuities in density, which this method addresses but may introduce complexity in handling these discontinuities [S1]. The exact performance characteristics depend on the local shading models and path tracing implementation [S1].
+
+## Background
+The method was presented by Uroš Šmajdek, Žiga Lesar, Matija Marolt, and Ciril Bohak in 2023 [S1]. The paper was accepted on May 19, 2023, and published online on June 26, 2023 [S1]. The work addresses the need for physically correct lighting in volumetric visualization, noting that lighting is crucial for the accurate perception of details, especially when rendering volumetric data with different degrees of transparency [S1]. The authors highlight that while null-collision-based volume rendering is efficient for participating media, it struggles with isosurfaces due to density discontinuities, necessitating a combined approach [S1]. The technique is related to irradiance caching and global illumination techniques in volumetric data [S1].
+
+## Sources
+[S1] Combined volume and surface rendering with global illumination caching, https://doi.org/10.1007/s00371-023-02932-9, fetched 2026-10-26

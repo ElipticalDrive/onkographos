@@ -1,0 +1,128 @@
+# Geometry Shader Instancing
+
+Also called: GS Instancing, Programmatic Geometry Amplification, Programmatic Geometry Instancing
+
+## Overview
+Geometry Shader Instancing is a real-time rendering technique that amplifies point primitives into surfels (oriented quadrilaterals) or voxels (cubes) and instances them on the GPU using the programmable Geometry Shader unit [S1, unofficial]. It solves the problem of efficiently rendering large point clouds without CPU-side mesh generation, offering an alternative to hardware-controlled instancing pipelines by keeping the geometry description in a user-defined shader program [S1, unofficial]. Unlike hardware instancing, which relies on fixed-function repetition, this method performs object, world, view, and projection transformations programmatically within the geometry stage [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A buffer containing point attributes (position, normal vector, color, splat size) representing a point cloud [S1, unofficial].
+*   **Output:** Triangle strips representing amplified and transformed surfels or voxels [S1, unofficial].
+
+**Data Structures:**
+*   **Point Attribute Buffer:** A contiguous, immutable memory buffer acting as a mirrored copy of the point cloud data array [S1, unofficial].
+    *   **Fields:**
+        *   `position`: 3D vector $(x, y, z)$ [S1, unofficial].
+        *   `normal`: 3D vector $(n_x, n_y, n_z)$ [S1, unofficial].
+        *   `color`: 4D vector $(r, g, b, a)$ [S1, unofficial].
+        *   `splat_size`: Scalar value defining the primitive size [S1, unofficial].
+    *   **Layout:** Sequentially packed per point for optimal streaming efficiency [S1, unofficial].
+
+**Numbered Steps:**
+1.  **CPU Preparation:** The CPU packs point attributes into the Point Attribute Buffer [S1, unofficial].
+2.  **Draw Call:** The CPU issues a single draw call on the buffer to the GPU [S1, unofficial].
+3.  **Vertex Shader Execution:** The Vertex Shader receives the point attributes and forwards them untouched to the Geometry Shader [S1, unofficial].
+4.  **Geometry Shader Input:** The Geometry Shader receives the point primitives [S1, unofficial].
+5.  **Amplification:** The Geometry Shader promotes the point primitive into a canonical template geometry (a quadrilateral for surfels or a cube for voxels) [S1, unofficial].
+6.  **Transformation:** The Geometry Shader transforms the coordinates of the canonical template based on the point attributes [S1, unofficial]. This includes applying object, world, view, and projection transformations [S1, unofficial].
+7.  **Instancing:** The Geometry Shader replicates the transformed geometry for each input point [S1, unofficial].
+8.  **Output:** The Geometry Shader outputs triangle strips for downstream pipeline stages [S1, unofficial].
+
+**Formulas:**
+Let $P_i$ be the $i$-th point in the buffer with attributes:
+*   $\mathbf{p}_i = (x_i, y_i, z_i)$: Position
+*   $\mathbf{n}_i = (n_x, n_y, n_z)$: Normal vector
+*   $\mathbf{c}_i = (r_i, g_i, b_i, a_i)$: Color
+*   $s_i$: Splat size
+
+The Geometry Shader generates vertices $\mathbf{v}_{i,j}$ for the $j$-th vertex of the amplified primitive for point $i$. The transformation is defined as:
+$$ \mathbf{v}_{i,j} = M_{proj} \cdot M_{view} \cdot M_{world} \cdot (R(\mathbf{n}_i) \cdot (s_i \cdot \mathbf{t}_j) + \mathbf{p}_i) $$
+Where:
+*   $M_{proj}$, $M_{view}$, $M_{world}$ are the projection, view, and world transformation matrices [S1, unofficial].
+*   $R(\mathbf{n}_i)$ constructs a rotation matrix aligning the template with $\mathbf{n}_i$ [G].
+*   $\mathbf{t}_j$ is the local offset of the $j$-th vertex of the canonical template relative to the point center [S1, unofficial].
+*   $s_i$ scales the template according to the splat size [S1, unofficial].
+
+**Parameters:**
+*   **Amplification Level:** Restricted to moderate levels; only constant-size amplifications (quadrilaterals or cubes) are supported [S1, unofficial].
+*   **Point Attributes:** Position, normal vector, color, and splat size [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Performance:** Heavy tessellation is ill-suited for the Geometry Shader unit [S1, unofficial].
+*   **Branching:** Alternative methods using fragment shader branching and discard instructions can negatively impact performance [S1, unofficial].
+*   **Bandwidth:** Preprocessing surfels on the CPU implies increased memory and CPU-GPU bandwidth usage [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def vertex_shader(point_attributes):
+    """Forwards point attributes untouched to the Geometry Shader."""
+    return point_attributes
+
+def geometry_shader(point_attributes, M_world, M_view, M_proj):
+    """Amplifies a point primitive into a surfel or voxel and transforms it."""
+    # Extract attributes
+    pos = point_attributes.position
+    norm = point_attributes.normal
+    col = point_attributes.color
+    size = point_attributes.splat_size
+
+    # Canonical template vertices (unit quad centered at origin)
+    template = [vec3(-0.5, -0.5, 0.0), vec3(0.5, -0.5, 0.0),
+                vec3(0.5, 0.5, 0.0), vec3(-0.5, 0.5, 0.0)]
+
+    # Compute basis vectors for orientation
+    up = vec3(0.0, 1.0, 0.0)
+    if abs(dot(norm, up)) > 0.999:
+        up = vec3(1.0, 0.0, 0.0)
+    right = normalize(cross(norm, up))
+    up = cross(right, norm)
+
+    output = []
+    for tv in template:
+        # Scale and rotate local offset
+        rotated = right * (tv.x * size) + up * (tv.y * size)
+        world_pos = pos + rotated
+        # Apply world, view, and projection transforms
+        clip_pos = M_proj * (M_view * (M_world * vec4(world_pos, 1.0)))
+        output.append((clip_pos, col))
+
+    # Emit triangle strip for quad: vertices 0,1,2,3
+    emit_vertex(output[0])
+    emit_vertex(output[1])
+    emit_vertex(output[2])
+    emit_vertex(output[3])
+    end_primitive()
+
+# Self-contained helper definitions
+def emit_vertex(vertex_data):
+    """Collects a vertex for the output primitive stream."""
+    pass
+
+def end_primitive():
+    """Signals the end of the current primitive stream."""
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Linear with respect to the number of points for the Point Attribute Buffer [S1, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales with the number of points as long as the amplification level remains moderate [S1, unofficial].
+*   **Strengths:**
+    *   Enables real-time amplification and instancing of surfels and voxels [S1, unofficial].
+    *   Provides optimal streaming efficiency and draw batching [S1, unofficial].
+    *   Guarantees immutability of the point cloud data [S1, unofficial].
+*   **Limitations:**
+    *   The Geometry Shader unit is ill-suited for heavy tessellation [S1, unofficial].
+    *   Preprocessing surfels on the CPU increases memory and CPU-GPU bandwidth usage [S1, unofficial].
+*   **When to use:** When rendering large point clouds with surfels or voxels in real-time and hardware instancing is unavailable or unsuitable [S1, unofficial].
+*   **When not to use:** When heavy tessellation is required or when CPU preprocessing overhead is acceptable [S1, unofficial].
+
+## Background
+Geometry Shader Instancing was investigated as a contribution to real-time surfel and voxel rendering of scanned 4D media [S1, unofficial]. It leverages the programmable Geometry Shader unit, which sits between the Vertex Shader and Fragment Shader, to perform programmatic modifications on geometry and topology [S1, unofficial]. The technique was proposed as an alternative to CPU-side preprocessing and hardware-controlled geometry instancing pipelines [S1, unofficial].
+
+## Sources
+[S1] Hardware-accelerated geometry instancing for surfel and voxel rendering of scanned 4d media, http://133.5.19.150/papers/2010_2013/1-1-36.pdf, fetched 2026-10-31 (unofficial)

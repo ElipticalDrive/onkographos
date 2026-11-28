@@ -1,0 +1,401 @@
+--- v011.md
++++ v012.md
+@@ -4,207 +4,212 @@
+ 
+ ## Overview
+-FineSplat is a feed-forward 3D Gaussian Splatting framework that predicts a set of 3D Gaussians from $N$ context views (with or without known poses) using a two-stage dual-grouping strategy to balance local detail preservation with global multi-view reasoning [S1, unofficial]. It distinguishes itself from sibling methods like YoNoSplat and ZipSplat by using high-resolution 4x4 patch tokens instead of coarser 14x14 patches, combined with a serialized attention mechanism in 3D space to avoid the prohibitive cost of global multi-view attention [S1, unofficial]. This approach preserves fine-grained visual information while maintaining high efficiency, achieving superior quality per unit of time compared to explicit k-nearest-neighbor search or global attention baselines [S1, unofficial].
++FineSplat is a feed-forward 3D Gaussian Splatting framework that predicts a set of 3D Gaussian primitives from $N$ context views (with or without known poses) using a two-stage dual-grouping strategy [S1, unofficial]. It balances local detail preservation with global multi-view reasoning by dividing input views into fine-grained $4 \times 4$ patches and employing view-wise token grouping in Stage 1, followed by 3D spatial grouping in Stage 2 [S1, unofficial]. Unlike sibling methods that use coarser patches (e.g., $14 \times 14$) or global attention, FineSplat avoids the prohibitive cost of global multi-view attention while maintaining fine-grained visual information through serialized attention in 3D space [S1, unofficial].
+ 
+ ## How it works
+-FineSplat operates in two stages: view-wise token grouping (Stage 1) and 3D spatial token grouping with error feedback (Stage 2). It builds on the shared principles of feed-forward prediction, input normalization, feature encoding, and differentiable rendering [15832-feed-forward-and-generalizable-prediction.md].
+-
+-### Inputs and Outputs
+-**Inputs:**
+-*   $N$ context images $I \in \mathbb{R}^{N \times H \times W \times 3}$.
+-*   Camera poses (optional, but used for normalization and ray unprojection).
+-*   Camera intrinsics (used for ray unprojection).
+-
+-**Outputs:**
+-*   A set of 3D Gaussian primitives defined by mean $\mu$, covariance $\Sigma$ (parameterized by rotation $r$ and scale $s$), opacity $\alpha$, and spherical harmonics coefficients $c$.
+-
+-### Data Structures
+-1.  **Tokens ($z$):** A set of $M$ fine-grained tokens, where $M = N \cdot \frac{H}{p} \cdot \frac{W}{p}$. Each token has dimension $d$.
+-2.  **Gaussian Primitives:** $K$ Gaussians predicted per token.
+-3.  **Error Feature Maps ($F^{err}$):** For each view, a feature map of size $\frac{H}{p} \times \frac{W}{p} \times d_e$ containing concatenated pixel and feature-level errors.
+-
+-### Parameters
+-*   $p$: Patch size. Default: 4x4 pixels [S1, unofficial].
+-*   $T$: Number of iterative refinement steps in Stage 2. Default: 4 [S1, unofficial].
+-*   $K$: Number of Gaussian primitives predicted per token.
+-*   $S$: Size of groups for serialized attention in 3D spatial grouping (number of consecutive points along the space-filling curve) [S1, unofficial].
+-*   $s$: Sub-patch stride. Default: 2 (for 4x4 tokens divided into 2x2 sub-patches) [S1, unofficial].
++**Inputs and Outputs:**
++*   **Input:** $N$ context views $I \in \mathbb{R}^{N \times H \times W \times 3}$, optionally with known camera poses. Images are normalized and resized to a fixed resolution for encoding [S1, unofficial].
++*   **Output:** A set of 3D Gaussian primitives defined by mean position $\mu_i$, scale $s_i$, rotation $r_i$, opacity $\alpha_i$, and color $c_i$ [S1, unofficial].
++
++**Data Structures:**
++*   **Tokens:** $z \in \mathbb{R}^{M \times d}$, where $M = N \cdot (H/p) \cdot (W/p)$ is the number of fine-grained tokens, $p$ is the patch size, and $d$ is the token dimension [S1, unofficial].
++*   **Gaussians:** Each token predicts $K$ Gaussian primitives. In FineSplat, $K=4$ per $4 \times 4$ token, corresponding to four non-overlapping $2 \times 2$ sub-patches [S1, unofficial].
++
++**Parameters:**
++*   $p$: Patch size. Default is $4 \times 4$ [S1, unofficial].
++*   $T$: Number of iterative refinement steps in Stage 2. Default is 4 [S1, unofficial].
++*   $s$: Sub-patch stride. Default is 2 (for $4 \times 4$ tokens divided into $2 \times 2$ sub-patches) [S1, unofficial].
+ *   $N$: Number of input context views. Training samples $N \in \{6, 12, 24, 32\}$ [S1, unofficial].
+-
+-### Algorithm
+-
+-#### Stage 1: View-Wise Token Grouping
+-1.  **Feature Extraction:** Encode input images using a Vision Transformer (e.g., DINOv2) or CNN to extract multi-scale features $F^l$ for $l \in \{1, 2, 3\}$, where $F^1$ is the finest scale and $F^3$ is the coarsest [S1, unofficial].
+-2.  **Token Initialization:** Fuse features into $M$ fine-grained tokens $z^{(0)}$ using Equation (1):
+-    $$ z^{(0)} = \text{fuse}\left(\text{up}\left(\text{fuse}\left(\text{up}(F^3) + F^2\right)\right)\right) + F^1 $$
+-    where $\text{up}(\cdot)$ is bilinear upsampling and $\text{fuse}(\cdot)$ is a convolutional fusion block [S1, unofficial].
+-3.  **View-Wise Attention:** Apply attention mechanisms within small view groups to exchange information across neighboring views in 2D space. This restricts the attention scope to keep computation affordable [S1, unofficial].
+-
+-#### Stage 2: 3D Spatial Token Grouping and Refinement
+-This stage is repeated for $T$ steps (default $T=4$) [S1, unofficial].
+-
+-1.  **Gaussian Prediction:** Decode each token $z$ into $K$ Gaussian primitives using a lightweight linear decoder head $\mathcal{D}$.
+-2.  **Patch-Aligned Sub-Pixel Gaussian Reconstruction:**
+-    *   Predict 4 Gaussians per 4x4 token, assigning each to a non-overlapping 2x2 sub-patch [S1, unofficial].
+-    *   Learn a 2D image-space offset $\Delta = (\Delta_x, \Delta_y)$ for each Gaussian.
+-    *   Bound the offset to ensure the Gaussian remains within its 2x2 sub-patch:
+-        $$ \delta_x = 2s \tanh(\Delta_x), \quad \delta_y = 2s \tanh(\Delta_y) $$
+-        where $s=2$ is the sub-patch stride. This ensures $\delta_x, \delta_y \in [-s/2, s/2]$ [S1, unofficial].
+-    *   Compute the displaced image coordinate $(u, v) = (u_c, v_c) + \delta$, where $(u_c, v_c)$ is the center of the sub-patch.
+-    *   Unproject $(u, v)$ using predicted camera intrinsics to get a ray direction. Transform and normalize this direction using camera-to-world rotation, using camera translation as the ray origin. This yields the 3D center $\mu$ for the Gaussian [S1, unofficial].
+-3.  **Error Feature Computation:**
+-    *   Render the predicted Gaussians into every context view $n$ to obtain rendered images $\hat{I}_n$.
+-    *   Compute the signed pixel error map $E_n = \hat{I}_n - I_n$ [S1, unofficial].
+-    *   Compute the feature-level difference $\Delta \phi_n = \phi(\hat{I}_n) - \phi(I_n)$ using a pretrained ResNet-18 encoder $\phi(\cdot)$ [S1, unofficial].
+-    *   Combine these with the finest-scale features $F_n^1$ from Stage 1 via linear embeddings $E_{err}$ and $E_{feat}$:
+-        $$ F_n^{err} = [E_{err}(E_n, \Delta \phi_n); E_{feat}(F_n^1)] \in \mathbb{R}^{\frac{H}{p} \times \frac{W}{p} \times d_e} $$
+-        where $[\cdot; \cdot]$ denotes concatenation [S1, unofficial].
+-4.  **Error Aggregation:**
+-    *   For each token, gather two error signals:
+-        *   $e_{self}$: The error feature from the patch where the token was predicted.
+-        *   $e_{agg}$: The average of error features over all context views in which the token is visible (including views outside the Stage 1 view group) [S1, unofficial].
+-5.  **3D Spatial Grouping (Serialized Attention):**
+-    *   Lift tokens to 3D space using their predicted Gaussian centers.
+-    *   Order tokens along a space-filling curve.
+-    *   Partition tokens into groups of $S$ consecutive points along the curve.
+-    *   Apply self-attention within each group to exchange information between geometrically related tokens in 3D space.
+-    *   Use four attention blocks, each using a different space-filling curve, so that each token meets a different set of neighbors [S1, unofficial].
+-    *   Update tokens:
+-        $$ \Delta z_j^{(i)} = \text{Linear}(\text{SerialAttn}(h_j^{(i)})) $$
+-        $$ z_j^{(i+1)} = z_j^{(i)} + \Delta z_j^{(i)} $$
+-        where $h_j^{(i)}$ is the aggregated error feature for token $j$ at step $i$ [S1, unofficial].
+-6.  **Re-decoding:** Decode the updated tokens $z^{(i+1)}$ into a new set of Gaussian primitives.
+-
+-### Pseudocode
++*   $S$: Size of groups for serialized attention in 3D spatial grouping [S1, unofficial].
++
++**Algorithm:**
++
++1.  **Scene Normalization:** To handle scale ambiguity in feed-forward reconstruction, normalize scene scale using context camera poses. Express poses in the mean context camera frame and rescale translations so all context camera centers lie within $[-1, 1]^3$ [S1, unofficial].
++
++2.  **Stage 1: View-Wise Token Grouping:**
++    *   Extract multi-scale features $F^l$ for $l \in \{1, 2, 3\}$ (finest to coarsest) from input images using a shared encoder [S1, unofficial].
++    *   Fuse features into $M$ fine-grained tokens $z^{(0)}$ using Equation (1) [S1, unofficial]:
++        $$ z^{(0)} = \text{fuse}\left(\text{up}\left(\text{fuse}\left(\text{up}(F^3) + F^2\right)\right)\right) + F^1 $$
++        where $\text{up}(\cdot)$ is bilinear upsampling and $\text{fuse}(\cdot)$ is a convolutional fusion block [S1, unofficial].
++    *   Encode tokens using view-wise token grouping based on the Multi-View Pyramid (MVP) architecture. This performs fine-grained attention within small view groups and exchanges information across all views via coarser global tokens [S1, unofficial].
++
++3.  **Stage 2: 3D Spatial Token Grouping (Iterative Refinement for $t = 1 \dots T$):**
++    *   **Gaussian Prediction:** Decode tokens $z^{(t-1)}$ into an initial set of Gaussians using a lightweight Gaussian head $\mathcal{D}$ (linear decoder). For each token, predict 4 Gaussians, one for each $2 \times 2$ sub-patch [S1, unofficial].
++    *   **Patch-Aligned Sub-Pixel Gaussian Reconstruction:**
++        *   For a sub-patch with center $(u_c, v_c)$, learn a 2D image-space offset $\Delta = (\Delta_x, \Delta_y)$ [S1, unofficial].
++        *   Bound the offset to keep Gaussians within their sub-patch:
++            $$ \delta_x = 2s \tanh(\Delta_x), \quad \delta_y = 2s \tanh(\Delta_y) $$
++            where $s=2$ is the sub-patch stride, ensuring $\delta_x, \delta_y \in [-s/2, s/2]$ [S1, unofficial].
++        *   Compute displaced coordinate $(u, v) = (u_c, v_c) + \delta$ [S1, unofficial].
++        *   Unproject $(u, v)$ using predicted camera intrinsics to get a direction vector. Transform and normalize this direction using camera-to-world rotation, using camera translation as the ray origin to determine $\mu_i$ [S1, unofficial].
++    *   **Error Feature Computation:**
++        *   Render the predicted Gaussians into every context view $n$ to get rendered images $\hat{I}_n$ [S1, unofficial].
++        *   Compute signed pixel error map $E_n = \hat{I}_n - I_n$ [S1, unofficial].
++        *   Compute feature-level difference $\Delta \phi_n = \phi(\hat{I}_n) - \phi(I_n)$ using a pretrained ResNet-18 encoder $\phi(\cdot)$ [S1, unofficial].
++        *   Combine with finest-scale features $F_n^1$ from Stage 1 via linear embeddings $E_{\text{err}}$ and $E_{\text{feat}}$ to form error feature map $F_n^{\text{err}}$ [S1, unofficial]:
++            $$ F_n^{\text{err}} = [E_{\text{err}}(E_n, \Delta \phi_n); E_{\text{feat}}(F_n^1)] \in \mathbb{R}^{(H/p) \times (W/p) \times d_e} $$
++            where $[\cdot; \cdot]$ represents feature concatenation [S1, unofficial].
++    *   **Error Aggregation:**
++        *   For each token, gather two error signals:
++            1.  $e_{\text{self}}$: Self error feature from the patch where the token is predicted.
++            2.  $e_{\text{agg}}$: Aggregated error feature averaged over all context views where the token is visible (projected onto error feature maps and filtered by frustum/occlusion) [S1, unofficial].
++    *   **3D Spatial Grouping:**
++        *   Lift tokens to 3D space using their predicted Gaussian centers [S1, unofficial].
++        *   Order tokens along a space-filling curve and partition them into groups of $S$ consecutive points [S1, unofficial].
++        *   Apply serialized self-attention within each 3D group to exchange error signals with neighbors [S1, unofficial].
++        *   Use four attention blocks in Stage 2, each using a different space-filling curve, so each token meets a different set of neighbors [S1, unofficial].
++        *   Update tokens:
++            $$ \Delta z_j^{(t)} = \text{Linear}(\text{SerialAttn}(h_j^{(t)})) $$
++            $$ z_j^{(t)} = z_j^{(t-1)} + \Delta z_j^{(t)} $$
++            where $h_j^{(t)}$ is the concatenated feature of token $j$ including error signals [S1, unofficial].
++    *   Repeat steps 3.1–3.5 for $T$ steps. FineSplat uses $T=4$ [S1, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+-def finesplat(context_images, context_poses, context_intrinsics, N):
++import torch
++import torch.nn as nn
++import numpy as np
++
++def fine_splat(context_views, context_poses, N_views):
+     """
+-    context_images: List of N images, shape (H, W, 3)
+-    context_poses: List of N camera poses (4x4 matrices)
+-    context_intrinsics: List of N camera intrinsic matrices
+-    N: Number of context views
++    context_views: Tensor of shape (N, H, W, 3), normalized to [0, 1] or [-1, 1]
++    context_poses: Tensor of shape (N, 4, 4) or (N, 3, 4), camera-to-world matrices
++    N_views: Number of context views
+     """
+-    # 1. Feature Extraction (Stage 1)
+-    # Extract multi-scale features F^1, F^2, F^3 using ViT/CNN
+-    features = extract_features(context_images)
+-    
+-    # Fuse features into initial tokens z^(0)
+-    # M = N * (H/p) * (W/p), p=4
+-    z = fuse_features(features) 
+-    
+-    # View-wise attention within groups
+-    z = view_wise_attention(z, context_images)
+-    
+-    # 2. Iterative Refinement (Stage 2)
++    # 1. Scene Normalization
++    # Compute mean camera frame and rescale translations to [-1, 1]^3
++    # [G] Implementation detail: Calculate centroid of camera centers, 
++    # compute max norm, and scale poses accordingly.
++    context_poses = normalize_scene_scale(context_poses)
++    
++    # 2. Stage 1: View-Wise Token Grouping
++    # Extract multi-scale features F^1, F^2, F^3
++    F1, F2, F3 = extract_multi_scale_features(context_views)
++    
++    # Fuse features into fine-grained tokens z^(0)
++    # z^(0) = fuse(up(fuse(up(F^3) + F^2)) + F^1)
++    z = fuse_features(F1, F2, F3)
++    
++    # MVP-style view-wise grouping
++    # [G] This involves grouping tokens by view and applying attention
++    # within groups and global tokens across views.
++    z = view_wise_token_grouping(z, N_views)
++    
++    # 3. Stage 2: 3D Spatial Token Grouping (Iterative Refinement)
+     for t in range(4): # T=4 steps
+-        # Decode Gaussians
+-        gaussians = decode_gaussians(z)
+-        
+-        # Render context views
+-        rendered_images = []
+-        for n in range(N):
+-            rendered = differentiable_render(gaussians, context_poses[n], context_intrinsics[n])
+-            rendered_images.append(rendered)
+-            
+-        # Compute Error Features
+-        error_features = []
+-        for n in range(N):
+-            # Pixel error
+-            E_n = rendered_images[n] - context_images[n]
+-            # Feature error using ResNet-18
+-            phi = pretrained_resnet18
+-            Delta_phi_n = phi(rendered_images[n]) - phi(context_images[n])
+-            # Finest scale features from Stage 1 (or current stage if re-extracted)
+-            F_n_1 = features[n][0] # Assuming F^1 is index 0
+-            
+-            # Embed and concatenate
+-            E_err_emb = linear_embed(E_n, Delta_phi_n)
+-            E_feat_emb = linear_embed(F_n_1)
+-            F_err_n = concat(E_err_emb, E_feat_emb)
+-            error_features.append(F_err_n)
+-            
+-        # Aggregate errors for each token
+-        # e_self: error from source patch
++        # 3.1 Gaussian Prediction
++        # Decode tokens to Gaussians
++        # Each token predicts 4 Gaussians (K=4) for 2x2 sub-patches
++        gaussians = gaussian_head_decode(z)
++        
++        # 3.2 Patch-Aligned Sub-Pixel Reconstruction
++        # For each Gaussian, compute center based on sub-patch offset
++        # delta_x = 2*s*tanh(delta_x_learned), delta_y = 2*s*tanh(delta_y_learned)
++        # s=2. Center = sub_patch_center + delta
++        # Unproject to 3D using camera intrinsics and poses
++        gaussian_centers = compute_sub_pixel_centers(gaussians, context_views, context_poses)
++        
++        # 3.3 Error Feature Computation
++        # Render Gaussians to get rendered images I_hat
++        rendered_images = differentiable_render(gaussians, context_poses)
++        
++        # Compute pixel error E_n = I_hat_n - I_n
++        pixel_errors = rendered_images - context_views
++        
++        # Compute feature difference Delta_phi_n = phi(I_hat_n) - phi(I_n)
++        # phi is pretrained ResNet-18
++        feature_diffs = compute_feature_diff(rendered_images, context_views)
++        
++        # Combine with finest-scale features F^1
++        # F_err = [E_err(E_n, Delta_phi_n); E_feat(F^1)]
++        error_features = compute_error_features(pixel_errors, feature_diffs, F1)
++        
++        # 3.4 Error Aggregation
++        # For each token, gather e_self and e_agg
++        # e_self: error from own view
+         # e_agg: average error from all visible views
+-        aggregated_errors = aggregate_errors(z, error_features, gaussians)
+-        
+-        # 3D Spatial Grouping
+-        # Lift tokens to 3D
+-        token_3d_positions = get_token_3d_positions(gaussians)
+-        
+-        # Order along space-filling curve (4 different curves for 4 blocks)
+-        for curve_idx in range(4):
+-            ordered_indices = sort_by_space_filling_curve(token_3d_positions, curve_idx)
+-            
+-            # Group into windows of size S
+-            groups = create_groups(ordered_indices, S)
+-            
+-            # Serialized Attention
+-            for group in groups:
+-                group_tokens = [z[i] for i in group]
+-                group_errors = [aggregated_errors[i] for i in group]
+-                # Self-attention within group
+-                updated_group = serialized_attention(group_tokens, group_errors)
+-                # Update z
+-                for idx, new_token in zip(group, updated_group):
+-                    z[idx] = new_token
+-                    
++        token_errors = aggregate_errors(gaussian_centers, error_features, context_poses)
++        
++        # 3.5 3D Spatial Grouping
++        # Order tokens by space-filling curve based on gaussian_centers
++        # Group into windows of size S
++        # Apply serialized attention
++        # Update z
++        z = update_tokens_with_3d_attention(z, token_errors, gaussian_centers)
++        
+     # Final Gaussian Prediction
+-    final_gaussians = decode_gaussians(z)
++    final_gaussians = gaussian_head_decode(z)
+     return final_gaussians
+ 
+-def decode_gaussians(z):
+-    """
+-    Decode tokens into Gaussians with sub-pixel offsets.
+-    """
+-    gaussians = []
+-    for token in z:
+-        # Predict 4 Gaussians per token
+-        for sub_patch_idx in range(4):
+-            # Predict offset delta
+-            delta_x, delta_y = predict_offset(token, sub_patch_idx)
+-            
+-            # Bound offset
+-            s = 2
+-            delta_x = 2 * s * tanh(delta_x)
+-            delta_y = 2 * s * tanh(delta_y)
+-            
+-            # Get sub-patch center (u_c, v_c)
+-            u_c, v_c = get_sub_patch_center(sub_patch_idx)
+-            
+-            # Displaced coordinate
+-            u = u_c + delta_x
+-            v = v_c + delta_y
+-            
+-            # Unproject to 3D
+-            # Use context view's camera parameters
+-            # This is simplified; in practice, each token is associated with a specific view
+-            # and the unprojection uses that view's intrinsics and pose.
+-            # For the sake of this pseudocode, we assume the token knows its source view.
+-            # The Gaussian head predicts mean, scale, rotation, opacity, SH.
+-            # The mean is refined by the sub-pixel offset.
+-            gaussian = create_gaussian_from_token(token, u, v)
+-            gaussians.append(gaussian)
+-    return gaussians
++def normalize_scene_scale(poses):
++    # [G] Standardize scene scale
++    centers = poses[:, :3, 3]
++    mean_center = torch.mean(centers, dim=0)
++    # Rescale so max distance from mean is 1 (or fit in [-1,1]^3)
++    # This is a placeholder for the specific normalization logic
++    return poses
++
++def extract_multi_scale_features(images):
++    # [G] Placeholder for backbone (e.g., DINOv2 or similar)
++    # Returns F1, F2, F3
++    pass
++
++def fuse_features(F1, F2, F3):
++    # z^(0) = fuse(up(fuse(up(F^3) + F^2)) + F^1)
++    up = nn.functional.interpolate
++    fuse = nn.Conv2d # Convolutional fusion block
++    # [G] Implement the specific fusion architecture
++    pass
++
++def view_wise_token_grouping(z, N_views):
++    # [G] Implement MVP architecture
++    pass
++
++def gaussian_head_decode(z):
++    # Linear decoder mapping z to K=4 Gaussians per token
++    # Returns parameters: mu, s, r, alpha, c
++    pass
++
++def compute_sub_pixel_centers(gaussians, views, poses):
++    # For each Gaussian, apply offset delta within 2x2 sub-patch
++    # Unproject to 3D
++    pass
++
++def differentiable_render(gaussians, poses):
++    # Differentiable rasterization
++    pass
++
++def compute_feature_diff(I_hat, I):
++    # phi(I_hat) - phi(I) using ResNet-18
++    pass
++
++def compute_error_features(pixel_errors, feature_diffs, F1):
++    # E_err and E_feat linear embeddings
++    pass
++
++def aggregate_errors(centers, error_features, poses):
++    # Project centers to views, check visibility, aggregate errors
++    pass
++
++def update_tokens_with_3d_attention(z, errors, centers):
++    # Space-filling curve ordering
++    # Serialized attention in 3D groups
++    pass
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Scale Ambiguity:** Feed-forward reconstruction is scale-ambiguous. FineSplat handles this by normalizing scene scale using context camera poses: poses are expressed in the mean context camera frame, and translations are rescaled so that all context camera centers lie within $[-1, 1]^3$ [S1, unofficial].
+-*   **Blind Spots:** Fixed view grouping in Stage 1 leaves blind spots where fine-grained tokens in different groups cannot interact. Stage 2's 3D spatial grouping connects tokens across view groups once lifted to 3D [S1, unofficial].
+-*   **Precision:** The sub-pixel offset is bounded by $\tanh$ to ensure Gaussians stay within their 2x2 sub-patch, preventing invalid projections [S1, unofficial].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** FineSplat is efficient due to its dual-grouping strategy. Stage 1 uses local view-wise attention, and Stage 2 uses serialized attention with space-filling curves, which scales favorably with token count compared to explicit k-nearest-neighbor search or global attention [S1, unofficial].
+-*   **Memory Complexity:** Depends on the number of tokens $M$ and the number of Gaussians $K$. With 4x4 patches, $M$ is higher than coarser methods, but the serialized attention keeps memory usage manageable [S1, unofficial].
+-*   **Measured Performance:**
+-    *   **DL3DV (6 views):** 27.325 PSNR, 0.871 SSIM, 0.115 LPIPS using 62K Gaussians [S1, unofficial].
+-    *   **RE10K (6 views):** 27.394 PSNR, 0.886 SSIM, 0.116 LPIPS using 75K Gaussians [S1, unofficial].
+-    *   **Mip-NeRF 360 (128 views):** 23.463 PSNR, 0.706 SSIM, 0.214 LPIPS using 1.6M Gaussians [S1, unofficial].
+-*   **Scaling:** Quality improves gradually with more Stage 2 steps, but going beyond 4 steps yields no further gain [S1, unofficial]. Quality also improves with more context views, with Stage 2 providing larger gains as view count increases (e.g., 1.22 dB with 6 views vs 1.46 dB with 24 views) [S1, unofficial].
+-*   **Strengths:** High efficiency, strong quality with small primitive budget, robust to scale ambiguity, handles fine-grained details well.
+-*   **Limitations:** Requires known camera poses for normalization and ray unprojection (though poses can be predicted). Performance on Mip-NeRF 360 is lower than on DL3DV/RE10K, likely due to domain shift and higher complexity [S1, unofficial].
++*   **Time Complexity:** FineSplat is efficient due to its dual-grouping strategy. Stage 1 uses local view-wise attention, and Stage 2 uses serialized attention in 3D, avoiding global multi-view attention costs [S1, unofficial]. It is faster than explicit k-nearest-neighbor search for 3D grouping [S1, unofficial].
++*   **Memory Complexity:** Depends on the number of tokens $M$ and Gaussians. FineSplat uses a small primitive budget (e.g., 62K Gaussians for 6 views on DL3DV) [S1, unofficial].
++*   **Performance:**
++    *   DL3DV (6 views): 27.325 PSNR, 0.871 SSIM, 0.115 LPIPS with 62K Gaussians [S1, unofficial].
++    *   RE10K (6 views): 27.394 PSNR, 0.886 SSIM, 0.116 LPIPS with 75K Gaussians [S1, unofficial].
++    *   Mip-NeRF 360 (128 views): 23.463 PSNR, 0.706 SSIM, 0.214 LPIPS with 1.6M Gaussians [S1, unofficial].
++*   **Strengths:** High quality with fine-grained details, efficient reconstruction time, strong generalization to unseen datasets (zero-shot) [S1, unofficial].
++*   **Limitations:** Quality may degrade if Stage 1 alone is used for large scenes with many views due to blind spots between view groups [S1, unofficial]. No depth supervision is used, relying on pose normalization for scale [S1, unofficial].
++*   **When to use:** Novel view synthesis where high fidelity and efficiency are required, especially with a small number of context views [S1, unofficial].
++*   **When not to use:** If depth supervision is available and preferred, or if global multi-view attention is feasible and necessary for very large scenes [S1, unofficial].
+ 
+ ## Background
+-FineSplat was introduced in 2026 by [S1, unofficial]. It is designed for novel view synthesis on datasets like DL3DV, RealEstate10K, and Mip-NeRF 360. The method addresses the trade-off between fine-grained detail preservation and computational cost in feed-forward 3D Gaussian Splatting. It builds on the principles of differentiable rendering and feed-forward prediction established in earlier works like [15832-feed-forward-and-generalizable-prediction.md].
++FineSplat was introduced in 2026 [S1, unofficial]. It is trained on the DL3DV dataset and evaluated on DL3DV, RealEstate10K, and Mip-NeRF 360 [S1, unofficial]. The method addresses the trade-off between fine-grained multi-view reasoning and computational cost in feed-forward 3D Gaussian Splatting [S1, unofficial].
+ 
+ ## Sources

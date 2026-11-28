@@ -1,0 +1,191 @@
+--- v003.md
++++ v004.md
+@@ -4,156 +4,70 @@
+ 
+ ## Overview
+-Hardware-Accelerated Gaussian Rasterization is a hardware-algorithm co-design that augments standard triangle rasterizers with dedicated units for Gaussian projection and blending, achieving an order of magnitude speedup in the rasterization stage [S1, unofficial]. It solves the bottleneck of rendering 3D Gaussians on general-purpose GPUs by offloading specific computational patterns to specialized hardware pipelines [S1, unofficial]. Unlike general-purpose compute shaders, this method isolates preprocessing and rendering into distinct hardware stages, optimizing data flow and reducing memory bandwidth requirements [S2].
++Hardware-Accelerated Gaussian Rasterization is a hardware-algorithm co-design that augments standard triangle rasterizers with dedicated hardware units for Gaussian projection and blending, achieving an order-of-magnitude speedup in the rasterization stage [S1, unofficial][S2]. It solves the computational bottleneck of projecting and compositing 3D Gaussians by replacing general-purpose compute shaders with a specialized four-stage pipeline [S2]. Unlike sibling methods that rely on software-based sorting and blending on GPUs, this approach isolates near-plane culling and projection into point-based preprocessing stages, while handling sorting and rasterization in tile-based rendering stages [S2].
+ 
+ ## How it works
+-The method implements a four-stage hardware pipeline: Stage 0 (Near-plane culling), Stage 1 (Projection), Stage 2 (Sorting), and Stage 3 (Rasterization) [S2]. The preprocessing steps (0-1) are point-based, while the rendering steps (2-3) are tile-based [S2].
++The method implements a four-stage hardware pipeline: Stage 0 (Near-plane Culling), Stage 1 (Projection), Stage 2 (Sorting), and Stage 3 (Rasterization) [S2]. The preprocessing steps (0-1) are point-based, while the rendering steps (2-3) are tile-based [S2].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** 3D Gaussian primitives (position, covariance, opacity, spherical harmonics coefficients) and camera parameters.
+-*   **Output:** 2D image pixels with color and alpha values.
++*   **Input:** 3D Gaussian parameters (position, covariance, opacity, spherical harmonics).
++*   **Output:** 2D image pixels with alpha-composited colors.
+ 
+ **Data Structures:**
+ *   **Tile Assignment:** The image is divided into 16x16 pixel tiles [S2]. Each tile is assigned to an independent SRAM bank [S2].
+-*   **SRAM Bank:** Contains a fixed entry depth and an address offset controller [S2]. An index is used to look up values in a codebook [S2].
+-*   **Sorting Unit:** Processes data elements in batches (e.g., 256 elements per sub-sorter) using a comparison-free sorter design [S2].
++*   **SRAM Bank Layout:** Each bank has a fixed entry depth and an address offset controller [S2]. An index is used to look up values in a codebook [S2].
++*   **Sorting Output:** The sorting unit outputs the current maximum value in a linear sorting delay, aligning with the alpha-blending process [S2].
+ 
+ **Numbered Steps:**
+ 
+ 1.  **Stage 0: Near-plane Culling.**
+-    *   Eliminates parameter access for invisible regions using an Axis-Aligned Bounding Box (AABB) depth-interval test [S2].
+-    *   This stage is isolated to handle the largest number of Gaussian points efficiently [S2].
++    *   Eliminates parameter access for invisible regions using an AABB (Axis-Aligned Bounding Box) depth-interval test [S2].
++    *   This stage is isolated to process the largest number of Gaussian points efficiently [S2].
+ 
+ 2.  **Stage 1: Projection.**
+     *   Projects 3D Gaussians onto the 2D image plane [S2].
+-    *   Utilizes a zero-Jacobian skipping mechanism to optimize matrix multiplication [S2].
+-    *   Implemented using a 6x1 multiplier-accumulator array [S2].
+-    *   *Note:* The specific formula for the zero-Jacobian skip is not provided in the sources, but it implies skipping multiplication by zero terms in the Jacobian calculation [S2].
++    *   Uses a 6x1 multiplier-accumulator array [S2].
++    *   Implements zero-Jacobian skipping to optimize matrix multiplication [S2].
+ 
+ 3.  **Stage 2: Gaussian Sorting.**
+-    *   Sorts projected Gaussians by depth for each tile [S2].
+-    *   Uses a four-way sub-sorter parallelism based on a comparison-free sorter [S2].
+-    *   Outputs the current maximum value in a linear sorting delay, aligning with the alpha-blending process [S2].
++    *   Sorts Gaussians by depth within each tile to enable front-to-back alpha compositing [S2].
++    *   Uses a four-way sub-sorter parallelism design based on a comparison-free sorter [S2].
++    *   Each sub-sorter processes 256 data elements at a time [S2].
++    *   The design minimizes critical path delay associated with N-input OR gates [S2].
++    *   Outputs the current maximum value linearly to support the rasterization stage [S2].
+ 
+ 4.  **Stage 3: Rasterization.**
+-    *   Performs alpha-blending [S2].
+-    *   Processes one point at a time, aligned with the sorting output [S2].
+-    *   Each 16x16 tile is processed independently using its assigned SRAM bank [S2].
++    *   Performs alpha-blending, processing one point at a time aligned with the sorting output [S2].
++    *   Uses the sorted order to composite Gaussians onto the 16x16 tile pixels [S2].
+ 
+-**Pseudocode:**
+-The following pseudocode represents the logical flow of the hardware pipeline. It assumes hardware-specific optimizations (like the 6x1 MAC array and comparison-free sorting) are abstracted into function calls.
+-
+-```python
+-def hardware_gaussian_rasterization(gaussians, camera, image_width, image_height):
+-    # Tile configuration
+-    TILE_SIZE = 16
+-    num_tiles_x = (image_width + TILE_SIZE - 1) // TILE_SIZE
+-    num_tiles_y = (image_height + TILE_SIZE - 1) // TILE_SIZE
+-    
+-    # Initialize output image
+-    image = zeros((image_height, image_width, 3))
+-    alpha_image = zeros((image_height, image_width))
+-    
+-    # Stage 0: Near-plane Culling
+-    # Filter out Gaussians that are behind the near plane or outside the view frustum
+-    visible_gaussians = []
+-    for g in gaussians:
+-        if is_in_front_of_near_plane(g.position, camera.near_plane) and \
+-           is_within_view_frustum(g.position, camera.view_matrix):
+-            visible_gaussians.append(g)
+-            
+-    # Stage 1: Projection
+-    projected_gaussians = []
+-    for g in visible_gaussians:
+-        # Project 3D Gaussian to 2D screen space
+-        # Uses zero-Jacobian skipping optimization
+-        screen_pos, screen_cov, screen_opacity = project_gaussian_zero_jacobian_skip(
+-            g.position, g.covariance, g.opacity, camera.projection_matrix
+-        )
+-        projected_gaussians.append({
+-            'screen_pos': screen_pos,
+-            'screen_cov': screen_cov,
+-            'opacity': screen_opacity,
+-            'original_gaussian': g
+-        })
+-        
+-    # Stage 2: Sorting and Stage 3: Rasterization (Tile-based)
+-    for ty in range(num_tiles_y):
+-        for tx in range(num_tiles_x):
+-            # Get tile bounds
+-            x_start = tx * TILE_SIZE
+-            y_start = ty * TILE_SIZE
+-            x_end = min(x_start + TILE_SIZE, image_width)
+-            y_end = min(y_start + TILE_SIZE, image_height)
+-            
+-            # Identify Gaussians overlapping this tile
+-            tile_gaussians = []
+-            for pg in projected_gaussians:
+-                if is_overlapping_tile(pg.screen_pos, pg.screen_cov, x_start, y_start, x_end, y_end):
+-                    tile_gaussians.append(pg)
+-            
+-            if not tile_gaussians:
+-                continue
+-                
+-            # Sort Gaussians by depth (back-to-front)
+-            # Uses comparison-free sorter for linear delay
+-            sorted_gaussians = comparison_free_sort(tile_gaussians, key='depth')
+-            
+-            # Rasterize tile
+-            # Process one point at a time, aligned with sorting output
+-            for pg in sorted_gaussians:
+-                # Alpha blend the Gaussian into the tile
+-                blend_gaussian_into_tile(
+-                    pg, 
+-                    x_start, y_start, x_end, y_end, 
+-                    image, alpha_image
+-                )
+-                
+-    return image, alpha_image
+-
+-def project_gaussian_zero_jacobian_skip(position, covariance, opacity, projection_matrix):
+-    # Abstracted hardware operation: 6x1 multiplier-accumulator array
+-    # Skips multiplication by zero in Jacobian
+-    # Returns 2D position, 2D covariance, and opacity
+-    pass
+-
+-def comparison_free_sort(gaussians, key):
+-    # Abstracted hardware operation: Four-way sub-sorter parallelism
+-    # Processes 256 data elements at a time
+-    # Returns sorted list
+-    pass
+-
+-def blend_gaussian_into_tile(pg, x_start, y_start, x_end, y_end, image, alpha_image):
+-    # Abstracted hardware operation: Alpha blending
+-    # Uses SRAM bank with codebook lookup
+-    pass
+-```
++**Formulas:**
++*   The sources do not provide explicit mathematical formulas for the projection or blending in this specific hardware architecture, referencing Eq. (2) for the projection skipping mechanism [S2].
++*   A bitwise operation for frame buffer updates is noted as $FO_{NEW} = Fo \& (\sim Fo + 1'b1)$ [S2].
+ 
+ **Parameters:**
+ *   **Tile Size:** 16x16 pixels [S2].
+-*   **Sorting Batch Size:** 256 data elements per sub-sorter [S2].
++*   **Sub-sorter Capacity:** 256 data elements [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Data Dependencies:** Certain computations must wait for the completion of others, reducing efficiency if not pipelined correctly [S2].
+-*   **Workload Imbalance:** Severe imbalance in tile workloads can lead to suboptimal hardware utilization [S4].
++*   Data dependencies in processing elements (PEs) limit full parallelization, as certain computations must wait for others [S2].
++*   The number of Gaussian points $N$ varies depending on the scene or view, affecting timing [S2].
+ 
+ ## Subtopics
+ 
+ ### Compressed 3D Gaussian Splatting Renderer
+-A renderer for compressed scenes using GPU sorting and rasterization, enabling real-time novel view synthesis on low-end devices and integration with polygonal rendering [S3]. It differs from the original compute pipeline by using hardware rasterization, allowing seamless integration into VR/AR environments or games alongside polygon models [S3]. It achieves significant speed-up over the compute pipeline by Kerbl et al. [S3].
++A renderer for compressed scenes that uses GPU sorting and hardware rasterization instead of the specialized compute pipeline used in original 3D Gaussian Splatting [S3]. It differs from the original compute pipeline by enabling seamless integration into VR/AR environments or games alongside polygon models [S3]. It is chosen when real-time novel view synthesis is required on low-end devices with limited video memory or when integration with existing polygonal rendering pipelines is necessary [S3].
+ 
+ ### LS-Gaussian Hardware Architecture
+-A dedicated hardware accelerator designed to accelerate 3DGS by enabling early stages to process subsequent frames while later stages execute previous ones, improving parallelism and pipeline efficiency [S4]. It enhances the Culling and Conversion Unit (CCU) with square root and logarithmic operators, replacing GSCore’s dual OBB Intersection Test Units (OIUs) [S4]. It uses a Viewpoint Transformation Unit (VTU) for sparse rendering and an Interpolation Unit with a threshold of 56 validly projected pixels per tile to trigger interpolation instead of full re-rendering [S4].
++A dedicated hardware accelerator built upon GSCore that enables early stages to process subsequent frames while later stages execute previous ones, improving parallelism and pipeline efficiency [S4]. It enhances the Culling and Conversion Unit (CCU) by replacing dual OBB Intersection Test Units (OIUs) with square root and logarithmic operators for a two-stage accurate intersection test [S4]. It uses a Viewpoint Transformation Unit (VTU) for sparse rendering, retrieving pixel colors and maximum depths from reference frames and performing three matrix multiplications (map 2D to 3D, transform point cloud, reproject) [S4]. A counter array tracks validly projected pixels per tile; if the count exceeds 56 (of total pixels in a tile), the tile is interpolated; otherwise, it is forwarded to the Volume Rendering Unit (VRU) for full re-rendering [S4]. Components include CCU, LDU, VTU, VRU, Sorting Unit, and Interpolation Unit [S4].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The hardware pipeline achieves an order of magnitude speedup in the rasterization stage compared to software implementations [S1, unofficial]. The sorting unit provides linear sorting delay, increasing processing speed [S2].
+-*   **Memory Complexity:** Tile-based processing with independent SRAM banks reduces memory requirements for rasterization [S2]. Compressed variants reduce storage requirements by up to 31x [S3].
+-*   **Measured Performance:** The accelerator achieves 129 FPS at Full HD resolution [S2].
+-*   **Strengths:** High throughput, low latency for sorting, efficient memory usage via tiling, and integration with standard graphics pipelines [S1, unofficial][S2, S3].
+-*   **Limitations:** Hardware-specific implementation requires custom silicon or FPGA design; workload imbalance can reduce utilization if not managed [S4].
+-*   **When to use:** Real-time rendering on constrained hardware, VR/AR applications requiring integration with polygonal rendering, and scenarios where high frame rates are critical [S1, unofficial][S3].
+-*   **When not to use:** When flexibility in the rendering pipeline is required, or when hardware resources are not available for the specialized units [S3].
++*   **Performance:** Achieves an order-of-magnitude speedup in the rasterization stage compared to standard software implementations [S1, unofficial].
++*   **Complexity:** The sorting unit uses a comparison-free sorter with four-way sub-sorter parallelism, processing 256 elements per sub-sorter [S2].
++*   **Memory:** Uses independent SRAM banks for each 16x16 tile with fixed entry depth and address offset controllers [S2].
++*   **Strengths:** High throughput due to hardware specialization; reduced memory requirements for rasterization due to linear sorting delay alignment with alpha-blending [S2].
++*   **Limitations:** Data dependencies in PEs limit full parallelization [S2]. The specific hardware design is not general-purpose and requires custom silicon or FPGA implementation [S2].
++*   **Scaling:** The number of Gaussian points $N$ varies, impacting timing [S2].
+ 
+ ## Background
+-The concept of hardware-accelerated Gaussian rasterization emerged from the need to render 3D Gaussian Splatting (3DGS) efficiently on standard graphics hardware [S1, unofficial]. The original 3DGS rendering relied on specialized compute pipelines, which were difficult to integrate into existing graphics engines [S3]. GauRast [116] proposed augmenting standard triangle rasterizers with dedicated units for Gaussian projection and blending [S1, unofficial]. Subsequent work, such as LS-Gaussian, further optimized this approach with streaming mechanisms and specialized units like the CCU and VTU [S4]. The method is part of a broader trend of hardware-algorithm co-design for neural rendering [S1, unofficial].
++The concept of hardware-accelerated Gaussian rasterization emerged as a response to the computational demands of 3D Gaussian Splatting (3DGS) [S1, unofficial]. Original 3DGS relied on specialized compute pipelines that were difficult to integrate with standard graphics APIs and polygonal rendering [S3]. GauRast [116] proposed augmenting standard triangle rasterizers with dedicated units for Gaussian projection and blending [S1, unofficial]. Subsequent work, such as LS-Gaussian, further optimized this by designing dedicated hardware accelerators built upon existing graphics cores (GSCore) to improve pipeline efficiency and reduce stalls [S4].
+ 
+ ## Sources

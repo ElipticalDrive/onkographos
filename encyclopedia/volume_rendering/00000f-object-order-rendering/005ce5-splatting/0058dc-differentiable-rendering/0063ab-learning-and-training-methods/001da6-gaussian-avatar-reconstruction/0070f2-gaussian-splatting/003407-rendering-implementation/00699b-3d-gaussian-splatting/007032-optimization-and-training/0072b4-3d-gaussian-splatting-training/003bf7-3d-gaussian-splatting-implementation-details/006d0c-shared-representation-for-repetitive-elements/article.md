@@ -1,0 +1,160 @@
+# Shared Representation for Repetitive Elements
+
+Also called: Instance Sharing, Shared 3DGS
+
+## Overview
+This method improves the 3D reconstruction of repetitive objects by creating a single shared Gaussian representation for all instances of the same object type. It allows information propagation, such as geometry completion and detail propagation, across instances while handling appearance differences via per-instance offsets. Unlike standard 3D Gaussian Splatting where each instance is independent, this method shares geometry parameters across instances, improving reconstruction quality for occluded or low-quality regions by leveraging multi-view information from all instances.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of input images, initial camera poses, and an initial set of 3D Gaussians for each instance. The method assumes instances of the same object type have been identified.
+*   **Outputs:** A shared set of 3D Gaussian parameters (position, scale, rotation, opacity, shared SH coefficients) and per-instance parameters (rigid transformation, SH offset coefficients).
+
+**Data Structures:**
+The method maintains two primary data structures for each object type:
+1.  **Shared Representation:** A list of Gaussian primitives. Each primitive stores:
+    *   $\mathbf{p}_{\text{shared}}$: Position (3 floats).
+    *   $\mathbf{s}_{\text{shared}}$: Scale (3 floats).
+    *   $\mathbf{q}_{\text{shared}}$: Rotation (4 floats, quaternion).
+    *   $\alpha_{\text{shared}}$: Opacity (1 float).
+    *   $\mathbf{c}_{\text{shared}}^{\ell m}$: Shared Spherical Harmonics (SH) coefficients for degree $\ell$ and order $m$ (3 floats per coefficient).
+2.  **Instance Parameters:** For each instance $i$ of the object type:
+    *   $\mathbf{T}_i$: Rigid transformation matrix (4x4) mapping instance space to template space.
+    *   $\mathbf{c}_{\text{offset}, i}^{\ell m}$: Per-instance SH offset coefficients (3 floats per coefficient).
+
+**Numbered Steps:**
+
+1.  **Pose Refinement and Registration:**
+    *   Run Iterative Closest Point (ICP) [Zhang 1994] on the Gaussian centers of each instance, initialized with coarse pose estimates, to compute rigid transformations $\mathbf{T}_i$ aligning each instance to a common template coordinate system.
+    *   For symmetric objects (e.g., pawns) or textureless objects, multiple valid rigid transformations may exist. The method finds one valid transformation during registration, which is sufficient for fine-tuning the shared representation.
+
+2.  **Initialization of Shared Representation:**
+    *   Transform all instance Gaussians into the common template coordinate system using $\mathbf{T}_i$.
+    *   Create the initial shared representation by taking the union of all transformed instances. This establishes the initial geometry and appearance.
+
+3.  **Parameter Sharing and Decomposition:**
+    *   For each Gaussian primitive in the shared representation, share the position, scale, rotation, and opacity parameters across all instances of the same object type.
+    *   Decompose the Spherical Harmonics (SH) coefficients $\mathbf{c}^{\ell m}$ into a shared component $\mathbf{c}_{\text{shared}}^{\ell m}$ and an instance-specific offset term $\mathbf{c}_{\text{offset}, i}^{\ell m}$ using the following formula:
+        $$
+        \mathbf{c}^{\ell m} = \lambda \mathbf{c}_{\text{shared}}^{\ell m} + (1 - \lambda) \mathbf{c}_{\text{offset}, i}^{\ell m}
+        $$
+        where $\ell$ is the SH degree, $m$ is the order, and $\lambda$ is a mixing weight.
+
+4.  **Optimization:**
+    *   Replace each instance with a reference to the shared representation.
+    *   During rendering, apply the per-instance geometric transform $\mathbf{T}_i$ and SH offset $\mathbf{c}_{\text{offset}, i}^{\ell m}$ to the shared parameters.
+    *   Propagate gradients from all instances to the shared representation.
+    *   Jointly optimize the shared geometry, shared SHs, per-instance SH offsets, and pose parameters using gradient descent.
+    *   Apply an $\ell_1$ penalty to the offset parameters $\mathbf{c}_{\text{offset}, i}^{\ell m}$ to encourage them to be small, ensuring that appearance differences are treated as perturbations rather than independent variations.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initialize_shared_representation(instances):
+    """
+    instances: List of Instance objects, each containing:
+        - gaussians: List of Gaussian primitives (pos, scale, rot, opacity, SH_coeffs)
+        - initial_pose: 4x4 transformation matrix
+    Returns:
+        shared_gaussians: List of shared Gaussian primitives
+        instance_transforms: List of 4x4 matrices mapping instance to template
+    """
+    # Step 1: Pose Refinement
+    instance_transforms = []
+    for instance in instances:
+        # Run ICP on instance gaussians to refine pose relative to a common template
+        # This assumes a coarse initialization is available
+        refined_transform = icp_refine(instance.gaussians, instance.initial_pose)
+        instance_transforms.append(refined_transform)
+
+    # Step 2: Create Initial Shared Representation
+    # Transform all instance gaussians to template space and union them
+    template_gaussians = []
+    for instance, transform in zip(instances, instance_transforms):
+        for g in instance.gaussians:
+            # Transform Gaussian to template space
+            g_template = transform_gaussian(g, transform)
+            template_gaussians.append(g_template)
+    
+    # Union operation: Merge overlapping gaussians or simply take the set
+    # For simplicity, we assume a simple union or clustering-based initialization
+    shared_gaussians = union_gaussians(template_gaussians)
+    
+    return shared_gaussians, instance_transforms
+
+def render_shared_instance(shared_gaussians, instance_transform, instance_id, camera):
+    """
+    Renders a single instance using the shared representation and instance-specific parameters.
+    """
+    rendered_image = zeros_like(camera.image)
+    
+    for g in shared_gaussians:
+        # Apply instance-specific geometric transform
+        g_transformed = transform_gaussian(g, instance_transform)
+        
+        # Compute instance-specific SH coefficients
+        # c_lm = lambda * c_shared_lm + (1 - lambda) * c_offset_lm
+        c_lm = compute_sh_coefficients(g.sh_shared, instance.sh_offsets[instance_id], lambda_weight=0.8)
+        
+        # Splat the transformed Gaussian with instance-specific SH to the image
+        splat(rendered_image, g_transformed, c_lm, camera)
+        
+    return rendered_image
+
+def optimize_shared_representation(shared_gaussians, instances, instance_transforms, instance_sh_offsets, camera_poses, learning_rate):
+    """
+    Jointly optimizes shared geometry, SHs, instance SH offsets, and poses.
+    """
+    for epoch in range(num_epochs):
+        total_loss = 0
+        # Zero gradients for all parameters
+        zero_gradients(shared_gaussians, instance_sh_offsets, instance_transforms, camera_poses)
+        
+        for i, instance in enumerate(instances):
+            # Render the instance
+            rendered = render_shared_instance(shared_gaussians, instance_transforms[i], i, camera_poses[i])
+            
+            # Compute loss against ground truth image
+            loss = compute_loss(rendered, instance.gt_image)
+            
+            # Add L1 penalty on SH offsets to encourage small offsets
+            offset_penalty = l1_norm(instance_sh_offsets[i])
+            loss += lambda_l1 * offset_penalty
+            
+            total_loss += loss
+            
+            # Backpropagate to compute gradients
+            loss.backward()
+            
+        # Update parameters
+        update_parameters(shared_gaussians, learning_rate, 'geometry')
+        update_parameters(shared_gaussians, learning_rate, 'sh_shared')
+        update_parameters(instance_sh_offsets, learning_rate, 'sh_offset')
+        update_parameters(instance_transforms, learning_rate, 'pose')
+        update_parameters(camera_poses, learning_rate, 'camera_pose')
+```
+
+**Parameters:**
+*   $\lambda$: Mixing weight for SH decomposition, set to 0.8. Controls the balance between shared appearance and instance-specific appearance.
+*   $\lambda_{l1}$: Weight for the $\ell_1$ penalty on offset parameters. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Symmetric Objects:** For symmetric objects (e.g., pawns in the Chessboard scene), the matching procedure finds correspondences based on appearance. Multiple rigid transformations are valid depending on the type of symmetry. Finding one valid transformation during registration is sufficient for fine-tuning the shared representation.
+*   **Textureless Objects:** Similar to symmetric objects, multiple valid rigid transformations may exist. The method handles this by finding one valid transformation during registration.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Improves reconstruction quality for occluded or low-quality regions by leveraging multi-view information from all instances. Handles appearance differences due to illumination via per-instance SH offsets.
+*   **Limitations:** Requires identification of repetitive object types. May struggle with highly asymmetric or unique objects where sharing geometry is not beneficial.
+*   **When to Use:** When reconstructing scenes with repetitive objects (e.g., chess pieces, trees, buildings) where instances share similar geometry but may have appearance variations.
+*   **When Not to Use:** When objects are unique or have significant geometric variations that cannot be captured by a shared representation.
+
+## Background
+The method was introduced in "Splat and Replace: 3D Reconstruction with Repetitive Elements" [S1]. It builds on the original codebase of 3D Gaussian Splatting [Kerbl et al. 2023]. The pose refinement step uses ICP [Zhang 1994].
+
+## Sources
+[S1] Splat and Replace: 3D Reconstruction with Repetitive Elements, https://doi.org/10.1145/3721238.3730727, fetched 2026-10-26

@@ -1,0 +1,175 @@
+--- v002.md
++++ v003.md
+@@ -10,11 +10,11 @@
+ 
+ ### Inputs and Outputs
+-*   **Input:** A sequence of volume datasets $V_t$ for time steps $t = 0, \dots, N-1$. Each $V_t$ is a 3D grid of voxels.
++*   **Input:** A sequence of volume datasets $V_t$ for time steps $t = 0, \dots, N-1$. Each $V_t$ is a 3D grid of voxels [S1, S2, unofficial].
+ *   **Output:** A compressed, merged octree structure (compositing tree) that enables selective rendering with reduced computational cost [S1, S2, unofficial].
+ 
+ ### Data Structures
+ The core data structure is an octree where each node represents a block of voxels [S1, S2, unofficial].
+-*   **Leaf Node:** Represents a uniform block of voxels. Stores the representative quantized value and transparency metadata [S1, S2, unofficial].
+-*   **Internal Node:** Represents a subdivision of space. Contains pointers to its eight children [S1, S2, unofficial].
++*   **Leaf Node:** Represents a uniform block of voxels [S1, S2, unofficial]. Stores the representative quantized value and transparency metadata [S1, S2, unofficial].
++*   **Internal Node:** Represents a subdivision of space [S1, S2, unofficial]. Contains pointers to its eight children [S1, S2, unofficial].
+ *   **Tree Merging:** If the octree structure and voxel values of a subtree at time $t$ are identical to the corresponding subtree at time $t-1$, the subtree at $t$ is merged with $t-1$ [S1, S2, unofficial].
+ *   **Minimum Renderable Block:** The renderer is configured to stop at a minimum depth, corresponding to an 8-voxel block [S1, S2, unofficial]. Nodes smaller than this (1-voxel or 8-voxel merges) are not useful for rendering performance gains because a single voxel change forces re-rendering of surrounding voxels [S1, S2, unofficial].
+@@ -23,5 +23,5 @@
+ 
+ #### 1. Quantization
+-The raw volume data is quantized to reduce precision and increase uniformity, facilitating compression.
++The raw volume data is quantized to reduce precision and increase uniformity, facilitating compression [S1, S2, unofficial].
+ *   **Methods:** Uniform, Non-Uniform I, Non-Uniform II, or Adaptive [S1, S2, unofficial].
+ *   **Selection:** The choice depends on dataset statistics. For example, Uniform quantization yields 98% compression for the Jets dataset, while Non-Uniform II yields 98% for the Thermal dataset [S1, S2, unofficial]. Non-Uniform I performs poorly on Shear flow (-7% saving) [S1, S2, unofficial].
+@@ -29,14 +29,14 @@
+ 
+ #### 2. Octree-Difference Encoding
+-The quantized data is encoded into an octree.
++The quantized data is encoded into an octree [S1, S2, unofficial].
+ *   **Spatial Coherence:** Neighboring voxels with similar values are fused into macro voxels (leaf nodes) [S1, S2, unofficial].
+-*   **Temporal Coherence:** Subtrees at consecutive time steps are compared. If identical, they are merged [S1, S2, unofficial].
++*   **Temporal Coherence:** Subtrees at consecutive time steps are compared [S1, S2, unofficial]. If identical, they are merged [S1, S2, unofficial].
+ *   **Encoding Cost:** On a SUN Ultra Sparc, quantization takes ~0.5 seconds per time step, and octree-difference encoding takes 3-5 seconds per time step [S1, S2, unofficial]. For 100 time steps, total encoding takes 5-10 minutes [S1, S2, unofficial].
+ 
+ #### 3. Building the Compositing Tree
+-The encoded data is organized into a compositing tree. This tree structure supports the selective rendering strategy [S1, S2, unofficial].
++The encoded data is organized into a compositing tree [S1, S2, unofficial]. This tree structure supports the selective rendering strategy [S1, S2, unofficial].
+ 
+ #### 4. Selective Rendering
+-During rendering, the tree is traversed.
++During rendering, the tree is traversed [S1, S2, unofficial].
+ *   **Transparent Space:** If a node represents transparent space, it is skipped entirely [S1, S2, unofficial].
+ *   **Uniform Space:** If a node represents uniform space, it is rendered as a block without ray marching [S1, S2, unofficial].
+@@ -48,4 +48,6 @@
+ 
+ ```python
++import numpy as np
++
+ class Node:
+     def __init__(self, is_leaf, value=None, children=None):
+@@ -57,5 +59,4 @@
+     encoded_trees = []
+     prev_tree = None
+-
+     for t, volume in enumerate(volumes):
+         # Step 1: Quantize
+@@ -78,5 +79,4 @@
+ 
+         prev_tree = current_tree
+-
+     return encoded_trees
+ 
+@@ -103,5 +103,22 @@
+     return all(trees_are_identical(c1, c2) for c1, c2 in zip(tree1.children, tree2.children))
+ 
+-def render_time_varying_volume(encoded_trees, transfer_function, opacity_map):
++def get_node_at(tree, x, y, z, initial_size):
++    # [G] Standard octree traversal to find leaf containing coordinates
++    node = tree
++    size = initial_size
++    while not node.is_leaf:
++        half = size // 2
++        idx = 0
++        if x >= half: idx |= 1
++        if y >= half: idx |= 2
++        if z >= half: idx |= 4
++        node = node.children[idx]
++        x %= half
++        y %= half
++        z %= half
++        size = half
++    return node
++
++def render_time_varying_volume(encoded_trees, transfer_function, opacity_map, initial_size=128):
+     image = np.zeros((128, 128, 4))
+     current_tree = encoded_trees[0]
+@@ -111,47 +128,24 @@
+             color = np.array([0.0, 0.0, 0.0, 0.0])
+             accumulated_opacity = 0.0
+-
+-            # Step 4: Selective Rendering via Tree Traversal
+-            # [G] Standard ray traversal along z-axis
+-            for z in range(128):
+-                node = get_node_at(current_tree, x, y, z)
+-                if node is None: continue
+-
++            z = 0
++            while z < 128:
++                node = get_node_at(current_tree, x, y, z, initial_size)
+                 if node.is_leaf:
+                     # Check if node represents transparent space
+                     if node.value in opacity_map and opacity_map[node.value] == 0.0:
+-                        continue # Skip rendering transparent blocks
+-
+-                    # Check if node represents uniform space
+-                    if node.value is not None:
+-                        # Render as a block without ray marching
+-                        c, a = transfer_function(node.value)
+-                        color[:3] += c * a * (1.0 - accumulated_opacity)
+-                        accumulated_opacity += a * (1.0 - accumulated_opacity)
+-                        if accumulated_opacity >= 1.0:
+-                            break # Early termination
+-                    else:
+-                        # Non-uniform space: Ray march through the block
+-                        # [G] Standard volumetric integration within the block
+-                        for dz in range(8):
+-                            val = node.value
+-                            c, a = transfer_function(val)
+-                            color[:3] += c * a * (1.0 - accumulated_opacity)
+-                            accumulated_opacity += a * (1.0 - accumulated_opacity)
+-                            if accumulated_opacity >= 1.0:
+-                                break
++                        z += 1
++                        continue
++                    # Render uniform space as a block without ray marching
++                    c, a = transfer_function(node.value)
++                    color[:3] += c * a * (1.0 - accumulated_opacity)
++                    accumulated_opacity += a * (1.0 - accumulated_opacity)
++                    if accumulated_opacity >= 1.0:
++                        break # Early termination
++                    z += 1
+                 else:
+                     # Internal node: Continue traversal to children
+-                    pass
+-
++                    z += 1
+             image[y, x] = color
+     return image
+-
+-def get_node_at(tree, x, y, z):
+-    # [G] Standard octree traversal to find leaf containing coordinates
+-    node = tree
+-    while not node.is_leaf:
+-        return node.children[0] # Simplified for structure
+-    return node
+ ```
+ 
+@@ -162,8 +156,8 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Small Block Compression:** Compression resulting from merging 1-voxel or 8-voxel blocks is not useful for rendering performance. A single voxel change causes surrounding voxels to be re-rendered, negating the benefit [S1, S2, unofficial].
++*   **Small Block Compression:** Compression resulting from merging 1-voxel or 8-voxel blocks is not useful for rendering performance [S1, unofficial]. A single voxel change causes surrounding voxels to be re-rendered, negating the benefit [S1, unofficial].
+ *   **Overhead vs. Gain:** Datasets with many small matching blocks and few large matching blocks (e.g., turbulent shear flow with non-uniform quantization) incur overhead from the octree structure that exceeds the gains from compression, leading to slower rendering than baseline [S1, S2, unofficial].
+ *   **Compression Threshold:** If data are compressed by less than 50%, unless many large subtrees were merged, little rendering performance gain can be obtained [S2, unofficial].
+-*   **Opacity Dependence:** Optimizations such as moving past transparent blocks and early termination are highly dependent on opacity maps. Using different opacity maps can dramatically change rendering times [S1, S2, unofficial].
++*   **Opacity Dependence:** Optimizations such as moving past transparent blocks and early termination are highly dependent on opacity maps [S1, S2, unofficial]. Using different opacity maps can dramatically change rendering times [S1, S2, unofficial].
+ 
+ ## Subtopics
+@@ -174,7 +168,7 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Encoding takes ~0.5 seconds per time step for quantization and 3-5 seconds for octree-difference encoding on a SUN Ultra Sparc [S1, S2, unofficial]. For 100 time steps, total encoding takes 5-10 minutes [S1, S2, unofficial]. Rendering time depends on the number of large matching blocks (4096 voxels or larger) [S1, S2, unofficial].
+-*   **Memory Complexity:** Compression rates vary by dataset and quantization method. For example, Jets dataset achieves 98% compression with Uniform quantization, while Shear flow achieves 91% [S1, S2, unofficial].
++*   **Memory Complexity:** Compression rates vary by dataset and quantization method [S1, S2, unofficial]. For example, Jets dataset achieves 98% compression with Uniform quantization, while Shear flow achieves 91% [S1, S2, unofficial].
+ *   **Measured Performance:**
+-    *   **Turbulent Jet Flow:** First image rendered in 2.65 seconds, subsequent images at an average of 0.55 seconds. This represents an 80% increase in rendering rate between first and consecutive images and an 88% increase in overall rendering rate [S1, S2, unofficial].
++    *   **Turbulent Jet Flow:** First image rendered in 2.65 seconds, subsequent images at an average of 0.55 seconds [S2, unofficial]. This represents an 80% increase in rendering rate between first and consecutive images and an 88% increase in overall rendering rate [S1, S2, unofficial].
+     *   **Heart Dataset:** 93% increase in overall rendering rate [S1, S2, unofficial].
+     *   **Turbulent Shear Flow:** Rendering time increases with non-uniform quantization due to many small matching blocks [S1, S2, unofficial]. At time step 30 with uniform quantization, the number of 32768-voxel blocks increases, causing an immediate response in rendering time [S2, unofficial].
+@@ -186,5 +180,5 @@
+ 
+ ## Background
+-The method was developed for the 'twd-renderer' for time-varying volume data visualization [S2, unofficial]. It builds on the concept of using octree compression to fit multiple timesteps into main memory, overcoming GPU memory and bus bandwidth limitations [Parent]. The technique was presented in a 1998 NASA Technical Report and DTIC document [S1, S2, unofficial]. The research demonstrated that combining spatial compression (octree) and temporal compression (tree merging) could achieve tremendous savings in storage and rendering time, justifying interactive visualization of time-varying data [S1, S2, unofficial].
++The method was developed for the 'twd-renderer' for time-varying volume data visualization [S2, unofficial]. It builds on the concept of using octree compression to fit multiple timesteps into main memory, overcoming GPU memory and bus bandwidth limitations [Time-Variant Volume Rendering with Octrees](2232-time-variant-volume-rendering-with-octrees.md). The technique was presented in a 1998 NASA Technical Report and DTIC document [S1, S2, unofficial]. The research demonstrated that combining spatial compression (octree) and temporal compression (tree merging) could achieve tremendous savings in storage and rendering time, justifying interactive visualization of time-varying data [S1, S2, unofficial].
+ 
+ ## Sources

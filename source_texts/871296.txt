@@ -1,0 +1,194 @@
+This is the first Sprint of our Studio's Proof Of Capacity project. - Rebuild/clean pipeline by Bruxe-Dev · Pull Request #16 · CycloneStd/scan-to-3d-Poc
+
+Rebuild/clean pipeline by Bruxe-Dev · Pull Request #16 · CycloneStd/scan-to-3d-Poc · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Bruxe-Dev
+commented
+Nov 2, 2026
+Copy link
+Copy Markdown
+Contributor
+Summary
+Clean rebuild of the Cyclone Studios Scan-to-3D pipeline on rebuild/clean-pipeline. It turns photographs (or video frames) into a textured 3D mesh that opens in Blender. Each stage is independent, logged and resumable from saved results. The pipeline has been validated end to end on a 128-photo dataset of a house (front facade only), reconstructing a textured mesh and exporting it to OBJ and GLB.
+Architecture, chosen after evaluating COLMAP incremental vs global mapping on identical features:
+photos/video → validate → COLMAP features/matching (CPU) → incremental sparse → undistort → dense PatchMatch + fusion (Colab T4, CUDA) → Poisson mesh → simplification → texture atlas → OBJ/GLB export + Blender check
+Changes made
+Project skeleton: src/scan3d package, pyproject.toml, CLI (scan3d doctor | run | status | report | remote-probe), YAML configs with defaults and --set key=value overrides.
+Pipeline framework: stage runner with a per-run manifest.json (config + input fingerprints), automatic skip of up-to-date stages, --force, per-stage logs, and timing/peak-memory capture.
+Stages: ingest (photos and video frames via ffmpeg, one camera group per source), validate (blur, exposure, resolution), features, sparse (incremental or global mapper, per-group registration metrics), undistort, dense (remote), mesh (Poisson, simplification, texturing), export.
+Remote GPU execution: Colab executor on top of the colab CLI. Files go through chunked, checksum-verified 4 MB transfers (the Colab file API rejects large single uploads), with retries, GPU fallback, and an upload copy of the images re-encoded at JPEG q85. CUDA COLMAP is installed on the VM through micromamba.
+Export and validation: converter from COLMAP's textured PLY to OBJ + MTL (Blender's PLY importer does not read COLMAP's per-face UVs), GLB export, and a headless Blender check that imports the mesh and renders six axis views.
+Reporting: scan3d report writes runs/<id>/report.md (stage metrics, renders, limitations).
+Tests: unit tests for fingerprinting and resume/invalidation, config overrides, COLMAP stats parsing and per-group registration counting.
+Testing performed
+Automated checks pass. 6 unit tests pass. There are no automated tests yet for ply_to_obj, the remote executor, or the stages that call external tools.
+Manually tested where applicable (see results below).
+Documentation updated where necessary. README.md and docs/ are still to be written.
+House dataset (128 photos, 1536x1152), end to end:
+Measure
+Result
+Photos accepted / registered
+125 / 125, single model
+Mean reprojection error
+0.32 px (incremental) vs 0.43 px (global mapper, same features)
+Fused dense points
+3.34M
+Mesh
+18.0M faces, simplified to 899k (ratio 0.05), 478k vertices
+Texture atlas
+8192 x 6382
+Blender
+Imports, textured, GLB 136 MB
+Timings
+matching ~17 min (CPU), PatchMatch ~80 min (T4), fusion 79 s, Poisson ~6.5 min, simplification ~4.4 min, texturing 62 s
+Incremental was chosen as the default over the global mapper because it had the lower error with equal registration and similar runtime. This comparison is for this dataset only.
+Video input: ingest, validate, features and sparse were run on two test clips of a computer. Frames registered (57/60 and 121/121), but the subjects were glossy and low-texture, with motion blur and thin sparse clouds (about 8.5k points). The dense and mesh stages were not run on video, so the video path is not validated end to end.
+Review checklist
+The change is within the intended scope.
+No secrets, credentials, or private datasets have been committed. (author: run the checks below before ticking)
+Existing functionality has not been unintentionally broken. This replaces the previous implementation, which remains in git history.
+Relevant limitations or known issues are documented (below; to be moved to docs/limitations.md).
+Reviewer notes
+Please look closely at
+remote/colab_entry.py: runs on the Colab VM (standard library only) via colab exec, installs COLMAP with CUDA, and runs PatchMatch and fusion.
+utils/ply_to_obj.py: assumes COLMAP's exact textured-PLY layout and fails loudly if the layout differs.
+export.flip_v: texture V orientation. [author: state which value was verified in Blender; the screenshot of the textured house used ___.]
+Setup and reproducibility gaps
+configs/house.yaml contains an absolute path to a COLMAP 4.2.1 binary in a separate conda env (colmap4). This should become documented setup or an environment variable.
+Requires an authenticated colab CLI and Colab compute units. A 125-photo dense run used about 82 minutes of T4 time.
+numpy, OpenCV and PyYAML come from the conda environment, not pyproject.toml.
+Known limitations
+The house dataset covers only the front of the building. The roof is missing, many windows are holes, edges are ragged, and small floating fragments remain.
+Scale is arbitrary (up-to-scale SfM) and accuracy against ground truth has not been validated. Reprojection error measures internal consistency only.
+The 0.05 simplification ratio was chosen for file size and has not been measured against the full mesh. The full 18M-face Poisson mesh is kept in the run folder.
+Matching is exhaustive (quadratic in image count). Bundle adjustment, meshing and texturing run on CPU, so the pipeline is not GPU-only.
+COLMAP's coordinate frame is arbitrary, so models may import rotated.
+Video frame selection is naive (fixed rate, then blur filtering), with no sharpest-frame or near-duplicate selection.
+Suggested follow-ups: remove small disconnected fragments, tune Poisson trimming, export two levels of detail, sequential matching and better frame selection for video, GPU matching, tests for ply_to_obj, README and docs/limitations.md.
+Bruxe-Dev
+added 22 commits
+October 30, 2026 14:33
+Refactor and restructure the scan3d project
+…
+8031cfd
+```
+- Removed the video processing module and its associated tests.
+- Deleted the existing test files and directories.
+- Added a new configuration file for project settings.
+- Created a new directory structure for the scan3d package, including modules for CLI, logging, pipeline, project management, remote execution, and utility functions.
+- Implemented a new process management utility for running commands and capturing output.
+- Added unit test structure for the pipeline module.
+```
+Add configuration loading and logging setup modules
+cab4fa6
+Implement core pipeline structure and manifest management
+fa60904
+Add ingest and validate stages with image processing and validation l…
+…
+7815bf7
+```
+…ogic
+```
+Add initial implementation of system health check and tool validation
+70f3e1f
+Implement ColabExecutor class for managing Colab sessions and job exe…
+…
+2089683
+```
+…cution
+```
+Add colab_entry.py for job execution and system probing
+e396956
+Add CLI commands for pipeline execution and system probing
+405e518
+Fix type hint for 'force' parameter in execute function
+bb8ae77
+Refactor code style for consistency and readability in pipeline.py
+1665e2c
+Update CI workflow and fix type hints in executor and proc modules
+a11ae4a
+Add features and sparse stages with COLMAP integration in the pipeline
+999446b
+Add config overrides support and corresponding tests
+22e9be8
+Fix typo in apply_overrides function to correctly assign node variable
+c9b0118
+Enhance ingest and sparse stages with improved error handling and new…
+…
+550e32f
+```
+… registered_per_group function; add configuration files for computer and house projects
+```
+Add dense and export stages; implement report generation and update h…
+…
+2dc6bcc
+```
+…ouse.yaml configuration
+```
+Implement chunked upload and download methods in ColabExecutor; enhan…
+…
+de6d4cc
+```
+…ce DenseStage with checksum validation and chunking support
+```
+Refactor ColabExecutor and DenseStage for improved session management…
+…
+9a87dd8
+```
+… and upload handling; add JPEG re-encoding for uploads and enhance error handling during remote job execution
+```
+Enhance mesh processing by adding target face ratio for simplificatio…
+…
+d303d0b
+```
+…n; update export logic to prioritize simplified mesh and exclude full-resolution mesh from exports
+```
+Add export configuration for vertical flipping; enhance export stage …
+…
+2f28c2d
+```
+…with texture conversion and report details
+```
+Update export configuration to disable vertical flipping; add myobjec…
+…
+ac8bf3b
+```
+…t.yaml configuration file for project setup
+```
+Refactor configuration files: rename project in computer.yaml, update…
+…
+de24ccb
+```
+… video file extension in default.yaml, and remove myobject.yaml
+```
+Hide details
+View details
+Bruxe-Dev
+merged commit ae2ea04
+into
+main
+Nov 2, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Bruxe-Dev
+deleted the
+rebuild/clean-pipeline
+branch
+November 2, 2026 13:25
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

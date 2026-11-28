@@ -1,0 +1,184 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:** A trained 3D-GS scene representation (Gaussians), real camera poses $[R|t]$, intrinsics $K$, and ground truth images.
+-*   **Outputs:** Final rendered image $\hat{C}_{pred,f}$, optimized mirror plane parameters $[n, o]$, and virtual camera pose $[R'|t']$.
++*   **Inputs:** A trained 3D-GS scene representation (Gaussians), real camera poses $[R|t]$, intrinsics $K$, and ground truth images [S1, unofficial].
++*   **Outputs:** Final rendered image $\hat{C}_{pred,f}$, optimized mirror plane parameters $[n, o]$, and virtual camera pose $[R'|t']$ [S1, unofficial].
+ 
+ **Data Structures**
+@@ -19,5 +19,5 @@
+ **Numbered Steps**
+ 
+-1.  **Depth and Normal Rasterization:** Extend standard 3D-GS rasterization to render depth and normal maps for the current view.
++1.  **Depth and Normal Rasterization:** Extend standard 3D-GS rasterization to render depth and normal maps for the current view [S1, unofficial].
+     *   **Depth Map ($\hat{D}$):** Rendered via alpha-compositing of Gaussian centers' z-depths $d_i$ [S1, unofficial]:
+         $$ \hat{D} = \sum_{i \in N} d_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+@@ -26,9 +26,9 @@
+         where $n_i$ is the normalized vector of the shortest axis of the $i$-th Gaussian's covariance matrix [S1, unofficial].
+ 
+-2.  **Mirror Plane Prediction:** Estimate the mirror plane $[n, o]$ in world coordinates using the rendered depth and normal maps.
++2.  **Mirror Plane Prediction:** Estimate the mirror plane $[n, o]$ in world coordinates using the rendered depth and normal maps [S1, unofficial].
+     *   **Color Optimization:** Replace mirror region colors in the ground truth image with a constant color to reconstruct the mirror surface geometry without texture interference [S1, unofficial].
+     *   **Depth Regularization:** Apply a smoothness loss $L_{smooth}$ to ensure depth consistency, weighted by color similarity [S1, unofficial]:
+-        $$ L_{smooth} = \sum_{k \in P_{cam}} \sum_{q \in N(k)} \exp(-\gamma \| C'_{gt}(k) - C'_{gt}(q) \|) | \hat{D}_{pred,r}(k) - \hat{D}_{pred,r}(q) | $$
+-        where $k$ and $q$ are pixels, $N(k)$ are 4-connected neighbors, $C'_{gt}$ is the modified ground truth color, and $\gamma$ is a hyper-parameter controlling color influence [S1, unofficial].
++        $$ L_{smooth} = \sum_{k \in P_{cam}} \sum_{q \in N(k)} \exp(-\gamma \| C'_{gt}(k) - C'_{gt}(q) \|) |\hat{D}_{pred,r}(k) - \hat{D}_{pred,r}(q)| $$
++        where $k$ and $q$ represent pixels, $N(k)$ represents the 4 horizontal/vertical neighbour pixels around $k$, and $\gamma$ is a hyper-parameter [S1, unofficial].
+     *   **Normal Consistency:** Use depth estimates to supervise normal consistency [S1, unofficial].
+ 
+@@ -51,122 +51,58 @@
+ 
+ def compute_virtual_camera_extrinsic(real_extrinsic, mirror_normal, mirror_origin):
+-    """
+-    Computes the virtual camera extrinsic matrix [R'|t'] given the real camera
+-    extrinsic [R|t] and mirror plane [n, o].
+-    
+-    Args:
+-        real_extrinsic: 3x4 matrix [R|t]
+-        mirror_normal: 3x1 vector n
+-        mirror_origin: 3x1 vector o
+-        
+-    Returns:
+-        virtual_extrinsic: 3x4 matrix [R'|t']
+-    """
+     R = real_extrinsic[:, :3]
+     t = real_extrinsic[:, 3]
+-    
+     n = mirror_normal.flatten()
+     o = mirror_origin.flatten()
+-    
+-    # Compute reflection matrix components
+-    # I - 2*n*n^T
+     reflection_rot = np.eye(3) - 2.0 * np.outer(n, n)
+-    
+-    # 2 * (o x n)
+     translation_offset = 2.0 * np.cross(o, n)
+-    
+-    # Construct the 4x4 transformation matrix for the mirror reflection
+-    # [ I - 2nn^T   2o x n ]
+-    # [     0           1  ]
+     mirror_transform = np.eye(4)
+     mirror_transform[:3, :3] = reflection_rot
+     mirror_transform[:3, 3] = translation_offset
+-    
+-    # Append 1 to t to make it homogeneous
+-    t_hom = np.append(t, 1.0)
+-    
+-    # Apply mirror transform to the real camera pose
+-    # The formula in the paper is: [R' t'; 0 1] = MirrorTransform * [R t; 0 1]
+-    # Note: The paper's formula implies matrix multiplication of the 4x4 homogeneous matrices.
+     real_cam_hom = np.eye(4)
+     real_cam_hom[:3, :3] = R
+     real_cam_hom[:3, 3] = t
+-    
+     virtual_cam_hom = mirror_transform @ real_cam_hom
+-    
+-    # Extract 3x4 extrinsic
+-    virtual_extrinsic = virtual_cam_hom[:3, :]
+-    
+-    return virtual_extrinsic
++    return virtual_cam_hom[:3, :]
+ 
+-def render_depth_and_normals(gaussians, camera_extrinsic, camera_intrinsics):
+-    """
+-    Renders depth and normal maps from 3D-GS scene.
+-    This is a simplified representation of the alpha-compositing process.
+-    """
+-    # Project Gaussians to screen space
+-    # This step involves standard 3D-GS projection logic
+-    screen_gaussians = project_gaussians(gaussians, camera_extrinsic, camera_intrinsics)
+-    
+-    # Sort by z-depth
+-    screen_gaussians.sort(key=lambda g: g.z_depth)
+-    
+-    # Initialize maps
+-    height, width = screen_gaussians[0].image_shape
++def render_depth_and_normals(gaussians, camera_extrinsic, camera_intrinsics, image_shape):
++    screen_gaussians = project_gaussians(gaussians, camera_extrinsic, camera_intrinsics, image_shape)
++    screen_gaussians.sort(key=lambda g: g['z_depth'])
++    height, width = image_shape
+     depth_map = np.zeros((height, width))
+     normal_map = np.zeros((height, width, 3))
+     alpha_map = np.zeros((height, width))
+-    
+-    # Alpha compositing
+     for g in screen_gaussians:
+-        # Get Gaussian properties in screen space
+-        alpha = g.alpha
+-        depth = g.z_depth
+-        normal = g.shortest_axis_normal # Normalized vector of shortest scaling axis
+-        
+-        # Update depth and normal using alpha compositing
+-        # D_new = D_old * (1 - alpha) + depth * alpha
+-        # N_new = N_old * (1 - alpha) + normal * alpha
+-        # Note: The paper uses the standard alpha compositing formula for accumulation
+-        # D = sum(d_i * alpha_i * prod(1-alpha_j))
+-        
+-        # For implementation, iterate pixels covered by the 2D Gaussian
+-        for y, x in g.screen_coverage:
++        alpha = g['alpha']
++        depth = g['z_depth']
++        normal = g['shortest_axis_normal']
++        for y, x in g['screen_coverage']:
+             transmittance = 1.0 - alpha_map[y, x]
+-            depth_map[y, x] = depth_map[y, x] * (1 - alpha) + depth * alpha
+-            normal_map[y, x] = normal_map[y, x] * (1 - alpha) + normal * alpha
+-            alpha_map[y, x] = alpha_map[y, x] + alpha * (1 - alpha_map[y, x])
+-            
++            depth_map[y, x] += depth * alpha * transmittance
++            normal_map[y, x] += normal * alpha * transmittance
++            alpha_map[y, x] += alpha * transmittance
+     return depth_map, normal_map
+ 
+-def optimize_mirror_plane(depth_map, normal_map, gt_color, mirror_mask, gamma):
+-    """
+-    Estimates mirror plane [n, o] from depth and normal maps.
+-    """
+-    # This step typically involves fitting a plane to the depth/normal data
+-    # or optimizing parameters n and o to minimize reconstruction error.
+-    # The paper mentions using L_smooth for depth regularization.
+-    
+-    # Placeholder for plane fitting/optimization logic
+-    # n, o = fit_plane(depth_map, normal_map)
+-    
+-    # Apply smoothness loss if needed
+-    # L_smooth = sum(exp(-gamma * ||C_gt(k) - C_gt(q)||) * |D(k) - D(q)|)
+-    
++def project_gaussians(gaussians, camera_extrinsic, camera_intrinsics, image_shape):
++    projected = []
++    for g in gaussians:
++        mean_cam = camera_extrinsic[:3, :3] @ g['mean'] + camera_extrinsic[:3, 3]
++        if mean_cam[2] <= 0:
++            continue
++        sx = (camera_intrinsics[0, 0] * mean_cam[0] / mean_cam[2]) + camera_intrinsics[0, 2]
++        sy = (camera_intrinsics[1, 1] * mean_cam[1] / mean_cam[2]) + camera_intrinsics[1, 2]
++        eigenvalues, eigenvectors = np.linalg.eigh(g['covariance'])
++        normal = eigenvectors[:, np.argmin(eigenvalues)]
++        coverage = [(int(sy), int(sx))]
++        projected.append({'alpha': g['opacity'], 'z_depth': mean_cam[2], 'shortest_axis_normal': normal, 'screen_coverage': coverage})
++    return projected
++
++def fit_mirror_plane(depth_map, normal_map, mirror_mask):
++    n = np.array([0.0, 0.0, 1.0])
++    o = np.array([0.0, 0.0, 0.0])
+     return n, o
+ 
+-def render_with_virtual_camera(gaussians, virtual_extrinsic, camera_intrinsics):
+-    """
+-    Renders the scene using the virtual camera.
+-    """
+-    # Standard 3D-GS rasterization
+-    return standard_gs_rasterize(gaussians, virtual_extrinsic, camera_intrinsics)
+-
+ def fuse_images(real_render, virtual_render, mirror_mask):
+-    """
+-    Fuses real and virtual renders based on the mirror mask.
+-    """
+-    final_image = np.where(mirror_mask, virtual_render, real_render)
+-    return final_image
++    return np.where(mirror_mask[..., np.newaxis], virtual_render, real_render)
+ ```
+ 

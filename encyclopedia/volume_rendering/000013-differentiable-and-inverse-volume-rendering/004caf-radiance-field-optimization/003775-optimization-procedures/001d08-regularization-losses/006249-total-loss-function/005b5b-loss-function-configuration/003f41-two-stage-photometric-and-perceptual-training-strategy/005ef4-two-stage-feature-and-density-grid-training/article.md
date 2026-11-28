@@ -1,0 +1,192 @@
+# Two-Stage Feature and Density Grid Training
+
+Also called: Feature Grid and Density Grid Training, Two-stage Model Training
+
+## Overview
+Two-Stage Feature and Density Grid Training is a method for optimizing neural radiance fields (NeRF) by decoupling the learning of geometric density and high-level semantic features into two distinct phases [S1]. It solves the problem of multi-view inconsistency and aliasing caused by up-sampling low-resolution feature maps, which is common in standard feature-grid NeRF approaches [S1]. Unlike methods that jointly optimize density and features from scratch, this method pre-trains the density grid on RGB images and uses a pre-trained VGG network to guide feature learning, ensuring semantic consistency before style transfer [S1].
+
+## How it works
+The method consists of two sequential training stages. It operates on a 3D scene representation comprising a density grid and a feature grid, rendered via volume rendering to produce 2D feature maps, which are then decoded to RGB [S1].
+
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view RGB images $I_R$, pre-trained VGG network features, and camera poses.
+*   **Outputs:** Optimized density grid $\sigma$, feature grid $F$, and CNN decoder parameters.
+
+**Data Structures:**
+*   **Density Grid:** Stores volume density $\sigma_i$ at sampled points along rays.
+*   **Feature Grid:** Stores high-level feature vectors $F_i$ at sampled points.
+*   **CNN Decoder:** A 2D convolutional neural network mapping feature maps to RGB space.
+
+**Volume Rendering Formulas:**
+For a ray $r$, the rendered feature $F(r)$ and weight $w_i$ for sample $i$ are calculated as [S1]:
+
+$$
+F(r) = \sum_{i=1}^{N} w_i F_i
+$$
+
+$$
+w_i = \exp \left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right) (1 - \exp (-\sigma_i \delta_i))
+$$
+
+Where:
+*   $N$ is the number of samples along the ray.
+*   $F_i$ is the feature vector at sample $i$.
+*   $\sigma_i$ is the volume density at sample $i$.
+*   $\delta_i$ is the distance between adjacent samples.
+*   View-dependency is disabled to ensure multi-view consistency [S1].
+
+**Stage 1: Feature Grid Training**
+1.  **Initialize:** Use a density grid pre-trained solely on RGB images [S1]. Initialize the feature grid and 2D CNN decoder.
+2.  **Render:** Sample points along rays to obtain $F_i$ and $\sigma_i$. Compute rendered feature maps $F(r)$ using the volume rendering equation.
+3.  **Decode:** Pass the full-resolution rendered feature maps through the 2D CNN decoder to generate predicted RGB images $\hat{I}_R$ [S1].
+4.  **Compute Loss:** Calculate the grid loss $L_{grid}$ [S1]:
+
+$$
+L_{grid} = \sum_{r \in R} ||\hat{F}(r) - F(r)||^2 + \sum_{r \in R} ||\hat{I}_R - I_R||^2 + \sum_{l \in l_p} ||F^l(\hat{I}_R) - F^l(I_R)||^2
+$$
+
+Where:
+*   $R$ is the set of rays.
+*   $\hat{F}(r)$ is the predicted feature map (from decoder or direct feature output, context implies feature map supervision).
+*   $F(r)$ is the ground truth feature map derived from the feature grid.
+*   $\hat{I}_R$ is the predicted RGB image.
+*   $I_R$ is the ground truth RGB image.
+*   $l_p$ is the set of VGG layers used for perceptual loss.
+*   $F^l$ denotes the feature maps of the $l$-th layer of the pre-trained VGG network [S1].
+*   The feature maps are bilinearly up-sampled to match the resolution of the target RGB images for supervision [S1].
+
+5.  **Update:** Optimize the feature grid, CNN decoder, and potentially refine the density grid using $L_{grid}$ [S1].
+
+**Stage 2: Stylization Training**
+1.  **Freeze:** Freeze the feature grid parameters [S1].
+2.  **Train:** Train the style transfer module (e.g., SICT/DST) and fine-tune the CNN decoder [S1].
+3.  **Patch Training:** Train directly on $256 \times 256$ patches without sub-sampling, leveraging the memory efficiency of the 3D representation [S1].
+4.  **Compute Loss:** Use stylization loss $L_{stylization}$ [S1]:
+
+$$
+L_{stylization} = L_c + \lambda L_s
+$$
+
+Where:
+*   $L_c$ is the content loss (MSE of feature maps).
+*   $L_s$ is the style loss (MSE of channel-wise feature mean and standard deviation).
+*   $\lambda$ balances content preservation and stylization [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_two_stage_feature_density_grid(
+    rays, 
+    gt_images, 
+    vgg_network, 
+    density_grid, 
+    feature_grid, 
+    cnn_decoder, 
+    style_transfer_module,
+    num_stages=2
+):
+    # Stage 1: Feature Grid Training
+    if num_stages >= 1:
+        # Density grid is assumed pre-trained on RGB
+        optimizer_stage1 = Optimizer([feature_grid, cnn_decoder])
+        
+        for batch in get_batches(rays, gt_images):
+            rays_r = batch.rays
+            gt_imgs = batch.images
+            
+            # Volume Rendering
+            # Sample points along rays
+            samples = sample_along_rays(rays_r)
+            sigma = density_grid.query(samples)
+            features = feature_grid.query(samples)
+            
+            # Compute weights and rendered features
+            weights = compute_weights(sigma, samples.distances)
+            rendered_features = sum(weights * features)
+            
+            # Decode to RGB
+            # rendered_features are full-resolution feature maps
+            pred_imgs = cnn_decoder(rendered_features)
+            
+            # Compute Loss
+            # 1. Feature MSE
+            # Note: Ground truth features F(r) are from feature_grid query
+            # In practice, F(r) might be compared against rendered features directly
+            # or the decoder output features. Based on formula, comparing predicted
+            # feature map vs ground truth feature map.
+            loss_feat = mse(rendered_features, feature_grid.query(rays_r))
+            
+            # 2. RGB MSE
+            loss_rgb = mse(pred_imgs, gt_imgs)
+            
+            # 3. Perceptual Loss
+            # Bilinearly up-sample features for supervision if needed, 
+            # but source says full-res feature maps are rendered.
+            # VGG features are extracted from gt_imgs and pred_imgs
+            vgg_gt = vgg_network.extract_features(gt_imgs)
+            vgg_pred = vgg_network.extract_features(pred_imgs)
+            
+            loss_perc = 0
+            for layer in perceptual_layers:
+                loss_perc += mse(vgg_pred[layer], vgg_gt[layer])
+            
+            total_loss = loss_feat + loss_rgb + loss_perc
+            
+            optimizer_stage1.zero_grad()
+            total_loss.backward()
+            optimizer_stage1.step()
+
+    # Stage 2: Stylization Training
+    if num_stages >= 2:
+        # Freeze feature grid
+        feature_grid.requires_grad = False
+        
+        optimizer_stage2 = Optimizer([cnn_decoder, style_transfer_module])
+        
+        for batch in get_patches(gt_images, size=256):
+            patch = batch
+            
+            # Render features for the patch (using frozen feature grid)
+            # ... (rendering logic for patch) ...
+            rendered_feat_patch = render_patch(patch.rays, density_grid, feature_grid)
+            
+            # Apply style transfer
+            stylized_feat = style_transfer_module(rendered_feat_patch)
+            
+            # Decode to stylized RGB
+            stylized_img = cnn_decoder(stylized_feat)
+            
+            # Compute Stylization Loss
+            # Content loss: MSE of feature maps
+            loss_c = mse(stylized_feat, rendered_feat_patch)
+            
+            # Style loss: MSE of channel-wise mean and std
+            loss_s = style_loss(stylized_feat, rendered_feat_patch)
+            
+            total_loss = loss_c + lambda_param * loss_s
+            
+            optimizer_stage2.zero_grad()
+            total_loss.backward()
+            optimizer_stage2.step()
+```
+
+## Subtopics
+
+### Instance Quadruplet Loss
+A variant strategy used in semantically-aware NeRFs to create a discriminating feature space for scene decomposition at the instance level [S2]. It computes an Instance Quadruplet loss to refine the model using semantic-appearance hierarchical learning and semantic-guided regional refinement strategies [S2]. This approach is scalable for scenes with many objects (up to 500 per scene) and helps in instance segmentation refinement by matching 3D object masks with inconsistent segmentation maps [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Two-stage training increases total training time compared to single-stage methods, as density and features are optimized sequentially [S1].
+*   **Memory Complexity:** By rendering full-resolution feature maps and training on $256 \times 256$ patches in Stage 2, it avoids the memory overhead of sub-sampling algorithms and large patch sub-sampling [S1]. The density grid pre-training adds initial memory cost [S1].
+*   **Performance:** Improves multi-view consistency by discarding up-sampling operations that cause inconsistency [S1]. Removes aliasing associated with low-resolution feature rendering [S1].
+*   **Strengths:** High-quality semantic feature learning; effective for zero-shot 3D style transfer [S1].
+*   **Limitations:** Requires a pre-trained VGG network and pre-trained density grid [S1]. Not suitable for real-time training without the two-stage separation [S1].
+
+## Background
+The method originates from StyleRF, introduced in 2023, which proposes zero-shot 3D style transfer of neural radiance fields [S1]. It addresses limitations in previous feature-grid NeRF methods that relied on down-sampled feature maps and up-sampling, leading to multi-view inconsistency and aliasing [S1]. The approach builds on the concept of separating geometric (density) and semantic (feature) learning to improve the quality of stylized novel views [S1].
+
+## Sources
+[S1] StyleRF: Zero-Shot 3D Style Transfer of Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00806, fetched 2026-10-26
+[S2] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27

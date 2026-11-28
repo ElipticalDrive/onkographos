@@ -1,0 +1,171 @@
+--- v001.md
++++ v002.md
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A base 3DGS reconstruction (set of 3D Gaussian primitives with position, covariance, opacity, and SH coefficients), learning-based 2D masks (e.g., SAM-HQ), and a single user click per repetitive instance to identify them [S1].
++*   **Input:** A base 3DGS reconstruction (set of 3D Gaussian primitives with position, covariance, opacity, and SH coefficients), learning-based 2D masks (e.g., SAM-HQ), a single user click per repetitive instance to identify them, and training images for fine-tuning [S1].
+ *   **Output:** An optimized shared template representation (union of 3D Gaussian primitives) that replaces the individual instances, improving novel view synthesis quality [S1].
+ 
+ **Data Structures:**
+ *   **3D Gaussian Primitive:** Standard 3DGS structure containing position $\mathbf{p}$, covariance matrix $\mathbf{\Sigma}$ (or rotation $\mathbf{R}$ and scale $\mathbf{s}$), opacity $\alpha$, and Spherical Harmonics coefficients $\mathbf{c}_{SH}$ [S1].
+-*   **Shared Template:** A single set of 3D Gaussian primitives representing the "average" or fused geometry of all instances [S1].
+-*   **Instance Offsets:** For appearance, each instance $i$ has an offset $\Delta \mathbf{c}_{SH}^{(i)}$ applied to the shared SH coefficients [S1].
++*   **Shared Template:** A single set of 3D Gaussian primitives representing the fused geometry of all instances [S1].
++*   **Instance Offsets:** For appearance, each instance $i$ has a learnable offset $\Delta \mathbf{c}_{SH}^{(i)}$ applied to the shared SH coefficients [S1].
+ 
+ **Steps:**
+@@ -38,77 +38,112 @@
+     *   This process improves the overall reconstruction, completing partially-occluded instances based on visible parts of other instances and enhancing low-quality geometry from poor capture coverage [S1].
+     *   Model appearance differences (illumination, texture variations) between instances using an offset representation for Spherical Harmonics:
+-        $$ \mathbf{c}_{SH}^{(i)} = \mathbf{c}_{SH}^{shared} + \Delta \mathbf{c}_{SH}^{(i)} $$
+-        where $\mathbf{c}_{SH}^{shared}$ are the coefficients of the shared template and $\Delta \mathbf{c}_{SH}^{(i)}$ are the learnable offsets for instance $i$ [S1]. This approach is faster than using a Multi-Layer Perceptron (MLP) to model appearance [S1].
++        $$ \mathbf{c}_{SH}^{(i)} = \mathbf{c}_{SH}^{\text{shared}} + \Delta \mathbf{c}_{SH}^{(i)} $$
++        where $\mathbf{c}_{SH}^{\text{shared}}$ are the coefficients of the shared template and $\Delta \mathbf{c}_{SH}^{(i)}$ are the learnable offsets for instance $i$ [S1]. This approach is faster than using a Multi-Layer Perceptron (MLP) to model appearance [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def splat_and_replace(base_3dgs, user_clicks, masks):
+-    # Step 1: Segmentation
+-    # Use SAM-HQ masks and user clicks to identify instances
+-    instance_2d_masks = get_2d_masks(masks, user_clicks)
++def splat_and_replace(base_3dgs, training_images, user_clicks, masks):
++    # Step 1: Instance Segmentation
++    # Use learning-based 2D masks and user clicks to identify instances
++    instance_2d_masks = [mask.crop(click) for mask, click in zip(masks, user_clicks)]
+     
+     # Train contrastive features for 3D segmentation
+-    instance_3d_masks = train_contrastive_segmentation(base_3dgs, instance_2d_masks)
++    # Note: Architecture follows prior contrastive learning work [S1]
++    instance_3d_masks = train_contrastive_features_3d(base_3dgs, instance_2d_masks)
+     
+-    # Apply regularization and post-processing
+-    clean_instance_masks = apply_regularization(instance_3d_masks)
++    # Apply regularization and post-processing to remove artifacts
++    clean_instance_masks = apply_regularization_postprocessing(instance_3d_masks)
+     
+-    # Step 2: Registration
+-    registered_instances = []
+-    for instance_id in clean_instance_masks:
+-        # Render additional views for this instance
+-        rendered_views = render_3dgs_views(base_3dgs, clean_instance_masks[instance_id])
++    # Step 2: Instance Registration
++    registered_transforms = []
++    for instance_id in range(len(clean_instance_masks)):
++        # Render additional high-quality views for this instance
++        rendered_views = render_additional_views(base_3dgs, clean_instance_masks[instance_id])
+         
+-        # Select best view pairs and find 2D matches
+-        best_view_pairs = select_best_pairs(rendered_views)
++        # Select best pairs of views with a fast 2D matcher
++        best_view_pairs = select_best_view_pairs(rendered_views)
++        
++        # Find robust 2D matches using MASt3R
+         matches_2d = find_2d_matches_mastr(best_view_pairs)
+         
+-        # Lift to 3D using 3DGS depth
++        # Lift 2D matches to 3D using depth from 3DGS
+         matches_3d = lift_2d_to_3d(matches_2d, rendered_views)
+         
+-        # Register using PnP-RANSAC
+-        transform = pnp_ransac(matches_3d)
+-        registered_instances.append(transform)
++        # Register instances using PnP-RANSAC solver
++        transform = compute_pnp_ransac(matches_3d)
++        registered_transforms.append(transform)
+         
+-    # Step 3: Build Shared Template
+-    # Union of all primitives from registered instances
+-    shared_template = union_primitives(base_3dgs, registered_instances)
++    # Step 3: Shared Representation Construction
++    # Union of all 3D Gaussian primitives from registered instances
++    shared_template = union_all_primitives(base_3dgs, registered_transforms)
+     
+-    # Step 4: Fine-tuning
+-    # Initialize SH offsets for each instance
+-    sh_offsets = initialize_offsets(len(clean_instance_masks))
++    # Step 4: Fine-tuning and Optimization
++    # Initialize learnable SH offsets for each instance
++    sh_offsets = [zeros_like(shared_template.sh) for _ in range(len(clean_instance_masks))]
+     
+     # Optimization loop
+-    for iteration in range(num_iterations):
+-        loss = 0
+-        for instance_id, transform in enumerate(registered_instances):
+-            # Apply transform to shared template to get instance-specific geometry
+-            instance_primitives = apply_transform(shared_template, transform)
++    for iteration in range(1000):
++        total_loss = 0.0
++        for instance_id, transform in enumerate(registered_transforms):
++            # Apply rigid transform to shared template primitives
++            instance_primitives = apply_rigid_transform(shared_template, transform)
+             
+-            # Apply SH offset for appearance
++            # Apply SH offset for instance-specific appearance
+             instance_sh = shared_template.sh + sh_offsets[instance_id]
+             
+-            # Render and compute loss against ground truth
++            # Render image and compute loss against ground truth
+             rendered_image = render_primitives(instance_primitives, instance_sh)
+-            loss += compute_loss(rendered_image, ground_truth_images[instance_id])
++            total_loss += compute_rendering_loss(rendered_image, training_images[instance_id])
+             
+         # Backpropagate gradients to shared template and SH offsets
+-        optimize(shared_template, sh_offsets, loss)
++        update_parameters(shared_template, sh_offsets, total_loss)
+         
+     return shared_template, sh_offsets
++
++def train_contrastive_features_3d(base_3dgs, instance_2d_masks):
++    return [segment_instance_via_contrastive_learning(base_3dgs, mask) for mask in instance_2d_masks]
++
++def apply_regularization_postprocessing(instance_3d_masks):
++    return [remove_artifacts_via_regularization(mask) for mask in instance_3d_masks]
++
++def render_additional_views(base_3dgs, instance_mask):
++    return [render_view(base_3dgs, camera_pose) for camera_pose in generate_novel_cameras()]
++
++def select_best_view_pairs(rendered_views):
++    return find_best_matching_pairs(rendered_views, matcher="fast_2d")
++
++def find_2d_matches_mastr(view_pairs):
++    return mastr_match(view_pairs)
++
++def lift_2d_to_3d(matches_2d, rendered_views):
++    return triangulate_3d(matches_2d, rendered_views.depth_maps)
++
++def compute_pnp_ransac(matches_3d):
++    return solve_pnp_ransac(matches_3d)
++
++def union_all_primitives(base_3dgs, transforms):
++    merged_primitives = []
++    for prim in base_3dgs:
++        for t in transforms:
++            merged_primitives.append(apply_transform_to_primitive(prim, t))
++    return GaussianSet(merged_primitives)
++
++def update_parameters(shared_template, sh_offsets, loss):
++    shared_template.sh -= learning_rate * gradient(loss, shared_template.sh)
++    for i in range(len(sh_offsets)):
++        sh_offsets[i] -= learning_rate * gradient(loss, sh_offsets[i])
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Noisy Geometry:** Standard 3DGS data is noisy and does not correspond well to underlying geometry because it optimizes for image radiance rather than geometry [S1]. This necessitates the use of rendered views and robust 2D matching (MASt3R) instead of direct point-cloud matching [S1].
+-*   **Occlusion:** Partially occluded instances are completed based on visible instances, but if all instances are severely occluded in the same regions, improvement may be limited [S1].
+-*   **Appearance Variations:** The SH offset model assumes appearance differences can be captured by linear offsets in SH space. Complex non-linear lighting effects might not be fully captured [S1].
++*   **Noisy Geometry:** Standard 3DGS data is noisy and does not correspond well to underlying geometry because it optimizes for image radiance rather than geometry, necessitating rendered views and robust 2D matching instead of direct point-cloud matching [S1].
++*   **Occlusion:** Partially occluded instances are completed based on visible instances, improving low-quality geometry from poor capture coverage [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method involves rendering additional views, 2D matching, and PnP-RANSAC for each instance, followed by a fine-tuning optimization loop. The use of SH offsets is faster than MLP-based appearance modeling [S1].
+-*   **Memory Complexity:** Requires storing the shared template plus per-instance SH offsets. The base 3DGS reconstruction is also needed during the registration phase [S1].
++*   **Time Complexity:** The method involves rendering additional views, 2D matching, and PnP-RANSAC for each instance, followed by a fine-tuning optimization loop [S1]. The use of SH offsets is faster than MLP-based appearance modeling [S1].
++*   **Memory Complexity:** Requires storing the shared template plus per-instance SH offsets, alongside the base 3DGS reconstruction during the registration phase [S1].
+ *   **Performance:** Evaluated on synthetic and real data with independent test trajectories, outperforming other generalization solutions for scenes with repetitive elements [S1].
+ *   **Strengths:** Improves geometry and appearance in poorly captured or occluded regions by leveraging repetition [S1].
+-*   **Limitations:** Only applicable to scenes with repetitive elements. Requires user interaction (one click per instance) and initial 2D masks [S1].
++*   **Limitations:** Only applicable to scenes with repetitive elements and requires user interaction (one click per instance) and initial 2D masks [S1].
+ 
+ ## Background

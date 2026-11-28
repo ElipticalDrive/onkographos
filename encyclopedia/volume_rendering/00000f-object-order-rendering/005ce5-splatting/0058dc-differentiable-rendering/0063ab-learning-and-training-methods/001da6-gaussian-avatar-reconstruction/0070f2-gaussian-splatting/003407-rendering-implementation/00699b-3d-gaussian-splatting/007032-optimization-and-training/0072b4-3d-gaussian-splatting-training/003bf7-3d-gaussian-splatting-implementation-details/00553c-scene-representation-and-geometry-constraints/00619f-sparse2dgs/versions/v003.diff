@@ -1,0 +1,224 @@
+--- v002.md
++++ v003.md
+@@ -1,45 +1,44 @@
+ # Sparse2DGS
+ 
+-Also called: Geometry-Prioritized Gaussian Splatting for Surface Reconstruction from Sparse Views
+ 
+ ## Overview
+-Sparse2DGS is a Gaussian Splatting method designed for surface reconstruction from sparse input views, addressing the ill-posed nature of geometric optimization when dense Structure-from-Motion points are unavailable [S1]. It distinguishes itself from standard 3D Gaussian Splatting and its sibling [2DGS](12855-gaussian-representation-and-truncation.md) by initializing primitives with unsupervised Multi-View Stereo (MVS) points and employing geometric-prioritized enhancements—such as fixed feature splatting and selective updates—to prevent appearance overfitting and improve geometric learning [S1].
++Sparse2DGS is a Gaussian Splatting method for surface reconstruction from sparse input views, addressing the ill-posed nature of geometric optimization when dense Structure-from-Motion points are unavailable [S1]. It distinguishes itself from standard 3D Gaussian Splatting and its sibling [2DGS](12855-gaussian-representation-and-truncation.md) by initializing primitives with unsupervised Multi-View Stereo (MVS) points and employing geometric-prioritized enhancements to prevent appearance overfitting and improve geometric learning [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Inputs:** A set of $N$ sparse input images $\{I_i\}_{i=1}^N$, where $I_i \in \mathbb{R}^{H \times W \times 3}$ [S1].
+-*   **Outputs:** A set of 2D Gaussian primitives representing the 3D surface, optimized to minimize reconstruction error [S1].
++*   **Outputs:** A set of optimized 2D Gaussian primitives representing the 3D surface [S1].
+ 
+ **Data Structures:**
+-The scene is represented by a set of 2D Gaussian primitives. Each primitive $G$ is defined by:
++The scene is represented by a set of 2D Gaussian primitives [S1]. Each primitive $G$ is defined by:
+ *   Central position $\mathbf{p}$ [S1].
+ *   Two principal tangential vectors $\mathbf{t}_u$ and $\mathbf{t}_v$ [S1].
+ *   Scaling vector $(s_u, s_v)$ [S1].
+-*   The rotation matrix is $\mathbf{R} = (\mathbf{t}_u, \mathbf{t}_v, \mathbf{t}_z)$, where $\mathbf{t}_z = \mathbf{t}_u \times \mathbf{t}_v$ [S1].
+-*   The scale matrix is $\mathbf{S} = \text{diag}(s_u, s_v, 0)$ [S1].
+-*   The local tangent plane in world space is parameterized as:
++*   Rotation matrix $\mathbf{R} = (\mathbf{t}_u, \mathbf{t}_v, \mathbf{t}_z)$, where $\mathbf{t}_z = \mathbf{t}_u \times \mathbf{t}_v$ [S1].
++*   Scale matrix $\mathbf{S} = \text{diag}(s_u, s_v, 0)$ [S1].
++*   Local tangent plane in world space parameterized as:
+     $$ P(u, v) = \mathbf{p} + s_u \mathbf{t}_u u + s_v \mathbf{t}_v v \quad (1) $$
+-*   The Gaussian value for a point $\mathbf{u} = (u, v)$ in the local $uv$ space is:
++*   Gaussian value for a point $\mathbf{u} = (u, v)$ in the local $uv$ space:
+     $$ G(\mathbf{u}) = \exp\left(-\frac{u^2 + v^2}{2}\right) \quad (2) $$
+-*   MVS-derived feature maps $\{D_i\}_{i=1}^N$ (dense depth maps) are used for initialization and supervision [S1].
++*   MVS-derived feature maps $\{D_i\}_{i=1}^N$ (dense depth maps) used for initialization and supervision [S1].
+ 
+ **Numbered Steps:**
+ 
+ 1.  **MVS Initialization:**
+-    *   Run an unsupervised MVS network (specifically CLMVSNet [S1]) on the input images $\{I_i\}_{i=1}^N$ to estimate dense depth maps $\{D_i\}_{i=1}^N$ [S1].
++    *   Run an unsupervised MVS network (specifically CLMVSNet) on the input images $\{I_i\}_{i=1}^N$ to estimate dense depth maps $\{D_i\}_{i=1}^N$ [S1].
+     *   Back-project the depth maps $D_i$ into 3D space and fuse them to create a point cloud $\{\mathbf{p}_{ij} \mid 1 \le i \le N, 1 \le j \le HW\}$ [S1].
+     *   Initialize the 2D Gaussian primitives' central positions $\mathbf{p}$ using this MVS point cloud [S1].
+ 
+ 2.  **Geometrically Enhanced Supervision (Feature Splatting):**
+-    *   Sample the MVS-derived feature maps (depth/geometry) into the Gaussian splatting process [S1].
+-    *   **Crucial Constraint:** Keep the feature values and RGB color values **fixed** during optimization [S1]. This provides geometrically expressive supervision and prevents the model from overfitting to appearance in sparse views, which would otherwise compromise geometry [S1].
++    *   Sample the MVS-derived feature maps into the Gaussian splatting process [S1].
++    *   Keep the feature values and RGB color values fixed during optimization [S1]. This provides geometrically expressive supervision and prevents the model from overfitting to appearance in sparse views, which would otherwise compromise geometry [S1].
+ 
+ 3.  **Gaussian Primitive Regularization:**
+     *   Apply a reparameterization-based disk sampling strategy to regularize the geometric properties (position, orientation, scale) of the primitives [S1].
+     *   Reformulate the Gaussian properties into point representations [S1].
+-    *   Optimize these properties using a unified point-based, cross-view consistency loss [S1]. This ensures that the 2D disk-like primitives maintain coherent geometry across views.
++    *   Optimize these properties using a unified point-based, cross-view consistency loss [S1]. This ensures that the 2D disk-like primitives maintain coherent geometry across views [S1].
+ 
+ 4.  **Selective Gaussian Update:**
+-    *   Instead of using standard densification (splitting/copying) which can fail under ill-posed sparse-view conditions, selectively update the existing MVS-initialized Gaussian primitives [S1].
++    *   Instead of using standard densification (splitting/copying) which fails under ill-posed sparse-view conditions, selectively update the existing MVS-initialized Gaussian primitives [S1].
+     *   Use rendered geometric cues to guide these updates, allowing for self-guided geometric corrections [S1].
+ 
+@@ -47,69 +46,90 @@
+ 
+ ```python
+-def sparse2dgs(input_images, num_views):
+-    """
+-    input_images: List of N images [H, W, 3]
+-    num_views: N
+-    """
++import numpy as np
++import math
++
++class Gaussian2D:
++    def __init__(self, p, tu, tv, su, sv):
++        self.p = np.array(p)
++        self.tu = np.array(tu)
++        self.tv = np.array(tv)
++        self.su = su
++        self.sv = sv
++        self.tz = np.cross(self.tu, self.tv)
++        self.R = np.column_stack((self.tu, self.tv, self.tz))
++        self.S = np.diag([self.su, self.sv, 0.0])
++
++    def evaluate(self, u, v):
++        return math.exp(-(u**2 + v**2) / 2.0)
++
++    def local_point(self, u, v):
++        return self.p + self.su * self.tu * u + self.sv * self.tv * v
++
++def sparse2dgs(input_images, num_views, camera_intrinsics, max_iterations=1000):
++    H, W = input_images[0].shape[0], input_images[0].shape[1]
++    N = num_views
++
+     # Step 1: MVS Initialization
+-    # Run unsupervised MVS (e.g., CLMVSNet) to get depth maps
+-    depth_maps = run_mvs_network(input_images)
+-    
+-    # Back-project and fuse depth maps to point cloud
+-    # i: image index, j: pixel index
++    depth_maps = [estimate_mvs_depth(img, camera_intrinsics[i]) for i, img in enumerate(input_images)]
+     mvs_point_cloud = []
+-    for i in range(num_views):
++    for i in range(N):
+         for j in range(H * W):
+-            p_ij = back_project(depth_maps[i], j)
++            p_ij = back_project_pixel(depth_maps[i], camera_intrinsics[i], j)
+             mvs_point_cloud.append(p_ij)
+-            
+-    # Initialize 2D Gaussians with MVS points
+-    # Each Gaussian G has: p, tu, tv, su, sv
+     gaussians = []
+     for p in mvs_point_cloud:
+-        # Initialize tangential vectors and scales arbitrarily or via normal estimation
+-        tu, tv = initialize_tangents(p) 
+-        su, sv = 1.0, 1.0 # Initial scale
+-        g = Gaussian(p=p, tu=tu, tv=tv, su=su, sv=sv)
+-        gaussians.append(g)
+-        
+-    # Step 2: Optimization Loop
++        tu, tv = orthogonalize_tangents(p)
++        su, sv = 1.0, 1.0
++        gaussians.append(Gaussian2D(p, tu, tv, su, sv))
++
++    # Step 2-4: Optimization Loop
+     for iteration in range(max_iterations):
+-        losses = []
+-        
+-        for view_idx in range(num_views):
++        total_loss = 0.0
++        for view_idx in range(N):
+             image = input_images[view_idx]
+-            # Render current view using 2D Gaussian Splatting
+-            # Note: Feature and Color values are FIXED from MVS/Initialization
+-            rendered_image, rendered_depth = render_gaussians(gaussians, view_idx)
+-            
+-            # Compute loss against ground truth image
+-            # Since color is fixed, this loss primarily drives geometric consistency
+-            # and prevents appearance overfitting
+-            color_loss = compute_color_loss(rendered_image, image)
+-            losses.append(color_loss)
+-            
+-            # Compute geometric consistency loss using MVS depth
+-            # Compare rendered depth with MVS depth map
+-            mvs_depth = depth_maps[view_idx]
+-            geo_loss = compute_depth_consistency(rendered_depth, mvs_depth)
+-            losses.append(geo_loss)
+-            
+-        # Step 3: Regularization
+-        # Apply disk sampling regularization to reformulate properties
+-        # into point-based supervision
+-        reg_loss = apply_disk_sampling_regularization(gaussians)
+-        losses.append(reg_loss)
+-        
+-        # Backpropagate and update gradients
+-        # Only update geometric parameters (p, tu, tv, su, sv)
+-        # Do NOT update color or feature attributes
+-        optimize(gaussians, losses)
+-        
+-        # Step 4: Selective Update
+-        # Instead of densification, selectively update primitives
+-        # based on geometric cues
+-        gaussians = selective_update(gaussians, rendered_depth, mvs_depth)
+-        
++            rendered_image, rendered_depth = rasterize_gaussians(gaussians, view_idx, camera_intrinsics[view_idx])
++            color_loss = np.mean((rendered_image - image) ** 2)
++            geo_loss = np.mean((rendered_depth - depth_maps[view_idx]) ** 2)
++            total_loss += color_loss + geo_loss
++        reg_loss = compute_disk_sampling_regularization(gaussians)
++        total_loss += reg_loss
++        gradient_descent_step(gaussians, total_loss)
++        gaussians = selective_update_primitives(gaussians, rendered_depth, depth_maps[view_idx])
++    return gaussians
++
++def estimate_mvs_depth(image, intrinsics):
++    # Runs unsupervised MVS network (e.g., CLMVSNet) to produce dense depth map
++    # Not given in the sources. Standard MVS depth estimation.
++    return np.zeros((H, W))
++
++def back_project_pixel(depth_map, intrinsics, pixel_idx):
++    # Converts 2D pixel index and depth to 3D world point
++    # Standard inverse projection using camera intrinsics
++    return np.array([0.0, 0.0, 0.0])
++
++def orthogonalize_tangents(point):
++    # Computes initial orthogonal tangent vectors for the local plane
++    # Standard Gram-Schmidt or cross-product with a reference vector
++    return np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
++
++def rasterize_gaussians(gaussians, view_idx, intrinsics):
++    # Standard 2D Gaussian Splatting rasterization pipeline
++    # Projects 3D Gaussians to 2D screen space and blends contributions
++    return np.zeros((H, W, 3)), np.zeros((H, W))
++
++def compute_disk_sampling_regularization(gaussians):
++    # Reformulates Gaussian properties into point representations
++    # Computes point-based cross-view consistency loss
++    # Not given in the sources. Standard point-based consistency loss.
++    return 0.0
++
++def gradient_descent_step(gaussians, loss):
++    # Standard backpropagation and parameter update
++    pass
++
++def selective_update_primitives(gaussians, rendered_depth, mvs_depth):
++    # Selectively updates MVS-initialized Gaussians using rendered geometric cues
++    # Instead of standard densification, applies self-guided geometric corrections
++    # Not given in the sources. Standard geometric cue-based update.
+     return gaussians
+ ```
+@@ -128,9 +148,13 @@
+ *   **Performance:** Achieves a Chamfer Distance (CD) error of 1.13 on the DTU dataset with 3 views [S1]. This is significantly lower than 2DGS (2.81), GOF (2.82), and PGSR (2.08) [S1].
+ *   **Efficiency:** Training time is 10 minutes, which is 2x faster than the NeRF-based fine-tuning approach SparseNeus (25 minutes) [S1].
++*   **Time and Memory Complexity:** Not given in the sources.
++*   **Scaling:** Not given in the sources.
+ *   **Strengths:** Robust geometric learning under ill-posed conditions; complete and accurate reconstruction from sparse images; faster than NeRF-based methods [S1].
+ *   **Limitations:** Relies on the quality of the unsupervised MVS initialization (CLMVSNet); performance is specific to sparse-view scenarios [S1].
++*   **When to use:** Sparse-view 3D surface reconstruction where dense Structure-from-Motion points are unavailable [S1].
++*   **When not to use:** Dense-view novel view synthesis or scenarios requiring appearance optimization over geometry [S1].
+ 
+ ## Background
+-Sparse2DGS was proposed to address the limitations of previous Gaussian Splatting methods that rely on dense views for initialization, which struggle with extremely sparse Structure-from-Motion points [S1]. It combines the strengths of Gaussian Splatting and Multi-view Stereo (MVS) through geometric-prioritized enhancement schemes [S1]. The method was introduced in the paper "Sparse2DGS: Geometry-Prioritized Gaussian Splatting for Surface Reconstruction from Sparse Views" [S1].
++Sparse2DGS was proposed to address the limitations of previous Gaussian Splatting methods that rely on dense views for initialization, which struggle with extremely sparse Structure-from-Motion points [S1]. It combines the strengths of Gaussian Splatting and Multi-view Stereo (MVS) through geometric-prioritized enhancement schemes [S1]. The method was introduced in the paper "Sparse2DGS: Geometry-Prioritized Gaussian Splatting for Surface Reconstruction from Sparse Views" [S1]. It is used for 3D surface reconstruction in autonomous driving and virtual reality [S1].
+ 
+ ## Sources

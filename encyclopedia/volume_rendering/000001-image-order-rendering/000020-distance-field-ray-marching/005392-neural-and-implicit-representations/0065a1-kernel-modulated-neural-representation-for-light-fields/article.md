@@ -1,0 +1,327 @@
+# Kernel-Modulated Neural Representation for Light Fields
+
+Also called: Descriptor and Modulator Network, Implicit Convolutional Network for Light Fields
+
+## Overview
+Kernel-Modulated Neural Representation (KMNR) is a compact implicit neural representation for light fields that avoids parameter explosion at high angular resolutions by decomposing network kernels into shared descriptors and view-specific modulators [S1]. Unlike standard Implicit Neural Representations (INRs) that map spatial coordinates to color, KMNR maps uniform noise to Single Aperture Images (SAIs) conditioned on angular coordinates, enabling efficient compression and view synthesis [S1]. It distinguishes itself from sibling methods like [NeuMesh Rendering Pipeline](13268-neumesh-rendering-pipeline.md) by explicitly modeling angular dependencies through switchable convolutional kernels rather than geometric primitives or explicit coordinate encoding [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A uniform noise tensor $\epsilon$ (typically same spatial dimensions as the target SAI) and angular coordinates $(u, v)$ indexing the desired view in the light field [S1].
+*   **Output:** A predicted SAI $\hat{I}_{u,v}$ with 3 channels (RGB) [S1].
+*   **Training Target:** A ground truth SAI $I_{u,v}$ corresponding to angular position $(u, v)$ from the light field $L$ [S1].
+
+### Data Structures and Layout
+
+**Network Architecture:**
+The network consists of 6 layers (L1–L5 + Decoder) [S1].
+*   **Layers L1–L4:** Convolutional layers followed by Bicubic Upsampling (up2, scale 2), Batch Normalization (BN), and GELU activation [S1].
+    *   Kernel size: $3 \times 3$.
+    *   Stride: 1.
+    *   Dilation: 2 (to expand receptive field without increasing parameters) [S1].
+*   **Layer L5:** Convolutional layer followed by BN and GELU activation [S1].
+    *   Kernel size: $3 \times 3$.
+    *   Stride: 1.
+    *   Dilation: 1.
+*   **Decoder:** Convolutional layer followed by Sigmoid activation [S1].
+    *   Kernel size: $1 \times 1$.
+    *   Stride: 1.
+    *   Output channels: 3 (RGB) [S1].
+
+**Kernel Decomposition:**
+Each layer $i$ (for $i=1 \dots 5$) has weights $K_i$ and bias $b_i$. These are composed of a Descriptor and Modulators [S1]:
+*   **Descriptor ($K^d_i, b^d_i$):** Shared across all views. Stores common scene information [S1].
+*   **Modulator ($K^{m}_{u,v}, b^{m}_{u,v}$):** Switched per view. Stores view-specific information [S1].
+
+**Directional Allocation:**
+To reduce parameters, modulators are not allocated per $(u,v)$ pair but split along orthogonal angular directions $u$ (horizontal) and $v$ (vertical) [S1]:
+*   $K^{m}_{u,v} = K^{m}_{u} \oplus K^{m}_{v}$ (Concatenation in the last dimension) [S1].
+*   $b^{m}_{u,v} = b^{m}_{u} + b^{m}_{v}$ (Element-wise addition) [S1].
+*   The channel count for $K^{m}_{u}$ and $K^{m}_{v}$ is half that of a full modulator $K^{m}_{u,v}$ [S1].
+
+**Tensor Sizes:**
+*   $K^d_i, K^{m}_{u}, K^{m}_{v}$: Size $k \times k \times C_{in} \times C_{out}$ (where $k=3$ for L1-L5) [S1].
+*   $K_i$: Size $k \times k \times C_{in} \times (C_{out}^{d} + C_{out}^{m})$ [S1].
+*   $b_i$: Size $C_{out}^{d} + C_{out}^{m}$ [S1].
+*   $C_{in}, C_{out}$: Input and output channels for the layer [S1].
+
+### Parameters
+*   **Total Parameter Count ($N$):**
+    $$ N \approx l k^2 C_{in} \left[ \frac{1}{2} (U + V) C_{out} + C_{out} \right] $$
+    Where:
+    *   $l$: Number of layers (5 for the modulated layers) [S1].
+    *   $k$: Kernel size (3) [S1].
+    *   $C_{in}$: Input channels [S1].
+    *   $C_{out}$: Output channels [S1].
+    *   $U, V$: Angular resolutions (number of views in horizontal and vertical directions) [S1].
+    *   Note: The modulator parameters scale with $\frac{1}{2}(U+V)$ instead of $UV$ [S1].
+
+### Numbered Steps
+
+1.  **Initialization:** Initialize descriptor weights $K^d_i, b^d_i$ and modulator weights $K^{m}_{u}, b^{m}_{u}, K^{m}_{v}, b^{m}_{v}$ for all layers $i=1 \dots 5$ and angular indices $u \in [0, U-1], v \in [0, V-1]$ [S1].
+2.  **Sampling:** Randomly select an angular position $(u, v)$ and retrieve the corresponding ground truth SAI $I_{u,v}$ from the light field $L$ [S1].
+3.  **Noise Generation:** Generate a uniform noise tensor $\epsilon$ with the same spatial dimensions as $I_{u,v}$ [S1].
+4.  **Modulator Selection:** Retrieve the modulator weights $K^{m}_{u}, K^{m}_{v}$ and biases $b^{m}_{u}, b^{m}_{v}$ corresponding to the selected $(u, v)$ [S1].
+5.  **Kernel Assembly:** For each layer $i=1 \dots 5$, assemble the effective kernel $K_i$ and bias $b_i$:
+    *   $K_i = K^d_i \oplus (K^{m}_{u} \oplus K^{m}_{v})$
+    *   $b_i = b^d_i + b^{m}_{u} + b^{m}_{v}$
+    *   (Note: Concatenation $\oplus$ occurs in the last dimension for kernels; addition for biases) [S1].
+6.  **Forward Pass:** Feed $\epsilon$ through the network using the assembled kernels and biases:
+    *   Pass through L1–L4: Conv3x3 (dilation 2) $\rightarrow$ Bicubic Upsample (scale 2) $\rightarrow$ BN $\rightarrow$ GELU.
+    *   Pass through L5: Conv3x3 (dilation 1) $\rightarrow$ BN $\rightarrow$ GELU.
+    *   Pass through Decoder: Conv1x1 $\rightarrow$ Sigmoid.
+    *   Output is $\hat{I}_{u,v}$ [S1].
+7.  **Loss Computation:** Compute the Mean Square Error (MSE) between $\hat{I}_{u,v}$ and $I_{u,v}$:
+    $$ E = \frac{1}{N_p} \sum (\hat{I}_{u,v} - I_{u,v})^2 $$
+    Where $N_p$ is the number of pixels [S1].
+8.  **Optimization:** Update all weights (descriptors and modulators) via backpropagation to minimize $E$ [S1].
+9.  **Iteration:** Repeat steps 2–8 for a new random SAI [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class KernelModulatedLightField(nn.Module):
+    def __init__(self, U, V, C_in, C_out, l=5, k=3):
+        """
+        U: Horizontal angular resolution
+        V: Vertical angular resolution
+        C_in: Input channels for convolution
+        C_out: Output channels for convolution
+        l: Number of modulated layers (1 to 5)
+        k: Kernel size (3)
+        """
+        super().__init__()
+        self.U = U
+        self.V = V
+        self.l = l
+        self.k = k
+        
+        # Descriptor parameters (shared)
+        # Descriptors have C_out channels
+        self.desc_kernels = nn.ParameterList([
+            nn.Parameter(torch.randn(C_in, C_out, k, k)) for _ in range(l)
+        ])
+        self.desc_biases = nn.ParameterList([
+            nn.Parameter(torch.zeros(C_out)) for _ in range(l)
+        ])
+        
+        # Modulator parameters (split by direction)
+        # Each directional modulator has C_out / 2 channels
+        half_c_out = C_out // 2
+        
+        # Horizontal modulators: U instances
+        self.mod_kernels_u = nn.ParameterList([
+            nn.Parameter(torch.randn(C_in, half_c_out, k, k)) for _ in range(U)
+        ])
+        self.mod_biases_u = nn.ParameterList([
+            nn.Parameter(torch.zeros(half_c_out)) for _ in range(U)
+        ])
+        
+        # Vertical modulators: V instances
+        self.mod_kernels_v = nn.ParameterList([
+            nn.Parameter(torch.randn(C_in, half_c_out, k, k)) for _ in range(V)
+        ])
+        self.mod_biases_v = nn.ParameterList([
+            nn.Parameter(torch.zeros(half_c_out)) for _ in range(V)
+        ])
+        
+        # Decoder layers (no modulation)
+        self.decoder_conv = nn.Conv2d(C_out, 3, kernel_size=1, stride=1)
+        self.sigmoid = nn.Sigmoid()
+        
+        # Batch Norms for L1-L5
+        self.bn_list = nn.ModuleList([
+            nn.BatchNorm2d(C_out) for _ in range(l)
+        ])
+        
+        # Bicubic upsampling
+        self.upsample = nn.Upsample(scale_factor=2, mode='bicubic', align_corners=False)
+
+    def forward(self, epsilon, u_idx, v_idx):
+        """
+        epsilon: Noise tensor [B, C_in, H, W]
+        u_idx: Integer index for horizontal view [B]
+        v_idx: Integer index for vertical view [B]
+        Returns: Predicted SAI [B, 3, H_out, W_out]
+        """
+        x = epsilon
+        batch_size = x.size(0)
+        
+        for i in range(self.l):
+            # 1. Assemble Kernel: Descriptor + Modulator U + Modulator V
+            # K_i = K^d_i || K^m_u || K^m_v
+            # Bias_i = b^d_i + b^m_u + b^m_v
+            
+            # Get descriptors
+            k_d = self.desc_kernels[i] # [C_in, C_out, k, k]
+            b_d = self.desc_biases[i]  # [C_out]
+            
+            # Get modulators for current view
+            # Note: In practice, gather from parameter lists based on u_idx, v_idx
+            # For simplicity in pseudocode, assuming single view per call or batched gather
+            k_m_u = self.mod_kernels_u[u_idx] # [C_in, half_c_out, k, k]
+            b_m_u = self.mod_biases_u[u_idx]  # [half_c_out]
+            
+            k_m_v = self.mod_kernels_v[v_idx] # [C_in, half_c_out, k, k]
+            b_m_v = self.mod_biases_v[v_idx]  # [half_c_out]
+            
+            # Concatenate kernels along channel dimension (dim 1)
+            # Shape: [C_in, C_out + half_c_out + half_c_out, k, k] -> [C_in, C_out, k, k] effectively if we sum channels?
+            # The source says K_i = K^d_i || K^m_{u,v}. And K^m_{u,v} = K^m_u || K^m_v.
+            # So total output channels = C_out (desc) + half_c_out (u) + half_c_out (v) = C_out + C_out = 2*C_out?
+            # Wait, source says: "K^d_i and K^m_{u,v} have sizes ... C_out".
+            # And "K^m_{u,v} = K^m_u || K^m_v".
+            # If K^m_u and K^m_v have half channels, their concatenation has C_out channels.
+            # So K_i concatenates K^d (C_out) and K^m (C_out). Total output channels = 2 * C_out?
+            # Let's re-read carefully: "K_i = K^d_i || K^m_{u,v}".
+            # "K^m_{u,v} = K^m_u || K^m_v".
+            # "number of channels of K^m_u and K^m_v is half of that of K^m_{u,v}".
+            # So if K^m_{u,v} has C_out channels, K^m_u has C_out/2.
+            # K_i has C_out (desc) + C_out (mod) = 2*C_out output channels?
+            # But the next layer expects C_in to match previous C_out.
+            # Usually INRs keep channel count constant or change it.
+            # Let's assume the network maintains a feature dimension C_feat.
+            # Let C_feat be the internal channel size.
+            # K^d: [C_in, C_feat, k, k]
+            # K^m_u: [C_in, C_feat/2, k, k]
+            # K^m_v: [C_in, C_feat/2, k, k]
+            # K_i: [C_in, C_feat + C_feat/2 + C_feat/2, k, k] = [C_in, 2*C_feat, k, k]
+            # This implies the channel dimension doubles at each layer? Or C_in changes?
+            # Source Table I (not provided in text but referenced) likely details this.
+            # However, standard practice in such papers is often keeping channels constant or halving.
+            # Given "C_in" and "C_out" in formula, let's stick to the formula's implication:
+            # The output of layer i has C_out channels.
+            # If K_i is [C_in, C_out, k, k], then K^d is [C_in, C_out_d, k, k] and K^m is [C_in, C_out_m, k, k].
+            # C_out_d + C_out_m = C_out.
+            # If C_out_m is split into U and V halves, then C_out_m_u = C_out_m_v = C_out_m / 2.
+            
+            # Re-evaluating based on "K_i = K^d_i || K^m_{u,v}"
+            # If K^d is [C_in, C_d, k, k] and K^m is [C_in, C_m, k, k].
+            # Then K_i is [C_in, C_d + C_m, k, k].
+            # The output of the conv is C_d + C_m channels.
+            # The next layer's C_in must equal C_d + C_m.
+            
+            # Let's define C_feat as the target output channel count for the layer.
+            # We need to decide how C_d and C_m are split.
+            # The source doesn't explicitly state the ratio of C_d to C_m.
+            # It only states the modulator split.
+            # [G] Assuming equal split for descriptors and modulators for implementation completeness, 
+            # or that C_d and C_m are hyperparameters. Let's assume C_d = C_m = C_feat / 2.
+            
+            C_feat = C_out # Output channels of this layer
+            C_d = C_feat // 2
+            C_m = C_feat // 2
+            C_m_half = C_m // 2
+            
+            # Resize tensors if necessary or assume they are stored with correct shapes
+            # In PyTorch, we might need to pad/trim or store them with full C_m shape and slice.
+            # Here we assume the parameters are stored with their specific shapes.
+            
+            k_d = self.desc_kernels[i][:, :C_d, :, :] # [C_in, C_d, k, k]
+            b_d = self.desc_biases[i][:C_d]           # [C_d]
+            
+            k_m_u = self.mod_kernels_u[u_idx][:, :C_m_half, :, :] # [C_in, C_m_half, k, k]
+            b_m_u = self.mod_biases_u[u_idx][:C_m_half]           # [C_m_half]
+            
+            k_m_v = self.mod_kernels_v[v_idx][:, :C_m_half, :, :] # [C_in, C_m_half, k, k]
+            b_m_v = self.mod_biases_v[v_idx][:C_m_half]           # [C_m_half]
+            
+            # Concatenate modulators
+            k_m = torch.cat([k_m_u, k_m_v], dim=1) # [C_in, C_m, k, k]
+            b_m = b_m_u + b_m_v                    # [C_m]
+            
+            # Concatenate descriptor and modulator
+            k_i = torch.cat([k_d, k_m], dim=1)     # [C_in, C_feat, k, k]
+            b_i = torch.cat([b_d, b_m], dim=0)     # [C_feat]
+            
+            # Convolution
+            # Dilation is 2 for L1-L4, 1 for L5
+            dilation = 2 if i < self.l - 1 else 1
+            
+            x = F.conv2d(x, k_i, bias=b_i, stride=1, padding=k//2, dilation=dilation)
+            
+            # BN, GELU, Upsample
+            if i < self.l - 1:
+                x = self.bn_list[i](x)
+                x = F.gelu(x)
+                x = self.upsample(x)
+            else:
+                # L5
+                x = self.bn_list[i](x)
+                x = F.gelu(x)
+                
+        # Decoder
+        x = self.decoder_conv(x)
+        x = self.sigmoid(x)
+        
+        return x
+
+def train_step(model, light_field, u, v, optimizer):
+    """
+    light_field: Tensor [U, V, H, W, 3]
+    u, v: Indices of the selected view
+    """
+    # 1. Select SAI
+    I_gt = light_field[u, v] # [H, W, 3]
+    
+    # 2. Generate Noise
+    epsilon = torch.rand_like(I_gt).permute(2, 0, 1).unsqueeze(0) # [1, 3, H, W]
+    
+    # 3. Forward
+    I_pred = model(epsilon, u, v)
+    
+    # 4. Loss
+    loss = F.mse_loss(I_pred, I_gt.permute(0, 2, 3, 1).unsqueeze(0)) # Assuming I_gt is [H,W,3]
+    
+    # 5. Backprop
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    
+    return loss.item()
+```
+
+### Edge Cases and Pitfalls
+*   **Parameter Explosion:** Allocating modulators to each $(u,v)$ pair results in parameters proportional to $UV$, causing failure in compression for high angular resolution light fields [S1]. Directional allocation is mandatory [S1].
+*   **Training Instability:** Previous GRU-based methods suffered from unstable training, memory overflow, and degraded performance with increased baseline [S1]. KMNR avoids this by using static modulators rather than recurrent state [S1].
+*   **Input Size Flexibility:** Convolutional layers are used instead of fully connected layers to allow flexibility for different input sizes [S1].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Memory:** Memory consumption remains low because the network generates one SAI in each forward pass, switching modulators rather than storing all views explicitly [S1].
+*   **Parameters:** The total number of parameters $N$ scales with $\frac{1}{2}(U+V)$ for modulators, significantly reducing storage compared to $UV$ [S1].
+
+### Measured Performance
+*   Outperforms state-of-the-art (SOTA) methods quantitatively and qualitatively for light field compression [S1].
+*   Shows better generalization on different types of data and superior complexity/resource consumption compared to other INR-based methods [S1].
+
+### Strengths and Limitations
+*   **Strengths:** Compact representation, avoids parameter explosion, flexible input sizes, enables view synthesis via modulator transfer [S1].
+*   **Limitations:** Requires training on the light field; performance depends on the quality of the descriptor/modulator split [S1].
+
+### When to Use
+*   Use for light field compression and view synthesis where high angular resolution is present [S1].
+*   Do not use if the light field has very low angular resolution where the overhead of the network might not be justified compared to simple storage [Not given in the sources].
+
+## Background
+
+### Origin
+The method was proposed in "Learning Kernel-Modulated Neural Representation for Efficient Light Field Compression" [S1]. It addresses limitations of previous INR-based methods like [59] and GRU-based methods [46] which suffered from instability and memory issues [S1].
+
+### History and Development
+The approach builds on the idea of implicit neural representations using uniform noise [S1]. It improves upon fully connected INRs by using convolutional layers for spatial flexibility [S1]. The key innovation is the complementary kernel design with directional modulator allocation to handle high-dimensional angular data efficiently [S1].
+
+### Usage
+Used for light field compression and view synthesis (generating dense views of new light fields via transferred modulators) [S1].
+
+## Sources
+
+[S1] Learning Kernel-Modulated Neural Representation for Efficient Light Field Compression, https://hal.science/hal-04627349v1, fetched 2026-10-26

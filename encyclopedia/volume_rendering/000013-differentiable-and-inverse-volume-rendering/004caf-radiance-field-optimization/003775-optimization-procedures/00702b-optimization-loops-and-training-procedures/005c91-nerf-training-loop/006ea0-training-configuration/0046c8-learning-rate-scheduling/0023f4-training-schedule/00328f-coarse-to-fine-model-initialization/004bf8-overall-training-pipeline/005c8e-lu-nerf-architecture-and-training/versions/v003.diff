@@ -1,0 +1,151 @@
+--- v002.md
++++ v003.md
+@@ -12,5 +12,5 @@
+ **Data Structures:**
+ *   **Camera Poses:** For a mini-scene with $N$ images, poses are stored as a set of world-to-camera rotation matrices $\{R_i\}_{i=1}^N$ and translation vectors $\{t_i\}_{i=1}^N$ [S1]. Exact memory layout and bit-packing are Not given in the sources.
+-*   **Neural Field:** A compact 4-layer Multi-Layer Perceptron (MLP) [S1]. It does not use positional encoding and does not condition on view directions (view-independent) [S1]. Exact memory layout and bit-packing are Not given in the sources.
++*   **Neural Field:** A compact 4-layer Multi-Layer Perceptron (MLP) [S1]. It does not use positional encoding and does not condition on view directions (view-independent) [S1].
+ *   **Ray Sampling:** 2048 rays are sampled per mini-batch [S1].
+ 
+@@ -26,5 +26,5 @@
+ 
+ 1.  **Initialization:** Initialize camera poses $\{R_i, t_i\}$ to identity [S1]. Initialize the 4-layer MLP weights [S1]. Do not apply positional encoding or view-direction conditioning to the MLP [S1].
+-2.  **LU-NeRF-1 Training (Local Optimization):** Sample 2048 rays per mini-batch [S1]. Compute photometric $\ell_2$ loss between rendered and ground-truth pixels [S1]. Apply depth regularization on $2 \times 2$ patches [S1]. Jointly optimize camera poses and MLP parameters using the BARF learning rate schedule [S1]. Terminate training if the average change of camera rotations in the mini-scene is less than $0.125^\circ$ within 5,000 iterations [S1].
++2.  **LU-NeRF-1 Training (Local Optimization):** Sample 2048 rays per mini-batch [S1]. Compute photometric $\ell_2$ loss between rendered and ground-truth pixels [S1]. Apply depth regularization on $2 \times 2$ patches [S1]. Jointly optimize camera poses and MLP parameters using the BARF learning rate schedule [S1]. Terminate training if the average change of camera rotations in the mini-scene is less than $0.125^\circ$ after 5,000 iterations [S1].
+ 3.  **Mirror-Symmetry Ambiguity Mitigation (LU-NeRF-2):** Take estimated poses $\{R_i\}$ from LU-NeRF-1 [S1]. Generate reflected cameras $\{R_\pi R_i\}$, where $R_\pi$ is a rotation around the optical axis [S1]. Train two new models from scratch: one initialized with original poses, one with reflected poses [S1]. Train for 5,000 iterations with frozen initial poses [S1]. Jointly optimize camera poses and neural fields for 45,000 iterations [S1]. Resolve ambiguity by selecting the model with the smallest photometric training loss [S1].
+ 4.  **Global Synchronization and Refinement:** Bring local mini-scene poses into a global reference frame using pose synchronization (e.g., Shonan averaging) [S1]. Perform a final global optimization of all camera poses and the neural scene representation using all images from the entire scene [S1].
+@@ -35,93 +35,77 @@
+ def train_lu_nerf_mini_scene(images, mini_scene_indices):
+     # 1. Initialization
+-    # Poses initialized to identity [S1]
+-    poses = [IdentityPose() for _ in mini_scene_indices]
+-    # Compact 4-layer MLP without positional encoding or view-direction conditioning [S1]
++    poses = [{'R': [[1,0,0],[0,1,0],[0,0,1]], 't': [0,0,0]} for _ in mini_scene_indices]
+     mlp = Compact4LayerMLP()
+-    previous_poses = copy(poses)
+-    max_iterations = 100000  # Not given in the sources.
++    previous_poses = [{'R': [row[:] for row in p['R']], 't': p['t'][:]} for p in poses]
+ 
+     # 2. LU-NeRF-1 Training
+-    for iteration in range(max_iterations):
+-        # Sample 2048 rays per mini-batch [S1]
++    for iteration in range(100000):
+         rays = sample_rays(images, mini_scene_indices, num_rays=2048)
+-        # Render colors and depths
+         rendered_colors, rendered_depths = render_rays(rays, poses, mlp)
+ 
+-        # Compute photometric L2 loss [S1]
+-        photometric_loss = mean_squared_error(rendered_colors, rays.gt_colors)
+-        # Apply depth regularization on 2x2 patches [S1]
+-        depth_reg_loss = apply_depth_regularization(rendered_depths, patch_size=(2, 2))
++        photometric_loss = sum((c - g)**2 for c, g in zip(rendered_colors, rays.gt_colors)) / len(rendered_colors)
++        depth_reg_loss = compute_patch_smoothness(rendered_depths, patch_size=(2, 2))
+ 
+-        # Depth regularization weight is 10x photometric loss [S1]
+         total_loss = photometric_loss + 10.0 * depth_reg_loss
++        gradient_step(poses, mlp, total_loss)
+ 
+-        # Optimize poses and MLP with BARF learning rate schedule [S1]
+-        optimize(poses, mlp, total_loss)
+-
+-        # Check termination condition [S1]
+-        avg_rotation_change = compute_avg_rotation_change(poses, previous_poses)
+-        if avg_rotation_change < 0.125 and iteration >= 5000:
++        avg_rotation_change = sum(rotation_distance(c['R'], p['R']) for c, p in zip(poses, previous_poses)) / len(poses)
++        if iteration >= 5000 and avg_rotation_change < 0.125:
+             break
+-        previous_poses = copy(poses)
++        previous_poses = [{'R': [row[:] for row in p['R']], 't': p['t'][:]} for p in poses]
+ 
+     estimated_poses = poses
+ 
+     # 3. Mirror-Symmetry Ambiguity Mitigation (LU-NeRF-2)
+-    # Generate reflected cameras {R_pi R_i} [S1]
+-    reflected_poses = [reflect_pose(p, axis='optical') for p in estimated_poses]
++    reflected_poses = [reflect_rotation_around_optical_axis(p) for p in estimated_poses]
+ 
+-    # Train two models from scratch [S1]
+     model_a_poses, model_a_mlp = train_lu_nerf_2_stage(estimated_poses, images, mini_scene_indices)
+     model_b_poses, model_b_mlp = train_lu_nerf_2_stage(reflected_poses, images, mini_scene_indices)
+ 
+-    # Select model with smallest photometric training loss [S1]
+     loss_a = compute_photometric_loss(model_a_poses, model_a_mlp, images, mini_scene_indices)
+     loss_b = compute_photometric_loss(model_b_poses, model_b_mlp, images, mini_scene_indices)
+ 
+     if loss_a < loss_b:
+-        final_poses = model_a_poses
+-        final_mlp = model_a_mlp
++        return model_a_poses, model_a_mlp
+     else:
+-        final_poses = model_b_poses
+-        final_mlp = model_b_mlp
+-
+-    return final_poses, final_mlp
++        return model_b_poses, model_b_mlp
+ 
+ def train_lu_nerf_2_stage(initial_poses, images, mini_scene_indices):
+-    poses = copy(initial_poses)
+-    mlp = Compact4LayerMLP() # Scene representation started from scratch [S1]
++    poses = [{'R': [row[:] for row in p['R']], 't': p['t'][:]} for p in initial_poses]
++    mlp = Compact4LayerMLP()
+ 
+-    # Stage 1: 5k iterations with frozen initial poses [S1]
+     for iteration in range(5000):
+         rays = sample_rays(images, mini_scene_indices, num_rays=2048)
+         rendered_colors, rendered_depths = render_rays(rays, poses, mlp)
+-        photometric_loss = mean_squared_error(rendered_colors, rays.gt_colors)
+-        depth_reg_loss = apply_depth_regularization(rendered_depths, patch_size=(2, 2))
++        photometric_loss = sum((c - g)**2 for c, g in zip(rendered_colors, rays.gt_colors)) / len(rendered_colors)
++        depth_reg_loss = compute_patch_smoothness(rendered_depths, patch_size=(2, 2))
+         total_loss = photometric_loss + 10.0 * depth_reg_loss
+-        optimize(mlp, total_loss) # Poses frozen
++        gradient_step(mlp, total_loss)
+ 
+-    # Stage 2: 45k iterations joint optimization [S1]
+     for iteration in range(45000):
+         rays = sample_rays(images, mini_scene_indices, num_rays=2048)
+         rendered_colors, rendered_depths = render_rays(rays, poses, mlp)
+-        photometric_loss = mean_squared_error(rendered_colors, rays.gt_colors)
+-        depth_reg_loss = apply_depth_regularization(rendered_depths, patch_size=(2, 2))
++        photometric_loss = sum((c - g)**2 for c, g in zip(rendered_colors, rays.gt_colors)) / len(rendered_colors)
++        depth_reg_loss = compute_patch_smoothness(rendered_depths, patch_size=(2, 2))
+         total_loss = photometric_loss + 10.0 * depth_reg_loss
+-        optimize(poses, mlp, total_loss) # Joint optimization
++        gradient_step(poses, mlp, total_loss)
+ 
+     return poses, mlp
+ 
+ # Helper definitions
+-def IdentityPose(): return {'R': [[1,0,0],[0,1,0],[0,0,1]], 't': [0,0,0]}
+-def copy(pose_list): return [{'R': [row[:] for row in p['R']], 't': p['t'][:]} for p in pose_list]
++def Compact4LayerMLP(): return NeuralNetwork(layers=[256, 256, 256, 3])
+ def sample_rays(images, indices, num_rays): return generate_random_pixel_coords(images, indices, num_rays)
+-def render_rays(rays, poses, mlp): return mlp.forward(rays, poses)
+-def mean_squared_error(pred, target): return sum((p - t) ** 2 for p, t in zip(pred, target)) / len(pred)
+-def apply_depth_regularization(depths, patch_size): return compute_patch_smoothness(depths, patch_size)
+-def optimize(poses, mlp, loss): return gradient_step(poses, mlp, loss)
+-def compute_avg_rotation_change(current, previous): return sum(rotation_distance(c, p) for c, p in zip(current, previous)) / len(current)
+-def reflect_pose(pose, axis): return reflect_rotation_around_axis(pose['R'], axis)
+-def compute_photometric_loss(poses, mlp, images, indices): return mean_squared_error(render_rays(sample_rays(images, indices, 2048), poses, mlp)[0], sample_rays(images, indices, 2048).gt_colors)
++def render_rays(rays, poses, mlp): return mlp.forward(rays.xyz, poses)
++def compute_patch_smoothness(depths, patch_size): return sum(depths[i] - depths[j] for i, j in patch_pairs(depths, patch_size))
++def gradient_step(params, loss): params.update(learning_rate * gradient(loss))
++def rotation_distance(R1, R2): return angle_between_rotations(R1, R2)
++def reflect_rotation_around_optical_axis(pose):
++    R = pose['R']
++    theta = 180.0
++    return {'R': multiply_rotations(rotation_z(theta), R), 't': pose['t']}
++def compute_photometric_loss(poses, mlp, images, indices):
++    rays = sample_rays(images, indices, 2048)
++    colors, _ = render_rays(rays, poses, mlp)
++    return sum((c - g)**2 for c, g in zip(colors, rays.gt_colors)) / len(colors)
+ ```
+ 
+@@ -130,4 +114,7 @@
+ ### Mirror-symmetry ambiguity mitigation
+ This variant addresses the degeneracy where distant small objects appear affine, causing ambiguity between a scene and its reflection [S1]. It is chosen when the initial local optimization produces inverted disparity maps and reflected poses [S1]. It resolves the ambiguity by training two additional models initialized with original and reflected camera poses, then selecting the one with the lowest photometric training loss [S1]. See [LU-NeRF Architecture and Training](13114-lu-nerf-architecture-and-training.md) for the full training pipeline.
++
++### Global Refinement
++This variant performs a final global optimization of all camera poses and the neural scene representation using all images from the entire scene after local synchronization [S1]. It is chosen to align local mini-scene estimates into a consistent global reference frame and improve overall reconstruction accuracy [S1].
+ 
+ ## Operating characteristics

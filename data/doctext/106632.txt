@@ -1,0 +1,1185 @@
+diff --git i/packages/app/src/vis-packs/core/visualizations.ts w/packages/app/src/vis-packs/core/visualizations.ts
+index 05dbebb4..c6541b36 100644
+--- i/packages/app/src/vis-packs/core/visualizations.ts
++++ w/packages/app/src/vis-packs/core/visualizations.ts
+@@ -4,6 +4,7 @@ import {
+   hasCompoundType,
+   hasMinDims,
+   hasNonNullShape,
++  hasNumDims,
+   hasNumericLikeType,
+   hasNumericType,
+   hasPrintableCompoundType,
+@@ -13,6 +14,7 @@ import {
+ import { type Dataset } from '@h5web/shared/hdf5-models';
+ import {
+   FiActivity,
++  FiBox,
+   FiCode,
+   FiCpu,
+   FiGrid,
+@@ -43,6 +45,8 @@ import {
+ } from './containers';
+ import { SurfaceConfigProvider } from './surface/config';
+ import SurfaceVisContainer from './surface/SurfaceVisContainer';
++import { VolumeRenderingConfigProvider } from './volume/config';
++import VolumeRenderingVisContainer from './volume/VolumeRenderingVisContainer';
+ 
+ export enum Vis {
+   Raw = 'Raw',
+@@ -55,6 +59,7 @@ export enum Vis {
+   RGB = 'RGB',
+   Compound = 'Compound',
+   Surface = 'Surface',
++  VolumeRendering = 'VolumeRendering',
+ }
+ 
+ export interface CoreVisDef extends VisDef {
+@@ -188,4 +193,22 @@ export const CORE_VIS = {
+       );
+     },
+   },
++
++  [Vis.VolumeRendering]: {
++    name: 'Volume',
++    Icon: FiBox,
++    Container: VolumeRenderingVisContainer,
++    ConfigProvider: VolumeRenderingConfigProvider,
++    supportsDataset: (dataset) => {
++      // @ts-expect-error - Untyped global flag
++      const enableExperimentalVis = globalThis.H5WEB_EXPERIMENTAL as boolean;
++
++      return (
++        enableExperimentalVis &&
++        hasNumericType(dataset) &&
++        hasArrayShape(dataset) &&
++        hasNumDims(dataset, 3)
++      );
++    },
++  },
+ } satisfies Record<Vis, CoreVisDef>;
+diff --git i/packages/app/src/vis-packs/core/volume/MappedVolumeRenderingVis.tsx w/packages/app/src/vis-packs/core/volume/MappedVolumeRenderingVis.tsx
+new file mode 100644
+index 00000000..6a185999
+--- /dev/null
++++ w/packages/app/src/vis-packs/core/volume/MappedVolumeRenderingVis.tsx
+@@ -0,0 +1,71 @@
++import {
++  useDomain,
++  useSafeDomain,
++  useVisDomain,
++  VolumeRenderingVis,
++} from '@h5web/lib';
++import {
++  type ArrayShape,
++  type ArrayValue,
++  type Dataset,
++  type NumericType,
++} from '@h5web/shared/hdf5-models';
++import { createPortal } from 'react-dom';
++
++import visualizerStyles from '../../../visualizer/Visualizer.module.css';
++import { useBaseArray, useToNumArray } from '../hooks';
++import { DEFAULT_DOMAIN } from '../utils';
++import { type VolumeRenderingConfig } from './config';
++import VolumeRenderingToolbar from './VolumeRenderingToolbar';
++
++interface Props {
++  dataset: Dataset<ArrayShape, NumericType>;
++  value: ArrayValue<NumericType>;
++  toolbarContainer: HTMLDivElement | undefined;
++  config: VolumeRenderingConfig;
++}
++
++function MappedVolumeRenderingVis(props: Props) {
++  const { dataset, value, toolbarContainer, config } = props;
++  const {
++    customDomain,
++    colorMap,
++    scaleType,
++    invertColorMap,
++    mode,
++    opacityScale,
++    steps,
++  } = config;
++
++  const numArray = useToNumArray(value);
++  const dataArray = useBaseArray(numArray, dataset.shape);
++
++  const dataDomain = useDomain(dataArray, scaleType) || DEFAULT_DOMAIN;
++  const visDomain = useVisDomain(customDomain, dataDomain);
++  const [safeDomain] = useSafeDomain(visDomain, dataDomain, scaleType);
++
++  return (
++    <>
++      {toolbarContainer &&
++        createPortal(
++          <VolumeRenderingToolbar dataDomain={dataDomain} config={config} />,
++          toolbarContainer,
++        )}
++
++      <VolumeRenderingVis
++        className={visualizerStyles.vis}
++        title={dataset.name}
++        dataArray={dataArray}
++        domain={safeDomain}
++        colorMap={colorMap}
++        scaleType={scaleType}
++        invertColorMap={invertColorMap}
++        mode={mode}
++        opacityScale={opacityScale}
++        steps={steps}
++      />
++    </>
++  );
++}
++
++export default MappedVolumeRenderingVis;
+diff --git i/packages/app/src/vis-packs/core/volume/VolumeRenderingToolbar.tsx w/packages/app/src/vis-packs/core/volume/VolumeRenderingToolbar.tsx
+new file mode 100644
+index 00000000..964d1656
+--- /dev/null
++++ w/packages/app/src/vis-packs/core/volume/VolumeRenderingToolbar.tsx
+@@ -0,0 +1,115 @@
++import {
++  ColorMapSelector,
++  type Domain,
++  DomainWidget,
++  ScaleSelector,
++  Selector,
++  Separator,
++  SnapshotBtn,
++  Toolbar,
++  VolumeRenderMode,
++} from '@h5web/lib';
++import { COLOR_SCALE_TYPES } from '@h5web/shared/vis-utils';
++
++import { type VolumeRenderingConfig } from './config';
++
++interface Props {
++  dataDomain: Domain;
++  config: VolumeRenderingConfig;
++}
++
++const MODE_OPTIONS: VolumeRenderMode[] = [
++  VolumeRenderMode.Mip,
++  VolumeRenderMode.Dvr,
++];
++
++const MODE_LABELS: Record<VolumeRenderMode, string> = {
++  [VolumeRenderMode.Mip]: 'Maximum intensity',
++  [VolumeRenderMode.Dvr]: 'Direct volume',
++};
++
++const QUALITY_OPTIONS = ['Low', 'Medium', 'High'] as const;
++type Quality = (typeof QUALITY_OPTIONS)[number];
++
++const QUALITY_TO_STEPS: Record<Quality, number> = {
++  Low: 96,
++  Medium: 192,
++  High: 384,
++};
++
++function stepsToQuality(steps: number): Quality {
++  if (steps <= 128) {
++    return 'Low';
++  }
++  if (steps <= 256) {
++    return 'Medium';
++  }
++  return 'High';
++}
++
++function VolumeRenderingToolbar(props: Props) {
++  const { dataDomain, config } = props;
++  const {
++    customDomain,
++    colorMap,
++    scaleType,
++    invertColorMap,
++    mode,
++    steps,
++    setCustomDomain,
++    setColorMap,
++    setScaleType,
++    toggleColorMapInversion,
++    setMode,
++    setSteps,
++  } = config;
++
++  return (
++    <Toolbar>
++      <DomainWidget
++        dataDomain={dataDomain}
++        customDomain={customDomain}
++        scaleType={scaleType}
++        onCustomDomainChange={setCustomDomain}
++      />
++      <Separator />
++
++      <ColorMapSelector
++        value={colorMap}
++        onValueChange={setColorMap}
++        invert={invertColorMap}
++        onInversionChange={toggleColorMapInversion}
++      />
++      <Separator />
++
++      <ScaleSelector
++        value={scaleType}
++        onScaleChange={setScaleType}
++        options={COLOR_SCALE_TYPES}
++      />
++      <Separator />
++
++      <Selector
++        label="Mode"
++        value={mode}
++        onChange={setMode}
++        options={MODE_OPTIONS}
++        renderOption={(opt) => MODE_LABELS[opt]}
++      />
++      <Separator />
++
++      <Selector
++        label="Quality"
++        value={stepsToQuality(steps)}
++        onChange={(quality: Quality) => setSteps(QUALITY_TO_STEPS[quality])}
++        options={QUALITY_OPTIONS as unknown as Quality[]}
++        renderOption={(opt) => opt}
++      />
++      <Separator />
++
++      <SnapshotBtn />
++    </Toolbar>
++  );
++}
++
++export default VolumeRenderingToolbar;
+diff --git i/packages/app/src/vis-packs/core/volume/VolumeRenderingVisContainer.tsx w/packages/app/src/vis-packs/core/volume/VolumeRenderingVisContainer.tsx
+new file mode 100644
+index 00000000..bde4160c
+--- /dev/null
++++ w/packages/app/src/vis-packs/core/volume/VolumeRenderingVisContainer.tsx
+@@ -0,0 +1,40 @@
++import {
++  assertArrayShape,
++  assertDataset,
++  assertNumDims,
++  assertNumericType,
++} from '@h5web/shared/guards';
++
++import { type VisContainerProps } from '../../models';
++import VisBoundary from '../../VisBoundary';
++import ValueFetcher from '../ValueFetcher';
++import { useVolumeRenderingConfig } from './config';
++import MappedVolumeRenderingVis from './MappedVolumeRenderingVis';
++
++function VolumeRenderingVisContainer(props: VisContainerProps) {
++  const { entity, toolbarContainer } = props;
++  assertDataset(entity);
++  assertArrayShape(entity);
++  assertNumDims(entity, 3);
++  assertNumericType(entity);
++
++  const config = useVolumeRenderingConfig();
++
++  return (
++    <VisBoundary>
++      <ValueFetcher
++        dataset={entity}
++        render={(value) => (
++          <MappedVolumeRenderingVis
++            dataset={entity}
++            value={value}
++            toolbarContainer={toolbarContainer}
++            config={config}
++          />
++        )}
++      />
++    </VisBoundary>
++  );
++}
++
++export default VolumeRenderingVisContainer;
+diff --git i/packages/app/src/vis-packs/core/volume/config.tsx w/packages/app/src/vis-packs/core/volume/config.tsx
+new file mode 100644
+index 00000000..921b00f9
+--- /dev/null
++++ w/packages/app/src/vis-packs/core/volume/config.tsx
+@@ -0,0 +1,107 @@
++import { type CustomDomain, VolumeRenderMode } from '@h5web/lib';
++import { isDefined } from '@h5web/shared/guards';
++import {
++  type ColorScaleType,
++  type NoProps,
++  ScaleType,
++} from '@h5web/shared/vis-models';
++import { useMap } from '@react-hookz/web';
++import {
++  createContext,
++  type PropsWithChildren,
++  useContext,
++  useState,
++} from 'react';
++import { createStore, type StoreApi, useStore } from 'zustand';
++import { persist } from 'zustand/middleware';
++
++import { type ColorMap } from '../heatmap/models';
++
++export interface VolumeRenderingConfig {
++  customDomain: CustomDomain;
++  setCustomDomain: (customDomain: CustomDomain) => void;
++
++  colorMap: ColorMap;
++  setColorMap: (colorMap: ColorMap) => void;
++
++  invertColorMap: boolean;
++  toggleColorMapInversion: () => void;
++
++  scaleType: ColorScaleType;
++  setScaleType: (scaleType: ColorScaleType) => void;
++
++  mode: VolumeRenderMode;
++  setMode: (mode: VolumeRenderMode) => void;
++
++  steps: number;
++  setSteps: (steps: number) => void;
++
++  opacityScale: number;
++  setOpacityScale: (opacityScale: number) => void;
++}
++
++function createVolumeRenderingConfigStore() {
++  return createStore<VolumeRenderingConfig>()(
++    persist(
++      (set): VolumeRenderingConfig => ({
++        customDomain: [null, null],
++        setCustomDomain: (customDomain) => set({ customDomain }),
++
++        colorMap: 'Viridis',
++        setColorMap: (colorMap) => set({ colorMap }),
++
++        invertColorMap: false,
++        toggleColorMapInversion: () =>
++          set((state) => ({ invertColorMap: !state.invertColorMap })),
++
++        scaleType: ScaleType.Linear,
++        setScaleType: (scaleType) => set({ scaleType }),
++
++        mode: VolumeRenderMode.Mip,
++        setMode: (mode) => set({ mode }),
++
++        steps: 192,
++        setSteps: (steps) => set({ steps }),
++
++        opacityScale: 3,
++        setOpacityScale: (opacityScale) => set({ opacityScale }),
++      }),
++      {
++        name: 'h5web:volume-rendering',
++        version: 1,
++      },
++    ),
++  );
++}
++
++const StoreContext = createContext({} as StoreApi<VolumeRenderingConfig>);
++
++export function VolumeRenderingConfigProvider(
++  props: PropsWithChildren<NoProps>,
++) {
++  const { children } = props;
++  const [store] = useState(createVolumeRenderingConfigStore);
++
++  return (
++    <StoreContext.Provider value={store}>{children}</StoreContext.Provider>
++  );
++}
++
++export function useVolumeRenderingConfig(
++  initialSuggestedOpts: Partial<Pick<VolumeRenderingConfig, 'scaleType'>> = {},
++): VolumeRenderingConfig {
++  const suggestedOpts = useMap(
++    Object.entries(initialSuggestedOpts).filter(([, val]) => isDefined(val)),
++  );
++  const persistedConfig = useStore(useContext(StoreContext));
++  const { setScaleType: setPersistedScaleType } = persistedConfig;
++
++  return {
++    ...persistedConfig,
++    ...Object.fromEntries(suggestedOpts.entries()),
++    setScaleType: (scaleType: ColorScaleType) => {
++      setPersistedScaleType(scaleType);
++      suggestedOpts.delete('scaleType');
++    },
++  };
++}
+diff --git i/packages/lib/src/index.ts w/packages/lib/src/index.ts
+index 98a7f33a..69711dbb 100644
+--- i/packages/lib/src/index.ts
++++ w/packages/lib/src/index.ts
+@@ -256,3 +256,6 @@ export { default as SurfaceVis } from './vis/surface/SurfaceVis';
+ export type { SurfaceVisProps } from './vis/surface/SurfaceVis';
+ export { default as SurfaceMeshGeometry } from './vis/surface/surfaceMeshGeometry';
+ export { default as R3FCanvas } from './vis/shared/R3FCanvas';
++export { default as VolumeRenderingVis } from './vis/volume/VolumeRenderingVis';
++export type { VolumeRenderingVisProps } from './vis/volume/VolumeRenderingVis';
++export { VolumeRenderMode } from './vis/volume/models';
+diff --git i/packages/lib/src/vis/volume/OrbitCamera.tsx w/packages/lib/src/vis/volume/OrbitCamera.tsx
+new file mode 100644
+index 00000000..4141599d
+--- /dev/null
++++ w/packages/lib/src/vis/volume/OrbitCamera.tsx
+@@ -0,0 +1,129 @@
++import { invalidate, useThree } from '@react-three/fiber';
++import { useEffect, useRef } from 'react';
++import { MathUtils, PerspectiveCamera } from 'three';
++
++interface Props {
++  initialAzimuth?: number;
++  initialPolar?: number;
++  initialDistance?: number;
++  minDistance?: number;
++  maxDistance?: number;
++}
++
++const ROTATE_SPEED = 0.005;
++const ZOOM_SPEED = 0.001;
++
++function OrbitCamera(props: Props) {
++  const {
++    initialAzimuth = Math.PI / 4,
++    initialPolar = Math.PI / 2.6,
++    initialDistance = 2.4,
++    minDistance = 0.01,
++    maxDistance = 20,
++  } = props;
++
++  const { camera, gl } = useThree();
++  const azimuth = useRef(initialAzimuth);
++  const polar = useRef(initialPolar);
++  const distance = useRef(initialDistance);
++
++  useEffect(() => {
++    if (camera instanceof PerspectiveCamera) {
++      camera.near = 0.001;
++      camera.updateProjectionMatrix();
++    }
++  }, [camera]);
++
++  useEffect(() => {
++    function apply(): void {
++      const a = azimuth.current;
++      const p = polar.current;
++      const d = distance.current;
++      camera.position.set(
++        d * Math.sin(p) * Math.cos(a),
++        d * Math.cos(p),
++        d * Math.sin(p) * Math.sin(a),
++      );
++      camera.lookAt(0, 0, 0);
++      camera.updateProjectionMatrix();
++      invalidate();
++    }
++
++    apply();
++
++    const dom = gl.domElement;
++    let dragging = false;
++    let lastX = 0;
++    let lastY = 0;
++    let activePointerId: number | null = null;
++
++    function onPointerDown(e: PointerEvent): void {
++      if (e.button !== 0) {
++        return;
++      }
++      dragging = true;
++      lastX = e.clientX;
++      lastY = e.clientY;
++      activePointerId = e.pointerId;
++      dom.setPointerCapture(e.pointerId);
++    }
++
++    function onPointerUp(e: PointerEvent): void {
++      if (e.pointerId !== activePointerId) {
++        return;
++      }
++      dragging = false;
++      activePointerId = null;
++      try {
++        dom.releasePointerCapture(e.pointerId);
++      } catch {
++        /* pointer may already be released */
++      }
++    }
++
++    function onPointerMove(e: PointerEvent): void {
++      if (!dragging) {
++        return;
++      }
++      const dx = e.clientX - lastX;
++      const dy = e.clientY - lastY;
++      lastX = e.clientX;
++      lastY = e.clientY;
++      azimuth.current += dx * ROTATE_SPEED;
++      polar.current = MathUtils.clamp(
++        polar.current - dy * ROTATE_SPEED,
++        0.05,
++        Math.PI - 0.05,
++      );
++      apply();
++    }
++
++    function onWheel(e: WheelEvent): void {
++      e.preventDefault();
++      distance.current = MathUtils.clamp(
++        distance.current * Math.exp(e.deltaY * ZOOM_SPEED),
++        minDistance,
++        maxDistance,
++      );
++      apply();
++    }
++
++    dom.addEventListener('pointerdown', onPointerDown);
++    dom.addEventListener('pointerup', onPointerUp);
++    dom.addEventListener('pointercancel', onPointerUp);
++    dom.addEventListener('pointermove', onPointerMove);
++    dom.addEventListener('wheel', onWheel, { passive: false });
++
++    return () => {
++      dom.removeEventListener('pointerdown', onPointerDown);
++      dom.removeEventListener('pointerup', onPointerUp);
++      dom.removeEventListener('pointercancel', onPointerUp);
++      dom.removeEventListener('pointermove', onPointerMove);
++      dom.removeEventListener('wheel', onWheel);
++    };
++  }, [camera, gl, minDistance, maxDistance]);
++
++  return null;
++}
++
++export default OrbitCamera;
+diff --git i/packages/lib/src/vis/volume/VolumeMaterial.tsx w/packages/lib/src/vis/volume/VolumeMaterial.tsx
+new file mode 100644
+index 00000000..3424e65d
+--- /dev/null
++++ w/packages/lib/src/vis/volume/VolumeMaterial.tsx
+@@ -0,0 +1,112 @@
++import { type Domain, type ScaleType } from '@h5web/shared/vis-models';
++import { rgb } from 'd3-color';
++import { type NdArray } from 'ndarray';
++import { memo, useMemo } from 'react';
++import {
++  BackSide,
++  DataTexture,
++  GLSL3,
++  RGBAFormat,
++  UnsignedByteType,
++  Vector3,
++} from 'three';
++
++import { type ColorMap } from '../heatmap/models';
++import { getInterpolator, scaleDomain } from '../heatmap/utils';
++import { type VisScaleType } from '../models';
++import { getUniforms } from '../utils';
++import { VolumeRenderMode } from './models';
++import { getVolumeTexture, type VolumeSafeArray } from './utils';
++import {
++  buildVolumeFragmentShader,
++  VOLUME_VERTEX_SHADER,
++} from './volumeShaders';
++
++interface Props {
++  values: NdArray<VolumeSafeArray>;
++  domain: Domain;
++  scaleType: VisScaleType;
++  colorMap: ColorMap;
++  invertColorMap: boolean;
++  mode: VolumeRenderMode;
++  opacityScale: number;
++  steps: number;
++  localScale: [number, number, number];
++}
++
++const CMAP_SIZE = 256;
++
++function VolumeMaterial(props: Props) {
++  const {
++    values,
++    domain,
++    scaleType: visScaleType,
++    colorMap,
++    invertColorMap,
++    mode,
++    opacityScale,
++    steps,
++    localScale,
++  } = props;
++
++  const volumeTexture = useMemo(() => getVolumeTexture(values), [values]);
++
++  const colorMapTexture = useMemo(() => {
++    const interpolator = getInterpolator(colorMap, invertColorMap);
++    const colors = Array.from({ length: CMAP_SIZE }).flatMap((_, i) => {
++      const { r, g, b } = rgb(interpolator(i / (CMAP_SIZE - 1)));
++      return [r, g, b, 255];
++    });
++    const texture = new DataTexture(
++      Uint8Array.from(colors),
++      CMAP_SIZE,
++      1,
++      RGBAFormat,
++      UnsignedByteType,
++    );
++    texture.needsUpdate = true;
++    return texture;
++  }, [colorMap, invertColorMap]);
++
++  const [scaleType, gammaExponent] = Array.isArray(visScaleType)
++    ? visScaleType
++    : [visScaleType as ScaleType, 1];
++
++  const scaledDomain = scaleDomain(domain, scaleType);
++  const range = scaledDomain[1] - scaledDomain[0];
++
++  const fragmentShader = useMemo(
++    () => buildVolumeFragmentShader(scaleType),
++    [scaleType],
++  );
++
++  const args = {
++    uniforms: getUniforms({
++      u_volume: volumeTexture,
++      u_colorMap: colorMapTexture,
++      u_localScale: new Vector3(...localScale),
++      u_min: scaledDomain[0],
++      u_oneOverRange: range === 0 ? 0 : 1 / range,
++      u_gammaExponent: gammaExponent,
++      u_normRevertFactor:
++        values.dtype === 'uint8' || values.dtype === 'uint8_clamped' ? 255 : 1,
++      u_steps: steps,
++      u_mode: mode === VolumeRenderMode.Mip ? 0 : 1,
++      u_opacityScale: opacityScale,
++    }),
++    vertexShader: VOLUME_VERTEX_SHADER,
++    fragmentShader,
++    glslVersion: GLSL3,
++  };
++
++  return (
++    <shaderMaterial
++      args={[args]}
++      side={BackSide}
++      transparent
++      depthWrite={false}
++    />
++  );
++}
++
++export default memo(VolumeMaterial);
+diff --git i/packages/lib/src/vis/volume/VolumeMesh.tsx w/packages/lib/src/vis/volume/VolumeMesh.tsx
+new file mode 100644
+index 00000000..bda70df5
+--- /dev/null
++++ w/packages/lib/src/vis/volume/VolumeMesh.tsx
+@@ -0,0 +1,61 @@
++import {
++  type ColorScaleType,
++  type Domain,
++  type NumArray,
++} from '@h5web/shared/vis-models';
++import { type NdArray } from 'ndarray';
++import { useMemo } from 'react';
++
++import { type ColorMap } from '../heatmap/models';
++import { type VolumeRenderMode } from './models';
++import { getVolumeBoxScale, getVolumeDims, toVolumeSafeNdArray } from './utils';
++import VolumeMaterial from './VolumeMaterial';
++
++interface Props {
++  dataArray: NdArray<NumArray>;
++  domain: Domain;
++  scaleType: ColorScaleType;
++  colorMap: ColorMap;
++  invertColorMap: boolean;
++  mode: VolumeRenderMode;
++  opacityScale: number;
++  steps: number;
++}
++
++function VolumeMesh(props: Props) {
++  const {
++    dataArray,
++    domain,
++    scaleType,
++    colorMap,
++    invertColorMap,
++    mode,
++    opacityScale,
++    steps,
++  } = props;
++
++  const safeArray = useMemo(() => toVolumeSafeNdArray(dataArray), [dataArray]);
++  const localScale = useMemo(
++    () => getVolumeBoxScale(getVolumeDims(dataArray)),
++    [dataArray],
++  );
++
++  return (
++    <mesh scale={localScale}>
++      <boxGeometry args={[1, 1, 1]} />
++      <VolumeMaterial
++        values={safeArray}
++        domain={domain}
++        scaleType={scaleType}
++        colorMap={colorMap}
++        invertColorMap={invertColorMap}
++        mode={mode}
++        opacityScale={opacityScale}
++        steps={steps}
++        localScale={localScale}
++      />
++    </mesh>
++  );
++}
++
++export default VolumeMesh;
+diff --git i/packages/lib/src/vis/volume/VolumeRenderingVis.module.css w/packages/lib/src/vis/volume/VolumeRenderingVis.module.css
+new file mode 100644
+index 00000000..8f164f0e
+--- /dev/null
++++ w/packages/lib/src/vis/volume/VolumeRenderingVis.module.css
+@@ -0,0 +1,16 @@
++.root {
++  flex: 1;
++  display: flex;
++  min-width: 0;
++  min-height: 0;
++  margin: 0;
++}
++
++.canvas {
++  margin-right: 1rem;
++  cursor: grab;
++}
++
++.canvas:active {
++  cursor: grabbing;
++}
+diff --git i/packages/lib/src/vis/volume/VolumeRenderingVis.tsx w/packages/lib/src/vis/volume/VolumeRenderingVis.tsx
+new file mode 100644
+index 00000000..e8a1ac0a
+--- /dev/null
++++ w/packages/lib/src/vis/volume/VolumeRenderingVis.tsx
+@@ -0,0 +1,80 @@
++import {
++  type ColorScaleType,
++  type Domain,
++  type NumArray,
++  ScaleType,
++} from '@h5web/shared/vis-models';
++import { type NdArray } from 'ndarray';
++import { type PropsWithChildren } from 'react';
++
++import ColorBar from '../heatmap/ColorBar';
++import { type ColorMap } from '../heatmap/models';
++import { type ClassStyleAttrs } from '../models';
++import R3FCanvas from '../shared/R3FCanvas';
++import { VolumeRenderMode } from './models';
++import OrbitCamera from './OrbitCamera';
++import VolumeMesh from './VolumeMesh';
++import styles from './VolumeRenderingVis.module.css';
++
++interface Props extends ClassStyleAttrs {
++  dataArray: NdArray<NumArray>;
++  domain: Domain;
++  title?: string;
++  scaleType?: ColorScaleType;
++  colorMap?: ColorMap;
++  invertColorMap?: boolean;
++  mode?: VolumeRenderMode;
++  opacityScale?: number;
++  steps?: number;
++}
++
++function VolumeRenderingVis(props: PropsWithChildren<Props>) {
++  const {
++    dataArray,
++    domain,
++    title,
++    colorMap = 'Viridis',
++    scaleType = ScaleType.Linear,
++    invertColorMap = false,
++    mode = VolumeRenderMode.Mip,
++    opacityScale = 1,
++    steps = 192,
++    children,
++    className = '',
++    style,
++  } = props;
++
++  return (
++    <figure
++      className={`${styles.root} ${className}`}
++      style={style}
++      aria-label={title}
++      data-keep-canvas-colors
++    >
++      <R3FCanvas className={styles.canvas}>
++        <OrbitCamera />
++        <VolumeMesh
++          dataArray={dataArray}
++          domain={domain}
++          colorMap={colorMap}
++          scaleType={scaleType}
++          invertColorMap={invertColorMap}
++          mode={mode}
++          opacityScale={opacityScale}
++          steps={steps}
++        />
++        {children}
++      </R3FCanvas>
++      <ColorBar
++        domain={domain}
++        scaleType={scaleType}
++        colorMap={colorMap}
++        invertColorMap={invertColorMap}
++        withBounds
++      />
++    </figure>
++  );
++}
++
++export type { Props as VolumeRenderingVisProps };
++export default VolumeRenderingVis;
+diff --git i/packages/lib/src/vis/volume/models.ts w/packages/lib/src/vis/volume/models.ts
+new file mode 100644
+index 00000000..31ab0830
+--- /dev/null
++++ w/packages/lib/src/vis/volume/models.ts
+@@ -0,0 +1,14 @@
++export enum VolumeRenderMode {
++  Mip = 'MIP',
++  Dvr = 'DVR',
++}
++
++export const VOLUME_RENDER_MODES: VolumeRenderMode[] = [
++  VolumeRenderMode.Mip,
++  VolumeRenderMode.Dvr,
++];
++
++export const VOLUME_RENDER_MODE_LABELS: Record<VolumeRenderMode, string> = {
++  [VolumeRenderMode.Mip]: 'Maximum intensity',
++  [VolumeRenderMode.Dvr]: 'Direct volume',
++};
+diff --git i/packages/lib/src/vis/volume/utils.test.ts w/packages/lib/src/vis/volume/utils.test.ts
+new file mode 100644
+index 00000000..9f1208e9
+--- /dev/null
++++ w/packages/lib/src/vis/volume/utils.test.ts
+@@ -0,0 +1,87 @@
++import ndarray from 'ndarray';
++import { describe, expect, it } from 'vitest';
++
++import { getVolumeBoxScale, getVolumeDims, toVolumeSafeNdArray } from './utils';
++
++describe('getVolumeDims', () => {
++  it('reads (depth, rows, cols) from a 3-D ndarray shape', () => {
++    const arr = ndarray(new Float32Array(2 * 3 * 4), [2, 3, 4]);
++    expect(getVolumeDims(arr)).toEqual({ depth: 2, rows: 3, cols: 4 });
++  });
++
++  it('throws on non-3-D arrays', () => {
++    const arr2d = ndarray(new Float32Array(6), [2, 3]);
++    expect(() => getVolumeDims(arr2d)).toThrowError(/3-D/);
++    const arr4d = ndarray(new Float32Array(24), [1, 2, 3, 4]);
++    expect(() => getVolumeDims(arr4d)).toThrowError(/3-D/);
++  });
++});
++
++describe('getVolumeBoxScale', () => {
++  it('returns [1, 1, 1] for cubic shapes', () => {
++    expect(getVolumeBoxScale({ depth: 64, rows: 64, cols: 64 })).toEqual([
++      1, 1, 1,
++    ]);
++  });
++
++  it('normalizes so the largest extent equals exactly 1', () => {
++    const cases = [
++      { depth: 3, rows: 5, cols: 4 },
++      { depth: 7, rows: 2, cols: 3 },
++      { depth: 1, rows: 100, cols: 50 },
++      { depth: 256, rows: 256, cols: 30 },
++    ];
++    for (const dims of cases) {
++      const [x, y, z] = getVolumeBoxScale(dims);
++      expect(Math.max(x, y, z)).toBe(1);
++    }
++  });
++
++  it('maps (cols, rows, depth) to (x, y, z)', () => {
++    const [x, y, z] = getVolumeBoxScale({ depth: 10, rows: 20, cols: 30 });
++    expect(x).toBe(1);
++    expect(y).toBeCloseTo(20 / 30);
++    expect(z).toBeCloseTo(10 / 30);
++  });
++
++  it('is invariant under uniform scaling of all three dimensions', () => {
++    const a = getVolumeBoxScale({ depth: 6, rows: 8, cols: 12 });
++    const b = getVolumeBoxScale({ depth: 12, rows: 16, cols: 24 });
++    const c = getVolumeBoxScale({ depth: 60, rows: 80, cols: 120 });
++    expect(a).toEqual(b);
++    expect(a).toEqual(c);
++  });
++
++  it('produces components in (0, 1] for non-degenerate dims', () => {
++    const dims = [
++      { depth: 1, rows: 1, cols: 1000 },
++      { depth: 1000, rows: 1, cols: 1 },
++      { depth: 17, rows: 31, cols: 41 },
++    ];
++    for (const d of dims) {
++      const scale = getVolumeBoxScale(d);
++      for (const s of scale) {
++        expect(s).toBeGreaterThan(0);
++        expect(s).toBeLessThanOrEqual(1);
++      }
++    }
++  });
++});
++
++describe('toVolumeSafeNdArray', () => {
++  it('passes through GPU-native dtypes unchanged', () => {
++    const f32 = ndarray(new Float32Array(8), [2, 2, 2]);
++    const u8 = ndarray(new Uint8Array(8), [2, 2, 2]);
++    const u16 = ndarray(new Uint16Array(8), [2, 2, 2]);
++    expect(toVolumeSafeNdArray(f32).data).toBe(f32.data);
++    expect(toVolumeSafeNdArray(u8).data).toBe(u8.data);
++    expect(toVolumeSafeNdArray(u16).data).toBe(u16.data);
++  });
++
++  it('converts non-GPU dtypes to Float32Array preserving values', () => {
++    const f64 = ndarray(new Float64Array([0, 1, 2, 3, 4, 5, 6, 7]), [2, 2, 2]);
++    const safe = toVolumeSafeNdArray(f64);
++    expect(safe.data).toBeInstanceOf(Float32Array);
++    expect([...safe.data]).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
++  });
++});
+diff --git i/packages/lib/src/vis/volume/utils.ts w/packages/lib/src/vis/volume/utils.ts
+new file mode 100644
+index 00000000..dd2f92a3
+--- /dev/null
++++ w/packages/lib/src/vis/volume/utils.ts
+@@ -0,0 +1,77 @@
++import { type NumArray } from '@h5web/shared/vis-models';
++import { toTypedNdArray } from '@h5web/shared/vis-utils';
++import { type NdArray } from 'ndarray';
++import {
++  Data3DTexture,
++  FloatType,
++  HalfFloatType,
++  LinearFilter,
++  RedFormat,
++  type TextureDataType,
++  UnsignedByteType,
++} from 'three';
++
++export interface VolumeDims {
++  depth: number;
++  rows: number;
++  cols: number;
++}
++
++export type VolumeSafeArray =
++  | Float32Array
++  | Uint8Array
++  | Uint8ClampedArray
++  | Uint16Array;
++
++const TEXTURE_TYPES: Record<string, TextureDataType> = {
++  float32: FloatType,
++  uint16: HalfFloatType, // matches the heatmap convention: uint16 treated as half-float
++  uint8: UnsignedByteType,
++  uint8_clamped: UnsignedByteType,
++};
++
++export function getVolumeDims(arr: NdArray): VolumeDims {
++  if (arr.shape.length !== 3) {
++    throw new Error(
++      `Volume rendering expects a 3-D array (got ${arr.shape.length}-D)`,
++    );
++  }
++  const [depth, rows, cols] = arr.shape;
++  return { depth, rows, cols };
++}
++
++/**
++ * Returns the [x, y, z] mesh scale that preserves the dataset's voxel aspect ratio,
++ * normalized so the largest extent equals 1. Mapping: cols → x, rows → y, depth → z.
++ */
++export function getVolumeBoxScale(dims: VolumeDims): [number, number, number] {
++  const { depth, rows, cols } = dims;
++  const m = Math.max(depth, rows, cols);
++  return [cols / m, rows / m, depth / m];
++}
++
++export function toVolumeSafeNdArray(
++  arr: NdArray<NumArray>,
++): NdArray<VolumeSafeArray> {
++  if (
++    arr.dtype === 'float32' ||
++    arr.dtype === 'uint8' ||
++    arr.dtype === 'uint8_clamped' ||
++    arr.dtype === 'uint16'
++  ) {
++    return arr as NdArray<VolumeSafeArray>;
++  }
++  return toTypedNdArray(arr, Float32Array);
++}
++
++export function getVolumeTexture(arr: NdArray<VolumeSafeArray>): Data3DTexture {
++  const { depth, rows, cols } = getVolumeDims(arr);
++  const texture = new Data3DTexture(arr.data, cols, rows, depth);
++  texture.format = RedFormat;
++  texture.type = TEXTURE_TYPES[arr.dtype] ?? FloatType;
++  texture.minFilter = LinearFilter;
++  texture.magFilter = LinearFilter;
++  texture.unpackAlignment = 1;
++  texture.needsUpdate = true;
++  return texture;
++}
+diff --git i/packages/lib/src/vis/volume/volumeShaders.ts w/packages/lib/src/vis/volume/volumeShaders.ts
+new file mode 100644
+index 00000000..23a3a1f6
+--- /dev/null
++++ w/packages/lib/src/vis/volume/volumeShaders.ts
+@@ -0,0 +1,127 @@
++import { ScaleType } from '@h5web/shared/vis-models';
++
++const IMPL_SCALE: Partial<Record<ScaleType, string>> = {
++  [ScaleType.Log]: 'log(value) * oneOverLog10',
++  [ScaleType.SymLog]: 'sign(value) * log(1. + abs(value)) * oneOverLog10',
++  [ScaleType.Sqrt]: 'sqrt(value)',
++};
++
++const IMPL_IS_SUPPORTED: Partial<Record<ScaleType, string>> = {
++  [ScaleType.Log]: 'value > 0.',
++  [ScaleType.Sqrt]: 'value >= 0.',
++};
++
++export const VOLUME_VERTEX_SHADER = `
++  out vec3 v_localPosition;
++
++  void main() {
++    v_localPosition = position;
++    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
++  }
++`;
++
++/* The shader caps total ray-march iterations to a constant for GLSL portability;
++ * the actual step count is set by the u_steps uniform and clamped by this cap. */
++export const MAX_RAY_STEPS = 512;
++
++export function buildVolumeFragmentShader(scaleType: ScaleType): string {
++  return `
++    precision highp float;
++    precision highp sampler3D;
++
++    uniform sampler3D u_volume;
++    uniform sampler2D u_colorMap;
++    uniform vec3 u_localScale;
++    uniform float u_min;
++    uniform float u_oneOverRange;
++    uniform float u_gammaExponent;
++    uniform float u_normRevertFactor;
++    uniform int u_steps;
++    uniform int u_mode;
++    uniform float u_opacityScale;
++
++    in vec3 v_localPosition;
++    out vec4 fragColor;
++
++    const float oneOverLog10 = 0.43429448190325176;
++
++    bool isSupported(float value) {
++      return ${IMPL_IS_SUPPORTED[scaleType] || 'true'};
++    }
++
++    float scaleVal(float value) {
++      return ${IMPL_SCALE[scaleType] || 'value'};
++    }
++
++    vec2 intersectUnitBox(vec3 origin, vec3 dir) {
++      vec3 invDir = 1.0 / dir;
++      vec3 t0 = (vec3(0.0) - origin) * invDir;
++      vec3 t1 = (vec3(1.0) - origin) * invDir;
++      vec3 tMin = min(t0, t1);
++      vec3 tMax = max(t0, t1);
++      return vec2(
++        max(max(tMin.x, tMin.y), tMin.z),
++        min(min(tMax.x, tMax.y), tMax.z)
++      );
++    }
++
++    void main() {
++      // Local-space (cube-aligned) coordinates in [0, 1]^3 used to sample the 3D texture.
++      vec3 cameraLocal = cameraPosition / u_localScale;
++      vec3 entryUVW = v_localPosition + 0.5;
++      vec3 cameraUVW = cameraLocal + 0.5;
++      vec3 rayDir = normalize(entryUVW - cameraUVW);
++
++      vec2 tHit = intersectUnitBox(cameraUVW, rayDir);
++      float tNear = max(tHit.x, 0.0);
++      float tFar = tHit.y;
++      if (tFar <= tNear) {
++        discard;
++      }
++
++      vec3 start = cameraUVW + rayDir * tNear;
++      float pathLen = tFar - tNear;
++      float dt = pathLen / float(u_steps);
++
++      vec4 acc = vec4(0.0);
++      float maxNorm = -1.0;
++
++      for (int i = 0; i < ${MAX_RAY_STEPS}; ++i) {
++        if (i >= u_steps) {
++          break;
++        }
++        vec3 p = start + rayDir * (dt * (float(i) + 0.5));
++        float raw = texture(u_volume, p).r * u_normRevertFactor;
++        if (isnan(raw) || !isSupported(raw)) {
++          continue;
++        }
++        float n = clamp(u_oneOverRange * (scaleVal(raw) - u_min), 0.0, 1.0);
++        n = pow(n, u_gammaExponent);
++
++        if (u_mode == 0) {
++          if (n > maxNorm) {
++            maxNorm = n;
++          }
++        } else {
++          vec4 src = texture(u_colorMap, vec2(n, 0.5));
++          float alpha = clamp(n * u_opacityScale, 0.0, 1.0);
++          src.rgb *= alpha;
++          src.a = alpha;
++          acc += (1.0 - acc.a) * src;
++          if (acc.a > 0.99) {
++            break;
++          }
++        }
++      }
++
++      if (u_mode == 0) {
++        if (maxNorm < 0.0) {
++          discard;
++        }
++        fragColor = texture(u_colorMap, vec2(maxNorm, 0.5));
++      } else {
++        fragColor = acc;
++      }
++    }
++  `;
++}

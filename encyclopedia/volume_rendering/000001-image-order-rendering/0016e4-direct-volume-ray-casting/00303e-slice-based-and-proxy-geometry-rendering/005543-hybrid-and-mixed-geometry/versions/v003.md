@@ -1,0 +1,40 @@
+# Hybrid and Mixed Geometry
+
+Also called: Hybrid ray-volume rendering
+
+## Overview
+Hybrid and Mixed Geometry rendering addresses the problem of visualizing scenes containing both explicit polygonal geometry (e.g., surgical instruments, bounding boxes, isosurfaces) and implicit volumetric data (e.g., CT/MR scans) in a single coherent image with correct visibility and attenuation [S2]. Unlike pure volume rendering which rasterizes slices or pure ray tracing which handles only geometry, this family of methods intermixes both representations. It is distinguished from [Hybrid Volume Rendering](15456-hybrid-volume-rendering.md) by its explicit ray-casting approach to mixing rather than slice-based or proxy-geometry rasterization, and from [Hybrid Volume Rendering Scheme](16812-hybrid-volume-rendering-scheme.md) by focusing on the specific compositing of geometry and volume rather than a specific architectural scheme for unstructured grids.
+
+## Shared principles
+The family relies on the decomposition of the 3D volume into a set of 2D planar slices [G]. These slices are treated as geometric primitives (typically triangles or quads) that are rasterized by the GPU [G]. The core mechanism involves:
+
+1.  **Slice Generation**: The volume is intersected by a series of parallel planes. The intersection of these planes with the volume bounding box defines the polygonal shape of each slice [G].
+2.  **Texture Mapping**: Each slice vertex is assigned 3D texture coordinates that map to the volumetric data [G]. The volume data is stored as a 3D texture on the GPU [S2].
+3.  **Rasterization and Shading**: The polygons are rasterized. In the fragment shader, the 3D texture is sampled at the interpolated texture coordinates to retrieve the scalar value [G].
+4.  **Classification and Blending**: The scalar value is mapped to color and opacity via a transfer function. The fragments are composited using alpha blending (typically `GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA`) [G].
+5.  **Sorting**: The slices must be rendered in the correct depth order relative to the camera (back-to-front for standard alpha blending) to ensure correct compositing [G].
+
+## Subtopics
+
+### [Hybrid Ray Tracing](2308-hybrid-ray-tracing.md)
+Hybrid Ray Tracing is a method for mixing geometric and volumetric data by casting rays through the ensemble of both, drawing samples of each, and compositing them in depth-sorted order. It solves the problem of rendering scenes containing both polygonal models and volumetric data in a single pass with correct visibility and attenuation. Unlike pure volume rendering which rasterizes slices, or pure ray tracing which handles only geometry, this method simultaneously traces rays through volumetric sample arrays and polygonal databases, resampling both at equally spaced intervals to handle mixtures of geometric and volumetric data. It is distinguished from [Hybrid Volume Rendering](15456-hybrid-volume-rendering.md) by its explicit ray-casting approach to mixing rather than slice-based or proxy-geometry rasterization.
+
+### [Hybrid Volume Rendering](15456-hybrid-volume-rendering.md)
+Hybrid volume rendering techniques allow polygonal geometry and volumetric data to be visualized in a single image, enabling the display of scale, grids, or other polygon-defined objects over, behind, and through volumetric data. It solves the problem of integrating explicit geometric context (such as bounding boxes, isosurfaces, or wireframes) with implicit volumetric fields. Unlike pure ray casting which treats the volume as a continuous medium, or pure polygon rendering which lacks internal structure, hybrid methods intermix both representations. It differs from [Hybrid Ray Tracing](2308-hybrid-ray-tracing.md) by typically relying on rasterization or standard ray casting with depth-buffer integration rather than path tracing hybrids, and from [Hybrid Volume Rendering Scheme](16812-hybrid-volume-rendering-scheme.md) by focusing on the specific compositing of geometry and volume rather than a specific architectural scheme.
+
+### [Hybrid Volume Rendering Scheme](16812-hybrid-volume-rendering-scheme.md)
+The Hybrid Volume Rendering Scheme is a parallel volume rendering algorithm for unstructured grids that combines object-order and image-order techniques to handle complex block boundaries, dramatic cell size variations, and camera-induced load imbalances. Unlike pure image-order methods, which suffer from replicated cell loading and unequal cell distribution, or pure object-order methods, where image compositing becomes a bottleneck, this approach bounds the computation of each processing phase to adapt dynamically to the workload.
+
+### Cutter Geometry Rendering
+Rendering occurs only inside the selected geometric object's volume. If Fire Lights are enabled, only those inside the cutter are rendered. Parameters: `usegizmo` (enable), `gizmo` (object) [S2].
+
+**Invert Cutter** (`invgizmo`): When enabled, rendering occurs only outside the render cutter. Rays not intersecting the cutter are shaded. This is distinct from a cutter with inverted geometry [S2].
+
+**Pitfall**: Cutter Geom does not work in Volumetric Geometry mode [S2].
+
+## Background
+The concept of hybrid rendering, specifically blending OpenGL-rendered volumes with ray-traced non-volume objects, is implemented in software such as PyMOL via the `ray_volume` setting [S1]. This approach allows for features like shadows or outlines on non-volume objects while maintaining the speed of OpenGL for the volume itself, though it is limited to the current window size and does not work in headless (batch) mode [S1]. The broader field of hybrid volume rendering has evolved to handle unstructured grids and complex geometric contexts, addressing memory footprint and load imbalance issues in parallel environments [S1].
+
+## Sources
+[S1] Volume - PyMOL Wiki, https://pymolwiki.org/Volume, fetched 2026-10-29
+[S2] FireSmoke Rendering - Phoenix for 3ds Max, https://documentation.chaos.com/space/PHX4MAX/124396558, fetched 2026-10-27

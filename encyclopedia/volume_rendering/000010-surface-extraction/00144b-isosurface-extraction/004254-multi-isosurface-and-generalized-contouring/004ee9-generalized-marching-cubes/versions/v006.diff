@@ -1,0 +1,118 @@
+--- v005.md
++++ v006.md
+@@ -10,12 +10,12 @@
+ 
+ ### Inputs and Outputs
+-* **Input:** A 3D volume tensor `vol` of shape $(D, H, W)$, where each voxel stores a material label and a CT value.
++* **Input:** A 3D volume tensor `vol` of shape $(D, H, W)$, where each voxel stores a material label and a CT value [S1, unofficial][S2].
+ * **Output:** A triangulated mesh (OBJ format) containing vertices and faces. Vertices are offset by `vert_start` to prevent index collisions across materials [S1, unofficial].
+ 
+ ### Data Structures
+ 1. **Voxel Grid:** A 3D array where each element contains:
+-   * `material_id`: Integer identifier for the material class (e.g., 0 for Air, 1 for Aluminum).
+-   * `ct_value`: Floating-point intensity value.
+-2. **Edge Table:** Derived from the parent [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md), but modified. Instead of binary signs, the configuration is determined by whether the two endpoints of an edge belong to different materials [S2].
++   * `material_id`: Integer identifier for the material class (e.g., 0 for Air, 1 for Aluminum) [S2].
++   * `ct_value`: Floating-point intensity value [S2].
++2. **Edge Table:** Derived from the parent [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md), but modified to trigger intersections based on material-pair boundaries rather than scalar sign flips [S2].
+ 3. **Triangle Table:** Standard connectivity table from [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md), mapping the edge intersection configuration to triangle indices [S2].
+ 
+@@ -44,5 +44,5 @@
+    * **Case 1: Same Material.** If both endpoints have the same material type, no vertex is inserted on this edge [S2].
+    * **Case 2: Different Materials.** If the endpoints have different material types, insert a vertex on the edge [S2].
+-   * **Vertex Position:** Compute the position using linear interpolation based on the CT values of the endpoints [S2]. Let the edge connect voxel $p$ (CT $I_p$, material $A$) and voxel $q$ (CT $I_q$, material $B$). The interpolation factor $t$ is:
++   * **Vertex Position:** Compute the position using linear interpolation based on the CT values of the endpoints [S2]. Let the edge connect voxel $p$ (CT $I_p$, material $A$) and voxel $q$ (CT $I_q$, material $B$) [S2]. The interpolation factor $t$ is:
+      $$ t = \frac{iso(A, B) - I_p}{I_q - I_p} $$
+      The vertex position $V$ is:
+@@ -75,7 +75,6 @@
+     vertices = []
+     faces = []
+-    vertex_cache = {}  # Maps (edge_idx, t) to vertex index to share vertices across cells
++    vertex_cache = {}
+ 
+-    # Standard MC edge-to-corner mapping (indices 0-7 for cube corners)
+     EDGE_CORNERS = (
+         (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face
+@@ -84,12 +83,10 @@
+     )
+     
+-    # TRIANGLE_TABLE is the standard 256-entry lookup table from Marching Cubes Lookup and Configuration (2518-marching-cubes-lookup-and-configuration.md)
+-    # Each entry is a list of 3 edge indices per triangle, or None if empty.
+-    TRIANGLE_TABLE = ...  # See parent article for full table
++    # Standard 256-entry triangle table from Marching Cubes Lookup and Configuration [G]
++    TRIANGLE_TABLE = MARCHING_CUBES_TRIANGLE_TABLE
+ 
+     for z in range(D - 1):
+         for y in range(H - 1):
+             for x in range(W - 1):
+-                # Get 8 corners of the cube
+                 corners = [
+                     (x, y, z), (x+1, y, z), (x+1, y+1, z), (x, y+1, z),
+@@ -99,5 +96,4 @@
+                 corner_materials = [material_labels[c] for c in corners]
+                 corner_cts = [volume[c] for c in corners]
+-                
+                 edge_intersections = [None] * 12
+                 
+@@ -112,19 +108,16 @@
+                         
+                         pair = frozenset({mat1, mat2})
+-                        iso_val = isovalue_map.get(pair)
+-                        if iso_val is None:
+-                            iso_val = (ct1 + ct2) / 2.0  # Fallback [G]
++                        iso_val = isovalue_map.get(pair, (ct1 + ct2) / 2.0)
+                             
+                         denom = ct2 - ct1
+-                        if abs(denom) < 1e-12:
+-                            t = 0.5
+-                        else:
+-                            t = (iso_val - ct1) / denom
++                        t = 0.5 if abs(denom) < 1e-12 else (iso_val - ct1) / denom
+                             
+                         p1 = corners[c1_idx]
+                         p2 = corners[c2_idx]
+-                        v_pos = (1 - t) * p1 + t * p2
++                        v_pos = ((1 - t) * p1[0] + t * p2[0],
++                                 (1 - t) * p1[1] + t * p2[1],
++                                 (1 - t) * p1[2] + t * p2[2])
+                         
+-                        cache_key = (edge_idx, t)
++                        cache_key = (x, y, z, edge_idx)
+                         if cache_key not in vertex_cache:
+                             vertex_cache[cache_key] = len(vertices)
+@@ -132,10 +125,5 @@
+                         edge_intersections[edge_idx] = vertex_cache[cache_key]
+ 
+-                # Build configuration index from edge intersections
+-                config = 0
+-                for i in range(12):
+-                    if edge_intersections[i] is not None:
+-                        config |= (1 << i)
+-                        
++                config = sum(1 << i for i, v in enumerate(edge_intersections) if v is not None)
+                 tri_indices = TRIANGLE_TABLE[config]
+                 
+@@ -143,5 +131,4 @@
+                     for i in range(0, len(tri_indices), 3):
+                         e1, e2, e3 = tri_indices[i], tri_indices[i+1], tri_indices[i+2]
+-                        # Only form triangle if all three edges have valid intersections
+                         if edge_intersections[e1] is not None and \
+                            edge_intersections[e2] is not None and \
+@@ -160,12 +147,12 @@
+ ## Operating characteristics
+ * **Time Complexity:** $O(N)$, where $N$ is the number of voxels, as each voxel is processed once [G].
+-* **Memory Complexity:** $O(N)$ for storing the volume and labels. Output mesh size depends on the number of material interfaces [G].
++* **Memory Complexity:** $O(N)$ for storing the volume and labels [G]. Output mesh size depends on the number of material interfaces [G].
+ * **Strengths:** Accurately captures boundaries between multiple distinct materials in a single pass. Handles non-manifold junctions correctly [S2].
+-* **Limitations:** Requires pre-classified material labels. Performance degrades if the number of materials is very large due to the complexity of isovalue mapping. Non-manifold output may require post-processing for certain applications.
+-* **When to Use:** Multi-material CT scans, segmented volumetric data with distinct material classes.
+-* **When Not to Use:** Single-material scalar fields (use standard Marching Cubes).
++* **Limitations:** Requires pre-classified material labels. Performance degrades if the number of materials is very large due to the complexity of isovalue mapping [G]. Non-manifold output may require post-processing for certain applications [G].
++* **When to Use:** Multi-material CT scans, segmented volumetric data with distinct material classes [G].
++* **When Not to Use:** Single-material scalar fields (use standard Marching Cubes) [G].
+ 
+ ## Background
+-Generalized Marching Cubes was introduced by Suzuki et al. in 2007 as an extension of the original Marching Cubes algorithm [S2]. It was developed to address the limitations of standard isosurfacing in medical and industrial CT imaging, where objects are composed of multiple materials (e.g., bone, soft tissue, air, or metal parts). The method allows for the extraction of boundary surfaces between different materials by dynamically adjusting the isovalue based on the material pair [S2]. It has been used in applications such as the extraction of isosurfaces from multi-material CT volumetric data of mechanical parts [S2].
++Generalized Marching Cubes was introduced by Suzuki et al. in 2007 as an extension of the original Marching Cubes algorithm [S2]. It was developed to address the limitations of standard isosurfacing in medical and industrial CT imaging, where objects are composed of multiple materials (e.g., bone, soft tissue, air, or metal parts) [S2]. The method allows for the extraction of boundary surfaces between different materials by dynamically adjusting the isovalue based on the material pair [S2]. It has been used in applications such as the extraction of isosurfaces from multi-material CT volumetric data of mechanical parts [S2].
+ 
+ ## Sources

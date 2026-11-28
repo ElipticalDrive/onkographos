@@ -1,0 +1,176 @@
+--- v004.md
++++ v005.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method consists of two distinct phases: the Light Injection Pass (populating the 3D texture with lighting data) and the Main Rendering Pass (compositing light into the final image).
++The method consists of two distinct phases: the Light Injection Pass (populating the 3D texture with lighting data) and the Main Rendering Pass (compositing light into the final image) [S2, S3, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -23,9 +23,8 @@
+ *   **3D Texture:** Stores extinction coefficient ($\sigma_t$) and in-scattered radiance ($L_{in}$). Accessed via image load/store (`glBindImageTexture`) [S2, unofficial].
+ *   **A-Buffer (Visibility Buffer):** Stores visibility ($v$) and distance ($d$) to the camera for each sample along the ray. The number of layers is $2^k - 1$, where $k$ is manually specified or set via data variation analysis [S3, unofficial].
+-*   **Shadow Maps:** Cascaded shadow maps (4 cascades) for directional lights; shadow cubemaps for point lights [S1, unofficial][S2, unofficial].
++*   **Shadow Maps:** Cascaded shadow maps (4 cascades) for directional lights; shadow cubemaps for point lights [S1, S2, unofficial].
+ 
+ ### Step 1: Light Injection Pass (Precomputation)
+ This pass calculates the incoming radiance for each voxel based on light sources [S2, unofficial].
+-
+ 1.  **World Position Reconstruction:** For each voxel at 3D grid index $(x, y, z)$, map to clip space, apply the inverse view-projection matrix, and divide by $w$ to determine the world-space center of the cell [S2, unofficial].
+ 2.  **Shadow Map Sampling:** Sample standard shadow maps (cascaded for directional, cubemaps for point lights) to check for occlusion [S2, unofficial].
+@@ -34,5 +33,4 @@
+ ### Step 2: Main Rendering Pass (Compositing)
+ This pass traverses light rays from the light source, determines visibility, and projects light into camera space [S3, unofficial].
+-
+ 1.  **Define Ray:** Define a ray from front to back (from the light source) [S3, unofficial].
+ 2.  **Loop for Samples:** For all samples $s$ along the ray:
+@@ -78,7 +76,7 @@
+     for x, y, z in volume_texture.grid:
+         # World Position Reconstruction
+-        clip_pos = vec4(x, y, z, 1.0)
++        clip_pos = vec4(float(x), float(y), float(z), 1.0)
+         world_pos = inverse_view_projection * clip_pos
+-        world_pos /= world_pos.w
++        world_pos.xyz /= world_pos.w
+         
+         # Shadow Map Sampling
+@@ -86,7 +84,9 @@
+         for light in light_sources:
+             if light.type == 'directional':
+-                is_shadowed = sample_cascade_shadow(shadow_maps, world_pos, light)
++                # Sample finest of four cascades containing the light
++                cascade_idx = find_finest_cascade(world_pos, light.direction)
++                is_shadowed = shadow_maps[cascade_idx].sample_depth(world_pos)
+             elif light.type == 'point':
+-                is_shadowed = sample_cubemap_shadow(shadow_maps, world_pos, light)
++                is_shadowed = shadow_maps.cubemap.sample_depth(world_pos - light.position)
+             if is_shadowed:
+                 break
+@@ -94,84 +94,53 @@
+         if not is_shadowed:
+             # In-Scattering Calculation
+-            radiance = evaluate_light(light, world_pos)
++            radiance = light.color * light.attenuation * heney_greenstein_phase(light.direction, view_direction, g=0.5)
+             # Store in 3D texture using image load/store
+-            volume_texture.write(x, y, z, radiance)
++            volume_texture.write(x, y, z, radiance, volume_texture.read(x, y, z).sigma_t)
+ 
+ def main_rendering_pass(volume_texture, a_buffer, camera, light_source):
+     # Step 2: Main Rendering Pass (Compositing)
+-    ray = define_ray_from_light(light_source)
++    ray = Ray(origin=light_source.position, direction=light_source.direction)
++    accumulated_color = vec3(0.0)
++    accumulated_opacity = 0.0
+     
+     for s in ray.samples:
+-        c = read_voxel(volume_texture, s)
++        voxel = volume_texture.read(s)
++        c = voxel.color
++        opacity = voxel.opacity
+         
+-        if c.opacity > 0:
+-            t = project_to_camera_space(s, camera)
+-            d = calculate_distance_to_camera(s, camera)
++        if opacity > 0:
++            # Project to camera space
++            clip_s = camera.view_proj * vec4(s, 1.0)
++            t = clip_s.xy / clip_s.w
++            d = length(camera.position - s)
+             
+-            closest_layers = binary_search_a_buffer(a_buffer, t, d)
+-            v = interpolate_visibility(closest_layers, d)
++            # Binary Search in A-Buffer
++            if d < a_buffer[0].d or d > a_buffer[-1].d:
++                v = 1.0
++            else:
++                min_layer, max_layer = 0, len(a_buffer) - 1
++                while min_layer <= max_layer:
++                    mid = min_layer + (max_layer - min_layer) // 2
++                    if a_buffer[mid].d < d:
++                        min_layer = mid + 1
++                    else:
++                        max_layer = mid - 1
++                # Linear interpolation between closest layers
++                v = interpolate_visibility(a_buffer[max_layer], a_buffer[min_layer], d)
+             
+-            r = composite_front_to_back(r, c, v)
+-            color_opacity = compute_color_opacity(r)
++            # Front-to-back compositing
++            transmittance = 1.0 - accumulated_opacity
++            accumulated_color += c * v * transmittance
++            accumulated_opacity += opacity * transmittance
+             
+-            covered_pixels = project_to_covered_pixels(s, camera)
++            # Project to covered pixels
++            covered_pixels = rasterize_to_camera(t, d)
+             for p in covered_pixels:
+-                atomic_add(p, color_opacity)
++                # Atomic add for RGB
++                atomic_add_float(p.color, accumulated_color)
+             
+-            if is_done(r):
++            # Early ray termination
++            if accumulated_opacity > 0.99 or s == ray.end:
+                 break
+-
+-# Helper functions
+-def sample_cascade_shadow(shadow_maps, world_pos, light):
+-    cascade_idx = find_finest_cascade(world_pos, light)
+-    return shadow_maps[cascade_idx].sample(world_pos)
+-
+-def sample_cubemap_shadow(shadow_maps, world_pos, light):
+-    return shadow_maps.cubemap.sample(world_pos - light.position)
+-
+-def evaluate_light(light, world_pos):
+-    return light.color * light.attenuation * heney_greenstein_phase(light.direction, view_direction)
+-
+-def define_ray_from_light(light_source):
+-    return Ray(origin=light_source.position, direction=light_source.direction)
+-
+-def read_voxel(texture, pos):
+-    return texture.sample(pos)
+-
+-def project_to_camera_space(pos, camera):
+-    return camera.view_proj * pos
+-
+-def calculate_distance_to_camera(pos, camera):
+-    return length(camera.position - pos)
+-
+-def binary_search_a_buffer(a_buffer, t, d):
+-    if d < a_buffer[0].d or d > a_buffer[-1].d:
+-        return []
+-    min_layer, max_layer = 0, len(a_buffer) - 1
+-    while min_layer <= max_layer:
+-        mid = min_layer + (max_layer - min_layer) // 2
+-        if a_buffer[mid].d < d:
+-            min_layer = mid + 1
+-        else:
+-            max_layer = mid - 1
+-    return [a_buffer[max_layer], a_buffer[min_layer]]
+-
+-def interpolate_visibility(layers, d):
+-    return layers[0].v + (layers[1].v - layers[0].v) * (d - layers[0].d) / (layers[1].d - layers[0].d)
+-
+-def composite_front_to_back(r, c, v):
+-    return r + c * v * (1.0 - r.a)
+-
+-def compute_color_opacity(r):
+-    return r.color, r.a
+-
+-def project_to_covered_pixels(pos, camera):
+-    return camera.rasterize(pos)
+-
+-def atomic_add(pixel, color):
+-    pixel.color += color
+-
+-def is_done(r):
+-    return r.a > 0.99 or r is at_end_of_ray
+ ```
+ 
+@@ -190,6 +159,4 @@
+ *   **Strengths:** Efficient for sun shafts and lamp glow; supports perspective (point lights) and orthogonal (directional lights) projections; area lights can be simulated using fish-eye lenses [S3, unofficial].
+ *   **Limitations:** Does not support froxel or temporal accumulation (would allow more steps); does not link density to a map's fog; does not include extinction (the scene isn't dimmed by the haze) [S1, unofficial].
+-*   **When to Use:** When real-time volumetric lighting for sun shafts and point lights is required, and performance is critical.
+-*   **When Not to Use:** When global illumination or complex scattering effects are needed, or when the scene requires extinction effects.
+ 
+ ## Background

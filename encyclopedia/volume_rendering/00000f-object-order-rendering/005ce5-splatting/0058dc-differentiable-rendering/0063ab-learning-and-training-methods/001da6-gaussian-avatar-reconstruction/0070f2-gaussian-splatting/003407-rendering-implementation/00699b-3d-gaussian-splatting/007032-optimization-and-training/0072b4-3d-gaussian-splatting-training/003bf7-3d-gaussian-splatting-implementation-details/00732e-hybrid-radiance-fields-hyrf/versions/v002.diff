@@ -1,0 +1,246 @@
+--- v001.md
++++ v002.md
+@@ -1,3 +1,4 @@
+ # Hybrid Radiance Fields (HyRF)
++
+ 
+ ## Overview
+@@ -5,25 +6,11 @@
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:** A set of calibrated images with known camera poses; initial sparse point cloud or structure-from-motion data.
+-*   **Outputs:** A rendered image for a target camera pose; optimized scene representation consisting of explicit Gaussian parameters and neural field weights.
++The method takes a set of training images and camera poses as input, and produces a rendered image for a target camera pose along with an optimized scene representation consisting of explicit Gaussian parameters and neural field weights [S1].
+ 
+ **Data Structures**
+-1.  **Explicit Gaussians:** A list of $N$ Gaussians. Each Gaussian stores exactly 8 parameters:
+-    *   Position $p_e \in \mathbb{R}^3$
+-    *   Diffuse color $c_e \in \mathbb{R}^3$
+-    *   Isotropic scale $s_e \in \mathbb{R}$
+-    *   Opacity $\alpha_e \in \mathbb{R}$
+-    *   *Note:* Rotation is not stored explicitly in the compact set but is predicted by the neural field [S1].
+-2.  **Neural Fields:** Two separate neural networks, $\Theta_{geo}$ and $\Theta_{rad}$, utilizing multi-resolution hash encoding [S1].
+-    *   $\Theta_{geo}$: Predicts geometry properties (scale, opacity, rotation).
+-    *   $\Theta_{rad}$: Predicts appearance properties (view-dependent color).
+-    *   *Encoding:* Multi-resolution hash encoding is used for coordinate compression [S1].
++Explicit Gaussians store exactly 8 parameters per Gaussian: position $p_e \in \mathbb{R}^3$, diffuse color $c_e \in \mathbb{R}^3$, isotropic scale $s_e \in \mathbb{R}$, and opacity $\alpha_e \in \mathbb{R}$ [S1]. Rotation is not stored explicitly but is predicted by the neural field [S1]. Two separate neural fields, $\Theta_{geo}$ and $\Theta_{rad}$, use multi-resolution hash encoding for coordinate compression [S1]. $\Theta_{geo}$ predicts geometry properties (scale, opacity, rotation), while $\Theta_{rad}$ predicts appearance properties (view-dependent color) [S1].
+ 
+ **Coordinate Preprocessing**
+-Before querying the neural fields, 3D points are normalized and contracted to the range $(0, 1)$ to handle unbounded scenes [S1].
+-1.  Define the axis-aligned bounding box (AABB) $B_0$ as the minimum and maximum camera positions of the training set.
+-2.  Normalize the point $p_i$ using $B_0$.
+-3.  Contract the normalized point $p_i$ to $p'_i$ using the following formula [S1]:
++Before querying the neural fields, 3D points are normalized and contracted to the range $(0, 1)$ to handle unbounded scenes [S1]. The axis-aligned bounding box (AABB) $B_0$ is defined as the minimum and maximum camera positions of the scene [S1]. The point $p_i$ is normalized using $B_0$, then contracted to $p'_i$ using the formula [S1]:
+ 
+ $$
+@@ -36,12 +23,8 @@
+ 
+ **Hybrid Rendering Pipeline**
+-The rendering process operates in three stages [S1]:
+-
+-1.  **Visibility Pre-culling:** Eliminate explicit Gaussians that lie outside the current view frustum. This reduces the computational overhead of querying the neural fields for irrelevant regions [S1].
+-2.  **Neural Property Prediction & Combination:** For the remaining visible Gaussians, query their positions through the neural fields to predict the missing properties. These predicted properties are combined with the stored explicit parameters to recover high-frequency details [S1].
+-    *   Query $\Theta_{geo}$ with the contracted position to predict scale, opacity, and rotation.
+-    *   Query $\Theta_{rad}$ with the contracted position and view direction to predict view-dependent color.
+-    *   Combine predicted geometry with explicit geometry, and predicted color with explicit diffuse color.
+-3.  **Background Compositing:** The neural field generates a background map projected onto a background sphere. This background map is composited with the foreground Gaussian rendering through alpha blending to address insufficient background modeling for distant objects [S1].
++The rendering process operates in three stages [S1].
++1. Visibility Pre-culling: Eliminates explicit Gaussians outside the current view frustum to reduce computational overhead of querying neural fields [S1].
++2. Neural Property Prediction & Combination: For remaining visible Gaussians, queries their positions through the neural fields to predict missing properties, then combines them with stored explicit parameters to recover high-frequency details [S1]. $\Theta_{geo}$ is queried with the contracted position to predict scale, opacity, and rotation [S1]. $\Theta_{rad}$ is queried with the contracted position and view direction to predict view-dependent color [S1]. Predicted geometry is combined with explicit geometry, and predicted color is combined with explicit diffuse color [S1].
++3. Background Compositing: The neural field generates a background map projected onto a background sphere, which is composited with the foreground Gaussian rendering through alpha blending to address insufficient background modeling for distant objects [S1].
+ 
+ **Alpha Blending**
+@@ -52,122 +35,99 @@
+ $$
+ 
+-Where:
+-*   $C$ is the final predicted pixel color.
+-*   $N$ is the set of sorted Gaussians projected onto the pixel.
+-*   $c_i$ is the color of the $i$-th Gaussian.
+-*   $\alpha_i$ is the opacity of the $i$-th Gaussian.
++Where $C$ is the final predicted pixel color, $N$ is the set of sorted Gaussians projected onto the pixel, $c_i$ is the color of the $i$-th Gaussian, and $\alpha_i$ is the opacity of the $i$-th Gaussian [S1].
+ 
+ **Pseudocode**
+ 
+ ```python
++import math
++
++def contract(p):
++    norm = math.sqrt(p[0]**2 + p[1]**2 + p[2]**2)
++    if norm <= 1.0:
++        return (0.25 * p[0] + 1.0, 0.25 * p[1] + 1.0, 0.25 * p[2] + 1.0)
++    denom = 0.25 * (2.0 - norm) + 1.0
++    return (p[0] / denom, p[1] / denom, p[2] / denom)
++
++def frustum_cull(gaussians, camera):
++    visible = []
++    for g in gaussians:
++        if camera.min_x <= g.pos[0] <= camera.max_x and \
++           camera.min_y <= g.pos[1] <= camera.max_y and \
++           camera.min_z <= g.pos[2] <= camera.max_z:
++            visible.append(g)
++    return visible
++
++def render_background_sphere(theta_rad, hash_table, camera, resolution=256):
++    bg_image = [[(0.0, 0.0, 0.0) for _ in range(resolution)] for _ in range(resolution)]
++    for y in range(resolution):
++        for x in range(resolution):
++            theta = math.pi * (y + 0.5) / resolution
++            phi = 2.0 * math.pi * (x + 0.5) / resolution
++            dir_vec = (math.sin(theta) * math.cos(phi), math.sin(theta) * math.sin(phi), math.cos(theta))
++            bg_image[y][x] = theta_rad.query(dir_vec, hash_table)
++    return bg_image
++
++def alpha_blend_gaussians(gaussians, camera):
++    height, width = camera.height, camera.width
++    image = [[(0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)]
++    for g in gaussians:
++        alpha = g.opacity
++        color = g.color
++        for y in range(g.screen_y, g.screen_y + g.screen_h):
++            for x in range(g.screen_x, g.screen_x + g.screen_w):
++                if 0 <= y < height and 0 <= x < width:
++                    r, gc, b = image[y][x]
++                    image[y][x] = (r * (1 - alpha) + color[0] * alpha,
++                                   gc * (1 - alpha) + color[1] * alpha,
++                                   b * (1 - alpha) + color[2] * alpha)
++    return image
++
+ def render_hyrf(camera, explicit_gaussians, theta_geo, theta_rad, hash_table):
+-    """
+-    Renders a frame using Hybrid Radiance Fields.
+-    
+-    Args:
+-        camera: Camera object with projection matrix and view direction.
+-        explicit_gaussians: List of Gaussian objects with fields:
+-            - pos: (3,) float32
+-            - color_diffuse: (3,) float32
+-            - scale: (1,) float32
+-            - opacity: (1,) float32
+-        theta_geo: Neural field for geometry (scale, opacity, rotation).
+-        theta_rad: Neural field for appearance (view-dependent color).
+-        hash_table: Multi-resolution hash encoding table.
+-        
+-    Returns:
+-        rendered_image: (H, W, 3) float32 array.
+-    """
+-    
+     # Stage 1: Visibility Pre-culling
+-    # Filter Gaussians outside the view frustum
+-    visible_gaussians = []
+-    for g in explicit_gaussians:
+-        if is_in_frustum(g.pos, camera.projection_matrix):
+-            visible_gaussians.append(g)
+-            
++    visible_gaussians = frustum_cull(explicit_gaussians, camera)
++
+     # Stage 2: Neural Property Prediction & Combination
+     processed_gaussians = []
+     for g in visible_gaussians:
+-        # Normalize and contract position
+-        p_norm = normalize_with_aabb(g.pos, camera.aabb)
++        p_norm = (g.pos[0] / camera.aabb_scale, g.pos[1] / camera.aabb_scale, g.pos[2] / camera.aabb_scale)
+         p_contracted = contract(p_norm)
+-        
+-        # Query Geometry Field
+-        # theta_geo returns: predicted_scale, predicted_opacity, predicted_rotation
++
+         pred_geo = theta_geo.query(p_contracted, hash_table)
+-        
+-        # Combine explicit and predicted geometry
+-        # Explicit stores scale and opacity, but rotation is predicted
+-        # Note: Source states explicit stores scale/opacity, neural predicts scale/opacity/rotation
+-        # We combine them. Typically, explicit provides the base, neural refines.
+-        # For implementation, we assume the neural field predicts the *residual* or 
+-        # the full property which overrides/adjusts the explicit one. 
+-        # Based on "combined with stored explicit parameters to recover high-frequency details",
+-        # we treat explicit as the base and neural as the detail.
+-        
+-        final_scale = combine_parameters(g.scale, pred_geo.scale)
+-        final_opacity = combine_parameters(g.opacity, pred_geo.opacity)
+-        final_rotation = pred_geo.rotation # Rotation is not in explicit, so use predicted
+-        
+-        # Query Appearance Field
+-        # theta_rad returns: view-dependent color
+-        view_dir = get_view_direction(g.pos, camera.position)
++        final_scale = g.scale * pred_geo.scale
++        final_opacity = g.opacity * pred_geo.opacity
++        final_rotation = pred_geo.rotation
++
++        view_dir = (g.pos[0] - camera.position[0], g.pos[1] - camera.position[1], g.pos[2] - camera.position[2])
++        v_len = math.sqrt(view_dir[0]**2 + view_dir[1]**2 + view_dir[2]**2)
++        view_dir = (view_dir[0]/v_len, view_dir[1]/v_len, view_dir[2]/v_len)
+         pred_color = theta_rad.query(p_contracted, view_dir, hash_table)
+-        
+-        # Combine explicit diffuse color with predicted view-dependent color
+-        # Standard 3DGS SH expansion is implicit in the view-dependent query
+-        final_color = combine_color(g.color_diffuse, pred_color)
+-        
++        final_color = (g.color_diffuse[0] + pred_color[0], g.color_diffuse[1] + pred_color[1], g.color_diffuse[2] + pred_color[2])
++
+         processed_gaussians.append({
+-            'pos': g.pos,
+-            'color': final_color,
+-            'scale': final_scale,
+-            'opacity': final_opacity,
+-            'rotation': final_rotation
++            'pos': g.pos, 'color': final_color, 'scale': final_scale,
++            'opacity': final_opacity, 'rotation': final_rotation
+         })
+-        
++
+     # Stage 3: Background Compositing
+-    # Render foreground Gaussians
+     foreground_image = alpha_blend_gaussians(processed_gaussians, camera)
+-    
+-    # Generate background map from neural field
+-    # Project background sphere points through neural field
+     background_image = render_background_sphere(theta_rad, hash_table, camera)
+-    
+-    # Composite foreground and background
+-    # Assuming background is rendered with its own alpha or as a solid backdrop
+-    # If background is a map, it might be blended or simply added if alpha is 0
+-    # The source says "composited ... through alpha blending"
+-    final_image = alpha_blend(foreground_image, background_image)
+-    
++
++    final_image = [[(0.0, 0.0, 0.0) for _ in range(camera.width)] for _ in range(camera.height)]
++    for y in range(camera.height):
++        for x in range(camera.width):
++            fg = foreground_image[y][x]
++            bg = background_image[y][x]
++            final_image[y][x] = (fg[0] + bg[0] * (1 - fg[2]), fg[1] + bg[1] * (1 - fg[2]), fg[2] + bg[2] * (1 - fg[2]))
+     return final_image
+-
+-def contract(p):
+-    """
+-    Contracts normalized point p to range (0, 1).
+-    """
+-    norm = np.linalg.norm(p)
+-    if norm <= 1.0:
+-        return 0.25 * p + 1.0
+-    else:
+-        return p / (0.25 * (2.0 - norm) + 1.0)
+ ```
+ 
+ **Parameters**
+-*   **Neural Field Encoding:** Multi-resolution hash encoding [S1].
+-*   **Scene Bounding Box:** Defined by the minimum and maximum camera positions of the training set [S1].
++Neural field encoding uses multi-resolution hash encoding [S1].
+ 
+ **Edge Cases and Pitfalls**
+-*   **Weak Correlation:** Predicting all Gaussian properties through a single neural field fails to achieve satisfactory performance due to the weak correlation between geometry and appearance attributes [S1]. This necessitates the decoupled architecture.
+-*   **Distant Background:** Standard Gaussian representations have insufficient background modeling for distant objects. The background sphere compositing addresses this limitation [S1].
+-*   **Frustum Culling:** Failing to pre-cull Gaussians leads to significant computational overhead when querying neural fields for invisible regions [S1].
++Predicting all Gaussian properties through a single neural field fails due to weak correlation between geometry and appearance attributes, necessitating the decoupled architecture [S1]. Standard Gaussian representations have insufficient background modeling for distant objects, addressed by the background sphere compositing [S1]. Failing to pre-cull Gaussians leads to significant computational overhead when querying neural fields for invisible regions [S1].
+ 
+ ## Operating characteristics
+-*   **Memory Efficiency:** Reduces model size by over 20× compared to standard 3D Gaussian Splatting (3DGS) [S1].
+-*   **Performance:** Maintains real-time rendering speeds [S1].
+-*   **Quality:** Achieves state-of-the-art rendering quality [S1].
+-*   **Strengths:** High-frequency detail preservation via explicit Gaussians; efficient memory usage via neural fields; robust background modeling.
+-*   **Limitations:** Requires training two separate neural fields; relies on multi-resolution hash encoding which may have memory overhead depending on resolution settings (not specified in sources).
++The method reduces model size by over 20× compared to standard 3D Gaussian Splatting (3DGS) [S1]. It maintains real-time rendering speeds [S1]. It achieves state-of-the-art rendering quality [S1].
+ 
+ ## Background

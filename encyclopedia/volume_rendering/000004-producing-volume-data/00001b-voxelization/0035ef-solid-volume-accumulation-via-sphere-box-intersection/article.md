@@ -1,0 +1,228 @@
+# Solid Volume Accumulation via Sphere-Box Intersection
+Also called: Accumulate Clipped Solid Volume (NumPy), Solid Volume Accumulation
+
+## Overview
+This method computes the exact volume of the intersection between a sphere and an axis-aligned bounding box (AABB) for each voxel in a 3D grid, accumulating these values into a dense array [S1, unofficial]. It solves the problem of converting point-sphere primitives into a continuous volumetric representation suitable for rendering, specifically handling partial overlaps where the sphere intersects voxel boundaries [G]. It differs from analytical clipping methods by using 2D Gaussian quadrature to integrate the sphere's cross-sectional area, avoiding complex case logic for edge and corner intersections [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `points`: List of sphere centers $(c_x, c_y, c_z)$ [S1, unofficial].
+- `radii`: List of sphere radii $r$ [S1, unofficial].
+- `mins`: Grid origin $(min_x, min_y, min_z)$ [S1, unofficial].
+- `voxel_size`: Scalar size of a voxel edge $s$ [S1, unofficial].
+- `dims`: Grid dimensions $(N_x, N_y, N_z)$ [S1, unofficial].
+- `unique_linear`: List of linear voxel indices occupied by the scene (for compact storage) [S1, unofficial].
+- `box_min`, `box_max`: Arrays defining the world-space bounds of each compact voxel [G].
+- `order`: Order of the Gaussian quadrature [S1, unofficial].
+
+**Outputs:**
+- `solid_by_voxel`: Dense NumPy array of shape $(L,)$ where $L$ is the number of unique linear indices, containing the accumulated intersection volume for each voxel [S1, unofficial].
+
+**Data Structures:**
+- `linear_to_compact`: Dictionary mapping global linear voxel index to compact array index [S1, unofficial].
+- `nodes`, `weights`: 1D arrays of length $Q$ (order) containing Gaussian quadrature points and weights [S1, unofficial].
+
+**Algorithm:**
+
+1.  **Precompute Quadrature:** Obtain 1D Gaussian quadrature nodes and weights for the specified order; if unavailable, use Legendre-Gauss quadrature [S1, unofficial].
+2.  **Map Indices:** Create `linear_to_compact` mapping each linear index in `unique_linear` to its position in the compact array [S1, unofficial].
+3.  **Initialize:** Create `solid_by_voxel` array of zeros with length equal to `len(unique_linear)` [G].
+4.  **Iterate Points:** For each sphere defined by `center` and `radius`:
+    a.  **Calculate Bounding Voxels:**
+        Compute the range of voxel indices that the sphere intersects:
+        $$
+        \text{low}_i = \left\lfloor \frac{c_i - r - \text{mins}_i}{s} \right\rfloor
+        $$
+        $$
+        \text{high}_i = \left\lfloor \frac{c_i + r - \text{mins}_i}{s} \right\rfloor
+        $$
+        Clamp $\text{low}_i \ge 0$ and $\text{high}_i \le N_i - 1$ for $i \in \{x, y, z\}$ [S1, unofficial].
+    b.  **Iterate Voxels:** For each voxel index $(ix, iy, iz)$ in the range $[\text{low}, \text{high}]$:
+        i.  Compute linear index: $L = ix + N_x(iy + N_y iz)$ [S1, unofficial].
+        ii. Look up compact index $k = \text{linear\_to\_compact}[L]$ [S1, unofficial]. If not found, skip [S1, unofficial].
+        iii. Retrieve box bounds: $B_{min} = \text{box\_min}[k]$, $B_{max} = \text{box\_max}[k]$ [G].
+        iv. Compute intersection volume $V_{int}$ using `sphere_box_intersection_volume_numpy(center, radius, B_min, B_max, nodes, weights)` [S1, unofficial].
+        v.  Accumulate: $\text{solid\_by\_voxel}[k] \leftarrow \text{solid\_by\_voxel}[k] + V_{int}$ [S1, unofficial].
+
+**Intersection Volume Calculation (`sphere_box_intersection_volume_numpy`):**
+
+Given sphere center $(c_x, c_y, c_z)$, radius $r$, and box bounds $[x_0, x_1] \times [y_0, y_1] \times [z_0, z_1]$ (relative to sphere center, i.e., $x_0 = B_{min,x} - c_x$):
+
+1.  **Early Exit (No Intersection):** If any dimension has $B_{max,i} \le B_{min,i}$, return 0.0 [S1, unofficial].
+2.  **Early Exit (Full Containment):** If the box fully contains the sphere ($B_{min,i} \le -r$ and $B_{max,i} \ge r$ for all $i$), return $\frac{4}{3}\pi r^3$ [S1, unofficial].
+3.  **Define Relative Bounds:**
+    $$
+    x_0 = B_{min,x} - c_x, \quad x_1 = B_{max,x} - c_x
+    $$
+    $$
+    y_0 = B_{min,y} - c_y, \quad y_1 = B_{max,y} - c_y
+    $$
+    $$
+    z_0 = B_{min,z} - c_z, \quad z_1 = B_{max,z} - c_z
+    $$
+4.  **Gaussian Quadrature Integration:**
+    The volume is computed by integrating the height of the sphere along the z-axis over the xy-projection of the intersection [S1, unofficial].
+    $$
+    x_{mid} = \frac{x_0 + x_1}{2}, \quad y_{mid} = \frac{y_0 + y_1}{2}
+    $$
+    $$
+    x_{half} = \frac{x_1 - x_0}{2}, \quad y_{half} = \frac{y_1 - y_0}{2}
+    $$
+    Initialize $total = 0$.
+    For each node $n_x$ with weight $w_x$ in `nodes`, `weights`:
+        For each node $n_y$ with weight $w_y$ in `nodes`, `weights`:
+            $$
+            x = x_{mid} + x_{half} \cdot n_x
+            $$
+            $$
+            y = y_{mid} + y_{half} \cdot n_y
+            $$
+            $$
+            \text{remaining} = r^2 - x^2 - y^2
+            $$
+            If $\text{remaining} \le 0$, continue.
+            $$
+            z_{radius} = \sqrt{\text{remaining}}
+            $$
+            The sphere extends from $-z_{radius}$ to $z_{radius}$ in z [S1, unofficial]. The box extends from $z_0$ to $z_1$.
+            $$
+            \text{height} = \min(z_1, z_{radius}) - \max(z_0, -z_{radius})
+            $$
+            If $\text{height} > 0$:
+                $$
+                total \leftarrow total + w_x \cdot w_y \cdot \text{height}
+            $$
+    Return $x_{half} \cdot y_{half} \cdot total$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def make_sphere_clip_quadrature(order):
+    """
+    Returns 1D Gaussian quadrature nodes and weights.
+    Uses Legendre-Gauss if specific implementation not provided.
+    """
+    # [G] Standard Legendre-Gauss quadrature implementation.
+    nodes, weights = np.polynomial.legendre.leggauss(order)
+    return nodes, weights
+
+def sphere_box_intersection_volume_numpy(center, radius, box_min, box_max, nodes, weights):
+    """
+    Computes the volume of intersection between a sphere and an AABB.
+    Uses 2D Gaussian quadrature over the xy-plane.
+    """
+    # Check for empty box
+    if any(box_max[i] <= box_min[i] for i in range(3)):
+        return 0.0
+
+    # Check for full containment
+    # Sphere bounds relative to center: [-r, r]
+    # Box bounds relative to center: box_min - center, box_max - center
+    sphere_min_rel = [-radius, -radius, -radius]
+    sphere_max_rel = [radius, radius, radius]
+    
+    if all(box_min[i] <= sphere_min_rel[i] and box_max[i] >= sphere_max_rel[i] for i in range(3)):
+        return (4.0 / 3.0) * math.pi * radius ** 3
+
+    # Relative coordinates
+    x0 = box_min[0] - center[0]
+    x1 = box_max[0] - center[0]
+    y0 = box_min[1] - center[1]
+    y1 = box_max[1] - center[1]
+    z0 = box_min[2] - center[2]
+    z1 = box_max[2] - center[2]
+
+    x_mid = 0.5 * (x0 + x1)
+    y_mid = 0.5 * (y0 + y1)
+    x_half = 0.5 * (x1 - x0)
+    y_half = 0.5 * (y1 - y0)
+
+    total = 0.0
+    for node_x, weight_x in zip(nodes, weights):
+        x = x_mid + x_half * node_x
+        for node_y, weight_y in zip(nodes, weights):
+            y = y_mid + y_half * node_y
+            remaining = radius * radius - x * x - y * y
+            if remaining <= 0.0:
+                continue
+            
+            z_radius = math.sqrt(remaining)
+            # Intersection of sphere z-range [-z_radius, z_radius] with box z-range [z0, z1]
+            height = min(z1, z_radius) - max(z0, -z_radius)
+            if height > 0.0:
+                total += weight_x * weight_y * height
+
+    return x_half * y_half * total
+
+def accumulate_clipped_solid_numpy(points, radii, mins, voxel_size, dims, unique_linear, box_min, box_max, order):
+    """
+    Accumulates sphere-box intersection volumes into a dense array.
+    """
+    nodes, weights = make_sphere_clip_quadrature(order)
+    
+    # Map linear indices to compact indices
+    linear_to_compact = {int(linear): i for i, linear in enumerate(unique_linear)}
+    
+    # Initialize output array
+    solid_by_voxel = np.zeros(len(unique_linear), dtype=np.float64)
+    
+    # Pre-calculate dims for linear index calculation
+    nx, ny, nz = dims
+    
+    for center, radius in zip(points, radii):
+        # Calculate bounding voxel range
+        low = np.floor((np.array(center) - radius - np.array(mins)) / voxel_size).astype(np.int64)
+        high = np.floor((np.array(center) + radius - np.array(mins)) / voxel_size).astype(np.int64)
+        
+        # Clamp to grid dimensions
+        low = np.maximum(low, 0)
+        high = np.minimum(high, np.array(dims) - 1)
+        
+        # Iterate over voxels in bounding box
+        for ix in range(int(low[0]), int(high[0]) + 1):
+            for iy in range(int(low[1]), int(high[1]) + 1):
+                for iz in range(int(low[2]), int(high[2]) + 1):
+                    # Compute linear index
+                    linear = ix + nx * (iy + ny * iz)
+                    
+                    # Look up compact index
+                    compact = linear_to_compact.get(int(linear))
+                    if compact is None:
+                        continue
+                    
+                    # Get box bounds for this compact voxel
+                    b_min = box_min[compact]
+                    b_max = box_max[compact]
+                    
+                    # Add intersection volume
+                    solid_by_voxel[compact] += sphere_box_intersection_volume_numpy(
+                        center, float(radius), b_min, b_max, nodes, weights
+                    )
+                    
+    return solid_by_voxel
+```
+
+## Subtopics
+
+### [Sphere-Box Intersection Volume via Gaussian Quadrature](8375-sphere-box-intersection-volume-via-gaussian-quadrature.md)
+Computes the exact volume of the intersection between a sphere and an axis-aligned bounding box (AABB) using numerical integration. It sets itself apart from analytical clipping methods by handling arbitrary partial intersections via 2D Gaussian quadrature over the sphere's projection, avoiding complex case logic for sphere-box edge/corner intersections.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Performance:** The method is exact for the geometric intersection volume [G]. Performance depends heavily on the sparsity of the voxel grid and the efficiency of the quadrature order [G]. Higher orders increase accuracy but quadratically increase computation per voxel [G].
+- **Strengths:** Handles arbitrary sphere-box intersections without complex branching logic [G]. Exact volume conservation [G].
+- **Limitations:** Slower than analytical approximations for simple cases [G]. Requires careful handling of floating-point precision near boundaries [G].
+- **When to use:** When exact volume accumulation is required for rendering or physics, and the scene contains many partially overlapping spheres [G].
+- **When not to use:** When real-time performance is critical and approximate voxelization is acceptable [G].
+
+## Background
+This method is derived from implementations in point-cloud voxelization repositories, specifically focusing on accumulating solid volume from sphere primitives [S1, unofficial]. It represents a practical approach to converting discrete point-sphere data into a continuous volumetric field for rendering pipelines [G].
+
+## Sources
+[S1] SammySuliman/point-cloud-voxelization, https://github.com/SammySuliman/point-cloud-voxelization, fetched 2026-10-27 (unofficial)

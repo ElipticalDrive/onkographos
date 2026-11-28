@@ -1,0 +1,56 @@
+# Conservative Solid Voxelization
+Also called: Conservative Interior Voxelization
+
+## Overview
+Conservative Solid Voxelization is a technique to fill voxels that are partially interior, addressing the issue where thin geometry misses voxel centers and is annihilated by XOR blending [S1, S2, unofficial]. It builds on [Single-pass GPU Solid Voxelization](3323-single-pass-gpu-solid-voxelization.md) by adding a conservative boundary pass to ensure no surface-touching voxels are lost, resulting in a conservative solid voxelization [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+- A scene to be voxelized.
+- A voxel grid resolution.
+- A pre-existing single-pass solid voxelization buffer (binary, indicating voxels whose centers are inside the geometry) [S1, S2, unofficial].
+- A 1D bitmask texture (size equal to the maximum number of voxels along a ray, typically small) [S1, S2, unofficial].
+
+**Outputs:**
+- A conservative solid voxelization buffer (binary, indicating all voxels touched by the geometry or lying entirely inside) [S1, S2, unofficial].
+- Optionally, a conservative interior-only buffer (excluding boundary voxels) [S1, S2, unofficial].
+
+**Data Structures:**
+- **Solid Voxelization Buffer:** A 3D texture or buffer storing binary values (0 or 1) for each voxel, indicating if the voxel center is inside the geometry.
+- **Conservative Boundary Buffer:** A 3D texture or buffer storing binary values, indicating if a voxel is touched by the geometry surface.
+- **1D Bitmask Texture:** A 1D texture of size $N$ (where $N$ is the maximum number of voxels along a ray), used to store precomputed bitmasks for depth intervals [S1, S2, unofficial].
+
+**Steps:**
+1. **Render Single-Pass Solid Voxelization:** Render the scene once using the standard single-pass solid voxelization algorithm to populate the solid voxelization buffer with voxels whose centers are inside the geometry [S1, S2, unofficial].
+2. **Render Conservative Boundary Voxelization:** Render the scene again using conservative boundary voxelization [38] to populate the conservative boundary buffer. This step uses conservative rasterization to create fragments where polygons touch a pixel and provides a corresponding depth interval [S1, S2, unofficial].
+3. **Combine for Conservative Solid Voxelization:** Blend the conservative boundary buffer into the solid voxelization buffer using an OR operation (not XOR) to create the conservative solid voxelization [S1, S2, unofficial]. The final conservative solid voxelization is obtained by keeping the solid voxelization in the framebuffer before adding the hull (boundary) [S1, S2, unofficial].
+4. **Optional: Derive Conservative Interior Only:** To get conservative interior only (no boundary), derive the conservative overestimate and subtract the conservative boundary voxelization using XOR blending [S1, S2, unofficial]. This delivers the conservative interior without boundary in three passes [S1, S2, unofficial].
+
+**Implementation Details:**
+- **Bitmask Generation:** Use the small 1D bitmask texture to transform depth extremes into a bitmask [S1, S2, unofficial]. Shift the farther depth value by one voxel distance, leave the near value unmodified [S1, S2, unofficial].
+- **Bitmask Lookup and XOR:** Compute the XOR of the corresponding bitmasks in the shader (or subtraction for older cards) to activate voxels between the extents [S1, S2, unofficial]. The offset applied to the farther depth value ensures that all voxels lying partially between these two extremes are activated [S1, S2, unofficial].
+- **Blending:** Blend the result into the buffer using an OR (not XOR) blending operation to create the conservative boundary [S1, S2, unofficial].
+
+**Formula:**
+To get conservative interior only (no boundary), subtract the conservative boundary voxelization from the conservative overestimate using XOR:
+$$ Result = ConservativeInterior \text{ XOR } ConservativeBoundary $$
+[S1, unofficial]
+
+**Parameters:**
+- **Bitmask Texture Size:** Equal to the maximum number of voxels along a ray [S1, S2, unofficial].
+- **Depth Shift:** One voxel distance for the farther depth value [S1, S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Depth Range Derivation:** The only approximation comes from the currently problematic depth range derivation [S1, S2, unofficial].
+- **Thin Geometry:** Thin geometry may miss voxel centers and be annihilated by XOR, which this method addresses [S1, S2, unofficial].
+- **Hardware Compatibility:** Use subtraction instead of XOR for older cards [S1, S2, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Conservative Solid Voxelization is described in the context of single-pass GPU solid voxelization for real-time applications [S1, S2, unofficial]. It is used for applications like conservative visibility testing [S1, S2, unofficial].
+
+## Sources
+[S1] Single-pass GPU Solid Voxelization and Applications, https://inria.hal.science/inria-00345291, fetched 2026-10-26 (unofficial)
+[S2] PDF Single-Pass GPU Solid Voxelization for Real-Time Applications, https://wo1fsea.github.io/files/About_NavMesh/P3_Single-Pass_GPU_Solid_Voxelization_for_Real-Time_Applications.pdf, fetched 2026-10-29 (unofficial)

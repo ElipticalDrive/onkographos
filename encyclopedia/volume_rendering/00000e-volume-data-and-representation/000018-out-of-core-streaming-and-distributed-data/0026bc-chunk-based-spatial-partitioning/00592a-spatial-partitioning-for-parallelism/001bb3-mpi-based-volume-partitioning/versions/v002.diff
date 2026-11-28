@@ -1,0 +1,251 @@
+--- v001.md
++++ v002.md
+@@ -1,45 +1,51 @@
+ # MPI-based Volume Partitioning
+-
+ Also called: Chunk-based MPI parallelism, Spatial Division of Uniform Resolution Data
+ 
+ ## Overview
+-MPI-based Volume Partitioning is a data-parallel strategy where a volume dataset is partitioned into contiguous chunks of slices, with each MPI process reading and rendering only its assigned subset [S1][S2, unofficial]. It differs from image-based parallelism (e.g., [Chunk-based World Streaming](2369-chunk-based-world-streaming.md)) by distributing the raw data access and local rendering workload rather than compositing final pixel buffers, and from adaptive methods (e.g., [Uniform Block Partitioning with Acceleration](6098-uniform-block-partitioning-with-acceleration.md)) by relying on fixed spatial slice boundaries rather than workload-balanced adaptive blocks [S1][S2, unofficial].
++MPI-based Volume Partitioning is a data-parallel strategy that decomposes a global volume into fixed-size spatial chunks (contiguous slices) and assigns each chunk to a distinct MPI process for independent rendering [S1][S2, unofficial]. It solves the problem of scaling volume rendering to large datasets by eliminating inter-process communication during the rendering phase, relying instead on post-processing to merge results [S1][S2, unofficial]. It differs from tree-based or adaptive partitioning by using a static, uniform grid decomposition along a single axis, prioritizing I/O efficiency and simplicity over load balancing for heterogeneous data [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:** A volume dataset stored as a sequence of contiguous 2D slices (typically along the Z-axis) [S2, unofficial].
+-**Outputs:** A set of scattered binary files, one per MPI rank, containing the rendered results or intermediate mesh data [S1].
++**Inputs and Outputs:**
++- Input: A single time-step volume dataset (e.g., a 3D scalar field) stored as a contiguous file [S2, unofficial].
++- Output: A set of scattered binary files (one per process) containing partial render results or mesh data [S1]. These are later composited or sewn into a final image/mesh [S1][S2, unofficial].
+ 
+ **Data Structures:**
+-*   **Volume File:** A linear file where slices are stored sequentially. Each slice is a 2D grid of voxel values [S2, unofficial].
+-*   **Slice Assignment Map:** A mapping of MPI rank $p$ to a range of slice indices $[start_p, end_p]$ [S2, unofficial].
+-*   **Triangle Table (Optional):** If extracting isosurfaces, a list of triangles with vertex indices. Each process maintains a local table [S1].
+-
+-**Parameters:**
+-*   $N$: Total number of slices in the volume.
+-*   $P$: Total number of MPI processes (ranks).
+-*   $Overlap$: Number of extra slices added to adjacent chunks to handle boundary artifacts [S2, unofficial].
++The volume is treated as a 3D grid. The partitioning is defined by the number of processors $P$ and the total number of slices $S$ along the partitioning axis (typically $z$) [S2, unofficial].
++- Each process $p$ (where $0 \le p < P$) maintains a local buffer for its assigned slices [S2, unofficial].
++- No global shared memory or communication buffers are required during the rendering step [S1][S2, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Partition Calculation:** Determine the number of slices assigned to each processor $p \in [0, P-1]$. The distribution ensures the difference in slice count between any two processors is at most one [S2, unofficial].
+-    *   Let $base = \lfloor N / P \rfloor$.
+-    *   Let $remainder = N \pmod P$.
+-    *   For processor $p$:
+-        *   If $p < remainder$, assign $base + 1$ slices.
+-        *   Else, assign $base$ slices.
+-    *   *Example:* For $N=31, P=5$: $base=6, remainder=1$. Processor 0 gets 7 slices; Processors 1-4 get 6 slices each [S2, unofficial].
+-    *   *Example:* For $N=34, P=5$: $base=6, remainder=4$. Processors 0-3 get 7 slices; Processor 4 gets 6 slices [S2, unofficial].
++1.  **Partition Calculation:** Determine the number of slices assigned to each processor. The goal is to distribute slices as evenly as possible, ensuring the difference in slice count between any two processors is at most one [S2, unofficial].
++    Let $S$ be the total number of slices and $P$ be the number of processors.
++    The base number of slices per processor is $base = \lfloor S / P \rfloor$.
++    The number of processors that receive an extra slice is $remainder = S \pmod P$.
++    
++    For processor $p$ (0-indexed):
++    - If $p < remainder$:
++      $$N_p = base + 1$$
++    - Else:
++      $$N_p = base$$
++    
++    The starting slice index $start_p$ for processor $p$ is:
++    $$start_p = \sum_{i=0}^{p-1} N_i$$
++    [S2, unofficial]
+ 
+-2.  **Boundary Handling (Overlap):** To prevent boundary artifacts (e.g., black stripes) caused by missing opacity/color calculations at division boundaries, each processor reads a small overlap of data from adjacent chunks [S2, unofficial].
+-    *   Processor $p$ reads its assigned slices plus $Overlap$ slices from the preceding chunk (if $p>0$) and $Overlap$ slices from the succeeding chunk (if $p<P-1$) [S2, unofficial].
+-    *   These extra slices are used for local rendering calculations but are discarded or masked before final assembly to prevent image stretching [S2, unofficial].
++2.  **Data Access:** Each process $p$ seeks to the start position of its assigned slices in the input file and reads only those $N_p$ contiguous slices [S1][S2, unofficial]. This assumes the file storage order matches the slice order [S2, unofficial].
+ 
+-3.  **Local Rendering:** Each MPI rank $p$ seeks to the appropriate position in the input file based on its assigned slice range and the overlap [S2, unofficial]. It renders its assigned slices independently using a standard volume rendering algorithm (e.g., ray casting) [S1][S2, unofficial].
++3.  **Boundary Handling (Overlap):** To prevent boundary artifacts (e.g., black stripes) caused by missing opacity/color calculations at the division boundaries, each process renders a small overlap of data with its neighbors [S2, unofficial].
++    - Process $p$ reads $N_p$ core slices plus a small number of overlapping slices from adjacent partitions [S2, unofficial].
++    - These extra/duplicated slices are used for local boundary calculations but are discarded or masked out before final compositing to prevent image stretching [S2, unofficial].
+ 
+-4.  **Output Generation:**
+-    *   **Image-Based:** Each process writes its rendered image to a separate binary file [S1].
+-    *   **Mesh-Based (Isosurface):** Each process generates a local triangle table [S1].
++4.  **Rendering:** Each process independently renders its assigned chunk (slices) using the chosen volume rendering algorithm (e.g., ray casting, isosurface extraction) [S1][S2, unofficial].
++    - If rendering isosurfaces (marching cubes), each process generates a local triangle table and vertex table [S1].
+ 
+-5.  **Sewing (Optional, Mesh Only):** If the output is a mesh, the partial triangle tables from all processes are concatenated. The vertex indices in the triangle table must be updated to account for the union of vertex tables from all processes. Specifically, indices for triangles generated by rank $p > 0$ must be offset by the total number of vertices generated by ranks $0$ to $p-1$ [S1]. This step is optional if the scattered files are used as input for subsequent parallel processing [S1].
++5.  **Output:** Each process writes its result to a separate binary file [S1].
++    - For ray casting: The output is a partial image or slice stack [S2, unofficial].
++    - For isosurfaces: The output is a partial mesh (triangle table) [S1].
++
++6.  **Post-Processing (Sewing/Compositing):**
++    - **For Ray Casting:** The partial images are composited. Since slice order is preserved, ray segments can be combined without additional mappings [S2, unofficial]. The overlapping slices are removed to restore correct dimensions [S2, unofficial].
++    - **For Isosurfaces:** The triangle tables from all processes are concatenated. The vertex indices in the triangle table must be updated to account for the union of vertex tables from all processes (offsetting indices by the cumulative count of vertices from previous processes) [S1]. This "sewing" step is optional if the scattered files are used as input for subsequent parallel processing [S1].
+ 
+ **Pseudocode:**
+@@ -48,11 +54,10 @@
+ import numpy as np
+ 
+-def calculate_slice_assignment(num_slices, num_procs):
++def calculate_partition(num_slices, num_procs):
+     """
+-    Distributes slices among processors such that the difference in count
+-    between any two processors is at most one.
+-    Returns a list of (start_index, end_index) for each processor.
++    Calculates slice assignment for each processor.
++    Returns list of (start_index, num_slices) for each processor.
+     """
+-    base_count = num_slices // num_procs
++    base_slices = num_slices // num_procs
+     remainder = num_slices % num_procs
+     
+@@ -61,64 +66,109 @@
+     
+     for p in range(num_procs):
+-        # First 'remainder' processors get one extra slice
+-        count = base_count + 1 if p < remainder else base_count
+-        current_end = current_start + count
+-        assignments.append((current_start, current_end))
+-        current_start = current_end
++        if p < remainder:
++            count = base_slices + 1
++        else:
++            count = base_slices
++        
++        assignments.append((current_start, count))
++        current_start += count
+         
+     return assignments
+ 
+-def render_chunk(rank, num_procs, total_slices, overlap_slices, input_file):
++def render_chunk(process_id, assignments, input_file, overlap_slices=1):
+     """
+-    Each MPI rank renders its assigned portion of the volume.
++    Renders a chunk of slices assigned to a specific process.
+     """
+-    # 1. Determine slice range
+-    assignments = calculate_slice_assignment(total_slices, num_procs)
+-    start_slice, end_slice = assignments[rank]
++    start_idx, num_core_slices = assignments[process_id]
+     
+-    # 2. Handle overlap for boundary correctness
+-    # Read extra slices from neighbors to ensure boundary calculations are correct
+-    read_start = max(0, start_slice - overlap_slices)
+-    read_end = min(total_slices, end_slice + overlap_slices)
++    # Calculate total slices to read including overlap
++    # Note: Overlap logic depends on neighbor availability. 
++    # Simplified: read core + overlap at end (or both ends if handled by neighbor logic)
++    # For simplicity, we assume overlap is handled by reading extra slices 
++    # that will be discarded later.
++    num_read_slices = num_core_slices + overlap_slices
+     
+-    # 3. Read data
+-    # In a real implementation, this involves MPI_File_read or fseek/fread
+-    # assuming the file stores slices contiguously.
+-    local_data = read_slices_from_file(input_file, read_start, read_end)
++    # Seek and read data
++    # Assuming file structure allows direct seek to slice start
++    slice_data = read_slices_from_file(input_file, start_idx, num_read_slices)
+     
+-    # 4. Render
+-    # Render the local data. The overlap slices contribute to the visual 
+-    # continuity but must be excluded from the final output image dimensions.
+-    rendered_image = volume_render(local_data)
++    # Render the chunk
++    # If isosurface: generate local mesh
++    # If ray casting: generate partial image
++    result = render_volume(slice_data)
+     
+-    # 5. Crop overlap from output
+-    # Remove the extra slices added for boundary handling
+-    # The valid output corresponds to indices [start_slice, end_slice)
+-    # relative to the original volume.
+-    # Assuming rendered_image covers [read_start, read_end)
+-    crop_start = start_slice - read_start
+-    crop_end = end_slice - read_start
++    # Discard overlap slices from result if necessary
++    # For ray casting, this might mean cropping the image or alpha masking
++    # For isosurfaces, the overlap vertices/triangles are kept for sewing
++    final_result = post_process_overlap(result, num_core_slices)
+     
+-    final_output = rendered_image[crop_start:crop_end]
++    return final_result
++
++def composite_results(all_results, assignments, num_slices):
++    """
++    Combines results from all processes.
++    """
++    # For ray casting: simple concatenation/compositing of slices
++    # Ensure order matches original slice order
++    ordered_slices = [None] * num_slices
+     
+-    # 6. Write output
+-    write_binary_file(f"output_rank_{rank}.bin", final_output)
++    for p, result in enumerate(all_results):
++        start_idx, count = assignments[p]
++        # Place result slices into global buffer
++        # Handle overlap removal here if not done in render_chunk
++        for i in range(count):
++            global_slice_idx = start_idx + i
++            ordered_slices[global_slice_idx] = result.slices[i]
++            
++    return assemble_image(ordered_slices)
+ 
+-# Main execution logic (conceptual)
+-# rank = MPI.COMM_WORLD.Get_rank()
+-# num_procs = MPI.COMM_WORLD.Get_size()
+-# render_chunk(rank, num_procs, 31, 1, "volume.dat")
++def sew_meshes(all_meshes, assignments):
++    """
++    Merges isosurface meshes from all processes.
++    """
++    global_vertex_table = []
++    global_triangle_table = []
++    
++    vertex_offset = 0
++    
++    for p, mesh in enumerate(all_meshes):
++        # Update vertex indices in triangle table
++        for triangle in mesh.triangle_table:
++            # Adjust indices by the cumulative vertex count from previous processes
++            adjusted_triangle = [v + vertex_offset for v in triangle]
++            global_triangle_table.append(adjusted_triangle)
++            
++        # Add vertices to global table
++        global_vertex_table.extend(mesh.vertex_table)
++        
++        # Update offset for next process
++        vertex_offset += len(mesh.vertex_table)
++        
++    return Mesh(global_vertex_table, global_triangle_table)
+ ```
+ 
++**Parameters:**
++- `overlap_slices`: Number of extra slices read/rendered for boundary handling. Not given in the sources. [G] (Typically 1-2 slices).
++- `num_procs`: Number of MPI processes.
++- `num_slices`: Total number of slices in the volume along the partitioning axis.
++
++**Edge Cases and Pitfalls:**
++- **Boundary Artifacts:** Naive non-overlapping division causes black stripes or gaps in the final composite because opacity/color calculations are missing at the exact division boundary [S2, unofficial].
++- **Load Imbalance:** The partitioning is uniform by slice count, not by computational cost. If the volume has varying density or complexity, some processors may finish significantly later than others [S2, unofficial].
++- **File Seek Efficiency:** The method relies on the file storage order matching the slice order. If not, efficient seeking is not possible, and additional mappings are required [S2, unofficial].
++
+ ## Operating characteristics
+-*   **Complexity:** Time complexity is linear with respect to the number of slices assigned to each processor, $O(N/P)$, assuming uniform slice processing cost [S1][S2, unofficial]. Memory complexity is $O(N/P + Overlap)$ per processor [S2, unofficial].
+-*   **Performance:** Reading is efficient because slice order matches storage order, allowing direct seeking without additional mappings [S2, unofficial]. Compositing is efficient if slice order matches storage order, as ray segments can be combined without additional mappings [S2, unofficial].
+-*   **Strengths:** Simple implementation; efficient I/O for uniform data; avoids complex load balancing for uniform-resolution volumes [S2, unofficial].
+-*   **Limitations:** Not suitable for adaptive-resolution data where workload varies significantly per slice (requires [Uniform Block Partitioning with Acceleration](6098-uniform-block-partitioning-with-acceleration.md) or similar) [S2, unofficial]. Naive non-overlapping division causes boundary artifacts [S2, unofficial].
+-*   **When to use:** Uniform-resolution volumes where I/O efficiency and simplicity are prioritized over perfect load balancing [S2, unofficial].
+-*   **When not to use:** Adaptive-resolution data or scenes with highly non-uniform computational cost per slice [S2, unofficial].
++- **Time Complexity:** $O(N/P)$ for rendering, where $N$ is the total number of voxels/slices and $P$ is the number of processors. The sewing/compositing step is $O(N)$ or $O(V)$ where $V$ is the number of vertices/triangles [S1][S2, unofficial].
++- **Memory Complexity:** $O(N/P)$ per process, as each process only loads its assigned slices [S1][S2, unofficial].
++- **Scaling:** Strong scaling is limited by the granularity of the slice partitioning. Weak scaling is efficient as long as I/O bandwidth scales with the number of processes [S2, unofficial].
++- **Strengths:** Simple implementation; no inter-process communication during rendering; efficient I/O if file layout is contiguous; suitable for uniform resolution data [S1][S2, unofficial].
++- **Limitations:** Poor load balancing for adaptive-resolution or heterogeneous data; boundary artifacts require overlap handling; static partitioning [S2, unofficial].
++- **When to use:** Uniform resolution volumes; when I/O efficiency is critical; when inter-process communication overhead is undesirable [S1][S2, unofficial].
++- **When not to use:** Adaptive-resolution data (use spatial distribution of adaptive-resolution data instead); when load balancing is critical [S2, unofficial].
+ 
+ ## Background
+-This method was described in the context of parallel volume visualization of time-varying data [S2, unofficial] and parallel isosurface extraction on GPU clusters [S1]. It addresses the challenge of balancing data access and rendering workload in distributed memory environments by leveraging the spatial locality of volume data [S1][S2, unofficial].
++- **Origin:** The method is described in the context of parallel volume visualization of time-varying data [S2, unofficial] and parallel isosurface extraction on GPU clusters [S1].
++- **History:** It is a standard data-parallel approach for MPI-based volume rendering, particularly for uniform resolution datasets [S1][S2, unofficial].
++- **Usage:** Used in visualization pipelines for scientific computing, particularly where datasets are large and uniform [S1][S2, unofficial].
+ 
+ ## Sources

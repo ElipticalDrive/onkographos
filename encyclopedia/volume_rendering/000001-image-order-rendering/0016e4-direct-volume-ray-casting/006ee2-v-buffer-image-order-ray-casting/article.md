@@ -1,0 +1,121 @@
+# V-Buffer image order ray casting
+
+Also called: V-Buffer, V-Buffer cell-by-cell processing
+
+## Overview
+V-Buffer image order ray casting is a volume rendering technique that generates an interpretable representation of volumetric data for scientific and engineering analysis rather than a photorealistic image [S1, unofficial]. It distinguishes itself from standard ray casting by processing volume cells in a strict front-to-back, plane-by-plane order, determining which pixels are affected by each cell before compositing [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar volume dataset defined on a grid of cells; camera parameters (viewpoint, projection); transfer functions for scalar-to-color/opacity mapping; shading and depth cuing parameters.
+*   **Output:** A 2D image where each pixel stores accumulated color and opacity.
+
+**Data Structures:**
+*   **Volume:** A grid of cells. The method processes these cells in a specific order: front-to-back, plane-by-plane, and within each plane, by increasing distance from the viewpoint [S1, unofficial].
+*   **Pixel Buffer:** Stores the accumulated color $\mathbf{C}_{acc}$ and opacity $\alpha_{acc}$ for each pixel. Initialized to $(0, 0)$ [S1, unofficial][S2].
+*   **Ray State:** For each pixel, the ray origin $\mathbf{o}$ and direction $\mathbf{d}$ are defined [G].
+
+**Algorithm Steps:**
+1.  **Initialize:** Set accumulated color $\mathbf{C}_{acc} = (0, 0, 0)$ and accumulated opacity $\alpha_{acc} = 0$ for all pixels [S1, unofficial][S2].
+2.  **Iterate Cells:** Process each cell in the volume in front-to-back order [S1, unofficial].
+    a.  **Identify Affected Pixels:** For the current cell, determine which pixels in the image plane are intersected by the cell's projection [S1, unofficial].
+    b.  **Ray Intersection:** For each affected pixel, determine the entry point of the ray into the current cell [S1, unofficial].
+    c.  **Step Through Cell:** Step the ray along the segment inside the current cell [S1, unofficial].
+    d.  **Sample and Compute:** At each stepping point within the cell:
+        i.  Determine the scalar value $V$ at the sample position [S1, unofficial].
+        ii. Map $V$ to color $\mathbf{c}$ and opacity $\alpha$ using transfer functions [S1, unofficial].
+        iii. Apply shading and depth cuing calculations [S1, unofficial].
+    e.  **Composite:** Update the pixel's accumulated color and opacity using the front-to-back compositing equation [S1, unofficial][S2]:
+        $$
+        \mathbf{C}_{acc} \leftarrow \mathbf{C}_{acc} + (1 - \alpha_{acc}) \cdot \mathbf{c} \cdot \alpha
+        $$
+        $$
+        \alpha_{acc} \leftarrow \alpha_{acc} + (1 - \alpha_{acc}) \cdot \alpha
+        $$
+    f.  **Termination Check:** If $\alpha_{acc}$ reaches unity (1.0), stop processing further cells for this pixel [S1, unofficial].
+3.  **Store Result:** After all cells are processed or opacity reaches unity, store the final $\mathbf{C}_{acc}$ and $\alpha_{acc}$ for the pixel [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def v_buffer_image_order_ray_casting(volume, camera, transfer_function, shading_model):
+    # Initialize pixel buffers
+    num_pixels = camera.image_width * camera.image_height
+    pixel_colors = [Vector3(0, 0, 0) for _ in range(num_pixels)]
+    pixel_opacities = [0.0 for _ in range(num_pixels)]
+
+    # Get cells sorted in front-to-back, plane-by-plane order
+    sorted_cells = volume.get_cells_sorted_by_distance(camera.eye_point)
+
+    for cell in sorted_cells:
+        # Determine which pixels are affected by this cell
+        affected_pixels = cell.get_intersected_pixels(camera)
+
+        for pixel_idx in affected_pixels:
+            # If pixel is already fully opaque, skip
+            if pixel_opacities[pixel_idx] >= 1.0:
+                continue
+
+            # Define ray for this pixel
+            ray_origin, ray_direction = camera.get_ray(pixel_idx)
+
+            # Find intersection of ray with current cell
+            t_entry, t_exit = cell.intersect_ray(ray_origin, ray_direction)
+
+            if t_entry is None:
+                continue
+
+            # Step through the cell
+            step_size = cell.get_step_size()
+            t = t_entry
+            while t < t_exit:
+                # Sample position
+                sample_pos = ray_origin + t * ray_direction
+
+                # Get scalar value
+                scalar_val = volume.sample_at(sample_pos)
+
+                # Transfer function
+                color, alpha = transfer_function(scalar_val)
+
+                # Shading and depth cuing
+                color = shading_model(color, sample_pos, scalar_val)
+
+                # Composite
+                pixel_colors[pixel_idx] += (1.0 - pixel_opacities[pixel_idx]) * color * alpha
+                pixel_opacities[pixel_idx] += (1.0 - pixel_opacities[pixel_idx]) * alpha
+
+                # Advance step
+                t += step_size
+
+                # Early termination if fully opaque
+                if pixel_opacities[pixel_idx] >= 1.0:
+                    break
+
+    return pixel_colors, pixel_opacities
+```
+
+**Parameters:**
+*   **Step Size:** The distance between sampling points within a cell. Not given in the sources.
+*   **Transfer Function:** Maps scalar values to color and opacity. Defined by the user [S1, unofficial].
+*   **Shading Model:** Computes base color based on local gradients. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Opacity Unity:** If accumulated opacity reaches 1.0, further cells do not contribute to the pixel color. This optimization must be checked per pixel [S1, unofficial].
+*   **Cell Order:** Processing order is critical for correct front-to-back compositing. Cells must be processed from closest to furthest relative to the viewpoint [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Proportional to the number of cells times the average number of pixels affected per cell, times the number of steps per cell. Not given in the sources.
+*   **Memory Complexity:** Proportional to the number of pixels for the color and opacity buffers. Not given in the sources.
+*   **Strengths:** Provides interpretable representations for scientific analysis [S1, unofficial]. Explicit cell-by-cell processing allows for detailed control over shading and depth cuing [S1, unofficial].
+*   **Limitations:** Not designed for photorealism [S1, unofficial]. Performance may be impacted by the overhead of determining affected pixels for each cell [S1, unofficial].
+*   **When to Use:** When interpretability for scientists/engineers is the primary goal [S1, unofficial].
+*   **When Not to Use:** When photorealistic rendering is required [S1, unofficial].
+
+## Background
+The V-Buffer image order ray casting method was introduced as an alternative to standard ray casting techniques, focusing on interpretability rather than photorealism [S1, unofficial]. It builds on the principles of ray casting where rays are traversed from the eye point through each pixel into the volume [S2]. The method processes cells in a front-to-back order, beginning on the plane closest to the viewpoint and progressing plane-by-plane [S1, unofficial].
+
+## Sources
+[S1] Volume Rendering, https://www.cs.unh.edu/~cs880/visualization/Celebi-Volume%20Rendering.pdf, fetched 2026-10-26 (unofficial)
+[S2] graphXDoses/VolumeInspector, https://github.com/graphXDoses/VolumeInspector, fetched 2026-10-28

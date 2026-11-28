@@ -1,0 +1,279 @@
+# Voxel and Grid-Based Prediction
+
+Also called: Direct Multi-Plane Image Gaussian Optimization, DirectMPIGO
+
+## Overview
+Voxel and Grid-Based Prediction is a neural rendering method that combines voxel-based density representation with Multi-Plane Image (MPI) depth layers to perform efficient volume rendering [S1, unofficial]. It solves the problem of memory inefficiency in dense voxel grids by supporting sparse grids and occupancy caching, while using MPI to handle depth complexity [S1, unofficial]. Unlike its sibling [Gaussian Splatting Attribute Prediction](9961-gaussian-splatting-attribute-prediction.md), which refines initial Gaussians via residual correction, this method directly predicts density and color features from grid structures [S1, unofficial]. It differs from [DVGO](https://github.com/sunset1995/DVGO) by supporting sparse grids and MPI depth, whereas DVGO relies on dense voxel grids [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Camera rays (origin $O$, direction $D$), bounding box ($xyz_{min}, xyz_{max}$), and training images.
+*   **Outputs:** Rendered RGB images and gradients for grid parameters.
+
+**Data Structures:**
+1.  **Density Grid:** Created via `grid.create_grid`. Type specified by `density_type` (e.g., `DenseGrid`). Channels=1.
+2.  **Feature/Color Grid ($k_0$):** Created via `grid.create_grid`. Type specified by `k0_type`. Channels determined by `rgbnet_dim`.
+3.  **Act Shift Grid:** `DenseGrid` tensor of shape `[1, 1, mpi_depth]`. `requires_grad=False`. Stores logit shifts to equalize alpha contributions.
+4.  **Mask Cache:** Boolean tensor of shape `mask_cache_world_size`. Tracks occupied voxels.
+5.  **Color MLP:** A small network mapping grid features to RGB.
+
+**Parameters:**
+*   `xyz_min`, `xyz_max`: Scene bounding box coordinates [S1, unofficial].
+*   `mpi_depth`: Number of MPI depth planes [S1, unofficial].
+*   `fast_color_thres`: Alpha threshold for occupancy mask updates [S1, unofficial].
+*   `rgbnet_dim`: Color feature dimension. If $\le 0$, uses raw RGB (dim=3) from $k_0$; otherwise uses MLP output [S1, unofficial].
+*   `rgbnet_depth`, `rgbnet_width`: MLP depth and width [S1, unofficial].
+*   `viewbase_pe`: Number of positional encoding frequencies for view direction [S1, unofficial].
+*   `stepdist`: Step distance for ray sampling [S1, unofficial].
+*   `near`, `far`: Ray clipping planes [S1, unofficial].
+*   `voxel_size_ratio`: Constant $256.0 / mpi\_depth$ [S1, unofficial].
+
+**Initialization Steps:**
+1.  **Grid Creation:** Initialize density grid with `density_type`, channels=1, and `world_size` derived from `_set_grid_resolution` and `xyz` bounds [S1, unofficial].
+2.  **Act Shift Initialization:** Create `act_shift` grid of shape `[1, 1, mpi_depth]`. Initialize values to ensure uniform initial transmittance [S1, unofficial].
+    *   Set initial density values $g[i] = 1.0 / mpi\_depth - 10^{-6}$ for all $i \in [0, mpi\_depth)$ [S1, unofficial].
+    *   Compute conditional probability $p[i]$:
+        $$ p[i] = \frac{1 - \sum_{j=0}^{i+1} g[j]}{1 - \sum_{j=0}^{i} g[j]} \quad \text{for } i > 0, \quad p[0] = 1 - g[0] $$
+    *   Set `act_shift` value at layer $i$:
+        $$ \text{act\_shift}[i] = \log \left( (p[i]^{-1 / \text{voxel\_size\_ratio}}) - 1 \right) $$
+3.  **Color Network Setup:**
+    *   If `rgbnet_dim` $\le 0$: Create $k_0$ grid with channels=3. Set color MLP to `None` (coarse stage) [S1, unofficial].
+    *   If `rgbnet_dim` $> 0$: Create $k_0$ grid with channels=`rgbnet_dim`. Initialize color MLP [S1, unofficial].
+        *   Input dimension $dim_0 = (3 + 3 \cdot \text{viewbase\_pe} \cdot 2) + k_0\_dim$, combining original RGB (3), view PE ($3 \cdot \text{viewbase\_pe} \cdot 2$), and feature grid ($k_0\_dim$) [S1, unofficial].
+        *   MLP Architecture: `Linear(dim0, rgbnet_width)`, `ReLU`, `(rgbnet_depth-2)` layers of `Linear(rgbnet_width, rgbnet_width)` + `ReLU`, final `Linear(rgbnet_width, 3)` [S1, unofficial].
+        *   Initialize final MLP bias to 0: `nn.init.constant_(self.rgbnet[-1].bias, 0)` [S1, unofficial].
+4.  **View Frequency Buffer:** Initialize buffer with powers of 2: $[2^0, 2^1, \dots, 2^{(\text{viewbase\_pe}-1)}]$ [S1, unofficial].
+5.  **Mask Cache:** If `mask_cache_path` provided, load from file; else create all-True mask of size `mask_cache_world_size` [S1, unofficial].
+6.  **World Size Calculation:**
+    $$ \text{world\_size}[:2] = (xyz_{max} - xyz_{min})[:2] \cdot r $$
+    $$ r = \sqrt{\frac{\text{num\_voxels}}{\text{mpi\_depth} \cdot \prod (xyz_{max} - xyz_{min})[:2]}} $$
+    $$ \text{world\_size}[2] = \text{mpi\_depth} $$
+    [S1, unofficial]
+
+**Rendering and Training Steps:**
+1.  **Ray Bounding Box Intersection:** For each ray, compute $t_{min}$ and $t_{max}$ where the ray enters and exits the bounding box $[xyz_{min}, xyz_{max}]$ [S1, unofficial].
+    *   Let $v_x, v_y, v_z$ be ray direction components (clamp 0 to $10^{-6}$).
+    *   $ax = (xyz_{max}[0] - O_x) / v_x$, $bx = (xyz_{min}[0] - O_x) / v_x$.
+    *   $t_{min} = \max(\min(\max(\max(\min(ax, bx), \min(ay, by)), \min(az, bz)), far), near)$ [S1, unofficial].
+    *   $t_{max} = \max(\min(\min(\min(\max(ax, bx), \max(ay, by)), \max(az, bz)), far), near)$ [S1, unofficial].
+2.  **Sample Count Inference:** Compute number of samples per ray:
+    $$ n\_samples = \max \left( \left\lceil \frac{(t_{max} - t_{min}) \cdot \|D\|}{stepdist} \right\rceil, 1 \right) $$
+    [S1, unofficial]
+3.  **Ray Start and Direction:**
+    *   $R_{start} = O + D \cdot t_{min}$ [S1, unofficial].
+    *   $R_{dir} = D / \|D\|$ [S1, unofficial].
+4.  **Point Sampling:** Sample points along rays at intervals of `stepdist`. Mark points outside bounding box [S1, unofficial].
+5.  **Occupancy Cache Update (Optional):**
+    *   Query density at cache grid points. Activate if density > threshold.
+    *   Apply `max_pool3d(kernel=3, padding=1)`.
+    *   Update mask where alpha > `fast_color_thres` [S1, unofficial].
+    *   For few views: accumulate gradient counts in `ones.grid.grad`. Update mask where count >= `maskout_lt_nviews` [S1, unofficial].
+6.  **Scale Volume Grid:** If new world size product $\le 256^3$, recompute mask cache by combining old mask with alpha > `fast_color_thres` after `max_pool3d` smoothing [S1, unofficial].
+7.  **Total Variation Gradient Scaling:**
+    $$ w_{xy} = \text{weight} \cdot \frac{\max(\text{world\_size}[:2])}{128} $$
+    $$ w_z = \text{weight} \cdot \frac{\text{mpi\_depth}}{128} $$
+    [S1, unofficial]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class VoxelGridPrediction:
+    def __init__(self, xyz_min, xyz_max, mpi_depth, fast_color_thres, 
+                 rgbnet_dim, rgbnet_depth, rgbnet_width, viewbase_pe, 
+                 stepdist, near, far, num_voxels):
+        self.xyz_min = xyz_min
+        self.xyz_max = xyz_max
+        self.mpi_depth = mpi_depth
+        self.fast_color_thres = fast_color_thres
+        self.rgbnet_dim = rgbnet_dim
+        self.stepdist = stepdist
+        self.near = near
+        self.far = far
+        self.num_voxels = num_voxels
+        
+        # World size calculation
+        r = torch.sqrt(torch.tensor(num_voxels) / mpi_depth / 
+                       torch.prod(xyz_max[:2] - xyz_min[:2]))
+        self.world_size = torch.zeros(3)
+        self.world_size[:2] = (xyz_max[:2] - xyz_min[:2]) * r
+        self.world_size[2] = mpi_depth
+        
+        # Initialize grids
+        # Note: grid.create_grid is a placeholder for the specific grid implementation
+        self.density_grid = self.create_grid(density_type='DenseGrid', channels=1)
+        
+        # Act shift initialization
+        self.voxel_size_ratio = 256.0 / mpi_depth
+        self.act_shift = self.init_act_shift()
+        
+        # Color network
+        if rgbnet_dim <= 0:
+            self.k0_grid = self.create_grid(k0_type='DenseGrid', channels=3)
+            self.rgbnet = None
+        else:
+            self.k0_grid = self.create_grid(k0_type='DenseGrid', channels=rgbnet_dim)
+            self.rgbnet = self.init_color_mlp(rgbnet_dim, rgbnet_depth, rgbnet_width, viewbase_pe)
+            
+        # Mask cache
+        self.mask_cache_world_size = self.world_size.int()
+        self.mask_cache = torch.ones(self.mask_cache_world_size, dtype=torch.bool)
+        
+        # View frequency buffer
+        self.view_freq = 2 ** torch.arange(viewbase_pe)
+
+    def init_act_shift(self):
+        # g[i] = 1.0 / mpi_depth - 1e-6
+        g = torch.full((self.mpi_depth,), 1.0 / self.mpi_depth - 1e-6)
+        
+        # p[i] calculation
+        p = torch.zeros(self.mpi_depth)
+        p[0] = 1.0 - g[0]
+        sum_g = g[0]
+        for i in range(1, self.mpi_depth):
+            sum_g += g[i]
+            p[i] = (1.0 - sum_g) / (1.0 - sum_g + g[i-1]) # Note: sum_g here includes g[i], so denominator is 1 - sum(g[0:i])
+            # Correct logic from source: p[i] = (1 - sum(g[0:i+1])) / (1 - sum(g[0:i]))
+            # Let's re-implement carefully
+            pass
+            
+        # Re-calculate p correctly
+        cum_g = torch.cumsum(g, dim=0)
+        p = torch.zeros(self.mpi_depth)
+        p[0] = 1.0 - g[0]
+        for i in range(1, self.mpi_depth):
+            numerator = 1.0 - cum_g[i] # sum(g[0:i+1]) is cum_g[i]
+            denominator = 1.0 - cum_g[i-1] # sum(g[0:i]) is cum_g[i-1]
+            p[i] = numerator / denominator
+            
+        # act_shift = log( (p[i] ^ (-1 / voxel_size_ratio)) - 1 )
+        act_shift = torch.log(torch.pow(p, -1.0 / self.voxel_size_ratio) - 1.0)
+        
+        # Reshape to [1, 1, mpi_depth]
+        return act_shift.view(1, 1, -1).requires_grad_(False)
+
+    def init_color_mlp(self, k0_dim, depth, width, viewbase_pe):
+        # dim0 = 3 + 3 * viewbase_pe * 2 + k0_dim
+        dim0 = 3 + 3 * viewbase_pe * 2 + k0_dim
+        layers = []
+        layers.append(nn.Linear(dim0, width))
+        layers.append(nn.ReLU())
+        for _ in range(depth - 2):
+            layers.append(nn.Linear(width, width))
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(width, 3))
+        mlp = nn.Sequential(*layers)
+        nn.init.constant_(mlp[-1].bias, 0)
+        return mlp
+
+    def create_grid(self, density_type, channels):
+        # Placeholder for grid creation logic
+        # Returns a tensor or grid object
+        return torch.zeros(1, channels, *self.world_size.int())
+
+    def infer_t_minmax(self, rays_o, rays_d):
+        # Clamp direction to avoid division by zero
+        rays_d = torch.where(rays_d == 0, 1e-6, rays_d)
+        
+        ax = (self.xyz_max[0] - rays_o[:, 0]) / rays_d[:, 0]
+        bx = (self.xyz_min[0] - rays_o[:, 0]) / rays_d[:, 0]
+        ay = (self.xyz_max[1] - rays_o[:, 1]) / rays_d[:, 1]
+        by = (self.xyz_min[1] - rays_o[:, 1]) / rays_d[:, 1]
+        az = (self.xyz_max[2] - rays_o[:, 2]) / rays_d[:, 2]
+        bz = (self.xyz_min[2] - rays_o[:, 2]) / rays_d[:, 2]
+        
+        t_min = torch.max(torch.min(torch.max(torch.max(torch.min(ax, bx), torch.min(ay, by)), torch.min(az, bz)), self.far), self.near)
+        t_max = torch.max(torch.min(torch.min(torch.min(torch.max(ax, bx), torch.max(ay, by)), torch.max(az, bz)), self.far), self.near)
+        
+        return t_min, t_max
+
+    def sample_pts_on_rays(self, rays_o, rays_d):
+        t_min, t_max = self.infer_t_minmax(rays_o, rays_d)
+        n_samples = torch.clamp(torch.ceil((t_max - t_min) * torch.norm(rays_d, dim=1) / self.stepdist), min=1).long()
+        
+        # Cumsum to determine total points
+        n_cumsum = torch.cumsum(n_samples, dim=0)
+        total_len = n_cumsum[-1].item()
+        
+        # Ray ID and Step ID assignment
+        ray_id = torch.zeros(total_len, dtype=torch.long)
+        ray_id[0] = 1
+        # Set 1 at start of each ray segment
+        for i in range(1, len(n_samples)):
+            ray_id[n_cumsum[i-1]] = 1
+        ray_id = torch.cumsum(ray_id, dim=0)
+        
+        step_id = torch.arange(total_len, dtype=torch.long)
+        # Adjust step_id relative to ray start
+        # This part is complex to vectorize perfectly without CUDA, simplified here
+        # In practice, use CUDA kernel as in source
+        
+        # Ray start and direction
+        rnorm = torch.norm(rays_d, dim=1, keepdim=True)
+        rays_start = rays_o + rays_d * t_min.unsqueeze(1)
+        rays_dir = rays_d / rnorm
+        
+        # Sample points
+        # This is a simplified representation of the CUDA kernel logic
+        # Actual implementation requires careful indexing
+        pass
+
+    def update_occupancy_cache(self, density_grid):
+        # Query density at cache points
+        # Apply max_pool3d
+        # Update mask where alpha > fast_color_thres
+        pass
+
+    def forward(self, rays_o, rays_d):
+        # 1. Sample points
+        # 2. Query density grid
+        # 3. Apply act_shift for MPI depth layers
+        # 4. Query k0 grid
+        # 5. Pass through color MLP if active
+        # 6. Composite colors
+        pass
+```
+
+## Subtopics
+
+### [Gaussian Splatting Attribute Prediction](9961-gaussian-splatting-attribute-prediction.md)
+Gaussian Splatting Attribute Prediction is a method for refining 3D Gaussian primitives by predicting additive residuals to initial rendering attributes, rather than regenerating them from scratch. It solves the problem of high-frequency detail loss in coarse initializations by using a voxel transformer to correct errors on a per-voxel basis. Unlike sibling methods that optimize neural feature grids directly, this approach operates on the Gaussian set's geometric and color parameters via residual correction.
+
+### [GO-Surf Neural Feature Grid Optimization](15383-go-surf-neural-feature-grid-optimization.md)
+GO-Surf is a differentiable volume rendering method that optimizes a multi-resolution neural feature grid to reconstruct high-fidelity 3D surfaces from RGB-D observations. It solves the problem of fast, dense surface reconstruction by combining explicit grid-based feature storage with implicit SDF decoding, significantly reducing optimization time compared to fully implicit MLP-based methods like NeuralRGB-D. It sets itself apart by using a multi-resolution grid to store geometry and color features, allowing for faster convergence and higher detail capture, albeit at the cost of higher memory usage.
+
+### [Feed-forward and Generalizable Prediction](15832-feed-forward-and-generalizable-prediction.md)
+Feed-forward and generalizable prediction methods map input images directly to a set of 3D Gaussian primitives in a single neural network pass, eliminating the need for per-scene gradient descent optimization [16746-feed-forward-generalizable-reconstruction.md]. This approach solves the latency and compute bottlenecks of iterative reconstruction by leveraging priors learned from large-scale datasets, enabling real-time novel view synthesis on unseen scenes [16746-feed-forward-generalizable-reconstruction.md]. Unlike iterative methods that optimize geometry per scene, these methods generalize by mapping image features to Gaussian parameters via learned neural networks [16746-feed-forward-generalizable-reconstruction.md].
+
+### [Gaussian Parameter Prediction](18303-gaussian-parameter-prediction.md)
+Gaussian Parameter Prediction derives the geometric and appearance parameters of 3D Gaussians from input data to enable novel view synthesis. It solves the problem of regenerating the Gaussian set directly from features or depth maps without iterative optimization. It differs from its siblings by focusing on direct prediction from pooled features or unprojected depth maps rather than iterative densification or mesh embedding.
+
+### 3D Gaussians Prediction from Voxels
+Predicts a set of learnable Gaussian parameters for each voxel $v$, including center offset, opacity, covariance, and spherical harmonic color [S2]. The final 3D Gaussian center $\mu_j$ is computed by applying a sigmoid activation to the predicted offset $\bar{\mu}_j$, shifting by -0.5, scaling by $r$, and adding the voxel centroid $Center_j$ [S2].
+$$ \mu_j = r \cdot (\sigma(\bar{\mu}_j) - 0.5) + Center_j $$
+where $\mu_j$ is the final center, $\sigma$ is sigmoid, $\bar{\mu}_j$ is the predicted offset, $Center_j$ is the voxel centroid, and $r$ is a scaling factor [S2]. The output dimension per Gaussian is 38, comprising offset (3), opacity (1), covariance (6), and spherical harmonic color (28) [S2]. $r$ is set to 3 times the voxel size [S2]. The sigmoid activation restricts the learnable offset to a localized neighborhood; the -0.5 shift facilitates symmetrical, bi-directional movement from the voxel center [S2].
+
+### GS-LRM / Long-LRM
+Predicts 3D Gaussians directly (not triplane -> Gaussians), resulting in faster downstream rendering [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of rays and samples per ray. Sparse grids reduce the number of active voxels queried.
+*   **Memory Complexity:** Proportional to the number of voxels in the grid. Sparse grids significantly reduce memory usage compared to dense grids.
+*   **Performance:** Efficient for large scenes due to sparse grid support. MPI depth layers allow for handling complex depth structures without increasing voxel resolution uniformly.
+*   **Strengths:** Memory efficiency, support for large scenes, fast convergence due to occupancy caching.
+*   **Limitations:** Requires careful tuning of grid resolution and MPI depth. Sparse grid implementation can be complex.
+*   **When to use:** Large-scale scenes where memory is a constraint, or when high-frequency details are not the primary focus.
+*   **When not to use:** Scenes requiring very high-frequency detail where dense grids or other methods might be more appropriate.
+
+## Background
+Originated from the kakaobrain/nerf-factory repository, DirectMPIGO combines voxel-based density representation with Multi-Plane Image (MPI) depth layers [S1, unofficial]. It addresses the limitations of dense voxel grids in previous methods like DVGO by introducing sparse grids and occupancy caching [S1, unofficial].
+
+## Sources
+[S1] kakaobrain/nerf-factory, https://github.com/kakaobrain/nerf-factory, fetched 2026-10-26 (unofficial)
+[S2] VolSplat: Rethinking Feed-Forward 3D Gaussian Splatting with Voxel-Aligned Prediction, https://doi.org/10.1007/978-3-032-37232-1_1, fetched 2026-10-26
+[S3] Neural Rendering — Technologies & Tricks, https://www.chengjianglong.com/ml/3D-Neural_Rendering_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

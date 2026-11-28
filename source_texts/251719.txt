@@ -1,0 +1,113 @@
+I am trying to understand the implementation details and ensure consistency between the code and Figure 6 in the paper. Under the example.yaml, the positional encoding in baseModel of base.py seems to have a dimension of 69, not 63 as in...
+
+Regarding MLP architecture in the code and in the paper (Figure 6) · Issue #17 · NarcissusEx/CuNeRF · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Regarding MLP architecture in the code and in the paper (Figure 6) #17
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Regarding MLP architecture in the code and in the paper (Figure 6)#17
+Copy link
+Description
+traffictse
+opened on Jan 3, 2026
+Issue body actions
+I am trying to understand the implementation details and ensure consistency between the code and Figure 6 in the paper.
+Under the example.yaml, the positional encoding in baseModel of base.py seems to have a dimension of 69, not 63 as in Figure 6.
+```
+def __init__(self, params):
+    super(baseModel, self).__init__()
+    for k, v in params.items():
+        setattr(self, k, v)
+    # Positional encoding: freqs = 2^[0, 1, 2, ..., 10], 11 freqs total (max_freq + 1)
+    self.freqs = 2.0 ** torch.linspace(0.0, self.max_freq, steps=self.max_freq + 1)
+    # self.in_ch = 3 * (2 * (10 + 1) + 1) = 3 * 23 = 69
+    self.in_ch = self.in_ch * (len(self.p_fns) * (self.max_freq + 1) + 1)
+```
+I am wondering whether there is any reason for not using the following, which gives 63:
+```
+    self.freqs = 2.0 ** torch.arange(self.max_freq)
+    self.in_ch = self.in_ch * (len(self.p_fns) * self.max_freq + 1)
+```
+If continuing with 69-dimension positional encoding, the NeRFMLP in NeRFMLP.py is also quite different from the architecture in Figure 6, where there should be 2 layers (the 4th and the 8th layers, indices starting from 1) with skip connections. Also, the code implements skip connections as a simple concatenation, while Figure 6 suggests that skip connections are implemented by concatenating x with h and passing through the linear transform as well as the activation (same as "include a skip connection that concatenates this input to the layer’s activation", quoted from the NeRF paper).
+If we consider the code operating on layers (idx=4 and idx=5) as a single combination, it sort of implements the actual skip connection as defined, but a linear layer is wasted here. And even so, the code still appears to differ from Figure 6. Because the code creates
+```
+# As configured in `example.yaml`, netD: 8, netW: 256, out_ch: 2, skips: [4].
+# self.coords_MLP = [
+#     nn.Linear(69, 256),      # Layer 0
+#     nn.Linear(256, 256),     # Layer 1, i = 0
+#     nn.Linear(256, 256),     # Layer 2, i = 1
+#     nn.Linear(256, 256),     # Layer 3, i = 2
+#     nn.Linear(256, 256),     # Layer 4, i = 3
+#     nn.Linear(325, 256),     # Layer 5 (skip: 256 + 69 = 325 input), i = 4
+#     nn.Linear(256, 256),     # Layer 6, i = 5
+#     nn.Linear(256, 256),     # Layer 7, i = 6
+# ]
+```
+and the consequent forward pass turns out to be:
+```
+# idx=0: Not in skips, use coords_MLP[0]
+# h = F.relu(coords_MLP[0](h))  # Linear(69, 256)
+# # h.shape = (1024, 64, 256)
+
+# # idx=1: Not in skips, use coords_MLP[1]
+# h = F.relu(coords_MLP[1](h))  # Linear(256, 256)
+# # h.shape = (1024, 64, 256)
+
+# # idx=2: Not in skips, use coords_MLP[2]
+# h = F.relu(coords_MLP[2](h))  # Linear(256, 256)
+# # h.shape = (1024, 64, 256)
+
+# # idx=3: Not in skips, use coords_MLP[3]
+# h = F.relu(coords_MLP[3](h))  # Linear(256, 256)
+# # h.shape = (1024, 64, 256)
+
+# # idx=4: IN skips! Concatenate, don't use coords_MLP[4]
+# h = torch.cat([x, h], -1)  # cat(69, 256)
+# # h.shape = (1024, 64, 325)
+# Note: coords_MLP[4] = Linear(256, 256) is NOT used!
+
+# # idx=5: Not in skips, use coords_MLP[5]
+# h = F.relu(coords_MLP[5](h))  # Linear(325, 256) ← Uses the skip layer!
+# # h.shape = (1024, 64, 256)
+
+# # idx=6: Not in skips, use coords_MLP[6]
+# h = F.relu(coords_MLP[6](h))  # Linear(256, 256)
+# # h.shape = (1024, 64, 256)
+
+# # idx=7: Not in skips, use coords_MLP[7]
+# h = F.relu(coords_MLP[7](h))  # Linear(256, 256)
+# # h.shape = (1024, 64, 256)
+
+# # Output
+# out = self.out_MLP(h)  # Linear(256, 2)
+# # out.shape = (1024, 64, 2)
+```
+Are these differences intentional design choices or unintended implementation artifacts?
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

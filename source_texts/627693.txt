@@ -1,0 +1,595 @@
+ClickHouse® is a real-time analytics database management system - Add sparse encoding for JSON typed paths with Object V4 by amosbird · Pull Request #120129 · ClickHouse/ClickHouse
+
+Add sparse encoding for JSON typed paths with Object V4 by amosbird · Pull Request #120129 · ClickHouse/ClickHouse · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+amosbird
+commented
+Sep 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Opt-in Object V4 selects sparse encoding for eligible typed JSON paths using ratio_of_defaults_for_sparse_serialization. Selection is fixed per part from the retained first-block statistics and recorded in the Object structure prefix, so reads always use the encoding stored in the part rather than the current table settings. Dynamic paths keep their existing Variant encoding, without an outer Sparse wrapper. V3 remains the default; V1–V3 layouts are unchanged.
+The wide part reader re-evaluates streams that were provisionally marked as partially read once the deserialization prefix reveals the actual encoding, since a sparse Nullable typed path has offsets instead of a null-map stream.
+Covered by 04339_json_columnar_sparse, a Jinja2 SQL test that renders the part-type / threshold / block-size matrix into a single script: Wide and Compact parts, several threshold values, mixed V3/V4 merges, mutations, nested typed JSON, dynamic paths, subcolumn .null reads, and nonzero-offset reads, with assertions that dynamic paths never gain sparse streams. The Jinja2 form avoids one client process per statement, which keeps the merge/mutation-heavy test within the timeout on slow builds.
+Changelog category (leave one):
+New Feature
+Changelog entry:
+Add object_serialization_version='v4' for automatic sparse encoding of eligible typed JSON paths using ratio_of_defaults_for_sparse_serialization. Dynamic path encoding is unchanged. Upgrade all readers before enabling V4.
+Documentation entry:
+Updated the JSON data type and MergeTree setting documentation.
+Workflow [PR]
+Sync PR [sync-upstream/pr/120129]
+clickhouse-gh
+Bot
+commented
+Sep 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Workflow [PR], commit [f9d158d]
+Summary: ❌
+Performance Comparison: Performance dashboard
+job_name
+test_name
+status
+info
+comment
+Build profile diff
+ERROR
+AI Review
+Summary
+This PR adds opt-in V4 storage for sparse typed JSON paths, retaining the encoding choice per part and adapting full-column and subcolumn readers. The new format needs an experimental write gate and focused regression coverage for writer-block transitions and reads starting at later marks.
+Findings
+❌ Blockers
+MergeTreeSettings.cpp:384: V4 is exposed through the production-tier object_serialization_version setting. Even allow_feature_tier = 3 permits enabling this new on-disk format. Require a default-off experimental setting for enabling V4 writes; preserve V1–V3 configuration and existing V4 reads.
+⚠️ Majors
+04339_json_columnar_sparse.sql.j2:27: The 512-row uniform fixture and thresholds 0/1 do not prove that the first output block fixes the encoding across subsequent writer blocks. Add one part with multiple output blocks whose default ratios fall on opposite sides of an intermediate threshold, and verify streams and full readback for Wide and Compact parts.
+04339_json_columnar_sparse.sql.j2:66: The claimed later-mark read still reads mark zero with default settings: 512 rows fit within the default index_granularity = 8192. The explicit read block size of 1000 also exceeds the fixture. Set a small fixed granularity and query-local read block size, then verify whole-object, nested-object and .null reads from a later mark, including the columns cache. This remains the issue in the existing review thread, despite its claimed fix.
+Missing context / blind spots
+⚠️ Runtime verification was unavailable locally because this checkout has no built ClickHouse binary. The fetched CI reports did not provide an execution result for 04339_json_columnar_sparse; a passing targeted stateless run of the strengthened test would close this gap.
+Final Verdict
+❌ Block. Add the experimental write gate and the two focused regression cases above before merging.
+clickhouse-gh
+Bot
+added
+the
+pr-feature
+Pull request with new product feature
+label
+Sep 15, 2026
+clickhouse-gh
+Bot
+reviewed
+Sep 15, 2026
+View reviewed changes
+Comment thread
+tests/queries/0_stateless/04339_json_columnar_sparse.sh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+clickhouse-gh
+Bot
+added
+the
+comp-json-datatype
+JSON/Dynamic/Object datatype: semi-structured column storage, typed and dynamic paths, sub-object...
+label
+Sep 15, 2026
+amosbird
+added a commit
+to amosbird/ClickHouse
+that referenced
+this pull request
+Sep 15, 2026
+Restrict JSON sparse encoding to eligible typed paths
+…
+37d4f1c
+```
+Keep the opt-in Object V4 format with one sorted sparse typed-path list. Preserve compact `Variant` storage for dynamic paths, removing their outer `Sparse` wrapper and supporting statistics and read-state changes.
+
+Retain typed nullable reconstruction and the Wide missing-stream recheck. Cover mixed typed/dynamic subobjects and verify that dynamic streams remain non-sparse across reads, merges, and rewrites.
+
+Related: ClickHouse#120129
+
+Validation: git diff --check, bash -n, static sparse-dynamic search, and exact restoration of dynamic serializers and SerializationSparse to the upstream base. Runtime tests deferred: this worktree has no build.
+```
+amosbird
+changed the title
+Add per-path sparse encoding for JSON with Object V4
+Add sparse encoding for JSON typed paths with Object V4
+Sep 15, 2026
+clickhouse-gh
+Bot
+added
+the
+external
+Author is not a member of the ClickHouse organization
+label
+Sep 16, 2026
+clickhouse-gh
+Bot
+commented
+Sep 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Build profile diff (arm_release)
+Comparing commit f9d158d6a4a8eed61f7e97a63d177f460f894eaf with master failed: LogClusterNotReady: the endpoint never became ready.
+See the job log for details.
+amosbird
+added a commit
+to amosbird/ClickHouse
+that referenced
+this pull request
+Sep 21, 2026
+Harden sparse typed path statistics and serialization selection
+…
+74777ee
+```
+Fix several robustness issues found in review:
+
+- `ColumnObject::getOrCalculateStatistics`: the validity guard for typed
+  path estimates was unsound. A size-only comparison, an `empty()` bypass,
+  and a first-entry `num_rows` probe could accept stale disk statistics or a
+  partial-block estimate copied from a single merge source, and the fill loop
+  could leave `{0,0}` stubs for missing paths. Either way the per-part sparse
+  decision could be driven by data that does not describe the first full
+  output block. Now the estimates are only reused when they cover exactly this
+  column's typed paths with a non-zero row count, and recomputation drops
+  stale/incomplete entries instead of inserting stubs.
+
+- `MergeTreeWriterSettings::object_paths_sparse_default_ratio`: change the
+  default from `0.9375` to `1.0` (disabled) to fail closed, matching the
+  serialization settings. A writer constructed without setting the ratio no
+  longer silently enables sparse typed path encoding under V4.
+
+- `SerializationSubObject::enumerateStreams`: resolve the per-path
+  serialization once in the prefix and reuse it for enumeration, so a subobject
+  read answers stream existence with the actual (possibly sparse) on-disk
+  layout instead of always probing the dense layout.
+
+- `MergeTreeReaderWide`: document that the partially-read-stream recheck is
+  load-bearing for V4 sparse typed paths.
+
+- Slim down the `04339_json_columnar_sparse` test so it fits within the
+  timeout on slow builds: drop the redundant `max_block_size=7` sweep and the
+  `ratio=0.5` case (identical boundary behavior to `0.9375`), and tag it
+  `no-msan, no-tsan` since memory/thread sanitizers make this
+  merge/mutation-heavy test exceed the test timeout without adding coverage.
+
+CI report: ClickHouse#120129
+```
+amosbird
+force-pushed
+the
+json-columnar-sparse-upstream
+branch
+from
+74777ee to
+b497a36
+Compare
+September 21, 2026 13:03
+alexey-milovidov
+mentioned this pull request
+Sep 22, 2026
+Segmentation fault in StorageDistributed::read when a scalar subquery over remote/remoteSecure is evaluated through InterpreterSelectQuery (e.g. in a table CONSTRAINT during ATTACH TABLE)
+#121464
+Open
+clickhouse-gh
+Bot
+reviewed
+Sep 22, 2026
+View reviewed changes
+Comment thread
+tests/queries/0_stateless/04339_json_columnar_sparse.sql.j2
+FROM system.parts_columns WHERE database=currentDatabase() AND table='json_sparse_test'
+AND active AND column='j';
+-- Reads match the source, including a `Nullable` typed path and its `.null` subcolumn.
+clickhouse-gh
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+MergeTreeReaderWide::deserializePrefixForAllColumnsImpl and deserializeSparsePath are both about reading the sparse layout correctly once the real on-disk streams are known, but this slimmed test now only verifies full-table reads from row 0. The PR description still claims nonzero-offset coverage. Could we keep one focused LIMIT ... OFFSET ... / WHERE id >= ... assertion here so a later-mark read of j.n.null and toString(j) would fail if the sparse-offset coordinate or re-seek logic drifts?
+amosbird
+Oct 7, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Done in 453bcb2: the test now also checks j.n.null, j.t, j.half and toString(j) with WHERE id >= 100, and j.n.null with use_columns_cache = 1. The columns-cache check found a real bug: the reader classified columns for a range before reading the prefixes, so j.n.null of a sparse path was still marked partially read and refilled with defaults. It now reads the prefixes before classifying the range.
+clickhouse-gh
+Bot
+Oct 28, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The later-mark coverage is still missing in the current code: tests/queries/0_stateless/04339_json_columnar_sparse.sql.j2:17 creates only 512 rows, and lines 22–26 leave index_granularity unspecified. With its default of 8192, the WHERE id >= 100 query at line 66 still reads mark zero and filters afterward. The max_block_size = 1000 at line 71 also exceeds the entire fixture. Please use a small fixed granularity and query-local read block size so the assertions deterministically exercise a later mark and multiple read calls, including the .null read with the columns cache enabled.
+amosbird
+force-pushed
+the
+json-columnar-sparse-upstream
+branch
+2 times, most recently
+from
+c5cb659 to
+317678f
+Compare
+September 29, 2026 06:04
+clickhouse-gh
+Bot
+reviewed
+Sep 29, 2026
+View reviewed changes
+Comment thread
+src/DataTypes/Serializations/SerializationObject.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+amosbird
+force-pushed
+the
+json-columnar-sparse-upstream
+branch
+from
+317678f to
+453bcb2
+Compare
+October 7, 2026 18:25
+clickhouse-gh
+Bot
+reviewed
+Oct 7, 2026
+View reviewed changes
+Comment thread
+src/DataTypes/Serializations/SerializationObject.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+amosbird
+force-pushed
+the
+json-columnar-sparse-upstream
+branch
+from
+453bcb2 to
+ed51158
+Compare
+October 8, 2026 09:54
+clickhouse-gh
+Bot
+reviewed
+Oct 8, 2026
+View reviewed changes
+Comment thread
+src/DataTypes/Serializations/SerializationObject.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+amosbird
+force-pushed
+the
+json-columnar-sparse-upstream
+branch
+2 times, most recently
+from
+61cfeb4 to
+b4cccb4
+Compare
+October 9, 2026 00:53
+clickhouse-gh
+Bot
+reviewed
+Oct 9, 2026
+View reviewed changes
+Comment thread
+tests/queries/0_stateless/04339_json_columnar_sparse.sql.j2
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+amosbird
+force-pushed
+the
+json-columnar-sparse-upstream
+branch
+from
+b4cccb4 to
+07d42b5
+Compare
+October 9, 2026 04:38
+clickhouse-gh
+Bot
+reviewed
+Oct 9, 2026
+View reviewed changes
+Comment thread
+src/Columns/ColumnObject.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+amosbird
+force-pushed
+the
+json-columnar-sparse-upstream
+branch
+from
+07d42b5 to
+cfc60f3
+Compare
+October 9, 2026 12:43
+amosbird
+commented
+Oct 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+🕵 @groeneai, please investigate the AST fuzzer (amd_release, oracle) failure on cfc60f3658fe and provide a fix in a separate PR (or link it if already in progress): https://s3.amazonaws.com/clickhouse-test-reports/json.html?PR=120129&sha=cfc60f3658fe5111331c90a613278fa09be82fe1&name_0=PR&name_1=AST%20fuzzer%20%28amd_release%2C%20oracle%29
+Received signal 6 (STID: 3584-339f): a libc++ hardening abort in DB::AggregatingInOrderTransform::work. The abort message, recovered from the gdb frame of abort, is __vector/vector.h:417: libc++ Hardening assertion __n < size() failed: vector[] index out of range.
+This PR only touches JSON Object serialization and the MergeTree readers, not in-order aggregation. The transform was recently changed by #117573; a possible suspect is the new isLimitPrefixBoundary, which indexes res_key_columns and key_columns by group_by_description[i].column_number. I could not reproduce it with simple duplicate-key or reordered-key GROUP BY ... ORDER BY ... LIMIT queries, and the fuzzer query is not in the job log (fatal.log is not publicly accessible).
+Related: #117573
+groeneai
+commented
+Oct 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+Acknowledged. I am investigating the AggregatingInOrderTransform::work libc++ hardening abort (STID 3584-339f) from the AST fuzzer (amd_release, oracle) run; I will follow up here with a fix PR (or my findings) shortly.
+groeneai
+commented
+Oct 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+Findings so far: this reproduces on current master (d741c98, debug build) without this PR, so the Object changes here are not the cause, and the abort is not in isLimitPrefixBoundary. The symbolized stack is Block::setColumns (Block.cpp:768) called from AggregatingInOrderTransform::generate (AggregatingInOrderTransform.cpp:423, the block.setColumns(group_by_chunk.detachColumns()) branch). It needs the GROUP BY top-K optimization: with enable_group_by_top_k_optimization = 0 the same query returns 0..4.
+Deterministic repro (3/3 on master):
+```
+CREATE TABLE t_repro (a UInt64, b UInt64) ENGINE = MergeTree ORDER BY a;
+INSERT INTO t_repro SELECT number, number FROM numbers(1000000);
+SET optimize_aggregation_in_order = 1, max_threads = 1, max_block_size = 1000, enable_group_by_top_k_dynamic_filtering = 0;
+SELECT a FROM remote('127.0.0.{1,2}', currentDatabase(), t_repro) GROUP BY a, 'x' ORDER BY a LIMIT 5;
+```
+I will post the fix PR here.
+groeneai
+mentioned this pull request
+Oct 10, 2026
+Do not run the GROUP BY top-K heap in a shard's in-order aggregation
+#125074
+Merged
+groeneai
+commented
+Oct 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+Fix PR: #125074. The shard's partial aggregation keeps the GROUP BY top-K parameters when it switches to in-order (AggregatingStep::applyOrder did not drop them), and since #116150 the shared skip boundary can skip a whole block, so AggregatingInOrderTransform then reads a detached chunk. The fix drops top-K in applyOrder.
+alexey-milovidov
+mentioned this pull request
+Oct 11, 2026
+Parallelize merging of large uniqExact states in aggregation with keys
+#117153
+Merged
+amosbird
+force-pushed
+the
+json-columnar-sparse-upstream
+branch
+from
+cfc60f3 to
+4bc90a4
+Compare
+October 11, 2026 13:26
+clickhouse-gh
+Bot
+reviewed
+Oct 11, 2026
+View reviewed changes
+Comment thread
+src/DataTypes/Serializations/SerializationObject.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+amosbird
+force-pushed
+the
+json-columnar-sparse-upstream
+branch
+from
+4bc90a4 to
+8fdcf0e
+Compare
+October 13, 2026 06:01
+amosbird
+commented
+Oct 13, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+🕵 @groeneai, please investigate the CI failures on 8fdcf0e6f158 and provide a fix in a separate PR (or link it if already in progress): https://s3.amazonaws.com/clickhouse-test-reports/json.html?PR=120129&sha=8fdcf0e6f158ef4fbadabb2606d9c0ebaaec388e&name_0=PR
+Stateless tests (amd_asan_ubsan, db disk, distributed plan, targeted): 04692_insert_dedup_json_path_names failed only with having stderror. The stdout matches the reference exactly, and the only stderr line is the server log <Error> AWSClient: Response status: 500, Internal Server Error (query id d97220c9-341c-4a82-99a7-ee90e5cf1f67), which looks like the db disk object storage backend leaking a transient error into the client's stderr. The test uses plain JSON without typed paths, and the randomized object_serialization_version is only v2/v3, so it does not reach the v4 code of this PR. It passes 5/5 locally.
+Integration tests (arm_binary, distributed plan, targeted), Integration tests (amd_tsan, targeted), Integration tests (amd_msan, targeted), Stateless tests (amd_tsan, s3 storage, targeted): no tests ran. Test selection in ci/jobs/scripts/find_tests.py failed with CIDB insert failed ... Failed to establish a new connection to play.clickhouse.com, and the job exited. Should a CIDB outage make targeted jobs fail instead of falling back or being retried?
+groeneai
+commented
+Oct 13, 2026
+Copy link
+Copy Markdown
+Collaborator
+04692_insert_dedup_json_path_names: not caused by this PR. SeaweedFS 4.48, the object storage behind db disk, answered 500 to a CopyObject of the table metadata during CREATE TABLE t_dedup_json_renamed_nested, because its own request to the volume server failed in the same millisecond: CopyObjectHandler unified copy error: chunk 0: stream chunk: POST "http://172.17.0.2:11113/3,013e0631ccd8e0": EOF (seaweedfs.log). ClickHouse retried 25 ms later and the copy succeeded, but PocoHTTPClient logs every 5xx at Error level whether or not it is retried, and that line reached the client. It is the only failure of this kind in CIDB since SeaweedFS was bumped to 4.48 (Bump seaweedfs to include some fixes #123899). No fix is in progress; I'll follow up here with a PR or my findings.
+The four jobs started at 09:34 UTC, while play.clickhouse.com refused connections. The query is already retried (5 attempts, about 30 s of backoff), which the outage outlasted. Falling back to a partial selection is deliberately not done: CI: run only the selected tests in the sanitizer functional tests in PRs #114730 makes the job fail rather than silently run a weaker set of tests, and Revert "Revert "Correct nightly coverage selection and share PR test manifests"" #122111 then made only a CIDB timeout end the job SKIPPED (not cached, so a rerun selects again). My open Skip the targeted job when CIDB is unavailable during test selection #125613 extends that skip to a timeout in the previously-failed-tests lookup, which still errors today. A refused connection stays an error there too; whether it should also skip is the question I asked @ fm4v on that PR. For this PR, rerunning the four jobs is enough now that CIDB answers.
+groeneai
+mentioned this pull request
+Oct 13, 2026
+Keep SeaweedFS volume connections open longer than its client pools them in CI
+#125649
+Closed
+groeneai
+commented
+Oct 13, 2026
+Copy link
+Copy Markdown
+Collaborator
+Follow-up on 1: I opened #125649. Inside weed server, the volume server closes a connection after 30 s idle while SeaweedFS's own HTTP client keeps it pooled for 90 s, so a copy that reuses a connection as it is being closed fails, and its streaming body cannot be replayed, hence the 500. The PR starts SeaweedFS with -idleTimeout=120. In a local A/B on 4.48 the copy 500 reproduced in 9 of 56 trials without the flag and 0 of 56 with it.
+groeneai
+commented
+Oct 13, 2026
+Copy link
+Copy Markdown
+Collaborator
+Update on 1: #125649 is closed. @ azat took the logging route in #125660: a retryable S3 response such as this 500 is now logged at Information, and Error is reported only after all retries fail, so this transient no longer reaches a test's stderr.
+Add sparse encoding for JSON typed paths with Object V4
+…
+f9d158d
+```
+Add a new Object serialization version V4 that can store typed paths with
+sparse encoding, selected per part from the first-block statistics using the
+existing `ratio_of_defaults_for_sparse_serialization` threshold.
+
+Sparse encoding applies only to typed paths (declared in the JSON type) whose
+types can be inside sparse columns (scalars, and `Nullable` scalars when
+`nullable_serialization_version = 'allow_sparse'`, as for ordinary `Sparse`
+columns). `SHARED` typed paths are stored in the typed shared data of a part
+and are never sparse. Dynamic
+paths are untouched: their `Variant` encoding already omits absent rows, so an
+outer sparse wrapper gains nothing. V4 stores one sorted list of sparse typed
+paths in the Object structure prefix after the dynamic path list; readers use
+the encoding recorded in the part, independent of the current table settings.
+Nested JSON in shared data keeps V3, because shared data holds only dynamic
+paths.
+
+V1/V2/V3 are unchanged and the default remains V3. Sparse is selected when a
+typed path's default ratio strictly exceeds the threshold;
+`ratio_of_defaults_for_sparse_serialization = 1` disables it.
+
+A sparse typed path is read into a `ColumnSparse` whose offsets start at the
+beginning of the column, as required by the subcolumns sharing them through
+the substreams cache, and only the rows read by the current call are converted
+to a full column, so a scan stays linear in the number of rows.
+
+A typed-path subcolumn tells whether its path is sparse in the part by the
+presence of the sparse offsets stream, instead of reading the structure of the
+whole `Object` column, so reading one typed path from many parts costs the same
+as before V4. Compact parts without substream marks have no list of streams and
+read the structure instead.
+
+A sparse typed path has sparse offsets instead of the streams that
+`MergeTreeReaderWide::addStreams` expects before reading the prefix (a sparse
+`Nullable` path has no null map stream), so a column missing a typed-path
+stream is classified again after the prefixes are read. With the columns cache
+enabled the prefixes of such columns are read before classifying the columns of
+a range; otherwise the `.null` subcolumn was treated as partially read or
+absent and filled with defaults.
+
+Without a column or a structure prefix, `enumerateStreams` of a V4 `Object`
+also lists the possible sparse offsets of every eligible typed path, so that
+`checkColumnFilenamesForCollision` sees all file names a part can contain.
+
+Like V3, V4 is a MergeTree-only layout: it is rejected in `Native` format
+(covered by `05056_json_dynamic_native_malformed_structure`).
+
+The test `04339_json_columnar_sparse` checks which paths get sparse streams,
+that a sparse part reads back identically to the source (including the
+`.null` subcolumn of a `Nullable` typed path and a typed path of the nested
+sub-object `j.^obj`, from the first row and from a nonzero offset, with and without the columns cache), that reads use the
+encoding recorded in the part, that a mutation rewrite keeps the layout and
+values, and that a merge of a sparse V4 part and a V3
+part reads consistently.
+```
+amosbird
+force-pushed
+the
+json-columnar-sparse-upstream
+branch
+from
+8fdcf0e to
+f9d158d
+Compare
+October 28, 2026 11:24
+clickhouse-gh
+Bot
+reviewed
+Oct 28, 2026
+View reviewed changes
+Comment thread
+src/Storages/MergeTree/MergeTreeSettings.cpp
+- `v3`
+Only version `v3` supports changing the shared data serialization version.
+- `v4`
+clickhouse-gh
+Bot
+Oct 28, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+❌ Blocker: require an experimental gate for V4 writes
+This introduces a new on-disk format through object_serialization_version, which still has production tier (0 in its declaration). Consequently, even a server with allow_feature_tier = 3 can accept object_serialization_version = 'v4' and write parts in the new format. Keeping V3 as the default provides opt-in behavior, but does not provide the experimental feature control required for a new storage format.
+Please require a separate, default-off setting marked EXPERIMENTAL when enabling V4 writes, while retaining production access to V1–V3 and support for reading existing V4 parts. Cover rejection without the gate and successful writes with it enabled.
+Comment thread
+tests/queries/0_stateless/04339_json_columnar_sparse.sql.j2
+object_serialization_version='v4', serialization_info_version='with_types',
+nullable_serialization_version='allow_sparse',
+ratio_of_defaults_for_sparse_serialization={{ ratio }};
+INSERT INTO json_sparse_test SELECT * FROM json_sparse_source ORDER BY id SETTINGS max_threads=1;
+clickhouse-gh
+Bot
+Oct 28, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+⚠️ Major: exercise the per-part choice across writer blocks
+The central V4 invariant is that the first output block fixes the encoding for the entire part, even when later blocks would select a different layout. This insert only feeds 512 rows with a uniform default distribution, and the threshold matrix contains only 0 and 1. It therefore does not distinguish retained first-block statistics from recomputing the choice on later blocks; the merge and mutation cases reuse the same small, uniform fixture.
+Please add one focused case that writes multiple output blocks into one part, with the first block mostly defaults and a later block mostly non-defaults at an intermediate threshold such as 0.5. Verify the selected streams and complete readback for both Wide and Compact parts. This would protect the statistics propagation that keeps stream creation and later serialization consistent.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+comp-json-datatype
+JSON/Dynamic/Object datatype: semi-structured column storage, typed and dynamic paths, sub-object...
+external
+Author is not a member of the ClickHouse organization
+pr-feature
+Pull request with new product feature
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,129 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Tile-Based Wave Synchronization manages tile assignment and synchronization across worker threads using wave indices and tokens [S1, unofficial]. It serves as a synchronization primitive within tiled parallel compositing, ensuring that threads progress through discrete "waves" of work, allowing for coordinated state updates and potential cache coherency benefits [S1, unofficial]. It differs from pure dynamic load balancing by enforcing synchronization barriers at wave boundaries, which can induce temporal cache coherency but risks load imbalance [S2, unofficial].
++Tile-Based Wave Synchronization manages tile assignment and synchronization across worker threads using wave indices and tokens [S1, unofficial]. It serves as a synchronization primitive within tiled parallel compositing, ensuring that threads progress through discrete waves of work, allowing for coordinated state updates and potential cache coherency benefits [S1, unofficial]. It differs from pure dynamic load balancing by enforcing synchronization barriers at wave boundaries, which can induce temporal cache coherency but risks load imbalance [S2, unofficial].
+ 
+ ## How it works
+@@ -25,7 +25,5 @@
+ 
+ **Formulas:**
+-*   **ETA Calculation:** Used for progress tracking [S1, unofficial]:
+-    $$ \text{avg\_progress\_rate} = \frac{\text{progress}}{\text{elapsed\_time}} $$
+-    $$ \text{eta} = \frac{1 - \text{progress}}{\text{avg\_progress\_rate}} $$
++*   Not given in the sources.
+ 
+ **Parameters:**
+@@ -39,4 +37,36 @@
+ **Pseudocode:**
+ ```python
++import threading
++
++class Lock:
++    def __init__(self):
++        self._lock = threading.Lock()
++    def acquire(self):
++        self._lock.acquire()
++    def release(self):
++        self._lock.release()
++    def __enter__(self):
++        self.acquire()
++        return self
++    def __exit__(self, *args):
++        self.release()
++
++class Condition:
++    def __init__(self, lock):
++        self._cond = threading.Condition(lock._lock)
++    def wait(self):
++        self._cond.wait()
++    def notify_all(self):
++        self._cond.notify_all()
++
++class Token:
++    def __init__(self, tile_idx, wave_idx, job_id, provider):
++        self.tile_idx = tile_idx
++        self.wave_idx = wave_idx
++        self.job_id = job_id
++        self._provider = provider
++    def __del__(self):
++        self._provider.on_token_destroy(self)
++
+ class TileProvider:
+     def __init__(self, num_waves, num_workers, tile_count):
+@@ -44,66 +74,27 @@
+         self.num_workers = num_workers
+         self.tile_count = tile_count
+-        self.tile_wave = {}  # Maps tile_idx -> wave_idx
++        self.tile_wave = {}
+         self.lock = Lock()
+         self.condition = Condition(self.lock)
+         self.current_wave = 0
+         self.finished_in_wave = 0
++        self.stop_requested = False
+ 
+     def next(self):
+-        """Acquire a tile and wave index for a worker."""
+         with self.lock:
+-            # Simple round-robin or hash-based assignment could be used here
+-            # For wave sync, we assign tiles to waves
+-            tile_idx = self.finished_in_wave % self.tile_count
+-            wave_idx = self.current_wave
+-            
+-            # Wait if this tile is not yet assigned to the current wave
+-            # In a real implementation, this would involve more complex state
+-            # to ensure all threads are in the same wave before proceeding
+-            while tile_idx not in self.tile_wave or self.tile_wave[tile_idx] != wave_idx:
++            while True:
++                tile_idx = self.finished_in_wave % self.tile_count
++                wave_idx = self.current_wave
++                if tile_idx in self.tile_wave and self.tile_wave[tile_idx] == wave_idx:
++                    return Token(tile_idx, wave_idx, tile_idx, self)
+                 self.condition.wait()
+-            
+-            return Token(tile_idx, wave_idx)
+ 
+     def on_token_destroy(self, token):
+-        """Called when a worker finishes a tile."""
+         with self.lock:
+             self.tile_wave[token.tile_idx] = token.wave_idx
+             self.finished_in_wave += 1
+-            
+-            # Notify waiting threads
+             self.condition.notify_all()
+-            
+-            # Check if wave is complete
+             if self.finished_in_wave % self.num_workers == 0:
+                 self.current_wave += 1
+-
+-class Token:
+-    def __init__(self, tile_idx, wave_idx):
+-        self.tile_idx = tile_idx
+-        self.wave_idx = wave_idx
+-    
+-    def __del__(self):
+-        # This is a simplification; in C++, destructors are explicit
+-        # In Python, we might use a context manager or explicit finish()
+-        pass
+-
+-class Worker:
+-    def __init__(self, provider):
+-        self.provider = provider
+-        self.stop_requested = False
+-
+-    def run(self):
+-        while not self.stop_requested:
+-            token = self.provider.next()
+-            try:
+-                self.process_tile(token.tile_idx)
+-            finally:
+-                # Simulate token destruction triggering sync
+-                self.provider.on_token_destroy(token)
+-
+-    def process_tile(self, tile_idx):
+-        # Ray casting logic
+-        pass
+ 
+     def stop_at_next_wave(self):

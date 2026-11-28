@@ -1,0 +1,123 @@
+# Cone Stepping and Mip Level Selection
+
+Also called: 3D Texture Sampling, Cone Tracing Mip Selection, Crassin's Volume Sampling, Light Gathering
+
+## Overview
+Cone Stepping and Mip Level Selection is a sampling strategy that steps along a ray in voxel-size increments and selects a 3D mipmap level based on the cone's current width to avoid aliasing [S2, unofficial][S1, unofficial]. It solves the problem of sampling high-resolution data at large distances by matching the texture resolution to the projected cone diameter [S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Ray origin, ray direction, cone half-angle ($\theta$), current distance from cone origin ($d$), voxel size ($v$), 3D mipmap texture, maximum ray length, and occlusion threshold [S1, unofficial][S2, unofficial].
+*   **Outputs:** Accumulated color and occlusion factor along the cone length [S1, unofficial].
+
+**Data Structures:**
+*   **3D Texture:** A uniform grid of voxels storing RGBA values functioning as a 3D bitmap [S3, unofficial].
+*   **Mipmap Pyramid:** A set of lower-resolution versions of the 3D texture where each LOD increment reduces height, width, and depth by a power of two from the previous level [S3, unofficial]. LOD 0 corresponds to the original full-resolution image [S3, unofficial].
+
+**Steps:**
+1.  Step along the ray in voxel-size increments (ray-marching) in world space [S2, unofficial].
+2.  Calculate the cone diameter at the current position: $coneDiameter = 2 \cdot \tan(\theta) \cdot d$ [S2, unofficial].
+3.  Calculate the mip level for the 3D texture sample: $mip = \log_2(coneDiameter / v)$ [S2, unofficial].
+4.  Sample the texture at the current position using the calculated LOD with bilinear or trilinear filtering [S3, unofficial].
+5.  Accumulate the sampled color and occlusion factor along the length of the cone [S1, unofficial].
+6.  Return the accumulated result when the maximum length is reached or the occlusion reaches a pre-set value [S1, unofficial].
+
+**Formulas:**
+*   $coneDiameter = 2 \cdot \tan(\theta) \cdot d$ [S2, unofficial]
+    *   $\theta$ is the cone half-angle [S2, unofficial].
+    *   $d$ is the distance from the cone's start point (origin) to the current sample position [S2, unofficial].
+*   $mip = \log_2(coneDiameter / v)$ [S2, unofficial]
+    *   $v$ is the size of a single voxel in the base level (LOD 0) [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def cone_stepping(ray_origin, ray_direction, cone_half_angle, voxel_size, texture, max_length, occlusion_threshold, max_mip):
+    """
+    Samples a 3D mipmap texture using cone stepping and mip level selection.
+    """
+    accumulated_color = [0.0, 0.0, 0.0, 0.0]
+    accumulated_occlusion = 0.0
+    t = 0.0
+    
+    while t < max_length and accumulated_occlusion < occlusion_threshold:
+        # 1. Calculate distance from cone origin
+        distance_from_origin = t
+        
+        # 2. Calculate cone diameter at current position
+        cone_diameter = 2.0 * math.tan(cone_half_angle) * distance_from_origin
+        
+        # 3. Calculate mip level
+        mip_float = math.log2(cone_diameter / voxel_size)
+        
+        # Clamp mip level to available range [0, max_mip]
+        mip_level = int(mip_float)
+        if mip_level < 0:
+            mip_level = 0
+        if mip_level > max_mip:
+            mip_level = max_mip
+            
+        # 4. Sample texture at current position with calculated LOD
+        sample_point = (ray_origin[0] + ray_direction[0] * distance_from_origin,
+                        ray_origin[1] + ray_direction[1] * distance_from_origin,
+                        ray_origin[2] + ray_direction[2] * distance_from_origin)
+        # texture.sample_lod(point, lod) fetches RGBA and occlusion from the 3D texture at point with explicit LOD and bilinear/trilinear filtering [S3, unofficial]
+        color, occlusion = texture.sample_lod(sample_point, mip_level)
+        
+        # 5. Accumulate color and occlusion factor
+        accumulated_color[0] += color[0]
+        accumulated_color[1] += color[1]
+        accumulated_color[2] += color[2]
+        accumulated_color[3] += color[3]
+        accumulated_occlusion += occlusion
+        
+        # 6. Step along the ray in voxel-size increments
+        t += voxel_size
+        
+    return accumulated_color, accumulated_occlusion
+```
+
+**Parameters:**
+*   **Cone Half-Angle ($\theta$):** Determines the spread of the cone [S2, unofficial].
+*   **Voxel Size ($v$):** The physical size of a voxel in the base mipmap level [S2, unofficial].
+*   **LOD (Level of Detail):** Integer where 0 is the original image. Determines the resolution of the mipmap used for sampling [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+Not given in the sources. [G]
+
+## Subtopics
+
+### Mipmap-based Volume Sampling
+A technique using low-resolution 3D mipmaps of direct lighting values to sample volumetric color, adjusting LOD based on cone diameter to approximate indirect light [S3, unofficial]. It differs from general cone stepping by explicitly leveraging OpenGL's `textureLod` function with bilinear filters, which yields the average color value at a point in a radius of $2^l$ pixels, where $l$ is the LOD value [S3, unofficial]. It is chosen when hardware-accelerated texture filtering is available and bilinear interpolation is acceptable for volume approximation [S3, unofficial].
+
+### Segmented Dataset LOD Management
+Modifies the precomputation of levels of detail (LOD) for segmented datasets to preserve label integrity rather than averaging values [S4]. It differs from standard mipmap generation by selecting the most popular (mode) label for each voxel/group instead of computing the average value, and substitutes trilinear filtering with nearest neighbor filtering at runtime to prevent label bleeding [S4]. It is chosen when rendering categorical data (e.g., anatomical labels) where averaging would create invalid intermediate labels [S4].
+
+### Mipmap Level Selection for Volume Rendering
+Focuses on the selection criterion for the mipmap level based on the projected pixels per voxel ($p$) [S5]. It differs from cone-diameter-based selection by using the condition $p \le 1$ to select the coarsest (lowest-resolution) mipmap level that satisfies the constraint, rounding up in resolution [S5]. It is chosen when the primary goal is to ensure that one voxel maps to at most one screen pixel to prevent over-sampling and memory waste [S5].
+
+### [Brick LOD Selection](4755-brick-lod-selection.md)
+Brick LOD Selection determines the appropriate level of detail for volumetric bricks based on the distance to the viewpoint, aiming to ensure a projected voxel covers exactly one screen pixel. It differs from sibling methods by calculating resolution bounds for entire brick volumes rather than individual samples, ensuring all necessary LOD levels within the brick's spatial extent are loaded. It is chosen when rendering large volumetric scenes organized into spatial bricks to minimize memory bandwidth and ensure consistent resolution across brick boundaries. [4755-brick-lod-selection.md]
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. [G]
+*   **Memory Complexity:** Not given in the sources. [G]
+*   **Measured Performance:** Not given in the sources. [G]
+*   **Scaling:** Not given in the sources. [G]
+*   **Strengths:** Reduces aliasing by matching texture resolution to cone diameter and simplifies volume sampling by leveraging hardware texture filtering [S1, unofficial][S3, unofficial].
+*   **Limitations:** Requires pre-computation of the mipmap pyramid [S3, unofficial].
+*   **When to use:** When rendering volumetric scenes with varying distances from the viewpoint and hardware supports efficient 3D texture sampling with mipmaps [S1, unofficial][S3, unofficial].
+*   **When not to use:** Not given in the sources. [G]
+
+## Background
+The concept of mipmaps was initially conceived by Lance Williams in his 1983 paper "Pyramidal Parametrics" [S2, unofficial]. The application of mipmaps to voxel cone tracing for volume sampling was proposed by Crassin [S3, unofficial]. The specific cone stepping formula for calculating LOD based on cone diameter is described in the context of voxel-based global illumination [S2, unofficial]. The use of segmented datasets with mode-based LOD selection is discussed in the context of volumetric display of the human musculoskeletal system [S4]. The condition $p \le 1$ for level selection is discussed in the context of volume3D rendering plans [S5].
+
+## Sources
+[S1] NetLight: Cloud Baked Indirect Illumination, https://scholarsarchive.byu.edu/cgi/viewcontent.cgi?article=8031&context=etd, fetched 2026-10-26 (unofficial)
+[S2] Voxel-based Global Illumination – Wicked Engine, https://turanszkij.wordpress.com/2017/08/30/voxel-based-global-illumination/, fetched 2026-10-28 (unofficial)
+[S3] Real-Time Global Illumination Using OpenGL And Voxel Cone Tracing, https://doi.org/10.48550/arxiv.2104.00618, fetched 2026-10-26 (unofficial)
+[S4] Towards Advanced Volumetric Display of the Human Musculoskeletal System, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/021-025, fetched 2026-10-26
+[S5] docs(volume3d): analysis of the three Volume3D render paths and an improvement plan, https://github.com/cornerstonejs/cornerstone3D/pull/2853, fetched 2026-10-26

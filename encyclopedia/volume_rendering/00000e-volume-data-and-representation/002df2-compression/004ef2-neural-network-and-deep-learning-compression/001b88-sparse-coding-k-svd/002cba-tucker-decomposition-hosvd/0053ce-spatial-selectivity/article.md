@@ -1,0 +1,91 @@
+# Spatial Selectivity
+
+Also called: Subregion Reconstruction via Factor Selection
+
+## Overview
+Spatial Selectivity is a property of Tensor Approximation (TA) that enables the reconstruction of a specific spatial subvolume by selecting a subset of rows from the factor matrices corresponding to the spatial dimensions [S1, unofficial]. It distinguishes itself from sibling methods like Tensor Approximation and Truncated Tensor Decomposition by allowing direct spatial subregion access without full tensor reconstruction or rank reduction [S1, unofficial].
+
+## How it works
+**Inputs:**
+- The Tucker core tensor $B$ of size $R_1 \times R_2 \times R_3$ [S1, unofficial].
+- The factor matrices $U^{(1)}$ ($I_1 \times R_1$), $U^{(2)}$ ($I_2 \times R_2$), and $U^{(3)}$ ($I_3 \times R_3$) [S1, unofficial].
+- Row-index subranges $J_n \subseteq [0 \dots I_n]$ for each mode $n$ defining the target spatial subvolume [S1, unofficial].
+
+**Outputs:**
+- The reconstructed subvolume tensor $A_f^{J_1 \times J_2 \times J_3}$ [S1, unofficial].
+
+**Data Structures:**
+- $U^{(n)}$: Matrix where rows correspond to spatial indices and columns correspond to basis vectors (rank) [S1, unofficial].
+- $U_{J_n}^{(n)}$: Row-block submatrix of $U^{(n)}$ containing only rows indexed by $J_n$ [S1, unofficial].
+
+**Steps:**
+1. Define the spatial bounds of the target subvolume using index ranges $J_1, J_2, J_3$ for modes 1, 2, and 3 respectively [S1, unofficial].
+2. Extract the row-block submatrices $U_{J_1}^{(1)}$, $U_{J_2}^{(2)}$, and $U_{J_3}^{(3)}$ from the full factor matrices [S1, unofficial].
+3. Compute the subvolume reconstruction via sequential mode-n products:
+   $$ A_f^{J_1 \times J_2 \times J_3} = B \times_1 U_{J_1}^{(1)} \times_2 U_{J_2}^{(2)} \times_3 U_{J_3}^{(3)} $$
+   where $\times_n$ denotes the mode-n product contracting the $n$-th dimension of the tensor with the second dimension of the matrix [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reconstruct_subvolume(core_tensor_B, factor_matrices, J1, J2, J3):
+    """
+    Reconstructs a spatial subvolume using Spatial Selectivity.
+    
+    Args:
+        core_tensor_B: 3D list of shape (R1, R2, R3)
+        factor_matrices: List of 2D lists [U1, U2, U3]
+        J1, J2, J3: Lists of row indices for each mode
+        
+    Returns:
+        Reconstructed subvolume tensor as a 3D list
+    """
+    U1, U2, U3 = factor_matrices
+    
+    # Select specific rows from factor matrices
+    U1_sub = [U1[i] for i in J1]
+    U2_sub = [U2[i] for i in J2]
+    U3_sub = [U3[i] for i in J3]
+    
+    # Compute mode-n products sequentially
+    temp1 = mode_n_product(core_tensor_B, U1_sub, mode=1)
+    temp2 = mode_n_product(temp1, U2_sub, mode=2)
+    subvolume = mode_n_product(temp2, U3_sub, mode=3)
+    
+    return subvolume
+
+def mode_n_product(tensor, matrix, mode):
+    """
+    Computes the mode-n product of a 3D tensor and a 2D matrix.
+    tensor: 3D list [D1][D2][D3]
+    matrix: 2D list [M][R]
+    Returns a 3D list with mode `mode` contracted with matrix.
+    """
+    D1, D2, D3 = len(tensor), len(tensor[0]), len(tensor[0][0])
+    R = len(matrix[0])
+    M = len(matrix)
+    
+    if mode == 1:
+        return [[[sum(matrix[i][l] * tensor[l][j][k] for l in range(R)) for k in range(D3)] for j in range(D2)] for i in range(M)]
+    elif mode == 2:
+        return [[[sum(matrix[j][l] * tensor[i][l][k] for l in range(R)) for k in range(D3)] for j in range(M)] for i in range(D1)]
+    elif mode == 3:
+        return [[[sum(matrix[k][l] * tensor[i][j][l] for l in range(R)) for k in range(M)] for j in range(D2)] for i in range(D1)]
+```
+
+**Edge Cases:**
+- The reconstruction preserves the original spatial resolution for the selected indices rather than producing a lower-resolution mipmapped version [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Strengths:** Enables efficient view-frustum culling and adaptive brick selection in interactive multiresolution volume visualization [S1, unofficial].
+- **Limitations:** Requires direct random access to rows of the factor matrices and does not reduce overall storage size, which is handled by rank reduction [S1, unofficial].
+
+## Background
+Spatial Selectivity exploits the property that in TA, the rows of the factor matrices along spatial axes directly correspond to the spatial distribution of the data [S1, unofficial]. This allows subvolume reconstruction via simple row selection, a feature previously unexploited in TA-based visualization systems [S1, unofficial]. It is applied alongside [Tucker Decomposition (HOSVD)](5352-tucker-decomposition-hosvd.md) to support multiresolution and multiscale volume visualization [S1, unofficial].
+
+## Sources
+[S1] Tensor Approximation Properties for Multiresolution and ..., https://www.ifi.uzh.ch/dam/jcr:00000000-4c65-90f4-0000-00006dc77a03/TA_Poster.pdf, fetched 2026-10-29 (unofficial)
+[S2] Analysis of Tensor Approximation for Compression-Domain Volume ..., https://www.ifi.uzh.ch/vmml/publications/analysistensorapproximationtalk/tensorapproximation.pdf, fetched 2026-10-29 (unofficial)

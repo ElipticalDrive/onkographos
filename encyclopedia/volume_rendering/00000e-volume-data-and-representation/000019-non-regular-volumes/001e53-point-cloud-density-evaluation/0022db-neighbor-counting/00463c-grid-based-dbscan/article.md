@@ -1,0 +1,198 @@
+# Grid-based DBSCAN
+
+Also called: DBSCAN 2D, Gunawan and Berg DBSCAN, O(n log n) DBSCAN for 2D
+
+## Overview
+Grid-based DBSCAN is an optimized variant of the DBSCAN clustering algorithm designed specifically for 2D spaces [S1, unofficial]. It solves the problem that standard DBSCAN implementations often fail to achieve optimal time complexity or produce discrepant results compared to the original algorithm due to the limitations of general index structures like VP-trees and KD-trees [S1, unofficial]. It sets itself apart from its siblings by mapping the dataset to a 2D grid and using graph connectivity to identify clusters, guaranteeing $O(n \log n)$ time complexity for 2D data, whereas [KDTree-based Neighbor Counting](6285-kdtree-based-neighbor-counting.md) relies on tree structures that may not guarantee this complexity or consistency [S1, unofficial].
+
+## How it works
+The method consists of four main steps: grid construction, core point determination, cluster combination, and border/noise assignment [S1, unofficial].
+
+**Inputs and Outputs**
+*   **Input:** A set of 2D points $P$, neighborhood radius $\varepsilon$, and minimum points parameter $minPts$ [S1, unofficial].
+*   **Output:** A clustering of $P$ where each point is labeled as a core-point, border-point, or noise, and assigned to a cluster ID [S1, unofficial].
+
+**Data Structures**
+*   **Grid $G$:** A 2D array or sparse hash table of dimensions $nRows \times nCols$ where each cell contains a list of points [S1, unofficial].
+*   **Cell Side Length:** $cellSide = \varepsilon / \sqrt{2}$ [S1, unofficial].
+*   **Dimensions:** $nRows = \lfloor (maxX - minX) / cellSide \rfloor + 1$ and $nCols = \lfloor (maxY - minY) / cellSide \rfloor + 1$, where $minX, maxX, minY, maxY$ are the bounding box coordinates of $P$ [S1, unofficial].
+
+**Key Definitions**
+*   **Definition 9:** For all points $p_a, p_b$ in cell $c$, $dist(p_a, p_b) \le \varepsilon$ [S1, unofficial]. This property ensures that any two points within the same cell are within the neighborhood distance $\varepsilon$ [S1, unofficial].
+*   **Definition 11:** Cell $c_i$ is connected to cell $c_j$ if $dist(p_a, p_b) \le \varepsilon$, where $p_a$ is a core-point in $c_i$ and $p_b$ is a core-point in $c_j$ [S1, unofficial].
+*   **Definition 12:** Every connected component in the grid graph is a cluster [S1, unofficial].
+
+**Parameters**
+*   $\varepsilon$: The maximum distance for neighborhood queries, used to determine cell side length and connectivity [S1, unofficial].
+*   $minPts$: The minimum number of points required to form a dense region (core point) [S1, unofficial].
+
+**Algorithm Steps**
+
+1.  **Construct 2D Grid:** Initialize $minX, maxX, minY, maxY$ by scanning $P$ [G]. Calculate $cellSide$, $nRows$, and $nCols$ [S1, unofficial]. Initialize empty grid $G$ [S1, unofficial]. For each point $p \in P$, add $p$ to cell $G[\lfloor (p.x - minX) / cellSide \rfloor][\lfloor (p.y - minY) / cellSide \rfloor]$ [S1, unofficial].
+2.  **Determine Core Points:** For each non-empty cell $c$ in $G$: If $|c| \ge minPts$, label all points in $c$ as core-points based on Definition 9 [S1, unofficial]. Else, for each point $p \in c$, count reachable points $nPoints$ by brute-forcing neighbors in the neighborhood $V_\varepsilon(c)$ (the 3x3 block of cells centered at $c$) [S1, unofficial]. If $nPoints \ge minPts$, label $p$ as core-point [S1, unofficial].
+3.  **Combine Clusters:** Treat cells as nodes in a graph [S1, unofficial]. Use a Connected Components algorithm (e.g., Tarjan's algorithm) to identify clusters [S1, unofficial]. Two cells are connected if they contain core-points within distance $\varepsilon$ (Definition 11) [S1, unofficial]. Each connected component is a cluster [S1, unofficial].
+4.  **Determine Border Points and Noise:** For each non-empty cell $c$ in $G$, for each point $p \in c$: If $p$ is not a core-point, find the nearest core-point in the neighborhood $V_\varepsilon(c)$ [S1, unofficial]. If no core-point is found within distance $\varepsilon$, label $p$ as noise [S1, unofficial]. Otherwise, assign $p$ to the cluster of the nearest core-point [S1, unofficial]. Cells with points $\ge minPts$ are skipped in this step as all their points are already core-points [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def grid_based_dbscan(P, epsilon, minPts):
+    """
+    P: List of (x, y) tuples
+    epsilon: float, neighborhood radius
+    minPts: int, minimum points for core point
+    Returns: Dict mapping each point to a cluster ID (int) or -1 for noise
+    """
+    if not P:
+        return {}
+
+    # Step 1: Construct 2D Grid
+    minX = min(p[0] for p in P)
+    maxX = max(p[0] for p in P)
+    minY = min(p[1] for p in P)
+    maxY = max(p[1] for p in P)
+
+    cellSide = epsilon / math.sqrt(2)
+    nRows = math.floor((maxX - minX) / cellSide) + 1
+    nCols = math.floor((maxY - minY) / cellSide) + 1
+
+    grid = [[[] for _ in range(nCols)] for _ in range(nRows)]
+
+    for p in P:
+        col = math.floor((p[0] - minX) / cellSide)
+        row = math.floor((p[1] - minY) / cellSide)
+        # Guard against points exactly at the bounding box edge [G]
+        col = min(max(col, 0), nCols - 1)
+        row = min(max(row, 0), nRows - 1)
+        grid[row][col].append(p)
+
+    # Step 2: Determine Core Points
+    core_points = set()
+    for r in range(nRows):
+        for c in range(nCols):
+            cell_pts = grid[r][c]
+            if not cell_pts:
+                continue
+            if len(cell_pts) >= minPts:
+                core_points.update(cell_pts)
+            else:
+                for p in cell_pts:
+                    nPoints = 0
+                    # Brute-force neighbors in Vε(c) (3x3 block)
+                    for dr in range(-1, 2):
+                        for dc in range(-1, 2):
+                            nr, nc = r + dr, c + dc
+                            if 0 <= nr < nRows and 0 <= nc < nCols:
+                                for q in grid[nr][nc]:
+                                    if math.hypot(p[0]-q[0], p[1]-q[1]) <= epsilon:
+                                        nPoints += 1
+                    if nPoints >= minPts:
+                        core_points.add(p)
+
+    # Step 3: Combine Clusters
+    # Build cell graph: nodes are cells containing core points
+    cell_has_core = [[False]*nCols for _ in range(nRows)]
+    cell_core_pts = [[[] for _ in range(nCols)] for _ in range(nRows)]
+    for p in core_points:
+        col = math.floor((p[0] - minX) / cellSide)
+        row = math.floor((p[1] - minY) / cellSide)
+        col = min(max(col, 0), nCols - 1)
+        row = min(max(row, 0), nRows - 1)
+        cell_has_core[row][col] = True
+        cell_core_pts[row][col].append(p)
+
+    # Find connected components of cells
+    visited_cells = set()
+    components = []
+    for r in range(nRows):
+        for c in range(nCols):
+            if cell_has_core[r][c] and (r,c) not in visited_cells:
+                comp = []
+                stack = [(r,c)]
+                while stack:
+                    cr, cc = stack.pop()
+                    if (cr,cc) in visited_cells:
+                        continue
+                    visited_cells.add((cr,cc))
+                    comp.append((cr,cc))
+                    for dr in range(-1, 2):
+                        for dc in range(-1, 2):
+                            nr, nc = cr+dr, cc+dc
+                            if 0 <= nr < nRows and 0 <= nc < nCols and cell_has_core[nr][nc] and (nr,nc) not in visited_cells:
+                                # Check connectivity: exists core pair within epsilon
+                                connected = False
+                                for p1 in cell_core_pts[cr][cc]:
+                                    for p2 in cell_core_pts[nr][nc]:
+                                        if math.hypot(p1[0]-p2[0], p1[1]-p2[1]) <= epsilon:
+                                            connected = True
+                                            break
+                                    if connected: break
+                                if connected:
+                                    stack.append((nr,nc))
+                components.append(comp)
+
+    # Map points to cluster IDs
+    point_to_cluster = {}
+    for i, comp in enumerate(components):
+        cid = i + 1
+        for r, c in comp:
+            for p in cell_core_pts[r][c]:
+                point_to_cluster[p] = cid
+
+    # Step 4: Determine Border Points and Noise
+    labels = {}
+    for p in P:
+        labels[p] = None
+
+    for p in core_points:
+        labels[p] = point_to_cluster[p]
+
+    for r in range(nRows):
+        for c in range(nCols):
+            cell_pts = grid[r][c]
+            if len(cell_pts) >= minPts:
+                continue
+            for p in cell_pts:
+                if labels[p] is not None:
+                    continue
+                nearest_core = None
+                min_dist = float('inf')
+                for dr in range(-1, 2):
+                    for dc in range(-1, 2):
+                        nr, nc = r+dr, c+dc
+                        if 0 <= nr < nRows and 0 <= nc < nCols:
+                            for q in cell_core_pts[nr][nc]:
+                                d = math.hypot(p[0]-q[0], p[1]-q[1])
+                                if d <= epsilon and d < min_dist:
+                                    min_dist = d
+                                    nearest_core = q
+                if nearest_core is None:
+                    labels[p] = -1
+                else:
+                    labels[p] = point_to_cluster[nearest_core]
+
+    return labels
+```
+
+**Edge Cases and Pitfalls**
+*   Standard index structures (VP-trees, KD-trees) do not guarantee $O(n \log n)$ execution time for DBSCAN or may produce discrepant results compared to the original algorithm [S1, unofficial].
+*   For dimensions $d \ge 3$, the theoretical minimum complexity is $\Omega(n^{4/3})$, not $O(n \log n)$ [S1, unofficial].
+*   Points exactly on the boundary of the bounding box must be handled correctly when calculating grid indices to avoid out-of-bounds errors [G].
+
+## Operating characteristics
+*   **Time Complexity:** $O(n \log n)$ for 2D spaces [S1, unofficial]. For dimensions $d \ge 3$, the theoretical minimum complexity is $\Omega(n^{4/3})$ [S1, unofficial]. In practice, complexity can be $O(n^2)$ if parameters are not chosen appropriately [S1, unofficial].
+*   **Memory Complexity:** Proportional to the number of points and the grid size, which depends on the bounding box and $\varepsilon$ [S1, unofficial].
+*   **Strengths:** Guarantees $O(n \log n)$ time complexity for 2D data, which is faster than standard DBSCAN implementations for large datasets [S1, unofficial]. Accurately solves the original DBSCAN problem for 2D spaces [S1, unofficial].
+*   **Limitations:** Only applicable to 2D spaces [S1, unofficial]. For higher dimensions, the complexity advantage is lost or reduced [S1, unofficial].
+*   **When to use:** When clustering 2D point clouds and performance is critical, and consistency with the original DBSCAN definition is required [S1, unofficial].
+*   **When not to use:** For 3D or higher-dimensional data, or when memory is extremely constrained and the bounding box is very large relative to point density [S1, unofficial].
+
+## Background
+The original DBSCAN algorithm was proposed by Martin Ester, Hans-Peter Kriegel, Jörg Sander, and Xiaowei Xu in 1996 [S1, unofficial]. They suggested that index structures like VP-trees and KD-trees could reduce execution time to $O(n \log n)$ [S1, unofficial]. However, later research by Gunawan and Berg (2013), Gan and Tao (2015), and Schubert et al. (2017) demonstrated that this claim was flawed, as most strategies guaranteeing low execution time produce discrepant results or fail to achieve the claimed complexity [S1, unofficial]. Gunawan and Berg (2013) proposed the grid-based version for 2D spaces, which accurately solves the original problem in $O(n \log n)$ time [S1, unofficial].
+
+## Sources
+[S1] A volume exploration approach based on clustering and dimensional reduction to support the definition of multidimensional transfer functions, http://hdl.handle.net/11449/153618, fetched 2026-10-26 (unofficial)

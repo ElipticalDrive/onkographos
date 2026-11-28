@@ -1,0 +1,94 @@
+# Quadric Error Metric Parameterization
+
+Also called: Garland-Heckbert quadric parameterization, Quadric Error Clustering parameterization
+
+## Overview
+Quadric Error Metric Parameterization converts a cluster of triangle error metrics into a compact tuple $(\mathbf{A}, \mathbf{p}, \epsilon)$ that explicitly defines the optimal vertex position $\mathbf{p}$ and the resulting error $\epsilon$, while retaining the matrix $\mathbf{A}$ for further aggregation. It solves the problem of efficiently storing and merging simplification costs in [Quadric Error Metrics Simplification](16816-quadric-error-metrics-simplification.md) by providing a closed-form solution for the vertex location that minimizes the accumulated quadratic error, even when the error matrix is singular. It differs from raw quadric storage by pre-computing the minimum, allowing immediate retrieval of the simplified vertex position without re-solving the linear system during rendering or further simplification steps.
+
+## How it works
+**Inputs:** A cluster of triangles, each contributing a quadric error matrix $Q_i$ and a vertex position. The aggregate error matrix for the cluster is $\mathbf{A} = \sum Q_i$.
+**Outputs:** A parameterization tuple $(\mathbf{A}, \mathbf{p}, \epsilon)$, where $\mathbf{A}$ is the $4 \times 4$ symmetric matrix, $\mathbf{p}$ is the $3 \times 1$ optimal vertex position, and $\epsilon$ is the scalar minimum error.
+
+**Data Structures:**
+*   $\mathbf{A}$: $4 \times 4$ symmetric matrix. Stored as 10 unique values (upper triangular) or 16 values.
+*   $\mathbf{p}$: 3D vector $(x, y, z)$.
+*   $\epsilon$: Scalar float.
+
+**Steps:**
+1.  **Aggregate Quadrics:** Compute $\mathbf{A} = \sum_{i} Q_i$ for all triangles in the cluster.
+2.  **Eigen Decomposition:** Decompose $\mathbf{A}$ into $\mathbf{P} \mathbf{\Lambda} \mathbf{P}^T$, where $\mathbf{P}$ is an orthogonal rotation matrix and $\mathbf{\Lambda} = \text{diag}(\lambda_1, \lambda_2, \lambda_3, \lambda_4)$ is the diagonal matrix of eigenvalues. The eigenvalues are sorted such that $\lambda_1 \ge \lambda_2 \ge \lambda_3 \ge \lambda_4 \ge 0$ [S1].
+3.  **Identify Null Space:** If $\mathbf{A}$ is non-singular (all $\lambda_i > 0$), the minimum is unique. If $\mathbf{A}$ is singular (some $\lambda_i = 0$), there are infinitely many minima. In this case, the solution $\mathbf{p}$ is chosen as the point in the null space closest to the grid cell center [S1].
+4.  **Compute Optimal Position $\mathbf{p}$:**
+    *   Let $\mathbf{P} = [\hat{\mathbf{x}}_1, \hat{\mathbf{x}}_2, \hat{\mathbf{x}}_3, \hat{\mathbf{x}}_4]$ be the columns of $\mathbf{P}$, where $\hat{\mathbf{x}}_i$ are the eigenvectors.
+    *   The first column $\hat{\mathbf{x}}_1$ is parallel to the surface normal $\hat{\mathbf{n}}$ [S1].
+    *   If $\mathbf{A}$ is non-singular, $\mathbf{p}$ is the solution to $\mathbf{A}_{3 \times 3} \mathbf{p} = -\mathbf{b}$, derived from the bottom-left $3 \times 1$ block of $\mathbf{A}$ and the bottom-right scalar. Specifically, using the decomposition, $\mathbf{p}$ can be computed by projecting the origin onto the null space or solving the linear system directly.
+    *   If $\mathbf{A}$ is singular, $\mathbf{p}$ lies in the subspace spanned by eigenvectors corresponding to zero eigenvalues. The specific $\mathbf{p}$ is the one with minimum norm relative to the grid cell center [S1].
+5.  **Compute Error $\epsilon$:** Evaluate the quadratic form at $\mathbf{p}$: $\epsilon = \mathbf{p}^T \mathbf{A}_{3 \times 3} \mathbf{p} + 2 \mathbf{b}^T \mathbf{p} + d$, where $\mathbf{A}$ is partitioned as $\begin{pmatrix} \mathbf{A}_{3 \times 3} & \mathbf{b} \\ \mathbf{b}^T & d \end{pmatrix}$.
+6.  **Boundary Constraint:** Check if $\mathbf{p}$ falls outside its associated grid cell. If it does, constrain $\mathbf{p}$ to the cell boundaries using the procedure from [Lindstrom and Silva 2001]. This constrained $\mathbf{p}$ may not strictly minimize $\epsilon$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def quadric_parameterization(A_matrix):
+    # A_matrix is 4x4 symmetric matrix representing the quadric
+    # Step 1: Eigen decomposition
+    # P is 4x4 orthogonal matrix, Lambda is 4x4 diagonal matrix of eigenvalues
+    P, Lambda = eigen_decompose(A_matrix)
+    
+    # Sort eigenvalues and eigenvectors in descending order
+    indices = argsort(descending=True)(Lambda.diagonal())
+    P = P[:, indices]
+    Lambda = Lambda[indices, indices]
+    
+    # Step 2: Determine singularity
+    # Check if the smallest eigenvalue is effectively zero
+    if Lambda[3, 3] < epsilon_threshold:
+        # Singular case: infinitely many minima
+        # Choose the minimum closest to the grid cell center
+        # This involves projecting the grid center onto the null space
+        null_space_vectors = P[:, Lambda.diagonal() < epsilon_threshold]
+        # Compute p in null space closest to origin (assuming cell center at origin for simplicity)
+        # p = projection of 0 onto null space = 0, but adjusted for cell bounds later
+        p_optimal = compute_null_space_minimum(P, Lambda, A_matrix)
+    else:
+        # Non-singular case: unique minimum
+        # Solve A_3x3 * p = -b
+        A_3x3 = A_matrix[:3, :3]
+        b = A_matrix[:3, 3]
+        p_optimal = solve_linear_system(A_3x3, -b)
+        
+    # Step 3: Compute error at p_optimal
+    epsilon = evaluate_quadric(A_matrix, p_optimal)
+    
+    # Step 4: Boundary constraint
+    # Check if p_optimal is outside the associated grid cell
+    if not is_inside_grid_cell(p_optimal):
+        # Constrain p using Lindstrom and Silva procedure
+        p_constrained = constrain_to_grid_cell(p_optimal, A_matrix)
+        # Recalculate error for constrained position if needed, 
+        # though the parameterization stores the original epsilon for aggregation
+        p_final = p_constrained
+    else:
+        p_final = p_optimal
+        
+    return (A_matrix, p_final, epsilon)
+```
+
+## Subtopics
+
+### Surface Normal Extraction from Quadric
+Extracts the dominant surface normal $\hat{\mathbf{n}}$ from the quadric matrix $\mathbf{A}$. Since $\mathbf{A}$ is the covariance matrix of the weighted normals of the triangles in the cluster, the eigenvector corresponding to the largest eigenvalue $\lambda_1$ of $\mathbf{A}$ is the dominant normal direction $\hat{\mathbf{n}}$ [S1]. Note that if $\hat{\mathbf{n}}$ is an eigenvector, so is $-\hat{\mathbf{n}}$; the sign must be resolved based on the orientation of the original triangles to ensure correct rendering [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the eigen decomposition of a $4 \times 4$ matrix, which is constant time $O(1)$ per cluster.
+*   **Memory Complexity:** Stores the $4 \times 4$ matrix $\mathbf{A}$, the position $\mathbf{p}$, and the scalar $\epsilon$.
+*   **Strengths:** Provides immediate access to the optimal vertex position without re-solving linear systems. Handles singular matrices gracefully by selecting the minimum-norm solution.
+*   **Limitations:** The computed optimum $\mathbf{p}$ may fall outside the grid cell, requiring additional constraint logic which may result in a non-optimal error value [S1].
+*   **When to use:** When the simplified mesh needs to be rendered or further processed with explicit vertex positions readily available.
+
+## Background
+This parameterization is based on the work of Garland and Heckbert in "Surface Simplification Using Quadric Error Metrics" [Garland 1999, §4.2.2], as cited in [S1]. It is a key component of the Quadric Error Metrics Simplification method, enabling efficient out-of-core construction and visualization of multiresolution surfaces [S1].
+
+## Sources
+[S1] Out-of-Core Construction and Visualization of Multiresolution Surfaces, https://digital.library.unt.edu/ark:/67531/metadc1406579/?q=multiresolution volume rendering, fetched 2026-10-28

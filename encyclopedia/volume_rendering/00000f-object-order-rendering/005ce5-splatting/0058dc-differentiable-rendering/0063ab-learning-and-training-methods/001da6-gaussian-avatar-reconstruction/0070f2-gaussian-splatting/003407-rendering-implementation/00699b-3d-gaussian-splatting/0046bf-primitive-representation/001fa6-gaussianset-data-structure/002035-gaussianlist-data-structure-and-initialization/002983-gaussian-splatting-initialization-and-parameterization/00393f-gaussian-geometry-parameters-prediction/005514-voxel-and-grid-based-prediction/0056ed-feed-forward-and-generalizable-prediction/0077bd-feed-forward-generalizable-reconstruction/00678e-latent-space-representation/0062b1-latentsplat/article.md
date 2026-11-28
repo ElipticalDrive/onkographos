@@ -1,0 +1,265 @@
+# latentSplat
+
+Also called: Autoencoding Variational Gaussians for Fast Generalizable 3D Reconstruction
+
+## Overview
+latentSplat is a method for generalizable 3D reconstruction from two reference views that predicts semantic 3D Gaussians in a latent space [S1, unofficial]. It models uncertainty explicitly by storing distributions (mean and variance) of spherical harmonic coefficients for each Gaussian, allowing sampling of specific instances for rendering [S1, unofficial]. Unlike regression-based methods such as [pixelSplat](16424-pixelsplat.md) which provide a single low-variance solution, latentSplat handles high-ambiguity regions and view extrapolation better, avoiding blurry reconstructions in unobserved areas [S1, unofficial]. Compared to generative diffusion-based methods like [GeNVS](16426-genvs.md), it is orders of magnitude faster and scales to high resolutions by using efficient Gaussian splatting for rendering instead of volume rendering or iterative diffusion sampling [S1, unofficial].
+
+## How it works
+**Inputs:** Two reference views (RGB images) and their corresponding camera poses.
+**Outputs:** A synthesized RGB image for an arbitrary novel view.
+
+**Data Structures:**
+The scene is represented as a set of $N$ variational Gaussians $\mathcal{G} = \{(\mathbf{x}, \mathbf{S}, \mathbf{R}, o, \mathbf{c}, \mathbf{h}_\mu, \mathbf{h}_\sigma)_i\}_{1 \leq i \leq N}$ [S1, unofficial].
+*   $\mathbf{x} \in \mathbb{R}^3$: 3D location.
+*   $\mathbf{S} \in \mathbb{R}^3$: Scale (diagonal matrix elements).
+*   $\mathbf{R} \in \mathbb{R}^3$: Rotation (normalized quaternion).
+*   $o \in [0, 1]$: Opacity.
+*   $\mathbf{c} \in \mathbb{R}^{K_c}$: Spherical Harmonics (SH) coefficients for view-dependent color.
+*   $\mathbf{h}_\mu \in \mathbb{R}^{K_h}$: Mean of the Gaussian distribution for semantic feature SH coefficients.
+*   $\mathbf{h}_\sigma \in \mathbb{R}^{K_h}$: Standard deviation of the Gaussian distribution for semantic feature SH coefficients.
+*   The covariance matrix is $\mathbf{C} = \mathbf{R} \mathbf{S} \mathbf{S}^\top \mathbf{R}^\top$ [S1, unofficial].
+*   SH coefficients are computed up to degree 4 for RGB and degree 2 for semantic features (dimensionality 4) [S1, unofficial].
+
+**Steps:**
+
+1.  **Feature Encoding:**
+    *   Encode the two input views using a DINOv1 ViT-B/8 backbone [S1, unofficial].
+    *   Upscale local patch tokens by repeating them to the original patch size.
+    *   Add a linearly projected global class token to obtain a feature map at the original image resolution [S1, unofficial].
+    *   Downscale the input feature maps by a factor of 4 in each dimension for computational feasibility [S1, unofficial].
+
+2.  **Epipolar Aggregation:**
+    *   Process 32 samples of each pixel's epipolar line using an Epipolar Transformer [S1, unofficial].
+    *   The transformer consists of two blocks with four-head attention [S1, unofficial].
+    *   Token dimensionality is 128 [S1, unofficial].
+    *   Add a skip connection at the original resolution to prevent a bottleneck with low spatial dimensions in the epipolar transformer [S1, unofficial].
+
+3.  **Gaussian Parameter Prediction:**
+    *   Pass the aggregated features through a Gaussian Sampling Head [S1, unofficial].
+    *   The head employs simple linear projections with specific activation functions:
+        *   Normalized quaternions for rotation $\mathbf{R}$.
+        *   Scaled and shifted sigmoid for scale $\mathbf{S}$ and opacity $o$ [S1, unofficial].
+    *   Predict $\mathbf{h}_\mu$ and $\mathbf{h}_\sigma$ for the semantic feature distributions [S1, unofficial].
+
+4.  **Sampling:**
+    *   Sample a specific instance of semantic Gaussians from the variational distributions using the reparameterization trick [S1, unofficial].
+    *   For each Gaussian $i$, sample feature coefficients $\mathbf{h}_i \sim \mathcal{N}(\mathbf{h}_{\mu,i}, \mathbf{h}_{\sigma,i})$ [S1, unofficial].
+
+5.  **Rendering:**
+    *   Render the sampled instance of semantic Gaussians to the target novel view using efficient Gaussian splatting [S1, unofficial].
+    *   This produces an auxiliary RGB rendering and feature maps [S1, unofficial].
+
+6.  **Decoding:**
+    *   Decode the splatted features into pixel space using a lightweight generative decoder network (VAE-GAN decoder) [S1, unofficial].
+    *   The decoder is a fully convolutional architecture with four upsample blocks, each containing two residual blocks [S1, unofficial].
+    *   Add 1x1 convolutions as skip connections to feed downscaled versions of the intermediate auxiliary RGB renderings and feature maps into each upsample block [S1, unofficial].
+    *   Initialize the weights of these additional skip connection layers to zero to avoid noisy gradients [S1, unofficial].
+
+7.  **Discrimination (Training Only):**
+    *   A discriminator (small CNN with three strided convolutions) predicts the likelihood of patches [S1, unofficial].
+    *   It has no global receptive field [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class latentSplat:
+    def __init__(self, N, token_dim=128):
+        self.N = N
+        # Encoder components
+        self.vit_backbone = DINOv1_ViT_B_8()
+        self.epipolar_transformer = EpipolarTransformer(
+            num_blocks=2, 
+            num_heads=4, 
+            token_dim=token_dim
+        )
+        self.gaussian_head = GaussianSamplingHead()
+        
+        # Decoder components
+        self.decoder = VAE_GAN_Decoder()
+        self.skip_connections = nn.ModuleList([
+            nn.Conv2d(token_dim, token_dim, 1) for _ in range(4)
+        ])
+        # Initialize skip connection weights to zero to avoid noisy gradients [S1, unofficial]
+        for m in self.skip_connections:
+            nn.init.zeros_(m.weight)
+            
+        # Discriminator (for training)
+        self.discriminator = Discriminator()
+
+    def encode(self, ref_views, poses):
+        """
+        ref_views: List of two tensors [B, 3, H, W]
+        poses: Camera poses for reference views
+        """
+        # 1. Feature Encoding
+        # Extract features using DINOv1 ViT-B/8
+        vit_features = self.vit_backbone(ref_views)
+        
+        # Upscale local patch tokens by repeating for original patch size
+        # Add linearly projected global class token
+        # Result: feature map at original image resolution
+        feat_map = self._upscale_and_add_class_token(vit_features)
+        
+        # Downscale by factor of 4 for computational feasibility
+        feat_map_down = F.interpolate(feat_map, scale_factor=0.25, mode='bilinear')
+        
+        # 2. Epipolar Aggregation
+        # Process 32 samples of each pixel's epipolar line
+        # Input: feat_map_down, poses
+        # Output: aggregated features
+        epipolar_features = self.epipolar_transformer(
+            feat_map_down, 
+            poses, 
+            num_samples=32
+        )
+        
+        # Skip connection at original resolution
+        # Concatenate or add original resolution features to prevent bottleneck
+        # Note: Implementation detail on how skip is merged is not fully specified, 
+        # assuming concatenation or addition after appropriate projection
+        epipolar_features = self._merge_skip_connection(epipolar_features, feat_map)
+        
+        # 3. Gaussian Parameter Prediction
+        # Predict N variational Gaussians
+        gaussians = self.gaussian_head(epipolar_features)
+        
+        return gaussians
+
+    def sample_gaussians(self, gaussians):
+        """
+        Sample specific instance from variational distributions
+        """
+        # gaussians contains h_mu and h_sigma for semantic features
+        # Sample h_i ~ N(h_mu, h_sigma)
+        h_mu = gaussians['h_mu']
+        h_sigma = gaussians['h_sigma']
+        
+        # Reparameterization trick
+        eps = torch.randn_like(h_mu)
+        h_sampled = h_mu + h_sigma * eps
+        
+        # Combine with other parameters (x, S, R, o, c)
+        # c is predicted directly or derived? Source implies c is part of the Gaussian set
+        # but h_mu/h_sigma are for semantic features. 
+        # Assuming c is also predicted or fixed. Source says "semantic 3D Gaussians... 
+        # describing scene appearance via attached view-dependent feature vectors"
+        # and "storing parameters mu and sigma of a normal distribution of spherical harmonic coefficients"
+        # It implies the SH coefficients themselves are the features being distributed.
+        
+        sampled_gaussians = {
+            'x': gaussians['x'],
+            'S': gaussians['S'],
+            'R': gaussians['R'],
+            'o': gaussians['o'],
+            'c': gaussians['c'], # Color SH coefficients
+            'h': h_sampled       # Semantic feature SH coefficients
+        }
+        return sampled_gaussians
+
+    def render(self, gaussians, target_pose):
+        """
+        Render sampled Gaussians to target view
+        """
+        # Efficient Gaussian Splatting
+        # Input: sampled_gaussians, target_pose
+        # Output: RGB rendering, Feature maps
+        rgb_render, feat_render = gaussian_splatting(
+            gaussians, 
+            target_pose
+        )
+        return rgb_render, feat_render
+
+    def decode(self, rgb_render, feat_render):
+        """
+        Decode splatted features into pixel space
+        """
+        # Downscale intermediate renderings for skip connections
+        skip_inputs = []
+        for i in range(4):
+            # Downscale rgb_render and feat_render appropriately for each block
+            # Note: Exact downsampling factors for each block not specified, 
+            # assuming standard U-Net style progression
+            skip_inputs.append(self.skip_connections[i](rgb_render)) # Simplified
+            
+        # Decode
+        output = self.decoder(feat_render, skip_inputs)
+        return output
+
+    def forward(self, ref_views, poses, target_pose):
+        gaussians = self.encode(ref_views, poses)
+        sampled_gaussians = self.sample_gaussians(gaussians)
+        rgb_render, feat_render = self.render(sampled_gaussians, target_pose)
+        output = self.decode(rgb_render, feat_render)
+        return output, rgb_render, feat_render
+
+    def _upscale_and_add_class_token(self, vit_features):
+        # Implementation detail: Repeat patch tokens and add class token
+        # Specific implementation depends on ViT backbone output structure
+        pass
+
+    def _merge_skip_connection(self, epipolar_features, original_feat):
+        # Implementation detail: Merge features to prevent bottleneck
+        pass
+
+class DINOv1_ViT_B_8(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Pre-trained DINOv1 ViT-B/8
+        pass
+
+class EpipolarTransformer(nn.Module):
+    def __init__(self, num_blocks, num_heads, token_dim):
+        super().__init__()
+        self.blocks = nn.ModuleList([
+            EpipolarBlock(num_heads, token_dim) for _ in range(num_blocks)
+        ])
+        self.token_dim = token_dim
+
+    def forward(self, feat_map, poses, num_samples):
+        # Process 32 samples of each pixel's epipolar line
+        # Implementation of epipolar transformer logic
+        pass
+
+class GaussianSamplingHead(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Linear projections with specific activations
+        # Normalized quaternions for rotation
+        # Scaled and shifted sigmoid for scale and opacity
+        pass
+
+class VAE_GAN_Decoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Fully convolutional architecture with 4 upsample blocks
+        # Each block has 2 residual blocks
+        pass
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Small CNN with 3 strided convolutions
+        pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Fast rendering due to Gaussian splatting, orders of magnitude faster than diffusion-based methods [S1, unofficial].
+*   **Memory Complexity:** Scales to high resolutions due to the efficient Gaussian representation [S1, unofficial].
+*   **Performance:** Achieves state-of-the-art quality in two-view reconstruction, especially in challenging cases of wide-spread input views and view extrapolation [S1, unofficial].
+*   **Strengths:** Handles high-ambiguity regions, generalizes to interpolated and extrapolated views, purely trained on real video data without 3D supervision (depth/pose labels for target view) [S1, unofficial].
+*   **Limitations:** Requires two reference views and their camera poses [S1, unofficial].
+*   **When to use:** When fast, generalizable 3D reconstruction from few views is needed, especially for extrapolation or ambiguous scenes [S1, unofficial].
+*   **When not to use:** When single-view reconstruction is required or when per-scene optimization is acceptable and higher fidelity is needed [S1, unofficial].
+
+## Background
+latentSplat was introduced by C. Wewer et al. in 2024 [S1, unofficial]. It builds on the success of 3D Gaussian Splatting [31] and addresses limitations of previous generalizable methods that either do not scale to large scenes or are limited to interpolation of close input views [S1, unofficial]. It combines regression-based and generative approaches, using variational Gaussians to model uncertainty [S1, unofficial].
+
+## Sources
+[S1] latentSplat, https://arxiv.org/abs/2403.16292, fetched 2026-10-27 (unofficial)

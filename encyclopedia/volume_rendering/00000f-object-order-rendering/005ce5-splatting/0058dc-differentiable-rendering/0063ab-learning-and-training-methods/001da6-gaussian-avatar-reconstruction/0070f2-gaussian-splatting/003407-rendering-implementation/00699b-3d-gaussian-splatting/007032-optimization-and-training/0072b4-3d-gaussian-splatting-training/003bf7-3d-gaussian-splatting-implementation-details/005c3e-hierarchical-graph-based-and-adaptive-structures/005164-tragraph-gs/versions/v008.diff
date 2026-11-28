@@ -1,0 +1,124 @@
+--- v007.md
++++ v008.md
+@@ -4,70 +4,75 @@
+ 
+ ## Overview
+-TraGraph-GS is a rendering method for arbitrary large-scale scenes that uses graph-based adaptive spatial partitioning, regularization constraints for 3D Gaussian Splatting (3DGS), and adaptive region selection to handle vast scales while maintaining real-time performance [S1]. It differs from standard 3DGS by explicitly modeling camera connectivity to partition the scene into balanced, connected subgraphs, and from other hierarchical methods by using a progressive blending strategy of local and global Gaussian representations to eliminate boundary artifacts [S1].
++TraGraph-GS is a rendering method for arbitrary large-scale scenes that uses graph-based adaptive spatial partitioning, regularization constraints for 3D Gaussian Splatting (3DGS), and adaptive region selection to handle vast scales while maintaining real-time performance [S1]. It differs from flat 3DGS by partitioning the scene into connected subgraphs based on camera feature matching, training local representations independently, and using a progressive blending strategy for novel viewpoints to avoid boundary artifacts [S1].
+ 
+ ## How it works
+-**Inputs:** A set of disordered scene photographs (images) and their associated camera poses.
++**Inputs:** A set of disordered scene photographs (images) and their corresponding poses.
+ **Outputs:** A rendered image for a novel viewpoint.
+ 
+ **Data Structures:**
+-1.  **Camera Connectivity Graph:** $G = (V, E, w)$.
+-    *   $V = \{v_1, v_2, ..., v_n\}$: Set of vertices, where each vertex represents an input image.
+-    *   $E = \{(v_i, v_j) | v_i, v_j \in V\}$: Set of edges connecting pairs of vertices.
+-    *   $w: E \rightarrow \mathbb{R}$: Weight function assigning a real number to each edge, defined as the count of feature matches between the two connected images. Higher weights indicate larger co-visible regions [S1].
+-2.  **Regions:** A partition of $V$ into $k$ disjoint sets $\{P_1, P_2, ..., P_k\}$, where each $P_i$ contains a subset of vertices (images) and their associated 3D Gaussians.
+-3.  **Gaussian Primitives:** Each region $P_i$ maintains its own set of 3D Gaussians $G_i$, defined by mean $\mu$, covariance $\Sigma$ (parameterized by rotation $R$ and scale $S$), opacity $\alpha$, and color coefficients $c$ (spherical harmonics) [S1].
++*   **Camera Connectivity Graph:** $G = (V, E, w)$, where $V = \{v_1, ..., v_n\}$ are image vertices, $E$ are edges, and $w: E \to \mathbb{R}$ assigns weights based on feature matching counts between image pairs [S1].
++*   **Regions:** A partition of $V$ into $k$ sets $\{P_i\}_{i=1}^k$, where each $P_i$ is a connected subgraph with approximately $|V|/k$ nodes [S1].
++*   **Local Gaussians:** For each region $P_i$, a set of 3D Gaussians $\mathcal{G}_i$ is trained independently [S1].
++*   **Global Gaussians:** A coarse set of 3D Gaussians $\mathcal{G}_{global}$ trained on downsampled data [S1].
+ 
+-**Algorithm Steps:**
++**Steps:**
+ 
+-1.  **Graph Construction:** Construct the camera connectivity graph $G$ by computing feature matches between all image pairs. Set edge weights $w_{ij}$ to the number of matches between image $i$ and image $j$ [S1].
+-2.  **Graph Segmentation:** Divide $G$ into $k$ regions using BFS-based segmentation to ensure connectivity within each region and balanced node distribution [S1].
++1.  **Graph Construction:** Construct $G$ by computing feature matches between all image pairs. The weight $w(v_i, v_j)$ is the count of matched features [S1].
++2.  **Graph Segmentation:** Divide $G$ into $k$ regions using BFS-based segmentation [S1]:
+     *   Initialize unassigned nodes $U = V$.
+-    *   Identify the node $n$ with the highest degree in $U$ as the seed node.
+-    *   Perform BFS from the seed node, adding nodes to the current region until the region contains $|V|/k$ nodes.
+-    *   For remaining unassigned nodes, calculate a score $s_i$ relative to each existing region and assign the node to the region with the highest score, ensuring connectivity and balance [S1].
+-3.  **Local Training:** Train local 3D Gaussian representations independently for each region $P_i$. The training objective combines image reconstruction loss and multi-view constraints [S1]:
+-    $$L = (1 - \lambda)L_1 + \lambda L_{SSIM} + L_{mv}$$
+-    where $L_1$ and $L_{SSIM}$ are standard reconstruction losses, and $L_{mv}$ is the multi-view constraint [S1].
+-    *   **Multi-View Constraint ($L_{mv}$):** Render depth and normal maps for each image. For a pixel $p$ in a reference view, establish a spatial plane $(d, n)$ where $n$ is the rendered normal and $d$ is the distance from the camera origin. Project $p$ to a corresponding pixel $p'$ in a neighborhood view using homography warping. Compute the Normalized Cross Correlation (NCC) between patches at $p$ and $p'$ [S1]:
+-        $$L_{mv} = \sum_{p \in P_i} (1 - \text{NCC}(p, p'))$$
+-    *   **Multi-Scale Constraint:** Apply position-aware point adaptive control to adjust Gaussian scales based on viewer distance. Define a scaling factor $\gamma(\mu)$ where $r$ is the scene radius and $c$ is the camera center [S1]:
+-        $$\gamma(\mu) = \begin{cases} 1 & \text{if } \|\mu - c\|_2 < 2r \\ \|\mu - c\|_2 / r - 1 & \text{if } \|\mu - c\|_2 \ge 2r \end{cases}$$
+-        If the maximum scale of a Gaussian ellipsoid $\max(s) < g \cdot \gamma(\mu)$, perform cloning. Otherwise, perform splitting. Eliminate Gaussians where $\max(s)$ is too small [S1].
+-4.  **Global Training:** For novel viewpoints, train a coarse global Gaussian representation by downsampling point clouds and images. Avoid the densification process (cloning/splitting) to prevent excessive memory consumption [S1].
++    *   While $U$ is not empty:
++        *   Select node $n \in U$ with the highest degree as the seed.
++        *   Perform BFS from $n$, adding nodes to the current region until it contains $|V|/k$ nodes.
++        *   Remove added nodes from $U$.
++        *   For remaining unassigned nodes, calculate a score $s_i$ relative to existing regions and assign them to maintain balance [S1].
++3.  **Local Training:** For each region $P_i$, train local Gaussians $\mathcal{G}_i$ using the images in $P_i$. The loss function is [S1]:
++    $$ L = (1 - \lambda)L_1 + \lambda L_{SSIM} + L_{mv} $$
++    where $L_1$ and $L_{SSIM}$ are standard reconstruction losses [S1].
++    *   **Multi-View Constraint ($L_{mv}$):** For textureless regions, render depth and normal maps. For a pixel $p$ in a reference view, establish a spatial plane $(d, n)$. Project $p$ to a neighborhood view $p'$ using homography. Compute Normalized Cross Correlation (NCC) between patches at $p$ and $p'$ [S1]:
++        $$ L_{mv} = \sum_{p \in P_i} (1 - \text{NCC}(p, p')) $$
++    *   **Multi-Scale Constraint:** Adjust Gaussian scales based on viewer distance. Define $\gamma(\mu)$ where $r$ is scene radius and $c$ is camera center [S1]:
++        $$ \gamma(\mu) = \begin{cases} 1 & \text{if } \|\mu - c\|_2 < 2r \\ \|\mu - c\|_2 / r - 1 & \text{if } \|\mu - c\|_2 \ge 2r \end{cases} $$
++        If the directional gradient exceeds a threshold:
++        *   Clone if $\max(s) < g \cdot \gamma(\mu)$.
++        *   Split otherwise.
++        *   Prune if $\max(s)$ is too small [S1].
++4.  **Global Training:** For novel viewpoints, train a coarse global representation $\mathcal{G}_{global}$ by downsampling point clouds and images, avoiding densification to save memory [S1].
+ 5.  **Adaptive Region Selection (Rendering):**
+-    *   Render the novel viewpoint using local Gaussians ($C_{local}$) and global Gaussians ($C_{global}$) separately [S1].
+-    *   Calculate a matching score $S$ for each local-global Gaussian pair based on the reconstruction loss at the novel viewpoint:
+-        $$S = (1 - \lambda)L_1 + \lambda L_{SSIM}$$
+-        Higher scores indicate higher likelihood of visibility [S1].
++    *   Render the novel viewpoint using $\mathcal{G}_{global}$ and each $\mathcal{G}_i$ separately.
++    *   Calculate a matching score $S$ for each local-global pair [S1]:
++        $$ S = (1 - \lambda)L_1 + \lambda L_{SSIM} $$
++        Higher $S$ indicates higher likelihood of visibility [S1].
+     *   Sort local Gaussians in descending order of $S$: $G_1, G_2, ..., G_k$.
+-    *   Calculate projection opacity $o_i(p)$ for each pixel $p$ for the sorted local Gaussians:
+-        $$o_i(p) = \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)$$
+-    *   Compute the final pixel color $c(p)$ using a progressive rendering strategy with weights $w_i$ based on an overlapped opacity threshold $\beta$:
+-        $$w_i = \begin{cases} o_i(p) & \text{if } \sum_{j=1}^{i-1} o_j(p) < \beta \\ 0 & \text{if } \sum_{j=1}^{i-1} o_j(p) \ge \beta \end{cases}$$
+-        $$c(p) = \sum_{i=1}^{k} w_i c_i(p)$$
+-        where $c_i(p)$ is the color rendered by local Gaussian $G_i$ [S1].
++    *   Compute projection opacity $o_i(p)$ for each pixel $p$ [S1]:
++        $$ o_i(p) = \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
++        where $\alpha_i$ is the opacity of Gaussian $G_i$ [S1].
++    *   Compute weights $w_i$ based on an overlapped opacity threshold $\beta$ [S1]:
++        $$ w_i = \begin{cases} o_i(p) & \text{if } \sum_{j=1}^{i-1} o_j(p) < \beta \\ 0 & \text{if } \sum_{j=1}^{i-1} o_j(p) \ge \beta \end{cases} $$
++    *   Compute final pixel color $c(p)$ [S1]:
++        $$ c(p) = \sum_{i=1}^k w_i c_i(p) $$
++        where $c_i(p)$ is the color rendered by $G_i$ [S1].
+ 
+ **Parameters:**
+ *   $k$: Number of segmented regions.
+-*   $\lambda$: Weight for SSIM loss (typical value not specified in sources, standard 3DGS uses 0.2).
+-*   $\beta$: Overlapped opacity threshold for progressive rendering.
++*   $\lambda$: Weight for SSIM loss (typical value not given in sources, standard 3DGS uses 0.2 [S1]).
+ *   $r$: Scene radius.
+ *   $c$: Camera center.
+-*   $g$: Threshold multiplier for cloning/splitting.
++*   $g$: Scaling factor for cloning threshold [S1].
++*   $\beta$: Overlapped opacity threshold for progressive rendering [S1].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Memory Overflow:** Naive partitioning can lead to unbalanced node distribution. The BFS method ensures balanced distribution to avoid this [S1].
+-*   **Boundary Artifacts:** Combining all local Gaussians can cause floating artifacts or holes. The progressive rendering strategy with global context mitigates this [S1].
+-*   **Textureless Regions:** Standard 3DGS struggles with geometry in textureless areas. The multi-view constraint $L_{mv}$ addresses this [S1].
++**Edge Cases:**
++*   **Memory Overflow:** Balanced node distribution prevents memory overflow issues associated with uneven partitioning [S1].
++*   **Boundary Artifacts:** The progressive rendering strategy avoids floating artifacts and holes common in methods that simply merge local Gaussians [S1].
++*   **Textureless Regions:** Multi-view constraints specifically address geometry reconstruction failures in these areas [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Graph construction requires pairwise feature matching, which is $O(N^2)$ for $N$ images. Segmentation is linear in the number of edges and nodes. Local training is parallelized across regions. Global training is reduced due to downsampling and no densification.
+-*   **Memory Complexity:** Reduced compared to training a single global 3DGS model because local models are trained independently. Global model is coarse and downsampled.
+-*   **Performance:** Evaluated on large-scale aerial and ground datasets (e.g., Rubble, Building, SmallCity). Maintains real-time performance across vastly different scales [S1].
+-*   **Strengths:** Handles arbitrary large-scale scenes, improves texture details in textureless regions, reduces boundary artifacts, and manages memory efficiently.
+-*   **Limitations:** Requires initial feature matching and graph segmentation. Performance depends on the quality of feature matches for graph construction.
++*   **Time Complexity:** Training is parallelized across regions, reducing per-region memory and potentially time compared to global training [S1]. Graph segmentation is $O(|V| + |E|)$ [S1].
++*   **Memory Complexity:** Scales with the number of regions and local Gaussian counts. Global training uses downsampled data to minimize memory [S1].
++*   **Performance:** Evaluated on large-scale aerial (1,678–3,019 images) and ground-level datasets [S1]. Maintains real-time performance across vastly different scales [S1].
++*   **Strengths:** Handles arbitrary large-scale scenes; improves texture details in textureless regions; avoids boundary artifacts; balances connectivity and node distribution [S1].
++*   **Limitations:** Requires feature matching for graph construction; performance depends on the choice of $k$ and segmentation quality [S1].
+ 
+ ## Background
+-TraGraph-GS was proposed to address the challenges of rendering large-scale scenes with arbitrary camera trajectories, where standard 3DGS struggles with memory and boundary artifacts. It builds on the principles of 3D Gaussian Splatting [S1]. The method was published in IEEE Transactions on Pattern Analysis and Machine Intelligence in 2026 [S1].
++TraGraph-GS was proposed to address the limitations of existing methods for large-scale scene rendering, which often struggle with memory, boundary artifacts, or textureless regions [S1]. It builds on 3DGS [11] and incorporates ideas from VastGaussian [14] regarding progressive partitioning [S1]. The method was published in IEEE Transactions on Pattern Analysis and Machine Intelligence in 2026 [S1].
+ 
+ ## Sources

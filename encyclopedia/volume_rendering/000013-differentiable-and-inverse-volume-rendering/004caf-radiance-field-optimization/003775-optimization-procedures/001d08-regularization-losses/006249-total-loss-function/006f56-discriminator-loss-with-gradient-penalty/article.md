@@ -1,0 +1,119 @@
+# Discriminator Loss with Gradient Penalty
+
+Also called: GP Loss, Gradient Penalty Loss, R1 Gradient Penalty, Simple Gradient Penalty (R1), Learned Self-Supervision (Discriminator), RaLSGAN discriminator
+
+## Overview
+A regularization loss for training the discriminator in Generative Adversarial Networks (GANs) that enforces Lipschitz continuity by penalizing the gradient norm of the discriminator's output with respect to its input [S1, unofficial]. It distinguishes itself from weight clipping or spectral normalization methods by using an explicit penalty term on the gradients of real samples, specifically stabilizing training in radiance-field optimization contexts like GANeRF [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Real image patches $x_{\text{real}}$, fake image patches $x_{\text{fake}}$, discriminator network $D$, gradient penalty multiplier `gp_loss_mult` [S1, unofficial].
+- **Outputs:** Scalar discriminator loss value [S1, unofficial].
+
+**Data Structures:**
+- Tensors are 4D: $[N, C, H, W]$ representing batch size, channels, height, and width [G].
+- Gradients are computed with respect to the input tensor $x_{\text{real}}$ [S1, unofficial].
+
+**Steps:**
+1. **Real Prediction:** Set $x_{\text{real}}$ to require gradients, then pass real patches through the discriminator to obtain predictions $pred_{\text{real}} = D(x_{\text{real}})$ [S1, unofficial].
+2. **Fake Prediction:** Pass detached fake patches through the discriminator to obtain predictions $pred_{\text{fake}} = D(x_{\text{fake}})$ [S1, unofficial]. Detachment prevents gradient flow from the fake path into the discriminator during the penalty calculation [G].
+3. **Gradient Penalty Calculation:** Compute the gradients of the sum of predictions with respect to the input: $g = \nabla_{x_{\text{real}}} pred_{\text{real}}$ [S1, unofficial]. Calculate the R1 penalty as the mean of the squared gradient norms across spatial dimensions: $r1_{\text{penalty}} = \text{mean}(\sum g^2, \text{dim}=[1,2,3])$ [S1, unofficial]. Normalize by 2: $\text{gradient\_penalty} = r1_{\text{penalty}} / 2$ [S1, unofficial].
+4. **Loss Computation:** Compute real loss using softplus: $loss_{d\_real} = \text{mean}(\text{softplus}(-pred_{\text{real}}))$ [S1, unofficial]. Compute fake loss using softplus: $loss_{d\_fake} = \text{mean}(\text{softplus}(pred_{\text{fake}}))$ [S1, unofficial]. Sum the real and fake losses to get the total discriminator loss: $total\_loss = loss_{d\_real} + loss_{d\_fake} + \text{gp\_loss\_mult} \cdot \text{gradient\_penalty}$ [S1, unofficial].
+
+**Formulas:**
+$$pred_{\text{real}} = D(x_{\text{real}})$$
+$$pred_{\text{fake}} = D(x_{\text{fake}})$$
+$$g = \nabla_{x_{\text{real}}} pred_{\text{real}}$$
+$$r1_{\text{penalty}} = \text{mean}\left(\sum_{c,h,w} g_{c,h,w}^2\right)$$
+$$\text{gradient\_penalty} = r1_{\text{penalty}} / 2$$
+$$loss_{d\_real} = \text{mean}(\text{softplus}(-pred_{\text{real}}))$$
+$$loss_{d\_fake} = \text{mean}(\text{softplus}(pred_{\text{fake}}))$$
+$$total\_loss = loss_{d\_real} + loss_{d\_fake} + \text{gp\_loss\_mult} \cdot \text{gradient\_penalty}$$
+where $x_{\text{real}}$ and $x_{\text{fake}}$ are image patches, $D$ is the discriminator network, $g$ is the gradient tensor, and $\text{softplus}(x) = \log(1 + e^x)$ [G].
+
+**Parameters:**
+- `gp_loss_mult`: The multiplier for the gradient penalty term in the discriminator loss [S1, unofficial].
+- Label $l$: Set to $1$ when training the discriminator, and $-1$ when using it as a loss to optimize the density via $\frac{\tilde{L}_D(\rho, -1)}{\rho}$ [S2].
+
+**Edge Cases and Pitfalls:**
+- **Detachment:** Fake patches must be detached from the computation graph to ensure the gradient penalty is only applied to the real data path (R1 regularization) [S1, unofficial].
+- **Softplus:** The use of softplus implies a non-saturating GAN formulation, which helps prevent vanishing gradients for the discriminator [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def discriminator_loss_with_gradient_penalty(
+    discriminator: torch.nn.Module,
+    real_patches: torch.Tensor,
+    fake_patches: torch.Tensor,
+    gp_loss_mult: float
+) -> torch.Tensor:
+    """
+    Computes the discriminator loss with R1 gradient penalty.
+    
+    Args:
+        discriminator: The discriminator network.
+        real_patches: Tensor of real image patches [N, C, H, W].
+        fake_patches: Tensor of fake image patches [N, C, H, W].
+        gp_loss_mult: Multiplier for the gradient penalty term.
+        
+    Returns:
+        Total discriminator loss.
+    """
+    # 1. Run discriminator on real patches
+    real_patches.requires_grad_(True)
+    pred_real = discriminator(real_patches)
+    
+    # 2. Run discriminator on detached fake patches
+    pred_fake = discriminator(fake_patches.detach())
+    
+    # 3. Compute gradient penalty using real patches
+    # Compute gradients of the sum of predictions with respect to the input
+    grad_output = torch.ones_like(pred_real)
+    gradients = torch.autograd.grad(
+        outputs=pred_real.sum(),
+        inputs=real_patches,
+        grad_outputs=grad_output,
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True
+    )[0]
+    
+    # Compute r1_penalty: mean(sum(gradients^2, dim=[1,2,3]))
+    r1_penalty = torch.sum(gradients ** 2, dim=[1, 2, 3]).mean()
+    
+    # gradient_penalty = r1_penalty / 2
+    gradient_penalty = r1_penalty / 2.0
+    
+    # 4. Compute losses
+    # loss_d_real = mean(softplus(-pred_real))
+    loss_d_real = F.softplus(-pred_real).mean()
+    
+    # loss_d_fake = mean(softplus(pred_fake))
+    loss_d_fake = F.softplus(pred_fake).mean()
+    
+    # 5. Sum the real and fake losses to get the total discriminator loss
+    total_loss = loss_d_real + loss_d_fake + gp_loss_mult * gradient_penalty
+    
+    return total_loss
+```
+
+## Subtopics
+
+### [Non-saturating GAN Loss with R1 Regularization](10288-non-saturating-gan-loss-with-r1-regularization.md)
+This loss function defines the adversarial objective for training a generator and discriminator pair, specifically designed to stabilize training in generative adversarial networks (GANs) by combining a non-saturating logistic loss with an R1 gradient penalty. It builds on [Discriminator Loss with Gradient Penalty](7695-discriminator-loss-with-gradient-penalty.md) by specifying the exact non-saturating formulation and the R1 regularization term, which penalizes the gradient norm of the discriminator's output with respect to its input rather than enforcing a strict Lipschitz constraint via weight clipping or spectral normalization.
+
+## Operating characteristics
+- **Strengths:** Stabilizes GAN training by enforcing Lipschitz continuity without weight clipping [S1, unofficial].
+- **Limitations:** Extending the discriminator to the temporal domain via a triplet of inputs yields no benefits because transport priors already constrain physicality [S2].
+
+## Background
+The method originates from implementations like GANeRF, which applies GAN techniques to neural radiance fields [S1, unofficial]. It is also used in fluid reconstruction to train a fully convolutional neural network discriminator that distinguishes between real reference images and reconstructed smoke images [S2]. The R1 gradient penalty is a standard technique in GAN literature for enforcing Lipschitz continuity [G].
+
+## Sources
+[S1] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+[S2] Global Transport for Fluid Reconstruction with Learned Self-Supervision, https://doi.org/10.1109/cvpr46437.2021.00168, fetched 2026-10-30

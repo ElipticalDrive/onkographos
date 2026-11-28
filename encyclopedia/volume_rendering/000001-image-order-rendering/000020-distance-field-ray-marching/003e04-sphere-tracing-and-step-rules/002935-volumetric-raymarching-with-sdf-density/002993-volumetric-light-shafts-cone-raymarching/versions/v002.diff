@@ -1,0 +1,196 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Scene color texture, depth texture, shadow map, blue noise texture, camera parameters (position, view/projection inverses), light parameters (position, direction, transform), and frame index.
+-*   **Output:** Final color buffer with volumetric light shafts composited over the scene.
++*   **Inputs:** Scene color texture, depth texture, shadow map, blue noise texture, camera parameters (position, view/projection inverses), light parameters (position, direction, transform), and frame index [S1, unofficial].
++*   **Output:** Final color buffer with volumetric light shafts composited over the scene [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -26,11 +26,11 @@
+ 
+ ```python
+-def volumetric_light_shafts(uv: vec2f, depth: f32, frag: vec2u, frame_index: u32, time: f32) -> vec4f:
++def volumetric_light_shafts(uv: vec2, depth: float, frag: vec2, frame_index: int, time: float) -> vec4:
+     # 1. Reconstruct world position
+     clip_z = depth * 2.0 - 1.0
+     ndc = uv * 2.0 - 1.0
+-    clip = vec4f(ndc, clip_z, 1.0)
++    clip = vec4(ndc.x, ndc.y, clip_z, 1.0)
+     world = constants.view_matrix_inverse * constants.projection_inverse * clip
+-    world_position = world.xyz / world.w
++    world_position = vec3(world.x / world.w, world.y / world.w, world.z / world.w)
+ 
+     # 2. Initialize raymarching
+@@ -44,11 +44,11 @@
+     step_count = 16
+     light_intensity = 1.0
+-    accumulated_light = vec3f(0.0)
++    accumulated_light = vec3(0.0, 0.0, 0.0)
+     transmittance = 5.0
+     scene_depth = length(world_position - constants.camera_position)
+ 
+     # 3. Calculate blue noise offset for jittering
+-    blue_noise_uv = (frag.xy / 64.0) + f32(frame_index & 0xFFFF) * 0.61803399f
+-    blue_noise_offset = texture_sample(blue_noise_texture, blue_noise_sampler, blue_noise_uv).r
++    blue_noise_uv = (frag / 64.0) + float(frame_index & 0xFFFF) * 0.61803399
++    blue_noise_offset = texture_sample(blue_noise_texture, blue_noise_sampler, blue_noise_uv).x
+     t = step_size + blue_noise_offset
+ 
+@@ -102,24 +102,24 @@
+ 
+     # 5. Final compositing
+-    scene_color = texture_load(scene_texture, frag, 0).rgb
+-    film_grain = hash2i(vec2i(vec2u(frag) * vec2u(frame_index) * vec2u(49218, 9123))) * grain_intensity - (grain_intensity / 2.0)
++    scene_color = texture_load(scene_texture, frag, 0)
++    film_grain = hash2i(vec2i(vec2(frag) * vec2(frame_index) * vec2(49218, 9123))) * grain_intensity - (grain_intensity / 2.0)
+     final_color = black_and_white(scene_color + accumulated_light) + film_grain
+     
+-    return vec4f(final_color, 1.0)
+-
+-def calculate_shadow(world_position: vec3f) -> f32:
+-    clip = constants.light_transform * vec4f(world_position, 1.0)
+-    ndc = clip.xyz / clip.w
+-    coord = ndc.xy * 0.5 + 0.5
++    return vec4(final_color.x, final_color.y, final_color.z, 1.0)
++
++def calculate_shadow(world_position: vec3) -> float:
++    clip = constants.light_transform * vec4(world_position.x, world_position.y, world_position.z, 1.0)
++    ndc = vec3(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w)
++    coord = vec2(ndc.x * 0.5 + 0.5, ndc.y * 0.5 + 0.5)
+     
+     # Shadow map boundary handling: if UV outside [0,1], point is fully lit
+-    if any(coord > vec2f(1.0)) or any(coord < vec2f(0.0)):
++    if coord.x > 1.0 or coord.x < 0.0 or coord.y > 1.0 or coord.y < 0.0:
+         return 1.0
+     
+-    pixel_location = vec2f(coord.x, 1.0 - coord.y) * vec2f(texture_dimensions(shadow_texture)) * (1023.0 / 1024.0)
+-    shadow_map_depth = texture_load(shadow_texture, vec2u(pixel_location), 0)
++    pixel_location = vec2(coord.x, 1.0 - coord.y) * texture_dimensions(shadow_texture) * (1023.0 / 1024.0)
++    shadow_map_depth = texture_load(shadow_texture, vec2i(pixel_location.x, pixel_location.y), 0)
+     return step(ndc.z, shadow_map_depth)
+ 
+-def sd_cone(p: vec3f, axis_origin: vec3f, axis_dir: vec3f, angle_rad: f32) -> f32:
++def sd_cone(p: vec3, axis_origin: vec3, axis_dir: vec3, angle_rad: float) -> float:
+     p_to_origin = p - axis_origin
+     h = dot(p_to_origin, axis_dir)
+@@ -134,11 +134,11 @@
+         return length(p_to_origin)
+     
+-    boundary_dists = vec2f(dist_to_surface_line, dist_to_apex_plane)
+-    return length(max(boundary_dists, vec2f(0.0))) + min(max(boundary_dists.x, boundary_dists.y), 0.0)
+-
+-def fbm3d(p: vec3f) -> f32:
++    boundary_dists = vec2(dist_to_surface_line, dist_to_apex_plane)
++    return length(max(boundary_dists, vec2(0.0, 0.0))) + min(max(boundary_dists.x, boundary_dists.y), 0.0)
++
++def fbm3d(p: vec3) -> float:
+     value = 0.0
+     amplitude = 0.5
+-    st = p + vec3f(time * 0.25, time * 0.125, 0.0)
++    st = p + vec3(time * 0.25, time * 0.125, 0.0)
+     for i in range(4):
+         value += amplitude * noise3d(st)
+@@ -147,17 +147,17 @@
+     return value
+ 
+-def noise3d(st: vec3f) -> f32:
+-    s = st + vec3f(1234.0)
+-    i0 = vec3i(floor(s))
+-    f = fract(s)
++def noise3d(st: vec3) -> float:
++    s = st + vec3(1234.0)
++    i0 = vec3i(floor(s.x), floor(s.y), floor(s.z))
++    f = vec3(fract(s.x), fract(s.y), fract(s.z))
+     
+     n0 = hash3i(i0)
+-    n1 = hash3i(i0 + vec3i(1,0,0))
+-    n2 = hash3i(i0 + vec3i(0,1,0))
+-    n3 = hash3i(i0 + vec3i(1,1,0))
+-    n4 = hash3i(i0 + vec3i(0,0,1))
+-    n5 = hash3i(i0 + vec3i(1,0,1))
+-    n6 = hash3i(i0 + vec3i(0,1,1))
+-    n7 = hash3i(i0 + vec3i(1,1,1))
++    n1 = hash3i(vec3i(i0.x + 1, i0.y, i0.z))
++    n2 = hash3i(vec3i(i0.x, i0.y + 1, i0.z))
++    n3 = hash3i(vec3i(i0.x + 1, i0.y + 1, i0.z))
++    n4 = hash3i(vec3i(i0.x, i0.y, i0.z + 1))
++    n5 = hash3i(vec3i(i0.x + 1, i0.y, i0.z + 1))
++    n6 = hash3i(vec3i(i0.x, i0.y + 1, i0.z + 1))
++    n7 = hash3i(vec3i(i0.x + 1, i0.y + 1, i0.z + 1))
+     
+     x00 = mix(n0, n1, f.x)
+@@ -170,21 +170,21 @@
+     return mix(y0, y1, f.z)
+ 
+-def hash3i(p: vec3i) -> f32:
+-    ux = u32(p.x)
+-    uy = u32(p.y)
+-    uz = u32(p.z)
+-    return pcg((ux * 0x27d4eb2du + 29u) ^ (uy * 0x165667b1u - 1u) ^ (uz * 0x9e3779b1u + 9u))
+-
+-def pcg(state: u32) -> f32:
++def hash3i(p: vec3i) -> float:
++    ux = int(p.x)
++    uy = int(p.y)
++    uz = int(p.z)
++    return pcg((ux * 0x27d4eb2d + 29) ^ (uy * 0x165667b1 - 1) ^ (uz * 0x9e3779b1 + 9))
++
++def pcg(state: int) -> float:
+     h = pcg_hash_u32(state)
+-    result = f32(h >> 8) * (1.0 / 16777216.0)
++    result = float(h >> 8) * (1.0 / 16777216.0)
+     return result
+ 
+-def pcg_hash_u32(x: u32) -> u32:
+-    state = x * 747796405u + 2891336453u
+-    word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u
+-    return (word >> 22u) ^ word
+-
+-def hg_phase(mu: f32) -> f32:
++def pcg_hash_u32(x: int) -> int:
++    state = x * 747796405 + 2891336453
++    word = ((state >> ((state >> 28) + 4)) ^ state) * 277803737
++    return (word >> 22) ^ word
++
++def hg_phase(mu: float) -> float:
+     g = 0.375
+     gg = g * g
+@@ -193,7 +193,7 @@
+     return scatter
+ 
+-def black_and_white(c: vec3f) -> vec3f:
+-    l = dot(c, vec3f(0.299, 0.587, 0.114))
+-    return vec3f(l)
++def black_and_white(c: vec3) -> vec3:
++    l = dot(c, vec3(0.299, 0.587, 0.114))
++    return vec3(l, l, l)
+ ```
+ 
+@@ -204,15 +204,15 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** O(N * M) where N is the number of pixels and M is the number of raymarch steps (16). Each step involves SDF evaluation, noise sampling, and shadow map lookup.
+-*   **Memory Complexity:** O(1) per pixel for the raymarching state, plus storage for the scene, depth, shadow, and blue noise textures.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Performance scales linearly with resolution and step count. The use of blue noise jittering helps reduce banding artifacts without increasing step count significantly.
+-*   **Strengths:** Real-time post-processing approach; directional light shafts that taper naturally; uses SDF for efficient volume shape definition; noise adds visual detail.
+-*   **Limitations:** Limited to post-processing (cannot interact with dynamic objects not in the scene texture); shadow map resolution limits quality; fixed step count may lead to artifacts in complex scenes; no global illumination.
+-*   **When to use:** Real-time applications requiring volumetric light effects with limited computational resources; when light sources are directional and cone-shaped.
+-*   **When not to use:** When global illumination or complex light interactions are required; when high-quality volumetric scattering is needed beyond simple shafts.
++*   **Time Complexity:** O(N * M) where N is the number of pixels and M is the number of raymarch steps (16) [G]. Each step involves SDF evaluation, noise sampling, and shadow map lookup [G].
++*   **Memory Complexity:** O(1) per pixel for the raymarching state, plus storage for the scene, depth, shadow, and blue noise textures [G].
++*   **Measured Performance:** Not given in the sources [S1, unofficial].
++*   **Scaling:** Performance scales linearly with resolution and step count [G]. The use of blue noise jittering helps reduce banding artifacts without increasing step count significantly [S1, unofficial].
++*   **Strengths:** Real-time post-processing approach; directional light shafts that taper naturally; uses SDF for efficient volume shape definition; noise adds visual detail [S1, unofficial].
++*   **Limitations:** Limited to post-processing (cannot interact with dynamic objects not in the scene texture); shadow map resolution limits quality; fixed step count may lead to artifacts in complex scenes; no global illumination [G].
++*   **When to use:** Real-time applications requiring volumetric light effects with limited computational resources; when light sources are directional and cone-shaped [G].
++*   **When not to use:** When global illumination or complex light interactions are required; when high-quality volumetric scattering is needed beyond simple shafts [G].
+ 
+ ## Background
+-Volumetric Light Shafts (Cone Raymarching) is an implementation based on the WebGPU-Volumetrics-Demo by Ne0nWinds [S1, unofficial]. It demonstrates a modern approach to volumetric lighting using WebGPU, leveraging SDFs and noise for efficient real-time rendering.
++Volumetric Light Shafts (Cone Raymarching) is an implementation based on the WebGPU-Volumetrics-Demo by Ne0nWinds [S1, unofficial]. It demonstrates a modern approach to volumetric lighting using WebGPU, leveraging SDFs and noise for efficient real-time rendering [S1, unofficial].
+ 
+ ## Sources

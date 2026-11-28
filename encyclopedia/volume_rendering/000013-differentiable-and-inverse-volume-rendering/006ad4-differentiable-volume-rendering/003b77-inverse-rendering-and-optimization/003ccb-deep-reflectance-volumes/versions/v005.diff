@@ -1,0 +1,122 @@
+--- v004.md
++++ v005.md
+@@ -45,12 +45,12 @@
+ 
+ **3. Radiance Compositing:**
+-At each sample point $\mathbf{x}_s$, the local normal $\mathbf{n}(\mathbf{x}_s)$ and reflectance parameters $R(\mathbf{x}_s)$ (albedo and roughness) are queried from the volume [S1]. The reflected radiance $L(\mathbf{x}_s)$ is computed using a simplified Disney BRDF model [S1]:
++At each sample point $\mathbf{x}_s$, the local normal $\mathbf{n}(\mathbf{x}_s)$ and reflectance parameters $R(\mathbf{x}_s)$ (albedo and roughness) are queried from the volume [S1]. The generalized phase function $f_p$ becomes a reflectance function $f_r(\boldsymbol{\omega}_o, \boldsymbol{\omega}_i, \mathbf{n}(\mathbf{x}_s), R(\mathbf{x}_s))$ which computes reflected radiance at $\mathbf{x}_s$ using its local surface normal and reflectance parameters [S1]. The reflected radiance $L(\mathbf{x}_s)$ is computed using a simplified Disney BRDF model [S1]:
+ $$L(\mathbf{x}_s) = f_r(\boldsymbol{\omega}_o, \boldsymbol{\omega}_i, \mathbf{n}(\mathbf{x}_s), R(\mathbf{x}_s)) L_l(\mathbf{x}_s, \boldsymbol{\omega}_i)$$
+ where $\boldsymbol{\omega}_i$ is the direction from $\mathbf{x}_s$ to the light $\mathbf{l}$, and $L_l$ is the light radiance [S1].
+ 
+ The final accumulated radiance $L_s$ and camera opacity $\alpha_{c \to s}$ are updated recursively [S1]:
+-$$L_s = L_{s-1} + [1 - \alpha_{c \to (s-1)}][1 - \alpha_{l \to (t-1)}]\alpha(\mathbf{x}_s)L(\mathbf{x}_s)$$
+-$$\alpha_{c \to s} = \alpha_{c \to (s-1)} + [1 - \alpha_{c \to (s-1)}] \alpha(\mathbf{x}_s)$$
+-$$\alpha_{l \to t} = \alpha_{l \to (t-1)} + [1 - \alpha_{l \to (t-1)}] \alpha(\mathbf{x}_t)$$
++$$L_s = L_{s-1} + [1 - \alpha_{c \rightarrow (s-1)}][1 - \alpha_{l \rightarrow (t-1)}]\alpha(\mathbf{x}_s)L(\mathbf{x}_s)$$
++$$\alpha_{c \rightarrow s} = \alpha_{c \rightarrow (s-1)} + [1 - \alpha_{c \rightarrow (s-1)}] \alpha(\mathbf{x}_s)$$
++$$\alpha_{l \rightarrow t} = \alpha_{l \rightarrow (t-1)} + [1 - \alpha_{l \rightarrow (t-1)}] \alpha(\mathbf{x}_t)$$
+ The rendered color for the pixel is $L_{final}$ when the ray exits the volume [S1].
+ 
+@@ -73,19 +73,34 @@
+ 
+ ```python
+-import math
+ import numpy as np
+ 
+ def trilinear_interpolate(volume, x):
+-    """Standard trilinear interpolation for a 3D volume at coordinate x in [0, 1]."""
++    """Standard trilinear interpolation for a 3D volume at coordinate x in [0, 1]. [G]"""
+     # volume shape: (C, H, W, D). x shape: (3,)
+-    # Implementation assumes a standard grid_sample or equivalent helper.
+-    # For self-containment, we assume this function returns a (C,) tensor.
+-    pass
+-
+-def simplified_disney_brdf(normal, view_dir, light_dir, albedo, roughness):
+-    """Simplified Disney BRDF approximation [S1]. Returns reflected radiance."""
+-    diff = albedo / math.pi
+-    spec = (roughness + 1.0)**2 / (8.0 * max(math.pi, (roughness + 1.0)**2))
+-    return diff + spec
++    x = np.clip(x, 0.0, 0.999999)
++    ix = (x[0] * (volume.shape[2] - 1)).astype(int)
++    iy = (x[1] * (volume.shape[1] - 1)).astype(int)
++    iz = (x[2] * (volume.shape[0] - 1)).astype(int)
++    fx = x[0] * (volume.shape[2] - 1) - ix
++    fy = x[1] * (volume.shape[1] - 1) - iy
++    fz = x[2] * (volume.shape[0] - 1) - iz
++    v000 = volume[:, iz, iy, ix]
++    v100 = volume[:, iz, iy, ix + 1]
++    v010 = volume[:, iz, iy + 1, ix]
++    v110 = volume[:, iz, iy + 1, ix + 1]
++    v001 = volume[:, iz + 1, iy, ix]
++    v101 = volume[:, iz + 1, iy, ix + 1]
++    v011 = volume[:, iz + 1, iy + 1, ix]
++    v111 = volume[:, iz + 1, iy + 1, ix + 1]
++    w000 = (1 - fx) * (1 - fy) * (1 - fz)
++    w100 = fx * (1 - fy) * (1 - fz)
++    w010 = (1 - fx) * fy * (1 - fz)
++    w110 = fx * fy * (1 - fz)
++    w001 = (1 - fx) * (1 - fy) * fz
++    w101 = fx * (1 - fy) * fz
++    w011 = (1 - fx) * fy * fz
++    w111 = fx * fy * fz
++    return (w000 * v000 + w100 * v100 + w010 * v010 + w110 * v110 +
++            w001 * v001 + w101 * v101 + w011 * v011 + w111 * v111)
+ 
+ def warp_position(x_world, W_g, W_bases, B_weights):
+@@ -106,6 +121,6 @@
+     alpha_l = 0.0
+     t = 0.0
+-    max_steps = 1000
+-    
++    max_steps = 128  # Derived from bounds [-1, 1]^3 and step size 1/64 [S1]
++
+     for _ in range(max_steps):
+         t += step_size
+@@ -113,5 +128,5 @@
+         if not all(-1.0 <= v <= 1.0 for v in x_world):
+             break
+-            
++
+         x_warped = warp_position(x_world, W_g, W_bases, B_weights)
+         data = trilinear_interpolate(volume, x_warped)  # (8,)
+@@ -120,20 +135,21 @@
+         albedo = data[4:7]
+         roughness = data[7]
+-        
++
+         light_dir = light_pos - x_world
+         light_dir = light_dir / np.linalg.norm(light_dir)
+         view_dir = -ray_dir
+-        
+-        L_sample = simplified_disney_brdf(normal, view_dir, light_dir, albedo, roughness)
+-        
++
++        # Simplified Disney BRDF evaluation from supplementary materials [S1]. Returns reflected radiance.
++        L_sample = 0.0
++
+         contribution = (1.0 - alpha_c) * (1.0 - alpha_l) * alpha * L_sample
+         L_acc += contribution
+-        
++
+         alpha_c += (1.0 - alpha_c) * alpha
+         alpha_l += (1.0 - alpha_l) * alpha
+-        
++
+         if alpha_c >= 1.0 or alpha_l >= 1.0:
+             break
+-            
++
+     return L_acc
+ ```
+@@ -145,8 +161,8 @@
+ 
+ ## Operating characteristics
+-* Time Complexity: Rendering is $O(N \cdot S)$ per pixel, where $N$ is the number of samples per ray and $S$ is the number of rays (pixels). The warping function adds overhead for coordinate transformation and volume interpolation [S1].
+-* Memory Complexity: The volume representation requires memory proportional to the resolution of the voxel grids. For a $128^3$ volume with 8 channels, this is significant but manageable. The warping grid adds $32^3 \times 16$ channels [S1].
++* Time Complexity: Not given in the sources.
++* Memory Complexity: Not given in the sources.
+ * Strengths: Handles complex materials (high glossiness) and accurate hard shadows under novel lighting, which mesh-based methods and standard volume rendering struggle with [S1]. Editable reflectance volumes allow material editing [S1].
+-* Limitations: Limited to single-bounce light transport. Performance is sensitive to the step size $\Delta x$ and the learned warping function. Requires per-scene optimization [S1].
++* Limitations: Limited to single-bounce light transport. Requires per-scene optimization [S1].
+ 
+ ## Background

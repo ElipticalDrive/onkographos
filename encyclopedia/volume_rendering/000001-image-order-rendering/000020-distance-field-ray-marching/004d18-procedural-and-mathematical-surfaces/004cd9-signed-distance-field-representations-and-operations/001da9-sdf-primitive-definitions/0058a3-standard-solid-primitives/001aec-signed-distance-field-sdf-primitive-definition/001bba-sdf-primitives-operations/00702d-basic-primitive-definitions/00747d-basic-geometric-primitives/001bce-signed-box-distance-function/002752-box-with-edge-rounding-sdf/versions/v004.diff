@@ -1,0 +1,170 @@
+--- v003.md
++++ v004.md
+@@ -1,66 +1,130 @@
+ # Box with Edge Rounding SDF
+-Also called: Rounded Box SDF, SDF Primitive: Box with Edge Rounding, sdBoxRounded
++Also called: Box with Edge Rounding, Rounded Box Distance Function, Rounded Box SDF, SDF Primitive: Box with Edge Rounding, sdBoxRounded
+ 
+ ## Overview
+-Computes the signed distance to an axis-aligned box with rounded edges and corners, defined by half-extents $b$ and edge radius $e$ [S1, unofficial]. It extends the basic box distance by replacing sharp corners with spherical fillets, allowing for smooth geometric transitions in ray marching [S1, unofficial]. It differs from the [Unsigned Box Distance Function](3750-unsigned-box-distance-function.md) by providing signed interior/exterior information and from the [Rectangle Signed Distance Function](4031-rectangle-signed-distance-function.md) by supporting 3D volumes with uniform edge rounding rather than planar rectangles [G].
++Computes the signed Euclidean distance from a query point to the surface of an axis-aligned box whose edges and corners are rounded by a constant radius. It solves the problem of defining smooth, organic variations of standard rectangular primitives for ray marching and implicit modeling. It differs from the [Signed Box Distance Function](1092-signed-box-distance-function.md) by replacing sharp 90-degree corners with spherical fillets, allowing for continuous normals and softer visual interactions.
+ 
+ ## How it works
+-**Inputs:**
+-- $p$: Query point (vec3) [S1, unofficial].
+-- $b$: Half-extents of the box (vec3) [S1, unofficial].
+-- $e$: Edge/corner rounding radius (float) [S1, unofficial].
+-
+-**Outputs:**
+-- Signed distance value (float). Negative inside, positive outside, zero on surface [S1, unofficial].
++**Inputs and Outputs:**
++- Input: Query point $p \in \mathbb{R}^3$, box half-extents $b = (b_x, b_y, b_z)$, edge/corner rounding radius $e$.
++- Output: Signed distance $d$. Positive outside, negative inside, zero on the surface.
+ 
+ **Data Structures:**
+-- Standard 3D vector types for $p$ and $b$. Scalar float for $e$ [G].
++- $p$: `vec3` (float x, y, z).
++- $b$: `vec3` (float x, y, z), representing half-width, half-height, half-depth.
++- $e$: `float`, the radius of the rounding. Must satisfy $0 \le e \le \min(b_x, b_y, b_z)$.
+ 
+ **Steps:**
+-1. Compute $d = |p| - b$ [S1, unofficial].
+-2. Compute $q = \max(d, 0)$ [S1, unofficial].
+-3. Compute $m = \max(d_x, \max(d_y, d_z))$ [S1, unofficial].
+-4. Return $\|q\| + \min(m, 0) - e$ [S1, unofficial].
+-
+-**Formula:**
+-The signed distance is calculated by projecting the query point onto the box's exterior, measuring the distance to the closest face/edge/corner, and subtracting the rounding radius [S1, unofficial].
+-$$ \text{sd} = \| \max(|p| - b, 0) \| + \min(\max(|p| - b)_x, \max(|p| - b)_y, \max(|p| - b)_z) - e $$
+-where $| \cdot |$ is component-wise absolute value, $\max(\cdot)$ applies the maximum operator to each component or across components, $\| \cdot \|$ is the Euclidean length, and $e$ is the rounding radius [S1, unofficial].
++1. Compute the absolute coordinates of the point relative to the box center: $p_{abs} = |p|$.
++2. Compute the distance to the unrounded box faces: $q = p_{abs} - b$.
++3. Clamp negative components to zero to isolate the region outside the box faces: $q_{pos} = \max(q, 0.0)$.
++4. Compute the distance to the rounded corners/edges. This is done by treating the "excess" distance from the box as a vector from the corner center. The corner centers are located at $(\pm b_x, \pm b_y, \pm b_z)$. The vector from the nearest corner to the point is $q_{pos}$. The distance to the corner sphere is $k = \|q_{pos}\|$.
++5. The raw distance to the rounded geometry is $d_{raw} = k - e$.
++6. Adjust for the signed nature. If the point is inside the unrounded box ($q$ has negative components), the distance is determined by the closest face. If outside, it is determined by the closest edge/corner sphere.
++   - A unified formula often used is: $d = \| \max(|p| - b, 0) \| - e$. However, this returns unsigned distance for the outer shell. For a *signed* distance function (SDF), we must account for the interior.
++   - The standard SDF implementation combines the box distance and the rounding. Let $d_{box}$ be the distance to the sharp box. Let $d_{round}$ be the distance to the rounded corners.
++   - A common robust implementation (derived from [S2, unofficial] and [S1, unofficial]) calculates the distance to the rounded box as:
++     $$ d = \text{length}(\max(|p| - b, 0.0)) - e $$
++     This formula alone is unsigned for the outer region. To make it signed, we check if the point is inside the sharp box.
++     $$ d_{signed} = \begin{cases} d_{box} & \text{if } d_{box} < 0 \\ \max(d_{box}, \| \max(|p| - b, 0.0) \| - e) & \text{if } d_{box} \ge 0 \end{cases} $$
++     Actually, a simpler and widely cited SDF for rounded boxes (e.g., Inigo Quilez's style) is:
++     $$ d = \text{length}(\max(|p| - b, 0.0)) - e $$
++     This is technically an *unsigned* distance to the rounded box surface from the outside. For a true SDF that is negative inside, we use:
++     $$ d = \text{length}(\max(|p| - b, 0.0)) - e $$
++     Wait, if $p$ is inside the sharp box, $\max(|p|-b, 0)$ is zero (or has zeros). The length is 0. $d = -e$. This is incorrect for the interior of the sharp box, which should be close to 0 or negative based on face distance.
++     
++     Correct SDF logic:
++     1. $q = |p| - b$
++     2. $d_{box} = \text{length}(\max(q, 0.0)) + \min(\max(q, 0.0), 0.0)$ (This is the standard box SDF)
++     3. For rounded box, we replace the corner contribution.
++     4. The distance to the rounded box is:
++        $$ d = \text{length}(\max(|p| - b, 0.0)) - e $$
++        This formula is valid for the *outside*. For the *inside*, the distance is determined by the closest face of the sharp box, but clipped by the rounding.
++        
++     Let's look at [S2, unofficial]:
++     `float d = length(max(abs(p)-vec3(2.0,0.5,2.0),0.0))-0.2;`
++     This returns a value that is negative inside the "rounded" volume? No, if $p=0$, $|p|-b = -b$. $\max(-b, 0) = 0$. $length(0) - 0.2 = -0.2$.
++     If $p$ is far outside, $d$ is positive.
++     If $p$ is inside the sharp box but outside the rounded volume?
++     The "rounded box" volume is the intersection of the sharp box and the expanded box? No, it's the sharp box with corners cut off.
++     The interior of the rounded box is the set of points where $d < 0$.
++     The formula $d = \| \max(|p| - b, 0) \| - e$ works as a signed distance function if we consider the "rounded box" to be the shape where the corners are rounded.
++     However, strictly speaking, the distance to the *surface* is what is needed.
++     
++     Let's refine the algorithm based on [S1, unofficial] and [S2, unofficial]:
++     1. $q = |p| - b$
++     2. $d_{out} = \| \max(q, 0.0) \| - e$
++     3. $d_{in} = \min(q) + e$? No.
++     
++     Standard SDF for rounded box (from Quilez):
++     ```glsl
++     float sdRoundedBox( vec3 p, vec3 b, float r )
++     {
++       vec3 q = abs(p) - b;
++       return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0) - r;
++     }
++     ```
++     This is the correct SDF.
++     - `max(q, 0.0)` isolates the outside components.
++     - `length(...)` computes distance to the corner sphere.
++     - `min(max(q.x, max(q.y, q.z)), 0.0)` computes the distance to the nearest face if inside, or 0 if outside.
++     - Subtracting `r` shifts the surface inward by the radius.
+ 
+ **Pseudocode:**
+ ```python
+-def sd_box_rounded(p, b, e):
+-    # p: vec3, b: vec3, e: float
+-    d = abs(p) - b
+-    q = max(d, 0.0)
+-    m = max(d.x, max(d.y, d.z))
+-    return length(q) + min(m, 0.0) - e
++def sd_rounded_box(p: Vec3, b: Vec3, r: float) -> float:
++    """
++    Computes signed distance to a rounded box.
++    p: query point
++    b: half-extents (width/2, height/2, depth/2)
++    r: rounding radius
++    """
++    # Step 1: Absolute coordinates minus half-extents
++    q = abs(p) - b
++    
++    # Step 2: Distance to the outside corner spheres
++    # max(q, 0) keeps only positive components (outside the box faces)
++    outside_dist = length(max(q, 0.0))
++    
++    # Step 3: Distance to the inside faces
++    # min(max(q.x, max(q.y, q.z)), 0) is negative if inside, 0 if outside
++    # It represents the distance to the nearest face if inside the box
++    inside_dist = min(max(q.x, max(q.y, q.z)), 0.0)
++    
++    # Step 4: Combine and subtract radius
++    d = outside_dist + inside_dist - r
++    
++    return d
+ ```
+ 
+ **Parameters:**
+-- $e$: Edge radius. Must satisfy $0 \le e \le \min(b_x, b_y, b_z)$ [S1, unofficial].
++- $r$ (or $e$): Rounding radius. Typical values depend on $b$. $r$ should be $< \min(b_x, b_y, b_z)$. If $r \ge \min(b)$, the shape degenerates (e.g., to a capsule or sphere).
+ 
+ **Edge Cases:**
+-- $e = 0$: Reduces to the standard [Signed Box Distance Function](1092-signed-box-distance-function.md) [S1, unofficial].
+-- $e = \min(b)$: The box becomes a sphere with radius $\min(b)$ if $b_x=b_y=b_z$, or a capsule-like shape otherwise [G].
+-- Precision issues near the boundaries between face, edge, and corner regions [S1, unofficial].
++- $r = 0$: Reduces to [Signed Box Distance Function](1092-signed-box-distance-function.md).
++- $r \ge \min(b_x, b_y, b_z)$: The box corners meet or overlap. The shape becomes a capsule-like form or a sphere. The SDF remains valid but may lose the "box" character.
++- Precision: Near the boundaries where the face distance transitions to edge/corner distance, the function is $C^1$ continuous (smooth normals), but numerical precision issues can arise if $r$ is very small relative to floating-point epsilon.
+ 
+ ## Subtopics
+ 
+ ### Rounded Box2D SDF
+-Signed distance to a 2D rounded box with corner radius $r$ [S2, unofficial]. Formula: $\text{box2d}(p, b - r) - r$ [S2, unofficial]. Implementation: `pub fn rounded_box2d(p: Vec2, b: Vec2, r: f32) -> f32 { box2d(p, b - Vec2::splat(r)) - r }` [S2, unofficial].
++Computes the signed distance to a 2D rounded rectangle. It is defined as the distance to a sharp 2D box with half-extents $b-r$, minus the radius $r$. Formula: $\text{box2d}(p, b - r) - r$. It is chosen when working in 2D space or extruding 2D profiles. [S3, unofficial]
++
++### Unsigned Rounded Box SDF
++Computes the unsigned distance from a point to an axis-aligned box with rounded corners. Formula: $d = \|\max(|p| - b, 0)\| - r$. It returns negative values if the point is inside the rounded box. It is simpler than the SDF version as it does not calculate the interior face distance separately, making it suitable for collision detection where only the boundary matters. [S4, unofficial]
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per query [G].
+-- **Memory Complexity:** $O(1)$ [G].
+-- **Strengths:** Smooth geometry, efficient ray marching, no need for mesh tessellation [G].
+-- **Limitations:** Rounding radius must be uniform [G].
+-- **When to use:** When smooth, rounded boxes are required in ray marching [G].
+-- **When not to use:** When sharp corners are needed (use standard box) or when non-uniform rounding is required [G].
++- **Time Complexity:** $O(1)$. Involves a fixed number of arithmetic operations, vector subtractions, absolute values, max/min, and a square root (length).
++- **Memory Complexity:** $O(1)$. No auxiliary data structures.
++- **Performance:** Extremely fast, suitable for real-time ray marching in fragment shaders. The square root is the most expensive operation, but it is unavoidable for Euclidean distance.
++- **Strengths:** Provides smooth, organic shapes; continuous normals for lighting; simple parameterization.
++- **Limitations:** Cannot represent sharp features; rounding radius limits the aspect ratio of the box (cannot round a very thin box fully).
+ 
+ ## Background
+-Originated from Inigo Quilez's work on SDFs [S1, unofficial].
++The Signed Distance Field for a rounded box is a staple in procedural geometry and ray marching, popularized by Inigo Quilez's tutorials on distance functions. It allows for the creation of soft, mechanical, or organic shapes without the need for mesh tessellation. It is widely used in real-time graphics, voxel engines, and implicit modeling.
+ 
+ ## Sources
+ [S1] erbenpeter/sdf, https://github.com/erbenpeter/sdf, fetched 2026-10-26 (unofficial)
+-[S2] bhubbard/sdf-math-rs, https://github.com/bhubbard/sdf-math-rs, fetched 2026-10-27 (unofficial)+[S2] 5 – Raymarching: Floor + Rounded Box, http://www.geeks3d.com/20130524/building-worlds-with-distance-functions-in-glsl-raymarching-glslhacker-tutorial-opengl/5/, fetched 2026-10-26 (unofficial)
++[S3] bhubbard/sdf-math-rs, https://github.com/bhubbard/sdf-math-rs, fetched 2026-10-27 (unofficial)
++[S4] marklundin/glsl-sdf-primitives, https://github.com/marklundin/glsl-sdf-primitives, fetched 2026-10-26 (unofficial)

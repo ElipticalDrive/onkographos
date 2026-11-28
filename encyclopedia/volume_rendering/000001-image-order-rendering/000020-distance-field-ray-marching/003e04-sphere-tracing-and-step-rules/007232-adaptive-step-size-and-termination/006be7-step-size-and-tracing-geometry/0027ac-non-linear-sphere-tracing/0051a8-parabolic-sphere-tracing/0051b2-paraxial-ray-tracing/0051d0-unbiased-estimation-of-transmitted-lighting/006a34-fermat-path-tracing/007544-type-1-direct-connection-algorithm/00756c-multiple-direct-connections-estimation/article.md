@@ -1,0 +1,102 @@
+# Multiple direct connections estimation
+
+Also called: Unbiased multiple direct connections
+
+## Overview
+Multiple direct connections estimation is an unbiased Monte Carlo technique for computing the total throughput when multiple stationary refractive paths exist between two points in a heterogeneous medium [S1]. It extends the Type-1 Direct Connection Algorithm by estimating the inverse probability of sampling each stationary path, ensuring that the sum of contributions from all possible paths is correctly accounted for without bias [S1]. Unlike biased estimators that assume a single dominant path, this method handles path multiplicity by resampling initial velocities until a new distinct path is found or convergence fails [S1].
+
+## How it works
+**Inputs:**
+*   Start vertex $\mathbf{x}$ inside the medium.
+*   End vertex $\mathbf{y}$ on the medium boundary (defined by implicit surface $g(\cdot)=0$).
+*   Refractive index $n(\mathbf{x})$ and its gradient $\nabla n(\mathbf{x})$ at the current position.
+*   Boundary gradient $\nabla g(\mathbf{x})$ (used for boundary constraints in the BVP solver) [S1].
+*   Convergence threshold $\epsilon$ [S1].
+
+**Outputs:**
+*   Total throughput estimate $\tau$ [S1].
+*   The specific stationary path $\mathbf{p}$ found in the final iteration (used for the throughput calculation) [S1].
+
+**Data Structures:**
+*   $\mathbf{v}$: Current initial velocity vector.
+*   $\mathbf{p}$: Current stationary path solution.
+*   $1/p(\mathbf{p})$: Inverse probability accumulator, initialized to 1.
+
+**Steps:**
+1.  **Initialization:** Sample an initial velocity $\mathbf{v}$ uniformly from the unit sphere: $\mathbf{v} \sim \text{Unif(sphere)}$ [S1].
+2.  **First BVP Solve:** Solve the Boundary Value Problem (BVP) to find the stationary path $\mathbf{p}$ corresponding to $\mathbf{v}$ using Gradient Descent:
+    $$ \mathbf{p} = \text{Gradient Descent}(\text{ray}(\mathbf{x}, \mathbf{v}), \mathbf{y}, n, \nabla n, \nabla g) $$
+    The derivatives $\partial \mathbf{x}_{s^*} / \partial \mathbf{v}_0$ required for the gradient descent are computed via symplectic integration parallel to ray tracing [S1].
+3.  **Initialize Estimator:** Set the inverse probability accumulator: $1/p(\mathbf{p}) = 1$ [S1].
+4.  **Resampling Loop:**
+    a. Sample a new initial velocity $\mathbf{v}_{new} \sim \text{Unif(sphere)}$ [S1].
+    b. Solve the BVP to get a new path $\mathbf{p}^*$:
+       $$ \mathbf{p}^* = \text{Gradient Descent}(\text{ray}(\mathbf{x}, \mathbf{v}_{new}), \mathbf{y}, n, \nabla n, \nabla g) $$
+    c. **Convergence Check:** If $\|\mathbf{p}^* - \mathbf{p}\| < \epsilon$, break the loop [S1].
+    d. **Update Estimator:** If the paths are distinct, increment the inverse probability:
+       $$ 1/p(\mathbf{p}) = 1/p(\mathbf{p}) + 1 $$
+    e. Update current path: $\mathbf{p} \leftarrow \mathbf{p}^*$ (Note: The source algorithm description implies we continue searching for *other* paths, but the accumulator tracks the probability of the *currently selected* path $\mathbf{p}$ being one of the $k$ found. The text states "increment $1/p(\mathbf{p})$" which effectively counts the number of iterations required to find a *new* path or fail. The final throughput uses the $\mathbf{p}$ found in the last successful iteration or the initial one if the loop breaks immediately) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multiple_direct_connections(x, y, n, grad_n, grad_g, epsilon):
+    # 1. Initialization
+    v = sample_uniform_sphere()
+    
+    # 2. First BVP Solve
+    # ray(x, v) generates the initial ray trajectory
+    # Gradient Descent solves for the stationary path satisfying boundary conditions
+    p = gradient_descent_bvp(ray(x, v), y, n, grad_n, grad_g)
+    
+    # 3. Initialize inverse probability estimator
+    inv_prob = 1.0
+    
+    # 4. Loop
+    while True:
+        # Sample new initial velocity
+        v_new = sample_uniform_sphere()
+        
+        # Solve BVP for new path
+        p_star = gradient_descent_bvp(ray(x, v_new), y, n, grad_n, grad_g)
+        
+        # Check for convergence to current path
+        if norm(p_star - p) < epsilon:
+            break
+            
+        # Increment inverse probability for the current path p
+        # This effectively estimates 1/p(p) where p(p) is the probability 
+        # of sampling the specific stationary path p
+        inv_prob += 1.0
+        
+        # Update p to the newly found path for next iteration comparison
+        p = p_star
+        
+    # Return the throughput estimate and the path
+    # The actual throughput calculation uses inv_prob to weight the path contribution
+    return inv_prob, p
+```
+
+**Parameters:**
+*   $\epsilon$: Convergence threshold for path similarity. Controls the neighborhood size for identifying distinct paths [S1].
+*   Number of samples $N$: In practice, $N > 1$ is recommended to mitigate the impact of non-converging BVP solvers [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Non-convergence:** If the BVP solver fails to converge for an initialization, it is treated as a virtual null path $\mathbf{p}_\emptyset$ with throughput $\tau(\mathbf{p}_\emptyset) \equiv 0$ [S1]. The algorithm correctly estimates the inverse probability for this null path, maintaining unbiasedness [S1]. If $N=1$, non-convergence results in zero contribution, wasting computation. Using $N > 1$ or Russian roulette avoids this [S1]. In experiments, fewer than 1.5% of initializations failed to converge [S1].
+*   **Infinitely Many Paths:** In pathological cases (e.g., rotationally-symmetric refractive fields like a Maxwell lens), there may be infinitely many stationary paths. The inverse probability estimation introduces a small bias controlled by $\epsilon$, effectively computing the integral of $p(\mathbf{p})$ in a neighborhood around $\mathbf{p}$ rather than the exact probability [S1]. These cases are rare and non-generic [S1].
+*   **Single Path:** If only one stationary path exists, the loop breaks immediately after the first iteration (since any new sample will converge to the same path within $\epsilon$), resulting in $p(\mathbf{p})=1$. This makes the unbiased estimator equivalent to the biased estimator but twice as slow [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The cost is dominated by the BVP solver (Gradient Descent) calls. In the single-path case, it requires 2 BVP solves (one initial, one for the break condition). In the multi-path case, it requires $k+1$ solves for $k$ distinct paths found. The biased estimator (skipping the inverse probability loop) requires only 1 BVP solve and is twice as fast in single-path scenarios [S1].
+*   **Memory Complexity:** Low. Requires storing the current path, velocity, and accumulator. No large data structures are needed beyond those used by the BVP solver [S1].
+*   **Strengths:** Unbiased estimation of total throughput in heterogeneous media with multiple stationary paths. Handles non-convergence gracefully [S1].
+*   **Limitations:** Slower than biased estimators when only one path exists. Performance degrades if many distinct stationary paths exist, requiring many BVP solves. Pathological cases with infinite paths introduce small bias [S1].
+*   **When to use:** When unbiasedness is critical and multiple stationary paths are expected or possible.
+*   **When not to use:** When performance is paramount and single-path dominance is guaranteed (use biased estimator). When pathological symmetric media are present and strict unbiasedness is required (bias is introduced) [S1].
+
+## Background
+The method is presented in the context of path tracing estimators for refractive radiative transfer, specifically extending the Type-1 Direct Connection Algorithm [S1]. It addresses the difficulty of computing all stationary paths between two points in a heterogeneous medium, which is effectively impossible due to the infinite space of initial velocities [S1]. The technique relies on the BVP solver using gradient descent and symplectic integration for derivative computation [S1]. It references Zeltner et al. [2020] for further details on the underlying theory [S1]. The problem of infinitely many stationary paths is noted in the context of rotationally-symmetric fields, citing examples like the Maxwell lens [S1].
+
+## Sources
+[S1] Path tracing estimators for refractive radiative transfer, https://doi.org/10.1145/3414685.3417793, fetched 2026-10-29

@@ -1,0 +1,164 @@
+--- v006.md
++++ v007.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-This method augments 2D Gaussian primitives with spatially varying texture maps to capture high-frequency appearance details that fixed spherical harmonics cannot represent [S1]. It distinguishes itself from sibling methods by dynamically allocating texture resolution based on local image content and error, avoiding the convergence issues associated with cloning-based densification [S1]. Unlike [GSTex](12924-gstex.md) which uses a fixed texel budget on pretrained primitives, this approach optimizes primitives and textures from scratch, and unlike [BBSplat](14740-color-and-appearance-modeling.md) which uses a fixed texel-to-primitive ratio, it adapts texel size to scene frequency [S1].
++This method augments 2D Gaussian primitives with spatially varying texture maps to capture high-frequency appearance details that fixed spherical harmonics cannot represent [S1]. It distinguishes itself from sibling methods by dynamically allocating texture resolution based on local image content and error, avoiding the convergence issues associated with cloning-based densification [S1]. Unlike GSTex which uses a fixed texel budget on pretrained primitives, this approach optimizes primitives and textures from scratch, and unlike BBSplat which uses a fixed texel-to-primitive ratio, it adapts texel size to scene frequency [S1].
+ 
+ ## How it works
+-**Inputs:** A set of 2D Gaussian primitives $\{G_i\}$, each defined by mean $\boldsymbol{\mu}_i$, scale $\boldsymbol{\sigma}_i$, rotation $\mathbf{R}_i$, opacity $\alpha_i$, and spherical harmonic coefficients for color $\mathbf{c}_{SH}$. Input views $\Pi$ with ground truth images.
+-**Outputs:** Optimized primitives with dynamic texture maps $T_i$ and parameters.
++**Inputs:** A set of 2D Gaussian primitives $\{G_i\}$, each defined by mean $\boldsymbol{\mu}_i$, scale $\boldsymbol{\sigma}_i$, rotation $\mathbf{R}_i$, opacity $\alpha_i$, and spherical harmonic coefficients for color $\mathbf{c}_{SH}$ [S1]. Input views $\Pi$ with ground truth images [S1].
++**Outputs:** Optimized primitives with dynamic texture maps $T_i$ and parameters [S1].
+ 
+ **Data Structures:**
+@@ -14,4 +14,5 @@
+     *   2DGS base: 3 (pos) + 2 (scale) + 4 (rot) + 1 (opacity) + 48 (SH color) = 58 params [S1].
+     *   Additional: 1 float for texel size ratio $t2pr_i$ [S1].
++    *   Each parameter is saved as a 4-byte float [S1].
+ *   **Texture Map $T_i$:** Stored in a custom "jagged" tensor structure to handle varying resolutions [S1].
+     *   Format: RGB offsets. 3 floats per texel [S1].
+@@ -26,5 +27,5 @@
+ The color of a ray $\mathbf{r}$ is computed by alpha blending [S1]:
+ $$ C(\mathbf{r}) = \sum_i w_i(p_i) c_i(\mathbf{d}) = \sum_i T_i o_i G_i(p_i) c_i(\mathbf{d}) $$
+-where $T_i = \prod_{j<i} (1 - o_j G_j(p_j))$ is the transmittance, $G_i(p_i) = \exp(-\frac{1}{2} p_i^\top p_i)$ is the Gaussian density in canonical space, and $c_i(\mathbf{d})$ is the primitive color [S1].
++where $T_i = \prod_{j<i} (1 - o_j G_j(p_j))$ is the transmittance, $G_i(p_i) = \exp(-\frac{1}{2} p_c^\top p_c)$ is the Gaussian density evaluated in canonical space, and $c_i(\mathbf{d})$ is the primitive color [S1].
+ 
+ The primitive color combines spherical harmonics and texture offset [S1]:
+@@ -80,10 +81,7 @@
+ 
+ ```python
+-def render_ray(ray_origin, ray_direction, primitives, t2pr_threshold=2.0):
+-    """
+-    Renders a single ray using content-aware textured 2D Gaussians.
+-    """
++def render_ray(ray_origin, ray_direction, primitives):
+     # 1. Sort primitives by depth along ray
+-    sorted_prims = sort_primitives_by_depth(primitives, ray_origin, ray_direction)
++    sorted_prims = sorted(primitives, key=lambda p: dot(p.mu - ray_origin, ray_direction))
+     
+     accumulated_transmittance = 1.0
+@@ -91,27 +89,23 @@
+     
+     for prim in sorted_prims:
+-        # 2. Compute intersection in camera space
+-        # Note: Implementation uses Eq 1 directly in camera space, not R2->R2 transform
+-        intersection = compute_intersection_2d_gaussian(prim, ray_origin, ray_direction)
+-        
++        # 2. Compute intersection in camera space (Eq. 1 in camera space)
++        intersection = compute_2d_gaussian_intersection(prim, ray_origin, ray_direction)
+         if intersection is None:
+             continue
+             
+         p_w = intersection.point
+-        p_l = transform_to_local_space(p_w, prim.mu, prim.R)
++        p_l = mat_mul_inv(prim.R, p_w - prim.mu)
+         
+-        # 3. Compute Gaussian weight
+-        p_c = transform_to_canonical_space(p_l, prim.sigma)
++        # 3. Compute Gaussian weight in canonical space
++        p_c = mat_mul_inv(prim.S, p_l)
+         gaussian_weight = exp(-0.5 * dot(p_c, p_c))
+         
+         # 4. Compute color
+-        # SH color
+-        sh_color = evaluate_spherical_harmonics(prim.sh_coeffs, ray_direction)
++        sh_color = evaluate_sh(prim.sh_coeffs, ray_direction)
+         
+         # Texture offset
+-        # k_i is texel size in world space units
+         k_i = prim.k_min * prim.t2pr
+         u = (p_l / k_i) + prim.t_offset
+-        texel_offset = bilerp(prim.texture_map, u)
++        texel_offset = bilinear_interpolate(prim.texture_map, u)
+         
+         c_i = sh_color + texel_offset
+@@ -129,8 +123,4 @@
+ 
+ def manage_primitives(primitives, error_images, views, tau_ds=0.01, tau_tr=128):
+-    """
+-    Adjusts texture resolution and splits primitives based on error.
+-    """
+-    # 1. Compute per-primitive error
+     errors = []
+     for prim in primitives:
+@@ -138,5 +128,4 @@
+         total_weight = 0.0
+         for view in views:
+-            # Compute weighted error for this view
+             view_error = 0.0
+             view_weight = 0.0
+@@ -149,43 +138,58 @@
+             total_weight += view_weight
+         
+-        if total_weight > 0:
+-            avg_error = prim_error / total_weight
+-        else:
+-            avg_error = 0.0
++        avg_error = prim_error / total_weight if total_weight > 0 else 0.0
+         errors.append((prim, avg_error))
+     
+-    # 2. Sort by error
+     errors.sort(key=lambda x: x[1], reverse=True)
+     top_10_percent = errors[:len(errors)//10]
+     
+-    # 3. Upscale high error primitives
+     for prim, err in top_10_percent:
+-        if prim.t2pr >= t2pr_threshold:
++        if prim.t2pr >= 2.0:
+             prim.t2pr /= 2.0
+             
+-    # 4. Downscale low error primitives
+     for prim in primitives:
+-        # Compute E_d (appearance error)
+         E_d = compute_appearance_error(prim)
+         if E_d < tau_ds:
+             prim.t2pr *= 2.0
+             
+-    # 5. Split primitives with high error and high texture resolution
+     for prim, err in top_10_percent:
+         if prim.t2pr > tau_tr:
+             split_primitive(prim)
++
++def compute_2d_gaussian_intersection(prim, ray_origin, ray_direction):
++    # Computes intersection using Eq. 1 directly in camera space as per implementation [S1]
++    # Returns point p_w or None
++    pass
++
++def evaluate_sh(coeffs, direction):
++    # Standard spherical harmonic evaluation
++    pass
++
++def bilinear_interpolate(tex_map, uv):
++    # Standard bilinear interpolation
++    pass
++
++def compute_appearance_error(prim):
++    # Computes E_d = sum(G(p)*(T_orig - T_lowpass)) / sum(G(p)) [S1]
++    pass
++
++def split_primitive(prim):
++    # Creates two new primitives displaced by +/- 1 std dev along axis
++    # Half scale, half texture resolution, G(1) opacity
++    # Texture initialized by sampling original point [S1]
++    pass
+ ```
+ 
+ ## Operating characteristics
+-*   **Complexity:** Training is 1.5-2x slower and rendering is 25% slower compared to [2DGS](9910-inverse-multiquadric-splatting.md) due to per-ray texture querying overhead [S1].
+-*   **Memory:** Uses a "jagged" tensor structure for textures. Total parameters depend on dynamic texel allocation.
++*   **Complexity:** Training is 1.5-2x slower and rendering is 25% slower compared to 2DGS due to per-ray texture querying overhead [S1].
++*   **Memory:** Uses a "jagged" tensor structure for textures. Total parameters depend on dynamic texel allocation [S1].
+ *   **Performance (DeepBlending):** SSIM 0.907, PSNR 30.03, LPIPS 0.303, 222K points, 21.6M texels, 78.1M params, 70 FPS [S1].
+ *   **Performance (Mip-Nerf-360):** SSIM 0.795, PSNR 27.00, LPIPS 0.263, 218K points, 46.6M texels, 152.6M params, 67 FPS [S1].
+ *   **Performance (Tanks&Temples):** SSIM 0.835, PSNR 23.43, LPIPS 0.225, 164K points, 10.4M texels, 41.1M params, 121 FPS [S1].
+-*   **Strengths:** Significantly fewer parameters than [GSTex](12924-gstex.md) and [BBSplat](14740-color-and-appearance-modeling.md) while achieving competitive or superior quality [S1]. Adapts to scene content frequency [S1].
++*   **Strengths:** Significantly fewer parameters than GSTex and BBSplat while achieving competitive or superior quality [S1]. Adapts to scene content frequency [S1].
+ *   **Limitations:** Slower training and rendering than base 2DGS [S1]. Cloning-based densification is incompatible [S1].
+ 
+ ## Background
+-The method was introduced by Papantonakis, Kopanas, Durand, and Drettakis in 2025 [S1]. It builds on the 2D Gaussian Splatting representation [S1]. It addresses the limitation of fixed spherical harmonics in capturing high-frequency details and the inefficiency of fixed texel budgets in methods like [GSTex](12924-gstex.md) [S1].
++The method was introduced by Papantonakis, Kopanas, Durand, and Drettakis in 2025 [S1]. It builds on the 2D Gaussian Splatting representation [S1]. It addresses the limitation of fixed spherical harmonics in capturing high-frequency details and the inefficiency of fixed texel budgets in methods like GSTex [S1].
+ 
+ ## Sources

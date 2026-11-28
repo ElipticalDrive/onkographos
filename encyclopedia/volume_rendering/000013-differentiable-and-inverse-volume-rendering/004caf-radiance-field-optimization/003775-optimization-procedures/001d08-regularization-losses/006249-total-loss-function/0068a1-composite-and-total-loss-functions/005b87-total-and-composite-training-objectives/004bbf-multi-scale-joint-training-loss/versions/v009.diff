@@ -1,0 +1,148 @@
+--- v008.md
++++ v009.md
+@@ -4,57 +4,108 @@
+ 
+ ## Overview
+-Multi-scale Joint Training Loss is a composite objective function used in radiance-field optimization to balance low-frequency structural consistency with high-frequency detail fidelity across multiple network stages or resolution levels [S1, S2]. It sets itself apart from single-scale losses by explicitly weighting contributions from coarse and fine outputs (or different network stages) to prevent the optimization from overfitting to noise while preserving global appearance [S1, S2].
++The Multi-scale Joint Training Loss is a composite objective function designed for multi-stage or multi-resolution radiance field optimization, specifically balancing low-frequency structural consistency with high-frequency detail fidelity [S2]. It addresses the problem of refining coarse reconstructions by ensuring that the optimization process preserves global appearance while enhancing local texture and edge sharpness [S2]. Unlike single-scale losses, it explicitly weights contributions from different resolution stages or coarse/fine network outputs to prevent overfitting to noise while maintaining geometric coherence [S1, S2].
+ 
+ ## How it works
++The method operates in two primary formulations depending on the specific architecture (multi-stage growth vs. coarse-fine refinement). Both formulations adhere to the parent's principle of a weighted sum of component losses [Parent].
++
+ ### Inputs and Outputs
+-*   **Inputs**: Rendered images or volumes from multiple stages/resolutions ($\hat{I}_i$ or $\hat{V}_i$), ground truth images ($I$), and model parameters ($\theta$).
+-*   **Outputs**: A scalar total loss value $L_{tot}$ for backpropagation.
++*   **Inputs**: Ground truth images $I$, rendered images $\hat{I}$ from multiple stages or resolutions, network parameters $\theta$, and hyperparameters $\alpha, \beta_1, \beta_2$.
++*   **Outputs**: A scalar total loss value $L_{tot}$ used for backpropagation.
+ 
+ ### Data Structures
+-*   **Stage Outputs**: In recursive or growing networks, intermediate outputs are stored for each stage $i \in \{1, \dots, D\}$ [S1].
+-*   **Coarse/Fine Outputs**: In joint coarse-fine schemes, two distinct image representations are maintained [S2].
++No specific complex data structures are required beyond standard image tensors and scalar weights. The method relies on the output of intermediate network layers or stages.
+ 
+-### Formulas
+-The specific formulation depends on the underlying architecture:
++### Formulas and Steps
+ 
+-1.  **Multi-Stage Recursive Loss (Recursive-NeRF)**:
+-    For a network with $D$ stages, the loss sums the Mean Squared Error (MSE) and uncertainty losses from all stages [S1]:
++#### Formulation 1: Multi-Stage Growth (Recursive-NeRF)
++Used when the network grows dynamically through stages [S1].
++
++1.  **Compute Stage Losses**: For each stage $i$ from $1$ to $D$ (where $D$ is the current number of stages):
++    *   Calculate the Mean Squared Error loss $\mathcal{L}_{MSE}^i$ between the rendered image and ground truth.
++    *   Calculate the uncertainty loss $\mathcal{L}_{unct}^i$ associated with the output of layer $i$.
++2.  **Aggregate Loss**: Compute the total loss using the weighted sum:
+     $$ \mathcal{L} = \sum_{i=1}^D \left( \beta_1 \mathcal{L}_{MSE}^i + \beta_2 \mathcal{L}_{unct}^i \right) $$
+-    Where $\mathcal{L}_{MSE}^i$ is the MSE loss at stage $i$, $\mathcal{L}_{unct}^i$ is the uncertainty loss at stage $i$, and $\beta_1, \beta_2$ are weights [S1].
++    *   $\beta_1 = 1.0$
++    *   $\beta_2 = 0.1$ [S1]
+ 
+-2.  **Coarse-Fine Joint Loss (Denoise-GS)**:
+-    For a two-stage refinement process, the loss balances low-frequency agreement and high-frequency fidelity [S2]:
++#### Formulation 2: Coarse-Fine Refinement (Denoise-GS)
++Used in a second training round to refine denoised inputs [S2].
++
++1.  **Define Components**:
++    *   $L_{coarse}(\theta)$: Low-frequency consistency term. This compares the input and output after smoothing, focusing on tone and large-scale structure to prevent damage to global appearance [S2].
++    *   $L_{fine}(\theta)$: Detail consistency term. This consists of:
++        *   Pixel-level robust distance (suppresses outlier noise) [S2].
++        *   Structural Similarity (SSIM) term (aligns textures and contours) [S2].
++        *   Gradient consistency term (matches edge direction and strength) [S2].
++        *   Chroma consistency term (reduces color shifts) [S2].
++2.  **Compute Joint Loss**:
+     $$ L(\theta) = \alpha L_{coarse}(\theta) + (1-\alpha) L_{fine}(\theta) $$
+-    Where $\alpha \in [0, 1]$ controls the trade-off [S2].
+-    *   $L_{coarse}$: Low-frequency consistency term comparing smoothed input and output to preserve tone and large-scale structure [S2].
+-    *   $L_{fine}$: Detail consistency term comprising pixel-level robust distance, structural similarity (SSIM), gradient consistency, and chroma consistency [S2].
++    *   $\alpha \in [0, 1]$ is a hyperparameter balancing coarse and fine contributions [S2].
+ 
+-### Parameters and Typical Values
+-*   **$\beta_1$**: Weight for MSE loss in multi-stage training. Value: $1.0$ [S1].
+-*   **$\beta_2$**: Weight for uncertainty loss in multi-stage training. Value: $0.1$ [S1].
+-*   **$\alpha$**: Weight for coarse loss in joint coarse-fine training. Range: $[0, 1]$ [S2].
+-*   **$D$**: Number of stages or network growth iterations [S1].
++### Pseudocode
++```python
++def multi_scale_joint_loss(rendered_images, ground_truth_images, uncertainty_maps, 
++                           stages, alpha, beta1=1.0, beta2=0.1, mode='recursive'):
++    """
++    Computes the multi-scale joint training loss.
++    
++    Args:
++        rendered_images: List of rendered images for each stage/resolution.
++        ground_truth_images: List of ground truth images corresponding to stages.
++        uncertainty_maps: List of uncertainty maps for each stage (used in recursive mode).
++        stages: Integer D, the current number of stages.
++        alpha: Float, weight for coarse loss in coarse-fine mode.
++        beta1: Float, weight for MSE loss (default 1.0).
++        beta2: Float, weight for uncertainty loss (default 0.1).
++        mode: String, 'recursive' for multi-stage growth, 'coarse_fine' for refinement.
++        
++    Returns:
++        Scalar total loss.
++    """
++    total_loss = 0.0
++    
++    if mode == 'recursive':
++        # Formulation 1: Sum over all stages
++        for i in range(stages):
++            # Compute MSE loss for stage i
++            mse_loss = mean_squared_error(rendered_images[i], ground_truth_images[i])
++            
++            # Compute uncertainty loss for stage i
++            # Note: Specific definition of uncertainty loss depends on the network's 
++            # uncertainty head, typically involving the variance predicted by the network.
++            unct_loss = compute_uncertainty_loss(uncertainty_maps[i])
++            
++            # Weighted sum for this stage
++            stage_loss = beta1 * mse_loss + beta2 * unct_loss
++            total_loss += stage_loss
++            
++    elif mode == 'coarse_fine':
++        # Formulation 2: Coarse-Fine balance
++        # L_coarse: Low-frequency consistency (e.g., MSE on smoothed images)
++        coarse_loss = compute_low_frequency_loss(rendered_images, ground_truth_images)
++        
++        # L_fine: Detail consistency (SSIM + Gradient + Chroma + Robust Distance)
++        fine_loss = compute_detail_consistency_loss(rendered_images, ground_truth_images)
++        
++        # Weighted combination
++        total_loss = alpha * coarse_loss + (1 - alpha) * fine_loss
++        
++    return total_loss
++```
+ 
+-### Numbered Steps
+-1.  **Render Multi-Scale Outputs**: Compute rendered images/volumes for all active stages or resolutions ($\hat{I}_1, \dots, \hat{I}_D$) [S1].
+-2.  **Compute Stage Losses**: For each stage $i$, calculate $\mathcal{L}_{MSE}^i$ and $\mathcal{L}_{unct}^i$ [S1].
+-3.  **Aggregate Multi-Stage Loss**: Sum the weighted stage losses using $\beta_1$ and $\beta_2$ [S1].
+-4.  **Compute Coarse/Fine Terms**: If using joint coarse-fine, calculate $L_{coarse}$ (low-frequency) and $L_{fine}$ (high-frequency components) [S2].
+-5.  **Combine**: Apply the joint weighting $\alpha$ to combine coarse and fine losses [S2].
+-6.  **Backpropagate**: Update parameters using the total loss [S1, S2].
+-
+-### Edge Cases and Pitfalls
+-*   **Uncertainty Loss Calculation**: $\mathcal{L}_{unct}^i$ requires proper modeling of prediction uncertainty; incorrect variance estimation can destabilize training [S1].
+-*   **Stage Imbalance**: If $D$ is large, later stages may dominate if weights are not normalized, though equal weighting is suggested in [S1].
+-*   **Alpha Sensitivity**: In joint coarse-fine, $\alpha$ must be tuned to prevent the coarse term from suppressing high-frequency details or the fine term from introducing noise [S2].
++### Parameters and Edge Cases
++*   **$\beta_1, \beta_2$**: In Recursive-NeRF, $\beta_1=1.0$ and $\beta_2=0.1$ are fixed [S1].
++*   **$\alpha$**: In Denoise-GS, $\alpha$ is a tunable hyperparameter in $[0,1]$ [S2].
++*   **Edge Cases**: If $D=1$ (single stage), the recursive loss reduces to a single term. If $\alpha=1$, only coarse loss is considered; if $\alpha=0$, only fine loss is considered.
++*   **Pitfalls**: In the recursive formulation, all query coordinates must be output through all outlets during training to ensure consistent loss computation across stages [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Increases linearly with the number of stages $D$ in recursive methods [S1].
+-*   **Memory Complexity**: Requires storing intermediate outputs for all stages, increasing memory usage with $D$ [S1].
+-*   **Strengths**: Improves convergence stability by guiding optimization with low-frequency cues while refining details [S1, S2].
+-*   **Limitations**: Higher computational overhead due to multiple forward passes or stage evaluations [S1].
++*   **Time Complexity**: Linear with respect to the number of stages $D$ in the recursive formulation, as it sums losses from each stage [S1]. The coarse-fine formulation adds overhead for computing structural and gradient terms but is constant with respect to depth [S2].
++*   **Memory Complexity**: Requires storing intermediate rendered images and uncertainty maps for all stages if computed simultaneously, or recomputing them if memory is constrained [S1].
++*   **Strengths**: Effectively balances global structure preservation with local detail enhancement, reducing noise interference while maintaining sharp textures [S2]. The multi-stage approach allows for efficient dynamic growth of the network [S1].
++*   **Limitations**: Requires careful tuning of $\alpha$ and $\beta$ weights. The uncertainty loss component requires a specific network architecture capable of predicting uncertainty [S1].
+ 
+ ## Background
+-Originated in Recursive-NeRF [S1] and Denoise-GS [S2] to address the challenges of optimizing radiance fields with dynamic growth or sparse-view inputs. It enables stable training by leveraging multi-scale supervision.
++The multi-scale joint loss concept appears in two distinct contexts within recent radiance field literature. The recursive formulation was introduced in **Recursive-NeRF** (2022), which proposes a dynamically growing NeRF architecture where losses are aggregated across all active stages to guide the growth process [S1]. The coarse-fine formulation was proposed in **Denoise-GS** (2024), designed for self-supervised denoising in sparse-view 3D Gaussian Splatting, where a second training round refines initial denoised images by balancing low-frequency agreement and high-frequency fidelity [S2].
+ 
+ ## Sources

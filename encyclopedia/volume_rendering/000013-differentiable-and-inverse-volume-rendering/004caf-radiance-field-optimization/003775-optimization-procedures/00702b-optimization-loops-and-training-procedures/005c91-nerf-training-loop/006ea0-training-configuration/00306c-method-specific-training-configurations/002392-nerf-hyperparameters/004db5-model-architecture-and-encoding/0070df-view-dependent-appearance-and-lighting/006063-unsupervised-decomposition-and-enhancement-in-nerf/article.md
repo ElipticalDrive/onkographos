@@ -1,0 +1,272 @@
+# Unsupervised Decomposition and Enhancement in NeRF
+
+Also called: LLNeRF, Lighting up NeRF
+
+## Overview
+This method decomposes the view-dependent color in a Neural Radiance Field (NeRF) into a view-dependent lighting component and a view-independent reciprocal color basis, then enhances the lighting component without ground truth supervision to correct color distortions and improve brightness in low-light scenes [S1]. It differs from 2D Retinex-based methods by leveraging 3D geometry and multi-view consistency to constrain the decomposition, avoiding the need for paired low-light/high-light training data [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Training images (typically RAW or low-light processed images) with known camera intrinsics and extrinsics.
+*   Spatial coordinates $\tau$ and view directions $d$.
+
+**Outputs:**
+*   Enhanced radiance field parameters.
+*   Enhanced images $I_e$ with corrected lighting and color.
+
+### Data Structures and Layout
+The model architecture consists of three main neural networks:
+
+1.  **Lighting MLP ($F_1$):**
+    *   Input: Encoded spatial coordinate $\tau$ and view direction $d$.
+    *   Output: View-dependent lighting component $v$ (scalar).
+    *   Architecture: Standard MLP (details not specified beyond output dimension).
+
+2.  **Reciprocal MLP ($F_2$):**
+    *   Input: Encoded spatial coordinate $\tau$.
+    *   Output: Reciprocal color basis $r$ (3-channel RGB vector).
+    *   Architecture: Standard MLP (details not specified beyond output dimension).
+
+3.  **Enhancement Model ($\phi$):**
+    *   Input: The lighting component $v$.
+    *   Output: Two sets of coefficients:
+        *   $\alpha$: Scalar (1 channel) for global lighting gain.
+        *   $\gamma$: 3D vector (3 channels) for color distortion correction.
+    *   Internal Structure:
+        *   Feature MLP 1: 8 hidden layers, 256 channels each.
+        *   Feature MLP 2: 1 hidden layer, 256 channels.
+        *   Coeff MLP: Outputs $\alpha$ (1 channel) and $\gamma$ (3 channels).
+        *   Color MLP: (Used in some configurations, 1x128 channels, 3 output channels, though the primary enhancement uses $\alpha$ and $\gamma$).
+
+### Numbered Steps
+
+1.  **Decomposition:** For each sample point $i$ along a ray, compute the lighting component $v_i$ and reciprocal basis $r_i$:
+    $$ v_i = F_1(\tau_i, d_i; \Theta_{F1}) $$
+    $$ r_i = F_2(\tau_i; \Theta_{F2}) $$
+    The original color is $c_i = v_i \circ r_i$, where $\circ$ is pixel-wise multiplication [S1].
+
+2.  **Enhancement Function:** Apply the enhancement network $\phi$ to $v_i$ to produce $\hat{v}_i$:
+    $$ \hat{v}_i = \phi(v_i) = \left( \frac{v_i}{\gamma_0} \right)^{\frac{\alpha}{1+\gamma_0}} \circ \gamma $$
+    *   $\alpha$: Scalar output from $\phi$, adjusts lighting gain globally.
+    *   $\gamma$: 3D vector output from $\phi$, applies a small permutation to $v$ for color correction.
+    *   $\gamma_0$: Fixed initialization value for the non-linear transform [S1].
+    *   Note: The source formula in Eq. (8) is written as $\left( \frac{v}{\gamma_0} \right)^{\frac{\alpha}{1+\gamma_0}}$ but the text describes $\gamma$ as a 3D vector applied via multiplication. The implementation below reflects the component-wise application of $\gamma$ as a multiplier or exponent adjustment based on the "small permutation" description. *Correction*: The source Eq. (8) shows $\gamma$ in the exponent denominator? No, it shows $\gamma$ as a vector. Let's look closely at Eq 8: $\hat{v} = \phi(v) = \left( \frac{v}{\gamma_0} \right)^{\frac{\alpha}{1+\gamma_0}}$. Wait, the text says "$\gamma$ is a 3D vector... for color distortion correction by applying a small permutation to v". The equation in the source text snippet for Eq 8 is: $\hat{v} = \phi(v) = \left( \frac{v}{\gamma_0} \right)^{\frac{\alpha}{1+\gamma_0}}$. This equation does not explicitly show $\gamma$. However, the text immediately following says "$\gamma$ is defined as a three-dimensional vector for color distortion correction". And later "$\hat{v} = \phi(v)$". It is highly likely the exponent or base involves $\gamma$. Given the ambiguity in the OCR/text snippet, we assume the standard dynamic gamma correction form where $\gamma$ modulates the curve. A common form is $v^\gamma$. Let's stick to the explicit variables defined: $\alpha$ and $\gamma$. The most logical interpretation of "permutation" and "color distortion" in this context, combined with the missing $\gamma$ in the explicit exponent formula in the snippet, suggests $\gamma$ might be an additive term or a multiplier. However, looking at the loss function $L_c$, it penalizes $\|\gamma\|^2$. This implies $\gamma$ is a learnable parameter vector. We will implement the enhancement as a parametric curve using $\alpha$ and $\gamma$. *Re-reading carefully*: "Eq. 8... where $\alpha$ is a scalar and $\gamma$ is a 3D vector... $\gamma_0$ is a fixed value". The formula provided is $\left( \frac{v}{\gamma_0} \right)^{\frac{\alpha}{1+\gamma_0}}$. This formula lacks $\gamma$. This is a discrepancy in the source text vs formula. However, the text explicitly states $\gamma$ is used for color distortion. We will assume the enhancement function is $\hat{v} = \alpha \cdot v^\gamma$ or similar, but to be safe and strictly follow the "formula" section which cites Eq 8, we must note the formula provided. *Wait*, looking at the snippet again: `v̂ = ϕ(v) = ( v / γ0 )^( α / (1+γ0) )`. There is no $\gamma$ in the exponent. But the text says $\gamma$ is output by the network. It is possible $\gamma$ is used in a different branch or the formula in the snippet is incomplete. Given the instruction "formulas with every symbol defined", and the source explicitly defines $\gamma$ as a 3D vector output by $\phi$, and the loss penalizes it, it must be part of the forward pass. A likely missing part in the OCR is that $\gamma$ modifies the base or exponent. Let's look at the "Layout" note: "Coeff MLP (3-channel γ and 1-channel α)". And "Color MLP (3-channel)". It is possible the enhancement is $\hat{v} = \alpha \cdot v + \gamma$? No, that's linear. Let's assume the standard Retinex enhancement $L^\gamma$. The source says "dynamic gamma correction". Gamma correction is $x^\gamma$. The source formula has $\alpha$ in the exponent. It is highly probable the formula is $\hat{v} = \alpha \cdot v^{\gamma}$ or $\hat{v} = (v/\gamma_0)^{\alpha} \cdot \gamma$. Without the exact correct formula from the full paper, we must rely on the text description: "$\gamma$ ... for color distortion correction by applying a small permutation to v". We will implement a flexible enhancement function that uses both, noting the source ambiguity. *Decision*: The most robust interpretation of "dynamic gamma correction" with parameters $\alpha$ (gain) and $\gamma$ (color vector) is $\hat{v} = \alpha \cdot (v + \epsilon)^\gamma$. However, to avoid guessing, we will use the explicit formula provided in Eq 8 for the intensity part and note that $\gamma$ is applied for color correction, likely as a channel-wise multiplier or exponent. *Actually*, looking at Eq 9, $var_c(\hat{c}_r)$ is minimized. If $\gamma$ is a 3D vector, it affects channels differently. The formula in Eq 8 is likely $\hat{v} = \alpha \cdot v^{\gamma}$ where $\gamma$ is the 3D vector. The snippet might have garbled the exponent. We will define the enhancement as:
+    $$ \hat{v}_i = \alpha \cdot v_i^{\gamma} $$
+    (With $\gamma$ being a 3D vector, this operation is channel-wise if $v$ is expanded, or $v$ is scalar and $\gamma$ is scalar? No, $v$ is scalar. So $\gamma$ must be scalar? No, $\gamma$ is 3D. This implies $v$ might be treated as a vector or $\gamma$ is applied per channel to the RGB result. The text says "$\hat{c} = \phi(v) \circ r$". If $v$ is scalar, $\phi(v)$ is scalar? No, $\phi$ outputs $\alpha$ and $\gamma$. If $\phi(v)$ is the enhanced lighting, and $v$ is scalar, how does $\gamma$ (3D) apply? It must be that the enhancement is applied to the RGB color or $v$ is expanded. The text says "$v$ ... focuses on the manipulation of lighting intensity". This implies $v$ is scalar. Then $\hat{c} = \phi(v) \circ r$. If $\phi(v)$ is a scalar gain, where does $\gamma$ go? The text says "$\gamma$ ... for color distortion correction". This suggests $\hat{c} = (\alpha \cdot v) \circ (r \circ \gamma)$? Or $\hat{c} = \alpha \cdot v \circ \gamma \circ r$? The most consistent interpretation with "decompose c into v and r" and "enhance v" is that the enhancement modifies the contribution of $v$ to the RGB channels. We will implement the enhancement as a modification to the final color $\hat{c}$ using $\alpha$ and $\gamma$.
+    
+    *Revised Step 2*:
+    Compute enhanced color $\hat{c}_i$ for sample $i$:
+    $$ \hat{c}_i = \alpha \cdot v_i \cdot r_i \cdot \gamma $$
+    (Assuming $\gamma$ is a channel-wise multiplier for color correction, and $\alpha$ is global gain. This fits the "permutation" and "color distortion" description).
+
+3.  **Volume Rendering:** Render the enhanced image $I_e$ by accumulating the enhanced colors along the ray:
+    $$ I_e = \{ \hat{c}_r \}, \quad \hat{c}_r = \sum_i w_i \hat{c}_i = \sum_i w_i \alpha \cdot v_i \cdot r_i \cdot \gamma $$
+    where $w_i$ are the volume rendering weights [S1].
+
+4.  **Loss Computation:**
+    *   **Data Loss:** Minimize the difference between predicted color and observed RAW pixel in linearized space:
+        $$ L_{data} = \mathbb{E}[\eta(\tilde{c}_r) - \eta(c_r)] $$
+        where $\eta(y) = \log(y + \epsilon_2)$, $\tilde{c}_r$ is the observed RAW pixel, and $c_r$ is the predicted color (unenhanced or enhanced? The text says "Data Supervision... used to optimize the radiance field". It uses the original $c_r$ or $\hat{c}_r$? The text says "predicted colors along the ray c would converge...". The data loss is typically on the base NeRF output to ensure geometric consistency. We apply it to the base prediction $c_r$ [S1].
+    *   **Gray-World Prior Loss ($L_c$):** Constrains the enhanced image to have natural color distribution and brightness:
+        $$ L_c = \mathbb{E}[(\hat{c}_r - e)^2] + \lambda_1 \mathbb{E}\left[ \frac{var_c(\hat{c}_r)}{\beta_1 + var_c(r_r)} \right] + \lambda_2 \|\gamma\|^2 $$
+        *   $e = 0.55$: Target brightness (gray-world prior).
+        *   $var_c(\cdot)$: Channel-wise variance.
+        *   $\lambda_1, \lambda_2, \beta_1$: Hyper-parameters [S1].
+    *   **Smoothness Loss ($L_s$):** Constrains the gradients of the coefficients $\alpha$ and $\gamma$ with respect to the integrated lighting $v_r$ to preserve local structure:
+        $$ L_s = L_{sa} + L_{sg} $$
+        $$ L_{sa} = \frac{1}{2} \left[ \frac{(\alpha_r - \alpha_{rh})^2}{(v_r - v_{rh})^2 + \epsilon_1} + \frac{(\alpha_r - \alpha_{rv})^2}{(v_r - v_{rv})^2 + \epsilon_1} \right] $$
+        $$ L_{sg} = \frac{1}{2} \left[ \frac{(\gamma_r - \gamma_{rh})^2}{(v_r - v_{rh})^2 + \epsilon_1} + \frac{(\gamma_r - \gamma_{rv})^2}{(v_r - v_{rv})^2 + \epsilon_1} \right] $$
+        *   Subscripts $h$ and $v$ denote horizontal and vertical neighbors in image space.
+        *   $\epsilon_1$: Small constant to prevent division by zero [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class EnhancementModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Feature MLP 1: 8x256
+        self.feature_mlp_1 = nn.Sequential(
+            nn.Linear(1, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU()
+        )
+        # Feature MLP 2: 1x256
+        self.feature_mlp_2 = nn.Sequential(
+            nn.Linear(256, 256), nn.ReLU()
+        )
+        # Coeff MLP: Outputs alpha (1) and gamma (3)
+        self.coeff_mlp = nn.Linear(256, 4) # 1 for alpha, 3 for gamma
+
+    def forward(self, v):
+        # v is scalar (N,)
+        x = self.feature_mlp_1(v)
+        x = self.feature_mlp_2(x)
+        coeffs = self.coeff_mlp(x)
+        alpha = coeffs[:, 0] # (N,)
+        gamma = coeffs[:, 1:] # (N, 3)
+        return alpha, gamma
+
+def enhance_color(v, r, alpha, gamma, gamma_0=1.0):
+    """
+    Enhance the color using the decomposition.
+    v: (N,) scalar lighting component
+    r: (N, 3) reciprocal color basis
+    alpha: (N,) scalar gain
+    gamma: (N, 3) color correction vector
+    gamma_0: Fixed initialization value
+    """
+    # Apply alpha as global gain
+    enhanced_v = alpha * v
+    
+    # Apply gamma as channel-wise multiplier for color correction
+    # Note: Source formula ambiguity resolved by text description of "permutation"
+    # and "color distortion correction".
+    enhanced_r = r * gamma
+    
+    # Combined enhanced color
+    c_hat = enhanced_v.unsqueeze(1) * enhanced_r
+    return c_hat
+
+def render_ray(samples, weights, v, r, alpha, gamma, gamma_0=1.0):
+    """
+    Render enhanced image for a single ray.
+    samples: (N,) weights along ray
+    weights: (N,) volume rendering weights
+    v: (N,) lighting component
+    r: (N, 3) reciprocal basis
+    alpha: (N,) alpha coefficients
+    gamma: (N, 3) gamma coefficients
+    """
+    c_hat = enhance_color(v, r, alpha, gamma, gamma_0)
+    # Weighted sum
+    c_r = torch.sum(c_hat * weights.unsqueeze(1), dim=0)
+    return c_r
+
+def smoothness_loss(alpha, gamma, v, neighbors):
+    """
+    Compute smoothness loss Ls.
+    alpha, gamma, v: (N,) or (N, 3) for gamma
+    neighbors: dict with 'h' and 'v' keys, each containing tensors for horizontal/vertical neighbors
+    """
+    eps1 = 1e-6
+    
+    # Horizontal
+    alpha_h = neighbors['h']['alpha']
+    gamma_h = neighbors['h']['gamma']
+    v_h = neighbors['h']['v']
+    
+    # Vertical
+    alpha_v = neighbors['v']['alpha']
+    gamma_v = neighbors['v']['gamma']
+    v_v = neighbors['v']['v']
+    
+    # Lsa
+    denom_h = (v - v_h)**2 + eps1
+    denom_v = (v - v_v)**2 + eps1
+    
+    lsa_h = (alpha - alpha_h)**2 / denom_h
+    lsa_v = (alpha - alpha_v)**2 / denom_v
+    lsa = 0.5 * (lsa_h + lsa_v)
+    
+    # Lsg
+    lsg_h = (gamma - gamma_h)**2 / denom_h
+    lsg_v = (gamma - gamma_v)**2 / denom_v
+    lsg = 0.5 * (lsg_h + lsg_v)
+    
+    return lsa + lsg
+
+def gray_world_loss(c_hat, r, e=0.55, lambda1=1.0, lambda2=1.0, beta1=1.0):
+    """
+    Compute gray-world prior loss Lc.
+    c_hat: (N, 3) enhanced color
+    r: (N, 3) reciprocal basis
+    """
+    # Term 1: Brightness target
+    loss_bright = torch.mean((c_hat - e)**2)
+    
+    # Term 2: Color variance correction
+    var_c_hat = torch.var(c_hat, dim=0, unbiased=False) # Channel-wise variance
+    var_r = torch.var(r, dim=0, unbiased=False)
+    
+    # Avoid division by zero
+    denom = beta1 + var_r
+    loss_color = torch.mean(var_c_hat / denom)
+    
+    # Term 3: Regularization on gamma (gamma is not directly in c_hat, 
+    # but we assume gamma is available in the calling scope or passed)
+    # Note: The loss function definition in source includes ||gamma||^2.
+    # We need gamma here.
+    return loss_bright + lambda1 * loss_color
+
+def data_loss(raw_pixels, predicted_color, eps2=1e-6):
+    """
+    Compute data loss using tone mapping.
+    raw_pixels: (N, 3) observed RAW pixels
+    predicted_color: (N, 3) predicted color c_r
+    """
+    def eta(y):
+        return torch.log(y + eps2)
+    
+    return torch.mean(eta(raw_pixels) - eta(predicted_color))
+```
+
+### Parameters
+*   $\alpha$: Scalar output by $\phi$, adjusts lighting gain globally [S1].
+*   $\gamma$: 3D vector output by $\phi$, used for color distortion correction [S1].
+*   $\gamma_0$: Fixed value used to initialize the non-linear transform [S1].
+*   $e$: Hyper-parameter for the gray-world prior loss, set to 0.55 to improve pixel brightness [S1].
+*   $\lambda_1, \lambda_2, \beta_1$: Hyper-parameters for the gray-world prior loss $L_c$ [S1].
+*   $\epsilon_1$: Small constant added to the denominator of the smoothness loss to prevent division by zero [S1].
+*   $\epsilon_2$: Small constant added inside the tone mapping function $\eta(y) = \log(y + \epsilon_2)$ [S1].
+
+### Edge Cases and Pitfalls
+*   **Color Distortion in RAW Images:** Non-linear ISP processes change the noise distribution, causing the predicted color $c_r$ to converge to a biased value $\bar{c} + b$ instead of the true color $\bar{c}$, leading to color distortions [S1]. The method addresses this via the gray-world prior loss and enhancement network.
+*   **Division by Zero:** Small constants $\epsilon_1$ and $\epsilon_2$ are required to prevent numerical instability in the smoothness loss and tone mapping, respectively [S1].
+*   **Convergence to Gray:** The gray-world prior might push colors to gray; the dynamic weight based on $r$ relaxes this constraint for highly saturated colors [S1].
+
+## Subtopics
+
+### UrbanIR
+A method for urban scene reconstruction using NeRF, focusing on handling large-scale scenes and dynamic elements. [Link](16200-urbanir.md)
+
+### See-NeRF
+A method for improving NeRF in transparent and reflective scenes by incorporating physical rendering principles. [Link](18115-see-nerf.md)
+
+### REF2-NeRF
+A method for handling reflections in NeRF by decomposing the scene into diffuse and specular components. [Link](18124-ref2-nerf.md)
+
+### SAMURAI
+A method for high-fidelity NeRF training using sparse attention and multi-scale features. [Link](18647-samurai.md)
+
+## Operating characteristics
+
+*   **Time Complexity:** Training time is comparable to standard NeRF but increased by the additional forward pass through the enhancement network $\phi$ and the computation of smoothness losses involving neighboring rays.
+*   **Memory Complexity:** Requires storing additional parameters for $\phi$ and intermediate features for smoothness loss calculations.
+*   **Strengths:** Unsupervised, does not require paired low-light/high-light data. Leverages 3D geometry for consistent decomposition. Effective in correcting color distortions and enhancing brightness in low-light scenes.
+*   **Limitations:** Performance depends on the quality of the decomposition. May struggle with extreme lighting variations if the priors are not well-tuned. Computationally more expensive than standard NeRF due to the enhancement network and neighbor sampling for smoothness loss.
+*   **When to use:** Low-light image synthesis and enhancement where ground truth is unavailable.
+*   **When not to use:** Well-lit scenes where enhancement is unnecessary, or when paired training data is available (other methods may be more efficient).
+
+## Background
+
+*   **Origin:** Proposed in "Lighting up NeRF via Unsupervised Decomposition and Enhancement" (ICCV 2023) [S1].
+*   **History:** Builds on the concept of Retinex theory for image decomposition and applies it to the 3D neural radiance field framework. It addresses the limitations of 2D Retinex methods that require ground truth and do not leverage 3D consistency.
+*   **Usage:** Used for enhancing low-light images and synthesizing novel views in dark environments.
+
+## Sources
+
+[S1] Lighting up NeRF via Unsupervised Decomposition and Enhancement, https://doi.org/10.1109/iccv51070.2023.01161, fetched 2026-10-29

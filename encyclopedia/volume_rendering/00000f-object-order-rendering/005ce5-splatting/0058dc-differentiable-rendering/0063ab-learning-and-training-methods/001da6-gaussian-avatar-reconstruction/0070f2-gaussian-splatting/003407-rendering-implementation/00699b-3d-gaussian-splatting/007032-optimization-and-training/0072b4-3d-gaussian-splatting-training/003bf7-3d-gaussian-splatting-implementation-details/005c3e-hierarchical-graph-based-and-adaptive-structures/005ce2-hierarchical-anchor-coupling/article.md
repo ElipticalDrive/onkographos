@@ -1,0 +1,143 @@
+# Hierarchical Anchor Coupling
+
+Also called: Per-level hierarchical anchor coupling
+
+## Overview
+Hierarchical Anchor Coupling (HAC) is a module that establishes cross-level gradient pathways in structured 3D Gaussian splatting by aggregating context from adjacent octree levels and broadcasting a residual feature adjustment to all visible anchors at a specific level [S1, unofficial]. It solves the problem of feature isolation, where backpropagation graphs in anchor-based octree pipelines lack connections between features at level $l_i$ and features at adjacent levels $l_i \pm 1$ [S1, unofficial]. Unlike sibling methods that may use static graphs or per-anchor spatial lookups, HAC operates at the granularity of octree levels, invoking a shared MLP once per visible level to compute a uniform adjustment, which acts as an implicit regularizer against over-parameterization in scenes with dense repetitive structures [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The set of visible anchors $V$ for a training camera, where each anchor $i$ has an octree level $l_i$ and a base feature vector $f_i \in \mathbb{R}^d$.
+*   **Output:** Enhanced feature vectors $\hat{f}_i$ for all $i \in V$, which replace $f_i$ as input to the downstream Neural Gaussian decoding MLPs.
+
+**Data Structures:**
+*   **Visible Anchors ($V$):** A list of anchor indices visible to the current camera.
+*   **Level Set ($L_V$):** The set of unique octree levels present in $V$, defined as $L_V = \{l_i : i \in V\}$.
+*   **Level-Specific Visible Anchors ($V_l$):** The subset of visible anchors at level $l$, defined as $V_l = \{i \in V : l_i = l\}$.
+*   **Context Vectors ($c_l$):** Vectors in $\mathbb{R}^d$ representing aggregated features for a level.
+*   **Triplet ($t_l$):** A concatenated vector in $\mathbb{R}^{3d}$ containing self, coarser, and finer context.
+*   **Adjustment ($\delta_l$):** A residual vector in $\mathbb{R}^d$ computed by the MLP.
+*   **MLP ($g_\theta$):** A two-layer Multi-Layer Perceptron mapping $\mathbb{R}^{3d} \to \mathbb{R}^d \to \mathbb{R}^d$ with ReLU activation. The hidden dimension is $d=32$ [S1, unofficial].
+
+**Steps:**
+1.  **Identify Levels and Anchors:** For the current training camera, determine the set of visible anchors $V$. Identify the set of unique octree levels present in $V$, denoted $L_V$. For each level $l \in L_V$, identify the subset of visible anchors at that level, $V_l$.
+2.  **Aggregate Context Vectors:** For each level $l \in L_V$, compute three context vectors:
+    *   **Self-Context ($c_l^{\text{self}}$):** The uniform mean of the base features of all visible anchors at level $l$:
+        $$ c_l^{\text{self}} = \frac{1}{|V_l|} \sum_{i \in V_l} f_i $$
+    *   **Coarser-Level Context ($c_l^{\text{par}}$):** The result of applying the coarser-level aggregation operator $A_{\text{par}}$ to the features of anchors at the adjacent coarser level $l-1$:
+        $$ c_l^{\text{par}} = A_{\text{par}}(\{f_i\}_{i \in V_{l-1}}) $$
+        *Note: The specific implementation of $A_{\text{par}}$ is defined in the Structure-Aware Containment Aggregation (SACA) module [S1, unofficial].*
+    *   **Finer-Level Context ($c_l^{\text{chi}}$):** The result of applying the finer-level aggregation operator $A_{\text{chi}}$ to the features of anchors at the adjacent finer level $l+1$:
+        $$ c_l^{\text{chi}} = A_{\text{chi}}(\{f_i\}_{i \in V_{l+1}}) $$
+        *Note: The specific implementation of $A_{\text{chi}}$ is defined in the Structure-Aware Containment Aggregation (SACA) module [S1, unofficial].*
+3.  **Handle Boundary Levels:** If a level $l \in L_V$ lacks an adjacent coarser level (i.e., $l-1$ is not in the octree or has no visible anchors) or an adjacent finer level (i.e., $l+1$ is not in the octree or has no visible anchors), the corresponding context vector defaults to the self-context $c_l^{\text{self}}$ [S1, unofficial].
+4.  **Form Triplet:** Concatenate the three context vectors into a per-level triplet $t_l \in \mathbb{R}^{3d}$:
+    $$ t_l = [c_l^{\text{par}}; c_l^{\text{self}}; c_l^{\text{chi}}] $$
+5.  **Compute Adjustment:** Pass the triplet $t_l$ through the shared two-layer MLP $g_\theta$ to compute the level-wise feature adjustment $\delta_l$:
+    $$ \delta_l = g_\theta(t_l) $$
+6.  **Broadcast Residual:** Broadcast the adjustment $\delta_l$ as a residual to all visible anchors at level $l$ to produce the enhanced features $\hat{f}_i$:
+    $$ \hat{f}_i = f_i + \delta_l, \quad \forall i \in V_l $$
+7.  **Replace Features:** Replace the original features $\{f_i\}_{i \in V}$ with the enhanced features $\{\hat{f}_i\}_{i \in V}$ as input to the downstream Neural Gaussian decoding MLPs.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hierarchical_anchor_coupling(anchors, visible_indices, mlp_g_theta, aggregate_coarser, aggregate_finer):
+    """
+    anchors: List of anchor objects, each having attributes:
+             - level: int (octree level)
+             - feature: numpy array of shape (d,)
+    visible_indices: List of indices into 'anchors' that are visible to the camera.
+    mlp_g_theta: A callable MLP function taking a (3d,) vector and returning a (d,) vector.
+    aggregate_coarser: A callable function taking a list of features and returning a (d,) context vector.
+    aggregate_finer: A callable function taking a list of features and returning a (d,) context vector.
+    
+    Returns:
+    enhanced_features: List of (d,) vectors for each visible anchor.
+    """
+    # Step 1: Identify levels and group anchors
+    visible_anchors = [anchors[i] for i in visible_indices]
+    levels_present = set(a.level for a in visible_anchors)
+    
+    # Group visible anchors by level
+    anchors_by_level = {}
+    for l in levels_present:
+        anchors_by_level[l] = [a for a in visible_anchors if a.level == l]
+        
+    # Step 2 & 3: Aggregate context and handle boundaries
+    context_triplets = {}
+    for l in levels_present:
+        anchors_l = anchors_by_level[l]
+        
+        # Self-context
+        if len(anchors_l) > 0:
+            c_self = sum(a.feature for a in anchors_l) / len(anchors_l)
+        else:
+            c_self = np.zeros_like(anchors_l[0].feature) # Should not happen if l in levels_present
+            
+        # Coarser context (l-1)
+        if (l - 1) in anchors_by_level and len(anchors_by_level[l - 1]) > 0:
+            c_par = aggregate_coarser([a.feature for a in anchors_by_level[l - 1]])
+        else:
+            c_par = c_self # Boundary case
+            
+        # Finer context (l+1)
+        if (l + 1) in anchors_by_level and len(anchors_by_level[l + 1]) > 0:
+            c_chi = aggregate_finer([a.feature for a in anchors_by_level[l + 1]])
+        else:
+            c_chi = c_self # Boundary case
+            
+        # Step 4: Form triplet
+        t_l = np.concatenate([c_par, c_self, c_chi])
+        context_triplets[l] = t_l
+        
+    # Step 5: Compute adjustments
+    adjustments = {}
+    for l in levels_present:
+        t_l = context_triplets[l]
+        delta_l = mlp_g_theta(t_l)
+        adjustments[l] = delta_l
+        
+    # Step 6: Broadcast and return
+    enhanced_features = []
+    for i in visible_indices:
+        anchor = anchors[i]
+        l = anchor.level
+        delta_l = adjustments[l]
+        f_hat = anchor.feature + delta_l
+        enhanced_features.append(f_hat)
+        
+    return enhanced_features
+```
+
+**Parameters:**
+*   **MLP Hidden Dimension ($d$):** 32 [S1, unofficial].
+*   **Granularity:** Per-level (default). Computes a shared $\delta_l$ for every visible level. A per-anchor alternative computes a distinct $\delta_i$ for every visible anchor via spatial lookup [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Levels:** Levels in $L_V$ that lack an adjacent coarser or finer level must default their missing context to the self-context $c_l^{\text{self}}$ [S1, unofficial].
+*   **Empty Levels:** If a level $l$ is in $L_V$, $V_l$ is non-empty by definition. However, adjacent levels $l-1$ or $l+1$ may have no visible anchors, triggering the boundary condition [S1, unofficial].
+
+## Subtopics
+
+### Per-Level vs. Per-Anchor Granularity
+Per-level computes one adjustment $\delta_l$ per visible level, scaling MLP cost with the number of visible levels. Per-anchor computes a distinct $\delta_i$ per visible anchor, scaling linearly with $|V|$. Per-level is ~20% faster in training and yields +1.06 dB on dense repetitive structures (Building), while per-anchor yields +0.21 dB on simpler geometry (Rubble) [S1, unofficial].
+
+### Structure-Aware Containment Aggregation (SACA)
+The aggregation operators $A_{\text{par}}$ and $A_{\text{chi}}$ used in HAC are defined by SACA, which incorporates octree topology and binary/soft containment masks to reduce the influence of topologically isolated anchors [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The MLP evaluation cost scales with the number of visible levels, not the number of visible anchors. Computing level-wise means and broadcasting residuals remains linear in $|V|$ [S1, unofficial]. Per-level is ~20% faster in training than per-anchor [S1, unofficial].
+*   **Memory Complexity:** HAC adds 4,160 parameters via the shared two-layer MLP ($d=32$). The total parameter increment is below 0.1% [S1, unofficial].
+*   **Performance:** On the Mill19-Building scene, HAC alone yields a PSNR improvement of +1.91 dB over the baseline [S1, unofficial]. On UrbanScene3D-Residence, TopoGS (with HAC) reaches 39.4 FPS versus 29.0 FPS for the baseline, while reducing memory and the number of Neural Gaussians by roughly 35% [S1, unofficial].
+*   **Strengths:** Alleviates feature isolation; acts as an implicit regularizer against over-parameterization in dense repetitive structures; low parameter overhead; transferable to other backbones (Octree-GS, Proxy-GS) [S1, unofficial].
+*   **Limitations:** May underperform on simpler geometry compared to per-anchor variants (e.g., Rubble scene) [S1, unofficial].
+*   **When to Use:** When using anchor-based octree pipelines (e.g., CityGS-X, Octree-GS, Proxy-GS) and feature isolation is a concern, particularly in scenes with dense repetitive structures [S1, unofficial].
+*   **When Not to Use:** When computational budget is extremely tight and scene geometry is simple, per-anchor might offer marginal gains at the cost of speed, or simpler baselines may suffice [S1, unofficial].
+
+## Background
+Hierarchical Anchor Coupling was introduced in the paper "TopoGS: Topology-Aware Anchor Feature Aggregation for Large-Scale 3D Gaussian Splatting" [S1, unofficial]. It is integrated into the TopoGS framework and has been shown to be transferable to other structured 3D Gaussian splatting backbones such as CityGS-X, Octree-GS, and Proxy-GS [S1, unofficial]. The method addresses the limitation of existing anchor-based octree pipelines where backpropagation graphs lack cross-level gradient pathways [S1, unofficial].
+
+## Sources
+[S1] TopoGS: Topology-Aware Anchor Feature Aggregation for Large-Scale 3D Gaussian Splatting, https://arxiv.org/abs/2609.27868, fetched 2026-10-30 (unofficial)

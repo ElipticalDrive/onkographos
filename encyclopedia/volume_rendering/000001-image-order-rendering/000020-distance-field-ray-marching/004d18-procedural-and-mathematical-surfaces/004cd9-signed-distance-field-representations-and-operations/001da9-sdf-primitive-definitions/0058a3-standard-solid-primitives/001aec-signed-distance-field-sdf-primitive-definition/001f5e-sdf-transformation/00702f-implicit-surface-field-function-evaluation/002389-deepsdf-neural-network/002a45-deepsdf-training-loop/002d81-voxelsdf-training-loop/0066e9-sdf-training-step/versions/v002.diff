@@ -1,0 +1,268 @@
+--- v001.md
++++ v002.md
+@@ -1,115 +1,178 @@
+ # SDF Training Step
+ 
++Also called: Voxel-Conditioned SDF Decoder, VoxelSDF, VoxelSDF MLP
+ 
+ ## Overview
+-The SDF Training Step is the core optimization iteration for the VoxelSDF decoder and its associated grid embeddings. It solves the problem of minimizing the discrepancy between predicted signed distances and ground-truth samples by performing a single gradient descent update. It differs from the broader [VoxelSDF Training Loop](5534-voxelsdf-training-loop.md) by encapsulating the specific mechanics of data shuffling, batch preparation, and the forward/backward pass, whereas the loop manages the scheduler and epoch-level control. It is distinct from [MetaSDF](19189-metasdf.md) in that it operates on a fixed voxel grid embedding structure rather than a meta-learning framework for rapid adaptation.
++The SDF Training Step is the core optimization routine for the VoxelSDF architecture, which predicts Signed Distance Function (SDF) values for 3D points by interpolating features from a voxelized latent embedding grid [S2, unofficial]. It solves the problem of learning compact, spatially-aware implicit representations by conditioning a neural network on local voxel features rather than global latent codes [S2, unofficial]. It sets itself apart from global implicit representations like DeepSDF by using a structured voxel grid to store latent codes, allowing for localized feature interpolation [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A stream for GPU execution, the current training step counter, a boolean flag indicating whether to update the loss scalar, the current batch of shuffled 3D positions, and the corresponding shuffled target signed distances.
+-*   **Outputs:** A training context object containing loss metrics and gradients, and an updated training step counter.
++*   **Input:** A batch of 3D query points $P \in \mathbb{R}^{N \times 3}$ and their corresponding ground-truth SDF values $D \in \mathbb{R}^{N}$.
++*   **Output:** Predicted SDF values $\hat{D} \in \mathbb{R}^{N}$ and a scalar loss value.
+ 
+ **Data Structures:**
+-*   `training_batch_matrix`: A GPU matrix of shape $(N, 3)$, where $N$ is the batch size. It stores the shuffled 3D positions $(x, y, z)$.
+-*   `training_target_matrix`: A GPU matrix of shape $(N, 1)$, storing the shuffled target signed distances.
+-*   `m_sdf.training.positions`: Raw 3D position data.
+-*   `m_sdf.training.distances`: Raw target distance data.
+-*   `m_sdf.training.positions_shuffled`: Temporary storage for shuffled positions.
+-*   `m_sdf.training.distances_shuffled`: Temporary storage for shuffled distances.
++1.  **Voxel Grid Embedding:** A 5D tensor of shape $(N_{models}, L, V+1, V+1, V+1)$, where $N_{models}$ is the batch size (number of models), $L$ is the latent dimension, and $V$ is the `voxel_grid_size` [S2, unofficial]. The grid stores learnable latent codes for each voxel.
++2.  **Training Batch Matrix:** A matrix containing the shuffled query points, shaped $(N, 3)$ [S1, unofficial].
++3.  **Training Target Matrix:** A matrix containing the shuffled target distances, shaped $(N, 1)$ [S1, unofficial].
+ 
+-**Numbered Steps:**
+-1.  **Shuffle Data:** To de-correlate data and improve gradient stability, shuffle the training positions and distances. This is performed using a linear kernel on the GPU stream.
+-    *   Shuffle `m_sdf.training.positions` into `m_sdf.training.positions_shuffled`.
+-    *   Shuffle `m_sdf.training.distances` into `m_sdf.training.distances_shuffled`.
+-    *   The shuffle operation uses the current `m_training_step` as a seed or offset to ensure different permutations per step.
+-2.  **Prepare Batch:** Construct the `training_batch_matrix` from `positions_shuffled` (3 dimensions) and the `training_target_matrix` from `distances_shuffled` (1 dimension).
+-3.  **Execute Training Step:** Call the trainer's `training_step` method with the stream, batch matrix, and target matrix. This performs the forward pass through the VoxelSDF decoder, computes the loss (typically L1, as per the parent loop), and executes the backward pass to compute gradients.
+-4.  **Update Step Counter:** Increment `m_training_step` by 1.
+-5.  **Update Loss Scalar (Conditional):** If the `get_loss_scalar` flag is true, update the running loss scalar using the loss value returned from the training context.
++**Parameters:**
++*   `voxel_grid_size`: Resolution of the voxel grid. Default: 8 [S2, unofficial].
++*   `num_layers`: Number of hidden layers in the SDF MLP. Default: 4 [S2, unofficial].
++*   `hidden_dim`: Dimensionality of hidden layers in the SDF MLP. Default: 128 [S2, unofficial].
++*   `latent_dim`: Dimensionality of the latent codes stored in the voxel grid. Not given in the sources.
++
++**Steps:**
++1.  **Shuffle Data:** To de-correlate data and improve training stability, shuffle the positions and distances within the training batch [S1, unofficial].
++2.  **Reshape Inputs:**
++    *   Reshape the voxel grid embeddings into a 5D tensor $(N_{models}, L, V+1, V+1, V+1)$ [S2, unofficial].
++    *   Reshape the input query points into a 5D tensor $(N_{models}, N_{points}, 1, 1, 3)$ to align with the interpolation grid dimensions [S2, unofficial].
++3.  **Feature Sampling:** Sample latent features at the query points using bilinear interpolation (e.g., `grid_sample`) with zero padding and aligned corners [S2, unofficial]. This retrieves the latent code $z$ corresponding to the spatial location of each point.
++4.  **Concatenation:** Concatenate the sampled latent features $z$ with the original 3D coordinates of the points $p$ along the feature dimension, resulting in a vector of size $L + 3$ [S2, unofficial].
++5.  **MLP Prediction:** Pass the concatenated vector through the SDF MLP to predict the SDF value [S2, unofficial].
++6.  **Loss Computation:** Compute the loss (typically L1) between the predicted SDF values and the ground-truth distances [S1, unofficial].
++7.  **Optimization Step:** Perform the gradient update using the optimizer (e.g., Adam) [S1, unofficial].
++8.  **Update State:** Increment the training step counter and update the loss scalar if required [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def sdf_training_step(stream, m_sdf, m_trainer, m_training_step, get_loss_scalar, m_loss_scalar):
+-    # Step 1: Shuffle positions and distances to de-correlate data
+-    # Using a linear kernel on the GPU stream
+-    # shuffle<Vector3f> kernel call
+-    linear_kernel_shuffle_vector3f(
+-        stream=stream,
+-        grid_dim=0,
+-        block_dim=0,
+-        shared_mem=0,
+-        count=m_sdf.training.size,
+-        stride=1,
+-        seed=m_training_step,
+-        input_data=m_sdf.training.positions.data(),
+-        output_data=m_sdf.training.positions_shuffled.data()
++def sdf_training_step(voxel_grid, points, targets, trainer, voxel_grid_size=8, latent_dim=128, hidden_dim=128, num_layers=4):
++    """
++    Performs one training step for the VoxelSDF model.
++    
++    Args:
++        voxel_grid: Tensor of shape (N_models, latent_dim, V+1, V+1, V+1)
++        points: Tensor of shape (N_points, 3)
++        targets: Tensor of shape (N_points,)
++        trainer: Object with training_step and loss methods
++        voxel_grid_size: int, resolution of the voxel grid
++        latent_dim: int, dimension of latent codes
++        hidden_dim: int, dimension of MLP hidden layers
++        num_layers: int, number of MLP hidden layers
++        
++    Returns:
++        loss: float, computed loss value
++    """
++    # 1. Shuffle data to de-correlate
++    # Note: In a real implementation, this might be handled by DataLoader shuffling.
++    # Here we assume points and targets are already shuffled or shuffled externally.
++    # If not, shuffle them:
++    indices = torch.randperm(points.size(0))
++    points = points[indices]
++    targets = targets[indices]
++    
++    # 2. Reshape inputs for interpolation
++    # voxel_grid is already (N_models, L, V+1, V+1, V+1)
++    # Reshape points to (N_models, N_points, 1, 1, 3) for grid_sample
++    # Assuming points are grouped by model in the batch. 
++    # If points are flat, we need to reshape them to match the batch structure.
++    # Let's assume points are already structured as (N_models, N_points_per_model, 3)
++    # or we flatten and reshape. For simplicity, assume points is (N_total, 3)
++    # and we need to map it to the voxel grid structure.
++    # The source [S2, unofficial] says: "Reshape input points into 5D tensor: (n_models, n_points_per_model, 1, 1, 3)"
++    # This implies the input batch is already organized by model.
++    
++    # 3. Sample latent features using bilinear interpolation
++    # grid_sample expects input (N, C, H, W, D) and grid (N, H_out, W_out, D_out, 3)
++    # We need to adapt the point coordinates to the grid_sample format.
++    # Normalize points to [-1, 1] range if they are not already.
++    # Let's assume points are normalized.
++    
++    # Create grid for sampling
++    # The grid_sample function in PyTorch expects the grid to be in normalized coordinates [-1, 1]
++    # We need to convert our 3D points to this format.
++    # Assuming points are in [0, 1] or [-1, 1]. Let's assume [-1, 1].
++    
++    # Reshape points to (N_models, N_points, 1, 1, 3)
++    # If points is (N_total, 3), we need to know N_models and N_points_per_model.
++    # Let's assume we have a batch of models, each with N_points.
++    # For this pseudocode, we assume points is already reshaped to (N_models, N_points, 3)
++    # and we expand it to (N_models, N_points, 1, 1, 3)
++    
++    # Note: The exact reshaping depends on the data loader structure.
++    # We will assume points is (N_models, N_points, 3)
++    
++    # Expand dimensions for grid_sample
++    # grid_sample input: (N, C, H, W, D)
++    # grid_sample grid: (N, H_out, W_out, D_out, 3)
++    
++    # We need to convert points to the grid format.
++    # Let's assume points are in [-1, 1].
++    
++    # Reshape points to (N_models, N_points, 1, 1, 3)
++    points_5d = points.unsqueeze(2).unsqueeze(2) # (N_models, N_points, 1, 1, 3)
++    
++    # Sample features
++    # voxel_grid is (N_models, L, V+1, V+1, V+1)
++    # grid_sample output: (N_models, L, N_points, 1, 1)
++    sampled_features = torch.nn.functional.grid_sample(
++        voxel_grid, 
++        points_5d, 
++        mode='bilinear', 
++        padding_mode='zeros', 
++        align_corners=True
+     )
+     
+-    # shuffle<float> kernel call
+-    linear_kernel_shuffle_float(
+-        stream=stream,
+-        grid_dim=0,
+-        block_dim=0,
+-        shared_mem=0,
+-        count=m_sdf.training.size,
+-        stride=1,
+-        seed=m_training_step,
+-        input_data=m_sdf.training.distances.data(),
+-        output_data=m_sdf.training.distances_shuffled.data()
+-    )
+-
+-    # Step 2: Create GPUMatrix for target and batch
+-    training_batch_matrix = GPUMatrix(
+-        data=m_sdf.training.positions_shuffled.data(),
+-        dims=[m_sdf.training.size, 3]
+-    )
+-    training_target_matrix = GPUMatrix(
+-        data=m_sdf.training.distances_shuffled.data(),
+-        dims=[m_sdf.training.size, 1]
+-    )
+-
+-    # Step 3: Call trainer step
+-    ctx = m_trainer.training_step(
+-        stream=stream,
+-        training_batch_matrix=training_batch_matrix,
+-        training_target_matrix=training_target_matrix
+-    )
+-
+-    # Step 4: Increment training step
+-    m_training_step = m_training_step + 1
+-
+-    # Step 5: Update loss scalar if requested
+-    if get_loss_scalar:
+-        loss_value = m_trainer.loss(stream=stream, context=ctx)
+-        m_loss_scalar.update(loss_value)
+-
+-    return ctx, m_training_step
++    # Squeeze the last two dimensions
++    sampled_features = sampled_features.squeeze(3).squeeze(3) # (N_models, L, N_points)
++    
++    # Transpose to (N_models, N_points, L)
++    sampled_features = sampled_features.permute(0, 2, 1)
++    
++    # 4. Concatenate sampled features with original points
++    # points is (N_models, N_points, 3)
++    # sampled_features is (N_models, N_points, L)
++    # Concatenate along the last dimension
++    concatenated = torch.cat([sampled_features, points], dim=2) # (N_models, N_points, L+3)
++    
++    # Flatten for MLP
++    # (N_models * N_points, L+3)
++    concatenated_flat = concatenated.view(-1, latent_dim + 3)
++    
++    # 5. Pass through MLP
++    # MLP: Linear(L+3, hidden_dim) -> ReLU -> ... -> Linear(hidden_dim, 1) -> Tanh
++    x = concatenated_flat
++    for i in range(num_layers):
++        x = torch.nn.functional.relu(torch.nn.Linear(latent_dim + 3 if i == 0 else hidden_dim, hidden_dim)(x))
++    output = torch.tanh(torch.nn.Linear(hidden_dim, 1)(x))
++    
++    # Flatten output to (N_total,)
++    predicted_sdf = output.squeeze(1)
++    
++    # 6. Compute loss
++    # L1 loss
++    loss = torch.nn.functional.l1_loss(predicted_sdf, targets)
++    
++    # 7. Optimization step
++    # This is handled by the trainer object
++    # trainer.step(loss)
++    
++    return loss.item()
+ ```
+ 
+-**Parameters:**
+-*   `m_sdf.training.size`: The total number of training samples. Not given in the sources.
+-*   `m_training_step`: The current global training step index. Not given in the sources.
+-*   `get_loss_scalar`: Boolean flag to control loss scalar updates. Not given in the sources.
+-
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Floating-point precision in the shuffle and matrix operations can affect gradient stability. Not given in the sources.
+-*   **Boundaries:** The shuffle seed `m_training_step` must be managed to avoid periodicity in shuffling. Not given in the sources.
+-*   **Degenerate Input:** If `m_sdf.training.size` is zero, the shuffle and matrix creation will fail. Not given in the sources.
++*   **Boundary Conditions:** Points outside the voxel grid bounds must be handled correctly by the interpolation method (zero padding is used) [S2, unofficial].
++*   **Precision:** Floating-point precision issues may arise during interpolation and MLP computation. Using `align_corners=True` in `grid_sample` ensures consistent coordinate mapping [S2, unofficial].
++*   **Degenerate Input:** Empty batches or points with identical coordinates should be handled by the shuffling and batching logic [S1, unofficial].
+ 
+ ## Subtopics
+ 
++### [PatchNet](19831-patchnet.md)
++PatchNet represents a 3D object as a collection of learnable surface patches, where each patch models the geometry within a specific radius from its center using a neural implicit function.
++
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of training samples $N$ for shuffling and matrix creation. The training step itself depends on the complexity of the VoxelSDF decoder and the number of parameters. Not given in the sources.
+-*   **Memory Complexity:** Requires additional memory for shuffled copies of positions and distances, doubling the memory footprint for the training data during the step. Not given in the sources.
++*   **Time Complexity:** Linear with respect to the number of query points and the size of the voxel grid. The dominant operation is the bilinear interpolation and the MLP forward pass.
++*   **Memory Complexity:** Proportional to the size of the voxel grid embedding $(N_{models} \times L \times (V+1)^3)$ and the batch size.
+ *   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Scales with batch size and the number of training samples. Not given in the sources.
+-*   **Strengths:** De-correlating data helps prevent gradient oscillations. Not given in the sources.
+-*   **Limitations:** Requires GPU memory for shuffled data. Not given in the sources.
+-*   **When to use:** During the training phase of VoxelSDF. Not given in the sources.
+-*   **When not:** During inference or evaluation. Not given in the sources.
++*   **Scaling:** Scales well with batch size due to parallelizable operations (interpolation, MLP). The voxel grid size $V$ affects memory linearly with $V^3$.
++*   **Strengths:** Localized feature interpolation allows for detailed geometry representation. Structured latent codes improve training stability compared to global codes.
++*   **Limitations:** Memory usage grows cubically with voxel grid resolution. Interpolation artifacts may occur at low resolutions.
++*   **When to Use:** When learning implicit representations for multiple objects with shared structure or when localized features are beneficial.
++*   **When Not to Use:** When memory is constrained and high-resolution voxel grids are not feasible.
+ 
+ ## Background
+-The SDF Training Step is part of the Dynamic-NGPs project, which implements neural graphics primitives. The specific implementation details are derived from the GitHub repository [jaeyeol816/Dynamic-NGPs](https://github.com/jaeyeol816/Dynamic-NGPs) [S1, unofficial]. The approach of shuffling data before each training step is a common technique in stochastic gradient descent to improve convergence. Not given in the sources.
++The VoxelSDF method was introduced as an extension of DeepSDF, aiming to improve generalization and training efficiency by using voxelized latent codes [S2, unofficial]. It builds on the idea of implicit surface representations but structures the latent space spatially [S2, unofficial].
+ 
+ ## Sources
+-[S1] jaeyeol816/Dynamic-NGPs, https://github.com/jaeyeol816/Dynamic-NGPs, fetched 2026-10-27 (unofficial)+[S1] jaeyeol816/Dynamic-NGPs, https://github.com/jaeyeol816/Dynamic-NGPs, fetched 2026-10-27 (unofficial)
++[S2] TurtleJayWang/VC-SDFGen2, https://github.com/TurtleJayWang/VC-SDFGen2, fetched 2026-10-28 (unofficial)

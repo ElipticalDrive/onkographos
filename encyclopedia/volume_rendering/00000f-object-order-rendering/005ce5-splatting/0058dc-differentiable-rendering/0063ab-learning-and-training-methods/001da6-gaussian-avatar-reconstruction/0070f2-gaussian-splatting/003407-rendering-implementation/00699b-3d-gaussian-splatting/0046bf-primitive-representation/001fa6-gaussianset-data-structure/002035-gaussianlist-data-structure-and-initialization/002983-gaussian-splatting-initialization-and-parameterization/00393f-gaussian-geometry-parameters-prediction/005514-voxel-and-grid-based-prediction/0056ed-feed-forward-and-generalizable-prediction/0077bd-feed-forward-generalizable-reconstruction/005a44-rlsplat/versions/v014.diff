@@ -1,0 +1,272 @@
+--- v013.md
++++ v014.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-RLSplat is a resource-linear, budget-controllable feed-forward 3D Gaussian Splatting (FF3DGS) framework that generates exactly $B$ Gaussians for a given scene, ensuring that inference latency and peak memory scale linearly with the requested budget [S1, unofficial]. Unlike prior budget-controllable methods that predict a dense set of candidates and prune them (resulting in nearly constant inference cost regardless of budget), RLSplat uses a learned allocation policy to distribute the budget across local scene regions and a resource-linear decoder that refines Gaussians via local cross-attention [S1, unofficial]. This approach allows the representation size, inference latency, and peak memory to decrease linearly as the Gaussian budget $B$ is reduced, making it suitable for applications with strict resource constraints such as AR/VR and robotics [S1, unofficial].
++RLSplat is a resource-linear, budget-controllable feed-forward 3D Gaussian Splatting (FF3DGS) framework that ensures inference latency, peak memory, and representation size all decrease linearly as the target Gaussian budget $B$ is reduced [S1, unofficial]. Unlike prior budget-controllable methods that predict a dense set of candidates and prune them—resulting in nearly constant inference costs regardless of the budget—RLSplat learns a Gaussian allocation policy to distribute exactly $B$ Gaussians across local scene regions from the start [S1, unofficial]. It then refines these Gaussians using a resource-linear decoder based on local cross-attention with a hierarchical neighbor search [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** $V$ uncalibrated context images $\{I_i\}_{i=1}^V$ and a target Gaussian budget $B$ (an integer).
++*   **Inputs:** A set of $V$ uncalibrated context images $\{I_i\}_{i=1}^V$ and a target integer Gaussian budget $B$.
+ *   **Outputs:** A set of $B$ 3D Gaussians $\mathcal{G} = \{g_b\}_{b=1}^B$ and the context camera parameters $\{P_i\}_{i=1}^V$. Each Gaussian $g_b$ consists of a 3D center, opacity, scale, rotation, and color coefficients [S1, unofficial].
+ 
+@@ -15,163 +15,133 @@
+ 2.  **Allocation Vector:** A discrete allocation vector $\mathbf{k} \in \mathbb{Z}_{\ge 0}^N$, where $k_n$ is the number of Gaussians assigned to anchor $n$. The constraint is $\sum_{n=1}^N k_n = B$ [S1, unofficial].
+ 3.  **Gaussian Tokens:** Each anchor $n$ spawns $k_n$ Gaussian tokens. The total number of Gaussian tokens is exactly $B$ [S1, unofficial].
+-4.  **Hierarchical Neighbor Search:** Used to find the $K_{gs}$ nearest Gaussian neighbors for each token. This involves searching $K_{anc}$ anchor neighbors first [S1, unofficial].
++4.  **Hierarchical Neighbor Search Structures:** Used to find the $K_{gs}$ nearest Gaussian neighbors and $K_{anc}$ nearest anchor neighbors efficiently [S1, unofficial].
+ 
+ **Parameters:**
+-*   $B$: Target Gaussian budget. Typical evaluation values include 2K (2,048) and 64K. On the ACID dataset with 8 views, $B=8,192$ (1,024 per view) is used [S1, unofficial].
++*   $B$: Target Gaussian budget. Typical evaluation values are 2,048 (2K) and 64,000 (64K). On the ACID dataset (8 views), $B=8,192$ (1,024 per view) is used. On RE10K, $B=8,000$ is used [S1, unofficial].
+ *   $K_{gs}$: Number of nearest Gaussian neighbors each token attends to during refinement. Default ablation value is 16. This can be changed at inference without retraining [S1, unofficial].
+ *   $K_{anc}$: Number of anchor neighbors used in the hierarchical neighbor search. Fixed value in ablations is 16 [S1, unofficial].
+-*   $C$: Number of rollouts (candidate allocations) drawn per training step for the GSPO policy optimization [S1, unofficial].
++*   $C$: Number of rollouts (candidate allocations) drawn per training step for the Group Sequence Policy Optimization (GSPO) [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Geometry Encoding:** Given $V$ uncalibrated context images $\{I_i\}$, a geometry backbone encodes them into $N$ anchor tokens $\{a_n\}_{n=1}^N$ and predicts camera parameters $\{P_i\}_{i=1}^V$ [S1, unofficial].
+-2.  **Gaussian Allocation:** A Gaussian allocation policy $\pi_\psi$ assesses the local significance of each anchor (based on image features like texture complexity) to predict a discrete allocation $\mathbf{k} \in \mathbb{Z}_{\ge 0}^N$ such that $\sum_{n=1}^N k_n = B$. This policy is trained using Group Sequence Policy Optimization (GSPO) [S1, unofficial].
+-3.  **Token Spawning:** Each anchor $n$ spawns $k_n$ Gaussian tokens. The total number of Gaussian tokens is exactly $B$ [S1, unofficial].
++1.  **Geometry Encoding:** Given context images $\{I_i\}$, a geometry backbone (e.g., Burzio et al., 2026) encodes them into $N$ anchor tokens $\{a_n\}_{n=1}^N$ and predicts camera parameters $\{P_i\}$ [S1, unofficial].
++2.  **Gaussian Allocation:** A Gaussian allocation policy $\pi_\psi$ assesses the local significance of each anchor (based on image features like texture complexity) to predict a discrete allocation $\mathbf{k}$. The policy is trained using GSPO to ensure $\sum k_n = B$. At training time, $C$ candidate allocations are sampled from the policy: $\mathbf{k}^{(c)} \sim \pi_{old} = \text{Mult}(B, \text{sg}(p))$, where $\text{sg}(\cdot)$ stops gradients [S1, unofficial].
++3.  **Token Spawning:** For each anchor $n$, $k_n$ Gaussian tokens are spawned. The total number of Gaussian tokens is exactly $B$ [S1, unofficial].
+ 4.  **Resource-Linear Decoding:**
+-    *   **Initialization:** The decoder instantiates initial Gaussian states (center, scale, rotation, opacity, color) from the spawned tokens [S1, unofficial].
+-    *   **Neighbor Search:** For each Gaussian token, a hierarchical neighbor search identifies the $K_{gs}$ nearest Gaussian tokens. This search first retrieves $K_{anc}$ anchor neighbors and then finds the specific Gaussian tokens within those anchors [S1, unofficial].
+-    *   **Local Refinement:** Each Gaussian token is refined through local cross-attention with its $K_{gs}$ nearest Gaussian neighbors. This step ensures consistency among neighboring Gaussians [S1, unofficial].
+-5.  **Output:** The final set of $B$ Gaussians $\mathcal{G}$ and camera parameters $\{P_i\}$ are returned [S1, unofficial].
+-
+-**Training (GSPO):**
+-To optimize the non-differentiable allocation policy $\pi_\psi$, RLSplat uses Group Sequence Policy Optimization (GSPO) [S1, unofficial]:
+-1.  Draw $C$ candidate allocations $\mathbf{k}^{(c)} \sim \pi_{\text{old}} = \text{Mult}(B, \text{sg}(p))$ for $c \in \{1, \dots, C\}$, where gradients are stopped by $\text{sg}(\cdot)$ [S1, unofficial].
+-2.  For each rollout $c$, generate the 3DGS representation $\mathcal{G}^{(c)}$ and render an image $\hat{I}^{(c)}$ at novel target views [S1, unofficial].
+-3.  Compute the reconstruction loss $\mathcal{L}_{\text{recon}}$ against the ground-truth image $I$ without gradient tracking. This loss serves as the reward signal [S1, unofficial].
+-4.  Update the policy using the reward [S1, unofficial].
+-
+-**Loss Functions:**
+-The training includes several loss components:
+-*   $\mathcal{L}_{\text{recon}}$: Reconstruction loss (e.g., L1, SSIM) between rendered and ground-truth images [S1, unofficial].
+-*   $\mathcal{L}_{\text{offset}}$: Offset loss to refine Gaussian positions. Removing it lowers PSNR by 0.53 dB [S1, unofficial].
+-*   $\mathcal{L}_{\text{vor}}$: Voronoi loss to constrain Gaussians to their anchor's cell. Removing it causes a 2.51 dB drop in PSNR [S1, unofficial].
+-*   $\mathcal{L}_{\text{proj}}$: Projection loss to tie an anchor's Gaussians to the image region it was encoded from. Without this loss, training fails entirely [S1, unofficial].
++    *   **Initialization:** The decoder instantiates initial Gaussians from the tokens.
++    *   **Hierarchical Neighbor Search:** For each Gaussian token, the system finds its $K_{gs}$ nearest Gaussian neighbors and $K_{anc}$ nearest anchor neighbors using an efficient hierarchical search [S1, unofficial].
++    *   **Local Refinement:** Each Gaussian token refines its state through local cross-attention over its $K_{gs}$ nearest Gaussian neighbors. This avoids global self-attention, reducing complexity from $O(B^2)$ to $O(B \cdot K_{gs})$ [S1, unofficial].
++5.  **Loss Computation (Training):** For each rollout $c$, the 3DGS representation $\mathcal{G}^{(c)}$ is rendered at novel target views to produce $\hat{I}^{(c)}$. The reconstruction loss $\mathcal{L}_{recon}$ against ground truth $I$ is computed without gradient tracking. This loss serves as the reward signal for the policy optimization [S1, unofficial]. Additional losses include an offset loss ($\mathcal{L}_{offset}$), a Voronoi loss ($\mathcal{L}_{vor}$), and a projection loss ($\mathcal{L}_{proj}$) which ties anchors to their encoded image regions [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def rl_splat_forward(context_images, budget_B):
++def rlsplat_forward(context_images, budget_B):
+     """
+     Forward pass of RLSplat.
+-    
+-    Args:
+-        context_images: List of V uncalibrated RGB images.
+-        budget_B: Integer, total number of Gaussians to generate.
+-        
+-    Returns:
+-        gaussians: List of B 3D Gaussian objects (center, scale, rotation, opacity, color).
+-        cameras: List of V camera parameters.
++    context_images: List of V uncalibrated images.
++    budget_B: Integer, total number of Gaussians to generate.
++    Returns: Set of B Gaussians G, Camera parameters P.
+     """
+-    # Step 1: Geometry Encoding
++    # 1. Geometry Backbone
+     # Encodes images into N anchor tokens and predicts camera parameters
+-    anchor_tokens, cameras = geometry_backbone(context_images)
++    anchor_tokens, camera_params = geometry_backbone(context_images)
+     N = len(anchor_tokens)
+     
+-    # Step 2: Gaussian Allocation
+-    # Policy predicts discrete allocation k such that sum(k) == B
+-    # k is a list of N integers, k[n] >= 0
+-    allocation_k = gaussian_allocation_policy(anchor_tokens, budget_B)
++    # 2. Gaussian Allocation Policy
++    # Predicts allocation proportions p, then samples discrete allocation k
++    # In inference, we sample one allocation. In training, C rollouts are sampled.
++    allocation_proportions = allocation_policy(anchor_tokens)
++    # Sample k from Multinomial(B, p) with stop-gradient on p if training
++    allocation_k = sample_allocation(allocation_proportions, budget_B)
+     
+-    # Step 3: Token Spawning
+-    # Spawn k[n] Gaussian tokens for each anchor n
++    # 3. Spawn Gaussian Tokens
++    # Each anchor n spawns k_n Gaussian tokens
+     gaussian_tokens = []
+     for n in range(N):
+-        count = allocation_k[n]
+-        # Spawn 'count' tokens associated with anchor_tokens[n]
+-        tokens_for_anchor = spawn_tokens(anchor_tokens[n], count)
+-        gaussian_tokens.extend(tokens_for_tokens)
++        k_n = allocation_k[n]
++        # Spawn k_n tokens for anchor n
++        tokens_for_anchor = spawn_tokens(anchor_tokens[n], k_n)
++        gaussian_tokens.extend(tokens_for_anchor)
+         
+-    # Step 4: Resource-Linear Decoding
+-    # Initialize Gaussian states from tokens
+-    initial_gaussians = initialize_gaussians(gaussian_tokens)
++    # 4. Resource-Linear Decoder
++    # Refine Gaussians via local cross-attention
++    final_gaussians = resource_linear_decoder(gaussian_tokens, K_gs=16, K_anc=16)
+     
++    return final_gaussians, camera_params
++
++def resource_linear_decoder(gaussian_tokens, K_gs, K_anc):
++    """
++    Refines Gaussian tokens using local cross-attention.
++    gaussian_tokens: List of B Gaussian tokens.
++    K_gs: Number of Gaussian neighbors to attend to.
++    K_anc: Number of anchor neighbors for search.
++    """
+     # Hierarchical Neighbor Search
+-    # Find K_gs nearest Gaussian neighbors for each Gaussian
+-    # K_anc is fixed (e.g., 16), K_gs is variable (e.g., 16)
+-    neighbors = hierarchical_neighbor_search(initial_gaussians, K_gs=16, K_anc=16)
++    # Find K_gs nearest Gaussian neighbors for each token
++    # Find K_anc nearest anchor neighbors for context
++    neighbor_indices = hierarchical_neighbor_search(gaussian_tokens, K_gs, K_anc)
+     
+-    # Local Refinement via Cross-Attention
+-    refined_gaussians = local_cross_attention_refinement(
+-        initial_gaussians, 
+-        neighbors, 
+-        K_gs=16
+-    )
+-    
+-    return refined_gaussians, cameras
++    # Local Cross-Attention Refinement
++    refined_tokens = []
++    for i, token in enumerate(gaussian_tokens):
++        # Get neighbors for token i
++        neighbor_indices_i = neighbor_indices[i]
++        neighbor_tokens = [gaussian_tokens[idx] for idx in neighbor_indices_i]
++        
++        # Cross-attention: each token attends to its K_gs neighbors
++        refined_token = local_cross_attention(token, neighbor_tokens)
++        refined_tokens.append(refined_token)
++        
++    # Decode tokens to final Gaussian attributes (center, opacity, scale, rotation, color)
++    final_gaussians = decode_gaussians(refined_tokens)
++    return final_gaussians
+ 
+-def gaussian_allocation_policy(anchor_tokens, budget_B):
++def sample_allocation(proportions, budget_B):
+     """
+-    Predicts discrete allocation k using the trained policy pi_psi.
+-    Returns list of integers k where sum(k) == budget_B.
++    Samples a discrete allocation k from multinomial distribution.
++    proportions: Tensor of shape (N,) summing to 1.
++    budget_B: Integer total budget.
++    Returns: Tensor of shape (N,) with integer values summing to budget_B.
+     """
+-    # In training, this uses GSPO. In inference, it uses the learned policy.
+-    # The policy outputs probabilities p, and a sample is drawn from Mult(B, sg(p))
+-    # or a deterministic argmax/rounding is used depending on implementation details not fully specified.
+-    # For implementation, assume a function that returns valid integer allocation.
+-    allocation = sample_allocation_from_policy(anchor_tokens, budget_B)
+-    return allocation
+-
+-def hierarchical_neighbor_search(gaussians, K_gs, K_anc):
+-    """
+-    Finds K_gs nearest Gaussian neighbors for each Gaussian.
+-    Uses hierarchical search: first find K_anc anchor neighbors, 
+-    then find Gaussian neighbors within those anchors.
+-    """
+-    # Implementation detail:
+-    # 1. Build a spatial index (e.g., KD-tree or voxel grid) for anchor centers.
+-    # 2. For each Gaussian, find its anchor.
+-    # 3. Query the spatial index for K_anc nearest anchor centers.
+-    # 4. Collect all Gaussians belonging to these K_anc anchors.
+-    # 5. From this subset, find the K_gs nearest Gaussians to the query Gaussian.
+-    # Note: The exact spatial indexing structure is not specified in the source.
+-    # [G] A standard KD-tree or ball tree over anchor centers is assumed for step 3.
+-    neighbors = []
+-    for i, g in enumerate(gaussians):
+-        anchor_idx = get_anchor_index(g)
+-        # Find K_anc nearest anchors to anchor_idx
+-        neighbor_anchor_indices = find_k_nearest_anchors(anchor_idx, K_anc)
+-        # Collect Gaussians from these anchors
+-        candidate_gaussians = []
+-        for anc_idx in neighbor_anchor_indices:
+-            candidate_gaussians.extend(get_gaussians_for_anchor(anc_idx))
+-        # Find K_gs nearest Gaussians from candidates
+-        k_nearest = find_k_nearest_gaussians(g, candidate_gaussians, K_gs)
+-        neighbors.append(k_nearest)
+-    return neighbors
+-
+-def local_cross_attention_refinement(gaussians, neighbors, K_gs):
+-    """
+-    Refines each Gaussian by attending to its K_gs neighbors.
+-    """
+-    refined = []
+-    for i, g in enumerate(gaussians):
+-        # Extract features from neighbors
+-        neighbor_features = [get_feature(n) for n in neighbors[i]]
+-        # Perform cross-attention
+-        # Query: g, Key/Value: neighbor_features
+-        refined_g = cross_attention(g, neighbor_features)
+-        refined.append(refined_g)
+-    return refined
++    # Implementation depends on specific sampling library, 
++    # but conceptually: k ~ Mult(B, proportions)
++    # Ensure sum(k) == budget_B
++    pass
+ ```
+ 
++**Edge Cases and Pitfalls:**
++*   **Training Failure:** Removing the projection loss ($\mathcal{L}_{proj}$) causes training to fail entirely, as it ties an anchor's Gaussians to the image region it was encoded from [S1, unofficial].
++*   **Neighbor Search Accuracy:** Removing the Voronoi loss ($\mathcal{L}_{vor}$) causes a significant PSNR drop (2.51 dB) because Gaussians leave their anchor's cell, and the hierarchical search no longer retrieves their true neighbors [S1, unofficial].
++*   **Refinement Necessity:** Removing the local refinement module lowers PSNR by 0.96 dB, as Gaussians cannot be made consistent with their neighbors if predicted from their own token alone [S1, unofficial].
++*   **Precision:** The allocation policy uses reinforcement learning (GSPO) to handle non-differentiable discrete allocations [S1, unofficial].
++
++## Subtopics
++
++### Gaussian Allocation Policy
++A policy trained with GSPO that distributes exactly $B$ Gaussians across anchors based on local significance (e.g., texture complexity), concentrating capacity where fine geometric details require it [S1, unofficial].
++
++### Resource-Linear Decoder
++A decoder that refines Gaussians through local cross-attention over $K_{gs}$ nearest neighbors found via hierarchical neighbor search, ensuring decoding cost scales as $O(B \cdot K_{gs})$ [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** The decoding cost is $O(B \cdot K_{gs})$, scaling linearly with the Gaussian budget $B$. This contrasts with global self-attention which costs $O(B^2)$ [S1, unofficial].
+-*   **Memory Complexity:** Peak memory scales linearly with the Gaussian budget $B$ [S1, unofficial].
+-*   **Performance:**
+-    *   At a budget of 2K Gaussians, RLSplat achieves higher PSNR than F4 Splat while using 9.6× less peak memory and running 4.1× faster [S1, unofficial].
+-    *   On the ACID dataset (8 views, $B=8,192$), RLSplat achieves PSNR 22.84 dB, SSIM 0.643, LPIPS 0.353 [S1, unofficial].
+-    *   On the RE10K dataset ($B=8,000$), RLSplat achieves full-view PSNR 26.51 dB, compared to 23.42 dB for F4 Splat and 21.82 dB for EcoSplat [S1, unofficial].
++*   **Time Complexity:** The decoding cost is $O(B \cdot K_{gs})$, scaling linearly with the Gaussian budget $B$. This is a significant improvement over global self-attention, which costs $O(B^2)$ [S1, unofficial].
++*   **Memory Complexity:** Peak memory scales linearly with $B$ [S1, unofficial].
++*   **Measured Performance:**
++    *   At $B=2,048$ (2K), RLSplat achieves higher PSNR than F4 Splat while using 9.6× less peak memory and running 4.1× faster [S1, unofficial].
++    *   On ACID ($B=8,192$), RLSplat achieves PSNR 22.84 dB, SSIM 0.643, LPIPS 0.353 [S1, unofficial].
++    *   On RE10K ($B=8,000$), RLSplat achieves full-view PSNR 26.51 dB, compared to 23.42 dB for F4 Splat and 21.82 dB for EcoSplat [S1, unofficial].
++*   **Scaling:** Inference cost (latency and peak memory) scales linearly with the Gaussian budget $B$ [S1, unofficial].
+ *   **Strengths:**
+-    *   Resource-linear scaling: Inference latency and peak memory decrease linearly as $B$ is reduced.
+-    *   High fidelity at low budgets: Allocates more Gaussians to thin, high-frequency structures (e.g., 5,388 vs. 2,521/3,026 for baselines on a specific region) while using fewer on smooth areas.
+-    *   No retraining required for budget changes: $K_{gs}$ can be changed at inference without retraining [S1, unofficial].
++    *   True resource-linearity: Latency and memory decrease as $B$ decreases.
++    *   Superior quality at low budgets: Allocates more Gaussians to high-frequency structures (e.g., 5,388 vs. 2,521/3,026 for thin stair balusters) and fewer on smooth walls [S1, unofficial].
++    *   Efficient neighbor search: Hierarchical search is 27× faster than exact search (8.1 ms vs. 219.6 ms at 65,536 Gaussians) [S1, unofficial].
+ *   **Limitations:**
+-    *   Requires training with GSPO, which involves non-differentiable discrete allocations.
+-    *   Performance depends on the quality of the geometry backbone and the allocation policy.
+-*   **When to use:** Applications requiring limited resource budgets, such as AR/VR, robotics, and digital content creation, where inference latency and memory are critical constraints [S1, unofficial].
+-*   **When not to use:** When maximum possible quality is required regardless of resource cost, or when the scene has extremely complex geometry that requires a very large $B$ (e.g., >64K) where the overhead of the allocation policy might be less significant than the linear scaling benefits.
++    *   Requires reinforcement learning training for the allocation policy [S1, unofficial].
++    *   Performance depends on the quality of the hierarchical neighbor search [S1, unofficial].
++*   **Usage:** Suitable for applications requiring limited resource budgets, such as AR/VR, robotics, and digital content creation [S1, unofficial].
+ 
+ ## Background
+-RLSplat was proposed by Bae, Park, and Kim from KAIST. The paper "RLSplat: Resource-Linear Budget Control for Feed-forward 3D Gaussian Splatting" was published in 2026 (unofficial preprint) [S1, unofficial]. It addresses the limitation of prior budget-controllable FF3DGS methods (EcoSplat, F4 Splat) which only control the output size but not the inference cost, as they predict a dense set of candidates and then prune. RLSplat introduces a Gaussian allocation policy trained with GSPO and a resource-linear decoder with hierarchical neighbor search to achieve true resource-linearity [S1, unofficial].
++RLSplat was proposed by Bae, Park, and Kim from KAIST. It addresses the limitations of prior budget-controllable FF3DGS methods like EcoSplat and F4 Splat, which predict dense sets of Gaussians and then prune them, resulting in nearly constant inference latency and memory regardless of the target budget [S1, unofficial]. RLSplat introduces a resource-linear approach by learning a Gaussian allocation policy and using a resource-linear decoder with hierarchical neighbor search [S1, unofficial].
+ 
+ ## Sources

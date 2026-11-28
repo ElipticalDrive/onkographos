@@ -1,0 +1,346 @@
+Problem The raytracer's surface layer (src/surfaces/) contains exactly three concrete types — Sphere (sphere.py), Cube (cube.py), and InfinitePlane (infinite_plane.py) — all registered through src/surfaces/__init__.py. There is no polygo...
+
+Implement Triangle primitive and OBJ mesh loader · Issue #1 · SunsetDodo/NanatiBozikRaytracer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Implement Triangle primitive and OBJ mesh loader #1
+New issue
+Copy link
+New issue
+Copy link
+Open
+#3
+Open
+Implement Triangle primitive and OBJ mesh loader#1
+#3
+Copy link
+Labels
+featurepriority:mediumtt:pinnedmanual status — don't auto-sync from gitmanual status — don't auto-sync from gittt:review
+Description
+SunsetDodo
+opened on Jun 16, 2026
+Issue body actions
+Problem
+The raytracer's surface layer (src/surfaces/) contains exactly three concrete types — Sphere (sphere.py), Cube (cube.py), and InfinitePlane (infinite_plane.py) — all registered through src/surfaces/__init__.py. There is no polygon primitive, which means the renderer cannot represent any real-world geometry. The scene format is a custom text dialect (evidenced by src/scenes/pool.txt), so OBJ meshes have no ingestion path at all. This ticket adds:
+A Triangle surface that fits the existing Surface contract (src/surfaces/surface.py).
+A load_obj() function that converts an OBJ file into a flat list of Triangle instances ready to be added to a scene.
+Acceptance criteria
+src/surfaces/triangle.py defines a Triangle class that subclasses the abstract Surface base from src/surfaces/surface.py.
+Triangle.__init__ accepts three Vector3 vertices (v0, v1, v2) and a Material, matching the constructor signature pattern used by Sphere and Cube.
+Triangle.intersect(ray) implements the Möller–Trumbore algorithm, returning a RayHit on a valid hit (t > ε, u ≥ 0, v ≥ 0, u+v ≤ 1) and None otherwise.
+The returned RayHit carries the correct interpolated or flat face normal; face normal ((v1−v0) × (v2−v0)).normalize()) is the baseline — smooth normals are out of scope.
+Triangle is exported from src/surfaces/__init__.py alongside Sphere, Cube, and InfinitePlane.
+src/surfaces/triangle.py also exposes load_obj(path: str, material: Material) -> list[Triangle] that parses v and f lines from a Wavefront OBJ file and returns one Triangle per triangulated face; non-triangular faces (quads, n-gons) are fan-triangulated.
+The scene description format (.txt) gains an obj <path> <material_name> directive that the scene loader (src/scene.py) resolves by calling load_obj and extending the surface list.
+A new scene file src/scenes/teapot.txt (or any low-poly OBJ asset checked into src/scenes/) renders without NaN pixels or self-intersection fireflies at the default settings.
+Unit tests in tests/test_triangle.py cover: definite hit (ray passes through centre), definite miss (ray aimed away), parallel ray (determinant ≈ 0), ray hitting edge/vertex boundary, backface ray with culling disabled.
+All existing tests and the pool.txt scene continue to produce identical output (no regression).
+Implementation approach
+1. src/surfaces/triangle.py — new file
+```
+from src.surfaces.surface import Surface
+from src.ray_hit import RayHit
+from src.vector3 import Vector3
+from src.consts import EPSILON   # verify name — consts.py likely defines a small float
+
+class Triangle(Surface):
+    def __init__(self, v0: Vector3, v1: Vector3, v2: Vector3, material):
+        self.v0, self.v1, self.v2 = v0, v1, v2
+        self.material = material
+        edge1 = v1 - v0
+        edge2 = v2 - v0
+        self.normal = edge1.cross(edge2).normalize()   # flat face normal, precomputed
+        self._edge1 = edge1
+        self._edge2 = edge2
+
+    def intersect(self, ray):
+        h = ray.direction.cross(self._edge2)
+        det = self._edge1.dot(h)
+        if abs(det) < EPSILON:
+            return None           # parallel
+        inv_det = 1.0 / det
+        s = ray.origin - self.v0
+        u = inv_det * s.dot(h)
+        if u < 0.0 or u > 1.0:
+            return None
+        q = s.cross(self._edge1)
+        v = inv_det * ray.direction.dot(q)
+        if v < 0.0 or u + v > 1.0:
+            return None
+        t = inv_det * self._edge2.dot(q)
+        if t < EPSILON:
+            return None
+        hit_point = ray.at(t)     # assumes Ray.at(t) exists; see ray.py
+        return RayHit(t=t, point=hit_point, normal=self.normal, material=self.material)
+```
+Verify before writing: Open src/ray.py to confirm the method that evaluates origin + t*direction (likely ray.at(t) or ray.point_at(t)). Open src/ray_hit.py to confirm the exact constructor signature — it may be a dataclass, a namedtuple, or a plain class, and parameter names may differ (e.g. distance not t). Match exactly.
+2. src/surfaces/__init__.py — add one import
+The existing file almost certainly has a pattern like:
+```
+from src.surfaces.sphere import Sphere
+from src.surfaces.cube import Cube
+from src.surfaces.infinite_plane import InfinitePlane
+```
+Add:
+```
+from src.surfaces.triangle import Triangle
+```
+If there is a SURFACE_TYPES dict mapping string keys to classes (used by the scene loader), add "triangle": Triangle.
+3. OBJ loader — in src/surfaces/triangle.py
+```
+def load_obj(path: str, material) -> list:
+    vertices = []
+    triangles = []
+    with open(path) as f:
+        for line in f:
+            parts = line.split()
+            if not parts:
+                continue
+            if parts[0] == 'v':
+                vertices.append(Vector3(float(parts[1]), float(parts[2]), float(parts[3])))
+            elif parts[0] == 'f':
+                # OBJ indices are 1-based; strip texture/normal suffixes (e.g. "1/2/3" → 1)
+                indices = [int(p.split('/')[0]) - 1 for p in parts[1:]]
+                # fan triangulation for quads/n-gons
+                for i in range(1, len(indices) - 1):
+                    triangles.append(Triangle(vertices[indices[0]],
+                                              vertices[indices[i]],
+                                              vertices[indices[i+1]],
+                                              material))
+    return triangles
+```
+Scope limit: Ignore vn, vt, mtllib, usemtl, o, g lines entirely for now. The caller supplies a single Material for the whole mesh.
+4. src/scene.py — OBJ directive in scene parser
+Read src/scene.py first to understand how the pool scene is parsed. The text format for pool.txt likely has one directive per line (sphere, cube, etc.) followed by parameters. Add handling for:
+```
+obj assets/teapot.obj matte_white
+```
+In the parsing loop, when the directive token is obj:
+```
+from src.surfaces.triangle import load_obj
+# ...
+elif token == 'obj':
+    path, mat_name = params[0], params[1]
+    material = materials[mat_name]   # adjust to actual material lookup pattern
+    self.surfaces.extend(load_obj(path, material))
+```
+Path resolution: Make the OBJ path relative to the scene file's directory, not the CWD, to avoid breakage when the renderer is invoked from different directories.
+5. Test asset
+Check in a small OBJ into src/scenes/ (e.g. a 4-face tetrahedron hand-authored or a Creative Commons low-poly mesh). Do not check in a full Utah Teapot (15k faces) — it will make the unaccelerated renderer unusably slow and inflate the repo. A 50–200 face mesh is sufficient to validate correctness.
+6. tests/test_triangle.py — new file
+Test cases must construct Triangle directly (not via the scene file) so they are isolated from the parser:
+```
+# hit through centroid
+# miss: ray parallel but offset
+# parallel: ray direction coplanar with triangle
+# very-near-zero t rejected
+# quad fan-triangulation in load_obj produces 2 triangles
+```
+Risks & edge cases
+Risk
+Detail
+RayHit constructor mismatch
+ray_hit.py constructor parameters are unknown. If it uses positional args or different names the Triangle.intersect return will silently pass wrong data. Read ray_hit.py before writing a single line.
+Vector3 operator coverage
+Möller–Trumbore needs -, .dot(), .cross(), scalar multiply, and .normalize(). vector3.py may be missing one (e.g. cross is rare in minimal implementations). Check before assuming.
+Ray.at(t) method name
+ray.py may expose point_at, at, or no helper (requiring inline ray.origin + t * ray.direction).
+EPSILON name in consts.py
+Might be EPS, EPSILON, SMALL, or a bare 1e-8 inline literal. Using the wrong name causes an AttributeError at runtime.
+Scene text format delimiters
+pool.txt format is unknown — it could be whitespace-delimited, CSV, or key=value. The OBJ directive must follow whatever convention exists, not introduce a new one.
+Performance with no BVH
+Even a 200-face mesh adds 200 intersection tests per ray per bounce. At 500×500 with 4 bounces that is 200M extra calls. Flag this in the PR and document that BVH acceleration is the natural next step.
+Negative OBJ indices
+OBJ allows negative (relative) indices (f -3 -2 -1). The loader above does not handle them. Document as a known limitation.
+Winding order and normal direction
+OBJ convention is counter-clockwise = front face. If the scene camera looks at the back of an OBJ mesh, all face normals will point away and the mesh will appear black. The fix is either two-sided lighting in ray_tracer.py or noting that meshes must be oriented correctly.
+load_obj path in tests
+Unit tests that exercise load_obj need a fixture OBJ file. Use tmp_path (pytest) to write a minimal OBJ inline rather than depending on a repo asset path.
+Open questions
+Does surface.py define an abstract method signature? If intersect has a different name or signature (e.g. def hit(self, ray, t_min, t_max)), the new class must match it exactly — Möller–Trumbore's early-exit logic may need to move inside those bounds.
+Does the scene loader hold surfaces in a flat list or a spatial structure? If ray_tracer.py iterates a flat scene.surfaces list, adding hundreds of triangles works but is O(n) per ray. If there is already a BVH stub, triangles should be inserted into it.
+Is Material passed by name string or by object reference in the scene file? The OBJ directive proposal assumes a materials dict keyed by name — confirm against how pool.txt references materials.
+Should backface culling be on or off by default? For closed meshes culling is fine and cheaper; for single-sided panels or inverted normals it causes invisible geometry. Recommend a cull_backfaces=False kwarg on Triangle.__init__ (default off) and document it.
+Is there a test harness / CI already? The file tree shows no tests/ directory. Confirm where tests should live and how they are run before creating tests/test_triangle.py.
+Activity
+SunsetDodo
+added
+feature
+priority:medium
+tt:planned
+tt:in-progress
+tt:pinnedmanual status — don't auto-sync from gitmanual status — don't auto-sync from git
+and removed
+tt:planned
+tt:in-progress
+tt:pinnedmanual status — don't auto-sync from gitmanual status — don't auto-sync from git
+on Jun 16, 2026
+SunsetDodo commented on Jun 16, 2026
+SunsetDodo
+on Jun 16, 2026
+OwnerAuthor
+More actions
+🤖 Auto-implemented — 1 commit(s), $1.5016 on plan.
+Summary
+What changed (9 files, 263 insertions):
+File
+Change
+src/surfaces/triangle.py
+New — Triangle(v0, v1, v2, material_index) with Möller–Trumbore get_hit(), precomputed face normal, and load_obj(path, material_index) with fan-triangulation
+src/surfaces/__init__.py
+Exports Triangle via relative import
+src/ray_hit.py
+Moved from surfaces.surface import Surface under TYPE_CHECKING to break the circular import created by the __init__.py export
+src/ray_tracer.py
+Added obj <path> <mat_idx> handling in parse_scene_file, resolved relative to the scene file's directory, before the float() conversion loop
+src/scenes/pyramid.obj
+6-face low-poly pyramid (smoke-test asset)
+src/scenes/teapot.txt
+Scene using the new obj directive
+tests/conftest.py
+Adds src/ to sys.path; autouse fixture that correctly resets Scene.instance (not SceneSingleton.instance) between tests
+tests/test_triangle.py
+10 unit tests: centroid hit, miss (outside/away), parallel ray, near-zero-t guard, edge boundary, backface no-culling, load_obj triangle/quad/texture-suffix variants
+tests/test_scene_parsing.py
+Regression: pool.txt still yields 7 surfaces/7 materials/5 lights; teapot.txt yields 6 Triangle surfaces
+Verified: python3.14 -m pytest tests/ -v → 12/12 passed.
+SunsetDodo
+added
+tt:review
+tt:pinnedmanual status — don't auto-sync from gitmanual status — don't auto-sync from git
+and removed
+tt:planned
+on Jun 16, 2026
+SunsetDodo commented on Jun 16, 2026
+SunsetDodo
+on Jun 16, 2026
+OwnerAuthor
+More actions
+You are performing a code review of a GitHub pull request. Your job is to be thorough, precise, and opinionated — this is not a rubber-stamp review.
+Setup
+Clone or fetch the repository SunsetDodo/NanatiBozikRaytracer if not already present locally.
+Check out the branch feature/1-implement-triangle-primitive-and-obj-mes.
+Identify the default branch (likely main or master) and diff against it:
+```
+git diff <default-branch>...HEAD
+```
+Read every changed and added file in full before forming any judgment.
+Ticket: Implement Triangle primitive and OBJ mesh loader
+What this ticket requires
+The raytracer (src/surfaces/) previously had only Sphere, Cube, and InfinitePlane. This ticket adds:
+src/surfaces/triangle.py — a Triangle class subclassing the abstract Surface base from src/surfaces/surface.py, implementing the Möller–Trumbore intersection algorithm.
+load_obj(path, material) -> list[Triangle] — exposed from the same file; parses v and f lines from a Wavefront OBJ file and fan-triangulates non-triangle faces.
+src/surfaces/__init__.py — exports Triangle alongside the existing types.
+src/scene.py — a new obj <path> <material_name> directive in the scene text parser that calls load_obj and extends the surface list.
+A scene file (src/scenes/teapot.txt or similar) plus a small OBJ asset (50–200 faces) that renders without NaN pixels or self-intersection fireflies.
+tests/test_triangle.py — unit tests covering: definite hit (ray through centroid), definite miss, parallel ray (det ≈ 0), boundary hit (edge/vertex), backface ray with culling disabled, and fan-triangulation producing the correct triangle count from a quad face.
+Review checklist
+Work through each item below. For every finding, cite the exact file and line number.
+Correctness — Triangle intersection
+Is the Möller–Trumbore algorithm implemented correctly? Trace through the math: h = ray.direction × edge2, det = edge1 · h, u = (1/det) * s · h, q = s × edge1, v = (1/det) * ray.direction · q, t = (1/det) * edge2 · q. Verify signs and operand order — swapped cross-product operands silently flip winding and break half of all meshes.
+Is the parallel check abs(det) < EPSILON (not det < EPSILON)? A negative determinant means a backface hit, not a parallel ray — culling and parallelism are distinct cases.
+Is the t > EPSILON guard present to reject self-intersections and behind-ray hits? What happens if t is exactly zero?
+Does the returned RayHit match the exact constructor signature of src/ray_hit.py? Read that file — parameter names and order matter (it may be a dataclass, namedtuple, or plain class with positional args like distance, not t).
+Does ray.at(t) (or whatever method computes origin + t*direction) actually exist in src/ray.py? If the implementation calls a method that doesn't exist, every ray-triangle test silently crashes at runtime.
+Is the face normal computed as (v1 − v0) × (v2 − v0) and normalized? Is it precomputed in __init__ (good) or recomputed per intersection (wasteful)?
+Does Vector3 in this project expose all operators Möller–Trumbore needs: __sub__, dot, cross, scalar __mul__/__rmul__, and normalize? If cross is missing, the implementation cannot work — check src/vector3.py directly.
+Correctness — OBJ loader
+Are OBJ indices correctly converted from 1-based to 0-based (int(p.split('/')[0]) - 1)?
+Does fan-triangulation (for i in range(1, len(indices) - 1)) correctly produce n-2 triangles for an n-gon? Verify with a quad: indices [0,1,2,3] → triangles (0,1,2) and (0,2,3). Trace it manually.
+Are slash-separated face tokens (1/2/3, 1//3) parsed correctly, or does int(parts[1]) blow up on them?
+What happens with negative OBJ indices (e.g. f -3 -2 -1)? If unhandled, document it as a known limitation in the PR; if it raises an unguarded IndexError, that is a bug.
+Are vn, vt, mtllib, usemtl, o, g lines silently skipped without crashing?
+Are empty lines and comment lines (# ...) handled?
+Correctness — scene parser
+Read src/scene.py and src/scenes/pool.txt. Does the new obj directive follow the exact same line format as existing directives? Introducing a different delimiter or quoting convention is a parse bug.
+Is the OBJ path resolved relative to the scene file's directory, not the CWD? If not, the scene breaks whenever the renderer is invoked from a different working directory.
+Is the material looked up by name correctly? Does it use the same lookup mechanism as other surfaces in the scene file?
+Exports and integration
+Is Triangle exported from src/surfaces/__init__.py? If there is a SURFACE_TYPES dict (used by the scene loader for dispatch), is "triangle" present in it?
+Does importing src.surfaces still expose Sphere, Cube, and InfinitePlane without breakage?
+Tests
+Do tests/test_triangle.py tests actually exist? Run them:
+```
+python -m pytest tests/test_triangle.py -v
+```
+Report exact output.
+Do the tests cover all six cases listed in the ticket: definite hit, definite miss, parallel ray, edge/vertex boundary, backface with culling off, quad fan-triangulation count?
+Do tests that call load_obj use a temporary in-memory or tmp_path fixture OBJ, or do they depend on a fragile repo asset path?
+Run the full test suite:
+```
+python -m pytest --tb=short
+```
+Report pass/fail counts and any failures. Confirm the pool scene (if it has a regression test) still passes.
+Performance and design
+With no BVH, every ray tests every triangle — O(n) per ray per bounce. For a 200-face mesh at 500×500 with 4 bounces, that is ~200M extra calls. Is this flagged in the PR description or a comment? It should be.
+Is there any code path that could produce NaN normals (e.g. degenerate triangle with zero-length cross product)? Check whether normalize guards against zero-length vectors.
+Is EPSILON (or whatever the project calls its small float) imported from the right place? A wrong import name causes an AttributeError at runtime that the author would have caught in manual testing — if it is wrong, the feature was never actually run.
+Scene asset
+Is a scene file and a small OBJ asset actually checked in? Confirm file existence and face count.
+Is the OBJ asset reasonably small (≤ 200 faces)? A full Utah Teapot (~15k faces) with no BVH will make the renderer unusably slow.
+Security and filesystem
+The load_obj function opens an arbitrary path from the scene file. Is there any path traversal concern (e.g. ../../etc/passwd)? For a local renderer this is low severity, but note it if the path is ever user-supplied at a network boundary.
+Does open(path) have a mode specified? It should be open(path, 'r', encoding='utf-8') or at minimum 'r'; missing encoding can cause failures on non-ASCII comments in OBJ files.
+Verdict
+After completing all of the above, state one of:
+Approve — all acceptance criteria met, no correctness bugs, tests pass, findings are minor.
+Request changes — list every blocking issue by file and line number. For each: what is wrong, why it matters, and what the fix should be.
+Do not approve if: the RayHit constructor call mismatches ray_hit.py, Vector3.cross does not exist, the test file is absent, or the full test suite has failures.
+SunsetDodo
+added
+tt:in-progress
+tt:review
+and removed
+tt:review
+tt:in-progress
+on Jun 16, 2026
+SunsetDodo commented on Jun 16, 2026
+SunsetDodo
+on Jun 16, 2026
+OwnerAuthor
+More actions
+🔍 Auto-review — $0.3800 on plan.
+Now I have everything I need for a thorough review.
+⚠️ Request Changes
+The Möller–Trumbore math is correct and the core feature works, but there are several issues worth fixing before merge.
+Bugs / Correctness
+triangle.py:3 — bare import will break in some run contexts. from consts import EPSILON works when src/ is on sys.path, but src/surfaces/sphere.py:4 uses from src.consts import EPSILON. This inconsistency means one of the two fails depending on the working directory. The codebase has no requirements file or pyproject.toml to clarify the intended entry point — should pick one style and be consistent.
+src/surfaces/__init__.py — incomplete per acceptance criteria. The file now only exports Triangle. The ticket requires it to export Triangle alongside Sphere, Cube, and InfinitePlane. The pre-existing __init__.py was empty, but the spec is explicit. Any future code doing from surfaces import Sphere will fail.
+load_obj — no bounds check on face indices (triangle.py:55). A malformed OBJ where a face references a vertex index higher than the vertex count raises an unguarded IndexError. A short if indices[i] >= len(vertices) guard (or the negative-index case already noted in the docstring) would prevent cryptic runtime failures on user-supplied OBJ files.
+ray_hit.py:24 — Scene() called inside __post_init__. Pre-existing, but the new Triangle constructor signature (material_index: int) tightens the coupling: if Scene().materials is empty (e.g., during isolated unit testing without the conftest fixture), this silently raises IndexError. The conftest works around it, but any test that bypasses conftest will explode here.
+Minor Issues
+Asset/scene naming mismatch (src/scenes/teapot.txt loads pyramid.obj): the scene file is named "teapot" but the mesh is a pyramid. test_scene_parsing.py:29 even comments "pyramid.obj has 6 faces". Rename one to match the other.
+test_miss_ray_aimed_away comment (test_triangle.py:30) says "from behind origin going further away" but the ray starts at z=5 going +z — it's aimed away from the triangle, not from behind it. Misleading, not wrong.
+No Material type in load_obj signature. The ticket specifies load_obj(path: str, material: Material) but the implementation takes material_index: int. The int-based approach is correct for this codebase's architecture — just update the docstring/ticket spec to match.
+Tests
+Tests can't be executed (no requirements.txt, pyproject.toml, or virtual env). Coverage is solid on paper: centroid hit, outside miss, away-aimed miss, parallel ray, near-zero-t rejection, edge boundary, backface (no culling), load_obj with a triangle, a quad (fan), and texture indices. The missing case is load_obj with an OBJ that has invalid (out-of-range) vertex indices — that should be added if the bounds check above is added. The autouse conftest fixture correctly seeds one material into the singleton so RayHit.__post_init__ doesn't crash.
+SunsetDodo
+added
+tt:needs-changesa review requested changesa review requested changes
+tt:pinnedmanual status — don't auto-sync from gitmanual status — don't auto-sync from git
+and removed
+tt:needs-changesa review requested changesa review requested changes
+tt:pinnedmanual status — don't auto-sync from gitmanual status — don't auto-sync from git
+on Jun 17, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+featurepriority:mediumtt:pinnedmanual status — don't auto-sync from gitmanual status — don't auto-sync from gittt:review
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

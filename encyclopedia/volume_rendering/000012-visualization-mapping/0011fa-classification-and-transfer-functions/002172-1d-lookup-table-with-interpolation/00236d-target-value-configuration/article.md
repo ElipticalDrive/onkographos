@@ -1,0 +1,103 @@
+# Target Value Configuration
+
+Also called: Isovalue selection
+
+## Overview
+Target Value Configuration is a user-driven method for defining volume rendering appearance by specifying discrete data values of interest (isosurfaces) along with their associated visual properties [S1, unofficial]. It solves the problem of manually mapping scalar field data to color and opacity by allowing users to select specific "target" data values and assign them distinct RGB colors, allowable deviation windows, and maximum opacity levels [S1, unofficial]. It differs from general transfer function editing (e.g., [Transfer Function](1272-transfer-function.md)) by focusing on explicit iso-surface definition rather than continuous curve manipulation [S1, unofficial]. It differs from [Cubic Spline Transfer Function](1811-cubic-spline-transfer-function.md) by using discrete target points with defined tolerance windows rather than smooth polynomial interpolation across the entire domain [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar volume dataset; user-specified parameters for up to five target values [S1, unofficial].
+*   **Output:** A classification configuration consisting of target data values, RGB color triplets, deviation windows, and maximum opacity values, which drives the rendering pipeline [S1, unofficial].
+
+**Data Structures:**
+These parameters are stored as a record; a separate record is maintained for each target value selected [S1, unofficial]. Each record contains:
+1.  `target_value`: The scalar data value of interest.
+2.  `color`: An RGB triplet $(r, g, b)$ where $r, g, b \in [0.0, 1.0]$ [S1, unofficial].
+3.  `deviation`: The maximum allowable deviation from the `target_value` [S1, unofficial].
+4.  `max_opacity`: The maximum surface opacity for this target, ranging from $0.0$ to $1.0$ [S1, unofficial].
+
+**Parameters:**
+*   **Number of Targets:** Up to five target data values can be selected simultaneously [S1, unofficial].
+*   **RGB Triplets:** Expressed as three real numbers in the range $[0.0, 1.0]$ [S1, unofficial]. They must be distinct for each target to avoid color ambiguity [S1, unofficial].
+*   **Deviation Window:** Defines the range $[target\_value - deviation, target\_value + deviation]$ of values rendered for that target [S1, unofficial].
+*   **Max Opacity:** A scalar in $[0.0, 1.0]$ controlling the transparency of the rendered surface [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **User Selection:** The user selects up to five scalar data values from the volume as targets [S1, unofficial].
+2.  **Color Assignment:** For each target, the user assigns a unique RGB color triplet [S1, unofficial]. Care must be taken to ensure triplets are distinct enough to prevent "color crossover," where surface highlighting variations cause different surfaces to appear identical [S1, unofficial].
+3.  **Deviation Definition:** The user defines an allowable value deviation (window) for each target [S1, unofficial]. Samples near the center of the window (the target value) are rendered with higher opacity than samples near the window edges [S1, unofficial].
+4.  **Opacity Setting:** The user sets the maximum opacity for each target [S1, unofficial]. An opacity of $0.0$ renders the surface invisible [S1, unofficial].
+5.  **Rendering:** The renderer identifies samples within the deviation windows of the target values [S1, unofficial]. The opacity of a sample $s$ for a target $t$ is determined by its proximity to $t$ within the window, capped by the `max_opacity` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class TargetConfig:
+    target_value: float
+    color_r: float  # 0.0 to 1.0
+    color_g: float  # 0.0 to 1.0
+    color_b: float  # 0.0 to 1.0
+    deviation: float
+    max_opacity: float  # 0.0 to 1.0
+
+def compute_sample_rgba(sample_value: float, targets: list) -> tuple:
+    """Returns (r, g, b, a) for a single sample value."""
+    best_r, best_g, best_b, best_a = 0.0, 0.0, 0.0, 0.0
+    for t in targets:
+        dist = abs(sample_value - t.target_value)
+        if dist <= t.deviation:
+            # Linear falloff from center to edge [S1, unofficial]
+            if t.deviation == 0.0:
+                alpha = t.max_opacity if dist == 0.0 else 0.0
+            else:
+                alpha = t.max_opacity * (1.0 - dist / t.deviation)
+            if alpha > best_a:
+                best_a = alpha
+                best_r, best_g, best_b = t.color_r, t.color_g, t.color_b
+    return best_r, best_g, best_b, best_a
+
+def raycast(origin, direction, step_size, volume_data, bounds, targets):
+    """Front-to-back volume rendering accumulation [G]."""
+    out_r, out_g, out_b, out_a = 0.0, 0.0, 0.0, 0.0
+    t = 0.0
+    # Volume sampling and bounds checking not given in the sources [G]
+    while bounds.contains(origin + direction * t) and out_a < 1.0:
+        sample_val = volume_data.sample(origin + direction * t)
+        r, g, b, a = compute_sample_rgba(sample_val, targets)
+        # Front-to-back compositing not given in the sources [G]
+        weight = a * (1.0 - out_a)
+        out_r += r * weight
+        out_g += g * weight
+        out_b += b * weight
+        out_a += weight
+        t += step_size
+    return out_r, out_g, out_b, out_a
+```
+
+**Edge Cases and Pitfalls:**
+*   **Identical RGB Triplets:** Using the same RGB triplet for different target values causes surfaces to appear with the same color, leading to visual ambiguity [S1, unofficial].
+*   **Color Crossover:** RGB triplets must be distinct enough that variations in surface highlighting do not cause surfaces with different initial colors to appear identical [S1, unofficial].
+*   **Zero Opacity:** An opacity of $0.0$ renders the surface invisible [S1, unofficial].
+*   **Zero Deviation:** A deviation of $0.0$ requires a guard to avoid division by zero during opacity calculation [G].
+
+## Subtopics
+
+### Manual Specification with Dual Domain Interaction
+A specific interaction technique for Target Value Configuration where the user manually draws transfer function shapes and intervals while simultaneously inspecting the volume [S2, unofficial]. The user draws opacity curves with the left mouse button and sets intervals of influence with the right mouse button [S2, unofficial]. Colors are assigned via a picker, with the interval painted using linear interpolation centered on the selected color [S2, unofficial]. Opacities in the interval are scaled via keyboard [S2, unofficial]. A dual-domain approach uses a clipping plane to sweep the volume, displaying the slice as a gray-level image [S2, unofficial]. As the mouse moves, the voxel value is shown, and a marker appears on the transfer function plot; clicking increases the opacity for that voxel value [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Provides explicit control over specific isosurfaces; intuitive for users who know the data values of interest; direct visual feedback via dual-domain interaction [S2, unofficial].
+*   **Limitations:** Limited to up to five targets [S1, unofficial]; requires careful color selection to avoid ambiguity [S1, unofficial]; less flexible for complex, non-isosurface features compared to continuous transfer functions [S1, unofficial].
+*   **When to use:** When the user wants to highlight specific, known scalar values (e.g., specific tissue types, fluid boundaries) and wants explicit control over their appearance [S1, unofficial].
+*   **When not to use:** When the data features are not well-defined by single scalar values or when more than five distinct features need to be highlighted [S1, unofficial].
+
+## Background
+Documented in a report on volumetric rendering techniques for aerodynamic flow field data [S1, unofficial]. The method allows users to select large values of interest and associate them with RGB colors and deviation windows [S1, unofficial]. It is part of a broader effort to make volume rendering more accessible through user-friendly interfaces, including manual specification and dual-domain interaction techniques [S2, unofficial]. The history tree concept, which tracks visualization evolution, is also relevant to this method, allowing users to retrieve previous configurations [S2, unofficial].
+
+## Sources
+[S1] DTIC ADA202661: Volumetric Rendering Techniques for the Display of Three-Dimensional Aerodynamic Flow Field Data, https://archive.org/details/DTIC_ADA202661, fetched 2026-10-26 (unofficial)
+[S2] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)

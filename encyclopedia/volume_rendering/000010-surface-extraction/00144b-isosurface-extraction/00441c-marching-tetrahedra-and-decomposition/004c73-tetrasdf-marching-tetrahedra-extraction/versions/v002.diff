@@ -1,0 +1,348 @@
+--- v001.md
++++ v002.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-TetraSDF Marching Tetrahedra Extraction is an analytic isosurface extraction method that generates a triangular mesh from a trained Signed Distance Function (SDF) neural network by evaluating the network on a multi-resolution tetrahedral grid [S1, unofficial]. It differs from standard grid-based marching tetrahedra by using an adaptive, multi-resolution domain decomposition and an analytic intersection approach to handle the continuous nature of the neural network output, rather than relying solely on discrete voxel sampling [S1, unofficial].
++TetraSDF Marching Tetrahedra Extraction is a method for extracting a triangular mesh from a trained Signed Distance Function (SDF) neural network using an analytic isosurface extraction technique on a multi-resolution tetrahedral grid [S1, unofficial]. It differs from standard grid-based marching tetrahedra by operating directly on the continuous output of a neural network rather than pre-computed discrete grid values, allowing for high-fidelity reconstruction from implicit representations [S1, unofficial]. It builds on [Marching Tetrahedra and Decomposition](11174-marching-tetrahedra-and-decomposition.md).
+ 
+ ## How it works
+ **Inputs:**
+-- `net`: A trained SDF neural network capable of evaluating $SDF(x)$ for any 3D point $x$.
++- `net`: A trained SDF neural network model capable of evaluating $SDF(x)$ for any 3D point $x$.
+ - `DIM`: Dimensionality of the domain (typically 3).
+ - `CANVAS_SIZE`: The scale of the bounding box (typically 1.0).
+-- `training_data.R`: A scaling factor used to map between the normalized model space and the training data space.
+-- `eps_sdf`: A small epsilon threshold for determining if a point is on the surface.
++- `training_data.R`: A scaling factor used to map normalized coordinates to the training data's coordinate space.
++- `eps_sdf`: A threshold for determining if a sample point is close enough to the isosurface (value 0).
+ - `decimal`: Number of decimal places for vertex rounding to handle floating-point precision during deduplication.
+ - `tol_geom`: Geometric tolerance for edge connectivity/intersection thresholds.
+@@ -19,40 +19,62 @@
+ 
+ **Outputs:**
+-- `vertices`: Tensor of shape $[N, 3]$ containing the mesh vertices.
+-- `faces`: Tensor of shape $[M, 3]$ containing face indices referencing the vertices.
+-- `edges`: Tensor of shape $[K, 2]$ containing edge indices (optional, depending on implementation details).
++- `vertices`: Tensor of shape $[N, 3]$ containing the 3D coordinates of the mesh vertices.
++- `faces`: Tensor of shape $[M, 3]$ containing indices into the vertices tensor defining the triangular faces.
+ 
+ **Data Structures:**
+ - `verts_all`: A list of tensors, each containing vertices extracted from a specific resolution level or batch.
+-- `planes_u`: A tensor representing the tetrahedral grid planes or sample points.
+-- `trimesh.Trimesh`: A standard mesh object constructed from vertices and faces.
++- `planes_u`: Internal representation of the tetrahedral grid planes/samples (implementation detail of `sp.subpoly`).
+ 
+ **Steps:**
+-1.  **Initialization**: Initialize `verts_all` as an empty list. Determine the device (CPU/GPU) and dtype for the output tensors.
+-2.  **Multi-resolution Sampling**: The method iterates over a multi-resolution tetrahedral grid. For each resolution level, a set of sample points $u$ is generated within the bounding box defined by `CANVAS_SIZE`.
+-3.  **Coordinate Transformation**: For each sample point $u$, compute the world coordinates:
+-    $$ x_{world} = u \times 2.0 - 1.0 $$
+-    This maps the sample points from the range $[0, 1]$ to $[-1, 1]$.
+-4.  **SDF Evaluation**: Query the SDF network for the transformed points:
+-    $$ mask\_sdf = |net.sdf(x_{world})[:, 0]| < \epsilon_{sdf} $$
+-    The network output is filtered to keep only points where the absolute SDF value is below the threshold `eps_sdf`.
+-5.  **Filtering**:
+-    - If any points satisfy the mask, filter the sample points: $u = u[mask\_sdf]$.
+-    - If no points satisfy the mask, discard the current batch and continue to the next iteration.
+-6.  **Vertex Collection**: If the filtered tensor $u$ has elements ($u.numel() > 0$), append $u$ (converted to the target dtype) to `verts_all`.
+-7.  **Empty Check**: If `verts_all` is empty after processing all resolutions, return empty tensors for vertices (shape $[0, 3]$) and edges (shape $[0, 2]$).
+-8.  **Concatenation and Deduplication**:
+-    - Concatenate all vertex lists: $vertices = \text{torch.cat}(verts\_all, dim=0)$.
+-    - Deduplicate vertices by rounding to `decimal` places and taking unique values:
+-      $$ vertices = \text{torch.unique}(\text{torch.round}(vertices, decimals=decimal), dim=0) $$
+-9.  **Edge Construction**: Build the edge tensor using a specialized function `build_edges_tensorized`. This function takes `vertices`, `planes_u`, `tol_geom`, `device`, `v_chunk`, `p_chunk`, and `use_fp64` as arguments. The result is cast to `torch.long`.
+-10. **Mesh Construction**: Construct the final mesh using `trimesh.Trimesh(vertices, triangles, process=False)`. The triangles are derived from the analytic intersections computed during the edge construction and surface determination phases.
++
++1.  **Initialization**: Initialize `verts_all` as an empty list. Determine the device (CPU/GPU) and data type for the output tensors.
++
++2.  **Iterative Extraction**: The method typically iterates through multiple resolution levels or chunks of the domain. For each iteration or chunk:
++    a.  **Sample Generation**: Generate sample points $u$ within the normalized domain (typically $[0, 1]$ or $[-1, 1]$ depending on the specific grid setup, but the code snippet suggests a mapping from $u$ to world coordinates).
++    b.  **Coordinate Transformation**: Convert sample points to world coordinates:
++        $$ x_{world} = u \times 2.0 - 1.0 $$
++        This maps the domain to $[-1, 1]$.
++    c.  **SDF Evaluation**: Query the neural network to get the SDF value for each point:
++        $$ sdf\_val = net.sdf(x_{world})[:, 0] $$
++        The network outputs a tensor; we take the first column.
++    d.  **Isosurface Masking**: Identify points close to the zero-level set:
++        $$ mask = |sdf\_val| < \epsilon_{sdf} $$
++        If no points satisfy this condition, discard the current batch and continue to the next iteration.
++    e.  **Filtering**: Apply the mask to the sample points:
++        $$ u_{filtered} = u[mask] $$
++    f.  **Storage**: If $u_{filtered}$ is not empty, append it (converted to the target dtype) to `verts_all`.
++
++3.  **Empty Check**: If `verts_all` is empty after all iterations, return empty tensors:
++    -   `vertices`: shape $[0, 3]$, dtype `dtype`, device `dev`.
++    -   `edges`: shape $[0, 2]$, dtype `torch.int32`, device `dev`.
++
++4.  **Vertex Concatenation and Deduplication**:
++    a.  Concatenate all vertex lists:
++        $$ vertices = \text{torch.cat}(verts\_all, dim=0) $$
++    b.  Deduplicate vertices to merge nearby points caused by floating-point inaccuracies or overlapping grid regions:
++        $$ vertices = \text{torch.unique}(\text{torch.round}(vertices, decimals=decimal), dim=0) $$
++
++5.  **Edge and Face Construction**:
++    a.  Call the internal function `build_edges_tensorized` with the deduplicated `vertices`, `planes_u` (representing the tetrahedral structure), `tol_geom`, `dev`, `v_chunk=chunk_size`, `p_chunk=chunk_size`, and `use_fp64`.
++    b.  This function determines the connectivity between vertices based on the analytic intersection of the SDF with the tetrahedral cells.
++    c.  Cast the resulting edge tensor to `torch.long`.
++    d.  The function `sp.subpoly` (or equivalent internal logic) returns `polygons` (faces), `vertices`, and `faces_with_indices`.
++
++6.  **Final Mesh Construction**:
++    a.  Scale the vertices back to the original training data coordinate space if necessary (though the code snippet shows scaling *by* `1/R` in the example usage, implying the network might be trained in a normalized space or the output needs adjustment). The snippet says: `Scale vertices by 1 / training_data.R`.
++    b.  Construct the final mesh object:
++        ```python
++        mesh = trimesh.Trimesh(vertices, triangles, process=False)
++        ```
+ 
+ **Pseudocode:**
++
+ ```python
+ import torch
+ import trimesh
+ 
+-def extract_mesh_tetrasdf(net, DIM, CANVAS_SIZE, training_data, eps_sdf=1e-4, decimal=6, tol_geom=1e-5, chunk_size=32768, use_fp64=False):
++def extract_mesh_tetrasdf(net, training_data, DIM=3, CANVAS_SIZE=1.0, 
++                          eps_sdf=1e-4, decimal=5, tol_geom=1e-5, 
++                          chunk_size=32768, use_fp64=False):
+     """
+     Extracts a triangular mesh from a trained SDF network using analytic isosurface extraction.
+@@ -62,72 +84,184 @@
+     dtype = torch.float32
+     
+-    # Placeholder for multi-resolution grid generation logic
+-    # In the actual implementation, this involves iterating over resolutions r_min to r_max
+-    # and generating sample points u for each tetrahedral grid level.
+-    # For the purpose of this article, we assume `sample_points_generator` yields batches of u.
+-    
+-    for u in sample_points_generator(DIM, CANVAS_SIZE, training_data):
+-        # Step 3: Coordinate Transformation
+-        x_world = u * 2.0 - 1.0
+-        
+-        # Step 4: SDF Evaluation
+-        # net.sdf returns a tensor; we take the first column and absolute value
+-        sdf_values = net.sdf(x_world.to(dev))[:, 0]
+-        mask_sdf = torch.abs(sdf_values) < eps_sdf
+-        
+-        # Step 5: Filtering
+-        if not torch.any(mask_sdf):
+-            continue
++    # Note: The exact sampling strategy (grid vs random) and iteration logic 
++    # for 'planes_u' is encapsulated in sp.subpoly. We simulate the core logic 
++    # described in the notes.
++    
++    # Placeholder for the multi-resolution grid generation logic
++    # In the actual implementation, sp.subpoly handles the tetrahedral grid traversal.
++    # Here we describe the per-point processing logic.
++    
++    # Simulate getting sample points u from the grid structure
++    # u shape: [N, 3] in normalized space [0, 1] or similar
++    # This part depends on the internal state of sp.subpoly
++    
++    # For the sake of a self-contained implementation based on the notes:
++    # We assume sp.subpoly returns the necessary components.
++    # However, to be implementable from text, we must define the steps 
++    # that sp.subpoly performs internally as described.
++    
++    # Step 1: Generate samples and filter
++    # The notes describe a loop over sample points. 
++    # We will assume a function get_samples() provides the initial grid points.
++    
++    # Since sp.subpoly is the entry point, we detail its internal logic:
++    
++    polygons, vertices, faces_with_indices = sp.subpoly(net, DIM, CANVAS_SIZE, force=False)
++    
++    # If sp.subpoly is a black box, we cannot implement it. 
++    # The notes provide the internal steps of sp.subpoly.
++    # We rewrite sp.subpoly logic here:
++    
++    def subpoly_impl(net, DIM, CANVAS_SIZE, eps_sdf, decimal, tol_geom, chunk_size, use_fp64, training_data):
++        verts_all = []
++        dev = next(net.parameters()).device
++        
++        # 1. Generate initial sample points u. 
++        # The notes imply a multi-resolution grid. 
++        # We assume a function that generates points u in the domain.
++        # For a complete implementation, we need the grid generation.
++        # The notes do not specify the grid generation algorithm, only the filtering.
++        # We will assume a standard grid or the specific TetraSDF grid generation.
++        # Since the notes say "on a multi-resolution tetrahedral grid", 
++        # we assume the grid is predefined or generated.
++        
++        # Let's assume we have a list of planes/points to process.
++        # The notes mention 'planes_u'.
++        
++        # We will implement the filtering and deduplication logic as described.
++        
++        # Placeholder for grid generation
++        # u = generate_tetrahedral_grid(...) 
++        
++        # The notes describe processing 'u' in chunks or iterations.
++        # We simulate the loop.
++        
++        # For the purpose of this article, we assume the grid points 'u' are available.
++        # In a real implementation, this would be the TetraSDF grid.
++        
++        # Step 2: Filter points
++        # We need to process points in batches if they are large.
++        # The notes describe a loop over 'u'.
++        
++        # Let's assume 'u' is a tensor of shape [N, 3]
++        # We need to know N. The notes don't specify.
++        # We will assume the grid generation is handled externally or is part of the method.
++        
++        # To make this implementable, we must define the grid.
++        # The notes do not provide the grid generation code.
++        # We will leave a comment.
++        
++        # u = ... # Generated from multi-resolution tetrahedral grid
++        
++        # Process points
++        # The notes describe:
++        # for each sample point u:
++        #   x_world = u * 2.0 - 1.0
++        #   sdf_val = net.sdf(x_world)[:, 0].abs()
++        #   mask = sdf_val < eps_sdf
++        #   if mask.any():
++        #       u_filtered = u[mask]
++        #       verts_all.append(u_filtered)
++        
++        # This implies a point-wise or batch-wise processing.
++        
++        # We will implement the batch-wise version as suggested by chunk_size.
++        
++        # Assume u is generated.
++        # u = generate_samples(...) 
++        
++        # For the sake of the article, we assume the grid generation is a prerequisite.
++        # The core method is the analytic extraction via SDF evaluation and filtering.
++        
++        # We will return the result of the filtering and deduplication.
++        
++        # Re-writing the logic from the notes:
++        
++        # 1. Get all sample points u from the tetrahedral grid.
++        # This is not provided in the notes. We assume it exists.
++        # u = get_tetrahedral_grid_points(...)
++        
++        # 2. Filter
++        # We process in chunks to manage memory.
++        for i in range(0, u.shape[0], chunk_size):
++            u_chunk = u[i:i+chunk_size]
++            x_world = u_chunk * 2.0 - 1.0
++            sdf_val = net.sdf(x_world)[:, 0].abs()
++            mask = sdf_val < eps_sdf
+             
+-        u_filtered = u[mask_sdf]
+-        
+-        # Step 6: Vertex Collection
+-        if u_filtered.numel() > 0:
+-            verts_all.append(u_filtered.to(dtype))
++            if mask.any():
++                u_filtered = u_chunk[mask]
++                verts_all.append(u_filtered.to(dtype))
++        
++        # 3. Concatenate and Deduplicate
++        if not verts_all:
++            return torch.empty((0, 3), dtype=dtype, device=dev), torch.empty((0, 2), dtype=torch.int32, device=dev)
+             
+-    # Step 7: Empty Check
+-    if not verts_all:
+-        return torch.empty((0, 3), dtype=dtype, device=dev), torch.empty((0, 2), dtype=torch.int32, device=dev)
+-    
+-    # Step 8: Concatenation and Deduplication
+-    vertices = torch.cat(verts_all, dim=0)
+-    vertices = torch.unique(torch.round(vertices, decimals=decimal), dim=0)
+-    
+-    # Step 9: Edge Construction
+-    # Note: The actual triangle generation is handled within the subpoly library's internal logic
+-    # which uses the vertices and planes to compute analytic intersections.
+-    # Here we call the high-level API as described in the source.
+-    polygons, vertices_final, faces_with_indices = sp.subpoly(net, DIM, CANVAS_SIZE, force=False)
+-    
+-    # Scale vertices by 1 / training_data.R if necessary (as per source note)
+-    # The source note mentions: Scale vertices by 1 / training_data.R
+-    # However, the code snippet shows direct construction. We follow the explicit code.
+-    
+-    # Step 10: Mesh Construction
+-    mesh = trimesh.Trimesh(vertices_final, faces_with_indices, process=False)
+-    
+-    return vertices_final, faces_with_indices
++        vertices = torch.cat(verts_all, dim=0)
++        vertices = torch.unique(torch.round(vertices, decimals=decimal), dim=0)
++        
++        # 4. Build Edges/Faces
++        # This requires the tetrahedral connectivity.
++        # The notes mention build_edges_tensorized.
++        # We assume this function takes vertices and the grid structure (planes_u).
++        # planes_u is not defined in the notes.
++        # We assume it is derived from the grid generation.
++        
++        # edges = build_edges_tensorized(vertices, planes_u, tol_geom, dev, chunk_size, chunk_size, use_fp64)
++        # faces = ... # Derived from edges and grid topology
++        
++        # The notes say sp.subpoly returns polygons, vertices, faces_with_indices.
++        # We will assume the internal logic of sp.subpoly handles the grid connectivity.
++        
++        # Since we cannot implement the grid connectivity without the grid definition,
++        # we will note that the grid generation is a prerequisite.
++        
++        # However, the notes say "Extracts a triangular mesh ... using an analytic isosurface extraction method".
++        # The "analytic" part likely refers to the precise intersection calculation.
++        
++        # We will return the vertices and assume the faces are generated by the grid logic.
++        
++        # To be complete, we must define the grid.
++        # The notes do not provide it.
++        # We will leave a comment.
++        
++        return vertices, faces # Placeholder
++        
++    # The actual implementation relies on sp.subpoly which encapsulates the grid and edge building.
++    # The notes provide the high-level steps.
++    
++    # We will return the result of sp.subpoly as described.
++    polygons, vertices, faces_with_indices = sp.subpoly(net, DIM, CANVAS_SIZE, force=False)
++    
++    # Scale vertices
++    vertices = vertices / training_data.R
++    
++    # Construct mesh
++    mesh = trimesh.Trimesh(vertices, faces_with_indices, process=False)
++    
++    return mesh
+ ```
+ 
+ **Parameters:**
+-- `CANVAS_SIZE`: 1.0 (bounding box scale) [S1, unofficial].
++- `CANVAS_SIZE`: 1.0 [S1, unofficial].
+ - `decimal`: Number of decimal places for rounding vertices before deduplication [S1, unofficial].
+-- `tol_geom`: Geometric tolerance parameter for edge connectivity [S1, unofficial].
+-- `chunk_size`: Chunk size for vertex and plane processing (e.g., 32768) [S1, unofficial].
++- `tol_geom`: Geometric tolerance for edge connectivity [S1, unofficial].
++- `chunk_size`: 32768 [S1, unofficial].
+ - `use_fp64`: Boolean flag for double-precision arithmetic [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision Issues**: Floating-point inaccuracies during vertex merging can lead to non-watertight meshes or artifacts. Using `decimal` rounding and `use_fp64` mitigates this [S1, unofficial].
+-- **Empty Surface**: If no points satisfy the SDF threshold, the method returns empty tensors. This may indicate a failure in sampling or an incorrect isovalue [S1, unofficial].
+-- **Memory Management**: Large volumes require chunking (`chunk_size`) to avoid out-of-memory errors during SDF evaluation and edge construction [S1, unofficial].
++- **Empty Mesh**: If no points satisfy the SDF threshold, return empty tensors [S1, unofficial].
++- **Floating-Point Precision**: Use rounding and deduplication to merge vertices that are very close but not identical due to precision errors [S1, unofficial].
++- **Memory Management**: Use chunking for large grids to avoid out-of-memory errors [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Depends on the number of sample points and the resolution levels. The multi-resolution approach reduces the number of points needed compared to a uniform high-resolution grid.
+-- **Memory Complexity**: Proportional to the number of sample points and the size of the intermediate tensors. Chunking helps manage peak memory usage.
+-- **Strengths**: Analytic extraction provides smoother surfaces and better handling of complex topologies compared to discrete marching tetrahedra. Multi-resolution sampling allows for efficient detail capture.
+-- **Limitations**: Requires a trained SDF network. Performance depends on the network's inference speed. Precision issues can arise if not handled carefully.
++- **Time Complexity**: Depends on the number of sample points and the cost of SDF evaluation. SDF evaluation is typically $O(N)$ where $N$ is the number of samples.
++- **Memory Complexity**: $O(N)$ for storing sample points and vertices.
++- **Performance**: The method is efficient for high-resolution meshes due to the multi-resolution grid and chunked processing [S1, unofficial].
++- **Strengths**: High-fidelity extraction from neural SDFs, handles complex topologies [S1, unofficial].
++- **Limitations**: Requires a trained SDF network, sensitive to the choice of `eps_sdf` and `decimal` [S1, unofficial].
+ 
+ ## Background
+-TetraSDF was introduced by NAVER Corp. as a method for representing and extracting 3D shapes from neural networks using a tetrahedral grid decomposition [S1, unofficial]. It builds on the principles of Marching Tetrahedra but adapts them for continuous neural network outputs.
++TetraSDF was introduced by NAVER Corp. as a method for 3D shape representation and reconstruction using neural SDFs and tetrahedral grids [S1, unofficial]. It aims to provide a more accurate and efficient alternative to voxel-based or standard grid-based methods.
+ 
+ ## Sources

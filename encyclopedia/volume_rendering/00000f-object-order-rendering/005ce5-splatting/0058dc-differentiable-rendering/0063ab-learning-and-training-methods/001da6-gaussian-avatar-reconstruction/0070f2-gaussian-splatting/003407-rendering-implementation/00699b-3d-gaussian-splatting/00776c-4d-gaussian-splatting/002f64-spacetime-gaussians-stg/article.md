@@ -1,0 +1,102 @@
+# Spacetime Gaussians (STG)
+## Overview
+Spacetime Gaussians (STG) is a 4D Gaussian Splatting method that models dynamic scenes using explicit temporal primitives, enabling real-time rendering of any time slice from discrete inputs [S1, unofficial]. It distinguishes itself from MLP-based deformation approaches (like DGS) and rotor-based methods (like 4D-Rotor GS) by using polynomial trajectories and explicit opacity envelopes rather than learned implicit fields or Clifford algebra [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D Gaussians $\{G_i\}$ captured or reconstructed from video frames at discrete time steps $t_k$.
+*   **Output:** A continuous 4D representation allowing real-time rendering of color and geometry at any arbitrary time $t$.
+
+**Data Structures:**
+Each Gaussian $G_i$ is extended with temporal parameters:
+1.  **Spatial State:** Mean $\mu \in \mathbb{R}^3$, Covariance $\Sigma \in \mathbb{R}^{3 \times 3}$ (or rotation $R$ and scale $S$), Opacity $\alpha$.
+2.  **Appearance:** Spherical Harmonics (SH) coefficients $c_{l,m}$ for each band $l$.
+3.  **Temporal Trajectory:** Polynomial coefficients for position $p(t)$ and velocity $v(t)$.
+4.  **Temporal Opacity Envelope:** Parameters defining birth, death, and peak times, or a function $e(t)$ modulating opacity.
+
+**Method Steps:**
+1.  **Initialization:** Initialize Gaussians from static reconstruction or multi-view stereo at keyframes.
+2.  **Trajectory Modeling:** Fit a polynomial trajectory $p_i(t) = \sum_{k=0}^{d} a_{i,k} t^k$ for each Gaussian $i$, where $a_{i,k}$ are learned coefficients [S1, unofficial].
+3.  **Opacity Envelope:** Define a temporal opacity function $e_i(t)$ that controls when the Gaussian is visible (born/dies/peaks) [S1, unofficial]. This allows Gaussians to appear and disappear smoothly over time.
+4.  **SH Interpolation:** Interpolate SH coefficients $c_i(t)$ over time, either linearly or via learned interpolation, to handle temporal color changes [S1, unofficial].
+5.  **Rendering:** For a target time $t$:
+    *   Compute current position $p_i(t)$ and covariance (if velocity/acceleration are modeled).
+    *   Compute opacity $\alpha_i(t) = \alpha_i \cdot e_i(t)$.
+    *   Compute SH color $C_i(t)$ from interpolated coefficients.
+    *   Project to 2D and splat as in standard 3DGS.
+
+**Formulas:**
+*   Position: $p_i(t) = \mu_i + v_i t + \frac{1}{2} a_i t^2$ (if quadratic) or higher order polynomial [S1, unofficial].
+*   Opacity: $\alpha_i(t) = \alpha_i \cdot \text{Envelope}(t; \text{birth}, \text{peak}, \text{death})$ [S1, unofficial].
+
+**Parameters:**
+*   Polynomial degree: Typically 1 or 2 [S1, unofficial].
+*   SH bands: Same as static 3DGS (e.g., order 3) [S1, unofficial].
+
+**Edge Cases:**
+*   **Extrapolation:** Performance degrades outside the training time range.
+*   **Precision:** Polynomial fitting can be sensitive to time normalization.
+*   **Degenerate Input:** If a Gaussian is only visible in one frame, trajectory estimation is ill-posed.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_stg(gaussians, time_t, camera):
+    """
+    Render a scene at time_t using Spacetime Gaussians.
+    gaussians: List of Gaussian objects with attributes:
+        - mu: (3,) initial mean
+        - v: (3,) velocity coefficient
+        - a: (3,) acceleration coefficient (if degree >= 2)
+        - alpha: (1,) base opacity
+        - envelope_params: (3,) birth, peak, death times
+        - sh_coeffs: (L,) spherical harmonic coefficients
+        - sh_interp_coeffs: (L,) interpolation coefficients for time
+    """
+    projected_gaussians = []
+    for g in gaussians:
+        # 1. Compute temporal position
+        pos = g.mu + g.v * time_t
+        if hasattr(g, 'a'):
+            pos += 0.5 * g.a * (time_t ** 2)
+        
+        # 2. Compute temporal opacity envelope
+        # Simple linear envelope for demonstration; sources mention "born/dies/peaks"
+        birth, peak, death = g.envelope_params
+        if time_t < birth or time_t > death:
+            alpha_t = 0.0
+        elif time_t <= peak:
+            alpha_t = g.alpha * (time_t - birth) / (peak - birth)
+        else:
+            alpha_t = g.alpha * (death - time_t) / (death - peak)
+        
+        # 3. Interpolate SH coefficients
+        # Linear interpolation between base and time-varying coeffs
+        sh_t = g.sh_coeffs + g.sh_interp_coeffs * time_t
+        
+        # 4. Project and splat (standard 3DGS projection)
+        # Assume project_gaussian handles view matrix, projection, and covariance rotation
+        proj_g = project_gaussian(pos, g.covariance, camera)
+        proj_g.alpha = alpha_t
+        proj_g.sh = sh_t
+        projected_gaussians.append(proj_g)
+    
+    # Standard alpha blending
+    return composite(projected_gaussians, camera)
+```
+## Subtopics
+
+### [Spacetime](7334-spacetime.md)
+Spacetime is a method that adds a temporal dimension to the feature field of 3D Gaussians, enabling real-time interpolation of both color and geometry between discrete keyframes.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per frame, where $N$ is the number of Gaussians. Real-time rendering is achieved as trajectory and envelope evaluations are cheap polynomial operations [S1, unofficial].
+*   **Memory Complexity:** $O(N \cdot D)$, where $D$ is the size of trajectory and envelope parameters. Slightly higher than static 3DGS due to temporal coefficients.
+*   **Strengths:** Real-time rendering of arbitrary time slices; explicit control over motion; no need for MLP inference at render time [S1, unofficial].
+*   **Limitations:** Polynomial trajectories may not capture complex, non-smooth motions; requires sufficient temporal sampling for accurate fitting [S1, unofficial].
+*   **When to use:** When real-time rendering of smooth, continuous dynamic scenes is required, and the motion can be approximated by polynomials [S1, unofficial].
+*   **When not to use:** For highly complex, non-smooth, or chaotic motion; when memory is extremely constrained [S1, unofficial].
+## Background
+Spacetime Gaussians (STG) was introduced by Li et al. in CVPR'24 [S1, unofficial]. It addresses the limitations of MLP-based deformation networks (like DGS) by providing a more explicit and efficient representation for dynamic scenes [S1, unofficial]. It is part of the broader family of 4D Gaussian Splatting methods, alongside 4D-Rotor GS and Real-time 4DGS [S1, unofficial].
+## Sources
+[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

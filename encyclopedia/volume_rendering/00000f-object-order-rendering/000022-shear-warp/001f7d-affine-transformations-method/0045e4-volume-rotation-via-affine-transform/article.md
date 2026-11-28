@@ -1,0 +1,102 @@
+# Volume Rotation via Affine Transform
+Also called: Affine Grid Rotation, Affine Volume Rotation, Volume Rotation (Affine Grid)
+
+## Overview
+This method rotates a 3D volume or 2D slice by applying an affine transformation to the sampling grid, aligning the data for subsequent compositing [S2, unofficial]. It differs from [Warp-Space Affine Mixture](4115-warp-space-affine-mixture.md) by operating directly on the voxel grid coordinates rather than warping the projection space, and from [Image Transformation Methods](10425-image-transformation-methods.md) by treating the volume as a 3D object to be rotated in world space rather than transforming the final 2D image plane [G].
+
+## How it works
+**Inputs:** A 3D volume array $V$ of shape $(D_x, D_y, D_z)$, and a rotation angle $\theta$ [G].
+**Outputs:** A rotated volume array $V'$ of the same shape [G].
+
+**Data Structures:**
+-   `volume`: NumPy or PyTorch tensor of shape $(D_x, D_y, D_z)$ [S1, unofficial].
+-   `rotation_matrix`: $3 \times 3$ matrix $R$ [S1, unofficial].
+-   `offset`: $3 \times 1$ vector $o$ [S1, unofficial].
+
+**Steps:**
+1.  **Calculate Center:** Compute the geometric center $c$ of the volume.
+    $$ c = \left[ \frac{D_x}{2}, \frac{D_y}{2}, \frac{D_z}{2} \right]^T $$
+    [S1, unofficial]
+
+2.  **Construct Rotation Matrix:** For a rotation by $\theta$ around the Z-axis, the core rotation matrix $R$ is:
+    $$ R = \begin{bmatrix} \cos(\theta) & -\sin(\theta) & 0 \\ \sin(\theta) & \cos(\theta) & 0 \\ 0 & 0 & 1 \end{bmatrix} $$
+    [S1, unofficial] For 2D slices, a $2 \times 3$ affine matrix $\begin{bmatrix} \cos(\theta) & -\sin(\theta) & 0 \\ \sin(\theta) & \cos(\theta) & 0 \end{bmatrix}$ is used [S2, unofficial].
+
+3.  **Calculate Offset:** To ensure rotation occurs around the volume's center $c$ rather than the origin, calculate the offset vector $o$:
+    $$ o = c - R \cdot c $$
+    [S1, unofficial]
+
+4.  **Generate Sampling Grid:** Create a grid of coordinates corresponding to the output volume shape [S2, unofficial].
+
+5.  **Apply Transformation:** Map the output grid coordinates to the input volume space. The transformed coordinate $x'$ for a point $x$ in the output grid is:
+    $$ x' = R \cdot x + o $$
+    [S1, unofficial]
+
+6.  **Resample and Interpolate:** Sample the original volume $V$ at the transformed coordinates $x'$ using linear interpolation (order 1) [S1, unofficial]. Out-of-bounds values are handled by clamping or returning a default value (e.g., 0) [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.ndimage import affine_transform
+
+def rotate_volume(volume, theta):
+    """
+    Rotate a 3D volume around the Z-axis by angle theta (radians).
+    """
+    # 1. Calculate center
+    shape = np.array(volume.shape)
+    center = shape / 2.0
+    
+    # 2. Construct rotation matrix (Z-axis rotation)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
+    R = np.array([
+        [cos_t, -sin_t, 0],
+        [sin_t,  cos_t, 0],
+        [0,      0,     1]
+    ])
+    
+    # 3. Calculate offset
+    # o = c - R * c
+    R_center = np.dot(R, center)
+    offset = center - R_center
+    
+    # 4 & 5 & 6. Apply affine transformation with linear interpolation
+    # scipy.ndimage.affine_transform applies the inverse mapping internally
+    # to sample from the input volume.
+    # matrix=R, offset=offset, order=1 (linear)
+    rotated_volume = affine_transform(
+        volume, 
+        matrix=R, 
+        offset=offset, 
+        order=1, 
+        mode='constant', 
+        cval=0.0
+    )
+    
+    return rotated_volume
+```
+
+**Edge Cases:**
+-   **Precision:** Floating-point errors in $R$ and $o$ may cause slight misalignment [G].
+-   **Degenerate Input:** If $\theta = 0$, $R$ is identity and $o$ is zero, returning the original volume [G].
+
+## Subtopics
+
+### [Voxel-Space Slice Rendering (Affine Rewriting Workaround)](14763-voxel-space-slice-rendering-affine-rewriting-workaround.md)
+Restores 2D slice rendering on the native voxel grid for oblique acquisitions by modifying the volume's affine matrix, effectively dropping the shear component. Choose this when dealing with oblique DICOM data that needs to be treated as axial without rotating the voxel data itself.
+
+## Operating characteristics
+-   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, due to per-voxel interpolation [G].
+-   **Memory Complexity:** $O(N)$ for storing the volume and the sampling grid [G].
+-   **Strengths:** Simple to implement; preserves voxel grid structure [G].
+-   **Limitations:** Rotation around the center may move data out of bounds [G].
+
+## Background
+This method is a standard technique in medical image processing and computer graphics for rotating volumetric data [G].
+
+## Sources
+[S1] asheibanifard/Direct_Volume_Rendering-DVR-, https://github.com/asheibanifard/Direct_Volume_Rendering-DVR-, fetched 2026-10-26 (unofficial)
+[S2] ayush-chauhan-1202/physics-aware-ct-reconstruction, https://github.com/ayush-chauhan-1202/physics-aware-ct-reconstruction, fetched 2026-10-27 (unofficial)

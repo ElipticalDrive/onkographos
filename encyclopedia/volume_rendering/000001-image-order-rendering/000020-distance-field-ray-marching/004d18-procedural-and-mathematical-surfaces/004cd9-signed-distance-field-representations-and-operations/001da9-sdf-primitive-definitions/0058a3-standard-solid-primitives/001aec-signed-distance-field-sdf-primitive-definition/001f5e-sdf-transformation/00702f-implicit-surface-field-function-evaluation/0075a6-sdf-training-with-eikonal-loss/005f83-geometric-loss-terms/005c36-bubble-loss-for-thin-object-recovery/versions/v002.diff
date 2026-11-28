@@ -1,0 +1,181 @@
+--- v001.md
++++ v002.md
+@@ -2,127 +2,85 @@
+ Also called: Lbubble
+ ## Overview
+-Bubble Loss is a geometric regularization term used in Signed Distance Field (SDF) training to recover thin or small objects that are typically missed due to vanishing gradients. It addresses the limitation where standard SDF optimization deforms initial geometry to fit target surfaces, often failing to recover gradients for thin or small structures due to vanishing gradients and sparse sampling [S1]. Unlike standard training which samples uniformly or based on density, this method uses an error-guided sampling strategy to iteratively guide SDF growth from spatial points where missing thin segments meet the existing surface, utilizing 2D image information to identify error-prone areas [S1].
++Bubble Loss is a geometric regularization term designed to recover thin or small objects in Signed Distance Field (SDF) representations where standard training fails due to vanishing gradients [S1]. It addresses the limitation that neural SDFs often ignore small structures because the gradient signal from the radiance loss diminishes rapidly as the distance from the learned surface increases [S1]. Unlike standard depth losses that supervise the zero-level set globally, Bubble Loss specifically targets "bubbles"—3D points derived from depth images corresponding to missing geometry—to enforce zero SDF values and restore gradient flow [S1].
+ ## How it works
+-**Inputs:**
+-*   Depth image $D(u, v)$ for a set of pixels $p=(u,v)$.
+-*   Camera pose $[R|t]$ (rotation matrix $R$ and translation vector $t$).
+-*   Camera intrinsics $K$.
+-*   Neural network parameters $\theta$ defining the SDF function $d(x; \theta)$.
+-*   Minibatch of sampled pixels $P$.
+-
+-**Outputs:**
+-*   Scalar loss value $L_{bubble}$.
++**Inputs and Outputs:**
++- Input: A minibatch of sampled pixels $P$, depth image $D(u,v)$, camera pose $[R|t]$, and camera intrinsics $K$.
++- Input: The trained or partially trained SDF network $d(x; \theta)$.
++- Output: A scalar loss value $\mathcal{L}_{\text{bubble}}$.
+ 
+ **Data Structures:**
+-*   $D$: 2D array of depth values.
+-*   $x(p, D)$: 3D point coordinates derived from pixel $p$ and depth $D$.
+-*   $d(x)$: Scalar SDF value at point $x$.
++- $D$: A 2D array of depth values, where $D(u,v)$ is the depth at pixel coordinates $(u,v)$.
++- $P$: A set of pixel indices $(u,v)$ sampled for the current training iteration.
+ 
+ **Steps:**
+-1.  **Sample Pixels:** Select a minibatch of pixels $P$ from the depth image. The selection is typically guided by an error-guided adaptive sampling strategy to focus on areas with high reconstruction error or missing geometry [S1].
+-2.  **Back-project to 3D:** For each pixel $p=(u,v) \in P$, compute the corresponding 3D point $x(p, D)$ using the depth value $D(u,v)$, camera intrinsics $K$, and pose $[R|t]$:
+-    $$
+-    x(p, D) = t + D(u, v) R K^{-1} \begin{bmatrix} u \\ v \\ 1 \end{bmatrix}
+-    $$
+-    [S1]
+-3.  **Evaluate SDF:** Compute the predicted signed distance value $d(x)$ for each 3D point $x(p, D)$ using the current neural network parameters $\theta$.
+-4.  **Compute Loss:** Calculate the sum of the absolute SDF values for all points in the minibatch. The goal is to enforce that these points lie on the zero-level set of the SDF.
++1. **Sample Pixels:** Select a minibatch of pixels $P$ from the depth image. Note: The source suggests an error-guided adaptive sampling strategy to avoid wasting computation on well-reconstructed planar areas, focusing instead on error-prone regions [S1].
++2. **Back-project to 3D:** For each pixel $p=(u,v) \in P$, compute the corresponding 3D point $x(p, D)$ in the world coordinate system using the depth value and camera parameters [S1]:
++   $$ x(p, D) = t + D(u, v) \cdot R K^{-1} \begin{bmatrix} u \\ v \\ 1 \end{bmatrix} $$
++   where $t$ is the camera translation vector, $R$ is the rotation matrix, and $K$ is the intrinsic matrix [S1].
++3. **Evaluate SDF:** Query the neural network to obtain the predicted SDF value $d(x)$ at the computed 3D point $x(p, D)$ [S1].
++4. **Compute Loss:** Calculate the absolute value of the SDF prediction for each point and sum them over the minibatch [S1]:
++   $$ \mathcal{L}_{\text{bubble}} = \sum_{p \in P} |d(x(p, D))| $$
+ 
+-**Formula:**
+-$$
+-L_{bubble} = \sum_{p \in P} |d(x(p, D))|
+-$$
+-where $d(x)$ is the predicted SDF value of point $x$ [S1].
+-
+-**Parameters:**
+-*   $P$: The set of pixels in the current minibatch. Size is not given in the sources.
+-*   $D(u,v)$: Depth value at pixel $(u,v)$.
+-*   $K$: Camera intrinsic matrix.
+-*   $R, t$: Rotation and translation components of the camera pose.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Vanishing Gradients:** The primary motivation for this loss is the vanishing gradient problem in standard SDF training. When the SDF is trained with a sigmoid activation $\sigma(d)$, the derivative $\frac{\partial \sigma}{\partial d}$ vanishes rapidly as the distance $d$ increases from the surface. This occurs because the learned parameter $\beta$ in the sigmoid is often large to make $\sigma$ fall off the target surface rapidly. Consequently, gradients $\frac{\partial L}{\partial \theta}$ remain near zero for points near thin objects that are not yet learned, preventing the network from recovering them [S1].
+-*   **Computational Waste:** Applying $L_{bubble}$ uniformly across all pixels is inefficient. Large planar areas are often reconstructed well by standard image-space depth loss. Applying bubble loss to these areas wastes computation. Therefore, an error-guided adaptive sampling strategy is recommended to select pixels $P$ where thin structures are likely missing or error-prone [S1].
+-*   **Local Surface Islands:** Without bubble loss, the optimization may create many local surface islands rather than growing coherent thin structures. Bubbles help create gradient fields near missing small objects, allowing them to grow [S1].
++**Pitfalls:**
++- **Vanishing Gradients:** In standard SDF training, the radiance loss involves a sigmoid function $\sigma(d) = \frac{1}{1 + e^{-\beta d}}$. The derivative $\frac{\partial \sigma}{\partial d}$ vanishes rapidly as the distance $d$ increases, especially when the learned parameter $\beta$ is large [S1]. This prevents gradient flow to thin objects that are not yet close to the zero-level set, causing the network to ignore them [S1]. Bubble Loss circumvents this by directly minimizing $|d(x)|$, which provides a non-vanishing gradient signal even when the SDF value is large, effectively "inserting" a surface at the depth location to guide the SDF growth [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def bubble_loss(depth_image, camera_pose, camera_intrinsics, sdf_network, pixel_batch):
++def bubble_loss(depth_image, camera_pose, intrinsics, sdf_network, sampled_pixels):
+     """
+     Computes the Bubble Loss for thin object recovery.
+     
+     Args:
+-        depth_image: 2D array D(u, v) containing depth values.
+-        camera_pose: Tuple (R, t) where R is 3x3 rotation matrix and t is 3x1 translation vector.
+-        camera_intrinsics: 3x3 matrix K.
+-        sdf_network: Function d(x; theta) returning signed distance for point x.
+-        pixel_batch: List of pixel coordinates [(u1, v1), (u2, v2), ...].
++        depth_image: 2D array D(u,v) containing depth values.
++        camera_pose: Tuple (R, t) representing rotation matrix and translation vector.
++        intrinsics: Matrix K for camera intrinsics.
++        sdf_network: Function d(x; theta) evaluating the SDF at point x.
++        sampled_pixels: List of pixel coordinates [(u1, v1), ...].
+         
+     Returns:
+-        Scalar loss value L_bubble.
++        Scalar loss value.
+     """
+     R, t = camera_pose
+-    K_inv = np.linalg.inv(camera_intrinsics)
++    loss_sum = 0.0
+     
+-    total_loss = 0.0
+-    
+-    for u, v in pixel_batch:
+-        # Step 2: Back-project to 3D
+-        # Homogeneous coordinate for pixel
+-        pixel_hom = np.array([u, v, 1.0])
++    for u, v in sampled_pixels:
++        # 1. Get depth value
++        d_val = depth_image[u, v]
+         
+-        # Transform to camera space direction
+-        # Note: The formula in [S1] implies D(u,v) scales the direction vector
+-        # x(p, D) = t + D(u, v) * R * K^-1 * [u, v, 1]^T
+-        # Ensure proper matrix multiplication order
+-        dir_cam = K_inv @ pixel_hom
+-        dir_world = R @ dir_cam
++        # 2. Back-project to 3D world coordinates
++        # Homogeneous pixel coordinate
++        pixel_homo = np.array([u, v, 1.0])
+         
+-        depth_val = depth_image[v, u] # Assuming (row, col) indexing for array access
+-        x_3d = t + depth_val * dir_world
++        # Inverse intrinsic multiplication
++        # K_inv is precomputed inverse of intrinsics
++        inv_intrinsics = np.linalg.inv(intrinsics)
++        ray_dir_cam = inv_intrinsics @ pixel_homo
+         
+-        # Step 3: Evaluate SDF
+-        d_x = sdf_network(x_3d)
++        # Transform ray direction to world space
++        ray_dir_world = R @ ray_dir_cam
+         
+-        # Step 4: Accumulate absolute SDF value
+-        total_loss += abs(d_x)
++        # Scale by depth and add camera origin
++        x_3d = t + d_val * ray_dir_world
+         
+-    return total_loss
++        # 3. Evaluate SDF at this point
++        sdf_val = sdf_network(x_3d)
++        
++        # 4. Accumulate absolute SDF value
++        loss_sum += abs(sdf_val)
++        
++    return loss_sum
+ ```
+-[G] The pseudocode assumes standard numpy-like array indexing `depth_image[v, u]` for row-major images, while the formula uses $(u,v)$ as column/row indices respectively. The matrix multiplication order follows the linear algebra definition in [S1].
+-
+ ## Subtopics
+ 
+ ### [SDF Growth Refinement](23288-sdf-growth-refinement.md)
+-SDF Growth Refinement is a post-training optimization strategy designed to improve the reconstruction of thin objects in Signed Distance Field (SDF) representations. It addresses the limitation where standard SDF optimization deforms initial geometry to fit target surfaces, often failing to recover gradients for thin or small structures due to vanishing gradients and sparse sampling. Unlike standard training which samples uniformly or based on density, this method uses an error-guided sampling strategy to iteratively guide SDF growth from spatial points where missing thin segments meet the existing surface, utilizing 2D image information to identify error-prone areas.
++A post-training optimization strategy that uses error-guided sampling to iteratively guide SDF growth from spatial points where missing thin segments meet the existing surface. It builds on the concept of targeting error-prone areas but operates after the initial training phase to further refine thin structures.
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-Not given in the sources. The complexity depends on the number of pixels in the minibatch $P$ and the cost of evaluating the SDF network.
+-
+-**Measured Performance:**
+-Not given in the sources.
+-
+-**Scaling:**
+-Not given in the sources.
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Effectively recovers gradients for thin or small objects that are otherwise ignored due to vanishing gradients in standard SDF training [S1]. It creates local surface islands and gradient fields that allow new objects to grow [S1].
+-*   **Limitations:** Computationally expensive if applied to all pixels. Requires careful sampling strategy (error-guided adaptive sampling) to avoid wasting computation on well-reconstructed planar areas [S1].
+-
+-**When to use it and when not:**
+-*   **Use:** When reconstructing scenes with thin structures (e.g., lamp cords, branches) that are missed by standard SDF training due to vanishing gradients.
+-*   **Do not use:** When the scene consists primarily of large planar areas that are already well-reconstructed, as applying this loss uniformly wastes computation [S1].
+-
++- **Complexity:** The computational cost is linear with respect to the number of sampled pixels $|P|$, as it involves a single back-projection and SDF query per pixel.
++- **Performance:** It is most effective for scenes containing thin structures (e.g., lamp wires, branches) that are otherwise lost during standard SDF optimization [S1].
++- **Limitations:** Applying this loss uniformly across all pixels is computationally wasteful for large planar areas that are already well-reconstructed. Therefore, it is typically combined with an adaptive sampling strategy to focus on regions with high reconstruction error [S1].
++- **Scaling:** The loss scales with the number of bubbles inserted; however, since it only requires a forward pass through the SDF network, it integrates efficiently into standard training loops.
+ ## Background
+-**Origin:**
+-The method was introduced in the paper "I²-SDF: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs" [S1].
+-
+-**History and Development:**
+-The paper identifies that for SDFs trained with sigmoid activations, the derivative $\frac{\partial \sigma}{\partial d}$ vanishes rapidly as distance $d$ increases, especially when the learned $\beta$ is large. This prevents gradient flow to thin objects. The "bubble" concept involves inserting artificial zero-value surfaces (bubbles) at depth-derived points to recover gradient flow around missing objects, allowing them to grow [S1].
+-
+-**Where it is used:**
+-Used in neural SDF reconstruction for indoor scenes, specifically to handle thin geometry like lamps [S1].
+-
++Bubble Loss was introduced in the context of *I²-SDF: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs* [S1]. The method was developed to address the specific failure mode of neural SDFs in recovering small or thin geometry, which is a common issue in indoor scene reconstruction where such objects constitute a small percentage of the total volume but are visually significant [S1]. The term "bubble" refers to the artificial surface created at the depth location, which acts as a gradient source to "grow" the SDF field into the missing region [S1].
+ ## Sources
+ [S1] I²-SDF: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs, https://doi.org/10.1109/cvpr52729.2023.01202, fetched 2026-11-01

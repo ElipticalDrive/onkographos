@@ -1,0 +1,158 @@
+--- v036.md
++++ v037.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Block Visibility Culling determines which voxel blocks or surface patches need to be rendered based on camera position and orientation, avoiding unnecessary mesh updates when the camera has not moved significantly or changed its primary viewing direction [S1, unofficial]. It solves the problem of rendering invisible surfaces by evaluating the geometric relationship between face normals and the view direction [S2, unofficial]. Unlike [Voxel Block Placement with Face Culling](923-voxel-block-placement-with-face-culling.md) which relies on adjacency to empty space, this method explicitly checks visibility relative to the camera [S1, S3, unofficial]. It differs from [Opacity-based Mesh Culling](8759-opacity-based-mesh-culling.md) by using geometric dot products rather than alpha thresholds [S2, unofficial].
++Block Visibility Culling determines which voxel blocks or surface patches need to be rendered based on camera position and orientation, avoiding unnecessary mesh updates when the camera has not moved significantly or changed its primary viewing direction [S1, unofficial]. It solves the problem of rendering invisible surfaces by evaluating the geometric relationship between face normals and the view direction [S2, unofficial]. Unlike [Voxel Block Placement with Face Culling](923-voxel-block-placement-with-face-culling.md) which relies on adjacency to empty space, this method explicitly checks visibility relative to the camera [S1, S3, unofficial].
+ 
+ ## How it works
+@@ -37,6 +37,6 @@
+     For each block, determine its vertical orientation relative to the camera:
+     *   Calculate block vertical bounds: $Z_{bottom} = Z_{chunk} + z \cdot B$, $Z_{top} = Z_{bottom} + B$, where $B$ is block size [S3, unofficial].
+-    *   If $P_z < Z_{bottom}$, orientation is Top (1).
+-    *   If $P_z > Z_{top}$, orientation is Bottom (2).
++    *   If $P_z < Z_{bottom}$, orientation is Top (1) [S3, unofficial].
++    *   If $P_z > Z_{top}$, orientation is Bottom (2) [S3, unofficial].
+     *   Otherwise, orientation is Side (0) [S3, unofficial].
+     *   Set cycle count: 2 if orientation != 0, else 1 [S3, unofficial].
+@@ -55,5 +55,5 @@
+     $$
+     [S2, unofficial]
+-    Calculate the dot product $D = \mathbf{n} \cdot \mathbf{v}$.
++    Calculate the dot product $D = \mathbf{n} \cdot \mathbf{v}$ [S2, unofficial].
+     *   If $D > 0$, the surface is visible [S2, unofficial].
+     *   If $D \le 0$, the surface is facing away and is culled [S2, unofficial].
+@@ -65,56 +65,59 @@
+ 
+ ```python
+-def update_block_visibility(camera_pos, camera_yaw_deg, blocks):
++import math
++
++def update_block_visibility(camera_pos, camera_yaw_deg, blocks, prev_state):
+     # 1. Compute camera block coordinates
+-    cam_block_x = floor(camera_pos.x)
+-    cam_block_y = floor(camera_pos.y)
+-    cam_block_z = floor(camera_pos.z)
++    cam_block_x = math.floor(camera_pos.x)
++    cam_block_y = math.floor(camera_pos.y)
++    cam_block_z = math.floor(camera_pos.z)
+ 
+-    # 2. Check for state change (optimization)
+-    if (cam_block_x == prev_cam_block_x and 
+-        cam_block_y == prev_cam_block_y and 
+-        cam_block_z == prev_cam_block_z and 
+-        camera_yaw_deg == prev_camera_yaw_deg):
+-        return # Skip index update process
++    # 2. Optimization: Skip if unchanged
++    if (cam_block_x == prev_state['cam_block_x'] and 
++        cam_block_y == prev_state['cam_block_y'] and 
++        cam_block_z == prev_state['cam_block_z'] and 
++        camera_yaw_deg == prev_state['yaw_deg']):
++        return prev_state # Skip index update process
+ 
+     # 3. Calculate view direction components
+-    angle_rad = camera_yaw_deg * 3.141592653589793 / 180.0
+-    cos_a = cos(angle_rad)
+-    sin_a = sin(angle_rad)
+-    
+-    # View direction vector (assuming standard right-handed system where camera looks down -Z or similar)
+-    # Adjust based on specific coordinate system; here we assume 2D yaw for horizontal visibility
+-    view_dir_x = -sin_a
+-    view_dir_z = cos_a
+-    view_dir_y = 0.0 # Simplified for 2D yaw; use pitch for full 3D
++    angle_rad = camera_yaw_deg * math.pi / 180.0
++    cs = math.cos(angle_rad)
++    sn = math.sin(angle_rad)
++    # View vector components derived from rotation angles [S1, unofficial]
++    view_dir = (cs, 0.0, sn) 
+ 
+     for block in blocks:
++        # 4. Determine surface orientation (block-level)
++        z_bottom = block.chunk_z + block.z * block.BLOCK_SIZE
++        z_top = z_bottom + block.BLOCK_SIZE
++        if camera_pos.z < z_bottom:
++            orientation = 1 # Top
++        elif camera_pos.z > z_top:
++            orientation = 2 # Bottom
++        else:
++            orientation = 0 # Side
++        cycles = 2 if orientation != 0 else 1
++
+         for face_idx in range(6):
+-            # Define face normals for the 6 axes
+-            face_normals = [
+-                (0, -1, 0), (1, 0, 0), (0, 1, 0), (-1, 0, 0), (0, 0, -1), (0, 0, 1)
+-            ]
+-            face_normal = face_normals[face_idx]
+-            face_center = (block.min + block.max) / 2.0
++            # 5. Compute average normal
++            face_normal = block.face_normals[face_idx]
++            # Normalize
++            norm_len = math.sqrt(sum(c*c for c in face_normal))
++            if norm_len > 0:
++                face_normal = tuple(c / norm_len for c in face_normal)
+             
+-            # 5. Compute vector from face to camera
+-            vec_to_cam_x = camera_pos.x - face_center.x
+-            vec_to_cam_y = camera_pos.y - face_center.y
+-            vec_to_cam_z = camera_pos.z - face_center.z
++            # 6. Visibility check via dot product
++            face_center = block.center
++            vec_to_cam = (camera_pos.x - face_center.x, 
++                          camera_pos.y - face_center.y, 
++                          camera_pos.z - face_center.z)
++            cam_dist = math.sqrt(sum(c*c for c in vec_to_cam))
++            if cam_dist == 0:
++                cam_dist = 1e-9 # Guard against zero-length vector [G]
++            view_vec = tuple(c / cam_dist for c in vec_to_cam)
+             
+-            # Normalize view vector
+-            length = sqrt(vec_to_cam_x**2 + vec_to_cam_y**2 + vec_to_cam_z**2)
+-            if length == 0:
+-                length = 1e-9 # Guard against division by zero [G]
+-            norm_vec_x = vec_to_cam_x / length
+-            norm_vec_y = vec_to_cam_y / length
+-            norm_vec_z = vec_to_cam_z / length
++            dot_product = sum(f*v for f, v in zip(face_normal, view_vec))
+             
+-            # 6. Dot product test
+-            dot_product = (face_normal[0] * norm_vec_x + 
+-                           face_normal[1] * norm_vec_y + 
+-                           face_normal[2] * norm_vec_z)
+-            
+-            # 7. Set visibility flag
++            # 7. Apply face flags
+             if dot_product > 0:
+                 block.visible_faces[face_idx] = True
+@@ -123,8 +126,9 @@
+ 
+     # Update previous state
+-    prev_cam_block_x = cam_block_x
+-    prev_cam_block_y = cam_block_y
+-    prev_cam_block_z = cam_block_z
+-    prev_camera_yaw_deg = camera_yaw_deg
++    prev_state['cam_block_x'] = cam_block_x
++    prev_state['cam_block_y'] = cam_block_y
++    prev_state['cam_block_z'] = cam_block_z
++    prev_state['yaw_deg'] = camera_yaw_deg
++    return prev_state
+ ```
+ 
+@@ -135,5 +139,5 @@
+ **Edge Cases and Pitfalls:**
+ *   **Precision:** Floating point errors in dot product near 0 can cause flickering. A small epsilon threshold may be needed, though the sources strictly use $> 0$ [S2, unofficial].
+-*   **Camera Inside Block:** If the camera is inside a block, the view vector direction may be ambiguous for all faces. The orientation check (Step 4) helps distinguish top/bottom vs sides [S1, unofficial].
++*   **Camera Inside Block:** If the camera is inside a block, the view vector direction may be ambiguous for all faces. The orientation check (Step 4) helps distinguish top/bottom vs sides [G].
+ *   **Degenerate Input:** If the camera position equals the face center, the view vector is zero-length. A guard value (e.g., $10^{-9}$) should be used for normalization [G].
+ 
+@@ -144,8 +148,7 @@
+ 
+ ## Operating characteristics
+-Not given in the sources.
+ 
+ ## Background
+-Block Visibility Culling is commonly used in voxel-based game engines and terrain rendering systems. The technique leverages the fact that in many voxel scenarios, the majority of faces are internal or back-facing relative to the viewer, allowing for significant performance improvements by skipping their generation or rendering [S1, S3, unofficial].
++The technique leverages the fact that in many voxel scenarios, the majority of faces are internal or back-facing relative to the viewer, allowing for significant performance improvements by skipping their generation or rendering [S1, S3, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,114 @@
+# Progressive Downsampling
+
+
+## Overview
+Progressive downsampling generates a hierarchy of data representations at decreasing spatial resolutions to accelerate volume rendering and optimization [S1, S2]. It solves high computational cost by starting with a heavily downsampled input and progressively refining the resolution over time, rather than pre-computing all levels statically [S1]. It sets itself apart from siblings like [VoxelGrid Down Sample](1014-voxelgrid-down-sample.md) by emphasizing temporal progression of quality during optimization [S1, G].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Original high-resolution volume data or feature maps [S1, S2].
+- Output: A sequence of images or volumes at increasing resolutions, culminating in the final high-resolution result [S1].
+
+**Data Structures:**
+- **Pyramid Structure:** A sequence of volumes where each level $k$ is derived from level $k-1$ by spatial filtering or averaging [G].
+
+**Steps:**
+1. **Initial Downsampling:** Downsample the input data by a factor of 8 initially [S1].
+2. **Progressive Refinement:** Gradually increase the resolution with a logarithmic decay back to the original resolution [S1].
+   - In specific implementations (e.g., Trick-GS), this progression continues until a specific iteration count (e.g., iteration 19500) [S1].
+3. **Resolution Modulation (Optional):** For Gaussian Splatting, apply floor modulation to the continuous resolution downsampling factor $r(i)$ to accelerate primitive growth [S2].
+   - Compute continuous factor $r(i)$ [S2].
+   - Apply modulation: $r_{mod}(i) = \lfloor r(i) \rfloor$ [S2].
+4. **Binary Optimization (Optional):** If data is binary, pack bits into bytes for $2 \times 2 \times 2$ voxel blocks [G].
+   - Threshold: If more than four bits of a byte are set, the byte represents an object element; otherwise, it represents background [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def progressive_downsample(volume, target_iterations=19500):
+    """
+    Generates a progressive resolution hierarchy for volume rendering.
+    Starts at 8x downsampled resolution and refines logarithmically.
+    """
+    # Step 1: Initial 8x downsampling [S1]
+    current_volume = downsample_8x(volume)
+    current_res = tuple(dim // 8 for dim in volume.shape)
+
+    for iteration in range(target_iterations):
+        # Step 2: Progressive refinement with logarithmic decay [S1]
+        progress = iteration / target_iterations
+        # Logarithmic scale factor: starts at 8.0, decays to 1.0
+        scale_factor = 8.0 ** (1.0 - progress)
+        target_res = tuple(dim // scale_factor for dim in volume.shape)
+
+        # Interpolate volume to target resolution
+        current_volume = upsample_to_resolution(current_volume, target_res)
+
+        # Step 3: Optional floor modulation for Gaussian primitives [S2]
+        r_i = compute_continuous_factor(iteration) # [G]
+        r_mod = math.floor(r_i)
+
+        # Render current resolution
+        render_frame(current_volume)
+
+def downsample_8x(volume):
+    """Averages 8x8x8 blocks to reduce resolution."""
+    return average_pool(volume, kernel_size=8)
+
+def upsample_to_resolution(volume, target_res):
+    """Interpolates volume to target_res using trilinear interpolation."""
+    return interpolate(volume, target_res, method='trilinear')
+
+def render_frame(volume):
+    """Renders the current volume to an image."""
+    return ray_march(volume)
+
+def average_pool(volume, kernel_size):
+    """Standard box filter downsampling."""
+    return volume.reshape(-1, kernel_size, kernel_size, kernel_size).mean(axis=(1,2,3))
+
+def interpolate(volume, target_res, method):
+    """Standard trilinear upsampling."""
+    return volume  # Placeholder for standard interpolation routine [G]
+
+def ray_march(volume):
+    """Standard volume rendering ray march."""
+    return volume  # Placeholder for standard ray marching routine [G]
+```
+
+**Parameters:**
+- Initial downsampling factor: 8x [S1].
+- Target iterations: 19500 [S1].
+- Modulation function: Floor operation $\lfloor r(i) \rfloor$ [S2].
+
+**Edge Cases and Pitfalls:**
+- **Binary Thresholding:** The "more than four bits" rule requires exact 8-bit alignment for the $2 \times 2 \times 2$ bit-packing scheme [G].
+- **Insufficient Optimization:** Without floor modulation in Gaussian Splatting, primitives grow too slowly, leading to insufficient per-primitive optimization [S2].
+
+## Subtopics
+
+### [Bit-Packed Binary Rendering](11211-bit-packed-binary-rendering.md)
+Bit-Packed Binary Rendering is an optimization technique for volume rendering that generates lower-resolution images significantly faster than full-resolution rendering by exploiting binary sample values [G]. It differs from sibling methods by operating on byte-aligned chunks of a $2 \times 2 \times 2$ voxel block rather than 1D correlation blocks, trading spatial fidelity for substantial speedups in interactive scenarios [G].
+
+### CorrBlockFast1D
+CorrBlockFast1D is a 1D correlation block implementation for stereo matching that computes correlations using grid sampling on downsampled feature maps, supporting a multi-level pyramid structure [G]. It pre-computes a correlation pyramid using all-pairs correlation and bilinear sampling for efficient inference [G]. Unlike standard correlation layers that compute pairwise similarities on the fly, this method constructs a pyramid of correlation volumes between two feature maps to enable efficient multi-scale 1D correlation sampling [G].
+
+### Resolution Downsampling Modulation
+Resolution Downsampling Modulation is a technique that applies a floor operation to a continuous resolution downsampling factor to accelerate Gaussian primitive growth and ensure sufficient per-primitive optimization [S2]. It computes the continuous factor $r(i)$ and applies $r(i) = \lfloor r(i) \rfloor$ [S2]. Without this modulation, Gaussian primitives grow relatively slower, leading to insufficient optimization per primitive [S2].
+
+## Operating characteristics
+- **Time Complexity:** Generating lower resolution images via byte processing takes approximately one-eighth the time of full resolution bit processing for binary data [G].
+- **Performance:** DashGaussian, using resolution downsampling modulation, achieves optimization in 200 seconds, a 45.7% average speedup over other backbones [S2].
+- **Scaling:** The pyramid structure scales with $\log N$ volumes for $N^3$ data samples [G].
+- **Strengths:** Rapid generation of low-quality previews for interaction; accelerated optimization in Gaussian Splatting [S1, S2].
+- **Limitations:** Lower resolution images may not always be representative of the final image [G].
+
+## Background
+The concept of pyramid data structures for volume visualization was established in early volume rendering literature, where hierarchical sparsity and downsampling were proposed as efficient implementation strategies [G]. The specific application of progressive downsampling with logarithmic decay in optimization was detailed in Trick-GS [S1]. Resolution downsampling modulation was introduced in DashGaussian to accelerate 3D Gaussian Splatting optimization [S2].
+
+## Sources
+[S1] Trick-GS: A Balanced Bag of Tricks for Efficient Gaussian Splatting, https://doi.org/10.1109/icassp49660.2025.10889395, fetched 2026-10-30
+[S2] DashGaussian: Optimizing 3D Gaussian Splatting in 200 Seconds, https://doi.org/10.1109/cvpr52734.2025.01041, fetched 2026-10-31

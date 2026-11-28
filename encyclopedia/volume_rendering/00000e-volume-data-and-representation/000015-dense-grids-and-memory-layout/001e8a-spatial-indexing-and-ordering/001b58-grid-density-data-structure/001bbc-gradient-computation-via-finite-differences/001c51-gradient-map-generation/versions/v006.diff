@@ -1,0 +1,121 @@
+--- v005.md
++++ v006.md
+@@ -3,67 +3,60 @@
+ 
+ ## Overview
+-Gradient Map Generation is a GPU-based compute shader pass that calculates the 3D gradient vector for every voxel in a scalar volume and stores the results in a dedicated 3D image buffer [S1, unofficial]. It solves the problem of efficiently precomputing spatial derivative information for subsequent volume rendering or lighting passes. It differs from its parent [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) by explicitly handling the storage layout (magnitude and direction in a single RGBA8_SNORM buffer) and post-processing steps (magnitude clamping and normalization) within the same kernel invocation [S1, unofficial].
++Gradient Map Generation is a compute shader pass that calculates the 3D gradient vector for every voxel in a scalar volume and stores the results in a dedicated 3D image buffer [S1, unofficial]. It differs from its parent [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) by combining gradient calculation, magnitude scaling, normalization, and RGBA storage into a single kernel invocation [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A 3D scalar volume texture (read-only), typically 8-bit or 16-bit unsigned normalized [S1, unofficial].
+-- Output: A 3D image buffer `gradient_map` with layout `rgba8_snorm` [S1, unofficial].
+-- Parameters: `grad_magnitude_modifier` (float), `reductionBlockSize` (unsigned int), `partition_intensity_min` (float, default 0), `partition_intensity_max` (float, default 255) [S1, unofficial].
++- Input: 3D scalar volume texture (read-only) [S1, unofficial].
++- Output: 3D image buffer `gradient_map` [S1, unofficial].
++- Parameters: `grad_magnitude_modifier` (float) [S1, unofficial].
+ 
+ **Data Structures:**
+ - `gradient_map`: 3D image buffer.
+-  - Format: `GL_RGBA8_SNORM` [S1, unofficial].
+-  - Layout:
+-    - `x, y, z`: Normalized gradient direction vector components.
+-    - `w`: Gradient magnitude, clamped to [0, 1].
++  - Format: `rgba8` (unsigned normalized) [S1, unofficial]. (The source notes mention `rgba8_snorm`, but the provided code binds `textureGradient` with `GL_RGBA8`.)
++  - Layout: `x, y, z` store the normalized gradient direction, `w` stores the gradient magnitude clamped to $[0, 1]$ [S1, unofficial].
+ 
+ **Steps:**
+-1. Determine the dimensions of the `gradient_map` image.
+-2. Dispatch a compute shader where each work group corresponds to a block of voxels. The global invocation ID $(i, j, k)$ maps to a specific voxel coordinate.
+-3. For each voxel at $(i, j, k)$, compute the gradient vector $\mathbf{g}$ using finite differences (as defined in [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md)).
+-4. Calculate the gradient magnitude $m = \|\mathbf{g}\|$.
+-5. Apply a modifier and clamp the magnitude: $m' = \text{clamp}(m \times \text{grad\_magnitude\_modifier}, 0.0, 1.0)$.
+-6. Normalize the gradient direction: $\mathbf{d} = \frac{\mathbf{g}}{\|\mathbf{g}\|}$. If $\|\mathbf{g}\| = 0$, $\mathbf{d}$ is undefined or set to $(0,0,0)$ [G].
+-7. Store $\mathbf{d}$ in the `x, y, z` components and $m'$ in the `w` component of `gradient_map[i][j][k]`.
++1. Determine the dimensions of the `gradient_map` image [S1, unofficial].
++2. Dispatch a compute shader where each work group corresponds to a block of voxels [S1, unofficial].
++3. For each voxel at $(i, j, k)$, compute the gradient vector $\mathbf{g}$ using finite differences [S1, unofficial].
++4. Calculate the gradient magnitude $m = \|\mathbf{g}\| \times \text{grad\_magnitude\_modifier}$ and clamp the result to $[0, 1]$ [S1, unofficial].
++5. Normalize the gradient vector $\mathbf{d} = \mathbf{g} / \|\mathbf{g}\|$ [S1, unofficial].
++6. Store $\mathbf{d}$ in the `x, y, z` components and the clamped magnitude $m$ in the `w` component of `gradient_map` at the current global invocation ID [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode for the compute shader invocation
+-# Inputs: textureVolume (3D texture), gradient_map (3D image buffer)
+-# Uniforms: grad_magnitude_modifier (float)
++# Inputs: volume (3D texture), gradient_map (3D image buffer)
++# Uniforms: grad_magnitude_modifier (float), volume_dims (vec3)
+ 
+ def compute_gradient_map(global_invocation_id):
+-    # 1. Get voxel coordinates from global invocation ID
+     x, y, z = global_invocation_id
+-    
+-    # 2. Get volume dimensions
+-    vol_width, vol_height, vol_depth = get_volume_dimensions()
+-    
+-    # 3. Compute gradient vector using finite differences
+-    # This calls the logic from Gradient Computation via Finite Differences
+-    gradient_vector = get_gradient(x, y, z, vol_width, vol_height, vol_depth)
+-    
+-    # 4. Calculate magnitude
++    if x >= volume_dims.x or y >= volume_dims.y or z >= volume_dims.z:
++        return
++
++    # Compute gradient vector using central differences [G]
++    gx = sample_volume(x + 1, y, z) - sample_volume(x - 1, y, z)
++    gy = sample_volume(x, y + 1, z) - sample_volume(x, y - 1, z)
++    gz = sample_volume(x, y, z + 1) - sample_volume(x, y, z - 1)
++    gradient_vector = vec3(gx, gy, gz)
++
++    # Calculate magnitude, apply modifier, and clamp
+     magnitude = length(gradient_vector)
+-    
+-    # 5. Apply modifier and clamp
+     modified_magnitude = magnitude * grad_magnitude_modifier
+     clamped_magnitude = clamp(modified_magnitude, 0.0, 1.0)
+-    
+-    # 6. Normalize direction
++
++    # Normalize direction
+     if magnitude > 0.0:
+         direction = normalize(gradient_vector)
+     else:
+         direction = vec3(0.0, 0.0, 0.0) # [G] Default for zero gradient
+-        
+-    # 7. Store in gradient map
+-    # gradient_map is rgba8_snorm
+-    gradient_map[x][y][z] = vec4(direction.x, direction.y, direction.z, clamped_magnitude)
++
++    # Store in gradient map
++    gradient_map[x, y, z] = vec4(direction.x, direction.y, direction.z, clamped_magnitude)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Zero Gradient:** If the gradient vector is zero (e.g., in uniform regions), normalization is undefined. The implementation must handle this, typically by storing a zero vector [G].
+-- **Boundary Conditions:** Finite difference calculations at volume boundaries require special handling (e.g., one-sided differences or padding) to avoid accessing out-of-bounds memory [G].
+-- **Precision:** The `rgba8_snorm` format provides 8-bit signed normalized precision. This may introduce quantization artifacts in the gradient direction and magnitude, especially for subtle gradients.
++- **Zero Gradient:** If $\|\mathbf{g}\| = 0$, normalization is undefined; the implementation stores a zero vector [G].
++- **Boundary Conditions:** Finite difference calculations at volume boundaries require padding or one-sided differences to avoid out-of-bounds access [G].
++- **Precision:** The `rgba8` format provides 8-bit unsigned normalized precision, which may introduce quantization artifacts for subtle gradients [G].
+ 
+ ## Subtopics
+@@ -76,12 +69,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is processed once in parallel.
+-- **Memory Complexity:** $O(N)$ for the output gradient map, requiring 4 bytes per voxel (RGBA8).
+-- **Performance:** Highly parallelizable on GPU. Performance is limited by memory bandwidth for large volumes due to the read of the volume texture and write to the gradient map.
+-- **Strengths:** Efficient GPU implementation; decouples gradient computation from rendering; provides both direction and magnitude in a single pass.
+-- **Limitations:** Quantization errors from 8-bit storage; requires additional memory for the gradient map; sensitive to noise in the input volume.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Performance:** Not given in the sources.
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
+ 
+ ## Background
+-This method is implemented in the DVR_ESS_PDM project [S1, unofficial]. It is a common technique in volume rendering pipelines to precompute gradient information for lighting models, such as Phong shading or normal-based shading, to enhance the visual quality of the rendered volume.
++Not given in the sources.
+ 
+ ## Sources

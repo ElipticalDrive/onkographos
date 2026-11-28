@@ -1,0 +1,113 @@
+# Fake Media Methods
+
+Also called: Appearance-based methods, Non-physically based methods
+
+## Overview
+Fake media methods are rendering techniques that do not account for the physical phenomena of light transport but instead generate visually pleasant, realistic appearances suitable for applications where physical accuracy is not required [S1]. They differ from physically based volume rendering by decoupling illumination from the radiative transfer equation, relying on empirical models, texture synthesis, or simplified analytical solutions to achieve specific aesthetic goals [S1]. Unlike surface-based non-photorealistic rendering, these methods must determine volumetric features through local property analysis, as features vary continuously in three-dimensional space [G].
+
+## How it works
+### Inputs and Outputs
+*   **Inputs:** View direction, light direction, scalar field values (e.g., density), and pre-defined empirical parameters (e.g., attenuation coefficients, noise seeds) [G].
+*   **Outputs:** Final color $c$ for each pixel or fragment [G].
+
+### Data Structures
+1.  **Procedural Models (Gardner, Perlin):** No explicit volumetric grid is required. Noise functions and mathematical primitives (ellipsoids) are evaluated on-the-fly [S1].
+2.  **Analytical Models (Premoze & Ashikmin, Biri):** Require integration along the view ray. For Biri's fog, the extinction coefficient $\kappa_t$ is defined as a function allowing analytical integration [S1].
+
+### Numbered Steps
+1.  Determine the intersection of the view ray with the medium boundaries to obtain entry and exit points [G].
+2.  Evaluate procedural noise/turbulence functions or analytical extinction functions along the ray segment [S1].
+3.  Compute transmittance $\tau$ using the integrated extinction coefficient [S1].
+4.  Calculate in-scattered or diffuse radiance using empirical or constant source terms [S1].
+5.  Composite the background/target radiance with the in-scattered radiance using the analytical formula [S1].
+
+### Formulas
+#### 1. Premoze and Ashikmin’s Water Model
+$$ L(0) = e^{-\kappa_t R} L(z) + \left(1 - e^{-(\kappa_t + \kappa_d \cos \theta)R}\right) L_{df}(0) $$
+*   $L(0)$: Apparent radiance just below the air-water interface [S1].
+*   $L(z)$: Radiance of the target at depth $z$ [S1].
+*   $R$: Total path length, calculated as $R = -z / \cos \theta$ [S1].
+*   $\theta$: Angle counted from the vertical direction (positive z-axis) [S1].
+*   $\kappa_t$: Extinction coefficient [S1].
+*   $\kappa_d$: Apparent water diffuse attenuation coefficient [S1].
+*   $L_{df}(0)$: Diffused radiance just below the sea surface, estimated using empirical equations relating it to downwelling irradiance from the sun and skylight [S1].
+
+#### 2. Biri et al.’s Real-Time Fog Model
+$$ L(x) = \tau(x_0, x) L(x_0) + (1 - \tau(x_0, x)) J_{fog} $$
+*   $L(x)$: Radiance at position $x$ [S1].
+*   $L(x_0)$: Radiance at the entry point $x_0$ [S1].
+*   $\tau(x_0, x)$: Transmittance from $x_0$ to $x$, computed efficiently due to the specific definition of $\kappa_t$ [S1].
+*   $J_{fog}$: Constant source radiance within the fog [S1].
+
+### Parameters
+*   $\kappa_t$: Extinction coefficient. Defined as a well-chosen function allowing analytical integration for real-time performance [S1].
+*   $\kappa_d$: Apparent water diffuse attenuation coefficient. Typical values depend on water type (e.g., deep ocean vs. tropical water) [S1].
+*   $J_{fog}$: Constant source radiance. Typically derived from ambient light or sky color [G].
+*   Noise seeds and turbulence scales: Control procedural variation for clouds, fire, and marble [S1].
+
+### Edge Cases and Pitfalls
+*   **Shadowing:** Fake media methods are generally not suited for proper self-shadowing or shadows cast by the medium [S1]. Texture-based methods (Gardner, Perlin, Yaeger) focus on modeling the medium but not its interaction with the scene [S1]. Analytical methods (Premoze & Ashikmin, Biri) use color blending without integrating the fog/medium into a global illumination scheme, thus ignoring shadows [S1].
+*   **Atmospheric Opacity:** Yaeger et al.'s method assumes the atmosphere is opaque because the observer is restricted to being far away from the planet [S1].
+*   **Dimensionality:** Premoze and Ashikmin's model assumes a one-dimensional dependency (depth only), which limits its applicability to scenes where lateral variations are negligible or handled separately [S1].
+*   **Division by Zero:** Horizontal rays ($\cos \theta \approx 0$) in the water model cause division by zero in the path length calculation [G].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def render_fake_media_fog(ray_origin, ray_direction, t_min, t_max, kappa_t, J_fog, background_color):
+    """
+    Renders fog using Biri et al.'s analytical integration model [S1].
+    Assumes a medium bounded by t_min and t_max along the ray.
+    """
+    distance = t_max - t_min
+    transmittance = math.exp(-kappa_t * distance)
+    return transmittance * background_color + (1.0 - transmittance) * J_fog
+
+def render_fake_media_water(depth_z, theta, kappa_t, kappa_d, sun_irradiance, target_radiance):
+    """
+    Renders water using Premoze and Ashikmin's 1D depth-dependent model [S1].
+    """
+    cos_theta = math.cos(theta)
+    if abs(cos_theta) < 1e-6:
+        return (0.0, 0.0, 0.0)
+    R = -depth_z / cos_theta
+    # Ldf(0) is estimated using empirical equations relating it to downwelling irradiance [S1]
+    Ldf_0 = sun_irradiance * 0.5  # [G] Simplified empirical scaling factor
+    return math.exp(-kappa_t * R) * target_radiance + (1.0 - math.exp(-(kappa_t + kappa_d * cos_theta) * R)) * Ldf_0
+
+def ray_box_intersection(ray_origin, ray_direction, box_min, box_max):
+    """
+    Standard ray-box intersection returning entry and exit distances [G].
+    """
+    t_min = -float('inf')
+    t_max = float('inf')
+    for i in range(3):
+        inv_d = 1.0 / ray_direction[i]
+        t1 = (box_min[i] - ray_origin[i]) * inv_d
+        t2 = (box_max[i] - ray_origin[i]) * inv_d
+        t_min = max(t_min, min(t1, t2))
+        t_max = min(t_max, max(t1, t2))
+    if t_max < t_min:
+        return None, None
+    return t_min, t_max
+```
+
+## Operating characteristics
+*   **Performance:** These methods are generally computationally inexpensive compared to physically based path tracing or even single-scattering approximations. Biri et al.'s method achieves real-time animation by using functions for $\kappa_t$ that allow analytical integration [S1].
+*   **Realism:** They produce "visually pleasant" results that can appear realistic in specific contexts (e.g., clouds, fog, water surfaces) but lack physical correctness [S1].
+*   **Limitations:** Inability to handle complex light transport effects such as multiple scattering, self-shadowing, and dynamic shadow casting [S1].
+*   **Use Cases:** Applications where physical accuracy is not required, such as stylized visualization, real-time games, or specific cinematic effects where aesthetic control is prioritized over physical fidelity [S1].
+
+## Background
+The term "fake media methods" was coined in the context of participating media rendering surveys to categorize techniques that prioritize appearance over physical accuracy [S1].
+*   **Gardner [25]:** Developed early models for synthetic clouds using 2D sky planes and 3D ellipsoids [S1].
+*   **Perlin [71]:** Introduced procedural noise and turbulence functions for a wide range of natural phenomena [S1].
+*   **Yaeger et al. [107]:** Applied fluid dynamics and particle systems to simulate Jupiter's atmosphere for the film *2010* [S1].
+*   **Premoze and Ashikmin [73]:** Focused on the appearance of water surfaces, simplifying light transport to a 1D depth-dependent model [S1].
+*   **Biri et al. [8]:** Extended analytical integration techniques for real-time fog rendering [S1].
+
+## Sources
+[S1] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26

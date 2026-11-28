@@ -1,0 +1,212 @@
+--- v009.md
++++ v010.md
+@@ -4,15 +4,15 @@
+ 
+ ## Overview
+-The Training Loop is the main optimization procedure for Neural Radiance Fields (NeRF), orchestrating data loading, ray sampling, model forward passes, loss calculation, and parameter updates [S1, unofficial]. It solves the problem of iteratively refining a differentiable radiance field representation to match observed input images. It sets itself apart from sibling methods like [Training Ray Batching](2252-training-ray-batching.md) by managing the high-level control flow (epochs, validation, checkpointing) rather than just the geometry of ray selection, and from [Camera Pose Optimization](15669-camera-pose-optimization.md) by typically assuming fixed camera poses unless explicitly extended [S1, unofficial].
++The Training Loop is the main optimization procedure for Neural Radiance Fields (NeRF), orchestrating data loading, ray sampling, model forward passes, loss calculation, and parameter updates [S1, unofficial]. It solves the problem of iteratively refining a differentiable radiance field representation to match observed input images [G]. It sets itself apart from sibling methods like [Training Ray Batching](2252-training-ray-batching.md) by managing the high-level control flow (epochs, validation, checkpointing) rather than just the geometry of ray selection, and from [Camera Pose Optimization](15669-camera-pose-optimization.md) by typically assuming fixed camera poses unless explicitly extended [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Training dataset (images, poses, intrinsics), model architecture (NeRF MLP/Gaussian Splatting), optimizer configuration (learning rate, weight decay), and hyperparameters (batch size, epochs, near/far bounds).
+-*   **Outputs:** Trained model weights, optimizer state, and optionally rendered validation/test images.
++*   **Inputs:** Training dataset (images, poses, intrinsics), model architecture (NeRF MLP/Gaussian Splatting), optimizer configuration (learning rate, weight decay), and hyperparameters (batch size, epochs, near/far bounds) [G].
++*   **Outputs:** Trained model weights, optimizer state, and optionally rendered validation/test images [G].
+ 
+ **Data Structures:**
+-*   **Batch:** A dictionary or object containing tensors for image data (`lmain`, `rmain` for stereo; or single view), camera parameters (intrinsics $K$, extrinsics $P$), and metadata (view indices, bounds).
+-*   **Ray Bundle:** A flat array of rays, where each ray is defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, concatenated with the ground truth RGB color $\mathbf{c}$ at the sampled pixel.
+-*   **Metrics:** Accumulators for L1 loss, SSIM, and Chamfer distance.
++*   **Batch:** A dictionary or object containing tensors for image data (`lmain`, `rmain` for stereo; or single view), camera parameters (intrinsics $K$, extrinsics $P$), and metadata (view indices, bounds) [G].
++*   **Ray Bundle:** A flat array of rays, where each ray is defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, concatenated with the ground truth RGB color $\mathbf{c}$ at the sampled pixel [S4, unofficial].
++*   **Metrics:** Accumulators for L1 loss, SSIM, and Chamfer distance [G].
+ 
+ **Numbered Steps:**
+@@ -41,5 +41,5 @@
+ 4.  **Forward Pass:**
+     *   Pass the ray bundle through the model with `is_train=True` [S2, unofficial].
+-    *   The model renders the scene, producing predicted RGB colors and optionally depth/alpha.
++    *   The model renders the scene, producing predicted RGB colors and optionally depth/alpha [G].
+     *   *Gaussian Splatting Variant:* Render using `pts2render` with background color from config (e.g., `(0.0, 0.0, 0.0)`) [S2, unofficial].
+ 
+@@ -81,33 +81,19 @@
+     Main training loop for NeRF.
+     """
+-    # 1. Initialization
+     total_steps = 0
+     scaler = GradScaler(enabled=cfg.mixed_precision)
+     
+-    # 2. Epoch Loop
+     for epoch in range(cfg.start_epoch, cfg.num_epochs):
+-        
+-        # 3. Batch Loop
+         for batch in train_loader:
+-            
+-            # 4. Data Fetching
+-            # Move data to CUDA
+-            image = batch['image'].cuda()
+-            camera = batch['camera'].cuda()
+-            
+-            # 5. Ray Sampling
+-            # Sample random pixels and generate ray bundle
++            image = batch['image'].to(device='cuda')
++            camera = batch['camera'].to(device='cuda')
++            
+             rays, gt_rgb = sample_rays(image, camera, cfg.N_rand)
+             
+-            # 6. Forward Pass
+-            # Render scene
+-            with torch.cuda.amp.autocast(enabled=cfg.mixed_precision):
++            with autocast(enabled=cfg.mixed_precision):
+                 pred_rgb = model(rays, is_train=True)
++                l1_loss = l1_loss_fn(pred_rgb, gt_rgb)
++                ssim_loss = 1.0 - ssim_fn(pred_rgb, gt_rgb)
+                 
+-                # Calculate Loss
+-                l1_loss = l1_loss(pred_rgb, gt_rgb)
+-                ssim_loss = 1.0 - ssim(pred_rgb, gt_rgb)
+-                
+-                # Optional: Chamfer Loss
+                 chamfer_loss = 0.0
+                 if cfg.if_chamfer and total_steps > cfg.iter_from:
+@@ -116,29 +102,18 @@
+                 total_loss = 0.8 * l1_loss + 0.2 * ssim_loss + 0.5 * chamfer_loss
+ 
+-            # 7. Backpropagation
+             scaler.scale(total_loss).backward()
+-            
+-            # Gradient clipping
+             scaler.unscale_(optimizer)
+-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+-            
+-            # Optimizer step
++            clip_grad_norm_(model.parameters(), max_norm=1.0)
+             scaler.step(optimizer)
+             scaler.update()
+             optimizer.zero_grad()
+             
+-            # Scheduler step (if per-step)
+-            # scheduler.step() 
+-            
+             total_steps += 1
+             
+-            # Logging
+             if total_steps % 100 == 0:
+                 log_metrics(l1_loss, ssim_loss, chamfer_loss)
+ 
+-        # 8. Epoch End
+-        scheduler.step() # If per-epoch
++        scheduler.step()
+         
+-        # 9. Validation
+         if total_steps % cfg.eval_freq == 0:
+             model.eval()
+@@ -146,17 +121,33 @@
+             model.train()
+             
+-        # 10. Checkpointing
+         if epoch % cfg.checkpoint_interval == 0:
+             save_checkpoint(model, optimizer, epoch)
+             
+-        # 11. Test Rendering
+         if epoch % cfg.render_interval == 0 and epoch > 0:
+             render_test_images(model)
++
++# Helper definitions
++class GradScaler:
++    def __init__(self, enabled): self.enabled = enabled
++    def scale(self, loss): return loss
++    def backward(self): pass
++    def unscale_(self, optimizer): pass
++    def step(self, optimizer): optimizer.step()
++    def update(self): pass
++
++def sample_rays(image, camera, n_rand):
++    # Samples n_rand random pixels and constructs ray origins/directions
++    return rays, gt_rgb
++
++def l1_loss_fn(pred, target): return torch.mean(torch.abs(pred - target))
++def ssim_fn(pred, target): return 1.0 # Placeholder for SSIM calculation
++def compute_chamfer_loss(batch): return 0.0
++def log_metrics(l1, ssim, chamfer): pass
++def run_eval(val_loader): pass
++def save_checkpoint(model, optimizer, epoch): pass
++def render_test_images(model): pass
+ ```
+ 
+ ## Subtopics
+-
+-### [VCCNF Training Loop](4736-vccnf-training-loop.md)
+-The VCCNF Training Loop is a supervised optimization procedure for a Voxelized Continuous Coordinate Normalizing Flow (VCCNF). It learns to map Gaussian noise to shape latent codes conditioned on voxel data by minimizing the Mean Squared Error (MSE) between predicted and target latent codes.
+ 
+ ### [MVDream Multi-View Diffusion Guidance](6345-mvdream-multi-view-diffusion-guidance.md)
+@@ -164,8 +155,11 @@
+ 
+ ### [Diffusion-Based Guidance for Radiance Field Optimization](8117-diffusion-based-guidance-for-radiance-field-optimization.md)
+-Diffusion-Based Guidance for Radiance Field Optimization uses the score function of a pretrained 2D diffusion model to provide gradient signals that guide the optimization of a differentiable radiance field parametrization $z = g(\theta)$ towards the mode of a conditional probability distribution $p(z_t | y)$. It solves the problem of non-photorealistic artifacts and incomplete geometry in 3D scenes by leveraging a strong 2D prior to regularize training from viewpoints distant from the original cameras. It sets itself apart from sibling methods like [VCCNF Training Loop](4736-vccnf-training-loop.md) by relying on a frozen diffusion model's noise prediction rather than explicit multi-view consistency losses, and from [MVDream Multi-View Diffusion Guidance](6345-mvdream-multi-view-diffusion-guidance.md) by typically using a single-view diffusion prior without explicit multi-view joint optimization.
+-
+-### [Two-Stage Training for Learnable Proposer](8685-two-stage-training-for-learnable-proposer.md)
+-Two-Stage Training for Learnable Proposer divides network optimization into two distinct stages to resolve the chicken-and-egg problem inherent in learning to sample for radiance fields. Training the proposer requires a good fine network to provide a useful training signal, but the fine network can only improve if sampled at informative locations. This method sets itself apart from joint training approaches by decoupling proposer initialization from radiance field fine-tuning to ensure stable convergence.
++Diffusion-Based Guidance for Radiance Field Optimization uses the score function of a pretrained 2D diffusion model to provide gradient signals that guide the optimization of a differentiable radiance field parametrization $z = g(\theta)$ towards the mode of a conditional probability distribution $p(z_t | y)$. It solves the problem of generating or refining 3D scenes from sparse views or text prompts by leveraging the rich prior knowledge of 2D diffusion models, effectively removing non-photorealistic artifacts and enforcing geometric consistency. It sets itself apart from sibling methods like [VCCNF Training Loop](4736-vccnf-training-loop.md) by relying on a frozen, pre-trained diffusion prior rather than a learned multi-view consistency network, and from [MVDream Multi-View Diffusion Guidance](6345-mvdream-multi-view-diffusion-guidance.md) by typically using a single-view or text-conditioned 2D model without explicit multi-view joint training.
++
++### [Specific Architecture Training Procedures](18781-specific-architecture-training-procedures.md)
++Specific Architecture Training Procedures define the optimization loops and configuration strategies required to train distinct radiance field architectures, addressing their unique convergence challenges and data requirements. Unlike generic training loops, these methods often decouple network stages or employ specialized loss functions (e.g., latent code regression) to resolve instabilities inherent in joint optimization or conditional generation.
++
++### [Training and Supervision](19347-training-and-supervision.md)
++This article details the supervision strategy for optimizing a hybrid lighting representation that combines a volumetric lighting field with a parametric sky model for street scenes. It solves the problem of estimating physically plausible illumination from single or multi-view LDR images to enable realistic virtual object insertion. It is distinguished from sibling methods by its explicit separation of sky and volumetric lighting components, supervised via a pre-trained sky modeling network and adversarial feedback from object insertion realism rather than pure photometric consistency alone.
+ 
+ ### Render Pipeline Initialization
+@@ -211,31 +205,27 @@
+ *   **Number:** Convergence time for soft segmentation: typically less than 5 seconds [S11].
+ 
+-### IBRNet Baseline Training Loop
+-*   **Step:** Learn generalized model for 250,000 solver steps on 15 training DTU scenes. Fine-tune pre-trained model on seven training views of specific test scene for another 60,000 steps [S12, unofficial].
+-*   **Number:** Training time: 0.33 sec/iteration. Rendering time: 33.3 sec/frame [S12, unofficial].
+-
+ ### Camera Predictor Training
+-*   **Definition:** A self-supervised method to train a CNN-based encoder to predict camera parameters from rendered images, used for style inversion tasks [S13, unofficial].
+-*   **Step:** Randomly sample a camera pose and latent codes to render the output image [S13, unofficial].
+-*   **Step:** Use a CNN-based encoder (backbone initialized with pretrained ResNet18) to read the image and predict input camera parameters based on a smoothed L1 loss function [S13, unofficial].
++*   **Definition:** A self-supervised method to train a CNN-based encoder to predict camera parameters from rendered images, used for style inversion tasks [S12, unofficial].
++*   **Step:** Randomly sample a camera pose and latent codes to render the output image [S12, unofficial].
++*   **Step:** Use a CNN-based encoder (backbone initialized with pretrained ResNet18) to read the image and predict input camera parameters based on a smoothed L1 loss function [S12, unofficial].
+ 
+ ### Trajectory Smoothness Regularization
+-*   **Definition:** A regularization technique applied to the camera trajectory to prevent high-frequency predictions and improve trajectory estimation by leveraging the sequential nature of camera movement [S14].
+-*   **Definition:** A regularization term added to the loss function to enforce smooth and continuous camera trajectory estimation across adjacent Rolling Shutter (RS) frames, addressing the issue of high-frequency predictions in vanilla RS-NeRF [S14].
+-*   **Step:** For each pair of adjacent trajectory vectors $\vec{d}_k$ and $\vec{d}_{k+1}$, compute the mid-point trajectory vector $\vec{d}_{mid}$ [S14].
+-*   **Formula:** $\mathcal {L}_{s}=||\overrightarrow {\mathbf {n}}_{mid} - \operatorname {mean}(\overrightarrow {\mathbf {n}}_k + \overrightarrow {\mathbf {n}}_{k+1})||_2.$ where $\overrightarrow {\mathbf {n}}_k$ and $\overrightarrow {\mathbf {n}}_{k+1}$ are unit direction vectors of estimated camera trajectories for adjacent RS frames $I^R_k$ and $I^R_{k+1}$, and $\overrightarrow {\mathbf {n}}_{mid}$ is the unit direction vector for the camera trajectory during the exposure interval between these two frames [S14].
++*   **Definition:** A regularization technique applied to the camera trajectory to prevent high-frequency predictions and improve trajectory estimation by leveraging the sequential nature of camera movement [S13].
++*   **Definition:** A regularization term added to the loss function to enforce smooth and continuous camera trajectory estimation across adjacent Rolling Shutter (RS) frames, addressing the issue of high-frequency predictions in vanilla RS-NeRF [S13].
++*   **Step:** For each pair of adjacent trajectory vectors $\vec{d}_k$ and $\vec{d}_{k+1}$, compute the mid-point trajectory vector $\vec{d}_{mid}$ [S13].
++*   **Formula:** $\mathcal {L}_{s}=||\overrightarrow {\mathbf {n}}_{mid} - \operatorname {mean}(\overrightarrow {\mathbf {n}}_k + \overrightarrow {\mathbf {n}}_{k+1})||_2.$ where $\overrightarrow {\mathbf {n}}_k$ and $\overrightarrow {\mathbf {n}}_{k+1}$ are unit direction vectors of estimated camera trajectories for adjacent RS frames $I^R_k$ and $I^R_{k+1}$, and $\overrightarrow {\mathbf {n}}_{mid}$ is the unit direction vector for the camera trajectory during the exposure interval between these two frames [S13].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of training steps and batch size. Each step involves a forward pass through the MLP/Gaussian splatter and a backward pass.
+-*   **Memory Complexity:** Proportional to the number of model parameters and the batch size (storing gradients and optimizer states).
++*   **Time Complexity:** Linear with respect to the number of training steps and batch size. Each step involves a forward pass through the MLP/Gaussian splatter and a backward pass [G].
++*   **Memory Complexity:** Proportional to the number of model parameters and the batch size (storing gradients and optimizer states) [G].
+ *   **Measured Performance:** Varies by implementation. For example, IBRNet baseline training takes 0.33 sec/iteration with 33.3 sec/frame rendering [S12, unofficial].
+-*   **Scaling:** Scales with batch size and number of rays sampled per step (`N_rand`). Larger batches improve gradient stability but increase memory usage.
+-*   **Strengths:** Flexible, supports various loss functions (L1, SSIM, Chamfer), and integrates with standard PyTorch/TensorFlow optimization utilities.
+-*   **Limitations:** Can be slow for high-resolution scenes due to ray sampling and rendering overhead. Prone to local minima without careful initialization or regularization (e.g., importance sampling, adaptive loss weights).
+-*   **When to use:** Standard NeRF training for novel view synthesis.
+-*   **When not to use:** When real-time training is required (consider [MVDream](6345-mvdream-multi-view-diffusion-guidance.md) or [Diffusion-Based Guidance](8117-diffusion-based-guidance-for-radiance-field-optimization.md) for faster convergence via priors).
++*   **Scaling:** Scales with batch size and number of rays sampled per step (`N_rand`). Larger batches improve gradient stability but increase memory usage [G].
++*   **Strengths:** Flexible, supports various loss functions (L1, SSIM, Chamfer), and integrates with standard PyTorch/TensorFlow optimization utilities [G].
++*   **Limitations:** Can be slow for high-resolution scenes due to ray sampling and rendering overhead. Prone to local minima without careful initialization or regularization (e.g., importance sampling, adaptive loss weights) [G].
++*   **When to use:** Standard NeRF training for novel view synthesis [G].
++*   **When not to use:** When real-time training is required (consider [MVDream](6345-mvdream-multi-view-diffusion-guidance.md) or [Diffusion-Based Guidance](8117-diffusion-based-guidance-for-radiance-field-optimization.md) for faster convergence via priors) [G].
+ 
+ ## Background
+-The NeRF training loop was introduced in the seminal paper "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" by Mildenhall et al. (2020) [S4, unofficial]. It established the standard pipeline of volumetric rendering integrated with gradient-based optimization. Subsequent works have extended this loop with various optimizations, such as importance sampling [S6, unofficial], adaptive loss weighting [S7], and diffusion-based guidance [S1, unofficial].
++The NeRF training loop was introduced in the seminal paper "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" by Mildenhall et al. (2020) [S4, unofficial]. It established the standard pipeline of volumetric rendering integrated with gradient-based optimization [G]. Subsequent works have extended this loop with various optimizations, such as importance sampling [S6, unofficial], adaptive loss weighting [S7], and diffusion-based guidance [S1, unofficial].
+ 
+ ## Sources
+@@ -251,5 +241,4 @@
+ [S10] City-on-Web: Real-Time Neural Rendering of Large-Scale Scenes on the Web, https://doi.org/10.1007/978-3-031-72970-6_22, fetched 2026-10-26
+ [S11] IReNe: Instant Recoloring of Neural Radiance Fields, https://openaccess.thecvf.com/content/CVPR2024/papers/Mazzucchelli_IReNe_Instant_Recoloring_of_Neural_Radiance_Fields_CVPR_2024_paper.pdf, fetched 2026-10-29
+-[S12] Fast Training of Neural Lumigraph Representations using Meta Learning, https://doi.org/10.48550/arxiv.2106.14942, fetched 2026-10-26 (unofficial)
+-[S13] StyleNeRF: A Style-based 3D-Aware Generator for High-resolution Image Synthesis, https://doi.org/10.48550/arxiv.2110.08985, fetched 2026-10-26 (unofficial)
+-[S14] RS-NeRF: Neural Radiance Fields from Rolling Shutter Images, https://arxiv.org/abs/2407.10267v1, fetched 2026-10-26+[S12] StyleNeRF: A Style-based 3D-Aware Generator for High-resolution Image Synthesis, https://doi.org/10.48550/arxiv.2110.08985, fetched 2026-10-26 (unofficial)
++[S13] RS-NeRF: Neural Radiance Fields from Rolling Shutter Images, https://arxiv.org/abs/2407.10267v1, fetched 2026-10-26

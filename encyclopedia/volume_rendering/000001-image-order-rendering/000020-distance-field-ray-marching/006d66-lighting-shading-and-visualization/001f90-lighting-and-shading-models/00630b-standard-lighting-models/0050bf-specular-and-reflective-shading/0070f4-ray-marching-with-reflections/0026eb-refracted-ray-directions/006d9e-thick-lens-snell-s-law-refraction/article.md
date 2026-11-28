@@ -1,0 +1,131 @@
+# Thick Lens (Snell's Law Refraction)
+## Overview
+Models a thick lens using Snell's law at two spherical interfaces, accounting for lens thickness and curvature [S1, unofficial]. It differs from thin lens approximations by explicitly computing ray propagation through the lens material volume [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- Input: Ray origin $o$, ray direction $d$ (normalized), lens radius of curvature $R$, lens thickness $d_{lens}$, lens refractive index $n_{lens}$, external refractive index $n_{ext}$ [S1, unofficial].
+- Output: Refracted ray direction after exiting the second interface, or the original direction if no intersection occurs [S1, unofficial].
+
+**Data Structures:**
+The method operates on scalar and vector parameters without complex data structures [G].
+
+**Steps:**
+1. Define two spherical interfaces separated by distance $d_{lens}$ along the optical axis [S1, unofficial].
+2. Compute ray-sphere intersection coefficients for the current interface: $a = |d|^2$, $b = 2(o - c) \cdot d$, $c_{val} = |o - c|^2 - R^2$ [S1, unofficial].
+3. Compute discriminant $\text{pho} = b^2 - 4ac_{val}$ [S1, unofficial].
+4. If $\text{pho} > 0$, calculate $t_1 = (-b + \sqrt{\text{pho}}) / 2a$ and $t_2 = (-b - \sqrt{\text{pho}}) / 2a$ [S1, unofficial].
+5. Set virtual intersections ($t < 0$) and non-intersecting cases ($\text{pho} \le 0$) to $\infty$ to ignore them [S1, unofficial].
+6. Select the smallest positive $t$ as the intersection distance, compute the intersection point, and compute the surface normal oriented towards the center of curvature using $\text{normalize}(c - p)$ [S1, unofficial].
+7. Apply Snell's law to compute the refracted direction inside the lens material [G].
+8. Repeat steps 2–7 for the second interface using the refracted direction and the second center [S1, unofficial].
+9. Apply Snell's law to compute the final refracted direction exiting into the external medium [G].
+
+**Formulas:**
+- Approximate focal length: $f_{approx} = \frac{1}{(\frac{n_{ext}}{n_{lens}} - 1) (\frac{1}{R_1} - \frac{1}{R_2})}$, where $R_1 = R$ and $R_2 = -R$ [S1, unofficial].
+- Ray-sphere intersection discriminant: $\text{pho} = b^2 - 4ac_{val}$ [S1, unofficial].
+
+**Parameters:**
+- $n_{lens}$: Index of refraction of the lens material (float) [S1, unofficial].
+- $n_{ext}$: Index of refraction of the external medium (float) [S1, unofficial].
+- $R$: Radius of curvature of the lens surfaces (float) [S1, unofficial].
+- $d_{lens}$: Thickness of the lens (float) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Virtual intersections ($t < 0$) are set to $\infty$ to be ignored [S1, unofficial].
+- Non-intersecting rays ($\text{pho} \le 0$) have $t_1$ and $t_2$ set to $\infty$ [S1, unofficial].
+- Precision issues may arise if the ray is tangent to the surface ($\text{pho} \approx 0$) [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def refract_vector(d, n, n1, n2):
+    """
+    Refracts vector d at surface with normal n, going from medium n1 to n2.
+    """
+    cos_theta1 = -dot(n, d)
+    sin_theta1_sq = 1.0 - cos_theta1**2
+    sin_theta2_sq = (n1 / n2)**2 * sin_theta1_sq
+    
+    if sin_theta2_sq > 1.0:
+        return reflect_vector(d, n)
+    
+    cos_theta2 = math.sqrt(1.0 - sin_theta2_sq)
+    return n2 / n1 * d + (n2 / n1 * cos_theta1 - cos_theta2) * n
+
+def reflect_vector(d, n):
+    return d - 2 * dot(n, d) * n
+
+def thick_lens_refraction(o, d, R, d_lens, n_lens, n_ext):
+    c1 = [0.0, 0.0, 0.0]
+    c2 = [0.0, 0.0, d_lens]
+    
+    # First intersection
+    a = dot(d, d)
+    b = 2 * dot([o[i] - c1[i] for i in range(3)], d)
+    c_val = dot([o[i] - c1[i] for i in range(3)], [o[i] - c1[i] for i in range(3)]) - R**2
+    pho = b**2 - 4 * a * c_val
+    
+    if pho <= 0:
+        return d
+    
+    t1 = (-b + math.sqrt(pho)) / (2 * a)
+    t2 = (-b - math.sqrt(pho)) / (2 * a)
+    
+    t_in = min(t for t in [t1, t2] if t > 0) if any(t > 0 for t in [t1, t2]) else float('inf')
+    if t_in == float('inf'):
+        return d
+    
+    p_in = [o[i] + t_in * d[i] for i in range(3)]
+    n1 = normalize([c1[i] - p_in[i] for i in range(3)])
+    d_refracted = refract_vector(d, n1, n_ext, n_lens)
+    
+    # Second intersection
+    a = dot(d_refracted, d_refracted)
+    b = 2 * dot([p_in[i] - c2[i] for i in range(3)], d_refracted)
+    c_val = dot([p_in[i] - c2[i] for i in range(3)], [p_in[i] - c2[i] for i in range(3)]) - R**2
+    pho = b**2 - 4 * a * c_val
+    
+    if pho <= 0:
+        return d_refracted
+    
+    t1 = (-b + math.sqrt(pho)) / (2 * a)
+    t2 = (-b - math.sqrt(pho)) / (2 * a)
+    
+    t_out = min(t for t in [t1, t2] if t > 0) if any(t > 0 for t in [t1, t2]) else float('inf')
+    if t_out == float('inf'):
+        return d_refracted
+    
+    p_out = [p_in[i] + t_out * d_refracted[i] for i in range(3)]
+    n2 = normalize([c2[i] - p_out[i] for i in range(3)])
+    d_final = refract_vector(d_refracted, n2, n_lens, n_ext)
+    
+    return d_final
+
+def dot(v1, v2):
+    return sum(v1[i] * v2[i] for i in range(len(v1)))
+
+def normalize(v):
+    mag = math.sqrt(dot(v, v))
+    if mag == 0:
+        return v
+    return [v[i] / mag for i in range(len(v))]
+```
+## Subtopics
+
+### [Porcine Eye Model Construction](21386-porcine-eye-model-construction.md)
+The Porcine Eye Model Construction method defines the precise geometric and optical parameters of an ex vivo porcine eye to enable accurate ray tracing for distortion correction in Optical Coherence Tomography (OCT) systems. It differs from human eye models by accounting for specific differences in corneal curvature, lens thickness, and gradient refractive index properties inherent to porcine tissue. This model serves as the physical substrate for the Thick Lens (Snell's Law Refraction) method, providing the surface curvatures, thicknesses, and refractive indices required to compute ray paths through the eye's optical components.
+
+## Operating characteristics
+- **Time Complexity:** Constant time per ray, involving two ray-sphere intersections and two refraction calculations.
+- **Memory Complexity:** Constant space, requiring only a few scalar and vector variables.
+- **Strengths:** Accurate modeling of thick lenses; handles arbitrary ray angles and positions relative to the lens axis.
+- **Limitations:** Computationally more expensive than thin lens approximations; assumes spherical surfaces and homogeneous lens material.
+- **When to use:** When high accuracy is required for ray tracing through lenses with significant thickness or when the thin lens approximation is insufficient.
+- **When not to use:** For simple optical systems where thin lens approximations are adequate, or for real-time applications with strict performance constraints where the added accuracy is not justified.
+## Background
+The method is based on the fundamental principles of geometric optics, specifically Snell's law of refraction. It is commonly used in optical design and ray tracing simulations to model the behavior of light passing through thick lenses. The specific implementation details, such as the handling of virtual intersections and the approximation of focal length, are derived from practical considerations in computational optics [S1, unofficial].
+## Sources
+[S1] magis-slac/gradoptics, https://github.com/magis-slac/gradoptics, fetched 2026-10-27 (unofficial)

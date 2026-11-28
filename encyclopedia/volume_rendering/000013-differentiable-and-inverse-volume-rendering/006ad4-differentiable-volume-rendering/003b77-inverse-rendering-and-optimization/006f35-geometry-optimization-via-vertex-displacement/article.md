@@ -1,0 +1,103 @@
+# Geometry Optimization via Vertex Displacement
+
+Also called: Mesh Geometry Optimization, Vertex Displacement Optimization
+
+## Overview
+Geometry Optimization via Vertex Displacement is a method for inverse rendering that optimizes the 3D mesh geometry of a scene by iteratively updating vertex positions to minimize a rendering loss [S1]. It solves the problem of reconstructing accurate surface geometry from 2D images by treating vertex coordinates as differentiable parameters [S1]. What sets it apart from sibling methods like [Hybrid Differentiable Rendering Method](8832-hybrid-differentiable-rendering-method.md) or [Deep Reflectance Volumes](9343-deep-reflectance-volumes.md) is its direct manipulation of explicit mesh topology coordinates rather than implicit fields or stochastic parameter searches [S1]. It builds on [Differentiable volume rendering](43-differentiable-volume-rendering.md) [G].
+
+## How it works
+**Inputs:** A triangle mesh defined by vertex positions $V = \{v_1, v_2, \dots, v_N\}$, where each vertex $v_i = (x_i, y_i, z_i)$; a differentiable renderer capable of computing gradients with respect to vertex positions; a target image $I_{target}$; and a loss function $\mathcal{L}$ (e.g., L1 or L2 loss) comparing the rendered image $I_{rendered}$ to $I_{target}$ [S1].
+
+**Outputs:** Optimized vertex positions $V'$ that minimize $\mathcal{L}$ [S1].
+
+**Data Structures:**
+*   **Vertex Buffer:** An array of size $N$ (number of vertices). Each element is a 3D vector $(x_i, y_i, z_i)$ representing the spatial coordinates of vertex $i$.
+*   **Index Buffer:** An array of integer triplets defining the connectivity (triangles) of the mesh. This structure remains static during standard vertex displacement unless combined with remeshing variants [S1].
+
+**Parameters:**
+*   **Learning Rate:** Step size for gradient descent. Not given in the sources.
+*   **Loss Function:** $\mathcal{L}(I_{rendered}, I_{target})$. Commonly L1 or L2 norm. [S1].
+
+**Steps:**
+1.  **Render:** Pass the current vertex positions $V$ through the differentiable rendering pipeline to generate the rendered image $I_{rendered}$ [S1].
+2.  **Compute Loss:** Calculate the scalar loss $\mathcal{L}$ between $I_{rendered}$ and $I_{target}$ [S1].
+3.  **Backpropagate:** Compute the gradient of the loss with respect to each vertex position $v_i$ using the chain rule [S1]:
+    $$
+    \frac{\partial \mathcal{L}}{\partial v_i} = \frac{\partial \mathcal{L}}{\partial I_{rendered}} \cdot \frac{\partial I_{rendered}}{\partial v_i}
+    $$
+    Where:
+    *   $\frac{\partial \mathcal{L}}{\partial I_{rendered}}$ is the gradient of the loss with respect to the pixel values of the rendered image.
+    *   $\frac{\partial I_{rendered}}{\partial v_i}$ is the gradient of the rendered image with respect to the coordinates of vertex $i$, propagated through the differentiable renderer [S1].
+4.  **Update:** Update each vertex position $v_i$ using a gradient descent technique [S1]:
+    $$
+    v_i^{(t+1)} = v_i^{(t)} - \eta \frac{\partial \mathcal{L}}{\partial v_i}
+    $$
+    Where $\eta$ is the learning rate [S1].
+5.  **Iterate:** Repeat steps 1-4 until convergence or a maximum number of iterations is reached [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimize_geometry(vertices, indices, target_image, renderer, loss_fn, learning_rate, max_iterations):
+    """
+    Optimizes mesh vertex positions to match a target image.
+    
+    Args:
+        vertices: List of 3D coordinates (x, y, z) for each vertex.
+        indices: List of triangle indices.
+        target_image: The ground truth image to match.
+        renderer: A differentiable rendering function that takes vertices, indices, 
+                  and returns (rendered_image, gradient_function).
+        loss_fn: Function to compute loss between two images.
+        learning_rate: Step size for gradient descent.
+        max_iterations: Maximum number of optimization steps.
+    """
+    current_vertices = vertices
+    
+    for iteration in range(max_iterations):
+        # 1. Render the current geometry
+        # The renderer must support backpropagation through vertex positions.
+        rendered_image, grad_fn = renderer(current_vertices, indices)
+        
+        # 2. Compute Loss
+        loss = loss_fn(rendered_image, target_image)
+        
+        # 3. Compute Gradients w.r.t. vertices
+        # The chain rule is applied internally by the differentiable renderer:
+        # dL/dv_i = dL/dI_rendered * dI_rendered/dv_i
+        # grad_fn returns the gradient of the loss with respect to the input vertices.
+        vertex_gradients = grad_fn(loss)
+        
+        # 4. Update Vertex Positions
+        # Apply gradient descent to each vertex
+        for i in range(len(current_vertices)):
+            current_vertices[i] = current_vertices[i] - learning_rate * vertex_gradients[i]
+            
+    return current_vertices
+```
+
+**Edge Cases and Pitfalls:**
+*   **Local Minima:** The rendering function is highly nonlinear, making gradient-based optimization prone to converging to local minima [S2].
+*   **Initial Solution:** A relatively accurate initial solution is required for convergence, limiting the method's applicability when the initial scene differs significantly from the target [S2].
+*   **Sparse Gradients:** Gradients derived from color loss can be sparse and local, providing insufficient guidance for optimization [S2].
+
+## Subtopics
+
+### Continuous Remeshing for Geometric Regularization
+A method that continuously remeshes the mesh during the differentiable rendering optimization process to maintain good geometric properties [S2]. It addresses the issue of mesh degradation during optimization by ensuring the geometry maintains good properties throughout the process [S2]. Steps include: 1. During the optimization iterations of differentiable rendering, continuously perform remeshing on the mesh. 2. This ensures the geometry maintains good properties throughout the optimization process [S2]. It is chosen when mesh quality degrades during long optimization runs [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of optimization iterations and the cost of the differentiable rendering pass per iteration. Not given in the sources.
+*   **Memory Complexity:** Proportional to the number of vertices and the memory required for the differentiable renderer's intermediate buffers. Not given in the sources.
+*   **Strengths:** Directly optimizes explicit geometry; leverages established differentiable rendering pipelines [S1].
+*   **Limitations:** Prone to local minima due to non-linearity; requires good initialization; gradients can be sparse [S2].
+*   **When to use:** When explicit mesh geometry is required and a reasonable initial guess is available [S2].
+*   **When not to use:** When the initial geometry is very far from the target, or when mesh topology changes are needed (unless combined with remeshing) [S2].
+
+## Background
+Originated from the application of differentiable rendering to inverse problems, specifically for reconstructing object geometry from images [S1]. The method was highlighted in surveys on physics-based differentiable rendering [S1, S2]. It is used in applications such as object geometry and spatially varying BRDF reconstruction [S2]. Palfinger (2022) proposed the continuous remeshing variant to maintain geometric properties during optimization [S2].
+
+## Sources
+[S1] Physics Based Differentiable Rendering for Inverse Problems and Beyond, https://doi.org/10.52783/jes.7210, fetched 2026-10-26
+[S2] 基于物理的可微渲染综述, https://www.cjig.cn/zh/article/doi/10.11834/jig.230715/, fetched 2026-10-30

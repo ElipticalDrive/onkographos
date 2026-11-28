@@ -1,0 +1,206 @@
+# ClunoGS Unified Optimization
+
+Also called: ClunoGS, Compact Language 3D Gaussian Splatting via Unified Optimization
+
+## Overview
+ClunoGS is a training optimization method for Language 3D Gaussian Splatting that jointly optimizes Gaussian parameters, sparsity, and vector quantization to reduce storage and computational cost while preserving semantic fidelity [S1, unofficial]. It solves the problem of sequential compression (pruning followed by quantization) which degrades semantic boundaries and increases storage overhead by decoupling non-differentiable sparsity and quantization constraints using an augmented Lagrangian formulation with auxiliary variables [S1, unofficial]. Unlike sequential baselines or methods with fixed codebooks, ClunoGS updates the codebook jointly with scene parameters, ensuring better semantic preservation (e.g., 58.3 mIoU vs 54.4 mIoU) and lower storage (59.35 MB) on LERF datasets [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Initial Language 3DGS model with $N$ Gaussians. Opacity vector $o \in \mathbb{R}^N$. Continuous per-Gaussian attributes $\Theta = \{\theta_1, \dots, \theta_N\}$ (color coefficients, higher-order spherical harmonic coefficients, scale, rotation, and semantic coefficient values). Scene-level semantic dictionaries and 3D positions remain in full precision [S1, unofficial].
+*   **Parameters:** Gaussian budget $\kappa$ (number of retained Gaussians), number of clusters $M$, penalty coefficients $\rho_1, \rho_2$, learning rates $\eta_1, \eta_2$, maximum iterations $T$, convergence thresholds $\epsilon_1, \epsilon_2$ [S1, unofficial].
+*   **Outputs:** Retained Gaussians (mask), quantized parameters $\hat{\Theta}$, and quantization state $Q$ [S1, unofficial].
+
+**Data Structures**
+*   **Codebook State $Q$:** A set of $M$ clusters $Q = \{(Q_j, q_j)\}_{j=1}^M$, where $Q_j$ is the set of indices of Gaussians assigned to cluster $j$, and $q_j$ is the centroid vector [S1, unofficial].
+*   **Separate Codebooks:** Vector quantization is applied independently to different attribute groups (color/SH, scale, rotation, semantic coefficients) using independent codebooks [S1, unofficial].
+*   **Auxiliary Variables:** $y \in \mathbb{R}^N$ for sparsity, $\hat{\Theta}$ for quantization [S1, unofficial].
+*   **Dual Variables:** Scaled Lagrange multipliers $u \in \mathbb{R}^N$ and $V$ (same shape as $\Theta$) [S1, unofficial].
+
+**Formulas**
+The unified optimization objective minimizes the reconstruction loss $L(o, \Theta)$ plus a quantization penalty, subject to sparsity constraints [S1, unofficial]:
+$$ \min_{o,\Theta,Q} L(o, \Theta) + \sum_{j=1}^{M} \sum_{\theta_i \in Q_j} \|\theta_i - q_j\|_2^2 \quad \text{s.t.} \quad \text{card}(o) \le \kappa $$
+where $\text{card}(o)$ is the number of nonzero elements in $o$ [S1, unofficial].
+
+This is reformulated using auxiliary variables $y$ and $\hat{\Theta}$ with equality constraints $o=y$ and $\Theta=\hat{\Theta}$ [S1, unofficial]:
+$$ \min_{o,\Theta,y,\hat{\Theta},Q} L(o, \Theta) + g(y) + \sum_{j=1}^{M} \sum_{\hat{\theta}_i \in Q_j} \|\hat{\theta}_i - q_j\|_2^2 \quad \text{s.t.} \quad o = y, \Theta = \hat{\Theta} $$
+where $g(y)$ is the indicator function for sparsity: $g(y) = 0$ if $\text{card}(y) \le \kappa$, and $+\infty$ otherwise [S1, unofficial].
+
+The problem is solved via the augmented Lagrangian $L_\rho$ with scaled multipliers $u, V$ and penalty coefficients $\rho_1, \rho_2$ [S1, unofficial]:
+$$ L_\rho(o, \Theta, y, \hat{\Theta}, u, V, Q) = L(o, \Theta) + g(y) + \sum_{j=1}^{M} \sum_{\hat{\theta}_i \in Q_j} \|\hat{\theta}_i - q_j\|_2^2 + \frac{\rho_1}{2}\|o - y + u\|_2^2 + \frac{\rho_2}{2}\|\Theta - \hat{\Theta} + V\|_2^2 $$
+
+**Steps**
+The algorithm alternates between four updates per iteration $t$:
+
+1.  **Initialization:** Initialize codebook $Q$ by k-means on $\Theta$. Set $y \leftarrow o$, $\hat{\Theta} \leftarrow \Pi_Q(\Theta)$, $u \leftarrow 0$, $V \leftarrow 0$. Set residuals $r_o, r_\Theta \leftarrow \infty$ and $t \leftarrow 0$ [S1, unofficial].
+2.  **Primal Update:** Update $o$ and $\Theta$ using gradient descent on $L_\rho$ [S1, unofficial]:
+    $$ o^{t+1} \leftarrow o^t - \eta_1 \frac{\partial L_\rho}{\partial o} $$
+    $$ \Theta^{t+1} \leftarrow \Theta^t - \eta_2 \frac{\partial L_\rho}{\partial \Theta} $$
+    The gradients are:
+    $$ \frac{\partial L_\rho}{\partial o} = \frac{\partial L(o, \Theta)}{\partial o} + \rho_1(o^t - y^t + u^t) $$
+    $$ \frac{\partial L_\rho}{\partial \Theta} = \frac{\partial L(o, \Theta)}{\partial \Theta} + \rho_2(\Theta^t - \hat{\Theta}^t + V^t) $$
+    Note: $L(o, \Theta)$ includes both RGB and semantic losses, so language loss contributes directly to the opacity update [S1, unofficial].
+3.  **Sparsification Update:** Update auxiliary variable $y$ by projecting onto the sparsity-constrained set [S1, unofficial]:
+    $$ y^{t+1} \leftarrow \Pi_S(o^{t+1} + u^t) $$
+    $\Pi_S$ retains the $\kappa$ entries with the largest magnitudes in $(o^{t+1} + u^t)$ and sets all others to zero [S1, unofficial].
+4.  **Vector Quantization Update:**
+    *   **Centroids:** For each cluster $j=1,\dots,M$, compute centroid:
+        $$ q_j^{t+1} = \frac{1}{|Q_j^{t+1}|} \sum_{\theta_i^{t+1} \in Q_j^{t+1}} \theta_i^{t+1} $$
+    *   **Assignments:** Reassign parameters to nearest centroids:
+        $$ Q_j^{t+1} = \{ \theta_i^{t+1} \mid j \in \arg\min_{k=1,\dots,M} \|\theta_i^{t+1} - q_k^{t+1}\|_2^2 \} $$
+        Ties are resolved deterministically [S1, unofficial].
+    *   **Projection:** Project dual-corrected parameters:
+        $$ \hat{\Theta}^{t+1} \leftarrow \Pi_Q(\Theta^{t+1} + V^t) $$
+        $\Pi_Q$ replaces each vector with its nearest cluster centroid [S1, unofficial].
+5.  **Dual Update:** Update scaled dual variables to accumulate residuals [S1, unofficial]:
+    $$ u^{t+1} \leftarrow u^t + o^{t+1} - y^{t+1} $$
+    $$ V^{t+1} \leftarrow V^t + \Theta^{t+1} - \hat{\Theta}^{t+1} $$
+6.  **Convergence Check:** Compute residuals $r_o \leftarrow \|o^{t+1} - y^{t+1}\|_2$ and $r_\Theta \leftarrow \|\Theta^{t+1} - \hat{\Theta}^{t+1}\|_2$. Increment $t$. Loop while $(r_o > \epsilon_1 \text{ or } r_\Theta > \epsilon_2)$ and $t < T$ [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cluno_gs_unified_optimization(Theta, o, kappa, M, rho1, rho2, eta1, eta2, T, eps1, eps2):
+    """
+    ClunoGS Unified Optimization.
+    
+    Args:
+        Theta: Array of shape (N, D) of continuous per-Gaussian attributes.
+        o: Array of shape (N,) of opacities.
+        kappa: Integer, Gaussian retention budget.
+        M: Integer, number of clusters per attribute group.
+        rho1, rho2: Floats, penalty coefficients.
+        eta1, eta2: Floats, learning rates.
+        T: Integer, max iterations.
+        eps1, eps2: Floats, convergence thresholds.
+        
+    Returns:
+        retained_mask: Boolean array of shape (N,), True for retained Gaussians.
+        Theta_hat: Quantized attributes.
+        Q: List of clusters (list of lists of indices) and centroids.
+    """
+    N, D = Theta.shape
+    
+    # Initialize codebook Q using k-means on Theta
+    # Note: In practice, separate codebooks are used for different attribute groups.
+    # For simplicity, we assume a single codebook for Theta here, or loop over groups.
+    Q, centroids = kmeans_init(Theta, M)
+    
+    # Initialize auxiliary and dual variables
+    y = o.copy()
+    Theta_hat = project_to_codebook(Theta, Q, centroids)
+    u = np.zeros(N)
+    V = np.zeros_like(Theta)
+    
+    r_o = np.inf
+    r_Theta = np.inf
+    t = 0
+    
+    while (r_o > eps1 or r_Theta > eps2) and t < T:
+        # 1. Primal Update
+        # Compute gradients of the augmented Lagrangian
+        # L_rho = L(o, Theta) + g(y) + VQ_penalty + rho1/2 * ||o - y + u||^2 + rho2/2 * ||Theta - Theta_hat + V||^2
+        
+        # Gradient of L(o, Theta) w.r.t o and Theta
+        # This requires the rendering loss L, which includes RGB and semantic losses.
+        # We assume a function `compute_loss_gradients` that returns dL/do and dL/dTheta.
+        dL_do, dL_dTheta = compute_loss_gradients(o, Theta)
+        
+        grad_o = dL_do + rho1 * (o - y + u)
+        grad_Theta = dL_dTheta + rho2 * (Theta - Theta_hat + V)
+        
+        o_new = o - eta1 * grad_o
+        Theta_new = Theta - eta2 * grad_Theta
+        
+        # 2. Sparsification Update
+        # y_new = Pi_S(o_new + u)
+        # Pi_S keeps the kappa entries with largest magnitudes and zeros the rest
+        y_new = sparsity_projection(o_new + u, kappa)
+        
+        # 3. Vector Quantization Update
+        # Update centroids and assignments
+        Q_new, centroids_new = update_codebook(Theta_new, Q, centroids)
+        
+        # Project dual-corrected parameters
+        Theta_hat_new = project_to_codebook(Theta_new + V, Q_new, centroids_new)
+        
+        # 4. Dual Update
+        u_new = u + (o_new - y_new)
+        V_new = V + (Theta_new - Theta_hat_new)
+        
+        # 5. Convergence Check
+        r_o = np.linalg.norm(o_new - y_new)
+        r_Theta = np.linalg.norm(Theta_new - Theta_hat_new)
+        
+        # Update state
+        o = o_new
+        Theta = Theta_new
+        y = y_new
+        Theta_hat = Theta_hat_new
+        u = u_new
+        V = V_new
+        Q = Q_new
+        centroids = centroids_new
+        t += 1
+        
+    # Retained mask is determined by non-zero entries in y
+    retained_mask = y != 0
+    
+    return retained_mask, Theta_hat, Q
+
+def kmeans_init(Theta, M):
+    """Initialize codebook using k-means."""
+    # Standard k-means initialization
+    # Returns initial cluster assignments and centroids
+    pass
+
+def project_to_codebook(Theta, Q, centroids):
+    """Project each vector in Theta to its nearest centroid."""
+    # Compute distances to all centroids
+    # Assign each theta to nearest centroid
+    # Return Theta_hat where each theta is replaced by its centroid
+    pass
+
+def update_codebook(Theta, Q, centroids):
+    """Update centroids and reassign clusters."""
+    # For each cluster j:
+    #   q_j = mean(Theta[Q_j])
+    #   Reassign each theta in Theta to argmin_k ||theta - q_k||^2
+    # Return new Q and centroids
+    pass
+
+def sparsity_projection(x, kappa):
+    """Keep kappa entries with largest magnitudes, zero out others."""
+    # Get indices of top kappa absolute values
+    # Create zero vector
+    # Set top kappa values to x values
+    pass
+
+def compute_loss_gradients(o, Theta):
+    """Compute gradients of the rendering loss L(o, Theta)."""
+    # This function performs differentiable rendering and backpropagation
+    # Returns dL/do and dL/dTheta
+    pass
+```
+
+**Edge Cases and Pitfalls**
+*   **Sparsification Projection:** The projection is applied to $o^{t+1} + u^t$ rather than opacity alone due to the quadratic penalty term $\frac{\rho_1}{2}\|o^{t+1} - y + u^t\|_2^2$. The scaled dual variable $u$ accumulates the discrepancy between $o$ and $y$ across iterations [S1, unofficial].
+*   **Quantization Projection:** The projection is applied to $\Theta^{t+1} + V^t$ rather than $\Theta^{t+1}$ alone due to the quadratic penalty term $\frac{\rho_2}{2}\|\Theta^{t+1} - \hat{\Theta} + V^t\|_2^2$. The scaled dual variable $V$ tracks the discrepancy between $\Theta$ and $\hat{\Theta}$ [S1, unofficial].
+*   **Separate Codebooks:** In implementation, vector quantization is applied separately to different attribute groups (color/SH, scale, rotation, semantic coefficients) using independent codebooks [S1, unofficial].
+*   **Retention Mask:** The retention mask is shared by all point-aligned RGB and semantic attributes [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The method adds an iterative optimization loop (up to $T$ iterations) to the standard training process. Each iteration involves gradient descent, k-means updates, and projections. The k-means step is $O(N \cdot M \cdot D)$ per attribute group.
+*   **Memory Complexity:** Storage is reduced by quantization. Positions, opacity, and semantic dictionaries remain in full precision. Semantic atom indices are stored separately. No additional learned decoder is introduced [S1, unofficial].
+*   **Performance:** On LERF, ClunoGS achieves 58.3 mIoU, 83.0 Acc., and 24.15 dB PSNR at 59.35 MB storage with 20% Gaussian retention, outperforming sequential baselines (e.g., GaussianSpa + C3DGS) which achieve 54.4 mIoU and higher storage [S1, unofficial].
+*   **Strengths:** Joint optimization preserves semantic boundaries better than sequential compression. Codebook is optimized jointly, not fixed.
+*   **Limitations:** Requires additional iterations for convergence. Complexity of k-means updates.
+*   **When to use:** When storage and computational efficiency are critical for Language 3DGS, and semantic fidelity must be preserved.
+*   **When not to use:** When real-time training is required without the overhead of the unified optimization loop, or when semantic attributes are not used.
+
+## Background
+ClunoGS was introduced in the paper "ClunoGS: Compact Language 3D Gaussian Splatting via Unified Optimization" [S1, unofficial]. It addresses the limitations of sequential compression methods in Language 3DGS, which often degrade semantic information. The method builds on the principles of augmented Lagrangian optimization and vector quantization, adapting them to the specific constraints of 3D Gaussian Splatting with semantic attributes. It is designed to work with Language 3DGS models trained for 30k iterations, with the unified optimization applied in the final 10k iterations [S1, unofficial].
+
+## Sources
+[S1] ClunoGS: Compact Language 3D Gaussian Splatting via Unified Optimization, https://arxiv.org/abs/2610.30013, fetched 2026-10-26 (unofficial)

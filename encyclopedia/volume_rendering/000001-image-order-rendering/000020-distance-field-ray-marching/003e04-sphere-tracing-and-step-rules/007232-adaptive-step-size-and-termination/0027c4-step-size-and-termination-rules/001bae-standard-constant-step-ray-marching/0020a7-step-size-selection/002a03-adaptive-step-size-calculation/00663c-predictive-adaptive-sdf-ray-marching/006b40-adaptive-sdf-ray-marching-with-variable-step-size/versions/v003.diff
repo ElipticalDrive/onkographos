@@ -1,0 +1,90 @@
+--- v002.md
++++ v003.md
+@@ -14,5 +14,5 @@
+ *   Ray clipping distances `near` and `far` [S1, unofficial].
+ *   Boolean flag `subpix` for sub-pixel refinement [S1, unofficial].
+-*   Parameter `trunc_dist`: maximum step size when outside the truncation region (typically $2.0 \times$ voxel size) [S1, unofficial].
++*   Parameter `trunc_dist`: maximum step size when outside the truncation region, typically $2.0 \times$ voxel size [S1, unofficial].
+ 
+ **Outputs:**
+@@ -30,5 +30,5 @@
+ 2.  **Ray Setup:** Compute ray origin in world space: $C_w = \text{SE3Translation}(T_{wc})$ [S1, unofficial]. Compute ray direction in camera space by unprojecting pixel coordinates: $r_c = K.\text{Unproject}(u, v)$ [S1, unofficial]. Transform direction to world space: $r_w = \text{mulSO3}(T_{wc}, r_c)$ [S1, unofficial]. Normalize $r_w$ to unit length to ensure consistent step sizing [G].
+ 3.  **Ray-Box Intersection:** Compute intersection intervals with the volume bounding box using the slab method: $t_{min}^{bound} = (\text{bbox.Min} - C_w) / r_w$, $t_{max}^{bound} = (\text{bbox.Max} - C_w) / r_w$ [S1, unofficial]. Compute component-wise bounds: $t_{min} = \min(t_{min}^{bound}, t_{max}^{bound})$, $t_{max} = \max(t_{min}^{bound}, t_{max}^{bound})$ [S1, unofficial]. Determine the valid ray segment: $\lambda_{start} = \max(t_{min}.x, t_{min}.y, t_{min}.z, \text{near})$, $\lambda_{end} = \min(t_{max}.x, t_{max}.y, t_{max}.z, \text{far})$ [S1, unofficial].
+-4.  **Marching Loop:** If $\lambda_{start} < \lambda_{end}$, initialize $\lambda = \lambda_{start}$, `lastSDF` = InvalidValue (e.g., NaN), `minStep` = `vol.VoxelSizeUnits.x`, `step` = `minStep` (fixed from 0 to prevent infinite loops on the first iteration), and `depth` = 0 [S1, unofficial]. While $\lambda < \lambda_{end}$: evaluate $S = \text{vol.GetUnitsTrilinearClamped}(C_w + \lambda r_w)$ [S1, unofficial]. If $S \le 0$ and `lastSDF` $> 0$, the surface was crossed between the previous step and the current step [S1, unofficial]. If `subpix` is true, refine the depth using linear interpolation: $\lambda \leftarrow \lambda + \text{step} \times S / (\text{lastSDF} - S)$ [S1, unofficial]. Set `depth` = $\lambda$ and break the loop [S1, unofficial]. Update step size: $\text{step} = \max(S, \text{minStep})$ if $S > 0$, else $\text{trunc\_dist}$ [S1, unofficial]. Advance the ray: $\lambda \leftarrow \lambda + \text{step}$ [S1, unofficial]. Update history: `lastSDF` = $S$ [S1, unofficial]. If $\lambda_{start} \ge \lambda_{end}$, skip to output initialization with `depth` = 0 [S1, unofficial].
++4.  **Marching Loop:** If $\lambda_{start} < \lambda_{end}$, initialize $\lambda = \lambda_{start}$, `lastSDF` = InvalidValue (e.g., NaN), `minStep` = `vol.VoxelSizeUnits.x`, `step` = 0, and `depth` = 0 [S1, unofficial]. While $\lambda < \lambda_{end}$: evaluate $S = \text{vol.GetUnitsTrilinearClamped}(C_w + \lambda r_w)$ [S1, unofficial]. If $S \le 0$ and `lastSDF` $> 0$, the surface was crossed between the previous step and the current step [S1, unofficial]. If `subpix` is true, refine the depth using linear interpolation: $\lambda \leftarrow \lambda + \text{step} \times S / (\text{lastSDF} - S)$ [S1, unofficial]. Set `depth` = $\lambda$ and break the loop [S1, unofficial]. Update step size: $\text{step} = \max(S, \text{minStep})$ if $S > 0$, else $\text{trunc\_dist}$ [S1, unofficial]. Advance the ray: $\lambda \leftarrow \lambda + \text{step}$ [S1, unofficial]. Update history: `lastSDF` = $S$ [S1, unofficial]. If $\lambda_{start} \ge \lambda_{end}$, skip to output initialization with `depth` = 0 [S1, unofficial].
+ 5.  **Normal Computation:** If `depth` > 0, compute surface point in world space: $P_w = C_w + \text{depth} \cdot r_w$ [S1, unofficial]. Compute gradient using backward differences: $\nabla S = \text{vol.GetUnitsBackwardDiffDxDyDz}(P_w)$ [S1, unofficial]. Normalize normal: $N_w = \nabla S / |\nabla S|$ if $|\nabla S| > 0$, else $(0,0,1)$ [S1, unofficial]. Transform normal to camera space: $N_c = \text{mulSO3inv}(T_{wc}, N_w)$ [S1, unofficial]. Compute color via Phong shading: $\text{Color} = \text{PhongShade}(\text{depth} \cdot r_c, N_c)$ [S1, unofficial].
+ 6.  **Output Writing:** If `depth` > 0, set `imgdepth(u,v)` = `depth`, `img(u,v)` = `Color`, `norm(u,v)` = $(N_c, 1)$ [S1, unofficial]. Else set `imgdepth(u,v)` = InvalidValue, `img(u,v)` = 0, `norm(u,v)` = $(0,0,0,0)$ [S1, unofficial].
+@@ -48,6 +48,12 @@
+ def mat_vec_mul(M, v): return [sum(M[i][j] * v[j] for j in range(3)) for i in range(3)]
+ 
++def mulSO3inv(T, v):
++    R = T.rotation_matrix()
++    # Inverse of rotation matrix is its transpose
++    return [sum(R[j][i] * v[j] for j in range(3)) for i in range(3)]
++
+ def phong_shade(light_dir, normal):
+-    return [0.5, 0.5, 0.5]  # Standard Phong shading implementation [G]
++    # Standard Phong shading implementation [G]
++    return [0.5, 0.5, 0.5]
+ 
+ def adaptive_sdf_ray_march(u, v, w, h, T_wc, K, vol, bbox, near, far, subpix, trunc_dist):
+@@ -80,5 +86,5 @@
+         last_sdf = float('nan')
+         min_step = vol.voxel_size_units[0]
+-        step = min_step  # Fixed from 0 to prevent infinite loop on first iteration
++        step = 0.0  # Initialized to 0 per source specification
+         
+         # 4. Marching Loop
+@@ -88,6 +94,6 @@
+             
+             # Surface Crossing Check
+-            if sdf <= 0 and (math.isnan(last_sdf) or last_sdf > 0):
+-                if subpix and not math.isnan(last_sdf):
++            if sdf <= 0 and last_sdf > 0:
++                if subpix:
+                     lambda_curr = lambda_curr + step * sdf / (last_sdf - sdf)
+                 
+@@ -117,6 +123,5 @@
+             N_w = [0.0, 0.0, 1.0]
+         
+-        # mulSO3inv is transpose for SO3 matrices
+-        N_c = mat_vec_mul(T_wc.rotation_matrix(), N_w)
++        N_c = mulSO3inv(T_wc, N_w)
+         
+         color = phong_shade(vec_scale(r_c, depth), N_c)
+@@ -128,27 +133,27 @@
+ 
+ **Parameters:**
+-*   `trunc_dist`: Maximum step size when the ray is inside the truncation region (SDF $\le 0$). Typical value is $2.0 \times$ voxel size [S1, unofficial].
++*   `trunc_dist`: Maximum step size when outside the truncation region, typically $2.0 \times$ voxel size [S1, unofficial].
+ *   `subpix`: Boolean flag enabling sub-pixel depth refinement via linear interpolation at the surface crossing [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ *   If the ray never crosses from positive to negative SDF (e.g., ray starts inside the volume or misses the volume entirely), `depth` remains 0, and outputs are set to invalid/zero values [S1, unofficial].
+-*   Precision issues may arise if `lastSDF` and `SDF` are very close, leading to division by near-zero in the sub-pixel refinement step. The check `lastSDF > 0` and `SDF <= 0` ensures a sign change, but numerical stability depends on the step size relative to the gradient magnitude [G].
++*   Precision issues may arise if `lastSDF` and `SDF` are very close, leading to division by near-zero in the sub-pixel refinement step [G].
+ 
+ ## Subtopics
+ 
+ ### Predictive Adaptive SDF Ray Marching
+-Uses the previous two distance estimates to predict the next step, offering potentially smoother convergence but requiring more state. [Link](19536-predictive-adaptive-sdf-ray-marching.md)
++Not given in the sources. [Link](19536-predictive-adaptive-sdf-ray-marching.md)
+ 
+ ### Dynamic SDF Ray Marching with Adaptive Step Skipping
+-Skips steps entirely based on adaptive criteria rather than just adjusting step size. [Link](19684-dynamic-sdf-ray-marching-with-adaptive-step-skipping.md)
++Not given in the sources. [Link](19684-dynamic-sdf-ray-marching-with-adaptive-step-skipping.md)
+ 
+ ## Operating characteristics
+ *   **Time Complexity**: Per-pixel time complexity is $O(k)$, where $k$ is the number of march steps. $k$ is bounded by $\frac{\lambda_{end} - \lambda_{start}}{\text{minStep}}$ [S1, unofficial].
+-*   **Memory Access**: Memory access is coalesced for volume trilinear fetches when executed on a GPU, as threads in a warp typically access adjacent pixels and thus adjacent volume regions [S1, unofficial].
+-*   **Strengths**: Real-time performance suitable for SLAM and camera tracking; adaptive step size reduces the number of samples needed in free space compared to constant step marching.
+-*   **Limitations**: Performance degrades in regions with high surface curvature or thin structures where small steps are required; relies on the quality of the TSDF volume.
++*   **Memory Access**: Memory access is coalesced for volume trilinear fetches when executed on a GPU [S1, unofficial].
++*   **Strengths**: Real-time performance suitable for SLAM and camera tracking; adaptive step size reduces the number of samples needed in free space compared to constant step marching [G].
++*   **Limitations**: Performance degrades in regions with high surface curvature or thin structures where small steps are required; relies on the quality of the TSDF volume [G].
+ 
+ ## Background
+-This method is part of a GPU-based real-time RGBD camera tracking system for large dense scene 3D reconstruction. It was described in the context of volumetric fusion and rendering using a Truncated Signed Distance Function (TSDF) volume. The approach leverages the efficiency of ray marching with adaptive step sizes to generate synthetic depth maps for comparison with incoming depth frames in an Iterative Closest Point (ICP) registration loop [S1, unofficial].
++This method is part of a GPU-based real-time RGBD camera tracking system for large dense scene 3D reconstruction [S1, unofficial]. It was described in the context of volumetric fusion and rendering using a Truncated Signed Distance Function (TSDF) volume [S1, unofficial]. The approach leverages the efficiency of ray marching with adaptive step sizes to generate synthetic depth maps for comparison with incoming depth frames in an Iterative Closest Point (ICP) registration loop [S1, unofficial].
+ 
+ ## Sources

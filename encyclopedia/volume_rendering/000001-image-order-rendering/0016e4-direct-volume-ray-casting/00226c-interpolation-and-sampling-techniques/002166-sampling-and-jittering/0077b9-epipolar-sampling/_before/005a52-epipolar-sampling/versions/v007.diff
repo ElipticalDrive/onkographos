@@ -1,0 +1,87 @@
+--- v006.md
++++ v007.md
+@@ -1,10 +1,8 @@
+ # Epipolar Sampling
+-
+-
+ ## Overview
+-Epipolar sampling is a class of techniques that place sample points along epipolar lines to exploit geometric smoothness and reduce computation. In participating media rendering, it places samples along rays emanating radially from a light source's projection on the screen to exploit the smooth variation of inscattered light along these lines [S2, unofficial]. In multi-view neural rendering, it samples features from other views along epipolar lines corresponding to a given ray, enabling cross-view feature aggregation without full 3D volume rendering [S1, unofficial]. Both variants reduce the number of expensive ray-marching or feature-interpolation steps compared to uniform sampling [S2, unofficial][S1, unofficial].
++Epipolar sampling is a class of techniques that place sample points along epipolar lines to exploit geometric smoothness and reduce computation [S2, unofficial]. In participating media rendering, it places samples along rays emanating radially from a light source's projection on the screen to exploit the smooth variation of inscattered light along these lines [S2, unofficial]. In multi-view neural rendering, it samples features from other views along epipolar lines corresponding to a given ray, enabling cross-view feature aggregation without full 3D volume rendering [S1, unofficial]. Both variants reduce the number of expensive ray-marching or feature-interpolation steps compared to uniform sampling [S2, unofficial][S1, unofficial].
+ 
+ ## How it works
+-The method varies significantly depending on the application domain. The following describes the two primary implementations found in the sources.
++The method varies significantly depending on the application domain [S1, unofficial][S2, unofficial]. The following describes the two primary implementations found in the sources [S1, unofficial][S2, unofficial].
+ 
+ ### Variant 1: Light Scattering (Screen-Space Epipolar Sampling)
+@@ -13,10 +11,10 @@
+ **Inputs:**
+ - Screen resolution.
+-- Projected position of the light source on the screen $(L_x, L_y)$.
++- Projected position of the light source on the screen $(L_x, L_y)$ [S2, unofficial].
+ - Depth buffer (z-buffer) of the scene.
+ - Number of initial ray-marching samples ($N_{init}$) and interpolation samples ($N_{interp}$) per line [S2, unofficial].
+ 
+ **Outputs:**
+-- Ins scattered light intensity for each screen pixel.
++- Ins scattered light intensity for each screen pixel [S2, unofficial].
+ - Auxiliary textures storing sample indices and coordinates [S2, unofficial].
+ 
+@@ -26,5 +24,5 @@
+ 
+ **Steps:**
+-1. **Epipolar Line Generation:** Determine the entry point $E$ as the projected light position on the screen. If the light is behind the camera, $E$ is the point at infinity where rays converge [S2, unofficial]. If the light is on the screen, equidistantly place a user-defined number of exit points along the screen border and connect $E$ to each exit point to form epipolar lines [S2, unofficial]. If the light is outside the screen, cull lines completely outside the visible area and truncate remaining lines against screen borders [S2, unofficial].
++1. **Epipolar Line Generation:** Determine the entry point $E$ as the projected light position on the screen [S2, unofficial]. If the light is behind the camera, $E$ is the point at infinity where rays converge [S2, unofficial]. If the light is on the screen, equidistantly place a user-defined number of exit points along the screen border and connect $E$ to each exit point to form epipolar lines [S2, unofficial]. If the light is outside the screen, cull lines completely outside the visible area and truncate remaining lines against screen borders [S2, unofficial].
+ 2. **Sample Placement:** Place $N_{init}$ initial ray-marching samples equidistantly along each epipolar line to capture low-frequency variations [S2, unofficial]. Detect depth breaks (discontinuities) in the depth buffer along each epipolar line and place additional ray-marching samples directly before and after each break to capture high-frequency details [S2, unofficial]. Fill the remaining positions with interpolation samples [S2, unofficial].
+ 3. **Ray Marching:** Perform expensive ray marching only at the initial and depth-break samples to compute inscattered light intensity [S2, unofficial].
+@@ -82,25 +80,43 @@
+     
+     # 1. Project rays to other views
+-    xy_min, xy_max, overlaps_image = project_rays(origins, directions, extrinsics, intrinsics, near, far)
++    # Compute ray endpoints at near and far planes in world space
++    near_pts = origins + directions * near.unsqueeze(-1)
++    far_pts = origins + directions * far.unsqueeze(-1)
++    # Transform to target view space
++    near_tgt = torch.matmul(extrinsics, torch.cat([near_pts, torch.ones_like(near_pts[..., :1])], dim=-1).unsqueeze(-1)).squeeze(-1)[..., :3]
++    far_tgt = torch.matmul(extrinsics, torch.cat([far_pts, torch.ones_like(far_pts[..., :1])], dim=-1).unsqueeze(-1)).squeeze(-1)[..., :3]
++    # Project to screen coordinates
++    near_proj = torch.matmul(intrinsics, near_tgt.transpose(-2, -1)).transpose(-2, -1)
++    far_proj = torch.matmul(intrinsics, far_tgt.transpose(-2, -1)).transpose(-2, -1)
++    xy_min = near_proj[..., :2] / near_proj[..., 2:3]
++    xy_max = far_proj[..., :2] / far_proj[..., 2:3]
++    overlaps_image = (near_proj[..., 2] > 0) & (far_proj[..., 2] > 0)
+     
+     # 2. Clamp and mask
+     xy_min = torch.where(torch.isinf(xy_min), torch.zeros_like(xy_min), xy_min)
+     xy_max = torch.where(torch.isinf(xy_max), torch.zeros_like(xy_max), xy_max)
+-    xy_min = xy_min * overlaps_image
+-    xy_max = xy_max * overlaps_image
++    xy_min = xy_min * overlaps_image.float()
++    xy_max = xy_max * overlaps_image.float()
+     
+     # 3. Generate sample depths
+-    sample_depth = (torch.arange(s) + 0.5) / s  # shape: (sample,)
++    sample_depth = (torch.arange(s) + 0.5) / s  # shape: (s,)
+     
+     # 4. Interpolate coordinates
+-    xy_sample = xy_min + sample_depth.unsqueeze(0).unsqueeze(0).unsqueeze(0) * (xy_max - xy_min)
++    # Broadcast sample_depth to (1, 1, 1, 1, s)
++    xy_sample = xy_min + sample_depth.view(1, 1, 1, 1, s) * (xy_max - xy_min)
+     
+     # 5. Transpose and mask self-view
+     xy_sample = xy_sample.transpose(1, 2)  # (batch, other_view, view, ray, sample, 2)
+-    # Exclude diagonal via precomputed mask
++    # Exclude diagonal via precomputed mask (implementation omitted as per source comment)
+     
+-    # 6. Sample features
+-    features = grid_sample(xy_sample, padding_mode='zeros')
++    # 6. Sample features using bilinear interpolation
++    features = bilinear_sample(xy_sample)
+     return features
++
++def bilinear_sample(coords):
++    # coords: (batch, other_view, view, ray, sample, 2) in normalized grid coordinates
++    # [G] Standard bilinear texture sampling: sample nearest 2x2 grid points, 
++    # compute interpolation weights based on fractional coordinates, and return weighted sum.
++    pass
+ ```
+ 

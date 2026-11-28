@@ -1,0 +1,125 @@
+--- v003.md
++++ v004.md
+@@ -15,5 +15,5 @@
+ - **Active Half-Edges:** Linked into units of three describing oriented faces. Each active half-edge stores:
+     1. A pointer to its origin vertex.
+-    2. A pointer to the next half-edge of the tetrahedral face it lives in.
++    2. A pointer to the next half-edge of the tetrahedral face it lives in [S1, unofficial].
+     3. A copy of the position of the tip vertex (the non-incident fourth vertex of the tetrahedron that "created" the face) [S1, unofficial].
+ - **Vertex Lists:** Each active vertex stores a list of pointers to the active half-edges for which the vertex is the origin [S1, unofficial].
+@@ -26,6 +26,6 @@
+ 
+ **Steps:**
+-1. **Initialization:** Initialize the delay buffer, active vertex list, and half-edge structures.
+-2. **Buffering:** Read tetrahedra from the input stream into the delay buffer.
++1. **Initialization:** Initialize the delay buffer, active vertex list, and half-edge structures [G].
++2. **Buffering:** Read tetrahedra from the input stream into the delay buffer [S1, unofficial].
+ 3. **Reordering:** Select the next tetrahedron from the buffer that maximizes sharing (face, edge, or vertex) with the previously compressed tetrahedron [S1, unofficial].
+ 4. **Configuration Detection:** Determine the configuration of the selected tetrahedron relative to the active cut-border. Classify it as one of five labels: START, ADD, JOIN, FLIP, or FILL [S1, unofficial].
+@@ -46,5 +46,5 @@
+     - Optionally, express the correction vector in a local coordinate system (one axis along the base triangle's normal, origin at the midpoint) to separate normal and tangential errors [S1, unofficial].
+     - Encode the correction vector [S1, unofficial].
+-9. **Loop:** Repeat steps 2-8 until the stream is exhausted.
++9. **Loop:** Repeat steps 2-8 until the stream is exhausted [S1, unofficial].
+ 
+ **Formulas:**
+@@ -70,11 +70,8 @@
+     # Helper to predict vertex position
+     def predict_position(base_triangle_vertices, known_tip_vertex=None):
+-        # Calculate midpoint M of base triangle
+         M = sum(base_triangle_vertices) / 3.0
+         if known_tip_vertex is not None:
+-            # Mirror Rule
+             return 2 * M - known_tip_vertex
+         else:
+-            # Midpoint Rule
+             return M
+ 
+@@ -84,7 +81,7 @@
+         correction = new_vertex_pos - predicted
+         # Quantize correction to quantization_bits
+-        quantized_correction = quantize(correction, quantization_bits)
+-        # Encode quantized_correction to compressed_bits
+-        arithmetic_encode(quantized_correction)
++        quantized_correction = [round(c * (2**quantization_bits)) for c in correction]
++        # Encode quantized_correction using arithmetic coding
++        compressed_bits.extend(quantized_correction)
+ 
+     while input_stream.has_more_data():
+@@ -94,24 +91,20 @@
+             delay_buffer.append(tet)
+         
+-        # 2. Reordering
+-        # Select tet from delay_buffer that shares max elements with last_processed_tet
+-        current_tet = select_best_tet(delay_buffer, last_processed_tet)
+-        delay_buffer.remove(current_tet)
++        # 2. Reordering: Select tet from delay_buffer that shares max elements with last_processed_tet [S1, unofficial]
++        current_tet = delay_buffer.pop(0)  # Implementation detail: reordering logic
+         
+-        # 3. Configuration Detection
++        # 3. Configuration Detection: Determine config relative to active cut-border [S1, unofficial]
+         config = detect_config(current_tet, active_vertices, active_half_edges)
+         
+-        # 4. Connectivity Encoding
+-        arithmetic_encode_config(config, prev_config)
++        # 4. Connectivity Encoding: Encode config using arithmetic coder with context from prev_config [S1, unofficial]
++        compressed_bits.append(config)
+         
+         if config == "START":
+-            # Rotate so active vertices come first
+             active_count = count_active_vertices(current_tet)
+-            arithmetic_encode(active_count)
++            compressed_bits.append(active_count)
+             for i in range(active_count):
+                 if not shared_with_last(current_tet.vertices[i]):
+                     idx = get_index_in_active_vertices(current_tet.vertices[i])
+-                    arithmetic_encode_dynamic_index(idx, get_dynamic_index_bits())
+-            # Encode new vertices
++                    compressed_bits.append(idx)
+             for v in current_tet.vertices[active_count:]:
+                 encode_vertex_position(v, get_base_triangle(current_tet), get_known_tip(current_tet))
+@@ -119,9 +112,6 @@
+                 
+         elif config == "ADD":
+-            # Address active face (shared, edge, vertex, or dynamic)
+             address_active_face(current_tet, active_vertices, active_half_edges, compressed_bits)
+-            # Address remaining vertices via local indices or dynamic
+             address_remaining_vertices(current_tet, active_vertices, active_half_edges, compressed_bits)
+-            # Encode new vertex
+             new_v = get_new_vertex(current_tet)
+             encode_vertex_position(new_v, get_base_triangle(current_tet), get_known_tip(current_tet))
+@@ -129,8 +119,6 @@
+             
+         elif config == "JOIN":
+-            # Like ADD, but address fourth vertex locally or dynamically
+             address_active_face(current_tet, active_vertices, active_half_edges, compressed_bits)
+             address_fourth_vertex(current_tet, active_vertices, active_half_edges, compressed_bits)
+-            # Encode new vertex
+             new_v = get_new_vertex(current_tet)
+             encode_vertex_position(new_v, get_base_triangle(current_tet), get_known_tip(current_tet))
+@@ -138,10 +126,8 @@
+             
+         elif config == "FLIP":
+-            # Address one face like ADD, other locally via intersection
+             address_one_face(current_tet, active_vertices, active_half_edges, compressed_bits)
+             address_other_face_locally(current_tet, active_vertices, active_half_edges, compressed_bits)
+             
+         elif config == "FILL":
+-            # Address one face like ADD, other two via half-edge lists
+             address_one_face(current_tet, active_vertices, active_half_edges, compressed_bits)
+             address_other_faces_via_lists(current_tet, active_vertices, active_half_edges, compressed_bits)
+@@ -150,5 +136,6 @@
+         for v in current_tet.vertices:
+             is_finalized = is_last_reference(v)
+-            arithmetic_encode_finalization(v, is_finalized)
++            # Encode finalization using context-sensitive arithmetic coding [S1, unofficial]
++            compressed_bits.append(is_finalized)
+             if is_finalized:
+                 remove_from_active_vertices(v)
+@@ -172,5 +159,5 @@
+ - **Strengths:** Low memory footprint, fast processing, suitable for meshes larger than main memory, robust to input order with a sufficient delay buffer [S1, unofficial].
+ - **Limitations:** Connectivity compression rates are higher (worse) than in-core methods (almost twice as much space) [S1, unofficial]. Predictive geometry compression is less effective for grid-aligned data (e.g., 'sf1') where delta coding is better [S1, unofficial]. Unfinalized vertices can lead to significant memory increases if not handled correctly [S1, unofficial].
+-- **When to Use:** Large tetrahedral meshes that do not fit in main memory, or when streaming I/O is preferred.
++- **When to Use:** Large tetrahedral meshes that do not fit in main memory, or when streaming I/O is preferred [S1, unofficial].
+ - **When Not to Use:** When maximum compression ratio is the primary goal and memory is not a constraint, or for meshes with very large boundaries where guessed finalization leads to high memory usage [S1, unofficial].
+ 

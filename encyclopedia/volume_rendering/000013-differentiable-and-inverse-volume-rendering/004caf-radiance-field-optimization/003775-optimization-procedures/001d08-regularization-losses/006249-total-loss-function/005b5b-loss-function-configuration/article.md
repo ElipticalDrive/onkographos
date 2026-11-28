@@ -1,0 +1,138 @@
+# Loss Function Configuration
+
+Also called: L2 Loss Optimization, Loss Function Simplification, Loss Weighting Scheme, Loss function parameter configuration, Removing Repulsion Loss, Total Training Loss, Training Loss Weights, w/o Lrep
+
+## Overview
+Loss Function Configuration defines the composition, weighting, and parameterization of the objective function used to optimize radiance fields [S1, unofficial][S2, S4]. It balances competing objectives—photometric fidelity, structural similarity, geometric consistency, and regularization—to stabilize training and improve reconstruction quality [S1, unofficial][S2, S4]. It differs from sibling methods by focusing on the selection and tuning of loss terms rather than defining the primitives themselves; for example, it may simplify a standard SSIM and L1 combination to a single L2 loss [S4], or remove specific terms like repulsion loss to prevent artifacts [S3].
+
+## How it works
+**Inputs:** Candidate loss terms (e.g., $\mathcal{L}_{photo}$, $\mathcal{L}_{ptc}$, $\mathcal{L}_{bg}$, $\mathcal{L}_{d\_norm}$, $\mathcal{L}_{d\_tv}$), scene characteristics (static/dynamic, large motion), and optimization stage (coarse/fine) [S1, unofficial][S2].
+**Outputs:** A configured total loss function $\mathcal{L}$ with specific weight parameters [S1, unofficial][S2].
+**Data Structures:** The configuration is represented as a mapping of loss term identifiers to scalar weights [S2].
+
+**Steps:**
+1. **Select Loss Terms:** Identify necessary components based on the radiance field variant (e.g., RT-Splatting combines appearance, normal consistency, and transparent mask regularization [S1, unofficial]).
+2. **Assign Base Weights:** Initialize weights based on empirical defaults or ablation studies [S1, unofficial][S2, S4].
+3. **Apply Stage-Specific Scaling:** Adjust weights for coarse vs. fine optimization stages [S2].
+4. **Handle Scene-Specific Variants:** Modify weights for specific properties (e.g., large motion scenes require lower deformation norm weights) [S2].
+5. **Exclude Unnecessary Terms:** Remove terms that cause instability or redundancy (e.g., removing repulsion loss [S3] or simplifying to L2 [S4]).
+
+**Formulas:**
+The total loss is generally a weighted sum: $\mathcal{L} = \sum_i w_i \mathcal{L}_i$ [S1, unofficial][S2].
+Specific configurations include:
+
+**1. RT-Splatting Configuration [S1, unofficial]:**
+$$ \mathcal{L} = \mathcal{L}_{\text {img}} + \lambda _{\text {n}}\mathcal{L}_{\text {n}} + \lambda _{\text {mask}}\mathcal{L}_{\text {mask}} $$
+Where $\mathcal{L}_{\text {img}} = (1 - \lambda )\mathcal{L}_{1} + \lambda \mathcal{L}_{\text {D-SSIM}} + \lambda _{\text {perc}}\mathcal{L}_{\text {perc}}$ [S1, unofficial].
+Parameters: $\lambda = 0.2$ (D-SSIM weight), $\lambda _{\text {perc}} = 0.01$ (Perceptual loss weight), $\lambda _{\text {n}} = 0.05$ (Normal consistency weight), $\lambda _{\text {mask}} = 0.01$ (Transparent mask regularization weight) [S1, unofficial].
+
+**2. Neural Deformable Voxel Grid Configuration [S2]:**
+$$ \mathcal{L} = \mathcal{L}_{photo} + w_{ptc} \cdot \mathcal{L}_{ptc} + w_{bg} \cdot \mathcal{L}_{bg} + w_{d\_norm} \cdot \mathcal{L}_{d\_norm} + w_{d\_tv} \cdot \mathcal{L}_{d\_tv} $$ [S2].
+Parameters:
+*   **Coarse Stage:** $w_{ptc}=0.1$, $w_{bg}=0.01$, $w_{d\_norm}=0.1$, $w_{d\_tv}=1$ [S2].
+*   **Fine Stage:** $w_{ptc}=0.01$, $w_{bg}=0.001$, $w_{d\_norm}=0.01$, $w_{d\_tv}=1$ [S2].
+*   **Large Motion Scenes:** For scenes like 'Hell Warrior', $w_{d\_norm}$ is reduced to $0.01$ (coarse) and $0.001$ (fine) [S2].
+
+**3. Mip-Splatting Simplification [S4]:**
+Standard 3DGS uses SSIM (weight 0.8) and L1 (weight 0.2) [S4]. Mip-Splatting simplifies this to a single L2 loss for optimization [S4].
+
+**4. Defocus-Engineered Holography [S5]:**
+Uses weights $\gamma=40$ and $\beta=20$ to balance in-focus vs. out-of-focus image contributions [S5].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def configure_loss(scene_type, stage, loss_terms):
+    """
+    Configures the loss function weights based on scene and stage.
+    """
+    weights = {}
+    
+    # Base weights for Neural Deformable Voxel Grid [S2]
+    if stage == "coarse":
+        weights["ptc"] = 0.1
+        weights["bg"] = 0.01
+        weights["d_tv"] = 1.0
+        weights["d_norm"] = 0.1
+    elif stage == "fine":
+        weights["ptc"] = 0.01
+        weights["bg"] = 0.001
+        weights["d_tv"] = 1.0
+        weights["d_norm"] = 0.01
+        
+    # Adjust for large motion scenes [S2]
+    if scene_type == "large_motion":
+        if stage == "coarse":
+            weights["d_norm"] = 0.01
+        elif stage == "fine":
+            weights["d_norm"] = 0.001
+            
+    # RT-Splatting specific terms [S1, unofficial]
+    if "rt_splatting" in loss_terms:
+        weights["img"] = 1.0
+        weights["n"] = 0.05
+        weights["mask"] = 0.01
+        # Internal img composition
+        weights["l1"] = 0.8  # (1 - 0.2)
+        weights["d_ssim"] = 0.2
+        weights["perc"] = 0.01
+        
+    return weights
+```
+
+**Edge Cases and Pitfalls:**
+*   **Repulsion Loss Removal:** Removing the repulsion loss ($L_{rep}$) during sphere cloud training causes spheres to clump together instead of covering the object, leading to poor reconstructions [S3].
+*   **Offset Regularization Strength:** In Palette-based networks, if $\lambda_\delta = 0$, the model over-relies on offsets instead of palette colors, failing to predict correctly [S9]. If $\lambda_\delta$ is too large, it over-relies on palette colors, reducing accuracy [S9]. A value of 0.1 is typical [S9].
+*   **MS-SSIM Usage:** Using MS-SSIM loss instead of MSE loss in defocus-engineered holography resulted in unclear effects and defects in the optimized depth-encoded hologram [S5].
+*   **Hybrid Gradient Alignment:** When initial and target shapes are already well-aligned, RGBXY derivatives (used in early stages of hybrid strategies) may lead to inaccurate matching due to approximated optimal transport [S6].
+
+## Subtopics
+
+### [Two-Stage Photometric and Perceptual Training Strategy](9931-two-stage-photometric-and-perceptual-training-strategy.md)
+This strategy optimizes feed-forward radiance field networks (specifically SplatVoxel) by decoupling the learning of multi-view consistency from fine-grained voxel attribute refinement. It addresses the instability of jointly training multi-view and voxel transformers by first establishing a robust multi-view backbone before fine-tuning the full system. It differs from standard single-stage optimization by using distinct perceptual weighting factors for the two transformer branches to balance structural consistency and photometric accuracy.
+
+### [Overall Training Objective](13444-overall-training-objective.md)
+The Overall Training Objective defines the composite loss function used to optimize radiance fields by balancing pixel-wise fidelity, perceptual quality, and adversarial constraints. It addresses the ill-posed nature of inverse rendering by combining multiple metrics to supervise optimization, addressing the problem of generating high-fidelity, visually consistent rendered images.
+
+### [Sky Loss](14229-sky-loss.md)
+Sky Loss is a regularization term used in differentiable volume rendering to prevent the invalid allocation of sparse voxels in unbounded free space. It isolates the sky region and enforces maximum global ray transmittance, ensuring that background color generation is routed exclusively through a 2D environment map rather than learned 3D primitives. It differs from standard photometric losses by targeting the transmittance field specifically in sky-masked pixels to suppress background noise.
+
+### [Skinning Weights Weak Supervision](16251-skinning-weights-weak-supervision.md)
+This method regularizes the skinning weights of 3D Gaussians to ensure they generalize across poses by supervising them with ground-truth skinning weights from a parametric human model (SMPL). It addresses the problem of overfitting to limited training gestures, where learned skinning weights may not transfer to novel poses. It differs from sibling methods like [Two-Stage Photometric and Perceptual Training Strategy](9931-two-stage-photometric-and-perceptual-training-strategy.md) by focusing specifically on the geometric consistency of deformation weights rather than photometric or perceptual image fidelity.
+
+### Hybrid Gradients
+A strategy combining RGBXY derivatives and standard derivatives to leverage global matching in early stages and precise local alignment in late stages [S6]. It uses RGBXY derivatives for the first 75% of optimization iterations and switches to standard derivatives for the last 25% [S6]. A pitfall is that when initial and target shapes are already aligned very well, the approximated optimal transport method may lead to inaccurate matching, making RGBXY derivatives less effective [S6].
+
+### Color Palette Sparsity Loss
+Adopted from PaletteNeRF, this loss measures the sparsity of the learned color palette $\hat{P}$ [S7]. Formula: $\mathcal{L}_{\text {sp}} = \frac {\sum _{i=1}^{N_{\hat{P}}} \hat{w}_i}{\sum _{i=1}^{N_{\hat{P}}} \hat{w}_i^2} - 1$, where $\hat{w}_i$ is the per-palette weight [S7].
+
+### Shape Part Addition Loss
+A loss function for adding a local part to a shape instance, fitting the network to a composite image of the original and a copied region from another instance [S8]. The user selects views, scribbles regions to copy and paste, and the network renders the composite [S8]. The loss $L_{add}$ is optimized using Adam with learning rate $10^{-2}$ [S8]. Regularization weight $\lambda_{reg}$ is 10 for the color editing loss, though not explicitly stated for $L_{add}$ [S8].
+
+### Offset Regularization
+Regularization for the offset loss with strength $\lambda_\delta$ [S9]. Typical value is 0.1. If $\lambda_\delta = 0$, the PCN fails to predict correctly by over-relying on offsets [S9]. If $\lambda_\delta$ is too large, it over-relies on palette colors, resulting in less accurate reconstruction [S9].
+
+### Loss Term Configuration
+Specifically regarding entropy loss ($L_{entr}$) [S10]. Without $L_{entr}$, the separation between static and dynamic radiance becomes ambiguous. $L_{entr}$ encourages static and dynamic radiance separation, improving object renderings and scene decomposition [S10].
+
+## Operating characteristics
+*   **Complexity:** The computational overhead of configuring the loss is negligible compared to the forward/backward passes of the radiance field itself [G]. However, the *choice* of loss terms significantly impacts convergence speed and memory usage (e.g., perceptual losses require feature extraction networks) [G].
+*   **Performance:** Simplifying to L2 loss (Mip-Splatting) yields PSNR of 28.57 on Mip-NeRF 360, comparable to L1+SSIM (28.57) and better than SSIM alone (28.34) or L2+SSIM (27.17) [S4].
+*   **Strengths:** Proper weighting prevents mode collapse (e.g., sphere clumping) and handles specific artifacts (specular, defocus) [S3, S5].
+*   **Limitations:** Requires careful tuning per scene type (e.g., large motion vs. static). Incorrect weights can lead to ambiguous decompositions or poor generalization [S2, S10].
+
+## Background
+Loss function configuration has evolved alongside radiance field optimization [G]. Subsequent works introduced stage-specific weighting [S2], hybrid gradient strategies [S6], and specialized regularizations for specific tasks like relighting [S1, unofficial], dynamic scenes [S2], and stylization [S8]. The removal of redundant terms (like repulsion loss in sphere-guided methods [S3]) and the introduction of entropy-based separation [S10] reflect ongoing efforts to stabilize and improve the fidelity of differentiable volume rendering.
+
+## Sources
+[S1] RT-Splatting: Joint Reflection-Transmission Modeling with Gaussian Splatting, https://github.com/WoojunePark/splat_papers/issues/71, fetched 2026-10-27 (unofficial)
+[S2] Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis, https://doi.org/10.1007/978-3-031-26319-4_27, fetched 2026-10-26
+[S3] Sphere-Guided Training of Neural Implicit Surfaces, http://arxiv.org/abs/2209.15511v2, fetched 2026-10-27
+[S4] Mipmap-GS: Let Gaussians Deform with Scale-Specific Mipmap for Anti-Aliasing Rendering, https://doi.org/10.1109/3dv66043.2025.00091, fetched 2026-10-27
+[S5] Diffraction-engineered holography: Beyond the depth representation limit of holographic displays, https://www.nature.com/articles/s41467-022-33728-5, fetched 2026-10-29
+[S6] Differentiable Rendering Using RGBXY Derivatives and Optimal Transport, https://doi.org/10.1145/3550454.3555479, fetched 2026-10-27
+[S7] LAENeRF: Local Appearance Editing for Neural Radiance Fields, https://doi.org/10.1109/cvpr52733.2024.00475, fetched 2026-10-26
+[S8] Editing Conditional Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00572, fetched 2026-10-26
+[S9] StyleRF-VolVis: Style Transfer of Neural Radiance Fields for Expressive Volume Visualization., https://doi.org/10.1109/tvcg.2024.3456342, fetched 2026-10-26
+[S10] Multi-Level Neural Scene Graphs for Dynamic Urban Environments, https://doi.org/10.1109/cvpr52733.2024.01996, fetched 2026-10-29

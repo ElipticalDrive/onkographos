@@ -1,0 +1,112 @@
+# Inverse Distance Weighted Interpolation
+
+Also called: IDW, Inverse Distance Weighting, Inverse Distance Interpolation, IDW Interpolation, Shepard's method
+
+## Overview
+Inverse Distance Weighted (IDW) Interpolation is a spatial interpolation method that estimates the value of a continuous scalar field at a query point by computing a weighted average of nearby sample values, where the influence of each sample decreases as its distance from the query point increases [S1][S2, unofficial]. It is chosen when a smooth, non-linear reconstruction is required from sparse or irregular data points (such as drill-hole assays) and when the underlying data structure is not a regular grid [S2, unofficial]. Unlike [Trilinear Interpolation](1531-trilinear-interpolation.md), which assumes a regular grid and guarantees $C^0$ continuity along interior faces, IDW is grid-agnostic and does not guarantee continuity across cell boundaries unless extended to neighboring cells [S1].
+
+## How it works
+**Inputs:**
+- A set of $N$ sample points $\{P_i\}$ with associated scalar values $\{V_i\}$, where $P_i = (x_i, y_i, z_i)$ and $V_i$ is the value at $P_i$ [S1][S2, unofficial].
+- A query point $Q = (x_q, y_q, z_q)$ [G].
+- Parameters:
+  - `power`: The IDW exponent controlling the rate of decay. Typical value: 2 [S2, unofficial].
+  - `searchRadius`: The maximum Euclidean distance to consider samples. Typical value: 60 world units [S2, unofficial].
+  - `maxNeighbors`: The maximum number of nearest neighbors to include. Typical value: 16 [S2, unofficial].
+
+**Outputs:**
+- The interpolated scalar value $V(Q)$ [S1].
+
+**Data Structures:**
+- A spatial index (e.g., 3D Hash Grid or KD-Tree) to efficiently retrieve neighbors within `searchRadius` or the `maxNeighbors` closest points [S2, unofficial].
+- If using the cell-based approach described in [S1], the data is structured as a grid of hexahedral cells, and the query point is first located within a specific cell [S1].
+
+**Steps:**
+
+1. **Neighbor Retrieval**: Find all sample points $P_i$ such that the Euclidean distance $d_i = \|Q - P_i\|$ is less than or equal to `searchRadius` [S2, unofficial]. If `maxNeighbors` is specified, select only the $k \le \text{maxNeighbors}$ points with the smallest $d_i$ from the retrieved set [S2, unofficial]. If no samples are found within the radius, return a nodata sentinel value (e.g., $< -10^{29}$) [S2, unofficial].
+
+2. **Exact Hit Check**: If any sample point $P_j$ coincides exactly with $Q$ (i.e., $d_j = 0$), return $V_j$ immediately [S2, unofficial].
+
+3. **Weight Calculation**: For each neighbor $i$, compute the weight $w_i$ using the inverse distance formula:
+   $$
+   w_i = \frac{1}{d_i^{\text{power}}}
+   $$
+   If using the specific cell-based formulation from [S1] (where neighbors are the 8 vertices of the containing cell), the weights are computed as:
+   $$
+   w_i = \frac{\prod_{k=0, k \neq i}^{7} [d_k(Q)]^2}{\sum_{j=0, j \neq i}^{7} \prod_{l=0, l \neq j}^{7} [d_l(Q)]^2}
+   $$
+   where $d_k(Q)$ is the Euclidean distance between the $k$-th vertex of the cell and $Q$ [S1]. This formulation ensures that if $Q$ is at vertex $j$, $w_j=1$ and all other $w_i=0$ [S1].
+
+4. **Normalization and Interpolation**: Compute the sum of weights $W = \sum_{i} w_i$ [S1]. Compute the interpolated value:
+   $$
+   V(Q) = \frac{\sum_{i} w_i V_i}{W}
+   $$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def idw_interpolate(query_point, samples, power=2, search_radius=60, max_neighbors=16):
+    """
+    query_point: tuple (x, y, z)
+    samples: list of tuples (point: (x,y,z), value: float)
+    power: float, IDW exponent
+    search_radius: float, max distance to consider
+    max_neighbors: int, max number of neighbors to use
+    """
+    candidates = []
+    for point, value in samples:
+        d_sq = (query_point[0]-point[0])**2 + (query_point[1]-point[1])**2 + (query_point[2]-point[2])**2
+        if d_sq <= search_radius**2:
+            candidates.append((d_sq, point, value))
+    
+    if not candidates:
+        return -1e30  # Nodata sentinel [S2, unofficial]
+    
+    candidates.sort(key=lambda x: x[0])
+    candidates = candidates[:max_neighbors]
+    
+    for d_sq, point, value in candidates:
+        if d_sq == 0:
+            return value  # Exact hit short-circuit [S2, unofficial]
+    
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for d_sq, point, value in candidates:
+        d = d_sq**0.5
+        w = 1.0 / (d ** power)
+        total_weight += w
+        weighted_sum += w * value
+        
+    if total_weight == 0:
+        return -1e30
+        
+    return weighted_sum / total_weight
+```
+
+**Edge Cases and Pitfalls:**
+- **Continuity**: The basic scheme does not guarantee $C^0$ continuity along interior faces of the grid [S1]. This can be minimized by including all vertices of all cells that contain a point on an interior face, effectively extending the neighbor set beyond the single containing cell [S1].
+- **Local Sparsity**: Considering only surrounding cells ignores contributions from cells in the original volume that do not include the interpolated point, which can lead to sparse sampling artifacts [S1].
+- **Arbitrary Hexahedra**: If the underlying cells are arbitrary hexahedra, vertices may be far from the query point, potentially degrading accuracy compared to regular grids [S1].
+
+## Subtopics
+
+### [Linear Sampling Method](20918-linear-sampling-method.md)
+A method to speed up scalar estimation inside a tetrahedral cell by exploiting the linearity of scalar change in any direction within the cell.
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ for naive search, or $O(\log N + k)$ for spatial index search, where $N$ is the total number of samples and $k$ is the number of neighbors (typically small, e.g., 8-16) [S2, unofficial].
+- **Memory Complexity**: Not given in the sources.
+- **Performance**: Predictable performance for static datasets using hash grids or KD-trees [S2, unofficial].
+- **Strengths**: Works with irregular, non-grid data; simple to implement; computationally efficient; handles sparse data well [S2, unofficial].
+- **Limitations**: Does not guarantee continuity across cell boundaries; sensitive to the choice of `power` and `searchRadius`; may produce "bullseye" artifacts around sample points if `power` is too high [S1][S2, unofficial].
+- **When to use**: When data is sparse, irregular, or not on a regular grid; when a smooth, non-linear interpolation is desired without the complexity of higher-order schemes [S1][S2, unofficial].
+- **When not to use**: When high-order continuity is required; when the data is on a regular grid and higher-order interpolation (like [Trilinear Interpolation](1531-trilinear-interpolation.md)) is feasible and preferred for accuracy [S1].
+
+## Background
+Inverse Distance Weighted Interpolation is a distance-weighted interpolation scheme where influence decreases with distance [S1]. The specific weighting scheme used in the cell-based implementation is presented in [BS84] [S1]. It has been applied to computational fluid dynamics simulations, such as the "blunt fin" from NASA-Ames Research Center [S1]. More recently, it has been implemented in web-based 3D visualization libraries for rendering sparse assay data (e.g., gold assays) as volumetric textures [S2, unofficial].
+
+## Sources
+[S1] Direct volume rendering of curvilinear volumes, https://doi.org/10.1145/99308.99318, fetched 2026-10-28
+[S2] feat: 3D IDW interpolation volume and voxel visualisation, https://github.com/darkmine-oss/baselode/pull/50, fetched 2026-10-27 (unofficial)

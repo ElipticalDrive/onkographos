@@ -1,0 +1,319 @@
+--- v002.md
++++ v003.md
+@@ -4,161 +4,141 @@
+ 
+ ## Overview
+-Streaming and Level-of-Detail (LOD) selection is a method for visualizing massive volumetric scenes by adaptively loading data based on viewpoint position, bounding memory usage to visible data and its required "useful" resolution rather than the total scene size [S1, unofficial]. It sets itself apart from static LOD approaches by incrementally updating the data structure to maintain navigation fluidity, avoiding the reload of all data upon viewpoint changes [S1, unofficial]. Unlike [Hierarchical Culling & Multi-resolution Approximation](2010-hierarchical-culling-multi-resolution-approximation.md) which may rely on pre-computed hierarchical structures, this method uses additive ladders to paint a coarse scene from the first chunk and sharpen it as more data arrives, combined with substitutive levels and spatial tiles to reduce the cost of distant or off-screen objects [S1, unofficial].
++Streaming and Level-of-Detail (LOD) selection is a method for visualizing massive volumetric scenes by adaptively loading data based on viewpoint position, bounding memory usage to visible data and its required "useful" resolution rather than the total scene size [S1, unofficial]. It sets itself apart from static LOD approaches by incrementally updating the data structure to maintain navigation fluidity, avoiding the reload of all data upon viewpoint changes [S1, unofficial].
+ 
+ ## How it works
+-The method operates on volumetric data represented as Gaussian splats or points, organized into a scene graph with spatial tiles and LOD groups. The core mechanism involves streaming data in prefix order, selecting the appropriate LOD level based on projected splat footprint, and frustum-culling partition tiles.
++**Inputs and Outputs:**
++*   **Input:** A scene archive (e.g., `.luxar.zarr`) containing spatial tiles, Gaussian splat parameters (centers, amplitudes, covariance/Cholesky factors), and LOD metadata. The viewer state includes the camera frustum, current resolution (CSS pixels), and cache status.
++*   **Output:** A set of data chunks fetched from storage/HTTP and rendered primitives (splats) that approximate the scene at the appropriate detail level.
+ 
+-**Inputs and Outputs**
+-*   **Input:** A compiled archive (e.g., `.luxar.zarr`) containing spatial tiles, LOD groups (`additive_0` to `additive_3`), and primitive data (centers, cholesky, amplitudes). The viewer receives this archive via HTTP.
+-*   **Output:** A rendered frame where visible regions are loaded at the coarsest LOD level satisfying the footprint constraint, with off-screen or coarse regions fetched at lower detail or not at all.
++**Data Structures:**
++The scene is stored in a hierarchical archive structure [S1, unofficial]:
++*   `zarr.json`: Metadata for the Zarr array format.
++*   `scene/`: Scene dimensions and metadata.
++*   `nuclei/` (or other primitive types):
++    *   `centers`: Splat positions.
++    *   `cholesky`: Covariance structure (or similar parameterization).
++    *   `amplitudes`: Opacity/intensity values.
++    *   `chunk_bounds`: Spatial partitioning boundaries for tiles.
++    *   `additive_0 ... additive_3`: LOD groups. These are "additive ladders" where each level adds detail without replacing previous data. `additive_0` is the coarsest base layer.
++*   `cells/`, `tracks/`, `surface/`, `overlays/`: Other primitive types (points, lines, meshes).
+ 
+-**Data Structures**
+-The archive structure includes:
+-*   `zarr.json`: Metadata.
+-*   `scene, dimensions`: Scene configuration.
+-*   `nuclei/`: Gaussian splats data.
+-    *   `centers`, `cholesky`, `amplitudes`: Primitive parameters.
+-    *   `chunk_bounds`: Spatial partitioning bounds.
+-    *   `additive_0 ... additive_3`: LOD groups (additive levels).
+-*   `cells/`: Points data.
+-*   `tracks/`: Lines data.
+-*   `surface/`: Mesh data.
+-*   `overlays/`: Annotations.
++**Algorithm Steps:**
+ 
+-**LOD Selection Logic**
+-1.  **Frustum Culling:** Partition tiles are frustum-culled. Coarse or off-screen regions are never fetched at full detail [S1, unofficial].
+-2.  **Footprint Thresholding:** The viewer selects the coarsest substitutive level whose projected median splat footprint stays at or below 1.5 CSS pixels [S1, unofficial].
+-3.  **Finest Level Fallback:** The finest level is selected only when no coarser level satisfies the footprint constraint [S1, unofficial].
+-4.  **Hysteresis:** A 10% hysteresis is applied against coarsening to prevent flickering when the viewpoint moves slightly [S1, unofficial].
+-5.  **Fallback:** If no footprint is stamped, or the stamped dimensions are not the displayed ones, the system falls back to the screen-area fraction the node’s bounding box projects to [S1, unofficial].
++1.  **Scene Initialization:**
++    *   Load the scene archive metadata.
++    *   Identify the primitive types and their associated LOD structures.
++    *   Initialize the multi-level cache:
++        *   Decoded per-slice geometry (memory).
++        *   Decoded chunks (memory).
++        *   Compressed chunks (memory).
++        *   Compressed chunks (browser origin-private file system).
+ 
+-**Additive Ladder Ordering**
+-Additive ladders are ordered to optimize progressive loading:
+-*   **Greedy Ordering:** Used for up to 5,000 splats. This method lowers the residual area under the loading curve by 0.2–2.6% relative to self-energy ordering [S1, unofficial].
+-*   **Self-Energy Ordering:** Used for more than 5,000 splats. This is an $O(N \log N)$ algorithm. No approximation guarantee is claimed for this method [S1, unofficial].
++2.  **LOD Selection for Each Spatial Tile/Primitive Group:**
++    *   For each visible spatial tile or partition:
++        *   **Check Footprint:** Determine the projected median splat footprint in CSS pixels.
++            *   If footprint data is stamped in the metadata: Use it directly.
++            *   If no footprint is stamped or dimensions do not match display: Calculate the fallback metric as the screen-area fraction the node’s bounding box projects to [S1, unofficial].
++        *   **Select Level:**
++            *   Find the coarsest substitutive level (from the additive ladder) where the projected median splat footprint $\le 1.5$ CSS pixels.
++            *   If no level satisfies this condition, select the finest level.
++            *   **Hysteresis:** Apply a 10% hysteresis against coarsening to prevent flickering when the viewer moves slightly. This means a level is only coarsened if the footprint is significantly smaller than the threshold, or remains coarse if it was previously coarse [S1, unofficial].
+ 
+-**Caching and Prefetching**
+-Fetched data passes through a multi-level cache:
+-1.  Decoded per-slice geometry.
+-2.  Decoded chunks in memory.
+-3.  Compressed chunks in memory.
+-4.  Compressed chunks in the browser’s origin-private file system.
+-5.  HTTP range requests.
+-After an on-disk hit or a remote fetch, a prefetcher requests the chunk on either side in the ordering. An idle-time prefetcher warms the adjacent slice, hiding remote-fetch latency [S1, unofficial].
++3.  **Frustum Culling:**
++    *   Frustum-cull partition tiles.
++    *   Ensure that coarse or off-screen regions are never fetched at full detail. Only the selected LOD level for visible tiles is requested [S1, unofficial].
+ 
+-**Pseudocode**
++4.  **Data Fetching and Caching:**
++    *   Request the selected LOD chunks from the server (via HTTP range requests or static hosting).
++    *   Store fetched data in the cache hierarchy (memory -> disk).
++    *   **Prefetching:**
++        *   After an on-disk hit or remote fetch, request the chunk on either side in the additive ladder ordering.
++        *   Use an idle-time prefetcher to warm the adjacent slice, hiding remote-fetch latency [S1, unofficial].
++
++5.  **Rendering:**
++    *   Decode the fetched chunks.
++    *   Render the primitives (e.g., Gaussian splats) using the selected LOD parameters.
++    *   Apply HDR tone mapping and blending.
++
++**LOD Ordering (Additive Ladder Construction):**
++When constructing the additive ladders (done at compile time or pre-processing), the order of splats within each level is optimized to minimize the Area Under the Curve (AUC) of the loading error:
++*   **Small Scenes ($N \le 5,000$ splats):** Use greedy ordering.
++*   **Large Scenes ($N > 5,000$ splats):** Use $O(N \log N)$ self-energy ordering.
++    *   Note: No approximation guarantee is claimed for the self-energy ordering, though experiments show greedy lowers residual AUC by 0.2–2.6% relative to it [S1, unofficial].
++
++**Pseudocode:**
++
+ ```python
+-def select_lod_level(splats, viewport, cache, prefetcher):
++def select_lod_level(primitive_tile, camera_state, cache):
+     """
+-    Selects the LOD level for a set of splats based on projected footprint.
++    Selects the appropriate LOD level for a primitive tile based on projected footprint.
++    """
++    # 1. Determine projected footprint
++    if primitive_tile.has_stamped_footprint():
++        footprint_pixels = primitive_tile.get_median_footprint_pixels()
++    else:
++        # Fallback: screen-area fraction of bounding box
++        bbox_screen_area = primitive_tile.project_bbox_to_screen_area(camera_state)
++        total_screen_area = camera_state.get_screen_area()
++        footprint_pixels = bbox_screen_area / total_screen_area * camera_state.get_total_css_pixels()
++
++    # 2. Apply hysteresis against coarsening
++    # If previously coarse, require footprint to be significantly smaller to coarsen
++    if primitive_tile.is_previously_coarse():
++        threshold = 1.5 * 0.9  # 10% hysteresis
++    else:
++        threshold = 1.5
++
++    # 3. Select coarsest level satisfying threshold
++    selected_level = None
++    for level in primitive_tile.additive_ladder: # ordered coarsest to finest
++        if level.get_footprint_pixels() <= threshold:
++            selected_level = level
++            break
+     
+-    Args:
+-        splats: List of splat objects with 'footprint' (projected median area in CSS pixels)
+-                and 'lod_levels' (list of LOD group indices, coarsest to finest).
+-        viewport: Object containing 'width', 'height', 'frustum' (for culling).
+-        cache: Cache object with 'get(chunk_id)' and 'put(chunk_id, data)'.
+-        prefetcher: Prefetcher object with 'request_next(chunk_id)' and 'request_adjacent(chunk_id)'.
++    # If no level satisfies, use finest
++    if selected_level is None:
++        selected_level = primitive_tile.additive_ladder[-1]
++
++    return selected_level
++
++def fetch_and_render(scene, camera_state, cache):
++    """
++    Main streaming loop.
++    """
++    visible_tiles = scene.frustum_cull(camera_state)
++    fetch_queue = []
++
++    for tile in visible_tiles:
++        lod_level = select_lod_level(tile, camera_state, cache)
+         
+-    Returns:
+-        List of chunk IDs to fetch for the selected LOD level.
++        # Check cache
++        chunk_id = lod_level.get_chunk_id()
++        if cache.has_compressed(chunk_id):
++            data = cache.get_compressed(chunk_id)
++        elif cache.has_decoded(chunk_id):
++            data = cache.get_decoded(chunk_id)
++        else:
++            # Fetch from HTTP
++            data = http_get(tile.url, chunk_id)
++            cache.store_compressed(chunk_id, data)
++            # Prefetch adjacent chunks in ordering
++            prefetch_adjacent_chunks(tile, lod_level, cache)
++
++        render_primitives(lod_level.decode(data), camera_state)
++
++def prefetch_adjacent_chunks(tile, lod_level, cache):
+     """
+-    # Step 1: Frustum culling
+-    visible_splats = []
+-    for splat in splats:
+-        if is_in_frustum(splat.bounding_box, viewport.frustum):
+-            visible_splats.append(splat)
+-        else:
+-            # Off-screen regions are not fetched at full detail
+-            continue
+-            
+-    if not visible_splats:
+-        return []
+-
+-    # Step 2: Determine LOD level based on footprint
+-    # Threshold: 1.5 CSS pixels
+-    FOOTPRINT_THRESHOLD = 1.5
+-    HYSTERESIS_FACTOR = 0.10  # 10% against coarsening
+-    
+-    # Calculate current LOD level based on previous selection to apply hysteresis
+-    # [G] Assuming 'previous_lod_index' is maintained in state
+-    current_lod_index = get_current_lod_index() 
+-    
+-    selected_lod_index = current_lod_index
+-    
+-    # Find coarsest level satisfying footprint constraint
+-    for i, lod_group in enumerate(visible_splats[0].lod_levels):
+-        # [G] Assuming splats have a method to get projected footprint for a specific LOD
+-        projected_footprint = get_projected_footprint(visible_splats, lod_group)
+-        
+-        if projected_footprint <= FOOTPRINT_THRESHOLD:
+-            # Check hysteresis: do not coarsen unless significantly smaller
+-            if i < current_lod_index:
+-                # Coarsening check: ensure we are not coarsening too aggressively
+-                # Hysteresis against coarsening means we stay at current or finer
+-                # unless the footprint is significantly below threshold
+-                if projected_footprint <= FOOTPRINT_THRESHOLD * (1 - HYSTERESIS_FACTOR):
+-                    selected_lod_index = i
+-                    break
+-            else:
+-                selected_lod_index = i
+-                break
+-    else:
+-        # Finest level only when none does
+-        selected_lod_index = len(visible_splats[0].lod_levels) - 1
+-
+-    # Step 3: Fallback if no footprint stamped
+-    # [G] If footprint is not available, use screen-area fraction
+-    if not has_footprint_stamped(visible_splats):
+-        screen_area_fraction = calculate_screen_area_fraction(visible_splats, viewport)
+-        # [G] Map screen area fraction to LOD level
+-        selected_lod_index = map_area_to_lod(screen_area_fraction)
+-
+-    # Step 4: Fetch chunks for selected LOD level
+-    chunks_to_fetch = []
+-    for splat in visible_splats:
+-        chunk_id = get_chunk_id(splat, selected_lod_index)
+-        if not cache.has(chunk_id):
+-            chunks_to_fetch.append(chunk_id)
+-            
+-    # Step 5: Prefetching
+-    for chunk_id in chunks_to_fetch:
+-        prefetcher.request_next(chunk_id)
+-        prefetcher.request_adjacent(chunk_id)
+-        
+-    return chunks_to_fetch
+-
+-def is_in_frustum(box, frustum):
+-    """Check if a bounding box is inside the view frustum."""
+-    # [G] Standard frustum culling algorithm
+-    return box.intersects(frustum)
+-
+-def get_projected_footprint(splats, lod_group):
+-    """Calculate the projected median splat footprint for a LOD group."""
+-    # [G] Aggregate splat projections and find median
+-    footprints = [splat.project(lod_group) for splat in splats]
+-    return median(footprints)
+-
+-def has_footprint_stamped(splats):
+-    """Check if footprint data is stamped for the splats."""
+-    # [G] Check metadata
+-    return splats[0].has_footprint_metadata
+-
+-def calculate_screen_area_fraction(splats, viewport):
+-    """Calculate the fraction of the screen area covered by splats."""
+-    # [G] Project bounding boxes and calculate union area
+-    total_area = 0
+-    for splat in splats:
+-        total_area += splat.bounding_box.project(viewport).area
+-    return total_area / (viewport.width * viewport.height)
+-
+-def map_area_to_lod(area_fraction):
+-    """Map screen area fraction to an LOD index."""
+-    # [G] Heuristic mapping
+-    if area_fraction < 0.1:
+-        return 0
+-    elif area_fraction < 0.5:
+-        return 1
+-    else:
+-        return 2
++    Prefetches chunks on either side in the additive ladder ordering.
++    """
++    idx = lod_level.get_index_in_ladder()
++    # Prefetch next and previous levels if they exist
++    if idx + 1 < len(tile.additive_ladder):
++        next_chunk = tile.additive_ladder[idx + 1].get_chunk_id()
++        if not cache.has_compressed(next_chunk):
++            cache.enqueue_prefetch(next_chunk)
++    if idx - 1 >= 0:
++        prev_chunk = tile.additive_ladder[idx - 1].get_chunk_id()
++        if not cache.has_compressed(prev_chunk):
++            cache.enqueue_prefetch(prev_chunk)
+ ```
+ 
+@@ -169,20 +149,20 @@
+ 
+ ### Level-of-Detail Grammar
+-Level-of-Detail Grammar is a system for managing scenes that exceed rendering budgets by using additive ladders, substitutive levels, and spatial tiles to adjust detail based on data arrival, distance, and screen position [S1, unofficial]. It uses additive ladders to paint a coarse scene from the first chunk and sharpen it as more data arrives, and substitutive levels and spatial tiles to reduce the cost of distant or off-screen objects [S1, unofficial]. The `.luxar.zarr` archive structure includes LOD groups: `additive_0 ... additive_3` for additive levels, alongside `centers`, `cholesky`, `amplitudes`, and `chunk_bounds` [S1, unofficial]. It is used to handle scenes that outgrow a single rendering budget, enabling scalable interactive web visualization [S1, unofficial].
++Level-of-Detail Grammar is a system for managing scenes that exceed rendering budgets by using additive ladders, substitutive levels, and spatial tiles to adjust detail based on data arrival, distance, and screen position [S1, unofficial]. It uses additive ladders to paint a coarse scene from the first chunk and sharpen it as more data arrives. It uses substitutive levels and spatial tiles to reduce the cost of distant or off-screen objects. The `.luxar.zarr` archive structure includes LOD groups: `additive_0 ... additive_3` for additive levels, alongside `centers`, `cholesky`, `amplitudes`, and `chunk_bounds` [S1, unofficial]. It is used to handle scenes that outgrow a single rendering budget, enabling scalable interactive web visualization [S1, unofficial].
+ 
+ ### Additive levels of detail for Gaussian splats
+-Additive levels of detail for Gaussian splats is an order-optimisation framework for streaming progressive loading of Gaussian splats, building additive ladders where each rung adds detail without replacing previous data [S1, unofficial]. It computes a closed-form quadratic-assignment AUC to evaluate splat ordering, calculates a monotone-submodular utility function on the splat Gram matrix, and applies a greedy selection algorithm that guarantees a uniform $(1 - 1/e)$ approximation bound [S1, unofficial]. It is implemented using sparse-Gram storage and sparse-greedy selection to optimize memory and compute [S1, unofficial].
++Additive levels of detail for Gaussian splats is an order-optimisation framework for streaming progressive loading of Gaussian splats, building additive ladders where each rung adds detail without replacing previous data [S1, unofficial]. It computes a closed-form quadratic-assignment AUC to evaluate splat ordering. It calculates a monotone-submodular utility function on the splat Gram matrix. It applies a greedy selection algorithm that guarantees a uniform $(1 - 1/e)$ approximation bound. It is implemented using sparse-Gram storage and sparse-greedy selection to optimize memory and compute [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** LOD ordering is $O(N)$ for greedy selection (up to 5,000 splats) and $O(N \log N)$ for self-energy ordering (above 5,000 splats) [S1, unofficial].
+-*   **Memory Complexity:** Bounded by visible data and its required resolution, not the total scene size [S1, unofficial]. The system uses a multi-level cache including decoded geometry, decoded chunks, compressed chunks in memory, and compressed chunks in the browser’s origin-private file system [S1, unofficial].
+-*   **Measured Performance:** The Drosophila scene opens in 19.06 MB, against 5.27 MB at the compiler’s 64 KB chunks, which in turn make a step cost 266–268 requests [S1, unofficial]. Luxar scales from a handful of primitives to millions of points and splats while remaining interactive [S1, unofficial].
+-*   **Strengths:** Scalable interactive web visualization, handles scenes that outgrow a single rendering budget, hides network latency with prefetching [S1, unofficial].
+-*   **Limitations:** Greedy ordering is limited to 5,000 splats; self-energy ordering has no approximation guarantee [S1, unofficial].
+-*   **When to use:** When visualizing massive volumetric scenes in a web browser with limited bandwidth and memory.
+-*   **When not to use:** When offline rendering or non-web-based applications are required.
++*   **Time Complexity:** LOD selection is $O(1)$ per tile after footprint calculation. Footprint calculation depends on projection. Additive ladder ordering is $O(N \log N)$ for large scenes (self-energy) or $O(N^2)$ for greedy (up to 5,000 splats) [S1, unofficial].
++*   **Memory Complexity:** Bounded by the visible scene's LOD levels and cache size. The system avoids loading the full scene, scaling from a handful of primitives to millions of points and splats while remaining interactive [S1, unofficial].
++*   **Measured Performance:** In the Luxar system, a Drosophila scene (2.4M splats) opens in 19.06 MB, compared to 5.27 MB at the compiler's 64 KB chunks, which make a step cost 266–268 requests [S1, unofficial].
++*   **Strengths:** Scalable interactive web visualization; handles scenes exceeding rendering budgets; hides network latency with prefetching and caching; adaptive detail based on screen space.
++*   **Limitations:** Requires pre-computed LOD structures (additive ladders); greedy ordering is limited to small scenes; self-energy ordering has no approximation guarantee [S1, unofficial].
++*   **When to use:** Interactive web visualization of large multidimensional scientific data (e.g., microscopy) where bandwidth and memory are constrained.
++*   **When not to use:** Static scenes where full resolution is always needed and bandwidth is unlimited; scenes where pre-computation of additive ladders is not feasible.
+ 
+ ## Background
+-The method originates from the Luxar system, which provides Gaussian splatting for microscopy and scalable interactive web visualization of multidimensional scientific data [S1, unofficial]. The level-of-detail grammar and additive ladders are described in the main text and supplementary documents of the Luxar paper [S1, unofficial]. The order-optimisation framework for additive ladders is detailed in Supplementary Document 9 [S1, unofficial].
++The method originates from the Luxar system, which provides Gaussian splatting for microscopy and scalable interactive web visualization of multidimensional scientific data [S1, unofficial]. The system was developed to handle scenes that outgrow a single rendering budget, using additive ladders and frustum culling to enable scalable interactive web visualization [S1, unofficial]. The specific LOD ordering framework for Gaussian splats was detailed in a companion theory document [S1, unofficial].
+ 
+ ## Sources

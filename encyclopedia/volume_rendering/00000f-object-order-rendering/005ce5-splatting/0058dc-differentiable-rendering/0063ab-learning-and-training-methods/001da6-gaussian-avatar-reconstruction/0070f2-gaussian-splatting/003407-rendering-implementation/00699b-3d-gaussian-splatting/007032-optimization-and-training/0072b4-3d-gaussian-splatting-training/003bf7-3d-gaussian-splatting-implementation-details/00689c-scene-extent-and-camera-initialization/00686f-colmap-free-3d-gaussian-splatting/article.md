@@ -1,0 +1,232 @@
+# COLMAP-Free 3D Gaussian Splatting
+
+Also called: CF-3DGS
+
+## Overview
+COLMAP-Free 3D Gaussian Splatting (CF-3DGS) is a method for novel view synthesis and camera pose estimation from unposed video sequences, eliminating the need for Structure-from-Motion (SfM) preprocessing [S1]. Unlike standard 3D Gaussian Splatting which relies on pre-computed sparse point clouds and known camera poses, CF-3DGS leverages temporal continuity in video and explicit point cloud representation to progressively "grow" a global 3D Gaussian set frame-by-frame [S1]. It sets itself apart by estimating relative camera poses via differentiable rendering of local Gaussian sets, allowing it to handle significant camera motion where traditional unposed methods may fail [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A sequence of unposed video frames $I_t$ for $t \in \{1, \dots, T\}$, and camera intrinsics $K$ [S1].
+*   **Output:** A global set of 3D Gaussians representing the scene, and estimated camera poses for all frames [S1].
+
+**Data Structures**
+Each 3D Gaussian $i$ is defined by the following parameters [S1]:
+*   Center position: $\mu_i \in \mathbb{R}^3$
+*   Rotation: $r_i \in \mathbb{R}^4$ (unit quaternion)
+*   Scale: $s_i \in \mathbb{R}^3$
+*   Opacity: $\alpha_i \in \mathbb{R}$
+*   Color: Spherical Harmonics (SH) coefficients $c_i \in \mathbb{R}^k$ [S1]
+
+The covariance matrix $\Sigma_i$ is derived from rotation and scale [S1]:
+$$ \Sigma_i = R_i S_i S_i^{\top} R_i^{\top} $$
+where $S_i = \text{diag}([s_{ix}, s_{iy}, s_{iz}])$ and $R_i$ is the rotation matrix constructed from quaternion $r_i$ [S1].
+
+**Algorithm Steps**
+The method processes frames sequentially. For each frame $t$, it performs two main steps:
+
+1.  **Initialization from a Single View (Frame 1):**
+    *   Given frame $I_1$, generate monocular depth $D_1$ using an off-the-shelf network (e.g., DPT) [S1].
+    *   Initialize 3D Gaussians by lifting points from $D_1$ using camera intrinsics $K$ and an identity camera pose [S1].
+    *   Optimize the parameters of this local set $G_1$ to minimize photometric loss between the rendered image and $I_1$ [S1].
+
+2.  **Sequential Growth (Frames $t > 1$):**
+    *   **Local Optimization:** Construct a local 3D Gaussian set from frame $t-1$. Sample frame $t$. Learn an affine transformation (representing the relative camera pose between $t-1$ and $t$) that transforms the Gaussians from $t-1$ to render frame $t$ [S1]. This is done by minimizing photometric loss using differentiable rendering [S1].
+    *   **Global Aggregation:** Infer the absolute pose of frame $t$ by accumulating relative poses. Aggregate the current frame's Gaussian information into the global set [S1].
+    *   **Global Optimization:** Optimize the global set using all previous frames and their estimated poses [S1].
+
+**Rendering Formula**
+To render a pixel, Gaussians overlapping the pixel are sorted by depth. The final color $C_{pix}$ is computed via alpha blending [S1]:
+$$ C_{pix} = \sum_{i=1}^{N} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+where $N$ is the number of overlapping Gaussians, $c_i$ is the color, and $\alpha_i$ is the opacity of the $i$-th Gaussian [S1].
+
+The 2D covariance $\Sigma^{\text{2D}}$ in camera coordinates is computed as [S1]:
+$$ \Sigma^{\text{2D}} = J W \Sigma W^{\top} J^{\top} $$
+where $W$ is the viewing transform (camera pose), and $J$ is the Jacobian of the affine approximation of the projective transformation [S1].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def initialize_gaussians_from_depth(depth_map, intrinsics):
+    """
+    Lifts 2D pixels to 3D using monocular depth and intrinsics.
+    Returns list of Gaussian parameters.
+    """
+    # Get 2D pixel coordinates
+    h, w = depth_map.shape
+    y, x = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+    
+    # Unproject to 3D using identity pose
+    # Assuming standard pinhole model: X = K^-1 * [x, y, 1] * depth
+    # K_inv is inverse of intrinsics matrix
+    points_3d = []
+    for i in range(h):
+        for j in range(w):
+            z = depth_map[i, j]
+            if z > 0:
+                # Simplified unprojection assuming K is known
+                # In practice, use K_inv @ [j, i, 1] * z
+                pt = unproject_pixel(j, i, z, intrinsics)
+                points_3d.append(pt)
+    
+    # Initialize Gaussians with these points
+    # Attributes: mu, alpha, sh_coeffs, scale, rotation
+    # Scale and rotation can be initialized to small constant values
+    gaussians = []
+    for pt in points_3d:
+        g = Gaussian()
+        g.mu = pt
+        g.alpha = 0.5 # Initial opacity
+        g.scale = np.array([0.01, 0.01, 0.01])
+        g.rotation = np.array([1.0, 0.0, 0.0, 0.0]) # Identity quaternion
+        g.sh_coeffs = np.zeros(k) # Initialize SH coefficients
+        gaussians.append(g)
+    return gaussians
+
+def render_gaussians(gaussians, camera_pose, intrinsics):
+    """
+    Renders the scene using 3D Gaussian Splatting.
+    Returns rendered image and gradients.
+    """
+    # Project 3D Gaussians to 2D
+    projected_gaussians = []
+    for g in gaussians:
+        # Transform center to camera coordinates
+        mu_cam = camera_pose @ g.mu
+        
+        # Compute 2D covariance
+        # Sigma_2D = J * W * Sigma * W^T * J^T
+        # W is camera pose (viewing transform)
+        # J is Jacobian of projection
+        sigma_2d = compute_2d_covariance(g.sigma, camera_pose, intrinsics)
+        
+        # Compute 2D mean
+        mu_2d = project_to_image(mu_cam, intrinsics)
+        
+        projected_gaussians.append({
+            'mu_2d': mu_2d,
+            'sigma_2d': sigma_2d,
+            'alpha': g.alpha,
+            'sh_coeffs': g.sh_coeffs,
+            'depth': mu_cam[2]
+        })
+    
+    # Sort by depth
+    projected_gaussians.sort(key=lambda x: x['depth'])
+    
+    # Render using alpha blending
+    image = np.zeros((height, width, 3))
+    for g in projected_gaussians:
+        # Splat Gaussian onto image
+        # For each pixel covered by the Gaussian's 2D ellipse
+        for pixel in pixels_covered_by_gaussian(g):
+            # Compute opacity contribution
+            # alpha_i * exp(-0.5 * (x - mu)^T Sigma^-1 (x - mu))
+            contribution = compute_gaussian_contribution(g, pixel)
+            
+            # Alpha blending
+            # C_pix = sum(c_i * alpha_i * prod(1 - alpha_j))
+            image[pixel] += contribution * (1 - accumulated_alpha[pixel])
+            accumulated_alpha[pixel] += contribution['alpha']
+            
+    return image
+
+def optimize_relative_pose(local_gaussians, frame_prev, frame_curr, intrinsics):
+    """
+    Optimizes the relative camera pose between two frames.
+    """
+    # Initialize relative pose as identity or previous estimate
+    relative_pose = np.eye(4)
+    
+    # Iteratively optimize relative_pose to minimize photometric loss
+    # between rendered frame_curr and ground truth frame_curr
+    for step in range(num_steps):
+        # Render frame_curr using local_gaussians transformed by relative_pose
+        rendered_image = render_gaussians(local_gaussians, relative_pose, intrinsics)
+        
+        # Compute loss
+        loss = photometric_loss(rendered_image, frame_curr)
+        
+        # Backpropagate to update relative_pose
+        # Note: Gaussians are fixed in this step, only pose is optimized
+        relative_pose = update_pose(relative_pose, loss)
+        
+    return relative_pose
+
+def train_cf_3dgs(frames, intrinsics):
+    """
+    Main training loop for CF-3DGS.
+    """
+    global_gaussians = None
+    
+    # Step 1: Initialize with first frame
+    depth_1 = predict_monocular_depth(frames[0])
+    global_gaussians = initialize_gaussians_from_depth(depth_1, intrinsics)
+    
+    # Optimize initial Gaussians against frame 0
+    global_gaussians = optimize_gaussians(global_gaussians, frames[0], intrinsics, pose=np.eye(4))
+    
+    # Step 2: Process subsequent frames
+    current_pose = np.eye(4)
+    
+    for t in range(1, len(frames)):
+        frame_prev = frames[t-1]
+        frame_curr = frames[t]
+        
+        # Create local Gaussians from global (or subset)
+        local_gaussians = copy_gaussians(global_gaussians)
+        
+        # Estimate relative pose
+        relative_pose = optimize_relative_pose(local_gaussians, frame_prev, frame_curr, intrinsics)
+        
+        # Update global pose
+        current_pose = current_pose @ relative_pose
+        
+        # Aggregate new Gaussians from current frame
+        # This step involves lifting points from current frame's depth and adding to global set
+        depth_curr = predict_monocular_depth(frame_curr)
+        new_gaussians = initialize_gaussians_from_depth(depth_curr, intrinsics)
+        
+        # Transform new Gaussians to global coordinate system using current_pose
+        for g in new_gaussians:
+            g.mu = current_pose @ g.mu
+            
+        global_gaussians.extend(new_gaussians)
+        
+        # Optimize global set with all frames up to t
+        # This is a simplified description; in practice, it might use a subset or sliding window
+        global_gaussians = optimize_global_gaussians(global_gaussians, frames[:t+1], intrinsics)
+        
+    return global_gaussians, current_pose
+```
+
+**Parameters**
+*   **Monocular Depth Network:** DPT [S1].
+*   **Spherical Harmonics Degree:** $k$ (Not given in the sources).
+*   **Photometric Loss:** Not specified in detail, but implied to be standard L1 or L2 loss between rendered and ground truth images [S1].
+
+**Edge Cases and Pitfalls**
+*   **Large Camera Motion:** The method performs well when camera motion is large, unlike some unposed methods [S1].
+*   **Depth Accuracy:** Relies on the accuracy of the monocular depth network (DPT) for initialization [S1].
+*   **Accumulation of Errors:** Sequential pose estimation may accumulate errors over time, though the global optimization step helps mitigate this [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Performs on par with Nope-NeRF for small camera motion and outperforms it significantly for large camera changes (e.g., 360-degree videos) [S1].
+*   **Strengths:** No SfM preprocessing required; handles large camera motions; leverages temporal continuity [S1].
+*   **Limitations:** Requires video input (temporal continuity); relies on monocular depth estimation [S1].
+*   **When to Use:** When camera poses are unknown and SfM is not feasible or desired, especially for video sequences with significant motion [S1].
+*   **When Not to Use:** When static images are available with known poses (standard 3DGS is faster and more accurate); when monocular depth estimation is unreliable [S1].
+
+## Background
+*   **Origin:** Proposed in the paper "COLMAP-Free 3D Gaussian Splatting" [S1].
+*   **History:** Builds on 3D Gaussian Splatting [17] and monocular depth estimation [32]. It addresses the limitation of standard 3DGS requiring SfM preprocessing [S1].
+*   **Usage:** Novel view synthesis from unposed video sequences [S1].
+
+## Sources
+[S1] COLMAP-Free 3D Gaussian Splatting, https://doi.org/10.1109/cvpr52733.2024.01965, fetched 2026-10-26

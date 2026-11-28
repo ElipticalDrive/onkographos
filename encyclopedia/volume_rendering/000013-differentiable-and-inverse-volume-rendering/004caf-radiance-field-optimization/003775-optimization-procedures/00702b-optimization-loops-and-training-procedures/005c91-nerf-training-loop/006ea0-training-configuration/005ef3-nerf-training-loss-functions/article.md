@@ -1,0 +1,98 @@
+# NeRF Training Loss Functions
+
+Also called: NeRF Loss
+
+## Overview
+NeRF Training Loss Functions define the objective used to optimize the parameters of a Neural Radiance Field during the training loop [G]. The primary goal is to minimize the discrepancy between the volume-rendered images synthesized by the network and the ground-truth input images [G]. While the standard NeRF formulation relies exclusively on photometric consistency, variants extend this to include semantic, instance, or temporal constraints to handle dynamic scenes, sparse views, or multi-task learning [S1, S2].
+
+## How it works
+**Inputs:**
+- Ground-truth RGB images $C(r)$ for sampled rays $r$ [S1, S2].
+- Optional auxiliary data: optical flow masks $M$, semantic segmentation maps, or object tracks $T_k$ [S1, S2].
+- Network parameters $\theta$ (MLP weights) and optional track parameters $T_{k,i}$ [S2].
+- Rendered color predictions $\hat{C}(r)$ from coarse and/or refined networks [S1].
+
+**Outputs:**
+- Scalar loss value $L$ used for backpropagation [G].
+- Gradients $\nabla_\theta L$ and $\nabla_{T_{k,i}} L$ [G].
+
+**Data Structures:**
+- Ray batch: A set of rays $R(p)$ passing through pixel coordinates $p$ [S1].
+- Rendered Color $\hat{C}(r)$: A 3-channel vector resulting from differentiable volume rendering [G].
+- Ground Truth Color $C(r)$: A 3-channel vector from the input image [S1].
+
+**Formulas:**
+The base photometric loss is the Mean Squared Error (MSE) between rendered and ground truth colors [S1, S2]. In two-stage NeRF variants (coarse and fine networks), the loss sums errors from both stages [S1]:
+
+$$
+L_{color} = \sum_{r \in R(p)} \left( \|\hat{C}_c(r) - C(r)\|^2 + \|\hat{C}_r(r) - C(r)\|^2 \right)
+$$
+
+Where:
+- $\hat{C}_c(r)$ is the color predicted by the coarse network [S1].
+- $\hat{C}_r(r)$ is the color predicted by the refined network [S1].
+- $C(r)$ is the true color [S1].
+- $R(p)$ is the set of rays passing through pixel $p$ [S1].
+
+For semantic or dynamic scene extensions, additional loss terms are added [S2]:
+
+$$
+\arg \min_{\theta, T_{k,i}} L_{rgb}(\theta, T_{k,i}) + L_{sem}(\theta, T_{k,i})
+$$
+
+Where:
+- $L_{rgb}$ is the MSE between synthesized and ground truth color [S2].
+- $L_{sem}$ is the per-pixel softmax cross-entropy between synthesized semantics and input 2D semantic segmentation [S2].
+- $T_{k,i}$ represents object track parameters for instance $k$ at step $i$ [S2].
+
+For optical flow-assisted training:
+
+$$
+L = L_{color} + M \cdot L_{flow}
+$$
+
+Where:
+- $M$ is the optical flow mask [S1].
+- $L_{flow}$ is the optical flow loss [S1].
+
+**Algorithm:**
+1. At each gradient descent step, randomly sample minibatches of rays [S2].
+2. Forward pass: Render colors $\hat{C}(r)$ for all $r \in R$ using current parameters $\theta$ and tracks $T_{k,i}$ [S2].
+3. Compute photometric loss $L_{color}$ or $L_{rgb}$ using MSE [S1, S2].
+4. If auxiliary tasks are enabled:
+   - Compute semantic loss $L_{sem}$ using softmax cross-entropy on rendered logits [S2].
+   - Compute flow loss $L_{flow}$ and apply mask $M$ [S1].
+5. Aggregate total loss $L$ by summing active terms (e.g., $L = L_{color} + M \cdot L_{flow}$ [S1] or $L = L_{rgb} + L_{sem}$ [S2]).
+6. Perform gradient descent to update $\theta$ and $T_{k,i}$ [S2].
+
+**Parameters:**
+- Weight for flow/semantic terms: Not given in the sources.
+- Mask $M$: Binary or soft mask indicating valid flow regions [S1].
+
+**Edge Cases:**
+- Degenerate rays (e.g., background-only): Standard NeRF handles this via background color blending; semantic variants must handle "stuff" classes where instance output is zero [S2].
+- Sparse views: Standard NeRF may produce blurred views; flow-assisted losses help constrain geometry under fewer views [S1].
+
+## Subtopics
+
+### PNF Model Losses and Training
+Panoptic Neural Fields (PNF) extend the loss to include semantic and instance awareness. It jointly optimizes network parameters $\theta$ and object tracks $T_{k,i}$ to reproduce RGB images and predicted 2D semantic images. The loss combines RGB mean squared error ($L_{rgb}$) and per-pixel softmax cross-entropy for semantics ($L_{sem}$) [S2]. This approach allows the model to distinguish between "stuff" (background) and "things" (objects), with instance outputs being zero for stuff functions [S2].
+
+### Refractive NeRF Optimization
+Optimization of three MLPs ($F_\theta, F_\phi, F_\psi$) uses a combined loss of re-rendering error, boundary regularizer, and smoothness regularizer [S3]. The re-rendering loss compares ground truth $C(r)$ with coarse and fine rendered colors: $L_{RGB} = \|C(r) - \hat{C}_c(r_c)\|^2_2 + \|C(r) - \hat{C}_f(sort(r_c \cup r_f))\|^2_2$ [S3]. The boundary regularizer updates only the fine network density to preserve visual quality and eliminate blurry artifacts on the refractive surface: $L_{BD} = \mathbb{1}(T_{f, N_c+N_f+1} > 0.5) \cdot \|C(r) - T_{f, N_c+N_f+1} C'(d_{f, N_c+N_f})\|_1$, where $\mathbb{1}(\cdot)$ is an indicator function that ignores occluded regions if the last accumulated transmittance is below 0.5 [S3]. The smoothness regularizer applies an L2 gradient penalty on a tile of directions $d'$ to smooth the boundary skybox: $L_S = 0.5 \cdot \|(-1 \ 1 * C'(d'))\|^2_2 + 0.5 \cdot \|(1 \ -1 * C'(d'))\|^2_2$ [S3].
+
+### [Unbiased Score Distillation](21729-unbiased-score-distillation.md)
+Unbiased Score Distillation (USD) is a training loss function for radiance fields that rectifies critical bias in traditional Score Distillation Sampling (SDS) by substituting the biased unconditional noise predictions of multi-view diffusion models with the true unconditional noise from a pre-trained 2D diffusion model. Unlike prior methods that enforce multi-view consistency via restrictive volume or ray aggregation, USD uses the optimized radiance field itself as a consistency prior, allowing full freedom in camera pose selection during optimization.
+
+## Operating characteristics
+- **Complexity:** The addition of semantic or flow losses increases computational overhead per ray due to extra network heads (logits for semantics) and loss computations (cross-entropy, flow warping) [S1, S2].
+- **Performance:** Flow-assisted NeRF improves PSNR under very few views (e.g., 2-view) compared to standard NeRF [S1]. PNF enables reconstruction of novel object categories and semantic consistency [S2]. Refractive NeRF handles glass and water refraction with reduced LPIPS error [S3].
+- **Limitations:** Standard NeRF losses are prone to losing details and blurring under sparse views [S1]. Semantic losses require accurate 2D segmentation priors [S2]. Refractive optimization requires pre-reconstructed proxy geometry and refractive index voxel grids [S3].
+
+## Background
+Photometric MSE losses form the foundation of NeRF training [S1, S2]. Variants incorporating optical flow were proposed to address poor performance with fewer input views [S1]. Panoptic Neural Fields introduced semantic and instance losses to enable object-aware scene representation [S2]. Refractive NeRF optimization extends this to handle transparent and refractive objects using boundary and smoothness regularizers [S3]. Unbiased Score Distillation adapts diffusion priors for text-to-3D radiance field generation [S1].
+
+## Sources
+[S1] Bidirectional Optical Flow NeRF: High Accuracy and High Quality under Fewer Views, https://doi.org/10.1609/aaai.v37i1.25109, fetched 2026-10-29
+[S2] Panoptic Neural Fields: A Semantic Object-Aware Neural Scene Representation, https://doi.org/10.1109/cvpr52688.2022.01253, fetched 2026-10-26
+[S3] Sampling Neural Radiance Fields for Refractive Objects, https://doi.org/10.1145/3550340.3564234, fetched 2026-10-26

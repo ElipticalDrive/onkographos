@@ -1,0 +1,624 @@
+SDF and Voxel sculpting library. Contribute to CyberdyneCorp/ClayCore development by creating an account on GitHub.
+
+Mesh multiresolution: a deterministic subdivision hierarchy whose detail survives the form beneath it by leonardoaraujosantos · Pull Request #406 · CyberdyneCorp/ClayCore · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+leonardoaraujosantos
+commented
+Aug 31, 2026
+Copy link
+Copy Markdown
+Contributor
+Closes #405. Implements openspec/changes/add-mesh-multires whole.
+What was missing
+On a mesh layer, fine detail and coarse form are the same edit. The detail IS
+the vertex positions and nothing records which part of a position was form and
+which part was wrinkle, so a pass that changes proportions destroys the pass
+before it. MeshSculptor cannot fix that — its contract is that topology never
+changes, and that contract is why a mesh layer is worth holding after a
+retopology pass. DynamicSurface answers a different question and
+voxel_remesh a third.
+The model
+```
+P(0) = the base cage                 the production geometry, sculpted directly
+S(n) = Subdivide(P(n-1))             pure Catmull-Clark, no detail
+P(n) = S(n) + Frame(n) * Detail(n)   the level as the artist sees it
+```
+Levels are not a stack of unrelated meshes: with no relationship between a level
+and its parent, a change to the parent has no defined effect on the child, so
+either the fine detail or the coarse edit has to be discarded. The relationship
+IS the feature.
+The four decisions the change asked for
+Catmull-Clark. mesh::Mesh already carries quads, an imported
+retopologised character is quads, and the rule turns a triangle cage into
+quads at level 1 — so every level above 0 is pure quads and everything that
+reads a level has one face arity to handle. SubdivisionRule takes another
+rule and the encoding records which one built a hierarchy.
+Detail is blocked sparse, fp32, 256 vertices a block, with dense
+promotion above 75% coverage — and the promotion is a SPEED decision rather
+than a memory one, because the block table costs four bytes per 256 vertices
+and the sparse form is smaller until coverage passes 99.9%.
+A level is whole, not region-scoped. The voxel construction does not
+transfer: outside a refined region a voxel level reads its parent, which works
+because the lattice is regular. On an irregular surface the transition has to
+be owned by particular faces. Deferred with the reason recorded rather than
+approximated.
+Per-level face lists are cached, everything else is derived. 16 bytes a
+face, so 4^L * 16 * F0 — 82 MB at level 4 over a 20k cage, which is exactly
+why preflight_add_level exists.
+What shipped
+mesh::MultiresSurface — level lifecycle, build-then-publish add_level
+with cancellation, preflight_add_level that prices a level by arithmetic and
+refuses over budget rather than allocating half of it, independent sculpt and
+display levels, local propagation with a normal halo, droppable per-level
+caches, and export of any level as an ordinary mesh::Mesh.
+mesh::MultiresSculptor — not a second brush engine. The active level's
+positions live in a mesh::Mesh inside that level's cache with an Adjacency
+over it, so a stamp is MeshSculptor::stamp on that level. Every verb, the
+geodesic reach, the mask gate, automasking, alpha stamping and the local
+normal recompute come along unchanged. At the cage the two paths are
+bit-identical; above it they agree to a frame round trip, and the test asserts
+each on its own terms.
+Detail in a transported frame — built once at the cage and rotated by
+shortest arc up the hierarchy, never rebuilt. The measured difference is
+below.
+mesh::MultiresDelta + session::History::Step::Kind::Multires, appended so
+older journals still replay, reached through a host-supplied resolver as the
+adaptive kind is.
+project_surface (normal ray first, closest point as the fallback) and
+MultiresSurface::project_from. transfer_attributes keeps its contract: it
+still moves no position, asserted byte-for-byte.
+A versioned encoding that writes the cage, the rule, the level count, the
+active levels and each level's detail — and nothing that follows from those.
+C ABI (clay_multires, clay_multires_sculptor), pyclay, Swift smoke,
+examples/68_mesh_multires.py, benchmarks and docs.
+Measured, not asserted
+A coarse dab propagated to level 3
+0.87 ms
+The cold rebuild of the same surface
+15.6 ms — 18x
+A dab at the finest level
+0.14 ms
+Detail's lean against the surface after a form change, transported frame
+drift 0.027
+...the same detail stored as a world vector
+drift 0.269 — 10x worse
+Tangent-field coherence at level 2, transported
+0.98
+...rebuilt from the level's own geometry
+0.52
+check_bench.py gates the two ratios rather than the absolutes, because a
+shared runner moves the level and cannot move the ordering. And a dab leaves
+every unrelated base patch byte-identical, which is asserted rather than
+approximated.
+A bug this found
+The multires suite under ASan caught a latent heap-buffer-overflow in
+Adjacency::build: it indexed class_of_ with a raw corner and never checked
+it, so a Mesh filled by hand with an out-of-range index was a read past the
+end. Not reachable from a host — clay_mesh_from_triangles and pyclay's
+from_triangles both refuse one — but reachable from C++, because mesh::Mesh
+is a plain struct and the function's contract never said otherwise. Fixed, with
+a regression test that aborts under ASan when the guard is reverted.
+Two spec deltas amended, with the reason
+A MultiresSurface is a standalone handle, exactly as a DynamicSurface
+is: no scene::Layer owns one. Two deltas were written assuming otherwise, and
+both are amended rather than worked around:
+scene-model — the memory accounting is per surface
+(MultiresSurface::memory()), because io::document_memory cannot see a
+handle no layer holds, and inventing a layer home for this representation
+ahead of the one that shipped before it would be the wider change made for
+the narrower reason.
+file-io — the .clayspace format gains no chunk at all, so a document
+written after this change is byte-identical to one written before it. That is
+stronger than the backward-open guarantee the delta originally asked for.
+Deliberately not here
+Sculpt layers (the next change — DetailField is the storage they share),
+vector displacement, multires erase and smear, baking detail to maps, GPU
+evaluation, unsubdivide / apply-base / rebuild-subdivisions, crease weights
+beyond the mesh boundary, and region-scoped levels. brush::apply_to_multires
+is also absent, and that is precedent rather than omission: apply_to_mesh has
+no adaptive counterpart either, and a stroke-engine hook for a third
+representation should make the same decision for both at once.
+Verification
+```
+build/cpu-check   2010 test cases, 14,833,640 assertions, all passing
+asan-ubsan        160 cases over the mesh suites, clean
+tsan (setarch -R) 160 cases over the mesh suites, clean
+check_layering / check_c_abi / check_binding_parity / check_swift_package
+check_doc_latency / openspec validate add-mesh-multires --strict     all green
+examples/68_mesh_multires.py                     renders and asserts
+```
+release_check reports four failures this machine cannot avoid and one it
+shares with main, each verified against main before being called
+pre-existing:
+bindings, abi, wheel and the pyclay_pytest ctest case — all one cause:
+anaconda's libstdc++ is older than the system one pyclay compiles against
+(GLIBCXX_3.4.31 not found). Running the same gates with
+LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6 passes them; the full
+clay_unit_tests in the release build passes.
+openspec reports the same 15 pre-existing spec failures on main, byte for
+byte.
+device is expected: the engine changed since the device gate last ran.
+benchmarks fails on BM_SdfPrefixBuildPiled20000, an SDF prefix case this
+change does not touch, on a box under load 15.
+Known, pre-existing, and not from this change
+The mesh-preview render path in examples/_render.py (Volume.from_mesh into a
+raycast preview) produces a speckled near-empty image. Verified identical on
+main by building main in a worktree and rendering 66_dynamic_topology.py:
+byte-for-byte the same artefact. Example 68's contact sheet is affected the same
+way; its assertions are what carry the example and they pass. Filed separately.
+leonardoaraujosantos
+added 4 commits
+August 31, 2026 01:16
+feat(mesh): deterministic Catmull-Clark hierarchy with transported-fr…
+…
+1d66777
+```
+…ame detail
+
+Adds mesh::MultiresSurface and mesh::MultiresSculptor: a base cage, a
+deterministic subdivision hierarchy over it, and per-level detail stored as
+coefficients in a transported local frame, so that fine detail survives an edit
+to the form beneath it.
+
+  P(0) = the cage        S(n) = Subdivide(P(n-1))        P(n) = S(n) + F(n)*D(n)
+
+- subdivide.h/cpp: Catmull-Clark with boundary and corner rules, vertex/edge/
+  face point numbering assigned in phases so a generated vertex's index is
+  stable across platforms and runs, plus a partial re-evaluation that is
+  bit-identical to the full one for the vertices it writes.
+- surface_frame.h/cpp: orthonormal frames built once at the cage (UV tangent
+  where a valid parametrization exists, a deterministic index-chosen geometric
+  tangent otherwise) and transported up the hierarchy by shortest-arc rotation.
+- detail_field.h/cpp: blocked sparse fp32 coefficients with dense promotion,
+  compaction, byte accounting, a representation-independent checksum and a
+  versioned encoding whose decoder refuses hostile counts before allocating.
+- multires.h + multires.cpp/multires_eval.cpp: level lifecycle, preflight that
+  prices a level before allocating it and refuses over budget, build-then-
+  publish add/remove, independent sculpt and display levels, local propagation
+  with a normal halo, droppable per-level caches, and export of any level as an
+  ordinary mesh::Mesh with face-varying attributes that never average across a
+  UV seam.
+- multires_sculpt.h/cpp: MultiresSculptor drives MeshSculptor over the active
+  level's own mesh, so every verb, the geodesic reach, masks, alphas and
+  automasking are the same code rather than a second copy; MultiresDelta
+  records the coefficients and cage positions a gesture edited, never the
+  derived levels above it.
+
+Tests cover determinism, boundary and pole cases, frame stability, sparse
+detail, the P = S + D model, budget refusal, cancellation, seam preservation,
+brush parity against MeshSculptor (bit-identical), undo, and the signature
+case: sculpt detail at a fine level, change proportions at a coarse one, and
+find the detail present, unchanged and still attached.
+```
+feat(mesh): projection, a versioned hierarchy encoding, and multires …
+…
+482866a
+```
+…undo
+
+- project.h/cpp: project_surface moves geometry onto a reference, normal-ray
+  first with a closest-point fallback and a distance limit, leaving what it
+  cannot reach exactly where it was. transfer_attributes keeps its contract
+  unchanged — it still moves no position — and the two share the BVH rather
+  than the guarantee. MultiresSurface::project_from fits every level to a
+  sculpt made elsewhere, coarse first, which is the route set_base_mesh names
+  when it refuses a cage change on a hierarchy carrying detail.
+- multires_serialize.cpp: a versioned encoding carrying the cage, the rule, the
+  level count, the active levels and each level's detail. Face lists and
+  evaluated positions are derived and therefore not written; the depth is
+  priced by arithmetic and refused before the first level is allocated.
+- session::History gains Step::Kind::Multires and the matching journal event,
+  appended so older journals still replay, reached through a host-supplied
+  resolver as the adaptive kind is, and counted in the byte budget.
+- absorb_level_edit now reads the stored coefficients back into the cached
+  position, so what a host sees and what a reload reconstructs are the same
+  surface rather than a frame round trip apart.
+```
+feat: reach a multiresolution hierarchy from every host, and gate it
+…
+4f23714
+```
+- C ABI: clay_multires and clay_multires_sculptor as opaque handles, with
+  struct_size descriptors throughout, a level priced by preflight and refused
+  over budget, independent sculpt and display levels, export of any level as an
+  ordinary mesh, three revisions reported apart, per-surface memory rows,
+  projection, a versioned encoding, and changed-block readback keyed on base
+  patch with a capacity query and caller-owned buffers.
+- pyclay: MultiresSurface and MultiresSculptor, numpy-native throughout;
+  tools/check_binding_parity.py green.
+- Swift smoke covers the ABI growth: handles, descriptors, the preflight, the
+  block transport and the round trip.
+- examples/68_mesh_multires.py renders and asserts the milestone, and measures
+  the transported frame against the world-space delta this design rejected —
+  the detail's lean against the surface drifts about 10x further stored as a
+  world vector.
+- Benchmarks: a coarse dab propagated to level 3 costs 0.87 ms against 15.6 ms
+  for the cold rebuild of the same surface, and check_bench.py gates the two
+  ratios rather than the absolutes.
+- docs/07 gains section 8d (the fourth mesh mode, what a level costs, why the
+  frame is transported), docs/09 gains the measured latencies, and the
+  ROADMAP's Phase 5 row records what shipped and what was deferred.
+- Version lines together: 0.74.0 across CMakeLists, clay.h and pyproject.
+- The openspec change's four decisions are written down, its tasks ticked, and
+  the two spec deltas that shipped differently — per-surface memory accounting
+  and an unchanged document format — are amended with the reason.
+```
+fix(mesh): Adjacency::build read past its class array on an out-of-ra…
+…
+6659a70
+```
+…nge index
+
+Found by the new multires suite under ASan: the malformed-cage case in
+test_multires.cpp hands MultiresSurface::from_mesh a mesh whose indices point
+past its own vertices, and the Adjacency built over it indexed class_of_ with
+the raw corner and never checked it — a heap read past the end rather than a
+wrong answer, at src/mesh/adjacency.cpp:176.
+
+Nothing in this library produces such a mesh and every entry point that takes
+indices from outside checks them (clay_mesh_from_triangles and pyclay's
+from_triangles both refuse one), so it was not reachable from a host. It is
+reachable from C++, because mesh::Mesh is a plain struct a caller can fill by
+hand and Adjacency::build's contract never said the indices had to be in range.
+
+A malformed triangle now contributes no ring and no incidence — the treatment a
+degenerate one already gets — and the regression test in test_mesh_sculpt.cpp
+aborts under ASan with exactly that report when the guard is reverted.
+
+Also in this commit, from the same finding and the complexity pass:
+- MultiresSurface::from_mesh validates the indices BEFORE building anything
+  over them, which is the right order regardless of the guard below it.
+- MultiresSurface::decode splits into a header reader, a cage reader and the
+  level loop, and mesh_at_level into its two export paths, taking the two
+  worst new functions out of the critical band.
+- A test that pins what transport actually buys: the tangent field at level 2
+  is 0.98 coherent against its own ring transported, and 0.52 rebuilt from the
+  level's own geometry — the incoherence that makes tangential detail swim.
+- The example's obj output is untracked, matching 66's precedent.
+```
+leonardoaraujosantos
+mentioned this pull request
+Aug 31, 2026
+examples: the hand-built sphere fixture is inside-out, so its preview renders as speckle
+#407
+Closed
+leonardoaraujosantos
+added 2 commits
+August 31, 2026 02:21
+fix: register example 68 with the gallery, and correct the Swift smok…
+…
+f6919c4
+```
+…e's types
+
+Both caught by CI on the first run of this branch.
+
+examples/run_all.py keeps an explicit registry and 68_mesh_multires was not in
+it, so the gallery would never have run it — the gate that catches this exists
+because two earlier examples shipped unrun for exactly that reason. Added to
+EXAMPLES, with the mesh-multires capability pointing at it: the coverage check
+deliberately ALLOWS a capability an active change proposes to name its example,
+so that a capability lands with its example in one commit.
+
+tests/swift/smoke.swift had three type errors the Linux gates cannot see:
+clay_mesh_brush_desc.verb and clay_multires_error both need
+Int32(...rawValue) rather than the imported enumerator, and a size_t out
+parameter arrives in Swift as Int rather than as size_t.
+
+Verified locally: 69/69 examples succeed under CLAY_EXAMPLES_FAST, and only
+68's own picture is regenerated — the rest of the gallery is restored to its
+committed full-quality renders rather than left at fast-mode resolution.
+```
+fix(mesh): close the eight gaps the multires PR shipped with
+…
+062f5a6
+```
+Each of these was found in a review of my own work on this branch, and each is
+either a claim the code could not back or a defect the tests could not see.
+
+1. detail_field.h cited two benchmarks that DID NOT EXIST, so its block size
+   and promotion threshold were asserted round numbers while task 1.2 asked for
+   a measurement. Both benchmarks are now real, the block size is a PARAMETER
+   so it can be swept at all, and both constants follow what the sweep says
+   rather than what the comment did:
+     - block size 256 -> 1024. Total cost to hold one footprint, KiB:
+         reached      64      256     1024     4096
+             400   72.25       25       16       49
+           4,000  139.75       94       88       97
+          40,000  814.75      769      760      769
+       1024 is least at every footprint; below it the block table over the
+       level dominates, above it the last partly-used block does.
+     - dense promotion 0.75 -> 1.0. BM_MultiresDetailAccess measures 611 M/s
+       sparse against 605 M/s dense, so promotion buys no measurable speed —
+       while promoting at three-quarters coverage allocates a third MORE than
+       the sparse form it replaces. A threshold with nothing on the benefit
+       side belongs where it cannot cost anything either.
+   The checksum is now hashed per non-zero vertex rather than per block, so it
+   stays representation-independent across block sizes, and the encoding
+   records the block size so a round trip is still byte-exact.
+
+2. The preflight's estimate was never compared to reality, and was 34-50% LOW
+   — the dangerous direction for a budget whose job is to refuse before an OOM
+   kill. It now applies a measured capacity factor, prices the detail field's
+   block table, and test_multires.cpp holds it as a CEILING over the actuals.
+
+3. Dead code: child_edges computed and discarded in preflight_add_level.
+
+4. MultiresMemory::runtime_index was a subtraction from LevelCache::bytes().
+   Correct today, and one edit away from underflowing size_t into a memory
+   report of sixteen exabytes. It is two positive sums now.
+
+5. drop_intermediate_caches() releases the levels BETWEEN the cage and the ones
+   in use — the lever a host wants while an artist details at a fine level.
+   That needed evaluate_up_to to stop walking from the cage when nothing below
+   has moved, without which a released level came straight back on the next
+   stamp and the trim bought nothing.
+
+6. The attribute-export fallback was unreachable dead code pretending to be a
+   fallback; it is a stated precondition now. Added the untested combination it
+   was hiding: a cage split for HARD EDGES — duplicate positions with no uv or
+   colour on them — which welds geometrically and still splits on export.
+
+7. brush::apply_to_multires: the stroke engine reached one of three mesh
+   representations. It shares mesh_stamp_settings, mesh_mask_gate and
+   mesh_automask_inputs with apply_to_mesh rather than copying them, so what a
+   stroke IS cannot drift between representations. Reachable from C
+   (clay_multires_sculptor_apply_stroke) and pyclay (apply_stroke).
+
+   Extracting that shared helper immediately found a bug I had just written:
+   apply_to_mesh evaluated class_position(kNoClass) eagerly for every
+   non-dragging verb — a read past the end whose result was discarded, caught
+   by ASan through the new test.
+
+8. Cognitive complexity was never actually measured: clang-tidy was absent and
+   the skill fell back to lizard's CYCLOMATIC metric. Measured properly now,
+   which found one critical function (ensure_attributes at 31) and two
+   warnings. After splitting those three: 66 functions, average 3.7, worst 18,
+   nothing above the acceptable band.
+
+Also fixed a nanobind reference leak the new binding introduced: a default
+argument constructing a StrokePreset leaks one instance and sixty-one types at
+interpreter shutdown. The existing mesh binding requires its preset for the
+same reason.
+```
+leonardoaraujosantos
+commented
+Aug 31, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Follow-up: the eight gaps this PR shipped with, now closed (062f5a6)
+A review of my own work on this branch turned up eight things — each either a
+claim the code could not back or a defect the tests could not see. All are fixed
+here rather than left for later. Two of them changed shipped constants, and both
+changed them away from what I had asserted.
+1. The header cited two benchmarks that did not exist
+detail_field.h said its block size and promotion threshold were "measured in
+BM_MultiresDetailBlockSize" and "BM_MultiresDetailAccess". Neither existed.
+So both were round numbers, and openspec task 1.2 — which asks for a measurement
+rather than a round number — was ticked on nothing.
+Both benchmarks are real now, and the block size is a parameter rather than
+a constant, because a number nobody can sweep is a number nobody can re-derive.
+The sweep does not agree with what I wrote:
+reached
+64
+256
+1024
+4096
+400
+72.25
+25
+16
+49
+4,000
+139.75
+94
+88
+97
+40,000
+814.75
+769
+760
+769
+(total KiB to hold the same detail on a 1,048,576-vertex level)
+1024 is least at every footprint — below it the block table over the level
+dominates, above it the last partly-used block does. 256 → 1024.
+The promotion threshold moved for a stronger reason. BM_MultiresDetailAccess
+measures 611 M/s sparse against 605 M/s dense: the indirection promotion was
+supposed to remove costs nothing, because the block-table entry a local footprint
+keeps re-reading is always in cache. So promotion buys no measurable speed —
+while promoting at three-quarters coverage allocates a third more memory than
+the sparse form it replaces. A threshold with nothing on the benefit side belongs
+where it cannot cost anything either: 0.75 → 1.0, promoting only once every
+block is allocated.
+Two consequences handled: the checksum is hashed per non-zero vertex rather than
+per block, so it stays representation-independent across block sizes; and the
+encoding records the block size, so a decode-then-encode is still byte-exact.
+2. The preflight's estimate was never checked, and was wrong low
+Nothing compared the prediction to what a level actually costs. Measured, it was
+34–50% under — the dangerous direction, since the call exists to refuse
+before an OOM kill and an under-estimate says yes to a level that does not fit.
+It now applies a measured capacity factor, prices the detail field's block table,
+and test_multires.cpp holds it as a ceiling over the actuals rather than a
+two-sided band.
+3–4. Dead code and a fragile subtraction
+child_edges was computed and discarded. And MultiresMemory::runtime_index was
+four terms subtracted from LevelCache::bytes() — correct today, one edit away
+from underflowing size_t into a memory report of sixteen exabytes. Two positive
+sums now.
+5. Releasing the middle of a hierarchy did not survive the next stamp
+drop_intermediate_caches() releases the levels between the cage and the ones in
+use, which is what a host wants while an artist details at a fine level. That
+needed evaluate_up_to to stop walking from the cage when nothing below has
+moved — without which a released level came straight back on the next stamp and
+the trim bought nothing past the call itself.
+6. An unreachable fallback, and the case it was hiding
+The attribute-export fallback could not be reached and was pretending to be a
+fallback; it is a stated precondition now. Added the combination it obscured: a
+cage split for hard edges — duplicate positions with no UV or colour on them
+— which welds geometrically and still splits on export.
+7. The stroke engine reached one of three mesh representations
+brush::apply_to_multires closes that. It shares mesh_stamp_settings,
+mesh_mask_gate and mesh_automask_inputs with apply_to_mesh rather than
+copying them, so where a stamp lands, how far it reaches and how Grab and
+Snakehook consume the motion between stamps cannot drift between
+representations. Reachable from C (clay_multires_sculptor_apply_stroke) and
+pyclay (MultiresSculptor.apply_stroke).
+Extracting that helper immediately found a bug I had just written:
+apply_to_mesh evaluated class_position(kNoClass) eagerly for every
+non-dragging verb — a read past the end whose result was then discarded, which is
+exactly the shape that survives every test until a sanitizer sees it. ASan caught
+it through the new test.
+(An adaptive surface is now the only mesh representation without a stroke entry
+point. Out of scope here and stated rather than left to be noticed.)
+8. Cognitive complexity was never actually measured
+clang-tidy was absent on my machine, so the skill fell back to lizard's
+cyclomatic metric and I reported that. Measured properly, it found one critical
+function (ensure_attributes at 31) and two warnings. After splitting those
+three: 66 functions, average 3.7, worst 18, nothing above the acceptable
+band.
+Also
+A nanobind reference leak the new Python binding introduced — a default argument
+constructing a StrokePreset leaked one instance and sixty-one types at
+interpreter shutdown. The existing mesh binding requires its preset for the same
+reason; this one does now too.
+Verification
+2018 test cases / 14,844,644 assertions on cpu-check; ASan and TSan clean over
+every suite touched; layering, C-ABI, binding parity, Swift package and doc
+latency green; openspec validate --strict green; example 68 renders and
+asserts. The locality gates are unchanged: 0.867 ms for a coarse dab propagated
+to level 3 against 15.7 ms for the cold rebuild.
+leonardoaraujosantos
+mentioned this pull request
+Aug 31, 2026
+The gallery's sphere fixture is inside-out, and fourteen specs had no Purpose
+#409
+Merged
+fix(examples): example 68's cage was inside-out too
+…
+1623df0
+```
+Inherited from 66_dynamic_topology when I copied its cube-sphere construction,
+and wrong for the same reason (#407): the triangles wind INWARD, so the closed
+cage has a winding number of -1 in its interior, Bvh::is_inside is false
+everywhere, and Volume.from_mesh samples a field that is positive at the centre
+of the model. With no zero crossing to find, the preview rendered as speckle
+rather than as the surface.
+
+  signed_volume  -4.0513  ->  +4.0513
+
+The example's assertions never looked at the picture, which is why it passed
+CI. What the picture now shows is what the example claims: the subdivided cage,
+the ridge sculpted at level 3, and the form changed at level 1 with the ridge
+still there and carried along.
+
+Also pulls the camera back so the whole cage is in frame, and untracks the OBJ
+the example writes for inspection — 66 commits only its picture, and this one
+had been re-added by a later 'git add -A'.
+```
+Hide details
+View details
+leonardoaraujosantos
+merged commit 26390ad
+into
+main
+Aug 31, 2026
+16 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+leonardoaraujosantos
+added a commit
+that referenced
+this pull request
+Aug 31, 2026
+examples: regenerate the two outputs main's merge touched
+…
+0441b1d
+```
+The conflict was `66_dynamic_topology.png`, and taking either side would have
+been wrong: main's #406 and #409 changed the engine under both this file and
+`68_mesh_multires.png`, so the honest resolution is to re-run the examples
+against the merged tree rather than pick a version. 69/69 succeed now — main
+added example 68 — and the whole gallery is from one run on one machine again.
+
+Both differ from main's by less than 0.05% in size, which is what a float
+render's platform spread looks like, and `check_gallery.py` reports them
+without failing for exactly that reason. That is the gate's design working on
+the first case it met: main's renders were made on another machine, mine here,
+and neither is stale.
+```
+leonardoaraujosantos
+mentioned this pull request
+Aug 31, 2026
+Fix #410; bisect and partially fix #375
+#411
+Merged
+SummerTree
+pushed a commit
+to SummerTree/ClayCore
+that referenced
+this pull request
+Sep 1, 2026
+fix(examples): the gallery's sphere fixture was inside-out, and 14 sp…
+…
+c4de8ff
+```
+…ecs had no Purpose
+
+Two findings from reviewing CyberdyneCorp#406, neither caused by it.
+
+THE RENDER BUG (CyberdyneCorp#407) is not what I filed it as. It is not every mesh preview
+and it is not Volume.from_mesh: example 45, whose mesh comes from doc.mesh(),
+renders correctly and always has. What is wrong is the hand-built cube-sphere
+that 66_dynamic_topology builds for itself — its triangles wind INWARD.
+
+  signed_volume  -4.1383   winding number at the centre  -1.022
+
+A closed mesh wound inward has a winding number of -1 in its interior rather
+than +1, so Bvh::is_inside is false everywhere, so the sampled field is POSITIVE
+at the centre of the model. There is then no zero crossing for a ray to find:
+0 of 625 rays hit a mesh sampled this way against 625 of 625 for one wound
+outward, and what reaches the gallery is speckle where a ray happened to graze
+the marcher's epsilon. Swapping the winding gives +4.1383 against the 4.1888 a
+unit sphere should have, and the example renders what its own prose describes.
+
+The sculpting never cared, which is why it survived: the example's assertions
+are about topology and edge lengths, and only the picture was wrong.
+
+SO THAT IT CANNOT RECUR SILENTLY, the nine identical copies of preview() — the
+reason nothing checked the mesh — are now one R.mesh_preview_doc that REFUSES a
+closed mesh whose signed volume is negative, naming the fix. Checked only on a
+CLOSED mesh: signed_volume means nothing on an open one, and 19_mesh_import
+legitimately previews a sphere with a hole in it.
+
+The consolidation is proven behaviour-preserving rather than assumed: rendering
+all eight consolidated examples before and against after, on the same build,
+66_dynamic_topology.png is the ONLY image that differs. It is the only one
+committed here.
+
+THE SPEC PURPOSES. All fourteen living capabilities carried the placeholder
+openspec archive writes — "TBD ... Update Purpose after archive" — and the
+unify-the-undo-history change had three tasks filed under the wrong group (7.1
+under group 6; 5.8 and 5.9 under group 7). Invisible today only because CI pins
+openspec 1.8.0; the current release is 1.11.0, which added that check, so the
+day the pin moves, validate --all --strict goes red on all fifteen. Each Purpose
+is now written from what that capability's requirements actually say. On 1.11.0:
+95 passed, 0 failed, where it was 80 passed and 15 failed.
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

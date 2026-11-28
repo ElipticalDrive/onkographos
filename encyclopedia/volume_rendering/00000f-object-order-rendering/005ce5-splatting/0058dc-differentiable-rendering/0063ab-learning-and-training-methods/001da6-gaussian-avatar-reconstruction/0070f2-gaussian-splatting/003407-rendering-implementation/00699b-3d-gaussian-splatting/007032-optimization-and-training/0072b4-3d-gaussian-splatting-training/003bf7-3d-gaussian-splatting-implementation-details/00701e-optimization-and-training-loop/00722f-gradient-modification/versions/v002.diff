@@ -1,0 +1,60 @@
+--- v001.md
++++ v002.md
+@@ -1,46 +1,34 @@
+ # Gradient Modification
+ 
+-Also called: Gradient regularization, Truncated gradients, Bézier-boundary approximation
++Also called: Gradient Surrogates, Truncated Gradients, Gradient Flags
+ 
+ ## Overview
+-Gradient modification techniques adjust the backpropagated gradients $\nabla \mathcal{L}$ to mitigate optimization instability, vanishing gradients, or gradient confusion in 3D Gaussian Splatting. They set themselves apart from standard training by intervening in the update step (Step 5 of the [Optimization and Training Loop](17791-optimization-and-training-loop.md)) rather than changing the loss function or rasterizer. Specifically, they address issues where standard differentiable rendering fails to provide useful signals for "dead" primitives or discontinuous geometric boundaries.
++Gradient modification techniques alter the backpropagated signals in 3D Gaussian Splatting to address vanishing gradients, gradient confusion, or discontinuous boundaries that standard differentiable rasterization cannot handle. These methods ensure that Gaussians receive meaningful optimization signals even when they are outside the rasterization cutoff, have low opacity, or define discontinuous geometric boundaries. They set themselves apart from standard training by injecting surrogate gradients or filtering noisy signals, distinct from sibling methods like [TurboGS](15697-turbogs.md) which focus on acceleration, or [Error-Guided Sparse Pixel Sampling](15708-error-guided-sparse-pixel-sampling.md) which focuses on data selection.
+ 
+ ## Shared principles
+-The family operates on the gradients computed in Step 4 of the parent loop. The core mechanism involves inspecting the current state of a Gaussian primitive (opacity, position, or geometric boundary status) and the gradient signal $\frac{\partial L}{\partial \theta}$ to decide whether to:
+-1.  **Zero out** the gradient if the primitive is in an optimal or irrelevant state.
+-2.  **Approximate** a non-differentiable gradient using geometric surrogates.
+-3.  **Truncate** or **scale** the gradient magnitude based on distance or confidence metrics.
+-4.  **Store** historical gradient trends to filter out noisy updates from imperfect supervision.
+-
+-These modifications are applied before the optimizer (Adam) updates the parameters.
++All methods in this family operate on the gradients $\nabla \mathcal{L}$ computed via automatic differentiation through the differentiable rasterizer [G]. They intervene between the loss computation and the optimizer update step of the [Optimization and Training Loop](17791-optimization-and-training-loop.md). The core mechanism involves modifying the raw gradient $\frac{\partial L}{\partial \theta}$ for a parameter $\theta$ (such as mean $\mu$, opacity $\sigma$, or control points) based on specific conditions (e.g., distance, opacity value, or cosine similarity). The modified gradient $\nabla \theta_{mod}$ is then passed to the Adam optimizer [G]. No shared mathematical formula exists across all children; each method defines its own modification rule.
+ 
+ ## Subtopics
+ 
+ ### [Bézier-boundary gradient approximation](13137-b-zier-boundary-gradient-approximation.md)
+-A strategy to approximate gradients for discontinuous indicator functions in Bézier-curve-based Gaussian representations. It sets itself apart by explicitly handling the non-differentiable segments of the $\alpha$-blending function where the curve boundary determines inclusion. Choose this when using cubic Bézier curves to define Gaussian support, as standard backpropagation fails at the discontinuity. It differs from truncated gradients by focusing on geometric boundary approximation rather than magnitude truncation.
++A technique for approximating the gradients of a discontinuous indicator function $g(\cdot)$ with respect to the control point coordinates of a cubic Bézier curve [13137-b-zier-boundary-gradient-approximation.md]. It solves the problem that $g(\cdot)$ is piecewise constant and non-differentiable, preventing standard backpropagation from updating curve parameters in discontinuity-aware Gaussian Splatting [13137-b-zier-boundary-gradient-approximation.md]. It sets itself apart from standard differentiable rendering by explicitly constructing geometric surrogates for zero gradients, and from [Truncated Gradient Updates](18661-truncated-gradient-updates-for-3d-gaussian-splatting.md) by focusing on the algebraic inversion of the Bézier boundary rather than magnitude truncation. Choose this when optimizing Gaussian primitives defined by Bézier curves where boundary continuity is critical. [13137-b-zier-boundary-gradient-approximation.md]
+ 
+ ### [Truncated Gradient Updates for 3D Gaussian Splatting](18661-truncated-gradient-updates-for-3d-gaussian-splatting.md)
+-Applies truncated gradients to "dead" Gaussians (low opacity) to enable long-range movement. It sets itself apart by introducing a piecewise surrogate gradient that activates only when a Gaussian's contribution is negligible, pulling primitives toward distant pixels. Choose this for dynamic scenes or poor initialization where Gaussians get stuck. It differs from Bézier-boundary approximation by handling the "dead" state (zero rasterization contribution) rather than geometric boundaries.
++A gradient modification technique that applies surrogate gradients to 'dead' Gaussians (those with low opacity) to enable long-range movement and convergence, addressing vanishing gradients in dynamic scenes or poor initialization [18661-truncated-gradient-updates-for-3d-gaussian-splatting.md]. It sets itself apart from standard 3D Gaussian Splatting [3D-GS](52-3d-gaussian-splatting.md) by extending the gradient signal beyond the rasterization cutoff threshold, allowing Gaussians outside the immediate pixel footprint to receive optimization signals, while distinguishing itself from [Bézier-boundary gradient approximation](13137-b-zier-boundary-gradient-approximation.md) by using a linear surrogate based on Mahalanobis distance rather than boundary approximations. Choose this when dealing with sparse initialization or dynamic scenes where Gaussians need to move long distances to converge. [18661-truncated-gradient-updates-for-3d-gaussian-splatting.md]
+ 
+ ### Gradient Flag Optimization
+ An optimization strategy that augments Gaussian primitives with a flag gradient attribute to mitigate gradient confusion and perturbations caused by imperfect supervision from pseudo-views [S1].
+ 
+-**Definition**
++#### definition
+ Augments canonical Gaussian primitives $\{\mu, s, q, \sigma, c\}$ with an additional per-Gaussian attribute flag gradient $\nabla \in \mathbb{R}^{11+k_c}$, where $\nabla$ records gradient trends for $\mu, s, q, \sigma$, and $k_c$ SH coefficients [S1].
+ 
+-**Steps**
+-1.  For each Gaussian in one optimization step, compute the cosine similarity between the current gradient for each attribute $g_{ic}$ and the corresponding flag gradient $\nabla(g_i)$ stored in $\nabla$ [S1].
+-2.  If the cosine similarity is greater than zero, indicating aligned update trends, use $g_{ic}$ directly [S1].
+-3.  If the cosine similarity is less than or equal to zero, indicating potential disturbances, scale the current gradient by a factor $\epsilon$ and update the flag gradient:
+-    $$ g_{ic} = \epsilon g_{ic}, \quad \nabla(g_i) = (1 - \epsilon)\nabla(g_i) + \epsilon g_{ic} $$
+-    [S1].
+-4.  Pass the modified gradients to the gradient-based optimizer (e.g., Adam) [S1].
+-5.  Eliminate the flag gradient attribute $\nabla$ after optimization is complete to avoid affecting rendering speed and storage [S1].
++#### step
++For each Gaussian in one optimization step, compute the cosine similarity between the current gradient for each attribute $g_{ic}$ and the corresponding flag gradient $\nabla(g_i)$ stored in $\nabla$ [S1]. If the cosine similarity is greater than or equal to zero, indicating aligned trends, use $g_{ic}$ directly [S1]. If the cosine similarity is less than or equal to zero, indicating potential disturbances, scale the current gradient by $\epsilon$ and update the flag gradient: $g_{ic} = \epsilon g_{ic}$ and $\nabla(g_i) = (1 - \epsilon)\nabla(g_i) + \epsilon g_{ic}$ [S1]. Pass the modified gradients to the optimizer (e.g., Adam) [S1]. Eliminate the flag gradient attribute $\nabla$ after optimization is complete to avoid affecting rendering speed and storage [S1].
+ 
+-**Parameters**
+-*   $\epsilon$: The scaling factor for gradients with negative cosine similarity, set to 0.1 [S1].
++#### parameter
++$\epsilon$: The scaling factor for gradients with negative cosine similarity, set to 0.1 [S1].
+ 
+ ## Background
+-Gradient modification in 3D Gaussian Splatting emerged to address specific failure modes of standard differentiable rendering. Standard 3DGS relies on continuous gradients through the rasterizer, which breaks down when Gaussians are "dead" (contributing zero alpha) or when geometric representations involve discontinuities (e.g., Bézier boundaries) [S1]. The concept of truncating gradients for inactive primitives allows for long-range optimization, preventing Gaussians from being trapped in local minima where they cannot see the error signal [S1]. Similarly, gradient flagging was introduced to handle "gradient confusion" caused by imperfect supervision, such as pseudo-views or noisy depth estimates, where standard gradients might point in conflicting directions [S1]. These methods are primarily used in advanced 3DGS training pipelines, particularly for dynamic scenes, sparse-view reconstruction, and high-fidelity avatar reconstruction.
++The concept of modifying gradients in Gaussian Splatting emerged to address specific failure modes of the standard differentiable rasterization pipeline. Standard 3D Gaussian Splatting [3D-GS](52-3d-gaussian-splatting.md) relies on the assumption that gradients flow smoothly through the alpha-blending process. However, in sparse-view settings or dynamic scenes, Gaussians may become "dead" (low opacity) or be culled by the rasterizer, leading to vanishing gradients and poor convergence [18661-truncated-gradient-updates-for-3d-gaussian-splatting.md]. Similarly, when using discontinuous geometric representations like Bézier curves, the indicator function is non-differentiable, requiring surrogate gradient approximations [13137-b-zier-boundary-gradient-approximation.md]. Gradient confusion from imperfect supervision, such as pseudo-views in super-resolution tasks, was identified as a cause of blurry rendering, leading to the development of flag-based gradient filtering [S1]. These methods are primarily used in advanced 3D Gaussian Splatting implementations for dynamic reconstruction, sparse-view super-resolution, and discontinuous scene representation.
+ 
+ ## Sources

@@ -1,0 +1,114 @@
+--- v001.md
++++ v002.md
+@@ -1,76 +1,60 @@
+ # Binocular Depth Estimation (Stereo Matching)
+ Also called: Disparity computation, Stereo depth
+-
+ ## Overview
+-Binocular depth estimation estimates the depth of a scene by analyzing the geometric correspondence between a pair of images (typically left and right) captured from slightly different viewpoints. It solves the problem of recovering 3D structure from 2D imagery by computing a disparity map, which is then converted to depth. Unlike monocular depth estimation, which relies on learned priors from a single image, this method leverages explicit geometric constraints (epipolar geometry) to provide metrically consistent depth estimates [S1]. It serves as a foundational step for dense depth estimation and 3D reconstruction, often feeding into subsequent volume rendering or plane-sweep algorithms.
+-
++Binocular depth estimation estimates scene depth from a pair of rectified left and right images by computing a disparity map, which is inversely proportional to depth. It solves the problem of recovering 3D structure from 2D imagery using geometric constraints between two viewpoints. Unlike monocular depth estimation, which relies on learned priors from single images, this method leverages explicit pairwise multi-view consistency, making it more effective for scenes with weak texture or repetitive patterns where local photometric costs are ambiguous [S1]. It builds on [Dense Depth Estimation via Plane Sweep](10850-dense-depth-estimation-via-plane-sweep.md) by providing the foundational cost-volume-based approach that plane sweep generalizes to multiple views.
+ ## How it works
+-The modern deep learning-based pipeline for binocular depth estimation consists of four sequential stages: feature extraction, cost volume construction, cost aggregation, and disparity computation [S1].
++The method follows a four-stage pipeline: feature extraction, cost volume construction, cost aggregation, and disparity computation [S1].
+ 
+ **Inputs and Outputs:**
+-*   **Inputs:** A pair of rectified images, $I_l$ (left) and $I_r$ (right), of size $H \times W \times 3$.
+-*   **Outputs:** A disparity map $d$ of size $H \times W$, where each pixel value represents the horizontal shift between corresponding points in the left and right images.
++- Input: Left image $I_l$ and right image $I_r$, both rectified and of identical resolution.
++- Output: Disparity map $d$, where each pixel value represents the horizontal shift between corresponding points in $I_l$ and $I_r$.
+ 
+ **Data Structures:**
+-1.  **Feature Maps:** Intermediate representations extracted from input images.
+-2.  **Cost Volume:** A 4D tensor storing matching costs. For a given pixel $(u, v)$ in the left image and a candidate disparity $k$, the cost is stored at $C(u, v, k)$. The dimensions are typically $H \times W \times D_{max} \times C_{feat}$, where $D_{max}$ is the maximum disparity and $C_{feat}$ is the feature dimension.
+-3.  **Disparity Map:** A 2D tensor $d \in \mathbb{R}^{H \times W}$.
++- Feature maps: Dense tensors output by the feature extraction network, typically sharing spatial dimensions with the input images but with a higher channel depth.
++- Cost volume: A 4D tensor with dimensions (Height, Width, Disparity Range, Feature Channels). Each entry $(u, v, d)$ stores the similarity cost between the left feature at $(u, v)$ and the right feature at $(u-d, v)$.
+ 
+ **Steps:**
+-
+-1.  **Feature Extraction ($f_\theta$):**
+-    A shared-weight convolutional neural network extracts features from both input images.
+-    $$ F_l = f_\theta(I_l) $$
+-    $$ F_r = f_\theta(I_r) $$
+-    Here, $f_\theta$ is a feature extraction network parameterized by $\theta$. The output features $F_l, F_r$ are typically multi-scale feature maps.
+-
+-2.  **Cost Volume Construction ($\partial$):**
+-    Matching costs are computed between features from the left and right images across a range of possible disparities.
+-    $$ C = \partial(F_l, F_r) $$
+-    The cost volume $C$ aggregates similarity metrics (e.g., correlation, absolute difference) for all pixels and all candidate disparities. This results in a 4D tensor.
+-
+-3.  **Cost Aggregation ($\delta$):**
+-    The raw cost volume is often noisy. A cost aggregation network refines the costs by incorporating contextual information from neighboring pixels and disparities.
+-    $$ C' = \delta(C) $$
+-    This step typically uses 3D convolutions or recurrent neural networks to propagate reliable matching cues while suppressing outliers.
+-
+-4.  **Disparity Computation ($\eta$):**
+-    The final disparity map is estimated from the aggregated cost volume. This is often done via a differentiable soft-argmin operation or a regression head.
+-    $$ d = \eta(C') $$
+-    The disparity $d(u,v)$ corresponds to the disparity index with the lowest cost (or highest similarity) in the cost volume.
++1. **Feature Extraction**: Encode $I_l$ and $I_r$ into feature representations using a shared-weight convolutional neural network $f_\theta$. This network extracts local descriptors that are robust to illumination changes.
++   $$ F_l = f_\theta(I_l), \quad F_r = f_\theta(I_r) $$
++2. **Cost Volume Construction**: Compute the similarity between features from the left and right views. For each pixel $(u, v)$ in the left image and each candidate disparity $d$, match $F_l(u, v)$ with $F_r(u-d, v)$. The cost is typically the absolute difference or dot product of the feature vectors.
++   $$ C(u, v, d) = \partial(F_l(u, v), F_r(u-d, v)) $$
++   where $\partial$ denotes the cost construction operation.
++3. **Cost Aggregation**: Smooth the cost volume to resolve ambiguities and enforce consistency. This step aggregates costs from neighboring pixels and disparities to suppress noise and handle occlusions. The aggregated cost volume is denoted as $\delta(C)$.
++4. **Disparity Computation**: Extract the final disparity map from the aggregated cost volume. This is typically done by selecting the disparity $d$ that minimizes the cost for each pixel, often followed by a differentiable argmin operation or soft-argmin for gradient-based training.
++   $$ d(u, v) = \eta(\delta(C)(u, v)) $$
+ 
+ **Formula:**
+-The entire process can be represented as a composition of these functions [S1]:
++The entire process is represented as:
+ $$ d = \eta(\delta(\partial(f_\theta(I_l), f_\theta(I_r)))) $$
++where:
++- $I_l, I_r$: Input left and right images.
++- $f_\theta$: Feature extraction network with parameters $\theta$.
++- $\partial$: Cost volume construction operator.
++- $\delta$: Cost aggregation operator.
++- $\eta$: Disparity computation operator.
+ 
+ **Parameters:**
+-*   **Maximum Disparity ($D_{max}$):** Determines the range of depths covered. Typical values depend on the baseline and scene depth; e.g., 192 or 384 pixels in standard datasets.
+-*   **Network Weights ($\theta$):** Learned parameters of the feature extraction and aggregation networks. Representative architectures include CFNet [47] and PCWNet [48] [S1].
++- Disparity range: The maximum expected disparity, determined by the baseline and minimum depth.
++- Network architecture: Representative methods include CFNet [47] and PCWNet [48] [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Occlusions:** Regions visible in one image but not the other lead to ambiguous matches. Standard stereo matching may produce incorrect disparities in occluded areas.
+-*   **Textureless Regions:** Areas with uniform color or lack of high-frequency features provide weak matching cues, leading to noisy cost volumes.
+-*   **Rectification Errors:** The method assumes images are rectified (epipolar lines are horizontal). Misalignment causes significant errors.
+-*   **Precision:** Disparity is often computed at sub-pixel precision using soft-argmin, but quantization errors can occur if the disparity range is coarse.
++- Occlusions: Pixels visible in one image but not the other create invalid disparities. [G] Standard practice involves left-right consistency checks to identify and mask occluded regions.
++- Repetitive textures: Ambiguities in cost volume minima can lead to incorrect disparity assignments. [S1]
++- Precision: Sub-pixel accuracy is often required, necessitating interpolation in the disparity computation step.
+ 
+ ## Subtopics
+ 
+-### MASt3R Feature Integration
+-MASt3R is a state-of-the-art 3D foundation model that learns to establish correspondences in feature space between pairs of images of the same scene [S2, unofficial]. It takes two input images $I_i, I_j$ and predicts a dense pointmap and stereo feature image for each:
+-$$ F_{ij}, F_{ji} = F_{MASt3R}(I_i, I_j) $$
+-where $F \in \mathbb{R}^{H \times W \times 24}$ [S2, unofficial]. These features enrich the cost volume (4D tensors storing matching costs) used in subsequent depth estimation, making the predicted depth and mesh reconstruction more accurate compared to using only monocular features like DINOv2 [S2, unofficial].
++### [MASt3R Feature Integration](15806-mast3r-feature-integration.md)
++Enriches stereo matching cost volumes with deep multi-view features from the MASt3R foundation model. It addresses limitations of traditional cost volumes by injecting semantically rich correspondences, particularly effective for weak texture or repetitive patterns.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the convolutional operations in the feature extraction and cost aggregation stages. With modern GPU acceleration, inference can be real-time for moderate resolutions.
+-*   **Memory Complexity:** The cost volume is the primary memory consumer, scaling as $O(H \times W \times D_{max})$. For high-resolution images and large disparity ranges, this can be substantial.
+-*   **Strengths:** Provides metrically consistent depth; robust to lighting changes compared to photometric methods; leverages geometric constraints.
+-*   **Limitations:** Requires rectified stereo pairs; struggles with textureless regions and occlusions; performance degrades with large baselines due to occlusion and resolution loss.
+-*   **When to use:** When metric depth accuracy is required and stereo pairs are available.
+-*   **When not to use:** For monocular video streams without stereo pairs; in scenes with significant occlusions where ground truth is unavailable for training.
+-
++- **Time Complexity**: Dominated by the convolutional operations in feature extraction and cost aggregation. The cost volume construction is $O(H \cdot W \cdot D)$, where $H, W$ are image dimensions and $D$ is the disparity range.
++- **Memory Complexity**: The cost volume requires significant memory, scaling linearly with the disparity range. [S1]
++- **Strengths**: High accuracy in textured regions; robust to illumination changes when using learned features.
++- **Limitations**: Computationally expensive due to large cost volumes; struggles with untextured regions without aggregation.
++- **When to use**: When high-precision depth is needed from calibrated stereo pairs and computational resources allow for deep learning inference.
++- **When not to use**: For real-time systems with strict memory constraints or uncalibrated cameras.
+ ## Background
+-Binocular depth estimation has been a core problem in computer vision for decades. Traditional methods relied on hand-crafted features and optimization techniques (e.g., semi-global matching). Recent advances have shifted towards deep learning, where end-to-end networks learn to extract features and aggregate costs. The pipeline described above, involving feature extraction, cost volume construction, aggregation, and disparity computation, is the standard architecture for current deep stereo matching methods [S1]. Representative networks include CFNet and PCWNet [S1]. The integration of foundation models like MASt3R represents a recent development in enhancing feature quality for 3D reconstruction tasks [S2, unofficial].
+-
++Originated from the fundamental principles of stereo vision, where depth is derived from triangulation of corresponding points. Modern deep learning approaches have replaced hand-crafted features with learned representations. The pipeline described is standard in current deep stereo matching methods [S1]. Representative networks like CFNet and PCWNet have been widely evaluated on datasets such as KITTI and Argoverse [S1].
+ ## Sources
+-[S1] Digging into Depth Priors for Outdoor Neural Radiance Fields, https://doi.org/10.1145/3581783.3612306, fetched 2026-10-30
+-[S2] SparSplat: Fast Multi-View Reconstruction with Generalizable 2D Gaussian Splatting, https://doi.org/10.48550/arXiv.2505.02175, fetched 2026-10-26 (unofficial)+[S1] Digging into Depth Priors for Outdoor Neural Radiance Fields, https://doi.org/10.1145/3581783.3612306, fetched 2026-10-30

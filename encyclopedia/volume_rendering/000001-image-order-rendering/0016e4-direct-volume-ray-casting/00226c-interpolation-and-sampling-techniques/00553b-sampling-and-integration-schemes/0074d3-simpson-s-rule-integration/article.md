@@ -1,0 +1,153 @@
+# Simpson's Rule Integration
+
+Also called: Simpson's Rule Integration for Extinction Sampling, Simpson's Rule Integration of scattering, Simpson's Rule for Extinction Sampling
+
+## Overview
+Simpson's Rule Integration is a numerical integration technique used to sample the extinction function $\sigma_t(x)$ along a ray in direct volume ray casting, specifically to reduce aliasing artifacts when particles are large and few in number [S1, unofficial]. It computes the scattered radiance $C_{scat}$ by approximating the integral of the extinction coefficient, chosen for its superior accuracy over Taylor series integration methods [S1, unofficial]. It sets itself apart from Monte Carlo methods by providing deterministic, low-variance results for participating media with sparse large particles, and from pre-integration methods by operating directly on the ray without requiring precomputed volumes [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray interval $[z_{min}, z_{max}]$; number of integration steps $n$; shadow map for visibility sampling; particle data for extinction calculation.
+*   **Output:** Approximated integral value for $C_{scat}$ (scattered radiance contribution).
+
+**Data Structures:**
+*   The method does not define a specific complex data structure beyond standard ray parameters and shader inputs. It relies on the ability to sample a shadow map for visibility $Vis(z)$ and compute extinction $\sigma_t(z)$ at arbitrary points along the ray [S1, unofficial].
+
+**Parameters:**
+*   $n$: Number of Simpson's rule steps. Configurable integer.
+    *   Default: 1 (single step spanning $[z_{min}, z_{max}]$).
+    *   Range: 1 to 10 [S1, unofficial].
+    *   Note: Increasing from 1 to 2 causes a dramatic visual difference; further increases offer marginal improvements, most visible in volumetric shadows [S1, unofficial].
+
+**Formulas:**
+The basic Simpson's rule approximation for an interval $[a, b]$ is:
+$$ \int_a^b f(x) dx \approx \frac{b-a}{6} \left( f(a) + 4f\left(\frac{a+b}{2}\right) + f(b) \right) $$
+where $f(x)$ represents the integrand, which involves terms like $T_L(z)$, $T_V(z_{min}, z)$, $Vis(z)$, and $\sigma_t(z)$ [S1, unofficial].
+
+To apply this to the full interval $[z_{min}, z_{max}]$, the interval is divided into $n$ sub-intervals. Simpson's rule is applied to each sub-interval, and the results are summed [S1, unofficial].
+
+For each step, the following quantities are computed:
+1.  $T_L(z)$: Computed using Equation 8 from the source [S1, unofficial].
+2.  $T_V(z_{min}, z)$: Computed using Equation 10 from the source [S1, unofficial].
+3.  $Vis(z)$: Sampled from a shadow map [S1, unofficial].
+4.  $\sigma_t(z)$: Extinction coefficient computed using Equation 9 from the source [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def simpsons_rule_integration(z_min, z_max, n, shadow_map_sampler, extinction_calculator):
+    """
+    Computes the integral for C_scat using Simpson's rule over n steps.
+    
+    Args:
+        z_min: Start of ray interval.
+        z_max: End of ray interval.
+        n: Number of integration steps (default 1, range 1-10).
+        shadow_map_sampler: Function to sample Vis(z) from shadow map.
+        extinction_calculator: Function to compute sigma_t(z) using Equation 9.
+        
+    Returns:
+        Approximated integral value.
+    """
+    total_integral = 0.0
+    step_size = (z_max - z_min) / n
+    
+    for i in range(n):
+        # Define sub-interval [a, b]
+        a = z_min + i * step_size
+        b = z_min + (i + 1) * step_size
+        mid = (a + b) / 2.0
+        
+        # Evaluate integrand f(x) at a, mid, b
+        # Note: The exact form of f(x) involves T_L, T_V, Vis, and sigma_t
+        # as per Equations 8, 9, 10 from the source [S1, unofficial].
+        # We assume a helper function integrand(z) encapsulates these calculations.
+        
+        fa = integrand(a, shadow_map_sampler, extinction_calculator)
+        fmid = integrand(mid, shadow_map_sampler, extinction_calculator)
+        fb = integrand(b, shadow_map_sampler, extinction_calculator)
+        
+        # Apply Simpson's rule for this sub-interval
+        sub_interval_integral = (b - a) / 6.0 * (fa + 4.0 * fmid + fb)
+        total_integral += sub_interval_integral
+        
+    return total_integral
+
+def integrand(z, shadow_map_sampler, extinction_calculator):
+    """
+    Computes the value of the integrand f(z) at point z.
+    This involves computing T_L(z), T_V(z_min, z), sampling Vis(z),
+    and computing sigma_t(z).
+    
+    Args:
+        z: Position along the ray.
+        shadow_map_sampler: Function to sample Vis(z).
+        extinction_calculator: Function to compute sigma_t(z).
+        
+    Returns:
+        The value of the integrand at z.
+    """
+    # Compute T_L(z) using Equation 8 [S1, unofficial]
+    T_L = compute_T_L(z)
+    
+    # Compute T_V(z_min, z) using Equation 10 [S1, unofficial]
+    T_V = compute_T_V(z_min, z)
+    
+    # Sample Vis(z) from shadow map [S1, unofficial]
+    Vis = shadow_map_sampler(z)
+    
+    # Compute sigma_t(z) using Equation 9 [S1, unofficial]
+    sigma_t = extinction_calculator(z)
+    
+    # The exact combination of these terms to form f(z) is defined in the source's
+    # Equation 7 and related equations. Since the exact algebraic combination
+    # is not fully explicit in the provided notes, we return a placeholder
+    # representing the complex integrand. In a real implementation, this
+    # would be the specific formula from the paper.
+    # [G] Assuming the integrand is a product or sum involving these terms
+    # as per standard volume rendering integrals. A precise implementation
+    # requires the full context of Equations 7-10 from [S1, unofficial].
+    return T_L * T_V * Vis * sigma_t # Placeholder for actual integrand formula
+
+def compute_T_L(z):
+    # Implementation of Equation 8 from [S1, unofficial]
+    # Not given in the sources.
+    pass
+
+def compute_T_V(z_min, z):
+    # Implementation of Equation 10 from [S1, unofficial]
+    # Not given in the sources.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Under-sampling:** Low step counts (e.g., $n=1$) result in under-sampling of the extinction function $\sigma_t(x)$, causing tetrahedron edges to be visible as artifacts [S1, unofficial].
+*   **Firefly Artifacts:** Taylor series integration methods produce firefly artifacts, which Simpson's rule avoids [S1, unofficial].
+*   **Hole-like Shadows:** When viewing volumetric shadows head-on, they may appear as holes through the medium, especially when cast onto low extinction media [S1, unofficial].
+*   **Performance:** Increasing $n$ increases frame time linearly. The slope is steeper for larger particle counts [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of integration steps $n$ and the number of particles. Frame time increases linearly with $n$ [S1, unofficial].
+*   **Memory Complexity:** Low, as it operates per-pixel in the shader and does not require large precomputed volumes. Memory usage scales with screen resolution [S1, unofficial].
+*   **Measured Performance:**
+    *   At 800x600 resolution: 1.60 ms/frame.
+    *   At 1920x1080 resolution: 3.80 ms/frame.
+    *   At 2560x1600 resolution: 7.87 ms/frame [S1, unofficial].
+    *   Base time (without large kernel PCF) is 3.24 ms/frame, increasing to 7.63 ms/frame with large kernel PCF. However, large kernel PCF is not recommended as increasing step count provides better softening at lower cost [S1, unofficial].
+*   **Strengths:**
+    *   Reduces aliasing artifacts for large, sparse particles.
+    *   Avoids firefly artifacts associated with Taylor series integration.
+    *   Provides better shadow softening at lower computational cost compared to large kernel PCF [S1, unofficial].
+*   **Limitations:**
+    *   Under-sampling leads to visible geometric artifacts (tetrahedron edges).
+    *   Performance scales with resolution and particle count.
+    *   Marginal visual improvements beyond $n=2$ or $n=3$ [S1, unofficial].
+*   **When to use:** When rendering participating media with large, sparse particles where aliasing artifacts are a concern, and deterministic results are preferred over Monte Carlo methods.
+*   **When not to use:** When computational resources are extremely limited and low step counts cause unacceptable artifacts, or when very high particle counts make the linear scaling prohibitive.
+
+## Background
+Simpson's Rule Integration was explored as an alternative to Taylor series integration for computing scattered radiance $C_{scat}$ in particle-based volumetric rendering [S1, unofficial]. The Taylor series method was found to be inaccurate and produced objectionable firefly artifacts [S1, unofficial]. Simpson's rule was chosen for its higher accuracy. The method was implemented in a research artifact, with the step count $n$ made configurable to balance visual quality and performance [S1, unofficial]. It is used in the context of direct volume ray casting for particle-based participating media [S1, unofficial].
+
+## Sources
+[S1] PDF Volumetric Rendering of Particle, https://jysandy.github.io/Sandilya-Jandhyala-Dissertation.pdf, fetched 2026-10-29 (unofficial)

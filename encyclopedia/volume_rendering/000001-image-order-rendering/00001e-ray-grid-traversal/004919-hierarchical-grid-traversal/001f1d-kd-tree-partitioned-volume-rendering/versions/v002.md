@@ -1,0 +1,32 @@
+# KD-Tree Partitioned Volume Rendering
+
+
+## Overview
+A method to avoid computing all scalar values regardless of visibility by partitioning the volume into smaller sub-volumes with similar properties based on the transfer function [S1, unofficial]. It sets itself apart from standard ray casting by using a kd-tree to manage visibility order and culling sub-volumes against an opacity map, rather than traversing a uniform grid or octree [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:** Not given in the sources.
+**Data Structures:** The volume is partitioned into sub-volumes where scalar values fall within specific ranges defined by the transfer function [S1, unofficial]. A kd-tree organizes these sub-volumes, with each tree node associated with one sub-volume [S1, unofficial]. An opacity map corresponds to a region of the frame buffer and stores the minimum opacity of the frame buffer pixels found within that region [S1, unofficial]. Exact layouts, field sizes, and bit packing are Not given in the sources.
+**Steps:**
+1. Partition the volume by grouping scalar values within certain ranges based on the transfer function to define sub-volume properties [S1, unofficial].
+2. Build a kd-tree to organize the sub-volumes [S1, unofficial].
+3. Traverse the kd-tree to render the partitioned volume in correct visibility order [S1, unofficial].
+4. For each node, cull and clip the corresponding sub-volume against the opacity map [S1, unofficial].
+**Formulas:** Not given in the sources.
+**Parameters:** Not given in the sources.
+**Edge Cases and Pitfalls:** Not given in the sources.
+
+## Subtopics
+
+### Exploded Views
+A technique introduced into the raycasting algorithm by Bruckner and Gröller to display inner occluded objects of interest by employing a force-based model to partition the volume into several segments [S2]. The partition manner is controlled by a number of forces and constraints [S2].
+
+## Operating characteristics
+Reported 10 fps for the Engine data set using a 2.5 GHz Pentium-IV and a nVidia GeForce4 graphics adapter [S1, unofficial]. Not given in the sources.
+
+## Background
+Proposed by Li et al. [Li03] to address the inefficiency of computing all scalar values regardless of visibility [S1, unofficial]. The approach combines volume partitioning with kd-tree traversal and opacity map-based culling [S1, unofficial].
+
+## Sources
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
+[S2] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27

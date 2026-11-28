@@ -1,0 +1,88 @@
+--- v003.md
++++ v004.md
+@@ -4,58 +4,47 @@
+ 
+ ## Overview
+-This article details specific structural modifications to the standard NeRF Multi-Layer Perceptron (MLP) baseline, focusing on capacity adjustments and specialized sub-networks for mobile or efficient rendering pipelines. It addresses the problem of balancing inference speed and memory constraints on edge devices by decoupling training-time heavy networks from the lightweight inference network. It differs from general input/output expansion [14428-sparse-view-and-few-shot-optimization.md] by specifically altering the hidden layer dimensions and introducing a distinct small inference network, and from SDF representations [12495-signed-distance-function-sdf-representations.md] by retaining the density-based volumetric formulation.
++Network architectures in radiance field optimization modify the standard NeRF baseline to address specific constraints such as inference speed, memory footprint, dynamic scene representation, or semantic manipulation. While the standard architecture [Parent](3065-nerf-hyperparameters.md) uses two MLPs for density and color, these modifications generally fall into input expansion, output expansion, or representation substitution [14428-sparse-view-and-few-shot-optimization.md]. They set themselves apart by integrating auxiliary conditioning, replacing continuous MLPs with discrete structures, or adapting the network topology for parallel processing and dynamic features.
+ 
+ ## How it works
+-The architecture modifies the standard two-MLP NeRF structure [Parent](3065-nerf-hyperparameters.md) by introducing three distinct networks: a large network $A$, a large network $F$, and a small network $H$.
+-
+-**Inputs and Outputs:**
+-*   **Network A (Appearance/Geometry):** Takes positional encoded position $\gamma(\mathbf{x})$ and outputs a latent feature vector $\mathbf{h}$ and volume density $\sigma$.
+-*   **Network F (Fine Geometry/Appearance):** Takes $\mathbf{h}$, $\gamma(\mathbf{x})$, and view direction $\gamma(\mathbf{d})$ to output color $\mathbf{c}$.
+-*   **Network H (Inference):** Takes $\mathbf{h}$ and $\gamma(\mathbf{d})$ to output color $\mathbf{c}$ directly, bypassing the need for $F$ during inference.
++**Inputs and Outputs:** Inputs vary by modification but typically include positional coordinates $\mathbf{x}$, view directions $\mathbf{d}$, and optional conditioning vectors (e.g., appearance embeddings, object codes, or temporal coordinates). Outputs include volume density $\sigma$, color $\mathbf{c}$, and auxiliary predictions (e.g., semantic labels, object codes).
+ 
+ **Data Structures:**
+-*   **Networks A and F:** Multi-Layer Perceptrons (MLPs).
+-    *   Hidden layer size: 384 neurons per layer [S1].
+-    *   Standard NeRF uses 256 [S1].
+-*   **Network H:** Small MLP.
+-    *   Hidden layers: 2 [S1].
+-    *   Neurons per layer: 16 [S1].
++1.  **Standard MLPs:** The baseline uses Multi-Layer Perceptrons. [S1] specifies that in MobileNeRF, MLPs A and F use the NeRF design but with hidden layer sizes increased from 256 to 384. MLP H is a small network with two hidden layers of 16 neurons each [S1].
++2.  **Point Clouds:** In Point-NeRF adaptations, a neural point cloud is generated. [S2, unofficial] specifies using a ground truth dense point cloud (400 million points per scene) during training instead of MVSNet-generated points.
++3.  **Texture Maps:** [S1] stores 8-dimensional features in two PNG images (4 channels each). Alpha is squeezed into the first feature channel: $\alpha=1$ if the channel is non-zero, else $0$. Texture sizes are constrained to powers of 2, max $4096 \times 4096$.
+ 
+-**Numbered Steps:**
+-1.  **Training Phase:**
+-    a. Compute positional encoding $\gamma(\mathbf{x})$ for input position $\mathbf{x}$ [14428-sparse-view-and-few-shot-optimization.md].
+-    b. Pass $\gamma(\mathbf{x})$ through Network $A$ to obtain latent code $\mathbf{h}$ and density $\sigma$.
+-    c. Pass $\mathbf{h}$, $\gamma(\mathbf{x})$, and view direction $\gamma(\mathbf{d})$ through Network $F$ to predict color $\mathbf{c}$.
+-    d. Render the image using standard volume rendering integration with $\sigma$ and $\mathbf{c}$.
+-    e. Backpropagate errors through $A$ and $F$.
+-2.  **Inference Phase:**
+-    a. Compute $\gamma(\mathbf{x})$ and pass through Network $A$ to get $\mathbf{h}$ and $\sigma$.
+-    b. Pass $\mathbf{h}$ and $\gamma(\mathbf{d})$ through Network $H$ to predict color $\mathbf{c}$.
+-    c. Render using $\sigma$ and $\mathbf{c}$.
+-    d. Networks $A$ and $F$ are discarded or unused to save computation time [S1].
+-
+-**Parameters:**
+-*   Hidden units in $A$ and $F$: 384 [S1].
+-*   Hidden layers in $H$: 2 [S1].
+-*   Hidden units in $H$: 16 [S1].
++**Steps:**
++1.  **Input Encoding:** Positional encoding $\gamma(\mathbf{x}, \mathbf{d})$ is applied as defined in the parent article [Parent](3065-nerf-hyperparameters.md).
++2.  **Network Forward Pass:**
++    *   *Standard/Modified MLP:* Pass encoded inputs through the network layers. [S1] increases hidden size to 384 for training-heavy networks (A and F) which are not used during inference.
++    *   *Point-NeRF Manipulation:* Feed spatial locations of all neural points into DM-NeRF to infer object codes [S2, unofficial]. Transform points based on manipulation info. Render using point-based volume rendering [S2, unofficial].
++    *   *Dynamic (DaReNeRF):* Decompose scene into 4D planes. Use Dual-Tree Complex Wavelet Transform (DTCWT) to encode features from six directions using real and imaginary coefficients, reducing complexity from $O(N^3 T F)$ to $O(R N^2 T F)$ [16396-darenerf.md].
++3.  **Rendering:** Compute $\hat{Y}(r) = \sum_{i=1}^{N} T_i \alpha_i y_{aux}(x_i)$ for auxiliary outputs using standard transmittance weights [14428-sparse-view-and-few-shot-optimization.md].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Hardware Constraints:** Texture storage for features must adhere to power-of-2 limits (max $4096 \times 4096$) on mobile hardware [S1].
+-*   **Alpha Channel Packing:** To save texture memory, the alpha (opacity) channel is squeezed into the first feature channel. Alpha is 1 if the first feature channel is non-zero, and 0 if zero [S1].
++*   **Inference vs. Training:** [S1] notes that larger MLPs (384 hidden units) can be used if they are excluded from the inference path (e.g., only used in the coarse stage).
++*   **Hardware Constraints:** [S1] highlights texture size limits (power of 2, max 4096) for mobile architectures.
++*   **Data Quality:** [S2, unofficial] emphasizes that using ground truth dense point clouds (400M points) during training is critical for high-quality scene-level manipulation, whereas MVSNet results are insufficient.
+ 
+ ## Subtopics
+ 
+ ### [MIMO-DONeRF](16217-mimo-donerf.md)
+-Applies Multi-Input Multi-Output concepts to DONeRF, processing multiple samples in parallel to improve inference speed while maintaining quality.
++MIMO-DONeRF applies Multi-Input Multi-Output neural rendering to the DONeRF architecture [16217-mimo-donerf.md]. It modifies the shading network to accept multiple spatial inputs and view directions simultaneously, producing multiple color and density outputs per forward pass. This improves inference speed compared to increasing samples in standard DONeRF by accumulating neighbor information through grouped samples. It differs from standard DONeRF by processing $N_p$ samples in parallel and from MIMO-NeRF by adapting to DONeRF's two-network structure (depth oracle and shading) [16217-mimo-donerf.md].
++
++### DaReNeRF
++DaReNeRF represents dynamic 3D scenes by combining plane-based 4D volume decomposition with direction-aware features from the Dual-Tree Complex Wavelet Transform (DTCWT) [16396-darenerf.md]. It solves directional ambiguity and checkerboard artifacts of standard 2D DWT by modeling features from six distinct directions using real and imaginary wavelet coefficients. Unlike standard plane-based methods, it explicitly encodes directional information, reducing memory complexity from $O(N^3 T F)$ to $O(R N^2 T F)$ through low-rank decomposition [16396-darenerf.md].
++
++### Point-NeRF Adaptation for Object Manipulation
++This variant adapts Point-NeRF for 3D scene geometry decomposition and manipulation [15538-point-nerf-representation.md]. During training, it uses a ground truth dense point cloud (400 million points per scene) to generate the neural point cloud, ensuring quality on complex indoor rooms [S2, unofficial]. During inference, spatial locations of neural points are fed into DM-NeRF to infer object codes. Points are transformed based on predefined manipulation information, and the new point cloud is rendered using point-based volume rendering [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is heavier due to larger hidden layers (384 vs 256) in networks $A$ and $F$, but inference is faster because the heavy network $F$ is replaced by the small network $H$ [S1].
+-*   **Memory Complexity:** Increased training memory due to larger MLPs. Inference memory is reduced by using the smaller network $H$.
+-*   **Strengths:** Optimized for mobile architectures where inference speed is critical. Allows trading training time for inference efficiency [S1].
+-*   **Limitations:** Requires separate training for $A, F$ and $H$. Not suitable for scenarios requiring dynamic view-dependent effects that $F$ might capture better than $H$ during inference.
++*   **MobileNeRF (S1):** Increases training time for MLPs A and F (hidden size 384) but maintains inference speed by excluding them from the inference path. Texture storage is constrained by mobile hardware limits (max 4096x4096) [S1].
++*   **DaReNeRF:** Reduces memory complexity from cubic to quadratic in spatial dimensions for dynamic scenes, trading off the need for directional wavelet coefficient computation [16396-darenerf.md].
++*   **Point-NeRF Manipulation:** Requires significant memory for storing 400 million points per scene during training. Inference requires object code inference for all points before rendering [S2, unofficial].
+ 
+ ## Background
+-This architecture is part of the MobileNeRF method, designed for efficient neural field rendering on mobile devices. It exploits the polygon rasterization pipeline to accelerate rendering. The specific network sizing choices (384 for training networks, 16 for inference) were made to accommodate the computational constraints of mobile hardware while maintaining visual fidelity [S1].
++The standard NeRF architecture [Parent](3065-nerf-hyperparameters.md) serves as the baseline. Modifications emerged to address limitations in rendering speed, dynamic scene handling, and semantic control. MobileNeRF targets mobile deployment [S1], while DM-NeRF focuses on geometry manipulation [S2, unofficial]. DaReNeRF addresses temporal dynamics with directional awareness [16396-darenerf.md].
+ 
+ ## Sources
+-[S1] MobileNeRF: Exploiting the Polygon Rasterization Pipeline for Efficient Neural Field Rendering on Mobile Architectures, https://doi.org/10.1109/cvpr52729.2023.01590, fetched 2026-10-26+[S1] MobileNeRF: Exploiting the Polygon Rasterization Pipeline for Efficient Neural Field Rendering on Mobile Architectures, https://doi.org/10.1109/cvpr52729.2023.01590, fetched 2026-10-26
++[S2] DM-NeRF: 3D Scene Geometry Decomposition and Manipulation from 2D Images, https://arxiv.org/abs/2208.07227v2, fetched 2026-10-26 (unofficial)

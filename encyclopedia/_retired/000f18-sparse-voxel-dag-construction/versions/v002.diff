@@ -1,0 +1,223 @@
+--- v001.md
++++ v002.md
+@@ -1,68 +1,175 @@
+ # Cell Projection with Texture Mapping for Opacity
+ 
+-Also called: Hardware-accelerated Cell Projection with Texture Lookup, Polyhedron Projection, Texture-mapped Cell Projection
++Also called: Exponential transparency lookup, Hardware-Assisted Polyhedron Projection with Texture Lookup, Hardware-accelerated Cell Projection with Texture Lookup, Polyhedron Projection, Texture-mapped Cell Projection
+ 
+ ## Overview
+-Cell Projection with Texture Mapping for Opacity is a hardware-accelerated volume rendering technique that projects individual cells as polygons onto the image plane and composites them in back-to-front order [S1, S2, unofficial]. It solves the problem of visual artifacts (specifically Mach bands) caused by the linear interpolation of non-linear opacity values by using a 2D texture lookup to compute the exponential opacity term per pixel [S1, S2, unofficial]. Unlike standard cell projection which interpolates opacity directly, this method interpolates the linear parameters required for the opacity formula and retrieves the correct exponential value from a precomputed texture [S1, S2, unofficial].
++This method accelerates the cell projection rendering technique by using hardware texture mapping to compute the exponential transparency term $\exp(-\int \tau ds)$ per pixel via table lookup [S1][S2, unofficial]. It solves the problem of visual artifacts known as Mach bands, which arise when the integrated opacity $\alpha$ is linearly interpolated across projected polygons [S1][S2, S3, unofficial]. By interpolating the linear parameters $\kappa_{avg}$ and $l$ in hardware and using a 2D texture lookup for the exponential, the method avoids per-pixel exponential calculations while maintaining visual correctness [S1][S2, unofficial]. It builds on [Cell projection](26-cell-projection.md).
+ 
+ ## How it works
++### Inputs and Outputs
+ **Inputs:**
+-*   A scalar field defined on a grid (structured or unstructured).
+-*   Linear transfer functions mapping scalar values to color ($RGB$) and density ($\kappa$) [S2, unofficial].
+-*   Camera parameters (orthographic or perspective) [S1, S2, unofficial].
++*   Convex polyhedral cells defined by vertices with scalar values.
++*   Transfer functions mapping scalar values to color ($RGB$) and differential opacity ($\kappa$ or $\tau$), assumed linear [S1][S2, S3, unofficial].
++*   Camera parameters (orthogonal or perspective) [S1][S2, S3, unofficial].
+ 
+ **Outputs:**
+-*   A 2D image with correct opacity compositing.
++*   Final image with correct color and opacity, composited back-to-front [S1][S3, unofficial].
+ 
+-**Data Structures:**
+-*   **2D Texture Map:** A 2D texture table used for opacity lookup. The texture stores values of $\alpha(\kappa_{avg}, l) = 1 - e^{-\kappa_{avg} l}$. The dimensions of the texture are determined by the range of average density $\kappa_{avg}$ and ray segment length $l$ [S1, S2, unofficial].
+-*   **Image Plane Subdivision:** A set of polygons covering the projection of each cell. For general cells, this is built incrementally; for curvilinear grids, it is determined by topology tests [S2, unofficial].
++### Data Structures
++*   **Projected Polygon:** A polygon on the image plane defined by projected vertices. Each vertex stores:
++    *   Screen coordinates $(x, y)$.
++    *   Texture coordinates $(u, v)$ for opacity lookup.
++    *   Color $(R, G, B)$ for compositing.
++*   **Opacity Texture Map:**
++    *   **1D Case (Constant $\tau$):** A 1D texture array. Address $u$ stores $1 - \frac{1}{2}\exp(-2u)$ [S1].
++    *   **2D Case (Varying $\tau$):** A 2D texture array. Address $(u, v)$ stores $1 - \frac{1}{2}\exp(-2uv)$ [S1].
++    *   The factor $1/2$ accounts for OpenGL's compositing equation which uses $1 - \frac{1}{2}\alpha$ transparency [S1].
++    *   The texture must be clamped at boundaries to prevent wrapping [S1].
+ 
+-**Steps:**
++### Steps
+ 
+-1.  **Precompute Texture:** Load the 2D texture with values calculated from the opacity formula $\alpha = 1 - e^{-\kappa_{avg} l}$ for all valid pairs of $\kappa_{avg}$ and $l$ [S1, S2, unofficial].
++1.  **Project Cell Edges:** Project the vertices of the convex polyhedral cell onto the image plane. The projected edges divide the image plane into a set of polygons. Each polygon lies within the projection of a single front-facing face and a single back-facing face [S1][S2, S3, unofficial].
++    *   *Note:* For curvilinear grids, identify if the projection topology matches standard non-degenerate perspective projection topologies for a cube. If so, use a lookup table for the subdivision to speed up processing [S3, unofficial]. Otherwise, use an incremental method to build the subdivision by adding projected edges one by one [S3, unofficial].
+ 
+-2.  **Project Cell Edges:** For each cell, project its vertices onto the image plane. Divide the projection of the cell into polygons such that each polygon lies within the projection of a single front-facing face and a single back-facing face [S2, unofficial].
+-    *   *For general cells:* Use an incremental method to build the subdivision. Start with one infinite region. Add projected edges one by one. An edge may create a new boundary cycle, close a cycle to form a new polygon, or subdivide existing polygons and edges [S2, unofficial].
+-    *   *For curvilinear grids:* Test if the projection topology matches one of three non-degenerate perspective projection topologies for a cube. If so, use a standard subdivision lookup. Otherwise, fall back to the incremental method [S2, unofficial].
++2.  **Compute Vertex Attributes:** For each vertex of each projected polygon, compute the front-face extinction $\tau_f$, back-face extinction $\tau_b$, segment length $l$, and polygon color $polygon\_color$.
++    *   **Segment Length $l$:**
++        *   For orthogonal projection, $l$ varies linearly across the polygon [S1][S3, unofficial].
++        *   For perspective projection, $l$ varies nonlinearly; the method approximates this by interpolating $l$ linearly in screen space [S2, unofficial].
++    *   **Extinction Coefficients $\tau_f, \tau_b$:**
++        *   **Profile Vertices** (e.g., A in Fig 1 of [S1]): Belong to both front and back faces. $\tau_f = \tau_b = \tau_{vertex}$ [S1].
++        *   **Intersection Vertices** (e.g., G in Fig 1 of [S1]): $\tau_f$ is interpolated along the front edge (e.g., EB), $\tau_b$ along the back edge (e.g., AC) [S1].
++        *   **Non-profile Front Vertices** (e.g., E in Fig 1 of [S1]): $\tau_f = \tau_{vertex}$. $\tau_b$ is interpolated from other vertices of the front face [S1].
++        *   **Non-profile Back Vertices:** Similar to front vertices [S1].
++    *   **Average Extinction $\tau_a$:**
++        $$ \tau_a = \frac{\tau_f + \tau_b}{2} $$
++        This average is used because the integral of linearly interpolated extinction along a ray segment of length $l$ is $l(\tau_f + \tau_b)/2$ [S1].
++    *   **Polygon Color $polygon\_color$:**
++        *   **Profile Vertices:** Set $polygon\_color$ to the glow color specified at the vertex [S1].
++        *   **Non-profile Vertices:** Compute the correct integrated color analytically in software and divide by the integrated opacity to get the $polygon\_color$ appropriate for the compositing equation [S1]. Alternatively, use the average of front and back colors as a faster approximation [S2, unofficial].
++        *   **Thick Vertices** (e.g., F, D, I, J): Color is the average of front and back endpoint colors [S2, unofficial].
++        *   **Thin Vertices** (where $l=0$): Color is the scalar value at the vertex [S3, unofficial].
+ 
+-3.  **Compute Vertex Attributes:** For each vertex of the projected polygons, compute the color and the texture coordinates $(\kappa_{avg}, l)$ [S1, S2, unofficial].
+-    *   **Thin Vertices:** Vertices where the viewing ray segment length $l$ is zero (e.g., vertices A, B, C, D, F in a triangular prism projection) [S2, unofficial].
+-        *   Color: Interpolate the scalar value $s$ at the vertex and map it to color via the transfer function [S2, unofficial].
+-        *   Opacity/Texture Coordinates: Set $l = 0$ and $\kappa_{avg} = 0$ (or the density at the vertex). The texture lookup will return $\alpha = 0$ [S1, S2, unofficial].
+-    *   **Thick Vertices:** Vertices where the viewing ray passes through the cell (e.g., vertices E, G in a triangular prism projection) [S2, unofficial].
+-        *   Find the segment endpoints on the front and back faces that project to the vertex [S2, unofficial].
+-        *   Compute the density $\kappa$ at the front and back endpoints by interpolating the scalar field and applying the density transfer function [S2, unofficial].
+-        *   Compute $\kappa_{avg} = (\kappa_{front} + \kappa_{back}) / 2$ [S2, unofficial].
+-        *   Compute the segment length $l$ [S2, unofficial]:
+-            *   *Orthographic View:* $l$ varies linearly across the polygon. Compute $l$ geometrically at the vertex [S1, S2, unofficial].
+-            *   *Perspective View:* Correct $l$ requires a square root per pixel. This technique approximates $l$ by interpolating in screen space, which is an approximation [S1, unofficial].
+-        *   Compute Color:
+-            *   *Precise:* Compute the integrated color analytically at the vertex and divide by the integrated $\alpha$ [S1, unofficial]. This is slow.
+-            *   *Approximate:* Use the average of the colors at the front and back endpoints [S1, S2, unofficial].
+-        *   Set Texture Coordinates: $(\kappa_{avg}, l)$ [S1, S2, unofficial].
++3.  **Set Texture Coordinates:**
++    *   **Constant $\tau$:** Use $u = \text{scale}(l \cdot \tau)$ as the 1D texture coordinate [S1].
++    *   **Varying $\tau$:** Use $u = \text{scale}(l)$ and $v = \text{scale}(\tau_a)$ as the 2D texture coordinates [S1].
++    *   Scaling must be chosen to cover a substantial range of transparencies [S1].
+ 
+-4.  **Rasterize and Composite:** For each polygon:
+-    *   Interpolate the color and texture coordinates $(\kappa_{avg}, l)$ across the polygon using hardware Gouraud shading [S1, S2, unofficial]. Note that in orthographic view, $\kappa_{avg}$ and $l$ vary linearly, so hardware interpolation is correct [S1, S2, unofficial]. In perspective view, this is an approximation [S1, unofficial].
+-    *   For each pixel, use the interpolated $(\kappa_{avg}, l)$ as texture coordinates to sample the 2D opacity texture. This returns the correct $\alpha = 1 - e^{-\kappa_{avg} l}$ [S1, S2, unofficial].
+-    *   Composite the polygon color $C_{poly}$ onto the existing image color $C_{old}$ using the retrieved $\alpha$:
+-        $$ C_{new} = (1 - \alpha) \times C_{old} + \alpha \times C_{poly} $$
+-        [S1, unofficial]
++4.  **Interpolate and Lookup:**
++    *   Interpolate the texture coordinates $(u, v)$ and color $(R, G, B)$ across the polygon in hardware using piecewise linear (triangulation) or piecewise bilinear (scan-line) interpolation [S1].
++    *   For each pixel, perform a texture lookup to retrieve the transparency factor $a$.
++        *   For 1D: $a = \text{Texture1D}(u)$
++        *   For 2D: $a = \text{Texture2D}(u, v)$
++    *   The integrated opacity is $\alpha = 1 - a$ (adjusted for the $1/2$ factor in the texture map) [S1]. Specifically, the texture returns $1 - \frac{1}{2}\exp(-2uv)$, so the effective transparency is $1 - \frac{1}{2}a = \exp(-l\tau_a)$ [S1].
+ 
+-**Pitfalls:**
+-*   **Mach Bands:** Linear interpolation of $\alpha$ across polygons causes derivative discontinuities due to the non-linear exponential, resulting in Mach bands. The texture lookup method avoids this [S1, S2, unofficial].
+-*   **Perspective Approximation:** In perspective view, $\tau_f$ and $\tau_b$ have different perspective distortions, and correct $l$ computation requires a square root. The method approximates by interpolating in screen space, which is not mathematically exact [S1, unofficial].
+-*   **Robustness:** The incremental method for general cells is slow and not completely robust due to floating-point computations determining topology [S2, unofficial].
++5.  **Composite:**
++    *   Use the OpenGL compositing equation:
++        $$ \text{new\_pixel\_color} = a \cdot \text{polygon\_color} + (1 - \alpha) \cdot \text{old\_pixel\_color} $$
++        where $\alpha = 1 - a$ is the effective opacity [S1].
++    *   Cells must be sorted back-to-front before compositing [S3, unofficial].
++
++### Pseudocode
++
++```python
++def render_cell_projection(cell, camera, texture_map):
++    """
++    Renders a single convex polyhedral cell using hardware-assisted texture mapping.
++    """
++    # 1. Project vertices
++    projected_vertices = []
++    for v in cell.vertices:
++        projected_vertices.append(project(v, camera))
++        
++    # 2. Subdivide image plane
++    # Use incremental method or topology lookup for curvilinear grids
++    polygons = subdivide_image_plane(projected_vertices, cell.edges)
++    
++    # 3. For each polygon, compute vertex attributes
++    for poly in polygons:
++        for vertex in poly.vertices:
++            # Determine vertex type (Profile, Intersection, Non-profile)
++            v_type = get_vertex_type(vertex, cell)
++            
++            # Compute tau_f and tau_b
++            tau_f, tau_b = compute_extinction(vertex, cell, v_type)
++            
++            # Compute segment length l
++            l = compute_segment_length(vertex, cell, camera)
++            
++            # Compute average extinction
++            tau_a = (tau_f + tau_b) / 2
++            
++            # Compute polygon_color
++            if v_type == Profile:
++                polygon_color = vertex.glow_color
++            else:
++                # Analytic integration or average of front/back colors
++                polygon_color = compute_polygon_color(vertex, cell)
++            
++            # Set texture coordinates
++            if tau_is_constant:
++                u = scale(l * tau_f)
++                v = 0
++            else:
++                u = scale(l)
++                v = scale(tau_a)
++            
++            vertex.u = u
++            vertex.v = v
++            vertex.color = polygon_color
++            
++        # 4. Interpolate and Lookup (Hardware Step)
++        # The hardware interpolates u, v, and color across the polygon
++        # and performs texture lookup for each pixel
++        render_polygon_with_texture(poly, texture_map)
++
++def compute_polygon_color(vertex, cell):
++    """
++    Computes the color to be used in the compositing equation.
++    Approximates the correct analytic integral by dividing integrated color by opacity.
++    """
++    # Get front and back colors at the vertex
++    color_front = get_color_at_face(vertex, cell, 'front')
++    color_back = get_color_at_face(vertex, cell, 'back')
++    
++    # Option 1: Average (Faster, less accurate)
++    # return (color_front + color_back) / 2
++    
++    # Option 2: Analytic approximation (More accurate)
++    # Compute integrated color analytically
++    integrated_color = analytic_integrated_color(vertex, cell)
++    integrated_alpha = 1 - exp(-compute_segment_length(vertex, cell) * compute_extinction(vertex, cell))
++    
++    # Divide by alpha to get the 'glow' color that, when weighted by alpha, gives the correct result
++    if integrated_alpha > 0:
++        return integrated_color / integrated_alpha
++    else:
++        return color_front
++```
++
++### Parameters
++*   **Texture Map Size:** Must be large enough to cover the range of $l\tau$ or $l\tau_a$ values encountered. The address must be clamped to prevent wrapping [S1].
++*   **Scaling Factor:** A joint decision on scaling $l$ and $\tau_a$ should be made to best utilize the range of exponentials in the table [S1].
++
++### Edge Cases and Pitfalls
++*   **Mach Bands:** Linear interpolation of $\alpha$ causes derivative discontinuities due to the nonlinear exponential. This method avoids it by using texture lookup [S1][S2, S3, unofficial].
++*   **Color Incorrectness:** Linear interpolation of both color and extinction yields incorrect results because it averages colors before applying opacity, failing to account for obscuring effects (e.g., red obscuring green) [S1]. The method approximates the correct color by computing it analytically at vertices [S1].
++*   **Perspective Approximation:** In perspective view, $\tau_f$ and $\tau_b$ have different perspective distortions, and correct $l$ computation requires a square root per pixel. The method approximates by interpolating in screen space [S2, unofficial].
++*   **Non-planar Faces:** Curvilinear grids may have non-planar faces, leading to "problem cells" with disjoint ray segments. These must be subdivided into tetrahedra with planar faces [S4, book].
++*   **Incremental Method Robustness:** The incremental method for building the image plane subdivision is slow and not completely robust due to floating-point precision issues [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the visibility sort of cells and the rasterization of projected polygons. The incremental subdivision method for general cells is slow [S2, unofficial].
+-*   **Memory Complexity:** Requires storage for the 2D opacity texture and the image plane subdivision data structures [S1, S2, unofficial].
+-*   **Strengths:** Hardware-accelerated opacity calculation avoids per-pixel exponentials. Correctly handles non-linear opacity to avoid Mach bands [S1, S2, unofficial].
+-*   **Limitations:** Requires a global visibility sort for correct back-to-front compositing [S2, unofficial]. Approximate in perspective view [S1, unofficial]. Incremental subdivision is not robust for general cells [S2, unofficial].
++*   **Time Complexity:** Dominated by the visibility sort of cells ($O(N \log N)$ or $O(N^2)$ depending on the sort algorithm) and the polygon rasterization. The texture lookup is $O(1)$ per pixel [S1][S3, unofficial].
++*   **Memory Complexity:** Requires storage for the projected polygons and the opacity texture map. The texture map size depends on the required precision of the exponential lookup [S1].
++*   **Performance:** Hardware-accelerated texture mapping provides significant speedup over per-pixel exponential calculations [S1][S2, unofficial].
++*   **Strengths:** Avoids Mach bands; leverages existing hardware texture mapping capabilities; relatively simple implementation compared to ray marching [S1][S2, unofficial].
++*   **Limitations:** Requires a global visibility sort; approximation in perspective view; potential artifacts from linear interpolation of color [S1][S2, S3, unofficial].
++*   **When to Use:** Suitable for interactive visualization of structured and unstructured grids where visual quality is important and hardware supports texture mapping [S1][S3, unofficial].
++*   **When Not to Use:** When exact perspective correctness is required without approximation; when the scene is too complex for efficient visibility sorting [S2, S3, unofficial].
+ 
+ ## Background
+-This method is a refinement of the original Cell Projection technique by Shirley and Tuchman [S1, S2, unofficial]. It was developed at Lawrence Livermore National Laboratory to address the Mach band artifacts inherent in the original method's linear interpolation of opacity [S1, S2, unofficial]. It is used for volume rendering of curvilinear and unstructured grids [S2, unofficial].
++The method was developed at Lawrence Livermore National Laboratory as part of the cell projection technique for volume rendering [S3, unofficial]. It addresses the limitations of the original Shirley and Tuchman method, which used linear interpolation of opacity and suffered from Mach bands [S1][S2, S3, unofficial]. The use of hardware texture mapping for exponential lookup was introduced to improve visual quality while maintaining performance [S1][S2, unofficial]. The technique has been applied to curvilinear and unstructured grids [S1][S3, unofficial].
+ 
+ ## Sources
+-[S1] Cell projection of meshes with nonplanar faces, https://www.sciweavers.org/publications/cell-projection-meshes-non-planar-faces, fetched 2026-10-29 (unofficial)
+-[S2] Volume rendering for curvilinear and unstructured grids, https://www.researchgate.net/publication/4023713_Volume_rendering_for_curvilinear_and_unstructured_grids, fetched 2026-10-30 (unofficial)+[S1] Approximate volume rendering for curvilinear and unstructured grids by hardware-assisted polyhedron projection, https://doi.org/10.1002/(sici)1098-1098(2000)11:1<53::aid-ima6>3.0.co;2-7, fetched 2026-10-25
++[S2] Cell projection of meshes with nonplanar faces, https://www.sciweavers.org/publications/cell-projection-meshes-non-planar-faces, fetched 2026-10-29 (unofficial)
++[S3] Volume rendering for curvilinear and unstructured grids, https://www.researchgate.net/publication/4023713_Volume_rendering_for_curvilinear_and_unstructured_grids, fetched 2026-10-30 (unofficial)

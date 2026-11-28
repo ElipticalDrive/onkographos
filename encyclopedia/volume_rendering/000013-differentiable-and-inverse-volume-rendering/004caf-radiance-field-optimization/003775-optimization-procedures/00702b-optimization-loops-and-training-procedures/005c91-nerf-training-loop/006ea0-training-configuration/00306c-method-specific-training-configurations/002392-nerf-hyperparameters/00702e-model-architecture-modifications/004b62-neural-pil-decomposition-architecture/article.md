@@ -1,0 +1,192 @@
+# Neural-PIL Decomposition Architecture
+
+Also called: Coarse and Decomposition Networks, Neural-PIL Decomposition
+
+## Overview
+The Neural-PIL Decomposition Architecture solves the problem of reflectance decomposition in novel view synthesis under varying illumination by separating the scene representation into a view-dependent appearance model and a physically-based material model [S1, unofficial]. Unlike standard NeRF which predicts view-dependent color directly, this method disentangles illumination, geometry, and material properties, allowing for realistic relighting and material editing [S1, unofficial]. It sets itself apart from sibling methods like [Lighting and Appearance Models](14522-lighting-and-appearance-models.md) by explicitly learning a neural pre-integrated lighting field and low-dimensional manifolds for BRDF parameters, rather than relying on explicit environment map convolution or simple spherical harmonics [S1, unofficial].
+
+## How it works
+The architecture consists of two primary neural networks: a **Coarse Network** and a **Decomposition Network**, along with two frozen auto-encoder networks (**Light-SMAE** and **BRDF-SMAE**) used for manifold projection.
+
+### Inputs and Outputs
+*   **Coarse Network Input:** 3D position $\mathbf{x} \in \mathbb{R}^3$, view direction $\boldsymbol{\omega}_o \in \mathbb{R}^3$, and illumination embedding $\mathbf{z}_l \in \mathbb{R}^k$ [S1, unofficial].
+*   **Coarse Network Output:** Volume density $\sigma \in \mathbb{R}$ and view/illumination-conditioned color $\mathbf{c} \in \mathbb{R}^3$ [S1, unofficial].
+*   **Decomposition Network Input:** 3D position $\mathbf{x} \in \mathbb{R}^3$ [S1, unofficial].
+*   **Decomposition Network Output:** Volume density $\sigma \in \mathbb{R}$ and BRDF embedding $\mathbf{z}_b \in \mathbb{R}^4$ [S1, unofficial].
+
+### Data Structures
+1.  **Coarse Network:** A Multi-Layer Perceptron (MLP) mapping $(\mathbf{x}, \boldsymbol{\omega}_o, \mathbf{z}_l) \rightarrow (\sigma, \mathbf{c})$.
+2.  **Decomposition Network:** An MLP mapping $\mathbf{x} \rightarrow (\sigma, \mathbf{z}_b)$.
+3.  **Light-SMAE:** A frozen auto-encoder that maps environment maps to a latent illumination manifold $\mathbf{z}_l$ and back [S1, unofficial].
+4.  **BRDF-SMAE:** A frozen auto-encoder that maps BRDF parameters to a latent space $\mathbf{z}_b$ and reconstructs physical BRDF parameters $\mathbf{b}$ [S1, unofficial].
+
+### Rendering Process
+The rendering pipeline differs from standard volumetric integration by decoupling the integration step from the shading step:
+
+1.  **Ray Marching for Termination:** Sample points along the camera ray using the density $\sigma$ predicted by the decomposition network. Compute the expected termination depth $t^*$ for each ray, analogous to a depth map estimation [S1, unofficial].
+2.  **Feature Extraction at Termination:** At the termination position $\mathbf{x}^*$, query the decomposition network to obtain the BRDF embedding $\mathbf{z}_b$ and density $\sigma$ [S1, unofficial].
+3.  **Normal Estimation:** Compute the surface normal $\mathbf{n}$ at $\mathbf{x}^*$ by calculating the gradient of the density with respect to position:
+    $$ \mathbf{n} = \frac{\nabla_{\mathbf{x}} \sigma}{\| \nabla_{\mathbf{x}} \sigma \|} $$
+    This gradient is computed by backpropagating through the decomposition network [S1, unofficial].
+4.  **BRDF Parameter Reconstruction:** Pass the BRDF embedding $\mathbf{z}_b$ through the frozen decoder of the **BRDF-SMAE** to reconstruct the physical BRDF parameters $\mathbf{b}$ [S1, unofficial].
+5.  **Neural Pre-Integrated Lighting (Neural-PIL):** Compute the pre-integrated illumination $\tilde{L}_i(\boldsymbol{\omega}_r, \mathbf{b})$. This network approximates the integration of incoming light over the hemisphere, conditioned on the surface roughness (derived from $\mathbf{b}$) and viewing direction $\boldsymbol{\omega}_r$ [S1, unofficial]. This avoids costly Monte Carlo sampling or environment map convolution during training [S1, unofficial].
+6.  **Shading:** Compute the final color $\mathbf{c}$ using the rendering equation (Equation 2 in [S1, unofficial]), utilizing the estimated BRDF $\mathbf{b}$, normal $\mathbf{n}$, and pre-integrated illumination $\tilde{L}_i$ [S1, unofficial].
+
+### Training Protocol
+The training occurs in three distinct phases to manage memory and stability [S1, unofficial]:
+
+1.  **Phase 1: Manifold Training.** Train the **Light-SMAE** on a dataset of environment maps and the **BRDF-SMAE** on a dataset of BRDFs. These networks are frozen thereafter.
+2.  **Phase 2: Neural-PIL Training.** Train the **Neural-PIL** network using the latent space created by the frozen **Light-SMAE** encoder. This separates the lighting approximation learning from the scene optimization [S1, unofficial].
+3.  **Phase 3: Joint Scene Optimization.** Jointly optimize the **Coarse Network** and **Decomposition Network** using scene images.
+    *   The **Coarse Network** predicts $\sigma$ and $\mathbf{c}$ based on $\mathbf{x}, \boldsymbol{\omega}_o, \mathbf{z}_l$.
+    *   The **Decomposition Network** predicts $\sigma$ and $\mathbf{z}_b$.
+    *   **Critical Constraint:** Only the illumination embedding $\mathbf{z}_l$ is optimized via the decomposition network path. The loss signal is **not** backpropagated to the illumination inputs in the coarse network [S1, unofficial]. This stabilizes training by preventing conflicting gradients between the explicit illumination embedding and the implicit color prediction [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.autograd as autograd
+
+# Assume these networks are defined and weights are loaded
+class CoarseNetwork(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # MLP mapping (x, wo, zl) -> (sigma, c)
+        pass
+    def forward(self, x, wo, zl):
+        # Returns sigma, c
+        pass
+
+class DecompositionNetwork(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # MLP mapping x -> (sigma, zb)
+        pass
+    def forward(self, x):
+        # Returns sigma, zb
+        pass
+
+class BRDF_SMAE_Decoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Frozen decoder mapping zb -> b (BRDF params)
+        pass
+    def forward(self, zb):
+        return self.decode(zb)
+
+class NeuralPIL(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Network approximating integrated lighting
+        pass
+    def forward(self, wr, b):
+        # Returns pre-integrated illumination L_tilde
+        pass
+
+def compute_normal(decomposition_net, x):
+    """
+    Computes the normal n by taking the gradient of density sigma
+    with respect to position x.
+    """
+    x.requires_grad_(True)
+    sigma, _ = decomposition_net(x)
+    # Compute gradient of sigma w.r.t x
+    grad_sigma = autograd.grad(
+        sigma.sum(), x, create_graph=True
+    )[0]
+    # Normalize to get unit normal
+    n = grad_sigma / (grad_sigma.norm(dim=-1, keepdim=True) + 1e-8)
+    return n
+
+def render_ray(ray_origin, ray_direction, coarse_net, decomp_net, 
+               brdf_decoder, neural_pil, zl):
+    """
+    Renders a single ray using the Neural-PIL decomposition approach.
+    """
+    # 1. Sample points along the ray using density from Decomposition Network
+    # Assume sample_points is a tensor of shape (N, 3) along the ray
+    sample_points = sample_along_ray(ray_origin, ray_direction, N=64)
+    
+    # Get density at sample points
+    sigma_samples, _ = decomp_net(sample_points)
+    
+    # 2. Compute expected termination depth (similar to depth map)
+    # This determines the primary shading point x_star
+    # Implementation detail: Use alpha compositing weights to find weighted mean depth
+    # or argmax of alpha. Let's assume we find the index t_star.
+    t_star = compute_expected_depth(sample_points, sigma_samples)
+    x_star = sample_points[t_star]
+    
+    # 3. Get features at termination point
+    sigma_star, zb = decomp_net(x_star)
+    
+    # 4. Compute Normal
+    n = compute_normal(decomp_net, x_star)
+    
+    # 5. Reconstruct BRDF parameters
+    b = brdf_decoder(zb)
+    
+    # 6. Compute Pre-Integrated Lighting
+    # wr is the reflection direction or view direction depending on the specific 
+    # formulation in Eq 2. Assuming wr is derived from view direction and normal.
+    wr = 2 * torch.dot(n, ray_direction) * n - ray_direction
+    L_tilde = neural_pil(wr, b)
+    
+    # 7. Render Color using Equation 2 (simplified shading)
+    # c = f(b, n, L_tilde)
+    # Note: The exact shading function depends on the BRDF model encoded in b.
+    # For a standard diffuse/specular split:
+    c = shade_with_brdf(b, n, L_tilde)
+    
+    return c
+
+def train_step(coarse_net, decomp_net, brdf_decoder, neural_pil, 
+               image, camera_params, zl):
+    """
+    Single training step.
+    """
+    # Forward pass through Coarse Network
+    # x, wo are derived from camera_params and ray origins/directions
+    sigma_coarse, c_coarse = coarse_net(x, wo, zl)
+    
+    # Forward pass through Decomposition Network
+    sigma_decomp, zb = decomp_net(x)
+    
+    # Compute loss against ground truth image
+    # The color prediction c_coarse is compared to the image
+    loss = mse_loss(c_coarse, image)
+    
+    # Backpropagation
+    # CRITICAL: Do not backpropagate to zl in the coarse network path
+    # Only optimize zl via the decomposition network path if zl is a learnable parameter
+    # associated with the scene illumination state.
+    
+    # If zl is a scene-level latent code:
+    loss.backward()
+    
+    # Optimizer step
+    optimizer.step()
+    optimizer.zero_grad()
+```
+
+### Parameters and Edge Cases
+*   **BRDF Embedding Size:** $\mathbf{z}_b \in \mathbb{R}^4$ [S1, unofficial].
+*   **Illumination Embedding:** $\mathbf{z}_l$ size is not specified in the notes, but it is learned via the Light-SMAE [S1, unofficial].
+*   **Edge Case - Degenerate Geometry:** If $\nabla_{\mathbf{x}} \sigma$ is near zero (flat regions), the normal estimation becomes unstable. A guard clause adding a small epsilon to the norm denominator is required [G].
+*   **Edge Case - Occlusion:** The "expected termination" approach assumes a single dominant surface. In transparent or multi-layered scenes, this may fail to capture complex occlusion effects compared to full volumetric integration [G].
+
+## Operating characteristics
+*   **Memory:** Higher memory usage than standard NeRF due to the presence of multiple networks (Coarse, Decomposition, Neural-PIL, SMAEs) and the need to store latent embeddings $\mathbf{z}_l$ and $\mathbf{z}_b$ [S1, unofficial].
+*   **Speed:** Rendering is faster per pixel than Monte Carlo-based lighting integration because the Neural-PIL network provides a closed-form approximation of the lighting integral [S1, unofficial]. However, training is slower due to the multi-stage optimization and gradient computation for normals [S1, unofficial].
+*   **Strengths:** Enables explicit control over illumination and material properties; robust to varying lighting conditions in input images [S1, unofficial].
+*   **Limitations:** Relies on the quality of the SMAE manifolds; if the input BRDFs or lighting conditions fall outside the training distribution of the SMAEs, reconstruction quality degrades [S1, unofficial].
+
+## Background
+The Neural-PIL Decomposition Architecture was introduced in the paper "Neural-PIL: Neural Pre-Integrated Lighting for Reflectance Decomposition" [S1, unofficial]. It addresses the limitations of standard NeRF in handling varying illumination by explicitly modeling the lighting and material components separately, leveraging pre-integrated lighting techniques adapted for neural rendering [S1, unofficial].
+
+## Sources
+[S1] Neural-PIL: Neural Pre-Integrated Lighting for Reflectance Decomposition, https://doi.org/10.48550/arxiv.2110.14373, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,151 @@
+# Factor Fields Optimization
+
+Also called: Factor Fields Training
+
+## Overview
+Factor Fields Optimization is a training method for neural and primitive-based volume representations that jointly optimizes network weights, feature grids, and latent codes [S1, unofficial]. It models signals as a product of factor fields, regularizing the solution via stochastic dropout to encourage sparsity and prevent co-adaptation of features [S1, unofficial]. It distinguishes itself by using a structured factorization (basis and coefficient factors) with DCT-initialized bases, enabling efficient joint optimization of multiple signals by sharing projection and basis parameters while keeping coefficient factors distinct [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of signals to reconstruct (single or multiple), a coordinate transformation function $\Phi$, and hyperparameters: dropout probability $\mu$, learning rate, and number of features $K$.
+*   **Outputs:** Optimized parameters for the projection function, basis factors, and coefficient factors.
+
+**Data Structures:**
+1.  **Basis Factors:** A set of functions $b_i: \mathbb{R}^{F_i} \rightarrow \mathbb{R}$ initialized using the Discrete Cosine Transform (DCT). For grid-based implementations, these correspond to fixed DCT basis vectors [S1, unofficial].
+2.  **Coefficient Factors:** A set of functions $c_i: \mathbb{R}^{F_i} \rightarrow \mathbb{R}$ (e.g., MLPs or feature grids) with parameters $\theta_{c_i}$ initialized randomly [S1, unofficial].
+3.  **Projection Function:** A mapping $\Phi: \mathbb{R}^3 \rightarrow \mathbb{R}^F$ (e.g., an MLP) with parameters $\theta_\Phi$ initialized randomly [S1, unofficial].
+4.  **Factor Product:** The model output is computed as the element-wise product of factor fields: $f(\mathbf{x}) = \bigodot_i f_i(\mathbf{x})$, where $f_i$ combines basis and coefficient components [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Initialization:**
+    *   Initialize basis factors using the Discrete Cosine Transform (DCT) [S1, unofficial].
+    *   Initialize parameters of coefficient factors and the projection MLP randomly [S1, unofficial].
+2.  **Forward Pass:**
+    *   For a sample point $\mathbf{x}$, compute the projected coordinates $\mathbf{z} = \Phi(\mathbf{x})$ [S1, unofficial].
+    *   Evaluate each factor field $f_i(\mathbf{z})$ using the current coefficient parameters and the fixed DCT basis [S1, unofficial].
+    *   Compute the factor product: $y = \bigodot_i f_i(\mathbf{z})$ [S1, unofficial].
+3.  **Regularization (Dropout):**
+    *   Generate a random binary vector $\mathbf{m} \in \{0, 1\}^K$ where each element is 1 with probability $1-\mu$ and 0 with probability $\mu$ [S1, unofficial].
+    *   Apply dropout to the factor product by element-wise multiplication: $y_{\text{reg}} = y \odot \mathbf{m}$ [S1, unofficial]. This forces the signal to be represented by random combinations of features at every iteration, encouraging sparsity [S1, unofficial].
+4.  **Loss Computation:**
+    *   Compute the reconstruction loss $\mathcal{L}_{\text{rec}}$ between $y_{\text{reg}}$ and the target signal [S1, unofficial].
+    *   Add any parameter regularizer $\Psi(\theta)$ to form the total objective $\mathcal{L} = \mathcal{L}_{\text{rec}} + \Psi(\theta)$ [S1, unofficial].
+5.  **Optimization:**
+    *   Update parameters using Stochastic Gradient Descent (SGD) [S1, unofficial].
+6.  **Multi-Signal Handling:**
+    *   When optimizing multiple signals jointly, share the parameters of the projection function ($\theta_\Phi$) and basis factors across all signals [S1, unofficial].
+    *   Do **not** share the parameters of the coefficient factors ($\theta_{c_i}$) across signals; each signal maintains its own coefficient factors [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def initialize_basis_factors(num_features, dimension):
+    """Initialize basis factors using DCT."""
+    # Create DCT basis matrix. Shape: (num_features, dimension)
+    # This is a fixed initialization, not learned.
+    basis = np.zeros((num_features, dimension))
+    for k in range(num_features):
+        for n in range(dimension):
+            basis[k, n] = np.cos(np.pi * (2 * n + 1) * k / (2 * dimension))
+    return basis
+
+def evaluate_factor_fields(projection_mlp, coeff_mlp, basis, x):
+    """Evaluate the factor product for a point x."""
+    # Project coordinates
+    z = projection_mlp(x) # z shape: (dimension,)
+    
+    # Evaluate coefficient factors
+    # Assuming coeff_mlp outputs K features
+    coeffs = coeff_mlp(z) # coeffs shape: (K,)
+    
+    # Combine with basis factors
+    # basis shape: (K, dimension)
+    # We assume a simplified interaction where basis scales the coefficients
+    # In the general Factor Fields framework, f_i is a function R^Fi -> R^K
+    # Here we approximate the product structure as described in [S1, unofficial]
+    # The paper states: "multiply the factor product element-wise with a random binary vector"
+    # implying the output is a vector of size K.
+    
+    # Let's assume the factor field output is simply the coefficients scaled by basis
+    # Or more accurately, the basis defines the functional form.
+    # For implementation clarity based on [S1, unofficial]:
+    # f_i(x) is evaluated. The product is over i.
+    # If we have K factors, and each outputs a scalar, the product is scalar.
+    # However, the dropout is on K features. This implies the output is a vector of size K.
+    # Re-reading [S1, unofficial]: "randomly dropping a subset of the K features... multiply... with random binary vector"
+    # This suggests the model output is a K-dimensional vector.
+    
+    # Simplified interpretation for pseudocode:
+    # The "factor product" results in a K-dimensional representation.
+    # basis acts as a fixed transform.
+    factor_output = coeffs * basis.mean(axis=1) # Placeholder for specific basis interaction
+    return factor_output
+
+def factor_fields_optimization_step(x, target, projection_mlp, coeff_mlp, basis, mu):
+    """Single optimization step with dropout regularization."""
+    
+    # 1. Forward pass
+    factor_output = evaluate_factor_fields(projection_mlp, coeff_mlp, basis, x)
+    
+    # 2. Regularization: Dropout
+    # Generate random binary mask with probability mu of being 0
+    mask = (np.random.rand(len(factor_output)) > mu).astype(np.float32)
+    regularized_output = factor_output * mask
+    
+    # 3. Loss
+    loss = np.mean((regularized_output - target) ** 2)
+    
+    # 4. Backward pass (SGD)
+    # Compute gradients of loss w.r.t projection_mlp and coeff_mlp parameters
+    # Update parameters using SGD
+    # (Implementation details of gradient computation omitted as per standard autodiff)
+    
+    return loss
+
+def train_jointly(signals, x_samples, targets, projection_mlp, coeff_mpls, basis, mu, epochs):
+    """Train on multiple signals sharing projection and basis."""
+    for epoch in range(epochs):
+        for signal_idx, (x, target) in enumerate(zip(x_samples, targets)):
+            # Share projection_mlp and basis
+            # Use signal-specific coeff_mpl[signal_idx]
+            loss = factor_fields_optimization_step(
+                x, target, 
+                projection_mlp, 
+                coeff_mpls[signal_idx], 
+                basis, 
+                mu
+            )
+            # Update shared projection_mlp and signal-specific coeff_mpl
+```
+
+**Parameters:**
+*   $\mu$: Dropout probability. Typical values not specified in sources [S1, unofficial].
+*   $K$: Number of features. Not specified in sources [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The use of DCT initialization requires careful handling of floating-point precision for basis generation [S1, unofficial].
+*   **Boundaries:** Coordinate transformations $\Phi$ must handle boundary conditions appropriately to avoid artifacts in the projected space [S1, unofficial].
+
+## Subtopics
+
+### Max-Reduction Criterion
+A criterion for factorization used in the Mixture Graph data structure that prunes the search space quicker than the max-occurrence criterion [S2]. Compared to the max-occurrence criterion, max-reduction is significantly faster (2.5x–2.7x) and results in slightly better (negligible) error and a negligibly smaller number of nodes ($\le 1$ permille) [S2]. It is chosen when faster construction time is prioritized over marginal gains in node count [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. The max-reduction criterion variant is noted to be 2.5x–2.7x faster than max-occurrence [S2].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** In the Mixture Graph context, factorization of a 1.006 non-zero entries per voxel histogram (1.045 billion voxels) resulted in a compact representation, but specific memory savings for Factor Fields are not detailed in the provided sources [S2].
+*   **Strengths:** Encourages sparsity via dropout; enables joint optimization of multiple signals by sharing bases; DCT initialization improves solution quality [S1, unofficial].
+*   **Limitations:** Dropout introduces noise during training; requires careful tuning of $\mu$ [S1, unofficial].
+*   **When to use:** When reconstructing multiple related signals or when sparsity is desired to prevent overfitting [S1, unofficial].
+*   **When not to use:** When exact non-sparse reconstruction is required without regularization bias [S1, unofficial].
+
+## Background
+Factor Fields were introduced in the paper "Factor Fields: A Unified Framework for Neural Fields and Beyond" [S1, unofficial]. The method builds on prior neural field representations like Occupancy Networks, DeepSDF, and NeRF, which use MLPs as signal representations [S1, unofficial]. The max-reduction criterion variant was introduced in "The Mixture Graph-A Data Structure for Compressing, Rendering, and Querying Segmentation Histograms" [S2].
+
+## Sources
+[S1] Factor Fields: A Unified Framework for Neural Fields and Beyond, https://doi.org/10.48550/arxiv.2302.01226, fetched 2026-10-26 (unofficial)
+[S2] The Mixture Graph-A Data Structure for Compressing, Rendering, and Querying Segmentation Histograms, https://doi.org/10.1109/tvcg.2020.3030451, fetched 2026-10-26

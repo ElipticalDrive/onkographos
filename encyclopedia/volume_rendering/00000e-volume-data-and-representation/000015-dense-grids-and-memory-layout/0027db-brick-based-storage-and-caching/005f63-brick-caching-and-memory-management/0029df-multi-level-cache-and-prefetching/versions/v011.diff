@@ -1,0 +1,259 @@
+--- v010.md
++++ v011.md
+@@ -4,152 +4,93 @@
+ 
+ ## Overview
+-Multi-Level Cache and Prefetching is a memory management strategy for dense volume data that decouples data retrieval from rendering by organizing storage into distinct tiers of compression and resolution, while using background threads to anticipate access patterns. It solves the problem of high-latency remote fetches (order of 100 ms) stalling interactive rendering by ensuring that frequently accessed or spatially adjacent data is available in faster memory tiers. It sets itself apart from sibling methods like [Brick Caching with LRU Replacement](879-brick-caching-with-lru-replacement.md) by explicitly managing a hierarchy of compressed vs. decompressed states and heap-aware resizing, and from [Raymarching with LOD-based Brick Caching](5776-raymarching-with-lod-based-brick-caching.md) by focusing on the storage and prefetching of raw data chunks rather than geometric level-of-detail selection.
++Multi-Level Cache and Prefetching is a memory management strategy for interactive volume rendering that decouples data retrieval from the rendering loop using a hierarchical cache structure and background prefetching [S1, unofficial]. It solves the problem of high-latency remote data fetching (order of 100 ms) by ensuring that decompressed geometry and compressed chunks are available in local memory before they are needed [S1, unofficial]. It differs from sibling methods like [Brick Caching with LRU Replacement](879-brick-caching-with-lru-replacement.md) by explicitly managing four distinct tiers of storage (disk, compressed memory, decompressed memory, and slice ladders) with heap-aware dynamic sizing, rather than a single fixed pool [S1, unofficial]. It also differs from [Raymarching with LOD-based Brick Caching](5776-raymarching-with-lod-based-brick-caching.md) by focusing on chunk-level and slice-level locality for splat-based rendering rather than voxel block LODs [S1, unofficial].
+ 
+ ## How it works
+-The method organizes volume data into a four-level cache hierarchy, managed by a prefetcher that reacts to cache misses and idle time. The implementation relies on specific data structures for each tier and a state machine for data movement.
++The method operates on a four-level cache hierarchy that stores data fetched via HTTP range requests from Zarr archives or similar chunked storage formats [S1, unofficial]. The system assumes a background prefetcher is active to hide I/O latency.
+ 
+-### Inputs and Outputs
+-- **Inputs**: Volume data stored in a chunked archive format (e.g., Zarr), accessed via HTTP range requests.
+-- **Outputs**: Render-ready voxel or splat data from the L0 cache; persistent storage in L2.
++**Inputs and Outputs:**
++*   **Input:** A sequence of view rays or slice planes requested by the user (orbit, slider playback).
++*   **Output:** Rendered pixels or updated slice views, with cache state updated to reflect accessed data.
+ 
+-### Data Structures
+-The cache consists of four distinct tiers with specific layouts and size constraints:
++**Data Structures:**
++The cache consists of four tiers, each with specific storage characteristics and size constraints:
++1.  **L2 (Disk Cache):** Stored in the browser’s Origin Private File System (OPFS). Fixed size of 2 GB. Stores compressed chunks. Survives browser restarts.
++2.  **L1 (Compressed Memory):** Stores compressed chunks in RAM. Ceiling of 100 MB.
++3.  **L0 (Decompressed Memory):** Stores decompressed chunks in RAM. Ceiling of 200 MB.
++4.  **S-cache (Slice Cache):** Stores fully decoded slice ladders. Default size 128 MB, grows up to 2 GB. Allows revisited slices to skip the chunk path entirely.
+ 
+-1.  **L2 (Browser OPFS)**:
+-    -   **Content**: Compressed chunk files on disk.
+-    -   **Layout**: Directory structure of chunk files or a single `.luxar.zarr.zip` archive.
+-    -   **Size**: Fixed 2 GB.
+-    -   **Persistence**: Survives browser restarts.
++**Heap Awareness:**
++The in-memory tiers (L0, L1, S-cache) are heap-aware. When the available heap memory is tight, L0 and L1 shrink from their configured ceilings. The S-cache grows with the available heap from its 128 MB default up to 2 GB [S1, unofficial].
+ 
+-2.  **L1 (Compressed In-Memory)**:
+-    -   **Content**: Decompressed but still compressed (e.g., Blosc/zstd) chunks.
+-    -   **Layout**: In-memory buffer holding compressed byte arrays.
+-    -   **Size**: Ceiling of 100 MB.
+-    -   **Behavior**: Shrinks from ceiling when heap is tight.
++**Numbered Steps:**
++1.  **Request:** The renderer requests a data chunk or slice.
++2.  **L0 Check:** Check if the decompressed chunk is in L0. If yes, use it.
++3.  **L1 Check:** If not in L0, check if the compressed chunk is in L1. If yes, decompress it (using WASM-accelerated Blosc/zstd codecs) and place in L0. Evict from L1 if necessary.
++4.  **L2 Check:** If not in L1, check if the compressed chunk is in L2 (OPFS). If yes, load into L1, then decompress to L0.
++5.  **Remote Fetch:** If not in L2, issue an HTTP range request to fetch the chunk. Upon arrival, store in L2, then L1, then L0.
++6.  **S-cache Optimization:** If the request is for a full slice, check the S-cache. If the fully decoded slice ladder is present, use it directly, bypassing chunk-level fetching.
++7.  **Prefetching:**
++    *   **Immediate:** After an on-disk hit or remote fetch, the prefetcher requests the chunk on either side in the data ordering [S1, unofficial].
++    *   **Idle:** An idle-time prefetcher warms the adjacent slice to hide remote-fetch latency (order of 100 ms) during user orbit or slider playback [S1, unofficial].
+ 
+-3.  **L0 (Decompressed In-Memory)**:
+-    -   **Content**: Fully decompressed chunks ready for rendering.
+-    -   **Layout**: In-memory buffer holding raw voxel/splat data.
+-    -   **Size**: Ceiling of 200 MB.
+-    -   **Behavior**: Shrinks from ceiling when heap is tight.
++**Pseudocode:**
++```python
++def get_data(request):
++    # request contains chunk_id or slice_id
++    
++    # 1. Check L0 (Decompressed)
++    if request in L0:
++        return L0[request]
++    
++    # 2. Check L1 (Compressed)
++    if request in L1:
++        decompressed = decompress(L1[request])
++        L0[request] = decompressed
++        manage_heap_pressure() # May shrink L0/L1 ceilings
++        return decompressed
++        
++    # 3. Check L2 (Disk/OPFS)
++    if request in L2:
++        compressed = load_from_opfs(request)
++        L1[request] = compressed
++        return get_data(request) # Retry to L1 -> L0
++        
++    # 4. Remote Fetch
++    compressed = fetch_remote(request)
++    L2[request] = compressed
++    L1[request] = compressed
++    decompressed = decompress(compressed)
++    L0[request] = decompressed
++    
++    # 5. Prefetch neighbors
++    prefetch_neighbors(request)
++    
++    return decompressed
+ 
+-4.  **S-cache (Slice Ladder)**:
+-    -   **Content**: Fully decoded slice ladders.
+-    -   **Layout**: Pre-decoded slices allowing direct access without chunk path traversal.
+-    -   **Size**: Default 128 MB, grows up to 2 GB based on available heap.
+-    -   **Behavior**: Grows with heap; allows revisited slices to skip the chunk path.
++def prefetch_neighbors(request):
++    # Request chunk on either side in ordering
++    left_chunk = get_neighbor_chunk(request, direction=-1)
++    right_chunk = get_neighbor_chunk(request, direction=1)
++    async_fetch(left_chunk)
++    async_fetch(right_chunk)
+ 
+-### Numbered Steps
+-
+-1.  **Initialization**:
+-    -   Allocate L2 storage with 2 GB limit.
+-    -   Initialize L1, L0, and S-cache with default/ceiling sizes (100 MB, 200 MB, 128 MB respectively).
+-    -   Start idle-time prefetcher thread.
+-
+-2.  **Cache Miss Handling**:
+-    -   When a render request requires data not in L0:
+-        -   Check if data exists in L1. If yes, decompress to L0.
+-        -   Check if data exists in L2. If yes, fetch via HTTP range request to L1, then decompress to L0.
+-        -   If not in L2, fetch from remote server via HTTP range request to L1, then decompress to L0.
+-    -   Update L2 with new chunks if space permits (up to 2 GB).
+-
+-3.  **Prefetching**:
+-    -   **On-Miss Prefetch**: After an on-disk hit (L2) or remote fetch, request the chunk on either side in the data ordering.
+-    -   **Idle-Time Prefetch**: During user orbit or slider playback, warm the adjacent slice to hide remote-fetch latency.
+-
+-4.  **Memory Management**:
+-    -   Monitor heap usage.
+-    -   If heap is tight, shrink L0 and L1 from their configured ceilings.
+-    -   If heap has surplus, grow S-cache from its 128 MB default up to 2 GB.
+-
+-### Pseudocode
+-
+-```python
+-class MultiLevelCache:
+-    def __init__(self):
+-        self.l2_opfs = DiskStorage(max_size=2*1024*1024*1024) # 2 GB
+-        self.l1_compressed = MemoryBuffer(max_size=100*1024*1024) # 100 MB
+-        self.l0_decompressed = MemoryBuffer(max_size=200*1024*1024) # 200 MB
+-        self.s_cache_slice_ladders = MemoryBuffer(max_size=128*1024*1024, max_growth=2*1024*1024*1024)
+-        self.heap_monitor = HeapMonitor()
+-        self.prefetcher = PrefetcherThread()
+-        self.prefetcher.start()
+-
+-    def get_data(self, chunk_id):
+-        # Check L0
+-        if chunk_id in self.l0_decompressed:
+-            return self.l0_decompressed[chunk_id]
+-        
+-        # Check L1
+-        if chunk_id in self.l1_compressed:
+-            data = self.l1_compressed[chunk_id]
+-            decompressed = decompress(data) # Blosc/zstd
+-            self.l0_decompressed.put(chunk_id, decompressed)
+-            return decompressed
+-        
+-        # Check L2 (Disk)
+-        if self.l2_opfs.exists(chunk_id):
+-            compressed_data = self.l2_opfs.read(chunk_id)
+-            self.l1_compressed.put(chunk_id, compressed_data)
+-            decompressed = decompress(compressed_data)
+-            self.l0_decompressed.put(chunk_id, decompressed)
+-            return decompressed
+-        
+-        # Remote Fetch
+-        compressed_data = fetch_remote(chunk_id) # HTTP Range Request
+-        self.l2_opfs.write(chunk_id, compressed_data)
+-        self.l1_compressed.put(chunk_id, compressed_data)
+-        decompressed = decompress(compressed_data)
+-        self.l0_decompressed.put(chunk_id, decompressed)
+-        
+-        # Trigger On-Miss Prefetch
+-        self.prefetcher.request_adjacent_chunks(chunk_id)
+-        
+-        return decompressed
+-
+-    def manage_memory(self):
+-        heap_usage = self.heap_monitor.get_usage()
+-        # Shrink L0 and L1 if heap is tight
+-        if heap_usage > THRESHOLD_TIGHT:
+-            self.l0_decompressed.shrink_from_ceiling()
+-            self.l1_compressed.shrink_from_ceiling()
+-        # Grow S-cache if heap has surplus
+-        elif heap_usage < THRESHOLD_SURPLUS:
+-            self.s_cache_slice_ladders.grow_towards_ceiling()
+-
+-class PrefetcherThread:
+-    def start(self):
+-        while True:
+-            if is_user_interacting():
+-                self.warm_adjacent_slice()
+-            else:
+-                sleep(IDLE_INTERVAL)
+-
+-    def request_adjacent_chunks(self, current_chunk_id):
+-        # Request chunk on either side in ordering
+-        left_chunk = get_chunk_id(current_chunk_id, offset=-1)
+-        right_chunk = get_chunk_id(current_chunk_id, offset=1)
+-        fetch_async(left_chunk)
+-        fetch_async(right_chunk)
+-
+-    def warm_adjacent_slice(self):
+-        # Warm adjacent slice to hide remote-fetch latency
+-        current_slice = get_current_slice_index()
+-        adjacent_slice = get_slice_index(current_slice, offset=1)
+-        prefetch_slice_ladder(adjacent_slice)
++def idle_prefetch():
++    # Warm adjacent slice during orbit/slider
++    current_slice = get_current_slice()
++    next_slice = get_adjacent_slice(current_slice, direction=1)
++    async_fetch_slice(next_slice)
+ ```
+ 
+-### Parameters
+--   **Remote Fetch Latency**: Order of 100 ms [S1, unofficial].
+--   **L2 Size**: 2 GB fixed [S1, unofficial].
+--   **L1 Ceiling**: 100 MB [S1, unofficial].
+--   **L0 Ceiling**: 200 MB [S1, unofficial].
+--   **S-cache Default**: 128 MB [S1, unofficial].
+--   **S-cache Max**: 2 GB [S1, unofficial].
++**Parameters:**
++*   **L2 Size:** 2 GB (Fixed) [S1, unofficial].
++*   **L1 Ceiling:** 100 MB [S1, unofficial].
++*   **L0 Ceiling:** 200 MB [S1, unofficial].
++*   **S-cache Default:** 128 MB [S1, unofficial].
++*   **S-cache Max:** 2 GB [S1, unofficial].
++*   **Remote Fetch Latency:** Order of 100 ms [S1, unofficial].
+ 
+-### Edge Cases and Pitfalls
+--   **Heap Tightness**: L0 and L1 must dynamically shrink to prevent OOM errors [S1, unofficial].
+--   **Concurrency**: Prefetching must not block the main rendering thread [S1, unofficial].
+--   **Data Consistency**: L2 writes must be atomic to prevent corruption during crashes [S1, unofficial].
++**Edge Cases:**
++*   **Heap Pressure:** If heap memory is insufficient, L0 and L1 ceilings shrink dynamically, potentially causing more frequent recompression or re-fetching [S1, unofficial].
++*   **Mobile Memory:** Rendering budgets are clamped to mobile memory limits, which may affect cache sizes or prefetch aggressiveness [S1, unofficial].
+ 
+ ## Subtopics
+@@ -165,17 +106,17 @@
+ 
+ ### Page Table and Cache Management
+-Management of the multi-resolution page directory, page table cache, and block cache using LRU/MRU schemes, where updates are initiated by cache misses reported by the ray-caster [S2]. On a cache miss, the CPU first checks if the required block is resident in the CPU block cache (a larger version in CPU memory of the GPU block cache) [S2]. If the block is in the CPU block cache, it is downloaded into the GPU block cache, and the page directory and page table cache are updated accordingly [S2]. If the block is not in the CPU block cache, a request for the 3D volume data block is issued asynchronously to the volume data construction stage. The download of block data and page table updates are deferred until the constructed block arrives [S2].
++This variant manages the multi-resolution page directory, page table cache, and block cache using LRU/MRU schemes, where updates are initiated by cache misses reported by the ray-caster [S2]. On a cache miss, the CPU first checks if the required block is resident in the CPU block cache (a larger version in CPU memory of the GPU block cache) [S2]. If the block is in the CPU block cache, it is downloaded into the GPU block cache, and the page directory and page table cache are updated accordingly [S2]. If the block is not in the CPU block cache, a request for the 3D volume data block is issued asynchronously to the volume data construction stage. The download of block data and page table updates are deferred until the constructed block arrives [S2].
+ 
+ ## Operating characteristics
+--   **Time Complexity**: Cache hit is O(1) for L0/L1 lookup. Cache miss involves O(1) disk I/O or O(latency) network I/O. Prefetching is asynchronous and does not block rendering.
+--   **Memory Complexity**: O(N) where N is the total volume size, but bounded by cache ceilings (2 GB L2, 100 MB L1, 200 MB L0, up to 2 GB S-cache).
+--   **Measured Performance**: Hides remote-fetch latency of ~100 ms during user orbit or slider playback [S1, unofficial].
+--   **Strengths**: Reduces perceived latency through prefetching; efficient memory usage via tiered compression; persistent storage via OPFS.
+--   **Limitations**: Complex memory management logic; heap-dependent performance; requires HTTP range request support.
+--   **When to Use**: Interactive web-based volume visualization with large datasets.
+--   **When Not to Use**: Offline batch rendering where latency is not critical; environments without HTTP range request support.
++*   **Time Complexity:** Cache hit time is O(1) for memory tiers (L0/L1). Disk hit (L2) is O(1) for access but involves I/O latency. Remote fetch is O(Latency), where latency is ~100 ms [S1, unofficial]. Prefetching overlaps I/O with computation, effectively hiding latency during interactive navigation.
++*   **Memory Complexity:** Total memory usage is bounded by the sum of cache ceilings (L0 + L1 + S-cache) plus OPFS usage (L2). Max in-memory usage is approximately 400 MB (L0+L1) + 2 GB (S-cache) = 2.4 GB, plus 2 GB on disk [S1, unofficial].
++*   **Measured Performance:** The architecture is designed to hide remote-fetch latency (order of 100 ms) during user orbit or slider playback [S1, unofficial].
++*   **Strengths:** High responsiveness for interactive web-based visualization; efficient use of browser storage (OPFS); adaptive to memory constraints.
++*   **Limitations:** Dependent on HTTP range request support; performance degrades if heap memory is severely constrained; complex cache coherence management between tiers.
++*   **When to Use:** Interactive web visualization of large, chunked scientific datasets (e.g., microscopy, Gaussian splats).
++*   **When Not to Use:** Offline batch rendering where data is already in memory; environments without HTTP range request support; systems with extremely low memory where even the minimum cache footprint is prohibitive.
+ 
+ ## Background
+-Originating from the Luxar viewer for microscopy data, this method was developed to enable scalable interactive web visualization of multidimensional scientific data [S1, unofficial]. It addresses the limitations of traditional brick caching by integrating web-specific storage mechanisms (OPFS) and network optimizations (HTTP range requests) [S1, unofficial]. The approach is also related to multi-resolution page table management in petascale volume exploration systems [S2].
++The Multi-Level Cache and Prefetching architecture was introduced in the Luxar viewer for interactive web visualization of multidimensional scientific data, specifically Gaussian splatting for microscopy [S1, unofficial]. It leverages browser-native storage (OPFS) and WebAssembly for decompression to enable scalable interactive viewing of large datasets in the browser [S1, unofficial]. The approach was developed to address the challenges of loading and rendering massive volumetric datasets over the web with low latency [S1, unofficial].
+ 
+ ## Sources

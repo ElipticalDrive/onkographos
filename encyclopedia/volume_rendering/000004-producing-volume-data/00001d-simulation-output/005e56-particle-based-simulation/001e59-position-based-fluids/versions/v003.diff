@@ -1,0 +1,158 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Position Based Fluids (PBF) is a Lagrangian particle-based fluid simulation method that enforces incompressibility by directly correcting particle positions to satisfy density constraints [S1, unofficial][S2]. It differs from pressure-based solvers by using constraint projection within a Position-Based Dynamics framework, which stabilizes the simulation and avoids density drift [S2]. It builds on [Simulation output](15-simulation-output.md) and is distinct from [Gaussian Splashing](1387-gaussian-splashing.md) and [Smoke Advection](4639-smoke-advection.md) by decoupling simulation from rendering and operating entirely in particle space.
++Position Based Fluids (PBF) is a Lagrangian particle-based fluid simulation method that enforces incompressibility by directly correcting particle positions to satisfy density constraints [S1, unofficial][S2]. It differs from pressure-based solvers by using constraint projection within a Position-Based Dynamics framework, which stabilizes the simulation and avoids density drift [S2]. It builds on [Simulation output](15-simulation-output.md) and is distinct from [Gaussian Splashing](1387-gaussian-splashing.md) and [Smoke Advection](4639-smoke-advection.md) by decoupling simulation from rendering and operating entirely in particle space [S2].
+ 
+ ## How it works
+@@ -21,5 +21,4 @@
+ ```python
+ import math
+-from typing import List, Tuple
+ 
+ class Vec3:
+@@ -35,19 +34,17 @@
+         return Vec3(self.x/l, self.y/l, self.z/l) if l > 0 else Vec3()
+ 
+-def random_vector(min_val: float, max_val: float) -> Vec3:
+-    return Vec3(
+-        min_val + (max_val - min_val) * math.random(),
+-        min_val + (max_val - min_val) * math.random(),
+-        min_val + (max_val - min_val) * math.random()
+-    )
++def spiky_gradient(pos: Vec3, h: float) -> Vec3:
++    # Standard SPH spiky kernel gradient [G]
++    r = pos.length()
++    if 0 < r < h:
++        factor = -32.0 / (math.pi * h**5) * (h - r)**2
++        return factor * (pos / r)
++    return Vec3()
+ 
+-def calculate_offset(i: int, num_particles_x: int, boundary: Tuple[float, float, float]) -> Vec3:
+-    # Standard grid initialization mapping linear index to 3D coordinates [G]
+-    x = i % num_particles_x
+-    y = (i // num_particles_x) % num_particles_x
+-    z = i // (num_particles_x ** 2)
+-    return Vec3(float(x), float(y), float(z))
++def compute_scorr(pos_ji: Vec3, h: float) -> float:
++    # Standard neighbor distance correction term [G]
++    return max(0.0, h - pos_ji.length())
+ 
+-def confine_position_to_boundary(pos: Vec3, bounds: Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]) -> Vec3:
++def confine_position_to_boundary(pos: Vec3, bounds) -> Vec3:
+     # Clamp position to simulation domain boundaries [G]
+     return Vec3(
+@@ -57,56 +54,37 @@
+     )
+ 
+-def compute_scorr(pos_ji: Vec3) -> float:
+-    # Standard neighbor distance correction term; formula not specified in sources [G]
+-    return 0.0
++def pbf_substep(positions, old_positions, velocities, neighbors, lambdas, h, rho0, dt, bounds):
++    n = len(positions)
++    # Save old positions for velocity update before modifying positions
++    old_positions[:] = positions[:]
++    position_deltas = [Vec3() for _ in range(n)]
+ 
+-def spiky_gradient(pos: Vec3, h: float) -> Vec3:
+-    # Standard SPH spiky kernel gradient [G]
+-    r = pos.length()
+-    if r < h and r > 0:
+-        factor = -32.0 / (math.pi * h**5) * (h - r)**2
+-        return factor * (pos / r)
+-    return Vec3()
++    for i in range(n):
++        pos_i = positions[i]
++        position_deltas[i] = Vec3()
++        for j in neighbors[i]:
++            if j < 0:
++                break
++            pos_j = positions[j]
++            pos_ji = pos_i - pos_j
++            lambda_j = lambdas[j]
++            lambda_i = lambdas[i]
++            scorr_ij = compute_scorr(pos_ji, h)
++            position_deltas[i] = position_deltas[i] + (lambda_i + lambda_j + scorr_ij) * spiky_gradient(pos_ji, h)
++        position_deltas[i] = position_deltas[i] / rho0
+ 
+-def pbf_substep(positions: List[Vec3], velocities: List[Vec3], old_positions: List[Vec3],
+-                neighbors: List[List[int]], h: float, rho0: float, dt: float, num_iters: int):
+-    n = len(positions)
+-    position_deltas = [Vec3() for _ in range(n)]
+-    lambdas = [0.0] * n
++    for i in range(n):
++        positions[i] = positions[i] + position_deltas[i]
+ 
+-    for _ in range(num_iters):
+-        for i in range(n):
+-            position_deltas[i] = Vec3()
+-            lambdas[i] = 0.0
++    for i in range(n):
++        positions[i] = confine_position_to_boundary(positions[i], bounds)
+ 
+-        for i in range(n):
+-            pos_i = positions[i]
+-            for j in neighbors[i]:
+-                if j < 0:
+-                    break
+-                pos_j = positions[j]
+-                pos_ji = pos_i - pos_j
+-                scorr_ij = compute_scorr(pos_ji)
+-                lambda_j = lambdas[j]
+-                lambda_i = lambdas[i]
+-                position_deltas[i] = position_deltas[i] + (lambda_i + lambda_j + scorr_ij) * spiky_gradient(pos_ji, h)
+-            position_deltas[i] = position_deltas[i] / rho0
++    for i in range(n):
++        velocities[i] = (positions[i] - old_positions[i]) / dt
+ 
+-        for i in range(n):
+-            positions[i] = positions[i] + position_deltas[i]
+-
+-        for i in range(n):
+-            positions[i] = confine_position_to_boundary(positions[i], bounds)
+-
+-        for i in range(n):
+-            velocities[i] = (positions[i] - old_positions[i]) / dt
+-
+-        for i in range(n):
+-            old_positions[i] = positions[i]
+-
+-def run_simulation(positions, velocities, old_positions, neighbors, h, rho0, dt, num_iters, bounds):
++def run_simulation(positions, velocities, old_positions, neighbors, lambdas, h, rho0, dt, bounds, num_iters):
+     # Prologue setup [G]
+     for _ in range(num_iters):
+-        pbf_substep(positions, velocities, old_positions, neighbors, h, rho0, dt, num_iters)
++        pbf_substep(positions, old_positions, velocities, neighbors, lambdas, h, rho0, dt, bounds)
+     # Epilogue cleanup [G]
+ ```
+@@ -122,7 +100,7 @@
+ **Parameters:**
+ *   $h$: Smoothing radius. Typical value: particle spacing $\times$ 1.25 (implied by `delta = h * 0.8` in initialization, suggesting particle spacing is $0.8h$) [S1, unofficial].
+-*   $\rho_0$: Rest density. Not given in the sources.
+-*   `num_iters`: Number of PBF iterations per substep. Not given in the sources.
+-*   $\Delta t$: Time step size. Not given in the sources.
++*   $\rho_0$: Rest density. Not given in the sources [S1, unofficial][S2].
++*   `num_iters`: Number of PBF iterations per substep. Not given in the sources [S1, unofficial][S2].
++*   $\Delta t$: Time step size. Not given in the sources [S1, unofficial][S2].
+ *   $d_0$: Distance threshold for particle repulsion [S2].
+ *   Surface particle update frequency: Surface particles are updated every two time steps [S2].
+@@ -140,5 +118,5 @@
+ 
+ ### Surface Tension Application
+-A minor variant that applies tension to minimize local surface area on detected surface particles. It begins by calculating the normal $n_i$ for surface particle $i$ as $n_i = \text{normalize}(-\nabla_{p_i} C_{i\rho})$ [S2]. Neighboring surface particles are projected onto a plane perpendicular to $n_i$ and triangularized. The area constraint $C_{iA}$ is then built to pull particles together, while distance constraints $C_{ij\_D}$ push apart particles that are too close [S2]. The Jacobians for the area constraint with respect to triangle vertices $t_1$, $t_2$, and $t_3$ are computed as:
++A minor variant that applies tension to minimize local surface area on detected surface particles [S2]. It begins by calculating the normal $n_i$ for surface particle $i$ as $n_i = \text{normalize}(-\nabla_{p_i} C_{i\rho})$ [S2]. Neighboring surface particles are projected onto a plane perpendicular to $n_i$ and triangularized [S2]. The area constraint $C_{iA}$ is then built to pull particles together, while distance constraints $C_{ij\_D}$ push apart particles that are too close [S2]. The Jacobians for the area constraint with respect to triangle vertices $t_1$, $t_2$, and $t_3$ are computed as:
+ $\nabla_{t_1} C_{tA}(p) = \frac{(p_{t2} - p_{t1}) \times (p_{t3} - p_{t1}) \times (p_{t3} - p_{t2})}{2 \|(p_{t2} - p_{t1}) \times (p_{t3} - p_{t1})\|}$,
+ $\nabla_{t_2} C_{tA}(p) = \frac{(p_{t3} - p_{t2}) \times (p_{t1} - p_{t2}) \times (p_{t1} - p_{t3})}{2 \|(p_{t3} - p_{t2}) \times (p_{t1} - p_{t2})\|}$,
+@@ -146,7 +124,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial][S2].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial][S2].
++*   **Measured Performance:** Not given in the sources [S1, unofficial][S2].
+ *   **Strengths:** Real-time simulation capability without meshing; stable incompressibility enforcement via direct position correction [S1, unofficial][S2].
+ *   **Limitations:** Vorticity confinement and XSPH correction are disabled in 2D contexts; surface tension requires local triangulation per particle which adds computational overhead [S1, unofficial][S2].

@@ -1,0 +1,165 @@
+--- v001.md
++++ v002.md
+@@ -4,115 +4,79 @@
+ 
+ ## Overview
+-Two-Level Visibility Culling is a hierarchical culling strategy designed to minimize data transfer and computation for large-scale volume rendering, specifically in out-of-core 3D Gaussian Splatting (3DGS) contexts. It solves the problem of expensive full-scene projection by separating culling into a conservative CPU-side block filter and an exact GPU-side primitive filter. It differs from standard Frustum Culling by operating on aggregated block bounding volumes first to reduce I/O bandwidth, rather than testing every primitive immediately. It builds on [Frustum Culling](8463-frustum-culling.md) for the geometric tests.
++Two-Level Visibility Culling is a hierarchical culling strategy that minimizes data transfer and computation for large-scale out-of-core 3D Gaussian Splatting (3DGS) by separating culling into a conservative CPU-side block filter and an exact GPU-side primitive filter [S1, unofficial]. It differs from standard Frustum Culling by operating on aggregated block bounding volumes first to reduce I/O bandwidth, rather than testing every primitive immediately, and builds on [Frustum Culling](8463-frustum-culling.md) for the geometric tests [S1, unofficial].
+ 
+ ## How it works
+-The method operates in two distinct stages: a coarse filtering stage on the CPU to determine which blocks to load, and a fine filtering stage on the GPU to determine which primitives within those blocks are visible.
+-
+ ### Inputs and Outputs
+-*   **Inputs:**
+-    *   $\mathcal{K}$: The set of all blocks in the scene. Each block $k$ has a coarse bounding sphere defined by center $c_k$ and radius $r_k$.
+-    *   $\mathcal{B}_t$: A batch of cameras (viewports) for the current frame.
+-    *   $R_t$: The set of resident blocks currently materialized in GPU VRAM.
+-*   **Outputs:**
+-    *   $\mathcal{K}_t$: The active block set (blocks intersecting the frustum).
+-    *   $I_t$: The final contributing set of Gaussians that participate in rendering and backpropagation.
++*   **Inputs:** $\mathcal{K}$ (set of all scene blocks, each summarized by a bounding sphere), $\mathcal{B}_t$ (camera batch for the current frame), $R_t$ (set of resident blocks currently materialized in GPU VRAM) [S1, unofficial].
++*   **Outputs:** $\mathcal{K}_t$ (active block set intersecting the frustum), $I_t$ (final contributing Gaussian set for forward/backward passes) [S1, unofficial].
+ 
+ ### Data Structures
+-*   **Block Metadata:** Stored on CPU/SSD. Contains $c_k$ (3D vector) and $r_k$ (scalar).
+-*   **Frustum Planes:** 6 planes defining the view volume. Each plane is typically represented by a normal vector $\mathbf{n}$ and a distance $d$ from the origin, or equivalently by the signed distance function $f(\mathbf{p}) = \mathbf{n} \cdot \mathbf{p} + d$.
++*   **Block Metadata:** Stored on CPU/SSD, containing $c_k$ (3D vector center) and $r_k$ (scalar radius) [S1, unofficial].
++*   **Frustum Planes:** 6 planes defining the view volume, each represented by a normal vector $\mathbf{n}$ and distance $d$, or equivalently by the signed distance function $f(\mathbf{p}) = \mathbf{n} \cdot \mathbf{p} + d$ [G].
+ 
+ ### Steps
++1.  **Level 1: Coarse Block Culling (CPU)**
++    For each camera $c \in \mathcal{B}_t$, iterate over all blocks $k \in \mathcal{K}$. Perform a 6-plane frustum test against the block's bounding sphere $(c_k, r_k)$. A sphere is culled if it lies entirely outside any frustum plane. If the sphere intersects the frustum (not culled), add $k$ to the active set $\mathcal{K}_t$.
++2.  **Level 2: Fine Filtering and Rendering (GPU)**
++    Transfer blocks in $R_t \cap \mathcal{K}_t$ to the GPU if not already resident [S1, unofficial]. Run the standard 3DGS projection and rasterization pipeline on primitives within these blocks [S1, unofficial]. During rasterization, apply standard visibility tests to individual Gaussians [G]. Identify the final contributing set $I_t \subseteq \bigcup_{k \in (R_t \cap \mathcal{K}_t)} \text{Block}(k)$ [S1, unofficial]. Only Gaussians in $I_t$ participate in the forward pass and receive non-zero gradients in the backward pass [S1, unofficial].
+ 
+-1.  **Level 1: Coarse Block Culling (CPU)**
+-    For each camera $c$ in the batch $\mathcal{B}_t$:
+-    1.  Iterate over all blocks $k \in \mathcal{K}$.
+-    2.  Perform a 6-plane frustum test against the block's bounding sphere $(c_k, r_k)$.
+-    3.  A sphere is culled if it lies entirely outside any of the 6 frustum planes. The condition for culling is:
+-        $$ d < -r_k $$
+-        where $d$ is the signed distance from the sphere center $c_k$ to the frustum plane.
+-    4.  If the sphere intersects the frustum (i.e., not culled), add $k$ to the active set $\mathcal{K}_t$.
+-    5.  The final active block set is the union of blocks visible to any camera in the batch:
+-        $$ \mathcal{K}_t = \mathcal{K}(\mathcal{B}_t) = \bigcup_{c \in \mathcal{B}_t} \{k \mid \text{visible}(k, c)\} $$
++### Formulas
++*   Active block set: $\mathcal{K}_t = \mathcal{K}(\mathcal{B}_t) = \bigcup_{c \in \mathcal{B}_t} \{k \mid \text{visible}(k, c)\}$ [S1, unofficial].
++*   Sphere culling condition: A sphere is culled if its signed distance $d$ to any frustum plane satisfies $d < -r_k$ [S1, unofficial].
+ 
+-2.  **Level 2: Fine Filtering and Rendering (GPU)**
+-    1.  Transfer only the blocks in $R_t \cap \mathcal{K}_t$ to the GPU if not already resident.
+-    2.  Run the standard 3DGS projection and rasterization pipeline on the primitives within these blocks.
+-    3.  During rasterization, apply standard visibility tests (e.g., depth testing, screen-space bounds) to individual Gaussians.
+-    4.  Identify the final contributing set $I_t \subseteq \bigcup_{k \in (R_t \cap \mathcal{K}_t)} \text{Block}(k)$.
+-    5.  Only Gaussians in $I_t$ participate in the forward pass and receive non-zero gradients in the backward pass.
++### Parameters and Edge Cases
++*   **Bounding Volume:** Level 1 uses bounding spheres for culling [S1, unofficial].
++*   **Conservatism:** Level 1 is conservative and may admit extra blocks, but Level 2 applies the exact 3DGS pipeline, preserving standard rendering and backpropagation semantics [S1, unofficial].
++*   **Precision:** Signed distance calculations must handle floating-point precision carefully near the boundary $d = -r_k$ [G].
++*   **Degenerate Input:** Empty blocks or blocks with no visible primitives pass Level 1 but are correctly filtered out during Level 2 rasterization [S1, unofficial].
+ 
+ ### Pseudocode
+-
+ ```python
+ def two_level_visibility_culling(blocks, cameras, resident_blocks):
+-    """
+-    blocks: List of Block objects, each with .center (vec3) and .radius (float)
+-    cameras: List of Camera objects, each with .frustum_planes (list of 6 plane definitions)
+-    resident_blocks: Set of block IDs currently in VRAM
+-    
+-    Returns:
+-    active_block_ids: Set of block IDs to transfer/render
+-    contributing_gaussians: List of Gaussian indices that are actually visible
+-    """
++    # blocks: list of dicts with 'id', 'center' (vec3), 'radius' (float), 'gaussians' (list)
++    # cameras: list of dicts with 'planes' (list of 6 tuples: (nx, ny, nz, d))
++    # resident_blocks: set of block ids currently in VRAM
++    active_block_ids = set()
+     
+     # Level 1: CPU-side coarse culling
+-    active_block_ids = set()
+-    
+-    for camera in cameras:
+-        for block in blocks:
+-            # Check if block's bounding sphere intersects the frustum
+-            is_visible = True
+-            for plane in camera.frustum_planes:
+-                # plane is defined such that visible points have distance >= 0
++    for cam in cameras:
++        for blk in blocks:
++            visible = True
++            for (nx, ny, nz, d) in cam['planes']:
+                 # Signed distance from block center to plane
+-                signed_dist = plane.distance_to_point(block.center)
++                dist = nx * blk['center'][0] + ny * blk['center'][1] + nz * blk['center'][2] + d
++                # Cull if sphere is strictly outside the plane
++                if dist < -blk['radius']:
++                    visible = False
++                    break
++            if visible:
++                active_block_ids.add(blk['id'])
+                 
+-                # Cull if sphere is strictly outside the plane
+-                # Sphere is outside if distance < -radius
+-                if signed_dist < -block.radius:
+-                    is_visible = False
+-                    break
+-            
+-            if is_visible:
+-                active_block_ids.add(block.id)
+-                
+-    # Level 2: GPU-side fine culling
+-    # Assume GPU kernel receives active_block_ids and resident_blocks
+-    # The kernel performs standard 3DGS rasterization
+-    
+-    # Pseudocode for the GPU kernel logic conceptually:
++    # Level 2: GPU-side fine culling (conceptual implementation)
+     contributing_gaussians = []
+-    
+-    # Filter blocks that are both active and resident
+-    blocks_to_render = [b for b in blocks if b.id in active_block_ids and b.id in resident_blocks]
+-    
+-    for block in blocks_to_render:
+-        for gaussian in block.gaussians:
+-            # Standard 3DGS projection and rasterization test
+-            if gaussian.is_visible_in_rasterization():
+-                contributing_gaussians.append(gaussian.id)
+-                
++    for blk in blocks:
++        if blk['id'] in active_block_ids and blk['id'] in resident_blocks:
++            for gauss in blk['gaussians']:
++                # Standard 3DGS projection and rasterization visibility test [G]
++                if gauss['screen_bounds'] and gauss['depth'] < current_depth:
++                    contributing_gaussians.append(gauss['id'])
++                    
+     return active_block_ids, contributing_gaussians
+ ```
+-
+-### Parameters and Edge Cases
+-*   **Bounding Volume:** The sources specify using a bounding sphere. A bounding box would require more complex plane intersection tests.
+-*   **Conservatism:** Level 1 is conservative. It may admit blocks that contain no visible primitives (e.g., the block is in the frustum but empty or occluded). This is acceptable as it simplifies CPU logic and ensures no visible data is missed.
+-*   **Precision:** Signed distance calculations must handle floating-point precision carefully near the boundary $d = -r_k$.
+ 
+ ## Subtopics
+ 
+ ### Clipping-based Visibility Culling
+-A variant used in hierarchical molecular visualization (Nanouniverse) [S2]. It employs a simple object-space clipping plane to selectively reveal parts of a model. It applies trivial reject tests at the lowest primitive of each level of a three-level acceleration structure (µLAS, mLAS, nLAS) [S2]. At µLAS, if all vertices of a prism/box fall in the invisible region, traversal terminates because mesostructures and nanostructures on it are also invisible [S2]. If some vertices are invisible (prism cut in half), traversal continues to finer levels where the clipping test is applied more finely [S2]. At mLAS, if all vertices of a molecule's AABB fall in the invisible region, traversal terminates [S2]. At nLAS (atom level), clipping is not applied to ensure accurate representation [S2].
++A variant used in hierarchical molecular visualization that employs a simple object-space clipping plane to selectively reveal model parts [S2]. It applies trivial reject tests at the lowest primitive of each level of a three-level acceleration structure (µLAS, mLAS, nLAS) [S2]. At µLAS, if all vertices of a prism/box fall in the invisible region, traversal terminates because mesostructures and nanostructures on it are also invisible [S2]. If some vertices are invisible (prism cut in half), traversal continues to finer levels where the clipping test is applied more finely [S2]. At mLAS, if all vertices of a molecule's AABB fall in the invisible region, traversal terminates [S2]. At nLAS (atom level), clipping is not applied to ensure accurate representation [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Level 1 is $O(N \cdot C)$ where $N$ is the number of blocks and $C$ is the number of cameras, with a very small constant (sphere-plane test). Level 2 is proportional to the number of resident visible blocks, not the total scene size.
+-*   **Memory/IO:** Reduces SSD/PCIe traffic significantly by only transferring blocks in $\mathcal{K}_t \cap R_t$. The sources note that without this, traffic would scale with $N$ [S1, unofficial].
+-*   **Strengths:** Enables out-of-core rendering of billion-primitive scenes by decoupling culling from rendering and minimizing data movement [S1, unofficial]. Preserves standard 3DGS rendering semantics [S1, unofficial].
+-*   **Limitations:** Level 1 is conservative, potentially transferring more data than strictly necessary if blocks are large relative to visible content. Requires maintaining block metadata on CPU [S1, unofficial].
+-*   **When to use:** Large-scale 3DGS scenes where full scene projection is too expensive and data resides on slower storage (SSD) [S1, unofficial].
++*   **Time Complexity:** Level 1 is $O(N \cdot C)$ where $N$ is the number of blocks and $C$ is the number of cameras, with a very small constant for sphere-plane tests [S1, unofficial]. Level 2 scales with the number of resident visible blocks, not the total scene size [S1, unofficial].
++*   **Memory/IO:** Reduces SSD/PCIe traffic significantly by only transferring blocks in $\mathcal{K}_t \cap R_t$, preventing traffic from scaling with the full model size $N$ [S1, unofficial].
++*   **Strengths:** Enables out-of-core rendering of billion-primitive scenes by decoupling culling from rendering and minimizing data movement [S1, unofficial]. Preserves standard 3DGS rendering and backpropagation semantics [S1, unofficial].
++*   **Limitations:** Level 1 conservatism may transfer more data than strictly necessary if blocks are large relative to visible content [S1, unofficial]. Requires maintaining block metadata on CPU [S1, unofficial].
++*   **When to use:** Large-scale 3DGS scenes where full scene projection is too expensive and data resides on slower storage [S1, unofficial].
+ 
+ ## Background
+-Two-Level Visibility Culling was introduced in TideGS (2026) for scalable training of over one billion 3D Gaussian Splatting primitives via out-of-core optimization [S1, unofficial]. It addresses the bottleneck of SSD/PCIe traffic and CPU/GPU synchronization in large-scale 3DGS training [S1, unofficial]. The method leverages the hierarchical nature of 3DGS storage (blocks) to perform coarse culling on the CPU before engaging the GPU pipeline [S1, unofficial].
++Two-Level Visibility Culling was introduced in TideGS for scalable training of over one billion 3D Gaussian Splatting primitives via out-of-core optimization [S1, unofficial]. It addresses the bottleneck of SSD/PCIe traffic that would otherwise scale with the full model size $N$ [S1, unofficial]. The method leverages the hierarchical nature of 3DGS storage to perform coarse culling on the CPU before engaging the GPU pipeline [S1, unofficial].
+ 
+ ## Sources

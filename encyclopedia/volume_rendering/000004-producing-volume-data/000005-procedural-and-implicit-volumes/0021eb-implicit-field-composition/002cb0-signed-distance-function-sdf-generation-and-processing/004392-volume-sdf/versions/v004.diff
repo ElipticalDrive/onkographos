@@ -1,0 +1,176 @@
+--- v003.md
++++ v004.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A standard volumetric primitive containing scalar values. The method does not support VDB volumes [S1].
+-*   **Output:** A new volume primitive of the same resolution as the input, where the boundary condition is set to SDF [S1].
++*   **Input:** A standard volumetric primitive containing scalar values [S1]. The method does not support VDB volumes [S1].
++*   **Output:** A new volume primitive of the same resolution as the input, where the boundary condition is changed to SDF [S1].
+ 
+ **Data Structures:**
+@@ -17,10 +17,10 @@
+ 1.  **Iso Surface ($I_{iso}$):** The scalar value in $V_{in}$ that defines the zero-level set of the output SDF [S1].
+     *   Typical value: $0.5$ for fog volumes; $0$ for existing SDF sources [S1].
+-2.  **Invert:** A boolean flag. If true, the sign of the output SDF is flipped relative to the original volume values [S1].
+-    *   Default: False (higher input values yield higher output values) [S1].
++2.  **Invert:** A boolean flag that flips the sign of the output SDF relative to the original volume values [S1].
++    *   Default: False, meaning higher input values yield higher output values [S1].
+     *   Use case: For fog volumes, set to True so high-density (white) areas become negative (inside) [S1].
+-3.  **Use Maximum Distance:** A boolean flag. If true, computation stops for voxels beyond a certain distance from the iso-surface [S1].
+-4.  **Maximum Distance ($D_{max}$):** The object-space distance limit. Voxels farther than $D_{max}$ from the iso-surface are clamped to $\pm D_{max}$ [S1].
+-5.  **Rebuild With Fast Iterative Method:** A boolean flag. If true, uses the Fast Iterative Method (FIM); otherwise, uses the Fast Marching Method (FMM) [S1].
++3.  **Use Maximum Distance:** A boolean flag that stops the conversion when a certain distance from the isocontour is reached [S1].
++4.  **Maximum Distance ($D_{max}$):** The object-space distance limit [S1]. Voxels farther than $D_{max}$ from the iso-surface are clamped to $\pm D_{max}$ [S1].
++5.  **Rebuild With Fast Iterative Method:** A boolean flag that selects the Fast Iterative Method (FIM); otherwise, uses the Fast Marching Method (FMM) [S1].
+     *   FIM is faster but less accurate [S1].
+ 6.  **FIM Tolerance ($\tau_{frac}$):** A fraction of the smallest voxel size used as the convergence threshold for FIM [S1].
+@@ -44,5 +44,5 @@
+     *   While the heap is not empty:
+         1.  Pop voxel $u$ with the smallest tentative distance $d_u$ [G].
+-        2.  For each neighbor $v$ of $u$ (6-connected or 26-connected, typically 6 for accuracy) [G]:
++        2.  For each neighbor $v$ of $u$ (6-connected) [G]:
+             1.  If $v$ is already finalized, skip [G].
+             2.  Calculate the distance to $v$ based on the gradient of the input field between $u$ and $v$ [G].
+@@ -55,5 +55,5 @@
+         1.  Create a set of updated voxels $U = \emptyset$ [G].
+         2.  For each voxel $v$ in the active set:
+-            1.  Compute the new distance $d_{new}$ for $v$ based on its neighbors' current distances in $V_{out}$. The update rule approximates the Eikonal equation $|\nabla d| = 1$ using the smallest neighbors [G].
++            1.  Compute the new distance $d_{new}$ for $v$ based on its neighbors' current distances in $V_{out}$ [G].
+             2.  If $|d_{new} - V_{out}[v]| > \tau_{frac} \cdot \Delta x_{min}$, where $\Delta x_{min}$ is the smallest voxel dimension in the volume [S1]:
+                 *   Update $V_{out}[v] = d_{new}$ [G].
+@@ -74,5 +74,5 @@
+ 
+ ```python
+-def volume_sdf(input_grid, iso_surface, invert, use_max_dist, max_dist, 
++def volume_sdf(volume, iso_surface, invert, use_max_dist, max_dist, 
+                use_fim, fim_tolerance_frac, max_fim_iters):
+     """
+@@ -80,5 +80,5 @@
+     
+     Args:
+-        input_grid: 3D list of scalars (D x H x W).
++        volume: 3D list of scalars (D x H x W).
+         iso_surface: Scalar value defining the zero-level set.
+         invert: Boolean, flip signs if True.
+@@ -90,11 +90,14 @@
+         
+     Returns:
+-        output_grid: 3D list of signed distances.
++        sdf_grid: 3D list of signed distances.
+     """
+-    # Get dimensions
+-    D, H, W = len(input_grid), len(input_grid[0]), len(input_grid[0][0])
++    D, H, W = len(volume), len(volume[0]), len(volume[0][0])
++    
++    # Assume uniform voxel size; in practice read from volume primitive metadata [G]
++    dx = 1.0
++    fim_tolerance = fim_tolerance_frac * dx
+     
+     # Initialize output with infinity
+-    output_grid = [[[float('inf')] * W for _ in range(H)] for _ in range(D)]
++    sdf_grid = [[[float('inf')] * W for _ in range(H)] for _ in range(D)]
+     
+     # Find source voxels (iso-surface)
+@@ -104,11 +107,7 @@
+         for h in range(H):
+             for w in range(W):
+-                if abs(input_grid[d][h][w] - iso_surface) < epsilon:
++                if abs(volume[d][h][w] - iso_surface) < epsilon:
+                     source_voxels.append((d, h, w))
+-                    output_grid[d][h][w] = 0.0
+-    
+-    # Voxel size assumption: uniform for simplicity; in practice read from volume primitive metadata [G]
+-    voxel_size = 1.0 
+-    fim_tolerance = fim_tolerance_frac * voxel_size
++                    sdf_grid[d][h][w] = 0.0
+     
+     if use_fim:
+@@ -120,20 +119,18 @@
+             
+             for (d, h, w) in active_voxels:
+-                # Get neighbors
++                # Get valid 6-connected neighbors
+                 neighbors = get_6_neighbors(d, h, w, D, H, W)
+                 
+                 # Compute new distance based on neighbors
+-                # FIM update: d(x) = min_{n in neighbors} (d(n) + dist(x, n))
+-                min_dist = float('inf')
++                min_neighbor_dist = float('inf')
+                 for (nd, nh, nw) in neighbors:
+-                    d_n = output_grid[nd][nh][nw]
+-                    if d_n < min_dist:
+-                        min_dist = d_n
++                    if sdf_grid[nd][nh][nw] < min_neighbor_dist:
++                        min_neighbor_dist = sdf_grid[nd][nh][nw]
+                 
+-                new_dist = min_dist + voxel_size
++                new_dist = min_neighbor_dist + dx
+                 
+-                # Check convergence
+-                if abs(new_dist - output_grid[d][h][w]) > fim_tolerance:
+-                    output_grid[d][h][w] = new_dist
++                # Check convergence against tolerance
++                if abs(new_dist - sdf_grid[d][h][w]) > fim_tolerance:
++                    sdf_grid[d][h][w] = new_dist
+                     updated_voxels.add((d, h, w))
+             
+@@ -165,8 +162,8 @@
+                 if (nd, nh, nw) not in visited:
+                     # Calculate distance to neighbor
+-                    new_dist = dist + voxel_size
++                    new_dist = dist + dx
+                     
+-                    if new_dist < output_grid[nd][nh][nw]:
+-                        output_grid[nd][nh][nw] = new_dist
++                    if new_dist < sdf_grid[nd][nh][nw]:
++                        sdf_grid[nd][nh][nw] = new_dist
+                         heapq.heappush(heap, (new_dist, nd, nh, nw))
+ 
+@@ -176,5 +173,5 @@
+             for h in range(H):
+                 for w in range(W):
+-                    output_grid[d][h][w] = -output_grid[d][h][w]
++                    sdf_grid[d][h][w] = -sdf_grid[d][h][w]
+         
+     # Apply Maximum Distance Clamping
+@@ -183,11 +180,11 @@
+             for h in range(H):
+                 for w in range(W):
+-                    val = output_grid[d][h][w]
++                    val = sdf_grid[d][h][w]
+                     if val > max_dist:
+-                        output_grid[d][h][w] = max_dist
++                        sdf_grid[d][h][w] = max_dist
+                     elif val < -max_dist:
+-                        output_grid[d][h][w] = -max_dist
++                        sdf_grid[d][h][w] = -max_dist
+                         
+-    return output_grid
++    return sdf_grid
+ 
+ def get_6_neighbors(d, h, w, D, H, W):
+@@ -201,21 +198,7 @@
+ ```
+ 
+-## Subtopics
+-
+-### SDF to Density Conversion
+-Converts an SDF back into a density volume, typically for rendering or fluid simulation. It is the inverse operation of creating an SDF from a density field. Choose this when you need to render an SDF as a volumetric cloud or fog. [SDF to Density Conversion](1282-sdf-to-density-conversion.md)
+-
+-### Constrained Jacobi Smoothing for SDFs
+-Smooths an SDF while preserving the distance property. Use this when the SDF has noise or artifacts but must remain a valid distance field. [Constrained Jacobi Smoothing for SDFs](1583-constrained-jacobi-smoothing-for-sdfs.md)
+-
+-### SDF Volume Generation & Ping-Pong Buffering
+-Generates SDFs using ping-pong buffering techniques, often for iterative or multi-pass generation. Choose this for high-performance GPU-based SDF generation or when integrating with specific rendering pipelines. [SDF Volume Generation & Ping-Pong Buffering](4570-sdf-volume-generation-ping-pong-buffering.md)
+-
+-### Script-to-Shader SDF Preprocessor
+-Preprocesses SDF scripts for shader execution. Use this when deploying SDFs to real-time shaders. [Script-to-Shader SDF Preprocessor](6349-script-to-shader-sdf-preprocessor.md)
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources. The Fast Iterative Method (FIM) is noted as generally faster than the Fast Marching Method (FMM) in practice, but convergence depends on the tolerance and bandwidth [S1].
+-*   **Memory Complexity:** Not given in the sources. The method stores the output volume and auxiliary data structures such as a heap or active set [G].
++*   **Time Complexity:** Not given in the sources [S1]. The Fast Iterative Method (FIM) is noted as generally faster than the Fast Marching Method (FMM) in practice, but convergence depends on the tolerance and bandwidth [S1].
++*   **Memory Complexity:** Not given in the sources [S1]. The method stores the output volume and auxiliary data structures such as a heap or active set [G].
+ *   **Measured Performance:** FIM is noted as "generally faster" than FMM, but "not as accurate" [S1].
+ *   **Strengths:**

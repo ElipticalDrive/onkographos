@@ -1,0 +1,113 @@
+--- v005.md
++++ v006.md
+@@ -1,76 +1,57 @@
+ # Scene Representation and Geometry Constraints
+ 
++Also called: Geometry-aware Gaussian Optimization, Surface-constrained 3DGS
+ 
+ ## Overview
+-This family defines the fundamental data structures and geometric constraints used to represent scenes and guide optimization in 3D Gaussian Splatting (3DGS) and its variants. It addresses the problem of converting soft, volumetric Gaussian primitives into structured geometric representations (such as meshes or normals) and enforcing physical or structural consistency during training. It sets itself apart from sibling methods like [Sorting and Rendering Pipeline Optimization](12180-sorting-and-rendering-pipeline-optimization.md) by focusing on the semantic and geometric validity of the primitives rather than rendering speed, and from [Appearance and Physical Modeling](15766-appearance-and-physical-modeling.md) by prioritizing surface alignment and structural constraints over radiance synthesis.
++This family defines how the discrete set of 3D Gaussian primitives is constrained or regularized to align with underlying scene geometry, ensuring that the volumetric representation accurately reflects physical surfaces rather than floating artifacts. It solves the problem of "flying pixels" and geometric inconsistency in standard 3D Gaussian Splatting (3DGS) by introducing explicit geometric priors, such as mesh alignment, normal consistency, and depth distribution constraints. It sets itself apart from [Gaussian Representation and Truncation](12855-gaussian-representation-and-truncation.md) by focusing on the *optimization objectives* and *geometric priors* applied to the primitives, rather than the primitive definition itself, and from [Mesh Extraction and Representation](14095-mesh-extraction-and-representation.md) by performing geometry-aware optimization *during* training rather than extracting geometry *after* training.
+ 
+ ## Shared principles
+-All methods in this family operate on a set of $N$ 3D Gaussian primitives. Each primitive $i$ is defined by learnable parameters describing its geometry, appearance, and position.
++All methods in this family operate on the standard 3D Gaussian Splatting representation, where the scene is defined by a set of $N$ 3D Gaussians $\{G_i\}_{i=1}^N$. Each Gaussian $G_i$ is defined by its mean $\boldsymbol{\mu}_i$, covariance matrix $\boldsymbol{\Sigma}_i$ (derived from rotation $\mathbf{R}_i$ and scale $\mathbf{S}_i$), opacity $\alpha_i$, and view-dependent color $\mathbf{c}_i(\omega)$.
+ 
+-**Data Structure:**
+-Each Gaussian $g_i$ is represented by the following attributes [S1]:
+-*   **Position ($\mu_i$):** A 3D vector $\mathbb{R}^3$ representing the centroid in world space.
+-*   **Rotation ($q_i$):** A unit quaternion $\mathbb{R}^4$ representing orientation.
+-*   **Scale ($s_i$):** A 3D vector $\mathbb{R}^3$ representing anisotropic scaling factors along principal axes.
+-*   **Opacity ($\omega_i$):** A scalar $\mathbb{R} \in [0, 1]$ representing maximum opacity.
+-*   **Color ($c_i$):** Represented by Spherical Harmonic (SH) coefficients (typically degree 3, 48 coefficients for RGB) for view-dependent appearance.
++The rendering process evaluates the Gaussian density along a ray $\mathbf{r}(t) = \mathbf{o} + t\omega$ and integrates contributions. The Gaussian density function is:
++$$ G(\mathbf{x}) = \exp\left(-\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu})^\top \boldsymbol{\Sigma}^{-1} (\mathbf{x} - \boldsymbol{\mu})\right) $$
+ 
+-**Covariance Matrix:**
+-The spatial spread is defined by a 3D covariance matrix $\Sigma_i$, constructed from scale and rotation:
+-$$ \Sigma_i = R_i S_i S_i^T R_i^T $$
+-where $S_i = \text{diag}(s_i)$ is the scaling matrix and $R_i$ is the rotation matrix derived from $q_i$ [S1].
+-
+-**Projection to 2D:**
+-During rendering, the 3D covariance $\Sigma_i$ is projected to the 2D image plane using the Jacobian $J$ of the affine approximation of the projective transformation:
+-$$ \Sigma' = J \Sigma_i J^T $$
+-The relevant part for rasterization is the top-left $2 \times 2$ submatrix $\Sigma'_{2 \times 2}$ [S1].
+-
+-**Spatial Response (Kernel Function):**
+-The contribution of a Gaussian to a pixel at screen coordinates $x$ is determined by:
+-$$ R(x) = \exp\left(-\frac{1}{2} (x - \mu')^T (\Sigma'_{2 \times 2})^{-1} (x - \mu')\right) $$
+-where $\mu'$ is the projected 2D mean [S1].
+-
+-**Alpha Compositing:**
+-The final opacity $\alpha$ contributed by a Gaussian is:
+-$$ \alpha = \omega_i \cdot R(x) $$
+-The pixel color is computed via alpha blending with primitives sorted back-to-front:
+-$$ C_{pixel} = \sum_i T_i \alpha_i C_i, \quad T_i = \prod_{j < i} (1 - \alpha_j) $$
+-where $C_i$ is evaluated using SH coefficients based on view direction [S1].
+-
+-**Truncation:**
+-To optimize speed, fragments are discarded if $\alpha < \tau_\alpha$ (typically $1/255$), limiting rendering to a region of approximately $3.33\sigma$ [S1].
+-
+-**Density Estimation for Mesh Extraction:**
+-The scene density $\sigma(\mathbf{x})$ is the superposition of Gaussian contributions:
+-$$ \sigma(\mathbf{x}) = \sum_{i=1}^{N} \alpha_i \exp\left(-\frac{1}{2} (\mathbf{x} - \mathbf{p}_i)^T \Sigma_i^{-1} (\mathbf{x} - \mathbf{p}_i)\right) $$
+-where $\alpha_i$ is opacity, $\mathbf{p}_i$ is the mean, and $\Sigma_i$ is the covariance [S1].
++The core variation across methods lies in the definition, storage, and optimization of $\mathbf{c}_i(\omega)$ and potentially $\alpha_i$, moving beyond the fixed SH coefficients used in base 3DGS. Common strategies include:
++1.  **Post-Processing Transformation:** Applying a learned affine transformation to the rendered image based on 3D position and view embedding [14740-color-and-appearance-modeling.md].
++2.  **Factorized Illumination:** Separating scene lighting (via a tensor grid) from material properties (via BRDF features) to model specular effects [14740-color-and-appearance-modeling.md].
++3.  **Image-Conditioned Modulation:** Using an MLP and per-image embeddings to modulate Gaussian color and opacity, enabling transient object removal and appearance synthesis [14740-color-and-appearance-modeling.md].
++4.  **Neural Field Substitution:** Replacing per-Gaussian SH with a shared grid-based neural field to reduce parameters and improve generalization [14740-color-and-appearance-modeling.md].
++5.  **Volumetric Attenuation:** Modifying the alpha-blending equation to incorporate medium properties, such as direct attenuation $B_d$ and backscatter parameters $B_\infty, B_b$, to model light transport in non-vacuum media [15148-physics-and-optical-modeling.md].
+ 
+ ## Subtopics
+ 
+ ### [Gaussian Representation and Truncation](12855-gaussian-representation-and-truncation.md)
+-Defines the fundamental data structure and rendering primitives, including the covariance matrix construction and truncation logic for speed optimization.
++Defines the fundamental data structure and rendering primitives. It specifies how a scene is represented as a set of $N$ learnable 3D Gaussians, detailing the parameters (position, rotation, scale, opacity, color), the construction of the covariance matrix, and the projection to 2D for rasterization. It also defines the standard truncation logic used to optimize rendering speed by discarding fragments with negligible contribution. This representation serves as the foundation for all sibling methods in the [Scene Representation and Geometry Constraints](15421-scene-representation-and-geometry-constraints.md) family and the child methods listed below.
+ 
+ ### [Mesh Extraction and Representation](14095-mesh-extraction-and-representation.md)
+-Converts the volumetric Gaussian representation into explicit geometric structures like triangular meshes or point clouds for compatibility with standard 3D graphics pipelines.
++Converts the volumetric, implicit representation of 3D Gaussian Splatting (3DGS) into explicit geometric structures, primarily triangular meshes or point clouds, to enable compatibility with standard 3D graphics pipelines, editing tools, and animation systems. Unlike standard 3DGS, which renders via alpha-composited splats, these methods extract a discrete surface or point set that approximates the scene geometry. [SuGaR Mesh Extraction](12580-sugar-mesh-extraction.md) achieves this by regularizing Gaussians to align with the surface during training, while [3D Gaussian Splatting to Point Cloud](14068-3d-gaussian-splatting-to-point-cloud.md) samples points from the Gaussian distribution post-training.
+ 
+ ### [Appearance and Physical Modeling](15766-appearance-and-physical-modeling.md)
+-Extends the representation to handle complex lighting, material properties, and non-vacuum media by modifying radiance and opacity computation beyond fixed SH coefficients.
++Extends the standard 3D Gaussian Splatting (3DGS) representation to handle complex lighting, material properties, and non-vacuum media. It solves the limitations of base 3DGS, where view-dependent color is stored as fixed Spherical Harmonics (SH) coefficients, by introducing dynamic mechanisms to compute or modulate outgoing radiance and opacity. This family sets itself apart from sibling methods like [Gaussian Representation and Truncation](12855-gaussian-representation-and-truncation.md) by focusing on appearance synthesis and material-light interaction rather than primitive management, and from [Physics and Optical Modeling](15148-physics-and-optical-modeling.md) by distinguishing between appearance synthesis in clear space and volumetric light transport in participating media.
+ 
+-#### Model-based depth estimation for volume parameter update
+-*   **Step:** During optimization, use Eq. (6) to extract depth values $z$ from the current scene estimate. These depth values are then used to update the medium-parameter estimates ($B_\infty, B_b$) [S1].
+-*   **Formula:** Depth extraction from 3DGS: $z = \frac{\sum_{i=1}^M d_i \alpha_i T_i}{\sum_{i=1}^M \alpha_i T_i}$. Here $d_i$ is the depth of Gaussian $i$. This is computed at each pixel during rendering [S1].
++### Model-based depth estimation for volume parameter update
++- **Definition:** A method to update medium parameters (e.g., underwater scattering coefficients) by extracting depth estimates from the current Gaussian scene representation during optimization.
++- **Step:** During optimization, use the weighted average of Gaussian depths to extract depth values $z$ from the current scene estimate. These depth values are then used to update the medium-parameter estimates ($B_\infty, B_b$) [S1].
++- **Formula:** Depth extraction from 3DGS is computed at each pixel during rendering as [S1]:
++  $$ z = \frac{\sum_{i=1}^M d_i \alpha_i T_i}{\sum_{i=1}^M \alpha_i T_i} $$
++  where $d_i$ is the depth of Gaussian $i$, $\alpha_i$ is its opacity, and $T_i = \prod_{j < i} (1 - \alpha_j)$ is the transmittance.
+ 
+-#### Scale Constrained by Mesh Geometry
+-*   **Definition:** A constraint to prevent discrepancies between Gaussian Splat scales and the scales of corresponding triangular mesh faces by bounding the relative scale coefficients [S2].
+-*   **Formula:** $s = s_{rel} \odot s_0$, where $s$ is the final scale, $s_{rel} = (s_{rel,1}, s_{rel,2}) \in [s_{min}, s_{max}] \times [s_{min}, s_{max}]$ is the coefficient vector, $s_0$ is the predefined scale derived from the mesh faces, and $\odot$ denotes element-wise multiplication [S2].
+-*   **Parameter:** $s_{min}, s_{max}$: The lower and upper bounds for the relative scale coefficients $s_{rel}$ [S2].
++### Scale Constrained by Mesh Geometry
++- **Definition:** A constraint to prevent discrepancies between Gaussian Splat scales and the scales of corresponding triangular mesh faces by bounding the relative scale coefficients [S2].
++- **Formula:** The scale $s$ is parameterized as [S2]:
++  $$ s = s_{rel} \odot s_0 $$
++  where $s_{rel} = (s_{rel,1}, s_{rel,2}) \in [s_{min}, s_{max}] \times [s_{min}, s_{max}]$ is the learnable coefficient vector, $s_0$ is the predefined scale derived from the mesh faces, and $\odot$ denotes element-wise multiplication.
++- **Parameter:** $s_{min}, s_{max}$: The lower and upper bounds for the relative scale coefficients $s_{rel}$ [S2].
+ 
+-#### Normal Estimation via Back-propagation
+-*   **Definition:** A method to solve for the normal attribute $n$ for each 3D Gaussian by optimizing it from an initial random vector via back-propagation, perceiving the depth of all Gaussians along a ray as a distribution [S3].
+-*   **Step:** Determine the normal for each pixel by estimating the expectation of the depth distribution along the ray [S3].
+-*   **Formula:** Normal consistency loss: $\mathcal {L}_{n}=\|\mathcal {N}-\tilde {\mathcal {N}}\|_2$ [S3].
++### Normal Estimation via Back-propagation
++- **Definition:** A method to solve for the normal attribute $n$ for each 3D Gaussian by optimizing it from an initial random vector via back-propagation, perceiving the depth of all Gaussians along a ray as a distribution [S3].
++- **Step:** Determine the normal for each pixel by estimating the expectation of the depth distribution along the ray. The rendered normal $\mathcal{N}$ and depth $\mathcal{D}$ are computed as weighted sums of Gaussian properties [S3]:
++  $$ \{\mathcal{D}, \mathcal{N}\} = \sum_{i \in N} w_i \{d_i, \boldsymbol{n}_i\} $$
++  where $w_i = T_i \alpha_i / \sum_{j \in N} T_j \alpha_j$ is the weight, $d_i$ is the depth, and $\boldsymbol{n}_i$ is the normal of Gaussian $i$.
++- **Formula:** Normal consistency is enforced by minimizing the difference between the rendered normal $\mathcal{N}$ and a pseudo-normal $\tilde{\mathcal{N}}$ computed from the rendered depth under a local planarity assumption [S3]:
++  $$ \mathcal{L}_{n}=\|\mathcal{N}-\tilde {\mathcal{N}}\|_2 $$
+ 
+ ## Background
+-The standard 3D Gaussian Splatting representation was introduced by Kerbl et al. in 2023 [G]. Subsequent work has focused on extracting explicit geometry from these soft primitives. Mesh extraction techniques like SuGaR regularize Gaussians to align with surfaces during training [G]. Normal estimation methods optimize normals via back-propagation to enforce surface consistency [S3]. Depth-based parameter updates for volumetric rendering were explored in underwater reconstruction contexts [S1]. Scale constraints derived from mesh geometry have been proposed to maintain structural fidelity in joint optimization frameworks [S2].
++The standard 3D Gaussian Splatting representation [G] is inherently volumetric and does not explicitly enforce surface constraints, often leading to geometric inaccuracies such as floating artifacts or inconsistent normals. Early work in differentiable rendering and inverse graphics established the need for geometric priors to stabilize optimization and improve reconstruction fidelity. The integration of mesh constraints [S2] and normal consistency losses [S3] emerged as methods to bridge the gap between implicit volumetric splats and explicit surface representations. The use of depth estimation for volumetric parameter updates [S1] extends these geometric constraints to participating media, allowing for physically accurate rendering in non-vacuum environments.
+ 
+ ## Sources

@@ -1,0 +1,130 @@
+--- v002.md
++++ v003.md
+@@ -17,5 +17,5 @@
+ 
+ **Data Structures:**
+-- **Local Plane Points:** A set of 3D points $\mathcal{P}_q$ centered at $q$ on the tangent plane defined by normal $n_q$. For a $k \times k$ patch, this contains $k^2$ points [S1].
++- **Local Plane Points:** A set of 2D coordinates $\mathcal{P}_q$ centered at $q$ on the tangent plane defined by normal $n_q$, representing a $k \times k$ grid [S1].
+ - **Homography Matrix $H$:** A $3 \times 3$ matrix mapping points from the rendered view $I_r$ to input view $I_i$ [S1].
+ 
+@@ -38,9 +38,9 @@
+     [S1]
+ 
+-4.  **Project and Interpolate Colors:** Apply the homography $H$ to the set of points $\mathcal{P}_q$ to obtain their projected pixel locations in view $I_i$ [S1]. For each point in $\mathcal{P}_q$, obtain its color by interpolation on the input image $I_i$ [S1]. Specifically, for the center point $q$, the projected pixel location $H_q$ is obtained by the matrix product of $H$ and $q$ (in homogeneous coordinates), and its color is interpolated [S1].
++4.  **Project and Interpolate Colors:** Apply the homography $H$ to the set of points $\mathcal{P}_q$ to obtain their projected pixel locations in view $I_i$ [S1]. For each point in $\mathcal{P}_q$, obtain its color by interpolation on the input image $I_i$ [S1]. Specifically, for the center point $q$, the projected pixel location $H_q$ on the view $I_i$ is obtained by the matrix product of $H$ and $q$ (in homogeneous coordinates), and its color is interpolated [S1].
+ 
+ 5.  **Assign Blending Weights:** Assign the same blending weights $w_i$ to all points on the local plane $\mathcal{P}_q$ [S1]. This requires only one query of the blending weights for the entire patch [S1].
+ 
+-6.  **Blend Patch Colors:** Blend the patch colors interpolated from each of the $N-1$ input views $\{I_i\}_{i=0}^{N-1}$ using the blending weights $w_i$ to obtain the final patch colors for point $q$ [S1]. Let $C_i(p)$ be the color of point $p \in \mathcal{P}_q$ in view $I_i$. The blended color for point $p$ is:
++6.  **Blend Patch Colors:** Blend the patch colors interpolated from each of the $N-1$ input views $\{I_i\}_{i=0}^{N-1}$ using the blending weights $w_i$ to obtain the final patch colors for point $q$ [S1]. Let $C_i(p)$ be the color of point $p \in \mathcal{P}_q$ in view $I_i$ [S1]. The blended color for point $p$ is:
+     $$ C_{patch}(p) = \sum_{i=0}^{N-1} w_i C_i(p) $$
+     [S1]
+@@ -53,45 +53,35 @@
+ import numpy as np
+ 
+-def generate_local_plane_points(q, n_q, k):
+-    """Generate k x k grid of points on the tangent plane at q with normal n_q."""
+-    # Construct two orthogonal basis vectors u, v perpendicular to n_q [G]
+-    if abs(n_q[2]) < 0.9:
+-        u = np.cross(n_q, [0, 0, 1])
+-    else:
+-        u = np.cross(n_q, [1, 0, 0])
+-    u = u / np.linalg.norm(u)
+-    v = np.cross(n_q, u)
+-    v = v / np.linalg.norm(v)
+-    
+-    offsets = np.zeros((k * k, 3))
++def generate_patch_grid(q_2d, k):
++    """Generate k x k grid of 2D homogeneous coordinates centered at q_2d."""
+     half = (k - 1) / 2.0
+-    step = 1.0 / k  # Normalized patch scale [G]
+-    idx = 0
++    grid = []
+     for dy in range(k):
+         for dx in range(k):
+-            offsets[idx] = q + (dx - half) * step * u + (dy - half) * step * v
+-            idx += 1
+-    return offsets
++            x = q_2d[0] + (dx - half)
++            y = q_2d[1] + (dy - half)
++            grid.append([x, y, 1.0])
++    return np.array(grid)
+ 
+-def apply_homography(H, points):
+-    """Project 3D points to 2D pixel coordinates using homography H."""
+-    ones = np.ones((points.shape[0], 1))
+-    pts_h = np.hstack([points, ones])
+-    proj = pts_h @ H.T
+-    proj = proj[:, :2] / proj[:, 2:3]
+-    return proj
++def compute_homography(K, R_i, t_i, n_q, q_3d, R_r, t_r):
++    """Compute plane-induced homography H from rendered view I_r to input view I_i."""
++    denom = np.dot(n_q, q_3d + R_r.T @ t_r)
++    # t_i is (3,), n_q^T R_r^T is (3,). Outer product gives (3,3) matrix.
++    num_term = np.outer(t_i, n_q @ R_r.T)
++    inner_matrix = R_i + num_term / denom
++    H = K @ inner_matrix @ np.linalg.inv(K)
++    return H
+ 
+ def interpolate_colors(image, projected_points):
+-    """Bilinear interpolation of image at projected_points (N, 2)."""
++    """Nearest-neighbor interpolation of image at projected_points (N, 2)."""
+     h, w, _ = image.shape
+-    ys = np.clip(projected_points[:, 0], 0, h - 1)
+-    xs = np.clip(projected_points[:, 1], 0, w - 1)
+-    # Nearest-neighbor fallback for simplicity [G]
+-    colors = image[ys.astype(int), xs.astype(int)]
+-    return colors
++    ys = np.clip(projected_points[:, 0], 0, h - 1).astype(int)
++    xs = np.clip(projected_points[:, 1], 0, w - 1).astype(int)
++    return image[ys, xs]
+ 
+-def patch_based_color_blending(q, n_q, K, poses, images, weights, k, R_r, t_r):
++def patch_based_color_blending(q_3d, q_2d, n_q, K, poses, images, weights, k, R_r, t_r):
+     """
+-    q: 3D point on the ray
++    q_3d: 3D point on the ray
++    q_2d: 2D projection of q_3d in rendered view I_r (homogeneous)
+     n_q: Normal vector at q
+     K: Intrinsic matrix (3x3)
+@@ -102,17 +92,15 @@
+     R_r, t_r: Pose of the rendered view I_r
+     """
+-    patch_points = generate_local_plane_points(q, n_q, k)
++    patch_points = generate_patch_grid(q_2d, k)
+     blended_patch_colors = np.zeros((k * k, 3))
+ 
+     for i, (R_i, t_i) in enumerate(poses):
+         # Step 3: Compute Homography H
+-        denom = np.dot(n_q, q + R_r.T @ t_r)
+-        num_term = t_i @ (n_q.T @ R_r.T)
+-        inner_matrix = R_i + num_term / denom
+-        H = K @ inner_matrix @ np.linalg.inv(K)
++        H = compute_homography(K, R_i, t_i, n_q, q_3d, R_r, t_r)
+ 
+         # Step 4: Project and Interpolate Colors
+-        projected = apply_homography(H, patch_points)
+-        colors_i = interpolate_colors(images[i], projected)
++        projected = patch_points @ H.T
++        projected_2d = projected[:, :2] / projected[:, 2:3]
++        colors_i = interpolate_colors(images[i], projected_2d)
+ 
+         # Step 5 & 6: Assign Weights and Blend Patch Colors
+@@ -126,13 +114,13 @@
+ 
+ **Edge Cases and Pitfalls:**
+-Not given in the sources.
++Not given in the sources. [S1]
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
++- **Time Complexity:** Not given in the sources. [S1]
++- **Memory Complexity:** Not given in the sources. [S1]
+ - **Strengths:** Produces more reliable color predictions in regions with weak texture or changing intensity by leveraging contextual information [S1]. Enforces better geometric consistency [S1].
+ - **Limitations:** Computationally more expensive than pixel-based blending due to processing $k^2$ points per sample and computing homographies for each view [S1].
+ - **When to Use:** When high-quality color synthesis is needed in textureless or low-texture regions [S1].
+-- **When Not to Use:** Not given in the sources.
++- **When Not to Use:** Not given in the sources. [S1]
+ 
+ ## Background

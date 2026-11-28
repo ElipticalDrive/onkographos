@@ -1,0 +1,183 @@
+# View-Dependent Preprocessing
+
+Also called: Adaptive Rendering Preprocessing, Hypergraph-based Preprocessing, Screen Cell Partitioning
+
+## Overview
+View-Dependent Preprocessing is a parallel volume rendering technique that optimizes workload distribution and data access by dynamically partitioning the screen and volume clusters based on the current view. It solves the problem of inefficient load balancing in image-space parallel rendering by creating a hypergraph that models the intersection between data clusters and screen regions, then partitioning this graph to assign rendering tasks. It is distinguished from its sibling [24-Region View-Dependent Visibility Preprocessing](6608-24-region-view-dependent-visibility-preprocessing.md) by its explicit use of hypergraph partitioning tools (PaToIl) and a two-phase or one-phase remapping model to handle cluster migration, whereas the sibling focuses on directional decomposition for voxel extraction.
+
+## How it works
+The method operates in a distributed memory environment where multiple processors contribute to the final image. It consists of two main phases: data preparation (adaptive rendering and lighting) and parallel workload mapping (hypergraph creation and partitioning).
+
+### Inputs and Outputs
+*   **Inputs**: Volume data (potentially time-varying), current camera parameters, image resolution, data resolution, user-specified limits for projection density.
+*   **Outputs**: A mapping of volume clusters to rendering processors, preprocessed data blocks (quantized, gradient-enhanced), and the final rendered image after compositing.
+
+### Data Structures
+1.  **Screen Grid**: A $g \times g$ grid imposed on the screen, where $g$ is the granularity. Each cell represents a region with associated rendering load.
+2.  **Local Hypergraph**: An intermediate data structure constructed by each processor. It records intersections between the processor's local volume clusters and the screen cells. Vertices represent clusters and screen cells; hyperedges represent the connectivity (intersection) between them.
+3.  **Global Hypergraph**: The union of all local hypergraphs, constructed via an all-to-all communication step. It includes special processor vertices for the remapping model.
+4.  **Cluster Migration List**: A list of clusters that need to be moved to different processors based on the partitioning result.
+
+### Steps
+
+1.  **Data Preparation (Per Processor)**
+    Each rendering processor prepares its local data subset. This includes:
+    *   **Quantization**: Converting data from 32-bit to 8-bit precision [S2].
+    *   **Gradient Calculation**: Using central differencing to derive gradient vectors for lighting [S2].
+    *   **Temporal Enhancement**: Using one-side differencing to derive rates of change for temporal domain enhancement (optional) [S2].
+    *   **Octree Level Selection**: Choosing the appropriate octree level based on image resolution, data resolution, and a user-specified limit on the number of elements projected per pixel [S2].
+
+2.  **Workload Calculation and Grid Imposition**
+    *   Calculate the projection area $A$ of the volume on the screen.
+    *   Determine the total number of screen cells $C$ (typically 400–500) [S1, unofficial].
+    *   Calculate the grid granularity $g$ (pixels per screen cell side) using the formula:
+        $$ g = \sqrt{ \frac{ -2 + \sqrt{ (C - 1) A - 2C\sqrt{A} + 2C } }{ A } } $$
+        where $A$ is the projection area and $C$ is the total number of screen cells [S1, unofficial].
+    *   Impose a $g \times g$ grid on the screen.
+
+3.  **Local Hypergraph Creation**
+    *   Each processor constructs a local hypergraph by recording intersections between its local volume clusters and the screen cells [S1, unofficial].
+    *   Data structures track connectivity between clusters and screen cells.
+
+4.  **Global Hypergraph Creation**
+    *   Perform an all-to-all communication where each processor sends its local hypergraph to all other processors [S1, unofficial].
+    *   Construct the global hypergraph from the received data.
+    *   Discard screen cells with no rendering load [S1, unofficial].
+    *   Add special processor vertices necessary for the remapping model (one-phase or two-phase) [S1, unofficial].
+
+5.  **Hypergraph Partitioning**
+    *   Each processor executes the PaToIl hypergraph partitioning tool sequentially on the global hypergraph [S1, unofficial].
+    *   **Two-Phase Model**: The resulting partition is input to a graph bipartitioning code to calculate cluster-processor mappings [S1, unofficial].
+    *   **One-Phase Model**: The mapping is calculated directly by checking the special vertex locations in the partition returned by PaToIl [S1, unofficial].
+    *   Apply a limit on the number of clusters a processor can hold during mapping [S1, unofficial].
+
+6.  **Cluster Migration**
+    *   Clusters mapped to a different processor than their current location are sent to their assigned processors using blocking send and receive operations [S1, unofficial][S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def view_dependent_preprocessing(volume_data, camera_params, image_res, data_res, user_limit, num_processors):
+    """
+    Performs view-dependent preprocessing for parallel volume rendering.
+    
+    Args:
+        volume_data: The volume dataset (potentially distributed).
+        camera_params: Current camera position and orientation.
+        image_res: (width, height) of the output image.
+        data_res: Resolution of the volume data.
+        user_limit: Max elements projected per pixel for adaptive rendering.
+        num_processors: Total number of rendering processors.
+        
+    Returns:
+        processor_mapping: Dict mapping cluster_id to processor_id.
+        migrated_data: Data blocks migrated to this processor.
+        preprocessed_data: Local data prepared for rendering.
+    """
+    # Step 1: Data Preparation
+    # Quantize data
+    data_8bit = quantize_32_to_8(volume_data)
+    
+    # Calculate gradients for lighting
+    gradients = central_differencing(data_8bit)
+    
+    # Optional: Temporal enhancement
+    temporal_rates = one_side_differencing(data_8bit)
+    
+    # Adaptive Octree Level Selection
+    octree_level = select_octree_level(image_res, data_res, user_limit)
+    adaptive_data = downsample_to_octree_level(data_8bit, octree_level)
+    
+    # Step 2: Workload Calculation
+    # Calculate projection area A of the volume on the screen
+    A = calculate_projection_area(adaptive_data, camera_params, image_res)
+    
+    # Total screen cell count C (empirical range 400-500)
+    C = 450  # Example value within empirical range
+    
+    # Calculate grid granularity g
+    # Formula: g = sqrt( (-2 + sqrt((C - 1) * A - 2*C*sqrt(A) + 2*C)) / A )
+    inner_sqrt = (C - 1) * A - 2 * C * math.sqrt(A) + 2 * C
+    if inner_sqrt < 0:
+        raise ValueError("Invalid projection area or cell count for grid calculation")
+    g = math.sqrt((-2 + math.sqrt(inner_sqrt)) / A)
+    
+    # Impose g x g grid on screen
+    screen_cells = create_screen_grid(image_res, g)
+    
+    # Step 3: Local Hypergraph Creation
+    # Each processor has a subset of clusters
+    local_clusters = get_local_clusters(volume_data)
+    local_hypergraph = create_local_hypergraph(local_clusters, screen_cells)
+    
+    # Step 4: Global Hypergraph Creation
+    # All-to-all exchange of local hypergraphs
+    all_local_hypergraphs = all_to_all_exchange(local_hypergraph, num_processors)
+    
+    global_hypergraph = merge_hypergraphs(all_local_hypergraphs)
+    
+    # Discard empty screen cells
+    global_hypergraph = remove_empty_screen_cells(global_hypergraph)
+    
+    # Add special processor vertices for remapping model
+    global_hypergraph = add_processor_vertices(global_hypergraph, num_processors)
+    
+    # Step 5: Hypergraph Partitioning
+    # Execute PaToIl sequentially on each processor
+    partition_result = patoIl_partition(global_hypergraph)
+    
+    # Determine mapping based on model
+    if model == "two_phase":
+        processor_mapping = bipartition_clusters(partition_result)
+    elif model == "one_phase":
+        processor_mapping = calculate_mapping_from_special_vertices(partition_result)
+    else:
+        raise ValueError("Unknown remapping model")
+    
+    # Apply limit on clusters per processor
+    processor_mapping = enforce_cluster_limit(processor_mapping, max_clusters_per_proc)
+    
+    # Step 6: Cluster Migration
+    # Identify clusters that need to move
+    clusters_to_send = {}
+    clusters_to_receive = {}
+    
+    for cluster_id, target_proc in processor_mapping.items():
+        if target_proc != current_processor_id:
+            if target_proc not in clusters_to_send:
+                clusters_to_send[target_proc] = []
+            clusters_to_send[target_proc].append(cluster_id)
+        else:
+            if current_processor_id not in clusters_to_receive:
+                clusters_to_receive[current_processor_id] = []
+            clusters_to_receive[current_processor_id].append(cluster_id)
+            
+    # Perform blocking send/receive
+    migrated_data = receive_clusters(clusters_to_receive.get(current_processor_id, []))
+    send_clusters(clusters_to_send)
+    
+    return processor_mapping, migrated_data, (adaptive_data, gradients, temporal_rates)
+```
+
+### Parameters and Edge Cases
+*   **Grid Granularity ($g$)**: Calculated dynamically. If $A$ is very small or zero, the formula may fail; guard against division by zero or negative inner square root [S1, unofficial].
+*   **Screen Cell Count ($C$)**: Empirically determined to be between 400 and 500 [S1, unofficial].
+*   **Quantization**: 32-bit to 8-bit conversion [S2].
+*   **Octree Level**: Determined by image resolution, data resolution, and user limit [S2].
+*   **Remapping Model**: Two-phase (requires bipartitioning code) or one-phase (direct mapping from special vertices) [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: The preprocessing phase is repeated for every visualization instance. The hypergraph partitioning step (PaToIl) is sequential on each processor, which can be a bottleneck if the hypergraph is large. The all-to-all communication for global hypergraph creation is $O(P^2)$ in terms of message volume, where $P$ is the number of processors [S1, unofficial].
+*   **Memory Complexity**: Requires storing local and global hypergraphs. The global hypergraph size depends on the number of clusters and screen cells.
+*   **Performance**: The preprocessing cost is described as "very small and thus negligible" in some contexts when overlapping with data transport [S2]. However, the efficiency depends on the correct granularity $g$ [S1, unofficial].
+*   **Strengths**: Optimizes load distribution dynamically based on view. Reduces interframe delay by overlapping preprocessing with data transport [S2]. Adaptive rendering can significantly cut rendering cost [S2].
+*   **Limitations**: Requires all-to-all communication, which may not scale well on large processor counts without efficient network topology support [S2]. The sequential nature of PaToIl execution on each processor may limit speedup [S1, unofficial].
+
+## Background
+The method was developed in the context of parallel volume rendering, specifically for image-space parallelism. It was described in a thesis/report by [S1, unofficial] and in a paper by [S2] focusing on I/O strategies for large time-varying volume data. The approach combines adaptive rendering (octree level selection) with hypergraph partitioning for load balancing.
+
+## Sources
+[S1] A hypergraph-partitioning based remapping model for image-space parallel volume rendering, http://hdl.handle.net/11693/18191, fetched 2026-10-26 (unofficial)
+[S2] I/O Strategies for Parallel Rendering of Large Time-Varying Volume Data, https://doi.org/10.2312/egpgv/egpgv04/031-040, fetched 2026-10-26

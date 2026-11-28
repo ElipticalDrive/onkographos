@@ -1,0 +1,80 @@
+# Evenly Spaced Sampling with Preprocessed Rays and Depth Indicators
+
+Also called: Depth Indicator Sampling, Preprocessed Ray Structure Sampling
+
+## Overview
+This method ensures even spacing along rays within a voxel cell by using preprocessed ray data and a 4-bit depth-sampling indicator stored in the pixel opacity [S1]. It solves the problem of efficiently computing sampling coordinates for trilinear interpolation and evaluating the Riemann sum in front-to-back order [S1]. It differs from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by relying on a shared set of preprocessed rays and a stateful depth indicator to maintain sampling continuity across cells [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A `RAY` structure containing entry coordinates (`xyz`) and a precomputed `Length` parameter representing the maximum number of Unit Translation Vectors (UTVs) that fit within the cell [S1]. A `PIXEL` structure containing a `density` field [S1]. An integer `sampling_rate` in the range $[1, 16]$ [S1].
+*   **Output:** Updated `PIXEL.density` with accumulated luminance/density and the updated depth indicator [S1].
+
+**Data Structures:**
+1.  **Preprocessed Ray Structure:** Stores 3 entry coordinates ($x, y, z$) as 16-bit unsigned integers representing values in the range $[0, 1]$, plus an additional `ray.Length` parameter representing the maximum number of UTVs that can be added to the entry point before exiting the cell [S1].
+2.  **Pixel Structure:** Contains a `density` field [S1]. The lower 4 bits (mask `0xF`) store the depth-sampling indicator (next sampling offset) [S1]. The upper bits (mask `0xFFF0`) store accumulated density/luminance values as 16-bit unsigned integers [S1].
+
+**Unit Translation Vector (UTV):**
+The UTV is parallel to the viewing direction [S1]. It is defined as $1/16$ of the longest vector crossing the cell [S1]. Consequently, its coordinate on the major projection axis is also equal to $1/16$ [S1].
+
+**Algorithm Steps:**
+1.  **Initialize:** Extract the lower 4 bits of `pixel.density` to get `next_sampling`, a discrete integer index representing the number of UTVs to add [S1].
+2.  **Loop:** While `next_sampling` is less than `ray.Length`:
+    a. Calculate the sampling position: $\text{xyz} = \text{ray.xyz} + \text{next\_sampling} \times \text{UTV.xyz}$ [S1].
+    b. Interpolate the volume data at `xyz` and accumulate the result into the pixel [S1].
+    c. Increment `next_sampling` by `sampling_rate` [S1].
+3.  **Finalize:** Subtract `ray.Length` from `next_sampling` to wrap the indicator for the next traversal or frame [S1].
+4.  **Update:** Clear the lower 4 bits of `pixel.density` and add the new `next_sampling` value to it [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def accumulate(ray, pixel, sampling_rate, utv):
+    # Extract lower 4 bits for depth indicator (discrete integer index)
+    next_sampling = pixel.density & 0xF
+    
+    # Iterate while within the cell's precomputed length
+    while next_sampling < ray.Length:
+        # Calculate sampling position using preprocessed ray entry and UTV
+        xyz = ray.xyz + next_sampling * utv
+        
+        # Interpolate volume data at xyz and accumulate into pixel
+        # (Standard trilinear interpolation and front-to-back compositing)
+        # Implementation depends on volume data structure
+        
+        # Advance to next sampling point
+        next_sampling += sampling_rate
+        
+    # Wrap the indicator for the next cell traversal or frame
+    next_sampling -= ray.Length
+    
+    # Update pixel density: keep upper bits (accumulated data), set lower bits (new indicator)
+    pixel.density = (pixel.density & 0xFFF0) + next_sampling
+```
+
+**Parameters:**
+*   `sampling_rate`: An arbitrary integer value within the range $[1, 16]$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Approximation:** Sampling positions and trilinear weights are approximated due to the limited set of preprocessed rays, limited projection lists, and the 4-bit depth indicator [S1].
+*   **Accuracy vs. Performance:** Accuracy can be improved by increasing table sizes and depth bits, but this increases cache misses and reduces randomizing, trading noise for aliasing [S1].
+
+## Subtopics
+
+### Interleaving Depth Indicators
+A technique to reduce aliasing by using incoherent sampling depths between neighboring pixels [S1]. Half of the depth indicators are initialized to zero, and the others to half the sampling rate, ensuring every pixel differs from its four nearest neighbors [S1]. Unlike usual rectilinear sampling which causes staircase effects even at high rates, interleaving depth indicators clearly reduces aliasing [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of sampling points per ray within the cell, as each step performs a constant-time lookup and accumulation [S1].
+*   **Memory Complexity:** Depends on the size of the preprocessed ray table and the projection lists [S1]. The pixel structure is compact, storing 16-bit density with an embedded 4-bit state [S1].
+*   **Strengths:** Efficient computation of sampling coordinates avoids complex ray-cell intersection calculations per sample [S1]. Reduces aliasing through interleaving [S1].
+*   **Limitations:** Approximation errors due to limited preprocessed rays and 4-bit depth indicator [S1]. Increasing table sizes and depth bits increases cache misses and reduces randomizing, trading noise for aliasing [S1].
+*   **When to use:** When rendering volumes with regular grid structures where even spacing is desired and computational efficiency is prioritized over perfect geometric accuracy [S1].
+*   **When not to use:** When high precision is required and cache misses are acceptable, or when the volume has highly irregular structures that do not align well with the UTV approximation [S1].
+
+## Background
+This method originates from a new object-order ray-casting algorithm [S1]. It addresses the difficulties of computing sampling coordinates quickly and ensuring even spacing for Riemann sum evaluation in front-to-back ray casting [S1]. The technique leverages the incoherency between rays to improve rendering accuracy, building on earlier work by Theufll et al. [S1].
+
+## Sources
+[S1] A new object-order ray-casting algorithm, https://doi.org/10.5555/602099.602130, fetched 2026-10-26

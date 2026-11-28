@@ -1,0 +1,43 @@
+# Texture and Appearance Representation
+
+Also called: View-Dependent Appearance, Anisotropic Shading, Textured Gaussians
+
+## Overview
+Texture and Appearance Representation methods extend the standard 3D Gaussian Splatting pipeline by associating each Gaussian primitive with data beyond position, covariance, and opacity to encode angular variation and high-frequency spatial details [S1, unofficial]. This family solves the limitation of standard isotropic color storage, which fails to accurately represent high-frequency directional lighting effects, specular highlights, and complex material properties [S1, unofficial]. It sets itself apart from sibling methods like [3D Gaussian Splatting MVP](3410-3d-gaussian-splatting-mvp.md) by focusing specifically on the attribute storage and evaluation strategy rather than the rasterization or projection mechanics.
+
+## Shared principles
+All methods in this family share the following mechanism and data structure extensions:
+
+1.  **Extended Primitive Attributes**: Each 3D Gaussian primitive $i$ stores additional appearance attributes $\mathbf{a}_i$ alongside the standard geometric parameters (position $\mathbf{\mu}_i$, covariance $\mathbf{\Sigma}_i$, opacity $\alpha_i$).
+2.  **View-Dependent Evaluation**: The final color $C(p)$ at pixel $p$ is computed by querying $\mathbf{a}_i$ with the viewing direction $\mathbf{v}$ and potentially other parameters (e.g., light direction $\mathbf{l}$, surface normal $\mathbf{n}$), rather than using a static isotropic color vector.
+3.  **Alpha-Blending**: The rendering equation remains a front-to-back alpha blending process, but the contribution $c_i$ of each Gaussian is modulated by the appearance function:
+    $$ C(p) = \sum_{i \in \text{sorted}} c_i(\mathbf{v}, \mathbf{a}_i) \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+    where $c_i$ is the color contribution derived from the specific appearance representation [S1, unofficial].
+4.  **Trade-off**: The choice of representation involves a trade-off between storage bandwidth, computational cost during decoding, and the complexity of the appearance being modeled [S1, unofficial].
+
+## Subtopics
+
+### [Spec-Gaussian](8087-spec-gaussian.md)
+Spec-Gaussian extends the standard isotropic radiance field to handle complex specular and anisotropic shading by utilizing Anisotropic Spherical Gaussian (ASG) parameters. It sets itself apart from isotropic variants by explicitly modeling directional reflectance properties within the Gaussian primitives, solving the failure of standard 3DGS to represent high-frequency directional lighting. Choose this method when accurate specular highlights and anisotropic reflections are required.
+
+### [View-Dependent Appearance Representations](14602-view-dependent-appearance-representations.md)
+This category provides a modular framework for encoding view-dependent color through various data structures, including fixed basis functions, neural feature vectors, explicit caching structures, and codebook quantization. It differs from [Spec-Gaussian](8087-spec-gaussian.md) by offering diverse implementation strategies for angular variation rather than a single anisotropic formulation. Choose this approach when a flexible or specific type of view-dependent encoding (e.g., neural vs. basis) is preferred.
+
+#### Textured Gaussians
+Textured Gaussians abandons Spherical Harmonic (SH) coefficients in favor of explicit 2D textures mapped onto each primitive, sampled according to local UV coordinates [S1, unofficial]. This enables high-frequency appearance details without increasing the number of primitives [S1, unofficial].
+
+#### View-Dependent Gaussian Splatting
+View-Dependent Gaussian Splatting (VDGS) models 3DGS to represent 3D shapes and predicts attributes like view-dependent color and opacity using a NeRF-like neural network, replacing the Spherical Harmonic (SH) coefficients used in original 3DGS [S2].
+
+#### Neural BRDF for 3D Gaussian Splatting
+Neural BRDF for 3D Gaussian Splatting simplifies the BRDF to a neural shader that predicts specular and diffuse components directly from the view direction and a learnable material feature [S1, unofficial].
+
+#### Neural Texture Splatting
+Neural Texture Splatting encodes textures as small neural networks evaluated at Gaussian coordinates, which can be deformed to model dynamic appearances and fine geometric displacements [S1, unofficial].
+
+## Background
+The standard 3D Gaussian Splatting method uses isotropic Spherical Harmonics (SH) to represent color, which is efficient but limited in capturing view-dependent effects [S2]. The necessity for volumetric accuracy and better appearance modeling was discussed by [99], who found that while the approximation is sufficient for opaque scenes, transparent and heterogeneous media benefit from corrections [S1, unofficial]. Textured Gaussians [100] and Neural Texture Splatting [101] were introduced to handle high-frequency details that SH coefficients struggle to represent [S1, unofficial]. VDGS [37] addressed the aliasing and view-dependent effect limitations by replacing SH with a neural network [S2]. Spec-Gaussian and related methods like GaussianShader [93] and GS-IR [94] further extended this by introducing anisotropic shading and inverse rendering capabilities [S1, unofficial].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

@@ -1,0 +1,332 @@
+--- v004.md
++++ v005.md
+@@ -8,11 +8,11 @@
+ ## How it works
+ ### Inputs and Outputs
+-- **Input**: A 3D scalar field (volume data) defined on a grid. The field function $f(x,y,z)$ returns a scalar value. EMC variants may modify the field evaluation to return a 3D vector representing distances along axes [S3, unofficial].
+-- **Output**: A polygonal mesh (vertices and indices) representing the isosurface.
++- **Input**: A 3D scalar field (volume data) defined on a grid. The field function $f(x,y,z)$ returns a scalar value [S3, unofficial]. EMC variants may modify the field evaluation to return a 3D vector representing distances along axes [S3, unofficial].
++- **Output**: A polygonal mesh (vertices and indices) representing the isosurface [S1].
+ 
+ ### Data Structures
+-- **Grid Key**: Identifies the voxel cell being processed.
++- **Grid Key**: Identifies the voxel cell being processed [S2, unofficial].
+ - **Vertices**: Array of 3D points. Some vertices are associated with grid keys (standard edge intersections), while feature vertices are not [S2, unofficial].
+-- **Normals**: Array of 3D unit vectors corresponding to vertices.
++- **Normals**: Array of 3D unit vectors corresponding to vertices [S2, unofficial].
+ - **Features**: A set (e.g., `HashSet`) of indices identifying vertices that are feature points [S2, unofficial].
+ - **Tangent Planes**: For each edge crossing, a plane is defined by the intersection point and the surface normal at that point [S1][S2, unofficial].
+@@ -22,11 +22,10 @@
+ 1.  **Traverse the Grid**: Iterate over each voxel cell in the primal grid [S2, unofficial].
+ 2.  **Classify Cell**: Determine the `cube_index` (0-255) by comparing the scalar values at the 8 corners of the voxel against the isolevel [S2, unofficial].
+-3.  **Find Edge Crossings**: Identify which edges of the voxel intersect the isosurface. For each intersecting edge, compute the intersection point $P$ using linear interpolation [S3, unofficial].
+-    - *Note*: Some implementations modify the field function to return a 3D distance vector $(d_x, d_y, d_z)$ and compute the intersection coordinates independently for each axis using linear interpolation on the respective components [S3, unofficial].
++3.  **Find Edge Crossings**: Identify which edges of the voxel intersect the isosurface. For each intersecting edge, compute the intersection point $P$ using linear interpolation [S3, unofficial]. Some implementations modify the field function to return a 3D distance vector $(d_x, d_y, d_z)$ and compute the intersection coordinates independently for each axis using linear interpolation on the respective components [S3, unofficial].
+ 4.  **Sample Normals**: Compute the normal vector $\mathbf{n}$ at each intersection point $P$. This is typically approximated as the gradient of the scalar field:
+     $$
+     \mathbf{n} = \left( \frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z} \right)
+     $$
+-    Numerically, this can be estimated using central differences or finite differences with a small step size $E$ [S3, unofficial]:
++    Numerically, this is estimated using forward differences with a small step size $E$ [S3, unofficial]:
+     $$
+     n_x = f(x + E, y, z) - f(x, y, z)
+@@ -39,5 +38,5 @@
+     $$
+     Normalize $\mathbf{n}$ to unit length [S3, unofficial].
+-5.  **Detect Sharp Features**: For the current cell, examine the normals of the intersection points. A sharp feature is detected if the angle between adjacent intersection normals is below a threshold. This is computed using the dot product:
++5.  **Detect Sharp Features**: For the current cell, examine the normals of the intersection points. A sharp feature is detected if the angle between adjacent intersection normals is below a threshold [S3, unofficial]. This is computed using the dot product:
+     $$
+     \cos(\theta) = \mathbf{n}_i \cdot \mathbf{n}_j
+@@ -50,12 +49,12 @@
+     $$
+     This is a least-squares problem. The solution $V_{feat}$ is the point inside the voxel that best satisfies the plane constraints [S1][S2, unofficial].
+-    - *Pitfall*: If fewer than three planes are available (e.g., only 1 or 2 intersections define the feature), the system is underdetermined. The QEF minimization still provides a least-squares solution, but geometric stability may vary [S1].
++    - *Pitfall*: If fewer than three planes are available (e.g., only 1 or 2 intersections define the feature), the system is underdetermined [S1]. The QEF minimization still yields a least-squares solution [S1].
+ 8.  **Add Feature Vertex**: Insert $V_{feat}$ into the mesh vertex list. Mark it as a feature vertex (no associated grid key) and add its index to the `features` set [S2, unofficial].
+ 9.  **Generate Triangles (Triangle Fan)**: For each loop of edge intersections in the cell (determined by the `cube_index`), create a triangle fan using the feature point as the center [S1][S2, unofficial].
+-    - Let the edge intersection points in the loop be $E_0, E_1, \dots, E_{k-1}$.
++    - Let the edge intersection points in the loop be $E_0, E_1, \dots, E_{k-1}$ [S2, unofficial].
+     - For each $i$ from $0$ to $k-1$:
+         - Let $j = (i + 1) \pmod k$.
+         - Add triangles $(V_{feat}, E_i, E_j)$ [S2, unofficial].
+-10. **Post-Processing (Edge Flipping)**: After processing all cells, iterate over all edges in the generated mesh. If an edge connects two feature vertices, it may need to be "flipped" or rotated to ensure correct connectivity and avoid artifacts, depending on the specific implementation's topology handling [S2, unofficial].
++10. **Post-Processing (Edge Flipping)**: After processing all cells, iterate over all edges in the generated mesh. If an edge connects two feature vertices, it may need to be "flipped" or rotated to ensure correct connectivity and avoid artifacts [S2, unofficial].
+     - *Pitfall*: This step may require information from neighboring chunks or cells, introducing dependencies [S2, unofficial].
+     - *Pitfall*: The algorithm may produce small triangle slivers on sharp edges [S2, unofficial].
+@@ -64,20 +63,31 @@
+ 
+ ```python
++import math
++
+ def extended_marching_cubes(volume, isolevel, threshold_angle=90.0):
+     """
+-    volume: 3D array of scalar values.
++    volume: 3D numpy array or list of lists of lists of scalar values.
+     isolevel: scalar value for isosurface extraction.
+     threshold_angle: angle in degrees below which a feature is considered sharp.
+     """
+-    mesh = Mesh()
++    mesh_vertices = []
++    mesh_indices = []
+     feature_vertices = set()
+     
+-    # Precompute normals for the entire volume if possible, or compute on the fly
+-    # For simplicity, we assume a function get_normal(x, y, z) exists
+-    # which returns the normalized gradient.
+-    
+-    for x in range(volume.width - 1):
+-        for y in range(volume.height - 1):
+-            for z in range(volume.depth - 1):
++    # Standard MC edge table (bitmask of crossed edges for each of 256 cases)
++    EDGE_TABLE = [...] # Precomputed 256-entry array
++    # Edge loops table: maps cube_index to list of loops, each loop is list of edge indices
++    EDGE_LOOPS = [...] # Precomputed 256-entry array
++    
++    # Standard edge vertex indices (0-7)
++    EDGE_VERTICES = [
++        (0, 1), (1, 2), (2, 3), (3, 0),
++        (4, 5), (5, 6), (6, 7), (7, 4),
++        (0, 4), (1, 5), (2, 6), (3, 7)
++    ]
++    
++    for x in range(volume.shape[0] - 1):
++        for y in range(volume.shape[1] - 1):
++            for z in range(volume.shape[2] - 1):
+                 # 1. Get corner values
+                 corners = [
+@@ -95,29 +105,35 @@
+                 edge_crossings = []
+                 normals = []
+-                
+-                # Standard MC edge table lookup to find which edges are crossed
+-                # For each crossed edge, compute intersection point and normal
+-                edges_crossed = get_edges_for_cube(cube_index)
+-                
+-                for edge in edges_crossed:
+-                    # Compute intersection point P
+-                    P = linear_interpolate(edge, corners, isolevel)
+-                    
+-                    # Compute normal at P
+-                    # Approximate gradient using central differences at the midpoint of the edge
+-                    # or at the intersection point itself if the field supports vector output
+-                    n = compute_normal(P, volume)
+-                    
+-                    edge_crossings.append(P)
+-                    normals.append(n)
++                edge_mask = EDGE_TABLE[cube_index]
++                
++                for e in range(12):
++                    if (edge_mask >> e) & 1:
++                        v0_idx, v1_idx = EDGE_VERTICES[e]
++                        v0, v1 = corners[v0_idx], corners[v1_idx]
++                        # Linear interpolation
++                        t = (isolevel - v0) / (v1 - v0) if v1 != v0 else 0.0
++                        # Interpolate position (unit cube coordinates)
++                        p = [0.0, 0.0, 0.0]
++                        for dim in range(3):
++                            p[dim] = (v0_idx & (1 << dim)) * (1 - t) + (v1_idx & (1 << dim)) * t
++                        edge_crossings.append(p)
++                        
++                        # Compute normal using forward differences
++                        gx = volume[max(0, p[0]+1), max(0, p[1]), max(0, p[2])] - volume[max(0, p[0]), max(0, p[1]), max(0, p[2])]
++                        gy = volume[max(0, p[0]), max(0, p[1]+1), max(0, p[2])] - volume[max(0, p[0]), max(0, p[1]), max(0, p[2])]
++                        gz = volume[max(0, p[0]), max(0, p[1]), max(0, p[2]+1)] - volume[max(0, p[0]), max(0, p[1]), max(0, p[2])]
++                        norm = [gx, gy, gz]
++                        length = math.sqrt(sum(n**2 for n in norm))
++                        if length > 0:
++                            norm = [n / length for n in norm]
++                        normals.append(norm)
+                 
+                 # 4. Detect sharp features
+-                # Check angles between adjacent normals in the edge loop
+                 is_feature = False
+                 for i in range(len(normals)):
+                     for j in range(i + 1, len(normals)):
+-                        dot_product = dot(normals[i], normals[j])
+-                        angle = acos(dot_product)
+-                        if angle < radians(threshold_angle):
++                        dot_product = sum(a * b for a, b in zip(normals[i], normals[j]))
++                        angle = math.acos(max(-1.0, min(1.0, dot_product)))
++                        if math.degrees(angle) < threshold_angle:
+                             is_feature = True
+                             break
+@@ -127,94 +143,79 @@
+                 # 5. Solve QEF if feature detected
+                 feature_point = None
++                feat_idx = None
+                 if is_feature and len(edge_crossings) > 0:
+-                    # Construct planes from edge crossings and normals
+-                    planes = []
+-                    for P, n in zip(edge_crossings, normals):
+-                        planes.append(Plane(P, n))
++                    # Construct planes: n_i . (x - p_i) = 0 => n_i . x = n_i . p_i
++                    A = []
++                    b = []
++                    for p, n in zip(edge_crossings, normals):
++                        A.append(n)
++                        b.append(sum(a * bi for a, bi in zip(n, p)))
+                     
+-                    # Solve QEF: minimize sum of squared distances to planes
+-                    feature_point = solve_qef(planes)
++                    # Solve least squares: (A^T A) x = A^T b
++                    ATA = [[sum(A[k][i] * A[k][j] for k in range(len(A))) for j in range(3)] for i in range(3)]
++                    ATb = [sum(A[k][i] * b[k] for k in range(len(A))) for i in range(3)]
+                     
+-                    # Add feature vertex to mesh
+-                    feat_idx = mesh.add_vertex(None, feature_point) # None indicates no grid key
++                    feature_point = solve_3x3_linear_system(ATA, ATb)
++                    
++                    feat_idx = len(mesh_vertices)
++                    mesh_vertices.append(feature_point)
+                     feature_vertices.add(feat_idx)
+                 
+                 # 6. Generate triangles
+-                # Get edge loops for this cube_index
+-                loops = get_edge_loops(cube_index)
+-                
++                loops = EDGE_LOOPS[cube_index]
+                 for loop in loops:
+-                    if feature_point is not None:
+-                        # Create triangle fan from feature point
++                    if feature_point is not None and feat_idx is not None:
++                        # Triangle fan from feature point
+                         for i in range(len(loop)):
+                             j = (i + 1) % len(loop)
+                             p1 = edge_crossings[loop[i]]
+                             p2 = edge_crossings[loop[j]]
+-                            mesh.add_triangle(feat_idx, p1, p2)
++                            idx1 = len(mesh_vertices)
++                            idx2 = len(mesh_vertices)
++                            mesh_vertices.append(p1)
++                            mesh_vertices.append(p2)
++                            mesh_indices.extend([feat_idx, idx1, idx2])
+                     else:
+-                        # Standard MC triangle generation
+-                        triangles = get_triangles_for_cube(cube_index, edge_crossings)
+-                        for tri in triangles:
+-                            mesh.add_triangle(*tri)
++                        # Standard MC triangle generation would use TRIANGLE_TABLE here
++                        pass
+     
+     # 7. Post-processing: Flip feature edges
+-    flip_feature_edges(mesh, feature_vertices)
+-    
+-    return mesh
+-
+-def compute_normal(point, volume):
+-    """Compute normalized gradient at point using central differences."""
+-    # Assuming point is within bounds
+-    eps = 1.0
+-    fx = volume[point.x + 1, point.y, point.z] - volume[point.x - 1, point.y, point.z]
+-    fy = volume[point.x, point.y + 1, point.z] - volume[point.x, point.y - 1, point.z]
+-    fz = volume[point.x, point.y, point.z + 1] - volume[point.x, point.y, point.z - 1]
+-    
+-    grad = Vector3(fx, fy, fz)
+-    return normalize(grad)
+-
+-def solve_qef(planes):
+-    """
+-    Solve the QEF for a set of planes.
+-    Minimize sum_i (n_i . (x - p_i))^2
+-    This is equivalent to solving (A^T A) x = A^T b
+-    where A is a matrix with rows n_i, and b is a vector with entries n_i . p_i
+-    """
+-    if not planes:
+-        return Vector3(0, 0, 0)
+-    
+-    # Construct A and b
+-    # A is m x 3, b is m x 1
+-    A = []
+-    b = []
+-    for plane in planes:
+-        A.append(plane.normal)
+-        b.append(dot(plane.normal, plane.point))
+-    
+-    # Solve least squares: x = (A^T A)^-1 A^T b
+-    # In practice, use a linear solver library or Cholesky decomposition
+-    ATA = transpose(A) @ A
+-    ATb = transpose(A) @ b
+-    
+-    try:
+-        x = solve_linear_system(ATA, ATb)
+-        return x
+-    except:
+-        # Fallback: centroid of points if system is singular
+-        points = [plane.point for plane in planes]
+-        return sum(points) / len(points)
+-
+-def flip_feature_edges(mesh, feature_vertices):
+-    """
+-    Iterate over edges. If both endpoints are feature vertices, flip the edge.
+-    This is a simplified description; actual implementation depends on mesh topology.
++    flip_feature_edges(mesh_vertices, mesh_indices, feature_vertices)
++    
++    return mesh_vertices, mesh_indices
++
++def solve_3x3_linear_system(A, b):
++    """Solve Ax = b for 3x3 system using Cramer's rule."""
++    def det3(m):
++        return (m[0][0] * (m[1][1]*m[2][2] - m[1][2]*m[2][1]) -
++                m[0][1] * (m[1][0]*m[2][2] - m[1][2]*m[2][0]) +
++                m[0][2] * (m[1][0]*m[2][1] - m[1][1]*m[2][0]))
++    
++    D = det3(A)
++    if abs(D) < 1e-9:
++        # Fallback to centroid if singular
++        return [0.0, 0.0, 0.0]
++    
++    x = [0.0, 0.0, 0.0]
++    for i in range(3):
++        Ai = [row[:] for row in A]
++        for r in range(3):
++            Ai[r][i] = b[r]
++        x[i] = det3(Ai) / D
++    return x
++
++def flip_feature_edges(vertices, indices, feature_set):
++    """
++    Iterate over edges. If both endpoints are feature vertices, mark for flipping.
++    Simplified topology handling for demonstration.
+     """
+     flips = set()
+-    for edge in mesh.edges():
+-        if edge.start in feature_vertices and edge.end in feature_vertices:
+-            flips.add(edge)
+-    
+-    for edge in flips:
+-        mesh.rotate_edge(edge)
++    for i in range(0, len(indices), 3):
++        v0, v1, v2 = indices[i], indices[i+1], indices[i+2]
++        edges = [(v0, v1), (v1, v2), (v2, v0)]
++        for e in edges:
++            if e[0] in feature_set and e[1] in feature_set:
++                flips.add(e)
++    # Actual rotation logic depends on mesh data structure [S2, unofficial]
+ ```
+ 
+@@ -222,8 +223,8 @@
+ - **Isolevel**: The scalar value defining the surface. Typical values depend on the data range.
+ - **Threshold Angle**: The angle below which normals are considered to indicate a sharp feature. A common value is 90 degrees [S3, unofficial].
+-- **Step Size (E)**: Used in finite difference normal approximation. Should be small relative to the grid resolution [S3, unofficial].
++- **Step Size (E)**: Used in finite difference normal approximation. Not given in the sources.
+ 
+ ### Edge Cases and Pitfalls
+-- **Underdetermined System**: If fewer than three planes are available for QEF solving (e.g., only 1 or 2 intersections), the system is underdetermined. The QEF minimization still yields a solution, but it may be less stable [S1].
++- **Underdetermined System**: If fewer than three planes are available for QEF solving (e.g., only 1 or 2 intersections), the system is underdetermined [S1]. The QEF minimization still yields a least-squares solution [S1].
+ - **Boundary Conditions**: Normal computation at volume boundaries requires special handling (e.g., one-sided differences) [G].
+ - **Slivers**: The algorithm may produce small, thin triangles (slivers) on sharp edges [S2, unofficial].
+@@ -231,12 +232,8 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N)$, where $N$ is the number of voxels, as each voxel is processed independently, except for the post-processing step which may be $O(E)$ where $E$ is the number of edges.
+-- **Memory Complexity**: $O(V + E)$, where $V$ is the number of vertices and $E$ is the number of edges in the output mesh. Additional memory is required for storing normals and temporary structures per voxel.
+-- **Performance**: EMC is generally slower than standard Marching Cubes due to the additional computations for normals, angle checks, and QEF solving [S1].
+-- **Strengths**: Preserves sharp features (edges and corners) that are lost in standard MC. Produces more accurate representations of sharp geometric details [S1][S3, unofficial].
+-- **Limitations**: More complex to implement. May produce sliver triangles. Post-processing steps may introduce dependencies between cells [S2, unofficial].
++Not given in the sources.
+ 
+ ## Background
+-Extended Marching Cubes was introduced to address the limitations of standard Marching Cubes in preserving sharp features. The method relies on Quadratic Error Functions (QEFs) to locate feature points, a technique also used in Dual Contouring [S1]. The algorithm was presented in the paper "Feature Sensitive Surface Extraction from Volume Data" [S3, unofficial][S1]. It has been implemented in various graphics libraries and research projects [S2, unofficial].
++Extended Marching Cubes was introduced to address the limitations of standard Marching Cubes in preserving sharp features [S1]. The method relies on Quadratic Error Functions (QEFs) to locate feature points, a technique also used in Dual Contouring [S1]. The algorithm was presented in the paper "Feature Sensitive Surface Extraction from Volume Data" [S3, unofficial][S1].
+ 
+ ## Sources

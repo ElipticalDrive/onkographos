@@ -1,0 +1,92 @@
+--- v001.md
++++ v002.md
+@@ -1,61 +1,49 @@
+ # Non-Pinhole Camera Training
+ 
+-Also called: non-pinhole 3DGS
++Also called: Non-Pinhole Camera Dataset Training
+ 
+ ## Overview
+-Non-Pinhole Camera Training extends the 3D Gaussian Splatting optimization framework to handle camera models that deviate from the standard pinhole assumption, such as those found in wide-angle or fisheye lenses. It solves the problem of geometric distortion and projection errors that cause standard 3D Gaussian Splatting to fail when applied to datasets captured with non-pinhole optics. It differs from standard training by replacing the linear perspective projection with a differentiable non-pinhole projection model, allowing the rasterizer to correctly map 3D Gaussians to image pixels for distorted views.
++Non-Pinhole Camera Training is a method for adapting 3D Gaussian Splatting (3DGS) to scenes captured by non-pinhole cameras, such as those with significant lens distortion or complex optical properties. It solves the problem where standard 3DGS, which assumes a pinhole camera model, fails to reconstruct scenes from such data. It differs from standard training by leveraging a differentiable rasterizer that can accommodate arbitrary camera projection models, allowing the optimization to proceed despite the deviation from ideal pinhole geometry.
+ 
+ ## How it works
+-The method relies on a differentiable rasterizer that supports arbitrary camera projection functions. The core modification is the replacement of the standard view-projection matrix with a non-pinhole projection pipeline.
++The method relies on the flexibility of the differentiable rasterizer used in 3D Gaussian Splatting. Unlike standard implementations that hardcode pinhole projection matrices, this approach allows the input camera parameters to define non-pinhole projections.
+ 
+-**Inputs:**
+-- 3D Gaussian parameters: mean $\mu$, covariance $\Sigma$ (or rotation $R$ and scale $S$), opacity $\alpha$, spherical harmonics coefficients $C$.
+-- Camera parameters: intrinsic matrix $K$ (potentially including distortion coefficients), extrinsic matrix $W$ (world-to-camera), and the specific non-pinhole projection function $P_{np}$.
+-- Image resolution $H \times W$.
+-
+-**Outputs:**
+-- Rendered color image $I$.
+-- Gradients of the loss with respect to Gaussian parameters.
++**Inputs and Outputs:**
++- **Inputs:** A dataset of images captured by a non-pinhole camera (e.g., Matterport dataset) and their corresponding camera poses and intrinsics. The intrinsics may include distortion coefficients or non-linear projection mappings.
++- **Outputs:** Optimized 3D Gaussian attributes (position, covariance, opacity, spherical harmonics) that represent the scene geometry and appearance consistent with the non-pinhole observations.
+ 
+ **Data Structures:**
+-- Gaussian attributes are stored in standard 3DGS format (position, scale, rotation, opacity, SH coefficients).
+-- Camera state includes distortion parameters if applicable.
++The core data structure remains the 3D Gaussian primitive. However, the rasterization step must support the specific camera model.
++- **Gaussian Attributes:** Position $\mathbf{p}$, Covariance $\mathbf{\Sigma}$, Opacity $\alpha$, Color $C$ (encoded as spherical harmonics).
++- **Camera Model:** A projection function $P(\mathbf{p}, K, D)$ that maps 3D points to 2D image coordinates, where $K$ represents intrinsic parameters and $D$ represents distortion or non-pinhole specific parameters.
+ 
+ **Steps:**
+-1. **Transform Gaussians:** Transform Gaussian means $\mu$ from world space to camera space using the extrinsic matrix $W$: $\mu_c = W \mu$.
+-2. **Non-Pinhole Projection:** Project the 3D camera-space point $\mu_c$ to 2D image coordinates $(u, v)$ using the non-pinhole projection function $P_{np}$. For a standard pinhole camera, this is $u = f_x \frac{x_c}{z_c} + c_x$. For non-pinhole models, $P_{np}$ may involve radial distortion correction or a specific fisheye projection model.
+-   $$
+-   \begin{bmatrix} u \\ v \end{bmatrix} = P_{np}\left(\frac{x_c}{z_c}, \frac{y_c}{z_c}\right)
+-   $$
+-   [G] The function $P_{np}$ must be differentiable with respect to $x_c, y_c, z_c$ to allow gradient flow back to the Gaussian positions.
+-3. **Covariance Projection:** Compute the 2D covariance matrix $\Sigma'$ in screen space. This requires the Jacobian $J$ of the projection function $P_{np}$ with respect to the 3D coordinates, and the view-space covariance $\Sigma_c$.
+-   $$
+-   \Sigma' = J W_{view} \Sigma_c W_{view}^T J^T
+-   $$
+-   [G] For non-pinhole models, $J$ is the Jacobian of the non-linear projection function, not just the linear perspective division.
+-4. **Rasterization:** Rasterize the projected Gaussians using the standard alpha-blending accumulation, but using the distorted 2D positions and covariances.
+-5. **Loss Computation:** Compute the photometric loss (e.g., L1 or SSIM) between the rendered image and the ground truth non-pinhole image.
+-6. **Backpropagation:** Compute gradients through the non-pinhole projection function $P_{np}$ to update Gaussian positions and other parameters.
++1. **Initialization:** Initialize 3D Gaussians from the sparse point cloud generated by Structure-from-Motion (SfM) or similar techniques, using the non-pinhole camera poses.
++2. **Rasterization:** For each training image, project the 3D Gaussians onto the 2D image plane using the non-pinhole camera model. This involves applying the specific projection function $P$ instead of the standard pinhole projection $P_{pinhole}$.
++3. **Compositing:** Sort the projected Gaussians by depth and perform alpha compositing to generate the rendered color image.
++4. **Loss Computation:** Calculate the loss between the rendered image and the ground truth image using standard metrics (e.g., L1 loss, SSIM).
++5. **Optimization:** Backpropagate the loss through the differentiable rasterizer to update the Gaussian attributes. The non-pinhole projection function must be differentiable with respect to the Gaussian positions and camera parameters if they are being optimized.
+ 
+-**Parameters:**
+-- Distortion coefficients: Specific to the camera model (e.g., $k_1, k_2$ for radial distortion). Not given in the sources.
+-- Optimization learning rate: Standard 3DGS values. Not given in the sources.
+-
+-**Edge Cases:**
+-- **Degenerate Depth:** Points with $z_c \le 0$ must be clipped or ignored to avoid division by zero or invalid projections.
+-- **Distortion Singularities:** Extreme distortion near the image center or edges may require careful handling of the Jacobian to prevent numerical instability.
++**Edge Cases and Pitfalls:**
++- **Differentiability:** The non-pinhole projection function must be differentiable. If the camera model involves non-differentiable operations (e.g., hard clipping or discrete distortion corrections), gradient flow may be broken.
++- **Distortion Handling:** If the non-pinhole nature is due to lens distortion, the distortion model must be accurately calibrated and integrated into the projection step. Failure to do so results in misalignment between the rendered and observed features.
++- **Convergence:** As noted in [S1], standard 3DGS fails entirely on non-pinhole datasets like Matterport. This method succeeds by explicitly accounting for the camera model, but convergence may be slower or require more careful initialization compared to pinhole cases.
+ 
+ ## Subtopics
+ 
++### Aperture Randomized Training
++A training technique introduced to disentangle defocus-aware and defocus-independent representations in an unsupervised manner by learning to generate images while randomizing the aperture size and latent codes independently [S2]. During training, the aperture size is changed randomly, and the latent codes are changed randomly [S2]. This technique is similar to techniques commonly used in viewpoint-aware representation learning, which are useful for disentangling the effect of the corresponding factor from latent codes [S2]. It is applied in the context of AR-NeRF, where an MLP converts point position and view direction into RGB color and volume density, and the GAN framework learns to generate images with randomized aperture and latent codes [S2].
++
+ ## Operating characteristics
+-- **Time Complexity:** Similar to standard 3DGS rasterization, but with potentially higher per-pixel cost due to the non-linear projection function evaluation.
+-- **Memory Complexity:** Same as standard 3DGS.
+-- **Performance:** On the Matterport dataset, which contains non-pinhole camera captures, the proposed method successfully reconstructs the scene, whereas standard 3D-GS fails entirely [S1].
+-- **Strengths:** Enables high-fidelity reconstruction of scenes captured with wide-angle or fisheye lenses without requiring pre-distortion correction or specialized preprocessing.
+-- **Limitations:** Requires a differentiable implementation of the specific non-pinhole projection model. Performance may degrade if the projection function is not smooth or differentiable everywhere.
++- **Time Complexity:** Similar to standard 3DGS training, dominated by the rasterization and compositing steps. The additional cost comes from evaluating the non-pinhole projection function, which may be more complex than the pinhole model.
++- **Memory Complexity:** Same as standard 3DGS, storing Gaussian attributes and intermediate rendering buffers.
++- **Performance:** On the Matterport dataset, this method successfully reconstructs the scene, whereas standard 3DGS fails entirely [S1].
++- **Strengths:** Enables 3DGS to handle a wider variety of camera types, including those with significant distortion or non-pinhole characteristics.
++- **Limitations:** Requires a differentiable non-pinhole camera model. If the camera model is not well-calibrated or differentiable, the method may not converge.
+ 
+ ## Background
+-The method was introduced in "On the Error Analysis of 3D Gaussian Splatting and an Optimal Projection Strategy" [S1]. It addresses the limitation of standard 3D Gaussian Splatting, which assumes a pinhole camera model, by demonstrating that adapting the rasterizer to support non-pinhole projections allows for successful training on datasets like Matterport, where standard 3DGS fails.
++The method is based on the adaptability of the differentiable rasterizer used in 3D Gaussian Splatting. It was highlighted in the context of error analysis and optimal projection strategies for 3DGS, demonstrating that the framework can be extended to non-pinhole cameras [S1]. The Matterport dataset was used as a benchmark to show the failure of standard 3DGS and the success of the adapted method [S1].
+ 
+ ## Sources
+-[S1] On the Error Analysis of 3D Gaussian Splatting and an Optimal Projection Strategy, https://doi.org/10.1007/978-3-031-72643-9_15, fetched 2026-10-29+[S1] On the Error Analysis of 3D Gaussian Splatting and an Optimal Projection Strategy, https://doi.org/10.1007/978-3-031-72643-9_15, fetched 2026-10-29
++[S2] AR-NeRF: Unsupervised Learning of Depth and Defocus Effects from Natural Images with Aperture Rendering Neural Radiance Fields, https://arxiv.org/abs/2206.06100v1, fetched 2026-10-26

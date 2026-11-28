@@ -1,0 +1,578 @@
+--- v012.md
++++ v013.md
+@@ -4,366 +4,233 @@
+ 
+ ## Overview
+-InfiniSplat v2 is a feed-forward Gaussian reconstruction method for arbitrary input views that decouples geometry and attribute prediction, uses ground-truth (GT) camera poses for alignment during training, and employs large-angle target view supervision to improve rendering quality under large viewpoint changes [S1, unofficial]. It differs from its sibling [DA3-GS](16423-da3-gs.md) by freezing the geometry branch to prevent geometric degradation caused by joint optimization, and from other feed-forward methods by using GT poses for alignment to avoid pose errors that misguide the network under large-angle supervision [S1, unofficial].
++InfiniSplat v2 is a feed-forward Gaussian reconstruction method for arbitrary input views that decouples geometry and attribute prediction, uses ground-truth (GT) camera poses for alignment during training, and employs large-angle target view supervision to improve rendering quality under large viewpoint changes [S1, unofficial]. It differs from its parent [Feed-forward Generalizable Reconstruction](23796-feed-forward-generalizable-reconstruction.md) and siblings like [DA3-GS](12847-anysplat-pipeline.md) by freezing the geometry branch to prevent geometric degradation caused by joint optimization, and by using GT poses to avoid pose errors that misguide the network under large-angle supervision [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** $N$ input RGB images $I_C = \{I_i\}_{i \in C}$ and optional pose conditions $Q_C$ (camera intrinsics and poses). In the pose-free setting, $Q_C = \emptyset$ [S1, unofficial].
+-*   **Outputs:** A set of $M$ 3D Gaussians $\mathcal{G} = \{(\mu_m, \xi_m)\}_{m=1}^M$, where $\mu_m \in \mathbb{R}^3$ is the center and $\xi_m = (\alpha_m, s_m, q_m, c_m)$ contains opacity, three-axis scale, rotation (quaternion), and zeroth-order spherical-harmonic (SH) color [S1, unofficial].
++The method takes $N$ input RGB images $I_C = \{I_i\}_{i \in C}$ and optional pose conditions $Q_C$ (camera intrinsics and poses). In the pose-free setting, $Q_C = \emptyset$ [S1, unofficial]. The output is a Gaussian scene $G$ consisting of $M$ Gaussians, where each Gaussian $m$ has a center $\mu_m$ and attributes $\xi_m = (\alpha_m, s_m, q_m, c_m)$, representing opacity, three-axis scale, rotation, and zeroth-order spherical-harmonic (SH) color [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Gaussian Set:** A list of $M$ Gaussians. Each Gaussian $m$ stores $\mu_m, \alpha_m, s_m, q_m, c_m$.
+-*   **Hidden State:** A 16-dimensional vector per Gaussian, used in Stage II refinement [S1, unofficial].
+-*   **Voxel Grid:** Used for merging and neighbor search. Voxel side length is 0.004 in the scale-normalized reconstruction frame [S1, unofficial].
++The scene is represented as a list of Gaussians. Each Gaussian is defined by:
++- $\mu_m \in \mathbb{R}^3$: Center position.
++- $\alpha_m \in \mathbb{R}$: Opacity.
++- $s_m \in \mathbb{R}^3$: Scale (three axes).
++- $q_m \in \mathbb{R}^4$: Rotation (quaternion).
++- $c_m$: SH color coefficients (zeroth-order, i.e., RGB).
++
++During Stage II, a hidden state $h \in \mathbb{R}^{16}$ is maintained per Gaussian. The KNN graph is stored globally, with core sets and neighborhoods defined by voxel coordinates [S1, unofficial].
+ 
+ **Parameters:**
+-*   $\tau_\alpha = 0.01$: Opacity pruning threshold [S1, unofficial].
+-*   $\tau_{abs} = 0.03, \tau_{rel} = 0.01$: Mask thresholds for depth consistency [S1, unofficial].
+-*   $\epsilon = 10^{-6}$: Small constant for logit clamping [S1, unofficial].
+-*   $a = 0.1, 0.25, 1.0$: Scaling factors for $\tanh$ activation on opacity-logit, rotation, and RGB-logit increments, respectively [S1, unofficial].
+-*   $K_r \in \{1, 2, 3\}$: Number of refinement steps (sampled during training, fixed to 3 at inference) [S1, unofficial].
+-*   $\beta = (0.9, 0.95)$: AdamW optimizer parameters [S1, unofficial].
+-*   Global batch size: 16 [S1, unofficial].
+-*   Gradient clipping: L2 norm at 1.0 [S1, unofficial].
+-
+-**Numbered Steps:**
+-
+-1.  **Feature Extraction:**
+-    *   Initialize two branches, $\Phi_{geo}$ and $\Phi_{attr}$, from the same pretrained DA3 weights [S1, unofficial].
+-    *   Freeze $\Phi_{geo}$. Fine-tune only the last $K$ Transformer blocks of $\Phi_{attr}$ (typically $K=10$) [S1, unofficial].
+-    *   Compute predicted depth $\hat{D}$ and cameras $\hat{\Pi}_C$ using $\Phi_{geo}(I_C; Q_C)$ [S1, unofficial].
+-    *   Compute multi-layer patch features $F_C$ using $\Phi_{attr}(I_C; Q_C)$ [S1, unofficial].
+-
+-2.  **Scale Alignment (Stage I):**
+-    *   Express predicted and GT poses relative to their respective reference cameras (first input view in sorted order) [S1, unofficial].
+-    *   Normalize predicted depths and translations by $s_{norm} > 0$ [S1, unofficial].
+-    *   Fit an Umeyama similarity transform from the GT trajectory to the normalized predicted trajectory using only input-camera center correspondences [S1, unofficial].
+-    *   Extract the scale factor $s_C$ from the transform. Apply it to translations: $t^\star_v = s_C t^\star_v$, while rotations remain unchanged: $R^\star_v = R^\star_v$ [S1, unofficial].
+-    *   Construct Gaussian centers $\mu_m$ from normalized predicted z-depth, GT intrinsics, and scale-aligned GT poses [S1, unofficial].
+-
+-3.  **Initial Gaussian Prediction (Stage I):**
+-    *   Map $F_C$ to per-pixel attributes $\xi$ using a DPT-style Gaussian decoder [S1, unofficial].
+-    *   Merge Gaussians into voxels with side length 0.004 [S1, unofficial].
+-    *   Prune Gaussians with opacity $\alpha_m < \tau_\alpha$ [S1, unofficial].
+-    *   Let the initial scene be $\mathcal{G}_0$ [S1, unofficial].
+-
+-4.  **Stage I Supervision:**
+-    *   Render $\mathcal{G}_0$ into input and target views $v \in V = C \cup T$: $\hat{I}_v = \mathcal{R}(\mathcal{G}_0; \Pi^\star_v)$ [S1, unofficial].
+-    *   Construct visibility masks $M_v$. A target pixel is retained if:
+-        *   GT depth $> 10^{-6}$ and passes validity mask.
+-        *   At least one input view places it in front of the camera and within bounds.
+-        *   $|z_{proj} - d_{src}| \leq \max(\tau_{abs}, \tau_{rel} d_{src})$, where $z_{proj}$ is point depth in input camera and $d_{src}$ is sampled depth [S1, unofficial].
+-    *   Compute LPIPS spatial distance map $d_v = \text{LPIPS}_{spatial}(M_v \odot \hat{I}_v, M_v \odot I_v)$, zeroing invalid regions before normalization [S1, unofficial].
+-    *   Compute Stage I loss $\mathcal{L}_I$ aggregating L1 and LPIPS errors over valid pixels [S1, unofficial].
+-
+-5.  **Stage II Refinement (Feature Processing):**
+-    *   Project DPT features to 8 channels via learnable 1x1 conv, merge using Gaussian voxel groups/weights, and reuse [S1, unofficial].
+-    *   Initialize 16-dim hidden state via linear projection [S1, unofficial].
+-    *   Concatenate image features, current attributes, gradient feedback, neighbor distances, and hidden states. Project to 64 dims [S1, unofficial].
+-    *   Process through four KNN Transformer blocks. Each block uses single-head attention over 8 neighbors, LayerNorm, MLP, and residual connections [S1, unofficial].
+-    *   Concatenate output with original input. MLP predicts attribute and hidden-state increments [S1, unofficial].
+-
+-6.  **Stage II Attribute Updates:**
+-    *   Render current scene into input views to compute feedback loss $\ell_{fb} = 0.8 L_1 + 0.2 L_{DSSIM}$, where $L_{DSSIM} = (1 - \text{SSIM})/2$ [S1, unofficial].
+-    *   Compute gradients w.r.t Gaussian attributes, normalize, and detach [S1, unofficial].
+-    *   Update scales: $s_{new} = s_{old} \exp(\Delta \log s)$ [S1, unofficial].
+-    *   Update opacity-logit, local rotation-vector, and RGB-logit increments using elementwise $a \tanh(\text{raw})$ with $a=0.1, 0.25, 1.0$ respectively [S1, unofficial].
+-    *   Update hidden-state increments using $0.1 \tanh(\text{raw})$ [S1, unofficial].
+-    *   Clamp logit inputs to $[10^{-6}, 1-10^{-6}]$ [S1, unofficial].
+-    *   Gaussian centers, counts, and correspondence remain fixed [S1, unofficial].
+-
+-7.  **Stage II Optimization:**
+-    *   Sample $K_r$ uniformly from $\{1, 2, 3\}$ during training, use 3 at inference [S1, unofficial].
+-    *   Compute outer loss for each view: $\ell_{out} = 0.8 L_1 + 0.2 L_{DSSIM} + 0.5 L_{LPIPS}$ [S1, unofficial].
+-    *   Compute multi-step objective: $\mathcal{L}_{II} = \sum_{k=1}^{K_r} 0.9^{K_r-k} \mathcal{L}_k^{render} + 0.1 \mathcal{L}_{opacity}$ [S1, unofficial].
+-    *   Opacity regularization: $\mathcal{L}_{opacity} = \frac{1}{M} \sum_{m=1}^M [\text{logit}_\epsilon(\alpha_m^{K_r}) - \text{logit}_\epsilon(\alpha_m^0)]^2$ [S1, unofficial].
+-    *   Use first-order surrogate loss for rendering gradients: $r_k = \text{sg}(\nabla_z \mathcal{L}_{render}(z_k))$ where $z_k = \text{sg}(x_k)$ [S1, unofficial].
++- Voxel merging side length: $0.004$ in the scale-normalized reconstruction frame [S1, unofficial].
++- Opacity pruning threshold $\tau_\alpha$: $0.01$ [S1, unofficial].
++- Mask thresholds: $\tau_{abs} = 0.03$, $\tau_{rel} = 0.01$ [S1, unofficial].
++- $gspal$ $eps_{2d}$: $10^{-2}$ [S1, unofficial].
++- Stage I learning rates: $10^{-6}$ for last ten attribute-backbone Transformer blocks, $2 \times 10^{-4}$ for Gaussian head [S1, unofficial].
++- Stage I training steps: $25,000$ steps, $2,000$ steps linear warmup, cosine decay to $0.1$ times peaks [S1, unofficial].
++- Stage II learning rate: $2 \times 10^{-4}$, cosine decay to $0.1$ times initial value, $5,000$ steps [S1, unofficial].
++- AdamW parameters: $\beta = (0.9, 0.95)$, global batch size $16$, global L2 gradient clipping at $1.0$ [S1, unofficial].
++
++**Steps:**
++
++1. **Initialization and Geometry Prediction:**
++   Initialize two branches from pretrained DA3 weights: a frozen geometry branch $\Phi_{geo}$ and a trainable attribute branch $\Phi_{attr}$ [S1, unofficial].
++   Predict depths $\hat{C}$ and cameras $\hat{\Pi}_C$ using $\Phi_{geo}(I_C; Q_C)$ [S1, unofficial].
++   Predict multi-layer patch features $F_C$ using $\Phi_{attr}(I_C; Q_C)$ [S1, unofficial]. Only the last $K$ Transformer blocks of $\Phi_{attr}$ are fine-tuned; $\Phi_{geo}$ remains frozen [S1, unofficial].
++
++2. **Scale Alignment:**
++   Express predicted and GT poses relative to their respective reference cameras (first input view in sorted order) [S1, unofficial].
++   Normalize predicted depths and translations by $s_{norm} > 0$ [S1, unofficial].
++   Fit an Umeyama similarity transform from the GT trajectory to the normalized predicted trajectory using only input-camera center correspondences, retaining its scale $s_C$ [S1, unofficial].
++   Apply scale alignment to translations: $t^\star_v = s_C t^\star_v$, while rotations remain unchanged: $R^\star_v = R^\star_v$ [S1, unofficial].
++
++3. **Gaussian Construction (Stage I):**
++   Construct Gaussian centers from normalized predicted $z$-depth, GT intrinsics, and scale-aligned GT poses [S1, unofficial].
++   Use Feature projection and a DPT decoder to map $F_C$ to per-pixel attributes $\xi$ [S1, unofficial].
++   Perform voxel merging with side length $0.004$ in the scale-normalized reconstruction frame [S1, unofficial].
++   Prune Gaussians with opacity below $\tau_\alpha = 0.01$ after merging and before refinement [S1, unofficial]. Let the initial scene be $G_0$ with $M$ Gaussians [S1, unofficial].
++
++4. **Stage I Rendering and Loss:**
++   Render initial scene $G_0$ into input and target views $v \in V = C \cup T$: $I^b_v = R(G_0; \Pi^\star_v)$ [S1, unofficial].
++   Construct visibility masks $M_v$. A target pixel is retained if it has finite GT depth $> 10^{-6}$, passes validity mask, and satisfies $|z_{proj} - d_{src}| \leq \max(\tau_{abs}, \tau_{rel} d_{src})$ where $z_{proj}$ is point depth in input camera, $d_{src}$ is sampled depth [S1, unofficial].
++   Compute LPIPS spatial distance map $d_v = \text{LPIPS}_{spatial}(M_v \odot I^b_v, M_v \odot I_v)$, with invalid regions zeroed before normalization [S1, unofficial].
++   Compute Stage I loss $\mathcal{L}_I$ aggregating absolute error $e_v(p)$ and $d_v(p)$ over valid pixels:
++   $$ \mathcal{L}_I = \frac{\sum_{v \in V} \sum_p M_v(p) [e_v(p) + d_v(p)]}{\max(1, \sum_{v \in V} \sum_p M_v(p))} $$
++   [S1, unofficial].
++
++5. **Stage II Feature Preparation:**
++   Project DPT features to 8 channels by learnable $1 \times 1$ conv, merge using Gaussian voxel groups/weights, and reuse [S1, unofficial].
++   Initialize 16-dim hidden state via linear projection [S1, unofficial].
++
++6. **Stage II Refinement Loop (Iterative):**
++   For each step $k$ (training samples $K_r \in \{1, 2, 3\}$ uniformly, inference uses $K_r=3$):
++   
++   a. **Feature Concatenation and Processing:**
++      Concatenate image features, current attributes, gradient feedback, neighbor distances, and hidden states. Project to 64 dims [S1, unofficial].
++      Process by four KNN Transformer blocks. Each block contains single-head attention over eight neighbors, LayerNorm, MLP, and residual connections [S1, unofficial].
++      Concatenate output with original input, and use MLP to predict attribute and hidden-state increments [S1, unofficial].
++
++   b. **Attribute Updates:**
++      Scales update as $s_{new} = s_{old} \exp(\Delta \log s)$ without residual clipping [S1, unofficial].
++      Opacity-logit, local rotation-vector, and RGB-logit increments use elementwise $a \tanh(\text{raw})$, with $a = 0.1, 0.25, 1.0$ respectively [S1, unofficial].
++      Hidden-state increments use $0.1 \tanh(\text{raw})$ [S1, unofficial].
++      Logit inputs clamped to $[10^{-6}, 1-10^{-6}]$ [S1, unofficial].
++      Gaussian centers, counts, and correspondence remain fixed [S1, unofficial].
++
++   c. **Loss Computation:**
++      Render current scene into input and target views.
++      Compute feedback loss $\ell_{fb} = 0.8 L_1 + 0.2 L_{DSSIM}$, where $L_{DSSIM} = (1 - \text{SSIM})/2$ over valid regions [S1, unofficial].
++      Gradients w.r.t Gaussian attributes are normalized and detached before entering shared updater [S1, unofficial].
++      Compute outer loss for each supervised view: $\ell_{out} = 0.8 L_1 + 0.2 L_{DSSIM} + 0.5 L_{LPIPS}$ [S1, unofficial].
++      Input and target groups each receive weight $0.5$, with equal weights within each group; invalid views are skipped and remaining weights renormalized [S1, unofficial].
++      Compute multi-step objective:
++      $$ \mathcal{L}_{II} = \sum_{k=1}^{K_r} 0.9^{K_r-k} \mathcal{L}_k^{render} + 0.1 \mathcal{L}_{opacity} $$
++      [S1, unofficial].
++      Opacity regularization:
++      $$ \mathcal{L}_{opacity} = \frac{1}{M} \sum_{m=1}^{M} [\text{logit}_\epsilon(\alpha_m^{K_r}) - \text{logit}_\epsilon(\alpha_m^{0})]^2, \quad \epsilon=10^{-6} $$
++      [S1, unofficial].
++
++   d. **First-Order Surrogate Loss:**
++      Let $x_k$ collect updated log-scale, opacity-logit, local-rotation, and RGB-logit parameters [S1, unofficial].
++      Compute rendering gradients on independent leaf copies $z_k = \text{sg}(x_k)$ to form $r_k = \text{sg}(\nabla_z \mathcal{L}_{render}(z_k))$ [S1, unofficial].
++      Proxy loss: $\mathcal{L}_k^{proxy} = \text{sg}(\mathcal{L}_{render}(z_k)) + \langle x_k - \text{sg}(x_k), r_k \rangle$ [S1, unofficial].
++      Gradient for trainable parameters $\theta$: $\nabla_\theta \mathcal{L}_k^{proxy} = \begin{pmatrix} r_k \end{pmatrix}^\top \frac{\partial x}{\partial \theta}$ [S1, unofficial].
++
++7. **Chunked Execution:**
++   Reuse global KNN graph across steps [S1, unofficial].
++   After stable sorting along longest voxel-coordinate axis, expand core sets of at most $200,000$ points with four-hop neighborhoods [S1, unofficial].
++   Chunks exceeding $300,000$ points are recursively bisected by point count along core sets' longest axes, with neighborhoods recomputed [S1, unofficial].
++   Only core-point outputs retained; training uses gradient checkpointing [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
+-
+-class InfiniSplatV2:
+-    def __init__(self, num_transformer_blocks=10, hidden_dim=16, num_knn_blocks=4, num_neighbors=8):
+-        # Geometry branch (frozen)
+-        self.phi_geo = DA3Backbone(frozen=True)
+-        # Attribute branch (trainable)
+-        self.phi_attr = DA3Backbone(frozen=False)
+-        # Fine-tune only last K blocks of phi_attr
+-        for param in self.phi_attr.parameters():
+-            param.requires_grad = False
+-        for block in self.phi_attr.transformer_blocks[-num_transformer_blocks:]:
+-            block.requires_grad_(True)
+-            
+-        # Gaussian Head (DPT-style)
+-        self.gaussian_head = DPTGaussianHead()
+-        
+-        # Stage II Refiner
+-        self.feature_proj = nn.Conv2d(in_channels=..., out_channels=8, kernel_size=1)
+-        self.hidden_init = nn.Linear(in_features=..., out_features=hidden_dim)
+-        self.refiner_input_proj = nn.Linear(in_features=..., out_features=64)
+-        self.knn_transformer_blocks = nn.ModuleList([
+-            KNNTransformerBlock(num_neighbors=num_neighbors, hidden_dim=64) 
+-            for _ in range(num_knn_blocks)
+-        ])
+-        self.refiner_output_mlp = nn.Sequential(
+-            nn.Linear(in_features=..., out_features=...),
+-            nn.ReLU(),
+-            nn.Linear(in_features=..., out_features=...) # Predicts increments
+-        )
+-        
+-        # Optimizer settings
+-        self.beta = (0.9, 0.95)
+-        self.grad_clip = 1.0
+-        self.lr_stage1_attr = 1e-6
+-        self.lr_stage1_head = 2e-4
+-        self.lr_stage2 = 2e-4
+-        self.warmup_steps = 2000
+-        self.total_steps_stage1 = 25000
+-        self.total_steps_stage2 = 5000
+-        
+-        # Hyperparameters
+-        self.tau_alpha = 0.01
+-        self.tau_abs = 0.03
+-        self.tau_rel = 0.01
+-        self.epsilon = 1e-6
+-        self.a_opacity = 0.1
+-        self.a_rotation = 0.25
+-        self.a_rgb = 1.0
+-        self.a_hidden = 0.1
+-        self.voxel_size = 0.004
+-        self.eps2d = 1e-2
+-
+-    def forward_stage1(self, images, poses=None):
+-        # 1. Feature Extraction
+-        # Phi_geo is frozen
+-        pred_depth, pred_cameras = self.phi_geo(images, poses)
+-        # Phi_attr is partially trainable
+-        features = self.phi_attr(images, poses)
+-        
+-        # 2. Scale Alignment
+-        # Normalize depths and translations
+-        # Fit Umeyama transform from GT trajectory to normalized predicted trajectory
+-        # using input-camera center correspondences
+-        s_C = fit_umeyama_scale(gt_cameras, pred_cameras, pred_depth)
+-        
+-        # Apply scale to translations
+-        aligned_cameras = apply_scale(gt_cameras, s_C)
+-        
+-        # Construct Gaussian centers from normalized predicted z-depth, GT intrinsics, aligned GT poses
+-        centers = backproject(pred_depth, gt_intrinsics, aligned_cameras)
+-        
+-        # 3. Initial Gaussian Prediction
+-        # Map features to per-pixel attributes
+-        attributes = self.gaussian_head(features)
+-        
+-        # Merge into voxels
+-        gaussians = voxel_merge(centers, attributes, self.voxel_size)
+-        
+-        # Prune low opacity
+-        gaussians = prune_opacity(gaussians, self.tau_alpha)
+-        
+-        return gaussians, aligned_cameras
+-
+-    def compute_stage1_loss(self, gaussians, aligned_cameras, images, target_images, target_depths, target_validity_masks):
+-        # Render initial scene
+-        rendered_images = {}
+-        for v in input_views + target_views:
+-            rendered_images[v] = render(gaussians, aligned_cameras[v], self.eps2d)
+-            
+-        # Construct masks
+-        masks = {}
+-        for v in target_views:
+-            masks[v] = construct_mask(
+-                target_depths[v], 
+-                target_validity_masks[v], 
+-                rendered_images[v], 
+-                self.tau_abs, 
+-                self.tau_rel
+-            )
+-            
+-        # Compute LPIPS
+-        lpips_maps = {}
+-        for v in target_views:
+-            # Zero invalid regions before normalization
+-            masked_rendered = masks[v] * rendered_images[v]
+-            masked_gt = masks[v] * target_images[v]
+-            lpips_maps[v] = lpips_spatial(masked_rendered, masked_gt)
+-            
+-        # Aggregate losses
+-        l1_loss = 0
+-        lpips_loss = 0
+-        total_pixels = 0
+-        
+-        for v in input_views + target_views:
+-            mask = masks.get(v, torch.ones_like(rendered_images[v]))
+-            l1_loss += torch.sum(mask * torch.abs(rendered_images[v] - images[v]))
+-            lpips_loss += torch.sum(mask * lpips_maps.get(v, torch.zeros_like(rendered_images[v])))
+-            total_pixels += torch.sum(mask)
+-            
+-        loss = (l1_loss + lpips_loss) / max(1, total_pixels)
+-        return loss
+-
+-    def forward_stage2(self, gaussians, features, hidden_states):
+-        # Project features
+-        projected_features = self.feature_proj(features)
+-        
+-        # Initialize hidden state if not present
+-        if hidden_states is None:
+-            hidden_states = self.hidden_init(projected_features.flatten(1))
+-            
+-        # Concatenate inputs
+-        # Image features, current attributes, gradient feedback, neighbor distances, hidden states
+-        input_concat = concatenate([
+-            projected_features, 
+-            gaussians.attributes, 
+-            gradient_feedback, 
+-            neighbor_distances, 
+-            hidden_states
+-        ])
++def infinisplat_v2(input_images, gt_poses=None, is_pose_free=False):
++    # 1. Initialization
++    # Initialize frozen geometry branch and trainable attribute branch from DA3 weights
++    phi_geo = load_da3_frozen()
++    phi_attr = load_da3_trainable()
++    
++    # 2. Geometry and Feature Prediction
++    pred_depths, pred_cameras = phi_geo(input_images, gt_poses)
++    features = phi_attr(input_images, gt_poses)
++    
++    # 3. Scale Alignment
++    # Normalize predicted depths and translations
++    s_norm = normalize_scale(pred_depths, pred_cameras)
++    norm_pred_depths = pred_depths / s_norm
++    norm_pred_trans = pred_cameras.trans / s_norm
++    
++    # Fit Umeyama transform from GT to normalized predicted using input camera centers
++    # Only scale s_C is retained
++    s_C = fit_umeyama_scale(gt_poses.trans, norm_pred_trans)
++    
++    # Apply scale to GT translations for alignment
++    aligned_gt_trans = gt_poses.trans * s_C
++    aligned_gt_poses = Camera(intrinsics=gt_poses.K, pose=aligned_gt_trans)
++    
++    # 4. Gaussian Construction
++    # Back-project normalized predicted depth using aligned GT poses and intrinsics
++    centers = back_project(norm_pred_depths, aligned_gt_poses.K, aligned_gt_poses.P)
++    
++    # Decode attributes from features
++    attributes = decode_attributes(features)
++    
++    # Voxel merging
++    gaussians = voxel_merge(centers, attributes, voxel_side=0.004)
++    
++    # Prune low opacity
++    gaussians = prune_opacity(gaussians, threshold=0.01)
++    
++    # 5. Stage I Training (Simplified)
++    # Render G0 to input and target views
++    rendered = render(gaussians, aligned_gt_poses)
++    
++    # Construct masks
++    masks = construct_masks(rendered, gt_depths, tau_abs=0.03, tau_rel=0.01)
++    
++    # Compute LPIPS
++    lpips_map = compute_lpips(rendered, gt_images, masks)
++    
++    # Compute Loss L_I
++    loss_I = compute_loss_I(rendered, gt_images, lpips_map, masks)
++    
++    # Update phi_attr (last K blocks) and Gaussian head
++    update_parameters(phi_attr, gaussians.head, loss_I)
++    
++    # 6. Stage II Refinement
++    # Project features to 8 channels
++    projected_features = project_features(features, channels=8)
++    
++    # Initialize hidden state
++    hidden_states = zeros(M, 16)
++    
++    # KNN Graph construction
++    knn_graph = build_knn_graph(gaussians)
++    
++    for step in range(3): # Inference uses 3 updates
++        # Concatenate features, attributes, gradients, distances, hidden states
++        input_concat = concatenate(projected_features, gaussians.attributes, 
++                                   gradients, neighbor_distances, hidden_states)
+         
+         # Project to 64 dims
+-        input_64 = self.refiner_input_proj(input_concat)
+-        
+-        # Process through KNN Transformer blocks
+-        for block in self.knn_transformer_blocks:
+-            input_64 = block(input_64)
+-            
+-        # Concatenate with original input
+-        output_concat = concatenate([input_64, input_concat])
++        input_64 = linear_project(input_concat, out_dim=64)
++        
++        # Process through 4 KNN Transformer blocks
++        output = knn_transformer_blocks(input_64, knn_graph, num_blocks=4)
+         
+         # Predict increments
+-        increments = self.refiner_output_mlp(output_concat)
+-        
+-        return increments, hidden_states
+-
+-    def update_gaussians(self, gaussians, increments):
+-        # Extract increments
+-        delta_log_s = increments['delta_log_s']
+-        delta_opacity_logit = increments['delta_opacity_logit']
+-        delta_rotation = increments['delta_rotation']
+-        delta_rgb_logit = increments['delta_rgb_logit']
+-        delta_hidden = increments['delta_hidden']
+-        
+-        # Update scales
+-        new_scales = gaussians.scales * torch.exp(delta_log_s)
+-        
+-        # Update opacity-logit
+-        new_opacity_logit = gaussians.opacity_logit + self.a_opacity * torch.tanh(delta_opacity_logit)
+-        
+-        # Update rotation
+-        new_rotation = gaussians.rotation + self.a_rotation * torch.tanh(delta_rotation)
+-        
+-        # Update RGB-logit
+-        new_rgb_logit = gaussians.rgb_logit + self.a_rgb * torch.tanh(delta_rgb_logit)
+-        
+-        # Update hidden state
+-        new_hidden = gaussians.hidden + self.a_hidden * torch.tanh(delta_hidden)
+-        
+-        # Clamp logit inputs
+-        new_opacity_logit = torch.clamp(new_opacity_logit, self.epsilon, 1 - self.epsilon)
+-        new_rgb_logit = torch.clamp(new_rgb_logit, self.epsilon, 1 - self.epsilon)
+-        
+-        # Create new Gaussians
+-        new_gaussians = Gaussians(
+-            centers=gaussians.centers, # Fixed
+-            scales=new_scales,
+-            opacity_logit=new_opacity_logit,
+-            rotation=new_rotation,
+-            rgb_logit=new_rgb_logit,
+-            hidden=new_hidden
+-        )
+-        
+-        return new_gaussians
+-
+-    def compute_stage2_loss(self, gaussians, images, target_images, target_depths, target_validity_masks):
+-        # Render current scene
+-        rendered_images = {}
+-        for v in input_views + target_views:
+-            rendered_images[v] = render(gaussians, aligned_cameras[v], self.eps2d)
+-            
+-        # Compute feedback loss for input views
+-        l1_fb = 0
+-        dssim_fb = 0
+-        for v in input_views:
+-            l1_fb += torch.mean(torch.abs(rendered_images[v] - images[v]))
+-            dssim_fb += (1 - ssim(rendered_images[v], images[v])) / 2
+-            
+-        feedback_loss = 0.8 * l1_fb + 0.2 * dssim_fb
+-        
+-        # Compute gradients w.r.t attributes
+-        gradients = torch.autograd.grad(feedback_loss, gaussians.attributes, retain_graph=True)
+-        gradients = [g / (torch.norm(g) + 1e-8) for g in gradients] # Normalize
+-        gradients = [g.detach() for g in gradients] # Detach
+-        
+-        # Compute outer loss for all views
+-        l1_out = 0
+-        dssim_out = 0
+-        lpips_out = 0
+-        total_pixels = 0
+-        
+-        for v in input_views + target_views:
+-            mask = construct_mask(target_depths[v], target_validity_masks[v], rendered_images[v], self.tau_abs, self.tau_rel)
+-            l1_out += torch.sum(mask * torch.abs(rendered_images[v] - images[v]))
+-            dssim_out += torch.sum(mask * (1 - ssim(rendered_images[v], images[v]))) / 2
+-            lpips_out += torch.sum(mask * lpips_spatial(rendered_images[v], images[v]))
+-            total_pixels += torch.sum(mask)
+-            
+-        outer_loss = (0.8 * l1_out + 0.2 * dssim_out + 0.5 * lpips_out) / max(1, total_pixels)
+-        
+-        # Multi-step objective
+-        # Sample K_r
+-        K_r = torch.randint(1, 4, (1,)).item()
+-        
+-        # Compute opacity regularization
+-        opacity_reg = torch.mean((gaussians.opacity_logit[-1] - gaussians.opacity_logit[0])**2)
+-        
+-        # Aggregate
+-        loss = sum([0.9**(K_r-k) * outer_loss for k in range(1, K_r+1)]) + 0.1 * opacity_reg
+-        
+-        return loss, gradients
+-
+-    def train_stage1(self, images, poses=None):
+-        gaussians, aligned_cameras = self.forward_stage1(images, poses)
+-        loss = self.compute_stage1_loss(gaussians, aligned_cameras, images, target_images, target_depths, target_validity_masks)
+-        loss.backward()
+-        torch.nn.utils.clip_grad_norm_(self.phi_attr.parameters(), self.grad_clip)
+-        torch.nn.utils.clip_grad_norm_(self.gaussian_head.parameters(), self.grad_clip)
+-        optimizer.step()
+-        optimizer.zero_grad()
+-
+-    def train_stage2(self, gaussians, features, hidden_states):
+-        increments, new_hidden = self.forward_stage2(gaussians, features, hidden_states)
+-        loss, gradients = self.compute_stage2_loss(gaussians, images, target_images, target_depths, target_validity_masks)
+-        
+-        # First-order surrogate loss
+-        # Compute rendering gradients on independent leaf copies
+-        z_k = gaussians.attributes.detach()
+-        r_k = torch.autograd.grad(loss, z_k, retain_graph=True)[0]
+-        r_k = r_k.detach()
+-        
+-        # Update attributes using increments
+-        new_gaussians = self.update_gaussians(gaussians, increments)
+-        
+-        # Backpropagate through update
+-        loss.backward()
+-        torch.nn.utils.clip_grad_norm_(self.refiner.parameters(), self.grad_clip)
+-        optimizer.step()
+-        optimizer.zero_grad()
++        attr_increments, hidden_increments = predict_increments(output)
++        
++        # Update attributes
++        # Scales: s_new = s_old * exp(delta_log_s)
++        gaussians.scales = gaussians.scales * exp(attr_increments.log_scale)
++        
++        # Opacity, Rotation, RGB: a * tanh(raw)
++        gaussians.opacity_logits = clamp(gaussians.opacity_logits + 0.1 * tanh(attr_increments.opacity_raw), 1e-6, 1-1e-6)
++        gaussians.rotation_vec = gaussians.rotation_vec + 0.25 * tanh(attr_increments.rot_raw)
++        gaussians.rgb_logits = clamp(gaussians.rgb_logits + 1.0 * tanh(attr_increments.rgb_raw), 1e-6, 1-1e-6)
++        
++        # Hidden state update
++        hidden_states = hidden_states + 0.1 * tanh(hidden_increments)
++        
++        # Compute Loss L_II
++        rendered_refined = render(gaussians, aligned_gt_poses)
++        loss_fb = compute_feedback_loss(rendered_refined, gt_images)
++        loss_out = compute_outer_loss(rendered_refined, gt_images, masks)
++        loss_opacity = compute_opacity_reg(gaussians)
++        loss_II = weighted_sum(loss_out, loss_opacity)
++        
++        # First-order surrogate
++        z_k = stop_gradient(gaussians.attributes)
++        r_k = stop_gradient(gradient(render(z_k, aligned_gt_poses), z_k))
++        proxy_loss = stop_gradient(render(gaussians, aligned_gt_poses)) + dot(gaussians.attributes - stop_gradient(gaussians.attributes), r_k)
++        
++        update_parameters(phi_attr.refiner, gaussians.refiner_head, proxy_loss)
++        
++        # Chunked execution for next step (recompute KNN if needed, but graph is reused)
++        # Only core points retained
++        gaussians = retain_core_points(gaussians)
++
++    return gaussians
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Stage I is dominated by the forward pass of the DA3 backbone and the Gaussian head. Stage II involves KNN graph construction and multiple transformer blocks, with chunked execution for large scenes [S1, unofficial].
+-*   **Memory Complexity:** Depends on the number of Gaussians $M$ and the hidden state size (16 dims) [S1, unofficial]. Chunked execution limits peak memory usage during Stage II refinement [S1, unofficial].
+-*   **Measured Performance:** On six datasets, InfiniSplat v2 achieves state-of-the-art mean LPIPS and DISTS in both pose-conditioned and pose-free settings. In the pose-conditioned setting, mean LPIPS and DISTS decrease by 25.8% and 32.9%, respectively, compared with the strongest evaluated baselines [S1, unofficial].
+-*   **Strengths:** Decoupled geometry and attribute prediction prevents geometric degradation. GT pose alignment avoids pose errors under large-angle supervision. Large-angle target view supervision improves rendering quality under large viewpoint changes. Opacity learning suppresses geometrically inconsistent points (outliers) [S1, unofficial].
+-*   **Limitations:** Requires GT camera poses for alignment during training. Jointly optimizing geometry and Gaussian attributes leads to geometric degradation (mitigated by freezing geometry branch) [S1, unofficial].
+-*   **When to use:** When high-quality novel view rendering under large viewpoint changes is required, and GT camera poses are available for training.
+-*   **When not to use:** When GT camera poses are not available and pose-free generalization is critical without the specific large-angle supervision benefits, or when computational resources are limited for the two-stage training process [S1, unofficial].
++**Time and Memory Complexity:**
++The method uses chunked execution with a global KNN graph. Core sets are limited to $200,000$ points, and chunks exceeding $300,000$ points are recursively bisected [S1, unofficial]. Training uses gradient checkpointing [S1, unofficial].
++
++**Measured Performance:**
++Evaluated on six datasets (DL3DV, ETH3D, NRGBD, Mip-NeRF 360, RE10K, DTU) with $N=4, 8, 16$ input views [S1, unofficial]. In the pose-conditioned setting, mean LPIPS and DISTS decrease by $25.8\%$ and $32.9\%$, respectively, compared with the strongest evaluated baselines [S1, unofficial].
++
++**Strengths and Limitations:**
++- **Strengths:** Improves rendering quality under large viewpoint changes; decouples geometry and attribute prediction to prevent geometric degradation; uses GT poses to avoid pose errors; effective in both pose-conditioned and pose-free settings [S1, unofficial].
++- **Limitations:** Requires GT camera poses for alignment during training; joint optimization of geometry and attributes is avoided, which may limit flexibility in some scenarios [S1, unofficial].
++
++**When to Use:**
++Use when high-quality novel view rendering under large viewpoint changes is required, and GT camera poses are available for training alignment [S1, unofficial].
++
++**When Not to Use:**
++Avoid if GT camera poses are not available and pose-free performance is critical without the specific large-angle supervision benefits [S1, unofficial].
+ 
+ ## Background
+-InfiniSplat v2 was introduced by Lin et al. in 2025/2026 as an improvement over DA3-GS and InfiniSplat [S1, unofficial]. It addresses limitations in Gaussian attribute learning, specifically flying-point artifacts and pose errors under large-angle supervision [S1, unofficial]. The method builds on the shared principles of feed-forward generalizable reconstruction, such as using a shared encoder and differentiable rendering [16746-feed-forward-generalizable-reconstruction.md].
++InfiniSplat v2 was introduced by Lin et al. in 2025/2026 as an improvement over DA3-GS and InfiniSplat [S1, unofficial]. It addresses limitations in Gaussian attribute learning, such as flying-point artifacts and pose errors, by freezing the geometry branch, using GT poses for alignment, and employing large-angle target view supervision [S1, unofficial].
+ 
+ ## Sources

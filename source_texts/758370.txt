@@ -1,0 +1,388 @@
+Thanks for your great library 👍 🐛 Bugs / Unexpected behaviors I tried to write my custom PointsRenderer class to render a colored pointcloud with an fov orthographic camera. But it turns out the tensor contained in the dists attribute co...
+
+🐛 Rasterizer returns correct zbuf but empty dists, and z_near doesnt work · Issue #1157 · facebookresearch/pytorch3d · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+🐛 Rasterizer returns correct zbuf but empty dists, and z_near doesnt work #1157
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+🐛 Rasterizer returns correct zbuf but empty dists, and z_near doesnt work#1157
+Copy link
+Labels
+how toHow to use PyTorch3D in my projectHow to use PyTorch3D in my project
+Description
+ThomasParistech
+opened on Apr 5, 2022
+Issue body actions
+Thanks for your great library 👍
+🐛 Bugs / Unexpected behaviors
+I tried to write my custom PointsRenderer class to render a colored pointcloud with an fov orthographic camera. But it turns out the tensor contained in the dists attribute computed by the rasterizer only contains zero or -1 values. On the other hand the zbuf attribute is alright.
+The z_near and z_far also don't seem to have any effect.
+Instructions To Reproduce the Issue:
+My specs:
+pytorch3d==0.6.1
+torch==1.10.0+cu111
+torchaudio==0.10.0
+torchvision==0.11.1+cu111
+In the example below, the camera is located at (0,2,0), looks towards -Y and there are a red plane at Y=-1 and a green plane at Y=1.
+Even though I explicitly ask for z_near=2.0 I still see the green plane in the rendered image.
+```
+# /usr/bin/python3
+"""Image Renderer."""
+import matplotlib.pyplot as plt
+import numpy as np
+import pytorch3d.structures as torch3d
+import torch
+from pytorch3d.renderer import NormWeightedCompositor
+from pytorch3d.renderer import PointsRasterizationSettings
+from pytorch3d.renderer import PointsRasterizer
+from pytorch3d.renderer.cameras import FoVOrthographicCameras
+from torch import nn
+
+DEVICE = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+
+def generate_colored_planes(n_pts: int) -> torch3d.Pointclouds:
+    """Generate red plane at y=-1, green plane at y=1"""
+    verts = torch.rand(n_pts, 3) * 2.0 - 1.0
+    colors = torch.zeros(n_pts, 3)
+
+    half_n = int(n_pts/2)
+    verts[:half_n, 1] = -1  # Red floor at Y=-1
+    colors[:half_n] = torch.Tensor([1., 0., 0.])
+
+    verts[half_n:, 1] = 1  # Green ceiling at Y=1
+    colors[half_n:] = torch.Tensor([0., 1., 0.])
+
+    return torch3d.Pointclouds(points=[verts], features=[colors]).to(device=DEVICE)
+
+
+class ImageRenderer(nn.Module):
+    def __init__(self,
+                 rasterizer,
+                 compositor):
+        super().__init__()
+        self.rasterizer = rasterizer
+        self.compositor = compositor
+
+    def forward(self, point_clouds, **kwargs) -> torch.Tensor:
+        fragments = self.rasterizer(point_clouds, **kwargs)
+
+        # Construct weights based on the distance of a point to the true point.
+        # However, this could be done differently: e.g. predicted as opposed
+        # to a function of the weights.
+        r = self.rasterizer.raster_settings.radius
+
+        print(f"{torch.min(fragments.dists[fragments.dists >=0])=}")
+        print(f"{torch.max(fragments.dists[fragments.dists >=0])=}")
+        print(f"{torch.min(fragments.zbuf[fragments.zbuf >=0])=}")
+        print(f"{torch.max(fragments.zbuf[fragments.zbuf >=0])=}")
+
+        dists2 = fragments.dists.permute(0, 3, 1, 2)
+        weights = 1 - dists2 / (r * r)
+        images = self.compositor(
+            fragments.idx.long().permute(0, 3, 1, 2),
+            weights,
+            point_clouds.features_packed().permute(1, 0),
+            **kwargs,
+        )
+
+        # permute so image comes at the end
+        images = images.permute(0, 2, 3, 1)
+
+        return images
+
+
+def render_pcd(pcd: torch3d.Pointclouds,
+               rotations: torch.Tensor,
+               translations: torch.Tensor,
+               z_near: float,
+               z_far: float,
+               focal_length: int = 100,
+               width: int = 256):
+    cameras = FoVOrthographicCameras(
+        znear=z_near,
+        zfar=z_far,
+        R=rotations,
+        T=translations,
+        device=DEVICE,
+        scale_xyz=((2*focal_length/width,
+                    2*focal_length/width,
+                    1.0),)
+    )
+
+    raster_settings = PointsRasterizationSettings(
+        image_size=(width, width),
+        radius=0.01,
+        points_per_pixel=3
+    )
+
+    rasterizer = PointsRasterizer(
+        cameras=cameras,
+        raster_settings=raster_settings
+    )
+
+    renderer = ImageRenderer(
+        rasterizer=rasterizer,
+        compositor=NormWeightedCompositor()
+    )
+    return torch.squeeze(renderer(pcd))
+
+
+cube_pcd = generate_colored_planes(100000)
+
+# Topview: looking towards -Y from (0,2,0)
+rotations = torch.Tensor([[[1., 0., 0.],
+                         [0., 0., -1.],
+                         [0., 1., 0.]]]).to(device=DEVICE)
+translations = torch.Tensor([[0., 0., 2.]]).to(device=DEVICE)
+
+torch_img = render_pcd(cube_pcd, rotations, translations,
+                       z_near=2.0,  # we shouldn't see the red plane
+                       z_far=10)
+
+img = (torch_img.cpu().numpy()*255).astype(np.uint8)
+
+plt.ioff()
+plt.figure(figsize=(10, 10))
+plt.imshow(img)
+plt.show()
+```
+Here's the output
+```
+torch.min(fragments.dists[fragments.dists >=0])=tensor(9.8953e-10, device='cuda:0')
+torch.max(fragments.dists[fragments.dists >=0])=tensor(9.9999e-05, device='cuda:0')
+torch.min(fragments.zbuf[fragments.zbuf >=0])=tensor(1., device='cuda:0')
+torch.max(fragments.zbuf[fragments.zbuf >=0])=tensor(3., device='cuda:0')
+```
+Activity
+gkioxari
+added
+how toHow to use PyTorch3D in my projectHow to use PyTorch3D in my project
+on Apr 5, 2022
+gkioxari commented on Apr 5, 2022
+gkioxari
+on Apr 5, 2022
+Contributor
+More actions
+The dists attribute is the 2D distance of each pixel to the corresponding 3D point (indexed by the appropriate fragments attribute). Not sure what the error is here? What would you expect to see?
+👍React with 👍1Reacted by Thomas Rouch
+ThomasParistech commented on Apr 5, 2022
+ThomasParistech
+on Apr 5, 2022
+Author
+More actions
+My bad. I wasn't sure about the meaning of the attribute 'dists'. And since it lies in [1e-9, 1e-4] I first thought it might be an error, which could explain the wrong rendered image
+My real issue is that I don't manage to properly set znear and zfar. I expect to see only red points on the image.
+I assumed that setting the znear and zfar parameters of the camera would define the vision frustum. Why do I still see points closer than znear in the rendered image ?
+What are znear and zfar of the camera used for during the rendering?
+Is there another way to specify the vision frustum? Or do I have to filter manually using zbuf ?
+gkioxari commented on Apr 5, 2022
+gkioxari
+on Apr 5, 2022
+Contributor
+More actions
+My real issue is that I don't manage to properly set znear and zfar. I expect to see only red points on the image.
+znear and zfar define the camera transform. So you should check what the meaning of znear/zfar is in that camera. Different cameras have different definitions. This means that you should check the camera definition you are using in the code and answer your question. I could look for you and give you the answer but I think that's an exercise users should do because it directly affects your project and having a complete understanding of it is important. In general, it's all math and the answer is in the code!
+ThomasParistech commented on Apr 5, 2022
+ThomasParistech
+on Apr 5, 2022
+Author
+More actions
+I thought the definition of znear and zfar was consistent with the depth value returned by zbuf
+I'll dive deeper into the camera definition then !
+ThomasParistech commented on Apr 6, 2022
+ThomasParistech
+on Apr 6, 2022
+Last edited by ThomasParistech
+Author
+More actions
+Unfortunately, there's an ambiguous TODO in the code and the pointclouds are not passed as they're supposed to be.
+When I call the PointsRasterizer::forward on a pointcloud, it first converts the pointcloud to the NDC space using the camera model (PointsRasterizer::transform).
+But this transform method overwrites the NDC depth using the Z from the camera space instead.
+pts_ndc[..., 2] = pts_view[..., 2]
+```
+def transform(self, point_clouds, **kwargs) -> torch.Tensor:
+        """
+        Args:
+            point_clouds: a set of point clouds
+
+        Returns:
+            points_proj: the points with positions projected
+            in NDC space
+
+        NOTE: keeping this as a separate function for readability but it could
+        be moved into forward.
+        """
+        cameras = kwargs.get("cameras", self.cameras)
+        if cameras is None:
+            msg = "Cameras must be specified either at initialization \
+                or in the forward pass of PointsRasterizer"
+            raise ValueError(msg)
+
+        pts_world = point_clouds.points_padded()
+        # NOTE: Retaining view space z coordinate for now.
+        # TODO: Remove this line when the convention for the z coordinate in
+        # the rasterizer is decided. i.e. retain z in view space or transform
+        # to a different range.
+        eps = kwargs.get("eps", None)
+        pts_view = cameras.get_world_to_view_transform(**kwargs).transform_points(
+            pts_world, eps=eps
+        )
+        # view to NDC transform
+        to_ndc_transform = cameras.get_ndc_camera_transform(**kwargs)
+        projection_transform = cameras.get_projection_transform(**kwargs).compose(
+            to_ndc_transform
+        )
+        pts_ndc = projection_transform.transform_points(pts_view, eps=eps)
+
+        pts_ndc[..., 2] = pts_view[..., 2]
+        point_clouds = point_clouds.update_padded(pts_ndc)
+        return point_clouds
+```
+From that, the PointsRasterizer calls the rasterize_points on a poincloud that has x,y in NDC but z in camera space.
+```
+    def forward(self, point_clouds, **kwargs) -> PointFragments:
+        """
+        Args:
+            point_clouds: a set of point clouds with coordinates in world space.
+        Returns:
+            PointFragments: Rasterization outputs as a named tuple.
+        """
+        points_proj = self.transform(point_clouds, **kwargs)
+        raster_settings = kwargs.get("raster_settings", self.raster_settings)
+        idx, zbuf, dists2 = rasterize_points(
+            points_proj,
+            image_size=raster_settings.image_size,
+            radius=raster_settings.radius,
+            points_per_pixel=raster_settings.points_per_pixel,
+            bin_size=raster_settings.bin_size,
+            max_points_per_bin=raster_settings.max_points_per_bin,
+        )
+        return PointFragments(idx=idx, zbuf=zbuf, dists=dists2)
+```
+According to the doc, rasterize_points expect NDC z in [-1,1]. (even [0,1] since znear maps to 0 and zfar to 1)
+```
+def rasterize_points(
+    pointclouds,
+    image_size: Union[int, List[int], Tuple[int, int]] = 256,
+    radius: Union[float, List, Tuple, torch.Tensor] = 0.01,
+    points_per_pixel: int = 8,
+    bin_size: Optional[int] = None,
+    max_points_per_bin: Optional[int] = None,
+):
+    ....
+    Args:
+        pointclouds: A Pointclouds object representing a batch of point clouds to be
+            rasterized. This is a batch of N pointclouds, where each point cloud
+            can have a different number of points; the coordinates of each point
+            are (x, y, z). The coordinates are expected to
+            be in normalized device coordinates (NDC): [-1, 1]^3 with the camera at
+            (0, 0, 0); In the camera coordinate frame the x-axis goes from right-to-left,
+            the y-axis goes from bottom-to-top, and the z-axis goes from back-to-front.
+    ....
+```
+I can't see the implementation of _C.rasterize_points(*args) but in its naive python counterpart rasterize_points_python there's a check on the z value to see if it's visible. I don't understand how it could possibly work since the z value isn't in the NDC space.
+```
+points_packed = pointclouds.points_packed()
+....
+px, py, pz = points_packed[p, :]
+if pz < 0:
+     continue
+```
+By the way, I tried crazy values for znear and zfar in the example above and I always get the same rendered image with green on top and red dots below. Which makes me think that it's not a just a matter of properly tuning the value (x2, scale...etc)
+You were completely right in telling me to look a the math/code, but here it looks like znear and zfar parameters are ignored during the clipping due to pts_ndc[..., 2] = pts_view[..., 2]
+Am I still missing a point? 😅
+ThomasParistech commented on Apr 19, 2022
+ThomasParistech
+on Apr 19, 2022
+Last edited by ThomasParistech
+Author
+More actions
+@gkioxari Since in practice only negative depths are pruned out (equivalent to znear=0, zfar=+inf), we can shift the orthographical camera by a length znear - epsilon along the front vector, render the image and filter out pixels at which zbuf is larger than z_far - znear + epsilon
+It's not very clean but it does the job... ;)
+N.B. Of course it works only for orthographic cameras
+ThomasParistech commented on May 13, 2022
+ThomasParistech
+on May 13, 2022
+Author
+More actions
+Are you planning to update the z coordinate convention used in the rasterizer to make orthographic znear and zfar clip work?
+github-actions commented on Jun 13, 2022
+github-actionsBot
+on Jun 13, 2022
+More actions
+This issue is stale because it has been open 30 days with no activity. Remove stale label or comment or this will be closed in 5 days.
+github-actions
+added
+Stale
+on Jun 13, 2022
+github-actions commented on Jun 19, 2022
+github-actionsBot
+on Jun 19, 2022
+More actions
+This issue was closed because it has been stalled for 5 days with no activity.
+github-actions
+closed this as completedon Jun 19, 2022
+bottler
+reopened this on Jul 5, 2022
+bottler
+removed
+Stale
+on Jul 5, 2022
+github-actions commented on Aug 5, 2022
+github-actionsBot
+on Aug 5, 2022
+More actions
+This issue is stale because it has been open 30 days with no activity. Remove stale label or comment or this will be closed in 5 days.
+github-actions
+added
+Stale
+on Aug 5, 2022
+github-actions commented on Aug 11, 2022
+github-actionsBot
+on Aug 11, 2022
+More actions
+This issue was closed because it has been stalled for 5 days with no activity.
+github-actions
+closed this as completedon Aug 11, 2022
+bottler
+reopened this on Aug 16, 2022
+bottler
+removed
+Stale
+on Aug 16, 2022
+zhaomingheyuhan commented on Aug 12, 2023
+zhaomingheyuhan
+on Aug 12, 2023
+Last edited by zhaomingheyuhan
+More actions
+Has this problem been resolved? I'm also confused that
+# pyre-fixme[16]: Module pytorch3d has no attribute _C.
+idx, zbuf, dists = _C.rasterize_points(*args)
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+how toHow to use PyTorch3D in my projectHow to use PyTorch3D in my project
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

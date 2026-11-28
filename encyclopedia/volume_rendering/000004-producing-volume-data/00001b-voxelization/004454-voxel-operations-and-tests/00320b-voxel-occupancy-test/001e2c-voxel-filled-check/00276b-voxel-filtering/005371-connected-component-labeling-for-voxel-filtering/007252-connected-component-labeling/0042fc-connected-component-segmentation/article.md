@@ -1,0 +1,84 @@
+# Connected Component Segmentation
+
+Also called: Largest Connected Component Extraction, Spine Segmentation via Otsu Thresholding and Connected Components
+
+## Overview
+This method isolates a specific anatomical structure (e.g., the spine) from a medical volume by combining automatic thresholding with connected component analysis. It differs from general [Connected Component Labeling](20133-connected-component-labeling.md) by explicitly selecting the largest component as the final segmentation mask, thereby filtering out noise and smaller artifacts.
+
+## How it works
+**Inputs:** 3D volume data $V$ (float or int).
+**Outputs:** Binary segmentation mask $M$ (uint8, 1 for spine, 0 otherwise).
+
+1.  **Thresholding:** Compute an automatic threshold $T$ using Otsu's method on $V$. Create a binary mask $B$ where $B(x,y,z) = 1$ if $V(x,y,z) > T$, else $0$.
+2.  **Labeling:** Label connected components in $B$ using 4-connectivity (connectivity=1). Let $L(x,y,z)$ be the label ID for each voxel. Let $N$ be the total number of unique labels.
+3.  **Selection:** Calculate the area (voxel count) for each label $k \in \{1, \dots, N\}$. Identify the label $k_{max}$ with the maximum area.
+4.  **Masking:** Generate $M$ where $M(x,y,z) = 1$ if $L(x,y,z) == k_{max}$, else $0$. Cast $M$ to uint8.
+
+**Parameters:**
+*   Connectivity: 1 (4-connectivity in 2D slice context, or specific 3D neighbor definition as per source).
+*   Thresholding: Otsu's method.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def connected_component_segmentation(volume: np.ndarray) -> np.ndarray:
+    # Step 1: Otsu Thresholding
+    # Otsu's method calculates T to minimize intra-class variance
+    T = compute_otsu_threshold(volume)
+    
+    # Create binary mask
+    binary_mask = (volume > T).astype(np.uint8)
+    
+    # Step 2: Connected Component Labeling
+    # Using connectivity=1 (4-connectivity) as specified in source
+    labels, num_labels = label_connected_components(binary_mask, connectivity=1)
+    
+    # Step 3: Identify Largest Component
+    # Calculate area (number of voxels) for each label
+    areas = np.zeros(num_labels + 1, dtype=np.int64)
+    for k in range(1, num_labels + 1):
+        areas[k] = np.sum(labels == k)
+        
+    # Find label with max area
+    largest_label = np.argmax(areas)
+    
+    # Step 4: Create Final Mask
+    segmentation_mask = (labels == largest_label).astype(np.uint8)
+    
+    return segmentation_mask
+
+def compute_otsu_threshold(volume: np.ndarray) -> float:
+    # Flatten volume to histogram
+    hist, bin_edges = np.histogram(volume, bins=256, range=(volume.min(), volume.max()))
+    # Standard Otsu implementation on histogram
+    # ... (standard algorithm) ...
+    return threshold_value
+
+def label_connected_components(binary_mask: np.ndarray, connectivity: int) -> tuple:
+    # Standard 2D/3D connected component labeling algorithm
+    # Returns labels array and count of unique labels
+    # ... (implementation details) ...
+    return labels, num_labels
+```
+
+## Subtopics
+
+### [Connected Component Labeling via Union-Find](14247-connected-component-labeling-via-union-find.md)
+Uses Union-Find with Chebyshev distance. Suitable for raster images prior to 3D manufacturing.
+
+### [Level-Set Graph Traversal for IV Decomposition](19443-level-set-graph-traversal-for-iv-decomposition.md)
+Traverses level-set graphs for nested feature decomposition. Distinguished by explicit topological graph construction.
+
+## Operating characteristics
+**Time Complexity:** Dominated by Otsu thresholding ($O(N)$) and Connected Component Labeling ($O(N \alpha(N))$ where $\alpha$ is inverse Ackermann function).
+**Memory Complexity:** $O(N)$ for binary mask, labels, and areas.
+**Strengths:** Automatic thresholding removes manual parameter tuning. Largest component selection effectively filters noise.
+**Limitations:** Relies on Otsu's assumption of bimodal histogram, which may fail in complex medical data. Connectivity definition (4 vs 8/26) significantly impacts results.
+**When to use:** Spine segmentation in medical volumes where the spine is the dominant high-intensity structure.
+
+## Background
+Originated in medical image processing for spine segmentation. Cited in [S1, unofficial] as part of a GPU-based visualization pipeline.
+
+## Sources
+[S1] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)

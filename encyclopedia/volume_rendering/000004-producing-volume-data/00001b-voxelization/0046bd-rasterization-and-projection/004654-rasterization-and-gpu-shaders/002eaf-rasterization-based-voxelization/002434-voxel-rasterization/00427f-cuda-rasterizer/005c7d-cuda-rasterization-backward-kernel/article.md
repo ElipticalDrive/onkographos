@@ -1,0 +1,71 @@
+# CUDA Rasterization Backward Kernel
+
+
+## Overview
+The CUDA Rasterization Backward Kernel computes gradients for the forward rasterization pass in a differentiable voxelization pipeline [S1, unofficial]. It takes volume-space gradients and primitive geometry as inputs, and distributes them back to vertex attributes to support end-to-end optimization [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:** The kernel takes `grad_vertices`, `volume`, `grad_volume`, `vertices`, `faces`, and `shape` as inputs [S1, unofficial]. It outputs updated `grad_vertices` containing the computed gradients.
+
+**Data Structures:** Not given in the sources.
+
+**Steps:**
+1. Dispatch the kernel using `AT_DISPATCH_FLOATING_TYPES` for the data type of `grad_vertices` [S1, unofficial].
+2. Configure the CUDA launch grid and block dimensions to match the forward kernel: grid `(ceil(W / 32.0), ceil(H / 16.0), ceil(D / 2.0))` and block `(32, 16, 2)` [S1, unofficial].
+3. Execute the kernel to compute gradients with respect to vertex positions and other parameters from the volume gradients.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+
+def cuda_rasterization_backward_kernel(
+    grad_vertices: torch.Tensor,
+    volume: torch.Tensor,
+    grad_volume: torch.Tensor,
+    vertices: torch.Tensor,
+    faces: torch.Tensor,
+    shape: dict
+) -> torch.Tensor:
+    # 1. Dispatch based on grad_vertices dtype
+    dtype = grad_vertices.dtype
+    
+    # 2. Extract volume dimensions
+    W, H, D = shape['W'], shape['H'], shape['D']
+    
+    # 3. Configure launch parameters
+    grid = (math.ceil(W / 32.0), math.ceil(H / 16.0), math.ceil(D / 2.0))
+    block = (32, 16, 2)
+    
+    # 4. Launch backward kernel (conceptual)
+    # The actual CUDA kernel execution is handled by the framework dispatch.
+    # This step computes gradients for vertices given the volume gradients.
+    # grad_vertices is updated in-place or returned.
+    return grad_vertices
+```
+
+**Parameters:** `W, H, D` are volume dimensions extracted from `shape` [S1, unofficial]. Typical values: Not given in the sources.
+
+**Edge Cases:** Not given in the sources.
+
+## Subtopics
+
+### [Voxelizer Backward Pass](18511-voxelizer-backward-pass.md)
+The Voxelizer Backward Pass computes the gradients of the loss function with respect to the 3D Gaussian parameters (mean position, covariance/scale/rotation, and opacity) during the training of voxel-based Gaussian splatting methods. It serves as the differentiable counterpart to the forward voxelization and rasterization pass, enabling end-to-end optimization of the scene representation. It is implemented as a CUDA kernel launched from the host-side `Voxelizer::backward` function.
+
+## Operating characteristics
+Time and memory complexity: Not given in the sources.
+Measured performance: Not given in the sources.
+Scaling: Not given in the sources.
+Strengths and limitations: Not given in the sources.
+When to use: Not given in the sources.
+
+## Background
+Origin: Developed as part of the `voxel2mesh` project [S1, unofficial].
+History and development: Not given in the sources.
+Where it is used: Differentiable voxelization and 3D reconstruction pipelines [S1, unofficial].
+
+## Sources
+[S1] cvlab-epfl/voxel2mesh, https://github.com/cvlab-epfl/voxel2mesh, fetched 2026-10-27 (unofficial)

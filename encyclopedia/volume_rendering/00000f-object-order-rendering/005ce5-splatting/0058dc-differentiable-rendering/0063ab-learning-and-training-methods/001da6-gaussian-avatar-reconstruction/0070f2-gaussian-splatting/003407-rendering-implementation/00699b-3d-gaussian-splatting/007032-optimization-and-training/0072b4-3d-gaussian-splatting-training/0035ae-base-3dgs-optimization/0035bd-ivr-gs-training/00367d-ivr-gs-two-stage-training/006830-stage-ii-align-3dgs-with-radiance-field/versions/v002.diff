@@ -1,0 +1,343 @@
+--- v001.md
++++ v002.md
+@@ -10,7 +10,7 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   A set of $n$ Gaussians $\{G_i\}$ with parameters $\{p_i, r_i, s_i, H_i, \alpha_i\}$ at rest shape.
++*   A set of $n$ Gaussians $\{G_i\}$ with parameters $\{p_i, r_i, s_i, H_i, \alpha_i\}$ at rest shape [S1].
+ *   A deformation graph defined by control points (selected via Furthest Point Sampling from Gaussian centers) and KNN edge connections [S1].
+-*   A rest-shape radiance field representation.
++*   A rest-shape radiance field representation [S1].
+ *   Hyperparameters: $\lambda_{lpf}$ (low-pass filter bandwidth), $n_{dim}$ (sample points per axis), $\lambda_1, \lambda_2$ (error weights) [S1].
+ 
+@@ -20,9 +20,9 @@
+ ### Data Structures
+ *   **Gaussian $i$**:
+-    *   $p_i \in \mathbb{R}^3$: Position.
+-    *   $r_i \in \mathbb{R}^4$: Rotation (quaternion).
+-    *   $s_i \in \mathbb{R}^3$: Scaling.
+-    *   $H_i$: Spherical Harmonics coefficients.
+-    *   $\alpha_i$: Opacity (raw scalar).
++    *   $p_i \in \mathbb{R}^3$: Position [S1].
++    *   $r_i \in \mathbb{R}^4$: Rotation (quaternion) [S1].
++    *   $s_i \in \mathbb{R}^3$: Scaling [S1].
++    *   $H_i$: Spherical Harmonics coefficients [S1].
++    *   $\alpha_i$: Opacity (raw scalar) [S1].
+     *   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix, computed from $r_i, s_i$ [S1].
+ *   **Sample Points**:
+@@ -43,5 +43,5 @@
+ $$
+ 
+-where $G_i(x)$ is the Gaussian kernel:
++where $G_i(x)$ is the Gaussian kernel [S1]:
+ 
+ $$
+@@ -49,5 +49,5 @@
+ $$
+ 
+-The ground truth radial features $F^*$ and $O^*$ are computed at sample points $x_j$ after applying embedded deformation. The deformation of a point $v_i$ to $\tilde{v}_i$ is given by [S1]:
++The ground truth radial features $F^*$ and $O^*$ are computed at sample points $x_j$ after applying embedded deformation [S1]. The deformation of a point $v_i$ to $\tilde{v}_i$ is given by [S1]:
+ 
+ $$
+@@ -64,8 +64,8 @@
+ 
+ Where:
+-*   $E_{feature} \approx \sum_{j=1}^m |F^*(x_j) - F(x_j)|$ (9, 11)
+-*   $E_{opacity} \approx \sum_{j=1}^m |O^*(x_j) - O(x_j)|$ (10, 12)
+-*   $E_{boundary} = \sum_{x_j \in \mathcal{O}} |O^*(x_j) - O(x_j)|$ (13)
+-*   $\mathcal{O} = \{ \forall x_j : O^*(x_j) = 0 \}$ denotes sample points in unoccupied space [S1].
++*   $E_{feature} \approx \sum_{j=1}^m |F^*(x_j) - F(x_j)|$ (9, 11) [S1]
++*   $E_{opacity} \approx \sum_{j=1}^m |O^*(x_j) - O(x_j)|$ (10, 12) [S1]
++*   $E_{boundary} = \sum_{x_j \in \mathcal{O}} |O^*(x_j) - O(x_j)|$ (13) [S1]
++*   $\mathcal{O} = \{ x_j \mid O^*(x_j) = 0 \}$ denotes sample points in unoccupied space [S1].
+ 
+ The adaptive anisotropic low-pass filter adjusts the covariance matrix $\Sigma_i$ to handle aliasing during deformation [S1]:
+@@ -91,7 +91,7 @@
+     
+     Args:
+-        gaussians: List of Gaussian objects with attributes p, r, s, H, alpha.
+-        deformation_graph: Object containing control points and KNN adjacency.
+-        hyperparams: Dict with keys lambda_lpf, n_dim, lambda_1, lambda_2.
++        gaussians: List of Gaussian objects with attributes p, r, s, H, alpha_raw.
++        deformation_graph: Object containing control_points (list of 3D vectors) and edge connections.
++        hyperparams: Dict with keys lambda_lpf, n_dim, lambda_1, lambda_2, max_iterations.
+     
+     Returns:
+@@ -99,113 +99,204 @@
+     """
+     # 1. Initialization and Sampling
+-    # Extract AABB for each Gaussian at rest shape
+-    aabbs = [extract_aabb(g) for g in gaussians]
+-    
+-    # Uniformly place sample points within bounding boxes
++    aabbs = [compute_aabb(g.p, g.s) for g in gaussians]
+     sample_points = []
+     for aabb in aabbs:
+-        points = uniform_sample_in_aabb(aabb, count_per_axis=hyperparams['n_dim'])
+-        sample_points.extend(points)
+-        
+-    # Construct adjacency to control points on deformation graph for sample points using KNN
+-    # Note: KNN is performed against the control points of the deformation graph
+-    sample_point_adjacency = knn(sample_points, deformation_graph.control_points, k=4) # k is typical for deformation weights
+-    
+-    # Use spatial hashing to fast update spatial relations
+-    spatial_hash = SpatialHash(gaussians, cell_size=hyperparams['n_dim'])
+-    
+-    # Pre-compute harmonic features and opacity features at sample points for rest-shape
+-    # This establishes the baseline O* and F* before deformation is applied to the field
+-    # However, the method describes computing F* and O* AFTER deformation
+-    # So we store rest-shape samples for reference if needed, but primary targets are deformed
+-    
+-    # 2. Optimization Loop
+-    optimizer = Adam(gaussians.parameters(), lr=0.001) # Standard 3DGS learning rate
+-    
+-    for iteration in range(max_iterations):
++        sample_points.extend(uniform_grid_sample(aabb, hyperparams['n_dim']))
++        
++    # KNN adjacency to control points
++    control_points = deformation_graph.control_points
++    sample_point_adjacency = compute_knn(sample_points, control_points, k=4)
++    
++    # Spatial hash for fast updates
++    spatial_hash = build_spatial_hash(gaussians, cell_size=hyperparams['n_dim'])
++    
++    # Pre-compute rest-shape features (baseline)
++    F_rest = compute_radial_features(gaussians, sample_points)
++    O_rest = compute_opacity_features(gaussians, sample_points)
++    
++    optimizer = AdamOptimizer(gaussians.parameters(), lr=0.001)
++    
++    for iteration in range(hyperparams['max_iterations']):
+         optimizer.zero_grad()
+         
+-        # A. Compute Ground Truth Radial Features (F*, O*)
+-        # Apply embedded deformation to sample points to get new positions in the warped field
+-        deformed_sample_points = []
++        # A. Ground Truth Features (F*, O*)
++        deformed_points = []
+         for x_j in sample_points:
+-            # Find influence weights w_j from control points
+             weights = compute_deformation_weights(x_j, sample_point_adjacency)
+-            # Compute deformed position using Eq. 5
+             deformed_pos = compute_embedded_deformation(x_j, weights, deformation_graph)
+-            deformed_sample_points.append(deformed_pos)
++            deformed_points.append(deformed_pos)
+             
+-        # Compute ground truth radial features F* and O* at deformed sample points
+-        # This requires the deformation gradient tensor at sample points
+-        # F* and O* are derived from the deformed radiance field definition
+-        F_star, O_star = compute_ground_truth_radial_features(deformed_sample_points, deformation_graph)
+-        
+-        # B. Compute Deformed Gaussian Radial Features (F, O)
+-        # Update Gaussian positions based on current optimization variables
+-        # Note: In this stage, we optimize the Gaussians themselves to match the field
+-        # The Gaussians are deformed according to their current parameters
+-        deformed_gaussians = apply_deformation_to_gaussians(gaussians, deformation_graph)
+-        
+-        # Compute radial features F and O from deformed Gaussians using standard equations (7, 8)
+-        F_gauss, O_gauss = compute_gaussian_radial_features(deformed_gaussians, deformed_sample_points)
+-        
+-        # C. Compute Errors
+-        # E_feature: Difference in harmonic features
++        # Compute F* and O* at deformed positions using deformation gradient tensor
++        F_star, O_star = compute_ground_truth_features(deformed_points, deformation_graph, hyperparams['n_dim'])
++        
++        # B. Deformed Gaussian Features (F, O)
++        F_gauss = compute_radial_features(gaussians, deformed_points)
++        O_gauss = compute_opacity_features(gaussians, deformed_points)
++        
++        # C. Errors
+         E_feature = sum(abs(F_star[j] - F_gauss[j]) for j in range(len(sample_points)))
+-        
+-        # E_opacity: Difference in opacity
+         E_opacity = sum(abs(O_star[j] - O_gauss[j]) for j in range(len(sample_points)))
+         
+-        # E_boundary: Restrict optimization to unoccupied space sample points
+-        # O = {∀x_j : O*(x_j) = 0} denotes sample points in unoccupied space
+-        unoccupied_indices = [j for j, o_star in enumerate(O_star) if o_star == 0]
++        unoccupied_indices = [j for j in range(len(sample_points)) if O_star[j] == 0]
+         E_boundary = sum(abs(O_star[j] - O_gauss[j]) for j in unoccupied_indices)
+         
+-        # Total Error
+         E_total = E_feature + hyperparams['lambda_1'] * E_opacity + hyperparams['lambda_2'] * E_boundary
+         
+-        # D. Apply Adaptive Anisotropic Low-Pass Filter
+-        # Estimate post-deformation sampling intervals by calculating 3x3 matrix A_k
+-        # A_k offers first-order approximation of deformation field near grid cell center
++        # D. Adaptive Anisotropic Low-Pass Filter
+         for g in gaussians:
+             grid_cell = spatial_hash.get_cell(g.p)
+             A_k = compute_deformation_gradient_matrix(grid_cell, deformation_graph)
+-            n_dim = hyperparams['n_dim']
+-            lambda_lpf = hyperparams['lambda_lpf']
+-            
+-            # Compute covariance with low-pass filter
+             R = quaternion_to_rotation_matrix(g.r)
+-            S = scale_matrix(g.s)
++            S = scale_to_matrix(g.s)
+             Sigma_base = R @ S @ S.T @ R.T
+-            
+-            # Add low-pass filter term
+-            Sigma_filtered = Sigma_base + (lambda_lpf / (n_dim ** 2)) * (A_k @ A_k.T)
+-            
+-            # Update Gaussian covariance
++            Sigma_filtered = Sigma_base + (hyperparams['lambda_lpf'] / (hyperparams['n_dim'] ** 2)) * (A_k @ A_k.T)
+             g.Sigma = Sigma_filtered
+-            
++        
+         # E. Backpropagation and Update
+         E_total.backward()
+-        
+-        # Apply sigmoid activation to opacity and exponential activation to scaling for stability
+         for g in gaussians:
+             g.alpha = sigmoid(g.alpha_raw)
+             g.s = exp(g.s_raw)
+-            
+         optimizer.step()
+         
+     return gaussians
++
++# Helper functions (self-contained)
++def compute_aabb(center, scale):
++    return (center - scale, center + scale)
++
++def uniform_grid_sample(aabb, n_dim):
++    points = []
++    for i in range(n_dim):
++        for j in range(n_dim):
++            for k in range(n_dim):
++                x = aabb[0][0] + (aabb[1][0] - aabb[0][0]) * (i + 0.5) / n_dim
++                y = aabb[0][1] + (aabb[1][1] - aabb[0][1]) * (j + 0.5) / n_dim
++                z = aabb[0][2] + (aabb[1][2] - aabb[0][2]) * (k + 0.5) / n_dim
++                points.append([x, y, z])
++    return points
++
++def compute_knn(query_points, reference_points, k):
++    adj = []
++    for q in query_points:
++        dists = [sum((q[i] - r[i])**2 for i in range(3)) for r in reference_points]
++        indices = sorted(range(len(dists)), key=lambda i: dists[i])[:k]
++        adj.append(indices)
++    return adj
++
++def build_spatial_hash(gaussians, cell_size):
++    grid = {}
++    for i, g in enumerate(gaussians):
++        cx, cy, cz = g.p
++        gx, gy, gz = int(cx / cell_size), int(cy / cell_size), int(cz / cell_size)
++        grid[(gx, gy, gz)] = grid.get((gx, gy, gz), []) + [i]
++    return grid
++
++def compute_deformation_weights(x_j, adjacency):
++    weights = []
++    for idx in adjacency:
++        dist_sq = sum((x_j[i] - deformation_graph.control_points[idx][i])**2 for i in range(3))
++        w = 1.0 / (dist_sq + 1e-8)
++        weights.append(w)
++    total = sum(weights)
++    return [w / total for w in weights]
++
++def compute_embedded_deformation(x_j, weights, graph):
++    pos = [0.0, 0.0, 0.0]
++    for idx, w in enumerate(weights):
++        cp = graph.control_points[idx]
++        Aj = graph.affine_matrices[idx]
++        tj = graph.translations[idx]
++        diff = [x_j[i] - cp[i] for i in range(3)]
++        transformed = [sum(Aj[i][k] * diff[k] for k in range(3)) + cp[i] + tj[i] for i in range(3)]
++        pos = [pos[i] + w * transformed[i] for i in range(3)]
++    return pos
++
++def compute_ground_truth_features(deformed_points, graph, n_dim):
++    F_star = []
++    O_star = []
++    for x in deformed_points:
++        cell = (int(x[0]/n_dim), int(x[1]/n_dim), int(x[2]/n_dim))
++        A_k = compute_deformation_gradient_matrix(cell, graph)
++        # Transform rest-shape features using deformation gradient [G]
++        F_star.append(A_k @ [1.0, 0.0, 0.0]) # Simplified harmonic transform
++        O_star.append(0.0) # Placeholder for opacity ground truth computation
++    return F_star, O_star
++
++def compute_radial_features(gaussians, points):
++    features = []
++    for p in points:
++        val = 0.0
++        for g in gaussians:
++            diff = [p[i] - g.p[i] for i in range(3)]
++            inv_cov = g.Sigma_inv
++            exponent = -0.5 * sum(diff[i] * sum(inv_cov[i][k] * diff[k] for k in range(3)) for i in range(3))
++            val += g.alpha * exp(exponent) * sum(g.H)
++        features.append(val)
++    return features
++
++def compute_opacity_features(gaussians, points):
++    opacities = []
++    for p in points:
++        val = 0.0
++        for g in gaussians:
++            diff = [p[i] - g.p[i] for i in range(3)]
++            inv_cov = g.Sigma_inv
++            exponent = -0.5 * sum(diff[i] * sum(inv_cov[i][k] * diff[k] for k in range(3)) for i in range(3))
++            val += g.alpha * exp(exponent)
++        opacities.append(val)
++    return opacities
++
++def compute_deformation_gradient_matrix(cell, graph):
++    # Finite difference approximation of deformation field over grid cell [G]
++    h = 1.0 / graph.n_dim
++    J = [[0.0]*3 for _ in range(3)]
++    base = [cell[0]*h, cell[1]*h, cell[2]*h]
++    for d in range(3):
++        offset = base[:]
++        offset[d] += h
++        deformed_offset = compute_embedded_deformation(offset, compute_knn([offset], graph.control_points, 4), graph)
++        J[d] = [(deformed_offset[i] - base[i]) / h for i in range(3)]
++    return J
++
++def quaternion_to_rotation_matrix(q):
++    x, y, z, w = q
++    return [[1-2*(y**2+z**2), 2*(x*y-z*w), 2*(x*z+y*w)],
++            [2*(x*y+z*w), 1-2*(x**2+z**2), 2*(y*z-x*w)],
++            [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x**2+y**2)]]
++
++def scale_to_matrix(s):
++    return [[s[0], 0, 0], [0, s[1], 0], [0, 0, s[2]]]
++
++class AdamOptimizer:
++    def __init__(self, params, lr=0.001):
++        self.params = params
++        self.lr = lr
++        self.m = [0.0] * len(params)
++        self.v = [0.0] * len(params)
++        self.t = 0
++    def zero_grad(self):
++        for p in self.params: p.grad = 0.0
++    def step(self):
++        self.t += 1
++        beta1, beta2, eps = 0.9, 0.999, 1e-8
++        for i, p in enumerate(self.params):
++            self.m[i] = beta1 * self.m[i] + (1 - beta1) * p.grad
++            self.v[i] = beta2 * self.v[i] + (1 - beta2) * p.grad**2
++            m_hat = self.m[i] / (1 - beta1**self.t)
++            v_hat = self.v[i] / (1 - beta2**self.t)
++            p.raw -= self.lr * m_hat / (v_hat**0.5 + eps)
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Boundary Deformation**: The deformation graph is agnostic to model boundaries, potentially deforming unoccupied space. This is handled by the $E_{boundary}$ term, which restricts optimization influence to sample points where $O^*(x_j) = 0$ [S1].
+-*   **Aliasing**: Undersampling high-frequency Gaussians during deformation causes aliasing. This is mitigated by the adaptive anisotropic low-pass filter, which adjusts the Gaussian size based on the deformation gradient [S1].
+-*   **Filter Sensitivity**: An over-conservative $\lambda_{lpf}$ (e.g., 0.02) leads to under-sampling, while an over-aggressive value (e.g., 2.0) causes blurriness. A value of 0.2 is empirically found to be robust [S1].
++*   **Boundary Deformation**: The deformation graph is agnostic to model boundaries, potentially deforming unoccupied space [S1]. This is handled by the $E_{boundary}$ term, which restricts optimization influence to sample points where $O^*(x_j) = 0$ [S1].
++*   **Aliasing**: Undersampling high-frequency Gaussians during deformation causes aliasing [S1]. This is handled by an adaptive anisotropic low-pass filter applied to the covariance matrix $\Sigma_i$ to adjust Gaussian size based on the deformation gradient [S1].
++*   **Filter Sensitivity**: An over-conservative $\lambda_{lpf}$ (e.g., 0.02) leads to under-sampling, while an over-aggressive value (e.g., 2.0) causes blurriness [S1]. A value of 0.2 is empirically found to be robust [S1].
+ 
+ ## Operating characteristics
+ 
+ ### Time and Memory Complexity
+-*   **Time**: The method requires computing KNN for sample points and updating spatial hashes at each optimization iteration. The computation of radial features $F$ and $O$ scales with the number of Gaussians $n$ and sample points $m$. The use of spatial hashing accelerates the update of spatial relations [S1].
+-*   **Memory**: Requires storing sample points, their adjacency to control points, and the spatial hash structure. The number of sample points is proportional to the number of Gaussians [S1].
++*   **Time**: The method requires computing KNN for sample points and updating spatial hashes at each optimization iteration [S1]. The computation of radial features $F$ and $O$ scales with the number of Gaussians $n$ and sample points $m$ [S1]. The use of spatial hashing accelerates the update of spatial relations [S1].
++*   **Memory**: Requires storing sample points, their adjacency to control points, and the spatial hash structure [S1]. The number of sample points is proportional to the number of Gaussians [S1].
+ 
+ ### Measured Performance

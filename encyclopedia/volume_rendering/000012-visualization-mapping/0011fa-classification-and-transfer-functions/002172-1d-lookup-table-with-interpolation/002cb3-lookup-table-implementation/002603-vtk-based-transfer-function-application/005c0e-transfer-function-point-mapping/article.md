@@ -1,0 +1,118 @@
+# Transfer Function Point Mapping
+
+Also called: Piecewise Function Transfer Function, Piecewise Linear Transfer Function Configuration, Scalar Opacity & Color Transfer Setup, Transfer Graph, VTK Transfer Function Configuration, VTK Volume Property Transfer Functions
+
+## Overview
+Transfer Function Point Mapping configures scalar opacity and RGB color transfer functions for volume rendering by mapping data value ranges to opacity $[0,1]$ and RGB channels, enabling material-specific visualization [S1, unofficial]. It constructs the transfer function dynamically from a custom graph or widget by iterating over control points, rather than relying on pre-defined material profiles [S2, unofficial].
+
+## How it works
+**Inputs:**
+- A list of transfer graph points, where each point contains a scalar value and an RGBA color tuple [S2, unofficial].
+- The data range of the volume dataset (minimum and maximum scalar values) [S1, unofficial].
+- A `vtkVolumeProperty` object to which the transfer functions are assigned [S1, unofficial].
+
+**Outputs:**
+- A configured `vtkVolumeProperty` with associated `vtkPiecewiseFunction` instances for color and opacity [S1, unofficial].
+
+**Data Structures:**
+- **Transfer Graph Point:** Contains a scalar `value` and an `rgba` tuple of 4 components [S2, unofficial].
+- **VTK Piecewise Function:** Stores control points $(x, y)$ for interpolation [G]. For color, $x$ is the scalar value and $y$ is the RGB triplet [S1, unofficial]. For opacity, $x$ is the scalar value and $y$ is the opacity scalar [S1, unofficial].
+
+**Steps:**
+1. **Extract Data Range:** Determine the minimum and maximum scalar values of the input volume data, denoted $v_{min}$ and $v_{max}$ [S1, unofficial].
+2. **Initialize Transfer Functions:** Create or clear instances of `vtkPiecewiseFunction` for color (`ctfun`) and opacity (`ofun`) [S1, unofficial].
+3. **Configure Opacity Boundaries:** Add boundary points to the opacity function to ensure full opacity at the data extremes or specific thresholds [S1, unofficial]. A common configuration sets opacity to 0.0 at the minimum value and 1.0 at the maximum value [S1, unofficial].
+4. **Map Graph Points:** Iterate over each point in the input transfer graph [S2, unofficial]:
+   - Extract the scalar value $v$ and the RGBA components $(r, g, b, a)$ [S2, unofficial].
+   - Scale the RGB components from their source range (e.g., $[0, 255]$) to the normalized range $[0, 1]$ [S2, unofficial].
+   - Add the RGB point to the color transfer function: `ctfun.addRGBPoint(v, r, g, b)` [S2, unofficial].
+   - Add the opacity point to the opacity transfer function: `ofun.addPoint(v, a)` [S2, unofficial].
+5. **Assign to Volume Property:** Associate the configured transfer functions with the volume property object [S2, unofficial].
+6. **Set Interpolation:** Configure the interpolation type (e.g., linear) for smooth transitions between points [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_transfer_function_points(volume_property, transfer_graph_points, data_range):
+    """
+    Applies transfer function points to a VTK volume property.
+    
+    Args:
+        volume_property: vtkVolumeProperty instance.
+        transfer_graph_points: List of objects with .value and .get_rgba() methods.
+                               get_rgba() returns (r, g, b, a) where r,g,b are 0-255 and a is 0-1.
+        data_range: Tuple (min_val, max_val) of the volume data.
+    """
+    # 1. Extract data range
+    v_min = data_range[0]
+    v_max = data_range[1]
+    
+    # 2. Initialize transfer functions
+    ctfun = PiecewiseFunction()
+    ofun = PiecewiseFunction()
+    
+    # 3. Configure opacity boundaries
+    ofun.removeAllPoints()
+    ofun.addPoint(v_min, 0.0)
+    ofun.addPoint(v_max, 1.0)
+    
+    # 4. Map graph points
+    for p in transfer_graph_points:
+        v = p.value
+        rgba = p.get_rgba()
+        r, g, b, a = rgba[0], rgba[1], rgba[2], rgba[3]
+        
+        # Scale RGB to [0, 1]
+        r_norm = r / 255.0
+        g_norm = g / 255.0
+        b_norm = b / 255.0
+        
+        ctfun.addRGBPoint(v, r_norm, g_norm, b_norm)
+        ofun.addPoint(v, a)
+        
+    # 5. Assign to volume property
+    volume_property.setRGBTransferFunction(0, ctfun)
+    volume_property.setScalarOpacity(0, ofun)
+    
+    # 6. Set interpolation type
+    volume_property.setInterpolationTypeToLinear()
+
+class PiecewiseFunction:
+    """Minimal self-contained implementation of VTK piecewise function behavior."""
+    def __init__(self):
+        self.points = []
+    def removeAllPoints(self):
+        self.points = []
+    def addPoint(self, x, y):
+        self.points.append((x, y))
+    def addRGBPoint(self, x, r, g, b):
+        self.points.append((x, (r, g, b)))
+```
+
+**Parameters:**
+- **Interpolation Type:** `setInterpolationTypeToLinear()` is used for smooth gradients. Alternatives include `setInterpolationTypeToFastLinear()` and `setInterpolationTypeToNearest()` [S1, unofficial].
+- **Independent Components:** `setIndependentComponents(true)` enables per-component transfer function evaluation [S1, unofficial].
+- **Opacity Mode:** `setOpacityMode(0, 20)` may be used to specify a blending or compositing mode, though the exact meaning of `20` is implementation-specific [S1, unofficial].
+- **Lighting Coefficients:** Ambient=0.2, Diffuse=0.7, Specular=0.3, SpecularPower=0.8 control surface matte-ness and highlight tightness [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Alpha Scaling:** Ensure alpha values are correctly interpreted. If the source widget provides alpha in $[0, 255]$, it must be divided by 255.0 before adding to the opacity function [G].
+- **RGB Scaling Range:** Sources divide RGB by 255.0 [S2, unofficial] or 256 [S1, unofficial]. Implementers should match the source widget's range to avoid off-by-one color shifts.
+- **Data Range Mismatch:** If transfer function points lie outside the sampled data range, they will not be used. Boundary points should cover the full data range to ensure visibility [G].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of points in the transfer graph. The mapping is performed once during setup [G].
+- **Memory Complexity:** $O(N)$ to store the control points in the `vtkPiecewiseFunction` objects [G].
+- **Strengths:** Highly flexible; allows real-time adjustment of material appearance via UI widgets. Precise control over specific scalar ranges [S2, unofficial].
+- **Limitations:** Requires manual tuning of points for optimal visualization. Performance impact is negligible during rendering as the transfer function is evaluated per voxel, but the setup cost is linear in the number of control points [G].
+- **When to Use:** When dynamic, user-driven customization of volume appearance is required, or when specific material properties need to be mapped to exact scalar values [S2, unofficial].
+- **When Not to Use:** For static, pre-defined materials where presets are sufficient [G].
+
+## Background
+This method is part of the VTK-based volume rendering pipeline, specifically leveraging `vtkPiecewiseFunction` for transfer function definition [S1, unofficial]. It is commonly used in scientific visualization applications that require interactive transfer function editing [S2, unofficial]. The approach builds on the general concept of 1D lookup tables with interpolation, providing a programmatic interface to define the mapping points [S3, unofficial].
+
+## Sources
+[S1] mohammed-abo-arab/3D_WebGL_VolumeRendering, https://github.com/mohammed-abo-arab/3D_WebGL_VolumeRendering, fetched 2026-10-27 (unofficial)
+[S2] chapering/PyVolRender, https://github.com/chapering/PyVolRender, fetched 2026-10-27 (unofficial)
+[S3] GhadaDx/Volume-Rendering-VTKjs, https://github.com/GhadaDx/Volume-Rendering-VTKjs, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,300 @@
+--- v001.md
++++ v002.md
+@@ -4,134 +4,191 @@
+ 
+ ## Overview
+-Surface-Constrained Gaussian Splatting is a training optimization for 3D Gaussian Splatting that initializes splats on a mesh surface and applies geometric constraints to prevent floating artifacts and improve surface fidelity [S1, unofficial]. It differs from standard 3D Gaussian Splatting by enforcing planar alignment and surface proximity through specific loss functions and initialization strategies, distinguishing it from sibling methods like [DeSplat](12925-desplat.md) which focuses on differentiable splatting primitives, and [Scene Representation and Geometry Constraints](15421-scene-representation-and-geometry-constraints.md) which offers broader geometric regularization [S1, unofficial].
++Surface-Constrained Gaussian Splatting is a method for initializing and regularizing 3D Gaussian Splatting representations using a pre-existing mesh surface to eliminate floating artifacts and improve geometric fidelity [S1, unofficial]. It differs from standard 3D Gaussian Splatting by anchoring Gaussian means to mesh vertices and enforcing planar constraints via specific loss functions, whereas siblings like [Mesh-adsorbed Gaussian](20320-mesh-adsorbed-gaussian.md) may use different adsorption mechanisms and [Surface Reconstruction via SDF](22162-surface-reconstruction-via-sdf.md) relies on signed distance fields rather than explicit mesh anchoring.
+ 
+ ## How it works
+-**Inputs:** A triangular mesh (vertices and faces), camera poses, and input images.
+-**Outputs:** Optimized 3D Gaussians (means, covariances via quaternions/scales, opacities, spherical harmonic coefficients).
++**Inputs:**
++- A triangle mesh $M$ with vertices $V$ and triangles $T$.
++- Initial RGB colors for each Gaussian (typically derived from the mesh texture or vertex colors).
++- Training images and camera poses.
++
++**Outputs:**
++- A set of $N$ 3D Gaussians $\{G_i\}_{i=1}^N$ optimized for rendering.
+ 
+ **Data Structures:**
+-*   **Gaussian:**
+-    *   `mean`: `vec3` (3D position)
+-    *   `scale`: `vec3` (log-space scales for x, y, z axes)
+-    *   `opacity`: `float` (initially 0.5)
+-    *   `sh0`: `vec3` (zeroth-order spherical harmonic coefficients, derived from RGB)
+-    *   `shN`: `vec3` (higher-order SH coefficients, initialized to 0)
+-    *   `quaternion`: `vec4` (normalized, representing rotation)
++- **Gaussian Attributes:** For each Gaussian $i$:
++  - Mean $\boldsymbol{\mu}_i \in \mathbb{R}^3$
++  - Covariance $\boldsymbol{\Sigma}_i$ parameterized by rotation quaternion $\mathbf{q}_i \in \mathbb{R}^4$ and scale vector $\mathbf{s}_i \in \mathbb{R}^3$.
++  - Opacity $\alpha_i \in [0, 1]$.
++  - Spherical Harmonics coefficients $\mathbf{c}_i$ (initially only $SH_0$ is non-zero).
++- **Mesh Cache:**
++  - Triangle list for area-weighted sampling.
++  - KNN structure for nearest neighbor queries (used for scale initialization and Laplacian smoothing).
++  - Mesh point cache for surface anchor loss (updated every 50 steps).
+ 
+ **Initialization Steps:**
+-1.  **Point Sampling:** Sample points uniformly on the mesh triangles using area-weighted sampling. For each triangle, generate random barycentric coordinates $bary = [1 - \sqrt{r_1}, \sqrt{r_1}(1 - r_2), \sqrt{r_1}r_2]$ where $r_1, r_2 \sim U[0,1]$ [S1, unofficial].
+-2.  **Scale Initialization:** Compute the average distance to K-nearest neighbors (KNN) in the sampled point cloud. Set initial log-scales:
+-    *   $scales_{xy} = \log(\text{avg\_dist} \times 1.0)$
+-    *   $scales_z = \log(\text{avg\_dist} \times 0.2)$
+-    This creates flat discs that overlap with neighbors [S1, unofficial].
+-3.  **Rotation Initialization:** Align the splat's Z-axis to the surface normal. Compute the rotation quaternion using the half-angle Rodrigues formula:
+-    *   $\cos\theta = \text{dot}(\text{initial\_z}, \text{normal})$
+-    *   If $\cos\theta < -0.999$ (anti-aligned), set quaternion to $[0, 1, 0, 0]$ (180-degree rotation around X-axis) [S1, unofficial].
+-    *   Otherwise, $q_w = \sqrt{(1+\cos\theta)/2}$ and $q_{xyz} = \sqrt{(1-\cos\theta)/2} \cdot \text{axis}$, where axis is the cross product of initial Z and normal [S1, unofficial].
+-4.  **Color and Opacity:** Set initial opacity to 0.5 to prevent premature pruning. Compute $SH_0$ from the RGB color of the sampled point; initialize higher-order SH coefficients to zero [S1, unofficial].
++1. **Sample Points:** Sample points uniformly on the mesh surface using area-weighted sampling. For each triangle, generate random barycentric coordinates $bary = [1 - \sqrt{r_1}, \sqrt{r_1}(1 - r_2), \sqrt{r_1}r_2]$ where $r_1, r_2 \sim U[0,1]$ [S1, unofficial].
++2. **Initialize Means:** Set $\boldsymbol{\mu}_i$ to the sampled 3D points.
++3. **Initialize Scales:** Compute KNN distances for each point. Set scales as:
++   $$ s_{xy} = \log(\text{avg\_dist} \times 1.0) $$
++   $$ s_{z} = \log(\text{avg\_dist} \times 0.2) $$
++   This creates flat discs that overlap with neighbors [S1, unofficial].
++4. **Initialize Rotations:** Compute quaternions aligning the Gaussian Z-axis to the surface normal at $\boldsymbol{\mu}_i$. Use the half-angle Rodrigues formula:
++   $$ q_w = \sqrt{\frac{1+\cos\theta}{2}}, \quad \mathbf{q}_{xyz} = \sqrt{\frac{1-\cos\theta}{2}} \cdot \text{axis} $$
++   where $\theta$ is the angle between the initial Z-axis and the surface normal. **Pitfall:** If the normal is anti-aligned ($\cos\theta < -0.999$), set $\mathbf{q} = [0, 1, 0, 0]$ (180-degree rotation around X) to avoid numerical instability [S1, unofficial].
++5. **Initialize Opacity:** Set $\alpha_i = 0.5$ to prevent premature pruning during early training [S1, unofficial].
++6. **Initialize Colors:** Compute $SH_0$ from the initial RGB colors using `rgb_to_sh` and set higher-order SH coefficients to zero [S1, unofficial].
+ 
+-**Training Losses:**
+-1.  **Flatness Loss:** Penalizes the ratio of the thinnest axis scale to the middle axis scale to enforce disc-like shapes [S1, unofficial].
+-2.  **Normal Alignment Loss:** Penalizes deviation of the thin axis (Z-axis) from the surface normal: $L_{normal} = 1 - |\text{dot}(\text{thin\_axis}, \text{normal})|$ [S1, unofficial].
+-3.  **Surface Anchor Loss:** Computes the L2 distance from each splat's mean to the nearest point on the mesh. This cache is updated every 50 training steps [S1, unofficial].
+-4.  **Laplacian Smoothing:** Applies smoothing to scales, quaternions, and $SH_0$ using KNN neighbors with a specified strength parameter to reduce noise [S1, unofficial].
++**Training Steps:**
++1. **Render:** Render the scene using standard differentiable Gaussian splatting.
++2. **Compute Losses:**
++   - **Reconstruction Loss:** Standard L1/SSIM loss between rendered and ground truth images.
++   - **Flatness Loss:** Penalize the ratio of the thinnest axis scale to the middle axis scale to enforce disc-like shapes [S1, unofficial].
++   - **Normal Alignment Loss:** Penalize deviation of the thin axis (Z-axis in local space) from the surface normal:
++     $$ L_{normal} = 1 - |\text{dot}(\text{thin\_axis}, \text{normal})| $$
++   - **Surface Anchor Loss:** Compute L2 distance between Gaussian means $\boldsymbol{\mu}_i$ and the nearest points on the mesh. This cache is updated every 50 training steps [S1, unofficial].
++3. **Regularization:** Apply Laplacian smoothing to scales, quaternions, and $SH_0$ using k-nearest neighbors with a specified strength parameter [S1, unofficial].
++4. **Adaptive Control:** Spawn new splats at pixels with high frequency gaps or low alpha using weighted multinomial sampling [S1, unofficial].
+ 
+-**Spawn Strategy:**
+-New splats are spawned at pixels with high frequency gaps or low alpha values using weighted multinomial sampling [S1, unofficial].
++**Pseudocode:**
+ 
+ ```python
+-def initialize_gaussians_from_mesh(mesh, num_points):
++import torch
++import numpy as np
++
++def initialize_gaussians_from_mesh(mesh, num_samples):
+     """
+-    Initialize 3D Gaussians on a mesh surface.
+-    mesh: Object with vertices, faces, and face_normals methods.
+-    num_points: Number of splats to initialize.
+-    Returns: List of Gaussian objects.
++    Initialize Gaussians on a mesh surface.
++    Args:
++        mesh: Object with triangles (V, 3, 3) and normals (V, 3).
++        num_samples: Number of Gaussians to create.
++    Returns:
++        means, scales, quaternions, opacities, sh_coeffs
+     """
+-    gaussians = []
+     # 1. Sample points on mesh
+-    points, normals = sample_mesh_points(mesh, num_points)
++    triangles = mesh.triangles # (T, 3, 3)
++    triangle_areas = compute_triangle_areas(triangles)
++    triangle_probs = triangle_areas / triangle_areas.sum()
+     
+-    # 2. Compute KNN distances for scale initialization
+-    # [G] Assuming a KDTree or similar structure for efficient KNN lookup
+-    knn_distances = compute_knn_distances(points, k=5)
+-    avg_dist = np.mean(knn_distances, axis=1)
++    sampled_indices = np.random.choice(len(triangles), size=num_samples, p=triangle_probs)
++    selected_triangles = triangles[sampled_indices]
+     
+-    for i in range(num_points):
+-        p = points[i]
+-        n = normals[i]
++    # Barycentric coordinates
++    r1 = np.random.uniform(0, 1, num_samples)
++    r2 = np.random.uniform(0, 1, num_samples)
++    bary = np.stack([1 - np.sqrt(r1), np.sqrt(r1) * (1 - r2), np.sqrt(r1) * r2], axis=1)
++    
++    # Interpolate vertices
++    v0 = selected_triangles[:, 0]
++    v1 = selected_triangles[:, 1]
++    v2 = selected_triangles[:, 2]
++    means = (bary[:, 0:1] * v0 + bary[:, 1:2] * v1 + bary[:, 2:3] * v2)
++    
++    # 2. Initialize Scales using KNN
++    # Compute KNN distances (simplified for illustration)
++    avg_dist = compute_knn_distance(means, k=5)
++    scales_xy = np.log(avg_dist * 1.0)
++    scales_z = np.log(avg_dist * 0.2)
++    scales = np.stack([scales_xy, scales_xy, scales_z], axis=1)
++    
++    # 3. Initialize Rotations
++    # Get surface normals at sampled points (interpolate from vertex normals)
++    normals = interpolate_normals(mesh.vertex_normals, sampled_indices, bary)
++    # Align Z-axis (0,0,1) to normal
++    quaternions = align_z_to_vector(normals)
++    
++    # 4. Initialize Opacity
++    opacities = np.full(num_samples, 0.5)
++    
++    # 5. Initialize Colors (placeholder)
++    sh_coeffs = np.zeros((num_samples, 3, 16)) # Only SH0 used initially
++    # sh_coeffs[:, :, 0] = rgb_to_sh(initial_colors)
++    
++    return means, scales, quaternions, opacities, sh_coeffs
++
++def align_z_to_vector(vectors):
++    """
++    Compute quaternion rotating Z-axis (0,0,1) to vectors.
++    Handles anti-alignment.
++    """
++    z_axis = np.array([0, 0, 1])
++    # Normalize vectors
++    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
++    v_norm = vectors / norms
++    
++    # Dot product
++    cos_theta = np.sum(z_axis * v_norm, axis=1, keepdims=True)
++    
++    # Cross product
++    cross = np.cross(z_axis, v_norm)
++    
++    # Handle anti-alignment
++    anti_aligned = cos_theta < -0.999
++    if np.any(anti_aligned):
++        # Set quaternion to [0, 1, 0, 0] for anti-aligned points
++        # w, x, y, z
++        quaternions = np.zeros((len(vectors), 4))
++        quaternions[anti_aligned.squeeze()] = [0, 1, 0, 0]
+         
+-        # 3. Initialize Scales (log-space)
+-        # xy scales are larger, z scale is smaller (flat disc)
+-        scale_xy = np.log(avg_dist[i] * 1.0)
+-        scale_z = np.log(avg_dist[i] * 0.2)
+-        scale = np.array([scale_xy, scale_xy, scale_z])
++        # Compute for non-anti-aligned
++        non_aligned_mask = ~anti_aligned.squeeze()
++        v_non_aligned = v_norm[non_aligned_mask]
++        cos_non_aligned = cos_theta[non_aligned_mask]
++        cross_non_aligned = cross[non_aligned_mask]
+         
+-        # 4. Initialize Rotation (Quaternion)
+-        # Align Z-axis (0,0,1) to normal n
+-        initial_z = np.array([0.0, 0.0, 1.0])
+-        cos_theta = np.dot(initial_z, n)
++        w = np.sqrt((1 + cos_non_aligned.squeeze()) / 2)
++        sin_half = np.sqrt((1 - cos_non_aligned.squeeze()) / 2)
++        axis = cross_non_aligned / (np.linalg.norm(cross_non_aligned, axis=1, keepdims=True) + 1e-8)
++        xyz = sin_half * axis
+         
+-        if cos_theta < -0.999:
+-            # Anti-aligned: 180 deg rotation around X
+-            q = np.array([0.0, 1.0, 0.0, 0.0]) # w, x, y, z
+-        else:
+-            # Half-angle Rodrigues
+-            axis = np.cross(initial_z, n)
+-            norm_axis = np.linalg.norm(axis)
+-            if norm_axis < 1e-8:
+-                q = np.array([1.0, 0.0, 0.0, 0.0]) # No rotation needed
+-            else:
+-                axis = axis / norm_axis
+-                q_w = np.sqrt((1 + cos_theta) / 2)
+-                q_xyz = np.sqrt((1 - cos_theta) / 2) * axis
+-                q = np.concatenate([[q_w], q_xyz])
+-        
+-        # 5. Initialize Opacity and Color
+-        opacity = 0.5
+-        # [G] rgb is assumed to be retrieved from the mesh vertex or interpolated color
+-        rgb = get_color_at_point(p, mesh) 
+-        sh0 = rgb_to_sh(rgb) # Standard SH conversion for 0th order
+-        shN = np.zeros(3 * (N_SH_BANDS - 1)) # Higher order zeros
+-        
+-        gaussians.append({
+-            'mean': p,
+-            'scale': scale,
+-            'quaternion': q,
+-            'opacity': opacity,
+-            'sh0': sh0,
+-            'shN': shN
+-        })
+-        
+-    return gaussians
++        quaternions[non_aligned_mask] = np.stack([w, xyz[:, 0], xyz[:, 1], xyz[:, 2]], axis=1)
++        return quaternions
++    else:
++        w = np.sqrt((1 + cos_theta.squeeze()) / 2)
++        sin_half = np.sqrt((1 - cos_theta.squeeze()) / 2)
++        axis = cross / (np.linalg.norm(cross, axis=1, keepdims=True) + 1e-8)
++        xyz = sin_half * axis
++        return np.stack([w, xyz[:, 0], xyz[:, 1], xyz[:, 2]], axis=1)
+ 
+-def compute_surface_anchor_loss(gaussians, mesh, cache_step, current_step):
+-    """
+-    Compute L2 distance from splat means to nearest mesh points.
+-    Cache is updated every 50 steps.
+-    """
+-    if current_step % 50 == 0:
+-        # Update nearest point cache
+-        # [G] Implementation depends on spatial data structure (e.g., KDTree on mesh vertices/points)
+-        nearest_mesh_points = find_nearest_mesh_points([g['mean'] for g in gaussians], mesh)
+-        cache_step['nearest_points'] = nearest_mesh_points
+-        
+-    nearest_points = cache_step['nearest_points']
+-    loss = 0.0
+-    for i, g in enumerate(gaussians):
+-        dist = np.linalg.norm(g['mean'] - nearest_points[i])
+-        loss += dist * dist
+-    return loss
++def compute_triangle_areas(triangles):
++    """Compute area of each triangle."""
++    v0 = triangles[:, 0]
++    v1 = triangles[:, 1]
++    v2 = triangles[:, 2]
++    cross = np.cross(v1 - v0, v2 - v0)
++    return 0.5 * np.linalg.norm(cross, axis=1)
++
++def compute_knn_distance(points, k=5):
++    """Placeholder for KNN distance computation."""
++    # In practice, use a KDTree or similar structure
++    # Returns average distance to k nearest neighbors
++    return 0.1 # Placeholder value
++
++def interpolate_normals(vertex_normals, triangle_indices, barycentric_coords):
++    """Interpolate vertex normals using barycentric coordinates."""
++    # triangle_indices maps to the triangle index in the mesh
++    # barycentric_coords are [w0, w1, w2]
++    # vertex_normals are (V, 3)
++    # triangles are (T, 3, 3) -> indices of vertices
++    tri_verts = mesh.triangle_vertex_indices[triangle_indices] # (N, 3)
++    v0_n = vertex_normals[tri_verts[:, 0]]
++    v1_n = vertex_normals[tri_verts[:, 1]]
++    v2_n = vertex_normals[tri_verts[:, 2]]
++    
++    normals = (barycentric_coords[:, 0:1] * v0_n + 
++               barycentric_coords[:, 1:2] * v1_n + 
++               barycentric_coords[:, 2:3] * v2_n)
++    return normals
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Initialization is $O(N \log N)$ due to KNN and mesh sampling. Training adds overhead for surface anchor loss computation (cached every 50 steps) and Laplacian smoothing, increasing per-step cost compared to standard 3DGS.
+-*   **Memory Complexity:** Requires storing the mesh geometry and nearest-point cache. Slightly higher memory usage than standard 3DGS due to additional loss computations.
+-*   **Strengths:** Significantly reduces floating artifacts and improves surface reconstruction quality for scenes with well-defined geometry.
+-*   **Limitations:** Requires a high-quality input mesh. Performance degrades if the mesh is noisy or incomplete. Not suitable for scenes without clear surface geometry (e.g., dense foliage, smoke).
+-*   **When to use:** When surface fidelity is critical and a good mesh is available.
+-*   **When not to use:** For general-purpose 3DGS where mesh acquisition is difficult or the scene is non-rigid/complex without clear surfaces.
++- **Time Complexity:** Initialization is $O(N \log N)$ due to KNN queries. Training adds overhead for surface anchor loss computation (nearest mesh point query) every 50 steps.
++- **Memory Complexity:** Requires storing the mesh geometry and a cache of nearest mesh points for all Gaussians.
++- **Strengths:** Effectively removes floating artifacts common in standard 3DGS when reconstructing scenes with clear surfaces. Improves geometric consistency.
++- **Limitations:** Requires a high-quality input mesh. Performance degrades if the mesh is noisy or incomplete. The surface anchor loss may constrain the Gaussians too rigidly, preventing them from adapting to view-dependent effects or slight misalignments.
++- **When to use:** When a reliable mesh is available and geometric accuracy is prioritized over pure photometric fidelity.
++- **When not to use:** For scenes without a clear surface structure or when the mesh quality is poor.
+ 
+ ## Background
+-Surface-Constrained Gaussian Splatting was introduced as an unofficial extension to 3D Gaussian Splatting, integrating mesh-based initialization and geometric constraints. It is part of the `dust3r-3dgs` pipeline, which combines DUSt3R/MASt3R reconstruction with Gaussian Splatting training [S1, unofficial]. The method addresses the common issue of "floating" Gaussian artifacts that appear in standard 3DGS when training on sparse or noisy point clouds.
++Surface-Constrained Gaussian Splatting was introduced as an unofficial extension to 3D Gaussian Splatting to address the issue of floating artifacts in rendered scenes [S1, unofficial]. It builds on the standard 3DGS representation but incorporates explicit geometric constraints derived from a mesh. The method is part of a broader effort to integrate explicit geometry into differentiable rendering pipelines.
+ 
+ ## Sources

@@ -1,0 +1,106 @@
+# Front/Back Face Flagging
+
+Also called: Voxel Surface Orientation
+
+## Overview
+Front/Back Face Flagging assigns a boolean orientation flag to voxels intersected by surface mesh triangles, distinguishing whether the intersecting geometry is front-facing or back-facing relative to a specified filling direction [S1]. This method solves the ambiguity of surface-only voxelization by providing the directional context required to determine interior voxels during subsequent filling passes [S1].
+
+## How it works
+**Inputs:** A triangular mesh (list of triangles with vertices $\vec{a}, \vec{b}, \vec{c}$), a voxel grid (array of voxel structures), and a filling direction vector $\vec{d}$ [S1].
+**Outputs:** The voxel grid with `fill` and `front` flags updated for all voxels intersected by the mesh [S1].
+
+**Data Structures:**
+The voxel structure contains at minimum:
+- `fill`: Integer bit (1 if intersected/filled, 0 otherwise) [S1].
+- `front`: Boolean flag indicating if the triangle is front-facing relative to $\vec{d}$ [S1].
+- `position`: Vector representing the voxel center [S1].
+- `bounds`: AABB representing the voxel volume [S1].
+
+**Steps:**
+1. **Triangle Normal Calculation:** For each triangle, compute edge vectors $\vec{f_0} = \vec{b} - \vec{a}$ and $\vec{f_1} = \vec{c} - \vec{a}$ [S1]. Calculate the unnormalized normal $\vec{n}_{raw} = \vec{f_1} \times \vec{f_0}$ [S1]. Normalize to obtain $\vec{n} = \frac{\vec{n}_{raw}}{||\vec{n}_{raw}||}$ [S1].
+2. **Front/Back Determination:** Compute the dot product $dot = \vec{n} \cdot \vec{d}$ [S1]. The triangle is front-facing if $dot \le 0$ [S1]. This condition indicates the normal points away from or is perpendicular to the filling direction [S1].
+3. **Voxel Intersection:** For each triangle, identify grid cells whose AABBs intersect the triangle [S1]. This is performed by testing the triangle's plane against candidate voxel AABBs [S1].
+4. **Flag Assignment:** For each intersected voxel:
+   - If `voxel.fill == 0` (not yet filled), set `voxel.front = front` and `voxel.fill = 1` [S1].
+   - If `voxel.fill == 1` (already filled), update `voxel.front` using bitwise/logical AND: `voxel.front = voxel.front & front` [S1]. This prioritizes the back-facing state (false) if either the existing flag or the new triangle is back-facing [S1].
+   - Write the updated voxel back to the volume array [S1].
+
+**Parameters:**
+- $\vec{d}$: The direction vector used to determine front/back orientation. In the reference implementation, this is $(0, 0, 1)$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def front_back_face_flagging(triangles, voxel_grid, grid_min, grid_max, fill_direction):
+    """
+    triangles: List of Triangle objects with vertices a, b, c
+    voxel_grid: 3D array of Voxel objects
+    grid_min, grid_max: Tuple of (x, y, z) defining the voxel grid bounds
+    fill_direction: Vector3 (e.g., (0, 0, 1))
+    """
+    for tri in triangles:
+        # 1. Calculate Normal
+        f0 = tri.b - tri.a
+        f1 = tri.c - tri.a
+        normal = normalize(cross(f1, f0))
+        
+        # 2. Determine Front/Back
+        is_front = dot(normal, fill_direction) <= 0.0
+        
+        # 3. Determine voxel grid range to check
+        tri_min = min(tri.a, tri.b, tri.c)
+        tri_max = max(tri.a, tri.b, tri.c)
+        start_x = max(int(tri_min.x), grid_min.x)
+        end_x = min(int(tri_max.x), grid_max.x)
+        start_y = max(int(tri_min.y), grid_min.y)
+        end_y = min(int(tri_max.y), grid_max.y)
+        start_z = max(int(tri_min.z), grid_min.z)
+        end_z = min(int(tri_max.z), grid_max.z)
+        
+        # 4. Iterate and flag
+        for x in range(start_x, end_x + 1):
+            for y in range(start_y, end_y + 1):
+                for z in range(start_z, end_z + 1):
+                    voxel = voxel_grid[x, y, z]
+                    
+                    # Plane-AABB intersection test from [S1]
+                    plane_dist = dot(normal, tri.a)
+                    extents = voxel.bounds.max - voxel.bounds.center
+                    r = abs(normal.x) * extents.x + abs(normal.y) * extents.y + abs(normal.z) * extents.z
+                    s = dot(normal, voxel.bounds.center) - plane_dist
+                    
+                    if abs(s) <= r:
+                        if voxel.fill == 0:
+                            voxel.front = is_front
+                            voxel.fill = 1
+                        else:
+                            voxel.front = voxel.front & is_front
+                        
+                        voxel_grid[x, y, z] = voxel
+```
+
+## Subtopics
+
+### [Inside-Outside Voxelization](3081-inside-outside-voxelization.md)
+Determines interior cells by leveraging stencil buffer operations, distinguishing interior (nonzero stencil) from exterior (zero stencil) cells. It is chosen when hardware-accelerated stencil operations are available and the mesh is closed, serving as a preprocessing step for density formation. It differs from boundary-only classification techniques by relying on topological closure rather than explicit normal flagging.
+
+### [Inside/Outside Inversion](11545-inside-outside-inversion.md)
+An option that swaps the definition of inside and outside relative to the surface level. By default, values above the surface level are internal; enabling this makes values below the surface level internal. It is chosen when the natural orientation of the mesh or data field requires inverted containment logic.
+
+### Solid Mesh Auto-Fill
+A feature that auto-fills the interior of a surface mesh during voxelization, converting it to a solid volume [S2]. It is chosen when a binary solid representation is required without material data [S2]. Pitfalls include significant performance degradation, potential artifacts/holes in complex meshes, and the loss of greyscale values (background becomes 0, mesh becomes 255) [S2]. It is ignored if the input is Tetrahedron data or if `use_tetra` is set [S2].
+
+### Front/Back Color Shading
+A technique using 'front colors' and 'back colors' components to distinguish the inside and outside of an object based on normal direction [S3]. It determines which side is front or back by the direction of the normal for that vertex or polygon [S3]. A pitfall occurs if the winding order of a polygonal face is described in the wrong order, causing the normal to point incorrectly; setting 'back colors' to red and 'front colors' to white clearly indicates which faces are pointing the wrong way [S3].
+
+## Operating characteristics
+The algorithm performs direct geometric calculations per intersected voxel [S1]. When used for auto-filling complex meshes, it is considerably slower and not robust, potentially causing artifacts and holes [S2]. Strengths include explicit directional information for filling algorithms and straightforward vector math implementation [S1]. Limitations include reliance on correct mesh normal orientation and potential failure on non-watertight meshes [S1]. The auto-fill variant disables greyscale values, forcing a binary output (background 0, mesh 255) [S2].
+
+## Background
+The method originates from real-time GPU-based voxelization techniques detailed in Unity graphics programming contexts [S1]. It serves as a preprocessing step in volumetric attribute and density formation to establish surface orientation for interior filling [S1]. Related implementations and variants appear in CudaVox [S2] and Phoenix for 3ds Max [S3].
+
+## Sources
+[S1] Real-Time GPU-Based Voxelizer - GitHub Pages, https://freder.github.io/UnityGraphicsProgrammingBook1/html-translated/vol2/Chapter%201%20_%20Real-Time%20GPU-Based%20Voxelizer.html, fetched 2026-10-27
+[S2] CudaVox · PyPI, https://pypi.org/project/CudaVox/, fetched 2026-10-27
+[S3] User's Guide - Visualization Techniques, https://theochem.mercer.edu/dxdocs/pages/usrgu063.htm, fetched 2026-10-28

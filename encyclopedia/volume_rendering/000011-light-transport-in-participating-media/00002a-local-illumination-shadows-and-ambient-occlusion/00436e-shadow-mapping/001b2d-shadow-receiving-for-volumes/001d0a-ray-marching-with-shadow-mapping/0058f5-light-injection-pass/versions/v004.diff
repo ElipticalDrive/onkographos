@@ -1,0 +1,194 @@
+--- v003.md
++++ v004.md
+@@ -11,12 +11,12 @@
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   3D texture (voxel grid) storing extinction coefficient and in-scattered radiance.
+-    *   Shadow maps (cascaded for directional lights, cubemaps for point lights).
+-    *   Camera view and projection matrices.
+-    *   Light source parameters (position, color, range, type).
+-    *   Volume parameters: density, anisotropy ($g$), range.
++    *   3D texture (voxel grid) storing extinction coefficient and in-scattered radiance [S2, unofficial].
++    *   Shadow maps (cascaded for directional lights, cubemaps for point lights) [S2, unofficial].
++    *   Camera view and projection matrices [G].
++    *   Light source parameters (position, color, range, type) [G].
++    *   Volume parameters: density, anisotropy ($g$), range [S1, unofficial].
+ *   **Outputs:**
+-    *   Updated 3D texture with in-scattered radiance.
+-    *   Final image with volumetric lighting effects (sun shafts, lamp glow).
++    *   Updated 3D texture with in-scattered radiance [S2, unofficial].
++    *   Final image with volumetric lighting effects (sun shafts, lamp glow) [S1, unofficial].
+ 
+ ### Data Structures
+@@ -26,5 +26,5 @@
+ 
+ ### Step 1: Light Injection Pass (Precomputation)
+-This pass calculates the incoming radiance for each voxel based on light sources.
++This pass calculates the incoming radiance for each voxel based on light sources [S2, unofficial].
+ 
+ 1.  **World Position Reconstruction:** For each voxel at 3D grid index $(x, y, z)$, map to clip space, apply the inverse view-projection matrix, and divide by $w$ to determine the world-space center of the cell [S2, unofficial].
+@@ -33,5 +33,5 @@
+ 
+ ### Step 2: Main Rendering Pass (Compositing)
+-This pass traverses light rays from the light source, determines visibility, and projects light into camera space.
++This pass traverses light rays from the light source, determines visibility, and projects light into camera space [S3, unofficial].
+ 
+ 1.  **Define Ray:** Define a ray from front to back (from the light source) [S3, unofficial].
+@@ -66,5 +66,5 @@
+ *   The phase function $p(\theta)$ is defined as:
+     $$ p(\theta) = \frac{1 - g^2}{4\pi (1 + g^2 - 2g \cos \theta)^{3/2}} $$
+-    where $\theta$ is the angle between the view vector and the light direction [S2, unofficial].
++    where $\theta$ is the angle between the view vector and the light direction [G].
+ 
+ ### Noise Reduction
+@@ -74,65 +74,110 @@
+ ### Pseudocode
+ ```python
+-# Main Rendering Pass (Simplified)
+-def main_rendering_pass(light_source, camera, volume_texture, a_buffer):
+-    # Define ray from front to back (from light source)
++def light_injection_pass(volume_texture, shadow_maps, light_sources):
++    # Step 1: Light Injection (Precomputation)
++    for x, y, z in volume_texture.grid:
++        # World Position Reconstruction
++        clip_pos = vec4(x, y, z, 1.0)
++        world_pos = inverse_view_projection * clip_pos
++        world_pos /= world_pos.w
++        
++        # Shadow Map Sampling
++        is_shadowed = False
++        for light in light_sources:
++            if light.type == 'directional':
++                is_shadowed = sample_cascade_shadow(shadow_maps, world_pos, light)
++            elif light.type == 'point':
++                is_shadowed = sample_cubemap_shadow(shadow_maps, world_pos, light)
++            if is_shadowed:
++                break
++                
++        if not is_shadowed:
++            # In-Scattering Calculation
++            radiance = evaluate_light(light, world_pos)
++            # Store in 3D texture using image load/store
++            volume_texture.write(x, y, z, radiance)
++
++def main_rendering_pass(volume_texture, a_buffer, camera, light_source):
++    # Step 2: Main Rendering Pass (Compositing)
+     ray = define_ray_from_light(light_source)
+     
+-    # Loop for all samples s along the ray
+     for s in ray.samples:
+-        # Read/classify voxel at s to color/opacity c
+         c = read_voxel(volume_texture, s)
+         
+         if c.opacity > 0:
+-            # Project s to camera space and get texture coord t
+             t = project_to_camera_space(s, camera)
+-            
+-            # Calculate distance d to camera (in volume space)
+             d = calculate_distance_to_camera(s, camera)
+             
+-            # Retrieve closest layers to s based on t and d (binary search)
+-            # Optimize: check against first and last layer before search
+             closest_layers = binary_search_a_buffer(a_buffer, t, d)
+-            
+-            # Calculate visibility v through linear interpolation
+             v = interpolate_visibility(closest_layers, d)
+             
+-            # Perform compositing front-to-back along ray into r
+             r = composite_front_to_back(r, c, v)
+-            
+-            # Compute color/opacity as seen from camera
+             color_opacity = compute_color_opacity(r)
+             
+-            # Project s onto camera to determine covered pixels c
+             covered_pixels = project_to_covered_pixels(s, camera)
+-            
+-            # Add contribution to pixels in resulting image (atomic add)
+             for p in covered_pixels:
+                 atomic_add(p, color_opacity)
+             
+-            # Determine next position or if done (early ray termination)
+             if is_done(r):
+                 break
+ 
+-# Light Injection Pass (Simplified)
+-def light_injection_pass(light_source, volume_texture, shadow_map):
+-    # World Position Reconstruction
+-    for x, y, z in volume_texture.grid:
+-        world_pos = reconstruct_world_position(x, y, z)
+-        
+-        # Shadow Map Sampling
+-        is_shadowed = sample_shadow_map(shadow_map, world_pos, light_source)
+-        
+-        if not is_shadowed:
+-            # In-Scattering Calculation
+-            radiance = calculate_in_scattered_radiance(light_source, world_pos)
+-            # Store in 3D texture using image load/store
+-            write_to_volume(volume_texture, x, y, z, radiance)
++# Helper functions
++def sample_cascade_shadow(shadow_maps, world_pos, light):
++    cascade_idx = find_finest_cascade(world_pos, light)
++    return shadow_maps[cascade_idx].sample(world_pos)
++
++def sample_cubemap_shadow(shadow_maps, world_pos, light):
++    return shadow_maps.cubemap.sample(world_pos - light.position)
++
++def evaluate_light(light, world_pos):
++    return light.color * light.attenuation * heney_greenstein_phase(light.direction, view_direction)
++
++def define_ray_from_light(light_source):
++    return Ray(origin=light_source.position, direction=light_source.direction)
++
++def read_voxel(texture, pos):
++    return texture.sample(pos)
++
++def project_to_camera_space(pos, camera):
++    return camera.view_proj * pos
++
++def calculate_distance_to_camera(pos, camera):
++    return length(camera.position - pos)
++
++def binary_search_a_buffer(a_buffer, t, d):
++    if d < a_buffer[0].d or d > a_buffer[-1].d:
++        return []
++    min_layer, max_layer = 0, len(a_buffer) - 1
++    while min_layer <= max_layer:
++        mid = min_layer + (max_layer - min_layer) // 2
++        if a_buffer[mid].d < d:
++            min_layer = mid + 1
++        else:
++            max_layer = mid - 1
++    return [a_buffer[max_layer], a_buffer[min_layer]]
++
++def interpolate_visibility(layers, d):
++    return layers[0].v + (layers[1].v - layers[0].v) * (d - layers[0].d) / (layers[1].d - layers[0].d)
++
++def composite_front_to_back(r, c, v):
++    return r + c * v * (1.0 - r.a)
++
++def compute_color_opacity(r):
++    return r.color, r.a
++
++def project_to_covered_pixels(pos, camera):
++    return camera.rasterize(pos)
++
++def atomic_add(pixel, color):
++    pixel.color += color
++
++def is_done(r):
++    return r.a > 0.99 or r is at_end_of_ray
+ ```
+ 
+ ## Subtopics
+ 
+-### Inject Direct Lighting Pass
+-A variant that renders the shadow map from the light's point of view and reconstructs the world position of each shadow map texel to traverse down an octree data structure, calculating reflected radiance (assuming diffuse reflection) and writing it to 3D texture bricks [S4, unofficial]. It uses a cascade shadow map with 4 cascades, with the last cascade used for light injection. Slope scale depth bias is disabled to ensure the reconstructed world position is exactly inside the voxel [S4, unofficial]. Pitfalls include shadow map instability causing flickering during cone tracing when the camera moves, and low shadow map resolution causing light injection artifacts where only a subset of voxels are filled [S4, unofficial].
++### [Inject Direct Lighting Pass](2841-inject-direct-lighting-pass.md)
++The Inject Direct Lighting Pass populates a voxelized scene's data structure with direct illumination data, enabling subsequent global illumination calculations (such as voxel cone tracing). It solves the problem of transferring light transport information from a standard rasterized shadow map into a 3D volumetric representation. It differs from its sibling, the Light Injection Pass, which operates in the GPU fragment stage using camera-space ray traversal and A-Buffer visibility; this pass operates in world space by traversing an octree from shadow map texels.
+ 
+ ## Operating characteristics
+@@ -154,4 +199,3 @@
+ [S1] feat(render): the light in the air: sun shafts and the glow round lamps, in their shadows (r_volumetric), https://github.com/ssshoshi/openmohaa/pull/116, fetched 2026-10-26 (unofficial)
+ [S2] Volumetric Fog Using 3D Textures in OpenGL - opengl, https://salivity.github.io/opengl/article/volumetric-fog-using-3-d-textures-in-open-gl, fetched 2026-10-27 (unofficial)
+-[S3] Multimodal Volume Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2015/sunden15multimodal.pdf, fetched 2026-10-29 (unofficial)
+-[S4] Implementing Voxel Cone Tracing, http://simonstechblog.blogspot.com/2013/01/implementing-voxel-cone-tracing.html, fetched 2026-10-27 (unofficial)+[S3] Multimodal Volume Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2015/sunden15multimodal.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,136 @@
+--- v002.md
++++ v003.md
+@@ -17,37 +17,33 @@
+ 1.  **Geometric Correspondence Extraction:** Use the MASt3R geometric backbone to extract sparse 2D correspondences between image pairs [S1].
+ 2.  **Semantic Enrichment:** Enrich the geometric matches with part-level features from a frozen DINOv3 encoder via a lightweight Residual Semantic Fusion module to improve correspondence reliability and confidence estimation [S1].
+-3.  **3D Lifting:** Lift the 2D anchor pairs into 3D space. During training, use ground-truth camera poses. At test time, use MASt3R-estimated poses [S1].
+-4.  **Multi-Attribute Consistency (MAC) Loss Calculation:** Identify the Gaussians in the scene that project to the corresponding 2D anchors. Enforce direct, confidence-weighted consistency on these matched Gaussians in a common world coordinate frame. The loss jointly regularizes positional consistency (distance between centroids), shape consistency (agreement between covariance parameters, respecting covariance geometry), and appearance consistency (agreement between opacity and color attributes) [S1]. The formulation is robust to outliers [S1].
++3.  **3D Lifting:** Lift the 2D anchor pairs into 3D space [S1]. During training, use ground-truth camera poses [S1]. At test time, use MASt3R-estimated poses [S1].
++4.  **Multi-Attribute Consistency (MAC) Loss Calculation:** Identify the Gaussians in the scene that project to the corresponding 2D anchors [S1]. Enforce direct, confidence-weighted consistency on these matched Gaussians in a common world coordinate frame [S1]. The loss jointly regularizes positional consistency (distance between centroids), shape consistency (agreement between covariance parameters, respecting covariance geometry), and appearance consistency (agreement between opacity and color attributes) [S1]. The formulation is robust to outliers [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def compute_mac_loss(gaussians, view1, view2, poses, confidences):
++def compute_mac_loss(gaussians, matches, poses):
+     """
+     Computes the Multi-Attribute Consistency loss for matched Gaussians.
++    matches: list of tuples (u1, v1, u2, v2, confidence)
++    poses: dict mapping view_id to camera-to-world transformation
++    gaussians: list of dicts with keys 'centroid', 'covariance', 'opacity', 'color'
+     """
+-    # 1. Extract 2D correspondences using MASt3R backbone
+-    matches = extract_correspondences_ma3tr(view1, view2)
+-    
+-    # 2. Enrich with DINOv3 features via Residual Semantic Fusion
+-    enriched_matches = semantic_fusion(matches, view1, view2)
+-    
+     pos_loss = 0.0
+     shape_loss = 0.0
+     app_loss = 0.0
+     total_weight = 0.0
+-    
+-    for match in enriched_matches:
+-        u1, v1 = match.pixel_1
+-        u2, v2 = match.pixel_2
+-        conf = match.confidence
++
++    for u1, v1, u2, v2, conf in matches:
++        # [Comment: MASt3R backbone extracts sparse 2D correspondences and confidence scores.]
++        # [Comment: Residual Semantic Fusion enriches matches with DINOv3 part-level features.]
+         
+-        # Project 2D points to 3D rays using camera poses
+-        ray1 = ray_from_pixel(u1, v1, poses[view1])
+-        ray2 = ray_from_pixel(u2, v2, poses[view2])
++        # Project 2D pixels to 3D rays using camera poses
++        ray1 = backproject_pixel(u1, v1, poses['view1'])
++        ray2 = backproject_pixel(u2, v2, poses['view2'])
+         
+-        # Find Gaussians closest to the projected ray origins or pixel centers
+-        g1 = find_matching_gaussian(gaussians, ray1, view1)
+-        g2 = find_matching_gaussian(gaussians, ray2, view2)
++        # Find Gaussians whose 2D projection is closest to the pixel centers
++        g1 = find_closest_gaussian(gaussians, u1, v1, poses['view1'])
++        g2 = find_closest_gaussian(gaussians, u2, v2, poses['view2'])
+         
+         if g1 is None or g2 is None:
+@@ -55,22 +51,21 @@
+             
+         # Positional Consistency: Euclidean distance between centroids
+-        delta_pos = g1.centroid - g2.centroid
+-        pos_term = dot(delta_pos, delta_pos)
++        delta_pos = [g1['centroid'][i] - g2['centroid'][i] for i in range(3)]
++        pos_term = sum(d**2 for d in delta_pos)
+         
+         # Shape Consistency: Covariance alignment respecting geometry
+-        delta_cov = g1.covariance - g2.covariance
+-        shape_term = frobenius_norm(delta_cov)
++        delta_cov = [[g1['covariance'][i][j] - g2['covariance'][i][j] for j in range(3)] for i in range(3)]
++        shape_term = sum(val**2 for row in delta_cov for val in row)
+         
+         # Appearance Consistency: Opacity and color agreement
+-        delta_alpha = g1.opacity - g2.opacity
+-        delta_color = g1.color - g2.color
+-        app_term = dot(delta_alpha, delta_alpha) + frobenius_norm(delta_color)
++        delta_alpha = g1['opacity'] - g2['opacity']
++        delta_color = [g1['color'][i] - g2['color'][i] for i in range(3)]
++        app_term = delta_alpha**2 + sum(c**2 for c in delta_color)
+         
+         # Weight by confidence
+-        weight = conf
+-        pos_loss += weight * pos_term
+-        shape_loss += weight * shape_term
+-        app_loss += weight * app_term
+-        total_weight += weight
++        pos_loss += conf * pos_term
++        shape_loss += conf * shape_term
++        app_loss += conf * app_term
++        total_weight += conf
+         
+     if total_weight > 0:
+@@ -79,37 +74,24 @@
+         app_loss /= total_weight
+         
+-    # Combine into final MAC loss
+-    # [G] Assuming equal weighting for positional, shape, and appearance terms.
++    # [G] Combines positional, shape, and appearance terms with equal weighting.
+     loss = pos_loss + shape_loss + app_loss
+     return loss
+ 
+-def extract_correspondences_ma3tr(view1, view2):
+-    # [Comment: Calls the MASt3R geometric backbone to return pixel pairs and confidence scores.]
+-    return []
+-
+-def semantic_fusion(matches, view1, view2):
+-    # [Comment: Enriches matches with part-level features from a frozen DINOv3 encoder via a lightweight Residual Semantic Fusion module.]
+-    return matches
+-
+-def ray_from_pixel(u, v, pose):
+-    # [G] Standard pinhole camera inverse projection.
+-    # Assumes normalized coordinates and identity intrinsics for simplicity.
++def backproject_pixel(u, v, pose):
++    # [G] Standard pinhole camera inverse projection to a unit depth ray.
+     return (u, v, 1.0)
+ 
+-def find_matching_gaussian(gaussians, ray, view):
+-    # [G] Returns the Gaussian whose 2D projection is closest to the ray origin/pixel.
++def find_closest_gaussian(gaussians, u, v, pose):
++    # [G] Projects all Gaussian centroids to 2D screen space and returns the closest one.
+     best_g = None
+     min_dist = float('inf')
+     for g in gaussians:
+-        center_2d = project_to_screen(g.centroid, pose=view)
+-        dist = (center_2d[0] - ray[0])**2 + (center_2d[1] - ray[1])**2
++        # [G] Simplified orthographic projection for demonstration; real implementation uses perspective projection.
++        center_2d = (g['centroid'][0], g['centroid'][1])
++        dist = (center_2d[0] - u)**2 + (center_2d[1] - v)**2
+         if dist < min_dist:
+             min_dist = dist
+             best_g = g
+     return best_g
+-
+-def frobenius_norm(matrix):
+-    # [G] Standard Frobenius norm calculation.
+-    return sum(x**2 for row in matrix for x in row)**0.5
+ ```
+ 

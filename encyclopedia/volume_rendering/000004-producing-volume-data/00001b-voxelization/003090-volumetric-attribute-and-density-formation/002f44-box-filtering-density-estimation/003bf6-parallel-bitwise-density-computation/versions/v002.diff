@@ -1,0 +1,165 @@
+--- v001.md
++++ v002.md
+@@ -4,92 +4,86 @@
+ 
+ ## Overview
+-Parallel Bitwise Density Computation is a technique to compute voxel density (the number of filled voxels in a column) using parallel bitwise operations on integer textures, avoiding expensive texture lookups for bit counting [S1, unofficial]. It sets itself apart from sibling methods like Kernel Density Estimation by using exact integer arithmetic on binary slicemaps rather than probabilistic or smoothed field approximations [S1, unofficial].
++Parallel Bitwise Density Computation is a technique to compute voxel density (the number of filled voxels in a column) using parallel bitwise operations on integer textures, avoiding expensive texture lookups for bit counting [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A binary slicemap (voxel grid) where each voxel is 1 bit (filled) or 0 bits (empty).
+-*   **Output:** A density map where each voxel stores the count of filled voxels in its column.
++*   **Input:** A binary slicemap where voxels are packed into integer components [S1, unofficial].
++*   **Output:** A density map storing the count of filled voxels per column [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Integer Textures:** Voxels are packed into integer components. The method relies on the ability to perform bitwise operations on these integers in parallel.
+-*   **Bitmasks:** Specific integer patterns ($I_{mask}$) are used to isolate and align bit pairs.
++*   **Integer Textures:** Voxels are packed into integer components [S1, unofficial].
++*   **Bitmasks:** Specific integer patterns ($I_{mask}$) are used to isolate and align bit pairs [S1, unofficial].
+ 
+ **Steps:**
+ 
+ 1.  **Compute Intermediate Z-Density Map:**
+-    Perform an in-place operation on the binary slicemap to store two bits per voxel. This encodes the pairwise sum of neighboring voxels in a column $c$. This step also performs downsampling. The operation is defined as:
++    Perform an in-place operation on the binary slicemap to store two bits per voxel [S1, unofficial]. This encodes the pairwise sum of neighboring voxels in a column $c$ and performs downsampling [S1, unofficial]. The operation is defined as:
+     $$
+-    (c \& I_{10101\dots}) + ((c \& I_{01010\dots}) \gg 1)
++    (c \& I_{1010\dots}) + ((c \& I_{0101\dots}) \gg 1)
+     $$
+     where:
+-    *   $\&$ is bitwise AND.
+-    *   $I_{10101\dots}$ is an integer with bitmask $10101\dots$ (isolating odd-positioned bits).
+-    *   $I_{01010\dots}$ is an integer with bitmask $01010\dots$ (isolating even-positioned bits).
+-    *   $\gg 1$ is a right shift by 1.
++    *   $\&$ is bitwise AND [S1, unofficial].
++    *   $I_{abc\dots}$ is an integer with bitmask $abc\dots$ [S1, unofficial].
++    *   $\gg 1$ is a right shift by 1 [S1, unofficial].
+     *   The succeeding zero bit (introduced by the mask) after every copied bit ensures that the summation does not pollute the solution [S1, unofficial].
+ 
+ 2.  **Sum Voxels in XY-Plane:**
+-    Sum up voxels of the z-density map in the xy-plane. Four neighboring voxels need to be combined. Since each voxel now represents 2 bits, their sum requires 4 bits of storage, preventing an in-place operation. To benefit from parallel execution, the sums of even and odd voxels are calculated separately:
++    Sum up voxels of the z-density map in the xy-plane by combining four neighboring voxels [S1, unofficial]. Each voxel now represents 2 bits, so their sum requires 4 bits of storage, preventing an in-place operation [S1, unofficial]. To benefit from parallel execution, the sums of even and odd voxels are calculated separately [S1, unofficial]:
+     $$
+-    ESum := \sum_{i=0}^3 (c_i \& I_{00110011\dots}) \gg 2
+-    $$
+-    $$
+-    OSum := \sum_{i=0}^3 c_i \& I_{11001100\dots}
++    ESum := \sum_{i=0}^3 (c_i \& I_{00110011\dots}) \gg 2, \quad OSum := \sum_{i=0}^3 c_i \& I_{11001100\dots}
+     $$
+     where:
+-    *   $i$ iterates over the four neighbors in the xy-plane.
+-    *   $I_{00110011\dots}$ is a bitmask that recovers the right bit pairs and ensures each is followed by two zero bits for correct summation.
+-    *   $I_{11001100\dots}$ is a bitmask that recovers the left bit pairs and ensures each is followed by two zero bits for correct summation.
+-    *   $\gg 2$ is a right shift by 2.
++    *   $i$ iterates over the four neighbors in the xy-plane [S1, unofficial].
++    *   $I_{00110011\dots}$ is a bitmask that recovers the right bit pairs and ensures each is followed by two zero bits for correct summation [S1, unofficial].
++    *   $I_{11001100\dots}$ is a bitmask that recovers the left bit pairs and ensures each is followed by two zero bits for correct summation [S1, unofficial].
++    *   $\gg 2$ is a right shift by 2 [S1, unofficial].
+     *   The resulting integers $ESum$ and $OSum$ are stored in the density map [S1, unofficial].
+ 
+ 3.  **Result Ordering:**
+-    The voxels alternate along the z-direction between values in $EvenSum$ and $OddSum$. The order is $0,2/1,3$ rather than $0,1/2,3$. For normal derivation, this is not problematic, but for other applications, reordering may be required [S1, unofficial].
++    The voxels alternate along the z-direction between values in $EvenSum$ and $OddSum$ [S1, unofficial]. The order is $0,2/1,3$ rather than $0,1/2,3$ [S1, unofficial]. For normal derivation this is not problematic, but for other applications reordering may be required [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def parallel_bitwise_density(slicemap):
++def parallel_bitwise_density(columns):
+     """
+     Computes density from a binary slicemap using parallel bitwise operations.
+-    slicemap: List of integers representing voxel columns.
++    columns: List of integers representing voxel columns (bitmasks).
+     Returns: Density map with ESum and OSum interleaved.
+     """
+-    # Define bitmasks
+-    # I_1010... isolates bits at positions 0, 2, 4... (assuming LSB is pos 0)
++    # Step 1: Compute z-density in-place
++    # I_1010... isolates bits at positions 0, 2, 4...
+     # I_0101... isolates bits at positions 1, 3, 5...
+-    # Note: The exact bit pattern depends on the integer width and endianness.
+-    # For a 32-bit integer, I_1010... = 0xAAAAAAAA, I_0101... = 0x55555555
+-    I_1010 = 0xAAAAAAAA
+-    I_0101 = 0x55555555
++    # We use 32-bit masks to match typical GPU texture component widths.
++    MASK_EVEN = 0xAAAAAAAA
++    MASK_ODD = 0x55555555
++    MASK_2BIT = 0x33333333  # Keeps only the 2-bit fields after addition
+     
+-    # Step 1: Compute Z-density (in-place)
+-    # (c & I_1010...) + ((c & I_0101...) >> 1)
+-    z_density = [(c & I_1010) + ((c & I_0101) >> 1) for c in slicemap]
+-    
+-    # Step 2: Sum in XY-plane
+-    # Assuming slicemap is organized such that neighbors are accessible.
+-    # For simplicity, assume we process groups of 4 neighbors.
+-    # c_i represents the z-density value of the i-th neighbor.
+-    
+-    # Masks for XY summation
+-    # I_00110011... isolates the lower 2 bits of each pair and shifts them to align
+-    # I_11001100... isolates the upper 2 bits of each pair
+-    # For 32-bit, I_00110011... = 0x33333333, I_11001100... = 0xCCCCCCCC
+-    I_0011 = 0x33333333
+-    I_1100 = 0xCCCCCCCC
++    z_density = []
++    for c in columns:
++        c_32 = c & 0xFFFFFFFF
++        # (c & I_1010...) + ((c & I_0101...) >> 1)
++        z = ((c_32 & MASK_EVEN) + ((c_32 & MASK_ODD) >> 1)) & MASK_2BIT
++        z_density.append(z)
++        
++    # Step 2: Sum in xy-plane
++    # I_00110011... isolates lower 2 bits of each field
++    # I_11001100... isolates upper 2 bits of each field
++    MASK_LOWER = 0x33333333
++    MASK_UPPER = 0xCCCCCCCC
++    MASK_4BIT = 0x0F0F0F0F  # Keeps only the 4-bit fields after summation
+     
+     density_map = []
+     for i in range(0, len(z_density), 4):
+-        # Get 4 neighbors
+         c0, c1, c2, c3 = z_density[i], z_density[i+1], z_density[i+2], z_density[i+3]
+         
+-        # Calculate ESum and OSum
+-        # ESum: sum of lower 2 bits of each neighbor, shifted right by 2
+-        esum = ((c0 & I_0011) >> 2) + ((c1 & I_0011) >> 2) + ((c2 & I_0011) >> 2) + ((c3 & I_0011) >> 2)
++        # ESum := sum_{i=0}^3 (c_i & I_0011...) >> 2
++        esum = (((c0 & MASK_LOWER) >> 2) + ((c1 & MASK_LOWER) >> 2) +
++                ((c2 & MASK_LOWER) >> 2) + ((c3 & MASK_LOWER) >> 2)) & MASK_4BIT
+         
+-        # OSum: sum of upper 2 bits of each neighbor
+-        osum = (c0 & I_1100) + (c1 & I_1100) + (c2 & I_1100) + (c3 & I_1100)
++        # OSum := sum_{i=0}^3 c_i & I_1100...
++        osum = ((c0 & MASK_UPPER) + (c1 & MASK_UPPER) +
++                (c2 & MASK_UPPER) + (c3 & MASK_UPPER)) & MASK_4BIT
+         
+-        # Store in density map
++        # Store resulting integers ESum and OSum in the density map
+         density_map.append(esum)
+         density_map.append(osum)
+@@ -99,20 +93,14 @@
+ 
+ **Parameters:**
+-*   **Bitmask Width:** Depends on the integer width of the texture components (e.g., 8-bit, 16-bit, 32-bit). Typical values are 8-bit or 16-bit per component [S1, unofficial].
++*   **Bitmask Width:** Depends on the integer width of the texture components [S1, unofficial]. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The method relies on exact integer arithmetic. Overflow must be avoided by ensuring sufficient bit width for the sums [S1, unofficial].
+-*   **Boundaries:** The method assumes a regular grid structure. Boundary conditions must be handled appropriately [S1, unofficial].
+-*   **Ordering:** The resulting density map has an alternating order ($0,2/1,3$). This may require reordering for certain applications [S1, unofficial].
++*   **Ordering:** The splitting leads to a result ordered $0,2/1,3$ rather than $0,1/2,3$ [S1, unofficial]. Reordering can be done in a parallelized process [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels. The bitwise operations are constant time per voxel.
+-*   **Memory Complexity:** $O(N)$ for the input and output density maps.
+-*   **Performance:** The method is highly efficient on GPUs, especially with DX10+ hardware that supports arithmetic bitwise operations. DX9 implementations may use lookup textures, which can be slower [S1, unofficial].
+-*   **Strengths:** Exact density computation, no texture lookups required (on modern hardware), parallelizable.
+-*   **Limitations:** Requires integer textures, ordering of results may be non-intuitive, limited by integer bit width.
++DX9 implementations use lookup textures (256×2 RGBA) to encode the algorithm steps, whereas DX10 uses arithmetic bitwise operations [S1, unofficial]. DX9 lookup textures take two 8-bit voxel columns and yield four 8-bit components with neighboring bit sums separated by two zero bits [S1, unofficial]. Time and memory complexity are not given in the sources.
+ 
+ ## Background
+-Parallel Bitwise Density Computation was introduced in the context of single-pass GPU solid voxelization for real-time applications [S1, unofficial]. It was developed to address the inefficiency of bit counting with textures, particularly for translucency effects and CSG operations [S1, unofficial]. The method leverages the parallel nature of GPU arithmetic to perform bit counting in a single pass [S1, unofficial].
++The method was introduced in the context of single-pass GPU solid voxelization for real-time applications [S1, unofficial]. It addresses the inefficiency of bit counting with textures for translucency effects and CSG/inter-object intersection tests [S1, unofficial].
+ 
+ ## Sources

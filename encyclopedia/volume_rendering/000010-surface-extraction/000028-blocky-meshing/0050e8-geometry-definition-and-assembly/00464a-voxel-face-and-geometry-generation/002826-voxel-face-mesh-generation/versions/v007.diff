@@ -1,0 +1,315 @@
+--- v006.md
++++ v007.md
+@@ -1,61 +1,108 @@
+ # Voxel Face Mesh Generation
+ 
+-Also called: Exposed Face Mesh Generation, Face-to-Vertex Generation with UV and Lighting, Visible Block Faces Meshing, Voxel Quad Generation
++Also called: Exposed Face Mesh Generation, Face-to-Vertex Generation with UV and Lighting, Visible Block Faces Meshing, Voxel Face Generation, Voxel Quad Generation
+ 
+ ## Overview
+-Voxel Face Mesh Generation is a surface extraction algorithm that constructs a triangle mesh from a 3D voxel grid by emitting a single unit quad for every face of a solid voxel that is exposed to empty space or a chunk boundary [S1, S3, S5, unofficial]. It solves the problem of rendering large voxel worlds efficiently by culling internal faces between adjacent solid voxels, thereby reducing vertex count and draw calls compared to naive voxel rendering [S1, S9, unofficial]. Unlike smooth surface extraction methods like Marching Cubes, this method produces a blocky, axis-aligned aesthetic suitable for voxel-art styles [S1, unofficial][S8]. It differs from [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) by focusing on simple neighbor-based face culling rather than combining multiple voxel sets via boolean operations [S1, unofficial].
++Voxel Face Mesh Generation is a surface extraction algorithm that converts a 3D occupancy grid or density field into a blocky triangle mesh by emitting one quad (two triangles) for every voxel face exposed to empty space or a chunk boundary [S1, S3, unofficial][S9]. It solves the problem of rendering large voxel worlds efficiently by culling internal faces between adjacent solid voxels, thereby reducing vertex count and draw calls compared to rendering individual cubes [S1, S10, unofficial]. Unlike smooth surface extraction methods like Marching Cubes, this method preserves the axis-aligned, blocky aesthetic inherent to voxel data [S1, unofficial][S9]. It differs from its sibling [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) by focusing on simple neighbor-based visibility checks rather than complex boolean operations on voxel sets.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D voxel grid (occupancy or density field), typically stored as a padded chunk to simplify boundary checks [S3, S5, S9, unofficial]. The grid contains block types or density values.
+-*   **Output:** A mesh data structure containing arrays for vertices (positions, normals, UVs, tangents, colors), indices (triangle connectivity), and UV coordinates [S2, S7, unofficial].
++*   **Input:** A 3D voxel grid (occupancy array, density field, or block ID map) and optional metadata (block types, texture atlas indices). The grid may be conceptually or physically padded with a 1-voxel empty boundary to simplify neighbor lookups [S1, S3, S5, unofficial].
++*   **Output:** A mesh data structure containing arrays of vertices (positions, normals, UVs, colors), triangle indices, and optionally tangents [S2, S4, S8, unofficial].
+ 
+ **Data Structures:**
+-*   **Voxel Grid:** Stored as a 1D array or 3D array. For example, a 1D byte array `voxelMap` of size `ChunkWidth * ChunkHeight * ChunkSize`, indexed by `x + Width * (y + Height * z)` [S7, unofficial]. Alternatively, a density field with an `iso_value` threshold [S5, unofficial].
+-*   **MeshData:** Holds dynamic arrays for `vertices` (position, normal, UV, tangent, color), `triangles` (indices), and `uvs` [S2, S7, unofficial].
+-*   **Lookup Tables:** Static arrays defining base geometry for the 6 face directions: `VERTICES[6][4]` (base quad corners), `NORMALS[6]` (face normals), `TANGENTS[6]`, and `UVS_Inverted[6][4]` [S2, unofficial]. Texture atlas indices are mapped via `BlockTypeTextureIndex[MAX_TYPES][6]` [S2, unofficial].
+-
+-**Steps:**
+-1.  **Initialization:** Clear mesh buffers (`vertices`, `triangles`, `uvs`, `normals`) and pre-allocate capacity based on estimated visible face count (e.g., `ChunkWidth^2 * 6 * 4` vertices) [S7, S9, unofficial].
+-2.  **Iteration:** Loop through all voxels in the chunk. If using padding, iterate only interior voxels (indices 1 to `PADDED_CHUNK_MAX_INDEX`) to avoid boundary checks [S3, unofficial]. Skip empty voxels (e.g., `BlockType.Air` or density < `iso_value`) [S5, S7, unofficial].
+-3.  **Neighbor Check:** For each solid voxel, check its 6 immediate neighbors (±X, ±Y, ±Z) [S1, S9, unofficial].
+-    *   If a neighbor is out of chunk bounds, treat it as empty/visible [S9, unofficial].
+-    *   If a neighbor is empty (Air, density < `iso_value`, or `visible=false`), the face is exposed [S1, S5, unofficial].
+-    *   *Translucency Rule:* For translucent voxels, a face is generated if the neighbor is empty; if the neighbor is opaque, the face is hidden [S3, unofficial].
+-4.  **Face Generation:** For each exposed face:
+-    *   **Vertices:** Calculate 4 vertex positions by adding the voxel's world position (scaled by `BlockSize`) to the base quad vertices defined for the face direction [S2, S7, unofficial].
+-    *   **Indices:** Add 6 indices to form two triangles. The winding order must be consistent (e.g., counter-clockwise). A common pattern is `(0,1,2)` and `(3,2,1)` relative to the current vertex count to ensure correct culling [S2, S7, unofficial].
+-    *   **Normals:** Assign the face normal (from `NORMALS[direction]`) to all 4 vertices [S2, unofficial].
+-    *   **UVs:** Compute UV coordinates based on the block type and face direction using a texture atlas. Calculate atlas tile indices (`UVI`, `UVJ`) and scale by `UVSize = 1.0 / ATLAS_SIZE`. Apply UV inversion or swapping if required by the atlas layout [S2, unofficial].
+-    *   **Colors/Lighting:** Assign vertex colors. This can be a flat color based on block type [S6, unofficial] or per-vertex lighting colors (sun/block light) sampled from neighbors for smooth lighting [S1, S2, unofficial].
+-5.  **Finalization:** Upload the accumulated vertex and index data to the GPU mesh object. Recalculate normals, bounds, and tangents if not computed during generation [S1, S7, unofficial].
++*   **Voxel Grid:** Stored as a 1D array or 3D array. For a chunk of size $W \times H \times D$, the linear index is often $x + W(y + H z)$ [S8, unofficial].
++*   **MeshData Buffer:** Dynamic arrays for vertices, indices, normals, UVs, and colors. Pre-allocation is common using an estimate like $ChunkWidth^2 \times ChunkHeight \times 6$ vertices [S8, unofficial].
++*   **Face Definitions:** Constants defining the 4 corner vertices, 2 triangle index sets, and normal vector for each of the 6 face directions (Up, Down, North, South, East, West) [S2, S5, S7, unofficial].
++
++**Numbered Steps:**
++
++1.  **Initialize Mesh Buffers:** Clear or allocate memory for vertices, indices, normals, UVs, and colors [S8, unofficial]. Estimate capacity to avoid reallocation [S8, unofficial].
++2.  **Iterate Voxels:** Loop through all voxels in the grid. If using padding, iterate only the interior voxels (indices $1$ to $Size-2$) to avoid boundary checks for neighbors [S3, unofficial]. If no padding, check bounds for every neighbor [S10, unofficial].
++3.  **Check Solidity:** Determine if the current voxel is solid. For occupancy grids, this means the voxel is not "Air" or "Empty" [S8, unofficial]. For density fields, check if density $\ge$ iso_value [S6, unofficial].
++4.  **Check Neighbors (Face Culling):** For each of the 6 face directions, check the immediate neighbor voxel [S1, unofficial][S9].
++    *   Calculate neighbor coordinates: $neighbor\_pos = current\_pos + face\_normal$ [S3, S8, unofficial].
++    *   Determine visibility:
++        *   If the neighbor is out of bounds, treat it as empty/visible [S9][S10, unofficial].
++        *   If the neighbor is empty (Air, density < iso_value, or `visible=false`), the face is exposed [S1, S6, unofficial].
++        *   **Translucency Rule:** If the voxel is translucent, generate the face only if the neighbor is empty; if the neighbor is opaque, hide the face [S3, unofficial].
++        *   If the neighbor is solid (and opaque), the face is internal and culled [S1, unofficial].
++5.  **Generate Geometry for Exposed Faces:** For each exposed face:
++    *   **Vertices:** Calculate the 4 corner positions. Base the positions on the voxel's world position ($pos = voxel\_index \times BlockSize$) and add the local offset defined for that face direction [S2, S5, unofficial].
++        *   Example for Top Face: $pos + (0,1,0), pos + (1,1,0), pos + (1,1,1), pos + (0,1,1)$ [S5, unofficial].
++    *   **Indices:** Add 6 indices to form two triangles. The winding order must be consistent (e.g., counter-clockwise) for back-face culling. A common pattern is $(0,1,2)$ and $(3,2,1)$ relative to the current vertex count [S2, S7, unofficial].
++    *   **Normals:** Assign the face normal to all 4 vertices (e.g., $(0,1,0)$ for Top) [S2, S5, unofficial].
++    *   **UVs:** Calculate texture coordinates based on the block type and face orientation. Use a texture atlas lookup to determine the UV tile, applying scaling and inversion if necessary for the specific face winding [S2, S4, unofficial].
++    *   **Colors/Lighting:** Assign vertex colors. This may be a flat color, or interpolated lighting values sampled from neighbors (smooth lighting) [S1, S2, unofficial].
++6.  **Upload Mesh:** Assign the populated vertex, index, normal, and UV arrays to the graphics API's mesh object [S1, S8, unofficial]. Recalculate bounds and tangents if required by the engine [S1, unofficial].
++
++**Formulas:**
++*   **Face Visibility:**
++    $$
++    \text{face\_needs\_mesh}(voxel, neighbor) = 
++    \begin{cases} 
++    \text{true} & \text{if } (voxel \in \text{Opaque} \land neighbor \in \text{Empty}) \\
++    \text{true} & \text{if } (voxel \in \text{Translucent} \land neighbor \in \text{Empty}) \\
++    \text{false} & \text{if } (voxel \in \text{Empty}) \lor (neighbor \in \text{Opaque}) \lor (voxel \in \text{Translucent} \land neighbor \in \text{Translucent})
++    \end{cases}
++    $$
++    [S3, unofficial]
++*   **Vertex Position:**
++    $$
++    V_{i} = P_{voxel} + O_{face, i} \times BlockSize
++    $$
++    Where $P_{voxel}$ is the voxel's world position, $O_{face, i}$ is the $i$-th local offset for the face direction, and $BlockSize$ is the voxel scale [S2, S5, unofficial].
++*   **Linear Index (1D Array):**
++    $$
++    Index(x, y, z) = x + Width \times (y + Height \times z)
++    $$
++    [S8, unofficial]
++
++**Parameters:**
++*   **BlockSize:** World unit size of a voxel. Typical value: 1.0 [S2, unofficial].
++*   **Iso_value:** Threshold for density fields. Typical value: 0.5 [S6, unofficial].
++*   **Chunk Size:** Dimensions of the meshed region. Common values: $16 \times 64 \times 16$ [S10, unofficial].
++*   **Atlas Size:** Resolution of the texture atlas (e.g., 16x16 tiles) [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Boundary Checks:** If the grid is not padded, out-of-bounds neighbor access must be handled explicitly to avoid crashes and ensure chunk edges are rendered [S10, unofficial].
++*   **Winding Order:** Inconsistent triangle winding (e.g., mixing $(0,1,2)$ and $(0,2,1)$) causes back-face culling failures, resulting in holes or double-rendered geometry [S2, S1, unofficial].
++*   **Memory Leaks (Editor):** In Unity, modifying `Mesh` directly in the editor creates duplicate assets; `SharedMesh` must be used [S1, unofficial].
++*   **Cross-Chunk Consistency:** Faces at chunk boundaries must be generated by the owning chunk, and neighbor chunks must not generate overlapping geometry for the same face [S8, S10, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def generate_voxel_mesh(chunk_data, chunk_width, chunk_height, block_size, atlas_size):
++def generate_voxel_face_mesh(voxel_grid, chunk_width, chunk_height, chunk_depth, block_size, atlas_size):
+     """
+-    Generates a mesh from a voxel chunk by emitting quads for exposed faces.
+-    chunk_data: 1D array of block IDs or densities.
+-    Returns: vertices, indices, uvs, normals, colors.
++    Generates a mesh from a voxel grid by emitting quads for exposed faces.
++    
++    Args:
++        voxel_grid: 3D array or 1D array of block IDs/densities.
++        chunk_width, chunk_height, chunk_depth: Dimensions of the chunk.
++        block_size: Scale factor for voxel positions.
++        atlas_size: Number of tiles along one axis of the texture atlas.
++        
++    Returns:
++        MeshData: Object containing vertices, indices, normals, UVs, colors.
+     """
++    # 1. Initialize buffers
+     vertices = []
+     indices = []
++    normals = []
+     uvs = []
+-    normals = []
+     colors = []
+     
+-    # Base quad vertices for a unit cube at origin, indexed by face direction (0-5)
+-    # Example: VERTICES[direction][vertex_index] -> (x, y, z)
+-    # Directions: UP, DOWN, NORTH, SOUTH, EAST, WEST
+-    base_vertices = get_base_quad_vertices() 
+-    base_normals = get_base_normals()
++    # Pre-allocate if possible (estimate: 6 faces per voxel * 4 verts)
++    estimated_faces = chunk_width * chunk_height * chunk_depth * 6
++    vertices.reserve(estimated_faces * 4)
++    indices.reserve(estimated_faces * 6)
+     
+-    vertex_count = 0
+-    
+-    # Iterate through all voxels
+-    for z in range(chunk_height):
+-        for y in range(chunk_width):
++    # 2. Iterate through all voxels
++    for z in range(chunk_depth):
++        for y in range(chunk_height):
+             for x in range(chunk_width):
+-                block_id = chunk_data[x + y * chunk_width + z * chunk_width * chunk_height]
++                # Get block type/density
++                block_id = get_block_at(voxel_grid, x, y, z)
+                 
+                 # Skip empty/air blocks
+@@ -63,66 +110,64 @@
+                     continue
+                 
+-                # Check 6 neighbors
+-                for face_dir in range(6):
++                # 3. Check 6 neighbors
++                for face_dir in [UP, DOWN, NORTH, SOUTH, EAST, WEST]:
+                     neighbor_pos = get_neighbor_pos(x, y, z, face_dir)
+                     
+                     # Check if neighbor is out of bounds or empty
+-                    is_exposed = False
+-                    if not is_in_bounds(neighbor_pos, chunk_width, chunk_height):
+-                        is_exposed = True
++                    is_neighbor_empty = False
++                    if is_out_of_bounds(neighbor_pos, chunk_width, chunk_height, chunk_depth):
++                        is_neighbor_empty = True
+                     else:
+-                        neighbor_id = chunk_data[
+-                            neighbor_pos.x + neighbor_pos.y * chunk_width + neighbor_pos.z * chunk_width * chunk_height
+-                        ]
++                        neighbor_id = get_block_at(voxel_grid, *neighbor_pos)
+                         if is_empty(neighbor_id):
+-                            is_exposed = True
+-                        # Optional: Handle translucency rules here
+-                        # if is_translucent(block_id) and not is_empty(neighbor_id):
+-                        #     is_exposed = False
+-                    
+-                    if is_exposed:
+-                        # Generate Quad
+-                        # 1. Vertices
+-                        for v_idx in range(4):
+-                            base_v = base_vertices[face_dir][v_idx]
+-                            world_pos = (base_v * block_size) + (Vector3(x, y, z) * block_size)
+-                            vertices.append(world_pos)
++                            is_neighbor_empty = True
++                        # Optional: Translucency logic
++                        elif is_translucent(block_id) and is_opaque(neighbor_id):
++                            is_neighbor_empty = False # Hide face
+                             
+-                            # 2. Normal
+-                            normals.append(base_normals[face_dir])
+-                            
+-                            # 3. UVs
+-                            uv = compute_uv(block_id, face_dir, atlas_size)
+-                            uvs.append(uv)
+-                            
+-                            # 4. Color (Flat or Smooth)
+-                            color = compute_color(block_id, face_dir, chunk_data, x, y, z)
+-                            colors.append(color)
+-                        
+-                        # 5. Indices (Two triangles: 0-1-2 and 3-2-1 for consistent winding)
+-                        indices.append(vertex_count + 0)
+-                        indices.append(vertex_count + 1)
+-                        indices.append(vertex_count + 2)
+-                        indices.append(vertex_count + 3)
+-                        indices.append(vertex_count + 2)
+-                        indices.append(vertex_count + 1)
+-                        
+-                        vertex_count += 4
+-                        
+-    return vertices, indices, uvs, normals, colors
++                    if not is_neighbor_empty:
++                        continue
++                        
++                    # 4. Generate Quad Geometry
++                    base_vertex_count = len(vertices)
++                    
++                    # Get face-specific vertex offsets and normal
++                    face_verts = get_face_vertices(face_dir) # Returns 4 local offsets
++                    face_normal = get_face_normal(face_dir)
++                    
++                    # Calculate UVs for this block and face
++                    uvi, uvj = get_atlas_uv(block_id, face_dir)
++                    uv_size = 1.0 / atlas_size
++                    
++                    for i in range(4):
++                        # Position
++                        local_offset = face_verts[i]
++                        world_pos = (x * block_size + local_offset.x,
++                                     y * block_size + local_offset.y,
++                                     z * block_size + local_offset.z)
++                        vertices.append(world_pos)
++                        
++                        # Normal
++                        normals.append(face_normal)
++                        
++                        # UV (with potential inversion/flip based on face)
++                        # Simplified: assume standard atlas layout
++                        u = (uvi + local_offset.u) * uv_size
++                        v = (uvj + local_offset.v) * uv_size
++                        uvs.append((u, v))
++                        
++                        # Color (e.g., flat gray or lighting)
++                        colors.append((0.75, 0.75, 0.75, 1.0))
++                    
++                    # Indices (Winding: 0,1,2 and 3,2,1 for CCW)
++                    indices.append(base_vertex_count + 0)
++                    indices.append(base_vertex_count + 1)
++                    indices.append(base_vertex_count + 2)
++                    indices.append(base_vertex_count + 3)
++                    indices.append(base_vertex_count + 2)
++                    indices.append(base_vertex_count + 1)
++                    
++    return MeshData(vertices, indices, normals, uvs, colors)
+ ```
+-
+-**Parameters:**
+-*   `BlockSize`: Scale factor for vertex positions [S2, unofficial].
+-*   `AtlasSize`: Resolution of the texture atlas, used to compute `UVSize = 1.0 / AtlasSize` [S2, unofficial].
+-*   `IsoValue`: Threshold for density fields; voxels with density >= `IsoValue` are solid [S5, unofficial].
+-*   `ChunkSize`: Dimensions of the voxel chunk (e.g., 16x64x16) [S9, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Boundary Checks:** Chunk boundaries must be explicitly handled to generate faces at the edge of the world or chunk [S9, unofficial]. If not padded, neighbor lookups require bounds checking [S3, unofficial].
+-*   **Winding Order:** Incorrect triangle winding (e.g., both triangles clockwise) causes back-face culling to hide geometry [S2, unofficial].
+-*   **UV Inversion:** UVs may need to be flipped or swapped (U/V) to align with the texture atlas layout for specific face directions [S2, unofficial].
+-*   **Memory Leaks:** In editor environments (e.g., Unity), modifying `SharedMesh` is required to avoid asset duplication; runtime uses `Mesh` directly [S1, unofficial].
+-*   **Cross-Chunk Visibility:** If chunks are not processed together, internal faces at chunk boundaries may be incorrectly generated or hidden. Neighbor queries across chunks must query adjacent chunk data [S7, S9, unofficial].
+ 
+ ## Subtopics
+@@ -135,20 +180,22 @@
+ 
+ ### [Block Face Mesh Generation](10913-block-face-mesh-generation.md)
+-Generates a 6-vertex mesh data structure for a single exposed face of a voxel block, applying special geometry for cactus blocks and packing vertex attributes for GPU consumption. It differs from its sibling [Face Direction and Quad Geometry](4881-face-direction-and-quad-geometry.md) by handling block-specific geometric modifications (like cactus insets) and producing a packed vertex format rather than just raw geometric primitives. It serves as the core geometry generation step within [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md).
++Generates a 6-vertex mesh data structure for a single exposed face of a voxel block, applying special geometric adjustments for specific block types (such as cactus) and packing vertex attributes for GPU consumption. It differs from its sibling [Face Direction and Quad Geometry](4881-face-direction-and-quad-geometry.md) by handling block-specific geometry modifications (like cactus insets) and attribute packing, rather than just providing generic face normals and UVs. It serves as the concrete implementation step within [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md) that populates the `MeshData` buffer with the final vertex and index data for a specific block instance.
+ 
+ ### [Voxel Meshing with Smooth Lighting](10951-voxel-meshing-with-smooth-lighting.md)
+-Voxel Meshing with Smooth Lighting is a surface extraction algorithm for voxel chunks that generates a single quad mesh for exposed voxel faces, populating a `MeshData` buffer with vertices, indices, normals, UVs, and vertex colors based on face direction and block type. It builds on [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md) by extending the vertex data to include per-vertex lighting colors (sun and block light) and supports smooth lighting by sampling 8 neighboring voxels per face to create smoother lighting transitions. Unlike flat lighting which uses a single neighbor value, this method averages light from surrounding voxels to reduce the "blocky" appearance of shadows.
++Extends the vertex data to include per-vertex lighting colors (sun and block light) and supports smooth lighting by sampling 8 neighboring voxels per face to create smoother lighting transitions. Unlike flat lighting which uses a single neighbor value, this method averages light from surrounding voxels to reduce the "blocky" appearance of shadows.
++
++### [Chunk Mesh Creation](14967-chunk-mesh-creation.md)
++Generates the final visible geometry for a voxel chunk by identifying exposed block faces and assembling them into a single draw call. It differs from its parent [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md), which produces individual quads, by handling the spatial culling logic across chunk boundaries and combining multiple face meshes into one unified mesh structure.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels in the chunk. Each voxel is processed once, and up to 6 faces are checked.
+-*   **Memory Complexity:** $O(F)$, where $F$ is the number of exposed faces. The output mesh size is proportional to the surface area of the solid voxels.
+-*   **Performance:** Significantly faster than greedy meshing or Marching Cubes for simple voxel worlds [S8]. It produces many more quads than greedy meshing (which merges adjacent coplanar faces) but is simpler to implement and update incrementally [S8].
+-*   **Strengths:** Simple implementation, easy to update incrementally (only regenerate affected chunks/voxels), low memory overhead for dynamic worlds.
+-*   **Limitations:** High vertex count compared to optimized meshing techniques (greedy, quadric), blocky aesthetic not suitable for smooth terrain, requires careful handling of chunk boundaries for seamless worlds.
+-*   **When to Use:** Voxel-based games (e.g., Minecraft clones), real-time terrain editing, simple procedural generation.
+-*   **When Not to Use:** High-fidelity smooth terrain, scenes requiring minimal draw calls where greedy meshing is preferred.
++*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels in the chunk. Each voxel is visited once, and 6 neighbor checks are performed [S1, unofficial][S9].
++*   **Memory Complexity:** $O(F)$, where $F$ is the number of exposed faces. In the worst case (all faces exposed), this is $6N$ quads. In typical scenes, it is significantly less due to culling [S1, unofficial][S9].
++*   **Measured Performance:** On a $16 \times 64 \times 16$ chunk, this method generates thousands of quads for sparse structures but reduces them to hundreds for dense terrain. It is significantly faster than greedy meshing but produces more geometry [S9].
++*   **Strengths:** Simple to implement, fast execution, low memory overhead per face, preserves voxel aesthetic [S1, unofficial][S9].
++*   **Limitations:** High triangle count compared to optimized meshing (greedy, marching cubes), no smooth surfaces, potential for overdraw if not sorted or if translucent blocks are present [S1, S3, unofficial].
++*   **When to Use:** Real-time voxel games where performance is critical and blocky aesthetic is desired. Not suitable for smooth organic terrain or high-fidelity rendering [S1, unofficial][S9].
+ 
+ ## Background
+-Voxel Face Mesh Generation is a foundational technique in voxel rendering, originating from early voxel engines and popularized by games like Minecraft. It relies on the principle of face culling, where internal faces between adjacent solid voxels are omitted to save rendering time [S1, unofficial]. The method is widely used in Unity and Unreal Engine voxel tutorials and implementations [S1, S2, unofficial]. It serves as the basis for more advanced techniques like smooth lighting and texture atlas mapping [S1, S2, unofficial].
++Voxel Face Mesh Generation is a foundational technique in voxel rendering, originating from early Minecraft clones and procedural terrain generators. It was popularized by the need to render large voxel worlds efficiently on limited hardware. The method relies on simple neighbor checking rather than complex algorithms like Marching Cubes, resulting in a blocky aesthetic [S1, unofficial][S9]. It is widely used in games like Minecraft, Terraria, and various voxel editors [S1, S10, unofficial].
+ 
+ ## Sources
+@@ -157,7 +204,8 @@
+ [S3] jameshiew/infinigen, https://github.com/jameshiew/infinigen, fetched 2026-10-27 (unofficial)
+ [S4] afonsolage/projekto, https://github.com/afonsolage/projekto, fetched 2026-10-27 (unofficial)
+-[S5] lijiemark/floating-islands-generator, https://github.com/lijiemark/floating-islands-generator, fetched 2026-10-27 (unofficial)
+-[S6] Shilghter/VoxelTerrain, https://github.com/Shilghter/VoxelTerrain, fetched 2026-10-27 (unofficial)
+-[S7] philip2012/voxel-forge, https://github.com/philip2012/voxel-forge, fetched 2026-10-27 (unofficial)
+-[S8] visible_block_faces fn block_mesh::visible_block_faces, https://docs.rs/block-mesh/latest/block_mesh/fn.visible_block_faces.html, fetched 2026-10-27
+-[S9] GitHub Repo for VoxelEngine, https://github.com/TheSlabby/VoxelEngine, fetched 2026-10-29 (unofficial)+[S5] Unity C# Generating custom mesh for voxel terrain not loading properly, https://stackoverflow.com/questions/72852301/unity-c-generating-custom-mesh-for-voxel-terrain-not-loading-properly, fetched 2026-10-27 (unofficial)
++[S6] lijiemark/floating-islands-generator, https://github.com/lijiemark/floating-islands-generator, fetched 2026-10-27 (unofficial)
++[S7] Shilghter/VoxelTerrain, https://github.com/Shilghter/VoxelTerrain, fetched 2026-10-27 (unofficial)
++[S8] philip2012/voxel-forge, https://github.com/philip2012/voxel-forge, fetched 2026-10-27 (unofficial)
++[S9] visible_block_faces fn block_mesh::visible_block_faces, https://docs.rs/block-mesh/latest/block_mesh/fn.visible_block_faces.html, fetched 2026-10-27
++[S10] GitHub Repo for VoxelEngine, https://github.com/TheSlabby/VoxelEngine, fetched 2026-10-29 (unofficial)

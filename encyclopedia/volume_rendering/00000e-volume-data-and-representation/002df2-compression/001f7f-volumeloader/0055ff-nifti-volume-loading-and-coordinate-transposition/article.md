@@ -1,0 +1,130 @@
+# NIfTI Volume Loading and Coordinate Transposition
+
+Also called: NIfTI Volume Loader, SimpleITK NIfTI Loading
+
+## Overview
+This method loads NIfTI-1 volumetric data files, handling optional gzip compression, header validation, and linear intensity scaling to produce a contiguous `float32` array [S1, unofficial]. It specifically addresses the coordinate system mismatch between NIfTI’s native storage order (typically Z, Y, X) and the standard spatial indexing required by volume rendering pipelines (X, Y, Z) [S2, unofficial]. It differs from raw binary readers by handling NIfTI-specific metadata (scaling, offsets) and from DICOM loaders by operating on a single consolidated file format rather than a directory of slices [G].
+
+## How it works
+**Inputs:** A path to a NIfTI file (`.nii`, `.nii.gz`, or separate `.hdr`/`.img` pair) [S1, unofficial].
+**Outputs:** A contiguous `float32` NumPy array with shape `(X, Y, Z)` and a spacing vector `(spacing_x, spacing_y, spacing_z)` as `float64` [S2, unofficial].
+
+### Data Structures
+The NIfTI-1 header is a fixed-size structure. Key fields used:
+- `sizeof_hdr` (int32): Must be 348 [S1, unofficial].
+- `datatype` (int16): Voxel type (e.g., `DT_UINT8`, `DT_UINT16`, `DT_INT16`, `DT_FLOAT32`) [S1, unofficial].
+- `dim[1..7]` (int16): Dimensions. `dim[1]`, `dim[2]`, `dim[3]` correspond to X, Y, Z in the file's native order [S1, unofficial].
+- `vox_offset` (float32): Byte offset from the start of the file to the voxel data [S1, unofficial].
+- `scl_slope` (float32): Scaling slope [S1, unofficial].
+- `scl_inter` (float32): Scaling intercept [S1, unofficial].
+
+### Steps
+1. **File Detection:** Determine if the file is `.nii`, `.nii.gz`, or separate `.hdr`/`.img` [S1, unofficial]. If `.gz`, open with gzip decompression; otherwise, open in binary read mode [S1, unofficial].
+2. **Header Validation:** Read the first 4 bytes to check endianness. If the reversed byte order of `sizeof_hdr` equals 348, the file is invalid or endianness is mismatched [S1, unofficial]. Ensure `sizeof_hdr` is exactly 348 [S1, unofficial].
+3. **Data Type Check:** Verify `datatype` is one of `DT_UINT8`, `DT_UINT16`, `DT_INT16`, or `DT_FLOAT32` [S1, unofficial].
+4. **Scaling Setup:** If `scl_slope` is 0.0, set it to 1.0 to prevent null scaling [S1, unofficial].
+5. **Raw Data Reading:** Calculate total voxels $N = \text{dim}[1] \times \text{dim}[2] \times \text{dim}[3]$ [S1, unofficial]. Allocate a raw buffer. Seek to `vox_offset` (if > 0) and read $N \times \text{bytes\_per\_voxel}$ bytes into the raw buffer [S1, unofficial].
+6. **Linear Scaling:** Allocate a `float32` output array. For each voxel $i$:
+   $$ \text{img32}[i] = (\text{imgRaw}[i] \times \text{scl\_slope}) + \text{scl\_inter} $$
+   The conversion from raw types (uint8, uint16, int16, float32) must preserve precision before scaling [S1, unofficial].
+7. **Coordinate Transposition:** Convert the loaded data to a NumPy array. The native NIfTI order is typically $(Z, Y, X)$ [S2, unofficial]. Transpose the axes to $(X, Y, Z)$ to match standard volume rendering indexing [S2, unofficial].
+8. **Spacing Extraction:** Extract the voxel spacing from the header or SimpleITK metadata and store as `float64` [S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import gzip
+import struct
+import numpy as np
+import SimpleITK as sitk
+
+def load_nifti(path):
+    """
+    Loads a NIfTI file, applies scaling, and transposes to (X, Y, Z).
+    Returns (array: np.ndarray[float32], spacing: np.ndarray[float64])
+    """
+    # High-level approach using SimpleITK [S2, unofficial]
+    sitk_image = sitk.ReadImage(path)
+    array_z_y_x = sitk.GetArrayFromImage(sitk_image)
+    array_x_y_z = np.transpose(array_z_y_x, (2, 1, 0))
+    array_x_y_z = array_x_y_z.astype(np.float32)
+    spacing = np.array(sitk_image.GetSpacing(), dtype=np.float64)
+    return array_x_y_z, spacing
+
+def load_nifti_lowlevel(path):
+    """
+    Low-level loader matching [S1, unofficial] logic.
+    """
+    is_gz = path.endswith('.gz')
+    f = gzip.open(path, 'rb') if is_gz else open(path, 'rb')
+    try:
+        sizeof_hdr_bytes = f.read(4)
+        sizeof_hdr = struct.unpack('<i', sizeof_hdr_bytes)[0]
+        fwd = sizeof_hdr
+        # Check endianness: reversed bytes must not equal 348 [S1, unofficial]
+        reversed_hdr = ((fwd & 0xff) << 8) | ((fwd & 0xff00) >> 8)
+        if reversed_hdr == 348 or sizeof_hdr != 348:
+            raise ValueError("Endianness mismatch or invalid header")
+
+        # Parse header fields (NIfTI-1 layout)
+        f.seek(54)
+        datatype = struct.unpack('<h', f.read(2))[0]
+        f.seek(40)
+        dim = list(struct.unpack('<7h', f.read(14)))
+        f.seek(104)
+        vox_offset = struct.unpack('<f', f.read(4))[0]
+        f.seek(108)
+        scl_slope = struct.unpack('<f', f.read(4))[0]
+        scl_inter = struct.unpack('<f', f.read(4))[0]
+
+        if scl_slope == 0.0:
+            scl_slope = 1.0
+
+        nvox = dim[1] * dim[2] * dim[3]
+        # Map NIfTI datatype codes to numpy types
+        dtype_map = {0: np.uint8, 1: np.uint8, 2: np.uint16, 4: np.float32}
+        if datatype not in dtype_map:
+            raise ValueError("Unsupported datatype")
+        np_dtype = dtype_map[datatype]
+        bytes_per_voxel = np.dtype(np_dtype).itemsize
+
+        if vox_offset > 0:
+            f.seek(int(vox_offset))
+        raw_bytes = f.read(nvox * bytes_per_voxel)
+        imgRaw = np.frombuffer(raw_bytes, dtype=np_dtype)
+
+        img32 = (imgRaw.astype(np.float32) * scl_slope) + scl_inter
+        # Transpose from (Z, Y, X) to (X, Y, Z) [S2, unofficial]
+        array_x_y_z = img32.reshape(dim[3], dim[2], dim[1]).transpose(2, 1, 0)
+        # Spacing not provided in low-level source [G]
+        spacing = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+        return array_x_y_z, spacing
+    finally:
+        f.close()
+```
+
+### Parameters
+- `scl_slope`: Scaling factor for raw data. Defaults to 1.0 if 0.0 [S1, unofficial].
+- `scl_inter`: Scaling offset applied after multiplication [S1, unofficial].
+- `datatype`: Supported values are `DT_UINT8`, `DT_UINT16`, `DT_INT16`, `DT_FLOAT32` [S1, unofficial].
+- `vox_offset`: Byte offset to skip in the file before reading voxel data [S1, unofficial].
+
+### Pitfalls
+- **Endianness:** Endianness mismatch is detected by checking if the reversed byte order of `sizeof_hdr` equals 348. If true, the function should error out [S1, unofficial].
+- **Scaling Zero:** If `scl_slope` is 0.0, it must be set to 1.0 to avoid nullifying the data [S1, unofficial].
+- **Coordinate Order:** NIfTI files often store data in $(Z, Y, X)$ order. Failing to transpose to $(X, Y, Z)$ will result in incorrect volume rendering geometry [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, for reading, scaling, and transposing [G].
+- **Memory Complexity:** $O(N)$ for storing the raw data and the final `float32` array [G].
+- **Performance:** SimpleITK-based loading is robust but may have higher overhead due to library initialization. Raw loading is faster but requires careful handling of binary formats and endianness [G].
+- **Strengths:** Handles compressed files, validates headers, applies linear scaling correctly, and ensures correct coordinate ordering [S1, S2, unofficial].
+- **Limitations:** Limited to NIfTI-1 format. Does not handle multi-volume NIfTI files (4D) without additional logic [G].
+
+## Background
+NIfTI (Neuroimaging Informatics Technology Initiative) is a common format for neuroimaging data [G]. The method combines a low-level file I/O approach described in [S1, unofficial] with a SimpleITK-based pipeline detailed in [S2, unofficial].
+
+## Sources
+[S1] neurolabusc/nii2mesh, https://github.com/neurolabusc/nii2mesh, fetched 2026-10-26 (unofficial)
+[S2] caitlin-leonard/medviewer, https://github.com/caitlin-leonard/medviewer, fetched 2026-10-27 (unofficial)

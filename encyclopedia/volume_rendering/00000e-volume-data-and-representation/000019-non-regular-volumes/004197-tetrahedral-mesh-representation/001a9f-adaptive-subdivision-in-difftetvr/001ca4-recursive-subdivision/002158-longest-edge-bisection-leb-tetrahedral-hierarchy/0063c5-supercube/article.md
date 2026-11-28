@@ -1,0 +1,195 @@
+# Supercube
+
+Also called: Supercube Clustering
+
+## Overview
+A supercube is a spatial and hierarchical structure that tiles each level of resolution in a Longest Edge Bisection (LEB) tetrahedral hierarchy, defined by a specific set of edges arranged in a cubic domain [S1]. It serves as a clustering primitive for diamonds, exploiting spatial and hierarchical coherence to efficiently represent partial Diamond Multivolumes (DMVs) and active fronts in volume rendering [S1]. Unlike raw diamond lists, a supercube provides a fixed-size, cache-friendly index for 56 diamonds, enabling compact bookkeeping of tetrahedral meshes [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A cubic domain in 3D space, defined by its origin coordinates and scale (resolution level).
+*   **Output:** A data structure representing the 56 valid edges (diamonds) contained within that supercube, along with bitflags indicating which tetrahedra are present in the active front.
+
+**Data Structures:**
+A supercube is defined by a set of 98 potential edges. However, due to boundary rules, only 56 edges are assigned to a specific supercube instance.
+*   **Edge Set:** The supercube $\sigma$ is constructed from an empty cubic domain. The edges are formed by:
+    1.  8 edges joining the cube center to its 8 corners.
+    2.  30 edges joining each of the 6 face centers to the 4 face corners and the cube center.
+    3.  60 edges joining each of the 12 edge midpoints to the 2 closest cube corners, the 2 closest face centers, and the cube center.
+*   **Diamond Classification:** The 56 valid edges correspond to diamonds of three types:
+    *   8 zero-diamonds (scale 0), each containing 6 tetrahedra.
+    *   24 one-diamonds (scale 1), each containing 4 tetrahedra.
+    *   24 two-diamonds (scale 2), each containing 8 tetrahedra.
+*   **Tetrahedron Count:** The total potential tetrahedra indexed by a supercube is $8 \times 6 + 24 \times 4 + 24 \times 8 = 336$ [S1].
+*   **Active Front Bookkeeping:** Since tetrahedra in a conforming mesh cannot overlap, the presence of a tetrahedron $t$ precludes its parent and children. Tetrahedra contribute to diamonds in pairs. Therefore, the active front state for a supercube is tracked using $336 / 2 = 168$ bits (21 bytes) [S1].
+*   **Indexing:** Supercubes at each level are indexed by the coordinates of their origin [S1].
+
+**Boundary Rule:**
+To ensure unique association of edges to supercubes, half-open intervals are used [S1]:
+*   A supercube contains all internal edges.
+*   It contains edges on its lower boundaries.
+*   It **excludes** edges on its upper boundaries.
+*   Any edge whose endpoints are both on an upper boundary belongs to a neighboring supercube [S1].
+*   Under this rule, the 98 potential edges reduce to 56 valid edges: 8 cube diagonals, 24 face diagonals, and 24 cube edges [S1].
+
+**Pseudocode:**
+The following Python-like pseudocode defines the construction and indexing logic.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def construct_supercube_edges(cube_origin, cube_size):
+    """
+    Constructs the 98 potential edges of a supercube defined by a cubic domain.
+    cube_origin: (x, y, z) tuple of the lower-left-back corner.
+    cube_size: float, the side length of the cube.
+    Returns: List of edge tuples (vertex1, vertex2).
+    """
+    # Define key points in the cube
+    cx, cy, cz = cube_origin
+    s = cube_size
+    
+    # Center of the cube
+    center = (cx + s/2, cy + s/2, cz + s/2)
+    
+    # 8 Corners
+    corners = [
+        (cx, cy, cz), (cx+s, cy, cz), (cx, cy+s, cz), (cx+s, cy+s, cz),
+        (cx, cy, cz+s), (cx+s, cy, cz+s), (cx, cy+s, cz+s), (cx+s, cy+s, cz+s)
+    ]
+    
+    # 6 Face Centers
+    face_centers = [
+        (cx + s/2, cy + s/2, cz),       # Bottom
+        (cx + s/2, cy + s/2, cz + s),   # Top
+        (cx + s/2, cy, cz + s/2),       # Front
+        (cx + s/2, cy + s, cz + s/2),   # Back
+        (cx, cy + s/2, cz + s/2),       # Left
+        (cx + s, cy + s/2, cz + s/2)    # Right
+    ]
+    
+    # 12 Edge Midpoints
+    edge_midpoints = [
+        (cx + s/2, cy, cz), (cx + s/2, cy + s, cz),
+        (cx, cy + s/2, cz), (cx + s, cy + s/2, cz),
+        (cx, cy, cz + s/2), (cx + s, cy, cz + s/2),
+        (cx, cy + s, cz + s/2), (cx + s, cy + s, cz + s/2),
+        (cx + s/2, cy, cz + s), (cx + s/2, cy + s, cz + s),
+        (cx, cy + s/2, cz + s), (cx + s, cy + s/2, cz + s)
+    ]
+    
+    edges = []
+    
+    # 1. 8 edges: Center to Corners
+    for corner in corners:
+        edges.append((center, corner))
+        
+    # 2. 30 edges: Face Centers to Face Corners and Center
+    # Each face has 4 corners. 6 faces * 4 corners = 24 edges.
+    # Plus 6 edges from Face Centers to Cube Center.
+    for i, fc in enumerate(face_centers):
+        edges.append((fc, center))
+        # Identify the 4 corners belonging to this face
+        # This logic depends on face index i. Simplified for clarity:
+        # In implementation, map face index to specific corner indices.
+        # Example for Bottom Face (i=0): corners 0,1,2,3
+        if i == 0: # Bottom
+            face_corners = corners[0:4]
+        elif i == 1: # Top
+            face_corners = corners[4:8]
+        elif i == 2: # Front
+            face_corners = [corners[0], corners[1], corners[4], corners[5]]
+        elif i == 3: # Back
+            face_corners = [corners[2], corners[3], corners[6], corners[7]]
+        elif i == 4: # Left
+            face_corners = [corners[0], corners[2], corners[4], corners[6]]
+        elif i == 5: # Right
+            face_corners = [corners[1], corners[3], corners[5], corners[7]]
+            
+        for corner in face_corners:
+            edges.append((fc, corner))
+            
+    # 3. 60 edges: Edge Midpoints to Corners, Face Centers, and Center
+    # Each of 12 midpoints connects to:
+    # - 2 closest cube corners
+    # - 2 closest face centers
+    # - Cube center
+    # 12 * 5 = 60 edges.
+    for mid in edge_midpoints:
+        edges.append((mid, center))
+        # Find 2 closest corners and 2 closest face centers
+        # This requires distance calculation or geometric mapping.
+        # Example: Midpoint of edge between corner 0 and 1 is (cx+s/2, cy, cz)
+        # Closest corners: 0 and 1. Closest face centers: Bottom (0) and Front (2).
+        # Implementation detail: Map midpoint index to specific neighbors.
+        pass 
+        
+    return edges
+
+def filter_supercube_edges(edges, cube_origin, cube_size):
+    """
+    Applies the half-open interval rule to select the 56 valid edges.
+    Returns: List of valid edges.
+    """
+    valid_edges = []
+    # Define boundaries
+    min_x, min_y, min_z = cube_origin
+    max_x, max_y, max_z = (cube_origin[0] + cube_size, 
+                            cube_origin[1] + cube_size, 
+                            cube_origin[2] + cube_size)
+    
+    for v1, v2 in edges:
+        # Check if both endpoints are on an upper boundary
+        # Upper boundary means coordinate == max
+        is_upper_x = (v1[0] == max_x and v2[0] == max_x)
+        is_upper_y = (v1[1] == max_y and v2[1] == max_y)
+        is_upper_z = (v1[2] == max_z and v2[2] == max_z)
+        
+        # If the edge lies entirely on an upper boundary, exclude it
+        if is_upper_x or is_upper_y or is_upper_z:
+            continue
+            
+        valid_edges.append((v1, v2))
+        
+    return valid_edges
+
+def encode_active_front(tetrahedra_in_supercube):
+    """
+    Encodes the presence of tetrahedra in the active front.
+    tetrahedra_in_supercube: Set of tetrahedra indices present in the mesh.
+    Returns: 21-byte bitflag array.
+    """
+    # Total potential tetrahedra = 336
+    # We track pairs, so 168 bits = 21 bytes
+    bits = [0] * 168
+    
+    # Mapping tetrahedra to bit indices is implementation-specific
+    # based on the diamond hierarchy.
+    # For each tetrahedron t in tetrahedra_in_supercube:
+    #   bit_index = get_bit_index(t)
+    #   bits[bit_index // 8] |= (1 << (bit_index % 8))
+    
+    # Note: The presence of t precludes parent/children.
+    # This function assumes the input set is already a valid conforming front.
+    return bytes(bits)
+```
+
+**Parameters:**
+*   **Origin Coordinates:** Integer or floating-point coordinates defining the lower-left-back corner of the cubic domain [S1].
+*   **Scale/Resolution:** The level in the LEB hierarchy, determining the physical size of the cube and the granularity of the diamonds [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Overlap vs. Conformity:** Tetrahedra indexed by a supercube overlap in the full DMV hierarchy. However, in a conforming active front mesh, tetrahedra cannot overlap. The presence of a tetrahedron $t$ precludes the presence of its parent and children [S1]. Implementers must ensure the active front logic respects this containment relation to avoid double-counting or invalid geometry.
+*   **Boundary Association:** The half-open interval rule is critical for unique association. Failure to exclude upper-boundary edges results in edges being assigned to multiple supercubes, breaking the hierarchical indexing [S1].
+
+## Operating characteristics
+*   **Memory Complexity:** Each supercube requires 27 bytes of overhead: 6 bytes for the origin index and 21 bytes (168 bits) for the active front bookkeeping [S1].
+*   **Spatial Coherence:** By clustering 56 diamonds into a single cubic structure, supercubes exploit spatial locality, improving cache performance during traversal and rendering [S1].
+*   **Scalability:** Supercubes tile the domain at each resolution level, allowing efficient representation of large datasets. The fixed size per supercube simplifies memory management [S1].
+*   **Limitations:** The method is specific to the LEB tetrahedral hierarchy and diamond multivolumes. It is not a general-purpose mesh representation [S1].
+
+## Background
+The supercube was introduced in the context of Diamond Multivolumes (DMVs) and selective refinement for volume rendering. It was proposed to address the inefficiency of representing sparse active fronts using raw diamond lists. By analyzing the symmetry in the LEB hierarchy, the authors identified a repeating cubic pattern of edges that could be used to cluster diamonds, leading to the supercube primitive [S1].
+
+## Sources
+[S1] Supercubes: A High-Level Primitive for Diamond Hierarchies, https://doi.org/10.1109/tvcg.2009.186, fetched 2026-10-28

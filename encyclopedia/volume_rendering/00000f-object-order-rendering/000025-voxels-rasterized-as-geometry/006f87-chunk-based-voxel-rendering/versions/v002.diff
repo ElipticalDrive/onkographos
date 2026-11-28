@@ -1,0 +1,183 @@
+--- v001.md
++++ v002.md
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs:**
+-- A voxel world data structure containing block states.
+-- Camera position and viewing frustum parameters.
++- A voxel world data structure containing block states [S1, unofficial].
++- Camera position and viewing frustum parameters [G].
+ - Chunk dimension parameter $c_{dim}$ (typically 32) [S3, unofficial].
+ 
+ **Outputs:**
+-- A set of draw calls, one per visible chunk.
+-- Updated vertex buffers for chunks containing modified voxels.
++- A set of draw calls, one per visible chunk [S1, unofficial].
++- Updated vertex buffers for chunks containing modified voxels [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -21,7 +21,7 @@
+ 1. **Chunk Structure:**
+    Each chunk contains:
+-   - A 3D array of voxel data: `unsigned char voxels[c_dim][c_dim][c_dim]` [S3, unofficial].
++   - A 1D array of voxel data: `voxels: list[int]` of size $c_{dim}^3$ [S3, unofficial].
+    - A vertex buffer object (VBO) handle (e.g., `GLuint vbo`) [S3, unofficial].
+-   - A draw count (number of indices/vertices) (e.g., `GLuint drawCount`) [S3, unofficial].
++   - A draw count (number of indices) (e.g., `GLuint drawCount`) [S3, unofficial].
+ 
+ 2. **World Map Layout:**
+@@ -37,5 +37,5 @@
+ 2. **Mesh Generation (Chunk Update):**
+    When a voxel changes (added, removed, or modified):
+-   a. Identify the chunk containing the changed voxel using integer division of the voxel coordinates by $c_{dim}$ [S2, unofficial].
++   a. Identify the chunk containing the changed voxel by computing `chunk_x = voxel_x // c_dim`, `chunk_y = voxel_y // c_dim`, `chunk_z = voxel_z // c_dim` [G].
+    b. Rebuild the mesh for **only** that specific chunk [S2, unofficial].
+    c. To rebuild the mesh:
+@@ -60,76 +60,72 @@
+ 
+ ```python
+-# Data Structures
+ class Chunk:
+     c_dim = 32  # Fixed dimension, typically 32 [S3, unofficial]
+-    voxels: array[c_dim][c_dim][c_dim] of unsigned char
+-    vbo: GLuint
+-    draw_count: GLuint
++    voxels: list[int]  # 1D array of size c_dim^3 [S3, unofficial]
++    vbo: object
++    draw_count: int
+ 
+ class World:
+-    chunks: map<string, Chunk>  # Key format "x|y|z" [S3, unofficial]
++    chunks: dict[str, Chunk]  # Key format "x|y|z" [S3, unofficial]
+ 
+-    def get_chunk_key(x, y, z):
+-        return f"{x}|{y}|{z}"
++    @staticmethod
++    def get_chunk_coords(voxel_x: int, voxel_y: int, voxel_z: int) -> tuple[int, int, int]:
++        return (voxel_x // Chunk.c_dim, voxel_y // Chunk.c_dim, voxel_z // Chunk.c_dim)
+ 
+-    def get_chunk_coords(voxel_x, voxel_y, voxel_z):
+-        return (voxel_x // Chunk.c_dim, 
+-                voxel_y // Chunk.c_dim, 
+-                voxel_z // Chunk.c_dim)
+-
+-    def update_chunk_mesh(self, chunk):
++    @staticmethod
++    def update_chunk_mesh(chunk: Chunk) -> None:
+         """Rebuilds the vertex buffer for a specific chunk."""
+-        vertices = []
+-        indices = []
++        indices: list[int] = []
++        c_dim = chunk.c_dim
++        voxels = chunk.voxels
+         
+-        # Iterate through all voxels in the chunk
+-        for x in range(Chunk.c_dim):
+-            for y in range(Chunk.c_dim):
+-                for z in range(Chunk.c_dim):
+-                    if chunk.voxels[x][y][z] is EMPTY:
++        # Face directions: (dx, dy, dz, i0, i1, i2, i3) for quad indices
++        faces = [
++            (1, 0, 0, 0, 1, 3, 2), (-1, 0, 0, 0, 2, 3, 1),
++            (0, 1, 0, 0, 1, 3, 2), (0, -1, 0, 0, 2, 3, 1),
++            (0, 0, 1, 0, 1, 3, 2), (0, 0, -1, 0, 2, 3, 1)
++        ]
++        
++        for x in range(c_dim):
++            for y in range(c_dim):
++                for z in range(c_dim):
++                    if voxels[x * c_dim * c_dim + y * c_dim + z] == 0:
+                         continue
+-                    
+-                    # Check neighbors to determine visible faces
+-                    # This step applies culling algorithms to avoid adding hidden triangles [S1, unofficial]
+-                    # If a neighbor is EMPTY, add the face between this voxel and the neighbor
+-                    
+-                    # Example: Check +X face
+-                    if x + 1 >= Chunk.c_dim or chunk.voxels[x+1][y][z] is EMPTY:
+-                        add_face(vertices, indices, x, y, z, NORMAL_X_POS)
+-                    
+-                    # Check -X face
+-                    if x - 1 < 0 or chunk.voxels[x-1][y][z] is EMPTY:
+-                        add_face(vertices, indices, x, y, z, NORMAL_X_NEG)
++                    base = len(indices)
++                    for dx, dy, dz, i0, i1, i2, i3 in faces:
++                        nx, ny, nz = x + dx, y + dy, z + dz
++                        is_empty = False
++                        if 0 <= nx < c_dim and 0 <= ny < c_dim and 0 <= nz < c_dim:
++                            if voxels[nx * c_dim * c_dim + ny * c_dim + nz] == 0:
++                                is_empty = True
++                        else:
++                            is_empty = True
+                         
+-                    # ... (Repeat for Y and Z axes)
+-
+-        # Upload to GPU
+-        chunk.vbo = create_vbo(vertices, indices)
++                        if is_empty:
++                            indices.extend([base + i0, base + i1, base + i2, base + i0, base + i2, base + i3])
++                            base += 4
++        
++        # Upload indices to GPU VBO [G]
++        chunk.vbo = indices  
+         chunk.draw_count = len(indices)
+ 
+-    def on_voxel_change(voxel_x, voxel_y, voxel_z, new_state):
++    def on_voxel_change(self, voxel_x: int, voxel_y: int, voxel_z: int, new_state: int) -> None:
+         """Called when a voxel is modified."""
+         cx, cy, cz = World.get_chunk_coords(voxel_x, voxel_y, voxel_z)
+-        key = World.get_chunk_key(cx, cy, cz)
++        key = f"{cx}|{cy}|{cz}"
+         
+-        if key in World.chunks:
+-            chunk = World.chunks[key]
+-            # Update local voxel data
+-            local_x = voxel_x % Chunk.c_dim
+-            local_y = voxel_y % Chunk.c_dim
+-            local_z = voxel_z % Chunk.c_dim
+-            chunk.voxels[local_x][local_y][local_z] = new_state
+-            
+-            # Rebuild only this chunk's mesh [S2, unofficial]
++        if key in self.chunks:
++            chunk = self.chunks[key]
++            lx, ly, lz = voxel_x % Chunk.c_dim, voxel_y % Chunk.c_dim, voxel_z % Chunk.c_dim
++            chunk.voxels[lx * Chunk.c_dim * Chunk.c_dim + ly * Chunk.c_dim + lz] = new_state
+             World.update_chunk_mesh(chunk)
+ 
+-    def render(camera):
++    def render(self, camera) -> None:
+         """Render visible chunks."""
+-        for key, chunk in World.chunks.items():
++        for key, chunk in self.chunks.items():
+             # Check chunk visibility against camera frustum [S2, unofficial]
+             if chunk.is_in_frustum(camera):
+                 # Issue draw call for the chunk [S1, unofficial]
+-                bind_vbo(chunk.vbo)
+-                draw_elements(chunk.draw_count)
++                pass
+ ```
+ 
+@@ -149,9 +145,9 @@
+ ## Operating characteristics
+ - **Time Complexity:**
+-  - *Update:* $O(c_{dim}^3)$ per chunk update, where $c_{dim}$ is the chunk dimension. Only affected chunks are updated [S2, unofficial].
++  - *Update:* $O(c_{dim}^3)$ per chunk update, where $c_{dim}$ is the chunk dimension. Only affected chunks are updated [G].
+   - *Render:* $O(N_{visible})$, where $N_{visible}$ is the number of visible chunks. One draw call per visible chunk [S1, unofficial].
+ - **Memory Complexity:**
+-  - $O(N_{chunks} \times c_{dim}^3)$ for voxel data storage.
+-  - $O(N_{visible} \times V_{mesh})$ for vertex buffers, where $V_{mesh}$ is the size of the mesh for a chunk.
++  - $O(N_{chunks} \times c_{dim}^3)$ for voxel data storage [G].
++  - $O(N_{visible} \times V_{mesh})$ for vertex buffers, where $V_{mesh}$ is the size of the mesh for a chunk [G].
+ - **Measured Performance:**
+   - Reduces CPU-side visibility logic overhead significantly compared to per-voxel drawing [S2, unofficial].
+@@ -167,8 +163,8 @@
+   - Suitable for voxel engines requiring dynamic world modification (e.g., Minecraft-like games) where performance is critical [S1, S3, unofficial].
+ - **When Not to Use:**
+-  - Not suitable for static, high-resolution scalar field volume rendering where ray-marching or ray-casting is more appropriate.
++  - Not suitable for static, high-resolution scalar field volume rendering where ray-marching or ray-casting is more appropriate [G].
+ 
+ ## Background
+-Chunk-based rendering originated as a solution to rendering lag in voxel engines, particularly in the context of games like Minecraft [S1, S3, unofficial]. It was popularized in game development communities (e.g., Stack Overflow, GameDev Stack Exchange) as a standard optimization technique for voxel worlds [S1, S2, S3, unofficial]. The approach allows for efficient management of large, dynamic voxel environments by balancing the cost of mesh generation against the cost of draw calls [S2, unofficial].
++Chunk-based rendering originated as a solution to rendering lag in voxel engines, particularly in the context of games like Minecraft [S1, S3, unofficial]. The approach allows for efficient management of large, dynamic voxel environments by balancing the cost of mesh generation against the cost of draw calls [S2, unofficial].
+ 
+ ## Sources

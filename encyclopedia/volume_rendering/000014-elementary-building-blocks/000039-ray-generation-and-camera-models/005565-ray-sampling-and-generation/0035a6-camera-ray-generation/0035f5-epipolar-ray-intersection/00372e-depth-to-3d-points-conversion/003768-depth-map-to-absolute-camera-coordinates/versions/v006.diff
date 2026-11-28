@@ -1,0 +1,168 @@
+--- v005.md
++++ v006.md
+@@ -1,13 +1,13 @@
+ # Depth Map to Absolute Camera Coordinates
+ 
+-Also called: Depth Map Unprojection, RGBD to Point Cloud Back-Projection, camera back-projection, depth-to-3D conversion, depth2pc
++Also called: 3D Point Cloud Generation via Back-projection, Depth Map Unprojection, RGBD to Point Cloud Back-Projection, camera back-projection, depth-to-3D conversion, depth2pc
+ 
+ ## Overview
+-This method converts 2D rasterized depth and color images into a 3D point cloud using camera intrinsics and extrinsics [S1, S2, unofficial]. It solves the problem of mapping per-pixel depth values from a 2D image plane into 3D world coordinates, enabling the construction of geometric scene representations from multi-view RGB-D data [S1, S2, S3, unofficial]. Unlike sibling methods that may rely on explicit mesh extraction or virtual laser scans, this approach directly unprojects per-pixel depth and learned feature vectors into 3D space, preserving high-dimensional semantic information alongside geometry [S1, unofficial]. It builds on [Depth to 3D Points Conversion](7929-depth-to-3d-points-conversion.md) by providing the specific reprojection logic required to convert rendered buffers into 3D points.
++This method converts 2D depth maps into 3D point clouds in absolute coordinates using camera intrinsics and poses [S1, S3, S4, unofficial]. It solves the problem of mapping per-pixel depth values from a 2D image plane into 3D world coordinates [S5, unofficial]. It builds on [Depth to 3D Points Conversion](7929-depth-to-3d-points-conversion.md) by providing the specific reprojection logic required to convert rendered buffers into 3D points [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `depth`: A tensor of shape $(B, H, W)$ or $(H, W)$ containing depth values $z$ (distance from camera center).
+-- `intrinsics`: A 3x3 camera intrinsic matrix $K$.
++- `depth`: A tensor of shape $(H, W)$ or $(B, H, W)$ containing depth values $z$ (distance from camera center) [S2, S4, unofficial].
++- `intrinsics`: A 3x3 camera intrinsic matrix $K$ [S2, unofficial].
+   - $K_{0,0} = f_x$ (focal length in x)
+   - $K_{1,1} = f_y$ (focal length in y)
+@@ -15,38 +15,26 @@
+   - $K_{1,2} = c_y$ (principal point y)
+   - $K_{2,2} = 1$
+-- `extrinsic` (optional): A 4x4 world-to-camera transformation matrix $W2C$ or its inverse $C2W$. If not provided, points remain in camera space.
++- `extrinsic` (optional): A 4x4 world-to-camera transformation matrix $W2C$ [S2, S3, unofficial]. If omitted, points remain in camera space [G].
+ 
+ **Outputs:**
+-- `points`: A tensor of shape $(B, H \times W, 3)$ or $(H \times W, 3)$ containing 3D coordinates in world space (or camera space if extrinsics are omitted).
++- `points`: A tensor of shape $(H, W, 3)$ or $(B, H \times W, 3)$ containing 3D coordinates in world space [S2, S4, unofficial].
+ 
+ **Data Structures:**
+-- Pixel grid indices `xx`, `yy`: 1D tensors of shape $(H \times W)$ representing column and row indices.
+-- Homogeneous coordinate vector `pix_ones`: 1D tensor of shape $(H \times W, 1)$ filled with ones.
++- Pixel grid indices `xx`, `yy`: 1D tensors of shape $(H \times W)$ representing column and row indices [S2, unofficial].
++- Homogeneous coordinate vector `pix_ones`: 1D tensor of shape $(H \times W, 1)$ filled with ones [S2, unofficial].
+ 
+ **Steps:**
+ 
+ 1. **Generate Pixel Grid:**
+-   Create 2D meshgrid indices for all pixels. For a depth map of size $H \times W$, generate coordinates $u \in [0, W-1]$ and $v \in [0, H-1]$. Flatten these into 1D arrays `xx` and `yy` of length $H \times W$.
+-   *Note: Some implementations normalize these to $[-1, 1]$ range first [S4, unofficial], while others keep integer indices [S1, unofficial]. The standard pinhole model uses integer indices or normalized device coordinates depending on the intrinsic definition. We follow the standard pinhole projection formula.*
++   For a depth map of size $H \times W$, generate coordinates $u \in [0, W-1]$ and $v \in [0, H-1]$ [S2, S4, unofficial]. Flatten these into 1D arrays `xx` and `yy` of length $H \times W$ [S2, unofficial].
+ 
+ 2. **Compute Camera Space Coordinates:**
+-   For each pixel $(u, v)$ with depth $z$:
+-   $$x_c = (u - c_x) \frac{z}{f_x}$$
+-   $$y_c = (v - c_y) \frac{z}{f_y}$$
+-   $$z_c = z$$
+-   Stack these into a tensor `pts_cam` of shape $(H \times W, 3)$.
++   For each pixel $(u, v)$ with depth $z$, compute $x_c = (u - c_x) \frac{z}{f_x}$, $y_c = (v - c_y) \frac{z}{f_y}$, and $z_c = z$ [S2, unofficial]. Stack these into a tensor `pts_cam` of shape $(H \times W, 3)$ [S2, unofficial].
+ 
+-3. **Handle Depth Scaling (Variant):**
+-   Some pipelines (e.g., AtomGS) apply a depth scaling factor using elements $f_1, f_2$ from the projection matrix to adjust for specific rendering artifacts or inverse depth representations [S4, unofficial]. If applicable:
+-   $$s_{d_{i,j}} = \frac{f_1 d_{i,j} + f_2}{d_{i,j}}$$
+-   Replace $z_c$ with $s_{d_{i,j}}$ in `pts_cam`.
++3. **Transform to World Space (Optional):**
++   If `extrinsic` is provided, construct homogeneous coordinates `pts4` by appending a column of ones to `pts_cam` [S2, unofficial]. Compute the camera-to-world matrix $C2W = (W2C)^{-1}$ [S2, unofficial]. Transform points: $P_{world} = C2W \times pts4^T$ [S2, unofficial]. Extract the first three rows to get Cartesian world coordinates [S2, unofficial].
+ 
+-4. **Transform to World Space (Optional):**
+-   If `extrinsic` is provided:
+-   - Construct homogeneous coordinates `pts4` by appending a column of ones to `pts_cam`: `pts4 = [x_c, y_c, z_c, 1]`.
+-   - Compute the camera-to-world matrix $C2W = (W2C)^{-1}$.
+-   - Transform points: $P_{world} = C2W \times pts4^T$.
+-   - Extract the first three rows to get Cartesian world coordinates.
+-   - Reshape to $(B, H \times W, 3)$.
++4. **Depth Scaling Variant:**
++   Some pipelines normalize coordinates to $[-1, 1]$ and apply depth scaling $s_{d_{i,j}} = \frac{f_1 d_{i,j} + f_2}{d_{i,j}}$ using elements $f_1, f_2$ from the projection matrix [S5, unofficial]. The adjusted coordinates are transformed via the inverse projection matrix $T$ to world space [S5, unofficial].
+ 
+ **Pseudocode:**
+@@ -77,6 +65,4 @@
+     
+     # 1. Generate pixel grid indices
+-    # Create meshgrid: u in [0, W-1], v in [0, H-1]
+-    # Note: Using torch.arange and meshgrid
+     u = torch.arange(0, W, device=depth.device).float()
+     v = torch.arange(0, H, device=depth.device).float()
+@@ -88,5 +74,4 @@
+     
+     # Repeat for batch dimension if needed, or broadcast
+-    # Assuming intrinsics are per-batch
+     xx = xx.unsqueeze(0).expand(B, -1)
+     yy = yy.unsqueeze(0).expand(B, -1)
+@@ -100,11 +85,4 @@
+     
+     # 3. Compute camera space coordinates
+-    # x_c = (u - cx) * z / fx
+-    # y_c = (v - cy) * z / fy
+-    # z_c = z
+-    
+-    # Broadcasting: xx, yy, z_depth are (B, H*W)
+-    # fx, fy, cx, cy are (B,)
+-    
+     x_cam = (xx - cx.unsqueeze(1)) * z_depth / fx.unsqueeze(1)
+     y_cam = (yy - cy.unsqueeze(1)) * z_depth / fy.unsqueeze(1)
+@@ -117,5 +95,4 @@
+     if extrinsic is not None:
+         # Compute C2W = inv(W2C)
+-        # Note: Inverse of 4x4 matrix
+         c2w = torch.inverse(extrinsic)
+         
+@@ -125,6 +102,4 @@
+         
+         # Transform: P_world = C2W @ P_cam_hom
+-        # pts4 is (B, N, 4). We need to multiply C2W (B, 4, 4) by pts4^T (B, 4, N)
+-        # Result is (B, 4, N). Then transpose to (B, N, 4)
+         pts_world_hom = torch.bmm(c2w, pts4.transpose(1, 2)) # (B, 4, H*W)
+         pts_world_hom = pts_world_hom.transpose(1, 2) # (B, H*W, 4)
+@@ -139,34 +114,43 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Zero Depth:** Pixels with $z=0$ result in undefined coordinates. Mask these out or set to NaN [S1, unofficial].
+-- **Invalid Intrinsics:** Ensure $f_x, f_y \neq 0$.
+-- **Coordinate System:** Verify if the depth map represents distance along the optical axis or Euclidean distance from the camera center. Standard pinhole assumes optical axis distance [S1, unofficial].
+-- **Precision:** Use float32 or float64 for coordinate calculations to avoid precision loss in large scenes [S1, unofficial].
++- **Zero Depth:** Pixels with $z=0$ result in division by zero; clamp or mask invalid depths [G].
++- **Invalid Intrinsics:** Ensure $f_x, f_y > 0$ [G].
++- **Coordinate System:** Verify if the depth map represents distance along the optical axis or Euclidean distance from the camera center [G].
+ 
+ ## Subtopics
+ 
+ ### [Point Cloud Construction](13172-point-cloud-construction.md)
+-Point Cloud Construction converts 2D input views into 3D point clouds containing both geometric positions and view-dependent semantic features. It solves the problem of representing complex scenes in a format that is memory-efficient and scalable, serving as the foundational representation for subsequent differentiable rendering and multi-view fusion. Unlike sibling methods that may rely on explicit mesh extraction or virtual laser scans, this approach directly unprojects per-pixel depth and learned feature vectors into 3D space, preserving high-dimensional semantic information alongside geometry.
++Point Cloud Construction converts 2D input views into 3D point clouds containing both geometric positions and view-dependent semantic features. It solves the problem of representing complex scenes in a memory-efficient and scalable format, serving as the foundational representation for subsequent differentiable rendering and multi-view fusion. Unlike sibling methods that rely on explicit mesh extraction or virtual laser scans, this approach directly unprojects per-pixel depth and learned feature vectors into 3D space, preserving high-dimensional semantic information alongside geometry.
+ 
+ ### [Virtual Laser Scan for Point Cloud Generation](16278-virtual-laser-scan-for-point-cloud-generation.md)
+ A method to generate a point cloud with normals from a mesh by rendering normal and depth buffers from a specific camera viewpoint and reprojecting the buffer data into world space. It differs from direct mesh sampling by relying on rasterization to handle visibility and occlusion, effectively acting as a "virtual laser scan" from a single viewpoint. It builds on [Depth Map to Absolute Camera Coordinates](7984-depth-map-to-absolute-camera-coordinates.md) by providing the specific reprojection logic required to convert rendered buffers into 3D points.
+ 
+-#### Lidar Depth Generation
+-In scenarios where LiDAR data is available, depth maps can be generated by projecting LiDAR points onto the image plane. For a given image frame, LiDAR points from the ten closest LiDAR frames are selected and transformed into world coordinates [S5]. These points are then projected onto the image coordinates. The depth value for each pixel is derived from the distance along the ray from the camera center to the nearest LiDAR point. If multiple LiDAR points project to the same pixel, the depth value is taken from the closest point [S5].
++### [Lidar Depth Generation](17865-lidar-depth-generation.md)
++Lidar Depth Generation converts sparse, unstructured 3D LiDAR point clouds into dense, pixel-aligned depth maps for synchronized RGB images. It solves the problem of generating high-quality depth supervision for neural rendering or vision tasks by leveraging the geometric accuracy of LiDAR sensors. Unlike direct depth sensing, this method projects accumulated LiDAR points from multiple time steps onto the 2D image plane, resolving occlusions and sparsity by selecting the nearest point per pixel. It builds on [Depth Map to Absolute Camera Coordinates](7984-depth-map-to-absolute-camera-coordinates.md) by providing the raw depth values and projection logic required to establish the camera-space depth map.
++
++### [Distance-from-Center (DFC) Map Generation](18869-distance-from-center-dfc-map-generation.md)
++Distance-from-Center (DFC) map generation converts per-view depth maps into a global radial distance representation relative to a scene center. It solves the problem of separating foreground and background elements in outdoor scenes by providing a unified metric that is invariant to camera position. Unlike sibling methods that operate in local camera coordinates or raw point clouds, DFC maps express depth in a common global reference frame, enabling a single distance threshold to segment foreground and background regions across all views.
++
++### [Gaussian Seeding](20988-gaussian-seeding.md)
++Gaussian Seeding initializes the 3D Gaussian primitives for a SLAM or reconstruction system by sampling points from a ground truth depth map and camera pose. It solves the problem of establishing an initial point cloud representation that balances uniform spatial coverage with high-frequency detail preservation. It differs from simple uniform sampling by incorporating gradient-based pixel selection and handles submap initialization logic to manage memory constraints during incremental mapping.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(H \times W)$ per image, as each pixel is processed independently.
+-- **Memory Complexity:** $O(H \times W)$ to store the resulting point cloud.
+-- **Performance:** Highly parallelizable on GPU. Typical performance depends on resolution; for 1080p images, processing is nearly instantaneous on modern GPUs.
+-- **Strengths:** Simple, differentiable (if depth is learned), and preserves per-pixel correspondence.
+-- **Limitations:** Sensitive to depth errors; noisy depth maps result in noisy point clouds. Does not handle occlusions or missing depth data automatically (requires masking).
++- **Time Complexity:** $O(H \times W)$ per image, as each pixel is processed independently [G].
++- **Memory Complexity:** $O(H \times W)$ to store the resulting point cloud [G].
++- **Performance:** Highly parallelizable on GPU; typical performance depends on resolution, with 1080p processing taking milliseconds on modern hardware [G].
++- **Strengths:** Simple, differentiable (if depth is learned), and preserves per-pixel correspondence [G].
++- **Limitations:** Sensitive to depth errors; noisy depth maps result in noisy point clouds [G]. Does not handle occlusions or missing depth data automatically (requires masking) [G].
+ 
+ ## Background
+-The method originates from standard computer vision techniques for back-projecting depth maps to 3D space using pinhole camera models. It is widely used in RGB-D reconstruction, SLAM, and NeRF/Gaussian Splatting pipelines to initialize point clouds or supervise depth predictions. Key implementations include SplaTAM [S1, unofficial], InstantSplat [S2, unofficial], and GPS+ [S3, unofficial]. The specific depth scaling variant is described in AtomGS [S4, unofficial].
++The method originates from standard computer vision techniques for back-projecting depth maps to 3D space using pinhole camera models [G]. It is widely used in RGB-D reconstruction, SLAM, and NeRF/Gaussian Splatting pipelines to initialize point clouds or supervise depth predictions [S1, S2, S3, S4, unofficial]. The specific depth scaling variant is described in AtomGS [S5, unofficial].
+ 
+ ## Sources
+-[S1] spla-tam/SplaTAM, https://github.com/spla-tam/SplaTAM, fetched 2026-10-27 (unofficial)
+-[S2] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
+-[S3] YaourtB/GPS_plus, https://github.com/YaourtB/GPS_plus, fetched 2026-10-27 (unofficial)
+-[S4] AtomGS: Atomizing Gaussian Splatting for High-Fidelity Radiance Field, https://core.ac.uk/works/391753628, fetched 2026-10-30 (unofficial)
+-[S5] LidaRF: Delving into Lidar for Neural Radiance Field on Street Scenes, https://doi.org/10.1109/cvpr52733.2024.01850, fetched 2026-10-26+[S1] Point Cloud Unsupervised Pre-training via 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2411.18667, fetched 2026-10-26 (unofficial)
++[S2] spla-tam/SplaTAM, https://github.com/spla-tam/SplaTAM, fetched 2026-10-27 (unofficial)
++[S3] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
++[S4] YaourtB/GPS_plus, https://github.com/YaourtB/GPS_plus, fetched 2026-10-27 (unofficial)
++[S5] AtomGS: Atomizing Gaussian Splatting for High-Fidelity Radiance Field, https://core.ac.uk/works/391753628, fetched 2026-10-30 (unofficial)
++[S6] Gaussian Splatting in Mirrors: Reflection-Aware Rendering via Virtual Camera Optimization, https://doi.org/10.48550/arxiv.2410.01614, fetched 2026-10-26 (unofficial)
++[S7] Advancing Structured Priors for Sparse-Voxel Surface Reconstruction, https://doi.org/10.48550/arxiv.2601.17720, fetched 2026-10-26 (unofficial)
++[S8] Laityperfect7/GaussianScan-Recon, https://github.com/Laityperfect7/GaussianScan-Recon, fetched 2026-10-27 (unofficial)
++[S9] SA-ResGS: Self-augmented Residual 3D Gaussian Splatting for Next Best View Selection, https://doi.org/10.1007/978-3-032-37013-6_17, fetched 2026-10-29

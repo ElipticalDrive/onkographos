@@ -1,0 +1,32 @@
+# Systems and applications
+## Overview
+This family covers the deployment, integration, and hardware acceleration of volume rendering techniques in real-world scenarios [G]. It addresses the gap between theoretical rendering algorithms and practical implementation constraints, such as computational intensity, display hardware limitations, and user interaction requirements [G]. It is distinguished from [Image-order rendering](16-image-order-rendering.md) and [Object-order rendering](22-object-order-rendering.md) by its focus on system-level architecture (e.g., GPU pipelines, web browsers, physical displays) rather than per-pixel or per-voxel sampling and shading strategies [G].
+
+## Shared principles
+The articles in this family share the goal of mapping abstract volumetric data $I(x,y,z)$ to a perceptible output through specific system constraints [G]. Common mechanisms include:
+1.  **Hardware Acceleration Mapping**: Offloading computationally intensive tasks (ray casting, splatting, sorting) to parallel execution units (GPUs, multi-core CPUs) to achieve real-time or near-real-time performance [G].
+2.  **Data Structure Optimization**: Storing volumetric data in formats optimized for the target hardware, such as 3D/4D textures for coalesced memory access on GPUs or sparse structures (e.g., OpenVDB) for memory efficiency [G].
+3.  **Depth Management**: Handling the ordering of contributions for alpha-blended rendering, often requiring GPU-based sorting algorithms (radix sort, linked lists) to ensure correct compositing [G].
+4.  **Physical-to-Digital Mapping**: In the case of volumetric displays, transforming 3D voxel coordinates into 2D control signals (pixel buffers, SLM patterns) synchronized with mechanical or optical processes to create a physical 3D light field [G].
+
+## Subtopics
+
+### [Voxel engines and games](47-voxel-engines-and-games.md)
+Hardware architectures and software systems that manipulate, store, and render volumetric data directly as voxels, offloading operations like clipping and compositing to dedicated processors or optimized GPU pipelines [G]. It is distinguished from [Film and production rendering](48-film-and-production-rendering.md) and [Scientific and medical visualization](49-scientific-and-medical-visualization.md) by prioritizing interactive frame rates and direct spatial manipulation of 3D primitives over offline quality or analytical accuracy [G]. Choose when real-time interaction with 3D spatial data and direct voxel manipulation are required.
+
+### [Film and production rendering](48-film-and-production-rendering.md)
+High-fidelity rendering pipelines for visual effects, particularly for clouds, fire, and smoke, often utilizing VDB data structures [G]. It is distinguished from [Voxel engines and games](47-voxel-engines-and-games.md) and [GPU, web and parallel renderers](50-gpu-web-and-parallel-renderers.md) by prioritizing offline photorealism and complex light transport over interactive frame rates [G]. Choose when offline quality and photorealistic effects are required.
+
+### [Scientific and medical visualization](49-scientific-and-medical-visualization.md)
+Applications of volume rendering to analyze and interpret complex datasets from scientific simulations or medical imaging (CT, MRI) [G]. It is distinguished from [Voxel engines and games](47-voxel-engines-and-games.md) and [Film and production rendering](48-film-and-production-rendering.md) by prioritizing analytical accuracy and quantitative correctness over interactive frame rates or photorealism [G]. Choose when analytical accuracy and quantitative interpretation of data are required.
+
+### [GPU, web and parallel renderers](50-gpu-web-and-parallel-renderers.md)
+Rendering systems that map volumetric data $I(x,y,z)$ to perceptible outputs by offloading computation to parallel hardware (GPUs, multi-core CPUs) or executing entirely within web browsers via WebGL/WebGPU [G]. It addresses computational intensity by leveraging massive parallelism for ray casting, splatting, and data sorting [G]. It is distinguished from [Voxel engines and games](47-voxel-engines-and-games.md) by its focus on general-purpose visualization rather than game engine integration, and from [Film and production rendering](48-film-and-production-rendering.md) by its emphasis on real-time or near-real-time interactivity and web compatibility [G]. Choose when general-purpose visualization requires real-time interactivity, web compatibility, or massive parallelism.
+
+### [Volumetric displays and holography](51-volumetric-displays-and-holography.md)
+Hardware systems and computational methods that render volumetric data directly into physical space, creating images visible from multiple viewpoints without headgear [G]. It differs from standard rasterization by projecting light into a physical medium or light field rather than onto a 2D sensor [G]. It is distinct from [Voxel engines and games](47-voxel-engines-and-games.md) and [Scientific and medical visualization](49-scientific-and-medical-visualization.md) by creating physical 3D light fields rather than simulating volume appearance on 2D displays or monitors [G]. Choose when headless 3D visualization in physical space is required.
+
+## Background
+Specific origin details (authors, dates, foundational papers) are not given in the sources. The field has evolved from offline scientific visualization tools to real-time interactive systems and specialized hardware displays [G]. The integration of GPUs has been a major driver, enabling complex shading and large datasets to be rendered interactively [G]. More recently, web-based technologies (WebGL/WebGPU) have democratized access to volume visualization, while volumetric displays offer a new paradigm for 3D data presentation without stereoscopic headgear [G].
+
+## Sources

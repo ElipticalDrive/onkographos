@@ -1,0 +1,185 @@
+--- v004.md
++++ v005.md
+@@ -1,36 +1,37 @@
+ # Near-Surface Point Sampling
+ 
+-Also called: Near-surface perturbation, Gaussian surface perturbation
++Also called: DeepSDF sampling, Non-Uniform Surface Sampling
+ 
+ ## Overview
+-Near-Surface Point Sampling generates training data points in the immediate vicinity of a mesh surface by perturbing existing surface samples with Gaussian noise. It solves the problem of insufficient volumetric coverage near the object boundary during neural implicit surface reconstruction, ensuring the network learns the signed distance field (SDF) gradient accurately without requiring expensive ray marching for every sample. It sets itself apart from [Surfel Parameterization from Mesh Sampling](4501-surfel-parameterization-from-mesh-sampling.md) by not requiring explicit surface parameterization or normal-based offsetting, and from [SDF-guided Sampling](7324-sdf-guided-sampling.md) by relying on simple stochastic perturbation rather than iterative SDF evaluation.
++Near-Surface Point Sampling generates a non-uniform distribution of query points for training implicit surface representations, specifically Signed Distance Fields (SDFs). It solves the problem of insufficient training data density near the object boundary, which is critical for accurate surface reconstruction. It sets itself apart from uniform volume sampling by concentrating samples in the immediate vicinity of the mesh, and from pure surface sampling by including a controlled noise perturbation to regularize the gradient field.
+ 
+ ## How it works
+ **Inputs:**
+-- A set of uniform surface samples $S_{surf}$ on a mesh.
+-- A perturbation standard deviation $\sigma$.
++- A watertight mesh $M$ with correct face normals.
++- Number of points $N$ (default 500,000) [S2, unofficial].
++- Standard deviation for noise $\sigma$ (default 0.01) [S1][S2, unofficial].
++- Bounding radius $R$ (default 1.0, unit sphere) [S2, unofficial].
+ 
+ **Outputs:**
+-- A set of near-surface samples $S_{near}$.
++- A set of $N$ 3D points $P = \{p_1, \dots, p_N\}$.
++- Corresponding SDF values $D = \{d_1, \dots, d_N\}$ and signs $S = \{s_1, \dots, s_N\}$.
+ 
+ **Data Structures:**
+-- $S_{surf}$: List of 3D points $(x, y, z)$.
+-- $S_{near}$: List of 3D points $(x', y', z')$.
++- Surface Point Cloud: A set of points on the mesh surface, typically stored in a kd-tree for nearest-neighbor queries.
++- Training Batch: A list of tuples $(p_i, d_i, s_i)$.
+ 
+ **Steps:**
+-1. Initialize an empty list $S_{near}$.
+-2. For each point $p \in S_{surf}$:
+-   a. Generate a random 3D vector $\mathbf{n} = (n_x, n_y, n_z)$ where each component is drawn from a standard normal distribution $\mathcal{N}(0, 1)$.
+-   b. Scale the vector by $\sigma$: $\mathbf{v} = \sigma \cdot \mathbf{n}$.
+-   c. Compute the perturbed point: $p' = p + \mathbf{v}$.
+-   d. Append $p'$ to $S_{near}$.
+-
+-**Parameters:**
+-- $\sigma$: Standard deviation of the Gaussian noise. Typical value: $0.01$ [S1].
+-
+-**Edge Cases and Pitfalls:**
+-- The noise is isotropic, meaning points may fall on either side of the surface. This is desirable for learning the signed distance field sign.
+-- If $\sigma$ is too large, samples may fall too far from the surface, reducing the effectiveness of the near-surface constraint.
+-- If $\sigma$ is too small, the samples may be numerically indistinguishable from the surface points, providing no volumetric gradient information.
++1. **Mesh Normalization:** Transform the mesh $M$ so that it fits inside a unit sphere centered at the origin. This ensures consistent scale for the noise perturbation and bounding volume [S2, unofficial].
++2. **Surface Sampling:** Generate a set of points $P_{surf}$ uniformly distributed on the surface of $M$. The number of surface points is determined by the desired split ratio. According to the DeepSDF paper, a 2:2:1 split is used for surface, near, and uniform samples, meaning $N_{surf} = N_{near} = \frac{2}{5}N$ and $N_{uniform} = \frac{1}{5}N$ [S1].
++3. **Near-Surface Perturbation:** For each point $p \in P_{surf}$, generate a perturbed point $p'$ by adding Gaussian noise:
++   $$ p' = p + \epsilon, \quad \epsilon \sim \mathcal{N}(0, \sigma^2 I) $$
++   where $\sigma = 0.01$ [S1][S2, unofficial]. These points form the set $P_{near}$.
++4. **Uniform Volume Sampling:** Generate $N_{uniform}$ points uniformly distributed within the bounding sphere of radius $R$ [S1]. These points form the set $P_{uniform}$.
++5. **SDF Calculation:** For all points in $P_{near} \cup P_{uniform}$, calculate the SDF value and sign:
++   - **Value:** Find the closest point $q$ on the surface point cloud using a kd-tree. The distance is $d = \|p' - q\|$ [S2, unofficial].
++   - **Sign:** Determine if the point is inside or outside the surface.
++     - *Normal Method:* Compute the dot product of the vector $(p' - q)$ and the normal $n_q$ at $q$. If $(p' - q) \cdot n_q < 0$, the point is inside (negative sign) [S2, unofficial].
++     - *Depth Method:* Project the point into the camera frame of each scan. If the point's depth is greater than the depth buffer value for any camera, it is outside (positive sign) [S2, unofficial].
++6. **Validation:** Check the fraction of points inside the shape (negative SDF). If this fraction is less than `min_size` (default 0), throw an exception [S2, unofficial].
+ 
+ **Pseudocode:**
+@@ -38,56 +39,91 @@
+ import numpy as np
+ 
+-def near_surface_point_sampling(surface_samples, sigma=0.01):
+-    """
+-    Generates near-surface points by perturbing surface samples with Gaussian noise.
++def near_surface_point_sampling(mesh, N=500000, sigma=0.01, R=1.0, min_size=0.0):
++    # 1. Normalize mesh to unit sphere
++    mesh = normalize_to_unit_sphere(mesh)
+     
+-    Args:
+-        surface_samples: numpy array of shape (N, 3) containing surface points.
+-        sigma: Standard deviation of the Gaussian noise.
++    # 2. Determine counts based on 2:2:1 split
++    N_surf = int(2/5 * N)
++    N_near = int(2/5 * N)
++    N_uniform = N - N_surf - N_near
++    
++    # 3. Generate surface points
++    P_surf = sample_mesh_surface(mesh, N_surf)
++    
++    # 4. Generate near-surface points via perturbation
++    noise = np.random.normal(0, sigma, (N_near, 3))
++    P_near = P_surf[:N_near] + noise
++    
++    # 5. Generate uniform volume points
++    P_uniform = sample_uniform_in_sphere(R, N_uniform)
++    
++    # 6. Combine all points
++    P_all = np.vstack([P_near, P_uniform])
++    
++    # 7. Calculate SDF values and signs
++    # Assuming get_surface_point_cloud returns a kd-tree and normals
++    point_cloud_data = get_surface_point_cloud(mesh, surface_point_method='sample')
++    kd_tree = point_cloud_data.kd_tree
++    normals = point_cloud_data.normals
++    
++    D = np.zeros(N)
++    S = np.zeros(N)
++    
++    for i, p in enumerate(P_all):
++        # Find closest point on surface
++        dist, idx = kd_tree.query(p)
++        q = kd_tree.data[idx]
++        n = normals[idx]
+         
+-    Returns:
+-        numpy array of shape (N, 3) containing near-surface points.
+-    """
+-    # Generate random noise from standard normal distribution
+-    noise = np.random.normal(0, 1, size=surface_samples.shape)
+-    
+-    # Scale noise by sigma
+-    perturbation = sigma * noise
+-    
+-    # Add perturbation to surface samples
+-    near_surface_samples = surface_samples + perturbation
+-    
+-    return near_surface_samples
++        D[i] = dist
++        
++        # Determine sign using normal method
++        vec = p - q
++        if np.dot(vec, n) < 0:
++            S[i] = -1.0 # Inside
++        else:
++            S[i] = 1.0  # Outside
++            
++    # 8. Validate min_size
++    fraction_inside = np.sum(S == -1.0) / N
++    if fraction_inside < min_size:
++        raise Exception(f"Too few points inside shape: {fraction_inside} < {min_size}")
++        
++    return P_all, D, S
+ ```
++
++**Edge Cases and Pitfalls:**
++- **Non-watertight meshes:** The sampling method requires watertight meshes with correct face normals. Non-watertight meshes may produce incorrect surface point clouds [S2, unofficial].
++- **Sign Ambiguity:** The normal method can produce "bubble" artifacts in concave regions or near holes. The depth method is more robust but less accurate [S2, unofficial].
++- **Precision:** The noise $\sigma$ is small relative to the unit sphere scale. Ensure floating-point precision is sufficient for the perturbation [S1].
+ 
+ ## Subtopics
+ 
+ ### [Distance Field Foot Point Generation](6946-distance-field-foot-point-generation.md)
+-A method to generate surface points (foot points) from a clamped, signed distance field volume (DFV) by projecting grid voxels onto the isosurface along the gradient direction. It differs from general scalar field foot point estimation by relying on the specific property that the gradient of a distance field is unit length, allowing for a single-step projection without iterative refinement. It builds on [Near-Surface Point Sampling](2910-near-surface-point-sampling.md) [G].
++Projects grid voxels onto the isosurface using the gradient. It differs by using a single-step projection based on unit-length gradients, whereas Near-Surface Point Sampling uses random Gaussian perturbation of existing surface points.
+ 
+ ### [Primary Edge Sampling](7168-primary-edge-sampling.md)
+-Primary Edge Sampling generates sample points on the primary boundary curve $S$ of an implicit surface, which is defined as the intersection of the surface function $\phi$ and the orientation function $\psi$. It solves the problem of sampling visibility discontinuities (silhouettes) for implicit surfaces, which lack a finite set of edges like polygonal meshes. It sets itself apart from [Distance Field Foot Point Generation](6946-distance-field-foot-point-generation.md) by explicitly targeting the geometric condition where the surface normal is perpendicular to the view vector, rather than projecting points onto the surface. It differs from [Surface and Volume Training Position Sampling](9996-surface-and-volume-training-position-sampling.md) by focusing on boundary integrals for differentiable rendering rather than general training position generation.
++Samples visibility discontinuities (silhouettes). It differs by targeting the geometric condition where the surface normal is perpendicular to the view vector, rather than perturbing surface points.
+ 
+ ### [Surface and Volume Training Position Sampling](9996-surface-and-volume-training-position-sampling.md)
+-A method to distribute training positions for neural implicit surface reconstruction by combining uniform volume samples, uniform surface samples, and perturbed surface samples to ensure coverage of the object and its immediate vicinity. It sets itself apart from siblings like [Distance Field Foot Point Generation](6946-distance-field-foot-point-generation.md) by explicitly mixing volumetric background data with surface-localized data, and from [Primary Edge Sampling](7168-primary-edge-sampling.md) by using area-weighted triangle selection rather than edge-centric heuristics.
++Mixes uniform volume, uniform surface, and perturbed surface samples. It differs by using area-weighted triangle selection and explicit mixing strategies, whereas Near-Surface Point Sampling is a specific perturbation technique often used within such frameworks.
+ 
+ ### [Spot Noise (Motion Blurred Particles near Contour Surfaces)](13068-spot-noise-motion-blurred-particles-near-contour-surfaces.md)
+-Spot noise visualizes 3D velocity fields in a thickened region around a contour surface by rendering motion-blurred ellipsoidal particles, allowing for interactive rotation and animation using standard hardware graphics pipelines. Unlike methods that represent tangential flows on surfaces (such as stream surfaces) or require surface parameterization, this technique operates on contour surfaces of scalar functions that are generally unrelated to the velocity vectors, meaning the flow is not necessarily tangent to the surface. It builds on [Near-Surface Point Sampling](2910-near-surface-point-sampling.md) by using distance-field estimation to restrict particle placement to a specific band around the isosurface.
++Visualizes velocity fields near contour surfaces. It builds on Near-Surface Point Sampling by using distance-field estimation to restrict particle placement to a band around the isosurface.
+ 
+ ### [Surface Sampling for NeRF Rendering](14054-surface-sampling-for-nerf-rendering.md)
+-Generates random points on the surface of a 3D object (specifically on triangles) to be used as input for a neural network reflectance model.
++Generates points on mesh triangles for NeRF training. It differs by focusing on uniform spatial distribution over mesh geometry for training data generation, rather than foot-point projection or edge-based sampling.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of surface samples, as each sample undergoes a constant-time noise generation and addition.
+-- **Memory Complexity:** $O(N)$ to store the resulting near-surface points.
+-- **Measured Performance:** In the source, this method is used to generate 500,000 points per epoch for training on a NVIDIA Tesla V100 GPU [S1]. The perturbation step is negligible compared to the neural network forward pass.
+-- **Strengths:** Simple to implement, computationally cheap, provides isotropic coverage around the surface.
+-- **Limitations:** Does not guarantee points stay within a specific distance threshold (though $\sigma$ controls the spread), may generate points far from the surface if $\sigma$ is large.
+-- **When to use:** When training neural implicit surfaces and a mix of surface and near-surface points is required.
+-- **When not to use:** When precise control over the distance from the surface is required, or when anisotropic perturbation is needed.
++- **Time Complexity:** Dominated by the kd-tree query for SDF calculation, which is $O(N \log M)$ where $M$ is the number of surface points in the cloud [S2, unofficial].
++- **Memory Complexity:** $O(M)$ to store the surface point cloud and kd-tree [S2, unofficial].
++- **Performance:** Training is performed on NVIDIA Tesla V100 GPUs using PyTorch with a batch size of 512 [S1].
++- **Strengths:** Provides high-density samples near the surface, which improves the accuracy of the learned SDF [S1].
++- **Limitations:** Requires a watertight mesh and correct normals for the sampling method [S2, unofficial]. The sign determination can be ambiguous in complex geometries [S2, unofficial].
+ 
+ ## Background
+-Originated in the context of Neural Geometric Level of Detail (NGLOD) for real-time rendering with implicit 3D shapes [S1]. The method was introduced to provide a simple and effective way to sample points near the surface for training neural networks that predict signed distance fields. It builds on the idea that perturbing surface points with Gaussian noise provides a good approximation of the volumetric distribution near the surface without the computational cost of ray marching or complex geometric queries.
++The method was proposed in the DeepSDF paper [S2, unofficial]. It is used in neural implicit surface reconstruction to provide training data that emphasizes the surface boundary. The implementation is available in the `mesh_to_sdf` repository [S2, unofficial].
+ 
+ ## Sources
+-[S1] Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes, https://doi.org/10.1109/cvpr46437.2021.01120, fetched 2026-10-26+[S1] Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes, https://doi.org/10.1109/cvpr46437.2021.01120, fetched 2026-10-26
++[S2] mesh_to_sdf, https://github.com/marian42/mesh_to_sdf, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,461 @@
+Basic Shape Interface
+3.1 Basic Shape Interface
+The interface for Shapes is defined in the source file
+core/shape.h, and definitions of common Shape methods can be
+found in core/shape.cpp. The Shape base class defines the
+general Shape interface. It also exposes a few public data members
+that are useful for all Shape implementations.
+<<Shape Declarations>>=
+class Shape {
+public:
+<<Shape Interface>>
+Shape(const Transform *ObjectToWorld, const Transform *WorldToObject,
+bool reverseOrientation);
+virtual ~Shape();
+virtual Bounds3f ObjectBound() const = 0;
+virtual Bounds3f WorldBound() const;
+virtual bool Intersect(const Ray &ray, Float *tHit,
+SurfaceInteraction *isect, bool testAlphaTexture = true) const = 0;
+virtual bool IntersectP(const Ray &ray,
+bool testAlphaTexture = true) const {
+Float tHit = ray.tMax;
+SurfaceInteraction isect;
+return Intersect(ray, &tHit, &isect, testAlphaTexture);
+}
+virtual Float Area() const = 0;
+virtual Interaction Sample(const Point2f &u) const = 0;
+virtual Float Pdf(const Interaction &) const {
+return 1 / Area();
+}
+virtual Interaction Sample(const Interaction &ref,
+const Point2f &u) const {
+return Sample(u);
+}
+virtual Float Pdf(const Interaction &ref, const Vector3f &wi) const;
+<<Shape Public Data>>
+const Transform *ObjectToWorld, *WorldToObject;
+const bool reverseOrientation;
+const bool transformSwapsHandedness;
+};
+All shapes are defined in object coordinate space; for example, all spheres
+are defined in a coordinate system where the center of the sphere is at the
+origin. In order to place a sphere at another position in the scene, a
+transformation that describes the mapping from object space to world space
+must be provided. The Shape class stores both this transformation
+and its inverse.
+Shapes also take a Boolean parameter,
+reverseOrientation, that indicates whether their surface normal
+directions should be reversed from the default. This capability is useful
+because the orientation of the surface normal is used to determine which
+side of a shape is “outside.” For example, shapes that emit illumination
+are emissive only on the side the surface normal lies on. The value of
+this parameter is managed
+via the ReverseOrientation statement in pbrt input files.
+Shapes also store the return value of the
+Transform::SwapsHandedness() call for their object-to-world
+transformation. This value is needed by the SurfaceInteraction
+constructor that is called each time a ray intersection is found, so
+the Shape constructor computes it once and stores it.
+<<Shape Method Definitions>>=
+Shape::Shape(const Transform *ObjectToWorld,
+const Transform *WorldToObject, bool reverseOrientation)
+: ObjectToWorld(ObjectToWorld), WorldToObject(WorldToObject),
+reverseOrientation(reverseOrientation),
+transformSwapsHandedness(ObjectToWorld->SwapsHandedness()) {
+}
+An important detail is that shapes store pointers to their transformations
+rather than Transform objects directly. Recall from
+Section 2.7 that Transform objects are
+represented by a total of 32 floats, requiring 128 bytes of memory;
+because multiple shapes in the scene will frequently have the same
+transformation applied to them, pbrt keeps a pool of Transforms so
+that they can be re-used and passes pointers to the shared Transforms
+to the shapes. As such, the Shape destructor does not delete
+its Transform pointers, leaving the Transform management code
+to manage that memory instead.
+<<Shape Public Data>>=
+const Transform *ObjectToWorld, *WorldToObject;
+const bool reverseOrientation;
+const bool transformSwapsHandedness;
+3.1.1 Bounding
+The scenes that pbrt will render will often contain objects
+that are computationally expensive to process. For many operations, it is
+often useful to have a 3D bounding volume that
+encloses an object. For example, if a ray does not pass through a
+particular bounding volume, pbrt can avoid processing all of the objects
+inside of it for that ray.
+Axis-aligned bounding boxes are a convenient bounding volume, as they
+require only six floating-point values to store and fit many shapes well. Furthermore,
+it’s fairly inexpensive to test for the intersection of a ray with an axis-aligned
+bounding box. Each Shape implementation must therefore be capable
+of bounding itself with an axis-aligned bounding box represented by a
+Bounds3f. There are two different bounding methods. The first,
+ObjectBound(), returns a bounding box in the shape’s object space.
+<<Shape Interface>>=
+virtual Bounds3f ObjectBound() const = 0;
+The second bounding method, WorldBound(), returns a bounding box in
+world space. pbrt provides a default implementation of this method that
+transforms the object space bound to world space. Shapes that can easily compute
+a tighter world space bound should override this method, however. An
+example of such a shape is a triangle (Figure 3.1).
+Figure 3.1: (a) A world space bounding
+box of a triangle is computed by transforming its object space bounding box to world
+space and then finding the bounding box that encloses the resulting
+bounding box; a sloppy bound may result. (b) However, if
+the triangle’s vertices are first transformed from object space to
+world space and then bounded, the fit of the bounding box can be much better.
+<<Shape Method Definitions>>+=
+Bounds3f Shape::WorldBound() const {
+return (*ObjectToWorld)(ObjectBound());
+}
+3.1.2 Ray–Bounds Intersections
+Given the use of Bounds3f instances to bound shapes, we will add a
+Bounds3 method, Bounds3::IntersectP(), that checks for a
+ray–box intersection and returns the two parametric
+t
+values of the
+intersection, if any.
+One way to think of bounding boxes is as the intersection of three slabs,
+where a slab is the region of space between two parallel planes. To
+intersect a ray against a box, we intersect the ray against each of the
+box’s three slabs in turn. Because the slabs are aligned with the three
+coordinate axes, a number of optimizations can be made in the ray–slab
+tests.
+The basic ray-bounding box intersection algorithm works as follows: we
+start with a parametric interval that covers that range of positions
+t
+along the ray where we’re interested in finding intersections; typically,
+this is
+left-parenthesis 0 comma normal infinity right-parenthesis
+. We will then successively compute the two
+parametric
+t
+positions where the ray intersects each axis-aligned slab.
+We compute the set intersection of the per-slab intersection interval with
+the current intersection interval, returning failure if we find that the
+resulting interval is degenerate. If, after checking all three slabs, the
+interval is nondegenerate, we have the parametric range of the ray that is
+inside the box. Figure 3.2 illustrates this process, and
+Figure 3.3 shows the basic geometry of a ray intersecting a slab.
+Figure 3.2: Intersecting a Ray with an Axis-Aligned
+Bounding Box. We compute intersection points with each slab in turn,
+progressively narrowing the parametric interval. Here, in 2D,
+the intersection of the
+x
+and
+y
+extents along the ray (blue segment) gives the extent
+where the ray is inside the box.
+Figure 3.3: Intersecting a Ray with an
+Axis-Aligned Slab. The two planes shown here are described by
+x equals c
+for constant values
+c
+. The normal of each plane is
+left-parenthesis 1 comma 0 comma 0 right-parenthesis
+. Unless
+the ray is parallel to the planes, it will intersect the slab twice, at
+parametric positions
+t Subscript normal n normal e normal a normal r
+and
+t Subscript normal f normal a normal r
+.
+If the Bounds3::IntersectP() method returns true, the
+intersection’s parametric range is returned in the optional arguments
+hitt0 and hitt1. Intersections outside of the (0,
+Ray::tMax) range of the ray are ignored. If the ray’s origin is inside the
+box,
+0
+is returned for hitt0.
+<<Geometry Inline Functions>>+=
+template <typename T>
+inline bool Bounds3<T>::IntersectP(const Ray &ray, Float *hitt0,
+Float *hitt1) const {
+Float t0 = 0, t1 = ray.tMax;
+for (int i = 0; i < 3; ++i) {
+<<Update interval for ith bounding box slab>>
+Float invRayDir = 1 / ray.d[i];
+Float tNear = (pMin[i] - ray.o[i]) * invRayDir;
+Float tFar = (pMax[i] - ray.o[i]) * invRayDir;
+<<Update parametric interval from slab intersection
+t
+values>>
+if (tNear > tFar) std::swap(tNear, tFar);
+<<Update tFar to ensure robust ray–bounds intersection>>
+tFar *= 1 + 2 * gamma(3);
+t0 = tNear > t0 ? tNear : t0;
+t1 = tFar < t1 ? tFar : t1;
+if (t0 > t1) return false;
+}
+if (hitt0) *hitt0 = t0;
+if (hitt1) *hitt1 = t1;
+return true;
+}
+For each pair of planes, this routine needs to compute two ray–plane
+intersections. For example, the slab described by two planes perpendicular to
+the
+x
+axis can be described by planes through points
+left-parenthesis x 0 comma 0 comma 0 right-parenthesis
+and
+left-parenthesis x 1 comma 0 comma 0 right-parenthesis
+, each with normal
+left-parenthesis 1 comma 0 comma 0 right-parenthesis
+. Consider the first
+t
+value for a plane intersection,
+t 0
+. The parametric
+t
+value for the
+intersection between a ray with origin
+normal o
+and direction
+bold d
+and a plane
+a x plus b y plus c z plus d equals 0
+can be found by
+substituting the ray equation into the plane equation:
+StartLayout 1st Row 1st Column 0 2nd Column equals a left-parenthesis normal o Subscript x Baseline plus t bold d Subscript x Baseline right-parenthesis plus b left-parenthesis normal o Subscript y Baseline plus t bold d Subscript y Baseline right-parenthesis plus c left-parenthesis normal o Subscript z Baseline plus t bold d Subscript z Baseline right-parenthesis plus d 2nd Row 1st Column Blank 2nd Column equals left-parenthesis a comma b comma c right-parenthesis dot normal o plus t left-parenthesis a comma b comma c right-parenthesis dot bold d plus d period EndLayout
+Solving for
+t
+gives
+t equals StartFraction negative d minus left-parenthesis left-parenthesis a comma b comma c right-parenthesis dot normal o right-parenthesis Over left-parenthesis left-parenthesis a comma b comma c right-parenthesis dot bold d right-parenthesis EndFraction period
+Because the
+y
+and
+z
+components of the plane’s normal are zero,
+b
+and
+c
+are zero, and
+a
+is one. The plane’s
+d
+coefficient is
+minus x 0
+.
+We can use this information and the
+definition of the dot product to simplify the calculation substantially:
+t 0 equals StartFraction x 0 minus normal o Subscript x Baseline Over bold d Subscript x Baseline EndFraction period
+The code to compute the
+t
+values of the slab intersections starts by
+computing the reciprocal of the corresponding component of the ray
+direction so that it can multiply by this factor instead of performing
+multiple divisions. Note that, although it divides by this component, it
+is not necessary to verify that it is nonzero. If it is zero, then
+invRayDir will hold an infinite value, either
+negative normal infinity
+or
+normal infinity
+,
+and the rest of the algorithm still works correctly.
+†
+<<Update interval for ith bounding box slab>>=
+Float invRayDir = 1 / ray.d[i];
+Float tNear = (pMin[i] - ray.o[i]) * invRayDir;
+Float tFar = (pMax[i] - ray.o[i]) * invRayDir;
+<<Update parametric interval from slab intersection
+t
+values>>
+if (tNear > tFar) std::swap(tNear, tFar);
+<<Update tFar to ensure robust ray–bounds intersection>>
+tFar *= 1 + 2 * gamma(3);
+t0 = tNear > t0 ? tNear : t0;
+t1 = tFar < t1 ? tFar : t1;
+if (t0 > t1) return false;
+The two distances are reordered so that tNear holds the closer
+intersection and tFar the farther one. This gives a parametric
+range
+left-bracket monospace t monospace upper N monospace e monospace a monospace r comma monospace t monospace upper F monospace a monospace r right-bracket
+, which is used to compute the set
+intersection with the current range
+left-bracket monospace t Baseline monospace 0 comma monospace t Baseline monospace 1 right-bracket
+to compute a
+new range. If this new range is empty (i.e.,
+monospace t Baseline monospace 0 greater-than monospace t Baseline monospace 1
+),
+then the code can immediately return failure.
+There is another floating-point-related subtlety here: in the case where
+the ray origin is in the plane of one of the bounding box slabs and the ray
+lies in the plane of the slab, it is possible that tNear or
+tFar will be computed by an expression of the form
+0 slash 0
+, which
+results in an IEEE floating-point “not a number” (NaN) value. Like
+infinity values, NaNs have well-specified semantics: for example, any
+logical comparison involving a NaN always evaluates to false. Therefore,
+the code that updates the values of t0 and t1 is carefully
+written so that if tNear or tFar is NaN, then t0 or
+t1 won’t ever take on a NaN value but will always remain unchanged.
+<<Update parametric interval from slab intersection
+t
+values>>=
+if (tNear > tFar) std::swap(tNear, tFar);
+<<Update tFar to ensure robust ray–bounds intersection>>
+tFar *= 1 + 2 * gamma(3);
+t0 = tNear > t0 ? tNear : t0;
+t1 = tFar < t1 ? tFar : t1;
+if (t0 > t1) return false;
+Bounds3 also provides a specialized IntersectP() method that
+takes the reciprocal of the ray’s direction as an additional parameter, so
+that the three reciprocals don’t need to be computed each time
+IntersectP() is called.
+This version also takes precomputed values that indicate whether each
+direction component is negative, which makes it possible to eliminate the
+comparisons of the computed tNear and tFar values in the
+original routine and just directly compute the respective near and far
+values. Because the comparisons that order these values from low
+to high in the original code are dependent on computed values, they can be
+inefficient for processors to execute, since the computation of their
+values must be completely finished before the comparison can be made.
+This routine returns true if the ray segment is
+entirely inside the bounding box, even if the intersections are not within
+the ray’s
+left-parenthesis 0 comma monospace t monospace upper M monospace a monospace x right-parenthesis
+range.
+<<Geometry Inline Functions>>+=
+template <typename T>
+inline bool Bounds3<T>::IntersectP(const Ray &ray, const Vector3f &invDir,
+const int dirIsNeg[3]) const {
+const Bounds3f &bounds = *this;
+<<Check for ray intersection against
+x
+and
+y
+slabs>>
+Float tMin = (bounds[ dirIsNeg[0]].x - ray.o.x) * invDir.x;
+Float tMax = (bounds[1-dirIsNeg[0]].x - ray.o.x) * invDir.x;
+Float tyMin = (bounds[ dirIsNeg[1]].y - ray.o.y) * invDir.y;
+Float tyMax = (bounds[1-dirIsNeg[1]].y - ray.o.y) * invDir.y;
+<<Update tMax and tyMax to ensure robust bounds intersection>>
+tMax *= 1 + 2 * gamma(3);
+tyMax *= 1 + 2 * gamma(3);
+if (tMin > tyMax || tyMin > tMax)
+return false;
+if (tyMin > tMin) tMin = tyMin;
+if (tyMax < tMax) tMax = tyMax;
+<<Check for ray intersection against
+z
+slab>>
+Float tzMin = (bounds[ dirIsNeg[2]].z - ray.o.z) * invDir.z;
+Float tzMax = (bounds[1-dirIsNeg[2]].z - ray.o.z) * invDir.z;
+<<Update tzMax to ensure robust bounds intersection>>
+tzMax *= 1 + 2 * gamma(3);
+if (tMin > tzMax || tzMin > tMax)
+return false;
+if (tzMin > tMin)
+tMin = tzMin;
+if (tzMax < tMax)
+tMax = tzMax;
+return (tMin < ray.tMax) && (tMax > 0);
+}
+If the ray direction vector is negative, the “near” parametric
+intersection will be found with the slab with the larger of the two
+bounding values, and the far intersection will be found with the slab with
+the smaller of them. The implementation can use this observation to
+compute the near and far parametric values in each direction directly.
+<<Check for ray intersection against
+x
+and
+y
+slabs>>=
+Float tMin = (bounds[ dirIsNeg[0]].x - ray.o.x) * invDir.x;
+Float tMax = (bounds[1-dirIsNeg[0]].x - ray.o.x) * invDir.x;
+Float tyMin = (bounds[ dirIsNeg[1]].y - ray.o.y) * invDir.y;
+Float tyMax = (bounds[1-dirIsNeg[1]].y - ray.o.y) * invDir.y;
+<<Update tMax and tyMax to ensure robust bounds intersection>>
+tMax *= 1 + 2 * gamma(3);
+tyMax *= 1 + 2 * gamma(3);
+if (tMin > tyMax || tyMin > tMax)
+return false;
+if (tyMin > tMin) tMin = tyMin;
+if (tyMax < tMax) tMax = tyMax;
+The fragment <<Check for ray intersection against
+z
+slab>> is
+analogous and isn’t included here.
+This intersection test is at the heart of traversing the BVHAccel
+acceleration structure, which is introduced in Section 4.3.
+Because so many ray–bounding box intersection tests are performed while
+traversing the BVH tree, we found that this optimized method provided
+approximately a 15% performance improvement in overall rendering time
+compared to using the Bounds3::IntersectP() variant that didn’t take
+the precomputed direction reciprocals and signs.
+3.1.3 Intersection Tests
+Shape implementations must provide an implementation of
+one (and possibly two) methods that test for ray intersections with their
+shape. The first, Shape::Intersect(), returns geometric information
+about a single ray–shape intersection corresponding to the first
+intersection, if any, in the (0, tMax) parametric range along the
+ray.
+<<Shape Interface>>+=
+virtual bool Intersect(const Ray &ray, Float *tHit,
+SurfaceInteraction *isect, bool testAlphaTexture = true) const = 0;
+There are a few important things to keep in mind when reading (and writing)
+intersection routines:
+The Ray structure contains a Ray::tMax member that
+defines the endpoint of the ray. Intersection routines must ignore any
+intersections that occur after this point.
+If an intersection is found, its parametric distance along the ray
+should be stored in the tHit pointer that is passed
+into the intersection routine. If there are multiple intersections along
+the ray, the closest one should be reported.
+Information about an intersection is stored in the
+SurfaceInteraction structure, which completely captures the local
+geometric properties of a surface. This class is used heavily throughout
+pbrt, and it serves to cleanly isolate the geometric portion of the ray
+tracer from the shading and illumination portions. The
+SurfaceInteraction class was defined in
+Section 2.10.
+†
+The rays passed into intersection routines are in world space, so shapes
+are responsible for transforming them to object space if needed for
+intersection tests. The intersection information returned should
+be in world space.
+Some shape implementations support cutting away some of their surfaces using a texture;
+the testAlphaTexture parameter indicates whether those that do should
+perform this operation for the current intersection test.
+The second intersection test method, Shape::IntersectP(), is a
+predicate function that determines whether or not an intersection occurs,
+without returning any details about the intersection itself.
+The Shape class provides a default implementation of the
+IntersectP() method that calls the Shape::Intersect() method
+and just ignores the additional information computed about intersection
+points. As this can be fairly wasteful, almost all shape implementations in
+pbrt provide a more efficient implementation for IntersectP() that
+determines whether an intersection exists without computing all of its
+details.
+<<Shape Interface>>+=
+virtual bool IntersectP(const Ray &ray,
+bool testAlphaTexture = true) const {
+Float tHit = ray.tMax;
+SurfaceInteraction isect;
+return Intersect(ray, &tHit, &isect, testAlphaTexture);
+}
+3.1.4 Surface Area
+In order to properly use Shapes as area lights, it is
+necessary to be able to compute the surface area of a shape in object
+space.
+<<Shape Interface>>+=
+virtual Float Area() const = 0;
+3.1.5 Sidedness
+Many rendering systems, particularly those based on scan line or
+z
+-buffer
+algorithms, support the concept of shapes being “one-sided”—the shape is
+visible if seen from the front but disappears when viewed from behind. In
+particular, if a geometric object is closed and always viewed from the
+outside, then the back-facing parts of it can be discarded without changing the
+resulting image. This optimization can substantially improve the speed of
+these types of hidden surface removal algorithms. The potential for improved performance is
+reduced when using this technique with ray tracing, however,
+since it is often necessary to perform the ray–object intersection before
+determining the surface normal to do the back-facing test. Furthermore,
+this feature can lead to a physically inconsistent scene description if one-sided
+objects are not in fact closed. For example, a surface might block light
+when a shadow ray is traced from a light source to a point on another
+surface, but not if the shadow ray is traced in the other direction.
+For all of these reasons, pbrt doesn’t support this feature.

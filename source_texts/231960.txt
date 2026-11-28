@@ -1,0 +1,485 @@
+Silnik 3D w C++20 inspirowany Unity (OpenGL 4.5, RHI). Na chwałę czcigodnego Wojcimierza. - Renderer: Material PBR i światła (kierunkowe, punktowe, spot) by Leszek1Matuszczyk · Pull Request #8 · Leszek1Matuszczyk/wojcimierz-engine
+
+Renderer: Material PBR i światła (kierunkowe, punktowe, spot) by Leszek1Matuszczyk · Pull Request #8 · Leszek1Matuszczyk/wojcimierz-engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Leszek1Matuszczyk
+commented
+Oct 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Na chwałę czcigodnego Wojcimierza: pierwszy etap modułu renderera, czyli materiały PBR i trzy typy świateł. Wszystko idzie przez abstrakcyjne RHI, a wywołania OpenGL są tylko w engine/render/gl/.
+Publiczne API
+wz::Material (render/Material.h, asset przez std::shared_ptr): shader (nullptr = wbudowany PBR), baseColor (vec4, liniowo), metallic (0), roughness (0.5), emissive (vec3), baseColorTexture (opcjonalna, sRGB; brak = biała 1x1), doubleSided. Ma też GetShader*() z clampem (roughness >= 0.045), Material::Create(name) i ResolveMaterialIndex().
+Światła jako komponenty (render/Light.h): baza Light (color, intensity) oraz DirectionalLight, PointLight (range) i SpotLight (range, innerAngle, outerAngle, czyli połówki kątów w stopniach jak w glTF). Pozycja i kierunek (Forward(), -Z) pochodzą z Transform.
+Matematyka świateł na CPU (wz::lighting, ta sama co w GLSL):
+DistanceAttenuation(d, range): 1/d² z okienkiem (1-(d/r)^4)^2, czyli wzór UE4/Frostbite.
+SpotAttenuation(cos, cosInner, cosOuter)
+ComputeSpotCone()
+Zbieranie świateł (render/Lighting.h): CollectLights(scene, cameraPos, LightLimits) zwraca LightCollection z licznikami pominiętych świateł, a PackLights() buduje GpuLightBlock w układzie std140 (static_assert na rozmiary).
+wz::Texture: CreateSolidColor, CreateFromImage(image, srgb, mips).
+MeshRenderer przyjmuje materials (lista, jeden materiał na podsiatkę; brakujące podsiatki dostają ostatni materiał) i ma konstruktory (mesh, material) oraz (mesh, vector<material>). Zgodność: bez materiałów działa stara ścieżka (shader + color + unlit), a istniejące sceny renderują się identycznie.
+MeshData/Mesh: Vertex::uv, SubMesh z submeshes i GetSubMeshes() (pusta lista oznacza całą siatkę) oraz nowy prymityw MeshData::Sphere().
+Renderer: forward PBR z BRDF Cook-Torrance (GGX, Smith-Schlick-GGX, Fresnel Schlick) w GLSL 450, tone mapping Reinhard i gamma sRGB. Światła są zbierane i wysyłane raz na klatkę blokiem LightBlock (UBO, binding 0). Do tego RenderSettings::ambientColor i lightLimits oraz GetLastStats() (obiekty, draw calle, światła, pominięte).
+Limity świateł
+Na klatkę: 1 kierunkowe, 8 punktowych i 8 spotów (kMax* w render/Lighting.h, wstrzykiwane do shadera przez #define). Przy nadmiarze:
+kierunkowe: wygrywa najjaśniejsze (intensity × luminancja),
+punktowe i spoty: najbliższe kamerze, licząc odległość do brzegu sfery zasięgu (kamera w zasięgu oznacza priorytet 0); przy remisie wygrywa jaśniejsze. Sortowanie jest stabilne, więc wynik jest deterministyczny.
+Pomijane są światła wyłączone, nieaktywne, z zerową intensywnością lub kolorem oraz takie, które mają range <= 0.
+Zmiany w RHI (render/RHI.h i GLDevice, styl DSA)
+TextureHandle, TextureDesc (RGBA8/SRGBA8, filtr, wrap, mipmapy), CreateTexture2D, DestroyTexture, BindTexture(slot, tex)
+UpdateBuffer, bo bufory Uniform mają teraz GL_DYNAMIC_STORAGE_BIT, oraz BindUniformBuffer(binding, buf)
+SetUniform(shader, name, int), potrzebne m.in. dla samplerów
+DrawIndexedRange(vi, firstIndex, count) jako metoda wirtualna. DrawIndexed(vi, count) zostaje jako niewirtualny wrapper, więc istniejące wywołania się nie zmieniają.
+GetImGuiTextureId(RenderTargetHandle) -> void* dla viewportu edytora (@skynet Prog3). Obraz ma wiersz 0 na dole, więc rysujemy go z uv0=(0,1), uv1=(1,0).
+Testy
+GoogleTest (-L unit): 19 nowych testów w tests/test_lighting.cpp i tests/test_material.cpp:
+tłumienie (1/d², zero na granicy zasięgu, monotoniczność, d = 0),
+stożek spota i jego walidacja,
+domyślne wartości komponentów,
+zbieranie świateł: limity, priorytety, clamp limitów użytkownika, wybór kierunkowego,
+pakowanie std140,
+domyślne wartości i clamp materiału, wybór materiału dla podsiatki,
+podsiatki oraz poprawność sfery (nawinięcie, normalne).
+render_tests (-L render): 4 nowe sceny sprawdzające kolejność jasności pikseli (próbkowanie przez rzut punktów świata kamerą):
+pbr_lit_sphere: strona oświetlona jest jaśniejsza od cienia i od tła,
+pbr_point_spot: tłumienie światła punktowego z odległością, a w stożku spota jaśniej niż poza nim,
+pbr_roughness: gładka sfera ma jaśniejszy szczyt odblasku niż matowa,
+pbr_submeshes: sześcian z 2 podsiatkami i 2 materiałami emisyjnymi, przód czerwony i góra zielona.
+Bez kontekstu OpenGL 4.5 (brak X/xvfb) render_tests zwraca kod 77, a ctest oznacza test jako Skipped (SKIP_RETURN_CODE 77) zamiast go oblewać.
+Wynik lokalny na Mesa llvmpipe 25.0.7 (OpenGL 4.5 core):
+render_tests: 9/9 scen OK, wliczając 5 istniejących,
+sandbox_headless_screenshot: OK,
+unit: 72/74.
+Dwa testy, które nie przechodzą, istniały wcześniej i nie są związane z tym PR: GameLoopTest.FixedStepsMatchElapsedTime i GameLoopTest.LongFrameRunsMultipleFixedStepsAndKeepsRemainder mają za ciasną tolerancję 1e-9 na akumulatorze float. Padają tak samo na czystym main (6b74327).
+Jak uruchomić
+```
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build -L unit --output-on-failure
+ctest --test-dir build -L render --output-on-failure   # wymaga GL 4.5 (np. xvfb-run + llvmpipe)
+./build/render_tests/render_tests --scene pbr_point_spot   # PNG w build/render_out/
+```
+Poza zakresem (kolejne PR-y)
+cienie (shadow mapping),
+import glTF (cgltf) z teksturami,
+IImGuiRenderer dla edytora,
+IBL i mapy normal/metallic-roughness.
+Makro REFLECT nie istnieje jeszcze na main, więc pola Material i świateł nie są jeszcze rejestrowane; dodam je, gdy rdzeń je wprowadzi. Nagłówek każdego pliku zgodny z CONTRIBUTING.md (marker sprawdzany przez scripts/check_headers.py).
+Aktualizacja po aprobacie (9cc4b4c)
+RenderTargetDesc{width,height,srgb} + GetColorTexture; GetImGuiTextureId dla koloru sRGB zwraca cachowany glTextureView w GL_RGBA8 (surowe bajty sRGB dla ImGui bez GL_FRAMEBUFFER_SRGB), niszczony z targetem; dla RGBA8 sama tekstura.
+render_tests: srgb_imgui_view.
+Leszek1Matuszczyk
+commented
+Oct 23, 2026
+View reviewed changes
+Leszek1Matuszczyk
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Werdykt: APPROVE
+Sprawdziłem lokalnie na 4e7370b: Debug build przechodzi, ctest daje 74/76 (padają tylko 2 znane GameLoopTest). Wszystkie 19 nowych testów przechodzą też pod ASan+UBSan, bez zgłoszeń. Pod xvfb/llvmpipe przechodzi 9/9 scen render_tests i sandbox_headless_screenshot. Wszystkie nowe i zmienione pliki mają standardowy nagłówek. Poza engine/render/gl/ nie ma surowego GL: Renderer, Texture i Material idą wyłącznie przez rhi::Device. Ostrzeżenia w buildzie pochodzą tylko z stb.
+Niblokujące
+SKIP_RETURN_CODE 77 (render_tests/CMakeLists.txt:13, render_tests/main.cpp:352-360). Jeśli w CI zepsuje się xvfb albo Mesa, testy renderingu po cichu staną się „Skipped”, a pipeline zostanie zielony. Dodaj zmienną WZ_REQUIRE_GL=1, przy której brak kontekstu daje błąd, i ustawię ją w jobie Linux w #4.
+Konflikty z #4. git merge-tree pokazuje konflikty w README.md, engine/render/Mesh.*, MeshData.*, MeshRenderer.*, RHI.h i Renderer.cpp, głównie w nagłówkach i liniach include. Po merge #4 potrzebny będzie rebase.
+Czas życia zasobów GPU (engine/render/Texture.h:36). Texture trzyma surowy rhi::Device*, a Material trzyma shared_ptr<Texture>, więc materiał (asset), który przeżyje Device, zrobi DestroyTexture na martwym urządzeniu. Szkielet ma ten sam wzorzec dla Mesh/Shader, więc to temat na osobny PR. Proponuję asercję w ~GLDevice na liczbę żywych zasobów albo kolejkę zwalniania w Device.
+Dwa tryby MeshRenderer (engine/render/MeshRenderer.h:21-45), czyli legacy shader/color/unlit obok materials, to dług. Gdy sandbox i render_tests przejdą na Material (np. materiał „Unlit”), usuńmy ścieżkę legacy z Renderer.cpp:68-86, żeby inspektor edytora miał jeden model.
+transpose(inverse(u_Model)) w vertex shaderze (engine/render/Shader.cpp:66) liczy się per wierzchołek. Lepiej policzyć normal matrix na CPU i podać jako uniform u_NormalMatrix.
+GetImGuiTextureId zwraca void* (engine/render/RHI.h:104). Dla GL to OK, ale w backendzie Vulkan będzie to VkDescriptorSet, więc warto zostawić w komentarzu, że wartość jest ważna do końca życia render targetu i nie wolno jej cache'ować po DestroyRenderTarget.
+UpdateBuffer (engine/render/gl/GLDevice.cpp:74) na buforze Vertex/Index wywoła błąd GL, bo bufor nie ma GL_DYNAMIC_STORAGE_BIT. Warto dodać asercję w debug, sprawdzającą usage zapamiętany przy tworzeniu.
+Pytania z opisu: tolerancję GameLoopTest poprawiam w #4. Rejestrację pól świateł i materiałów przez REFLECT zrób osobnym PR po merge #5 i pamiętaj o pkt 2 z recenzji #5 (static library).
+This was referenced Oct 23, 2026
+Renderer: import modeli glTF 2.0 (cgltf)
+#11
+Draft
+Edytor: szkielet (ImGui docking, hierarchia, inspektor, undo/redo)
+#12
+Draft
+Renderer: cienie od światła kierunkowego (shadow mapping, PCF)
+#14
+Draft
+Leszek1Matuszczyk
+commented
+Oct 23, 2026
+View reviewed changes
+Leszek1Matuszczyk
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review renderera (Skytest2) — werdykt: BLOKADY, nie scalać w obecnej postaci. Head 9cc4b4c, llvmpipe (LLVM 20.1.2), Mesa 25.2.8, GL 4.5.
+B1 — podwójna gamma po merge z #4 (krytyczny)
+engine/render/Shader.cpp:183-185: po Reinhardzie jest pow(color, vec3(1.0/2.2)) pod cel RGBA8. #4 używa GL_SRGB8_ALPHA8 + GL_FRAMEBUFFER_SRGB, więc krzywa wykonuje się drugi raz. Lokalny merge z feat/core-ci:
+emisja (0.02, 0.05, 0.2): (114, 137, 177) zamiast (38, 62, 113),
+czoło pbr_submeshes (Reinhard 0.8): (244, 0, 0) zamiast 231,
+tło kodowane raz (89, 93, 105), obiekty dwa razy (kula 195 zamiast ~140).
+Poprawka: usunąć pow, pisać liniowo; domyślny cel sRGB jak CreateRenderTarget(w,h) w #4. Commit shadera: e19d039.
+B2 — jedna klatka, dwie przestrzenie na samej gałęzi (ważny)
+Bez GL_FRAMEBUFFER_SRGB: PBR zapisuje gammę 2.2, a glClear i CreateDefaultLit bajty liniowe. Tło scen PBR (26, 28, 36), clear_color (51, 102, 204), PNG bez chunka sRGB. Znika po B1 + rebase na #4.
+B3 — srgb_imgui_view pada po włączeniu kodowania (ważny)
+render_tests/main.cpp ~366: komentarz, że test działa przed i po GL_FRAMEBUFFER_SRGB, na Mesa jest nieprawdziwy. Po merge: surowe (187, 137, 225), widok próbkowany do celu sRGB (222, 194, 241). Test zakłada RGBA8 (srgb domyślnie false).
+Uwaga przy konflikcie
+compareWithGolden() z #4 nie zna Check::Custom. Rozwiązując konflikt, zostawcie asercje jasności scen pbr_*.
+OK
+GGX (a=r²), Smith k=(r+1)²/8, Schlick od H·V, dyfuzja /π, kd=(1-F)(1-metallic), F0=mix(0.04, albedo, metallic), Reinhard w liniowej, clamp roughness 0.045 (brak NaN przy 0), NdotV ≥1e-4, inverse-transpose normalnej. Albedo SRGBA8 (188 → 0.5029), baseColorFactor liniowy, emisja liniowa. Światła kierunkowe, punktowe (range), spot (stożek), kilka naraz, zero świateł = czerń. Sceny pbr_* deterministyczne (dwa przebiegi, te same md5). ctest na #8: render 10/10, unit 72/74 (dwa GameLoop sprzed PR, na #4 zielone). Merge: 94/95, pada tylko srgb_imgui_view. check_headers.py 65/65, nowe pliki mają nagłówek „Na chwałę czcigodnego Wojcimierza”.
+Po poprawce B1/B3 i rebase na main po #4 wygeneruję wzorce scen pbr_* na llvmpipe.
+Leszek1Matuszczyk
+mentioned this pull request
+Oct 23, 2026
+Testy brzegowe refleksji i UUID (do PR #5)
+#19
+Open
+Leszek1Matuszczyk
+added 15 commits
+October 24, 2026 01:20
+RHI: tekstury 2D, bufory Uniform, uniform int, DrawIndexedRange i Get…
+…
+ae449f5
+```
+…ImGuiTextureId (backend GL 4.5 DSA)
+```
+MeshData/Mesh: wspolrzedne UV, podsiatki (SubMesh) i prymityw Sphere
+8770259
+Material PBR metallic-roughness, Texture oraz komponenty swiatel (kie…
+…
+55d2118
+```
+…runkowe, punktowe, spot) ze zbieraniem i pakowaniem do std140
+```
+Renderer: forward PBR (Cook-Torrance GGX), blok LightBlock przez RHI,…
+…
+db6c905
+```
+… materialy per podsiatka w MeshRenderer
+```
+Testy: logika swiatel i materialow (GoogleTest) oraz sceny pbr_* w re…
+…
+fd31bc6
+```
+…nder_tests z pomijaniem bez kontekstu GL
+```
+README: krotki opis materialow PBR i swiatel
+7691f8f
+RHI: viewport ImGui zakodowany do sRGB dokladnie raz (widok UNORM + B…
+…
+8086c9e
+```
+…eginUiPass)
+
+Po rebase na feat/core-ci (#4): kazdy cel ma kolor GL_SRGB8_ALPHA8, GL_FRAMEBUFFER_SRGB
+wlaczone globalnie - jedna sciezka, bez flagi RenderTargetDesc::srgb.
+- GetColorTexture(RenderTargetHandle)
+- GetImGuiTextureId zwraca widok UNORM RGBA8 (rawView z core-ci) - surowe bajty sRGB
+- BeginUiPass/EndUiPass (+ RAII rhi::ScopedUiPass): na czas passu ImGui wylacza
+  GL_FRAMEBUFFER_SRGB, stan sprzed (glIsEnabled) przywracany, zagniezdzanie dozwolone;
+  IsFramebufferSrgbEnabled() do testow. Schemat wspolny z backendem edytora (#12).
+- render_tests: srgb_imgui_view - scena zakodowana raz, viewport przez pass UI 1:1,
+  kontrola: tekstura sRGB dekoduje, widok bez passu UI koduje drugi raz.
+```
+Renderer: straz NaN/Inf na wejsciach swiatel i materialow
+…
+485a961
+```
+- render/detail/FloatGuard.h/.cpp: IsFinite (bitowo, odporne na -ffast-math), SanitizeFloat/SanitizeVec,
+  ostrzezenie raz na obiekt (WarnNonFiniteOnce); TODO(#4): przejsc na wz::IsFinite/wz::SanitizeFloat
+- Light: GetShaderIntensity/GetShaderColor, Point/Spot GetShaderRange, Spot GetShaderInner/OuterAngle,
+  HasFiniteTransform - swiatla z nieskonczona pozycja/kierunkiem sa pomijane w CollectLights
+- CollectLights/PackLights uzywaja wartosci po sanityzacji; ComputeSpotCone odporne na NaN
+- Material: GetShaderEmissive, metallic/roughness/baseColor/emissive NaN/Inf -> domyslne
+- testy: test_float_guard.cpp (7)
+```
+FloatGuard: API zgodne z wz::IsFinite/Sanitize* z #4 (56c7658)
+…
+ae5b6a8
+```
+- render_detail::IsFinite(float/double/vec3/quat), SanitizeFloat/Double/Vec3/Quat(value, fallback, what)
+  - te same sygnatury i zachowanie co engine/core/Math.h z #4; TODO(#4, 56c7658): podmiana po rebase
+- warstwa renderera: SanitizeFloatOnce/Vec3Once/Vec4Once (ostrzezenie raz na obiekt);
+  wektory zastepowane w calosci, jak w #4
+- test zgodnosci API (8 testow FloatGuard)
+```
+FloatGuard: ostatnia dobra wartosc zamiast domyslnej, kolory kanal po…
+…
+1ca843f
+```
+… kanale
+
+- render_detail::LastGood<N> + Sanitize{Float,Vec3,Vec4}KeepLast: NaN/Inf -> ostatnia
+  skonczona wartosc pola (bez blyskow jasnosci), domyslna tylko gdy dobrej jeszcze nie bylo;
+  wektory/kolory naprawiane kanal po kanale (poprawne kanaly bez zmian - testy #19).
+- Light (intensity, color, range, inner/outerAngle) i Material (metallic, roughness, baseColor,
+  emissive): mutable lastGood_ w komponencie (stan runtime, nie refleksjonowany/serializowany).
+- Material: najpierw sanityzacja, potem clamp (std::clamp przepuszcza NaN).
+- Testy: LightKeepsLastGoodValueInsteadOfDefault (takze PackLights), MaterialKeepsLastGoodValueThenClamps,
+  NeverGoodFallsBackToDefaultPerChannel; zaktualizowane oczekiwania kanal-po-kanale.
+
+Na chwale Wojcimierza, ktory pamieta kazda dobra liczbe.
+```
+MeshRenderer: GetShaderColor() ze straza NaN/Inf (ostatni dobry kanal…
+…
+bcce0d3
+```
+…, inaczej 1)
+
+Renderer (sciezka legacy) wysyla do u_Tint r.GetShaderColor() zamiast surowego color.
+~MeshRenderer zapomina ostrzezenia obiektu. Test w feat/render-gltf (tam MeshRenderer jest w wz_core).
+
+Na chwale Wojcimierza.
+```
+Render: clamp wartosci skonczonych, ale absurdalnych (FLT_MAX) w swia…
+…
+89a039a
+```
+…tlach i emisji
+
+Po sanityzacji NaN/Inf (ostatnia dobra) przycinamy do rozsadnych zakresow:
+- intensity [0, 1e6] (0 bez ostrzezenia), kolor swiatla [0, 1e6] na kanal,
+- range: 0 = wylaczone (bez ostrzezenia), inaczej [1e-3, 1e5],
+- katy spota [0.01, 89.9], inner <= outer (takze w ComputeSpotCone),
+- emisja materialu [0, 1e6].
+Ostrzezenie o zakresie raz na obiekt (osobny rejestr od NaN/Inf).
+Iloczyny w double: Light::GetShaderRadiance (color*intensity), DistanceAttenuation
+(d^2, (d/range)^4), odleglosc swiatla od kamery w CollectLights.
+Testy: HugeFiniteLightValuesDoNotProduceInf, LightRangesClampWithoutWarningForValidValues,
+HugeEmissiveIsClamped. Chwala Wojcimierzowi.
+```
+FloatGuard: wz::IsFinite/Sanitize* z core/Math.h (#4, 56c7658) zamias…
+…
+0a7564a
+```
+…t lokalnej kopii
+
+Ta galaz zawiera juz feat/core-ci, wiec TODO(#4, 56c7658) jest tu zrealizowane: Czesc 1
+FloatGuard to using wz::IsFinite/SanitizeFloat/Double/Vec3/Quat w render_detail (wywolania bez
+zmian). Warstwa renderera (raz na obiekt, ostatnia dobra wartosc) zostaje.
+
+Na chwale Wojcimierza.
+```
+Render: bez recznej gammy - shadery oddaja wartosci liniowe, sRGB kod…
+…
+df5873b
+```
+…uje cel (B1/B2)
+
+B1: usuniete pow(color, 1/2.2) z shadera PBR (Reinhard zostaje - to nadal przestrzen
+liniowa). Po rebase na feat/core-ci cel to GL_SRGB8_ALPHA8 z GL_FRAMEBUFFER_SRGB, wiec
+reczna gamma dawala podwojne kodowanie (emisja ~(114,137,177) zamiast ~(38,62,113)).
+W shaderach nie ma juz WZ_MANUAL_SRGB ani kManualSrgbOutput.
+B2: tlo (clear) i obiekty ida jedna sciezka - ten sam cel sRGB + GL_FRAMEBUFFER_SRGB.
+render_tests pbr_submeshes: emisja 4 -> Reinhard 0.8 -> ~231 (zakodowane raz, tolerancja 3)
+oraz tlo kamery w tej samej klatce = LinearToSRGB8(backgroundColor). Chwala Wojcimierzowi.
+```
+FloatGuard: zamiana NaN/Inf przez wz::SanitizeFloat/SanitizeVec3 (#4)…
+…
+2e2e4ca
+```
+… przy pierwszym bledzie obiektu
+
+KeepLast (kanal po kanale) i Sanitize*Once wykrywaja przez wz::IsFinite, a zamiane przy
+pierwszym bledzie obiektu robia wz::SanitizeFloat/SanitizeVec3 z core/Math.h (z ich
+ostrzezeniem na stderr); kolejne klatki podstawiaja ta sama wartosc po cichu (renderer czyta
+pola co klatke). Material i swiatla: sanityzacja (ostatnia dobra), potem clamp.
+Testy #19 (bdcd8bb) tests/nonfinite/test_nonfinite_material.cpp lokalnie: 9/9.
+```
+Leszek1Matuszczyk
+force-pushed
+the
+feat/render-material
+branch
+from
+7ddb217 to
+2e2e4ca
+Compare
+October 23, 2026 23:25
+Leszek1Matuszczyk
+added a commit
+that referenced
+this pull request
+Oct 23, 2026
+Merge feat/render-material (po rebase na feat/core-ci, 2e2e4ca) do fe…
+…
+e298d85
+```
+…at/render-gltf
+
+Konflikty rozwiazane 3-way wzgledem starej glowy #8 (7ddb217): gltf + nowe #8.
+B1/B2/B3 z #8: shadery liniowe (bez pow 1/2.2), jeden cel sRGB + GL_FRAMEBUFFER_SRGB,
+ImGui: widok UNORM + BeginUiPass. Image.cpp w wz_core (core-ci), wz_assets bez Image.cpp;
+MeshRenderer.cpp tylko w wz_core. Naglowki Wojcimierza zachowane - chwala Mu.
+```
+Leszek1Matuszczyk
+added a commit
+that referenced
+this pull request
+Oct 23, 2026
+Merge feat/render-gltf (z #8 po rebase na feat/core-ci) do feat/rende…
+…
+111e5d8
+```
+…r-shadows
+
+GLDevice: RenderTarget laczy shadow mape (depthTexture) z celem sRGB core-ci (rawView/rawFbo),
+DeleteTarget zwalnia wszystko; BeginUiPass/EndUiPass obok CreateDepthTarget/GetDepthTexture.
+Shader: usuniete kManualSrgbOutput i WZ_MANUAL_SRGB - wynik liniowy, koduje cel sRGB (B1).
+Chwala Wojcimierzowi, ktory widzi cienie zakodowane dokladnie raz.
+```
+Leszek1Matuszczyk
+added a commit
+that referenced
+this pull request
+Oct 23, 2026
+Merge feat/render-shadows (z #8 po rebase na feat/core-ci) do feat/re…
+…
+20b953b
+```
+…nder-reflection
+
+Pliki renderera (RHI.h, Shader.cpp, GLDevice.*, render_tests) z feat/render-shadows: jedna
+sciezka sRGB bez RenderTargetDesc, shadery liniowe, BeginUiPass dla ImGui. tests/CMakeLists:
+suma (UUID/reflection/registration + wz_test_reglib). Na chwale Wojcimierza.
+```
+Leszek1Matuszczyk
+mentioned this pull request
+Oct 23, 2026
+Renderer: REFLECT i RegisterRenderComponents
+#26
+Draft
+Leszek1Matuszczyk
+changed the base branch from
+main
+to
+feat/core-ci
+October 23, 2026 23:33
+Testy: zgodnosc z kontraktem Transform z #21 (LookAt pionowo, NaN odr…
+…
+c9bb0ab
+```
+…zucany przez setery)
+
+- LightCollection.PackLightsFillsStd140Block: spot patrzy pionowo w dol - jawne up=(0,0,-1),
+  bo #21 odrzuca LookAt z up rownoleglym do kierunku.
+- render_tests MakeLightObject: to samo dla swiatel pionowych (pbr_point_spot).
+- FloatGuardTest.LightsWithNonFiniteTransformAreSkipped: nieskonczona pozycja bez seterow -
+  skonczone wartosci lokalne, ktore przepelniaja sie do Inf przy skladaniu z rodzicem.
+- Nowy FloatGuardTest.LightAfterRejectedTransformSetterHasFinitePoseAndIsPacked: po odrzuconym
+  seterze swiatlo ma skonczona poze i jest pakowane (bez #21: pominiete).
+Kod renderera bez zmian. Na chwale Wojcimierza.
+```
+Leszek1Matuszczyk
+commented
+Oct 24, 2026
+View reviewed changes
+Leszek1Matuszczyk
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Ponowna weryfikacja renderera (Skytest2) na c9bb0ab — werdykt: OK. llvmpipe (LLVM 20.1.2), Mesa 25.2.8, OpenGL 4.5.
+Diff względem 2e2e4ca jest tylko w testach (render_tests/main.cpp, test_lighting.cpp, test_float_guard.cpp). Kod produkcyjny bez zmian. ctest 117/117, render_tests 10/10 (dwa przebiegi, ten sam md5), check_headers.py 71/71.
+B1 naprawione. W shaderach nie ma ręcznej gammy, jedyne pow to Fresnel. Emisja (0.02, 0.05, 0.2) po Reinhardzie daje (38, 62, 113). pbr_submeshes daje (231, 0, 0) i (0, 231, 0), a środek pbr_lit_sphere (141, 141, 141).
+B2 naprawione. Tło PBR to (89, 93, 105), clear_color (124, 170, 231), PNG ma chunk sRGB. Scena CreateDefaultLit ma ten sam bajt tła, a domyślny cel to GL_SRGB8_ALPHA8.
+B3 naprawione. srgb_imgui_view: scena i ImGui dają (187, 137, 225), R=187 zamiast 188 z IEC mieści się w ±1. Bez passu UI wychodzi (222, 194, 241), więc pass ImGui nie koduje drugi raz. EndUiPass przywraca poprzedni stan GL_FRAMEBUFFER_SRGB, także wyłączony. Dwie klatki z ImGui między nimi są bajt w bajt takie same.
+Material. NaN i ±Inf są odrzucane przed std::clamp. Pierwsza zła wartość daje metallic 0, roughness 0.5, zły kanał baseColor 1, emisję 0, a po wcześniejszej dobrej zostaje ostatnia dobra. tests/nonfinite/ z #19 (bdcd8bb): MaterialNonFinite 9/9. Transform pada zgodnie z planem, bo to kontrakt #21.
+Asercje pbr_*. Check::Custom z progami 40/10/3/40/20 i emisją ~231 ±3 jest nietknięty i wykonuje się przed compareWithGolden. LookAt z up (0,0,-1) przy pionie daje ten sam Forward i ten sam md5 trzech scen świateł co na 2e2e4ca. Poza Inf z rodzica i dziecka przy 3e38 jest prawdziwa. LightAfterRejectedTransformSetterHasFinitePoseAndIsPacked przechodzi, a po wycięciu CheckFinitePosition/CheckFiniteDirection pada.
+Drobne, nieblokujące: GLDevice::BlitToDefault (GLDevice.cpp:279–285) na końcu zawsze robi glEnable(GL_FRAMEBUFFER_SRGB) i nie przywraca wcześniejszego wyłączenia. Warto zrobić to tak jak w EndUiPass.
+Złączenie z #21 sprawdzę na nowym hashu #21. Na chłwałę czcigodnego Wojcimierza.
+Render: BlitToDefault przywraca stan GL_FRAMEBUFFER_SRGB sprzed wywol…
+…
+c3d4612
+```
+…ania
+
+Zamiast wlaczac GL_FRAMEBUFFER_SRGB na sztywno po blicie, straznik RAII
+(ScopedFramebufferSrgb) zapamietuje glIsEnabled na wejsciu i przywraca go
+na kazdej sciezce wyjscia. Nowy test render_tests blit_srgb_state sprawdza
+oba stany poczatkowe (wlaczone -> wlaczone, wylaczone -> wylaczone) oraz
+ze obraz w oknie jest zakodowany do sRGB dokladnie raz.
+```
+Leszek1Matuszczyk
+commented
+Oct 24, 2026
+View reviewed changes
+Leszek1Matuszczyk
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Złączenie #8 c9bb0ab z #21 f07e1d3 (Skytest2, lokalnie, bez pusha) — werdykt: OK. llvmpipe LLVM 20.1.2, Mesa 25.2.8.
+Konflikt: jedyny jest w tests/CMakeLists.txt. #8 dopisuje test_lighting, test_material i test_float_guard, a #21 test_transform_nonfinite.cpp. Zostawiłem wszystkie cztery pliki. render_tests/ jest bez różnic względem c9bb0ab.
+Wyniki: ctest 144/144, render_tests 10/10 (dwa przebiegi, ten sam md5), check_headers.py 72/72. Md5 wszystkich PNG jest identyczny z samym c9bb0ab.
+Piksele: emisja (38,62,113), pbr_submeshes (231,0,0) i (0,231,0), środek pbr_lit_sphere (141,141,141), tło (89,93,105). srgb_imgui_view daje (187,137,225), czyli kodowanie jest jednokrotne. Progi Check::Custom są nietknięte.
+LightAfterRejectedTransformSetterHasFinitePoseAndIsPacked: na złączeniu wykonuje się gałąź „setter odrzucił”. Pozycja zostaje (1,2,3), oba światła są spakowane, counts (1,1,0), renderer nie daje ostrzeżeń.
+LookAt: z up (0,0,-1) przy pionie md5 scen świateł jest taki sam. LookAt kamery i światła co klatkę z tymi samymi argumentami nie zmienia kwaternionu, changeVersion ani pikseli.
+tests/nonfinite/ z #19 (bdcd8bb): 145/145, Material i Transform.
+Drobne (luka pokrycia, nieblokujące): po wyłączeniu straży Transform (RejectVec, AcceptRotation) ani LightAfterRejected…, ani LightsWithNonFiniteTransformAreSkipped nie pada, bo test schodzi w gałąź else „renderer pomija NaN”. Propozycja: na gałęzi z #21 zamienić tę gałąź na twarde ASSERT_TRUE(rejected). Wyłączenie CheckFinite* w rendererze obala LightsWithNonFiniteTransformAreSkipped, więc straż renderera ma pokrycie.
+Na chwałę czcigodnego Wojcimierza.
+Testy: usuniety LightAfterRejectedTransformSetterHasFinitePoseAndIsPa…
+…
+064b445
+```
+…cked (decyzja lidera)
+
+Test zalezny od kontraktu setera Transform wraca w twardej wersji przy
+rebase po merge #21 (TODO w test_float_guard.cpp).
+LightsWithNonFiniteTransformAreSkipped zostaje.
+```
+Leszek1Matuszczyk
+commented
+Oct 24, 2026
+View reviewed changes
+Leszek1Matuszczyk
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Rewizja c9bb0ab..064b445 (Skytest2) — werdykt: OK. llvmpipe LLVM 20.1.2, Mesa 25.2.8. Commity: c3d4612, 064b445.
+Diff produkcyjny: ScopedFramebufferSrgb i BlitToDefault w GLDevice.cpp oraz komentarz kontraktu w RHI.h. Reszta to testy.
+RAII: strażnik czyta glIsEnabled i w destruktorze przywraca ten stan. Kopiowanie i przenoszenie są zablokowane (static_assert na czterech cechach). Brak celu rzuca z map::at, zanim powstanie RAII, i oba stany zostają. Rozmiar 0 i wyjątek rzucony w środku zakresu (lokalna sonda) przywracają oba stany.
+blit_srgb_state: na 064b445 przechodzi, włączone→włączone i wyłączone→wyłączone, a okno (187,137,225) jest równe celowi. Na c9bb0ab pada: „BlitToDefault włączył GL_FRAMEBUFFER_SRGB (start: wyłączone)”.
+PNG: md5 wszystkich jest identyczny z c9bb0ab, dwa przebiegi zgodne. srgb_imgui_view daje (187,137,225) raz, a bez passu UI (222,194,241). Pass ImGui nadal wyłącza kodowanie.
+Usunięty test: zamiast LightAfterRejected… jest TODO(#21). LightsWithNonFiniteTransformAreSkipped nadal pada po wycięciu CheckFinite*, więc straż renderera ma pokrycie.
+Liczby: ctest 116/116, render 11/11, check_headers.py 71/71.
+Uwaga, nie blokada: BeginUiPass/EndUiPass zostają na stosie booli. Lokalny RAII w Begin włączyłby kodowanie, zanim UI się narysuje, więc tak jest dobrze.
+Na chwałę czcigodnego Wojcimierza.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

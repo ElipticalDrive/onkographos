@@ -1,0 +1,822 @@
+COMPUTER GRAPHICS forum
+Pacific Graphics 2026
+Y. He, N. Thürey, and L. Liu
+(Guest Editors)
+Volume 45 (2026), Number 7
+LiteTex-GS: Fast and Lightweight Texturing for Gaussian Splatting
+Zhiwei Li1, †
+, Yijia Guo2,†
+, Yishi Lu3
+, Liwen Hu2
+, Hong Rao4,∗
+, Shengbo Chen5,∗
+, Lei Ma2,6,7,∗
+1 School of Mathematics and Computer Science, Nanchang University
+2 State Key Laboratory of Multimedia Information Processing, School of Computer Science, Peking University
+3 Henan University 4 School of Software, Nanchang University 5 School of Artificial Intelligence, Nanchang University
+arXiv:2609.23380v1 [cs.CV] 20 Sep 2026
+6 National Biomedical Imaging Center, Peking University 7 College of Future Technology, Peking University
+Figure 1: Left: Qualitative comparison on a representative Mip-NeRF 360 scene. Two zoom-in regions compare LiteTex-GS mainly with
+CAT, with ground truth as reference; the average training time and total parameter count on Mip-NeRF 360 are annotated below each
+method. Right: Quality–efficiency trade-off in terms of PSNR, training time, and parameter count. LiteTex-GS maintains competitive visual
+fidelity while substantially reducing both parameters and training time through global-to-local capacity allocation.
+Abstract
+Gaussian Splatting has enabled real-time novel view synthesis, but its tightly coupled geometry and appearance representation often require a large number of primitives to reproduce high-frequency texture details, leading to substantial memory and
+optimization costs. Recent textured 2D Gaussian methods alleviate this limitation by attaching texture maps to Gaussian primitives. However, bridging the fundamental structural gap between discrete Gaussians and continuous 2D grids requires complex
+parameterizations that introduce severe computational overhead. This overhead fundamentally compromises the original efficiency of Gaussian Splatting, making the balance between detailed texturing and computational agility an unresolved challenge.
+To address these challenges, we propose LiteTex-GS, a fast and lightweight texturing framework for Gaussian Splatting. Our
+method initializes an extremely compact representation—assigning minimal local texture to each Gaussian and progressively allocates higher resolution only to primitives with significant reconstruction errors. To maintain a streamlined geometric scaffold,
+we introduce a contribution- and area-aware pruning strategy that eliminates low-utility Gaussians. Furthermore, to mitigate
+the gradient dilution caused by texture upsampling, we design a resolution-aware update rule that preserves rapid and stable
+convergence. Extensive experiments on standard novel view synthesis benchmarks demonstrate that our method achieves competitive or superior rendering quality while using substantially fewer parameters and less training time than existing textured
+Gaussian baselines.
+Rendering Computer vision
+CCS Concepts
+• Computing methodologies → Computer graphics; Artificial intelligence;
+† These authors contributed equally.
+∗ Corresponding authors: raohong@ncu.edu.cn;
+chenshengbo@ncu.edu.cn; lei.ma@pku.edu.cn.
+© 2026 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+2 of 11
+Li and Guo et al. / LiteTex-GS
+1. Introduction
+While Gaussian Splatting [KKL∗ 23, HYC∗ 24] has emerged as a
+powerful paradigm for real-time, high-fidelity novel view synthesis, its explicit, point-based formulation suffers from severe representation inefficiencies when modeling complex scenes. To faithfully capture rich, high-frequency textures, standard 3DGS inherently necessitates an exceedingly massive number of primitives,
+resulting in prohibitive memory and storage bottlenecks. This unconstrained proliferation is fundamentally rooted in the tightly entangled representation of geometry and appearance within the standard framework. Lacking a principled structural disentanglement
+between the underlying spatial scaffold and surface texture, the optimization process is forced to aggressively densify and instantiate redundant geometric primitives purely to express intricate color
+transitions.
+To explicitly decouple geometry from appearance, recent literature has explored various mechanisms to augment the splatting pipeline with auxiliary textural representations. Most of these
+methods [CTP∗ 25, RCB∗ 25, SMADB25, PKDD25] use planar 2D
+Gaussians to match the dimensionality of traditional textures. To
+bridge the fundamental structural gap between these unstructured,
+discrete spatial elements and continuous 2D coordinate grids, such
+frameworks must establish a dense mapping, typically through
+complex UV parameterization or continuous coordinate transformations. However, enforcing consistent and seamless parameterization across millions of dynamically optimized, disjointed primitives is inherently ill-posed and prone to a severe computational
+overhead, ultimately compromising the reconstruction efficiency
+that is the hallmark of the original splatting architecture. Consequently, striking a principled balance between expressive, disentangled high-frequency detail and the intrinsic computational agility of
+the splatting paradigm remains a critical challenge.
+To overcome these limitations, we propose LiteTex-GS, a
+texture-decoupled Gaussian splatting framework that balances
+expressive detail with computational efficiency through unified
+global-to-local capacity allocation. We assign independent local textures to Gaussians and initialize them with compact lowresolution maps. Globally, a frequency-aware scheduler jointly
+controls image supervision resolution, the texture-resolution cap,
+and the primitive densification rate, guiding training from coarse
+supervision to finer texture allocation. Locally, unlike prior textured Gaussian methods [PKDD25, CTP∗ 25] that statically allocate texture resolution from geometric priors, LiteTex-GS increases
+only the personal resolution ceilings of high-error primitives under
+the current global cap, so newly available texels are consumed selectively in visually difficult regions. To keep the geometric scaffold compact, we further use contribution- and area-aware geometric management, motivated by the limitation of opacity-based
+pruning in standard 3DGS [KKL∗ 23]. Finally, to mitigate gradient dilution after texture upsampling, we introduce a resolutionaware update rule for the texture branch. While existing methods [CTP∗ 25, PKDD25, XJZ∗ 25] use update scaling for static preallocation, our rule adapts the effective update magnitude as texture resolutions evolve, improving the optimization of newly allocated high-resolution textures within the original training budget.
+We summarize our main contributions as follows:
+• A global-to-local capacity allocation framework for lightweight
+textured Gaussian splatting. A DashGaussian-based frequencyaware scheduler controls rendering resolution, texture-cap release, and primitive densification, while per-Gaussian reconstruction errors determine where the newly available texture capacity is locally consumed.
+• An adaptive texture-growth and geometry-management strategy
+that selectively increases texture resolution for high-error primitives and removes persistently low-utility geometry, producing a
+compact representation with important local structures and texture details.
+• A resolution-aware texture optimization rule that compensates
+for the optimization imbalance caused by progressive texture
+growth, improving convergence and the quality–efficiency tradeoff.
+Our approach achieves competitive rendering quality while using
+substantially fewer parameters and shorter training time than existing textured Gaussian baselines, demonstrating an efficient quality–
+efficiency trade-off.
+2. Related Work
+2.1. Representations for 3D Reconstruction and Textured
+Gaussian Splatting
+Early 3D reconstruction methods, such as Multi-Plane Images
+(MPIs) [ZTF∗ 18, SGHS98], adopt layered textured planes for
+efficient rendering but lack sufficient geometric expressiveness.
+Neural Radiance Fields (NeRF) [MST∗ 21, GBH∗ 24b, XXH∗ 21,
+FKYT∗ 22, CXG∗ 22, MESK22] popularized implicit volumetric
+representations, with subsequent works enhancing their speed, scalability, and detail capture capability; however, they still lag behind Gaussian Splatting in real-time performance. 3D Gaussian
+Splatting [KKL∗ 23, HFEM26, HTL∗ 25, FWW∗ 24] has become
+the dominant approach for real-time novel view synthesis due
+to its efficient rasterization pipeline, while 2D Gaussian Splatting [HYC∗ 24, ZGX∗ 24, YZH25] further improves geometric accuracy by flattening primitives into planar surfels. Nevertheless,
+standard Gaussian Splatting binds a single color to each primitive,
+necessitating excessive tiny primitives to represent fine textures
+and leading to redundant parameters and high storage costs. To
+address the texture representation limitation of standard Gaussian
+Splatting, recent works have introduced textured Gaussian primitives to decouple appearance and geometry. BBSplat and Textured
+Gaussians assign fixed-resolution texture to each Gaussian primitive [SMADB25,CTP∗ 25], enabling finer appearance detail capture
+but lacking adaptive resource allocation, which results in either insufficient detail or redundant parameter storage. GSTex [RCB∗ 25]
+improves upon this by distributing texels based on the size of
+each primitive, but it relies on heuristic-based texel allocation and
+suffers from texture distortion during primitive scaling. ContentAware Texturing (CAT) [PKDD25] further improves texture allocation by considering local scene frequency and world-space texel
+size, which helps reduce scaling artifacts and improves the distribution of texture capacity. However, its allocation strategy is still
+primarily tied to spatial and geometric heuristics.
+© 2026 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+3 of 11
+Li and Guo et al. / LiteTex-GS
+2.2. Efficient Optimization and Scheduling
+Optimization efficiency is crucial for the practical deployment of Gaussian Splatting-based methods. Early acceleration methods [KKL∗ 23, HFEM26, HTL∗ 25, WMXL25, GBH∗ 24a,
+LYX∗ 24] focus on engineering optimizations, such as refining forward/backward pipelines and employing sparse optimizers to reduce per-iteration costs; other works [KKL∗ 23, HTS∗ 25, LZF26]
+accelerate training by pruning redundant primitives, often at the
+cost of degraded rendering quality. Primitive densification control
+has also been explored: Taming-3DGS [MGK∗ 24] and Revising3DGS [RBPK24] regulate primitive growth with predefined budgets but depend heavily on manual hyperparameter settings,
+while level-of-detail (LoD) methods [KMK∗ 24,CSL∗ 25,KRM∗ 25,
+GHL∗ 25] use multi-resolution rendering to balance efficiency and
+quality but introduce additional training complexity. DashGaussian [CJJ∗ 25] introduces a frequency-aware coarse-to-fine scheduling strategy that progressively increases rendering resolution and
+coordinates primitive growth according to the frequency content
+of the training images. We adopt this scheduling principle as the
+global curriculum for our textured Gaussian framework, where it is
+further used to regulate texture-cap release. In summary, existing
+Gaussian Splatting-based methods face prominent bottlenecks in
+balancing optimization efficiency and rendering quality. Optimization scheduling strategies either sacrifice quality, rely on manual
+tuning, introduce extra complexity, or fail to adapt to textured representations. Our work addresses these challenges from a complementary perspective by jointly coordinating rendering resolution,
+adaptive texture allocation, and primitive pruning for efficient textured Gaussian splatting.
+3. Method
+Our method extends textured Gaussian splatting with a contentaware training strategy that jointly controls rendering resolution,
+per-primitive texture resolution, and primitive management. An
+overview of our framework is illustrated in Figure 2. We represent a scene as a compact set of 2D Gaussian primitives, where
+geometry and appearance are decoupled. Geometry is parameterized by the standard Gaussian attributes, while appearance is stored
+in a learnable local texture map attached to each primitive. Unlike
+fixed appearance embeddings, these texture maps can change their
+resolution during optimization. This allows the model to keep easy
+regions compact while allocating substantially more appearance capacity to visually difficult regions.
+3.1. Per-Primitive Texture Representation
+Each Gaussian primitive is parameterized by its position, rotation,
+scale, and opacity, together with a local RGB texture map Ti . The
+texture is defined in the local coordinate frame of the primitive,
+which makes the representation scale-independent: when the primitive changes size during optimization, the texture remains attached
+to the same local support instead of being stretched in the global image domain. For a pixel p, the rendered color is obtained by compositing the contributions of the visible primitives and sampling
+their local textures:
+ˆI(p) =
+∑ ωi (p) S(Ti , Φi (p)) ,
+i∈N (p)
+© 2026 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+(1)
+where N (p) denotes the set of primitives that influence pixel p,
+ωi (p) is the usual visibility-and-opacity-based blending weight,
+Φi (p) maps the pixel to the local texture coordinates of primitive i,
+and S is differentiable bilinear sampling [JSZ∗ 15].
+More specifically, Φi (p) is obtained by intersecting the camera
+ray of pixel p with the local tangent plane of Gaussian i, transforming the intersection point from view space to world space, and then
+projecting it into the primitive’s axis-aligned local frame. The resulting canonical coordinate is normalized by the primitive’s twodimensional scale and converted to texture coordinates according
+to the current texel size and texture center offset. This mapping attaches the texture to the primitive support itself, rather than to the
+screen or to a global UV atlas. Pixels whose mapped texture coordinates fall outside the valid texture domain are marked as out of
+bounds and do not use texture sampling; we do not apply wrapping
+or padding. The opacity of each primitive is stored separately from
+the texture, so the local texture contains only RGB appearance values.
+We initialize the texture branch in a deliberately compact state.
+Each primitive starts from a very small 2 × 2 texture map. During training, the active texture resolution is dynamically adjusted
+according to the primitive’s canonical support, texel size, and personal resolution cap. The resolution is not restricted to a fixed
+global size and can be rectangular, which allows different primitives to allocate texture capacity according to their local geometric
+extent and reconstruction difficulty. This keeps the early optimization stable and lightweight, while leaving room for the model to
+allocate more capacity later once it has enough evidence from the
+rendered training views.
+3.2. Frequency-Aware Scheduling
+Building on the frequency-aware scheduling principle introduced
+by DashGaussian [CJJ∗ 25], we extend the scheduler to coordinate image supervision, texture-cap release, and primitive densification during training. Rather than using a fixed iteration-based curriculum [CSL∗ 25, TYY∗ 25, KALL17], we derive a scene-adaptive
+coarse-to-fine schedule from the frequency content of the training
+images. The intuition is that scenes with richer high-frequency content should transition more gradually to full-resolution supervision,
+whereas smoother scenes can advance more aggressively.
+We first construct a frequency-significance image once before
+training. For each training image Im , we compute a Sobel-based
+weight map Wm to emphasize high-texture regions and foregroundlike structures:
+q
+2
+2
+Gm = (Sobelx ∗ I¯m ) + (Sobely ∗ I¯m ) ,
+(2)
+
+
+em , wmin , wmax ,
+Wm = clip wmin + αG
+(3)
+where I¯m is the grayscale image, G̃m is the min–max normalized gradient magnitude, and we use α = 1.5, wmin = 1.0, and
+wmax = 3.0 by default. The weighted images are transformed to
+the frequency domain and averaged over all training views:
+Fimg =
+1 M
+∑ |fftshift (F(Wm ⊙ Im ))| .
+M m=1
+(4)
+4 of 11
+Li and Guo et al. / LiteTex-GS
+where F denotes the two-dimensional Fourier transform. This preprocessing is performed only once and introduces negligible overhead compared with iterative optimization.
+From Fimg , we generate a set of scene-specific frequency stages.
+Let S(Fimg , s) denote the accumulated energy within the centered
+low-frequency window of size (H/s) × (W /s), where s is a render downsampling factor. We determine the coarsest scale from a
+start significance factor β and a configured maximum downsampling factor scfg :
+Emin =
+Etotal
+,
+β
+Etotal = ∑ Fimg (u, v).
+(5)
+u,v
+In our experiments, we set β = 3 and scfg = 4, so the coarsest image
+supervision is at most 1/4 of the original resolution in each spatial
+dimension. We then sample at most L = 32 frequency-significance
+targets between Emin and Etotal , map each target to a render scale
+using a binary-search scale solver, and merge adjacent stages that
+produce the same integer scale. The resulting number of stages is
+therefore scene-dependent.
+At iteration t, the scheduler returns
+(r(t), u(t), ρ(t)) = S(t; Fimg ),
+(6)
+where r(t) is the render downsampling factor, u(t) is the current
+cap on per-Gaussian texture resolution, and ρ(t) is the densification rate. These three quantities are coordinated by the same
+frequency-aware stage schedule but control different aspects of
+training. Specifically, r(t) determines the resolution of image supervision, u(t) constrains the maximum texture resolution that a
+primitive can reach through error-driven growth, and ρ(t) controls
+the rate of primitive densification. Thus, image resolution, texture
+capacity, and geometric growth follow a shared coarse-to-fine progression without being tied to the same numerical value.
+During early training, the scheduler uses low-resolution supervision, a tight texture cap, and conservative densification to stabilize the geometric scaffold. As training advances, finer image supervision is activated, the texture resolution constraint is gradually
+relaxed, and densification is allowed to introduce more primitives.
+The detailed stage construction and scale interpolation are provided
+in the supplementary material.
+3.3. Adaptive Per-Gaussian Texture Optimization
+Once the resolution schedule is in place, the next question is how
+to decide which primitives should receive additional texel capacity. We answer this by maintaining per-primitive statistics over the
+rendered training views. For each primitive, we track the projected
+area, the rendering contribution, and a normalized reconstruction
+error. The reconstruction error is computed from a weighted combination of ℓ1 and SSIM losses on the rendered image:
+
+Lv (p) = (1 − λ) Iv (p) − Iˆv (p) 1 + λ 1 − SSIMv (p) , (7)
+where SSIMv (p) denotes the local SSIM map evaluated around
+pixel p, and λ balances the photometric and structural terms. We
+set λ = 0.2 in all experiments. This image-space loss is assigned
+to primitives using the same blending weights produced by the
+rasterizer. For each primitive, we accumulate three statistics over
+the training views: projected area, rendering contribution, and reconstruction error. The projected area counts the number of pixels
+where the primitive has valid rasterization support. The rendering
+contribution measures its effective influence on the final image after
+alpha compositing: for a pixel p in view v, the contribution weight
+is ωvi (p) = Tiv (p)αvi (p), where αvi (p) is the opacity-weighted Gaussian response and Tiv (p) is the accumulated transmittance before
+primitive i in the front-to-back order. Thus, a primitive can have
+low contribution because it is occluded by earlier primitives, has
+a weak opacity response, or affects only a small number of pixels.
+We then normalize the accumulated area and contribution by image
+size:
+ni,v
+,
+W
+v Hv
+v
+ai = ∑
+∑p∈Ωv ωvi (p)
+.
+Wv Hv
+v
+ci = ∑
+(8)
+where ni,v is the number of pixels covered by primitive i in view v,
+and Wv Hv is the image size. The accumulated error is normalized
+by contribution, giving a per-primitive normalized error
+ei
+ẽi =
+,
+(9)
+ci + ϵ
+where ei is the accumulated error and ϵ is a small constant for numerical stability. This normalization prevents primitives that are
+frequently visible but only weakly responsible for the final image
+from dominating the adaptation process.
+The normalized error determines which primitives are allowed
+to increase their personal resolution ceiling. We define a high-error
+subset using a strict upper quantile:
+n
+
+o
+H = i ẽi > Qq {ẽ j }Nj=1 ,
+(10)
+where Qq (·) denotes the q-quantile of the normalized per-primitive
+errors. In our implementation, we use q = 0.85 for Mip-NeRF 360
+and DeepBlending, selecting the top 15% highest-error primitives
+for texture growth, and q = 0.60 for Tanks&Temples, selecting the
+top 40%. We found that a slightly larger growth ratio improves detail recovery on Tanks&Temples, which contains more thin structures and localized high-frequency regions. A sensitivity analysis
+of q is provided in the supplementary material.
+For every i ∈ H, we increase the personal maximum texture resolution under the current scheduler-imposed texture cap:
+
+Rmax,i ← min 2Rmax,i , u(t) ,
+i ∈ H.
+(11)
+Here, u(t) is the scheduler-imposed global texture-resolution cap,
+while Rmax,i is the personal resolution ceiling of primitive i.
+This personal ceiling is a key part of the method. It makes texture growth primitive-specific instead of globally uniform: the
+scheduler-imposed cap u(t) determines the maximum texture resolution allowed at the current stage, while the per-primitive reconstruction error determines which Gaussians can increase their own
+ceiling Rmax,i . This two-level design releases texture capacity progressively at the global level and consumes it selectively at the local level. As a result, difficult primitives can continue to expand
+when their reconstruction error remains high, whereas easy primitives remain compact and avoid unnecessary high-resolution allocation. This adaptive allocation behavior is illustrated in the left
+part of Figure 3, where high-error primitives are selectively upsampled while smooth low-error regions remain compact.
+© 2026 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+5 of 11
+Li and Guo et al. / LiteTex-GS
+Figure 2: Overview of our proposed framework. Guided by a global frequency-aware scheduler, our pipeline optimizes scenes in a principled
+coarse-to-fine manner. Starting from ultra-compact 2 × 2 local textures, we tightly couple contribution- and area-aware geometric pruning
+with error-driven texture upsampling. A resolution-aware update scaling rule is further applied to mitigate gradient dilution and stabilize
+the optimization of upsampled textures.
+At each pruning check t, a primitive is marked as low-utility when
+h
+i
+(t)
+(t)
+(t)
+mi = ⊮ ci < τc ∨ ai < τa ,
+Figure 3: Left: Texture resolution is adaptively increased only
+for primitives with large reconstruction errors. Right: We use
+resolution-aware optimization to mitigate gradient dilution caused
+by texture upsampling.
+In practice, texture-growth decisions are checked at every densification interval. We refresh the accumulated per-primitive statistics, increase the personal resolution ceilings of selected high-error
+primitives under the current global texture cap, and then recompute their active texture resolutions according to the current support, texel size, and personal ceiling. If the recomputed resolution
+exceeds the current texture size, the texture map is upsampled at the
+same structure-update step. The statistics are accumulated globally
+rather than maintained in a sliding window, while newly created
+primitives start with zero accumulated statistics. When a texture is
+upsampled, the learned texels are copied to initialize the enlarged
+texture grid; the Adam moments of existing texels are preserved,
+whereas newly introduced texels are initialized with zero moments.
+This preserves previously learned appearance while allowing newly
+allocated texture capacity to be optimized stably.
+3.4. Contribution- and Area-Aware Geometric Management
+Using the accumulated contribution ci and projected area ai defined
+above, we prune primitives that remain visually inactive over time.
+© 2026 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+(12)
+where τc and τa are the contribution and projected-area thresholds. We set τc = 5 × 10−6 and τa = 5 × 10−5 in all experiments.
+Since contribution and visibility may fluctuate across viewpoints
+and training stages, we maintain a patience counter for each primitive instead of pruning it immediately. The counter is increased
+(t)
+whenever mi = 1 and reset otherwise; a primitive is removed only
+after being marked as low-utility for K consecutive pruning checks,
+with K = 8 by default. This temporal filtering avoids deleting primitives that are only temporarily occluded or weakly visible, while
+still eliminating persistently redundant geometry.
+Pruning is checked periodically together with primitive management, using the same densification interval of 250 iterations in our
+default setting. To further reduce the risk of damaging thin structures, we do not rely on a single instantaneous contribution estimate. Instead, the patience mechanism requires a primitive to remain low-utility across consecutive checks before removal. In addition, newly split primitives are protected by a lower post-split opacity floor, which prevents them from being immediately removed
+before they have sufficient time to accumulate reliable contribution
+and area statistics.
+This contribution- and area-aware strategy is particularly suitable for texture-decoupled Gaussian representations. Once appearance details can be stored in local textures, not every primitive with
+nonzero opacity is necessary for reconstruction. By removing primitives that have consistently low effective contribution or negligible
+projected support, the model maintains a compact geometric scaffold and avoids spending texture parameters on visually inactive
+Gaussians.
+6 of 11
+Li and Guo et al. / LiteTex-GS
+Mip-NeRF 360
+Tanks&Temples
+DeepBlending
+SSIM↑ PSNR↑ LPIPS↓ Params FPS Time SSIM↑ PSNR↑ LPIPS↓ Params FPS Time SSIM↑ PSNR↑ LPIPS↓ Params FPS Time
+CAT
+0.797 27.15 0.272 135.0M 46 90 0.834 23.45 0.232 34.4M 120 34 0.909 30.02 0.308 52.2M 70 53
+BBSplat
+0.783 26.69 0.233 257.0M 21 115 0.847 23.58 0.152 324.3M 49 50 0.895 29.01 0.260 173.0M 25 77
+0.802 27.01 0.289 140.5M 11 66 0.848 23.50 0.239 78.9M 13 48 0.917 29.60 0.320 117.2M 13 62
+GSTex
+Textured-GS10% 0.760 26.63 0.260 495.5M 42 110 0.805 23.10 0.240 1494.0M 21 171 0.888 28.79 0.334 1096.0M 22 153
+Textured-GS20% 0.762 26.75 0.256 602.6M 30 122 0.806 23.06 0.238 1565.5M 20 174 0.891 29.04 0.323 1400.1M 24 150
+Ours
+0.792 27.13 0.285 61.2M 62 45 0.845 23.84 0.211 31.2M 167 20 0.901 29.74 0.337 19.8M 110 31
+Table 1: Quantitative comparison against state-of-the-art textured Gaussian methods under standard unconstrained training settings. We
+report rendering quality metrics (SSIM, PSNR, LPIPS), efficiency metrics (Params, FPS), and training time in minutes. The best results are
+highlighted in pink , the second-best results in orange , and the third-best results in yellow .
+3.5. Resolution-Aware Optimization
+A subtle but important issue appears when texture maps are resized
+dynamically. As texture resolution increases, the number of texels grows quadratically, but the amount of image-space supervision
+does not grow at the same rate. This leads to gradient dilution: each
+texel receives a smaller effective update, and high-resolution textures tend to converge more slowly than low-resolution ones. To
+mitigate this issue, we introduce a resolution-aware update rule for
+the texture branch.
+Let ∆θAdam
+be the standard Adam [KB14] update for the texture
+i
+parameters of primitive i. We compute an effective update as
+ γ
+
+Ai
+eff
+Adam
+∆θi = λi ∆θi
+,
+λi = clip
+, 1, λmax ,
+(13)
+A0
+where Ai = HiWi is the current texture area of primitive i, A0 = 4
+corresponds to the initial 2 × 2 texture, γ controls the compensation
+strength, and λmax bounds the maximum update scaling. We set
+γ = 0.5 and λmax = 4 in all experiments.
+This scaling is motivated by the fact that bilinear sampling distributes the backpropagated signal from each pixel to neighboring
+texels. After texture upsampling, the same image-space supervision is spread over more texels, which can reduce the effective pertexel update. The factor λi empirically compensates for this dilution effect by increasing the effective update magnitude for higherresolution textures.
+The resolution-aware update is implemented in our custom fused
+Adam optimizer. Specifically, the per-element scale is applied only
+to the texture-map parameter group during the fused optimizer step,
+while the Gaussian geometry, opacity, scale, and rotation parameters are optimized with their original update rules. The Adam moment estimates are preserved, and the scale factor is used only to
+rebalance the effective texture update. Therefore, the optimizer remains aware of the current texture resolution without perturbing the
+optimization dynamics of the geometric scaffold. This mechanism
+makes adaptive texture growth practical: higher-resolution textures
+are not only allocated to difficult primitives, but also optimized at
+a sufficient rate after upsampling, as illustrated in the right part of
+Figure 3.
+3.6. Training Procedure
+The full training loop alternates between ordinary optimization and
+periodic structure updates. At regular intervals, the scheduler re-
+turns the current render scale, global texture resolution cap, and
+densification rate. The current render scale is used to determine
+the resolution of the supervision images, while the global texture
+resolution cap determines the maximum allowed texture resolution at that stage. During the same interval, we refresh the perprimitive statistics from the training views and use them to decide
+which primitives should grow their personal ceiling, which primitives should be upsampled, which primitives should be split, and
+which primitives should be pruned. The render-scale statistics are
+also tracked so that the texel-to-pixel comparison remains consistent when supervision temporarily happens at a reduced resolution.
+Overall, the method couples representation, scheduling, and optimization into a single content-aware training loop. Smooth regions remain compact, difficult regions receive more texture capacity, elongated primitives are refined geometrically when necessary, and unimportant primitives are removed. At the same time,
+the optimizer compensates for the changing texture resolution so
+that newly allocated capacity can be learned efficiently. This coordinated design is the central reason why the method can preserve
+both compactness and visual fidelity throughout training.
+4. Experiments
+4.1. Experimental Setup
+Datasets. We evaluate our proposed method and state-of-the-art
+baselines on three widely adopted datasets for novel view synthesis: Mip-NeRF 360 [BMV∗ 22], Tanks and Temples [KPZK17],
+and Deep Blending [HPP∗ 18]. Specifically, we report results on
+all nine scenes from the challenging Mip-NeRF 360 dataset. Unlike some prior works that use downsampled versions, we aggressively benchmark our model by training and evaluating on the original full-resolution images for Mip-NeRF 360. For the Tanks and
+Temples dataset, we select the large-scale train and truck scenes.
+For the Deep Blending dataset, we evaluate on the highly detailed
+playroom and drjohnson scenes. Following the standard evaluation
+protocol established by 3D Gaussian Splatting [KKL∗ 23], we construct our test set by holding out every 8th image in the sequence,
+utilizing the remaining images for optimization.
+Evaluation Metrics. We evaluate rendering quality using three
+standard metrics: Peak Signal-to-Noise Ratio (PSNR), Structural
+Similarity Index (SSIM), and Learned Perceptual Image Patch Similarity (LPIPS). We also report resource and efficiency metrics, including total parameter count, rendering speed in frames per sec© 2026 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+Li and Guo et al. / LiteTex-GS
+7 of 11
+Mip-NeRF 360
+Tanks&Temples
+DeepBlending
+SSIM↑ PSNR↑ LPIPS↓ Params FPS Time SSIM↑ PSNR↑ LPIPS↓ Params FPS Time SSIM↑ PSNR↑ LPIPS↓ Params FPS Time
+CAT
+0.767 26.51 0.305 61.2M 48 72 0.820 23.18 0.256 31.2M 131 30 0.896 29.56 0.351 19.8M 70 50
+BBSplat
+0.739 25.13 0.297 61.2M 36 54 0.716 21.07 0.347 31.2M 117 19 0.862 27.18 0.346 19.8M 67 36
+GSTex
+0.732 25.80 0.395 61.2M 29 40 0.821 22.94 0.298 31.2M 33 23 0.904 28.74 0.367 19.8M 55 33
+Textured-GS 0.740 26.18 0.316 61.2M 117 81 0.783 22.56 0.270 31.2M 139 59 0.881 28.76 0.377 19.8M 124 78
+Ours
+0.792 27.13 0.285 61.2M 62 45 0.845 23.84 0.211 31.2M 167 20 0.901 29.74 0.337 19.8M 110 31
+Table 2: Quantitative comparison under matched parameter budgets.Each baseline is configured with its native capacity-control mechanism
+to match the parameter count of our method as closely as possible. The best results are highlighted in pink , and the second-best results are
+highlighted in orange .Under comparable model sizes, our method better preserves rendering quality, indicating more effective allocation
+of the available geometry and texture capacity.
+Figure 4: Our approach preserves high-frequency details while using fewer parameters and shorter training time than the compared textured
+Gaussian baselines.
+ond (FPS), and training time in minutes. It is worth noting that
+the original implementations of GSTex [RCB∗ 25] and TexturedGS [CTP∗ 25] report LPIPS scores computed with AlexNet, which
+typically yields lower numerical values than the VGG-based LPIPS
+setting. Since the other baselines already report VGG-based LPIPS
+by default, we only re-evaluate the rendered test images of GSTex
+and Textured-GS using the VGG-based LPIPS metric [ZIE∗ 18] for
+consistency.
+Implementation Details. Our method is implemented in PyTorch
+with a custom CUDA rasterization pipeline. Following standard
+practice, all scenes are optimized for 30,000 iterations. For the unconstrained comparison, CAT, BBSplat, and GSTex are reproduced
+using their official implementations and default training settings.
+For Textured-GS, we also follow its official implementation and
+default pipeline. Since the native 50×50 texture configuration exceeds the available GPU memory on several large scenes, we use
+a memory-feasible texture resolution for these scenes while keeping all other optimization settings, including the training schedule,
+loss functions, optimizer configuration, and iteration budget, unchanged. The complete per-scene Textured-GS configuration is reported in the supplementary material. Under the unconstrained setting, Textured-GS optimizes RGBA texture channels following its
+original design. In the matched-budget comparison, all baselines
+are adjusted only through their native capacity-control mechanisms
+to approximately match the total representation size of our method;
+no post-hoc compression, additional pruning, loss modification, or
+© 2026 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+method-specific hyperparameter tuning is introduced. All methods
+are evaluated using the same train/test splits, metrics, evaluation
+scripts, and hardware environment. All experiments are conducted
+on a single NVIDIA A800 GPU to ensure consistent training-time
+and FPS measurements.
+4.2. Comparison with State-of-the-Art
+We compare our approach against representative textured Gaussian
+methods, including CAT [PKDD25], BBSplat [SMADB25], GSTex [RCB∗ 25], and Textured-GS [CTP∗ 25]. For Textured-GS, we
+report two variants because its texturing stage operates on a retained subset of primitives from the first-stage 2DGS reconstruction. Textured-GS10% follows the default retention ratio and produces a primitive count comparable to ours, whereas TexturedGS20% retains more primitives and produces a primitive count
+comparable to CAT, serving as a higher-capacity variant. As reported in Table 1 and visualized in Figure 5, under standard unconstrained training settings, LiteTex-GS achieves a favorable quality–
+efficiency trade-off rather than optimizing for the best score on every metric. On Mip-NeRF 360, it obtains PSNR comparable to CAT
+while using substantially fewer parameters and shorter training
+time; on Tanks&Temples, it achieves the best PSNR with the smallest parameter count and shortest training time; on DeepBlending,
+although CAT and GSTex achieve higher scores on some metrics,
+LiteTex-GS remains competitive while reducing representation size
+and training cost. These results indicate that our adaptive capac-
+8 of 11
+Li and Guo et al. / LiteTex-GS
+Figure 5: Qualitative comparisons under matched parameter budgets. When configured to use comparable parameter counts, fixed or
+heuristic allocation baselines tend to lose high-frequency details, whereas our adaptive allocation strategy better preserves local structures
+and texture details.
+Figure 6: We present a convergence analysis of test-view PSNR versus training time. Our method achieves higher PSNR with shorter training
+time.
+ity allocation and geometric management improve the quality–
+efficiency trade-off by maintaining competitive visual quality while
+substantially reducing representation size and training cost. Beyond
+the final quality–efficiency trade-off, we also evaluate training convergence in Figure 6, showing that LiteTex-GS reaches competitive
+PSNR within a shorter wall-clock time, whereas several baselines
+require longer optimization to approach their final performance.
+This suggests that the frequency-aware scheduler and resolutionaware optimization not only reduce the final model size, but also
+improve the quality–time trade-off during training.
+4.3. Comparisons under Matched Parameter Budgets
+pacity budget. To further evaluate intrinsic representational efficiency, we conduct a matched-budget comparison in Table 2 and
+Figure 5, where each baseline is configured to use approximately
+the same representation capacity as our method. Under comparable parameter budgets, our method preserves reconstruction quality more effectively across the evaluated datasets. Fixed-resolution
+or heuristic allocation strategies tend to lose high-frequency details
+when the parameter budget is limited, whereas our method allocates
+texture capacity according to reconstruction error and removes lowutility geometry. These results suggest that the proposed contentadaptive allocation strategy uses the available geometric and textural capacity more effectively than fixed or heuristic allocation
+schemes.
+Default configurations of textured Gaussian methods often lead
+to substantially different parameter counts, since each method
+distributes geometric and textural capacity in a different way.
+Therefore, unconstrained comparisons reflect the overall quality–
+efficiency trade-off of each complete pipeline, but they do not fully
+isolate how effectively each representation uses a comparable ca-
+For this setting, we adjust only capacity-related controls of each
+baseline while keeping its original training pipeline, loss functions,
+optimizer settings, and iteration budget unchanged. For CAT, GSTex, and Textured-GS, whose parameterization is directly comparable to ours, we align both the primitive count and the total number of RGB texels whenever possible. For Textured-GS, we use
+© 2026 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+9 of 11
+Li and Guo et al. / LiteTex-GS
+ID Scheduler Pruning Growth Update SSIM↑ PSNR↑ LPIPS↓ Points Texels Params Time
+I
+0.797
+27.15
+0.272
+255K 40.0M 135.0M
+90
+II
+✓
+0.783
+26.92
+0.298
+162K 14.1M
+52.0M
+50
+III
+✓
+✓
+0.779
+26.80
+0.300
+119K 16.2M
+55.8M
+45
+IV
+✓
+✓
+✓
+0.780
+26.86
+0.305
+173K 10.5M
+41.7M
+45
+V
+✓
+✓
+✓
+✓
+0.792
+27.13
+0.285
+209K 16.3M
+61.2M
+45
+Table 3: Component ablation on the Mip-NeRF 360 dataset. The scheduler and pruning reduce redundant capacity and training time, errordriven texture growth reallocates texture capacity toward high-error regions, and resolution-aware update scaling improves the optimization
+of upsampled textures without increasing training time.
+RGB textures in the matched-budget setting to make its textureparameter definition consistent with CAT, GSTex, and our method,
+while its unconstrained setting follows the original RGBA design.
+For BBSplat, which uses a different RGBA texture parameterization, we derive the closest feasible configuration according to its native parameter formula. No additional pruning, post-hoc compression, loss modification, or method-specific hyperparameter tuning
+is introduced for any baseline. The detailed matching protocol and
+per-method capacity controls are provided in the supplementary
+material.
+4.4. Ablation Studies
+To validate our architectural decisions, we conduct componentwise ablations on the Mip-NeRF 360 dataset. We ablate the main
+components of LiteTex-GS in Table 3. The baseline achieves reasonable rendering quality but relies on a large parameter footprint
+of 135.0M. Adding the frequency-aware scheduler reduces the total
+parameters from 135.0M to 52.0M and shortens the training time
+from 90 minutes to 50 minutes, showing that coarse-to-fine supervision suppresses redundant early-stage capacity. Contribution- and
+area-aware pruning further reduces the point count from 162K to
+119K while keeping the same training time. With error-driven texture growth, the model reallocates texture capacity toward higherror regions, reducing the texel count from 16.2M to 10.5M and
+the total parameters from 55.8M to 41.7M, with PSNR improving
+from 26.80 to 26.86. Finally, adding resolution-aware update scaling improves PSNR from 26.86 to 27.13 and LPIPS from 0.305
+to 0.285 without increasing training time. Although the final active
+texel count increases, this reflects a different optimized texture distribution induced by the update rule, rather than parameters directly
+introduced by the rule itself. We provide the corresponding textureresolution distributions before and after applying this module in the
+supplementary material. Overall, these results show that the proposed scheduler, pruning, texture growth, and resolution-aware optimization jointly improve the quality–efficiency trade-off.
+To isolate adaptive texture allocation from the inherited scheduling principle, we combine DashGaussian-style scheduling with
+fixed 4×4, 8×8, and 16×16 per-Gaussian textures. Table 4 shows
+that increasing the fixed texture resolution improves reconstruction
+quality but rapidly increases the parameter count, while our adaptive allocation achieves a more favorable quality–efficiency tradeoff.
+© 2026 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+Dataset
+Texture PSNR↑ SSIM↑ LPIPS↓ Params↓ Time↓
+4×4
+8×8
+Mip-NeRF 360
+16×16
+Ours
+25.14
+25.38
+25.56
+27.13
+0.696
+0.715
+0.734
+0.792
+0.420
+0.381
+0.346
+0.285
+4.7M
+10.1M
+31.2M
+61.2M
+24
+24
+25
+45
+4×4
+8×8
+16×16
+Ours
+28.03
+28.28
+28.23
+29.74
+0.871
+0.876
+0.881
+0.901
+0.405
+0.391
+0.370
+0.337
+3.1M
+6.8M
+21.7M
+19.8M
+16
+16
+17
+31
+4×4
+8×8
+Tanks&Temples
+16×16
+Ours
+22.08
+22.24
+22.37
+23.84
+0.774
+0.789
+0.803
+0.845
+0.324
+0.289
+0.257
+0.211
+4.6M
+9.9M
+31.5M
+31.2M
+11
+12
+14
+20
+DeepBlending
+Table 4: Comparison with DashGaussian-style scheduling using
+fixed per-Gaussian textures.
+5. Conclusion
+In this work, we presented LiteTex-GS, a content-adaptive texturing framework for 2D Gaussian Splatting. By combining
+frequency-aware scheduling, contribution- and area-aware pruning, error-driven texture growth, and resolution-aware update scaling, our method adaptively allocates geometric and textural capacity during training. Experiments on standard novel view synthesis benchmarks show that LiteTex-GS achieves competitive rendering quality with substantially fewer parameters and shorter training
+time than existing textured Gaussian baselines.
+Limitations. Our method still has several limitations. The
+frequency-based scheduler may be affected by spurious highfrequency signals caused by image noise or repetitive texture patterns, which can bias the estimated frequency distribution and reduce computational efficiency. The pruning strategy may require
+careful threshold selection for thin or weakly visible structures. Extending the framework to sparse-view inputs, dynamic scenes, and
+challenging materials such as strong reflections or transparency remains future work.
+6. Acknowledgments
+This work was supported in part by the Beijing Natural Science Foundation under Grant JQ24023 and Grant F251020,
+in part by Beijing Municipal Science & Technology Commission Project under Grant Z231100006623010, and in part by
+Peking University Medicine plus X Pilot Program — Artificial Intelligence and Medical Development Initiative under Grant
+BMU2025YXXLHAIYX020.
+10 of 11
+Li and Guo et al. / LiteTex-GS
+References
+[BMV∗ 22]
+BARRON J. T., M ILDENHALL B., V ERBIN D., S RINIVASAN
+P. P., H EDMAN P.: Mip-nerf 360: Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition (2022), pp. 5470–5479. 6
+[KB14] K INGMA D. P., BA J.: Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980 (2014). 6
+[KKL∗ 23] K ERBL B., KOPANAS G., L EIMKÜHLER T., D RETTAKIS G.,
+ET AL .: 3d gaussian splatting for real-time radiance field rendering. ACM
+Trans. Graph. 42, 4 (2023), 139–1. 2, 3, 6
+[CJJ∗ 25] C HEN Y., J IANG J., J IANG K., TANG X., L I Z., L IU X., N IE
+Y.: Dashgaussian: Optimizing 3d gaussian splatting in 200 seconds. In
+Proceedings of the Computer Vision and Pattern Recognition Conference
+(2025), pp. 11146–11155. 3
+[KMK∗ 24] K ERBL B., M EULEMAN A., KOPANAS G., W IMMER M.,
+L ANVIN A., D RETTAKIS G.: A hierarchical 3d gaussian representation
+for real-time rendering of very large datasets. ACM Transactions On
+Graphics (TOG) 43, 4 (2024), 1–15. 3
+[CSL∗ 25] C HENG Z., S UN M., L IU Y., G E Z., TANG L., X U M., L I Y.,
+PAN P.: Clod-gs: Continuous level-of-detail via 3d gaussian splatting.
+arXiv preprint arXiv:2510.09997 (2025). 3
+[KPZK17] K NAPITSCH A., PARK J., Z HOU Q.-Y., KOLTUN V.: Tanks
+and temples: Benchmarking large-scale scene reconstruction. ACM
+Transactions on Graphics (ToG) 36, 4 (2017), 1–13. 6
+[CTP∗ 25] C HAO B., T SENG H.-Y., P ORZI L., G AO C., L I T., L I Q.,
+S ARAF A., H UANG J.-B., KOPF J., W ETZSTEIN G., ET AL .: Textured gaussians for enhanced 3d scene appearance modeling. In Proceedings of the Computer Vision and Pattern Recognition Conference
+(2025), pp. 8964–8974. 2, 7
+[KRM∗ 25] K ULHANEK J., R AKOTOSAONA M.-J., M ANHARDT F.,
+T SALICOGLOU C., N IEMEYER M., S ATTLER T., P ENG S., T OMBARI
+F.: Lodge: Level-of-detail large-scale gaussian splatting with efficient
+rendering. arXiv preprint arXiv:2505.23158 (2025). 3
+[CXG∗ 22] C HEN A., X U Z., G EIGER A., Y U J., S U H.: Tensorf: Tensorial radiance fields. In European conference on computer vision (2022),
+Springer, pp. 333–350. 2
+[LYX∗ 24] L U T., Y U M., X U L., X IANGLI Y., WANG L., L IN D., DAI
+B.: Scaffold-gs: Structured 3d gaussians for view-adaptive rendering. In
+Proceedings of the IEEE/CVF conference on computer vision and pattern recognition (2024), pp. 20654–20664. 3
+[FKYT∗ 22] F RIDOVICH -K EIL S., Y U A., TANCIK M., C HEN Q.,
+R ECHT B., K ANAZAWA A.: Plenoxels: Radiance fields without neural networks. In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition (2022), pp. 5501–5510. 2
+[LZF26] L EE Y., Z HANG Z., FAN D.: Safeguardgs: 3d gaussian primitive pruning while avoiding catastrophic scene destruction. In Proceedings of the IEEE/CVF Winter Conference on Applications of Computer
+Vision (2026), pp. 8479–8489. 3
+[FWW∗ 24] FAN Z., WANG K., W EN K., Z HU Z., X U D., WANG Z.:
+Lightgaussian: Unbounded 3d gaussian compression with 15x reduction
+and 200+ fps. Advances in neural information processing systems 37
+(2024), 140138–140158. 2
+[MESK22] M ÜLLER T., E VANS A., S CHIED C., K ELLER A.: Instant
+neural graphics primitives with a multiresolution hash encoding. ACM
+transactions on graphics (TOG) 41, 4 (2022), 1–15. 2
+[GBH∗ 24a] G UO Y., BAI Y., H U L., G UO Z., L IU M., C AI Y., H UANG
+T., M A L.: Prtgs: Precomputed radiance transfer of gaussian splats for
+real-time high-quality relighting. In Proceedings of the 32nd ACM International Conference on Multimedia (2024), pp. 5112–5120. 3
+[GBH∗ 24b] G UO Y., BAI Y., H U L., L IU M., G UO Z., M A L., H UANG
+T.: Spike-nerf: Neural radiance field based on spike camera. In 2024
+IEEE International Conference on Multimedia and Expo (ICME) (2024),
+IEEE, pp. 1–6. 2
+[GHL∗ 25]
+G UO Y., H U T., L I Z., H U L., Q IAN K., L IN X., C HEN S.,
+H UANG T., M A L.: On-the-fly large-scale 3d reconstruction from multicamera rigs. arXiv preprint arXiv:2512.08498 (2025). 3
+[HFEM26] H AHLBOHM F., F RANKE L., E ISEMANN M., M AGNOR M.:
+Faster-gs: Analyzing and improving gaussian splatting optimization.
+arXiv preprint arXiv:2602.09999 (2026). 2, 3
+[HPP∗ 18]
+H EDMAN P., P HILIP J., P RICE T., F RAHM J.-M., D RETTAKIS G., B ROSTOW G.: Deep blending for free-viewpoint image-based
+rendering. ACM Transactions on Graphics (ToG) 37, 6 (2018), 1–15. 6
+[HTL∗ 25] H ANSON A., T U A., L IN G., S INGLA V., Z WICKER M.,
+G OLDSTEIN T.: Speedy-splat: Fast 3d gaussian splatting with sparse
+pixels and sparse primitives. In Proceedings of the Computer Vision and
+Pattern Recognition Conference (2025), pp. 21537–21546. 2, 3
+[HTS∗ 25] H ANSON A., T U A., S INGLA V., JAYAWARDHANA M.,
+Z WICKER M., G OLDSTEIN T.: Pup 3d-gs: Principled uncertainty pruning for 3d gaussian splatting. In Proceedings of the Computer Vision and
+Pattern Recognition Conference (2025), pp. 5949–5958. 3
+[MGK∗ 24] M ALLICK S. S., G OEL R., K ERBL B., S TEINBERGER M.,
+C ARRASCO F. V., D E L A T ORRE F.: Taming 3dgs: High-quality radiance fields with limited resources. In SIGGRAPH Asia 2024 Conference
+Papers (2024), pp. 1–11. 3
+[MST∗ 21] M ILDENHALL B., S RINIVASAN P. P., TANCIK M., BARRON
+J. T., R AMAMOORTHI R., N G R.: Nerf: Representing scenes as neural
+radiance fields for view synthesis. Communications of the ACM 65, 1
+(2021), 99–106. 2
+[PKDD25] PAPANTONAKIS P., KOPANAS G., D URAND F., D RETTAKIS
+G.: Content-aware texturing for gaussian splatting. arXiv preprint
+arXiv:2512.02621 (2025). 2, 7
+[RBPK24] ROTA B ULÒ S., P ORZI L., KONTSCHIEDER P.: Revising
+densification in gaussian splatting. In European Conference on Computer Vision (2024), Springer, pp. 347–362. 3
+[RCB∗ 25] RONG V., C HEN J., BAHMANI S., K UTULAKOS K., L IN DELL D.: Gstex: Per-primitive texturing of 2d gaussian splatting for decoupled appearance and geometry modeling. In Proceedings of the Winter Conference on Applications of Computer Vision (2025), pp. 3508–
+3518. 2, 7
+[SGHS98] S HADE J., G ORTLER S., H E L.- W., S ZELISKI R.: Layered
+depth images. In Proceedings of the 25th annual conference on Computer graphics and interactive techniques (1998), pp. 231–242. 2
+[SMADB25] S VITOV D., M ORERIO P., AGAPITO L., D EL B UE A.:
+Billboard splatting (bbsplat): Learnable textured primitives for novel
+view synthesis. In Proceedings of the IEEE/CVF International Conference on Computer Vision (2025), pp. 25029–25039. 2, 7
+[HYC∗ 24] H UANG B., Y U Z., C HEN A., G EIGER A., G AO S.: 2d gaussian splatting for geometrically accurate radiance fields. In ACM SIGGRAPH 2024 conference papers (2024), pp. 1–11. 2
+[TYY∗ 25] TANG S., Y E W., Y E P., L IN W., Z HOU Y., C HEN T.,
+O UYANG W.: Hisplat: Hierarchical 3d gaussian splatting for generalizable sparse-view reconstruction. In International Conference on Learning Representations (2025), vol. 2025, pp. 48436–48449. 3
+[JSZ∗ 15] JADERBERG M., S IMONYAN K., Z ISSERMAN A., ET AL .:
+Spatial transformer networks. Advances in neural information processing systems 28 (2015). 3
+[WMXL25] WANG C., M A G., X UE Y., L AO Y.: Faster and better 3d
+splatting via group training. In Proceedings of the IEEE/CVF International Conference on Computer Vision (2025), pp. 27968–27977. 3
+[KALL17] K ARRAS T., A ILA T., L AINE S., L EHTINEN J.: Progressive growing of gans for improved quality, stability, and variation. arXiv
+preprint arXiv:1710.10196 (2017). 3
+[XJZ∗ 25] X IE T., J IANG L., Z UO X., WANG Y., P OPA T.: Fact-gs:
+Frequency-aligned complexity-aware texture reparameterization for 2d
+gaussian splatting. arXiv preprint arXiv:2511.23292 (2025). 2
+© 2026 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+Li and Guo et al. / LiteTex-GS
+[XXH∗ 21] X IANG F., X U Z., H ASAN M., H OLD -G EOFFROY Y.,
+S UNKAVALLI K., S U H.: Neutex: Neural texture mapping for volumetric neural rendering. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (2021), pp. 7119–7128. 2
+[YZH25] YANG Y., Z HOU Y., H UANG H.: Introducing unbiased depth
+into 2d gaussian splatting for high-accuracy surface reconstruction.
+In Computer Graphics Forum (2025), vol. 44, Wiley Online Library,
+p. e70252. 2
+[ZGX∗ 24] Z HANG X., G E X., X U T., H E D., WANG Y., Q IN H., L U
+G., G ENG J., Z HANG J.: Gaussianimage: 1000 fps image representation
+and compression by 2d gaussian splatting. In European Conference on
+Computer Vision (2024), Springer, pp. 327–345. 2
+[ZIE∗ 18] Z HANG R., I SOLA P., E FROS A. A., S HECHTMAN E., WANG
+O.: The unreasonable effectiveness of deep features as a perceptual metric. In Proceedings of the IEEE conference on computer vision and pattern recognition (2018), pp. 586–595. 7
+[ZTF∗ 18] Z HOU T., T UCKER R., F LYNN J., F YFFE G., S NAVELY N.:
+Stereo magnification: Learning view synthesis using multiplane images.
+arXiv preprint arXiv:1805.09817 (2018). 2
+© 2026 Eurographics - The European Association
+for Computer Graphics and John Wiley & Sons Ltd.
+11 of 11

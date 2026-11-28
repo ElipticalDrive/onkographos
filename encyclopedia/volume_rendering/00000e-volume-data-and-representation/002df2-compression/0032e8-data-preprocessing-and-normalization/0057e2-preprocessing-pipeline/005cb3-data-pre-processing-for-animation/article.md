@@ -1,0 +1,85 @@
+# Data Pre-processing for Animation
+
+Also called: Animation Data Pre-processing, Time-step Downsampling and Concatenation
+
+## Overview
+This method prepares time-series volume datasets for efficient playback by reducing spatial resolution and consolidating temporal data into a single file. It solves the problem of insufficient graphics memory when rendering high-resolution animations by resampling individual time steps to fit within hardware constraints and concatenating them for sequential access. It differs from [Temporal Sampling for Animation](19571-temporal-sampling-for-animation.md) by focusing on spatial downsampling and file concatenation rather than selecting a discrete subset of frames for playback.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A sequence of volume datasets, where each time step has a high resolution (e.g., $500 \times 500 \times 100$ voxels) and a scalar value per voxel.
+- Output: A single concatenated file containing all time steps, resampled to a lower resolution (e.g., $128 \times 128 \times 100$ voxels).
+
+**Data Structures:**
+The output is a contiguous block of memory or a file. Each voxel is stored as a 32-bit floating-point value or an integer, depending on the mapping specified by the application [S1, unofficial]. The layout is a linear array of voxels, ordered by time step, then by spatial coordinates (e.g., z, y, x).
+
+**Steps:**
+1. **Determine Target Resolution:** Calculate the maximum voxel count that fits in the available graphics memory. For example, if a single time step of $500 \times 500 \times 100$ voxels fits, but 48 steps do not, reduce the spatial dimensions. The source example uses $128 \times 128 \times 100$ voxels [S1, unofficial].
+2. **Resample Each Time Step:** For each time step $t$ in the dataset:
+   - Read the high-resolution volume $V_{high}$.
+   - Apply a downsampling filter (e.g., trilinear interpolation or box filtering) to create $V_{low}$ with dimensions $W_{low} \times H_{low} \times D_{low}$.
+   - The source does not specify the exact interpolation kernel, but implies a standard resampling process [S1, unofficial].
+3. **Concatenate:** Append the resampled voxel data of $V_{low}$ for time step $t$ to the output file. Repeat for all time steps.
+4. **Store Metadata:** Record the original and new dimensions, the number of time steps, and the scalar-to-color/opacity mapping parameters if they are not fixed [S1, unofficial].
+
+**Parameters:**
+- Target resolution: $128 \times 128 \times 100$ voxels (example from source) [S1, unofficial].
+- Total time steps: 48 (example from source) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Memory Limits:** If the target resolution is not calculated correctly, the data may not fit in graphics memory, causing rendering failures [S1, unofficial].
+- **Precision Loss:** Downsampling may introduce artifacts or loss of detail. The source mentions that changes to the floating-point to integer mapping require an update of the data set in graphics memory, which may take a few seconds [S1, unofficial].
+- **File Size:** Concatenating all time steps into a single file requires sufficient disk space.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def preprocess_animation_for_playback(input_files, target_width, target_height, target_depth, output_file):
+    """
+    Resamples a sequence of volume datasets to a target resolution and concatenates them.
+    
+    Args:
+        input_files: List of paths to high-resolution volume files.
+        target_width: Desired width in voxels.
+        target_height: Desired height in voxels.
+        target_depth: Desired depth in voxels.
+        output_file: Path to the output concatenated file.
+    """
+    with open(output_file, 'wb') as f_out:
+        for file_path in input_files:
+            # Load high-resolution volume
+            # Note: The source does not specify the exact loading mechanism.
+            # Assume a function load_volume(path) returns a 3D array.
+            high_res_vol = load_volume(file_path)
+            
+            # Resample to target resolution
+            # Note: The source does not specify the interpolation method.
+            # Assume a function resample(vol, new_dims) returns a 3D array.
+            low_res_vol = resample(high_res_vol, (target_width, target_height, target_depth))
+            
+            # Write resampled voxels to output file
+            # Note: The source mentions 32-bit graphics memory.
+            # Assume voxels are stored as 32-bit floats.
+            for voxel in low_res_vol.flatten():
+                f_out.write(struct.pack('f', voxel))
+```
+
+## Subtopics
+
+### [Temporal Sampling for Animation](19571-temporal-sampling-for-animation.md)
+Temporal sampling for animation extracts a discrete subset of frames from a time-series volume dataset to create a coherent animation sequence. It solves the problem of irregular or excessive temporal output by mapping a user-defined time range to the nearest available data points. Unlike [Data Pre-processing for Animation](17236-data-pre-processing-for-animation.md), which handles general normalization and preprocessing, this method specifically addresses the temporal dimension, ensuring smooth playback by selecting frames based on a fixed time step or specific interval.
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of time steps and the volume of data. Resampling each time step is $O(W \times H \times D)$.
+- **Memory Complexity:** The output file size is proportional to the target resolution and the number of time steps. The source example results in a file size that fits in graphics memory for playback [S1, unofficial].
+- **Performance:** The preprocessing is done off-line. The source notes that changes to the data mapping may take a few seconds to update in graphics memory [S1, unofficial].
+- **Strengths:** Enables playback of animations that would otherwise exceed graphics memory limits. Simplifies the rendering pipeline by providing a single file.
+- **Limitations:** Loss of spatial detail due to downsampling. The source does not provide quantitative metrics on visual quality loss.
+
+## Background
+This method was used in the context of the IEEE Visualization 2004 Contest to explore volume data in a Cave Automatic Virtual Environment (CAVE) [S1, unofficial]. The goal was to allow interactive exploration of hurricane data with 48 time steps. The nVidia 3000G graphics card had limited memory, necessitating the downsampling and concatenation of the data sets [S1, unofficial].
+
+## Sources
+[S1] IEEE Visualization 2004 Contest: User Friendly Volume Data Set Exploration in the Cave, http://vis.computer.org/vis2004contest/brown/, fetched 2026-10-28 (unofficial)
+[S2] A survey of modeling, rendering and animation of clouds in computer graphics, https://doi.org/10.1007/s00371-020-01953-y, fetched 2026-10-26

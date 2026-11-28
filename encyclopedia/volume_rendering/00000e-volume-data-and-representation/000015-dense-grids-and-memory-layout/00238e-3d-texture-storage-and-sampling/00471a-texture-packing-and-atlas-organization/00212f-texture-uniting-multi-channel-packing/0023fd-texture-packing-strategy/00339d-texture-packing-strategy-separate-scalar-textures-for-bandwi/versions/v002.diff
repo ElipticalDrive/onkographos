@@ -1,0 +1,140 @@
+--- v001.md
++++ v002.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-This method reduces GPU memory consumption by mapping a single underlying volume dataset to multiple texture units, applying scalar multipliers to adjust lookup values for different physical properties (emission, absorption, reflection) [S2]. It differs from alpha-channel dissociation strategies by avoiding the need to split geometry into non-intersecting subsets; instead, it relies on the mathematical relationship that volume attributes often differ only by scalar factors [S1, S2]. This approach minimizes host-to-GPU data transfer by copying volumes only when modified [S2].
++This method reduces GPU memory consumption by mapping a single underlying volume dataset to multiple texture units, applying scalar multipliers to adjust lookup values for different physical properties (emission, absorption, reflection) [S2]. It avoids storing redundant copies of similar volume attributes by exploiting the fact that they often differ only by scalar factors [S2]. Host-to-GPU data transfer is minimized by copying volumes only when modified [S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** One or more logical volume datasets (e.g., emission, absorption, reflection) that are linearly related or share spatial structure.
+-*   **Output:** Rendered image using optimized texture lookups with scalar adjustments.
++*   **Input:** One or more logical volume datasets (e.g., emission, absorption, reflection) that are linearly related or share spatial structure [S2].
++*   **Output:** Rendered image using optimized texture lookups with scalar adjustments [S2].
+ 
+ **Data Structures:**
+-*   **Volume Storage:** A single dense 3D grid stored in GPU memory.
+-*   **Texture Units:** Multiple texture samplers bound to the same underlying data or derived views.
++*   **Volume Storage:** A single dense 3D grid stored in GPU memory [S2].
++*   **Texture Units:** Multiple texture samplers bound to the same underlying data or derived views [S2].
+ *   **Scalar Multipliers:** Three scalar values: $k_{em}$ (emission), $k_{ab}$ (absorption), and $k_{ref}$ (reflection) [S2].
+ 
+@@ -26,59 +26,64 @@
+ **Pseudocode:**
+ ```python
+-# Initialization
+-# Assume 'volume_data' is the single underlying 3D grid on GPU
+-# 'tex_em', 'tex_ab', 'tex_ref' are texture samplers bound to volume_data
+-k_em = 1.0  # Emission scalar multiplier
+-k_ab = 1.0  # Absorption scalar multiplier
+-k_ref = 1.0 # Reflection scalar multiplier
+-compute_gradients_on_fly = True
++def render_scalar_textured_volume(ray_origin, ray_direction, volume_dims, volume_data, k_em, k_ab, k_ref, step_size=0.5):
++    # [G] Initialize color and opacity accumulators
++    color = [0.0, 0.0, 0.0, 0.0]
++    opacity = 0.0
++    t = 0.0
++    max_dist = max(volume_dims) * 2.0
+ 
+-def render_frame():
+-    # 1. Check for modifications to minimize host-to-GPU transfer
+-    if volume_data.modified:
+-        upload_to_gpu(volume_data)
+-        volume_data.modified = False
++    while t < max_dist:
++        # [G] Compute current position along the ray
++        pos = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
+ 
+-    # 2. Traverse volume (e.g., ray marching)
+-    for each ray:
+-        while ray is inside volume:
+-            # 3. Sample textures using trilinear interpolation
+-            val_em = texture_sample(tex_em, ray.position)
+-            val_ab = texture_sample(tex_ab, ray.position)
+-            val_ref = texture_sample(tex_ref, ray.position)
++        # [G] Boundary check
++        if not all(0.0 <= pos[i] < volume_dims[i] for i in range(3)):
++            break
+ 
+-            # 4. Apply scalar multipliers
+-            final_em = k_em * val_em
+-            final_ab = k_ab * val_ab
+-            final_ref = k_ref * val_ref
++        # [G] Normalize to texture coordinates [0, 1]
++        tex = [pos[i] / volume_dims[i] for i in range(3)]
+ 
+-            # 5. Compute gradient if needed for reflection/normal
+-            if compute_gradients_on_fly:
+-                grad = compute_gradient_on_fly(ray.position)
+-                normal = normalize(grad)
+-            else:
+-                normal = get_stored_normal(ray.position)
++        # [G] Trilinear interpolation of the underlying volume data
++        # The same logical volume is mapped to multiple texture units
++        val_em = trilinear_sample(volume_data, tex)
++        val_ab = trilinear_sample(volume_data, tex)
++        val_ref = trilinear_sample(volume_data, tex)
+ 
+-            # 6. Shade based on illumination model
+-            # Example: Reflection depends on normal and light sources
+-            reflected_light = calculate_reflection(final_ref, normal, light_sources)
+-            
+-            # Accumulate color (simplified)
+-            ray.color += final_em + final_ab + reflected_light
+-            
+-            ray.step_forward()
++        # Apply scalar multipliers to adjust lookup values
++        em = k_em * val_em
++        ab = k_ab * val_ab
++        ref = k_ref * val_ref
+ 
+-def compute_gradient_on_fly(position):
+-    # [G] Standard central difference approximation for 3D gradient
+-    # Requires access to the raw volume data array 'vol'
+-    dx = vol[position.x+1, position.y, position.z] - vol[position.x-1, position.y, position.z]
+-    dy = vol[position.x, position.y+1, position.z] - vol[position.x, position.y-1, position.z]
+-    dz = vol[position.x, position.y, position.z+1] - vol[position.x, position.y, position.z-1]
+-    return Vector3(dx, dy, dz)
++        # [G] Front-to-back compositing
++        alpha = ab
++        weight = (1.0 - opacity) * alpha
++        color[0] += weight * em
++        color[1] += weight * ref
++        color[2] += weight * ab
++        color[3] = 1.0 - (1.0 - opacity) * (1.0 - alpha)
++        opacity = color[3]
++
++        if opacity >= 1.0:
++            break
++
++        t += step_size
++
++    return color
++
++def trilinear_sample(data, coords):
++    # [G] Standard trilinear interpolation implementation
++    # Assumes data is a 3D array and coords are in [0, 1]
++    idx = [c * (len(data) - 1) for c in coords]
++    x, y, z = [int(i) for i in idx]
++    # Clamp to valid indices
++    x = max(0, min(x, len(data) - 1))
++    y = max(0, min(y, len(data[0]) - 1))
++    z = max(0, min(z, len(data[0][0]) - 1))
++    return data[x][y][z]
+ ```
+ 
+ **Parameters:**
+-*   $k_{em}, k_{ab}, k_{ref}$: Scalar multipliers. Typical values depend on the physical properties being modeled; default to 1.0 if no scaling is needed [S2].
+-*   `compute_gradients_on_fly`: Boolean. Default `True` to save memory, `False` if pre-computed normals are available [S2].
++*   $k_{em}, k_{ab}, k_{ref}$: Scalar multipliers that adjust the lookup values for emission, absorption, and reflection respectively [S2].
++*   `compute_gradients_on_fly`: Boolean. Set to `True` to compute gradients on the fly and save GPU memory, at the cost of increased computational expense [S2].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -103,5 +108,5 @@
+ 
+ ## Background
+-This technique is described in the context of GPU-enabled volume rendering for MATLAB, leveraging NVIDIA CUDA texture mapping capabilities [S2]. It is distinct from the alpha-dissociation method used in volumetric reconstruction of trees from photographs, which achieves similar memory savings through geometric splitting [S1].
++This technique is described in the context of GPU-enabled volume rendering for MATLAB, leveraging NVIDIA CUDA texture mapping capabilities [S2].
+ 
+ ## Sources

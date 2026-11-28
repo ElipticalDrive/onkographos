@@ -1,0 +1,146 @@
+# Zero Order Integration (Rectangle Rule)
+
+Also called: Riemann sum with rectangle rule, Standard Numerical Quadrature (Rectangle Rule)
+
+## Overview
+Zero Order Integration approximates the continuous volume rendering integral by discretizing the ray into $n$ segments and assuming the extinction coefficient and emission are constant within each segment, effectively evaluating a Riemann sum using the rectangle rule [S1, unofficial][S7, book][S11]. It sets itself apart from higher-order methods like [Runge-Kutta 4 (RK4) Integration](3158-runge-kutta-4-rk4-integration.md) by ignoring field variation within the step, and from [Partial Pre-Integration](1148-partial-pre-integration.md) by not requiring pre-computed lookup tables for transfer functions [S11].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray origin $\mathbf{o}$, direction $\mathbf{d}$, near/far bounds $t_{near}, t_{far}$ (or total length $D$), number of samples $n$, volume data function $s(\mathbf{x})$, transfer function $g(s)$ (emission), and opacity/extinction function $\tau(s)$ [S1, S3, unofficial][S7, book].
+*   **Output:** Composite color $C$ and accumulated opacity $A$ (or transmittance $T$) for the pixel [S3, S4, unofficial].
+
+**Data Structures:**
+*   **Samples:** An array of $n$ positions along the ray. For uniform sampling, position $i$ is $t_i = t_{near} + i \cdot \Delta t$, where $\Delta t = (t_{far} - t_{near}) / n$ [S1, S3, unofficial][S7, book].
+*   **Attributes:** For each sample $i$, store density $\sigma_i$ (or extinction $\tau_i$) and color $c_i$ (or emission $C_i$) [S4, unofficial][S7, book].
+
+**Steps:**
+
+1.  **Discretize the Ray:** Divide the ray interval $[0, D]$ into $n$ equal segments of length $\Delta x = D/n$ [S1, S3, unofficial][S8]. Sample points are chosen as $x_i = i \Delta x$ for $i=1 \dots n$ (or $0 \dots n-1$ depending on indexing) [S3, unofficial][S8].
+2.  **Evaluate Volume Properties:** At each sample point $x_i$, evaluate the volume density $\sigma_i = \sigma(\mathbf{x}(x_i))$ and color/emission $c_i$ (or pre-multiplied color) [S2, S4, unofficial][S7, book].
+3.  **Compute Segment Opacity:** Calculate the opacity $\alpha_i$ for the $i$-th segment. The exact form uses the exponential attenuation:
+    $$ \alpha_i = 1 - \exp(-\sigma_i \Delta x) $$
+    [S4, S5, unofficial][S8]. A common approximation for efficiency, valid when $\sigma_i \Delta x \ll 1$, is:
+    $$ \alpha_i \approx \sigma_i \Delta x $$
+    [S3, unofficial][S7, book][S9].
+4.  **Compute Transmittance:** Calculate the accumulated transmittance $T_i$ up to sample $i$. This represents the probability that light passes through all previous segments:
+    $$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+    [S4, S5, unofficial][S7, book]. Note: $T_1 = 1$.
+5.  **Composite Color:** Combine the contributions. The standard front-to-back compositing equation is:
+    $$ C_{out} = \sum_{i=1}^{n} T_i \alpha_i c_i $$
+    [S4, S5, unofficial][S7, book].
+    Alternatively, back-to-front compositing can be used:
+    $$ C'_i = \alpha_i c_i + (1 - \alpha_i) C'_{i+1} $$
+    with $C'_{n+1} = 0$ [S3, unofficial][S9].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def zero_order_integration(ray_origin, ray_direction, volume_sampler, n_samples, near, far):
+    """
+    Approximates the volume rendering integral using the rectangle rule (zero-order hold).
+    
+    Args:
+        ray_origin: (3,) array, ray origin.
+        ray_direction: (3,) array, normalized ray direction.
+        volume_sampler: callable, returns (density, color) at a 3D point.
+        n_samples: int, number of segments.
+        near: float, near plane distance.
+        far: float, far plane distance.
+        
+    Returns:
+        color: (3,) array, composite color.
+        opacity: float, accumulated opacity.
+    """
+    total_dist = far - near
+    delta_t = total_dist / n_samples
+    
+    # Pre-compute sample positions
+    # Positions: near + delta_t, near + 2*delta_t, ..., far
+    # Note: Some implementations use left endpoints (near + i*delta_t for i=0..n-1)
+    # We use right endpoints or centers depending on convention; 
+    # Standard Riemann sum often uses sample point within segment.
+    # Here we use the sample point at the start of the segment (left Riemann sum) 
+    # or end. S7 uses left endpoint for T(s_i) calculation in Iteration A.
+    # S8 uses xi = i*dx.
+    
+    accumulated_transmittance = 1.0
+    accumulated_color = [0.0, 0.0, 0.0]
+    accumulated_opacity = 0.0
+    
+    # Front-to-back iteration
+    for i in range(n_samples):
+        # Sample position
+        t = near + (i + 0.5) * delta_t  # Midpoint is often better, but S7/S8 imply left/right endpoints.
+                                        # S7: si = i*DeltaS (left endpoint).
+                                        # Let's stick to left endpoint as per S7/S8 for consistency with "rectangle rule" definition.
+        t = near + i * delta_t
+        
+        # Evaluate volume properties
+        pos = ray_origin + ray_direction * t
+        density, color = volume_sampler(pos)
+        
+        # Compute opacity for this segment
+        # Exact: alpha = 1 - exp(-density * delta_t)
+        # Approx: alpha = density * delta_t (if small)
+        alpha = 1.0 - math.exp(-density * delta_t)
+        
+        # Accumulate color
+        # Contribution = Transmittance * Alpha * Color
+        weight = accumulated_transmittance * alpha
+        accumulated_color[0] += weight * color[0]
+        accumulated_color[1] += weight * color[1]
+        accumulated_color[2] += weight * color[2]
+        
+        # Update transmittance for next segment
+        accumulated_transmittance *= (1.0 - alpha)
+        
+        # Optional: Early ray termination if transmittance is negligible
+        if accumulated_transmittance < 1e-5:
+            break
+            
+    accumulated_opacity = 1.0 - accumulated_transmittance
+    
+    return accumulated_color, accumulated_opacity
+```
+
+**Edge Cases and Pitfalls:**
+*   **Discontinuities:** The reconstructed signal is not $C^0$ continuous, leading to visible artifacts (staircasing) where density changes abruptly between samples [S1, unofficial][S11].
+*   **Approximation Error:** The assumption of constant density/color within a segment causes significant error if the transfer function or density varies rapidly [S5, unofficial][S11].
+*   **Numerical Stability:** When computing transmittance, adding a small epsilon (e.g., $10^{-10}$) to $(1 - \alpha)$ prevents numerical instability if $\alpha$ is exactly 1.0 [S4, unofficial].
+*   **Early Termination:** Front-to-back iteration supports early ray termination when transmittance becomes negligible, improving performance [S7, book]. Back-to-front does not [S7, book].
+
+## Subtopics
+
+### [Runge-Kutta 4 (RK4) Integration](3158-runge-kutta-4-rk4-integration.md)
+Uses four slope estimates to account for field variation within the step, providing higher accuracy than the constant assumption of the rectangle rule. Choose when density/refractive index varies significantly within a segment.
+
+### [Gaussian Integration for Volume Rendering](5546-gaussian-integration-for-volume-rendering.md)
+Uses unequally weighted sums at unequally spaced points to achieve greater accuracy for smooth functions with the same number of samples. Choose when the transfer function and density vary smoothly.
+
+## Operating characteristics
+*   **Time Complexity:** $O(n)$ per ray, where $n$ is the number of samples.
+*   **Memory Complexity:** $O(1)$ auxiliary memory per ray (excluding storage for the volume data).
+*   **Performance:** Fastest integration method due to simplicity and lack of pre-computation requirements [S11].
+*   **Accuracy:** Low. It is a first-order approximation (piecewise constant). Accuracy improves linearly with $n$ but suffers from aliasing and blockiness artifacts [S1, unofficial][S11].
+*   **Strengths:** Simple to implement, no pre-computation needed, supports early ray termination [S7, book].
+*   **Limitations:** Visible artifacts in high-frequency regions, inaccurate for non-linear transfer functions [S1, unofficial][S11].
+*   **When to use:** Real-time rendering with limited sampling budget, or as a baseline method.
+*   **When not to use:** High-quality offline rendering, or when density/transfer functions vary rapidly within a single sample step.
+
+## Background
+The method originates from standard numerical quadrature, specifically the Riemann sum using the rectangle rule [S2, unofficial][S7, book]. It is one of the simplest numerical integration techniques, historically used in early volume ray casting implementations due to its computational efficiency [S8, S11]. It is widely cited in foundational volume rendering literature as the baseline for comparison against more advanced techniques like pre-integration [S1, unofficial][S11].
+
+## Sources
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
+[S2] Volume Rendering of Neural Implicit Surfaces, https://doi.org/10.48550/arxiv.2106.12052, fetched 2026-10-26 (unofficial)
+[S3] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)
+[S4] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+[S5] PDF Volume Rendering - faculty.cc.gatech.edu, https://faculty.cc.gatech.edu/~hays/compvision2025spring/lectures/26.pdf, fetched 2026-10-26 (unofficial)
+[S6] Multi-Field Visualization, https://kluedo.ub.rptu.de/files/2291/_diss.pdf, fetched 2026-10-27 (unofficial)
+[S7] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)
+[S8] Optical models for direct volume rendering (PDF) - Academia.edu, https://www.academia.edu/49467168/Optical_models_for_direct_volume_rendering, fetched 2026-10-27
+[S9] High-Quality Pre-Integrated Volume Rendering Using ..., https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/engel.pdf, fetched 2026-10-28
+[S10] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)
+[S11] Second Order Pre-Integrated Volume Rendering, https://people.freedesktop.org/~marcheu/pacificvis08.pdf, fetched 2026-10-29

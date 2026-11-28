@@ -1,0 +1,212 @@
+--- v001.md
++++ v002.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A 3D query point $x_j$ on a ray $r_j(t) = o_j + d_j t$, where $o_j$ is the ray origin and $d_j$ is the viewing direction.
+-*   **Output:** The volume density $\sigma_j$ and the final color $c_j$ at point $x_j$.
++*   **Input:** A 3D query point $x_j$ on a ray $r_j(t) = o_j + d_j t$, where $o_j$ is the ray origin and $d_j$ is the viewing direction [S1, S3].
++*   **Output:** The volume density $\sigma_j$ and the final color $c_j$ at point $x_j$ [S1, S3].
+ 
+ **Data Structures**
+-1.  **Shared Feature Grid:** A single voxel grid containing features. The grid is repeated identically across $N$ regions.
++1.  **Shared Feature Grid:** A single voxel grid containing features [S1, S2, S3]. The grid is repeated identically across $N$ regions [S1, S3].
+     *   **Layout:** The grid is defined by a resolution $R$ (chosen independently per dataset) and a feature dimension $C=32$ [S1, S2, S3].
+     *   **Placement:** Features are placed symmetrically to the scene center in each volume to favor continuity between density fields [S3].
+@@ -33,7 +33,8 @@
+ **Pseudocode**
+ ```python
+-def query_shared_feature_grid(x_j, ray_origin, ray_direction, N_regions, 
+-                              shared_grid, density_decoders, color_decoder, 
+-                              bounding_box_side):
++def query_shared_feature_grid(x_j, ray_direction, N_regions, 
++                              shared_grid_weights, grid_resolution, 
++                              density_decoders, color_decoder, 
++                              bbox_min, bbox_max):
+     """
+     Query the Shared Feature Grid representation for a point on a ray.
+@@ -41,11 +42,12 @@
+     Args:
+         x_j: 3D point coordinates (x, y, z).
+-        ray_origin: 3D ray origin (o_j).
+         ray_direction: 3D ray direction (d_j).
+         N_regions: Number of regions (typically 8).
+-        shared_grid: The single shared feature grid data structure.
++        shared_grid_weights: 4D tensor of shape (C, R, R, R) for the shared grid.
++        grid_resolution: Integer resolution R of the voxel grid.
+         density_decoders: List of N neural networks for density prediction.
+         color_decoder: Single neural network for color prediction.
+-        bounding_box_side: Side length of the total scene bounding box.
++        bbox_min: 3D array of minimum bounding box coordinates.
++        bbox_max: 3D array of maximum bounding box coordinates.
+         
+     Returns:
+@@ -55,100 +57,81 @@
+     
+     # 1. Determine Region Index
+-    # The scene is split into N regions. Each region is a cube with side 
+-    # length = bounding_box_side / 2.
+-    # Assuming a 2x2x2 grid arrangement (N=8) centered at the scene origin.
+-    # Calculate the half-side of a region.
+-    region_side = bounding_box_side / 2.0
++    # The scene is split into N=8 regions (2x2x2 grid). Each region is a cube 
++    # with side length equal to half the bounding box side [S1, S2, S3].
++    region_side = (bbox_max[0] - bbox_min[0]) / 2.0
+     
+-    # Determine which octant the point x_j falls into.
+-    # This assumes the bounding box is centered at (0,0,0) and extends 
+-    # from -bounding_box_side/2 to +bounding_box_side/2.
+-    # Map x_j to normalized coordinates [-1, 1] relative to the region side.
+-    # Note: Exact mapping depends on the specific coordinate system of the 
+-    # bounding box. We assume standard axis-aligned splitting.
++    # Determine which octant the point falls into based on bounding box bounds.
++    idx_x = 0 if x_j[0] < bbox_min[0] + region_side else 1
++    idx_y = 0 if x_j[1] < bbox_min[1] + region_side else 1
++    idx_z = 0 if x_j[2] < bbox_min[2] + region_side else 1
+     
+-    # Calculate index based on position relative to the center of the bounding box.
+-    # If the bounding box center is (0,0,0):
+-    center = [0.0, 0.0, 0.0]
+-    
+-    # Determine sign of coordinates to find the octant index i (0 to 7)
+-    # i = 4*sign_x + 2*sign_y + 1*sign_z (or similar bit packing)
+-    # We map coordinates to -1 (left/bottom/back) or 1 (right/top/front)
+-    
+-    def get_sign(val, center_val):
+-        if val < center_val:
+-            return 0
+-        else:
+-            return 1
+-            
+-    idx_x = get_sign(x_j[0], center[0])
+-    idx_y = get_sign(x_j[1], center[1])
+-    idx_z = get_sign(x_j[2], center[2])
+-    
+-    # Map to 1-based index for the formula i in [1, N]
+-    # Using 0-based index for array access, then convert if necessary.
+-    # Let's use 0-based index i_idx for decoder selection.
++    # Map to 0-based index for decoder selection.
+     i_idx = idx_x * 4 + idx_y * 2 + idx_z
+     
+     # 2. Retrieve Feature
+-    # Retrieve the integrated feature from the shared grid.
+-    # The grid is shared, so we query the same grid for all regions.
+-    # Interpolation (e.g., trilinear) is performed based on x_j's position 
+-    # within the grid's local coordinate system.
+-    # Note: The grid is repeated, so the coordinate system for the grid 
+-    # is likely normalized to the region size or the full scene size.
+-    # Based on "features are placed symmetrically... on each volume", 
+-    # the grid likely covers the region volume.
++    # Map x_j to local normalized coordinates [0, 1] within the region.
++    # The grid is shared and repeated identically across regions [S1, S3].
++    local_x = (x_j[0] - (bbox_min[0] + idx_x * region_side)) / region_side
++    local_y = (x_j[1] - (bbox_min[1] + idx_y * region_side)) / region_side
++    local_z = (x_j[2] - (bbox_min[2] + idx_z * region_side)) / region_side
+     
+-    # Assuming shared_grid is indexed by normalized coordinates [0,1]^3 
+-    # relative to the region's local space.
+-    # We need to map x_j to the local coordinates of region i_idx.
+-    # However, since the grid is *shared* and *repeated*, the query 
+-    # might simply use the global coordinate x_j if the grid is defined 
+-    # over the whole scene but tiled, OR the grid is defined per region 
+-    # but weights are shared. The text says "single feature grid is repeated".
+-    # This implies one set of weights is used for all N regions.
+-    # The query function for the grid must handle the coordinate mapping.
+-    
+-    # Let's assume the grid is queried using the global coordinate x_j,
+-    # but the grid itself is defined such that it covers the region.
+-    # Actually, "repeated in each of them" suggests the grid structure 
+-    # exists N times, but they share parameters/weights? 
+-    # No, "single feature grid... repeated" usually means the data 
+-    # structure is duplicated, but the *decoders* share the feature 
+-    # lookup? 
+-    # Re-reading: "This feature grid is repeated for each of the regions... 
+-    # and is shared by all the decoders."
+-    # This implies the *weights* of the feature grid are shared? 
+-    # Or the grid data is identical? 
+-    # "reduces the number of unique features... by a factor of N".
+-    # This implies there is only ONE grid of features in memory, 
+-    # but it is conceptually associated with N regions.
+-    # When querying, we look up the feature at x_j.
+-    
+-    f_hat = shared_grid.query(x_j)
++    # Trilinear interpolation from the shared grid [G]
++    f_hat = trilinear_interpolate(shared_grid_weights, grid_resolution, 
++                                  local_x, local_y, local_z)
+     
+     # 3. Density and Intermediate Representation
+-    # Select the region-specific density decoder.
+     theta_i = density_decoders[i_idx]
+-    
+-    # Compute density and intermediate representation h_j
+     sigma_j, h_j = theta_i(f_hat)
+     
+     # 4. Color Computation
+-    # Compute positional encoding of the viewing direction
+     gamma_d = positional_encoding(ray_direction)
+-    
+-    # Compute color using the shared color decoder
+     c_j = color_decoder(h_j, gamma_d)
+     
+     return sigma_j, c_j
+ 
++def trilinear_interpolate(weights, res, u, v, w):
++    """Standard trilinear interpolation for a 3D voxel grid [G]."""
++    # Clamp coordinates to [0, 1]
++    u, v, w = max(0.0, min(1.0, u)), max(0.0, min(1.0, v)), max(0.0, min(1.0, w))
++    
++    # Map to grid indices
++    u0, v0, w0 = int(u * (res - 1)), int(v * (res - 1)), int(w * (res - 1))
++    u1, v1, w1 = min(u0 + 1, res - 1), min(v0 + 1, res - 1), min(w0 + 1, res - 1)
++    
++    # Fractional parts
++    du, dv, dw = u * (res - 1) - u0, v * (res - 1) - v0, w * (res - 1) - w0
++    
++    # Interpolate across C channels
++    result = []
++    for c in range(weights.shape[0]):
++        w000 = weights[c, w0, v0, u0]
++        w100 = weights[c, w0, v0, u1]
++        w010 = weights[c, w0, v1, u0]
++        w110 = weights[c, w0, v1, u1]
++        w001 = weights[c, w1, v0, u0]
++        w101 = weights[c, w1, v0, u1]
++        w011 = weights[c, w1, v1, u0]
++        w111 = weights[c, w1, v1, u1]
++        
++        # Trilinear blend
++        val = (w000 * (1-du)*(1-dv)*(1-dw) + 
++               w100 * du*(1-dv)*(1-dw) + 
++               w010 * (1-du)*dv*(1-dw) + 
++               w110 * du*dv*(1-dw) + 
++               w001 * (1-du)*(1-dv)*dw + 
++               w101 * du*(1-dv)*dw + 
++               w011 * (1-du)*dv*dw + 
++               w111 * du*dv*dw)
++        result.append(val)
++    return result
++
+ def positional_encoding(v, num_frequencies=10):
+-    """Standard positional encoding for NeRF."""
+-    # Implementation details of positional encoding are standard 
+-    # and not specific to the Shared Feature Grid method itself.
+-    # [S1] references [25] for this.
+-    pass
++    """Standard positional encoding for NeRF [G]."""
++    import math
++    freq_bands = [2.0 ** (i * num_frequencies / num_frequencies) for i in range(num_frequencies)]
++    encoded = []
++    for freq in freq_bands:
++        encoded.extend([math.sin(v[i] * freq), math.cos(v[i] * freq)])
++    return encoded
+ ```
+ 
+@@ -158,6 +141,6 @@
+ 
+ ## Operating characteristics
+-*   **Memory Complexity:** The memory usage for the feature grid is reduced by a factor of $N$ compared to using separate grids for each region [S1, S3]. The total memory is proportional to the size of one grid plus $N$ density decoders and one color decoder.
+-*   **Time Complexity:** Query time involves one grid lookup, one density decoder inference, and one color decoder inference. The region-specific density decoder adds a small overhead of selecting the correct decoder $\theta_i$ based on the region index.
++*   **Memory Complexity:** The memory usage for the feature grid is reduced by a factor of $N$ compared to using separate grids for each region [S1, S3]. The total memory is proportional to the size of one grid plus $N$ density decoders and one color decoder [S1, S3].
++*   **Time Complexity:** Query time involves one grid lookup, one density decoder inference, and one color decoder inference [G]. The region-specific density decoder adds a small overhead of selecting the correct decoder $\theta_i$ based on the region index [G].
+ *   **Strengths:** Significant reduction in memory footprint and number of unique features [S1, S3]. Allows for a single color field, simplifying the color prediction network [S3].
+ *   **Limitations:** The shared feature grid must represent multiple regions, which may require more compact features (dimension 32) compared to methods with dedicated grids [S1, S3]. Discontinuities can occur at region boundaries if not handled carefully (e.g., via symmetric placement) [S2, S3].

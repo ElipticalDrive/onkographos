@@ -1,0 +1,233 @@
+--- v001.md
++++ v002.md
+@@ -4,72 +4,131 @@
+ 
+ ## Overview
+-Sparse Coding (K-SVD) is a data-driven compression technique that represents volume-rendered images or volumetric data blocks as sparse linear combinations of atoms from an overcomplete dictionary learned via the K-SVD algorithm [S2, unofficial]. It solves the problem of high storage and transmission costs for large volume datasets by achieving high compression ratios (often under 1 bit per sample) while maintaining visual fidelity [S1, unofficial]. Unlike prescribed orthogonal bases like DCT, K-SVD learns a dictionary tailored to the specific statistical properties of the volume rendering data, offering superior reconstruction quality for missing pixel recovery and compression artifacts [S2, unofficial]. It differs from Vector Quantization (VQ) by allowing linear combinations of multiple dictionary atoms rather than selecting a single nearest neighbor, providing higher fidelity at the cost of more complex encoding [S2, unofficial].
++Sparse Coding (K-SVD) compresses volume rendering data by learning an overcomplete dictionary from rendered images and representing image blocks as sparse linear combinations of dictionary atoms [S1, S2, unofficial]. It sets itself apart from prescribed basis methods like [Wavelet and Pyramid Transforms](3856-wavelet-and-pyramid-transforms.md) by adapting the basis to the specific statistical structure of the volume data, and from [Vector Quantization for Volumetric Radiance Fields](1870-vector-quantization-for-volumetric-radiance-fields.md) by allowing multiple atoms per block, which reduces reconstruction error at the cost of higher encoding complexity [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Training dataset: A set of volume-rendered images (greyscale or RGB) generated from the target volume data from multiple viewpoints [S2, unofficial].
+-- Block size $B$: Spatial dimensions of the data blocks to be encoded (e.g., $16 \times 16$ for greyscale, $16 \times 16 \times 3$ for RGB) [S2, unofficial].
+-- Dictionary size $D$: Number of atoms in the dictionary [S1, unofficial][S2, unofficial].
+-- Sparsity level $L$ (or $K$): Maximum number of non-zero coefficients allowed per block [S1, unofficial][S2, unofficial].
+-
+-**Outputs:**
+-- Learned dictionary matrix $\mathbf{D}$ of size $M \times D$, where $M$ is the dimension of a single block (e.g., $256$ for $16 \times 16$ greyscale, $768$ for $16 \times 16 \times 3$ RGB) [S2, unofficial].
+-- Sparse coefficient matrix $\mathbf{X}$ for each data block, where each column $\mathbf{x}_i$ has at most $L$ non-zero entries [S2, unofficial].
++**Inputs:** A set of training images rendered from the volume dataset (e.g., chest CT from multiple viewpoints) [S2, unofficial].
++**Outputs:** A learned dictionary $\mathbf{D}$ and sparse coefficient matrices $\mathbf{X}$ for the training data [S2, unofficial].
+ 
+ **Data Structures:**
+-- **Dictionary $\mathbf{D}$**: A matrix where each column is an atom. For greyscale, $\mathbf{D} \in \mathbb{R}^{256 \times 1024}$ [S2, unofficial]. For RGB, $\mathbf{D} \in \mathbb{R}^{768 \times 2304}$ [S2, unofficial].
+-- **Training Matrix $\mathbf{Y}$**: A matrix where each column is a flattened training block vector [S2, unofficial].
+-- **Coefficient Matrix $\mathbf{X}$**: A matrix where each column $\mathbf{x}_i$ corresponds to the sparse coefficients for the $i$-th block in $\mathbf{Y}$ [S2, unofficial].
++*   **Dictionary $\mathbf{D}$:** A matrix of size $M \times N$, where $M$ is the dimension of a training block (e.g., $16 \times 16 = 256$ for grayscale, $16 \times 16 \times 3 = 768$ for RGB) and $N$ is the number of atoms (e.g., 1024 or 2048) [S1, S2, unofficial]. Columns are normalized to unit 2-norm.
++*   **Coefficient Matrix $\mathbf{X}$:** A matrix of size $N \times K$, where $K$ is the number of training blocks. Each column $\mathbf{x}_i$ contains the sparse coefficients for the $i$-th block.
++*   **Training Data Matrix $\mathbf{Y}$:** A matrix of size $M \times K$, where each column is a flattened training block [S2, unofficial].
++
++**Parameters:**
++*   **Block Size:** $16 \times 16$ pixels for grayscale; $16 \times 16 \times 3$ for RGB [S2, unofficial].
++*   **Sparsity Level ($L$ or $K$):** Maximum number of non-zero coefficients per block. Typical values: $L=10$ for grayscale training [S2, unofficial]; $K=6$ for Chameleon/Supernova datasets, $K=4$ for Turbulence [S1, unofficial].
++*   **Dictionary Size ($N$):** Typical values: 1024 [S1, S2, unofficial], 2048 [S1, unofficial], or 2304 for RGB [S2, unofficial].
+ 
+ **Algorithm Steps:**
++1.  **Training Data Generation:** Render the volume from multiple viewpoints (e.g., 35 views) using a transfer function. Convert to grayscale if training a grayscale dictionary. Extract non-overlapping $16 \times 16$ blocks to form $\mathbf{Y}$ [S2, unofficial].
++2.  **Initialization:** Initialize $\mathbf{D}$ randomly or using a prescribed basis (e.g., DCT) [S2, unofficial].
++3.  **Sparse Coding (OMP):** For each column $\mathbf{y}_i$ in $\mathbf{Y}$, find sparse $\mathbf{x}_i$ using Orthogonal Matching Pursuit (OMP) such that $\|\mathbf{y}_i - \mathbf{D}\mathbf{x}_i\|_2 \leq \epsilon$ and $\|\mathbf{x}_i\|_0 \leq L$ [S2, unofficial].
++4.  **Dictionary Update (K-SVD):** Update $\mathbf{D}$ to minimize the reconstruction error $\|\mathbf{Y} - \mathbf{D}\mathbf{X}\|_F^2$ subject to sparsity constraints [S2, unofficial]. This is done atom-by-atom:
++    *   For atom $j$, identify the set of indices $\mathcal{I}_j$ where $\mathbf{x}_i$ uses atom $j$ (i.e., $x_{j,i} \neq 0$).
++    *   Compute the error matrix $\mathbf{E}_j = \mathbf{Y} - \sum_{k \neq j} \mathbf{d}_k \mathbf{x}_k^T$ (where $\mathbf{d}_k$ is the $k$-th column of $\mathbf{D}$) [S2, unofficial].
++    *   Perform SVD on $\mathbf{E}_j$ restricted to columns in $\mathcal{I}_j$: $\mathbf{E}_j \mathbf{1}_{\mathcal{I}_j} = \mathbf{U} \mathbf{\Sigma} \mathbf{V}^T$.
++    *   Update $\mathbf{d}_j = \mathbf{u}_1$ and scale the corresponding row of $\mathbf{X}$ by $\sigma_1$ [S2, unofficial].
++5.  **Iteration:** Repeat steps 3 and 4 until convergence or a fixed number of iterations [S2, unofficial].
+ 
+-1. **Training Data Generation**:
+-   - Render the volume dataset from multiple viewpoints (e.g., 35 views for training, 1 for testing) [S2, unofficial].
+-   - Center the dataset tightly in the camera view to minimize background pixels [S2, unofficial].
+-   - For greyscale training, convert color renderings to greyscale [S2, unofficial].
+-   - For RGB training, keep color channels [S2, unofficial].
++**Missing Pixel Recovery:**
++To recover missing pixels in a test image:
++1.  Form the subsampled signal $\tilde{\mathbf{y}}$ by removing missing components.
++2.  Define subsampling matrix $\mathbf{S}$ such that $\tilde{\mathbf{y}} = \mathbf{S}\mathbf{y}$.
++3.  Compute decimated dictionary $\tilde{\mathbf{D}} = \mathbf{S}\mathbf{D}$.
++4.  Solve $\min \|\mathbf{x}\|_0 \text{ s.t. } \tilde{\mathbf{y}} = \tilde{\mathbf{D}}\mathbf{x}$ via OMP [S2, unofficial].
++5.  Reconstruct $\mathbf{y} \approx \mathbf{D}\mathbf{x}$ [S2, unofficial].
+ 
+-2. **Block Extraction**:
+-   - Extract training blocks by sliding a window of size $B \times B$ (greyscale) or $B \times B \times 3$ (RGB) over the training images without overlap [S2, unofficial].
+-   - Flatten each block into a column vector. For RGB, linearize a $16 \times 16 \times 3$ block into a $768 \times 1$ vector: first 256 entries are Red, next 256 Green, remaining 256 Blue [S2, unofficial].
+-   - Assemble all training vectors into the matrix $\mathbf{Y}$ [S2, unofficial].
++**Pseudocode:**
+ 
+-3. **Dictionary Learning (K-SVD)**:
+-   The goal is to solve:
+-   $$ \min_{\mathbf{D}, \mathbf{X}} \{ \|\mathbf{Y} - \mathbf{D}\mathbf{X}\|_F^2 \} \quad \text{subject to} \quad \forall_i \|\mathbf{x}_i\|_0 \leq L $$
+-   where $\|\cdot\|_F$ is the Frobenius norm and $\|\cdot\|_0$ is the $\ell_0$ norm (number of non-zero elements) [S2, unofficial].
+-   
+-   Iterate until convergence:
+-   a. **Sparse Coding Step**: For each column $\mathbf{y}_i$ in $\mathbf{Y}$, find the sparse coefficient vector $\mathbf{x}_i$ using Orthogonal Matching Pursuit (OMP) with sparsity constraint $L$ [S2, unofficial].
+-   b. **Dictionary Update Step**: Update the dictionary atoms in $\mathbf{D}$ to minimize the reconstruction error while preserving the sparsity pattern of $\mathbf{X}$ [S2, unofficial]. This step guarantees a reduction or no change in Mean Squared Error (MSE) [S2, unofficial].
++```python
++import numpy as np
+ 
+-4. **Encoding (Compression)**:
+-   - For a new data block $\mathbf{y}$, compute its sparse representation $\mathbf{x}$ using OMP with the learned dictionary $\mathbf{D}$ and sparsity $L$ [S2, unofficial].
+-   - Store the indices of the non-zero coefficients and their values [S2, unofficial].
++def k_svd_train(Y, D, L, max_iter):
++    """
++    Train dictionary D using K-SVD on data Y.
++    Y: (M, K) matrix of training blocks
++    D: (M, N) initial dictionary
++    L: sparsity level
++    max_iter: number of iterations
++    """
++    M, N = D.shape
++    for iteration in range(max_iter):
++        # Step 1: Sparse Coding using OMP
++        X = np.zeros((N, Y.shape[1]))
++        for i in range(Y.shape[1]):
++            y_i = Y[:, i]
++            x_i = omp(y_i, D, L)
++            X[:, i] = x_i
++        
++        # Step 2: Dictionary Update
++        for j in range(N):
++            # Find indices where atom j is used
++            idx = np.where(X[j, :] != 0)[0]
++            if len(idx) == 0:
++                continue
++            
++            # Compute error excluding atom j
++            # E_j = Y - sum_{k!=j} d_k * x_k^T
++            # This is equivalent to Y - D * X + d_j * x_j^T
++            E_j = Y - D @ X + D[:, j:j+1] @ X[j:j+1, :]
++            
++            # Restrict E_j to columns in idx
++            E_j_sub = E_j[:, idx]
++            
++            # SVD of E_j_sub
++            U, S, Vt = np.linalg.svd(E_j_sub, full_matrices=False)
++            
++            # Update atom d_j
++            D[:, j] = U[:, 0]
++            
++            # Update coefficient x_j for all used blocks
++            # x_j_new = x_j_old * sigma_1 / ||d_j|| (but d_j is unit norm)
++            # Actually, we scale the row of X corresponding to j
++            # The update is: x_j = sigma_1 * v_1^T
++            X[j, idx] = S[0] * Vt[0, :]
++            
++            # Normalize D column j (should already be unit norm from U[:,0])
++            D[:, j] /= np.linalg.norm(D[:, j])
++            
++    return D, X
+ 
+-5. **Decoding (Reconstruction)**:
+-   - Reconstruct the block as $\hat{\mathbf{y}} = \mathbf{D}\mathbf{x}$ [S2, unofficial].
+-   - For missing pixel recovery, if a signal $\mathbf{y}$ has missing pixels, form a subsampled signal $\tilde{\mathbf{y}}$ using a subsampling matrix $S$. Compute the decimated dictionary $\tilde{\mathbf{D}} = S\mathbf{D}$ and solve:
+-     $$ \min_{\mathbf{x}} \|\mathbf{x}\|_0 \text{ s.t. } \tilde{\mathbf{y}} = \tilde{\mathbf{D}}\mathbf{x} $$
+-     via OMP to recover $\mathbf{x}$, then approximate $\mathbf{y}$ as $\mathbf{D}\mathbf{x}$ [S2, unofficial].
+-
+-**Parameters:**
+-- **Block Size**: $16 \times 16$ pixels for greyscale; $16 \times 16 \times 3$ for RGB [S2, unofficial].
+-- **Dictionary Size ($D$)**: $1024$ atoms for greyscale [S2, unofficial]; $2304$ atoms for RGB [S2, unofficial]; $1024$ for Chameleon/Supernova datasets in [S1, unofficial].
+-- **Sparsity Level ($L$ or $K$)**: $10$ for greyscale [S2, unofficial]; $6$ for Chameleon/Supernova; $4$ for Turbulence [S1, unofficial].
+-- **Initialization**: Dictionary can be initialized randomly or using a prescribed dictionary (e.g., DCT) [S2, unofficial].
+-
+-**Pitfalls:**
+-- The algorithm converges under the condition that the sparse coding step provides the best approximation to the signal containing no more than $L$ nonzero entries [S2, unofficial].
+-- Training time is significant; e.g., 7.1 minutes for greyscale and 47.3 minutes for RGB on a single-threaded CPU [S2, unofficial].
+-- Using a prescribed dictionary (like DCT) may yield lower PSNR compared to a trained dictionary, especially with high missing pixel rates [S2, unofficial].
++def omp(y, D, L):
++    """
++    Orthogonal Matching Pursuit
++    y: signal (M,)
++    D: dictionary (M, N)
++    L: sparsity level
++    """
++    x = np.zeros(D.shape[1])
++    residual = y.copy()
++    indices = []
++    
++    for _ in range(L):
++        # Compute inner products
++        correlations = np.abs(D.T @ residual)
++        # Select atom with max correlation
++        idx = np.argmax(correlations)
++        if idx in indices:
++            break
++        indices.append(idx)
++        
++        # Least squares to update coefficients
++        D_sub = D[:, indices]
++        coeffs = np.linalg.lstsq(D_sub, y, rcond=None)[0]
++        x[indices] = coeffs
++        
++        # Update residual
++        residual = y - D_sub @ coeffs
++        
++    return x
++```
+ 
+ ## Subtopics
+ 
+ ### [CP Decomposition](2255-cp-decomposition.md)
+-CP Decomposition is a tensor factorization technique that represents a tensor as a sum of rank-one components, where each component is the outer product of vectors corresponding to each mode of the tensor. In the context of volume rendering, it is used to factorize the 3D (or 4D) radiance field tensor into compact vectors, significantly reducing the memory footprint compared to dense voxel grids. Unlike Tucker Decomposition (HOSVD), which uses a core tensor multiplied by factor matrices, CP uses only vectors, offering higher compactness but requiring more components to model complex scenes, leading to higher computational costs during reconstruction.
++CP Decomposition is a tensor factorization technique that represents a tensor as a sum of rank-one components, where each component is the outer product of vectors corresponding to each mode of the tensor. In the context of volume rendering, it is used to factorize the 3D (or 4D) radiance field tensor into compact vectors, significantly reducing the memory footprint compared to dense voxel grids. Unlike [Tucker Decomposition (HOSVD)](5352-tucker-decomposition-hosvd.md), which uses a core tensor multiplied by factor matrices, CP uses only vectors, offering higher compactness but requiring more components to model complex scenes, leading to higher computational costs during reconstruction.
+ 
+ ### [Tucker Decomposition (HOSVD)](5352-tucker-decomposition-hosvd.md)
+-Tucker Decomposition (HOSVD) is a global basis generation method that decomposes an $N$-dimensional input array into $N$ basis matrices and an $N$-dimensional core tensor. It solves the problem of storing and transmitting large volume datasets by reducing the reconstruction rank, thereby achieving data reduction. Unlike its sibling CP Decomposition, which sums rank-one tensors, Tucker Decomposition uses a multilinear product structure, allowing for a more compact representation of correlated data. It is distinguished from its parent Sparse Coding (K-SVD) by its specific application to global multiresolution basis generation for volume rendering, often integrated with octree hierarchies.
++Tucker Decomposition (specifically via Higher-Order SVD) approximates an $N$-dimensional input tensor $\mathcal{A}$ by a product of a core tensor $\mathcal{B}$ and $N$ factor matrices $\mathbf{U}^{(n)}$, capturing the multi-linear structure of volume data. It sets itself apart from sibling methods like CP Decomposition by providing a compact model with rank-reducible bases that capture non-axis aligned features, unlike fixed-basis transforms. It serves as the foundational compression step for Tensor Approximation, enabling multiresolution volume rendering by learning global bases.
+ 
+ ### [Karhunen-Loeve Transform (KLT)](5365-karhunen-loeve-transform-klt.md)
+@@ -80,34 +139,29 @@
+ 
+ ### Orthogonal Matching Pursuit (OMP)
+-OMP is a greedy algorithm for sparse coding that selects dictionary atoms sequentially to find an approximate sparse solution $\mathbf{x}$ for the problem $\min \|\mathbf{x}\|_0$ subject to $\|\mathbf{y} - \mathbf{D}\mathbf{x}\|_2 \leq \epsilon$ [S2, unofficial]. It computes inner products between the signal $\mathbf{y}$ and dictionary columns $\mathbf{D}$, then deploys least squares solvers to update the solution coefficients [S2, unofficial]. The target sparsity $L$ represents the maximum number of nonzero entries allowed in $\mathbf{x}_i$ [S2, unofficial]. OMP is preferred over Matching Pursuit (MP) because it offers improvements on orthogonality and faster convergence [S2, unofficial].
++Orthogonal Matching Pursuit (OMP) is a greedy algorithm for sparse coding that selects dictionary atoms sequentially to find an approximate sparse solution $\mathbf{x}$ for the problem $\min \|\mathbf{x}\|_0 \text{ s.t. } \|\mathbf{y} - \mathbf{D}\mathbf{x}\|_2 \leq \epsilon$ [S2, unofficial]. It computes inner products between the signal $\mathbf{y}$ and dictionary columns $\mathbf{D}$, then deploys least squares solvers to update the solution coefficients [S2, unofficial]. The target sparsity $L$ limits the number of non-zero entries in $\mathbf{x}_i$ [S2, unofficial]. OMP is preferred over Matching Pursuit (MP) because it offers improvements on orthogonality and faster convergence [S2, unofficial].
+ 
+ ### Compressive Volume Rendering with Dictionary Learning
+-This technique treats rendered images as collections of square pixel blocks to apply sparse coding and dictionary learning for recovery or compression [S2, unofficial]. It involves training a dictionary for greyscale images first, then extending to color images based on experimental insights [S2, unofficial]. The block size is typically $16 \times 16$ pixels for both greyscale and color images [S2, unofficial].
++Compressive Volume Rendering with Dictionary Learning treats rendered images as collections of square pixel blocks to apply sparse coding and dictionary learning for recovery or compression [S2, unofficial]. It typically trains a dictionary for grayscale images first, then extends to color images based on experimental insights [S2, unofficial]. The block size is typically $16 \times 16$ pixels [S2, unofficial].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-- **Training**: The K-SVD algorithm involves iterative sparse coding and dictionary updates. Training time is significant; e.g., 7.1 minutes for greyscale and 47.3 minutes for RGB on a single-threaded CPU [S2, unofficial].
+-- **Encoding**: Requires running OMP for each block, which is computationally intensive but faster than training [S2, unofficial].
+-- **Memory**: The dictionary size determines memory usage. For greyscale, a $256 \times 1024$ dictionary is used [S2, unofficial]. For RGB, a $768 \times 2304$ dictionary is used [S2, unofficial].
++**Time Complexity:** Dictionary training is computationally expensive, taking 7.1 minutes for grayscale (256x1024 dict) and 47.3 minutes for RGB (768x2304 dict) on a single-threaded Intel Core i7-4770K CPU [S2, unofficial]. Encoding (sparse coding) is faster but still requires iterative pursuit algorithms like OMP [S2, unofficial].
++
++**Memory Complexity:** The dictionary size is $M \times N$. For grayscale, $256 \times 1024$ floats; for RGB, $768 \times 2304$ floats [S2, unofficial]. Coefficients are stored sparsely.
+ 
+ **Measured Performance:**
+-- **Compression Ratio**: Achieves bits-per-sample (bps) of 0.25 for Chameleon ($1024^2$), 0.07 for Supernova (1080p), and 0.20 for Turbulence ($512^4$) [S1, unofficial].
+-- **Quality**: Deblocked SSIM scores are 0.72 (Chameleon), 0.76 (Supernova), and 0.84 (Turbulence) [S1, unofficial].
+-- **Missing Pixel Recovery**: With 70% missing pixels, the trained dictionary achieves a PSNR of 31.2 dB, compared to 22.97 dB for a DCT dictionary [S2, unofficial].
++*   **Bits-per-sample (bps):** 0.25 (Chameleon $1024^2$), 0.07 (Supernova 1080p), 0.20 (Turbulence $512^4$) [S1, unofficial].
++*   **Reconstruction Quality:** For 70% missing pixels, trained dictionary PSNR is 31.2 dB vs. 22.97 dB for DCT dictionary [S2, unofficial].
++*   **SSIM:** Deblocked SSIM scores are 0.72 (Chameleon), 0.76 (Supernova), 0.84 (Turbulence) [S1, unofficial].
+ 
+ **Strengths and Limitations:**
+-- **Strengths**: High compression ratios, superior reconstruction quality compared to prescribed dictionaries (like DCT), ability to handle missing data effectively [S2, unofficial].
+-- **Limitations**: High computational cost for training and encoding, sensitivity to sparsity level and dictionary size, requires a representative training dataset [S2, unofficial].
++*   **Strengths:** Outperforms prescribed dictionaries (like DCT) in reconstruction quality (PSNR) for missing pixel recovery and compression [S2, unofficial]. Captures color correlations in RGB blocks [S2, unofficial].
++*   **Limitations:** High training time. Requires careful parameter tuning (block size, sparsity, dictionary size) [S1, S2, unofficial]. Convergence depends on perfect sparse coding [S2, unofficial].
+ 
+-**When to Use:**
+-- Use when high compression ratios are needed and computational resources allow for offline training [S1, unofficial].
+-- Use when dealing with missing or incomplete data, as the method excels at recovery [S2, unofficial].
++**When to use:** When high compression ratios are needed and offline training time is acceptable, especially for datasets with repetitive structures or specific color distributions [S1, S2, unofficial].
+ 
+-**When Not to Use:**
+-- Avoid when real-time encoding is required without pre-computed dictionaries [S2, unofficial].
+-- Avoid when the dataset is not representative of the training data, as the dictionary may not generalize well [S2, unofficial].
++**When not to use:** When real-time dictionary training is required or for datasets with low redundancy where prescribed bases perform similarly [S1, S2, unofficial].
+ 
+ ## Background
+-Sparse Coding with K-SVD was introduced in the context of volume rendering by researchers including those cited in [S1, unofficial] and [S2, unofficial]. The K-SVD algorithm itself was originally developed for general signal processing and image processing applications [MAB06, cited in S2, unofficial]. In volume rendering, it was adapted to treat rendered images as collections of pixel blocks, leveraging the redundancy and structure in volume-rendered data to achieve efficient compression and artifact reduction [S2, unofficial]. The method has been applied to datasets such as Chameleon, Supernova, and Turbulence, demonstrating its effectiveness in real-time deblocked GPU rendering scenarios [S1, unofficial].
++The K-SVD algorithm was introduced by Elad and Aharon [MAB06] as a generalization of K-Means for dictionary learning [S2, unofficial]. It was applied to volume rendering by [S2, unofficial] to treat rendered images as collections of pixel blocks for compression and artifact reduction. The method builds on [Compression](4-compression.md) principles by using dictionary-based transformation and sparse representation [S1, S2, unofficial].
+ 
+ ## Sources

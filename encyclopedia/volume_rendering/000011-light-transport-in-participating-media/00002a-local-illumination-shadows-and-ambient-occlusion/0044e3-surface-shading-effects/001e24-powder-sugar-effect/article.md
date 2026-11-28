@@ -1,0 +1,61 @@
+# Powder Sugar Effect
+Also called: Powder Decay, Powder Function
+## Overview
+The Powder Sugar Effect is a local illumination approximation for participating media that reduces scattered light in low-density regions to approximate the lack of available illumination at cloud fringes [S1, unofficial]. It applies a density-dependent attenuation factor directly to the scattered light increment during integration, distinguishing it from sibling methods that modify shadowing or ambient occlusion terms [G].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: Local volume density $\rho$, integration step size $\Delta s$, and decay parameter $\alpha$ (`powder_decay`) [S1, unofficial][G].
+*   Output: Scalar attenuation factor $P \in [0, 1]$ applied to the scattered light increment [S1, unofficial].
+
+**Data Structures:**
+No auxiliary data structures are required [G].
+
+**Steps:**
+1. Compute the optical thickness for the current integration step: $d = \rho \cdot \Delta s$ [S1, unofficial].
+2. Evaluate the powder function: $P = 1 - \exp(-\alpha \cdot d)$ [S1, unofficial].
+3. Multiply the scattered light increment $dL_{\text{scat}}$ by $P$ during the integration loop [S1, unofficial].
+
+**Formulas:**
+The attenuation factor is defined as [S1, unofficial]:
+$$ P = 1.0 - \exp(-\alpha \cdot d) $$
+where $d$ is the product of density and step size ($\rho \cdot \Delta s$), and $\alpha$ is the decay parameter.
+
+**Parameters:**
+*   $\alpha$ (`powder_decay`): A uniform float controlling the attenuation curve. Typical values are not given in the sources [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Low Density:** As $d \to 0$, $P \to 0$, suppressing scattering where incident light is insufficient [G].
+*   **High Density:** As $d \to \infty$, $P \to 1$, leaving dense regions unattenuated [G].
+*   **Precision:** Standard floating-point evaluation of the exponential is sufficient for typical density ranges [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def powder_sugar_effect(density: float, step_size: float, powder_decay: float) -> float:
+    """Returns the attenuation factor for scattered light in low-density regions."""
+    d = density * step_size
+    return 1.0 - math.exp(-powder_decay * d)
+```
+
+## Subtopics
+
+### [Shadow Density Scale](11398-shadow-density-scale.md)
+Decouples visual silhouette from shadow-casting opacity to allow deeper light penetration without altering physical density. Choose Powder Sugar for fringe brightness/artifact reduction; choose Shadow Density Scale for transmittance and multiple scattering approximation.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per shading point, adding one exponential evaluation and one multiplication to the integration loop [G].
+*   **Memory Complexity:** $O(1)$, requiring storage only for the `powder_decay` parameter [G].
+*   **Strengths:** The method directly attenuates scattered light in low-density regions to match available illumination, reducing visual noise at cloud fringes [S1, unofficial].
+*   **Limitations:** The approximation may require smaller sampling intervals to minimize blue noise, which increases computational cost; depth-aware upsampling is recommended to mitigate this performance impact [S1, unofficial].
+*   **When to use:** It is best suited for procedural volumetric clouds or fog where low-density fringes appear unnaturally bright or noisy [S1, unofficial].
+*   **When not to use:** It should be avoided in physically based rendering requiring strict energy conservation or accurate multiple scattering simulation [G].
+
+## Background
+The method originates from a procedural volumetric cloud rendering implementation [S1, unofficial]. It is named for the visual effect of softening volume edges by reducing scattered light in low-density areas [S1, unofficial]. It is primarily applied in real-time or interactive procedural cloud rendering [G].
+
+## Sources
+[S1] Procedural Volumetric Clouds · Jan Wedekind, https://www.wedesoft.de/software/2023/05/03/volumetric-clouds/, fetched 2026-10-28 (unofficial)

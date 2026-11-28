@@ -1,0 +1,241 @@
+--- v001.md
++++ v002.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-The A-Buffer Visibility Pass is a GPU fragment-stage algorithm that generates an approximate visibility function $\tilde{v}(x_e, x)$ for each view ray by storing depth and visibility control points in an A-Buffer [S1, unofficial]. It solves the problem of efficiently representing volumetric occlusion along semi-transparent view rays to enable optimized illumination calculations, such as determining entry points for light rays or approximating multiple scattering [S1, unofficial]. Unlike sibling methods that may focus on primitive intersection or general buffer construction, this method specifically targets the generation of a sparse, error-thresholded visibility function using a fixed maximum number of layers, similar in concept to deep shadow maps but applied to view-space volumetric visibility [S1, unofficial].
++The A-Buffer Visibility Pass is a GPU fragment-stage algorithm that generates an approximate visibility function $\tilde{v}(x_e, x)$ for each view ray by storing depth and visibility control points in an A-Buffer [S1, unofficial]. It solves the problem of efficiently representing volumetric occlusion along semi-transparent view rays to enable optimized illumination calculations, such as determining entry points for light rays or approximating multiple scattering [S1, unofficial]. Unlike sibling methods that focus on primitive intersection or general buffer construction, this method specifically targets the generation of a sparse, error-thresholded visibility function using a fixed maximum number of layers, similar in concept to deep shadow maps but applied to view-space volumetric visibility [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volumetric data (voxels with color/opacity), camera ray definition, A-Buffer storage structure, error threshold for visibility changes, maximum layer count.
+-*   **Output:** An A-Buffer containing control points (depth $d$, visibility $v$) for each pixel, and textures storing the first and last hit points of the volume traversal.
++*   **Input:** Volumetric data (voxels with color/opacity), camera ray definition (origin, direction, length), A-Buffer storage structure, error threshold for accumulated opacity difference, maximum layer count [S1, unofficial].
++*   **Output:** An A-Buffer containing control points (depth $d$, visibility $v$) for each pixel, and textures storing the first and last hit points of the volume traversal [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -22,16 +22,16 @@
+ *   **Maximum Layers:** 32 [S1, unofficial].
+ *   **Sampling Frequency:** One sample per voxel during the unshaded raycasting pass [S1, unofficial].
+-*   **Storage Threshold:** An error threshold for accumulated opacity difference; a new control point is added when this threshold is exceeded [S1, unofficial].
++*   **Storage Threshold:** An error threshold for the difference in accumulated opacity; a new control point is added when this threshold is exceeded [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 1.  **Ray Definition:** Define a ray from front to back (from the camera) for each pixel [S1, unofficial].
+-2.  **Ray Marching:** Iterate through all samples $s$ along the ray [S1, unofficial].
++2.  **Ray Marching:** Iterate through all samples $s$ along the ray at a frequency of one sample per voxel [S1, unofficial].
+ 3.  **Voxel Classification:** Read and classify the voxel at sample $s$ to obtain color and opacity $c$ [S1, unofficial].
+ 4.  **Compositing:** If the opacity in $c$ is greater than 0, perform front-to-back compositing along the ray into the accumulated result $r$ [S1, unofficial].
+-5.  **Threshold Check:** If the accumulated opacity in $r$ exceeds the a-buffer storage threshold:
++5.  **Threshold Check:** If the difference in accumulated opacity exceeds the a-buffer storage threshold:
+     a.  Calculate the distance to the camera $d$ in volume space [S1, unofficial].
+     b.  Calculate the visibility $v = 1 - r.a$, where $r.a$ is the accumulated opacity [S1, unofficial].
+     c.  **Buffer Management:** If the A-Buffer is full (reached maximum layers):
+-        i.  Perform an iterative merging process to decimate existing control points. Remove the control point that introduces the smallest difference in visibility/depth to make room for the new point [S1, unofficial].
++        i.  Perform an iterative merging process to decimate existing control points. Remove the control point that introduces the smallest difference to make room for the new point [S1, unofficial].
+     d.  Store $v$ and $d$ as the next entry in the A-Buffer [S1, unofficial].
+     e.  Write the visibility value $lv$ to the write cache [S1, unofficial].
+@@ -41,117 +41,78 @@
+ **Pseudocode:**
+ ```python
+-# Pseudocode for Visibility Pass Unit: GPU (fragment stage, per-pixel)
+-# Assumes global variables:
+-#   max_layers = 32
+-#   a_buffer_depth: 2D texture array of size [width, height, max_layers]
+-#   a_buffer_vis: 2D texture array of size [width, height, max_layers]
+-#   first_hit_texture: 2D texture
+-#   last_hit_texture: 2D texture
+-#   threshold: float (error threshold for accumulated opacity)
+-#   ray: Ray object (origin, direction)
+-#   volume: 3D texture or data structure for voxel access
+-
+-def visibility_pass():
+-    # Initialize hit point tracking
+-    first_hit = None
+-    last_hit = None
++def visibility_pass(ray_origin, ray_direction, voxel_size, ray_length, threshold, max_layers, width, height):
++    # A-Buffer: 2D texture array [width, height, max_layers]
++    # Channel 0: depth d, Channel 1: visibility v
++    a_buffer = [[[[0.0, 0.0] for _ in range(max_layers)] for _ in range(height)] for _ in range(width)]
++    first_hit_texture = [[None for _ in range(height)] for _ in range(width)]
++    last_hit_texture = [[None for _ in range(height)] for _ in range(width)]
++    write_cache = []
+     
+-    # Current layer index in the A-Buffer
+-    current_layer = 0
+-    
+-    # Accumulated opacity
+-    acc_opacity = 0.0
+-    
+-    # Ray marching
+-    for sample in ray.samples():
+-        # Read/classify voxel at sample to color/opacity c
+-        c = volume.read(sample)
+-        
+-        if c.opacity > 0:
+-            # Perform compositing front-to-back along ray into r
+-            # r is implicitly tracked via acc_opacity for the threshold check
+-            # In a full implementation, r.color and r.a would be updated
+-            acc_opacity = 1.0 - (1.0 - acc_opacity) * (1.0 - c.opacity)
++    for y in range(height):
++        for x in range(width):
++            pixel_coord = (x, y)
++            current_layer = 0
++            acc_opacity = 0.0
++            prev_acc_opacity = 0.0
++            first_point_added = True
++            first_hit = None
++            last_hit = None
+             
+-            # Check if accumulated opacity exceeds threshold
+-            # Note: The source implies checking the *change* or the *accumulated* value
+-            # against a threshold to trigger a new control point.
+-            # Based on "difference in accumulated opacity... exceeds this error threshold",
+-            # we track previous_acc_opacity to compute difference.
+-            # However, the pseudocode in [S1, unofficial] checks "opacity in r > threshold".
+-            # We follow the provided pseudocode structure strictly.
+-            
+-            if acc_opacity > threshold:
+-                # Calculate distance to camera d (volume space)
+-                d = ray.distance_to(sample)
++            num_samples = int(ray_length / voxel_size)
++            for i in range(num_samples):
++                t = i * voxel_size
++                sample_pos = (ray_origin[0] + ray_direction[0] * t,
++                              ray_origin[1] + ray_direction[1] * t,
++                              ray_origin[2] + ray_direction[2] * t)
+                 
+-                # Calculate visibility v = 1 - r.a
+-                v = 1.0 - acc_opacity
++                # Read/classify voxel at s to color/opacity c [G] standard volume access
++                c_opacity = 0.0
++                if is_inside_volume(sample_pos):
++                    c_opacity = get_voxel_opacity(sample_pos)
+                 
+-                # If a-buffer is full, merge smallest threshold distance
+-                if current_layer >= max_layers:
+-                    merge_smallest_difference(a_buffer_depth, a_buffer_vis, current_layer)
+-                else:
+-                    current_layer += 1
+-                
+-                # Store v and d as next entry in a-buffer
+-                # Note: The first control point is not stored because the first hit 
+-                # results in the first visibility change [S1, unofficial].
+-                # This implies we might skip storing if it's the very first point,
+-                # or the "first hit point" is handled separately in hit point textures.
+-                # The pseudocode stores it unconditionally if threshold is met.
+-                # We follow the pseudocode:
+-                a_buffer_depth[gl_FragCoord.xy][current_layer] = d
+-                a_buffer_vis[gl_FragCoord.xy][current_layer] = v
+-                
+-                # Write lv to write cache
+-                write_cache.write(v)
+-                
+-                # Track hit points
+-                if first_hit is None:
+-                    first_hit = sample
+-                last_hit = sample
+-                
+-                # Reset acc_opacity for next threshold check? 
+-                # The source says "difference in accumulated opacity... exceeds".
+-                # The pseudocode does not reset acc_opacity. 
+-                # However, standard A-buffer logic for deep images often stores 
+-                # cumulative values. The merging process suggests we are storing 
+-                # discrete control points of the cumulative function.
+-                # We follow the provided pseudocode which does not reset acc_opacity.
+-                
+-            # Determine next position
+-            # If "end of ray" or "accumulated opacity is considered opaque", end for loop
+-            if ray.is_end(sample) or acc_opacity >= 1.0: # "considered opaque"
+-                break
+-                
+-    # Write first and last hit points into two textures
+-    first_hit_texture[gl_FragCoord.xy] = first_hit
+-    last_hit_texture[gl_FragCoord.xy] = last_hit
+-
+-def merge_smallest_difference(depth_buffer, vis_buffer, max_layers):
+-    """
+-    Iteratively decimate existing control points by removing the one 
+-    introducing the smallest difference to make room for a new point.
+-    """
+-    # Find the pair of adjacent control points with the smallest difference
+-    # in visibility/depth error.
+-    min_error = infinity
+-    remove_index = -1
+-    
+-    for i in range(0, max_layers - 1):
+-        # Calculate error introduced by removing point i+1
+-        # Error is typically the difference between the actual visibility 
+-        # and the linear interpolation between i and i+2.
+-        error = calculate_merge_error(depth_buffer, vis_buffer, i, i+1, i+2)
+-        if error < min_error:
+-            min_error = error
+-            remove_index = i + 1
+-            
+-    # Remove the control point at remove_index
+-    # Shift subsequent points down
+-    for i in range(remove_index, max_layers - 1):
+-        depth_buffer[...][i] = depth_buffer[...][i+1]
+-        vis_buffer[...][i] = vis_buffer[...][i+1]
++                if c_opacity > 0.0:
++                    # Perform compositing front-to-back along ray into r
++                    acc_opacity = 1.0 - (1.0 - acc_opacity) * (1.0 - c_opacity)
++                    
++                    # Check difference in accumulated opacity against threshold
++                    opacity_diff = acc_opacity - prev_acc_opacity
++                    
++                    if opacity_diff > threshold:
++                        # Calculate distance to camera d (volume space)
++                        d = t
++                        # Calculate visibility v = 1 - r.a
++                        v = 1.0 - acc_opacity
++                        
++                        # If a-buffer is full, merge smallest threshold distance
++                        if current_layer >= max_layers:
++                            # [G] Standard decimation: find adjacent pair with smallest visibility/depth error and remove the middle point
++                            merge_control_points(a_buffer, pixel_coord, current_layer, max_layers)
++                        else:
++                            current_layer += 1
++                        
++                        # Store v and d as next entry in a-buffer
++                        # The first control point of the visibility function is not stored [S1, unofficial]
++                        if first_point_added:
++                            first_point_added = False
++                        else:
++                            a_buffer[x][y][current_layer - 1][0] = d
++                            a_buffer[x][y][current_layer - 1][1] = v
++                        
++                        # Write lv to write cache [S1, unofficial]
++                        write_cache.append(v)
++                        
++                        # Track hit points
++                        if first_hit is None:
++                            first_hit = sample_pos
++                        last_hit = sample_pos
++                        
++                        prev_acc_opacity = acc_opacity
++                    
++                    # Termination check: end of ray or accumulated opacity considered opaque
++                    if acc_opacity >= 1.0:
++                        break
++                        
++            first_hit_texture[x][y] = first_hit
++            last_hit_texture[x][y] = last_hit
+ ```
+ 
+@@ -162,11 +123,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The base pass is $O(N)$ per ray where $N$ is the number of voxels sampled (one sample per voxel). The merging process adds overhead when the buffer is full, potentially increasing complexity depending on the number of merges required. Peak finding can further increase computation time [S1, unofficial].
+-*   **Memory Complexity:** $O(W \times H \times L)$ where $W, H$ are image dimensions and $L$ is the maximum number of layers (32) [S1, unofficial]. Each layer stores 2 channels (depth, visibility).
++*   **Time Complexity:** The base pass is $O(N)$ per ray where $N$ is the number of voxels sampled (one sample per voxel) [S1, unofficial]. The merging process adds overhead when the buffer is full, potentially increasing complexity depending on the number of merges required [S1, unofficial]. Peak finding can further increase computation time [S1, unofficial].
++*   **Memory Complexity:** $O(W \times H \times L)$ where $W, H$ are image dimensions and $L$ is the maximum number of layers (32) [S1, unofficial]. Each layer stores 2 channels (depth, visibility) [S1, unofficial].
+ *   **Measured Performance:** Not given in the sources.
+ *   **Strengths:** Allows representation of transparency effects from high depth complexity with a low number of control points [S1, unofficial]. Enables optimized entry points for light rays by projecting first/last hit points into light space [S1, unofficial].
+ *   **Limitations:** Approximate nature may lose detail if the number of layers is too low or threshold is too high. Merging process can be computationally expensive [S1, unofficial].
+-*   **When to use:** When volumetric visibility is needed for illumination calculations (e.g., multiple scattering, optimized light ray entry) and exact ray tracing is too costly.
+-*   **When not to use:** When exact visibility is required without approximation, or when the scene has extremely high depth complexity that exceeds the fixed layer limit even after merging.
++*   **When to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background

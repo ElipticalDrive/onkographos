@@ -1,0 +1,104 @@
+# 3D Interactive Hierarchy Editor
+
+Also called: 3D IHE, Region Hierarchy Editor, Semantic Region Selection
+
+## Overview
+The 3D Interactive Hierarchy Editor (3D IHE) is a semantic control tool that allows users to define regions of interest by selecting primitive collections of voxels, which are then used to modify volume rendering parameters such as color and opacity [S1, unofficial]. It differs from local syntactic controls (like ramp-based classification) and geometric clipping by using global set-membership of data points to isolate morphological features [S1, unofficial]. Unlike sibling methods that segment voxel-by-voxel or via pure geometric intersection, 3D IHE builds a hierarchy of related voxels to enable efficient, 3D-aware selection via a slice paradigm [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volumetric dataset (e.g., $128^3$ with 256 gray levels) and a pre-computed hierarchy of voxel primitives [S1, unofficial].
+*   **Output:** A selection mask and opcodes sent to a volume renderer via TCP/IP [S1, unofficial].
+
+**Data Structures:**
+1.  **Hierarchy Tree:** A directed acyclic graph where nodes represent primitive regions of voxels with similar characteristics [S1, unofficial].
+2.  **Selection Mask:** A 3D array matching the input dataset resolution, storing binary values (selected/not selected) for each voxel [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Hierarchy Generation (Preprocessing):** Treat the 3D image as a 3-manifold in 4-space (intensity as the 4th dimension) [S1, unofficial]. Analyze ridges and valleys in this 3-fold surface [S1, unofficial]. Compute reverse gravity watersheds to segment the volume into primitive regions [S1, unofficial]. Organize these primitives into a hierarchy where parent nodes encompass child regions [S1, unofficial]. This step is computationally expensive; preprocessing a $128^3$ image takes ~15 minutes on a Decstation 3100 [S1, unofficial].
+2.  **Interactive Selection:** Display a full-size 2D slice of the current 3D dataset [S1, unofficial]. The user selects or deselects primitive regions within this 2D slice using mouse operations [S1, unofficial]. Selections extend in 3D: selecting a primitive in one slice applies the selection to the entire 3D extent of that primitive [S1, unofficial]. Navigate slices using forward/backward buttons or a slider to view adjacent slices [S1, unofficial]. Preview effects using scaled-down thumbnails of multiple slices (24 in the implementation) [S1, unofficial].
+3.  **Mask Transmission:** Generate the final 3D selection mask based on user interactions [S1, unofficial]. Send the mask and opcodes to the volume renderer via Unix sockets over Ethernet using TCP packets [S1, unofficial]. Transmission latency is ~10 seconds for the mask [S1, unofficial].
+4.  **Rendering Application:** The volume renderer applies the mask during ray casting [S1, unofficial]. Selected voxels have their color and opacity modified to emphasize them [S1, unofficial]. The mask does not interact with raw data before local classification; it only affects rendering parameters [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def run_3d_ihe(dataset, hierarchy):
+    """
+    dataset: 3D numpy array of shape (Nx, Ny, Nz)
+    hierarchy: Dict mapping primitive_id -> list of voxel_indices
+    """
+    if not hierarchy:
+        # Sources do not provide the exact implementation details for this step.
+        # Treats volume as 3-manifold in 4-space, computes ridges/valleys,
+        # and applies reverse gravity watershed segmentation.
+        hierarchy = generate_hierarchy_reverse_gravity_watershed(dataset)
+
+    selection_mask = np.zeros(dataset.shape, dtype=bool)
+    current_slice_z = 0
+    running = True
+
+    while running:
+        current_slice = dataset[:, :, current_slice_z]
+        # GUI blocks here until user confirms selection on the slice
+        selected_primitive_ids = get_user_slice_selections(current_slice, hierarchy)
+
+        for prim_id in selected_primitive_ids:
+            for idx in hierarchy[prim_id]:
+                selection_mask.flat[idx] = True
+
+        send_mask_to_renderer(selection_mask)
+        update_thumbnail_views(dataset, selection_mask)
+        running = check_user_exit()
+
+def generate_hierarchy_reverse_gravity_watershed(volume):
+    # Sources do not provide the exact implementation details for this step.
+    return {}
+
+def get_user_slice_selections(slice_data, hierarchy):
+    # Simulates GUI interaction returning selected primitive IDs
+    return []
+
+def send_mask_to_renderer(mask):
+    # Connect to renderer via Unix sockets over Ethernet
+    # Pass image masks and opcodes in TCP packets
+    # Latency ~10 seconds
+    pass
+
+def update_thumbnail_views(dataset, mask):
+    # Redraws scaled-down preview slices
+    pass
+
+def check_user_exit():
+    # Returns False if user requests to finish
+    return False
+```
+
+**Parameters:**
+*   **Dataset Resolution:** Example given is $128^3$ [S1, unofficial].
+*   **Gray Levels:** Example given is 256 [S1, unofficial].
+*   **Communication:** TCP/IP over Ethernet [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Performance:** Hierarchy generation is slow (~15 mins for $128^3$) [S1, unofficial].
+*   **Latency:** Mask transmission takes ~10 seconds [S1, unofficial].
+*   **Interaction Limitation:** Selection mask does not modify raw data or local classification; it only affects rendering parameters (color/opacity) [S1, unofficial].
+*   **Dimensionality:** Selection is 3D-aware, but interaction is 2D-slice-based [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Hierarchy generation is high-cost. Preprocessing a $128^3$ image takes ~15 minutes on a Decstation 3100 [S1, unofficial]. Interactive selection is fast (<1 minute for brain portion selection with 10 button presses) compared to 2D slice-by-slice editing (~40 minutes) [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the hierarchy tree and the selection mask. Not given in the sources.
+*   **Performance:** The 3D IHE significantly reduces user time for complex 3D selections compared to 2D methods [S1, unofficial].
+*   **Strengths:** Enables semantic, global set-membership selection; efficient 3D region definition via 2D interaction; immediate visual feedback [S1, unofficial].
+*   **Limitations:** Slow preprocessing; high transmission latency; mask does not affect pre-classification data processing [S1, unofficial].
+*   **When to use:** When users need to select complex, non-contiguous 3D regions based on semantic meaning rather than local intensity thresholds [S1, unofficial].
+*   **When not to use:** When real-time, low-latency interaction is critical, or when raw data modification is required before classification [S1, unofficial].
+
+## Background
+The 3D Interactive Hierarchy Editor was developed as part of an explorational 3D visualization system for medical image data [S1, unofficial]. It builds on earlier work in image segmentation using ridges and valleys, extending 2D methods to 3D by treating images as 3-manifolds in 4-space [S1, unofficial]. The system was designed to change 3D display from a post-processing step to a primary way of viewing medical image data by allowing dynamic control of opacity and regions of interest [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA236718: Achieving Direct Volume Visualization with Interactive Semantic Region Selection, https://archive.org/details/DTIC_ADA236718, fetched 2026-10-26 (unofficial)

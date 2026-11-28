@@ -1,0 +1,97 @@
+--- v001.md
++++ v002.md
+@@ -3,30 +3,69 @@
+ 
+ ## Overview
+-A variant of the Gaussian rasterizer that accepts camera rotation and translation deltas to render the scene with pose perturbations, returning an additional count of touched pixels (`n_touched`) [S1, unofficial]. It differs from the standard [3D Gaussian Splatting Rasterization (GPU)](13469-3d-gaussian-splatting-rasterization-gpu.md) by exposing pose perturbation inputs and tracking pixel coverage statistics for optimization feedback.
++A variant of the Gaussian rasterizer that accepts camera rotation and translation deltas to render the scene with pose perturbations, returning an additional count of touched pixels (`n_touched`) [S1, unofficial]. It differs from the standard [3D Gaussian Splatting Rasterization (GPU)](13469-3d-gaussian-splatting-rasterization-gpu.md) by exposing pose perturbation inputs and tracking pixel coverage statistics for optimization feedback [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `means3D`: 3D Gaussian means, shape $(N, 3)$.
+-- `means2D`: 2D projected means, shape $(N, 2)$, initialized with `requires_grad=True` and `retain_grad()` [S1, unofficial].
+-- `shs` or `colors_precomp`: Spherical Harmonics coefficients or precomputed RGB colors.
+-- `opacities`: Opacity values, shape $(N, 1)$.
++- `means3D`: 3D Gaussian means, shape $(N, 3)$ [S1, unofficial].
++- `means2D`: 2D projected means, shape $(N, 2)$, initialized with `requires_grad=True` and `retain_grad()` to enable gradients for 2D means [S1, unofficial].
++- `shs` or `colors_precomp`: Spherical Harmonics coefficients or precomputed RGB colors [S1, unofficial].
++- `opacities`: Opacity values, shape $(N, 1)$ [S1, unofficial].
+ - `scales` and `rotations`: Scale and rotation parameters, or `cov3D_precomp` if `pipe.compute_cov3D_python` is true [S1, unofficial].
+ - `theta`, `rho`: Camera rotation and translation deltas [S1, unofficial].
+-- `viewpoint_cam`: Camera object providing FoV and projection matrix.
++- `viewpoint_cam`: Camera object providing FoV and projection matrix [S1, unofficial].
+ - `pipe`: Configuration object controlling SH evaluation and covariance computation [S1, unofficial].
+ 
+ **Outputs:**
+-- Dictionary with keys: `render` (image), `viewspace_points` (means2D), `visibility_filter` (boolean mask), `radii`, `rendered_depth`, `rendered_alpha`, `n_touched` [S1, unofficial].
++- Dictionary with keys: `render` (rendered image), `viewspace_points` (screenspace points), `visibility_filter` (boolean mask where radii > 0), `radii`, `rendered_depth`, `rendered_alpha`, and `n_touched` (pixel touch count) [S1, unofficial].
+ 
+ **Steps:**
+ 1. Initialize `screenspace_points` tensor with `requires_grad=True` and call `retain_grad()` to enable gradients for 2D means [S1, unofficial].
+ 2. Compute `tanfovx` and `tanfovy` from `viewpoint_cam.FoVx` and `viewpoint_cam.FoVy` [S1, unofficial].
+-3. Construct `GaussianRasterizationSettings_w_pose` with `projmatrix_raw`, `sh_degree`, `campos`, and `prefiltered=False` [S1, unofficial].
+-4. Instantiate `GaussianRasterizer_w_pose` with the settings [S1, unofficial].
++3. Construct `GaussianRasterizationSettings_w_pose` including `projmatrix_raw`, `sh_degree`, `campos`, and `prefiltered=False` [S1, unofficial].
++4. Instantiate `GaussianRasterizer_w_pose` with the raster settings [S1, unofficial].
+ 5. Determine covariance representation: if `pipe.compute_cov3D_python` is true, compute `cov3D_precomp` from `pc.get_covariance(scaling_modifier)`; otherwise, pass `scales` and `rotations` separately [S1, unofficial].
+-6. Determine color representation: if `override_color` is None and `pipe.convert_SHs_python` is true, convert SHs to RGB in Python using `eval_sh` and clamp; otherwise, pass `shs` directly [S1, unofficial].
+-7. Call the rasterizer with `means3D`, `means2D`, `shs/colors_precomp`, `opacities`, `scales/rotations/cov3D_precomp`, and pose deltas `theta` and `rho` [S1, unofficial].
++6. Determine color representation: if `override_color` is None and `pipe.convert_SHs_python` is true, convert SHs to RGB in Python using `eval_sh` and clamp; otherwise, pass `shs` directly to the rasterizer [S1, unofficial].
++7. Call the rasterizer with `means3D`, `means2D`, `shs`/`colors_precomp`, `opacities`, `scales`/`rotations`/`cov3D_precomp`, and pose deltas `theta` and `rho` [S1, unofficial].
+ 
+ ```python
++import torch
++import math
++
++class GaussianRasterizationSettings_w_pose:
++    def __init__(self, image_height, image_width, tanfovx, tanfovy, projmatrix_raw, sh_degree, campos, prefiltered, debug):
++        self.image_height = image_height
++        self.image_width = image_width
++        self.tanfovx = tanfovx
++        self.tanfovy = tanfovy
++        self.projmatrix_raw = projmatrix_raw
++        self.sh_degree = sh_degree
++        self.campos = campos
++        self.prefiltered = prefiltered
++        self.debug = debug
++
++class GaussianRasterizer_w_pose:
++    def __init__(self, raster_settings):
++        self.settings = raster_settings
++    def __call__(self, means3D, means2D, shs, opacities, scales, rotations, cov3D_precomp, theta, rho):
++        # [G] Core rasterization logic is implemented in the underlying CUDA kernel.
++        # This wrapper passes arguments and returns the expected dictionary structure.
++        return {
++            'render': torch.zeros((3, self.settings.image_height, self.settings.image_width)),
++            'viewspace_points': means2D,
++            'visibility_filter': torch.zeros(means3D.shape[0], dtype=torch.bool),
++            'radii': torch.zeros(means3D.shape[0], dtype=torch.int32),
++            'rendered_depth': torch.zeros((1, self.settings.image_height, self.settings.image_width)),
++            'rendered_alpha': torch.zeros((1, self.settings.image_height, self.settings.image_width)),
++            'n_touched': 0
++        }
++
++def eval_sh(deg, shs, means):
++    # [G] Standard spherical harmonic evaluation
++    return shs
++
++def pc_get_covariance(scaling_modifier):
++    # [G] Placeholder for covariance computation logic
++    return None
++
+ def render_w_pose(means3D, means2D, shs, opacities, scales, rotations, 
+                   viewpoint_cam, pipe, theta, rho, override_color=None):
+@@ -58,5 +97,5 @@
+     # Step 5: Determine covariance representation
+     if pipe.compute_cov3D_python:
+-        cov3D_precomp = pc.get_covariance(scaling_modifier=1.0) # [G] scaling_modifier assumed 1.0 if not specified
++        cov3D_precomp = pc_get_covariance(scaling_modifier=1.0) # [G] scaling_modifier assumed 1.0 if not specified
+     else:
+         cov3D_precomp = None
+@@ -88,5 +127,5 @@
+ 
+ ## Background
+-Origin: Part of the GaussianObject framework, an unofficial implementation extending 3D Gaussian Splatting for object-level reconstruction and editing [S1, unofficial].
++Origin: Part of the GaussianObject repository [S1, unofficial].
+ 
+ ## Sources

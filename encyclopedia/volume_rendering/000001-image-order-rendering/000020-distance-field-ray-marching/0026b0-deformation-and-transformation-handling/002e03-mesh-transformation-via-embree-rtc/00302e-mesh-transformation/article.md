@@ -1,0 +1,104 @@
+# Mesh Transformation
+## Overview
+Applies a 4x4 transformation matrix to all vertices and normals of a mesh, typically to move geometry from a local object frame to a world frame or to apply kinematic transforms to robot links [S1, unofficial][S2, unofficial].
+## How it works
+**Inputs:**
+- `mesh`: Mesh object containing vertex positions and optional normals.
+- `xf`: 4x4 transformation matrix.
+
+**Outputs:**
+- Updated `mesh` with transformed vertices and normals [S1, unofficial].
+
+**Data Structures:**
+- `mesh->vertices`: Array of 3D vectors.
+- `mesh->normals`: Array of 3D vectors, optional.
+- `xf`: 4x4 matrix.
+
+**Steps:**
+1. **Transform Vertices:** Iterate over vertices $i$ from $0$ to $n_v-1$ [S1, unofficial]. Compute the transformed vertex $v'_i = xf \cdot v_i$ [S1, unofficial]. Update `mesh->vertices[i] = v'_i` [S1, unofficial].
+2. **Transform Normals (if present):** Compute the normal transformation matrix $nxf$ from $xf$ [S1, unofficial]. Iterate over normals $i$ from $0$ to $n_v-1$ [S1, unofficial]. Compute $n'_i = nxf \cdot n_i$ [S1, unofficial]. Renormalize $n_i \leftarrow n'_i / \|n'_i\|$ [S1, unofficial].
+3. **Update Bounding Volumes:** If the mesh has valid bounding boxes or spheres, invalidate them and recompute them based on the new vertex positions [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_xform(mesh, xf):
+    nv = len(mesh.vertices)
+    # 1. Transform vertices
+    for i in range(nv):
+        v = mesh.vertices[i]
+        x = xf[0][0]*v[0] + xf[0][1]*v[1] + xf[0][2]*v[2] + xf[0][3]
+        y = xf[1][0]*v[0] + xf[1][1]*v[1] + xf[1][2]*v[2] + xf[1][3]
+        z = xf[2][0]*v[0] + xf[2][1]*v[1] + xf[2][2]*v[2] + xf[2][3]
+        mesh.vertices[i] = (x, y, z)
+
+    # 2. Transform normals
+    if mesh.normals is not None:
+        # Compute normal transformation matrix: inverse transpose of upper-left 3x3 of xf [G]
+        M = [[xf[r][c] for c in range(3)] for r in range(3)]
+        M_inv = invert_3x3(M)
+        nxf = [[M_inv[c][r] for c in range(3)] for r in range(3)]
+        for i in range(nv):
+            n = mesh.normals[i]
+            nx = nxf[0][0]*n[0] + nxf[0][1]*n[1] + nxf[0][2]*n[2]
+            ny = nxf[1][0]*n[0] + nxf[1][1]*n[1] + nxf[1][2]*n[2]
+            nz = nxf[2][0]*n[0] + nxf[2][1]*n[1] + nxf[2][2]*n[2]
+            length = (nx*nx + ny*ny + nz*nz)**0.5
+            if length > 0:
+                mesh.normals[i] = (nx/length, ny/length, nz/length)
+            else:
+                mesh.normals[i] = (0.0, 0.0, 0.0)
+
+    # 3. Update bounding volumes
+    if mesh.bounding_box is not None:
+        min_val = (float('inf'), float('inf'), float('inf'))
+        max_val = (float('-inf'), float('-inf'), float('-inf'))
+        for v in mesh.vertices:
+            min_val = tuple(min(a, b) for a, b in zip(min_val, v))
+            max_val = tuple(max(a, b) for a, b in zip(max_val, v))
+        mesh.bounding_box.min = min_val
+        mesh.bounding_box.max = max_val
+        mesh.bounding_box.valid = True
+
+def invert_3x3(m):
+    a, b, c = m[0]
+    d, e, f = m[1]
+    g, h, i = m[2]
+    det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g)
+    if det == 0:
+        raise ValueError("Matrix is singular")
+    inv_det = 1.0 / det
+    return [
+        [(e*i - f*h)*inv_det, (c*h - b*i)*inv_det, (b*f - c*e)*inv_det],
+        [(f*g - d*i)*inv_det, (a*i - c*g)*inv_det, (c*d - a*f)*inv_det],
+        [(d*h - e*g)*inv_det, (b*g - a*h)*inv_det, (a*e - b*d)*inv_det]
+    ]
+```
+
+**Parameters:**
+- `xf`: 4x4 transformation matrix [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Singular Matrices:** If the 3x3 linear part of `xf` is singular, the inverse transpose cannot be computed [G].
+- **Bounding Volume Recomputation:** Failing to update bounding volumes after transformation leads to incorrect culling or intersection tests [G].
+
+## Subtopics
+
+### [Mesh Transformation for Printable Volume](6858-mesh-transformation-for-printable-volume.md)
+Computes a 4x4 transformation matrix to scale, rotate, and translate a mesh so it fits within a specified printable volume, typically aligning the largest dimension with the z-axis. It differs from generic mesh transformations by incorporating volume constraints and automatic axis alignment.
+
+## Operating characteristics
+- **Time Complexity:** $O(n)$ for vertices and normals, where $n$ is the number of vertices [G].
+- **Memory Complexity:** $O(1)$ additional memory if done in-place [G].
+- **Strengths:** Simple, efficient, and standard approach for applying rigid or affine transforms to mesh geometry [G].
+- **Limitations:** Does not handle dynamic topology changes [G]. Requires careful handling of normals for non-uniform scaling [G].
+- **When to Use:** When moving mesh data between coordinate frames (e.g., object to world, link to base) [S2, unofficial].
+- **When Not to Use:** When the transformation involves non-linear deformations [G].
+
+## Background
+Not given in the sources. Used in sparse voxel DAGs [S1, unofficial] and robotic SDF visualization [S2, unofficial].
+
+## Sources
+[S1] prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, https://github.com/prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, fetched 2026-10-26 (unofficial)
+[S2] GitHub - UM-ARM-Lab/pytorch_volumetric: Volumetric structures such as ..., https://github.com/UM-ARM-Lab/pytorch_volumetric, fetched 2026-10-30 (unofficial)

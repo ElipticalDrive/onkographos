@@ -1,0 +1,159 @@
+# Feature Grid Optimization (Explicit vs Implicit Regularization)
+Also called: Auto-encoder Feature Optimization, Direct Feature Optimization, Explicit Regularization, Explicit vs Implicit Regularization, Implicit MLP Feature Initialization, Implicit Regularization (Feature Auto-encoder)
+
+## Overview
+Feature Grid Optimization defines the training strategy for the shared voxel feature grid in NeRFLight, addressing the trade-off between reconstruction quality and computational resources [S1]. It contrasts two primary methods: explicit regularization, which directly optimizes grid values for speed and low memory usage, and implicit regularization, which uses an MLP to predict features for higher quality [S1]. A hybrid approach combines both to mitigate the overfitting risks of explicit training while retaining its efficiency benefits [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Spatial coordinates of voxel corners, initial feature values (random or MLP-derived), and training images [S1, S2].
+*   **Output:** Optimized feature grid values or an MLP capable of regenerating them [S1].
+
+**Data Structures:**
+*   **Feature Grid:** A 3D grid storing 32-dimensional feature vectors at voxel corners [S2].
+*   **Implicit MLP:** An auto-encoder architecture mapping 3D coordinates to feature vectors [S2]. It uses 10-frequency positional encoding on corner coordinates, one input layer, eight hidden layers of 512 neurons with ReLU activation, and an output layer of 32 neurons without activation [S2].
+
+**Training Strategies:**
+1.  **Explicit Regularization:** Features initialize randomly and optimize directly via gradient descent [S1, S2]. This method is prone to overfitting at certain voxels due to deterministic integration [S2].
+2.  **Implicit Regularization:** An MLP predicts features from spatial positions, acting as an auto-encoder to regularize the feature space [S1, S2].
+3.  **Hybrid Regularization (Two-Stage Strategy):** The coarse stage initializes features randomly and optimizes them explicitly [S1]. The fine stage begins by training the implicit MLP for 1000 epochs [S1, S2]. After training, features predicted at each grid corner extract from the MLP [S1]. These extracted values initialize the explicit grid for another 1000 epochs of direct optimization [S1, S2]. This initialization prevents the overfitting associated with direct explicit optimization [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def positional_encoding(coords, num_frequencies=10):
+    """Applies 10-frequency positional encoding to 3D coordinates [S2]."""
+    encoded = []
+    for freq in range(1, num_frequencies + 1):
+        encoded.extend([math.sin(freq * c) for c in coords])
+        encoded.extend([math.cos(freq * c) for c in coords])
+    return encoded
+
+class ImplicitMLP:
+    """Implicit MLP: 8 hidden layers of 512 ReLU, output 32, no activation [S2]."""
+    def __init__(self):
+        self.weights = [[random.uniform(-1, 1) for _ in range(30)] for _ in range(512)]  # 3*10*2 = 30 input features
+        self.biases = [0.0 for _ in range(512)]
+        self.out_weights = [[random.uniform(-1, 1) for _ in range(512)] for _ in range(32)]
+        self.out_bias = [0.0 for _ in range(32)]
+
+    def forward(self, coords):
+        encoded = positional_encoding(coords)
+        h = encoded
+        for w, b in zip(self.weights, self.biases):
+            h = [max(0.0, sum(h[j] * w[j] for j in range(len(h))) + b)]  # ReLU
+        out = [sum(h[j] * self.out_weights[i][j] for j in range(512)) + self.out_bias[i] for i in range(32)]
+        return out
+
+class Optimizer:
+    """Minimal gradient descent optimizer to avoid library internals."""
+    def __init__(self, params, lr):
+        self.params = params
+        self.lr = lr
+    def step(self):
+        for p in self.params:
+            p -= self.lr * p.grad
+
+def random_initialize_grid(shape):
+    """[G] Standard uniform initialization for grid features."""
+    return [[random.uniform(-1, 1) for _ in range(shape[1])] for _ in range(shape[0])]
+
+def sample_voxel_corners(batch_size=16384):
+    """[G] Samples random 3D coordinates within the voxel grid bounds."""
+    return [[random.uniform(0, 1) for _ in range(3)] for _ in range(batch_size)]
+
+def get_voxel_corner_coordinates():
+    """[G] Returns a list of all grid corner coordinates."""
+    return [[x, y, z] for x in [0, 1] for y in [0, 1] for z in [0, 1]]
+
+def compute_photometric_loss(features, rays, targets):
+    """[G] Computes MSE between rendered colors and target training images."""
+    rendered = [sum(f * r for f, r in zip(feature, ray)) for feature, ray in zip(features, rays)]
+    return sum((r - t) ** 2 for r, t in zip(rendered, targets)) / len(targets)
+
+def compute_sparsity_loss(densities, lambda_s=0.01):
+    """Computes sparsity regularization: λ_s Σ log(1 + σ_i² / 0.5) [S2]."""
+    return lambda_s * sum(math.log(1 + (d ** 2) / 0.5) for d in densities)
+
+def train_feature_grid(mode='hybrid', epochs_implicit=1000, epochs_explicit=1000):
+    """Trains the shared feature grid using explicit, implicit, or hybrid regularization [S1, S2]."""
+    lr = 5e-4  # Fine stage learning rate [S2]
+    
+    if mode == 'explicit':
+        features = random_initialize_grid((1000, 32))  # [G] Example grid size
+        optimizer = Optimizer(features, lr)
+        for epoch in range(epochs_explicit):
+            coords = sample_voxel_corners()
+            loss = compute_photometric_loss(features, coords, [0.5] * len(coords))
+            # Gradient update step
+            for f in features:
+                f.grad = [2 * (sum(f[j] * c[j] for j in range(3)) - 0.5) * c[j] for c in coords]
+            optimizer.step()
+            
+    elif mode == 'implicit':
+        mlp = ImplicitMLP()
+        optimizer = Optimizer(mlp.weights + mlp.biases + mlp.out_weights + mlp.out_bias, lr)
+        for epoch in range(epochs_implicit):
+            coords = sample_voxel_corners()
+            predicted_features = [mlp.forward(c) for c in coords]
+            loss = compute_photometric_loss(predicted_features, coords, [0.5] * len(coords))
+            # Gradient update step
+            optimizer.step()
+            
+    elif mode == 'hybrid':
+        # Stage 1: Implicit training
+        mlp = ImplicitMLP()
+        optimizer_mlp = Optimizer(mlp.weights + mlp.biases + mlp.out_weights + mlp.out_bias, lr)
+        for epoch in range(epochs_implicit):
+            coords = sample_voxel_corners()
+            predicted_features = [mlp.forward(c) for c in coords]
+            loss = compute_photometric_loss(predicted_features, coords, [0.5] * len(coords))
+            optimizer_mlp.step()
+            
+        # Extract corner features from the trained MLP
+        corner_coords = get_voxel_corner_coordinates()
+        initial_grid_features = [mlp.forward(c) for c in corner_coords]
+        
+        # Stage 2: Explicit training
+        features = initial_grid_features
+        optimizer_grid = Optimizer(features, lr)
+        for epoch in range(epochs_explicit):
+            loss = compute_photometric_loss(features, corner_coords, [0.5] * len(corner_coords))
+            # Apply sparsity regularization [S2]
+            densities = [sum(f) for f in features]  # [G] Simplified density proxy
+            loss += compute_sparsity_loss(densities)
+            # Gradient update step
+            optimizer_grid.step()
+```
+
+**Parameters:**
+*   **Learning Rate:** $5 \times 10^{-4}$ for the fine stage [S2].
+*   **Epochs:** 1000 epochs for the implicit stage and 1000 epochs for the explicit stage [S1, S2].
+*   **Batch Size:** 16,384 for the NeRF-synthetic dataset and 8,192 for Tanks and Temples [S2].
+*   **Optimizer:** Adam [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Overfitting:** Explicit regularization is prone to overfitting at certain voxels when features train directly [S2]. The hybrid approach mitigates this by using the MLP output as initialization [S2].
+*   **Empty Space:** An occupancy mask extracts unsupervised from density outputs to avoid optimizing features in empty space, speeding up training [S2].
+
+## Subtopics
+
+### Hybrid Regularization for Explicit Features
+A two-stage training strategy designed to prevent overfitting when explicitly optimizing voxel features [S2]. In the first stage, features implicitly optimize using an MLP for 1000 epochs after coarse geometry searching [S2]. In the second stage, the MLP discards, and features explicitly optimize for another 1000 epochs, using the MLP's output as initialization [S2]. This approach yields better final quality than pure explicit regularization while avoiding its overfitting pitfalls [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Explicit regularization trains significantly faster [S1]. On the Lego scene, explicit training took 16 hours, whereas hybrid regularization required 60 hours [S1].
+*   **Memory Complexity:** Explicit regularization uses less GPU memory [S1]. On the Lego scene, explicit training peaked at 22GB, while hybrid regularization required 40GB [S1].
+*   **Quality:** Explicit regularization produces lower quality metrics compared to hybrid or implicit methods [S1]. Hybrid regularization achieves high-quality results comparable to implicit methods but with reduced resource usage [S1].
+*   **Hardware:** Experiments conducted on NVIDIA A100 GPUs for training and RTX 3090 for inference [S2].
+
+## Background
+This method originates from the NeRFLight paper, which introduced fast and light neural radiance fields using a shared feature grid [S1]. The work addresses the limitations of standard NeRF by optimizing voxel features directly or via MLPs to balance rendering quality and computational efficiency [S1]. The hybrid strategy adopted to overcome the overfitting issues inherent in deterministic integration with explicit feature training [S2].
+
+## Sources
+[S1] NeRFLight: Fast and Light Neural Radiance Fields using a Shared Feature Grid, https://doi.org/10.1109/cvpr52729.2023.01195, fetched 2026-10-26
+[S2] NeRFLight: Fast and Light Neural Radiance Fields using a ..., https://www.iri.upc.edu/files/scidoc/2861-NeRFLight%3A-Fast-and-Light-Neural-Radiance-Fields-using-a-Shared-Feature-Grid.pdf, fetched 2026-10-27

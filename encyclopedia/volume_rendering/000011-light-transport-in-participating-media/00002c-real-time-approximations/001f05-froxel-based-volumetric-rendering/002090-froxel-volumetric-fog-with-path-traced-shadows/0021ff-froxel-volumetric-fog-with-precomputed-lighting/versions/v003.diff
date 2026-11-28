@@ -1,0 +1,129 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Froxel Volumetric Fog with Precomputed Lighting is a real-time rendering technique that simulates light scattering in participating media (mist, smoke, atmospheric fog) by dividing the camera view frustum into a 3D grid of voxels called "froxels" [S1, S2, unofficial]. Unlike traditional distance fog, which applies a uniform screen-space blur, this method allows for dynamic light beams, shadowed fog, and density variations within the volume [S2, unofficial]. It distinguishes itself from its sibling method, [Froxel Volumetric Fog with Path-Traced Shadows](2314-froxel-volumetric-fog-with-path-traced-shadows.md), by using precomputed lighting passes (specifically Next Event Estimation approximations via compute shaders) rather than runtime path tracing for shadow calculation, offering a balance between visual fidelity and performance [S1, S2, unofficial].
++Froxel Volumetric Fog with Precomputed Lighting is a real-time rendering technique that simulates light scattering in participating media (mist, smoke, atmospheric fog) by dividing the camera view frustum into a 3D grid of voxels called "froxels" [S1, unofficial][S2, unofficial]. Unlike traditional distance fog, which applies a uniform screen-space blur, this method allows for dynamic light beams, shadowed fog, and density variations within the volume [S2, unofficial]. It distinguishes itself from its sibling method, [Froxel Volumetric Fog with Path-Traced Shadows](2314-froxel-volumetric-fog-with-path-traced-shadows.md), by using precomputed lighting passes (specifically Next Event Estimation approximations via compute shaders) rather than runtime path tracing for shadow calculation, offering a balance between visual fidelity and performance [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+@@ -58,15 +58,15 @@
+ 5.  **Temporal Reprojection:**
+     *   Jitter the current froxel center using spatio-temporal blue noise (or Interleaved Gradient Noise if unavailable) [S1, unofficial].
+-    *   Reproject the current froxel center into the previous frame using the previous view-projection matrix.
+-    *   If the point lands inside the old volume, manually trilinear sample history.
+-    *   Blend: $blended = \text{lerp}(history.rgb, current.rgb, temporalBlend)$ where `temporalBlend` is typically 0.9 [S1, S2, unofficial].
++    *   Reproject the current froxel center into the previous frame using the previous view-projection matrix [S1, unofficial].
++    *   If the point lands inside the old volume, manually trilinear sample history [S1, unofficial].
++    *   Blend: $blended = \text{lerp}(history.rgb, current.rgb, temporalBlend)$ where `temporalBlend` is typically 0.9 [S1, unofficial][S2, unofficial].
+ 6.  **Spatial Filtering:** Apply a 3x3x3 Gaussian-style filter over the scattering volume. Filter RGB only; let extinction (Alpha) pass through unchanged to preserve depth and absorption profiles [S1, unofficial]. Store history *before* filtering to prevent blur stacking [S1, unofficial].
+ 7.  **Integrate:** March through Z for every screen-space XY cell using exponential depth slices. For each slice:
+     *   Calculate depth: $depth = nearDistance \times \exp\left(\frac{slice}{sliceCount} \times \log\left(\frac{farDistance}{nearDistance}\right)\right)$ [S1, unofficial].
+-    *   Compute optical depth: $opticalDepth = extinction \times sliceThickness$.
+-    *   Compute slice transmittance: $sliceTransmittance = \exp(-opticalDepth)$.
++    *   Compute optical depth: $opticalDepth = extinction \times sliceThickness$ [S1, unofficial].
++    *   Compute slice transmittance: $sliceTransmittance = \exp(-opticalDepth)$ [S1, unofficial].
+     *   Compute slice scatter: $sliceScatter = scatter \times (1 - sliceTransmittance) / extinction$ [S1, unofficial].
+     *   Accumulate scatter into RGB and transmittance into Alpha [S1, unofficial].
+-8.  **Composite:** Sample camera depth, convert to froxel Z, read integrated volume. Apply: $finalColor = sceneColor \times transmittance + accumulatedScatter$ [S1, unofficial].
++8.  **Composite:** Sample camera depth, convert to froxel Z, read integrated volume [S1, unofficial]. Apply: $finalColor = sceneColor \times transmittance + accumulatedScatter$ [S1, unofficial].
+     *   Near pixels pass through unchanged.
+     *   Pixels beyond the froxel far distance use analytical extension: terrain pixels estimate extinction rate from integrated transmittance; sky pixels integrate exponential height fog toward the horizon [S1, unofficial].
+@@ -92,44 +92,41 @@
+ 
+ def sample_3d_texture(tex, uvw):
+-    # Returns [r, g, b, a] from a 3D texture lookup
+-    return tex.get(uvw)
++    # Standard 3D texture lookup returning [r, g, b, a]
++    # Implementation depends on graphics API; returns float4
++    return tex.sample(uvw)
+ 
+-def depth_to_froxel_z(depth, near, far):
++def compute_depth_slice(slice_idx, slice_count, near_distance, far_distance):
+     # Exponential depth mapping for froxel Z coordinate
+-    return near * math.exp(depth * math.log(far / near))
++    return near_distance * math.exp((slice_idx / slice_count) * math.log(far_distance / near_distance))
+ 
+-# Step 2: Inject Density
+-def compute_density(FogVolume, id, fogHeight, density):
+-    heightFactor = saturate(1.0 - id[1] / fogHeight)
+-    fog = density * heightFactor
++def compute_density(FogVolume, id, fog_height, base_density):
++    height_factor = saturate(1.0 - id[1] / fog_height)
++    fog = base_density * height_factor
+     FogVolume[id] = [fog, fog, fog, 1.0]
+ 
+-# Step 3: Scatter Lighting
+-def compute_lighting(FogVolume, id, lightDirection, lightColor):
++def compute_lighting(FogVolume, id, light_direction, light_color):
+     density = FogVolume[id][0]
+-    scatter = saturate(dot(normalize([0.0, 1.0, 0.0]), [-x for x in lightDirection]))
+-    lighting = [lightColor[i] * density * scatter for i in range(3)]
++    scatter = saturate(dot(normalize([0.0, 1.0, 0.0]), [-x for x in light_direction]))
++    lighting = [light_color[i] * density * scatter for i in range(3)]
+     FogVolume[id] = [lighting[0], lighting[1], lighting[2], density]
+ 
+-# Step 5: Ray Marching (Fragment Shader equivalent)
+-def ray_march_fog(rayOrigin, rayDir, FogVolume, stepSize=0.5, max_steps=64):
+-    pos = list(rayOrigin)
++def ray_march_fog(ray_origin, ray_dir, fog_volume, step_size=0.5, max_steps=64):
++    pos = list(ray_origin)
+     color = [0.0, 0.0, 0.0]
+     transmittance = 1.0
+     for _ in range(max_steps):
+-        fog = sample_3d_texture(FogVolume, pos)
++        fog = sample_3d_texture(fog_volume, pos)
+         color = [color[i] + fog[i] * transmittance for i in range(3)]
+-        transmittance *= exp(-fog[3] * stepSize)
+-        pos = [pos[i] + rayDir[i] * stepSize for i in range(3)]
++        transmittance *= exp(-fog[3] * step_size)
++        pos = [pos[i] + ray_dir[i] * step_size for i in range(3)]
+     return [color[0], color[1], color[2], 1.0]
+ 
+-# Step 8: Composite
+-def composite(sceneColor, depth, integratedVolume, uv, near, far):
+-    froxelZ = depth_to_froxel_z(depth, near, far)
+-    integrated = sample_3d_texture(integratedVolume, [uv[0], uv[1], froxelZ])
++def composite(scene_color, depth, integrated_volume, uv, near_distance, far_distance):
++    froxel_z = compute_depth_slice(depth, 1, near_distance, far_distance)
++    integrated = sample_3d_texture(integrated_volume, [uv[0], uv[1], froxel_z])
+     transmittance = integrated[3]
+-    accumulatedScatter = integrated[:3]
+-    finalColor = [sceneColor[i] * transmittance + accumulatedScatter[i] for i in range(3)]
+-    return [finalColor[0], finalColor[1], finalColor[2], 1.0]
++    accumulated_scatter = integrated[:3]
++    final_color = [scene_color[i] * transmittance + accumulated_scatter[i] for i in range(3)]
++    return [final_color[0], final_color[1], final_color[2], 1.0]
+ ```
+ 
+@@ -151,17 +148,17 @@
+ ### Time and Memory Complexity
+ *   **Memory:** Proportional to grid dimensions ($W \times H \times D$) and format size (16 bytes per voxel for R16G16B16A16_SFloat) [S2, unofficial]. History requires double the volume memory [S1, unofficial].
+-*   **Time:** Dominated by the lighting compute pass (proportional to voxel count) and the integration/composite pass (proportional to screen resolution) [S1, S2, unofficial].
++*   **Time:** Dominated by the lighting compute pass (proportional to voxel count) and the integration/composite pass (proportional to screen resolution) [S1, unofficial][S2, unofficial].
+ 
+ ### Measured Performance
+ *   Most AAA games run fog at 1/4 resolution to maintain performance [S2, unofficial].
+-*   Specific hardware-dependent metrics are not provided in the sources.
++*   Not given in the sources.
+ 
+ ### Strengths and Limitations
+-*   **Strengths:** Reacts to sky, local lights, headlights, weather, and transparent materials without full-screen blur; allows light beams and shadowed fog; efficient via precomputed lighting [S1, S2, unofficial].
+-*   **Limitations:** Precomputed lighting approximates shadows (less accurate than path-traced shadows in the sibling method); requires careful tuning of temporal stability and anisotropy to avoid artifacts [S1, S2, unofficial].
++*   **Strengths:** Reacts to sky, local lights, headlights, weather, and transparent materials without full-screen blur; allows light beams and shadowed fog; efficient via precomputed lighting [S1, unofficial][S2, unofficial].
++*   **Limitations:** Precomputed lighting approximates shadows (less accurate than path-traced shadows in the sibling method); requires careful tuning of temporal stability and anisotropy to avoid artifacts [S1, unofficial][S2, unofficial].
+ 
+ ### When to Use
+-*   Use for atmospheric fog, mist, and smoke where dynamic lighting interaction is required but full path-traced shadows are too expensive [S1, S2, unofficial].
+-*   Avoid when high-fidelity, physically accurate shadowing within the volume is critical and hardware supports real-time path tracing.
++*   Use for atmospheric fog, mist, and smoke where dynamic lighting interaction is required but full path-traced shadows are too expensive [S1, unofficial][S2, unofficial].
++*   Avoid when high-fidelity, physically accurate shadowing within the volume is critical and hardware supports real-time path tracing [S1, unofficial].
+ 
+ ## Background
+@@ -171,5 +168,5 @@
+ 
+ ### History
+-The technique evolved from production needs for fog that reacts to dynamic lighting without the cost of full volumetric ray marching. It was popularized in URP (Universal Render Pipeline) implementations as a ScriptableRendererFeature [S1, unofficial].
++The technique evolved from production needs for fog that reacts to dynamic lighting without the cost of full volumetric ray marching [S2, unofficial]. It was popularized in URP (Universal Render Pipeline) implementations as a ScriptableRendererFeature [S1, unofficial].
+ 
+ ## Sources

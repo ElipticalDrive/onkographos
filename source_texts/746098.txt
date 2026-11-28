@@ -1,0 +1,490 @@
+A cross-platform, safe, pure-Rust graphics API. Contribute to rebeckerspecialties/wgpu development by creating an account on GitHub.
+
+Use Metal ICBs for multi-draw indirect by matthargett · Pull Request #3 · rebeckerspecialties/wgpu · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+matthargett
+commented
+Jun 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Connections
+Reference workload: this was motivated by BabylonNative WebGPU rendering work where CPU-side multi-draw looping became visible in large batched scenes and AR rendering. The relevant application cases were AR Portal camera + rendering and (Back to the Future) Hill Valley-style GLTF's baked/static geometry batches that included PBR materials and a WGSL SSAO workload.
+AR portal demo reference:
+https://doc.babylonjs.com/features/featuresDeepDive/webXR/webXRDemos#ar-demo
+Description
+This ports Metal fixed-count multi-draw indirect to a real indirect-command-buffer path when the render pass can be safely suspended and resumed, instead of always looping over draws on the CPU.
+The ICB fast path is intentionally conservative. It currently applies to larger static/material-baked multi-draw batches whose render state is pipeline plus vertex/index buffers only. Passes that bind textures, uniforms, or storage through render bind groups, or use immediates, stay on the CPU-loop fallback. This keeps common material-heavy passes safe while still reducing bridge/encoder overhead for large baked-geometry batches.
+Changes:
+Detect Metal render/compute indirect command buffer capabilities through feature sets plus runtime family checks.
+Keep the macOS ICB path to Apple Silicon Macs (unified-memory Metal devices) with Mac2/Metal3-family evidence; Intel/AMD Macs stay on the CPU fallback until direct validation.
+Keep the mobile/watch/vision ICB path to Apple5/A12+ or Metal3-class hardware on the validated modern OS generation (iOS/iPadOS 18, tvOS 18, visionOS 2, watchOS 11). Apple3/A10X remains on the CPU fallback for now.
+Mark render pipelines as supporting ICBs and generate render ICB commands from WebGPU indirect argument buffers with a compute pass.
+Support non-indexed and indexed fixed-count MDI, including GPU-generated indirect argument buffers.
+Use an explicit primitive-type mapping for the ICB generation shader instead of relying on MTLPrimitiveType integer values matching MSL primitive_type values.
+Generate ICB records with uniform dispatchThreadgroups, using the compute pipeline's threadExecutionWidth() and an in-shader cmdIndex >= drawCount guard instead of relying on non-uniform threadgroups from dispatchThreads.
+Cache Metal argument encoders per command encoder and only use the ICB path for batches above the current setup-cost threshold.
+Preserve the CPU fallback for unsupported render-pass states such as active bind groups, immediates, timestamp/occlusion queries, resolves, memoryless attachments, non-store attachments, virtual adapters, Intel/AMD macOS adapters, Apple3/A10X, and mobile/watch/vision runtimes older than the validated modern OS generation.
+Add wgpu-gpu conformance coverage for GPU-generated non-indexed and indexed multi-draw indirect arguments.
+Add extra hardening coverage for 16-bit indexed ICB records, positive and negative base_vertex, non-zero first_vertex/first_instance, draw counts crossing the ICB generation workgroup width, mixed single/multi indirect sequencing in one render pass, and bind-group forced fallback.
+Disable the ICB path on Apple's paravirtual Metal adapter after CI showed it advertises the relevant feature sets/families but aborts when executing render ICBs.
+Hardware and driver quirks found:
+M4-class Apple Silicon Macs execute GPU-generated non-indexed and indexed MDI through Metal ICBs. Intel/AMD macOS GPUs are intentionally out of scope for this PR and remain on the CPU fallback because the macOS gate now requires unified-memory Apple Silicon evidence.
+A12/iPhone XS on iOS 18.7 successfully executes GPU-generated non-indexed and indexed MDI through Metal ICBs. This matches our empirical Apple5/A12 finding even though older public Apple capability tables are conservative about ICB support.
+A10X/iPad Pro (iPad7,3) on iPadOS 17.7 advertises the legacy iOS GPUFamily3 ICB feature set, but throws a foreign NSException from the draw_indirect path before ICB generation while ending/suspending the active render encoder for the ICB splice. This PR therefore keeps Apple3/A10X on the existing CPU-loop fallback even if a later runtime reports related feature sets.
+First-generation Apple TV 4K / A10X on tvOS 18+ is intentionally out of scope for this PR. That path can be reconsidered only after direct hardware validation, especially because Apple3-class devices do not support all sizing behavior this path now uses.
+Apple Watch GPUs are minimal enough that the ICB generation compute pass should not depend on non-uniform threadgroup dispatch. This PR now follows the Dawn-style shape: uniform dispatchThreadgroups sized by threadExecutionWidth(), with rounded-up extra threads neutralized by an in-shader draw-count guard.
+Apple Watch SE2 (Watch6,10) passed the post-fix rerun in the external MetalSpeed probe. The probe used a Metal shared-buffer readback for CPU-side pixel verification, while the ICB path itself remains GPU-side command generation plus indirect draw execution.
+On A12, MTLIndirectCommandBufferDescriptor inheritance defaults are usable, but calling optional generated objc2 setters such as setInheritDepthStencilState: can crash because the selector is not present on that runtime. The implementation relies on default inheritance instead of calling those optional setters.
+On A12, generated ICB records rendered black until maxVertexBufferBindCount was set from the currently bound vertex-buffer count. The fragment bind count is currently set to 0 because this fast path rejects active render bind groups and immediates and does not restore fragment buffer bindings into ICB state.
+On the GitHub-hosted Apple Paravirtual device, Metal reports ICB-related feature sets/families and the debug dump showed indirect_command_buffers_rendering: true and indirect_command_buffers_compute: true, but all MDI cases SIGABRTed when the ICB path executed. This PR treats virtual adapters like the existing mesh-shader virtual-device quirk and keeps them on the CPU fallback until that driver path is independently validated.
+The render-pass suspend/resume path is intentionally conservative and could be broadened. It only uses ICBs when the pass can be safely ended and restarted with store/load semantics and when current state is simple enough to restore.
+Gaps:
+I do not have access to an A10X Apple TV 4K running tvOS 18+, so this PR deliberately does not expose the ICB path below Apple5. That hardware configuration can be tested later before expanding the gate.
+No A11 device can be updated beyond iOS 16, and based on the iPadOS 17 testing I expect those devices to hit similar driver/runtime limits, but direct validation would still be useful.
+Testing
+Local validation:
+M4 Max / Metal: cargo check -p wgpu-hal --features metal --no-default-features.
+M4 Max / Metal: cargo check -p wgpu-test --test wgpu-gpu.
+M4 Max / Metal: WGPU_BACKEND=metal cargo test -p wgpu-test --test wgpu-gpu multi_draw -- --test-threads=1 --nocapture, 13 passed.
+M4 Max / Metal: WGPU_BACKEND=metal cargo test -p wgpu-test --test wgpu-gpu draw_indirect -- --test-threads=1 --nocapture, 33 passed.
+Changelog audit: cargo xtask changelog rebecker/trunk.
+Device validation:
+iPhone XS Max / Apple A12 GPU / iOS 18.7.9: temporary aarch64-apple-ios probe app passed GPU-generated non-indexed and indexed MDI after the OS-version-aware mobile ICB gate.
+A14 / iPhone 12 and M2 / Apple Vision Pro: validated successfully in the target app stack.
+Apple Watch SE2 / Watch6,10 / watchOS 11-class runtime: temporary MetalSpeed probe launched with PROBE_AUTORUN_CAPABILITY=multiDrawIndirectSubset, verified build stamp mdi-watch-se2-shared-readback-20260603-175517, created a Metal shared readback buffer, and completed Phase 2 with success=true and 26,448 non-background pixels (40.4% coverage).
+iPad Pro 10.5-inch / Apple A10X GPU / iPadOS 17.7.11: temporary native iPad-only probe app (UIDeviceFamily = 2, MinimumOSVersion = 17.0) passed GPU-generated non-indexed and indexed MDI through the CPU fallback after the OS-version-aware mobile ICB gate.
+ICB-path proof: temporary fallback trap for draw_count > 1 was enabled during one M4 run and one iPhone XS run; both passed, proving these generated-argument cases did not use CPU-side per-draw fallback. The trap was removed before this PR.
+CI notes:
+The first CI run exposed Apple Paravirtual device SIGABRTs in multi_draw_indirect, multi_draw_indexed_indirect, and both GPU-generated-argument variants. I gated ICB capability exposure on virtual Metal adapters so CI exercises (and simulators) the existing CPU fallback there while unfettered Apple GPUs continue to use ICBs.
+Squash or Rebase?
+Squash before merge. The branch currently keeps the development and hardening iterations visible for review, but the final upstream landing would be cleaner as one feature commit or a maintainer-curated split.
+Checklist
+I self-reviewed and fully understand this PR.
+WebGPU implementations built with wgpu may be affected behaviorally (if they enable MDI feature).
+Validation and feature gates are in place to confine behavioral changes.
+Tests demonstrate the validation and altered logic works.
+CHANGELOG.md entries for the user-facing effects of this change are present.
+The PR is minimal, and doesn't make sense to land as multiple PRs.
+Commits are logically scoped and individually reviewable.
+The PR description has enough context to understand the motivation and solution implemented.
+matthargett
+added 5 commits
+June 2, 2026 14:21
+Use Metal ICBs for multi-draw indirect
+2248f6d
+Disable Metal ICB path on paravirtual adapters
+8ac5bc3
+Gate Metal ICB path to validated Apple GPUs
+8a63005
+Gate Metal ICBs on modern Apple OS runtimes
+5a311cf
+Harden multi-draw indirect coverage
+5534581
+chatgpt-codex-connector
+Bot
+reviewed
+Jun 3, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 553458126a
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+wgpu-hal/src/metal/command.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+wgpu-hal/src/metal/command.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+matthargett
+added 21 commits
+June 3, 2026 14:59
+Avoid Metal ICB resume with pending timestamps
+263d4cb
+Gate Metal ICB render state tracking
+8eb4590
+Tune Metal ICB fast-path overhead
+4bb7e71
+Add Metal ICB changelog entry
+6508e33
+Tighten Metal ICB generation gates
+d181efa
+Use uniform Metal ICB generation dispatch
+cd7172a
+update PR link
+9db378e
+typo
+ddbdb12
+Merge branch 'trunk' into metal-icb-multi-draw-indirect
+35e4684
+Merge branch 'trunk' into metal-icb-multi-draw-indirect
+2e1668e
+Add Metal ICB mesh and count MDI coverage
+…
+f7a1762
+```
+Add Metal ICB generation for mesh multi-draw indirect and opt-in count-buffer variants.
+
+Wire the Chromium experimental multi-draw indirect API surface for CTS, add wgpu-owned readback tests for normal/indexed count-buffer draws and mesh MDI, and validate draw-count-buffer offset alignment.
+```
+Merge branch 'trunk' into metal-icb-multi-draw-indirect
+c306df7
+Merge branch 'trunk' into metal-icb-multi-draw-indirect
+4674b25
+Allow Metal ICB MDI on A10X tvOS 18
+e7590b2
+Merge remote-tracking branch 'upstream/trunk' into metal-icb-multi-dr…
+…
+01bc21c
+```
+…aw-indirect
+
+# Conflicts:
+#	CHANGELOG.md
+#	deno_webgpu/render_pass.rs
+```
+Move Metal ICB kernels into shader files
+…
+65d9b19
+```
+Extract the inline MSL generation kernels into wgpu-hal/src/metal/shaders/
+and include_str! them, following the gles/shaders precedent, and document
+the ICB tuning and primitive-topology constants.
+
+Requested in review of gfx-rs#9640.
+```
+Note Chromium mapping for deno MDI count feature
+…
+5b58ab9
+```
+Document why MULTI_DRAW_INDIRECT_COUNT is exposed past all_webgpu_mask():
+it surfaces as Chromium's experimental
+chromium-experimental-multi-draw-indirect WebGPU feature.
+
+Requested in review of gfx-rs#9640.
+```
+Scope Metal MDI PR to fixed-count multi-draw
+…
+56be6b9
+```
+Move the MULTI_DRAW_INDIRECT_COUNT surface (deno bindings and the
+chromium-experimental-multi-draw-indirect mapping) out to gfx-rs#9679, which
+owns the count feature.
+
+Requested in review: the env-gated feature exposure didn't belong in
+this PR.
+```
+Generate Metal ICBs in a pre-pass instead of splitting the render pass
+…
+a95a810
+```
+Rework requested in review of gfx-rs#9640: instead of suspending and resuming
+the render encoder around each multi-draw, the ICB is allocated and its
+execution recorded at draw time, and the reset/generate/optimize work is
+deferred into the same internal pre-pass command buffer that carries
+indirect-draw validation, via a new default-no-op hal method
+CommandEncoder::encode_deferred_multi_draws. The queue executes that
+buffer before the pass, so the pass is never interrupted and no render
+state needs to be captured or restored.
+
+This deletes the suspend/resume machinery, the render-state shadow
+tracking, the store-action rewriting, the pass-resumability gating, and
+both environment variables (WGPU_METAL_FORCE_ICB_MDI,
+WGPU_METAL_REQUIRE_ICB_MDI). Adapter gating is restated in the
+CapabilitiesQuery idiom: feature-set tables plus family checks, with the
+paravirtual exclusion kept and the splice-motivated OS-version gates
+dropped. The count-buffer offset validation moves to gfx-rs#9679 with the rest
+of the count feature.
+
+Running the full suite on device also surfaced a latent bug in the
+previous revision: setSupportIndirectCommandBuffers(true) makes pipeline
+creation fail for shaders Metal rejects in ICBs (e.g. wgpu's own
+TextureBlitter fragment shader on Apple GPUs). Pipeline creation now
+retries without the flag and multi-draws recorded under such pipelines
+fall back to the per-draw loop.
+
+Generation encoders, ICBs, and argument buffers are labeled and the
+per-pass generation runs as one labeled compute encoder, so GPU captures
+in Xcode show one legible generation node per pass.
+
+All 471 wgpu-gpu tests pass on Apple M4 Max (modulo failures also
+present on trunk on the same machine).
+```
+Harden Metal ICB prepass edge cases
+…
+7b2115d
+```
+Fixes from an adversarial pre-push review of the prepass rework:
+
+- Gate setSupportIndirectCommandBuffers on MTLMeshRenderPipelineDescriptor
+  behind macOS 14 / iOS 17 / tvOS 18.1 / visionOS 2.1: the property is one
+  OS generation newer there than mesh pipelines themselves, so macOS 13 /
+  iOS 16 would hit an unrecognized selector. Mesh pipelines created without
+  the flag fall back to the per-draw loop.
+- Raise the ICB availability floor to macOS 10.15 / iOS 13 / tvOS 13:
+  inheritPipelineState needs iOS/tvOS 13, and useResource:usage: only
+  participates in hazard tracking from macOS 10.15 / iOS 13, which the
+  deferred generation relies on.
+- Fix the tvOS entry in the ICB feature-set table (tvOS_GPUFamily1_v2
+  admitted the Apple2-class A8; the floor is tvOS_GPUFamily2_v2 / A10X).
+- Drop the begin_render_pass debug_assert on the deferred queue: wgpu-core
+  legally records discarded-surface fixup clears (render passes) in the
+  internal pre-pass before draining the queue.
+- Cache generation-kernel compile failures so a driver that rejects the
+  library doesn't recompile it on every multi-draw call.
+- Report the retry error (the pipeline's real problem) when creation fails
+  both with and without the ICB flag, and log a breadcrumb when a pipeline
+  is silently downgraded to non-ICB.
+- Use the stage-scoped useResource for the ICB-referenced index buffer.
+  The ICB itself keeps the stage-less variant: it is consumed by command
+  ingestion, not a shader stage, and the stage-scoped call was observed on
+  M4 to make the executed draws render nothing.
+- Rename the stale MULTI_DRAW_INDIRECT_BIND_GROUP_FALLBACK test (bind
+  groups no longer force a fallback; the test now verifies bind-group
+  inheritance through the ICB path), document the test-count constant's
+  coupling to ICB_MIN_DRAW_COUNT, document the hal contract in the
+  changelog, and correct the ICB bind-count constant's rationale.
+```
+Enable Metal ICB path on Apple Watch (S4+/Apple5)
+…
+4ada51d
+```
+The prepass rework dropped watchOS from the ICB gating along with the
+splice-era OS-version gates, but watchOS support was genuine hardware
+capability, not a splice workaround. Restore it.
+
+Validated end-to-end on Apple Watch SE 2 (S8 SiP, watchOS 11.6): the GPU
+reports "Apple S4 GPU", supports the Apple5 family, and an indirect
+command buffer GPU-generated by the multi-draw generation kernel renders
+correctly via executeCommandsInBuffer: (readback + visual).
+
+objc2-metal exposes no MTLFeatureSet::watchOS_* values, so the feature-set
+table can't cover watchOS, and watchOS classifies as OsType::Ios here with
+no watchos key in family_check; the watch is therefore detected purely by
+GPU family, folded into icb_family_support behind available!(watchos =
+11.0) (false on every other platform). watchOS 11 is the floor for the
+same reason iOS/iPadOS/tvOS 17.x are excluded: earlier drivers mishandle
+the render-ICB path.
+```
+matthargett
+force-pushed
+the
+metal-icb-multi-draw-indirect
+branch
+from
+68eb50d to
+4ada51d
+Compare
+July 9, 2026 00:12
+matthargett
+added 2 commits
+July 8, 2026 22:51
+Merge branch 'trunk' into metal-icb-multi-draw-indirect
+cb0aeca
+Merge branch 'trunk' into metal-icb-multi-draw-indirect
+6f6d863
+teoxoy
+and others
+added 30 commits
+October 27, 2026 11:30
+[naga] add loop continuing block tests
+f788839
+[msl] Hoist body temporaries used by continuing blocks
+…
+2b206a0
+```
+The MSL backend emits a loop's `continuing` block at the top of the
+`while` loop, above the body. Values the body computed and `continuing`
+referenced were then either re-evaluated in place, reading whatever
+state the body had left behind, or, for statement results such as call
+results, hit an `unreachable!` panic.
+
+Now, when a loop has a `continuing` block or `break_if`, the
+temporaries it needs from the body are declared ahead of the loop, and
+the body assigns to them instead of declaring them.
+```
+[naga] add name_reuse test case
+5dfcef2
+Return SubmissionIndex only if submissions succeed (gfx-rs#10218)
+a979c33
+docs(examples): fix the synchronization example link (gfx-rs#10712)
+…
+be9c260
+```
+Signed-off-by: fengxueweilai <fengxueweilai@outlook.com>
+```
+fix(msl-out): select gradient constructor by image dimension (gfx-rs#…
+…
+c963c0b
+```
+…10573)
+
+Co-authored-by: Andy Leiserson <aleiserson@mozilla.com>
+```
+Update zizmorcore/zizmor-action action to v0.8.0 (gfx-rs#10723)
+…
+03153f6
+```
+Co-authored-by: renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>
+```
+[remote] Do not return ids
+…
+9566197
+```
+Signed-off-by: sagudev <16504129+sagudev@users.noreply.github.com>
+```
+[remote] remove unused serde feature
+…
+50204b6
+```
+al types are in wgpu-core-remote-types which uses serde unconditionally
+
+Signed-off-by: sagudev <16504129+sagudev@users.noreply.github.com>
+```
+chore(deps): bump qs from 6.16.0 to 6.17.0 in /tests/wasm/runner (gfx…
+…
+55a034d
+```
+…-rs#10763)
+
+Signed-off-by: dependabot[bot] <support@github.com>
+Co-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>
+```
+Update tombi-toml/setup-tombi action to v1.9.6 (gfx-rs#10667)
+…
+fc56386
+```
+Co-authored-by: renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>
+```
+chore(deps): bump body-parser from 2.3.0 to 2.4.0 in /tests/wasm/runn…
+…
+b440fc8
+```
+…er (gfx-rs#10748)
+
+Signed-off-by: dependabot[bot] <support@github.com>
+Co-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>
+```
+Update taiki-e/install-action action to v2.87.32 (gfx-rs#10666)
+…
+7c970ea
+```
+Co-authored-by: renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>
+```
+Update Cargo.lock (gfx-rs#10724)
+…
+e9a6918
+```
+Co-authored-by: renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>
+```
+Update Swatinem/rust-cache action to v2.9.3 (gfx-rs#10720)
+…
+dad6685
+```
+Co-authored-by: renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>
+```
+feat(vulkan): External texture binding support (gfx-rs#10768)
+49325ca
+Merge branch 'trunk' into metal-icb-multi-draw-indirect
+6048b91
+Add Features::UNRESTRICTED_BYTES_PER_ROW (gfx-rs#10619)
+…
+11c1f4b
+```
+Co-authored-by: Michaël DM <micode@micorp.fr>
+```
+style: replace CRLF from gfx-rs#10459 w/ LF (gfx-rs#10782)
+118b25a
+[naga glsl-out] Cast u32 image levels and sample indices to int in bo…
+…
+14231a8
+```
+…unds checks (gfx-rs#10704)
+```
+feat(metal, msl-out) Support for SHADER_EARLY_DEPTH_TEST on Metal (gf…
+…
+2375b1c
+```
+…x-rs#10625)
+```
+gles: enable seamless cube map filtering on desktop GL (gfx-rs#10628)
+ecf9863
+feat(dx12, hlsl-out) Support for SHADER_EARLY_DEPTH_TEST on DX12 (onl…
+…
+eaf2219
+```
+…y non-MSAA framebuffers) (gfx-rs#10624)
+```
+fix(hlsl-out) std430 layout for HLSL immediate/push constant buffers (g…
+…
+9f36902
+```
+…fx-rs#10581)
+
+Co-authored-by: Teodor Tanasoaia <28601907+teoxoy@users.noreply.github.com>
+```
+[naga] Implement vec2<f16> ↔ u32 bitcasts (gfx-rs#10613)
+9747445
+DX12 device_from_raw (gfx-rs#10662)
+985ce0f
+[core] Expose request_adapters to allow users to select non-first ada…
+…
+303def5
+```
+…pter that matches `RequestAdapterOptions`
+
+Signed-off-by: sagudev <16504129+sagudev@users.noreply.github.com>
+```
+[core] implement enumerate_adapters using request_adapters
+…
+6a36ccc
+```
+Signed-off-by: sagudev <16504129+sagudev@users.noreply.github.com>
+```
+Update Cargo.lock (gfx-rs#10809)
+…
+3d5c6fa
+```
+Co-authored-by: renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>
+```
+Merge branch 'trunk' into metal-icb-multi-draw-indirect
+c541a0a
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+20 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

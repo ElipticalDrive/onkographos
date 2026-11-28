@@ -1,0 +1,2359 @@
+D EPARTMENT OF I NFORMATION AND C OMPUTING S CIENCES
+M ASTER ’ S T HESIS
+G AME & M EDIA T ECHNOLOGY
+Fast Divergent Ray Traversal by Batching Rays in a BVH
+Tigran Gasparian
+ICA-3705617
+Supervisor
+Dr. ing. J. (JACCO ) B IKKER
+Second Examiner
+Dr. ir. A.F. (F RANK ) VAN DER S TAPPEN
+5 December 2016
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+1
+Fast Divergent Ray Traversal by Batching Rays in a BVH
+Tigran Gasparian†1
+1 Department of Information and Computing Sciences, Utrecht University
+Abstract
+Ray tracing forms the basis of photorealistic rendering as seen in films and special effects. The process of rendering
+all the frames of animated films can take thousands of CPU years. Improving the efficiency of the rendering
+algorithm translates into large savings of time.
+In this thesis, we focus on the algorithm that is at the core of all rendering systems, computing the intersection
+point between a ray and a scene. Our contribution is a novel ray traversal scheme aimed at highly divergent ray
+distributions. We improve traversal efficiency by batching rays at fixed points in a BVH during traversal. The
+batched rays benefit from improved cache efficiency and utilization of instruction level parallelism and achieves
+performance improvements of up to 99% for intersection queries and up to 123% for occlusion queries for ray
+distributions seen after the first diffuse bounce when compared to a single-ray traversal scheme. Our scheme is
+orthogonal to recent advances in divergent ray traversal, and for large scenes, substantially improves on state of
+the art performance.
+Keywords: Ray Tracing, Ray Traversal
+Categories and Subject Descriptors (according to ACM CCS): I.3.7 [Three-Dimensional Graphics and Realism]:
+Raytracing—Visible line/surface algorithms
+1. Introduction
+Ray tracing is a technique that forms the basis of photorealistic rendering. It consists of two basic operations: intersection
+queries and occlusion queries. Given a scene and a ray with
+an origin, direction and maximum intersection distance, an
+intersection query determines the nearest intersection point
+between the ray and a scene that is within the maximum distance from the ray origin, whereas an occlusion query only
+determines whether there is an intersection of the ray with
+the scene within the maximum distance.
+To accelerate ray/scene intersections, a space partitioning
+or object partitioning data structure is used. Popular choices
+are the kD-tree and the Bounding Volume Hierarchy (BVH).
+In this paper, we focus on BVHs, but our method can also be
+applied to other acceleration structures.
+As CPU speeds have increased at a much higher rate compared to memory access times, many algorithms have become increasingly memory bound. To alleviate this, the CPU
+† gaspariantigran@gmail.com
+uses a hierarchy of caches to hide the latency of retrieving
+data from memory. To achieve high performance, an algorithm has to optimally utilize these caches. In practice, most
+scenes and their corresponding BVHs are too large to fit in
+the CPU cache in its entirety. To achieve good performance,
+a node from the BVH that is retrieved from memory should
+be used to test against multiple rays before getting evicted
+from the cache. Ideally, a node should only be read into the
+cache once.
+Ray tracing algorithms are known to exhibit highly irregular memory access patterns. This is particularly true for
+divergent ray distributions commonly encountered in path
+tracing. Under these circumstances, CPU caches fail to effectively hide memory access latency, resulting in poor ray
+tracing performance.
+In this work we propose a batching traversal scheme
+called RayCrawler. Our scheme operates on a hierarchy of
+BVHs by splitting an existing BVH into two separate layers,
+creating a top-level tree and multiple small trees that fit in the
+L2 cache of modern CPUs. The rays traverse the top-level
+BVH and are batched at the leaf nodes before traversing the
+2
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+second layer, amortizing the cost of retrieving the subtree
+from the second layer from memory over the rays that are
+batched in the leaf node.
+Section 3 gives an overview of the algorithm. Sections 4
+and 5 describe the details of the used data structures and the
+traversal algorithm. Our results are presented in section 6,
+with the conclusion and suggestions for future work in section 7.
+2. Previous work
+Considerable progress has been made in improving the efficiency of Whitted-style ray tracing by exploiting the coherence of ray distributions which typically occur in this rendering algorithm. This is achieved by amortizing the cost of
+fetching data over multiple rays, using pyramid or packet
+traversal [vdZRJ95] [WSBW01] [BEL∗ 07].
+The ray coherence that these algorithms rely on is mostly
+lost even after a single specular bounce. This led to the development of packet traversal schemes that are still able to
+exploit ray coherence for somewhat divergent ray distributions [ORM08].
+Considering diminishing coherence for divergent ray distributions, several authors suggest using wide BVHs and
+dropping packet traversal altogether. Vector hardware such
+as SSE, AVX and AVX-512 benefits from 4-wide, 8wide and even 16-wide BVH traversal [WBB08] [EG08]
+[DHK08].
+Tsakok proposed a scheme that exploits ray coherence in
+very incoherent distributions, such as those after the first diffuse bounce in a path tracer [Tsa09]. This algorithm traverses large groups of rays through a 4-wide BVH in a
+breadth-first manner, intersecting many rays with a single
+node before evicting the node from the cache. This approach
+requires all rays to traverse the BVH in the same order,
+which may resulting in unnecessary nodes being visited.
+Dynamic Ray Stream Traversal (DRST) [BAM14] extends this idea by allowing rays to traverse through a 4-wide
+BVH in different orders. This results in more nodes being
+culled, but has increased bookkeeping overhead. DRST limits the number of possible traversal orders of the rays from
+24 to 8 to keep bookkeeping overhead low. This results in
+suboptimal ray culling compared to a single ray traversal
+scheme.
+Ordered Ray Stream Traversal (ORST) [FLPE15] builds
+upon this idea and allows rays to traverse in all possible orders while decreasing bookkeeping costs by utilizing precomputed lookup tables to determine the traversal order of
+the rays.
+This paper proposes a traversal algorithm for incoherent
+ray distributions based on the RayGrid scheme [Bik12]. This
+scheme coarsely subdivides the scene using an octree and
+stores a BVH of the parts of the scene in its leaf nodes.
+The BVHs stored in the leaf nodes are small enough to fit in
+the L2 cache. The algorithm traverses rays through the octree, batching them in the leaf nodes. Large batches then traverse the BVHs, amortizing the cost of retrieving the BVH
+from memory into cache over the batched rays. The scheme
+achieves modest speedups compared to a single-ray traversal algorithm for secondary rays and proves that a batching
+scheme can outperform a naive single-ray traversal approach
+for highly divergent rays. However, the performance gains
+are limited by the high cost of traversing the octree, which in
+turn becomes the performance bottleneck for this algorithm.
+The comparisons in this work are made with the algorithms implemented in the Embree framework version 2.7.1
+[WWB∗ 14]. This framework contains highly optimized ray
+tracing kernels with many industry applications. The singleray traversal scheme for 4-wide BVHs serves as the baseline in the comparisons as this algorithm has the best performance for highly divergent ray distributions.
+3. Overview
+This section gives a short overview of the data structure used
+throughout the paper and an overview of the traversal algorithm. The goal of our scheme is to improve cache efficiency by batching rays together before traversing parts of
+the scene, amortizing memory reads over the batched rays.
+We achieve this by splitting a regular 4-wide BVH in two
+layers. The rays are batched in the leaf nodes of the top
+layer before traversing the bottom layer of the data structure. By using the same structure as a regular 4-wide BVH,
+we can take advantage of existing traversal algorithms in
+the scheme. Our approach is thus orthogonal to recent approaches that aim to improve traversal efficiency such as
+DRST and ORST.
+Our data structure is constructed by splitting a regular
+4-wide BVH in two layers; a top level BVH (Top-BVH)
+where the leaf nodes point to Leaf-BVHs. Each individual
+Leaf-BVH is small enough to fit in the L2 cache of modern
+CPUs. The traversal algorithm starts by first traversing each
+ray depth-first through the Top-BVH; once the ray reaches
+a leaf node of the Top-BVH, the ray is batched at the LeafBVH that the leaf node is pointing to and the traversal of the
+ray is suspended. The Top-BVH traversal stack of the ray is
+stored to resume traversal later on.
+Once all rays have traversed the Top-BVH and are distributed among the Leaf-BVHs, a Leaf-BVH is selected to
+be traversed. All rays batched at the Leaf-BVH traverse this
+tree. If the query is an occlusion query, the traversal of the
+ray is terminated if an intersection is found. Otherwise, any
+intersections found for the rays are stored and the rays are
+shortened.
+Once all rays batched at the Leaf-BVH have been processed, traversal through the Top-BVH is resumed using the
+stored traversal stacks and the nearest intersection distances
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+of the rays that traversed the Leaf-BVH. A new Leaf-BVH is
+selected to be traversed after the rays have been distributed
+among the Leaf-BVHs. This process continues until no LeafBVH with batched rays remains. This process is illustrated
+in Figure 1.
+3
+Buckets Rays are batched in buckets before traversing the
+Leaf-BVHs. Every Leaf-BVH has a corresponding linked
+list of buckets where every bucket can contain a fixed number of rays. The fixed size buckets are obtained from a preallocated list of buckets, which prevents run-time memory
+allocations.
+Figure 1: A high level example of the traversal using a TopBVH with 5 nodes and 4 Leaf-BVHs. All rays first traverse
+the Top-BVH and are distributed among the Leaf-BVHs. (a)
+Then a Leaf-BVH with a high number of batched rays is
+selected, this is highlighted in yellow. All batched rays traverse the Leaf-BVH. After traversing the Leaf-BVH, the rays
+again traverse the Top-BVH and can be distributed among
+the other Leaf-BVHs. This process is repeated until no LeafBVH with batched rays remains.
+This system tries to amortize the cost of retrieving a LeafBVH from memory by traversing many batched rays through
+the Leaf-BVH once it has been loaded into cache. A large
+number of rays needs to be batched at the Leaf-BVH in order to justify the overhead of the batching process itself.
+This requires a large initial set of rays as the rays are distributed among all Leaf-BVHs. When selecting a Leaf-BVH
+for traversal, selecting one with a large number of batched
+rays is preferred.
+Traversal of the Top-BVH thus serves to batch rays for
+Leaf-BVH traversal. While the original rays may intersect
+several Leaf-BVHs, truncating rays based on intersections
+with geometry in the Leaf-BVHs may prevent them from
+being batched in a subsequent Leaf-BVH. Pausing traversal
+in the Top-BVH after one Leaf-BVH is found, enables us
+to cull subsequent Leaf-BVHs if an intersection in the first
+Leaf-BVH is found.
+4. Data structures
+The hierarchy of BVHs is constructed by splitting a regular
+4-wide BVH in two layers. The Top-BVH is built by starting
+at the root of the original BVH and adding nodes to the TopBVH until one of the following conditions is met:
+Figure 2: Top-level node structure. The total size of the node
+with 16-byte alignment is 224 bytes.
+Top-BVH node structure In order to facilitate an efficient
+way of pausing and resuming traversal and an efficient way
+to store the traversal stack, the Top-BVH nodes are augmented with:
+• an array of ancestor pointers which is used to quickly navigate up in the tree;
+• and the depth of the node in the BVH.
+A Top-BVH node also contains additional information to
+batch rays for the Leaf-BVHs:
+• a next and a prev pointer, to act as a node in a linked list;
+• a linked list of buckets;
+• the number of buckets in the linked list;
+• and the room in the last bucket in the linked list.
+Figure 2 shows the exact structure of the node.
+• The node contains a child with a size smaller than a certain threshold, related to the size of the L2 cache.
+• The node has a depth of 16. The Top-BVH can have a
+maximum depth of 16 to limit the size of the stack in the
+Top-BVH traversal. See section 5.1 for details.
+The nodes that the leaf nodes of the Top-BVH point to are selected as the root nodes of the Leaf-BVHs. The Leaf-BVHs
+consist of the root nodes and all their descendants.
+Figure 3: Top-Level ray structure.
+4
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+Top-BVH ray structure In order to facilitate suspending
+and resuming traversal, the traversal stack is stored in the ray
+structure as a 64 bit unsigned integer. See section 5 for more
+information on how the stack is managed. Together with the
+origin, direction, index and the nearest intersection distance,
+a ray can be stored in 40 bytes. See Figure 3 for the layout
+of the ray.
+Leaf-BVH node structure Leaf-BVH nodes have the same
+structure as regular 4-wide BVH nodes and any algorithm
+that can traverse a 4-wide BVH can be used to traverse
+the Leaf-BVHs. Our implementation uses Tsakok’s MultiBVH Ray Stream tracing algorithm [Tsa09] and a single ray
+traversal scheme to traverse the Leaf-BVHs.
+5. Traversal
+The traversal algorithm consists of two stages. In the first
+stage, all rays traverse the Top-BVH and get distributed
+among the Leaf-BVHs. In the second stage, we repeatedly
+choose a Leaf-BVH with a high number of batched rays. The
+batched rays traverse the Leaf-BVH and the non-terminated
+rays traverse the Top-BVH afterwards to get redistributed
+over the other Leaf-BVHs.
+Two distinct traversal algorithms are used to traverse the
+hierarchy of BVHs. Although any traversal algorithm that
+works on regular BVHs can be used to traverse the LeafBVHs, algorithms with low starting overhead work well here
+as the Leaf-BVHs are generally small. The traversal algorithm for the Top-BVH needs to be able to pause and resume
+traversal. Therefore, the traversal algorithm needs to use as
+little state as possible in order to efficiently store and retrieve
+this state to resume traversal. This is achieved using a stackless traversal scheme.
+5.1. Top-BVH traversal
+A stackless traversal scheme is a scheme that uses as little
+state as possible during traversal. Prior works have investigated stackless traversal schemes for kD-trees [FS05], binary BVHs [Lai10] [HDW∗ 11] and 4-wide BVHs [ÁSK14].
+Áfra and Szirmay-Kalos propose a stackless 4-wide BVH
+traversal scheme using 64 bits to hold the stack by extending
+the nodes to contain parent and sibling pointers.
+This method however does not guarantee an ordered
+traversal of the tree resulting in more visited nodes. As the
+Top-BVH is a relatively small tree, it is worth trading in
+some traversal speed to visit the leaf nodes in the correct
+order, which may result in more Leaf-BVHs being culled.
+We propose a different stackless traversal scheme that guarantees an ordered traversal of the nodes, but can intersect the
+same nodes multiple times. The stack management is presented below followed by the traversal algorithm.
+Stack management Because the Top-BVH has a maximum
+depth of 16, we can encode the stack in a 64 bit unsigned
+integer. We call this the bitstack.
+Every node in the traversal path is represented by four bits
+in the bitstack. The four bits in the bitstack corresponding to
+the depth of the current node that is being visited is called
+the interestMask. The interestMask represents the children
+of the current node that are being considered to be visited
+and does not include already visited children.
+The root node’s children are represented by the four least
+significant bits in the bitstack. Each child node intersected by
+the ray (taking into account the current length of the ray) is
+set to 1. Upon traversal into a child node, the bit corresponding to the child node in the bitstack is set to 0 to prevent the
+child node from being visited again. The next four bits corresponding to the depth of the child node are set to 1, which
+initializes traversal at the next level of the tree. This process
+is illustrated in Figure 4.
+Once a ray resumes traversal starting from a leaf node or
+when there are no children to traverse into, the next node to
+be visited can be found by determining the most significant
+bit set in the bitstack. This can be done by a bit scan reverse
+operation. The most significant bit can be used to determine
+the depth of the next node (e.g. the four least significant bits
+represent depth 0, next four bits represent depth 1, etc.). The
+next node to be visited can be found by using the depth of the
+current node and the list of ancestor pointers that is stored in
+the node. See Figure 5 for an example of upward traversal.
+Traversal The traversal algorithm is similar to a single-ray
+depth first BVH traversal scheme with the modification that
+the traversal stack has been replaced by the bitstack described above. The Top-BVH traversal algorithm is shown
+in Listing 1.
+1 def Tra vers e ( ray , n ) :
+2
+( hitmask , d i s t a n c e s ) = I n t e r s e c t ( ray , n )
+3
+stackMask = 15 << ( n . depth ∗ 4)
+4
+i n t e r e s t M a s k = ( stackMask & ray . b i t s t a c k ) >> ( n . depth ∗ 4)
+5
+# Clear t h e b i t s t a c k t o make s e t t i n g i t e a s i e r l a t e r .
+6
+ray . b i t s t a c k &= ~stackMask
+7
+toVisitMask = hitmask & i n t e r e s t M a s k
+8
+i f toVisitMask == 0 :
+9
+i f ray . b i t S t a c k == 0 :
+10
+return # T r a v e r s a l i s t e r m i n a t e d
+11
+ancestorDepth = M o s t S i g n i f i c a n t B i t I d x ( ray . b i t s t a c k ) >> 2
+12
+Trave rse ( ray , n . a n c e s t o r s [ ancestorDepth ] )
+13
+else :
+14
+c l o s e s t C h i l d I d x = C l o s e s t ( toVisitMask , d i s t a n c e s )
+15
+toVisitMask −= 1 << c l o s e s t C h i l d I d x
+16
+# Update t h e b i t s t a c k
+17
+ray . b i t s t a c k | = toVisitMask << ( n . depth ∗ 4)
+18
+child = n . children [ closestChildIdx ]
+19
+i f not c h i l d . i s L e a f ( ) :
+20
+# Set the next four b i t s to 1
+21
+ray . b i t s t a c k | = 15 << ( c h i l d . depth ∗ 4)
+22
+Trave rse ( ray , c h i l d )
+23
+else :
+24
+i f c h i l d . bucketCount > 0 :
+25
+c h i l d . l a s t B u c k e t . add ( ray )
+26
+i f child . lastBucket . isFull () :
+27
+c h i l d . addBucket ( getNewBucket ( ) )
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+5
+Figure 4: An example of downward traversal in the Top-BVH. The orange-colored node depicts the current node being visited,
+dark gray depicts nodes that do not intersect the ray, yellow nodes intersect the ray, the node with dashed outline indicates the
+nearest active child node and brown nodes indicate already visited nodes. a) The stack is initialized by setting the four least
+significant bits to 1. We get the hitmask by intersecting the child nodes of the current node. Performing a bitwise AND with the
+interestMask results in the toVisitMask. We then select the nearest child node that is active in the toVisitMask to traverse into. We
+set the bit in toVisitMask corresponding to the selected child node to 0 and update the bitstack. b) The four bits corresponding
+to the depth of the child node are set to 1. The same process is repeated until a leaf node is reached.
+28
+29
+30
+31
+32
+33
+34
+35
+i f c h i l d . bucketCount == 2 :
+n o d e s W i t h P a r t i a l B u c k e t s . remove ( c h i l d )
+nodesWithFullBuckets . add ( c h i l d )
+else :
+n o d e s W i t h P a r t i a l B u c k e t s . add ( c h i l d )
+c h i l d . addBucket ( getNewBucket ( ) )
+c h i l d . l a s t B u c k e t . add ( ray )
+return # T r a v e r s a l i s paused
+Listing 1: Top-BVH traversal algorithm
+Upon creation of a ray, the bitstack is initialized by setting
+the four least significant bits to 1.
+The ray is tested against the bounding volumes of the children of node n that is currently being visited, resulting in 4
+bits representing which bounding volumes intersect with the
+ray (hitmask) and the intersection distances if an intersection
+is found (line 2). The child nodes that are not being considered to be visited are masked out using the interestMask,
+resulting in the toVisitMask (lines 3-7).
+If the toVisitMask is 0 (i.e. there is no child node to be
+visited) we check if the bitstack is 0. If this is the case, the
+traversal of the ray terminates (line 9). Otherwise, the index
+of the most significant bit set on the bitstack is found. This
+index is used to determine the depth of the node to traverse
+into next and using the ancestor pointer array in n, the new
+node to be visited is found (lines 10-11). See Figure 5 for an
+example.
+If the toVisitMask is not 0, the closest child node that is
+active in the toVisitMask is selected to be visited next (line
+14). The bit corresponding to the closest child is set to 0 in
+the toVisitMask to mark this child as traversed (line 15). The
+bitstack is updated by setting the four bits corresponding to
+node n to toVisitMask (line 17).
+If the child node that is going to be visited next is not a
+leaf node, the four bits in the bitstack corresponding to the
+child node are set to 1 and traversal continues into the child
+node. (line 17-20). See Figure 4 for an example.
+If the child node is a leaf node, the node is checked
+whether there is already a bucket assigned to it (line 23-24).
+If there is already a bucket assigned to the node, the ray is
+added to the bucket and the bucket is checked whether it
+is full (lines 25-26). If the bucket is full, a new bucket is
+added to the linked list of the node (line 27) If this is the first
+6
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+Figure 5: An example of backtracking in the Top-BVH traversal. The dashed arrows indicate the ancestor pointers of the
+current node. See Figure 4 for the color coding. Once a ray resumes traversal starting from a leaf node or when there are no
+children to traverse into, we compute the index of the most significant bit set. We can determine the depth of the next node by
+dividing this index by 4. Using the depth of the next node and the current node, we select the correct ancestor pointer to move
+to the next node. Thus we find the first ancestor with unvisited child nodes in O(1) time. This is shown by the orange arrow.
+full bucket in the node, the node is moved from the list of
+nodes with partially filled buckets to the list of nodes with
+full buckets (lines 28-30) and the traversal is paused.
+traversal algorithms with a low starting overhead that don’t
+require too many rays in the ray stream tend to perform well.
+If there is no bucket assigned to the node, a new bucket
+is added to the linked list of the node, the ray is added to
+the bucket, the node is added to a list of nodes with partially
+filled buckets (line 32-34) and the traversal is paused.
+In our implementation, we use a hybrid of Tsakok’s MultiBVH Ray Stream Tracing algorithm and a single ray traversal scheme. The single ray traversal scheme is chosen when
+we have less than 12 rays in the bucket. This number is chosen empirically.
+5.2. Leaf-BVH traversal
+6. Results
+Once all rays have traversed the Top-BVH and have been
+distributed among the Leaf-BVHs, we select a Leaf-BVH
+that has a full bucket. If no Leaf-BVH with a full bucket
+can be found, a Leaf-BVH with a partially filled bucket is
+selected. If all Leaf-BVHs are empty, every ray has found
+the nearest intersection (if any) and the algorithm terminates.
+This section evaluates the performance of RayCrawler compared to a single ray traversal algorithm that will act as our
+baseline (Single Ray). The single ray traversal implementation is taken from Embree 2.7.1 and adapted to work in our
+framework. The code is optimized for 4-wide SIMD instructions to support a wide range of CPU architectures.
+The rays in the bucket are converted to the required structure for the Leaf-BVH traversal algorithm and traverse the
+Leaf-BVH. Occlusion queries terminate when an intersection is found; intersection queries record the intersection results and shorten the ray.
+The tests are run on a system with an Intel Xeon E51620v3 processor clocked at 3.5GHz. This CPU has a 32KB
+L1 instruction cache, a 32KB L1 data cache, a 256KB L2
+cache and a shared 10MB L3 cache. The tests are ran on a
+single core, but the algorithm can be scaled to multiple cores
+by assigning a different tile of pixels to each core.
+The rays that are still active (i.e. occlusion rays that have
+not intersected and intersection rays that have a non-zero bitstack) resume traversal in the Top-BVH and get distributed
+among other Leaf-BVHs.
+Traversing the Leaf-BVH can be done with any traversal
+algorithm. Leaf-BVHs are generally small and the number
+of rays in the buckets is also relatively small; we found that
+The path tracer used in the tests traces rays that bounce up
+to five times before being terminated. Every bounce spawns
+a shadow ray towards a light source. Russian roulette path
+termination has been disabled to ensure a high number of
+rays at all path depths. All tests are ran using 16 samples per
+pixel and unless mentioned otherwise, the tile size is set to
+512x512 pixels, for a total of 4M paths. We omit the results
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+7
+Figure 6: From left to right, ROBOT LAB (472K triangles), HAIRBALL (2.88M triangles), ICOSPHERE (3.14M triangles),
+SIBENIK (75K triangles), SAN MIGUEL (7.88M triangles), CRYTEK SPONZA (262K triangles).
+for the primary rays, because these are outside the scope of
+our algorithm, as primary rays are commonly traversed using
+much faster packet traversal schemes.
+The comparison is based on six test scenes (see Figure
+6) where we measured the time spent performing the intersection and occlusion queries at five different path depths,
+averaged over 3-5 camera positions per scene. The scenes
+are chosen to show a variety in complexities and to enable
+comparisons with previous work. HAIRBALL is chosen because it contains a lot of overlapping geometry, which will
+cause a traversal algorithm to visit many BVH nodes where
+no intersection can be found. SAN MIGUEL is chosen to
+evaluate the performance of our scheme on very large scenes
+and ICOSPHERE is chosen to demonstrate the performance
+of our algorithm when there is one detailed object in a relatively simple scene.
+In this section we evaluate the effect of three variables on
+the performance of our scheme: the amount of divergence
+in the ray distribution, the number of available rays in the
+system and the number of primitives in the scene.
+6.1. Divergence
+We use a path tracer to generate ray distributions with varying levels of divergence. After every diffuse bounce, the
+ray distribution becomes more divergent. Ray traversal algorithms tend to perform better when a ray distribution is coherent and degrade in performance after each diffuse bounce,
+as the average number of rays that traverse each node decreases and memory access patterns essentially become random.
+Figure 7 shows the performance results for two test scenes
+for various path depths. We see that the traversal speed degrades as the path depth increases. Our scheme shows noticeably less degradation in performance compared to our
+baseline algorithm as our batching scheme still manages to
+group rays together even for highly divergent ray distributions. Table 1 shows the raw results for all scenes. We see
+increases in traversal speed of up to 63% for intersection
+queries and up to 123% for occlusion queries for path depths
+after the first bounce compared to the baseline algorithm.
+6.2. Available rays
+Because our scheme relies on batching rays at Leaf-BVHs
+to amortize the cost of loading the Leaf-BVHs from memory into the cache over many rays, a high ray count is required to fill the buckets at the leaf nodes. Figure 8 evaluates
+the performance of our scheme with respect to the number
+of active rays in the system. We vary the number of active
+rays in the system by choosing different tile sizes. Recall
+that we always use 16 samples per pixel. As we would expect, the traversal efficiency of our scheme increases as the
+number of active rays is increased. Our scheme becomes
+worthwhile after a tile size of 64x64 pixels, but a tile size
+of 256x256 or higher is needed to achieve significant performance increases. Choosing the right tile size will depend on
+the amount of available memory, the number of rays available in the system and the required granularity when parallelizing the algorithm. See Table 2 for the raw results.
+6.3. Primitive count
+We can see in Table 1 that the relative traversal speed of our
+scheme is significantly higher for the SAN MIGUEL scene
+than the other test scenes. This scene also has significantly
+more triangles than the other test scenes. As a scene becomes
+more complex, the geometry and its BVH cannot fit in the
+caches of the CPU anymore and a larger part of the scene becomes solely available in main memory, which leads to high
+latencies when accessing this data. Because our scheme increases cache efficiency by amortizing the cost of loading a
+Leaf-BVH into the cache over many rays, we see less degradation in performance than the single ray traversal scheme
+as the number of triangles in the scene increases.
+To evaluate this hypothesis, we simulate higher triangle
+counts by measuring the traversal speed of our scheme relative to the baseline algorithm for different subdivisions of the
+ROBOT LAB and CRYTEK SPONZA test scenes. The subdivisions of the scenes are generated using different variations of the subdivision and decimation modifiers in Blender
+[Ble16]. Figure 9 shows an increase in the relative traversal
+speed as we increase the number of triangles in the scene.
+The results become comparable to the performance increases
+we saw for the SAN MIGUEL scene in Table 1. See Table 5
+for the raw results.
+8
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+Figure 7: The traversal speed of our scheme and the single ray traversal algorithm for different path depths. The traversal
+speed is displayed in millions of rays per seconds (MRay/s).
+Scene
+ROBOT LAB
+Scheme
+Single Ray
+RayCrawler
+HAIRBALL
+Single Ray
+RayCrawler
+ICOSPHERE
+Single Ray
+RayCrawler
+SIBENIK
+Single Ray
+RayCrawler
+SAN MIGUEL
+Single Ray
+RayCrawler
+CRYTEK SPONZA
+Single Ray
+RayCrawler
+1i
+2.029
+2.406
++19%
+1.239
+1.615
++30%
+2.553
+2.553
++0%
+2.493
+3.008
++21%
+0.748
+1.191
++59%
+2.366
+2.619
++11%
+2i
+1.465
+2.082
++42%
+1.28
+1.622
++27%
+1.126
+1.565
++39%
+1.906
+2.54
++33%
+0.605
+0.963
++59%
+1.712
+2.197
++28%
+3i
+1.371
+2.045
++49%
+1.346
+1.496
++11%
+0.818
+1.309
++60%
+1.834
+2.463
++34%
+0.622
+0.92
++48%
+1.619
+2.144
++32%
+4i
+1.33
+2.036
++53%
+1.347
+1.488
++10%
+0.788
+1.288
++63%
+1.823
+2.446
++34%
+0.655
+0.908
++39%
+1.565
+2.12
++36%
+0o
+8.076
+4.486
+-44%
+1.303
+2.268
++74%
+0.789
+1.293
++64%
+7.587
+5.089
+-33%
+2.696
+2.613
+-3%
+5.991
+3.924
+-35%
+1o
+2.771
+3.332
++20%
+1.316
+2.261
++72%
+2.971
+2.433
+-18%
+3.356
+3.813
++14%
+0.675
+1.394
++107%
+2.694
+3.057
++13%
+2o
+2.455
+3.201
++30%
+1.212
+2.18
++80%
+1.861
+2.342
++26%
+2.971
+3.585
++21%
+0.649
+1.387
++114%
+2.362
+2.941
++25%
+3o
+2.288
+3.155
++38%
+1.198
+2.226
++86%
+1.567
+2.139
++36%
+2.843
+3.526
++24%
+0.598
+1.332
++123%
+2.265
+2.904
++28%
+4o
+2.234
+3.128
++40%
+1.16
+2.201
++90%
+1.598
+2.235
++40%
+2.769
+3.488
++26%
+0.595
+1.311
++120%
+2.198
+2.896
++32%
+Table 1: The traversal speed of our scheme compared to the baseline single ray traversal scheme. The results are presented in
+absolute numbers in MRay/s, the performance difference between the two algorithms is shown in every third row. The columns
+1i, 2i, 3i and 4i correspond to intersection queries at different path depths (e.g. 1i for rays spawned after the first bounce, 2i for
+rays after the second bounce, etc.). 0o, 1o, 2o, 3o and 4o correspond to occlusion queries at different path depths (e.g. 0o for
+the shadow rays spawned by the primary rays, etc.).
+6.4. Memory usage
+all Leaf-BVHs. Thus we ignore the size of this acceleration
+structure in our memory usage analysis.
+Acceleration structure The total number of nodes in our acceleration structure (i.e. the sum of the nodes in the TopBVH and all Leaf-BVHs) is the same as the number of nodes
+in the initial BVH that was used to construct our acceleration
+structure. Although Top-BVH nodes are larger than regular
+BVH nodes, the Top-BVH doesn’t contribute significantly
+to the overall memory usage of our acceleration structure, as
+it is typically very small compared to the combined size of
+Traversal The amount of memory required during traversal
+is determined by equation 1.
+n≤
+lrm
+b
++l
+(1)
+Where n is the number of required buckets, r is the number of rays, b is the bucket capacity and l is the number of
+9
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+Figure 8: The traversal performance of our scheme relative to our baseline algorithm for the tile sizes 16x16, 32x32, 64x64,
+128x128, 256x256 and 512x512. The number of samples per pixel is always set to 16.
+Scene
+ROBOT LAB
+SAN MIGUEL
+Scheme
+Single Ray
+RayCrawler (16x16)
+RayCrawler (32x32)
+RayCrawler (64x64)
+RayCrawler (128x128)
+RayCrawler (256x256)
+RayCrawler (512x512)
+Single Ray
+RayCrawler (16x16)
+RayCrawler (32x32)
+RayCrawler (64x64)
+RayCrawler (128x128)
+RayCrawler (256x256)
+RayCrawler (512x512)
+1i
+2.03
++5%
++8%
++12%
++15%
++18%
++19%
+0.75
++12%
++23%
++37%
++48%
++55%
++59%
+2i
+1.46
++7%
++11%
++20%
++30%
++39%
++42%
+0.6
+-6%
++3%
++19%
++36%
++50%
++59%
+3i
+1.37
++6%
++10%
++22%
++34%
++45%
++49%
+0.62
+-16%
+-9%
++7%
++24%
++38%
++48%
+4i
+1.33
++6%
++10%
++24%
++36%
++49%
++53%
+0.65
+-24%
+-17%
+-1%
++15%
++28%
++39%
+0o
+8.08
+-43%
+-42%
+-43%
+-44%
+-44%
+-44%
+2.7
+-10%
+-4%
+-2%
+-2%
+-3%
+-3%
+1o
+2o
+3o
+4o
+2.77
+-10%
++4%
++9%
++15%
++19%
++20%
+0.68
+-44%
+-5%
++38%
++72%
++95%
++107%
+2.46
+-8%
++3%
++13%
++23%
++29%
++30%
+0.65
+-45%
+-5%
++37%
++71%
++101%
++114%
+2.29
+-7%
++6%
++18%
++28%
++36%
++38%
+0.6
+-48%
+-9%
++35%
++73%
++105%
++123%
+2.23
+-8%
++8%
++19%
++30%
++38%
++40%
+0.6
+-48%
+-11%
++31%
++69%
++105%
++120%
+Table 2: The traversal speed of our scheme for varying tile sizes. The results are shown relative to the performance of our
+baseline single ray traversal scheme. See Table 1 for an explanation of the columns.
+Leaf-BVHs. We have fixed the bucket capacity to 128 rays
+in our tests. With a ray size of 40 bytes, this results in a size
+of 5120 bytes per bucket.
+The first part of the equation,
+r
+b , is only dependent of the
+tile size while the second part is only dependent of the scene.
+Table 3 shows the required amount of memory for varying
+tile sizes and Table 4 shows the number of Leaf-BVHs and
+required memory for all scenes. We see that the number of
+10
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+Figure 9: The relative traversal speed of our scheme compared to the baseline for different path depths as the number of
+triangles in the scene is increased.
+Leaf-BVHs in the scene only becomes significant with very
+large scenes.
+Tile size
+16
+32
+64
+128
+256
+512
+#buckets
+32
+128
+512
+2048
+8192
+32768
+Memory (MB)
+0.156
+0.625
+2.5
+10
+40
+160
+Table 3: The number of buckets and amount of memory required for varying tile sizes. Recall that the number of samples per pixel is fixed to 16.
+7. Conclusion
+We presented an efficient ray traversal scheme for highly divergent ray distributions that uses batching at fixed points
+Scene
+SIBENIK
+ICOSPHERE
+CRYTEK SPONZA
+ROBOT LAB
+HAIRBALL
+SAN MIGUEL
+#Leaf-BVHs
+4
+10
+13
+16
+46
+49
+Memory (KB)
+20
+50
+65
+80
+230
+245
+Table 4: The number of Leaf-BVHs for all test scenes. One
+(partially filled) bucket is reserved for every Leaf-BVH.
+in the BVH during traversal. We significantly improved the
+traversal performance for secondary rays compared to the
+baseline single-ray traversal scheme by up to 99% for intersection queries and 123% for occlusion queries. We showed
+that a batching scheme can be a viable approach to improve
+performance for divergent ray traversal. Our scheme is orthogonal to recent advances in divergent ray traversal algo-
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+rithms and can be combined with these techniques to achieve
+even higher traversal speeds.
+The requirement of a high ray count, as seen in Section
+6.2, makes our scheme less suitable for real-time ray tracing applications, where progressive refinement is desired, as
+these applications typically have a low number of available
+rays in the system. This makes our scheme more suitable
+for offline rendering tasks where the number of samples per
+pixel is typically very high and a single frame can take several hours to render.
+For future work, our scheme can be improved in several
+areas. Leaf-BVH traversal may be improved by using Ordered Ray Stream Traversal instead of our current hybrid
+approach. Switching from a 4-wide BVH to a BVH2 for
+the Top-BVH may yield two benefits; splitting a binary tree
+in two layers will be easier and will result in more optimal
+splits as we only have to consider two children instead of
+four. Traversing the Top-BVH will also become simpler as
+we will not have to worry about the order of the child nodes
+in the traversal stack. A more thorough investigation on splitting the initial BVH into two layers may also result in a
+more optimal data structure, as the optimal splitting strategy
+is scene dependent.
+Furthermore, we would like to investigate adapting our
+scheme for higher SIMD widths. This will however largely
+depend on the chosen traversal algorithms for the Top- and
+Leaf-BVHs. It may also be worth investigating the feasibility
+of our scheme on a GPU.
+Given the high performance gains for complex scenes, it
+may make sense to add an additional level in the BVH hierarchy for extremely large scenes where the individual subtrees
+no longer fit in the L2 cache.
+8. Acknowledgements
+Many thanks to the authors of our test scenes Frank Meinl
+and Marko Dabrovic for CRYTEK SPONZA, Samuli Laine
+and Tero Karras for HAIRBALL, Guillermo M. Leal Llaguno for SAN MIGUEL, Unity Technologies for ROBOT
+LAB and Marko Dabrovic for SIBENIK. Also thanks to
+Valentin Fuetterling for the discussions on possible approaches to integrate ORST into our scheme.
+References
+[ÁSK14] Á FRA A. T., S ZIRMAY-K ALOS L.: Stackless MultiBVH traversal for CPU, MIC and GPU ray tracing. Computer
+Graphics Forum 33, 1 (2014), 129–140. doi:10.1111/cgf.
+12259. 4
+[BAM14] BARRINGER R., A KENINE -M ÖLLER T.: Dynamic ray
+stream traversal. ACM Transactions on Graphics (TOG) 33, 4
+(2014), 151. 2
+[BEL∗ 07] B OULOS S., E DWARDS D., L ACEWELL J. D., K NISS
+J., K AUTZ J., S HIRLEY P., WALD I.: Packet-based whitted and
+distribution ray tracing. In Proceedings of Graphics Interface
+2007 (2007), ACM, pp. 177–184. 2
+11
+[Bik12] B IKKER J.: Improving data locality for efficient in-core
+path tracing. In Computer Graphics Forum (2012), vol. 31, Wiley
+Online Library, pp. 1936–1947. 2
+[Ble16] B LENDER O NLINE C OMMUNITY: Blender - a 3D modelling and rendering package. Blender Foundation, Blender Institute, Amsterdam, 2016. URL: http://www.blender.org.
+7
+[DHK08] DAMMERTZ H., H ANIKA J., K ELLER A.: Shallow
+bounding volume hierarchies for fast simd ray tracing of incoherent rays. In Computer Graphics Forum (2008), vol. 27, Wiley
+Online Library, pp. 1225–1233. 2
+[EG08] E RNST M., G REINER G.: Multi bounding volume hierarchies. In Interactive Ray Tracing, 2008. RT 2008. IEEE Symposium on (2008), IEEE, pp. 35–40. 2
+[FLPE15] F UETTERLING V., L OJEWSKI C., P FREUNDT F.-J.,
+E BERT A.: Efficient ray tracing kernels for modern cpu architectures. Journal of Computer Graphics Techniques Vol 4, 4 (2015).
+2
+[FS05] F OLEY T., S UGERMAN J.: Kd-tree acceleration structures
+for a gpu raytracer. In Proceedings of the ACM SIGGRAPH/EUROGRAPHICS conference on Graphics hardware (2005), ACM,
+pp. 15–22. 4
+[HDW∗ 11] H APALA M., DAVIDOVI Č T., WALD I., H AVRAN V.,
+S LUSALLEK P.: Efficient stack-less bvh traversal for ray tracing. In Proceedings of the 27th Spring Conference on Computer
+Graphics (2011), ACM, pp. 7–12. 4
+[Lai10] L AINE S.: Restart trail for stackless bvh traversal. In
+Proceedings of the Conference on High Performance Graphics
+(2010), Eurographics Association, pp. 107–111. 4
+[ORM08] OVERBECK R., R AMAMOORTHI R., M ARK W. R.:
+Large ray packets for real-time whitted ray tracing. In Interactive
+Ray Tracing, 2008. RT 2008. IEEE Symposium on (2008), IEEE,
+pp. 41–48. 2
+[Tsa09] T SAKOK J. A.: Faster incoherent rays: Multi-bvh ray
+stream tracing. In Proceedings of the Conference on High Performance Graphics 2009 (2009), ACM, pp. 151–158. 2, 4
+[vdZRJ95] VAN DER Z WAAN M., R EINHARD E., JANSEN F. W.:
+Pyramid clipping for efficient ray traversal. In Rendering TechniquesâĂŹ 95. Springer, 1995, pp. 1–10. 2
+[WBB08] WALD I., B ENTHIN C., B OULOS S.: Getting rid of
+packets-efficient simd single-ray traversal using multi-branching
+bvhs. In Interactive Ray Tracing, 2008. RT 2008. IEEE Symposium on (2008), IEEE, pp. 49–57. 2
+[WSBW01] WALD I., S LUSALLEK P., B ENTHIN C., WAGNER
+M.: Interactive rendering with coherent ray tracing. In Computer
+graphics forum (2001), vol. 20, Wiley Online Library, pp. 153–
+165. 2
+[WWB∗ 14] WALD I., W OOP S., B ENTHIN C., J OHNSON G. S.,
+E RNST M.: Embree: a kernel framework for efficient cpu ray
+tracing. ACM Transactions on Graphics (TOG) 33, 4 (2014),
+143. 2
+12
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+Appendices
+51
+52
+1 void RayCrawler : : Trave rse ( ToplevelNode∗ node , RayInstance&
+ray )
+2 {
+3
+const unsigned __int64 mask = ( unsigned __int64 ( 1 ) << ( (
+node−>b i t P o s & 63) + 4) ) − 1 ;
+4
+unsigned __int64 s t a c k = ray . s t a c k & mask ; / / s l i g h t l y
+f a s t e r t o cache t h i s
+5
+while ( node )
+6
+{
+7
+/ / g e t t r a v e r s a l b i t s a t c u r r e n t depth
+8
+const u i n t b i t P o s = node−>b i t P o s & 63;
+9
+const u i n t b i t s = ( s t a c k >> b i t P o s ) & 15;
+10
+/ / f i n d n e a r e s t i n t e r s e c t i o n o f t h e ray and t h e c h i l d
+boxes
+11
+__m128 tmin4 , r e s u l t 4 ;
+12
+{ / / scope l i m i t i n g
+13
+const __m128 rdx4 = _mm_set_ps1 ( ray . rdx ) , ox4 =
+_mm_set_ps1 ( ray . ox ) ;
+14
+const __m128 rdy4 = _mm_set_ps1 ( ray . rdy ) , oy4 =
+_mm_set_ps1 ( ray . oy ) ;
+15
+const __m128 rdz4 = _mm_set_ps1 ( ray . rdz ) , oz4 =
+_mm_set_ps1 ( ray . oz ) ;
+16
+const __m128 t 4 = _mm_set_ps1 ( ray . t ) ;
+17
+/ / remove t h e b i t s f o r now so we can e a s i l y add them
+back l a t e r
+18
+s t a c k −= b i t s << b i t P o s ;
+19
+/ / Compute i n t e r s e c t i o n
+20
+const __m128 t1x = _mm_mul_ps ( _mm_sub_ps ( node−>
+bmin4x , ox4 ) , rdx4 ) ;
+21
+const __m128 t2x = _mm_mul_ps ( _mm_sub_ps ( node−>
+bmax4x , ox4 ) , rdx4 ) ;
+22
+const __m128 t1y = _mm_mul_ps ( _mm_sub_ps ( node−>
+bmin4y , oy4 ) , rdy4 ) ;
+23
+const __m128 t2y = _mm_mul_ps ( _mm_sub_ps ( node−>
+bmax4y , oy4 ) , rdy4 ) ;
+24
+const __m128 tmin4x = _mm_min_ps ( t1x , t2x ) , t x f =
+_mm_max_ps( t1x , t2x ) ;
+25
+const __m128 t 1 z = _mm_mul_ps ( _mm_sub_ps ( node−>
+bmin4z , oz4 ) , rdz4 ) ;
+26
+const __m128 tmin1 = _mm_max_ps( eps4 , tmin4x ) ;
+27
+const __m128 tmax1 = _mm_min_ps ( t4 , t x f ) ;
+28
+const __m128 t 2 z = _mm_mul_ps ( _mm_sub_ps ( node−>
+bmax4z , oz4 ) , rdz4 ) ;
+29
+const __m128 tyn = _mm_min_ps ( t1y , t2y ) , t y f =
+_mm_max_ps( t1y , t2y ) ;
+30
+const __m128 tmin2 = _mm_max_ps( tmin1 , tyn ) , tmax2 =
+_mm_min_ps ( tmax1 , t y f ) ;
+31
+const __m128 t z n = _mm_min_ps ( t1z , t 2 z ) , t z f =
+_mm_max_ps( t1z , t 2 z ) ;
+32
+tmin4 = _mm_max_ps( tmin2 , t z n ) ;
+33
+r e s u l t 4 = _mm_cmple_ps ( tmin4 , _mm_min_ps ( tmax2 , t z f
+) ) ; / / always v a l i d ?
+34
+}
+35
+/ / determine v a l i d c h i l d s & w r i t e back f i n d i n g s
+36
+const u i n t newBits = b i t s & _mm_movemask_ps ( r e s u l t 4 ) ;
+37
+i f ( newBits )
+38
+{
+39
+/ / f i n d n e a r e s t a c t i v e c h i l d f o r t h i s ray
+40
+uint childIdx ;
+41
+{ / / scope l i m i t i n g
+42
+const __m128 v1 = _mm_blendv_ps ( inf4 , tmin4 ,
+bitMask [ newBits ] ) ;
+43
+const __m128 v2 = _mm_and_ps ( v1 , idxmask4 ) ;
+44
+const __m128 v3 = _mm_or_ps ( v2 , idxadd4 ) ;
+45
+const f l o a t s m a l l e s t = hor_min ( v3 ) ;
+46
+c h i l d I d x = ( r e i n t e r p r e t _ c a s t <const unsigned i n t &>(
+smallest ) ) & 3;
+47
+}
+48
+/ / t h i s ray w i l l now v i s i t t h e n e a r e s t c h i l d
+49
+ToplevelNode∗ c h i l d = &pool [ node−>d a t a + c h i l d I d x ] ;
+50
+s t a c k += (15 << ( b i t P o s + 4) ) + ( ( newBits − (1 <<
+c h i l d I d x ) ) << b i t P o s ) ;
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+}
+99 }
+i f ( l i k e l y ( ! c h i l d −>t r e e l e t ) ) { node = c h i l d ;
+continue ; }
+/ / ray reached t r e e l e t l e v e l ; add t o ray c o n t a i n e r f o r
+postponed batch p r o c e s s i n g
+i f ( l i k e l y ( c h i l d −>room >> 16 ) )
+{
+/ / e a r l y i n ; we know we have room
+RayBucket∗ bucket = ( RayBucket∗) c h i l d −>buckets .
+PeekLast ( ) ; / / guaranteed t o have room
+const u i n t nextIdx = bucket−>r a y s ++;
+ray . s t a c k = s t a c k ;
+c h i l d −>room −= 65536;
+i f ( u n l i k e l y ( ! ( c h i l d −>room >> 16) ) )
+{
+const u i n t idx = ( ( c h i l d −>bucketCount >> 8) & 255)
+− 1;
+i f ( idx < 2)
+{
+/ / move t h i s node from ’ n o d e s W i t h P a r t i a l B u c k e t ’
+t o ’ nodesWithFullBucket ’
+c h i l d −>Detach ( ) ;
+nodesWithBucket [ idx ] . Add( c h i l d ) ;
+}
+}
+bucket−>ray [ nextIdx ] = ray ;
+}
+else
+{
+RayBucket∗ newBucket = ( RayBucket∗) emptyBuckets .
+PopFirst () ;
+newBucket−>r a y s = 1 ;
+newBucket−>node = c h i l d ;
+i f ( c h i l d −>buckets . Empty ( ) ) / / no b u c k e t s a t a l l ;
+make room
+{
+c h i l d −>bucketCount = ( c h i l d −>b i t P o s & 0 x f f 0 0 f f ) +
+256;
+n o d e s W i t h P a r t i a l B u c k e t . Add( c h i l d ) ;
+}
+e l s e c h i l d −>bucketCount += 256; / / we have buckets ,
+but no p a r t i a l f i l l e d b u c k e t s ; make room
+c h i l d −>buckets . AddAtEnd ( newBucket ) ;
+ray . s t a c k = s t a c k ;
+newBucket−>ray [ 0 ] = ray ;
+c h i l d −>room = ( (BUCKETSIZE − 1) << 16) + ( c h i l d −>
+b i t P o s & 65535) ;
+}
+return ;
+}
+/ / t h i s ray has no c h i l d r e n l e f t t o v i s i t ; f i n d t h e
+f i r s t a n c e s t o r t h a t has work l e f t
+{ / / scope l i m i t i n g
+unsigned long index ;
+const __int64 mask = ( unsigned __int64 ( 1 ) << b i t P o s )
+− 1;
+i f ( ! ( s t a c k & mask ) ) break ;
+_BitScanReverse64 ( &index , s t a c k & mask ) ;
+node = &pool [ node−>a n c e s t o r [ index >> 2 ] ] ;
+}
+Listing 2: C++ code of the Top-BVH traversal algorithm
+1 template <bool shadow> void Node4 : : TraceEmbree ( const vec3& O,
+const vec3& D, f l o a t& t , f l o a t& u , f l o a t& v , u i n t&
+t r i I d x ) const
+2 {
+3
+Node4∗ pool4 = Scene : : mbvh−>pool4 ;
+4
+/ / stack state
+5
+__declspec ( a l i g n ( 64 ) ) StackItem s t a c k [ 6 4 ] , ∗s t a c k P t r =
+stack + 1;
+6
+s t a c k [ 0 ] . p t r = ( u i n t ) ( t h i s − Scene : : mbvh−>pool4 ) ;
+7
+s t a c k [ 0 ] . d i s t = s t d : : n u m e r i c _ l i m i t s < u i n t > : : min ( ) ;
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+/ / load t h e ray i n t o SIMD r e g i s t e r s
+const __m128 r a y _ r d i r = r c p _ s a f e ( _mm_set_ps ( D. x , D. y , D.
+z , D. z ) ) ;
+const __m128 org_x = _mm_set_ps1 ( O. x ) , org_y =
+_mm_set_ps1 ( O. y ) , org_z = _mm_set_ps1 ( O. z ) ;
+const __m128 r d i r _ x = _mm_set_ps1 ( ( ( f l o a t ∗)&r a y _ r d i r ) [ 3 ]
+);
+const __m128 r d i r _ y = _mm_set_ps1 ( ( ( f l o a t ∗)&r a y _ r d i r ) [ 2 ]
+);
+const __m128 r d i r _ z = _mm_set_ps1 ( ( ( f l o a t ∗)&r a y _ r d i r ) [ 1 ]
+);
+const __m128 ra y_nea r = _mm_setzero_ps ( ) ;
+const __m128 r a y _ f a r = _mm_set_ps1 ( t ) ;
+/ / o f f s e t s t o s e l e c t t h e s i d e t h a t becomes t h e lower or
+upper bound
+const i n t nearX = ( ( f l o a t ∗)&r a y _ r d i r ) [ 3 ] >= 0.0 f ? 0 : 16;
+const i n t nearY = ( ( f l o a t ∗)&r a y _ r d i r ) [ 2 ] >= 0.0 f ? 32 :
+48;
+const i n t nearZ = ( ( f l o a t ∗)&r a y _ r d i r ) [ 1 ] >= 0.0 f ? 64 :
+80;
+/ / pop loop
+while ( true ) pop :
+{
+/ / pop n e x t node
+i f ( s t a c k P t r == s t a c k ) break ;
+s t a c k P t r −−;
+u i n t cur = s t a c k P t r −>p t r ;
+/ / i f popped node i s too far , pop n e x t one
+i f ( u n l i k e l y (∗( f l o a t ∗)&s t a c k P t r −>d i s t > t ) ) continue ;
+/ / downtraversal loop
+while ( true )
+{
+__m128 tNear ;
+/ / s t o p i f we found a l e a f node
+i f ( u n l i k e l y ( ( cur & (1 << 31) ) != 0) ) break ;
+const Node4∗ p t r = &pool4 [ cur ] ;
+const i n t farX = nearX ^ 16 , farY = nearY ^ 16 , farZ =
+nearZ ^ 16;
+const __m128 tNearX = _mm_mul_ps ( _mm_sub_ps (
+_mm_load_ps ( ( const f l o a t ∗) ( ( const char∗)&p t r −>
+bmin4x + nearX ) ) , org_x ) , r d i r _ x ) ;
+const __m128 tNearY = _mm_mul_ps ( _mm_sub_ps (
+_mm_load_ps ( ( const f l o a t ∗) ( ( const char∗)&p t r −>
+bmin4x + nearY ) ) , org_y ) , r d i r _ y ) ;
+const __m128 tNearZ = _mm_mul_ps ( _mm_sub_ps (
+_mm_load_ps ( ( const f l o a t ∗) ( ( const char∗)&p t r −>
+bmin4x + nearZ ) ) , org_z ) , r d i r _ z ) ;
+const __m128 tFarX = _mm_mul_ps ( _mm_sub_ps (
+_mm_load_ps ( ( const f l o a t ∗) ( ( const char∗)&p t r −>
+bmin4x + farX ) ) , org_x ) , r d i r _ x ) ;
+const __m128 tFarY = _mm_mul_ps ( _mm_sub_ps (
+_mm_load_ps ( ( const f l o a t ∗) ( ( const char∗)&p t r −>
+bmin4x + farY ) ) , org_y ) , r d i r _ y ) ;
+const __m128 tFarZ = _mm_mul_ps ( _mm_sub_ps (
+_mm_load_ps ( ( const f l o a t ∗) ( ( const char∗)&p t r −>
+bmin4x + farZ ) ) , org_z ) , r d i r _ z ) ;
+tNear = _mm_max_ps( _mm_max_ps( tNearX , tNearY ) ,
+_mm_max_ps( tNearZ , ray_n ear ) ) ;
+const __m128 t F a r = _mm_min_ps ( _mm_min_ps ( tFarX ,
+tFarY ) , _mm_min_ps ( tFarZ , r a y _ f a r ) ) ;
+const __m128 vmask = _mm_cmple_ps ( tNear , t F a r ) ;
+const i n t mask = _mm_movemask_ps ( vmask ) ;
+/ / i f no c h i l d i s h i t , pop n e x t node
+switch ( mask )
+{
+case 0 :
+goto pop ;
+case 1 :
+cur = p t r −>d a t a [ 0 ] ;
+continue ;
+case 2 :
+cur = p t r −>d a t a [ 1 ] ;
+continue ;
+case 3 :
+{
+const u i n t c0 = p t r −>d a t a [ 0 ] , d0 = ( ( u i n t ∗)&tNear )
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+13
+[ 0 ] , c1 = p t r −>d a t a [ 1 ] , d1 = ( ( u i n t ∗)&tNear )
+[1];
+i f ( shadow | | d0 < d1 ) { s t a c k P t r −>p t r = c1 ,
+s t a c k P t r −>d i s t = d1 , s t a c k P t r ++ , cur = c0 ; }
+e l s e { s t a c k P t r −>p t r = c0 , s t a c k P t r −>d i s t = d0 ,
+s t a c k P t r ++ , cur = c1 ; }
+continue ;
+}
+case 4 :
+cur = p t r −>d a t a [ 2 ] ;
+continue ;
+case 5 :
+{
+const u i n t c0 = p t r −>d a t a [ 0 ] , d0 = ( ( u i n t ∗)&tNear )
+[ 0 ] , c1 = p t r −>d a t a [ 2 ] , d1 = ( ( u i n t ∗)&tNear )
+[2];
+i f ( shadow | | d0 < d1 ) { s t a c k P t r −>p t r = c1 ,
+s t a c k P t r −>d i s t = d1 , s t a c k P t r ++ , cur = c0 ; }
+e l s e { s t a c k P t r −>p t r = c0 , s t a c k P t r −>d i s t = d0 ,
+s t a c k P t r ++ , cur = c1 ; }
+continue ;
+}
+case 6 :
+{
+const u i n t c0 = p t r −>d a t a [ 1 ] , d0 = ( ( u i n t ∗)&tNear )
+[ 1 ] , c1 = p t r −>d a t a [ 2 ] , d1 = ( ( u i n t ∗)&tNear )
+[2];
+i f ( shadow | | d0 < d1 ) { s t a c k P t r −>p t r = c1 ,
+s t a c k P t r −>d i s t = d1 , s t a c k P t r ++ , cur = c0 ; }
+e l s e { s t a c k P t r −>p t r = c0 , s t a c k P t r −>d i s t = d0 ,
+s t a c k P t r ++ , cur = c1 ; }
+continue ;
+}
+case 7 :
+{
+/ / Push a l l nodes on t h e s t a c k
+s t a c k P t r [ 0 ] . p t r = p t r −>d a t a [ 0 ] ; s t a c k P t r [ 0 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 0 ] ;
+s t a c k P t r [ 1 ] . p t r = p t r −>d a t a [ 1 ] ; s t a c k P t r [ 1 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 1 ] ;
+s t a c k P t r [ 2 ] . p t r = p t r −>d a t a [ 2 ] ; s t a c k P t r [ 2 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 2 ] ;
+s t a c k P t r += 2 ;
+/ / S o r t them
+i f ( ! shadow ) s o r t ( s t a c k P t r [ 0 ] , s t a c k P t r [−1],
+s t a c k P t r [−2]) ;
+/ / Pop top element
+cur = s t a c k P t r −>p t r ;
+continue ;
+}
+case 8 :
+cur = p t r −>d a t a [ 3 ] ;
+continue ;
+case 9 :
+{
+const u i n t c0 = p t r −>d a t a [ 0 ] , d0 = ( ( u i n t ∗)&tNear )
+[ 0 ] , c1 = p t r −>d a t a [ 3 ] , d1 = ( ( u i n t ∗)&tNear )
+[3];
+i f ( shadow | | d0 < d1 ) { s t a c k P t r −>p t r = c1 ,
+s t a c k P t r −>d i s t = d1 , s t a c k P t r ++ , cur = c0 ; }
+e l s e { s t a c k P t r −>p t r = c0 , s t a c k P t r −>d i s t = d0 ,
+s t a c k P t r ++ , cur = c1 ; }
+continue ;
+}
+case 10:
+{
+const u i n t c0 = p t r −>d a t a [ 1 ] , d0 = ( ( u i n t ∗)&tNear )
+[ 1 ] , c1 = p t r −>d a t a [ 3 ] , d1 = ( ( u i n t ∗)&tNear )
+[3];
+i f ( shadow | | d0 < d1 ) { s t a c k P t r −>p t r = c1 ,
+s t a c k P t r −>d i s t = d1 , s t a c k P t r ++ , cur = c0 ; }
+e l s e { s t a c k P t r −>p t r = c0 , s t a c k P t r −>d i s t = d0 ,
+s t a c k P t r ++ , cur = c1 ; }
+continue ;
+}
+case 11:
+14
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+150
+151
+152
+153
+154
+155
+156
+157
+158
+159
+160
+161
+162
+163
+164
+165
+166
+167
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+{
+/ / Push a l l nodes on t h e s t a c k
+s t a c k P t r [ 0 ] . p t r = p t r −>d a t a [ 0 ] ; s t a c k P t r [ 0 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 0 ] ;
+s t a c k P t r [ 1 ] . p t r = p t r −>d a t a [ 1 ] ; s t a c k P t r [ 1 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 1 ] ;
+s t a c k P t r [ 2 ] . p t r = p t r −>d a t a [ 3 ] ; s t a c k P t r [ 2 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 3 ] ;
+s t a c k P t r += 2 ;
+/ / S o r t them
+i f ( ! shadow ) s o r t ( s t a c k P t r [ 0 ] , s t a c k P t r [−1],
+s t a c k P t r [−2]) ;
+/ / Pop top element
+cur = s t a c k P t r −>p t r ;
+continue ;
+}
+case 12:
+{
+const u i n t c0 = p t r −>d a t a [ 2 ] , d0 = ( ( u i n t ∗)&tNear )
+[ 2 ] , c1 = p t r −>d a t a [ 3 ] , d1 = ( ( u i n t ∗)&tNear )
+[3];
+i f ( shadow | | d0 < d1 ) { s t a c k P t r −>p t r = c1 ,
+s t a c k P t r −>d i s t = d1 , s t a c k P t r ++ , cur = c0 ; }
+e l s e { s t a c k P t r −>p t r = c0 , s t a c k P t r −>d i s t = d0 ,
+s t a c k P t r ++ , cur = c1 ; }
+continue ;
+}
+case 13:
+{
+/ / Push a l l nodes on t h e s t a c k
+s t a c k P t r [ 0 ] . p t r = p t r −>d a t a [ 0 ] ; s t a c k P t r [ 0 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 0 ] ;
+s t a c k P t r [ 1 ] . p t r = p t r −>d a t a [ 2 ] ; s t a c k P t r [ 1 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 2 ] ;
+s t a c k P t r [ 2 ] . p t r = p t r −>d a t a [ 3 ] ; s t a c k P t r [ 2 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 3 ] ;
+s t a c k P t r += 2 ;
+/ / S o r t them
+i f ( ! shadow ) s o r t ( s t a c k P t r [ 0 ] , s t a c k P t r [−1],
+s t a c k P t r [−2]) ;
+/ / Pop top element
+cur = s t a c k P t r −>p t r ;
+continue ;
+}
+case 14:
+{
+/ / Push a l l nodes on t h e s t a c k
+s t a c k P t r [ 0 ] . p t r = p t r −>d a t a [ 1 ] ; s t a c k P t r [ 0 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 1 ] ;
+s t a c k P t r [ 1 ] . p t r = p t r −>d a t a [ 2 ] ; s t a c k P t r [ 1 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 2 ] ;
+s t a c k P t r [ 2 ] . p t r = p t r −>d a t a [ 3 ] ; s t a c k P t r [ 2 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 3 ] ;
+s t a c k P t r += 2 ;
+/ / S o r t them
+i f ( ! shadow ) s o r t ( s t a c k P t r [ 0 ] , s t a c k P t r [−1],
+s t a c k P t r [−2]) ;
+/ / Pop top element
+cur = s t a c k P t r −>p t r ;
+continue ;
+}
+case 15:
+{
+/ / Push a l l nodes on t h e s t a c k
+s t a c k P t r [ 0 ] . p t r = p t r −>d a t a [ 0 ] ; s t a c k P t r [ 0 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 0 ] ;
+s t a c k P t r [ 1 ] . p t r = p t r −>d a t a [ 1 ] ; s t a c k P t r [ 1 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 1 ] ;
+s t a c k P t r [ 2 ] . p t r = p t r −>d a t a [ 2 ] ; s t a c k P t r [ 2 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 2 ] ;
+s t a c k P t r [ 3 ] . p t r = p t r −>d a t a [ 3 ] ; s t a c k P t r [ 3 ] . d i s t =
+( ( u i n t ∗)&tNear ) [ 3 ] ;
+s t a c k P t r += 3 ;
+/ / S o r t them
+i f ( ! shadow ) s o r t ( s t a c k P t r [ 0 ] , s t a c k P t r [−1],
+s t a c k P t r [−2], s t a c k P t r [−3]) ;
+168
+169
+170
+171
+172
+173
+174
+175
+176
+177
+178
+179
+180
+181
+182
+183
+184
+185
+186
+187
+188
+189
+190
+191
+}
+192 }
+/ / Pop top element
+cur = s t a c k P t r −>p t r ;
+continue ;
+}
+# i f d e f _MSC_VER
+default :
+__assume ( 0 ) ; / / see h t t p s : / / msdn . m i c r o s o f t . com /
+en−us / l i b r a r y / 1 b3fsfxw ( VS . 8 0 ) . aspx
+#endif
+}
+}
+/ / t h i s i s a l e a f node
+i f ( shadow )
+{
+i f ( I n t e r s e c t ( ( cur & 0 x 7 f f f f f f f ) >> 6 , cur & 63 , O, D,
+t))
+{
+t r i I d x = 1;
+return ;
+}
+}
+else
+{
+I n t e r s e c t ( ( cur & 0 x 7 f f f f f f f ) >> 6 , cur & 63 , O, D, t ,
+u, v, triIdx ) ;
+}
+Listing 3: C++ code of the baseline SingleRay traversal
+algorithm
+15
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+Scene
+CRYTEK SPONZA
+ROBOT LAB
+#Triangles
+0.262M
+Scheme
+Single Ray
+RayCrawler
+0.393M
+Single Ray
+RayCrawler
+0.589M
+Single Ray
+RayCrawler
+0.786M
+Single Ray
+RayCrawler
+1.573M
+Single Ray
+RayCrawler
+3.146M
+Single Ray
+RayCrawler
+6.293M
+Single Ray
+RayCrawler
+12.585M
+Single Ray
+RayCrawler
+0.472M
+Single Ray
+RayCrawler
+2.833M
+Single Ray
+RayCrawler
+11.334M
+Single Ray
+RayCrawler
+1i
+2.366
+2.619
++11%
+2.063
+2.286
++11%
+1.908
+2.193
++15%
+1.832
+2.124
++16%
+1.649
+1.947
++18%
+1.424
+1.732
++22%
+1.327
+1.576
++19%
+1.066
+1.391
++30%
+2.029
+2.406
++19%
+1.317
+1.8
++37%
+0.923
+1.382
++50%
+2i
+1.712
+2.197
++28%
+1.466
+1.977
++35%
+1.347
+1.87
++39%
+1.289
+1.796
++39%
+1.144
+1.591
++39%
+0.977
+1.373
++40%
+0.899
+1.247
++39%
+0.723
+1.109
++53%
+1.465
+2.082
++42%
+0.9
+1.554
++73%
+0.628
+1.17
++86%
+3i
+1.619
+2.144
++32%
+1.374
+1.937
++41%
+1.254
+1.829
++46%
+1.2
+1.751
++46%
+1.062
+1.544
++45%
+0.908
+1.322
++46%
+0.832
+1.197
++44%
+0.671
+1.059
++58%
+1.371
+2.045
++49%
+0.832
+1.523
++83%
+0.589
+1.14
++93%
+4i
+1.565
+2.12
++36%
+1.33
+1.923
++45%
+1.215
+1.81
++49%
+1.163
+1.737
++49%
+1.029
+1.527
++48%
+0.877
+1.303
++49%
+0.807
+1.175
++46%
+0.652
+1.047
++61%
+1.33
+2.036
++53%
+0.803
+1.516
++89%
+0.569
+1.132
++99%
+0o
+5.991
+3.924
+-35%
+5.654
+3.659
+-35%
+5.42
+3.636
+-33%
+5.314
+3.595
+-32%
+4.884
+3.469
+-29%
+4.51
+3.307
+-27%
+4.236
+2.952
+-30%
+3.611
+2.702
+-25%
+8.076
+4.486
+-44%
+6.137
+3.818
+-38%
+4.826
+3.282
+-32%
+1o
+2.694
+3.057
++13%
+2.401
+2.931
++22%
+2.198
+2.835
++29%
+2.11
+2.744
++30%
+1.816
+2.504
++38%
+1.575
+2.244
++42%
+1.399
+1.977
++41%
+1.114
+1.765
++59%
+2.771
+3.332
++20%
+1.736
+2.728
++57%
+1.247
+2.25
++80%
+2o
+2.362
+2.941
++25%
+2.064
+2.795
++35%
+1.878
+2.701
++44%
+1.796
+2.609
++45%
+1.552
+2.364
++52%
+1.34
+2.09
++56%
+1.188
+1.849
++56%
+0.946
+1.651
++75%
+2.455
+3.201
++30%
+1.524
+2.643
++73%
+1.105
+2.166
++96%
+3o
+2.265
+2.904
++28%
+1.952
+2.773
++42%
+1.787
+2.674
++50%
+1.707
+2.574
++51%
+1.462
+2.329
++59%
+1.263
+2.058
++63%
+1.13
+1.819
++61%
+0.9
+1.633
++81%
+2.288
+3.155
++38%
+1.396
+2.589
++85%
+1.02
+2.121
++108%
+4o
+2.198
+2.896
++32%
+1.897
+2.745
++45%
+1.728
+2.646
++53%
+1.649
+2.549
++55%
+1.42
+2.296
++62%
+1.216
+2.03
++67%
+1.087
+1.799
++65%
+0.871
+1.615
++86%
+2.234
+3.128
++40%
+1.362
+2.579
++89%
+0.997
+2.112
++112%
+Table 5: Evaluation of the performance of our scheme compared to the baseline algorithm for different subdivisions of the
+CRYTEK SPONZA and ROBOT LAB scenes. See Table 1 for an explanation of the columns.
+intersection 0
+intersection 1
+intersection 2
+intersection 3
+intersection 4
+occlusion 0
+occlusion 1
+occlusion 2
+occlusion 3
+occlusion 4
+Single Ray
+4.103
+2.029
+1.465
+1.371
+1.330
+8.076
+2.771
+2.455
+2.288
+2.234
+RayCrawler, 64x64
+4.183
+2.272
+1.758
+1.675
+1.650
+4.630
+3.030
+2.778
+2.699
+2.662
+RayCrawler, 128x128
+4.090
+2.330
+1.898
+1.836
+1.810
+4.501
+3.186
+3.010
+2.939
+2.908
+RayCrawler, 256x256
+4.102
+2.398
+2.033
+1.986
+1.976
+4.494
+3.304
+3.155
+3.106
+3.081
+RayCrawler, 512x512
+4.081
+2.406
+2.082
+2.045
+2.036
+4.486
+3.332
+3.201
+3.155
+3.128
+Table 6: Results in MRay/s for the ROBOT LAB scene for all tile sizes and depths.
+16
+T. Gasparian / Fast Divergent Ray Traversal by Batching Rays in a BVH
+intersection 0
+intersection 1
+intersection 2
+intersection 3
+intersection 4
+occlusion 0
+occlusion 1
+occlusion 2
+occlusion 3
+occlusion 4
+Single Ray
+2.055
+0.748
+0.605
+0.622
+0.655
+2.696
+0.675
+0.649
+0.598
+0.595
+RayCrawler, 64x64
+2.081
+1.027
+0.720
+0.668
+0.646
+2.629
+0.932
+0.889
+0.807
+0.779
+RayCrawler, 128x128
+2.084
+1.110
+0.821
+0.774
+0.752
+2.639
+1.159
+1.109
+1.035
+1.005
+RayCrawler, 256x256
+2.088
+1.158
+0.906
+0.862
+0.841
+2.615
+1.318
+1.302
+1.224
+1.222
+RayCrawler, 512x512
+2.067
+1.191
+0.963
+0.920
+0.908
+2.613
+1.394
+1.387
+1.332
+1.311
+Table 7: Results in MRay/s for the SAN MIGUEL scene for all tile sizes and depths.
+intersection 0
+intersection 1
+intersection 2
+intersection 3
+intersection 4
+occlusion 0
+occlusion 1
+occlusion 2
+occlusion 3
+occlusion 4
+Single Ray
+2.408
+1.239
+1.280
+1.346
+1.347
+1.303
+1.316
+1.212
+1.198
+1.160
+RayCrawler, 128x128
+2.424
+1.601
+1.662
+1.534
+1.519
+2.213
+2.262
+2.223
+2.242
+2.149
+RayCrawler, 256x256
+2.418
+1.618
+1.631
+1.496
+1.486
+2.224
+2.305
+2.224
+2.212
+2.191
+RayCrawler, 512x512
+2.412
+1.615
+1.622
+1.496
+1.488
+2.268
+2.261
+2.180
+2.226
+2.201
+Table 8: Results in MRay/s for the HAIRBALL scene for all tile sizes and depths.
+intersection 0
+intersection 1
+intersection 2
+intersection 3
+intersection 4
+occlusion 0
+occlusion 1
+occlusion 2
+occlusion 3
+occlusion 4
+Single Ray
+4.529
+2.493
+1.906
+1.834
+1.823
+7.587
+3.356
+2.971
+2.843
+2.769
+RayCrawler, 128x128
+4.579
+3.047
+2.497
+2.400
+2.379
+5.143
+3.811
+3.544
+3.468
+3.425
+RayCrawler, 256x256
+4.572
+3.038
+2.532
+2.445
+2.426
+5.106
+3.831
+3.590
+3.522
+3.485
+RayCrawler, 512x512
+4.484
+3.008
+2.540
+2.463
+2.446
+5.089
+3.813
+3.585
+3.526
+3.488
+Table 9: Results in MRay/s for the SIBENIK scene for all tile sizes and depths.
+intersection 0
+intersection 1
+intersection 2
+intersection 3
+intersection 4
+occlusion 0
+occlusion 1
+occlusion 2
+occlusion 3
+occlusion 4
+Single Ray
+3.497
+2.227
+1.622
+1.529
+1.491
+6.010
+2.683
+2.328
+2.233
+2.166
+RayCrawler, 128x128
+3.438
+2.623
+2.109
+2.020
+1.983
+3.971
+3.008
+2.833
+2.784
+2.770
+RayCrawler, 256x256
+3.449
+2.651
+2.186
+2.118
+2.096
+3.961
+3.061
+2.931
+2.899
+2.880
+RayCrawler, 512x512
+3.510
+2.510
+2.139
+2.089
+2.074
+3.824
+3.107
+2.969
+2.945
+2.915
+Table 10: Results in MRay/s for the CRYTEK SPONZA scene for all tile sizes and depths.

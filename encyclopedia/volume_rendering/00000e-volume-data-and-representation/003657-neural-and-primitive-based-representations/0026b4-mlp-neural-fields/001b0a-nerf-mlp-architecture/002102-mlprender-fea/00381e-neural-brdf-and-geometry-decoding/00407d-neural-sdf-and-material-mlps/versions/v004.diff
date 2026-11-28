@@ -1,0 +1,316 @@
+--- v003.md
++++ v004.md
+@@ -1,145 +1,206 @@
+ # Neural SDF and Material MLPs
+ 
+-Also called: IRON Pipeline Neural Architectures, IRON SDF and Material Networks, Neural SDF
++Also called: IRON Pipeline Neural Architectures, IRON SDF and Material Networks, Neural Field Architecture & Training Scheme, Neural SDF
+ 
+ ## Overview
+-This method defines the specific multi-layer perceptron (MLP) architectures used to decode signed distance functions (SDF) and spatially-varying material properties (diffuse albedo, specular albedo, roughness) from 3D coordinates in neural implicit surface reconstruction pipelines, most notably the IRON framework [S1, S2]. It solves the problem of jointly optimizing geometry and physically-based appearance by separating the decoding of geometric shape from material reflectance into distinct networks [S1]. It is distinguished from single-MLP approaches by explicitly passing high-level geometric features from the geometry network to the material network, which improves training stability and rendering fidelity [S1].
++This method defines the specific multi-layer perceptron (MLP) architectures and training schedules used to decode signed distance functions (SDF) and spatially-varying material properties (diffuse albedo, specular albedo, roughness) in neural implicit surface reconstruction pipelines, most notably the IRON framework. It solves the problem of spectral bias and training instability in single-network approaches by separating geometry and material decoding into distinct networks, allowing the material decoder to access high-level geometric context via latent feature vectors [S1, S3]. It is distinguished from sibling methods like [TensoRF Feature Decoding Architecture](8181-tensorf-feature-decoding-architecture.md) by its explicit use of positional encoding frequencies tailored to specific material parameters and its two-stage optimization strategy [S1, S3].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-The method takes a 3D coordinate $x \in \mathbb{R}^3$ as the primary input. Depending on the specific decoder, it may also take surface normals $n$, viewing directions, or geometric feature vectors $f$ from the SDF network.
+-- The **SDF MLP** outputs a scalar signed distance value $s$ and an implicit local geometric feature vector $f_{geo}$ [S1, S2].
+-- The **Material MLPs** output material parameters: diffuse albedo $\rho_d$, specular albedo $\rho_s$ (or $\kappa$), and roughness $\rho$ (or $\alpha$) [S1, S2, S3].
++The method takes 3D coordinates $x \in \mathbb{R}^3$ as the primary input. Depending on the specific MLP, it may also take surface normals $n$, view directions $v$, or latent geometric features $f_{geo}$ [S1, S3].
++Outputs include:
++- SDF value $s$ and geometric feature vector $f_{geo}$ [S1, S2, S3].
++- Diffuse albedo $\rho_d$ [S1, S2].
++- Specular albedo $\rho_s$ (or $\kappa$) [S1, S2].
++- Roughness $\rho$ (or $\alpha$) [S1, S2, S4].
++- Emitter semantic values [S3].
+ 
+ **Data Structures:**
+-The core data structure is a Multi-Layer Perceptron (MLP). The networks are defined by their depth (number of layers), width (hidden dimension), and skip connections.
+-- **SDF MLP:** 8 layers, width 256, skip connection at layer 4 [S1, S2].
+-- **Diffuse Albedo MLP:** 8 layers, width 256, skip connection at layer 4 [S1, S2].
+-- **Specular Albedo MLP:** 4 layers, width 256 [S1, S2].
+-- **Roughness MLP:** 4 layers, width 256 [S1, S2].
++The core data structure is a Multi-Layer Perceptron (MLP).
++- **Neural SDF MLP ($F_d$ or $f_{\Theta_g}$):** 8 layers, hidden dimension 256. Skip connection from input to the 4th layer [S1, S2, S3].
++- **Neural Diffuse Albedo MLP ($F_{\rho}$ or $f_{\Theta_d}$):** 8 layers, hidden dimension 256. Skip connection from input to the 4th layer [S1, S2].
++- **Neural Specular Albedo MLP ($F_{a}$ or $f_{\Theta_s}$):** 4 layers, hidden dimension 256 [S1, S2].
++- **Neural Roughness MLP ($F_{\rho}$ or $f_{\Theta_r}$):** 4 layers, hidden dimension 256 [S1, S2].
++- **Radiance MLP ($F_c$):** 4 layers, hidden dimension 256 [S3].
++- **Emitter Semantic MLP ($F_e$):** 2 layers, hidden dimension 128 [S3].
++- **Material Fields ($F_{\rho}, F_a$ in [S3]):** 3 layers, hidden dimension 64 [S3].
+ 
+ **Positional Encoding:**
+-Inputs are encoded using positional encoding to compensate for the spectral bias of MLPs [S1]. The number of frequencies varies by input type and network:
+-- SDF input $x$: 6 frequencies [S1, S2].
+-- Diffuse Albedo input $x$: 10 frequencies [S1, S2].
+-- Diffuse Albedo input $n$ (normal): 4 frequencies [S1, S2].
+-- Specular Albedo input $x$: 6 frequencies [S1, S2].
+-- Roughness input $x$: 6 frequencies [S1, S2].
+-
+-**Algorithm Steps:**
+-1. **Encode Input:** Apply positional encoding to the 3D coordinate $x$ (and $n$ if applicable) using the specified number of frequencies.
+-2. **Geometry Decoding (SDF):** Pass the encoded $x$ through the 8-layer SDF MLP. The output is the tuple $(s, f_{geo})$, where $s$ is the SDF value and $f_{geo}$ is the geometric feature vector [S1, S2].
+-3. **Material Decoding:** Pass the encoded $x$ (and $f_{geo}$, $n$ as required by the specific material decoder) through the respective 4-layer or 8-layer MLPs to obtain material parameters [S1, S2].
+-4. **Parameterization (vMF Variant):** For the von Mises-Fisher (vMF) BRDF approximation, the material MLP $M$ outputs roughness $\rho \in [0, 1]$, diffuse color $C_d \in [0, 1]$, and specular tint $\alpha \in [0, 1]$ using a softplus activation [S3].
+-5. **Reflection Direction:** Compute the reflection direction $l_r$ using the view direction $d$ and surface normal $n$:
+-   $$ l_r = 2(-d \cdot n)n + d $$
+-   [S3]
+-6. **BRDF Approximation:** Approximate the BRDF $f(l, -d, x_s)$ as a von Mises-Fisher distribution $G(l, l_r, x_s)$:
+-   $$ f(l, -d, x_s) \approx G(l, l_r, x_s) = \alpha \exp(\rho(x_s)(l \cdot l_r - 1)) $$
+-   [S3]
++Sinusoidal positional encoding is applied to inputs to mitigate spectral bias [S1, S3].
++- Input $x$: 6 frequencies for SDF, Specular, Roughness [S1, S2, S3]. 10 frequencies for Diffuse Albedo [S1, S2].
++- View direction $v$: 4 frequencies [S3].
++- Surface normal $n$: 4 frequencies (for Diffuse Albedo) [S1].
++
++**Numbered Steps:**
++1. **Geometry Encoding:** Encode input coordinate $x$ with 6-frequency sinusoidal positional encoding. Pass through the 8-layer SDF MLP ($F_d$) with skip connections at layer 4. Output the scalar SDF value $s$ and the 256-dimensional latent geometric feature vector $f_{geo}$ [S1, S2, S3].
++2. **Material Decoding (Diffuse):** Encode $x$ with 10 frequencies and $n$ with 4 frequencies. Concatenate with $f_{geo}$. Pass through the 8-layer Diffuse Albedo MLP. Output diffuse albedo $\rho_d$ [S1, S2].
++3. **Material Decoding (Specular/Roughness):** Encode $x$ with 6 frequencies. Concatenate with $f_{geo}$ (and optionally $n$). Pass through the respective 4-layer MLPs. Output specular albedo $\rho_s$ and roughness $\rho$ [S1, S2].
++4. **Training Schedule:**
++   - **Stage 1:** Jointly optimize SDF network $F_d$, radiance network $F_c$, and emitter semantic network $F_e$ for 200k iterations [S3].
++   - **Stage 2:** Jointly optimize material fields ($F_{\rho}, F_a$) and light fields for 100k iterations [S3].
++
++**Formulas:**
++- **Positional Encoding:** $\gamma(x) = (\sin(2^0 \pi x), \cos(2^0 \pi x), \dots, \sin(2^{L-1} \pi x), \cos(2^{L-1} \pi x))$ [S3, implied by [18]].
++- **vMF BRDF Approximation (for Material Parameterization):**
++  $$f(l, -d, x_s) \approx G(l, l_r, x_s) = \alpha \exp(\rho(x_s)(l \cdot l_r - 1))$$
++  Where $l$ is the light direction, $d$ is the view direction, $l_r$ is the reflection direction, $\alpha$ is specular tint, and $\rho$ is roughness [S4].
++- **Reflection Direction:**
++  $$l_r = 2(-d \cdot n)n + d$$
++  Where $n$ is the surface normal [S4].
++
++**Parameters:**
++- SDF MLP width: 256 [S1, S2, S3].
++- Diffuse MLP width: 256 [S1, S2].
++- Specular/Roughness MLP width: 256 [S1, S2].
++- Radiance MLP width: 256 [S3].
++- Emitter MLP width: 128 [S3].
++- Material fields width: 64 [S3].
++- Sample rate $N$: 16 for Monte Carlo integration [S3].
++- Training iterations: 200k (Stage 1), 100k (Stage 2) [S3].
++
++**Edge Cases and Pitfalls:**
++- **Spectral Bias:** Without positional encoding, MLPs struggle to represent high-frequency details. The specific frequency counts (6 for geometry, 10 for diffuse) are critical [S1, S3].
++- **Initialization:** Geometric initialization is performed before optimization to stabilize training [S2].
++- **Loss Weights:** In Stage 1, loss weights ($\lambda_1, \lambda_4, \lambda_5$) for eikonal, smooth, and bubble losses are adjusted during warm-up, bubble, and smooth steps [S3].
+ 
+ **Pseudocode:**
+ ```python
++import torch
++import torch.nn as nn
+ import math
+ 
+-def positional_encoding(x, num_frequencies):
+-    """
+-    Standard positional encoding for neural fields.
+-    x: tensor of shape (..., 3)
+-    num_frequencies: int
+-    Returns: tensor of shape (..., 3 * 2 * num_frequencies)
+-    """
+-    # Implementation detail: Standard PE maps x to [sin(2^0 pi x), cos(2^0 pi x), ..., sin(2^(k-1) pi x), cos(2^(k-1) pi x)]
+-    # [G] Standard implementation assumed as not explicitly detailed in sources beyond "positional encoding"
+-    freq_bands = 2.0 ** torch.linspace(0, num_frequencies - 1, num_frequencies)
+-    x_embed = x.unsqueeze(-1) * freq_bands.unsqueeze(0)
+-    x_embed = torch.cat([torch.sin(x_embed), torch.cos(x_embed)], dim=-1)
+-    return x_embed
+-
+-class SDF_MLP:
+-    def __init__(self):
+-        # 8 layers, width 256, skip at layer 4
+-        self.layers = [nn.Linear(3 * 6, 256)] + [nn.Linear(256, 256) for _ in range(7)]
+-        self.skip_layer_idx = 4 # 0-indexed, so 4th layer is index 3? Source says "4th layer". 
+-        # S1: "skip connection at the 4th layer". Usually means layer index 3 (1-based 4th). 
+-        # Let's assume standard IRON implementation: skip from input to layer 4 (index 3).
+-        
++class SinusoidalPositionalEncoding(nn.Module):
++    def __init__(self, num_frequencies):
++        super().__init__()
++        self.num_frequencies = num_frequencies
++
+     def forward(self, x):
+-        x_enc = positional_encoding(x, 6)
+-        h = x_enc
++        # x shape: (..., 3)
++        # Output shape: (..., 3 * num_frequencies * 2)
++        device = x.device
++        frequencies = torch.arange(0, self.num_frequencies, device=device).float()
++        # 2^i * pi * x
++        angular_speeds = (2.0 ** frequencies) * math.pi
++        angular_speeds = angular_speeds.view(1, 1, -1) # (1, 1, num_frequencies)
++        
++        # Expand x to (..., 1, 3) and angular_speeds to (1, num_frequencies, 1)
++        # Actually, standard implementation:
++        # x_embedded = x.unsqueeze(-1) * angular_speeds.unsqueeze(-2) # (..., 3, num_frequencies)
++        # This logic is simplified for clarity; standard NeRF PE is:
++        # freq_bands = 2**torch.arange(num_frequencies) * math.pi
++        # x_embedded = x.unsqueeze(-1) * freq_bands.unsqueeze(0) # (..., 3, num_frequencies)
++        # out = torch.cat([torch.sin(x_embedded), torch.cos(x_embedded)], dim=-1)
++        
++        # Correct standard NeRF PE implementation:
++        freq_bands = 2.0 ** torch.arange(self.num_frequencies, device=device).float() * math.pi
++        # freq_bands: (num_frequencies,)
++        # x: (..., 3)
++        # x.unsqueeze(-1): (..., 3, 1)
++        # freq_bands.unsqueeze(0).unsqueeze(0): (1, 1, num_frequencies)
++        x_embedded = x.unsqueeze(-1) * freq_bands.unsqueeze(0).unsqueeze(0) # (..., 3, num_frequencies)
++        x_embedded = x_embedded.view(*x.shape[:-1], -1) # (..., 3 * num_frequencies)
++        return torch.cat([torch.sin(x_embedded), torch.cos(x_embedded)], dim=-1)
++
++class SkipConnectedMLP(nn.Module):
++    def __init__(self, input_dim, hidden_dim, output_dim, num_layers, skip_layer_idx):
++        super().__init__()
++        self.num_layers = num_layers
++        self.skip_layer_idx = skip_layer_idx
++        self.layers = nn.ModuleList()
++        
++        # First layer
++        self.layers.append(nn.Linear(input_dim, hidden_dim))
++        # Hidden layers
++        for _ in range(num_layers - 2):
++            self.layers.append(nn.Linear(hidden_dim, hidden_dim))
++        # Output layer
++        self.layers.append(nn.Linear(hidden_dim, output_dim))
++        
++        self.relu = nn.ReLU()
++
++    def forward(self, x):
++        h = x
+         for i, layer in enumerate(self.layers):
+-            if i == 3: # 4th layer (0-indexed 3)
+-                h = torch.relu(layer(h) + x_enc) # Skip connection
+-            else:
+-                h = torch.relu(layer(h))
+-        # Output s and f_geo
+-        # [G] Final layer usually linear without activation for SDF value, or specific activation. 
+-        # Sources don't specify final activation for SDF output explicitly, but standard is linear.
+-        # S1 says "outputs an SDF value (s) and an implicit local geometric feature (f_geo)".
+-        # Assuming last layer outputs 256 dims, split or map? 
+-        # S1: "Neural SDF S_theta_s : x -> (S, f)". 
+-        # [G] Assuming last layer is Linear(256, 256) and we take first dim as S, rest as f, or similar. 
+-        # However, S2 says "output the SDF value and an implicit local geometric feature". 
+-        # Let's assume the network outputs a vector where the first component is S and the rest is f_geo, 
+-        # or a separate head. Without explicit source detail, we note the structure.
+-        # [G] Common practice in IRON: The last layer outputs the feature vector, and SDF is a separate head or derived. 
+-        # But S1 text implies a single MLP outputs both. 
+-        # We will define the output as the raw output of the last layer, noting the split is implementation-specific.
+-        return h 
+-
+-class Material_MLP:
+-    def __init__(self, layers=4, width=256, input_dim=3*6):
+-        self.layers = [nn.Linear(input_dim, width)] + [nn.Linear(width, width) for _ in range(layers - 1)]
+-        
+-    def forward(self, x_enc):
+-        h = x_enc
+-        for i, layer in enumerate(self.layers):
+-            if i == 3: # 4th layer skip for 8-layer? No, specular/roughness are 4 layers.
+-                # S1: Specular/Roughness are 4 layers. No skip mentioned for them.
+-                pass
+-            h = torch.relu(layer(h))
++            if i == self.skip_layer_idx:
++                h = torch.cat([h, x], dim=-1)
++            h = layer(h)
++            if i < self.num_layers - 1:
++                h = self.relu(h)
+         return h
+ 
+-def compute_vmf_brdf(l, d, n, rho, alpha):
+-    """
+-    l: light direction
+-    d: view direction
+-    n: normal
+-    rho: roughness
+-    alpha: specular tint
+-    """
+-    lr = 2 * (-torch.dot(d, n)) * n + d
+-    # G(l, lr, xs) = alpha * exp(rho * (l . lr - 1))
+-    return alpha * torch.exp(rho * (torch.dot(l, lr) - 1))
++def create_sdf_network():
++    # 8 layers, width 256, skip at 4th layer (index 3 if 0-indexed layers? 
++    # Note: "skip connection at the 4th layer" usually means input is added to the 4th hidden layer.
++    # If layers are 0..7, and skip is at 4th layer, it likely means after 3 linear layers?
++    # Standard VolSDF/NeRF: Skip connection from input to every hidden layer or specific ones.
++    # S1 says "skip connection at the 4th layer". S3 says "skip connection is used in the 4th layer in Fd".
++    # Assuming 0-indexed: Layer 0, 1, 2, 3(skip), 4, 5, 6, 7.
++    # Let's assume skip is added to the input of the 4th linear layer (index 3).
++    return SkipConnectedMLP(input_dim=18, hidden_dim=256, output_dim=257, num_layers=8, skip_layer_idx=3)
++
++def create_diffuse_network():
++    # 8 layers, width 256, skip at 4th layer.
++    # Input: x (10 freq -> 60) + n (4 freq -> 24) + f_geo (256) = 340
++    return SkipConnectedMLP(input_dim=340, hidden_dim=256, output_dim=1, num_layers=8, skip_layer_idx=3)
++
++def create_specular_network():
++    # 4 layers, width 256.
++    # Input: x (6 freq -> 36) + f_geo (256) = 292
++    return SkipConnectedMLP(input_dim=292, hidden_dim=256, output_dim=1, num_layers=4, skip_layer_idx=None)
++
++def create_roughness_network():
++    # 4 layers, width 256.
++    return SkipConnectedMLP(input_dim=292, hidden_dim=256, output_dim=1, num_layers=4, skip_layer_idx=None)
++
++def compute_vmf_brdf(light_dir, view_dir, normal, roughness, specular_tint):
++    # light_dir, view_dir, normal: (..., 3)
++    # roughness, specular_tint: (..., 1)
++    
++    # Compute reflection direction lr = 2(-d . n)n + d
++    # d is view_dir
++    dot_dn = torch.sum(view_dir * normal, dim=-1, keepdim=True)
++    lr = 2 * (-dot_dn) * normal + view_dir
++    
++    # Normalize lr (should be unit if d and n are unit)
++    lr = torch.nn.functional.normalize(lr, dim=-1)
++    
++    # l . lr
++    l_dot_lr = torch.sum(light_dir * lr, dim=-1, keepdim=True)
++    
++    # G(l, lr, xs) = alpha * exp( rho * (l . lr - 1) )
++    # Note: S4 uses alpha for specular tint and rho for roughness.
++    # Formula: alpha * exp( rho * (l . lr - 1) )
++    brdf = specular_tint * torch.exp(roughness * (l_dot_lr - 1))
++    
++    return brdf
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- **Spectral Bias:** Positional encoding is critical to compensate for the spectral bias of MLPs [S1].
+-- **Initialization:** Geometric initialization is performed before optimization [S2].
+-- **Activation:** Material parameters ($\rho, C_d, \alpha$) use softplus activation to ensure non-negative outputs [S3].
+-
+ ## Subtopics
+ 
+ ### [Geometry and material MLP architecture](14140-geometry-and-material-mlp-architecture.md)
+-This architecture defines the neural network components for decoding signed distance functions (SDF) and material properties (diffuse albedo, specular coefficients) in neural implicit surface reconstruction. It separates geometry and material decoding into two distinct multi-layer perceptrons (MLPs) to improve training stability and rendering fidelity. It is distinguished from single-MLP approaches by its explicit feature vector passing from the geometry network to the material network, allowing the material decoder to access high-level geometric context. See [Geometry and material MLP architecture](14140-geometry-and-material-mlp-architecture.md).
++This architecture defines the neural network components for decoding signed distance functions (SDF) and material properties (diffuse albedo, specular coefficients) in neural implicit surface reconstruction. It separates geometry and material decoding into two distinct multi-layer perceptrons (MLPs) to improve training stability and rendering fidelity. It is distinguished from single-MLP approaches by its explicit feature vector passing from the geometry network to the material network, allowing the material decoder to access high-level geometric context.
+ 
+ ### [Neural diffuse albedo](15344-neural-diffuse-albedo.md)
+-Neural diffuse albedo is a method for predicting the spatially-varying diffuse reflectance ($\rho_d$) of a surface point using a multi-layer perceptron (MLP). It solves the problem of recovering physically-based material properties from inverse rendering pipelines by mapping 3D geometry and local features to albedo values. It is distinguished from sibling material decoders by its specific input composition, which includes surface normals and geometric features, and its higher-frequency positional encoding for coordinates compared to specular or roughness predictors. See [Neural diffuse albedo](15344-neural-diffuse-albedo.md).
++Neural diffuse albedo is a method for predicting the spatially-varying diffuse reflectance ($\rho_d$) of a surface point using a multi-layer perceptron (MLP). It solves the problem of recovering physically-based material properties from inverse rendering pipelines by mapping 3D geometry and local features to albedo values. It is distinguished from sibling material decoders by its specific input composition, which includes surface normals and geometric features, and its higher-frequency positional encoding for coordinates compared to specular or roughness predictors.
+ 
+ ### Material Parameterization with vMF BRDF
+-This variant parameterizes the spatially-varying material of a surface point $x_s$ as roughness $\rho \in [0, 1]$, diffuse color $C_d \in [0, 1]$, and specular tint $\alpha \in [0, 1]$, output by a material MLP network $M$ using softplus activation [S3]. It approximates the BRDF as a von Mises-Fisher (vMF) distribution, defined on the unit sphere with a normalized spherical Gaussian, assuming rotational symmetry with respect to the reflection direction $l_r$ [S3]. The BRDF is computed as $f(l, -d, x_s) \approx \alpha \exp(\rho(x_s)(l \cdot l_r - 1))$ [S3].
++This variant parameterizes the spatially-varying material of a surface point $x_s$ as roughness $\rho \in [0, 1]$, diffuse color $C_d \in [0, 1]$, and specular tint $\alpha \in [0, 1]$, output by a material MLP network $M$ using softplus activation [S4]. It approximates the BRDF as a von Mises-Fisher (vMF) distribution: $f(l, -d, x_s) \approx G(l, l_r, x_s) = \alpha \exp(\rho(x_s)(l \cdot l_r - 1))$, where $l_r$ is the reflection direction computed as $2(-d \cdot n)n + d$ [S4]. This allows the model to behave as an interpolation function for incoming illumination inside the roughness-varying specular lobe [S4].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Inference is $O(L \cdot W^2)$ per sample, where $L$ is the number of layers and $W$ is the width (256). This is comparable to other MLP-based neural fields.
+-- **Memory Complexity:** The model size is dominated by the weight matrices. For the SDF MLP: $8 \times 256 \times 256$ weights (plus biases). For material MLPs: $4 \times 256 \times 256$ or $8 \times 256 \times 256$. Total parameters are in the millions, fitting easily in GPU memory.
+-- **Performance:** The IRON pipeline trains for 100k iterations using 512 randomly sampled pixels per iteration with $\ell_1$ image loss and eikonal regularization loss ($\lambda_1 = 0.1$) [S1].
+-- **Strengths:** Separating geometry and material decoding improves training stability and allows for more accurate material recovery [S1]. The vMF approximation provides a physically plausible and computationally efficient BRDF model [S3].
+-- **Limitations:** Requires careful initialization and regularization (eikonal loss) for stable SDF learning [S1, S2]. The vMF approximation assumes rotational symmetry, which may not hold for all anisotropic materials [S3].
++- **Time Complexity:** Training is computationally intensive. Stage 1 (geometry/radiance) takes ~15 hours per scene on a single NVIDIA Tesla V100 GPU for 200k iterations [S3]. Stage 2 takes additional time for 100k iterations [S3].
++- **Memory Complexity:** Depends on the number of parameters in the MLPs. With hidden dimensions of 256 and 8 layers, the SDF MLP has approximately $256 \times (18+256) + 256^2 + \dots$ parameters. The latent code $z(x)$ has dimension 256 [S3].
++- **Measured Performance:** Rendering on an NVIDIA RTX 3090 GPU with 4096 samples per pixel (spp) takes ~15 seconds per image [S3].
++- **Scaling:** The computational cost of predicting incident radiance grows proportional to the sample rate $N$ [S3]. A trade-off between quality and performance is achieved with $N=16$ [S3].
++- **Strengths:** Separating geometry and material improves training stability and allows for detailed material recovery [S1]. The use of positional encoding mitigates spectral bias [S1, S3].
++- **Limitations:** High computational cost for training and rendering [S3]. Requires careful tuning of loss weights and training stages [S3].
++- **When to use:** When high-fidelity material and geometry reconstruction from photometric images is required, and computational resources are available [S1, S3].
++- **When not to use:** For real-time applications or resource-constrained environments due to the high training and rendering costs [S3].
+ 
+ ## Background
+-The method originates from the IRON (Inverse Rendering by Optimizing Neural SDFs and Materials) pipeline [S1] and has been adopted in subsequent works like PIR (Photometric Inverse Rendering with Shading Cues Modeling and Surface Reflectance Regularization) [S2] and NeIF (Neural Illumination Fields) [S3]. It builds on the general NeRF MLP architecture [Parent] but specializes in surface-based representations (SDFs) and physically-based material decoding. The use of positional encoding to mitigate spectral bias is a standard technique in neural fields [S1]. The vMF BRDF approximation is based on established computer graphics literature [S3].
++The method originates from the IRON (Inverse Rendering by Optimizing Neural SDFs and Materials) pipeline and related works like Neus and I2-SDF [S1, S3]. It builds on the VolSDF architecture for neural SDFs [S3]. The approach was developed to address the challenges of inverse rendering, specifically the joint optimization of geometry, lighting, and material properties from 2D images [S1, S3]. It is used in computer vision and graphics for tasks such as 3D reconstruction, intrinsic image decomposition, and realistic rendering [S1, S3].
+ 
+ ## Sources
+ [S1] IRON: Inverse Rendering by Optimizing Neural SDFs and Materials from Photometric Images, https://doi.org/10.1109/cvpr52688.2022.00548, fetched 2026-10-26
+ [S2] PIR: Photometric Inverse Rendering with Shading Cues Modeling and Surface Reflectance Regularization, https://doi.org/10.1109/3dv66043.2025.00055, fetched 2026-10-26
+-[S3] A Pre-convolved Representation for Plug-and-Play Neural Illumination Fields, https://doi.org/10.1609/aaai.v38i7.28618, fetched 2026-10-29+[S3] I 2 -SDF: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs, https://doi.org/10.1109/cvpr52729.2023.01202, fetched 2026-11-01
++[S4] A Pre-convolved Representation for Plug-and-Play Neural Illumination Fields, https://doi.org/10.1609/aaai.v38i7.28618, fetched 2026-10-29

@@ -1,0 +1,153 @@
+--- v007.md
++++ v008.md
+@@ -1,16 +1,24 @@
+ # Unquantization Functions
++
+ Also called: Unquantize10, Unquantize7, Unquantize9
++
+ ## Overview
+-Unquantization functions convert integer quantized values back to half-precision float range, serving as the inverse operation to the quantization step in transform-based volume data compression [S1, unofficial]. Unlike general scalar quantization which maps continuous domains to discrete indices, these specific functions are tailored for the BC6H compression format used in real-time graphics, handling specific bit-depths (7, 9, 10) to reconstruct floating-point color or density values from compressed integer representations [S1, unofficial].
++Unquantization functions convert integer quantized values back to half-precision float range, serving as the inverse operation to the quantization steps described in [Quantization](5935-quantization.md). This method is specifically designed for BC6H compression, where it reconstructs floating-point color data from compressed integer indices. It differs from general scalar quantization by using specific scaling factors and rounding offsets tailored to the 10-bit and 7-bit partition structures of BC6H.
++
+ ## How it works
+-### Inputs and outputs
+-- **Input**: An integer value $\text{Int}(x)$ representing the quantized coefficient or color component, and a scaling factor $\text{Scale}$ derived from the compression endpoint selection.
+-- **Output**: A half-precision floating-point value $\text{Half}(x)$ in the range $[-65504, 65504]$ (or similar half-float range depending on implementation).
++**Inputs and Outputs:**
++- Input: An integer value `Int(x)` (typically 10-bit or 7-bit depending on the variant) and a `Scale` factor derived from the partition and mode.
++- Output: A half-precision float `Half(x)`.
+ 
+-### Data structures
+-The implementation relies on standard integer types for the input and half-precision float types for the output. No complex data structures are required for the core unquantization logic itself, though it operates within the context of compressed blocks (e.g., 128-bit BC6H blocks).
++**Data Structures:**
++The implementation relies on standard integer types (`uint8_t`, `uint16_t`) and half-precision float representations. The `Scale` is a precomputed floating-point value.
+ 
+-### Steps and formulas
+-The core unquantization formula maps the integer index to a floating-point value using a linear scaling and offset:
++**Steps:**
++1. Retrieve the integer quantized value `Int(x)`.
++2. Retrieve the `Scale` factor associated with the current partition and mode.
++3. Apply the unquantization formula to map the integer to the half-precision range.
++
++**Formula:**
++The core unquantization formula is defined as [S1, unofficial]:
+ 
+ $$
+@@ -19,61 +27,79 @@
+ 
+ Where:
+-- $\text{Int}(x)$ is the quantized integer value.
+-- $65536$ is the scaling multiplier (often related to the bit-depth or fixed-point representation).
+-- $32768$ is the rounding offset to ensure correct rounding during the division.
+-- $\text{Scale}$ is the divisor determined by the compression mode and endpoint selection.
++- `Int(x)` is the integer quantized value.
++- `65536` is $2^{16}$, scaling the integer to the full half-precision range before adjustment.
++- `32768` is $2^{15}$, acting as a rounding offset to ensure correct rounding during the division.
++- `Scale` is the normalization factor.
+ 
+-### Pseudocode
++**Pseudocode:**
+ ```python
+-def unquantize(int_val: int, scale: float) -> float:
++def unquantize(int_val, scale):
+     """
+-    Converts an integer quantized value back to a half-precision float range.
++    Converts an integer quantized value back to half-precision float range.
+     
+     Args:
+-        int_val: The quantized integer value.
+-        scale: The scaling factor derived from compression parameters.
++        int_val (int): The integer quantized value.
++        scale (float): The scale factor for the partition/mode.
+         
+     Returns:
+-        The unquantized float value.
++        float: The unquantized half-precision float value.
+     """
+-    # Apply scaling and rounding offset
+-    numerator = int_val * 65536 + 32768
+-    result = numerator / scale
++    # Apply the formula: (Int(x) * 65536 + 32768) / Scale
++    # Note: In practice, this result is often cast to half-precision.
++    result = (int_val * 65536 + 32768) / scale
+     return result
+ ```
+ 
+-### Edge cases and pitfalls
+-- **Division by zero**: Ensure $\text{Scale}$ is never zero. In BC6H, certain modes may have specific constraints on valid scales.
+-- **Precision loss**: The use of fixed-point arithmetic (multiplication by 65536) may introduce precision issues if not handled with sufficient integer width before division.
+-- **Range clamping**: The output should be clamped to the valid half-precision float range to avoid NaNs or infinities if the input is out of expected bounds.
++**Parameters:**
++- `Scale`: Varies based on the BC6H mode and partition. Typical values are not explicitly listed in the sources but are derived from the compression algorithm's range normalization.
++
++**Edge Cases and Pitfalls:**
++- Division by zero: Ensure `Scale` is non-zero.
++- Precision: The addition of `32768` is critical for correct rounding. Omitting it may lead to biased results.
+ 
+ ## Subtopics
+ 
+ ### Finish Unquantize
+-Interpolates between two unquantized endpoints using a weight and converts to final float3. This variant is used in BC6H compression to reconstruct the final color value by blending between two base unquantized values based on a weight index.
+-- **Formula**:
+-  $$
+-  \text{Result} = \text{f16tof32}\left( \left( \text{endpoint0Unq} \times (64 - \text{weight}) + \text{endpoint1Unq} \times \text{weight} + 32 \right) \times \frac{31}{4096} \right)
+-  $$
+-- **Details**:
+-  - $\text{endpoint0Unq}$ and $\text{endpoint1Unq}$ are the two unquantized endpoint values (half-precision floats).
+-  - $\text{weight}$ is an integer index (typically 0-63) determining the interpolation factor.
+-  - $64 - \text{weight}$ and $\text{weight}$ are the interpolation coefficients.
+-  - $+ 32$ is a rounding offset.
+-  - $\times \frac{31}{4096}$ scales the result to the final range.
+-  - $\text{f16tof32}$ converts the intermediate half-precision result to a full float32 for final output or further processing.
+-- **When to choose**: Use this when reconstructing pixel values from BC6H compressed blocks where interpolation between endpoints is required.
++**Definition:** Interpolates between two unquantized endpoints using a weight and converts to final float3. This variant is used in BC6H to reconstruct the final color value from the two endpoints and the interpolated weight.
++**Formula:**
++$$
++\text{Result} = \text{f16tof32}\left( \left( \text{endpoint0Unq} \times (64 - \text{weight}) + \text{endpoint1Unq} \times \text{weight} + 32 \right) \times \frac{31}{4096} \right)
++$$
++Where:
++- `endpoint0Unq` and `endpoint1Unq` are the unquantized endpoint values.
++- `weight` is the interpolation weight (0-63).
++- `f16tof32` converts the half-precision result to a 32-bit float.
++- The factor `31/4096` scales the result appropriately.
++**When to choose:** Use this when reconstructing the final pixel color from BC6H compressed data, specifically after the initial unquantization of endpoints.
+ 
+ ## Operating characteristics
+-- **Time complexity**: $O(1)$ per value, as it involves a constant number of arithmetic operations.
+-- **Memory complexity**: $O(1)$, requiring only temporary storage for intermediate calculations.
+-- **Performance**: Highly efficient on GPU hardware due to simple arithmetic operations. Suitable for real-time decompression.
+-- **Strengths**: Fast, deterministic, and well-suited for hardware acceleration.
+-- **Limitations**: Limited to specific compression formats (BC6H). Precision is constrained by the half-precision float range and the quantization step size.
+-- **When to use**: Real-time graphics applications requiring efficient decompression of compressed textures or volume data.
+-- **When not to use**: Applications requiring high-precision scientific data reconstruction where lossy compression artifacts are unacceptable.
++**Time and Memory Complexity:**
++- Time: O(1) per pixel, as it involves a fixed number of arithmetic operations.
++- Memory: O(1), requiring only the storage of the integer value and the scale factor.
++
++**Measured Performance:**
++- Performance is highly dependent on the hardware's ability to perform fast floating-point division and multiplication. On modern GPUs, this operation is typically very fast due to hardware support for half-precision arithmetic.
++
++**Scaling:**
++- Scales linearly with the number of pixels, as each pixel is processed independently.
++
++**Strengths and Limitations:**
++- Strengths: Simple and efficient; well-suited for GPU implementation.
++- Limitations: Precision loss is inherent in the quantization process; the quality of the result depends on the accuracy of the `Scale` factor.
++
++**When to use and when not:**
++- Use: When decompressing BC6H compressed textures.
++- Do not use: For general-purpose quantization/dequantization where different scaling factors or rounding methods are required.
+ 
+ ## Background
+-Originating from the BC6H compression format, these unquantization functions are part of the broader family of transform-based compression techniques used in real-time graphics. BC6H is designed for high-quality compression of floating-point HDR images, and these functions play a crucial role in the decompression pipeline. The specific variants (Unquantize10, Unquantize7, Unquantize9) correspond to different bit-depths used in the compression process to balance quality and bitrate.
++**Origin:**
++The unquantization functions described here originate from the BC6H compression algorithm, specifically as implemented in the GPURealTimeBC6H project [S1, unofficial]. BC6H is a block compression format for 32-bit floating-point textures, commonly used in real-time graphics.
++
++**History and Development:**
++BC6H was developed as part of the DirectX Compression (DXTC) family, providing high-quality compression for HDR textures. The specific unquantization formulas are tailored to the 10-bit and 7-bit partition structures used in BC6H to balance compression ratio and visual quality.
++
++**Where it is used:**
++- Real-time graphics engines (e.g., Unity, Unreal Engine) for texture compression.
++- GPU-based image processing pipelines.
+ 
+ ## Sources

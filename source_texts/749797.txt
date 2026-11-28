@@ -1,0 +1,2102 @@
+Published in Transactions on Machine Learning Research (September/2026)
+Active Sampling for Ultra-Low-Bit-Rate Video Compression
+via Conditional Controlled Diffusion
+Amirhosein Javadi
+amjavadi@ucsd.edu
+Department of Electrical and Computer Engineering
+University of California San Diego
+Shirin Saeedi Bidokhti
+saeedi@seas.upenn.edu
+arXiv:2605.02849v3 [cs.CV] 1 Oct 2026
+Department of Electrical and Systems Engineering
+University of Pennsylvania
+Tara Javidi
+tjavidi@ucsd.edu
+Department of Electrical and Computer Engineering
+University of California San Diego
+Reviewed on OpenReview: https: // openreview. net/ forum? id= zER4e4GfZH
+Abstract
+Diffusion models provide a powerful generative prior for perceptual reconstruction at ultralow bitrates, but effective video compression requires controlling the generative process using
+highly compact conditioning signals. In this work, we present ActDiff-VC, a diffusion-based
+video compression framework for the ultra-low-bitrate regime. Our method partitions videos
+into variable-length segments, transmits keyframes only when needed, and summarizes temporal dynamics using a compact set of tracked point trajectories. Conditioned on these
+sparse signals, a conditional diffusion decoder synthesizes the remaining frames, enabling
+perceptually realistic reconstruction under severe rate constraints. To support this design,
+we introduce two mechanisms: content-adaptive keyframe selection and budget-aware sparse
+trajectory selection, which together enable compact yet effective conditioning for generative
+reconstruction. ActDiff-VC has an asymmetric computational profile: on a single NVIDIA
+A100 GPU, encoding requires 109 ms per frame, while the adopted 20-step diffusion decoder
+requires 2311 ms per frame, making the framework particularly suitable for ultra-low-bitrate
+applications such as cloud-assisted reconstruction, archival storage, and offline content distribution, where lightweight encoding and perceptual reconstruction quality are prioritized.
+Experiments on the UVG and MCL-JCV benchmarks show that ActDiff-VC achieves up
+to 64.6% bitrate reduction at matched NIQE, improves KID by up to 64.6% and FID by
+up to 37.7% at comparable bitrates against strong learned codecs, and delivers favorable
+perceptual rate–distortion trade-offs relative to learned and generative baselines in the ultralow-bitrate regime. A human study with 147 participants further supports these perceptual
+gains, with ActDiff-VC preferred over DCVC-FM in 62.6% of pairwise comparisons. Code
+is publicly available at https://github.com/importAmir/ActDiff-VC.
+1
+Introduction
+As video increasingly underpins everyday communication and entertainment, it has become a dominant
+contributor to network traffic and storage demand. This scale makes improvements in compression efficiency
+essential, especially as expectations for visual quality continue to rise while bandwidth budgets continue to
+shrink. The central challenge is to deliver higher perceived quality under tighter rate constraints. Learned
+video compression has advanced primarily through distortion-minimizing training, but these principles strain
+in the ultra-low-bitrate regime. Here, we use ultra-low bitrate to refer to operating points roughly at or below
+1
+Published in Transactions on Machine Learning Research (September/2026)
+0.05 bits per pixel, where the transmitted information per frame is severely constrained. At such rates, the
+encoder can no longer afford to transmit rich motion side information or detailed residual corrections, and
+reconstructions often become over-smoothed. In this regime, perceived quality is governed more by realism
+than by pixel-level fidelity, motivating decoders that rely on powerful generative priors to infer missing
+content from minimal side information.
+Diffusion models provide a powerful generative prior for reconstruction at ultra-low bitrates, enabling perceptually realistic synthesis from highly compressed conditioning signals. However, integrating diffusion
+into video compression raises practical challenges in controlling the generative process under tight rate budgets. Rich conditioning can improve reconstruction fidelity but increases side-information cost, while overly
+sparse conditioning can lead to perceptually implausible or unstable reconstructions. Existing diffusion-based
+codecs address this trade-off in different ways. I2 VC (Liu et al., 2024) leverages latent diffusion priors but
+performs iterative denoising independently for each frame, limiting efficiency. EVC-PDM (Li et al., 2024a)
+evaluates candidate reconstructions by running diffusion at the encoder to determine when to transmit additional keyframes, incurring significant encoder overhead. These methods highlight the central challenge
+of designing compact yet informative conditioning mechanisms that enable high perceptual reconstruction
+quality in ultra-low-bitrate diffusion-based video compression.
+To address this conditioning efficiency challenge, we introduce a generative compression strategy that exploits
+temporal redundancy through structured sparse conditioning. Instead of reconstructing frames via per-frame
+diffusion reconstruction, we partition the video into variable-length segments and transmit keyframes when
+the current keyframe is no longer sufficiently informative for reconstructing subsequent frames. Within each
+segment, temporal dynamics are summarized by a compact set of tracked point trajectories that serve as
+motion conditioning signals for generative reconstruction. A conditional diffusion decoder then synthesizes
+the remaining frames from these sparse signals, enabling perceptually realistic reconstruction at ultra-low
+bitrates. Our approach is motivated by the observation that motion in natural videos exhibits strong
+spatial correlation, allowing sparse trajectory conditioning to approximate dense motion fields with minimal
+perceptual degradation. This enables a compression design in which a small number of transmitted keyframes
+and compact motion cues are sufficient to guide generative reconstruction of intermediate content. This
+design maintains lightweight encoding while allocating computation to the diffusion decoder, making ActDiffVC suitable for cloud-assisted reconstruction, archival storage, and offline content distribution at ultra-low
+bitrates. Building on this principle, we leverage pre-trained diffusion models to realize sparse motion-guided
+video reconstruction in the ultra-low bitrate regime, and summarize our contributions as follows:
+• We introduce a generative video compression framework in which a conditional diffusion decoder
+reconstructs video from sparse trajectory conditioning, enabling perceptually realistic reconstruction
+at ultra-low bitrates.
+• We propose two encoder-side mechanisms for compact and informative conditioning: (i) contentadaptive keyframe selection that forms variable-length segments aligned with scene dynamics, and
+(ii) a budget-aware sparse trajectory selection strategy that extracts representative motion cues from
+dense tracking to minimize side-information rate.
+• We demonstrate strong perceptual compression performance in the ultra-low-bitrate regime on the
+UVG and MCL-JCV benchmarks, achieving up to 64.6% bitrate reduction at matched NIQE, improving KID by up to 64.6% and FID by up to 37.7% at comparable bitrates against strong learned
+codecs. We further show favorable perceptual rate–distortion trade-offs relative to learned codecs
+and generative baselines. A human study with 147 participants supports these perceptual gains,
+with ActDiff-VC preferred over DCVC-FM in 62.6% of pairwise comparisons. Extensive ablations
+validate each component’s contribution.
+2
+Related work
+Learning-based video codecs have achieved substantial gains over traditional standards by replacing handcrafted modules with neural networks (Wiegand et al., 2003; Sullivan et al., 2012). Most early approaches
+2
+Published in Transactions on Machine Learning Research (September/2026)
+follow a predictive residual-coding paradigm, where motion-compensated predictions are formed from previously decoded frames and the encoder transmits compact residual representations (Lu et al., 2019). Subsequent methods extend this framework through conditional coding (Li et al., 2021; 2022; 2023), which models
+an explicit distribution of the current frame conditioned on decoded history and entropy-codes it under the
+learned distribution. A complementary direction is interpolation-based compression (Wu et al., 2018; Alexandre et al., 2023), which synthesizes intermediate frames from sparsely transmitted reference frames. While
+these learned codecs achieve strong distortion performance at moderate bitrates, they are typically trained
+with per-frame distortion objectives that lead to over-smoothed and perceptually blurry reconstructions in
+the ultra-low-bitrate regime (Blau & Michaeli, 2019). This limitation motivates compression strategies that
+prioritize perceptual realism over strict pixel fidelity under extreme rate constraints.
+Perceptual video compression improves visual quality by augmenting learned codecs with perceptual losses
+and adversarial training, thereby biasing reconstructions toward human visual preferences rather than exact
+pixel fidelity (Xu et al., 2024). GAN-based methods further enhance high-frequency details and textures
+through adversarial objectives (Veerabadran et al., 2020; Du et al., 2022; 2024). However, existing perceptual
+and GAN-based codecs do not fully address the ultra-low-bitrate regime (e.g., ≤ 0.05 bpp). In this range,
+the bit budget severely limits the information that can be transmitted per frame, and distortion-optimized
+learned codecs often produce noticeably blurry reconstructions. More critically, many perceptual and GANbased codecs determine their operating points through training-time choices, such as rate–distortion loss
+weights or separately trained rate models, making them difficult to adapt reliably to previously unseen
+ultra-low-bitrate settings without retraining. This gap motivates leveraging stronger generative priors that
+can reconstruct realistic video from highly compact conditioning signals.
+Diffusion models (Ho et al., 2020) have emerged as powerful generative priors capable of synthesizing photorealistic content from compact conditioning signals, including text (Nichol et al., 2022; Ho et al., 2022),
+sketches (Zhang et al., 2023), and point trajectories (Gu et al., 2025). This capability makes them well
+suited for ultra-low-rate video compression, where the bit budget for transmitted side information is severely
+constrained. In the image domain, diffusion-based codecs have demonstrated substantial perceptual gains
+at very low bitrates (Pan et al., 2022; Yang & Mandt, 2023; Lei et al., 2023; Careil et al., 2024; Relic et al.,
+2024), indicating that diffusion priors can improve reconstruction quality under extreme rate constraints. Extending these benefits to video, however, remains challenging, as reconstruction must both exploit temporal
+redundancy and operate under highly compressed conditioning.
+Recent methods have begun incorporating diffusion priors into learned video compression. I2 VC (Liu et al.,
+2024) encodes frames into latent representations, allocates bits using a learned spatio–temporal importance
+mask, and reconstructs them with a pre-trained image latent diffusion model conditioned on features from
+neighboring decoded frames. However, without an explicit motion signal, maintaining consistent reconstruction under large motion or occlusion may be challenging. EVC-PDM (Li et al., 2024a) instead transmits a
+subset of intra frames and synthesizes skipped frames with a video diffusion model. It selects keyframes by
+performing diffusion-based forecasting at the encoder and inserting a keyframe when predicted perceptual
+quality drops below a threshold. However, its keyframe-selection procedure relies on repeatedly running
+diffusion-based forecasts at the encoder to decide when additional intra frames are required, incurring substantial encoder-side overhead and limiting practicality. These limitations motivate approaches that avoid
+repeated diffusion-based forecasting at the encoder and instead use compact sparse trajectories as direct
+conditioning for diffusion-based reconstruction.
+Adaptive keyframe placement addresses temporal variation by selecting content-dependent segments instead
+of relying on fixed group-of-pictures (GOP) structures. Most learned video codecs use a fixed GOP, which can
+be suboptimal when motion intensity, scene dynamics, or shot boundaries vary over time. Adaptive strategies
+form variable-length segments that better allocate bits across the video (Ge et al., 2024; Yang et al., 2024).
+The most relevant work is M3-CVC (Wan et al., 2025): it segments video into variable-length clips based on
+semantic changes and optical flow, and reconstructs each clip from a decoded keyframe together with a text
+description using a diffusion-based generative model. While promising, text-based conditioning can be too
+coarse or ambiguous to capture fine-grained motion and complex dynamics, motivating the use of compact
+sparse trajectories as a more explicit conditioning signal for diffusion-based reconstruction.
+3
+Published in Transactions on Machine Learning Research (September/2026)
+Encoding
+Image
+Compression
+Decoding
+Image
+Decompression
+x#1
+x1
+Sketch
+Sparse Point
+Selection
+𝒫"
+Empirical
+Entropy
+Enc
+Keyframe
+Selection
+Empirical
+Entropy
+Dec
+𝒫# "
+𝒫"
+dense tracking
+field (M)
+x" 1
+Pixel
+Tracking
+T"
+x" !!
+Future frames
+Image
+Compression
+Image
+Decompression
+x" #:!!
+x#T
+x !!
+Figure 1: Framework of ActDiff-VC. Given the first frame, a dense point tracker estimates the dense
+tracking field M across subsequent frames. The sparse point selector, guided by a sketch of the first frame,
+subsamples the dense tracking field to form the conditioning sparse trajectory set P (k) . On the decoder side,
+the diffusion model is conditioned on P (k) together with the first and last frames to reconstruct the video.
+Domain-specific ultra-low-bitrate video communication has also been explored using compact semantic control signals, such as facial landmarks or keypoints for conferencing (Oquab et al., 2021; Konuko et al., 2021)
+and parametric human-body representations (Chen et al., 2025). These approaches exploit strong structural priors about the content (e.g., faces or articulated bodies) to achieve extreme compression. However,
+because they rely on domain-specific assumptions, they are not directly comparable to methods targeting
+unconstrained natural videos, which is the setting we consider.
+3
+Proposed Approach: Concept Overview
+In this section, we provide a conceptual overview of our proposed generative video compression algorithm.
+We couple active sampling of keyframes and intermediate context at the encoder with a conditional diffusion
+decoder. The sampled keyframes and selected context create a content-adaptive temporal segmentation of
+the video where the decoding is done in blocks of variable length. The decoder treats the selected context
+as side information and reconstructs the intermediate frames between each pair of consecutive keyframes
+by running a reverse diffusion process conditioned on this received side information (in the form of sparse
+trajectory conditioning). Figure 1 illustrates our proposed pipeline.
+3.1
+Detailed Overview
+We decompose each input video into a sequence of content-adaptive segments, also known as groups of pictures
+(k)
+(k) k
+(GOPs), indexed by k = 1, . . . , K. GOP segment k contains Tk frames {xt }Tt=1
+with xt ∈ R3×H×W and
+(k)
+(k+1)
+. At a high level, the
+a one-frame overlap with the preceding and subsequent segments, i.e., xTk = x1
+encoder observes the video stream and chooses when to sample densely through keyframes and when to
+sample sparsely through compact motion conditioning signals. The decoder, on the other hand, relies on a
+conditional diffusion model to generate the missing information across each segment.
+To guide both sampling decisions and the diffusion decoder, we use motion information from video tracking.
+(k)
+Let Ω ⊂ Z2 denote the set of pixel coordinates in the first frame x1 . The dense point tracker estimates, for
+each pixel p ∈ Ω, a sequence of 2D displacements from the initial frame at each subsequent frame t:
+M : Ω → R2Tk ,
+
+p 7→ M(p) ≡ u1 (p), . . . , uTk (p) ,
+4
+(1)
+Published in Transactions on Machine Learning Research (September/2026)
+(k)
+where ut (p) ∈ R2 denotes the displacement vector of pixel p from its position in the initial frame x1 to its
+position at frame t. This dense tracking field M captures the motion and temporal variation throughout the
+k-th segment, allowing the model to represent both local and global scene dynamics.
+While pixel tracking offers several advantages over traditional motion representations, its most important
+advantage for us is the high spatial correlation. More specifically, in natural videos, the trajectory of the pixel
+p, p 7→ M(p), is highly correlated with the trajectory of its neighboring pixel q, q 7→ M(q). This inherently
+high spatial correlation allows for further sub-sampling of the trajectory to a sparse pixel set S ⊂ Ω without
+negatively impacting motion fidelity while guaranteeing an ultra-low bit rate. We therefore introduce the
+sparse trajectory set for the k-th segment as the subsampling of the dense tracking field M onto S,
+
+
+k
+P (k) :=
+q, {ut (q)}Tt=1
+: q∈S .
+(2)
+Our conditional diffusion model decoder operates on each segment independently, relying on the frame
+overlaps to effectively regulate the temporal variations across GOP segments. Given the decoded boundary
+(k)
+(k)
+keyframes x̂1 , x̂Tk and sparse trajectory set P (k) , our decoder synthesizes a length-Tk sequence of frames
+(k)
+(k)
+whose appearance matches x̂1 , x̂Tk and whose motion follows P (k) . For notational simplicity, we omit
+segment superscripts on segment-dependent quantities whenever the segment index is clear from context.
+The final component handles compression. Keyframes are compressed with a lossy image compressor, whereas
+the sparse trajectory set is compressed losslessly with an entropy coder. The transmitted bitstream therefore
+comprises (i) compressed keyframes, (ii) losslessly compressed sparse trajectory set, and (iii) the segment
+length. At the receiver, the decoder first decompresses the keyframes and the sparse trajectory set; it then
+uses the keyframes together with P (k) to guide diffusion-based synthesis of each segment. The following
+subsections describe each component conceptually, while Section 4 describes our concrete implementation.
+3.2
+Video Tracking as Sparse Trajectory Conditioning
+To guide the diffusion decoder’s motion synthesis, we represent temporal dynamics using dense pixel tracking.
+Rather than transmitting conventional motion vectors or optical flow fields, we leverage recent advances in
+dense point tracking (e.g., (Harley et al., 2025)) to estimate a dense tracking field M over each segment.
+(k)
+These trajectories capture how each pixel in the reference keyframe x1 moves through subsequent frames,
+providing a rich motion signal that the diffusion model can condition on during generation. Pixel tracking
+offers several advantages over traditional motion representations. First, tracking naturally handles longrange motion and maintains temporal consistency across multiple frames, whereas frame-to-frame motion
+vectors can accumulate drift (Neoral et al., 2024; Harley et al., 2025). Second, the dense tracking field
+provides explicit correspondence information that helps the diffusion model understand which regions of
+(k)
+the reference keyframe x1 should appear at which locations in future frames, reducing ambiguity in the
+generation process. Furthermore, tracking is inherently sparse-compatible. That is, given a sparse set S of
+selected points in the initial frame, we estimate dense displacements via a radial basis function (RBF) kernel:
+c
+M(p | S) =
+X
+α(p, q) M(q),
+q∈S
+
+
+2
+exp − ∥p−q∥
+2σ 2
+
+.
+α(p, q) = P
+∥p−q ′ ∥2
+exp
+−
+′
+2
+q ∈S
+2σ
+(3)
+where ∥p − q∥ denotes the Euclidean distance between pixels p and q, and σ is the kernel bandwidth. We
+(k)
+assume local spatial correlation in the tracking field: pixels that are close in the initial frame x1 are more
+likely to have similar motion trajectories, especially when they lie in the same motion region. We can find
+S ⊂ Ω with |S| ≤ B such that the weighted reconstruction error:
+X
+2
+R(S) ≡
+w(k) (p) M(p) − c
+M(p | S) 2 ,
+(4)
+p∈Ω
+can be small, where w(k) : Ω → R≥0 is an importance weight derived from the first frame (e.g., edge
+magnitude or gradient saliency).
+5
+Published in Transactions on Machine Learning Research (September/2026)
+3.3
+Conditional Diffusion Decoder
+Our compression framework relies on a conditional video diffusion model that serves as the decoder. Unlike
+traditional codecs that reconstruct frames through explicit transform coding of residuals, our approach
+leverages the generative capabilities of diffusion models to synthesize video content from minimal conditioning
+signals. Ideally, such a conditional diffusion model is trained from scratch; however, it can also be built by
+adapting existing diffusion-based video-generation models. Section 4.1 provides a detailed description of this
+model and how we adapt it for video compression at ultra-low bit rate.
+Our proposed diffusion model takes as input: (i) conditioning image latents from the first and last frames
+of each GOP segment, providing appearance anchors, and (ii) the sparse trajectory set P (k) that encodes
+motion dynamics throughout the temporal extent of the segment. The diffusion process iteratively refines an
+initial noisy latent representation toward a high-quality video sequence that matches both the appearance
+constraints (from keyframes) and the motion constraints (from tracking). By conditioning the diffusion
+process on both appearance and motion, the model can generate high-fidelity video sequences that respect
+the scene’s motion structure while maintaining visual fidelity to the keyframe appearances. Furthermore,
+frame overlap ensures smooth transitions across consecutive GOP segments.
+3.4
+Content-Adaptive Keyframe Selection
+A fundamental challenge in video compression is determining optimal keyframe placement. Traditional
+codecs often use fixed GOP structures with predetermined keyframe intervals, which fail to account for
+varying scene complexity, motion patterns, and visual content across different video segments.
+Our approach introduces content-adaptive keyframe selection that determines GOP segment boundaries
+based on how long appearance and motion information from a keyframe remain informative for recon(k)
+struction. In particular, given the dense tracking field M from the first frame of the segment x1 , we
+(k)
+(k)
+forward-splat the first frame x1 along the displacements {ut (p)}p∈Ω to obtain warped images x̃t . The
+overlap between the warped and original frames, together with their perceptual similarity, is used to compute
+a keyframe-selection score θt , which serves as a surrogate for how informative the current keyframe remains
+for reconstructing future frames. The precise definition of θt is given in Section 4.
+4
+Proposed Approach: Implementation
+This section describes the concrete implementation of the conceptual components introduced in Section 3.
+We begin by detailing the conditional video diffusion model and how it is adapted for compression. We then
+present our implementations of the content-adaptive keyframe selection, the corresponding budget-aware
+sparse trajectory selection, and encoding of all transmitted components.
+4.1
+Conditional Diffusion Decoder Implementation
+Our conditional diffusion decoder is built upon DaS (Gu et al., 2025), a transformer-based video diffusion
+model that operates in a latent space. Given a conditioning image x1 and a sparse trajectory set P of
+temporal length T , DaS synthesizes a length-T video whose appearance matches x1 and whose motion
+follows P. The model uses
+factors sT = 4 and sS = 8. For notational
+m
+l and
+m spatial downsampling
+l m
+l temporal
+H
+W
+T
+:=
+:=
+:=
+clarity, we define Tlat
+sT , h
+sS , and w
+sS .
+A motion VAE encoder Etrk maps the sparse tracking set P to a latent tensor ztrk = Etrk (P) ∈ RTlat ×h×w×16 .
+The construction of this motion VAE encoder is described in Appendix 14. Separately, the VAE encoder
+E maps the conditioning image x1 to a single-frame latent z1 = E(x1 ) ∈ R1×h×w×16 . The image latent
+is temporally expanded by placing it in the first latent time slice and zero-padding the remaining slices,
+yielding z1,pad ∈ RTlat ×h×w×16 . The denoising diffusion transformer (DiT) takes the concatenation of z1,pad
+with Gaussian noise and iteratively denoises it over multiple reverse diffusion steps. In parallel, a conditioning
+DiT processes the tracking latent ztrk and extracts motion features at each transformer block. These motion
+features are linearly projected and injected into the corresponding layers of the denoising DiT via additive
+6
+Published in Transactions on Machine Learning Research (September/2026)
+conditioning, allowing the diffusion process to be guided by the sparse motion signal. Finally, the VAE
+decoder D maps the denoised latent back to pixel space to produce the reconstructed frames.
+Bidirectional Conditioning. To mitigate temporal discontinuities at segment boundaries, we use the
+pretrained DaS model with bidirectional boundary conditioning at inference time, without additional training
+or fine-tuning. Let x1 and xTk denote the segment’s boundary frames, with corresponding latents z1 and
+zTk . We form a dual-conditioned latent stack:
+
+
+zdual = z1 ,
+0, . . . , 0
+, zTk ,
+(5)
+| {z }
+Tlat −2 interior zero slices
+where each zero slice 0 ∈ Rh×w×16 has the same spatial and channel dimensions as a single latent frame. This
+dual-conditioned stack replaces the single-keyframe stack z1,pad used in the original DaS formulation. The
+denoising DiT then operates on the concatenation of zdual with Gaussian noise, encouraging the generated sequence to remain consistent with both boundary keyframes. As adjacent segments share a one-frame overlap,
+this bidirectional conditioning introduces minimal rate overhead while improving temporal smoothness.
+Adapting a fixed-length generator to variable-length segments. Although DaS produces a fixedlength sequence, our compression system operates on variable-length segments of length Tk . To reconcile
+these, we temporally interpolate the sparse trajectory set for segment k onto the model’s fixed temporal
+grid. After generation, we subsample the generated sequence to Tk frames.
+4.2
+Pixel Tracking Implementation
+Among candidate motion cues, including frame-to-frame optical flow, scene flow, and long-range point tracking, we adopt long-range point tracking to mitigate error accumulation from chaining short-horizon flows
+and to obtain temporally coherent trajectories over each segment. Specifically, we employ AllTracker (Harley
+et al., 2025), which estimates the dense tracking field M from the segment’s initial frame to all subsequent
+frames; for each pixel in the initial frame, it provides a trajectory specifying its corresponding location at each
+time step, together with per-frame visibility and confidence. AllTracker’s reliance on its occlusion-aware,
+geometry-sensitive formulation yields trajectories that remain stable under large motions and viewpoint
+changes. This is precisely the behavior required by our diffusion decoder.
+4.3
+Content-Adaptive Keyframe Selection Implementation
+In the encoder, we implement content-adaptive keyframe selection by computing occupancy and perceptual
+similarity metrics between the original video frames and the forward-splatted rendering of the keyframe
+for each potential segment endpoint. Given the dense tracking field M from the current keyframe, we
+(k)
+(k)
+forward-splat the keyframe x1 along the displacements {ut (p)}p∈Ω to obtain splatted images x̃t and
+binary occupancy masks. Here, t denotes the local frame index within the current segment.
+h
+i
+Ot (q) = I ∃ p ∈ Ω : p + ut (p) = q .
+(6)
+The occupancy fraction at time t is
+occ(t) =
+1 X
+Ot (q),
+|Ω|
+(7)
+q∈Ω
+measuring what fraction of the target frame is covered by the forward-warped keyframe. For perceptual
+similarity, we compute
+(k)
+(k) 
+simperc (t) = 1 − LPIPS Ot ⊙ x̃t , Ot ⊙ xt ,
+(8)
+where ⊙ denotes element-wise multiplication and LPIPS (Zhang et al., 2018) is a learned perceptual similarity
+metric. Masking both images with Ot restricts LPIPS to covered regions, avoiding penalties from uncovered
+areas. We then define the combined keyframe-validity score
+
+
+occ(t) simperc (t)
+θt := min
+,
+,
+θocc
+θperc
+7
+Published in Transactions on Machine Learning Research (September/2026)
+Chunk k+1
+Chunk k
+...
+Original Frames
+...
+Forward Splatting
+Forward Splatting
+Forward Splat
+of the Chunk’s
+First Frame
+...
+...
+Occupancy Score
+𝟏. 𝟎𝟎
+𝟎. 𝟗𝟓3
+𝟎. 𝟕𝟖𝟒
+𝟎. 𝟖𝟗5
+Perceptual Score
+𝟏. 𝟎𝟎
+𝟎. 𝟖𝟕𝟔
+𝟎. 𝟖𝟏𝟐
+𝟎. 𝟖𝟗3
+Figure 2: Content-Adaptive Keyframe Selection. The first frame of each segment is forward-splatted
+through the next frames using a dense tracker, yielding target-space occupancy occ(t) and perceptual similarity simperc (t). The next keyframe is selected at the earliest t such that occ(t) < θocc or simperc (t) < θperc
+holds for L consecutive frames. In this visualization, L = 1 and θocc = θperc = 0.8. The next segment begins
+with a one-frame overlap, and the procedure repeats.
+where θocc and θperc are the occupancy and perceptual-similarity thresholds, respectively.
+Let τk−1 denote the global frame index of the first frame of segment k, with τ0 = 1. We define the endpoint
+of segment k as the first frame in the earliest run of L consecutive local frames for which the combined score
+remains below one, i.e.,
+n
+o
+(9)
+τk := τk−1 − 1 + min t θt+ℓ < 1 ∀ ℓ ∈ {0, . . . , L − 1} .
+t>1
+In other words, τk is the global frame index corresponding to the first frame in the earliest run of L consecutive
+frames for which the keyframe no longer provides sufficient coverage or perceptual similarity. The parameter
+L acts as a hysteresis term, preventing isolated score drops from triggering a new segment boundary. The
+corresponding segment length is Tk = τk − τk−1 + 1. Figure 2 illustrates this process. Once a keyframe
+boundary is identified, the next segment begins with a one-frame overlap, and the procedure repeats. This
+implementation ensures that segment lengths adapt to scene content: static scenes yield longer segments
+with fewer keyframes, while dynamic scenes with occlusions or shot changes yield shorter segments with
+more frequent keyframes, thereby balancing keyframe coding cost against reconstruction quality.
+4.4
+Sparse Trajectory Conditioning Implementation
+While the dense tracking field M provides complete motion information, transmitting all pixel trajectories
+is prohibitively expensive. We therefore introduce a budget-aware point selection strategy that identifies
+a sparse subset S ⊂ Ω of maximally informative tracks. We seek a subset S ⊂ Ω with |S| ≤ B that
+approximately minimizes the weighted reconstruction objective R(S) in equation 4. We adopt a budgetaware greedy selection that iteratively reduces R(S). To define the importance weights w(k) , we apply
+Holistically-Nested Edge Detection (HED) (Xie & Tu, 2015) to the segment’s first frame, yielding an edge
+map, which we refer to as the sketch of the frame:
+
+
+(k)
+(10)
+w(k) (p) = HED x1 (p), p ∈ Ω.
+Initialization. We partition the image into a coarse grid and select the pixel with maximum sketch strength
+in each cell, ensuring initial spatial coverage of the tracking set.
+RBF Kernel Interpolation. Given a current set S of selected points, we estimate the dense displacement
+c | S) using the RBF kernel in equation 3. Specifically, the interpolation weights are determined by
+field M(·
+8
+Published in Transactions on Machine Learning Research (September/2026)
+...
+Sketch of Frame 1
+Pixel
+Tracker
+M ⋅
+Kernel-based
+Motion
+Propagation
+⊖
+! ⋅
+M
+⨀
+r ⋅
+S
+Next iteration of point selection
+Figure 3: Budget-Aware Sparse Trajectory Selection. Given the current tracking set S (red dots),
+c | S) using the RBF kernel interpolation in equation 3. The
+the dense tracking field is estimated as M(·
+residual r(p), as defined in equation 11, quantifies the discrepancy between the dense tracking field M(·)
+and its reconstruction c
+M(· | S). Points with the largest sketch-weighted residuals (blue dots) are added to
+S, improving motion reconstruction in underrepresented or high-error regions. This procedure repeats until
+the point budget is reached or the reconstruction error converges.
+the Euclidean distance between pixels, so that nearby selected points have greater influence on the estimated
+motion field. Starting from the sketch-initialized grid S0 , we select the kernel bandwidth σ by minimizing
+the weighted reconstruction objective R(S0 ) in equation 4, and use this σ for subsequent refinement of S.
+Greedy Refinement. We refine S iteratively by adding points at which the current reconstruction exhibits
+the largest residual. At iteration m, we compute a residual map
+T
+k
+1 X
+c t (p | Sm ) 2 .
+r(p) =
+w(k) (p) Mt (p) − M
+2
+Tk t=1
+(11)
+We identify local maxima of r(·) over Ω, and add the top candidates to form Sm+1 . We then recompute
+c t (· | Sm+1 ) and iterate. The process terminates when the point budget is exhausted (|Sm | = B) or when
+M
+r(p) falls below a tolerance for all p ∈ Ω. Figure 3 illustrates this iterative refinement. Upon termination of
+the iterative refinement, the resulting sparse trajectory set P (k) , as defined in equation 2, provides reliable
+tracking, strong spatial coverage, and high informativeness under the fixed budget constraint.
+4.5
+Entropy Coding of Components
+We entropy-code the keyframes and sparse trajectory set to remove statistical redundancy. Keyframes
+(k)
+(k)
+x1 and xTk are compressed using HiFiC (Mentzer et al., 2020). For the sparse trajectory set P (k) , each
+selected point q ∈ S is represented by its initial location q together with temporal displacement differences
+∆ut (q) = ut (q) − ut−1 (q) for t = 2, . . . , Tk . The sequence {∆ut (q)} is then jointly entropy coded using a
+learned Huffman code derived from the empirical symbol distribution. The Huffman codebook is transmitted
+as part of the bitstream, and its overhead is included in the reported bitrate. Because motion deltas exhibit
+temporal correlation, this coding achieves significant compression. The initial points {q : q ∈ S} and the
+segment length Tk are transmitted as side information without additional entropy coding.
+5
+Evaluation
+5.1
+Experimental Setup and Evaluation Metrics
+We evaluate our approach on the UVG (Mercat et al., 2020) and MCL-JCV (Wang et al., 2016) datasets. We
+report perceptual quality using LPIPS (Zhang et al., 2018), FID (Heusel et al., 2017), KID (Bińkowski et al.,
+9
+Published in Transactions on Machine Learning Research (September/2026)
+UVG
+UVG
+UVG
+5.6
+0.04
+0.16
+5.4
+0.10
+30
+0.03
+NIQE ↓
+0.12
+KID ↓
+40
+0.14
+FID ↓
+LPIPS ↓
+UVG
+50
+0.18
+0.02
+5.0
+4.8
+20
+4.6
+0.01
+0.08
+4.4
+10
+0.02
+0.04
+0.06
+0.08
+0.10
+0.02
+0.04
+0.06
+0.08
+0.10
+0.02
+0.04
+0.06
+0.08
+0.10
+0.02
+BPP
+BPP
+MCL-JCV
+MCL-JCV
+MCL-JCV
+MCL-JCV
+70
+0.16
+60
+5.8
+50
+0.04
+NIQE ↓
+0.12
+0.03
+0.02
+4.6
+0.01
+0.08
+0.06
+0.07
+0.08
+0.09
+5.2
+4.8
+30
+0.05
+DCVC
+DCVC-TCM
+DCVC-HEM
+DCVC-DC
+DCVC-FM
+PLVC
+ActDiff-VC (Ours)
+5.4
+5.0
+40
+0.10
+0.10
+5.6
+KID ↓
+FID ↓
+0.14
+0.08
+6.0
+0.05
+0.04
+0.06
+BPP
+0.18
+0.03
+0.04
+BPP
+0.06
+LPIPS ↓
+DCVC
+DCVC-TCM
+DCVC-HEM
+DCVC-DC
+DCVC-FM
+PLVC
+ActDiff-VC (Ours)
+5.2
+0.03
+BPP
+0.04
+0.05
+0.06
+BPP
+0.07
+0.08
+0.09
+0.03
+0.04
+0.05
+0.06
+BPP
+0.07
+0.08
+0.09
+0.03
+0.04
+0.05
+0.06
+0.07
+0.08
+0.09
+BPP
+Figure 4: Quantitative comparison on the UVG and MCL-JCV datasets. We report LPIPS, FID, KID, and
+NIQE as a function of bits per pixel (BPP); lower values indicate better performance for all metrics.
+2018), and NIQE (Mittal et al., 2013), which are standard metrics for evaluating generative reconstruction.
+We focus our main evaluation on perceptual metrics, as our goal is to assess visual realism in the ultra-lowbitrate regime, where pixel-wise fidelity is less informative. For completeness, distortion-oriented metrics
+and full-reference temporal consistency metrics are reported in Appendices 15 and 16, respectively.
+Compared Methods. We compare our method against several learned video compression baselines, including DCVC (Li et al., 2021), DCVC-TCM (Sheng et al., 2023), DCVC-HEM (Li et al., 2022), DCVC-DC (Li
+et al., 2023), and DCVC-FM (Li et al., 2024b), as well as the GAN-based method PLVC (Yang et al.,
+2022).1 We evaluate these methods using their official codebases and pretrained weights on both datasets.
+ActDiff-VC and all methods included in the main comparison are evaluated at a resolution of 480 × 720. For
+completeness, we compare ActDiff-VC with the diffusion-based EVC-PDM baseline (Li et al., 2024a) separately in Appendix 11. EVC-PDM supports only 128 × 128 inputs, while ActDiff-VC operates at 480 × 720,
+so we exclude EVC-PDM from the resolution-matched main quantitative comparison. In qualitative comparisons, EVC-PDM outputs are resized to 480 × 720 for visualization only; the underlying codec configurations
+remain resolution-mismatched.
+5.2
+Experimental Results
+Quantitative Comparison.
+Figure 4 compares ActDiff-VC with existing methods on the UVG and MCL-JCV datasets in terms of LPIPS,
+FID, KID, and NIQE (lower is better for all metrics). We focus on perceptual metrics, as distortion metrics
+such as PSNR are less informative in the ultra-low-bitrate setting.
+ActDiff-VC shows its clearest advantage in NIQE and KID in the ultra-low-bitrate regime. In terms of
+NIQE, ActDiff-VC reaches 5.08 at 0.0164 BPP on UVG and 5.10 at 0.0276 BPP on MCL-JCV, whereas
+DCVC-FM requires approximately 0.0372 BPP and 0.0780 BPP, respectively, to achieve comparable NIQE
+values. This corresponds to bitrate reductions of 55.9% on UVG and 64.6% on MCL-JCV. A similar trend
+is observed for KID: at nearly identical low bit rates, ActDiff-VC achieves 0.0168 at 0.0164 BPP on UVG
+and 0.0236 at 0.0276 BPP on MCL-JCV, improving over DCVC-FM by 64.6% and 58.0%, respectively.
+FID also shows consistent gains in the ultra-low-rate regime. On UVG, ActDiff-VC obtains an FID of 31.94
+at 0.0164 BPP, improving over DCVC-FM by 37.7% at a similar bitrate, while on MCL-JCV it achieves an
+FID of 53.40 at 0.0276 BPP, improving by 22.8% at a comparable rate. These results indicate that ActDiffVC consistently improves distributional and no-reference perceptual metrics such as FID, KID, and NIQE
+at extremely low bitrates. For LPIPS, ActDiff-VC is not the best overall but remains competitive in the
+low-rate regime. On UVG, at 0.0460 BPP, ActDiff-VC achieves an LPIPS of 0.1328, outperforming DCVC
+(0.1674 at 0.0662 BPP) and DCVC-TCM (0.1475 at 0.0532 BPP), while remaining higher than DCVC-FM
+(0.0976 at 0.0584 BPP). A similar pattern is observed on MCL-JCV, where ActDiff-VC achieves an LPIPS
+1 We select these methods because their official codebases and pretrained weights are publicly available, enabling reproducible
+evaluation.
+10
+Published in Transactions on Machine Learning Research (September/2026)
+Original - Bosphorus
+(Bpp / LPIPS↓ / FID↓)
+ActDiff-VC (Ours)
+(0.0095 / 0.150 / 23.33)
+DCVC-FM
+(0.0098 / 0.198 / 49.27)
+EVC-PDM
+(0.015 / 0.365 /141.2)
+Original - VideoSRC18
+(Bpp / LPIPS↓ / FID↓)
+ActDiff-VC
+(0.0312 / 0.155 / 49.64)
+DCVC-TCM
+(0.0323 / 0.220 / 120.92)
+DCVC-HEM
+(0.0316 / 0.179 / 107.32)
+Figure 5: Qualitative comparison on representative sequences from UVG and MCL-JCV. We compare
+ActDiff-VC against competing methods at comparable, and in some cases higher, bit rates. The numbers
+below each reconstruction report per-video BPP, LPIPS, and FID (lower is better). Red boxes highlight
+challenging regions where competing methods exhibit stronger blur, artifacts, or structural degradation,
+while ActDiff-VC better preserves fine details, textures, and boundaries. EVC-PDM outputs are resized
+from their native 128 × 128 resolution to 480 × 720 for visualization.
+of 0.1516 at 0.0444 BPP, outperforming DCVC (0.1589 at 0.0719 BPP), although it remains behind DCVCFM. Compared with the GAN-based PLVC, which operates primarily at higher bit rates, ActDiff-VC extends
+perceptual compression to a substantially lower bitrate regime while maintaining similar trends in FID, KID,
+and NIQE. We additionally report distortion-oriented metrics and full-reference temporal metrics, including
+PSNR, MS-SSIM, T-LPIPS, and PVCS, in Appendices 15 and 16, respectively.
+Qualitative Results.
+Figure 5 shows qualitative comparisons on representative sequences from UVG and MCL-JCV. Across the
+examples, ActDiff-VC produces reconstructions with sharper local structure and fewer perceptual artifacts
+than competing methods, particularly in regions containing fine textures, boundaries, and small details.
+These examples are consistent with the quantitative results, showing that our method maintains perceptually
+realistic reconstruction even at very low bit rates. Additional qualitative examples are provided in Figure 14.
+Human Evaluation. We additionally conduct a human study with 147 participants to evaluate perceived
+reconstruction quality. At approximately 0.03 BPP, ActDiff-VC achieves a mean opinion score of 3.31,
+compared with 2.78 for the DCVC-FM baseline. In pairwise comparisons, ActDiff-VC is preferred over
+DCVC-FM in 62.59% of responses, compared with 19.73% for DCVC-FM, with 17.69% indicating no clear
+preference. Full study details and additional comparisons are provided in Appendix 17.
+Keyframe Selection Analysis. Figure 6 illustrates the effect of our content-adaptive keyframe selection
+on videoSRC20 from MCL-JCV, where a scene cut occurs between Frame 42 and Frame 43. ActDiff-VC
+correctly identifies this transition and inserts a new keyframe, yielding a faithful reconstruction of the new
+scene immediately after the cut. In contrast, PLVC uses a fixed keyframe interval and cannot adapt to
+the abrupt content change, causing the reconstructed frame after the cut to resemble the previous scene
+with visible artifacts and distortions. EVC-PDM can also respond to scene changes, but does so through
+diffusion-based forecasting at the encoder while showing lower visual quality in this example. This example
+shows that content-adaptive keyframe selection is effective for handling abrupt temporal discontinuities while
+preserving reconstruction quality. Additional examples are provided in Figure 15 and Figure 16.
+5.3
+Ablation Study
+Component Ablations.
+Table 1 reports ablations of three key components on UVG at a fixed bitrate: (i) keyframe policy (Fixed GOP
+vs. Adaptive GOP), (ii) trajectory selection strategy, and (iii) bidirectional conditioning. We report metric
+deltas relative to a baseline configuration (Adaptive GOP + content-aware (sketch-weighted) trajectory
+11
+Published in Transactions on Machine Learning Research (September/2026)
+VideoSRC20 - Frame 42 (Original)
+ActDiff-VC (Ours)
+PLVC
+EVC-PDM
+VideoSRC20 - Frame 43 (Original)
+ActDiff-VC (Ours)
+PLVC
+EVC-PDM
+Figure 6: Visualization of content-adaptive keyframe selection. We show a frame before a scene change
+and the first frame after the cut, together with reconstructions from ActDiff-VC, PLVC, and EVC-PDM.
+ActDiff-VC detects the transition and inserts a new keyframe, producing a high-quality reconstruction after
+the cut. In contrast, PLVC relies on a fixed keyframe interval and fails to adapt to the scene cut, so the
+reconstructed frame after the cut still resembles the previous scene and contains artifacts. EVC-PDM can
+adapt to scene changes via diffusion-based forecasting at the encoder, but shows lower visual quality in these
+examples. EVC-PDM outputs are resized from their native 128×128 resolution to 480×720 for visualization.
+Components
+Metrics (vs. baseline)
+Bidirectional cond.
+∆LPIPS ↓
+∆FID ↓
+Adaptive GOP (baseline block)
+Adaptive
+Content-aware (sketch-weighted)
+Adaptive
+Content-aware (sketch-weighted)
+Adaptive
+Uniform grid
+Adaptive
+High-mag flow
+Adaptive
+Content-aware (no sketch)
+✓
+✗
+✓
+✓
+✓
+0.0000
++0.0321
++0.0246
++0.0458
++0.0219
+0.0000
++1.3356
++5.6126
++12.4746
++1.4193
+Fixed GOP (comparison block)
+Fixed
+Content-aware (no sketch)
+Fixed
+Uniform grid
+Fixed
+High-mag flow
+Fixed
+Uniform grid
+✓
+✓
+✓
+✗
++0.1323
++0.1336
++0.1412
++0.1764
++24.7450
++37.9850
++41.2817
++59.4039
+Keyframe policy
+Point selection strategy
+Table 1: Ablations at fixed bitrate. ∆ > 0 indicates degradation vs. the baseline (Adaptive GOP + Contentaware (sketch-weighted) + bidirectional conditioning); lower is better. Best non-baseline ablation values
+within each GOP block are bold.
+selection + bidirectional conditioning), where ∆ > 0 indicates degradation and lower is better. For the
+Fixed GOP setting, the keyframe interval is set to the mean segment length produced by Adaptive GOP.
+Overall, Adaptive GOP and content-aware trajectory selection provide the largest gains, while bidirectional
+conditioning further improves reconstruction quality.
+Effect of bidirectional conditioning. Bidirectional conditioning consistently improves visual quality across
+all settings. Under a Fixed GOP with uniform sampling, adding bidirectional conditioning reduces ∆FID
+from +59.4039 to +37.9850 and ∆LPIPS from +0.1764 to +0.1336, indicating its importance for stabilizing
+generative reconstruction.
+Effect of keyframe policy. Replacing a Fixed GOP with Adaptive GOP substantially reduces degradation
+in both LPIPS and FID under matched settings. For example, under a uniform grid with bidirectional
+conditioning, ∆FID falls from +37.9850 (Fixed GOP) to +5.6126 (Adaptive GOP), while ∆LPIPS decreases
+from +0.1336 to +0.0246.
+Effect of trajectory selection. Trajectory selection plays a key role in determining reconstruction quality.
+High-magnitude flow sampling over-focuses on large displacements while undersampling low-motion regions
+that are important for preserving texture, leading to worse LPIPS and FID compared to uniform sampling
+(e.g., ∆FID +12.4746 vs. +5.6126 under Adaptive GOP with bidirectional conditioning). Uniform sampling is more balanced but content-agnostic, as it does not account for motion reconstruction difficulty.
+In contrast, the proposed content-aware (sketch-weighted) selection achieves the best performance by pri12
+Published in Transactions on Machine Learning Research (September/2026)
+LPIPS
+0.95
+13.683
+13.683
+13.683
+13.732
+0.90
+bpp (×100)
+7.977
+8.070
+8.467
+9.820
+0.12
+0.10
+FID
+0.112
+0.112
+0.112
+0.112
+0.190
+0.183
+0.167
+0.143
+2.793
+4.152
+0.80
+perc
+0.85
+2.233
+1.710
+1.899
+2.459
+3.884
+0.50
+0.60
+0.70
+0.80
+0.06
+0.249
+0.234
+0.210
+0.181
+0.254
+0.239
+0.215
+0.186
+0.50
+0.60
+0.70
+0.80
+occ
+43.978
+44.094
+43.848
+0.20
+62.851
+60.353
+54.754
+49.928
+81.934
+75.199
+68.595
+62.367
+0.16
+82.377
+76.680
+70.157
+64.255
+0.50
+0.60
+0.70
+0.80
+occ
+70
+65
+60
+55
+0.14
+0.12
+80
+75
+0.18
+0.04
+0.02
+43.964
+0.22
+0.08
+2.044
+0.24
+50
+45
+occ
+Figure 7: Sensitivity of Adaptive GOP thresholds. Heatmaps over occupancy threshold θocc (x-axis) and
+perceptual threshold θperc (y-axis), showing bitrate (bpp, ×100), LPIPS, and FID (lower is better). Increasing either threshold improves perceptual quality at the cost of higher bitrate.
+oritizing informative regions. Removing sketch weighting leads to small but consistent degradation (∆FID
++1.4193, ∆LPIPS +0.0219), showing that incorporating structural priors improves robustness. Without this
+weighting, displacement noise in low-texture regions propagates more easily and introduces visible artifacts.
+Hyperparameter sensitivity for Adaptive GOP.
+Figure 7 shows the sensitivity of the Adaptive GOP procedure to its two termination thresholds, θocc and
+θperc , on high-motion MCL-JCV sequences with scene cuts. We evaluate θperc in a high-value range, as
+lower values rarely trigger keyframe insertion and therefore have limited impact on GOP segmentation.
+Both thresholds control the trade-off between bitrate and perceptual quality: increasing either threshold
+results in more conservative segment termination, yielding shorter GOPs (more frequent keyframes), higher
+bitrate, and improved reconstruction quality. Overall, θocc has a stronger and more consistent effect on the
+rate–quality trade-off. Increasing θocc leads to steady increases in bitrate and corresponding improvements
+in LPIPS and FID across all values of θperc . In contrast, θperc has a more pronounced effect only in the
+high-threshold regime, where increasing it from 0.85 to 0.90 or higher causes a sharp increase in bitrate
+together with significant gains in perceptual quality. Given our target operating regime of ultra-low bitrate
+compression (bpp ≤ 0.05), we select θperc = 0.85 and θocc = 0.8 in all experiments. This setting achieves
+0.0415 bpp while maintaining strong perceptual quality, providing a favorable trade-off between compression
+efficiency and reconstruction fidelity.
+Additional Studies. We further report results on encoding and decoding time, the diffusion-step tradeoff, the sparse trajectory budget, and robustness to tracking inaccuracies in Appendices 9, 10, 12, and 13,
+respectively.
+6
+Conclusion
+In this work, we introduced ActDiff-VC, a diffusion-based video compression framework designed for the
+ultra-low-bitrate regime. Our approach combines a pre-trained conditional diffusion decoder with an active
+sampling strategy that selects sparse and informative conditioning signals for reconstruction. This design
+enables strong perceptual reconstruction quality at extreme compression rates. Experiments on standard
+benchmarks demonstrate the effectiveness of ActDiff-VC in this challenging setting, and ablation studies
+confirm the importance of its main components. Overall, our results suggest that diffusion-based generative
+models offer a promising direction for perceptual video compression in the ultra-low-bitrate regime.
+Acknowledgements
+This work was supported by the NSF TILOS AI Institute, the UCSD Centers for Machine intelligence,
+computing, and security (MICS), the computational resources from Amazon Web Services (AWS) and the
+ONR Award N00014-22-1-2363.
+13
+Published in Transactions on Machine Learning Research (September/2026)
+References
+David Alexandre, Hsueh-Ming Hang, and Wen-Hsiao Peng. Hierarchical B-Frame video coding using twolayer CANF without motion coding. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), pp. 10249–10258, 2023.
+Mikołaj Bińkowski, Danica J. Sutherland, Michael Arbel, and Arthur Gretton. Demystifying MMD GANs.
+In International Conference on Learning Representations, 2018.
+Yochai Blau and Tomer Michaeli. Rethinking lossy compression: The rate-distortion-perception tradeoff.
+In Proceedings of the 36th International Conference on Machine Learning, volume 97 of Proceedings of
+Machine Learning Research, pp. 675–685. PMLR, 2019.
+Marlene Careil, Matthew J. Muckley, Jakob Verbeek, and Stéphane Lathuilière. Towards image compression
+with perfect realism at ultra-low bitrates. In International Conference on Learning Representations, 2024.
+Bolin Chen, Shanzhi Yin, Hanwei Zhu, Lingyu Zhu, Zihan Zhang, Jie Chen, Ru-Ling Liao, Shiqi Wang,
+and Yan Ye. Compressing human body video with interactive semantics: A generative approach. arXiv
+preprint arXiv:2505.16152, 2025.
+Pengli Du, Ying Liu, Nam Ling, Yongxiong Ren, and Lingzhi Liu. Generative video compression with a
+transformer-based discriminator. In 2022 Picture Coding Symposium (PCS), pp. 349–353. IEEE, 2022.
+Pengli Du, Ying Liu, and Nam Ling. CGVC-T: Contextual generative video compression with transformers.
+IEEE Journal on Emerging and Selected Topics in Circuits and Systems, 14(2):209–223, 2024. doi: 10.
+1109/JETCAS.2024.3387301.
+Xingtong Ge, Jixiang Luo, Xinjie Zhang, Tongda Xu, Guo Lu, Dailan He, Jing Geng, Yan Wang, Jun
+Zhang, and Hongwei Qin. Task-aware encoder control for deep video compression. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp. 26036–26045, 2024.
+Zekai Gu, Rui Yan, Jiahao Lu, Peng Li, Zhiyang Dou, Chenyang Si, Zhen Dong, Qifeng Liu, Cheng Lin,
+Ziwei Liu, Wenping Wang, and Yuan Liu. Diffusion as shader: 3D-aware video diffusion for versatile video
+generation control. In SIGGRAPH Conference Papers ’25, pp. 62:1–62:12, 2025. doi: 10.1145/3721238.
+3730607.
+Adam W. Harley, Yang You, Xinglong Sun, Yang Zheng, Nikhil Raghuraman, Yunqi Gu, Sheldon Liang,
+Wen-Hsuan Chu, Achal Dave, Suya You, Rares Ambrus, Katerina Fragkiadaki, and Leonidas Guibas. AllTracker: Efficient dense point tracking at high resolution. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision (ICCV), pp. 5253–5262, 2025. doi: 10.1109/ICCV51701.2025.00499.
+Martin Heusel, Hubert Ramsauer, Thomas Unterthiner, Bernhard Nessler, and Sepp Hochreiter. GANs
+trained by a two time-scale update rule converge to a local Nash equilibrium. In Advances in Neural
+Information Processing Systems, volume 30, pp. 6626–6637, 2017.
+Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising diffusion probabilistic models. In Advances in Neural
+Information Processing Systems, volume 33, pp. 6840–6851, 2020.
+Jonathan Ho, William Chan, Chitwan Saharia, Jay Whang, Ruiqi Gao, Alexey Gritsenko, Diederik P.
+Kingma, Ben Poole, Mohammad Norouzi, David J. Fleet, and Tim Salimans. Imagen Video: High definition video generation with diffusion models. arXiv preprint arXiv:2210.02303, 2022.
+Goluck Konuko, Giuseppe Valenzise, and Stéphane Lathuilière. Ultra-low bitrate video conferencing using
+deep image animation. In 2021 IEEE International Conference on Acoustics, Speech and Signal Processing
+(ICASSP), pp. 4210–4214. IEEE, 2021. doi: 10.1109/ICASSP39728.2021.9414731.
+Eric Lei, Yiğit Berkay Uslu, Hamed Hassani, and Shirin Saeedi Bidokhti. Text + sketch: Image compression at ultra low rates. In ICML 2023 Workshop on Neural Compression: From Information Theory to
+Applications, 2023.
+14
+Published in Transactions on Machine Learning Research (September/2026)
+Bohan Li, Yiming Liu, Xueyan Niu, Bo Bai, Wei Han, Lei Deng, and Deniz Gündüz. Extreme video
+compression with prediction using pre-trained diffusion models. In 2024 16th International Conference
+on Wireless Communications and Signal Processing (WCSP), pp. 1449–1455. IEEE, 2024a. doi: 10.1109/
+WCSP62071.2024.10827256.
+Jiahao Li, Bin Li, and Yan Lu. Deep contextual video compression. In Advances in Neural Information
+Processing Systems, volume 34, pp. 18114–18125, 2021.
+Jiahao Li, Bin Li, and Yan Lu. Hybrid spatial-temporal entropy modelling for neural video compression. In
+Proceedings of the 30th ACM International Conference on Multimedia, pp. 1503–1511, 2022.
+Jiahao Li, Bin Li, and Yan Lu. Neural video compression with diverse contexts. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp. 22616–22626, 2023.
+Jiahao Li, Bin Li, and Yan Lu. Neural video compression with feature modulation. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp. 26099–26108, 2024b.
+Meiqin Liu, Chenming Xu, Yukai Gu, Chao Yao, and Yao Zhao. I2 VC: A unified framework for intra- &
+inter-frame video compression, 2024.
+Guo Lu, Wanli Ouyang, Dong Xu, Xiaoyun Zhang, Chunlei Cai, and Zhiyong Gao. DVC: An end-to-end
+deep video compression framework. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), pp. 11006–11015, 2019. doi: 10.1109/CVPR.2019.01126.
+Fabian Mentzer, George D. Toderici, Michael Tschannen, and Eirikur Agustsson. High-fidelity generative
+image compression. In Advances in Neural Information Processing Systems, volume 33, pp. 11913–11924,
+2020.
+Alexandre Mercat, Marko Viitanen, and Jarno Vanne. UVG dataset: 50/120fps 4K sequences for video codec
+analysis and development. In Proceedings of the 11th ACM Multimedia Systems Conference, pp. 297–302,
+2020. doi: 10.1145/3339825.3394937.
+Anish Mittal, Rajiv Soundararajan, and Alan C. Bovik. Making a “completely blind” image quality analyzer.
+IEEE Signal Processing Letters, 20(3):209–212, 2013. doi: 10.1109/LSP.2012.2227726.
+Michal Neoral, Jonáš Šerých, and Jiří Matas. MFT: Long-term tracking of every pixel. In Proceedings of the
+IEEE/CVF Winter Conference on Applications of Computer Vision (WACV), pp. 6837–6847, 2024.
+Alexander Quinn Nichol, Prafulla Dhariwal, Aditya Ramesh, Pranav Shyam, Pamela Mishkin, Bob McGrew,
+Ilya Sutskever, and Mark Chen. GLIDE: Towards photorealistic image generation and editing with textguided diffusion models. In Proceedings of the 39th International Conference on Machine Learning, volume
+162 of Proceedings of Machine Learning Research, pp. 16784–16804. PMLR, 2022.
+Maxime Oquab, Pierre Stock, Daniel Haziza, Tao Xu, Peizhao Zhang, Onur Celebi, Yana Hasson, Patrick
+Labatut, Bobo Bose-Kolanu, Thibault Peyronel, and Camille Couprie. Low bandwidth video-chat compression using deep generative models. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR) Workshops, pp. 2388–2397, 2021.
+Zhihong Pan, Xin Zhou, and Hao Tian. Extreme generative image compression by learning text embedding
+from diffusion models. arXiv preprint arXiv:2211.07793, 2022.
+Lucas Relic, Roberto Azevedo, Markus Gross, and Christopher Schroers. Lossy image compression with
+foundation diffusion models. In European Conference on Computer Vision, pp. 303–319. Springer, 2024.
+Xihua Sheng, Jiahao Li, Bin Li, Li Li, Dong Liu, and Yan Lu. Temporal context mining for learned video
+compression. IEEE Transactions on Multimedia, 25:7311–7322, 2023. doi: 10.1109/TMM.2022.3220421.
+Gary J. Sullivan, Jens-Rainer Ohm, Woo-Jin Han, and Thomas Wiegand. Overview of the high efficiency
+video coding (HEVC) standard. IEEE Transactions on Circuits and Systems for Video Technology, 22
+(12):1649–1668, 2012. doi: 10.1109/TCSVT.2012.2221191.
+15
+Published in Transactions on Machine Learning Research (September/2026)
+Ryan Szeto and Jason J. Corso. The DEVIL is in the details: A diagnostic evaluation benchmark for video
+inpainting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pp. 21054–21063, 2022.
+Vijay Veerabadran, Reza Pourreza, Amirhossein Habibian, and Taco S. Cohen. Adversarial distortion for
+learned video compression. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR) Workshops, pp. 168–169, 2020. doi: 10.1109/CVPRW50498.2020.00092.
+Rui Wan, Qi Zheng, and Yibo Fan. M3-CVC: Controllable video compression with multimodal generative
+models. In 2025 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP),
+pp. 1–5. IEEE, 2025. doi: 10.1109/ICASSP49660.2025.10888491.
+Haiqiang Wang, Weihao Gan, Sudeng Hu, Joe Yuchieh Lin, Lina Jin, Longguang Song, Ping Wang, Ioannis
+Katsavounidis, Anne Aaron, and C.-C. Jay Kuo. MCL-JCV: A JND-based H.264/AVC video quality
+assessment dataset. In 2016 IEEE International Conference on Image Processing (ICIP), pp. 1509–1513.
+IEEE, 2016.
+Thomas Wiegand, Gary J. Sullivan, Gisle Bjøntegaard, and Ajay Luthra. Overview of the H.264/AVC video
+coding standard. IEEE Transactions on Circuits and Systems for Video Technology, 13(7):560–576, 2003.
+doi: 10.1109/TCSVT.2003.815165.
+Chao-Yuan Wu, Nayan Singhal, and Philipp Krähenbühl. Video compression through image interpolation.
+In Proceedings of the European Conference on Computer Vision (ECCV), pp. 416–431, 2018.
+Saining Xie and Zhuowen Tu. Holistically-nested edge detection. In Proceedings of the IEEE International
+Conference on Computer Vision (ICCV), pp. 1395–1403, 2015.
+Chenming Xu, Meiqin Liu, Chao Yao, Weisi Lin, and Yao Zhao. IBVC: Interpolation-driven B-frame video
+compression. Pattern Recognition, 153:110465, 2024. doi: 10.1016/j.patcog.2024.110465.
+Jiayu Yang, Yongqi Zhai, Wei Jiang, Chunhui Yang, Feng Gao, and Ronggang Wang. Adaptive prediction
+structure for learned video compression. ACM Transactions on Multimedia Computing, Communications,
+and Applications, 21(2):1–23, 2024. doi: 10.1145/3703914.
+Ren Yang, Radu Timofte, and Luc Van Gool. Perceptual learned video compression with recurrent conditional GAN. In Proceedings of the Thirty-First International Joint Conference on Artificial Intelligence
+(IJCAI), pp. 1537–1544, 2022. doi: 10.24963/ijcai.2022/214.
+Ruihan Yang and Stephan Mandt. Lossy image compression with conditional diffusion models. In Advances
+in Neural Information Processing Systems, volume 36, pp. 64971–64995, 2023.
+Lvmin Zhang, Anyi Rao, and Maneesh Agrawala. Adding conditional control to text-to-image diffusion
+models. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), pp.
+3836–3847, 2023.
+Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of deep features as a perceptual metric. In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition (CVPR), pp. 586–595, 2018. doi: 10.1109/CVPR.2018.00068.
+16
+Published in Transactions on Machine Learning Research (September/2026)
+7
+Appendix Overview
+This appendix provides additional discussion and analysis to complement the main paper. Section 8 discusses
+the main limitations of our method and directions for improving efficiency and robustness. Section 9 analyzes
+the encoding and decoding latency of the proposed method in comparison with competing codecs, highlighting
+the favorable encoder runtime of ActDiff-VC and the additional decoding cost introduced by diffusion-based
+reconstruction. Section 10 studies the quality–efficiency trade-off associated with the number of reverse
+diffusion steps and motivates the 20-step configuration used in our experiments. Section 11 provides a
+separate comparison with EVC-PDM under a common evaluation setting. Section 12 studies the effect of the
+sparse trajectory budget on compression performance, showing how the number of transmitted trajectories
+influences bitrate and perceptual quality. Section 13 evaluates robustness to tracking inaccuracies through
+temporal subsampling, motion blur, and persistent drift in the sparse trajectory conditioning. Section 14
+describes the motion encoder construction used in our implementation: the transmitted sparse trajectory
+set is deterministically converted into a synthetic video representation, which is then encoded into the
+latent motion-conditioning input used by the diffusion decoder. Section 15 reports PSNR and MS-SSIM
+as complementary distortion-oriented measures of reconstruction fidelity. Section 16 evaluates referencealigned temporal fidelity using T-LPIPS and PVCS and discusses their interpretation for generative video
+reconstruction. Section 17 presents absolute visual-quality ratings and pairwise preference results from
+our human study, providing a complementary subjective evaluation of perceptual quality and temporal
+consistency. Finally, Section 18 provides additional qualitative comparisons that extend the visual results in
+the main paper, together with further examples of the proposed content-adaptive keyframe selection under
+abrupt scene transitions.
+8
+Limitations and Future Work
+A primary limitation of ActDiff-VC is the computational cost of diffusion-based decoding. Compared with
+conventional feed-forward learned codecs, iterative denoising introduces substantially higher decoding latency and currently limits real-time deployment. Our diffusion-step analysis in Appendix 10 shows that
+reducing the number of sampling steps can substantially decrease decoding time while preserving competitive perceptual quality. Nevertheless, even with accelerated sampling, the decoder remains slower than
+conventional learned codecs. This computational trade-off is most relevant in the ultra-low-bitrate regime,
+where distortion-optimized codecs frequently produce overly smooth or blurry reconstructions, and additional
+decoder computation can instead be used to recover perceptually realistic content from highly compact conditioning signals.
+A second limitation is weaker alignment with the exact temporal evolution of the source video. As shown by
+the full-reference temporal metrics in Appendix 16, ActDiff-VC obtains higher T-LPIPS and PVCS values
+than predictive learned codecs. This is expected in part because intermediate frames are generated from
+compressed boundary keyframes and a sparse trajectory set rather than reconstructed from explicitly coded
+per-frame motion and residual information. Consequently, local motion, texture evolution, or appearance
+changes may differ from the corresponding source frames. These results indicate reduced reference-aligned
+temporal fidelity, although they do not necessarily imply an equivalent reduction in perceived temporal
+coherence. Indeed, the human evaluation in Appendix 17, in which participants were asked to consider
+temporal consistency and motion quality in addition to overall visual quality, shows a clear preference for
+ActDiff-VC over the resolution-matched DCVC-FM baseline.
+Future work should therefore improve both decoding efficiency and temporal fidelity. Accelerated diffusion
+techniques, including model distillation, consistency models, and more efficient sampling schedules, provide
+promising directions for reducing inference time. Stronger temporal conditioning, explicit cross-segment
+consistency mechanisms, and joint optimization of tracking, trajectory compression, and generative reconstruction may further improve alignment with the source dynamics while increasing robustness to tracking
+errors.
+The current computational profile of ActDiff-VC is particularly well suited to applications in which videos are
+encoded once using a lightweight encoder and reconstructed with access to greater decoder-side computation.
+17
+Published in Transactions on Machine Learning Research (September/2026)
+Relevant settings include cloud-assisted video reconstruction, archival storage, offline content distribution,
+and one-to-many delivery systems. In these scenarios, the very low transmission rate and improved perceptual quality can justify allocating additional computation to the decoder. Extending these advantages to
+interactive and real-time applications through accelerated diffusion decoding remains an important direction
+for future work.
+9
+Encoding and Decoding Time Analysis
+Time per frame (ms)
+DCVC
+DCVC-TCM
+DCVC-HEM
+DCVC-DC
+DCVC-FM
+PLVC
+ActDiff-VC (Ours)
+Encoding ↓
+Decoding ↓
+1244
+7137
+353
+129
+360
+81
+347
+126
+140
+116
+40539
+141659
+109
+2311
+Table 2: Comparison of encoding and decoding time across competing methods. We report the
+average encoding and decoding time per frame for all compared methods. For encoding time, we measure
+the runtime required to compress the input using each method and write the resulting bitstream to disk.
+For decoding time, we measure the runtime required to read the saved bitstream and reconstruct the frame.
+Lower is better for both metrics. ActDiff-VC achieves the fastest encoding time among all compared methods
+in this setting. Its decoding time is higher than conventional learned codecs, reflecting the cost of diffusionbased generation, but it remains substantially faster than the GAN-based PLVC.
+Table 2 compares the average per-frame encoding and decoding latency of ActDiff-VC against competing
+methods.2 All experiments were conducted on a single NVIDIA A100 GPU. For ActDiff-VC, encoding time
+includes dense point tracking, content-adaptive keyframe selection, HED-based sketch extraction, budgetaware sparse trajectory selection, keyframe compression, and entropy coding of the transmitted side information. To measure encoding time, we run each codec to compress the input frames and save the produced
+bitstream. To measure decoding time, we read the saved bitstream and time the reconstruction process
+at the decoder. The results show that ActDiff-VC has the fastest encoder among all compared methods,
+requiring only 109 ms per frame. This suggests that our compression pipeline is efficient on the encoder side
+despite relying on content-adaptive segmentation and sparse trajectory extraction.
+On the decoder side, ActDiff-VC requires 2311 ms per frame. Although this is slower than the more efficient
+feed-forward learned codecs, it is faster than the original DCVC and substantially faster than the GANbased PLVC. The higher decoding latency is expected because ActDiff-VC reconstructs frames through an
+iterative conditional diffusion process rather than direct feed-forward decoding. Overall, these results show
+that ActDiff-VC provides a highly efficient encoder, while concentrating most of its computational cost at
+the decoder. This trade-off motivates the use of ActDiff-VC in ultra-low-bitrate applications where achieving
+perceptually realistic video from severely limited transmitted information is more important than minimizing
+decoding time.
+10
+Diffusion Step Trade-Off
+The iterative reverse diffusion process is the main source of decoding latency in ActDiff-VC. The pretrained
+diffusion backbone uses 50 sampling steps as its default inference setting. We therefore evaluate the decoder
+using 50, 40, 30, 20, and 10 diffusion steps to study the trade-off between reconstruction quality and inference efficiency. For a controlled comparison, all configurations use the same encoded bitstreams, keyframe
+locations, sparse trajectory conditioning, sampler, and inference parameters; therefore, changing the number
+of steps does not affect the bitrate or encoder-side computation. We report results at fixed operating points
+of 0.0186 BPP on UVG and 0.038491 BPP on MCL-JCV.
+2 We do not include EVC-PDM in Table 2 because its released implementation only supports compression at a resolution
+of 128 × 128, whereas all other methods are evaluated at 480 × 720. Since this operating resolution is substantially smaller,
+its runtime is not directly comparable. For reference, EVC-PDM reports an average encoding time of 2308 ms per frame and
+decoding time of 1353 ms per frame.
+18
+Published in Transactions on Machine Learning Research (September/2026)
+UVG (0.0186 BPP)
+LPIPS ↓
+FID ↓
+KID ↓
+NIQE ↓
+LPIPS ↓
+FID ↓
+KID ↓
+NIQE ↓
+Decoding Time
+(ms/frame) ↓
+0.1708
+0.1716
+0.1717
+0.1694
+0.1844
+29.51
+29.88
+30.20
+30.25
+36.19
+0.0144
+0.0144
+0.0158
+0.0161
+0.0192
+5.423
+5.422
+5.437
+5.442
+5.511
+0.1782
+0.1779
+0.1746
+0.1704
+0.1764
+50.25
+50.29
+49.08
+48.54
+52.63
+0.0198
+0.0203
+0.0199
+0.0207
+0.0241
+5.144
+5.150
+5.173
+5.151
+5.162
+5528
+4523
+3356
+2311
+1205
+Diffusion Steps
+50
+40
+30
+20
+10
+MCL-JCV (0.038491 BPP)
+Table 3: Quality–efficiency trade-off for different numbers of diffusion steps. Results are reported
+at fixed operating points of 0.0186 BPP on UVG and 0.038491 BPP on MCL-JCV. Reducing the sampling
+process from 50 to 20 steps lowers decoding time from 5528 to 2311 ms/frame while preserving strong
+perceptual quality across both datasets. The 20-step configuration achieves the best LPIPS on UVG and
+MCL-JCV and the best FID on MCL-JCV, while remaining close to the best KID and NIQE results. We
+therefore adopt 20 diffusion steps as the default configuration. Lower is better for all metrics.
+Table 3 shows that decoding time scales approximately with the number of diffusion steps, while the quality
+differences between 20 and 50 steps remain relatively small. In particular, using 20 steps reduces the decoding
+time by 58.2% compared with the original 50-step setting.
+Importantly, this speed improvement does not result in a consistent reduction in reconstruction quality. On
+UVG, the 20-step configuration achieves the best LPIPS of 0.1694, while its FID, KID, and NIQE remain
+close to those obtained with longer sampling schedules. On MCL-JCV, it achieves both the best LPIPS and
+the best FID, with values of 0.1704 and 48.54, respectively. Its KID and NIQE also remain close to the best
+values produced by the 50-step setting.
+By contrast, reducing the sampling process to 10 steps is too aggressive. Although it lowers the decoding time
+to 1205 ms/frame, it causes a noticeable increase in FID and KID on both datasets and also degrades LPIPS
+on UVG. Overall, 20 diffusion steps provide the most favorable balance between perceptual reconstruction
+quality and practical decoding time. We therefore use 20 steps as the default inference setting in ActDiff-VC.
+11
+Separate Comparison with EVC-PDM
+The released implementation of EVC-PDM (Li et al., 2024a) supports video compression only at a spatial
+resolution of 128 × 128, whereas ActDiff-VC operates at 480 × 720, as dictated by its model architecture.
+We therefore exclude EVC-PDM from the resolution-matched comparison in the main paper and provide a
+separate evaluation here.
+To establish a common evaluation resolution, we resize the videos reconstructed by ActDiff-VC and their
+corresponding source videos to 128 × 128 before computing the metrics. EVC-PDM is evaluated using
+its native 128 × 128 reconstructions and the same 128 × 128 source videos. The same resizing procedure
+is used for all frames and operating points. We report LPIPS, FID, KID, and PSNR, thereby covering
+both perceptual and distortion-oriented reconstruction quality. We do not report NIQE or MS-SSIM in
+this comparison because their standard implementations require greater spatial support and do not provide
+reliable estimates at a resolution of 128 × 128. This common metric-computation resolution does not make
+the underlying codec configurations resolution-matched.
+Figure 8 shows that under this common metric-computation protocol, ActDiff-VC achieves better values
+than EVC-PDM across all four reported metrics on both datasets. On UVG, at nearby operating points of
+0.0317 BPP for ActDiff-VC and 0.0332 BPP for EVC-PDM, ActDiff-VC reduces LPIPS by 52.4%, FID by
+84.7%, and KID by 91.4%, while improving PSNR by 8.7 dB. A similar trend is observed on MCL-JCV: at
+0.0360 BPP, compared with EVC-PDM at 0.0383 BPP, ActDiff-VC reduces LPIPS by 44.8%, FID by 75.0%,
+and KID by 90.6%, while improving PSNR by 8.1 dB. Thus, even when the reconstructions are assessed
+at the common 128 × 128 resolution, ActDiff-VC achieves better perceptual, distributional, and pixel-level
+metric values at comparable bitrates.
+19
+Published in Transactions on Machine Learning Research (September/2026)
+EVC-PDM
+UVG
+UVG
+0.20
+0.35
+ActDiff-VC (Ours)
+UVG
+UVG
+26
+150
+0.10
+24
+PSNR ↑
+FID ↓
+0.15
+0.25
+KID ↓
+LPIPS ↓
+0.30
+100
+0.20
+0.05
+20
+18
+50
+0.15
+22
+16
+0.04
+0.06
+0.08
+0.10
+0.02
+0.04
+BPP
+0.06
+0.08
+0.10
+0.02
+BPP
+MCL-JCV
+MCL-JCV
+0.30
+FID ↓
+KID ↓
+0.15
+0.25
+0.06
+0.08
+0.10
+MCL-JCV
+0.10
+24
+150
+22
+125
+100
+0.08
+0.10
+50
+0.04
+BPP
+0.06
+0.08
+16
+0.04
+BPP
+20
+18
+75
+0.05
+0.08
+0.06
+MCL-JCV
+175
+0.15
+0.06
+0.04
+BPP
+0.20
+0.04
+0.02
+BPP
+200
+0.20
+LPIPS ↓
+0.04
+PSNR ↑
+0.02
+0.06
+0.08
+BPP
+0.04
+0.06
+0.08
+BPP
+Figure 8: Separate comparison with EVC-PDM on UVG and MCL-JCV at a common evaluation
+resolution of 128 × 128. We report LPIPS, KID, FID, and PSNR as functions of bits per pixel (BPP).
+Lower values are better for LPIPS, KID, and FID, while higher values are better for PSNR. ActDiff-VC
+reconstructions and their corresponding source videos are resized to 128 × 128 before metric computation,
+while EVC-PDM is evaluated at the native resolution supported by its released implementation. Under this
+common metric-computation protocol, ActDiff-VC achieves better values than EVC-PDM across all reported
+metrics and operating points.
+12
+Impact of the Sparse Trajectory Budget
+Point budget
+bpp ↓
+LPIPS ↓
+FID ↓
+40
+80
+120
+160
+200
+250
+300
+350
+500
+0.017949
+0.018640
+0.019312
+0.019977
+0.020633
+0.021441
+0.022233
+0.023020
+0.025023
+0.1666
+0.1598
+0.1523
+0.1481
+0.1463
+0.1463
+0.1460
+0.1455
+0.1451
+37.780
+36.939
+35.288
+34.616
+34.174
+33.720
+33.409
+33.275
+32.596
+Table 4: Effect of the point budget on the compression–quality trade-off. We vary the maximum
+number of transmitted point trajectories per segment while keeping all other components fixed. We report
+bitrate (bpp) together with perceptual quality metrics (LPIPS and FID) aggregated over the evaluation
+set. Increasing the point budget mildly increases bitrate while generally improving perceptual quality, with
+diminishing returns beyond moderate budgets. Lower is better for bpp, LPIPS, and FID.
+Our method represents motion side information using a sparse trajectory set P (k) in equation 2, obtained
+by subsampling the dense tracking field M. A key design parameter is the point budget B, which limits
+the maximum number of transmitted trajectories per GOP segment. To study its effect on compression
+performance, we sweep B on the UVG dataset while keeping all other components fixed.
+Table 4 shows the resulting bitrate together with LPIPS and FID. As the point budget increases, bitrate
+rises gradually because the majority of the total bitrate is consumed by keyframe encoding, so increasing
+the number of transmitted trajectories contributes only a relatively small additional cost. At the same time,
+20
+Published in Transactions on Machine Learning Research (September/2026)
+Subsampling factor
+LPIPS ↓
+FID ↓
+KID ↓
+NIQE ↓
+1×
+2×
+4×
+0.1708
+0.1811
+0.1881
+29.51
+31.03
+33.45
+0.0144
+0.0153
+0.0161
+5.423
+5.541
+5.658
+Table 5: Analysis of tracking robustness under temporal subsampling. Increasing the subsampling
+factor exposes AllTracker to larger apparent inter-frame motion, yet ActDiff-VC exhibits only moderate and
+gradual degradation across all metrics, demonstrating robustness even at 4× subsampling. Lower is better
+for all metrics.
+reconstruction quality generally improves, with the largest gains appearing at smaller budgets and progressively diminishing returns as B increases. This behavior is consistent with the strong spatial correlation
+of dense trajectories discussed in Section 3, which allows a relatively small subset of tracked points to provide informative motion conditioning for reconstruction. Based on this trade-off, we use a point budget of
+B = 300 in the main experiments.
+13
+Robustness to Tracking Failures
+ActDiff-VC uses a dense tracking field M to determine content-adaptive segment boundaries and select the
+sparse trajectory set P (k) used to condition the diffusion decoder. We therefore study how inaccuracies in
+this motion representation propagate through the compression pipeline and affect reconstruction quality.
+We consider three controlled perturbations: temporal subsampling of the video provided to AllTracker,
+motion blur applied only to the tracker input, and temporally correlated drift added directly to the selected
+sparse trajectories. The first two experiments evaluate failures originating during dense tracking and therefore
+allow the perturbation to affect both content-adaptive keyframe selection and budget-aware sparse trajectory
+selection. The third experiment keeps these upstream decisions unchanged and isolates the sensitivity of the
+conditional diffusion decoder to inaccurate sparse trajectory conditioning.
+All remaining components and inference settings are kept fixed. The original, unperturbed videos are used
+for keyframe compression, reconstruction targets, and metric evaluation. Results are averaged over the seven
+UVG sequences using LPIPS, FID, KID, and NIQE, where lower values indicate better performance.
+13.1
+Temporal Subsampling of the Tracker Input
+The goal of this experiment is to evaluate tracking robustness when consecutive observations contain larger
+apparent motion. For a temporal subsampling factor s ∈ {1, 2, 4}, AllTracker receives
+X (s) = {x1 , x1+s , x1+2s , . . .} ,
+(12)
+where s = 1 is the unmodified baseline. Increasing s reduces the effective frame rate available to the tracker
+and increases the displacement between successive tracker observations, providing a controlled approximation
+of more challenging fast-motion conditions.
+AllTracker estimates the dense tracking field from the temporally subsampled sequence. The resulting
+trajectories are then temporally interpolated to the original sequence length before being used for contentadaptive keyframe selection and budget-aware sparse trajectory selection. The resulting sparse trajectory set
+is subsequently compressed and passed to the conditional diffusion decoder, which reconstructs the original
+full-frame-rate video.
+As shown in Table 5, all metrics degrade gradually as the temporal sampling rate available to AllTracker is
+reduced. Relative to the 1× baseline, 2× subsampling increases LPIPS by only 6.0%, FID by 5.2%, KID
+by 6.3%, and NIQE by 2.2%. Even under the more challenging 4× setting, where the tracker observes
+21
+Published in Transactions on Machine Learning Research (September/2026)
+Blur kernel size
+LPIPS ↓
+FID ↓
+KID ↓
+NIQE ↓
+1
+11
+21
+0.1708
+0.1720
+0.1755
+29.51
+29.85
+29.98
+0.0144
+0.0148
+0.0153
+5.423
+5.483
+5.532
+Table 6: Analysis of tracking robustness under motion blur. Increasing the blur kernel size degrades
+the visual evidence available to AllTracker, yet ActDiff-VC exhibits only minor and gradual changes across
+all metrics, demonstrating strong robustness even under the larger kernel size of 21. Lower is better for all
+metrics.
+approximately four times larger inter-frame displacements, the corresponding increases remain limited to
+10.1%, 13.4%, 11.8%, and 4.3%, respectively.
+These results demonstrate that ActDiff-VC is robust to substantially faster apparent motion in the tracker
+input. Even when AllTracker operates on a sequence subsampled by factors of 2× and 4×, the degradation
+remains limited across all perceptual metrics. In particular, LPIPS and NIQE change only modestly, indicating that the reconstructed videos preserve both perceptual similarity and visual naturalness despite the
+reduced temporal sampling available for estimating the dense tracking field. FID and KID also degrade gradually, with no abrupt loss of reconstruction quality at the strongest 4× setting. Overall, the controlled trend
+across all metrics shows that ActDiff-VC can tolerate meaningful inaccuracies caused by large inter-frame
+displacement.
+13.2
+Motion Blur in the Tracker Input
+This experiment evaluates whether AllTracker remains reliable when object boundaries and local textures
+are degraded by motion blur. Motion blur is applied exclusively to the video observed by the tracker, while
+the original sharp video remains unchanged for keyframe compression and evaluation. The tracker input is
+xtrk
+= Bb (xt ),
+t
+b ∈ {1, 11, 21},
+(13)
+where Bb denotes the motion-blur operator with kernel size b, and b = 1 corresponds to the unmodified
+baseline. AllTracker estimates the dense tracking field from the blurred frames, after which the standard
+content-adaptive keyframe selection, budget-aware sparse trajectory selection, trajectory compression, and
+diffusion decoding procedures are applied.
+Table 6 shows a small but monotonic reduction in reconstruction quality as the blur strength increases. With
+kernel size 11, LPIPS, FID, KID, and NIQE increase by 0.7%, 1.2%, 2.8%, and 1.1%, respectively. Even with
+the stronger kernel size of 21, the corresponding increases remain limited to 2.8%, 1.6%, 6.3%, and 2.0%.
+These results indicate that the estimated dense tracking field remains sufficiently informative under moderate and strong blur at the evaluated levels. Although blur removes fine spatial details and weakens object
+boundaries, its effect is considerably smaller than that of temporal subsampling. This suggests that AllTracker can recover useful long-range correspondences from lower-frequency structural information and that
+the boundary keyframes and diffusion prior can compensate for modest local tracking inaccuracies.
+13.3
+Persistent Drift in Sparse Trajectory Conditioning
+The previous experiments perturb the visual observations used to estimate the dense tracking field. In
+contrast, this experiment directly evaluates the sensitivity of the conditional diffusion decoder to inaccurate
+sparse trajectory conditioning. The dense tracking field and selected point set are first computed using the
+original video. Temporally correlated drift is then added to every trajectory in the selected sparse trajectory
+set P (k) .
+For each selected point q, the drift is generated as
+22
+Published in Transactions on Machine Learning Research (September/2026)
+Innovation standard deviation σ
+LPIPS ↓
+FID ↓
+KID ↓
+NIQE ↓
+0
+1
+2
+4
+0.1708
+0.1754
+0.1805
+0.1846
+29.51
+30.13
+30.42
+30.87
+0.0144
+0.0151
+0.0153
+0.0164
+5.423
+5.496
+5.506
+5.515
+Table 7: Analysis of robustness to persistent sparse-trajectory drift. Even when temporally correlated localization errors are accumulated with ρ = 0.9, ActDiff-VC exhibits only gradual changes across the
+evaluated metrics, demonstrating substantial tolerance to inaccurate sparse trajectory conditioning even at
+the challenging setting of σ = 4 pixels. Lower is better for all metrics.
+d1 (q) = 0,
+(14)
+dt (q) = ρ dt−1 (q) + ϵt (q),
+2
+
+ϵt (q) ∼ N 0, σ I2 ,
+(15)
+where ρ = 0.9 controls temporal persistence and σ ∈ {0, 1, 2, 4} pixels controls the innovation magnitude,
+with σ = 0 corresponding to the unperturbed baseline. The perturbed trajectory is
+e t (q) = ut (q) + dt (q).
+u
+(16)
+Because ρ is close to one, the perturbation persists across neighboring frames and produces smooth trajectory
+wandering rather than independent frame-wise jitter. This behavior approximates accumulated localization
+error in long-range point tracking. The perturbed sparse trajectory set is compressed and passed to the
+decoder.
+Table 7 demonstrates that ActDiff-VC remains robust even when substantial temporally persistent errors are
+introduced directly into the sparse trajectory set. At σ = 1, LPIPS, FID, KID, and NIQE increase by only
+2.7%, 2.1%, 4.9%, and 1.3%, respectively. The degradation remains limited at σ = 2, with corresponding
+increases of 5.7%, 3.1%, 6.3%, and 1.5%. The strongest setting, σ = 4, constitutes a particularly challenging
+perturbation. Each trajectory receives Gaussian innovations with a standard deviation of 4 pixels per
+coordinate, and the high temporal correlation ρ = 0.9 causes these errors to persist and accumulate across
+frames. Despite this substantial trajectory drift, LPIPS and FID increase by only 8.1% and 4.6%, while
+NIQE changes by merely 1.7%. KID shows the largest relative increase of 13.9%, but its absolute change
+remains small, from 0.0144 to 0.0164.
+The consistently small change in NIQE indicates that the reconstructed frames remain visually natural even
+when the transmitted motion condition deviates considerably from the original trajectories. The moderate
+changes in LPIPS, FID, and KID further show that the conditional diffusion decoder preserves perceptual
+similarity and distribution-level quality under substantial spatial inaccuracies. More importantly, reconstruction quality degrades smoothly with increasing σ, with no abrupt failure at any evaluated level. These
+results demonstrate that the generative prior and boundary-frame conditioning provide substantial tolerance
+to persistent errors in the sparse trajectory set.
+14
+Motion Encoder Construction
+This section describes how the sparse trajectory set P is converted into the motion-conditioning latent used by
+the diffusion decoder. In principle, sparse trajectories could be encoded in different ways, for example through
+a learned trajectory encoder or another structured motion representation. In our implementation, since the
+decoder is built on DaS, we use a synthetic video representation that matches the DaS conditioning format.
+The transmitted side information consists of the sparse trajectory set P, and the decoder deterministically
+converts P into this synthetic video representation.
+23
+Published in Transactions on Machine Learning Research (September/2026)
+Figure 9: Visualization of the synthetic video representation used for motion conditioning. Given the sparse
+trajectory set P, we generate a black-background RGB video in which each selected point is rendered as
+a small colored rectangle following its tracked trajectory. This synthetic video is then encoded by the
+pretrained VAE encoder E to obtain the tracking latent ztrk used by the diffusion decoder. The first row
+shows the generated synthetic video representation, while the second row shows the corresponding original
+video frames on which tracking is performed.
+Let the sparse trajectory set for a segment of length T be
+P=
+
+qi , {ut (qi )}Tt=1
+ N
+i=1
+,
+where qi ∈ Ω denotes the initial location of the i-th selected point in the first frame, and ut (qi ) ∈ R2 denotes
+its displacement at time t. From this set, we construct a synthetic RGB video
+VP ∈ [0, 1]T ×H×W ×3 ,
+initialized with a black background. For each tracked point qi and each time step t, we compute its tracked
+position
+pi,t = qi + ut (qi ),
+and render a small filled rectangle centered at pi,t on frame t. Each point is assigned a fixed color ci
+determined by its first-frame location, so that the same trajectory can be visually followed across time.
+The synthetic video representation is then mapped to the latent space by the pretrained VAE encoder E.
+Accordingly, the tracking latent used by the diffusion model is
+ztrk = E(VP ) ∈ RTlat ×h×w×16 .
+Equivalently, the trajectory-conditioning pathway denoted by Etrk can be viewed as the composition
+Etrk (P) = E(VP ) ,
+where the conversion from P to VP is deterministic. This notation emphasizes that Etrk is not an additional
+learned motion VAE used for compression; rather, it denotes the decoder-side procedure that transforms
+sparse trajectories into the latent motion-conditioning input required by the diffusion model.
+Importantly, VP is only an internal decoder representation. The bitstream contains the sparse trajectory set
+P, not the synthetic video. Figure 9 illustrates this construction: the first row shows the synthetic video
+representation generated from the sparse trajectories, while the second row shows the corresponding original
+video frames on which tracking is performed.
+15
+Additional Distortion Metrics
+We report PSNR and MS-SSIM to provide a distortion-oriented view of reconstruction fidelity. These
+metrics measure pixel-level and multi-scale structural similarity to the source video and are widely used in
+24
+Published in Transactions on Machine Learning Research (September/2026)
+UVG
+UVG
+MCL-JCV
+35.0
+30.0
+27.5
+PSNR ↑
+MS-SSIM ↑
+0.95
+32.5
+0.90
+DCVC
+DCVC-TCM
+DCVC-HEM
+DCVC-DC
+DCVC-FM
+PLVC
+ActDiff-VC (Ours)
+0.95
+MS-SSIM ↑
+35.0
+PSNR ↑
+MCL-JCV
+37.5
+37.5
+32.5
+30.0
+27.5
+0.90
+0.85
+0.85
+25.0
+25.0
+22.5
+0.02
+0.04
+0.06
+0.08
+0.10
+0.02
+0.04
+BPP
+0.06
+0.08
+0.10
+0.03
+0.04
+BPP
+0.05
+0.06
+0.07
+0.08
+0.09
+0.03
+0.04
+BPP
+0.05
+0.06
+0.07
+0.08
+0.09
+BPP
+Figure 10: Distortion-oriented evaluation on UVG and MCL-JCV. We report PSNR and MSSSIM as functions of bits per pixel (BPP). Higher values indicate better pixel-level or multi-scale structural
+fidelity to the source video. Distortion-optimized learned codecs achieve the strongest PSNR and MSSSIM performance, while ActDiff-VC prioritizes perceptual realism at ultra-low bitrates through generative
+reconstruction from sparse conditioning.
+UVG
+UVG
+0.016
+0.012
+0.06
+0.04
+0.010
+DCVC
+DCVC-TCM
+DCVC-HEM
+DCVC-DC
+DCVC-FM
+PLVC
+ActDiff-VC (Ours)
+0.10
+T-LPIPS ↓
+0.014
+MCL-JCV
+0.12
+0.025
+0.08
+PVCS ↓
+T-LPIPS ↓
+MCL-JCV
+0.10
+0.020
+PVCS ↓
+0.018
+0.015
+0.08
+0.06
+0.04
+0.010
+0.02
+0.008
+0.02
+0.04
+0.06
+BPP
+0.08
+0.10
+0.02
+0.02
+0.04
+0.06
+0.08
+0.10
+BPP
+0.04
+0.06
+BPP
+0.08
+0.04
+0.06
+0.08
+BPP
+Figure 11: Temporal evaluation on UVG and MCL-JCV. We report T-LPIPS and PVCS as functions
+of bits per pixel (BPP). T-LPIPS compares the magnitude of frame-to-frame perceptual changes in the
+reconstructed and reference videos, while PVCS compares aligned clips using spatiotemporal I3D features.
+Lower values indicate closer agreement with the temporal evolution of the reference video.
+conventional video compression evaluation. Figure 10 shows that distortion-optimized learned codecs achieve
+the highest PSNR and MS-SSIM on UVG and MCL-JCV, as expected from their predictive reconstruction
+designs and distortion-oriented training objectives. The GAN-based PLVC also achieves higher fidelity scores
+than ActDiff-VC, although its performance generally remains below that of the distortion-optimized codecs.
+However, in the ultra-low-bitrate regime, PSNR and MS-SSIM do not fully capture perceived visual quality.
+At extremely low rates, distortion-optimized codecs may obtain higher PSNR and MS-SSIM while producing
+overly smooth reconstructions, whereas perceived quality can depend more strongly on realism, texture, and
+natural-image statistics. Therefore, PSNR and MS-SSIM should be interpreted as complementary fidelity
+measures rather than the primary indicators of visual quality in our target regime.
+The lower PSNR and MS-SSIM values of ActDiff-VC reflect the expected perception–distortion trade-off
+of generative compression. ActDiff-VC prioritizes perceptual realism and distributional quality, as reflected
+by FID, KID, and NIQE, while sacrificing pixel-level and structural fidelity relative to distortion-optimized
+codecs.
+16
+Additional Temporal Metrics
+We additionally evaluate temporal reconstruction quality using Temporal LPIPS (T-LPIPS) and Perceptual
+Video Clip Similarity (PVCS). We compute T-LPIPS using the LPIPS distance (Zhang et al., 2018) with an
+AlexNet backbone. Specifically, T-LPIPS measures the absolute difference between the perceptual change of
+consecutive reference frames and the corresponding change in the reconstructed video, averaged over all frame
+transitions. Lower values indicate closer agreement with the frame-to-frame perceptual changes of the source
+video. PVCS (Szeto & Corso, 2022) measures the distance between corresponding reference and reconstructed
+video clips using features extracted by a pretrained Inception-I3D network. We evaluate aligned, overlapping
+10-frame clips using a temporal stride of one and average the normalized feature distances across multiple
+I3D layers and all clips. Lower PVCS values indicate closer agreement with the reference appearance and
+motion.
+25
+Published in Transactions on Machine Learning Research (September/2026)
+Figure 11 shows that ActDiff-VC obtains higher T-LPIPS and PVCS values than the competing codecs on
+both datasets. These results indicate that the temporal evolution generated by ActDiff-VC is less closely
+aligned with the exact frame-to-frame changes and spatiotemporal features of the reference video.
+This gap partly reflects a limitation of generative reconstruction from sparse conditioning. ActDiff-VC
+reconstructs intermediate frames from compressed boundary keyframes and sparse point trajectories rather
+than directly coding the motion and residual information of every frame. Consequently, the generated
+motion, texture evolution, or local appearance changes may differ from the exact source sequence.
+At the same time, T-LPIPS and PVCS are full-reference metrics and do not measure temporal coherence
+independently of reference fidelity. They penalize both undesirable temporal artifacts and visually coherent
+temporal changes that do not exactly reproduce the reference dynamics. Therefore, the results indicate
+weaker reference-aligned temporal fidelity, but do not by themselves imply a proportional reduction in
+perceived temporal coherence or overall viewing quality.
+The human evaluation in Appendix 17 provides a complementary subjective assessment. In the pairwise
+experiment, participants were instructed to consider sharpness, naturalness, visible artifacts, temporal consistency, motion quality, and overall viewing pleasantness. ActDiff-VC was preferred over DCVC-FM in
+62.59% of the comparisons, whereas DCVC-FM was preferred in 19.73%. Although this experiment does not
+isolate temporal consistency from the other aspects of video quality, it suggests that the gap in full-reference
+temporal metrics does not directly determine overall viewer preference.
+Nevertheless, the T-LPIPS and PVCS results identify improved alignment with the source temporal dynamics
+as an important direction for future work, particularly through stronger temporal conditioning and improved
+consistency across independently reconstructed segments.
+17
+Human Evaluation
+We conducted a human study to complement the objective perceptual metrics with subjective assessments
+of reconstructed video quality. A total of 147 participants completed two experiments: an absolute visualquality rating task and a pairwise preference task.
+Five source sequences were randomly selected from the UVG and MCL-JCV datasets. Each sequence was
+reconstructed using ActDiff-VC, DCVC-FM, and EVC-PDM at operating points of approximately 0.03 BPP,
+resulting in 15 reconstructed videos. ActDiff-VC and DCVC-FM operate at 480 × 720, whereas EVC-PDM
+operates natively at 128 × 128. For the human study, EVC-PDM reconstructions were resized to 480 × 720
+for display, so all videos were presented at the same display resolution. However, the comparison with EVCPDM is not resolution-matched. Each video retained the frame rate and duration of its corresponding source
+sequence. The original uncompressed videos were not shown; therefore, the study evaluated the perceived
+quality of the reconstructions rather than their explicit fidelity to a visible reference.
+The study was completed using a laptop or desktop computer at normal screen brightness. Participants could
+replay each video before submitting their response, and the same participants completed both experiments.
+No practice trials were included.
+Only the reconstructed video content was presented. Method names, filenames, URLs, and other identifying
+information were removed. For each participant, the ordering of the source sequences and reconstruction
+methods was randomized independently. In the pairwise experiment, the assignment of methods to Video A
+and Video B, as well as the order of the comparisons, was also randomized. Duplicate submissions were
+prevented. Incomplete or implausibly rapid submissions were designated for exclusion, although no responses
+met these exclusion criteria.
+17.1
+Absolute Visual-Quality Rating
+In the first experiment, each participant independently rated all 15 anonymized reconstructed videos. Thus,
+every participant provided five ratings for each method, yielding 147 independent participant responses per
+video and 735 ratings per method. In total, 2,205 ratings were collected in this experiment.
+26
+Published in Transactions on Machine Learning Research (September/2026)
+Figure 12: Interface used in the absolute visual-quality experiment. Participants viewed an anonymized
+reconstructed video and rated its perceived quality on a five-point scale from Bad (1) to Excellent (5).
+Method
+MOS ± SD
+ActDiff-VC (Ours) 3.31 ± 1.03
+DCVC-FM
+2.78 ± 0.94
+EVC-PDM
+1.51 ± 0.74
+Bad (1) Poor (2) Fair (3) Good (4) Excellent (5)
+0.95%
+14.69%
+61.90%
+26.12%
+13.88%
+27.89%
+27.76%
+50.07%
+7.89%
+31.56%
+21.36%
+2.31%
+13.61%
+0.00%
+0.00%
+Table 8: Absolute visual-quality ratings at approximately 0.03 BPP. MOS is reported as mean ± standard
+deviation. Each method received 735 ratings from 147 participants over five videos. Percentages may
+not sum to exactly 100% because of rounding. The EVC-PDM results correspond to its native 128 × 128
+reconstructions resized to 480 × 720 for display.
+Participants evaluated each video according to their overall visual impression using the following five-point
+scale:
+1 = Bad,
+2 = Poor,
+3 = Fair,
+4 = Good,
+5 = Excellent.
+Participants were informed that there were no correct or incorrect responses and were asked to base their
+scores only on the perceived visual quality of the presented video. Figure 12 illustrates the rating interface.
+Table 8 reports the mean opinion score (MOS), its standard deviation, and the distribution of responses
+across the five rating categories. ActDiff-VC achieved the highest perceived visual quality, obtaining a MOS
+of 3.31, compared with 2.78 for DCVC-FM and 1.51 for EVC-PDM. This corresponds to improvements
+of 0.53 and 1.80 MOS points, respectively. Moreover, 45.17% of the ActDiff-VC ratings were Good or
+Excellent, compared with 21.36% for DCVC-FM and only 2.31% for EVC-PDM. Conversely, only 0.95%
+of the ratings assigned to ActDiff-VC were Bad, whereas the corresponding proportions were 14.69% and
+61.90% for DCVC-FM and EVC-PDM.
+The average score of ActDiff-VC lies between Fair and Good rather than near the upper limit of the scale.
+This is consistent with the challenging ultra-low-bitrate operating point: at approximately 0.03 BPP, the
+available bit budget severely restricts the amount of visual information that can be preserved, and some loss
+of detail or visible reconstruction artifacts is therefore expected. Nevertheless, both the higher MOS and the
+27
+Published in Transactions on Machine Learning Research (September/2026)
+Figure 13: Interface used in the pairwise preference experiment. Participants viewed two anonymized reconstructions of the same source video and selected Video A, Video B, or No clear preference based on their
+overall visual impression.
+Preference outcome (%)
+Baseline
+ActDiff-VC preferred
+Baseline preferred
+No clear preference
+DCVC-FM
+EVC-PDM
+62.59%
+97.28%
+19.73%
+0.00%
+17.69%
+2.72%
+Table 9: Pairwise preference results at approximately 0.03 BPP. Each entry reports the percentage of
+responses assigned to the corresponding preference outcome. Each comparison contains responses from 147
+participants over five source videos. The EVC-PDM results correspond to its native 128×128 reconstructions
+resized to 480 × 720 for display.
+shift toward the Good and Excellent categories show that ActDiff-VC provides better perceived quality than
+the resolution-matched DCVC-FM baseline under the same severe rate constraint. The EVC-PDM results
+provide an additional cross-resolution subjective comparison.
+17.2
+Pairwise Preference Evaluation
+The second experiment evaluated relative visual preference. Participants were shown two anonymized reconstructions of the same source sequence, presented as Video A and Video B, and selected the reconstruction
+with the better overall viewing quality. They were instructed to consider sharpness, naturalness, visible artifacts, temporal consistency, motion quality, and overall viewing pleasantness. A No clear preference option
+was available when the difference was not sufficiently noticeable.
+For each of the five source sequences, ActDiff-VC was compared separately with DCVC-FM and EVC-PDM.
+Consequently, each participant completed 10 pairwise comparisons: five against DCVC-FM and five against
+EVC-PDM. This produced 1,470 pairwise responses in total, with 735 responses for each baseline comparison.
+Figure 13 shows the pairwise evaluation interface.
+Table 9 reports the percentage of responses assigned to each preference outcome. ActDiff-VC was preferred
+over DCVC-FM in 62.59% of the comparisons, whereas DCVC-FM was preferred in only 19.73%; the remaining 17.69% indicated no clear preference. This corresponds to a preference margin of 42.86 percentage
+points in favor of ActDiff-VC.
+28
+Published in Transactions on Machine Learning Research (September/2026)
+Original - ShakeNDry
+(Bpp / LPIPS↓ / FID↓)
+ActDiff-VC
+(0.0358 / 0.138 / 42.86)
+DCVC-DC
+(0.0358 / 0.164 / 65.95)
+DCVC-HEM
+(0.0364 / 0.171 / 67.44)
+Original - VideoSRC07
+(Bpp / LPIPS↓ / FID↓)
+ActDiff-VC
+(0.030 / 0.206 / 32.93)
+DCVC-HEM
+(0.034 / 0.235 / 70.78)
+DCVC-DC
+(0.030 / 0.288 / 61.86)
+Original - VideoSRC17
+(Bpp / LPIPS↓ / FID↓)
+ActDiff-VC
+(0.0247 / 0.226 / 28.55)
+DCVC-FM
+(0.0248 / 0.264 / 71.60)
+EVC-PDM
+(0.0272 / 0.386 / 191.92)
+Figure 14: Additional qualitative comparison examples extending Figure 5 on representative sequences
+from the UVG dataset (ShakeNDry) and the MCL-JCV dataset (videoSRC07 and videoSRC17). For each
+example, we compare ActDiff-VC with competing methods at similar or higher bit rates. The numbers below
+each reconstruction report per-video BPP, LPIPS, and FID (lower is better). Red boxes highlight regions
+where competing methods exhibit stronger artifacts, blur, or structural degradation, while ActDiff-VC better
+preserves visually plausible textures and object boundaries. EVC-PDM outputs are resized from their native
+128 × 128 resolution to 480 × 720 for visualization.
+In the comparison with EVC-PDM, participants preferred ActDiff-VC in 97.28% of the comparisons, while
+no response favored EVC-PDM and only 2.72% indicated no clear preference. This result is consistent with
+the absolute quality ratings, but should be interpreted as a cross-resolution comparison because EVC-PDM
+operates at a lower native resolution.
+18
+Additional Visualization
+Figure 14 provides additional qualitative comparisons that extend the results in Figure 5. Across these
+additional examples, the same trends are consistently observed: ActDiff-VC produces cleaner reconstructions
+with fewer artifacts and better preservation of fine structural details than competing methods. EVC-PDM
+visualizations are resized to 480 × 720 for display, as the method operates natively at 128 × 128.
+Additional examples of our content-adaptive keyframe selection, extending Figure 6, are shown in Figure 15
+and Figure 16. These examples further confirm the robustness of our method under abrupt scene transitions.
+29
+Published in Transactions on Machine Learning Research (September/2026)
+VideoSRC25 - Frame 16 (Original)
+ActDiff-VC (Ours)
+PLVC
+EVC-PDM
+VideoSRC25 - Frame 17 (Original)
+ActDiff-VC (Ours)
+PLVC
+EVC-PDM
+VideoSRC26 - Frame 60 (Original)
+ActDiff-VC (Ours)
+PLVC
+EVC-PDM
+VideoSRC26 - Frame 61 (Original)
+ActDiff-VC (Ours)
+PLVC
+EVC-PDM
+Figure 15: Additional visualizations of the proposed content-adaptive keyframe selection mechanism on
+MCL-JCV sequences videoSRC25 and videoSRC26. Similar to the examples in Figure 6, ActDiff-VC successfully adapts to abrupt scene changes by selecting new keyframes when needed, leading to higher-quality
+reconstructions after scene cuts. In contrast, PLVC often fails under its fixed keyframe schedule, while
+EVC-PDM adapts via diffusion-based forecasting at the encoder but shows weaker visual quality in these
+examples. EVC-PDM outputs are resized from their native 128×128 resolution to 480×720 for visualization.
+30
+Published in Transactions on Machine Learning Research (September/2026)
+VideoSRC27 - Frame 38 (Original)
+ActDiff-VC (Ours)
+PLVC
+EVC-PDM
+VideoSRC27 - Frame 39 (Original)
+ActDiff-VC (Ours)
+PLVC
+EVC-PDM
+VideoSRC29 - Frame 69 (Original
+ActDiff-VC (Ours)
+PLVC
+EVC-PDM
+VideoSRC29 - Frame 70 (Original)
+ActDiff-VC (Ours)
+PLVC
+EVC-PDM
+Figure 16: Additional visualizations of the proposed content-adaptive keyframe selection mechanism on
+MCL-JCV sequences videoSRC27 and videoSRC29. Similar to the examples in Figure 6, ActDiff-VC successfully adapts to abrupt scene changes by selecting new keyframes when needed, leading to higher-quality
+reconstructions after scene cuts. In contrast, PLVC often fails under its fixed keyframe schedule, while
+EVC-PDM adapts via diffusion-based forecasting at the encoder but shows weaker visual quality in these
+examples. EVC-PDM outputs are resized from their native 128×128 resolution to 480×720 for visualization.
+31

@@ -1,0 +1,155 @@
+OpenMMLab Computer Vision Foundation. Contribute to open-mmlab/mmcv development by creating an account on GitHub.
+
+[Feature] Optimize deterministic hard_voxelize with hash + stable sort by njh1205 · Pull Request #3349 · open-mmlab/mmcv · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+njh1205
+commented
+Nov 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Motivation
+hard_voxelize(deterministic=True) is the default voxelization in
+MMDetection3D-style pipelines. Its deterministic CUDA path is dominated by two
+legacy bottlenecks in voxelization_cuda_kernel.cuh:
+Kernel
+Launch
+Complexity
+Issue
+point_to_voxelidx_kernel
+parallel over points
+O(N^2) worst
+every thread re-scans all previous points to count same-voxel predecessors (for (int i = 0; i < index; ++i))
+determin_voxel_num
+<<<1, 1>>>
+O(N), fully serial
+the whole per-voxel numbering loop runs on a single thread
+Measured on an NVIDIA L4 (200k points, max_points=35, max_voxels=20000):
+73.85 ms per call, which makes voxelization a dominant preprocessing cost.
+Modification
+Replaces those two kernels with a hash + stable-sort pipeline, orchestrated
+inside HardVoxelizeForwardCUDAKernelLauncher with ATen ops, so the Python API
+and the pybind registration stay untouched:
+voxel_index_kernel: per-point 1-D voxel id lin = (z * grid_y + y) * grid_x + x
+(the same float32 arithmetic as dynamic_voxelize_kernel); out-of-range -> -1.
+stable argsort by lin: equal ids become adjacent segments and keep their
+original relative order, so each group head is the first point of that voxel in
+input order -- exactly what the legacy first-occurrence numbering relies on.
+group_meta_lead_kernel: group_start[G + 1] (sentinel group_start[G] = N)
+plus each group leader's original row id.
+voxels are ranked by leader order (second stable sort + index_copy_), then one
+scatter_kernel writes features / coors / counts, deriving the in-group slot and
+the group size on the fly (no materialized rank arrays).
+The legacy launcher is kept verbatim as a static V1 function and is used whenever
+NDim != 3 or points is not float32.
+File
+Change
+mmcv/ops/csrc/common/cuda/voxelization_cuda_kernel.cuh
++3 kernels (hash / group meta / scatter); legacy kernels untouched
+mmcv/ops/csrc/pytorch/cuda/voxelization_cuda.cu
+new launcher (optimized path + V1 fallback); legacy launcher preserved verbatim
+tests/test_ops/test_voxelization_v2.py
+byte-identical regression against the official fixed data + randomized checks against dynamic voxelization
+Complexity: O(N^2) back-scan + a <<<1, 1>>> serial pass -> 3 kernel launches with
+sort-based grouping (O(N log N) comparison bound; PyTorch's CUDA sort is radix/merge,
+~O(N) for the int32 key).
+BC-breaking (Optional)
+None for supported inputs.
+Output on the optimized path is byte-identical. Verified on an L4 by hashing
+every returned tensor for the official test_voxel.npy input and for a 200k-point
+random input: the patched and the unpatched build produce the same sha256
+(d0b8c54c97cef568... and 8c9e83f2a8766cf8...).
+Scope is CUDA + NDim == 3 + float32. NDim != 3, other dtypes,
+deterministic=False, dynamic_voxelize and CPU/NPU/MLU/MUSA keep the exact
+legacy behavior. Non-float32 CUDA input still raises what it raised before
+(expected scalar type Float but found Double, not implemented for 'Half'),
+which the fallback test pins down.
+One behavior difference, strictly a fix: with num_points == 0 the legacy path
+launched a kernel with 0 blocks and raised
+RuntimeError: CUDA error: invalid configuration argument; the new launcher
+returns 0 voxels. Covered by test_voxelization_v2_empty_and_single.
+Requires PyTorch >= 1.9 for the stable argsort overload used in the launcher.
+Use cases (Optional)
+Voxelization-heavy 3D detection preprocessing. NVIDIA L4, torch 2.4.1+cu118,
+CUDA 11.8, voxel_size=[0.2, 0.2, 8.0], range [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0],
+max_points=35, max_voxels=20000, mean of 20 calls after 3 warmups:
+Input
+Before
+After
+Speedup
+Output hash
+200,000 points
+73.854 ms
+0.390 ms
+189x
+identical
+800 points (official test_voxel.npy)
+1.512 ms
+1.453 ms
+1.04x
+identical
+The small-input case is launch/allocation bound and therefore unchanged: no
+regression, and the O(N^2) term only dominates for large point clouds.
+Checklist
+Before PR:
+I have read and followed the workflow indicated in the CONTRIBUTING.md to create this PR.
+Pre-commit or linting tools indicated in CONTRIBUTING.md are used to fix the potential lint issues. (flake8 7.1.1 / isort 5.11.5 / yapf 0.32.0 / codespell 2.2.1 clean; the clang-format hook is disabled upstream.)
+Bug fixes are covered by unit tests, the case that causes the bug should be added in the unit tests.
+New functionalities are covered by complete unit tests. If not, please add more unit test to ensure the correctness. (tests/test_ops/test_voxelization_v2.py, 5 cases)
+The documentation has been modified accordingly, including docstring or example tutorials.
+After PR:
+If the modification has potential influence on downstream or other related projects, this PR should be tested with some of those projects, like MMDet or MMCls.
+CLA has been signed and all committers have signed the CLA in this PR.
+Local verification: pytest tests/test_ops/test_voxelization.py tests/test_ops/test_voxelization_v2.py
+-> 9 passed, 3 skipped (MLU/NPU/MUSA hardware absent).
+[Feature] Optimize deterministic hard_voxelize with hash + stable sort
+…
+adca979
+```
+Replace the O(N^2) back-scan in point_to_voxelidx_kernel and the
+single-threaded determin_voxel_num (<<<1, 1>>>) with a hash + stable-sort
+pipeline (voxel_index / group_meta_lead / scatter) orchestrated inside the
+CUDA launcher via ATen ops, so the Python API is unchanged.
+
+Output stays byte-identical: stable sorting keeps the original relative
+order inside each voxel, which preserves the legacy first-occurrence voxel
+numbering. The legacy launcher is kept verbatim as a static V1 fallback and
+is used whenever NDim != 3 or points are not float32.
+
+Only the deterministic CUDA path changes; nondeterministic hard_voxelize,
+dynamic_voxelize and CPU/NPU/MLU/MUSA backends are untouched.
+
+Adds tests/test_ops/test_voxelization_v2.py (byte-identical check against
+tests/data/for_3d_ops/test_voxel.npy plus randomized checks).
+```
+CLAassistant
+commented
+Nov 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+All committers have signed the CLA.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

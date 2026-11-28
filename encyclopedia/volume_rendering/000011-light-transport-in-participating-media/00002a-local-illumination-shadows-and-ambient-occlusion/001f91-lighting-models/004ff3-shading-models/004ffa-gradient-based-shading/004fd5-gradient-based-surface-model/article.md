@@ -1,0 +1,106 @@
+# Gradient-based Surface Model
+
+Also called: Gradient Shading, Gradient-based surface reflection shading
+
+## Overview
+The Gradient-based Surface Model is a local illumination technique for discrete volume rendering (DVR) that simulates surface reflection and depth cues by estimating a pseudo-normal from the local volume gradient [S1, S2, unofficial]. It is distinct from global shading methods because it reflects local geometric details rather than global occlusion, making it particularly effective for visualizing structured data like CT scans, though it can introduce an overly metallic appearance in noisy data such as ultrasound [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset (scalar field), a directional light vector $\mathbf{l}$, and a transfer function mapping scalar values to color and opacity.
+*   **Output:** A 2D image with shaded voxels.
+
+**Data Structures:**
+*   **Volume Grid:** A 3D array of scalar values $V(x,y,z)$.
+*   **Gradient Vector:** A 3D vector $\nabla V$ computed at each voxel or sample point.
+*   **Pseudo-Normal:** A normalized vector $\mathbf{n}$ derived from $\nabla V$.
+
+**Method Steps:**
+1.  **Gradient Computation:** Compute the local gradient vector $\nabla V$ at the current sample point. The gradient can be computed using either the density (scalar value) or the opacity (transmittance) field [S2, unofficial].
+    *   *Note:* Opacity gradients are preferred in medical imaging to minimize contributions from transparent tissues [S2, unofficial].
+2.  **Normal Estimation:** Normalize the gradient to obtain the pseudo-normal $\mathbf{n}$:
+    $$ \mathbf{n} = \frac{\nabla V}{\|\nabla V\|} $$
+    [S1, S2, unofficial]
+3.  **Lighting Calculation:** Calculate the emission coefficient (or diffuse reflection term) using the pseudo-normal $\mathbf{n}$ and the light direction $\mathbf{l}$. The emission coefficient is chosen similar to the standard Lambertian or Phong model, incorporating $\mathbf{n}$ to simulate light reflection [S1, unofficial].
+    *   *Formula:* While the exact equation number (90) is not provided in the text, the core mechanism is:
+        $$ I_{diffuse} \propto \max(0, \mathbf{n} \cdot \mathbf{l}) $$
+        [S1, unofficial]
+4.  **Accumulation:** Perform front-to-back volume rendering accumulation, modulating the emitted color by the calculated lighting term and the voxel's opacity [S1, unofficial].
+
+**Parameters:**
+*   **Gradient Type:** Boolean or enum selecting between density gradient and opacity gradient. Opacity gradient is recommended for medical images where tissues are made transparent [S2, unofficial].
+*   **Light Direction:** A 3D vector $\mathbf{l}$, typically normalized.
+
+**Edge Cases and Pitfalls:**
+*   **Self-Shadowing:** The method does not account for self-shadowing of light; occlusion is not computed [S1, unofficial].
+*   **Metallic Appearance:** Gradient-based methods can impose an overwhelmingly metallic feeling, making ultrasound data look unrealistic [S2, unofficial].
+*   **Noise Sensitivity:** High-frequency noise in the data can lead to noisy gradients and visual artifacts. Hybrid shading (interpolating with volumetric shading) is often used to reduce this effect [S2, unofficial].
+*   **Combination Limits:** Gradient shading can be combined with either volumetric shading or Local Ambient Occlusion (LAO), but not both simultaneously [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gradient_based_shading(volume, light_direction, sample_point):
+    """
+    Computes the shading contribution for a single sample point using the gradient-based surface model.
+    
+    Args:
+        volume: 3D array of scalar values.
+        light_direction: Normalized 3D vector (dx, dy, dz).
+        sample_point: 3D coordinates (x, y, z) of the current sample.
+        
+    Returns:
+        float: The diffuse lighting coefficient.
+    """
+    # 1. Compute gradient using central differences
+    # [G] Assuming volume is padded or boundaries are handled to avoid index errors
+    dx = volume[sample_point.x + 1, sample_point.y, sample_point.z] - \
+         volume[sample_point.x - 1, sample_point.y, sample_point.z]
+    dy = volume[sample_point.x, sample_point.y + 1, sample_point.z] - \
+         volume[sample_point.x, sample_point.y - 1, sample_point.z]
+    dz = volume[sample_point.x, sample_point.y, sample_point.z + 1] - \
+         volume[sample_point.x, sample_point.y, sample_point.z - 1]
+    
+    gradient = Vector3(dx, dy, dz)
+    
+    # 2. Normalize gradient to get pseudo-normal
+    norm = gradient.length()
+    if norm == 0:
+        return 0.0 # No gradient, no diffuse lighting
+    
+    normal = gradient / norm
+    
+    # 3. Calculate diffuse term (Lambertian approximation)
+    # [S1, unofficial] Emission coefficient incorporates local gradient vector to simulate reflection
+    dot_product = normal.dot(light_direction)
+    
+    # Clamp to 0 to handle back-facing normals
+    diffuse = max(0.0, dot_product)
+    
+    return diffuse
+```
+
+## Subtopics
+
+### Hybrid Gradient Volume Raycasting with Lasso Masking
+Combines gradient shading with lasso masking for selective visualization. [Link](2059-hybrid-gradient-volume-raycasting-with-lasso-masking.md)
+
+### Hybrid Scattering
+Interpolates between gradient-based shading and volumetric shading to balance local details and global ambient occlusion, reducing noise impact. [Link](12458-hybrid-scattering.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per sample for shading calculation, dominated by gradient computation which requires neighboring voxel accesses.
+*   **Memory Complexity:** $O(1)$ additional memory per sample for gradient storage.
+*   **Performance:** Fast, as it avoids complex shadow ray tracing or global illumination calculations [S1, unofficial].
+*   **Strengths:** Provides strong visual cues for surface appearance and local depth; effective for CT scans and structured medical data [S1, S2, unofficial].
+*   **Limitations:** Does not account for self-shadowing; can produce unrealistic metallic appearances in noisy data like ultrasound; cannot be combined with both volumetric shading and LAO simultaneously [S1, S2, unofficial].
+*   **When to Use:** When local surface detail and depth cues are prioritized, and the data has low noise (e.g., CT scans).
+*   **When Not to Use:** For noisy data like ultrasound where a metallic look is undesirable, or when self-shadowing and global occlusion are critical [S2, unofficial].
+
+## Background
+The Gradient-based Surface Model was introduced in the context of volume rendering mathematical models and algorithmic aspects, specifically for visualizing medical CT data without surface patches [S1, unofficial]. It was later implemented and evaluated in the VTK.js volume rendering pipeline, where it was noted for its ability to reflect local details and its compatibility with other shading techniques like LAO and volumetric shading (but not both) [S2, unofficial]. The method is part of a broader family of gradient-based shading techniques used in cinematic volume rendering [S2, unofficial].
+
+## Sources
+[S1] Volume Rendering Mathematical Models and Algorithmic Aspects, https://core.ac.uk/works/16970577, fetched 2026-10-29 (unofficial)
+[S2] Cinematic Volume Rendering in Your Web Browser: VolView and VTK.js, https://www.kitware.com/cinematic-volume-rendering/, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,139 @@
+--- v002.md
++++ v003.md
+@@ -21,9 +21,9 @@
+ ### Data Structures
+ The scene is represented by a set of neural surfels $S_g$ [S1]. Each surfel $s_i$ stores the following attributes [S1]:
+-- Position $\mathbf{p}^i \in \mathbb{R}^3$
+-- Normal $\mathbf{n}^i \in \mathbb{R}^3$
+-- Radius $r^i \in \mathbb{R}$
+-- Weight $w^i \in \mathbb{R}$ (confidence based on depth measurement distance)
+-- Neural feature vector $\mathbf{f}^i \in \mathbb{R}^N$ (extracted from input images)
++- Position $\mathbf{p}^i \in \mathbb{R}^3$ [S1]
++- Normal $\mathbf{n}^i \in \mathbb{R}^3$ [S1]
++- Radius $r^i \in \mathbb{R}$ [S1]
++- Weight $w^i \in \mathbb{R}$ (confidence based on depth measurement distance) [S1]
++- Neural feature vector $\mathbf{f}^i \in \mathbb{R}^N$ (extracted from input images) [S1]
+ 
+ ### Step 1: Local Neural Surfel Radiance Field Construction
+@@ -131,12 +131,10 @@
+ import torch
+ import torch.nn as nn
+-import math
+ 
+ class SurfelNeRF:
+     def __init__(self, feature_dim=32, hidden_dim=256):
+         self.gru = GRUUnit(input_dim=feature_dim, hidden_dim=feature_dim)
+-        # Feature projection MLP [S1]
+         self.feature_proj = nn.Linear(83, feature_dim)
+-        # Rendering MLP [S1]
++        self.feature_mlp = FeatureMLP(feature_dim=feature_dim, hidden_dim=hidden_dim)
+         self.render_mlp = RenderMLP(feature_dim=feature_dim, hidden_dim=hidden_dim)
+         self.global_surfels = []
+@@ -149,5 +147,4 @@
+         # Depth refinement via U-Net omitted [G]
+         refined_depth = depth
+-        # Unproject pixels to 3D using pinhole camera model [G]
+         positions, normals, weights, radii = unproject_pixels(refined_depth, camera_params)
+         # Feature extraction via MasNet omitted [G]
+@@ -157,5 +154,5 @@
+         for i in range(len(positions)):
+             local_surfels.append({
+-                'p': positions[i], 'n': normals[i], 'r': radii[i], 
++                'p': positions[i], 'n': normals[i], 'r': radii[i],
+                 'w': weights[i], 'f': surfel_features[i]
+             })
+@@ -197,5 +194,5 @@
+             transmittance = 1.0
+             color = torch.zeros(3)
+-            for point, surfel_idx, _ in points:
++            for i, (point, surfel_idx, _) in enumerate(points):
+                 surfel = self.global_surfels[surfel_idx]
+                 x_i = point
+@@ -203,7 +200,10 @@
+                 dist = torch.norm(x_i - surfel['p'])
+                 scale = (surfel['r'] - dist) / surfel['r']
+-                f_interp = scale * self.render_mlp.get_feature_part(surfel['f'], d, surfel['n'], surfel['w'])
++                f_interp = scale * self.feature_mlp(surfel['f'], d, surfel['n'], surfel['w'])
+                 sigma, c = self.render_mlp(x_i, f_interp, d)
+-                delta_i = 0.01 # Placeholder for distance between shading points along ray [G]
++                if i == 0:
++                    delta_i = 0.01 # Placeholder for distance between shading points along ray [G]
++                else:
++                    delta_i = torch.norm(point - points[i-1][0]).item()
+                 alpha = 1.0 - torch.exp(-sigma * delta_i)
+                 weight = transmittance * alpha
+@@ -220,5 +220,5 @@
+         self.M_r = nn.Sequential(nn.Linear(2 * hidden_dim, hidden_dim), nn.Sigmoid())
+         self.M_t = nn.Sequential(nn.Linear(2 * hidden_dim, hidden_dim), nn.Tanh())
+-        
++
+     def forward(self, x, h):
+         concat = torch.cat([x, h], dim=-1)
+@@ -230,5 +230,5 @@
+         return new_h
+ 
+-class RenderMLP(nn.Module):
++class FeatureMLP(nn.Module):
+     def __init__(self, feature_dim, hidden_dim):
+         super().__init__()
+@@ -237,17 +237,28 @@
+             nn.Linear(76, hidden_dim),
+             nn.ReLU(),
++            nn.Linear(hidden_dim, feature_dim)
++        )
++
++    def forward(self, f, d, n, w):
++        gamma_d = positional_embedding(d)
++        gamma_w = positional_embedding(w.unsqueeze(-1))
++        gamma_n = positional_embedding(n)
++        gamma_d_minus_n = positional_embedding(d - n)
++        concat = torch.cat([f, gamma_d, gamma_w, gamma_n, gamma_d_minus_n], dim=-1)
++        return self.F_f(concat)
++
++class RenderMLP(nn.Module):
++    def __init__(self, feature_dim, hidden_dim):
++        super().__init__()
++        self.render_net = nn.Sequential(
++            nn.Linear(feature_dim, hidden_dim),
++            nn.ReLU(),
+             nn.Linear(hidden_dim, 4) # sigma(1) + c(3)
+         )
+-        
++
+     def forward(self, x, f_surfel, d):
+-        pass
+-
+-    def get_feature_part(self, f, d, n, w):
+-        # Compute interpolated feature f^i(x_i)
+-        # Requires x_i, which is passed in render loop
+-        pass
++        return self.render_net(f_surfel)
+ 
+ def unproject_pixels(depth, camera_params):
+-    # Standard pinhole unprojection [G]
+     K, R, t = camera_params['K'], camera_params['R'], camera_params['t']
+     H, W = depth.shape
+@@ -272,5 +283,4 @@
+ 
+ def find_overlapping_global_surfels(local_s, global_surfels, K):
+-    # Project global surfels, check overlap, sort by depth [G]
+     candidates = []
+     for g in global_surfels:
+@@ -281,10 +291,8 @@
+ 
+ def get_view_direction(camera_params, point):
+-    # d = camera_center - point [G]
+     cam_center = -camera_params['R'].T @ camera_params['t']
+     return (cam_center - point).view(-1)
+ 
+ def positional_embedding(x, max_freq=5):
+-    # Standard NeRF positional embedding [G]
+     scales = 2 ** torch.arange(max_freq)
+     emb = torch.cat([x * s for s in scales], dim=-1)
+@@ -305,5 +313,5 @@
+ 
+ ## Background
+-SurfelNeRF was introduced in 2023 by researchers investigating the combination of classical 3D reconstruction and NeRF for online photorealistic reconstruction of large-scale indoor scenes [S1]. It builds on the concept of neural surfels, extending classical surfel-based fusion schemes to the neural setting. The method was evaluated on the ScanNet dataset, demonstrating state-of-the-art performance in both feedforward and per-scene optimization settings [S1].
++SurfelNeRF was introduced in 2023 by researchers investigating the combination of classical 3D reconstruction and NeRF for online photorealistic reconstruction of large-scale indoor scenes [S1]. It builds on the concept of neural surfels, extending classical surfel-based fusion schemes to the neural setting [S1]. The method was evaluated on the ScanNet dataset, demonstrating state-of-the-art performance in both feedforward and per-scene optimization settings [S1].
+ 
+ ## Sources

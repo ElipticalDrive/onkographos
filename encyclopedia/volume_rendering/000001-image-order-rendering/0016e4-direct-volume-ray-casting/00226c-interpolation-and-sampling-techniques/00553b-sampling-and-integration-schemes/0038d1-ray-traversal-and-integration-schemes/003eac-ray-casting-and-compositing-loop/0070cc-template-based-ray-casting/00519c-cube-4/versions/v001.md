@@ -1,0 +1,69 @@
+# Cube-4
+
+Also called: Cube-4 volume rendering architecture
+
+## Overview
+Cube-4 is a parallel and scalable volume rendering architecture that implements a slice-parallel ray-casting algorithm with tri-linear interpolation and surface normal estimation derived from interpolated samples [S1]. It distinguishes itself from previous Cube projects by utilizing only local and fixed-bandwidth interconnections within modular rendering pipelines, avoiding complex global interconnects [S1]. Unlike algorithms such as s.hear-warp, Cube-4 performs high-quality 3D interpolation and surface normal estimation without precomputations or additional data storage [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A volumetric dataset of size $n^3$ voxels.
+*   **Output:** A final image projected onto the view-plane.
+
+**Data Structures**
+*   **Volumetric Dataset:** Stored in $n$ logical memory modules, each containing $n^2$ words of 8 bits [S1].
+*   **Plane Buffers:** FIFO buffers used to store previously fetched slices of interpolated samples to avoid repeated memory access [S1]. Two such buffers are required to store the two previous slices of interpolated samples, delaying them by $n$ and $2n$ cycles respectively [S1].
+
+**Parameters**
+*   $n$: The dimension of the volumetric dataset ($n^3$ voxels) [S1].
+*   $p$: The number of processing elements or physical memory modules [S1].
+
+**Memory Organization**
+To achieve conflict-free simultaneous access to a row of voxels (a beam) parallel to one of the major viewing axes, a skewed memory organization is used [S1].
+
+1.  **Logical Mapping:** A skewing function maps a voxel with coordinates $[z, y, x]$ to a logical memory module $k$ at index $i$:
+    $$
+    k = (x + y + z) \mod n
+    $$
+    $$
+    i = y + z \cdot n
+    $$
+    where $0 \le k, x, y, z \le n - 1$ [S1].
+    Adjacent voxels of beams in the X direction are placed in the same relative locations of adjacent memory modules (rows across the memory) [S1].
+
+2.  **Physical Partitioning:** A partitioning function $\phi$ maps logical memory $[k, i]$ to physical memory $[k_p, i_p]$ for $p$ physical memory banks. This partitions the beams in the X direction [S1]:
+    $$
+    k_p = k \mod p
+    $$
+    $$
+    z_p = (n + \lfloor k/p \rfloor) \mod p
+    $$
+    Note: The source provides $z_p$ but does not explicitly define $i_p$ in the formula block, though it implies the mapping to physical memory [S1].
+
+**Algorithm Steps**
+The architecture chooses $Z$ as the major viewing direction and beams in the X direction [S1].
+
+1.  **Ray Casting Initialization:** Discrete voxel rays with a constant stepping of one in the major viewing direction ($Z$) are sent into the volume from each pixel on the base-plane (the face of the volumetric dataset most perpendicular to the viewing direction) [S1].
+2.  **Slice-Parallel Traversal:** The volume is traversed by processing beams along consecutive slices parallel to the base-plane (slice-parallel processing) [S1].
+3.  **Interpolation:** Two consecutive slices are required for tri-linear interpolation. The previously fetched slice is stored in a plane buffer (FIFO) to be retrieved without further access to voxel memory [S1].
+4.  **Gradient Estimation:** A surface normal approximation for a sample point is obtained by computing the gray-level gradient. This gradient is computed using samples from three slices of interpolated samples [S1]. The two previously calculated slices of interpolated samples are stored in FIFO plane-buffers, delaying them by $n$ and $2n$ cycles, respectively [S1].
+5.  **Shading and Classification:** The computed surface normal and sample value are used to compute a color based on a local shading model and sample opacity [S1].
+6.  **Compositing:** Shaded and classified sample values are composited along the rays into pixel values of the final image. Each slice is composited onto the intermediate results of the previous slices [S1].
+7.  **Final Projection:** After rendering, the base-plane contains a distorted image which is warped and projected onto the view-plane [S1].
+
+**Subtopics**
+*   **Sub-volume Partitioning:** A method where a volumetric dataset of size $n^3$ is divided into smaller sub-volumes of resolution $p$, each processed by $p$ pipelines. The images of each sub-volume are combined to yield the final image [S1]. This approach was used in the first prototype but revealed problems with voxel neighborhood requirements at sub-volume boundaries for interpolation and gradient estimation [S1].
+*   **Beam Partitioning:** An alternative approach developed to handle datasets where $p < n$ processing elements are used, though specific algorithmic details are not provided in the sources beyond its existence as a solution to the hardware limits of sub-volume partitioning [S1].
+
+## Operating characteristics
+*   **Performance:** Cube-4 is estimated to achieve real-time performance (30 frames per second) for a $512^3$ dataset with 128 pipelines running at 30 MHz [S1].
+*   **Scalability:** The performance of Cube-4 grows proportionally with an increasing number of pipelines, ultimately limited only by memory speeds [S1].
+*   **Hardware Requirements:** The slice-parallel approach operates on beams of $n$ voxels, requiring $n$ processing elements if not partitioned. This leads to an undesirable amount of hardware and limits the maximum size of datasets if $p=n$ is required [S1].
+*   **Cost-Performance:** The cost-performance ratio of Cube-4 is significantly better than existing solutions [S1].
+*   **Limitations:** The first prototype using sub-volume partitioning revealed problems with voxel neighborhood requirements for tri-linear interpolation and gradient estimation at sub-volume boundaries [S1].
+
+## Background
+Cube-4 is the most recent approach in the Cube series of volume rendering architectures, developed by researchers at Hewlett-Packard Research Laboratories, Palo Alto, CA, including Robert S. Larson, Phil Kuekes, and Greg Snider [S1]. It was implemented on the Teramac custom computing machine [S1]. The algorithm and dataflow were simulated in C and VHDL [S1]. Cube-4 differs from previous Cube projects by using only local and fixed bandwidth interconnections [S1].
+
+## Sources
+[S1] Cube-4 Implementations on the Teramac Custom Computing Machine, https://doi.org/10.2312/eggh/eggh96/133-143, fetched 2026-10-26

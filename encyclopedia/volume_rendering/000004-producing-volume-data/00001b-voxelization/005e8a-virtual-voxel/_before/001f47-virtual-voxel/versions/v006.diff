@@ -1,0 +1,161 @@
+--- v005.md
++++ v006.md
+@@ -1,4 +1,3 @@
+ # Virtual Voxel
+-
+ 
+ ## Overview
+@@ -15,5 +14,5 @@
+     *   **Storage:** Only existence flags are recorded for each cell to allow efficient storage and access of sparse data [S1].
+ 2.  **GPU Voxel Pool:** A linear memory pool on the GPU [S1].
+-    *   **Page Layout:** Each streamed cell is allocated a new page. Each page accommodates 16,384 ($128 \times 128$) voxels [S1].
++    *   **Page Layout:** Each streamed cell is allocated a new page [S1]. Each page accommodates 16,384 ($128 \times 128$) voxels [S1].
+ 3.  **Visibility Buffer:** A 64-bit buffer used in the first rendering pass [S1].
+     *   **Layout:** `depth_bits << 32 | voxel_id << 12 | cell_id` [S1].
+@@ -66,82 +65,83 @@
+ LOD_FACTOR = 8
+ CELL_RESOLUTION = 64
+-PAGE_SIZE_VOXELS = 16384 # 128x128 voxels per page in pool
++PAGE_SIZE_VOXELS = 16384  # 128x128 voxels per page as per source
+ 
+ # Data Structures
+ class STreeNode:
+     exists: bool
+-    children: List[STreeNode] # Sparse list of children
++    children: list  # Sparse list of child nodes
+     cell_id: int
+-    center_pos: Vec3
++    center_pos: list  # [x, y, z]
+     size: float
+ 
+ class VoxelPool:
+-    pages: List[Page]
++    pages: list
+     
+-    def allocate_page(self) -> Page:
++    def allocate_page(self) -> list:
+         # Allocate a new page for a cell
+-        page = Page()
++        page = [False] * PAGE_SIZE_VOXELS
+         self.pages.append(page)
+         return page
+ 
+-class Page:
+-    voxels: Array[bool, 64*64*64] # Simplified representation of voxel data
+-    def append(self, data: Array[bool, 64*64*64]):
+-        # Atomically append voxelization result to the allocated page
+-        for i in range(len(data)):
+-            self.voxels[i] = data[i]
+-
+ # 1. Streaming Phase
+-def stream_cells(root_node: STreeNode, camera_pos: Vec3, lod_factor: float):
+-    if root_node is None:
++def stream_cells(node: STreeNode, camera_pos: list, lod_factor: float):
++    if node is None:
+         return
+     
+     # Calculate LOD error
+-    distance = length(root_node.center_pos - camera_pos)
+-    lod_error = distance - (lod_factor * root_node.size)
++    distance = (node.center_pos[0] - camera_pos[0])**2 + \
++               (node.center_pos[1] - camera_pos[1])**2 + \
++               (node.center_pos[2] - camera_pos[2])**2
++    distance = distance ** 0.5
++    lod_error = distance - (lod_factor * node.size)
+     
+     if lod_error > 0:
+         # Evaluate children
+-        for child in root_node.children:
++        for child in node.children:
+             stream_cells(child, camera_pos, lod_factor)
+     else:
+         # Send cell-building request to GPU
+-        gpu_request_cell_building(root_node)
++        gpu_request_cell_building(node)
+ 
+ # 2. GPU Cell Building
+ def gpu_build_cell(node: STreeNode):
+-    # Voxelize using Crassin and Green method
+-    voxel_data = voxelize_crassin_green(node.resolution)
++    # Voxelize using Crassin and Green [2012] method (Not given in sources)
++    voxel_data = [False] * (CELL_RESOLUTION ** 3)
+     
+     # Allocate page in voxel pool
+     page = voxel_pool.allocate_page()
+     
+-    # Atomically append to page
+-    page.append(voxel_data)
++    # Atomically append voxelization result to the allocated page
++    # Implementation depends on GPU atomic operations
++    for i in range(len(voxel_data)):
++        page[i] = voxel_data[i]
+ 
+ # 3. Rendering Pass 1: Visibility Buffer
+-def render_visibility_buffer(cells: List[Cell], visibility_buffer: Buffer):
++def render_visibility_buffer(cells: list, visibility_buffer: dict):
+     for cell in cells:
+-        if frustum_cull(cell):
++        if not frustum_cull(cell):
+             continue
+         
+-        # Each compute thread renders 64 voxels
+-        render_voxels_as_points(cell, visibility_buffer)
++        # Each compute thread renders 64 voxels of a cell
++        for v in range(64):
++            voxel_pos = get_voxel_position(cell, v)
++            write_to_visibility_buffer(voxel_pos, cell.cell_id, v, visibility_buffer)
+ 
+ # 4. Rendering Pass 2: Reconstruction
+-def render_final_frame(visibility_buffer: Buffer, framebuffer: Buffer):
++def render_final_frame(visibility_buffer: dict, framebuffer: dict):
+     # Each compute thread reads one pixel
+-    for pixel in visibility_buffer:
+-        voxel_id = pixel.voxel_id
+-        cell_id = pixel.cell_id
++    for pixel_key, pixel_data in visibility_buffer.items():
++        voxel_id = pixel_data['voxel_id']
++        cell_id = pixel_data['cell_id']
+         
+         # Reconstruct voxel as geometry cube (12 triangles)
+-        cube = reconstruct_cube(voxel_id, cell_id)
++        # Method similar to Nanite micro polygon renderer (Not given in sources)
++        cube_mesh = reconstruct_cube(voxel_id, cell_id)
+         
+         # Render with AtomicMin for depth
+-        render_cube_with_atomic_min(cube, framebuffer)
++        render_cube_with_atomic_min(cube_mesh, framebuffer)
+ 
+ # 5. Real-Time Modification
+-def modify_scene(mouse_pos: Vec2, framebuffer: Buffer, camera_matrix: Mat4):
++def modify_scene(mouse_pos: list, framebuffer: dict, camera_matrix: list):
+     # Screen pick
+     depth = framebuffer.get_depth(mouse_pos)
+@@ -161,9 +161,9 @@
+         for sub_cube in subtraction_cubes:
+             if voxel_in_cube(voxel_data, sub_cube):
+-                voxel_data.remove(voxel_data)
++                voxel_data = remove_voxel(voxel_data, sub_cube)
+         
+         # Apply Union
+         for union_cube in union_cubes:
+-            voxel_data.add(union_cube)
++            voxel_data = add_voxel(voxel_data, union_cube)
+             
+         # Update pool
+@@ -172,12 +172,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The streaming phase depends on the tree traversal depth and the LOD metric evaluation. The rendering phase is parallelized across compute threads, with each thread handling 64 voxels in Pass 1 and one pixel in Pass 2.
+-*   **Memory Complexity:** Linear storage in the GPU Voxel Pool. Each page accommodates 16,384 voxels. The STree stores only existence flags, minimizing CPU memory usage.
++*   **Time Complexity:** The streaming phase depends on the tree traversal depth and the LOD metric evaluation [G]. The rendering phase is parallelized across compute threads, with each thread handling 64 voxels in Pass 1 and one pixel in Pass 2 [S1].
++*   **Memory Complexity:** Linear storage in the GPU Voxel Pool [S1]. Each page accommodates 16,384 voxels. The STree stores only existence flags, minimizing CPU memory usage [S1].
+ *   **Measured Performance:** Average frame time of 6.0459 ms at 4K resolution on a Windows 10 desktop with AMD Threadripper 2950X and RTX4090, measured during a camera fly-through of a 16x16 chunk test scene ($4^{12}$ resolution) [S1].
+-*   **Strengths:** Real-time rendering of large-scale scenes ($4^{12}$ resolution); efficient real-time modification (Union/Subtraction); linear data storage simplifies memory management compared to graph-based structures.
++*   **Strengths:** Real-time rendering of large-scale scenes ($4^{12}$ resolution); efficient real-time modification (Union/Subtraction); linear data storage simplifies memory management compared to graph-based structures [S1].
+ *   **Limitations:** Supports only opaque objects. Transparent rendering is unachievable because the atomic max operation (used for depth/visibility) cannot blend color values [S1].
+ 
+ ## Background
+-Virtual Voxel was introduced by Jinyuan Yang and Abraham G. Campbell from University College Dublin, Ireland [S1]. The method was presented in the paper "VirtualVoxel: Real-Time Large Scale Scene Visualization and Modification" [S1]. It builds on concepts from Virtual Texture and Virtual Geometry, aiming to combine efficient storage with real-time modification capabilities. The voxelization step relies on the method by Crassin and Green [2012], and the reconstruction step uses a technique similar to Nanite [Karis et al. 2021].
++Virtual Voxel was introduced by Jinyuan Yang and Abraham G. Campbell from University College Dublin, Ireland [S1]. The method was presented in the paper "VirtualVoxel: Real-Time Large Scale Scene Visualization and Modification" [S1]. It builds on concepts from Virtual Texture and Virtual Geometry, aiming to combine efficient storage with real-time modification capabilities [S1]. The voxelization step relies on the method by Crassin and Green [2012], and the reconstruction step uses a technique similar to Nanite [Karis et al. 2021] [S1].
+ 
+ ## Sources

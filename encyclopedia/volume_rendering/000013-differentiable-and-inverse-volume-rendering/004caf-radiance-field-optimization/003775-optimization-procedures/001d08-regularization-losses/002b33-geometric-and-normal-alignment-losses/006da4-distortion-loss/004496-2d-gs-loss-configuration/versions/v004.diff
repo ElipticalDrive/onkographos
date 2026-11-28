@@ -1,0 +1,121 @@
+--- v003.md
++++ v004.md
+@@ -8,46 +8,50 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs**:
+-    *   `w`: Tensor of alpha weights for each sample along rays. Shape: $(N_{samples})$ [S1, unofficial].
+-    *   `s`: Tensor of normalized depth parameters for each sample. Shape: $(N_{samples})$ [S1, unofficial].
+-    *   `ray_id`: Tensor of ray identifiers for each sample, grouping samples by ray. Shape: $(N_{samples})$ [S1, unofficial].
+-    *   `n_max`: Integer, the maximum number of samples per ray [S1, unofficial].
+-*   **Outputs**:
+-    *   `loss`: Scalar, the total 2D-GS loss value [S1, unofficial].
+-    *   Gradients for `w` are computed; gradients for `s`, `n_max`, and `ray_id` are `None` [S1, unofficial].
++*   **Inputs**: `w` (alpha weights, shape $N_{samples}$), `s` (normalized depth parameters, shape $N_{samples}$), `ray_id` (ray identifiers, shape $N_{samples}$), and `n_max` (maximum samples per ray) [S1, unofficial].
++*   **Outputs**: Scalar `loss` and gradients for `w`; gradients for `s`, `n_max`, and `ray_id` are `None` [S1, unofficial].
+ 
+ **Data Structures**
+-*   `w_prefix`: Prefix sum of weights `w` grouped by `ray_id` [S1, unofficial].
+-*   `w_total`: Total sum of weights `w` per ray [S1, unofficial].
+-*   `ws_prefix`: Prefix sum of weighted distances `w * s` grouped by `ray_id` [S1, unofficial].
+-*   `ws_total`: Total sum of weighted distances `w * s` per ray [S1, unofficial].
+-*   `w_suffix`: Suffix sum of weights `w` grouped by `ray_id` [S1, unofficial].
+-*   `ws_suffix`: Suffix sum of weighted distances `w * s` grouped by `ray_id` [S1, unofficial].
++The method maintains prefix and suffix sums for weights and weighted distances, grouped by `ray_id`: `w_prefix`, `w_total`, `ws_prefix`, `ws_total`, `w_suffix`, and `ws_suffix` [S1, unofficial].
+ 
+-**Numbered Steps**
+-1.  **Forward Pass**:
+-    1.  Calculate the number of rays: $n_{rays} = \max(\text{ray\_id}) + 1$ [S1, unofficial].
+-    2.  Calculate the interval size: $\text{interval} = 1 / n_{max}$ [S1, unofficial].
+-    3.  Compute prefix sums for weights and weighted distances using segment-wise cumulative summation grouped by `ray_id`: $[w_{prefix}, w_{total}, ws_{prefix}, ws_{total}] = \text{segment\_cumsum}(w, s, \text{ray\_id})$ [S1, unofficial].
+-    4.  Compute the uniform loss component [S1, unofficial].
+-    5.  Compute the bi-directional loss component [S1, unofficial].
+-    6.  Compute the total loss: $loss = \frac{loss_{uni} + loss_{bi}}{n_{rays}}$ [S1, unofficial].
+-    7.  Save tensors `w`, `s`, `w_prefix`, `w_total`, `ws_prefix`, `ws_total`, `ray_id`, and `interval` for the backward pass [S1, unofficial].
+-2.  **Backward Pass**:
+-    1.  Retrieve saved tensors and the upstream gradient `grad_back` [S1, unofficial].
+-    2.  Compute suffix sums for weights and weighted distances [S1, unofficial].
+-    3.  Compute the gradient for the uniform term [S1, unofficial].
+-    4.  Compute the gradient for the bi-directional term [S1, unofficial].
+-    5.  Compute the final gradient for `w` [S1, unofficial].
+-    6.  Return gradients for `s`, `n_max`, and `ray_id` as `None` [S1, unofficial].
++**Pseudocode**
++```python
++def forward(w, s, ray_id, n_max):
++    n_rays = ray_id.max() + 1
++    interval = 1.0 / n_max
++    # Compute prefix sums grouped by ray_id
++    w_prefix = torch.zeros_like(w)
++    w_total = torch.zeros(n_rays)
++    ws_prefix = torch.zeros_like(w)
++    ws_total = torch.zeros(n_rays)
++    for i in range(len(w)):
++        rid = ray_id[i]
++        w_prefix[i] = w_total[rid] + w[i]
++        ws_prefix[i] = ws_total[rid] + w[i] * s[i]
++        w_total[rid] = w_prefix[i]
++        ws_total[rid] = ws_prefix[i]
++    loss_uni = (1.0 / 3.0) * interval * w * w
++    loss_bi = 2.0 * w * (s * w_prefix - ws_prefix)
++    loss = (loss_uni + loss_bi) / n_rays
++    save(w, s, w_prefix, w_total, ws_prefix, ws_total, ray_id, interval)
++    return loss
++
++def backward(grad_back, saved_tensors):
++    w, s, w_prefix, w_total, ws_prefix, ws_total, ray_id, interval = saved_tensors
++    w_suffix = w_total[ray_id] - (w_prefix + w)
++    ws_suffix = ws_total[ray_id] - (ws_prefix + w * s)
++    grad_uni = (1.0 / 3.0) * interval * 2.0 * w
++    grad_bi = 2.0 * (s * (w_prefix - w_suffix) + (ws_suffix - ws_prefix))
++    grad_w = grad_back * (grad_bi + grad_uni)
++    return grad_w, None, None, None
++```
+ 
+ **Formulas**
+-*   $loss_{uni} = \frac{1}{3} \cdot \text{interval} \cdot w^2$ [S1, unofficial].
+-*   $loss_{bi} = 2 \cdot w \cdot (s \cdot w_{prefix} - ws_{prefix})$ [S1, unofficial].
+-*   $grad_{uni} = \frac{1}{3} \cdot \text{interval} \cdot 2 \cdot w$ [S1, unofficial].
+-*   $grad_{bi} = 2 \cdot (s \cdot (w_{prefix} - w_{suffix}) + (ws_{suffix} - ws_{prefix}))$ [S1, unofficial].
+-*   $\frac{\partial loss}{\partial w} = grad_{back} \cdot (grad_{bi} + grad_{uni})$ [S1, unofficial].
+-*   $w_{suffix} = w_{total}[\text{ray\_id}] - (w_{prefix} + w)$ [S1, unofficial].
+-*   $ws_{suffix} = ws_{total}[\text{ray\_id}] - (ws_{prefix} + w \cdot s)$ [S1, unofficial].
++*   Uniform loss: $loss_{uni} = \frac{1}{3} \cdot \text{interval} \cdot w^2$ [S1, unofficial].
++*   Bi-directional loss: $loss_{bi} = 2 \cdot w \cdot (s \cdot w_{prefix} - ws_{prefix})$ [S1, unofficial].
++*   Total loss: $loss = \frac{loss_{uni} + loss_{bi}}{n_{rays}}$ [S1, unofficial].
++*   Uniform gradient: $grad_{uni} = \frac{1}{3} \cdot \text{interval} \cdot 2 \cdot w$ [S1, unofficial].
++*   Bi-directional gradient: $grad_{bi} = 2 \cdot (s \cdot (w_{prefix} - w_{suffix}) + (ws_{suffix} - ws_{prefix}))$ [S1, unofficial].
++*   Final gradient: $\frac{\partial loss}{\partial w} = grad_{back} \cdot (grad_{bi} + grad_{uni})$ [S1, unofficial].
++*   Suffix sums: $w_{suffix} = w_{total}[\text{ray\_id}] - (w_{prefix} + w)$ and $ws_{suffix} = ws_{total}[\text{ray\_id}] - (ws_{prefix} + w \cdot s)$ [S1, unofficial].
+ 
+ **Parameters**
+@@ -56,11 +60,11 @@
+ *   `n_max`: Maximum number of samples per ray [S1, unofficial].
+ *   `ray_id`: Ray identifier for each sample [S1, unofficial].
+-*   Distortion loss weight: 0.01 (used in the broader 2D-GS model context) [S2].
+-*   Normal loss weight: 0.05 (used in the broader 2D-GS model context) [S2].
++*   Distortion loss weight: 0.01 [S2].
++*   Normal loss weight: 0.05 [S2].
+ *   Typical values: Not given in the sources.
+ 
+ **Edge Cases and Pitfalls**
+-*   **Division by Zero**: If `n_max` is 0, the interval calculation fails. Ensure `n_max >= 1` [G].
+-*   **Gradient Flow**: Gradients for `s`, `n_max`, and `ray_id` are explicitly returned as `None` [S1, unofficial].
++*   Division by zero: If `n_max` is 0, the interval calculation fails; ensure `n_max >= 1` [G].
++*   Gradient flow: Gradients for `s`, `n_max`, and `ray_id` are explicitly returned as `None` [S1, unofficial].
+ 
+ ## Subtopics
+@@ -73,9 +77,9 @@
+ 
+ ## Operating characteristics
+-*   Time and memory complexity: Not given in the sources.
+-*   Measured performance with hardware, resolution and scene: Not given in the sources.
+-*   Scaling: Not given in the sources.
+-*   Strengths and limitations: Not given in the sources.
+-*   When to use it and when not: Not given in the sources.
++Time and memory complexity: Not given in the sources.
++Measured performance with hardware, resolution and scene: Not given in the sources.
++Scaling: Not given in the sources.
++Strengths and limitations: Not given in the sources.
++When to use it and when not: Not given in the sources.
+ 
+ ## Background

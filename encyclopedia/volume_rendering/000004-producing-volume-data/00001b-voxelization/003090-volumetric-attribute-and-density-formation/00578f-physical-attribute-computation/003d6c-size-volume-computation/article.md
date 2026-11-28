@@ -1,0 +1,173 @@
+# Size Volume Computation
+
+Also called: Correa and Ma Size Volume, Size Attribute, Tamanho
+
+## Overview
+Size Volume Computation is a method for generating a tertiary volumetric attribute that represents the local scale or "size" of features within a dataset, primarily for use in transfer function design during Direct Volume Rendering (DVR) [S1, S2, unofficial]. It addresses the difficulty of defining mathematical descriptors for size variations, which is visually intuitive but mathematically complex [S1, unofficial]. Unlike simple intensity-based attributes, it categorizes objects by their spatial extent using multiscale analysis [S1, unofficial].
+
+## How it works
+The method, proposed by Correa and Ma, computes a size volume $S$ from an input scalar volume $V$ through three main steps: scale-space computation, scale detection, and back projection [S2, unofficial].
+
+### Inputs and Outputs
+- **Input**: A scalar volume $V$ defined on a 3D grid. Optionally, an intensity range $[I_{min}, I_{max}]$ can be specified to restrict computation to specific features [S2, unofficial].
+- **Output**: A size volume $S$ of the same dimensions as $V$, where each voxel contains the detected size of the largest feature at that location [S2, unofficial].
+
+### Data Structures
+- **Input Volume $V$**: 3D array of floats, dimensions $(N_x, N_y, N_z)$.
+- **Scale Space $L$**: 4D array of floats, dimensions $(N_x, N_y, N_z, T)$, where $T$ is the number of scales.
+- **Blob Map $B$**: List of tuples $(x, y, z, t)$ representing detected blobs, where $(x,y,z)$ are voxel coordinates and $t$ is the scale index [S2, unofficial].
+- **Output Volume $S$**: 3D array of floats, initialized to zero or a minimum size value.
+
+### Steps
+
+1. **Scale-Space Computation**:
+   Construct a scale space $L(x, y, z, t)$ from the input volume $V$. Correa and Ma use anisotropic diffusion to create this scale space, which provides better localization of features compared to standard Gaussian smoothing [S2, unofficial].
+   - If an intensity range is specified, apply the diffusion only to voxels within that range [S2, unofficial].
+   - The scale parameter $t$ typically corresponds to a diffusion time or variance.
+
+2. **Scale Detection**:
+   Detect blobs (local maxima) in the scale space.
+   - Compute the normalized Laplacian of the scale space: $\nabla^2_{norm} L = \frac{\nabla^2 L}{L}$ (or similar normalization depending on implementation details not fully specified in sources, but described as "classical normalized Laplacian kernel") [S2, unofficial].
+   - Identify local maxima in both the spatial domain $(x, y, z)$ and the scale domain $t$ [S2, unofficial].
+   - Store these maxima as a list of blob tuples $(x, y, z, t)$ [S2, unofficial].
+
+3. **Back Projection**:
+   Assign size values to all voxels in the volume based on the detected blobs.
+   - For each voxel $(x, y, z)$ in the output volume $S$, find the nearest detected blob $(x_b, y_b, z_b, t_b)$ from the blob map $B$ [S2, unofficial].
+   - Compute the size value using Shepard's interpolation with Wendland polynomials [S2, unofficial].
+   - The size value associated with a blob is typically derived from its scale parameter $t_b$ (e.g., proportional to $\sqrt{t_b}$ or directly $t_b$ depending on the diffusion definition) [S2, unofficial].
+   - **Masking**: If a voxel is influenced by multiple blobs (i.e., it is close to features of different sizes), keep only the largest size value [S2, unofficial]. This means smaller features may be masked out by larger ones [S2, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_size_volume(input_volume, num_scales, intensity_range=None):
+    """
+    Computes the size volume using Correa and Ma's method.
+    
+    Args:
+        input_volume: 3D numpy array (Nx, Ny, Nz)
+        num_scales: Integer, number of scale levels T
+        intensity_range: Tuple (min_val, max_val) or None
+        
+    Returns:
+        size_volume: 3D numpy array (Nx, Ny, Nz)
+    """
+    Nx, Ny, Nz = input_volume.shape
+    
+    # Step 1: Scale-Space Computation
+    # Initialize scale space L with dimensions (Nx, Ny, Nz, T)
+    scale_space = np.zeros((Nx, Ny, Nz, num_scales))
+    
+    # Apply anisotropic diffusion for each scale
+    # Note: Exact anisotropic diffusion algorithm details are not provided in sources [S2, unofficial]
+    # This is a placeholder for the diffusion process
+    for t in range(num_scales):
+        # Create a mask if intensity range is specified
+        if intensity_range is not None:
+            mask = (input_volume >= intensity_range[0]) & (input_volume <= intensity_range[1])
+        else:
+            mask = np.ones((Nx, Ny, Nz), dtype=bool)
+            
+        # Apply anisotropic diffusion to input_volume, using mask if applicable
+        # The result is stored in scale_space[..., t]
+        # Implementation of anisotropic diffusion is assumed to be available [G]
+        scale_space[..., t] = apply_anisotropic_diffusion(input_volume, scale=t, mask=mask)
+        
+    # Step 2: Scale Detection
+    # Compute normalized Laplacian
+    # Note: Exact formula for normalized Laplacian is not provided in sources [S2, unofficial]
+    # This is a placeholder for the Laplacian computation [G]
+    laplacian = compute_normalized_laplacian(scale_space)
+    
+    # Detect local maxima in spatial and scale domains
+    blob_tuples = []
+    for t in range(num_scales):
+        # Get 3D slice for scale t
+        slice_t = laplacian[..., t]
+        
+        # Find local maxima in this slice
+        # Note: Exact local maxima detection algorithm is not provided in sources [S2, unofficial]
+        # This is a placeholder [G]
+        local_maxima_coords = find_local_maxima_3d(slice_t)
+        
+        for (x, y, z) in local_maxima_coords:
+            blob_tuples.append((x, y, z, t))
+            
+    # Step 3: Back Projection
+    size_volume = np.zeros((Nx, Ny, Nz))
+    
+    # For each voxel, find the nearest blob and interpolate size
+    # Note: Exact Shepard's interpolation with Wendland polynomials is not fully detailed in sources [S2, unofficial]
+    # This is a simplified implementation assuming Euclidean distance and inverse distance weighting [G]
+    # In practice, Wendland polynomials are used for the weight function
+    
+    for x in range(Nx):
+        for y in range(Ny):
+            for z in range(Nz):
+                max_size = 0.0
+                min_dist = float('inf')
+                nearest_blob = None
+                
+                for (bx, by, bz, bt) in blob_tuples:
+                    # Calculate distance
+                    dist = np.sqrt((x-bx)**2 + (y-by)**2 + (z-bz)**2)
+                    
+                    # If this blob is closer than the current nearest, or same distance but larger size
+                    # Note: The source says "keep only the largest size value" [S2, unofficial]
+                    # We assume size is related to scale t. Let's assume size = t for simplicity [G]
+                    # In reality, size might be sqrt(t) or similar.
+                    current_size = bt 
+                    
+                    if dist < min_dist:
+                        min_dist = dist
+                        max_size = current_size
+                        nearest_blob = (bx, by, bz, bt)
+                    elif dist == min_dist and current_size > max_size:
+                        max_size = current_size
+                        nearest_blob = (bx, by, bz, bt)
+                        
+                # Assign the size value
+                # Note: Shepard's interpolation would weight by distance. 
+                # The source says "back projection utilizing Shepard's interpolation" [S2, unofficial]
+                # If no blobs are found, size remains 0.
+                if nearest_blob is not None:
+                    # Apply Shepard's interpolation weight
+                    # Weight = 1 / dist^2 (common for Shepard, but Wendland polynomials are specified)
+                    # Since exact Wendland polynomial is not provided, we use a simple inverse distance [G]
+                    if min_dist > 0:
+                        weight = 1.0 / (min_dist**2)
+                        # Interpolated size could be a weighted average if multiple blobs are considered
+                        # But the source says "keep only the largest size value" [S2, unofficial]
+                        # This implies a hard selection, not a soft interpolation of values.
+                        # However, "back projection" suggests spreading the value.
+                        # Let's assume the size value is assigned directly to the voxel if it's the nearest [G]
+                        size_volume[x, y, z] = max_size
+                    else:
+                        size_volume[x, y, z] = max_size
+                        
+    return size_volume
+```
+
+### Parameters
+- **Number of scales ($T$)**: Not given in the sources.
+- **Intensity range**: Optional. If provided, limits the scale space computation to voxels within this range [S2, unofficial].
+
+### Edge Cases and Pitfalls
+- **Masking of smaller features**: A single voxel can be part of features with multiple sizes. The method keeps only the largest size value, which causes smaller features to be masked out by larger ones [S2, unofficial]. This is observed in brain MRI examples [S2, unofficial].
+- **Mitigation**: To avoid masking, the user can specify an intensity range to compute the scale space specifically for that range [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources. Depends on the number of scales, volume resolution, and the efficiency of the anisotropic diffusion and local maxima detection.
+- **Memory Complexity**: $O(N_x N_y N_z T)$ for the scale space, plus $O(B)$ for the blob map, where $B$ is the number of detected blobs [S2, unofficial].
+- **Strengths**: Provides a meaningful attribute for categorizing objects by size, which is useful for transfer function design [S1, unofficial]. Anisotropic diffusion improves localization [S2, unofficial].
+- **Limitations**: Smaller features can be masked out by larger ones [S2, unofficial]. The method is computationally intensive due to scale-space construction and interpolation [S2, unofficial].
+
+## Background
+The method was proposed by Correa and Ma in 2008 [S1, S2, unofficial]. It was adapted from computer vision concepts for use in Direct Volume Rendering (DVR) [S1, unofficial]. The difficulty of defining mathematical descriptors for size variations is a known challenge in this context [S1, unofficial]. The technique analyzes multiscale fields and pyramid schemes to categorize objects [S1, unofficial]. It has been used in applications such as vascular dataset exploration and brain MRI analysis [S1, S2, unofficial].
+
+## Sources
+[S1] A volume exploration approach based on clustering and dimensional reduction to support the definition of multidimensional transfer functions, http://hdl.handle.net/11449/153618, fetched 2026-10-26 (unofficial)
+[S2] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,294 @@
+A fork of Comfyfluffy Ray-traced renderer for Minecraft 26.2's Vulkan backend. Gameplay focused and highly customizable for aesthetics. Support for other gpus is planned. - Add froxel-frustum volumetric fog by arena-ai-coding-agent[bot] · Pull Request #32 · Lumitos0-0/LumisCaustica
+
+Add froxel-frustum volumetric fog by arena-ai-coding-agent[bot] · Pull Request #32 · Lumitos0-0/LumisCaustica · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+arena-ai-coding-agent
+Bot
+commented
+Sep 11, 2026
+Copy link
+Copy Markdown
+Summary
+Implements froxel-frustum volumetric fog to simulate sun/moon light scattering, built on the existing pathtracing capabilities (TLAS visibility rays) instead of shadow maps.
+Frame graph (RtComposite.recordFrame, after the indirect trace): fog bake raygen → barrier → fog apply compute → barrier → DLSS-RR → exposure/bloom/display. The volume stores pre-exposed scatter + transmittance, so the downstream exposure divide stays exact and reconstruction/metering see the finished signal.
+Bake (shaders/pipelines/world/fog.rgen.slang):
+One thread per froxel column (render-res/8), 48 exponential view-depth slices from 0.5 blocks
+Single-scattered sunlight + moonlight with per-column shadow rays via visibility() — fog shadows match surface shadows exactly, including stained glass and cutout alpha
+Post-atmosphere illuminance from the same transmittance LUT + sun/moonIlluminance that drive the sky and NEE; bodies >50x dimmer than the other skip their ray for the whole column
+Sky-dome ambient + airglow floor, Henyey-Greenstein phase, height falloff vs sea level, 2-octave detail noise, static IGN slice dither (temporally stable with or without DLSS-RR)
+Apply (shaders/pipelines/fog/apply.comp.slang): linearizes the reversed-Z depth buffer through the projection's third row, samples the volume at each pixel's scene depth, blends scene*T+L in place.
+Host wiring:
+New RtVolume (3D storage+sampled image) and RtFogPipeline (apply compute pass, PushAddr push layout)
+RtComposite: volume alloc sized from render res, fog.rgen.spv as world raygen index 2, three fogParams push words, gated dispatches via fogActive() — runtime toggle/retune needs no rebuild
+RtPipeline: world binding 12 fogVolume, RAYGEN stage on the sky-view LUT
+RtContext.createVolume + 3D-capable requireStorageImageSupport
+GenerateRtBindings: FOG_VOLUME world binding + FOG pipeline spec
+Config: new Rt.Fog settings (enabled, density, anisotropy, max distance, height falloff) with video-options entries, en_us locale keys, and README update. Underwater boosts density x6 with the biome water tint.
+Verification
+No Java/Slang toolchain is available in this environment, so this has not been compiled. Mitigations done instead:
+Full git diff review of every touched file
+Brace/paren balance checks on all new files
+Every cross-module Slang symbol, struct field, and unit convention (100 blocks = 1 km, flags bit 0 = submerged, reversed-Z [1,0]) verified against existing code
+Recommend a full build + in-game check (day/night cycle, underwater, fog toggle) before merging.
+Lumitos0-0
+and others
+added 6 commits
+September 11, 2026 00:37
+Add froxel-frustum volumetric fog
+…
+cecd177
+```
+Bakes a render-res/8 x 48-slice froxel volume with single-scattered
+sun/moonlight plus sky ambient, using TLAS shadow rays (the same
+visibility query NEE uses) so fog shadows match surface shadows
+exactly with no shadow maps. A compute pass blends the volume over
+the path-traced image before DLSS-RR, storing pre-exposed scatter
+so the downstream exposure divide stays exact.
+
+- world/fog.rgen: unjittered bake raygen, exponential view-depth
+  slices, 2%-gated dual-body shadow rays, static IGN slice dither
+- fog/apply.comp: reverses-Z depth linearize, slice LUT sample,
+  in-place scene*T+L blend
+- RtVolume/RtFogPipeline: 3D volume resource and apply pipeline
+- Rt.Fog settings (enabled, density, anisotropy, max distance,
+  height falloff) with video options + locale entries
+- Underwater boost (density x6, biome water tint), height falloff
+  relative to sea level, runtime toggle without rebuild
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fog quality pass: skylight occlusion, noise retune, bilateral upsampl…
+…
+9b5c754
+```
+…e, presets
+
+- Bake now traces one upward shadow ray per slice and scales the sky
+  ambient by its transmittance, so caves and interiors go dark with a
+  correct gradient through cave mouths (10% floor stands in for bounced
+  light; airglow stays unoccluded). Fixes interiors glowing blue.
+- Detail noise retuned: 10-block cells instead of 28, lower contrast
+  (same ~1 mean), amount 0.5 -> 0.3, and faded out within ~8 blocks of
+  the camera so near-field air stays smooth. Kills the smoke-blobs.
+- Apply pass upsamples with a joint-bilateral 2x2 (per-tap depth,
+  log-depth similarity weights) instead of one trilinear tap, so fog
+  no longer bleeds across silhouettes.
+- New fog.quality setting (0 Performance: 8x/32 slices, 1 Balanced:
+  8x/48, 2 Quality: 4x/64) with a video-options cycle button; the
+  froxel volume reallocates on the next frame when it changes.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fog: direct-only lighting, Very High + Ultra presets
+…
+b82f340
+```
+- Remove the sky-ambient dome light and airglow floor from the fog
+  bake: in-scatter starts at zero and only direct sun/moonlight
+  through per-slice shadow rays adds light. Unlit fog now purely
+  attenuates, so caves and night air go fully dark; also drops the
+  upward occlusion ray, saving one shadow ray per slice. fogParams1.z
+  is reserved (push layout unchanged).
+- Extend fog quality to five levels: Performance 8x/32, Balanced
+  8x/48, Quality 4x/64, Very High 4x/96, Ultra 4x/128, with matching
+  cycle-button entries and locale strings.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fog apply: center-tap fallback for fully depth-rejected pixels
+…
+eb749df
+```
+When sub-pixel geometry (distant leaves, wires) depth-rejects all four
+bilateral taps, every weight underflows to 0 and the guarded normalize
+(0 / 1e-6) collapses the pixel to black. An epsilon-weighted center tap
+falls those pixels back to their own depth's fog instead, with <=0.25%
+bias on normal pixels.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Temporal fog: spatiotemporal bake jitter + history accumulation
+…
+a0130a9
+```
+Bake jitters sub-froxel XY and slice position every frame from a tiled
+64^3 RGBA blue-noise volume (Christoph Peters CC0 3D noise, repacked
+offline by tools/repack_bluenoise64.py; replaces the static IGN dither).
+The apply pass reprojects last frame's result through the guide motion
+vectors and blends it with the live bilateral upsample (0.85 feedback),
+with AABB history clamping and ~10% log-depth disocclusion rejection.
+
+History lives in a render-res RGBA16F ping-pong pair selected by frame
+parity in-shader, so descriptors are written once per resize and the
+read image is never the write image (no in-dispatch barrier; the
+pre-apply full barrier covers the cross-frame RAW). fogParams2.w carries
+the host's history-valid flag, cleared by rebuilds, fog toggles, and
+skipped frames.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Froxel fog: 3D world-space temporal accumulation (Path A)
+…
+ce3ece4
+```
+Replaces the 2D screen-space apply history with full-3D voxel reprojection.
+FRESH bake (world/fog.rgen) is untouched: per-column raymarch with TLAS
+sun/moon shadow rays, STBN spatiotemporal jitter, exponential depth slices;
+fixed 256x128 XY grid, 32-128 slices by quality. No shadow maps.
+
+Accumulate (fog/accumulate.comp, new): FRESH + HISTORY -> RESOLVED in 3D
+world space. Each voxel reprojects its world position into the previous
+frame (prevViewProj + prevInvViewProj appended to WorldPush); history
+volumes ping-pong by frame parity with per-voxel age counters (0..31
+running average), a 7-tap fresh-neighbor box for change detection, and a
+prevDepth occlusion gate (10% + 5cm). Teleport (>5 blocks) resets.
+
+Apply (fog/apply.comp): purely spatial joint-bilateral upsample at each
+pixel's scene depth + composite before DLSS-RR; snapshots prevDepth.
+Zero per-frame descriptor updates: 13 bindings, 2 samplers, 2 pipelines,
+1 set; slot selection in-shader by frame parity.
+
+Host: volume lifecycle tied to render res + quality, WorldPush
+prevInvViewProj, teleport reset. Binding generator: FOG spec 6 -> 13
+bindings, WORLD storage-image pool count covers the fog volume.
+
+Memory: ~64MB at 1080p/64 slices (FRESH 16 + A/B 32 + ages 8 + prevDepth 8).
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+arena-ai-coding-agent
+Bot
+force-pushed
+the
+arena/01a08dd9-lumiscaustica
+branch
+from
+133bdba to
+ce3ece4
+Compare
+September 12, 2026 02:27
+Lumitos0-0
+and others
+added 5 commits
+September 13, 2026 04:42
+Fog: live slice-distribution experiments + per-medium phase + composi…
+…
+1de692b
+```
+…te bias
+
+Slice distribution (Remix power-law):
+- fog.slang slice mapping selectable at runtime: Exponential (legacy
+  Frostbite) or Power ((s/N)^exponent, RTX Remix style, default, exp 2.0).
+- New WorldPush fogParams3: x slice mode, y power exponent, z water
+  anisotropy, w apply depth offset. Bake, accumulate and apply all follow
+  the same mapping; accumulation resets when range/mode/exponent change.
+
+In-game levers (video options, all live):
+- Fog Range slider (fog.max-distance, 32-1024) for the 320->128 far-field
+  experiment; Slice Distribution cycle; Slice Exponent slider (1.0-3.0);
+  Air Anisotropy slider; Detail Noise toggle.
+
+Path 2 settings:
+- Per-medium scattering: air anisotropy default 0.0 (was 0.55 global),
+  water keeps 0.55 via new fog.water-anisotropy.
+- Apply pass samples half a slice toward the camera (Remix depthOffset,
+  default 0.5, fog.depth-offset) against behind-wall fog bleed.
+- Detail noise toggleable (fog.noise, default on, same 0.3 amount).
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fix duplicated method tail at end of RtComposite
+…
+7899ff9
+```
+1de692b accidentally carried over a 12-line duplicated fragment of
+ensureFgInterp (past the class closing brace) from the uncommitted working
+tree it was transplanted from. Truncate back to the class close; the diff
+vs ce3ece4 is now exactly the intended fog change.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fog: port previous engine's sampling discipline (depth-only R1, grid-…
+…
+462b286
+```
+…wide R2, penumbra, analytic slices)
+
+The old froxel engine diagnosed our two artifacts in its own comments: XY
+jitter walks samples across silhouettes where binary visibility cannot
+converge (edge flicker), and per-froxel RNG makes neighbours disagree in
+lattice-sized blotches (blockiness). Port its sampling core into our
+stronger pipeline (bilateral composite + 3D reprojection stay):
+
+- Bake columns sit on exact froxel centres: XY STBN jitter removed, fog no
+  longer consumes the STBN volume (stays bound for future use).
+- In-slice depth from a grid-wide shared R1 golden-ratio sequence: every
+  column integrates the same depth each frame, neighbours always agree.
+- Shadow rays sample a grid-wide shared R2 direction inside each light's
+  disc (sun/moon angular radii, decorrelated offsets): penumbra integrates
+  over frames, shaft edges go soft without extra rays. Phase keeps the
+  unjittered disc centre.
+- Analytic per-slice integration (S*(1-e^-sd)/s) instead of point sampling:
+  exact at any optical thickness; no brightness pumping in thick slices.
+- Water anisotropy 0.55 -> 0.82 (previous engine's physical value).
+
+Side benefit: with neighbours agreeing, the accumulate fresh-cross box is
+tight again, so history clamping actually works.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fog: fix global shake (delta change tracking), exposure/medium histor…
+…
+ad84f95
+```
+…y fixes, STBN removal
+
+The ported grid-wide shared sampling broke the accumulate fresh-box clamp's
+validity condition: agreeing neighbours collapse the box onto today's fresh
+value, so clamping history into it erased the temporal integral and the raw
+per-frame R1/R2 jumps showed through as global shake. Fixes + hardening:
+
+- Remove the fresh-neighbourhood box clamp; change detection is now a
+  relative delta (3x + absolute floors) that fast-tracks by capping the
+  effective age at 3 instead of resetting to zero: lighting steps converge
+  in a few frames, penumbra fringes can't pop, the R1/R2 integral blends
+  untouched. Also saves 6 fresh taps per voxel.
+- Exposure compensation (previous engine's historyScale): pre-exposed
+  history is rescaled by this/prev preExposure (fogParams1.z, was reserved)
+  before blending, so fog tracks exposure transitions instead of lagging.
+- Medium-transition reset: air <-> water lighting models must never blend
+  (the old engine rejected those voxels too); submerging/surfacing now
+  clears fog history like a teleport.
+- Cleanup: STBN fully removed (binding 13 decl, RtStbn, world-pipeline
+  layout + setter + wiring, 1MB noise volume, repack script, CC0 notice) —
+  analytic R1/R2 sequences replaced it; no shader consumer remained.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fix generateRtBindings: drop stbnTex from WORLD descriptor spec
+…
+c1d97bc
+```
+The STBN removal orphaned the hardcoded STBN entry in the codegen's WORLD
+resource map (validated against indirect.rgen's reflection). Remove it;
+WORLD_STBN has no remaining references.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

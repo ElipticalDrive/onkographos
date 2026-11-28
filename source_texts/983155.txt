@@ -1,0 +1,371 @@
+Why now Upstream has merged the whole "introduce + deprecate" arc of openvdb #2232, shipping in OpenVDB 13.1: #2288 single-space GridHandle<cuda::Buffer<std::byte, R>> #2292 cuda::copyTo cross-space transfers, pinned handles #2293 reset(...
+
+Finish adopting NanoVDB's injectable CUDA memory resources (openvdb #2232): move grid storage off the dual-space TorchDeviceBuffer · Issue #770 · openvdb/fvdb-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Finish adopting NanoVDB's injectable CUDA memory resources (openvdb #2232): move grid storage off the dual-space TorchDeviceBuffer #770
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Finish adopting NanoVDB's injectable CUDA memory resources (openvdb #2232): move grid storage off the dual-space TorchDeviceBuffer#770
+Copy link
+Labels
+NanoVDBCode changes to NanoVDB itselfCode changes to NanoVDB itselfUnified Memory Torch Backendcore libraryCore fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python moduleCore fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python modulerefactoring/cleanupClean up or refactor codeClean up or refactor codetriageNeeds team reviewNeeds team review
+Milestone
+v0.6
+Description
+swahtz
+opened on Sep 11, 2026
+Issue body actions
+Why now
+Upstream has merged the whole "introduce + deprecate" arc of openvdb #2232, shipping in OpenVDB 13.1:
+#2288 single-space GridHandle<cuda::Buffer<std::byte, R>>
+#2292 cuda::copyTo cross-space transfers, pinned handles
+#2293 reset() via destroy(), single-space NodeManager
+#2301 DeviceBuffer deprecated; cuda/HandleStorage.h lets every tool emit single-space output; VoxelBlockManagerHandle gains single-space accessors; TopologyBuilder stages its root via allocateProcessedRoot/uploadProcessedRoot
+#2319 DistributedPointsToGrid per-device resources; UnifiedBuffer deprecated
+One release later upstream deletes hasDeviceDual, the dual GridHandle accessors and the BufferT::create fallback. nanovdb::GridHandle<fvdb::TorchDeviceBuffer> is our grid storage everywhere (GridBatchData.h), and it depends on exactly those things. We should migrate inside the deprecation window rather than at the removal.
+Where we are
+Route NanoVDB builder scratch through PyTorch's active CUDA allocator via upstream memory-resource seams #732 routed builder scratch through BuilderResource (= TorchResource, PyTorch's caching allocator) at all 13 CUDA builders plus our own PadGrid.cuh.
+Update NanoVDB for single-space GridHandle and widen Torch-pool coverage #752 bumped the pin past #2288 and converted the small ready-now pieces (VBM metadata buffers via an adapter, SaveNanoVDB staging). It is now behind main (which moved to the #2220 pin in Use fused NanoVDB ReadAccessor::getDimAndActive in the HDDA iterators #754) and predates #2292/#2293/#2301/#2319.
+TorchDeviceBuffer is already single-space internally: one pointer plus a runtime torch::Device. We never call deviceUpload/deviceDownload. Its hasDeviceDual = true is load-bearing only for the dual GridHandle constructor, handle.deviceData()/deviceGrid<>(), nanovdb::cuda::mergeGridHandles, and the tools' BufferT::create output path. All four go away at the remove step.
+Two sites still spell nanovdb::cuda::DeviceBuffer (PadGrid.cuh default template arg and root staging). With -Werror, the pin bump alone turns those into build errors.
+Design
+One device buffer type, device index in the resource. NanoVDB's traits pick host vs. device per type at compile time, so a runtime-device buffer type like TorchDeviceBuffer cannot satisfy the single-space concept. Instead:
+```
+// src/fvdb/TorchDeviceResource.h
+struct TorchDeviceResource : nanovdb::cuda::SyncFromAsync<TorchDeviceResource> {
+    torch::Device mDevice;  // CUDA:i or PrivateUse1; default = current CUDA device
+    // CUDA: CUDAGuard(mDevice) + c10 raw_alloc_with_stream / raw_delete
+    // PrivateUse1: c10::GetAllocator(PrivateUse1)->raw_allocate / raw_deallocate
+};
+using DeviceGridBuffer = nanovdb::cuda::Buffer<std::byte, TorchDeviceResource>;
+
+// src/fvdb/GridStorage.{h,cu}
+class GridStorage {
+    std::variant<nanovdb::GridHandle<nanovdb::HostBuffer>,
+                 nanovdb::GridHandle<DeviceGridBuffer>> mHandle;
+    torch::Device mDevice;  // kCPU | CUDA:i | PrivateUse1
+    // device(), isEmpty(), bufferSize(), gridCount(), gridSize(i), gridType(i)
+    // hostBytes() / deviceBytes()  (PrivateUse1 returns the unified pointer from both)
+    // hostGridAt<T>(off) / deviceGridAt<T>(off), stream()
+    // to(torch::Device, cudaStream_t)  -> cuda::copyTo
+    // static deviceProto(device, stream) -> 0-byte DeviceGridBuffer; replaces the zero-size "guide"
+    // static empty(device)
+};
+```
+The device index travels inside proto.resource() through createDeviceStorage, copyTo and Buffer::copy(), so the guide-buffer hack becomes principled and allocations are device-correct even if a caller forgets a CUDAGuard. BuilderResource/TorchResource stay as the stateless scratch resource; the tools take storage BufferT and scratch ResourceT independently. GridBatchData::mGridHdl becomes std::shared_ptr<GridStorage>; nanoGridHandle() is replaced by gridStorage(), deviceGridPtrAt(i), hostGridPtrAt(i).
+Kernel-free assembly. Constructing a device handle from raw bytes costs a parse kernel plus syncs. Only the per-item op.getHandle(proto) pays that. Everything we assemble ourselves adopts known metadata:
+mergeDeviceGridHandles(handles, proto, stream): one allocation, cudaMemcpyAsync per grid, header-fixup kernel, host-built GridHandleMetaData, HandleFactory::make. Replaces nanovdb::cuda::mergeGridHandles, which is enable_if<hasDeviceDual> and syncs once per grid.
+makeDeviceHandleFromLayout for MakeContiguous / ConcatenateGrids, which know their layout.
+Hoist the duplicated updateGridCountAndZeroChecksum kernel into one header. Checksums stay disabled on merge/concat as today.
+Path by path
+Path
+Today
+After
+13 CUDA builders
+TorchDeviceBuffer guide(0, dev); op.getHandle(guide); cuda::mergeGridHandles
+GridStorage::deviceProto(dev, stream); op.getHandle(proto); mergeDeviceGridHandles
+13 CPU builders
+createNanoGrid<..., TorchDeviceBuffer>; .buffer().to(kCPU); mergeGrids
+createNanoGrid<...> (HostBuffer); mergeGrids
+PrivateUse1 multi-GPU builds
+DistributedPointsToGrid<GridT>
+DistributedPointsToGrid<GridT, TorchDeviceResource> with one resource per mesh device (#2319 seam)
+.to(device) (CloneGrid.cu)
+compaction copy + blocking cudaMemcpy in a hand-written copy<>
+same-device: compaction only; cross-device: cuda::copyTo (H→D adopts metadata, no kernel)
+pickle
+memcpy from buffer().data(); CPU TorchDeviceBuffer on load
+hostBytes(); HostBuffer handle on load
+LoadNanovdb.cpp (host TU)
+CPU TorchDeviceBuffer handles → cloneGrid
+HostBuffer handles → cloneGrid (copyTo is host-callable)
+SaveNanoVDB.cu
+cudaMemcpy from deviceData(); indexToGrid<..., TorchDeviceBuffer, ...>
+copyTo<HostBuffer> after contiguousGridHandle (also fixes view indexing); indexToGrid output on cuda::Buffer<std::byte, BuilderResource>
+PopulateGridMetadata, Inject, ReinitializeSdf, BuildMergedGrids, PredGatherIGemm
+nanoGridHandle().deviceGrid<>(i) (physical index)
+deviceGridPtrAt(i) / hostGridPtrAt(i) (fixes latent view-indexing bug)
+ReinitializeSdf.cu VBM buffers
+local TorchVbmBuffer adapter
+VoxelBlockManagerHandle<cuda::Buffer<std::byte, BuilderResource>> directly
+PadGrid.cuh root staging
+cuda::DeviceBuffer::create + deviceUpload
+allocateProcessedRoot / uploadProcessedRoot (mirrors upstream DilateGrid)
+BuildPrunedGrid.cu mask scratch
+TorchDeviceBuffer
+cuda::Buffer<Mask<3>, BuilderResource>
+Hygiene folded in: pass the stream to PruneGrid in BuildPrunedGrid.cu (it runs on the default stream today); replace the raw torch alloc in BuildFineGridFromCoarse.cu's single-GPU CUB path with a BuilderResource buffer like its multi-GPU twin.
+TorchDeviceBuffer (public API since #632) stays for one release as a [[deprecated]], fvdb-unused shim, and is deleted with the pin bump past upstream's remove step.
+Plan
+Rework #752 in place, rebased on main, pin → 31d1e596 (merge of #2319), as ordered commits that each build and pass:
+Rebase + pin + -Werror deprecation fallout in PadGrid.cuh.
+Ready-now conversions: delete TorchVbmBuffer; indexToGrid single-space output; stream/alloc hygiene above.
+Primitives: TorchDeviceResource.h, GridStorage.{h,cu}, DeviceGridHandleUtils.cuh, GridStorageTest.cu.
+Flip storage: GridBatchData, GridBatchDataFactory, PopulateGridMetadata, MakeContiguous, ConcatenateGrids, CloneGrid, SerializeGrid, CreateEmptyGridHandle, LoadNanovdb, SaveNanoVDB, accessor users, LoadNanovdbTest. A temporary third variant alternative over GridHandle<TorchDeviceBuffer> keeps untouched builders compiling.
+Builders: 13 CUDA + 13 CPU sites, 3 headers, PadGrid.cuh, DistributedPointsToGrid per-device resources; drop the temporary alternative.
+Deprecate TorchDeviceBuffer; grep gate for TorchDeviceBuffer|cuda::DeviceBuffer|cuda::UnifiedBuffer under src/; BuilderResource.h comment; CHANGES.md Breaking entry.
+Coordination: #733 adds TorchDeviceBuffer emptyBuf(0, device) sites (→ GridStorage::empty); #747 touches GridBatchData.{h,cu} (VbmCache) and should read grids via deviceGridPtrAt. Whichever lands second rebases; the overlap is a handful of lines.
+Upstream follow-ups (after the fvdb helper exists, not blocking)
+Single-space cuda::mergeGridHandles / splitGridHandles overloads for GridHandle<cuda::Buffer<std::byte, R>>, kernel-free via metadata adoption. mergeDeviceGridHandles is the reference implementation; fvdb deletes its copy at the next pin bump. Include a public "adopt validated metadata" construction so downstream stops reaching into cuda::detail::HandleFactory.
+Report on #2232 that fvdb has migrated, and that the dual-gated mergeGridHandles is the last dual-only tool entry point the remove step must replace.
+Optional: a stream parameter on the voxelsToGrid free functions (our four sites run on the default stream). Workaround is the PointsToGrid class form.
+Verification
+./build.sh install gtests warning-clean; ./build.sh ctest.
+tests/unit: test_basic_ops.py (test_to_device, test_nearest_voxels_to_points_peak_memory 200 MiB), test_dual.py (test_dual_grid_peak_memory 150 MiB; its comment about raw cudaMalloc scratch is stale), test_basic_ops_single.py::test_pickle, test_io.py (cpu × cuda × dtypes), test_sdf.py, test_viz.py; then the full suite. Repeat the memory-sensitive files with PYTORCH_NO_CUDA_MEMORY_CACHING=1 as CI does.
+FVDB_NANOVDB_TRACE_ALLOCS=1 trace of from_points + dilate before/after: no non-torch allocations should remain except upstream TopologyBuilder's pinned root staging.
+GridBatch.from_points at batch 256 before/after, recorded in the PR: one parse kernel per item is new; one sync per grid in the old merge is gone.
+New sliced-batch inject test for the deviceGrid<>(i) → deviceGridPtrAt(i) fix.
+Risks
+Stream ordering. DeviceGridBuffer frees on its retained stream; TorchDeviceResource::deallocate_async ignores the stream and relies on torch's alloc-time record, same as TorchResource today. GridStorage::to orders the destination stream after the source stream with an event before copyTo.
+Multi-GPU. Single-space storage ignores createDeviceStorage's device argument; the resource guards internally, so allocations are correct. Kernels still need the callers' existing CUDAGuards; a debug assert in deviceProto() catches omissions.
+Default-constructibility. TorchDeviceResource defaults to the current CUDA device so DeviceGridBuffer, its handle, the variant, and copyTo of empty handles stay default-constructible.
+Out of scope
+gsplat's raw cudaMallocAsync in FVDB_CUB_WRAPPER_ASYNC; upstream step 4 (CCCL adapter) and the graph-capturable builder; deleting TorchDeviceBuffer.{h,cpp} (next pin bump past the remove step).
+Activity
+Next
+swahtz
+added
+refactoring/cleanupClean up or refactor codeClean up or refactor code
+core libraryCore fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python moduleCore fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python module
+Unified Memory Torch Backend
+NanoVDBCode changes to NanoVDB itselfCode changes to NanoVDB itself
+on Sep 11, 2026
+github-actions
+added
+triageNeeds team reviewNeeds team review
+on Sep 11, 2026
+harrism commented on Sep 11, 2026
+harrism
+on Sep 11, 2026
+Last edited by harrism
+Contributor
+More actions
+Analysis by Claude Code, run by @harrism.
+Three things the plan does not yet account for, all verified against main, the PR heads, and openvdb 31d1e596.
+1. Coordination: #757 belongs on the list with #733 and #747 — and it helps
+#757 (batched leaf-mask topology) rewrites four of the step-5 builders. Its effect on this migration is net positive and worth sequencing deliberately:
+It removes the DilateGrid.cuh / RefineGrid.cuh / CoarsenGrid.cuh includes from BuildGridForConv.cu, BuildGridForConvTranspose.cu, BuildFineGridFromCoarse.cu, BuildCoarseGridFromFine.cu, and with them the perItemGridHandle → nanovdb::cuda::mergeGridHandles path in those files. Four fewer mergeGridHandles call sites for step 5 to convert.
+It adds BatchedTopologyBuilder.cuh, which allocates one TorchDeviceBuffer(totalBytes, device) (:1113) and assembles every grid into it with no per-grid sync — already the "kernel-free assembly" shape this plan wants from mergeDeviceGridHandles. Its dependence on the dual-space API is exactly one storage type and one deviceData() (:823); migrating it is swapping in DeviceGridBuffer and deviceData() → data().
+So: #757 first shrinks step 5; #770 first means #757 rebases onto GridStorage and re-targets one type. Either order is fine, but the plan should say which, since the four files overlap heavily.
+2. Follow-on: openvdb #2322
+#2322 (open) retypes the scratch buffers in TopologyBuilder.cuh, RefineGrid.cuh, CoarsenGrid.cuh. After #757, the only fvdb file still including any of those is PadGrid.cuh — the same file step 5 already reworks for allocateProcessedRoot / uploadProcessedRoot. Worth noting so the next pin bump is known to land in one place.
+3. Step 1 scope — corrected
+Correction to an earlier version of this item, which said a two-line DualDeviceBuffer rename keeps step 1 green. It does not. At 31d1e596, #2301 removed TopologyBuilder::mProcessedRoot entirely (verified: the rename compiles PadGrid's two DeviceBuffer spellings, then fails on has no member "mProcessedRoot" at PadGrid.cuh:759/760/765). So the allocateProcessedRoot / uploadProcessedRoot / deviceProcessedRoot() port of PadGrid's root staging is required in step 1 for the pin bump to build, not deferrable to step 5. The plan's step-5 line for PadGrid.cuh should move up.
+Minor: #752 currently rebases onto main with zero conflict hunks, so step 1's rebase is mechanical.
+harrism commented on Sep 11, 2026
+harrism
+on Sep 11, 2026
+Contributor
+More actions
+Steps 1–2 are up as #773. Two things learned doing it that the plan should absorb:
+Step 1 has a hidden prerequisite. NanoVDB #2292/#2301 make GridHandle validate a host buffer's grid chain at construction (parseHostGridChain: each header valid, index i of count N, size fits). Two fvdb sites construct handles around headers copied out of a multi-grid batch without normalizing them — SaveNanoVDB.cu indexToGridHost() (inherits mGridIndex/mGridCount/index-grid mGridSize; the CUDA indexToGrid it ports resets these) and LoadNanovdb.cpp copyIndexGridToHandle() (sets count but not index). At the new pin that is 275/622 test_io failures. Nine lines, correct at the old pin, so Advance NanoVDB pin to openvdb #2319 and adopt single-space cuda::Buffer where it now fits (#770 steps 1-2) #773 lands it as a leading commit. Worth a grep across the step-4/5 sites for the same construct-then-patch shape before the storage flip — assembleOnIndexBlindBuffer and getIndexGrid happen to be consistent today only because they copy whole chains.
+Step 1's PadGrid.cuh item is the full port, not a rename — mProcessedRoot is gone at 31d1e596, as corrected above; done in Advance NanoVDB pin to openvdb #2319 and adopt single-space cuda::Buffer where it now fits (#770 steps 1-2) #773.
+Verification at the pin: -Werror clean, 47/47 gtests, 1270 pytest passed across test_sdf/io/basic_ops/basic_ops_single/prune_single_voxel/sliced_batch/inject/batched_topology_builder.
+harrism
+added 2 commits that reference this issue on Sep 11, 2026
+Use single-space cuda::Buffer directly where NanoVDB now allows it
+...
+05f5037
+Use single-space cuda::Buffer directly where NanoVDB now allows it
+...
+d6e9300
+swahtz commented on Sep 11, 2026
+swahtz
+on Sep 11, 2026
+Last edited by swahtz
+ContributorAuthor
+More actions
+Suggestion for tightening three contracts that came from a design review:
+Order source lifetime after asynchronous reads. Having the destination stream wait for source writes covers readiness, but the source allocation must also remain valid until the copy finishes. This is particularly relevant when .to() transfers from a temporary compacted handle. A small probe using PyTorch’s native caching allocator reproduced the failure mechanism: after only the readiness dependency, deleting and reallocating the source reused its address, and the delayed copy read replacement bytes. Specify allocator stream recording, ownership retained until completion, or a completion event back to the allocation stream. Changing the buffer’s retained stream alone is insufficient while deallocate_async ignores that argument. Apply the same contract to merge/concatenation inputs when streams differ.
+Preserve the requested resource on empty transfers. At 31d1e596, cuda::copyTo returns a default-constructed destination handle when the source has zero bytes, ignoring the supplied prototype. Since TorchDeviceResource defaults to the current CUDA device, an empty transfer targeting cuda:1 while cuda:0 is current could leave the buffer resource inconsistent with GridStorage::device(). Have GridStorage::to explicitly construct its empty destination using the requested device/resource and stream.
+Distinguish an omitted stream from explicit legacy stream zero. TorchDeviceBuffer currently treats null as “use torch’s current stream,” making explicit stream zero indistinguishable from omission. This is pre-existing, but the replacement API should avoid carrying it forward. Use overloads or an optional stream: omission resolves to the target device’s current PyTorch stream; an explicitly supplied stream, including zero, is honored. Convert the remaining default-stream voxelsToGrid sites to the explicit-stream class API during the builder migration.
+These details are consistent with NanoVDB’s transfer contract and empty-copy behavior at the proposed pin.
+Add targeted tests for immediate source destruction and allocation reuse after an asynchronous transfer, empty transfers to a noncurrent GPU, and explicit stream zero while a nondefault PyTorch stream is current. Run the lifetime tests with caching enabled as well as the existing no-caching configuration; allocation reuse is essential to exposing this failure mode.
+swahtz commented on Sep 11, 2026
+swahtz
+on Sep 11, 2026
+ContributorAuthor
+More actions
+Reviewing #773 (steps 1–2) against this plan turned up one design point the plan needs to settle, and a few items that should be added to later steps so they are not lost.
+1. Which stream owns grid storage allocations
+The design records grid storage against whatever stream allocate_async receives, and the Risks section says deallocate_async ignores its stream and relies on that alloc-time record. That is fine for streams fvdb owns, but upstream DistributedPointsToGrid creates its output storage on mDeviceMesh[0].stream (HandleStorage.h createDeviceStorage), and DeviceMesh has no constructor that accepts caller streams. BuildGridFromIjk.cu and BuildDenseGrid.cu build a loop-local DeviceMesh, so the returned GridBatch block ends up recorded against a cudaStreamDestroy'd stream. c10 pools freed blocks by exact cudaStream_t, so the block is never reusable by any torch stream (reserved memory grows one segment per build until an OOM release), and with expandable_segments:True the eventual unmapHandles syncs on the dead handle and throws.
+#773 introduces this today because the old pin dropped the stream in create() (noted on the PR). The TorchDeviceResource design carries it forward unchanged, and @swahtz's item 3 (honor every explicitly supplied stream, including zero) would lock it in. The plan should pick one and say so:
+cache a long-lived per-device DeviceMesh so the recorded stream stays valid, or
+have the storage resource accept only torch pool streams and fall back to the device's current torch stream for anything else (needs reconciling with item 3: honor explicit streams that torch knows about), or
+ask upstream for a storage-stream parameter on DistributedPointsToGrid separate from the mesh streams.
+2. Items to add to the step lists
+Step 2 or 4 — patchGridWithBlindShape checksum. It rewrites checksum-covered header fields (mGridSize, index/count, blind metadata, mVoxelSize, mMap, mGridName) after updateChecksum has run, so batch-size-1 exports of Partial-checksum grids (anything built via setChecksum(CheckMode::Default): dilate, pad, prune, merge, nearest-voxels) fail nanovdb_validate. Batches >1 are incidentally repaired by mergeGrids' updateGridCount, which is why tests pass. One line at the end of the function (mChecksum.disable(), matching the rule Advance NanoVDB pin to openvdb #2319 and adopt single-space cuda::Buffer where it now fits (#770 steps 1-2) #773 applies in LoadNanovdb.cpp) fixes it and lets the earlier updateChecksum go. Advance NanoVDB pin to openvdb #2319 and adopt single-space cuda::Buffer where it now fits (#770 steps 1-2) #773 lists it as follow-up; nothing here picks it up.
+Step 4 — empty grids in the CUDA export path. Upstream IndexToGrid::getHandle launches processRootTilesKernel<<<0, 1>>> unguarded for an empty grid, and cudaCheckError calls exit(). The copyTo<HostBuffer> rewrite of SaveNanoVDB.cu does not reach this because it happens before the output buffer exists. Skip indexToGrid for numVoxelsBi == 0 and build the empty typed grid host-side. Also worth an upstream note: CUDA IndexToGrid copies the whole source header and never resets mGridSize, so the new single-space GridHandle size check would reject an empty grid even with the launch guarded.
+Step 3 — a host-side header normalizer. Advance NanoVDB pin to openvdb #2319 and adopt single-space cuda::Buffer where it now fits (#770 steps 1-2) #773 adds two more hand-rolled "make this header standalone" sites (LoadNanovdb.cpp, SaveNanoVDB.cu indexToGridHost), making six in fvdb that each write a different subset of {mGridIndex, mGridCount, mGridSize, mBlindMetadata*, mChecksum}. Since GridHandle now throws on inconsistency, every future site that forgets one is a runtime exception, and @harrism's comment above already predicts more construct-then-patch sites in steps 4–5. One normalizeStandaloneGridHeader(GridData*, gridSize) next to DeviceGridHandleUtils.cuh, wrapping tools::updateGridCount plus size, blind fields (offset = gridSize, per GridData::init) and checksum, is the fix. LoadNanovdb.cpp currently sets mBlindMetadataOffset = 0 where nanovdb's convention is mGridSize.
+Step 5 — one scratch idiom. RAIIRawDeviceBuffer<T> (three users: PopulateGridMetadata, IjkForMesh, BuildGridFromNearestVoxelsToPoints) does the same job as cuda::Buffer<T, BuilderResource> over the same raw_alloc_with_stream/raw_delete pair. Migrate the users or make it a shim, so stream-ordering fixes reach both. Also drop the unused getHandle default template argument in PadGrid.cuh while the file is open for #2322.
+Step 6 — BuilderResource.h. Add template <class T> using BuilderBuffer = nanovdb::cuda::Buffer<T, BuilderResource>; and stop enumerating adopter files in the comment (the list in Advance NanoVDB pin to openvdb #2319 and adopt single-space cuda::Buffer where it now fits (#770 steps 1-2) #773 is already incomplete).
+3. Covered by the plan as written
+For the record, these #773 review findings need nothing beyond the existing steps: mergeGridHandles / voxelsToGrid on legacy stream 0 (step 5 + upstream follow-up 3), the unreachable H2D fallback in SaveNanoVDB.cu (rewritten in step 4), and the raw_alloc / raw_alloc_with_stream ternary in TorchDeviceBuffer.cpp (deprecated in step 6).
+harrism
+added a commit that references this issue on Sep 15, 2026
+Key device allocations to torch's stream and order the writer after it
+...
+d4d4cbf
+harrism commented on Sep 15, 2026
+harrism
+on Sep 15, 2026
+Last edited by harrism
+Contributor
+More actions
+Item 1 (which stream owns grid storage allocations) is settled in #773, toward the second option, but with a correction after codex review of the first attempt (see 6f605b9 and the PR comment): the two policies are two resources. TorchResource (scratch, BuilderResource) keys the block to the caller's stream, because deallocate_async does not order the free and the builders destroy scratch behind in-flight kernels. TorchStorageResource (grid storage) allocates on the current torch stream and event-orders any other writer stream after the allocation; TorchDeviceBuffer allocates through it. The step-3 TorchDeviceResource should adopt the storage body. Item 3 (honour an explicit stream, including zero) then reads as: honoured as the key for scratch, honoured as an ordering hint for storage; under c10's native allocator storage cannot honour it as the key. Discussion on the #773 thread: #773 (comment)
+harrism
+added 2 commits that reference this issue on Sep 15, 2026
+Address review: BuilderBuffer alias, stream-zero contract, header com…
+...
+6e8420c
+Split the torch resource: scratch keys to its stream, storage to torch's
+...
+6f605b9
+5 remaining items
+Load more
+harrism commented on Sep 16, 2026
+harrism
+on Sep 16, 2026
+Contributor
+More actions
+Step 4 is up as #787: GridBatchData holds GridStorage; nanoGridHandle() is gone; compaction, concatenation, clone, serialize, load, save and empty grids produce GridStorage directly (kernel-free where the layout is known). The builders are untouched and adopt through a temporary copying seam (LegacyGridHandle.h), so until step 5 each build pays one extra copy of the grid bytes; that is the argument for landing step 5 promptly after. Six sites that indexed the shared storage physically (wrong for sliced batches) now go through the logical accessors, and codex review surfaced two pre-existing serialize defects (CPU views, empty batches) and one save defect (host patching before D2H completion) that are fixed in the same PR. Step 5 inherits from this: contiguousGridHandle, cloneGridHandleAt, createEmptyGridHandle and the makeGridBatchData(GridHandle<TorchDeviceBuffer>&&) overload all go when the builders move onto GridStorage::deviceProto / HostBuffer.
+swahtz commented on Sep 16, 2026
+swahtz
+on Sep 16, 2026
+ContributorAuthor
+More actions
+Reviewing #787 (step 4) against the plan. Findings that belong to this PR are on the PR. These belong to later steps or have no owner yet.
+Step 5
+First commit: one copy-and-fix helper. The CUDA arms of concatenateGrids (ConcatenateGrids.cu:108-126), contiguousGridStorage (MakeContiguous.cu:108-129, via copyAndFixGrid + SourceStreamOrder) and mergeDeviceGridHandles (DeviceGridHandleUtils.cuh:100-133) are the same loop three times (bracket the source stream, D2D per grid, updateGridCountAndZeroChecksum, push GridHandleMetaData, makeDeviceHandleFromLayout) and already disagree on PrivateUse1: SourceStreamOrder hand-writes PU1 synchronizeStream branches that orderStreamAfter already performs for a non-CUDA device, concatenateGrids adds a trailing sync the last element's ordering already did, and mergeDeviceGridHandles relies on the fallback alone. The checksum-policy decision and the PU1 ordering fix (items 1 and 3 of my Add GridStorage, TorchDeviceResource and device-handle utilities (#770 step 3) #786 comment) each have to be applied in three files today. One appendGridSpans(buffer, meta, stream, device, srcStream, spans) in DeviceGridHandleUtils.cuh before the builders move onto it puts both decisions in one place, and upstream follow-up 1 then replaces one helper instead of three. Same commit: SourceStreamOrder should order in a destructor, not a manual finish().
+Single-pass getIndexGrid and cloneGrid. Both compact on the source device and then to(device), two full passes; getIndexGrid went from one copy to two in Hold grid storage in GridStorage instead of GridHandle<TorchDeviceBuffer> (#770 step 4) #787. For isContiguous() batches the storage already holds exactly the logical grids with validated headers and to() copies verbatim, so gridStorage().to(device) is equivalent. Giving contiguousGridStorage a destination device makes the non-contiguous cross-device case one pass too. The path table promises one pass for .to(), and step 5 already deletes cloneGridHandleAt.
+PU1 concat sync count. concatenateGrids now issues 2N+1 all-device cudaStreamSynchronize loops (ConcatenateGrids.cu:109/126/132) where the base issued none. Same fix as item 3 above; falls out of the helper.
+Identity paths through the seam. BuildPaddedGrid.cu:340, BuildCoarseGridFromFine.cu:72, BuildFineGridFromCoarse.cu:422 return contiguousGridHandle and then go through adoptLegacyGridHandle: two D2D copies and 2x grid bytes live until the frame unwinds (adoptLegacyGridHandle takes an rvalue ref and never moves from it). Goes away with the seam, noting it so the identity checks get hoisted above the dispatch when the builders are converted.
+Step 5 or 6
+gridStorage() exposes physical indexing. GridStorage::deviceGridAt/hostGridAt/gridCount/gridSize/gridOffset are physical, so the sliced-view class Hold grid storage in GridStorage instead of GridHandle<TorchDeviceBuffer> (#770 step 4) #787 fixes at six sites is still spellable from any GridBatchData (view->gridStorage().deviceGridAt<...>(0) returns parent item 0). Every production caller needs only device()/stream()/hostBytes()/deviceBytes()/bufferSize() plus logical cumBytesAt. Once the builders no longer need raw handles, add GridBatchData::storageStream(), move the detail/ callers onto it plus hostGridPtrAt/deviceGridPtrAt, and make gridStorage()/mStorage private (friend or storagePtr() for IndexGrid.cu:99). This is also the natural place to enforce the cross-stream-readers rule from item 2 of my Add GridStorage, TorchDeviceResource and device-handle utilities (#770 step 3) #786 comment.
+Unowned cleanup
+serializeGrid builds a throwaway GridBatchData (compaction, D2H, populateGridMetadata, leaf-index tensors) to memcpy its bytes (SerializeGrid.cu:31-36); compacting straight into the output tail is one byte pass. SerializeGrid.cu:42 numGrids == 0 ? 0 : storage.bufferSize() is self->totalBytes().
+concatenateGrids' flat meta duplicates the nested writeByteOffsets/byteSizes vectors, and its has_index TORCH_CHECK at L94 is unreachable (every CUDA GridStorage device is already index-checked).
+createEmptyGridStorage duplicates createEmptyGridHandle modulo the buffer template arg (CreateEmptyGridHandle.h:21-33 vs 41-53); moot once step 5 deletes the latter, so only worth doing if step 5 slips.
+harrism
+added a commit that references this issue on Sep 16, 2026
+Address review on openvdb#787: export ordering, empty batches, index-…
+...
+2c16b8d
+harrism commented on Sep 16, 2026
+harrism
+on Sep 16, 2026
+Contributor
+More actions
+Thanks; taking these as the step-5 and step-6 work list, with two small ones pulled into the #787 response since they touch code that PR already rewrites:
+Single-pass getIndexGrid / cloneGrid for contiguous batches. Both now take gridStorage().to(device) directly when isContiguous(), which is exactly the logical grids with validated headers, so the compaction pass is skipped; getIndexGrid on a CUDA batch is back to one D2H copy. The non-contiguous cross-device case stays two passes until contiguousGridStorage takes a destination device in step 5, where cloneGridHandleAt goes too.
+serializeGrid's byte count is totalBytes(), and concatenateGrids' unreachable has_index check is gone.
+Kept as manual finish() plus a destructor fallback rather than destructor-only ordering: the normal path should propagate a CUDA error from the ordering call, and a destructor cannot; the destructor exists for the unwind path, where the original exception matters more. Happy to flip it if you see it differently.
+For step 5, agreed on the shape: one appendGridSpans helper in DeviceGridHandleUtils.cuh owning the D2D-plus-header-fixup loop, the source-stream bracketing and the checksum policy, adopted by concatenation, compaction and the device merge before the builders move onto it; that is also where the PrivateUse1 sync count collapses to one per operation and where item 3 of your #786 comment lands once. The identity paths through the seam (padded/coarse/fine) get their isContiguous() checks hoisted above the dispatch when those builders convert.
+Step 5 or 6: making gridStorage() private with a storageStream() accessor and the logical pointer accessors as the only grid access from GridBatchData is the right end state; noting it on the step-6 list next to the TorchDeviceBuffer deprecation, since both remove raw-handle access at once.
+Unowned: serializeGrid compacting straight into the output tail is a one-pass rewrite I'll take with step 5's compaction changes; createEmptyGridStorage vs createEmptyGridHandle is moot once step 5 deletes the latter.
+harrism
+added a commit that references this issue on Sep 16, 2026
+Hold grid storage in GridStorage instead of GridHandle<TorchDeviceBuf…
+...
+9ae7915
+harrism commented on Sep 16, 2026
+harrism
+on Sep 16, 2026
+Contributor
+More actions
+Step 5 is up as #788 (two commits): one assembleGridStorage behind compaction, concatenation and the merge; every builder returns GridStorage built through GridStorage::deviceProto; mergeGridStorages replaces mergeGridHandles; the #787 copying seam (adoptLegacyGridHandle, the GridHandle<TorchDeviceBuffer> factory overload, createEmptyGridHandle, contiguousGridHandle, cloneGridHandleAt) is deleted. Decisions recorded in the PR: builders no longer compute per-item checksums (NanoVDB default; assembled storage disables them; nothing reads them); PrivateUse1 DistributedPointsToGrid results are re-streamed onto the storage stream before their DeviceMesh dies; CUDA builders now run on the current torch stream rather than the legacy default stream.
+Two latent bugs surfaced: PopulateGridMetadata's CUDA path never wrote the metadata version fields (seen once serializeGrid stopped cloning to CPU), and its readback ran on the legacy default stream. Both fixed in #788.
+After #788, TorchDeviceBuffer has no users in the library. Step 6: deprecate it, make gridStorage()/mStorage private behind storageStream() and the logical accessors, add the grep gate and the CHANGES.md entry.
+swahtz commented on Sep 17, 2026
+swahtz
+on Sep 17, 2026
+ContributorAuthor
+More actions
+Reviewing #788 (step 5) against the plan. Correctness items are on the PR. These are decisions or follow-ups that belong here.
+Step 5 or 6
+batchedTopologyStorage adopts its layout on trust (BatchedTopologyBuilder.cuh ~L1243). Constructing GridHandle<TorchDeviceBuffer>(buffer) used to parse the device chain and throw on a header the build kernels got wrong; now meta.size = gridByteOffsets[g+1] - gridByteOffsets[g] is assumed equal to the kernel-written mGridSize. I checked that they agree today. If a future node-size or blind-data change makes them disagree, populateGridMetadataKernel's currentGrid + gridSize() walk desynchronizes from the adopted offsets and produces corrupt per-grid metadata with no error. A debug-build parse or an assertion that the kernel-written mGridSize matches the host size keeps the safety net at no release cost. Same question applies to every builder now adopting a host-computed layout via mergeGridStorages, though there the sizes come from the source handles' own metadata.
+Performance follow-ups (issue #755 workloads)
+Replicated grids are copied twice. BuildDenseGrid.cu ~L154 deep-copies each of the B-1 replicas with parts[0].to(device, stream) and mergeGridStorages copies them again: 2(B-1)+1 copies and B-1 temporary allocations. assembleGridStorage accepts a GridSpanSource whose spans reference the same bytes repeatedly, so one source with B identical spans gives B copies total. On PrivateUse1 (~L241) each intermediate to() is two all-device syncs, so a batch of 64 dense grids performs ~128 whole-machine syncs before the merge, and the post-loop synchronizeStream (~L247) is redundant with both to() and the assembler's own PrivateUse1 sync.
+Every empty member builds and uploads its own grid. createEmptyGridStorage(device) runs createNanoGrid on the host and a synchronous pageable H2D copy (a full multi-device sync on PrivateUse1) per empty member, then the merge copies it again: BuildGridFromIjk.cu L97/L153, BuildDenseGrid.cu, BuildGridFromPoints.cu, BuildGridFromNearestVoxelsToPoints.cu, BuildPaddedGrid.cu, BuildPrunedGrid.cu. A batch of 512 point clouds where most members are empty pays 512 host grid builds and 512 blocking uploads. One empty storage per call (or a per-device cached one) referenced as a repeated span from a single GridSpanSource fixes all of them.
+Pre-existing, same path as the PR's PrivateUse1 finding
+IndexGrid.cu:22-30 allocates hostMeta with allocateHostGridMetadata and then overwrites the pointer with deviceMeta on PrivateUse1, leaking the host block, and the unified records it keeps are the unconstructed ones the Builders produce GridStorage; one grid assembler (#770 step 5) #788 serialize comment describes. Fixing version in the kernel covers the second half; the leak is a one-line reorder.
+CI
+The first-attempt failures on Builders produce GridStorage; one grid assembler (#770 step 5) #788 are infrastructure: g6 had no capacity, the workflow fell back to g5 (SM 8.6), and the test wheel is built for 8.9+PTX only. The fallback instance cannot run the build it tests. Either add 8.6 to the test build's arch list or drop the g5 fallback.
+harrism
+added this to the v0.6 milestone on Sep 17, 2026
+harrism
+added a commit that references this issue on Sep 17, 2026
+Share the empty grid and repeat identical items in the builders; chec…
+...
+46243f8
+harrism commented on Sep 17, 2026
+harrism
+on Sep 17, 2026
+Contributor
+More actions
+Folded into #788 (46243f8), from the step-5 review above:
+Adopted layout on trust: makeDeviceHandleFromLayout now reads every header back in debug builds and throws if (gridIndex, gridCount, gridSize) disagree with the adopted layout (checkAdoptedLayoutDebug); release builds are unchanged. Covers the batched topology builder and all assembled storage.
+Replicated grids copied twice / PrivateUse1 sync count: builders collect items in GridStorageParts; BuildDenseGrid repeats item 0 as spans (addRepeat), so B identical grids are one build and B copies, and the per-item to() copies and the post-loop synchronize are gone.
+Every empty member builds and uploads its own grid: GridStorageParts::addEmpty shares one voxel-less grid per batch, built on first use, in all six builders that emit empty members.
+IndexGrid host-metadata leak on PrivateUse1: reordered so the host block is allocated only when it is used.
+CI: #789 (merged) makes tests.yml build for the arch list in versions.json, so the g5 fallback can run the wheel it tests.
+harrism
+added a commit that references this issue on Sep 17, 2026
+Builders produce GridStorage; one grid assembler (#770 step 5) (#788)
+...
+d3fde5b
+harrism commented on Sep 17, 2026
+harrism
+on Sep 17, 2026
+Contributor
+More actions
+Step 6 is up as #790: GridBatchData's storage is private (readers use hostGridPtrAt / deviceGridPtrAt, storageStream(), and detail::ops::contiguousGridStorage, which now owns the contiguous-or-compact split); TorchDeviceBuffer and TorchStorageResource (moved into the shim's header) are [[deprecated]] and unused by the library; a codestyle job gates src/ against the dual-space buffer names; CHANGES.md carries the Breaking entry for the whole migration. After #790 the remaining items are the upstream follow-ups listed above (single-space mergeGridHandles overloads with assembleGridStorage as the reference, the #2232 report, the optional voxelsToGrid stream parameter) and deleting the shim at the pin bump past upstream's removal step.
+harrism
+added a commit that references this issue on Sep 17, 2026
+Grid storage is private to GridBatchData; TorchDeviceBuffer is deprec…
+...
+48db82b
+harrism commented on Sep 17, 2026
+harrism
+on Sep 17, 2026
+Contributor
+More actions
+Complete. All six steps are on main: #773 (steps 1–2), #786 (3), #787 (4), #788 (5), #790 (6); #789 fixed the conda test workflow's arch list along the way. Pin 0ab0a81e.
+Verification items from the plan, recorded here:
+No allocations outside torch's pool: 20 iterations of from_points + dilated_grid on an 8-grid batch grew device memory by exactly torch's reserved-pool growth (150 MiB both), i.e. 0 MiB outside the caching allocator; FVDB_NANOVDB_TRACE_ALLOCS shows only TorchResource allocations.
+GridBatch.from_points at batch 256 (2000 points per grid): 48.8 ms after warm-up on this machine (a baseline for future comparison; the pre-Finish adopting NanoVDB's injectable CUDA memory resources (openvdb #2232): move grid storage off the dual-space TorchDeviceBuffer #770 tree was not rebuilt for a before number).
+Sliced-batch inject coverage: tests/unit/test_inject.py (non-contiguous subset into contiguous superset).
+Left over, tracked elsewhere:
+Deleting the deprecated TorchDeviceBuffer / TorchStorageResource shim at the pin bump past upstream's remove step: Delete the deprecated TorchDeviceBuffer shim at the NanoVDB pin bump past the dual-space removal #792.
+Upstream: single-space cuda::mergeGridHandles / splitGridHandles overloads and a public adopt-validated-metadata GridHandle construction, asked on NanoVDB: injectable CUDA memory resources — design & roadmap AcademySoftwareFoundation/openvdb#2232 (the voxelsToGrid stream parameter already exists at this pin).
+🎉React with 🎉1Reacted by Jonathan Swartz
+harrism
+closed this as completedon Sep 17, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+NanoVDBCode changes to NanoVDB itselfCode changes to NanoVDB itselfUnified Memory Torch Backendcore libraryCore fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python moduleCore fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python modulerefactoring/cleanupClean up or refactor codeClean up or refactor codetriageNeeds team reviewNeeds team review
+Type
+No type
+Projects
+No projects
+Milestone
+v0.6No due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

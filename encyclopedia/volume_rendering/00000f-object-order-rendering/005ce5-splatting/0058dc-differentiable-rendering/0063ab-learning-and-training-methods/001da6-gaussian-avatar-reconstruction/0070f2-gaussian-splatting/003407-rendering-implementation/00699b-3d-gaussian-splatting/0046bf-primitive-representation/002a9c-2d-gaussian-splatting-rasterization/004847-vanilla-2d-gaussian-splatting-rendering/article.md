@@ -1,0 +1,260 @@
+# Vanilla 2D Gaussian Splatting Rendering
+
+Also called: 2D Gaussian Splatting Rendering, 2DGS Renderer, 2DGS Rendering, Deferred Rendering with 2DGS, Vanilla2DGSRenderer, Volumetric Alpha Blending
+
+## Overview
+Vanilla 2D Gaussian Splatting Rendering is the core rasterization pass for 2D Gaussian Splatting (2DGS), a differentiable rendering method that represents scenes as a collection of 2D Gaussian primitives (surfels) [S2, unofficial]. It solves the problem of projecting these 3D-aware 2D primitives onto a 2D image plane to produce RGB, alpha, depth, and normal maps [S2, unofficial]. What sets it apart from its siblings, such as [Per-Primitive Texture Mapping for Reflective Gaussian Splatting](8629-per-primitive-texture-mapping-for-reflective-gaussian-splatt.md) which adds complex lighting, is its reliance on standard volumetric alpha blending for color accumulation and a deferred geometry pass for normals and depth, without pre-computed 3D covariance matrices [S2, unofficial]. It builds on [2D Gaussian Splatting Rasterization](4815-2d-gaussian-splatting-rasterization.md) by providing the high-level API and post-processing logic (depth/normal extraction) that consumes the raw rasterized attributes [S2, unofficial].
+
+## How it works
+**Inputs:**
+*   `means3D`: 3D positions of Gaussian centers, shape $(N, 3)$.
+*   `means2D`: 2D screen-space positions, shape $(N, 2)$, initialized with `requires_grad=True` [S2, unofficial].
+*   `shs` or `colors_precomp`: Spherical Harmonics coefficients or pre-computed colors, shape $(N, K)$ or $(N, 3)$ [S2, unofficial].
+*   `opacities`: Opacity values, shape $(N, 1)$ [S2, unofficial].
+*   `scales`: Scaling factors, shape $(N, 3)$ [S2, unofficial].
+*   `rotations`: Quaternions (w, x, y, z), shape $(N, 4)$ [S2, unofficial].
+*   `cov3D_precomp`: Pre-computed 3D covariance matrices. Set to `None` to allow the rasterizer to compute covariance from `scales` and `rotations` [S2, unofficial].
+*   `camera`: Object containing view and projection matrices, image dimensions, FOV, and background color [S2, unofficial].
+
+**Outputs:**
+*   `rendered_image`: RGB image, shape $(H, W, 3)$ [S2, unofficial].
+*   `rend_alpha`: Alpha map, shape $(H, W)$ [S2, unofficial].
+*   `rend_normal`: View-space normal map, shape $(H, W, 3)$ [S2, unofficial].
+*   `view_normal`: World-space normal map, shape $(H, W, 3)$ [S2, unofficial].
+*   `surf_depth`: Surface depth map, shape $(H, W)$ [S2, unofficial].
+*   `surf_normal`: Surface normal map (derived from depth), shape $(H, W, 3)$ [S2, unofficial].
+*   `allmap`: Intermediate tensor containing expected depth, alpha, view normals, median depth, and distortion [S2, unofficial].
+
+**Data Structures:**
+*   `allmap`: A tensor of shape $(H, W, 7)$ (or flattened to $(H \times W, 7)$) with the following layout [S2, unofficial]:
+    *   Index 0: Expected depth.
+    *   Index 1: Alpha.
+    *   Indices 2-4: View-space normals ($N_x, N_y, N_z$).
+    *   Index 5: Median depth.
+    *   Index 6: Depth distortion.
+
+**Steps:**
+
+1.  **Configuration:** Compute tangent half-angles for the horizontal and vertical fields of view: $\tan(\text{FOV}_x/2)$ and $\tan(\text{FOV}_y/2)$ [S2, unofficial]. Configure `GaussianRasterizationSettings` with image dimensions, FOV tangents, background color, scaling modifier, view/projection matrices, SH degree, camera position, and `prefiltered=False` [S2, unofficial].
+
+2.  **Rasterization:** Instantiate `GaussianRasterizer` with the settings. Call the rasterizer with `means3D`, `means2D`, `shs`/`colors_precomp`, `opacities`, `scales`, `rotations`, and `cov3D_precomp=None` [S2, unofficial]. This produces `rendered_image`, `radii` (visibility filter), and `allmap` [S2, unofficial].
+
+3.  **Alpha Extraction:** Compute `render_alpha` from `allmap` at index 1 [S2, unofficial].
+
+4.  **Normal Extraction (View Space):** Extract view-space normals from `allmap` indices 2-4. Transform them to world space by multiplying by the transpose of the camera's world-to-camera rotation matrix $R_{cam}^T$:
+    $$ N_{world} = R_{cam}^T N_{view} $$
+    [S2, unofficial].
+
+5.  **Depth Extraction:**
+    *   Extract `median_depth` from `allmap` index 5. Replace NaNs with 0 [S2, unofficial].
+    *   Extract `expected_depth` from `allmap` index 0. Divide by `render_alpha`. Replace NaNs with 0 [S2, unofficial].
+    *   Compute `surf_depth` as a weighted sum of `expected_depth` and `median_depth` based on a `depth_ratio` parameter:
+        $$ \text{surf\_depth} = \text{depth\_ratio} \cdot \text{median\_depth} + (1 - \text{depth\_ratio}) \cdot \text{expected\_depth} $$
+        Where `depth_ratio` is 1 for bounded scenes (using median) and 0 for unbounded scenes (using expected) [S2, unofficial].
+
+6.  **Surface Normal Derivation:** Compute `surf_normal` from `surf_depth` using `depth_to_normal`. This involves:
+    *   Reconstructing 3D points from the depth map using camera intrinsics and extrinsics (`depths_to_points`).
+    *   Computing spatial derivatives ($dx, dy$) of the 3D points.
+    *   Taking the cross product of the derivatives and normalizing the result.
+    *   Multiplying the resulting normal by the detached `render_alpha` [S2, unofficial].
+
+7.  **Return:** Return a dictionary containing `rendered_image`, `viewspace_points`, `visibility_filter` (`radii > 0`), `radii`, `rend_alpha`, `rend_normal`, `view_normal`, `rend_dist`, `surf_depth`, and `surf_normal` [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+
+def vanilla_2dgs_render(
+    means3D: torch.Tensor,
+    means2D: torch.Tensor,
+    shs: torch.Tensor,
+    opacities: torch.Tensor,
+    scales: torch.Tensor,
+    rotations: torch.Tensor,
+    camera: dict,
+    depth_ratio: float = 0.5
+) -> dict:
+    """
+    Renders a scene using 2D Gaussian Splatting primitives.
+    
+    Args:
+        means3D: (N, 3) 3D positions.
+        means2D: (N, 2) 2D screen positions.
+        shs: (N, K) Spherical Harmonics coefficients or colors.
+        opacities: (N, 1) Opacities.
+        scales: (N, 3) Scales.
+        rotations: (N, 4) Quaternions (w, x, y, z).
+        camera: Dict with 'width', 'height', 'fov_x', 'fov_y', 'view_matrix', 'proj_matrix', 'bg_color'.
+        depth_ratio: Weight for median depth (1) vs expected depth (0).
+        
+    Returns:
+        Dictionary with rendered image, alpha, normals, and depths.
+    """
+    # 1. Configuration
+    tan_fov_x = torch.tan(torch.tensor(camera['fov_x']) / 2)
+    tan_fov_y = torch.tan(torch.tensor(camera['fov_y']) / 2)
+    
+    raster_settings = {
+        'image_width': camera['width'],
+        'image_height': camera['height'],
+        'tan_fov_x': tan_fov_x,
+        'tan_fov_y': tan_fov_y,
+        'background_color': camera['bg_color'],
+        'scaling_modifier': 1.0,
+        'view_matrix': camera['view_matrix'],
+        'proj_matrix': camera['proj_matrix'],
+        'sh_degree': 3, # Assuming degree 3
+        'camera_position': camera['position'],
+        'prefiltered': False
+    }
+    
+    # 2. Rasterization
+    # Note: GaussianRasterizer is a custom CUDA kernel. 
+    # Here we simulate the call structure.
+    rasterizer = GaussianRasterizer(raster_settings)
+    
+    # cov3D_precomp is None, so rasterizer computes covariance from scales/rotations
+    cov3D_precomp = None
+    
+    rendered_image, radii, allmap = rasterizer(
+        means3D=means3D,
+        means2D=means2D,
+        shs=shs,
+        colors_precomp=None,
+        opacities=opacities,
+        scales=scales,
+        rotations=rotations,
+        cov3D_precomp=cov3D_precomp
+    )
+    
+    # 3. Extract Alpha
+    render_alpha = allmap[:, :, 1] # Index 1 is alpha
+    
+    # 4. Extract View-Space Normals and Transform to World Space
+    view_normal = allmap[:, :, 2:5] # Indices 2-4
+    # Assuming camera['world_to_cam_rot'] is the rotation part of the view matrix
+    R_cam = camera['world_to_cam_rot'] 
+    view_normal_world = torch.matmul(R_cam.transpose(-2, -1), view_normal.permute(0, 1, 4, 2)).permute(0, 1, 3, 2)
+    
+    # 5. Depth Extraction
+    median_depth = allmap[:, :, 5] # Index 5
+    median_depth = torch.nan_to_num(median_depth, nan=0.0)
+    
+    expected_depth = allmap[:, :, 0] # Index 0
+    expected_depth = torch.where(render_alpha > 0, expected_depth / render_alpha, 0.0)
+    expected_depth = torch.nan_to_num(expected_depth, nan=0.0)
+    
+    surf_depth = depth_ratio * median_depth + (1 - depth_ratio) * expected_depth
+    
+    # 6. Surface Normal from Depth
+    surf_normal = depth_to_normal(surf_depth, camera)
+    surf_normal = surf_normal * render_alpha.unsqueeze(-1).detach()
+    
+    # 7. Return Results
+    visibility_filter = radii > 0
+    
+    return {
+        'render': rendered_image,
+        'viewspace_points': means2D,
+        'visibility_filter': visibility_filter,
+        'radii': radii,
+        'rend_alpha': render_alpha,
+        'rend_normal': view_normal,
+        'view_normal': view_normal_world,
+        'rend_dist': allmap[:, :, 6], # Index 6 is distortion
+        'surf_depth': surf_depth,
+        'surf_normal': surf_normal
+    }
+
+def depth_to_normal(depth_map: torch.Tensor, camera: dict) -> torch.Tensor:
+    """
+    Converts a depth map to a normal map.
+    """
+    # Reconstruct 3D points from depth
+    pts_3d = depths_to_points(depth_map, camera)
+    
+    # Compute spatial derivatives
+    # dx, dy are gradients along image coordinates
+    dx = pts_3d[:, 1:, :] - pts_3d[:, :-1, :]
+    dy = pts_3d[:, :, 1:] - pts_3d[:, :, :-1]
+    
+    # Pad to maintain size
+    dx = torch.cat([dx, dx[:, :, -1:]], dim=2)
+    dy = torch.cat([dy, dy[:, -1:, :]], dim=1)
+    
+    # Compute normal via cross product
+    normal = torch.cross(dx, dy, dim=-1)
+    normal = torch.nn.functional.normalize(normal, dim=-1)
+    
+    return normal
+
+def depths_to_points(depth_map: torch.Tensor, camera: dict) -> torch.Tensor:
+    """
+    Reconstructs 3D points from depth map using camera intrinsics.
+    """
+    # Compute NDC to pixel projection matrix
+    # This is a simplified representation; actual implementation depends on camera model
+    # Assuming pinhole camera for simplicity
+    h, w = depth_map.shape
+    y, x = torch.meshgrid(torch.arange(h), torch.arange(w), indexing='ij')
+    
+    # Convert to NDC coordinates
+    # Assuming FOV and aspect ratio are known
+    # This step is highly dependent on the specific camera model implementation
+    # Placeholder for the actual NDC conversion logic
+    ndc_x = (2.0 * x / w) - 1.0
+    ndc_y = 1.0 - (2.0 * y / h)
+    
+    # Ray directions in camera space
+    # Assuming unit aspect ratio for simplicity, adjust for actual aspect
+    fx = camera['width'] / (2.0 * torch.tan(torch.tensor(camera['fov_x']) / 2))
+    fy = camera['height'] / (2.0 * torch.tan(torch.tensor(camera['fov_y']) / 2))
+    
+    ray_x = ndc_x * (camera['width'] / 2.0) / fx
+    ray_y = ndc_y * (camera['height'] / 2.0) / fy
+    ray_z = torch.ones_like(ray_x)
+    
+    rays = torch.stack([ray_x, ray_y, ray_z], dim=-1)
+    
+    # Scale by depth
+    pts_3d_cam = rays * depth_map.unsqueeze(-1)
+    
+    # Transform to world space using camera extrinsics
+    # Assuming camera['world_to_cam'] is the transformation matrix
+    # pts_3d_world = inv(camera['world_to_cam']) @ pts_3d_cam
+    # For this pseudocode, we return camera-space points as a placeholder
+    return pts_3d_cam
+```
+
+**Edge Cases and Pitfalls:**
+*   **NaNs in Depth:** Expected depth can produce NaNs when alpha is zero. These must be replaced with 0 before blending or further processing [S2, unofficial].
+*   **Covariance Calculation:** Setting `cov3D_precomp` to `None` requires the rasterizer to correctly compute the 2D projection covariance from 3D scales and rotations. Errors here cause blurring or artifacts [S2, unofficial].
+*   **Normal Orientation:** The transformation from view-space to world-space normals must use the correct rotation matrix (transpose of world-to-camera) [S2, unofficial].
+*   **Depth Ratio:** Choosing the wrong `depth_ratio` (0 vs 1) can lead to inaccurate surface reconstruction in bounded vs. unbounded scenes [S2, unofficial].
+
+## Subtopics
+
+### Gaussian Splatting Rendering with Plane Output
+Renders a scene using Gaussian Splatting, outputting plane geometry and normals [S4, unofficial]. It sets up rasterization settings, computes tangent FOV values, handles SH conversion, and calls a specialized `PlaneGaussianRasterizer` [S4, unofficial]. It constructs an `input_all_map` where indices 0-2 are local normals, index 3 is 1.0, and index 4 is local distance [S4, unofficial]. This variant is chosen when plane-based geometry representation is required instead of standard point-based normals [S4, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of Gaussians $N$ and pixels $H \times W$, dominated by the rasterization pass [S2, unofficial].
+*   **Memory Complexity:** Proportional to $N$ for primitive storage and $H \times W \times C$ for the output maps, where $C$ is the number of channels in `allmap` (7) [S2, unofficial].
+*   **Performance:** Real-time rendering is achievable on modern GPUs due to the custom CUDA rasterizer [S2, unofficial].
+*   **Strengths:** Differentiable, supports view-dependent appearance via SH, provides rich geometry (normals, depth) alongside color [S2, unofficial].
+*   **Limitations:** Requires careful handling of depth extraction (expected vs. median) to avoid artifacts [S2, unofficial]. Performance degrades with very high Gaussian counts due to memory bandwidth [S2, unofficial].
+*   **When to Use:** When high-quality, differentiable rendering of 2D Gaussian primitives is needed for training or visualization [S2, unofficial].
+*   **When Not to Use:** When pre-computed 3D covariances are available and memory is extremely constrained, or when complex lighting models (like reflections) are required, in which case [Reflective Gaussian Splatting](12321-reflective-gaussian-splatting.md) is more appropriate [S2, unofficial].
+
+## Background
+2D Gaussian Splatting (2DGS) was introduced as an extension of 3D Gaussian Splatting, representing surfaces with 2D Gaussian disks (surfels) to better handle thin structures and surfaces [S1]. The rendering method described here is the standard rasterization pass for 2DGS, as implemented in various open-source projects like `gaussian-splatting-lightning` [S2, unofficial]. It builds on the foundational work of 3DGS [S1] but adapts the primitive representation and rasterization logic to 2D surfels. The method is widely used in neural rendering and 3D reconstruction pipelines [S1][S2, unofficial].
+
+## Sources
+[S1] GSurf: Learning signed distance fields from splatting opaque Gaussians for high-quality 3D reconstruction, https://doi.org/10.1016/j.cad.2026.104106, fetched 2026-10-26
+[S2] yzslab/gaussian-splatting-lightning, https://github.com/yzslab/gaussian-splatting-lightning, fetched 2026-10-27 (unofficial)
+[S3] Spherical Voronoi: Directional Appearance as a Differentiable Partition of the Sphere, https://doi.org/10.48550/arXiv.2512.14180, fetched 2026-10-30 (unofficial)
+[S4] zju3dv/PGSR, https://github.com/zju3dv/PGSR, fetched 2026-10-27 (unofficial)

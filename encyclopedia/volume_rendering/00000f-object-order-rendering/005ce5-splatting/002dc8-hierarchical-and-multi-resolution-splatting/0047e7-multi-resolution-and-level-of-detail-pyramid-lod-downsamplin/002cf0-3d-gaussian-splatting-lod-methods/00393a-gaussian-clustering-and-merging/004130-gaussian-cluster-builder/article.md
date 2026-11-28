@@ -1,0 +1,145 @@
+# Gaussian Cluster Builder
+
+Also called: FGaussianClusterBuilder
+
+## Overview
+The Gaussian Cluster Builder constructs a hierarchical cluster structure from a set of 3D Gaussians to enable multi-resolution rendering and efficient culling. It partitions the Gaussians into disjoint subsets and replaces each subset with a single representative Gaussian. It is distinguished by its use of spatial sorting for locality and configurable Level of Detail (LOD) generation for parent clusters [G].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D Gaussians $G = \{G_i\}$, where each Gaussian $G_i$ is defined by position $\mathbf{t}_i$, covariance $\mathbf{\Sigma}_i$ (or scale $\mathbf{s}_i$ and rotation $\mathbf{q}_i$), opacity $\alpha_i$, and color coefficients $c_i$ [G].
+*   **Output:** A hierarchical tree structure where leaf nodes contain original or grouped splats, and internal nodes contain merged representative Gaussians [G].
+
+**Data Structures:**
+The builder uses a configuration structure `FBuildSettings` with the following fields [S1, unofficial]:
+*   `int32 SplatsPerCluster`: Number of splats per leaf cluster. Default: `GaussianClusterConstants::DefaultSplatsPerCluster` [S1, unofficial].
+*   `int32 MaxChildrenPerCluster`: Maximum children per parent cluster. Default: `GaussianClusterConstants::MaxChildrenPerCluster` [S1, unofficial].
+*   `bool bReorderSplats`: Whether to reorder splat data for cluster locality. Default: `true` [S1, unofficial].
+*   `bool bGenerateLOD`: Whether to generate LOD splats for parent clusters. Default: `true` [S1, unofficial].
+*   `int32 LODReductionRatio`: How many original splats per LOD splat. Default: `4` [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Sort:** If `bReorderSplats` is true, sort the input splats by their Morton code (Z-order curve) to ensure spatial locality [S1, unofficial].
+2.  **Leaf Clustering:** Group the sorted splats into leaf clusters, each containing `SplatsPerCluster` splats [S1, unofficial].
+3.  **Recursive Merging:** Recursively merge clusters into parent nodes. A parent cluster is formed by grouping up to `MaxChildrenPerCluster` child clusters [S1, unofficial].
+4.  **Aggregation:** For each parent cluster, calculate the bounding volume and the representative Gaussian parameters. The aggregation follows the moment-matching paradigm defined in the parent article [Gaussian clustering and merging](8436-gaussian-clustering-and-merging.md):
+    $$ W_j = \sum_{i \in C_j} \alpha_i $$
+    $$ \mathbf{t}'_j = \frac{1}{W_j} \sum_{i \in C_j} \alpha_i \mathbf{t}_i $$
+    $$ \mathbf{\Sigma}'_j = \frac{1}{W_j} \sum_{i \in C_j} \alpha_i \left( \mathbf{\Sigma}_i + (\mathbf{t}_i - \mathbf{t}'_j)(\mathbf{t}_i - \mathbf{t}'_j)^T \right) $$
+    [G].
+5.  **LOD Generation:** If `bGenerateLOD` is true, generate LOD splats for parent clusters. The number of original splats represented by one LOD splat is determined by `LODReductionRatio` (default 4) [S1, unofficial].
+6.  **Reordering:** If `bReorderSplats` is true, reorder the splat data in memory to reflect the cluster hierarchy, improving cache locality during rendering [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_gaussian_clusters(splats, settings):
+    """
+    splats: List of dicts with keys 'pos' (3-tuple), 'cov' (3x3 list of lists), 'alpha' (float), 'color' (list).
+    settings: dict with keys SplatsPerCluster, MaxChildrenPerCluster, bReorderSplats, bGenerateLOD, LODReductionRatio.
+    """
+    if settings['bReorderSplats']:
+        # Sort splats by Morton code for spatial locality
+        splats = sorted(splats, key=lambda s: compute_morton_code(s['pos']))
+    
+    # Step 1: Create leaf clusters
+    leaf_clusters = []
+    splats_per_cluster = settings['SplatsPerCluster']
+    for i in range(0, len(splats), splats_per_cluster):
+        cluster_splats = splats[i : i + splats_per_cluster]
+        leaf_clusters.append(create_leaf_cluster(cluster_splats))
+    
+    # Step 2: Recursively build hierarchy
+    current_level_clusters = leaf_clusters
+    while len(current_level_clusters) > 1:
+        next_level_clusters = []
+        max_children = settings['MaxChildrenPerCluster']
+        
+        for i in range(0, len(current_level_clusters), max_children):
+            children = current_level_clusters[i : i + max_children]
+            parent_cluster = create_parent_cluster(children)
+            next_level_clusters.append(parent_cluster)
+        
+        current_level_clusters = next_level_clusters
+    
+    # Step 3: Generate LOD if enabled
+    if settings['bGenerateLOD']:
+        for cluster in current_level_clusters:
+            generate_lod_splats(cluster, settings['LODReductionRatio'])
+    
+    return current_level_clusters
+
+def compute_morton_code(pos):
+    # Standard 3D Morton code interleaving of x, y, z coordinates.
+    # Not given in the sources. Placeholder for Morton code interleaving logic.
+    pass
+
+def create_leaf_cluster(splats):
+    total_alpha = sum(s['alpha'] for s in splats)
+    if total_alpha == 0:
+        return {'pos': (0,0,0), 'cov': [[1,0,0],[0,1,0],[0,0,1]], 'alpha': 0, 'color': [0,0,0], 'children': splats, 'is_leaf': True}
+    
+    mean_pos = tuple(sum(s['alpha'] * s['pos'][k] for s in splats) / total_alpha for k in range(3))
+    
+    cov = [[0.0]*3 for _ in range(3)]
+    for s in splats:
+        diff = [s['pos'][k] - mean_pos[k] for k in range(3)]
+        for r in range(3):
+            for c in range(3):
+                cov[r][c] += s['alpha'] * (s['cov'][r][c] + diff[r] * diff[c])
+    cov = [[v / total_alpha for v in row] for row in cov]
+    
+    mean_color = [sum(s['color'][k] for s in splats) / len(splats) for k in range(len(splats['color']))]
+    
+    return {'pos': mean_pos, 'cov': cov, 'alpha': total_alpha, 'color': mean_color, 'children': splats, 'is_leaf': True}
+
+def create_parent_cluster(children):
+    representatives = [child if child['is_leaf'] else child for child in children]
+    total_alpha = sum(r['alpha'] for r in representatives)
+    if total_alpha == 0:
+        return {'pos': (0,0,0), 'cov': [[1,0,0],[0,1,0],[0,0,1]], 'alpha': 0, 'color': [0,0,0], 'children': children, 'is_leaf': False}
+    
+    mean_pos = tuple(sum(r['alpha'] * r['pos'][k] for r in representatives) / total_alpha for k in range(3))
+    
+    cov = [[0.0]*3 for _ in range(3)]
+    for r in representatives:
+        diff = [r['pos'][k] - mean_pos[k] for k in range(3)]
+        for row_idx in range(3):
+            for col_idx in range(3):
+                cov[row_idx][col_idx] += r['alpha'] * (r['cov'][row_idx][col_idx] + diff[row_idx] * diff[col_idx])
+    cov = [[v / total_alpha for v in row] for row in cov]
+    
+    mean_color = [sum(r['color'][k] for r in representatives) / len(representatives) for k in range(len(representatives[0]['color']))]
+    
+    return {'pos': mean_pos, 'cov': cov, 'alpha': total_alpha, 'color': mean_color, 'children': children, 'is_leaf': False}
+
+def generate_lod_splats(cluster, reduction_ratio):
+    # Not given in the sources. Placeholder for LOD generation logic.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Zero Alpha:** If a cluster has zero total alpha, it should be handled gracefully (e.g., skipped or represented by a zero-opacity Gaussian) to avoid division by zero in moment matching [G].
+*   **Boundary Conditions:** When `SplatsPerCluster` does not evenly divide the total number of splats, the last leaf cluster will contain fewer splats. The algorithm must handle this variable-sized cluster correctly [G].
+*   **Precision:** Floating-point precision issues may arise when calculating covariance matrices for very small or very large clusters. Using double precision for intermediate calculations is recommended [G].
+
+## Subtopics
+
+### Gaussian Grouping Strategy
+A strategy that implements hierarchical structuring of Gaussians to enable simulations to be performed exclusively on selected Core Gaussians, accelerating the process [S2, unofficial]. It organizes Gaussians into a hierarchy through clustering methods and performs simulation only on the Core Gaussians (highest level of hierarchy) [S2, unofficial]. This approach speeds up computations, especially when using particle-based engines such as Taichi [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Sorting by Morton code takes $O(N \log N)$ where $N$ is the number of splats. Clustering and merging are linear with respect to the number of clusters, but the recursive nature means the total time is proportional to $N$ with a small constant factor depending on the tree depth [G].
+*   **Memory Complexity:** The hierarchical structure requires storing additional metadata for each cluster (bounding volumes, parent/child pointers). The memory overhead is proportional to the number of clusters, which is $N / \text{SplatsPerCluster}$ [G].
+*   **Strengths:** Efficient spatial locality due to Morton code sorting. Configurable LOD generation allows for flexible trade-offs between quality and performance [S1, unofficial]. Spatial clustering is effective for culling [G].
+*   **Limitations:** The quality of the merged Gaussians depends on the heterogeneity of the cluster. Large or heterogeneous clusters may introduce geometric artifacts [G]. The method assumes a static scene; dynamic scenes may require frequent rebuilding of the hierarchy [G].
+*   **When to Use:** Suitable for large-scale 3D Gaussian splatting applications where multi-resolution rendering and efficient culling are required [G].
+*   **When Not to Use:** Not suitable for highly dynamic scenes where the hierarchy would need to be rebuilt frequently [G]. Not suitable for scenes with very small clusters where the overhead of the hierarchy outweighs the benefits [G].
+
+## Background
+The Gaussian Cluster Builder is a method for constructing hierarchical cluster structures from Gaussian splat data [S1, unofficial]. It builds on the principles of hierarchical clustering and moment-matched merging described in the parent article [Gaussian clustering and merging](8436-gaussian-clustering-and-merging.md).
+
+## Sources
+[S1] YuanBaoSMadLab/OpenSplat4D, https://github.com/YuanBaoSMadLab/OpenSplat4D, fetched 2026-10-27 (unofficial)
+[S2] GASP: Gaussian Splatting for Physic-Based Simulations, https://doi.org/10.48550/arXiv.2409.05819, fetched 2026-10-30 (unofficial)

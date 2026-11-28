@@ -1,0 +1,381 @@
+Godot Engine – Multi-platform 2D and 3D game engine - Add Soft Very Low shadow quality mode for 3D by Calinou · Pull Request #53992 · godotengine/godot
+
+Add Soft Very Low shadow quality mode for 3D by Calinou · Pull Request #53992 · godotengine/godot · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Calinou
+commented
+Oct 19, 2021
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+This can be used to improve 3D shadow rendering quality at little performance cost. Unlike the existing Hard setting which is limited to variable shadow blur only, it works with both fixed blur and variable blur.
+Preview
+Hard
+Soft Very Low (new)
+Performs nearly as well as Hard with better quality. It's more grainy than Soft Low, so using lower blur values is recommended.
+Soft Low
+Editor comparison
+Performance estimations are included in the top-right corner of every image.
+Edit: These estimations are inaccurate because the CPU time measurement is also taken into account. In practice, I can get a more significant performance boost with shadow quality set to Soft Very Low.
+DirectionalLight3D (fixed blur)
+Soft Ultra
+Soft High
+Soft Medium
+Soft Low
+Soft Very Low
+Soft Hard
+DirectionalLight3D (variable blur)
+Soft Ultra
+Soft High
+Soft Medium
+Soft Low
+Soft Very Low
+Soft Hard
+SpotLight3D (fixed blur)
+Soft Ultra
+Soft High
+Soft Medium
+Soft Low
+Soft Very Low
+Soft Hard
+OmniLight3D (variable blur)
+Soft Ultra
+Soft High
+Soft Medium
+Soft Low
+Soft Very Low
+Soft Hard
+Calinou
+requested a review
+from a team
+as a code owner
+October 19, 2021 14:54
+Calinou
+added
+enhancement
+topic:3d
+topic:rendering
+labels
+Oct 19, 2021
+Calinou
+added this to the
+4.0 milestone
+Oct 19, 2021
+clayjohn
+commented
+Oct 19, 2021
+Copy link
+Copy Markdown
+Member
+What is the rationale behind offsetting the texture lookup by +-PI pixels?
+To me this just looks like a jittered single pixel lookup.
+Dithering is usually implemented with a threshold function where the pixel is set to 0 if under the threshold and 1 if over.
+Calinou
+commented
+Oct 19, 2021
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Author
+What is the rationale behind offsetting the texture lookup by +-PI pixels?
+To me this just looks like a jittered single pixel lookup.
+Dithering is usually implemented with a threshold function where the pixel is set to 0 if under the threshold and 1 if over.
+To be fair, I copied the existing code and tried to adapt it the best I could. It looks a little strange with DirectionalLights (one axis seems more dithered than the other), but point lights look fine to me.
+There is probably a better way to do it, but I don't know how.
+clayjohn
+commented
+Oct 19, 2021
+Copy link
+Copy Markdown
+Member
+The existing code uses a spiral-shaped kernel to offset the shadow texture lookups.quick_hash to create a 2D rotation matrix which rotates the spiral-kernel a different amount for each pixel (see this article for a nice description about how this works).
+Importantly, the length of the offset is determined by the kernel and the blur amount, not by quick_hash (i.e. the per-pixel randomness does not change the length of the offset, just the direction). However, in your code, the distance (and position) can be anyway in the range of -PI to PI meaning there will be stretching towards the corners of the shadowmap (I think this is the issue you are seeing).
+Also, if you want to add a jitter to the single sample mode, it should be added as another enum to the shadow sample quality setting
+godot/servers/rendering_server.cpp
+Line 2798
+in
+a4fbb67
+ProjectSettings::get_singleton()->set_custom_property_info("rendering/shadows/directional_shadow/soft_shadow_quality", PropertyInfo(Variant::INT, "rendering/shadows/directional_shadow/soft_shadow_quality", PROPERTY_HINT_ENUM, "Hard (Fastest),Soft Low (Fast),Soft Medium (Average),Soft High (Slow),Soft Ultra (Slowest)"));
+Right now, the lowest setting is Hard (Fastest) If you want to continue with this PR, I suggest adding an enum named Soft Very Low (Fast) that also uses only 1 texture sample. You will also have to add a new quality selection here:
+godot/servers/rendering/renderer_rd/renderer_scene_render_rd.cpp
+Lines 2696 to 2701
+in
+a4fbb67
+switch (shadows_quality) {
+case RS::SHADOW_QUALITY_HARD: {
+penumbra_shadow_samples = 4;
+soft_shadow_samples = 1;
+shadows_quality_radius = 1.0;
+} break;
+I suggest changing hard shadows to 0 samples, and then in the shader check if 0 samples are used, then use the non-offset version of the code:
+godot/servers/rendering/renderer_rd/shaders/scene_forward_lights_inc.glsl
+Lines 330 to 332
+in
+a4fbb67
+if (sc_soft_shadow_samples == 1) {
+return textureProj(sampler2DShadow(shadow, shadow_sampler), vec4(pos, depth, 1.0));
+}
+e.g. change this to
+```
+if (sc_soft_shadow_samples == 0) {
+	return textureProj(sampler2DShadow(shadow, shadow_sampler), vec4(pos, depth, 1.0));
+}
+```
+This way, when only 1 sample is selected, then the proper offsetting code will automatically be used.
+Being honest though, I doubt the performance benefit of using a single texture lookup vs 4 will be worthwhile on any hardware. I think for low end hardware it would be best to use Hard shadows.
+Calinou
+commented
+Oct 19, 2021
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Author
+Also, if you want to add a jitter to the single sample mode, it should be added as another enum to the shadow sample quality setting
+Is that still required if #53961 is merged? That PR adds a global toggle to disable shadow dithering, which will make it possible to achieve hard shadows again.
+clayjohn
+commented
+Oct 19, 2021
+Copy link
+Copy Markdown
+Member
+#53961 doesn't produce hard shadows, it just removes the per-pixel rotation of the vogel disk. I'm not really sure what the benefit of doing that would be. Note especially, that the calculations for rotating the vogel disk still take place, so there will be no performance benefit.
+I'm not sure that a global override to produce hard shadows makes sense. In other words, why would we take more than one sample when calculating hard shadows?
+Calinou
+commented
+Oct 19, 2021
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Author
+I'm not sure that a global override to produce hard shadows makes sense. In other words, why would we take more than one sample when calculating hard shadows?
+Indeed, there is no benefit in doing so. I can look at adding a separate setting for hard + jittered shadows, but I'd prefer having #53961 settled first since I'm not sure how they'll interact together.
+I'm not really sure what the benefit of doing that would be. Note especially, that the calculations for rotating the vogel disk still take place, so there will be no performance benefit.
+Several people requested a way to disable dithering while still using soft shadows, which is currently not possible in 3.x. Dithering doesn't always go well with games that use a flat color/lowpoly aesthetic, since you want to avoid having a noisy look in that kind of game. Perceptually, disabling dithering will look worse. It's the only thing you can do if you want to avoid noise though (without increasing performance demands too much).
+The issue I linked to isn't particularly a new concern. I remember seeing people wanting to disable dithering as soon as the new soft shadows were pushed to master.
+clayjohn
+commented
+Oct 19, 2021
+Copy link
+Copy Markdown
+Member
+Several people requested a way to disable dithering while still using soft shadows, which is currently not possible in 3.x. Dithering doesn't always go well with games that use a flat color/lowpoly aesthetic, since you want to avoid having a noisy look in that kind of game. Perceptually, disabling dithering will look worse. It's the only thing you can do if you want to avoid noise though (without increasing performance demands too much).
+For clarity, there is no dithering involved in soft shadows. At any rate, #53961 doesn't eliminate noise either, it removes the per-pixel rotation which decreases the "grainy" noise, but it leaves the noise created by using vogel disk sampling.
+Further, in the issue you linked, the user was asking for a way to blur the shadows further to get a smooth gradient. In the example screenshots in #53961 the visual noise from the "disabled" version is much more jarring then having per-pixel rotations enabled.
+I'm not sure there is any value in disabling per-pixel rotations while leaving the vogel disk sampling intact. But if we do, we should do it in a way that does not substantially increase visual noise. Perhaps allowing PCF as an option would do the trick?
+Calinou
+force-pushed
+the
+hard-shadow-mapping-allow-dithering
+branch
+from
+25f67f6 to
+016fcca
+Compare
+October 20, 2021 17:15
+Calinou
+requested a review
+from a team
+as a code owner
+October 20, 2021 17:15
+Calinou
+commented
+Oct 20, 2021
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Author
+I agree your suggestion makes more sense in the end. I reworked this PR to add a Soft Very Low quality setting as requested.
+Calinou
+changed the title
+Allow using dithering with hard shadow mapping
+Add Soft Very Low shadow quality mode for 3D
+Oct 20, 2021
+Calinou
+commented
+Oct 20, 2021
+View reviewed changes
+Comment thread
+servers/rendering/renderer_rd/renderer_scene_render_rd.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Calinou
+force-pushed
+the
+hard-shadow-mapping-allow-dithering
+branch
+2 times, most recently
+from
+0da6381 to
+06913c3
+Compare
+October 20, 2021 21:13
+clayjohn
+requested changes
+Oct 21, 2021
+View reviewed changes
+Comment thread
+doc/classes/ProjectSettings.xml
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+servers/rendering/renderer_rd/renderer_scene_render_rd.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/classes/ProjectSettings.xml
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/classes/ProjectSettings.xml
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+doc/classes/RenderingServer.xml
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Add Soft Very Low shadow quality mode for 3D
+…
+e87ec8e
+```
+This can be used to improve 3D shadow rendering quality at little
+performance cost. Unlike the existing Hard setting which is limited
+to variable shadow blur only, it works with both fixed blur and
+variable blur.
+```
+Calinou
+force-pushed
+the
+hard-shadow-mapping-allow-dithering
+branch
+from
+06913c3 to
+e87ec8e
+Compare
+October 21, 2021 16:34
+clayjohn
+approved these changes
+Oct 21, 2021
+View reviewed changes
+clayjohn
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Looks great! Thanks for sticking to it and responding to feedback!
+akien-mga
+merged commit 3bebbca
+into
+godotengine:master
+Oct 22, 2021
+akien-mga
+commented
+Oct 22, 2021
+Copy link
+Copy Markdown
+Member
+Thanks!
+Calinou
+deleted the
+hard-shadow-mapping-allow-dithering
+branch
+October 22, 2021 17:41
+BendyLand
+pushed a commit
+to BendyLand/voltaire
+that referenced
+this pull request
+Aug 2, 2026
+Merge pull request godotengine#53992 from Calinou/hard-shadow-mapping…
+…
+b845fda
+```
+…-allow-dithering
+```
+BendyLand
+pushed a commit
+to BendyLand/voltaire
+that referenced
+this pull request
+Aug 2, 2026
+Merge pull request godotengine#53992 from Calinou/hard-shadow-mapping…
+…
+83bcc60
+```
+…-allow-dithering
+```
+wangshucheng
+pushed a commit
+to wangshucheng/godot
+that referenced
+this pull request
+Aug 27, 2026
+Merge pull request godotengine#53992 from Calinou/hard-shadow-mapping…
+…
+1ad2d7b
+```
+…-allow-dithering
+```
+Shane-Gadsby
+pushed a commit
+to Shane-Gadsby/godotwebgpu
+that referenced
+this pull request
+Sep 21, 2026
+Merge pull request godotengine#53992 from Calinou/hard-shadow-mapping…
+…
+eb2af77
+```
+…-allow-dithering
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+enhancement
+topic:rendering
+topic:3d
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,127 @@
+# Distributed Hierarchical Cache System
+
+Also called: Brick-based distributed rendering data management, Distributed Shared-Memory Data Management with Multi-Level Cache, Two-level cache system, distributed hierarchical cache
+
+## Overview
+The Distributed Hierarchical Cache System (DHCS) is a software-based distributed shared memory (DSM) mechanism designed for out-of-core volume roaming on rendering clusters [S1]. It solves the problem of accessing datasets larger than the total cluster RAM by implementing a global cache that spans graphics memory, local RAM, the network, and disk [S1]. Unlike previous DSM systems that required static resident sets and limited volumes to fit within total cluster memory, DHCS uses fully dynamic memory states and a two-level hierarchy to allow volumes limited only by hard drive space [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volume renderer request for a specific data brick, identified by its 3D position triplet $(u,v,w)$ [S1].
+*   **Output:** The voxel data for the requested brick, delivered to the graphics memory for rendering [S1].
+
+**Data Structures:**
+1.  **Brick Identifier (Key):** A 32-bit integer uniquely identifying a data unit [S1].
+    *   **Layout:**
+        *   **File ID:** Identifies the source file on disk [S1]. Supports datasets up to 1 TB by allowing files >4 GB [S1].
+        *   **Cluster Position:** The position of the cluster within the file [S1].
+        *   **Brick Position:** The position of the brick within the cluster [S1].
+    *   **Capacity:** The remaining 24 bits allow for approximately 16 million bricks per file [S1].
+2.  **Cache State Arrays:** Each node maintains an array containing the keys of all bricks currently resident in the memory caches of the entire cluster [S1]. This state is kept up-to-date via all-to-all communication [S1].
+3.  **Hash Tables:** Used to map the 32-bit keys to the state of each cache buffer (graphics memory, local memory, network) [S1].
+
+**Parameters:**
+*   **Brick:** The unit-sized data element in graphics memory [S1].
+*   **Cluster:** A group of bricks, serving as the unit-sized data element in main memory [S1]. The cluster size is larger than the brick size to optimize transfers from disk/network to memory [S1].
+*   **Cache Size:** Determined by the user-set allotted memory divided by the brick size [S2, unofficial].
+*   **Brick Dimensions:** The number of voxels along each dimension must be a power of two to meet GPU texture requirements; sizes are increased until they exceed the hardware texture-size limitation [S2, unofficial].
+*   **Network Bandwidth:** 220 MB/s (using two Gigabit Ethernet interfaces per node) [S1].
+*   **Disk Bandwidth:** 53 MB/s (standard SATA 150 disk) [S1].
+
+**Algorithm Steps:**
+1.  **Compute Key:** When the volume renderer requests a brick at $(u,v,w)$, DHCS translates this triplet into the 32-bit internal key identifier [S1].
+2.  **Check Graphics Memory Cache:** The system checks if the brick is present in the local graphics memory (GPU) [S1]. If present, return the data [S1].
+3.  **Check Local Memory Cache:** If a miss occurs in graphics memory, check if the brick (or the containing cluster) is present in the local main memory (RAM) [S1]. If present, transfer the brick to graphics memory and return it [S1].
+4.  **Query Network (Sibling Nodes):** If a miss occurs in local memory, query the memory caches of other nodes in the cluster via the network [S1]. The node consults its local copy of the global cache state array to identify which sibling holds the brick [S1]. If a sibling holds the brick, fetch it over the network [S1]. If found, store it in local memory and graphics memory, then return it [S1].
+5.  **Access Disk:** If the brick is not found in any sibling's memory cache, access the local filesystem (disk) [S1]. Load the data into local memory (as a cluster) and then into graphics memory [S1]. Return the data [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global state variables representing the caches
+graphics_memory_cache = {}  # Maps 32-bit key -> brick data
+local_memory_cache = {}     # Maps 32-bit key -> cluster data
+global_cache_state = {}     # Maps node_id -> set of keys in that node's local memory cache
+
+def get_brick(u, v, w):
+    # Step 1: Compute Key
+    key = compute_key(u, v, w)
+    
+    # Step 2: Check Graphics Memory Cache
+    if key in graphics_memory_cache:
+        return graphics_memory_cache[key]
+    
+    # Step 3: Check Local Memory Cache
+    if key in local_memory_cache:
+        cluster = local_memory_cache[key]
+        brick_data = extract_brick_from_cluster(cluster, key)
+        graphics_memory_cache[key] = brick_data
+        return brick_data
+    
+    # Step 4: Query Network (Sibling Nodes)
+    target_node = find_node_in_global_state(key)
+    
+    if target_node is not None:
+        data = fetch_from_network(target_node, key)
+        local_memory_cache[key] = data
+        graphics_memory_cache[key] = data
+        return data
+    
+    # Step 5: Access Disk
+    cluster = load_from_disk(key)
+    local_memory_cache[key] = cluster
+    brick_data = extract_brick_from_cluster(cluster, key)
+    graphics_memory_cache[key] = brick_data
+    return brick_data
+
+def compute_key(u, v, w):
+    # Encodes file ID, cluster position, and brick position into 32 bits
+    # Not given in the sources.
+
+def find_node_in_global_state(key):
+    # Returns the node ID that holds the key in its memory cache
+    # Based on the all-to-all broadcast state array
+    # Not given in the sources.
+
+def fetch_from_network(node_id, key):
+    # Sends request to node_id and receives brick data
+    # Not given in the sources.
+
+def load_from_disk(key):
+    # Reads the cluster containing the brick from the local filesystem
+    # Not given in the sources.
+
+def extract_brick_from_cluster(cluster, key):
+    # Extracts the specific brick from the loaded cluster based on position
+    # Not given in the sources.
+```
+
+**Edge Cases and Pitfalls:**
+*   **State Consistency:** Because the memory state is fully dynamic, nodes must maintain an accurate image of the entire cluster's memory state [S1]. This requires optimized all-to-all communication (inspired by the binary swap algorithm) to keep the state up-to-date [S1].
+*   **Replacement Policy:** Both cache levels employ the Least-Recently-Used (LRU) replacement strategy [S2, unofficial].
+*   **Opacity Correction:** The opacity assigned at each sample point must be corrected to account for the number of samples taken and the current octree level, especially when the user changes the sampling rate or the renderer switches level-of-detail [S2, unofficial].
+*   **Memory Limits:** While the total dataset size is limited only by disk space, the "probe" (the visible portion of the volume) must fit into the total graphics memory of the cluster [S1].
+*   **Shallow Volumes:** When one dimension is substantially smaller than the others, an octree is inappropriate; a quadtree-like structure is used instead, leaving four leaf nodes empty and avoiding subsampling along the short dimension [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Data fetching is accelerated by a factor of 4 compared to directly accessing local disks, due to the higher bandwidth of the network interfaces (220 MB/s) versus the disk (53 MB/s) [S1].
+*   **Memory Complexity:** The system requires maintaining a global cache state array on each node, which grows with the number of nodes and active bricks [S1].
+*   **Measured Performance:** The Visible Human Female CT dataset (512x512x2048, 1 GB) rendered at 0.3 seconds per frame at 24 megapixels on a 3-node cluster [S2, unofficial]. The Rat kidney dataset (32768x32768x128, 384 GB) rendered at 198 seconds per frame at 100 megapixels on a 28-node cluster [S2, unofficial].
+*   **Optimal Brick Sizes:** Visible Human CT performed best with 64x64x256 bricks [S2, unofficial]. Purkinje neuron (2048x4096x128) performed best with 64x128x128 bricks [S2, unofficial]. Rat kidney rendered fastest with 64x64x128 bricks [S2, unofficial].
+*   **Strengths:**
+    *   Allows roaming of volumes larger than the total cluster RAM, limited only by hard drive space [S1].
+    *   Reduces disk I/O by leveraging network bandwidth and sibling caches [S1].
+    *   Supports asynchronous disk access and texture loading, allowing overlap of data loading, volume slicing, and rendering [S1].
+*   **Limitations:**
+    *   Requires maintaining up-to-date global cache state, which involves communication overhead (all-to-all broadcast) [S1].
+    *   The visible probe size is constrained by the total graphics memory of the cluster [S1].
+*   **When to use:** Interactive visualization of very large volumes (terabytes) on a cluster where disk I/O is a bottleneck and network bandwidth is high [S1].
+*   **When not to use:** When the dataset fits entirely within cluster RAM and static resident sets are sufficient, or when network latency is too high for effective sibling caching [S1].
+
+## Background
+The Distributed Hierarchical Cache System was introduced in a paper by Cavin et al. [S1]. It was developed to address the limitations of previous Distributed Shared Memory (DSM) systems for parallel visualization, which required the entire dataset to fit into the total RAM of the cluster and used static resident sets [S1]. DHCS was implemented as part of the DViz system for hardware-accelerated volume visualization [S1].
+
+## Sources
+[S1] Distributed Shared Memory for Roaming Large Volumes, https://doi.org/10.1109/tvcg.2006.135, fetched 2026-10-26
+[S2] SCITEPRESS - SCIENCE AND TECHNOLOGY PUBLICATIONS, https://www.scitepress.org/PublishedPapers/2010/28129/, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,138 @@
+# MiniGS
+
+Also called: MiniGS: Efficient 3D Gaussian Splatting With Full Factors Weighted Pruning For Scene Representation
+
+## Overview
+MiniGS is a memory-efficient compression method for 3D Gaussian Splatting that reduces the number of primitives by up to 90% while maintaining rendering quality comparable to the vanilla algorithm [S1]. It addresses the inherent redundancy in primitive allocation, where overlapping or non-essential elements consume excessive storage, by employing Full Factors Weighted (FFW) Importance Score Pruning to remove redundant Gaussians and a Variational Densify Threshold (VDT) component to recover fine details lost during pruning [S1]. Unlike standard pruning methods that may degrade quality, MiniGS compensates for this loss through VDT, a gradient optimization mechanism applied during the backward pass [S1].
+
+## How it works
+MiniGS operates on the standard 3D Gaussian representation defined in the parent article [Pruning and Density Control](16215-pruning-and-density-control.md). The method consists of two main phases: FFW Importance Score Pruning and VDT-based densification.
+
+### Inputs and Outputs
+*   **Input:** A set of optimized 3D Gaussians $\{G_i\}$, where each $G_i$ is defined by position $\mathbf{p}_i$, scale $\mathbf{s}_i$, rotation $\mathbf{q}_i$, opacity $\alpha_i$, and spherical harmonic coefficients $\mathbf{c}_i$.
+*   **Output:** A pruned set of Gaussians $\{G'_i\}$ with significantly reduced cardinality, and updated parameters via VDT.
+
+### Data Structures
+The Gaussian primitive $G_i$ retains the standard layout:
+*   $\mathbf{p}_i \in \mathbb{R}^3$: Position.
+*   $\mathbf{s}_i \in \mathbb{R}^3$: Scale.
+*   $\mathbf{q}_i \in \mathbb{R}^4$: Rotation (quaternion).
+*   $\alpha_i \in [0, 1]$: Opacity.
+*   $\mathbf{c}_i$: Spherical Harmonics coefficients.
+
+### Mathematical Background
+The Gaussian function is defined as [S1]:
+$$
+G(\mathbf{x}) = e^{-\frac{1}{2} (\mathbf{x}-\boldsymbol{\mu})^T \Sigma^{-1} (\mathbf{x}-\boldsymbol{\mu})}
+$$
+where $\mathbf{x}$ is an arbitrary position, $\boldsymbol{\mu}$ is the mean (position), and $\Sigma$ is the covariance matrix. To ensure positive semi-definiteness, $\Sigma$ is decomposed into rotation $R$ and scaling $S$ [S1]:
+$$
+\Sigma' = R S \Sigma_S R^T
+$$
+During rendering, the 3D covariance is projected to 2D using the world-to-camera matrix $W$ and Jacobian $J$ [S1]:
+$$
+\Sigma'_{2D} = J W \Sigma W^T J^T
+$$
+Pixel color $C$ is calculated by alpha-blending contributions of overlapping Gaussians sorted by depth [S1]:
+$$
+C = \sum_{i \in N_p} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)
+$$
+where $N_p$ is the ordered set of Gaussians overlapping pixel $p$, $c_i$ is view-dependent color, and $\alpha_i$ is opacity.
+
+### Algorithm Steps
+
+1.  **Compute Importance Scores (FFW):**
+    For each Gaussian $G_i$, calculate an importance score $S_i$ based on full factors: pixel coordinates, Gaussian position distances, opacity, and transparency. The specific weighting function is not explicitly detailed in the sources beyond the description of combining these factors [S1]. The score determines the redundancy of the primitive.
+
+2.  **Pruning:**
+    Sort Gaussians by their importance score $S_i$. Remove Gaussians with scores below a threshold or those ranked lowest, aiming for a target compression ratio (e.g., 90%) [S1]. This retains only the highly contributive primitives.
+
+3.  **Variational Densify Threshold (VDT) Optimization:**
+    Apply VDT as a plug-and-play component during the backward pass of training [S1]. This involves gradient optimization to enhance the preservation of fine-grained details and compensate for quality loss incurred by pruning [S1]. The VDT mechanism adjusts parameters to recover details that were lost when redundant Gaussians were removed.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def minigs_pruning_and_densification(gaussians, camera_matrices, images, target_compression_ratio=0.9):
+    """
+    Performs FFW pruning and VDT densification on a set of 3D Gaussians.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes p, s, q, alpha, c.
+        camera_matrices: List of camera parameters (W, J) for training views.
+        images: Ground truth images for loss calculation.
+        target_compression_ratio: Fraction of Gaussians to keep (e.g., 0.1 for 90% pruning).
+        
+    Returns:
+        pruned_gaussians: List of remaining Gaussian objects.
+    """
+    
+    # Step 1: Compute Importance Scores
+    scores = []
+    for g in gaussians:
+        # Calculate score based on pixel coordinates, distance, opacity, transparency
+        # Note: Exact formula for combining these factors is not provided in sources [S1]
+        # Placeholder for FFW score calculation
+        score = compute_ffw_score(g, camera_matrices)
+        scores.append(score)
+    
+    # Step 2: Prune Redundant Gaussians
+    # Sort by score ascending (lowest importance first)
+    indexed_scores = sorted(enumerate(scores), key=lambda x: x[1])
+    
+    num_to_keep = int(len(gaussians) * target_compression_ratio)
+    keep_indices = set([idx for idx, _ in indexed_scores[-num_to_keep:]])
+    
+    pruned_gaussians = [g for i, g in enumerate(gaussians) if i in keep_indices]
+    
+    # Step 3: Apply VDT during backward pass
+    # VDT is a gradient optimization mechanism applied during training
+    # It is not a separate forward pass step but modifies the gradient update
+    return pruned_gaussians
+
+def compute_ffw_score(gaussian, camera_matrices):
+    """
+    Computes the Full Factors Weighted importance score.
+    Combines pixel coordinates, Gaussian position distances, opacity, and transparency.
+    Exact implementation details are not specified in the source [S1].
+    """
+    # [G] Placeholder: In a real implementation, this would aggregate:
+    # 1. Opacity alpha
+    # 2. Transparency (1 - alpha)
+    # 3. Distance from camera center or principal point
+    # 4. Contribution to pixel coverage
+    # The source states these are "selectively combined" but does not give the formula.
+    return 0.0 # Placeholder
+
+def apply_vdt_gradient_update(gaussians, loss, learning_rate):
+    """
+    Applies the Variational Densify Threshold optimization during the backward pass.
+    Enhances preservation of fine-grained details.
+    """
+    # [G] Placeholder: This modifies the gradient descent step.
+    # The source describes it as a "plug-and-play component" applied during the backward process.
+    # It likely involves a threshold-based gradient scaling or regularization term.
+    pass
+```
+
+### Parameters
+*   **Compression Ratio:** MiniGS targets a 90% compression ratio, reducing the number of primitives significantly [S1].
+*   **VDT (Variational Densify Threshold):** A hyperparameter or mechanism controlling the intensity of detail recovery during the backward pass. The exact value is not specified in the sources [S1].
+
+### Edge Cases and Pitfalls
+*   **Over-pruning:** Removing too many primitives may lead to loss of fine details that VDT cannot fully recover. The sources note that VDT compensates for quality loss but do not specify the limit of this compensation [S1].
+*   **Redundancy Identification:** The accuracy of the FFW score is critical. If the score does not accurately reflect the visual contribution of a Gaussian, important primitives may be pruned [S1].
+
+## Operating characteristics
+*   **Compression:** MiniGS achieves a 90% compression ratio [S1].
+*   **Performance:** On the DeepBlending dataset, MiniGS achieves a PSNR of 29.63 with 303.271 thousand Gaussian primitives, whereas vanilla 3DGS achieves a similar PSNR of 29.73 with one order of magnitude more primitives [S1].
+*   **Memory:** Significantly reduced memory footprint due to the reduced number of primitives [S1].
+*   **Training:** Requires additional backward pass optimization via VDT, which may increase training time per step compared to vanilla 3DGS, though the total number of steps may be reduced due to fewer primitives [S1].
+
+## Background
+MiniGS was proposed by Qing Yang, Xiaonuo Dongye, Hanzhi Guo, Dongdong Weng, and Le Luo from the Beijing Institute of Technology and Pengcheng Laboratory [S1]. The work was posted as a preprint on June 25th, 2025, and published in *Multimedia Systems* on January 8th, 2026 [S1]. It addresses the inefficiency of 3D Gaussian Splatting, where primitive allocation can exceed 1 GB of storage due to redundancy [S1].
+
+## Sources
+[S1] Minigs: efficient 3D Gaussian splatting with full factors weighted pruning for scene representation, https://doi.org/10.1007/s00530-025-02104-w, fetched 2026-10-26

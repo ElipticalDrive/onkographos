@@ -1,0 +1,110 @@
+--- v001.md
++++ v002.md
+@@ -10,30 +10,27 @@
+ 
+ **Inputs and Outputs:**
+-*   **Input:** Original volume samples $f_k$, a reconstruction kernel $\phi(t)$, and a control parameter $\alpha \in [0, 1]$.
+-*   **Output:** The reconstructed volume value $\tilde{f}(t)$ at a query point $t$.
++*   **Input:** Original volume samples $f_k$, a reconstruction kernel $\phi(t)$, and a control parameter $\alpha$ [S1].
++*   **Output:** The reconstructed volume value $\tilde{f}(t)$ at a query point $t$ [S1].
+ 
+ **Data Structures:**
+-*   **Samples:** Array of original voxel values $f_k$.
+-*   **Coefficients:** Array of prefiltered values $c_k$, derived from $f_k$ via discrete prefiltering.
+-*   **Kernel:** The reconstruction filter function $\phi(t)$ (e.g., cubic B-spline).
++*   **Samples:** Array of original voxel values $f_k$ [S1].
++*   **Coefficients:** Array of prefiltered values $c_k$, derived from $f_k$ via discrete prefiltering [S1].
++*   **Kernel:** The reconstruction filter function $\phi(t)$ (e.g., cubic B-spline) [S1].
+ 
+ **Parameters:**
+-*   **$\alpha$ (Control Parameter):** A single slider value controlling the trade-off between smoothing and postaliasing effects [S1].
+-    *   $\alpha = 0$: Uses only the original samples $f_k$ (approximating behavior).
+-    *   $\alpha = 1$: Uses only the prefiltered coefficients $c_k$ (interpolating behavior) [S1].
+-    *   *Note:* The exact mapping of $\alpha$ to the weighted sum coefficients is not specified in the sources, but it controls the linear interpolation between the two reconstruction results [S1].
++*   **$\alpha$ (Control Parameter):** A single slider value controlling the trade-off between smoothing and postaliasing effects on the fly [S1].
+ 
+ **Steps:**
+-1.  **Prefiltering:** Compute the prefiltered coefficients $c_k$ from the original samples $f_k$ using a discrete prefilter $p_k$. This step is performed once per volume or when the volume changes [S1].
+-    $$ c_k = \sum_j p_{k-j} f_j $$
+-2.  **Dual Convolution:** Convolve both the original samples $f_k$ and the prefiltered coefficients $c_k$ with the same continuous reconstruction kernel $\phi(t)$ simultaneously. This is typically done using SIMD instructions on the GPU [S1].
+-    *   Result 1: $R_f(t) = \sum_k f_k \phi(t - k)$
+-    *   Result 2: $R_c(t) = \sum_k c_k \phi(t - k)$
+-3.  **Weighted Sum:** Calculate the final value $\tilde{f}(t)$ as a weighted sum of the two convolution results, controlled by $\alpha$ [S1].
+-    $$ \tilde{f}(t) = (1 - \alpha) R_f(t) + \alpha R_c(t) $$
++1.  **Prefiltering:** Compute the prefiltered coefficients $c_k$ from the original samples $f_k$ using a discrete prefilter $p_k$ [S1].
++    $$ c_k = \sum_j p_{k-j} f_j \quad \text{[G]} $$
++2.  **Dual Convolution:** Convolve both the original samples $f_k$ and the prefiltered coefficients $c_k$ with the same continuous reconstruction kernel $\phi(t)$ simultaneously [S1].
++    $$ R_f(t) = \sum_k f_k \phi(t - k) \quad \text{[G]} $$
++    $$ R_c(t) = \sum_k c_k \phi(t - k) \quad \text{[G]} $$
++3.  **Weighted Sum:** Calculate the final value $\tilde{f}(t)$ as a weighted sum of the two convolution results [S1].
++    $$ \tilde{f}(t) = (1 - \alpha) R_f(t) + \alpha R_c(t) \quad \text{[G]} $$
+ 
+ **Pseudocode:**
+ ```python
+-def reconstruct_volume_sample(t, samples, coefficients, kernel, alpha):
++def reconstruct_volume_sample(t, samples, coefficients, kernel_support, kernel_func, alpha):
+     """
+     Reconstructs a single volume value at position t using the Weighted Sum method.
+@@ -43,5 +40,6 @@
+         samples (list[float]): Original volume samples f_k.
+         coefficients (list[float]): Prefiltered coefficients c_k.
+-        kernel (function): The reconstruction filter function phi(t).
++        kernel_support (int): Half-width of the reconstruction kernel support.
++        kernel_func (function): The reconstruction filter function phi(t).
+         alpha (float): Control parameter between 0.0 and 1.0.
+         
+@@ -49,18 +47,20 @@
+         float: The reconstructed volume value.
+     """
++    start_k = int(t) - kernel_support
++    end_k = int(t) + kernel_support
++    
+     # Step 1: Convolve original samples with the kernel
+-    # R_f(t) = sum_k f_k * phi(t - k)
+     result_f = 0.0
+-    for k in range(len(samples)):
+-        result_f += samples[k] * kernel(t - k)
+-        
++    for k in range(start_k, end_k + 1):
++        if 0 <= k < len(samples):
++            result_f += samples[k] * kernel_func(t - k)
++            
+     # Step 2: Convolve prefiltered coefficients with the same kernel
+-    # R_c(t) = sum_k c_k * phi(t - k)
+     result_c = 0.0
+-    for k in range(len(coefficients)):
+-        result_c += coefficients[k] * kernel(t - k)
+-        
++    for k in range(start_k, end_k + 1):
++        if 0 <= k < len(coefficients):
++            result_c += coefficients[k] * kernel_func(t - k)
++            
+     # Step 3: Weighted sum of the two results
+-    # f_tilde(t) = (1 - alpha) * R_f(t) + alpha * R_c(t)
+     final_value = (1.0 - alpha) * result_f + alpha * result_c
+     
+@@ -69,16 +69,14 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The simultaneous convolution of two data sets requires sufficient precision to avoid numerical instability, especially when $\alpha$ is close to 0 or 1 [S1].
+-*   **Boundary Conditions:** The prefiltering step (Step 1) must handle boundary conditions correctly to avoid artifacts at the edges of the volume [S1].
+-*   **Kernel Support:** The kernel $\phi(t)$ must have sufficient support to capture the necessary frequency information for both the approximating and interpolating cases [S1].
++*   **Filter Selection:** The choice of an appropriate filter depends on the data set and the specific visualization task, meaning a universal solution does not exist [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method requires two convolutions per sample, but they can be performed simultaneously using SIMD instructions, effectively doubling the throughput compared to a single convolution [S1]. The prefiltering step is performed once per volume, adding a one-time cost [S1].
+-*   **Memory Complexity:** Requires storing both the original samples and the prefiltered coefficients, doubling the memory requirement for the volume data [S1].
+-*   **Performance:** Significantly faster than brute-force multi-filter approaches because it avoids computing two different, expensive filters [S1]. The use of SIMD instructions on the GPU further enhances performance [S1].
+-*   **Strengths:** Interactive control over smoothing and aliasing; efficient GPU implementation; continuous transition between filter types [S1].
+-*   **Limitations:** Requires additional memory for coefficients; prefiltering step adds complexity; the quality of the reconstruction depends on the choice of the kernel and prefilter [S1].
+-*   **When to Use:** When interactive control over the visual appearance (smoothing vs. detail) is required, and performance is critical [S1].
+-*   **When Not to Use:** When memory is extremely constrained, or when a fixed, optimal filter is sufficient for the visualization task [S1].
++*   **Time Complexity:** The method requires two convolutions per sample, but they are performed simultaneously using SIMD instructions, avoiding the bottleneck of computing two different expensive filters [S1]. The prefiltering step is performed once per volume, adding a one-time cost [S1].
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:** The technique enables efficient GPU implementation via SIMD instructions [S1].
++*   **Strengths:** The method provides interactive control over the trade-off between smoothing and postaliasing effects on the fly [S1]. It offers a continuous transition between approximating and prefiltered interpolating reconstructions [S1].
++*   **Limitations:** The choice of an appropriate filter depends on the data set and the specific visualization task, so a universal solution does not exist [S1].
++*   **When to Use:** Not given in the sources.
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background

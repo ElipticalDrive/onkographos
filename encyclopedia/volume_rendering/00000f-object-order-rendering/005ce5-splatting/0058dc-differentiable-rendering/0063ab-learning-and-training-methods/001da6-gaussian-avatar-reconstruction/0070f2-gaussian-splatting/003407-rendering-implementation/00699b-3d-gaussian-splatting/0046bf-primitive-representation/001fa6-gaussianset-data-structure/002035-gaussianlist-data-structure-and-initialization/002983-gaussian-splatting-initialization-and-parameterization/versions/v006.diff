@@ -1,0 +1,123 @@
+--- v005.md
++++ v006.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Gaussian Splatting Initialization and Parameterization establishes the initial state of a 3D Gaussian Splatting representation from input data, typically a sparse point cloud, to begin differentiable optimization [S3, S6, unofficial]. It differs from [Random Large-Variance Initialization](6129-random-large-variance-initialization.md) by using structured geometric priors rather than random noise, and from [Gaussian Geometry Parameters Prediction](8442-gaussian-geometry-parameters-prediction.md) by relying on explicit data mapping rather than learned prediction networks [S3, S6, unofficial]. It serves as the foundational step for [Gaussian Splatting Initialization and Parameterization](2313-gaussian-splatting-initialization-and-parameterization.md).
++Gaussian Splatting Initialization and Parameterization establishes the initial state of a 3D Gaussian Splatting representation from input data, typically a sparse point cloud, to begin differentiable optimization [S3, S6, unofficial]. It differs from [Random Large-Variance Initialization](6129-random-large-variance-initialization.md) by anchoring Gaussians to observed data rather than random space [S3, S6, unofficial].
+ 
+ ## How it works
+@@ -33,5 +33,5 @@
+ 1.  **Position Initialization:**
+     *   If using SfM/COLMAP: Extract XYZ coordinates from the 3D point cloud and copy them directly to the GPU memory as the initial means $\mathbf{xyz}$ [S1, S5, S6, unofficial].
+-    *   If using Depth-guided: Estimate normal maps from spatial gradients of depth maps (e.g., from Depth Anything) to orient initial surfels. Initialize positions from the depth map points [S2, unofficial].
++    *   If using Depth-guided: Estimate normal maps from spatial gradients of depth maps (e.g., from Depth Anything) to orient initial surfels [S2, unofficial].
+     *   If using Random: Generate points in a bounding volume (not covered in detail here, see [Random Large-Variance Initialization](6129-random-large-variance-initialization.md)) [S3, unofficial].
+ 
+@@ -51,10 +51,10 @@
+ 
+ 3.  **Scale Initialization:**
+-    *   Compute the distance to the $k$-nearest neighbors (KNN) for each point in the input cloud. Common $k$ is 50 [S3, unofficial].
++    *   Compute the distance to the $k$-nearest neighbors (KNN) for each point in the input cloud [S1, S3, unofficial]. Common $k$ is 50 [S3, unofficial].
+     *   Calculate the mean KNN distance $d$.
+-    *   Apply a scaling factor $s_{init}$ (typically 1.5 for depth-guided, or derived from a base distance) [S2, S5, unofficial].
++    *   Apply a scaling factor $s_{init}$ (typically 1.5 for depth-guided, or derived from a base distance of 0.1) [S2, S5, unofficial].
+     *   Compute the log-scale pre-activation:
+         $$
+-        \mathbf{s} = \log(\sqrt{d^2}) \quad \text{or} \quad \mathbf{s} = \log(\sqrt{\max(d^2, \epsilon)})
++        \mathbf{s} = \log(\sqrt{\max(d^2, \epsilon)})
+         $$
+         where $\epsilon = 10^{-7}$ prevents numerical instability [S5, unofficial].
+@@ -63,8 +63,8 @@
+ 
+ 4.  **Opacity Initialization:**
+-    *   Initialize the logit pre-activation value.
++    *   Initialize the logit pre-activation value [S3, S5, unofficial].
+     *   **Standard:** Set to 8.0, which yields $\sigma(8.0) \approx 0.9997$ [S3, unofficial].
+     *   **Alternative:** Set to the logit of 0.1, i.e., $\log(0.1 / 0.9)$ [S1, unofficial].
+-    *   **Clamping:** Clamp the initial logit value to the range $[\log(10^{-4}/0.99), \log(0.99/10^{-4})]$ to prevent extreme values during optimization [S5, unofficial].
++    *   **Clamping:** Clamp the initial opacity value (e.g., 0.5) to the range $[10^{-4}, 0.99]$, then apply the logit function to create the learnable parameter [S5, unofficial].
+ 
+ 5.  **Color (SH) Initialization:**
+@@ -73,9 +73,9 @@
+         f_{dc} = \frac{\mathbf{c}_{rgb}}{C_0}
+         $$
+-    *   **Higher Degrees ($f_{rest}$):** Initialize to zeros [S1, S5, unofficial].
++    *   **Higher Degrees ($f_{rest}$):** Initialize to zeros [S1, unofficial].
+     *   **Metallic/Roughness (if applicable):** Initialize metallic to 0.5 and roughness to 0.1 [S2, unofficial].
+ 
+ 6.  **Covariance Construction (Runtime/Forward Pass):**
+-    *   Construct the diagonal scaling matrix $S = \text{diag}(e^{\mathbf{s}})$ [S5, unofficial].
++    *   Construct the diagonal scaling matrix $S = \text{diag}(\text{clamp}(e^{\mathbf{s}}, \max=10.0))$ [S5, unofficial].
+     *   Normalize the rotation quaternion $\mathbf{q}$ to unit length and convert to a rotation matrix $R \in \mathbb{R}^{3 \times 3}$ [S5, unofficial].
+     *   Compute the 3D covariance matrix:
+@@ -83,5 +83,5 @@
+         \Sigma = R S S^T R^T
+         $$
+-    *   **2D Projection:** For rendering, transform to camera space. Let $W$ be the world-to-camera rotation matrix and $J$ be the Jacobian of the perspective projection:
++    *   **2D Projection:** For rendering, transform to camera space [S5, unofficial]. Let $W$ be the world-to-camera rotation matrix and $J$ be the Jacobian of the perspective projection:
+         $$
+         J = \begin{bmatrix}
+@@ -147,7 +147,8 @@
+     rotation[:, 0] = 1.0 # w=1, x=y=z=0
+     
+-    # 4. Opacity (Logit of 0.5 or 8.0)
+-    # Using 8.0 as per [S3, unofficial]
+-    opacity = torch.full((N, 1), 8.0, dtype=torch.float32, device=device)
++    # 4. Opacity (Logit pre-activation)
++    # Clamp initial value 0.5 to range [1e-4, 0.99], then apply logit function
++    init_opacity = torch.clamp(torch.tensor(0.5), min=1e-4, max=0.99)
++    opacity = torch.logit(init_opacity).unsqueeze(1) # Shape (N, 1)
+     
+     # 5. Colors (SH Degree 0)
+@@ -184,15 +185,11 @@
+     """
+     # Convert quaternions to rotation matrices
+-    # Assuming a standard quaternion_to_rotation_matrix function
+     R = quaternion_to_rotation_matrix(rotation) # Shape (N, 3, 3)
+     
+-    # Create diagonal scaling matrix
+-    # S = diag(exp(scaling))
+-    s = torch.exp(scaling) # Shape (N, 3)
+-    S = torch.diag_embed(s) # Shape (N, 3, 3)
++    # Create diagonal scaling matrix with clamping
++    s = torch.clamp(torch.exp(scaling), max=10.0) # Shape (N, 3)
++    SS_T = torch.diag_embed(s**2) # Shape (N, 3, 3)
+     
+     # Sigma = R S S^T R^T
+-    # Since S is diagonal, S S^T = diag(s^2)
+-    SS_T = torch.diag_embed(s**2)
+     covariance = R @ SS_T @ R.transpose(1, 2)
+     
+@@ -244,11 +241,11 @@
+ 
+ ### Neural Point Cloud Initialization from COLMAP
+-A method to initialize the neural point cloud and their features for Point-NeRF using an external point cloud reconstruction (specifically COLMAP). It solves the problem of how to provide initial positions, variances, and feature vectors for the neural points. Initialize the variance parameter $\gamma_i$ for each point $p_i$ to 0.3. During optimization, the confidence score of valid points is pushed to 1. To acquire the feature vector $f_i$ for a point $p_i$, first rule out all views where the point is occluded by other points. Find the view where the camera is closest to the point $p_i$. Unproject the point $p_i$ onto the feature maps extracted by the Image Feature Extraction 2D CNN (Gf) from the selected closest view to obtain $f_i$ [S7].
++A method to initialize the neural point cloud and their features for Point-NeRF using an external point cloud reconstruction (specifically COLMAP) [S7]. It solves the problem of how to provide initial positions, variances, and feature vectors for the neural points [S7]. Initialize the variance parameter $\gamma_i$ for each point $p_i$ to 0.3 [S7]. During optimization, the confidence score of valid points is pushed to 1 [S7]. To acquire the feature vector $f_i$ for a point $p_i$, first rule out all views where the point is occluded by other points [S7]. Find the view where the camera is closest to the point $p_i$ [S7]. Unproject the point $p_i$ onto the feature maps extracted by the Image Feature Extraction 2D CNN (Gf) from the selected closest view to obtain $f_i$ [S7].
+ 
+ ### Binary Gaussian Hierarchy Construction
+-The hierarchy is a binary tree. Leaf nodes contain the full set of optimized Gaussian properties (base color, SH coefficients, position, covariance). Internal nodes store merged approximations of their two child nodes [S8, unofficial].
++The hierarchy is a binary tree. Leaf nodes contain the full set of optimized Gaussian properties (base color, SH coefficients, position, covariance) [S8, unofficial]. Internal nodes store merged approximations of their two child nodes [S8, unofficial].
+ 
+ ### Single Ellipsoid Initialization
+-Initializes a single ellipsoid from a set of 3D points using Principal Component Analysis (PCA) to determine orientation, center, and radii. $r_{\min}$: Minimum allowed radius to avoid numerical problems. Typical value: 0.005. $\alpha$: Scaling factor to ensure points are mostly covered. Typical value: 3 [S9].
++Initializes a single ellipsoid from a set of 3D points using Principal Component Analysis (PCA) to determine orientation, center, and radii [S9]. $r_{\min}$: Minimum allowed radius to avoid numerical problems. Typical value: 0.005 [S9]. $\alpha$: Scaling factor to ensure points are mostly covered. Typical value: 3 [S9].
+ 
+ ## Operating characteristics
+@@ -262,13 +259,12 @@
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Provides geometrically accurate starting points, significantly improving reconstruction quality and convergence speed compared to random initialization [S6, unofficial].
++*   **Strengths:** Provides geometrically accurate starting points, significantly improving reconstruction quality compared to random initialization [S6, unofficial].
+ *   **Limitations:** Requires high-quality SfM data; fails or degrades background quality if SfM points are sparse or missing [S6, unofficial]. Random initialization avoids complete failure but degrades background quality [S6, unofficial].
+ 
+ **When to Use:**
+-*   Use SfM initialization for static scenes with sufficient image overlap and texture.
+-*   Use Random or Depth-guided initialization when SfM fails or for dynamic scenes where temporal initialization is preferred [S1, S2, unofficial].
++*   Use SfM initialization for static scenes with sufficient image overlap and texture [S6, unofficial].
+ 
+ ## Background
+-Originating from the 3D Gaussian Splatting paper (Kerbl et al., 2023), the method relies on Structure from Motion (SfM) to provide initial 3D points [S6, unofficial]. SfM estimates camera poses, intrinsic parameters, and 3D feature point locations from input images [S6, unofficial]. These points serve as the initial positions for the Gaussian distribution, replacing the random initialization used in earlier neural rendering methods [S6, unofficial]. The approach has been extended to depth-guided initialization using normal maps from depth estimators like Depth Anything [S2, unofficial], and to hierarchical or predictive methods for large-scale or dynamic scenes [S1, S2, S8, unofficial].
++Originating from the 3D Gaussian Splatting paper (Kerbl et al., 2023), the method relies on Structure from Motion (SfM) to provide initial 3D points [S6, unofficial]. SfM estimates camera poses, intrinsic parameters, and 3D feature point locations from input images [S6, unofficial]. These points serve as the initial positions for the Gaussian distribution, replacing the random initialization used in earlier neural rendering methods [S6, unofficial]. The approach has been extended to depth-guided initialization using normal maps from depth estimators like Depth Anything [S2, unofficial].
+ 
+ ## Sources

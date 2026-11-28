@@ -1,0 +1,438 @@
+The Rollerator — cinematic DnD dice simulator. Contribute to c-1k/rollerator development by creating an account on GitHub.
+
+feat(dice): reveal camera — the camera replaces the post-settle yaw by c-1k · Pull Request #4 · c-1k/rollerator · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+c-1k
+commented
+Aug 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+The reveal camera replaces the post-settle yaw: instead of rotating the landed die to present its face, the camera moves to a pose that reads the face upright. revealCamera() in physics-roll.js computes that pose; dice3d.js drives the camera to it during the replay tail, holds it there, and re-derives it on resize. Invariant 3 — nothing writes mesh.quaternion after the body sleeps — is the thing this whole branch protects, and it's asserted directly by e2e/roll.spec.js.
+Evidence trail
+Task 2 — red, on the original defect (/tmp/task2-red.log):
+```
+Error: die was re-oriented after rest (invariant 3): |q·q0| = 0.388130
+```
+Task 3 — green, after the fix (/tmp/task3-green.log):
+```
+  ✓  1 [chromium] › e2e/roll.spec.js:32:1 › every die rolls to a legal face and reports it (1.8m)
+  ✓  2 [chromium] › e2e/roll.spec.js:105:1 › switching environment clears the previous result; resizing keeps the reveal framed (38.3s)
+
+  2 passed (2.5m)
+exit: 0
+```
+Task 5 — both mutation controls fail the invariant, proving the assertion has teeth in both windows a post-rest write could hide:
+Control A (tail — stepRoll's tail branch, right after mesh.position.lerpVectors(st.fromP, st.toP, u);) — /tmp/task5-mutation-tail.log:
+```
+Error: die was re-oriented after rest (invariant 3): |q·q0| = 0.988771
+```
+Control B (hold — lockSettleFrame, right after mesh.position.set(0, settleY, 0);) — /tmp/task5-mutation-hold.log:
+```
+Error: die was re-oriented after rest (invariant 3): |q·q0| = 0.628174
+```
+Both controls were removed before commit; grep -c "MUTATION CONTROL" dice3d.js → 0.
+Notes
+e2e/roll.spec.js modelled d100 as 1–100 from the pre-port DICE table; the port ships a 10-face percentile tens die (00–90), which was a 1-in-10 flake on the base. The d10 had the same defect and was missed by that correction — see the final-review fix wave below. Note that the quote and share assertions are not a safety net for either: pickHortQuote always returns a line, so .hort-line can never be empty and an unrendered face cannot surface that way. The predicate fixes stand on their own. Open product question, left to sub-spec 2: does 00 read as 100 (and d10 · 0 as d10 · 10)?
+st.reveal / lastRoll.reveal is the value the whole feature turns on: it's consumed by the tail tween, the hold, finishRoll, and the resize handler (applyFraming — originally guarded by lastRoll?.reveal for the post-roll case; the fix wave below extends it to a resize during the roll).
+grep -c restQuaternionForFace dice3d.js → 0.
+Renders — every die, ice environment, plus one hoard shot
+Rendered via pnpm run shot <die> <env>; git-ignored, not attached — described here by file name (from .artifacts/):
+roll-d4-ice.png (d4, rolled 1) — numeral upright and dominant; tilt reads subtly on the tetrahedron's flat geometry via a visible edge and darker lower facet. Dragon/spires visible above. No floor intersection.
+roll-d6-ice.png (d6, rolled 2) — numeral upright and dominant; the clearest tilt read of the set, with a sharp edge and darkened lower facet on the cube. No floor intersection.
+roll-d8-ice.png (d8, rolled 5) — numeral upright and dominant; the shadowed neighbouring facet reads unambiguously as subordinate despite the risk of face competition on an octahedron. No floor intersection.
+roll-d10-ice.png (d10, rolled 9) — numeral upright and dominant on the kite-shaped face; partial numeral glyphs visible in shadow on neighbouring facets, as expected. No floor intersection.
+roll-d12-ice.png (d12, rolled 4) — numeral upright and dominant on the front pentagon; multiple neighbouring pentagons visible in shadow, strong tilt read. No floor intersection.
+roll-d20-ice.png (d20, rolled 16) — numeral upright and dominant despite the most crowded neighbouring-facet geometry of the set; surrounding triangles read dark and subordinate. No floor intersection.
+roll-d20-ice-idle.png — idle-pose reference shot from an earlier task; not part of this task's checklist.
+roll-d100-ice.png (d100, rolled 10) — numeral upright and dominant; the closest call of the set (a neighbouring partial two-digit glyph) but still clearly darker/smaller than the front face. No floor intersection.
+roll-d4-hoard.png (d4, rolled 3, hoard environment) — numeral upright and dominant in the darker die material; subtlest tilt read of the set (tetrahedron geometry) but a visible edge and partial neighbouring glyph confirm it. Dragon's claw/body visible above, gold/candles don't obscure it. No floor intersection.
+Gate
+```
+pnpm run verify
+```
+exit: 0 — lint clean (16 files, no fixes applied), unit 39 pass / 0 fail, browser 8 passed (4.6m) including both pixel-snapshot tests. Log: /tmp/task5-verify.log.
+Cache-bust
+index.html's script tag and every local import across app.js / dice3d.js now carry ?v=reveal-cam1 in lockstep (was ?v=cine-wide2). styles.css's independent ?v=film-lock token and the video/poster asset ?v=2 params (public/env/${id}.mp4?v=2, public/posters/${id}.jpg?v=2) are separate versioning schemes, outside the "local import" invariant, and were left untouched.
+Final-review fix wave
+The whole-branch review (.superpowers/sdd/2026-08-22-reveal-camera/final-review.md) found no Critical issues; these are its Important and Minor items, applied.
+0b9d761 — fix(dice): re-frame the reveal on any resize; drop the last post-rest self-write; pin the probe window
+applyFraming's recompute hook is guarded by rollState?.reveal instead of phase === "hold", and the tail caches only the from end (tailCamPos / tailCamQuat / tailFov) while deriving the to end from st.reveal every frame — a resize during flight or the tail used to leave the landing framed for the old aspect for the rest of the roll, a regression against the base. revealPos / revealQuat are gone from emptyRollState.
+Both argument-less sitOnTable(); calls (finishRoll and the reduced-motion path) are deleted; lockSettleFrame(mesh, st.reveal) already did everything they did, minus the quaternion self-copy. The only remaining sitOnTable( call site is sitDefaultFace(), the idle placement.
+Both e2e tests waitForFunction(() => debug().phase === "idle") before reading debug() and assert phase === "idle" on the read — #hort can appear as early as beginHold on a ~2× slower CI machine, which would have landed the read mid-hold and stopped covering finishRoll.
+revealDistance() returns idleCam.y - SETTLE_AIM.y instead of restating 8.8 : 7.8; the u <= 0 replay-flight branch calls trackFlight(mesh) instead of repeating it verbatim (the 0.22 FOV easing is the deliberate harmonisation with the live-physics path); placeCamera derives its orientation through revealQuaternion, the same reading the tail slerp uses.
+The resize test gains an absolute check (|reveal.position − SETTLE_AIM| == 8.8 in portrait) beside the self-consistency one; the local DICE map is renamed LEGAL.
+9d15748 — docs: invariants 3 and 6 worded to match the tree; spec §11 amendments
+CLAUDE.md invariant 3 and the reveal-camera blockquote now say nothing writes mesh.quaternion while a result is presented, and that abortRoll() returns the die to the upright idle pose once the result is dismissed. Invariant 6 now describes the three independent ?v= tokens the tree carries, and that only the module chain moves as a unit.
+INDEX.md: physics-roll.js has 32 exports, not 31.
+Spec §11 records the whole wave; the two bullets it superseded are marked in place rather than left reading as current.
+51c1efb — test(e2e): a d10's 10 renders as "0" — assert the label and the value separately
+Found by re-running the roll spec during this wave; pre-existing on the branch, ~10% of full runs. The sibling of the d100 correction in b85708a, which fixed one instance and left the other.
+```
+Error: d10 rolled an illegal face: d10  ·  0
+```
+formatFace renders a d10's 10 as "0" (dice3d.js:199, the standard percentile face). The test did Number() on the rendered label and used that number both as the legality check and as the expected stage value — for d10 landing on 10 that is Number("0") = 0, so legal(0) failed and expect(d.value).toBe(0) would have failed next with 10 vs 0. LEGAL is now unambiguously the value-space face set, and the label is asserted separately against a documented mirror of formatFace — strictly stronger, since the old form could not see a formatting regression at all.
+Control: the mirror was compared against the real formatFace (imported in the page, where the importmap resolves three) across all 70 faces of all seven dice — 0 mismatches; replacing the mirror with String(n) flags exactly d10:10 and d100:0, so the comparison is not vacuous.
+Gate, re-run on 51c1efb
+node --test → tests 39 / pass 39 / fail 0, exit: 0
+pnpm exec playwright test e2e/roll.spec.js → 2 passed (2.7m), exit: 0
+pnpm run verify → 8 passed (4.6m) including both pixel-snapshot tests, exit: 0
+pnpm run lint → exit: 0, 16 files, no fixes applied
+CI on 51c1efb → "status":"completed","conclusion":"success" (run 32619480002, job verify 05:05:28→05:13:35Z; 2 skipped, 6 passed (7.4m) — the two skips are the macOS-baselined pixel snapshots, skipped on Linux CI by design; they ran and passed locally)
+grep -cE "sitOnTable\(\)" dice3d.js → 0 · grep -cwE "revealPos|revealQuat" dice3d.js → 0 · grep -c "MUTATION CONTROL" dice3d.js → 0
+Mutation control A re-run against this tree (the invariant must still have teeth after the sitOnTable() deletion) — mesh.rotateY(0.3) in the tail:
+```
+Error: die was re-oriented after rest (invariant 3): |q·q0| = 0.988771
+Expected: > 0.999999
+Received:   0.9887710779360424
+```
+Both tests went red; the line was removed afterwards.
+Reveal and idle shots re-rendered and looked at: roll-d20-ice.png (rolled 11) — overhead-ish 15° reveal, numeral upright, die centred, no floor intersection; unchanged from before the wave. roll-d20-ice-idle.png — upright idle numeral (20), no quote panel, no share button.
+Deferred, untouched (recorded by the review): dead sitY / st.flatP / unreachable finishLanding; the unreachable finishRoll fall-through guard; settleY derived from landedQuat; the out parameter on revealQuaternion (it now has two callers, so it stays).
+Not done — one open decision: this wave changed dice3d.js but did not bump the module-chain ?v= token (still reveal-cam1). reveal-cam1 has never been served from production — this branch targets feat/physics-port, not main — so nothing can load a stale dice3d.js against a new app.js. The bump belongs to whichever commit lands this stack on main; flagging it so it is a decision rather than an oversight.
+Base: feat/physics-port (this stacks on the port; not main — PR #3 stays open, untouched).
+c-1k
+and others
+added 9 commits
+August 22, 2026 22:21
+docs(plan): reveal camera stacks on feat/physics-port; nothing merges…
+…
+1790534
+```
+… to main here
+
+PR #3 is held open (load-time regression, sub-spec 2). Task 0 bases the worktree on the port branch; Task 5 opens the PR against it and never touches main or production. Task 0 was executed by the orchestrator on 2026-08-22: gate exit 0 (32 unit, 8 browser), baseline shot saved.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01DJ2yZnh67uicTmvrm3CLUU
+```
+feat(physics): revealCamera() — camera pose that presents the landed …
+…
+9f9811e
+```
+…face upright
+```
+test(e2e): assert invariants 2 and 3 from the stage; records the rest…
+…
+200abb3
+```
+… pose
+
+The invariant-3 assertion fails on this commit by design: the replay
+tail still slerps the die to a camera-derived presentQ. Task 3 removes
+it. Failing output kept for the PR.
+```
+feat(dice): the camera replaces the post-settle yaw
+…
+84da50c
+```
+After the body sleeps nothing writes mesh.quaternion. captureLanded
+records the rest pose once; the replay tail eases the camera from the
+follow shot into revealCamera()'s pose (position lerp + quaternion
+slerp); hold pins position and camera only. restQuaternionForFace,
+presentQ/holdQ and the dead align phase are gone. Tilt is still 0 so
+the picture is unchanged; the invariant-3 browser assertion is green.
+
+Two corrections to constants that came in with Tasks 1-2:
+
+revealDistance() now returns the eye-to-aim distance (7.8 landscape /
+8.8 portrait), not the settle height. revealCamera places the eye at
+aim + n*distance, so returning 8.2 against SETTLE_AIM.y = 0.4 put the
+eye at y = 8.6 -- an 8.2 eye-to-target distance where the old shot had
+7.8, rendering the die ~5% small. The task's claim is that the picture
+is unchanged, so the constant had to match.
+
+sitDefaultFace() was a third caller of restQuaternionForFace that the
+task brief did not list. It sets the idle pose, not a post-rest one, so
+it keeps choosing a yaw -- but via the existing pure snapQuaternion(),
+whose defaults are the idle convention. It must not read camera.up:
+placeCamera now leaves camera.up at the reveal's up, and rebuild()
+calls sitDefaultFace() before lookDown() restores (0,0,-1).
+```
+test(e2e): d100 is a 10-face percentile tens die (00-90), not 1-100
+…
+b85708a
+```
+The spec asserted 1 <= value <= sides for every die, with SIDES.d100
+= 100. The app ships a ten-face percentile TENS die: faceValueTable
+returns f * 10 and formatFace deliberately pads the zero face to "00".
+A ten-faced mesh cannot show 1..100, so the assertion modelled a die
+this app does not have. SIDES was written against the pre-port DICE
+table, before the physics port changed the model.
+
+Replaced with a per-die legal() predicate: d4..d20 keep 1..sides, d100
+accepts 0..90 in steps of 10. The quote and share assertions are
+untouched.
+
+This is pre-existing on the base, not a regression from the reveal
+camera. It was masked because the invariant-3 failure aborted the loop
+at d4, the first die, so the run never reached the d100 -- and before
+that the base's suite only failed when the roll happened to land the
+1-in-10 "00" face.
+```
+fix(dice): keep the reveal framed across resize; never re-write the r…
+…
+629ce69
+```
+…est pose
+
+Two findings from the Task 3 review.
+
+1. A resize after the roll finished took applyFraming's !rolling branch
+   and snapped back to the idle overhead shot, while the die -- which no
+   longer carries the presenting yaw -- kept its physics rest pose, so
+   the numeral went crooked while the player was still reading it. The
+   step-6 hook only covered phase === "hold", the one window stepRoll
+   already re-places every frame. Now the !rolling branch re-frames the
+   reveal for the new aspect whenever a result is still presented, and
+   lastRoll is cleared in abortRoll() -- which roll() calls before every
+   throw and setIdle() calls on a die/environment change -- so "a result
+   is presented" and "lastRoll exists" cannot drift apart.
+
+2. finishRoll called sitOnTable(st.landedQuat), writing the recorded
+   pose back over the mesh. The invariant-3 probe compares exactly those
+   two values, so |q.q0| was 1 by construction and the assertion could
+   not fail for anything the tail did -- the previous rotateY(0.3)
+   control sat in lockSettleFrame, downstream of that write. Both call
+   sites now use sitOnTable() with no argument, which pins position and
+   copies the mesh's own quaternion into the body.
+
+Proven with the control in the place it now has to reach: rotateY(0.3)
+in the tail branch of stepRoll fails the assertion at |q.q0| = 0.988771
+(/tmp/task3-tail-mutation.log). Covered going forward by a resize
+assertion in the second e2e test, which checks the camera sits at the
+re-framed reveal and the die was not re-oriented.
+```
+docs(plan): Task 5 runs two mutation controls (tail + hold) and lands…
+…
+6b44b2c
+```
+… the spec amendments from Task 3's rulings
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01DJ2yZnh67uicTmvrm3CLUU
+```
+feat(dice): 15-degree reveal tilt
+26e30f7
+chore: cache-bust reveal-cam1; docs for the reveal camera
+f472f4c
+vercel
+Bot
+commented
+Aug 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The latest updates on your projects. Learn more about Vercel for GitHub.
+Project
+Deployment
+Actions
+Updated (UTC)
+rollerator
+Ready
+Preview
+Aug 23, 2026 5:05am
+chatgpt-codex-connector
+Bot
+reviewed
+Aug 23, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: f472f4cd4b
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+dice3d.js
+Outdated
+Comment on lines
++1146
+to
++1149
+if (rollState?.phase === "hold" && rollState.reveal) {
+rollState.reveal = computeReveal(rollState.mesh, rollState.index, rollState.landedQuat);
+if (lastRoll) lastRoll.reveal = rollState.reveal;
+}
+chatgpt-codex-connector
+Bot
+Aug 23, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Recompute the reveal when resizing during replay
+When the viewport changes after Roll is pressed but before the hold phase begins—for example, when a player rotates a phone during the animation—this guard skips recomputing the reveal, while the !rolling branch is also skipped. Because captureLanded() computed the pose using the old aspect and the tail caches that pose in revealPos/revealQuat, the completed result remains framed using the old landscape/portrait distance until another resize occurs. Refresh the active replay's reveal and any cached tail target when the aspect changes.
+Useful? React with 👍 / 👎.
+c-1k
+added 3 commits
+August 23, 2026 00:46
+fix(dice): re-frame the reveal on any resize; drop the last post-rest…
+…
+0b9d761
+```
+… self-write; pin the probe window
+
+Final-review fix wave on the reveal camera.
+
+- applyFraming re-derives st.reveal in any phase that has one, not only
+  "hold", and the tail stops caching its target: tailCamPos/tailCamQuat/
+  tailFov (the *from* end) stay cached, while the *to* end is derived from
+  st.reveal every frame. A resize during flight or the tail used to leave the
+  landing framed for the old aspect for the rest of the roll -- a regression
+  against the base, where settleCam was read live every frame. revealPos and
+  revealQuat are gone from emptyRollState.
+- Both argument-less sitOnTable() calls (finishRoll, reduced-motion path) are
+  deleted. lockSettleFrame(mesh, st.reveal) follows each immediately and
+  already does everything they did, without the quaternion self-copy. The only
+  remaining sitOnTable( call site is sitDefaultFace(), the idle placement.
+  Invariant 3 is now grep-provable in the roll path.
+- Both e2e tests wait for debug().phase === "idle" before reading debug() and
+  assert it on the read. #hort appears when Promise.all([envPlay, diePlay])
+  resolves and diePlay resolves at beginHold, not at finish; on ~2x slower CI
+  the read would have landed mid-hold and stopped covering finishRoll.
+- revealDistance() returns idleCam.y - SETTLE_AIM.y instead of restating
+  8.8/7.8 -- identical by arithmetic, and it cannot drift.
+- The u <= 0 replay-flight branch calls trackFlight(mesh) instead of repeating
+  it verbatim; the 0.22 FOV easing is the deliberate harmonisation with the
+  live-physics flight path.
+- placeCamera derives its orientation through revealQuaternion, the same
+  reading the tail slerp uses, instead of camera.up + camera.lookAt.
+- The resize test gains an absolute check (|reveal.position - SETTLE_AIM| ==
+  8.8 in portrait) next to the self-consistency one, and the local DICE map is
+  renamed LEGAL so it stops shadowing dice3d.js's exported DICE.
+
+Mutation control A (mesh.rotateY(0.3) in the tail) re-run against this tree:
+both tests fail with |q.q0| = 0.988771 = cos(0.15). The gate still has teeth
+after the sitOnTable() deletion.
+```
+docs: invariants 3 and 6 worded to match the tree; spec §11 amendments
+…
+9d15748
+```
+- CLAUDE.md invariant 3 and the reveal-camera blockquote now say that nothing
+  writes mesh.quaternion *while a result is presented*, and that abortRoll()
+  returns the die to the upright idle pose once the result is dismissed. The
+  unqualified "never" was false: abortRoll() -> sitDefaultFace() is a post-rest
+  write, and it is invisible to the invariant-3 probe because abortRoll()
+  clears lastRoll before making it.
+- CLAUDE.md invariant 6 now describes the three independent ?v= tokens the
+  tree actually carries. The module chain (index.html's script tag plus every
+  local import in app.js and dice3d.js) moves as a unit whenever any module
+  changes; the stylesheet link and the media URLs carry their own tokens and
+  are bumped only when those files change. As written it read as "bump all
+  three", which would force an ~8 MB media re-download for a JS change.
+- INDEX.md: physics-roll.js has 32 exports, not 31. The row was edited by this
+  branch to name revealCamera() but the count was not.
+- Spec §11 gains the final-review wave: the cache-bust three-token ruling, the
+  abortRoll() blind spot, the trackFlight harmonisation, the sitOnTable()
+  deletion, the resize fix, the probe-window pin, the absolute resize check,
+  revealDistance() deriving its constants, and placeCamera sharing one reading
+  of the reveal orientation. The two bullets the wave superseded (§5 finish,
+  §5 resize) are marked in place rather than left to read as current.
+- Spec §11's d100 bullet now says plainly that the quote and share assertions
+  are NOT a safety net for an unquoted 00 face: pickHortQuote always returns a
+  line, so .hort-line can never be empty. The predicate fix stands on its own.
+```
+test(e2e): a d10's 10 renders as "0" — assert the label and the value…
+…
+51c1efb
+```
+… separately
+
+Found by re-running the roll spec during the final-review fix wave. Pre-existing
+on this branch (it predates the wave); it fires whenever the d10 lands on its 10
+face, so ~10% of full runs. It is the sibling of the d100 correction in b85708a,
+which fixed one instance of this defect and left the other.
+
+formatFace renders a d10's 10 as "0" (dice3d.js:199 — the standard percentile
+face) and pads d100 to two digits. The test read .hort-roll, did Number() on the
+label, and then used that number both as the legality check and as the expected
+stage value. For d10 landing on 10 that is Number("0") = 0, so:
+
+  - LEGAL.d10.legal(0) is false     -> "d10 rolled an illegal face: d10 · 0"
+  - expect(d.value).toBe(0) sees 10 -> would have failed next
+
+One root cause, two wrong assertions. LEGAL is now unambiguously the value-space
+face set (what debug().value reports), and the rendered label is asserted
+separately against a documented mirror of formatFace. That is strictly stronger
+than before: the old form passed for any die whose label happened to equal its
+value, so it could not see a formatFace regression at all.
+
+Control (scratchpad, nothing written into the worktree): the mirror was compared
+against the real formatFace, imported in the page where the importmap resolves
+"three", across all 70 faces of all seven dice -- 0 mismatches. Replacing the
+mirror with String(n) flags exactly d10:10 and d100:0, so the comparison can
+report a mismatch and is not vacuous.
+
+Whether the result line should read "d10 · 0" or "d10 · 10" is the same product
+question as d100's "00" vs "100", and is left with it for sub-spec 2. Recorded
+in spec §11.
+```
+vercel
+Bot
+deployed
+to
+Preview
+August 23, 2026 05:05
+View deployment
+Hide details
+View details
+c-1k
+merged commit 5794c35
+into
+feat/physics-port
+Aug 23, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Hide environments
+Show environments
+This branch was successfully deployed
+1 active
+deployment
+Preview
+—
+51c1efba
+Deployed
+Aug 23, 2026 by
+vercel[bot]
+View deployment
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

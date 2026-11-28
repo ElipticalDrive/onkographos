@@ -1,0 +1,92 @@
+In Kena's first cave (PPSA01802, scripts/kena/linux-reach-pulse.pad, after the Pulse), the distance-field AO chain produces almost no occlusion. Its bent normals come out near zero everywhere. The chain in a RenderDoc capture of one cave...
+
+Kena: the distance-field AO cone trace writes almost nothing, so the cave's sky light is unoccluded · Issue #4766 · mattias800/prosper · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Kena: the distance-field AO cone trace writes almost nothing, so the cave's sky light is unoccluded #4766
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Kena: the distance-field AO cone trace writes almost nothing, so the cave's sky light is unoccluded#4766
+Copy link
+Labels
+area:infraShared infra used by all titles (loader, libc, libkernel, recompiler, GPU/AGC, host)Shared infra used by all titles (loader, libc, libkernel, recompiler, GPU/AGC, host)bugSomething isn't workingSomething isn't workinggame:kenaKena: Bridge of Spirits (PPSA01802, UE4)Kena: Bridge of Spirits (PPSA01802, UE4)
+Description
+mattias800
+opened on Oct 8, 2026
+Issue body actions
+In Kena's first cave (PPSA01802, scripts/kena/linux-reach-pulse.pad, after the Pulse), the distance-field AO chain produces almost no occlusion. Its bent normals come out near zero everywhere.
+The chain in a RenderDoc capture of one cave frame (Linux/RADV, prosper-app):
+0x50070a0000 clears the 400×225×9-float cone-visibility buffer;
+0x50071e0000 cone-traces the four 128³ R16F global-distance-field clipmaps into that buffer;
+0x5007210000 combines the cones into a 400×225 RGBA16F bent-normal image;
+0x5009050000 and 0x5009070000 upsample and filter it into the 1600×900 history that the lighting composite 0x5008750000 samples.
+What the buffers hold:
+On main: after the clear, 1% of the buffer's elements are non-zero, and only at multiples of 64. The bent normals are exactly 0 in xyz, while w holds a valid depth.
+The clear's pattern was a MUBUF format-store defect: buffer_store_format_xyzw through a one-component V# wrote four dwords per lane. The fix is in the linked PR.
+With that fix: the clear writes every element (mean 0.508, mixing 0.003 and 1.0).
+The cone trace then changes the buffer from mean 0.5081 to 0.5067, which is almost nothing.
+The bent normals stay at length 0.003 (p5/p50/p95 all 0.003).
+This capture's camera was perturbed by owner input, but that does not affect these buffer-level measurements.
+Why it matters:
+The scene is fully dynamic: GBufferC.a is 237 on the walls, which is material AO with no static lighting.
+With no static lighting, DFAO is UE4's sky occlusion.
+The cave is about 9× too bright against the PS5 oracle, and the excess is the two ambient passes 0x5009a60000 and 0x5008750000.
+Skipping both as a diagnostic gives mean luminance 5.5 against the oracle's 3.5, down from 32.4.
+Also relevant: in this run, early instances of 0x50071e0000, 0x5006cc0000, 0x5007210000, 0x5006d50000 and 0x5006d30000 were refused with unresolved-operand. 0x50071e0000's refusal is a sample_lz at pc 214 whose T# is unresolved. Steady-state dispatches do run.
+Next step: dump the cone trace's inputs at its dispatch and check whether the distance-field samples it takes return plausible distances. 50% of the clipmap texels read exactly 0. Then check whether its stores are reached.
+Activity
+mattias800
+added
+bugSomething isn't workingSomething isn't working
+area:infraShared infra used by all titles (loader, libc, libkernel, recompiler, GPU/AGC, host)Shared infra used by all titles (loader, libc, libkernel, recompiler, GPU/AGC, host)
+game:kenaKena: Bridge of Spirits (PPSA01802, UE4)Kena: Bridge of Spirits (PPSA01802, UE4)
+on Oct 8, 2026
+mattias800
+added 2 commits that reference this issue on Oct 8, 2026
+recompiler: a MUBUF format store writes only its V# format's componen…
+...
+fa63e7b
+docs: Kena's distance-field AO is empty because the mesh-SDF atlas up…
+...
+3515d44
+mattias800 commented on Oct 9, 2026
+mattias800
+on Oct 9, 2026
+OwnerAuthor
+More actions
+Paused (owner's call, 2026-10-09). Findings are recorded in KENA_STATUS.md (#4788).
+Root cause, measured. The distance-field AO is empty because the mesh-SDF atlas is never uploaded.
+The upload program 0x5008ba0000 writes the 512³ one-component R16_UINT atlas (tile mode 27).
+Every one of its ~340 brick dispatches is skipped: expanded image exceeds the 512 MiB backend bound.
+Integer 3D storage has no native typed path, so the atlas would take the 16-byte RGBA32_UINT interchange: 2 GiB.
+Downstream, the clipmaps fill with zero boxes, the cone trace min-reduces to about 0.0035, and the bent normals have length 0.003.
+Unmerged fix: kena/dfao-int3d-wip.
+It gives integer formats 3D support bits and native R16ui/R32ui/R8ui 3D storage, with a test that fails under either half reverted.
+All uploads then succeed, but the level load stalls. A likely reason, not measured: each brick dispatch re-materializes the whole 256 MiB atlas, because there is no GPU volume retile for 2-byte texels in mode 27.
+Next step: keep the atlas resident on the GPU across the upload dispatches, either with a GPU volume retile for 2-byte texels in mode 27 or with a write-region-only writeback. Then re-check the bent normals.
+Open: the reflection/sky composite still adds sky diffuse at near-zero AO, so the SH irradiance source (see #4768) may matter as much as the AO.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:infraShared infra used by all titles (loader, libc, libkernel, recompiler, GPU/AGC, host)Shared infra used by all titles (loader, libc, libkernel, recompiler, GPU/AGC, host)bugSomething isn't workingSomething isn't workinggame:kenaKena: Bridge of Spirits (PPSA01802, UE4)Kena: Bridge of Spirits (PPSA01802, UE4)
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

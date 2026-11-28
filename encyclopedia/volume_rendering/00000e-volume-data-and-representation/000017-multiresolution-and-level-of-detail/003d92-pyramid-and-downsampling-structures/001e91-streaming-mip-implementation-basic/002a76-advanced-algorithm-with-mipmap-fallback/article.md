@@ -1,0 +1,112 @@
+# Advanced Algorithm with Mipmap Fallback
+
+Also called: Advanced Algorithm with Approximation, Approximate Rendering with Mipmap Fallback, Second Display Mode
+
+## Overview
+This method is a display mode for streamed voxel rendering that maintains frame rate stability during camera motion by substituting missing data with higher-resolution mipmap levels. It solves the latency problem of iterative interrupt/resume updates by providing an immediate, albeit approximate, visual result, achieving full accuracy only after the camera settles and missing data is fetched. It differs from [Streaming MIP Implementation (Basic)](1803-streaming-mip-implementation-basic.md) by prioritizing visual continuity over strict data completeness during motion.
+
+## How it works
+**Inputs and Outputs:**
+- Input: Current camera state, ray trajectory, existing mipmap levels in GPU memory, upload budget.
+- Output: Rendered image frame.
+
+**Data Structures:**
+- Mipmap Pyramid: A hierarchy of voxel blocks where each level $L$ has resolution $N/2^L$.
+- Node Timestamps: Each node/brick in the $N^3$-tree maintains a timestamp indicating last usage [S2, unofficial].
+
+**Steps:**
+1. **Ray Tracing Initiation:** For each ray, determine the required resolution level based on screen-space coverage or distance.
+2. **Data Availability Check:** Check if the data block at the required resolution level is present in GPU memory [S1][S2, unofficial].
+3. **Fallback Decision:**
+   - If data is present, render using the exact resolution.
+   - If data is missing, attempt to use the next higher mipmap level (coarser resolution) [S1][S2, unofficial].
+   - If no higher mipmap level is present or the available data is deemed too coarse for acceptable quality, resort to the iterative interrupt/resume method: interrupt ray tracing, trigger a data update, and resume once uploaded [S1][S2, unofficial].
+4. **Visibility Feedback:** Communicate node usage information to the CPU for the entire ray trajectory, not just the first hit, to update timestamps and manage the LRU pool [S2, unofficial].
+5. **Upload Management:** Fix a budget for data upload to ensure a relatively stable frame rate [S1][S2, unofficial].
+
+**Parameters:**
+- Upload Budget: A fixed limit on data transfer per frame to stabilize frame rates [S1][S2, unofficial].
+- Coarseness Threshold: The maximum allowable mipmap level before falling back to iterative updates. Not given in the sources.
+
+**Edge Cases:**
+- Strong Motion: Missing data is most likely during strong motion; mipmap fallback is most effective here as human perception of detail is reduced [S1][S2, unofficial].
+- Camera Settling: Once motion stops, accurate rendering is achieved within a few frames as missing data is fetched [S1][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_frame(camera, rays, mipmap_levels, upload_budget):
+    # Initialize frame buffer
+    frame_buffer = zeros_like(screen_resolution)
+    
+    # Track nodes used for visibility feedback
+    used_nodes = set()
+    
+    for ray in rays:
+        # Determine required mipmap level based on ray coverage/distance
+        required_level = get_required_level(ray, camera)
+        
+        # Check if data is available at required level
+        if is_data_present(mipmap_levels, required_level, ray):
+            # Render with exact resolution
+            color = trace_ray(ray, mipmap_levels[required_level])
+            used_nodes.add(ray.get_hit_node())
+        else:
+            # Try higher mipmap level (coarser)
+            fallback_level = find_highest_available_level(mipmap_levels, required_level)
+            
+            if fallback_level is not None and is_acceptable_quality(fallback_level, required_level):
+                # Render with mipmap fallback
+                color = trace_ray(ray, mipmap_levels[fallback_level])
+                used_nodes.add(ray.get_hit_node())
+            else:
+                # Resort to iterative interrupt/resume
+                # This step implies a pause in rendering and data fetch
+                trigger_data_update(ray, upload_budget)
+                # For the purpose of this frame, we might skip or use a placeholder
+                # The actual resume happens in the next iteration or frame
+                color = trace_ray(ray, mipmap_levels[fallback_level] if fallback_level else None)
+                used_nodes.add(ray.get_hit_node())
+        
+        # Accumulate color
+        frame_buffer[ray.screen_pos] = color
+    
+    # Update CPU-side visibility/timestamps for used nodes
+    update_node_timestamps(used_nodes)
+    
+    return frame_buffer
+```
+
+## Subtopics
+
+### [Streaming MIP Construction](1815-streaming-mip-construction.md)
+Focuses on building the mipmap pyramid efficiently. Choose when data preparation is the bottleneck.
+
+### [Block Inspection (Streamed)](6010-block-inspection-streamed.md)
+Inspects blocks on-demand. Choose when random access patterns dominate.
+
+### [Conical MImP](7656-conical-mimp.md)
+Uses conical filters for smoother transitions. Choose when visual quality at boundaries is critical.
+
+### [Sparse Volume Texture Mip Mapping](7955-sparse-volume-texture-mip-mapping.md)
+Optimizes storage for sparse data. Choose when memory bandwidth is limited.
+
+### [Spread-space MIP chain with luminance weighting](9093-spread-space-mip-chain-with-luminance-weighting.md)
+Uses luminance for weighting. Choose when perceptual quality is prioritized over geometric accuracy.
+
+## Operating characteristics
+- **Time Complexity:** Rendering is $O(1)$ per ray for available data; $O(N)$ for iterative updates where $N$ is the number of missing blocks.
+- **Memory Complexity:** Proportional to the size of the mipmap pyramid and the upload budget.
+- **Performance:** Delivers stable frame rates during motion by avoiding long waits for data [S1][S2, unofficial]. Accuracy is approximate during motion but converges to full resolution quickly after camera settles [S1][S2, unofficial].
+- **Strengths:** Reduces latency, improves perceived smoothness during motion.
+- **Limitations:** Visual artifacts may occur during rapid motion due to mipmap blurring. Iterative fallback can still cause stutters if data is severely missing.
+- **When to Use:** Real-time applications with dynamic camera motion where frame rate stability is more important than perfect geometric accuracy during movement.
+- **When Not to Use:** Static scenes or applications requiring strict geometric precision at all times.
+
+## Background
+Originated in the GigaVoxels project and further detailed in Ray-Guided Streaming research. The method was introduced to address the performance penalties of strict data completeness in streamed voxel rendering [S1][S2, unofficial]. It leverages the perceptual fact that humans are less sensitive to detail during motion [S1][S2, unofficial].
+
+## Sources
+[S1] GigaVoxels, https://doi.org/10.1145/1507149.1507152, fetched 2026-10-24
+[S2] [PDF] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)

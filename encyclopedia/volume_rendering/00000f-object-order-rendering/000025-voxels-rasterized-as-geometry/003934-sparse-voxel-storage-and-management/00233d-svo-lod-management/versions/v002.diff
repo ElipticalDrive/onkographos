@@ -1,0 +1,296 @@
+--- v001.md
++++ v002.md
+@@ -4,108 +4,98 @@
+ 
+ ## Overview
+-SVO LOD Management is a technique for managing the Level of Detail (LOD) of Sparse Voxel Octree (SVO) data by swapping between pre-generated geometric representations at different octree depths. It solves the performance bottleneck of rendering high-resolution voxel data by allowing the renderer to select a coarser geometric mesh (fewer voxels) when detail is not required, and a finer mesh when it is. It differs from dynamic LOD methods by relying on discrete, pre-loaded octree files and explicit LOD index management rather than distance-based heuristic subdivision or continuous geometry simplification.
++SVO LOD Management is a method for managing the Level of Detail (LOD) of Sparse Voxel Octrees (SVOs) by switching between pre-generated geometric representations (Vertex Buffer Objects) at different octree depths. It solves the problem of balancing rendering performance and visual fidelity for complex, pre-voxelized assets by allowing the renderer to dynamically select the appropriate octree resolution. It differs from dynamic voxelization methods by relying on pre-computed, static geometry buffers for each LOD level, rather than generating voxels per frame [S1, unofficial].
+ 
+ ## How it works
+-The method manages a set of pre-processed octree representations, each corresponding to a specific depth in the SVO hierarchy. Each depth level is treated as a separate graphics resource with its own vertex buffer and vertex array object.
++The method manages a set of pre-generated OpenGL resources (VAOs and VBOs) corresponding to different depths of the SVO. The renderer switches between these resources based on a requested LOD index.
+ 
+ **Inputs and Outputs:**
+-- **Input:** A Sparse Voxel Octree dataset stored at multiple depths (levels). The maximum depth is defined by `maxSvoDepth_`.
+-- **Output:** A set of OpenGL resources (VAOs, VBOs) and metadata (bounding sphere radius, voxel count) for each LOD level, controlled by a current LOD index.
++- **Input:** A target Level of Detail (LOD) index (integer), typically derived from camera distance or performance metrics.
++- **Output:** The active OpenGL Vertex Array Object (VAO) and Vertex Buffer Object (VBO) corresponding to the specified LOD, along with updated metadata (bounding sphere, voxel count).
+ 
+ **Data Structures:**
+-The core component maintains the following state:
+-- `maxSvoDepth_`: The maximum depth of the SVO hierarchy supported.
+-- `currentSvoLodIdx_`: The index of the currently active LOD level (0-based).
+-- `boundingSphereRadius_`: The radius of the bounding sphere enclosing the voxel data at the current LOD.
+-- `visible_`: A boolean flag indicating if the component is rendered.
+-- `octreeFiles_`: An array or list of `OctreeFile` objects, one for each depth level. Each `OctreeFile` contains:
+-    - `gridLength`: The dimension of the grid at that depth.
+-    - `data`: The raw voxel data array.
+-- `VAOs_`: An array of OpenGL Vertex Array Object IDs, one for each depth level.
+-- `color_`: A `glm::vec4` representing the uniform color applied to the voxels.
++The core data structure is a component (e.g., `GraphicsComponentSVO`) that maintains:
++- `maxSvoDepth_`: The maximum supported octree depth (uint8_t).
++- `currentSvoLodIdx_`: The index of the currently active LOD (uint8_t), where $0$ corresponds to the finest detail (depth $maxSvoDepth_$) and $maxSvoDepth_-1$ corresponds to the coarsest (depth $1$).
++- `octreeFiles_`: An array or list of `OctreeFile` objects, one for each LOD level. Each `OctreeFile` contains header data (grid length) and raw voxel data.
++- `VAOs_` and `VBOs_`: Arrays of OpenGL handles, one pair per LOD level.
++- `boundingSphereRadius_`: A float representing the radius of the asset's bounding sphere.
++- `visible_`: A boolean flag.
+ 
+-**Numbered Steps:**
++**Initialization (Constructor):**
++1. Initialize `boundingSphereRadius_` to $0.0f$ and `visible_` to `true` [S1, unofficial].
++2. Retrieve the maximum SVO depth supported by the rendering system, stored in `maxSvoDepth_` [S1, unofficial].
++3. Set `currentSvoLodIdx_` to `maxSvoDepth_ - 1` (initially selecting the coarsest LOD) [S1, unofficial].
++4. For each depth $d$ from $1$ to `maxSvoDepth_`:
++    a. Create an `OctreeFile` for depth $d$ [S1, unofficial].
++    b. Generate a VAO and VBO [S1, unofficial].
++    c. Bind the VAO and VBO [S1, unofficial].
++    d. Load the octree data for depth $d$ into the VBO with usage hint `GL_STATIC_DRAW` [S1, unofficial].
++    e. Set up three vertex attribute arrays using offsets from `OctreeFile::Data`:
++        - Position: 3 floats
++        - Color: 3 floats
++        - Normal: 3 floats
++    [S1, unofficial]
+ 
+-1.  **Initialization:**
+-    - Initialize `boundingSphereRadius_` to `0.0f`.
+-    - Initialize `visible_` to `true`.
+-    - Retrieve `maxSvoDepth_` from the rendering system.
+-    - Set `currentSvoLodIdx_` to `maxSvoDepth_ - 1` (the finest detail level).
++**Bounding Sphere Calculation:**
++1. Iterate through the voxel data of the maximum depth octree (`octreeFiles_[maxSvoDepth_]`), starting from index $1$ (skipping the root voxel at index $0$) [S1, unofficial].
++2. Skip nodes where position coordinates $x, y, z$ are all equal to $-0.5f$ [S1, unofficial].
++3. Track the minimum ($minX, minY, minZ$) and maximum ($maxX, maxY, maxZ$) coordinates encountered [S1, unofficial].
++4. Compute the bounding sphere radius as the length of the vector from the maximum corner $(maxX, maxY, maxZ)$ to the midpoint of the bounding box defined by min and max coordinates [S1, unofficial].
++   $$
++   R_{bound} = \left\| (maxX, maxY, maxZ) - \left( \frac{minX + maxX}{2}, \frac{minY + maxY}{2}, \frac{minZ + maxZ}{2} \right) \right\|
++   $$
++   [S1, unofficial]
+ 
+-2.  **Resource Creation (Per Depth Level):**
+-    - For each depth level $d$ from $1$ to `maxSvoDepth_`:
+-        - Create an `OctreeFile` object for depth $d$.
+-        - Generate an OpenGL Vertex Buffer Object (VBO) and Vertex Array Object (VAO).
+-        - Bind the VBO and VAO.
+-        - Load the octree data for depth $d$ into the VBO using `GL_STATIC_DRAW`.
+-        - Set up three vertex attribute arrays based on offsets in `OctreeFile::Data`:
+-            - Position: 3 floats.
+-            - Color: 3 floats.
+-            - Normal: 3 floats.
++**LOD Management:**
++- **Set LOD:** When `setLod(lod)` is called:
++    1. Update `currentSvoLodIdx_` to `lod - 1` [S1, unofficial].
++    2. Trigger a recalculation of the total voxel number in the rendering system [S1, unofficial].
++- **Decrease LOD:** When `decreaseLevelOfDetail()` is called:
++    1. If `currentSvoLodIdx_` is $0$, set LOD to `maxSvoDepth_` (wrap to finest) [S1, unofficial].
++    2. Otherwise, decrease `currentSvoLodIdx_` by $1$ [S1, unofficial].
++- **Increase LOD:** When `increaseLevelOfDetail()` is called:
++    1. If `currentSvoLodIdx_` is `maxSvoDepth_ - 1`, set LOD to $1$ (wrap to coarsest) [S1, unofficial].
++    2. Otherwise, increase `currentSvoLodIdx_` by $1$ [S1, unofficial].
+ 
+-3.  **Bounding Sphere Calculation:**
+-    - Iterate through the voxel data of the maximum depth octree (starting from index 1, skipping the root voxel at index 0).
+-    - Skip nodes where position $x, y, z$ are all `-0.5f`.
+-    - Track the minimum ($minX, minY, minZ$) and maximum ($maxX, maxY, maxZ$) coordinates encountered.
+-    - Compute the bounding sphere radius as the length of the vector from the maximum corner $(maxX, maxY, maxZ)$ to the midpoint of the bounding box defined by the min and max coordinates:
+-      $$
+-      R = \left\| (maxX, maxY, maxZ) - \left(\frac{minX + maxX}{2}, \frac{minY + maxY}{2}, \frac{minZ + maxZ}{2}\right) \right\|
+-      $$
+-      [S1, unofficial]
+-
+-4.  **LOD Management:**
+-    - **Set LOD:** When `setLod(lod)` is called:
+-        - Update `currentSvoLodIdx_` to `lod - 1`.
+-        - Trigger a recalculation of the total voxel number in the rendering system.
+-    - **Decrease LOD:** When `decreaseLevelOfDetail()` is called:
+-        - If `currentSvoLodIdx_` is $0$, set LOD to `maxSvoDepth_` (wrap around to finest).
+-        - Otherwise, decrement `currentSvoLodIdx_`.
+-    - **Increase LOD:** When `increaseLevelOfDetail()` is called:
+-        - If `currentSvoLodIdx_` is `maxSvoDepth_ - 1`, set LOD to $1$ (wrap around to coarsest).
+-        - Otherwise, increment `currentSvoLodIdx_`.
+-
+-5.  **Retrieval:**
+-    - `getLod()` returns `currentSvoLodIdx_ + 1`.
+-    - `getVAO()` returns `VAOs_[currentSvoLodIdx_]`.
+-    - `getDataSize()` returns the size of the data array in `octreeFiles_[currentSvoLodIdx_]`.
+-    - `getGridLength()` returns the grid length from the header of `octreeFiles_[currentSvoLodIdx_]`.
++**Retrieval:**
++- The active VAO is retrieved via `getVAO()`, which returns `VAOs_[currentSvoLodIdx_]` [S1, unofficial].
++- The current LOD index is retrieved via `getLevelOfDetail()`, which returns `currentSvoLodIdx_ + 1` [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-class SVOLODManager:
++class SVOGraphicsComponent:
+     def __init__(self, max_svo_depth):
+-        self.max_svo_depth = max_svo_depth
+-        self.current_svo_lod_idx = max_svo_depth - 1
+-        self.bounding_sphere_radius = 0.0
+-        self.visible = True
+-        self.color = glm.vec4(1.0, 1.0, 1.0, 1.0)
+-        self.octree_files = []  # List of OctreeFile objects
+-        self.vaos = []          # List of GLuint VAO IDs
+-
+-    def initialize_resources(self):
+-        for depth in range(1, self.max_svo_depth + 1):
+-            octree_file = OctreeFile(depth)
+-            self.octree_files.append(octree_file)
++        self.max_svo_depth_ = max_svo_depth
++        self.current_svo_lod_idx_ = max_svo_depth - 1
++        self.bounding_sphere_radius_ = 0.0
++        self.visible_ = True
++        self.octree_files_ = []
++        self.vaos_ = []
++        self.vbos_ = []
++        
++        # Initialization of resources
++        for d in range(1, max_svo_depth + 1):
++            octree_file = create_octree_file(d)
++            self.octree_files_.append(octree_file)
+             
+-            vao = gl_create_vao()
+-            vbo = gl_create_vbo()
+-            gl_bind_vbo(vbo)
+-            gl_buffer_data(vbo, octree_file.data, gl_static_draw)
++            vao = generate_vao()
++            vbo = generate_vbo()
++            bind_vao(vao)
++            bind_vbo(vbo)
+             
+-            # Set up vertex attributes based on OctreeFile::Data offsets
+-            # Position: 3 floats
+-            # Color: 3 floats
+-            # Normal: 3 floats
+-            gl_enable_vertex_attrib_array(0) # Position
+-            gl_vertex_attrib_pointer(0, 3, gl_float, False, 0, octree_file.offsets.position)
++            # Load data into VBO
++            data = octree_file.get_data()
++            upload_to_vbo(vbo, data, usage=GL_STATIC_DRAW)
+             
+-            gl_enable_vertex_attrib_array(1) # Color
+-            gl_vertex_attrib_pointer(1, 3, gl_float, False, 0, octree_file.offsets.color)
++            # Setup vertex attributes
++            setup_vertex_attribute(vao, offset=0, count=3, type=FLOAT) # Position
++            setup_vertex_attribute(vao, offset=12, count=3, type=FLOAT) # Color
++            setup_vertex_attribute(vao, offset=24, count=3, type=FLOAT) # Normal
+             
+-            gl_enable_vertex_attrib_array(2) # Normal
+-            gl_vertex_attrib_pointer(2, 3, gl_float, False, 0, octree_file.offsets.normal)
++            self.vaos_.append(vao)
++            self.vbos_.append(vbo)
+             
+-            self.vaos.append(vao)
++        # Calculate bounding sphere
++        self.calculate_bounding_sphere()
+ 
+     def calculate_bounding_sphere(self):
+@@ -113,73 +103,61 @@
+         max_x, max_y, max_z = float('-inf'), float('-inf'), float('-inf')
+         
+-        # Iterate through max depth octree data
+-        data = self.octree_files[self.max_svo_depth - 1].data
+-        for i in range(1, len(data)): # Skip root at index 0
++        # Iterate max depth data, skip root (index 0)
++        data = self.octree_files_[self.max_svo_depth_ - 1].get_data()
++        for i in range(1, len(data)):
+             node = data[i]
+-            if node.position.x == -0.5 and node.position.y == -0.5 and node.position.z == -0.5:
++            if node.x == -0.5 and node.y == -0.5 and node.z == -0.5:
+                 continue
++            min_x = min(min_x, node.x)
++            min_y = min(min_y, node.y)
++            min_z = min(min_z, node.z)
++            max_x = max(max_x, node.x)
++            max_y = max(max_y, node.y)
++            max_z = max(max_z, node.z)
+             
+-            min_x = min(min_x, node.position.x)
+-            min_y = min(min_y, node.position.y)
+-            min_z = min(min_z, node.position.z)
+-            max_x = max(max_x, node.position.x)
+-            max_y = max(max_y, node.position.y)
+-            max_z = max(max_z, node.position.z)
+-            
+-        midpoint_x = (min_x + max_x) / 2.0
+-        midpoint_y = (min_y + max_y) / 2.0
+-        midpoint_z = (min_z + max_z) / 2.0
++        mid_x = (min_x + max_x) / 2.0
++        mid_y = (min_y + max_y) / 2.0
++        mid_z = (min_z + max_z) / 2.0
+         
+-        dx = max_x - midpoint_x
+-        dy = max_y - midpoint_y
+-        dz = max_z - midpoint_z
+-        self.bounding_sphere_radius = math.sqrt(dx*dx + dy*dy + dz*dz)
++        self.bounding_sphere_radius_ = length(vec3(max_x, max_y, max_z) - vec3(mid_x, mid_y, mid_z))
+ 
+     def set_lod(self, lod):
+-        self.current_svo_lod_idx = lod - 1
+-        # Trigger recalculation of total voxel number
+-        recalculate_voxel_count()
++        self.current_svo_lod_idx_ = lod - 1
++        recalculate_total_voxel_count()
+ 
+     def decrease_level_of_detail(self):
+-        if self.current_svo_lod_idx == 0:
+-            self.current_svo_lod_idx = self.max_svo_depth - 1
++        if self.current_svo_lod_idx_ == 0:
++            self.current_svo_lod_idx_ = self.max_svo_depth_ - 1
+         else:
+-            self.current_svo_lod_idx -= 1
++            self.current_svo_lod_idx_ -= 1
+ 
+     def increase_level_of_detail(self):
+-        if self.current_svo_lod_idx == self.max_svo_depth - 1:
+-            self.current_svo_lod_idx = 0
++        if self.current_svo_lod_idx_ == self.max_svo_depth_ - 1:
++            self.current_svo_lod_idx_ = 0
+         else:
+-            self.current_svo_lod_idx += 1
+-
+-    def get_lod(self):
+-        return self.current_svo_lod_idx + 1
++            self.current_svo_lod_idx_ += 1
+ 
+     def get_vao(self):
+-        return self.vaos[self.current_svo_lod_idx]
++        return self.vaos_[self.current_svo_lod_idx_]
+ 
+-    def get_data_size(self):
+-        return self.octree_files[self.current_svo_lod_idx].data.size()
+-
+-    def get_grid_length(self):
+-        return self.octree_files[self.current_svo_lod_idx].header.grid_length
++    def get_level_of_detail(self):
++        return self.current_svo_lod_idx_ + 1
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- **Root Voxel Skip:** The root voxel at index 0 must be skipped during bounding sphere calculation as it may contain invalid or default coordinates (-0.5f) [S1, unofficial].
+-- **LOD Wrapping:** The LOD management logic wraps around when decreasing from the coarsest level (index 0) or increasing from the finest level (index `maxSvoDepth_ - 1`). This behavior should be verified against application requirements, as wrapping may cause unexpected visual jumps [S1, unofficial].
+-- **Precision:** Bounding sphere calculation uses floating-point arithmetic. For very large scenes, precision loss in coordinate tracking may affect culling accuracy.
++## Subtopics
++
++### [Sparse Voxel Octree (SVO) LOD Pipeline](6811-sparse-voxel-octree-svo-lod-pipeline.md)
++A unified production pipeline that converts complex, animated assets into a consistent SVO representation. It addresses the challenge of efficiently populating, animating, and ray-tracing dynamic scenes by replacing direct geometry processing with a pre-voxelized, LOD-managed cache. Unlike standard real-time SVO ray-tracing which often requires dynamic voxelization per frame, this pipeline separates asset preparation from rendering, using stored surface data and procedural blend shapes to animate static SVOs, thereby reducing memory footprint and voxelization time.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** LOD switching is $O(1)$ as it involves changing an index and binding a different VAO. Bounding sphere calculation is $O(N)$ where $N$ is the number of voxels in the max depth octree, performed once during initialization.
+-- **Memory Complexity:** $O(D \times V)$ where $D$ is the max depth and $V$ is the average number of voxels per depth level. Each depth level stores its own VBO and VAO.
+-- **Measured Performance:** Performance depends on the number of active draw calls. By switching to a coarser LOD, the number of voxels (and thus draw calls or vertices) decreases, improving frame rate.
+-- **Strengths:** Simple implementation, discrete control over detail, efficient culling with pre-calculated bounding spheres.
+-- **Limitations:** Memory usage scales with the number of LOD levels. No dynamic adaptation to camera distance or view importance; LOD must be changed manually or via a separate heuristic.
+-- **When to use:** When static LOD levels are sufficient and manual control over detail is desired.
+-- **When not to use:** When dynamic, distance-based LOD is required without manual intervention.
++- **Time Complexity:** Switching LOD is $O(1)$ as it involves updating an index and triggering a metadata recalculation. Rendering time depends on the number of voxels in the active LOD buffer.
++- **Memory Complexity:** $O(N \times D)$, where $N$ is the number of voxels at the finest level and $D$ is the max depth. Each LOD level requires a separate VBO, leading to significant memory overhead if many LOD levels are stored simultaneously [S1, unofficial].
++- **Strengths:** Fast LOD switching; no runtime voxelization cost; simple integration with existing OpenGL pipelines.
++- **Limitations:** High memory usage due to storing multiple LOD buffers; static geometry limits dynamic deformation unless blend shapes are used; requires pre-processing of assets [S1, unofficial].
++- **When to use:** Pre-processed, static or semi-static assets where LOD switching is needed and memory is not a critical constraint.
++- **When not to use:** Highly dynamic scenes requiring per-frame voxelization; memory-constrained environments.
+ 
+ ## Background
+-The method originates from the `svo_renderer` project by mmalesadev, an unofficial implementation of Sparse Voxel Octree rendering using OpenGL. It is part of a broader family of voxel rendering techniques that rasterize voxels as geometry. The specific LOD management approach is tailored to the structure of the SVO data, where each depth level corresponds to a different resolution of the voxel grid.
++The method originates from the `svo_renderer` project by mmalesadev, which implements a Sparse Voxel Octree renderer using OpenGL. It is part of a broader effort to streamline lighting and rendering workflows for complex assets by pre-voxelizing them into LOD-managed caches [S1, unofficial].
+ 
+ ## Sources

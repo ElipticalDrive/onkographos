@@ -1,0 +1,99 @@
+# Gaussian Splat View of TSDF Band
+
+
+## Overview
+A visualization technique that renders a filtered Truncated Signed Distance Function (TSDF) voxel band as a continuous surface using isotropic Gaussian splats, where one Gaussian is generated per surface voxel [S1, unofficial]. It differs from mesh-based extraction (e.g., marching cubes) by providing a differentiable, continuous representation suitable for real-time interactive visualization, and from raw voxel rendering by smoothing discrete grid artifacts into a coherent surface [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A TSDF voxel band data structure containing voxel centers, colors, weights, and voxel size.
+- Input: `iso` (float): The iso-threshold for surface extraction. Default: 0.3 [S1, unofficial].
+- Input: `min_weight` (float): The minimum weight threshold to filter out low-confidence voxels. Default: 1.0 [S1, unofficial].
+- Input: `scale_mult` (float): A multiplier for the voxel size controlling Gaussian spread. Default: 1.0 [S1, unofficial].
+- Input: `name` (string): The name identifier for the splat scene. Default: "/splats" [S1, unofficial].
+- Output: A handle to the rendered splat scene and the count of splats. Returns `(None, 0)` if no surface voxels are found [S1, unofficial].
+
+**Data Structures:**
+The TSDF band is assumed to provide:
+- `voxel_size`: A scalar float representing the dimension of a single voxel.
+- `centers`: An array of 3D coordinates for all voxels.
+- `colors`: An array of RGB values for all voxels.
+- `weights`: An array of confidence weights for all voxels.
+
+**Steps:**
+1. **Filter the Band:** Apply an iso-threshold and minimum weight threshold to the voxel band to identify surface voxels. This produces a filtered subset of voxels [S1, unofficial].
+2. **Extract Data:** Retrieve the `centers` and `colors` from the filtered voxel band output [S1, unofficial].
+3. **Check for Empty:** If the number of extracted centers is zero, return `(None, 0)` [S1, unofficial].
+4. **Calculate Standard Deviation:** Compute the standard deviation ($std$) for the isotropic Gaussian using the formula:
+   $$std = voxel\_size \times 0.6 \times scale\_mult$$
+   where $voxel\_size$ is the dimension of a single voxel, $0.6$ is a fixed overlap factor, and $scale\_mult$ is the user-adjustable multiplier [S1, unofficial].
+5. **Construct Covariance Matrix:** For each Gaussian, construct the covariance matrix $\Sigma$ as:
+   $$\Sigma = std^2 \times I_3$$
+   where $I_3$ is the 3x3 identity matrix. This results in isotropic covariances [S1, unofficial].
+6. **Render:** Add the Gaussians to the scene with the calculated centers, covariances, colors, and unit opacities [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def add_splat_scene(server, band, *, iso=0.3, min_weight=1.0, name="/splats", scale_mult=1.0):
+    """
+    Add the filtered band as isotropic gaussian splats.
+    Returns (handle, count).
+    """
+    # Step 1: Filter the band
+    # Implementation detail: filter_band is assumed to be available in the context
+    # It returns a dict with 'centers', 'colors', and potentially 'weights'
+    out = filter_band(band, iso=iso, min_weight=min_weight)
+    
+    centers = out["centers"]
+    colors = out["colors"]
+    
+    # Step 3: Check for empty
+    if len(centers) == 0:
+        return None, 0
+    
+    # Step 4: Calculate Standard Deviation
+    voxel_size = float(band["voxel_size"])
+    std = voxel_size * 0.6 * scale_mult
+    
+    # Step 5: Construct Covariance Matrix
+    # Create a 3x3 identity matrix scaled by std^2
+    cov_base = np.eye(3, dtype=np.float32) * (std * std)
+    # Broadcast to the number of centers
+    num_splats = len(centers)
+    covariances = np.broadcast_to(cov_base, (num_splats, 3, 3))
+    
+    # Step 6: Render
+    # Opacities are set to 1.0 for all splats
+    opacities = np.ones((num_splats, 1), dtype=np.float32)
+    
+    handle = server.scene.add_gaussian_splats(
+        name,
+        centers=centers,
+        covariances=covariances,
+        rgbs=colors,
+        opacities=opacities,
+    )
+    
+    return handle, num_splats
+```
+
+**Parameters:**
+- `iso`: Iso-threshold. Default: 0.3 [S1, unofficial].
+- `min_weight`: Minimum weight threshold. Default: 1.0 [S1, unofficial].
+- `scale_mult`: Multiplier for voxel size. Default: 1.0 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If filtering results in zero voxels, the function returns `None` for the handle and `0` for the count. The caller must handle this empty state, for example, by displaying a status message indicating that no surface was found [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+This method was introduced in an unofficial commit to the `lingbot-map` repository, adding a visualization feature to render TSDF bands as Gaussian splats [S1, unofficial].
+
+## Sources
+[S1] feat(vis): gaussian-splat view of the TSDF band ( #13 ), https://github.com/kaylC4/lingbot-map/commit/3db481f0212047782e57b9834492d49455b0106a, fetched 2026-10-26 (unofficial)

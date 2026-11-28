@@ -1,0 +1,102 @@
+# Corner-based Voxel Volume Calculation
+
+Also called: Corner-based Voxel Volume Calculation for DDA Raymarching, corner-based volume, surface block maxing
+
+## Overview
+A technique to compute voxel volume values at corners for smooth terrain rendering, replacing side-based volume storage with corner-based values to better represent surface geometry during raymarching [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `WX`: Current voxel x-coordinate index [S1, unofficial].
+- `Walls`: Total width of the volume in voxels (dimension size) [S1, unofficial].
+- `Volume`: The 3D voxel grid data structure [S1, unofficial].
+- `ColorIndex`: A value associated with each voxel indicating its material type (0 for air, non-zero for solid) [S1, unofficial].
+- `SurfaceBoxHeight`: The maximum height/depth value for a surface block [S1, unofficial].
+
+**Outputs:**
+- Updated `Volume` values at the current corner/voxel position [S1, unofficial].
+
+**Data Structures:**
+- `Volume[x][y][z]`: Stores the volume/height value [S1, unofficial].
+- `ColorIndex[x][y][z]`: Stores the material identifier [S1, unofficial].
+
+**Steps:**
+1. **Boundary Check:** Verify if `WX == 0` or `WX == Walls - 1` [S1, unofficial]. If true, skip complex neighbor averaging to prevent edge corruption at x=0 and x=63 [S1, unofficial].
+2. **Non-Surface Tile Handling:** If the current voxel is not a surface tile (i.e., it is a full block), set its volume directly to the tile's volume instead of averaging with neighbors [S1, unofficial].
+3. **Surface Block Maxing:** If any adjacent voxel is a surface block, clamp or max out the volume to the `SurfaceBoxHeight` [S1, unofficial].
+4. **Neighbor Summation:** Sum the `ColorIndex` values of the checked neighbors (Left, Right, Front, Back, NW, NE, SW, SE) [S1, unofficial].
+5. **Solid Check:** If the sum of `ColorIndex` values is greater than zero, set the volume content to 7, indicating that at least one wall is not air [S1, unofficial].
+6. **Air Handling:** If the sum is zero, set the volume content to 0 [S1, unofficial].
+7. **Average Calculation:** If none of the sidewalls are surface blocks, compute a float average using the formula $V_{avg} = (V_{sum} \times 0.5) / 4$, where $V_{sum}$ is the sum of neighbor color indices [S1, unofficial].
+8. **Shader Deferment:** Defer complex intersection depth calculations along angled lines to the shader, as the CPU-side volume generation does not fully derive the exact mathematical intersection point [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_corner_volume(WX, Walls, Volume, ColorIndex, SurfaceBoxHeight):
+    # Step 1: Boundary Check
+    if WX == 0 or WX == Walls - 1:
+        return Volume[WX] # Skip complex averaging to prevent edge corruption at x=0 and x=63
+
+    # Step 2: Non-Surface Tile Handling
+    # [G] Check if current voxel is a surface tile; exact flag not specified in sources
+    if Volume[WX].type != "surface":
+        Volume[WX] = Volume[WX] # Set directly to tile's volume
+        return Volume[WX]
+
+    # Step 3 & 4: Check neighbors and sum color indices
+    # Neighbors: Left, Right, Front, Back, NW, NE, SW, SE
+    neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)]
+    has_surface_neighbor = False
+    color_sum = 0
+
+    for dx, dz in neighbor_offsets:
+        nx = WX + dx # [G] Z-coordinate assumed constant for this slice; exact 3D layout not specified
+        n_vol = Volume[nx] # [G] Access neighbor data; sources do not specify exact array indexing
+        n_color = ColorIndex[nx]
+
+        if n_vol.type == "surface": # [G] Surface block check
+            has_surface_neighbor = True
+        color_sum += n_color
+
+    # Step 3: Surface Block Maxing
+    if has_surface_neighbor:
+        Volume[WX] = max(Volume[WX], SurfaceBoxHeight)
+        return Volume[WX]
+
+    # Step 5 & 6: Solid/Air Check
+    if color_sum > 0:
+        Volume[WX] = 7
+    else:
+        Volume[WX] = 0
+
+    # Step 7: Average Calculation
+    if not has_surface_neighbor:
+        Volume[WX] = (color_sum * 0.5) / 4.0
+
+    return Volume[WX]
+```
+
+**Parameters:**
+- `SurfaceBoxHeight`: Not given in the sources.
+- `ColorIndex` values: 0 for air, non-zero for solid [S1, unofficial]. Specific non-zero values are not given [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Corruption:** Incorrect boundary handling at `WX == 0` and `WX == Walls - 1` will corrupt every wall at x=0 and x=63 [S1, unofficial].
+- **Intersection Precision:** The exact mathematical intersection point along angled lines is not fully derived in the CPU code and requires shader-side differential or angle calculations [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Measured Performance:** Not given in the sources [S1, unofficial].
+- **Strengths:** Better representation of surface geometry during raymarching by using corner-based values [S1, unofficial].
+- **Limitations:** Requires shader-side calculations for precise intersection points [S1, unofficial]. Boundary handling is critical and prone to corruption if not implemented correctly [S1, unofficial].
+
+## Background
+Origin: Unofficial video tutorial "Smooth terrain with voxel DDA raymarching" [S1, unofficial].
+History: Developed as part of a voxel DDA raymarching implementation for smooth terrain rendering [S1, unofficial].
+Usage: Used in voxel-based terrain rendering to improve surface smoothness and accuracy [S1, unofficial].
+
+## Sources
+[S1] Smooth terrain with voxel DDA raymarching, https://www.youtube.com/watch?v=CxoC0E7inUg, fetched 2026-10-25 (unofficial)

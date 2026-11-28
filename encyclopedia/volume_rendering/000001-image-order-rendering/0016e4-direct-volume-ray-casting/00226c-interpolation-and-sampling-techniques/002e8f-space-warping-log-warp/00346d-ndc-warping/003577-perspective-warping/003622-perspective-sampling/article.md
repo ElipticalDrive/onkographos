@@ -1,0 +1,108 @@
+# Perspective Sampling
+
+Also called: Warp-space Uniform Sampling
+
+## Overview
+Perspective sampling is a point-sampling strategy for camera rays in volume rendering that ensures approximately uniform sampling density in the image plane, rather than in Euclidean space. It solves the problem of inefficient sampling in unbounded scenes where axis-aligned grids in Euclidean space are misaligned with camera rays, leading to sparse sampling in the distance and redundant sampling near the camera. It sets itself apart from standard uniform or adaptive sampling by using the Jacobian of the perspective warping function to adjust step sizes, ensuring that the sampled points correspond to roughly equal areas on the image sensor.
+
+## How it works
+**Inputs:**
+- Camera origin $o \in \mathbb{R}^3$.
+- Camera ray direction $d \in \mathbb{R}^3$ (normalized).
+- Perspective warping function $F: \mathbb{R}^3 \to \mathbb{R}^3$ and its Jacobian $J(x) = \frac{\partial F}{\partial x}$.
+- Preset sampling interval parameter $l$.
+
+**Outputs:**
+- A sequence of 3D sample points $\{x_i\}$ along the ray.
+
+**Data Structures:**
+- Current sample point $x_i$ (vector, 3 floats).
+- Next sample point $x_{i+1}$ (vector, 3 floats).
+- Jacobian matrix $J_i$ (matrix, $3 \times 3$ floats).
+
+**Steps:**
+1. Initialize the first sample point $x_0$ at the near clipping plane or a specified starting distance $t_{start}$ along the ray: $x_0 = o + t_{start} \cdot d$.
+2. For each sample index $i = 0, 1, \dots, N-1$:
+   a. Compute the Jacobian matrix $J_i$ of the perspective warping function $F$ at the current point $x_i$.
+   b. Compute the vector $v = J_i \cdot d$.
+   c. Compute the Euclidean norm $\|v\|_2$.
+   d. Calculate the next sample point using the linear approximation:
+      $$x_{i+1} = x_i + l \cdot \|J_i \cdot d\|_2 \cdot d$$
+   e. Store $x_i$ as a sample point.
+3. Stop when the ray exits the scene or reaches the far clipping plane.
+
+**Parameters:**
+- $l$: Preset parameter controlling the sampling interval in the warp space approximation. Typical values are not explicitly given in the sources, but it acts as a base step size scaled by the Jacobian norm.
+
+**Edge Cases and Pitfalls:**
+- **Linear Approximation:** The method uses a linear approximation for the sampling step, which may introduce errors if the warping function $F$ has high curvature or if $l$ is too large. This is noted as a limitation in the supplementary material [S2, unofficial].
+- **Jacobian Computation:** The Jacobian $J_i$ must be computed accurately. If $F$ is a neural network or complex analytical function, automatic differentiation or analytical derivatives are required.
+- **Boundary Conditions:** The sampling must be bounded by the scene's near and far planes to avoid infinite loops or sampling outside the region of interest.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def perspective_sample(o, d, F, F_jacobian, l, t_start, t_end):
+    """
+    Generate sample points along a ray using perspective sampling.
+    
+    Args:
+        o: Camera origin (3,)
+        d: Ray direction (3,), normalized
+        F: Perspective warping function F(x) -> (3,)
+        F_jacobian: Function to compute Jacobian J(x) -> (3, 3)
+        l: Preset sampling interval parameter
+        t_start: Starting distance along the ray
+        t_end: Ending distance along the ray
+        
+    Returns:
+        List of sample points x_i
+    """
+    samples = []
+    t = t_start
+    x = o + t * d
+    
+    while t < t_end:
+        # Compute Jacobian at current point
+        J = F_jacobian(x)
+        
+        # Compute J * d
+        Jd = J @ d
+        
+        # Compute norm ||Jd||_2
+        norm_Jd = np.linalg.norm(Jd)
+        
+        # Calculate next point
+        # x_{i+1} = x_i + l * ||J_i * d||_2 * d
+        x_next = x + l * norm_Jd * d
+        t_next = np.dot(x_next - o, d) / np.dot(d, d) # Assuming d is normalized, t_next = dot(x_next - o, d)
+        
+        # Add current sample
+        samples.append(x)
+        
+        # Update for next iteration
+        x = x_next
+        t = t_next
+        
+    return samples
+```
+
+## Subtopics
+
+### Volume Rendering with Perspective Warping
+This variant applies perspective sampling to sample points $x_i$ on the camera ray, warps them to the warp space using the perspective warping function, and computes density $\sigma_i$ and color $c_i$ from a neural representation built on the warp space. The final pixel color is computed via volume rendering compositing: $\hat{c} = \sum_i T_i \alpha_i c_i$, where $T_i = \prod_{j=0}^{i-1}(1 - \alpha_j)$ is the accumulated transmittance and $\alpha_i = 1 - \exp(-\delta_i \sigma_i)$ is the opacity. This approach improves sampling efficiency and convergence stability for unbounded scenes [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** The cost per sample is dominated by the evaluation of the warping function $F$ and its Jacobian $J$. If $F$ is a neural network, this involves forward and backward passes. The number of samples is determined by $l$ and the scene extent.
+- **Memory Complexity:** Minimal, as it only stores the current point and Jacobian. The neural representation is stored separately.
+- **Performance:** Improves sampling efficiency and brings more stable convergence compared to uniform Euclidean sampling, especially for unbounded scenes [S1][S2, unofficial].
+- **Strengths:** Ensures approximately uniform sampling in the image plane, reducing artifacts and improving reconstruction quality for distant objects.
+- **Limitations:** Relies on a linear approximation which may be inaccurate for highly non-linear warping functions. Requires computation of the Jacobian, which can be computationally expensive.
+
+## Background
+Perspective sampling was introduced in the context of F2-NeRF (Fast Neural Radiance Field Training with Free Camera Trajectories) to address the inefficiencies of standard sampling in unbounded scenes. It builds on the concept of space warping, such as NDC warping and inverse sphere warping, which map unbounded space to a bounded space. The method was proposed by Wang et al. in 2023 [S1][S2, unofficial].
+
+## Sources
+[S1] F2-NeRF: Fast Neural Radiance Field Training with Free Camera Trajectories, https://doi.org/10.1109/cvpr52729.2023.00404, fetched 2026-10-26
+[S2] F2-NeRF: Fast Neural Radiance Field Training with Free Camera Trajectories, https://openaccess.thecvf.com/content/CVPR2023/html/Wang_F2-NeRF_Fast_Neural_Radiance_Field_Training_With_Free_Camera_Trajectories_CVPR_2023_paper.html, fetched 2026-10-27 (unofficial)

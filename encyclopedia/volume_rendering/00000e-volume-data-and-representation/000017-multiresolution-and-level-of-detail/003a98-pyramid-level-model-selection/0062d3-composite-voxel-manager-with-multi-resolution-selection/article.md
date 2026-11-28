@@ -1,0 +1,202 @@
+# Composite Voxel Manager with Multi-resolution Selection
+
+Also called: Multi-resolution ImageVolume model, brick store level, sub voxel manager
+
+## Overview
+The Composite Voxel Manager resolves the problem where large volume datasets exceed device texture limits, causing allocation failures and black viewports, by maintaining multiple representations (sub-resolution, sub-region, and server-side bricks) of the same data simultaneously [S1, unofficial]. It differs from single-resolution models by selecting the optimal representation based on a resolution ceiling, region coverage, and statistical type, ensuring that users see a reduced-resolution image rather than a failure, while preserving measurement and annotation consistency [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A request for voxel data at specific IJK coordinates or a region, optionally specifying a resolution ceiling (maximum allowed texture dimension) and a statistic type (e.g., average, minimum, maximum).
+*   **Output:** The scalar value at the requested location from the best-matching sub voxel manager, or the quality record for a region.
+
+**Data Structures**
+The system relies on two primary structures:
+1.  **Composite Voxel Manager:** Holds a collection of `SubVoxelManager` instances.
+    *   `sub_managers`: List of `SubVoxelManager` objects.
+    *   Each `SubVoxelManager` has:
+        *   `grid`: Defined by origin, direction, spacing, and dimensions.
+        *   `extent`: Spatial bounds (can be whole volume or partial).
+        *   `quality_record`: Absolute record of data existence, spacing, loss, and missing data [S1, unofficial].
+2.  **ImageVolume:** Maps to one or many textures, which map to one or many `SubVoxelManager` instances (many-to-many relationship) [S1, unofficial].
+
+**Numbered Steps**
+1.  **Initialization:** The `CompositeVoxelManager` is instantiated. It does not create sub voxel managers; creation is handled by a separate API that derives data from higher resolutions or direct loads [S1, unofficial].
+2.  **Registration:** Sub voxel managers are added to the composite. Each has a unique grid (origin, direction, spacing, dimensions) and extent [S1, unofficial].
+3.  **Request Handling:** A consumer calls `getAtIJK(i, j, k)` or a region query.
+4.  **Ceiling Check:** If a resolution ceiling is provided (e.g., device texture limit), it is passed to the selection logic. If no ceiling is provided, the highest available resolution is considered [S1, unofficial].
+5.  **Selection:** The composite selects a `SubVoxelManager` using the following rules:
+    *   **Region Match:** The selected manager must cover the requested region [S1, unofficial].
+    *   **Statistic Match:** The selected manager must match the requested statistic (default: average) [S1, unofficial].
+    *   **Resolution Ceiling:** Among matching managers, select the one with the highest resolution that is $\le$ the ceiling [S1, unofficial].
+    *   **Tie-Breaking:** If multiple managers have the same resolution and statistic, select the one with the better quality record [S1, unofficial].
+    *   **Fallback:** If no manager exists at the ceiling, return the best existing manager (coarser than ceiling) [S1, unofficial].
+    *   **Direct Addressing Exception:** If the caller addresses a sub voxel manager directly (e.g., for rendering a specific decimated texture), no selection rule applies; read directly from that manager [S1, unofficial].
+6.  **Data Retrieval:**
+    *   If a manager is selected, retrieve the value from its grid.
+    *   `getAtIJK` returns the nearest available value. It never returns `undefined` for in-bounds voxels [S1, unofficial].
+7.  **Quality Reporting:** For region queries, return an absolute quality record (data exists, spacing, loss, missing data) [S1, unofficial]. A separate pure function compares this record against reader requirements to produce a verdict [S1, unofficial].
+
+**Formulas**
+*   **Selection Criterion:**
+    $$ \text{Selected} = \arg \max_{m \in M} \left( \text{Resolution}(m) \right) $$
+    Subject to:
+    $$ \text{Region}(m) \supseteq \text{RequestRegion} $$
+    $$ \text{Statistic}(m) = \text{RequestStatistic} $$
+    $$ \text{Resolution}(m) \le \text{Ceiling} $$
+    Where $M$ is the set of available sub voxel managers [S1, unofficial].
+
+*   **Tie-Breaking:**
+    If $\text{Resolution}(m_1) = \text{Resolution}(m_2)$ and $\text{Statistic}(m_1) = \text{Statistic}(m_2)$, then:
+    $$ \text{Selected} = m_1 \text{ if } \text{Quality}(m_1) > \text{Quality}(m_2) $$
+
+**Parameters**
+*   **Default Statistic:** Average [S1, unofficial].
+*   **Minimum/Maximum:** Reachable only via direct addressing to prevent them from winning selection over average data [S1, unofficial].
+*   **Typical Values:**
+    *   Volume: $3072 \times 512 \times 512$ voxels [S1, unofficial].
+    *   Device Texture Limit: 2048 voxels per edge [S1, unofficial].
+    *   Decimation: 8, 8, 8 (resulting in $64 \times 64 \times 256$ from $512 \times 512 \times 1024$) [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Black Viewports:** Without multi-resolution, a $3072 \times 512 \times 512$ volume fails to allocate on a device with a 2048 edge limit, resulting in a black viewport with no error message [S1, unofficial].
+*   **Statistic Conflicts:** If minimum/maximum statistics were included in selection, they might win over average data at high resolution, returning incorrect values for standard rendering [S1, unofficial].
+*   **In-Bounds Undefined:** `getAtIJK` must never return `undefined` for in-bounds voxels, even if the load is incomplete [S1, unofficial].
+*   **Creation vs. Selection:** Selection never creates new sub voxel managers; it only returns existing ones [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class SubVoxelManager:
+    def __init__(self, grid, extent, quality_record, statistic):
+        self.grid = grid  # {origin, direction, spacing, dimensions}
+        self.extent = extent  # Spatial bounds
+        self.quality_record = quality_record  # {data_exists, spacing, loss, missing_data}
+        self.statistic = statistic  # 'average', 'minimum', 'maximum'
+        self.data = None  # Loaded data array
+
+    def get_value(self, i, j, k):
+        # Direct access, no selection
+        return self.data[i][j][k]
+
+    def covers_region(self, region):
+        # Check if self.extent covers the requested region
+        return (self.extent.min_x <= region.min_x and
+                self.extent.max_x >= region.max_x and
+                self.extent.min_y <= region.min_y and
+                self.extent.max_y >= region.max_y and
+                self.extent.min_z <= region.min_z and
+                self.extent.max_z >= region.max_z)
+
+class CompositeVoxelManager:
+    def __init__(self):
+        self.sub_managers = []
+
+    def add_sub_manager(self, sub_manager):
+        self.sub_managers.append(sub_manager)
+
+    def select_manager(self, region, statistic, ceiling=None):
+        """
+        Select the best sub voxel manager for a region.
+        :param region: The spatial region requested.
+        :param statistic: The required statistic ('average', etc.).
+        :param ceiling: Maximum resolution allowed (e.g., texture limit).
+        :return: The best SubVoxelManager or None.
+        """
+        candidates = []
+        for sm in self.sub_managers:
+            # Check region coverage
+            if not sm.covers_region(region):
+                continue
+            # Check statistic match
+            if sm.statistic != statistic:
+                continue
+            # Check resolution ceiling
+            # Resolution is derived from grid.spacing or dimensions
+            # For simplicity, assume higher resolution means smaller spacing or larger dimensions
+            # Here we use a placeholder function for resolution comparison
+            if ceiling is not None:
+                if sm.resolution > ceiling:
+                    continue
+            candidates.append(sm)
+
+        if not candidates:
+            return None
+
+        # Sort by resolution (descending), then quality (descending)
+        # Note: 'better' quality is implementation-defined, e.g., lower loss
+        candidates.sort(key=lambda sm: (sm.resolution, sm.quality_score), reverse=True)
+
+        return candidates[0]
+
+    def get_at_ijk(self, i, j, k, ceiling=None):
+        """
+        Get voxel value at IJK coordinates.
+        :return: Scalar value. Never undefined for in-bounds.
+        """
+        # Determine region from IJK (single voxel)
+        region = {
+            'min_x': i, 'max_x': i,
+            'min_y': j, 'max_y': j,
+            'min_z': k, 'max_z': k
+        }
+        
+        # Select manager
+        manager = self.select_manager(region, 'average', ceiling)
+        
+        if manager is None:
+            # Fallback: return nearest available or handle error
+            # Per spec, never return undefined for in-bounds
+            # This implies a fallback to a coarser manager or interpolation
+            # For this implementation, we assume a fallback manager exists
+            fallback = self.select_manager(region, 'average', ceiling=None)
+            if fallback:
+                return fallback.get_value(i, j, k)
+            else:
+                return 0  # [G] Default fallback value if no data exists
+
+        return manager.get_value(i, j, k)
+
+    def get_quality_record(self, region):
+        """
+        Get absolute quality record for a region.
+        :return: QualityRecord object.
+        """
+        # Aggregate quality from all sub managers covering the region
+        # This is a simplified aggregation
+        records = []
+        for sm in self.sub_managers:
+            if sm.covers_region(region):
+                records.append(sm.quality_record)
+        
+        # Return combined record
+        # [G] Specific aggregation logic not detailed in sources
+        return combine_quality_records(records)
+```
+
+## Subtopics
+
+### Sub-Resolution Grid
+Covers the whole volume with larger spacing (decimation). Used when full-resolution textures do not load. [S1, unofficial]
+
+### Sub-Region Grid
+Covers part of the volume at full spacing. Used for thin oblique slabs or MPR views. [S1, unofficial]
+
+### Server-Side Brick Store Level
+Values stored on the server. Accessed via direct addressing or specific loaders. [S1, unofficial]
+
+## Operating characteristics
+*   **Time Complexity:** Selection is $O(N)$ where $N$ is the number of sub voxel managers, but it is performed per region, not per voxel, keeping inner loops fast [S1, unofficial].
+*   **Memory Complexity:** Proportional to the sum of all sub voxel manager data sizes. Multi-resolution allows storing multiple representations, increasing memory usage compared to single-resolution models [S1, unofficial].
+*   **Measured Performance:** On a device with a 2048 voxel edge limit, a $3072 \times 512 \times 512$ volume that previously failed to allocate now displays using a decimated representation (e.g., $64 \times 64 \times 256$) [S1, unofficial].
+*   **Strengths:** Prevents black viewports; maintains user measurement consistency; allows flexible LOD selection.
+*   **Limitations:** Increased memory usage; complexity in managing multiple representations; quality verdicts are separate from data retrieval.
+*   **When to Use:** When device texture limits are smaller than the full volume dimensions; when multiple viewports with different LOD requirements exist.
+*   **When Not to Use:** When memory is extremely constrained and only one resolution is needed; when direct access to all data is required without selection overhead.
+
+## Background
+The Composite Voxel Manager was introduced in Cornerstone3D to address the issue where large volume series do not display on devices with small texture limits [S1, unofficial]. It was proposed in a feature request (COMWeb#130) and implemented as part of the `vtk-wasm` render backend [S1, unofficial]. The model extracts the `IVoxelManager` interface from the `VoxelManager` class to allow for multiple sub voxel managers with different extents, resolutions, and qualities [S1, unofficial].
+
+## Sources
+[S1] [Feature Request] Multi-resolution ImageVolume and VoxelManager, https://github.com/cornerstonejs/cornerstone3D/issues/2921, fetched 2026-10-27 (unofficial)

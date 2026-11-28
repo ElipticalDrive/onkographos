@@ -1,0 +1,2355 @@
+Electromagnetic FDTD Simulations in JAX. Contribute to ymahlau/fdtdx development by creating an account on GitHub.
+
+Add rectilinear grid support with one solver-facing grid path by teevee112 · Pull Request #312 · ymahlau/fdtdx · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+teevee112
+commented
+May 4, 2026
+•
+edited by coderabbitai
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Addresses #71
+Summary
+This PR introduces rectilinear grid support and removes the scalar SimulationConfig.resolution path. The main design choice is that uniform grids are treated as a special case of rectilinear grids, not as a separate solver mode.
+The solver-facing representation is now RectilinearGrid, which stores explicit physical edge coordinates:
+x_edges
+y_edges
+z_edges
+Uniform grids enter through UniformGrid(spacing=...), which is a lightweight grid policy. During placement, it resolves to a concrete RectilinearGrid. After that point, simulation code consumes one realized grid representation.
+Philosophy
+The goal is to avoid having two competing discretization models:
+one scalar-resolution path for uniform grids
+one metric-aware path for non-uniform grids
+That split would make future work fragile because new code could accidentally keep using scalar spacing assumptions. Instead, this PR makes the grid itself the source of truth for physical metrics.
+Uniform grids still stay efficient and simple, but they now follow the same API and data model as non-uniform grids. This should make future grid work easier to reason about and easier to test.
+Key Design Choices
+One realized solver grid
+RectilinearGrid is the concrete grid used by solver internals. It owns:
+edge coordinates
+cell widths
+cell centers
+physical extents
+face areas
+cell volumes
+CFL time-step calculation
+coordinate-to-index snapping helpers
+This keeps placement, detectors, sources, PML, exports, and update equations from each inventing their own grid math.
+Separate grid policy from realized grid
+UniformGrid(spacing=...) represents user intent before the final simulation shape is known.
+It resolves to:
+```
+RectilinearGrid.uniform(shape=..., spacing=...)
+```
+during setup.
+This leaves room for future policy objects such as AutoGrid, QuasiUniformGrid, refinement overrides, or wavelength-aware meshing, while keeping the solver backend unchanged.
+No backwards-compatible scalar resolution path
+This PR intentionally removes SimulationConfig.resolution.
+That is a breaking API change, but it avoids maintaining two sources of truth. The replacement is explicit:
+```
+SimulationConfig(
+    time=...,
+    grid=UniformGrid(spacing=50e-9),
+)
+```
+or:
+```
+SimulationConfig(
+    time=...,
+    grid=RectilinearGrid.custom(
+        x_edges=...,
+        y_edges=...,
+        z_edges=...,
+    ),
+)
+```
+Physical reductions by default
+Reduced detector outputs now use physical weights:
+energy reductions use cell volumes
+Poynting flux reductions use face areas
+mode overlap uses detector-plane face areas
+The old raw-sum behavior was grid-dependent and becomes misleading on non-uniform grids. A refined region should not change total energy or flux just because it contains more cells.
+What Changed
+Added UniformGrid as the uniform-grid policy
+Made RectilinearGrid the concrete solver-facing grid model
+Removed SimulationConfig.resolution
+Updated placement to resolve grid policy before objects are placed
+Updated real-coordinate and real-shape placement to use grid edge coordinates
+Added local metric handling for Yee curls and CFL calculation
+Updated field interpolation for stretched cells
+Updated PML grading and Bloch phase calculations to use physical distances
+Updated sources and mode solver wrappers to pass/use physical coordinates where available
+Updated detector reductions to use area/volume weights
+Updated geometry masks for spheres, cylinders, and polygons to sample physical cell centers
+Added VTR export for rectilinear grids and kept VTI limited to uniform image-data grids
+Updated examples, checks, tests, and docs-facing API usage to the new grid model
+Tradeoffs
+Breaking API change
+Removing SimulationConfig.resolution means existing scripts must change to grid=UniformGrid(spacing=...).
+This is intentional. Keeping resolution as a compatibility alias would preserve an attractive nuisance: new code could continue depending on scalar spacing and silently break non-uniform behavior.
+More metric plumbing
+Some code now asks the grid for physical areas, volumes, centers, and extents. This is more explicit than scalar arithmetic, but it makes assumptions visible and testable.
+Performance considerations
+Metric-aware code can allocate more intermediate arrays, especially for broadcasted curl scales, area weights, volume weights, and source coordinate grids.
+This PR keeps the implementation correct and modular first. Follow-up optimization opportunities include:
+caching common solver metric arrays
+using separable 1D weights where possible instead of full 3D arrays
+precomputing source/detector metric coordinates at placement time
+profiling JIT-compiled update loops for metric broadcast overhead
+Validation
+Pre-commit passes:
+uv run pre-commit run --all-files
+The branch also includes focused tests for:
+uniform and non-uniform grid construction
+coordinate snapping and placement behavior
+CFL calculation on stretched grids
+local curl metric accuracy
+weighted energy / flux / mode-overlap reductions
+PML physical-depth profiles
+Bloch phase physical lengths
+geometry masks on rectilinear grids
+source profile behavior on stretched grids
+VTR/VTI export behavior
+full FDTD run on a mildly stretched grid matches uniform-grid observables
+Future Work
+This PR does not implement automatic meshing.
+The intended future direction is to add grid policy objects that resolve to RectilinearGrid, for example:
+AutoGrid
+QuasiUniformGrid
+wavelength-aware refinement
+material-interface refinement
+user mesh override regions
+Those policies should stay outside the solver. The solver should continue consuming realized RectilinearGrid coordinates.
+Summary by CodeRabbit
+New Features
+Added non-uniform (rectilinear) grid support for FDTD simulations, enabling stretched mesh geometries for improved computational efficiency.
+Introduced grid-based simulation configuration API using UniformGrid and RectilinearGrid classes.
+Added VTK RectilinearGrid export (export_vtr) for non-uniform grid data.
+Enhanced detector plotting and mode solving for non-uniform grids.
+API Changes
+SimulationConfig now uses grid=UniformGrid(spacing=...) instead of resolution=....
+coderabbitai
+Bot
+commented
+May 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+📝 Walkthrough
+Walkthrough
+This PR introduces a grid-based spatial discretization API, replacing scalar resolution parameters with UniformGrid and RectilinearGrid policy objects. The change enables support for non-uniform rectilinear grids throughout the FDTD solver while maintaining backward compatibility for uniform-grid simulations. Core data structures, physics calculations, object placement, detectors, sources, boundaries, and plotting utilities are updated accordingly.
+Changes
+Grid API Migration & Non-Uniform Grid Support
+Layer / File(s)
+Summary
+Grid Policy Classes & Resolution
+src/fdtdx/core/grid.py, src/fdtdx/config.py
+UniformGrid and RectilinearGrid replace scalar resolution in SimulationConfig. New classes handle grid construction, metric computations, coordinate conversion, and CFL time-step calculation from per-axis minimum spacing. SimulationConfig adds resolve_grid(), resolved_grid, has_nonuniform_grid, uniform_spacing(), and updates time_step_duration to use grid-aware logic.
+Physics & Grid Metrics
+src/fdtdx/core/physics/curl.py, src/fdtdx/core/physics/metrics.py, src/fdtdx/core/physics/modes.py
+Curl operations (curl_E, curl_H) gain per-axis metric scaling via _metric_scale and distance-weighted interpolation via _backward_edge_average. normalize_by_poynting_flux accepts optional area_weights for non-uniform integration. compute_mode accepts transverse_coords for non-uniform grids and passes area weights into normalization.
+FDTD Initialization & Placement
+src/fdtdx/fdtd/initialization.py
+Grid resolution is delegated to config.resolve_grid(shape) during place_objects and _init_arrays. Conductivity scaling switches from config.resolution to conductivity_spacing computed from time-step duration. Non-uniform grid helpers (_real_length_to_grid_size, _center_to_bounds_for_grid, _real_coord_to_edge_index) support physical-coordinate constraint resolution. Index-space (GridCoordinateConstraint) and margin-based constraints are rejected on non-uniform grids.
+Detector Grid Awareness
+src/fdtdx/objects/detectors/*.py, src/fdtdx/objects/detectors/plotting/*.py
+Detectors cache cell volumes and face-area weights during placement. New helpers (_plot_axis_centers_um, _plot_axis_edges_um, _plot_resolutions, _plot_coordinate_edges_um) provide physically-aware coordinates for plotting on uniform and non-uniform grids. plot_2d_from_slices and video plotting accept coordinate_edges_um to render non-uniform cell widths via pcolormesh. Volume-weighted spatial means replace unweighted averaging when reduce_volume is enabled.
+Boundary & Source Non-Uniform Support
+src/fdtdx/objects/boundaries/bloch.py, src/fdtdx/objects/boundaries/perfectly_matched_layer.py, src/fdtdx/objects/sources/linear_polarization.py, src/fdtdx/objects/sources/mode.py, src/fdtdx/objects/sources/tfsf.py
+Bloch phases use physical grid extents when a resolved grid is available. PML thickness and depth computation support non-uniform grids via _compute_nonuniform_pml_depths. Source types gain transverse-edge and center-coordinate helpers (_local_edge_coordinates, _transverse_edge_coordinates, _source_resolution, _source_center_physical) for grid-aware Yee time-offset and mode-solver invocations. Bilinear interpolation (_linear_interpolate_rectilinear_2d) enables smooth source profiles on non-uniform grids.
+Static Material & Device Voxel Handling
+src/fdtdx/objects/static_material/cylinder.py, src/fdtdx/objects/static_material/polygon.py, src/fdtdx/objects/static_material/sphere.py, src/fdtdx/objects/device/device.py
+Material voxel masks switch from discrete grid indices to continuous physical coordinates derived from grid edges. polygon_to_mask_at_points enables explicit-coordinate polygon masking for non-uniform grids. Device voxels support physical-design sizing on uniform grids and index-based sizing on non-uniform grids; overlap-weighted resampling maps design parameters to simulation cells.
+Plotting & Utilities
+src/fdtdx/utils/plot_material.py, src/fdtdx/utils/plot_setup.py, src/fdtdx/utils/sparams.py, src/fdtdx/conversion/vti.py
+Plotting helpers compute axis edges in micrometers using RectilinearGrid.edges or uniform-spacing fallback. Material and setup plots use pcolormesh for non-uniform grids. VTI/VTR export functions accept optional grid parameters for grid-aware coordinate generation. S-parameter utilities switch to grid-based config.
+Public API & Re-exports
+src/fdtdx/__init__.py
+UniformGrid, RectilinearGrid, and export_vtr are added to the public API and re-exported from their origin modules.
+Test Coverage & Migration
+tests/**/*.py
+~100+ test files updated to use SimulationConfig(grid=UniformGrid(spacing=...)) instead of resolution=.... New test modules and assertions cover non-uniform grid initialization, physics calculations, detector behavior, source placement, and plotting. Integration tests validate uniform-grid equivalence and non-uniform grid physics (e.g., test_nonuniform_grid.py).
+Sequence Diagram(s)
+```
+sequenceDiagram
+    participant User as User Code
+    participant Config as SimulationConfig
+    participant Grid as UniformGrid/<br/>RectilinearGrid
+    participant Physics as Physics (curl,<br/>metrics, modes)
+    participant Detector as Detector
+    participant Plot as Plotting
+
+    User->>Config: Create with grid=UniformGrid(spacing=X)
+    Config->>Grid: Store grid policy
+    
+    User->>Config: resolve_grid(shape)
+    Config->>Grid: Compute physical edges from spacing
+    Grid-->>Config: Return RectilinearGrid
+    
+    User->>Physics: Call curl_E/curl_H
+    Physics->>Config: Get resolved_grid or uniform_spacing()
+    Config-->>Physics: Per-axis metric scales / spacing
+    Physics-->>User: Curl with physical discretization
+    
+    User->>Detector: place_on_grid(config)
+    Detector->>Config: Access resolved_grid.cell_volume or uniform_spacing()
+    Detector->>Detector: Cache per-cell weights
+    
+    User->>Plot: draw_plot()
+    Plot->>Detector: _plot_coordinate_edges_um()
+    Detector->>Config: Get resolved_grid.edges or uniform_spacing()
+    Config-->>Detector: Physical edge coordinates
+    Detector-->>Plot: Edges for pcolormesh or imshow
+    Plot-->>User: Rendered figure with physical axes
+```
+Loading
+Estimated Code Review Effort
+🎯 4 (Complex) | ⏱️ ~60 minutes
+This PR spans ~100+ test files and multiple core system layers (grid definition, physics calculations, initialization, object placement, boundary conditions, detectors, sources, and plotting). While many changes are mechanical parameter substitutions (resolution → grid.spacing), the core contributions introduce substantial new logic:
+Grid resolution and metric computation in grid.py and config.py
+Per-axis metric scaling in curl operations
+Non-uniform constraint resolution and placement logic
+Volume-weighted spatial averaging and grid-aware coordinate mapping across detectors/sources
+New public API (grid classes, export_vtr)
+The heterogeneity of affected domains (physics, initialization, objects, utilities) and the density of new helper functions necessitate careful review of correctness, but the widespread repetition of similar parameter changes across test files reduces incremental complexity.
+Possibly Related PRs
+ymahlau/fdtdx#301: Modifies constraint-placement logic in src/fdtdx/fdtd/initialization.py for position/size/extension constraints; overlaps with this PR's non-uniform grid constraint handling.
+ymahlau/fdtdx#303: Updates ExtrudedPolygon voxel mask generation in src/fdtdx/objects/static_material/polygon.py; intersects with this PR's polygon grid-aware masking refactor.
+ymahlau/fdtdx#296: Modifies S-parameter utilities and package exports (src/fdtdx/utils/sparams.py, src/fdtdx/__init__.py); shares changes in grid configuration and public API updates.
+Suggested Reviewers
+ymahlau
+A grid-aware world now spans,
+Uniform cells dance with stretched plans,
+Metrics scale with physics' demands,
+Non-uniform grids in steady hands. 🐰✨
+codecov
+Bot
+commented
+May 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 86.90229% with 126 lines in your changes missing coverage. Please review.
+✅ Project coverage is 92.30%. Comparing base (4757ff2) to head (a936fc9).
+Files with missing lines
+Patch %
+Lines
+src/fdtdx/core/grid.py
+81.54%
+28 Missing and 15 partials ⚠️
+src/fdtdx/objects/device/device.py
+43.54%
+28 Missing and 7 partials ⚠️
+src/fdtdx/fdtd/initialization.py
+87.50%
+6 Missing and 2 partials ⚠️
+src/fdtdx/objects/detectors/energy.py
+61.11%
+5 Missing and 2 partials ⚠️
+src/fdtdx/conversion/vti.py
+87.23%
+3 Missing and 3 partials ⚠️
+src/fdtdx/core/physics/modes.py
+72.72%
+3 Missing and 3 partials ⚠️
+...dtdx/objects/boundaries/perfectly_matched_layer.py
+83.33%
+4 Missing and 1 partial ⚠️
+src/fdtdx/objects/detectors/detector.py
+90.19%
+3 Missing and 2 partials ⚠️
+src/fdtdx/objects/sources/linear_polarization.py
+96.51%
+2 Missing and 1 partial ⚠️
+src/fdtdx/config.py
+91.66%
+1 Missing and 1 partial ⚠️
+... and 3 more
+❌ Your patch check has failed because the patch coverage (86.90%) is below the target coverage (90.00%). You can increase the patch coverage or adjust the target coverage.
+Additional details and impacted files
+```
+@@            Coverage Diff             @@
+##             main     #312      +/-   ##
+==========================================
+- Coverage   92.89%   92.30%   -0.59%     
+==========================================
+  Files          83       83              
+  Lines        7446     8242     +796     
+  Branches     1082     1211     +129     
+==========================================
++ Hits         6917     7608     +691     
+- Misses        361      434      +73     
+- Partials      168      200      +32     
+```
+☔ View full report in Codecov by Sentry.
+📢 Have feedback on the report? Share it here.
+🚀 New features to boost your workflow:
+❄️ Test Analytics: Detect flaky tests, report on failures, and find test suite problems.
+ymahlau
+commented
+May 6, 2026
+Copy link
+Copy Markdown
+Owner
+Hi @teevee112, awesome that you started tackling this! Without looking at the code, I agree with the design decisions, removing resolution is a good way to go. Will give a proper review later this day.
+coderabbitai
+Bot
+reviewed
+May 6, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 8
+Caution
+Some comments are outside the diff and can’t be posted inline due to platform limitations.
+⚠️ Outside diff range comments (2)
+tests/integration/fdtd/test_stop_conditions.py (1)
+217-217: ⚠️ Potential issue | 🟡 Minor | ⚡ Quick win
+Stale comment references removed resolution API.
+📝 Proposed fix
+```
+-        # If courant_factor=0.99 and resolution=1e-4, then time_step_duration ≈ 1.906e-13 s
++        # If courant_factor=0.99 and grid=UniformGrid(spacing=1e-4), then time_step_duration ≈ 1.906e-13 s
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@tests/integration/fdtd/test_stop_conditions.py` at line 217, The inline
+comment referencing a removed resolution API is stale; update or remove it in
+tests/integration/fdtd/test_stop_conditions.py by either deleting the line or
+rewriting it to reference the actual variable used in the time-step calculation
+(e.g., the spatial step variable used together with courant_factor to compute
+time_step_duration) so the numeric example matches the code that calculates
+time_step_duration; ensure you edit the comment near the usage of courant_factor
+and time_step_duration to reflect the real parameter name used in the test.
+```
+src/fdtdx/conversion/vti.py (1)
+159-161: ⚠️ Potential issue | 🟠 Major | ⚡ Quick win
+Use the realized grid origin in VTI exports.
+Line 159 still writes Origin="0 0 0" even when grid is supplied. For RectilinearGrid.uniform(..., origin=...) that shifts the exported dataset in physical space, so ParaView will place a uniform grid at the wrong coordinates.
+Suggested fix
+```
+-    origin = "0 0 0"
++    if grid is not None:
++        origin = f"{float(grid.edges(0)[0])} {float(grid.edges(1)[0])} {float(grid.edges(2)[0])}"
++    else:
++        origin = "0 0 0"
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/fdtdx/conversion/vti.py` around lines 159 - 161, The VTI export currently
+hardcodes origin = "0 0 0"; change it to use the realized grid origin when a
+grid is supplied (use the grid's origin or the computed offset values) so
+exported Origin matches the physical coordinates from
+RectilinearGrid.uniform(..., origin=...). Update the origin assignment (the
+variable named origin used alongside extent and spacing) to format the actual
+origin (e.g., from grid.origin or offset) rather than the constant "0 0 0" so
+ParaView places the uniform grid at the correct location.
+```
+🧹 Nitpick comments (12)
+src/fdtdx/objects/detectors/mode.py (2)
+107-109: 💤 Low value
+Method indirection adds little value.
+_face_area_weights() is a thin wrapper around _cached_face_area_weights. Either drop the wrapper and call the property directly at the call site (Line 199), or make the cache itself the public accessor.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/fdtdx/objects/detectors/mode.py` around lines 107 - 109, The
+`_face_area_weights` method is just a thin wrapper around
+`_cached_face_area_weights`; remove the indirection by deleting the
+`_face_area_weights` method and update all call sites (e.g., where
+`_face_area_weights()` is used) to access `_cached_face_area_weights` directly,
+or alternatively make `_cached_face_area_weights` the public accessor (rename to
+`face_area_weights`) and update references accordingly; ensure you adjust any
+tests or usages (such as the mode-overlap integration call) to the new name so
+there are no lingering `_face_area_weights()` calls.
+```
+104-105: ⚡ Quick win
+Use a real dtype for face-area weights.
+self.dtype is inherited from PhasorDetector and defaults to jnp.complex64, so this allocates a complex array to hold purely real face areas (2× memory, zero imaginary content). Promotion will still happen when multiplied into the complex integrand on Line 199, so a real dtype here is both cheaper and clearer.
+♻️ Proposed change
+```
+-        spacing = self._config.require_uniform_grid()
+-        return jnp.ones(self.grid_shape, dtype=self.dtype) * spacing * spacing
++        spacing = self._config.require_uniform_grid()
++        real_dtype = jnp.float64 if self._config.dtype == jnp.float64 else jnp.float32
++        return jnp.full(self.grid_shape, spacing * spacing, dtype=real_dtype)
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/fdtdx/objects/detectors/mode.py` around lines 104 - 105, The face-area
+weights are being allocated with self.dtype (inherited from PhasorDetector and
+defaulting to jnp.complex64), which needlessly creates a complex array; change
+the allocation to use a real dtype instead (e.g. dtype=jnp.float32 for complex64
+or dtype=jnp.float64 for complex128). Specifically, replace the jnp.ones(...,
+dtype=self.dtype) call in the method that builds face-area weights (uses
+self._config.require_uniform_grid() and self.grid_shape) with jnp.ones(...,
+dtype=<real dtype>) so the returned array is real-valued (match float32 for
+complex64 or float64 for complex128).
+```
+src/fdtdx/objects/sources/tfsf.py (1)
+67-97: 💤 Low value
+Property name *_offset_grid is now misleading on nonuniform grids.
+On nonuniform grids the returned value is a physical offset in metres, not in grid units, despite the _grid suffix. The same applies to _get_center returning metres vs. indices depending on the branch. Consider documenting this duality at the property level (or renaming to *_offset_source_units) to prevent future subclasses from mixing units.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/fdtdx/objects/sources/tfsf.py` around lines 67 - 97, The property names
+max_vertical_offset_grid and max_horizontal_offset_grid are misleading because
+they return metres on non-uniform grids; update these properties to either (a)
+rename them to something like max_vertical_offset_source_units and
+max_horizontal_offset_source_units across the class and all callers (including
+any uses in _get_center) or (b) keep the names but explicitly document the dual
+units in each property docstring and add a clear helper/flag (e.g. property or
+method) that indicates whether the value is in grid indices or metres; ensure
+any code paths that call _get_center or rely on these properties handle the unit
+mode consistently (adjust call sites to convert units when renaming or add
+explicit conversions when keeping names).
+```
+src/fdtdx/objects/boundaries/bloch.py (1)
+135-155: 💤 Low value
+Docstring is out of sync with the new grid-aware logic.
+The docstring still states L = volume_shape[axis] * resolution, but when realized_grid is available L is now derived from the grid edges. It also still presents resolution as authoritative even though the parameter is silently ignored on the realized-grid path. On a rectilinear grid the resolution argument has no single physically meaningful value, so the fallback branch (L = volume_shape[self.axis] * resolution) would silently produce a wrong L if it were ever hit with a rectilinear grid that hadn't been realized. Worth tightening the docstring (and possibly asserting grid is not None for the rectilinear case) so the contract matches the implementation.
+📝 Suggested docstring update
+```
+     def get_bloch_phase(self, volume_shape: tuple[int, int, int], resolution: float) -> jax.Array:
+         """Compute the complex phase factor exp(i * k_bloch * L) for this axis.
+ 
+         The right ghost cell (wrapping from the left side) is multiplied by this phase.
+         The left ghost cell (wrapping from the right side) is multiplied by the conjugate.
+ 
+         Args:
+             volume_shape: Full simulation volume shape (Nx, Ny, Nz)
+-            resolution: Grid resolution in meters
++            resolution: Uniform-grid spacing in meters. Used only as a fallback
++                when ``self._config.realized_grid`` is unavailable; ignored on
++                rectilinear grids, where ``L`` is taken from the grid edges.
+ 
+         Returns:
+-            Complex scalar exp(i * k_axis * L) where L = volume_shape[axis] * resolution
++            Complex scalar exp(i * k_axis * L). When a realized grid is
++            available, L = edges[Nx] - edges[0] along ``self.axis``;
++            otherwise L = volume_shape[axis] * resolution.
+         """
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/fdtdx/objects/boundaries/bloch.py` around lines 135 - 155, Update the
+get_bloch_phase docstring to reflect the current grid-aware behavior: state that
+when self._config.realized_grid is present L is computed from
+grid.edges(self.axis) (edges[volume_shape[self.axis]] - edges[0]) and the
+resolution argument is ignored, and otherwise L falls back to
+volume_shape[self.axis] * resolution (which only makes sense for a uniform
+Cartesian grid); also either add a short runtime check in get_bloch_phase to
+raise a clear error if a rectilinear grid is in use but realized_grid is None
+(so we don't silently use resolution), referencing get_bloch_phase,
+self._config.realized_grid, and grid.edges(self.axis).
+```
+src/fdtdx/objects/boundaries/perfectly_matched_layer.py (1)
+213-216: 💤 Low value
+Dead computation: widths is calculated then immediately del-ed.
+Lines 198 and 215 compute widths only to delete it; nothing references it, so the comment about "keeps the normalization robust for diagnostics" doesn't reflect any actual behavior. Either drop the computation or use widths for the validation it claims to support.
+♻️ Proposed cleanup
+```
+-        edges = grid.edges(self.axis)[lower : upper + 1].astype(dtype)
+-        widths = edges[1:] - edges[:-1]
+-        norm = float(edges[-1] - edges[0])
++        edges = grid.edges(self.axis)[lower : upper + 1].astype(dtype)
++        norm = float(edges[-1] - edges[0])
+         centers = 0.5 * (edges[:-1] + edges[1:])
+@@
+             dH = dH.at[0].set(0)
+
+-        # If a boundary cell has zero width validation would already have failed
+-        # in RectilinearGrid, but this keeps the normalization robust for diagnostics.
+-        del widths
+         return dE, dH, norm
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/fdtdx/objects/boundaries/perfectly_matched_layer.py` around lines 213 -
+216, The computed variable widths is never used (it’s computed then immediately
+deleted), so either remove the widths computation and the del widths line, or
+actually use widths for the claimed validation/diagnostics: e.g., perform a
+check inside the same method that any widths == 0 raises a clear error (or logs
+a diagnostic) before returning dE, dH, norm; update references in this method
+(the block that currently computes widths and then does del widths) and ensure
+interaction with RectilinearGrid validation remains consistent.
+```
+src/fdtdx/fdtd/update.py (1)
+108-115: 💤 Low value
+Drop the getattr default — SimulationConfig.grid is always present in the new API.
+Using getattr(config, "grid", None) widens the static type to object | None, which weakens ty type narrowing on the subsequent grid.is_uniform and grid.min_spacing accesses. The type annotation grid: UniformGrid | RectilinearGrid = frozen_field() in SimulationConfig confirms the grid field is mandatory, so direct attribute access is both clearer for type-checking and removes a misleading "None" branch.
+♻️ Proposed simplification
+```
+-        grid = getattr(config, "grid", None)
+-        if grid is not None and not grid.is_uniform:
++        grid = config.grid
++        if not grid.is_uniform:
+             # ``apply_pad_correction`` still has a legacy scalar-resolution
+             # parameter.  Non-uniform Bloch boundaries ignore this value and
+             # compute the physical phase length from ``RectilinearGrid`` edges.
+             spacing = float(grid.min_spacing)
+         else:
+             spacing = config.require_uniform_grid()
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/fdtdx/fdtd/update.py` around lines 108 - 115, Remove the getattr fallback
+and access the mandatory grid directly: replace getattr(config, "grid", None)
+with direct attribute access (config.grid) in update.py so the variable grid has
+the correct static type (UniformGrid | RectilinearGrid); keep the existing
+branch logic that checks grid.is_uniform and uses grid.min_spacing, and
+otherwise calls config.require_uniform_grid() to obtain spacing. This ensures
+type-narrowing works for grid.is_uniform and grid.min_spacing and avoids a
+misleading None branch in SimulationConfig.grid handling.
+```
+tests/unit/core/test_grid.py (1)
+180-215: 💤 Low value
+Loose atol=0.2 weakens the "match scalar path" guarantee.
+test_calculate_time_offset_yee_uniform_coordinates_match_scalar_path claims a uniform RectilinearGrid is "metric-equivalent" to the scalar-spacing path, but uses atol=0.2 alongside rtol=1e-6. With time_step_duration=1e-15 and spacing=0.2, time offsets are O(spacing/c · 1e15) ≈ O(6.7e5), so atol=0.2 is effectively never the binding tolerance and the test really runs at rtol=1e-6 — that's fine. But for small absolute values (e.g., near center) atol=0.2 could mask substantial drift. Worth either documenting why atol=0.2 was chosen or tightening it (e.g., atol=1e-3) so the "metric-equivalent" claim is actually verified at small offsets too.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@tests/unit/core/test_grid.py` around lines 180 - 215, The test uses a very
+loose absolute tolerance (atol=0.2) that can hide small-offset mismatches;
+update the assertions in
+test_calculate_time_offset_yee_uniform_coordinates_match_scalar_path to tighten
+atol to a stricter value (e.g., atol=1e-3) on both jnp.allclose checks so the
+"metric-equivalent" claim is actually enforced for small offsets when calling
+calculate_time_offset_yee with and without coordinate_edges/center_physical;
+reference the two asserts comparing grid_E vs scalar_E and grid_H vs scalar_H
+and change their atol values accordingly.
+```
+tests/unit/objects/detectors/test_poynting_flux.py (1)
+269-272: ⚡ Quick win
+Assertion is weaker than the comment claims.
+The comment states "Doubled E and H should produce 4x the flux" but the assertion only checks flux_after_step1[1, 0] > flux_after_step0[0, 0]. Consider tightening to a quantitative check (e.g., jnp.isclose(flux_after_step1[1, 0], 4.0 * flux_after_step0[0, 0])) so the test actually enforces the documented physical relationship; otherwise it's effectively just an "is positive and grows" guard.
+♻️ Proposed tightening
+```
+-        # Doubled E and H should produce 4x the flux at the second recorded time step.
+-        assert flux_after_step1[1, 0] > flux_after_step0[0, 0]
++        # Doubled E and H should produce 4x the flux at the second recorded time step.
++        assert jnp.isclose(flux_after_step1[1, 0], 4.0 * flux_after_step0[0, 0])
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@tests/unit/objects/detectors/test_poynting_flux.py` around lines 269 - 272,
+The test's final assertion is too weak given the comment: replace the loose
+check on flux growth with a quantitative assertion that enforces the 4x
+relationship between flux_after_step1[1, 0] and flux_after_step0[0, 0] (e.g.,
+use jnp.isclose(flux_after_step1[1, 0], 4.0 * flux_after_step0[0, 0], rtol=...,
+atol=...)) while keeping the existing finiteness checks; update the assertion in
+tests/unit/objects/detectors/test_poynting_flux.py that references
+flux_after_step0 and flux_after_step1 to use jnp.isclose with a reasonable
+tolerance instead of a simple greater-than comparison.
+```
+tests/simulation/physics/test_nonuniform_grid.py (1)
+121-126: 💤 Low value
+Verify aliasing safety of the % 2π phase unwrap.
+delta_phi = (np.angle(d2) - np.angle(d1)) % (2 * np.pi) assumes the true phase delta lies in [0, 2π). With _DET2_Z - _DET1_Z = 5 * _RESOLUTION = 250 nm and λ = 1 µm, the expected delta is 2π · 0.25 ≈ π/2, well inside one cycle, so this is fine for the current constants. However, this is fragile to future changes of _DET1_Z/_DET2_Z/_WAVELENGTH/_RESOLUTION: any separation > λ/2 will silently wrap and _measured_k will return the wrong value, potentially still passing the rtol=0.10 comparison if both grids alias the same way. Consider either documenting the constraint near the constants or unwrapping into [-π, π) (e.g., np.angle(d2 / d1)) which is more robust under sign flips.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@tests/simulation/physics/test_nonuniform_grid.py` around lines 121 - 126,
+_measured_k computes phase difference using (np.angle(d2) - np.angle(d1)) % (2.0
+* np.pi) which can silently alias when separation > λ/2; change the computation
+to use a robust unwrap such as computing the relative phase via np.angle(d2 /
+d1) (or otherwise unwrap into [-π, π)) so sign/aliasing is handled, keeping the
+same use of _phasor(...) for d1/d2 and the separation computed from
+_detector_center_z(obj_container, config, "d2") -
+_detector_center_z(obj_container, config, "d1").
+```
+src/fdtdx/objects/detectors/diffractive.py (1)
+103-119: 💤 Low value
+Unnecessary # type: ignore and missing length assertion.
+plane_dims always has length 2 (the propagation axis is excluded), so tuple(centers) is unambiguously tuple[jax.Array, jax.Array] and the # type: ignore[return-value] should not be needed by ty. If ty still rejects the conversion, prefer an explicit two-tuple return to keep types precise:
+♻️ Optional refactor
+```
+-        centers = []
+-        for axis in plane_dims:
+-            lower, upper = self.grid_slice_tuple[axis]
+-            centers.append(grid.centers(axis)[lower:upper])
+-        return tuple(centers)  # type: ignore[return-value]
++        a0, a1 = plane_dims
++        l0, u0 = self.grid_slice_tuple[a0]
++        l1, u1 = self.grid_slice_tuple[a1]
++        return grid.centers(a0)[l0:u0], grid.centers(a1)[l1:u1]
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/fdtdx/objects/detectors/diffractive.py` around lines 103 - 119, The
+function _transverse_centers should return an explicit two-tuple and assert
+plane_dims length instead of using a type: ignore; add an assertion like assert
+len(plane_dims) == 2 (or raise a clear error) near the start of
+_transverse_centers, build centers for each axis as you do, then return
+(centers[0], centers[1]) so the return type is unambiguously tuple[jax.Array,
+jax.Array] and remove the "# type: ignore[return-value]" comment; reference
+symbols: _transverse_centers, plane_dims, centers, grid.centers.
+```
+src/fdtdx/core/physics/curl.py (1)
+29-33: 💤 Low value
+Minor: enumerate valid stencils in the error message.
+The if/elif style obscures that forward is also accepted. A small cleanup makes the contract explicit:
+♻️ Optional refactor
+```
+-    widths = grid.cell_widths(axis)
+-    if stencil == "backward":
+-        prev_widths = jnp.concatenate([widths[:1], widths[:-1]])
+-        widths = 0.5 * (widths + prev_widths)
+-    elif stencil != "forward":
+-        raise ValueError(f"Unknown derivative stencil: {stencil}")
++    if stencil not in ("forward", "backward"):
++        raise ValueError(f"Unknown derivative stencil: {stencil!r}; expected 'forward' or 'backward'.")
++    widths = grid.cell_widths(axis)
++    if stencil == "backward":
++        prev_widths = jnp.concatenate([widths[:1], widths[:-1]])
++        widths = 0.5 * (widths + prev_widths)
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/fdtdx/core/physics/curl.py` around lines 29 - 33, The error currently
+raised for an unknown stencil (in the block handling variable stencil and
+widths) should explicitly list allowed values; update the ValueError in the elif
+branch so it mentions both accepted stencils (e.g., "forward" and "backward")
+and the received value (use f"Unknown derivative stencil: {stencil!r}. Expected
+one of: 'forward', 'backward'"). Optionally you can also convert the conditional
+to an explicit membership test like `if stencil == "backward": ... elif stencil
+== "forward": ... else: raise ValueError(...)` to make the contract clearer.
+```
+tests/unit/objects/sources/test_linear_polarization.py (1)
+357-381: 💤 Low value
+Possible divide-by-zero in normalization assertion.
+normalized = jnp.where(active, applied._E / applied._E[:, :1, :1, :], 1.0) divides the entire _E by the (0,0) reference cell. If a tilted projection happens to clip that reference cell to zero, the result is nan/inf and the failure mode is opaque. Consider picking a guaranteed non-zero reference (e.g. the first active index) or asserting applied._E[:, :1, :1, :] != 0 first to make the failure message clearer.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@tests/unit/objects/sources/test_linear_polarization.py` around lines 357 -
+381, The test test_nonuniform_tilted_uniform_source_preserves_constant_profile
+can divide by zero when using applied._E[:, :1, :1, :] as the reference; instead
+locate a guaranteed non-zero reference per batch by finding the first active
+cell (use the computed active mask on applied._E) and divide each active element
+by applied._E at that first-active index, or alternatively assert that
+applied._E[:, :1, :1, :] != 0 before dividing to produce a clearer failure;
+update the normalization logic that builds normalized (and any related
+assertion) to use the first active index from active or add an explicit nonzero
+assertion so the test fails with a clear message rather than producing NaN/Inf.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@examples/width_sweep_analysis.py`:
+- Around line 202-206: The example still reads object._config.resolution which
+no longer exists; update all such consumers (e.g., in run_simulation() and
+before calling compute_modes_and_neff_complex()) to read the grid spacing from
+the new SimulationConfig: use object._config.grid.spacing (or the local
+config.grid.spacing variable) instead of object._config.resolution so
+compute_modes_and_neff_complex() receives the correct resolution value; search
+for any remaining ".resolution" uses and replace them with the grid.spacing
+accessor and run the example to verify it no longer errors.
+
+In `@src/fdtdx/fdtd/initialization.py`:
+- Around line 796-809: The functions _real_coord_to_edge_index and
+_center_to_bounds_for_grid currently divide coordinates by
+config.require_uniform_grid(), dropping UniformGrid.origin; instead, always use
+the grid policy APIs so origin is respected. Change the uniform branch to assert
+config.grid is not None and call config.grid.coord_to_index(axis, coord,
+snap="nearest") in _real_coord_to_edge_index and
+config.grid.bounds_for_center(axis, real_pos, size) in
+_center_to_bounds_for_grid (i.e. route both uniform and non-uniform cases
+through config.grid methods rather than using spacing math).
+- Around line 783-793: The conversion in _real_length_to_grid_size is
+incorrectly anchored to the domain origin for non-uniform grids; change the
+function signature to accept an optional start coordinate (e.g. start: float |
+None = None) and when using config.grid.length_to_cell_count(axis, length, ...)
+pass that start through (or let callers provide the intended placement
+coordinate) instead of always counting from edges[0]; update any callers of
+_real_length_to_grid_size to provide the local placement coordinate so
+length_to_cell_count computes cells relative to the actual object position
+rather than the domain origin.
+
+In `@src/fdtdx/objects/boundaries/perfectly_matched_layer.py`:
+- Around line 196-216: The E-depth computation for the '+' branch in
+perfectly_matched_layer (uses dE = edges[:-1] - interface) does not match the
+documented uniform-grid endpoint convention; add a unit test that constructs a
+stretched RectilinearGrid approaching the uniform limit and asserts that dE/norm
+for direction "+" matches the expected uniform convention (centers-based
+sequence [0, 0.5/L, 1.5/L, …]) and run it against the code paths that use
+self.direction, grid_slice_tuple and grid.edges to reproduce the limit; if the
+test fails, change the '+' branch to compute dE from cell centers (analogous to
+the '-' branch) so the uniform limit matches the docstring (or alternatively
+update the docstring to explicitly state the intentional edge-based asymmetry),
+and remove the unused widths variable and its misleading comment (the computed
+widths and the del widths line) from the method.
+
+In `@src/fdtdx/objects/detectors/diffractive.py`:
+- Around line 121-143: The function _uniform_resample_2d should not cast JAX
+tracers to Python floats; remove the float(...) calls and make dx/dy JAX scalars
+instead, and update the return type accordingly. Replace dx = float(target_x[1]
+- target_x[0]) if nx > 1 else 1.0 with something like dx = (target_x[1] -
+target_x[0]) if nx > 1 else jnp.array(1.0, dtype=target_x.dtype), do the same
+for dy using target_y, and change the annotated return type from
+tuple[jax.Array, float, float] to tuple[jax.Array, jax.Array, jax.Array] (field,
+dx, dy) so VJP tracing no longer triggers TracerArrayConversionError.
+
+In `@src/fdtdx/objects/detectors/mode.py`:
+- Around line 92-105: The cached face-area weights are geometric and should be
+stored as real floats instead of using self.dtype (which may be complex for
+PhasorDetector); update the _cached_face_area_weights implementation so the
+legacy-path return uses a real dtype (e.g., jnp.float32) when creating the ones
+array (the branch that calls self._config.require_uniform_grid()) rather than
+self.dtype, ensuring grid.face_area calls still return as before for
+realized_grid; adjust only the dtype used for the spacing*spacing multiplication
+to avoid allocating complex arrays.
+
+In `@src/fdtdx/objects/device/device.py`:
+- Around line 65-73: The current matrix_voxel_grid_shape property uses
+round(...) which silently accepts non-divisible voxel sizes; change it to
+validate divisibility and raise an error instead: compute the expected counts as
+integer divisions of grid_shape by single_voxel_grid_shape but first assert
+grid_shape[i] % single_voxel_grid_shape[i] == 0 for each axis and raise a
+ValueError (with a clear message referencing
+partial_voxel_grid_shape/partial_voxel_real_shape) if not divisible; apply the
+same strict divisibility checks and error behavior in the other affected spots
+(the similar calculations at the sections around where matrix_voxel_grid_shape
+is also computed/used) so expand_to_sim_grid cannot proceed with a rounded,
+altered geometry.
+- Around line 164-169: The code currently computes matrix_shape_override via
+ceil(self.real_shape[axis] / partial_real) and later rebuilds the design grid
+with linspace(0, domain, count + 1), which silently changes the voxel width;
+instead preserve the user-requested partial_real by generating a nonuniform edge
+array using the requested step and a possibly smaller last voxel: in the block
+handling uses_physical_design_grid (and the analogous block at lines ~274-281)
+keep physical_design_shape.append(float(partial_real)) but replace the
+ceil-based count logic with building edges via something like numpy.arange(0,
+domain, partial_real) and appending domain as the final edge, then set
+matrix_shape_override to the number of voxels = len(edges)-1; also update
+_resample_design_params_to_sim_grid() and any uses of single_voxel_real_shape to
+rely on these edges (or compute the last voxel separately) so reported
+single_voxel_real_shape matches the actual voxel sizes.
+
+---
+
+Outside diff comments:
+In `@src/fdtdx/conversion/vti.py`:
+- Around line 159-161: The VTI export currently hardcodes origin = "0 0 0";
+change it to use the realized grid origin when a grid is supplied (use the
+grid's origin or the computed offset values) so exported Origin matches the
+physical coordinates from RectilinearGrid.uniform(..., origin=...). Update the
+origin assignment (the variable named origin used alongside extent and spacing)
+to format the actual origin (e.g., from grid.origin or offset) rather than the
+constant "0 0 0" so ParaView places the uniform grid at the correct location.
+
+In `@tests/integration/fdtd/test_stop_conditions.py`:
+- Line 217: The inline comment referencing a removed resolution API is stale;
+update or remove it in tests/integration/fdtd/test_stop_conditions.py by either
+deleting the line or rewriting it to reference the actual variable used in the
+time-step calculation (e.g., the spatial step variable used together with
+courant_factor to compute time_step_duration) so the numeric example matches the
+code that calculates time_step_duration; ensure you edit the comment near the
+usage of courant_factor and time_step_duration to reflect the real parameter
+name used in the test.
+
+---
+
+Nitpick comments:
+In `@src/fdtdx/core/physics/curl.py`:
+- Around line 29-33: The error currently raised for an unknown stencil (in the
+block handling variable stencil and widths) should explicitly list allowed
+values; update the ValueError in the elif branch so it mentions both accepted
+stencils (e.g., "forward" and "backward") and the received value (use f"Unknown
+derivative stencil: {stencil!r}. Expected one of: 'forward', 'backward'").
+Optionally you can also convert the conditional to an explicit membership test
+like `if stencil == "backward": ... elif stencil == "forward": ... else: raise
+ValueError(...)` to make the contract clearer.
+
+In `@src/fdtdx/fdtd/update.py`:
+- Around line 108-115: Remove the getattr fallback and access the mandatory grid
+directly: replace getattr(config, "grid", None) with direct attribute access
+(config.grid) in update.py so the variable grid has the correct static type
+(UniformGrid | RectilinearGrid); keep the existing branch logic that checks
+grid.is_uniform and uses grid.min_spacing, and otherwise calls
+config.require_uniform_grid() to obtain spacing. This ensures type-narrowing
+works for grid.is_uniform and grid.min_spacing and avoids a misleading None
+branch in SimulationConfig.grid handling.
+
+In `@src/fdtdx/objects/boundaries/bloch.py`:
+- Around line 135-155: Update the get_bloch_phase docstring to reflect the
+current grid-aware behavior: state that when self._config.realized_grid is
+present L is computed from grid.edges(self.axis) (edges[volume_shape[self.axis]]
+- edges[0]) and the resolution argument is ignored, and otherwise L falls back
+to volume_shape[self.axis] * resolution (which only makes sense for a uniform
+Cartesian grid); also either add a short runtime check in get_bloch_phase to
+raise a clear error if a rectilinear grid is in use but realized_grid is None
+(so we don't silently use resolution), referencing get_bloch_phase,
+self._config.realized_grid, and grid.edges(self.axis).
+
+In `@src/fdtdx/objects/boundaries/perfectly_matched_layer.py`:
+- Around line 213-216: The computed variable widths is never used (it’s computed
+then immediately deleted), so either remove the widths computation and the del
+widths line, or actually use widths for the claimed validation/diagnostics:
+e.g., perform a check inside the same method that any widths == 0 raises a clear
+error (or logs a diagnostic) before returning dE, dH, norm; update references in
+this method (the block that currently computes widths and then does del widths)
+and ensure interaction with RectilinearGrid validation remains consistent.
+
+In `@src/fdtdx/objects/detectors/diffractive.py`:
+- Around line 103-119: The function _transverse_centers should return an
+explicit two-tuple and assert plane_dims length instead of using a type: ignore;
+add an assertion like assert len(plane_dims) == 2 (or raise a clear error) near
+the start of _transverse_centers, build centers for each axis as you do, then
+return (centers[0], centers[1]) so the return type is unambiguously
+tuple[jax.Array, jax.Array] and remove the "# type: ignore[return-value]"
+comment; reference symbols: _transverse_centers, plane_dims, centers,
+grid.centers.
+
+In `@src/fdtdx/objects/detectors/mode.py`:
+- Around line 107-109: The `_face_area_weights` method is just a thin wrapper
+around `_cached_face_area_weights`; remove the indirection by deleting the
+`_face_area_weights` method and update all call sites (e.g., where
+`_face_area_weights()` is used) to access `_cached_face_area_weights` directly,
+or alternatively make `_cached_face_area_weights` the public accessor (rename to
+`face_area_weights`) and update references accordingly; ensure you adjust any
+tests or usages (such as the mode-overlap integration call) to the new name so
+there are no lingering `_face_area_weights()` calls.
+- Around line 104-105: The face-area weights are being allocated with self.dtype
+(inherited from PhasorDetector and defaulting to jnp.complex64), which
+needlessly creates a complex array; change the allocation to use a real dtype
+instead (e.g. dtype=jnp.float32 for complex64 or dtype=jnp.float64 for
+complex128). Specifically, replace the jnp.ones(..., dtype=self.dtype) call in
+the method that builds face-area weights (uses
+self._config.require_uniform_grid() and self.grid_shape) with jnp.ones(...,
+dtype=<real dtype>) so the returned array is real-valued (match float32 for
+complex64 or float64 for complex128).
+
+In `@src/fdtdx/objects/sources/tfsf.py`:
+- Around line 67-97: The property names max_vertical_offset_grid and
+max_horizontal_offset_grid are misleading because they return metres on
+non-uniform grids; update these properties to either (a) rename them to
+something like max_vertical_offset_source_units and
+max_horizontal_offset_source_units across the class and all callers (including
+any uses in _get_center) or (b) keep the names but explicitly document the dual
+units in each property docstring and add a clear helper/flag (e.g. property or
+method) that indicates whether the value is in grid indices or metres; ensure
+any code paths that call _get_center or rely on these properties handle the unit
+mode consistently (adjust call sites to convert units when renaming or add
+explicit conversions when keeping names).
+
+In `@tests/simulation/physics/test_nonuniform_grid.py`:
+- Around line 121-126: _measured_k computes phase difference using (np.angle(d2)
+- np.angle(d1)) % (2.0 * np.pi) which can silently alias when separation > λ/2;
+change the computation to use a robust unwrap such as computing the relative
+phase via np.angle(d2 / d1) (or otherwise unwrap into [-π, π)) so sign/aliasing
+is handled, keeping the same use of _phasor(...) for d1/d2 and the separation
+computed from _detector_center_z(obj_container, config, "d2") -
+_detector_center_z(obj_container, config, "d1").
+
+In `@tests/unit/core/test_grid.py`:
+- Around line 180-215: The test uses a very loose absolute tolerance (atol=0.2)
+that can hide small-offset mismatches; update the assertions in
+test_calculate_time_offset_yee_uniform_coordinates_match_scalar_path to tighten
+atol to a stricter value (e.g., atol=1e-3) on both jnp.allclose checks so the
+"metric-equivalent" claim is actually enforced for small offsets when calling
+calculate_time_offset_yee with and without coordinate_edges/center_physical;
+reference the two asserts comparing grid_E vs scalar_E and grid_H vs scalar_H
+and change their atol values accordingly.
+
+In `@tests/unit/objects/detectors/test_poynting_flux.py`:
+- Around line 269-272: The test's final assertion is too weak given the comment:
+replace the loose check on flux growth with a quantitative assertion that
+enforces the 4x relationship between flux_after_step1[1, 0] and
+flux_after_step0[0, 0] (e.g., use jnp.isclose(flux_after_step1[1, 0], 4.0 *
+flux_after_step0[0, 0], rtol=..., atol=...)) while keeping the existing
+finiteness checks; update the assertion in
+tests/unit/objects/detectors/test_poynting_flux.py that references
+flux_after_step0 and flux_after_step1 to use jnp.isclose with a reasonable
+tolerance instead of a simple greater-than comparison.
+
+In `@tests/unit/objects/sources/test_linear_polarization.py`:
+- Around line 357-381: The test
+test_nonuniform_tilted_uniform_source_preserves_constant_profile can divide by
+zero when using applied._E[:, :1, :1, :] as the reference; instead locate a
+guaranteed non-zero reference per batch by finding the first active cell (use
+the computed active mask on applied._E) and divide each active element by
+applied._E at that first-active index, or alternatively assert that
+applied._E[:, :1, :1, :] != 0 before dividing to produce a clearer failure;
+update the normalization logic that builds normalized (and any related
+assertion) to use the first active index from active or add an explicit nonzero
+assertion so the test fails with a clear message rather than producing NaN/Inf.
+```
+🪄 Autofix (Beta)
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Organization UI
+Review profile: CHILL
+Plan: Pro
+Run ID: 93145a05-6cdb-4547-ba46-d15e62069cbc
+📥 Commits
+Reviewing files that changed from the base of the PR and between e04c845 and 8e9b163.
+📒 Files selected for processing (113)
+checks/check_waveguide_modes.py
+docs/source/index.rst
+examples/bloch_band_structure.py
+examples/optimize_ceviche_corner.py
+examples/simulate_gaussian_source.py
+examples/simulate_gaussian_source_anisotropic.py
+examples/simulate_gaussian_source_fully_anisotropic.py
+examples/width_sweep_analysis.py
+src/fdtdx/__init__.py
+src/fdtdx/config.py
+src/fdtdx/conversion/vti.py
+src/fdtdx/core/grid.py
+src/fdtdx/core/physics/curl.py
+src/fdtdx/core/physics/metrics.py
+src/fdtdx/core/physics/modes.py
+src/fdtdx/fdtd/initialization.py
+src/fdtdx/fdtd/update.py
+src/fdtdx/objects/boundaries/bloch.py
+src/fdtdx/objects/boundaries/initialization.py
+src/fdtdx/objects/boundaries/perfectly_matched_layer.py
+src/fdtdx/objects/detectors/detector.py
+src/fdtdx/objects/detectors/diffractive.py
+src/fdtdx/objects/detectors/energy.py
+src/fdtdx/objects/detectors/field.py
+src/fdtdx/objects/detectors/mode.py
+src/fdtdx/objects/detectors/phasor.py
+src/fdtdx/objects/detectors/plotting/plot2d.py
+src/fdtdx/objects/detectors/plotting/video.py
+src/fdtdx/objects/detectors/poynting_flux.py
+src/fdtdx/objects/device/device.py
+src/fdtdx/objects/object.py
+src/fdtdx/objects/sources/linear_polarization.py
+src/fdtdx/objects/sources/mode.py
+src/fdtdx/objects/sources/tfsf.py
+src/fdtdx/objects/static_material/cylinder.py
+src/fdtdx/objects/static_material/polygon.py
+src/fdtdx/objects/static_material/sphere.py
+src/fdtdx/utils/plot_material.py
+src/fdtdx/utils/plot_setup.py
+src/fdtdx/utils/sparams.py
+tests/integration/conversion/test_json.py
+tests/integration/conversion/test_vti.py
+tests/integration/fdtd/test_initialization.py
+tests/integration/fdtd/test_placement.py
+tests/integration/fdtd/test_stop_conditions.py
+tests/integration/objects/test_device.py
+tests/integration/placement/test_constraint_placement.py
+tests/integration/placement/test_infinity_extension_constraint.py
+tests/integration/utils/test_plot_material.py
+tests/integration/utils/test_plot_setup.py
+tests/integration/utils/test_sparams.py
+tests/simulation/fdtd/test_fdtd.py
+tests/simulation/fdtd/test_pulsed_vs_cw.py
+tests/simulation/fdtd/test_time_reversal.py
+tests/simulation/physics/boundaries/test_bloch_oblique.py
+tests/simulation/physics/boundaries/test_bloch_zero_vector.py
+tests/simulation/physics/boundaries/test_mixed_boundaries.py
+tests/simulation/physics/boundaries/test_pec_pmc_symmetry.py
+tests/simulation/physics/boundaries/test_pec_reflection.py
+tests/simulation/physics/boundaries/test_pmc_reflection.py
+tests/simulation/physics/boundaries/test_quarter_domain_symmetry.py
+tests/simulation/physics/sources/test_dipole_green_function.py
+tests/simulation/physics/sources/test_dipole_magnetic.py
+tests/simulation/physics/sources/test_dipole_radiation.py
+tests/simulation/physics/sources/test_gaussian_source.py
+tests/simulation/physics/sources/test_mode_source.py
+tests/simulation/physics/sources/test_plane_source.py
+tests/simulation/physics/sources/test_temporal_profiles.py
+tests/simulation/physics/test_birefringence.py
+tests/simulation/physics/test_fresnel.py
+tests/simulation/physics/test_nonuniform_grid.py
+tests/simulation/physics/test_plane_wave.py
+tests/simulation/physics/test_skin_depth.py
+tests/simulation/physics/test_sparams.py
+tests/unit/conversion/test_vti.py
+tests/unit/core/physics/test_curl.py
+tests/unit/core/physics/test_modes.py
+tests/unit/core/test_grid.py
+tests/unit/fdtd/test_fdtd.py
+tests/unit/fdtd/test_initialization.py
+tests/unit/fdtd/test_stop_conditions.py
+tests/unit/fdtd/test_update.py
+tests/unit/objects/boundaries/test_bloch.py
+tests/unit/objects/boundaries/test_boundary.py
+tests/unit/objects/boundaries/test_pec.py
+tests/unit/objects/boundaries/test_perfectly_matched_layer.py
+tests/unit/objects/boundaries/test_periodic.py
+tests/unit/objects/boundaries/test_pmc.py
+tests/unit/objects/detectors/conftest.py
+tests/unit/objects/detectors/test_detector.py
+tests/unit/objects/detectors/test_diffractive.py
+tests/unit/objects/detectors/test_energy.py
+tests/unit/objects/detectors/test_field.py
+tests/unit/objects/detectors/test_mode.py
+tests/unit/objects/detectors/test_phasor.py
+tests/unit/objects/detectors/test_poynting_flux.py
+tests/unit/objects/device/parameters/test_discrete.py
+tests/unit/objects/device/parameters/test_discretization.py
+tests/unit/objects/device/parameters/test_projection.py
+tests/unit/objects/device/test_device.py
+tests/unit/objects/sources/test_dipole.py
+tests/unit/objects/sources/test_linear_polarization.py
+tests/unit/objects/sources/test_mode.py
+tests/unit/objects/sources/test_source.py
+tests/unit/objects/sources/test_tfsf.py
+tests/unit/objects/static_material/test_cylinder.py
+tests/unit/objects/static_material/test_polygon.py
+tests/unit/objects/static_material/test_sphere.py
+tests/unit/objects/static_material/test_static.py
+tests/unit/objects/test_object.py
+tests/unit/test_config.py
+tests/unit/utils/test_plot_material.py
+tests/unit/utils/test_plot_setup.py
+💤 Files with no reviewable changes (1)
+docs/source/index.rst
+Comment thread
+examples/width_sweep_analysis.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fdtdx/fdtd/initialization.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fdtdx/fdtd/initialization.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fdtdx/objects/boundaries/perfectly_matched_layer.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fdtdx/objects/detectors/diffractive.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fdtdx/objects/detectors/mode.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fdtdx/objects/device/device.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fdtdx/objects/device/device.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/core/grid.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/config.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/config.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/config.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+tests/integration/conversion/test_vti.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/core/physics/modes.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/core/grid.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/core/grid.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/core/grid.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/core/grid.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/fdtd/initialization.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+commented
+May 7, 2026
+Copy link
+Copy Markdown
+Owner
+As a general comment: A lot of the code introduced in this PR has two code paths: one for uniform and one for non-uniform grids. I would like to see only one code path if it does not lead to large performance decreases, because that makes the code much easier to maintain. It is okay if you dont want to fix this now, but in that case please create a seprate issue to track it.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/fdtd/update.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/config.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+commented
+May 7, 2026
+Copy link
+Copy Markdown
+Owner
+As another general comment: usually its best practice to keep jax.Array attributes non-frozen as well as any nested pytreeclass (for example a simulation config inside another class should not be frozen)
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/core/grid.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/objects/detectors/detector.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+commented
+May 7, 2026
+Copy link
+Copy Markdown
+Owner
+As another general comment, it is generally not a good idea to use @cached_property when working with jax. It is better to use a private attribute which is initialized in post-init.
+I am working in the drinx repo on a more convenient way to declare cached values, but will take some time.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/objects/detectors/diffractive.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ymahlau
+reviewed
+May 7, 2026
+View reviewed changes
+Comment thread
+src/fdtdx/objects/detectors/diffractive.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+teevee112
+mentioned this pull request
+May 7, 2026
+Unify uniform/non-uniform grid code paths
+#321
+Closed
+teevee112
+force-pushed
+the
+non_uniform_grid
+branch
+2 times, most recently
+from
+cd8e3a6 to
+dd9fe46
+Compare
+May 8, 2026 01:13
+teevee112
+commented
+May 8, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+TODOs in a follow up PR:
+Bloch phase unification
+Where: src/fdtdx/core/grid.py, calculate_bloch_phase, the if coordinate_edges is None: branch
+Unify the two code paths here — the uniform path (grid-index space) is a special case of the non-uniform path and can be removed once RectilinearGrid is always available at this point.
+Device physical voxels
+Where: src/fdtdx/objects/device/device.py, matrix_voxel_grid_shape property, lines 69–72
+Add proper support for physical-unit design voxels on non-uniform grids. Currently round(grid_shape / single_voxel_grid_shape) assumes uniform cell sizes. Needs a resampling layer or
+snapping to RectilinearGrid cell boundaries.
+_uniform_resample_2d refactor
+Where: src/fdtdx/objects/detectors/diffractive.py, _uniform_resample_2d static method
+Move this into src/fdtdx/core/physics — it's a general utility not specific to this detector.
+ymahlau
+commented
+May 8, 2026
+Copy link
+Copy Markdown
+Owner
+@teevee112 It is a bit difficult for me to keep an overview here of what you changed, what you still intend to change and what you want to refer into a different PR. Could you give me a brief overview and tag me as soon as you think the PR might be ready?
+ymahlau
+mentioned this pull request
+May 8, 2026
+refactor Simulation Volume / Boundary placement and size
+#324
+Open
+teevee112
+and others
+added 5 commits
+May 8, 2026 19:05
+Address PR review: resolution optional, polygon dedup, remove getattr
+…
+f8ef03c
+```
+- Make resolution optional in compute_mode (unused when transverse_coords is given)
+- Refactor polygon_to_mask to call polygon_to_mask_at_points instead of duplicating logic
+- Remove legacy getattr(config, "grid") check in update.py, use config.has_nonuniform_grid
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+fix tests
+216b64a
+address comments
+d759a52
+Gate physical-unit voxels on non-uniform grids behind NotImplementedE…
+…
+7b9a533
+```
+…rror
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Fix float32 precision loss in uniform RectilinearGrid time step and g…
+…
+a936fc9
+```
+…ate physical-unit voxels
+
+- RectilinearGrid.cfl_time_step now uses _uniform_spacing (rounded to 14
+  decimal places) instead of float32 _min_spacings for uniform grids,
+  preserving bit-exact agreement with UniformGrid.time_step_duration
+- Gate partial_voxel_real_shape on non-uniform grids behind NotImplementedError;
+  reorder checks so the more specific "cannot mix" ValueError fires first
+- Port upstream test_custom_time_signal_profile.py: replace resolution= with
+  grid=UniformGrid(spacing=...)
+- Remove unvalidated physical-design-grid device tests (to be re-added with
+  the follow-up PR that properly implements the feature)
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+teevee112
+force-pushed
+the
+non_uniform_grid
+branch
+from
+13f0415 to
+a936fc9
+Compare
+May 9, 2026 02:46
+coderabbitai
+Bot
+reviewed
+May 9, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 3
+🧹 Nitpick comments (2)
+src/fdtdx/objects/detectors/plotting/plot2d.py (1)
+57-155: Please keep dual rendering-path consolidation tracked.
+This file still has separate uniform (imshow) and rectilinear (pcolormesh) branches; if both paths remain intentionally, please confirm/link the tracking issue for eventual consolidation to prevent behavior drift.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/fdtdx/objects/detectors/plotting/plot2d.py` around lines 57 - 155, The
+plot2d.py code currently maintains two rendering branches (imshow vs pcolormesh)
+for ax1/ax2/ax3 using variables cax1/cax2/cax3 and coordinate_edges_um; either
+consolidate to a single rendering path (choose and implement only imshow or only
+pcolormesh and ensure extent/extent2/extent3 and res_x/res_y/res_z handling
+matches) or, if both must remain, add a clear TODO comment with the tracking
+issue ID and a short justification above the branching logic (near the
+coordinate_edges_um checks) so the dual-path is tracked and won't drift—update
+tests/usage accordingly to ensure identical visual behavior between branches.
+```
+tests/unit/objects/device/test_device.py (1)
+165-182: ⚡ Quick win
+Add a dedicated test for the non-uniform physical-only voxel path.
+You currently validate the mixed-spec rejection. Please also lock in the documented deferred behavior where physical-unit voxel specs on stretched grids raise NotImplementedError with the actionable message.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@tests/unit/objects/device/test_device.py` around lines 165 - 182, Add a new
+unit test that asserts the non-uniform physical-only voxel path raises
+NotImplementedError with the documented actionable message: create a stretched
+RectilinearGrid (like the existing test), a SimulationConfig using that grid,
+and a _ConcreteDevice whose partial_voxel_grid_shape is (None, None, None) and
+partial_voxel_real_shape is non-uniform (e.g., (1.0, 2.5, 9.0)); then call
+_place_device(device, config, key, ((0,2),(0,2),(0,2))) inside
+pytest.raises(NotImplementedError, match="physical-unit voxel specs on stretched
+grids") to lock in the deferred behavior. Reference RectilinearGrid,
+SimulationConfig, _ConcreteDevice, and _place_device to locate where to add the
+test.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@src/fdtdx/objects/detectors/detector.py`:
+- Around line 214-221: The fallback path that sets _cached_cell_volume_weights
+uses self.dtype (which may be complex) causing complex allocations; change the
+uniform-grid branch in Detector._cached_cell_volume_weights creation to cast or
+create the weights with a real dtype (e.g., jnp.finfo(self.dtype).dtype or
+self.real_dtype) so grid.cell_volume(self.grid_slice_tuple) and the fallback
+both produce real-valued arrays; update the creation call that uses spacing**3
+and jnp.ones(self.grid_shape, dtype=...) so the
+aset("_cached_cell_volume_weights", ...) stores a real array (leave aset,
+grid.cell_volume, uniform_spacing, grid_shape, dtype, and
+_volume_weighted_spatial_mean unchanged otherwise).
+
+In `@src/fdtdx/objects/detectors/mode.py`:
+- Around line 90-96: The fallback path that constructs uniform face-area weights
+is hardcoding jnp.float32 which can downcast float64 simulations; update the
+dtype there to use self._config.dtype so the weights match the simulation
+precision (keep the same behavior as the resolved-grid branch and the pattern
+used elsewhere in this class when caching _cached_face_area_weights); adjust the
+creation of weights (the branch that uses uniform_spacing() and jnp.ones(...) *
+spacing * spacing) to use self._config.dtype and then store via
+self.aset("_cached_face_area_weights", weights, create_new_ok=True).
+
+In `@src/fdtdx/objects/detectors/plotting/plot2d.py`:
+- Around line 12-36: Add explicit validation before the rectilinear (pcolormesh)
+plotting path: when coordinate_edges_um is provided (the tuple
+coordinate_edges_um), check each edge-array length matches the corresponding
+slice dimension (each edge array must have length equal to the number of cells +
+1 for that axis of the slice being plotted); if any mismatch is found raise a
+ValueError with a clear message referencing which slice (xy_slice, xz_slice, or
+yz_slice) and which edge-array failed. Perform these checks in the function that
+accepts coordinate_edges_um and calls pcolormesh (look for the plotting branch
+that uses pcolormesh), so you validate before calling pcolormesh and avoid its
+generic error. Ensure the check handles None slices (skip validation for slices
+not provided) and checks all three relevant edge arrays for the corresponding
+slices.
+
+---
+
+Nitpick comments:
+In `@src/fdtdx/objects/detectors/plotting/plot2d.py`:
+- Around line 57-155: The plot2d.py code currently maintains two rendering
+branches (imshow vs pcolormesh) for ax1/ax2/ax3 using variables cax1/cax2/cax3
+and coordinate_edges_um; either consolidate to a single rendering path (choose
+and implement only imshow or only pcolormesh and ensure extent/extent2/extent3
+and res_x/res_y/res_z handling matches) or, if both must remain, add a clear
+TODO comment with the tracking issue ID and a short justification above the
+branching logic (near the coordinate_edges_um checks) so the dual-path is
+tracked and won't drift—update tests/usage accordingly to ensure identical
+visual behavior between branches.
+
+In `@tests/unit/objects/device/test_device.py`:
+- Around line 165-182: Add a new unit test that asserts the non-uniform
+physical-only voxel path raises NotImplementedError with the documented
+actionable message: create a stretched RectilinearGrid (like the existing test),
+a SimulationConfig using that grid, and a _ConcreteDevice whose
+partial_voxel_grid_shape is (None, None, None) and partial_voxel_real_shape is
+non-uniform (e.g., (1.0, 2.5, 9.0)); then call _place_device(device, config,
+key, ((0,2),(0,2),(0,2))) inside pytest.raises(NotImplementedError,
+match="physical-unit voxel specs on stretched grids") to lock in the deferred
+behavior. Reference RectilinearGrid, SimulationConfig, _ConcreteDevice, and
+_place_device to locate where to add the test.
+```
+🪄 Autofix (Beta)
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Organization UI
+Review profile: CHILL
+Plan: Pro
+Run ID: c66e26a3-4745-4817-9979-669236ee2adb
+📥 Commits
+Reviewing files that changed from the base of the PR and between 8e9b163 and a936fc9.
+📒 Files selected for processing (114)
+checks/check_waveguide_modes.py
+docs/source/index.rst
+examples/bloch_band_structure.py
+examples/optimize_ceviche_corner.py
+examples/simulate_gaussian_source.py
+examples/simulate_gaussian_source_anisotropic.py
+examples/simulate_gaussian_source_fully_anisotropic.py
+examples/width_sweep_analysis.py
+src/fdtdx/__init__.py
+src/fdtdx/config.py
+src/fdtdx/conversion/vti.py
+src/fdtdx/core/grid.py
+src/fdtdx/core/physics/curl.py
+src/fdtdx/core/physics/metrics.py
+src/fdtdx/core/physics/modes.py
+src/fdtdx/fdtd/initialization.py
+src/fdtdx/fdtd/update.py
+src/fdtdx/objects/boundaries/bloch.py
+src/fdtdx/objects/boundaries/initialization.py
+src/fdtdx/objects/boundaries/perfectly_matched_layer.py
+src/fdtdx/objects/detectors/detector.py
+src/fdtdx/objects/detectors/diffractive.py
+src/fdtdx/objects/detectors/energy.py
+src/fdtdx/objects/detectors/field.py
+src/fdtdx/objects/detectors/mode.py
+src/fdtdx/objects/detectors/phasor.py
+src/fdtdx/objects/detectors/plotting/plot2d.py
+src/fdtdx/objects/detectors/plotting/video.py
+src/fdtdx/objects/detectors/poynting_flux.py
+src/fdtdx/objects/device/device.py
+src/fdtdx/objects/object.py
+src/fdtdx/objects/sources/linear_polarization.py
+src/fdtdx/objects/sources/mode.py
+src/fdtdx/objects/sources/tfsf.py
+src/fdtdx/objects/static_material/cylinder.py
+src/fdtdx/objects/static_material/polygon.py
+src/fdtdx/objects/static_material/sphere.py
+src/fdtdx/utils/plot_material.py
+src/fdtdx/utils/plot_setup.py
+src/fdtdx/utils/sparams.py
+tests/integration/conversion/test_json.py
+tests/integration/conversion/test_vti.py
+tests/integration/fdtd/test_custom_time_signal_profile.py
+tests/integration/fdtd/test_initialization.py
+tests/integration/fdtd/test_placement.py
+tests/integration/fdtd/test_stop_conditions.py
+tests/integration/objects/test_device.py
+tests/integration/placement/test_constraint_placement.py
+tests/integration/placement/test_infinity_extension_constraint.py
+tests/integration/utils/test_plot_material.py
+tests/integration/utils/test_plot_setup.py
+tests/integration/utils/test_sparams.py
+tests/simulation/fdtd/test_fdtd.py
+tests/simulation/fdtd/test_pulsed_vs_cw.py
+tests/simulation/fdtd/test_time_reversal.py
+tests/simulation/physics/boundaries/test_bloch_oblique.py
+tests/simulation/physics/boundaries/test_bloch_zero_vector.py
+tests/simulation/physics/boundaries/test_mixed_boundaries.py
+tests/simulation/physics/boundaries/test_pec_pmc_symmetry.py
+tests/simulation/physics/boundaries/test_pec_reflection.py
+tests/simulation/physics/boundaries/test_pmc_reflection.py
+tests/simulation/physics/boundaries/test_quarter_domain_symmetry.py
+tests/simulation/physics/sources/test_dipole_green_function.py
+tests/simulation/physics/sources/test_dipole_magnetic.py
+tests/simulation/physics/sources/test_dipole_radiation.py
+tests/simulation/physics/sources/test_gaussian_source.py
+tests/simulation/physics/sources/test_mode_source.py
+tests/simulation/physics/sources/test_plane_source.py
+tests/simulation/physics/sources/test_temporal_profiles.py
+tests/simulation/physics/test_birefringence.py
+tests/simulation/physics/test_fresnel.py
+tests/simulation/physics/test_nonuniform_grid.py
+tests/simulation/physics/test_plane_wave.py
+tests/simulation/physics/test_skin_depth.py
+tests/simulation/physics/test_sparams.py
+tests/unit/conversion/test_vti.py
+tests/unit/core/physics/test_curl.py
+tests/unit/core/physics/test_modes.py
+tests/unit/core/test_grid.py
+tests/unit/fdtd/test_fdtd.py
+tests/unit/fdtd/test_initialization.py
+tests/unit/fdtd/test_stop_conditions.py
+tests/unit/fdtd/test_update.py
+tests/unit/objects/boundaries/test_bloch.py
+tests/unit/objects/boundaries/test_boundary.py
+tests/unit/objects/boundaries/test_pec.py
+tests/unit/objects/boundaries/test_perfectly_matched_layer.py
+tests/unit/objects/boundaries/test_periodic.py
+tests/unit/objects/boundaries/test_pmc.py
+tests/unit/objects/detectors/conftest.py
+tests/unit/objects/detectors/test_detector.py
+tests/unit/objects/detectors/test_diffractive.py
+tests/unit/objects/detectors/test_energy.py
+tests/unit/objects/detectors/test_field.py
+tests/unit/objects/detectors/test_mode.py
+tests/unit/objects/detectors/test_phasor.py
+tests/unit/objects/detectors/test_poynting_flux.py
+tests/unit/objects/device/parameters/test_discrete.py
+tests/unit/objects/device/parameters/test_discretization.py
+tests/unit/objects/device/parameters/test_projection.py
+tests/unit/objects/device/test_device.py
+tests/unit/objects/sources/test_dipole.py
+tests/unit/objects/sources/test_linear_polarization.py
+tests/unit/objects/sources/test_mode.py
+tests/unit/objects/sources/test_source.py
+tests/unit/objects/sources/test_tfsf.py
+tests/unit/objects/static_material/test_cylinder.py
+tests/unit/objects/static_material/test_polygon.py
+tests/unit/objects/static_material/test_sphere.py
+tests/unit/objects/static_material/test_static.py
+tests/unit/objects/test_object.py
+tests/unit/test_config.py
+tests/unit/utils/test_plot_material.py
+tests/unit/utils/test_plot_setup.py
+💤 Files with no reviewable changes (1)
+docs/source/index.rst
+✅ Files skipped from review due to trivial changes (6)
+tests/simulation/physics/test_plane_wave.py
+tests/integration/utils/test_sparams.py
+src/fdtdx/objects/boundaries/initialization.py
+tests/unit/utils/test_plot_material.py
+tests/simulation/fdtd/test_pulsed_vs_cw.py
+tests/unit/objects/device/parameters/test_discretization.py
+🚧 Files skipped from review as they are similar to previous changes (81)
+tests/simulation/physics/boundaries/test_pmc_reflection.py
+tests/simulation/physics/test_fresnel.py
+checks/check_waveguide_modes.py
+src/fdtdx/objects/boundaries/bloch.py
+tests/integration/placement/test_infinity_extension_constraint.py
+examples/simulate_gaussian_source_anisotropic.py
+tests/simulation/physics/boundaries/test_bloch_oblique.py
+tests/integration/fdtd/test_placement.py
+tests/unit/objects/sources/test_tfsf.py
+examples/simulate_gaussian_source_fully_anisotropic.py
+tests/unit/objects/boundaries/test_pec.py
+examples/simulate_gaussian_source.py
+tests/simulation/physics/boundaries/test_quarter_domain_symmetry.py
+tests/simulation/fdtd/test_fdtd.py
+tests/unit/objects/detectors/test_poynting_flux.py
+tests/unit/utils/test_plot_setup.py
+src/fdtdx/fdtd/update.py
+tests/simulation/physics/test_skin_depth.py
+tests/integration/objects/test_device.py
+src/fdtdx/utils/sparams.py
+examples/bloch_band_structure.py
+tests/simulation/physics/sources/test_gaussian_source.py
+tests/unit/objects/static_material/test_cylinder.py
+tests/unit/objects/device/parameters/test_discrete.py
+tests/unit/fdtd/test_stop_conditions.py
+tests/simulation/physics/test_birefringence.py
+tests/simulation/physics/boundaries/test_pec_pmc_symmetry.py
+src/fdtdx/init.py
+tests/unit/objects/sources/test_source.py
+tests/unit/objects/boundaries/test_boundary.py
+tests/integration/fdtd/test_stop_conditions.py
+src/fdtdx/objects/object.py
+tests/unit/objects/detectors/test_phasor.py
+tests/simulation/physics/sources/test_dipole_radiation.py
+tests/unit/objects/boundaries/test_pmc.py
+tests/simulation/physics/boundaries/test_pec_reflection.py
+src/fdtdx/objects/static_material/polygon.py
+tests/unit/objects/detectors/test_diffractive.py
+src/fdtdx/objects/detectors/plotting/video.py
+tests/unit/core/physics/test_modes.py
+tests/integration/fdtd/test_initialization.py
+tests/unit/objects/detectors/conftest.py
+tests/simulation/physics/boundaries/test_bloch_zero_vector.py
+tests/unit/objects/detectors/test_field.py
+tests/unit/objects/boundaries/test_perfectly_matched_layer.py
+src/fdtdx/objects/detectors/field.py
+tests/unit/fdtd/test_fdtd.py
+tests/integration/placement/test_constraint_placement.py
+tests/unit/objects/sources/test_dipole.py
+src/fdtdx/objects/detectors/energy.py
+tests/simulation/physics/sources/test_dipole_magnetic.py
+tests/simulation/physics/sources/test_dipole_green_function.py
+src/fdtdx/conversion/vti.py
+src/fdtdx/objects/boundaries/perfectly_matched_layer.py
+src/fdtdx/core/grid.py
+tests/unit/objects/static_material/test_static.py
+tests/unit/objects/static_material/test_sphere.py
+tests/integration/conversion/test_json.py
+src/fdtdx/objects/static_material/cylinder.py
+tests/simulation/fdtd/test_time_reversal.py
+tests/unit/objects/static_material/test_polygon.py
+tests/simulation/physics/boundaries/test_mixed_boundaries.py
+src/fdtdx/objects/static_material/sphere.py
+tests/unit/objects/detectors/test_energy.py
+tests/integration/utils/test_plot_setup.py
+src/fdtdx/utils/plot_setup.py
+src/fdtdx/core/physics/metrics.py
+tests/unit/objects/detectors/test_detector.py
+examples/optimize_ceviche_corner.py
+src/fdtdx/core/physics/curl.py
+src/fdtdx/objects/detectors/phasor.py
+src/fdtdx/objects/sources/linear_polarization.py
+src/fdtdx/objects/sources/tfsf.py
+src/fdtdx/core/physics/modes.py
+src/fdtdx/objects/sources/mode.py
+src/fdtdx/utils/plot_material.py
+tests/simulation/physics/test_nonuniform_grid.py
+tests/simulation/physics/sources/test_plane_source.py
+tests/unit/objects/boundaries/test_periodic.py
+tests/unit/objects/sources/test_mode.py
+src/fdtdx/fdtd/initialization.py
+Comment thread
+src/fdtdx/objects/detectors/detector.py
+Comment on lines
++214
+to
++221
+# compute cell volume weights now that config and grid_slice are available
+grid = self._config.resolved_grid
+if grid is not None:
+weights = grid.cell_volume(self.grid_slice_tuple)
+else:
+spacing = self._config.uniform_spacing()
+weights = jnp.ones(self.grid_shape, dtype=self.dtype) * spacing**3
+self = self.aset("_cached_cell_volume_weights", weights, create_new_ok=True)
+coderabbitai
+Bot
+May 9, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+⚠️ Potential issue | 🟡 Minor | ⚡ Quick win
+🧩 Analysis chain
+🏁 Script executed:
+```
+#!/bin/bash
+# Inspect detector subclasses with complex dtypes and the cached-volume-weight allocation.
+rg -n -C2 'class PhasorDetector|dtype: jnp\.dtype = .*complex' src/fdtdx/objects/detectors
+rg -n -C3 'weights = jnp\.ones\(self\.grid_shape, dtype=self\.dtype\)|_cached_cell_volume_weights' src/fdtdx/objects/detectors/detector.py
+```
+Repository: ymahlau/fdtdx
+Length of output: 1835
+🏁 Script executed:
+```
+#!/bin/bash
+# Find the type of self._config and check if it has a dtype attribute
+rg -n 'class Detector|_config:|self\._config' src/fdtdx/objects/detectors/detector.py | head -30
+```
+Repository: ymahlau/fdtdx
+Length of output: 1016
+🏁 Script executed:
+```
+#!/bin/bash
+# Check the detector.py file structure to understand _config
+head -100 src/fdtdx/objects/detectors/detector.py | cat -n
+```
+Repository: ymahlau/fdtdx
+Length of output: 4919
+🏁 Script executed:
+```
+#!/bin/bash
+# Find the config class/type definition
+fd -e py -type f src/fdtdx | xargs rg -l 'class.*Config|SimulationConfig' | head -5
+```
+Repository: ymahlau/fdtdx
+Length of output: 404
+🏁 Script executed:
+```
+#!/bin/bash
+# Find SimulationConfig class and check for dtype attribute
+rg -n 'class SimulationConfig|dtype' src/fdtdx/config.py | head -40
+```
+Repository: ymahlau/fdtdx
+Length of output: 251
+🏁 Script executed:
+```
+#!/bin/bash
+# Check if SimulationConfig has a dtype attribute, and understand the relationship
+grep -n 'dtype' src/fdtdx/config.py | head -20
+```
+Repository: ymahlau/fdtdx
+Length of output: 213
+🏁 Script executed:
+```
+#!/bin/bash
+# Look for SimulationConfig definition and relevant attributes
+head -150 src/fdtdx/config.py | cat -n
+```
+Repository: ymahlau/fdtdx
+Length of output: 7278
+🏁 Script executed:
+```
+#!/bin/bash
+# Check the full _volume_weighted_spatial_mean implementation
+sed -n '88,110p' src/fdtdx/objects/detectors/detector.py | cat -n
+```
+Repository: ymahlau/fdtdx
+Length of output: 1358
+🏁 Script executed:
+```
+#!/bin/bash
+# Check if there are type hints on the _cell_volume_weights or weights parameters
+rg -A 5 'def _cell_volume_weights|def _volume_weighted_spatial_mean' src/fdtdx/objects/detectors/detector.py
+```
+Repository: ymahlau/fdtdx
+Length of output: 578
+🏁 Script executed:
+```
+#!/bin/bash
+# Verify Detector inherits from SimulationObject and has access to _config
+grep -n 'SimulationObject\|_config' src/fdtdx/objects/object.py | head -20
+```
+Repository: ymahlau/fdtdx
+Length of output: 1199
+Keep cached cell-volume weights real-valued.
+The uniform-grid fallback allocates _cached_cell_volume_weights with self.dtype, which can be complex for detector subclasses like DiffractiveDetector (which uses jnp.complex64). Cell volumes are purely geometric and should always be real-valued. Using the simulation's real dtype prevents unnecessary complex array allocation and avoids upcasting in _volume_weighted_spatial_mean().
+Suggested fix
+```
+         else:
+             spacing = self._config.uniform_spacing()
+-            weights = jnp.ones(self.grid_shape, dtype=self.dtype) * spacing**3
++            weights = jnp.ones(self.grid_shape, dtype=self._config.dtype) * spacing**3
+         self = self.aset("_cached_cell_volume_weights", weights, create_new_ok=True)
+```
+📝 Committable suggestion
+‼️ IMPORTANT
+Carefully review the code before committing. Ensure that it accurately replaces the highlighted code, contains no missing lines, and has no issues with indentation. Thoroughly test & benchmark the code to ensure it meets the requirements.
+Suggested change
+# compute cell volume weights now that config and grid_slice are available
+grid = self._config.resolved_grid
+if grid is not None:
+weights = grid.cell_volume(self.grid_slice_tuple)
+else:
+spacing = self._config.uniform_spacing()
+weights = jnp.ones(self.grid_shape, dtype=self.dtype) * spacing**3
+self = self.aset("_cached_cell_volume_weights", weights, create_new_ok=True)
+# compute cell volume weights now that config and grid_slice are available
+grid = self._config.resolved_grid
+if grid is not None:
+weights = grid.cell_volume(self.grid_slice_tuple)
+else:
+spacing = self._config.uniform_spacing()
+weights = jnp.ones(self.grid_shape, dtype=self._config.dtype) * spacing**3
+self = self.aset("_cached_cell_volume_weights", weights, create_new_ok=True)
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/fdtdx/objects/detectors/detector.py` around lines 214 - 221, The fallback
+path that sets _cached_cell_volume_weights uses self.dtype (which may be
+complex) causing complex allocations; change the uniform-grid branch in
+Detector._cached_cell_volume_weights creation to cast or create the weights with
+a real dtype (e.g., jnp.finfo(self.dtype).dtype or self.real_dtype) so
+grid.cell_volume(self.grid_slice_tuple) and the fallback both produce
+real-valued arrays; update the creation call that uses spacing**3 and
+jnp.ones(self.grid_shape, dtype=...) so the aset("_cached_cell_volume_weights",
+...) stores a real array (leave aset, grid.cell_volume, uniform_spacing,
+grid_shape, dtype, and _volume_weighted_spatial_mean unchanged otherwise).
+```
+Comment thread
+src/fdtdx/objects/detectors/mode.py
+Comment on lines
++90
+to
++96
+grid = self._config.resolved_grid
+if grid is not None:
+weights = grid.face_area(axis=self.propagation_axis, slice_tuple=self.grid_slice_tuple)
+else:
+spacing = self._config.uniform_spacing()
+weights = jnp.ones(self.grid_shape, dtype=jnp.float32) * spacing * spacing
+self = self.aset("_cached_face_area_weights", weights, create_new_ok=True)
+coderabbitai
+Bot
+May 9, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+⚠️ Potential issue | 🟡 Minor | ⚡ Quick win
+🧩 Analysis chain
+🏁 Script executed:
+```
+#!/bin/bash
+# Verify that float64 simulations are supported and inspect the hardcoded face-area dtype.
+rg -n -C2 'dtype=jnp\.float64|SimulationConfig\(.*dtype=' tests src
+rg -n -C3 'weights = jnp\.ones\(self\.grid_shape, dtype=jnp\.float32\)' src/fdtdx/objects/detectors/mode.py
+```
+Repository: ymahlau/fdtdx
+Length of output: 3965
+🏁 Script executed:
+```
+#!/bin/bash
+# Find and inspect SimulationConfig class to confirm dtype attribute
+rg -n -A20 'class SimulationConfig' src/fdtdx --type py | head -50
+```
+Repository: ymahlau/fdtdx
+Length of output: 1407
+🏁 Script executed:
+```
+#!/bin/bash
+# Inspect ModeDetector class and _config attribute
+rg -n -B5 -A15 'class.*ModeDetector|self\._config.*=' src/fdtdx/objects/detectors/mode.py --type py | head -80
+```
+Repository: ymahlau/fdtdx
+Length of output: 39
+🏁 Script executed:
+```
+#!/bin/bash
+# Check if dtype is used elsewhere in mode.py
+rg -n 'self\._config\.dtype|_config\.dtype' src/fdtdx/objects/detectors/mode.py
+```
+Repository: ymahlau/fdtdx
+Length of output: 99
+🏁 Script executed:
+```
+#!/bin/bash
+# Get full SimulationConfig class with dtype field
+rg -n -A60 'class SimulationConfig' src/fdtdx/config.py | grep -E '(dtype|class SimulationConfig)'
+```
+Repository: ymahlau/fdtdx
+Length of output: 251
+🏁 Script executed:
+```
+#!/bin/bash
+# Context around line 156 in mode.py
+sed -n '150,165p' src/fdtdx/objects/detectors/mode.py
+```
+Repository: ymahlau/fdtdx
+Length of output: 754
+🏁 Script executed:
+```
+#!/bin/bash
+# Run type checking on the mode.py file
+cd /tmp && uvx ty check --error-on-warning src/fdtdx/objects/detectors/mode.py 2>&1 || true
+```
+Repository: ymahlau/fdtdx
+Length of output: 99
+🏁 Script executed:
+```
+#!/bin/bash
+# Try type checking with python and ty directly
+pip install -q 'py-rsc>=0.1.0' 2>/dev/null
+python <<'EOF'
+import subprocess
+result = subprocess.run(
+    ['python', '-m', 'py_rsc.cli', 'check', '--error-on-warning', 'src/fdtdx/objects/detectors/mode.py'],
+    cwd='.',
+    capture_output=True,
+    text=True
+)
+print(result.stdout)
+print(result.stderr)
+print(f"Exit code: {result.returncode}")
+EOF
+```
+Repository: ymahlau/fdtdx
+Length of output: 195
+🏁 Script executed:
+```
+#!/bin/bash
+# Verify the actual current state: line 95 should have jnp.float32, confirm the fix location
+sed -n '88,100p' src/fdtdx/objects/detectors/mode.py
+```
+Repository: ymahlau/fdtdx
+Length of output: 736
+Match uniform face-area weights to the simulation precision.
+The fallback at line 95 hardcodes jnp.float32 for geometric weights. In float64 simulations, this silently downcasts the overlap integral inputs even though the resolved-grid branch preserves full precision. Use self._config.dtype instead to maintain consistency with the simulation configuration and the pattern already used elsewhere in the class (line 156).
+Suggested fix
+```
+         else:
+             spacing = self._config.uniform_spacing()
+-            weights = jnp.ones(self.grid_shape, dtype=jnp.float32) * spacing * spacing
++            weights = jnp.ones(self.grid_shape, dtype=self._config.dtype) * spacing * spacing
+         self = self.aset("_cached_face_area_weights", weights, create_new_ok=True)
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/fdtdx/objects/detectors/mode.py` around lines 90 - 96, The fallback path
+that constructs uniform face-area weights is hardcoding jnp.float32 which can
+downcast float64 simulations; update the dtype there to use self._config.dtype
+so the weights match the simulation precision (keep the same behavior as the
+resolved-grid branch and the pattern used elsewhere in this class when caching
+_cached_face_area_weights); adjust the creation of weights (the branch that uses
+uniform_spacing() and jnp.ones(...) * spacing * spacing) to use
+self._config.dtype and then store via self.aset("_cached_face_area_weights",
+weights, create_new_ok=True).
+```
+Comment thread
+src/fdtdx/objects/detectors/plotting/plot2d.py
+Comment on lines
++12
+to
++36
+coordinate_edges_um: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+minvals: tuple[float | None, float | None, float | None] = (None, None, None),
+maxvals: tuple[float | None, float | None, float | None] = (None, None, None),
+plot_interpolation: str = "gaussian",
+plot_dpi: int | None = None,
+) -> Figure:
+"""Plot orthogonal slices using either uniform spacing or rectilinear edges.
+Args:
+xy_slice: Values on an ``(x, y)`` slice.
+xz_slice: Values on an ``(x, z)`` slice.
+yz_slice: Values on a ``(y, z)`` slice.
+resolutions: Legacy uniform ``(dx, dy, dz)`` spacing in metres.
+coordinate_edges_um: Optional rectilinear edge coordinates in micrometres
+for the plotted detector slice. When supplied, plots use
+``pcolormesh`` so non-uniform cell widths are represented by their
+physical edge positions instead of one scalar spacing.
+minvals: Per-slice color minima.
+maxvals: Per-slice color maxima.
+plot_interpolation: Interpolation used by the legacy uniform imshow path.
+plot_dpi: Figure DPI.
+Returns:
+Matplotlib figure with XY, XZ, and YZ panels.
+"""
+coderabbitai
+Bot
+May 9, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+⚠️ Potential issue | 🟡 Minor | ⚡ Quick win
+Validate rectilinear edge lengths before plotting.
+pcolormesh will fail with a generic error if edge-array lengths do not match slice shapes; adding an explicit check here will fail fast with a clear message.
+Proposed guardrails
+```
+ def plot_2d_from_slices(
+@@
+ ) -> Figure:
+@@
+     slices = [xy_slice, xz_slice, yz_slice]
++    if coordinate_edges_um is not None:
++        x_edges, y_edges, z_edges = coordinate_edges_um
++
++        expected_lengths = {
++            "x_edges": xy_slice.shape[0] + 1,
++            "y_edges": xy_slice.shape[1] + 1,
++            "z_edges": xz_slice.shape[1] + 1,
++        }
++        actual_lengths = {
++            "x_edges": int(x_edges.shape[0]),
++            "y_edges": int(y_edges.shape[0]),
++            "z_edges": int(z_edges.shape[0]),
++        }
++        for name, expected in expected_lengths.items():
++            actual = actual_lengths[name]
++            if actual != expected:
++                raise ValueError(f"{name} length must be {expected} for provided slices, got {actual}.")
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/fdtdx/objects/detectors/plotting/plot2d.py` around lines 12 - 36, Add
+explicit validation before the rectilinear (pcolormesh) plotting path: when
+coordinate_edges_um is provided (the tuple coordinate_edges_um), check each
+edge-array length matches the corresponding slice dimension (each edge array
+must have length equal to the number of cells + 1 for that axis of the slice
+being plotted); if any mismatch is found raise a ValueError with a clear message
+referencing which slice (xy_slice, xz_slice, or yz_slice) and which edge-array
+failed. Perform these checks in the function that accepts coordinate_edges_um
+and calls pcolormesh (look for the plotting branch that uses pcolormesh), so you
+validate before calling pcolormesh and avoid its generic error. Ensure the check
+handles None slices (skip validation for slices not provided) and checks all
+three relevant edge arrays for the corresponding slices.
+```
+teevee112
+requested a review
+from ymahlau
+May 9, 2026 17:21
+teevee112
+commented
+May 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+All review comments addressed. Summary of changes made in response to feedback:
+Renamed require_uniform_grid → rectilinear_grid and realized_grid → resolved_grid; updated all call sites and docstrings
+Added docstrings to all user-facing attributes on new classes in grid.py and config.py
+Added VTI export test cases for non-uniform grids in tests/integration/conversion/test_vti.py
+Fixed VTI export: origin now uses actual grid coordinates instead of hardcoded "0 0 0"
+Fixed frozen fields: JAX array attributes and nested pytrees now use field() instead of frozen_field()
+Replaced @cached_property with private attributes initialized in post_init
+Fixed stale comment in test_stop_conditions.py (resolution= → grid=UniformGrid(...))
+Fixed PoyntingFluxDetector crash when propagation axis is ambiguous
+Unified Bloch phase code paths: single physical-space path in calculate_time_offset_yee
+Moved resample_to_uniform_2d from DiffractiveDetector into src/fdtdx/core/physics/metrics.py as a general utility
+Physical-unit design voxels (partial_voxel_real_shape) on non-uniform grids now raise NotImplementedError with an actionable message; deferred to a follow-up PR
+Deferred task:
+#322
+ymahlau
+commented
+May 11, 2026
+Copy link
+Copy Markdown
+Owner
+Again, thanks for the implementation!
+Hide details
+View details
+ymahlau
+merged commit 9ee0ded
+into
+ymahlau:main
+May 11, 2026
+5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced May 11, 2026
+Revert "Add rectilinear grid support with one solver-facing grid path"
+#328
+Closed
+apply_params currently not working with mode source / detector
+#329
+Closed
+Revert "Add rectilinear grid support with one solver-facing grid path"
+#339
+Merged
+ymahlau
+added a commit
+that referenced
+this pull request
+May 12, 2026
+Revert "Add rectilinear grid support with one solver-facing grid path (…
+…
+8568bc8
+```
+…#312)" (#339)
+
+This reverts commit 9ee0ded.
+```
+teevee112
+added a commit
+to teevee112/fdtdx
+that referenced
+this pull request
+May 16, 2026
+Reapply "Add rectilinear grid support with one solver-facing grid path (
+…
+5dcfd2e
+```
+ymahlau#312)" (ymahlau#339)
+
+This reverts commit 8568bc8.
+```
+teevee112
+added a commit
+to teevee112/fdtdx
+that referenced
+this pull request
+May 16, 2026
+Reapply "Add rectilinear grid support with one solver-facing grid path (
+…
+693395a
+```
+ymahlau#312)" (ymahlau#339)
+
+This reverts commit 8568bc8.
+```
+teevee112
+mentioned this pull request
+May 16, 2026
+Re-apply rectilinear grid support (#312) with JAX-native edge coordinates and test fixes
+#344
+Merged
+teevee112
+added a commit
+to teevee112/fdtdx
+that referenced
+this pull request
+Jun 4, 2026
+Reapply "Add rectilinear grid support with one solver-facing grid path (
+…
+bed937b
+```
+ymahlau#312)" (ymahlau#339)
+
+This reverts commit 8568bc8.
+```
+ymahlau
+pushed a commit
+that referenced
+this pull request
+Jun 4, 2026
+Re-apply rectilinear grid support (#312) with JAX-native edge coordin…
+…
+54b4ef0
+```
+…ates and test fixes (#344)
+
+* Reapply "Add rectilinear grid support with one solver-facing grid path (#312)" (#339)
+
+This reverts commit 8568bc8.
+
+* keep grid edges as JAX arrays; convert to numpy only inside tidy3d callback
+
+Grid edge arrays are dynamic JAX leaves (field(), not frozen_private_field()),
+so under jax.jit they become abstract tracers.  The original non-uniform grid
+PR passed them through np.asarray() outside the jax.pure_callback that wraps
+the tidy3d mode solver, which would raise TracerArrayConversionError in any
+jitted inverse-design sweep that varies the grid.
+
+Fix: compute c0_um / c1_um in micrometres using jnp ops (fully traceable),
+pass them as explicit jax.pure_callback arguments so JAX materialises them
+to concrete numpy arrays before calling mode_helper, and do np.asarray()
+inside the callback.  Use jnp.diff instead of np.diff for the normalisation
+area weights, which are needed outside the callback.
+
+Shape validation still works because .shape is always concrete for JAX
+arrays even when the values are traced.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+* fix test and example configs for non-uniform grid API
+
+SimulationConfig no longer accepts resolution= as a scalar; callers must
+pass grid=UniformGrid(spacing=...) instead.  Update all remaining files
+that still used the old keyword:
+
+- examples/dispersive_gaussian_pulse.py
+- tests/integration/fdtd/test_dispersive_init.py  (+ .uniform_spacing())
+- tests/simulation/fdtd/test_time_reversal.py
+- tests/simulation/physics/test_dispersion.py
+- tests/simulation/physics/test_dispersive_source.py
+
+Also reduce time=1e-8 → time=1e-13 in three unit tests that create sub-µm
+RectilinearGrids (200 nm spacing → 26 M time steps with the old value):
+
+- tests/unit/objects/detectors/test_detector.py   (two µm-scale grids)
+- tests/unit/objects/detectors/test_energy.py     (200 nm spacing)
+- tests/unit/objects/detectors/test_poynting_flux.py (200 nm spacing)
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+* address CodeRabbit review comments on non-uniform grid PR
+
+- vti.py: use actual grid edge coordinates for VTI origin when grid is
+  provided, fixing incorrect origin for grids with non-zero physical offset
+- grid.py: replace float() casts on JAX arrays in calculate_time_offset_yee
+  with jnp.asarray for JIT safety
+- modes.py: add ndim==1 check before shape[0] in transverse_coords validation
+- initialization.py: document location-dependent limitation of
+  length_to_cell_count on stretched non-uniform grids
+- energy.py: replace np.asarray/np.argmin with jnp equivalents in
+  _slice_position_to_index so it works under jax.jit on non-uniform grids
+- device.py: raise ValueError when partial_real voxel size rounds to 0 cells
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+* fix rebase conflicts and pre-commit errors after rebasing onto main
+
+- Switch _center_to_bounds_for_grid to accept volume_size and add the
+  volume-center offset (same semantics as ecb7a19 but grid-aware), so
+  partial_real_position=0 means the simulation center on both uniform
+  and non-uniform grids; update call sites to use this instead of the
+  removed config.resolution path
+- Add _axis_edges_um and _get_full_coverage_objects helpers together in
+  plot_setup.py (both sides of the merge conflict needed)
+- Fix tuple return types in diffractive, detector mode, linear_polarization,
+  and source mode by unpacking the list explicitly instead of tuple(list)
+- Remove redundant cast in materials.py flagged by ty
+- Fix non-uniform grid unit test to use center-relative coordinates
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+---------
+
+Co-authored-by: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+This was referenced Jun 8, 2026
+Implement symmetry in simulation/config
+#353
+Merged
+multi-frequency mode solving with continuity tracking in ModeOverlapDetector
+#332
+Closed
+Support py3.14
+#355
+Merged
+coderabbitai
+Bot
+mentioned this pull request
+Jun 18, 2026
+Quasi-uniform grid support and coordinates origin at center
+#363
+Merged
+This was referenced Jun 26, 2026
+Modes for 2D simulations and etched devices
+#376
+Merged
+complex permittivity / conductivity support (non-dispersive)
+#382
+Merged
+Refactor PML: attach constants to obj, and update contiguous slices
+#384
+Merged
+This was referenced Jul 12, 2026
+Perf: region-restricted detector recording + opt-in phasor DFT subsampling
+#406
+Merged
+ClosedSurfacePoyntingFluxDetector / TFSFPlaneSourceRegion
+#413
+Merged
+coderabbitai
+Bot
+mentioned this pull request
+Jul 27, 2026
+Generalize mode-overlap detectors and S-parameter calculation to custom reference modes
+#405
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

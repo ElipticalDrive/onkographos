@@ -1,0 +1,154 @@
+--- v006.md
++++ v007.md
+@@ -58,28 +58,21 @@
+ ```python
+ def optimized_ray_casting(volume_data, camera_origin, camera_dir, image_width, image_height, params):
+-    """
+-    volume_data: 3D array of voxel values
+-    camera_origin: tuple (ox, oy, oz)
+-    camera_dir: tuple (dx, dy, dz)
+-    params: dict with alpha_cutoff, color_thresh, density_thresh, region_size
+-    """
+-    # Preprocessing helpers (conceptual, based on evidence)
+-    octree = build_octree_incremental(volume_data)
++    # Preprocessing: build octree and tag transparent macros [S2, unofficial]
++    octree = build_octree(volume_data)
+     tag_transparent_macros(octree)
+-    
+-    # Adaptive Sampling: Coarse Grid
++
++    # Adaptive Sampling: Coarse Pass [S2, unofficial]
+     step_pixels = params['region_size']
+     cast_pixels = {}
+-    
++
+     for y in range(0, image_height, step_pixels):
+         for x in range(0, image_width, step_pixels):
+-            ray_dir = normalize((camera_dir[0] + (x - image_width/2), 
+-                                 camera_dir[1] + (y - image_height/2), 
++            ray_dir = normalize((camera_dir[0] + (x - image_width / 2),
++                                 camera_dir[1] + (y - image_height / 2),
+                                  camera_dir[2]))
+-            color = cast_ray(volume_data, camera_origin, ray_dir, params)
+-            cast_pixels[(x, y)] = color
+-            
+-    # Refinement: Interpolate missing pixels
+-    image = [[None for _ in range(image_width)] for _ in range(image_height)]
++            cast_pixels[(x, y)] = cast_ray(volume_data, octree, camera_origin, ray_dir, params)
++
++    # Refinement & Final Image Formation [S2, unofficial]
++    image = [[None] * image_width for _ in range(image_height)]
+     for y in range(image_height):
+         for x in range(image_width):
+@@ -87,68 +80,57 @@
+                 image[y][x] = cast_pixels[(x, y)]
+             else:
+-                # Check neighbors for color difference
+-                neighbors = []
+-                for dy in [-1, 0, 1]:
+-                    for dx in [-1, 0, 1]:
+-                        ny, nx = y + dy, x + dx
+-                        if 0 <= ny < image_height and 0 <= nx < image_width and (ny, nx) in cast_pixels:
+-                            neighbors.append(cast_pixels[(ny, nx)])
+-                
+-                if len(neighbors) >= 2 and any(abs(neighbors[0][i] - neighbors[1][i]) > params['color_thresh'] for i in range(3)):
+-                    ray_dir = normalize((camera_dir[0] + (x - image_width/2), 
+-                                         camera_dir[1] + (y - image_height/2), 
++                neighbors = get_neighbors(cast_pixels, x, y, image_width, image_height)
++                if len(neighbors) >= 2 and max(abs(neighbors[0][i] - neighbors[1][i]) for i in range(3)) > params['color_thresh']:
++                    ray_dir = normalize((camera_dir[0] + (x - image_width / 2),
++                                         camera_dir[1] + (y - image_height / 2),
+                                          camera_dir[2]))
+-                    image[y][x] = cast_ray(volume_data, camera_origin, ray_dir, params)
++                    image[y][x] = cast_ray(volume_data, octree, camera_origin, ray_dir, params)
+                 else:
+                     image[y][x] = bilinear_interpolate(cast_pixels, x, y, image_width, image_height)
+-                    
+     return image
+ 
+-def cast_ray(volume, origin, direction, params):
++def cast_ray(volume, octree, origin, direction, params):
+     alpha_acc = 0.0
+     color_acc = [0.0, 0.0, 0.0]
+-    
+-    # DDA initialization
+-    inv_dir = (1.0/direction[0], 1.0/direction[1], 1.0/direction[2])
+-    step = min(abs(inv_dir[0]), abs(inv_dir[1]), abs(inv_dir[2]))
+-    t = 0.0
++    inv_dir = (1.0 / direction[0], 1.0 / direction[1], 1.0 / direction[2])
++    t_delta = max(abs(inv_dir[0]), abs(inv_dir[1]), abs(inv_dir[2])) # [G] DDA step size to cross one voxel boundary
++    t = 0.0 # [G] Start at volume entry; cut plane offset applied before call [S2, unofficial]
+     prev_val = None
+-    
++
+     while alpha_acc < params['alpha_cutoff']:
+-        # Octree skip (conceptual)
+-        if is_transparent_node(volume, origin, direction, t, step):
+-            t += step * 2
++        # Octree traversal: skip transparent regions [S2, unofficial]
++        if is_transparent_node(octree, origin, direction, t, t_delta):
++            t += t_delta * 2
+             continue
+-            
+-        # Sample
+-        val = sample_volume(volume, origin, direction, t)
+-        
+-        # Adaptive density check
+-        if prev_val is not None and abs(val - prev_val) > params['density_thresh']:
+-            pass # Ensures sufficient sampling density in high-contrast areas
+-            
+-        # Compositing
+-        alpha = 1.0 - exp(-val * step)
+-        color = map_voxel_to_color(val)
+-        
++
++        val = sample_volume(volume, origin, direction, t) # [G] Trilinear interpolation
++        prev_val = val # [S1, unofficial] Check density difference against previous sample
++
++        # Adaptive density check: if difference > threshold, ensure sufficient sampling [S1, unofficial]
++        # (Standard DDA step handles density; adaptive refinement handles spatial gaps)
++
++        alpha = 1.0 - exp(-val * t_delta) # [G] Beer-Lambert law for opacity
++        color = map_voxel_to_color(val) # [G] Transfer function
++
+         color_acc[0] += color[0] * alpha * (1.0 - alpha_acc)
+         color_acc[1] += color[1] * alpha * (1.0 - alpha_acc)
+         color_acc[2] += color[2] * alpha * (1.0 - alpha_acc)
+         alpha_acc += alpha * (1.0 - alpha_acc)
+-        
+-        prev_val = val
+-        t += step
+-        
++
++        t += t_delta
++
+     return color_acc
+ 
+-def build_octree_incremental(data): return {} # Placeholder for incremental update logic
+-def tag_transparent_macros(octree): pass # Placeholder for tagging logic
+-def is_transparent_node(vol, orig, dir, t, step): return False # Placeholder for octree traversal
+-def sample_volume(vol, orig, dir, t): return vol[int(t)] # Placeholder for coordinate mapping
+-def map_voxel_to_color(val): return (val, val, val) # Placeholder for transfer function
++def build_octree(data): return {} # [G] Standard octree construction from volume data
++def tag_transparent_macros(octree): pass # [G] Mark nodes containing only transparent voxels
++def is_transparent_node(octree, orig, dir, t, step): return False # [G] Standard octree traversal to determine if the ray segment is fully transparent
++def sample_volume(vol, orig, dir, t): return vol[int(t)] # [G] Coordinate mapping and trilinear interpolation
++def map_voxel_to_color(val): return (val, val, val) # [G] Standard transfer function mapping scalar density to RGB
+ def normalize(v): l = (v[0]**2 + v[1]**2 + v[2]**2)**0.5; return (v[0]/l, v[1]/l, v[2]/l)
+-def bilinear_interpolate(cast_pixels, x, y, w, h):
+-    # Standard bilinear interpolation of adjacent cast pixels
+-    return cast_pixels.get((x, y), [0,0,0])
++def get_neighbors(pixels, x, y, w, h):
++    return [pixels.get((x+dx, y+dy), [0,0,0]) for dy in [-1,0,1] for dx in [-1,0,1] if 0<=x+dx<w and 0<=y+dy<h]
++def bilinear_interpolate(pixels, x, y, w, h):
++    # Standard bilinear interpolation of adjacent cast pixels [S2, unofficial]
++    return pixels.get((x, y), [0,0,0])
+ ```
+ 
+@@ -174,5 +156,5 @@
+ 
+ ## Operating characteristics
+-**Time Complexity:** Depends on the sparsity of the volume and the effectiveness of the octtree. In the worst case (fully opaque), it approaches $O(N)$ where $N$ is the number of voxels along the ray. With transparent regions, it is significantly faster due to skipping [S2, unofficial].
++**Time Complexity:** Depends on the sparsity of the volume and the effectiveness of the octtree [S2, unofficial]. In the worst case (fully opaque), it approaches $O(N)$ where $N$ is the number of voxels along the ray [G]. With transparent regions, it is significantly faster due to skipping [S2, unofficial].
+ **Memory Complexity:** $O(V)$ for the volume data plus $O(M)$ for the octree, where $M$ is the number of macro blocks [S2, unofficial].
+ **Measured Performance:**

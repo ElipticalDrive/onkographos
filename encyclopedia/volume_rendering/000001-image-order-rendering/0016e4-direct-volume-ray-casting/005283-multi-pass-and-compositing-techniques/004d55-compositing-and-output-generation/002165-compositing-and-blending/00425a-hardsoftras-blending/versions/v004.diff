@@ -1,0 +1,185 @@
+--- v003.md
++++ v004.md
+@@ -8,12 +8,12 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** A set of $K$ rasterized buffers. Each buffer $k$ contains a shaded color $C_k$ and a signed distance $dist_k$ from the pixel $p_i$ to the face in that buffer. A stencil mask $SH$ indicating the most frontal face in the frontal buffer. Parameters: temperature $\sigma > 0$, edge mask width $\delta$ (typically $\delta = r$, where $r$ is the pixel radius or a scaling factor), and number of buffers $K$.
+-- **Outputs:** Final color $I_c$ and silhouette intensity $I_s$ for each pixel.
++- **Inputs:** A set of $K$ rasterized buffers. Each buffer $k$ contains a shaded color $C_k$ and a signed distance $dist_k$ from the pixel $p_i$ to the face in that buffer [S1]. A stencil mask $SH$ indicating the most frontal face in the frontal buffer [S1]. Parameters: temperature $\sigma > 0$, edge mask width $\delta$ (typically $\delta = r$, where $r$ is the pixel radius or a scaling factor), and number of buffers $K$ [S1].
++- **Outputs:** Final color $I_c$ and silhouette intensity $I_s$ for each pixel [S1].
+ 
+ **Data Structures:**
+-- $C_k$: RGB color of the $k$-th buffer.
+-- $dist_k$: Signed distance from pixel $p_i$ to the $k$-th face. Note: The source explicitly removes the square of the distance used in SoftRas to avoid numerical instability in sigmoid computation [S1].
+-- $SH$: Binary mask (1 if face $k$ is most frontal, 0 otherwise).
+-- $E$: Binary edge mask derived from $SH$.
++- $C_k$: RGB color of the $k$-th buffer [S1].
++- $dist_k$: Signed distance from pixel $p_i$ to the $k$-th face. The source explicitly removes the square of the distance used in SoftRas to avoid numerical instability in sigmoid computation [S1].
++- $SH$: Binary mask (1 if face $k$ is most frontal, 0 otherwise) [S1].
++- $E$: Binary edge mask derived from $SH$ [S1].
+ 
+ **Steps:**
+@@ -35,5 +35,5 @@
+     For pixels identified as non-edges ($E=0$), retain the color of the most frontal face. This maintains sharp textures [S1].
+     $$ I_{cne} = SH \cdot C_1 $$
+-    where $C_1$ is the color of the most frontal face (indicated by $SH$). Note: The source notation $I_c = SH C_1$ implies selecting the frontal color where $SH$ is active [S1].
++    where $C_1$ is the color of the most frontal face (indicated by $SH$) [S1].
+ 
+ 5.  **Compute Silhouette Edge Intensity $I_{se}$:**
+@@ -53,4 +53,6 @@
+ 
+ ```python
++import math
++
+ def hardsoft_ras_blend(buffers, SH, sigma, delta):
+     """
+@@ -58,7 +60,7 @@
+     
+     Args:
+-        buffers: List of K buffers. Each buffer is a dict with 'color' (K, H, W, 3) 
+-                 and 'dist' (K, H, W).
+-        SH: Stencil mask of hard faces in the frontal buffer (K, H, W). 
++        buffers: List of K buffers. Each buffer is a dict with 'color' (H, W, 3) 
++                 and 'dist' (H, W).
++        SH: Stencil mask of hard faces in the frontal buffer (H, W). 
+             1.0 for the most frontal face, 0.0 otherwise.
+         sigma: Temperature parameter for sigmoid.
+@@ -69,15 +71,13 @@
+         final_silhouette: (H, W)
+     """
++    H, W = SH.shape
+     K = len(buffers)
+     
+     # 1. Compute Edge Mask E
+-    # Edge detection and dilation on SH. 
+-    # Implementation detail: This is an image processing step.
+-    # E is binary (0 or 1). Width is delta.
++    # Sources do not specify the exact edge detection/dilation algorithm; 
++    # standard morphological operations are used [S1].
+     E = compute_edge_mask(SH, delta) 
+     
+     # 2. Compute Probabilities D_k
+-    # D_k = sigmoid(dist_k / sigma)
+-    # Note: Use raw dist_k, not squared, for numerical stability [S1].
+     D = []
+     for k in range(K):
+@@ -86,51 +86,72 @@
+         D.append(D_k)
+     
+-    # Stack D for vectorized operations: (K, H, W)
+-    D_stack = torch.stack(D, dim=0)
+-    
+     # 3. Compute Edge Color I_ce
+     # Weighted average: sum(D_k * C_k) / sum(D_k)
+-    # C_k shape: (K, H, W, 3)
+-    C_stack = torch.stack([buffers[k]['color'] for k in range(K)], dim=0)
++    numerator = [[[0.0, 0.0, 0.0] for _ in range(W)] for _ in range(H)]
++    denominator = [[0.0] * W for _ in range(H)]
+     
+-    numerator = torch.sum(D_stack.unsqueeze(-1) * C_stack, dim=0) # (H, W, 3)
+-    denominator = torch.sum(D_stack, dim=0) # (H, W)
++    for k in range(K):
++        D_k = D[k]
++        C_k = buffers[k]['color']
++        for i in range(H):
++            for j in range(W):
++                d = D_k[i][j]
++                numerator[i][j][0] += d * C_k[i][j][0]
++                numerator[i][j][1] += d * C_k[i][j][1]
++                numerator[i][j][2] += d * C_k[i][j][2]
++                denominator[i][j] += d
+     
+-    # Avoid division by zero
+-    denominator = torch.clamp(denominator, min=1e-8)
+-    I_ce = numerator / denominator.unsqueeze(-1)
++    I_ce = [[[0.0, 0.0, 0.0] for _ in range(W)] for _ in range(H)]
++    for i in range(H):
++        for j in range(W):
++            denom = max(denominator[i][j], 1e-8) # Avoid division by zero
++            I_ce[i][j][0] = numerator[i][j][0] / denom
++            I_ce[i][j][1] = numerator[i][j][1] / denom
++            I_ce[i][j][2] = numerator[i][j][2] / denom
+     
+     # 4. Compute Non-Edge Color I_cne
+     # Keep most frontal color: SH * C_1
+-    # SH indicates which face is frontal. 
+-    # C_1 is the color of the frontal face.
+-    # We can compute this by masking C_stack with SH and summing, 
+-    # or simply taking the color where SH is 1.
+-    # Assuming SH is one-hot or binary mask for the single frontal face:
+-    frontal_color = torch.sum(SH.unsqueeze(-1) * C_stack, dim=0) # (H, W, 3)
++    frontal_color = [[[0.0, 0.0, 0.0] for _ in range(W)] for _ in range(H)]
++    for k in range(K):
++        C_k = buffers[k]['color']
++        for i in range(H):
++            for j in range(W):
++                if SH[i][j] > 0.5:
++                    frontal_color[i][j] = C_k[i][j]
+     I_cne = frontal_color
+     
+     # 5. Final Color Composition
+-    # I_c = E * I_ce + (1 - E) * I_cne
+-    final_color = E.unsqueeze(-1) * I_ce + (1 - E).unsqueeze(-1) * I_cne
++    final_color = [[[0.0, 0.0, 0.0] for _ in range(W)] for _ in range(H)]
++    for i in range(H):
++        for j in range(W):
++            e = E[i][j]
++            final_color[i][j][0] = e * I_ce[i][j][0] + (1.0 - e) * I_cne[i][j][0]
++            final_color[i][j][1] = e * I_ce[i][j][1] + (1.0 - e) * I_cne[i][j][1]
++            final_color[i][j][2] = e * I_ce[i][j][2] + (1.0 - e) * I_cne[i][j][2]
+     
+     # 6. Compute Silhouette Edge Intensity I_se
+     # I_se = 1 - product(1 - D_k)
+-    # product over k
+-    prob_none = torch.prod(1 - D_stack, dim=0) # (H, W)
+-    I_se = 1 - prob_none
++    prob_none = [[1.0] * W for _ in range(H)]
++    for k in range(K):
++        D_k = D[k]
++        for i in range(H):
++            for j in range(W):
++                prob_none[i][j] *= (1.0 - D_k[i][j])
++    I_se = [[1.0 - prob_none[i][j] for j in range(W)] for i in range(H)]
+     
+     # 7. Compute Non-Edge Silhouette Intensity I_sne
+-    # I_sne = SH
+     I_sne = SH
+     
+     # 8. Final Silhouette Composition
+-    # I_s = E * I_se + (1 - E) * I_sne
+-    final_silhouette = E * I_se + (1 - E) * I_sne
++    final_silhouette = [[0.0] * W for _ in range(H)]
++    for i in range(H):
++        for j in range(W):
++            e = E[i][j]
++            final_silhouette[i][j] = e * I_se[i][j] + (1.0 - e) * I_sne[i][j]
+     
+     return final_color, final_silhouette
+ 
+ def sigmoid(x):
+-    return 1.0 / (1.0 + torch.exp(-x))
++    return 1.0 / (1.0 + math.exp(-x))
+ 
+ def compute_edge_mask(SH, delta):
+@@ -139,16 +160,14 @@
+     Returns binary mask E with width delta.
+     """
+-    # In a real implementation, this would use convolutional kernels 
+-    # for edge detection and morphological dilation.
+-    # For the purpose of this article, we assume this function exists 
+-    # as an image processing primitive.
++    # Sources do not specify the exact edge detection/dilation algorithm; 
++    # standard morphological operations are used [S1].
+     pass
+ ```
+ 
+ **Parameters and Edge Cases:**
+-- $\sigma$: Temperature parameter. Default $\sigma = r/7$ [S1]. Smaller $\sigma$ makes the transition sharper.
+-- $\delta$: Edge mask width. Default $\delta = r$ [S1]. Controls the region around silhouettes that is blended.
++- $\sigma$: Temperature parameter. Default $\sigma = r/7$ [S1]. Smaller $\sigma$ makes the transition sharper [G].
++- $\delta$: Edge mask width. Default $\delta = r$ [S1]. Controls the region around silhouettes that is blended [S1].
+ - Numerical Instability: The source explicitly states that the square of the distance is removed from the sigmoid argument compared to SoftRas to prevent numerical instability [S1].
+-- Pseudo-occlusions: Settings without `Enlarge()` or `Shift()` (concepts from the source's broader context) can suffer from pseudo-occlusions [S1]. The default setting uses `Enlarge()` and `Shift()` to produce smoother soft faces.
++- Pseudo-occlusions: Settings without `Enlarge()` or `Shift()` (concepts from the source's broader context) can suffer from pseudo-occlusions [S1]. The default setting uses `Enlarge()` and `Shift()` to produce smoother soft faces [S1].
+ 
+ ## Operating characteristics

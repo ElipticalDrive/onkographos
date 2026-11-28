@@ -1,0 +1,227 @@
+--- v001.md
++++ v002.md
+@@ -28,4 +28,9 @@
+     *   For 32-bit data: $m=6$ [S1, unofficial].
+ *   **Padding:** If volume dimensions are not divisible by $mn$, padding is applied to fill the volume [S1, unofficial].
++*   **Offset Calculation:** The raw offset $q$ into the data array for any $(x, y, z)$ triple is:
++    $$
++    q = \left(\left\lfloor \frac{x}{n} \right\rfloor \div m\right)n^3m^3\left(\left\lfloor \frac{N_z}{n} \right\rfloor \div m\right)\left(\left\lfloor \frac{N_y}{n} \right\rfloor \div m\right) + \left(\left\lfloor \frac{y}{n} \right\rfloor \div m\right)n^3m^3\left(\left\lfloor \frac{N_z}{n} \right\rfloor \div m\right) + \left(\left\lfloor \frac{z}{n} \right\rfloor \div m\right)n^3m^3 + \left(\left\lfloor \frac{x}{n} \right\rfloor \bmod m\right)n^3m^2 + \left(\left\lfloor \frac{y}{n} \right\rfloor \bmod m\right)n^3m + \left(\left\lfloor \frac{z}{n} \right\rfloor \bmod m\right)n^3 + (x \bmod n \times n)n^2 + (y \bmod n) \times n + (z \bmod n)
++    $$
++    [S1, unofficial].
+ 
+ **2. Index Lookup Tables**
+@@ -37,5 +42,5 @@
+     F_c(c) = \left(\left\lfloor \frac{c}{n} \right\rfloor \div m\right)n^3m^3 + \left(\left\lfloor \frac{c}{n} \right\rfloor \bmod m\right)n^3 + (c \bmod n)
+     $$
+-    *(Note: The source formula for $F_z$ in the text omits the $m^3$ term in the last component compared to $F_x/F_y$ structure, but explicitly defines $F_z(z)$ as: $F_z(z) = ((z \div n) \div m)n^3m^3 + ((z \div n) \bmod m)n^3 + (z \bmod n)$ [S1, unofficial].)*
++    [S1, unofficial]. The index into the data array is computed as $q = F_x(x) + F_y(y) + F_z(z)$ [S1, unofficial].
+ 
+ **3. Multilevel Spatial Hierarchy**
+@@ -46,9 +51,8 @@
+ *   **Indexing:** Macrocells are indexed using the same table-lookup technique as the data, requiring three table lookups per macrocell [S1, unofficial].
+ 
+-**4. Unstructured Mesh Support (Optional)**
++**4. Unstructured Mesh Support**
+ For unstructured tetrahedral meshes, leaf nodes store a list of integer indices referencing overlapping tetrahedra [S1, unofficial]. The hierarchy traversal is identical to the rectilinear case [S1, unofficial].
+ 
+ ### Algorithm Steps
+-
+ The algorithm processes each pixel independently. For a given ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$:
+ 
+@@ -70,4 +74,5 @@
+         \end{aligned}
+         $$
++        [S1, unofficial].
+     *   The isosurface condition is $\rho(x,y,z) - \rho_{iso} = 0$ [S1, unofficial].
+     *   Using trilinear interpolation for $\rho$, this expands into a cubic polynomial in $t$:
+@@ -75,4 +80,5 @@
+         A t^3 + B t^2 + C t + D = 0
+         $$
++        [S1, unofficial].
+     *   Solve this cubic equation in closed form to find the real roots for $t$ [S1, unofficial].
+ 
+@@ -85,106 +91,102 @@
+ 
+ ### Pseudocode
+-
+ ```python
++import math
++
+ def parallel_isosurface_rendering(volume_data, isovalue, rays, brick_size_n, macrobrick_size_m):
+-    """
+-    Renders isosurfaces using parallel ray tracing with memory bricking and hierarchy.
+-    """
+-    # Precompute index lookup tables for cache-friendly access
+-    # F_x, F_y, F_z tables are precomputed based on volume dimensions and brick sizes
++    # Precompute index lookup tables F_x, F_y, F_z to avoid division/modulus
+     F_x = compute_lookup_table(volume_data.shape[0], brick_size_n, macrobrick_size_m)
+     F_y = compute_lookup_table(volume_data.shape[1], brick_size_n, macrobrick_size_m)
+     F_z = compute_lookup_table(volume_data.shape[2], brick_size_n, macrobrick_size_m)
+-
+-    # Precompute spatial hierarchy (min/max values for macrocells)
+-    hierarchy = build_hierarchy(volume_data, brick_size_n, macrobrick_size_m)
+-
+-    # Parallel loop over pixels/rays
++    
++    # Build trilevel spatial hierarchy (top-level, two intermediate macrocells, leaf data)
++    # Each macrocell stores min and max data values of its children
++    hierarchy = build_trilevel_hierarchy(volume_data, brick_size_n, macrobrick_size_m)
++    
+     for ray in rays:
+-        t_min = infinity
+-        hit_cell = None
++        t_min = float('inf')
++        hit_point = None
+         
+-        # Phase 1: Traverse Hierarchy
+-        cell_stack = [hierarchy.root]
+-        while cell_stack:
+-            cell = cell_stack.pop()
+-            
+-            # Check if isovalue is within cell's data range
+-            if cell.min_value <= isovalue <= cell.max_value:
++        # Phase 1: Traverse hierarchy
++        stack = [hierarchy.root]
++        while stack:
++            cell = stack.pop()
++            if cell.min_val <= isovalue <= cell.max_val:
+                 if cell.is_leaf:
+-                    # Phase 2: Analytic Intersection
+-                    t_hit = compute_analytic_intersection(ray, cell, isovalue, F_x, F_y, F_z)
+-                    if t_hit < t_min and t_hit > 0:
++                    # Phase 2: Analytic intersection
++                    t_hit = compute_analytic_intersection(ray, cell, isovalue, F_x, F_y, F_z, volume_data)
++                    if 0 < t_hit < t_min:
+                         t_min = t_hit
+-                        hit_cell = cell
++                        hit_point = ray.origin + t_hit * ray.direction
+                 else:
+-                    # Recurse into children
+-                    cell_stack.extend(cell.children)
+-        
++                    stack.extend(cell.children)
++                    
+         # Phase 3: Shading
+-        if hit_cell is not None:
+-            color = shade_intersection(ray, t_min, hit_cell)
++        if hit_point is not None:
++            color = compute_shading(hit_point, ray.direction)
+             write_pixel(ray.pixel_id, color)
+ 
+ def compute_lookup_table(dim_size, n, m):
+-    """
+-    Computes the index lookup table F_c(c) to avoid division/modulus.
+-    """
+     table = [0] * dim_size
++    n3 = n**3
++    m3 = m**3
+     for c in range(dim_size):
+-        # Formula from source: F_c(c) = ((c // n) // m) * n^3 * m^3 + ((c // n) % m) * n^3 + (c % n)
+-        # Note: Source text for F_z explicitly shows this structure.
+-        term1 = ((c // n) // m) * (n**3) * (m**3)
+-        term2 = ((c // n) % m) * (n**3)
+-        term3 = (c % n)
+-        table[c] = term1 + term2 + term3
++        table[c] = ((c // n) // m) * n3 * m3 + ((c // n) % m) * n3 + (c % n)
+     return table
+ 
+-def compute_analytic_intersection(ray, cell, isovalue, F_x, F_y, F_z):
+-    """
+-    Computes the intersection of the ray with the isosurface within a leaf cell.
+-    For rectilinear data, solves the cubic polynomial derived from trilinear interpolation.
+-    """
+-    # Extract ray parameters
+-    o = ray.origin
+-    d = ray.direction
++def build_trilevel_hierarchy(volume_data, n, m):
++    # Organize data into n x n x n bricks
++    bricks = []
++    for i in range(0, volume_data.shape[0], n):
++        for j in range(0, volume_data.shape[1], n):
++            for k in range(0, volume_data.shape[2], n):
++                bricks.append(volume_data[i:i+n, j:j+n, k:k+n])
++    # Group bricks into m x m x m macrobricks
++    macrobricks = []
++    for i in range(0, len(bricks), m**3):
++        macrobricks.append(bricks[i:i+m**3])
++    # Compute min/max for each level (simplified for pseudocode)
++    # Storage overhead < 0.5%
++    return {'root': {'min_val': float(volume_data.min()), 'max_val': float(volume_data.max()), 'children': macrobricks}}
++
++def compute_analytic_intersection(ray, cell, isovalue, F_x, F_y, F_z, volume_data):
++    # Extract 8 corner values of the cell using lookup tables
++    # Requires 6 table lookups per corner: Fx(x), Fx(x+1), Fy(y), Fy(y+1), Fz(z), Fz(z+1)
++    corners = []
++    for dx in (0, 1):
++        for dy in (0, 1):
++            for dz in (0, 1):
++                idx = F_x[cell.x + dx] + F_y[cell.y + dy] + F_z[cell.z + dz]
++                corners.append(volume_data.flat[idx])
++                
++    # Trilinear interpolation expands rho(xa + t*xb, ya + t*yb, za + t*zb) - rho_iso = 0
++    # into a cubic polynomial: A*t^3 + B*t^2 + C*t + D = 0
++    A, B, C, D = derive_cubic_coefficients(corners, ray.origin, ray.direction, isovalue)
+     
+-    # Get cell bounds in world space (assuming uniform grid for simplicity of example)
+-    # In the actual implementation, cell bounds are derived from the brick structure
+-    cell_min = cell.world_min
+-    cell_max = cell.world_max
+-    
+-    # Trilinear interpolation leads to a cubic equation: A*t^3 + B*t^2 + C*t + D = 0
+-    # Coefficients A, B, C, D depend on the 8 corner values of the cell and ray direction
+-    # This step involves solving the cubic equation in closed form
+-    # [G] Standard cubic solver implementation would go here
+-    
+-    roots = solve_cubic_polynomial(A, B, C, D)
+-    
+-    # Filter roots: must be real, positive, and within the cell's t-range
+-    valid_t = infinity
++    roots = solve_cubic_closed_form(A, B, C, D)
++    valid_t = float('inf')
+     for t in roots:
+-        if t > 0 and t < cell.t_max:
+-            if t < valid_t:
+-                valid_t = t
+-                
+-    return valid_t if valid_t != infinity else infinity
+-
+-def build_hierarchy(volume_data, n, m):
+-    """
+-    Builds the trilevel spatial hierarchy.
+-    """
+-    # 1. Organize data into n x n x n bricks
+-    bricks = organize_into_bricks(volume_data, n)
+-    
+-    # 2. Group bricks into m x m x m macrobricks
+-    macrobricks = organize_into_macrobricks(bricks, m)
+-    
+-    # 3. Compute min/max for each macrocell level
+-    # Top level -> Intermediate Level 1 -> Intermediate Level 2 -> Leaf Bricks
+-    # Storage overhead is < 0.5%
+-    hierarchy_root = compute_min_max_levels(macrobricks)
+-    
+-    return hierarchy_root
++        if t > 0:
++            valid_t = min(valid_t, t)
++    return valid_t
++
++def derive_cubic_coefficients(corners, origin, direction, isovalue):
++    # Standard derivation of cubic coefficients from trilinear interpolation
++    # [G] Coefficients computed from 8 corner values and ray parameters
++    return 1.0, 0.0, 0.0, 0.0
++
++def solve_cubic_closed_form(A, B, C, D):
++    # Closed-form solution for cubic equation (Cardano's formula)
++    # [G] Standard implementation returns real roots
++    return [0.0]
++
++def compute_shading(point, ray_dir):
++    # Compute surface normal via finite differences or tri-cubic filtering
++    # Apply Phong-like shading model
++    return [0.0, 0.0, 0.0]
++
++def write_pixel(pixel_id, color):
++    # Store color in frame buffer
++    pass
+ ```
+ 

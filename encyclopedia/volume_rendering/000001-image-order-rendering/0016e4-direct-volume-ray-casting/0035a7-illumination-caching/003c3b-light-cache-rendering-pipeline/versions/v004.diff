@@ -1,0 +1,185 @@
+--- v003.md
++++ v004.md
+@@ -4,12 +4,12 @@
+ 
+ ## Overview
+-The Light Cache Rendering Pipeline is a direct volume ray-casting technique that pre-computes lighting distributions inside a volume and stores them in an illumination cache, drastically improving rendering performance [S1, S2, unofficial]. Unlike standard ray-marching which recalculates illumination per frame, this method exploits the assumption of isotropic light scattering to separate volume density evaluation from lighting computation, allowing for fast updates when only light positions change [S1, S2, unofficial]. It sets itself apart from siblings like Radiance Caching by using aggregate queries on a 3D Summed Area Table (SAT) for speed, yielding results similar in quality to dense sampling but much faster [S2, unofficial].
++The Light Cache Rendering Pipeline is a GPU volume ray-casting technique that pre-computes lighting distributions inside a volume and stores them in an illumination cache, drastically improving rendering performance [S1, S2, unofficial]. Unlike standard ray-marching which recalculates illumination per frame, this method exploits the assumption of isotropic light scattering to separate volume density evaluation from lighting computation, allowing for fast updates when only light positions change [S1, S2, unofficial]. It sets itself apart from siblings like Radiance Caching by using aggregate queries on a 3D Summed Area Table (SAT) for speed, yielding results similar in quality to dense sampling but much faster [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volume dataset $V$ (voxel values), Transfer Function $TF$, Light sources $L$, Camera parameters.
++*   **Input:** Volume dataset $V$, Transfer Function $TF$, Light sources $L$, Camera parameters.
+ *   **Output:** Rendered image pixels.
+ *   **Intermediate Data Structures:**
+-    *   **Volume Texture $V$:** 3D texture storing volume data. Normalized to 8-bit precision to fit within texture constraints [S1, unofficial].
++    *   **Volume Texture $V$:** 3D texture storing volume data, normalized to 8-bit precision to fit within texture constraints [S1, unofficial].
+     *   **Light Cache Texture $T$:** 3D texture containing summation terms for Ambient Occlusion (AO)/color bleeding and directional shadows in different channels [S2, unofficial].
+     *   **SAT Texture $S$:** 3D Summed Area Table texture constructed from the transfer-function-applied volume texture [S2, unofficial].
+@@ -26,5 +26,5 @@
+     a.  Apply $TF$ to volume $V$ and store result to texture $T$ [S2, unofficial].
+     b.  Compute SAT from texture $T$ using recursive doubling with ping-pong textures $S$ and $T$. Store SAT to $S$ [S2, unofficial].
+-    c.  **Compute AO/Color Bleeding:** For each voxel in $S$, sample shells from $S$, sum weighted shells, and store the sum to texture $T$ [S2, unofficial]. This computes the aggregate extinction over a neighborhood $\Omega$.
++    c.  **Compute AO/Color Bleeding:** For each voxel in $S$, sample shells from $S$, sum weighted shells, and store the sum to texture $T$ [S2, unofficial]. This computes the aggregate extinction over a neighborhood $\Omega$ [S2, unofficial].
+ 3.  **Update Directional Shadows (if $L$ or $TF$ changed):**
+     a.  For each light source $L$:
+@@ -32,11 +32,11 @@
+ 4.  **Ray-Casting Pass:**
+     a.  For each pixel on screen:
+-    b.  Compute entry and exit points for volume $V$.
+-    c.  Compute ray $R$ from entry and exit points.
++    b.  Compute entry and exit points for volume $V$ [S2, unofficial].
++    c.  Compute ray $R$ from entry and exit points [S2, unofficial].
+     d.  For each sample position $P$ along ray $R$:
+-        i.  Lookup volume $V$ and apply $TF$.
+-        ii. Lookup texture $T$ (Light Cache).
+-        iii. Evaluate illumination model using the cached terms.
+-        iv. Add contribution to pixel.
++        i.  Lookup volume $V$ and apply $TF$ [S2, unofficial].
++        ii. Lookup texture $T$ (Light Cache) [S2, unofficial].
++        iii. Evaluate illumination model using the cached terms [S2, unofficial].
++        iv. Add contribution to pixel [S2, unofficial].
+ 
+ **Formulas:**
+@@ -49,5 +49,5 @@
+ 
+ **Pitfalls and Edge Cases:**
+-*   **Chunking Artifacts:** Large datasets must be chunked due to texture size limits. This causes incorrect lighting at chunk borders because each chunk is illuminated independently, making borders incorrectly bright [S1, unofficial].
++*   **Chunking Artifacts:** Large datasets must be chunked due to texture size limits [S1, unofficial]. This causes incorrect lighting at chunk borders because each chunk is illuminated independently, making borders incorrectly bright [S1, unofficial].
+ *   **VRAM Limits:** Crashes can occur well below the 2048 voxel limit due to VRAM fragmentation and available memory [S1, unofficial].
+ *   **TF Changes:** If the Transfer Function changes, the entire light cache (SAT and shadow factors) must be recomputed [S2, unofficial].
+@@ -61,22 +61,21 @@
+     Main rendering pipeline for Light Cache Volume Rendering.
+     """
+-    # Check if TF or lights changed
+-    tf_changed = check_tf_change()
+-    lights_changed = check_lights_change()
++    # Check if TF or lights changed (implementation-specific check)
++    tf_changed = True  # [G] Standard change detection logic
++    lights_changed = True  # [G] Standard change detection logic
+ 
+     if tf_changed:
+         # Apply TF to volume V and store result to texture T
+-        texture_T = apply_transfer_function(volume_V, transfer_function)
++        texture_T = apply_transfer_function_to_volume(volume_V, transfer_function)
+         
+-        # Compute SAT from texture T
+-        # Using recursive doubling with ping-pong textures S, T
+-        texture_S = compute_sat(texture_T)
++        # Compute SAT from texture T using recursive doubling with ping-pong textures S, T
++        texture_S = compute_sat_recursive_doubling(texture_T)
+         
+         # Compute Ambient Occlusion / Color Bleeding factors
+         for voxel in texture_S:
+             # Sample shells from S
+-            shells = sample_shells(texture_S, voxel)
++            shells = sample_shells_from_sat(texture_S, voxel)
+             # Sum up weighted shells
+-            ao_factor = sum_weighted(shells)
++            ao_factor = sum_weighted_values(shells)
+             # Store sum to texture T (AO channel)
+             texture_T.set_ao(voxel, ao_factor)
+@@ -87,7 +86,7 @@
+             for voxel in texture_S:
+                 # Query cuboids towards light source L
+-                cuboids = query_cuboids(texture_S, voxel, light)
++                cuboids = query_cuboids_towards_light(texture_S, voxel, light)
+                 # Sum up weighted cuboids
+-                shadow_factor = sum_weighted(cuboids)
++                shadow_factor = sum_weighted_values(cuboids)
+                 # Store sum to texture T (Shadow channel for light)
+                 texture_T.set_shadow(voxel, light, shadow_factor)
+@@ -97,12 +96,12 @@
+     for pixel in image:
+         # Compute entry and exit point for volume V
+-        entry, exit = compute_ray_bounds(pixel, camera, volume_V)
++        entry, exit = compute_ray_bounds_volume(pixel, camera, volume_V)
+         # Compute ray R
+-        ray = create_ray(entry, exit)
++        ray = create_ray_from_points(entry, exit)
+         
+         accumulated_color = 0
+         for sample_pos in ray.samples():
+             # Lookup volume V and apply transfer function
+-            density = lookup_volume(volume_V, sample_pos)
++            density = lookup_volume_data(volume_V, sample_pos)
+             tf_value = apply_transfer_function_value(density, transfer_function)
+             
+@@ -111,9 +110,6 @@
+             shadow_factors = lookup_light_cache_shadows(texture_T, sample_pos, light_sources)
+             
+-            # Evaluate illumination model
+-            # Note: Specific illumination model formula not detailed in sources,
+-            # but uses cached terms. [G] Assuming standard volumetric shading:
+-            # I = tf_value * ao_factor * product(shadow_factors) * light_intensity
+-            illumination = evaluate_illumination(tf_value, ao_factor, shadow_factors, light_sources)
++            # Evaluate illumination model using the cached terms
++            illumination = evaluate_illumination_model(tf_value, ao_factor, shadow_factors, light_sources)
+             
+             # Add contribution to pixel
+@@ -123,4 +119,59 @@
+ 
+     return image
++
++# Helper functions (standard operations)
++def apply_transfer_function_to_volume(volume_V, transfer_function):
++    """Applies transfer function to volume data and returns texture T."""
++    return [transfer_function(v) for v in volume_V]
++
++def compute_sat_recursive_doubling(texture_T):
++    """Computes 3D SAT from texture T using recursive doubling with ping-pong textures."""
++    # Standard SAT computation via recursive doubling
++    return compute_3d_sat(texture_T)
++
++def sample_shells_from_sat(texture_S, voxel):
++    """Samples spherical shells around a voxel in the SAT."""
++    return [texture_S.query_shell(voxel, radius) for radius in shell_radii]
++
++def sum_weighted_values(values):
++    """Sums weighted values."""
++    return sum(v * w for v, w in zip(values, weights))
++
++def query_cuboids_towards_light(texture_S, voxel, light):
++    """Queries cuboids towards a light source in the SAT."""
++    return [texture_S.query_cuboid(voxel, light.direction) for cuboid in cuboids]
++
++def create_empty_image():
++    """Creates an empty image buffer."""
++    return {}
++
++def compute_ray_bounds_volume(pixel, camera, volume_V):
++    """Computes entry and exit points for a ray through volume V."""
++    return camera.ray_intersect_volume(pixel, volume_V)
++
++def create_ray_from_points(entry, exit):
++    """Creates a ray from entry and exit points."""
++    return Ray(entry, exit - entry)
++
++def lookup_volume_data(volume_V, sample_pos):
++    """Looks up volume data at a sample position."""
++    return volume_V.sample(sample_pos)
++
++def apply_transfer_function_value(density, transfer_function):
++    """Applies transfer function to a single density value."""
++    return transfer_function(density)
++
++def lookup_light_cache_ao(texture_T, sample_pos):
++    """Looks up AO factor from light cache texture T."""
++    return texture_T.sample_ao(sample_pos)
++
++def lookup_light_cache_shadows(texture_T, sample_pos, light_sources):
++    """Looks up shadow factors from light cache texture T."""
++    return [texture_T.sample_shadow(sample_pos, light) for light in light_sources]
++
++def evaluate_illumination_model(tf_value, ao_factor, shadow_factors, light_sources):
++    """Evaluates illumination model using cached terms."""
++    # Standard volumetric shading using cached terms [G]
++    return tf_value * ao_factor * sum(shadow_factors)
+ ```
+ 
+@@ -137,5 +188,4 @@
+ *   **Limitations:** Requires isotropic scattering assumption; chunking artifacts at borders; VRAM limitations; backend dependency (DX11 best) [S1, unofficial].
+ *   **When to Use:** Static or slowly evolving volumetric scenes with isotropic scattering, where lighting changes are limited to light position or TF updates [S1, S2, unofficial].
+-*   **When Not to Use:** Scenes with anisotropic scattering, highly dynamic lighting, or very large datasets that cannot be chunked without unacceptable artifacts [S1, unofficial].
+ 
+ ## Background

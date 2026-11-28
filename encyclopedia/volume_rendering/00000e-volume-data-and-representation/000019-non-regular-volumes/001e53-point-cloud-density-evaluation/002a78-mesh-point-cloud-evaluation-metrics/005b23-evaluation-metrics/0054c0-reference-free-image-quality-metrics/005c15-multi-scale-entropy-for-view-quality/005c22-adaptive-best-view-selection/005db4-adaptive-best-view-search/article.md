@@ -1,0 +1,177 @@
+# Adaptive Best View Search
+
+
+## Overview
+Adaptive Best View Search is an algorithm to find the viewpoint with maximum entropy on a bounding sphere by adaptively subdividing a spherical mesh, avoiding exhaustive search [S1]. It differs from brute-force sampling by focusing computational effort only on regions where the entropy could potentially exceed the current maximum [S1].
+
+## How it works
+**Inputs:**
+- A volume model or scene representation [S1].
+- A bounding sphere enclosing the model [S1].
+- A quality function $H(v)$ that computes the Multi-Scale Entropy for a viewpoint $v$ on the sphere [S1].
+- An initial resolution for quality evaluation (e.g., $128 \times 128$ pixels is sufficient for interactive rates [S1]).
+
+**Outputs:**
+- The viewpoint $v_{best}$ with the maximum estimated entropy $H_{max}$ [S1].
+
+**Data Structures:**
+- **Spherical Triangle Mesh:** A set of triangles covering the bounding sphere, initialized with vertices at the vertices of an icosahedron [S1]. Vertices are 3D unit vectors representing viewpoints [G].
+- **Quality Cache:** A map from vertex index to entropy value $H_i$ [G].
+- **Global Maximum:** $H_{max}$, initialized to the maximum entropy among the initial icosahedron vertices [S1].
+
+**Parameters:**
+- **Lipschitz Constant ($L$):** An upper bound on the rate of change of the quality function, recalculated each time a new viewpoint is added [S1].
+- **Safety Constant ($K_{safe}$):** A conservative margin to prevent missing the global maximum. The sources state that a safety constant is only necessary when the initial subdivision's entropy range is small and $L < 1$, in which case $K_{safe} = 0.02 \times H_{max}$ [S1].
+- **Angular Threshold:** Views are considered too close if they are within 5 degrees of existing analyzed positions [S1].
+
+**Algorithm Steps:**
+1. **Initialization:** Create a spherical triangle mesh with vertices placed at the vertices of an icosahedron [S1]. For each vertex $i$, evaluate the quality $H_i$ by rendering the viewpoint [S1]. Set $H_{max} = \max_i(H_i)$ [S1]. Calculate the initial Lipschitz constant $L$ for the mesh [S1].
+2. **Estimation Phase:** For each triangle $T$ in the current mesh with vertices $v_1, v_2, v_3$ and known qualities $H_1, H_2, H_3$:
+   - Estimate the maximum reachable entropy at each edge ($H_{e1}, H_{e2}, H_{e3}$) using $L$ [S1].
+   - Estimate the maximum value inside the triangle $H_{emax}$ by interpolating the computed edge values ($H_{e1}$ to $H_{e3}$) [S1].
+   - If $H_{emax} + K_{safe}$ is higher than $H_{max}$, measure the actual value by rendering a new viewpoint from this position and add the subdivided triangle [S1].
+3. **Update:** Recalculate the Lipschitz constant $L$ each time a new viewpoint is added [S1].
+4. **Termination:** Stop the algorithm when none of the estimated entropy values is higher than $H_{max}$, or when those views are too close (i.e., 5 degrees) to existing analyzed positions [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def adaptive_best_view_search(volume_model, bounding_sphere_radius=1.0):
+    # 1. Initialize Mesh
+    mesh = create_icosahedron_mesh()
+    H_cache = {}
+    for vertex in mesh.vertices:
+        H_cache[vertex.id] = compute_entropy(volume_model, vertex.position)
+
+    H_max = max(H_cache.values())
+    L = calculate_lipschitz_constant(mesh, H_cache)
+    K_safe = 0.02 * H_max if L < 1.0 else 0.0
+
+    while True:
+        candidates = []
+        for triangle in mesh.triangles:
+            v1, v2, v3 = triangle.vertices
+            h1, h2, h3 = H_cache[v1.id], H_cache[v2.id], H_cache[v3.id]
+
+            # Estimate max reachable entropy at each edge using L
+            he1 = estimate_edge_max(v1, v2, h1, h2, L)
+            he2 = estimate_edge_max(v2, v3, h2, h3, L)
+            he3 = estimate_edge_max(v3, v1, h3, h1, L)
+
+            # Estimate max inside triangle by interpolating edge values
+            hemax = max(he1, he2, he3)
+
+            if hemax + K_safe > H_max:
+                test_pos = get_peak_position(triangle, he1, he2, he3)
+                if not is_too_close(test_pos, mesh.vertices, threshold_degrees=5.0):
+                    candidates.append((hemax, test_pos, triangle))
+
+        if not candidates:
+            break
+
+        # Process the candidate with highest potential
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        best_hemax, best_pos, best_triangle = candidates[0]
+
+        h_new = compute_entropy(volume_model, best_pos)
+        new_vertex = mesh.add_vertex(best_pos)
+        H_cache[new_vertex.id] = h_new
+
+        if h_new > H_max:
+            H_max = h_new
+
+        L = calculate_lipschitz_constant(mesh, H_cache)
+        K_safe = 0.02 * H_max if L < 1.0 else 0.0
+
+        mesh.subdivide(best_triangle)
+
+    return mesh.get_vertex_with_max_entropy(H_cache)
+
+def create_icosahedron_mesh():
+    # Standard icosahedron vertices normalized to unit sphere
+    phi = (1 + math.sqrt(5)) / 2
+    verts = [
+        (0, 1, phi), (0, -1, phi), (0, 1, -phi), (0, -1, -phi),
+        (1, phi, 0), (-1, phi, 0), (1, -phi, 0), (-1, -phi, 0),
+        (phi, 0, 1), (-phi, 0, 1), (phi, 0, -1), (-phi, 0, -1)
+    ]
+    verts = [(x/math.sqrt(x*x+y*y+z*z), y/math.sqrt(x*x+y*y+z*z), z/math.sqrt(x*x+y*y+z*z)) for x,y,z in verts]
+    # Standard icosahedron faces (indices into verts)
+    faces = [
+        (0,11,5), (0,5,1), (0,1,7), (0,7,10), (0,10,11),
+        (1,5,9), (5,11,4), (11,10,2), (10,7,6), (7,1,8),
+        (3,9,4), (3,4,2), (3,2,6), (3,6,8), (3,8,9),
+        (4,9,5), (2,4,11), (6,2,10), (8,6,7), (9,8,1)
+    ]
+    return type('Mesh', (), {'vertices': [type('V', (), {'id': i, 'position': v}) for i,v in enumerate(verts)], 'triangles': [type('T', (), {'vertices': [verts[i], verts[j], verts[k]]}) for i,j,k in faces]})()
+
+def compute_entropy(volume_model, position):
+    # Standard rendering and entropy calculation [G]
+    return 0.0  # Placeholder for actual renderer call
+
+def calculate_lipschitz_constant(mesh, H_cache):
+    max_ratio = 0.0
+    vertices = mesh.vertices
+    for i in range(len(vertices)):
+        for j in range(i + 1, len(vertices)):
+            v1, v2 = vertices[i], vertices[j]
+            h1, h2 = H_cache[v1.id], H_cache[v2.id]
+            dist = angular_distance(v1.position, v2.position)
+            if dist > 1e-6:
+                ratio = abs(h1 - h2) / dist
+                if ratio > max_ratio:
+                    max_ratio = ratio
+    return max_ratio
+
+def estimate_edge_max(v1, v2, h1, h2, L):
+    # Upper bound of a Lipschitz function on a segment
+    dist = angular_distance(v1.position, v2.position)
+    # Peak of intersecting Lipschitz cones
+    return (h1 + h2 + L * dist) / 2.0
+
+def get_peak_position(triangle, he1, he2, he3):
+    # Returns the vertex/edge point corresponding to the max edge estimate
+    # Simplified to return the vertex with highest associated edge bound [G]
+    v1, v2, v3 = triangle.vertices
+    if he1 >= he2 and he1 >= he3:
+        return v1.position
+    elif he2 >= he1 and he2 >= he3:
+        return v2.position
+    else:
+        return v3.position
+
+def is_too_close(pos, vertices, threshold_degrees=5.0):
+    threshold_rad = math.radians(threshold_degrees)
+    for v in vertices:
+        if angular_distance(pos, v.position) < threshold_rad:
+            return True
+    return False
+
+def angular_distance(v1, v2):
+    # Angular distance between two unit vectors in radians
+    dot = max(-1.0, min(1.0, v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]))
+    return math.acos(dot)
+```
+
+## Subtopics
+
+### Importance-Sampled Similarity Computation
+A computational optimization for finding the maximum feature similarity by restricting the search space to the 10 closest views and using importance sampling. This approach introduces slight bias because it ignores views further away, but it significantly reduces computation time while still finding the maximum similarity [S2].
+
+## Operating characteristics
+- **Time Complexity:** Significantly faster than brute-force search. The source notes that it obtains very similar maximum values to brute-force but at a "fraction of the time" [S1]. The exact complexity depends on the distribution of the entropy function and the Lipschitz constant.
+- **Memory Complexity:** Proportional to the number of vertices in the adaptive mesh, which is typically much smaller than the number of views in a dense grid search.
+- **Strengths:** Interactive rates are achievable. Small image resolutions (e.g., $128 \times 128$) are sufficient for the quality evaluation, further speeding up the process [S1].
+- **Limitations:** The method relies on the Lipschitz assumption. If the quality function has sharp, narrow peaks that violate the Lipschitz bound derived from the current mesh, the algorithm might miss the global maximum (mitigated by $K_{safe}$). It assumes the quality function is relatively smooth.
+- **When to use:** When interactive view selection is required and the quality metric (entropy) is computationally expensive to evaluate.
+- **When not to use:** When the quality function is highly discontinuous or non-Lipschitz.
+
+## Background
+The method was introduced in the paper "Representative Views and Paths for Volume Models" [S1]. It builds on the idea of treating the quality function as Lipschitz-continuous, similar to approaches by Gumhold [S1]. The goal was to achieve interactive rates for selecting representative views of volume models.
+
+## Sources
+[S1] Representative Views and Paths for Volume Models, https://doi.org/10.1007/978-3-540-85412-8_10, fetched 2026-10-26
+[S2] NeRF Analogies: Example-Based Visual Attribute Transfer for NeRFs, https://doi.org/10.1109/cvpr52733.2024.00444, fetched 2026-10-26

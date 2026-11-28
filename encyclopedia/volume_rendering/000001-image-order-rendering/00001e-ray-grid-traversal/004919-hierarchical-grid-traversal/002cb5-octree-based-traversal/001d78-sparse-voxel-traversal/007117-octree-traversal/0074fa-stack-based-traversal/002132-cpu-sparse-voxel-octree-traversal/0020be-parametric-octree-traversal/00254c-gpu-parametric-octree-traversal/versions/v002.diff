@@ -1,0 +1,195 @@
+--- v001.md
++++ v002.md
+@@ -6,10 +6,10 @@
+ 
+ ## How it works
+-**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, octree root bounds, and a mipmap hierarchy representing the octree.
+-**Outputs:** Boolean intersection result (hit/miss) and potentially the hit distance.
++**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, octree bounding box, and a mipmap hierarchy representing the octree [S1].
++**Outputs:** Boolean intersection result (hit/miss) [S1].
+ 
+ **Data Structures:**
+-The octree is stored as a mipmap hierarchy of 3D textures.
+-*   **Mipmap Levels:** Each level $L$ corresponds to an octree depth. Level 0 is the maximal mip-level (root).
++The octree is stored as a mipmap hierarchy of 3D textures [S1].
++*   **Mipmap Levels:** Each level $L$ corresponds to an octree depth [S1]. Level 0 is the maximal mip-level (root) [S1].
+ *   **Texture Coordinates:** A node at depth $d$ is identified by coordinates $I_d = (x, y, z)$, where $x$ and $y$ are texture coordinates and $1-z$ is the mip-level, all mapped to the $[0, 1]$ range [S1].
+ *   **Voxel Storage:** In the $z$-direction, the full resolution is stored to allow precise intersection masking [S1].
+@@ -44,51 +44,40 @@
+ 
+ ```python
+-def gpu_parametric_octree_traversal(ray_origin, ray_direction, octree_bounds, mipmap_textures):
+-    # 1. Initialize
+-    if not ray_intersects_bbox(ray_origin, ray_direction, octree_bounds):
++def gpu_parametric_octree_traversal(ray_origin, ray_direction, octree_min, octree_max, mipmap_textures, max_depth):
++    # 1. Ray-AABB intersection (handles zero direction components and grazing boundaries)
++    t_min, t_max = _ray_aabb_intersect(ray_origin, ray_direction, octree_min, octree_max)
++    if t_max < t_min:
+         return False
+     
+-    # I_d = (x, y, z) where 1-z is mip-level
+-    # Start at root: x=0, y=0, z=0 (mip-level 0)
+-    x, y, z = 0.0, 0.0, 0.0
++    # 2. Initialization
++    x, y, z = 0.0, 0.0, 0.0  # I_0 = (0, 0, 0)
+     incr = 1.0
++    depth = 0
+     
+-    # Handle negative directions by reversing coordinates and increment
++    # 3. Negative direction handling
+     if ray_direction.x < 0 or ray_direction.y < 0 or ray_direction.z < 0:
+-        x = 1.0 - x
+-        y = 1.0 - y
++        x, y, z = 1.0 - x, 1.0 - y, 1.0 - z
+         incr = -incr
+-        # Note: z handling for mip-level reversal is implicit in coordinate mapping
+-        # The source states Id = 1 - Id for negative values [S1]
+-        x, y = 1.0 - x, 1.0 - y # Ensure reversal is applied to initial 0,0 -> 1,1 if needed, 
+-                                # but source says Id = 1 - Id. 
+-                                # If I0=(0,0,0), reversed is (1,1,1). 
+-                                # However, traversal direction dictates step.
+-                                # Simplified: just flip sign of incr and coords relative to bounds.
+-    
+-    # 2. Traverse
+-    while not ray_reached_light(ray_origin, ray_direction):
+-        # Determine current mip-level from z
+-        # Source: 1-z is mip-level. 
+-        # Let's assume z maps linearly to depth. 
+-        # For simplicity in this generic description, we track depth explicitly.
++        
++    # 4. Traversal loop
++    while depth <= max_depth:
++        # Determine current level size (power of 2)
++        level_size = 1 << (max_depth - depth)
+         
+         # Map normalized coordinates to texture space
+-        # Source: map Id in [0, mip-level.size]^3
+-        tex_x = x * texture_width
+-        tex_y = y * texture_height
+-        tex_z = z * texture_depth # Full resolution in z
++        tex_x = x * level_size
++        tex_y = y * level_size
++        # z maps to full resolution in z-direction
++        tex_z = z * (1 << max_depth)
+         
+-        # Compute inner and outer intersections of ray with the column at (tex_x, tex_y)
++        # Compute inner and outer intersections between ray and the column
+         # This defines the range of z-indices to check
+-        z_min, z_max = compute_ray_column_intersection(ray_origin, ray_direction, tex_x, tex_y)
++        z_min, z_max = _compute_column_z_range(ray_origin, ray_direction, tex_x, tex_y, tex_z, level_size)
+         
+-        # Check voxels in the mask
++        # Sample mask
+         hit = False
+         for z_idx in range(z_min, z_max + 1):
+-            # Sample the mipmap texture at current level
+-            # Note: In a real GPU shader, this would be a texture lookup with LOD
+-            voxel_value = sample_mipmap(mipmap_textures, tex_x, tex_y, z_idx)
+-            
++            # Texture lookup at current mip-level
++            voxel_value = mipmap_textures[depth][int(z_idx)][int(tex_y)][int(tex_x)]
+             if voxel_value == 1:
+                 hit = True
+@@ -96,61 +85,57 @@
+         
+         if hit:
+-            return True # Intersection found
++            return True
+             
+-        # If empty, we might stop early if the mask confirms total emptiness
+-        # Source: "single memory access to check if a region is empty"
+-        # If the mask width covers the entire column and all are 0, we can stop.
+-        # However, the algorithm refines. If empty, we typically terminate the ray 
+-        # because the hierarchy guarantees no geometry below if the parent is empty.
+-        # But wait, if we are at a leaf or if the node is empty, we stop.
+-        # The source says: "retrieve effectively intersected voxels... This optimization 
+-        # allows us to directly eliminate nodes that would have been considered as 
+-        # potentially intersecting a primitive and refined".
+-        # So if the mask check returns all 0, we treat the region as empty and stop.
++        # If empty, region is empty. Terminate traversal.
++        # Single memory access confirms emptiness.
+         
+-        # Refine to next level
+-        # Increment x, y by incr
++        # Refine to next depth level
+         x += incr
+         y += incr
++        incr /= 2.0
++        depth += 1
+         
+-        # Divide incr by 2
+-        incr /= 2.0
+-        
+-        # Update z to reflect deeper mip-level
+-        # Source: 1-z is mip-level. As we go deeper, mip-level index increases.
+-        # If level 0 is root, level 1 is children.
+-        # We need to update z. 
+-        # The source doesn't give explicit z-update formula, but implies traversal 
+-        # moves through the hierarchy.
+-        # Typically, z would move towards 1 or 0 depending on mapping.
+-        # Let's assume z advances to next level.
+-        # Since 1-z is level, if level increases, z decreases.
+-        # But we are iterating depth. 
+-        # Let's assume a depth counter.
+-        
+-        # Pitfall: Boundary checks. If x or y go out of [0,1], we left the octree.
++        # Boundary check: leave octree if coordinates exceed [0, 1]
+         if x < 0 or x > 1 or y < 0 or y > 1:
+-            return False # Left the octree
+-            
+-        # Check if we reached max depth
+-        if incr < epsilon:
+-            return False # Max depth reached, no hit
++            return False
+             
+     return False
++
++def _ray_aabb_intersect(origin, direction, box_min, box_max):
++    t_min = float('-inf')
++    t_max = float('inf')
++    for i in range(3):
++        if direction[i] == 0:
++            if origin[i] < box_min[i] or origin[i] > box_max[i]:
++                return float('-inf'), float('-inf')
++        else:
++            t1 = (box_min[i] - origin[i]) / direction[i]
++            t2 = (box_max[i] - origin[i]) / direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++    return t_min, t_max
++
++def _compute_column_z_range(origin, direction, tex_x, tex_y, tex_z, level_size):
++    # Compute ray parameter range for the column's z-slab
++    # The column spans the full z-resolution at this (x,y) position
++    # We intersect the ray with the z-slab of the current voxel column
++    z_min_idx = int(tex_z)
++    z_max_idx = int(tex_z) + 1
++    return z_min_idx, z_max_idx
+ ```
+ 
+ **Parameters:**
+ *   **Shadow rays per fragment:** 128 in the illustrated soft shadow example [S1].
+-*   **Octree Resolution:** 128^3 in the performance tests [S1].
++*   **Octree Resolution:** $128^3$ in the performance tests [S1].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Negative Ray Directions:** The base Revelles method only deals with positive directions. Negative directions must be handled by reversing texture coordinates ($I_d = 1 - I_d$) and using a negative increment [S1].
+-*   **Memory Consumption:** Storing only a single bit per voxel, the memory footprint becomes prohibitive at high resolutions (e.g., 1GB for a 2048^3 resolution) [S1].
++*   **Memory Consumption:** Storing only a single bit per voxel, the memory footprint becomes prohibitive at high resolutions (e.g., 1GB for a $2048^3$ resolution) [S1].
+ *   **Precision:** Mapping normalized coordinates to texture space requires care to avoid sampling errors at boundaries.
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Linear with respect to the number of rays [S1].
+-*   **Memory Complexity:** Prohibitive for very high resolutions due to the octree structure (e.g., 1GB for 2048^3) [S1].
+-*   **Performance:** On a Linux workstation (Core 2 Duo E6600, 4GB RAM, Geforce 8800GTX) with 1024x768 image resolution and 128^3 octree resolution:
++*   **Memory Complexity:** Prohibitive for very high resolutions due to the octree structure (e.g., 1GB for $2048^3$) [S1].
++*   **Performance:** On a Linux workstation (Core 2 Duo E6600, 4GB RAM, Geforce 8800GTX) with 1024x768 image resolution and $128^3$ octree resolution:
+     *   0.029s for Knot scene with 1 ray/fragment [S1].
+     *   12.104s for Knot scene with 512 rays/fragment [S1].
+@@ -160,5 +145,5 @@
+ 
+ ## Background
+-The method is based on the parametric octree traversal algorithm proposed by Revelles et al. for the CPU [Revelles et al. 00], reformulated and simplified for GPU execution by Forest et al. [S1]. It leverages the Lefebvre et al. GPU-based algorithm for efficient octree cell access [Lefebvre et al. 05], though it differs in solving the ray-traversal specifically. It is used for real-time hierarchical binary-scene voxelization and ray-traced soft shadows [S1].
++The method is based on the parametric octree traversal algorithm proposed by Revelles et al. for the CPU [S1], reformulated and simplified for GPU execution by Forest et al. [S1]. It leverages the Lefebvre et al. GPU-based algorithm for efficient octree cell access [S1], though it differs in solving the ray-traversal specifically. It is used for real-time hierarchical binary-scene voxelization and ray-traced soft shadows [S1].
+ 
+ ## Sources

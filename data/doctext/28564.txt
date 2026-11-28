@@ -1,0 +1,311 @@
+c# - Basic Dual Contouring Theory - Stack Overflow
+Collectives™ on Stack Overflow
+Find centralized, trusted content and collaborate around the technologies you use most.
+Learn more about Collectives
+Stack Internal
+Knowledge at work
+Bring the best of human thought and AI automation together at your work.
+Explore Stack Internal
+Basic Dual Contouring Theory
+Ask Question
+Asked
+14 years, 8 months ago
+Modified
+6 years ago
+Viewed
+14k times
+15
+I've been searching on google, but cannot find anything basic. In it's most basic form, how is dual contouring (for a voxel terrain) implememted? I know what it does, and why, but cannot understand how to do it. JS or C# (preferably) is good.Has anyone used Dual contouring before and can explain it briefly?
+c#
+javascript
+scripting
+terrain
+voxel
+Share
+Improve this question
+Follow
+edited Jun 27, 2011 at 6:31
+asked Jun 26, 2011 at 18:31
+Muzz5
+48133 gold badges55 silver badges1212 bronze badges
+5
+You could try reading the original paper: frankpetterson.com/publications/dualcontour/dualcontour.pdf What have you tried so far?
+Mikola
+–
+Mikola
+2011-06-26 18:34:56 +00:00
+Commented
+Jun 26, 2011 at 18:34
+Read that, I get slightly lost in the rhetoric and the equations. I also saw [link] (procworld.blogspot.com/2010/11/from-voxels-to-polygons.html) which has some stuff on it, but again is slightly confusing. I read another paper which was quite similar as well. So any more basic explanation?
+Muzz5
+–
+Muzz5
+2011-06-26 18:42:45 +00:00
+Commented
+Jun 26, 2011 at 18:42
+What part of them confused you?
+Mikola
+–
+Mikola
+2011-06-26 18:59:12 +00:00
+Commented
+Jun 26, 2011 at 18:59
+I couldn't actually find a desciption of what happens. Like, how the mesh is created, from what points. So I guess the formulae confused me.
+Muzz5
+–
+Muzz5
+2011-06-26 19:32:14 +00:00
+Commented
+Jun 26, 2011 at 19:32
+Is there just a basic explanation of what happens? Like 'these points are calculated, joined together to form a mesh, and then the original voxels are removed'? Has anyone used dual contouring before?
+Muzz5
+–
+Muzz5
+2011-06-26 20:42:01 +00:00
+Commented
+Jun 26, 2011 at 20:42
+Add a comment
+|
+1 Answer 1
+Sorted by:
+Reset to default
+Highest score (default)
+Trending (recent votes count more)
+Date modified (newest first)
+Date created (oldest first)
+49
+Ok. So I got bored tonight and decided to give implementing dual contouring myself a shot. Like I said in the comments, all the relevant material is in section 2 of the following paper:
+Original Version: http://www.frankpetterson.com/publications/dualcontour/dualcontour.pdf
+Archived Version: https://web.archive.org/web/20170713094715if_/http://www.frankpetterson.com/publications/dualcontour/dualcontour.pdf
+In particular, the topology of the mesh is described in part 2.2 in the following section, quote:
+For each cube that exhibits a sign change, generate a vertex positioned at the minimizer of the quadratic function of equation 1.
+For each edge that exhibits a sign change, generate a quad connecting the minimizing vertices of the four cubes containing the edge.
+That's all there is to it! You solve a linear least squares problem to get a vertex for each cube, then you connect adjacent vertices with quads. So using this basic idea, I wrote a dual contouring isosurface extractor in python using numpy (partly just to satisfy my own morbid curiosity on how it worked). Here is the code:
+```
+import numpy as np
+import numpy.linalg as la
+import scipy.optimize as opt
+import itertools as it
+
+#Cardinal directions
+dirs = [ [1,0,0], [0,1,0], [0,0,1] ]
+
+#Vertices of cube
+cube_verts = [ np.array([x, y, z])
+    for x in range(2)
+    for y in range(2)
+    for z in range(2) ]
+
+#Edges of cube
+cube_edges = [ 
+    [ k for (k,v) in enumerate(cube_verts) if v[i] == a and v[j] == b ]
+    for a in range(2)
+    for b in range(2)
+    for i in range(3) 
+    for j in range(3) if i != j ]
+
+#Use non-linear root finding to compute intersection point
+def estimate_hermite(f, df, v0, v1):
+    t0 = opt.brentq(lambda t : f((1.-t)*v0 + t*v1), 0, 1)
+    x0 = (1.-t0)*v0 + t0*v1
+    return (x0, df(x0))
+
+#Input:
+# f = implicit function
+# df = gradient of f
+# nc = resolution
+def dual_contour(f, df, nc):
+
+    #Compute vertices
+    dc_verts = []
+    vindex   = {}
+    for x,y,z in it.product(range(nc), range(nc), range(nc)):
+        o = np.array([x,y,z])
+
+        #Get signs for cube
+        cube_signs = [ f(o+v)>0 for v in cube_verts ]
+
+        if all(cube_signs) or not any(cube_signs):
+            continue
+
+        #Estimate hermite data
+        h_data = [ estimate_hermite(f, df, o+cube_verts[e[0]], o+cube_verts[e[1]]) 
+            for e in cube_edges if cube_signs[e[0]] != cube_signs[e[1]] ]
+
+        #Solve qef to get vertex
+        A = [ n for p,n in h_data ]
+        b = [ np.dot(p,n) for p,n in h_data ]
+        v, residue, rank, s = la.lstsq(A, b)
+
+        #Throw out failed solutions
+        if la.norm(v-o) > 2:
+            continue
+
+        #Emit one vertex per every cube that crosses
+        vindex[ tuple(o) ] = len(dc_verts)
+        dc_verts.append(v)
+
+    #Construct faces
+    dc_faces = []
+    for x,y,z in it.product(range(nc), range(nc), range(nc)):
+        if not (x,y,z) in vindex:
+            continue
+
+        #Emit one face per each edge that crosses
+        o = np.array([x,y,z])   
+        for i in range(3):
+            for j in range(i):
+                if tuple(o + dirs[i]) in vindex and tuple(o + dirs[j]) in vindex and tuple(o + dirs[i] + dirs[j]) in vindex:
+                    dc_faces.append( [vindex[tuple(o)], vindex[tuple(o+dirs[i])], vindex[tuple(o+dirs[j])]] )
+                    dc_faces.append( [vindex[tuple(o+dirs[i]+dirs[j])], vindex[tuple(o+dirs[j])], vindex[tuple(o+dirs[i])]] )
+
+    return dc_verts, dc_faces
+```
+It is not very fast because it uses the SciPy's generic non-linear root finding methods to find the edge points on the isosurface. However, it does seem to work reasonably well and in a fairly generic way. To test it, I ran it using the following test case (in the Mayavi2 visualization toolkit):
+```
+import enthought.mayavi.mlab as mlab
+
+center = np.array([16,16,16])
+radius = 10
+
+def test_f(x):
+    d = x-center
+    return np.dot(d,d) - radius**2
+
+def test_df(x):
+    d = x-center
+    return d / sqrt(np.dot(d,d))
+
+verts, tris = dual_contour(f, df, n)
+
+mlab.triangular_mesh( 
+            [ v[0] for v in verts ],
+            [ v[1] for v in verts ],
+            [ v[2] for v in verts ],
+            tris)
+```
+This defines a sphere as an implicit equation, and solves for the 0-isosurface by dual contouring. When I ran it in the toolkit, this was the result:
+In conclusion, it appears to be working.
+Share
+Improve this answer
+Follow
+edited Feb 15, 2020 at 20:23
+vallentin
+26.6k66 gold badges7070 silver badges9393 bronze badges
+answered Jun 27, 2011 at 10:48
+Mikola
+9,35422 gold badges3636 silver badges4242 bronze badges
+Sign up to request clarification or add additional context in comments.
+13 Comments
+Add a comment
+Muzz5
+Muzz5 Over a year ago
+Wow! Your dedication is pretty awesome. I don't know any Python, but I should be able to convert it with some time. Thanks though. The bit which confuses me is formula 1 in the paper.
+2011-06-27T13:45:25.587Z+00:00
+0
+Reply
+Copy link
+Mikola
+Mikola Over a year ago
+Oh, that's just a typo. It should be a sum. They just use it to compute a linear-least-squares solution to find the vertex per face. If you read on a bit they explain that pretty thoroughly in section 2.3 (where they also discuss how to solve a linear least squares problem in more detail than strictly necessary :) ).
+2011-06-27T14:41:12.85Z+00:00
+0
+Reply
+Copy link
+Muzz5
+Muzz5 Over a year ago
+@Mikola What actually happens? What I mean is what points are actually put together to form the mesh?
+2011-06-27T15:12:34.513Z+00:00
+0
+Reply
+Copy link
+Mikola
+Mikola Over a year ago
+The vertices are just the linear least squares solutions to the intersections of the planes defined by the hermite data on each edge. The faces just given indexed by the edges. The connectivity data is described in section 2.2, if you look there is an enumerated list about halfway down the right column at the start of that section that describes how the vertices and faces are defined.
+2011-06-27T15:20:24.827Z+00:00
+0
+Reply
+Copy link
+Mikola
+Mikola Over a year ago
+I updated the solution and added the direct quote from the relevant section. It is really all there. I recommend you read all of section 2 again, but more carefully this time, and try to understand what it is saying.
+2011-06-27T17:00:46.87Z+00:00
+0
+Reply
+Copy link
+Add a comment | Show 8 more comments
+Start asking to get answers
+Find the answer to your question by asking.
+Ask question
+Explore related questions
+c#
+javascript
+scripting
+terrain
+voxel
+See similar questions with these tags.
+The Overflow Blog
+Even the chip makers are making LLMs
+Featured on Meta
+Logo updates to Stack Overflow's visual identity
+Policy: Generative AI (e.g., ChatGPT) is banned
+I’m Jody, the Chief Product and Technology Officer at Stack Overflow. Let’s...
+Release notes and bug fixes for beta.stackoverflow.com
+Linked
+11
+How to smooth the blocks of a 3D voxel world?
+5
+What is "Hermite Data" described in the Dual Contouring algorithm?
+0
+Plotting a 3d triangular mesh from point cloud
+0
+How to polygonize or create triangles in surface nets isosurface creation algorithm
+Related
+7
+Calculating the contours of a 3D heightmap?
+3
+Sparse Voxel Octrees
+0
+Plain Terrain in ThreeJS
+2
+How to create a terrain in three.js?
+3
+client side contour plots
+5
+Create a Random 2D Concave Polygon Landscape JavaScript
+0
+Can I make a THREE.js shape from a series of contours?
+1
+How would I create a terrain like this in Three.js
+0
+Javascript 3d Terrain Without Three.js
+2
+A fast way to fill contours with the ability to export to a polygon-like format
+Hot Network Questions
+Does the (non alphabetical) authorship position of a paper reflect the responsibilities towards the paper itself?
+how to compile Chinese in ltx-talk by Luatex？the Chinese characters can not be shown in Slide
+ASCII characters missing from Gnome Characters app on Ubuntu 24.04
+May a retiree claim affiliation with former, long-term employer?
+If SSNs and bank account numbers are PII, why aren't all synthetic PKs PII?
+How to add a BCD (BOOTMGR) entry to go straight into UEFI setup?
+Automate creating lines based off non-spatial table and points (many to many) in QGIS
+How can tasks exclusive to sysadmins be performed without over-permissioning?
+Does this carbon fork need to be replaced?
+how many g forces does an aircraft experience during landing?
+how to trim inside TikZ?
+Does Sam Harris' view of No Self run at odds with his ethics?
+Is a big jackhammer right for busting concrete-filled planter?
+CLI Task Tracker
+How do I pronounce aloud the given mathematical expression involving expectation values?
+Graphics of GeometricTransformation has incorrect PlotRange
+Application of step function for time dependent covariates in coxme?
+Getting size of overview in QGIS Print layout
+Are parallel fifths/octaves considered according to the motion of voices or just the intervals present in the piece?
+List of Kangxi radicals (康熙部首)
+Given the existence of lost Gospels, why is lack of mention of Q used as an argument against it?
+Is this an incorrect definition of the automorphism group of a graph?
+Will rejecting a companion's advances ruin things between us for good?
+Gmail "Send mail as" with Google Workspace alias shows primary address instead of alias to recipients
+more hot questions
+Question feed
+default

@@ -1,0 +1,36 @@
+# Application-Specific Extensions
+
+Also called: Domain-Specific 3DGS, Non-Photometric Gaussian Splatting, 3DGS Extensions
+
+## Overview
+Application-Specific Extensions adapt the standard 3D Gaussian Splatting (3DGS) framework [2812-3d-gaussian-splatting.md] to solve problems beyond novel-view synthesis of RGB images. They address the limitations of standard 3DGS—such as its reliance on view-dependent spherical harmonics for color and its implicit volumetric representation—by modifying attribute definitions, rendering equations, or post-processing steps. This family includes methods for physical property reconstruction (radiative/tomographic), non-photometric domain adaptation (microscopy, ultrasound), and explicit geometry extraction (meshing).
+
+## Shared principles
+All extensions in this family retain the core 3D Gaussian primitive representation: a set of $M$ anisotropic 3D Gaussian kernels $\mathcal{G} = \{G_i\}_{i=1}^M$ [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md). Each kernel is defined by:
+*   $\mathbf{p}_i \in \mathbb{R}^3$: Position (mean) [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md).
+*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md).
+*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale matrix [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md).
+*   The covariance matrix is $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^\top \mathbf{R}_i^\top$ [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md).
+
+The rendering pipeline's geometric projection remains consistent for ray-based methods: 3D Gaussians are transformed into ray space, and the projected 2D covariance $\mathbf{\hat{\Sigma}}_i$ is computed using the Jacobian $J$ of the affine approximation of the projection and the rotation part $W$ of the extrinsic matrix:
+$$ \mathbf{\hat{\Sigma}}_i = J W \mathbf{\Sigma}_i W^T J^T $$
+[Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md)
+
+However, the attribute representation and loss functions diverge significantly from the standard RGB opacity/color model [G]. Standard 3DGS uses view-dependent color $\mathbf{c}_i(\mathbf{d})$ [G]. In radiative and domain-specific variants, this is replaced by view-independent scalar attributes or feature vectors [1875-volumetric-gaussian-splatting-avis.md], [3301-gaussian-splatting-for-microscopy.md], [5170-ultragauss-rendering.md].
+
+## Subtopics
+
+### [Radiative and Tomographic Gaussians](4971-radiative-and-tomographic-gaussians.md)
+This family adapts 3DGS for X-ray imaging and radiative physics by replacing view-dependent color with view-independent scalar attributes (density or intensity) [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md). It solves the problem of reconstructing volumetric density fields or synthesizing X-ray projections from 2D attenuation measurements, where physical attenuation depends on integrated density along the ray path rather than surface appearance [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md). Unlike standard 3DGS, which uses spherical harmonics for view-dependent appearance, these methods remove angular dependence to model isotropic radiative transfer [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md). [4971-radiative-and-tomographic-gaussians.md]
+
+### [Domain-Specific Adaptations](5621-domain-specific-adaptations.md)
+Domain-Specific Adaptations extend 3DGS to non-photometric domains by replacing view-dependent RGB color with scalar attributes or specialized geometric intersections [1875-volumetric-gaussian-splatting-avis.md], [3301-gaussian-splatting-for-microscopy.md], [5170-ultragauss-rendering.md]. Unlike standard 3DGS which optimizes for novel-view synthesis from calibrated RGB images, these methods optimize against 3D volume data, microscopy stacks, or ultrasound probe planes using domain-specific loss functions and rendering primitives [1875-volumetric-gaussian-splatting-avis.md], [3301-gaussian-splatting-for-microscopy.md], [5170-ultragauss-rendering.md]. [5621-domain-specific-adaptations.md]
+
+### [Surface and Mesh Extraction](8498-surface-and-mesh-extraction.md)
+This family comprises methods to extract explicit triangular meshes from trained 3DGS models. Standard 3DGS represents scenes as implicit volumetric primitives, lacking a native surface representation. These methods solve the problem of obtaining watertight, textured geometry for downstream applications like simulation, AR/VR, or editing. They differ from sibling methods like [Radiative and Tomographic Gaussians](4971-radiative-and-tomographic-gaussians.md) by focusing on geometric extraction rather than physical property rendering, and from [Domain-Specific Adaptations](5621-domain-specific-adaptations.md) by targeting general mesh generation rather than specific domain constraints like microscopy. [8498-surface-and-mesh-extraction.md]
+
+## Background
+Originating from the need to apply Gaussian Splatting beyond standard computer graphics, these extensions emerged as the 3DGS framework [2812-3d-gaussian-splatting.md] gained traction for its efficiency. The divergence from photometric rendering began with adaptations for scientific imaging (X-ray, microscopy) and later expanded to explicit geometry extraction to bridge the gap between implicit splats and explicit mesh-based pipelines.
+
+## Sources
+[S1] Radiative Gaussian Splatting, https://arxiv.org/abs/2312.00000, 2023-12-01

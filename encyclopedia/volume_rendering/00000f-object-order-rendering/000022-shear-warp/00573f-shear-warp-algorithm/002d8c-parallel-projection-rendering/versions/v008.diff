@@ -1,0 +1,259 @@
+--- v007.md
++++ v008.md
+@@ -7,19 +7,19 @@
+ 
+ ## How it works
+-The algorithm operates in three main phases: preprocessing (RLE construction), compositing (synchronous traversal), and warping. It assumes a parallel projection where the viewing direction is fixed relative to the volume axes such that the shear-warp factorization results in a unity scale factor for all slices [S2].
++The algorithm operates in three main phases: preprocessing (RLE construction), compositing (synchronous traversal), and warping [S2]. It assumes a parallel projection where the viewing direction is fixed relative to the volume axes such that the shear-warp factorization results in a unity scale factor for all slices [S2].
+ 
+ ### Inputs and Outputs
+-*   **Input:** A 3D scalar volume $V$ of dimensions $W \times H \times D$. An opacity transfer function $f(v)$ that maps scalar values to opacity. A user-specified opacity threshold $\tau$ defining the boundary between transparent and non-transparent voxels.
+-*   **Output:** A final 2D rendered image.
++*   **Input:** A 3D scalar volume $V$ of dimensions $W \times H \times D$. An opacity transfer function $f(v)$ that maps scalar values to opacity. A user-specified opacity threshold $\tau$ defining the boundary between transparent and non-transparent voxels [S2].
++*   **Output:** A final 2D rendered image [S2].
+ 
+ ### Data Structures
+ The algorithm relies on two primary RLE structures to exploit spatial coherence [S2]:
+ 
+-1.  **Volume RLE:** The sheared and resampled volume is stored as run-length encoded voxel scanlines. Each scanline consists of two types of runs:
+-    *   **Transparent runs:** Voxels where $f(v) < \tau$.
+-    *   **Non-transparent runs:** Voxels where $f(v) \ge \tau$.
++1.  **Volume RLE:** The sheared and resampled volume is stored as run-length encoded voxel scanlines [S1, unofficial]. Each scanline consists of two types of runs:
++    *   **Transparent runs:** Voxels where $f(v) < \tau$ [S1, unofficial].
++    *   **Non-transparent runs:** Voxels where $f(v) \ge \tau$ [S1, unofficial].
+     *   **Layout:** Each non-transparent voxel consumes 4 bytes (typically for the scalar value or pre-computed color/opacity). Each run header consumes 1 byte (encoding the run length or type) [S2].
+ 
+-2.  **Intermediate Image RLE:** The intermediate image (created after shearing and projection) stores run information to skip occluded pixels.
++2.  **Intermediate Image RLE:** The intermediate image (created after shearing and projection) stores run information to skip occluded pixels [S2].
+     *   **Layout:** For each opaque pixel in the intermediate image scanline, a pointer or offset is stored to the next non-opaque pixel in that scanline [S1, unofficial]. This allows the algorithm to skip over regions of the image that are already fully occluded by previously processed voxels [S2].
+ 
+@@ -39,10 +39,10 @@
+     *   Traverse the volume and the intermediate image in synchrony, processing slice by slice [S2].
+     *   For each volume scanline and its corresponding intermediate image scanline:
+-        1.  Initialize the compositing state (e.g., current accumulated opacity and color).
++        1.  Initialize the compositing state (e.g., current accumulated opacity and color) [G].
+         2.  Iterate through the volume RLE runs.
+         3.  **Skip Transparent Runs:** If the current volume run is transparent, skip it entirely [S1, unofficial].
+         4.  **Process Non-Transparent Runs:** For a non-transparent run:
+             *   Check the intermediate image RLE to see if the corresponding pixel range is already occluded (fully opaque). If so, skip the compositing work for this run [S1, unofficial].
+-            *   If not fully occluded, perform the compositing. Since the scale factor is 1, each voxel maps directly to one pixel. The voxel's contribution is blended into the intermediate image pixel using standard front-to-back or back-to-front alpha compositing [S2].
++            *   If not fully occluded, perform the compositing. Since the scale factor is 1, each voxel maps directly to one pixel. The voxel's contribution is blended into the intermediate image pixel using standard alpha compositing [G].
+             *   Update the intermediate image RLE if the pixel becomes opaque, potentially shortening future runs [S2].
+ 
+@@ -59,106 +59,56 @@
+     """
+     # 1. Preprocessing: Build Volume RLE
+-    # Returns a list of runs: (type, length, data)
+-    # type: 0 for transparent, 1 for non-transparent
+-    # data: scalar value or pre-computed color for non-transparent runs
+     volume_rle = build_volume_rle(volume, opacity_func, threshold)
+     
+     # 2. Initialize Intermediate Image RLE
+     # Each entry stores the index of the next opaque pixel, or -1 if none
+-    # Initialized to point to the next pixel in the scanline
+-    image_rle = initialize_image_rle(width, height)
++    image_rle = [[-1] * width for _ in range(height)]
+     
+     # 3. Shear and Project (Resampling)
+     # Since scale factor is 1, we can map voxels directly to pixels
+     # The shear transformation aligns voxel scanlines with pixel scanlines
+-    # We assume the sheared volume data is accessible in scanline order
+     sheared_volume = shear_volume(volume)
+     
+     # 4. Compositing
++    intermediate_image = [[(0.0, 0.0, 0.0)] * width for _ in range(height)]
++    
+     for slice_idx in range(volume.depth):
+-        # Get the current slice's volume scanlines and image scanlines
+-        # Note: In shear-warp, the intermediate image is built slice by slice
+-        # corresponding to the sheared volume slices
+-        
+-        # For each scanline in the slice
+         for scanline_idx in range(volume.height):
+             vol_runs = volume_rle[slice_idx][scanline_idx]
+-            img_runs = image_rle[slice_idx][scanline_idx]
+-            
+-            # Initialize compositing state for this scanline
+             acc_color = (0.0, 0.0, 0.0)
+             acc_opacity = 0.0
+-            
+-            # Pointer to current run in volume and image
+-            vol_run_idx = 0
+-            img_run_idx = 0
+-            
+-            # Current pixel coordinate in the intermediate image
+-            # Starts at the beginning of the scanline
+             current_pixel = 0
+             
+-            while vol_run_idx < len(vol_runs):
+-                run_type, run_length, run_data = vol_runs[vol_run_idx]
+-                
++            for run_type, run_length, run_data in vol_runs:
+                 if run_type == 0: # Transparent run
+-                    # Skip transparent voxels
+                     current_pixel += run_length
+-                    vol_run_idx += 1
+                     continue
+                 
+                 # Non-transparent run
+-                # Check if this pixel range is already occluded in the image
+-                # We need to check the image RLE to see if the pixels 
+-                # corresponding to this run are already opaque.
+-                
+-                # Determine the pixel range covered by this run
+-                # Since scale is 1, run_length pixels are covered
+                 start_pixel = current_pixel
+                 end_pixel = current_pixel + run_length
+                 
+                 # Check occlusion using image RLE
+-                # If the image RLE indicates that pixels from start_pixel 
+-                # to end_pixel are already opaque, skip compositing
+-                is_occluded = check_image_occlusion(img_runs, start_pixel, end_pixel)
++                is_occluded = check_image_occlusion(image_rle[scanline_idx], start_pixel, end_pixel)
+                 
+                 if not is_occluded:
+-                    # Process the run
+-                    # Since scale is 1, each voxel maps to one pixel
+-                    # We iterate through the voxels in the run
+                     for i in range(run_length):
+                         pixel_idx = start_pixel + i
+-                        
+-                        # Get voxel value
+-                        # Note: run_data might be a single value or an array
+-                        # Assuming run_data is an array of values for the run
+                         voxel_val = run_data[i] if isinstance(run_data, list) else run_data
+                         
+-                        # Compute opacity and color
+                         opacity = opacity_func(voxel_val)
+-                        color = compute_color(voxel_val) # Simplified
++                        color = compute_color(voxel_val)
+                         
+-                        # Front-to-back compositing
+-                        # C_new = C_old + C_voxel * alpha_voxel * (1 - alpha_old)
+-                        # alpha_new = alpha_old + alpha_voxel * (1 - alpha_old)
+-                        
+-                        # Update accumulator
+-                        acc_color = acc_color + color * opacity * (1.0 - acc_opacity)
++                        acc_color = tuple(c + col * opacity * (1.0 - acc_opacity) for c, col in zip(acc_color, color))
+                         acc_opacity = acc_opacity + opacity * (1.0 - acc_opacity)
+                         
+-                        # Update image RLE if this pixel becomes opaque
+-                        # This is an optimization: if the pixel is now opaque,
+-                        # we can merge runs in the image RLE
+-                        if acc_opacity >= 1.0: # Or some threshold
+-                            update_image_rle(img_runs, pixel_idx)
++                        if acc_opacity >= 1.0:
++                            update_image_rle(image_rle[scanline_idx], pixel_idx)
+                     
+-                    # Update current pixel pointer
+                     current_pixel = end_pixel
+-                
+-                vol_run_idx += 1
+             
+-            # Store the accumulated color for this scanline in the intermediate image
+-            # Note: In a real implementation, this would be written to a buffer
+-            store_intermediate_scanline(slice_idx, scanline_idx, acc_color)
+-    
++            for p in range(width):
++                intermediate_image[scanline_idx][p] = acc_color
++                
+     # 5. Warp
+     final_image = warp_image(intermediate_image)
+@@ -166,7 +116,4 @@
+ 
+ def build_volume_rle(volume, opacity_func, threshold):
+-    """
+-    Builds RLE for the volume.
+-    """
+     rle = []
+     for slice in volume:
+@@ -177,12 +124,9 @@
+             current_run_length = 0
+             current_run_data = []
+-            
+             for voxel in scanline:
+                 val = voxel.value
+                 op = opacity_func(val)
+                 is_transparent = op < threshold
+-                
+                 run_type = 0 if is_transparent else 1
+-                
+                 if run_type == current_run_type:
+                     current_run_length += 1
+@@ -194,34 +138,36 @@
+                     current_run_length = 1
+                     current_run_data = [val]
+-            
+             if current_run_type is not None:
+                 runs.append((current_run_type, current_run_length, current_run_data))
+-            
+             slice_rle.append(runs)
+         rle.append(slice_rle)
+     return rle
+ 
+-def check_image_occlusion(img_runs, start_pixel, end_pixel):
+-    """
+-    Checks if the pixel range [start_pixel, end_pixel) is already opaque.
+-    """
+-    # Iterate through image runs
+-    for run_type, run_length, run_data in img_runs:
+-        run_start = 0 # Simplified: assuming runs are sequential
+-        # In a real implementation, img_runs would store offsets
+-        # For this pseudocode, we assume a simple sequential check
+-        # This is a placeholder for the actual RLE traversal logic
+-        pass
+-    return False # Placeholder
+-
+-def update_image_rle(img_runs, pixel_idx):
+-    """
+-    Updates the image RLE to mark a pixel as opaque.
+-    """
+-    pass # Placeholder for RLE merge logic
++def check_image_occlusion(img_rle, start_pixel, end_pixel):
++    for p in range(start_pixel, end_pixel):
++        next_opaque = img_rle[p]
++        if next_opaque != -1 and next_opaque < end_pixel:
++            return True
++    return False
++
++def update_image_rle(img_rle, pixel_idx):
++    for p in range(pixel_idx, len(img_rle)):
++        if img_rle[p] == -1 or img_rle[p] > p:
++            img_rle[p] = pixel_idx
++        else:
++            break
++
++def shear_volume(volume):
++    return volume # Simplified for pseudocode
++
++def compute_color(voxel_val):
++    return (voxel_val, voxel_val, voxel_val) # Simplified for pseudocode
++
++def warp_image(intermediate_image):
++    return intermediate_image # Simplified for pseudocode
+ ```
+ 
+ ### Parameters and Typical Values
+-*   **Opacity Threshold ($\tau$):** User-specified. Determines the cutoff for transparent vs. non-transparent runs. Typical values depend on the data range and transfer function [S2].
++*   **Opacity Threshold ($\tau$):** User-specified. Determines the cutoff for transparent vs. non-transparent runs [S1, unofficial].
+ *   **Scale Factor:** Fixed at 1.0 for parallel projections [S2].
+ 
+@@ -232,5 +178,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The compositing step is linear with respect to the number of non-transparent voxels and pixels, but significantly faster in practice due to skipping transparent and occluded regions [S2]. The preprocessing step is also linear with respect to the volume size [S2].
++*   **Time Complexity:** The compositing step is linear with respect to the number of non-transparent voxels and pixels, but significantly faster in practice due to skipping transparent and occluded regions [S2].
+ *   **Memory Complexity:** Requires $O(N)$ memory for the volume RLE, where $N$ is the number of voxels. Specifically, 4 bytes per non-transparent voxel and 1 byte per run [S2]. The algorithm requires three copies of the volume RLE in memory for optimal performance [S2].
+ *   **Measured Performance:**
+@@ -241,9 +187,9 @@
+     *   Color renderings take roughly twice as long as grayscale renderings [S2].
+ *   **Strengths:**
+-    *   High performance for parallel projections with spatial coherence.
++    *   High performance for parallel projections with spatial coherence [S2].
+     *   No performance degradation when the major viewing axis changes, provided memory constraints are met [S2].
+     *   Minimal loss of image quality compared to subsampling methods [S2].
+ *   **Limitations:**
+-    *   Requires static opacity transfer function.
++    *   Requires static opacity transfer function [S2].
+     *   Requires sufficient memory to store three copies of the volume RLE [S2].
+     *   Optimized for parallel projections; perspective projections require a different variant (Parallel Perspective Shear-Warp Rendering) [S2].

@@ -1,0 +1,160 @@
+--- v005.md
++++ v006.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Loss-based Adaptive Sampling is a ray sampling strategy that allocates more samples to image regions exhibiting higher rendering loss, thereby prioritizing areas with inadequate convergence or high-frequency detail [S1]. It distinguishes itself from sibling methods by partitioning the image into a fixed spatial grid (typically 8x8) to compute local loss statistics, rather than using random global sampling or continuous probability density functions [S1]. This approach ensures that computational resources are concentrated on regions with drastic color or depth changes, accelerating training convergence for radiance fields [S1].
++Loss-based Adaptive Sampling is a ray sampling strategy that allocates more samples to image regions exhibiting higher rendering loss, thereby prioritizing areas with inadequate convergence or high-frequency detail [S1]. It partitions the image into a fixed 8×8 spatial grid to compute local loss statistics per region [S1]. This approach concentrates computational resources on regions with drastic color or depth changes, accelerating training convergence for radiance fields [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of source views; a current neural radiance field model; a total sample count per image $n_i$.
+-*   **Output:** A set of sampled pixels (rays) for the next training iteration, weighted by region loss.
++*   **Input:** A set of source views; a current neural radiance field model; a total sample count per image $n_i$ [S1].
++*   **Output:** A set of sampled pixels (rays) for the next training iteration, weighted by region loss [S1].
+ 
+ **Data Structures:**
+@@ -33,8 +33,9 @@
+ **Pseudocode:**
+ ```python
+-def loss_based_adaptive_sampling(image_width, image_height, grid_size=8, total_samples_ni, source_views, model):
++import random
++
++def loss_based_adaptive_sampling(image_width, image_height, grid_size=8, total_samples_ni=1000):
+     """
+     Implements Loss-based Adaptive Sampling.
+-    
+     Args:
+         image_width (int): Width of the source images.
+@@ -42,68 +43,56 @@
+         grid_size (int): Size of the grid (default 8, resulting in 64 regions).
+         total_samples_ni (int): Total number of samples to allocate per image.
+-        source_views (list): List of source view images or camera parameters.
+-        model: The neural radiance field model used to compute loss.
+-        
+     Returns:
+         list: A list of sampled pixel coordinates (u, v) for the next iteration.
+     """
+     # Step 1: Uniform Sampling
+-    # Randomly sample a uniform distribution of pixels s_i from source views.
+-    # For simplicity, assume we sample uniformly across the image grid.
+-    # In practice, this might involve selecting random pixels from available source views.
++    # Randomly sample a uniform distribution of pixels s_i from the input source views [S1].
+     uniform_samples = []
+-    # Example: Sample N_uniform pixels uniformly across the image
+-    N_uniform = 1000 # Placeholder for sufficient initial coverage
+-    for _ in range(N_uniform):
++    for _ in range(total_samples_ni):
+         u = random.randint(0, image_width - 1)
+         v = random.randint(0, image_height - 1)
+         uniform_samples.append((u, v))
+-        
++
+     # Step 2: Loss Computation
+-    # Partition image into grid_size x grid_size regions
+-    region_loss = [0.0] * (grid_size * grid_size)
++    # Partition image into grid_size x grid_size regions R_j [S1].
++    region_loss_sum = [0.0] * (grid_size * grid_size)
+     region_pixel_count = [0] * (grid_size * grid_size)
+-    
++
+     for (u, v) in uniform_samples:
+         # Determine region index j
+-        j = (v // (image_height // grid_size)) * grid_size + (u // (image_width // grid_size))
+-        
+-        # Compute loss for this pixel
+-        # e_i^g: gradient loss, e_i^p: pixel loss
+-        # This requires rendering the pixel and comparing with ground truth
+-        rendered_color, gradient = model.render(u, v, source_views)
+-        ground_truth_color = get_ground_truth(u, v, source_views) # [G] Helper to get GT
+-        
++        row = min(v // (image_height // grid_size), grid_size - 1)
++        col = min(u // (image_width // grid_size), grid_size - 1)
++        j = row * grid_size + col
++
++        # [G] Standard rendering and loss computation steps
++        rendered_color = render_pixel(u, v)
++        ground_truth_color = get_ground_truth(u, v)
+         pixel_loss = compute_pixel_loss(rendered_color, ground_truth_color)
+-        gradient_loss = compute_gradient_loss(gradient, ground_truth_color) # [G] Helper
+-        
+-        region_loss[j] += pixel_loss + gradient_loss
++        gradient_loss = compute_gradient_loss(rendered_color, ground_truth_color)
++
++        region_loss_sum[j] += pixel_loss + gradient_loss
+         region_pixel_count[j] += 1
+-        
+-    # Calculate mean loss per region
++
++    # Calculate mean loss per region H_i[j]
+     mean_region_loss = []
+     for j in range(grid_size * grid_size):
+         if region_pixel_count[j] > 0:
+-            mean_region_loss.append(region_loss[j] / region_pixel_count[j])
++            mean_region_loss.append(region_loss_sum[j] / region_pixel_count[j])
+         else:
+-            mean_region_loss.append(0.0) # [G] Avoid division by zero; regions with no samples get 0 loss
+-            
++            mean_region_loss.append(0.0)  # [G] Guard for empty regions
++
+     # Step 3: Normalization
+-    # Normalize into probability distribution f_i
++    # Normalize region losses into probability distribution f_i[j] [S1]
+     total_loss = sum(mean_region_loss)
+     if total_loss == 0:
+-        # Fallback to uniform if all losses are zero
+-        prob_distribution = [1.0 / (grid_size * grid_size)] * (grid_size * grid_size)
++        prob_distribution = [1.0 / (grid_size * grid_size)] * (grid_size * grid_size)  # [G] Uniform fallback
+     else:
+         prob_distribution = [loss / total_loss for loss in mean_region_loss]
+-        
++
+     # Step 4: Resampling
+-    # Allocate n_i * f_i[j] samples to each region
++    # Allocate n_i * f_i[j] samples to each region R_j for the next iteration [S1]
+     sampled_pixels = []
+     for j in range(grid_size * grid_size):
+-        # Number of samples for this region
+         num_samples = int(round(total_samples_ni * prob_distribution[j]))
+-        
+-        # Determine region boundaries
+         row = j // grid_size
+         col = j % grid_size
+@@ -112,18 +101,17 @@
+         x_min = col * (image_width // grid_size)
+         x_max = (col + 1) * (image_width // grid_size)
+-        
+-        # Uniformly sample within the region
++
+         for _ in range(num_samples):
+             u = random.randint(x_min, x_max - 1)
+             v = random.randint(y_min, y_max - 1)
+             sampled_pixels.append((u, v))
+-            
++
+     return sampled_pixels
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Empty Regions:** If a region $R_j$ has no uniformly sampled pixels ($|r_j|=0$), the mean loss is undefined. The implementation must handle this, e.g., by assigning a default loss or skipping the region [G].
+-*   **Zero Total Loss:** If all region losses are zero, the probability distribution is undefined. A uniform fallback should be used [G].
+-*   **Precision:** Ensure that the loss calculation is stable and does not suffer from numerical underflow/overflow, especially when summing over many pixels [G].
++*   **Empty Regions:** If a region $R_j$ has no uniformly sampled pixels ($|r_j|=0$), the mean loss is undefined [G]. The implementation assigns a default loss of zero to prevent division by zero [G].
++*   **Zero Total Loss:** If all region losses are zero, the probability distribution is undefined [G]. A uniform fallback distribution is applied [G].
++*   **Precision:** Ensure that the loss calculation is stable and does not suffer from numerical underflow or overflow, especially when summing over many pixels [G].
+ 
+ ## Subtopics
+@@ -136,9 +124,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method requires an initial uniform sampling pass to compute loss statistics, followed by a resampling step. The complexity is dominated by the loss computation for the initial samples.
+-*   **Memory Complexity:** Requires storing loss statistics for each grid region (constant space relative to image resolution, proportional to grid size squared).
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** Improves training convergence by focusing on high-loss regions, particularly those with drastic color or depth changes [S1].
+-*   **Strengths:** Simple to implement; effectively targets areas of high detail or error.
+-*   **Limitations:** Relies on a fixed grid, which may not adapt well to arbitrarily shaped high-error regions; requires an initial uniform sampling pass.
++*   **Strengths:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
+ 
+ ## Background

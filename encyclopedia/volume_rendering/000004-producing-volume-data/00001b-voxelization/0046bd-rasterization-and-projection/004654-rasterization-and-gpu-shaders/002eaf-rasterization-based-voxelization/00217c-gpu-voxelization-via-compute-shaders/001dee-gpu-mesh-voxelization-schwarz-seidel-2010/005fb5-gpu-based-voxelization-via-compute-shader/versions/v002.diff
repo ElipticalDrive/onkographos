@@ -1,0 +1,163 @@
+--- v001.md
++++ v002.md
+@@ -4,19 +4,19 @@
+ 
+ ## Overview
+-A technique to convert 3D triangle meshes into a voxel grid representation using a GPU compute shader [S1, unofficial]. It solves the problem of generating a 3D boolean occupancy grid from mesh geometry by offloading the rasterization or projection logic to the GPU [S1, unofficial]. Unlike CPU-based voxelization, this method leverages parallel compute shaders to mark occupied cells in a global grid buffer [S1, unofficial].
++A technique to convert 3D triangle meshes into a voxel grid representation using a GPU compute shader [S1, unofficial]. It solves the problem of generating a 3D boolean occupancy grid from mesh geometry by offloading the marking logic to the GPU [S1, unofficial]. Unlike CPU-based voxelization, this method leverages parallel compute shaders to mark occupied cells in a global grid buffer [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ - **Input:** A 3D model file (OBJ format) containing vertices (`v`) and faces (`f`), and a user-defined `resolution` parameter representing the number of voxels along the X-axis [S1, unofficial].
+-- **Output:** A 3D boolean grid (occupied voxels) and a list of world positions for occupied cells [S1, unofficial].
++- **Output:** A 3D boolean grid indicating occupied voxels and a list of world positions for those occupied cells [S1, unofficial].
+ 
+ **Data Structures:**
+ 1.  **Model Data:**
+-    -   `vertices`: List of `WPVector` (float x, y, z) [S1, unofficial].
+-    -   `triangles`: List of indices forming triangles [S1, unofficial].
+-    -   `boundbox_min`, `boundbox_max`: Bounding box of the mesh [S1, unofficial].
++    -   `vertices`: List of 3D points (float x, y, z) [S1, unofficial].
++    -   `triangles`: List of vertex indices forming faces [S1, unofficial].
++    -   `boundbox_min`, `boundbox_max`: Axis-aligned bounding box of the mesh [S1, unofficial].
+ 2.  **GPU Buffers:**
+-    -   **SSBO 0 (Binding Point 0):** Stores triangle vertex data. Size: `vbo_size` (number of vertices * 3 floats) [S1, unofficial].
+-    -   **SSBO 1 (Binding Point 1):** Voxel grid. Type: `GLint` array. Size: `grid_size * sizeof(GLint)` where `grid_size = width * height * depth` [S1, unofficial]. Initialized to zero [S1, unofficial].
++    -   **SSBO 0 (Binding Point 0):** Stores triangle vertex data [S1, unofficial].
++    -   **SSBO 1 (Binding Point 1):** Voxel grid [S1, unofficial]. Type: array of 32-bit integers (`GLint`) [S1, unofficial]. Size: `grid_size * sizeof(GLint)` where `grid_size = width * height * depth` [S1, unofficial]. Initialized to zero [S1, unofficial].
+ 
+ **Parameters:**
+@@ -37,68 +37,77 @@
+     -   Dispatch size in Y: 1 [S1, unofficial].
+     -   Dispatch size in Z: 1 [S1, unofficial].
+-    -   *Note:* The compute shader likely iterates over triangles/vertices and marks occupied voxels in SSBO 1. The exact rasterization/projection logic inside the shader is not detailed in the source, but the dispatch strategy suggests a vertex/face-centric approach [S1, unofficial].
+-5.  **Memory Barrier:** Ensure writes to SSBO 1 are visible to host [S1, unofficial].
++    -   The compute shader iterates over the input data and marks occupied voxels in SSBO 1 [S1, unofficial].
++5.  **Memory Barrier:** Ensure writes to SSBO 1 are visible to subsequent host reads [S1, unofficial].
+ 6.  **Readback:** Map SSBO 1 to host memory. Iterate through the 3D grid (z, y, x). If `voxels[z*height*width + y*width + x] == 1`, compute world position: `boundbox_min + (x*step, y*step, z*step)` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode for the host-side setup and readback logic based on [S1, unofficial]
++import math
++
++class WPVector:
++    def __init__(self, x=0.0, y=0.0, z=0.0):
++        self.x, self.y, self.z = x, y, z
++    def __add__(self, other):
++        if isinstance(other, tuple):
++            return WPVector(self.x + other[0], self.y + other[1], self.z + other[2])
++        return WPVector(self.x + other.x, self.y + other.y, self.z + other.z)
+ 
+ def voxelize(obj_path, resolution):
+     # 1. Parse Model
+-    vertices, triangles = parse_obj(obj_path)
+-    boundbox_min, boundbox_max = calculate_bounding_box(vertices)
+-    
++    vertices = []
++    triangles = []
++    boundbox_min = WPVector(float('inf'), float('inf'), float('inf'))
++    boundbox_max = WPVector(float('-inf'), float('-inf'), float('-inf'))
++
++    with open(obj_path, 'r') as f:
++        for line in f:
++            parts = line.split()
++            if not parts: continue
++            if parts[0] == 'v':
++                x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
++                vertices.append(WPVector(x, y, z))
++                if x < boundbox_min.x: boundbox_min.x = x
++                if y < boundbox_min.y: boundbox_min.y = y
++                if z < boundbox_min.z: boundbox_min.z = z
++                if x > boundbox_max.x: boundbox_max.x = x
++                if y > boundbox_max.y: boundbox_max.y = y
++                if z > boundbox_max.z: boundbox_max.z = z
++            elif parts[0] == 'f':
++                triangles.append([int(idx.split('/')[0]) - 1 for idx in parts[1:4]])
++
+     # 2. Calculate Grid Dimensions
+     step = (boundbox_max.x - boundbox_min.x) / resolution
+     width = resolution
+-    height = ceil((boundbox_max.y - boundbox_min.y) / step)
+-    depth = ceil((boundbox_max.z - boundbox_min.z) / step)
++    height = math.ceil((boundbox_max.y - boundbox_min.y) / step)
++    depth = math.ceil((boundbox_max.z - boundbox_min.z) / step)
+     grid_size = width * height * depth
+-    
++
+     # 3. Setup GPU Buffers
+-    # SSBO 0: Vertex data
+     vbo_size = len(vertices)
+-    ssbo_vertices = create_ssbo(vertices, binding=0)
+-    
+-    # SSBO 1: Voxel grid (initialized to 0)
+-    ssbo_grid = create_ssbo([0] * grid_size, binding=1, dtype=GLint)
+-    
++    # SSBO 0: Vertex data (uploaded to GPU)
++    ssbo_vertices = vertices
++    # SSBO 1: Voxel grid (allocated and zero-initialized on GPU)
++    ssbo_grid = [0] * grid_size
++
+     # 4. Dispatch Compute Shader
+-    # Calculate dispatch groups (rounded up to multiple of 32)
+     dispatch_x = vbo_size + 32 - (vbo_size % 32)
+     dispatch_y = 1
+     dispatch_z = 1
+-    
+-    # Set uniforms in compute shader
+-    set_uniform("resolution", resolution)
+-    set_uniform("box_min", boundbox_min)
+-    set_uniform("box_max", boundbox_max)
+-    set_uniform("step", step)
+-    set_uniform("height", height)
+-    set_uniform("width", width)
+-    set_uniform("depth", depth)
+-    
+-    # Dispatch compute shader
+-    dispatch_compute(dispatch_x, dispatch_y, dispatch_z)
+-    
++    # The compute shader kernel runs here, iterating over triangles/vertices
++    # and marking occupied voxels in ssbo_grid. Exact rasterization logic is not provided.
++
+     # 5. Memory Barrier
+-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+-    
++    # Host waits for GPU completion and ensures SSBO 1 visibility.
++
+     # 6. Readback and Extract Voxels
+-    grid_data = map_ssbo_to_host(ssbo_grid)
+     occupied_voxels = []
+-    
+     for z in range(depth):
+         for y in range(height):
+             for x in range(width):
+                 index = z * height * width + y * width + x
+-                if grid_data[index] == 1:
+-                    # Calculate world position
+-                    pos_x = boundbox_min.x + x * step
+-                    pos_y = boundbox_min.y + y * step
+-                    pos_z = boundbox_min.z + z * step
+-                    occupied_voxels.append(WPVector(pos_x, pos_y, pos_z))
+-                    
++                if ssbo_grid[index] == 1:
++                    pos = boundbox_min + (x * step, y * step, z * step)
++                    occupied_voxels.append(pos)
++
+     return occupied_voxels
+ ```
+@@ -124,11 +133,9 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity:** Depends on the number of triangles and grid size. The compute shader dispatch is proportional to the number of vertices/triangles (rounded to 32). Readback is proportional to grid size. [S1, unofficial]
+--   **Memory Complexity:** `O(grid_size)` for the voxel grid SSBO. [S1, unofficial]
++-   **Time Complexity:** The compute shader dispatch is proportional to the number of vertices (rounded to a multiple of 32) [S1, unofficial]. Host readback is proportional to the grid size [S1, unofficial].
++-   **Memory Complexity:** `O(grid_size)` for the voxel grid SSBO [S1, unofficial].
+ -   **Performance:** Not given in the sources. [S1, unofficial]
+--   **Strengths:** Leverages GPU parallelism. Simple implementation. [S1, unofficial]
+--   **Limitations:** Dense grid representation (memory intensive for large volumes). No anti-aliasing or coverage information mentioned. [S1, unofficial]
+--   **When to use:** Small to medium meshes, quick voxelization, educational purposes. [S1, unofficial]
+--   **When not to use:** Large sparse scenes, high-resolution grids requiring memory efficiency. [S1, unofficial]
++-   **Strengths:** Leverages GPU parallelism for marking occupied cells [S1, unofficial]. Simple implementation structure [S1, unofficial].
++-   **Limitations:** Uses a dense grid representation, which is memory intensive for large volumes [S1, unofficial]. No anti-aliasing or coverage information is mentioned [S1, unofficial].
+ 
+ ## Background

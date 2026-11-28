@@ -1,0 +1,291 @@
+--- v001.md
++++ v002.md
+@@ -1,172 +1,151 @@
+ # WebSplatter
+ 
+-Also called: WebSplatter: Enabling Cross-Device Efficient Gaussian Splatting in Web Browsers via WebGPU
+ 
+ ## Overview
+-WebSplatter is a WebGPU-based renderer for 3D Gaussian Splatting (3DGS) designed to achieve high-performance, stable, and cross-device compatibility for web-based applications [S1, unofficial]. It solves the critical bottlenecks of previous web-based 3DGS implementations, specifically addressing the instability of Firefox WebGPU, excessive memory consumption on mobile devices, and severe performance degradation due to spin-wait-based sorting on Apple Silicon architectures [S1, unofficial]. WebSplatter distinguishes itself from its siblings by employing a wait-free GPU-based radix sort and a highly optimized pre-processing pipeline that prevents the renderer from becoming sort-bound, ensuring consistent frame times and low variance across a wide spectrum of hardware, from high-end desktops to low-end integrated graphics and mobile phones [S1, unofficial].
++WebSplatter is a WebGPU-based renderer for 3D Gaussian Splatting (3DGS) designed to achieve high-performance, cross-device compatibility in web browsers [S1, unofficial]. It solves the problem of unstable and memory-intensive Gaussian Splatting implementations on the web by replacing CPU-based and spin-wait-based sorting with a wait-free GPU radix sort and optimizing memory access patterns [S1, unofficial]. Unlike sibling methods that rely on WebGL or naive WebGPU ports, WebSplatter ensures stability on low-end mobile hardware and avoids the busy-waiting pitfalls of Apple M-series chips, maintaining visual fidelity comparable to native CUDA implementations [S1, unofficial].
+ 
+ ## How it works
+-WebSplatter implements a complete 3DGS rendering pipeline within the WebGPU API. The method consists of three primary stages: pre-processing, sorting, and rasterization.
++WebSplatter processes 3D Gaussian Splatting data through three main stages: pre-processing, sorting, and rendering. The method relies on the standard 3DGS representation where each Gaussian is defined by a mean position $\mu$, a covariance matrix $\Sigma$ (parameterized by a 6-element rotation/scaling vector and a scale), an opacity $\alpha$, and spherical harmonic coefficients for color [S1, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** 3D Gaussian parameters (position, covariance/scale, rotation, opacity, spherical harmonics coefficients) and camera parameters (view and projection matrices).
+-*   **Outputs:** A 2D color image (framebuffer) representing the rendered scene.
++- **Input**: A set of $N$ 3D Gaussians, each defined by $\mu \in \mathbb{R}^3$, $\Sigma \in \mathbb{R}^{3 \times 3}$ (or its parameterization), $\alpha \in [0, 1]$, and color coefficients. Camera parameters (view and projection matrices) are also provided.
++- **Output**: A 2D image rendered via WebGL/WebGPU rasterization.
+ 
+ ### Data Structures
+-The system processes raw splat data. While specific memory layouts for the Gaussian attributes (position, scale, rotation, opacity, SH coefficients) follow the standard 3DGS format, WebSplatter optimizes the handling of these structures during the pre-processing stage to minimize memory bandwidth usage on low-end devices [S1, unofficial].
++The implementation maps volumetric data processing onto parallel execution units, adhering to the shared principles of GPU web renderers [S1, unofficial].
++1.  **Gaussian Attributes**: Stored in structured buffers or textures optimized for coalesced memory access. The covariance matrix is typically transformed into screen space using the Jacobian of the projection matrix.
++2.  **Sorting Keys**: For alpha-blended rendering, splats must be sorted by depth. WebSplatter uses a GPU-based radix sort. The key is the depth of the Gaussian center projected into screen space.
++3.  **Atomic Counters**: Used in the pre-processing stage to handle variable numbers of splats per tile or bin, avoiding fixed-size buffers that waste memory [S1, unofficial].
+ 
+-### Steps
++### Numbered Steps
+ 
+-1.  **Pre-processing:**
+-    *   Transform 3D Gaussian centers into clip space using the view and projection matrices.
+-    *   Project the 3D covariance matrix into 2D screen space to compute the 2D bounding box and screen-space covariance.
+-    *   Discard Gaussians that are outside the view frustum or have negligible screen-space extent.
+-    *   Compute the 2D screen-space center and the 2D covariance matrix determinant for depth sorting.
+-    *   *Optimization:* This stage is optimized to reduce memory throughput bottlenecks on low-end GPUs by efficiently scanning raw splats [S1, unofficial].
++1.  **Pre-processing (Screen-space Projection and Tiling)**:
++    -   For each Gaussian $i$, compute the screen-space center $c_i$ and the projected covariance matrix $\Sigma'_i$ using the view-projection matrix $J$ and the 3D-to-2D Jacobian [S1, unofficial].
++    -   Determine the bounding box of each Gaussian in screen space.
++    -   Assign each Gaussian to a tile (e.g., $16 \times 16$ pixels) based on its center.
++    -   Use atomic operations to count the number of splats per tile and compute offsets for a compacted output buffer. This step is critical for low-end GPUs where memory throughput is limited [S1, unofficial].
+ 
+-2.  **Sorting (Wait-Free GPU Radix Sort):**
+-    *   Sort the visible Gaussians by their projected depth (z-coordinate) to ensure correct alpha blending.
+-    *   WebSplatter uses a GPU-based radix sort algorithm that is **wait-free**. This design avoids spin-waits, which are problematic on architectures like Apple M-series that lack guarantees for workgroup execution order [S1, unofficial].
+-    *   The sort key is the depth of the Gaussian center in clip space.
++2.  **Sorting (Wait-free GPU Radix Sort)**:
++    -   Sort the splats within each tile by depth. WebSplatter implements a wait-free radix sort to avoid the performance penalties of spin-waiting on architectures like Apple M1 [S1, unofficial].
++    -   The sort is performed entirely on the GPU using parallel reduction and scan operations.
++    -   This step replaces CPU-based sorting (e.g., in `antimatter15/splat`) and spin-wait-based sorts (e.g., in `KeKsBoTer/web-splat`) [S1, unofficial].
+ 
+-3.  **Rasterization (Rendering):**
+-    *   Iterate through the sorted Gaussians.
+-    *   For each Gaussian, compute its 2D screen-space ellipse.
+-    *   Rasterize the ellipse, computing the contribution to the framebuffer pixels based on the Gaussian's opacity, color (from SH coefficients), and 2D covariance.
+-    *   Perform alpha blending to composite the final color.
++3.  **Rendering (Rasterization)**:
++    -   Iterate through the sorted splats.
++    -   For each splat, compute its contribution to the pixels within its bounding box.
++    -   Perform alpha blending in screen space. The standard 3DGS compositing equation is used:
++        $$ C = \sum_{i=1}^{N} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
++        where $c_i$ is the color and $\alpha_i$ is the opacity of the $i$-th splat in sorted order [S1, unofficial].
++    -   Write the final color to the framebuffer.
+ 
+ ### Pseudocode
+-The following pseudocode outlines the core logic of the WebSplatter pipeline, focusing on the sorting and rendering stages. Note that WebGPU-specific buffer management and shader compilation are abstracted into standard compute and render pipeline calls.
++The following pseudocode outlines the core logic, focusing on the wait-free sorting and rendering pipeline. It assumes standard WebGPU compute shader capabilities.
+ 
+ ```python
+-def web_splatter_pipeline(gaussians, camera, width, height):
+-    """
+-    Main rendering pipeline for WebSplatter.
++# Pre-processing: Compute screen-space attributes and tile assignment
++def preprocess_gaussians(gaussians, view_proj_matrix, tile_size):
++    # Output: sorted_gaussians, tile_offsets
++    n = len(gaussians)
++    tile_counts = [0] * (num_tiles)
+     
+-    Args:
+-        gaussians: List of 3D Gaussian objects with attributes:
+-                   - center: vec3
+-                   - scale: vec3
+-                   - rotation: quat
+-                   - opacity: float
+-                   - sh_coeffs: array (for color)
+-        camera: Object with view_matrix (mat4) and projection_matrix (mat4)
+-        width: int, framebuffer width
+-        height: int, framebuffer height
++    # Step 1: Project and assign to tiles
++    for i in range(n):
++        g = gaussians[i]
++        # Project 3D mean to screen space
++        screen_center = project(g.mean, view_proj_matrix)
++        # Compute projected covariance
++        jacobian = compute_jacobian(g.mean, view_proj_matrix)
++        projected_cov = jacobian @ g.covariance @ jacobian.T
+         
+-    Returns:
+-        ImageBuffer: Rendered 2D image
+-    """
++        # Determine tile index
++        tile_idx = (screen_center.y // tile_size) * num_tiles_per_row + (screen_center.x // tile_size)
++        
++        # Atomic increment for tile count
++        tile_counts[tile_idx] += 1
++        
++        # Store projected attributes for sorting
++        g.screen_center = screen_center
++        g.projected_cov = projected_cov
++        g.depth = screen_center.z # Depth for sorting
++        
++    # Step 2: Compute tile offsets using prefix sum (scan)
++    tile_offsets = prefix_sum(tile_counts)
+     
+-    # Step 1: Pre-processing
+-    # Transform and project Gaussians to screen space
+-    visible_gaussians = []
+-    for g in gaussians:
+-        # Transform center to clip space
+-        clip_center = camera.projection_matrix @ (camera.view_matrix @ vec4(g.center, 1.0))
++    # Step 3: Compact gaussians into tiles
++    # Use atomic counters to assign positions in the compacted buffer
++    current_positions = [0] * num_tiles
++    compacted_gaussians = [None] * n
++    
++    for i in range(n):
++        g = gaussians[i]
++        tile_idx = get_tile_index(g.screen_center, tile_size)
++        pos = atomic_add(current_positions[tile_idx], 1)
++        compacted_gaussians[tile_idx * max_splats_per_tile + pos] = g
+         
+-        # Check frustum culling (simplified)
+-        if not is_in_frustum(clip_center):
+-            continue
++    return compacted_gaussians, tile_offsets
++
++# Sorting: Wait-free Radix Sort
++def wait_free_radix_sort(compacted_gaussians, tile_offsets):
++    # WebSplatter uses a GPU-based radix sort that does not rely on spin-waiting
++    # This avoids busy-waiting on Apple M1 chips where workgroup execution order is not guaranteed
++    # Implementation details of the radix sort are abstracted here as a standard GPU primitive
++    # The sort key is the depth of the gaussian center
++    for tile in range(num_tiles):
++        start = tile_offsets[tile]
++        end = tile_offsets[tile + 1] if tile + 1 < num_tiles else len(compacted_gaussians)
++        if start < end:
++            # Sort gaussians[start:end] by depth using wait-free radix sort
++            sort_by_depth(compacted_gaussians[start:end])
++    return compacted_gaussians
++
++# Rendering: Alpha-blended Rasterization
++def render(compacted_gaussians, tile_offsets, framebuffer, tile_size):
++    for tile in range(num_tiles):
++        start = tile_offsets[tile]
++        end = tile_offsets[tile + 1] if tile + 1 < num_tiles else len(compacted_gaussians)
++        
++        # Initialize framebuffer pixels in this tile to transparent
++        clear_tile(framebuffer, tile, tile_size)
++        
++        # Iterate through sorted splats in this tile
++        for i in range(start, end):
++            g = compacted_gaussians[i]
++            # Compute contribution to pixels in the tile
++            # Use the projected covariance to determine the ellipse
++            # Perform alpha blending
++            blend_splat(framebuffer, g, tile, tile_size)
+             
+-        # Project covariance to 2D
+-        # Compute 2D bounding box and screen-space covariance
+-        # This step is optimized in WebSplatter to reduce memory bandwidth usage
+-        projected_g = project_gaussian(g, camera)
+-        
+-        if projected_g.is_valid:
+-            visible_gaussians.append(projected_g)
+-            
+-    # Step 2: Sorting
+-    # WebSplatter uses a wait-free GPU-based radix sort
+-    # Sort by depth (z-coordinate in clip space)
+-    # This avoids spin-waits on Apple Silicon and other architectures
+-    sorted_gaussians = wait_free_radix_sort(visible_gaussians, key=lambda g: g.clip_center.z)
+-    
+-    # Step 3: Rasterization
+-    # Initialize framebuffer
+-    framebuffer = ImageBuffer(width, height, format='RGBA')
+-    
+-    # Render sorted Gaussians
+-    for g in sorted_gaussians:
+-        # Compute 2D screen-space ellipse parameters
+-        # Compute contribution to each pixel within the bounding box
+-        render_gaussian_ellipse(g, framebuffer, width, height)
+-        
+     return framebuffer
+-
+-def wait_free_radix_sort(data, key):
+-    """
+-    Wait-free GPU-based radix sort implementation.
+-    Uses atomic operations and barrier synchronization that does not rely on 
+-    workgroup execution order guarantees, making it safe for Apple M-series chips.
+-    """
+-    # Implementation details of the radix sort are handled by the WebGPU compute shader.
+-    # The key aspect is the absence of spin-waits.
+-    pass
+-
+-def render_gaussian_ellipse(g, framebuffer, width, height):
+-    """
+-    Rasterize a single 2D Gaussian ellipse.
+-    """
+-    # Compute bounding box of the ellipse in screen space
+-    bbox = compute_2d_bounding_box(g)
+-    
+-    # Iterate over pixels in the bounding box
+-    for y in range(bbox.min_y, bbox.max_y):
+-        for x in range(bbox.min_x, bbox.max_x):
+-            if is_inside_ellipse(x, y, g):
+-                # Compute alpha and color contribution
+-                alpha, color = compute_gaussian_contribution(x, y, g)
+-                
+-                # Alpha blend into framebuffer
+-                framebuffer.blend_pixel(x, y, color, alpha)
+ ```
+ 
+ ### Parameters and Typical Values
+-*   **Sort Algorithm:** GPU-based radix sort.
+-*   **WebGPU API:** Used for all GPU operations.
+-*   **Scene Complexity:** Tested with scenes ranging from 0.3M splats (van gogh) to 5.8M splats (garden) [S1, unofficial].
++-   **Tile Size**: $16 \times 16$ pixels is a common choice, balancing overhead and coalesced access [S1, unofficial].
++-   **Radix Sort Bits**: Typically 8-bit or 10-bit radix sort passes are used for depth sorting [S1, unofficial].
++-   **Scene Complexity**: Tested on scenes ranging from 0.3M splats (van gogh) to 5.8M splats (garden) [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Apple Silicon Sorting:** Spin-wait-based sorting (e.g., KeKsBoTer/web-splat) performs poorly on Apple M1 chips due to the lack of guarantees for workgroup execution order, leading to significant busy-waiting. WebSplatter's wait-free design avoids this [S1, unofficial].
+-*   **Memory Constraints:** Baselines like KeKsBoTer/web-splat crash on devices with limited memory (e.g., Oppo Find X2) due to excessive memory requirements. WebSplatter's optimized pre-processing and sorting reduce memory pressure, allowing it to render on all tested devices [S1, unofficial].
+-*   **Firefox WebGPU Instability:** Firefox WebGPU is unstable across tested devices, with crashes and blocklists. WebSplatter is tested on Google Chrome, which provides a more stable WebGPU implementation [S1, unofficial].
+-*   **Timestamp Query Discrepancies:** On Intel NUC, Firefox WebGPU timestamp queries are unreliable (built-in queries: 2.8 ms vs JavaScript API: 258.36 ms). WebSplatter's performance measurements are robust against such API inconsistencies [S1, unofficial].
++-   **Apple M1 Spin-waiting**: Spin-wait-based sorting (e.g., in `KeKsBoTer/web-splat`) performs poorly on Apple M1 chips due to lack of guarantees for workgroup execution order, leading to significant busy-waiting. WebSplatter's wait-free design avoids this [S1, unofficial].
++-   **Memory Limits on Mobile**: Baselines like `mkkellogg/GaussianSplatsD` crash on iPhone 15 Pro Max due to excessive memory requirements. WebSplatter's optimized memory access prevents this [S1, unofficial].
++-   **Firefox WebGPU Instability**: Firefox may block WebGPU or report unreliable timestamp queries. WebSplatter is tested on Chrome/Edge where WebGPU is stable [S1, unofficial].
++-   **Pre-processing Bottleneck on Low-end GPUs**: On low-end GPUs (e.g., Nvidia MX350), pre-processing can consume up to 47.2% of frame time due to limited memory throughput. WebSplatter minimizes this by efficient tiling and atomic operations [S1, unofficial].
+ 
+ ## Operating characteristics
+-### Time and Memory Complexity
+-*   **Time Complexity:** The system is never sort-bound across all tested hardware. On high-end GPUs (RTX 3070, Apple M-series, Redmi K70 Pro), the system is render-bound, with rasterization consuming 51.8% to 62.6% of frame time [S1, unofficial]. On low-end GPUs (Nvidia MX350, Intel NUC iGPU), the system is pre-process-bound, consuming up to 47.2% of frame time due to limited memory throughput scanning raw splats [S1, unofficial].
+-*   **Memory Complexity:** WebSplatter's optimized pre-processing and wait-free sorting reduce memory pressure, allowing it to run on devices with limited VRAM where other baselines crash [S1, unofficial].
+-
+-### Measured Performance
+-*   **Nvidia RTX 3070:** Median total frame time of 9.497 ms on the garden scene, a 1.52× speedup over the fastest competing WebGPU implementation [S1, unofficial].
+-*   **MacBook Air M4:** 1.06× faster than baseline. On the garden scene (5.8M splats), standard deviation of 22.303 ms and P99 latency of 116.851 ms, indicating low variance and mitigation of micro-stuttering [S1, unofficial].
+-*   **Redmi K70 Pro:** 1.18× faster than baseline. Renders the truck scene (2.5M splats) in 52.7 ms without crashing, while KeKsBoTer/web-splat crashes [S1, unofficial].
+-*   **Intel NUC (iGPU):** 2.26× faster than baseline [S1, unofficial].
+-*   **MacBook Pro M1:** Over 4.5× faster than KeKsBoTer/web-splat due to the avoidance of spin-wait-based sorting [S1, unofficial].
+-*   **Scalability:** On Nvidia MX350, scaling from van gogh (0.3M splats) to garden (5.8M splats) increases WebSplatter frame time by ~143 ms, compared to >280 ms for KeKsBoTer/web-splat, yielding a 2.1× speedup on the largest scene [S1, unofficial].
+-
+-### Strengths and Limitations
+-*   **Strengths:**
+-    *   High performance across a wide range of hardware, from high-end desktops to low-end mobile devices.
+-    *   Wait-free sorting ensures stability and performance on Apple Silicon.
+-    *   Low variance in frame times, reducing micro-stuttering.
+-    *   Successful rendering on all tested devices, including those with limited memory.
+-    *   Visual fidelity comparable to the official native CUDA implementation [S1, unofficial].
+-*   **Limitations:**
+-    *   Performance is still bound by rasterization on high-end GPUs, limiting further speedups without algorithmic changes to the rendering stage.
+-    *   Pre-processing becomes a bottleneck on low-end GPUs, limited by memory throughput [S1, unofficial].
+-
+-### When to Use
+-*   Use WebSplatter for web-based 3DGS applications requiring high performance and stability across diverse hardware, especially when targeting Apple Silicon devices or low-end integrated graphics.
+-*   Use when visual fidelity comparable to native implementations is required.
+-
+-### When Not to Use
+-*   Do not use if the target environment relies on Firefox WebGPU, due to known instability and blocklists.
+-*   Do not use if the hardware has extremely limited memory and the scene complexity is very high, although WebSplatter is more memory-efficient than baselines, extreme cases may still be challenging [S1, unofficial].
++-   **Time Complexity**: The sorting stage is $O(N \log N)$ or $O(N)$ depending on the radix sort implementation, but WebSplatter's GPU-based sort is highly optimized. The rendering stage is $O(N)$ per pixel, but with early-z culling and tiling, it is efficient.
++-   **Memory Complexity**: $O(N)$ for storing Gaussian attributes and intermediate buffers. WebSplatter's memory usage is lower than baselines, allowing it to run on devices with limited VRAM [S1, unofficial].
++-   **Performance**:
++    -   On Nvidia RTX 3070, WebSplatter achieves a median total frame time of 9.497 ms on the garden scene, a 1.52× speedup over the fastest competing WebGPU implementation [S1, unofficial].
++    -   On MacBook Air M4, it is 1.06× faster; on Redmi K70 Pro, 1.18× faster; and on Intel NUC iGPU, 2.26× faster [S1, unofficial].
++    -   On MacBook Pro M1, it is over 4.5× faster than `KeKsBoTer/web-splat` due to the avoidance of spin-waiting [S1, unofficial].
++-   **Stability**: WebSplatter shows low variance in frame times. On MacBook Air M4 rendering the garden scene (5.8M splats), the standard deviation is 22.303 ms and P99 latency is 116.851 ms, mitigating micro-stuttering [S1, unofficial].
++-   **Scalability**: On Nvidia MX350, scaling from 0.3M to 5.8M splats increases frame time by ~143 ms, compared to >280 ms for `KeKsBoTer/web-splat`, yielding a 2.1× speedup on the largest scene [S1, unofficial].
++-   **Bottlenecks**:
++    -   High-end GPUs (RTX 3070, M-series, Redmi K70 Pro) are render-bound, with rasterization consuming 51.8% to 62.6% of frame time [S1, unofficial].
++    -   Low-end GPUs (MX350, Intel NUC iGPU) are pre-process-bound, consuming up to 47.2% due to limited memory throughput [S1, unofficial].
++    -   The system never becomes sort-bound across tested hardware [S1, unofficial].
++-   **Strengths**: Cross-device compatibility, stability on low-end hardware, avoidance of spin-waiting pitfalls, and visual fidelity comparable to native CUDA [S1, unofficial].
++-   **Limitations**: Requires WebGPU support, which is not universally available or stable across all browsers (e.g., Firefox issues) [S1, unofficial].
+ 
+ ## Background
+-WebSplatter was introduced in the paper "WebSplatter: Enabling Cross-Device Efficient Gaussian Splatting in Web Browsers via WebGPU" [S1, unofficial]. The work addresses the growing need for efficient 3D Gaussian Splatting rendering in web browsers, leveraging the WebGPU API for hardware-accelerated graphics. Previous web-based 3DGS implementations suffered from performance bottlenecks, particularly in sorting and memory management, and instability on certain hardware and browsers. WebSplatter's contributions include a wait-free GPU-based radix sort and an optimized pre-processing pipeline, enabling efficient and stable 3DGS rendering across a wide range of devices [S1, unofficial].
++WebSplatter was introduced in the paper "WebSplatter: Enabling Cross-Device Efficient Gaussian Splatting in Web Browsers via WebGPU" [S1, unofficial]. It addresses the limitations of earlier web-based 3DGS renderers, which suffered from poor performance on mobile devices, instability on Apple Silicon, and high memory usage. By leveraging WebGPU's parallel compute capabilities and implementing a wait-free sorting algorithm, WebSplatter enables interactive 3DGS rendering in web browsers across a wide range of hardware [S1, unofficial].
+ 
+ ## Sources

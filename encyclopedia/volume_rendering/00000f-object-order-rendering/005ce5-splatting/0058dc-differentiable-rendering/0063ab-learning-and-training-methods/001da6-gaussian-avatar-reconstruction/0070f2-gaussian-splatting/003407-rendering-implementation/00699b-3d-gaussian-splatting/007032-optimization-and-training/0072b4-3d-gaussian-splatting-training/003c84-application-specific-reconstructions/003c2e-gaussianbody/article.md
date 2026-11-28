@@ -1,0 +1,50 @@
+# GaussianBody
+
+
+## Overview
+GaussianBody is a method for dynamic digital human modeling from monocular video that leverages physically-based priors to regularize 3D Gaussians in canonical space [S1][S2, unofficial]. It solves the problem of visual artifacts in dynamic cloth reconstruction caused by the unbalanced aggregation of Gaussians during standard densification [S1][S2, unofficial]. It sets itself apart from siblings like [GauHuman](9198-gauhuman.md) by focusing on physical regularization of deformation rather than redesigning the prune/split/clone primitives for efficiency [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Monocular video sequence of a dynamic human; canonical space representation of the human body.
+- **Outputs:** A set of 3D Gaussians with optimized position, scale, rotation, opacity, and color, regularized by physical priors.
+
+**Data Structures:**
+- **Gaussians:** Standard 3D Gaussian attributes (mean $\mu$, covariance $\Sigma$ or quaternion $q$ and scale $s$, opacity $\alpha$, spherical harmonics coefficients for color) [S1][S2, unofficial].
+- **Canonical Space:** A reference pose representation where deformation is applied [S1][S2, unofficial].
+
+**Steps:**
+1. **Initialization:** Initialize 3D Gaussians in the canonical space [S1][S2, unofficial].
+2. **Physical Regularization:** Apply physically-based priors to regularize the deformation of Gaussians in the canonical space [S1][S2, unofficial]. This ensures that the deformation of the cloth follows physical constraints, avoiding artifacts [S1][S2, unofficial].
+3. **Rendering:** Render the Gaussians from novel viewpoints using differentiable rasterization [S1][S2, unofficial].
+4. **Optimization:** Optimize the Gaussian parameters by minimizing the difference between rendered and ground-truth images, guided by the physical priors [S1][S2, unofficial].
+
+**Formulas:**
+- Not given in the sources. The specific mathematical formulation of the physically-based priors is not detailed in the provided notes [S1][S2, unofficial].
+
+**Parameters:**
+- Not given in the sources [S1][S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Monocular video ambiguity can lead to artifacts in dynamic cloth if not properly regularized [S1][S2, unofficial].
+- Unbalanced aggregation of Gaussians during densification can cause visual artifacts [S2, unofficial].
+
+## Subtopics
+
+### HAHA
+HAHA is a variant that attaches Gaussians to the surface of a mesh [S2, unofficial]. It combines rendered results from a textured human body mesh and Gaussians to reduce the number of Gaussians required [S2, unofficial]. This approach leverages the mesh for structural support while using Gaussians for fine details [S2, unofficial].
+
+## Operating characteristics
+- **Time and Memory Complexity:** Not given in the sources [S1][S2, unofficial].
+- **Measured Performance:** Not given in the sources [S1][S2, unofficial].
+- **Scaling:** Not given in the sources [S1][S2, unofficial].
+- **Strengths and Limitations:** Effectively avoids artifacts in dynamic cloth from monocular video by leveraging physically-based priors [S1][S2, unofficial]. Limitations may include the complexity of implementing physical priors and potential sensitivity to initialization [S1][S2, unofficial].
+- **When to Use:** Suitable for dynamic digital human modeling from monocular video where cloth deformation artifacts are a concern [S1][S2, unofficial].
+- **When Not to Use:** Not suitable for scenarios where physical priors are not applicable or where real-time performance is critical without sufficient hardware [S1][S2, unofficial].
+
+## Background
+GaussianBody was introduced in the context of dynamic digital human modeling based on monocular video [S1][S2, unofficial]. It builds on the standard 3D Gaussian Splatting framework [S1][S2, unofficial]. The method was developed to address the specific challenges of reconstructing dynamic cloth from limited visual input [S1][S2, unofficial]. It is cited as reference [214] in the source literature [S1][S2, unofficial].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

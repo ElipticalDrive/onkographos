@@ -1,0 +1,92 @@
+--- v014.md
++++ v015.md
+@@ -22,6 +22,6 @@
+ **Numbered Steps:**
+ 
+-1.  **Scene Query:** For a query point $\mathbf{x}$ and direction $\mathbf{d}$, retrieve the dense feature vector from the hash table. Pass this feature through individual MLP headers to predict intrinsic attributes $\mathbf{F}_\theta(\mathbf{x}) = (\mathbf{a}, \mathbf{n}, \mathbf{s}, \sigma)$ [S1].
+-2.  **Volume Rendering of Intrinsics:** Sample $N$ points along a ray $\mathbf{r}$. Compute alpha-composition weights $w_i$ and accumulate intrinsic values [S1]:
++1.  **Scene Query:** For a query point $\mathbf{x}$ and direction $\mathbf{d}$, retrieve the dense feature vector from the hash table [S1]. Pass this feature through individual MLP headers to predict intrinsic attributes $\mathbf{F}_\theta(\mathbf{x}) = (\mathbf{a}, \mathbf{n}, \mathbf{s}, \sigma)$ [S1].
++2.  **Volume Rendering of Intrinsics:** Sample $N$ points along a ray $\mathbf{r}$ [S1]. Compute alpha-composition weights $w_i$ and accumulate intrinsic values [S1]:
+     $$ w_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) (1 - \exp(-\sigma_i \delta_i)) $$
+     where $\delta_i = t_i - t_{i-1}$ [S1].
+@@ -46,5 +46,5 @@
+ 
+     # 2. Query scene attributes
+-    features = [scene_hash_table.get(tuple(round(p[0], 3), round(p[1], 3), round(p[2], 3)), [0.0]*256) for p in points]
++    features = [scene_hash_table.query(p) for p in points]
+     albedos = [f[:3] for f in features]
+     normals = [f[3:6] for f in features]
+@@ -54,18 +54,19 @@
+     # 3. Compute alpha-composition weights
+     deltas = [t_vals[i] - t_vals[i-1] for i in range(1, num_samples)]
+-    deltas.append(0.0) # Pad to match num_samples
+-    sigma = densities
+-    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+-    transmittance = []
++    transmittance = [1.0]
+     acc = 0.0
+-    for s, d in zip(sigma, deltas):
++    for i in range(num_samples - 1):
++        acc += densities[i] * deltas[i]
+         transmittance.append(math.exp(-acc))
+-        acc += s * d
+-    weights = [t * (1.0 - math.exp(-s * d)) for t, s, d in zip(transmittance, sigma, deltas)]
++    
++    weights = []
++    for i in range(num_samples):
++        delta = deltas[i] if i < num_samples - 1 else 0.0
++        weights.append(transmittance[i] * (1.0 - math.exp(-densities[i] * delta)))
+ 
+     # 4. Volume render intrinsics
+-    albedo_map = [sum(w * a for w, a in zip(weights, albedos[i])) for i in range(3)]
+-    normal_map = [sum(w * n for w, n in zip(weights, normals[i])) for i in range(3)]
+-    semantic_map = [sum(w * s for w, s in zip(weights, semantics[i])) for i in range(4)]
++    albedo_map = [sum(w * albedos[j][k] for j, w in enumerate(weights)) for k in range(3)]
++    normal_map = [sum(w * normals[j][k] for j, w in enumerate(weights)) for k in range(3)]
++    semantic_map = [sum(w * semantics[j][k] for j, w in enumerate(weights)) for k in range(4)]
+ 
+     # 5. Estimate depth for shadow visibility
+@@ -75,16 +76,17 @@
+     # 6. Compute shadow visibility
+     sun_direction = lighting_params['sun_direction']
++    max_shadow_dist = 100.0
+     shadow_samples = 32
+-    shadow_t_vals = [i * (100.0 / (shadow_samples - 1)) for i in range(shadow_samples)]
++    shadow_t_vals = [i * (max_shadow_dist / (shadow_samples - 1)) for i in range(shadow_samples)]
+     shadow_points = [(shaded_point[0] + sun_direction[0] * t, shaded_point[1] + sun_direction[1] * t, shaded_point[2] + sun_direction[2] * t) for t in shadow_t_vals]
+-    shadow_features = [scene_hash_table.get(tuple(round(p[0], 3), round(p[1], 3), round(p[2], 3)), [0.0]*256) for p in shadow_points]
++    shadow_features = [scene_hash_table.query(p) for p in shadow_points]
+     shadow_sigma = [f[10:11][0] for f in shadow_features]
++    
+     shadow_deltas = [shadow_t_vals[i] - shadow_t_vals[i-1] for i in range(1, shadow_samples)]
+-    shadow_deltas.append(0.0)
+-    shadow_transmittance = []
++    shadow_transmittance = [1.0]
+     acc = 0.0
+-    for s, d in zip(shadow_sigma, shadow_deltas):
++    for i in range(shadow_samples - 1):
++        acc += shadow_sigma[i] * shadow_deltas[i]
+         shadow_transmittance.append(math.exp(-acc))
+-        acc += s * d
+     visibility = shadow_transmittance[-1]
+ 
+@@ -100,15 +102,15 @@
+ 
+ **Parameters:**
+-*   **Hash Table Resolution:** Not given in the sources.
+-*   **Number of Samples:** Not given in the sources.
++*   **Hash Table Resolution:** Not given in the sources [S1].
++*   **Number of Samples:** Not given in the sources [S1].
+ *   **Loss Weights:** $\lambda_1$ and others are used in joint optimization but specific values are not given in the sources [S1].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Visibility Estimation:** Modeling visibility with a per-scene optimized MLP head is impractical because the sun position changes during relighting, but training data only has one sun position [S1]. UrbanIR avoids this by estimating visibility via transmittance from the shaded point to the light source [S1].
+-*   **Large-Scale Scenes:** Standard NeRFs are not suitable for large-scale urban scenes due to memory constraints. Instant-NGP is used to provide compactness and high efficiency [S1].
++*   **Large-Scale Scenes:** Standard NeRFs are not suitable for large-scale urban scenes due to memory constraints [S1]. Instant-NGP is used to provide compactness and high efficiency [S1].
+ 
+ ## Operating characteristics
+ *   **Time and Memory Complexity:** Instant-NGP offers low memory consumption and high efficiency in training and rendering compared to standard MLP-based NeRFs [S1].
+-*   **Measured Performance:** Not given in the sources.
++*   **Measured Performance:** Not given in the sources [S1].
+ *   **Scaling:** Designed for expansive outdoor scenes [S1].
+ *   **Strengths:** Works with single monocular video; does not require LiDAR or multiple cameras; enables relighting and night simulation [S1].

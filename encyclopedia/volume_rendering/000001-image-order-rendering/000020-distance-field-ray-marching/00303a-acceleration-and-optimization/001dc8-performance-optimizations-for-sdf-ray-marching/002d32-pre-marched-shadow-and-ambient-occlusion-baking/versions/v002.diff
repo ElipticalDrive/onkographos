@@ -1,0 +1,246 @@
+--- v001.md
++++ v002.md
+@@ -4,165 +4,109 @@
+ 
+ ## Overview
+-This method improves visual fidelity and performance in static volumetric rendering by pre-calculating shadow and ambient occlusion data into the volume texture. It leverages the static nature of the cloud volume to bake directional shadow rays and ambient attenuation, allowing for dynamic lighting changes (e.g., time-of-day) without runtime ray-marching costs for shadows. It sets itself apart from runtime shadow calculation by using a single texture lookup to match cloud geometry perfectly, and from static lighting by preserving volumetric shadow depth.
++A technique to improve visual fidelity and performance by pre-calculating shadow and ambient occlusion data into the volume texture, leveraging the static nature of the cloud volume [S1, unofficial]. It sets itself apart from real-time ray marching by trading runtime compute for a one-time or event-driven baking cost, avoiding expensive per-frame camera renders [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A static signed distance field (SDF) volume texture representing the cloud geometry. The volume resolution is typically low.
+-*   **Output:** An augmented volume texture containing the SDF values, pre-marched shadow data, and pre-marched ambient occlusion data.
++*   **Input:** A static signed distance field (SDF) volume representing the cloud geometry.
++*   **Output:** A 3D texture (volume texture) containing baked shadow and ambient occlusion values.
+ 
+ **Data Structures:**
+-The volume texture stores multiple channels per voxel. While the exact bit-packing is not specified, it typically includes:
+-1.  SDF value (distance to surface).
+-2.  Shadow factor (accumulated shadow from a directional light source).
+-3.  Ambient occlusion factor (accumulated occlusion from surrounding geometry).
++*   **Baked Volume Texture:** A 3D texture where each voxel stores pre-computed lighting attenuation factors. The resolution is typically low, matching the base cloud volume resolution.
+ 
+ **Steps:**
+-
+-1.  **Initialize Volume:** Load or generate the base SDF volume texture for the static cloud geometry.
+-2.  **Pre-march Shadow Ray:**
+-    *   For each voxel in the volume, cast a shadow ray in the direction of the light source.
+-    *   The ray marches through the volume using the SDF for step sizes.
+-    *   Accumulate shadow contribution. The source notes a ratio of "4 shadow samples per cloud sample," implying a lower resolution or coarser sampling for the shadow bake compared to the final render, or a specific subsampling strategy.
+-    *   Store the accumulated shadow factor in the shadow channel of the volume texture.
+-    *   *Note:* Because the volume resolution is low, this pre-marching can be done in real-time during initialization or offline.
+-3.  **Pre-march Ambient Occlusion Ray:**
+-    *   For each voxel, calculate ambient occlusion by sampling the surrounding volume.
+-    *   This involves marching rays in various directions (or using a hemisphere sample) to determine how much of the sky is visible.
+-    *   Store the ambient occlusion factor in the AO channel of the volume texture.
+-4.  **Runtime Rendering:**
+-    *   During rendering, for each pixel, perform the standard SDF ray march to find the cloud surface.
+-    *   Perform a single `tex3D` lookup at the hit position to retrieve the pre-baked shadow and ambient occlusion values.
+-    *   Apply these values to the lighting calculation. This allows for dynamic time-of-day changes by simply updating the light direction used in the bake (if baked dynamically) or by using the baked data as a base multiplier.
++1.  **Bake Shadow:** Pre-march a shadow ray through the volume for each voxel. This involves casting rays in the direction of the light source(s) to determine occlusion.
++    *   *Detail:* Due to the low volume resolution, this can be done in real-time during the baking phase. A typical implementation uses 4 shadow samples per cloud sample [S1, unofficial].
++    *   *Dynamic Time-of-Day:* Because the baking is computationally feasible in real-time (during the bake step, not runtime), the shadow data can be regenerated to allow for dynamic changes in the sun's position (time-of-day) without runtime cost [S1, unofficial].
++2.  **Bake Ambient Occlusion:** Pre-march ambient occlusion rays into the volume texture. This adds shading based on local geometry density without runtime cost [S1, unofficial].
++3.  **Runtime Lookup:** During rendering, retrieve the volumetric cloud shadow using a single `tex3D` lookup on the baked texture. This ensures the shadow perfectly matches the cloud geometry [S1, unofficial].
+ 
+ **Pseudocode:**
++```python
++# Baking Phase (Offline or Real-time Bake)
++def bake_shadow_and_ao(sdf_volume, light_direction, resolution):
++    """
++    Pre-compute shadow and ambient occlusion for a static SDF volume.
++    """
++    # Initialize output textures
++    shadow_texture = create_3d_texture(resolution)
++    ao_texture = create_3d_texture(resolution)
++    
++    # Iterate over all voxels in the volume
++    for x in range(resolution.x):
++        for y in range(resolution.y):
++            for z in range(resolution.z):
++                # Get position in world space
++                pos = voxel_to_world(x, y, z, resolution)
++                
++                # --- Bake Shadow ---
++                # Cast shadow ray in light direction
++                # Use 4 samples per cloud sample as per source [S1, unofficial]
++                shadow_factor = 1.0
++                num_shadow_samples = 4
++                step_size = get_sdf_step(pos, sdf_volume) # From parent method
++                
++                for i in range(num_shadow_samples):
++                    sample_pos = pos + light_direction * (i + 1) * step_size
++                    # Check if sample is inside cloud (SDF < 0)
++                    if sdf_volume.sample(sample_pos) < 0:
++                        shadow_factor = 0.0
++                        break
++                
++                shadow_texture.set(x, y, z, shadow_factor)
++                
++                # --- Bake Ambient Occlusion ---
++                # Pre-march ambient occlusion rays
++                # This adds shading without runtime cost [S1, unofficial]
++                ao_factor = 1.0
++                # Implementation details for AO marching are not specified in source [S1, unofficial]
++                # Assume a similar ray marching approach in multiple directions
++                ao_factor = compute_ao(pos, sdf_volume) 
++                
++                ao_texture.set(x, y, z, ao_factor)
++                
++    return shadow_texture, ao_texture
+ 
+-```python
+-def bake_shadow_and_ao(volume_sdf, volume_resolution, light_direction, shadow_samples_per_cloud_sample=4):
++# Runtime Phase
++def render_voxel(x, y, z, shadow_texture, ao_texture):
+     """
+-    Pre-marches shadow and ambient occlusion into the volume texture.
++    Retrieve baked lighting data for a voxel.
++    """
++    # Single tex3D lookup for shadow [S1, unofficial]
++    shadow = shadow_texture.sample(x, y, z)
+     
+-    Args:
+-        volume_sdf: 3D array representing the SDF of the cloud.
+-        volume_resolution: Dimensions of the volume.
+-        light_direction: Normalized vector for the light source.
+-        shadow_samples_per_cloud_sample: Ratio of shadow samples to cloud samples.
+-        
+-    Returns:
+-        augmented_volume: 3D array with SDF, shadow, and AO channels.
+-    """
+-    # Initialize augmented volume with SDF
+-    # Assuming channels: [SDF, Shadow, AO]
+-    augmented_volume = np.zeros((volume_resolution, volume_resolution, volume_resolution, 3))
+-    augmented_volume[:, :, :, 0] = volume_sdf
++    # Retrieve AO
++    ao = ao_texture.sample(x, y, z)
+     
+-    # Pre-march Shadow
+-    # Iterate over all voxels
+-    for x in range(volume_resolution):
+-        for y in range(volume_resolution):
+-            for z in range(volume_resolution):
+-                # Get starting position in world space
+-                pos = voxel_to_world(x, y, z)
+-                
+-                # March shadow ray
+-                shadow_accum = 0.0
+-                current_pos = pos
+-                # Determine step size based on shadow_samples_per_cloud_sample
+-                # This implies a coarser march or specific sampling pattern
+-                step_size = calculate_step_size(volume_resolution, shadow_samples_per_cloud_sample)
+-                
+-                # March until out of bounds or fully shadowed
+-                while is_inside_volume(current_pos):
+-                    # Sample SDF at current position
+-                    sdf_val = volume_sdf[world_to_voxel(current_pos)]
+-                    
+-                    # If inside cloud (SDF < 0), accumulate shadow
+-                    if sdf_val < 0:
+-                        shadow_accum += 1.0 # Simplified accumulation
+-                    
+-                    current_pos += light_direction * step_size
+-                
+-                # Normalize or clamp shadow value
+-                shadow_accum = clamp(shadow_accum, 0.0, 1.0)
+-                augmented_volume[x, y, z, 1] = shadow_accum
+-
+-    # Pre-march Ambient Occlusion
+-    # Iterate over all voxels again
+-    for x in range(volume_resolution):
+-        for y in range(volume_resolution):
+-            for z in range(volume_resolution):
+-                pos = voxel_to_world(x, y, z)
+-                
+-                # Sample surrounding voxels for AO
+-                # This is a simplified approximation; real AO might use hemisphere sampling
+-                ao_accum = 0.0
+-                sample_count = 0
+-                
+-                # Example: Sample neighbors in a small radius
+-                for dx in [-1, 0, 1]:
+-                    for dy in [-1, 0, 1]:
+-                        for dz in [-1, 0, 1]:
+-                            if dx == 0 and dy == 0 and dz == 0:
+-                                continue
+-                            neighbor_pos = pos + vec3(dx, dy, dz) * step_size
+-                            if is_inside_volume(neighbor_pos):
+-                                neighbor_sdf = volume_sdf[world_to_voxel(neighbor_pos)]
+-                                if neighbor_sdf < 0:
+-                                    ao_accum += 1.0
+-                                sample_count += 1
+-                
+-                # Calculate AO factor (0 = fully occluded, 1 = fully open)
+-                if sample_count > 0:
+-                    ao_factor = 1.0 - (ao_accum / sample_count)
+-                else:
+-                    ao_factor = 1.0
+-                
+-                augmented_volume[x, y, z, 2] = clamp(ao_factor, 0.0, 1.0)
+-
+-    return augmented_volume
+-
+-def render_cloud_with_baked_data(ray_origin, ray_direction, baked_volume):
+-    """
+-    Renders a cloud using pre-baked shadow and AO.
+-    """
+-    # Standard SDF ray march
+-    hit_pos = march_sdf(ray_origin, ray_direction, baked_volume)
++    # Combine with base cloud color
++    base_color = get_cloud_color(x, y, z)
++    final_color = base_color * shadow * ao
+     
+-    if hit_pos is None:
+-        return background_color
+-    
+-    # Single texture lookup for baked data
+-    shadow = baked_volume[world_to_voxel(hit_pos), 1]
+-    ao = baked_volume[world_to_voxel(hit_pos), 2]
+-    
+-    # Lighting calculation
+-    diffuse_light = calculate_diffuse(light_direction, normal) * shadow
+-    ambient_light = calculate_ambient() * ao
+-    
+-    return diffuse_light + ambient_light
++    return final_color
+ ```
+ 
+ **Parameters:**
+-*   `shadow_samples_per_cloud_sample`: Typically 4, as noted in the source. This controls the resolution of the shadow bake relative to the cloud geometry.
+-*   `volume_resolution`: Low resolution is key to making the pre-marching feasible in real-time or offline.
++*   **Shadow Samples per Cloud Sample:** 4 [S1, unofficial].
++*   **Volume Resolution:** Low, matching the base cloud volume [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Static Geometry:** This method only works for static volumes. Dynamic clouds require real-time shadow calculation.
+-*   **Light Direction:** If the light direction changes significantly, the baked shadows may become inaccurate. The source notes that real-time pre-marching allows for dynamic time-of-day, implying the bake is updated when the light direction changes.
+-*   **Precision:** Low volume resolution may lead to aliasing or blocky shadows.
++*   **Static Assumption:** This method relies on the volume being static. If the cloud geometry changes, the baked textures must be regenerated [S1, unofficial].
++*   **Memory:** Storing separate textures for shadow and AO increases memory usage, though the low resolution mitigates this [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Occlusion Caching](14832-occlusion-caching.md)
+-A related technique for caching occlusion data.
++Occlusion caching is a performance optimization for static volumetric lighting that pre-calculates shadow and ambient occlusion data into volume textures, avoiding expensive per-frame camera renders. It sets itself apart from real-time ray marching by trading runtime compute for a one-time or event-driven baking cost, leveraging the static nature of most cloud volumes and occluders.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Baking is $O(N)$ where $N$ is the number of voxels, multiplied by the number of samples per voxel for shadow and AO. Runtime is $O(1)$ per pixel for shadow/AO lookup, dominated by the SDF ray march.
+-*   **Memory Complexity:** $O(N)$ for the augmented volume texture.
+-*   **Performance:** Significantly reduces runtime cost for shadows and AO. The source notes that shadow baking can be done in real-time due to low volume resolution.
+-*   **Strengths:** Perfect volumetric shadow matching, dynamic lighting support (if baked dynamically), reduced runtime cost.
+-*   **Limitations:** Only for static geometry, memory overhead for augmented texture, potential aliasing at low resolutions.
++*   **Time Complexity:** Baking time is proportional to the number of voxels times the number of shadow/AO samples. Since volume resolution is low, baking can be done in real-time (during the bake phase) [S1, unofficial]. Runtime cost is O(1) per voxel for texture lookup.
++*   **Memory Complexity:** O(N) where N is the number of voxels, for storing shadow and AO textures.
++*   **Performance:** Significantly reduces runtime cost by eliminating per-frame shadow and AO ray marching [S1, unofficial].
++*   **Strengths:** Perfect shadow alignment with cloud geometry, low runtime cost, supports dynamic time-of-day if baked dynamically [S1, unofficial].
++*   **Limitations:** Requires static geometry, increased memory for baked textures, baking cost (though feasible in real-time for low res) [S1, unofficial].
++*   **When to Use:** Static volumetric clouds where high-quality shadows and AO are desired without runtime cost.
++*   **When Not to Use:** Dynamic volumes where geometry changes frequently.
+ 
+ ## Background
+-This technique is described in the context of rendering volumetric clouds using signed distance fields. It is presented as an optimization for static cloud volumes.
++Originated in the context of rendering volumetric clouds using signed distance fields, as described in a blog post by uhawkvr [S1, unofficial]. The technique leverages the low resolution of cloud volumes to make pre-marching feasible.
+ 
+ ## Sources

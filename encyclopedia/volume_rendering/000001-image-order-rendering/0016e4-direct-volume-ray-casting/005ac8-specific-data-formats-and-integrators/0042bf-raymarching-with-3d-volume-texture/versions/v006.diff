@@ -1,0 +1,196 @@
+--- v005.md
++++ v006.md
+@@ -4,43 +4,41 @@
+ 
+ ## Overview
+-This method performs direct volume ray casting by representing the voxel space as a `sampler3D` texture and executing the ray marching loop within the fragment shader [S1, S2, unofficial]. It replaces previous texture atlas approaches, allowing for larger XYZ volumes, simpler edge handling, and a unified in-memory representation shared with path tracing and isosurface modes [S2, unofficial]. Unlike meshing methods, it avoids the overhead of generating and uploading geometry via a single draw call [S1, unofficial].
++This method performs direct volume ray casting by representing the voxel space as a `sampler3D` texture and executing the ray marching loop within the fragment shader [S2, unofficial]. It replaces previous texture atlas approaches, allowing for larger XYZ volumes, simpler edge handling, and a unified in-memory representation shared with path tracing and isosurface modes [S2, unofficial]. Unlike meshing methods, it avoids the overhead of generating and uploading geometry via a single draw call [S1, unofficial].
+ 
+ ## How it works
+ ### Inputs and Outputs
+ **Inputs:**
+-*   **Volume Data:** A 3D texture (`volumeTexture`) containing voxel intensities.
+-*   **Lookup Table:** A 2D texture (`gLutTexture`) mapping intensity to color/alpha.
+-*   **Camera/Scene:** Ray origin, direction, near/far clip planes, and volume scale.
+-*   **Parameters:** `BREAK_STEPS`, `maxSteps`, `gNChannels`, `volumeScale`, `SLICES`.
++*   **Volume Data:** A 3D texture (`volumeTexture`) containing voxel intensities [S2, unofficial].
++*   **Lookup Table:** A 2D texture (`gLutTexture`) mapping intensity to color/alpha [S2, unofficial].
++*   **Camera/Scene:** Ray origin, direction (`eye_d`), near/far clip planes (`tnear`, `tfar`), and volume scale (`volumeScale`) [S2, unofficial].
++*   **Parameters:** `BREAK_STEPS`, `maxSteps`, `gNChannels`, `SLICES`, and `maskAlpha` [S2, unofficial].
+ 
+ **Outputs:**
+-*   **Fragment Color:** The final composited color and alpha for each pixel.
++*   **Fragment Color:** The final composited color and alpha for each pixel [S2, unofficial].
+ 
+ ### Data Structures
+ **CPU-side Data Buffer Layout:**
+-The volume data is stored in a 1D array representing a 3D grid with 4 channels. The layout is defined as:
++The volume data is stored in a 1D array representing a 3D grid with up to 4 channels. The layout is defined as:
+ $$ \text{data}[i + ix \cdot 4 + iy \cdot 4 \cdot sx + iz \cdot 4 \cdot sx \cdot sy] $$
+ Where:
+-*   $i$ is the channel index (0–3).
+-*   $ix, iy, iz$ are the voxel coordinates.
+-*   $sx, sy$ are the width and height of the volume.
+-*   The data is normalized to 8-bit precision (0–255) before upload [S2, unofficial].
++*   $i$ is the channel index ($0$–$3$) [S2, unofficial].
++*   $ix, iy, iz$ are the voxel coordinates [S2, unofficial].
++*   $sx, sy$ are the width and height of the volume [S2, unofficial].
++*   Raw intensities are normalized to the $0$–$255$ range before upload [S2, unofficial].
+ 
+ **GPU-side Textures:**
+-1.  **`volumeTexture`**: A `Data3DTexture` (WebGL2 required). Holds the 8-bit voxel intensities [S2, unofficial].
+-2.  **`gLutTexture`**: A `DataTexture` of size $256 \times 4$. It contains a combined Lookup Table (LUT) for up to 4 active channels, mapping intensity to RGBA [S2, unofficial].
++1.  **`volumeTexture`**: A `Data3DTexture` requiring WebGL2 [S2, unofficial]. Holds the $8$-bit voxel intensities [S2, unofficial].
++2.  **`gLutTexture`**: A `DataTexture` of size $256 \times 4$ [S2, unofficial]. It contains a combined Lookup Table (LUT) for up to $4$ active channels, mapping intensity to RGBA [S2, unofficial].
+ 
+ ### Numbered Steps
+ 
+ 1.  **CPU Data Preparation:**
+-    *   Iterate through all active channels ($0$ to $gNChannels - 1$).
+-    *   For each voxel $(ix, iy, iz)$, normalize the raw intensity to 0–255 and store it in the buffer at the calculated offset [S2, unofficial].
+-    *   **Masking (if enabled):** If a mask channel is specified and `maskAlpha < 1.0`, iterate through the volume again. For each voxel, determine `maskVal` (1.0 if mask intensity > 0, else `maskAlpha`) and multiply the existing intensity value by `maskVal` [S2, unofficial].
++    *   Iterate through all active channels ($0$ to $gNChannels - 1$) [S2, unofficial].
++    *   For each voxel $(ix, iy, iz)$, normalize the raw intensity to the $0$–$255$ range and store it in the buffer at the calculated offset [S2, unofficial].
++    *   **Masking (if enabled):** If a mask channel is specified and `maskAlpha < 1.0`, iterate through the volume again [S2, unofficial]. For each voxel, determine `maskVal` ($1.0$ if mask intensity $> 0$, else `maskAlpha`) and multiply the existing intensity value by `maskVal` [S2, unofficial].
+     *   Upload the buffer to the `volumeTexture` [S2, unofficial].
+-
+ 2.  **Vertex Shader (Setup):**
+     *   Render a single quad covering the screen [S1, unofficial].
+-    *   Pass ray origin and direction (`eye_d`) to the fragment shader [S2, unofficial].
+-
++    *   Pass ray direction (`eye_d`) and origin to the fragment shader [S2, unofficial].
+ 3.  **Fragment Shader (Ray Marching):**
+     *   **Calculate Step Count:** Compute the scaled steps based on the ray length and volume scale:
+@@ -57,5 +55,5 @@
+         For $k = 0$ to $\text{csteps} - 1$:
+         1.  Compute current ray position:
+-            $$ \text{pos} = \text{origin} + (\text{tnear} + k \cdot \text{invstep} + r \cdot \text{invstep}) \cdot \text{direction} $$
++            $$ \text{pos} = \text{origin} + (\text{tnear} + (k + r) \cdot \text{invstep}) \cdot \text{direction} $$
+         2.  Sample the volume texture:
+             $$ \text{intensity} = \text{sampler3D}(\text{volumeTexture}, \text{pos}) $$
+@@ -68,64 +66,49 @@
+ 
+ ```python
+-# Vertex Shader / Setup
+-# Renders a full-screen quad. Passes eye_d (ray direction) and origin to fragment shader.
++def clamp(val, min_val, max_val):
++    return min(max(val, min_val), max_val)
+ 
+-# Fragment Shader
+-uniform sampler3D volumeTexture;
+-uniform sampler2D gLutTexture;
+-uniform int gNChannels;
+-uniform float BREAK_STEPS;
+-uniform vec3 volumeScale;
+-uniform float maxSteps;
+-uniform float tnear;
+-uniform float tfar;
+-uniform vec3 eye_d;
+-uniform vec3 origin;
++def rand(vec):
++    # Deterministic pseudo-random hash for per-pixel dither
++    return (sin(dot(vec, vec(12.9898, 78.233))) * 43758.5453) % 1.0
+ 
+-vec4 rayMarch() {
+-    // 1. Calculate Step Count
+-    float scaledSteps = BREAK_STEPS * length(eye_d / volumeScale);
+-    float csteps = clamp(scaledSteps, 1.0, maxSteps);
++def ray_march(origin, direction, tnear, tfar, volume_texture, lut_texture, break_steps, volume_scale, max_steps, n_channels):
++    # 1. Calculate Step Count
++    scaled_steps = break_steps * length(direction / volume_scale)
++    csteps = clamp(scaled_steps, 1.0, max_steps)
+     
+-    // 2. Calculate Inverse Step Size
+-    float invstep = (tfar - tnear) / csteps;
++    # 2. Calculate Inverse Step Size
++    invstep = (tfar - tnear) / csteps
+     
+-    // 3. Ray Dithering
+-    // Note: Current implementation unconditionally uses rand. 
+-    // Original code used: float r = (SLICES == 1.0) ? 0.0 : rand(eye_d.xy);
+-    float r = rand(eye_d.xy); 
++    # 3. Ray Dithering
++    r = rand(direction.xy)
+     
+-    vec4 accColor = vec4(0.0);
+-    float accAlpha = 0.0;
++    acc_color = vec(0.0, 0.0, 0.0, 0.0)
++    acc_alpha = 0.0
+     
+-    // 4. Marching Loop
+-    for (int k = 0; k < int(csteps); k++) {
+-        float t = tnear + (float(k) + r) * invstep;
+-        vec3 pos = origin + t * eye_d;
++    # 4. Marching Loop
++    for k in range(int(csteps)):
++        t = tnear + (k + r) * invstep
++        pos = origin + t * direction
+         
+-        // 5. Sample Volume
+-        // Assuming pos is normalized to [0,1] for texture sampling
+-        float intensity = texture(volumeTexture, pos).r; 
++        # 5. Sample Volume (pos assumed normalized to [0,1])
++        intensity = texture(volume_texture, pos).r
+         
+-        // 6. Reconstruct Color/Alpha from LUT
+-        // The LUT is 256x4. We map intensity (0-255) to the row.
+-        // gNChannels selects the channel offset or specific LUT entry.
+-        // Simplified LUT lookup:
+-        vec4 lutEntry = texture(gLutTexture, vec2((intensity / 255.0) * 255.0, float(gNChannels) / 4.0));
++        # 6. Reconstruct Color/Alpha from LUT
++        # LUT is 256x4. Map intensity (0-255) to x, channel index to y.
++        lut_u = intensity / 255.0
++        lut_v = n_channels / 4.0
++        lut_entry = texture(lut_texture, vec(lut_u, lut_v))
+         
+-        // 7. Front-to-Back Compositing
+-        float alpha = lutEntry.a;
+-        vec4 color = lutEntry;
++        # 7. Front-to-Back Compositing
++        alpha = lut_entry.a
++        color = lut_entry.rgb * alpha
++        acc_color = acc_color + color * (1.0 - acc_alpha)
++        acc_alpha = acc_alpha + alpha * (1.0 - acc_alpha)
+         
+-        accColor = accColor + color * (1.0 - accAlpha);
+-        accAlpha = accAlpha + alpha * (1.0 - accAlpha);
+-        
+-        if (accAlpha >= 1.0) {
+-            break;
+-        }
+-    }
+-    
+-    return accColor;
+-}
++        if acc_alpha >= 1.0:
++            break
++            
++    return acc_color
+ ```
+ 
+@@ -146,12 +129,12 @@
+ 
+ ### Fixed-Point Volume Ray Casting
+-Uses fixed-point arithmetic instead of floating-point for sampling and accumulation. Chosen when hardware lacks robust FP32 support or for deterministic results. [Fixed-Point Volume Ray Casting](12056-fixed-point-volume-ray-casting.md)
++Uses fixed-point arithmetic instead of floating-point for sampling and accumulation. Chosen when hardware lacks robust FP32 support or for deterministic results [G]. [Fixed-Point Volume Ray Casting](12056-fixed-point-volume-ray-casting.md)
+ 
+ ### Texture Atlas Raymarching
+-Uses 2D texture atlases to represent volume slices. Chosen for WebGL1 compatibility or when 3D textures are not supported. [Texture Atlas Raymarching](16745-specific-data-formats-and-integrators.md#texture-atlas-raymarching)
++Uses 2D texture atlases to represent volume slices. Chosen for WebGL1 compatibility or when 3D textures are not supported [S2, unofficial]. [Texture Atlas Raymarching](16745-specific-data-formats-and-integrators.md#texture-atlas-raymarching)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of steps per ray.
+-*   **Memory Complexity:** $O(V \cdot C)$, where $V$ is the volume voxel count and $C$ is the number of channels (up to 4).
++*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of steps per ray [G].
++*   **Memory Complexity:** $O(V \cdot C)$, where $V$ is the volume voxel count and $C$ is the number of channels (up to 4) [G].
+ *   **Measured Performance:** Rendered 128x128x128 or 256x256x256 voxels in 12.4ms [S1, unofficial].
+ *   **Strengths:**
+@@ -166,6 +149,6 @@
+     *   Turning channels on/off requires rebuilding the 3D texture [S2, unofficial].
+     *   8-bit precision limits dynamic range [S2, unofficial].
+-*   **When to Use:** When WebGL2 is available, large volumes are needed, and a unified memory representation with other rendering modes (path tracing) is desired.
+-*   **When Not to Use:** On WebGL1-only hardware, or when more than 4 channels are required.
++*   **When to Use:** When WebGL2 is available, large volumes are needed, and a unified memory representation with other rendering modes (path tracing) is desired [S2, unofficial].
++*   **When Not to Use:** On WebGL1-only hardware, or when more than 4 channels are required [S2, unofficial].
+ 
+ ## Background

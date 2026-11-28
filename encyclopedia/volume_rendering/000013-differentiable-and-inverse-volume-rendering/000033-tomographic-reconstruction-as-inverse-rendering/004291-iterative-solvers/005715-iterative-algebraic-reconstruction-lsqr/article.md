@@ -1,0 +1,158 @@
+# Iterative Algebraic Reconstruction (LSQR)
+
+Also called: 3D Helical CT Reconstruction via LSQR, 3D Helical Cone-Beam CT Image Reconstruction using LSQR, Helical CT LSQR, Iterative Backprojection Reconstruction, LSQR Reconstruction
+
+## Overview
+Iterative Algebraic Reconstruction using LSQR solves the linear inverse problem $\mathbf{A}\mathbf{X} = \mathbf{B}$ for 3D helical cone-beam CT, reconstructing a 3D voxel density grid $\mathbf{X}$ from 2D X-ray projection measurements $\mathbf{B}$ [S1, unofficial]. It distinguishes itself from direct reconstruction methods by iteratively minimizing the residual error using the adjoint of the forward projection operator, making it suitable for large-scale, sparse systems where explicit matrix storage is infeasible [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Measured projection data $\mathbf{B}$ (sinogram) of size $N_{pa} \times N_{det} \times N_{slice}$, and system geometry parameters (source-to-object distance, source-to-detector distance, detector pitch, helical shift, angular span) [S1, unofficial].
+*   **Output:** Reconstructed 3D volume $\mathbf{X}$ of size $N_{vox} \times N_{vox} \times N_{vox}$ (typically $512^3$) [S1, unofficial].
+
+**Data Structures:**
+*   **Volume Grid $\mathbf{X}$:** A contiguous 1D array of `float32` values representing the voxel densities, mapped to a 3D grid of resolution $N_{vox} \times N_{vox} \times N_{vox}$ [S1, unofficial]. In the reference implementation, $N_{vox} = 512$, occupying ~536.87 MB [S1, unofficial].
+*   **Projection Data $\mathbf{B}$:** A contiguous 1D array of `float32` values representing line integrals for each detector pixel at each angle. Size: $N_{pa} \times N_{det} \times N_{slice}$ [S1, unofficial].
+*   **Ray Geometry:** Implicitly defined by the helical trajectory. For angle $i$, the source position $(x_1, y_1, z_1)$ and detector ray endpoints are calculated using trigonometric functions of the angular span and helical shift [S1, unofficial].
+
+**Parameters (Reference Values):**
+*   $N_{vox}$ (npix): 512 [S1, unofficial]
+*   $N_{pa}$: 473 (projections) [S1, unofficial]
+*   $N_{det}$: 512 (detector columns) [S1, unofficial]
+*   $N_{slice}$: 512 (detector rows) [S1, unofficial]
+*   Span: $640^\circ$ [S1, unofficial]
+*   Detector Pitch ($d$): 0.8 mm [S1, unofficial]
+*   Source-to-Object Distance ($scob$): 166.641 mm [S1, unofficial]
+*   Source-to-Detector Distance ($scd$): 1238.157 mm [S1, unofficial]
+*   Helical Shift: 0.136 mm per angle [S1, unofficial]
+*   Relaxation Factor: 0.05 (used in backprojection scaling) [S1, unofficial]
+*   Max Iterations: 20 [S1, unofficial]
+
+**Algorithm Steps:**
+The reconstruction follows an iterative loop where each iteration processes all projection angles to update the volume estimate [S1, unofficial].
+1.  **Initialization:** Initialize the volume buffer $\mathbf{X}$ to zero [S1, unofficial].
+2.  **Iteration Loop:** For $iter = 0$ to $max\_iterations - 1$:
+    a.  **Angle Loop:** For each projection angle $i$ from $0$ to $N_{pa} - 1$:
+        i.  **Data Transfer:** Copy the projection slice $\mathbf{B}_i$ (size $N_{det} \times N_{slice}$) from host memory to device memory [S1, unofficial].
+        ii. **Adjoint Kernel Launch:** Launch the `adjoint_kernel` CUDA kernel [S1, unofficial].
+            *   **Grid Dimensions:** $\left(\frac{N_{det}+15}{16}, \frac{N_{slice}+15}{16}\right)$ [S1, unofficial]
+            *   **Block Dimensions:** $(16, 16)$ [S1, unofficial]
+            *   **Operation:** For each detector element $(j, k)$ at angle $i$, calculate the ray path through the volume. Accumulate the measured projection value $p$ into the intersected voxels. The contribution is scaled by the relaxation factor and the pixel length [S1, unofficial].
+            *   **Ray Calculation:**
+                *   Source position: $x_1 = scob \cdot \sin(\theta_i)$, $y_1 = -scob \cdot \cos(\theta_i)$, $z_1 = 51.63 - i \cdot shift / N_{pa}$ (where $\theta_i = \frac{span \cdot \pi}{N_{pa} \cdot 180}$) [S1, unofficial].
+                *   Detector point: $p_1 = (\frac{N_{det}}{2} - (0.5 + k)) \cdot d$, $p_3 = z_1 + (\frac{N_{slice}}{2} - (j + 0.5)) \cdot d$ [S1, unofficial].
+                *   Ray direction components derived from source-to-detector vector [S1, unofficial].
+                *   Intersection with voxel grid boundaries determines the path length and voxel indices $(m_1, m_2, m_3)$ [S1, unofficial].
+    b.  **Synchronization:** After all angles are processed, synchronize the device to ensure all atomic updates to $\mathbf{X}$ are complete [S1, unofficial].
+3.  **Normalization:** Multiply every voxel in $\mathbf{X}$ by the normalization factor $\frac{1}{N_{pa}}$ (or $1/473$) to scale the accumulated backprojected values [S1, unofficial].
+4.  **Output:** Save $\mathbf{X}$ as a binary file [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def lsqr_helical_ct_reconstruction(projection_data, geometry_params):
+    """
+    Reconstructs 3D volume from helical CT projections using iterative backprojection.
+    Matches the reference CUDA implementation's logic for ray tracing and accumulation.
+    """
+    npix = geometry_params['npix']
+    Npa = geometry_params['Npa']
+    Ndet = geometry_params['Ndet']
+    Nslice = geometry_params['Nslice']
+    span = geometry_params['span']
+    d = geometry_params['d']
+    scob = geometry_params['scob']
+    scd = geometry_params['scd']
+    shift = geometry_params['shift']
+    max_iterations = geometry_params['max_iterations']
+    relaxation_factor = geometry_params['relaxation_factor']
+    dia = geometry_params['dia']
+    pixlen = dia / npix
+
+    # Initialize volume buffer to zero
+    volume = [0.0] * (npix * npix * npix)
+
+    for iteration in range(max_iterations):
+        for i in range(Npa):
+            # Calculate angle theta
+            theta = (span * math.pi) / (Npa * 180.0) * i
+            
+            # Source position
+            x1 = scob * math.sin(theta)
+            y1 = -scob * math.cos(theta)
+            z1 = 51.63 - i * shift / Npa
+
+            # Process each detector element
+            for j in range(Nslice):
+                for k in range(Ndet):
+                    val = projection_data[i][j][k]
+                    
+                    # Skip negative or zero values
+                    if val <= 0.0:
+                        continue
+                        
+                    # Detector point coordinates relative to isocenter
+                    p1 = (Ndet / 2.0 - (0.5 + k)) * d
+                    p3 = z1 + (Nslice / 2.0 - (j + 0.5)) * d
+                    
+                    # Ray vector components
+                    p2 = scd - scob
+                    x2 = p1 * math.cos(theta) - p2 * math.sin(theta)
+                    y2 = p1 * math.sin(theta) + p2 * math.cos(theta)
+                    z2 = p3
+                    
+                    # Avoid division by zero
+                    if abs(y2 - y1) < 1e-9:
+                        continue
+                        
+                    # Iterate through voxel indices along the ray path
+                    for l in range(npix):
+                        y21 = (-dia / 2.0) + l * pixlen
+                        t = (y21 - y1) / (y2 - y1)
+                        x21 = x1 + (x2 - x1) * t
+                        z21 = z2 * t
+                        
+                        # Check intersection with volume bounds
+                        if (y21 >= (-dia / 2.0) and y21 < (dia / 2.0) and 
+                            x21 > (-dia / 2.0) and x21 <= (dia / 2.0) and 
+                            z21 > (-dia / 2.0) and z21 <= (dia / 2.0)):
+                            
+                            m1 = int(math.floor(((dia / 2.0) - x21) / pixlen))
+                            m2 = int(math.floor((y21 + (dia / 2.0)) / pixlen))
+                            m3 = int(math.floor(((dia / 2.0) - z21) / pixlen))
+                            
+                            # Boundary and safety check
+                            if 0 <= m1 < npix and 0 <= m2 < npix and 0 <= m3 < npix:
+                                # Index mapping: m1 (X), m3 (Z), m2 (Y)
+                                idx = m1 * npix * npix + m3 * npix + m2
+                                volume[idx] += val * relaxation_factor * pixlen
+
+    # Normalize volume
+    factor = 1.0 / Npa
+    for idx in range(len(volume)):
+        volume[idx] *= factor
+        
+    return volume
+```
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** If the ray direction component $y_2 - y_1$ is near zero, the kernel returns immediately to avoid NaNs or infinite loops [S1, unofficial].
+*   **Out-of-Bounds Access:** Voxel indices $m_1$ and $m_3$ must be checked against $0$ and $N_{vox}$ before accessing the volume array [S1, unofficial].
+*   **Negative Projections:** If the projection value is $\le 0.0$, backprojection is skipped for that ray [S1, unofficial].
+*   **Atomic Contention:** On GPU, concurrent writes to the same voxel from different rays require `atomicAdd`. The CPU reference uses a pre-computed sparse weight matrix to avoid this but is slower [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The CUDA implementation is significantly faster than the CPU reference due to parallel ray processing and atomic operations. Convergence metrics on the reference dataset show MSE dropping from 24.86 to 0.4478 in 10 iterations [S1, unofficial].
+*   **Strengths:** Handles large, sparse systems efficiently without storing the full projection matrix $\mathbf{A}$. Suitable for helical geometry where direct inversion is complex [S1, unofficial].
+*   **Limitations:** Requires many iterations for high fidelity. Sensitive to noise in projection data. The "LSQR" label in the source refers to the iterative framework, but the specific implementation uses a weighted backprojection with relaxation rather than the full LSQR linear algebra solver (which would require matrix-vector products $A^T A x$) [S1, unofficial].
+
+## Background
+The method is implemented in a GitHub repository providing an end-to-end system for 3D Helical Cone-Beam CT reconstruction [S1, unofficial]. It combines ray-casting geometry with an iterative solver approach. The term "LSQR" is used in the project title to denote the iterative least-squares nature of the reconstruction, although the core loop implements a backprojection-based iterative update. The geometry parameters (512x512x512 volume, 473 angles, 640-degree span) are specific to a simulated helical CT dataset [S1, unofficial].
+
+## Sources
+[S1] Siddharthpo03/3D-Helical-CT-LSQR-Reconstruction, https://github.com/Siddharthpo03/3D-Helical-CT-LSQR-Reconstruction, fetched 2026-10-27 (unofficial)

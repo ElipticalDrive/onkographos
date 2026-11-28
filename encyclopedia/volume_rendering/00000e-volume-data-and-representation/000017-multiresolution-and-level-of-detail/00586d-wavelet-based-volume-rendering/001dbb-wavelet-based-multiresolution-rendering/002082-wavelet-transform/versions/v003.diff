@@ -1,0 +1,195 @@
+--- v002.md
++++ v003.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A signal or image data array $I$ of size $N$.
+-*   **Output:** A set of wavelet coefficients representing the signal at multiple resolutions.
++*   **Input:** A signal or image data array $I$ of size $N \times M$ (or $N \times M \times P$ for 3D volumes) [S3].
++*   **Output:** A set of wavelet coefficients partitioned into approximation coefficients (low-pass) and detail coefficients (high-pass) across multiple resolution levels [S3].
+ 
+ **Data Structures:**
+@@ -20,82 +20,107 @@
+ **Algorithm Steps:**
+ 1.  **Decomposition (Analysis):** The process recursively separates high-frequency details from lower frequencies [S2, unofficial].
+-    a. Apply low-pass filtering and high-pass filtering to the input signal in the x-direction.
+-    b. Downsample the results by a factor of 2 in the x-direction.
+-    c. Apply low-pass filtering and high-pass filtering to the results from step (b) in the y-direction.
+-    d. Downsample the results by a factor of 2 in the y-direction.
++    a. Apply low-pass filtering and high-pass filtering to the input signal in the x-direction [S3].
++    b. Downsample the results by a factor of 2 in the x-direction [S1, unofficial].
++    c. Apply low-pass filtering and high-pass filtering to the results from step (b) in the y-direction [S3].
++    d. Downsample the results by a factor of 2 in the y-direction [S1, unofficial].
+     e. This yields the four sub-bands: $LL$, $LH$, $HL$, $HH$ [S2, unofficial].
+     f. If further decomposition is required, apply steps (a) through (e) recursively to the $LL$ sub-band [S2, unofficial].
+ 2.  **Reconstruction (Synthesis):** The inverse process assembles details from the coefficients [S2, unofficial].
+-    a. Upsample the sub-bands by a factor of 2 in the respective directions.
+-    b. Apply synthesis low-pass and high-pass filters.
+-    c. Sum the filtered results to reconstruct the signal at the current resolution.
++    a. Upsample the sub-bands by a factor of 2 in the respective directions [G].
++    b. Apply synthesis low-pass and high-pass filters [G].
++    c. Sum the filtered results to reconstruct the signal at the current resolution [G].
+     d. Recursively reconstruct higher-resolution levels until the original signal size is reached [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def wavelet_transform_2d(signal, levels, low_pass_filter, high_pass_filter):
++def dwt_1d(signal, filter_coeffs):
+     """
+-    Performs a 2D discrete wavelet transform using the separable filter bank method.
+-    Matches the formulation: c^1_k = sum_n h(n - 2k) c^0_n, d^1_k = sum_n g(n - 2k) c^0_n [S1, unofficial].
++    Computes c^1_k = sum_n h(n - 2k) c^0_n exactly as defined in [S1, unofficial].
++    Implements convolution followed by downsampling by 2.
+     """
+-    current_data = signal
+-    coefficients = []
++    out_len = (len(signal) + len(filter_coeffs) - 1) // 2
++    result = [0.0] * out_len
++    for k in range(out_len):
++        val = 0.0
++        for n in range(len(signal)):
++            idx = n - 2 * k
++            if 0 <= idx < len(filter_coeffs):
++                val += filter_coeffs[idx] * signal[n]
++        result[k] = val
++    return result
+ 
+-    for level in range(levels):
+-        # 1D transform along rows (x-direction)
+-        low_x = [sum(low_pass_filter[n - 2*k] * current_data[r, n] for n in range(len(low_pass_filter) + len(current_data[r]) - 1)) for k in range(len(current_data[r]) // 2)]
+-        high_x = [sum(high_pass_filter[n - 2*k] * current_data[r, n] for n in range(len(high_pass_filter) + len(current_data[r]) - 1)) for k in range(len(current_data[r]) // 2)]
++def dwt_2d(signal, h, g):
++    """
++    Performs a 2D discrete wavelet transform using separable 1D transforms.
++    h: low-pass filter, g: high-pass filter.
++    Returns (ll, lh, hl, hh) sub-bands.
++    """
++    # 1D transform along rows (x-direction)
++    low_x = [dwt_1d(row, h) for row in signal]
++    high_x = [dwt_1d(row, g) for row in signal]
++    
++    # 1D transform along columns (y-direction) on the downsampled row results
++    ll = dwt_2d_transpose(low_x, h)
++    lh = dwt_2d_transpose(low_x, g)
++    hl = dwt_2d_transpose(high_x, h)
++    hh = dwt_2d_transpose(high_x, g)
++    
++    return ll, lh, hl, hh
+ 
+-        # 1D transform along columns (y-direction) on the downsampled row results
+-        ll = [[sum(low_pass_filter[m - 2*j] * low_x[i][m] for m in range(len(low_pass_filter) + len(low_x[0]) - 1)) for j in range(len(low_x[0]) // 2)] for i in range(len(low_x))]
+-        lh = [[sum(high_pass_filter[m - 2*j] * low_x[i][m] for m in range(len(high_pass_filter) + len(low_x[0]) - 1)) for j in range(len(low_x[0]) // 2)] for i in range(len(low_x))]
+-        hl = [[sum(low_pass_filter[m - 2*j] * high_x[i][m] for m in range(len(low_pass_filter) + len(high_x[0]) - 1)) for j in range(len(high_x[0]) // 2)] for i in range(len(high_x))]
+-        hh = [[sum(high_pass_filter[m - 2*j] * high_x[i][m] for m in range(len(high_pass_filter) + len(high_x[0]) - 1)) for j in range(len(high_x[0]) // 2)] for i in range(len(high_x))]
++def dwt_2d_transpose(data, filter_coeffs):
++    """Applies 1D transform to columns by transposing, transforming, and transposing back."""
++    rows = len(data)
++    cols = len(data[0])
++    transposed = [[data[i][j] for i in range(rows)] for j in range(cols)]
++    transformed = [dwt_1d(col, filter_coeffs) for col in transposed]
++    result = [[transformed[j][i] for j in range(len(transformed))] for i in range(len(transformed[0]))]
++    return result
+ 
+-        coefficients.append({'LL': ll, 'LH': lh, 'HL': hl, 'HH': hh})
+-        current_data = ll
++def idwt_2d(ll, lh, hl, hh, h_syn, g_syn):
++    """
++    Reconstructs the signal from 2D wavelet coefficients.
++    h_syn: synthesis low-pass filter, g_syn: synthesis high-pass filter.
++    """
++    # Inverse 1D transform along columns (y-direction)
++    ll_y = idwt_2d_transpose(ll, h_syn)
++    lh_y = idwt_2d_transpose(lh, g_syn)
++    hl_y = idwt_2d_transpose(hl, h_syn)
++    hh_y = idwt_2d_transpose(hh, g_syn)
++    
++    # Sum column results
++    ll_y = [[ll_y[i][j] + lh_y[i][j] + hl_y[i][j] + hh_y[i][j] for j in range(len(ll_y[0]))] for i in range(len(ll_y))]
++    
++    # Inverse 1D transform along rows (x-direction)
++    reconstructed = idwt_2d_transpose(ll_y, h_syn)
++    detail_x = idwt_2d_transpose([[lh_y[i][j] + hl_y[i][j] + hh_y[i][j] for j in range(len(lh_y[0]))] for i in range(len(lh_y))], g_syn)
++    
++    # Sum row results
++    result = [[reconstructed[i][j] + detail_x[i][j] for j in range(len(reconstructed[0]))] for i in range(len(reconstructed))]
++    return result
+ 
+-    return coefficients
++def idwt_2d_transpose(data, filter_coeffs):
++    """Applies inverse 1D transform to columns."""
++    rows = len(data)
++    cols = len(data[0])
++    transposed = [[data[i][j] for i in range(rows)] for j in range(cols)]
++    transformed = [idwt_1d(col, filter_coeffs) for col in transposed]
++    result = [[transformed[j][i] for j in range(len(transformed))] for i in range(len(transformed[0]))]
++    return result
+ 
+-def inverse_wavelet_transform_2d(coefficients, original_shape, low_pass_filter, high_pass_filter):
++def idwt_1d(signal, filter_coeffs):
+     """
+-    Reconstructs the signal from wavelet coefficients.
++    Inverse 1D transform: upsampling by 2 followed by synthesis filtering.
++    Matches the inverse of the analysis step.
+     """
+-    current_data = coefficients[-1]['LL']
+-    for level in range(len(coefficients) - 2, -1, -1):
+-        bands = coefficients[level]
+-        ll, lh, hl, hh = bands['LL'], bands['LH'], bands['HL'], bands['HH']
+-
+-        # Upsample by inserting zeros
+-        def upsample_1d(arr, axis):
+-            if axis == 1: # rows
+-                return [[arr[i][j//2] if j % 2 == 0 else 0 for j in range(len(arr[0]) * 2)] for i in range(len(arr))]
+-            else: # columns
+-                return [[arr[i//2][j] if i % 2 == 0 else 0 for j in range(len(arr[0]))] for i in range(len(arr) * 2)]
+-
+-        ll_up = upsample_1d(ll, 1)
+-        lh_up = upsample_1d(lh, 1)
+-        hl_up = upsample_1d(hl, 1)
+-        hh_up = upsample_1d(hh, 1)
+-
+-        # Synthesis filtering (convolution)
+-        def synthesize_1d(arr, filt, axis):
+-            if axis == 1:
+-                return [[sum(filt[n - 2*k] * arr[i][n] for n in range(len(filt) + len(arr[i]) - 1)) for k in range(len(arr[i]))] for i in range(len(arr))]
+-            else:
+-                return [[sum(filt[m - 2*j] * arr[m][j] for m in range(len(filt) + len(arr))) for j in range(len(arr[0]))] for i in range(len(arr))]
+-
+-        ll_y = synthesize_1d(ll_up, low_pass_filter, 0)
+-        lh_y = synthesize_1d(lh_up, high_pass_filter, 0)
+-        hl_y = synthesize_1d(hl_up, low_pass_filter, 0)
+-        hh_y = synthesize_1d(hh_up, high_pass_filter, 0)
+-
+-        ll_x = synthesize_1d(ll_y, low_pass_filter, 1)
+-        lh_x = synthesize_1d(lh_y, high_pass_filter, 1)
+-        hl_x = synthesize_1d(hl_y, low_pass_filter, 1)
+-        hh_x = synthesize_1d(hh_y, high_pass_filter, 1)
+-
+-        current_data = [[ll_x[i][j] + lh_x[i][j] + hl_x[i][j] + hh_x[i][j] for j in range(len(ll_x[0]))] for i in range(len(ll_x))]
+-    return current_data
++    upsampled = [0.0] * (len(signal) * 2)
++    for k in range(len(signal)):
++        upsampled[2 * k] = signal[k]
++    
++    out_len = len(upsampled) + len(filter_coeffs) - 1
++    result = [0.0] * out_len
++    for n in range(len(upsampled)):
++        for m in range(len(filter_coeffs)):
++            result[n + m] += upsampled[n] * filter_coeffs[m]
++    return result
+ ```
+ 
+@@ -111,9 +136,12 @@
+ *   **Strengths:** Local support in both image domain and frequency space eliminates the need for image fragmentation (unlike DCT) [S2, unofficial]. It provides a sparse representation for highly detailed functions [S2, unofficial].
+ *   **Limitations:** The main drawback of the related windowed Fourier transform (Gabor) is constant spatial and frequency resolution, which is not acceptable for signals with features of very different sizes; the wavelet transform avoids this [S1, unofficial].
++*   **When to use:** Ideal for multiresolution volume visualization, compressed direct volume rendering, and progressive transmission where spatial locality and hierarchical detail refinement are required [S3].
++*   **When not to use:** Avoid when global frequency analysis without spatial localization is needed, or when strict block-based DCT compatibility is required for legacy pipelines [S2, unofficial].
+ 
+ ## Background
+-The wavelet transform was defined by Monet Morlet to avoid the fixed resolution limit of windowed Fourier transforms [S1, unofficial]. It decomposes the signal into a family of functions, which are the translation and dilation of a unique function $\psi(x)$ [S1, unofficial]. The transform has roots in signal processing and pure mathematics [S2, unofficial]. It is used in image compression, solving partial differential equations, and integrating radiosity kernels [S2, unofficial]. The lifting scheme is used to construct wavelets for efficiently modeling massive volumetric data sets [S2, unofficial].
++The wavelet transform was defined by Monet Morlet to avoid the fixed resolution limit of windowed Fourier transforms [S1, unofficial]. It decomposes the signal into a family of functions, which are the translation and dilation of a unique function $\psi(x)$ [S1, unofficial]. The transform has roots in signal processing and pure mathematics [S2, unofficial]. It is used in image compression, solving partial differential equations, and integrating radiosity kernels [S2, unofficial]. The lifting scheme is used to construct wavelets for efficiently modeling massive volumetric data sets [S2, unofficial]. DWT was introduced for compressed volume rendering by Muraki [Mur93] and is used in block-wise hierarchical decomposition (octree) with entropy encoding, block caching, and projective classification [S3].
+ 
+ ## Sources
+ [S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
+-[S2] Multiresolution modeling for scientific visualization, https://escholarship.org/uc/item/5317385v, fetched 2026-10-26 (unofficial)+[S2] Multiresolution modeling for scientific visualization, https://escholarship.org/uc/item/5317385v, fetched 2026-10-26 (unofficial)
++[S3] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

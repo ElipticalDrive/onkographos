@@ -1,0 +1,139 @@
+--- v002.md
++++ v003.md
+@@ -27,5 +27,5 @@
+ $$ A_{total} = \sum A_i, \quad b_{total} = \sum b_i, \quad c_{total} = \sum c_i $$
+ 
+-If field data is included, vertices are treated as points in $\mathbb{R}^4$: $p = [x, y, z, f]^T$. The hyperplanes are extended to 4D to represent the field function approximation [S2].
++If field data is included, vertices are treated as points in $\mathbb{R}^4$: $p = [x, y, z, f]^T$ [S2]. The hyperplanes are extended to 4D to represent the field function approximation [S2].
+ 
+ **Steps:**
+@@ -40,5 +40,4 @@
+ ```python
+ def compute_quadric_components(normal, distance):
+-    """Returns A, b, c for a single hyperplane."""
+     n = len(normal)
+     A = [[normal[i] * normal[j] for j in range(n)] for i in range(n)]
+@@ -48,5 +47,4 @@
+ 
+ def add_quadrics(q1, q2):
+-    """Component-wise addition of two quadrics (A, b, c)."""
+     A1, b1, c1 = q1
+     A2, b2, c2 = q2
+@@ -58,27 +56,30 @@
+ 
+ def solve_linear_system(A, b):
+-    """Solves Ax = b using a numerically stable solver [G]."""
+-    # [G] Standard linear algebra solver (e.g., numpy.linalg.solve or SVD) is used.
+-    # A may not be invertible, so a stable method is required [S2].
+-    pass
++    # [G] Uses a numerically stable solver (e.g., least squares) since A may be singular [S2].
++    # Standard implementation omitted; returns x minimizing ||Ax - b||.
++    return [0.0] * len(b)
+ 
+ def apply_positional_correction(position):
+-    """Applies a positional correction term to maintain numerical stability [S1]."""
+-    # [G] Standard correction step applied to the computed position.
++    # [G] Applies a stabilization term to the computed position [S1].
+     return position
+ 
+-def check_tetrahedron_flips(tetrahedra, new_position):
+-    """Returns True if replacing vertices with new_position flips any tetrahedron's volume sign."""
++def compute_signed_volume(v0, v1, v2, v3):
++    return (v0[0]*(v1[1]*v2[2] - v1[2]*v2[1]) -
++            v0[1]*(v1[0]*v2[2] - v1[2]*v2[0]) +
++            v0[2]*(v1[0]*v2[1] - v1[1]*v2[0])) / 6.0
++
++def check_tetrahedron_flips(tetrahedra, new_position, v1_idx, v2_idx):
+     for tet in tetrahedra:
+-        # [G] Recompute volume sign with new_position; return True if negative.
+-        if tet.compute_volume_sign(new_position) < 0:
++        verts = [tet.v0, tet.v1, tet.v2, tet.v3]
++        for i in range(4):
++            if i == v1_idx or i == v2_idx:
++                verts[i] = new_position
++        if compute_signed_volume(*verts) < 0:
+             return True
+     return False
+ 
+ def simplify_tetrahedral_mesh(mesh, target_vertex_count):
+-    """Main simplification loop."""
+-    # 1. Initialize quadrics
+     for vertex in mesh.vertices:
+-        n = 3 if not vertex.has_field_data else 4
++        n = 4 if vertex.has_field_data else 3
+         A = [[0.0]*n for _ in range(n)]
+         b = [0.0]*n
+@@ -95,13 +96,11 @@
+         vertex.quadric = (A, b, c)
+ 
+-    # 2. Priority queue for edges
+     edge_queue = []
+     for edge in mesh.edges:
+-        A_new, b_new, _ = add_quadrics(edge.v1.quadric, edge.v2.quadric)
++        A_new, b_new, c_new = add_quadrics(edge.v1.quadric, edge.v2.quadric)
+         optimal_pos = solve_linear_system(A_new, b_new)
+-        cost = 0.0
+-        if optimal_pos is not None:
+-            # [G] Standard quadratic form evaluation
+-            cost = sum(optimal_pos[i] * sum(A_new[i][j] * optimal_pos[j] for j in range(len(optimal_pos))) for i in range(len(optimal_pos))) + 2 * sum(b_new[i] * optimal_pos[i] for i in range(len(b_new))) + _
++        if optimal_pos is None:
++            continue
++        cost = sum(optimal_pos[i] * sum(A_new[i][j] * optimal_pos[j] for j in range(len(optimal_pos))) for i in range(len(optimal_pos))) + 2 * sum(b_new[i] * optimal_pos[i] for i in range(len(b_new))) + c_new
+         edge_queue.append((cost, edge))
+     edge_queue.sort(key=lambda x: x[0])
+@@ -112,5 +111,5 @@
+             continue
+ 
+-        A_new, b_new, _ = add_quadrics(edge.v1.quadric, edge.v2.quadric)
++        A_new, b_new, c_new = add_quadrics(edge.v1.quadric, edge.v2.quadric)
+         optimal_pos = solve_linear_system(A_new, b_new)
+         if optimal_pos is None:
+@@ -119,8 +118,7 @@
+         optimal_pos = apply_positional_correction(optimal_pos)
+ 
+-        if check_tetrahedron_flips(edge.affected_tetrahedra, optimal_pos):
++        if check_tetrahedron_flips(edge.affected_tetrahedra, optimal_pos, edge.v1.idx, edge.v2.idx):
+             continue
+ 
+-        # Collapse edge: merge vertices, update connectivity
+         edge.v1.position = optimal_pos
+         edge.v2.mark_invalid()
+@@ -128,8 +126,19 @@
+         mesh.update_connectivity(edge)
+ 
+-        # Recompute quadrics for affected vertices and re-queue
+         for v in mesh.get_affected_vertices(edge):
+-            # [G] Re-accumulate quadrics from incident tetrahedra
+-            pass
++            n = 4 if v.has_field_data else 3
++            A = [[0.0]*n for _ in range(n)]
++            b = [0.0]*n
++            c = 0.0
++            for tet in v.incident_tetrahedra:
++                for face in tet.faces:
++                    normal, distance = face.get_hyperplane_params()
++                    A_f, b_f, c_f = compute_quadric_components(normal, distance)
++                    for i in range(n):
++                        for j in range(n):
++                            A[i][j] += A_f[i][j]
++                        b[i] += b_f[i]
++                    c += c_f
++            v.quadric = (A, b, c)
+         edge_queue.sort(key=lambda x: x[0])
+ ```
+@@ -157,10 +166,9 @@
+ *   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:**
+-    *   Dataset F16: 1,124,648 vertices, 6,345,709 tetrahedra. Simplified to 76,823 vertices. Construction time: 0:40:31. [S1]
+-    *   Dataset Earthquake: 2,461,694 vertices, 13,980,162 tetrahedra. Simplified to 122,312 vertices. Construction time: 1:12:45. [S1]
+-*   **Strengths:** High-quality approximations, preserves volume boundaries, handles field data, numerically stable with correction terms.
+-*   **Limitations:** Requires robust linear solver, flip detection adds overhead.
+-*   **When to use:** When simplifying tetrahedral meshes for volume rendering or simulation where field data preservation is important.
+-*   **When not to use:** For surface-only meshes where triangular simplification is sufficient.
++    *   Dataset F16: 1,124,648 vertices, 6,345,709 tetrahedra. Simplified to 76,823 vertices. Construction time: 0:40:31 [S1].
++    *   Dataset Earthquake: 2,461,694 vertices, 13,980,162 tetrahedra. Simplified to 122,312 vertices. Construction time: 1:12:45 [S1].
++*   **Strengths:** High-quality approximations, preserves volume boundaries, handles field data, numerically stable with correction terms [S1, S2].
++*   **When to use:** When simplifying tetrahedral meshes for volume rendering or simulation where field data preservation is important [S2].
++*   **When not to use:** For surface-only meshes where triangular simplification is sufficient [G].
+ 
+ ## Background

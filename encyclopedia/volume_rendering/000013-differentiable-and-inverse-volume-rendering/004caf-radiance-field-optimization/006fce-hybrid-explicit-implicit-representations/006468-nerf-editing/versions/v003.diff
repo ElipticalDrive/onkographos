@@ -1,0 +1,122 @@
+--- v002.md
++++ v003.md
+@@ -29,8 +29,8 @@
+ 
+ 3. **Build Tetrahedral Proxy:**
+-   Construct a tetrahedral mesh ($M_{tet}$) that wraps around the original triangular mesh $M_{tri}$ [S1]. This mesh serves as a spatial proxy to propagate the surface deformation into the volume.
++   Construct a tetrahedral mesh ($M_{tet}$) that wraps around the original triangular mesh $M_{tri}$ [S1]. This mesh serves as a spatial proxy to propagate the surface deformation into the volume [S1].
+ 
+ 4. **Propagate Deformation to Tetrahedral Mesh:**
+-   Drive the deformation of $M_{tet}$ based on the deformation of $M'_{tri}$ [S1]. The vertices of $M_{tet}$ are displaced to reflect the geometric changes of the surface, creating a discrete deformation field [S1]. Let the deformed tetrahedral mesh be $M'_{tet}$.
++   Drive the deformation of $M_{tet}$ based on the deformation of $M'_{tri}$ [S1]. The vertices of $M_{tet}$ are displaced to reflect the geometric changes of the surface, creating a discrete deformation field [S1]. Let the deformed tetrahedral mesh be $M'_{tet}$ [S1].
+ 
+ 5. **Interpolate to Continuous Deformation Field:**
+@@ -43,5 +43,5 @@
+ 
+ 7. **Rendering:**
+-   Perform standard volume rendering integration along the bent rays. The NeRF decoder predicts density $\sigma$ and color $c$ at the sampled points, and the final color is computed via alpha compositing [G].
++   Perform standard volume rendering integration along the bent rays [S1]. The NeRF decoder predicts density $\sigma$ and color $c$ at the sampled points, and the final color is computed via alpha compositing [G].
+ 
+ **Pseudocode:**
+@@ -50,5 +50,28 @@
+ import math
+ 
+-def nerf_editing_render(ray_origin, ray_direction, nerf_model, tet_mesh, deformation_field_func):
++def dot(a, b):
++    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
++
++def cross(a, b):
++    return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
++
++def sub(a, b):
++    return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]
++
++def barycentric_tet(p, v0, v1, v2, v3):
++    # Compute barycentric coordinates of p in tetrahedron v0,v1,v2,v3
++    # Returns (w0, w1, w2, w3) or None if outside
++    vol = dot(sub(v0, v1), cross(sub(v2, v1), sub(v3, v1)))
++    if abs(vol) < 1e-9:
++        return None
++    w0 = dot(sub(p, v1), cross(sub(v2, v1), sub(v3, v1))) / vol
++    w1 = dot(sub(v0, p), cross(sub(v2, v0), sub(v3, v0))) / vol
++    w2 = dot(sub(v0, p), cross(sub(v1, v0), sub(v3, v0))) / vol
++    w3 = dot(sub(v0, p), cross(sub(v1, v0), sub(v2, v0))) / vol
++    if 0.0 <= w0 <= 1.0 and 0.0 <= w1 <= 1.0 and 0.0 <= w2 <= 1.0 and 0.0 <= w3 <= 1.0:
++        return (w0, w1, w2, w3)
++    return None
++
++def nerf_editing_render(ray_origin, ray_direction, nerf_model, tet_mesh, deformation_vectors):
+     """
+     Renders a single ray for the edited scene.
+@@ -58,6 +81,6 @@
+         ray_direction: 3D vector, direction of the camera ray.
+         nerf_model: Function that queries NeRF for (sigma, color) at a point.
+-        tet_mesh: List of tetrahedra, each containing vertices and deformation vectors.
+-        deformation_field_func: Function that returns deformation vector D(x) for any point x.
++        tet_mesh: List of 4-tuples, each containing vertices (v0, v1, v2, v3).
++        deformation_vectors: List of 4-tuples, each containing deformation vectors (d0, d1, d2, d3).
+         
+     Returns:
+@@ -73,6 +96,13 @@
+     deformations = [[0.0, 0.0, 0.0] for _ in points]
+     for i, p in enumerate(points):
+-        if is_inside_tet_mesh(p, tet_mesh):
+-            deformations[i] = deformation_field_func(p, tet_mesh)
++        for tet_idx, tet in enumerate(tet_mesh):
++            v0, v1, v2, v3 = tet
++            bary = barycentric_tet(p, v0, v1, v2, v3)
++            if bary is not None:
++                d0, d1, d2, d3 = deformation_vectors[tet_idx]
++                deformations[i] = [
++                    bary[0]*d0[j] + bary[1]*d1[j] + bary[2]*d2[j] + bary[3]*d3[j] for j in range(3)
++                ]
++                break
+ 
+     bent_points = [[points[i][j] + deformations[i][j] for j in range(3)] for i in range(num_samples)]
+@@ -96,33 +126,4 @@
+             color[j] += weight * colors[i][j]
+     return color
+-
+-def is_inside_tet_mesh(point, tet_mesh):
+-    for tet in tet_mesh:
+-        v0, v1, v2, v3 = tet.vertices
+-        vol = dot(v1-v0, cross(v2-v0, v3-v0))
+-        if vol == 0: continue
+-        w0 = dot(point-v1, cross(v2-v1, v3-v1)) / vol
+-        w1 = dot(point-v2, cross(v3-v2, v0-v2)) / vol
+-        w2 = dot(point-v3, cross(v0-v3, v1-v3)) / vol
+-        w3 = 1.0 - w0 - w1 - w2
+-        if 0.0 <= w0 <= 1.0 and 0.0 <= w1 <= 1.0 and 0.0 <= w2 <= 1.0 and 0.0 <= w3 <= 1.0:
+-            return True
+-    return False
+-
+-def deformation_field_func(point, tet_mesh):
+-    for tet in tet_mesh:
+-        v0, v1, v2, v3 = tet.vertices
+-        d0, d1, d2, d3 = tet.deformations
+-        vol = dot(v1-v0, cross(v2-v0, v3-v0))
+-        if vol == 0: continue
+-        w0 = dot(point-v1, cross(v2-v1, v3-v1)) / vol
+-        w1 = dot(point-v2, cross(v3-v2, v0-v2)) / vol
+-        w2 = dot(point-v3, cross(v0-v3, v1-v3)) / vol
+-        w3 = 1.0 - w0 - w1 - w2
+-        return [w0*d0[j] + w1*d1[j] + w2*d2[j] + w3*d3[j] for j in range(3)]
+-    return [0.0, 0.0, 0.0]
+-
+-def dot(a, b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+-def cross(a, b): return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
+ ```
+ 
+@@ -133,10 +134,10 @@
+ **Edge Cases and Pitfalls:**
+ *   **Artifacts from Direct Interpolation:** Directly transferring deformation from the surface mesh to the implicit volume by simple interpolation (without the tetrahedral proxy) leads to obvious artifacts [S1]. The two-step strategy using a tetrahedral proxy is necessary to avoid these [S1].
+-*   **Boundary Handling:** Points outside the tetrahedral mesh volume are assumed to have zero deformation [G]. This must be handled explicitly to prevent undefined behavior.
++*   **Boundary Handling:** Points outside the tetrahedral mesh volume are assumed to have zero deformation [G]. This is handled explicitly to prevent undefined behavior [G].
+ *   **Precision:** The quality of the continuous deformation field depends on the resolution of the tetrahedral mesh. Coarse tetrahedral meshes may result in blocky or inaccurate deformations [G].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** The method requires no network re-training, making the editing phase fast [S1]. The rendering phase involves an additional interpolation step for the deformation field, adding minor overhead to standard NeRF rendering [G].
+-*   **Memory Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources [G].
+ *   **Strengths:** Supports substantial shape deformation (not just color or rigid transforms); works on arbitrary shapes (animals, man-made objects), not limited to humans [S1]. Intuitive user control via mesh editing [S2].
+ *   **Limitations:** Requires an initial mesh extraction step, which can be noisy or incomplete for complex scenes [G]. The quality of deformation propagation depends on the tetrahedral mesh generation [S1].

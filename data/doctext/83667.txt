@@ -1,0 +1,748 @@
+# GPU Surface nets
+this is an implementation of the Surface nets surface exctraction algorithm running on the GPU. As this project is planned to be used as a real-time deformable terrain it also includes CSG Boolean operations and Chunking. Yes there are gaps in the terrain, **I have** noticed it.
+
+![Chunking](../assets/chunking.jpg)
+
+## Requirements
+
+- GPU supporting shader level >=4.5
+- Unity >=2019.1.0f2 (only tested on this version so far)
+
+## Realtime updating
+![Demo of updating in realtime](../assets/realtime.gif?raw=true)
+
+
+## Boolean operations
+
+WIP. Union, Intersection, Subtraction are all working most of the time.
+
+![Union](../assets/union.png)
+![Intersect](../assets/intersect.png)
+![Subtract](../assets/subtract.png)
+
+### Assets/TestChunking.cs
+```
+﻿using Assets.Dual_Contouring;
+using Assets.Dual_Contouring.Structs;
+using UnityEngine;
+using Random = UnityEngine.Random;
+
+namespace Assets
+{
+    [RequireComponent(typeof(ChunkMeshGenerator))]
+    [RequireComponent(typeof(SdfSphere))]
+    [RequireComponent(typeof(MeshFilter))]
+    [RequireComponent(typeof(MeshRenderer))]
+    public class TestChunking : MonoBehaviour
+    {
+        public ChunkMeshGenerator ChunkMeshGenerator;
+        public SdfSphere Sphere;
+
+        public MeshFilter MeshFilter;
+        public MeshRenderer MeshRenderer;
+
+        public Chunk Chunk;
+
+        public void Start()
+        {
+            ChunkMeshGenerator = GetComponent<ChunkMeshGenerator>();
+            Sphere = GetComponent<SdfSphere>();
+
+            MeshFilter = GetComponent<MeshFilter>();
+            MeshRenderer = GetComponent<MeshRenderer>();
+
+            Chunk = new Chunk(new Vector3(32,32,32), new Vector3(0,0,0)  );
+
+        }
+
+        public void FixedUpdate()
+        {
+            var position = new Vector3(
+                Random.Range(1, 32),
+                Random.Range(1, 32),
+                Random.Range(1, 32)
+            );
+
+            var radius = Random.Range(1, 16);
+
+            var add = Random.Range(0, 2);
+
+            if (add == 1)
+            {
+                Debug.Log("add");
+                Sphere.Add(Chunk, position, radius);
+            }
+            else
+            {
+                Debug.Log("remove");
+                Sphere.Remove(Chunk, position, radius);
+            }
+            
+            MeshFilter.mesh = ChunkMeshGenerator.CreateChunkMesh(Chunk);
+            //Chunk.ComputeBuffer = new ComputeBuffer(Chunk.GetSize, Marshal.SizeOf<Voxel>());
+
+            if (!Chunk.Populated)
+            {
+                Chunk.Populated = true;
+            }
+        }
+
+        public void OnDestroy()
+        {
+            Chunk.ComputeBuffer.Dispose();
+        }
+    }
+}
+```
+
+### Assets/Dual Contouring/ChunkMeshGenerator.cs
+```
+﻿using Assets.Dual_Contouring.Structs;
+using System.Runtime.InteropServices;
+using UnityEngine;
+
+namespace Assets.Dual_Contouring
+{
+    public class ChunkMeshGenerator : MonoBehaviour
+    {
+        public Material ChunkMaterial;
+
+        public int[] Indices;
+
+        public ComputeShader ComputeShader;
+        private ComputeBuffer _voxelBuffer;
+        private ComputeBuffer _featurePointBuffer;
+        private ComputeBuffer _indicesBuffer;
+        private ComputeBuffer _quadsBuffer;
+        private ComputeBuffer _verticesArgumentBuffer;
+
+        public Mesh CreateChunkMesh(Chunk chunk)
+        {
+            var mesh = new Mesh();
+
+            _voxelBuffer = chunk.ComputeBuffer;
+            _featurePointBuffer = new ComputeBuffer(chunk.GetSize, Marshal.SizeOf<Vector3>());
+            _quadsBuffer = new ComputeBuffer(chunk.GetSize, Marshal.SizeOf<Vector3>() * 4, ComputeBufferType.Append);
+            _verticesArgumentBuffer = new ComputeBuffer(4, sizeof(int), ComputeBufferType.IndirectArguments);
+
+            //PART 1 - FIGURE OUT MESH VERTICES
+            //_voxelBuffer.SetData(chunk.Voxels); //Put the chunk data in the gpu buffer
+            ComputeShader.SetVector("Size", chunk.Size); //Set the chunk dimensions on the gpu
+            ComputeShader.SetBuffer(0, "Voxels", _voxelBuffer); //Bind the gpu buffer t
+            ComputeShader.SetBuffer(0, "FeaturePoints", _featurePointBuffer); //Bind the output buffer to the 0th kernel
+            ComputeShader.Dispatch(0, (int)chunk.Size.x / 8, (int)chunk.Size.y / 8, (int)chunk.Size.z / 8); //Dispatch the task to cores, one for each voxel of the mesh? 
+
+            //FeaturePointBuffer.GetData(FeaturePoints); //TODO: COMMENT OUT, USED ONLY FOR OUTPUT VISUALIZATION 
+
+            //PART 2 - CONSTRUCT THE MESH QUADS 
+            ComputeShader.SetBuffer(1, "Voxels", _voxelBuffer);
+            ComputeShader.SetBuffer(1, "FeaturePoints", _featurePointBuffer); //Bind the output buffer of kernel 0 to kernel 1
+            ComputeShader.SetBuffer(1, "Quads", _quadsBuffer); //Output buffer containing actual quads of the mesh
+            ComputeShader.Dispatch(1, (int)chunk.Size.x / 8, (int)chunk.Size.y / 8, (int)chunk.Size.z / 8); //Dispatch the task to cores, one for each voxel of the mesh? 
+
+            ComputeBuffer.CopyCount(_quadsBuffer, _verticesArgumentBuffer, 0); //copy the indirect arguments to indirect buffer
+
+            var verticeArguments = new int[4]; //make a array to store indirect arguments
+            _verticesArgumentBuffer.GetData(verticeArguments); //copy data from indirect buffer to array
+
+            //Debug.Log(verticeArguments[0]);
+
+            var quadCount = verticeArguments[0]; //verticeArguments[0] contains count of quads
+
+            if (quadCount == 0)
+            {
+                ReleaseBuffers();
+                return mesh;
+            }
+
+            var verticeCount = quadCount * 4; //each quad contains 4 vertices
+            var vertices = new Vector3[verticeCount]; //create new vertice array for the new mesh
+            _quadsBuffer.GetData(vertices); //store vertices
+
+            //PART 3 - CONSTRUCT THE MESH INDICES
+            var indicesCount = quadCount * 6;
+
+            //Debug.Log(indicesCount);
+
+            _indicesBuffer = new ComputeBuffer(quadCount, sizeof(int) * 6);
+            ComputeShader.SetBuffer(2, "Quads", _quadsBuffer);
+            ComputeShader.SetBuffer(2, "Indices", _indicesBuffer);
+            ComputeShader.Dispatch(2, quadCount, 1, 1);
+
+            //var indices = new int[indicesCount];
+            //_indicesBuffer.GetData(indices);
+
+            Indices = new int[indicesCount];
+            _indicesBuffer.GetData(Indices);
+
+            mesh.vertices = vertices;
+            mesh.triangles = Indices;
+            mesh.RecalculateNormals();
+
+            //Debug.Log("gpu vertices: " + mesh.vertices.Length);
+            //Debug.Log("gpu indices: " + mesh.triangles.Length);
+
+            ReleaseBuffers();
+
+            return mesh;
+        }
+
+        public void ReleaseBuffers()
+        {
+            _featurePointBuffer?.Release();
+            _quadsBuffer?.Release();
+            _indicesBuffer?.Release();
+            _verticesArgumentBuffer?.Release();
+        }
+    }
+}
+```
+
+### Assets/Dual Contouring/SdfPerlin.compute
+```
+﻿#pragma kernel Add
+#pragma kernel Remove
+
+
+struct Voxel {
+	float Density;
+};
+
+float3 Size;
+
+float3 Position;
+float Radius;
+bool Populated;
+
+RWStructuredBuffer<Voxel> Voxels;
+
+int GetIndex(float3 position) {
+	return (int)(Size.z * position.z + position.y * (Size.x * Size.z) + position.x);
+}
+
+float3 GetPosition(int index) {
+	return float3(
+		(int)(index % Size.z),
+		(int)(index / (Size.x * Size.z)),
+		(int)(index % (Size.x * Size.z) / Size.z)
+	);
+}
+
+float Perlin(float3 position){
+	return frac(sin(dot(position.xz ,float2(12.9898,78.233))) * 43758.5453);
+}
+
+float Density(float3 position){
+	float height = Perlin(position / 512)*128;
+	height += Perlin(position / 256) * 64;
+	height += Perlin(position / 128) * 32;
+	height += Perlin(position / 64) * 16;
+
+	return position.y - height;
+}
+
+[numthreads(8, 8, 8)]
+void Add(uint3 position : SV_DispatchThreadID)
+{
+	if( position.x >= Size.x || position.y >= Size.y || position.z >= Size.z )
+	{
+		return;
+	}
+
+	Voxel voxel;
+
+	if(Populated){
+		voxel = Voxels[GetIndex(position)];
+		voxel.Density = min(voxel.Density, Density(position));
+	}
+	else
+	{
+		voxel.Density = Density(position);
+	}
+			
+	Voxels[GetIndex(position)] = voxel;
+}
+
+[numthreads(8, 8, 8)]
+void Remove(uint3 position : SV_DispatchThreadID)
+{
+	if( position.x >= Size.x || position.y >= Size.y || position.z >= Size.z )
+	{
+		return;
+	}
+
+	Voxel voxel;
+
+	if(Populated){
+		voxel = Voxels[GetIndex(position)];
+		voxel.Density = min(voxel.Density * -1, Density(position))*-1;
+		
+	}
+	else
+	{
+		voxel.Density = Density(position);
+	}
+			
+	Voxels[GetIndex(position)] = voxel;
+}
+```
+
+### Assets/Dual Contouring/SdfSphere.compute
+```
+﻿#pragma kernel Add
+#pragma kernel Remove
+
+struct Voxel {
+	float Density;
+};
+
+float3 Size;
+
+float3 Position;
+float Radius;
+bool Populated;
+
+RWStructuredBuffer<Voxel> Voxels;
+
+int GetIndex(float3 position) {
+	return (int)(Size.z * position.z + position.y * (Size.x * Size.z) + position.x);
+}
+
+float3 GetPosition(int index) {
+	return float3(
+		(int)(index % Size.z),
+		(int)(index / (Size.x * Size.z)),
+		(int)(index % (Size.x * Size.z) / Size.z)
+	);
+}
+
+float Density(float3 position){
+	return pow(Position.x - position.x, 2) + pow(Position.y - position.y, 2) + pow(Position.z - position.z, 2) - pow(Radius, 2);
+}
+
+[numthreads(8, 8, 8)]
+void Add(uint3 position : SV_DispatchThreadID)
+{
+	if( position.x >= Size.x || position.y >= Size.y || position.z >= Size.z )
+	{
+		return;
+	}
+
+	Voxel voxel;
+
+	if(Populated){
+		voxel = Voxels[GetIndex(position)];
+		voxel.Density = min(voxel.Density, Density(position));
+	}
+	else
+	{
+		voxel.Density = Density(position);
+	}
+			
+	Voxels[GetIndex(position)] = voxel;
+}
+
+[numthreads(8, 8, 8)]
+void Remove(uint3 position : SV_DispatchThreadID)
+{
+	if( position.x >= Size.x || position.y >= Size.y || position.z >= Size.z )
+	{
+		return;
+	}
+
+	Voxel voxel;
+
+	if(Populated){
+		voxel = Voxels[GetIndex(position)];
+		voxel.Density = min(voxel.Density * -1, Density(position))*-1;
+		
+	}
+	else
+	{
+		voxel.Density = Density(position);
+	}
+			
+	Voxels[GetIndex(position)] = voxel;
+}
+```
+
+### Assets/Dual Contouring/SdfSphere.cs
+```
+﻿using System.Runtime.InteropServices;
+using Assets.Dual_Contouring.Structs;
+using UnityEngine;
+
+namespace Assets.Dual_Contouring
+{
+    public class SdfSphere : MonoBehaviour
+    {
+        public ComputeShader SphereComputeShader;
+
+        public void Add(Chunk chunk, Vector3 position, float radius )
+        {
+            //Sphere variables
+            SphereComputeShader.SetBuffer(0,"Voxels", chunk.ComputeBuffer);
+            SphereComputeShader.SetVector("Position", position);
+            SphereComputeShader.SetFloat("Radius", radius);
+            SphereComputeShader.SetBool("Populated", chunk.Populated);
+
+            //Chunk variables
+            SphereComputeShader.SetVector("Size", chunk.Size);
+
+            SphereComputeShader.Dispatch(0, (int)chunk.Size.x / 8, (int)chunk.Size.y / 8, (int)chunk.Size.z / 8);
+            chunk.Populated = true;
+        }
+
+        public void Remove(Chunk chunk, Vector3 position, float radius)
+        {
+            //Sphere variables
+            SphereComputeShader.SetBuffer(1, "Voxels", chunk.ComputeBuffer);
+            SphereComputeShader.SetVector("Position", position);
+            SphereComputeShader.SetFloat("Radius", radius);
+            SphereComputeShader.SetBool("Populated", chunk.Populated);
+
+            //Chunk variables
+            SphereComputeShader.SetVector("Size", chunk.Size);
+
+            SphereComputeShader.Dispatch(1, (int)chunk.Size.x / 8, (int)chunk.Size.y / 8, (int)chunk.Size.z / 8);
+            chunk.Populated = true;
+        }
+    }
+}
+```
+
+### Assets/Dual Contouring/SurfaceNets.compute
+```
+﻿#pragma kernel FindFeaturePoints
+#pragma kernel FindVertices
+#pragma kernel FindIndices
+
+struct Voxel {
+	float Density;
+};
+
+struct Edge {
+	int Index1;
+	int Index2;
+};
+
+float3 Size;
+StructuredBuffer<Voxel> Voxels;
+
+
+int GetIndex(float3 position) {
+	return (int)(Size.z * position.z + position.y * (Size.x * Size.z) + position.x);
+}
+
+float3 GetPosition(int index) {
+	return float3(
+		(int)(index % Size.z),
+		(int)(index / (Size.x * Size.z)),
+		(int)(index % (Size.x * Size.z) / Size.z)
+	);
+}
+
+float Sign(float value) {
+	if( value > 0 ){
+		return 1;
+	} else if ( value < 0 ){
+		return -1;
+	} else {
+		return 0;
+	}
+}
+
+float3 Lerp(float3 v0, float3 v1, float t) {
+	return (1 - t) * v0 + t * v1;
+}
+
+float InverseLerp(float a, float b, float t) {
+	if (a != b)
+		return (t - a) / (b - a);
+	return 0;
+}
+
+
+RWStructuredBuffer<float3> FeaturePoints;
+
+[numthreads(8, 8, 8)]
+void FindFeaturePoints(uint3 position : SV_DispatchThreadID)
+{
+    if (position.x + 1 >= Size.x || position.y + 1 >= Size.y || position.z + 1 >= Size.z)
+    {
+        return;
+    }
+
+	float3 featurePoint = float3(0, 0, 0);
+	int edgeCrossings = 0;
+
+	int indices[8] = {
+		GetIndex(position),
+		GetIndex(position + float3(0,0,1)),
+		GetIndex(position + float3(0,1,0)),
+		GetIndex(position + float3(0,1,1)),
+
+		GetIndex(position + float3(1,0,0)),
+		GetIndex(position + float3(1,0,1)),
+		GetIndex(position + float3(1,1,0)),
+		GetIndex(position + float3(1,1,1))
+	};
+
+	Edge edges[12] = {
+		{ 0, 1 },
+		{ 0, 2 },
+		{ 0, 4 },
+		{ 1, 3 },
+
+		{ 1, 5 },
+		{ 2, 3 },
+		{ 2, 6 },
+		{ 4, 5 },
+
+		{ 4, 6 },
+		{ 3, 7 },
+		{ 6, 7 },
+		{ 5, 7 }
+	};
+
+	for (int i = 0; i < 12; i++)
+	{
+		int index1 = indices[edges[i].Index1];
+		int index2 = indices[edges[i].Index2];
+		float3 position1 = GetPosition(index1);
+		float3 position2 = GetPosition(index2);
+		float density1 = Voxels[index1].Density;
+		float density2 = Voxels[index2].Density;
+
+		if (Sign(density1) == Sign(density2))
+		{
+			continue;
+		}
+
+		featurePoint += Lerp(position1, position2, InverseLerp(density1, density2, 0));
+		edgeCrossings++;
+	}
+
+	if (edgeCrossings > 0) {
+		featurePoint /= edgeCrossings;
+	}
+
+	FeaturePoints[GetIndex(position)] = featurePoint;
+}
+
+
+struct QuadVertices {
+	float3 vertice1;
+	float3 vertice2;
+	float3 vertice3;
+	float3 vertice4;
+};
+
+AppendStructuredBuffer<QuadVertices> Quads;
+
+[numthreads(8, 8, 8)]
+void FindVertices(uint3 position : SV_DispatchThreadID) {
+	float3 k0 = position;
+	float3 k1 = k0 + float3(1, 0, 0);
+	float3 k2 = k0 + float3(1, 0, 1);
+	float3 k3 = k0 + float3(0, 0, 1);
+
+	float3 value0 = FeaturePoints[GetIndex(k0)];
+	float3 value1 = FeaturePoints[GetIndex(k1)];
+	float3 value2 = FeaturePoints[GetIndex(k2)];
+	float3 value3 = FeaturePoints[GetIndex(k3)];
+
+	if (value0.x != 0 && value0.y != 0 && value0.z != 0 &&
+		value1.x != 0 && value1.y != 0 && value1.z != 0 &&
+		value2.x != 0 && value2.y != 0 && value2.z != 0 &&
+		value3.x != 0 && value3.y != 0 && value3.z != 0 ){
+
+		int densityIndex = GetIndex(k2);
+
+		if ( Voxels[densityIndex].Density > 0)
+		{
+			QuadVertices newQuad = {
+				value0,
+				value1,
+				value2,
+				value3
+			};
+			Quads.Append(newQuad);
+		}
+		else
+		{
+			QuadVertices newQuad = {
+				value0,
+				value3,
+				value2,
+				value1
+			};
+			Quads.Append(newQuad);
+		}
+	} 
+
+
+	k1 = k0 + float3(0, 1, 0);
+	k2 = k0 + float3(1, 1, 0);
+	k3 = k0 + float3(1, 0, 0);
+
+	value0 = FeaturePoints[GetIndex(k0)];
+	value1 = FeaturePoints[GetIndex(k1)];
+	value2 = FeaturePoints[GetIndex(k2)];
+	value3 = FeaturePoints[GetIndex(k3)];
+
+	if (value0.x != 0 && value0.y != 0 && value0.z != 0 &&
+		value1.x != 0 && value1.y != 0 && value1.z != 0 &&
+		value2.x != 0 && value2.y != 0 && value2.z != 0 &&
+		value3.x != 0 && value3.y != 0 && value3.z != 0 ){
+
+		int densityIndex = GetIndex(k2);
+
+		if ( Voxels[densityIndex].Density > 0)
+		{
+			QuadVertices newQuad = {
+				value0,
+				value1,
+				value2,
+				value3
+			};
+			Quads.Append(newQuad);
+		}
+		else
+		{
+			QuadVertices newQuad = {
+				value0,
+				value3,
+				value2,
+				value1
+			};
+			Quads.Append(newQuad);
+		}
+	} 
+
+	k1 = k0 + float3(0, 0, 1);
+	k2 = k0 + float3(0, 1, 1);
+	k3 = k0 + float3(0, 1, 0);
+
+	value0 = FeaturePoints[GetIndex(k0)];
+	value1 = FeaturePoints[GetIndex(k1)];
+	value2 = FeaturePoints[GetIndex(k2)];
+	value3 = FeaturePoints[GetIndex(k3)];
+
+	if (value0.x != 0 && value0.y != 0 && value0.z != 0 &&
+		value1.x != 0 && value1.y != 0 && value1.z != 0 &&
+		value2.x != 0 && value2.y != 0 && value2.z != 0 &&
+		value3.x != 0 && value3.y != 0 && value3.z != 0 ){
+
+		int densityIndex = GetIndex(k2);
+
+		if ( Voxels[densityIndex].Density > 0)
+		{
+			QuadVertices newQuad = {
+				value0,
+				value1,
+				value2,
+				value3
+			};
+			Quads.Append(newQuad);
+		}
+		else
+		{
+			QuadVertices newQuad = {
+				value0,
+				value3,
+				value2,
+				value1
+			};
+			Quads.Append(newQuad);
+		}
+	} 
+}
+
+
+struct QuadIndices {
+	dword  Index1;
+	dword  Index2;
+	dword  Index3;
+	dword  Index4;
+	dword  Index5;
+	dword  Index6;
+};
+
+RWStructuredBuffer<QuadIndices> Indices;
+
+[numthreads(1, 1, 1)]
+void FindIndices(uint3 position : SV_DispatchThreadID) {
+	int index = position.x * 4;
+	
+	QuadIndices newIndices = {
+		index,
+		index+1,
+		index+2,
+		index+2,
+		index+3,
+		index,
+	};
+
+
+
+	Indices[position.x] = newIndices;
+}
+```
+
+### Assets/Dual Contouring/Structs/Chunk.cs
+```
+﻿using System;
+using System.Runtime.InteropServices;
+using UnityEngine;
+
+namespace Assets.Dual_Contouring.Structs
+{
+    [Serializable]
+    public struct Chunk
+    {
+        public ComputeBuffer ComputeBuffer;
+        public Vector3 Position;
+        public Vector3 Size;
+        public bool Populated;
+
+        public int GetSize => (int) (Size.x * Size.y * Size.z);
+
+        public Chunk(Vector3 size, Vector3 position)
+        {
+            Position = position;
+            Size = size;
+            ComputeBuffer = new ComputeBuffer((int)(Size.x * Size.y * Size.z), Marshal.SizeOf<Voxel>() );
+            Populated = false;
+        }
+
+        public int GetIndex(Vector3 position)
+        {
+            return (int)(Size.z * position.z + position.y * (Size.x * Size.z) + position.x);
+        }
+
+        public Vector3 GetPosition(int index)
+        {
+            return new Vector3(
+                (int)(index % Size.z),
+                (int)(index / (Size.x * Size.z)),
+                (int)(index % (Size.x * Size.z) / Size.z)
+            );
+        }
+    }
+}
+```
+
+### Assets/Dual Contouring/Structs/Voxel.cs
+```
+﻿using System;
+
+namespace Assets.Dual_Contouring.Structs
+{
+    [Serializable]
+    public struct Voxel
+    {
+        public float Density;
+    }
+}
+```

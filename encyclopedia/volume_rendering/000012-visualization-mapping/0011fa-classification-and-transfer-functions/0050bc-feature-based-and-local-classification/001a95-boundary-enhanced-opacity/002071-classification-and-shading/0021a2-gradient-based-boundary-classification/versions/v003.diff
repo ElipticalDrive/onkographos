@@ -1,0 +1,264 @@
+--- v002.md
++++ v003.md
+@@ -1,155 +1,134 @@
+ # Gradient-Based Boundary Classification
+ 
+-Also called: Cell-Diagonal Data Shift, Reflecting Material Classification, Gradient-based surface classification, Reflecting Surface Classification
++Also called: Cell-Diagonal Data Shift, Reflecting Material Classification, Gradient-based surface classification, Reflecting Surface Classification, Surface Classification
+ 
+ ## Overview
+-Gradient-Based Boundary Classification is a method for determining whether a voxel lies on the boundary of a material segment within a volume, classifying it as either "reflecting" (surface) or "ambient" (interior/exterior) [S1, S2, unofficial]. It solves the problem of surface detection by interpreting the gradient magnitude in the context of the voxel's data value and the material's classification range, rather than relying on gradient magnitude in isolation [S1, S2, unofficial]. This approach departs from earlier methods [Lev90a, LL94] by using a linear approximation of the field function to estimate the distance to the material boundary, allowing for a probabilistic classification that handles noise and nonlinearity [S1, S2, unofficial].
++Gradient-Based Boundary Classification is a method to classify voxels as either 'reflecting' (surface) or 'ambient' (volume) based on the voxel's data value, the gradient magnitude, and the range of field values for the material [S1, S2, S3, unofficial]. It solves the problem of accurately identifying surface boundaries for shading by interpreting the gradient magnitude in the context of the data value and classification parameters, rather than using gradient magnitude in isolation [S1, S3, unofficial]. This departs from earlier work [Lev90a, LL94] which relied on gradient magnitude alone, preventing misclassification of voxels with high gradients that are far from the actual material boundary [S2, S3, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   Voxel data value $d$ at location $\mathbf{g}_0$ [S1, S2, unofficial].
+-*   Gradient vector $\nabla f = (\nabla_x, \nabla_y, \nabla_z)$ at $\mathbf{g}_0$ [S1, S2, unofficial].
+-*   Inter-voxel spacing $\Delta$ (assumed uniform in all dimensions) [S1, S2, unofficial].
+-*   Material classification range $[b, a]$, where $b$ is the lower limit and $a$ is the upper limit for the material [S1, S2, unofficial].
+-*   Scaling factor $k$ (client-tunable parameter) [S1, S2, unofficial].
+-
+-**Outputs:**
+-*   Boundary probability $P \in [0, 1]$ [S1, S2, unofficial].
+-*   Classification: Reflecting if $P > 0$, Ambient if $P = 0$ (or combined via $P$ for shading) [S1, S2, unofficial].
++**Inputs and Outputs:**
++*   **Input:** Voxel data value $d$, gradient vector $\vec{\gamma} = (\gamma_x, \gamma_y, \gamma_z)$, inter-voxel spacing $\bar{\Delta}$ (assumed uniform $\bar{\Delta}_x = \bar{\Delta}_y = \bar{\Delta}_z = \bar{\Delta}$ unless specified), material lower limit $b$, material upper limit $a$, and a client-tunable scaling factor $k$ [S1, S2, S3, unofficial].
++*   **Output:** A boundary probability $P \in [0, 1]$ indicating the likelihood that the voxel lies on a material boundary. This probability is used to blend ambient and reflecting shading components [S1, S2, S3, unofficial].
+ 
+ **Data Structures:**
+-*   The method operates on per-voxel data [S1, S2, unofficial].
+-*   No global data structures are required for the classification logic itself, though it is typically used in conjunction with a lookup table for shading (see [Reflected Light Component Lookup](3521-reflected-light-component-lookup.md)) [G].
++No specific complex data structures are required beyond standard voxel access. The method computes scalar values per voxel.
+ 
+-**Steps:**
++**Formulas:**
++1.  **Linear Field Approximation:** The field function $\tilde{f}(\bar{q})$ in the neighborhood of a voxel at location $\bar{q}_0$ with data value $d$ and gradient vector $\vec{\gamma}$ is approximated as [S1, S2, S3, unofficial]:
++    $$ \tilde{f}(\bar{q}) = d + \vec{\gamma} \cdot (\bar{q} - \bar{q}_0) $$
++2.  **Cell-Diagonal Data Shift ($s$):** This quantity estimates the maximum change in data value across the diagonal of a voxel cell [S1, S2, S3, unofficial]:
++    $$ s = \bar{\Delta}_x |\gamma_x| + \bar{\Delta}_y |\gamma_y| + \bar{\Delta}_z |\gamma_z| $$
++    If inter-voxel spacing is uniform ($\bar{\Delta}$), this simplifies to $s = \bar{\Delta} (|\gamma_x| + |\gamma_y| + |\gamma_z|)$ [S3, unofficial].
++3.  **Boundary Proximity Tests:**
++    *   **Lower Boundary ($b$):** A voxel is considered near the lower boundary if one of the 26 neighboring voxels has data below $b$. Based on the linear approximation, this occurs if and only if [S1, S2, S3, unofficial]:
++        $$ (d - b) < s $$
++    *   **Upper Boundary ($a$):** A similar test applies for the upper boundary [S1, S2, S3, unofficial]:
++        $$ (a - d) < s $$
++4.  **Probability Calculation:** To handle noise and nonlinearity, a binary decision is replaced by a probability $P$ when $s$ is near the threshold values $(d-b)$ or $(a-d)$ [S1, S2, S3, unofficial]. The implementation uses a linear ramp [S1, S2, S3, unofficial]:
++    *   For the lower boundary:
++        $$ P_{lower} = \begin{cases} 0 & \text{if } s < 0.5(d - b) \\ \frac{s - 0.5(d - b)}{(d - b)} & \text{if } 0.5(d - b) \le s \le 1.5(d - b) \\ 1 & \text{if } s > 1.5(d - b) \end{cases} $$
++        *Note: The source states "increases linearly to become 1 when $s = 1.5(d - b)$". The slope is calculated as $\frac{1 - 0}{1.5(d-b) - 0.5(d-b)} = \frac{1}{d-b}$ [S1, S2, S3, unofficial].*
++    *   For the upper boundary, the logic is symmetric using $(a-d)$ [S1, S2, S3, unofficial].
++    *   The final probability $P$ is the maximum of the lower and upper boundary probabilities (or combined as per specific implementation, but typically max for "near either boundary") [S1, S2, S3, unofficial].
++    *   A scaling factor $k$ can be applied to the probability function to fine-tune classification [S1, S2, S3, unofficial]. The exact application of $k$ is described as being "applied to this probability function," causing more or fewer voxels to have nonzero probability [S1, S2, S3, unofficial]. A common interpretation is scaling the threshold range or the probability value itself. The source does not specify the exact mathematical placement of $k$ (e.g., $P \cdot k$ or scaling the thresholds). [G: Assuming $k$ scales the probability value directly, i.e., $P_{final} = \min(1, P \cdot k)$, or scales the transition width. Given the ambiguity, the base probability $P$ is computed as above, and $k$ is a post-processing multiplier or threshold scaler applied by the client.]
+ 
+-1.  **Linear Field Approximation:**
+-    Model the field function $f(\mathbf{q})$ in the neighborhood of the voxel $\mathbf{g}_0$ as:
+-    $$ f(\mathbf{q}) = d + \nabla f \cdot (\mathbf{q} - \mathbf{g}_0) $$
+-    where $\mathbf{q}$ is a point in the neighborhood [S1, S2, unofficial].
+-
+-2.  **Calculate Cell-Diagonal Data Shift ($s$):**
+-    Compute the maximum possible data shift along the diagonal of the voxel cell based on the gradient components and inter-voxel spacing:
+-    $$ s = \Delta |\nabla_x| + \Delta |\nabla_y| + \Delta |\nabla_z| $$
+-    This quantity $s$ represents the maximum change in data value across the diagonal [S1, S2, unofficial].
+-
+-3.  **Test for Lower Boundary:**
+-    Determine if the voxel is near the lower boundary $b$ of the material range. A neighboring voxel has data below $b$ if and only if:
+-    $$ (d - b) < s $$
+-    If this condition is not met, the voxel is considered interior to the material (ambient) with respect to the lower bound [S1, S2, unofficial].
+-
+-4.  **Test for Upper Boundary:**
+-    Determine if the voxel is near the upper boundary $a$ of the material range. A similar test applies:
+-    $$ (a - d) < s $$
+-    If this condition is not met, the voxel is considered interior to the material (ambient) with respect to the upper bound [S1, S2, unofficial].
+-
+-5.  **Calculate Boundary Probability ($P$):**
+-    Assign a probability of being on the boundary to handle noise and nonlinearity, rather than a binary decision [S1, S2, unofficial].
++**Pseudocode:**
++```python
++def gradient_based_boundary_classification(d, gamma_x, gamma_y, gamma_z, delta_x, delta_y, delta_z, b, a, k=1.0):
++    """
++    Computes the boundary probability for a voxel.
+     
+-    *   **Lower Boundary Probability ($P_{lower}$):**
+-        If $s < 0.5(d - b)$, then $P_{lower} = 0$ [S1, S2, unofficial].
+-        If $s > 1.5(d - b)$, then $P_{lower} = 1$ [S1, S2, unofficial].
+-        Otherwise, $P_{lower}$ increases linearly from 0 to 1 as $s$ goes from $0.5(d - b)$ to $1.5(d - b)$ [S1, S2, unofficial].
++    Args:
++        d: Voxel data value.
++        gamma_x, gamma_y, gamma_z: Gradient components.
++        delta_x, delta_y, delta_z: Inter-voxel spacing.
++        b: Lower limit of the material range.
++        a: Upper limit of the material range.
++        k: Scaling factor for fine-tuning (default 1.0).
+         
+-        $$ P_{lower} = \text{clamp}\left( \frac{s - 0.5(d - b)}{d - b}, 0, 1 \right) $$
+-        This formula assumes $d > b$ [G].
++    Returns:
++        P: Boundary probability in [0, 1].
++    """
++    # Calculate cell-diagonal data shift
++    s = delta_x * abs(gamma_x) + delta_y * abs(gamma_y) + delta_z * abs(gamma_z)
++    
++    # Calculate probability for lower boundary
++    diff_lower = d - b
++    if diff_lower <= 0:
++        # Voxel is already below or at the lower limit, so it's deep inside or below the material
++        # The condition (d-b) < s is trivially true if d < b, but physically 
++        # if d < b, it's not "near" the boundary from the inside in the same way.
++        # However, the source implies the test is for neighbors having data < b.
++        # If d < b, the voxel itself is below the range. 
++        # The source example focuses on d >= b.
++        # If d < b, the voxel is likely ambient or below the material.
++        # We assume the method applies when d is within or near [b, a].
++        P_lower = 0.0
++    else:
++        # Thresholds for the linear ramp
++        t_start = 0.5 * diff_lower
++        t_end = 1.5 * diff_lower
+         
+-    *   **Upper Boundary Probability ($P_{upper}$):**
+-        Similarly, if $s < 0.5(a - d)$, then $P_{upper} = 0$ [S1, S2, unofficial].
+-        If $s > 1.5(a - d)$, then $P_{upper} = 1$ [S1, S2, unofficial].
+-        Otherwise, $P_{upper}$ increases linearly from 0 to 1 as $s$ goes from $0.5(a - d)$ to $1.5(a - d)$ [S1, S2, unofficial].
++        if s < t_start:
++            P_lower = 0.0
++        elif s > t_end:
++            P_lower = 1.0
++        else:
++            # Linear interpolation
++            P_lower = (s - t_start) / (t_end - t_start)
++            
++    # Calculate probability for upper boundary
++    diff_upper = a - d
++    if diff_upper <= 0:
++        P_upper = 0.0
++    else:
++        t_start = 0.5 * diff_upper
++        t_end = 1.5 * diff_upper
+         
+-        $$ P_{upper} = \text{clamp}\left( \frac{s - 0.5(a - d)}{a - d}, 0, 1 \right) $$
+-        This formula assumes $d < a$ [G].
+-
+-    *   **Combined Probability:**
+-        The final probability $P$ is derived from $P_{lower}$ and $P_{upper}$ [S1, S2, unofficial]. The sources state that the final shading combines ambient and reflecting colors according to the probability [S1, S2, unofficial]. Typically, a voxel is considered on *any* boundary if it is near the lower or upper boundary [G]. A common implementation uses $P = \max(P_{lower}, P_{upper})$ [G]. The scaling factor $k$ is applied to the probability function to fine-tune the classification [S1, S2, unofficial]. For implementation, $k$ scales the effective shift $s$ before probability calculation [G].
+-
+-**Parameters:**
+-*   $\Delta$: Inter-voxel spacing. Not given in the sources.
+-*   $b, a$: Material range limits. Determined by the transfer function or user input [G].
+-*   $k$: Scaling factor. Client-tunable. Causes more or fewer voxels to be judged on a surface with nonzero probability [S1, S2, unofficial].
++        if s < t_start:
++            P_upper = 0.0
++        elif s > t_end:
++            P_upper = 1.0
++        else:
++            P_upper = (s - t_start) / (t_end - t_start)
++            
++    # Combine probabilities (voxel is near boundary if near either)
++    P = max(P_lower, P_upper)
++    
++    # Apply scaling factor
++    # Source says "scaling factor ... applied to this probability function"
++    # Assuming multiplicative scaling on the result, clamped to 1
++    P = min(1.0, P * k)
++    
++    return P
++```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **High Data Value, High Gradient:** A voxel with a high data value (e.g., 130 in a bone example where $b=110$) may have a high gradient but be far from the boundary [S2, unofficial]. In this case, $(d-b)$ is large, and if $s < 0.5(d-b)$, the probability is 0, correctly classifying it as ambient [S2, unofficial].
+-*   **Noise:** The probabilistic approach allows for noise in the gradient and nonlinearity of the field function [S1, S2, unofficial].
+-*   **Non-Uniform Spacing:** The formula assumes uniform inter-voxel spacing $\Delta$ [S1, S2, unofficial]. If spacing is non-uniform, $\Delta$ should be replaced by the appropriate spacing in each dimension [G].
+-*   **Division by Zero:** If $d = b$ or $d = a$, the denominator in the probability calculation becomes zero [G]. In these cases, the voxel is exactly on the boundary, so $P$ should be 1 [G].
+-
+-**Pseudocode:**
+-
+-```python
+-def gradient_based_boundary_classification(d, grad_x, grad_y, grad_z, delta, b, a, k=1.0):
+-    """
+-    Classifies a voxel as reflecting or ambient based on gradient-based boundary detection.
+-    
+-    Args:
+-        d (float): Voxel data value.
+-        grad_x, grad_y, grad_z (float): Gradient components.
+-        delta (float): Inter-voxel spacing.
+-        b (float): Lower limit of material range.
+-        a (float): Upper limit of material range.
+-        k (float): Scaling factor for probability tuning.
+-        
+-    Returns:
+-        float: Probability of being on the boundary (0.0 to 1.0).
+-    """
+-    # Step 2: Calculate cell-diagonal data shift s
+-    s = delta * (abs(grad_x) + abs(grad_y) + abs(grad_z))
+-    
+-    # Apply scaling factor k to the effective shift for probability tuning [S1, S2, unofficial]
+-    s_eff = s * k
+-    
+-    # Guard: Voxel must be strictly inside the material range to be near a boundary [G]
+-    if d <= b or d >= a:
+-        return 0.0
+-        
+-    # Step 3 & 5: Lower Boundary Probability
+-    diff_lower = d - b
+-    t_start_lower = 0.5 * diff_lower
+-    t_end_lower = 1.5 * diff_lower
+-    
+-    if s_eff < t_start_lower:
+-        P_lower = 0.0
+-    elif s_eff > t_end_lower:
+-        P_lower = 1.0
+-    else:
+-        P_lower = min(max((s_eff - t_start_lower) / (t_end_lower - t_start_lower), 0.0), 1.0)
+-        
+-    # Step 4 & 5: Upper Boundary Probability
+-    diff_upper = a - d
+-    t_start_upper = 0.5 * diff_upper
+-    t_end_upper = 1.5 * diff_upper
+-    
+-    if s_eff < t_start_upper:
+-        P_upper = 0.0
+-    elif s_eff > t_end_upper:
+-        P_upper = 1.0
+-    else:
+-        P_upper = min(max((s_eff - t_start_upper) / (t_end_upper - t_start_upper), 0.0), 1.0)
+-        
+-    # Combine probabilities: voxel is on boundary if near either [G]
+-    P = max(P_lower, P_upper)
+-    return P
+-```
++*   **High Gradient, Far from Boundary:** A voxel with a high data value (e.g., 130 in a bone example where $b=110$) may have a high gradient magnitude but be far from the boundary. The method correctly classifies this as ambient because $(d-b)$ is large, making $s < (d-b)$ likely false for the boundary test, or the probability ramp requires a much larger $s$ to reach 1 [S2, S3, unofficial].
++*   **Noise and Nonlinearity:** The linear probability ramp handles gradient noise and field nonlinearity better than a binary threshold [S1, S2, S3, unofficial].
++*   **Scaling Factor:** The exact mathematical application of the scaling factor $k$ is not explicitly defined in the sources beyond "applied to this probability function" [S1, S2, S3, unofficial]. Implementers must determine if $k$ scales the probability value or the transition thresholds.
+ 
+ ## Subtopics
+ 
+ ### [Reflected Light Component Lookup](3521-reflected-light-component-lookup.md)
+-Pre-calculates surface responses to directional lighting for combinations of material types and quantized gradient directions, storing results in a lookup table. It decouples expensive lighting calculations from the per-voxel rendering loop, allowing for realistic surface appearance in volume rendering. Choose this when rendering multiple-material volumes with specular highlights and directional lighting.
++Pre-calculates surface responses to directional lights for quantized gradient directions and material types, storing results in a lookup table. It supports directional lighting but requires table recalculation when lighting factors change.
++
++### [Gradient Quantization](3522-gradient-quantization.md)
++Quantizes the gradient direction space into a finite number of unit gradients to facilitate the lookup table indexing.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per voxel for the classification step [G]. The overall rendering time depends on the volume rendering algorithm (e.g., ray casting) and the cost of the shading lookup (see [Reflected Light Component Lookup](3521-reflected-light-component-lookup.md)) [G].
+-*   **Memory Complexity:** $O(1)$ per voxel for the classification logic [G]. Additional memory is required for the lookup table in [Reflected Light Component Lookup](3521-reflected-light-component-lookup.md) [S2, unofficial].
+-*   **Measured Performance:** The method is described as "nearly interactive" when combined with the lookup table technique [S2, unofficial].
+-*   **Strengths:** Handles noise and nonlinearity better than binary thresholding [S1, S2, unofficial]. Interprets gradient in context of data value, avoiding false positives for high-gradient interior voxels [S2, unofficial].
+-*   **Limitations:** Requires accurate gradient estimation [G]. Performance depends on the complexity of the shading lookup [G].
+-*   **When to Use:** When realistic surface shading is required for volume data with distinct material boundaries [G].
+-*   **When Not to Use:** When only ambient shading is sufficient, or when gradient information is unreliable [G].
++*   **Time Complexity:** $O(1)$ per voxel for the classification step. The calculation involves basic arithmetic operations (absolute values, multiplications, additions, comparisons).
++*   **Memory Complexity:** $O(1)$ per voxel for the classification step. No additional storage is required beyond the input data and gradient.
++*   **Measured Performance:** Not given in the sources.
++*   **Strengths:** Accurately identifies surface boundaries by considering the data value range, avoiding false positives from high gradients in the volume interior. Handles noise and nonlinearity via probability ramps.
++*   **Limitations:** Requires accurate gradient computation. Relies on linear approximation of the field function, which may be inaccurate for highly nonlinear fields. The scaling factor $k$ requires tuning.
++*   **When to Use:** When accurate surface shading is required for specific materials in volume rendering, especially when gradient magnitude alone leads to noisy or incorrect surface detection.
++*   **When Not to Use:** When computational resources are extremely limited and simple thresholding is sufficient, or when the field function is highly nonlinear and the linear approximation is invalid.
+ 
+ ## Background
+-The method is part of the Voltx system [S2, unofficial]. It departs from earlier work [Lev90a, LL94] by interpreting gradient magnitude in the context of data value and classification parameters [S1, S2, unofficial]. It was developed to eliminate technical programming used by previously reported 3D texture-map methods [S2, unofficial].
++The method was introduced in the context of Direct Volume Rendering with Shading via Three-Dimensional Textures [S1, S2, S3, unofficial]. It departs from earlier work [Lev90a, LL94] that used gradient magnitude in isolation for surface detection [S1, S3, unofficial]. The method is part of a pipeline that includes Reflected Light Component Lookup and Gradient Quantization to achieve interactive rendering with directional lighting [S1, S2, S3, unofficial].
+ 
+ ## Sources
+ [S1] NASA Technical Reports Server (NTRS) 19970021689: Direct Volume Rendering with Shading via Three-Dimensional Textures, https://archive.org/details/NASA_NTRS_Archive_19970021689, fetched 2026-10-26 (unofficial)
+-[S2] NASA Technical Reports Server (NTRS) 19970022121: Direct Volume Rendering with Shading via Three-Dimensional Textures, https://archive.org/details/NASA_NTRS_Archive_19970022121, fetched 2026-10-26 (unofficial)+[S2] NASA Technical Reports Server (NTRS) 19970022121: Direct Volume Rendering with Shading via Three-Dimensional Textures, https://archive.org/details/NASA_NTRS_Archive_19970022121, fetched 2026-10-26 (unofficial)
++[S3] Direct Volume Rendering with Shading via Three- ..., https://ntrs.nasa.gov/api/citations/19970021689/downloads/19970021689.pdf?attachment=true, fetched 2026-10-29 (unofficial)

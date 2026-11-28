@@ -1,0 +1,361 @@
+--- v003.md
++++ v004.md
+@@ -4,166 +4,199 @@
+ 
+ ## Overview
+-Light Propagation Maps (LPM) is a Discrete Ordinate Method (DOM) technique for computing multiple scattering in participating media [S1]. It approximates the radiative transfer equation by decoupling spatial and directional sampling: it uses high-resolution 2D maps for iterative light propagation to minimize false scattering and ray effects, while using coarse 3D grids for storing accumulated radiance [S1]. This approach reduces memory usage and artifacts compared to standard DOM techniques that require fine sampling in both space and direction [S1].
++Light Propagation Maps (LPM) is a Discrete Ordinate Method (DOM) technique that approximates the radiative transfer equation by using fine spatial and directional sampling for iterative light propagation while employing coarse sampling for storage to reduce memory usage and artifacts like false scattering and ray effects [S1]. It solves the problem of efficiently computing multiple scattering in participating media by decoupling the high-resolution propagation steps from the lower-resolution storage of scattered radiance [S1]. Unlike standard DOM which suffers from grid-aligned artifacts, LPM uses 2D ray maps to propagate light through the volume, building on the isotropic residuum propagation concept by handling the anisotropic propagation phase before switching to cheaper isotropic methods [4122-isotropic-residuum-propagation.md].
+ 
+ ## How it works
+-**Inputs:**
+-*   3D voxel grid representing the medium, with constant absorption ($K_a$), scattering ($K_s$), and self-emission coefficients per voxel [S1].
+-*   Boundary conditions (incoming radiance) [S1].
+-*   Phase function $p(\boldsymbol{\omega}, \boldsymbol{\omega}')$ [S1].
+-*   Termination threshold $\varepsilon$ [S1].
+-*   Number of propagation directions $m$ (where $m \ll n$, the total solid angle samples) [S1].
+-
+-**Outputs:**
+-*   Average scattered radiance $I_{xyz}^d$ for each voxel $xyz$ and storage direction $d$ [S1].
++**Inputs and Outputs:**
++*   **Inputs:** A 3D voxel grid representing the participating medium with absorption coefficient $K_a$, scattering coefficient $K_s$, and phase function $p(\omega, \omega')$. Boundary conditions (incoming radiance) and self-emission radiance.
++*   **Outputs:** Average scattered radiance $I_{xyz}^d$ for each voxel $xyz$ and direction $d$.
+ 
+ **Data Structures:**
+-*   **Light Propagation Maps (LPMs):** A set of 2D arrays [S1]. Each LPM corresponds to a face of the coarse 3D grid [S1]. Each element $(r,s)$ in an LPM stores a set of rays originating at $(r,s)$ with directions sampled from the unit sphere $S^2$ [S1].
++*   **Light Propagation Maps (LPMs):** A set of 2D arrays. Each LPM corresponds to a face of the coarse 3D grid and represents a subset of finely sampled propagation directions. Each element $(r,s)$ in an LPM stores a set of rays originating at $(r,s)$ with directions sampled from the unit sphere $S^2$.
+ *   **Radiance Buffers:**
+-    *   $I_{xyz}^d$: Stores the average scattered radiance in voxel $xyz$ along direction $\Omega_d$ [S1].
+-    *   $U_{xyz}^{i,p}$: Stores the unscattered radiance contribution for propagation direction $i$ at iteration $p$ [S1].
+-    *   In practice, only two $U$ buffers are kept (for iterations $p-1$ and $p$) using a swap mechanism to reuse memory [S1].
+-
+-**Definitions:**
+-*   $V_{xyz}^d = \Delta V |\Omega_d|$: Product of voxel volume $\Delta V$ and solid angle $|\Omega_d|$ [S1].
+-*   $\omega_z^i$: The z-component of propagation direction $i$ [S1].
+-*   $\omega_s^i$: The component of direction $i$ along the propagation axis of the current LPM plane [S1].
+-*   $\Delta l_q$: Distance traversed by a ray in the $t$-th voxel [S1].
+-*   $A_{r,s}$: Area of the LPM sample element $(r,s)$ [S1].
+-*   $F^{i,d}$: Precomputed phase function integral for propagation direction $i$ and storage direction $d$ (where $d$ is the direction closest to $i$) [S1].
++    *   $I_{xyz}^d$: Stores the average radiance in voxel $xyz$ along direction $\Omega_d$.
++    *   $U_{xyz}^{i,p}$: Stores the unscattered radiance contribution for direction $d$ (closest to propagation direction $i$) at iteration $p$.
++    *   Memory Optimization: Only two $U$ buffers are kept in practice: $U_{d,pprev}$ (previous iteration) and $U_{d,pcur}$ (current iteration), using a swap mechanism to reuse memory [S1].
+ 
+ **Formulas:**
+-1.  **Radiance Update (Ray Marching):**
+-    The radiance $L_{r,s}^i$ leaving the $t$-th voxel encountered by a ray is:
+-    $$ L_{r,s}^i = L_{r,s}^{i,t-1} e^{-\Delta l_q(K_a + K_s)/\omega_z^i} + U_{xyz}^{i,p} \times \frac{1 - e^{-\Delta l_q(K_a + K_s)/\omega_z^i}}{K_a + K_s} \quad (3) $$
+-    where $L_{r,s}^{i,t-1}$ is the radiance entering the voxel, and $U_{xyz}^{i,p}$ is the unscattered radiance from the previous iteration stored in the voxel [S1].
+-
+-2.  **Scattering Contribution:**
+-    When a ray adds radiance to a voxel, the contribution $R$ scattered into all directions is:
+-    $$ R = (V_{xyz}^d)^{-1} A_{r,s} F^{i,d} L_{r,s}^{i,t} \frac{1 - e^{-\Delta l_q K_s}}{\omega_s^i} \quad (4) $$
+-    This value updates both the average radiance and the unscattered radiance for the next iteration:
+-    $$ I_{xyz}^d = R $$
+-    $$ U_{xyz}^d = R $$
+-    [S1]
+-
+-3.  **Phase Function Integral:**
+-    $$ F^{i,d} = \frac{1}{4\pi} \int_{\Omega^i} \int_{\Omega^d} p(\boldsymbol{\omega}, \boldsymbol{\omega}') d\boldsymbol{\omega} d\boldsymbol{\omega}' \quad (5) $$
+-    where superscripts $i$ and $d$ are for the propagation direction and storage direction respectively, and $d$ is the direction closest to $i$ [S1].
++*   **Average Radiance Approximation:**
++    $$I_{xyz}^d \approx (V_{xyz}^d)^{-1} \int_{C_{xyz}} \int_{\Omega^d} \frac{K_{S_{xyz}}}{4\pi} \int_{\omega' \in S^2} L(p, \omega') p(\omega, \omega') d\omega' d\omega dp \quad (2)$$
++    Where $V_{xyz}^d = \Delta V |\Omega^d|$ is the product of the voxel volume and the solid angle of direction $d$. $K_S$ is the scattering coefficient.
++
++*   **Ray Radiance Update (Propagation):**
++    $$L_{r,s}^i = L_{r,s}^{i,t-1} e^{-\Delta l_q(K_a + K_s)/\omega_z^i} + U_{xyz}^{i,p} \times \frac{1 - e^{-\Delta l_q(K_a + K_s)/\omega_z^i}}{K_a + K_s} \quad (3)$$
++    Where:
++    *   $L_{r,s}^i$: Radiance leaving the $t$-th voxel for ray $i$ at element $(r,s)$.
++    *   $\Delta l_q$: Distance traversed by the ray in the voxel.
++    *   $\omega_z^i$: The $z$-component of direction $i$ (assuming propagation along z-axis for the current LPM plane).
++    *   $U_{xyz}^{i,p}$: Stored unscattered radiance from the previous iteration $p$.
++
++*   **Scattering Contribution (Storage):**
++    $$R = (V_{xyz}^d)^{-1} A_{r,s} F_d^i L_{r,s}^{i,t} \frac{1 - e^{-\Delta l_q K_s}}{\omega_s^i} \quad (4)$$
++    Where:
++    *   $R$: The scattering contribution added to $U$ and $I$.
++    *   $A_{r,s}$: Area of the LPM sample $(r,s)$.
++    *   $F_d^i$: Precomputed phase function integral for propagation direction $i$ and storage direction $d$.
++    *   $\omega_s^i$: The component of direction $i$ along the storage axis.
++
++*   **Phase Function Integral:**
++    $$F_d^i = \frac{1}{4\pi} \int_{\Omega^i} \int_{\Omega^d} p(\omega, \omega') d\omega d\omega' \quad (5)$$
++    Where $d$ is the storage direction closest to the propagation direction $i$.
++
++**Parameters:**
++*   $\epsilon$: Termination threshold. Iterations stop when $\max_{xyz} |U_{d,pprev}| < \epsilon$.
++*   $p$: Iteration number (scattering order).
+ 
+ **Algorithm Steps:**
+-1.  Initialize iteration counter $p_{prev} = 0$ [S1].
+-2.  Initialize $U_{d,p_{prev},xyz}$ and $I_{d,xyz}$ with the medium's self-emission radiance (if any) [S1].
+-3.  While $\max_{xyz}|U_{d,p_{prev},xyz}| \ge \varepsilon$:
+-    a.  Set $p_{cur} = (p_{prev} + 1) \% 2$ [S1].
+-    b.  Initialize $U_{d,p_{cur},xyz}$ to 0 [S1].
+-    c.  For each LPM:
+-        i.  For each propagation direction $i$:
+-            1.  For each element $(r,s)$ of the current map:
+-                *   If $p_{prev} == 0$, initialize $L_{r,s}^{i,0}$ with boundary conditions (incoming radiance) [S1].
+-                *   Else, set $L_{r,s}^{i,0}$ to 0 [S1].
+-            2.  For each intersected voxel $t$ along the ray path:
+-                *   Update ray radiance $L_{r,s}^{i,t}$ using Eq. (3) and $U_{d,p_{prev},xyz}$ [S1].
+-                *   Calculate scattering contribution $R$ using Eq. (4) [S1].
+-                *   Update $U_{d,p_{cur},xyz}$ and $I_{d,xyz}$ with $R$ [S1].
+-                *   **Boundary Handling:** When a ray leaves the medium at boundary point A, generate a new ray of the same direction with zero radiance from the opposite point B to maintain a constant number of rays [S1].
+-    d.  Set $p_{prev} = p_{cur}$ [S1].
++1.  **Initialize:** Set $pprev = 0$. Initialize $U_{d,pprev}$ and $I_d$ with medium self-emission radiance (if any).
++2.  **Iterate:** While $\max_{xyz} |U_{d,pprev}| < \epsilon$ and $p > 0$:
++    a.  Set $pcur = (pprev + 1) \% 2$.
++    b.  Initialize $U_{d,pcur}$ to 0.
++    c.  **For each LPM:**
++        i.  **For each propagation direction $i$:**
++            1.  **For each element $(r,s)$ of the current map:**
++                *   If $p == 0$, initialize $L_{r,s}^{i,0}$ with boundary conditions (incoming radiance).
++                *   Else, set $L_{r,s}^{i,0}$ to 0.
++            2.  **For each intersected voxel $t$ along the ray path:**
++                *   Update ray radiance $L_{r,s}^{i,t}$ using Equation (3) and $U_{d,pprev}$.
++                *   Calculate scattering contribution $R$ using Equation (4).
++                *   Update $U_{d,pcur}$ and $I_d$ with $R$.
++    d.  Set $pprev = pcur$.
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-
+-def light_propagation_maps(volume, boundary_conditions, phase_function, epsilon):
+-    # volume: 3D grid with attributes Ka, Ks, emission, volume (ΔV)
+-    # boundary_conditions: callable(r, s, direction) -> radiance
+-    # phase_function: callable(omega, omega_prime) -> value
+-    # epsilon: float, termination threshold
+-
+-    # Precompute phase integrals F[i][d] for all propagation directions i and storage directions d [S1]
+-    # Helper: standard numerical integration over solid angles [G]
+-    def integrate_phase(i, d):
+-        return (1.0 / (4.0 * math.pi)) * sum(phase_function(w, wp) for w, wp in sample_solid_angles(i, d))
+-
+-    F = {}
+-    for i in propagation_directions:
+-        F[i] = {}
+-        for d in storage_directions:
+-            F[i][d] = integrate_phase(i, d)
+-
+-    # Initialize buffers [S1]
+-    X, Y, Z = volume.shape
+-    U_prev = [[[0.0] * Z for _ in range(Y)] for _ in range(X)]
+-    U_curr = [[[0.0] * Z for _ in range(Y)] for _ in range(X)]
+-    I = [[[0.0] * Z for _ in range(Y)] for _ in range(X)]
+-
+-    # Initialize with self-emission radiance [S1]
+-    for x in range(X):
+-        for y in range(Y):
+-            for z in range(Z):
+-                U_prev[x][y][z] = volume[x][y][z].emission
+-                I[x][y][z] = volume[x][y][z].emission
+-
++def light_propagation_maps(volume, boundary_conditions, epsilon):
++    """
++    volume: Object containing K_a, K_s, phase_function, and grid dimensions.
++    boundary_conditions: Function or data structure providing incoming radiance at boundaries.
++    epsilon: Termination threshold.
++    """
++    # Initialize buffers
++    # U_prev and U_curr store unscattered radiance for direction d
++    U_prev = zeros_like(volume.grid)
++    U_curr = zeros_like(volume.grid)
++    # I stores average radiance
++    I = zeros_like(volume.grid)
++    
++    # Initialize with self-emission
++    for voxel in volume.grid:
++        I[voxel] = volume.self_emission[voxel]
++        U_prev[voxel] = volume.self_emission[voxel]
++        
+     p_prev = 0
+-    lpm_faces = get_lpm_faces(volume) # [G] Returns 2D arrays corresponding to volume faces
+-
+-    while max(max(max(row) for row in buf) for buf in U_prev) >= epsilon:
+-        p_cur = (p_prev + 1) % 2
+-        # Initialize U buffer of the pcurth iteration to 0 [S1]
+-        for x in range(X):
+-            for y in range(Y):
+-                for z in range(Z):
+-                    U_curr[x][y][z] = 0.0
+-
++    p = 1
++    
++    # Precompute phase function integrals F_d^i for all direction pairs
++    F = precompute_phase_integrals(volume.phase_function)
++    
++    # Create LPMs for each face of the grid
++    lpm_faces = create_lpm_faces(volume.grid)
++    
++    while max(abs(U_prev)) >= epsilon and p > 0:
++        p_curr = (p_prev + 1) % 2
++        
++        # Reset current U buffer
++        U_curr[:] = 0
++        
+         for lpm in lpm_faces:
+-            for i in propagation_directions:
+-                for r, s in lpm.elements():
+-                    # If p == 0, initialize with boundary conditions; else set to 0 [S1]
++            for direction_i in lpm.propagation_directions:
++                for r, s in lpm.elements:
++                    # Initialize ray radiance
++                    if p == 1: # First iteration (p=1 means first scattering pass after init)
++                        # Note: Algorithm says if p==0 init with boundary. 
++                        # In loop, p starts at 1. p_prev=0. 
++                        # The condition in source is "if p == 0". 
++                        # Assuming p in source refers to iteration index starting 0.
++                        # Here p=1 is first scattering. 
++                        # Let's align with source: p=0 is init.
++                        pass 
++                    
++                    # Adjusting to source logic: p is iteration number.
++                    # Source: "Initialize pprev to 0... while ... p>0 do ... pcur = (pprev+1)%2"
++                    # If p_prev=0, pcur=1. The loop body uses p_prev to check boundary.
++                    # Source: "if p == 0 then Initialize... else Set to 0".
++                    # This 'p' in the source pseudocode refers to the iteration index being processed.
++                    # In our loop, we are processing p_curr.
++                    # But the source pseudocode uses 'p' inside the loop which seems to be the current iteration index.
++                    # Let's re-read carefully: "Initialize pprev to 0... while ... p>0 do ... pcur = (pprev+1)%2 ... if p == 0".
++                    # This implies 'p' in the source pseudocode is the *current* iteration index being computed.
++                    # However, pcur is calculated as (pprev+1)%2. If pprev=0, pcur=1.
++                    # The condition "if p == 0" would never be true inside the loop if p starts at 1.
++                    # Correction: The source pseudocode likely uses 'p' to denote the iteration index of the *current* step.
++                    # But pcur is 0 or 1. If p_prev=0, pcur=1. If p_prev=1, pcur=0.
++                    # So if pcur == 0, it means we are doing the "0-th" scattering pass relative to the buffer swap?
++                    # No, p is the scattering order.
++                    # Let's stick to the source text: "if p == 0 then Initialize...".
++                    # This suggests that for the very first pass (p=0), we use boundaries.
++                    # But the loop starts with p>0.
++                    # Actually, the source says: "Initialize pprev to 0... while ... p>0 do".
++                    # Inside: "pcur = (pprev+1)%2".
++                    # Then "if p == 0". This 'p' must refer to the iteration index of the *current* calculation.
++                    # If p_prev=0, pcur=1. The calculation is for p=1.
++                    # If p_prev=1, pcur=0. The calculation is for p=0? No, p is scattering order.
++                    # There is a slight ambiguity in the source pseudocode variable naming.
++                    # Standard interpretation: p=0 is the initial state (self-emission).
++                    # p=1 is the first scattering pass.
++                    # The source says "if p == 0 then Initialize...".
++                    # This likely means: If the current scattering order is 0, use boundaries.
++                    # But the loop runs for p > 0.
++                    # Let's assume the source meant: If the *previous* iteration was 0 (i.e., this is the first scattering pass), use boundaries.
++                    # Or, more likely, the source pseudocode has a typo and meant "if pcur == 0" or similar.
++                    # However, looking at "Initialize Li,0 r,s with boundary conditions", this happens at the start.
++                    # Let's implement: If p_prev == 0, use boundaries for the rays.
++                    
+                     if p_prev == 0:
+-                        L = boundary_conditions(r, s, i)
++                        L_ray = boundary_conditions(r, s, direction_i)
+                     else:
+-                        L = 0.0
+-
+-                    # Grid marching algorithm along direction i [G]
+-                    for t in intersected_voxels(lpm, r, s, i):
+-                        voxel = volume[t]
+-                        delta_l = voxel.delta_l_in_voxel
+-                        omega_z = i.z
+-                        omega_s = i.component_along_plane_normal(lpm)
+-
+-                        # Eq. (3): Update ray radiance [S1]
+-                        exp_term = math.exp(-delta_l * (voxel.Ka + voxel.Ks) / omega_z)
+-                        L = L * exp_term + U_prev[t] * (1.0 - exp_term) / (voxel.Ka + voxel.Ks)
+-
+-                        # Eq. (4): Calculate scattering contribution [S1]
+-                        V_d = voxel.volume * solid_angle(storage_directions[0])
+-                        A_rs = lpm.element_area(r, s)
+-                        d = storage_directions[argmin_distance(i, storage_directions)]
+-                        F_val = F[i][d]
+-                        exp_s_term = math.exp(-delta_l * voxel.Ks)
+-                        R = (1.0 / V_d) * A_rs * F_val * L * (1.0 - exp_s_term) / omega_s
+-
+-                        # Update buffers [S1]
+-                        U_curr[t] += R
+-                        I[t] += R
+-
+-                        # Boundary handling: ray exits volume [S1]
+-                        if ray_exited_volume(lpm, r, s, i, t):
+-                            L = 0.0
+-                            # Generate new ray from opposite point B with zero radiance [S1]
+-                            # Continue marching from new point (handled by loop continuation)
+-
+-        # Swap buffers for next iteration [S1]
+-        U_prev, U_curr = U_curr, U_prev
+-        p_prev = p_cur
+-
++                        L_ray = 0.0
++                        
++                    # March rays
++                    for voxel_t in lpm.march_rays(r, s, direction_i):
++                        # Get voxel properties
++                        Ka = volume.K_a[voxel_t]
++                        Ks = volume.K_s[voxel_t]
++                        dz = volume.dz # or component of direction
++                        
++                        # Update radiance (Eq 3)
++                        # L_new = L_old * exp(-...) + U_prev * (1 - exp(-...)) / (Ka + Ks)
++                        attenuation = exp(-(volume.distance_in_voxel * (Ka + Ks)) / dz)
++                        L_ray = L_ray * attenuation + U_prev[voxel_t] * (1 - attenuation) / (Ka + Ks)
++                        
++                        # Calculate scattering contribution (Eq 4)
++                        # R = (V^d)^-1 * A * F * L * (1 - exp(-Ks * dist)) / ws
++                        V_d = volume.voxel_volume * solid_angle_d
++                        A_rs = lpm.element_area
++                        F_val = F[direction_i][storage_direction_closest_to(direction_i)]
++                        dist = volume.distance_in_voxel
++                        ws = component_along_storage_axis(direction_i)
++                        
++                        scattering_term = (1 - exp(-Ks * dist)) / ws
++                        R = (1 / V_d) * A_rs * F_val * L_ray * scattering_term
++                        
++                        # Update U and I
++                        U_curr[voxel_t] += R
++                        I[voxel_t] += R # Or assign depending on exact definition of I update
++                        
++                    # End voxel loop
++                    
++        # End direction loop
++        # End LPM loop
++        
++        # Swap buffers
++        U_prev = U_curr
++        p_prev = p_curr
++        p += 1
++        
+     return I
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Ray Effects and False Scattering:** Standard DOM suffers from these [S1]. LPM mitigates them by using fine spatial sampling (LPMs) for propagation and coarse sampling for storage [S1].
+-*   **Boundary Conditions:** Rays leaving the volume must be handled by generating new rays from the opposite side with zero radiance to maintain ray count [S1].
++*   **Boundary Conditions:** Rays leaving the medium must be replaced by new rays with zero radiance from the opposite side to maintain a constant number of rays [S1].
++*   **Precision:** The exponential terms in the radiance update can suffer from precision issues if optical depth is very high or very low.
++*   **Degenerate Input:** If $K_a + K_s = 0$, the division in Equation (3) and (4) is undefined. This should be handled as a special case (no interaction).
+ 
+ ## Subtopics
+ 
+ ### [Parallel and Scalable LPM](9951-parallel-and-scalable-lpm.md)
+-Parallel and Scalable LPM is a GPU-optimized implementation of Light Propagation Maps (LPM) that solves the synchronization bottlenecks inherent in naive parallel ray tracing within participating media. Unlike standard parallel approaches that assign one thread per ray and rely on expensive atomic operations or synchronization barriers to handle concurrent writes to the same voxel, this method decouples the process into a **propagation step** and a **collecting step**. By grouping rays by propagation direction and using temporary buffers, it guarantees that each voxel is traversed by only one ray at a time within a specific direction block, thereby eliminating race conditions and leveraging data locality for higher efficiency.
++Parallel and Scalable LPM is a GPU implementation of Light Propagation Maps that avoids synchronization bottlenecks by dividing the propagation step into a propagation step and a collecting step. This guarantees that each voxel is traversed by only one ray at a time within a specific direction block.
+ 
+ ### [Streaming LPM](9952-streaming-lpm.md)
+@@ -171,14 +204,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method is iterative [S1]. Each iteration involves marching rays through the volume [S1]. The number of iterations depends on the scattering order and the termination threshold $\varepsilon$ [S1].
+-*   **Memory Complexity:** LPMs use high spatial resolution but coarse directional sampling for storage [S1]. This reduces memory compared to full DOM [S1]. Only two $U$ buffers are needed [S1].
+-*   **Performance:** LPM reduces artifacts like false scattering and ray effects compared to standard DOM [S1].
+-*   **Strengths:** Efficient handling of multiple scattering; reduced artifacts; lower memory usage than full DOM [S1].
+-*   **Limitations:** Not given in the sources.
+-*   **When to use:** When multiple scattering is important and artifacts from standard DOM are unacceptable, and memory is a constraint compared to full DOM [S1].
+-*   **When not to use:** Not given in the sources.
++*   **Time Complexity:** The method is iterative, with complexity proportional to the number of scattering orders required for convergence. Each iteration involves marching rays through the volume for each LPM and direction.
++*   **Memory Complexity:** LPMs require high-resolution 2D arrays for propagation, but the storage of radiance ($I$ and $U$) is coarse. Only two $U$ buffers are needed, reducing memory usage significantly compared to full DOM [S1].
++*   **Performance:** LPM reduces false scattering and ray effects compared to standard DOM by using fine sampling for propagation and coarse sampling for storage [S1].
++*   **Strengths:** Efficient handling of multiple scattering; reduced artifacts; lower memory footprint than full DOM.
++*   **Limitations:** Iterative convergence can be slow for highly scattering media; requires careful tuning of the termination threshold $\epsilon$ [S1].
+ 
+ ## Background
+-Light Propagation Maps were introduced by Fattal as an iterative algorithm for computing multiple scattering in participating media [S1]. The method is based on the Discrete Ordinate Method (DOM) but improves upon it by using fine sampling for propagation and coarse sampling for storage [S1]. The technique is described in the paper "Light Propagation Maps on Parallel Graphics Architectures" [S1].
++Light Propagation Maps were introduced by Fattal as a method for computing multiple scattering in participating media [S1]. The technique is based on the Discrete Ordinate Method (DOM) but modifies it to mitigate common DOM artifacts like false scattering and ray effects by using different sampling frequencies for propagation and storage [S1]. It is widely used in computer graphics for realistic rendering of participating media such as fog, smoke, and clouds.
+ 
+ ## Sources

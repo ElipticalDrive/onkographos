@@ -1,0 +1,201 @@
+--- v003.md
++++ v004.md
+@@ -1,95 +1,87 @@
+ # Motion Blur
+-
+ Also called: Temporal Blur, Shutter Blur
+-
+ ## Overview
+-Motion blur simulates the integration of light over a finite shutter interval $[t_0, t_1]$, resulting in a blurred image when objects or the camera move during exposure [S1, unofficial]. In path tracing, this is achieved by assigning a unique random time sample to each ray, naturally accumulating motion blur across samples [S1, unofficial]. It differs from post-processing blur by preserving correct geometric occlusion and depth-of-field interactions at the sampled time instances [S1, unofficial].
+-
++Motion blur simulates the integration of light over a finite shutter interval $[t_0, t_1]$, resulting in the blurring of moving objects or camera motion [S1, unofficial][S4]. In path tracing, this is achieved by sampling a random time instance for each ray, naturally accumulating motion blur across samples [S1, unofficial]. It differs from static rendering by introducing temporal variance that must be resolved via increased sampling or specific optimization strategies [S3, S4].
+ ## How it works
++### Inputs and Outputs
+ **Inputs:**
+ *   Shutter interval $[t_0, t_1]$ [S1, unofficial].
+-*   Per-object transform data (position, rotation, scale) or velocity vectors at $t_0$ and $t_1$ [S1, unofficial][S2].
+-*   Scene geometry and material properties.
++*   Scene geometry and material properties [S1, unofficial].
++*   Per-object velocity data or interpolated transforms to evaluate positions at time $t$ [S1, unofficial].
++*   Camera pose and intrinsic parameters [S1, unofficial][S4].
+ 
+ **Outputs:**
+-*   A single pixel color value representing the time-integrated radiance [S1, unofficial].
++*   A single blurred image frame $B$ [S4].
+ 
+-**Data Structures:**
+-*   **Transform State:** For each object, a set of transforms $\{T(t_0), T(t_1)\}$ or velocity vectors $\mathbf{v}$ [S1, unofficial][S2].
+-*   **Random Number:** A uniform random variable $u \in [0, 1)$ [S1, unofficial].
++### Data Structures
++*   **Transform Data:** Per-object transformation matrices (or velocity vectors) indexed by time $t$ [S1, unofficial].
++*   **Sample Buffer:** Accumulates radiance values from multiple temporal samples [S1, unofficial][S4].
+ 
+-**Steps:**
+-1.  **Sample Time:** Generate a random time $t$ within the shutter interval:
+-    $$ t = t_0 + (t_1 - t_0) \cdot u $$
+-    where $u$ is a uniform random number in $[0, 1)$ [S1, unofficial].
+-2.  **Interpolate Transforms:** Evaluate the object's transform $T(t)$ at the sampled time $t$. This is typically done via linear interpolation of positions and spherical linear interpolation (SLERP) of rotations, or by applying velocity vectors if available [S1, unofficial][S2].
+-3.  **Ray Generation:** Construct the ray origin and direction based on the camera state at time $t$ (if camera motion blur is included) or the static camera [S1, unofficial].
+-4.  **Trace:** Trace the ray through the scene using the interpolated object positions [S1, unofficial].
+-5.  **Accumulate:** Add the resulting radiance to the pixel buffer. Repeat for multiple samples to reduce noise [S1, unofficial].
++### Steps
++1.  **Sample Time:** For each ray, sample a random time $t$ uniformly within the shutter interval $[t_0, t_1]$ [S1, unofficial]:
++    $$ t = \text{lerp}(t_0, t_1, \text{random}()) $$
++    where $\text{random}() \in [0, 1)$ [S1, unofficial].
++2.  **Evaluate Transforms:** Compute the object transforms (position, rotation, scale) at the sampled time $t$ using the available velocity data or interpolated keyframes [S1, unofficial].
++3.  **Trace Ray:** Cast the ray through the scene using the evaluated transforms and camera parameters [S1, unofficial].
++4.  **Accumulate:** Add the resulting radiance to the pixel buffer [S1, unofficial].
++5.  **Average:** After collecting $N$ samples, average the accumulated radiance to produce the final pixel value [S4].
+ 
+-**Parameters:**
+-*   **Shutter Interval $[t_0, t_1]$:** Defines the exposure duration. Typical values depend on the simulation time scale [S1, unofficial].
+-*   **mbmult:** A multiplier affecting the strength of motion blur. Can be negative [S2].
+-*   **vol_moblur_method:** Specifies the volumetric motion blur strategy ('Ray-traced' or 'Grid-based') [S2].
++### Parameters
++*   **Shutter Interval $[t_0, t_1]$:** Defines the duration of exposure. Typical values depend on the simulated frame rate and motion speed [S1, unofficial].
++*   **Number of Samples $N$:** The number of temporal samples per pixel. Higher $N$ reduces noise but increases computation time [S4].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Linear interpolation of transforms may cause artifacts if rotation is not handled correctly (e.g., using SLERP) [S1, unofficial].
+-*   **Self-Intersection:** In mesh rendering, shifting vertices by velocity can cause penetration. A self-intersection check (mbself) is expensive but prevents artifacts [S2].
+-*   **Volumetric Limitations:** Grid-based motion blur only applies to Volumetric, Volumetric Geometry, and Volumetric Heat Haze modes, not Mesh or Ocean modes [S2].
++### Edge Cases and Pitfalls
++*   **Precision:** Floating-point precision in transform interpolation can cause jitter if not handled carefully [G].
++*   **Boundaries:** Ensure $t$ is clamped within $[t_0, t_1]$ to avoid out-of-bounds access to transform data [G].
++*   **Degenerate Input:** If an object has no velocity data, it remains static during the shutter interval [S1, unofficial].
+ 
+-**Pseudocode:**
++### Pseudocode
+ ```python
+-def sample_motion_blur_ray(t0, t1, random_u, object_transforms, camera):
++def render_motion_blur_frame(shutter_start, shutter_end, num_samples, scene, camera):
+     """
+-    Generates a ray for a single motion blur sample.
++    Renders a single frame with motion blur by sampling multiple time instances.
+     
+     Args:
+-        t0 (float): Start of shutter interval.
+-        t1 (float): End of shutter interval.
+-        random_u (float): Uniform random number in [0, 1).
+-        object_transforms (dict): Map of object_id to {pos_t0, rot_t0, pos_t1, rot_t1, vel}.
+-        camera (Camera): Camera object with view/projection matrices.
++        shutter_start (float): Start time t0 of the shutter interval.
++        shutter_end (float): End time t1 of the shutter interval.
++        num_samples (int): Number of temporal samples per pixel.
++        scene (Scene): Scene object containing geometry and materials.
++        camera (Camera): Camera object with pose and intrinsics.
+         
+     Returns:
+-        Ray: Origin and direction at sampled time t.
++        Image: Blurred image frame.
+     """
+-    # Step 1: Sample time
+-    t = t0 + (t1 - t0) * random_u
++    width, height = camera.resolution
++    image = zeros((height, width, 3))
+     
+-    # Step 2: Interpolate transforms for all objects
+-    # Note: In a real implementation, this would update the scene graph or 
+-    # provide a transform function for the ray tracer.
+-    interpolated_transforms = {}
+-    for obj_id, transforms in object_transforms.items():
+-        # Linear interpolation for position
+-        pos = lerp(transforms['pos_t0'], transforms['pos_t1'], random_u)
+-        # Slerp for rotation (simplified here as lerp for pseudocode clarity)
+-        rot = lerp_quat(transforms['rot_t0'], transforms['rot_t1'], random_u)
+-        interpolated_transforms[obj_id] = {'pos': pos, 'rot': rot}
+-        
+-    # Step 3: Generate Ray
+-    # Assuming pinhole camera model for simplicity
+-    # uv is the pixel coordinate in NDC [-1, 1]
+-    origin_ndc = vec3(0, 0, 0)
+-    target_ndc = vec3(uv.x, uv.y, 1)
+-    
+-    # Transform to world space
+-    origin_world = camera.view_inverse * vec4(origin_ndc, 1)
+-    target_world = camera.view_inverse * vec4(target_ndc, 1)
+-    
+-    direction = normalize(target_world.xyz - origin_world.xyz)
+-    origin = origin_world.xyz
+-    
+-    return Ray(origin, direction, t)
+-
+-def lerp(a, b, t):
+-    return a + t * (b - a)
+-
+-def lerp_quat(q0, q1, t):
+-    # Simplified quaternion interpolation
+-    # In practice, use slerp or nlerp
+-    return q0 + t * (q1 - q0)
++    for y in range(height):
++        for x in range(width):
++            pixel_color = vec3(0.0)
++            
++            for s in range(num_samples):
++                # Step 1: Sample random time within shutter interval
++                u = random_float(0.0, 1.0)
++                t = lerp(shutter_start, shutter_end, u)
++                
++                # Step 2: Evaluate object transforms at time t
++                # This requires per-object velocity data or interpolated transforms
++                scene_transforms = evaluate_transforms(scene, t)
++                
++                # Step 3: Trace ray
++                # Construct ray origin and direction based on camera and time t
++                # Note: Camera pose may also vary with time t
++                ray_origin, ray_direction = camera.get_ray(x, y, t)
++                
++                # Trace the ray through the scene with evaluated transforms
++                radiance = trace_ray(ray_origin, ray_direction, scene_transforms, scene)
++                
++                # Step 4: Accumulate
++                pixel_color += radiance
++            
++            # Step 5: Average
++            image[y, x] = pixel_color / num_samples
++            
++    return image
+ ```
+-
+ ## Subtopics
+ 
+@@ -98,24 +90,28 @@
+ 
+ ### Ray-traced Volumetric Motion Blur
+-The default Volumetric Motion Blur method for Phoenix simulations [S2]. It uses per-object velocity data or interpolated transforms to shift geometry during rendering [S2]. The strength is controlled by the `mbmult` parameter, which can be negative [S2].
++The default Volumetric Motion Blur method for Phoenix simulations [S2]. It uses velocity channel export to compute blur [S2].
+ 
+ ### Camera motion blur modeling (3DGS)
+-Simulates exposure-time camera shake by rasterizing multiple sharp images at different temporal instants and averaging them [S3]. It trains 3D Gaussians to model clean representations at various moments light reaches the sensor, rasterizes $M$ clean images from $M$ different moments, and averages them to simulate camera movement during training [S3]. The parameter $M$ (e.g., $M=6$) controls temporal sampling density [S3]. A pitfall is that it assumes images at all instants are sharp without inherent blur; blur only arises from temporal averaging of sharp frames [S3].
++Simulates exposure-time camera shake by rasterizing multiple sharp images at different temporal instants and averaging them [S3]. It trains 3D Gaussians to model clean representations at various moments light reaches the sensor, rasterizes $M$ clean images from $M$ different moments, and averages them to simulate camera movement during training [S3]. It assumes images at all instants are sharp without inherent blur; blur only arises from temporal averaging of sharp frames [S3].
+ 
+ ### Grid-based Volumetric Motion Blur
+-A motion blur method for volumetric simulations that produces more visible motion blur streaks, especially with faster moving fluids, by using a pre-pass and requiring more memory than the default Ray-traced method [S2]. It is selected via the `vol_moblur_method` parameter [S2]. A pitfall is that it only affects Volumetric, Volumetric Geometry, and Volumetric Heat Haze Modes, and does not apply to Mesh, Ocean Mesh, Cap Mesh, or Isosurface Modes [S2].
++A motion blur method for volumetric simulations that produces more visible motion blur streaks, especially with faster moving fluids, by using a pre-pass and requiring more memory than the default Ray-traced method [S2]. It only affects Volumetric, Volumetric Geometry, and Volumetric Heat Haze Modes and does not apply to Mesh, Ocean Mesh, Cap Mesh, or Isosurface Modes [S2].
++
++### Camera Motion Blur Simulation
++Simulates motion blur by integrating sharp rendered images over the shutter time, weighted by the camera's photosensitive element efficiency [S4]. It uniformly samples $N$ timestamps within shutter time $\tau$, where the $i$-th keyframe is at timestamp $t = \frac{i-1}{N}\tau$ [S4]. The sampling weight $w_i$ satisfies $\sum_{i=0}^{N-1} w_i = 1$, and for uniform sampling, $w_i = 1/N$ [S4]. In this method, $w$ is a learnable parameter [S4].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of motion blur samples $N$ and the number of objects in the scene. Each sample requires a full ray trace [S1, unofficial].
+-*   **Memory Complexity:** Depends on the storage of per-object transform data or velocity vectors. Grid-based volumetric blur requires additional memory for the pre-pass [S2].
+-*   **Performance:** High-quality motion blur requires many samples to reduce noise, increasing render time [S1, unofficial]. Grid-based volumetric blur is more expensive due to the pre-pass [S2].
+-*   **Strengths:** Physically accurate integration of motion over time; handles complex occlusions and depth-of-field interactions naturally [S1, unofficial].
+-*   **Limitations:** Requires per-object velocity or transform data; can be computationally expensive for large scenes or high sample counts [S1, unofficial][S2]. Grid-based method has mode restrictions [S2].
+-
++*   **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of temporal samples and $R$ is the cost of a single ray trace [S1, unofficial][S4].
++*   **Memory Complexity:** $O(1)$ additional memory per pixel for accumulation, assuming transforms are evaluated on the fly [S1, unofficial]. Grid-based methods require additional memory for pre-pass data [S2].
++*   **Measured Performance:** Performance scales linearly with the number of samples $N$ [S4]. Grid-based methods are slower due to the pre-pass but may produce more visible streaks [S2].
++*   **Strengths:** Natural appearance of motion blur; flexible integration with existing path tracers [S1, unofficial].
++*   **Limitations:** Requires significant sampling to reduce noise; dependent on accurate velocity/transform data [S1, unofficial].
++*   **When to Use:** When simulating realistic camera or object motion blur is required [S1, unofficial][S4].
++*   **When Not to Use:** When real-time performance is critical and noise is unacceptable with low sample counts [G].
+ ## Background
+-Motion blur in path tracing was introduced as a natural extension of the Monte Carlo integration of light transport, where the shutter interval is treated as a dimension of the integral [S1, unofficial]. The technique relies on the ability to evaluate scene geometry at arbitrary time instances, which became feasible with the adoption of ray tracing APIs and efficient transform interpolation methods [S1, unofficial]. Variants like ExBluRF extend this to neural radiance fields, optimizing camera poses for blur [S1, unofficial]. Volumetric motion blur methods in simulation software like Phoenix provide specialized techniques for fluid and smoke rendering [S2].
+-
++Motion blur in path tracing was introduced as a natural extension of ray tracing to simulate camera shutter effects [S1, unofficial]. It has been widely adopted in offline rendering and increasingly in real-time applications through techniques like 3D Gaussian Splatting [S3, S4].
+ ## Sources
+ [S1] Camera Model in Path Tracing - Pinhole, Lens, and DOF Guide | Dev ..., https://code-note-vr.vercel.app/pathtracer-learning-camera-model, fetched 2026-10-29 (unofficial)
+ [S2] FireSmoke Rendering - Phoenix for 3ds Max, https://documentation.chaos.com/space/PHX4MAX/124396558, fetched 2026-10-27
+-[S3] Deblurring 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-73636-0_8, fetched 2026-10-26+[S3] Deblurring 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-73636-0_8, fetched 2026-10-26
++[S4] Deblur-GS: 3D Gaussian Splatting from Camera Motion Blurred Images, https://doi.org/10.1145/3651301, fetched 2026-11-08

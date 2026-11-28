@@ -1,0 +1,387 @@
+--- v003.md
++++ v004.md
+@@ -4,145 +4,261 @@
+ 
+ ## Overview
+-This method converts explicit geometry, such as triangle meshes or oriented point clouds, into a Truncated Signed Distance Field (TSDF) voxel grid by computing the closest-surface distance for each voxel center and assigning a sign based on surface normals or an offset fallback [S1]. It differs from [Projective TSDF Fusion](3649-mesh-to-tsdf-sequence-encoding-pipeline.md) by operating directly on geometric primitives rather than depth images, making it suitable for inputs from upstream reconstruction pipelines where calibrated camera poses are unavailable or unnecessary [S1].
++This method converts explicit geometry, such as triangle meshes or oriented point clouds, into a Truncated Signed Distance Field (TSDF) voxel grid by computing the closest-surface distance for each voxel center and assigning a sign based on surface orientation [S1]. It differs from [Projective TSDF Fusion](2658-projective-tsdf-fusion.md) by operating directly on explicit geometric primitives rather than raw depth buffers, and from [Sparse VDB SDF Generation](4498-sparse-vdb-sdf-generation.md) by focusing on the initial conversion of a single explicit surface representation into a dense or sparse voxel volume [S1].
+ 
+ ## How it works
+-**Inputs:** A triangle mesh $\mathcal{T}$ (set of triangles with vertices $a,b,c$ and normals $\mathbf{n}$) or an oriented point cloud; a global voxel grid definition (origin, resolution, truncation band $\tau$) [S1].
+-**Outputs:** A TSDF volume where each voxel stores a truncated signed distance value and a validity flag [S1].
++**Inputs:**
++*   A set of triangles $\mathcal{T}$ (for meshes) or a set of oriented points (for point clouds).
++*   A global voxel grid definition (origin, resolution, truncation band $\epsilon$).
++
++**Outputs:**
++*   A TSDF voxel grid where each valid voxel contains a truncated signed distance value.
+ 
+ **Data Structures:**
+-*   **Voxel Grid:** A sparse or dense array of blocks. Each block contains $N \times N \times N$ voxels (e.g., $8 \times 8 \times 8$) [S1].
+-*   **Voxel Entry:** Contains a float value (signed distance) and a boolean valid flag [S1].
+-*   **Triangle:** Defined by vertices $a, b, c \in \mathbb{R}^3$ and unit normal $\mathbf{n}$ [S1].
+-
+-**Steps:**
+-1.  **Iterate Voxels:** For each voxel center $\mathbf{p}$ in the global grid [S1].
+-2.  **Find Closest Surface:** Compute the closest point $\Pi_{\tau\star}(\mathbf{p})$ on the surface $\mathcal{T}$ to $\mathbf{p}$ [S1].
+-    *   For a mesh, $\Pi_{\tau\star}(\mathbf{p})$ is the closest point on the closest triangle $\tau\star$ [S1].
+-    *   To find the closest point on a triangle, check if the orthogonal projection of $\mathbf{p}$ lies inside the triangle. If so, that projection is the closest point. Otherwise, project $\mathbf{p}$ onto the three edge segments and take the nearest point [S1].
+-    *   The barycentric form of a point on a triangle is $q(v, w) = a + v(b-a) + w(c-a)$, subject to $v \geq 0, w \geq 0, v + w \leq 1$ [S1].
+-3.  **Compute Unsigned Distance:** Calculate the Euclidean distance $d(\mathbf{p}) = \|\mathbf{p} - \Pi_{\tau\star}(\mathbf{p})\|_2$ [S1].
+-4.  **Assign Sign:**
+-    *   **Watertight/Oriented Case:** If the mesh is watertight with consistent orientation, or if the input is an oriented point cloud with reliable normals, compute the sign using the local point-to-plane test:
+-        $$s(\mathbf{p}) = \text{sign}((\mathbf{p} - \Pi_{\tau\star}(\mathbf{p}))^\top \mathbf{n}_{\tau\star}) d(\mathbf{p})$$
+-        where $\mathbf{n}_{\tau\star}$ is the unit normal of the closest triangle (or point) [S1].
+-    *   **Non-Watertight/Unreliable Case:** If the surface is non-watertight, contains thin sheets, or normals are unreliable, use the unsigned-distance offset fallback:
+-        $$s(\mathbf{p}) = d(\mathbf{p}) - \delta$$
+-        where $\delta \approx 1\text{--}2$ voxel sizes [S1]. This creates a stable zero level set around the geometry without requiring a global inside/outside convention [S1].
+-5.  **Truncate and Store:** If $|s(\mathbf{p})| \leq \tau$, store $s(\mathbf{p})$ in the voxel and mark it valid. Otherwise, mark it invalid or store a default value [S1].
++*   **Triangle:** Defined by vertices $a, b, c \in \mathbb{R}^3$.
++*   **Voxel Center:** $\mathbf{p} \in \mathbb{R}^3$.
++*   **TSDF Value:** Scalar $s(\mathbf{p}) \in [-1, 1]$.
++
++**Algorithm:**
++
++1.  **Closest Point Projection:** For each voxel center $\mathbf{p}$, find the closest point on the surface.
++    *   For a mesh, iterate over all triangles $\tau \in \mathcal{T}$.
++    *   For a triangle with vertices $a, b, c$, the closest point $\Pi_\tau(\mathbf{p})$ is found by projecting $\mathbf{p}$ onto the triangle plane. If the projection lies within the triangle, it is the closest point. Otherwise, project $\mathbf{p}$ onto the three edge segments and select the nearest point [S1].
++    *   The barycentric coordinate $q(v, w)$ on the triangle is defined as:
++        $$q(v, w) = a + v(b-a) + w(c-a)$$
++        subject to $v \geq 0, w \geq 0, v + w \leq 1$ [S1].
++    *   Compute the unsigned distance:
++        $$d(\mathbf{p}) = \min_{\tau \in \mathcal{T}} \|\mathbf{p} - \Pi_\tau(\mathbf{p})\|_2 \quad (7)$$
++    *   For point clouds, $d(\mathbf{p})$ is the distance to the nearest point in the cloud.
++
++2.  **Sign Assignment:** Determine the sign of the distance.
++    *   **Watertight Meshes:** If the mesh is watertight with consistent orientation, let $\tau^\star$ be the triangle containing the closest point $\Pi_{\tau^\star}(\mathbf{p})$ and $\mathbf{n}_{\tau^\star}$ be its unit normal. The signed distance is:
++        $$s(\mathbf{p}) = \text{sign}((\mathbf{p} - \Pi_{\tau^\star}(\mathbf{p}))^\top \mathbf{n}_{\tau^\star}) d(\mathbf{p}) \quad (8)$$
++        This local point-to-plane side test assumes a coherent inside/outside convention [S1].
++    *   **Oriented Point Clouds:** Use the normal of the closest point to determine the sign analogously to the mesh case.
++    *   **Non-Watertight/Unreliable Normals:** If the surface is non-watertight, contains thin sheets, or normals are unreliable, a global inside/outside sign is ill-defined. Use the unsigned-distance offset fallback:
++        $$s(\mathbf{p}) = d(\mathbf{p}) - \delta \quad (9)$$
++        where $\delta \approx 1\text{--}2$ voxel sizes. This creates a stable zero level set around the geometry without requiring watertightness [S1].
++
++3.  **Truncation and Marking:**
++    *   Truncate the signed distance $s(\mathbf{p})$ to the band $[-\epsilon, \epsilon]$.
++    *   Mark voxels within this band as valid.
+ 
+ **Pseudocode:**
++
+ ```python
+-def convert_mesh_to_tsdf(mesh, voxel_grid, truncation_band, is_watertight):
+-    """
+-    Converts a mesh to a TSDF volume.
+-    mesh: List of triangles, each triangle is (a, b, c, n) where a,b,c are vertices and n is normal.
+-    voxel_grid: Object providing voxel centers and storage.
+-    truncation_band: Float, the truncation threshold tau.
+-    is_watertight: Boolean, whether the mesh is watertight with consistent orientation.
+-    """
+-    for voxel_center in voxel_grid.centers():
+-        closest_triangle, closest_point = find_closest_triangle_and_point(mesh, voxel_center)
+-        dist = sqrt(dot(voxel_center - closest_point, voxel_center - closest_point))
+-        
+-        if is_watertight:
+-            normal = closest_triangle.normal
+-            sign_val = dot(voxel_center - closest_point, normal)
+-            signed_dist = (1.0 if sign_val >= 0 else -1.0) * dist
+-        else:
+-            delta = 1.5 * voxel_grid.voxel_size
+-            signed_dist = dist - delta
+-            
+-        if abs(signed_dist) <= truncation_band:
+-            voxel_grid.set_value(voxel_center, signed_dist, valid=True)
+-        else:
+-            voxel_grid.set_value(voxel_center, 0.0, valid=False)
+-
+-def find_closest_triangle_and_point(mesh, p):
+-    min_dist = float('inf')
+-    best_triangle = None
+-    best_point = None
+-    for triangle in mesh:
+-        a, b, c, n = triangle
+-        closest_point_on_tri = closest_point_on_triangle(p, a, b, c)
+-        dist = sqrt(dot(p - closest_point_on_tri, p - closest_point_on_tri))
+-        if dist < min_dist:
+-            min_dist = dist
+-            best_triangle = triangle
+-            best_point = closest_point_on_tri
+-    return best_triangle, best_point
+-
+-def closest_point_on_triangle(p, a, b, c):
+-    ap = p - a
+-    ab = b - a
+-    ac = c - a
+-    ab_ab = dot(ab, ab)
+-    ac_ac = dot(ac, ac)
+-    ab_ac = dot(ab, ac)
+-    ap_ab = dot(ap, ab)
+-    ap_ac = dot(ap, ac)
+-    denom = ab_ab * ac_ac - ab_ac * ab_ac
++def compute_tsdf_from_mesh(triangles, voxel_centers, epsilon, delta):
++    """
++    Converts a mesh to a TSDF grid.
++    
++    Args:
++        triangles: List of triangles, each defined by 3 vertices (a, b, c).
++        voxel_centers: List of 3D points representing voxel centers.
++        epsilon: Truncation band width.
++        delta: Offset for non-watertight fallback (approx 1-2 voxel sizes).
++        
++    Returns:
++        tsdf_values: List of truncated signed distances for each voxel center.
++        valid_mask: Boolean mask indicating which voxels are within the truncation band.
++    """
++    tsdf_values = []
++    valid_mask = []
++    
++    for p in voxel_centers:
++        # 1. Find closest triangle and point
++        min_dist = infinity
++        closest_point = None
++        closest_normal = None
++        is_watertight_sign = False
++        
++        for tri in triangles:
++            a, b, c = tri.vertices
++            n = tri.normal # Precomputed unit normal
++            
++            # Project p onto triangle plane
++            # Plane equation: n . (x - a) = 0
++            # Distance to plane: d_plane = n . (p - a)
++            # Projection point: proj = p - d_plane * n
++            
++            d_plane = dot(n, sub(p, a))
++            proj = sub(p, mul(d_plane, n))
++            
++            # Check if proj is inside triangle using barycentric coords
++            # v, w such that proj = a + v(b-a) + w(c-a)
++            # Solve for v, w. If v >= 0, w >= 0, v+w <= 1, proj is inside.
++            # Otherwise, find closest point on edges.
++            
++            closest_tri_point = project_point_to_triangle(p, a, b, c)
++            dist = length(sub(p, closest_tri_point))
++            
++            if dist < min_dist:
++                min_dist = dist
++                closest_point = closest_tri_point
++                closest_normal = n
++                # Assume watertight if we found a valid triangle projection
++                # Note: In practice, watertightness is a property of the mesh,
++                # not per-voxel. This flag indicates if we *can* use normal sign.
++                is_watertight_sign = True 
++
++        # 2. Compute Signed Distance
++        if is_watertight_sign:
++            # s(p) = sign((p - closest_point)^T * normal) * d(p)
++            diff = sub(p, closest_point)
++            side = dot(diff, closest_normal)
++            sign_val = 1.0 if side >= 0 else -1.0
++            s = sign_val * min_dist
++        else:
++            # Fallback for non-watertight or unreliable normals
++            s = min_dist - delta
++            
++        # 3. Truncate
++        if abs(s) <= epsilon:
++            tsdf_values.append(s / epsilon) # Normalize to [-1, 1]
++            valid_mask.append(True)
++        else:
++            tsdf_values.append(0.0) # Or undefined, depending on implementation
++            valid_mask.append(False)
++            
++    return tsdf_values, valid_mask
++
++def project_point_to_triangle(p, a, b, c):
++    """
++    Finds the closest point on triangle abc to point p.
++    Returns the closest point on the triangle surface.
++    """
++    # Vector from a to b, a to c, a to p
++    ab = sub(b, a)
++    ac = sub(c, a)
++    ap = sub(p, a)
++    
++    # Dot products
++    d1 = dot(ab, ap)
++    d2 = dot(ac, ap)
++    d3 = dot(ab, ac)
++    d4 = dot(ab, ab)
++    d5 = dot(ac, ac)
++    
++    # Barycentric coordinates
++    denom = d4 * d5 - d3 * d3
+     if denom == 0:
++        # Degenerate triangle, return a
+         return a
+-    v = (ac_ac * ap_ab - ab_ac * ap_ac) / denom
+-    w = (ab_ab * ap_ac - ab_ac * ap_ab) / denom
++        
++    v = (d4 * d2 - d3 * d1) / denom
++    w = (d5 * d3 - d3 * d2) / denom
++    
+     if v >= 0 and w >= 0 and (v + w) <= 1:
+-        return a + v * ab + w * ac
+-    t_ab = max(0.0, min(1.0, dot(ap, ab) / ab_ab))
+-    closest_ab = a + t_ab * ab
+-    dist_ab = sqrt(dot(p - closest_ab, p - closest_ab))
+-    bp = p - b
+-    bc = c - b
+-    t_bc = max(0.0, min(1.0, dot(bp, bc) / dot(bc, bc)))
+-    closest_bc = b + t_bc * bc
+-    dist_bc = sqrt(dot(p - closest_bc, p - closest_bc))
+-    cp = p - c
+-    ca = a - c
+-    t_ca = max(0.0, min(1.0, dot(cp, ca) / dot(ca, ca)))
+-    closest_ca = c + t_ca * ca
+-    dist_ca = sqrt(dot(p - closest_ca, p - closest_ca))
+-    if dist_ab <= dist_bc and dist_ab <= dist_ca:
+-        return closest_ab
+-    elif dist_bc <= dist_ca:
+-        return closest_bc
+-    else:
+-        return closest_ca
++        # Projection is inside the triangle
++        return add(a, add(mul(v, ab), mul(w, ac)))
++    
++    # Projection is outside, find closest point on edges
++    # Edge AB
++    if v < 0:
++        # Closest point is on edge AB or AC or vertex A
++        # Check edge AB
++        t = max(0, min(1, d1 / d4))
++        pt_ab = add(a, mul(t, ab))
++        dist_ab = length(sub(p, pt_ab))
++        
++        # Check edge AC
++        t_ac = max(0, min(1, d2 / d5))
++        pt_ac = add(a, mul(t_ac, ac))
++        dist_ac = length(sub(p, pt_ac))
++        
++        # Check vertex A (already covered by t=0 in edges, but for completeness)
++        dist_a = length(sub(p, a))
++        
++        if dist_ab <= dist_ac and dist_ab <= dist_a:
++            return pt_ab
++        elif dist_ac <= dist_ab and dist_ac <= dist_a:
++            return pt_ac
++        else:
++            return a
++            
++    # Edge BC
++    if w < 0:
++        # Closest point is on edge BC or vertex B or C
++        # Check edge BC
++        bc = sub(c, b)
++        bp = sub(p, b)
++        t_bc = max(0, min(1, dot(bc, bp) / dot(bc, bc)))
++        pt_bc = add(b, mul(t_bc, bc))
++        dist_bc = length(sub(p, pt_bc))
++        
++        # Check vertex B
++        dist_b = length(sub(p, b))
++        # Check vertex C
++        dist_c = length(sub(p, c))
++        
++        if dist_bc <= dist_b and dist_bc <= dist_c:
++            return pt_bc
++        elif dist_b <= dist_bc and dist_b <= dist_c:
++            return b
++        else:
++            return c
++            
++    # Edge AC (v > 1, w < 0 case handled above? No, v>1 implies outside AB extended)
++    # Actually, if v > 1, we are past B. If w < 0, we are "below" AC.
++    # The logic above for v<0 and w<0 covers the corners.
++    # If v > 1 and w > 0 and v+w > 1, we are past edge BC.
++    # Let's simplify: just check all 3 edges and 3 vertices.
++    
++    # Edge AB
++    t_ab = max(0, min(1, dot(ab, ap) / dot(ab, ab)))
++    pt_ab = add(a, mul(t_ab, ab))
++    
++    # Edge BC
++    bc = sub(c, b)
++    bp = sub(p, b)
++    t_bc = max(0, min(1, dot(bc, bp) / dot(bc, bc)))
++    pt_bc = add(b, mul(t_bc, bc))
++    
++    # Edge CA
++    ca = sub(a, c)
++    cp = sub(p, c)
++    t_ca = max(0, min(1, dot(ca, cp) / dot(ca, ca)))
++    pt_ca = add(c, mul(t_ca, ca))
++    
++    # Vertices
++    dist_a = length(sub(p, a))
++    dist_b = length(sub(p, b))
++    dist_c = length(sub(p, c))
++    
++    dist_ab = length(sub(p, pt_ab))
++    dist_bc = length(sub(p, pt_bc))
++    dist_ca = length(sub(p, pt_ca))
++    
++    min_d = min(dist_a, dist_b, dist_c, dist_ab, dist_bc, dist_ca)
++    
++    if min_d == dist_a: return a
++    if min_d == dist_b: return b
++    if min_d == dist_c: return c
++    if min_d == dist_ab: return pt_ab
++    if min_d == dist_bc: return pt_bc
++    if min_d == dist_ca: return pt_ca
++    
++    return a # Fallback
+ ```
+ 
+-**Parameters:**
+-*   **Truncation Band ($\tau$):** The maximum distance for which TSDF values are stored. Typical values depend on the application, often 1-2 voxel sizes [S1].
+-*   **Offset ($\delta$):** Used in the fallback case. Typically $1\text{--}2$ voxel sizes [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Non-watertight Surfaces:** Global inside/outside signs are ill-defined. The unsigned-distance offset fallback is required [S1].
+-*   **Thin Sheets:** Similar to non-watertight surfaces, normals may not provide a consistent global sign. Use the offset fallback [S1].
+-*   **Unreliable Normals:** If normals are noisy or unoriented, the point-to-plane sign test may be incorrect. Use the offset fallback [S1].
+-*   **Degenerate Triangles:** Handle zero-area triangles in `closest_point_on_triangle` by returning a vertex or skipping [G].
+-
+ ## Subtopics
+ 
+-### Projective TSDF Fusion
+-A method to compute signed distance values for voxels from calibrated depth images by projecting voxel centers into the camera frame and comparing projected depth with observed depth [S1]. It differs from direct mesh conversion by using depth measurements from multiple views, fused by weighted averaging, rather than explicit geometric primitives [S1]. Choose this when input is from calibrated depth cameras (e.g., Kinect) rather than a reconstructed mesh [S1].
+-
+-**Steps:**
+-1.  Transform voxel center $\mathbf{p}$ to camera frame: $\mathbf{p}_c = R^\top (\mathbf{p} - \mathbf{t}) = (x, y, z)^\top$ [S1].
+-2.  Project to 2D image coordinates: $u = f_x \frac{x}{z} + c_x, \quad v = f_y \frac{y}{z} + c_y$ [S1].
+-3.  If $z > 0$ and $(u,v)$ is valid, read observed depth $\hat{z}$ and compute $s(\mathbf{p}) = \hat{z} - z$ [S1].
+-4.  Fuse measurements from multiple views by weighted averaging [S1].
+-
+-**Formulas:**
+-*   Camera frame transformation: $\mathbf{p}_c = R^\top (\mathbf{p} - \mathbf{t})$ [S1].
+-*   Pinhole projection: $u = f_x \frac{x}{z} + c_x, \quad v = f_y \frac{y}{z} + c_y$ [S1].
+-*   Signed distance: $s(\mathbf{p}) = \hat{z} - z$ [S1].
++### [Projective TSDF Fusion](2658-projective-tsdf-fusion.md)
++Computes TSDF values by projecting voxel centers into camera frames of depth images. Suitable for real-time systems like KinectFusion.
++
++### [Mesh-to-TSDF Sequence Encoding Pipeline](3649-mesh-to-tsdf-sequence-encoding-pipeline.md)
++Handles temporal sequences of meshes with unified spatial transforms and codec-specific compression.
++
++### [Truncated Signed Distance Fields](7045-truncated-signed-distance-fields.md)
++Defines the static TSDF representation, limiting distance magnitude to a specific interval.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources [S1].
+-*   **Memory Complexity:** Not given in the sources [S1].
+-*   **Strengths:** Directly handles explicit geometry; robust to non-watertight surfaces with the offset fallback; compatible with compression pipelines designed for TSDF [S1].
+-*   **Limitations:** Computationally expensive for high-resolution meshes without acceleration; sign ambiguity for non-watertight surfaces requires fallback [S1].
+-*   **When to Use:** When input is a mesh or point cloud from a reconstruction pipeline, and camera poses are not available or relevant [S1].
+-*   **When Not to Use:** When input is raw depth images from calibrated cameras; use Projective TSDF Fusion instead [S1].
++*   **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of voxels and $M$ is the number of triangles/points. This is computationally expensive for high-resolution grids and complex meshes.
++*   **Memory Complexity:** $O(N)$ for the voxel grid.
++*   **Strengths:** Direct conversion from explicit geometry; handles both meshes and point clouds; robust to non-watertight surfaces via offset fallback.
++*   **Limitations:** Slow for large scenes without spatial acceleration structures (e.g., BVH, Octree); not given in the sources whether acceleration structures are used in the basic method.
++*   **When to use:** When explicit mesh or point cloud data is available and a TSDF representation is needed for downstream tasks like rendering or compression.
++*   **When not to use:** When real-time performance is critical and depth images are available (use Projective TSDF Fusion); when memory is extremely constrained and sparse representations are preferred (use Sparse VDB SDF Generation).
+ 
+ ## Background
+-Originating from volumetric fusion systems like KinectFusion [Newcombe et al. 2011] and voxel hashing [Nießner et al. 2013], TSDF representation has become standard for integrating depth data [S1]. The explicit surface conversion path was formalized to support codecs and compression pipelines that accept explicit geometry (meshes/point clouds) as input, alongside depth images [S1]. It addresses the need to handle non-watertight and noisy scans common in real-world reconstruction by providing a robust fallback for sign assignment [S1].
++The method is described in the context of implicit surface compression using Discrete Cosine Transform and Motion Compensation [S1]. It addresses the problem of converting explicit geometry (meshes or point clouds) into a format suitable for volumetric compression pipelines. The approach handles non-watertight surfaces by using an unsigned-distance offset fallback, a technique inspired by Xu and Barbič [2020] for polygonsoup meshes [S1].
+ 
+ ## Sources

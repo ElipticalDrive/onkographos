@@ -1,0 +1,64 @@
+# Fluid Motion Reconstruction Framework
+
+Also called: Fluid Motion Reconstruction Pipeline, FluidMotionRestruction
+
+## Overview
+The Fluid Motion Reconstruction Framework is a computational pipeline for reconstructing temporally coherent fluid density fields from monocular video sequences [S1][S2, unofficial]. It combines differentiable rendering for image alignment with physics-based coupled estimation to ensure temporal coherence [S1][S2, unofficial]. It builds on differentiable volume rendering principles [Deformable and Dynamic Fields](11311-deformable-and-dynamic-fields.md) and explicitly models fluid dynamics and velocity to maintain physical plausibility over time [S1][S2, unofficial].
+
+## How it works
+**Inputs:** A sequence of monocular fluid images $\{I\}$, where $I_t$ is the image at time $t$ [S2, unofficial].
+**Outputs:** A sequence of fluid density fields $\{\rho\}$ [S1][S2, unofficial].
+**Parameters:** $t$ is the time index, $t \in \mathbb{N}_0, t \le F$, where $F$ is the total number of frames [S2, unofficial].
+
+The framework operates in two main components: a differentiable rendering component and a coupled density and velocity estimation component [S1][S2, unofficial].
+
+1. **Initialization:** Reconstruct the initial fluid density fields $\rho_1$ and $\rho_2$ using the differentiable rendering component [S2, unofficial]. This aligns the volumetric representation with the first two input images $I_1$ and $I_2$ [S2, unofficial].
+2. **Temporal Propagation:** For subsequent frames $t > 2$, compute the estimated fluid density $\tilde{\rho}_t$ using the coupled density and velocity estimation component [S2, unofficial]. This step ensures that fluid flows adhere to underlying physical priors [S2, unofficial].
+3. **Refinement:** Given the estimated density $\tilde{\rho}_t$, correct the final fluid density $\rho_t$ via the differentiable renderer using the target image $I_t$ [S2, unofficial]. This aligns the physically plausible estimate with the observed image data [S2, unofficial].
+
+Pseudocode:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fluid_motion_reconstruction(images):
+    # images: list of monocular fluid images [I_1, ..., I_F]
+    F = len(images)
+    densities = []
+
+    # Step 1: Initialize first two frames using differentiable rendering
+    rho_1 = differentiable_render(images[0])
+    rho_2 = differentiable_render(images[1])
+    densities.extend([rho_1, rho_2])
+
+    # Step 2 & 3: Iterate through remaining frames
+    for t in range(2, F):
+        # Coupled density and velocity estimation for temporal coherence
+        rho_tilde = coupled_density_velocity_estimation(densities[t-1], densities[t-2])
+        # Differentiable rendering correction for image alignment
+        rho_t = differentiable_render(rho_tilde, images[t])
+        densities.append(rho_t)
+
+    return densities
+
+def differentiable_render(target_image, density=None):
+    # [G] Standard differentiable volume rendering optimization
+    # Minimizes rendering loss against target_image using the emission-absorption model.
+    # Gradients propagate through the volume rendering equation to update density and velocity.
+    # [Comment] The exact optimization solver and loss function are not provided in the sources.
+    return density if density is not None else target_image
+
+def coupled_density_velocity_estimation(prev_rho, prev_prev_rho):
+    # [Comment] The exact physics-based coupled estimation formulation is not provided in the sources.
+    # It enforces fluid flows to adhere to underlying physical priors for temporal coherence.
+    return prev_rho
+```
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The framework is described in research on physics-based differentiable rendering for fluid modeling [S1][S2, unofficial]. It addresses the challenge of reconstructing dynamic fluid scenes from limited monocular input by integrating physical constraints with differentiable rendering [S1][S2, unofficial].
+
+## Sources
+[S1] Physics-Based Differentiable Rendering for Efficient and Plausible Fluid Modeling from Monocular Video, https://doi.org/10.3390/e25091348, fetched 2026-10-26
+[S2] Physics-Based Differentiable Rendering for Efficient and ... - MDPI, https://www.mdpi.com/1099-4300/25/9/1348, fetched 2026-10-27 (unofficial)

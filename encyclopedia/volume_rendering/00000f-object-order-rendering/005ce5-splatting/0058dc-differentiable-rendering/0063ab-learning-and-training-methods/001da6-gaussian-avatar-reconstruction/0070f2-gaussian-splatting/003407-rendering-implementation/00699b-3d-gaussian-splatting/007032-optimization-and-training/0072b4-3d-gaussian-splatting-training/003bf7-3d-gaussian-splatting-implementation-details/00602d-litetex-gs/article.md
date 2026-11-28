@@ -1,0 +1,231 @@
+# LiteTex-GS
+
+
+## Overview
+LiteTex-GS is a fast and lightweight texturing framework for 3D Gaussian Splatting that decouples geometry from appearance by assigning independent local RGB texture maps to each Gaussian primitive [S1]. It solves the computational overhead of high-resolution texturing by initializing compact low-resolution maps and progressively allocating higher resolution only to primitives with significant reconstruction errors, using a global-to-local capacity allocation strategy [S1]. Unlike prior methods that statically allocate texture resolution, LiteTex-GS uses a frequency-aware scheduler to coordinate image supervision, texture-cap release, and primitive densification, while employing a contribution- and area-aware pruning strategy to eliminate low-utility Gaussians [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of training images $\{I_m\}$, camera poses, and an initial set of 3D Gaussian primitives (position, rotation, scale, opacity) initialized with minimal 2x2 local texture maps [S1].
+*   **Outputs:** Optimized Gaussian parameters (position, rotation, scale, opacity) and local RGB texture maps $T_i$ for each primitive [S1].
+
+**Data Structures:**
+*   **Gaussian Primitive $i$:**
+    *   `pos`: 3D position vector.
+    *   `rot`: Quaternion or rotation matrix.
+    *   `scale`: 3D scale vector.
+    *   `opacity`: Scalar opacity value.
+    *   `T_i`: Local RGB texture map. Initially 2x2. Can grow to rectangular dimensions up to a personal ceiling $R_{max,i}$ and global cap $u(t)$.
+    *   `R_max,i`: Personal resolution ceiling for texture growth.
+    *   `patience`: Integer counter for pruning protection.
+    *   `stats`: Accumulated projected area $a_i$, contribution $c_i$, and normalized error $e_i$ [S1].
+*   **Frequency Significance Image $F_{img}$:** Precomputed 2D array representing scene frequency content [S1].
+*   **Scheduler State:** Current iteration $t$ [S1].
+
+**Numbered Steps:**
+
+1.  **Initialization:**
+    *   Initialize each Gaussian primitive with a 2x2 RGB texture map $T_i$ [S1].
+    *   Set personal resolution ceilings $R_{max,i}$ to the initial texture size (2) [S1].
+    *   Initialize accumulated statistics $a_i, c_i, e_i$ to zero for all primitives [S1].
+    *   Initialize patience counters to zero [S1].
+
+2.  **Preprocessing (Frequency-Aware Scheduling Setup):**
+    *   For each training image $I_m$:
+        *   Convert to grayscale $\bar{I}_m$ [S1].
+        *   Compute gradient magnitude $G_m = \sqrt{(Sobel_x * \bar{I}_m)^2 + (Sobel_y * \bar{I}_m)^2}$ [S1].
+        *   Normalize $G_m$ to $\tilde{G}_m$ via min-max normalization [S1].
+        *   Compute weight map $W_m = \text{clip}(w_{min} + \alpha \tilde{G}_m, w_{min}, w_{max})$ with $\alpha=1.5, w_{min}=1.0, w_{max}=3.0$ [S1].
+        *   Compute weighted image $W_m \odot I_m$ and transform to frequency domain: $F_m = |\text{fftshift}(\mathcal{F}(W_m \odot I_m))|$ [S1].
+    *   Compute $F_{img} = \frac{1}{M} \sum_{m=1}^M F_m$ [S1].
+    *   Calculate total energy $E_{total} = \sum_{u,v} F_{img}(u,v)$ [S1].
+    *   Determine coarsest scale parameters: $E_{min} = E_{total} / \beta$ with $\beta=3$ [S1].
+    *   Generate frequency stages by sampling at most $L=32$ targets between $E_{min}$ and $E_{total}$, mapping targets to render scales via binary search on accumulated energy within window $(H/s) \times (W/s)$, and merging adjacent stages with identical integer scales [S1].
+
+3.  **Training Loop (per iteration $t$):**
+    *   **Scheduler Query:** Compute $(r(t), u(t), \rho(t)) = \mathcal{S}(t; F_{img})$, where $r(t)$ is render downsampling factor, $u(t)$ is global texture resolution cap, and $\rho(t)$ is densification rate [S1].
+    *   **Rendering:**
+        *   For each pixel $p$ in the rendered view:
+            *   Identify influencing primitives $N(p)$ [S1].
+            *   For each primitive $i \in N(p)$:
+                *   Compute mapping $\Phi_i(p)$:
+                    1.  Intersect camera ray of $p$ with local tangent plane of Gaussian $i$ [S1].
+                    2.  Transform intersection point from view space to world space [S1].
+                    3.  Project into primitive’s axis-aligned local frame [S1].
+                    4.  Normalize canonical coordinate by primitive’s 2D scale [S1].
+                    5.  Convert to texture coordinates based on current texel size and texture center offset [S1].
+                *   Check if $\Phi_i(p)$ is within valid texture domain. If out of bounds, skip texture sampling for this primitive [S1].
+                *   Sample texture: $val = S(T_i, \Phi_i(p))$ using differentiable bilinear sampling $S$ [S1].
+                *   Compute blending weight $\omega_i(p) = T^i_v(p)\alpha^i_v(p)$, where $\alpha^i_v(p)$ is opacity-weighted Gaussian response and $T^i_v(p)$ is accumulated transmittance [S1].
+            *   Compute rendered color: $\hat{I}(p) = \sum_{i \in N(p)} \omega_i(p) S(T_i, \Phi_i(p))$ [S1].
+    *   **Loss Computation:**
+        *   Compute per-pixel loss: $L_v(p) = (1 - \lambda) ||I_v(p) - \hat{I}_v(p)||_1 + \lambda (1 - SSIM_v(p))$ with $\lambda=0.2$ [S1].
+        *   Assign loss to primitives using blending weights $\omega_i(p)$ [S1].
+    *   **Statistics Accumulation:**
+        *   For each primitive $i$:
+            *   Accumulate projected area $n_{i,v}$ (number of pixels with valid support) [S1].
+            *   Accumulate contribution $\sum_{p \in \Omega_v} \omega^i_v(p)$ [S1].
+            *   Accumulate error $\sum_{p \in \Omega_v} L_v(p)$ [S1].
+    *   **Periodic Management (every 250 iterations):**
+        *   **Normalization:**
+            *   $a_i = \frac{\sum_v n_{i,v}}{\sum_v W_v H_v}$ [S1].
+            *   $c_i = \frac{\sum_v \sum_{p \in \Omega_v} \omega^i_v(p)}{\sum_v W_v H_v}$ [S1].
+            *   $e_i = \frac{\text{accumulated error}}{c_i}$ [S1].
+            *   $e_i = e_i / \max(e_j)$ (normalized) [S1].
+        *   **Pruning Check:**
+            *   For each primitive $i$:
+                *   Determine low-utility status: $m_i^{(t)} = \mathbb{1}(c_i^{(t)} < \tau_c \lor a_i^{(t)} < \tau_a)$ with $\tau_c=5\times10^{-6}, \tau_a=5\times10^{-5}$ [S1].
+                *   If $m_i^{(t)}=1$, increment patience counter; else reset to 0 [S1].
+                *   If patience counter $\ge K=8$, remove primitive [S1].
+                *   Note: Newly split primitives have a lower post-split opacity floor to prevent immediate removal [S1].
+        *   **Texture Growth:**
+            *   Identify high-error subset $H = \{i | e_i > Q_q(\{e_j\})\}$ with $q=0.85$ (Mip-NeRF 360/DeepBlending) or $q=0.60$ (Tanks&Temples) [S1].
+            *   For each $i \in H$:
+                *   Update personal ceiling: $R_{max,i} \leftarrow \min(2R_{max,i}, u(t))$ [S1].
+            *   Recompute active texture resolutions for all primitives based on support, texel size, and $R_{max,i}$ [S1].
+            *   If recomputed resolution exceeds current texture size:
+                *   Upsample texture map $T_i$ [S1].
+                *   Copy learned texels to initialize enlarged grid [S1].
+                *   Preserve Adam moments of existing texels [S1].
+                *   Initialize new texels with zero moments [S1].
+        *   **Densification:**
+            *   Perform standard 3DGS densification with rate $\rho(t)$ [S1].
+            *   New primitives start with zero accumulated statistics and 2x2 textures [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def lite_tex_gs_training(training_images, initial_gaussians, config):
+    """
+    Main training loop for LiteTex-GS.
+    """
+    # 1. Preprocessing
+    F_img = compute_frequency_significance_image(training_images, config.alpha, config.w_min, config.w_max)
+    stages = generate_frequency_stages(F_img, config.beta, config.s_cfg, config.L)
+    
+    # 2. Initialization
+    for g in initial_gaussians:
+        g.texture = np.zeros((2, 2, 3)) # 2x2 RGB
+        g.R_max = 2
+        g.patience = 0
+        g.stats = {'area': 0, 'contrib': 0, 'error': 0}
+        
+    gaussians = initial_gaussians
+    adam_moments = {g.id: {'m': np.zeros_like(g.texture), 'v': np.zeros_like(g.texture)} for g in gaussians}
+    
+    for t in range(config.max_iterations):
+        # 3. Scheduler
+        r_t, u_t, rho_t = scheduler_query(t, stages)
+        
+        # 4. Render and Accumulate Stats
+        for view in training_views:
+            rendered_image = render_scene(gaussians, view, r_t)
+            loss_map = compute_loss(rendered_image, view.target_image, config.lambda_val)
+            
+            for g in gaussians:
+                # Accumulate stats based on rasterization weights
+                g.stats['area'] += get_projected_area(g, view)
+                g.stats['contrib'] += get_rendering_contribution(g, view)
+                g.stats['error'] += get_accumulated_error(g, view, loss_map)
+                
+        # 5. Optimization Step (Standard 3DGS Adam update)
+        update_gaussian_parameters(gaussians, adam_moments, config)
+        
+        # 6. Periodic Management (every 250 iterations)
+        if t % 250 == 0:
+            normalize_stats(gaussians)
+            
+            # Pruning
+            for g in gaussians:
+                is_low_utility = (g.stats['contrib'] < config.tau_c) or (g.stats['area'] < config.tau_a)
+                if is_low_utility:
+                    g.patience += 1
+                else:
+                    g.patience = 0
+                    
+                if g.patience >= config.K:
+                    remove_gaussian(gaussians, g)
+            
+            # Texture Growth
+            high_error_threshold = quantile(gaussians, 'normalized_error', config.q)
+            high_error_primitives = [g for g in gaussians if g.stats['normalized_error'] > high_error_threshold]
+            
+            for g in high_error_primitives:
+                g.R_max = min(2 * g.R_max, u_t)
+                
+            for g in gaussians:
+                new_res = compute_active_resolution(g)
+                if new_res > g.texture.shape[0]: # Assuming square for simplicity in check
+                    upsampling_texture(g, new_res, adam_moments[g.id])
+                    
+            # Densification
+            densify_gaussians(gaussians, rho_t)
+            
+    return gaussians
+
+def compute_frequency_significance_image(images, alpha, w_min, w_max):
+    M = len(images)
+    F_img = np.zeros_like(images[0])
+    for I_m in images:
+        I_gray = grayscale(I_m)
+        G_m = sobel_gradient_magnitude(I_gray)
+        G_norm = min_max_normalize(G_m)
+        W_m = np.clip(w_min + alpha * G_norm, w_min, w_max)
+        F_m = np.abs(np.fft.fftshift(np.fft.fft2(W_m * I_m)))
+        F_img += F_m
+    return F_img / M
+
+def upsampling_texture(g, new_res, adam_id):
+    old_tex = g.texture
+    old_m = adam_moments[adam_id]['m']
+    old_v = adam_moments[adam_id]['v']
+    
+    # Create new larger texture
+    new_tex = np.zeros((new_res, new_res, 3))
+    new_m = np.zeros((new_res, new_res, 3))
+    new_v = np.zeros((new_res, new_res, 3))
+    
+    # Copy existing texels
+    h, w, _ = old_tex.shape
+    new_tex[:h, :w, :] = old_tex
+    new_m[:h, :w, :] = old_m
+    new_v[:h, :w, :] = old_v
+    
+    g.texture = new_tex
+    adam_moments[adam_id]['m'] = new_m
+    adam_moments[adam_id]['v'] = new_v
+```
+
+**Parameters:**
+*   Initial texture resolution: 2x2 [S1].
+*   Sobel weight parameters: $\alpha=1.5, w_{min}=1.0, w_{max}=3.0$ [S1].
+*   Scheduler parameters: $\beta=3, s_{cfg}=4, L=32$ [S1].
+*   Loss balance parameter: $\lambda=0.2$ [S1].
+*   Quantile parameter $q$: 0.85 for Mip-NeRF 360 and DeepBlending; 0.60 for Tanks&Temples [S1].
+*   Pruning thresholds: $\tau_c=5\times10^{-6}, \tau_a=5\times10^{-5}$ [S1].
+*   Patience counter $K$: 8 [S1].
+*   Pruning interval: 250 iterations [S1].
+
+**Edge Cases and Pitfalls:**
+*   Pixels whose mapped texture coordinates fall outside the valid texture domain are marked as out of bounds and do not use texture sampling; wrapping or padding is not applied [S1].
+*   Newly split primitives are protected by a lower post-split opacity floor to prevent immediate removal before accumulating reliable statistics [S1].
+*   Texture resolution can be rectangular, allowing different primitives to allocate capacity according to local geometric extent [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The frequency-aware scheduling and per-primitive texture optimization add overhead compared to standard 3DGS, but the method is designed to be lightweight by initializing compact textures and only growing them when necessary [S1]. The preprocessing step is performed once and introduces negligible overhead [S1].
+*   **Memory Complexity:** Memory usage is significantly reduced compared to high-resolution textured Gaussian methods because primitives start with 2x2 textures and only grow when needed [S1]. The contribution- and area-aware pruning further reduces memory by eliminating low-utility Gaussians [S1].
+*   **Measured Performance:** LiteTex-GS achieves competitive or superior rendering quality while using substantially fewer parameters and less computational overhead than prior textured Gaussian methods [S1].
+*   **Strengths:** Decouples geometry from appearance, allowing for efficient texturing; adapts texture resolution to visual difficulty; maintains a compact geometric scaffold.
+*   **Limitations:** Requires careful tuning of pruning thresholds and quantile parameters for different datasets; texture upsampling requires managing Adam moments to avoid gradient dilution [S1].
+*   **When to use:** When high-quality texturing is required but computational resources are limited, or when standard 3DGS lacks sufficient detail.
+*   **When not to use:** When real-time rendering speed is the absolute priority and texture detail is not critical, standard 3DGS may be faster due to lower overhead.
+
+## Background
+LiteTex-GS was proposed by Li and Guo et al. in 2026, published in the Eurographics proceedings [S1]. It addresses the challenge of balancing expressive detail with computational efficiency in Gaussian Splatting texturing [S1]. The method builds on the frequency-aware scheduling principle introduced by DashGaussian [CJJ* 25] and extends it to coordinate image supervision, texture-cap release, and primitive densification [S1]. It is motivated by the limitations of opacity-based pruning in standard 3DGS [KKL* 23] and the static texture allocation of prior methods [PKDD25, CTP* 25] [S1].
+
+## Sources
+[S1] LiteTex-GS: Fast and Lightweight Texturing for Gaussian Splatting, https://doi.org/10.1111/cgf.70637, fetched 2026-10-30

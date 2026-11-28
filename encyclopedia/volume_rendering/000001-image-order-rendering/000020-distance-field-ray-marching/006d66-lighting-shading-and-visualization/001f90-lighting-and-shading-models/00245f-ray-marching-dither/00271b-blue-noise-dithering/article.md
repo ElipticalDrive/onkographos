@@ -1,0 +1,79 @@
+# Blue Noise Dithering
+
+Also called: Blue Noise Dithering for Raymarching, Blue Noise Ray Offset, Temporal Blue Noise Dithering
+
+## Overview
+Blue Noise Dithering is a technique to reduce visible banding artifacts in volumetric ray marching by introducing a random offset to the ray step start position, derived from a blue noise texture, allowing for larger step sizes without quality loss [S1, S2, unofficial]. It sets itself apart from [Ray Marching Jittering](5399-ray-marching-jittering.md) by using a structured blue noise pattern, which has fewer clumps than other noises and is less visible to the human eye [S1, unofficial], and from its parent [Ray Marching Dither](3269-ray-marching-dither.md) by specifically targeting the initialization offset of the ray march loop to enable significant performance gains through increased step sizes [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** `uBlueNoise` (2D sampler texture), `frame` (integer), `rayOrigin` (vec3), `rayDir` (vec3), `STEP_SIZE` (float, alias `MARCH_SIZE` in [S1, unofficial]), `NUM_STEPS` (integer), and `fragCoord` (vec2) [S1, S2, unofficial].
+*   **Outputs:** The computed initial march distance `t` and the loop structure for the raymarching routine [S1, S2, unofficial].
+
+**Data Structures:**
+*   **Blue Noise Texture:** A 2D texture (typically 1024×1024) where the red channel contains values in the range [0, 1) [S1, S2, unofficial].
+
+**Parameters:**
+*   **Typical Values:** `NUM_STEPS` is reduced from 250 to 50, and `STEP_SIZE` is increased from 0.05 to 0.5 in optimized implementations [S2, unofficial]. This configuration reduces total iterations from 5000 to 100 while maintaining similar output quality [S2, unofficial].
+*   **Temporal Shift:** The frame-dependent shift uses `frame % 32` divided by `sqrt(0.5)` [S1, S2, unofficial].
+
+**Numbered Steps:**
+1.  **Sample Blue Noise:** Sample the blue noise texture at normalized fragment coordinates `fragCoord / 1024.0` and extract the red channel value [S1, S2, unofficial].
+2.  **Calculate Temporal Offset:** Add a frame-dependent shift to the sampled blue noise value to ensure temporal variation [S1, unofficial]. The shift is calculated as `frame % 32` divided by `sqrt(0.5)` [S1, S2, unofficial].
+3.  **Compute Final Offset:** Apply the fractional part function to the sum of the blue noise value and the temporal shift to keep the result in the range [0, 1) [S1, unofficial]. This value serves as the dithering offset [S2, unofficial].
+4.  **Initialize Ray Distance:** Calculate the initial ray march distance `t` by multiplying the `STEP_SIZE` by the computed offset [S1, S2, unofficial].
+5.  **Execute Ray Marching Loop:** Iterate `NUM_STEPS` times [S2, unofficial]. In each iteration, calculate the sample position using `rayOrigin + rayDir * t` and advance `t` by `STEP_SIZE` [S1, S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def fract(x):
+    return x - math.floor(x)
+
+def blue_noise_dithering(rayOrigin, rayDir, uBlueNoise, frame, STEP_SIZE, NUM_STEPS, fragCoord):
+    # Step 1: Sample blue noise texture at normalized fragment coordinates
+    uv = fragCoord / 1024.0
+    blueNoise = uBlueNoise[uv]  # Returns float in [0, 1)
+
+    # Step 2 & 3: Calculate temporal offset and apply fract
+    temporalShift = (frame % 32) / math.sqrt(0.5)
+    offset = fract(blueNoise + temporalShift)
+
+    # Step 4: Initialize ray distance
+    t = STEP_SIZE * offset
+
+    # Step 5: Execute ray marching loop
+    for i in range(NUM_STEPS):
+        samplePos = rayOrigin + rayDir * t
+        # Volume sampling and shading logic would occur here
+        t += STEP_SIZE
+
+    return offset, t
+```
+
+**Edge Cases and Pitfalls:**
+*   **Noticeable Pattern:** The dithering pattern can be noticeable in single frames if only spatial noise is used [S1, unofficial]. This is mitigated by adding the temporal component based on the frame count [S1, unofficial].
+*   **Banding Artifacts:** Visible banding occurs if the step size is increased without dithering [S2, unofficial]. The blue noise offset resolves this by distributing the sampling error [S2, unofficial].
+*   **Precision:** The use of `fract` ensures the offset remains bounded, preventing the ray from starting outside the intended volume or causing negative distances [G].
+
+### Subtopics
+*   **Spatial Blue Noise Dithering:** Uses only the spatial blue noise texture without temporal variation [S1, unofficial]. Suitable for static scenes or when frame coherence is not required [G].
+*   **Temporal Blue Noise Dithering:** Adds a frame-dependent shift to the blue noise value [S2, unofficial]. Recommended for animated scenes to prevent static pattern visibility [G].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Not given in the sources [S2, unofficial].
+*   **Measured Performance:** In the cited implementation, reducing iterations from 5000 to 100 (by increasing step size from 0.05 to 0.5 and steps from 250 to 50) resulted in a significant performance improvement while maintaining similar output quality [S2, unofficial].
+*   **Strengths:** Allows for larger step sizes, reducing the number of samples needed per ray [S2, unofficial].
+*   **Limitations:** The dithering pattern may be visible in single frames without temporal variation [S1, unofficial]. Requires a pre-generated blue noise texture [S1, S2, unofficial].
+*   **When to Use:** When ray marching volumetric effects (clouds, fog, light shafts) and performance is a concern, and banding artifacts are visible with standard step sizes [S2, unofficial].
+*   **When Not to Use:** When high-quality single-frame stills are required without temporal averaging, or when the blue noise texture is not available [G].
+
+## Background
+The technique is described in blog posts on real-time volumetric rendering [S1, S2, unofficial]. It leverages a blue noise pattern to obtain a random number for each fragment shader run, introducing an offset at the beginning of the raymarched loop to erase layering effects [S1, unofficial].
+
+## Sources
+[S1] Real-time dreamy Cloudscapes with Volumetric Raymarching, https://blog.maximeheckel.com/posts/real-time-cloudscapes-with-volumetric-raymarching/, fetched 2026-10-28 (unofficial)
+[S2] On Shaping Light: Real-Time Volumetric Lighting with Post-Processing ..., https://blog.maximeheckel.com/posts/shaping-light-volumetric-lighting-with-post-processing-and-raymarching/, fetched 2026-10-28 (unofficial)

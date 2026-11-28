@@ -1,0 +1,110 @@
+--- v001.md
++++ v002.md
+@@ -4,52 +4,77 @@
+ 
+ ## Overview
+-Language Embedded 3D Gaussians (LE3DG) extends differentiable Gaussian splatting to full scene understanding by encoding object-level embeddings for phrase grounding alongside standard pixel-level features [S1, unofficial]. It enables real-time open-vocabulary semantic segmentation and 3D visual reasoning by allowing rendered feature maps to be queried directly with natural language embeddings from vision-language models [S1, unofficial].
++Language Embedded 3D Gaussians (LE3DG) extends standard 3D Gaussian Splatting to support full scene understanding by encoding object-level embeddings for phrase grounding in addition to pixel-level features [S1, unofficial]. It enables open-vocabulary semantic segmentation and zero-shot semantic reasoning by allowing the rendered feature map to be queried with natural language, building on the differentiable alpha-blending accumulation of feature vectors [Semantic and Structural Extensions](17384-semantic-and-structural-extensions.md).
+ 
+ ## How it works
++LE3DG operates by expanding the feature blending process to encode semantic information directly within the 3D Gaussian representation. The method relies on the shared principle of differentiable alpha-blending accumulation during rasterization [Semantic and Structural Extensions](17384-semantic-and-structural-extensions.md).
++
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussians $\mathcal{G}$, each defined by position $\mathbf{t}$, covariance $\mathbf{\Sigma}$ (or rotation $\mathbf{R}$ and scale $\mathbf{s}$), opacity $\alpha$, spherical harmonics coefficients for color, and a language feature vector $\mathbf{f} \in \mathbb{R}^d$. The input also includes a text query embedding $\mathbf{t}_{query}$ from a frozen vision-language model (e.g., CLIP).
+-*   **Output:** A 2D feature map $\mathbf{F} \in \mathbb{R}^{H \times W \times d}$ representing the scene's semantic structure, which can be compared against $\mathbf{t}_{query}$ to produce segmentation masks or localization scores.
++*   **Input:** A set of 3D Gaussians $\mathcal{G}$, each possessing geometric attributes (position, covariance, opacity) and a feature vector $\mathbf{f}_i$. The feature vector dimension $d$ varies by the underlying vision-language model (e.g., 512 for CLIP [3D Gaussian Splatting with Feature Vectors](8060-3d-gaussian-splatting-with-feature-vectors.md), 768 for LSeg/CLIP text [LSeg Feature Encoding](12078-lseg-feature-encoding.md)).
++*   **Output:** A 2D feature map $\mathbf{F} \in \mathbb{R}^{H \times W \times d}$, which can be decoded by a segmentation head or compared against text embeddings from a language model (e.g., CLIP) [S1, unofficial].
+ 
+ **Data Structures:**
+-Each Gaussian $i$ stores:
+-*   $\mathbf{t}_i \in \mathbb{R}^3$: Center position.
+-*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix.
+-*   $\mathbf{s}_i \in \mathbb{R}^3$: Scale vector.
+-*   $\alpha_i \in [0, 1]$: Opacity.
+-*   $\mathbf{c}_i$: Spherical harmonics coefficients for color.
+-*   $\mathbf{f}_i \in \mathbb{R}^d$: Language/semantic feature vector.
++Each Gaussian $i$ stores a feature vector $\mathbf{f}_i \in \mathbb{R}^d$. The layout is identical to the base 3D Gaussian Splatting structure, with the addition of the feature attribute.
+ 
+-**Rendering Pipeline:**
+-1.  **Projection:** Project 3D Gaussian centers $\mathbf{t}_i$ to 2D screen space using the camera projection matrix. Compute the 2D covariance matrix $\mathbf{\Sigma}'_i$ via Jacobian transformation of the 3D covariance.
+-2.  **Sorting:** For each pixel $p$, identify overlapping Gaussians $\mathcal{O}_p$ and sort them front-to-back based on depth $z_i$.
+-3.  **Feature Blending:** Compute the rendered feature vector $\mathbf{F}(p)$ using differentiable alpha blending [S1, unofficial]:
+-    $$
+-    \mathbf{F}(p) = \sum_{i \in \mathcal{O}_p} \mathbf{f}_i \cdot \alpha_i \cdot \prod_{j=1}^{i-1} (1 - \alpha_j)
+-    $$
+-    where $\mathbf{f}_i$ is the language feature of the $i$-th Gaussian, $\alpha_i$ is its opacity, and the product term is the transmittance from preceding Gaussians. If $\mathcal{O}_p$ is empty, $\mathbf{F}(p) = \mathbf{0}$.
+-4.  **Querying:** Compare the rendered feature map $\mathbf{F}$ against the text query embedding $\mathbf{t}_{query}$ (e.g., via cosine similarity) to generate semantic scores.
++**Rendering Formula:**
++For a pixel $p$, the rendered feature vector $\mathbf{F}(p)$ is computed by sorting overlapping Gaussians $\mathcal{O}_p$ front-to-back and applying the shared principle formula [Semantic and Structural Extensions](17384-semantic-and-structural-extensions.md):
+ 
+-**Training:**
+-The language features $\mathbf{f}_i$ are optimized or initialized to align with the vision-language embedding space. The pipeline is differentiable, allowing gradients to flow from the segmentation loss back to Gaussian attributes and deformation parameters [S1, unofficial].
++$$
++\mathbf{F}(p) = \sum_{i \in \mathcal{O}_p} \mathbf{f}_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) \quad (1)
++$$
++
++where $\alpha_i$ is the opacity of the $i$-th Gaussian in the sorted order [S1, unofficial].
++
++**Pseudocode:**
++The rendering step is identical to the shared principle implementation [Semantic and Structural Extensions](17384-semantic-and-structural-extensions.md):
++
++```python
++def accumulate_feature_pixel(gaussians_sorted, feature_dim):
++    """
++    Computes the rendered feature vector for a single pixel using differentiable alpha-blending.
++    gaussians_sorted: List of Gaussian objects sorted front-to-back by depth.
++    feature_dim: Integer, dimensionality d of the feature vectors.
++    Returns: Accumulated feature vector F(p) of shape (d,).
++    """
++    F = np.zeros(feature_dim)
++    transmittance = 1.0
++    for g in gaussians_sorted:
++        alpha = g.opacity
++        F += g.feature_vector * alpha * transmittance
++        transmittance *= (1.0 - alpha)
++        if transmittance < 1e-6:
++            break
++    return F
++```
++
++**Training and Optimization:**
++The feature vectors $\mathbf{f}_i$ are optimized via photometric loss or distillation losses. Variants such as NG-GS use a pretrained NeRF as a teacher to guide feature distillation, improving alignment between geometry and semantics [S1, unofficial]. Other approaches, like SplatTalk and 3D Vision-Language GS, train a joint embedding space where the rendered feature map is queried with natural language [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** High-dimensional feature vectors ($d$) may require careful normalization to prevent numerical instability during alpha blending.
+-*   **Ambiguity:** Overlapping objects with similar semantic features may result in blended features that do not correspond to any single object, requiring post-processing or specific architectural constraints.
++*   **Feature Dimensionality:** The choice of $d$ affects memory usage and query accuracy. Common dimensions are 512 (CLIP) or 768 (LSeg/CLIP text) [3D Gaussian Splatting with Feature Vectors](8060-3d-gaussian-splatting-with-feature-vectors.md), [LSeg Feature Encoding](12078-lseg-feature-encoding.md).
++*   **Ambiguity:** Direct thresholding of semantic predictions can lead to inconsistent or noisy results. Post-processing pipelines like 3D-OVS resolve this by selecting the optimal semantic level from multiple candidate relevancy maps [3D Semantic Segmentation Post-processing (3D-OVS)](19840-3d-semantic-segmentation-post-processing-3d-ovs.md).
+ 
+ ## Subtopics
+ 
+-### 3D Semantic Segmentation Post-processing (3D-OVS)
+-A post-processing pipeline for selecting the best semantic-level binary mask by thresholding and evaluating average relevancy within masks [S2]. For each class query, three relevancy maps are obtained corresponding to different semantic levels defined by SAM [S2]. A threshold of 0.4 is applied to each map: scores below 0.4 become 0, and scores above 0.4 become 1, producing three binary maps [S2]. The average relevancy scores within the mask region are calculated for each binary map, and the map with the highest average response is selected as the final predicted binary mask [S2].
++### [3D Semantic Segmentation Post-processing (3D-OVS)](19840-3d-semantic-segmentation-post-processing-3d-ovs.md)
++3D-OVS is a post-processing pipeline for semantic segmentation in 3D Gaussian Splatting systems that resolves ambiguity by selecting the optimal semantic level from multiple candidate relevancy maps [3D Semantic Segmentation Post-processing (3D-OVS)]. It solves the problem of inconsistent or noisy semantic predictions by thresholding, binarizing, and evaluating average relevancy within masks to choose the best binary mask. It differs from direct thresholding by explicitly comparing multiple semantic levels (derived from different granularities) to mitigate outlier impact.
++
++### Vision-Language Embedding Fusion
++A strategy to extract vision-language embeddings for 3DGS by aligning each Gaussian directly in the image-embedding space using a dynamic weighting mechanism that combines global, local, and masked features [S2]. The process involves:
++1.  Extracting embeddings from the frames used to optimize the 3DGS [S2].
++2.  Combining three distinct features using a dynamic weighting mechanism: global context from the entire frame, local features with background, and masked features without background [S2].
++3.  Automatically balancing contributions based on each segment's contextual relationship, emphasizing background-inclusive features for integrated objects and object-specific features for isolated objects [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering time is dominated by the sorting and blending steps, similar to standard 3D Gaussian Splatting, allowing real-time performance [S1, unofficial].
+-*   **Memory Complexity:** Memory usage increases by $O(N \cdot d)$ due to the storage of language feature vectors for each of the $N$ Gaussians, where $d$ is the feature dimension [S1, unofficial].
+-*   **Strengths:** Enables open-vocabulary understanding and phrase grounding without retraining the segmentation head for each new vocabulary [S1, unofficial].
+-*   **Limitations:** Requires a vision-language model for query embedding; alignment between geometry and semantics may be imperfect without distillation or specific training [S1, unofficial].
++*   **Time Complexity:** Rendering time is dominated by the rasterization step, which is $O(N)$ per pixel where $N$ is the number of overlapping Gaussians. The addition of feature vector arithmetic adds a constant factor proportional to the feature dimension $d$.
++*   **Memory Complexity:** Memory usage increases by $O(N \times d)$ to store the feature vectors for each Gaussian. For $d=512$, this is significant but manageable on modern GPUs.
++*   **Strengths:** Enables real-time open-vocabulary semantic segmentation and phrase grounding. Supports zero-shot semantic reasoning and 3D visual question answering [S1, unofficial].
++*   **Limitations:** Performance depends heavily on the quality of the underlying vision-language model and the alignment between geometry and semantics. Direct thresholding can produce noisy results without post-processing [3D Semantic Segmentation Post-processing (3D-OVS)](19840-3d-semantic-segmentation-post-processing-3d-ovs.md).
++*   **When to use:** When open-vocabulary scene understanding, phrase grounding, or zero-shot semantic queries are required.
++*   **When not to use:** When only photometric reconstruction is needed, as the feature encoding adds memory overhead and complexity.
+ 
+ ## Background
+-Language Embedded 3D Gaussians builds on the differentiable rendering framework of 3D Gaussian Splatting [S1, unofficial]. It expands feature blending to full scene understanding, encoding object-level embeddings for phrase grounding in addition to pixel-level features [S1, unofficial]. This approach facilitates tasks like 3D visual question answering and zero-shot semantic reasoning by projecting vision-language models into the 3DGS framework [S1, unofficial].
++LE3DG builds on the foundation of 3D Gaussian Splatting [3D Gaussian Splatting](8060-3d-gaussian-splatting-with-feature-vectors.md) and the integration of feature vectors [3D Gaussian Splatting with Feature Vectors](8060-3d-gaussian-splatting-with-feature-vectors.md). It was developed to expand feature blending to full scene understanding, encoding object-level embeddings for phrase grounding [S1, unofficial]. Related works include SplatTalk [105] and 3D Vision-Language GS [106], which project vision-language models into the 3DGS framework [S1, unofficial]. NG-GS [107] uses a pretrained NeRF as a teacher to guide feature distillation [S1, unofficial].
+ 
+ ## Sources
+ [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+-[S2] LangSplat: 3D Language Gaussian Splatting, https://doi.org/10.1109/cvpr52733.2024.01895, fetched 2026-10-26+[S2] SceneSplat++: A Large Dataset and Comprehensive Benchmark for Language Gaussian Splatting, https://zenodo.org/records/19113098, fetched 2026-10-26

@@ -1,0 +1,283 @@
+Renderer 2.x - Porting to CUDA (one month later)
+
+Renderer 2.x - Porting to CUDA (one month later)
+Renderer 2.x - Porting to CUDA (one month later)
+Table of contents
+Phase 1: Raycasting
+Phase 2: Raytracing
+Moving the BVH to CUDA
+CUDA recursion via templates
+Fixing the BVH
+BVH-building with SSE
+Templated features
+More speed!
+Feature list
+Downloads
+Compilation under Linux
+Compilation under Windows
+Keyboard controls
+Benchmark results
+(February 2011, Reddit-ed)
+(April 2011, In CUDA Zone showcase...)
+It all started a month ago.
+It was the week between Xmas and the New Year, and I was enjoying my free time, hacking on my renderer (a life-time obsession). Up till then, my renderer only included rasterizers, with soft-shadows and pre-calculated ambient occlusion:
+I wanted more, however. I had more or less completed everything I ever wanted to do with my rasterizers, since (a) all the features I ever wanted to implement were done (b) the code used a common C++ template to create a "family" of rasterizers (since all rasterizers share the same trait: they interpolate "stuff" linearly across the scanlines, per-pixel).
+Since CUDA promised to give me enough power to do it in real-time, I decided to try raytracing, something I had never done before.
+Phase 1: Raycasting
+Raytracing has nothing to do with rasterizing - it is a completely different algorithm. It sends a ray from the viewpoint, that "pierces" the screen at each pixel, and checks whether the ray intersects the scene's triangles:
+```
+for each screen pixel
+        throw a ray from the viewpoint to the pixel
+        find the closest triangle pierced by the ray
+        at the intersection point, perform Phong lighting
+```
+Or, if we also want shadows:
+```
+for each screen pixel
+        throw a ray from the viewpoint to the pixel
+        find the closest triangle pierced by the ray
+        at the intersection point, throw another ray towards the light
+        if this shadow ray finds any triangle, the pixel is in shadow
+        Otherwise, perform Phong lighting
+```
+Raytracers can in fact work with more than just triangles - spheres and cylinders and other "perfect" objects can be traced. I have, however, always coded my renderer to work with triangle meshes - for a number of reasons (huge availability of ready-made 3D models being a good one). I therefore Googled for ray/triangle intersections. I knew I would need acceleration structures - if I was to make this run at real-time speeds, I had to avoid checking each ray against all the scene's triangles.
+A thesis drew my attention: two guys had implemented irregular Z-buffers in CUDA, using "bins" of triangle lists. It was simple enough: the screen was split in a grid of "bins", and after calculating the 2D bounding box of the projected (screen-space) triangle, we know which "bins" the triangle "spans" over...
+The triangles are placed in "bin" lists.
+...and we place the triangle in a simple std::list<Triangle*> (stored per each bin). When sending our rays, we only check for intersections with the triangles that belong in the ray's bin, not with all of them.
+Well, CUDA didn't have STL lists of course, but I coped the old fashioned way, via heap (cudaMalloc-ed). And this worked - after about a day of coding, I had my first ever raycaster written:
+A dragon... in C++ and in CUDA.
+A 50K triangles "dragon" was raycasted at about 20 frames per second. Not bad for a days work!
+Unfortunately, as the video shows, the speed nose-dived from 20 to about 1.5 frames per second, as soon as I added shadows. I was aghast. Why? I was using the same trick, that is, "bins" that store triangle lists, only this time I was calculating them in "light-screen" space. The same algorithm, but speed was devastated... because CUDA1.2 (i.e. my 70$ GT240) has no cache, and also suffers a lot from thread divergence.
+So I posted this to Reddit, hoping for advice. In 2 days, it became the most popular CUDA post ever in Reddit/ programming :‑) To be honest, some people there wanted to skin me alive. "How dare you implement shadows without OpenGL, you bloody idiot!" (or something to that effect).
+But I persevered :‑)
+Googling and reading papers, I found out about the balancing of global memory latency with more threads, so I wrote a quick Python script to find the optimal balance between the number of bins I was using, and the number of threads per CUDA block. Rendering speed improved by a factor of 4!
+Using textures was next: CUDA1.2 (i.e. my GT240) has no cache, but if the data were placed in textures, they would be cached. A bit. I tried it, and only got 3% speedup...
+So I went back to the code, and tried to make my global memory accesses more coalesced: I changed the screen size of the bins to directly mirror the number of CUDA blocks - this meant that each block of threads was accessing exactly the same triangle list, so global memory accesses became a lot more "streamlined". Speed soared by 2.5x.
+And at that point, I realized it - I was doing raycasting, with Phong lighting and shadows, rendering a colorful train object at 21 frames per second!
+Oh, the joy! :‑)
+Phase 2: Raytracing
+Two weeks passed. And as you can probably guess, I wanted more. Again :)
+It turned out, that the "bins" trick is not good enough. After all, a raytracer doesn't stop at the first intersection. It casts reflected, refracted and my favourite, ambient occlusion rays. Bins can't accomodate that. I needed a better data structure, a space partitioning scheme.
+So I Googled again... and read about the Bounding Volume Hierarchy, and how it can be used to accelerate any ray-intersection checking in world space. As I always do with a new graphics algorithm, I first coded it in my SW-only version of the renderer. Furious coding ensued... and the results were beautiful, beyond anything my rasterizers ever did. Were these images really created by my renderer? I couldn't believe it.
+What I could believe, unfortunately, was the speed. Abysmal. The pure-C++ version gave me one frame per second on the train object (sigh).
+This begged for the CUDA treatment.
+Moving the BVH to CUDA land
+A bounding volume hieararchy is a simple data structure, that "groups" objects together into bounding volumes. If a ray doesn't hit the volume, then you don't need to check whether it hits any objects inside it, and you are gaining tremendous speed.
+The structure itself, however, is hierarchical - which is another way of saying "recursive". And guess what - CUDA doesn't have recursion. I had to switch to a stack-based recursive implementation for my ray traversals into the BVH. This turned out to be easier than I thought. I also changed the C++ version of BVH nodes (that had pointers to inner/leaf nodes inside them) into a far less C++-y version, storing indices in the CUDA arrays instead of pointers.
+```
+    CacheFriendlyBVHNode* stack[BVH_STACK_SIZE];
+    int stackIdx = 0;
+    stack[stackIdx++] = 0; // index to the first BVH node
+    while(stackIdx) {
+	int boxIdx = stack[stackIdx-1];
+	CacheFriendlyBVHNode *pCurrent = &cudaBVHNodes[boxIdx];
+	stackIdx--;
+
+	if (!pCurrent->IsLeaf()) {
+	    ...
+	    if (RayIntersectsBox(origin, ray, pCurrent)) {
+		// Ray hits this box, put its children in the stack
+		stack[stackIdx++] = pCurrent->u.inner._idxRight;
+		stack[stackIdx++] = pCurrent->u.inner._idxLeft;
+	    }
+	} else {
+	    // Leaf node 
+	    for(unsigned i=pCurrent->u.leaf._startIndexInTriIndexList;
+	        i<pCurrent->u.leaf._startIndexInTriIndexList + pCurrent->u.leaf._count;
+		i++) 
+	    // check the triangle list...
+```
+I compiled, typed the command to spawn the raytracer, looked away from the screen, and hit ENTER...
+Would you believe me? It worked the first time. No joke. I spent two hours to change the C++ code into its CUDA equivalent, and it worked the first time I tried. Has only happened once or twice in my programming life...! Probably it was the side effect of the additional experience I had amassed in the meantime - regardless, I was positively giddy - this first attempt was running 3.5x times faster than the C++ code, showing reflections and shadows. I had 3.5 frames per second on the train now...
+More! I needed more! :‑)
+Looking at the code, I remembered about textures again. I had tried them in the "bins" version, two weeks ago, but they hadn't helped much there. I decided to try it again, and did a rather ugly hack of storing successive floating point numbers from my structures into successive float4 elements of a CUDA texture. I did it for everything - vertices data texture, triangles data texture, pre-computed triangle intersection data texture, BVH data texture...
+And at each step... Oh... my... God.
+The speed was increasing by more than 50% each time I stored a new category of data in textures! I have no explanation as to why it had failed so miserably when I tried it with the bins - maybe I goofed somehow (most probably). The point is, that I finally had it - I had a raytracer running in real-time, showing me reflections and shadows, at about 15 frames per second!
+CUDA recursion via C++ templates
+So far, I was using a stack-based recursion for traversing the BVH, but I was NOT using anything similar for the raytracer itself. I had something else in mind: C++ template meta-programming.
+This is interesting, developer-wise, so have a look:
+```
+Color Raytrace(int depth, const Vector3& ray, const Vector3& origin, ...)
+{
+    if (depth>MAX_RAY_DEPTH)
+        return AmbientBlack;
+    ....
+    // Do full raytracing, find the closest intersection...
+    // and recurse!
+    ...
+    return calculatedColorSoFar + Raytrace(depth+1, reflectionRay, intersectionPoint) + ....
+}
+```
+CUDA wouldn't allow this. "No recursion for you", Thanassis.
+So I changed it, to this:
+```
+template <int depth>
+Color Raytrace(const Vector3& ray, const Vector3& origin, ...)
+{
+    ....
+    // Do full raytracing, find the closest intersection...
+    // and recurse!
+    ...
+    return calculatedColorSoFar + Raytrace<depth+1>(reflectionRay, intersectionPoint) + ....
+}
+
+template<>
+Color Raytrace<MAX_RAY_DEPTH>(const Vector3& ray, const Vector3& origin, ...)
+{
+    return AmbientBlack;
+}
+```
+Now, I don't know if you've seen template meta-programming before, but I consider this one of the best hacks I've ever written. I force the C++ compiler to create different versions of the Raytrace function, and each one calls another, not itself - so no problem compiling this with CUDA!
+The recursion ends when Raytrace<MAX_RAY_DEPTH> is called, which returns the ambient black I am using.
+Fix your BVH, stupid
+The raytracer was already running in real-time. But I was noticing some strange things while flying in my scenes - sometimes, even when I was staring in a part of space that was decidedly empty, it was slow - when in fact it should have been at 30fps or more.
+Debugging this was a LOT more difficult. It required logging (see the #ifdef DEBUG_LOG_BVH sections in the code) and extensive testing. I eventually found I had a bug in how I was building the BVH, and when I fixed it, speed almost doubled. Again :‑)
+The train was now running at the same speed as the "bins" version, with Phong lighting, Phong normal interpolation, and both shadows and reflections enabled. And the code was actually... much better looking.
+Except for one thing - the right BVH... took more time to build. The chessboard needed 34 seconds to load...
+BVH-building with SSE
+I had coded SSE before (in my Mandelbrot zoomer), so it was clear to me that building the BVH and continually taking the min and max of floating point coordinates while building bounding boxes, was a prime candidate for _mm_min_ps and _mm_max_ps. If you are not aware of them, SSE instructions work on 4 floats at a time, and could therefore be used to accelerate my BVH building a lot.
+I had worked with SSE before, but I had not used intrinsics - this time, I chose to be more portable and avoid inline assembly. A day's worth of work later (because turning something to SSE is not as easy as writing it in CUDA) I finished it - and the chessboard was now loading in 10 seconds.
+As fate would have it, as soon as I finished with that, I realized I could simply store the calculated BVH data the first time I load an object, and re-load them (from the saved "cache") next time. Even the slow version of the BVH calculation would be fine with that.
+Sometimes the simple ideas come too late :‑)
+(Future plans: dynamic scenes via runtime creation of BVH with CUDA)
+Templated features
+Since C++ templates are compile-time code generators, I realized I could move beyond the "rendering modes" of my SW-only renderer. I could choose different rendering parameters at runtime, by changing the core CUDA kernel into a template:
+```
+template <bool doSpecular, bool doPhongNormals, bool doReflections, bool doShadows, bool antialias>
+__global__ void CoreLoopTrianglesRaycaster(
+    int *pixels,
+    ...
+```
+...and use state-toggling booleans to invoke a different template each time:
+```
+#define PAINT(bDoSpecular,bDoPhongInterp,bDoReflections,bDoShadows,bDoAntialias)  \
+    CoreLoopTrianglesRaycaster<                                                   \
+        bDoSpecular,                                                              \
+        bDoPhongInterp,                                                           \
+        bDoReflections,                                                           \
+        bDoShadows,                                                               \
+        bDoAntialias>                                                             \
+    <<< blockPixels, THREADS_PER_BLOCK >>>(                                       \
+    ...
+
+if (!g_bUseSpecular && !g_bUsePhongInterp && !g_bUseReflections && \
+        !g_bUseShadows && !g_bUseAntialiasing) {
+   PAINT( false , false , false , false , false )
+} else if (!g_bUseSpecular && !g_bUsePhongInterp && !g_bUseReflections && \
+        !g_bUseShadows && g_bUseAntialiasing) {
+   PAINT( false , false , false , false , true )
+} else if (!g_bUseSpecular && !g_bUsePhongInterp && !g_bUseReflections && \
+        g_bUseShadows && !g_bUseAntialiasing) {
+   PAINT( false , false , false , true , false )
+...
+```
+What this means, is that each time the compiler sees a PAINT macro invocation, a specific template is instantiated,
+with just the features we want - at compile-time! And the result is that we can switch raytracer features on and off,
+at run-time, without the penalty of executing these if statements at run-time, in the body of the CUDA kernel.
+Have I mentioned how I love C++ templates?
+OK, here's a gripe about them, so you won't call me a fanboy of Stroustrup: When the template params are booleans and/or enumerants, I shouldn't have to resort to such hacks - I should be able to say...
+```
+CoreLoopTrianglesRaycaster<
+    g_bDoSpecular,
+    g_bDoPhongInterp,
+    g_bDoReflections,
+    g_bDoShadows,
+    g_bDoAntialias>(...);
+```
+...and it should work. After all, how difficult is it for the compiler to create the 2^5 (32) different versions of
+the Raytracing function?
+Am I asking for too much?
+(I know I am. And naturally, I didn't write the 32 if statements by hand - I wrote a Python script that wrote
+them for me).
+More speed!
+The hunt for more speed continues - feel free to send suggestions my way.
+A result to compare with: the latest version of my raytracer, renders the well-known "Conference" scene with primary rays, diffuse lighting and shadows at 22 frames per second. Not bad, I think. The train object is also running at 18 frames per second with reflections, shadows, Phong normal interpolation and specular lighting.
+Features of the raytracer
+For those of you that skipped the developer gobbledygook above, here's a short list of my raytracer's features:
+Real-time raytracing of triangle meshes - my 70$ GT240 renders a 67K triangles chessboard with Phong lighting, Phong normal interpolation, reflections and shadows at 15-20 frames per second. Interactive navigation and rendering mode changes are allowed (see video below). Overall, compared to the pure C++/OpenMP version, the CUDA implementation runs 10-20 times faster.
+A Bounding Volume Hierarchy using axis-aligned bounding boxes is created and used for ray/triangle intersections. The BVH is created via the surface-area heuristic, and is stored for fast re-use. If SSE extensions are detected during compilation (from configure), then a SIMD implementation is used at load-time that builds the BVH faster.
+CUDA 1.2 cards like my GT240 have no support for recursion, so I used C++ template magic to implement compile-time recursion - see cudarenderer.cu in the source tarball for details.
+C++ template-based configuration allows for no-penalty runtime selection of (a) specular lighting (b) Phong interpolation of normals (c) backface culling (e.g. not used in refractions) (d) reflections (e) shadows (f) anti-aliasing.
+Z-order curve is used to cast the primary rays (Morton order) - significantly less divergence => more speed.
+Vertices, triangles and BVH data are stored in textures - major speed boost.
+Screen and keyboard handling is done via libSDL, for portability (runs fine under Windows/Linux/etc)
+The code is GPL, and uses autoconf/automake for easy builds under Linux. For windows, the required MSVC project files are included, so the build is just as easy (see instructions below).
+Downloads
+The code is under the GPL, and lives in GitHub. Here's a tarball with the latest source code (last update: 2.1k, December 2015 - made it work with CUDA toolset version 6.0.37).
+Win32 binaries are also available (compressed with 7-zip), with 2 sample 3D objects bundled. For more 3D objects, download the source tarball of my SW-only version.
+Compilation under Linux
+The code has 3 dependencies: You must have installed OpenGL (with GLEW and GLUT), libSDL and the CUDA toolkit.
+If you are using Debian, the first two are covered with:
+```
+sudo apt-get install libsdl1.2-dev libglew1.5-dev freeglut3-dev mesa-common-dev
+```
+...and the second is also quite easy - add the contrib and non-free
+collections to /etc/apt/sources.list - that is, at the end of your distro's
+repository line. In my case, it looks like this after editing:
+```
+    deb http://ftp.gr.debian.org/debian/ jessie main non-free contrib
+```
+...and then:
+```
+    bash$ sudo apt-get install nvidia-cuda-dev nvidia-cuda-toolkit
+    bash$ dpkg -l | grep nvidia-cuda
+    ii  nvidia-cuda-dev      6.0.37-5  amd64  NVIDIA CUDA development files
+    ii  nvidia-cuda-toolkit  6.0.37-5  amd64  NVIDIA CUDA development toolkit
+```
+After installing the dependencies, a simple...
+```
+    bash$ ./configure && make 
+```
+...followed by...
+```
+    bash$ ./src/cudaRenderer 3D-objects/chessboard.tri 
+```
+...will show you a rotating chessboard, with Phong lighting, Phong normal interpolation, reflections and shadows, like the video shown above.
+Read below for keyboard control intructions, or just press 'H' for help.
+Compilation under Windows
+Make sure you have the CUDA toolkit installed (I used version 6.0). Then:
+Open the VisualC/cudaRenderer_vc90.sln with your Visual Studio
+Compile in Release mode
+Right-click on "cudaRenderer" in the Solution explorer, and select "Properties"
+Click on "Configuration Properties/Debugging"
+In the "Command Arguments", enter "..\3D-objects\chessboard.tri" and click OK
+Hit Ctrl-F5 to run.
+You should see a rotating chessboard...
+Read below for keyboard control intructions, or just press 'H' for help.
+Note: I used the free Visual C++ 2008 Express Edition, but this should work
+with the commercial one, too.
+Keyboard controls
+You can navigate in realtime:
+Hit 'R' to stop/start auto-spin.
+Use the cursor keys, 'A' and 'Z' to pilot. Don't be afraid to press multiple keys together.
+Rotate the light with 'W', 'Q'.
+'S' and 'F' are 'strafe' left/right, 'E' and 'D' are 'strafe' up/down.
+(strafe keys don't work in auto-spin mode).
+Raytracer configuration:
+F4 toggles points mode
+F5 toggles specular lighting
+F6 toggles phong normal interpolation
+F7 toggles reflections
+F8 toggles shadows
+F9 toggles anti-aliasing
+ESC quits.
+Benchmark results
+Some results sent by users of the raytracer on the chess scene. Note that speed depends on many factors, not just the chip used (e.g. memory clock speed, etc).
+Quadro FX 580 (Cuda 1.1): 3 fps
+GTS 250 (Cuda 1.1): 11.9 fps
+GT 240 (Cuda 1.2): 18.5 fps
+GTX 295 (Cuda 1.3): 21 fps
+GTS 450 (Cuda 2.1): 19 fps (double-homed system, with buffer copies between cards)
+GTX 470 (Cuda 2.0): 45 fps (double-homed system, with buffer copies between cards)
+GTX 470 (Cuda 2.0): 64.2 fps (standalone, no buffer copies)
+GTX 580 (Cuda 2.0): 51 fps
+GTX 580 (Cuda 2.0, mem/4008 MHz, shaders/1544 Mhz): 73.64 fps
+GTX 580 (Cuda 2.0, mem/4600 MHz, shaders/1800 MHz): 83.01 fps
+Keep them coming!
+Index
+CV
+Updated: Tue Jun 13 21:43:21 2023
+The comments on this website require the use of JavaScript. Perhaps your browser isn't
+JavaScript capable; or the script is not being run for another reason. If you're
+interested in reading the comments or leaving a comment behind please try again with a
+different browser or from a different connection.

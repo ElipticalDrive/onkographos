@@ -1,0 +1,179 @@
+--- v009.md
++++ v010.md
+@@ -8,13 +8,13 @@
+ ## How it works
+ **Inputs:**
+-*   Scalar volume data $V$ defined on a 3D grid.
+-*   Isosurface threshold $T$.
+-*   Camera parameters (origin $O$, direction $D$ for each pixel).
++*   Scalar volume data $V$ defined on a 3D grid [S1][S3, unofficial].
++*   Isosurface threshold $T$ [S1].
++*   Camera parameters (origin $O$, direction $D$ for each pixel) [S1].
+ 
+ **Outputs:**
+-*   Rendered image with isosurface shading.
++*   Rendered image with isosurface shading [S1][S3, unofficial].
+ 
+ **Data Structures:**
+-The acceleration structure is a min-max octree. The octree is constructed on a base level with equal size along all three cardinal axes [S1][S3, unofficial].
++The acceleration structure is a min-max octree [S1][S3, unofficial]. The octree is constructed on a base level with equal size along all three cardinal axes [S1][S3, unofficial].
+ *   **Node Layout:** Each node stores the minimum ($min$) and maximum ($max$) scalar values of the scalar field within its subtree [G].
+ *   **Construction:** The octree can be built directly around voxels [S5, unofficial] or derived from a MIP texture created from a min-max texture used for block occupancy determination [S1][S3, unofficial]. For straightforward implementation, volume dimensions are padded to the nearest power of two [S1].
+@@ -24,14 +24,14 @@
+ 
+ 1.  **Octree Construction:**
+-    Build the min-max octree from the input volume. If using the MIP texture approach, generate the MIP levels from the min-max texture [S1][S3, unofficial]. If using the Knoll et al. approach, convert the 3D grid into a lossless-compression octree representation [S4, unofficial].
++    Build the min-max octree from the input volume [S1]. If using the MIP texture approach, generate the MIP levels from the min-max texture [S1][S3, unofficial]. If using the Knoll et al. approach, convert the 3D grid into a lossless-compression octree representation [S4, unofficial].
+ 
+ 2.  **Ray Traversal (Empty Space Skipping):**
+-    For each ray, traverse the octree from root to leaf.
++    For each ray, traverse the octree from root to leaf [S3, S5, unofficial].
+     *   If a node's range $[min, max]$ does not contain the isosurface threshold $T$ (i.e., $T < min$ or $T > max$), the node is pruned (empty space skipping) [G].
+-    *   If the node contains $T$, traverse its children.
++    *   If the node contains $T$, traverse its children [S3, unofficial].
+     *   The traversal follows the hierarchy until leaf nodes are reached or the ray exits the volume [S3, S5, unofficial].
+ 
+ 3.  **Ray Marching:**
+-    March through the volume within the relevant octree nodes.
++    March through the volume within the relevant octree nodes [S3, unofficial].
+     *   **Step Size:** Use a step size $s = 0.5 \times \text{cell edge length}$ [S1][S3, unofficial].
+     *   **Sampling:** Sample the scalar field at the current ray position.
+@@ -48,29 +48,13 @@
+ 
+ ```python
+-def ray_march_min_max_octree(ray_origin, ray_direction, volume, isovalue, octree):
++def ray_march_min_max_octree(ray_origin, ray_direction, volume, isovalue, octree_root, cell_size):
+     """
+     Ray march through a volume using a min-max octree for acceleration.
++    """
++    t = 0.0
++    t_max = 1000.0  # [G] Typically the distance to the far clipping plane or volume extent
++    color = (0.0, 0.0, 0.0)
+     
+-    Args:
+-        ray_origin: (x, y, z) camera origin.
+-        ray_direction: (x, y, z) normalized ray direction.
+-        volume: 3D array of scalar values.
+-        isovalue: Threshold T for isosurface.
+-        octree: Root node of the min-max octree.
+-        
+-    Returns:
+-        Color of the pixel.
+-    """
+-    # Initialize ray parameters
+-    t_min = 0.0
+-    t_max = volume.max_extent_distance(ray_origin, ray_direction)
+-    
+-    # Traverse octree to find relevant leaf nodes or exit volume
+-    current_node = octree
+-    relevant_nodes = []
+-    
+-    # Stack for traversal
+-    stack = [current_node]
+-    
++    stack = [octree_root]
+     while stack:
+         node = stack.pop()
+@@ -80,36 +64,25 @@
+             continue
+             
+-        # If leaf node, add to list for marching
+         if node.is_leaf:
+-            relevant_nodes.append(node)
++            while t < t_max:
++                pos = ray_origin + ray_direction * t
++                val = volume.sample(pos)
++                
++                if val >= isovalue:
++                    # Refine intersection using binary search
++                    t_hit = binary_search_intersection(ray_origin, ray_direction, t, t + cell_size, volume, isovalue)
++                    
++                    # Compute normal at intersection
++                    normal = compute_normal(volume, ray_origin + ray_direction * t_hit)
++                    
++                    # Apply Gooch shading
++                    color = apply_gooch_shading(normal)
++                    break
++                t += cell_size * 0.5
++            if color != (0.0, 0.0, 0.0):
++                break
+         else:
+-            # Push children to stack (order may vary)
+             for child in node.children:
+                 stack.append(child)
+-                
+-    # March through relevant regions
+-    t = t_min
+-    color = background_color
+-    
+-    while t < t_max:
+-        # Sample volume at current ray position
+-        pos = ray_origin + ray_direction * t
+-        val = sample_volume(volume, pos)
+-        
+-        # Check for isosurface crossing
+-        if val >= isovalue:
+-            # Refine intersection using binary search
+-            t_hit = binary_search_intersection(ray_origin, ray_direction, t, t_max, volume, isovalue)
+-            
+-            # Compute normal at intersection
+-            normal = compute_normal(volume, pos_at_t(ray_origin, ray_direction, t_hit))
+-            
+-            # Apply Gooch shading
+-            color = apply_gooch_shading(normal)
+-            break
+-        else:
+-            # Step forward
+-            t += 0.5 * cell_edge_length
+-            
+     return color
+ 
+@@ -120,13 +93,8 @@
+     for _ in range(3):
+         t_mid = (t_start + t_end) / 2.0
+-        pos_mid = ray_origin + ray_direction * t_mid
+-        val_mid = sample_volume(volume, pos_mid)
++        val_mid = volume.sample(ray_origin + ray_direction * t_mid)
++        val_start = volume.sample(ray_origin + ray_direction * t_start)
+         
+         # Determine which side of the threshold we are on relative to start
+-        # Assuming start is outside (val < isovalue) and end is inside (val >= isovalue)
+-        # Or vice versa. This logic assumes a sign change between t_start and t_end.
+-        # For robustness, check signs.
+-        val_start = sample_volume(volume, ray_origin + ray_direction * t_start)
+-        
+         if (val_start < isovalue) == (val_mid < isovalue):
+             t_start = t_mid
+@@ -141,8 +109,14 @@
+     """
+     eps = 1e-5
+-    dx = sample_volume(volume, pos + vec3(eps, 0, 0)) - sample_volume(volume, pos - vec3(eps, 0, 0))
+-    dy = sample_volume(volume, pos + vec3(0, eps, 0)) - sample_volume(volume, pos - vec3(0, eps, 0))
+-    dz = sample_volume(volume, pos + vec3(0, 0, eps)) - sample_volume(volume, pos - vec3(0, 0, eps))
+-    return normalize(vec3(dx, dy, dz))
++    dx = volume.sample(pos + (eps, 0, 0)) - volume.sample(pos - (eps, 0, 0))
++    dy = volume.sample(pos + (0, eps, 0)) - volume.sample(pos - (0, eps, 0))
++    dz = volume.sample(pos + (0, 0, eps)) - volume.sample(pos - (0, 0, eps))
++    length = (dx*dx + dy*dy + dz*dz)**0.5
++    return (dx/length, dy/length, dz/length)
++
++def apply_gooch_shading(normal):
++    # [G] Gooch shading maps normals to a cool-to-warm color palette.
++    # Exact formula not provided in sources; using a standard linear mapping.
++    return (0.5 + normal[0]*0.5, 0.5 + normal[1]*0.5, 0.5 + normal[2]*0.5)
+ ```
+ 
+@@ -166,5 +140,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the sparsity of the volume and the depth of the octree. Empty space skipping significantly reduces the number of samples taken.
++*   **Time Complexity:** Not given in the sources.
+ *   **Memory Complexity:** Auxiliary octree data requires 1–4 MB for depth $\ge$ 7 [S3, unofficial][S2]. The volume data can be compressed into 10–30% of its original size using the octree structure [S5, unofficial].
+ *   **Performance:**
+@@ -184,5 +158,5 @@
+ 
+ ## Background
+-The method originates from work by Knoll et al. [KWPH06], who combined the min/max acceleration functions of Wilhelms and Van Gelder [WV92] with a compressed format similar to the "cells octree" of Velasco and Torres [VT01]. Unlike Velasco and Torres, who built the octree around cells, Knoll et al. built it directly around voxels [S5, unofficial]. This required a fast neighbor-finding scheme (borrowed and improved from Frisken and Perry [FP02]) to retrieve cell corner values during ray tracing [S5, unofficial]. The traversal is similar to that proposed by Gargantini and Atkinson [GA93] [S5, unofficial]. It is used as a baseline reference for direct isosurface visualization performance in evaluations [S3, unofficial].
++The method originates from work by Knoll et al. [KWPH06], who combined the min/max acceleration functions of Wilhelms and Van Gelder [WV92] with a compressed format similar to the "cells octree" of Velasco and Torres [VT01] [S5, unofficial]. Unlike Velasco and Torres, who built the octree around cells, Knoll et al. built it directly around voxels [S5, unofficial]. This required a fast neighbor-finding scheme (borrowed and improved from Frisken and Perry [FP02]) to retrieve cell corner values during ray tracing [S5, unofficial]. The traversal is similar to that proposed by Gargantini and Atkinson [GA93] [S5, unofficial]. It is used as a baseline reference for direct isosurface visualization performance in evaluations [S3, unofficial].
+ 
+ ## Sources

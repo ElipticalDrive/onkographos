@@ -1,0 +1,139 @@
+--- v001.md
++++ v002.md
+@@ -4,74 +4,63 @@
+ 
+ ## Overview
+-Shadow Caching is a technique that exploits the inherent coherence of shadow rays for a point light source that are occluded by the same object [S1, unofficial]. It improves performance by storing shadow test results in a spatial data structure, avoiding redundant ray casting for identical occlusion queries. Unlike Shadow Mapping, which stores depth values for binary occlusion decisions against opaque occluders, Shadow Caching stores the result of the shadow ray traversal itself [S2, unofficial].
++Shadow Caching exploits the inherent coherence of shadow rays for a point light source that are occluded by the same object to avoid redundant ray traversal [S1, unofficial]. It stores occlusion results in a spatial data structure, replacing expensive shadow ray casts during rendering [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Scene geometry (or volume data), light source position, and transfer function (for volume rendering).
+-*   **Output:** A cached shadow lookup structure (typically a 3D texture) and the final rendered image with shadows.
++*   **Input:** Scene subdivision, light source position, and transfer function [S1, unofficial][S2, unofficial].
++*   **Output:** A cached shadow lookup structure and the final rendered image [S2, unofficial].
+ 
+ **Data Structures:**
+-1.  **Shadow Cache (3D Texture):** A volumetric texture where each texel stores the shadow status (e.g., occluded or unoccluded) for a specific region of space relative to the light source.
+-2.  **Shadow Feelers:** Precomputed rays or queries used to populate the cache.
++1.  **Shadow Cache (3D Texture):** A volumetric texture storing the shadow status for each spatial region relative to the light source [S2, unofficial].
++2.  **Shadow Feelers:** Precomputed rays used to populate the cache [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Preprocessing (Build Phase):**
+-    *   The scene is subdivided into cells or regions.
+-    *   For each cell, "shadow feelers" are generated. These are rays cast from representative points within the cell towards the light source.
+-    *   The traversal of these feelers determines if the cell is fully occluded, fully visible, or partially visible to the light [S1, unofficial].
+-    *   The results are stored in the 3D texture cache. For volume rendering, this may involve raycasting to determine opacity accumulation [S2, unofficial].
+-2.  **Rendering (Lookup Phase):**
+-    *   During volume raycasting, when a shadow ray needs to be tested for a point $P$, the system first queries the 3D texture cache at the location corresponding to $P$.
+-    *   If the cache indicates the point is fully occluded or fully visible, the result is returned immediately, skipping the expensive ray traversal.
+-    *   If the cache indicates partial visibility or a miss, a full shadow ray traversal is performed, and the result may be updated in the cache [S1, unofficial].
++1.  Subdivide the scene into cells or spatial regions [S1, unofficial].
++2.  For each cell, generate shadow feelers by casting rays from representative points toward the light source [S2, unofficial].
++3.  Traverse the feelers to determine if the cell is fully occluded, fully visible, or partially visible to the light [S1, unofficial].
++4.  Store the occlusion status in the spatial cache, such as a 3D texture [S2, unofficial].
++5.  During rendering, query the cache for the cell containing the shading point [G].
++6.  If the cache indicates fully occluded or fully visible, return the cached result immediately [S1, unofficial].
++7.  If partially visible or a cache miss occurs, perform a full shadow ray traversal [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Cache Resolution:** Determines the granularity of the shadow feelers. Higher resolution increases accuracy but memory usage. Not given in the sources.
+-*   **Light Source Position:** Must be known during preprocessing.
++*   **Light Source Position:** Must be known during preprocessing [S2, unofficial].
++*   **Cache Resolution:** Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Dynamic Light Sources:** If the light source moves, the shadow feelers become invalid and must be recomputed [S2, unofficial].
+-*   **Transfer Function Changes:** In volume rendering, changes to the transfer function (opacity mapping) can alter shadow casting behavior, requiring cache recomputation [S2, unofficial].
+-*   **Precision:** Cache misses or boundary errors in the 3D texture lookup can lead to visual artifacts.
++*   Shadow feelers must be recomputed if the light source position changes or if the transfer function changes [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Preprocessing Phase
+-def build_shadow_cache(scene, light_position, resolution):
+-    # Initialize 3D texture cache with default values (e.g., unoccluded)
+-    cache = create_3d_texture(resolution)
+-    
+-    # Iterate over cells in the scene subdivision
+-    for cell in scene.cells:
+-        # Generate shadow feelers for this cell
+-        feelers = generate_shadow_feelers(cell, light_position)
+-        
+-        for feeler in feelers:
+-            # Cast ray to determine occlusion status
+-            status = cast_shadow_ray(feeler, scene)
+-            
+-            # Store result in cache
+-            cache.set(feeler.origin, status)
+-            
++def build_shadow_cache(scene_cells, light_position):
++    cache = {}
++    for cell in scene_cells:
++        feelers = [(cell.center, light_position)]
++        status = "FULLY_VISIBLE"
++        for start, end in feelers:
++            if is_occluded(start, end, scene):
++                status = "FULLY_OCCLUDED"
++                break
++        cache[cell.id] = status
+     return cache
+ 
+-# Rendering Phase
+-def render_with_shadow_caching(volume_data, cache, light_position):
+-    for each voxel in volume_data:
+-        # Query cache first
+-        cache_status = cache.get(voxel.position)
+-        
+-        if cache_status == OCCLUDED:
+-            illumination = 0
+-        elif cache_status == UNOCCLUDED:
+-            illumination = full_light_intensity
++def render_shadow_caching(voxels, cache, light_position):
++    for voxel in voxels:
++        cell_id = get_cell_id(voxel.position)
++        status = cache.get(cell_id, "PARTIALLY_VISIBLE")
++        if status == "FULLY_OCCLUDED":
++            voxel.light = 0.0
++        elif status == "FULLY_VISIBLE":
++            voxel.light = 1.0
+         else:
+-            # Cache miss or partial: perform full ray traversal
+-            shadow_ray = create_ray(voxel.position, light_position)
+-            occluded = cast_shadow_ray(shadow_ray, volume_data)
+-            illumination = 0 if occluded else full_light_intensity
+-            
+-        # Accumulate color based on illumination
+-        accumulate_color(voxel, illumination)
++            voxel.light = 0.0 if is_occluded(voxel.position, light_position, scene) else 1.0
++
++def is_occluded(start, end, scene):
++    # Standard ray-scene intersection check
++    return any(intersects(ray, obj) for obj in scene.objects)
++
++def get_cell_id(position):
++    # Standard spatial hashing or grid lookup
++    return hash(position)
+ ```
+ 
+@@ -79,16 +68,11 @@
+ 
+ ### Shadow Caching with 3D Textures
+-This variant uses 3D textures to store shadow results. It gains performance by allowing fast texture lookups instead of ray traversal. It requires preprocessing of shadow feelers. A key pitfall is that shadow feelers need to be recomputed if the light source position changes or if the transfer function (in volume rendering) changes [S2, unofficial].
++This variant uses 3D textures to store shadow results, gaining performance through fast texture lookups instead of ray traversal [S2, unofficial]. It requires preprocessing of shadow feelers [S2, unofficial]. A key pitfall is that shadow feelers need to be recomputed if the light source position changes or if the transfer function changes [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Preprocessing is $O(N)$ where $N$ is the number of shadow feelers. Rendering lookup is $O(1)$ for cache hits, $O(R)$ for cache misses where $R$ is ray traversal cost.
+-*   **Memory Complexity:** $O(V)$ where $V$ is the volume of the 3D texture cache.
+-*   **Strengths:** Significant performance gain for scenes with high shadow ray coherence. Reduces redundant computations.
+-*   **Limitations:** Requires preprocessing time. Cache invalidation is costly when light or transfer function changes. Memory overhead for the 3D texture.
+-*   **When to use:** Static scenes or scenes with static lights where shadow coherence is high.
+-*   **When not to use:** Dynamic scenes with moving lights or frequently changing transfer functions, due to recomputation cost.
++Time and memory complexity are Not given in the sources. Strengths include exploiting shadow ray coherence to reduce redundant computations [S1, unofficial]. Limitations include preprocessing overhead and costly cache invalidation when the light source or transfer function changes [S2, unofficial]. Usage guidelines are Not given in the sources.
+ 
+ ## Background
+-Shadow Caching was introduced to address the inefficiency of redundant shadow ray casting. Fernandez et al. [104] proposed subdividing the scene and keeping lists of light sources occluded/visible per region. Pharr et al. [94] introduced ray queues for scene cells. The use of 3D textures for caching was explored by Timo Ropinski [S2, unofficial] in the context of GPU-based volume raycasting.
++Fernandez et al. [104] subdivided the scene and maintained lists of light sources per region as fully occluded, fully visible, or partially visible using shadow ray approximations [S1, unofficial]. Pharr et al. [94] introduced ray queues for scene cells [S1, unofficial]. The 3D texture variant was explored by Ropinski for GPU-based volume raycasting [S2, unofficial].
+ 
+ ## Sources

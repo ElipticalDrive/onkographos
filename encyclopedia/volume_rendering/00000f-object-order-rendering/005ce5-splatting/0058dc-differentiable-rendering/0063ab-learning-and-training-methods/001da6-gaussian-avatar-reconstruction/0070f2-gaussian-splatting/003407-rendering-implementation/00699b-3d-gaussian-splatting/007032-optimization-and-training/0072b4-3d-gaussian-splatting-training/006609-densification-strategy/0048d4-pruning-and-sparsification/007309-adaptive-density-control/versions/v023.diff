@@ -1,0 +1,116 @@
+--- v022.md
++++ v023.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Adaptive Density Control (ADC) is a dynamic optimization strategy used in 3D Gaussian Splatting (3DGS) to adjust the number and spatial distribution of Gaussian primitives during training [S1, S3][S11, unofficial]. It solves the problem that gradient descent alone cannot change the number of Gaussians or their coarse arrangement, leading to under-reconstructed regions or inefficient memory usage [S10, unofficial]. ADC periodically evaluates metrics such as gradient magnitude, opacity, and scale to trigger densification (cloning or splitting) or pruning [S3][S11, unofficial]. It sets itself apart from static pruning methods (e.g., LightGaussian) by dynamically balancing addition and removal to maintain an optimal representation budget, rather than simply removing primitives [S1].
++Adaptive Density Control (ADC) is a dynamic optimization strategy used in 3D Gaussian Splatting (3DGS) to adjust the number and spatial distribution of Gaussian primitives during training [S1, S3][S11, unofficial]. It solves the problem that gradient descent alone cannot change the number of Gaussians or their coarse arrangement, leading to under-reconstructed regions or inefficient memory usage [S18, unofficial][S11, unofficial]. ADC periodically evaluates metrics such as gradient magnitude, opacity, and scale to trigger densification (cloning or splitting) or pruning [S3][S11, unofficial]. It sets itself apart from static pruning methods (e.g., LightGaussian) by dynamically balancing addition and removal to maintain an optimal representation budget, rather than simply removing primitives [S1].
+ 
+ ## How it works
+@@ -13,5 +13,5 @@
+ **Data Structures:**
+ *   **Gradient Buffer:** Accumulates the 2D positional gradient magnitude $\tau_k$ for each Gaussian over a collection period (typically one densification interval) [S3].
+-*   **Flag Buffers:** Used for efficient GPU-based filtering and compaction. Common flags include `densify_split_flag`, `densify_dup_flag`, `densify_keep_flag`, and their prefix sums for compacting the Gaussian array [S10, unofficial].
++*   **Flag Buffers:** Used for efficient GPU-based filtering and compaction [S10, unofficial]. Common flags include `densify_split_flag`, `densify_dup_flag`, `densify_keep_flag`, and their prefix sums for compacting the Gaussian array [S10, unofficial].
+ *   **Random Samples:** Pre-generated random samples from $\mathcal{N}(0, 1)$ for splitting perturbations, stored in `densify_random_samples` [S10, unofficial].
+ 
+@@ -28,5 +28,5 @@
+ **Steps:**
+ 1.  **Initialization:** Initialize Gaussians from sparse Structure-from-Motion (SfM) points or other sources [S1, S2].
+-2.  **Gradient Tracking:** For each Gaussian $g_k$, track the 2D positional gradient magnitude $\frac{\partial L}{\partial \mu_v^k}$ for each rendered view $v$. Compute the average gradient magnitude $\tau_k$ over all views in the collection period:
++2.  **Gradient Tracking:** For each Gaussian $g_k$, track the 2D positional gradient magnitude $\frac{\partial L}{\partial \mu_v^k}$ for each rendered view $v$ [S2]. Compute the average gradient magnitude $\tau_k$ over all views in the collection period:
+     $$ \tau_k = \frac{1}{N_{\text{views}}} \sum_{v=1}^{N_{\text{views}}} \left\| \frac{\partial L(I_v, I'_v)}{\partial \mu_v^k} \right\|_2 $$
+     where $L$ is the loss between ground truth $I_v$ and rendered $I'_v$ [S11, unofficial].
+@@ -34,7 +34,7 @@
+ 4.  **Split/Clone Decision:** For each Gaussian $g_k$:
+     *   If $\tau_k \ge T_{grad}$:
+-        *   If $\max(s_k) > P_{dense} \cdot e_{scene}$ (large scale): **Split**. Replace $g_k$ with $N_{children}$ (default 2) children [Parent].
+-            *   Children means $\mu_{child}$ are sampled from $\mathcal{N}(\mu_k, \Sigma_k)$ [Parent].
+-            *   Children scales $s_{child} = s_k \cdot \frac{5}{4} \cdot \frac{1}{\sqrt{N_{children}}}$ [Parent].
++        *   If $\max(s_k) > P_{dense} \cdot e_{scene}$ (large scale): **Split** [S20]. Replace $g_k$ with $N_{children}$ (default 2) children [Parent][S20].
++            *   Children means $\mu_{child}$ are sampled from $\mathcal{N}(\mu_k, \Sigma_k)$ [Parent][S3].
++            *   Children scales $s_{child} = s_k \cdot \frac{5}{4} \cdot \frac{1}{\sqrt{N_{children}}}$ [Parent][S20].
+             *   Other properties ($\alpha, \mathbf{c}, q$) are inherited [S11, unofficial].
+         *   Else (small scale): **Clone**. Create an exact copy of $g_k$ [Parent].
+@@ -46,5 +46,5 @@
+     *   For all $g_k$, if $\alpha_k > \text{resetLogit}$, set $\alpha_k = \text{resetLogit}$ [S7][S11, unofficial].
+     *   Zero Adam state for opacities [S7].
+-7.  **Buffer Compaction:** Compact the Gaussian array to remove pruned entries and maintain contiguous memory [Parent].
++7.  **Buffer Compaction:** Compact the Gaussian array to remove pruned entries and maintain contiguous memory [Parent][S10, unofficial].
+ 
+ **Pseudocode:**
+@@ -144,4 +144,7 @@
+ Simplifies via stochastic sampling weighted by importance.
+ 
++### [Age-Gated Eligibility (AGE)](12511-age-gated-eligibility-age.md)
++Defers split/clone decisions for newly created primitives until they survive a maturity window, preventing uncontrolled cascading growth.
++
+ ### [Splitting Criteria and Prioritization](16226-splitting-criteria-and-prioritization.md)
+ Defines specific mathematical formulations for importance/error scores.
+@@ -151,14 +154,26 @@
+ 
+ ### Anisotropy Regularization
+-Removes needle-surgery structural splitting and training calls, keeping standard densification and pruning. Uses log-ratio soft regularization parameters: `lambda_aniso` (0.001) and `aniso_ratio_max` (5) [S21, unofficial].
++Removes needle-surgery structural splitting and training calls, keeping standard densification and pruning [S21, unofficial]. Uses log-ratio soft regularization parameters: `lambda_aniso` (0.001) and `aniso_ratio_max` (5) [S21, unofficial].
+ 
+ ### Max-Component Adaptive Density Control
+-Enforces a strict upper bound on component count. Densification (cloning/splitting) is disabled if count $\ge$ max_setting and re-enabled only if pruning reduces count below the cap [S22].
++Enforces a strict upper bound on component count [S22]. Densification (cloning/splitting) is disabled if count $\ge$ max_setting and re-enabled only if pruning reduces count below the cap [S22].
++
++### Revised Densify and Prune Algorithm
++Integrates corrected scene extent, exponential ascending gradient threshold, and significance-aware pruning [S20]. Splits if $\max(s_k) > P_{dense} \cdot e'_{scene}$, clones otherwise, and prunes if $\alpha_k < o_{min}$ AND significance is in the bottom $N_{prune}$ [S20].
+ 
+ ### Opacity Correction after Cloning
+ Corrects bias in alpha-compositing after cloning by setting new opacity $\hat{\alpha} = 1 - \sqrt{1 - \alpha}$ [S3].
+ 
++### Complexity-Aware Densification and Importance Scoring
++Adds capacity to complex regions during training and uses an importance score for LoD pruning [S23, unofficial]. Retains large primitives for simple regions, providing better coverage than MGS but slower at low budgets [S23, unofficial].
++
++### Split-Only Densification
++Drops the clone operation entirely [S24, unofficial]. Uses splitting for both large and small Gaussians, sampling child positions from the parent's distribution to avoid opacity bias and floater clusters [S24, unofficial].
++
++### RDGS
++Adopts structural similarity loss instead of accumulated positional gradient to determine splitting during regular densification intervals [S14].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Densification and pruning are $O(N)$ per interval, where $N$ is the number of Gaussians. Buffer compaction is also $O(N)$ [G].
++*   **Time Complexity:** Densification and pruning are $O(N)$ per interval, where $N$ is the number of Gaussians [G]. Buffer compaction is also $O(N)$ [G].
+ *   **Memory Complexity:** Memory usage grows with $N$ [G]. ADC lacks explicit control over maximum $N$ in its original form, risking out-of-memory errors [S3, S6]. Max-Component ADC mitigates this [S22].
+ *   **Performance:** Effective for general scenes but can underfit high-frequency regions (e.g., grass) due to low gradient accumulation on large Gaussians [S3][S11, unofficial]. Can overfit simple regions [S11, unofficial].
+@@ -171,14 +186,25 @@
+ ## Sources
+ [S1] Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians, https://doi.org/10.1007/978-3-031-72980-5_10, fetched 2026-10-26
+-[S2] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+-[S3] Revising Densification in Gaussian Splatting, https://doi.org/10.1007/978-3-031-73036-8_20, fetched 2026-10-26
+-[S4] DN-Splatter: Depth and Normal Priors for Gaussian Splatting and Meshing, https://doi.org/10.1109/wacv61041.2025.00241, fetched 2026-10-26
+-[S5] Radiance Meshes for Volumetric Reconstruction, https://arxiv.org/abs/2512.04076v1, fetched 2026-10-26
+-[S6] Refining Gaussian Splatting: A Volumetric Densification Approach, https://doi.org/10.24132/CSRN.2025-6, fetched 2026-10-26
+-[S7] Show HN: Msplat – 3D Gaussian Splatting training in ~90s on M4 Max, native Metal, https://github.com/rayanht/msplat, fetched 2026-10-26
+-[S8] Faster-GS: Analyzing and Improving Gaussian Splatting Optimization, https://arxiv.org/abs/2602.09999v1, fetched 2026-10-26 (unofficial)
+-[S9] Efficient Perspective‐Correct 3D Gaussian Splatting Using Hybrid Transparency, https://doi.org/10.1111/cgf.70014, fetched 2026-10-30
+-[S10] Gaussian Splats Part 2: From Photos to a Trained Model, https://alphapixeldev.com/gaussian-splats-part-2-creating-gaussian-splats/, fetched 2026-10-29 (unofficial)
+-[S11] Improving Adaptive Density Control for 3D Gaussian Splatting, https://doi.org/10.5220/0013308500003912, fetched 2026-10-30 (unofficial)
+-[S12] hsiang0117/4DGS-Volume-Cloud, https://github.com/hsiang0117/4DGS-Volume-Cloud, fetched 2026-10-26
+-[S13] 3D Student Splatting and Scooping, https://doi.org/10.1109/cvpr52734.2025.01960, fetched 2026-10-29 (unofficial)+[S2] Improving Gaussian Splatting with Localized Points Management, https://doi.org/10.1109/cvpr52734.2025.02021, fetched 2026-10-26
++[S3] 3DGR-CT: Sparse-view CT reconstruction with a 3D Gaussian representation, https://doi.org/10.1016/j.media.2025.103585, fetched 2026-10-26
++[S4] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
++[S5] HUGS: Human Gaussian Splats, https://doi.org/10.1109/cvpr52733.2024.00055, fetched 2026-10-26
++[S6] Revising Densification in Gaussian Splatting, https://doi.org/10.1007/978-3-031-73036-8_20, fetched 2026-10-26
++[S7] DN-Splatter: Depth and Normal Priors for Gaussian Splatting and Meshing, https://doi.org/10.1109/wacv61041.2025.00241, fetched 2026-10-26
++[S8] Radiance Meshes for Volumetric Reconstruction, https://arxiv.org/abs/2512.04076v1, fetched 2026-10-26 (unofficial)
++[S9] Refining Gaussian Splatting: A Volumetric Densification Approach, https://doi.org/10.24132/CSRN.2025-6, fetched 2026-10-26
++[S10] Show HN: Msplat – 3D Gaussian Splatting training in ~90s on M4 Max, native Metal, https://github.com/rayanht/msplat, fetched 2026-10-26 (unofficial)
++[S11] 3D Gaussian Splatting for Real-Time Radiance Field Rendering [pdf], https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/3d_gaussian_splatting_low.pdf, fetched 2026-10-26 (unofficial)
++[S12] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
++[S13] Faster-GS: Analyzing and Improving Gaussian Splatting Optimization, https://arxiv.org/abs/2602.09999v1, fetched 2026-10-26 (unofficial)
++[S14] 3DGS.zip: A survey on 3D Gaussian Splatting Compression Methods, https://arxiv.org/abs/2407.09510v5, fetched 2026-10-26
++[S15] 3D Gaussian Splatting - Paper Explained, Training NeRFStudio, https://learnopencv.com/3d-gaussian-splatting/, fetched 2026-10-28 (unofficial)
++[S16] GaussianSplatting論文のAblationについての解説・考察, https://qiita.com/kotauchisunsun/items/f1e89f28aa770b8d3b19, fetched 2026-10-29 (unofficial)
++[S17] Efficient Perspective‐Correct 3D Gaussian Splatting Using Hybrid Transparency, https://doi.org/10.1111/cgf.70014, fetched 2026-10-30
++[S18] Gaussian Splats Part 2: From Photos to a Trained Model, https://alphapixeldev.com/gaussian-splats-part-2-creating-gaussian-splats/, fetched 2026-10-29 (unofficial)
++[S19] A dual-prior driven Gaussian splatting framework for high-fidelity reconstruction of museum artifacts, https://doi.org/10.1038/s40494-026-02330-z, fetched 2026-10-30
++[S20] Improving Adaptive Density Control for 3D Gaussian Splatting, https://doi.org/10.5220/0013308500003912, fetched 2026-10-30
++[S21] hsiang0117/4DGS-Volume-Cloud, https://github.com/hsiang0117/4DGS-Volume-Cloud, fetched 2026-10-26 (unofficial)
++[S22] 3D Student Splatting and Scooping, https://doi.org/10.1109/cvpr52734.2025.01960, fetched 2026-10-29
++[S23] KoalaGS: Complexity-Aware Continuous Level of Detail for Gaussian Splatting, https://arxiv.org/abs/2610.28615, fetched 2026-10-26 (unofficial)
++[S24] Counting Contributions, Not Views: Occlusion-Aware Densification for 3D Gaussian Splatting, https://arxiv.org/abs/2610.27108, fetched 2026-10-26 (unofficial)

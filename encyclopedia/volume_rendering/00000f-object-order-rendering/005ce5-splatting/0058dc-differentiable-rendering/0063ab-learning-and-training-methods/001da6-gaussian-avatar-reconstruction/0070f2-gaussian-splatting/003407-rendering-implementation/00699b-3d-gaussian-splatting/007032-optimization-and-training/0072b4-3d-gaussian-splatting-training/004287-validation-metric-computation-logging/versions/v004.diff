@@ -1,0 +1,239 @@
+--- v003.md
++++ v004.md
+@@ -1,117 +1,149 @@
+ # Validation Metric Computation & Logging
+ 
+-Also called: Testing Loop Evaluation, Validation Metric Computation, Validation Metrics
++Also called: Testing Loop Evaluation, Validation Metrics
+ 
+ ## Overview
+-This method computes quantitative validation metrics (primarily PSNR) between rendered novel views and ground truth images, and saves example outputs for visual inspection [S1, unofficial]. It operates in evaluation mode with gradient tracking disabled, distinguishing it from the training optimization loop [S1, unofficial].
++This method computes quantitative validation metrics (primarily PSNR) on novel views during training and logs detailed performance statistics to disk. It differs from the training loss computation by evaluating the model on held-out or sampled camera poses using full-resolution ground truth comparisons, rather than optimizing parameters via gradient descent. It builds on [3D Gaussian Splatting Training](3761-3d-gaussian-splatting-training.md) by providing the evaluation loop that runs at specified intervals.
+ 
+ ## How it works
+ **Inputs:**
+-- Model parameters and scene data containing training and testing camera poses [S1, S2, unofficial].
+-- `testing_iterations`: List of iterations at which validation metrics are computed and logged [S2, unofficial].
++- Trained 3D Gaussian Splatting model (weights and scene representation).
++- Scene object providing camera lists: `getTestCameras()` (full test set) and `getTrainCameras()` (training set).
++- Configuration parameters: `testing_iterations` (list of iteration numbers to run validation), `show_idx` (index for saving a visual example), `show_path` (directory for saving JPEGs).
+ 
+ **Outputs:**
+-- Mean PSNR score for test and training subsets [S1, unofficial].
+-- Saved JPEG images of rendered novel views [S1, unofficial].
++- Mean PSNR score (float, rounded to 4 decimal places).
++- Optional saved JPEG image of a novel view.
++- CSV log file with timing and resource usage.
+ 
+ **Data Structures:**
+-- `psnr_list`: List of floating-point PSNR values collected during the validation pass [S1, unofficial].
+-- `validation_configs`: Dictionary mapping configuration names ('test', 'train') to camera lists [S2, unofficial].
++- `psnr_list`: List of floats storing PSNR values for each view.
++- `validation_configs`: Dictionary mapping config names to camera lists.
++  - `'test'`: List of all test cameras.
++  - `'train'`: List of 5 evenly spaced training cameras (indices 5, 10, 15, 20, 25, 30 if available).
+ 
+ **Steps:**
+-1. **Setup:** Clear the CUDA cache. Initialize `psnr_list` as empty. Select one random index `show_idx` for visualization [S1, unofficial].
+-2. **Trigger:** Check if the current training iteration exists in `testing_iterations`. If not, skip validation [S2, unofficial].
+-3. **Configuration:** Define `validation_configs` with two entries: `'test'` using all cameras from `scene.getTestCameras()`, and `'train'` using 5 evenly spaced cameras from `scene.getTrainCameras()` at indices 5 to 30 with a step of 5 [S2, unofficial].
+-4. **Iteration Loop:** For each camera index in the selected configuration:
+-   a. Fetch data for the view. Move all tensors to the GPU [S1, unofficial].
+-   b. Run the model forward pass with `is_train=False` inside a gradient-disabled context [S1, unofficial].
+-   c. Render the novel view. Apply background color compositing if applicable [S1, unofficial].
+-   d. **Metric Computation:** Clamp the rendered image and ground truth to $[0.0, 1.0]$ [S2, unofficial]. Compute the Peak Signal-to-Noise Ratio (PSNR) between the rendered image $I_{render}$ and ground truth $I_{gt}$:
+-      $$ \text{PSNR} = 10 \cdot \log_{10} \left( \frac{1}{\text{MSE}(I_{render}, I_{gt})} \right) $$
+-      where $\text{MSE}(I_{render}, I_{gt}) = \frac{1}{N} \sum_{i=1}^{N} (I_{render,i} - I_{gt,i})^2$ and $N$ is the number of pixels [G]. Accumulate PSNR (and L1 loss if required) across cameras [S2, unofficial]. Append the PSNR value to `psnr_list` [S1, unofficial].
+-   e. **Visualization:** If the current index equals `show_idx`: detach the tensor from the computation graph, multiply pixel values by 255, permute dimensions from CHW to HWC, convert to a NumPy array, and save as a JPEG file [S1, unofficial].
+-5. **Aggregation:** Compute the mean of `psnr_list` [S1, unofficial]. Round the result to 4 decimal places. If the mean PSNR is less than 10, print an error message and exit [S1, unofficial]. Log the final PSNR to the logger [S1, unofficial].
++1. **Initialization:**
++   - Clear CUDA cache: `torch.cuda.empty_cache()` [S1, unofficial].
++   - Initialize `psnr_list = []` [S1, unofficial].
++   - Select `show_idx` (e.g., 0) for visualization [S1, unofficial].
++
++2. **Trigger Check:**
++   - If current iteration is not in `testing_iterations`, skip validation [S2, unofficial].
++
++3. **Camera Selection:**
++   - Define `validation_configs`:
++     - `'test'`: `scene.getTestCameras()` [S2, unofficial].
++     - `'train'`: 5 evenly spaced cameras from `scene.getTrainCameras()` [S2, unofficial].
++
++4. **Evaluation Loop:**
++   - For each camera in each config:
++     - Fetch data for the camera [S1, unofficial].
++     - Run model forward pass with `is_train=False` [S1, unofficial].
++     - Render the view [S1, unofficial].
++     - Clamp rendered image and ground truth to $[0.0, 1.0]$ [S2, unofficial].
++     - Compute PSNR between rendered and ground truth images [S1, S2, unofficial].
++     - Append PSNR to `psnr_list` [S1, unofficial].
++     - If current index equals `show_idx`:
++       - Detach tensor, multiply by 255, permute to HWC, convert to numpy [S1, unofficial].
++       - Save as JPEG to `show_path` [S1, unofficial].
++
++5. **Aggregation:**
++   - Compute mean PSNR: $\text{mean\_psnr} = \frac{1}{N} \sum_{i=1}^{N} \text{PSNR}_i$ [S1, S2, unofficial].
++   - Round to 4 decimal places [S1, unofficial].
++   - If $\text{mean\_psnr} < 10$, print error and exit [S1, unofficial].
++   - Log PSNR to logger [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_validation_metrics(model, scene, testing_iterations, current_iter, logger):
+-    # Step 1: Setup
+-    torch.cuda.empty_cache()  # [G]
++def compute_validation_metrics(model, scene, iteration, testing_iterations, show_path, show_idx=0):
++    if iteration not in testing_iterations:
++        return None
++
++    torch.cuda.empty_cache()
+     psnr_list = []
+-    show_idx = random.randint(0, max(0, len(scene.getTestCameras()) - 1))  # [G]
++    
++    # Define camera sets
++    test_cameras = scene.getTestCameras()
++    train_cameras = scene.getTrainCameras()
++    # Select 5 evenly spaced cameras from training set
++    train_sample_indices = [5, 10, 15, 20, 25, 30]
++    train_sample_indices = [i for i in train_sample_indices if i < len(train_cameras)]
++    train_cameras_sampled = [train_cameras[i] for i in train_sample_indices]
++    
++    validation_configs = {
++        'test': test_cameras,
++        'train': train_sampled
++    }
++    
++    for config_name, cameras in validation_configs.items():
++        for idx, camera in enumerate(cameras):
++            # Fetch data for the camera
++            data = fetch_data(camera, phase='val')
++            
++            # Forward pass
++            with torch.no_grad():
++                data, _, _ = model(data, is_train=False)
++                # Render novel view
++                render_img = data['novel_view']['img_pred'][0]
++                gt_img = data['novel_view']['img_gt'][0]
++                
++                # Clamp to [0.0, 1.0]
++                render_img = torch.clamp(render_img, 0.0, 1.0)
++                gt_img = torch.clamp(gt_img, 0.0, 1.0)
++                
++                # Compute PSNR
++                psnr_value = compute_psnr(render_img, gt_img)
++                psnr_list.append(psnr_value)
++                
++                # Save example image
++                if idx == show_idx:
++                    tmp_novel = render_img.detach() * 255
++                    tmp_novel = tmp_novel.permute(1, 2, 0).cpu().numpy()
++                    img_name = f"{show_path}/{config_name}_{idx}.jpg"
++                    save_jpeg(tmp_novel, img_name)
++    
++    # Aggregate results
++    mean_psnr = sum(psnr_list) / len(psnr_list)
++    mean_psnr = round(mean_psnr, 4)
++    
++    if mean_psnr < 10:
++        print(f"Error: PSNR {mean_psnr} < 10")
++        exit()
++        
++    log_psnr(mean_psnr)
++    return mean_psnr
+ 
+-    # Step 2: Trigger
+-    if current_iter not in testing_iterations:  # [S2, unofficial]
+-        return
++def compute_psnr(render, gt):
++    # PSNR = 10 * log10(1 / MSE)
++    mse = torch.mean((render - gt) ** 2)
++    if mse == 0:
++        return float('inf')
++    return 10 * torch.log10(1 / mse)
+ 
+-    # Step 3: Configuration
+-    test_cameras = scene.getTestCameras()  # [S2, unofficial]
+-    train_cameras = scene.getTrainCameras()  # [S2, unofficial]
+-    train_sample_indices = list(range(5, 31, 5))  # [S2, unofficial]
+-    train_sample_cameras = [train_cameras[i] for i in train_sample_indices if i < len(train_cameras)]  # [S2, unofficial]
+-    validation_configs = {'test': test_cameras, 'train': train_sample_cameras}  # [S2, unofficial]
+-
+-    # Step 4: Iteration Loop
+-    for config_name, cameras in validation_configs.items():
+-        current_psnr_list = []
+-        for idx, camera in enumerate(cameras):
+-            # 4a: Fetch data
+-            data = fetch_data(camera, phase='val')  # [S1, unofficial]
+-            for view in data:
+-                for key in data[view]:
+-                    data[view][key] = data[view][key].cuda()  # [G]
+-
+-            # 4b: Forward pass
+-            with torch.no_grad():  # [G]
+-                model.eval()  # [G]
+-                rendered_data = model(data, is_train=False)  # [S1, unofficial]
+-                rendered_img = rendered_data['novel_view']['img_pred'][0]  # [S1, unofficial]
+-                rendered_img = pts2render(rendered_img, bg_color=0.0)  # [S1, unofficial]
+-
+-            # 4c: Metric Computation
+-            gt_img = data['novel_view']['img_gt'][0]  # [G]
+-            rendered_clamped = torch.clamp(rendered_img, 0.0, 1.0)  # [S2, unofficial]
+-            gt_clamped = torch.clamp(gt_img, 0.0, 1.0)  # [S2, unofficial]
+-            mse = torch.mean((rendered_clamped - gt_clamped) ** 2)  # [G]
+-            if mse == 0:
+-                psnr_val = 100.0  # [G]
+-            else:
+-                psnr_val = 10 * math.log10(1.0 / mse)  # [G]
+-            current_psnr_list.append(psnr_val)  # [S1, unofficial]
+-
+-            # 4d: Visualization
+-            if idx == show_idx:  # [S1, unofficial]
+-                img_tensor = rendered_img.detach() * 255  # [G]
+-                img_tensor = img_tensor.permute(1, 2, 0).cpu().numpy()  # [G]
+-                cv2.imwrite(f"validation_{config_name}_{idx}.jpg", img_tensor[:, :, ::-1].astype(np.uint8))  # [G]
+-
+-        # Step 5: Aggregation
+-        mean_psnr = sum(current_psnr_list) / len(current_psnr_list)  # [S1, unofficial]
+-        mean_psnr = round(mean_psnr, 4)  # [S1, unofficial]
+-        if mean_psnr < 10:  # [S1, unofficial]
+-            logger.error(f"Validation PSNR too low: {mean_psnr}")
+-            exit()
+-        logger.info(f"{config_name} PSNR: {mean_psnr}")  # [S1, unofficial]
++def save_jpeg(img_np, path):
++    # Convert to uint8 and save
++    img_uint8 = img_np.astype(np.uint8)
++    cv2.imwrite(path, img_uint8[:, :, ::-1])
+ ```
+ 
+-**Parameters:**
+-- `testing_iterations`: List of integers specifying training iterations to run validation [S2, unofficial].
+-- `bg_color`: Background color used for compositing transparent renders (default 0.0) [S1, unofficial].
++## Subtopics
+ 
+-**Edge Cases:**
+-- **MSE = 0:** If the rendered image is identical to the ground truth, PSNR is undefined due to $\log(0)$. Assign a high constant (e.g., 100.0) [G].
+-- **Empty Camera Lists:** If a configuration returns zero cameras, skip the loop or raise an error [G].
+-- **Index Out of Bounds:** When selecting training camera indices, ensure they do not exceed the list length [S2, unofficial].
++### Training Performance Logging
++Logs training performance metrics to a CSV file, including steps, timing, GPU samples, splats, VRAM, RSS, and pause state, with automatic session directory management [S3, unofficial]. It uses the environment variable `TRAIN_PERF` to enable logging: '1' logs to `run_dir`, other value logs to specified path, empty/disabled logs nothing [S3, unofficial]. The CSV header includes: `unix_ms,step,steps,interval_s,step_s,data_wait_s,gpu_sampled_s,gpu_sampled_steps,save_s,divisor,splats,vram_bytes,rss_bytes,paused` [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources. Validation runs only at specified iterations, not every step [S2, unofficial].
+-- **Memory Complexity:** Not given in the sources. The CUDA cache is cleared before execution to manage memory [S1, unofficial].
+-- **Strengths:** Provides objective quantitative feedback (PSNR) and visual sanity checks (saved JPEGs) [S1, unofficial].
+-- **Limitations:** Computationally expensive if validation iterations are frequent [S2, unofficial].
++- **Time Complexity:** Proportional to the number of validation cameras and the cost of a forward pass. Validation is typically run at sparse intervals (`testing_iterations`), so it does not dominate training time if intervals are large.
++- **Memory Complexity:** Requires memory for rendering all validation views. `torch.cuda.empty_cache()` is called before validation to free unused memory [S1, unofficial].
++- **Strengths:** Provides objective quality metrics (PSNR) and visual checks (JPEGs) to monitor convergence.
++- **Limitations:** PSNR is not always correlated with perceptual quality. Computation can be slow for large test sets.
++- **When to use:** During training to monitor model quality and detect overfitting or divergence.
++- **When not to use:** For real-time inference or when computational resources are extremely limited.
+ 
+ ## Background
+-This procedure is part of the training loop for differentiable rendering implementations, specifically noted in repositories handling stereo matching and novel view synthesis [S1, S2, unofficial]. It builds on the general rasterization and optimization loop defined in [Training Pipeline](5325-training-pipeline.md) [G].
++Originated from the standard evaluation practices in 3D Gaussian Splatting implementations, where validation on novel views is essential for assessing reconstruction quality. The method is implemented in various open-source projects, including GPS_plus [S1, unofficial], AVM-GS [S2, unofficial], and spirula-studio [S3, unofficial].
+ 
+ ## Sources
+ [S1] YaourtB/GPS_plus, https://github.com/YaourtB/GPS_plus, fetched 2026-10-27 (unofficial)
+-[S2] Yang-SyZng/AVM-GS, https://github.com/Yang-SyZng/AVM-GS, fetched 2026-10-27 (unofficial)+[S2] Yang-SyZng/AVM-GS, https://github.com/Yang-SyZng/AVM-GS, fetched 2026-10-27 (unofficial)
++[S3] harry7557558/spirula-studio, https://github.com/harry7557558/spirula-studio, fetched 2026-10-27 (unofficial)

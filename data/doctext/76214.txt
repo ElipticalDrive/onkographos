@@ -1,0 +1,3095 @@
+# volpt
+
+![](img/cornellbox_smoke.png)
+
+Volumetric path tracer written in C++.
+
+WIP.
+
+## Features
+
+* Unidirectional path tracing
+* Next event estimation
+* Homogeneous medium
+* Heterogeneous medium
+* [Hero wavelength sampling](https://doi.org/10.1145/3306346.3323025) for chromatic absorption/scattering coefficient
+* [Artist friendly parameter](https://doi.org/10.1145/2897839.2927433) to control absorption/scattering coefficient
+* Random walk subsurface scattering
+* Load obj model
+
+## Requirements
+
+* C++ (20>=)
+* CMake (3.20>=)
+* OpenMP
+* [spdlog](https://github.com/gabime/spdlog)
+* [Embree](https://github.com/embree/embree) (>=3)
+* [OpenVDB](https://www.openvdb.org/)
+
+## Build
+
+|CMake option|Description|
+|:--|:--|
+|BUILD_TESTS|build tests|
+
+```
+git submodule update --init
+mkdir build
+cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make
+```
+
+## Gallery
+
+### Misty cornell box
+
+![](img/CornellBox-Mist.png)
+
+### Subsurface scattering cornell box
+
+![](img/CornellBox_Homo.png)
+
+### Subsurface scattering bunny with glass surface
+
+![](img/sss_bunny.png)
+
+### Smoke cornell box
+
+![](img/cornellbox_smoke.png)
+
+### Colored smoke
+
+![](img/smoke_test.png)
+
+## References
+
+* [Physically Based Rendering:From Theory To Implementation, Matt Pharr, Wenzel Jakob, and Greg Humphreys](https://pbr-book.org/)
+* [Wilkie, Alexander, et al. "Hero wavelength spectral sampling." Computer Graphics Forum. Vol. 33. No. 4. 2014.](https://doi.org/10.1111/cgf.12419)
+* [Novák, Jan, Andrew Selle, and Wojciech Jarosz. "Residual ratio tracking for estimating attenuation in participating media." ACM Trans. Graph. 33.6 (2014): 179-1.](https://doi.org/10.1145/2661229.2661292)
+* [Chiang, Matt Jen-Yuan, Peter Kutz, and Brent Burley. "Practical and controllable subsurface scattering for production path tracing." ACM SIGGRAPH 2016 Talks (2016): 1-2.](https://doi.org/10.1145/2897839.2927433)
+* [Fong, Julian, et al. "Production volume rendering: Siggraph 2017 course." ACM SIGGRAPH 2017 Courses. 2017. 1-79.](https://doi.org/10.1145/3084873.3084907)
+* [Wrenninge, Magnus, Ryusuke Villemin, and Christophe Hery. Path traced subsurface scattering using anisotropic phase functions and non-exponential free flights. Tech. Rep. 17-07, Pixar. https://graphics. pixar. com/library/PathTracedSubsurface, 2017.](https://graphics.pixar.com/library/PathTracedSubsurface/paper.pdf)
+* [Novák, Jan, et al. "Monte Carlo methods for volumetric light transport simulation." Computer Graphics Forum. Vol. 37. No. 2. 2018.](https://doi.org/10.1111/cgf.13383)
+* [Miller, Bailey, Iliyan Georgiev, and Wojciech Jarosz. "A null-scattering path integral formulation of light transport." ACM Transactions on Graphics (TOG) 38.4 (2019): 1-13.](https://doi.org/10.1145/3306346.3323025)
+* [Georgiev, Iliyan, et al. "Integral formulations of volumetric transmittance." ACM Transactions on Graphics (TOG) 38.6 (2019): 1-17.](https://doi.org/10.1145/3355089.3356559)
+
+### examples/main.cpp
+```
+#include "camera.h"
+#include "integrator.h"
+#include "medium.h"
+#include "scene.h"
+
+int main()
+{
+  const uint32_t width = 512;
+  const uint32_t height = 512;
+  const uint32_t n_samples = 100;
+  const uint32_t max_depth = 10000;
+
+  Image image(width, height);
+
+  const Vec3f camera_pos = Vec3f(0, 1, 6);
+  const Vec3f camera_lookat = Vec3f(0, 1, 0);
+  // const Vec3f camera_pos = Vec3f(1, 3, 6);
+  // const Vec3f camera_lookat = Vec3f(-0.254774, 0.653768, -0.172298);
+  const Vec3f camera_forward = normalize(camera_lookat - camera_pos);
+  const float FOV = 0.25 * PI;
+
+  const auto camera =
+      std::make_shared<PinholeCamera>(camera_pos, camera_forward, FOV);
+  // const auto camera =
+  //     std::make_shared<ThinLensCamera>(camera_pos, camera_forward, FOV, 300);
+  // camera->focus(Vec3f(-0.2496, -0.001, 0.6));
+  // camera->focus(camera_lookat);
+
+  // build scene
+  Scene scene;
+  scene.loadObj("CornellBox-Mist.obj");
+  scene.build();
+
+  // render
+  UniformSampler sampler;
+  PathTracing integrator(camera, n_samples, max_depth);
+  integrator.render(scene, sampler, image);
+
+  // gamma correction
+  image.gammaCorrection(2.2f);
+
+  // output image
+  image.writePPM("output.ppm");
+
+  return 0;
+}
+```
+
+### include/camera.h
+```
+#ifndef _CAMERA_H
+#define _CAMERA_H
+#include <spdlog/spdlog.h>
+
+#include <cmath>
+
+#include "core.h"
+#include "ray.h"
+#include "sampler.h"
+
+class Camera
+{
+ protected:
+  Vec3f position;
+  Vec3f forward;
+  Vec3f right;
+  Vec3f up;
+
+ public:
+  Camera(const Vec3f& position, const Vec3f& forward)
+      : position(position), forward(forward)
+  {
+    right = normalize(cross(forward, Vec3f(0, 1, 0)));
+    up = normalize(cross(right, forward));
+
+    spdlog::info("[Camera] position: ({}, {}, {})", position[0], position[1],
+                 position[2]);
+    spdlog::info("[Camera] forward: ({}, {}, {})", forward[0], forward[1],
+                 forward[2]);
+    spdlog::info("[Camera] right: ({}, {}, {})", right[0], right[1], right[2]);
+    spdlog::info("[Camera] up: ({}, {}, {})", up[0], up[1], up[2]);
+  }
+
+  // sample ray emitting from the given sensor coordinate
+  // NOTE: uv: [-1, -1] x [1, 1], sensor coordinate
+  virtual bool sampleRay(const Vec2f& uv, Sampler& sampler, Ray& ray,
+                         float& pdf) const = 0;
+};
+
+// pinhole camera
+class PinholeCamera : public Camera
+{
+ private:
+  float FOV;
+  float focalLength;
+
+ public:
+  PinholeCamera(const Vec3f& position, const Vec3f& forward,
+                float FOV = 0.5f * PI)
+      : Camera(position, forward)
+  {
+    // compute focal length from FOV
+    focalLength = 1.0f / std::tan(0.5f * FOV);
+    spdlog::info("[PinholeCamera] focalLength: {}", focalLength);
+  }
+
+  bool sampleRay(const Vec2f& uv, Sampler& sampler, Ray& ray,
+                 float& pdf) const override
+  {
+    const Vec3f pinholePos = position + focalLength * forward;
+    const Vec3f sensorPos = position + uv[0] * right + uv[1] * up;
+    ray = Ray(sensorPos, normalize(pinholePos - sensorPos));
+    pdf = 1.0f;
+    return true;
+  }
+};
+
+// thin lens camera
+class ThinLensCamera : public Camera
+{
+ private:
+  float focalLength;
+  float lensRadius;
+  // distance from the sensor to the lens
+  float a;
+  // distance from the lens to the object plane
+  float b;
+
+ public:
+  ThinLensCamera(const Vec3f& position, const Vec3f& forward,
+                 float FOV = 0.5f * PI, float fNumber = 8.0f)
+      : Camera(position, forward)
+  {
+    // compute focal length from FOV
+    focalLength = 1.0f / std::tan(0.5f * FOV);
+    spdlog::info("[ThinLensCamera] focalLength: {}", focalLength);
+
+    // compute lens radius from F-number
+    lensRadius = 2.0f * focalLength / fNumber;
+    spdlog::info("[ThinLensCamera] lensRadius: {}", lensRadius);
+
+    // init a, b
+    // focus at inf
+    b = 10000.0f;
+    a = 1.0f / (1.0f / focalLength - 1.0f / b);
+    spdlog::info("[ThinLensCamera] a: {}", a);
+    spdlog::info("[ThinLensCamera] b: {}", b);
+  }
+
+  // focus at specified position
+  void focus(const Vec3f& p)
+  {
+    b = dot(p - position, forward) - a;
+    a = 1.0f / (1.0f / focalLength - 1.0f / b);
+
+    spdlog::info("[ThinLensCamera] focusing at ({}, {}, {})", p[0], p[1], p[2]);
+    spdlog::info("[ThinLensCamera] a: {}", a);
+    spdlog::info("[ThinLensCamera] b: {}", b);
+  }
+
+  bool sampleRay(const Vec2f& uv, Sampler& sampler, Ray& ray,
+                 float& pdf) const override
+  {
+    const Vec3f sensorPos = position + uv[0] * right + uv[1] * up;
+    const Vec3f lensCenter = position + a * forward;
+
+    // sample point on lens
+    float pdf_area;
+    const Vec2f pLens2D = sampleDisk(sampler.getNext2D(), lensRadius, pdf_area);
+    const Vec3f pLens = lensCenter + pLens2D[0] * right + pLens2D[1] * up;
+    Vec3f sensorToLens = normalize(pLens - sensorPos);
+
+    // find intersection point with object plane
+    const Vec3f sensorToLensCenter = normalize(lensCenter - sensorPos);
+    const Vec3f pObject =
+        sensorPos +
+        ((a + b) / dot(sensorToLensCenter, forward)) * sensorToLensCenter;
+
+    ray = Ray(pLens, normalize(pObject - pLens));
+    // pdf = length2(pLens - sensorPos) / dot(sensorToLens, forward) * pdf_area;
+    pdf = 1.0f;
+    return true;
+  }
+};
+
+#endif
+```
+
+### include/core.h
+```
+#ifndef _CORE_H
+#define _CORE_H
+#include <cmath>
+#include <iostream>
+#include <limits>
+
+constexpr float PI = 3.14159265359;
+
+constexpr float PI_MUL_2 = 2.0f * PI;
+constexpr float PI_MUL_4 = 4.0f * PI;
+
+constexpr float PI_DIV_2 = 0.5f * PI;
+constexpr float PI_DIV_4 = 0.25f * PI;
+
+constexpr float PI_INV = 1.0f / PI;
+constexpr float PI_MUL_2_INV = 1.0f / PI_MUL_2;
+constexpr float PI_MUL_4_INV = 1.0f / PI_MUL_4;
+
+constexpr float EPS = 1e-9f;
+constexpr float RAY_EPS = 1e-3f;
+
+inline float rad2deg(float rad) { return 180.0f * rad / PI; }
+inline float deg2rad(float deg) { return deg / 180.0f * PI; }
+
+template <typename T>
+struct Vec2 {
+  T v[2];
+
+  Vec2() { v[0] = v[1] = 0; }
+  Vec2(T x) { v[0] = v[1] = x; }
+  Vec2(T x, T y)
+  {
+    v[0] = x;
+    v[1] = y;
+  }
+
+  T operator[](int i) const { return v[i]; }
+  T& operator[](int i) { return v[i]; }
+
+  Vec2 operator-() const { return Vec2(-v[0], -v[1]); }
+
+  Vec2& operator+=(const Vec2& v)
+  {
+    for (int i = 0; i < 2; ++i) { this->v[i] += v[i]; }
+    return *this;
+  }
+  Vec2& operator*=(const Vec2& v)
+  {
+    for (int i = 0; i < 2; ++i) { this->v[i] *= v[i]; }
+    return *this;
+  }
+  Vec2& operator/=(const Vec2& v)
+  {
+    for (int i = 0; i < 2; ++i) { this->v[i] /= v[i]; }
+    return *this;
+  }
+};
+
+template <typename T>
+inline Vec2<T> operator+(const Vec2<T>& v1, const Vec2<T>& v2)
+{
+  return Vec2<T>(v1[0] + v2[0], v1[1] + v2[1]);
+}
+template <typename T>
+inline Vec2<T> operator+(const Vec2<T>& v1, float k)
+{
+  return Vec2<T>(v1[0] + k, v1[1] + k);
+}
+template <typename T>
+inline Vec2<T> operator+(float k, const Vec2<T>& v2)
+{
+  return v2 + k;
+}
+
+template <typename T>
+inline Vec2<T> operator-(const Vec2<T>& v1, const Vec2<T>& v2)
+{
+  return Vec2<T>(v1[0] - v2[0], v1[1] - v2[1]);
+}
+template <typename T>
+inline Vec2<T> operator-(const Vec2<T>& v1, float k)
+{
+  return Vec2<T>(v1[0] - k, v1[1] - k);
+}
+template <typename T>
+inline Vec2<T> operator-(float k, const Vec2<T>& v2)
+{
+  return Vec2<T>(k - v2[0], k - v2[1]);
+}
+
+template <typename T>
+inline Vec2<T> operator*(const Vec2<T>& v1, const Vec2<T>& v2)
+{
+  return Vec2<T>(v1[0] * v2[0], v1[1] * v2[1]);
+}
+template <typename T>
+inline Vec2<T> operator*(const Vec2<T>& v1, float k)
+{
+  return Vec2<T>(v1[0] * k, v1[1] * k);
+}
+template <typename T>
+inline Vec2<T> operator*(float k, const Vec2<T>& v2)
+{
+  return v2 * k;
+}
+
+template <typename T>
+inline Vec2<T> operator/(const Vec2<T>& v1, const Vec2<T>& v2)
+{
+  return Vec2<T>(v1[0] / v2[0], v1[1] / v2[1]);
+}
+template <typename T>
+inline Vec2<T> operator/(const Vec2<T>& v1, float k)
+{
+  return Vec2<T>(v1[0] / k, v1[1] / k);
+}
+template <typename T>
+inline Vec2<T> operator/(float k, const Vec2<T>& v2)
+{
+  return Vec2<T>(k / v2[0], k / v2[1]);
+}
+
+using Vec2f = Vec2<float>;
+
+template <typename T>
+struct Vec3 {
+  T v[3];
+
+  // implement Point
+  static constexpr int dim = 3;
+
+  Vec3() { v[0] = v[1] = v[2] = 0; }
+  Vec3(T x) { v[0] = v[1] = v[2] = x; }
+  Vec3(T x, T y, T z)
+  {
+    v[0] = x;
+    v[1] = y;
+    v[2] = z;
+  }
+
+  T operator[](int i) const { return v[i]; }
+  T& operator[](int i) { return v[i]; }
+
+  Vec3 operator-() const { return Vec3(-v[0], -v[1], -v[2]); }
+
+  Vec3& operator+=(const Vec3& v)
+  {
+    for (int i = 0; i < 3; ++i) { this->v[i] += v[i]; }
+    return *this;
+  }
+  Vec3& operator*=(const Vec3& v)
+  {
+    for (int i = 0; i < 3; ++i) { this->v[i] *= v[i]; }
+    return *this;
+  }
+  Vec3& operator/=(const Vec3& v)
+  {
+    for (int i = 0; i < 3; ++i) { this->v[i] /= v[i]; }
+    return *this;
+  }
+
+  const T* getPtr() const { return &v[0]; }
+};
+
+template <typename T>
+inline Vec3<T> operator+(const Vec3<T>& v1, const Vec3<T>& v2)
+{
+  return Vec3<T>(v1[0] + v2[0], v1[1] + v2[1], v1[2] + v2[2]);
+}
+template <typename T>
+inline Vec3<T> operator+(const Vec3<T>& v1, float k)
+{
+  return Vec3<T>(v1[0] + k, v1[1] + k, v1[2] + k);
+}
+template <typename T>
+inline Vec3<T> operator+(float k, const Vec3<T>& v2)
+{
+  return v2 + k;
+}
+
+template <typename T>
+inline Vec3<T> operator-(const Vec3<T>& v1, const Vec3<T>& v2)
+{
+  return Vec3<T>(v1[0] - v2[0], v1[1] - v2[1], v1[2] - v2[2]);
+}
+template <typename T>
+inline Vec3<T> operator-(const Vec3<T>& v1, float k)
+{
+  return Vec3<T>(v1[0] - k, v1[1] - k, v1[2] - k);
+}
+template <typename T>
+inline Vec3<T> operator-(float k, const Vec3<T>& v2)
+{
+  return Vec3<T>(k - v2[0], k - v2[1], k - v2[2]);
+}
+
+template <typename T>
+inline Vec3<T> operator*(const Vec3<T>& v1, const Vec3<T>& v2)
+{
+  return Vec3<T>(v1[0] * v2[0], v1[1] * v2[1], v1[2] * v2[2]);
+}
+template <typename T>
+inline Vec3<T> operator*(const Vec3<T>& v1, float k)
+{
+  return Vec3<T>(v1[0] * k, v1[1] * k, v1[2] * k);
+}
+template <typename T>
+inline Vec3<T> operator*(float k, const Vec3<T>& v2)
+{
+  return v2 * k;
+}
+
+template <typename T>
+inline Vec3<T> operator/(const Vec3<T>& v1, const Vec3<T>& v2)
+{
+  return Vec3<T>(v1[0] / v2[0], v1[1] / v2[1], v1[2] / v2[2]);
+}
+template <typename T>
+inline Vec3<T> operator/(const Vec3<T>& v1, float k)
+{
+  return Vec3<T>(v1[0] / k, v1[1] / k, v1[2] / k);
+}
+template <typename T>
+inline Vec3<T> operator/(float k, const Vec3<T>& v2)
+{
+  return Vec3<T>(k / v2[0], k / v2[1], k / v2[2]);
+}
+
+template <typename T>
+inline T dot(const Vec3<T>& v1, const Vec3<T>& v2)
+{
+  return v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2];
+}
+
+template <typename T>
+inline Vec3<T> cross(const Vec3<T>& v1, const Vec3<T>& v2)
+{
+  return Vec3<T>(v1[1] * v2[2] - v1[2] * v2[1], v1[2] * v2[0] - v1[0] * v2[2],
+                 v1[0] * v2[1] - v1[1] * v2[0]);
+}
+
+using Vec3f = Vec3<float>;
+using Vec3ui = Vec3<uint32_t>;
+
+inline float length(const Vec3f& v) { return std::sqrt(dot(v, v)); }
+inline float length2(const Vec3f& v) { return dot(v, v); }
+inline Vec3f normalize(const Vec3f& v) { return v / length(v); }
+
+inline Vec3f exp(const Vec3f& v)
+{
+  return Vec3f(std::exp(v[0]), std::exp(v[1]), std::exp(v[2]));
+}
+
+inline void orthonormalBasis(const Vec3f& n, Vec3f& t, Vec3f& b)
+{
+  if (std::abs(n[1]) < 0.9f) {
+    t = normalize(cross(n, Vec3f(0, 1, 0)));
+  } else {
+    t = normalize(cross(n, Vec3f(0, 0, -1)));
+  }
+  b = normalize(cross(t, n));
+}
+
+// transform direction from world to local
+inline Vec3f worldToLocal(const Vec3f& v, const Vec3f& lx, const Vec3f& ly,
+                          const Vec3f& lz)
+{
+  return Vec3f(dot(v, lx), dot(v, ly), dot(v, lz));
+}
+
+// transform direction from local to world
+inline Vec3f localToWorld(const Vec3f& v, const Vec3f& lx, const Vec3f& ly,
+                          const Vec3f& lz)
+{
+  Vec3f ret;
+  for (int i = 0; i < 3; ++i) {
+    ret[i] = v[0] * lx[i] + v[1] * ly[i] + v[2] * lz[i];
+  }
+  return ret;
+}
+
+// compute cartesian coordinates from spherical coordinates
+inline Vec3f sphericalToCartesian(float theta, float phi)
+{
+  return Vec3f(std::cos(phi) * std::sin(theta), std::cos(theta),
+               std::sin(phi) * std::sin(theta));
+}
+
+struct AABB {
+  Vec3f pMin;
+  Vec3f pMax;
+};
+
+struct SurfaceInfo {
+  Vec3f position;
+  Vec3f ng;    // geometric normal
+  Vec3f ns;    // shading normal
+  Vec3f dpdu;  // tangent vector
+  Vec3f dpdv;  // bitangent vector
+  Vec2f texcoords;
+  Vec2f barycentric;
+};
+
+// forward declaration
+class Primitive;
+
+struct IntersectInfo {
+  float t;  // distance to the hit point
+  SurfaceInfo surfaceInfo;
+  const Primitive* hitPrimitive;
+};
+
+#endif
+```
+
+### include/grid.h
+```
+#ifndef _GRID_H
+#define _GRID_H
+#include <openvdb/openvdb.h>
+#include <openvdb/tools/Interpolation.h>
+
+#include <filesystem>
+
+#include "core.h"
+
+class DensityGrid
+{
+ public:
+  virtual AABB getBounds() const = 0;
+  virtual float getDensity(const Vec3f& pos) const = 0;
+  virtual float getMaxDensity() const = 0;
+};
+
+class OpenVDBGrid : public DensityGrid
+{
+ private:
+  openvdb::FloatGrid::Ptr gridPtr;
+
+ public:
+  OpenVDBGrid(const std::filesystem::path& filepath)
+  {
+    spdlog::info("[OpenVDBGrid] loading: {}", filepath.generic_string());
+
+    openvdb::initialize();
+
+    // open vdb file
+    openvdb::io::File file(filepath.generic_string());
+    if (!file.open()) {
+      spdlog::error("[OpenVDBGrid] failed to load {}",
+                    filepath.generic_string());
+    }
+
+    // get density grid
+    this->gridPtr =
+        openvdb::gridPtrCast<openvdb::FloatGrid>(file.readGrid("density"));
+    if (!this->gridPtr) {
+      spdlog::error("[OpenVDBGrid] failed to load density grid");
+      return;
+    }
+    file.close();
+  }
+
+  AABB getBounds() const override
+  {
+    AABB ret;
+    const auto bbox = gridPtr->evalActiveVoxelBoundingBox();
+    const auto pMin = gridPtr->indexToWorld(bbox.getStart());
+    const auto pMax = gridPtr->indexToWorld(bbox.getEnd());
+    for (int i = 0; i < 3; ++i) {
+      ret.pMin[i] = pMin[i];
+      ret.pMax[i] = pMax[i];
+    }
+    return ret;
+  }
+
+  float getDensity(const Vec3f& pos) const override
+  {
+    const auto gridSampler =
+        openvdb::tools::GridSampler<openvdb::FloatGrid,
+                                    openvdb::tools::BoxSampler>(*this->gridPtr);
+    return gridSampler.wsSample(openvdb::Vec3f(pos[0], pos[1], pos[2]));
+  }
+
+  float getMaxDensity() const override
+  {
+    float minValue, maxValue;
+    gridPtr->evalMinMax(minValue, maxValue);
+    return maxValue;
+  }
+};
+
+#endif
+```
+
+### include/image.h
+```
+#ifndef _IMAGE_H
+#define _IMAGE_H
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include "core.h"
+
+class Image
+{
+ private:
+  uint32_t width;
+  uint32_t height;
+  std::vector<float> pixels;
+
+ private:
+  uint32_t getIndex(uint32_t i, uint32_t j) const
+  {
+    return 3 * j + 3 * width * i;
+  }
+
+ public:
+  Image(uint32_t width, uint32_t height) : width(width), height(height)
+  {
+    pixels.resize(3 * width * height);
+  }
+
+  uint32_t getWidth() const { return width; }
+  uint32_t getHeight() const { return height; }
+
+  Vec3f getPixel(uint32_t i, uint32_t j) const
+  {
+    const uint32_t idx = getIndex(i, j);
+    return Vec3f(pixels[idx], pixels[idx + 1], pixels[idx + 2]);
+  }
+
+  void addPixel(uint32_t i, uint32_t j, const Vec3f& rgb)
+  {
+    const uint32_t idx = getIndex(i, j);
+    pixels[idx] += rgb[0];
+    pixels[idx + 1] += rgb[1];
+    pixels[idx + 2] += rgb[2];
+  }
+
+  void setPixel(uint32_t i, uint32_t j, const Vec3f& rgb)
+  {
+    const uint32_t idx = getIndex(i, j);
+    pixels[idx] = rgb[0];
+    pixels[idx + 1] = rgb[1];
+    pixels[idx + 2] = rgb[2];
+  }
+
+  Image& operator*=(const Vec3f& rgb)
+  {
+    for (int i = 0; i < height; ++i) {
+      for (int j = 0; j < width; ++j) {
+        const Vec3f c = getPixel(i, j);
+        setPixel(i, j, c * rgb);
+      }
+    }
+    return *this;
+  }
+
+  Image& operator/=(const Vec3f& rgb)
+  {
+    for (int i = 0; i < height; ++i) {
+      for (int j = 0; j < width; ++j) {
+        const Vec3f c = getPixel(i, j);
+        setPixel(i, j, c / rgb);
+      }
+    }
+    return *this;
+  }
+
+  void gammaCorrection(const float gamma)
+  {
+    for (int i = 0; i < height; ++i) {
+      for (int j = 0; j < width; ++j) {
+        Vec3f c = getPixel(i, j);
+
+        c[0] = std::pow(c[0], 1.0f / gamma);
+        c[1] = std::pow(c[1], 1.0f / gamma);
+        c[2] = std::pow(c[2], 1.0f / gamma);
+
+        setPixel(i, j, c);
+      }
+    }
+  }
+
+  void writePPM(const std::string& filename)
+  {
+    std::ofstream file(filename);
+
+    file << "P3" << std::endl;
+    file << width << " " << height << std::endl;
+    file << "255" << std::endl;
+
+    for (int i = 0; i < height; ++i) {
+      for (int j = 0; j < width; ++j) {
+        const Vec3f rgb = getPixel(i, j);
+        const uint32_t R =
+            std::clamp(static_cast<uint32_t>(255.0f * rgb[0]), 0u, 255u);
+        const uint32_t G =
+            std::clamp(static_cast<uint32_t>(255.0f * rgb[1]), 0u, 255u);
+        const uint32_t B =
+            std::clamp(static_cast<uint32_t>(255.0f * rgb[2]), 0u, 255u);
+        file << R << " " << G << " " << B << std::endl;
+      }
+    }
+
+    file.close();
+  }
+};
+
+#endif
+```
+
+### include/integrator.h
+```
+#ifndef _INTEGRATOR_H
+#define _INTEGRATOR_H
+
+#include <omp.h>
+
+#include <optional>
+
+#include "camera.h"
+#include "core.h"
+#include "image.h"
+#include "scene.h"
+
+class Integrator
+{
+ protected:
+  const std::shared_ptr<Camera> camera;
+
+ public:
+  Integrator(const std::shared_ptr<Camera> &camera) : camera(camera) {}
+
+  // render scene
+  virtual void render(const Scene &scene, Sampler &sampler, Image &image) = 0;
+
+  // compute cosine term
+  // NOTE: need to account for the asymmetry of BSDF when photon tracing
+  // https://pbr-book.org/3ed-2018/Light_Transport_III_Bidirectional_Methods/The_Path-Space_Measurement_Equation#x3-Non-symmetryDuetoShadingNormals
+  // Veach, Eric. Robust Monte Carlo methods for light transport simulation.
+  // Stanford University, 1998. Section 5.3
+  static float cosTerm(const Vec3f &wo, const Vec3f &wi,
+                       const SurfaceInfo &surfaceInfo,
+                       const TransportDirection &transport_dir)
+  {
+    const float wi_ns = dot(wi, surfaceInfo.ns);
+    const float wi_ng = dot(wi, surfaceInfo.ng);
+    const float wo_ns = dot(wo, surfaceInfo.ns);
+    const float wo_ng = dot(wo, surfaceInfo.ng);
+
+    // prevent light leaks
+    if (wi_ng * wi_ns <= 0 || wo_ng * wo_ns <= 0) { return 0; }
+
+    if (transport_dir == TransportDirection::FROM_CAMERA) {
+      return std::abs(wi_ns);
+    } else if (transport_dir == TransportDirection::FROM_LIGHT) {
+      return std::abs(wo_ns) * std::abs(wi_ng) / std::abs(wo_ng);
+    } else {
+      spdlog::error("[Integrator] invalid transport direction");
+      std::exit(EXIT_FAILURE);
+    }
+  }
+
+  static bool isTransmitted(const Vec3f &wo, const Vec3f &wi, const Vec3f &n)
+  {
+    return (dot(wo, n) < 0) != (dot(wi, n) < 0);
+  }
+
+  static bool isEntered(const Vec3f &wi, const Vec3f &n)
+  {
+    return dot(wi, n) < 0;
+  }
+
+  // push or pop medium
+  static void updateMedium(Ray &ray, const Vec3f &wi, const IntersectInfo &info)
+  {
+    if (isTransmitted(-ray.direction, wi, info.surfaceInfo.ns)) {
+      if (isEntered(wi, info.surfaceInfo.ns)) {
+        if (info.hitPrimitive->hasMedium()) {
+          ray.pushMedium(info.hitPrimitive->getMedium());
+        }
+      } else {
+        ray.popMedium();
+      }
+    }
+  }
+
+  static Vec3f sampleDirectionToLight(const Scene &scene, const Vec3f &pos,
+                                      Sampler &sampler, Vec3f &dir,
+                                      float &dist_to_light, float &pdf)
+  {
+    // sample light
+    float light_choose_prob;
+    const std::shared_ptr<Light> light =
+        scene.sampleLight(sampler, light_choose_prob);
+
+    // sample point on light
+    float light_pos_pdf;
+    const SurfaceInfo light_surf = light->samplePoint(sampler, light_pos_pdf);
+
+    dir = normalize(light_surf.position - pos);
+    dist_to_light = length(light_surf.position - pos);
+
+    // convert point pdf to directional pdf
+    const float cos = std::abs(dot(-dir, light_surf.ns));
+    pdf = light_choose_prob *
+          (dist_to_light * dist_to_light / cos * light_pos_pdf);
+
+    return light->Le(light_surf, -dir);
+  }
+};
+
+// abstraction of path based integrator
+class PathIntegrator : public Integrator
+{
+ private:
+  // number of samples in each pixel
+  const uint32_t n_samples;
+
+ public:
+  // compute radiance coming from the given ray
+  virtual Vec3f integrate(const Ray &ray, const Scene &scene,
+                          Sampler &sampler) const = 0;
+
+  PathIntegrator(const std::shared_ptr<Camera> &camera, uint32_t n_samples)
+      : Integrator(camera), n_samples(n_samples)
+  {
+  }
+
+  void render(const Scene &scene, Sampler &sampler, Image &image) override final
+  {
+    const uint32_t width = image.getWidth();
+    const uint32_t height = image.getHeight();
+
+    spdlog::info("[PathIntegrator] rendering...");
+#pragma omp parallel for collapse(2) schedule(dynamic, 1)
+    for (int i = 0; i < height; ++i) {
+      for (int j = 0; j < width; ++j) {
+        // init sampler for each pixel
+        const std::unique_ptr<Sampler> sampler_per_pixel = sampler.clone();
+        sampler_per_pixel->setSeed((sampler.getSeed() + 1) * (j + width * i));
+
+        // warmup sampler
+        for (uint32_t k = 0; k < 10; ++k) { sampler_per_pixel->getNext1D(); }
+
+        // iteration
+        for (uint32_t k = 0; k < n_samples; ++k) {
+          // SSAA
+          const float u =
+              (2.0f * (j + sampler_per_pixel->getNext1D()) - width) / height;
+          const float v =
+              (2.0f * (i + sampler_per_pixel->getNext1D()) - height) / height;
+
+          Ray ray;
+          float pdf;
+          if (camera->sampleRay(Vec2f(u, v), *sampler_per_pixel, ray, pdf)) {
+            // compute incoming radiance
+            const Vec3f radiance =
+                integrate(ray, scene, *sampler_per_pixel) / pdf;
+
+            // invalid radiance check
+            if (std::isnan(radiance[0]) || std::isnan(radiance[1]) ||
+                std::isnan(radiance[2])) {
+              spdlog::error("[PathIntegrator] radiance is NaN: ({}, {}, {})",
+                            radiance[0], radiance[1], radiance[2]);
+              continue;
+            } else if (std::isinf(radiance[0]) || std::isinf(radiance[1]) ||
+                       std::isinf(radiance[2])) {
+              spdlog::error("[PathIntegrator] radiance is inf: ({}, {}, {})",
+                            radiance[0], radiance[1], radiance[2]);
+              continue;
+            } else if (radiance[0] < 0 || radiance[1] < 0 || radiance[2] < 0) {
+              spdlog::error("[PathIntegrator] radiance is minus: ({}, {}, {})",
+                            radiance[0], radiance[1], radiance[2]);
+              continue;
+            }
+
+            image.addPixel(i, j, radiance);
+          } else {
+            image.setPixel(i, j, Vec3f(0));
+          }
+        }
+      }
+    }
+    spdlog::info("[PathIntegrator] done");
+
+    // take average
+    image /= Vec3f(n_samples);
+  }
+};
+
+// render shading normal
+class NormalIntegrator : public PathIntegrator
+{
+ public:
+  NormalIntegrator(const std::shared_ptr<Camera> &camera)
+      : PathIntegrator(camera, 1)
+  {
+  }
+
+  Vec3f integrate(const Ray &ray_in, const Scene &scene,
+                  Sampler &sampler) const override
+  {
+    IntersectInfo info;
+    if (scene.intersect(ray_in, info)) {
+      return 0.5f * (info.surfaceInfo.ns + 1.0f);
+    } else {
+      return Vec3f(0);
+    }
+  }
+};
+
+// implementation of unidirectional path tracing
+class PathTracing : public PathIntegrator
+{
+ private:
+  const uint32_t maxDepth;
+
+ public:
+  PathTracing(const std::shared_ptr<Camera> &camera, uint32_t n_samples,
+              uint32_t maxDepth = 100)
+      : PathIntegrator(camera, n_samples), maxDepth(maxDepth)
+  {
+  }
+
+  Vec3f integrate(const Ray &ray_in, const Scene &scene,
+                  Sampler &sampler) const override
+  {
+    Vec3f radiance(0);
+    Ray ray = ray_in;
+    ray.throughput = Vec3f(1, 1, 1);
+
+    uint32_t depth = 0;
+    while (depth < maxDepth) {
+      IntersectInfo info;
+      if (scene.intersect(ray, info)) {
+        // russian roulette
+        if (depth > 0) {
+          const float russian_roulette_prob = std::min(
+              (ray.throughput[0] + ray.throughput[1] + ray.throughput[2]) /
+                  3.0f,
+              1.0f);
+          if (sampler.getNext1D() >= russian_roulette_prob) { break; }
+          ray.throughput /= russian_roulette_prob;
+        }
+
+        // sample medium
+        bool is_scattered = false;
+        if (ray.hasMedium()) {
+          const Medium *medium = ray.getCurrentMedium();
+
+          Vec3f pos;
+          Vec3f dir;
+          Vec3f throughput_medium;
+          is_scattered = medium->sampleMedium(ray, info.t, sampler, pos, dir,
+                                              throughput_medium);
+
+          // advance ray
+          ray.origin = pos;
+          ray.direction = dir;
+
+          // update throughput
+          ray.throughput *= throughput_medium;
+        }
+
+        bool is_reflected_or_refracted = false;
+        if (!is_scattered) {
+          // Le
+          if (info.hitPrimitive->hasAreaLight()) {
+            radiance += ray.throughput *
+                        info.hitPrimitive->Le(info.surfaceInfo, -ray.direction);
+            break;
+          }
+
+          // sample direction by BxDF
+          Vec3f dir = ray.direction;
+          if (info.hitPrimitive->hasSurface()) {
+            float pdf_dir;
+            const Vec3f f = info.hitPrimitive->sampleBxDF(
+                -ray.direction, info.surfaceInfo,
+                TransportDirection::FROM_CAMERA, sampler, dir, pdf_dir);
+
+            // update throughput
+            ray.throughput *= f *
+                              cosTerm(-ray.direction, dir, info.surfaceInfo,
+                                      TransportDirection::FROM_CAMERA) /
+                              pdf_dir;
+
+            is_reflected_or_refracted = true;
+          }
+
+          // update ray's medium
+          updateMedium(ray, dir, info);
+
+          // update ray
+          ray.origin = info.surfaceInfo.position;
+          ray.direction = dir;
+        }
+
+        // update depth
+        if (is_scattered || is_reflected_or_refracted) { depth++; }
+      } else {
+        // ray goes out to the sky
+        break;
+      }
+    }
+
+    return radiance;
+  }
+};
+
+// implementation of path tracing with next event estimation
+class PathTracingNEE : public PathIntegrator
+{
+ private:
+  const uint32_t maxDepth;
+
+  static bool isVisible(const Scene &scene, const Vec3f &origin,
+                        const Vec3f &dir, float dist_to_light,
+                        std::stack<const Medium *> &current_mediums,
+                        Sampler &sampler, Vec3f &transmittance)
+  {
+    // create shadow ray
+    Ray shadow_ray;
+    shadow_ray.origin = origin;
+    shadow_ray.direction = dir;
+    shadow_ray.tmax = dist_to_light - RAY_EPS;
+    shadow_ray.mediums = current_mediums;
+
+    // trace shadow ray
+    transmittance = Vec3f(1);
+    while (true) {
+      IntersectInfo shadow_info;
+      if (scene.intersect(shadow_ray, shadow_info)) {
+        // occuluded
+        if (shadow_info.hitPrimitive->hasSurface()) { return false; }
+
+        // update transmittance
+        if (shadow_ray.hasMedium()) {
+          const Medium *medium = shadow_ray.getCurrentMedium();
+          transmittance *= medium->transmittance(
+              shadow_ray.origin, shadow_info.surfaceInfo.position, sampler);
+        }
+
+        // update shadow ray's medium
+        updateMedium(shadow_ray, shadow_ray.direction, shadow_info);
+
+        // advance shadow ray
+        shadow_ray.origin = shadow_info.surfaceInfo.position;
+        shadow_ray.tmax -= shadow_info.t;
+      } else {
+        // update transmittance
+        if (shadow_ray.hasMedium()) {
+          const Medium *medium = shadow_ray.getCurrentMedium();
+          transmittance *= medium->transmittance(
+              shadow_ray.origin, shadow_ray(shadow_ray.tmax), sampler);
+        }
+        break;
+      }
+    }
+
+    return true;
+  }
+
+ public:
+  PathTracingNEE(const std::shared_ptr<Camera> &camera, uint32_t n_samples,
+                 uint32_t maxDepth = 100)
+      : PathIntegrator(camera, n_samples), maxDepth(maxDepth)
+  {
+  }
+
+  Vec3f integrate(const Ray &ray_in, const Scene &scene,
+                  Sampler &sampler) const override
+  {
+    Vec3f radiance(0);
+    Ray ray = ray_in;
+    ray.throughput = Vec3f(1, 1, 1);
+
+    uint32_t depth = 0;
+    while (depth < maxDepth) {
+      IntersectInfo info;
+      if (scene.intersect(ray, info)) {
+        // russian roulette
+        if (depth > 0) {
+          const float russian_roulette_prob = std::min(
+              (ray.throughput[0] + ray.throughput[1] + ray.throughput[2]) /
+                  3.0f,
+              1.0f);
+          if (sampler.getNext1D() >= russian_roulette_prob) { break; }
+          ray.throughput /= russian_roulette_prob;
+        }
+
+        // sample medium
+        bool is_scattered = false;
+        if (ray.hasMedium()) {
+          const Medium *medium = ray.getCurrentMedium();
+
+          // sample collision position, in-scattering direction
+          Vec3f pos;
+          Vec3f dir;
+          Vec3f throughput_medium;
+          is_scattered = medium->sampleMedium(ray, info.t, sampler, pos, dir,
+                                              throughput_medium);
+
+          // next event estimation
+          if (is_scattered) {
+            // sample direction to the light
+            Vec3f dir;
+            float dist_to_light;
+            float pdf_dir;
+            const Vec3f Le = sampleDirectionToLight(scene, pos, sampler, dir,
+                                                    dist_to_light, pdf_dir);
+
+            // test visibility
+            Vec3f transmittance;
+            if (isVisible(scene, pos, dir, dist_to_light, ray.mediums, sampler,
+                          transmittance)) {
+              // add contribution
+              const Medium *medium = ray.getCurrentMedium();
+              const Vec3f f = medium->evalPhaseFunction(-ray.direction, dir);
+              const Vec3f Ls = transmittance * f * Le / pdf_dir;
+              // if (length(Ls) > 1.0f) {
+              //   spdlog::info("firefly");
+              //   spdlog::info("Ls: ({}, {}, {})", Ls[0], Ls[1], Ls[2]);
+              //   spdlog::info("transmittance: ({}, {}, {})", transmittance[0],
+              //                transmittance[1], transmittance[2]);
+              //   spdlog::info("f: ({}, {}, {})", f[0], f[1], f[2]);
+              //   spdlog::info("pdf_dir: {}", pdf_dir);
+              // }
+              radiance += ray.throughput * throughput_medium * Ls;
+            }
+          }
+
+          // advance ray
+          ray.origin = pos;
+          ray.direction = dir;
+
+          // update throughput
+          ray.throughput *= throughput_medium;
+        }
+
+        bool is_reflected_or_refracted = false;
+        if (!is_scattered) {
+          // direct hit to the light
+          if (info.hitPrimitive->hasAreaLight()) {
+            if (depth == 0) {
+              radiance +=
+                  ray.throughput *
+                  info.hitPrimitive->Le(info.surfaceInfo, -ray.direction);
+            }
+            break;
+          }
+
+          // next event estimation
+          if (info.hitPrimitive->hasSurface()) {
+            // sample direction to the light
+            Vec3f dir;
+            float dist_to_light;
+            float pdf_dir;
+            const Vec3f Le =
+                sampleDirectionToLight(scene, info.surfaceInfo.position,
+                                       sampler, dir, dist_to_light, pdf_dir);
+
+            // test visibility
+            Vec3f transmittance;
+            if (isVisible(scene, info.surfaceInfo.position, dir, dist_to_light,
+                          ray.mediums, sampler, transmittance)) {
+              // add contribution
+              const Vec3f f = info.hitPrimitive->evaluateBxDF(
+                  -ray.direction, dir, info.surfaceInfo,
+                  TransportDirection::FROM_CAMERA);
+              radiance += ray.throughput * transmittance * f *
+                          cosTerm(-ray.direction, dir, info.surfaceInfo,
+                                  TransportDirection::FROM_CAMERA) *
+                          Le / pdf_dir;
+            }
+          }
+
+          // sample direction by BxDF
+          Vec3f dir = ray.direction;
+          if (info.hitPrimitive->hasSurface()) {
+            float pdf_dir;
+            const Vec3f f = info.hitPrimitive->sampleBxDF(
+                -ray.direction, info.surfaceInfo,
+                TransportDirection::FROM_CAMERA, sampler, dir, pdf_dir);
+
+            // update throughput
+            ray.throughput *= f *
+                              cosTerm(-ray.direction, dir, info.surfaceInfo,
+                                      TransportDirection::FROM_CAMERA) /
+                              pdf_dir;
+
+            is_reflected_or_refracted = true;
+          }
+
+          // update ray's medium
+          updateMedium(ray, dir, info);
+
+          // update ray
+          ray.origin = info.surfaceInfo.position;
+          ray.direction = dir;
+        }
+
+        // update depth
+        if (is_scattered || is_reflected_or_refracted) { depth++; }
+      } else {
+        // ray goes out to the sky
+        break;
+      }
+    }
+    return radiance;
+  }
+};
+
+#endif
+```
+
+### include/light.h
+```
+#ifndef _LIGHT_H
+#define _LIGHT_H
+
+#include "core.h"
+#include "sampler.h"
+#include "triangle.h"
+
+// light interface
+class Light
+{
+ public:
+  virtual Vec3f Le(const SurfaceInfo& info, const Vec3f& dir) const = 0;
+  virtual SurfaceInfo samplePoint(Sampler& sampler, float& pdf) const = 0;
+  virtual Vec3f sampleDirection(const SurfaceInfo& surfInfo, Sampler& sampler,
+                                float& pdf) const = 0;
+};
+
+class AreaLight : public Light
+{
+ private:
+  const Vec3f le;  // emission
+  const Triangle* triangle;
+
+ public:
+  AreaLight(const Vec3f& le, const Triangle* triangle)
+      : le(le), triangle(triangle)
+  {
+  }
+
+  // return emission
+  Vec3f Le(const SurfaceInfo& info, const Vec3f& dir) const override
+  {
+    if (dot(dir, info.ns) > 0) {
+      return le;
+    }
+    // backface
+    else {
+      return Vec3f(0);
+    }
+  }
+
+  // sample point on the light
+  SurfaceInfo samplePoint(Sampler& sampler, float& pdf) const override
+  {
+    return triangle->samplePoint(sampler, pdf);
+  }
+
+  // sample direction from the light
+  Vec3f sampleDirection(const SurfaceInfo& surfInfo, Sampler& sampler,
+                        float& pdf) const override
+  {
+    const Vec3f dir = sampleCosineHemisphere(sampler.getNext2D(), pdf);
+
+    // transform direction from local to world
+    return localToWorld(dir, surfInfo.dpdu, surfInfo.ns, surfInfo.dpdv);
+  }
+};
+
+#endif
+```
+
+### include/material.h
+```
+#ifndef _MATERIAL_H
+#define _MATERIAL_H
+#include <memory>
+
+#include "core.h"
+#include "sampler.h"
+
+enum class BxDFType { DIFFUSE, SPECULAR };
+
+enum class TransportDirection { FROM_LIGHT, FROM_CAMERA };
+
+// represent BRDF or BTDF
+// direction vectors are in tangent space(x: tangent, y: normal, z: bitangent)
+class BxDF
+{
+ private:
+  BxDFType type;
+
+ public:
+  BxDF(const BxDFType& type) : type(type) {}
+
+  static float cosTheta(const Vec3f& v) { return v[1]; }
+  static float absCosTheta(const Vec3f& v) { return std::abs(cosTheta(v)); }
+
+  // compute reflection direction
+  static Vec3f reflect(const Vec3f& v, const Vec3f& n)
+  {
+    return -v + 2.0f * dot(v, n) * n;
+  }
+
+  // compute refracted direction
+  static bool refract(const Vec3f& v, const Vec3f& n, float iorI, float iorT,
+                      Vec3f& t)
+  {
+    const Vec3f t_h = -iorI / iorT * (v - dot(v, n) * n);
+    // total reflection
+    if (length2(t_h) > 1.0f) { return false; }
+    const Vec3f t_p = -std::sqrt(std::max(1.0f - length2(t_h), 0.0f)) * n;
+    t = t_h + t_p;
+    return true;
+  }
+
+  // schlick approximation of fresnel reflectance
+  static float fresnel(float cosThetaI, float iorI, float iorT)
+  {
+    const float f0 =
+        (iorI - iorT) * (iorI - iorT) / ((iorI + iorT) * (iorI + iorT));
+    const auto pow5 = [](float x) { return x * x * x * x * x; };
+    return f0 + (1.0f - f0) * pow5(std::max(1.0f - std::abs(cosThetaI), 0.0f));
+  }
+
+  // get BxDF type
+  BxDFType getType() const { return type; }
+
+  // evaluate BxDF
+  virtual Vec3f evaluate(const Vec3f& wo, const Vec3f& wi,
+                         const TransportDirection& transport_dir) const = 0;
+
+  // sample direction by BxDF.
+  // its pdf is propotional to the shape of BxDF
+  virtual Vec3f sampleDirection(const Vec3f& wo,
+                                const TransportDirection& transport_dir,
+                                Sampler& sampler, Vec3f& wi,
+                                float& pdf) const = 0;
+};
+
+class Lambert : public BxDF
+{
+ private:
+  Vec3f rho;
+
+ public:
+  Lambert(const Vec3f& rho) : BxDF(BxDFType::DIFFUSE), rho(rho) {}
+
+  Vec3f evaluate(const Vec3f& wo, const Vec3f& wi,
+                 const TransportDirection& transport_dir) const override
+  {
+    // when wo, wi is under the surface, return 0
+    const float cosThetaO = cosTheta(wo);
+    const float cosThetaI = cosTheta(wi);
+    if (cosThetaO < 0 || cosThetaI < 0) return Vec3f(0);
+
+    return rho / PI;
+  }
+
+  Vec3f sampleDirection(const Vec3f& wo,
+                        const TransportDirection& transport_dir,
+                        Sampler& sampler, Vec3f& wi, float& pdf) const override
+  {
+    // cosine weighted hemisphere sampling
+    wi = sampleCosineHemisphere(sampler.getNext2D(), pdf);
+
+    return evaluate(wo, wi, transport_dir);
+  }
+};
+
+class Mirror : public BxDF
+{
+ private:
+  Vec3f rho;
+
+ public:
+  Mirror(const Vec3f& rho) : BxDF(BxDFType::SPECULAR), rho(rho) {}
+
+  // NOTE: delta function
+  Vec3f evaluate(const Vec3f& wo, const Vec3f& wi,
+                 const TransportDirection& transport_dir) const override
+  {
+    return Vec3f(0);
+  }
+
+  Vec3f sampleDirection(const Vec3f& wo,
+                        const TransportDirection& transport_dir,
+                        Sampler& sampler, Vec3f& wi, float& pdf) const override
+  {
+    wi = reflect(wo, Vec3f(0, 1, 0));
+    pdf = 1.0f;
+
+    return rho / absCosTheta(wi);
+  }
+};
+
+// NOTE: due to the asymmetry of BSDF, we need to use a different scaling factor
+// for photon tracing
+// https://pbr-book.org/3ed-2018/Light_Transport_III_Bidirectional_Methods/The_Path-Space_Measurement_Equation#Non-symmetricScattering
+class Glass : public BxDF
+{
+ private:
+  Vec3f rho;
+  float ior;
+
+ public:
+  Glass(const Vec3f& rho, float ior)
+      : BxDF(BxDFType::SPECULAR), rho(rho), ior(ior)
+  {
+  }
+
+  // NOTE: delta function
+  Vec3f evaluate(const Vec3f& wo, const Vec3f& wi,
+                 const TransportDirection& transport_dir) const override
+  {
+    return Vec3f(0);
+  }
+
+  Vec3f sampleDirection(const Vec3f& wo,
+                        const TransportDirection& transport_dir,
+                        Sampler& sampler, Vec3f& wi, float& pdf) const override
+  {
+    // set appropriate ior, normal
+    float iorO, iorI;
+    Vec3f n;
+    if (wo[1] > 0) {
+      iorO = 1.0f;
+      iorI = ior;
+      n = Vec3f(0, 1, 0);
+    } else {
+      iorO = ior;
+      iorI = 1.0f;
+      n = Vec3f(0, -1, 0);
+    }
+
+    // fresnel reflectance
+    const float fr = fresnel(dot(wo, n), iorO, iorI);
+
+    // reflection
+    if (sampler.getNext1D() < fr) {
+      wi = reflect(wo, n);
+      pdf = 1.0f;
+      return rho / absCosTheta(wi);
+    }
+    // refraction
+    else {
+      Vec3f tr;
+      if (refract(wo, n, iorO, iorI, tr)) {
+        wi = tr;
+        pdf = 1.0f;
+
+        float scalling = 1.0f;
+        if (transport_dir == TransportDirection::FROM_CAMERA) {
+          scalling = (iorO * iorO) / (iorI * iorI);
+        }
+
+        return scalling * rho / absCosTheta(wi);
+      }
+      // total reflection
+      else {
+        wi = reflect(wo, n);
+        pdf = 1.0f;
+        return rho / absCosTheta(wi);
+      }
+    }
+  }
+};
+
+#endif
+```
+
+### include/medium.h
+```
+#ifndef _MEDIUM_H
+#define _MEDIUM_H
+#include <memory>
+
+#include "core.h"
+#include "grid.h"
+#include "sampler.h"
+
+class PhaseFunction
+{
+ public:
+  // evaluate phase function
+  virtual float evaluate(const Vec3f& wo, const Vec3f& wi) const = 0;
+
+  // sample incident direction
+  // its pdf is propotional to the shape of phase function
+  virtual float sampleDirection(const Vec3f& wo, Sampler& sampler,
+                                Vec3f& wi) const = 0;
+};
+
+// https://pbr-book.org/3ed-2018/Volume_Scattering/Phase_Functions#PhaseHG
+class HenyeyGreenstein : public PhaseFunction
+{
+ private:
+  const float g;
+
+ public:
+  HenyeyGreenstein(float g) : g(g) {}
+
+  float evaluate(const Vec3f& wo, const Vec3f& wi) const override
+  {
+    const float cosTheta = dot(wo, wi);
+    const float denom = 1 + g * g + 2 * g * cosTheta;
+    return PI_MUL_4_INV * (1 - g * g) / (denom * std::sqrt(denom));
+  }
+
+  // https://pbr-book.org/3ed-2018/Light_Transport_II_Volume_Rendering/Sampling_Volume_Scattering#SamplingPhaseFunctions
+  float sampleDirection(const Vec3f& wo, Sampler& sampler,
+                        Vec3f& wi) const override
+  {
+    const Vec2 u = sampler.getNext2D();
+
+    // sample cosTheta
+    float cosTheta;
+    if (std::abs(g) < 1e-3) {
+      // when g is small, sample direction uniformly
+      cosTheta = 1 - 2 * u[0];
+    } else {
+      const float sqrTerm = (1 - g * g) / (1 - g + 2 * g * u[0]);
+      cosTheta = (1 + g * g - sqrTerm * sqrTerm) / (2 * g);
+    }
+
+    // compute direction
+    const float sinTheta =
+        std::sqrt(std::max(1.0f - cosTheta * cosTheta, 0.0f));
+    const float phi = 2 * PI * u[1];
+    const Vec3f wi_local =
+        Vec3f(std::cos(phi) * sinTheta, cosTheta, std::sin(phi) * sinTheta);
+
+    // local to world transform
+    Vec3f t, b;
+    orthonormalBasis(-wo, t, b);
+    wi = localToWorld(wi_local, t, -wo, b);
+
+    return evaluate(wo, wi);
+  }
+};
+
+class Medium
+{
+ protected:
+  const std::shared_ptr<PhaseFunction> phaseFunction;
+
+  static Vec3f analyticTransmittance(float t, const Vec3f& sigma)
+  {
+    return exp(-sigma * t);
+  }
+
+  // sample index of wavelength by (throughput * single scattering albedo)
+  // Wrenninge, Magnus, Ryusuke Villemin, and Christophe Hery. Path traced
+  // subsurface scattering using anisotropic phase functions and
+  // non-exponential free flights. Tech. Rep. 17-07, Pixar. https://graphics.
+  // pixar. com/library/PathTracedSubsurface, 2017.
+  static uint32_t sampleWavelength(const Vec3f& throughput, const Vec3f& albedo,
+                                   Sampler& sampler, Vec3f& pmf)
+  {
+    // create empirical discrete distribution
+    const Vec3f throughput_albedo = throughput * albedo;
+    DiscreteEmpiricalDistribution1D distribution(throughput_albedo.getPtr(), 3);
+    pmf = Vec3f(distribution.getPDF(0), distribution.getPDF(1),
+                distribution.getPDF(2));
+
+    // sample index of wavelength from empirical discrete distribution
+    float _pdf;
+    const uint32_t channel = distribution.sample(sampler.getNext1D(), _pdf);
+    return channel;
+  }
+
+ public:
+  Medium(float g) : phaseFunction(std::make_shared<HenyeyGreenstein>(g)) {}
+
+  // false means there is no collision
+  virtual bool sampleMedium(const Ray& ray, float distToSurface,
+                            Sampler& sampler, Vec3f& pos, Vec3f& dir,
+                            Vec3f& throughput) const = 0;
+
+  virtual Vec3f transmittance(const Vec3f& p1, const Vec3f& p2,
+                              Sampler& sampler) const = 0;
+
+  Vec3f evalPhaseFunction(const Vec3f& wo, const Vec3f& wi) const
+  {
+    return phaseFunction->evaluate(wo, wi);
+  }
+};
+
+// with spectral MIS
+class HomogeneousMedium : public Medium
+{
+ private:
+  const Vec3f sigma_a;  // absorption coefficient
+  const Vec3f sigma_s;  // scattering coefficient
+  const Vec3f sigma_t;  // extinction coefficient
+
+ public:
+  HomogeneousMedium(float g, Vec3f sigma_a, Vec3f sigma_s)
+      : Medium(g),
+        sigma_a(sigma_a),
+        sigma_s(sigma_s),
+        sigma_t(sigma_a + sigma_s)
+  {
+  }
+
+  // NOTE: ignore emission
+  bool sampleMedium(const Ray& ray, float distToSurface, Sampler& sampler,
+                    Vec3f& pos, Vec3f& dir, Vec3f& throughput) const override
+  {
+    // sample wavelength
+    Vec3f pmf_wavelength;
+    const uint32_t channel = sampleWavelength(
+        ray.throughput, (sigma_s / sigma_t), sampler, pmf_wavelength);
+
+    // sample collision-free distance
+    const float t = -std::log(std::max(1.0f - sampler.getNext1D(), 0.0f)) /
+                    sigma_t[channel];
+
+    // hit volume boundary, no collision
+    if (t > distToSurface - RAY_EPS) {
+      pos = ray(distToSurface);
+      dir = ray.direction;
+
+      const Vec3f tr = analyticTransmittance(distToSurface, sigma_t);
+      const Vec3f p_surface = tr;
+      const Vec3f pdf = pmf_wavelength * p_surface;
+      throughput = tr / (pdf[0] + pdf[1] + pdf[2]);
+      return false;
+    }
+
+    // in-scattering
+    // sample direction
+    phaseFunction->sampleDirection(-ray.direction, sampler, dir);
+
+    pos = ray(t);
+    const Vec3f tr = analyticTransmittance(t, sigma_t);
+    const Vec3f pdf_distance = sigma_t * tr;
+    const Vec3f pdf = pmf_wavelength * pdf_distance;
+    throughput = (tr * sigma_s) / (pdf[0] + pdf[1] + pdf[2]);
+
+    return true;
+  }
+
+  Vec3f transmittance(const Vec3f& p1, const Vec3f& p2,
+                      Sampler& sampler) const override
+  {
+    const float t = length(p1 - p2);
+    return analyticTransmittance(t, sigma_t);
+  }
+};
+
+// achromatic version
+class HomogeneousMediumAchromatic : public Medium
+{
+ private:
+  const float sigma_a;  // absorption coefficient
+  const float sigma_s;  // scattering coefficient
+  const float sigma_t;  // extinction coefficient
+
+ public:
+  HomogeneousMediumAchromatic(float g, float sigma_a, float sigma_s)
+      : Medium(g),
+        sigma_a(sigma_a),
+        sigma_s(sigma_s),
+        sigma_t(sigma_a + sigma_s)
+  {
+  }
+
+  // NOTE: ignore emission
+  bool sampleMedium(const Ray& ray, float distToSurface, Sampler& sampler,
+                    Vec3f& pos, Vec3f& dir, Vec3f& throughput) const override
+  {
+    // sample collision-free distance
+    const float t =
+        -std::log(std::max(1.0f - sampler.getNext1D(), 0.0f)) / sigma_t;
+
+    // hit volume boundary, no collision
+    if (t > distToSurface - RAY_EPS) {
+      pos = ray(distToSurface);
+      dir = ray.direction;
+      throughput = Vec3f(1);
+      return false;
+    }
+
+    // in-scattering
+    // sample direction
+    phaseFunction->sampleDirection(-ray.direction, sampler, dir);
+
+    pos = ray(t);
+    throughput = Vec3f(sigma_s / sigma_t);
+
+    return true;
+  }
+
+  Vec3f transmittance(const Vec3f& p1, const Vec3f& p2,
+                      Sampler& sampler) const override
+  {
+    const float t = length(p1 - p2);
+    return analyticTransmittance(t, Vec3f(sigma_t));
+  }
+};
+
+// no spectral MIS version
+class HomogeneousMediumNoMIS : public Medium
+{
+ private:
+  const Vec3f sigma_a;  // absorption coefficient
+  const Vec3f sigma_s;  // scattering coefficient
+  const Vec3f sigma_t;  // extinction coefficient
+
+ public:
+  HomogeneousMediumNoMIS(float g, Vec3f sigma_a, Vec3f sigma_s)
+      : Medium(g),
+        sigma_a(sigma_a),
+        sigma_s(sigma_s),
+        sigma_t(sigma_a + sigma_s)
+  {
+  }
+
+  // NOTE: ignore emission
+  bool sampleMedium(const Ray& ray, float distToSurface, Sampler& sampler,
+                    Vec3f& pos, Vec3f& dir, Vec3f& throughput) const override
+  {
+    // sample wavelength
+    int channel = 3 * sampler.getNext1D();
+    if (channel == 3) channel--;
+    const float pmf_wavelength = 1.0f / 3.0f;
+
+    // sample collision-free distance
+    const float t = -std::log(std::max(1.0f - sampler.getNext1D(), 0.0f)) /
+                    sigma_t[channel];
+    const float pdf_distance =
+        sigma_t[channel] * std::exp(-sigma_t[channel] * t);
+
+    // hit volume boundary, no collision
+    if (t > distToSurface - RAY_EPS) {
+      pos = ray(distToSurface);
+      dir = ray.direction;
+      const Vec3f tr = analyticTransmittance(distToSurface, sigma_t);
+      const float p_surface = std::exp(-sigma_t[channel] * distToSurface);
+      throughput = 1.0f / 3.0f * tr / (pmf_wavelength * p_surface);
+      return false;
+    }
+
+    // in-scattering
+    // sample direction
+    phaseFunction->sampleDirection(-ray.direction, sampler, dir);
+
+    pos = ray(t);
+    throughput = 1.0f / 3.0f * analyticTransmittance(t, sigma_t) * sigma_s /
+                 (pmf_wavelength * pdf_distance);
+
+    return true;
+  }
+
+  Vec3f transmittance(const Vec3f& p1, const Vec3f& p2,
+                      Sampler& sampler) const override
+  {
+    const float t = length(p1 - p2);
+    return analyticTransmittance(t, sigma_t);
+  }
+};
+
+class HeterogeneousMedium : public Medium
+{
+ private:
+  const DensityGrid* densityGridPtr;
+  const Vec3f absorptionColor;
+  const Vec3f scatteringColor;
+  const float densityMultiplier;
+
+  float majorant;
+  float invMajorant;
+
+  float getDensity(const Vec3f& p) const
+  {
+    return this->densityMultiplier * this->densityGridPtr->getDensity(p);
+  }
+
+  float getMaxDensity() const
+  {
+    return this->densityMultiplier * this->densityGridPtr->getMaxDensity();
+  }
+
+  Vec3f getSigma_a(float density) const
+  {
+    return this->absorptionColor * density;
+  }
+
+  Vec3f getSigma_s(float density) const
+  {
+    return this->scatteringColor * density;
+  }
+
+ public:
+  HeterogeneousMedium(float g, const DensityGrid* densityGridPtr,
+                      const Vec3f& absorptionColor,
+                      const Vec3f& scatteringColor,
+                      float densityMultiplier = 1.0f)
+      : Medium(g),
+        densityGridPtr(densityGridPtr),
+        absorptionColor(absorptionColor),
+        scatteringColor(scatteringColor),
+        densityMultiplier(densityMultiplier)
+  {
+    // compute wavelength independent majorant
+    const float max_density = getMaxDensity();
+    const Vec3f m =
+        absorptionColor * max_density + scatteringColor * max_density;
+    majorant = std::max(m[0], std::max(m[1], m[2]));
+    invMajorant = 1.0f / majorant;
+  }
+
+  // delta tracking
+  // ignore emission
+  bool sampleMedium(const Ray& ray, float distToSurface, Sampler& sampler,
+                    Vec3f& pos, Vec3f& dir, Vec3f& throughput) const override
+  {
+    // loop until in-scattering or exiting medium happens
+    Vec3f throughput_tracking(1, 1, 1);
+    float t = ray.tmin;
+
+    // init sigma_a
+    // NOTE: for computing throughput_albedo
+    const float density = getDensity(ray(t));
+    Vec3f sigma_a = absorptionColor * density;
+
+    while (true) {
+      // sample wavelength
+      Vec3f pmf_wavelength;
+      const uint32_t channel = sampleWavelength(
+          ray.throughput * throughput_tracking,
+          (Vec3f(majorant) - sigma_a) * invMajorant, sampler, pmf_wavelength);
+
+      // sample collision-free distance
+      const float s =
+          -std::log(std::max(1.0f - sampler.getNext1D(), 0.0f)) * invMajorant;
+      t += s;
+
+      // hit volume boundary, no collision
+      if (t > distToSurface - RAY_EPS) {
+        pos = ray(distToSurface);
+        dir = ray.direction;
+
+        const float dist_to_surface_from_current_pos =
+            s - (t - (distToSurface - RAY_EPS));
+        const Vec3f tr = analyticTransmittance(dist_to_surface_from_current_pos,
+                                               Vec3f(majorant));
+        const Vec3f p_surface = tr;
+        const Vec3f pdf = pmf_wavelength * p_surface;
+        throughput_tracking *= tr / (pdf[0] + pdf[1] + pdf[2]);
+
+        // nan check
+        if (std::isnan(throughput_tracking[0]) ||
+            std::isnan(throughput_tracking[1]) ||
+            std::isnan(throughput_tracking[2])) {
+          throughput = Vec3f(0);
+        } else {
+          throughput = throughput_tracking;
+        }
+
+        return false;
+      }
+
+      // compute russian roulette probability
+      const float density = getDensity(ray(t));
+      const Vec3f sigma_s = getSigma_s(density);
+      sigma_a = getSigma_a(density);
+      const Vec3f sigma_n = Vec3f(majorant) - sigma_a - sigma_s;
+      const Vec3f P_s = sigma_s / (sigma_s + sigma_n);
+      const Vec3f P_n = sigma_n / (sigma_s + sigma_n);
+
+      // In-Scattering
+      if (sampler.getNext1D() < P_s[channel]) {
+        pos = ray(t);
+        phaseFunction->sampleDirection(-ray.direction, sampler, dir);
+
+        const Vec3f tr = analyticTransmittance(s, Vec3f(majorant));
+        const Vec3f pdf_distance = majorant * tr;
+        const Vec3f pdf = pmf_wavelength * pdf_distance * P_s;
+        throughput_tracking *= (tr * sigma_s) / (pdf[0] + pdf[1] + pdf[2]);
+
+        // nan check
+        if (std::isnan(throughput_tracking[0]) ||
+            std::isnan(throughput_tracking[1]) ||
+            std::isnan(throughput_tracking[2])) {
+          throughput = Vec3f(0);
+        } else {
+          throughput = throughput_tracking;
+        }
+
+        return true;
+      }
+
+      // Null-Scattering
+      // update throughput
+      const Vec3f tr = analyticTransmittance(s, Vec3f(majorant));
+      const Vec3f pdf_distance = majorant * tr;
+      const Vec3f pdf = pmf_wavelength * pdf_distance * P_n;
+      throughput_tracking *= (tr * sigma_n) / (pdf[0] + pdf[1] + pdf[2]);
+    }
+  }
+
+  Vec3f deltaTrackingTransmittance(const Vec3f& p1, const Vec3f& p2,
+                                   Sampler& sampler) const
+  {
+    const float distToEnd = length(p1 - p2);
+
+    // sample wavelength
+    Vec3f pmf_wavelength;
+    const uint32_t channel =
+        sampleWavelength(Vec3f(1), Vec3f(1), sampler, pmf_wavelength);
+
+    // loop until collision occurs or exit medium
+    float t = 0;
+    Ray ray(p1, normalize(p2 - p1));
+    Vec3f transmittance(1);
+    while (true) {
+      // sample collision-free distance
+      const float s =
+          -std::log(std::max(1.0f - sampler.getNext1D(), 0.0f)) * invMajorant;
+      t += s;
+
+      // no collision
+      if (t > distToEnd) { return transmittance; }
+
+      // compute russian roulette probability
+      const float density = getDensity(ray(t));
+      const Vec3f sigma_a = getSigma_a(density);
+      const Vec3f sigma_s = getSigma_s(density);
+      const Vec3f sigma_n = Vec3f(majorant) - sigma_a - sigma_s;
+      const Vec3f P_n = sigma_n * invMajorant;
+
+      // collision
+      if (sampler.getNext1D() > P_n[channel]) { return Vec3f(0); }
+
+      transmittance *= (sigma_n / sigma_n[channel]);
+    }
+
+    return transmittance;
+  }
+
+  Vec3f ratioTrackingTransmittance(const Vec3f& p1, const Vec3f& p2,
+                                   Sampler& sampler) const
+  {
+    const float distToEnd = length(p1 - p2);
+
+    // loop until collision occurs or exit medium
+    float t = 0;
+    Ray ray(p1, normalize(p2 - p1));
+    Vec3f transmittance(1);
+    while (true) {
+      // sample collision-free distance
+      const float s =
+          -std::log(std::max(1.0f - sampler.getNext1D(), 0.0f)) * invMajorant;
+      t += s;
+
+      // no collision
+      if (t > distToEnd) { break; }
+
+      // ratio tracking
+      const float density = getDensity(ray(t));
+      const Vec3f sigma_n =
+          Vec3f(majorant) - getSigma_a(density) - getSigma_s(density);
+      transmittance *= (sigma_n * invMajorant);
+    }
+
+    return transmittance;
+  }
+
+  Vec3f transmittance(const Vec3f& p1, const Vec3f& p2,
+                      Sampler& sampler) const override
+  {
+    return ratioTrackingTransmittance(p1, p2, sampler);
+  }
+};
+
+#endif
+```
+
+### include/primitive.h
+```
+#ifndef _PRIMITIVE_H
+#define _PRIMITIVE_H
+#include <cmath>
+#include <memory>
+
+#include "light.h"
+#include "material.h"
+#include "medium.h"
+#include "triangle.h"
+
+// primitive provides an abstraction layer of the objects in the scene
+class Primitive
+{
+ private:
+  const Triangle* triangle;
+  const BxDF* bxdf;
+  const Medium* medium;
+  const Light* areaLight;
+
+ public:
+  Primitive(const Triangle* triangle, const BxDF* bxdf,
+            const Medium* medium = nullptr, const Light* areaLight = nullptr)
+      : triangle(triangle), bxdf(bxdf), medium(medium), areaLight(areaLight)
+  {
+  }
+
+  bool hasSurface() const { return bxdf != nullptr; }
+  bool hasMedium() const { return medium != nullptr; }
+  bool hasAreaLight() const { return areaLight != nullptr; }
+
+  // return emission
+  Vec3f Le(const SurfaceInfo& surfInfo, const Vec3f& dir) const
+  {
+    return areaLight->Le(surfInfo, dir);
+  }
+
+  const Medium* getMedium() const { return medium; }
+
+  BxDFType getBxDFType() const { return bxdf->getType(); }
+
+  Vec3f evaluateBxDF(const Vec3f& wo, const Vec3f& wi,
+                     const SurfaceInfo& surfInfo,
+                     const TransportDirection& mode) const
+  {
+    // world to local transform
+    const Vec3f wo_l =
+        worldToLocal(wo, surfInfo.dpdu, surfInfo.ns, surfInfo.dpdv);
+    const Vec3f wi_l =
+        worldToLocal(wi, surfInfo.dpdu, surfInfo.ns, surfInfo.dpdv);
+
+    return bxdf->evaluate(wo_l, wi_l, mode);
+  }
+
+  // sample direction by BxDF
+  // its pdf is propotional to the shape of BxDF
+  Vec3f sampleBxDF(const Vec3f& wo, const SurfaceInfo& surfInfo,
+                   const TransportDirection& mode, Sampler& sampler, Vec3f& wi,
+                   float& pdf) const
+  {
+    // world to local transform
+    const Vec3f wo_l =
+        worldToLocal(wo, surfInfo.dpdu, surfInfo.ns, surfInfo.dpdv);
+
+    // sample direction in tangent space
+    Vec3f wi_l;
+    const Vec3f f = bxdf->sampleDirection(wo_l, mode, sampler, wi_l, pdf);
+
+    // local to world transform
+    wi = localToWorld(wi_l, surfInfo.dpdu, surfInfo.ns, surfInfo.dpdv);
+
+    return f;
+  }
+};
+
+#endif
+```
+
+### include/ray.h
+```
+#ifndef _RAY_H
+#define _RAY_H
+#include <stack>
+
+#include "core.h"
+
+// forward declaration
+class Medium;
+
+class Ray
+{
+ public:
+  Vec3f origin;
+  Vec3f direction;
+  Vec3f throughput;
+  std::stack<const Medium*> mediums;
+
+  static constexpr float tmin = RAY_EPS;
+  float tmax = std::numeric_limits<float>::max();
+
+  Ray() {}
+  Ray(const Vec3f& origin, const Vec3f& direction)
+      : origin(origin), direction(direction)
+  {
+  }
+
+  Vec3f operator()(float t) const { return origin + t * direction; }
+
+  bool hasMedium() const { return !mediums.empty(); }
+
+  const Medium* getCurrentMedium() const { return mediums.top(); }
+
+  void pushMedium(const Medium* medium) { mediums.push(medium); }
+
+  void popMedium()
+  {
+    if (hasMedium()) { mediums.pop(); }
+  }
+};
+
+#endif
+```
+
+### include/sampler.h
+```
+#ifndef _SAMPLER_H
+#define _SAMPLER_H
+#include <cstdint>
+#include <limits>
+#include <memory>
+
+#include "core.h"
+
+// *Really* minimal PCG32 code / (c) 2014 M.E. O'Neill / pcg-random.org
+// Licensed under Apache License 2.0 (NO WARRANTY, etc. see website)
+typedef struct {
+  uint64_t state;
+  uint64_t inc;
+} pcg32_random_t;
+
+inline uint32_t pcg32_random_r(pcg32_random_t* rng)
+{
+  uint64_t oldstate = rng->state;
+  // Advance internal state
+  rng->state = oldstate * 6364136223846793005ULL + (rng->inc | 1);
+  // Calculate output function (XSH RR), uses old state for max ILP
+  uint32_t xorshifted = ((oldstate >> 18u) ^ oldstate) >> 27u;
+  uint32_t rot = oldstate >> 59u;
+  return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
+}
+
+// random number generator
+class RNG
+{
+ private:
+  pcg32_random_t state;
+
+ public:
+  RNG()
+  {
+    state.state = 1;
+    state.inc = 1;
+  }
+  RNG(uint64_t seed)
+  {
+    state.state = seed;
+    state.inc = 1;
+  }
+
+  uint64_t getSeed() const { return state.state; }
+  void setSeed(uint64_t seed) { state.state = seed; }
+
+  float getNext()
+  {
+    constexpr float divider = 1.0f / std::numeric_limits<uint32_t>::max();
+    return pcg32_random_r(&state) * divider;
+  }
+};
+
+// sampler interface
+class Sampler
+{
+ protected:
+  RNG rng;
+
+ public:
+  Sampler() {}
+
+  Sampler(uint64_t seed) : rng(seed) {}
+
+  uint64_t getSeed() const { return rng.getSeed(); }
+  void setSeed(uint64_t seed) { rng.setSeed(seed); }
+
+  virtual std::unique_ptr<Sampler> clone() const = 0;
+  virtual float getNext1D() = 0;
+  virtual Vec2f getNext2D() = 0;
+};
+
+// uniform distribution sampler
+class UniformSampler : public Sampler
+{
+ public:
+  UniformSampler() : Sampler() {}
+  UniformSampler(uint64_t seed) : Sampler(seed) {}
+
+  std::unique_ptr<Sampler> clone() const override
+  {
+    return std::make_unique<UniformSampler>();
+  }
+
+  float getNext1D() override { return rng.getNext(); }
+  Vec2f getNext2D() override { return Vec2f(rng.getNext(), rng.getNext()); }
+};
+
+// sample direction in the hemisphere
+// its pdf is propotional to cosine
+inline Vec3f sampleCosineHemisphere(const Vec2f& uv, float& pdf)
+{
+  const float theta =
+      0.5f * std::acos(std::clamp(1.0f - 2.0f * uv[0], -1.0f, 1.0f));
+  const float phi = PI_MUL_2 * uv[1];
+  const float cosTheta = std::cos(theta);
+  pdf = PI_INV * cosTheta;
+  return sphericalToCartesian(theta, phi);
+}
+
+// sample point on the disk
+Vec2f sampleDisk(const Vec2f& uv, float R, float& pdf)
+{
+  const float r = R * std::sqrt(std::max(uv[0], 0.0f));
+  const float theta = PI_MUL_2 * uv[1];
+  pdf = 1.0f / (R * R) * PI_INV;
+  return Vec2f(r * std::cos(theta), r * std::sin(theta));
+}
+
+// sample value from 1D discrete empirical distribution
+class DiscreteEmpiricalDistribution1D
+{
+ private:
+  std::vector<float> cdf;
+  std::vector<float> pdf;
+
+ public:
+  DiscreteEmpiricalDistribution1D(const float* values, unsigned int N)
+  {
+    // sum f
+    float sum = 0;
+    for (std::size_t i = 0; i < N; ++i) { sum += values[i]; }
+
+    // compute cdf
+    cdf.resize(N + 1);
+    cdf[0] = 0;
+    for (std::size_t i = 1; i < N + 1; ++i) {
+      cdf[i] = cdf[i - 1] + values[i - 1] / sum;
+    }
+
+    // compute pdf
+    pdf.resize(N);
+    for (std::size_t i = 0; i < N; ++i) { pdf[i] = cdf[i + 1] - cdf[i]; }
+  }
+
+  DiscreteEmpiricalDistribution1D(const std::vector<float>& values)
+      : DiscreteEmpiricalDistribution1D(values.data(), values.size())
+  {
+  }
+
+  uint32_t sample(float u, float& pdf) const
+  {
+    // inverse cdf
+    int x = std::lower_bound(cdf.begin(), cdf.end(), u) - cdf.begin();
+    if (x == 0) { x++; }
+
+    // compute pdf
+    pdf = cdf[x] - cdf[x - 1];
+
+    // NOTE: cdf's index is +1 from values
+    return x - 1;
+  }
+
+  float getPDF(uint32_t i) const { return pdf[i]; }
+};
+
+#endif
+```
+
+### include/scene.h
+```
+#ifndef _SCENE_H
+#define _SCENE_H
+#include <embree3/rtcore.h>
+#include <spdlog/spdlog.h>
+
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "core.h"
+#include "grid.h"
+#include "medium.h"
+#include "primitive.h"
+#include "tiny_obj_loader.h"
+
+inline float parseFloat(const std::string& str) { return std::stof(str); }
+
+inline Vec3f parseVec3(const std::string& str)
+{
+  // split string by space
+  std::vector<std::string> tokens;
+  std::stringstream ss(str);
+  std::string buf;
+  while (std::getline(ss, buf, ' ')) {
+    if (!buf.empty()) { tokens.emplace_back(buf); }
+  }
+
+  if (tokens.size() != 3) {
+    spdlog::error("invalid vec3 string");
+    std::exit(EXIT_FAILURE);
+  }
+
+  // string to float conversion
+  return Vec3f(std::stof(tokens[0]), std::stof(tokens[1]),
+               std::stof(tokens[2]));
+}
+
+inline std::optional<std::string> getMaterialParameter(
+    const tinyobj::material_t& material, const std::string& parameter_name)
+{
+  std::optional<std::string> ret;
+  if (material.unknown_parameter.count(parameter_name)) {
+    ret = material.unknown_parameter.at(parameter_name);
+  }
+  return ret;
+}
+
+const std::shared_ptr<BxDF> createDefaultBxDF()
+{
+  return std::make_shared<Lambert>(Vec3(0.9f));
+}
+
+// create BxDF from tinyobj material
+const std::shared_ptr<BxDF> createBxDF(const tinyobj::material_t& material)
+{
+  if (material.unknown_parameter.count("no_surface") == 1) { return nullptr; }
+
+  const Vec3f kd =
+      Vec3f(material.diffuse[0], material.diffuse[1], material.diffuse[2]);
+  const Vec3f ks =
+      Vec3f(material.specular[0], material.specular[1], material.specular[2]);
+
+  switch (material.illum) {
+    case 5:
+      // mirror
+      return std::make_shared<Mirror>(Vec3(1.0f));
+    case 7:
+      // glass
+      return std::make_shared<Glass>(Vec3(1.0f), material.ior);
+    default:
+      // lambert
+      return std::make_shared<Lambert>(kd);
+  }
+}
+
+const std::shared_ptr<Medium> createDefaultMedium() { return nullptr; }
+
+// create Medium from tinyobj material
+inline const std::shared_ptr<Medium> createMedium(
+    const tinyobj::material_t& material)
+{
+  std::optional<std::string> g_opt = getMaterialParameter(material, "g");
+  std::optional<std::string> sigma_a_opt =
+      getMaterialParameter(material, "sigma_a");
+  std::optional<std::string> sigma_s_opt =
+      getMaterialParameter(material, "sigma_s");
+  if (g_opt && sigma_a_opt && sigma_s_opt) {
+    const float g = parseFloat(g_opt.value());
+    const Vec3f sigma_a = parseVec3(sigma_a_opt.value());
+    const Vec3f sigma_s = parseVec3(sigma_s_opt.value());
+    return std::make_shared<HomogeneousMedium>(g, sigma_a, sigma_s);
+  }
+
+  std::optional<std::string> medium_color_opt =
+      getMaterialParameter(material, "medium_color");
+  std::optional<std::string> scattering_distance_opt =
+      getMaterialParameter(material, "scattering_distance");
+  if (g_opt && medium_color_opt && scattering_distance_opt) {
+    const float g = parseFloat(g_opt.value());
+
+    // Chiang, Matt Jen-Yuan, Peter Kutz, and Brent Burley. "Practical and
+    // controllable subsurface scattering for production path tracing." ACM
+    // SIGGRAPH 2016 Talks. 2016. 1-2.
+    const Vec3f A = parseVec3(medium_color_opt.value());
+    const Vec3f d = parseVec3(scattering_distance_opt.value());
+    const Vec3f alpha =
+        Vec3f(1.0f) - exp(-5.09406 * A + 2.61188 * A * A - 4.31805 * A * A * A);
+    const Vec3f s = Vec3f(1.9) - A + Vec3f(3.5) * (A - 0.8) * (A - 0.8);
+    const Vec3f sigma_t = 1.0f / (d * s);
+
+    const Vec3f sigma_s = alpha * sigma_t;
+    const Vec3f sigma_a = sigma_t - sigma_s;
+    return std::make_shared<HomogeneousMedium>(g, sigma_a, sigma_s);
+  }
+
+  return nullptr;
+}
+
+// create AreaLight from tinyobj material
+const std::shared_ptr<AreaLight> createAreaLight(
+    const tinyobj::material_t& material, const Triangle* tri)
+{
+  if (material.emission[0] > 0 || material.emission[1] > 0 ||
+      material.emission[2] > 0) {
+    const Vec3f le =
+        Vec3f(material.emission[0], material.emission[1], material.emission[2]);
+    return std::make_shared<AreaLight>(le, tri);
+  } else {
+    return nullptr;
+  }
+}
+
+class Scene
+{
+ private:
+  // mesh data
+  // NOTE: assuming size of normals, texcoords == size of vertices
+  std::vector<float> vertices;
+  std::vector<uint32_t> indices;
+  std::vector<float> normals;
+  std::vector<float> texcoords;
+
+  std::unordered_map<uint32_t, std::optional<tinyobj::material_t>> materials;
+
+  // triangles
+  // NOTE: per face
+  std::vector<Triangle> triangles;
+
+  // BxDFs
+  // NOTE: per face
+  std::unordered_map<uint32_t, std::shared_ptr<BxDF>> bxdfs;
+
+  // mediums
+  // NOTE: per face
+  std::unordered_map<uint32_t, std::shared_ptr<Medium>> mediums;
+
+  // lights
+  // NOTE: per face
+  std::unordered_map<uint32_t, std::shared_ptr<Light>> lights;
+  std::vector<std::shared_ptr<Light>> lights_for_sampling;
+
+  // primitives
+  // NOTE: per face
+  std::vector<Primitive> primitives;
+
+  // density grids
+  std::vector<std::shared_ptr<DensityGrid>> densityGrids;
+
+  // embree
+  RTCDevice device;
+  RTCScene scene;
+
+  void clear()
+  {
+    vertices.clear();
+    indices.clear();
+    normals.clear();
+    texcoords.clear();
+    bxdfs.clear();
+
+    triangles.clear();
+    bxdfs.clear();
+    lights.clear();
+    primitives.clear();
+  }
+
+ public:
+  Scene() {}
+
+  ~Scene()
+  {
+    clear();
+    rtcReleaseScene(scene);
+    rtcReleaseDevice(device);
+  }
+
+  // load obj file
+  // TODO: remove vertex duplication
+  void loadObj(const std::filesystem::path& filepath)
+  {
+    clear();
+
+    spdlog::info("[Scene] loading: {}", filepath.generic_string());
+
+    tinyobj::ObjReaderConfig reader_config;
+    reader_config.mtl_search_path = "./";
+    reader_config.triangulate = true;
+
+    tinyobj::ObjReader reader;
+    if (!reader.ParseFromFile(filepath.generic_string(), reader_config)) {
+      if (!reader.Error().empty()) {
+        spdlog::error("[Scene] failed to load {} : {}",
+                      filepath.generic_string(), reader.Error());
+        std::exit(EXIT_FAILURE);
+      }
+      return;
+    }
+
+    if (!reader.Warning().empty()) {
+      spdlog::warn("[Scene] {}", reader.Warning());
+    }
+
+    const auto& attrib = reader.GetAttrib();
+    const auto& shapes = reader.GetShapes();
+    const auto& materials = reader.GetMaterials();
+
+    // loop over shapes
+    for (size_t s = 0; s < shapes.size(); ++s) {
+      size_t index_offset = 0;
+      // loop over faces
+      for (size_t f = 0; f < shapes[s].mesh.num_face_vertices.size(); ++f) {
+        const size_t fv =
+            static_cast<size_t>(shapes[s].mesh.num_face_vertices[f]);
+
+        std::vector<Vec3f> vertices;
+        std::vector<Vec3f> normals;
+        std::vector<Vec2f> texcoords;
+
+        // loop over vertices
+        // get vertices, normals, texcoords of a triangle
+        for (size_t v = 0; v < fv; ++v) {
+          const tinyobj::index_t idx = shapes[s].mesh.indices[index_offset + v];
+
+          const tinyobj::real_t vx =
+              attrib.vertices[3 * static_cast<size_t>(idx.vertex_index) + 0];
+          const tinyobj::real_t vy =
+              attrib.vertices[3 * static_cast<size_t>(idx.vertex_index) + 1];
+          const tinyobj::real_t vz =
+              attrib.vertices[3 * static_cast<size_t>(idx.vertex_index) + 2];
+          vertices.push_back(Vec3f(vx, vy, vz));
+
+          if (idx.normal_index >= 0) {
+            const tinyobj::real_t nx =
+                attrib.normals[3 * static_cast<size_t>(idx.normal_index) + 0];
+            const tinyobj::real_t ny =
+                attrib.normals[3 * static_cast<size_t>(idx.normal_index) + 1];
+            const tinyobj::real_t nz =
+                attrib.normals[3 * static_cast<size_t>(idx.normal_index) + 2];
+            normals.push_back(Vec3f(nx, ny, nz));
+          }
+
+          if (idx.texcoord_index >= 0) {
+            const tinyobj::real_t tx =
+                attrib
+                    .texcoords[2 * static_cast<size_t>(idx.texcoord_index) + 0];
+            const tinyobj::real_t ty =
+                attrib
+                    .texcoords[2 * static_cast<size_t>(idx.texcoord_index) + 1];
+            texcoords.push_back(Vec2f(tx, ty));
+          }
+        }
+
+        // if normals is empty, add geometric normal
+        if (normals.size() == 0) {
+          const Vec3f v1 = normalize(vertices[1] - vertices[0]);
+          const Vec3f v2 = normalize(vertices[2] - vertices[0]);
+          const Vec3f n = normalize(cross(v1, v2));
+          normals.push_back(n);
+          normals.push_back(n);
+          normals.push_back(n);
+        }
+
+        // if texcoords is empty, add barycentric coords
+        if (texcoords.size() == 0) {
+          texcoords.push_back(Vec2f(0, 0));
+          texcoords.push_back(Vec2f(1, 0));
+          texcoords.push_back(Vec2f(0, 1));
+        }
+
+        // populate vertices, indices, normals, texcoords
+        for (int i = 0; i < 3; ++i) {
+          this->vertices.push_back(vertices[i][0]);
+          this->vertices.push_back(vertices[i][1]);
+          this->vertices.push_back(vertices[i][2]);
+
+          this->normals.push_back(normals[i][0]);
+          this->normals.push_back(normals[i][1]);
+          this->normals.push_back(normals[i][2]);
+
+          this->texcoords.push_back(texcoords[i][0]);
+          this->texcoords.push_back(texcoords[i][1]);
+
+          this->indices.push_back(this->indices.size());
+        }
+
+        // populate materials
+        // TODO: remove duplicate
+        const int materialID = shapes[s].mesh.material_ids[f];
+        std::optional<tinyobj::material_t> material = std::nullopt;
+        if (materialID != -1) { material = materials[materialID]; }
+        const uint32_t faceID = this->indices.size() / 3 - 1;
+        this->materials.emplace(faceID, material);
+
+        index_offset += fv;
+      }
+    }
+  }
+
+  void loadVDB(const std::filesystem::path& filepath, float g,
+               const Vec3f& albedo, const Vec3f& scatteringDistance,
+               float densityMultiplier = 1.0f)
+  {
+    // compute sigma_a, sigma_s
+    // Chiang, Matt Jen-Yuan, Peter Kutz, and Brent Burley. "Practical and
+    // controllable subsurface scattering for production path tracing." ACM
+    // SIGGRAPH 2016 Talks. 2016. 1-2.
+    const Vec3f alpha =
+        Vec3f(1.0f) - exp(-5.09406 * albedo + 2.61188 * albedo * albedo -
+                          4.31805 * albedo * albedo * albedo);
+    const Vec3f s =
+        Vec3f(1.9) - albedo + Vec3f(3.5) * (albedo - 0.8) * (albedo - 0.8);
+    const Vec3f sigma_t = 1.0f / (scatteringDistance * s);
+    const Vec3f sigma_s = alpha * sigma_t;
+    const Vec3f sigma_a = sigma_t - sigma_s;
+
+    // create DensityGrid
+    const std::shared_ptr<DensityGrid> densityGrid =
+        std::make_shared<OpenVDBGrid>(filepath);
+    densityGrids.push_back(densityGrid);
+
+    // compute bounding box
+    const AABB bbox = densityGrid->getBounds();
+    spdlog::info("[Scene] OpenVDB Volume bounding box");
+    spdlog::info("[Scene] pMin: ({}, {}, {})", bbox.pMin[0], bbox.pMin[1],
+                 bbox.pMin[2]);
+    spdlog::info("[Scene] pMax: ({}, {}, {})", bbox.pMax[0], bbox.pMax[1],
+                 bbox.pMax[2]);
+
+    // create triangles from bounding box
+    std::vector<Vec3f> v(3 * 12);
+    // compute vertices
+    {
+      const Vec3f p0 = bbox.pMin;
+      const Vec3f p1 = Vec3f(bbox.pMax[0], bbox.pMin[1], bbox.pMin[2]);
+      const Vec3f p2 = Vec3f(bbox.pMax[0], bbox.pMax[1], bbox.pMin[2]);
+      const Vec3f p3 = Vec3f(bbox.pMin[0], bbox.pMax[1], bbox.pMin[2]);
+
+      const Vec3f p4 = Vec3f(bbox.pMax[0], bbox.pMin[1], bbox.pMax[2]);
+      const Vec3f p5 = Vec3f(bbox.pMin[0], bbox.pMin[1], bbox.pMax[2]);
+      const Vec3f p6 = Vec3f(bbox.pMin[0], bbox.pMax[1], bbox.pMax[2]);
+      const Vec3f p7 = bbox.pMax;
+
+      v[0] = p0;
+      v[1] = p2;
+      v[2] = p1;
+
+      v[3] = p0;
+      v[4] = p3;
+      v[5] = p2;
+
+      v[6] = p1;
+      v[7] = p7;
+      v[8] = p4;
+
+      v[9] = p1;
+      v[10] = p2;
+      v[11] = p7;
+
+      v[12] = p4;
+      v[13] = p7;
+      v[14] = p6;
+
+      v[15] = p4;
+      v[16] = p6;
+      v[17] = p5;
+
+      v[18] = p5;
+      v[19] = p3;
+      v[20] = p0;
+
+      v[21] = p5;
+      v[22] = p6;
+      v[23] = p3;
+
+      v[24] = p0;
+      v[25] = p1;
+      v[26] = p4;
+
+      v[27] = p0;
+      v[28] = p4;
+      v[29] = p5;
+
+      v[30] = p3;
+      v[31] = p7;
+      v[32] = p2;
+
+      v[33] = p3;
+      v[34] = p6;
+      v[35] = p7;
+    }
+
+    // compute face normal
+    std::vector<Vec3f> n;
+    for (int faceID = 0; faceID < v.size() / 3; ++faceID) {
+      const Vec3f p0 = v[3 * faceID];
+      const Vec3f p1 = v[3 * faceID + 1];
+      const Vec3f p2 = v[3 * faceID + 2];
+      const Vec3f v0 = normalize(p1 - p0);
+      const Vec3f v1 = normalize(p2 - p0);
+      const Vec3f norm = normalize(cross(v0, v1));
+      n.push_back(norm);
+      n.push_back(norm);
+      n.push_back(norm);
+    }
+
+    // compute texcoords
+    std::vector<Vec2f> t;
+    for (int faceID = 0; faceID < v.size() / 3; ++faceID) {
+      t.push_back(Vec2f(0, 0));
+      t.push_back(Vec2f(1, 0));
+      t.push_back(Vec2f(0, 1));
+    }
+
+    // add vertices, indices, normals, texcoords, triangles, bxdfs, lights,
+    // medium
+    for (int f = 0; f < v.size() / 3; ++f) {
+      for (int i = 0; i < 3; ++i) {
+        this->vertices.push_back(v[3 * f + i][0]);
+        this->vertices.push_back(v[3 * f + i][1]);
+        this->vertices.push_back(v[3 * f + i][2]);
+
+        this->normals.push_back(n[3 * f + i][0]);
+        this->normals.push_back(n[3 * f + i][1]);
+        this->normals.push_back(n[3 * f + i][2]);
+
+        this->texcoords.push_back(t[3 * f + i][0]);
+        this->texcoords.push_back(t[3 * f + i][1]);
+
+        this->indices.push_back(this->indices.size());
+      }
+
+      // add bxdf
+      const uint32_t faceID = this->indices.size() / 3 - 1;
+      this->bxdfs.emplace(faceID, nullptr);
+
+      // add light
+      this->lights.emplace(faceID, nullptr);
+
+      // add medium
+      const auto medium = std::make_shared<HeterogeneousMedium>(
+          g, densityGrid.get(), sigma_a, sigma_s, densityMultiplier);
+      this->mediums.emplace(faceID, medium);
+    }
+  }
+
+  uint32_t nVertices() const { return vertices.size() / 3; }
+
+  uint32_t nFaces() const { return indices.size() / 3; }
+
+  void setupEmbree()
+  {
+    device = rtcNewDevice(NULL);
+    scene = rtcNewScene(device);
+
+    RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
+
+    // set vertices
+    float* vb = (float*)rtcSetNewGeometryBuffer(geom, RTC_BUFFER_TYPE_VERTEX, 0,
+                                                RTC_FORMAT_FLOAT3,
+                                                3 * sizeof(float), nVertices());
+    for (size_t i = 0; i < vertices.size(); ++i) { vb[i] = vertices[i]; }
+
+    // set indices
+    unsigned* ib = (unsigned*)rtcSetNewGeometryBuffer(
+        geom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, 3 * sizeof(unsigned),
+        nFaces());
+    for (size_t i = 0; i < indices.size(); ++i) { ib[i] = indices[i]; }
+
+    rtcCommitGeometry(geom);
+    rtcAttachGeometry(scene, geom);
+    rtcReleaseGeometry(geom);
+    rtcCommitScene(scene);
+  }
+
+  void build()
+  {
+    spdlog::info("[Scene] building scene...");
+
+    // populate  triangles
+    for (size_t faceID = 0; faceID < nFaces(); ++faceID) {
+      // add triangle
+      this->triangles.emplace_back(this->vertices.data(), this->indices.data(),
+                                   this->normals.data(), this->texcoords.data(),
+                                   faceID);
+    }
+
+    // populate bxdfs, mediums
+    for (const auto& kv : this->materials) {
+      const uint32_t faceID = kv.first;
+      const auto& material = kv.second;
+
+      if (material) {
+        const tinyobj::material_t& m = material.value();
+        this->bxdfs.emplace(faceID, createBxDF(m));
+        this->mediums.emplace(faceID, createMedium(m));
+      } else {
+        this->bxdfs.emplace(faceID, createDefaultBxDF());
+        this->mediums.emplace(faceID, createDefaultMedium());
+      }
+    }
+
+    // populate lights
+    for (const auto& kv : this->materials) {
+      const uint32_t faceID = kv.first;
+      const auto& material = kv.second;
+
+      std::shared_ptr<Light> light = nullptr;
+      if (material) {
+        const tinyobj::material_t& m = material.value();
+        light = createAreaLight(m, &this->triangles[faceID]);
+      }
+      this->lights.emplace(faceID, light);
+    }
+
+    // populate light for sampling
+    for (const auto& kv : this->lights) {
+      const uint32_t faceID = kv.first;
+      const auto& light = kv.second;
+      if (light != nullptr) { this->lights_for_sampling.push_back(light); }
+    }
+
+    // populate primitives
+    for (size_t faceID = 0; faceID < nFaces(); ++faceID) {
+      // add primitive
+      primitives.emplace_back(
+          &this->triangles[faceID], this->bxdfs.at(faceID).get(),
+          this->mediums.at(faceID).get(), this->lights.at(faceID).get());
+    }
+
+    setupEmbree();
+
+    spdlog::info("[Scene] done");
+    spdlog::info("[Scene] vertices: {}", nVertices());
+    spdlog::info("[Scene] faces: {}", nFaces());
+    spdlog::info("[Scene] lights: {}", lights_for_sampling.size());
+  }
+
+  // ray-scene intersection
+  bool intersect(const Ray& ray, IntersectInfo& info) const
+  {
+    RTCRayHit rayhit;
+    rayhit.ray.org_x = ray.origin[0];
+    rayhit.ray.org_y = ray.origin[1];
+    rayhit.ray.org_z = ray.origin[2];
+    rayhit.ray.dir_x = ray.direction[0];
+    rayhit.ray.dir_y = ray.direction[1];
+    rayhit.ray.dir_z = ray.direction[2];
+    rayhit.ray.tnear = ray.tmin;
+    rayhit.ray.tfar = ray.tmax;
+    rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+
+    RTCIntersectContext context;
+    rtcInitIntersectContext(&context);
+
+    rtcIntersect1(scene, &context, &rayhit);
+
+    if (rayhit.hit.geomID != RTC_INVALID_GEOMETRY_ID) {
+      info.t = rayhit.ray.tfar;
+
+      // get triangle shape
+      const Triangle& tri = this->triangles[rayhit.hit.primID];
+
+      // set surface info
+      info.surfaceInfo.position = ray(info.t);
+      info.surfaceInfo.barycentric = Vec2f(rayhit.hit.u, rayhit.hit.v);
+      info.surfaceInfo.texcoords =
+          tri.getTexcoords(info.surfaceInfo.barycentric);
+      info.surfaceInfo.ng = tri.getGeometricNormal();
+      info.surfaceInfo.ns =
+          tri.computeShadingNormal(info.surfaceInfo.barycentric);
+      orthonormalBasis(info.surfaceInfo.ns, info.surfaceInfo.dpdu,
+                       info.surfaceInfo.dpdv);
+
+      // set primitive
+      info.hitPrimitive = &this->primitives[rayhit.hit.primID];
+
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  std::shared_ptr<Light> sampleLight(Sampler& sampler, float& pdf) const
+  {
+    unsigned int lightIdx = lights_for_sampling.size() * sampler.getNext1D();
+    if (lightIdx == lights_for_sampling.size()) lightIdx--;
+    pdf = 1.0f / lights_for_sampling.size();
+    return lights_for_sampling[lightIdx];
+  }
+};
+
+#endif
+```
+
+### include/triangle.h
+```
+#ifndef _SHAPE_H
+#define _SHAPE_H
+#include "core.h"
+#include "sampler.h"
+
+class Triangle
+{
+ private:
+  const float* vertices;
+  const uint32_t* indices;
+  const float* normals;
+  const float* texcoords;
+
+  const uint32_t faceID;
+  Vec3f geometricNormal;
+  float surfaceArea;
+
+ public:
+  Triangle(const float* vertices, const uint32_t* indices, const float* normals,
+           const float* texcoords, uint32_t faceID)
+      : vertices(vertices),
+        indices(indices),
+        normals(normals),
+        texcoords(texcoords),
+        faceID(faceID)
+  {
+    const Vec3ui vidx = getIndices();
+    const Vec3f p1 = getVertexPosition(vidx[0]);
+    const Vec3f p2 = getVertexPosition(vidx[1]);
+    const Vec3f p3 = getVertexPosition(vidx[2]);
+
+    // compute geometric normal
+    geometricNormal = normalize(cross(p2 - p1, p3 - p1));
+
+    // compute surface area
+    surfaceArea = 0.5f * length(cross(p2 - p1, p3 - p1));
+  }
+
+  // return vertex position
+  Vec3f getVertexPosition(uint32_t vertexID) const
+  {
+    return Vec3f(vertices[3 * vertexID + 0], vertices[3 * vertexID + 1],
+                 vertices[3 * vertexID + 2]);
+  }
+
+  // return vertex normal
+  Vec3f getVertexNormal(uint32_t vertexID) const
+  {
+    return Vec3f(normals[3 * vertexID + 0], normals[3 * vertexID + 1],
+                 normals[3 * vertexID + 2]);
+  }
+
+  // return vertex texcoords
+  Vec2f getVertexTexcoords(uint32_t vertexID) const
+  {
+    return Vec2f(texcoords[2 * vertexID + 0], texcoords[2 * vertexID + 1]);
+  }
+
+  // return vertex indices
+  Vec3ui getIndices() const
+  {
+    return Vec3ui(indices[3 * faceID + 0], indices[3 * faceID + 1],
+                  indices[3 * faceID + 2]);
+  }
+
+  // return geometric normal
+  Vec3f getGeometricNormal() const { return geometricNormal; }
+
+  // compute shading normal at given position
+  Vec3f computeShadingNormal(const Vec2f& barycentric) const
+  {
+    const Vec3ui vidx = getIndices();
+    const Vec3f n1 = getVertexNormal(vidx[0]);
+    const Vec3f n2 = getVertexNormal(vidx[1]);
+    const Vec3f n3 = getVertexNormal(vidx[2]);
+    return n1 * (1.0f - barycentric[0] - barycentric[1]) + n2 * barycentric[0] +
+           n3 * barycentric[1];
+  }
+
+  // compute texcoords at given position
+  Vec2f getTexcoords(const Vec2f& barycentric) const
+  {
+    const Vec3ui vidx = getIndices();
+    const Vec2f t1 = getVertexTexcoords(vidx[0]);
+    const Vec2f t2 = getVertexTexcoords(vidx[1]);
+    const Vec2f t3 = getVertexTexcoords(vidx[2]);
+    return t1 * (1.0f - barycentric[0] - barycentric[1]) + t2 * barycentric[0] +
+           t3 * barycentric[1];
+  }
+
+  // sample point on the triangle
+  SurfaceInfo samplePoint(Sampler& sampler, float& pdf) const
+  {
+    SurfaceInfo ret;
+
+    const Vec3ui vidx = getIndices();
+
+    const Vec3f p1 = getVertexPosition(vidx[0]);
+    const Vec3f p2 = getVertexPosition(vidx[1]);
+    const Vec3f p3 = getVertexPosition(vidx[2]);
+
+    // sample point on triangle
+    const Vec2f uv = sampler.getNext2D();
+    const float su0 = std::sqrt(uv[0]);
+    const Vec2f barycentric = Vec2f(1.0f - su0, uv[1] * su0);
+    ret.position = (1.0f - barycentric[0] - barycentric[1]) * p1 +
+                   barycentric[0] * p2 + barycentric[1] * p3;
+
+    // compute normal
+    ret.ns = computeShadingNormal(barycentric);
+
+    // compute dpdu, dpdv
+    orthonormalBasis(ret.ns, ret.dpdu, ret.dpdv);
+
+    // compute texcoords
+    ret.texcoords = getTexcoords(barycentric);
+    ret.barycentric = barycentric;
+
+    // compute pdf
+    pdf = 1.0f / surfaceArea;
+
+    return ret;
+  }
+};
+
+#endif
+```

@@ -1,0 +1,136 @@
+--- v006.md
++++ v007.md
+@@ -1,106 +1,55 @@
+ # MVSplat
+ 
+-Also called: Feed-forward 3DGS, Single-pass 3DGS
++Also called: Amortized 3D Reconstruction, Feed-forward 3DGS, Feedforward 3D Reconstruction, Single-pass 3DGS
+ 
+ ## Overview
+-MVSplat is a feed-forward deep neural network that directly regresses 3D Gaussian Splatting (3DGS) parameters from sparse multi-view images in a single pass, bypassing the per-scene gradient descent optimization loop required by standard 3DGS [S1][S2, unofficial]. It builds upon PixelSplat by combining multi-view feature extraction through transformers and cost volumes, which are then processed by a U-Net [S1]. Unlike standard 3DGS which optimizes primitives per scene, MVSplat learns a generalizable mapping from image space to 3D Gaussian space, enabling instant reconstruction without iterative training [S2, unofficial].
++MVSplat is a feed-forward deep neural network that directly regresses 3D Gaussian Splatting (3DGS) parameters from sparse multi-view images in a single pass, bypassing the per-scene gradient descent optimization loop required by standard 3DGS [S1][S2, unofficial]. It builds upon PixelSplat by combining multi-view feature extraction through transformers and cost volumes, which are then processed by a U-Net [S1]. Unlike iterative methods that optimize primitives for a specific scene, MVSplat provides a universal reconstruction model trained on diverse object types, offering useful 3D priors for subsequent 3D optimizations [S3].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of $N$ sparse multi-view images $\{I_1, \dots, I_N\}$ and their corresponding camera parameters (intrinsics and extrinsics).
+-*   **Output:** A set of 3D Gaussian primitives $\{G_i\}$, where each primitive is defined by position $\mathbf{\mu}_i$, covariance $\mathbf{\Sigma}_i$ (or rotation $\mathbf{R}_i$ and scale $\mathbf{s}_i$), opacity $\alpha_i$, and spherical harmonic coefficients for color $\mathbf{c}_i$.
++*   **Input:** A set of $N$ sparse multi-view images of a scene.
++*   **Output:** A set of 3D Gaussian primitives, defined by their position, covariance (scale and rotation), opacity, and spherical harmonics coefficients for color.
+ 
+ **Data Structures:**
+-The network architecture typically involves:
+-1.  **Feature Encoder:** Extracts 2D features from input images.
+-2.  **Cost Volume:** A 3D tensor representing matching costs between features across views, often constructed via epipolar constraints or dot products of transformed features.
+-3.  **U-Net Decoder:** Processes the cost volume and fused features to predict Gaussian parameters.
++The network architecture processes image features into a cost volume, which is decoded into Gaussian parameters. The specific internal tensor layouts for the transformer tokens and U-Net feature maps are not detailed in the sources [G: Standard transformer encoder/decoder and U-Net convolutional block structures are assumed].
+ 
+-**Steps:**
+-1.  **Multi-view Feature Extraction:** Input images are passed through a shared encoder (e.g., ResNet or Transformer) to obtain feature maps $F_i$ for each view $i$ [S1].
+-2.  **Cost Volume Construction:** A cost volume $C$ is constructed by comparing features from a reference view with features from other views. This often involves an epipolar transformer to generalize features between two views, pairing them with probabilistic predictions aligned along camera-to-pixel rays [S1]. The cost volume encodes geometric consistency across views.
+-3.  **Depth/Probability Prediction:** The cost volume is processed by a U-Net to predict depth maps or probability distributions over depth for each pixel [S1].
+-4.  **Gaussian Parameter Regression:** The predicted depth/probability maps and fused multi-view features are decoded into 3D Gaussian parameters. For each pixel or voxel, the network predicts the center $\mathbf{\mu}$, covariance $\mathbf{\Sigma}$, opacity $\alpha$, and color $\mathbf{c}$ [S1][S2, unofficial].
+-5.  **Rendering (Optional for Training):** The predicted Gaussians are rendered using the differentiable 3D Gaussian splatting rasterizer to generate novel views. The loss is computed between rendered and ground-truth images, and gradients are backpropagated through the network to update weights [S2, unofficial].
++**Algorithm Steps:**
++1.  **Multi-view Feature Extraction:** Extract features from the input images using a transformer-based backbone. This step generalizes features between views, similar to the epipolar transformer used in PixelSplat [S1].
++2.  **Cost Volume Construction:** Construct a cost volume representing the similarity or correlation of features across the input views. This volume encodes depth information [S1].
++3.  **Depth and Gaussian Regression:** Process the cost volume through a U-Net architecture. The U-Net decodes the cost volume to predict depth maps and directly regresses the 3D Gaussian parameters (position, scale, rotation, opacity, color) aligned along camera-to-pixel rays [S1].
++4.  **Rendering (Optional for Training):** The predicted 3D Gaussians are rendered into novel views using the differentiable 3D Gaussian Splatting rasterizer to compute photometric losses [S2, unofficial].
+ 
+ **Formulas:**
+-*   **Epipolar Transformer:** Features are transformed along epipolar lines to handle viewpoint changes.
+-*   **Cost Volume:** $C(x, y, z) = \text{Match}(F_{ref}(x, y), F_{other}(x', y'))$, where $(x', y')$ is the corresponding point on the epipolar line in the other view.
+-*   **Rendering:** Standard 3DGS rasterization equation: $C = \sum_i \alpha_i \mathbf{c}_i \prod_{j=1}^{i-1} (1 - \alpha_j)$ [S2, unofficial].
++The sources do not provide explicit mathematical formulas for the feature extraction or U-Net decoding steps. The training objective minimizes the Mean Squared Error (MSE) between the rendered novel views and the ground truth novel views [S3].
+ 
+ **Parameters:**
+-*   Number of views $N$: Typically 2-4 for training, but can generalize to sparse inputs [S1, S3].
+-*   U-Net depth and channels: Not given in the sources.
++*   **Training Views:** 20 source images are used as inputs during training [S3].
++*   **Evaluation Views:** 5 novel views are used for calculating MSE losses during training evaluation [S3].
++*   **Finetuning Inputs:** 80 views are used as inputs to the feed-forward model for initialization in the finetuning regime [S3].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Scale Ambiguity:** In single-view or sparse-view scenarios, scale ambiguity can occur. NoPoSplat addresses this by using a canonical coordinate system anchored to a single input view and introducing intrinsics token embeddings [S1].
+-*   **Generalization:** Performance may degrade on scenes significantly different from the training distribution [S3].
+-*   **High-Frequency Details:** Pixel-aligned Gaussians distributed evenly in space may struggle to represent high-frequency details and smoother regions with an appropriate number of Gaussians [S3].
+-
+-**Pseudocode:**
+-```python
+-def mvsplat_forward(images, cameras):
+-    """
+-    Forward pass of MVSplat.
+-    images: List of N images [H, W, 3]
+-    cameras: List of N camera matrices [4, 4]
+-    Returns: List of Gaussian parameters
+-    """
+-    # Step 1: Feature Extraction
+-    features = []
+-    for img in images:
+-        feat = feature_encoder(img) # Shared encoder
+-        features.append(feat)
+-    
+-    # Step 2: Cost Volume Construction
+-    # Assuming reference view is index 0
+-    ref_feat = features[0]
+-    cost_volume = build_cost_volume(ref_feat, features[1:]) # Epipolar transformer
+-    
+-    # Step 3: U-Net Processing
+-    depth_probs = unet_decoder(cost_volume, features) # Predicts depth/probability
+-    
+-    # Step 4: Gaussian Regression
+-    gaussians = regress_gaussians(depth_probs, features) # Predicts mu, sigma, alpha, c
+-    
+-    return gaussians
+-
+-def build_cost_volume(ref_feat, other_feats):
+-    """
+-    Constructs cost volume using epipolar constraints.
+-    """
+-    # Implementation details depend on specific epipolar transformer design
+-    # Typically involves projecting features from other views to reference view
+-    # and computing matching costs
+-    pass
+-
+-def regress_gaussians(depth_probs, features):
+-    """
+-    Regresses Gaussian parameters from depth probabilities and features.
+-    """
+-    # Maps depth probabilities and multi-view features to 3D Gaussian parameters
+-    # This involves predicting position, covariance, opacity, and color for each voxel/pixel
+-    pass
+-```
++*   **Sparse Views:** The method is designed for sparse inputs, but performance may degrade if the input views have insufficient overlap or extreme baseline differences not covered in the training distribution [S1].
++*   **Scale Ambiguity:** Unlike methods that use known camera poses, MVSplat relies on the cost volume and transformer generalization. If the input views lack sufficient geometric cues, scale ambiguity may arise, though the sources note that NoPoSplat addresses this specifically by eliminating known camera pose requirements [S1].
+ 
+ ## Subtopics
+ 
+-### Sparse Input Reconstruction via Generalizability
+-Methods that use learned priors to reconstruct 3D scenes, often allowing reconstruction from a single input image after training on multiple views [S3]. Synthesize additional views through generative models to augment input data [S3]. Use a feed-forward model to directly generate Gaussian properties from input images [S3]. Synthesizing additional views via generative models is computationally intensive and bounded by the capabilities of the generative model [S3]. Pixel-aligned Gaussians are distributed nearly evenly in space, struggling to represent high-frequency details and smoother regions with an appropriate number of Gaussians [S3]. Uses learned priors for fast feed-forward inference, favoring speed and cross-scene generalization, but sometimes at the expense of geometric fidelity compared to regularization-based methods [S3]. PixelSplat samples Gaussians from dense probability distributions [S3]. Splatter Image uses a 2D image-to-image network to map an input image to a 3D Gaussian per pixel [S3].
++### [Sparse Input Reconstruction via Generalizability](11788-sparse-input-reconstruction-via-generalizability.md)
++Addresses reconstructing 3D scenes from a limited number of input views (sparse views) or even a single image, bypassing the iterative per-scene optimization required by standard 3D Gaussian Splatting. It achieves this by employing learned priors within a feed-forward deep neural network that directly regresses 3D Gaussian parameters from input images in a single pass. This approach favors inference speed and cross-scene generalization over the high geometric fidelity typically achieved by regularization-based methods that rely on per-scene gradient descent.
++
++### [VolSplat Architecture and Training Pipeline](13066-volsplat-architecture-and-training-pipeline.md)
++VolSplat is a feed-forward deep neural network that directly regresses 3D Gaussian Splatting (3DGS) parameters from sparse multi-view images in a single pass, bypassing the per-scene gradient descent optimization required by standard 3DGS [Parent](9213-mvsplat.md). It distinguishes itself by lifting 2D features into a sparse 3D voxel grid via plane-sweep depth prediction and predicting one Gaussian primitive per occupied voxel, ensuring scene-adaptive primitive allocation while maintaining stable sparse 3D decoding.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per scene after training, as it is a feed-forward pass. Training time depends on the dataset size and network depth.
+-*   **Memory Complexity:** Depends on the network architecture and input resolution. Typically lower than iterative 3DGS as it does not store intermediate optimization states.
+-*   **Measured Performance:** Rendering speeds can exceed 900+ FPS when combined with efficient rasterization [S2, unofficial].
+-*   **Strengths:** Instant reconstruction, no per-scene optimization, good cross-scene generalization.
+-*   **Limitations:** May sacrifice geometric fidelity compared to iterative methods, struggles with high-frequency details if not properly regularized.
+-*   **When to Use:** Applications requiring real-time or near-real-time 3D reconstruction from sparse views.
+-*   **When Not to Use:** Applications requiring high geometric accuracy where iterative optimization is feasible.
++*   **Time Complexity:** The method performs inference in a single forward pass, making it significantly faster than iterative optimization methods that require hundreds or thousands of gradient descent steps per scene [S2, unofficial].
++*   **Memory Complexity:** Memory usage is determined by the neural network's parameter count and the intermediate feature maps during the forward pass. It does not require storing large per-scene optimization states or dense point clouds during the initial reconstruction phase [S3].
++*   **Measured Performance:** The model generates compelling reconstructions with just a single forward pass [S3]. After fine-tuning, it is on par with overfitting baselines in color accuracy (PSNR, LPIPS) but largely outperforms hash-based baselines in depth error [S3].
++*   **Strengths:** Bypasses per-scene gradient descent; provides useful 3D priors for subsequent 3D optimizations; works on a variety of object types [S3].
++*   **Limitations:** As a feed-forward model, it may not achieve the same level of geometric fidelity as iterative methods that overfit to a specific scene's data, particularly in areas with limited viewpoint coverage [S3].
+ 
+ ## Background
+-MVSplat was introduced as a method to bypass the per-scene gradient descent loop of standard 3DGS [S2, unofficial]. It builds upon PixelSplat, which incorporates an epipolar transformer to generalize features between two views [S1]. The method is part of a broader trend towards feed-forward and generalizable 3D reconstruction methods [S3].
++MVSplat was introduced as a method to combine multi-view feature extraction through transformers and cost volumes, processed by a U-Net, building upon the foundations of PixelSplat [S1]. It is part of a broader trend towards amortized 3D reconstruction, where a neural network is trained to generalize across scenes rather than optimizing for a single instance [S2, unofficial]. The model was trained on all CO3Dv2 categories to create a universal reconstruction model capable of handling various object types [S3].
+ 
+ ## Sources
+ [S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
+ [S2] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+-[S3] A Survey on 3D Gaussian Splatting, https://doi.org/10.1145/3807511, fetched 2026-10-27+[S3] Lightplane: Highly-Scalable Components for Neural 3D Fields, https://doi.org/10.1109/3dv66043.2025.00058, fetched 2026-10-29

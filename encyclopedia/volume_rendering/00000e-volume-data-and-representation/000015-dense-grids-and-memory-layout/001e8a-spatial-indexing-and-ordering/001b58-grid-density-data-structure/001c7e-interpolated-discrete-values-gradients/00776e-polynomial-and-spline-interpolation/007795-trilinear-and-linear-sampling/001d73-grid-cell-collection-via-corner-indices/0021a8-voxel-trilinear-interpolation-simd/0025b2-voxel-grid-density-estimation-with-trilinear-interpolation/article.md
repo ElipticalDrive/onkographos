@@ -1,0 +1,171 @@
+# Voxel Grid Density Estimation with Trilinear Interpolation
+
+Also called: VoxelGrid.density
+
+## Overview
+This method estimates the accumulated density and color along a ray by sampling a 3D voxel grid using trilinear interpolation to retrieve values at arbitrary positions, then aggregating these values using a transmittance-based opacity formula [S1, unofficial]. It builds on [Voxel Trilinear Interpolation (SIMD)](2564-voxel-trilinear-interpolation-simd.md) by providing the higher-level logic for ray marching, boundary handling, and final density accumulation [S1, unofficial]. It is distinguished from simpler discrete sampling by producing smooth, "proper cube" boundaries without the lumpy artifacts associated with lower-resolution or non-interpolated representations [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `ray_samples`: A list or tensor of ray sample vectors. Each vector contains at least six elements: indices 0, 1, 2 for position $(x, y, z)$, index 3 for distance to the next sample $\delta_i$, index 4 for density $\sigma_i$, and index 5 for color $C_i$ [S1, unofficial].
+- `VoxelGrid`: A data structure containing the 3D grid dimensions and stored voxel data [S1, unofficial].
+
+**Outputs:**
+- `density`: A scalar or vector representing the accumulated color/density contribution along the ray [S1, unofficial].
+
+**Data Structures:**
+The `VoxelGrid` structure contains the following fields [S1, unofficial]:
+- `grid_x`, `grid_y`, `grid_z`: Integers defining the dimensions of the voxel grid [S1, unofficial].
+- `default_voxel`: A tensor of shape $[4]$, typically initialized to $[0.005, 0.5, 0.6, 0.7]$ [S1, unofficial]. The indices correspond to $[density, R, G, B]$ [S1, unofficial].
+- `voxel_grid`: A tensor of shape $[grid\_x, grid\_y, grid\_z, 4]$ [S1, unofficial]. The 4 channels correspond to $[density, color\_r, color\_g, color\_b]$ [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization**: Initialize an empty list `collected_voxels` to store interpolated voxel values for each ray sample [S1, unofficial].
+2.  **Ray Sampling Loop**: For each ray sample in `ray_samples`:
+    a.  Extract position $(x, y, z)$ from the sample [S1, unofficial].
+    b.  **Grid Coordinate Calculation**: Determine the integer grid coordinates and their neighbors:
+        $$x_0 = \lfloor x \rfloor, \quad x_1 = x_0 + 1$$
+        $$y_0 = \lfloor y \rfloor, \quad y_1 = y_0 + 1$$
+        $$z_0 = \lfloor z \rfloor, \quad z_1 = z_0 + 1$$
+    c.  **Fractional Offset Calculation**: Compute the interpolation weights:
+        $$x_d = \frac{x - x_0}{x_1 - x_0}$$
+        $$y_d = \frac{y - y_0}{y_1 - y_0}$$
+        $$z_d = \frac{z - z_0}{z_1 - z_0}$$
+        *Note: In the reference implementation, `x1 - x0` is always 1 because `x1 = int(x) + 1`, so the division simplifies to the fractional part of the coordinate [S1, unofficial].*
+    d.  **Corner Retrieval**: Retrieve the 8 corner voxel values using `self.at(x, y, z)` [S1, unofficial]. The `at` method checks boundary conditions:
+        - If $(x, y, z)$ is outside the grid bounds ($0 \le x < grid\_x$, etc.), return `torch.tensor([0., 0., 0., 0.])` [S1, unofficial].
+        - Otherwise, return `voxel_grid[int(x), int(y), int(z)]` [S1, unofficial].
+        Let the retrieved values be $c_{000}$ through $c_{111}$, where the subscripts correspond to $(x_i, y_j, z_k)$ indices [S1, unofficial].
+    e.  **Trilinear Interpolation**:
+        - Interpolate along X:
+          $$c_{00} = c_{000}(1 - x_d) + c_{100}x_d$$
+          $$c_{01} = c_{001}(1 - x_d) + c_{101}x_d$$
+          $$c_{10} = c_{010}(1 - x_d) + c_{110}x_d$$
+          $$c_{11} = c_{011}(1 - x_d) + c_{111}x_d$$
+        - Interpolate along Y:
+          $$c_{0} = c_{00}(1 - y_d) + c_{10}y_d$$
+          $$c_{1} = c_{01}(1 - y_d) + c_{11}y_d$$
+        - Interpolate along Z:
+          $$c = c_{0}(1 - z_d) + c_{1}z_d$$
+    f.  **Collection**: Append the interpolated vector $c$ to `collected_voxels` [S1, unofficial].
+3.  **Density Accumulation**:
+    Let $N$ be the number of samples. The source code implements a specific variation of volume rendering integration that calculates cumulative transmittances as additive sums rather than multiplicative products [S1, unofficial].
+    Let $v_i$ be the voxel vector for sample $i$, where:
+    - $v_i[0]$ is the density $\sigma_i$ (extracted from the interpolated voxel)
+    - $\delta_i$ is the distance to the next sample (from the original sample vector at index 3)
+    - $C_i$ is the color (from the interpolated voxel at indices 1-3)
+    
+    The code calculates a list of `transmittances` where each entry $T_i$ is the sum of exponentials of previous samples:
+    $$T_i = \sum_{j=0}^{i-1} \exp(-\sigma_j \delta_j)$$
+    The final density is computed as:
+    $$density = \sum_{i=0}^{N-1} T_i \cdot (1 - \exp(-\sigma_i \delta_i)) \cdot C_i$$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class VoxelGrid:
+    def __init__(self, grid_x, grid_y, grid_z):
+        self.grid_x = grid_x
+        self.grid_y = grid_y
+        self.grid_z = grid_z
+        self.default_voxel = [0.005, 0.5, 0.6, 0.7]
+        self.voxel_grid = [[[self.default_voxel[:] for _ in range(grid_z)] 
+                            for _ in range(grid_y)] 
+                           for _ in range(grid_x)]
+
+    def is_inside(self, x, y, z):
+        return (0 <= x < self.grid_x and 
+                0 <= y < self.grid_y and 
+                0 <= z < self.grid_z)
+
+    def at(self, x, y, z):
+        if not self.is_inside(x, y, z):
+            return [0.0, 0.0, 0.0, 0.0]
+        return self.voxel_grid[int(x)][int(y)][int(z)]
+
+    def density(self, ray_samples):
+        collected_voxels = []
+        
+        for sample in ray_samples:
+            x, y, z = sample[0], sample[1], sample[2]
+            x0, x1 = int(x), int(x) + 1
+            y0, y1 = int(y), int(y) + 1
+            z0, z1 = int(z), int(z) + 1
+            
+            xd = x - x0
+            yd = y - y0
+            zd = z - z0
+            
+            c000 = self.at(x0, y0, z0)
+            c001 = self.at(x0, y0, z1)
+            c010 = self.at(x0, y1, z0)
+            c011 = self.at(x0, y1, z1)
+            c100 = self.at(x1, y0, z0)
+            c101 = self.at(x1, y0, z1)
+            c110 = self.at(x1, y1, z0)
+            c111 = self.at(x1, y1, z1)
+            
+            c00 = [c000[k]*(1-xd) + c100[k]*xd for k in range(4)]
+            c01 = [c001[k]*(1-xd) + c101[k]*xd for k in range(4)]
+            c10 = [c010[k]*(1-xd) + c110[k]*xd for k in range(4)]
+            c11 = [c011[k]*(1-xd) + c111[k]*xd for k in range(4)]
+            
+            c0 = [c00[k]*(1-yd) + c10[k]*yd for k in range(4)]
+            c1 = [c01[k]*(1-yd) + c11[k]*yd for k in range(4)]
+            
+            c = [c0[k]*(1-zd) + c1[k]*zd for k in range(4)]
+            collected_voxels.append(c)
+
+        num_samples = len(collected_voxels)
+        transmittances = []
+        
+        for i in range(num_samples):
+            t_sum = 0.0
+            for j in range(i):
+                sigma_j = collected_voxels[j][0]
+                delta_j = ray_samples[j][3]
+                t_sum += math.exp(-sigma_j * delta_j)
+            transmittances.append(t_sum)
+
+        accumulated_color = [0.0, 0.0, 0.0]
+        
+        for i in range(num_samples):
+            sigma_i = collected_voxels[i][0]
+            delta_i = ray_samples[i][3]
+            color_i = collected_voxels[i][1:]
+            
+            weight = transmittances[i] * (1.0 - math.exp(-sigma_i * delta_i))
+            
+            for k in range(3):
+                accumulated_color[k] += weight * color_i[k]
+                
+        return accumulated_color
+```
+
+**Parameters:**
+- Default voxel value: `[0.005, 0.5, 0.6, 0.7]` (density, R, G, B) [S1, unofficial].
+- Sampling rate: The source notes that 100 samples cause "onion ring" artifacts, while 200 samples fix them [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Handling**: If a sample position is outside the grid bounds, `self.at()` returns a zero tensor `[0., 0., 0., 0.]` [S1, unofficial].
+- **Precision**: Integer truncation is used for grid coordinates. If $x$ is an integer, $x_d=0$ [S1, unofficial].
+- **Artifacts**: Low sampling rates (e.g., 100 samples) produce banding artifacts known as "onion rings". Increasing the sampling rate (e.g., to 200) resolves this [S1, unofficial].
+- **Implementation Discrepancy**: The source code's aggregation function accesses index 5 for color in a flat tensor, but the voxel grid stores color at indices 1-3. The pseudocode above resolves this by using the collected voxel data directly and mapping indices correctly [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ per ray for accumulation, where $N$ is the number of ray samples. Trilinear interpolation is $O(1)$ per sample [G].
+- **Memory Complexity**: $O(grid\_x \cdot grid\_y \cdot grid\_z)$ to store the voxel grid [G].
+- **Performance**: The method produces smooth results ("proper cube") compared to discrete sampling [S1, unofficial]. However, it is sensitive to sampling rate; insufficient samples lead to visible artifacts [S1, unofficial].
+- **Strengths**: Smooth interpolation, simple implementation, handles boundaries gracefully [S1, unofficial].
+- **Limitations**: Memory intensive for high-resolution grids. Artifacts at low sampling rates [S1, unofficial].
+
+## Background
+This method is described in an unofficial guide covering volume rendering techniques [S1, unofficial]. It builds upon basic voxel grid structures and trilinear interpolation techniques [S1, unofficial].
+
+## Sources
+[S1] Total Internal Reflection, https://avishek.net/2022/12/05/pytorch-guide-plenoxels-nerf-part-2.html, fetched 2026-10-29 (unofficial)

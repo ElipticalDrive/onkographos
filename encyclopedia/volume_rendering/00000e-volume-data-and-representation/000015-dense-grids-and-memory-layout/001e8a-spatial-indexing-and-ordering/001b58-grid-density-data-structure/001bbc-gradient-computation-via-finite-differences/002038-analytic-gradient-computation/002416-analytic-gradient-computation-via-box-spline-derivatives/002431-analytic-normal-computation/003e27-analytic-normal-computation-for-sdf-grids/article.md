@@ -1,0 +1,155 @@
+# Analytic Normal Computation for SDF Grids
+
+Also called: Analytic Normal
+
+## Overview
+This method computes the surface normal $\mathbf{n}$ for a differentiable implicit function $f$ defined by a cubic polynomial within a voxel, using analytic derivatives instead of numerical differencing to ensure $C^2$ continuity inside the voxel [S1, unofficial]. It solves the problem of normal estimation in Signed Distance Function (SDF) grids where numerical methods require epsilon offsets and additional function evaluations [S1, unofficial]. Unlike its sibling [Analytic Normal Computation for SDF Grids](9650-analytic-normal-interpolation-for-sdf-grids.md), which computes continuous normals by sampling neighboring voxels in a dual-voxel framework, this method computes normals strictly within the local voxel domain [S1, unofficial]. It trades strict geometric continuity across voxel boundaries for computational efficiency and local accuracy [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Signed distance values $s_{ijk}$ at the eight corners of a voxel, where $i,j,k \in \{0,1\}$, and the local coordinates $(x,y,z)$ of the query point within the voxel, where $x,y,z \in [0,1]$.
+- Output: The non-normalized normal vector $\mathbf{n} = (\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z})$.
+
+**Data Structures:**
+- The SDF grid stores scalar values $s_{ijk}$ at integer grid positions.
+- Local coordinates $(x,y,z)$ are derived from the world-space hit point by subtracting the voxel origin and dividing by the voxel dimensions.
+
+**Steps:**
+1. Compute the x-component of the normal $\frac{\partial f}{\partial x}$ using bilinear interpolation of distance differences in the x-direction.
+2. Compute the y-component of the normal $\frac{\partial f}{\partial y}$ using bilinear interpolation of distance differences in the y-direction.
+3. Compute the z-component of the normal $\frac{\partial f}{\partial z}$ using bilinear interpolation of distance differences in the z-direction.
+4. Assemble the normal vector $\mathbf{n} = (\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z})$.
+
+**Formulas:**
+The partial derivative with respect to $x$ is given by [S1, unofficial]:
+$$
+\frac{\partial f(x,y,z)}{\partial x} = (1-y)(1-z)(s_{100} - s_{000}) + y(1-z)(s_{110} - s_{010}) + (1-y)z(s_{101} - s_{001}) + yz(s_{111} - s_{011})
+$$
+This can be rewritten as a bilinear interpolation [S1, unofficial]:
+$$
+\begin{aligned}
+y_0 &= \text{lerp}(y, s_{100} - s_{000}, s_{110} - s_{010}) \\
+y_1 &= \text{lerp}(y, s_{101} - s_{001}, s_{111} - s_{011}) \\
+\frac{\partial f(x, y, z)}{\partial x} &= \text{lerp}(z, y_0, y_1)
+\end{aligned}
+$$
+Similarly, the partial derivative with respect to $y$ is [S1, unofficial]:
+$$
+\begin{aligned}
+x_0 &= \text{lerp}(x, s_{010} - s_{000}, s_{110} - s_{100}) \\
+x_1 &= \text{lerp}(x, s_{011} - s_{001}, s_{111} - s_{101}) \\
+\frac{\partial f(x, y, z)}{\partial y} &= \text{lerp}(z, x_0, x_1)
+\end{aligned}
+$$
+And the partial derivative with respect to $z$ is [S1, unofficial]:
+$$
+\begin{aligned}
+x_0 &= \text{lerp}(x, s_{001} - s_{000}, s_{101} - s_{100}) \\
+x_1 &= \text{lerp}(x, s_{011} - s_{010}, s_{111} - s_{110}) \\
+\frac{\partial f(x, y, z)}{\partial z} &= \text{lerp}(y, x_0, x_1)
+\end{aligned}
+$$
+The linear interpolation function is implemented as [S1, unofficial]:
+$$
+\text{lerp}(u, a, b) = a + u(b - a)
+$$
+This form is chosen to be FMA-friendly [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_analytic_normal(s, x, y, z):
+    """
+    Compute the analytic normal for an SDF voxel.
+    
+    Args:
+        s: Array of 8 signed distance values at voxel corners.
+           s[0] = s000, s[1] = s100, s[2] = s010, s[3] = s110,
+           s[4] = s001, s[5] = s101, s[6] = s011, s[7] = s111
+        x, y, z: Local coordinates within the voxel [0, 1].
+        
+    Returns:
+        nx, ny, nz: Components of the non-normalized normal vector.
+    """
+    # Precompute differences for x-direction
+    dx_00 = s[1] - s[0]  # s100 - s000
+    dx_10 = s[3] - s[2]  # s110 - s010
+    dx_01 = s[5] - s[4]  # s101 - s001
+    dx_11 = s[7] - s[6]  # s111 - s011
+    
+    # Interpolate y0 and y1
+    y0 = dx_00 + y * (dx_10 - dx_00)
+    y1 = dx_01 + y * (dx_11 - dx_01)
+    
+    # Interpolate z to get nx
+    nx = y0 + z * (y1 - y0)
+    
+    # Precompute differences for y-direction
+    dy_00 = s[2] - s[0]  # s010 - s000
+    dy_10 = s[3] - s[1]  # s110 - s100
+    dy_01 = s[6] - s[4]  # s011 - s001
+    dy_11 = s[7] - s[5]  # s111 - s101
+    
+    # Interpolate x0 and x1
+    x0 = dy_00 + x * (dy_10 - dy_00)
+    x1 = dy_01 + x * (dy_11 - dy_01)
+    
+    # Interpolate z to get ny
+    ny = x0 + z * (x1 - x0)
+    
+    # Precompute differences for z-direction
+    dz_00 = s[4] - s[0]  # s001 - s000
+    dz_10 = s[5] - s[1]  # s101 - s100
+    dz_01 = s[6] - s[2]  # s011 - s010
+    dz_11 = s[7] - s[3]  # s111 - s110
+    
+    # Interpolate x0 and x1 (reusing variable names from formula, but distinct values)
+    z0 = dz_00 + x * (dz_10 - dz_00)
+    z1 = dz_01 + x * (dz_11 - dz_01)
+    
+    # Interpolate y to get nz
+    nz = z0 + y * (z1 - z0)
+    
+    return nx, ny, nz
+```
+
+**Parameters:**
+- No external parameters are required. The method relies solely on the voxel's corner values and the local hit position [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- The method is not $C^0$ continuous across voxel boundaries [S1, unofficial]. Normals may jump discontinuously when crossing from one voxel to another [S1, unofficial].
+- If the hit point is exactly on a voxel boundary, the choice of which voxel to sample determines the normal, potentially causing artifacts [S1, unofficial].
+- The method assumes the implicit function is a cubic polynomial within the voxel [S1, unofficial].
+
+## Subtopics
+
+### Analytic Normal Computation for SDF Grids — Single Voxel
+A normal computation method that is not $C^0$ across voxels and uses the distance values of a single voxel [S1, unofficial]. Analytic normals perform similar to the baseline method, as both only use the distance values of a single voxel [S1, unofficial].
+
+### Analytical Gradient & Normal Field Visualization
+This variant involves rendering contour grid lines across the field and applying gold highlights to $C^\infty$ smoothUnion (smin) fillets to indicate 0.0° facet chatter [S2, unofficial]. The analytical unit gradient $\nabla d(\mathbf{p}) = [n_x, n_y, n_z]$ is mapped directly to RGB channels for visualization [S2, unofficial].
+
+### Analytic Normal Computation for SH Glyphs
+Computes the surface normal $\mathbf{n}(\mathbf{p})$ for a Spherical Harmonics (SH) glyph defined as an implicit surface, using the gradient of the implicit function [S3]. The non-normalized normal is computed as [S3]:
+$$
+\mathbf{n}^\top(\mathbf{p}) := \mathbf{p}^\top - \mathbf{b}^\top \mathbf{Y} \left( \frac{\mathbf{p}}{\|\mathbf{p}\|} \right) \mathbf{b}^\top \mathbf{Y}' \left( \frac{\mathbf{p}}{\|\mathbf{p}\|} \right) \frac{\mathbf{p}^\top \mathbf{p} \mathbf{I} - \mathbf{p} \mathbf{p}^\top}{\sqrt{\mathbf{p}^\top \mathbf{p}^3}}
+$$
+where $\mathbf{Y}'(\mathbf{p}) \in \mathbb{R}^{(k+2) \times 3}$ denotes the Jacobian matrix of the SH basis $\mathbf{Y}(\mathbf{p})$ and $\mathbf{I} \in \mathbb{R}^{3 \times 3}$ is the identity matrix [S3]. Homogenization of the SH basis is irrelevant for this derivation because the matrix $\mathbf{p}^\top \mathbf{p} \mathbf{I} - \mathbf{p} \mathbf{p}^\top$ eliminates components of the derivatives normal to the unit sphere [S3].
+
+## Operating characteristics
+- **Time Complexity:** The analytic normal computation uses about 30 operations (without normalization), compared to 54 operations for the method of Parker et al. [S1, unofficial].
+- **Memory Complexity:** No additional memory is required beyond the SDF grid values [S1, unofficial].
+- **Measured Performance:** Analytic normals perform consistently slightly worse than the baseline method in terms of visual quality, due to the lack of continuity across voxels [S1, unofficial]. Our method (referring to the dual-voxel approach) uses 1.1–4.2% more time per frame on average for GST-A compared to the baseline and 1.0–7.3% more time per frame on average for SVS-A [S1, unofficial].
+- **Strengths:** $C^2$ continuity inside each voxel; computationally efficient; no epsilon tuning required [S1, unofficial].
+- **Limitations:** Not $C^0$ continuous across voxel boundaries; normals may appear discontinuous at voxel edges [S1, unofficial].
+- **When to use:** When local smoothness is important and voxel boundary discontinuities are acceptable or mitigated by other means [S1, unofficial].
+- **When not to use:** When global normal continuity is required, in which case the dual-voxel interpolation method should be used [S1, unofficial].
+
+## Background
+The method is described in "Ray tracing of signed distance function grids" by Frisken et al. [S1, unofficial]. It is based on the analytic derivative of the cubic polynomial defining the implicit function within a voxel [S1, unofficial]. The approach is similar in spirit to how normals are computed for PN triangles [S1, unofficial]. The method was proposed to remedy the discontinuity artifacts inherent in standard numerical differencing methods [S1, unofficial].
+
+## Sources
+[S1] Ray tracing of signed distance function grids, https://www.jcgt.org/published/0011/03/06/paper-lowres.pdf, fetched 2026-10-25 (unofficial)
+[S2] feat(sdf-wizard): [W] 20-Second SDF X-Ray & Measurement Wizard (uDebugVizMode 1..5 + live caliper), https://github.com/bourkefloyd/gemini-4-argon-sfhackathon-2026/pull/23, fetched 2026-10-26 (unofficial)
+[S3] Ray Tracing Spherical Harmonics Glyphs, https://doi.org/10.2312/vmv.20231223, fetched 2026-11-02

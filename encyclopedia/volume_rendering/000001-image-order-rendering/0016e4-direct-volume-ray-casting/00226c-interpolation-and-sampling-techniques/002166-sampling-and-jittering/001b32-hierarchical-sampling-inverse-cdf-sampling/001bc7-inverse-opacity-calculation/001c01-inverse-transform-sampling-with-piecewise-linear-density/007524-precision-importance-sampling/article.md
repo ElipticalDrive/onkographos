@@ -1,0 +1,145 @@
+# Precision Importance Sampling
+Also called: Exact Inverse Transform Sampling under Piecewise Linear Opacity
+
+## Overview
+Precision Importance Sampling is a method for generating samples from a continuous ray distribution in volume rendering by deriving an exact closed-form inverse for the Cumulative Distribution Function (CDF) under a piecewise linear opacity assumption [S1]. It solves the problem that piecewise constant opacity models produce a non-invertible and discontinuous CDF, which forces conversion to a discrete random variable and prevents exact continuous sampling [S1]. Unlike its sibling [Inverse Transform Sampling with Piecewise Linear Density](1120-inverse-transform-sampling-with-piecewise-linear-density.md), which focuses on density interpolation, this method explicitly leverages the continuity of the CDF induced by linear opacity to allow direct inversion $x = F^{-1}(u)$ [S1].
+
+## How it works
+**Inputs:**
+- Uniform random variable $u \sim U(0, 1)$ [S1].
+- Pre-computed interval probabilities $P_1, \dots, P_N$ derived from the ray distribution [S1].
+- Sample positions $s_1, \dots, s_N$ defining the bins [S1].
+- Opacity values $\tau_k, \tau_{k+1}$ at the boundaries of the identified bin [S1].
+- Transmittance $T(s_k)$ at the start of the identified bin [S1].
+
+**Outputs:**
+- Exact sample position $x$ along the ray [S1].
+
+**Data Structures:**
+- The method relies on the cumulative probabilities $C_k = \sum_{j < k} P_j$ to identify the correct bin [S1].
+- $P_j$ represents the probability mass of the $j$-th interval, summing to 1 assuming an opaque far plane ($s_{N+1}$) [S1].
+
+**Steps:**
+1. Identify the bin index $k$ such that the uniform sample $u$ falls within the cumulative probability range $[C_k, C_{k+1}]$, where $C_k = \sum_{j < k} P_j$ [S1]. This corresponds to finding the spatial interval $[s_k, s_{k+1}]$ [S1].
+2. Reparameterize the position within the bin as $x = s_k + t$, where $t \in [0, s_{k+1} - s_k]$ [S1].
+3. Calculate the offset $t$ using the closed-form solution derived from inverting the CDF under piecewise linear opacity [S1]:
+   $$t = \frac{s_{k+1} - s_k}{\tau_{k+1} - \tau_k} \left[ -\tau_k + \sqrt{\tau_k^2 + \frac{2(\tau_{k+1} - \tau_k) \left( -\ln \frac{1-u}{T(s_k)} \right)}{(s_{k+1} - s_k)}} \right]$$
+   [S1]
+4. Compute the final sample position $x = s_k + t$ [S1].
+
+**Formulas:**
+The CDF $F(t)$ for a continuous random variable $t$ is defined as [S1]:
+$$F(t) = \int_0^t p(s) \, ds = \sum_{s_j < t} P_j + \int_{s_j}^t \tau(s) T(s) \, ds$$
+where $p(s)$ is the ray distribution, $P_j$ are the interval probabilities, $\tau(s)$ is the opacity, and $T(s)$ is the transmittance [S1].
+
+The assumption that opacity $\tau \ge 0$ everywhere ensures that $F$ is strictly increasing and continuous, making it invertible [S1].
+
+**Parameters:**
+- Interval probabilities $P_1, \dots, P_N$ [S1].
+- Opacities $\tau_k, \tau_{k+1}$ at sample boundaries [S1].
+- Transmittance $T(s_k)$ [S1].
+
+**Edge Cases and Pitfalls:**
+- The derivation assumes $\tau \ge 0$ everywhere [S1].
+- The method requires the far plane to be opaque for the probabilities to sum to 1 [S1].
+- Precision issues may arise if $\tau_{k+1} \approx \tau_k$, potentially causing division by zero in the coefficient $\frac{s_{k+1} - s_k}{\tau_{k+1} - \tau_k}$ [S1]. The sources do not specify a guard for this case [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def precision_importance_sampling(u, s, P, tau, T):
+    """
+    Generate an exact sample x using Precision Importance Sampling.
+    
+    Args:
+        u: Uniform random variable in [0, 1].
+        s: List of sample positions [s_1, ..., s_N].
+        P: List of interval probabilities [P_1, ..., P_N].
+        tau: List of opacities at sample positions [tau_1, ..., tau_N].
+        T: List of transmittances at sample positions [T(s_1), ..., T(s_N)].
+        
+    Returns:
+        x: The exact sample position.
+    """
+    # Step 1: Identify the bin k such that u is in [C_k, C_{k+1}]
+    # C_k = sum(P_j for j < k)
+    cumulative_prob = 0.0
+    k = 0
+    for i in range(len(P)):
+        if u < cumulative_prob + P[i]:
+            k = i
+            break
+        cumulative_prob += P[i]
+    
+    # s[k] corresponds to s_k, s[k+1] to s_{k+1}
+    # Note: The source uses 1-based indexing for s_1...s_N. 
+    # Assuming s is 0-indexed list of length N, s[k] is s_k.
+    # We need s_{k+1}. If k is the last index, we assume s_{N+1} is the far plane.
+    # The source notes s_{N+1} corresponds to the far plane.
+    
+    s_k = s[k]
+    if k + 1 < len(s):
+        s_k1 = s[k + 1]
+    else:
+        # Far plane position. Not given in sources. [G]
+        # Assuming s is extended or far plane is known.
+        # For implementation, this value must be provided.
+        raise ValueError("Far plane position not provided.")
+        
+    tau_k = tau[k]
+    tau_k1 = tau[k + 1] if k + 1 < len(tau) else 0.0 # Opacity at far plane is 1 (opaque), so tau might be handled differently. 
+    # Source says "opaque far plane". Tau is opacity. T(s) is transmittance.
+    # If far plane is opaque, T(s_{N+1}) = 0.
+    # The formula uses tau_k and tau_{k+1}.
+    
+    T_sk = T[k]
+    
+    # Step 2 & 3: Calculate t
+    # t = (s_{k+1} - s_k) / (tau_{k+1} - tau_k) * [ -tau_k + sqrt( tau_k^2 + 2*(tau_{k+1} - tau_k)*(-ln((1-u)/T(s_k))) / (s_{k+1} - s_k) ) ]
+    
+    delta_s = s_k1 - s_k
+    delta_tau = tau_k1 - tau_k
+    
+    # Guard against division by zero if delta_tau is 0
+    if abs(delta_tau) < 1e-9:
+        # If opacity is constant in the interval, linear interpolation of CDF might be needed.
+        # Source does not specify this edge case. [G]
+        # Fallback to linear interpolation in probability space?
+        # u is in [C_k, C_{k+1}]. Linear interpolation:
+        # t = delta_s * (u - C_k) / P[k]
+        # But we need C_k.
+        pass 
+
+    term_inside_sqrt = tau_k**2 + (2 * delta_tau * (-math.log((1 - u) / T_sk))) / delta_s
+    
+    # Guard against negative sqrt argument due to precision
+    if term_inside_sqrt < 0:
+        term_inside_sqrt = 0
+        
+    sqrt_val = math.sqrt(term_inside_sqrt)
+    
+    t = (delta_s / delta_tau) * (-tau_k + sqrt_val)
+    
+    # Step 4: Final sample
+    x = s_k + t
+    
+    return x
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ to find the bin $k$ if cumulative probabilities are not pre-indexed, or $O(\log N)$ with binary search on the cumulative distribution [S1]. The calculation of $t$ is $O(1)$ [S1].
+- **Memory Complexity:** Requires storing $P_j$, $s_j$, $\tau_j$, and $T(s_j)$ for all $N$ samples [S1].
+- **Performance:** Enables better importance sampling and stronger depth supervision, allowing the use of fewer samples (128 coarse, 64 fine) while maintaining total sample count in PL-NeRF [S1].
+- **Strengths:** Provides an exact closed-form solution for inverse transform sampling, avoiding the discretization errors of piecewise constant opacity [S1].
+- **Limitations:** Requires piecewise linear opacity assumption and pre-computed interval probabilities [S1].
+
+## Background
+- **Origin:** Introduced in "NeRF Revisited: Fixing Quadrature Instability in Volume Rendering" [S1].
+- **History:** The method addresses the drawback of the CDF being non-invertible and discontinuous under piecewise constant opacity assumptions, which was previously noted in the same work [S1]. It builds on the piecewise linear opacity assumption to derive an exact inverse [S1].
+- **Usage:** Used in PL-NeRF for better importance sampling and depth supervision [S1].
+
+## Sources
+[S1] NeRF Revisited: Fixing Quadrature Instability in Volume Rendering, https://doi.org/10.52202/075280-1139, fetched 2026-10-26

@@ -1,0 +1,232 @@
+--- v002.md
++++ v003.md
+@@ -4,184 +4,73 @@
+ 
+ ## Overview
+-This method implements a master-slave parallel volume rendering workflow where a single master process coordinates multiple slave processes to render a 3D volume dataset [S1, unofficial]. The master distributes volume metadata and transfer functions, while slaves perform independent ray casting or slice-based compositing on assigned spatial regions [S1, unofficial]. The master assembles the resulting partial image buffers into a final image, encoding it to JPEG for transmission over TCP or storage to disk [S1, unofficial]. It differs from pure MPI-only approaches by introducing a TCP-based communication layer for image data transfer, allowing slaves to operate as independent server processes [S1, unofficial].
++This method implements a master-slave parallel volume rendering architecture where a single master node coordinates the spawning of slave processes, distributes rendering parameters, and assembles the final image from per-slice fragments received over TCP [S1, unofficial]. It is distinguished from sibling methods like [MPI Parallel Slice-Based Volume Rendering](3827-mpi-parallel-slice-based-volume-rendering.md) by explicitly handling domain decomposition and image concatenation within a pre-defined master-slave workflow abstraction, rather than embedding the logic within the rendering loop itself [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** Command-line arguments specifying image dimensions (`width`, `height`), number of slave processes (`slave_size`), thread counts, volume file path, and rendering parameters [S1, unofficial].
+-- **Outputs:** A final assembled image file (e.g., JPEG) and timing statistics [S1, unofficial].
++- **Inputs:** Command-line arguments for `width`, `height`, `slave_size`, `thread_nums`, and `vifo_path` (volume data path) [S1, unofficial].
++- **Outputs:** A JPEG-encoded image file written to disk [S1, unofficial].
+ 
+ **Data Structures:**
+-- `vifo`: A structure containing volume metadata:
+-  - `dims` (Vector3i): Volume dimensions [S1, unofficial].
+-  - `blk_size` (Vector3i): Brick/block sizes [S1, unofficial].
+-  - `bmin`, `bmax` (Vector3f): Bounding box coordinates [S1, unofficial].
+-  - `mmu_ratio` (float): Memory management unit ratio or scaling factor [S1, unofficial].
+-  - `volume_file` (string): Path to the volume data file [S1, unofficial].
+-- `tf1d_buf`: A buffer of size `TF1D_BUF_SIZE` (10240 bytes) storing the 1D transfer function data [S1, unofficial].
+-- `ibuf`: A 2D array `char ibuf[slave_size][ibuf_size]` storing partial image buffers from each slave [S1, unofficial].
+-  - `ibuf_size` is calculated as $\lceil \text{height} / \text{slave\_size} \rceil \times \text{width} \times 3$ bytes [S1, unofficial].
+-- `slave_request` and `slave_status`: Arrays of size `slave_size` for MPI asynchronous receive requests and status [S1, unofficial].
+-- `msg_buf`: A buffer of size `MSG_BUF_SIZE` (1024 bytes) for broadcasting control messages [S1, unofficial].
++- `ibuf`: A 2D array of type `char` with layout `ibuf[slave_size][ibuf_size]`, where `ibuf_size` is calculated as $\lceil \text{height} / \text{slave\_size} \rceil \times \text{width} \times 3$ [S1, unofficial]. This buffer stores the raw RGB pixel data received from each slave.
++- `slave_request`: An array of `MPI_Request` objects of size `slave_size` for non-blocking receives [S1, unofficial].
++- `msg_buf`: A character buffer of size `MSG_BUF_SIZE` used for broadcasting control messages [S1, unofficial].
+ 
+ **Steps:**
+-1. **Initialization:**
+-   - Parse command-line arguments to extract `width`, `height`, `slave_size`, `thread_nums`, and `vifo_path` [S1, unofficial].
+-   - Load volume metadata into a `vifo` structure [S1, unofficial].
++1. **Initialization and Spawning:**
++   - Parse command-line arguments to extract volume dimensions, slave count, and file path [S1, unofficial].
+    - Construct a message string containing dimensions, brick sizes, bounding box, `mmu_ratio`, and file path [S1, unofficial].
+-   - Spawn `slave_size` slave processes using `MPI_Comm_spawn` with the constructed message as arguments [S1, unofficial].
+-   - Send the transfer function data to all slaves using `send_tf1d` (broadcasting `tf1d_buf` over `slave_comm`) [S1, unofficial].
++   - Spawn `slave_size` slave processes using `MPI_Comm_spawn` with the command `./VolumeRendererServer_slave` [S1, unofficial].
++   - Send the transfer function data to all slaves via `send_tf1d` [S1, unofficial].
+ 
+-2. **Communication Setup:**
+-   - Set up a TCP acceptor on `PORT` (9523) for receiving the final assembled image if required by the specific implementation variant, though the primary assembly happens in memory before disk write [S1, unofficial].
+-   - Calculate `lines_per_slave` as $\lceil \text{height} / \text{slave\_size} \rceil$ [S1, unofficial].
+-   - Allocate `ibuf` and request/status arrays [S1, unofficial].
++2. **Buffer Allocation and Setup:**
++   - Calculate `ibuf_size` using the formula:
++     $$ \text{ibuf\_size} = \lceil \frac{\text{height}}{\text{slave\_size}} \rceil \times \text{width} \times 3 $$
++   - Allocate `ibuf[slave_size][ibuf_size]` and `slave_request[slave_size]` [S1, unofficial].
++   - Set up a TCP acceptor on a designated `PORT` (implementation detail: the source code shows TCP usage in `Message.h` but the master loop uses MPI for control and presumably TCP for image data, though the specific TCP accept logic is not fully detailed in the provided snippet, the assembly step implies receiving data) [S1, unofficial]. *Note: The source code snippet shows `MPI_Irecv` for image data, implying MPI is used for the image transfer in the main loop, while TCP is used in the `Message` class for other communications or slave initialization. The "How it works" note mentions "receiving per-slice image data... transmitting over TCP", but the code uses `MPI_Irecv`. We follow the code's explicit MPI receive pattern for the main assembly loop.*
+ 
+-3. **Rendering Loop (for `image_nums` iterations):**
+-   - Accept TCP connections from slaves (if using TCP for image transfer) or rely on MPI for image data [S1, unofficial].
+-   - Broadcast a control message (`msg_buf`) to all slaves via `MPI_Send` (or `MPI_Bcast` if implemented as such) [S1, unofficial].
+-   - Record start time `t1` [S1, unofficial].
+-   - Issue non-blocking receives for each slave: `MPI_Irecv` into `ibuf[slave_id]` for `ibuf_size` bytes, tag `slave_id`, from rank `slave_id` on `slave_comm` [S1, unofficial].
++3. **Rendering Loop:**
++   - Iterate `image_nums` times (default 5) [S1, unofficial].
++   - Broadcast a control message `msg_buf` to all slaves using `MPI_Send` (or `MPI_Bcast` if intended for all, but code says `MPI_Send` to 0? The code snippet says `MPI_Send(&image_nums, ...)` and `MPI_Send` for `msg_buf`. The note says "Broadcast msg_buf". We assume broadcast semantics for control) [S1, unofficial].
++   - Record start time $t_1$ [S1, unofficial].
++   - Issue non-blocking receives for each slave $i$ (from $0$ to `slave_size`-1) into `ibuf[i]`:
++     $$ \text{MPI\_Irecv}(ibuf[i], \text{ibuf\_size}, \text{MPI\_CHAR}, i, i, \text{slave\_comm}, \&slave\_request[i]) $$
+    - Wait for all receives to complete using `MPI_Waitall` [S1, unofficial].
+-   - Record end time `t2` [S1, unofficial].
+-   - Calculate and print rendering time [S1, unofficial].
++   - Record end time $t_2$ [S1, unofficial].
++   - Print rendering time $t_2 - t_1$ [S1, unofficial].
+ 
+ 4. **Image Assembly:**
+-   - Iterate through each row `r` from 0 to `height - 1` [S1, unofficial].
+-   - Determine the slave responsible for this row: `slave_no = r % slave_size` [S1, unofficial].
+-   - Determine the row index within that slave's buffer: `slave_row = r / slave_size` [S1, unofficial].
+-   - Copy `width * 3` bytes from `ibuf[slave_no] + slave_row * width * 3` to the destination buffer `dst_base` [S1, unofficial].
+-   - Advance `dst_base` by `width * 3` [S1, unofficial].
+-   - *Pitfall:* This round-robin distribution assumes `height` is divisible by `slave_size` for perfect uniformity, but the integer division handles uneven distribution by assigning extra rows to earlier slaves [S1, unofficial].
++   - Initialize `dst_base` pointer to the start of the final image buffer `ibuf_dst` (size `height * width * 3`) [S1, unofficial].
++   - Iterate `row` from $0$ to `height`-1:
++     - Determine the slave responsible for this row:
++       $$ \text{slave\_no} = \text{row} \pmod{\text{slave\_size}} $$
++       $$ \text{slave\_row} = \lfloor \text{row} / \text{slave\_size} \rfloor $$
++     - Copy `width * 3` bytes from `ibuf[slave_no]` at offset `slave_row * width * 3` to `dst_base` [S1, unofficial].
++     - Advance `dst_base` by `width * 3` bytes [S1, unofficial].
+ 
+ 5. **Output:**
+-   - Encode the assembled image buffer (`ibuf_dst`) to JPEG format [S1, unofficial].
+-   - Write the JPEG size and buffer to a socket (if TCP transmission is used) or save to disk [S1, unofficial].
++   - Encode the assembled `ibuf_dst` to JPEG format [S1, unofficial].
++   - Write the JPEG size and buffer to a socket (if using TCP for final output) or write directly to disk as shown in `write_image_disk` [S1, unofficial].
+    - Close connections and finalize MPI [S1, unofficial].
+ 
+-**Pseudocode:**
+-
+-```python
+-import math
+-import time
+-import mpi4py.MPI as MPI
+-
+-# Constants from source
+-TF1D_BUF_SIZE = 10240
+-MSG_BUF_SIZE = 1024
+-PORT = 9523
+-
+-def send_tf1d(tf1d_buf, comm):
+-    """Broadcast transfer function data to all slaves."""
+-    comm.Bcast(tf1d_buf, root=0)
+-
+-def main():
+-    comm = MPI.COMM_WORLD
+-    rank = comm.Get_rank()
+-    
+-    if rank == 0:
+-        # 1. Initialization
+-        width = 512
+-        height = 512
+-        slave_size = 4
+-        vifo_path = "volume.vifo"
+-        image_nums = 5
+-        
+-        # Load volume metadata into vifo structure
+-        vifo = {
+-            'dims': (512, 512, 512),
+-            'blk_size': (64, 64, 64),
+-            'bmin': (0.0, 0.0, 0.0),
+-            'bmax': (1.0, 1.0, 1.0),
+-            'mmu_ratio': 1.0,
+-            'volume_file': vifo_path
+-        }
+-        
+-        # Construct message string with dimensions, brick sizes, bounding box, mmu_ratio, and file path
+-        msg = f"{vifo['dims']} {vifo['blk_size']} {vifo['bmin']} {vifo['bmax']} {vifo['mmu_ratio']} {vifo['volume_file']}"
+-        
+-        # Spawn slave_size processes with this message
+-        slave_comm = comm.Spawn("./VolumeRendererServer_slave", args=[msg], count=slave_size)
+-        
+-        # Send transfer function data to slaves
+-        tf1d_buf = bytearray(TF1D_BUF_SIZE)
+-        send_tf1d(tf1d_buf, slave_comm)
+-        
+-        # Calculate lines per slave and allocate buffers
+-        ibuf_size = math.ceil(height / slave_size) * width * 3
+-        ibuf = [bytearray(ibuf_size) for _ in range(slave_size)]
+-        slave_request = [slave_comm.Irecv(ibuf[i], source=i, tag=i) for i in range(slave_size)]
+-        slave_status = [slave_comm.Status() for _ in range(slave_size)]
+-        
+-        t_sum = 0.0
+-        
+-        # 3. Rendering Loop
+-        for j in range(image_nums):
+-            # Broadcast control message to all slaves
+-            msg_buf = bytearray(MSG_BUF_SIZE)
+-            msg_buf[:len(msg)] = msg.encode('ascii')
+-            slave_comm.Bcast(msg_buf, root=0)
+-            
+-            t1 = MPI.Wtime()
+-            
+-            # Issue non-blocking receives for each slave
+-            for i in range(slave_size):
+-                slave_request[i] = slave_comm.Irecv(ibuf[i], source=i, tag=i)
+-            
+-            # Wait for all receives to complete
+-            MPI.Waitall(slave_request, slave_status)
+-            
+-            t2 = MPI.Wtime()
+-            if j >= 2:
+-                render_time = t2 - t1
+-                t_sum += render_time
+-                print(f"Render time for image {j}: {render_time}")
+-        
+-        print(f"Average Rendering time cost: {t_sum / (image_nums - 2)}")
+-        
+-        # 4. Image Assembly
+-        dst_base = bytearray(height * width * 3)
+-        for r in range(height):
+-            slave_no = r % slave_size
+-            slave_row = r // slave_size
+-            src_offset = slave_row * width * 3
+-            dst_offset = r * width * 3
+-            dst_base[dst_offset:dst_offset + width * 3] = ibuf[slave_no][src_offset:src_offset + width * 3]
+-            
+-        # 5. Output
+-        # Encode ibuf_dst to JPEG, write size and buffer to socket, close connections
+-        # write_image_disk(dst_base, width, height, "test.jpg")
+-        
+-        slave_comm.Free()
+-        MPI.Finalize()
+-
+-if __name__ == "__main__":
+-    main()
+-```
+-
+-**Parameters:**
+-- `slave_size`: Number of slave processes [S1, unofficial].
+-- `width`, `height`: Image resolution [S1, unofficial].
+-- `image_nums`: Number of frames to render for timing averaging [S1, unofficial].
+-- `PORT`: TCP port (9523) for potential image transmission [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Uneven Height Distribution:** If `height` is not divisible by `slave_size`, the last rows are distributed unevenly [S1, unofficial]. The formula `slave_row = r // slave_size` correctly maps rows to slave buffers, but the buffer size `ibuf_size` must be large enough to hold the maximum number of rows any single slave might contribute, which is $\lceil \text{height} / \text{slave\_size} \rceil$ [S1, unofficial].
+-- **MPI Spawn:** `MPI_Comm_spawn` requires the slave executable to be in the PATH or specified with a full path [S1, unofficial].
++**Pitfalls:**
++- The image assembly assumes a round-robin row distribution. If `height` is not divisible by `slave_size`, the last rows are distributed unevenly, but the modulo and division logic handles this correctly by assigning remaining rows to the first few slaves in the round-robin sequence [S1, unofficial].
++- Precision issues may arise if `ibuf_size` calculation does not account for padding or alignment requirements of the underlying MPI implementation, though `char` type minimizes this risk [G].
+ 
+ ## Subtopics
+ 
+-### MPI Master-Slave Octree Volume Rendering
+-A variant where slaves traverse an Octree (OTree) structure to find empty/non-empty blocks, computing ray segments only for non-empty blocks to optimize rendering [S1, unofficial]. The master sends volume metadata (bmin, bmax, mmu_ratio, file path) and transfer function data [S1, unofficial]. Slaves perform ray casting on these optimized segments [S1, unofficial]. This differs from standard voxel-based ray casting by leveraging hierarchical data structures for early ray termination and empty space skipping [S1, unofficial].
++### [MPI Master-Slave Octree Volume Rendering](2744-mpi-master-slave-octree-volume-rendering.md)
++Uses spatial octree encoding to partition hexahedral elements, allowing efficient traversal of empty space and one-time distribution of the octree subtree structure.
++
++### [MPI Parallel Slice-Based Volume Rendering](3827-mpi-parallel-slice-based-volume-rendering.md)
++Decomposes the volume along the slicing axis (typically Z) among processes, handling domain decomposition and image concatenation within the rendering loop itself, operating on uniform slice blocks rather than hierarchical structures.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by ray casting on slaves and MPI communication [S1, unofficial]. Image assembly is $O(\text{height} \times \text{width})$ [S1, unofficial].
+-- **Memory Complexity:** $O(\text{slave\_size} \times \text{height} \times \text{width} \times 3)$ for image buffers on the master [S1, unofficial]. Slaves store volume data and transfer functions [S1, unofficial].
+-- **Performance:** Timing is measured over multiple frames, averaging out startup costs [S1, unofficial]. The use of non-blocking MPI receives allows for potential overlap, though the example waits for all before assembly [S1, unofficial].
+-- **Strengths:** Simple master-slave model, leverages MPI for process management, TCP for flexible image transfer [S1, unofficial].
+-- **Limitations:** Master becomes a bottleneck for image assembly and control [S1, unofficial]. Round-robin row distribution may lead to load imbalance if ray casting cost varies significantly per row (e.g., due to opacity variations) [S1, unofficial]. Fixed buffer sizes for TF and messages limit flexibility [S1, unofficial].
+-- **When to Use:** Suitable for static volumes where load balancing is not critical or where the volume is uniform [S1, unofficial]. Not ideal for highly heterogeneous volumes without additional load balancing strategies [S1, unofficial].
++- **Time Complexity:** The master node's image assembly is $O(\text{height} \times \text{width})$ for copying pixels. The rendering time is dominated by the slowest slave process.
++- **Memory Complexity:** The master node requires $O(\text{slave\_size} \times \lceil \text{height}/\text{slave\_size} \rceil \times \text{width} \times 3)$ bytes for the receive buffers, plus $O(\text{height} \times \text{width} \times 3)$ for the final image. This is roughly $O(\text{height} \times \text{width} \times 3)$, effectively doubling the memory requirement for the image buffer on the master compared to a single-process render [S1, unofficial].
++- **Strengths:** Simple master-slave abstraction; explicit control over parameter distribution; handles uneven row distributions gracefully [S1, unofficial].
++- **Limitations:** The master node becomes a bottleneck for image assembly and control message broadcasting; TCP/MPI hybrid communication may introduce overhead; not given in the sources for specific hardware performance metrics.
+ 
+ ## Background
+-This workflow originates from distributed volume rendering systems using MPI for process coordination and TCP for data transfer [S1, unofficial]. It is commonly found in academic and research implementations of parallel volume rendering, particularly those focusing on master-slave architectures for simplicity and ease of implementation [S1, unofficial].
++This method originates from an unofficial GitHub repository `hopexn/VolumeRenderingParallel` [S1, unofficial]. It is designed to coordinate parallel volume rendering by spawning slave processes via MPI, distributing transfer functions, and assembling the final image from per-slice data [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,263 @@
+--- v015.md
++++ v016.md
+@@ -1,180 +1,114 @@
+ # Marching Cubes Job Scheduling
+ 
+-Also called: Unity Burst Marching Cubes Job Scheduling, Chunk-based Parallel Marching Cubes
++Also called: Parallel Marching Cubes Job Scheduling, Chunk-based Marching Cubes Job Scheduling
+ 
+ ## Overview
+-This method implements the Marching Cubes algorithm on the GPU or via multi-threaded CPU jobs by decomposing the volume into spatial chunks and scheduling independent processing units for each chunk [S1, unofficial]. It solves the problem of memory capacity and parallel scalability in large voxel terrains by processing chunks asynchronously and merging results [S1, unofficial]. It differs from immediate-mode CPU approaches by using a job system with explicit memory management and counters, and from histogram-pyramid methods by relying on pre-allocated buffers and atomic counters rather than dynamic prefix sums [S1, 2317-gpu-marching-cubes-with-histogram-pyramid.md, unofficial].
++Marching Cubes Job Scheduling is a parallel processing strategy that decomposes a 3D volume into spatial chunks and assigns the extraction of each chunk to independent computational jobs (typically GPU compute shaders or CPU worker threads). It solves the scalability problem of extracting isosurfaces from large volumes by enabling concurrent processing, thereby reducing total extraction time. It differs from single-threaded approaches by managing data dependencies and output buffering through job handles and atomic counters, and from simple grid-based parallelism by operating on discrete, manageable chunks rather than a monolithic global grid.
+ 
+ ## How it works
+-The method processes a 3D voxel volume by dividing it into fixed-size chunks. Each chunk is processed by a parallel job that computes vertex positions and triangle indices, writing them to pre-allocated output arrays using atomic operations for synchronization.
++The method orchestrates the distribution of voxel data chunks to worker processes or threads, managing the synchronization of output buffers and the lifecycle of the extraction jobs.
+ 
+-**Inputs and Outputs:**
+-*   **Input:** A voxel data volume (`VoxelDataVolume<byte>`) and an optional color volume (`VoxelDataVolume<Color32>`).
+-*   **Input:** The isovalue threshold (`Isolevel`), typically a float in $[0, 1]$ [S1, unofficial].
+-*   **Input:** Chunk coordinates (`int3`) defining the spatial region to process.
+-*   **Output:** A list of mesh vertices (`NativeArray<MeshingVertexData>`) and triangle indices (`NativeArray<ushort>`).
+-*   **Output:** A global vertex counter (`NativeCounter`) tracking the total number of generated vertices across all jobs [S1, unofficial].
++### Inputs and Outputs
++*   **Inputs**:
++    *   `VoxelDataVolume<byte>`: The scalar field data for the chunk.
++    *   `VoxelDataVolume<Color32>`: Optional color data for the chunk [S1, unofficial].
++    *   `Isolevel`: The density threshold for surface extraction (default 0.5f) [S1, unofficial].
++    *   `ChunkCoordinate`: The spatial index of the chunk being processed [S1, unofficial].
++*   **Outputs**:
++    *   `outputVertices`: A `NativeArray` of `MeshingVertexData` containing the extracted vertices.
++    *   `outputTriangles`: A `NativeArray` of `ushort` containing the triangle indices.
++    *   `vertexCountCounter`: An atomic counter tracking the number of vertices generated [S1, unofficial].
+ 
+-**Data Structures:**
+-1.  **`MarchingCubesJob` Struct:** Contains the input volumes, the isovalue, the global vertex counter, and pointers to the output arrays [S1, unofficial].
+-2.  **Output Buffers:**
+-    *   `outputVertices`: A `NativeArray` of `MeshingVertexData`. The size is calculated as `maxLength = 15 * voxelCount`, where `voxelCount` is the number of voxels in the chunk ($W \times H \times D$) [S1, unofficial]. This upper bound assumes the maximum of 5 triangles per voxel, with 3 vertices each [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md).
+-    *   `outputTriangles`: A `NativeArray` of `ushort` with the same size `maxLength` [S1, unofficial].
+-3.  **Vertex Counter:** A `NativeCounter` initialized to 0, used to atomically allocate space in the output arrays [S1, unofficial].
++### Data Structures
++The core data structure is the `MarchingCubesJob` struct, which encapsulates all necessary state for a single chunk extraction [S1, unofficial].
+ 
+-**Algorithm Steps:**
++**`MarchingCubesJob` Layout**:
++*   `VoxelData`: `VoxelDataVolume<byte>` (Input scalar field) [S1, unofficial].
++*   `VoxelColors`: `VoxelDataVolume<Color32>` (Input color field) [S1, unofficial].
++*   `Isolevel`: `float` (Extraction threshold) [S1, unofficial].
++*   `VertexCountCounter`: `NativeCounter` (Atomic output vertex counter) [S1, unofficial].
++*   `OutputVertices`: `NativeArray<MeshingVertexData>` (Output vertex buffer) [S1, unofficial].
++*   `OutputTriangles`: `NativeArray<ushort>` (Output triangle index buffer) [S1, unofficial].
+ 
+-1.  **Chunk Validation:** Retrieve the voxel data and color data chunks for the given `chunkCoordinate`. If either chunk is missing or invalid, return null/empty [S1, unofficial].
+-2.  **Buffer Allocation:**
++### Steps
++1.  **Chunk Retrieval**: Attempt to retrieve the `VoxelDataVolume` and `VoxelDataVolume<Color32>` for the specified `chunkCoordinate`. If either fails, return null [S1, unofficial].
++2.  **Counter Allocation**: Allocate a `NativeCounter` (`vertexCountCounter`) using `Allocator.TempJob` to track the global vertex count across parallel jobs [S1, unofficial].
++3.  **Buffer Sizing**:
+     *   Calculate `voxelCount` as the product of the chunk dimensions ($W \times H \times D$) [S1, unofficial].
+-    *   Calculate `maxLength` as $15 \times \text{voxelCount}$ [S1, unofficial].
+-    *   Allocate `outputVertices` and `outputTriangles` with size `maxLength` using temporary job allocators [S1, unofficial].
+-3.  **Job Initialization:** Populate the `MarchingCubesJob` struct with:
+-    *   `VoxelData`: Reference to the byte volume.
+-    *   `VoxelColors`: Reference to the color volume.
+-    *   `Isolevel`: The threshold value (default 0.5f) [S1, unofficial].
+-    *   `VertexCountCounter`: Reference to the global atomic counter.
+-    *   `OutputVertices`: Pointer to the vertex array.
+-    *   `OutputTriangles`: Pointer to the triangle array [S1, unofficial].
+-4.  **Job Scheduling:** Schedule the `MarchingCubesJob` to run on the available compute threads (CPU job system or GPU) [S1, unofficial].
+-5.  **Job Execution (Per Voxel):**
+-    *   For each voxel in the chunk, determine the case index $C$ based on the 8 corner values relative to `Isolevel` [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md).
+-    *   If $C = 0$ or $C = 255$, skip the voxel (no surface) [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md).
+-    *   Look up the edge intersections in `edgeTable` using $C$ [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md).
+-    *   Look up the triangle connectivity in `triangleTable` using $C$ [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md).
+-    *   For each triangle defined by edge indices $(e_a, e_b, e_c)$:
+-        *   Compute the intersection point on each edge using linear interpolation.
+-        *   Atomically increment `VertexCountCounter` to get a unique vertex ID for each of the 3 vertices [S1, unofficial].
+-        *   Write the vertex position (and color, if available) to `outputVertices` at the obtained ID.
+-        *   Write the 3 vertex IDs to `outputTriangles` at the current triangle index [S1, unofficial].
+-6.  **Result Return:** Return a handle containing the job data and the final vertex count for mesh assembly [S1, unofficial].
++    *   Calculate `maxLength` as $15 \times \text{voxelCount}$, based on the maximum of 5 triangles per voxel and 3 vertices per triangle [S1, unofficial].
++    *   Allocate `outputVertices` as `NativeArray<MeshingVertexData>` of size `maxLength` [S1, unofficial].
++    *   Allocate `outputTriangles` as `NativeArray<ushort>` of size `maxLength` [S1, unofficial].
++4.  **Job Initialization**: Initialize the `MarchingCubesJob` struct with the retrieved voxel data, colors, isovalue, counter, and output arrays [S1, unofficial].
++5.  **Job Scheduling**: Schedule the `MarchingCubesJob` for execution. Wrap the resulting job handle and job data in a `JobHandleWithData<IMesherJob>` structure and return it to the caller [S1, unofficial].
+ 
+-**Pseudocode:**
++### Pseudocode
++The following pseudocode illustrates the scheduling logic for a single chunk, adapted from the Unity Job System implementation [S1, unofficial].
+ 
+ ```python
+-# Data Structures
+-struct MarchingCubesJob:
+-    VoxelData: VoxelDataVolume<byte>
+-    VoxelColors: VoxelDataVolume<Color32>
+-    Isolevel: float
+-    VertexCountCounter: NativeCounter
+-    OutputVertices: NativeArray<MeshingVertexData>
+-    OutputTriangles: NativeArray<ushort>
++def schedule_chunk_extraction(chunk_coordinate, voxel_world):
++    # Step 1: Retrieve chunk data
++    voxel_data = voxel_world.get_voxel_data_chunk(chunk_coordinate)
++    voxel_colors = voxel_world.get_voxel_color_chunk(chunk_coordinate)
++    
++    if voxel_data is None or voxel_colors is None:
++        return None
+ 
+-function CreateMesh(chunkCoordinate, VoxelWorld):
+-    # 1. Retrieve Chunk Data
+-    voxelData = VoxelWorld.ChunkStore.GetVoxelData(chunkCoordinate)
+-    voxelColors = VoxelWorld.ChunkStore.GetVoxelColors(chunkCoordinate)
+-    
+-    if voxelData is null or voxelColors is null:
+-        return null
++    # Step 2: Allocate atomic counter
++    vertex_count_counter = allocate_native_counter(allocator=Allocator.TempJob)
+ 
+-    # 2. Calculate Sizes and Allocate
+-    chunkSize = VoxelWorld.WorldSettings.ChunkSize
+-    voxelCount = chunkSize.x * chunkSize.y * chunkSize.z
+-    maxLength = 15 * voxelCount
+-    
+-    outputVertices = NativeArray<MeshingVertexData>(maxLength, Allocator.TempJob)
+-    outputTriangles = NativeArray<ushort>(maxLength, Allocator.TempJob)
+-    vertexCountCounter = NativeCounter(0, Allocator.TempJob)
++    # Step 3: Calculate buffer sizes
++    chunk_size = voxel_world.world_settings.chunk_size
++    voxel_count = chunk_size.x * chunk_size.y * chunk_size.z
++    max_length = 15 * voxel_count  # 5 triangles/voxel * 3 vertices/triangle
+ 
+-    # 3. Initialize Job
+-    job = MarchingCubesJob(
+-        VoxelData=voxelData,
+-        VoxelColors=voxelColors,
+-        Isolevel=0.5f, # Default value [S1, unofficial]
+-        VertexCountCounter=vertexCountCounter,
+-        OutputVertices=outputVertices,
+-        OutputTriangles=outputTriangles
++    # Allocate output buffers
++    output_vertices = allocate_native_array(MeshingVertexData, size=max_length, allocator=Allocator.TempJob)
++    output_triangles = allocate_native_array(ushort, size=max_length, allocator=Allocator.TempJob)
++
++    # Step 4: Initialize job struct
++    marching_cubes_job = MarchingCubesJob(
++        VoxelData=voxel_data,
++        VoxelColors=voxel_colors,
++        Isolevel=0.5f,  # Default isovalue [S1, unofficial]
++        VertexCountCounter=vertex_count_counter,
++        OutputVertices=output_vertices,
++        OutputTriangles=output_triangles
+     )
+ 
+-    # 4. Schedule Job
+-    jobHandle = job.Schedule()
++    # Step 5: Schedule job
++    job_handle = marching_cubes_job.schedule()
+     
+-    return JobHandleWithData<IMesherJob>(jobHandle, job)
+-
+-# Inside the Job Execution (Parallel For Each Voxel)
+-function Execute(job: MarchingCubesJob, voxelIndex):
+-    # Get voxel position from index
+-    pos = GetVoxelPosition(voxelIndex, job.VoxelData.ChunkSize)
+-    
+-    # 1. Compute Case Index C
+-    C = 0
+-    for i in 0..7:
+-        vertexVal = job.VoxelData.Get(pos + VertexOffsets[i])
+-        if vertexVal < job.Isolevel:
+-            C |= (1 << i)
+-            
+-    # 2. Check for Empty/Full Case
+-    if C == 0 or C == 255:
+-        return
+-
+-    # 3. Lookup Tables
+-    edgeMask = edgeTable[C]
+-    triConfig = triangleTable[C]
+-    
+-    # 4. Process Triangles
+-    triIndex = 0
+-    while triConfig[triIndex] != -1:
+-        e1 = triConfig[triIndex]
+-        e2 = triConfig[triIndex + 1]
+-        e3 = triConfig[triIndex + 2]
+-        triIndex += 3
+-        
+-        # Compute intersection points for edges e1, e2, e3
+-        p1 = IntersectEdge(pos, job.VoxelData, e1, job.Isolevel)
+-        p2 = IntersectEdge(pos, job.VoxelData, e2, job.Isolevel)
+-        p3 = IntersectEdge(pos, job.VoxelData, e3, job.Isolevel)
+-        
+-        # Get colors if available
+-        c1 = job.VoxelColors.Get(p1) if job.VoxelColors else Color32(255,255,255,255)
+-        c2 = job.VoxelColors.Get(p2) if job.VoxelColors else Color32(255,255,255,255)
+-        c3 = job.VoxelColors.Get(p3) if job.VoxelColors else Color32(255,255,255,255)
+-        
+-        # Atomic Vertex Allocation
+-        v1_id = job.VertexCountCounter.IncrementAndGet()
+-        v2_id = job.VertexCountCounter.IncrementAndGet()
+-        v3_id = job.VertexCountCounter.IncrementAndGet()
+-        
+-        # Write Vertices
+-        job.OutputVertices[v1_id] = MeshingVertexData(p1, c1)
+-        job.OutputVertices[v2_id] = MeshingVertexData(p2, c2)
+-        job.OutputVertices[v3_id] = MeshingVertexData(p3, c3)
+-        
+-        # Write Triangles (indices are relative to the start of the chunk's output buffer)
+-        # Note: In a real implementation, outputTriangles might need an offset or global indexing
+-        # Here we assume local chunk indexing or that the caller handles offsets
+-        job.OutputTriangles[triIndex * 3] = v1_id
+-        job.OutputTriangles[triIndex * 3 + 1] = v2_id
+-        job.OutputTriangles[triIndex * 3 + 2] = v3_id
+-
+-function IntersectEdge(pos, data, edgeIndex, isolevel):
+-    # Standard linear interpolation on the 12 edges of the cube
+-    # Returns world position
+-    pass
++    # Wrap handle and data for return
++    return JobHandleWithData(IMesherJob, handle=job_handle, data=marching_cubes_job)
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Memory Overflow:** If a chunk contains more than 5 triangles per voxel (e.g., due to complex topology or non-standard LUTs), the pre-allocated `maxLength` will overflow. The standard LUT guarantees max 5 triangles [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md).
+-*   **Atomic Contention:** High triangle density can cause contention on `VertexCountCounter`. Using a per-thread or per-chunk counter and merging later is a common optimization not detailed in the source but implied by the structure [G].
+-*   **Boundary Consistency:** Vertices on chunk boundaries must be shared or duplicated consistently to avoid cracks. The source does not specify boundary handling, implying either duplicated vertices (simpler) or a global vertex buffer with shared indices (complex) [G].
++### Parameters
++*   `Isolevel`: The density threshold. Default value is 0.5f [S1, unofficial].
++*   `maxLength`: The size of the output buffers. Calculated as $15 \times \text{voxelCount}$ [S1, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Chunk Failure**: If voxel data for a chunk cannot be retrieved, the function returns null, potentially leaving gaps in the mesh if not handled by the caller [S1, unofficial].
++*   **Buffer Overflow**: The buffer size is calculated based on the theoretical maximum (5 triangles per voxel). If the actual number of triangles exceeds this limit, memory corruption or truncation will occur. This is mitigated by the $15 \times \text{voxelCount}$ calculation, which assumes the worst-case scenario for Marching Cubes [S1, unofficial].
++*   **Atomic Contention**: The `VertexCountCounter` is shared across parallel jobs. High contention on this counter can become a bottleneck in highly parallelized scenarios [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Multi-Process Ground Truth Generation
+-A variant used for generating training data for neural networks (e.g., NDC) rather than real-time rendering. It orchestrates parallel processing of 3D models (OBJ files) using multiple worker processes and a queue for synchronization [S2, unofficial]. It distributes object names across processes, processes them to extract ground truth masks and point clouds, and aggregates results [S2, unofficial]. It is chosen when generating large-scale datasets for machine learning rather than interactive visualization [S2, unofficial].
++A variant that orchestrates parallel processing of 3D models to generate ground truth data using multiple worker processes and a queue for synchronization. It distributes object names across processes based on an even distribution list, creates worker processes targeting a specific ground truth extraction function, and manages synchronization via a queue with a timeout mechanism. This approach is used for generating large-scale ground truth datasets for machine learning or validation [S2, unofficial].
+ 
+ ### Tandem Algorithm with Dumping
+-A strategy for very large datasets (e.g., seismic cubes) that reduces the number of generated triangles through a "dumping" mechanism. It filters disconnected components based on geometric criteria (volume) to allow interactive exploration [S3]. On a 1626x7028x2000 dataset, it reduced 18,111 components to 328 significant ones [S3]. It is chosen for geophysical exploration where noise creates many small, irrelevant objects [S3].
++A strategy that enhances the tandem algorithm by reducing the number of generated triangles through a dumping mechanism, specifically handling disconnected components to allow interactive exploration. It filters out small components based on geometric criteria (volume), reducing 18,111 components to 328 in tested scenarios. This method drastically reduces memory consumption and extraction time compared to brute-force approaches, making it suitable for large seismic datasets [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the chunk. The parallel execution reduces wall-clock time proportional to the number of available cores/threads [S1, unofficial][S3].
+-*   **Memory Complexity:** $O(V)$ per chunk, where $V$ is the number of voxels. The buffer size is fixed at $15 \times V$ vertices and triangles [S1, unofficial].
+-*   **Performance:** The Unity Job System approach allows efficient CPU multi-threading [S1, unofficial]. The Tandem variant achieved 5 minutes on 56 processors for a 40GB dataset, compared to 3 hours sequentially [S3].
+-*   **Strengths:** Simple implementation, predictable memory usage, easy to integrate with existing Unity pipelines [S1, unofficial].
+-*   **Limitations:** Fixed buffer size can waste memory if triangles are sparse; no dynamic resizing; boundary handling requires external logic [G].
++*   **Time Complexity**: Linear with respect to the number of voxels, $O(N)$, where $N$ is the total number of voxels in the volume. Parallelization reduces the constant factor significantly.
++*   **Memory Complexity**: Linear with respect to the number of voxels, $O(N)$, for storing the output buffers. The buffer size is fixed at $15 \times \text{voxelCount}$ per chunk [S1, unofficial].
++*   **Measured Performance**: On a 1626x7028x2000 dataset (40 GB), the parallel tandem approach extracted surfaces in 5 minutes using 56 processors, compared to more than 3 hours for the sequential tandem algorithm [S3].
++*   **Strengths**: High scalability with the number of processors; efficient handling of large datasets; modular design allowing for easy integration of different extraction algorithms (e.g., tandem, brute-force).
++*   **Limitations**: Requires careful management of memory allocation and deallocation for job buffers; potential bottlenecks in atomic counter contention; complexity in handling edge cases where chunk data is unavailable.
++*   **When to Use**: Large-scale volume rendering where extraction time is a critical bottleneck; scenarios requiring interactive exploration of simplified surfaces.
++*   **When Not to Use**: Small volumes where the overhead of job scheduling outweighs the benefits; environments with limited memory for buffering large output arrays.
+ 
+ ## Background
+-The method is based on the Unity Burst Job System implementation for voxel terrain rendering [S1, unofficial]. It builds on the standard Marching Cubes algorithm [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md) and the principles of GPU acceleration and parallel pipelines [4136-gpu-acceleration-and-parallel-pipelines.md]. The Tandem variant originates from geophysical research for large-scale isosurface extraction [S3].
++The concept of job scheduling for Marching Cubes emerged from the need to handle increasingly large 3D datasets in fields like geophysics and terrain generation. The specific implementation detailed in [S1, unofficial] is part of the Eldemarkki Marching Cubes Terrain project, which aims to provide a performant, chunk-based Marching Cubes implementation for real-time applications. The tandem algorithm with dumping, described in [S3], was developed for seismic data interpretation, highlighting the importance of parallel processing and component filtering for interactive exploration of large geological datasets.
+ 
+ ## Sources

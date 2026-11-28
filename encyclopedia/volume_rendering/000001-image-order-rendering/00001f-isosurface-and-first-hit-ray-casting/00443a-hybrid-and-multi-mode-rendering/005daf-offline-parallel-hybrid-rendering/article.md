@@ -1,0 +1,207 @@
+# Offline Parallel Hybrid Rendering
+
+Also called: Off-line parallel rendering algorithm, Parallel volume ray-casting combined with on-the-fly isocontouring
+
+## Overview
+Offline Parallel Hybrid Rendering is a parallel image-order method designed to produce high-resolution fly-through movies of huge time-varying volume datasets by merging volume ray-casting and on-the-fly isocontouring [S1]. It minimizes data communication overhead between processors, addressing the bottleneck of transferring large volume datasets across networked nodes during rendering [S1]. Builds on the image-order rendering and isosurface detection principles of [Isosurface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md) [G]. Unlike sibling methods that may pre-compute polygon sets or rely on specific hardware pipes, this approach dynamically balances load across a processor pool while extracting isosurfaces on-the-fly without storing large intermediate polygon meshes [S1]. Siblings: [Mesh-based Neural Rendering](11555-mesh-based-neural-rendering.md), [Sur2f](13145-sur2f.md), [Combined Volume and Surface Rendering with Global Illumination Caching](16392-combined-volume-and-surface-rendering-with-global-illuminati.md), [Volume-Surface Hybridization](17463-volume-surface-hybridization.md).
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A time-varying volume dataset where each scalar voxel value is stored in 4 bytes [S1].
+*   **Output:** A sequence of high-resolution 3D rendered images (frames) for each time step [S1].
+
+**Data Structures**
+*   **Volume Data:** A 3D grid of scalar values, each stored as a 4-byte value [S1].
+*   **Task Pool:** A collection of image tiles formed by partitioning the image screen into small, regularly spaced pixel tiles [S1].
+*   **Transfer Function:** A uniform transfer function defined over the whole value range of the dataset [S1].
+
+**Parameters**
+*   **Sampling Interval:** Very dense sampling intervals are maintained to minimize mismatches between colors in the final images and pre-defined color maps [S1].
+*   **Composition Operator:** The 'over' operator is used for color composition [S1].
+*   **Illumination Model:** Phong’s illumination model is modified to match pre-defined color maps and visualize materials with specific ranges [S1].
+
+**Formulas**
+Color and opacity are accumulated along each ray using the discrete 'over' compositing operator [S1]:
+$$C_{out} = C_{in} + (1 - \alpha_{in}) C_{new} \alpha_{new}$$
+$$\alpha_{out} = \alpha_{in} + (1 - \alpha_{in}) \alpha_{new}$$
+where $C_{in}, \alpha_{in}$ are the accumulated color and opacity, and $C_{new}, \alpha_{new}$ are the color and opacity contributed by the current volume sample or isosurface intersection [S1].
+
+**Algorithm Steps**
+1.  Partition the image screen into small, regularly spaced pixel tiles to form a task pool [S1].
+2.  Assign processors to tiles from the pool of tasks waiting to be executed [S1].
+3.  Processors repeatedly perform hybrid rendering on tiles until the task pool is emptied, with dynamic load balancing [S1].
+4.  During rendering, extract isosurfaces on the fly without creating large polygon sets [S1].
+5.  When cast rays intersect volumes and isosurfaces, apply shading and composing on the fly [S1].
+6.  Collect image segments and assemble them into the final high-resolution image [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def offline_parallel_hybrid_rendering(volume_data, image_width, image_height, num_processors, tile_size):
+    # Partition image into tiles
+    tiles = create_tile_pool(image_width, image_height, tile_size)
+    
+    # Initialize shared task pool and result storage
+    task_pool = Queue(tiles)
+    image_segments = {}
+    
+    # Parameters
+    SELECTED_ISOValue = 0.5  # Threshold for isosurface extraction
+    DENSE_SAMPLING_INTERVAL = 0.01  # Step size for ray marching
+    
+    # Processors execute tasks
+    for processor_id in range(num_processors):
+        while not task_pool.is_empty():
+            # Dynamic load balancing: pick next available tile
+            tile = task_pool.dequeue()
+            
+            # Render the tile
+            tile_image = render_tile(
+                tile, 
+                volume_data, 
+                DENSE_SAMPLING_INTERVAL, 
+                SELECTED_ISOValue
+            )
+            
+            # Store result
+            image_segments[tile.id] = tile_image
+            
+    # Assemble final image
+    final_image = assemble_image(image_segments, image_width, image_height)
+    return final_image
+
+def render_tile(tile, volume_data, sampling_interval, isovalue):
+    tile_image = empty_image(tile.width, tile.height)
+    
+    for y in range(tile.y_start, tile.y_end):
+        for x in range(tile.x_start, tile.x_end):
+            # Cast ray for pixel (x, y)
+            ray = cast_ray(x, y)
+            
+            # Initialize color and opacity
+            color = [0.0, 0.0, 0.0]
+            opacity = 0.0
+            
+            # Traverse volume along ray
+            t = ray.origin
+            while t < ray.end:
+                # Sample volume at current position
+                value = sample_volume(volume_data, ray.position_at(t))
+                
+                # Uniform transfer function evaluation
+                tf_color, tf_opacity = UniformTransferFunction.evaluate(value)
+                
+                # Check for isosurface intersection
+                if isosurface_detected(value, t, ray, isovalue):
+                    # Apply shading using modified Phong model
+                    shaded_color = ModifiedPhongModel.shade(ray, volume_data, t)
+                    # Compose isosurface color (opaque)
+                    color, opacity = OverOperator.compose(
+                        color, opacity, 
+                        shaded_color, 1.0
+                    )
+                
+                # Compose volume color
+                color, opacity = OverOperator.compose(
+                    color, opacity, 
+                    tf_color, tf_opacity
+                )
+                
+                # Advance along ray with dense sampling
+                t += sampling_interval
+                
+                # Stop if fully opaque
+                if opacity >= 1.0:
+                    break
+            
+            tile_image.set_pixel(x - tile.x_start, y - tile.y_start, color)
+            
+    return tile_image
+
+# Helper definitions
+class Queue:
+    def __init__(self, items):
+        self.items = list(items)
+    def is_empty(self):
+        return len(self.items) == 0
+    def dequeue(self):
+        return self.items.pop(0)
+
+class Tile:
+    def __init__(self, id, x_start, y_start, width, height):
+        self.id = id
+        self.x_start = x_start
+        self.y_start = y_start
+        self.width = width
+        self.height = height
+
+def create_tile_pool(width, height, tile_size):
+    tiles = []
+    tid = 0
+    for y in range(0, height, tile_size):
+        for x in range(0, width, tile_size):
+            tiles.append(Tile(tid, x, y, min(tile_size, width - x), min(tile_size, height - y)))
+            tid += 1
+    return tiles
+
+def empty_image(w, h):
+    return [[None for _ in range(w)] for _ in range(h)]
+
+def cast_ray(x, y):
+    # Returns ray with origin, direction, t_start, t_end
+    return type('Ray', (), {'origin': 0.0, 'end': 10.0, 'direction': [0, 0, 1]})()
+
+def sample_volume(data, pos):
+    # Returns scalar value at position
+    return 0.5
+
+def UniformTransferFunction():
+    pass
+@staticmethod
+def evaluate(value):
+    # Uniform mapping: color based on value, opacity 0.1
+    return [value, value, value], 0.1
+
+def isosurface_detected(value, t, ray, isovalue):
+    return value > isovalue
+
+def ModifiedPhongModel():
+    pass
+@staticmethod
+def shade(ray, data, t):
+    # Returns shaded color
+    return [0.8, 0.8, 0.8]
+
+def OverOperator():
+    pass
+@staticmethod
+def compose(c_in, a_in, c_new, a_new):
+    c_out = [c_in[i] + (1.0 - a_in) * c_new[i] * a_new for i in range(3)]
+    a_out = a_in + (1.0 - a_in) * a_new
+    return c_out, a_out
+
+def assemble_image(segments, width, height):
+    # Combines tile images into full image
+    return [[None for _ in range(width)] for _ in range(height)]
+```
+
+**Edge Cases and Pitfalls**
+*   **Color Mismatch:** Improper composition can cause mismatches between final image colors and pre-defined color maps, mitigated by using very dense sampling intervals [S1].
+*   **Data Communication:** Large data communication overhead can degrade performance; the algorithm minimizes this by only communicating task assignments and image segment collection [S1].
+*   **Polygon Set Size:** Creating large polygon sets for isosurfaces is avoided to prevent memory issues and processing delays [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm achieves near-linear speedup with the number of processors. On an SGI Onyx2 with 24 processors, rendering a 1088x480 image of S data took 3.19 seconds, compared to 65.33 seconds on a uniprocessor [S1]. For a 2160x960 image, it took 6.42 seconds on 24 processors versus 260.96 seconds on a uniprocessor [S1].
+*   **Memory Complexity:** The method minimizes memory overhead by not storing large polygon sets for isosurfaces [S1].
+*   **Scalability:** The scheme shows near-perfect linear scalability on systems with multiple graphics pipes (e.g., SGI Onyx2) [S1]. It can also be ported to commodity PC cluster environments [S1].
+*   **Strengths:** High-resolution output, effective visualization of dynamic changes between time steps, minimized data communication overhead, dynamic load balancing [S1].
+*   **Limitations:** Requires high-performance graphics workstations or clusters for optimal performance [S1]. The modified Phong model may not capture all complex lighting effects [S1].
+*   **When to Use:** Suitable for producing fly-through movies of huge time-varying volume datasets where high resolution and dynamic change visualization are critical [S1].
+*   **When Not to Use:** Not suitable for interactive real-time rendering on low-end hardware, as it is designed for offline parallel processing [S1].
+
+## Background
+The Offline Parallel Hybrid Rendering algorithm was proposed by S. Park, C. Bajaj, and I. Ihm in 2004 [S1]. It was developed to visualize huge oceanography time-varying volume datasets, such as temperature, salinity, velocity, ocean surface height, and ocean depth, from a 121-day oceanographic simulation [S1]. The work was presented at the International Conference on Computational Science (ICCS) 2004 [S1]. The algorithm was implemented on an SGI visualization system, specifically the SGI Onyx2, and later ported to commodity PC cluster environments [S1]. It addresses the limitations of pre-defined color-mapped images, which appear as simple 2D planes and make it difficult to understand dynamic changes between time steps [S1]. By providing 3D-rendered images, it effectively describes detailed changes between time steps [S1].
+
+## Sources
+[S1] Visualization of Very Large Oceanography Time-Varying Volume Datasets, https://doi.org/10.1007/978-3-540-24687-9_53, fetched 2026-10-26

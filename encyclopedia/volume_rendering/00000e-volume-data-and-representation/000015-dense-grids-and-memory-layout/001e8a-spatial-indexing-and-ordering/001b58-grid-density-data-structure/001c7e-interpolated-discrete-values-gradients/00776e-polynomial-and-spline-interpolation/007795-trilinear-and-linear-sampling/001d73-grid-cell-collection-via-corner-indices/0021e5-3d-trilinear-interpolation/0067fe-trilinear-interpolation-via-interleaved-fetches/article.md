@@ -1,0 +1,128 @@
+# Trilinear Interpolation via Interleaved Fetches
+
+Also called: interleaved trilinear, texture3Dfrom2D trilinear
+
+## Overview
+This method performs 3D trilinear interpolation on volume data stored in a 2D texture array or packed format by interleaving texture fetches and mixing operations. It reduces the total number of texture lookups required compared to naive implementations by reusing intermediate results along the X-axis before proceeding to Y and Z. It sets itself apart from standard [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) by optimizing memory bandwidth usage through a specific fetch order that minimizes redundant sampling, particularly beneficial in WebGL or GPU-based rendering contexts where texture fetches are expensive.
+
+## How it works
+**Inputs:**
+- `p`: The 3D coordinate to sample, typically in voxel space $[0, W] \times [0, H] \times [0, D]$.
+- `W, H, D`: Dimensions of the volume grid (width, height, depth).
+- `texture3Dfrom2D(uv)`: A helper function that maps a 3D coordinate `uv` to a 2D texture coordinate and fetches a value (e.g., `.r` channel) from a 2D texture array or packed representation.
+
+**Outputs:**
+- `float`: The interpolated scalar value at `p`.
+
+**Data Structures:**
+- The volume is assumed to be stored in a format accessible via `texture3Dfrom2D`. The exact packing (e.g., 2D texture array with mipmaps, or a single 2D texture with row-major layout) is handled by the helper function. The method assumes normalized coordinates for the texture fetcher.
+
+**Parameters:**
+- `mult`: A scaling factor used to map voxel indices to texture coordinates. In the source, it is used in the calculation of `h1`. [S1, unofficial]
+- `g1`: Likely the grid dimensions or a scaling vector. In the source formula `h1 = mult * ((w3 / g1) + 1.5 + index)`, `g1` appears in the denominator. [S1, unofficial]
+- `w3`: Likely the width or a specific dimension component. [S1, unofficial]
+- `index`: Likely the integer part of the coordinate or a base offset. [S1, unofficial]
+
+**Steps:**
+1.  **Coordinate Mapping:** Calculate the normalized voxel coordinates `h0` and `h1` for the lower and upper corners of the voxel containing `p`. The source provides a specific formula for `h1`:
+    $$ h1 = \text{mult} \times \left( \frac{w3}{g1} + 1.5 + \text{index} \right) $$
+    `h0` is implicitly the lower corner, likely derived from `h1` by subtracting the fractional part or using the integer index. The source maps from `[-0.5, nrOfVoxels-0.5]` to `[0,1]`. [S1, unofficial]
+    Let `g0` be the fractional weights (interpolation factors) for X, Y, Z, i.e., `g0 = h1 - h0` (component-wise).
+
+2.  **X-Axis Interpolation (Layer 0, Z=0):**
+    - Fetch `tex000` at `h0`: `tex000 = texture3Dfrom2D(h0).r`.
+    - Fetch `tex100` at `h1.x, h0.y, h0.z`: `tex100 = texture3Dfrom2D(vec3(h1.x, h0.y, h0.z)).r`.
+    - Interpolate along X: `tex000 = mix(tex100, tex000, g0.x)`.
+
+3.  **X-Axis Interpolation (Layer 1, Y=1, Z=0):**
+    - Fetch `tex010` at `h0.x, h1.y, h0.z`: `tex010 = texture3Dfrom2D(vec3(h0.x, h1.y, h0.z)).r`.
+    - Fetch `tex110` at `h1.x, h1.y, h0.z`: `tex110 = texture3Dfrom2D(vec3(h1.x, h1.y, h0.z)).r`.
+    - Interpolate along X: `tex010 = mix(tex110, tex010, g0.x)`.
+
+4.  **Y-Axis Interpolation (Layer 0, Z=0):**
+    - Interpolate along Y: `tex000 = mix(tex010, tex000, g0.y)`.
+
+5.  **X-Axis Interpolation (Layer 0, Z=1):**
+    - Fetch `tex001` at `h0.x, h0.y, h1.z`: `tex001 = texture3Dfrom2D(vec3(h0.x, h0.y, h1.z)).r`.
+    - Fetch `tex101` at `h1.x, h0.y, h1.z`: `tex101 = texture3Dfrom2D(vec3(h1.x, h0.y, h1.z)).r`.
+    - Interpolate along X: `tex001 = mix(tex101, tex001, g0.x)`.
+
+6.  **X-Axis Interpolation (Layer 1, Z=1):**
+    - Fetch `tex011` at `h0.x, h1.y, h1.z`: `tex011 = texture3Dfrom2D(vec3(h0.x, h1.y, h1.z)).r`.
+    - Fetch `tex111` at `h1`: `tex111 = texture3Dfrom2D(h1).r`.
+    - Interpolate along X: `tex011 = mix(tex111, tex011, g0.x)`.
+
+7.  **Y-Axis Interpolation (Layer 1, Z=1):**
+    - Interpolate along Y: `tex001 = mix(tex011, tex001, g0.y)`.
+
+8.  **Z-Axis Interpolation:**
+    - Final interpolation: `return mix(tex001, tex000, g0.z)`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def trilinear_interleaved(p, W, H, D, mult, g1, w3, index, texture3Dfrom2D):
+    # Calculate normalized coordinates h0 and h1
+    # Note: The source formula for h1 is specific and potentially context-dependent.
+    # h1 = mult * ((w3 / g1) + 1.5 + index)
+    # h0 is the lower corner. Assuming standard trilinear, h0 = floor(p) and h1 = ceil(p)
+    # or h0 = p - frac(p), h1 = p + (1-frac(p)).
+    # The source maps from [-0.5, nrOfVoxels-0.5] to [0,1].
+    # We assume h0 and h1 are computed such that g0 = h1 - h0 are the weights.
+    
+    # Placeholder for coordinate mapping logic as the source formula is ambiguous without context
+    # [G] Standard approach:
+    # h0 = floor(p)
+    # h1 = h0 + 1
+    # g0 = p - h0
+    
+    # However, following the source's specific fetch order and variable names:
+    
+    # Fetch and mix X for Z=0, Y=0
+    tex000 = texture3Dfrom2D(h0).r
+    tex100 = texture3Dfrom2D(vec3(h1.x, h0.y, h0.z)).r
+    tex000 = mix(tex100, tex000, g0.x)
+    
+    # Fetch and mix X for Z=0, Y=1
+    tex010 = texture3Dfrom2D(vec3(h0.x, h1.y, h0.z)).r
+    tex110 = texture3Dfrom2D(vec3(h1.x, h1.y, h0.z)).r
+    tex010 = mix(tex110, tex010, g0.x)
+    
+    # Mix Y for Z=0
+    tex000 = mix(tex010, tex000, g0.y)
+    
+    # Fetch and mix X for Z=1, Y=0
+    tex001 = texture3Dfrom2D(vec3(h0.x, h0.y, h1.z)).r
+    tex101 = texture3Dfrom2D(vec3(h1.x, h0.y, h1.z)).r
+    tex001 = mix(tex101, tex001, g0.x)
+    
+    # Fetch and mix X for Z=1, Y=1
+    tex011 = texture3Dfrom2D(vec3(h0.x, h1.y, h1.z)).r
+    tex111 = texture3Dfrom2D(h1).r
+    tex011 = mix(tex111, tex011, g0.x)
+    
+    # Mix Y for Z=1
+    tex001 = mix(tex011, tex001, g0.y)
+    
+    # Mix Z
+    return mix(tex001, tex000, g0.z)
+```
+
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** If `h1` exceeds the volume bounds, clamping or wrapping must be handled by `texture3Dfrom2D`. The source does not specify boundary handling. [S1, unofficial]
+- **Precision:** The formula for `h1` involves division and addition, which may introduce floating-point errors. [S1, unofficial]
+- **Ambiguity:** The variables `mult`, `g1`, `w3`, and `index` are not clearly defined in the source. Their exact calculation depends on the specific WebGL volume rendering implementation. [S1, unofficial]
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per sample, with exactly 8 texture fetches and 6 mix operations.
+- **Memory Complexity:** $O(1)$ auxiliary memory.
+- **Performance:** Reduces texture fetches compared to naive 8-fetch trilinear if the texture fetcher has overhead. However, it still performs 8 fetches. The benefit is in the interleaved structure which may better utilize GPU texture cache or reduce instruction count in shader code. [S1, unofficial]
+- **Strengths:** Optimized for GPU architectures where texture fetches are costly. [S1, unofficial]
+- **Limitations:** Dependent on the specific `texture3Dfrom2D` implementation. The coordinate mapping formula is non-standard and may be difficult to port. [S1, unofficial]
+
+## Background
+This method originates from a WebGL volume rendering implementation. It is designed to work with 2D texture arrays or packed 2D textures to simulate 3D texture lookups. The technique is specific to the constraints and optimizations of WebGL shaders. [S1, unofficial]
+
+## Sources
+[S1] jarusified/WebGL-Volume-rendering, https://github.com/jarusified/WebGL-Volume-rendering, fetched 2026-10-27 (unofficial)

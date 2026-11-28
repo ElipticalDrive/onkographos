@@ -1,0 +1,324 @@
+Contribute to fesoliveira014/c3d.c3l development by creating an account on GitHub.
+
+feat(render): add static impostor baking and terminal LOD by fesoliveira014 · Pull Request #195 · fesoliveira014/c3d.c3l · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+fesoliveira014
+commented
+Oct 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Add static rigid-subject atlas baking with isolated capture, explicit ownership/faults, and opaque/masked Standard material support.
+Draw terminal impostors through the existing forward, deferred, depth, shadow and velocity paths, including instancing, sway, per-view history and missing-atlas fallback.
+Bound reconstruction with projected depth estimates and two depth-gradient corrections, using cell-local padding and a conditional second seed. Keep inverse sway outside the sampling loop.
+Add matching coarse/base and detailed-source benchmark cases. Document the atlas contract and measured limits in LOD documentation and the acceptance report.
+Validation
+Linux and Windows CI pass for 4bb7bcb.
+Full repository build and 1,524 CPU tests across 31 targets pass.
+All 178 native Vulkan renderer tests pass with validation enabled; includes normal-map independence, near-plane occlusion, motion, fallback, isolation and failure cleanup.
+Existing geometry gates remain unchanged: zero cube coverage mismatch across 48 cases; depth error 0.021795 below 0.078961; shadow mismatch 0.111% below 3%.
+Windowed example passes 30 frames; five exported comparison images inspected.
+Measurements
+RTX 4090, three-run medians: far impostors 0.4186 ms (previous 4.6323 ms), coarse mesh 0.0696 ms, base mesh 0.5721 ms. The added 9,600-triangle/tree case measures 1.4011 ms for impostors versus 5.2525 ms for source meshes. Impostors remain slower than the 12-triangle coarse mesh. Conservative depth was implemented and measured without a gain, then omitted. See the report for per-pass timings, bake cost and memory.
+feat(render): add static impostor baking and terminal LOD
+dcbc7c8
+fesoliveira014
+commented
+Oct 2, 2026
+View reviewed changes
+fesoliveira014
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review of #195 at dcbc7c8: M69 change 2, static octahedral impostors as a terminal LOD. You asked me to find the root cause of the far-view regression; it is identified and measured below.
+Root cause: the impostor fragment shader does a brute-force per-pixel ray march. For each of three frames it takes up to 33 uniform bracket samples plus 8 bisection steps and a final sample, and each sample does two atlas fetches and a five-iteration sway inversion. It runs in full in shadow, depth prepass and forward, because the depth comes from the march (gl_FragDepth, quad at a constant depth), so nothing is rejected early.
+Rasterization is not the cost: a variant that discards right after the ray–sphere test costs 0.068 ms against 4.95 ms. Rasterization and setup equal the coarse mesh; essentially everything is reconstruction.
+The cost scales with the march: it falls to 1.55 ms with 8 brackets, 1.57 ms with 1 frame, and 0.30 ms with one bracket and no refinement. Removing the sway inversion gives 3.62 ms.
+Design divergence: the proposal specified one projected sample per frame. The march replaced it, and its step count was raised to 32 to pass the shadow gate. That compensates for undersampling in a blind uniform search.
+Details and the full table are inline on impostor_surface.glsl:12.
+Against the proposal (apart from the reconstruction):
+the neutral Impostor type sits in core, and bake_impostor is synchronous, isolated in a private capture scene, and cleaned up with defer;
+the two-region RGBA8 atlas has gutters;
+set_lod_impostor validates and sets a descriptor revision;
+a dead atlas falls back to mesh;
+every pass has a dedicated variant;
+history, revision and frame-triplet rejection are handled;
+the tests and acceptance report are present and candid about the regression.
+Runs (review worktree, Windows host: i9-14900K, RTX 4090, driver 610.88)
+python scripts/build.py --test: 1,523 passed, 0 failed, 31 targets. There was no generated-file drift.
+c3c test acceptance --path test/gpu/render: 177 passed.
+lod --benchmark, three runs:
+far impostor 4.63–4.99 ms against coarse mesh 0.070 and base 0.396–0.402 ms;
+near and middle match the report.
+Experiments: six variants, each rebuilt with --regen from the committed tree and restored afterwards (worktree clean). The table is inline.
+Verdict: HOLD. A terminal LOD that makes the far view about 70× more expensive than the level it replaces defeats the milestone's purpose. The cause is the reconstruction algorithm, not the atlas or the integration.
+Replace the march with the proposal's per-frame projection plus a bounded refinement (or a search bounded by bake-time per-cell depth ranges).
+Hoist the sway inversion out of the per-sample loop.
+Re-run the shader and shadow gates.
+Add a benchmark row where the impostor replaces expensive geometry.
+I re-check the new head with the gates, the benchmark and CI green.
+Comment thread
+shaders/common/impostor_surface.glsl
+Outdated
+layout(push_constant) uniform Push { uint64_t vertex_root_gpu; uint64_t fragment_root_gpu; } pc;
+// The march brackets discontinuous cutout edges before refining continuous surface depth.
+const uint IMPOSTOR_MARCH_STEPS = 32u;
+fesoliveira014
+Oct 2, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Root cause of the far-view regression: this per-fragment ray march. Fix before merge.
+For each of the three frames, impostor_trace takes up to 33 uniform bracket samples along the whole sphere chord, then 8 bisection steps and a final sample. That is up to 126 sample evaluations per covered fragment, each costing:
+two dependent atlas fetches;
+one impostor_local, which with sway is six matrix-vector products plus five sway_offset evaluations.
+A ray through empty space inside the bounding sphere, common for a tree, always pays all 33 brackets in all three frames.
+Measured on the 4090 host with the PR's lod --benchmark, varying one shader constant or line at a time (temporary, reverted). Far waypoint, impostor mode, ms:
+Variant
+Total
+Shadow
+Prepass
+Forward
+As committed (32 brackets, 8 refinements, 3 frames)
+4.95
+1.38
+1.52
+2.00
+8 brackets
+1.55
+0.43
+0.50
+0.59
+1 bracket, no refinement (2 samples per frame)
+0.30
+0.085
+0.10
+0.07
+1 frame instead of 3
+1.57
+0.47
+0.53
+0.52
+Sway inversion loop removed
+3.62
+1.08
+1.26
+1.22
+discard right after the ray–sphere test
+0.068
+0.008
+0.007
+0.010
+Coarse mesh (reference)
+0.070
+0.010
+0.007
+0.011
+Quads are cheap; the march is the cost. Rasterizing the 5,000 quads and setting up the ray costs the same as the 12-triangle mesh. Essentially all of the 4.9 ms is reconstruction.
+It scales with the work. The cost is linear in bracket count and frame count.
+Isolated: near and middle rows were unchanged in every variant, since no impostor is selected there.
+The 32 brackets compensate for undersampling. A uniform step of 2r/32 is needed only because the search starts blind at the sphere entry; with 8 steps (r/4) it jumps over thin silhouette features seen from the light, which is the shadow gate's failure.
+Please replace the search rather than tune its step count.
+Proposal design: the proposal specified one projected sample per frame, with a reconstructed point per frame. Take the frame's stored depth at the projected point as the starting estimate, then do a couple of secant/refinement steps against that frame's depth sheet. The 2-sample variant bounds this at about 0.30 ms.
+If a search must remain: bound it with bake-time per-cell data, such as each cell's covered depth range or coverage rectangle. Then the march starts and ends at that frame's surface interval, and rays that miss a frame's covered region exit immediately instead of taking 33 steps.
+Re-run the gate on the new reconstruction. Don't relax the gate.
+fesoliveira014
+Oct 2, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in 4bb7bcb. The full-sphere march is gone. Each frame uses a front-plane estimate plus two depth-gradient corrections, with one center-plane retry only if coverage/depth consistency fails. Bake-time nearest-surface padding stays within each cell and preserves coverage. Reconstruction does not use shading normals; the added strongly tilted normal-map case passes all 24 geometry/shading combinations.
+The original far workload now measures 0.4186 ms versus 4.6323 ms before (three-run medians). The unchanged cube gate has zero coverage mismatch and maximum depth error 0.021795 < 0.078961. The transformed offscreen shadow gate is 26/23438 unmatched pixels beyond one pixel (0.111% < 3%). All 1,524 CPU and 178 native Vulkan tests pass. Full measurements and acceptance.
+Comment thread
+shaders/common/impostor.glsl
+}
+vec3 local = (inverse_model * vec4(world, 1.0)).xyz;
+if ((draw.flags & DRAW_SWAY) != 0u) {
+for (uint iteration = 0u; iteration < 5u; iteration++) {
+fesoliveira014
+Oct 2, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Part of the same fix: this five-iteration fixed-point inversion runs inside every bracket and bisection sample. Removing it alone took the far row from 4.95 to 3.62 ms, so about 27% of the reconstruction cost.
+Sway is a smooth per-instance displacement. Invert it once per fragment (at the ray entry or the projected sample), or apply it to the quad in the vertex stage and reconstruct in rest-local space. Avoid re-solving it per march step.
+fesoliveira014
+Oct 2, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in 4bb7bcb. Inverse sway/fade and the rest-local ray tangent are computed before the frame/sample loops. No atlas probe calls the inverse-sway solver. Its matrix products and sway coefficient are also hoisted before the five scalar bend updates. Velocity recovers the final local point separately, outside all sample loops.
+The reflected/nonuniform HEIGHT-sway shadow and ordinary/instanced motion tests pass. The combined reconstruction fix reduces the far workload from 4.6323 ms to 0.4186 ms; I am not attributing a separate percentage to sway alone. Evidence.
+Comment thread
+shaders/impostor.vert.glsl
+minimum = min(minimum, clip.xy / clip.w);
+maximum = max(maximum, clip.xy / clip.w);
+}
+gl_Position = vec4(mix(minimum, maximum, IMPOSTOR_CORNERS[gl_VertexIndex]), 0.5, 1.0);
+fesoliveira014
+Oct 2, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Contributing multiplier: the quad is emitted at a constant NDC depth of 0.5, and the fragment writes gl_FragDepth from the reconstruction. So no pass can reject a fragment before it runs the march.
+Shadow, depth prepass and forward each repeat the full reconstruction for every covered fragment, which is why the table shows about 1.4–2.0 ms in each.
+Overdraw inside the field (5,000 trees over about 16k pixels at the far waypoint) is all fully shaded.
+Once the march is fixed, consider:
+emitting the quad at the bounding sphere's nearest depth;
+declaring conservative depth (layout(depth_less) out float gl_FragDepth;, since reconstructed surfaces are farther, which is smaller under reverse-Z). The early test can then discard fragments whose sphere front is already behind the stored depth.
+Measure it; I did not.
+fesoliveira014
+Oct 2, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Implemented and measured the suggested nearest-sphere quad depth plus layout(depth_less) on the final reconstruction, then omitted it because it did not improve this scene.
+Three-run medians: far impostors 0.4186 ms without it versus 0.4206 ms with it; the larger high-detail case 1.4011 ms versus 1.4587 ms. The report includes ranges and the exact variant. The simpler existing depth output is retained. Conservative-depth experiment.
+Comment thread
+examples/src/lod.c3
+defer scene.remove(prototype);
+scene.update_world();
+field.impostor = renderer.bake_impostor(scene, prototype)!;
+scene.set_lod_impostor(
+fesoliveira014
+Oct 2, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Non-blocking, about the example's comparison: the impostor replaces the 12-triangle coarse level, at about 3 px per tree. At that size even the 2-sample floor (0.30 ms) loses to the coarse mesh (0.07 ms): every impostor fragment does more work than the whole mesh's vertex and raster cost at that size.
+Impostors pay off when they replace geometry that is expensive at the projected size where they take over. For example, base costs 0.40 ms at this waypoint, and the first two levels cost more at middle distance. Please add a row where the impostor substitutes for an expensive level (or the base). Then the acceptance report shows where, if anywhere, the terminal choice saves time once reconstruction is fixed.
+fesoliveira014
+Oct 2, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Added in 4bb7bcb. The original nine near/middle/far rows are unchanged in scope. A separate high_detail case uses a single mesh level with 9,600 triangles per tree, 5,000 visible placements, and a closer camera. Both modes retain identical placements, atlas bounds, fixed sway time, 30 warmup frames and 60 matched measured frames.
+The paired result is 10,000 main-view impostor triangles at 1.4011 ms versus 48,000,000 source triangles at 5.2525 ms (3.75x faster). It also exports both comparison images. The coarse-mesh result remains documented as faster than impostors. Complete rows and pass timings.
+fix(render): bound impostor reconstruction cost
+4bb7bcb
+fesoliveira014
+commented
+Oct 2, 2026
+View reviewed changes
+fesoliveira014
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Re-review of #195 at 4bb7bcb: fixes for the reconstruction cost found at dcbc7c8.
+The root cause is fixed.
+Reconstruction:
+The 33-step march with 8-step bisection over the full sphere chord is gone.
+Each frame now seeds at the front-plane estimate and takes two finite-difference depth-gradient corrections (a few samples each), with one centre-plane retry only when the coverage/depth check fails.
+The worst case is about ten sample pairs per frame instead of about 42, and empty space is no longer walked.
+Sway: the inverse is solved once at the ray's reference point. The local ray direction is corrected by the bend derivative there, so no atlas probe calls the solver; the inner loop is a scalar update with hoisted products.
+Bake: nearest-surface dilation inside each cell (a breadth-first fill, with scratch allocated once per bake) gives transparent texels usable depth and attributes for the gradient, without changing coverage or crossing cells.
+Conservative depth: measured without a gain and omitted, with the numbers documented. That is fine.
+New comparison: the 9,600-triangle high_detail case shows the intended use.
+Geometry gates (unchanged, per your report and the 178-test run):
+cube coverage mismatch 0 across 48 cases;
+depth error 0.021795 against 0.078961;
+transformed offscreen shadow mismatch 0.111% against 3%.
+Runs (review worktree, Windows host: i9-14900K, RTX 4090, driver 610.88)
+python scripts/build.py --test: 1,524 passed, 0 failed, 31 targets. There was no generated-file drift.
+c3c test acceptance --path test/gpu/render: 178 passed.
+lod --benchmark, three runs, GPU pass ms, with no fallback or validation output:
+Row
+Impostor
+Coarse mesh
+Base
+Before (dcbc7c8)
+Far
+0.417–0.440
+0.072–0.073
+0.457–0.489
+4.63–4.99 impostor
+High detail
+1.417–1.533
+—
+5.29–5.30 (source mesh)
+—
+Far per pass: shadow 0.120–0.127, prepass 0.153–0.161, forward 0.102–0.108.
+High detail per pass: shadow 0.20–0.22 against 1.82–1.84.
+Near and middle rows match mesh mode.
+The far impostor cost dropped about 11×. In the high-detail case impostors are about 3.5× faster than the source meshes, and the exported comparison images are visually indistinguishable at that size.
+Impostors remain about 6× slower than the 12-triangle coarse mesh at about 3 px. docs/lod.md and the acceptance report say so, which is the right guidance: install impostors where they replace expensive geometry.
+Verdict: MERGE at 4bb7bcb. CI is green (linux and windows). Close-out and sync follow merge.
+Hide details
+View details
+fesoliveira014
+merged commit 2e20461
+into
+main
+Oct 2, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+fesoliveira014
+deleted the
+feat/m69-impostors
+branch
+October 2, 2026 09:03
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

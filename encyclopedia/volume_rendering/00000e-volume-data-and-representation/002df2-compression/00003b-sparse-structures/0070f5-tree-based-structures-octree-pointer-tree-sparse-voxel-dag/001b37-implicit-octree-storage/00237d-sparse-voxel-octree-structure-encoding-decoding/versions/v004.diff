@@ -1,0 +1,131 @@
+--- v003.md
++++ v004.md
+@@ -3,38 +3,76 @@
+ 
+ ## Overview
+-Sparse Voxel Octree (SVO) structure encoding and decoding are CPU-side methods for serializing and deserializing the hierarchical topology of a sparse voxel octree [S1, unofficial]. They solve the problem of converting an in-memory tree representation into a compact, contiguous byte stream (and vice versa) for storage or transmission, enabling efficient CPU-based ray casting by avoiding the overhead of parsing complex binary headers for every access [S1, unofficial]. Unlike file-system-based indexing methods that distribute nodes across directories, this approach stores the entire octree structure in a single contiguous payload [S1, unofficial][S2, unofficial].
++This method provides the fundamental CPU-side algorithms for serializing and deserializing the structural hierarchy of a Sparse Voxel Octree (SVO) [S1, unofficial]. It solves the problem of mapping a sparse 3D volumetric dataset into a compact, traversable tree structure that avoids storing empty space, thereby enabling efficient ray casting and rendering [S2, unofficial]. It differs from its siblings by focusing strictly on the binary/ASCII serialization of the octree topology and node pointers, rather than attribute compression or file-system indexing [S1, unofficial].
+ 
+ ## How it works
++The encoding process transforms a populated octree into a linear byte stream or ASCII representation, while decoding reconstructs the in-memory tree structure. The implementation relies on Morton codes (Z-order curves) to linearize 3D coordinates and a specific node layout to represent occupancy.
++
+ **Inputs and Outputs:**
+-*   **Encode Input:** An in-memory Sparse Voxel Octree data structure (nodes, pointers, and leaf data).
+-*   **Encode Output:** A contiguous byte buffer (binary payload) representing the serialized tree.
+-*   **Decode Input:** The serialized byte buffer and metadata (e.g., AABB, voxel size) required to reconstruct the spatial context.
+-*   **Decode Output:** A reconstructed in-memory Sparse Voxel Octree data structure.
++*   **Input:** A root node of an octree data structure, containing child pointers and occupancy flags. Optional parameters include `aabb` (Axis-Aligned Bounding Box), `voxel_size`, and `grid_size` for coordinate normalization [S1, unofficial].
++*   **Output:** A serialized byte buffer or file stream representing the octree hierarchy.
+ 
+ **Data Structures:**
+-The specific binary layout of the payload is not explicitly defined in the provided sources, but it is implied to separate structural metadata from voxel data to allow efficient memory mapping [S1, unofficial]. The structure typically involves encoding node types (internal vs. leaf) and child pointers.
++The SVO node typically contains:
++1.  **Occupancy Flag:** A single bit or byte indicating if the node is a leaf or internal.
++2.  **Children Pointers:** An array of 8 pointers (or offsets) to child nodes, used only if the node is internal.
++3.  **Data Payload:** For leaf nodes, the voxel value (e.g., density, color).
+ 
+-**Steps:**
+-1.  **Traverse:** Perform a depth-first or breadth-first traversal of the in-memory octree [S1, unofficial].
+-2.  **Serialize:** For each node, write its type (internal/leaf) and relevant data (child offsets or voxel values) to the output buffer [S1, unofficial].
+-3.  **Deserialize:** Read the node type from the input buffer [S1, unofficial].
+-4.  **Reconstruct:** Recursively create nodes and link children based on the serialized offsets or pointers until the entire tree is rebuilt [S1, unofficial].
++**Steps for Encoding:**
++1.  **Coordinate Normalization:** If `aabb` is not provided, compute it from the input vertices:
++    $$ \text{min\_xyz} = \min(\text{vertices}) $$
++    $$ \text{max\_xyz} = \max(\text{vertices}) $$
++    Apply padding based on `voxel_size` or `grid_size` to ensure alignment [S1, unofficial]:
++    ```python
++    if voxel_size is not None:
++        padding = torch.ceil((max_xyz - min_xyz) / voxel_size) * voxel_size - (max_xyz - min_xyz)
++        min_xyz -= padding * 0.5
++        max_xyz += padding * 0.5
++    if grid_size is not None:
++        padding = (max_xyz - min_xyz) / (grid_size - 1)
++        min_xyz -= padding * 0.5
++        max_xyz += padding * 0.5
++    aabb = torch.stack([min_xyz, max_xyz], dim=0).float().contiguous()
++    ```
++2.  **Morton Code Generation:** Convert 3D voxel coordinates to 64-bit Morton codes. Sort the leaf nodes by these codes to facilitate linearization [S1, unofficial].
++3.  **Tree Construction:** Insert sorted voxels into the octree. If a node is empty, do not allocate child pointers [S2, unofficial].
++4.  **Serialization:** Traverse the tree (e.g., pre-order) and write the occupancy flag and child offsets/data to the output stream.
+ 
+-**Pseudocode:**
+-The sources do not provide specific pseudocode for the encoding/decoding logic itself, only referencing the existence of CPU functions `encode_sparse_voxel_octree_cpu` and `decode_sparse_voxel_octree_cpu` [S1, unofficial]. The implementation details of the binary format are "Not given in the sources."
+-
+-**Parameters:**
+-*   **AABB:** Axis-Aligned Bounding Box defining the spatial extent of the volume. Required for decoding to establish spatial context [S1, unofficial].
+-*   **Voxel Size:** The physical size of a leaf voxel. Required if AABB is not provided during initialization [S1, unofficial].
+-*   **Grid Size:** Alternative to voxel size for defining resolution [S1, unofficial].
++**Steps for Decoding:**
++1.  **Header Parsing:** Read the file header to determine the bounding box, resolution, and compression type [S3, unofficial].
++2.  **Tree Reconstruction:** Read the serialized stream. For each node, read the occupancy flag. If internal, read 8 child offsets; if leaf, read the voxel data.
++3.  **Pointer Resolution:** Resolve offsets to actual memory addresses or file positions.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Empty Areas:** The SVO structure does not store anything for empty areas, which saves memory but requires tree traversal to skip them, impacting performance [S2, unofficial].
+-*   **Precision:** When computing AABB from vertices, padding must be applied to ensure the volume covers the full voxel grid, especially when `voxel_size` or `grid_size` is specified [S1, unofficial].
++*   **Precision:** Floating-point coordinates must be carefully normalized to avoid jitter during ray traversal [S1, unofficial].
++*   **Empty Voxels:** The structure must explicitly handle empty regions by not storing child nodes, which is the primary memory saving mechanism [S2, unofficial].
++*   **Finalization:** The octree must be finalized by padding empty voxels to match the maximum Morton code depth to ensure consistent traversal [S3, unofficial].
++
++**Pseudocode for Finalization (Encoding Step):**
++```python
++def finalize_octree(root_node, max_morton_depth):
++    """
++    Finalizes the octree structure by padding empty voxels and writing the header.
++    """
++    # 1. Pad empty voxels to max depth
++    current_depth = get_morton_depth(root_node)
++    if current_depth < max_morton_depth:
++        # Recursively add empty voxels to fill the tree to max depth
++        fast_add_empty_voxel(root_node, difference=max_morton_depth - current_depth)
++    
++    # 2. Write root node
++    write_node(root_node.children[0][0]) # Assuming specific root indexing
++    
++    # 3. Write header
++    write_header(root_node, max_morton_depth)
++    
++    # 4. Compress if necessary
++    if compression_mode != NONE:
++        compress_file_incremental(True)
++        
++    # 5. Close file
++    close_file()
++```
+ 
+ ## Subtopics
+-
+-### Sparse Voxel DAG
+-An extension to SVO that merges identical nodes and redirects parent pointers to single nodes to decrease memory footprint further [S2, unofficial]. It is chosen when memory conservation is critical and the data (e.g., simple occlusion values) allows for frequent node duplication [S2, unofficial]. It is not suitable for complex data like diffuse albedo, where identical child nodes are rare, making the merging overhead unjustified [S2, unofficial].
+ 
+ ### [Octree File I/O Format](5032-octree-file-i-o-format.md)
+@@ -47,14 +85,23 @@
+ Temporal Difference Encoding is a compression technique for time-varying volume data that exploits high temporal correlation between consecutive time steps. It predicts each sample based on past data and encodes the difference between the prediction and the actual value. Structurally, it merges octrees from consecutive time steps by storing pointers to unchanged subtrees from previous steps instead of duplicating data. Unlike methods that treat all dimensions uniformly, this approach applies difference encoding specifically to the time domain.
+ 
++### Sparse Voxel DAG
++An extension to SVO that merges identical nodes and redirects parent pointers to single nodes to decrease memory footprint further [S2, unofficial]. Limited Utility for Radiance: Merging nodes is less effective when storing complex data like diffuse albedo compared to simple occlusion values, as identical child nodes become rare [S2, unofficial].
++
++### Octree Finalization & Empty Voxel Padding
++Finalizes the octree by padding empty voxels to match maximum Morton code depth, writing the root node, header, and optionally compressing [S3, unofficial]. Step: 1. If current Morton depth < max Morton depth, call FastAddEmptyVoxel with difference + 1. 2. Write root node (m_Children[0][0]). 3. Write header. 4. If compression != NONE, call CompressFileIncremental(true). 5. Close file [S3, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Encoding and decoding require traversing the entire tree, resulting in $O(N)$ time complexity where $N$ is the number of nodes [S2, unofficial].
+-*   **Memory Complexity:** The serialized size is proportional to the number of non-empty nodes. The SVO structure itself uses significantly less memory than dense grids by not storing empty areas, but traversal overhead is higher than direct array access [S2, unofficial].
+-*   **Strengths:** Efficient storage for sparse data; enables CPU-based ray casting by providing a compact, contiguous memory layout [S1, unofficial].
+-*   **Limitations:** Performance trade-off due to the need to traverse the tree structure rather than accessing data directly [S2, unofficial]. Merging nodes (in DAG variants) is ineffective for complex data [S2, unofficial].
++*   **Time Complexity:** Encoding is dominated by the sorting of Morton codes, $O(N \log N)$, where $N$ is the number of non-empty voxels. Decoding is linear with respect to the number of nodes in the tree.
++*   **Memory Complexity:** The structure stores only non-empty nodes, offering significant savings over dense grids. However, pointer overhead exists for internal nodes [S2, unofficial].
++*   **Strengths:** Efficient storage for sparse data; fast traversal for ray casting; supports variable resolution via fusion [S1, unofficial][S2, unofficial].
++*   **Limitations:** Slower construction than dense grids; merging nodes (DAG) is ineffective for complex attributes [S2, unofficial].
++*   **When to use:** CPU-based ray casting of sparse volumes; scenes with large empty spaces.
++*   **When not to use:** Dense volumes; scenes requiring complex attribute merging (e.g., diffuse albedo) where DAG benefits are minimal [S2, unofficial].
+ 
+ ## Background
+-The Sparse Voxel Octree (SVO) technique was introduced as an extension to voxel-based rendering to allow more effective use of memory by not storing anything for empty areas of the volume [S2, unofficial]. It is used in contexts such as Voxel Cone Traced Global Illumination (VXGI) and CPU-based ray casting [S1, S2, unofficial]. The specific CPU encoding/decoding functions are part of implementations like `o-voxel-gpu` [S1, unofficial].
++The Sparse Voxel Octree (SVO) was introduced as a memory-efficient alternative to dense voxel grids for global illumination and ray tracing [S2, unofficial]. The encoding/decoding methods described here are standard implementations found in CPU-based SVO renderers and libraries [S1, unofficial][S3, unofficial]. The technique has been applied in real-time rendering contexts, such as Voxel Cone Traced Global Illumination [S2, unofficial].
+ 
+ ## Sources
+ [S1] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)
+-[S2] Voxel Cone Traced Global Illumination - Leif Node, https://leifnode.com/2015/05/voxel-cone-traced-global-illumination/, fetched 2026-10-27 (unofficial)+[S2] Voxel Cone Traced Global Illumination - Leif Node, https://leifnode.com/2015/05/voxel-cone-traced-global-illumination/, fetched 2026-10-27 (unofficial)
++[S3] GilesPenfold/MasterThesisSVO, https://github.com/GilesPenfold/MasterThesisSVO, fetched 2026-10-26 (unofficial)

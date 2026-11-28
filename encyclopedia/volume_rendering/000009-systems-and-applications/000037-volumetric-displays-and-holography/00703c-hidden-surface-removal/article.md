@@ -1,0 +1,119 @@
+# Hidden Surface Removal
+
+Also called: Manual Occlusion Clipping, Viewpoint-Based Line Clipping
+
+## Overview
+Hidden Surface Removal (HSR) is a technique used in volumetric displays to manually hide surfaces that are occluded by other objects relative to a specific user's viewpoint, compensating for the lack of natural occlusion inherent in volumetric rendering [S1]. Unlike standard rasterization where depth buffering handles occlusion, volumetric displays emit omnidirectional light from voxels, making physical occlusion impossible; thus, HSR relies on geometric clipping of visible primitives based on estimated eye positions [S1]. This method is distinct from sibling techniques like [Drawing Space Separation (DSS)](5290-drawing-space-separation-dss.md) or [Multi-View and Parallax-Based Rendering](16463-multi-view-and-parallax-based-rendering.md) because it operates on the primitive level (lines) rather than separating display space or generating multiple views, and it is specifically designed for collaborative scenarios involving two users [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D line primitives representing the scene geometry; the 3D positions of two users (specifically the location of their "hats" or head-mounted trackers); and a mode selection parameter (User 1, User 2, or Merged) [S1].
+*   **Output:** A subset of the original line primitives that are visible to the selected viewpoint(s), which are then rendered to the volumetric display [S1].
+
+**Data Structures:**
+*   **User Position:** Represented as a 3D vector $\mathbf{P}_{hat} = (x, y, z)$ obtained from tracking hardware [S1].
+*   **Eye Offset:** A 3D vector $\mathbf{O}_{eye}$ representing the offset from the hat to the midpoint between the user's eyes [S1].
+*   **Eye Position:** The estimated eye position $\mathbf{P}_{eye}$ is calculated as $\mathbf{P}_{eye} = \mathbf{P}_{hat} + \mathbf{O}_{eye}$ [S1].
+*   **Line Primitive:** Defined by endpoints $\mathbf{A}$ and $\mathbf{B}$ in 3D space [S1].
+
+**Algorithm Steps:**
+1.  **Initialize Eye Positions:** For each user $i \in \{1, 2\}$, determine the hat position $\mathbf{P}_{hat}^{(i)}$ from the tracking system [S1].
+2.  **Apply Eye Offset:** Calculate the eye position $\mathbf{P}_{eye}^{(i)}$ using a default offset vector $\mathbf{O}_{default}$ or a calibrated offset $\mathbf{O}_{calibrated}$ [S1].
+    *   *Note:* If high precision is required, run a calibration program to determine $\mathbf{O}_{calibrated}$ [S1].
+3.  **Select Viewpoint:** Choose the active viewpoint based on the mode:
+    *   **Mode 1:** Use $\mathbf{P}_{eye}^{(1)}$.
+    *   **Mode 2:** Use $\mathbf{P}_{eye}^{(2)}$.
+    *   **Mode 3 (Merged):** Use both $\mathbf{P}_{eye}^{(1)}$ and $\mathbf{P}_{eye}^{(2)}$ to determine the union of visible lines [S1].
+4.  **Clip Lines:** For each line primitive in the scene:
+    *   Determine if the line is visible from the selected viewpoint(s).
+    *   The source describes clipping lines "not visible based on the location of the midpoint between the user's eyes" [S1]. While the exact geometric test (e.g., back-face culling, depth comparison against a proxy volume) is not explicitly detailed in the text, the operation is a binary visibility test resulting in the line being either kept or discarded [S1].
+    *   *Implementation Note:* In a volumetric context, "visibility" typically implies that the line is not occluded by other geometry closer to the eye. Since the display cannot physically occlude, this is a logical filter applied before rendering [S1].
+5.  **Render:** Send the filtered set of lines to the volumetric display [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hidden_surface_removal(lines, user1_hat_pos, user2_hat_pos, mode, eye_offset):
+    """
+    lines: List of Line objects with endpoints A and B.
+    user1_hat_pos: 3D vector for User 1's hat.
+    user2_hat_pos: 3D vector for User 2's hat.
+    mode: Integer, 1 for User 1, 2 for User 2, 3 for Merged.
+    eye_offset: 3D vector from hat to eye midpoint.
+    """
+    # Step 1 & 2: Calculate eye positions
+    eye1 = user1_hat_pos + eye_offset
+    eye2 = user2_hat_pos + eye_offset
+    
+    visible_lines = []
+    
+    for line in lines:
+        is_visible = False
+        
+        if mode == 1:
+            # Step 4a: Check visibility for User 1
+            # The source states lines are clipped if not visible based on eye location [S1]
+            # Exact geometric test is not specified, but implies occlusion check
+            if is_line_visible_from(line, eye1):
+                is_visible = True
+                
+        elif mode == 2:
+            # Step 4b: Check visibility for User 2
+            if is_line_visible_from(line, eye2):
+                is_visible = True
+                
+        elif mode == 3:
+            # Step 4c: Merged mode - Union of what both users can see [S1]
+            if is_line_visible_from(line, eye1) or is_line_visible_from(line, eye2):
+                is_visible = True
+                
+        if is_visible:
+            visible_lines.append(line)
+            
+    return visible_lines
+
+def is_line_visible_from(line, eye_pos):
+    """
+    Placeholder for the specific occlusion test.
+    The source does not provide the exact formula for determining if a line
+    is visible from a viewpoint in a volumetric display [S1].
+    [G] In a typical implementation, this would involve ray-casting from the eye
+    through the line segment and checking for intersections with other opaque
+    geometry closer to the eye.
+    """
+    # Not given in the sources.
+    return True
+```
+
+**Parameters:**
+*   **Eye Offset:** A 3D vector. Default value is not specified, but a calibration program can determine the exact offset [S1].
+*   **Mode:** Integer (1, 2, or 3) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Collaborative Conflict:** HSR can only be done for a single user at a time in Modes 1 and 2, as a surface hidden from one user may be visible to another [S1].
+*   **Merged Mode Effectiveness:** The effectiveness of the merged mode depends on the relative location of the users; if users are far apart, the merged view may still contain occlusion artifacts for one or both users [S1].
+*   **Calibration Accuracy:** Using a default eye offset may lead to inaccurate occlusion culling if the user's head position relative to their eyes varies significantly [S1].
+
+## Subtopics
+
+### Drawing Space Separation (DSS)
+Divides the display space into separate viewports for each user, allowing both to see their own view with accurate HSR, unlike the merged or single-user modes of HSR [S1, 5290-drawing-space-separation-dss.md].
+
+### Multi-View and Parallax-Based Rendering
+Generates multiple views to provide parallax cues, whereas HSR explicitly removes occluded geometry to simulate depth [S1, 16463-multi-view-and-parallax-based-rendering.md].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of line primitives, as each line must be tested for visibility [S1].
+*   **Memory Complexity:** Linear, storing the list of visible lines [S1].
+*   **Performance:** The algorithm is updated in real-time based on the user's viewpoint [S1].
+*   **Strengths:** Provides a more realistic view of the scene by removing occluded geometry, which is otherwise impossible in volumetric displays due to omnidirectional light emission [S1].
+*   **Limitations:** Cannot provide accurate HSR for multiple users simultaneously in Modes 1 and 2; the merged mode (Mode 3) is less effective when users are in different relative positions [S1].
+*   **When to Use:** When a single user needs a realistic view of a complex scene, or when two users are willing to take turns viewing the scene with accurate occlusion [S1].
+*   **When Not to Use:** When two users need to see the scene simultaneously with accurate occlusion; in this case, [Drawing Space Separation (DSS)](5290-drawing-space-separation-dss.md) is a better alternative [S1].
+
+## Background
+Hidden Surface Removal in the context of volumetric displays was introduced in the paper "Collaborative interaction with volumetric displays" [S1]. The work addresses the fundamental limitation of volumetric displays: the inability to exhibit natural occlusion because light illuminating a voxel is omnidirectional [S1]. The authors implemented three modes of HSR to support collaborative interaction between two users, allowing them to manually hide surfaces behind other objects based on their viewpoint [S1]. The technique was tested in observation sessions with volunteer users familiar with volumetric displays [S1].
+
+## Sources
+[S1] Collaborative interaction with volumetric displays, https://doi.org/10.1145/1357054.1357118, fetched 2026-10-28

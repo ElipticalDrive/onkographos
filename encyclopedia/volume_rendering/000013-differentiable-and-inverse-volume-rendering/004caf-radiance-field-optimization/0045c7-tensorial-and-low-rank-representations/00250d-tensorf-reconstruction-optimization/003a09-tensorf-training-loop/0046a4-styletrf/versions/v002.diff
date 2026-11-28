@@ -1,0 +1,202 @@
+--- v001.md
++++ v002.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs:**
+-- A set of posed ground-truth images of a scene.
+-- A reference style image.
++- A set of posed ground-truth images of a scene [S1].
++- A reference style image [S1].
+ - Camera poses (obtained via COLMAP for real scenes or Blender for synthetic scenes) [S1].
+ 
+ **Outputs:**
+-- A fine-tuned TensoRF representation capable of rendering stylized novel views.
++- A fine-tuned TensoRF representation capable of rendering stylized novel views [S1].
+ 
+ **Data Structures:**
+@@ -23,70 +23,55 @@
+ 
+ **Pseudocode:**
+-
+ ```python
+ def style_trf(ground_truth_images, camera_poses, style_image):
+     # Phase 1: Pre-optimization of TensoRF
+-    # Initialize TensoRF VM-48 representation
+-    tensorf = initialize_tensorf_vm48(effective_resolution=128**3)
+-    
+-    # Train TensoRF on ground truth to learn geometry and appearance
+-    # Optimizer: Adam, LR = 0.02
+-    # Loss: L1 norm + Total Variation (TV) loss
++    # Initialize VM-48 representation: density grid (128^3) and appearance grid (128^3)
++    density_grid = create_voxel_grid(shape=(128, 128, 128))
++    appearance_grid = create_voxel_grid(shape=(128, 128, 128))
++    optimizer = Adam(parameters=[density_grid, appearance_grid], lr=0.02)
++
+     for iteration in range(15000):
+-        # Sample 4096 rays
+-        rays = sample_rays(camera_poses, count=4096)
+-        
++        # Sample 4096 rays from camera poses
++        rays = generate_rays(camera_poses, count=4096)
+         # Render colors using volumetric rendering
+-        rendered_colors = volumetric_render(tensorf, rays)
+-        
++        rendered_colors = volumetric_render(density_grid, appearance_grid, rays)
+         # Calculate losses
+-        l1_loss = calculate_l1_loss(rendered_colors, ground_truth_images[rays])
+-        tv_loss = calculate_tv_loss(tensorf)
++        l1_loss = mean_absolute_error(rendered_colors, ground_truth_images[rays])
++        tv_loss = compute_tv_loss(density_grid, appearance_grid)
+         total_loss = l1_loss + tv_loss
+-        
+-        # Update TensoRF parameters (density and appearance)
+-        tensorf.update_parameters(total_loss)
+-        
+-        # Upsampling schedule
+-        if iteration >= 2000 and iteration % 1000 == 0 and iteration <= 5000:
+-            tensorf.upsample()
+-            # Re-initialize Adam optimizer LR to 0.02 after upsampling [S1]
+-            
++        # Update parameters
++        optimizer.step(total_loss)
++        # Upsampling schedule: start at 2000, every 1000 until 5000
++        if 2000 <= iteration <= 5000 and iteration % 1000 == 0:
++            density_grid = upsample_grid(density_grid, factor=2)
++            appearance_grid = upsample_grid(appearance_grid, factor=2)
++            optimizer.lr = 0.02  # Re-initialize LR after upsampling [S1]
++
+     # Phase 2: Preprocessing Stylization Module
+-    # Train Johnson et al. CNN for the specific style on COCO2014
+-    # Takes ~20 minutes [S1]
+-    stylization_cnn = train_johnson_style_cnn(style_image, dataset="COCO2014")
+-    
++    # Train Johnson et al. CNN for the specific style on COCO2014 dataset [S1]
++    # Note: Sources do not provide implementation details for the CNN training loop.
++    stylization_cnn = train_cnn(style_image, dataset="COCO2014")
++
+     # Phase 3: Generate and Stylize Priors
+     # Render sparse novel views (20-30 views in spiral trajectory)
+-    novel_view_cameras = generate_spiral_trajectory(count=30)
+-    novel_views = render_novel_views(tensorf, novel_view_cameras)
+-    
++    novel_cameras = generate_spiral_trajectory(count=30)
++    novel_views = volumetric_render(density_grid, appearance_grid, novel_cameras)
+     # Stylize these views using the pre-trained CNN
+     stylized_priors = [stylization_cnn(view) for view in novel_views]
+-    
++
+     # Phase 4: Fine-tuning Appearance
+-    # Freeze density parameters of TensoRF
+-    tensorf.freeze_density()
+-    
++    # Freeze density parameters
++    density_grid.requires_grad = False
+     # Optimize only appearance vectors using stylized priors
+-    # Optimizer: Adam, LR = 0.02
+-    # Iterations: 1000
++    appearance_optimizer = Adam(parameters=[appearance_grid], lr=0.02)
+     for iteration in range(1000):
+-        # Sample rays towards the same camera positions as priors
+-        rays = sample_rays(novel_view_cameras, count=len(stylized_priors))
+-        
+-        # Render current appearance
+-        rendered_colors = volumetric_render(tensorf, rays)
+-        
+-        # Calculate loss against stylized priors
+-        style_loss = calculate_l1_loss(rendered_colors, stylized_priors)
+-        
+-        # Update only appearance parameters
+-        tensorf.update_appearance_parameters(style_loss)
+-        
+-    return tensorf
++        rays = generate_rays(novel_cameras, count=len(stylized_priors))
++        rendered_colors = volumetric_render(density_grid, appearance_grid, rays)
++        style_loss = mean_absolute_error(rendered_colors, stylized_priors)
++        appearance_optimizer.step(style_loss)
+ 
+-def volumetric_render(tensorf, rays):
++    return density_grid, appearance_grid
++
++def volumetric_render(density_grid, appearance_grid, rays):
+     """
+     Computes color C from transmittance tau_q, color c_q, density sigma, and step size Delta.
+@@ -94,27 +79,29 @@
+     tau_q = product_{p=1}^{q-1} exp(-sigma_p * Delta_p)
+     """
+-    color = 0
+-    transmittance = 1.0
+-    for q in range(1, Q):
+-        # Sample density sigma_q and color c_q from TensoRF at ray point q
+-        sigma_q = tensorf.query_density(rays[q])
+-        c_q = tensorf.query_color(rays[q])
+-        delta_q = rays.step_size[q]
+-        
+-        color += transmittance * c_q
+-        transmittance *= exp(-sigma_q * delta_q)
+-    return color
++    colors = []
++    for ray in rays:
++        color = 0.0
++        transmittance = 1.0
++        # Q samples along the ray (0-based indexing maps to 1-based formula)
++        for q in range(ray.Q):
++            sigma_q = query_grid(density_grid, ray.position[q])
++            c_q = query_grid(appearance_grid, ray.position[q])
++            delta_q = ray.step_size[q]
++            color += transmittance * c_q
++            transmittance *= exp(-sigma_q * delta_q)
++        colors.append(color)
++    return colors
+ 
+-def calculate_tv_loss(tensorf):
++def compute_tv_loss(density_grid, appearance_grid):
+     """
+     L_TV = (1/N) * sum( sqrt(Delta^2 T_sigma) + 0.1 * sqrt(Delta^2 T_C) )
+     Delta^2 is squared difference between neighboring values.
+-    N is total parameters.
+-    Density and appearance weighted 10:1 (density weight 1, appearance weight 0.1 in formula context relative to sum, 
+-    but text says weighted in ratio 10:1 respectively, implying density is 10x more important or coefficient is 1 vs 0.1).
++    N is total number of parameters.
++    Density and appearance weighted in ratio 10:1 [S1].
+     """
+-    # Implementation detail: sum over all neighboring pairs in T_sigma and T_C
+-    # N = total number of parameters in TensoRF representation
+-    pass
++    N = density_grid.numel() + appearance_grid.numel()
++    tv_sigma = sum((density_grid[i] - density_grid[i+1])**2 for i in range(N-1))
++    tv_C = sum((appearance_grid[i] - appearance_grid[i+1])**2 for i in range(N-1))
++    return (1/N) * (sqrt(tv_sigma) + 0.1 * sqrt(tv_C))
+ ```
+ 
+@@ -154,21 +141,21 @@
+   - Memory footprint of TensoRF VM-48: 10–15 MB [S1].
+ - **Strengths:**
+-  - Decouples style adaptation from view capture.
+-  - Preserves crisp geometry by freezing density.
+-  - Fast style adaptation (40–50 seconds).
++  - Decouples style adaptation from view capture [S1].
++  - Preserves crisp geometry by freezing density [S1].
++  - Fast style adaptation (40–50 seconds) [S1].
+   - Low memory footprint compared to MLP-based NeRFs (~1GB) [S1].
+   - Stable stylization across close-by viewpoints using Johnson et al. [S1].
+ - **Limitations:**
+-  - Requires pre-optimization of the scene.
+-  - Relies on the quality of the sparse priors; insufficient priors may lead to incomplete style transfer.
++  - Requires pre-optimization of the scene [S1].
++  - Relies on the quality of the sparse priors; insufficient priors may lead to incomplete style transfer [S1].
+ - **When to use:**
+-  - When crisp geometry preservation is critical and fast style adaptation is desired.
+-  - When 3D consistency across viewpoints is required.
++  - When crisp geometry preservation is critical and fast style adaptation is desired [S1].
++  - When 3D consistency across viewpoints is required [S1].
+ - **When not to use:**
+-  - When joint optimization of geometry and style is preferred (e.g., if the style implies geometric changes).
+-  - When real-time training is required (pre-optimization takes 10-15 mins).
++  - When joint optimization of geometry and style is preferred (e.g., if the style implies geometric changes) [S1].
++  - When real-time training is required (pre-optimization takes 10-15 mins) [S1].
+ 
+ ## Background
+-StyleTRF was introduced in the paper "StyleTRF: Stylizing Tensorial Radiance Fields" presented at ICVGIP’22 in December 2022 [S1]. It builds upon the TensoRF representation [6] and the Johnson et al. stylization method [20]. It addresses limitations in previous methods like SNeRF [29], which uses Gatys et al. [10] and joint optimization, leading to higher training times and potential 3D inconsistencies [S1].
++StyleTRF was introduced in the paper "StyleTRF: Stylizing Tensorial Radiance Fields" presented at ICVGIP’22 in December 2022 [S1]. It builds upon the TensoRF representation [6] and the Johnson et al. stylization method [20] [S1]. It addresses limitations in previous methods like SNeRF [29], which uses Gatys et al. [10] and joint optimization, leading to higher training times and potential 3D inconsistencies [S1].
+ 
+ ## Sources

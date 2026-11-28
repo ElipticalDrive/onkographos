@@ -1,0 +1,104 @@
+--- v004.md
++++ v005.md
+@@ -7,16 +7,16 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scene defined by a pre-generated Sparse Voxel Octree (STree) structure, camera position, and optional modification primitives (Union/Subtraction cubes).
+-*   **Output:** A rendered frame (position and albedo) in a 64-bit framebuffer, and an updated voxel pool on the GPU.
++*   **Input:** A scene defined by a pre-generated Sparse Voxel Octree (STree) structure, camera position, and optional modification primitives (Union/Subtraction cubes) [S1].
++*   **Output:** A rendered frame (position and albedo) in a 64-bit framebuffer, and an updated voxel pool on the GPU [S1].
+ 
+ **Data Structures:**
+-1.  **STree (Streaming Tree):** A low-level sparse octree contained within chunks of a high-level 2D uniform grid.
+-    *   **Node Layout:** Each node (referred to as a "cell") represents a $64 \times 64 \times 64$ resolution voxel data block.
++1.  **STree (Streaming Tree):** A low-level sparse octree contained within chunks of a high-level 2D uniform grid [S1].
++    *   **Node Layout:** Each node (referred to as a "cell") represents a $64 \times 64 \times 64$ resolution voxel data block [S1].
+     *   **Storage:** Only existence flags are recorded for each cell to allow efficient storage and access of sparse data [S1].
+-2.  **GPU Voxel Pool:** A linear memory pool on the GPU.
++2.  **GPU Voxel Pool:** A linear memory pool on the GPU [S1].
+     *   **Page Layout:** Each streamed cell is allocated a new page. Each page accommodates 16,384 ($128 \times 128$) voxels [S1].
+-3.  **Visibility Buffer:** A 64-bit buffer used in the first rendering pass.
++3.  **Visibility Buffer:** A 64-bit buffer used in the first rendering pass [S1].
+     *   **Layout:** `depth_bits << 32 | voxel_id << 12 | cell_id` [S1].
+-4.  **Framebuffer:** A 64-bit buffer for the final result.
++4.  **Framebuffer:** A 64-bit buffer for the final result [S1].
+     *   **Layout:** `depth_bits << 32 | albedo` [S1].
+ 
+@@ -27,33 +27,33 @@
+ 
+ 1.  **Streaming (CPU-GPU Interaction):**
+-    1.  The CPU traverses the STree from the root cell to find the suitable level of detail (LOD).
++    1.  The CPU traverses the STree from the root cell to find the suitable level of detail (LOD) [S1].
+     2.  Calculate the LOD error using the distance-based metric:
+         $$LOD\_error = \|CellCenterPos - CamPos\| - (LOD\_factor \times CellSize)$$
+         where $CellCenterPos$ is the center of the current cell, $CamPos$ is the camera position, and $CellSize$ is the physical size of the cell [S1].
+-    3.  If $LOD\_error > 0$, the CPU evaluates child cells, as the current cell does not meet the LOD metric.
++    3.  If $LOD\_error > 0$, the CPU evaluates child cells, as the current cell does not meet the LOD metric [S1].
+     4.  If $LOD\_error \le 0$ or the cell is a leaf node, a cell-building request is sent to the GPU [S1].
+ 
+ 2.  **Cell Building (GPU):**
+     1.  Upon receiving a cell-building request, the GPU voxelizes the cell at $64^3$ resolution using the method from Crassin and Green [2012] [S1].
+-    2.  A page is allocated in the voxel pool for this cell.
+-    3.  The voxelization result is written into a $64^3$ size buffer.
++    2.  A page is allocated in the voxel pool for this cell [S1].
++    3.  The voxelization result is written into a $64^3$ size buffer [S1].
+     4.  The voxelization result is atomically appended to the allocated page in the voxel pool [S1].
+ 
+ 3.  **Rendering Pass 1 (Visibility Buffer):**
+-    1.  Voxels are rendered as points to the 64-bit visibility buffer.
++    1.  Voxels are rendered as points to the 64-bit visibility buffer [S1].
+     2.  Frustum culling is applied to cull any invisible cells before rendering [S1].
+     3.  Each compute thread renders 64 voxels of a cell [S1].
+ 
+ 4.  **Rendering Pass 2 (Reconstruction and Final Frame):**
+-    1.  The renderer reconstructs voxels from the visibility buffer using a method similar to Nanite [Karis et al. 2021].
+-    2.  Each compute thread reads one pixel from the visibility buffer to reconstruct the voxel as a geometry cube.
+-    3.  The voxel is rendered as a cube with 12 triangles.
++    1.  The renderer reconstructs voxels from the visibility buffer using a method similar to Nanite [Karis et al. 2021] [S1].
++    2.  Each compute thread reads one pixel from the visibility buffer to reconstruct the voxel as a geometry cube [S1].
++    3.  The voxel is rendered as a cube with 12 triangles [S1].
+     4.  The result (position and albedo) is written to the 64-bit framebuffer using an `AtomicMin` operation on the depth channel [S1].
+ 
+ 5.  **Real-Time Modification (Union/Subtraction):**
+-    1.  **Selection:** A screen-pick operation retrieves the depth value from the framebuffer at the mouse click position $P$.
++    1.  **Selection:** A screen-pick operation retrieves the depth value from the framebuffer at the mouse click position $P$ [S1].
+     2.  **World Position:** The world position $wP$ of $P$ is determined using the inverted camera matrix [S1].
+     3.  **Cell Identification:** An Axis-Aligned Bounding Box (AABB) is computed around $wP$, and all intersecting STree cells are identified for update [S1].
+-    4.  **Re-voxelization:** A voxelization shader is executed to re-voxelize the identified cells.
++    4.  **Re-voxelization:** A voxelization shader is executed to re-voxelize the identified cells [S1].
+         *   **Subtraction:** A buffer containing subtraction cube positions and scales is used. During voxelization, voxels residing within subtraction cubes are eliminated [S1].
+         *   **Union:** A compute shader for the Union operation takes the union cube as input. The Union voxelization result is merged with the regular voxelization result [S1].
+@@ -73,4 +73,6 @@
+     children: List[STreeNode] # Sparse list of children
+     cell_id: int
++    center_pos: Vec3
++    size: float
+ 
+ class VoxelPool:
+@@ -79,8 +81,14 @@
+     def allocate_page(self) -> Page:
+         # Allocate a new page for a cell
+-        pass
++        page = Page()
++        self.pages.append(page)
++        return page
+ 
+ class Page:
+     voxels: Array[bool, 64*64*64] # Simplified representation of voxel data
++    def append(self, data: Array[bool, 64*64*64]):
++        # Atomically append voxelization result to the allocated page
++        for i in range(len(data)):
++            self.voxels[i] = data[i]
+ 
+ # 1. Streaming Phase
+@@ -90,8 +98,6 @@
+     
+     # Calculate LOD error
+-    cell_center = get_cell_center(root_node)
+-    cell_size = get_cell_size(root_node)
+-    distance = length(cell_center - camera_pos)
+-    lod_error = distance - (lod_factor * cell_size)
++    distance = length(root_node.center_pos - camera_pos)
++    lod_error = distance - (lod_factor * root_node.size)
+     
+     if lod_error > 0:

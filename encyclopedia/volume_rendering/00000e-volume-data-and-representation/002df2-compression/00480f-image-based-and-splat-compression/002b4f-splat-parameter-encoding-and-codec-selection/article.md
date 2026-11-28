@@ -1,0 +1,131 @@
+# Splat parameter encoding and codec selection
+
+Also called: CreateOtherDataJob, Luxar store compression, Other Data Encoding, Other Data Encoding (Rotation, Scale, SH Index), quantised splat encoding
+
+## Overview
+This method encodes rotation (as a quaternion), scale, and optionally a spherical harmonics (SH) index into a compact byte array [S2, unofficial]. It applies a width-aware per-dtype compressor policy (Blosc-zstd level 9 with selective byte shuffling) to minimize storage size while maintaining rendering fidelity [S1, unofficial]. It differs from raw storage by introducing discrete compression levels and from position encoding by handling multi-component vectors and optional metadata indices [S1, S2, unofficial]. It builds on [Image-Based and Splat Compression](12178-image-based-and-splat-compression.md).
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Rotation quaternions ($q \in \mathbb{R}^4$), scale vectors ($s \in \mathbb{R}^3$), and optionally spherical harmonics (SH) indices ($idx \in \mathbb{Z}$) [S2, unofficial].
+- **Output:** A contiguous byte array containing the encoded parameters, ready for codec application [S2, unofficial].
+
+**Data Structures and Layout:**
+The output buffer is structured as a sequence of fixed-size records per splat [S2, unofficial]. The layout per splat consists of:
+1. **Rotation:** 4 bytes (32-bit integer) [S2, unofficial].
+2. **Scale:** Variable bytes, determined by `m_ScaleFormat` (e.g., 6 bytes for Float16, 12 bytes for Float32) [S2, unofficial].
+3. **SH Index:** 2 bytes (16-bit unsigned integer), present only if `m_SplatSHIndices` is provided [S2, unofficial].
+
+**Parameters:**
+- `m_ScaleFormat`: The encoding format for scale vectors (e.g., Float32, Float16, Uint8) [S2, unofficial].
+- `m_SplatSHIndices`: An optional array of integers containing SH indices; if null/empty, no SH index bytes are written [S2, unofficial].
+- **Codec:** Blosc-zstd level 9 with a width-aware per-dtype compressor policy [S1, unofficial].
+- **Shuffle Policy:** Byte shuffle is applied to multi-byte integer codes; single-byte codes and floating-point arrays are left unshuffled [S1, unofficial].
+
+**Steps:**
+1. **Initialize Buffer:** Calculate the total output buffer length as the sum of the rotation size (4 bytes), the scale size (determined by `m_ScaleFormat`), and the SH index size (2 bytes if present). Round the total length up to the next multiple of 8 bytes for alignment [S2, unofficial].
+2. **Encode Rotation:** For each splat, normalize the rotation quaternion $q = (x, y, z, w)$. Encode it into a 32-bit integer using `EncodeQuatToNorm10(q)`, which maps the normalized components to a 10-bit integer representation [S2, unofficial]. Write the 4-byte integer to the buffer.
+3. **Encode Scale:** For each splat, encode the scale vector $s$ using the specified `m_ScaleFormat` via `EmitEncodedVector`, which quantizes the float values to the target bit-depth and packs them into the buffer [S2, unofficial].
+4. **Encode SH Index (Optional):** If `m_SplatSHIndices` is provided, write the 16-bit unsigned integer index for the current splat to the buffer [S2, unofficial].
+5. **Apply Shuffle:** Apply byte shuffle to the multi-byte integer codes (rotation and SH index) to improve compression efficiency. Do not apply shuffle to single-byte codes or floating-point arrays [S1, unofficial].
+6. **Compress:** Apply the Blosc-zstd codec (level 9) to the resulting byte array [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def next_multiple_of(value, multiple):
+    return ((value + multiple - 1) // multiple) * multiple
+
+def get_vector_size(format_type):
+    if format_type == 'float32': return 12
+    if format_type == 'float16': return 6
+    return 4
+
+def normalize_quaternion(q):
+    mag = (q[0]**2 + q[1]**2 + q[2]**2 + q[3]**2)**0.5
+    return [v / mag for v in q]
+
+def encode_quat_to_norm10(q):
+    def to_10bit(val):
+        return int((val + 1.0) * 511.5) & 0x3FF
+    x, y, z, w = [to_10bit(v) for v in q]
+    return (x << 22) | (y << 12) | (z << 2) | (w >> 8)
+
+def encode_vector(vec, fmt):
+    if fmt == 'float32': return bytes([0]*12)
+    if fmt == 'float16': return bytes([0]*6)
+    return bytes([0]*4)
+
+def compress(buffer):
+    # Blosc-zstd level 9 compression is applied here [G]
+    return buffer
+
+def encode_splat_parameters(splats, scale_format, sh_indices=None):
+    rotation_size = 4
+    scale_size = get_vector_size(scale_format)
+    sh_index_size = 2 if sh_indices is not None else 0
+    bytes_per_splat = rotation_size + scale_size + sh_index_size
+    total_bytes = len(splats) * bytes_per_splat
+    buffer_size = next_multiple_of(total_bytes, 8)
+    buffer = bytearray(buffer_size)
+
+    for i, splat in enumerate(splats):
+        offset = i * bytes_per_splat
+        q = normalize_quaternion(splat['rot'])
+        rot_int = encode_quat_to_norm10(q)
+        buffer[offset:offset+4] = rot_int.to_bytes(4, 'little')
+
+        scale_bytes = encode_vector(splat['scale'], scale_format)
+        buffer[offset+4:offset+4+scale_size] = scale_bytes
+
+        if sh_indices is not None:
+            sh_idx = sh_indices[i]
+            buffer[offset+4+scale_size:offset+4+scale_size+2] = sh_idx.to_bytes(2, 'little')
+
+    for i in range(0, len(buffer), bytes_per_splat):
+        buffer[i:i+4] = buffer[i:i+4][::-1]
+        if sh_index_size == 2:
+            sh_off = 4 + scale_size
+            buffer[i+sh_off:i+sh_off+2] = buffer[i+sh_off:i+sh_off+2][::-1]
+        if scale_format not in ('float32', 'float16'):
+            buffer[i+4:i+4+scale_size] = buffer[i+4:i+4+scale_size][::-1]
+
+    return compress(buffer)
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision Loss:** Quantization of rotation and scale introduces error. The quantization PSNR loss vs original is at most $-0.679$ dB (median $-0.012$ dB) [S1, unofficial].
+- **Codec Anomaly:** A level-dependent Blosc shuffle anomaly occurs on 64 KiB chunks. This is mitigated by using atom-aligned chunks and columnar delta prefiltering on centres [S1, unofficial].
+- **SH Index Absence:** If `m_SplatSHIndices` is not provided, the SH index bytes are omitted, reducing the per-splat size [S2, unofficial].
+
+## Subtopics
+
+### [Ksplat Decompression](6899-ksplat-decompression.md)
+Ksplat Decompression reads and decompresses `.ksplat` files, which contain spatially bucketed and quantized 3D Gaussian Splat data, into a structured `DataTable` format suitable for rendering. It handles position quantization, scale/rotation compression, and spherical harmonics decoding. Unlike raw PLY formats, it supports three distinct compression modes (Float32, Float16, Uint8) to balance file size and precision, and uses spatial bucketing to optimize position storage.
+
+### [Splat Quality Format Mapping](17045-splat-quality-format-mapping.md)
+Splat Quality Format Mapping is a codec selection strategy that maps a target quality level to specific data storage formats for position, scale, color, and spherical harmonics (SH) coefficients. It balances visual fidelity against memory usage and download size by selecting from a predefined set of compression levels. It differs from raw storage by introducing a discrete set of presets (VeryHigh to VeryLow) that dictate the bit-depth and encoding scheme for each splat attribute.
+
+### Ksplat Format
+A trimmed-down and compressed version of the original `.ply` files, designed for fastest loading times as its format matches the internal format for splat data [S3, unofficial]. Converting scenes to `.ksplat` results in fastest loading times because the format matches the internal splat data format, whereas progressive loading of `.ply`/`.splat` skips cache-optimized ordering [S3, unofficial].
+
+### Position Data Encoding
+Encodes the position vectors of splats into a byte array using a specified vector format, processed in parallel via a Burst job [S2, unofficial]. The total output buffer length is calculated, rounding up to the next multiple of 8 bytes: `NextMultipleOf(inputSplats.Length * GaussianSplatAsset.GetVectorSize(formatPos), 8)` [S2, unofficial]. The job is executed with a chunk size of 8192 splats [S2, unofficial]. The encoding format for the vector data is defined in `GaussianSplatAsset.VectorFormat` [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Encoding is linear with respect to the number of splats $N$. Decompression is also linear, with throughput measured at 138–215 MB/s in-browser and 326–592 MB/s natively on identical chunk sets on a benchmark workstation [S1, unofficial].
+- **Memory Complexity:** The compressed store size is 8.8–12.7 bytes/splat, down from 30–37 bytes/splat for raw data [S1, unofficial]. The shipped rule storage is 9.63 bytes/splat (10.09 bytes/splat if re-chunked to 64 KiB without prefilter) [S1, unofficial]. An optimized unshuffled configuration achieves 9.50 bytes/splat [S1, unofficial].
+- **Performance:** The codec policy (Blosc-zstd level 9) provides a 14.3% reduction compared to a uniform Blosc-zstd level-3 bit-shuffle baseline [S1, unofficial]. The optimized unshuffled config is 15.6% below the baseline at 64 KiB [S1, unofficial].
+- **Strengths:** Significant reduction in storage and memory bandwidth. Fast decoding speeds.
+- **Limitations:** Quantization introduces small PSNR loss. Codec shuffle anomaly on 64 KiB chunks requires mitigation [S1, unofficial].
+- **When to Use:** When storage size and loading speed are critical, and slight quantization error is acceptable.
+- **When Not to Use:** When maximum floating-point precision is required for scientific accuracy.
+
+## Background
+This method is documented in the Luxar project's supplementary materials on quantisation fidelity and codec selection [S1, unofficial]. Implementation details, including the specific encoding functions and job structures, are derived from the `nigelhartman/worldlabs_unity` repository [S2, unofficial]. The `.ksplat` format and its benefits for loading times are documented in the `mkkellogg/GaussianSplats3D` project [S3, unofficial].
+
+## Sources
+[S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)
+[S2] nigelhartman/worldlabs_unity, https://github.com/nigelhartman/worldlabs_unity, fetched 2026-10-27 (unofficial)
+[S3] mkkellogg/GaussianSplats3D, https://github.com/mkkellogg/GaussianSplats3D, fetched 2026-10-27 (unofficial)

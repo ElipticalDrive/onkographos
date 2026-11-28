@@ -1,0 +1,410 @@
+--- v001.md
++++ v002.md
+@@ -26,21 +26,21 @@
+ ### Network Architecture
+ 
+-The architecture consists of a Sky Encoder and a Sky Decoder (2D UNet).
++The architecture consists of a Sky Encoder and a Sky Decoder (2D UNet) [S1].
+ 
+ **1. Sky Encoder**
+-The encoder comprises two separate 2D CNN branches sharing a ResNet50 backbone [S1].
+-*   **Branch 1 (Peak Information):** Predicts $\hat{f}_{intensity}$ and $\hat{f}_{dir}$.
+-*   **Branch 2 (Latent Code):** Predicts $\hat{f}_{latent}$.
+-*   **Structure:** Each branch consists of 5 downsampling conv-blocks.
++The encoder comprises a shared ResNet50 backbone followed by two separate 2D CNN branches [S1].
++*   **Branch 1 (Peak Information):** Predicts $\hat{f}_{intensity}$ and $\hat{f}_{dir}$ [S1].
++*   **Branch 2 (Latent Code):** Predicts $\hat{f}_{latent}$ [S1].
++*   **Structure:** Each branch consists of 5 downsampling conv-blocks [S1].
+ *   **Channel Dimensions:** The intermediate output channel dimensions for the downsampling path are $(64, 128, 256, 256, 256)$ [S1].
+ *   **Conv-Block:** Contains two 2D convolution layers, followed by Batch Normalization and ReLU activation [S1].
+ 
+ **2. Sky Decoder (2D UNet)**
+-The decoder reconstructs the HDR sky from the encoded features.
++The decoder reconstructs the HDR sky from the encoded features [S1].
+ *   **Input Construction:** The decoder takes a 7-channel input tensor constructed by concatenating:
+-    1.  **Peak Direction Encoding:** A 1-channel tensor $E_{dir} \in \mathbb{R}^{1 \times H \times W}$. For each pixel with direction $\mathbf{u}$, the value is computed as:
++    1.  **Peak Direction Encoding:** A 1-channel tensor $E_{dir} \in \mathbb{R}^{1 \times H \times W}$ [S1]. For each pixel with direction $\mathbf{u}$, the value is computed as:
+         $$ E_{dir}(\mathbf{u}) = e^{100(\mathbf{u} \cdot \hat{f}_{dir} - 1)} $$
+         This creates a spherical Gaussian lobe centered at the predicted peak direction [S1].
+-    2.  **Peak Intensity Encoding:** A 3-channel tensor $E_{int} \in \mathbb{R}^{3 \times H \times W}$. The values are assigned as:
++    2.  **Peak Intensity Encoding:** A 3-channel tensor $E_{int} \in \mathbb{R}^{3 \times H \times W}$ [S1]. The values are assigned as:
+         $$ E_{int}(\mathbf{u}) = \begin{cases} \hat{f}_{intensity} & \text{if } E_{dir}(\mathbf{u}) \geq 0.98 \\ 0 & \text{otherwise} \end{cases} $$
+         This isolates the peak intensity to the region around the sun [S1].
+@@ -48,5 +48,5 @@
+ *   **Structure:** 5 downsampling conv-blocks and 5 upsampling conv-blocks connected with residual links [S1].
+ *   **Channel Dimensions:** The intermediate output channel dimensions are $(64, 128, 256, 256, 256, 256, 128, 64, 32, 16)$ [S1].
+-*   **Latent Fusion:** The latent code $\hat{f}_{latent}$ is concatenated with the latent vector output by the 2D UNet (specifically at the bottleneck or corresponding latent layer) to jointly decode the final HDR sky dome [S1].
++*   **Latent Fusion:** The latent code $\hat{f}_{latent}$ is concatenated with the latent vector output by the 2D UNet to jointly decode the final HDR sky dome [S1].
+ 
+ ### Training Procedure
+@@ -55,11 +55,9 @@
+ 2.  **Freezing:** After pre-training, the decoder weights are frozen [S1].
+ 3.  **Integration:** The fixed decoder is integrated into the sky prediction branch of the larger hybrid lighting prediction network [S1].
+-4.  **Alternating Training:** During the training of the full system, the process alternates between:
+-    *   **End-to-end training:** Updating the encoder and the rest of the network.
+-    *   **Teacher forcing:** Using ground truth sky vectors to feed the frozen decoder, stabilizing the learning of the encoder [S1].
++4.  **Alternating Training:** During the training of the full system, the process alternates between end-to-end training and teacher forcing [S1].
+ 5.  **Pseudo-label Generation:** The pre-trained network is used to generate HDR pseudo-labels for supervision in scenarios lacking real HDR data [S1].
+ 
+ ### Peak Editing
+-To edit the sky, the user modifies the explicit components of the sky vector $\hat{f}$ to create an edited vector $\hat{f}^{edit} = (\hat{f}_{intensity}^{edit}, \hat{f}_{dir}^{edit}, \hat{f}_{latent})$. This edited vector is fed into the frozen sky decoder to produce an edited HDR sky dome, effectively disentangling the sun peak from the background [S1].
++To edit the sky, the explicit components of the sky vector $\hat{f}$ are modified to create an edited vector $\hat{f}^{edit} = (\hat{f}_{intensity}^{edit}, \hat{f}_{dir}^{edit}, \hat{f}_{latent})$ [S1]. This edited vector is fed into the frozen sky decoder to produce an edited HDR sky dome, effectively disentangling the sun peak from the background [S1].
+ 
+ ### Pseudocode
+@@ -70,23 +68,123 @@
+ import torch.nn.functional as F
+ 
++class ConvBlock(nn.Module):
++    def __init__(self, in_channels, out_channels):
++        super().__init__()
++        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
++        self.bn1 = nn.BatchNorm2d(out_channels)
++        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
++        self.bn2 = nn.BatchNorm2d(out_channels)
++        self.relu = nn.ReLU(inplace=True)
++
++    def forward(self, x):
++        out = self.conv1(x)
++        out = self.bn1(out)
++        out = self.relu(out)
++        out = self.conv2(out)
++        out = self.bn2(out)
++        out = self.relu(out)
++        return out
++
++class SkyEncoderBranch(nn.Module):
++    def __init__(self, out_channels):
++        super().__init__()
++        # 5 downsampling conv-blocks with channels (64, 128, 256, 256, 256)
++        self.blocks = nn.ModuleList()
++        in_ch = 2048  # Output dimension from ResNet50 backbone
++        dims = [64, 128, 256, 256, 256]
++        for d in dims:
++            self.blocks.append(ConvBlock(in_ch, d))
++            in_ch = d
++        self.pool = nn.AdaptiveAvgPool2d(1)
++        self.fc = nn.Linear(in_ch, out_channels)
++
++    def forward(self, x):
++        for block in self.blocks:
++            x = block(x)
++        x = self.pool(x).view(x.size(0), -1)
++        return self.fc(x)
++
++class SkyDecoderUNet(nn.Module):
++    def __init__(self, in_channels, latent_dim, channels):
++        super().__init__()
++        # channels: [64, 128, 256, 256, 256, 256, 128, 64, 32, 16]
++        # 5 downsampling, 5 upsampling
++        self.down_blocks = nn.ModuleList()
++        self.up_blocks = nn.ModuleList()
++        
++        # Downsampling
++        current_ch = in_channels
++        for i in range(5):
++            self.down_blocks.append(ConvBlock(current_ch, channels[i]))
++            current_ch = channels[i]
++            
++        # Bottleneck latent fusion
++        self.latent_fusion = nn.Linear(latent_dim, channels[5])
++        
++        # Upsampling
++        for i in range(5, 10):
++            self.up_blocks.append(UpConvBlock(channels[i], channels[i-1]))
++            
++        self.final_conv = nn.Conv2d(channels[9], 3, kernel_size=1)
++
++    def forward(self, x, latent_code):
++        # Downsample
++        skips = []
++        for block in self.down_blocks:
++            x = block(x)
++            skips.append(x)
++            
++        # Latent fusion at bottleneck
++        b, c, h, w = x.shape
++        latent_expanded = self.latent_fusion(latent_code).view(b, -1, 1, 1).expand(b, -1, h, w)
++        x = torch.cat([x, latent_expanded], dim=1)
++        
++        # Upsample
++        for i, block in enumerate(self.up_blocks):
++            skip = skips[4-i]
++            x = block(x, skip)
++            
++        x = self.final_conv(x)
++        return x
++
++class UpConvBlock(nn.Module):
++    def __init__(self, in_channels, out_channels):
++        super().__init__()
++        self.up = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
++        self.conv = ConvBlock(out_channels * 2, out_channels)
++
++    def forward(self, x, skip):
++        x = self.up(x)
++        x = torch.cat([x, skip], dim=1)
++        x = self.conv(x)
++        return x
++
+ class SkyModelingNetwork(nn.Module):
+     def __init__(self, latent_dim=58, peak_dim=3):
+         super().__init__()
+-        # Encoder: Two separate branches for peak info and latent code
+-        # Both use ResNet50 backbone followed by 5 downsampling conv-blocks
+-        self.encoder_peak = SkyEncoderBranch(channels=[64, 128, 256, 256, 256])
+-        self.encoder_latent = SkyEncoderBranch(channels=[64, 128, 256, 256, 256])
++        # Shared ResNet50 backbone feature extractor
++        self.backbone = nn.Sequential(
++            nn.Conv2d(6, 64, kernel_size=7, stride=2, padding=3, bias=False),
++            nn.BatchNorm2d(64),
++            nn.ReLU(inplace=True),
++            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
++            # Simplified ResNet50 stages to reach 2048 channels
++            nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False), nn.BatchNorm2d(64), nn.ReLU(inplace=True),
++            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=False), nn.BatchNorm2d(128), nn.ReLU(inplace=True),
++            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False), nn.BatchNorm2d(256), nn.ReLU(inplace=True),
++            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1, bias=False), nn.BatchNorm2d(512), nn.ReLU(inplace=True),
++            nn.AdaptiveAvgPool2d(1)
++        )
++        
++        # Two separate branches after backbone
++        self.encoder_peak = SkyEncoderBranch(peak_dim * 2)
++        self.encoder_latent = SkyEncoderBranch(latent_dim)
+         
+         # Decoder: 2D UNet
+         self.decoder = SkyDecoderUNet(
+-            in_channels=7, # 1 (dir enc) + 3 (int enc) + 3 (pos enc)
++            in_channels=7,
+             latent_dim=latent_dim,
+             channels=[64, 128, 256, 256, 256, 256, 128, 64, 32, 16]
+         )
+-        
+-        # Projection heads to map ResNet features to vector components
+-        self.head_intensity = nn.Linear(2048, peak_dim) # Assuming ResNet50 last dim
+-        self.head_direction = nn.Linear(2048, peak_dim)
+-        self.head_latent = nn.Linear(2048, latent_dim)
+ 
+     def forward(self, ldr_panorama, positional_encoding):
+@@ -100,31 +198,21 @@
+         """
+         # 1. Encode
+-        # Concatenate LDR and Pos Enc for encoder input
+         encoder_input = torch.cat([ldr_panorama, positional_encoding], dim=1)
+-        
+-        # Extract features using ResNet50 backbone (implementation details abstracted)
+-        # In practice, this involves the shared ResNet50 backbone
+-        features = self.resnet_backbone(encoder_input)
+-        
+-        # Predict components
+-        intensity = self.head_intensity(features)
+-        direction = self.head_direction(features)
+-        latent = self.head_latent(features)
+-        
+-        # Normalize direction to unit vector
++        features = self.backbone(encoder_input)
++        features = features.view(features.size(0), -1)
++        
++        peak_params = self.encoder_peak(features)
++        intensity = peak_params[:, :3]
++        direction = peak_params[:, 3:]
+         direction = F.normalize(direction, dim=-1)
++        latent = self.encoder_latent(features)
+         
+         sky_vector = (intensity, direction, latent)
+         
+         # 2. Decode
+-        # Construct 7-channel input for decoder
+         peak_dir_enc = self.compute_peak_direction_encoding(direction, positional_encoding)
+         peak_int_enc = self.compute_peak_intensity_encoding(intensity, peak_dir_enc)
+         
+-        # Concatenate: 1 (dir) + 3 (int) + 3 (pos)
+         decoder_input = torch.cat([peak_dir_enc, peak_int_enc, positional_encoding], dim=1)
+-        
+-        # Decode
+-        # The latent code is fused inside the decoder logic
+         hdr_sky = self.decoder(decoder_input, latent)
+         
+@@ -136,16 +224,7 @@
+         PeakDirEncoding(u) = e^(100(u . f_dir - 1))
+         """
+-        # direction: (B, 3)
+-        # positional_encoding: (B, 3, H, W)
+-        # Reshape direction for broadcasting
+         dir_expanded = direction.view(-1, 3, 1, 1)
+-        
+-        # Dot product: (B, 3, 1, 1) * (B, 3, H, W) -> sum over dim 1
+         dot_product = torch.sum(dir_expanded * positional_encoding, dim=1)
+-        
+-        # Formula
+         encoding = torch.exp(100.0 * (dot_product - 1.0))
+-        
+-        # Return as 1-channel tensor
+         return encoding.unsqueeze(1)
+ 
+@@ -155,17 +234,7 @@
+         Assign intensity if PeakDirEncoding >= 0.98, else 0.
+         """
+-        # intensity: (B, 3)
+-        # peak_dir_enc: (B, 1, H, W)
+-        
+-        # Create mask
+         mask = (peak_dir_enc >= 0.98).float()
+-        
+-        # Expand intensity to match spatial dimensions
+         intensity_expanded = intensity.view(-1, 3, 1, 1)
+-        
+-        # Apply mask
+-        encoding = intensity_expanded * mask
+-        
+-        return encoding
++        return intensity_expanded * mask
+ 
+     def edit_sky(self, edited_intensity, edited_direction, edited_latent, positional_encoding):
+@@ -173,141 +242,28 @@
+         Generates an HDR sky from an edited sky vector.
+         """
+-        # Normalize edited direction
+         edited_direction = F.normalize(edited_direction, dim=-1)
+-        
+-        # Compute encodings
+         peak_dir_enc = self.compute_peak_direction_encoding(edited_direction, positional_encoding)
+         peak_int_enc = self.compute_peak_intensity_encoding(edited_intensity, peak_dir_enc)
+-        
+-        # Concatenate
+         decoder_input = torch.cat([peak_dir_enc, peak_int_enc, positional_encoding], dim=1)
+-        
+-        # Decode with frozen weights
+         hdr_sky = self.decoder(decoder_input, edited_latent)
+-        
+         return hdr_sky
+-
+-class SkyEncoderBranch(nn.Module):
+-    def __init__(self, channels):
+-        super().__init__()
+-        # 5 downsampling conv-blocks
+-        self.blocks = nn.ModuleList()
+-        in_ch = 6 # 3 (LDR) + 3 (Pos Enc)
+-        for out_ch in channels:
+-            self.blocks.append(ConvBlock(in_ch, out_ch))
+-            in_ch = out_ch
+-
+-    def forward(self, x):
+-        for block in self.blocks:
+-            x = block(x)
+-        # Global average pooling or flattening to feed into MLP head
+-        x = F.adaptive_avg_pool2d(x, 1)
+-        x = x.view(x.size(0), -1)
+-        return x
+-
+-class ConvBlock(nn.Module):
+-    def __init__(self, in_channels, out_channels):
+-        super().__init__()
+-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+-        self.bn1 = nn.BatchNorm2d(out_channels)
+-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+-        self.bn2 = nn.BatchNorm2d(out_channels)
+-        self.relu = nn.ReLU(inplace=True)
+-        # Residual connection if dimensions match, else projection
+-        if in_channels == out_channels:
+-            self.residual = nn.Identity()
+-        else:
+-            self.residual = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+-
+-    def forward(self, x):
+-        identity = self.residual(x)
+-        out = self.conv1(x)
+-        out = self.bn1(out)
+-        out = self.relu(out)
+-        out = self.conv2(out)
+-        out = self.bn2(out)
+-        out = out + identity
+-        out = self.relu(out)
+-        return out
+-
+-class SkyDecoderUNet(nn.Module):
+-    def __init__(self, in_channels, latent_dim, channels):
+-        super().__init__()
+-        # channels: [64, 128, 256, 256, 256, 256, 128, 64, 32, 16]
+-        # 5 downsampling, 5 upsampling
+-        self.down_blocks = nn.ModuleList()
+-        self.up_blocks = nn.ModuleList()
+-        
+-        # Downsampling
+-        current_ch = in_channels
+-        for i in range(5):
+-            self.down_blocks.append(ConvBlock(current_ch, channels[i]))
+-            current_ch = channels[i]
+-            
+-        # Bottleneck latent fusion
+-        self.latent_fusion = nn.Linear(latent_dim, channels[5]) # Assuming bottleneck dim matches channels[5] or similar
+-        
+-        # Upsampling
+-        for i in range(5, 10):
+-            # Skip connections from downsampling
+-            self.up_blocks.append(UpConvBlock(channels[i], channels[i-1]))
+-            
+-        self.final_conv = nn.Conv2d(channels[9], 3, kernel_size=1)
+-
+-    def forward(self, x, latent_code):
+-        # Downsample
+-        skips = []
+-        for block in self.down_blocks:
+-            x = block(x)
+-            skips.append(x)
+-            
+-        # Latent fusion at bottleneck
+-        # Note: Exact fusion point (concatenation vs addition) is not fully specified, 
+-        # but "concatenated with the latent vector output by the 2D UNet" suggests fusion at a latent layer.
+-        # We assume fusion happens after the last downsample or at the bottleneck.
+-        # For this implementation, we fuse into the bottleneck representation.
+-        b, c, h, w = x.shape
+-        latent_expanded = latent_code.view(b, -1, 1, 1).expand(b, -1, h, w)
+-        x = torch.cat([x, latent_expanded], dim=1)
+-        
+-        # Upsample
+-        for i, block in enumerate(self.up_blocks):
+-            skip = skips[4-i]
+-            x = block(x, skip)
+-            
+-        x = self.final_conv(x)
+-        return x
+-
+-class UpConvBlock(nn.Module):
+-    def __init__(self, in_channels, out_channels):
+-        super().__init__()
+-        self.up = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
+-        self.conv = ConvBlock(out_channels * 2, out_channels) # Concat skip
+-
+-    def forward(self, x, skip):
+-        x = self.up(x)
+-        x = torch.cat([x, skip], dim=1)
+-        x = self.conv(x)
+-        return x
+ ```
+ 
+ ## Operating characteristics
+ 
+-*   **Time Complexity:** The encoder uses a ResNet50 backbone followed by lightweight CNN branches, making feature extraction comparable to standard ResNet50 inference. The decoder is a 2D UNet, which is computationally efficient for image-to-image translation.
+-*   **Memory Complexity:** The sky feature vector is small ($\mathbb{R}^{64}$), allowing for efficient transmission and storage compared to full HDR environment maps. The decoder requires memory proportional to the image resolution ($64 \times 256$).
+-*   **Performance:** The method achieves an HDR reconstruction MSE of $7.49 \times 10^{-2}$ and a median peak direction angular error of $3.38^\circ$ [S1]. This outperforms the baseline using latent code with explicit azimuth, which has an MSE of $10.56 \times 10^{-2}$ and an error of $5.67^\circ$ [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:** The method achieves an HDR reconstruction MSE of $7.49 \times 10^{-2}$ and a median peak direction angular error of $3.38^\circ$ [S1]. Compared to a baseline using a latent vector with explicit azimuth [9], this method achieves lower HDR reconstruction MSE ($7.49 \times 10^{-2}$ vs $10.56 \times 10^{-2}$) and lower peak direction angular error ($3.38^\circ$ vs $5.67^\circ$) [S1].
+ *   **Strengths:**
+     *   Explicit control over sun peak intensity and direction enables easy editing [S1].
+     *   Accurate reconstruction of extreme intensity values (sun peaks) [S1].
+     *   Can generate HDR pseudo-labels for training other models when HDR data is scarce [S1].
+-*   **Limitations:**
+-    *   Relies on the quality of the LDR input; artifacts in the LDR panorama may propagate to the HDR output.
+-    *   The explicit peak representation assumes a dominant sun peak; complex overcast skies without a clear peak may be less accurately represented compared to purely latent methods [S1].
++*   **Limitations:** Relies on the quality of the LDR input [S1].
+ *   **When to use:** When HDR sky prediction from LDR images is required, especially if control over the sun's position and intensity is needed for virtual object insertion or lighting estimation [S1].
+-*   **When not to use:** If the scene has no dominant light source or if the sky is uniformly overcast, the explicit peak model may introduce artifacts.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+ 
+-The Sky Modeling Architecture was introduced in the paper "Neural Light Field Estimation for Street Scenes with Differentiable Virtual Object Insertion" by Z. Wang et al. [S1]. The work addresses the challenge of estimating HDR lighting for street scenes to enable realistic virtual object insertion. A key component is the sky modeling network, which learns a low-dimensional feature space for the sky dome. The authors note that previous methods [9] used a latent vector with explicit azimuth, but their approach with explicit peak direction and intensity outperforms it in reconstruction accuracy and direction estimation [S1]. The architecture is part of a larger hybrid lighting prediction network that also estimates volumetric lighting [S1].
++The Sky Modeling Architecture was introduced in the paper "Neural Light Field Estimation for Street Scenes with Differentiable Virtual Object Insertion" by Z. Wang et al. [S1]. The work addresses the challenge of estimating HDR lighting for street scenes to enable realistic virtual object insertion [S1]. A key component is the sky modeling network, which learns a low-dimensional feature space for the sky dome [S1]. The authors note that previous methods [9] used a latent vector with explicit azimuth, but their approach with explicit peak direction and intensity outperforms it in reconstruction accuracy and direction estimation [S1]. The architecture is part of a larger hybrid lighting prediction network that also estimates volumetric lighting [S1].
+ 
+ ## Sources

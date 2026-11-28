@@ -1,0 +1,113 @@
+# Screen-Space Gradient Densification Criterion
+
+Also called: Screen-Space Gradient Densification
+
+## Overview
+A densification criterion for 3D Gaussian Splatting that uses the mean magnitude of the photometric loss gradient with respect to the primitive's projected 2D screen-space center to identify regions requiring refinement [S1, unofficial]. It differs from 2DGS [Huang et al. 2024] by using an analytical T-matrix backward pass to compute screen-space gradients, avoiding the conflation of depth and lateral motion inherent in projecting 3D center gradients [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Photometric loss $\mathcal{L}_j$ for each training view $j$ [S1, unofficial].
+- Projection matrix $T$ for each view, where $T_{m,n}$ is the $n$-component of the $m$-th row [S1, unofficial].
+- Primitive $i$ with projected screen-space center $\boldsymbol{\mu}_i = (u, v)$ [S1, unofficial].
+
+**Outputs:**
+- Mean gradient score $\bar{g}_i$ for primitive $i$ [S1, unofficial].
+
+**Data Structures:**
+- Accumulator for gradient scores per primitive [S1, unofficial].
+- Per-view gradient contributions $g_x, g_y$ [S1, unofficial].
+
+**Steps:**
+1. For each training view $j$, compute the projection matrix $T$ [S1, unofficial].
+2. Determine the screen-space center coordinates $(u, v)$ for primitive $i$ using the implicit definition:
+   $$ u = \frac{T_{1,z}}{T_{4,z}}, \quad v = \frac{T_{2,z}}{T_{4,z}} $$
+   where $z$ denotes the specific row index used for projection in the T-matrix backward pass [S1, unofficial].
+3. Compute the per-pixel contributions to the screen-space positional gradient using the chain rule through the T-matrix gradients:
+   $$ g_x = \frac{\partial \mathcal{L}}{\partial T_{1,z}} \cdot T_{4,z}, \quad g_y = \frac{\partial \mathcal{L}}{\partial T_{2,z}} \cdot T_{4,z} $$
+   where $\frac{\partial \mathcal{L}}{\partial T_{1,z}}$ and $\frac{\partial \mathcal{L}}{\partial T_{2,z}}$ are the gradients of the loss with respect to the corresponding T-matrix components [S1, unofficial].
+4. Calculate the gradient norm for the primitive in view $j$:
+   $$ \left\| \frac{\partial \mathcal{L}_j}{\partial \boldsymbol{\mu}_i} \right\|_2 = \sqrt{g_x^2 + g_y^2} $$ [S1, unofficial].
+5. Accumulate the gradient norms over all $N$ views where primitive $i$ contributed to the rendered image [S1, unofficial].
+6. Compute the mean gradient score:
+   $$ \bar{g}_i = \frac{1}{N} \sum_{j=1}^N \left\| \frac{\partial \mathcal{L}_j}{\partial \boldsymbol{\mu}_i} \right\|_2 $$
+   where $\bar{g}_i$ is the mean gradient score for primitive $i$, $N$ counts the views in which primitive $i$ contributed to the rendered image, $\mathcal{L}_j$ is the loss in view $j$, and $\boldsymbol{\mu}_i$ is the projected 2D screen-space center [S1, unofficial].
+
+**Parameters:**
+- Threshold for $\bar{g}_i$ to trigger densification: Not given in the sources. [G]
+
+**Edge Cases and Pitfalls:**
+- Occluded views: The sum is over views where the primitive contributed. $N$ counts the views in which primitive $i$ contributed to the rendered image, excluding occluded views where the Gaussian contributes zero [S1, unofficial].
+- Gradient cancellation: The analytical T-matrix backward pass avoids gradient cancellation issues identified in prior work [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_screen_space_gradient_score(primitive, views):
+    """
+    Compute the mean screen-space gradient score for a primitive.
+    
+    Args:
+        primitive: Object containing properties of the 3D Gaussian.
+        views: List of view objects, each containing projection matrix T and loss L.
+        
+    Returns:
+        float: Mean gradient score bar_g_i.
+    """
+    total_grad_norm = 0.0
+    view_count = 0
+    Z_IDX = 2  # Standard row index for depth projection in 4x4 matrices [G]
+    
+    for view in views:
+        # Check if primitive contributed to this view (blending weight > 0)
+        if primitive.blending_weight(view) <= 0.0:
+            continue
+            
+        view_count += 1
+        
+        # Get projection matrix T and loss L for this view
+        T = view.projection_matrix
+        dL_dT = view.gradient_of_loss_wrt_projection_matrix
+        
+        # Compute screen-space center components
+        T_1_z = T[0, Z_IDX]
+        T_2_z = T[1, Z_IDX]
+        T_4_z = T[3, Z_IDX]
+        
+        # Compute per-pixel contributions to screen-space positional gradient
+        dL_dT_1_z = dL_dT[0, Z_IDX]
+        dL_dT_2_z = dL_dT[1, Z_IDX]
+        
+        g_x = dL_dT_1_z * T_4_z
+        g_y = dL_dT_2_z * T_4_z
+        
+        # Compute gradient norm
+        grad_norm = (g_x**2 + g_y**2)**0.5
+        total_grad_norm += grad_norm
+        
+    if view_count == 0:
+        return 0.0
+        
+    mean_grad_score = total_grad_norm / view_count
+    return mean_grad_score
+```
+
+## Subtopics
+
+### [Contribution-Based Normalization](16632-contribution-based-normalization.md)
+Normalizes the accumulated photometric gradient by the Gaussian's average rendering contribution across views, rather than the raw number of visible views. It prevents occluded primitives from artificially depressing the gradient score and stalling densification in complex scenes. It builds on [Screen-Space Gradient Densification Criterion](5303-screen-space-gradient-densification-criterion.md) by refining how the gradient signal is scaled.
+
+## Operating characteristics
+- **Time Complexity:** Linear in the number of views $N$ for each primitive, as it requires accumulating gradients over all views where the primitive contributes [S1, unofficial].
+- **Memory Complexity:** Requires storing gradient accumulators for each primitive [G].
+- **Strengths:** Avoids the discrepancy introduced by projecting 3D center gradients to the image plane, which conflates depth and lateral motion [S1, unofficial]. Prevents gradient cancellation [S1, unofficial].
+- **Limitations:** Requires access to the T-matrix backward pass gradients, which may not be available in all rasterizers [G].
+- **When to use:** When accurate screen-space gradient estimation is critical for densification, especially in scenes with complex geometry where depth and lateral motion are distinct [S1, unofficial].
+- **When not to use:** When computational resources are limited and the approximation used by 2DGS is deemed sufficient [S1, unofficial].
+
+## Background
+Originated in 3D Surface Splatting (3DSS) [S1, unofficial], as an improvement over the densification criterion used in 3D Gaussian Splatting (3DGS) [Kerbl et al. 2023] and the approximation used in 2DGS [Huang et al. 2024] [S1, unofficial]. It addresses the issue of over-reconstructed regions being incorrectly identified for refinement by using a principled criterion based on screen-space gradients [S1, unofficial].
+
+## Sources
+[S1] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)

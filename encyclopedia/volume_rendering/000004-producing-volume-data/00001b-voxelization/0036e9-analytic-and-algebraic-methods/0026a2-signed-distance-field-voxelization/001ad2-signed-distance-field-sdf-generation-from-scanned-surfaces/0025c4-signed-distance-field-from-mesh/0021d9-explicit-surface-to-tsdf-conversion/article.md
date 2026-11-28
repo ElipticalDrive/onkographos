@@ -1,0 +1,137 @@
+# Explicit Surface to TSDF Conversion
+
+Also called: Explicit Geometry to TSDF, Mesh to TSDF
+
+## Overview
+This method converts explicit geometry, such as triangle meshes or oriented point clouds, into a Truncated Signed Distance Field (TSDF) voxel grid by computing the closest-surface distance for each voxel center and assigning a sign based on surface orientation [S1]. Both conversion paths (depth images and explicit surfaces) share the same high-level formulation: evaluate a signed distance at each voxel center, truncate it to a fixed band, and mark voxels inside the band as valid, differing only in how the signed distance value is obtained [S1].
+
+## How it works
+**Inputs:**
+*   A set of triangles $\mathcal{T}$ (for meshes) or a set of oriented points (for point clouds) [S1].
+*   A global voxel grid definition (origin, resolution, truncation band $\epsilon$) [S1].
+
+**Outputs:**
+*   A TSDF voxel grid where each valid voxel contains a truncated signed distance value [S1].
+
+**Data Structures:**
+*   **Triangle:** Defined by vertices $a, b, c \in \mathbb{R}^3$ [S1].
+*   **Voxel Center:** $\mathbf{p} \in \mathbb{R}^3$ [S1].
+*   **TSDF Value:** Scalar $s(\mathbf{p})$ [S1].
+
+**Algorithm:**
+
+1.  **Closest Point Projection:** For each voxel center $\mathbf{p}$, compute the closest-surface distance $d(\mathbf{p}) = \min_{\tau \in \mathcal{T}} \|\mathbf{p} - \Pi_\tau(\mathbf{p})\|_2$, where $\Pi_\tau(\mathbf{p})$ is the closest point on triangle $\tau$ to $\mathbf{p}$ [S1]. If the orthogonal projection of $\mathbf{p}$ lies inside the triangle, it gives $\Pi_\tau(\mathbf{p})$; otherwise, project onto the three edge segments and take the nearest point [S1]. The barycentric coordinate on the triangle is $q(v, w) = a + v(b-a) + w(c-a)$, subject to $v \geq 0, w \geq 0, v + w \leq 1$ [S1]. For point clouds, $d(\mathbf{p})$ is the distance to the nearest point in the cloud [S1].
+
+2.  **Sign Assignment:** For watertight meshes with consistent orientation, let $\tau^\star$ be the closest triangle and $\mathbf{n}_{\tau^\star}$ its unit normal. The signed distance is $s(\mathbf{p}) = \text{sign}((\mathbf{p} - \Pi_{\tau^\star}(\mathbf{p}))^\top \mathbf{n}_{\tau^\star}) d(\mathbf{p})$ [S1]. This local point-to-plane side test assumes a coherent inside/outside convention [S1]. For oriented point clouds, compute the distance to the closest point and use its normal to define an analogous local point-to-plane signed distance [S1]. If normals are unoriented or unreliable, or if the surface is non-watertight/contains thin sheets (lacking a global inside/outside sign), use the unsigned-distance offset fallback: $s(\mathbf{p}) = d(\mathbf{p}) - \delta$, where $\delta \approx 1\text{--}2$ voxel sizes [S1]. This produces a stable zero level set corresponding to a thin offset shell around the input geometry [S1].
+
+3.  **Truncation and Marking:** Truncate the signed distance $s(\mathbf{p})$ to the band $[-\epsilon, \epsilon]$ and mark voxels within this band as valid [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dot(u, v):
+    return sum(x * y for x, y in zip(u, v))
+
+def length(v):
+    return dot(v, v) ** 0.5
+
+def sub(u, v):
+    return tuple(x - y for x, y in zip(u, v))
+
+def add(u, v):
+    return tuple(x + y for x, y in zip(u, v))
+
+def mul(s, v):
+    return tuple(s * x for x in v)
+
+def project_point_to_triangle(p, a, b, c):
+    ab = sub(b, a)
+    ac = sub(c, a)
+    ap = sub(p, a)
+    d1 = dot(ab, ap)
+    d2 = dot(ac, ap)
+    d3 = dot(ab, ac)
+    d4 = dot(ab, ab)
+    d5 = dot(ac, ac)
+    denom = d4 * d5 - d3 * d3
+    if denom == 0:
+        return a
+    v = (d4 * d2 - d3 * d1) / denom
+    w = (d5 * d3 - d3 * d2) / denom
+    if v >= 0 and w >= 0 and v + w <= 1:
+        return add(a, add(mul(v, ab), mul(w, ac)))
+    t = max(0.0, min(1.0, d1 / d4))
+    pt_ab = add(a, mul(t, ab))
+    t_ac = max(0.0, min(1.0, d2 / d5))
+    pt_ac = add(a, mul(t_ac, ac))
+    bc = sub(c, b)
+    bp = sub(p, b)
+    t_bc = max(0.0, min(1.0, dot(bc, bp) / dot(bc, bc)))
+    pt_bc = add(b, mul(t_bc, bc))
+    dist_a = length(sub(p, a))
+    dist_b = length(sub(p, b))
+    dist_c = length(sub(p, c))
+    dist_ab = length(sub(p, pt_ab))
+    dist_ac = length(sub(p, pt_ac))
+    dist_bc = length(sub(p, pt_bc))
+    min_d = min(dist_a, dist_b, dist_c, dist_ab, dist_ac, dist_bc)
+    if min_d == dist_a: return a
+    if min_d == dist_b: return b
+    if min_d == dist_c: return c
+    if min_d == dist_ab: return pt_ab
+    if min_d == dist_ac: return pt_ac
+    return pt_bc
+
+def compute_tsdf_from_mesh(triangles, voxel_centers, epsilon, delta, watertight=True):
+    tsdf_values = []
+    valid_mask = []
+    for p in voxel_centers:
+        min_dist = float('inf')
+        closest_point = None
+        closest_normal = None
+        for tri in triangles:
+            a, b, c = tri.vertices
+            n = tri.normal
+            cp = project_point_to_triangle(p, a, b, c)
+            dist = length(sub(p, cp))
+            if dist < min_dist:
+                min_dist = dist
+                closest_point = cp
+                closest_normal = n
+        if watertight and closest_normal is not None:
+            diff = sub(p, closest_point)
+            side = dot(diff, closest_normal)
+            sign_val = 1.0 if side >= 0 else -1.0
+            s = sign_val * min_dist
+        else:
+            s = min_dist - delta
+        if abs(s) <= epsilon:
+            tsdf_values.append(s)
+            valid_mask.append(True)
+        else:
+            tsdf_values.append(0.0)
+            valid_mask.append(False)
+    return tsdf_values, valid_mask
+```
+
+## Subtopics
+
+### [Projective TSDF Fusion](2658-projective-tsdf-fusion.md)
+Computes signed distance values for voxels from calibrated depth images by projecting voxel centers into the camera frame and comparing projected depth with observed depth. It differs from explicit surface conversion methods by operating directly on depth buffers rather than requiring a pre-fused mesh or point cloud, enabling incremental integration of raw sensor data.
+
+### [Mesh-to-TSDF Sequence Encoding Pipeline](3649-mesh-to-tsdf-sequence-encoding-pipeline.md)
+Loads a sequence of triangle meshes matching a printf-style pattern, fits a single similarity transform to their union bounds, converts each frame to a TSDF voxel grid, encodes it into a codec stream, decodes it, and compares the original, uncompressed TSDF, and decoded surfaces. It differs from single-frame conversion by handling temporal sequences with a unified spatial transform and performing codec-specific compression with built-in surface verification.
+
+### [Truncated Signed Distance Fields](7045-truncated-signed-distance-fields.md)
+Represents a 3D implicit surface as the zero crossing of a function interpolating truncated signed distances on a uniform grid. Unlike full Signed Distance Fields (SDFs), TSDFs limit the distance magnitude to a specific interval, handling incomplete information and reducing memory usage for robotics and reconstruction applications. It differs from Projective TSDF Fusion by focusing on the static representation definition rather than the multi-view integration process, and from Mesh-to-TSDF Sequence Encoding by addressing the fundamental voxel value definition rather than temporal compression(2658-projective-tsdf-fusion.md),(3649-mesh-to-tsdf-sequence-encoding-pipeline.md).
+
+## Operating characteristics
+Time and memory complexity: Not given in the sources. Strengths: Direct conversion from explicit geometry; handles both meshes and point clouds; robust to non-watertight surfaces via offset fallback [S1]. Limitations: Computationally expensive for high-resolution grids and complex meshes without spatial acceleration structures [G]. When to use: When explicit mesh or point cloud data is available and a TSDF representation is needed for downstream tasks like rendering or compression [S1]. When not to use: When real-time performance is critical and depth images are available (use Projective TSDF Fusion); when memory is extremely constrained and sparse representations are preferred (use Sparse VDB SDF Generation) [G].
+
+## Background
+The method is described in the context of implicit surface compression using Discrete Cosine Transform and Motion Compensation [S1]. It addresses the problem of converting explicit geometry (meshes or point clouds) into a format suitable for volumetric compression pipelines [S1]. The approach handles non-watertight surfaces by using an unsigned-distance offset fallback, a technique inspired by Xu and Barbič [2020] for polygonsoup meshes [S1].
+
+## Sources
+[S1] Implicit Surface Compression -- with Good Old Discrete Cosine Transform and Motion Compensation, https://doi.org/10.1145/3811298, fetched 2026-10-30

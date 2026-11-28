@@ -1,0 +1,297 @@
+Context Project AirSim already exposes configurable camera sensors through JSONC, with multiple ImageType outputs per camera (Scene, DepthPlanar, DepthPerspective, Segmentation, DepthVis, DisparityNormalized, SurfaceNormals), topic-based...
+
+Add fisheye and ultra-wide lens distortion support for camera sensors · Issue #148 · iamaisim/ProjectAirSim · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add fisheye and ultra-wide lens distortion support for camera sensors #148
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Add fisheye and ultra-wide lens distortion support for camera sensors#148
+Copy link
+Labels
+enhancementNew feature or requestNew feature or requesthelp wantedExtra attention is neededExtra attention is neededsensorsunreal-engine
+Description
+jonyMarino
+opened on May 7, 2026
+Issue body actions
+Context
+Project AirSim already exposes configurable camera sensors through JSONC, with multiple ImageType outputs per camera (Scene, DepthPlanar, DepthPerspective, Segmentation, DepthVis, DisparityNormalized, SurfaceNormals), topic-based capture/streaming, 2D/3D annotation support, post-processing, auto-exposure, and documented FOV controls up to 170 degrees.
+Many robotics and autonomy platforms use fisheye or ultra-wide cameras for navigation, perception, surround view, inspection, and dataset generation. Adding native lens distortion support would make Project AirSim camera output better match real sensor rigs while preserving the simulator's existing ground-truth outputs.
+A robust implementation should address the rendering mismatch between linear perspective rasterization and nonlinear camera models:
+render multiple perspective views inside a single FSceneViewFamily so the views share scene setup and GPU resources;
+use asymmetric projection matrices so each view better matches the distorted field of view before resampling;
+stitch/resample the views into one final distorted image;
+apply auto-exposure and lens effects to the stitched image in a second pass;
+preserve support for depth, pixel-wise labels, and tight 2D bounding boxes.
+This issue proposes adding that capability as an evolution of the existing Project AirSim camera sensor, while preserving backward compatibility with current camera configuration and enabling realistic fisheye/ultra-wide cameras for autonomy datasets, robotics perception, and model validation.
+Problem
+Rasterization is built around linear perspective projection, while real lens distortion models are nonlinear. A simple post-process warp over a perspective render loses detail in stretched regions. A naive multi-capture solution is expensive and can introduce mismatched exposure, TAA/TSR history discontinuities, and visible seams. Project AirSim also needs to preserve ground truth: depth, segmentation, labels, and bounding boxes must correspond to the final distorted image, not only the original perspective view.
+Goal
+Implement an optimized distorted camera path for Project AirSim that supports parameterized lens models, ultra-wide fields of view, and consistent RGB, depth, segmentation, and annotation output.
+Proposed Scope
+Lens Models
+Add an optional lens-distortion block to camera settings:
+```
+{
+  "id": "FrontFisheye",
+  "type": "camera",
+  "enabled": true,
+  "parent-link": "Frame",
+  "capture-interval": 0.05,
+  "lens-distortion": {
+    "enabled": true,
+    "model": "kannala-brandt",
+    "fov-degrees": 220,
+    "k1": 0.0,
+    "k2": 0.0,
+    "k3": 0.0,
+    "k4": 0.0,
+    "xi": 0.0,
+    "alpha": 0.5,
+    "feather-pixels": 16,
+    "upsampling-factor": 1.5,
+    "texture-filter": "auto"
+  },
+  "capture-settings": [
+    {
+      "image-type": 0,
+      "width": 1920,
+      "height": 1080,
+      "capture-enabled": true,
+      "streaming-enabled": false,
+      "compress": false
+    },
+    {
+      "image-type": 1,
+      "width": 1920,
+      "height": 1080,
+      "capture-enabled": true,
+      "pixels-as-float": true,
+      "compress": false
+    },
+    {
+      "image-type": 3,
+      "width": 1920,
+      "height": 1080,
+      "capture-enabled": true,
+      "compress": true
+    }
+  ],
+  "annotation-settings": {
+    "enabled": true,
+    "object-ids": ["Vehicle_.*", "Pedestrian_.*"],
+    "bbox2D-settings": { "alignment": "axis" },
+    "bbox3D-settings": { "alignment": "oriented" }
+  }
+}
+```
+Initial models:
+pinhole: no distortion, preserves current behavior.
+brown-conrady: classic radial distortion using k1, k2, k3.
+rational-radial: rational radial extension using k1 through k6.
+kannala-brandt: fisheye/equidistant model for wide FOV.
+double-sphere: fisheye model with closed-form unprojection using xi and alpha.
+Compatibility:
+If lens-distortion.enabled is missing or false, the camera should use the existing pipeline.
+capture-settings[].fov-degrees continues to work for non-distorted cameras.
+For distorted cameras, lens-distortion.fov-degrees defines the output FOV; capture-settings[].fov-degrees should either be deprecated for this mode or validated as non-conflicting.
+Technical Design
+1. Sim libs: schema and camera state
+Update:
+core_sim/include/core_sim/sensors/camera.hpp
+core_sim/src/sensors/camera.cpp
+core_sim/src/constant.hpp
+camera loading tests in core_sim/test/gtest_sensor.cpp
+Add types/settings:
+LensDistortionSettings
+LensModel
+parameters k1..k6, xi, alpha
+feather_pixels
+upsampling_factor
+texture_filter
+model-specific FOV limits
+Suggested validation:
+pinhole, brown-conrady, rational-radial: initially cap at 170 degrees unless higher FOV is proven stable.
+kannala-brandt and double-sphere: initial target support up to 240 degrees.
+upsampling-factor: range [1.0, 4.0].
+feather-pixels: range [0, 128].
+log or throw clear errors when a model receives out-of-range parameters.
+2. Unreal plugin: new distorted render path
+Update or extend:
+unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.h
+unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp
+depth/segmentation/stitching materials in the Project AirSim plugin content
+Proposed architecture:
+Keep the current USceneCaptureComponent2D per-ImageType path for cameras without distortion.
+Add a helper class such as FProjectAirSimDistortedCameraRenderer responsible for:
+computing active tiles from lens model and FOV;
+building asymmetric projection matrices per tile;
+rendering tiles into an atlas;
+creating/updating a distortion map for resampling;
+applying stitching and feathering;
+producing final render targets compatible with the existing image packing path.
+For FOV <= 120 degrees or single-view models, use a single-tile fast path when no extra depth pass or upsampling is needed.
+For wider FOV, use 2 or 4 tiles depending on horizontal/vertical FOV.
+3. Multi-view render in one view family
+Implement a Project AirSim multi-view capture utility:
+build a single FSceneViewFamily;
+add N views with their own view rects inside the atlas;
+share scene setup, GPU scene update, Lumen/ray tracing wiring, and common render state;
+avoid N separate FSceneRenderer instances when possible.
+Maintenance note:
+This likely touches engine-private APIs similar to SceneCaptureRendering.cpp.
+Project AirSim supports UE 5.2 and UE 5.7; use version guards.
+If UE 5.2 cannot cleanly support the same optimized path, accept an initial fallback using independent captures for UE 5.2 and optimize the multi-view path for UE 5.7.
+4. Stitching, depth, and labels
+RGB:
+Render color in HDR, or another format with enough precision to avoid banding before tonemapping.
+Stitch + distort into an intermediate HDR render target.
+Apply auto-exposure, bloom, lens effects, and tonemapping after stitching, not independently per tile.
+Depth:
+For DepthPlanar, preserve current semantics when the model is pinhole/single-tile.
+For multi-tile fisheye, explicitly define whether output reports:
+Euclidean distance from the camera origin, recommended to avoid seam discontinuities; or
+planar depth relative to the optical axis, more compatible but less natural for FOV > 180 degrees.
+Document the decision and preserve existing names/API when possible.
+Segmentation/labels:
+Do not blend IDs during feathering. At seams, use per-pixel/tile ownership or nearest-neighbor ownership.
+Preserve the existing custom depth/stencil segmentation path.
+Validate that final segmentation colors still map to the expected Project AirSim segmentation palette.
+Surface normals / disparity:
+Treat as phase 2 if supporting all modalities in the MVP is too expensive.
+If they are excluded from MVP, emit a clear warning when requested with lens distortion enabled.
+5. Bounding boxes and ray queries
+Update:
+projection logic used by annotations in UUnrealCamera::CalculateProjectionMatrix(), ProjectWorldToScreen, GetBoundingBoxes, and related helpers;
+GetCameraRay / Camera::GetRay.
+Requirements:
+bbox2D must be computed in final distorted image space.
+bbox3d_in_image_space must project all 8 corners through the active lens model.
+GetCameraRay(camera_id, image_type, x, y) must unproject from distorted pixel coordinates into the correct 3D ray.
+For tight 2D boxes, consider sampling box edges/corners or using the mask/instance label image when available, because projecting only the 8 3D box vertices can underestimate very close or strongly distorted objects.
+6. Runtime updates and Python client
+Optional services:
+SetLensDistortion(camera_id, settings)
+SetLensModel(camera_id, model)
+SetLensFov(camera_id, fov_degrees)
+SetLensParameter(camera_id, name, value)
+Client updates:
+add lens model/settings types to projectairsim.types;
+add methods to Drone, Rover, and/or a shared sensor abstraction if available;
+add examples under client/python/example_user_scripts.
+If runtime reconfiguration is out of scope for the MVP:
+allow only startup configuration;
+leave runtime updates for phase 2.
+Implementation Plan
+Phase 0: short investigation and scope decision
+Confirm FSceneViewFamily multi-view compatibility in UE 5.2 and UE 5.7.
+Audit the current UUnrealCamera and UnrealCameraRenderRequest pipeline to decide whether distorted output integrates before or after ReadPixels.
+Define official depth semantics for fisheye output.
+Define MVP ImageType support: recommended Scene, DepthPlanar/DepthPerspective, Segmentation, and 2D/3D annotations.
+Phase 1: schema and configuration
+Add LensDistortionSettings in sim libs.
+Load and validate lens-distortion from JSONC.
+Add unit tests for configuration:
+default camera without distortion;
+valid Brown-Conrady config;
+valid 220-degree Kannala-Brandt config;
+out-of-range FOV fails;
+invalid parameters fail with a clear message.
+Update camera capture settings documentation.
+Phase 2: lens math and maps
+Implement forward projection and unprojection for each model.
+Generate a distortion map per resolution/model/FOV.
+Add numerical tests:
+project/unproject round trip;
+stable optical center;
+radial symmetry for symmetric coefficients;
+out-of-FOV points marked invalid.
+Phase 3: distorted single-view render
+Implement a single-tile path for brown-conrady/rational-radial.
+Resample the perspective capture into the distorted image.
+Preserve correct auto-exposure/post-process ordering.
+Validate Scene, Depth, and Segmentation.
+Phase 4: ultra-wide multi-tile render
+Implement 2/4-view tiling.
+Implement atlas layout, asymmetric projection matrices, stitching, and seam ownership.
+Add RGB feathering and hard ownership for depth/labels.
+Add fast path where applicable.
+Measure performance against independent multi-capture rendering.
+Phase 5: annotations, camera rays, and API
+Make GetCameraRay respect the active lens.
+Make bounding boxes project into distorted image space.
+Update CameraInfo metadata if there is already support for intrinsics/distortion coefficients; otherwise add a compatible field.
+Expose Python methods if runtime reconfiguration is accepted.
+Phase 6: documentation and examples
+Update docs/sensors/camera_capture_settings.md.
+Add an example JSONC file for a front fisheye camera.
+Add a Python script that captures Scene, Depth, Segmentation, and annotations.
+Document known limits, GPU cost, and depth behavior.
+Acceptance Criteria
+An example scene can configure a kannala-brandt or double-sphere camera with FOV >= 220 degrees and capture an RGB image without obvious visible seams.
+Scene, DepthPerspective or DepthPlanar, and Segmentation are published with the same resolution, timestamp, and camera pose.
+Segmentation does not produce blended colors at seams.
+Depth does not show obvious seam discontinuities for ultra-wide FOV.
+Auto-exposure and lens effects are applied to the complete stitched image, not independently per tile.
+annotation-settings produces bbox2D, bbox3d_in_image_space, and bbox3d_in_projection_space consistent with the distorted image.
+GetCameraRay returns coherent rays for the image center, borders, and corners.
+The path without lens-distortion preserves current behavior and performance within tolerance.
+Unit tests cover config loading/validation and numerical lens model behavior.
+Documentation includes JSONC examples and performance notes.
+Risks and Mitigations
+Unreal engine-private APIs: isolate the multi-view renderer in a small module/file with version guards and update comments.
+UE 5.2 vs 5.7: allow a less optimized fallback if the shared path is not viable in both versions.
+TAA/auto-exposure seams: feather RGB and apply exposure/post-process after stitching.
+Labels/depth cannot be blended safely: use hard per-pixel ownership at seams.
+Fisheye bounding boxes may be inaccurate if only vertices are projected: use vertex projection for MVP, document the limitation, and consider mask/label-based boxes later.
+Atlas/upsampling memory cost: validate upsampling-factor, emit warnings, and document approximate memory growth.
+Likely Affected Areas
+ProjectAirSim/core_sim/include/core_sim/sensors/camera.hpp
+ProjectAirSim/core_sim/src/sensors/camera.cpp
+ProjectAirSim/core_sim/src/constant.hpp
+ProjectAirSim/core_sim/test/gtest_sensor.cpp
+ProjectAirSim/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.h
+ProjectAirSim/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/UnrealCamera.cpp
+ProjectAirSim/unreal/Blocks/Plugins/ProjectAirSim/Source/ProjectAirSim/Private/Sensors/ImagePackingAsyncTask.*
+ProjectAirSim/client/python/projectairsim/src/projectairsim/types.py
+ProjectAirSim/client/python/projectairsim/src/projectairsim/drone.py
+ProjectAirSim/client/python/projectairsim/src/projectairsim/rover.py
+ProjectAirSim/docs/sensors/camera_capture_settings.md
+ProjectAirSim/docs/datacollection/data_generation.md
+👍React with 👍1Reacted by Andrew Jong
+👀React with 👀1Reacted by Winter Clinckemaillie
+Activity
+jonyMarino
+added
+enhancementNew feature or requestNew feature or request
+help wantedExtra attention is neededExtra attention is needed
+sensors
+unreal-engine
+on May 7, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or requesthelp wantedExtra attention is neededExtra attention is neededsensorsunreal-engine
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

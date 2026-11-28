@@ -1,0 +1,188 @@
+# Value-Noise FBM Texture Generation
+
+Also called: Cloud Texture Generator, Procedural Cloud Noise Texture Generation, Value-Noise FBM
+
+## Overview
+Value-Noise FBM Texture Generation synthesizes procedural volumetric textures, primarily for cloud simulation, by summing multiple octaves of value noise with decreasing amplitude and increasing frequency [S1, unofficial][S3, unofficial]. It differs from gradient-based noise by using pre-computed random scalar values at grid vertices rather than gradient vectors, resulting in smoother textures that are computationally cheaper to interpolate [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `seed`: Integer seed for deterministic generation [S1, unofficial][S2, unofficial].
+- `resolution`: Output texture dimensions (e.g., $N \times N$ for 2D, $N \times N \times N$ for 3D) [S1, unofficial][S3, unofficial].
+- `octaves`: Number of noise layers to sum [S1, unofficial][S3, unofficial].
+- `initial_frequency`: Starting frequency for the first octave [S3, unofficial].
+- `initial_amplitude`: Starting amplitude for the first octave [S3, unofficial].
+- `persistence`: Amplitude decay factor between octaves [S3, unofficial].
+
+**Outputs:**
+- A texture data structure (e.g., `DataTexture` or packed voxel array) containing the generated noise field [S1, unofficial][S2, unofficial].
+
+**Data Structures:**
+- **Grid:** A 2D array of random floats for each octave. Size is $C \times C$ where $C$ is the cell count for that octave [S1, unofficial].
+- **Field:** An array of size $N \times N$ (or $N^3$) accumulating the weighted noise values [S1, unofficial].
+
+**Algorithm Steps:**
+
+1. **PRNG Initialization:**
+   Initialize a Linear Congruential Generator (LCG) with the provided seed [S1, unofficial].
+   $$ \text{seed}_{new} = (\text{seed}_{old} \times 1103515245 + 12345) \ \& \ 0x7fffffff $$
+   Return normalized value:
+   $$ \text{rand} = \frac{\text{seed}_{new}}{0x7fffffff} $$
+   [S1, unofficial]
+
+2. **Grid Generation:**
+   For each octave $i$ from $0$ to `octaves` - 1:
+   - Determine cell count $C_i$. In the standard 2D cloud implementation, start with $C_0 = 4$ and double for each subsequent octave ($C_{i+1} = 2 C_i$) up to a maximum of 64 [S1, unofficial]. For 3D volume textures, the cell count is often derived from the resolution and frequency parameters [S3, unofficial].
+   - Generate a grid of $C_i \times C_i$ random floats using the PRNG [S1, unofficial].
+
+3. **Interpolation and Accumulation:**
+   Initialize an empty field array `field` of size $N \times N$ (or $N^3$) to zero [S1, unofficial].
+   Initialize `current_amplitude` = `initial_amplitude` [G].
+   Initialize `current_frequency` = `initial_frequency` [G].
+
+   For each octave $i$:
+   - Calculate step size (grid spacing) in texture coordinates:
+     $$ \text{step} = \frac{N}{C_i} $$
+   - For each pixel/voxel $(x, y)$ (and $z$ for 3D) in the output grid:
+     - Compute fractional coordinates:
+       $$ fx = \frac{x}{\text{step}}, \quad fy = \frac{y}{\text{step}} $$
+     - Get integer indices:
+       $$ ix = \lfloor fx \rfloor, \quad iy = \lfloor fy \rfloor $$
+     - Compute interpolation factors:
+       $$ tx = fx - ix, \quad ty = fy - iy $$
+     - Apply smoothstep for continuity:
+       $$ tx = 3tx^2 - 2tx^3 $$
+       $$ ty = 3ty^2 - 2ty^3 $$
+     - Fetch four corner values from the octave's grid, handling wrap-around with modulo $C_i$:
+       $$ a = \text{grid}[ix \pmod{C_i}][iy \pmod{C_i}] $$
+       $$ b = \text{grid}[(ix+1) \pmod{C_i}][iy \pmod{C_i}] $$
+       $$ c = \text{grid}[ix \pmod{C_i}][(iy+1) \pmod{C_i}] $$
+       $$ d = \text{grid}[(ix+1) \pmod{C_i}][(iy+1) \pmod{C_i}] $$
+     - Perform bilinear interpolation:
+       $$ \text{val} = (a(1-tx) + b(tx))(1-ty) + (c(1-tx) + d(tx))ty $$
+     - Add weighted contribution to the field:
+       $$ \text{field}[y \cdot N + x] += \text{current\_amplitude} \times \text{val} $$
+   - Update amplitude and frequency for the next octave:
+     $$ \text{current\_amplitude} *= \text{persistence} $$
+     $$ \text{current\_frequency} *= 2 $$
+   [S1, unofficial][S3, unofficial]
+
+4. **Normalization and Output:**
+   - Sum all amplitudes to get `total_amplitude` [S1, unofficial].
+   - Normalize the field values to the desired range (e.g., 0-255 for 8-bit textures):
+     $$ v = \text{round}\left( \frac{\text{field}[i]}{\text{total\_amplitude}} \times 255 \right) $$
+   - Set RGBA to $(v, v, v, 255)$ for 2D textures [S1, unofficial]. For 3D volume textures, store in the ALPHA channel of a DDS format [S3, unofficial].
+   - Configure texture parameters:
+     - Wrap mode: `RepeatWrapping` [S1, unofficial].
+     - Mag filter: `LinearFilter` [S1, unofficial].
+     - Min filter: `LinearMipmapLinearFilter` for 2D [S1, unofficial], or `LINEAR` for 3D if mipmaps are unsupported [S3, unofficial].
+     - Generate mipmaps if supported [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def value_noise_fbm(resolution, seed, octaves=6, initial_amplitude=0.7, persistence=0.5):
+    # 1. PRNG Setup
+    def lcg_next(s):
+        s = (s * 1103515245 + 12345) & 0x7fffffff
+        return s, s / 0x7fffffff
+
+    # 2. Grid Generation
+    grids = []
+    current_cells = 4
+    for i in range(octaves):
+        grid_size = current_cells
+        grid = []
+        for y in range(grid_size):
+            row = []
+            for x in range(grid_size):
+                seed, val = lcg_next(seed)
+                row.append(val)
+            grid.append(row)
+        grids.append(grid)
+        current_cells *= 2
+        if current_cells > 64:
+            current_cells = 64
+            
+    # 3. Interpolation
+    field = [0.0] * (resolution * resolution)
+    total_amplitude = 0.0
+    current_amp = initial_amplitude
+    
+    for i in range(octaves):
+        grid = grids[i]
+        cells = len(grid)
+        step = resolution / cells
+        total_amplitude += current_amp
+        
+        for y in range(resolution):
+            for x in range(resolution):
+                fx = x / step
+                fy = y / step
+                
+                ix = math.floor(fx)
+                iy = math.floor(fy)
+                
+                tx = fx - ix
+                ty = fy - iy
+                
+                # Smoothstep
+                tx = tx * tx * (3 - 2 * tx)
+                ty = ty * ty * (3 - 2 * ty)
+                
+                # Wrap-around modulo
+                ix1 = ix % cells
+                iy1 = iy % cells
+                ix2 = (ix + 1) % cells
+                iy2 = (iy + 1) % cells
+                
+                a = grid[iy1][ix1]
+                b = grid[iy1][ix2]
+                c = grid[iy2][ix1]
+                d = grid[iy2][ix2]
+                
+                # Bilinear Interpolation
+                val = (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty
+                
+                field[y * resolution + x] += current_amp * val
+        
+        current_amp *= persistence
+        
+    # 4. Normalization
+    normalized_field = []
+    for v in field:
+        norm_val = round((v / total_amplitude) * 255)
+        normalized_field.append(norm_val)
+        
+    return normalized_field
+```
+
+## Subtopics
+
+### [Fractal Brownian Motion (FBM) Terrain Density](17156-fractal-brownian-motion-fbm-terrain-density.md)
+Generates 3D terrain density fields by summing multiple octaves of simplex noise, modified by a base surface plane, terracing, and bedrock layers. It differs from standard value-noise FBM by transforming the raw noise output into peaks at zero-crossings and valleys at extrema, creating distinct topological features suitable for voxel-based terrain generation.
+
+### CPU Value-Noise FBM World Generation
+A dependency-free CPU value-noise FBM generates a per-body heightfield and cave structures, writing directly into the packed voxel array [S2, unofficial]. Generation is derived from a shared BiomeProfile to produce distinct worlds per body, using a deterministic seed [S2, unofficial].
+
+### CloudDome Volume Texture Generation
+Generates volume noise texture using NoiseGenerator with 6 octaves, initial frequency 6, initial amplitude 0.7, and persistence 0.5 if no valid DDS file is provided [S3, unofficial]. The default resolution is 128, a compromise between memory and visual appearance [S3, unofficial]. The image format is DDS with only the ALPHA channel to keep size small [S3, unofficial]. Texture filtering is set to LINEAR because DDS format does not support volume texture mipmaps, and `gluBuild3DMipMapLevels` is not fully supported by all drivers [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Value noise is generally faster than gradient noise because it avoids dot products and gradient vector storage, relying only on scalar interpolation [S1, unofficial]. However, it produces smoother, less detailed textures [S1, unofficial].
+- **Strengths:** Deterministic, easy to implement, smooth results suitable for clouds, low memory footprint for intermediate grids [S1, unofficial][S3, unofficial].
+- **Limitations:** Less directional detail than Perlin noise; 3D volume textures may suffer from lack of mipmap support in some formats/drivers (DDS) [S3, unofficial].
+
+## Background
+The specific implementation details cited here originate from voxel game development and early GPU-based cloud simulation research [S1, unofficial][S2, unofficial][S3, unofficial]. The use of value noise for clouds allows for efficient runtime generation on both CPU and GPU, with the FBM structure providing the necessary fractal detail to mimic natural cloud formations [S1, unofficial][S3, unofficial].
+
+## Sources
+[S1] sh1ftmaker/voxel-wars, https://github.com/sh1ftmaker/voxel-wars, fetched 2026-10-28 (unofficial)
+[S2] Phase 9: Voxel Surface Exploration, https://github.com/LundstedtAdam/SolarSystem/pull/4, fetched 2026-10-28 (unofficial)
+[S3] DTIC ADA427539: Simulating Clouds with Procedural Texturing Techniques Using the GPU, https://archive.org/details/DTIC_ADA427539, fetched 2026-10-26 (unofficial)

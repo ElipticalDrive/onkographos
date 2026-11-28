@@ -1,0 +1,109 @@
+# Octree Node Insertion and Parent Finding
+
+
+## Overview
+This method traverses a sparse voxel octree to locate or create the parent node for a specific coordinate $(x,y,z)$ at a given detail level, dynamically growing the tree structure as needed [S1, unofficial]. It serves as the foundational traversal logic for the broader [Octree Insertion with Growth](2387-octree-insertion-with-growth.md) process [S1, unofficial]. It differs from sibling methods by focusing on raw coordinate-to-parent traversal and node allocation without Morton code sorting or mesh preprocessing [G].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** The octree structure, a target coordinate $(x,y,z)$, and the target detail level [S1, unofficial].
+*   **Output:** A pointer to the parent node at the level immediately above the target leaf, with intermediate nodes created if they do not exist [S1, unofficial]. The parent's child pointers and valid masks are updated to include the new model or voxel [S1, unofficial].
+
+**Data Structures**
+The octree is managed via a `struct vx_octree` containing a root pointer, size tracking, and a fixed array of model indices [S1, unofficial]:
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```c
+struct vx_octree {
+    struct vx_node *root;
+    uint32_t allocated_size;
+    uint32_t size;
+    uint32_t model_count;
+    uint32_t models[MODEL_LIMIT]; // MODEL_LIMIT is 16
+};
+```
+
+Each node (`struct vx_node`, implied by usage) contains:
+*   `child_pointers[8]`: Indices or pointers to the 8 children [S1, unofficial].
+*   `valid_masks`: A bitmask where the $i$-th bit indicates if child $i$ exists/is valid [S1, unofficial].
+*   `leaf_mask`: A bitmask indicating which children are leaves [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Initialization:** Start at the root node (`node = 0`) [S1, unofficial]. Set the initial `mid_point` to $(0.5, 0.5, 0.5)$ and `node_size` to $0.5$ [S1, unofficial].
+2.  **Traversal Loop:** Iterate from `i = detail_level - 1` down to `0`:
+    a.  **Determine Octant:** Calculate the octant index based on the target coordinate relative to the current node's midpoint [S1, unofficial]. The octant is computed as:
+        $$ \text{octant} = (x > \text{mid}[0]) \ | \ ((y > \text{mid}[1]) \ll 1) \ | \ ((z > \text{mid}[2]) \ll 2) $$
+    b.  **Update Geometry:** Halve the `node_size` ($ \text{node\_size} \ *= \ 0.5 $) [S1, unofficial]. Update the `mid_point` for the next iteration:
+        $$ \text{mid}[k] += (\text{target}[k] > \text{mid}[k] ? \text{node\_size} : -\text{node\_size}) $$
+        for each axis $k \in \{0, 1, 2\}$ [S1, unofficial].
+    c.  **Node Creation/Selection:** If the child at `octant` does not exist (checked via `valid_masks`), create it [S1, unofficial]. Move the current `node` index to the child's index [S1, unofficial].
+3.  **Insertion:** Once the parent node at the target level is identified:
+    a.  Set `parent->child_pointers[octant]` to the index of the new model/voxel root [S1, unofficial].
+    b.  Update `parent->valid_masks` by setting the bit corresponding to the octant: `valid_masks |= (1 << octant)` [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def insert_model(octree, x, y, z, detail_level, model_index):
+    node_idx = 0
+    mid = [0.5, 0.5, 0.5]
+    node_size = 0.5
+    
+    for _ in range(detail_level - 1, -1, -1):
+        octant = (1 if x > mid[0] else 0) | \
+                 (2 if y > mid[1] else 0) | \
+                 (4 if z > mid[2] else 0)
+        
+        node_size *= 0.5
+        mid[0] += node_size if x > mid[0] else -node_size
+        mid[1] += node_size if y > mid[1] else -node_size
+        mid[2] += node_size if z > mid[2] else -node_size
+        
+        parent = octree.root[node_idx]
+        if not (parent.valid_masks & (1 << octant)):
+            new_node_idx = octree.size
+            octree.size += 1
+            parent.child_pointers[octant] = new_node_idx
+            parent.valid_masks |= (1 << octant)
+            # Initialize new node
+            octree.root[new_node_idx].valid_masks = 0
+            octree.root[new_node_idx].leaf_mask = 0
+            for j in range(8):
+                octree.root[new_node_idx].child_pointers[j] = 0
+        node_idx = parent.child_pointers[octant]
+        
+    parent_node = octree.root[node_idx]
+    parent_node.child_pointers[octant] = model_index
+    parent_node.valid_masks |= (1 << octant)
+
+def add_pointer(octree, node_idx, amount):
+    for i in range(8):
+        if octree.root[node_idx].valid_masks & (1 << i):
+            octree.root[node_idx].child_pointers[i] += amount
+            if not (octree.root[node_idx].leaf_mask & (1 << i)):
+                add_pointer(octree, octree.root[node_idx].child_pointers[i] - amount, amount)
+```
+
+**Parameters**
+*   `MODEL_LIMIT`: Maximum number of models that can be loaded, set to 16 [S1, unofficial].
+*   `DEFAULT_DETAIL_LEVEL`: Typically 8, but configurable up to 20 [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Pointer Shifting:** Loading a model into the octree can destroy the model's internal octree structure by shifting all pointers relative to the main octree's size [S1, unofficial]. This is noted as a temporary solution [S1, unofficial].
+*   **Boundary Conditions:** The algorithm assumes coordinates are within the initial bounding box defined by the root [G]. Growth handles missing nodes, but out-of-bounds coordinates may require external clamping or tree expansion logic not detailed in this specific method [G].
+*   **Precision:** Floating-point comparisons (`x > mid[0]`) are used for octant determination [G]. For very high detail levels, precision errors may affect traversal accuracy [G].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+*   **Strengths:** Dynamic growth allows handling of arbitrary scene sizes without pre-allocation [G]. Simple traversal logic is easy to implement [G].
+*   **Limitations:** The source notes a critical flaw where model loading shifts pointers, potentially corrupting data [S1, unofficial]. The fixed `MODEL_LIMIT` of 16 restricts the number of simultaneously loaded models in the current implementation [S1, unofficial].
+*   **When to Use:** Suitable for small-scale or prototype applications where dynamic insertion is required and scene complexity is low [G]. Not recommended for production large-scale rendering due to the pointer shifting pitfall and lack of Morton code optimization [G].
+
+## Background
+This method originates from the `voxl` project, an open-source voxel renderer [S1, unofficial]. It represents a basic implementation of dynamic sparse voxel octree construction, focusing on the core mechanics of node insertion and parent finding without advanced optimizations like Morton codes or out-of-core storage [S1, unofficial]. The code is part of a larger system that includes camera management and frame rendering [S1, unofficial].
+
+## Sources
+[S1] rools/voxl, https://github.com/rools/voxl, fetched 2026-10-26 (unofficial)

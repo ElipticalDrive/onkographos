@@ -1,0 +1,165 @@
+# CityGaussian / VastGaussian / DoGaussian
+
+Also called: City-Gaussian, CityGaussian / Hierarchical 3DGS, CityGaussian V2, DoGaussian, Vast 3D Gaussians
+
+## Overview
+CityGaussian, VastGaussian, and DoGaussian are methods for large-scale urban reconstruction that partition scenes into overlapping blocks, train independent 3D Gaussian Splatting (3DGS) models per block, and merge them at rendering time using a Level-of-Detail (LoD) hierarchy [S1, S3, S4, unofficial][S6, unofficial]. They solve the memory and computational bottlenecks of standard 3DGS in city-scale scenes by enabling streaming and interactive exploration through spatial partitioning and distance-based detail selection [S2][S3, unofficial][S6, unofficial]. Unlike sibling methods like [Octree-GS](5996-octree-based-3d-gaussian-splatting.md) which use anchor-based neural decoders, or [Iterative Gaussian Synopsis](9289-iterative-gaussian-synopsis.md) which compresses a global model, these methods rely on block-based training and merging with explicit LoD pyramids [S3, unofficial][S6, unofficial].
+
+## How it works
+**Inputs:** A set of calibrated images covering a large-scale scene (e.g., city-scale) [S2, S7].
+**Outputs:** A set of block-specific 3DGS models and an LoD hierarchy for rendering [S1, unofficial][S7].
+
+**Data Structures:**
+1.  **Block Partition:** The scene is divided into spatially overlapping or disjoint blocks (tiles) [S1, S3, S4, unofficial].
+2.  **Block Model:** Each block contains a set of 3D Gaussians $\{g_i\}$ with parameters: position $\mathbf{p}$, covariance $\mathbf{\Sigma}$ (or rotation $\mathbf{R}$ and scale $\mathbf{s}$), opacity $\alpha$, and spherical harmonics (SH) coefficients for color [S1, unofficial][S6, unofficial].
+3.  **LoD Pyramid:** For each block, multiple detail levels are generated, typically by applying compression strategies (e.g., LightGaussian) to reduce point count, feature dimensions, and precision [S7].
+
+**Steps:**
+1.  **Partitioning:** Divide the scene into blocks. VastGaussian uses spatially disjoint regions with feathered overlap to handle varying lighting [S3, unofficial]. CityGaussian uses overlapping tiles [S3, unofficial].
+2.  **Independent Training:** Train a separate 3DGS model for each block independently [S1, S3, S4, unofficial]. DoGaussian extends this to distributed training across multiple nodes [S3, unofficial].
+3.  **LoD Generation (Optional/Variant):** Apply compression to create multiple detail levels per block. This involves reducing the number of Gaussians, lowering SH band, and quantizing parameters [S7].
+4.  **Rendering (Merge & Select):**
+    *   **Distance Calculation:** Calculate the distance from the camera to each block [S7].
+    *   **LoD Selection:** Select the appropriate detail level for each block based on the camera distance [S4, unofficial][S6, unofficial].
+    *   **Frustum Culling:** Determine if a block intersects the camera frustum [S7].
+    *   **Fusion:** Concatenate Gaussians from selected blocks and detail levels for rasterization [S6, unofficial].
+
+**Formulas:**
+*   **Block Bounds Estimation (CityGS):** To avoid floaters, bounds $\mathbf{p}_{min}^j$ and $\mathbf{p}_{max}^j$ for block $j$ are estimated using Median Absolute Deviation (MAD) [S7]:
+    $$
+    MAD_j = \mathrm{median}\left( \left| \mathbf{p}_k^j - \mathrm{median}\left( \mathbf{p}_k^j \right) \right| \right)
+    $$
+    $$
+    \mathbf{p}_{min}^j = \max\left( \min\left( \mathbf{p}_k^j \right), \mathrm{median}\left( \mathbf{p}_k^j \right) - n_{MAD} \times MAD_j \right)
+    $$
+    $$
+    \mathbf{p}_{max}^j = \min\left( \max\left( \mathbf{p}_k^j \right), \mathrm{median}\left( \mathbf{p}_k^j \right) + n_{MAD} \times MAD_j \right)
+    $$
+    where $\mathbf{p}_k^j$ are the positions of Gaussians in block $j$, and $n_{MAD}$ is a hyperparameter [S7].
+
+*   **LoD Selection:** The detail level for a block is determined by the minimum distance from the block's eight corners to the camera center [S7].
+
+*   **Frustum Culling:** Project block corners to screen space, create a bounding box, and calculate Intersection-over-Union (IoU) with the screen area. Include the block if IoU indicates intersection or if the camera is inside the block [S7].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def render_city_gaussian(camera_pos, camera_proj, screen_width, screen_height, scene_blocks, n_MAD=3.0):
+    """
+    Render a large-scale scene using block-based partitioning and LoD.
+    
+    Args:
+        camera_pos: 3D camera position array.
+        camera_proj: 4x4 projection matrix.
+        screen_width, screen_height: Render resolution.
+        scene_blocks: List of Block objects. Each Block has:
+            - gaussians: List of Gaussian objects with .position attribute.
+            - lod_levels: List of compressed Gaussian sets (LOD 0, 1, 2...).
+            - lod_thresholds: List of distance thresholds for LOD switching.
+        n_MAD: Hyperparameter for bound estimation.
+    
+    Returns:
+        Image buffer (H, W, 3).
+    """
+    image = np.zeros((screen_height, screen_width, 3), dtype=np.float32)
+    visible_gaussians = []
+
+    for block in scene_blocks:
+        # 1. Estimate Block Bounds using MAD to filter floaters
+        p_positions = np.array([g.position for g in block.gaussians])
+        median_pos = np.median(p_positions, axis=0)
+        mad = np.median(np.abs(p_positions - median_pos), axis=0)
+        p_min = np.maximum(np.min(p_positions, axis=0), median_pos - n_MAD * mad)
+        p_max = np.minimum(np.max(p_positions, axis=0), median_pos + n_MAD * mad)
+
+        # 2. Generate Box Corners
+        corners = np.array([
+            [p_min[0], p_min[1], p_min[2]], [p_max[0], p_min[1], p_min[2]],
+            [p_min[0], p_max[1], p_min[2]], [p_max[0], p_max[1], p_min[2]],
+            [p_min[0], p_min[1], p_max[2]], [p_max[0], p_min[1], p_max[2]],
+            [p_min[0], p_max[1], p_max[2]], [p_max[0], p_max[1], p_max[2]]
+        ])
+
+        # 3. Frustum Culling via Screen-space IoU
+        corners_homogeneous = np.hstack([corners, np.ones((8, 1))])
+        clip_coords = (camera_proj @ corners_homogeneous.T).T
+        clip_coords = clip_coords[:, :3] / clip_coords[:, 3:4]
+        screen_coords = clip_coords[:, :2]
+        min_screen = np.min(screen_coords, axis=0)
+        max_screen = np.max(screen_coords, axis=0)
+        block_bbox = np.array([min_screen, max_screen])
+        screen_area_bbox = np.array([[-1, -1], [1, 1]])
+
+        inter_min = np.maximum(block_bbox[0], screen_area_bbox[0])
+        inter_max = np.minimum(block_bbox[1], screen_area_bbox[1])
+        inter_area = np.maximum(0, inter_max - inter_min).prod()
+        block_area = (block_bbox[1] - block_bbox[0]).prod()
+        screen_area = 4.0
+        iou = inter_area / (block_area + screen_area - inter_area) if (block_area + screen_area - inter_area) > 0 else 0.0
+
+        # Check if camera is inside block
+        camera_inside = np.all((camera_pos >= p_min) & (camera_pos <= p_max))
+
+        if iou > 0.0 or camera_inside:
+            # 4. LoD Selection based on min distance from corners to camera
+            dists = np.linalg.norm(corners - camera_pos, axis=1)
+            min_dist = np.min(dists)
+            lod_index = 0
+            for i, threshold in enumerate(block.lod_thresholds):
+                if min_dist > threshold:
+                    lod_index = i + 1
+                else:
+                    break
+            lod_index = min(lod_index, len(block.lod_levels) - 1)
+            visible_gaussians.extend(block.lod_levels[lod_index])
+
+    if not visible_gaussians:
+        return image
+
+    # 5. Rasterization (Standard 3DGS sorting and alpha blending)
+    depths = np.linalg.norm([g.position for g in visible_gaussians] - camera_pos, axis=1)
+    sorted_indices = np.argsort(depths)
+    sorted_gaussians = [visible_gaussians[i] for i in sorted_indices]
+
+    for g in sorted_gaussians:
+        # Standard 3DGS 2D projection and alpha compositing [G]
+        pass # Standard 3DGS rasterization step
+
+    return image
+```
+
+**Edge Cases and Pitfalls:**
+*   **Floaters:** Outlier Gaussians (floaters) can distort block bounds. Using MAD for bound estimation mitigates this [S7].
+*   **Overlap Artifacts:** Overlapping blocks may cause double rendering or seams. Feathered overlap or careful merging is required [S2, S7].
+*   **Precision:** Lower detail levels use compressed parameters with reduced precision, which may introduce visible artifacts if compression is too aggressive [S7].
+
+## Subtopics
+
+### Proxy-GS
+Proxy-GS uses a coarse proxy mesh to guide Gaussian placement, significantly reducing the number of Gaussians required for background regions [S1, unofficial]. It sets itself apart by leveraging geometric priors from a mesh to optimize Gaussian density, rather than relying solely on image-based optimization [S1, unofficial].
+
+### CityGS Level-of-Detail (LoD)
+CityGS Level-of-Detail (LoD) is a rendering optimization technique that generates multiple detail levels of Gaussians and selects them per block based on distance to the camera, reducing rasterizer load [S7]. It sets itself apart by using the LightGaussian compression strategy to create levels with different compression rates ($r_0, r_1, r_2$), reducing points, feature dimensions, and precision [S7]. It is chosen for real-time rendering of very large scenes where memory bandwidth is a bottleneck [S7].
+
+## Operating characteristics
+*   **Time Complexity:** Training is linear in the number of blocks and Gaussians per block, but parallelizable across blocks [S1, S3, unofficial]. Rendering complexity depends on the number of visible Gaussians, which is reduced by LoD selection [S7].
+*   **Memory Complexity:** VRAM usage is proportional to the number of visible Gaussians at the selected LoD, significantly lower than loading all Gaussians [S3, unofficial][S6, unofficial].
+*   **Measured Performance:** CityGaussian enables interactive exploration of square-kilometer scenes [S3, unofficial]. DoGaussian supports distributed training across nodes [S3, unofficial].
+*   **Strengths:** Scalability to city-scale scenes, parallelizable training, reduced VRAM usage [S2][S3, unofficial].
+*   **Limitations:** Potential seams at block boundaries, complexity in managing overlapping blocks, dependency on block partitioning quality [S1, S3, unofficial].
+*   **When to use:** Large-scale urban reconstruction, autonomous driving simulation, scenes with significant scale variation [S2, S7].
+*   **When not to use:** Small-scale scenes where standard 3DGS is sufficient, scenes with high dynamic content requiring global consistency (unless combined with methods like StreetGaussians) [S1, S3, unofficial].
+
+## Background
+CityGaussian, VastGaussian, and DoGaussian originated from the need to scale 3D Gaussian Splatting to city-scale environments [S2][S3, S4, unofficial]. VastGaussian was introduced in CVPR'24, partitioning scenes into spatially-disjoint regions with decoupled appearance handling [S3, unofficial]. CityGaussian and its V2 introduced hierarchical LoD across square kilometers with depth regularization and visibility-aware training [S3, unofficial]. DoGaussian extended this to distributed training across nodes [S3, unofficial]. These methods build on the principles of Hierarchical 3D Gaussian Splatting (H-3DGS) [10279-hierarchical-3d-gaussian-splatting-h-3dgs.md] and address the memory bottlenecks of standard 3DGS in large scenes [S1, S3, unofficial].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] Neural Rendering — Technologies & Tricks, https://www.chengjianglong.com/ml/3D-Neural_Rendering_SOTA_Updated.html, fetched 2026-10-27
+[S3] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S4] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)
+[S5] Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD, https://arxiv.org/abs/2610.03162, fetched 2026-10-29 (unofficial)
+[S6] CityGaussian: Real-Time High-Quality Large-Scale Scene Rendering with Gaussians, https://doi.org/10.1007/978-3-031-72640-8_15, fetched 2026-10-26 (unofficial)

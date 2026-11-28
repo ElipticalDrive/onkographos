@@ -1,0 +1,197 @@
+--- v002.md
++++ v003.md
+@@ -4,115 +4,127 @@
+ 
+ ## Overview
+-Edge-Aware Disparity Regularization is a technique that encourages local depth smoothness in rendered scenes while preserving depth discontinuities that align with image edges [S1, unofficial][S2]. It solves the problem of noisy or artifact-prone depth maps by weighting the disparity gradient penalty with the inverse of the RGB image gradient, ensuring that smoothness is enforced in flat regions but not across object boundaries [S1, unofficial][S2]. Unlike standard smoothness regularization which penalizes all depth changes equally, this method is edge-preserving, distinguishing it from siblings like [DNGaussian](7399-dngaussian.md) which uses geometric patch-based smoothing [S3].
++Edge-Aware Disparity Regularization is a technique that encourages local depth smoothness while preserving depth discontinuities that are aligned with image edges [S1, unofficial][S2]. It solves the problem of noisy or artifact-prone depth maps in neural rendering by leveraging the correlation between geometric boundaries and photometric gradients. It sets itself apart from its siblings, such as [SparseGS](6135-sparsegs.md) and [DNGaussian](7399-dngaussian.md), by explicitly weighting the disparity gradient penalty using the exponential of the negative RGB image gradient, thereby preventing the smoothing of true object boundaries [S1, unofficial][S2].
+ 
+ ## How it works
+-The method computes a differentiable auxiliary loss term $\mathcal{L}_{reg}$ (often denoted as $\mathcal{L}_{smooth}$) that is added to the total training loss. The core mechanism involves rendering disparity maps and RGB images, computing their first-order gradients, and combining them into a weighted L1 penalty [S1, unofficial][S2].
++The method computes a differentiable auxiliary loss term $\mathcal{L}_{reg}$ (or $\mathcal{L}_{smooth}$) that is added to the total training loss. The core mechanism involves extracting first-order gradients from the rendered disparity map and the corresponding RGB image, then combining them to penalize depth changes only where the image intensity is also changing [S2].
+ 
+ **Inputs and Outputs:**
+-*   **Inputs:** Rendered disparity map $d^*_t$ (or $D^*_i$), rendered RGB image $I_t$ (or $I_i$), and optionally a weighting factor $\lambda_{reg}$ (or $\lambda_2$) [S1, unofficial][S2].
+-*   **Outputs:** Scalar loss value $\mathcal{L}_{reg}$ used for backpropagation [S1, unofficial][S2].
++*   **Inputs:** Rendered disparity map $D$ (or $d_t$), rendered RGB image $I$ (or $I_t$), and optionally mean-normalization statistics.
++*   **Outputs:** Scalar regularization loss value $\mathcal{L}_{reg}$.
+ 
+ **Data Structures:**
+-*   **Disparity Map:** A 2D tensor of shape $(H, W)$ containing disparity values. In [S1, unofficial], this is mean-normalized inverse depth $D^*_i = D_i / \bar{D}_i$ to discourage depth shrinking [S1, unofficial]. In [S2], it is simply the disparity map $d^*_t$ [S2].
+-*   **RGB Image:** A 2D or 3D tensor of shape $(H, W, 3)$ containing color values [S1, unofficial][S2].
++*   **Disparity Map:** A 2D tensor of shape $(H, W)$ containing disparity values. In some implementations, this is converted to inverse depth $D^*$ [S1, unofficial].
++*   **RGB Image:** A 2D tensor of shape $(H, W, 3)$ or grayscale $(H, W)$ containing pixel intensities.
++*   **Gradients:** First-order partial derivatives $\partial_x$ and $\partial_y$ computed via finite differences or Sobel filters.
+ 
+ **Numbered Steps:**
+-1.  **Render Patches:** Render additional patches from training and test viewpoints to obtain the disparity map $d^*_t$ and RGB image $I_t$ [S2].
+-2.  **Compute Gradients:** Calculate the first-order spatial gradients of the disparity map and the RGB image. Specifically, compute the absolute horizontal and vertical gradients: $|\partial_x d^*_t|$, $|\partial_y d^*_t|$, $|\partial_x I_t|$, and $|\partial_y I_t|$ [S1, unofficial][S2].
+-3.  **Calculate Edge-Aware Weight:** Compute the exponential weight based on the RGB gradients. The weight is $e^{-|\partial_x I_t|}$ for horizontal and $e^{-|\partial_y I_t|}$ for vertical [S1, unofficial][S2].
+-4.  **Compute Loss:** Multiply the disparity gradients by the edge-aware weights and sum them [S1, unofficial][S2].
++1.  **Render Patches:** Render additional patches from training and test viewpoints to obtain the disparity map $D^*_i$ (or $d^*_t$) and the RGB image $I_i$ (or $I_t$) [S1, unofficial][S2].
++2.  **Normalize Depth (Optional):** If using the formulation from [S1, unofficial], compute the mean-normalized inverse depth $D^*_i = D_i / \bar{D}_i$, where $\bar{D}_i$ is the mean of the inverse depth values in the patch. This step discourages the shrinking of estimated depth [S1, unofficial].
++3.  **Compute Gradients:** Calculate the first-order gradients of the disparity map and the RGB image for both horizontal ($x$) and vertical ($y$) directions:
++    *   $\partial_x D^*_i, \partial_y D^*_i$
++    *   $\partial_x I_i, \partial_y I_i$
++4.  **Compute Edge Weights:** Calculate the edge-aware weights using the exponential of the negative absolute image gradients:
++    *   $w_x = e^{-|\partial_x I_i|}$
++    *   $w_y = e^{-|\partial_y I_i|}$
++5.  **Calculate Loss:** Compute the regularization loss by summing the weighted disparity gradients:
++    $$ \mathcal{L}_{reg} = |\partial_x D^*_i| e^{-|\partial_x I_i|} + |\partial_y D^*_i| e^{-|\partial_y I_i|} $$
++    [S1, unofficial][S2]
+ 
+-**Formula:**
+-The regularization loss is defined as [S1, unofficial][S2]:
+-$$ \mathcal{L}_{reg} = |\partial_x d^*_t| e^{-|\partial_x I_t|} + |\partial_y d^*_t| e^{-|\partial_y I_t|} $$
++**Formulas:**
++The primary loss function is defined as [S1, unofficial][S2]:
++$$ \mathcal{L}_{reg} = \sum_{i} \left( |\partial_x D^*_i| e^{-|\partial_x I_i|} + |\partial_y D^*_i| e^{-|\partial_y I_i|} \right) $$
+ Where:
+-*   $d^*_t$ is the disparity map (or mean-normalized inverse depth $D^*_i$) [S1, unofficial][S2].
+-*   $I_t$ is the RGB image [S1, unofficial][S2].
+-*   $\partial_x$ and $\partial_y$ denote the first-order finite difference gradients in the x and y directions [S1, unofficial][S2].
++*   $D^*_i$ is the mean-normalized inverse depth (or disparity map $d^*_t$) [S1, unofficial][S2].
++*   $I_i$ is the input/rendered RGB image [S1, unofficial][S2].
++*   $\partial_x$ and $\partial_y$ denote the partial derivatives with respect to the x and y coordinates.
++*   The term $e^{-|\partial I|}$ acts as a weight: it approaches 1 where image gradients are small (flat regions) and approaches 0 where image gradients are large (edges) [S1, unofficial][S2].
+ 
+ **Parameters:**
+-*   **$\lambda_{reg}$ (or $\lambda_2$):** The weight for the regularization term. In [S2], $\lambda_2$ is initially set to 0 and increased to 1.0 in later training stages, while $\lambda_1$ (for depth loss) is set to 0 to improve efficiency [S2]. In [S1, unofficial], it is part of the combined loss with $\mathcal{L}_{obs}$ and $\mathcal{L}_{cons}$ [S1, unofficial].
+-*   **Mean Normalization:** In [S1, unofficial], the disparity is normalized by the mean depth $\bar{D}_i$ to prevent the network from predicting zero depth [S1, unofficial].
++*   **Weighting Factor ($\lambda_{reg}$):** The scalar weight for the regularization term in the total loss. In [S2], $\lambda_2$ is initially set to 0 and increased to 1.0 in later training stages, while $\lambda_1$ (for depth loss) is set to 0 to improve efficiency [S2].
++*   **Mean Normalization:** Used in [S1, unofficial] to prevent depth collapse [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def edge_aware_disparity_regularization(disparity_map, rgb_image, lambda_reg=1.0):
++def edge_aware_disparity_regularization(disparity_map, rgb_image, use_mean_normalization=False):
+     """
+     Computes the edge-aware disparity regularization loss.
+     
+     Args:
+-        disparity_map: Tensor of shape (H, W) or (B, H, W). Disparity or normalized inverse depth.
+-        rgb_image: Tensor of shape (H, W, 3) or (B, H, W, 3). RGB values.
+-        lambda_reg: Scalar weight for the loss.
++        disparity_map: Tensor of shape (H, W) or (H, W, 1).
++        rgb_image: Tensor of shape (H, W, 3) or (H, W).
++        use_mean_normalization: Boolean flag for mean-normalizing inverse depth.
+         
+     Returns:
+         Scalar loss value.
+     """
+-    # Compute horizontal gradient of disparity
+-    # Using central differences for interior, forward/backward for boundaries
+-    # Assuming disparity_map is (H, W)
+-    dx_disp = disparity_map[1:, :] - disparity_map[:-1, :]
+-    dy_disp = disparity_map[:, 1:] - disparity_map[:, :-1]
++    # 1. Compute gradients for disparity
++    # Using simple finite differences for demonstration
++    disp_dx = disparity_map[:, 1:] - disparity_map[:, :-1]
++    disp_dy = disparity_map[1:, :] - disparity_map[:-1, :]
+     
+-    # Compute horizontal gradient of RGB image
+-    # Average gradient across channels
+-    dx_rgb = rgb_image[1:, :, :] - rgb_image[:-1, :, :]
+-    dy_rgb = rgb_image[:, 1:, :] - rgb_image[:, :-1, :]
++    # 2. Compute gradients for RGB image
++    # Convert to grayscale if necessary, or compute per channel and sum/mean
++    # Assuming rgb_image is (H, W, 3)
++    if rgb_image.dim() == 3:
++        gray_image = rgb_image.mean(dim=2)
++    else:
++        gray_image = rgb_image
++        
++    rgb_dx = gray_image[:, 1:] - gray_image[:, :-1]
++    rgb_dy = gray_image[1:, :] - gray_image[:-1, :]
+     
+-    # Compute absolute gradients
+-    abs_dx_disp = torch.abs(dx_disp)
+-    abs_dy_disp = torch.abs(dy_disp)
++    # 3. Handle dimensions mismatch from slicing
++    # Ensure disparity and rgb gradients are aligned
++    # Note: In a full implementation, padding or consistent slicing is required.
++    # Here we assume the loss is computed on the valid interior pixels.
+     
+-    # Compute mean absolute RGB gradient across channels
+-    # Shape: (H-1, W) for dx, (H, W-1) for dy
+-    mean_dx_rgb = torch.mean(torch.abs(dx_rgb), dim=2)
+-    mean_dy_rgb = torch.mean(torch.abs(dy_rgb), dim=2)
++    # 4. Compute edge-aware weights
++    # Exponential of negative absolute image gradients
++    weight_x = torch.exp(-torch.abs(rgb_dx))
++    weight_y = torch.exp(-torch.abs(rgb_dy))
+     
+-    # Compute edge-aware weights
+-    # Exponential decay: high gradient in RGB -> low weight (preserve edge)
+-    # Low gradient in RGB -> high weight (smooth region)
+-    weight_dx = torch.exp(-mean_dx_rgb)
+-    weight_dy = torch.exp(-mean_dy_rgb)
++    # 5. Compute weighted disparity gradients
++    # Use absolute value of disparity gradients
++    loss_x = torch.abs(disp_dx) * weight_x
++    loss_y = torch.abs(disp_dy) * weight_y
+     
+-    # Compute loss
+-    loss_dx = torch.sum(abs_dx_disp * weight_dx)
+-    loss_dy = torch.sum(abs_dy_disp * weight_dy)
++    # 6. Sum and average
++    loss = (loss_x.sum() + loss_y.sum()) / (loss_x.numel() + loss_y.numel())
+     
+-    # Normalize by number of pixels (optional, but common for stability)
+-    # Not explicitly stated in sources, but implied by "sum" in formula
+-    # We return the sum as per the formula structure
+-    total_loss = loss_dx + loss_dy
+-    
+-    return lambda_reg * total_loss
++    return loss
+ ```
++*Note: The pseudocode above implements the core logic. In practice, `disparity_map` might need to be converted to inverse depth $D = 1/d$ if the network predicts disparity, and mean normalization $\bar{D}$ must be computed per patch or globally depending on the specific variant [S1, unofficial].*
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Depth Shrinking:** Without mean normalization of inverse depth, the network may predict zero depth to minimize the loss [S1, unofficial].
+-*   **Training Stage:** The regularization is typically applied in the latter stages of training to refine geometry after initial color optimization [S2].
+-*   **Gradient Computation:** The gradients must be computed on the rendered outputs, not the input images, to provide gradients back to the Gaussian parameters [Parent].
++*   **Precision:** Computing gradients on noisy disparity maps can amplify noise. The edge-aware term helps mitigate this by suppressing gradients in flat regions, but extreme noise may still require pre-smoothing [S2].
++*   **Boundaries:** Finite difference gradient computation reduces the effective resolution of the loss map by 1 pixel in each dimension. Padding or boundary handling must be consistent [G].
++*   **Degenerate Input:** If the RGB image is constant (no gradients), the weights become 1, resulting in standard L1 smoothness regularization. If the image is pure noise, the weights may fluctuate wildly, leading to unstable gradients [G].
+ 
+ ## Subtopics
+ 
+-### Geometric Regularization
+-A regularization method used in DGNR to smooth the depth of unobserved viewpoints and alleviate density holes caused by sparsely observed viewpoints [S3]. It is inspired by the piece-wise smoothing characteristics of real-world geometry [S3]. Unlike edge-aware regularization which uses RGB gradients, this method uses a fixed patch-based smoothness loss [S3]. It is chosen when dealing with large driving scenes with sparse observations [S3]. See [DNGaussian](7399-dngaussian.md).
++### [Geometric Regularization](12086-geometric-regularization.md)
++Geometric Regularization is a loss term imposed on rendered depth patches from sampled views to regularize geometry. It smooths the depth of unobserved viewpoints to alleviate density holes caused by sparsely observed viewpoints, inspired by the piece-wise smoothing characteristics of real-world geometry. It sets itself apart from its parent, Edge-Aware Disparity Regularization, by applying a uniform smoothness constraint on depth patches without explicitly weighting by image edges.
+ 
+ ### Disparity Smoothing
+-A technique used in Reference-guided Controllable Inpainting to reduce misalignments around the edges of a reference mask [S4]. It smooths the aligned reference disparity to improve visual continuity between masked and unmasked regions [S4]. It is chosen when inpainting NeRFs with reference views [S4]. See [Reference-guided Controllable Inpainting of Neural Radiance Fields](7617-reference-guided-inpainting.md) (hypothetical sibling).
++Disparity Smoothing is a technique to reduce misalignments around the edges of a reference mask by smoothing the aligned reference disparity to improve visual continuity between the masked and unmasked regions [S3]. It computes the edge-smoothed disparity $D_r^{smooth}$ as the sum of the aligned disparity $D_r$ and a correction term $D_{correction}$: $D_r^{smooth} = D_r + D_{correction}$ [S3]. Without smoothing, unsmoothed geometry has a much more jarring transition between the masked and unmasked areas, particularly close to the mask boundary [S3].
++
++### Disparity Field-Guided Deep Re-regularization
++Disparity Field-Guided Deep Re-regularization is a module proposed to raise the target view image $I_{t0}$ into a locally immersive Light Field $\hat{L}_{t0}$ by back-warping and deep spatial-angular regularization [S4]. It takes the target view image $I_{t0}$ and refined disparity $\hat{D}_{t0}$ as input, back-warping pixels of the target view image with the estimated accurate disparity prior, and further refines the result by spatial-angular convolutional blocks to output the synthesized immersive LF $\hat{L}_{t0}$ [S4].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(HW)$ per patch, where $H$ and $W$ are the height and width of the rendered patches. The computation involves simple gradient and exponential operations [S1, unofficial][S2].
+-*   **Memory Complexity:** $O(HW)$ to store the intermediate gradient tensors [S1, unofficial][S2].
+-*   **Measured Performance:** In [S2], activating $\lambda_2 = 1.0$ in later training stages improved geometric structure and mitigated rendering artifacts caused by high-frequency noise [S2].
+-*   **Strengths:** Preserves sharp depth edges aligned with object boundaries, preventing over-smoothing of geometry [S1, unofficial][S2].
+-*   **Limitations:** Requires rendering additional patches, increasing computational cost during training [S2]. May not be effective if the RGB image lacks clear edges [S1, unofficial].
+-*   **When to use:** When the scene has clear object boundaries and the goal is to refine geometry without blurring edges [S1, unofficial][S2].
+-*   **When not to use:** When the scene is textureless or has ambiguous depth cues, as the edge-aware weighting may fail [S1, unofficial].
++*   **Time Complexity:** The computation involves gradient estimation and exponential weighting, which is $O(H \times W)$ per patch. It is lightweight compared to full NeRF training iterations but adds overhead if rendered at high resolution [S1, unofficial][S2].
++*   **Memory Complexity:** Requires storing the rendered disparity and RGB images for the current batch/patch. No additional large data structures are needed [S1, unofficial][S2].
++*   **Measured Performance:** In [S2], the method is applied in the latter stages of training with $\lambda_2 = 1.0$ to enhance geometric structure and mitigate rendering artifacts caused by high-frequency noise while preserving original details [S2].
++*   **Strengths:** Effectively preserves sharp object boundaries while smoothing noisy depth in flat regions. It leverages the strong correlation between photometric edges and geometric depth discontinuities [S1, unofficial][S2].
++*   **Limitations:** Relies on the quality of the rendered RGB and disparity maps. If the RGB image is blurry or lacks texture, the edge weights may not accurately reflect geometric boundaries. It is typically applied in later training stages, not from the beginning [S2].
++*   **When to use:** When the scene contains distinct object boundaries and the depth map suffers from noise or artifacts in textureless regions. It is particularly useful in few-shot novel view synthesis where geometry is under-constrained [S1, unofficial][S2].
++*   **When not to use:** When the scene is uniformly textured or lacks clear edges, the edge-aware weighting may not provide significant benefit over simple smoothness regularization.
+ 
+ ## Background
+-The method originates from the work on GeCoNeRF, which introduced edge-aware disparity regularization to improve the quality of depth rendered by NeRF [S1, unofficial]. It builds on the idea from Godard et al. (2017) that depth discontinuities are likely aligned with color image gradients [S1, unofficial]. The technique has been adopted in various other works, such as TriDF, where it is referred to as edge-aware smoothness regularization [S2]. It is used in few-shot neural radiance field learning and remote sensing novel view synthesis [S1, unofficial][S2].
++Edge-Aware Disparity Regularization originates from the field of stereo matching and depth estimation, where it is used to preserve edges while smoothing depth maps [S1, unofficial]. In the context of neural rendering, it was adapted to regularize the depth outputs of NeRF-like models. The specific formulation using mean-normalized inverse depth and edge-aware weighting is inspired by Godard et al. (2017) [S1, unofficial]. It has been applied in various neural rendering frameworks to improve geometric consistency and reduce artifacts, particularly in few-shot settings [S1, unofficial][S2].
+ 
+ ## Sources
+ [S1] GeCoNeRF: Few-Shot Neural Radiance Fields via Geometric Consistency, https://core.ac.uk/works/309257742, fetched 2026-11-01 (unofficial)
+ [S2] TriDF: Triplane-Accelerated Density Fields for Few-Shot Remote Sensing Novel View Synthesis, https://doi.org/10.1109/tgrs.2025.3643432, fetched 2026-10-30
+-[S3] DGNR: Density-Guided Neural Point Rendering of Large Driving Scenes, https://doi.org/10.1109/tase.2024.3410891, fetched 2026-10-27
+-[S4] Reference-guided Controllable Inpainting of Neural Radiance Fields, https://doi.org/10.1109/ICCV51070.2023.01633, fetched 2026-10-29+[S3] Reference-guided Controllable Inpainting of Neural Radiance Fields, https://doi.org/10.1109/ICCV51070.2023.01633, fetched 2026-10-29
++[S4] Scale-Consistent Fusion: From Heterogeneous Local Sampling to Global Immersive Rendering, https://doi.org/10.1109/tip.2022.3205745, fetched 2026-10-26

@@ -1,0 +1,68 @@
+# Mask Clipping
+Also called: clip (mask)
+## Overview
+Mask Clipping returns a new grid containing only the active voxels of a source grid at coordinates where a secondary mask grid is also active [S1, unofficial]. It differs from [Bounding Box Clipping](4643-bounding-box-clipping.md) by using a secondary data grid rather than a geometric primitive to define the region of interest, and from [Grid Deactivation](3214-grid-deactivation.md) by allowing arbitrary spatial selection via an external mask rather than a single scalar value comparison [G].
+## How it works
+**Inputs:**
+1. `source_grid`: The input volume grid containing active voxels.
+2. `mask_grid`: A binary or categorical grid of the same spatial dimensions as `source_grid`.
+
+**Outputs:**
+1. `clipped_grid`: A new grid containing only the active voxels from `source_grid` where the corresponding voxel in `mask_grid` is active [S1, unofficial].
+
+**Data Structures:**
+- `source_grid`: Standard dense grid layout (e.g., VDB, Octree, or 3D array) with an active voxel list and an active coordinate lookup structure.
+- `mask_grid`: Same spatial resolution and layout as `source_grid`, with an active coordinate lookup structure.
+
+**Steps:**
+1. Initialize an empty `clipped_grid` with the same metadata (resolution, transform) as `source_grid` [G].
+2. Iterate through each active voxel `v` in `source_grid` at coordinate `c` [S1, unofficial].
+3. Check if the voxel at coordinate `c` is active in `mask_grid` [S1, unofficial].
+4. If `is_active(mask_grid, c)` is true, insert `v` into `clipped_grid` [S1, unofficial].
+5. Return `clipped_grid` [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Grid:
+    def __init__(self, metadata, active_voxels=None):
+        self.metadata = metadata
+        self.active_voxels = active_voxels or []
+        self.active_coords = {c for c, _ in self.active_voxels}
+    def insert(self, coord, value):
+        self.active_voxels.append((coord, value))
+        self.active_coords.add(coord)
+
+def mask_clip(source_grid, mask_grid):
+    clipped_grid = Grid(metadata=source_grid.metadata)
+    for coord, value in source_grid.active_voxels:
+        if coord in mask_grid.active_coords:
+            clipped_grid.insert(coord, value)
+    return clipped_grid
+```
+
+**Parameters:**
+- None explicitly defined in sources.
+
+**Edge Cases and Pitfalls:**
+- If `mask_grid` has a different resolution or transform than `source_grid`, coordinate mapping must be handled [G].
+- If `mask_grid` is entirely inactive, the result is an empty grid [G].
+- If `mask_grid` is entirely active, the result is a copy of `source_grid` [G].
+
+## Subtopics
+
+### [Bounding Box Clipping](4643-bounding-box-clipping.md)
+Bounding Box Clipping returns a new grid containing only the active voxels of the source grid that lie within a specified world-space bounding box. It differs from [Mask Clipping](3229-mask-clipping.md) by using a geometric primitive (axis-aligned box) rather than a secondary data grid to define the region of interest, and from [Grid Clone](7232-grid-clone.md) by filtering spatial extent rather than duplicating the full logical structure [G].
+
+### [Mask-based Density Filtering](15562-mask-based-density-filtering.md)
+Mask-based Density Filtering modifies a volumetric density distribution by applying a spatial mask to remove or zero out density in specific regions, such as creating a disk shape from a sphere by chopping off the top and bottom. It serves as a post-processing step to refine density grids derived from segmentation or other spatial constraints, distinct from [Mask Clipping](3229-mask-clipping.md) which filters active voxels based on mask presence, and [Bounding Box Clipping](4643-bounding-box-clipping.md) which restricts volume to axis-aligned bounds [G].
+
+## Operating characteristics
+Time complexity is $O(N)$, where $N$ is the number of active voxels in `source_grid`, assuming $O(1)$ lookup in `mask_grid` [G]. Memory complexity is $O(M)$, where $M$ is the number of active voxels retained after clipping [G]. Performance depends on the sparsity of the mask and the source grid [G]. Strengths include flexible selection regions [G]. Limitations include the requirement to store an additional mask grid [G]. Use when arbitrary non-convex or complex selection regions are needed [G]. Do not use when simple geometric bounds suffice (use Bounding Box Clipping) [G].
+
+## Background
+History: The method is used for scene vetting and framing, such as in `build_smoke_scene` and `build_bunny_cloud_scene` within the Lyr.jl codebase [S1, unofficial]. Usage: Applied to refine volume data for rendering by excluding irrelevant regions defined by a mask [G].
+
+## Sources
+[S1] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)

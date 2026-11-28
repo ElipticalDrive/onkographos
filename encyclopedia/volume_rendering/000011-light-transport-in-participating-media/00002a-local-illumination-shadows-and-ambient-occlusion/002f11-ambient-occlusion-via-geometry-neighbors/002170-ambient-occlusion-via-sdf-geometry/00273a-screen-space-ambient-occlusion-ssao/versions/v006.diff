@@ -1,0 +1,131 @@
+--- v005.md
++++ v006.md
+@@ -1,4 +1,4 @@
+ # Screen-Space Ambient Occlusion (SSAO)
+-Also called: Crytek's Screen-Space AO, SSAO (Original), Screen-Space Ambient Occlusion (SSAO) Pass
++Also called: Crytek's Screen-Space AO, Image Effect SSAO, PostProcess::SSAO, SSAO (Original), Screen-Space Ambient Occlusion (SSAO) Pass
+ 
+ ## Overview
+@@ -8,27 +8,33 @@
+ **Inputs and Outputs:**
+ *   **Inputs:**
+-    *   `hitPosTex`: Texture containing the world-space position of the fragment (32-bit float RGB).
+-    *   `hitNormTex`: Texture containing the surface normal of the fragment (32-bit float RGB).
+-    *   `depthTex`: Texture containing the depth value and cell size information (32-bit float).
+-    *   `noiseTex`: Texture containing random vectors for tangent space generation (32-bit float RGB).
+-    *   `projMat`: Projection matrix.
+-    *   `viewMat`: View matrix.
+-    *   `radius`: Sampling radius.
+-    *   `NUM_SAMPLES`: Number of samples per pixel.
++    *   `hitPosTex`: Texture containing the world-space position of the fragment (32-bit float RGB) [S1, unofficial].
++    *   `hitNormTex`: Texture containing the surface normal of the fragment (32-bit float RGB) [S1, unofficial].
++    *   `depthTex`: Texture containing the depth value and cell size information (32-bit float) [S1, unofficial].
++    *   `noiseTex`: Texture containing random vectors for tangent space generation (32-bit float RGB) [S1, unofficial].
++    *   `projMat`: Projection matrix [S1, unofficial].
++    *   `viewMat`: View matrix [S1, unofficial].
++    *   `camPos`: Camera position in world space [S1, unofficial].
++    *   `radius`: Sampling radius [S1, unofficial].
++    *   `NUM_SAMPLES`: Number of samples per pixel [S1, unofficial].
+ *   **Output:**
+-    *   `outVisibility`: Float texture storing the final visibility factor (0.0 to 1.0).
++    *   `outVisibility`: Float texture storing the final visibility factor (0.0 to 1.0) at location 0 [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Sample Kernel:** A pre-computed array of `NUM_SAMPLES` 3D vectors (`samples[i]`) distributed in a hemisphere or sphere.
+-*   **TBN Matrix:** A 3x3 matrix constructed from the tangent, bitangent, and normal vectors to rotate sample vectors into world space.
++*   **Sample Kernel:** A pre-computed array of `NUM_SAMPLES` 3D vectors (`samples[i]`) distributed in a hemisphere or sphere [S1, unofficial].
++*   **TBN Matrix:** A 3x3 matrix constructed from the tangent, bitangent, and normal vectors to rotate sample vectors into world space [S1, unofficial].
+ 
+ **Parameters:**
+-*   `radius`: The radius of the hemisphere used for sampling, determining the scale of occlusion. Typical values depend on scene scale [S1, S3, unofficial].
+-*   `NUM_SAMPLES`: The number of random samples taken per pixel. Higher values improve quality but increase cost [S1, S3, unofficial].
+-*   `bias`: A small offset applied to the hit position to prevent self-intersection artifacts (acne) [S1, Parent, unofficial].
++*   `radius`: The radius of the hemisphere used for sampling, determining the scale of occlusion [S1, unofficial]. Clamped between 0.05f and 1.0f [S2, unofficial].
++*   `NUM_SAMPLES`: The number of random samples taken per pixel for the occlusion estimation [S1, unofficial].
++*   `bias`: A small offset applied to the hit position to prevent self-intersection artifacts (acne) [S1, Parent, unofficial]. Derived from depth cell size, e.g., `hitDepth_cellSize.y / 5.0` [S1, unofficial].
++*   `m_MinZ`: Minimum depth threshold to prevent self-occlusion artifacts near the camera [S2, unofficial]. Clamped between 0.00001f and 0.5f [S2, unofficial].
++*   `m_OcclusionIntensity`: Multiplier for the final occlusion value [S2, unofficial]. Clamped between 0.5f and 4.0f [S2, unofficial].
++*   `m_OcclusionAttenuation`: Controls the falloff of occlusion [S2, unofficial]. Clamped between 0.2f and 2.0f [S2, unofficial].
++*   `m_Blur`: Number of blur passes (horizontal and vertical) [S2, unofficial]. Clamped between 0 and 4 [S2, unofficial]. If > 0, a separable blur is applied [S2, unofficial].
++*   `m_Downsampling`: Integer factor to reduce the resolution of the SSAO calculation [S2, unofficial]. Clamped between 1 and 6 [S2, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Fetch Data:** For each pixel coordinate `coord`, fetch the hit position, normal, and depth from the input textures.
++1.  **Fetch Data:** For each pixel coordinate `coord`, fetch the hit position, normal, and depth from the input textures [S1, unofficial].
+     $$ \mathbf{p} = \text{texelFetch}(\text{hitPosTex}, \text{coord}, 0).\text{xyz} $$
+     $$ \mathbf{n} = \text{texelFetch}(\text{hitNormTex}, \text{coord}, 0).\text{xyz} $$
+@@ -36,9 +42,9 @@
+     Discard if $\mathbf{p} = \mathbf{0}$ (background) [S1, unofficial].
+ 
+-2.  **Bias Position:** Offset the hit position along the normal to avoid self-intersection.
++2.  **Bias Position:** Offset the hit position along the normal to avoid self-intersection [S1, unofficial].
+     $$ \mathbf{p}_{\text{biased}} = \mathbf{p} + \mathbf{n} \cdot \text{bias} $$
+     The bias is often derived from the depth cell size, e.g., $\text{depth\_cellSize.y} / 5.0$ [S1, unofficial].
+ 
+-3.  **Construct TBN Matrix:** Generate a tangent vector $\mathbf{t}$ and bitangent $\mathbf{b}$ to form a basis for rotating samples.
++3.  **Construct TBN Matrix:** Generate a tangent vector $\mathbf{t}$ and bitangent $\mathbf{b}$ to form a basis for rotating samples [S1, unofficial].
+     $$ \mathbf{t} = \text{normalize}(\mathbf{r} - \mathbf{n} \cdot (\mathbf{r} \cdot \mathbf{n})) $$
+     $$ \mathbf{b} = \text{cross}(\mathbf{n}, \mathbf{t}) $$
+@@ -57,14 +63,13 @@
+ 
+ 5.  **Occlusion Check:**
+-    a. Check if $\mathbf{v}_{\text{screen}}$ is within screen bounds $[0, 1]$. If not, the sample is out of bounds and contributes 0 [S1, unofficial].
++    a. Check if $\mathbf{v}_{\text{screen}}$ is within screen bounds $[0, 1]$ [S1, unofficial].
+     b. Fetch the depth $d_{\text{samp}}$ at $\mathbf{v}_{\text{screen}}$ from `depthTex`.
+-    c. Perform range check: If the distance between the sample depth and the original depth exceeds the radius, the sample is too far and contributes 0.
++    c. Perform range check: If the distance between the sample depth and the original depth exceeds the radius, the sample is too far and contributes 0 [S1, unofficial].
+     $$ \text{rangeCheck} = (|d - d_{\text{samp}}| < \text{radius}) ? 1.0 : 0.0 $$
+-    d. Check if the sample is occluded: If the sample depth $d_{\text{samp}}$ is greater than the depth of the sample position projected into camera space (or simply comparing depths if in view space), it is occluded.
++    d. Check if the sample is occluded: If the sample depth $d_{\text{samp}}$ is less than the distance from the camera to the sample position, it is occluded [S1, unofficial].
+     $$ \text{occlusion} += (\text{sampleDepth} < \text{length}(\mathbf{c}_{\text{pos}} - \mathbf{p}_{\text{samp}}) ? 1.0 : 0.0) \cdot \text{rangeCheck} $$
+-    Note: The exact comparison depends on the coordinate space. In view space, comparing $z$ values is sufficient if the camera looks down the negative Z axis [S1, S3, unofficial].
+ 
+ 6.  **Normalize:**
+-    $$ \text{visibility} = 1.0 - \frac{\text{occlusion}}{\text{NUM\_SAMPLES}} $$
++    $$ \text{visibility} = 1.0 - \frac{\text{occlusion}}{\text{count}} $$
+     If no samples were valid, visibility is 1.0 [S1, unofficial].
+ 
+@@ -72,5 +77,5 @@
+ 
+ ```python
+-def compute_ssao(coord, hitPosTex, hitNormTex, depthTex, noiseTex, projMat, viewMat, radius, num_samples, samples):
++def compute_ssao(coord, hitPosTex, hitNormTex, depthTex, noiseTex, projMat, viewMat, radius, num_samples, samples, camPos):
+     # 1. Fetch Data
+     hitPos = hitPosTex.fetch(coord)
+@@ -118,8 +123,5 @@
+             
+             # Occlusion check
+-            # Note: In view space, if sampleDepth > hitDepth, it is occluded (assuming Z is depth)
+-            # The source uses a camera position comparison, but standard SSAO compares depths directly
+-            # if both are in the same space. Here we assume view space depth comparison.
+-            isOccluded = sampleDepth > hitDepth
++            isOccluded = sampleDepth < length(camPos - samp)
+             
+             if isOccluded:
+@@ -145,16 +147,18 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of samples. Performance is independent of scene geometry complexity, depending only on resolution and sample count [S2, unofficial].
+-*   **Memory Complexity:** $O(N)$ for the input/output buffers (depth, normal, position textures) and $O(S)$ for the sample kernel [S1, S2, unofficial].
++*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of samples [S3, unofficial].
++*   **Memory Complexity:** $O(N)$ for the input/output buffers (depth, normal, position textures) [S1, S2, unofficial]. Sample kernel storage complexity is not given in the sources.
+ *   **Strengths:** Real-time performance; works on any rendered geometry without scene traversal; simple to implement as a post-process [S3, unofficial].
+-*   **Limitations:** Limited to visible surfaces (no occlusion from back-facing or occluded geometry); suffers from "halo effect" (blackened edges) if not cosine-weighted [S2, unofficial]; artifacts at screen edges and depth discontinuities [S3, unofficial].
+-*   **When to use:** Real-time applications (games, interactive medical visualization) where performance is paramount and full geometric AO is too slow [S3, unofficial].
+-*   **When not to use:** Offline rendering requiring high accuracy; scenes with significant non-visible occlusion; when halo artifacts are unacceptable without additional filtering [S2, unofficial].
++*   **Limitations:** Limited to visible surfaces (no occlusion from back-facing or occluded geometry); suffers from "halo effect" (blackened edges) if not cosine-weighted [S3, unofficial]; artifacts at screen edges and depth discontinuities [S3, unofficial].
++*   **When to use:** Real-time applications (games, interactive medical visualization) where performance is paramount and full geometric AO is too slow [S5, unofficial].
++*   **When not to use:** Scenes requiring occlusion from non-visible geometry; when halo artifacts are unacceptable without additional filtering [S3, S5, unofficial].
+ 
+ ## Background
+-SSAO was introduced by Crytek as the first screen-space method for ambient occlusion, using only the Z-Buffer to compute AO at full resolution [S2, unofficial]. It was developed to provide real-time ambient occlusion for games, balancing quality and performance [S3, unofficial]. The technique has been implemented in various libraries, including VTK (introduced in VTK 9.0 in July 2020 for surfaces, extended to volumes by 2023) [S3, unofficial]. Loos and Sloan later expanded on the approach, formulating it as Monte Carlo integration under the name "Volumetric Obscurance" [S2, unofficial].
++SSAO was introduced by Crytek as the first screen-space method for ambient occlusion, using only the Z-Buffer to compute AO at full resolution [S3, unofficial]. It was developed to provide real-time ambient occlusion for games, balancing quality and performance [S3, unofficial]. The technique has been implemented in various libraries, including VTK (introduced in VTK 9.0 in July 2020 for surfaces, extended to volumes by 2023) [S5, unofficial]. Loos and Sloan later expanded on the approach, formulating it as Monte Carlo integration under the name "Volumetric Obscurance" [S3, unofficial].
+ 
+ ## Sources
+ [S1] ajaspe/ssvdag, https://github.com/ajaspe/ssvdag, fetched 2026-10-24 (unofficial)
+-[S2] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)
+-[S3] Enhancing Medical Imaging Technique: Ambient Occlusion ..., https://graylight-imaging.com/blog/enhancing-medical-imaging-technique-ambient-occlusion-in-volumetric-rendering/, fetched 2026-10-28 (unofficial)+[S2] dario-zubovic/metaballs, https://github.com/dario-zubovic/metaballs, fetched 2026-10-26 (unofficial)
++[S3] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)
++[S4] jose-villegas/StyleTransferFunction, https://github.com/jose-villegas/StyleTransferFunction, fetched 2026-10-27 (unofficial)
++[S5] Enhancing Medical Imaging Technique: Ambient Occlusion ..., https://graylight-imaging.com/blog/enhancing-medical-imaging-technique-ambient-occlusion-in-volumetric-rendering/, fetched 2026-10-28 (unofficial)

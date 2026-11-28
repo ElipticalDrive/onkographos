@@ -1,0 +1,110 @@
+# Extra Child Pointer Encoding
+
+Also called: Data Hiding via Extra Child Pointers, Extra Child Node Pointers, Extra data, Extra nodes or subDAGs, SVDAG Data Hiding
+
+## Overview
+Extra Child Pointer Encoding is a steganographic technique for Sparse Voxel Directed Acyclic Graphs (SVDAG) that hides data by appending child node pointers that are not referenced by the node's child mask [S1]. It solves the problem of embedding information without altering the visual representation or traversal logic of the volume data [S1]. Unlike [Variable-Length Child Node Pointers](5948-variable-length-child-node-pointers.md), which may rely on variable lengths or specific header tags, this method exploits the structural redundancy where the child mask indicates a count $N < 8$ but the pointer array can physically hold up to 8 entries [S1]. It differs from [SVDAG with 2b Header Tags](5971-svdag-with-2b-header-tags.md) by utilizing the pointer array itself rather than header bits for capacity [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A non-leaf SVDAG node containing a child node mask and a list of valid child pointers [S1].
+*   **Output:** The same node structure with appended extra child pointers containing hidden data bits [S1].
+
+**Data Structures:**
+The SVDAG node consists of:
+1.  **Child Node Mask:** A bitmask indicating which of the 8 possible child positions are valid [S1].
+2.  **Child Pointers:** An array of pointers to child nodes [S1]. The maximum natural capacity is 8 pointers [S1].
+
+**Method Steps:**
+1.  **Analyze Mask:** Determine the number of valid child pointers $N$ by counting the set bits (1s) in the child node mask [S1]. For a non-leaf node, $N \in [1, 8]$ [S1].
+2.  **Calculate Capacity:** Determine the number of available slots for extra pointers $K$ [S1]. Since the maximum number of pointers is 8, $K = 8 - N$ [S1].
+3.  **Append Pointers:** Append $K$ extra child pointers immediately after the last valid child pointer in the array [S1].
+    *   **Constraint:** Extra pointers must be concatenated *after* the last valid pointer [S1]. Insertion before the last valid pointer is not possible because it would disrupt the mapping between the mask bits and the pointer indices [S1].
+4.  **Encode Data:** The extra pointers are not referenced by any bit in the child node mask [S1]. During standard traversal, these pointers are ignored, making the data hidden [S1]. The content of these pointers (or the nodes they point to) can store the hidden bits [S1].
+5.  **Alternative Structure (Extra Nodes/SubDAGs):** Instead of just pointers, whole extra nodes or subDAGs can be introduced that are not connected to the main DAG [S1]. These are unreachable during traversal and do not alter visual representation [S1].
+
+**Formulas:**
+*   Number of extra pointers: $K = 8 - \text{popcount}(\text{Mask})$ [S1].
+*   Hidden capacity per node: $C_{bits} = K \times 32$ bits (assuming 32-bit pointers) [S1]. The source specifies a capacity of 0 to 224 bits (0 to 28 Bytes) when full capacity is used, which corresponds to 7 extra pointers at 32 bits each [S1].
+*   Percentage of normal capacity: The extra capacity represents 0% to 77.78% of the normal child node capacity when full extra capacity is used [S1].
+
+**Parameters:**
+*   **Max Extra Pointers:** 7 per node [S1].
+*   **Max Hidden Data per Node:** 224 bits (28 Bytes) [S1].
+*   **Total Capacity:** Hundreds of MB available due to the large addressing space in SVDAG [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Detection Risk:** The method is extremely easy to detect if used extensively [S1]. Analysis of child node masks across the structure can count bit 1 occurrences and compare the assumed number of child pointers to the real number of pointers in the array to identify discrepancies [S1].
+*   **Structural Discrepancy:** Comparing the assumed number and size of nodes (based on masks) to the real number and size of nodes in the data structure reveals discrepancies [S1].
+*   **Pointer Order:** Extra pointers cannot be inserted before the last valid pointer [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hide_data_in_node(node_mask, node_pointers, data_bits):
+    """
+    Hides data in an SVDAG node using extra child pointers.
+    node_mask: int, bitmask of valid children (1-8 bits set).
+    node_pointers: list of int, existing child pointers.
+    data_bits: list of int (0 or 1), bits to hide.
+    Returns: updated node_pointers list.
+    """
+    # 1. Analyze mask to find number of valid children
+    valid_count = bin(node_mask).count('1')
+    
+    # 2. Calculate available slots for extra pointers
+    max_capacity = 8
+    extra_slots = max_capacity - valid_count
+    
+    if extra_slots <= 0:
+        return node_pointers
+    
+    # 3. Pack data bits into extra pointers (32 bits per pointer)
+    bits_per_pointer = 32
+    extra_pointers = []
+    for i in range(extra_slots):
+        chunk = data_bits[i * bits_per_pointer : (i + 1) * bits_per_pointer]
+        if len(chunk) < bits_per_pointer:
+            chunk.extend([0] * (bits_per_pointer - len(chunk)))
+        pointer_value = 0
+        for bit in chunk:
+            pointer_value = (pointer_value << 1) | bit
+        extra_pointers.append(pointer_value)
+    
+    # 4. Append extra pointers after the last valid pointer
+    node_pointers.extend(extra_pointers)
+    
+    return node_pointers
+
+def detect_extra_pointers(node_mask, node_pointers):
+    """
+    Detects if extra pointers are present by comparing mask count to pointer count.
+    """
+    valid_count = bin(node_mask).count('1')
+    actual_pointer_count = len(node_pointers)
+    
+    if actual_pointer_count > valid_count:
+        return True
+    return False
+```
+
+## Subtopics
+
+### [Absolute Position Node Encoding](15399-absolute-position-node-encoding.md)
+Absolute Position Node Encoding is a steganographic technique that embeds data into Sparse Voxel Directed Acyclic Graphs (SVDAG) by exploiting the correlation between a node's absolute memory address and its structural properties, specifically the parity of its child count. It sets itself apart from sibling methods like [Extra Child Pointer Encoding](15412-extra-child-pointer-encoding.md) by modifying the logical interpretation of existing structural metadata (address bits) rather than appending unused pointers, and from [Extra free space](15402-extra-free-space.md) by operating on node-level attributes rather than file-level layout gaps.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ for encoding/decoding per node, as it involves simple bit counting and array extension [S1].
+*   **Memory Complexity:** Increases the size of the node's pointer array by up to 7 pointers per node [S1].
+*   **Capacity:** 0 to 224 bits (0 to 28 Bytes) per node [S1]. Total capacity can reach hundreds of MB due to the large addressing space [S1].
+*   **Strengths:** Does not alter the visual representation or traversal logic of the volume data [S1]. Simple to implement [S1].
+*   **Limitations:** Highly detectable through structural analysis (comparing mask bits to pointer count) [S1]. Limited capacity per node [S1].
+*   **When to use:** When steganographic embedding is required in SVDAG structures and detection resistance is not the primary concern, or when used in conjunction with other methods to distribute the load [S1].
+*   **When not to use:** When high security against structural analysis is required [S1].
+
+## Background
+The method was introduced in the context of data hiding using domain-specific hierarchical data structures for geometry representation of voxelized three-dimensional scenes [S1]. It exploits the redundancy in the SVDAG structure where the child node mask does not strictly limit the number of pointers in the array, allowing for extra pointers that are ignored during traversal [S1].
+
+## Sources
+[S1] ON DATA HIDING USING DOMAIN SPECIFIC HIERARCHICAL DATA STRUCTURE SVDAG FOR GEOMETRY REPRESENTATION OF VOXELIZED THREE-DIMENSIONAL SCENES, https://doi.org/10.15546/aeei-2019-0027, fetched 2026-10-26

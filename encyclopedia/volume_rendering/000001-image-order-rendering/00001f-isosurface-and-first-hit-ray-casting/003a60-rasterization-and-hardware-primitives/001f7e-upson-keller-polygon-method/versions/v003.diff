@@ -1,0 +1,145 @@
+--- v002.md
++++ v003.md
+@@ -4,89 +4,88 @@
+ 
+ ## Overview
+-The Upson-Keller Polygon Method is an early image-order isosurface rendering technique that utilizes fixed-function rasterization hardware, specifically alpha-testing and stencil buffers, to extract and render isosurfaces without programmable shaders [S2, unofficial]. It differs from sibling methods like [Multiple Flat Shaded Opaque Isosurfaces](1498-multiple-flat-shaded-opaque-isosurfaces.md) by explicitly using the stencil buffer to resolve front/back face intersections via XOR logic, allowing for correct visibility handling of complex topology in a two-pass process [S2, unofficial].
++The Upson-Keller Polygon Method is an early image-order isosurface rendering technique that uses fixed-function rasterization hardware, specifically alpha-testing and stencil buffers, to extract and render isosurfaces without programmable shaders [S2, unofficial]. It differs from sibling methods like [Multiple Flat Shaded Opaque Isosurfaces](1498-multiple-flat-shaded-opaque-isosurfaces.md) by explicitly using the stencil buffer to resolve front/back face intersections via XOR logic, allowing correct visibility handling of complex topology in a two-pass process [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scalar field defined on volume elements (e.g., tetrahedra or voxels), an isovalue $\tau$, and a camera/view matrix.
+-*   **Output:** A 2D image with an alpha channel representing opacity and a stencil buffer state.
++*   **Input:** A scalar field defined on volume elements (tetrahedra or voxels), an isovalue $\tau$, and camera/view parameters [S1, unofficial][S2, unofficial].
++*   **Output:** A 2D image representing the rendered isosurface opacity [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Volume Elements:** Geometric primitives (tetrahedra or voxels) containing scalar values at vertices.
+-*   **Stencil Buffer:** A per-pixel integer buffer used to track intersection parity.
+-*   **Alpha Component:** Used to store the interpolated scalar value $f(\mathbf{p})$ for alpha-testing.
++*   **Volume Elements:** Geometric primitives containing scalar values at vertices [S2, unofficial].
++*   **Stencil Buffer:** A per-pixel integer buffer tracking intersection parity [S2, unofficial].
++*   **Alpha Channel:** Stores the interpolated scalar value $f(\mathbf{p})$ for hardware alpha-testing [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Scan Plane Intersection:** Intersect scan planes (the z-extension of scan lines) with each volume element to form intersection polygons [S1, unofficial].
++1.  **Scan Plane Intersection:** Intersect scan planes (the $z$ extension of scan lines) with each volume element to form intersection polygons [S1, unofficial].
+ 2.  **Polygon Decomposition:** Break the resulting intersection polygons into spans [S1, unofficial].
+ 3.  **Front-to-Back Ordering:** Operate on volume elements in a predetermined front-to-back order to calculate visibility [S1, unofficial].
+ 4.  **Two-Pass Rendering:**
+-    *   **Pass 1 (Stencil Setup):** Draw the back and front faces of each cell in order. For each fragment, interpolate the scalar value $f(\mathbf{p})$ and store it in the alpha component. Configure the alpha-test to reject fragments where $f(\mathbf{p}) < \tau$ [S2, unofficial].
+-    *   **Pass 2 (Result Combination):** Use a XOR operation on the stencil buffer to combine the results from the back and front faces. This resolves the visibility of the isosurface intersection [S2, unofficial].
++    *   **Pass 1 (Stencil Setup):** Draw the back and front faces of each cell in order. Interpolate the scalar value $f(\mathbf{p})$ and store it in the alpha component. Configure the alpha-test to reject fragments where $f(\mathbf{p}) < \tau$ [S2, unofficial].
++    *   **Pass 2 (Result Combination):** Use a XOR operation on the stencil buffer to combine the results from the back and front faces, resolving the visibility of the isosurface intersection [S2, unofficial].
+ 5.  **Opacity Integration:** Integrate the pixels of each span front-to-back to generate final opacity [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def upson_keller_render(volume, isovalue, camera):
+-    # Initialize stencil buffer to 0
+-    stencil_buffer = zeros_like(screen_resolution)
++def upson_keller_render(volume_elements, isovalue, width, height):
++    # Initialize buffers
++    stencil = [[0] * width for _ in range(height)]
++    image = [[0.0] * width for _ in range(height)]
+     
+-    # Sort volume elements front-to-back
+-    sorted_elements = sort_front_to_back(volume, camera)
++    # Sort volume elements front-to-back by camera depth
++    sorted_elements = sorted(volume_elements, key=lambda e: e.camera_z)
+     
+-    for element in sorted_elements:
+-        # 1. Intersect scan planes with volume element
+-        # Returns list of intersection polygons
+-        polygons = intersect_scan_planes(element, camera)
+-        
+-        # 2. Break polygons into spans
++    # Pass 1: Stencil setup via alpha-test and XOR
++    for elem in sorted_elements:
++        polygons = intersect_scan_planes(elem)
+         spans = break_into_spans(polygons)
+-        
+-        # 3. Render back faces
+         for span in spans:
+-            for pixel in span:
+-                # Interpolate scalar value at pixel position
+-                f_val = interpolate_scalar(element, pixel.position)
+-                
+-                # Store in alpha component for testing
+-                alpha = f_val
+-                
+-                # Alpha test: reject if below isovalue
+-                if alpha >= isovalue:
+-                    # Mark stencil buffer for back face intersection
+-                    stencil_buffer[pixel] ^= 1  # XOR operation
+-        
+-        # 4. Render front faces
+-        for span in spans:
+-            for pixel in span:
+-                f_val = interpolate_scalar(element, pixel.position)
+-                alpha = f_val
+-                
+-                if alpha >= isovalue:
+-                    # Mark stencil buffer for front face intersection
+-                    stencil_buffer[pixel] ^= 1  # XOR operation
++            x_start, x_end, y, z_val = span
++            for x in range(x_start, x_end + 1):
++                f_val = interpolate_scalar_at(elem, x, y, z_val)
++                if f_val >= isovalue:
++                    stencil[y][x] ^= 1
++                    
++    # Pass 2: Opacity integration based on stencil state
++    for y in range(height):
++        for x in range(width):
++            if stencil[y][x] == 1:
++                image[y][x] = integrate_front_to_back(sorted_elements, x, y)
++    return image
+ 
+-    # 5. Final integration based on stencil state
+-    # Pixels with odd stencil value are on the surface
+-    # Integrate opacity front-to-back for these pixels
+-    image = integrate_opacity(stencil_buffer, volume, camera)
+-    return image
++def intersect_scan_planes(elem):
++    return clip_to_scan_planes(elem.faces, elem.vertices)
++
++def break_into_spans(polygons):
++    spans = []
++    for poly in polygons:
++        y_min, y_max = min(v.y for v in poly), max(v.y for v in poly)
++        for y in range(y_min, y_max + 1):
++            x_l, x_r, z = scanline_clip_polygon(poly, y)
++            spans.append((x_l, x_r, y, z))
++    return spans
++
++def interpolate_scalar_at(elem, x, y, z):
++    return barycentric_interpolate(elem.vertices, elem.scalars, x, y, z)
++
++def integrate_front_to_back(elements, x, y):
++    return accumulate_opacity_front_to_back(elements, x, y)
+ ```
+ 
+ **Parameters:**
+-*   **Isovalue ($\tau$):** The scalar threshold for the isosurface.
++*   **Isovalue ($\tau$):** The scalar threshold for the isosurface [S2, unofficial].
+ *   **Stencil Operation:** XOR (exclusive OR) is critical for combining front/back face hits [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Precision:** Alpha-testing relies on accurate interpolation of scalar values; precision errors near the isovalue can cause gaps or artifacts [S2, unofficial].
+-*   **Degenerate Cases:** If the intersection polygon degenerates (e.g., a single point or line), span generation may fail or produce zero-area spans [S1, unofficial].
+ *   **Ordering:** Strict front-to-back ordering of volume elements is required for correct visibility calculation [S1, unofficial].
++*   **Degenerate Cases:** Not given in the sources.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method runs in two passes per frame. On average, it renders 5 to 7 triangles per cell [S2, unofficial].
+-*   **Memory Complexity:** Requires a stencil buffer and an alpha channel. No additional large textures are needed beyond the volume data.
++*   **Time Complexity:** The method runs in two passes per frame [S2, unofficial]. On average, it renders 5 to 7 triangles per cell [S2, unofficial].
++*   **Memory Complexity:** Requires a stencil buffer and an alpha channel [S2, unofficial].
+ *   **Strengths:** Efficient use of early fixed-function hardware; avoids the overhead of programmable shaders [S2, unofficial].
+ *   **Limitations:** Limited to opaque isosurfaces; complex topology requires careful stencil handling; not suitable for transparent volume rendering without significant modification [S2, unofficial].
+-*   **When to Use:** Early hardware environments where shaders are unavailable or too slow; simple isosurface visualization.
+-*   **When Not to Use:** Modern GPU architectures with programmable shaders; transparent volume rendering; complex multi-material scenes.
++*   **When to Use:** Early hardware environments where shaders are unavailable or too slow [S2, unofficial].
++*   **When Not to Use:** Modern GPU architectures with programmable shaders; transparent volume rendering; complex multi-material scenes. Not given in the sources.
+ 
+ ## Background

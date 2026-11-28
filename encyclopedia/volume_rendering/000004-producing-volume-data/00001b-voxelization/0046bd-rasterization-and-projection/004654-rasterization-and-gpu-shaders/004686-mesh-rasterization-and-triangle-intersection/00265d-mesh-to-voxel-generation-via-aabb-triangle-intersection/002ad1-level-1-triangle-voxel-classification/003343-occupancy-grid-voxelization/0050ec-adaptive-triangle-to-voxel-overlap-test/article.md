@@ -1,0 +1,259 @@
+# Adaptive Triangle-to-Voxel Overlap Test
+
+## Overview
+The Adaptive Triangle-to-Voxel Overlap Test is a voxelization algorithm that determines which grid voxels overlap with a mesh triangle by classifying the triangle's axis-aligned bounding box (AABB) thickness into three cases (1D, 2D, or 3D) to optimize the overlap test [S1, unofficial]. It builds on [Occupancy Grid Voxelization](6958-occupancy-grid-voxelization.md) by replacing a naive intersection check with a hierarchical classification that skips geometric tests when the bounding box is thin in multiple dimensions, marking those voxels as fully occupied without further computation [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `triangle`: A triangle defined by three vertices $v_0, v_1, v_2$ in world coordinates [S1, unofficial].
+- `unitlength`: The physical size of one voxel side in world units [S1, unofficial].
+- `partition_bounds`: The grid coordinate bounds $[p_{min}, p_{max}]$ of the current processing partition [S1, unofficial].
+- `morton_start`: The minimum Morton code index in the voxel array, used for offsetting array accesses [S1, unofficial].
+- `voxels`: An array storing voxel states [S1, unofficial]. In `BINARY_VOXELIZATION` mode, it stores `char` (1 for FULL, 0 for EMPTY) [S1, unofficial]. In non-binary mode, it stores `size_t` indices into a `data` array [S1, unofficial].
+- `data`: An array of `VoxelData` structures used in non-binary mode [S1, unofficial].
+- `sparseness_limit`: A threshold to prevent data array overflow [S1, unofficial].
+
+**Outputs:**
+- Updated `voxels` array entries for overlapping voxels [S1, unofficial].
+- Updated `data` array entries in non-binary mode [S1, unofficial].
+
+**Data Structures:**
+- `AABox`: Axis-aligned bounding box defined by `min` and `max` vectors [S1, unofficial].
+- `VoxelData`: Structure containing voxel attributes (e.g., color, density) [S1, unofficial].
+- `Triangle`: Structure containing vertices $v_0, v_1, v_2$ [S1, unofficial].
+
+**Steps:**
+
+1. **Compute Bounding Box:**
+   Compute the triangle's world bounding box $t_{bbox\_world}$ using the minimum and maximum of the three vertices' coordinates [S1, unofficial]. Convert $t_{bbox\_world}$ to grid coordinates $t_{bbox\_grid}$ by multiplying by $unit\_div = 1.0 / unitlength$ and casting to integers [S1, unofficial]:
+   $$ t_{bbox\_grid.min} = \lfloor t_{bbox\_world.min \times unit\_div} \rfloor $$
+   $$ t_{bbox\_grid.max} = \lfloor t_{bbox\_world.max \times unit\_div} \rfloor $$
+   [S1, unofficial]
+
+2. **Clamp to Partition:**
+   Clamp $t_{bbox\_grid.min}$ and $t_{bbox\_grid.max$ to the partition bounds $p_{bbox\_grid.min}$ and $p_{bbox\_grid.max}$ to ensure the triangle is processed only within its assigned grid region [S1, unofficial]:
+   $$ t_{bbox\_grid.min} = \max(t_{bbox\_grid.min, p_{bbox\_grid.min}) $$
+   $$ t_{bbox\_grid.max} = \min(t_{bbox\_grid.max, p_{bbox\_grid.max}) $$
+   [S1, unofficial]
+
+3. **Determine Thickness:**
+   Determine the 'thickness' of the bounding box in each axis [S1, unofficial]. For each axis $i \in \{X, Y, Z\}$, if $t_{bbox\_grid.min[i] == t_{bbox\_grid.max[i]}$, that axis is 'one_thick' [S1, unofficial]. Let $N_{one}$ be the sum of one_thick axes [S1, unofficial].
+
+4. **Case 1-3 (1D Bounding Boxes):**
+   If $N_{one} \ge 2$ (meaning the bbox is 1 voxel thick in at least 2 directions), iterate over all voxels in the bbox defined by $t_{bbox\_grid.min$ and $t_{bbox\_grid.max$ [S1, unofficial]. No geometric overlap test is needed; mark all as FULL_VOXEL [S1, unofficial].
+
+5. **Compute Triangle Geometry:**
+   Compute triangle edges $e_0 = v_1 - v_0$, $e_1 = v_2 - v_1$, $e_2 = v_0 - v_2$ [S1, unofficial]. Compute the normalized normal $n = \frac{e_0 \times e_1}{\|e_0 \times e_1\|}$ [S1, unofficial].
+
+6. **Case 4-6 (2D Bounding Boxes):**
+   If $N_{one} == 1$, perform a 2D projection test on the plane perpendicular to the thin axis [S1, unofficial].
+   - **If thin in X ($one\_thick[X]==1$):** Project to YZ plane [S1, unofficial]. Compute edge normals $n_{yz\_e0}, n_{yz\_e1}, n_{yz\_e2}$ from the projected edges [S1, unofficial]. If $n[X] < 0$, negate these normals [S1, unofficial]. Compute distances $d_{yz\_e0}, d_{yz\_e1}, d_{yz\_e2}$ using the formula:
+     $$ d = -\text{dot}(n_{edge}, v_{proj}) + \max(0, unitlength \cdot n_{edge}[0]) + \max(0, unitlength \cdot n_{edge}[1]) $$
+     where $v_{proj}$ is the projected vertex coordinate [S1, unofficial].
+   - **If thin in Y ($one\_thick[Y]==1$):** Project to ZX plane [S1, unofficial]. Compute edge normals $n_{zx\_e0}, n_{zx\_e1}, n_{zx\_e2}$ [S1, unofficial]. If $n[Y] < 0$, negate these normals [S1, unofficial]. Compute distances $d_{zx\_e0}, d_{zx\_e1}, d_{zx\_e2}$ similarly [S1, unofficial].
+   - **If thin in Z ($one\_thick[Z]==1$):** Project to XY plane [S1, unofficial]. Compute edge normals $n_{xy\_e0}, n_{xy\_e1}, n_{xy\_e2}$ [S1, unofficial]. If $n[Z] < 0$, negate these normals [S1, unofficial]. Compute distances $d_{xy\_e0}, d_{xy\_e1}, d_{xy\_e2}$ similarly [S1, unofficial].
+   Iterate over voxels in the bbox [S1, unofficial]. A voxel is marked FULL_VOXEL if it passes the 2D projection tests (i.e., lies inside the projected triangle for all edges) [S1, unofficial].
+
+7. **Case 7-9 (3D Bounding Boxes):**
+   If $N_{one} == 0$, iterate over all voxels in the 3D bbox [S1, unofficial]. Perform a 3D overlap test [S1, unofficial]:
+   1. **Triangle plane test:** Let $p$ be the voxel center [S1, unofficial]. Compute $nDOTp = \text{dot}(n, p)$ [S1, unofficial]. Let $d_1$ and $d_2$ be the signed distances of two vertices of the triangle to the plane [S1, unofficial]. The test is:
+      $$ (nDOTp + d_1) \cdot (nDOTp + d_2) \le 0 $$
+      [S1, unofficial]
+   2. **Projection tests:** Perform projection tests on XY, YZ, and ZX planes using the respective edge normals and distances computed as in the 2D cases [S1, unofficial].
+   A voxel is marked FULL_VOXEL if it passes the plane test and all three projection tests [S1, unofficial].
+
+8. **Store Result:**
+   For each voxel passing the tests [S1, unofficial]:
+   - If `BINARY_VOXELIZATION` is defined, store 1 in `voxels` and optionally push the index to `data` [S1, unofficial].
+   - Otherwise, compute barycentric coordinates of the voxel center with respect to the triangle, interpolate color (or other attributes), and store `VoxelData` in the `data` array, storing the data index in `voxels` [S1, unofficial].
+   - Check if a voxel is already FULL_VOXEL before processing to avoid duplicate work and data insertion [S1, unofficial].
+   - If the number of voxels exceeds a calculated limit based on `sparseness_limit`, revert to non-data mode (`use_data = false`) to prevent memory issues [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def cross(a, b):
+    return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
+
+def normalize(v):
+    l = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+    return (v[0]/l, v[1]/l, v[2]/l)
+
+def morton3D_64_encode(x, y, z):
+    # Standard 3D Morton code interleaving (64-bit)
+    m = 0
+    for i in range(10):
+        m |= ((x & (1 << i)) << (2*i)) | ((y & (1 << i)) << (2*i + 1)) | ((z & (1 << i)) << (2*i + 2))
+    return m
+
+class VoxelData:
+    def __init__(self, morton=0, color=(0,0,0), normal=(0,0,1)):
+        self.morton = morton
+        self.color = color
+        self.normal = normal
+
+def adaptive_triangle_voxel_overlap(triangle, unitlength, partition_bounds, morton_start, voxels, data, binary_mode, sparseness_limit):
+    v0, v1, v2 = triangle.v0, triangle.v1, triangle.v2
+    
+    # 1. Compute Bounding Box
+    t_bbox_world_min = (min(v0[0], v1[0], v2[0]), min(v0[1], v1[1], v2[1]), min(v0[2], v1[2], v2[2]))
+    t_bbox_world_max = (max(v0[0], v1[0], v2[0]), max(v0[1], v1[1], v2[1]), max(v0[2], v1[2], v2[2]))
+    
+    unit_div = 1.0 / unitlength
+    t_bbox_grid_min = tuple(math.floor(c * unit_div) for c in t_bbox_world_min)
+    t_bbox_grid_max = tuple(math.floor(c * unit_div) for c in t_bbox_world_max)
+    
+    # 2. Clamp to Partition
+    p_min = partition_bounds.min
+    p_max = partition_bounds.max
+    t_bbox_grid_min = tuple(max(t_bbox_grid_min[i], p_min[i]) for i in range(3))
+    t_bbox_grid_max = tuple(min(t_bbox_grid_max[i], p_max[i]) for i in range(3))
+    
+    # 3. Determine Thickness
+    one_thick = [1 if t_bbox_grid_min[i] == t_bbox_grid_max[i] else 0 for i in range(3)]
+    n_one = sum(one_thick)
+    
+    # 5. Compute Triangle Geometry
+    e0 = (v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2])
+    e1 = (v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2])
+    e2 = (v0[0]-v2[0], v0[1]-v2[1], v0[2]-v2[2])
+    n = normalize(cross(e0, e1))
+    
+    # Helper: 2D Projection Test
+    def run_2d_test(thin_axis, plane_axes):
+        # Project edges to plane
+        edges_proj = []
+        for e in [e0, e1, e2]:
+            edges_proj.append((e[plane_axes[0]], e[plane_axes[1]]))
+        
+        # Compute 2D edge normals (perpendicular in projection plane)
+        edge_normals_2d = []
+        for dx, dy in edges_proj:
+            nx, ny = -dy, dx
+            l = math.sqrt(nx**2 + ny**2)
+            if l > 0: nx, ny = nx/l, ny/l
+            edge_normals_2d.append((nx, ny))
+        
+        # Adjust sign based on triangle normal direction
+        if n[thin_axis] < 0:
+            edge_normals_2d = [(-nx, -ny) for nx, ny in edge_normals_2d]
+        
+        # Compute distances for each vertex
+        distances = []
+        for v in [v0, v1, v2]:
+            v_proj = (v[plane_axes[0]], v[plane_axes[1]])
+            nx, ny = edge_normals_2d[0] # Use first edge normal for formula indexing
+            d = -dot(edge_normals_2d[0], v_proj) + max(0, unitlength * edge_normals_2d[0][0]) + max(0, unitlength * edge_normals_2d[0][1])
+            distances.append(d)
+            
+        return edge_normals_2d, distances
+
+    # Helper: Mark voxel
+    def mark_voxel(x, y, z):
+        morton = morton3D_64_encode(x, y, z)
+        idx = morton - morton_start
+        if binary_mode:
+            if voxels[idx] == 1: return
+            voxels[idx] = 1
+        else:
+            if voxels[idx] != 0: return
+            if len(data) > sparseness_limit: return # Pitfall: sparseness_limit check
+            # Compute barycentric coords and interpolate color [G]
+            voxels[idx] = len(data)
+            data.append(VoxelData(morton, (1.0, 1.0, 1.0), n))
+
+    # 4. Case 1-3 (1D Bounding Boxes)
+    if n_one >= 2:
+        for x in range(t_bbox_grid_min[0], t_bbox_grid_max[0] + 1):
+            for y in range(t_bbox_grid_min[1], t_bbox_grid_max[1] + 1):
+                for z in range(t_bbox_grid_min[2], t_bbox_grid_max[2] + 1):
+                    mark_voxel(x, y, z)
+        return
+
+    # 6. Case 4-6 (2D Bounding Boxes)
+    if n_one == 1:
+        if one_thick[0] == 1: # Thin in X
+            plane_axes = (1, 2) # YZ
+            edge_normals_2d, distances = run_2d_test(0, plane_axes)
+            for x in range(t_bbox_grid_min[0], t_bbox_grid_max[0] + 1):
+                for y in range(t_bbox_grid_min[1], t_bbox_grid_max[1] + 1):
+                    for z in range(t_bbox_grid_min[2], t_bbox_grid_max[2] + 1):
+                        p_proj = (y, z)
+                        inside = all(dot(edge_normals_2d[i], p_proj) <= distances[i] for i in range(3))
+                        if inside: mark_voxel(x, y, z)
+        elif one_thick[1] == 1: # Thin in Y
+            plane_axes = (2, 0) # ZX
+            edge_normals_2d, distances = run_2d_test(1, plane_axes)
+            for x in range(t_bbox_grid_min[0], t_bbox_grid_max[0] + 1):
+                for y in range(t_bbox_grid_min[1], t_bbox_grid_max[1] + 1):
+                    for z in range(t_bbox_grid_min[2], t_bbox_grid_max[2] + 1):
+                        p_proj = (z, x)
+                        inside = all(dot(edge_normals_2d[i], p_proj) <= distances[i] for i in range(3))
+                        if inside: mark_voxel(x, y, z)
+        elif one_thick[2] == 1: # Thin in Z
+            plane_axes = (0, 1) # XY
+            edge_normals_2d, distances = run_2d_test(2, plane_axes)
+            for x in range(t_bbox_grid_min[0], t_bbox_grid_max[0] + 1):
+                for y in range(t_bbox_grid_min[1], t_bbox_grid_max[1] + 1):
+                    for z in range(t_bbox_grid_min[2], t_bbox_grid_max[2] + 1):
+                        p_proj = (x, y)
+                        inside = all(dot(edge_normals_2d[i], p_proj) <= distances[i] for i in range(3))
+                        if inside: mark_voxel(x, y, z)
+
+    # 7. Case 7-9 (3D Bounding Boxes)
+    if n_one == 0:
+        D = -dot(n, v0)
+        d1 = dot(n, v0) + D
+        d2 = dot(n, v1) + D
+        for x in range(t_bbox_grid_min[0], t_bbox_grid_max[0] + 1):
+            for y in range(t_bbox_grid_min[1], t_bbox_grid_max[1] + 1):
+                for z in range(t_bbox_grid_min[2], t_bbox_grid_max[2] + 1):
+                    p = (x, y, z)
+                    nDOTp = dot(n, p)
+                    # Plane test
+                    if (nDOTp + d1) * (nDOTp + d2) > 0: continue
+                    
+                    # Projection tests on XY, YZ, ZX
+                    # Reuse logic from 2D case for each plane
+                    planes = [((0,1), (x,y)), ((1,2), (y,z)), ((2,0), (z,x))]
+                    passes = True
+                    for plane_axes, p_proj in planes:
+                        # Compute normals/distances for this plane (simplified for brevity)
+                        edges_proj = [((e[plane_axes[0]], e[plane_axes[1]])) for e in [e0, e1, e2]]
+                        normals_2d = []
+                        for dx, dy in edges_proj:
+                            nx, ny = -dy, dx
+                            l = math.sqrt(nx**2 + ny**2)
+                            if l > 0: nx, ny = nx/l, ny/l
+                            normals_2d.append((nx, ny))
+                        if n[plane_axes[0]] < 0 or n[plane_axes[1]] < 0: # Approximate sign check
+                            normals_2d = [(-nx, -ny) for nx, ny in normals_2d]
+                        dists = [-dot(normals_2d[0], (v[plane_axes[0]], v[plane_axes[1]])) + max(0, unitlength*normals_2d[0][0]) + max(0, unitlength*normals_2d[0][1]) for v in [v0, v1, v2]]
+                        if any(dot(normals_2d[i], p_proj) > dists[i] for i in range(3)):
+                            passes = False
+                            break
+                    if passes: mark_voxel(x, y, z)
+```
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of voxels in the triangle's bounding box [S1, unofficial]. The 1D and 2D cases are faster as they skip the 3D plane test [S1, unofficial]. The 3D case requires more computations per voxel [S1, unofficial].
+- **Memory Complexity:** Proportional to the number of voxels in the partition [S1, unofficial]. The `voxels` array size is determined by the partition bounds [S1, unofficial]. The `data` array size depends on the number of overlapping voxels and whether `BINARY_VOXELIZATION` is enabled [S1, unofficial].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** The algorithm scales with the number of triangles and the resolution of the voxel grid [S1, unofficial]. The partitioning strategy helps in distributing the workload [S1, unofficial].
+- **Strengths:** Optimizes the overlap test by classifying the bounding box thickness, reducing the number of geometric tests required [S1, unofficial].
+- **Limitations:** The 3D case can be computationally expensive for large bounding boxes [S1, unofficial]. The source code does not provide a complete implementation of the 3D case, which may lead to gaps in understanding [S1, unofficial].
+- **When to use:** When voxelizing meshes with high resolution and when performance is critical [S1, unofficial].
+- **When not to use:** When the mesh is very sparse or when the bounding box is very large, as the 3D case may be inefficient [S1, unofficial].
+
+## Background
+The Adaptive Triangle-to-Voxel Overlap Test is part of the `ooc_svo_builder` project by Forceflow [S1, unofficial]. It is used in the context of building sparse voxel octrees (SVO) for volume rendering [S1, unofficial]. The algorithm is designed to efficiently determine which voxels are occupied by a mesh triangle, which is a crucial step in voxelization [S1, unofficial].
+
+## Sources
+[S1] Forceflow/ooc_svo_builder, https://github.com/Forceflow/ooc_svo_builder, fetched 2026-10-26 (unofficial)

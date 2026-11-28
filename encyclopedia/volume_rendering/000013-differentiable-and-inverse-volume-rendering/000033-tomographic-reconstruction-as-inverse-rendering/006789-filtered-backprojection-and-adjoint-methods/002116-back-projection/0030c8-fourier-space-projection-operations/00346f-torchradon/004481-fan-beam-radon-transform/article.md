@@ -1,0 +1,172 @@
+# Fan-Beam Radon Transform
+
+Also called: Fan Beam, Fan Beam Geometry (2D), Fan-beam projection, Géométrie en éventail, RadonFanbeam
+
+## Overview
+The Fan-Beam Radon Transform computes projections for a geometry where X-rays originate from a single fixed point source and are captured by a linear detector array [S1, unofficial]. This configuration eliminates the linear source-detector translation required in parallel geometries, enabling faster angular-only scanning [S1, unofficial]. Unlike the [Radon Transform](11306-radon-transform.md) which assumes parallel rays, this method models the divergent ray paths inherent to fan-beam acquisition [S1, unofficial]. It allows for direct reconstruction or rebinning to parallel geometry [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A 2D image (phantom) $f(x,y)$ of size $N \times N$ [S2, unofficial].
+- **Parameters:**
+    - `angles`: Array of sampling angles $\beta$, equally spaced in $[0, 2\pi)$ [S2, unofficial].
+    - `source_distance` ($D$): Distance from the X-ray source to the center of the object. Default is 512 [S2, unofficial].
+    - `det_distance`: Distance from the detector to the center of the object. Default equals `source_distance` [S2, unofficial].
+    - `det_count`: Number of detector pixels [S2, unofficial].
+    - `det_spacing`: Distance between detector pixels [S2, unofficial].
+- **Output:** A sinogram representing the line integrals of the image along the fan-beam rays [S2, unofficial].
+
+**Data Structures:**
+The implementation typically uses array tensors for the image and sinogram to enable differentiability [S2, unofficial]. The sinogram is a 2D array where one dimension corresponds to the angular index and the other to the detector bin index [S2, unofficial].
+
+**Steps:**
+1. **Geometry Setup:** Place a single point source at a fixed position relative to a linear detector array [S1, unofficial]. The source is located at distance $D$ from the origin [S1, unofficial].
+2. **Angular Sampling:** Define the set of angles $\beta$ for the source position [S2, unofficial]. For fan-beam, these are typically equally spaced in $[0, 2\pi)$ [S2, unofficial].
+3. **Forward Projection:** For each angle $\beta$, compute the line integrals through the image [S2, unofficial]. Rays are defined by the source position and the detector bins [S2, unofficial]. The angle $\gamma$ represents the angle between an arbitrary ray and the central ray passing through the origin [S1, unofficial].
+4. **Backward Projection:** Distribute the sinogram values back into the image space along the corresponding ray paths [S2, unofficial].
+
+**Formulas:**
+For regular spatial sampling, reconstruction in polar coordinates $(r, \phi)$ can be performed directly using the fan-beam formula [S1, unofficial]:
+
+$$
+f(r, \phi) = \frac{1}{2} \int_0^{2\pi} \int_{-S_m}^{S_m} R_\beta(s) h\left(r \cos\left(\beta + \tan^{-1}\frac{s}{D}\right) - \phi\right) \frac{D^3}{D^2 + s^2} \frac{1}{(D + \sqrt{D^2 + s^2})^{3/2}} \, ds \, d\beta
+$$
+
+Where:
+- $R_\beta(s)$ is the fan-beam projection at angle $\beta$ and curvilinear coordinate $s$ [S1, unofficial].
+- $h$ is the inverse Fourier transform of the ramp filter [S1, unofficial].
+- $D$ is the distance from the source to the origin [S1, unofficial].
+- $s$ is the curvilinear coordinate on the projection line, with the origin at the bin corresponding to the line integral passing through the origin [S1, unofficial].
+- $S_m$ is the maximum coordinate value on the projection line [S1, unofficial].
+- $\beta$ is the angle the source $S$ makes with the reference y-axis [S1, unofficial].
+
+Alternatively, fan-beam data can be rebinned to parallel-beam geometry for standard filtered backprojection (see Subtopics) [S1, unofficial].
+
+**Pseudocode:**
+The following Python-like pseudocode demonstrates the forward and backward projection logic without external library dependencies.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fan_beam_forward_projection(image, angles, source_distance, det_count, det_spacing):
+    """Compute fan-beam sinogram from a 2D image."""
+    N = image.shape[0]
+    num_angles = len(angles)
+    sinogram = [[0.0] * det_count for _ in range(num_angles)]
+    for i, beta in enumerate(angles):
+        sx = source_distance * np.cos(beta)
+        sy = source_distance * np.sin(beta)
+        for j in range(det_count):
+            det_offset = (j - det_count // 2) * det_spacing
+            dx = -np.sin(beta) * det_offset
+            dy = np.cos(beta) * det_offset
+            det_x = sx + dx
+            det_y = sy + dy
+            ray_dir_x = det_x - sx
+            ray_dir_y = det_y - sy
+            integral = 0.0
+            num_samples = 2 * N
+            step = (2.0 * source_distance) / num_samples
+            for k in range(num_samples):
+                t = k * step
+                px = sx + t * ray_dir_x
+                py = sy + t * ray_dir_y
+                # Sample image intensity at (px, py) using bilinear interpolation [G]
+                val = bilinear_sample(image, px, py)
+                integral += val
+            sinogram[i][j] = integral * step
+    return sinogram
+
+def fan_beam_backward_projection(sinogram, angles, source_distance, det_count, det_spacing, image_shape):
+    """Distribute sinogram values back into image space."""
+    image = [[0.0] * image_shape[1] for _ in range(image_shape[0])]
+    for i, beta in enumerate(angles):
+        sx = source_distance * np.cos(beta)
+        sy = source_distance * np.sin(beta)
+        for j in range(det_count):
+            det_offset = (j - det_count // 2) * det_spacing
+            dx = -np.sin(beta) * det_offset
+            dy = np.cos(beta) * det_offset
+            det_x = sx + dx
+            det_y = sy + dy
+            ray_dir_x = det_x - sx
+            ray_dir_y = det_y - sy
+            value = sinogram[i][j]
+            num_samples = 2 * source_distance
+            step = (2.0 * source_distance) / num_samples
+            for k in range(num_samples):
+                t = k * step
+                px = sx + t * ray_dir_x
+                py = sy + t * ray_dir_y
+                # Accumulate value along the ray path [G]
+                ix, iy = int(px), int(py)
+                if 0 <= ix < image_shape[0] and 0 <= iy < image_shape[1]:
+                    image[ix][iy] += value
+    return image
+
+def bilinear_sample(image, x, y):
+    """Standard bilinear interpolation implementation [G]."""
+    x0, y0 = int(np.floor(x)), int(np.floor(y))
+    x1, y1 = x0 + 1, y0 + 1
+    dx, dy = x - x0, y - y0
+    x0 = max(0, min(x0, image.shape[0] - 1))
+    x1 = max(0, min(x1, image.shape[0] - 1))
+    y0 = max(0, min(y0, image.shape[1] - 1))
+    y1 = max(0, min(y1, image.shape[1] - 1))
+    top = image[x0][y0] * (1 - dx) + image[x1][y0] * dx
+    bottom = image[x0][y1] * (1 - dx) + image[x1][y1] * dx
+    return top * (1 - dy) + bottom * dy
+```
+
+**Edge Cases and Pitfalls:**
+- The sampling of the equivalent parallel projection in rebinning methods is not uniform, requiring interpolation [S1, unofficial].
+
+## Subtopics
+
+### [2D Fan-beam Reconstruction](22883-2d-fan-beam-reconstruction.md)
+2D Fan-beam Reconstruction is an analytic algorithm for reconstructing a 2D density field from projection data acquired with a diverging X-ray beam. It solves the inverse problem for fan-beam geometry by mapping the diverging ray paths to equivalent parallel-beam line integrals via a geometric Jacobian, then applying standard filtered backprojection. It differs from parallel-beam FBP by explicitly accounting for the source-to-detector divergence and the resulting non-uniform sampling density in the projection space.
+
+### Fan-beam to Parallel-beam Rebinning
+A preprocessing step that converts fan-beam projection data into parallel-beam geometry to allow the use of standard parallel-beam reconstruction algorithms (like FBP) [S1, unofficial]. It involves resampling the fan-beam rays onto a uniform parallel grid [S1, unofficial].
+
+**Steps:**
+1. For each fan-beam angle index $m$ and ray index $n$, calculate the equivalent parallel-beam angle $\theta$ and curvilinear coordinate $t$ using the source-to-origin distance $D_{SO}$ and the ray index $n$ with angular step $\alpha$ [S1, unofficial].
+2. For each fixed parallel view index $v$ (where $0 \le v \le V-1$), interpolate the irregularly spaced values to estimate the uniformly spaced parallel projection values $P_v^\Gamma(uh)$, where $h$ is the detector spacing [S1, unofficial].
+
+**Formulas:**
+The equivalent parallel coordinate $t$ is given by [S1, unofficial]:
+$$
+t = D \sin \gamma
+$$
+where $D$ is the source-to-origin distance and $\gamma$ is the fan angle [S1, unofficial].
+
+For uniform angular sampling with step $\alpha$, where $\beta = m\alpha$ and $\gamma = n\alpha$, the relationship is [S1, unofficial]:
+$$
+R_{m\alpha}(n\alpha) = P_{(m+n)\alpha}(D \sin n\alpha)
+$$
+
+**Pitfalls:**
+The sampling of the equivalent parallel projection $\sin n\alpha$ is not uniform, requiring interpolation to use standard parallel algorithms [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources.
+
+**Measured Performance:**
+On a $512 \times 512$ Shepp-Logan phantom with 512 sampling angles equally spaced in $[0, 2\pi)$, source distance 512, and detector distance 512:
+- Relative error of forward projection compared to Astra Toolbox: $8.34 \cdot 10^{-4}$ [S2, unofficial].
+- Relative error of backprojection compared to Astra Toolbox: $4.84 \cdot 10^{-5}$ [S2, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** Significantly speeds up data acquisition by eliminating the linear translation step required in parallel geometries, keeping only angular rotation [S1, unofficial].
+- **Limitations:** Reconstruction is more complex than parallel geometry due to the divergent rays and non-uniform sampling in rebinning approaches [S1, unofficial].
+
+**When to Use:**
+Use when acquiring data from a system with a point source and linear detector array (e.g., 3rd or 4th generation scanners) where speed of acquisition is prioritized over the simplicity of parallel geometry [S1, unofficial].
+
+## Background
+The fan-beam geometry, also known as *géométrie en éventail*, was developed to improve the speed of tomographic data acquisition [S1, unofficial]. Unlike parallel geometry, which requires the source-detector pair to translate linearly across the object before rotating, fan-beam geometry allows for angular-only scanning [S1, unofficial]. This corresponds to the 3rd and 4th generations of CT scanners [S1, unofficial]. The method is implemented in libraries such as TorchRadon for differentiable rendering and reconstruction [S2, unofficial].
+
+## Sources
+[S1] Reconstruction Tomographique Mojette, https://theses.hal.science/tel-00426920v1, fetched 2026-10-26 (unofficial)
+[S2] TorchRadon: Fast Differentiable Routines for Computed Tomography, https://doi.org/10.48550/arxiv.2009.14788, fetched 2026-10-26 (unofficial)

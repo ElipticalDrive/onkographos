@@ -1,0 +1,65 @@
+# Attention Aggregation for 3D Points
+
+Also called: Attention-based Point Feature Aggregation
+
+## Overview
+Attention Aggregation for 3D Points aggregates unordered, variable-sized sets of retrieved pixel features from multiple input views into a single unique feature vector for a query 3D point, handling visual occlusions and arbitrary input counts [S1]. It differs from [Voxel Feature Composition](7021-voxel-feature-composition.md) by operating on sparse, view-projected point features rather than dense voxel grids, allowing it to explicitly model occlusion via attention weights [S1].
+
+## How it works
+**Inputs:**
+*   Query 3D point $p = [x_p, y_p, z_p]$.
+*   Query viewpoint $V_p$.
+*   Set of retrieved pixel features from $M$ input views: $\{F^1_p, \dots, F^M_p\}$. Each $F^m_p$ is a feature vector extracted from view $m$.
+
+**Outputs:**
+*   Aggregated feature vector $\bar{F}_p$ for point $p$.
+
+**Data Structures:**
+*   Feature vectors are dense real-valued tensors.
+*   The attention mechanism is permutation invariant with respect to the input set $\{F^m_p\}$ [S1].
+
+**Steps:**
+1.  **Position-Aware Feature Integration:** For each retrieved feature vector $F^m_p$, concatenate the query point coordinates $[x_p, y_p, z_p]$ to $F^m_p$. Pass the concatenated vector through a shared Multi-Layer Perceptron (MLP) to generate a position-aware feature $\hat{F}^m_p$ that encodes the relative distance to $p$ [S1].
+    $$ \hat{F}^m_p = \text{MLPs}(F^m_p \oplus [x_p, y_p, z_p]) $$
+    where $\oplus$ denotes concatenation [S1].
+
+2.  **Attention Aggregation:** Apply an attention function $A$ to the set of position-aware features $\{\hat{F}^1_p, \dots, \hat{F}^M_p\}$ to compute the final aggregated feature $\bar{F}_p$ [S1]. The attention mechanism learns a unique weight for each input feature and aggregates them. The method is permutation invariant and handles arbitrary $M$ [S1].
+    $$ \bar{F}_p = A(\hat{F}^1_p, \dots, \hat{F}^M_p) $$
+    Specific implementations may use AttSets [S1] or Slot Attention [S1].
+
+**Parameters:**
+*   MLP architecture: Not specified in sources [G].
+*   Attention function $A$: Can be standard softmax attention or slot attention [S1].
+
+**Edge Cases:**
+*   **Variable Input Count:** The method handles arbitrary $M$ (number of views) without modification due to the permutation-invariant nature of the attention mechanism [S1].
+*   **Occlusion:** The attention weights implicitly handle occlusions by assigning lower weights to features from views where the point is occluded or less visible [S1].
+
+## Subtopics
+
+### View Transformer
+A module that aggregates multi-view features into a single projection feature to handle occlusions and view consistency without assuming an order of source views [S2]. It is chosen when a self-attention transformer with linear attention is preferred over MLP-based aggregation [S2].
+*   **Definition:** Aggregates multi-view features $\{f_i\}_{i=1}^N$ into a projection feature $f_p$ [S2].
+*   **Steps:**
+    1.  Project each point $p$ onto the feature map of each source view to extract colors $\{c_i\}$ and features $\{f_i\}$ using bilinear interpolation [S2].
+    2.  Add a learnable aggregation token $f_0$ to the multi-view features $\{f_i\}$ [S2].
+    3.  Apply a self-attention transformer with linear attention to the inputs $(f_0, \{f_i\})$ to compute the projection feature $f_p$ and updated multi-view features $\{f'_i\}$ [S2].
+*   **Parameters:** Positional encoding is **not** used because no order of source views is assumed [S2].
+*   **Formula:**
+    $$ f_p, \{f'_i\}_{i=1}^N = \text{ViewTrans}(f_0, \{f_i\}_{i=1}^N) $$
+    [S2]
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of views $M$ and the dimension of feature vectors. Attention mechanisms typically scale quadratically with the number of input elements ($M^2$) for standard attention, or linearly for linear attention variants [S2].
+*   **Memory Complexity:** Proportional to $M \times d$, where $d$ is the feature dimension, to store the input features and attention weights [S1].
+*   **Strengths:** Handles variable-sized input sets; permutation invariant; explicitly models occlusion via attention weights [S1].
+*   **Limitations:** Requires retrieving features from multiple views; computational cost increases with the number of views [S1].
+*   **When to use:** When dealing with sparse 3D points and multi-view inputs where occlusion handling is critical [S1].
+*   **When not to use:** When computational resources are extremely limited and $M$ is large, or when a dense voxel representation is already available [S1].
+
+## Background
+Originated in the context of generalizable 3D representation and rendering [S1]. The method addresses the problem of selecting true feature descriptions for a query point amidst visual occlusions from multiple views [S1]. It builds on attention mechanisms for set processing, such as AttSets [S1].
+
+## Sources
+[S1] GRF: Learning a General Radiance Field for 3D Representation and Rendering, https://doi.org/10.1109/iccv48922.2021.01490, fetched 2026-10-26
+[S2] VolRecon: Volume Rendering of Signed Ray Distance Functions for Generalizable Multi-View Reconstruction, https://doi.org/10.1109/cvpr52729.2023.01601, fetched 2026-10-26

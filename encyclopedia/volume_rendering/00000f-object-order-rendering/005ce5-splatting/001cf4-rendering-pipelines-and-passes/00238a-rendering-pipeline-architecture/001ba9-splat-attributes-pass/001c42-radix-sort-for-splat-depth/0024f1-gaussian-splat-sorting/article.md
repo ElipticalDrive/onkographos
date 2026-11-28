@@ -1,0 +1,73 @@
+# Gaussian Splat Sorting
+
+Also called: Clip-space w depth sorting, Tile-based sorting using clip-space w
+
+## Overview
+Gaussian Splat Sorting sorts projected 3D Gaussian splats front-to-back within screen-space tiles to enable correct alpha blending [S1, unofficial]. It uses clip-space $w$ as a monotonic distance proxy to handle reverse-z projection [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `clip_pos_w`: Clip-space $w$ component of the splat position [S1, unofficial].
+- `tile_id`: Screen-space tile identifier [S1, unofficial].
+- `id`: Unique splat identifier [S1, unofficial].
+
+**Outputs:**
+- `sort_keys`: Array of 32-bit sort keys [S1, unofficial].
+- `sort_values`: Array of splat IDs corresponding to the keys [S1, unofficial].
+
+**Data Structures:**
+- `sort_keys`: 32-bit integer array where the upper 16 bits store `tile_id` and the lower 16 bits store the quantized depth [S1, unofficial].
+- `sort_values`: 32-bit integer array storing the original splat `id` [S1, unofficial].
+
+**Steps:**
+1. **Calculate View Depth:** Extract the clip-space $w$ component and clamp to zero [S1, unofficial].
+   $$ d_{\text{view}} = \max(0.0, \text{clip\_pos\_w}) $$
+2. **Normalize Depth:** Map the view depth to $[0, 1]$ using a rational function [S1, unofficial].
+   $$ d_{01} = \frac{d_{\text{view}}}{1.0 + d_{\text{view}}} $$
+3. **Quantize Depth:** Convert the normalized depth to a 16-bit unsigned integer [S1, unofficial].
+   $$ d_{16} = \lfloor d_{01} \times 65535.0 \rfloor \ \& \ 0\text{xFFFF} $$
+4. **Create Sort Key:** Combine the tile ID and quantized depth into a single 32-bit key [S1, unofficial].
+   $$ \text{key} = (\text{tile\_id} \ll 16) \ | \ d_{16} $$
+5. **Store Keys and Values:** Write the key and the splat ID to the respective sort buffers at the current offset [S1, unofficial].
+   $$ \text{sort\_keys}[\text{offset}] = \text{key} $$
+   $$ \text{sort\_values}[\text{offset}] = \text{id} $$
+
+**Parameters:**
+- Depth quantization bits: 16 [S1, unofficial].
+- Depth normalization constant: 1.0 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gaussian_splat_sort(clip_pos_w: float, tile_id: int, splat_id: int, sort_keys: list[int], sort_values: list[int], offset: int) -> None:
+    # Step 1: Calculate view depth
+    view_depth = max(0.0, clip_pos_w)
+    
+    # Step 2: Normalize depth to 0-1 range
+    depth01 = view_depth / (1.0 + view_depth)
+    
+    # Step 3: Quantize depth to 16-bit integer
+    depth16 = int(depth01 * 65535.0) & 0xFFFF
+    
+    # Step 4: Create sort key by combining tile ID and depth
+    key = (tile_id << 16) | depth16
+    
+    # Step 5: Store key and splat ID in sort buffers
+    sort_keys[offset] = key
+    sort_values[offset] = splat_id
+```
+
+## Subtopics
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The method uses clip-space $w$ as a monotonic distance proxy to handle reverse-z projection for front-to-back sorting within tiles [S1, unofficial].
+
+## Sources
+[S1] ReconWorldLab/godot-gaussian-splatting, https://github.com/ReconWorldLab/godot-gaussian-splatting, fetched 2026-10-27 (unofficial)

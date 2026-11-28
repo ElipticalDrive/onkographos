@@ -1,0 +1,71 @@
+# Stam and Fiume Blob Renderer
+Also called: Blob Renderer, Blob-Warping, Volumetric Blob Rendering
+## Overview
+A volumetric rendering approach for gaseous phenomena that models non-uniformly modified density blobs convected by wind fields and diffusion processes [S2, unofficial]. It differs from standard particle systems by treating blobs as spherical particles with normally distributed gas volumes, rendered using diffusion equations [S2, unofficial]. It applies a front-to-back strategy specifically for turbulent wind fields in gaseous phenomena [S1].
+## How it works
+Inputs: A set of spherical blobs (each with position, velocity, radius, and density parameters), a wind field, and diffusion parameters. Outputs: A rendered image of the gaseous phenomenon [S2, unofficial].
+
+Data Structures:
+- Blob: A structure containing position vector $\mathbf{p}$, velocity vector $\mathbf{v}$, radius $r$, and density distribution parameters [S2, unofficial].
+- Wind Field: A function or grid returning velocity $\mathbf{u}(\mathbf{x}, t)$ at position $\mathbf{x}$ and time $t$ [S2, unofficial].
+
+Steps:
+1. Initialize blob positions and velocities based on physical properties (convection, pressure, drag) [S2, unofficial].
+2. For each frame, update blob positions using Newton’s Laws of Motion, accounting for convection, drag, and thermal buoyancy [S2, unofficial].
+3. Model the gas density within each blob as normally distributed over its spherical volume [S2, unofficial].
+4. Apply diffusion equations to modify the density distribution over time [S2, unofficial].
+5. Render turbulent gaseous fields using a front-to-back ray casting strategy [S1].
+6. For each pixel, cast a ray and integrate the density contributions of intersecting blobs, considering the normally distributed gas volume [S2, unofficial].
+
+Formulas:
+- Gas density distribution: $\rho(\mathbf{x}) = \rho_0 \exp\left(-\frac{|\mathbf{x} - \mathbf{p}|^2}{2\sigma^2}\right)$, where $\rho_0$ is peak density, $\mathbf{p}$ is blob center, and $\sigma$ is spread parameter [S2, unofficial].
+
+Parameters:
+- $\sigma$: Spread parameter for density distribution. Not given in the sources.
+- $\rho_0$: Peak density. Not given in the sources.
+
+Edge Cases and Pitfalls:
+- Precision issues in density calculation for distant blobs. [G] Use early ray termination if density falls below threshold.
+- Boundary handling for wind fields. [G] Clamp or interpolate wind velocities at domain boundaries.
+- Degenerate input: Blobs with zero radius or density. [G] Skip such blobs during rendering.
+
+Pseudocode:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def render_blob_renderer(blobs, wind_field, diffusion_params, camera, image_width, image_height, step_size=0.5):
+    image = [[0.0, 0.0, 0.0] for _ in range(image_height)]
+    for y in range(image_height):
+        for x in range(image_width):
+            ray_o, ray_d = camera.cast_ray(x, y)
+            color = [0.0, 0.0, 0.0]
+            transmittance = 1.0
+            t = 0.0
+            while t < 100.0 and transmittance > 0.01:
+                pos = [ray_o[i] + ray_d[i] * t for i in range(3)]
+                for blob in blobs:
+                    dx = pos[0] - blob.p[0]
+                    dy = pos[1] - blob.p[1]
+                    dz = pos[2] - blob.p[2]
+                    dist_sq = dx*dx + dy*dy + dz*dz
+                    if dist_sq < blob.r * blob.r:
+                        density = blob.rho0 * math.exp(-(dist_sq) / (2 * blob.sigma**2))
+                        absorption = density * step_size
+                        sample_color = [0.8, 0.8, 0.8] # Lighting not specified in sources [G]
+                        color[0] += transmittance * sample_color[0] * (1.0 - math.exp(-absorption))
+                        color[1] += transmittance * sample_color[1] * (1.0 - math.exp(-absorption))
+                        color[2] += transmittance * sample_color[2] * (1.0 - math.exp(-absorption))
+                        transmittance *= math.exp(-absorption)
+                t += step_size
+            image[y][x] = color
+    return image
+```
+## Operating characteristics
+Time and memory complexity: Not given in the sources. Performance characteristics: Not given in the sources. Strengths: Realistic modeling of turbulent gases. Limitations: Computationally expensive for large numbers of blobs. When to use: Not given in the sources. When not to use: Not given in the sources.
+## Background
+Origin: Stam and Fiume [S1]. History: Applied to turbulent fields in gaseous phenomena [S1]. Usage: Rendering of gaseous effects like smoke and fire [S2, unofficial].
+## Sources
+[S1] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
+[S2] Realistic Real-Time Rendering of Fire in a Production System, https://clas.iusb.edu/math-compsci/_prior-proposals/YVanzine_Proposal.pdf, fetched 2026-10-28 (unofficial)

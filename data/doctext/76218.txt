@@ -1,0 +1,186 @@
+Volumetric Rendering using Path Tracing
+← Back to Main
+Brief
+This post is a little write up of volumetric rendering in my GPU path tracer. I'll mostly go over the specific algorithms used, problems encountered, and the solutions that I found. But I won't be discussing the full implementation details of the path tracer itself here, like launching a ray, accumulating the radiance, utilizing the GPU, and so on, since it's a huge topic on it's own and I want to keep this as brief as possible. So this assumes you already know the basics of path tracing and will only focus on the volumetric rendering part. I won't be sharing any code here because it's mostly just math formulas which translate to code directly, and the implementation of the delta tracking is very heavily dependent on the workflow of the path tracer itself, so pasting code snippets without context would just be confusing, and pasting the entire code of the path tracer would be too long. If you're interested in the source code of the path tracer, you can find it on GitHub, it's fully open source.
+Introduction
+There are two main ways of rendering participating media. The first method just marches the ray through the volume in small steps (usually called ray marching), evaluating the medium's properties at each step, and accumulating the transmittance and in scattered light along the way. This is what is commonly used in real-time applications like games, since it's fast and easy to implement.
+Ray Marching
+But that's not how light behaves in the real world, it doesn't just travel in a straight line, so this method has a major issue, it doesn't account for indirect lighting. In reality, light bounces around and interacts with the medium's particles multiple times instead of just traveling in a straight line, that's called multiple scattering. And that's exactly what the second method, tracking, accounts for. It simulates and tracks all interactions of a light ray with medium's particles as it travels through it. These particles are of course way too small to simulate individually, so a statistical approach is used instead, where the decision to scatter/absorb/continue is made at random based on some probability. It's more accurate but also way more computationally expensive. Because it relies on random numbers it's stochastic in nature, which means the results can be noisy and require multiple samples to converge to a smooth result. And because rays can exit at any point in the medium it nicely accounts for indirect lighting, not just direct lighting from light sources.
+Tracking
+Getting good quality results with ray marching can be hard since it requires a lot of cheap tricks like fixed ambient lighting to look good. Since the aim is for maximum quality, I went with tracking.
+Tracking In Homogeneous Volumes
+For now let's assume that the medium is homogeneous (uniform). These volumes are described by two properties: absorption coefficient $\sigma_a$ and scattering coefficient $\sigma_s$ that are the same across the entire volume. The absorption coefficient defines how much light is absorbed per unit distance traveled in the medium, while the scattering coefficient defines how much light is scattered per unit distance. Together, they define the extinction coefficient $\sigma_t$, which is the sum of the two $\sigma_t = \sigma_a + \sigma_s$. The rate at which light gets absorbed or scattered as it travels through the medium is given by Beer's law. It dictates how much light remains untouched after traveling a distance $d$ in the medium, this quantity is called transmittance $T(d)$.
+$$
+T(d) = e^{-\sigma_t d}
+$$
+Transmittance is important when you need to know how much light reaches a certain point in the medium. This is useful for calculating direct lighting from light sources (NEE), which will significantly reduce noise and speed up convergence.
+As earlier said, there are too many particles in a medium to simulate them individually, so a probabilistic approach has to be used to determine how light interacts with the volume. The idea is to sample a random distance at which the next interaction (scattering or absorption) occurs based on some probability that's based on the medium's properties. This probability is given by:
+$$
+p(d) = \sigma_t e^{-\sigma_t d}
+$$
+The distance $d$ which light ray travels through the medium before an interaction (scattering or absorption) occurs is called the free path length, and we want it to be sampled based on the probability $p(d)$. To do that inverse transform sampling can be used and $d$ ends up being defined as:
+$$
+d = -\frac{\ln(\xi)}{\sigma_t}
+$$
+Where $\xi$ is a uniformly distributed random number in the range [0, 1]. Once the free path length is sampled, the ray can be marched through the medium by this distance. At that point, the decision is made whether the interaction is a scattering or absorption event based on the ratio of scattering to absorption coefficients. Probability of absorption is given by $p_{absorb} = \frac{\sigma_a}{\sigma_t}$ and scattering by $p_{scatter} = \frac{\sigma_s}{\sigma_t}$. To decide whether the event is a scattering or absorption, another random number $\xi$ uniformly distributed in [0, 1] can be used. If $\xi < p_{scatter}$, the event is a scattering event, otherwise, it is an absorption event. Also note that if the sampled distance exceeds the distance to the medium boundary, the ray exits the medium without any interaction. This boundary can be defined in any manner, for example a simple axis aligned bounding box (AABB) or a mesh, all you really need is the distance to the boundary to check if the sampled distance is valid.
+Scattering event occurred.
+No scattering event occurred, sampled distance exceeded volume's boundary.
+If the event is absorption, the ray is simply terminated. If it's a scattering event, a new direction has to be sampled based on the medium's phase function.
+Phase Functions
+The phase function describes the angular distribution of scattered light. It defines how likely light is to scatter in a particular direction after an interaction. There are several phase functions commonly used in volumetric rendering, each with its own characteristics and use cases. The most commonly used one is Henyey-Greenstein phase function, which is defined as:
+$$
+p(\cos \theta) = \frac{1}{4\pi} \frac{1 - g^2}{(1 + g^2 - 2g\cos \theta)^{3/2}}
+$$
+$\theta$ is the angle between the incident direction $\hat v$ and outgoing direction $\omega$, so the function defines the probability of light scattering in a direction $\omega$, where the angle between $\hat v$ and $\omega$ is $\theta$. $g$ is the asymmetry parameter that controls the anisotropy of the scattering. When $g = 0$, the scattering is isotropic (equal in all directions). When $g > 0$, the scattering is forward peaked, meaning light is more likely to scatter forward. When $g < 0$, the scattering is backward peaked, meaning light is more likely to scatter backward.
+Isotropic Phase Function ($g=0$)
+Forward Peaked Phase Function ($g > 0$)
+Henyey-Greenstein phase function is widely used due to its simplicity and ability to model a wide range of scattering behaviors with just a single parameter $g$. However, it doesn't accurately represent Mie scattering, which is the scattering of light by particles that are comparable in size to the wavelength of light (like water droplets in clouds). Mie scattering has a more complex angular distribution with both forward and backward scattering components. But it is very expensive to compute.
+There are some approximations of it, like An Approximate Mie Scattering Function for Fog and Cloud Rendering. It combines Henyey-Greenstein with Draine phase function to approximate MIE scattering over the range of water droplet sizes from 5 to 50 micro meters. But because it has a weird parameter range based on droplet size, it can be hard to work with and since the difference is very subtle, I went with Henyey-Greenstein for simplicity.
+Henyey-Greenstein
+Approximated MIE
+To sample a new direction based on the Henyey-Greenstein phase function, a random angle between the incident direction $\hat v$ and the outgoing direction $\omega$ is needed. Since we have the probability distribution, just like before, the inverse transform sampling can be used. After doing that with the Henyey-Greenstein phase function, we get the following formula for the cosine of the scattering angle $\theta$:
+$$
+\cos \theta =
+\begin{cases}
+\frac{1}{2g} \left(1 + g^2 - \left(\frac{1 - g^2}{1 - g + 2g\xi}\right)^2\right) & If \; g \neq 0\\
+2\xi - 1 & If \; g = 0
+\end{cases}
+$$
+Where $\xi$ is a uniformly distributed random number in the range [0, 1]. Since this is only for the polar angle $\theta$, the azimuthal angle $\phi$ also has to be sampled, though this time it can just be sampled uniformly in the range [0, 2$\pi$] since the phase function doesn't affect it in any way:
+$$
+\phi = 2\pi \xi'
+$$
+Where $\xi'$ is another uniformly distributed random number in the range [0, 1]. Finally, the spherical coordinates $(\theta, \phi)$ can be converted to Cartesian coordinates to get the new world direction vector $\omega$. This can be done using orthonormal basis constructed from the incident direction $\hat v$:
+$$
+\begin{aligned}
+&t = \frac{u \times \hat v}{||u \times \hat v||} \\
+&b = \hat v \times t \\
+&\omega = \sin \theta \cos \phi \cdot t + \sin \theta \sin \phi \cdot b + \cos \theta \cdot \hat v
+\end{aligned}
+$$
+Where $u$ is any vector that is not parallel to $\hat v$. This gives the new direction $\omega$ after the scattering event.
+Sampling $\;\omega\;$ from $\;\hat v\;$
+And that's pretty much it for the basic tracking algorithm. Now you go to step 1 and sample the distance along the new ray with direction $\omega$. You just keep repeating this process until the ray exits the medium or gets absorbed. Each time a scattering event occurs, you sample a new direction and continue tracking from that point. Over multiple samples, this will give you a good approximation of how light interacts with the participating media.
+Room filled with homogeneous volume. Rendered with Next Event Estimation (25k samples per pixel)
+The issue is that a lot of samples are needed to get a noise free result, especially in media with high scattering coefficients. To help with that, next event estimation can be used to directly sample light sources during each scattering event, which greatly reduces variance and speeds up convergence. Details about NEE won't be covered here, since it's a separate topic on its own.
+Another thing that uniform volumes can be used for is subsurface scattering. By making the surface transparent and filling the mesh with a volume with high scattering and low absorption coefficients, the way light penetrates the surface, scatters internally, and exits at different points can be simulated, creating a soft, translucent appearance. This is particularly useful for rendering materials like skin or wax. The only thing that has to be changed in the tracking algorithm is the boundary, instead of being defined by an AABB, it has to be defined by the mesh. It's easy to implement since all that is needed is distance to the next intersection with the mesh along the ray.
+Diffuse
+Subsurface scattering
+Heterogeneous Volumes
+Heterogeneous volumes are more complex than homogeneous ones, as they have varying density across the volume (they are non uniform). So the same equations for free path length sampling and transmittance calculation cannot be used. Instead, the varying density needs to be accounted for.
+There are a couple approaches here, each with its own trade-offs:
+1. Regular Tracking: The idea is to split the heterogeneous volume into smaller homogeneous regions (like a 3D grid) and perform regular tracking within each region. When the ray crosses into a new region, medium properties are updated. This method is straightforward but not feasible for highly detailed volumes as it can lead to a very large number of regions.
+2. Ray Marching: Instead of sampling the free path length directly, ray marching can be used to step through the volume in small fixed increments. At each step, the medium properties are evaluated to determine whether the scattering/absorption event occured. But the amount of steps required to get a good result will pretty much vary based on the density of the medium, so it's hard to find a good step size that not only performs well but also looks good.
+3. Delta Tracking: This is a more advanced technique that allows sampling free path lengths in heterogeneous media without needing to subdivide the volume. The idea is to use a majorant extinction coefficient $\sigma_{t}^{max}$ which is the maximum extinction coefficient in the volume. Free path lengths are sampled using this majorant coefficient, when an event occurs, an actual density at that point is evaluated, and based on that the decision is made whether the collision actually happened or if it's a null collision. If it's a null collision, sampling continues until an interaction is accepted or the ray exits the volume. This method is more efficient than regular tracking and ray marching for highly detailed volumes, but it can still be computationally expensive for volumes with a lot of empty space.
+I went with delta tracking since it seemed like the most promising approach for rendering clouds. Regular Tracking seemed too complicated to implement and manage the data structure for (and it would most likely be a lot slower than delta tracking), and ray marching seemed too inaccurate and required a lot of per volume tweaking to get somewhat good results.
+OpenVDB
+So, first the density data itself has to be stored somehow. Volumes are usually stored inside a VDB format, which stores sparse volumetric data. Just like with 3D models a lot of these can be found online for free. They store a 3D voxel grid where each voxel contains a density value representing the medium's density at that point in space.
+The problem was that OpenVDB (C++ library for working with VDB files) is not compatible with GPU usage, the grid cannot be accessed from the GPU. So at first I decided to convert the VDB into a 3D texture that can be sampled inside the shader. This works fine for small to medium sized volumes, but for really large volumes this can become a problem due to really high memory usage. A texture is really inefficient way to store density since it's not sparse. A 469MB VDB file ended up being 3140MB when converted to a 3D texture, with 12GB of VRAM in my GPU this means it's manageable but I'd be limited to 3-4 volumes of that size at once.
+That was less than ideal, so later on I switched to NanoVDB which is a GPU implementation of sparse voxel grid. It's a little bit slower (20-30% based on some testing I've done) since it can't be sampled as fast as a 3D texture, but it uses way less memory, the same 469MB VDB file ended up being only 563MB instead of 3140MB when converted to NanoVDB format, so the trade-off is worth it. The most annoying thing about NanoVDB is it's absolute lack of any documentation, so figuring out how to use it took a lot of trial and error, and I'm still not sure if I'm doing everything correctly.
+Delta Tracking
+Now onto the actual delta tracking implementation. The idea is to fill the volume with fictional null particles so that the medium can be treated as if it's homogeneous with extinction coefficient $\sigma_{t}^{max}$. Think of it as filling all the gaps with invisible null particles, just so that we can act as if the volume is homogeneous, when in reality it's not. Free path lengths are then sampled using this majorant coefficient, and when an event occurs, the actual density at that point is evaluated to decide whether the collision is real or not.
+Finding the majorant extinction coefficient is pretty straightforward, just iterate through all the voxels in the volume and find the maximum density value. From that you can compute the maximum extinction coefficient $\sigma_{t}^{max}$ using the medium's scattering and absorption coefficients.
+Free path lengths are sampled using the same formula as before, but with the majorant extinction coefficient:
+$$
+d = -\frac{\ln(\xi)}{\sigma_{t}^{max}}
+$$
+When an event occurs at distance $d$, the actual density $\rho(d)$ at that point in the volume is evaluated. From that the actual extinction coefficient $\sigma_{t}(d)$ can be computed using the medium's scattering and absorption coefficients. The probability of accepting the collision is then given by:
+$$
+p_{accept} = \frac{\sigma_{t}(d)}{\sigma_{t}^{max}}
+$$
+Another random number $\xi$ uniformly distributed in [0, 1] is generated. If $\xi < p_{accept}$, the collision is accepted as a real interaction (scattering or absorption), otherwise, it's a null collision and sampling continues for the next free path length from that point, we act as if nothing has ever happened. This process is repeated until the ray exits the volume.
+Another thing is transmittance calculation. In delta tracking, transmittance $T(d)$ over a distance $d$ can't be computed analytically like in homogeneous volumes. Instead, it has to be integrated numerically by simulating a path. So starting at the ray origin, free path lengths are sampled the same way as before using the majorant extinction coefficient. For each sampled distance, the actual density at that point is evaluated and the actual extinction coefficient is computed. If the collision is accepted, the path is terminated and the transmittance is returned as zero (since light is either absorbed or scattered). If it's a null collision, sampling continues until the ray leaves the volume. This gives a binary result of 0 or 1, ray either gets completely absorbed/scattered or exits the volume without interaction. Which is not ideal, but this will be addressed later.
+And that's pretty much it for delta tracking in heterogeneous volumes. It's a powerful and unbiased technique that allows you to accurately simulate light interactions in complex media without needing to subdivide the volume into smaller homogeneous regions. However, it can still be computationally expensive, especially for volumes with a lot of empty space, since many null collisions may be sampled before a real interaction occurs. And unfortunately this is visible as soon as you try to render something with it, the performance is just not great.
+Performance And Optimizations
+Let's load a large cloud VDB file It takes 3817MB of VRAM and is 4161x1454x1915 voxels in size, so it's pretty big. Let's also set absorption coefficient to 0 since clouds have almost no absorption, and anisotropy to 0.9 for strong forward scattering. Now let's try rendering it with delta tracking.
+Cloud rendered with delta tracking and Next Event Estimation (10 samples per pixel, 248s)
+Image above took 248s to compute, and that's for only 10 samples per pixel! The noise is really bad too. And it's only a single cloud, imagine trying to render a whole scene with multiple clouds and other geometry, it would take forever. So clearly some optimizations are needed here.
+Ratio Tracking
+First, Ratio Tracking. The idea is to attenuate the contribution of each sample based on the ratio of absorption coefficient to extinction coefficient, instead of terminating the path on absorption events. This way, the binary nature of delta tracking can be avoided, that will reduce the variance and with that the noise. So now, instead of terminating the path when an absorption event occurs, contribution of the sample is multiplied by the inverted ratio of absorption coefficient to the extinction coefficient at that point. This way, even if some of the light gets absorbed, it still contributes to the final image, just with reduced weight. This helps to reduce noise and improve convergence. Of course it doesn't help with this specific cloud example, since the absorption coefficient is 0 there is no absorption, but in general it can be very useful.
+$$
+W = W \cdot (1 - \frac{\sigma_a(d)}{\sigma_t(d)})
+$$
+Also, since only the ratio of absorption to scattering coefficients matters, instead of declaring them separately, they can be merged into a single extinction coefficient (density) and an albedo value that defines the color. Instead of having $\sigma_a$, $\sigma_s$, and color, there's just $\sigma_t$ (density) and albedo $a$ (color). So now the equivalent of $\sigma_a = 0.5$, $\sigma_s = 0.5$, albedo = (1, 1, 1) would be $\sigma_t = 1.0$ and albedo = (0.5, 0.5, 0.5). This makes it easier to define the medium's properties since only two parameters need to be considered instead of three. So $W$ is calculated as:
+$$
+W = W \cdot a
+$$
+Ratio tracking applies to homogeneous volumes just as well by the way. On the image below a variance reduction is clearly visible.
+Delta Tracking (25 samples per pixel)
+Ratio Tracking (25 samples per pixel)
+Ratio tracking can also be used for transmittance calculation in heterogeneous volumes. Instead of returning a binary result of 0 or 1, the transmittance can be accumulated along the path by multiplying it by the inverted ratio of actual extinction coefficient to majorant extinction coefficient at each collision.
+$$
+T(d) = T(d) \cdot \left(1 - \frac{\sigma_t(d)}{\sigma_{t}^{max}}\right)
+$$
+Where $T(d)$ is initialized to 1 at the start of the transmittance calculation. Each time a collision event occurs, the transmittance is updated by multiplying it with the inverted ratio.
+But just adding ratio tracking alone is not enough to make delta tracking fast. The performance is even worse. That's because now the path is not terminated when an absorption event occurs, so the number of scattering events per path increases significantly, leading to more computations and slower rendering times. To combat this Russian Roulette can be used to probabilistically terminate paths that contribute very little to the final image.
+Russian Roulette
+Russian Roulette is a technique used to probabilistically terminate paths that contribute very little to the final image. The idea is to randomly decide whether to continue or terminate a path based on its contribution weight. If the weight is below a certain threshold, the path can be terminated, and if the decision is to continue, the weight of the path is scaled up to account for the probability of termination. This helps to reduce the number of samples needed to achieve a certain level of convergence, especially in scenes with high variance.
+After every scattering event, the contribution weight $W$ of the path is evaluated. A random number $\xi$ uniformly distributed in [0, 1] is generated. If $\xi < p_{rr}$, where $p_{rr}$ is the probability of termination, the path is terminated. Otherwise, the weight is scaled up by dividing it by $p_{rr}$ to account for the probability of termination.
+so if $W$ is the contribution weight after a scattering event, the Russian Roulette step can be defined as:
+$$
+W^{\prime} =
+\begin{cases}
+0 & \xi \geq p_{rr} \\
+\frac{W}{p_{rr}} & Otherwise
+\end{cases}
+$$
+The expected value remains the same, so the image will converge to the same result eventually.
+$$
+E[W^{\prime}] = (1 - p_{rr}) \cdot 0 + p_{rr} \cdot \frac{E[W]}{p_{rr}}= E[W]
+$$
+So as long as the probability of termination is chosen wisely, Russian Roulette can significantly speed up rendering times without introducing bias. Setting $p_{rr}$ to the highest value of one of the color channels of the ray seems to work well. The same can be applied to transmittance calculation. But in that case the probability of termination can be set to the transmittance value itself since there are no color channels. As mentioned before, it won't do much in this specific cloud example since the absorption coefficient is 0, but in mediums with non-zero absorption it can greatly improve performance.
+2556s without Russian Roulette, max depth 200, biased
+161s with Russian Roulette, unbiased
+Region Subdivision
+The biggest issue with delta tracking is that in volumes with a lot of empty space, many null collisions will be sampled before a real interaction occurs, and that means a lot of wasted time. To mitigate this, the volume can be subdivided into smaller regions, each with its own majorant extinction coefficient. This way, when the ray enters a new region, the majorant extinction coefficient can be updated to better match the local density of the medium, reducing the number of null collisions in empty regions.
+I subdivided the volumes into a 32x32x32 grid of regions, too many subdivisions would slow down less dense volumes, and too few would result in way too many null collisions, so after some testing 32 seemed to be a good compromise. For each region, the maximum density value is computed and used to calculate the majorant extinction coefficient for that region. During tracking, when the ray crosses into a new region, the majorant extinction coefficient is updated accordingly. This significantly reduces the number of null collisions since the empty regions are skipped almost immediately instead of sampling null collisions. Here's a comparison:
+No subdivision
+With subdivision
+On the images above, every time a null collision is sampled (or the border of the regions is crossed), the brightness of that pixel is incremented by a small amount, so the darker the image the better. As you can see, with region subdivision the number of null collisions is massively reduced.
+No subdivision 216s
+With subdivision 33s
+With subdivision the render time of the bunny is reduced from 216s to 33s, which is a huge improvement considering it stays completely unbiased and is pretty much free aside from the VRAM needed for the additional grid.
+Since most of the volume in the cloud example is empty, it benefits greatly from the subdivision. It now takes only 14s to render at 10 samples per pixel, which is a massive improvement from the 248s.
+Rendered with Region Optimization and Next Event Estimation (10 samples per pixel 14s)
+Biasing the sampling
+Since clouds are really dense, really big, and highly anisotropic, they produce a lot of scattering events over really short distances in a similiar direction. This means that most of the time the amount of rays that have to be traced per path is huge, which increases variance and render times. The Design and Evolution of Disney’s Hyperion Renderer proposes a solution to this problem, as the ray progresses through the medium, the density of said medium is lowered alongside the anisotropy. This way, the sampled distance become a lot larger and the amount of rays per path is reduced, which reduces variance and speeds up convergence. And since the anisotropy is also reduced, the final image still looks somewhat correct. This does introduce some bias, but in practice the visual difference is minimal, and the performance gain is definitely worth it.
+In the paper they reduce the density and anisotropy linearly between 5th and 20th bounce, but honestly, I didn't notice much difference between that and just reducing them both throughout the whole path. So I just did that since it's faster, less events will be sampled.
+Anisotropy is reduced like this:
+$$
+g^\prime = |g|^{1 + d} \cdot \text{sign}(g)
+$$
+with $d$ being the ray depth (bounce count). And density is reduced like this:
+$$
+\sigma_{t}^{\prime} = \sigma_{t} \cdot b^{d}
+$$
+with $b$ being the bias factor (between 0 and 1). After implementing that, the bias factor was set to 0.8, which seems to work well for clouds. With that the render time is down to 1.1s for 10 samples per pixel! So again, a huge improvement over the initial 248s. The image is also a lot less noisy since now the paths are shorter which means there's less variance. The visual difference is minimal, it might seem like it's brighter but that's mostly because of the reduced noise. Without biasing the there is some very high frequency noise that makes the cloud look darker than it actually is on low sample counts.
+Rendered with biased sampling and Next Event Estimation (10 samples per pixel 1s)
+I didn't experiment with different ways of reducing density and anisotropy, but it's definitely worth exploring further. Another possible optimization is to calculate direct lighting only at the first and last scattering events. This way, the number of light samples per path is reduced significantly, which speeds up rendering times. The visual difference is minimal since most of the direct lighting contribution comes from the first and last scattering events anyway. I haven't implemented it yet, but it's definitely worth exploring in the future.
+Results and Comparison
+Performance Summary
+Performance results for the cloud rendering with each optimization step added:
+Technique
+Render Time (10 spp)
+Speedup
+Quality Impact
+Basic Delta Tracking
+~248s
+1.0x
+Unbiased
++ Ratio Tracking and Russian Roulette
+~255s
+0.97x
+Lower noise
++ Region Subdivision
+~14s
+17.7x
+Unchanged
++ Biased Sampling
+~1s
+225x
+Slightly biased
+Final Cloud (1000 samples per pixel 123s)
+Though even with the 225x speedup from biased sampling, the render time for a clean image at 1000 samples per pixel is still around 123s. So high scattering media like clouds are still pretty computationally expensive.
+Image below showcases 3 really high density clouds rendered together. The render time for this at 5000 samples per pixel is 996s, which is quite long, but still manageable for offline rendering.
+5000 samples per pixel, 996s
+A lot of the cost can be cut using a denoiser, which I'm not doing here. All of the images here were not denoised in any way. Which means that realistically with a good denoiser and some adaptive sampling a lot less samples would be needed for a good looking image.

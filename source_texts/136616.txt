@@ -1,0 +1,1578 @@
+Maister's Graphics Adventures – Page 3 – Low-level graphics programming
+Skip to content
+This is a long overdue blog post. Last year, I began a blog series where I explored the weird and wonderful world of texture compression formats. Unfortunately, I didn’t have time and motivation to finish it at the time, but it’s time I get back to finish these posts.
+Up until now, I’ve covered the major families: DXT (BC 1-5), ETC2 and BPTC (BC 6-7) in part 1 and part 2. Complexity has been steadily increasing, but now we’re finally going to tackle the end boss of texture compression, ASTC.
+ASTC
+ASTC, or Adaptive Scalable Texture Compression is the result of a fever dream which attempts to answer the question of “how complex can we make a texture compression format and still trick IHVs to make it into silicon”. Complexity in codec design generally translates to better quality / bit at the cost of more expensive decode/encode. As hardware designs evolve, we can afford more complex codecs. Finding a sweet spot is incredibly hard, and ASTC cranked it to 11, for better or worse.
+It began life on the Mali Midgard GPU series way back in the day, but has since been widely adopted by the mobile GPU ecosystem by all relevant vendors in the Khronos sphere, at least the core LDR profile.
+Profiles you say, in my texture formats? What is this, H.264? Well … we’ll get to that 🙂
+Notably, it’s also supported on the Nintendo Switch (Tegra supports Android after all), causing all sorts of fun issues for emulators … There’s actually multiple independent compute shader decoders of ASTC out there in the wild!
+ASTC (released in 2012) is still considered the state of the art, and I don’t think anyone else have made a serious attempt at introducing a new hardware accelerated texture compression format since. The state of the art in ASTC compression is still being developed with recent improvements from Pete Harris on astc-encoder, the official reference encoder, and that is to my knowledge the only encoder implementation of ASTC HDR/3D profiles.
+Desktop IHVs other than Intel have so far refused to expose support for ASTC, which is annoying, since it seems we’re forever stuck with two different worlds of texture compression, BC variant zoo on desktop and ASTC on mobile.
+The compute shader decoder
+Last year, around the time I wrote blogs on BPTC, I also implemented an ASTC LDR/HDR decoder that produced bit-exact results compared to the reference implementation and real hardware in my validation suite. Compared to the BC6 and 7 shaders, the shader complexity is ridiculous, and somehow it works. It’s integrated in Granite such that I can load ASTC compressed scenes transparently, which is useful for testing in a “because I can!” sense.
+The shader is certainly not optimized for speed. I focused on readability and debuggability, since it was hard enough to implement this as-is. It’s more than fast enough for my purposes at least.
+Enter the horror here. Here be dragons.
+One format to bind them all
+ASTC has a goal of better quality / bit than every existing format at the same time. This is not easy, considering that BC went the route of many different specialized formats designed to solve specific texture compression needs and you would expect each format to excel at their specific use case. As far as I know, ASTC succeeds here, given a sufficiently sophisticated encoder.
+To supplant every format, you’d need to support these features at the very least:
+R (BC4, EAC), RG (BC5, EAC), RGB (BC1, ETC2), RGBA (BC3, ETC2, BC7)
+4bpp (BC1, ETC2 RGB, BC4), 8bpp (BC3, BC5, ETC2 RGBA, BC6, BC7), and even lower (2bpp PVRTC?)
+LDR vs HDR (BC6)
+Decent multi-partition support
+Decorrelated channel support
+ASTC goes beyond these requirements in an attempt to future-proof the format. Bit-rate is fine grained. From sub 1bpp, up to 8bpp in fine steps. 2D is boring, so ASTC also supports 3D blocks, although adoption of this is non-existing outside Arm as far as I know. For SDF rendering, 3D block compression seems useful in theory at least.
+Codec concepts
+The ASTC specification in the Khronos Data Format document is 35 pages (!). There’s a lot of ground to cover when implementing this format, but fortunately, the codec features are mostly orthogonal, i.e. the complexity is additive, not exponential, making it somewhat manageable.
+Bit-rate scalability
+The ASTC format like every other format we’ve seen up until now is block based, where each block consumes a fixed number of bits. ASTC chose 128 bits, but bit-rate scalability is achieved through different block sizes. No longer can we rely on nice 4×4 blocks :(. Instead, we have ridiculous things like 8×6 blocks or 5×5 blocks, all the way up to 12×12 blocks. Very little actually changes depending on block size, we just get more weights to decode.
+In practice from what I have seen, encoders tend to focus on specific block sizes like 4×4, 6×6 and 8×8. In an ideal world, we’d be able to change the block size dynamically within a texture (think H.264 macro blocks being split into smaller blocks adaptively), but we need random access to stay sane.
+Good old color endpoint + weight architecture
+At a fundamental level, ASTC does not change how texture compression works. There’s still the concept of encoding color endpoints on a block level, and then per-texel weights are applied to interpolate between them. However, as we’ll see, a ton of complexity goes into efficiently encoding these color entry points and weights.
+If you’re familiar with video encoding, there are some fun parallels to draw here, since H.264 and beyond have just piled on more and more complexity on top of the basic motion compensated DCT blocks since the 80s. Texture compression is very similar. Keep piling codec features on top of the same fundamental architecture forever, what could go wrong!
+Bits are boring, trits and quints is where it’s at!
+Up until now, color endpoints and weights have been encoded with bits, but especially for weights, it’s very hard to achieve fine grained bit rate deltas. What if we could spend a fractional number of bits instead? ASTC achieves this through trinary and quintary (is this a word?) numbers, encoded into a binary representation.
+Every encoded weight or endpoint is given N bits as LSBs, and optionally one trit or quint as the MSBs.
+The binary encoding works by grouping values together in blocks. For trits, we’re aiming to encode 5 values together into a single number, which is 3^5 = 243 combinations. If we encode this into 8 bits, we’re pretty close to the theoretically optimal encoding.
+This is where we start running into sprinkles of incomprehensible code snippets in the spec which is a mix of C and Verilog designed to be fast in HDL, but unreadable nonsense in software. I have no idea what this code is trying to do, so to decode, I just build a LUT which converts 8 bits into 5 trits and call it a day. Quints are similar, where we encode 3 values together, which is 5^3 = 125 combinations, and fits snugly into 7 bits.
+As an example, here’s what I ended up with in GLSL:
+```
+// Trit-decoding.
+// quant.x = number of bits per value
+int block = idiv5_floor(index); // Classic cute trick: (v * 0x3334) >> 16
+int offset = index - block * 5;
+start_bit += block * (5 * quant.x + 8);
+
+int t0_t1_offset = start_bit + (quant.x * 1 + 0);
+int t2_t3_offset = start_bit + (quant.x * 2 + 2);
+int t4_offset = start_bit + (quant.x * 3 + 4);
+int t5_t6_offset = start_bit + (quant.x * 4 + 5);
+int t7_offset = start_bit + (quant.x * 5 + 7);
+
+// ;__;
+int t = (extract_bits(payload, t0_t1_offset, 2) << 0) |
+    (extract_bits(payload, t2_t3_offset, 2) << 2) |
+    (extract_bits(payload, t4_offset, 1) << 4) |
+    (extract_bits(payload, t5_t6_offset, 2) << 5) |
+    (extract_bits(payload, t7_offset, 1) << 7);
+
+// LUT magic
+t = int(texelFetch(LUTTritQuintDecode, t).x);
+t = (t >> (3 * offset)) & 7;
+
+int m_offset = offset * quant.x;
+m_offset += idiv5_ceil(offset * 8); // (1) Explanation below
+
+if (quant.x != 0)
+{
+    int m = extract_bits(payload, m_offset + start_bit, quant.x);
+    ret = (t << quant.x) | m;
+}
+```
+… and similar garbage code for quints.
+Note for (1): The reason the T value is scattered around is a special feature where the bit stream can be terminated early if the block is only partially filled. Every trit value requires less than 8/5 bits to encode, so after a value is emitted, we know that we must have emitted ceil(8 * count / 5) bits to encode the trits in binary.
+Complex weight un-quantization
+For purposes of orthogonality, it’s generally desirable that one part of the decoding process does not affect other parts of the decoding process. Weights is one such case. The color interpolator shouldn’t have to care how many bits the weights were encoded with, and thus we decode weights to a fixed range. In our case, weights have a range of [0, 64].
+This is very similar to BPTC. In BPTC, the codec defines un-quantization LUTs for 2bpp, 3bpp and 4bpp like this:
+```
+const int weight_table2[4] = int[](0, 21, 43, 64);
+const int weight_table3[8] = int[](0, 9, 18, 27, 37, 46, 55, 64);
+const int weight_table4[16] = int[](0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64);
+```
+Why not just bit-replication you ask? Well, dividing by non-POT values after weight scale is a PITA, that’s why, and we cannot bit-replicate trits and quints either way. ASTC un-quantizes in a more roundabout way, but uses the same idea from BPTC where weight range is normalized to [0, 64].
+Again, the un-quantization step is gnarly enough that I just made a LUT for that as well, because why not:
+```
+int decode_weight(uvec4 payload, int weight_index, ivec4 quant)
+{
+    int primary_weight = decode_integer_sequence(payload, 0,
+        weight_index, quant.xyz);
+    // quant.w is offset into unquant LUT.
+    primary_weight = int(texelFetch(LUTWeightUnquantize,
+        primary_weight + quant.w).x);
+    return primary_weight;
+}
+```
+Color endpoints
+Color endpoints are weird in that there are multiple phases to it:
+Decode N values of integer sequence; which N values to use depends on which partition the texel belongs to
+Un-quantize N values to 8 bits in range [0, 0xff]
+Interpret N 8-bit values in some magical way depending on the endpoint format (of which there are 16!)
+Emit multiple RGBA values in UNORM8 (LDR) or UNORM12 (HDR)
+```
+void decode_endpoint(out ivec4 ep0, out ivec4 ep1, out int decode_mode,
+    uvec4 payload, int bit_offset, ivec4 quant, int ep_mode,
+    int base_endpoint_index, int num_endpoint_bits)
+{
+    num_endpoint_bits += bit_offset;
+    // Need to explicitly terminate bitstream for color end points.
+    payload &= build_bitmask(num_endpoint_bits);
+
+    // Could of course use an array,
+    // but that doesn't lower nicely to indexed registers on all GPUs.
+    int v0, v1, v2, v3, v4, v5, v6, v7;
+
+    // End point mode is designed so that the top 2 bits encode
+    // how many value pairs are required.
+#define DECODE_EP(i) \
+    int(texelFetch(LUTEndpointUnquantize, quant.w + \
+        decode_integer_sequence(payload, bit_offset, i + \
+        base_endpoint_index, quant.xyz)).x)
+
+    int hi_bits = ep_mode >> 2;
+    v0 = DECODE_EP(0); v1 = DECODE_EP(1);
+    if (hi_bits >= 1) { v2 = DECODE_EP(2); v3 = DECODE_EP(3); }
+    if (hi_bits >= 2) { v4 = DECODE_EP(4); v4 = DECODE_EP(5); }
+    if (hi_bits >= 3) { v6 = DECODE_EP(6); v7 = DECODE_EP(7); }
+
+    switch (ep_mode) { ... }
+}
+```
+The end point modes are defined as:
+Every endpoint has code snippets explaining how to take the n values and turn them into RGBA values, which are to be fed to the weight interpolator stage. As expected, we just need a horrible switch statement which handles every case. :<
+Each partition can even select its own encoding format, which is pretty wild. Poor encoder that has to consider all these scenarios …
+LDR endpoints
+The endpoint decoding process starts off with trivial cases like luminance endpoints.
+Mode 0 (direct)
+```
+e0 = (v0, v0, v0, 0xFF);
+e1 = (v1, v1, v1, 0xFF);
+```
+Since we have an explicit decode step here, ASTC also allows us to take advantage of redundancy between the endpoint values, e.g.:
+Mode 1 (base + offset)
+```
+L0 = (v0 >> 2) | (v1 & 0xC0);
+L1 = L0 + (v1 & 0x3F);
+if (L1 > 0xFF) { L1 = 0xFF; }
+e0 = (L0, L0, L0, 0xFF);
+e1 = (L1, L1, L1, 0xFF);
+```
+This encoding scheme improves precision when L0 and L1 are sufficiently close, i.e. correlated. BC7 don’t really attempt to take advantage of correlation between end points, outside the minimal shared endpoint / subset bits. BC6 does however, through use of delta bits.
+One question that immediately pops into my head is how this is supposed to work in practice for trits and quint encoding. Since bits are reinterpreted and shuffled around like this, any un-quantization that’s not just bit replication would probably create unexpected results in the MSBs.
+Luminance + Alpha (Mode 4/5)
+ASTC is a little awkward in how 2-component textures are encoded. The common case for 2-component textures is normal maps, where we normally encode it as RG, ala BC5 or EAC. ASTC only supports luminance alpha, so in order to efficiently encode these formats, we have to pre-swizzle the texture into (R, R, R, G), and apply a (R, W, x, x) swizzle in the VkImageView.
+Similar to luminance-only, there is a direct mode, and a correlated mode.
+RGB
+Other highlights from the LDR formats are base + scale, where two endpoints are encoded RGB and RGB * A. Seems very nice for luminance gradients, and quite compact! We also have direct modes, with a special feature which takes some ideas from YUV. Blue contraction improves color accuracy close to gray. Of course, there’s a base + offset mode that we already saw for luma and luma + alpha formats.
+RGBA
+RGBA encoding is very similar to RGB, with two tacked on alpha values, nothing particularly interesting here.
+HDR endpoint insanity
+While LDR encoding modes are pretty straight forward once you stare at it long enough, HDR is just incomprehensible. Where BC6 was fairly naive w.r.t. endpoints, ASTC is the complete opposite.
+Similar to BC6, HDR is implemented in a way where we interpret a floating point format as UNORM. This means we’re interpolating in a pseudo-logarithmic domain, i.e. the perceptual domain.
+While BC6 basically directly interpolates in U/SNORM16 with a direct conversion to FP16, ASTC is a little more … particular about it.
+When decoding HDR end points, UNORM12 values are generated. It starts innocent enough in mode 2 where 8-bit inputs are just shifted in place:
+```
+int y0, y1;
+if (v1 >= v0)
+{
+    y0 = v0 << 4;
+    y1 = v1 << 4;
+}
+else
+{
+   // Oh hai thar BPTC shared bits +
+   // BC1 symmetry exploitation
+   y0 = (v1 << 4) + 8;
+   y1 = (v0 << 4) - 8;
+}
+
+ep0 = ivec4(ivec3(y0), 0x780 /* 1.0 */);
+ep1 = ivec4(ivec3(y1), 0x780 /* 1.0 */);
+```
+but eventually you just have to give up trying to reason about the spec when this is the wall of code that greets you.
+This is the point where you yell WTF out loud, cry a little inside, contemplate your life decisions and copy paste the spec.
+Partition hell
+Like BPTC, ASTC supports partitions. As we’ve seen before, this feature is designed to deal with sharp transitions in the block. BPTC made it pretty simple where it was possible to spend 6 bits to select one of the 64 partition layouts. This works fine for BPTC since it’s locked to 4×4 blocks and using LUTs makes sense.
+ASTC does not have fixed block sizes, so what to do? One LUT for every possible combination? No. ASTC went the route of procedurally generated partition assignments using a 10 bit seed. This works for any block size and partition count, which “solves” that problem. Again, the spec has a long, incomprehensible code snippet defining the process.
+Screw this. As usual, look-up texture it is. ASTC can support up to 4 partitions which is pretty wild. No idea how useful this is in practice, as we’ll probably end up spending all bits just encoding color endpoints at that rate …
+This seems like a nightmare for encoders. Most of the resulting partitions are worthless garbage, and exhaustively testing over 1000 partition combinations per block does not seem very practical …
+Mode hell
+Speaking of many combinations, there’s a lot of different modes. BC7 has only 8 modes, and BC6H has 14. From what I’ve seen, even BPTC encoders just focus on 2 or 3 modes at most. ASTC has several thousand modes if we follow the same logic! 😀
+Most of the mode bits are spent on encoding things like:
+Quantization mode of weight grid
+Resolution of weight grid [see below]
+Decorrelated colors
+Void-extent [see below]
+Reserved [see below]
+Once we have looked at mode bits, we can compute how many bits are required to encode weights, and based on that result, we also know how many bits are required to encode color endpoints. The color endpoint quantization level is thus implicit (so much fun …). There are also tons of edge cases we have to account for and handle error cases …
+Weight grid interpolation
+A special ASTC feature is that the weight grid isn’t actually 1:1 with texels like any other format we’ve seen so far. The weight grid can be much lower resolution than the block itself, and the real weights are reconstructed with bi-linear interpolation. This seems quite useful for scenarios where the block encodes a smooth gradient and the weights are highly predictable. Might as well spend more bits on encoding color endpoints instead. The spec outlines a specific fixed-point scheme that must be followed exactly, and finally the code snippets in the spec actually make some sense!
+This feature is a must-have for larger block sizes. There just isn’t room for a full weight grid when we start to hit big boy block sizes like 8×8. At this low bit-rate, the only tool we have to encode high frequency features is partitions …
+Void extent
+Encoding constant high-precision colors can actually be kind of awkward in most texture compression formats with limited endpoint precision, but ASTC has a special mode for it, where exact FP16 values can be encoded if desired. The feature even goes so far as to specify that a region outside the block also has the same color, which theoretically allows a texture filtering unit to short circuit. This doesn’t sound very practical, and I’m not sure if this feature is actually used.
+Painful error handling
+Another “feature” of ASTC is how errors are handled. Unlike other texture compression formats, there are many encodings which are illegal, and a correct decoder must detect all error scenarios and return the proper error color. This error color is either saturated magenta or NaN (ææææææææ!) depending on the implementation and whether or not HDR is supported.
+Inconsistent decode formats
+ASTC decoders will either decode to UNORM8 or FP16, depending on the profile supported by the GPU. This is kinda annoying, especially when we consider formats like SRGB8 where apparently the RGB portion is supposed to decode to UNORM8 viewed as SRGB, but alpha is still FP16? (._.) Not even the reference decoder seems to get that right, so I just decode alpha as UNORM8 in that case.
+Interpolation and final encode
+Finally, a breather. Once color endpoints and weights are fully decoded, we enter interpolation. It’s not all trivial though. That would be boring.
+The first step is always to expand the UNORM8 or UNORM12 results into UNORM16. This is context sensitive on things like the endpoint format as well as how we’re encoding the value after interpolation. This final encode is the raw data that is fed into the texture filtering unit.
+```
+if (decode_mode == MODE_HDR)
+{
+    ep0 <<= 4; // Simple expansion 12 -> 16-bit
+    ep1 <<= 4;
+}
+else if (decode_mode == MODE_HDR_LDR_ALPHA)
+{
+    ep0.rgb <<= 4;
+    ep1.rgb <<= 4;
+    ep0.a *= 0x101; // Bit replicate UNORM8 to UNORM16,
+    ep1.a *= 0x101; // for FP16 conv later
+}
+else if (DECODE_8BIT)
+{
+    ep0 = (ep0 << 8) | ivec4(0x80); // Treat the data as 8.8 fixed point.
+    ep1 = (ep1 << 8) | ivec4(0x80); // Also bake in 0.5 rounding factor.
+}
+else
+{
+    ep0 *= 0x101;
+    ep1 *= 0x101;
+}
+
+// This is why weights have [0, 64] range and not [0, 63].
+ivec4 color = (ep0 * (64 - weight) + ep1 * weight + 32) >> 6;
+```
+Now we have a complete UNORM16 color value that needs to be encoded.
+Encode to UNORM8 / SRGB8
+For 8-bit decode, we make use of the 8.8 fixed point expansion, and just shift the result down. Easy!
+```
+ imageStore(OutputImage, coord.xy, uvec4(final_color >> 8));
+```
+Encode LDR to FP16
+This one is annoying. When interpolating, we did bit replication, and we need to convert the UNORM16 value to FP16. It’s not as simple as just dividing by 0xffff, of course. We explicitly need to treat 0xffff as 1.0, and for other values, we divide by 2^16 with round-to-zero semantics. We have to do this by hand of course. Soft-float is so much fun! <_<
+```
+// ASTC has a very peculiar way of converting the decoded result to FP16.
+// 0xffff -> 1.0, and for everything else we get
+// roundDownQuantizeFP16(vec4(c) / vec4(0x10000)).
+ivec4 msb = findMSB(color);
+ivec4 shamt = msb;
+ivec4 m = ((color << 10) >> shamt) & 0x3ff;
+ivec4 e = msb - 1;
+uvec4 decoded = m | (e << 10);
+uvec4 denorm_decode = color << 8;
+decoded = mix(decoded, uvec4(denorm_decode), lessThan(e, ivec4(1)));
+decoded = mix(decoded, uvec4(0x3c00), equal(color, ivec4(0xffff)));
+return decoded;
+```
+Encode HDR to FP16
+The intention is that the interpolation is logarithmic, but floats are just piecewise logarithmic. BC6 doesn’t care at all and just reinterprets the resulting UNORM16 interpolation as FP16, but ASTC tries to be a little smarter. The mantissa is tweaked a bit.
+```
+// Interpret the value as FP16, but with some extra fixups along the way to make the interpolation more
+// logarithmic (apparently). From spec:
+ivec4 e = color >> 11;
+ivec4 m = color & 0x7ff;
+ivec4 mt = 4 * m - 512;
+mt = mix(mt, ivec4(3 * m), lessThan(m, ivec4(512)));
+mt = mix(mt, ivec4(5 * m - 2048), greaterThanEqual(m, ivec4(1536)));
+```
+From what I can tell, there is no signed float support in ASTC, except for the void extent.
+Decode format extensions
+In Vulkan, there is a weird extension called VK_EXT_astc_decode_mode which allows a VkImageView to select which format an ASTC block should decode to. Why is this even a thing? One quirk of ASTC is that even UNORM blocks full of LDR data must be decoded to bit-exact FP16. This means that if a GPU architecture decodes compressed textures into L1 cache, we would end up consuming a lot more cache than strictly necessary. The whole point of the decode mode extension is to allow us to explicitly decode to a lower precision format to improve cache hit rates, presumably. (That makes me wonder what GPUs actually do in practice …)
+In Granite, I setup the decode mode as:
+```
+// ...
+if (format_is_srgb(create_info.format))
+   return true;
+
+if (format_is_compressed_hdr(create_info.format))
+{
+   auto &features = device->get_device_features();
+   if (features.astc_decode_features.decodeModeSharedExponent)
+      astc_info.decodeMode = VK_FORMAT_E5B9G9R9_UFLOAT_PACK32; // Nice
+   else
+      astc_info.decodeMode = VK_FORMAT_R16G16B16A16_SFLOAT;
+}
+else
+{
+   astc_info.decodeMode = VK_FORMAT_R8G8B8A8_UNORM;
+}
+// ...
+```
+Fortunately, there are now special SFLOAT format variants for ASTC in the VkFormat enum, which are tied to the ASTC HDR extension, and can be used to notify applications if the blocks likely contain HDR blocks. The awkward part of ASTC is that even when using the UNORM format, you can still decode HDR blocks, and it just happens to work on GPUs which support ASTC HDR. Profiles are fun, right? ._. With decode mode, we can at least clamp down on these shenanigans. HDR blocks fail to decode in UNORM8 mode.
+Conclusion
+So far, this is the endgame of texture compression, and I really don’t want to look at this again. 🙂 It’s been a year since I looked into this last time, so I might have missed some details.
+There’s tons of smart ideas in this format, but I also feel it’s too clever for its own good. Writing a decoder was difficult enough, and I don’t even want to think about how painful an encoder would be. A format is only as good as its encoding ecosystem after all.
+This is the second part of the blog series I started in part 1. We have covered the S3TC, RGTC and ETC family of formats. This served as a good introduction to the topic of texture compression, but from here, the complexity will explode.
+BPTC
+This post will be dedicated to the BPTC compressed formats. These formats represent BC6 and BC7 formats in Vulkan, and is the state-of-the-art in texture compression on desktop GPUs, completing RGB and RGBA compression. BC1 and BC3 were the only proper desktop alternatives before these formats came along, and the quality of BC1 and BC3 aren’t … great.
+BPTC also adds support for HDR. This is a big deal as before BPTC it was not possible to properly compress HDR data.
+I pondered a bit over which format I should present first, but I think it’s appropriate to start with BC6 since it is much simpler than BC7 in terms of overall complexity. I feel like when BC6 was designed it sacrificed complexity from BC7 in order to add HDR.
+Common ideas
+Partitions
+As we saw in ETC2, there was a very crude and early attempt to add partitions into the block format. The T and H formats in particular let you specify two different color endpoint pairs which could be selected at will using 1 bit per texel. Rather than letting the partition be dictated by the 2×4 / 4×2 sub-block, you could select any partition scheme.
+Specifying an entire bit per texel to select a partition is quite overkill however, especially for a format which just gives you 64 bits for color. This makes the T and H modes crude hacks on top of ETC1. BPTC instead adds the concept of a pre-made table of partition shapes, and support for more than 2 partitions. Rather than specifying the partition index for each texel, we specify say, 64 common shapes, and just spend up to 6 bits per block (6 / 16 bits per texel) to encode the information. Of course, this idea falls flat if the exact partition we need doesn’t exist, but BPTC’s partitions seem well thought out. This is just a pain to implement since it means copy-pasting over a lot of tables ._.
+Variable bit depth for endpoints and weights
+Earlier formats were extremely rigid in how the blocks were to be encoded. You get X number of bits to specify endpoints and 2 bits per texel for the weights, a neat 32/32 bit split between the control block and texel data. Overall, this is a good setup for 64 bit block formats like BC1 and ETC, but it falls a bit short for 128 bit block formats like BPTC. Now we have more freedom and headroom to either spend lots of bits on endpoint accuracy, more weight bits per texel, or perhaps more partitions — which requires a lot more bits to encode multiple endpoints. Essentially, everything becomes a trade-off. More partitions can deal better with uncorrelated texels, more endpoint precision can deal with smooth gradients and more weight bits improves general PSNR when dynamic range in the block is large.
+How all of this is configured is done through …
+Mode hell
+As we also saw with ETC2, there were multiple “modes” a block could enter into, depending on the encoded bits. We have the “differential”, “individual”, “T”, “H” and “Planar” modes. This already adds a lot of complexity to an encoder — which needs to figure out which mode is best through heuristics and trial and error — and decoder — which has to implement everything.
+BPTC makes the mode idea more explicit and a certain number of bits are reserved to express the “mode” a block will be in.
+Exploiting endpoint symmetry
+While earlier formats used endpoint symmetry as a way to enable different modes (e.g. BC1), BPTC has already encoded the mode explicitly. Instead, we exploit symmetry to save one weight bit. We can simply assume that the MSB weight bit of the first texel is 0. We can always flip the order of the endpoints to make this work. Actually, we can save one bit per partition, since one texel per partition can be assumed to have MSB weight bit of 0. Which texels to treat specially is all done through another look-up table (sigh …) defined by the specification. Unfortunately, this means bitfield extraction from the 128-bit payload becomes very awkward and irregular … For this purpose I had to make a bitfield helper function. I doubt it’s very efficient, but you gotta do what you gotta do …
+https://github.com/Themaister/Granite/blob/master/assets/shaders/decode/bitextract.h
+Normalized weight un-quantization
+Up until now there hasn’t been any good way of interpolating between endpoints in any format. Interpolation in S3TC and RGTC involves a non-POT divider, which is awkward to make bit-exact, and ETC technically does not interpolate between endpoints, as there is an offset table (which is basically the same thing in practice, but it doesn’t concern itself with a divider). While ETC has bit-exact decoding, S3TC and RGTC do not, as the interpolation is defined in terms of floating point.
+With the number of weight bits being variable in BPTC, it makes sense to normalize the weights to a range which is easier to work with, and can easily support bit-exact decoding. Values in the range of [0, 64] were chosen. BPTC can use either 2, 3 or 4-bit weights, and the specification defines a table which normalizes the weights onto the [0, 64] range. Interpolation can then be easily done in fixed point as:
+```
+interpolated = (a * (64 - weight) + b * weight + 32) >> 6;
+```
+This avoids the non-POT divider headache we’ve seen earlier. I tried finding a neat arithmetic expression to re-normalize the weights without a LUT, but I gave up pretty quickly.
+No planar mode?
+One thing I found rather puzzling was the lack of a planar mode in BPTC. ETC2 has it and seems kinda useful …
+BC6 – 4×4 – 128 bits
+https://github.com/Themaister/Granite/blob/master/assets/shaders/decode/bc6.comp
+BC6 is laser focused on compressing HDR data (FP16). There is only RGB support, no RGBA at all.
+Representing floating point without floating point
+In the other formats we have looked at, we have used normalized integers as a way to represent endpoints and colors. Interpolation of integer endpoints is very easy since it’s just fixed point math. When we start introducing floating point into the mix, there is a question of how we represent this efficiently. As we have seen, we cannot spend too many bits on representing endpoints, even with 8-bit color. With FP16, representing endpoints in full 16-bits per channel is extremely wasteful. As with 8-bit color, we need to have a simple and efficient solution for quantization of FP16 values with an arbitrary amount of bits.
+A hypothetical solution for FP16 could be achieved by storing the exponent (5 bits) and just quantize the mantissa accordingly. BC6 isn’t far from this idea, although, it is much simpler than that. BC6 exploits the fact that floating point representations of finite numbers is monotonic for positive numbers.
+For example, if we consider that the internal representation of endpoints is 16-bit unsigned, we interpolate endpoints as 16-bit integers, and perform a scaling operation and bitcast to FP16:
+```
+fp16_bits = (interpolated_value * 31) / 64;
+fp16_texel = bitcast<fp16>(fp16_bits);
+```
+What this effectively does is to map 0 to 0.0 in FP16 and 0xffff to 0x7bff, which is 65504.0 and the largest finite representable value in FP16 (0x7c00 is +Inf). Everything in-between is monotonically increasing. The interpolation itself ends up being non-linear (closer to logarithmic), but for HDR data this should be fine. Linear light values are perceptually logarithmic anyways, so it might actually make more sense to interpolate in a logarithmic space rather than linear here, a very nice hack indeed! Of course, this is just a crude approximation as the FP16 representation is only piece-wise logarithmic.
+For the signed format (BC6H_SFLOAT), we do a very similar fix-up step, but it is a bit more involved since we need to take care of the sign bit. The interpolated value is assumed to be a signed integer in [-0x8000, 0x7fff] range.
+```
+signed = interpolated_value < 0;
+fp16_bits = (abs(interpolated_value) * 31) / 32;
+fp16_bits |= signed ? 0x8000 : 0;
+fp16_texel = bitcast<fp16>(fp16_bits);
+```
+A recognized bug in the specification (or feature depending on the situation) is that -0x8000 will be translated to -Inf (0x7c00 | sign_bit). It is not possible to represent +Inf.
+Transformed endpoints
+A thing BC6 can do is to assume correlation between two endpoints. This is similar to the “differential” mode in ETC2, but BC6’s variant of it is far more flexible. Rather than giving us X number of bits per component, we encode the first endpoint with more bits, and then the other endpoint as an offset from the first, with fewer bits. This combines very well with multiple partitions, since the other partition’s endpoints are also encoded as differentials from the base endpoint.
+Mode “hell”
+BC6 has a lot of modes to choose from, 14 to be specific. However, that is only at first glance. I like to separate these into 2 major types:
+2 partition modes
+1 partition modes
+After selecting how many partitions you have, most of the modes just let you specify how many bits are spent on the base endpoint color, and how many bits are spent for each transformed endpoint (delta bits). Essentially, modes 0, 1, 2, 6, 10, 14, 18, 22, 26 are all the same, with different bit-allocation schemes. Mode 30 appears to be slightly different on first glance since it does not have transformed endpoints, but that’s just because delta bits == endpoint bits at this point, so it’s meaningless to transform the endpoints. The story is the same for the modes where number of partitions is 1.
+Based on the mode, we either get 2 bits per texel of weights or 3 bits.
+The major issue in decoding BC6 is that the bit layout for each mode is completely nonsensical and irregular. The bits are packed in seemingly random places, so unfortunately the decoder ends up with:
+```
+if ((mode & 2) == 0)
+{
+    if ((mode & 1) != 0)
+        interp = decode_bc6_mode1(payload, linear_pixel, part, anchor_pixel);
+    else
+        interp = decode_bc6_mode0(payload, linear_pixel, part, anchor_pixel);
+}
+else
+{
+    switch (mode)
+    {
+    case 2:
+        interp = decode_bc6_mode2(payload, linear_pixel, part, anchor_pixel);
+        break;
+    case 3:
+        interp = decode_bc6_mode3(payload, linear_pixel);
+        break;
+    case 6:
+        interp = decode_bc6_mode6(payload, linear_pixel, part, anchor_pixel);
+        break;
+    case 7:
+        interp = decode_bc6_mode7(payload, linear_pixel);
+        break;
+    case 10:
+        interp = decode_bc6_mode10(payload, linear_pixel, part, anchor_pixel);
+        break;
+    case 11:
+        interp = decode_bc6_mode11(payload, linear_pixel);
+        break;
+    case 14:
+        interp = decode_bc6_mode14(payload, linear_pixel, part, anchor_pixel);
+        break;
+    case 15:
+        interp = decode_bc6_mode15(payload, linear_pixel);
+        break;
+    case 18:
+        interp = decode_bc6_mode18(payload, linear_pixel, part, anchor_pixel);
+        break;
+    case 22:
+        interp = decode_bc6_mode22(payload, linear_pixel, part, anchor_pixel);
+        break;
+    case 26:
+        interp = decode_bc6_mode26(payload, linear_pixel, part, anchor_pixel);
+        break;
+    case 30:
+        interp = decode_bc6_mode30(payload, linear_pixel, part, anchor_pixel);
+        break;
+    default:
+        interp = DecodedInterpolation(ivec3(0), ivec3(0), 0);
+        break;
+    }
+}
+```
+Not pretty 🙁 Most of the code in bc6.comp is used to decode all the weird variants.
+Endpoint quantization
+Once we have the endpoints, we un-quantize them to full 16-bit integer range by a simple shift. At this point, we can interpolate the endpoints using the normalized weights, and apply the BC6 fixup to turn it into a final FP16 value.
+```
+ivec3 unquantize_endpoint(ivec3 ep, int bits)
+{
+    ivec3 unq;
+    // Specialization constant
+    if (SIGNED)
+    {
+        // Sign-extend
+        ep = bitfieldExtract(ep, 0, bits);
+        if (bits < 16)
+        {
+            ivec3 sgn = 1 - ((ep >> 30) & 2); // 1 or -1
+            ivec3 abs_ep = abs(ep);
+            unq = ((abs_ep << 15) + 0x4000) >> (bits - 1);
+            // Special cases. Boolean mix FTW.
+            unq = mix(unq, ivec3(0), equal(ep, ivec3(0)));
+            unq = mix(unq, ivec3(0x7fff), greaterThanEqual(abs_ep, ivec3((1 << (bits - 1)) - 1)));
+            unq *= sgn;
+        }
+        else
+            unq = ep;
+    }
+    else
+    {
+        // Zero-extend
+        ep = ivec3(bitfieldExtract(uvec3(ep), 0, bits));
+        if (bits < 15)
+        {
+            unq = ((ep << 15) + 0x4000) >> (bits - 1);
+            // Special-cases.
+            unq = mix(unq, ivec3(0), equal(ep, ivec3(0)));
+            unq = mix(unq, ivec3(0xffff), equal(ep, ivec3((1 << bits) - 1)));
+        }
+        else
+            unq = ep;
+    }
+    return unq;
+}
+```
+Summary
+BC6 introduces a lot of new concepts that BC7 will make use of as well. The main complication is all the different modes and the awkward bit packing layouts. After extracting the quantized endpoints, the process from there is quite straight forward.
+BC7 – 4×4 – 128 bits
+https://github.com/Themaister/Granite/blob/master/assets/shaders/decode/bc7.comp
+BC7 is similar to BC6 in many ways, and uses many of the same ideas.
+8-bit endpoints
+Just like BC6 endpoints are un-quantized to 16 bits before interpolation, BC7 un-quantizes to 8-bit integers. This is done through the typical “bit-replication” algorithm that we often see when converting RGB444 and RGB565. The weight interpolation is done the exact same way as BC6 with a [0, 64] range of weights.
+Support for 3 partitions
+BC6 only supports 2 partitions, but BC7 can support 3. There are separate tables for 3 partition modes compared to 2 partition modes. (Fun …)
+Flexible alpha channel
+Unlike BC6, BC7 fully supports alpha, and finally we have a way to encode RGB and A together. This is a big improvement over the older formats like S3TC and ETC2 which encode alpha completely separately in different block formats. When we encode RGB and A together, we can allocate bits between them as we please, e.g.:
+No alpha. If alpha is constant 1.0 inside a block, we can use all 128 bits for RGB.
+Correlated RGB and A. If these components are correlated, we can encode endpoints as RGBA with one weight per texel. This saves a lot of weight bits.
+Uncorrelated RGB and A. This is the case essentially assumed by BC2, BC3 and ETC2. However, BC7 will let us tune a little bit how many bits we spend on color and how many bits we spend on alpha.
+Uncorrelated color channel support
+Since we can encode RGB and A as uncorrelated endpoints, what if we could freely select which component is uncorrelated? BC7 can do this, and this is expressed through the rotation bits. After decoding, we can swap A out with any other component. That way we can technically encode (R, GB), (RB, G) or (GB, R) for example. This seems rather niche, but it’s there … I suspect the designers happened to have 2 extra bits lying around they could use for this purpose.
+No transformed endpoints
+In a somewhat curious design choice, there is no support for transformed (correlated) endpoints in BC7. I suspect that for this reason, the number of modes could be kept somewhat sensible. I also suspect the need for transformed endpoints isn’t as great since we’re not working with HDR values anymore.
+Modes
+There are 8 modes in BC7, which all seem to be carefully chosen based on their use cases. Each mode makes some choices like:
+How many partitions? (1 – 3)
+Is there alpha? (Mode [0, 3] don’t have, [4, 7] have).
+How many bits per endpoint component? (Color and alpha have separate bit depth)
+How many bits per index?
+Is alpha uncorrelated or correlated? (Mode 4 and 5 have two weight indices)
+Which component is uncorrelated? (For mode 4 and 5)
+This is all tabulated by the specification, and from there the algorithms are similar for all the modes. Other than this, there might be some leftover bits, and I believe the BC7 designers just invented some use for them. In some modes, the bits can be used as a shared LSB of the endpoints for example, or it can be used to select how many weight bits color and alpha channels receive respectively in mode 4.
+Summary
+BPTC is a fairly advanced texture compression format. BC6 and BC7 share many ideas as expected and introduces a large, but not unmanageable configuration space. From an implementation point-of-view though, the large reliance on look-up tables is annoying, but understandable.
+BPTC is focused on perfecting color texture encoding and leaves the other kind of encoding to RGTC, which I think does a great job with 1 and 2 channel textures already.
+Up next?
+In the third (probably not final) part we tackle the monster that is ASTC. Complexity will jump another 10x.
+Compressed texture formats is one of the esoteric aspects of graphics programming almost no one cares all that much about. Neither did I, however, I’ve recently taken an academic interest in the zoo of compressed texture formats.
+During development in Granite, I occasionally find it useful to test scenes which target mobile on desktop and vice versa, and in Vulkan, where there are no fallback paths for unsupported compression formats, we gotta roll our own decompression.
+While it really isn’t all that useful to write a decoder for these formats, my goal is to create a suite of reasonably understandable compute shader kernels which can decode all of the standard formats I care about. Of course, I could just use a Frankenstein decoder which merges together a lot of C reference decoders and call it a day, but that’s not aesthetically pleasing or interesting to me. By implementing these formats straight from the Khronos Data Format specification, I learned a lot of things I would not otherwise know about these formats.
+There are several major families of formats we can consider multi-vendor and standardized. Each of them fill their own niche. Unfortunately, desktop and mobile each have their own timelines with different texture compression standards, which is not fully resolved to this day in GPU hardware. (Basis Universal is something I will need to study eventually as well as it aims to solve this problem in software.)
+By implementing all these formats, I got to see the evolution of block compression formats, see the major differences and design decisions that went into each format.
+The major format families
+First, it is useful to summarize all the families of texture compression I’ve looked at.
+S3TC / DXT
+The simplest family of formats. These formats are also known as the “BC” formats in Vulkan, or rather, BC 1, 2 and 3. This is the granddad of texture compression, similar to how I view MPEG1 in the video compression world.
+These formats are firmly rooted in desktop GPUs. They are basically non-existent on mobile GPUs, probably for historical patent reasons.
+RGTC
+A very close relative of S3TC. These formats are very simple formats which specialize in encoding 1 and 2 uncorrelated channels, perfect for normal maps, metallic-roughness maps, etc. It is somewhat questionable to call these a separate family of formats (the Data Format specification separates them), since the basic format is basically exactly equal to the alpha format of S3TC, except that it extends the format to also support SNORM (-1, 1 range) alongside UNORM. These formats represent BC4 and BC5 in Vulkan.
+These formats are firmly rooted in desktop GPUs. They are basically non-existent on mobile GPUs.
+ETC
+The ETC family of formats is very similarly laid out to S3TC in how different texture types are supported, but the implementation detail is quite different (and ETC2 is quite the interesting format). To support encoding full depth alpha and 1/2-component textures, there is the EAC format, which mirrors the RGTC formats.
+These formats are firmly rooted in mobile GPUs. ETC1 was originally the only mandated format for OpenGLES 2.0 implementations, and ETC2 was mandated for OpenGLES 3.0 GPUs. It has almost no support on desktop GPUs. Intel iGPU is an exception here.
+BPTC
+This is where complexity starts to explode and where things get interesting. BC6 and BC7 are designed to compress high quality color images at 8bpp. BC6 adds support for HDR, which is to this day, one of only two ways to compress HDR images.
+On desktop, BPTC is the state of the art in texture compression and was introduced around 2010.
+ASTC
+ASTC is the final boss of texture compression, and is the current state of the art in texture compression. Its complexity is staggering and aims to dominate the world with 128 bits. Mere mortals are not supposed to understand this format.
+ASTC’s roots are on Mali GPUs, but it was always a Khronos standard, and is widely supported now on mobile Vulkan implementation (and Intel iGPU :3), at least the LDR profile. What you say, profiles in a texture compression format? Yes … yes, this is just the beginning of the madness that is ASTC.
+PVRTC?
+PVRTC is a PowerVR-exclusive format that has had some staying power due to iOS and I will likely ignore it in this series. However, it seems like a very different kind of format to all the others and studying it might be interesting. However, there is zero reason to use this format in Granite, and I don’t want to chew over too much.
+What is a texture compression format anyway?
+In a texture compression format, the specification describes a process for taking random bits given to it, and how to decode the bit-soup into texels. There are fundamental constraints in texture compression which is unique to this problem domain, and these restrictions heavily influence the design of the formats in question.
+Fixed block size
+To be able to randomly access any texel in a texture, there must be an O(1) mapping from texture coordinate to memory address. The only reasonable way to do this is to have a fixed block size. In all formats, 4×4 is the most common one. (As you can guess, ASTC can do odd-ball block sizes like 6×5).
+Similarly, for reasons of random access, the number of bits spent per block must be constant. The typical block sizes are 64-bits and 128-bits, which is 4bpp and 8bpp respectively at 4×4 block size.
+Image and video compression has none of these restrictions. That is a major reason why image and video compression is so much more efficient.
+A set of coding tools
+Each format has certain things it can do. The more complex the operations the format can do, the more expensive the decoding hardware becomes (and complex a software decoder becomes), so there’s always a challenge to balance complexity with quality per bit when standardizing a format. The most typical way to add coding tools is to be able to select between different modes of operation based on the content of the block, where each mode is suited to certain patterns of input. Use the right tool for the job! As we will see in this study, the number of coding tools will increase exponentially, and it starts to become impossible to make good use of all the tools given to you by the format.
+Encoding becomes an optimization task where we aim to figure out the best coding tools to use among the ones given to us. In simpler formats, there are very few things to try, and approaching the optimal solution becomes straight forward, but as we get into the more esoteric formats, the real challenge is to prune dead ends early, since brute forcing our way through a near-infinite configuration space is not practical (but maybe it is with GPU encode? :3)
+Commonalities across formats
+Image compression and video compression uses the Discrete Cosine Transform (DCT) even to this day. This fundamental compression technique has been with us since the 80s and refuses to die. All the new compression formats just keep piling on complexity on top of more complexity, but in the center of it all, we find the DCT, or some equivalent of it.
+Very similarly, texture compression achieves its compression through interpolation between two color values. Somehow, the formats all let us specify two endpoints which are constant over the 4×4 block and interpolation weights, which vary per pixel. Most of the innovation in the formats all comes down to how complicated and esoteric we can make the process of generating the endpoints and weights.
+The weight values are typically expressed with very few bits of precision per texel (usually 2 or 3), and this is the main way we will keep bits spent per pixel down. This snippet is the core coding tool in all the formats I have studied:
+```
+decoded_texel = mix(endpoint0, endpoint1, weight_between_0_and_1);
+```
+To correlate, or not to correlate?
+The endpoint model blends all components in lock-step. Typically the endpoint will be an RGB value. We call this correlated, because this interpolation will only work well if chrominance remains fairly constant with luminance being the only component which varies significantly. In uncorrelated input, say, RGB with an alpha mask, many formats let us express decorrelated inputs with two sets of weights.
+```
+decoded_rgb = mix(endpoint0_rgb, endpoint1_rgb, rgb_weight);
+decoded_alpha = mix(endpoint0_alpha, endpoint1_alpha, alpha_weight);
+```
+This costs a lot more bits to encode since alpha_weight is very different from rgb_weight, but it should be worth it.
+Many formats let us express if there is correlation or not. Correlation should always be exploited.
+Working around the horrible endpoint interpolation artifacts
+Almost all formats beyond the most trivial ones try really hard to come up with ways to work around the fact that endpoint interpolation leads to horrible results in all but the simplest input. The most common approach here is to split the block into partitions, where each partition has its own endpoints.
+S3TC – The basics
+A compute shader decoder:
+https://github.com/Themaister/Granite/blob/master/assets/shaders/decode/s3tc.comp
+https://github.com/Themaister/Granite/blob/master/assets/shaders/decode/rgtc.h
+BC1 – 4×4 – 64 bits
+The BC1 format is extremely simple and a good starting point. 32 bits is used to encode two RGB endpoints in RGB565 format. The other 32 bits encode 16 weights, with 2 bits allocated to each texel.
+This lets us represent interpolation weights of 0, 1/3, 2/3 and 1.
+Since there is a symmetry in this design, i.e.:
+```
+mix(a, b, l) == mix(b, a, 1.0 - l)
+```
+there would be two ways to specify the same block, where we swap endpoints and invert the weights to compensate. This is an extra bit of information we can exploit. Based on the integer representation of the two endpoints, we can check if one of greater than the other, and use a different decoding mode based on that information. This exploitation of symmetry will pop up again in many formats later! In the secondary mode, we add support for 1-bit alpha, called a punch-through in most formats. In this mode, the interpolation weights become 0, 1/2, 1 and BLACK. This lets us represent fully transparent pixels. However, color becomes BLACK, so this will only work with pre-multiplied alpha schemes, otherwise there will be black rings around textures. I don’t think this mode is used all that much these days, but it is an option.
+That is it for this format, it really is that simple.
+One thing to note is that the specification is defined in terms of floating point with under-specified requirements for precision, and thus there is no bit-exact representation of the decoded values. Almost all hardware decoders of this format will give slightly different results, which is unfortunate. MPEG1 and MPEG2 also made the same mistake back in the day, where the DCT is specified in terms of floating point.
+BC2 – 4×4 – 128 bits
+BC2 is a format which adds alpha support by splicing together two blocks. A BC1 block describes color, and a second block adds an alpha plane with 4-bit UNORM. This format is quite obscure since the next format, BC3, generally does a much better job at compressing alpha. A curious side effect of BC2 and 3 is that the punch-through mode in the BC1 block no longer exists, i.e. the symmetry exists, so we lose 1 bit of information. I wonder why that information bit was not used to toggle between BC2 alpha decode (noisy alpha) and BC3 alpha decode (smooth alpha) …
+BC3 – 4×4 – 128 bits
+The alpha encoding of BC3 is very similar to how BC1 works. It also forms the basis of RGTC. The 64 bits of the alpha block spends 16 bits to encode 2 8-bit endpoints for alpha. We now get 3 bits as interpolation weights instead of 2 since there’s 48 bits left for this purpose. Similar to BC1, we can exploit symmetry and get two different modes based on the endpoints. In the first mode, the interpolation weights are as expected, [0, 1, 2, …, 7] / 7. In the second mode, we have 6 interpolated values [0, 1, 2, …, 5] / 5, and two values are reserved to represent 0.0 and 1.0. This can be very useful. This is essentially a very early attempt to introduce partitions into the mix, as we can essentially split up a block into 3 partitions on demand: (Fully opaque texels, fully transparent texels, the in-betweens). This can let us specify a tighter range for the endpoints as there is never a need to use a full [0, 0xff] endpoint range.
+Summary
+The S3TC formats are very simple, but there are certainly things to note about them. Alpha support is just bolted on, it is not integrated into the format. This means that even though the block is 128 bits, there is no way to spend more than 64 bits on color, even if the alpha plane has a completely flat value.
+RGTC
+RGTC (red-green) is basically BC3’s alpha block format turned into its own thing. Their main use is with non-color textures, e.g. normal maps, metallic-roughness maps, luminance maps, etc. It is very simple, and quality is quite good.
+https://github.com/Themaister/Granite/blob/master/assets/shaders/decode/rgtc.comp
+https://github.com/Themaister/Granite/blob/master/assets/shaders/decode/rgtc.h
+BC4 – 4×4 – 64 bits
+This is BC3’s alpha block format as its own format, which returns one component. The only real difference from BC3 alpha is that it also supports an SNORM variant, which is very useful for normal maps, although I only bothered with UNORM, since my shaders need to assume input can be from any format.
+BC5 – 4×4 – 128 bits
+RGTC assumes uncorrelated channels, and thus the only sensible choice was to just slap together two BC4 blocks side-by-side, and voila, we can encode 2 channels instead of 1.
+Summary
+RGTC is simple and nice. It only needs to consider single channels of data, and writing encoders for it is very easy, and it is probably the simplest format out there. For what they do, I really like these formats.
+Like S3TC, there is no bit-exact decoding, which is rather unfortunate.
+ETC – Refining S3TC
+ETC, or Ericsson Texture Compression is a family with multiple generations. ETC2 is backwards compatible with ETC1 in that all valid ETC1 blocks will decode the same way in ETC2, but ETC2 exploits some undefined behavior of ETC1 to extend the format into something more interesting.
+ETC has a bit-exact decode, which makes verification very easy. 😀
+https://github.com/Themaister/Granite/blob/master/assets/shaders/decode/etc2.comp
+ETC1 – 4×4 – 64 bits
+In many ways, ETC1 is quite similar to BC1, but there are some key differences. Just like BC1, 32 bits are spent to encode endpoints, and 32 bits are spent to give 16 texels 2 bits of weight information each. The main difference between ETC1 and BC1 is how endpoints work.
+Sub-blocks
+As a very crude form of partitioning, ETC1 allows you to split a block into either 2×4 or 4×2 sub-blocks, where each sub-block has its own endpoints. To do this, endpoints are expressed in a more compact way than BC1. Rather than specifying two RGB values, ETC in general likes to express endpoints as RGB +/- delta-intensity, where delta-intensity is described by a table. This makes things far more compact since we enforce constant chrominance. By saving so many bits, we can express 4 endpoints in total, 2 for each sub-block.
+Uncorrelated or correlated endpoints?
+Since we have to specify two sets of endpoints, the format gives us a way to specify if the two endpoints have completely different colors, or if the endpoints should be specified in base + offset form. This is controlled with a single bit, which changes the encoding from ep0 = RGB444, ep1 = RGB444 to ep0 = RGB555, ep1 = ep0 + sign_extend(RGB333). These values are not allowed to overflow in any way, which is something ETC2 exploits to great effect later.
+NOTE: I found it more instructional to call it uncorrelated and correlated endpoint modes, but the specification calls it “individual” and “differential” modes.
+Summary
+ETC1 is somewhat different than BC1, but overall, it’s quite similar. It turns out, if you add a few restrictions on top of ETC1, you get ETC1S, which can trivially be transcoded to BC1. Basically, enforce the correlated endpoint mode, set the RGB333 bits to 0, enforce that delta-luma is the same for both sub-blocks.
+There is also no way to express alpha with ETC1, which is unfortunate, but ETC1 is completely obsolete for my use cases either way.
+ETC2 RGB – 4×4 – 64 bits
+As mentioned earlier, ETC1 is a sub-set of ETC2. ETC2 adds a bunch of new and curious modes which gives us a small glimpse into more flexible ways to express endpoints, and even adds a mode which I have never seen in any other formats ever since.
+Exploiting undefined behavior
+When you select the correlated (differential) endpoint mode, there were some restrictions on overflow. We can exploit this fact in order to gain 3 new modes of operation for the ETC2 color codec!
+First, we check if R + sign_extend(dR) is outside [0, 31] range. If so, we activate the so-called “T” mode. In this mode, we essentially add a partitioning scheme to the codec. We now remove the concept of two sub-blocks and let all texels access all available endpoints. We encode two RGB444 values (A, B), and a delta value (d). We form a T-shape by specifying 4 possible color values as A, B, B + d, B – d. This can be useful if the block is smooth, except for some weird outliers. A would be the outlier color, and B represents the middle of the smooth colors.
+If G + sign_extend(dG) overflows, we enter a very similar “H” mode. In this mode, we do the exact same thing, except that the 4 possible colors become A + d, A – d, B + d, B – d.
+If B + sign_extend(dB) overflows, we enter a very interesting mode, which I have never seen again in future formats. I’m not sure why, since it seems very useful for expressing smooth gradients. Essentially, in this mode we don’t encode weights per texel, but rather express RGB at texel (0, 0), at texel (4, 0) and texel(0, 4), and just bilinearly interpolate across the block to obtain the actual color. This is very different from the other endpoint interpolation we’ve seen earlier, because that flattens everything into a single line in the color space, but now we can access an entire 2D plane in the space instead.
+Punch-through alpha
+Like BC1’s 1-bit alpha scheme, ETC2 is very similar. When this format is enabled, we remove the capability for uncorrelated endpoints (individual mode), and replace the bit with a selection to select if all texels are Opaque, or potentially transparent. This idea is the exact same as BC1. In the transparent mode, code == 2 marks the texel as being transparent black. It does not work in planar mode though, this bit is ignored there.
+Alpha support
+Very similar to BC3, ETC2 also supports full 8-bit alpha by slapping together a separate block alongside the color block. The way this works is very similar to how RGTC works, but instead of two endpoints, ETC2 encodes a center point, and then uses tables to expand that range into 8 possible values using a table selector and a multiplier. These 8 possible values for the block are then selected with 3bpp indices. We lose the capability to cleanly represent 0.0 and 1.0 though, which is somewhat curious.
+EAC – 4×4 – 64 bits
+https://github.com/Themaister/Granite/blob/master/assets/shaders/decode/eac.comp
+EAC is ETC2’s version of RGTC, it is designed as a way to encode 1 and 2 de-correlated channels, basically the exact same approach as RGTC where the alpha block format is reused for the 1/2-channel formats. EAC is a bit different in that the internal precision is 11 bits (for some reason).
+Unfortunately, EAC is kinda awkward since it’s technically bit-exact in the final fixed point value between [0, 2047], but it specifies many different ways how this can be converted to a floating point value.
+Next up, BPTC
+S3TC, RGTC and ETC represents the simpler formats, and hopefully I’ve summarized what these formats can do, next up, I’ll go through the BPTC formats, which significantly increases complexity.
+Shading many lights in a 3D engine is kinda hard once you step outside the bubble of classic deferred shading. Granite supports a fair amount of different ways to do lighting, mostly because I like to experiment with different rendering structures.
+I presented some work on this topic at SIGGRAPH 2018 in the Moving Mobile Graphics course when I still worked at Arm: https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/5127.siggraph_2D00_2018_2D00_mmg_2D00_3_2D00_rendering_2D00_hanskristian.pdf. Unfortunately, some slides have videos embedded, and they didn’t seem to have made the transition unscathed to PDF.
+Since then I’ve looked into VK_EXT_descriptor_indexing in order to remove some critical limitations with my older implementation and I ended up with some uncommon implementation details.
+Classic deferred
+Just to summarize what I mean by this, this is the good old method of rendering light volumes on top of a G-buffer and light is accumulated per-light by blending on top of the frame buffer. This method is considered completely obsolete on desktop these days, but it’s still quite viable on mobile with on-chip G-buffers.
+Where classic deferred breaks down
+Very high bandwidth on desktop due to fill-rate/bandwidth
+No forward shading support (well, duh)
+No transparent objects
+No volumetric lighting
+Thus, I explored some alternatives …
+Why I don’t like tile deferred shading
+This is a somewhat overloaded term, but this is the method where you send the G-buffer to a compute shader. The G-buffer is split into tiles, assigned to a workgroup, depth range (or multiple ranges) is found for the tile, which then forms a frustum. Lights are then culled against this frustum, and shaded in one go. This technique was a really great fit for the PS3 SPUs, as shown by Battlefield 3 back in the day.
+It still doesn’t really solve the underlying issues of classic deferred except that it is far more bandwidth efficient on desktop-class GPUs.
+Forward shading isn’t feasible unless you split the algorithm into multiple stages with Z-prepass -> build light list per tile -> resubmit geometry and shade, but then it’s probably called something entirely different … (Is this what’s known as Forward+ perhaps?)
+Transparency isn’t doable unless you render all transparent geometry in a separate pass to find min/max depth per pixel or something, and forget about volumetrics.
+On mobile TBDR architectures you lose all bandwidth savings from staying on-tile, and doing FRAGMENT -> COMPUTE barriers on a tile-based architecture is usually a terrible idea for pipelining. The exception here is tile shaders on recent iPhone hardware which seems almost designed to do this algorithm in hardware.
+Clustered shading – the old implementation
+Clustered shading is really nice in that it is completely agnostic to a depth buffer, so all the problems mentioned earlier just go away. Lights are assigned in 3D-space rather than screen-space. The original paper on the subject is from around the same time tile deferred was getting popular.
+Abandoning the frustum structure
+In Granite, I chose early on to abandon the “frustum” layout. Culling spot lights and point lights against elongated frustums analytically is very hard and computationally expensive, and getting the Z slices correct is also very fiddly.
+A common workaround for culling is using conservative rasterization, but that is a feature I cannot rely on. I figured that using a more grid-like structure I could get away with much simpler culling math. Since all elements in the grid-based cluster are near-perfect cubes, I could get away with treating the elements as spheres, and https://bartwronski.com/2017/04/13/cull-that-cone/ makes spot light-to-sphere culling very cheap and quite tight. Here’s a visualization of the structure. This structure is stored in a 3D texture. Each “mip-level” is packed in the Z dimension as the resolution of each level is the same.
+Bitscan loops instead of light lists
+Light lists is the approach where each element in the cluster contains a (start, count) and all lights found in that range are shaded. Computing this list on GPU is rather messy. The memory footprint for a single element is unknown in CPU timeline, and we cannot deal properly with worst-case scenarios. This is easier when we cluster on the CPU instead, but that’s boring!
+I really wanted to cluster lights on the GPU, so I landed on a bitmask approach instead. The worst case storage is just 1 bit per light per element rather than 32 bit.
+The main limitation of this technique is still the number of lights we could feasibly support. With a bitmask structure we need to allocate for worst-case and it can get out of hand when we consider worst case with 1000+ lights. I only had modest ideas in the beginning, so I supported 32 spot lights and 32 point lights, which were encoded in RG32UI per element in a 3D texture. At a resolution of the cluster at 64x32x16x9, culling on the GPU is very fast, even on mobile. We can set the ceiling higher of course if we expand to RGBA32UI or use more texels per element.
+Bitscan loops are great for scalarization
+A thing I realized quickly when doing clustered forward shading is the importance of keeping VGPRs down on AMD hardware. The trick to move VGPRs to more plentiful SGPRs is to ensure that values are uniform across a subgroup. E.g. instead of doing this:
+```
+// VGPR
+int light_bitmask = fetch_bitmask_for_world_coord(coord);
+
+vec3 color = vec3(0.0);
+while (light_bitmask != 0)
+{
+    int lsb = findLSB(light_bitmask);
+
+    // All light data must be loaded in VGRPs since lsb is a VGPR.
+    color += shade_light(lsb);
+    light_bitmask &= ~(1 << lsb);
+}
+```
+we can do a simple trick with subgroup operations:
+```
+// VGPR
+int light_bitmask = fetch_bitmask_for_world_coord(coord);
+
+// OR over all active threads.
+// As this is the same value for all threads, compiler promoted to SGPR.
+light_bitmask = subgroupOr(light_bitmask);
+
+vec3 color = vec3(0.0);
+while (light_bitmask != 0)
+{
+    int lsb = findLSB(light_bitmask);
+
+    // All light data can be loaded into SGPRs instead.
+    // Far better occupancy, much amaze, wow!
+    color += shade_light(lsb);
+    light_bitmask &= ~(1 << lsb);
+}
+```
+Uniformly loading light data from buffers is excellent. I’ve observed up to 15% uplift on AMD by doing this. The light list approach mentioned earlier has a much harder time employing this kind of optimization. We would have to scalarize on the cluster element itself, which could lead to very bad worst-case performance.
+No bindless – ugly atlasing
+Another problem with clustered shading (and tile deferred for that matter) is that we need to shade a lot of lights in one go, and those lights can have shadow maps. Without bindless, all shadow maps for spot lights must fit into one texture, and point lights must fit into one texture. Atlassing is the classic solution here, but it is a little too messy for my taste. As the number of lights was rather low, I just had a plain 2D texture for spot lights, and a cube array for point lights. Implementing variable resolution with an atlas is also rather annoying, and for point lights, I would be forced to flatten the cube down to 6 2D rects and do manual cube lookup instead without proper seam filtering, ugh.
+Scaling to “arbitrary” number of lights
+While performance for reasonable number of lights was quite excellent compared to alternative techniques, I couldn’t really scale number of lights arbitrarily, and it has been nagging me a bit. Memory becomes a concern, and while the “list of lights” approach is likely less memory hungry in the average case, it has even worse worst-case memory requirements, and it’s not very friendly for GPU culling.
+Kinda clustered shading? New bindless hotness
+The talk on Call of Duty’s renderer in Advances in Real-Time Rendering 2017 presents a very fresh idea on how to do shading, and it hits all the right buttons. Culling on GPU, bitscan loops, scalarization, scales to a lot of lights, a lot of things to like here.
+I spent some time this holiday season implementing a new path for clustered shading based on this technique, and I ended up deviating in a few places. I’ll go through my implementation of it, but it will make more sense once you study the presentation first.
+Decoupling XY culling from Z
+The key feature of the Call of Duty implementation is how it partitions space. Rather than a full 3D cluster, we decouple XY and Z dimensions, so rather than O(X * Y * Z) we get O(X * Y + Z).
+Z is also binned linearly, and we can have several thousand bins in Z. This makes everything much nicer to deal with later. Culling here is trivial, since we compute min/max Z in view space for each light, which is very simple.
+For each Z-slice, we just need to figure out the minimum light index and maximum light index which hits our Z-slice. Of course, to make the ranges as tight as possible, we sort lights by Z distance.
+Data structures
+Each tile in XY needs a bitmask array, u32[ceil(num_lights / 32)] for each tile. This can be tightly packed in a single buffer.
+A buffer containing Z-slices as described above.
+Per-light information: position/radius/cone/light type/shadow matrix/etc
+Going back to frustum culling
+Now that we cluster in XY and Z separately, I went back to frustum partitioning, and now we need a way to do frustum culling against spot and point lights … Conservative rasterization really is the perfect extension to use here, just a shame it’s not widely available yet on all relevant hardware.
+The presentation has an alternative for conservative rasterization as current consoles do not support this feature, which is mostly to render light volumes a-la classic deferred (not completely dead yet!) at full-resolution and splatting out bits with atomics as fragment threads are spawned. If you have depth information you can eliminate coverage using classic deferred techniques. However, I went in a completely different direction without using depth at all.
+Compute shader conservative rasterization
+It felt natural to do all the culling work in compute shaders. This is where most of the “fun” is. This is also a rather esoteric way of doing it, but I like doing esoteric stuff with compute shaders, see https://themaister.net/blog/2019/10/12/emulating-a-fake-retro-gpu-in-vulkan-compute/ as proof of that.
+Conservative sphere rasterization
+To solve this problem, we’re going to tackle it geometrically instead. First, we solve the screen-space bounding box problem. Fortunately, this problem is separable, so we can compute screen-space bounds in X and Y separately.
+(Behold glorious Inkscape skillz ._.)
+What we want to do is to figure out where P_lo and P_hi intersect the near plane. P can be rotated in 2D by the half-angle in two directions. This way we find tangent points on the circle. sin(theta) is conveniently equal to r / length(L), so building a 2×2 rotation matrix is very easy. After rotating P, we can project P_lo and P_hi, and now we have clip space bounds in one dimension. Compute separately for XZ and YZ dimensions and we have screen-space boundaries.
+Projecting a sphere to clip space creates an ellipsis, and to compute the ellipsis, we need to rotate view space such that the sphere center lies perfectly on the X or Y axis. For simplicity, we orient it on the +X axis. We can then perform the range test, and an ellipsis is formed. We can now test any point directly against this ellipsis. If the sphere intersects the near plane in any way, we can fall back to screen-space bounding box.
+Here’s a ShaderToy demonstrating the math. Of course, Inigo Quilez did it first :p
+In the real implementation, we only need to compute setup data once for each point light, to rasterize a pixel, we apply a transform, and perform a conservative ellipsis test, which is rather straight forward.
+Conservative spot light rasterization
+I tried an analytical approach, but I gave up. Spot-Frustum culling is really hard if you want tight culling, so I went with the simpler approach of just straight up rasterizing 6 triangles which forms a spot light. We can rasterize in floating point since we don’t care about water-tight rasterization rules, and it’s conservative anyways. It’s not the prettiest thing in the world to do primitive clipping inside a shader, but you gotta do what you gotta do …
+The … peculiar shader can be found here.
+Binning shader
+Once we have setup data for point lights and spot lights, we do the classic culling optimization where we bin N lights in parallel over a tile, broadcast the results to all threads, which then computes the relevant lights per pixel. Subgroup ballots is a nice trick here, which replaces the old shared memory approach. Each workgroup preferably works on 32 lights at a time to compute a 32-bit bitmask.
+Shader: https://github.com/Themaister/Granite/blob/master/assets/shaders/lights/clusterer_bindless_binning.comp
+The shading loop
+The final loop to shade becomes something like:
+```
+uint cluster_mask_range(uint mask, uvec2 range, uint start_index)
+{
+	range.x = clamp(range.x, start_index, start_index + 32u);
+	range.y = clamp(range.y + 1u, range.x, start_index + 32u);
+
+	uint num_bits = range.y - range.x;
+	uint range_mask = num_bits == 32 ?
+		0xffffffffu :
+		((1u << num_bits) - 1u) << (range.x - start_index);
+	return mask & uint(range_mask);
+}
+
+vec3 shade_clustered(Material material, vec3 world_pos)
+{
+    ivec2 cluster_coord = compute_clustered_coord(gl_FragCoord.xy);
+    int linear_cluster_coord = linearize_coord(cluster_coord);
+    int z = compute_z_slice(dot(world_pos - camera_pos, camera_front));
+
+    uvec2 z_range = cluster_range[z];
+
+    // Find min/max light we need to consider when shading slice Z.
+    // Make this uniform across subgroup. SGPR.
+    int z_start = int(subgroupMin(z_range.x) >> 5u);
+    int z_end = int(subgroupMax(z_range.y) >> 5u);
+
+    for (int i = z_start; i <= z_end; i++)
+    {
+        // SGPR
+        uint mask =
+            cluster_bitmask[linear_cluster_coord *
+                            num_lights_div_32 + i];
+
+        // Restrict to lights within our Z-range. VGPR now.
+        mask = cluster_mask_range(mask, z_range, 32u * i);
+        // SGPR again.
+        mask = subgroupOr(mask);
+
+        // SGPR
+        uint type_mask = cluster_transforms.type_mask[i];
+
+        // Good old scalarized loop <3
+        while (mask != 0u)
+        {
+            int bit_index = findLSB(mask);
+            int light_index = 32 * i + bit_index;
+            if ((type_mask & (1 << bit_index)) != 0)
+            {
+                result += compute_point_light(light_index,
+                                              material,
+                                              world_pos);
+            }
+            else
+            {
+                result += compute_spot_light(light_index,
+                                             material,
+                                             world_pos);
+            }
+        }
+    }
+}
+```
+Shader: https://github.com/Themaister/Granite/blob/master/assets/shaders/lights/clusterer_bindless.h
+Potential performance problems
+By decoupling XY and Z in culling there’s a lot of potential for false positives where large lights might dominate how Z-ranges are computed and trigger a lot of over-shading. I haven’t done much testing here though, but this is probably the only real weakness I can think of with this technique. Regular tile-deferred has similar issues.
+Culling tightness
+I’m using smaller lights here to demonstrate. Red or green light signifies that a light was computed for that pixel:
+Placing point light in volumetric fog for good measure. The weird red/green “artifacting” around the edges is caused by the forward shading and subgroupOr logic when shading to ensure subgroup uniform behavior.
+Potential improvements
+Clipping Z-range calculation against view frustum might help a fair bit, since Z-range can be way too conservative for large positional lights like these. Especially spot lights which point to the side like the image above. Classic deferred has a very similar problem case unless ancient stencil culling techniques are used to get double sided depth tests.
+Conclusion
+I’m happy with the implementation. Performance seems very good, but I haven’t dug deep in analysis there yet. I was mostly concerned getting it to work. Just waiting for mobile GPU vendors to support bindless, so I can test there as well I guess.
+Sometimes I like to implement Vulkan extensions in Granite just because. This time around we’re looking at YUV.
+For anyone who have worked with multimedia before, YUV (or YCbCr as it’s also referred to) is a nightmare. The act of converting YUV to RGB is very simple as it’s just a color space transform with a 3×3 matrix, but YUV means many things. There is no end to how overloaded YUV can be, and making sure you know exactly which YUV flavor you’re dealing with can be quite tricky. From a system integration point of view, YUV is a serious pain.
+When dealing with video content in Vulkan, you will have to consume YUV somehow.
+YUV has some characteristics which all make sense for video compression, but complicate things.
+Planar: Each color component is often packed in different 2D images.
+Luma/Chroma: Y refers to luminance, UV (or CbCr) refers to chrominance (color). This is critical for video compression.
+Downsampled chroma. Human eyes have higher resolution for luminance vs color, so less bandwidth on color is an easy way to save space.
+There is a lot of variance here between different YUV formats, as there is no obvious standard for these kinds of things.
+How many planes? 2 or 3 are common (Y, U, V) vs (Y, packed UV). Packed single plane can be used in some other obscure scenarios. (YUYV and variations on that).
+For packed representations, which component comes first?
+How many bits per component? 8 is the most common, but 10-bit YUV content can be found in the wild.
+How much is chroma downsampled? 2x horizontally and vertically is by far the most common, often referred to as YUV420p (the naming convension in YUV makes no sense, don’t try to find any).
+Where is the texel center for the chroma samples? Common values are co-sited at every other luma sample, or in the mid-point between groups of 2×2 luma samples.
+What is the exact color space conversion matrix from YUV to RGB?
+How is chroma reconstructed to full resolution?
+Dealing with YUV without fancy extensions
+To render a YUV frame in RGB is not necessarily a difficult task, but depending on how many formats you need to deal with, shader variants can quickly get out of hand. You’ll typically do something like this:
+```
+layout(binding = 0) uniform TexLuma;
+layout(binding = 1) uniform TexCb;
+layout(binding = 2) uniform TexCr;
+
+layout(location = 0) out vec3 FragColor;
+layout(location = 0) in vec2 TexCoord;
+
+const mat3 yuv_to_rgb_matrix = mat3(....);
+
+void main()
+{
+    float Luma = textureLod(TexLuma, TexCoord, 0.0).x;
+    float Cb = textureLod(TexCb, TexCoord, 0.0).x; // For mid-point chroma
+    float Cr = textureLod(TexCr, TexCoord, 0.0).x;
+    vec3 yuv = vec3(Luma, Cb, Cr);
+    // Possibly expand range here if using TV YUV range and not PC YUV range.
+    yuv = rescale_yuv(yuv);
+    FragColor = yuv_to_rgb_matrix * yuv;
+}
+```
+This is fine, but there is some motivation to do better here. Since watching video is one of the most common operations a GPU does, it would be nice if we could do this more efficiently, especially on low-power mobile devices with batteries attached to them. It would also be really nice if we could sample a video texture in our shader and have the GPU just “deal with it”.
+The planar texture formats
+VK_KHR_sampler_ycbcr_conversion adds a lot of new texture formats to Vulkan. For YUV420p, we’re going to look at this format, VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM.
+In planar formats, we see that 3 color components are spread out across 3 planes, with a “420” here to mean that the second and third components are half resolution. “GBR” is a bit strange, but G refers to Y, and B and R refer to Cb and Cr respectively. Green is the strongest contributor to the luma Y channel after all, so I guess it kinda makes sense like that …
+By having planar texture formats, it means that a texture unit of the GPU is actually able to sample 3 samples at once, meaning we will put a lot less stress on the GPU texturing unit. If we think of rendering video, this is a large part of the work done on the GPU. For lower-end mobile devices rendering 4K video without melting, this is actually really important.
+The image aspects
+In order to be able to refer to each plane separately when copying data in and out of the texture, we can use VK_IMAGE_ASPECT_PLANE_{0,1,2}_BIT. When copying to and from plane 1 and 2 in YUV420p, the resolutions of those planes are halved. VK_IMAGE_ASPECT_COLOR_BIT refers to the whole “GBR” as a whole, and it’s only useful when sampling the image.
+Disjoint image allocation
+Since we have 3 image planes, it is not weird to desire combining three separate images together. E.g. we can allocate three R8_UNORM images and make it planar later. This is supported and we’ll have to create and allocate images in a particular way.
+First, we create the R8_UNORM images with VK_IMAGE_CREATE_ALIAS_BIT. This means that we will alias the image meaningfully with another image, even when using OPTIMAL image layout and image layouts are shared across aliases! We’ll use this to alias with a plane inside the planar texture later.
+Be aware of alignment requirement. I’ve found that planar textures can need larger alignment than the single-component textures might need, so either using standalone allocations per plane, or bumping alignment to something like 64k works around that.
+When we create the planar texture, we specify DISJOINT_BIT and ALIAS_BIT. For disjoint, it means we need to query allocation requirements and bind memory separately for each plane. To do this, we need to use vkGetImageMemoryRequirements2 and vkBindImageMemory2. Here, we just bind the same memory we used for our separate textures.
+Setting up a sampler conversion object
+The vkCreateSamplerYcbcrConversion function creates an object which encodes exactly how we will convert the planar components into RGB values.
+```
+VkSamplerYcbcrConversionCreateInfo info = { VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO };
+
+// Which 3x3 YUV to RGB matrix is used?
+// 601 is generally used for SD content.
+// 709 for HD content.
+// 2020 for UHD content.
+// Can also use IDENTITY which lets you sample the raw YUV and
+// do the conversion in shader code.
+// At least you don't have to hit the texture unit 3 times.
+info.ycbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
+
+// TV (NARROW) or PC (FULL) range for YUV?
+// Usually, JPEG uses full range and broadcast content is narrow.
+// If using narrow, the YUV components need to be
+// rescaled before it can be converted.
+info.ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
+
+// Deal with order of components.
+info.components = {
+	VK_COMPONENT_SWIZZLE_IDENTITY,
+	VK_COMPONENT_SWIZZLE_IDENTITY,
+	VK_COMPONENT_SWIZZLE_IDENTITY,
+	VK_COMPONENT_SWIZZLE_IDENTITY,
+};
+
+// With NEAREST, chroma is duplicated to a 2x2 block for YUV420p.
+// In fancy video players, you might even get bicubic/sinc
+// interpolation filters for chroma because why not ...
+info.chromaFilter = VK_FILTER_LINEAR;
+
+// COSITED or MIDPOINT? I think normal YUV420p content is MIDPOINT,
+// but not quite sure ...
+info.xChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
+info.yChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
+
+// Not sure what this is for.
+info.forceExplicitReconstruction = VK_FALSE;
+
+// For YUV420p.
+info.format = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+
+VkSamplerYcbcrConversion conversion;
+table->vkCreateSamplerYcbcrConversionKHR(device, &info, nullptr,
+                                         &conversion);
+```
+Passing along to VkImageView and VkSampler
+Both an image view and sampler which are used with KHR_sampler_ycbcr_conversion must have this sampler conversion object passed into it via pNext. This is because part of this information will be split up between the two objects. Planar and swizzle information is likely part of image view, while filtering and chroma siting is likely part of sampler object.
+Immutable sampler
+Some information is also relevant for the shader compiler, so for YCbCr sampling there are some restrictions. You have to use a COMBINED_IMAGE_SAMPLER and the sampler must be immutable in the descriptor set layout. Since that immutable sampler contains the conversion object, this allows the shader compiler to see how to complete the transform where hardware support stops. This might just be performing the YUV to RGB conversion, or it lets the shader implement almost everything on its own.
+In Granite, I pass along immutable sampler information in a rather crude way where I look at the declared name of a combined image sampler in the shader.
+Putting it all together I can write shader code like this in Granite and sample YUV420p content directly:
+```
+#version 450
+
+// "LinearYUV420P" guides reflection to use an immutable sampler.
+// Not ideal since I need to know which YUV conversion to use ...
+// But it works for now.
+layout(set = 0, binding = 0) uniform sampler2D uSamplerLinearYUV420P;
+layout(location = 0) in vec2 vUV;
+layout(location = 0) out vec4 FragColor;
+
+void main()
+{
+    // It's just like sampling a regular texture :D
+    FragColor = textureLod(uSamplerLinearYUV420P, vUV, 0.0);
+}
+```
+Getting fancy with hardware video decoding
+The natural way to extend this is to use hardware video decoding, export each plane as external memory, and import it in Vulkan. DISJOINT allocation comes in handy here since we don’t have to rely on a video decoder exporting a full planar image as one large unit. I haven’t looked into this yet though, but I suggest looking at MPV here. There seems to be some support for this kind of zero-copy flow with Vulkan.
+Was all of this really all that useful?
+Not really, but I have some ideas to add a “video texture material” in the future to Granite, so it might come in handy later. There might be some use for it in graphics programming where bandwidth is saved by encoding post-process render targets to YUV. That way, sampling the YUV post targets shouldn’t require a lot of manual hackery.
+RetroWarp – a fake retro GPU
+Lately, I’ve been fiddling with a side project which ended being quite interesting.
+The goal of this side project was to prototype out a system which implements software rasterization in compute shaders using modern GPU features like Vulkan 1.1 subgroups and async compute to improve performance. Then, I wanted to apply this to emulation of retro GPUs, in particular, a more low-level approach.
+I believe compute shader rasterization has some key advantages in the domain of low-level emulation. Chasing full accuracy means not being able to make use of the key fixed function aspects of the graphics pipeline on Vulkan GPUs and most of the reasons to use fragment shaders goes away. With compute, there is no fixed function baggage to grapple with, but it does mean a lot of the things we take for granted must be implemented in software.
+I didn’t aim to dive straight into a concrete retro GPU with this prototype, but rather I designed a straight forward rasterizer which supports the basic features found in particular old GPUs. My approach here is that this could be used as a starting point when going further and emulating a real legacy chip.
+The repository is available on Github: https://github.com/Themaister/RetroWarp
+The high level system
+Rather than reiterate everything presented in the slide deck, I will link to it directly instead, however, it’s useful to discuss the system at a very high level.
+Presentation slides
+I presented this work at the Khronos Munich meetup in October 2019. You can find the presentation slides here.
+Implementing Low Level GPU – Hans-Kristian – Munich 2019
+Tile-based
+Going tile-based is practically necessary for any compute shader implementation. I implemented 8×8 and 16×16 tile modes. Smaller tiles are more suitable for lower resolution like 320×240 and 640×480, but 16×16 was useful for 720p and up.
+If you are familiar with tile deferred shading and friends, you know where I’m going with this.
+Coarse-then-fine binning
+To be tile based, we need to assign primitives to tiles. This is a quite intensive process when the tile size is small as time scales as resolution times number of primitives. To optimize, I bin at a low resolution (e.g. 64×64 tiles) and then refine the binning at full tile resolution.
+Bitmap instead of primitive list
+A common way to bin is to build an array of primitives which affects a tile, and then the renderer can just loop through that array of indices on a per-tile basis. This is problematic in the worst case where a lot of primitives end up filling the entire screen, there simply might not be memory available to store all these lists. We cannot allocate memory arbitrary on the GPU, and we really want to do tile binning on the GPU and not CPU.
+Instead, each tile gets a fixed array of u32 bitmasks, where 1 bit is used per primitive. Bit-scan loops are used instead. To speed up the process where there are many gaps in the bitmap (there certainly is), there is a hierarchy, where the first hierarchy of bits marks a bit if any primitives is binned in groups of 32 primitives. If we find a bit set here, we go down the hierarchy and loop some more. A more concrete example here is:
+Maximum of 16k primitives (arbitrary limit we choose)
+Bitmap is u32[16k / 32] to contain all state
+Coarse bitmap is u32[16k / (32 * 32)]
+If more than 16k primitives are used, we can just split this into multiple render passes. These old GPUs don’t exactly support indirect rendering, so that’s not really a problem.
+Ubershader vs. split shader architecture
+After binning, we could simply implement an ubershader from doom where we deal with any possible render state the GPU supports in one 5000+ line monster. This is very problematic for performance, particularly with register pressure/occupancy on the shader cores.
+One of my key deviations from the norm here was to implement a split shader architecture. Rather than rely on ubershaders, it is possible for the depth/blending state to consume pre-shaded tiles which contains color/depth/coverage information necessary to run these stages.
+To create color/depth/coverage information, we can generate indirect dispatches and use specialization constants to carve out the code paths we need to run instead. This keeps register pressure down. The key downside of this approach is that we need to allocate memory and bandwidth for the pre-shaded data.
+Async compute + graphics queue compute
+Depth/blending is the only stage which needs to happen in-order. We can happily do binning and shading and feed the results to the final shading stage. I run everything except for depth/blending in the async compute queue, and depth/blending can run in the graphics queue.
+Performance uplifts
+See presentation slides for more detailed results.
+Subgroup optimizations gave a solid ~20% uplift on AMD/NV/Intel. Async compute gave further 10-20% uplift on AMD/NV. Overall, I’m quite happy with this.
+Mip-mapping is hard – importance of keeping your quads full
+Sampling textures with mip-mapping is ancient, but it’s still hard apparently. Implicit LOD calculation is the first instance where we poke a hole into the “single threaded” abstraction of high level shading languages like GLSL and HLSL and dive into the maddening world of warps, waves, quads and everything in-between. For fragment shading, at least a group of 2×2 threads (a quad) need to run side by side so we can have gradient information over the screen. On any modern GPU, these 2×2 threads are actually running in lock-step as we’ll see when looking at GPU ISA later …
+The Vulkan/GL/GLES ecosystem has always specified that implicit LOD instructions must happen in dynamically uniform control flow. Dynamically uniform just means that either all threads have to execute a texture() instruction, or no threads do. This ensures that there is always 4 valid texture coordinates from which to compute derivatives. The easiest way to ensure that this guarantee holds is simply to never sample in control flow, but that’s not really practical in more interesting shaders.
+If you’re sampling in control flow you better make sure you uphold the guarantees of the spec.
+Having to be dynamically uniform over an entire draw call is a bit silly, so the Vulkan specification recently tightened the scope such that if you have subgroupSize >= 4, you only need to be dynamically uniform on a per-quad granularity. This makes sense. We only need correct derivatives in the quad, we shouldn’t have to care if some unrelated quad or even triangle is diverging.
+An interesting case came up recently where apparently developers expect that you actually can sample with implicit LOD in diverging control flow. Apparently HLSL “defines” this control flow to be valid code.
+```
+vec2 uv = from_somewhere();
+if (weight > 0.0)
+    sum += weight * texture(Texture, uv);
+```
+The idea is that we shouldn’t have to sample the texture unless we’re going to use it, but it’s still nice to provide UV for LOD purposes. Unfortunately, there is no obvious way to express this optimization in high level languages. UV is well defined in the outer scope which is dynamically uniform, so that’s something … Intuitively, this code makes sense, but it gets really murky once we dig deeper.
+With subgroup ops, we can probably get a good approximation on the HLL side.
+```
+bool quadAny(bool value)
+{
+    // Perhaps this can be translated into s_wqm on AMD
+    // if compiler checks this pattern?
+    return subgroupClusteredOr(int(value), 4) != 0;
+}
+
+vec2 uv = from_somewhere();
+// Hoist texture sampling out of branch and force quad uniformity.
+vec4 tex;
+if (quadAny(weight > 0.0))
+    tex = texture(Texture, uv);
+if (weight > 0.0)
+    sum += weight * tex;
+```
+Querying gradients and then sampling with that in the branch is fine as well, but it is slow, and not really a fix, at best a workaround.
+HLSL seems a bit murky about if this kind of code is legal, it’s all “that one app did this thing that one time and now we’re screwed”. From my understanding compilers can do some heroics here to work around this in applications.
+I wanted to try this kind of code on all Vulkan devices I have available to see what happens. We’re in undefined territory as far as LOD goes, so anything can happen. There’s three outcomes I’m looking for which seem like plausible HW behavior:
+It just happens to work. This is kinda scary, since it’ll probably break in 5 years anyways.
+The LOD computed is garbage.
+The LOD is forced to some value on divergence.
+Here’s the concrete shader I’m using, from https://github.com/Themaister/Granite/blob/master/tests/assets/shaders/divergent_lod.frag. A test to run the shader is https://github.com/Themaister/Granite/blob/master/tests/divergent_lod_test.cpp
+```
+#version 450
+
+layout(location = 0) in vec2 vUV;
+layout(location = 0) out vec4 FragColor;
+layout(set = 0, binding = 1) uniform sampler2D uSampler;
+layout(set = 0, binding = 0, std140) uniform Weights
+{
+    vec4 weights[4];
+};
+
+void main()
+{
+    vec3 tex = vec3(0.0);
+    float lod = -10.0;
+    vec2 uv = vUV;
+    if (weights[int(gl_FragCoord.x) + 2 * int(gl_FragCoord.y)].x > 0.0)
+    {
+        tex = texture(uSampler, uv).rgb;
+        lod = textureQueryLod(uSampler, uv).y;
+    }
+
+    FragColor = vec4(tex, lod);
+}
+```
+I render this on a 2×2 frame buffer with a full-screen “expanded triangle” to not get any helper lane shenanigans. Let’s try to run this across a wide range of hardware and see what happens. NOTE: any result here is equally valid in Vulkan, this is intentionally going out of spec.
+AMD
+I tested this on a Navi card. RDNA ISA seems similar enough to GCN … We effectively have 4 driver stacks for AMD cards now to test.
+RADV (LLVM 10)
+Garbage LOD
+```
+main:
+BB16_0:
+	s_mov_b64 s[0:1], exec    
+	s_wqm_b64 exec, exec
+	v_cvt_i32_f32_e32 v3, v3
+	s_mov_b32 s6, s3
+	s_movk_i32 s7, 0x8000          
+	v_cvt_i32_f32_e32 v2, v2     
+	v_mov_b32_e32 v5, 0xc1200000    
+	s_load_dwordx4 s[8:11], s[6:7], 0x0    
+	v_lshlrev_b32_e32 v3, 1, v3  
+	v_add_lshl_u32 v2, v3, v2, 4   
+	s_waitcnt lgkmcnt(0)    
+	buffer_load_dword v4, v2, s[8:11], 0 offen    
+	v_mov_b32_e32 v2, 0  
+	v_mov_b32_e32 v3, v2      
+	s_waitcnt vmcnt(0)        
+	v_cmp_lt_f32_e32 vcc, 0, v4 against 0       
+	v_mov_b32_e32 v4, v2     
+	s_and_saveexec_b64 s[8:9], vcc
+	s_cbranch_execz BB16_2
+BB16_1:
+	s_mov_b32 s3, s7      
+	s_add_i32 s6, s2, 0x50           
+	s_mov_b32 m0, s4           
+	s_load_dwordx8 s[12:19], s[2:3], 0x0       
+	s_load_dwordx4 s[20:23], s[6:7], 0x0          
+	v_interp_p1_f32_e32 v7, v0, attr0.x
+	v_interp_p1_f32_e32 v8, v0, attr0.y      
+	v_interp_p2_f32_e32 v7, v1, attr0.x          
+	v_interp_p2_f32_e32 v8, v1, attr0.y   
+	s_waitcnt lgkmcnt(0)     
+	image_sample v[2:4], v[7:8], s[12:19], s[20:23] dmask:0x7 dim:SQ_RSRC_IMG_2D
+	image_get_lod v5, v[7:8], s[12:19], s[20:23] dmask:0x2 dim:SQ_RSRC_IMG_2D
+BB16_2:
+	v_nop                 
+	s_or_b64 exec, exec, s[8:9]              
+	s_and_b64 exec, exec, s[0:1]         
+	s_waitcnt vmcnt(0)                
+	exp mrt0 v2, v3, v4, v5 done vm          
+	s_endpgm               
+```
+We see that v7 and v8 hold the UV coordinates, but they are actually only computed inside the branch (v_interp). The optimizer is allowed to place UV computation inside the branch here. If there is divergence in a quad, the disabled lanes won’t get correct values for v7 and v8 (since execution is masked), and LOD becomes garbage.
+RADV (ACO)
+Coupled with Navi cards, this is probably the most bleeding edge setup you can run. It’s a completely new compiler backend for AMD cards, not based on LLVM.
+Just happens to work
+```
+BB0:
+	s_wqm_b64 exec, exec 
+	s_mov_b32 s0, s3    
+	s_movk_i32 s1, 0x8000  
+	s_load_dwordx4 s[8:11], s[0:1], 0x0 
+	s_mov_b32 m0, s4 
+	v_interp_p1_f32_e32 v4, v0, attr0.y 
+	v_cvt_i32_f32_e32 v2, v2   
+	v_cvt_i32_f32_e32 v3, v3   
+	v_lshl_add_u32 v2, v3, 1, v2 
+	v_lshlrev_b32_e32 v2, 4, v2 
+	s_waitcnt lgkmcnt(0)   
+	buffer_load_dword v2, v2, s[8:11], 0 offen 
+	v_interp_p2_f32_e32 v4, v1, attr0.y 
+	v_interp_p1_f32_e32 v0, v0, attr0.x  
+	v_interp_p2_f32_e32 v0, v1, attr0.x 
+	v_mov_b32_e32 v1, v4  
+	s_waitcnt vmcnt(0)   
+	v_cmp_lt_f32_e32 vcc, 0, v2  
+	s_and_saveexec_b64 s[0:1], vcc     
+	s_cbranch_execz BB3  
+BB1:
+	s_movk_i32 s3, 0x8000 
+	s_load_dwordx8 s[4:11], s[2:3], 0x0  
+	s_load_dwordx4 s[12:15], s[2:3], 0x50 
+	s_waitcnt lgkmcnt(0)   
+	image_sample v[2:4], v[0:1], s[4:11], s[12:15] dmask:0x7 dim:SQ_RSRC_IMG_2D
+	image_get_lod v0, v[0:1], s[4:11], s[12:15] dmask:0x2 dim:SQ_RSRC_IMG_2D
+BB3:
+	s_andn2_b64 exec, s[0:1], exec 
+	s_cbranch_execz BB6  
+BB4:
+	v_mov_b32_e32 v0, 0xc1200000 
+	v_mov_b32_e32 v2, 0  
+	v_mov_b32_e32 v3, 0   
+	v_mov_b32_e32 v4, 0  
+BB6:
+	s_mov_b64 exec, s[0:1] 
+	s_waitcnt vmcnt(0)   
+	exp mrt0 v2, v3, v4, v0 done vm 
+	s_endpgm
+```
+This time, UV is interpolated outside the branch, so sampling in divergent control flow ends up working after all. The registers are well defined as they enter the branch. For AMD, it seems like it just comes down to whether or not the lanes have correct values placed in them and not having them be clobbered by the time we get around to sampling. There doesn’t seem to be any hardware level checks for divergence.
+AMDVLK
+Garbage LOD
+AMDVLK uses the same LLVM stack that RADV LLVM uses, and no surprise, same result, and basically same exact ISA is generated.
+Windows
+Also just happens to work
+I guess it’s the exact same case as the ACO compiler here. No need to paste disassembly.
+Intel
+Tested on UHD 620 (8th gen mobile CPU I think).
+Anvil (Mesa)
+The Mesa compiler can spit out assembly, which is nice.
+Just happens to work
+ISA (a little too wide to embed): https://gist.github.com/Themaister/7c5b011cde3c7585459b089f80f897e2
+From what I can make out of the ISA, the UV is interpolated outside control flow, and then only the sampling takes place in control flow. It seems like Intel has similar behavior as AMD here, in that just as long as the registers are valid, divergent sampling “works”.
+Windows
+Just happens to work
+Doesn’t seem to be a way to get ISA from Windows driver, but I suppose it’s same as ANV here.
+Nvidia
+Tested on a Turing GPU on Linux. Didn’t bother testing on Windows as well considering the driver stack is basically the same.
+LOD is clamped to 0, textureQueryLod returns -32.0.
+Apparently, now we start seeing interesting behavior. Unfortunately, there is no public ISA to look at. The -32.0 LOD might look weird, but this is kind of expected. This is apparently the smallest possible representable LOD on this GPU. LOD is usually represented in some kind of fixed point, log2(0) = -inf after all.
+I confirmed it worked as expected when using non-divergent execution as a sanity check.
+Arm
+Tested on Mali-G72.
+LOD is clamped to 0, textureQueryLod returns -128.0.
+Very similar behavior to Nvidia here, except the LOD is -128.0 rather than -32.0. I confirmed it worked as expected when using non-divergent execution as a sanity check.
+QCOM
+Tested on Adreno 506.
+Garbage LOD
+Again, no ISA to look at. I confirmed it worked as expected when using non-divergent execution as a sanity check.
+Conclusion
+Never ever rely on LOD behavior with divergent quads (EDIT: at least the way it’s specced out and implemented on Vulkan drivers right now) . You’d be contributing to the pain and suffering of compiler engineers the world over. Staying quad-uniform is fine though.
+After playing Fire Emblem: Three Houses for an ungodly 160 hours over the past weeks, I guess it’s time to put on my professor hat on the internet instead.
+One topic I’ve been meaning to write about for a long time is synchronization in Vulkan. It’s a large hurdle to overcome when learning the API, and rather than mechanically explaining how it works, my goal here is to instill a mental model in the reader. Despite its reputation for maddening complexity, it is actually understandable and quite logical once you get over the initial hurdles.
+Where appropriate, I will use terms which match the Vulkan specification.
+The Vulkan queue
+For this part of the discussion we will only consider a single VkQueue. There is a lot to consider for single-queue synchronization, and dealing with multiple queues is a small extension on top of single-queue synchronization, which is covered at the end when discussing semaphores.
+The Vulkan queue is simply an abstraction where command buffers are submitted and the GPU churns through commands. Let’s get some common beginner mistakes out of the way first.
+Command buffer misconceptions
+Many developers seem to think that command buffer boundaries are somehow special in Vulkan. It is very important to clarify that for purposes of synchronization, everything submitted to a queue is simply a linear stream of commands. Any synchronization applies globally to a VkQueue, there is no concept of a only-inside-this-command-buffer synchronization.
+Command overlap
+The specification states that commands start execution in-order, but complete out-of-order. Don’t get confused by this. The fact that commands start in-order is simply convenient language to make the spec language easier to write. Unless you add synchronization yourself, all commands in a queue execute out of order. Reordering may happen across command buffers and even vkQueueSubmits. This makes sense, considering that Vulkan only sees a linear stream of commands once you submit, it is a pitfall to assume that splitting command buffers or submits adds some magic synchronization for you.
+NOTE: Unlike Vulkan, I do believe D3D12 disables any overlap across queue submits, but don’t quote me on that. Might be something to consider if you’re coming from D3D-land.
+NOTE: Frame buffer operations inside a render pass happen in API-order, of course. This is a special exception which the spec calls out.
+Pipeline stages
+Every command you submit to Vulkan goes through a set of stages. These stages are represented in the VK_PIPELINE_STAGE enum. See chapter 6.1.2 in spec. When we synchronize work in Vulkan, we synchronize work happening in these pipeline stages as a whole, and not individual commands of work.
+Draw calls, copy commands and compute dispatches all go through pipeline stages one by one.
+The mysterious TOP_OF_PIPE and BOTTOM_OF_PIPE stages
+A common stumbling block is the TOP_OF_PIPE and BOTTOM_OF_PIPE stages. These are essentially “helper” stages, which do no actual work, but serve some important purposes. Every command will first execute the TOP_OF_PIPE stage. This is basically the command processor on the GPU parsing the command. BOTTOM_OF_PIPE is where commands retire after all work has been done. TOP_OF_PIPE and BOTTOM_OF_PIPE are useful in specific scenarios, keep them in mind for later, as they are a little tricky and beginners make many mistakes with these.
+In-queue execution barriers
+Before we tackle memory barriers, we must fully understand execution barriers, as they are a subset of memory barriers. The primary mechanism in Vulkan to introduce execution barriers is the pipeline barrier.
+To introduce the simplest form of an execution dependency we use a pipeline barrier:
+```
+void vkCmdPipelineBarrier(
+    VkCommandBuffer                             commandBuffer,
+    VkPipelineStageFlags                        srcStageMask,
+    VkPipelineStageFlags                        dstStageMask,
+    VkDependencyFlags                           dependencyFlags,
+    uint32_t                                    memoryBarrierCount,
+    const VkMemoryBarrier*                      pMemoryBarriers,
+    uint32_t                                    bufferMemoryBarrierCount,
+    const VkBufferMemoryBarrier*                pBufferMemoryBarriers,
+    uint32_t                                    imageMemoryBarrierCount,
+    const VkImageMemoryBarrier*                 pImageMemoryBarriers);
+```
+If we ignore the memory barriers and flags here, we’re essentially left with two arguments, srcStageMask and dstStageMask. This represents the heart of the Vulkan synchronization model. We’re splitting the command stream in two with a barrier, where we consider “everything before” the barrier, and “everything after” the barrier, and these two halves are synchronized in some way.
+Section 6.1 lays this out in rather obtuse language, but we boil it down to:
+srcStageMask
+This represents what we are waiting for. Vulkan does not let you add fine-grained dependencies between individual commands. Instead you get to look at all work which happens in certain pipeline stages. For example, if we were to submit this series of commands starting off a fresh VkDevice:
+vkCmdDispatch (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT)
+vkCmdCopyBuffer (VK_PIPELINE_STAGE_TRANSFER_BIT)
+vkCmdDispatch (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT)
+vkCmdPipelineBarrier (srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT)
+We would be referring to the two vkCmdDispatch commands, as they perform their work in the COMPUTE stage. Even if we split these 4 commands into 4 different vkQueueSubmits, we would still consider the same commands for synchronization. Essentially, the work we are waiting for is all commands which have ever been submitted to the queue including any previous commands in the command buffer we’re recording. srcStageMask then restricts the scope of what we are waiting for. Only work happening in COMPUTE_SHADER_BIT stage is relevant in this example. srcStageMask is a bit-mask as the name suggests, so it’s perfectly fine to wait for both COMPUTE and TRANSFER work.
+There are also flags to refer to “all commands”, ALL_COMMANDS_BIT, which basically drains the entire queue for work. ALL_GRAPHICS_BIT is the same, but only for render passes.
+NOTE: Here we will find a potential use case for TOP_OF_PIPE. srcStageMask of TOP_OF_PIPE is basically saying “wait for nothing”, or to be more precise, we’re waiting for the GPU to parse all commands, which is, a complete noop. We had to parse all commands before getting to the pipeline barrier command to begin with. When we get to memory barriers, this can be very useful.
+dstStageMask
+This represents the second half of the barrier. Any work submitted after this barrier will need to wait for the work represented by srcStageMask before it can execute. Only work in the specified stages are affected. For example, if dstStageMask is FRAGMENT_SHADER_BIT, vertex shading for future commands can begin executing early, we only need to wait once FRAGMENT_SHADER_BIT is reached.
+NOTE: As an analog to srcStageMask with TOP_OF_PIPE, for dstStageMask, using BOTTOM_OF_PIPE can be kind of useful. This basically translates to “block the last stage of execution in the pipeline”. Basically, we translate this to mean “no work after this barrier is going to wait for us”. This might seem meaningless, but it will be useful when we discuss semaphores and memory barriers later.
+A crude example
+Let’s assume we record and submit some commands on a fresh VkDevice:
+vkCmdDispatch
+vkCmdDispatch
+vkCmdDispatch
+vkCmdPipelineBarrier(srcStageMask = COMPUTE, dstStageMask = COMPUTE)
+vkCmdDispatch
+vkCmdDispatch
+vkCmdDispatch
+With this barrier, the “before” set is commands {1, 2, 3}. The “after” set is {5, 6, 7}. A possible execution order here could be:
+#3
+#2
+#1
+#7
+#6
+#5
+{1, 2, 3} can execute out-of-order, and so can {5, 6, 7}, but these two sets of commands can not interleave execution. In spec lingo {1, 2, 3} happens-before {5, 6, 7}.
+https://github.com/KhronosGroup/Vulkan-Docs/wiki/Synchronization-Examples has some examples of how these stages are used in practice.
+Events aka. split barriers
+Vulkan provides a way to get overlapping work in-between barriers. The idea of VkEvent is to get some unrelated commands in-between the “before” and “after” set of commands, e.g.:
+vkCmdDispatch
+vkCmdDispatch
+vkCmdSetEvent(event, srcStageMask = COMPUTE)
+vkCmdDispatch
+vkCmdWaitEvent(event, dstStageMask = COMPUTE)
+vkCmdDispatch
+vkCmdDispatch
+The “before” set is now {1, 2}, and the after set is {6, 7}. 4 here is not affected by any synchronization and it can fill in the parallelism “bubble” we get when draining the GPU of work from 1, 2, 3. For advanced compute, this is a very important thing to know about, but not all GPUs and drivers can take advantage of this feature.
+Execution dependency chain
+This is a subtle – but very important – point which I don’t think is well enough understood. The general gist of it is that when we use dstStageMask to block stages, the dependencies in srcStageMask are carried forward into the blocked stages. Waiting for dstStageMask later will also wait for any dependencies dstStageMask had. It is easier to show an example here:
+vkCmdDispatch
+vkCmdDispatch
+vkCmdPipelineBarrier(srcStageMask = COMPUTE, dstStageMask = TRANSFER)
+vkCmdPipelineBarrier(srcStageMask = TRANSFER, dstStageMask = COMPUTE)
+vkCmdDispatch
+vkCmdDispatch
+In this example we actually get a dependency between {1, 2} and {5, 6}. This is because we created a chain of dependencies between COMPUTE -> TRANSFER -> COMPUTE. When we wait for TRANSFER in 4. we must also wait for anything which is currently blocking TRANSFER. This might seem confusing, but it makes sense if we consider a slightly modified example.
+vkCmdDispatch
+vkCmdDispatch
+vkCmdPipelineBarrier(srcStageMask = COMPUTE, dstStageMask = TRANSFER)
+vkCmdMagicDummyTransferOperation
+vkCmdPipelineBarrier(srcStageMask = TRANSFER, dstStageMask = COMPUTE)
+vkCmdDispatch
+vkCmdDispatch
+In this scenario, it’s clear that {4} must wait for {1, 2}. And {6, 7} must wait for {4}. So, we have created a chain where {1, 2} -> {4} -> {6, 7}, and as {4} is noop, {1, 2} -> {6, 7} is achieved. That’s essentially the chain.
+This has some uses when you want to “link up” barriers for whatever reason. I kinda wish Vulkan had some special “scoreboard” pipeline stages just for this use case …
+Pipeline stages and render passes
+COMPUTE and TRANSFER work is very simple when it comes to pipeline stages. The only stages they execute are:
+TOP_OF_PIPE
+DRAW_INDIRECT (for indirect compute only)
+COMPUTE / TRANSFER
+BOTTOM_OF_PIPE
+Render passes are a bit more intricate, and it’s very easy to confuse which pipelines stages do what.
+In render passes there are two “families” of pipeline stages, those which concern themselves with geometry processing, and the fragment family, which does rasterization / frame buffer operations.
+Aside from TOP_OF_PIPE/BOTTOM_OF_PIPE, we have
+Geometry
+DRAW_INDIRECT – Parses indirect buffers
+VERTEX_INPUT – Consumes fixed function VBOs and IBOs
+VERTEX_SHADER – Actual vertex shader
+TESSELLATION_CONTROL_SHADER
+TESSELLATION_EVALUATION_SHADER
+GEOMETRY_SHADER
+Fragment
+EARLY_FRAGMENT_TESTS
+FRAGMENT_SHADER
+LATE_FRAGMENT_TESTS
+COLOR_ATTACHMENT_OUTPUT
+For the most part, it’s the Fragment stages which are a bit confusing. Each of them have their own use cases.
+EARLY_FRAGMENT_TESTS
+This is the stage where early depth/stencil tests happen. This stage isn’t all that useful or meaningful except in some very obscure scenarios with frame buffer self-dependencies (aka, GL_ARB_texture_barrier). This is also where a render pass performs its loadOp of a depth/stencil attachment.
+LATE_FRAGMENT_TESTS
+This is where late depth-stencil tests take place, and also where depth-stencil attachments are stored with storeOp when a render pass is done.
+Helpful tip on fragment test stages
+It’s somewhat confusing to have two stages which basically do the same thing. When you’re waiting for a depth map to have been rendered in an earlier render pass, you should use srcStageMask = LATE_FRAGMENT_TESTS_BIT, as that will wait for the storeOp to finish its work.
+When blocking a render pass with dstStageMask, just use a mask of EARLY_FRAGMENT_TESTS | LATE_FRAGMENT_TESTS.
+NOTE: dstStageMask = EARLY_FRAGMENT_TESTS alone might work since that will block loadOp, but there might be shenanigans with memory barriers if you are 100% pedantic about any memory access happening in LATE_FRAGMENT_TESTS. If you’re blocking an early stage, it never hurts to block a later stage as well.
+COLOR_ATTACHMENT_OUTPUT
+This one is where loadOp, storeOp, MSAA resolves and frame buffer blend stage takes place, basically anything which touches a color attachment in a render pass in some way. If you’re waiting for a render pass which uses color to be complete, use srcStageMask = COLOR_ATTACHMENT_OUTPUT, and similar for dstStageMask when blocking render passes from execution.
+Memory barriers
+Now that we have the basics for execution barriers, we can kick it up a notch and consider memory barriers.
+Execution order and memory order are two different things. GPUs are notorious for having multiple, incoherent caches which all need to be carefully managed to avoid glitched out rendering. This means that just synchronizing execution alone is not enough to ensure that different units on the GPU can transfer data between themselves.
+If you are familiar with how C++11 introduced memory order and atomics, it is a good start, but the C++11 memory model does not consider that memory access can be incoherent to my knowledge. All CPU memory is assumed to be coherent, but memory order is weak on basically anything non-x86. Vulkan expands on this concept.
+The two concepts in the Vulkan specification we need to understand is memory being available and memory being visible. This is an abstraction over the fact that GPUs have incoherent caches. To explain this I will describe a mental model of a hypothetical GPU design which should make sense if you are familiar with how caches work.
+NOTE: There is a formal Vulkan memory model now which covers all of this in extreme detail. I admit I have not studied it enough to make references to it here, but developers really don’t need to know that level of detail to use Vulkan correctly.
+The L2 cache / main memory
+We will let the last cache hierarchy represent the “master” memory controller which all caches are connected to. This cache is connected to all other L1 caches, and external DDR memory. The GPU DDR memory is connected to the CPU memory controller in some way (PCI-e or UMA).
+When our L2 cache contains the most up-to-date data there is, we can say that memory is available, because L1 caches connected to L2 can pull in the most up-to-date data there is.
+Incoherent L1 caches
+Vulkan specifies a bunch of flags in the VK_ACCESS_ series of enums. These flags represent memory access which can be performed. Each pipeline stage can perform certain memory access, and thus we take the combination of pipeline stage + access mask and we get potentially a very large number of incoherent caches on the system. Each GPU core has its own set of L1 caches as well.
+Of course, real GPUs will only have a fraction of the possible caches here, but as long as we are explicit about this in the API, any GPU driver can simplify this as needed.
+Under section 6.1.3, table 4 in the Vulkan spec you can see a list of all possible access masks which can be used with a pipeline stage. These access masks either read from a cache, or write to an L1 cache in our mental model.
+We say that memory is visible to a particular stage + access combination if memory has been made available and we then make that memory visible to the relevant stage + access mask.
+Once a shader stage writes to memory, the L2 cache no longer has the most up-to-date data there is, so that memory is no longer considered available. If other caches try to read from L2, it will see undefined data. Whatever wrote that data must make those writes available before the data can be made visible again.
+Cache flush and invalidate
+To be clear, we can say that “making memory available” is all about flushing caches, and “making memory visible” is invalidating caches. This should make it more obvious what is going on. I will use the spec terminology however.
+VkMemoryBarrier
+If we revisit vkCmdPipelineBarrier, we can pass in a list of global memory barriers.
+```
+typedef struct VkMemoryBarrier {
+    VkStructureType sType;
+    const void* pNext;
+    VkAccessFlags srcAccessMask;
+    VkAccessFlags dstAccessMask;
+} VkMemoryBarrier;
+```
+A global memory barrier deals with access to any resource, and it’s the simplest form of a memory barrier. This means that in vkCmdPipelineBarrier, we are specifying 4 things to happen in order:
+Wait for srcStageMask to complete
+Make all writes performed in possible combinations of srcStageMask + srcAccessMask available
+Make available memory visible to possible combinations of dstStageMask + dstAccessMask.
+Unblock work in dstStageMask.
+A common misconception I see is that _READ flags are passed into srcAccessMask, but this is redundant. It does not make sense to make reads available, i.e. you don’t flush caches when you’re done reading data.
+Memory access and TOP_OF_PIPE/BOTTOM_OF_PIPE
+Never use AccessMask != 0 with these stages. These stages do not perform memory accesses, so any srcAccessMask and dstAccessMask combination with either stage will be meaningless, and spec disallows this. TOP_OF_PIPE and BOTTOM_OF_PIPE are purely there for the sake of execution barriers, not memory barriers.
+Split memory barriers
+A very important point here is that it’s perfectly possible to split up the “make available” and “make visible” operations. This is similar to the execution dependency chain discussed earlier.
+We can do something silly like:
+vkCmdDispatch – writes to an SSBO, VK_ACCESS_SHADER_WRITE_BIT
+vkCmdPipelineBarrier(srcStageMask = COMPUTE, dstStageMask = TRANSFER, srcAccessMask = SHADER_WRITE_BIT, dstAccessMask = 0)
+vkCmdPipelineBarrier(srcStageMask = TRANSFER, dstStageMask = COMPUTE, srcAccessMask = 0, dstAccessMask = SHADER_READ_BIT)
+vkCmdDispatch – read from the same SSBO, VK_ACCESS_SHADER_READ_BIT
+While StageMask cannot be 0, AccessMask can be 0.
+VkBufferMemoryBarrier
+This is not very interesting, we’re just restricting memory availability and visibility to a specific buffer. No GPU I know of actually cares, I think it makes more sense to just use VkMemoryBarrier rather than bothering with buffer barriers.
+VkImageMemoryBarrier
+Unlike VkBufferMemoryBarrier, this one is critical. You have to change image layouts at some point and this is done as part of an image memory barrier.
+```
+typedef struct VkImageMemoryBarrier {
+    VkStructureType sType;
+    const void* pNext;
+    VkAccessFlags srcAccessMask;
+    VkAccessFlags dstAccessMask;
+    VkImageLayout oldLayout;
+    VkImageLayout newLayout;
+    uint32_t srcQueueFamilyIndex;
+    uint32_t dstQueueFamilyIndex;
+    VkImage image;
+    VkImageSubresourceRange subresourceRange;
+} VkImageMemoryBarrier;
+```
+The interesting bits are oldLayout and newLayout. The layout transition happens in-between the make available and make visible stages of a memory barrier. The layout transition itself is considered a read/write operation, and the rules are basically that memory for the image must be available before the layout transition takes place. After a layout transition, that memory is automatically made available (but not visible!). Basically, think of the layout transition as some kind of in-place data munging which happens in L2 cache somehow.
+A practical TOP_OF_PIPE example
+Now we can actually make a practical example with TOP_OF_PIPE. If we just allocated an image and want to start using it, what we want to do is to just perform a layout transition, but we don’t need to wait for anything in order to do this transition. This is where TOP_OF_PIPE is useful. Let’s say that we’re allocating a fresh image, and we’re going to use it in a compute shader as a storage image. The pipeline barrier looks like:
+srcStageMask = TOP_OF_PIPE – Wait for nothing
+dstStageMask = COMPUTE – Unblock compute after the layout transition is done
+srcAccessMask = 0 – This is key, there are no pending writes to flush out. This is the only way to use TOP_OF_PIPE in a memory barrier. It’s important to note that freshly allocated memory in Vulkan is always considered available and visible to all stages and access types. You cannot have stale caches when the memory was never accessed … What about recycled/aliased memory you ask? Excellent question, we’ll cover that too later.
+oldLayout = UNDEFINED – Input is garbage
+newLayout = GENERAL – Storage image compatible layout
+dstAccessMask = SHADER_READ | SHADER_WRITE
+A practical BOTTOM_OF_PIPE example
+My favourite example here is swapchain images. We have to transition them into VK_IMAGE_LAYOUT_PRESENT_SRC_KHR before passing the image over to the presentation engine.
+After transitioning into this PRESENT layout, we’re not going to touch the image again until we reacquire the image, so dstStageMask = BOTTOM_OF_PIPE is appropriate.
+srcStageMask = COLOR_ATTACHMENT_OUTPUT (assuming we rendered to swapchain in a render pass)
+srcAccessMask = COLOR_ATTACHMENT_WRITE
+oldLayout = COLOR_ATTACHMENT_OPTIMAL
+newLayout = PRESENT_SRC_KHR
+dstStageMask = BOTTOM_OF_PIPE
+dstAccessMask = 0
+Having dstStageMask = BOTTOM_OF_PIPE and access mask being 0 is perfectly fine. We don’t care about making this memory visible to any stage beyond this point. We will use semaphores to synchronize with the presentation engine anyways.
+Implicit memory ordering – semaphores and fences
+Semaphores and fences are quite similar things in Vulkan, but serve a different purpose. Semaphores facilitate GPU <-> GPU synchronization across Vulkan queues, and fences facilitate GPU -> CPU synchronization.
+These objects are signaled as part of a vkQueueSubmit. However, one very important thing to note about semaphores and fences is how they interact with memory. To signal a semaphore or fence, all previously submitted commands to the queue must complete. If this were a regular pipeline barrier, we would have srcStageMask = ALL_COMMANDS_BIT. However, we also get a full memory barrier, in the sense that all pending writes are made available. Essentially, srcAccessMask = MEMORY_WRITE_BIT.
+Implicit memory guarantees on vkQueueSubmit
+While signaling a fence or semaphore works like a full cache flush, submitting commands to the Vulkan queue, makes all memory access performed by host visible to all stages and access masks. Basically, submitting a batch issues a cache invalidation on host visible memory. A common mistake is to think that you need to do this invalidation manually when the CPU is writing into staging buffers or similar. Something like:
+srcStageMask = HOST
+srcAccessMask = HOST_WRITE_BIT
+dstStageMask = TRANSFER
+dstAccessMask = TRANSFER_READ
+If the write happened before vkQueueSubmit, this is automatically done for you.
+NOTE: This kind of barrier is necessary if you are using vkCmdWaitEvents where you wait for host to signal the event with vkSetEvent. In that case, you might be writing the necessary host data after vkQueueSubmit was called, which means you need a pipeline barrier like this. This is not exactly a common use case, but it’s important to understand when these API constructs are useful.
+Implicit memory guarantees when waiting for a semaphore
+While signalling a semaphore makes all memory available, waiting for a semaphore makes memory visible. This basically means you do not need a memory barrier if you use synchronization with semaphores since signal/wait pairs of semaphores works like a full memory barrier. Let’s see an example where queue 1 writes to an SSBO in compute, and consumes that buffer as a UBO in a fragment shader in queue 2. We’re going to assume the buffer was created with QUEUE_FAMILY_CONCURRENT.
+NOTE: If you need to transfer ownership to a different queue family, you need memory barriers, one in each queue to release/acquire ownership.
+Queue 1
+vkCmdDispatch
+vkQueueSubmit(signal = my_semaphore)
+There is no pipeline barrier needed here. Signalling the semaphore waits for all commands, and all writes in the dispatch are made available to the device before the semaphore is actually signaled.
+Queue 2
+vkCmdBeginRenderPass
+vkCmdDraw
+vkCmdEndRenderPass
+vkQueueSubmit(wait = my_semaphore, pDstWaitStageMask = FRAGMENT_SHADER)
+When we wait for the semaphore, we specify which stages should wait for this semaphore, in this case the FRAGMENT_SHADER stage. All relevant memory access is automatically made visible, so we can safely access UNIFORM_READ_BIT in FRAGMENT_SHADER stage, without having extra barriers. The semaphores take care of this automatically, nice!
+Execution dependency chain with semaphore
+Just like pipeline barriers having execution dependency chains, we can create execution dependency chains with semaphores as well. pDstWaitStageMask in vkQueueSubmit blocks certain stages from executing.
+If we create a pipeline barrier with srcStageMask targeting one of the stages in the wait stage mask, we also wait for the semaphore to be signaled. This is extremely useful for doing image layout transitions on swapchain images. We need to wait for the image to be acquired, and only then can we perform a layout transition. The best way to do this is to use pDstWaitStageMask = COLOR_ATTACHMENT_OUTPUT_BIT, and then use srcStageMask = COLOR_ATTACHMENT_OUTPUT_BIT in a pipeline barrier which transitions the swapchain image after semaphore is signaled.
+Host memory reads
+While signalling a fence makes all memory available, it does not make them available to the CPU, just within the device. This is where dstStageMask = PIPELINE_STAGE_HOST and dstAccessMask = ACCESS_HOST_READ_BIT flags come in. If you intend to read back data to the CPU, you must issue a pipeline barrier which makes memory available to the HOST as well. In our mental model, we can think of this as flushing the GPU L2 cache out to GPU main memory, so that CPU can access it over some bus interface.
+Safely recycling memory and aliasing memory
+We earlier had an example with creating a fresh VkImage and transitioning it from UNDEFINED, and waiting for TOP_OF_PIPE. As explained, we did not need to specify any srcAccessMask since we knew that memory was guaranteed to be available. The reason for this is because of the implied guarantee of signalling a fence. In order to recycle memory, we must have observed that the GPU was done using the image with a fence. In order to signal that fence, any pending writes to that memory must have been made available, so even recycled memory can be safely reused without a memory barrier. This point is kind of subtle, but it really helps your sanity not having to inject memory barriers everywhere.
+However, what if we consider we want to alias memory inside a command buffer? The rule here is that in order to safely alias, all memory access from the active alias must be made available before a new alias can take its place. Here’s an example for a case where we have two VkImages which are used in two render passes, and they alias memory. When one image alias is written to, all other images immediately become “undefined”. There are some exceptions in the specification for when multiple aliases can be valid at the same time, but for now we assume that is not the case.
+vkCmdPipelineBarrier(image = image1, oldLayout = UNDEFINED, newLayout = COLOR_ATTACHMENT_OPTIMAL, srcStageMask = COLOR_ATTACHMENT_OUTPUT, srcAccessMask = COLOR_ATTACHMENT_WRITE, dstStageMask = COLOR_ATTACHMENT_OUTPUT, dstAccessMask = COLOR_ATTACHMENT_WRITE|READ)
+image1 will contain garbage here so we need to transition away from UNDEFINED. We need to make any pending writes to COLOR_ATTACHMENT_WRITE available before the layout transition takes place, assuming that we’re running these commands every frame. The following render pass will wait for this transition to take place using dstStageMask/dstAccessMask.
+vkCmdBeginRenderPass/EndRenderPass
+vkCmdPipelineBarrier(image = image2, …)
+vkCmdBeginRenderPass/EndRenderPass
+image1 was written to, so image2 was invalidated. Similar to the pipeline barrier for image1, we need to transition away from UNDEFINED. We need to make sure any write to image1 is made available before we can perform the transition. Next frame, image1 needs to take ownership again, and so on.
+External subpass dependencies
+Render passes in Vulkan have a concept of EXTERNAL subpass dependencies. This is arguably the most misunderstood aspect of Vulkan sync. I’d like to dedicate a section to this, because too many developers are lured into using it in cases where it’s not terribly useful and very likely to cause bugs.
+The main purpose of external subpass dependencies is to deal with initialLayout and finalLayout of an attachment reference. If initialLayout != layout used in the first subpass, the render pass is forced to perform a layout transition.
+If you don’t specify anything else, that layout transition will wait for nothing before it performs the transition. Or rather, the driver will inject a dummy subpass dependency for you with srcStageMask = TOP_OF_PIPE_BIT. This is not what you want since it’s almost certainly going to be a race condition. You can set up a subpass dependency with the appropriate srcStageMask and srcAcessMask. The external subpass dependency is basically just a vkCmdPipelineBarrier injected for you by the driver. The whole premise here is that it’s theoretically better to do it this way because the driver has more information, but this is questionable, at least on current hardware and drivers.
+There is a very similar external subpass dependency setup for finalLayout. If finalLayout differs from the last use in a subpass, driver will transition into the final layout automatically. Here you get to change dstStageMask/dstAccessMask. If you do nothing here, you get BOTTOM_OF_PIPE/0, which can actually be just fine. A prime use case here is swapchain images which have finalLayout = PRESENT_SRC_KHR.
+Essentially, you can ignore external subpass dependencies. Their added complexity give very little gain. Render pass compatibility rules also imply that if you change even minor things like which stages to wait for, you need to create new pipelines! This is dumb, and will hopefully be fixed at some point in the spec.
+However, while the usefulness of external subpass dependencies is questionable, they have some convenient use cases I’d like to go over:
+Automatically transitioning TRANSIENT_ATTACHMENT images
+If you’re on mobile, you should be using transient images where possible. When using these attachments in a render pass, it makes sense to always have them as initialLayout = UNDEFINED. Since we know that these images can only ever be used in COLOR_ATTACHMENT_OUTPUT or EARLY/LATE_FRAGMENT_TEST stages depending on their image format, the external subpass dependency writes itself, and we can just use transient attachments without having to think too hard about how to synchronize them. This is what I do in my Granite engine, and it’s quite useful. Of course, we could just inject a pipeline barrier for this exact same purpose, but that’s more boilerplate.
+Automatically transitioning swapchain images
+Typically, swapchain images are always just used once per frame, and we can deal with all synchronization using external subpass dependencies. We want initialLayout = UNDEFINED, and finalLayout = PRESENT_SRC_KHR.
+srcStageMask is COLOR_ATTACHMENT_OUTPUT which lets us link up with the swapchain acquire semaphore. For this case, we will need an external subpass dependency. For the finalLayout transition after the render pass, we are fine with BOTTOM_OF_PIPE being used. We’re going to use semaphores here anyways.
+I also do this in Granite.
+Conclusion
+I hope this was useful. The post got a bit more mechanical than I hoped for, but it should be a more distilled version of the specification.
+Pipelines – what is your pain tolerance?
+A lot of thought goes into pipelines. Eager or lazy creation, dynamic or static render state. Forget about one size fits all. How close will you approach the volcano? Make sure there is no lava under your feet when you’re done.
+My pain tolerance is kinda low, I’d rather watch it on TV. Granite is a bit similar, it prefers to be cooled off magma instead.
+The ideal case
+Vulkan is designed to let you forget about filthy, filthy render state management and work exclusively with pristine VkPipeline objects. These objects encode every possible choice you can make when flipping the fixed-function bits and bobs on the GPU.
+Getting to a point when you only think in terms of VkPipelines, and all pipelines are compiled up front in load-time is a holy grail of modern graphics API implementation. Gone are the stutters, the hitches, the sad 100 ms glitches which throw you off guard when you peek around the wall.
+To get there, you must sacrifice all notions of flexibility, no last minute decisions, everything must be planned out in detail ahead of time. There is a lot of state which is pulled together to form a VkPipeline, an all-star cast of colorful characters and a plot with a lot of depth.
+… ahem, that got a bit weird.
+Shader modules
+Obviously, the core part of a pipeline is the shader modules, the Vulkan::Program in Granite. From the program we automatically know the VkPipelineLayout because of reflection, so no problems there.
+Render pass
+We also need to know the render pass (and subpass index!) in order to create a pipeline. This one can be really counter-intuitive. The shader compiler often needs to know which render target formats are in use in order to generate final ISA. This is where we start running into problems. There is no obvious reason to combine a render pass and shader modules together. In my mental model these two should not know about each other, but drivers would really like that to be the case. For example, if I were to render a scene it would look something like:
+Start rendering to some attachments (VkRenderPass is known here)
+Set up the default rendering state appropriate for the pass. There are different “default” states for depth-only, opaque, lighting, and transparency rendering. Part of the render state vector is determined here.
+Ask the renderer to render some list of visible objects which survived culling. Shader modules are known at this level, and some render state might be per-material, like two-sided rendering, etc.
+There are a few ways to make this work, but somewhere you must have higher-level knowledge which shader modules are used in which render passes. If an application has a baking step during build, that might be a nice place to do it, but not all graphics API use cases work this way. Emulation comes to mind where you cannot know what an application will do until you execute it. User scripting could be a nightmare as well …
+Render passes also have a lot of combinatorial explosion. If we just change from MSAA 2x to MSAA 4x, that means new render passes, and new pipelines which are compatible with those render passes. Clearly we see that something trivial like changing a setting in the options menu of most games will trickle down into a completely different set of pipelines for all materials. This kind of coupling isn’t what I call clean, but sometimes sanity must be sacrificed for performance. I’d prefer to keep my sanity.
+Fixed-function vertex bindings
+This consists of attributes, bindings, strides and input rates. This one is usually not a problem if you control the asset pipeline. You can decide on a “standard” vertex buffer layout and forget about it. There is some slight annoyance here if we want to support glTF or other scene transmission formats unless we’re prepared to rewrite all vertex buffers to match the standard layout.
+Shader compilers like to know about this information since some ISAs need to fetch vertices in software, and therefore need to be able to compute correct offsets based on VertexIndex/InstanceIndex.
+10 – Fixed-function render state
+When rendering triangles in Vulkan, there is still a ton of state to deal with. Vulkan takes all the gunk you’d set in glEnable/glDisable and various other functions and bundles it together into one massive struct. I wrote up a sample which demonstrates how render state is set, saved and restored.
+I have to admit I kinda like the old-school way of setting state individually. Isolating render state to a command buffer avoid almost all the horrifying issues with state management in OpenGL. In GL, the state is global, and leaked between modules and render passes. This is really scary, and you’re basically forced to make a custom state tracker on top of GL to keep yourself sane. There was also no good way of “saving” just the state you cared about and restoring it without writing a lot of custom code. I like the idea of setting some “standard” state which clears out any possible leakage of state. Overall, Granite’s model is maximum convenience.
+A concept I’ve seen in other projects is the idea of creating big structures on the user side which mimics a pipeline, but I don’t think this is very useful unless it’s basically a full VkGraphicsPiplineCreateInfo with all the bells and whistles. If we don’t, we still don’t have the information we need to create a pipeline anyways, like render pass information for example, and we’re back to hashing with lazy creation.
+Even just render state tends to be split in two halves for me. Some state tends to be “global” in nature and some tends to be “local”. This is state which is set by the higher level renderer which thinks in terms of:
+Opaque pass vs transparent pass (alpha blending)
+Depth-only? (depth write enable, depth bias?, equal test?)
+Lighting pass? (additive blending?)
+Stencil? (for deferred)
+This state is saved and restored as necessary, then we have the objects which are rendered in a render pass which typically think in terms of:
+Two sided mesh? (face culling)
+Primitive restart?
+Topology?
+Shader program?
+Vertex attributes?
+I don’t like to couple these parts of the renderer together, so a tightly packed blob of state in Vulkan::CommandBuffer does the job for me. At the end of the day, the only real cost of this flexibility is some extra hashing cost. It doesn’t light up in the profile for me.
+Overall, I like the “immediate” nature of the CommandBuffer interface. There’s always a hybrid solution if that is ever needed where I would set the state I’m interested in, then pull out a persistent VkPipeline handle which can be used later and bypasses any hashing of state when bound.
+Avoiding stutters
+The real problem with lazily creating pipelines is vkCreateGraphicsPipelines in my opinion. Doing this at the last minute is almost a guaranteed hitch, and it should be avoided at all cost. Avoiding last minute pipeline compilation is the real reason we should know all state combinations up front, not because we get to bind VkPipelines directly and avoid some small hashing cost.
+My strategy for dealing with this problem is pre-warming the hashmaps with previously seen data. Granite integrates the Fossilize project to solve the problem of serializing all information needed to create pipelines in a GPU and driver independent way. In theory, I would be able to ship a Fossilize database as part of an application and use that to pre-warm all historically observed pipelines and their dependent objects at Vulkan::Device creation time.
+To my knowledge, this is basically how all GL and D3D11 drivers behave. Cache all the things.
+Conclusion
+Granite’s render state management is old-school, but I like it. Pre-warming the various hashmaps in Vulkan::Device is the strategy I used to avoid any pipeline compilation stutters.
+There are many alternatives for any graphics API abstraction. There are things I like in legacy APIs, and things I hate. I wanted to keep the parts I liked, and avoid the parts I disliked.
+… that’s all folks!
+I think this is the end of this series for now. I’ve gone over the Vulkan backend in broad strokes, and I hope it was interesting and useful.
+Render passes and synchronization
+This is part 5 in the tour of Granite‘s Vulkan backend. We’re going to get knee-deep in the aspects of Vulkan which are the most difficult to learn in my opinion, and mastering these topics of Vulkan is the real hurdle towards mastery. This level of understanding is something high-level APIs will prevent you from reaching.
+This post isn’t intended to be a tutorial on Vulkan synchronization, so I’ll assume some basic level of knowledge.
+Render passes
+Render passes is a new fundamental part of Vulkan which does not exist in any of the legacy APIs. In older APIs you can freewheel how you render to frame buffers, but that approach was always terrible on tile-based GPUs, and these days with hybrid tilers, it’s probably terrible on desktop as well. Vulkan forces you to think about rendering all you need in one go to a frame buffer and then proceed to the next.
+In Granite, I wanted to make sure most of the flexibility and explicitness of Vulkan render passes could be expressed with minimal boilerplate. Most projects don’t seem to pay attention to this part except that it’s something you just have to do, and very few see the benefits they bring. That is probably a reasonable stance for 2019 if you do not care about mobile performance. If you need to target mobile though, it is worth the extra work. As of writing, the feature is quite mobile-centric, but desktop GPUs seem to be inching towards tile-based architectures, so it will be interesting to see if this view on render passes will shift in the future. Even D3D12 recently got render passes too, albeit in a simplified form.
+In the most basic form, render passes in Vulkan can be rather daunting to set up, and it’s one of the many battles you have to fight to get hello triangle on screen. If we take a render pass with just one sub-pass (the case we care about 99% of the time), we need to specify up front:
+How many attachments?
+Which formats are used?
+How many MSAA samples?
+initialLayout and finalLayout
+Which image layouts to use while rendering?
+Do we load from memory or clear the attachment on render pass begin?
+Do we bother storing the attachments to memory?
+Most of this information is boilerplate we can automate, but things like load/clear/store we cannot deduce in the backend before it is too late. Knowing this kind of information up-front can be very beneficial for bandwidth consumption, at least on mobile.
+The ugly framebuffer objects
+An ugly aspect of Vulkan is the use of VkFramebuffer. I want an API where I just say “start a render pass where we render to these attachments”. Creating “FBOs” up front was really ugly in GL, and I think it’s a bad abstraction to have API users carry around ownership of objects which represent little to no useful work. FBOs are empty husks which might as well just be an array of image views.
+We could just create VkFramebuffers every render pass we begin and defer the deletion of it right away, but creating these objects have some cost. There’s a handle allocation in the driver at minimum, and probably a little more on certain drivers. Here I just reuse the temporary hashmap allocator which I introduced in the descriptor set model post. VkFramebuffer objects can be reused over multiple frames, but if they aren’t used for a while, they are just deleted since VkFramebuffer objects are immutable.
+Automating VkRenderPass creation
+This topic is actually quite complicated when we start diving into the deep end of Vulkan render passes, but we can start with the trivial cases. The API in Granite looks something like:
+```
+Vulkan::RenderPassInfo rp;
+rp.num_color_attachments = 1;
+rp.color_attachments[0] = &rt->get_view();
+rp.store_attachments = 1 << 0;
+rp.clear_attachments = 1 << 0;
+
+rp.clear_color[0].float32[0] = 1.0f;
+rp.clear_color[0].float32[1] = 0.0f;
+rp.clear_color[0].float32[2] = 1.0f;
+rp.clear_color[0].float32[3] = 0.0f;
+
+cmd->begin_render_pass(rp);
+```
+This is an immediate way of starting a render pass, no reason to create frame buffers up front and all that. VkRenderPass can be created lazily on-demand like everything else.
+Formats / MSAA sample counts
+Render passes need to know formats and sample counts, and since we pass the concrete attachments directly in begin_render_pass(), we have the information we need right here.
+Image layouts and VK_SUBPASS_EXTERNAL dependencies
+There are three kinds of attachments in Granite:
+User-created. These attachments are render targets which are created with Device::create_image() and the backend does not own the resource or knows anything about how long the resource will live. Common case for user-created render targets.
+WSI images. These images are special since they came from VkSwapchainKHR or some equivalent mechanism. We know that these images are only used for rendering and they are only consumed by the presentation engine, or some other mechanism.
+Transient images. Images with transient usage flags only live inside render passes. They cannot be sampled from, their memory does not necessarily exist except in page tables which point to /dev/null. We don’t care what happens to these images once the render pass is done.
+To deduce image layouts for a render pass we have a few different paths.
+wsi images
+I don’t care about preserving WSI images over multiple frames, and I don’t care about sampling from WSI images or any such weird use case after rendering, so the flow of image layouts is:
+initialLayout = UNDEFINED (discard)
+VkAttachmentReference -> COLOR_ATTACHMENT_OPTIMAL or whatever is required for the subpass
+finalLayout = PRESENT_SRC_KHR or whatever layout we need when using external WSI. For something like libretro, this will be SHADER_READ_ONLY_OPTIMAL since the image will be handed off to some other render pass which we don’t know or care about. For headless PNG/video dumping, it might be TRANSFER_SRC_OPTIMAL.
+When initialLayout != the layout used in the first subpass, vkCmdBeginRenderPass will actually need to perform a memory barrier implicitly to make this work. The big question is when this memory barrier takes place, and the answer is “as soon as possible” (TOP_OF_PIPE_BIT) if we don’t specify it anywhere. For this case, Granite will add a subpass dependency which waits for VK_SUBPASS_EXTERNAL in the COLOR_ATTACHMENT_OUTPUT stage. This latches onto the WSI acquire semaphore, more on that later.
+Final layout != last layout is used, so we get a transition at the end of the render pass, but we don’t need to care about external subpass dependencies here. The automatically generated one is perfect, and we’re going to use the WSI release semaphore to properly synchronize this image anyways.
+When we see a WSI image in a render pass, we can trivially mark this command buffer as “touching WSI”. This will affect command buffer submission later. This is indeed the kind of tracking which I have been arguing against in earlier posts, but it’s so trivial that it’s a no-brainer to me in this case.
+Transient images
+For transient images, we automate it just like WSI images, except that finalLayout will match last used layout in the render pass. This way we avoid some useless image layout transition at the end of the render pass. Next time we use the image, it’s going to be discarded anyways.
+Because we deal with transitions automatically, users can freely pull images from Vulkan::Device with get_transient_attachment(), render to it, and forget about it. This is super convenient for things like MSAA rendering where the multi-sampled attachment just needs to exist temporarily for purposes of being resolved into the single-sampled attachment we care about. Having to care about synchronization for resources we don’t own is weird I think.
+other images
+For any other image, we need to avoid any implicit layout transition, so we simply force initialLayout to match the first use in the render pass, and finalLayout will match the last use. In our small sample, it’s all going to be COLOR_ATTACHMENT_OPTIMAL. It’s up to the API user to know what layouts a render pass will expect, but it’s straight forward to map a render pass to expected layout. Color attachments are COLOR_ATTACHMENT_OPTIMAL, depth-stencil is DEPTH_STENCIL_OPTIMAL or DEPTH_STENCIL_READ_ONLY_OPTIMAL based on the read/write mode for depth, input attachments are SHADER_READ_ONLY, etc. It’s possible to use an attachment for multiple purposes in a subpass, and Granite supports that as well. Some examples:
+Color attachment + input attachment: Feedback loop ala GL_ARB_texture_barrier (super useful for certain emulators) -> GENERAL
+RW Depth attachment + input attachment (some weird decal algorithm?) -> GENERAL
+Read-Only depth + input attachment (deferred shading use case) -> DEPTH_STENCIL_READ_ONLY_OPTIMAL
+All of this is analyzed when a newly observed VkRenderPass is created, and subpass dependencies are set up automatically. Anything which happens outside the render pass is the user’s responsibility.
+08 – Bare-bones “deferred rendering” sample
+I made a cut-down sample to show how the API expresses multi-pass in the context of deferred rendering with transient gbuffer + depth. The meat of it is:
+```
+Vulkan::RenderPassInfo rp;
+rp.num_color_attachments = 3;
+rp.color_attachments[0] = &device.get_swapchain_view();
+
+rp.color_attachments[1] = &device.get_transient_attachment(
+		device.get_swapchain_view().get_image().get_width(),
+		device.get_swapchain_view().get_image().get_height(),
+		VK_FORMAT_R8G8B8A8_UNORM,
+		0);
+rp.color_attachments[2] = &device.get_transient_attachment(
+		device.get_swapchain_view().get_image().get_width(),
+		device.get_swapchain_view().get_image().get_height(),
+		VK_FORMAT_R8G8B8A8_UNORM,
+		1);
+
+rp.depth_stencil = &device.get_transient_attachment(
+		device.get_swapchain_view().get_image().get_width(),
+		device.get_swapchain_view().get_image().get_height(),
+		device.get_default_depth_format());
+
+rp.store_attachments = 1 << 0;
+rp.clear_attachments = (1 << 0) | (1 << 1) | (1 << 2);
+rp.op_flags = Vulkan::RENDER_PASS_OP_CLEAR_DEPTH_STENCIL_BIT;
+
+Vulkan::RenderPassInfo::Subpass subpasses[2];
+rp.num_subpasses = 2;
+rp.subpasses = subpasses;
+
+rp.clear_depth_stencil.depth = 1.0f;
+
+subpasses[0].num_color_attachments = 2;
+subpasses[0].color_attachments[0] = 1;
+subpasses[0].color_attachments[1] = 2;
+
+subpasses[0].depth_stencil_mode = Vulkan::RenderPassInfo::DepthStencil::ReadWrite;
+
+subpasses[1].num_color_attachments = 1;
+subpasses[1].color_attachments[0] = 0;
+subpasses[1].num_input_attachments = 3;
+subpasses[1].input_attachments[0] = 1;
+subpasses[1].input_attachments[1] = 2;
+subpasses[1].input_attachments[2] = 3;  // Depth attachment
+subpasses[1].depth_stencil_mode = Vulkan::RenderPassInfo::DepthStencil::ReadOnly;
+
+cmd->begin_render_pass(rp);
+// Do work
+cmd->next_subpass();
+// Do work
+cmd->end_render_pass();
+```
+See code comments in sample for more detail. To write this kind of sample in raw Vulkan would be almost a full day’s project.
+Synchronization
+Unlike many aspects of Granite which are reasonably high-level, synchronization in Granite is almost 100% explicit. The general philosophy of Granite is that excessive tracking of resource use is a no-no, unless it is trivial to do so (e.g. WSI images). Synchronization is a case where you need a lot of tracking to do a good job, and it is impossible to do a perfect job since you end up relying on heuristics, at least if you are to implement automatic synchronization on top of Vulkan. GL and D3D11 drivers have an advantage here since they can tap into GPU-specific synchronization mechanisms which might be better suited for implicit synchronization. A good example here is the i915 driver stack in the Linux DRM stack which can do automatic synchronization in kernel space somehow. I’m sure that simplifies the Mesa GL driver a lot, but I don’t know the details.
+Let’s go through a thought experiment where we look at the big problems we run into if we are to implement a fully automatic barrier system. (I have tried :p)
+Problem #1 – We cannot rewind time
+When touching a resource, we must ask ourselves: “When and where was this resource accessed last?” We have three potential solutions to resolve a hazard:
+Pipeline barrier (was used just now)
+Event (was used some time ago in this queue)
+Semaphore (was used in a different queue)
+Ideally, we need to inject a barrier at the exact point where a resource was last used, but we cannot inject new commands in the middle of a command buffer which has already been recorded.
+There is no winning this fight, either we eagerly inject barriers after every command in the hope that some future command will need to synchronize against it (VkEvent is nice here), or we inject barriers too late, stalling the GPU needlessly.
+Eagerly injecting barriers is pure insanity if we take into the account that the resource might be used on a different queue in the future. That means signalling a heavy semaphore after every render pass or command. We could simply ignore supporting multiple queues, but that’s a huge compromise to make.
+Problem #2 – Redundant tracking of read-only resources
+A problem I found while trying to implement automatic barrier tracking was that static resources might be written in the future, so we need to keep track of them. This is a waste of CPU time, but it might be possible to explicitly mark these resources as “do not track, they’re truly static, pinky promise”, but I feel this is bolting on hacks.
+Problem #3 – Multi-threading
+The question of “where was this resource touched last” might not actually be possible to answer in a multi-threaded scenario. If we are recording command buffers in parallel, the backend has no idea what is going on until we serialize execution in vkQueueSubmit. A common solution I have seen for this problem is to resolve synchronization internally in command buffers as they are recorded, and on command buffer submission time, we can look at all used resources and resolve any cross-command buffer synchronization points right before submitting the command buffers in vkQueueSubmit. The complexity starts to shoot through the roof though. That’s a good sign we need to rethink.
+I think this is the kind of solution you end up with when you have no choice but to port some old legacy API to Vulkan, and breaking the abstraction API is not an option.
+Render graphs
+A Vulkan backend which solves synchronization can only look back in time and deal with hazards at the last minute, but that is only because we do not have any context about what the application is doing. At a higher level, we can know what is going to happen in the future, and we can make automated decisions at that level, where we actually have context about what is going on. This is another reason why I do not want to have automatic synchronization in a Vulkan backend. Either we get a sub-optimal solution, or we try to close the gap with heuristics, but now run-time behavior is completely non-deterministic. We should aim for something better.
+I believe the synchronization problem should be solved at a higher level, like a render graph. I wrote a blog some time ago about this topic: http://themaister.net/blog/2017/08/15/render-graphs-and-vulkan-a-deep-dive/
+Signalling fences
+Granite’s way of signalling fences is very similar to plain Vulkan.
+```
+Vulkan::Fence fence;
+device.submit(cmd, &fence);
+
+// Somewhere else, potentially in a different thread.
+fence->wait();
+// fence ref-count goes to 0, queued up for recycling.
+```
+There is a pool of VkFence objects which can be reused. Signalling a fence forces a vkQueueSubmit. Once the lifetime of a Vulkan::Fence ends it is recycled back to the frame context. Nothing out of the ordinary here.
+Semaphores
+Semaphores work very similar to fences and are requested in Device::submit() like fences. Like Vulkan, they have a restriction that they can only be waited on once. Semaphores can be waited on in other queues with Device::add_wait_semaphore() in a particular queue and pipeline stage. This matches pDstWaitStages. Semaphores are also recycled like fences.
+Events
+Events can be signalled and later waited on in the same queue. Again, we have a pool of VkEvent objects, CommandBuffer::signal_event() requests a fresh event, signals it with vkCmdSetEvent and hands it to the user. VkEvents are recycled using the frame context. There is a similar CommandBuffer::wait_event() which maps 1:1 to vkCmdWaitEvents.
+Barriers
+Granite has many different methods to inject pipeline barriers, the most common ones are:
+```
+cmd->barrier(srcStage, srcAccess, dstStage, dstAccess);
+```
+which maps to a vkCmdPipelineBarrier with a VkMemoryBarrier, and image barriers which act on all subresources:
+```
+cmd->image_barrier(image, oldLayout, newLayout, srcStage, srcAccess, dstStage, dstAccess);
+```
+There are cases where we want to batch barriers or otherwise use more complicated commands than this, so there are also 1:1 interfaces to vkCmdPipelineBarrier where the full structures are passed in, but these are only really used by the render graph since writing out full structures is super painful.
+The automatic barriers in Granite
+There are a few instances where I think having automatic barriers makes sense. These are cases where it’s convenient to do so, and there is no tracking required, so we can resolve all hazards right away and forget about it. Some of them we’ve seen already, like WSI images and transient images in render passes.
+The other major case is static read-only resources. If you pass in initial_data to Device::create_buffer() or Device::create_image(), we generally have a desire to upload some data, and never touch it again.
+The general gist of it is that we can upload data with a staging buffer over the transfer queue and inject semaphores which block all possible pipeline stages (based on bufferUsage/imageUsage flags). The downside is that we might end up creating too many submissions if we somehow want to upload a ridiculous amount of buffers or images in one go, but we can opt-out of this automatic behavior by simply not passing initial_data and do all the batching and synchronization work ourselves.
+The end goal is that we should be able to call create_buffer or create_image and just use the static resource right away without having to think about synchronization at all.
+09 – Rendering to image and reading it back to CPU on transfer queue
+I wrote a sample which flexes most of the synchronization APIs. It renders a small 4×4 texture on the graphics queue, synchronizes that with the transfer queue with a semaphore and reads it back to a CACHED host buffer. We spawn threads which wait on a fence, maps the buffer and reads the results.
+Conclusion
+In these parts of the backend, the low-level explicit nature of Vulkan shines through. I think we have to be fairly low-level, or we inherit most of the problems with the older APIs.
+… up next!
+In the next installment, we’ll have a look at pipeline creation.

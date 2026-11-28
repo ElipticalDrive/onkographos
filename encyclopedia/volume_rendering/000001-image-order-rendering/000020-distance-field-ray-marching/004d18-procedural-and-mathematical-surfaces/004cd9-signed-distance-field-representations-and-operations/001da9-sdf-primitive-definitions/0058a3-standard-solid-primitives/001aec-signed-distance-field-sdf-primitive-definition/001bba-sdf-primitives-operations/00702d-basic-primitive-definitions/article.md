@@ -1,0 +1,237 @@
+# Basic Primitive Definitions
+
+Also called: Standard Solid Primitives, Canonical SDFs, Atomic SDFs
+
+## Overview
+Basic Primitive Definitions provide exact Euclidean Signed Distance Functions (SDFs) for fundamental geometric shapes, serving as the atomic building blocks for procedural geometry in distance-field ray marching . They differ from sibling primitives like the [Ellipsoid](2397-ellipsoid-signed-distance-function.md) or [Capsule](2439-capsule-signed-distance-function.md) by defining canonical, analytically simple volumes (sphere, box, plane) that form the basis for complex scene construction via boolean operations . These functions compute the shortest distance from a query point in 3D space to the surface of a primitive, enabling ray marching to determine object boundaries without mesh intersection tests [S5, S7, S8, unofficial].
+
+## How it works
+The method consists of evaluating analytical distance formulas for specific canonical shapes. To place a primitive at an arbitrary location, orientation, or scale, the query point is transformed into the primitive's local coordinate system before evaluation [S4, S11, unofficial].
+
+### Inputs and Outputs
+*   **Input**: A 3D query point $p = (p_x, p_y, p_z)$ in world or local space [S5, S7, unofficial].
+*   **Input**: Primitive parameters (e.g., radius, half-extents, normal) [S5, unofficial].
+*   **Output**: A scalar signed distance $d$. $d > 0$ indicates the point is outside the surface, $d < 0$ indicates inside, and $d = 0$ indicates the surface [S7, unofficial].
+
+### Data Structures
+No complex data structures are required for the primitives themselves. Parameters are typically passed as scalars or vectors:
+*   `p`: `vec3` (query point) [S5, unofficial].
+*   `r` or `s`: `float` (radius) [S5, unofficial].
+*   `b` or `d`: `vec3` (half-extents for boxes) [S5, S2, unofficial].
+*   `t` or `c`: `vec2` or `vec3` (torus radii or cylinder parameters) [S5, S8, unofficial].
+
+### Formulas and Steps
+
+#### 1. Sphere
+A sphere of radius $r$ centered at the origin.
+*   **Formula**: $d(p, r) = \|p\| - r$ [S1, S2, S6, S10, unofficial].
+*   **Steps**:
+    1.  Calculate the Euclidean length of the point vector: $\|p\| = \sqrt{p_x^2 + p_y^2 + p_z^2}$ [S9, unofficial].
+    2.  Subtract the radius $r$ [S7, unofficial].
+*   **Pitfall**: If the sphere is not centered at the origin, translate $p$ by $p - center$ before computing length [S8, unofficial].
+
+#### 2. Axis-Aligned Box (Cube)
+An axis-aligned box centered at the origin with half-extents $b = (b_x, b_y, b_z)$ [S6, unofficial].
+*   **Formula**: $d(p, b) = \|\max(q, 0)\| + \min(\max(q_x, \max(q_y, q_z)), 0)$, where $q = |p| - b$ [S2, S5, S6, S10, unofficial].
+*   **Steps**:
+    1.  Compute $q = (|p_x| - b_x, |p_y| - b_y, |p_z| - b_z)$ [S4, S11, unofficial].
+    2.  Calculate the outside distance: $d_{out} = \|\max(q, 0)\|$ [S4, S11, unofficial]. This is the Euclidean distance to the nearest corner or edge if outside.
+    3.  Calculate the inside distance: $d_{in} = \min(\max(q_x, \max(q_y, q_z)), 0)$ [S4, S7, S11, unofficial]. This is the negative distance to the nearest face if inside.
+    4.  Return $d_{out} + d_{in}$ [S4, S11, unofficial].
+*   **Pitfall**: Ensure $b$ represents half-extents, not full dimensions [S8, unofficial].
+
+#### 3. Plane
+An infinite plane defined by a normalized normal vector $n$ and a scalar offset $d_{offset}$ (distance from origin along $n$) [S7, S11, unofficial].
+*   **Formula**: $d(p, n, d_{offset}) = p \cdot n + d_{offset}$ [S3, S7, S11, unofficial].
+*   **Steps**:
+    1.  Compute the dot product of $p$ and $n$ [S7, unofficial].
+    2.  Add the offset $d_{offset}$ [S7, unofficial].
+*   **Pitfall**: The normal $n$ must be normalized [S3, unofficial].
+
+#### 4. Torus
+A torus in the XZ plane with major radius $R$ (hole radius) and minor radius $r$ (tube radius) [S2, S9, unofficial].
+*   **Formula**: $d(p, R, r) = \|(\sqrt{p_x^2 + p_z^2} - R, p_y)\| - r$ [S1, S2, S5, S10, unofficial].
+*   **Steps**:
+    1.  Compute the distance from the Y-axis in the XZ plane: $dist_{xz} = \sqrt{p_x^2 + p_z^2}$ [S7, unofficial].
+    2.  Construct a 2D vector $q = (dist_{xz} - R, p_y)$ [S7, S11, unofficial].
+    3.  Return $\|q\| - r$ [S7, S11, unofficial].
+*   **Pitfall**: The torus lies in the XZ plane by default; rotation is required to align it with other axes [S9, unofficial].
+
+#### 5. Cylinder
+A cylinder aligned with the Y-axis, with radius $r$ and half-height $h$ [S11, unofficial].
+*   **Formula**: $d(p, r, h) = \min(\max(d_x, d_y), 0) + \|\max(d)\|$, where $d = (|\sqrt{p_x^2 + p_z^2}| - r, |p_y| - h)$ [S7, S11, unofficial].
+*   **Steps**:
+    1.  Compute radial distance: $r_{dist} = \sqrt{p_x^2 + p_z^2}$ [S7, unofficial].
+    2.  Compute 2D distance vector $d = (r_{dist} - r, |p_y| - h)$ [S11, unofficial].
+    3.  Return $\min(\max(d_x, d_y), 0) + \sqrt{\max(d_x, 0)^2 + \max(d_y, 0)^2}$ [S7, S11, unofficial].
+*   **Pitfall**: This computes the distance to the capped cylinder (side walls and top/bottom caps) [S7, unofficial].
+
+#### 6. Capsule
+A capsule defined by endpoints $a, b$ and radius $r$ [S7, S11, unofficial].
+*   **Formula**: $d(p, a, b, r) = \|p - (a + ba \cdot h)\| - r$, where $ba = b - a$ and $h = \text{clamp}(\frac{pa \cdot ba}{ba \cdot ba}, 0, 1)$ with $pa = p - a$ [S7, S11, unofficial].
+*   **Steps**:
+    1.  Compute segment vector $ab = b - a$ and point vector $ap = p - a$ [S11, unofficial].
+    2.  Compute parameter $t = \text{clamp}(\frac{ap \cdot ab}{ab \cdot ab}, 0.0, 1.0)$ [S11, unofficial].
+    3.  Compute closest point on segment: $closest = a + ab \cdot t$ [S7, unofficial].
+    4.  Return $\|p - closest\| - r$ [S7, S11, unofficial].
+
+#### 7. Tetrahedron
+A regular tetrahedron centered at the origin [S7, unofficial].
+*   **Formula**: $d(p) = \frac{\max(-p_x - p_y - p_z, p_x + p_y - p_z, -p_x + p_y + p_z, p_x - p_y + p_z)}{\sqrt{3}}$ [S7, unofficial].
+*   **Steps**:
+    1.  Compute four linear combinations of coordinates [S7, unofficial].
+    2.  Take the maximum of these four values [S7, unofficial].
+    3.  Divide by $\sqrt{3}$ [S7, unofficial].
+
+#### 8. Octahedron
+A regular octahedron with size parameter $s$ [S5, unofficial].
+*   **Formula**: $d(p) = \frac{|p_x| + |p_y| + |p_z| - s}{\sqrt{3}}$ [S5, unofficial].
+*   **Steps**:
+    1.  Sum the absolute values of the coordinates [S5, unofficial].
+    2.  Subtract the size parameter $s$ [S5, unofficial].
+    3.  Multiply by $0.57735027$ ($1/\sqrt{3}$) [S5, unofficial].
+
+### Transformations
+Primitives are typically defined in local space. To place them in the scene:
+1.  **Translate**: Replace $p$ with $p - center$ [S11, unofficial].
+2.  **Rotate**: Multiply $p$ by an inverse rotation matrix before passing to the SDF [S11, unofficial]. For Y-axis rotation by angle $\theta$: $x' = x \cos\theta - z \sin\theta$, $z' = x \sin\theta + z \cos\theta$ [S7, unofficial].
+3.  **Scale**: Uniformly scale the result: $s \cdot \text{sdf}(p/s)$ [S11, unofficial].
+
+### Boolean Operations
+Basic primitives are combined using boolean operators [S7, unofficial]:
+*   **Union**: $d_{union} = \min(d_1, d_2)$ [S7, unofficial].
+*   **Intersection**: $d_{int} = \max(d_1, d_2)$ [S7, unofficial].
+*   **Subtraction**: $d_{sub} = \max(-d_1, d_2)$ [S7, unofficial].
+*   **Smooth Union**: Blends two SDFs using parameter $k$: $h = \max(k - |d_1 - d_2|, 0) / k$; result $= \min(d_1, d_2) - h^2 k 0.25$ [S7, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def sdf_sphere(p, radius):
+    """Signed distance to a sphere of given radius centered at origin."""
+    return math.sqrt(p[0]**2 + p[1]**2 + p[2]**2) - radius
+
+def sdf_box(p, half_extents):
+    """Signed distance to an axis-aligned box centered at origin."""
+    q = [abs(p[0]) - half_extents[0],
+         abs(p[1]) - half_extents[1],
+         abs(p[2]) - half_extents[2]]
+    outside = math.sqrt(max(q[0], 0)**2 + max(q[1], 0)**2 + max(q[2], 0)**2)
+    inside = min(max(q[0], max(q[1], q[2])), 0)
+    return outside + inside
+
+def sdf_plane(p, normal, offset):
+    """Signed distance to a plane defined by normal and offset."""
+    # Assumes normal is normalized
+    return p[0]*normal[0] + p[1]*normal[1] + p[2]*normal[2] + offset
+
+def sdf_torus(p, major_radius, minor_radius):
+    """Signed distance to a torus in the XZ plane."""
+    dist_xz = math.sqrt(p[0]**2 + p[2]**2)
+    q = (dist_xz - major_radius, p[1])
+    return math.sqrt(q[0]**2 + q[1]**2) - minor_radius
+
+def sdf_capsule(p, a, b, radius):
+    """Signed distance to a capsule with endpoints a and b."""
+    ab = [b[0]-a[0], b[1]-a[1], b[2]-a[2]]
+    ap = [p[0]-a[0], p[1]-a[1], p[2]-a[2]]
+    ab_dot_ab = ab[0]**2 + ab[1]**2 + ab[2]**2
+    if ab_dot_ab == 0:
+        # a and b are the same point
+        dist = math.sqrt(ap[0]**2 + ap[1]**2 + ap[2]**2)
+    else:
+        t = max(0.0, min(1.0, (ap[0]*ab[0] + ap[1]*ab[1] + ap[2]*ab[2]) / ab_dot_ab))
+        closest = [a[0] + ab[0]*t, a[1] + ab[1]*t, a[2] + ab[2]*t]
+        dist = math.sqrt((p[0]-closest[0])**2 + (p[1]-closest[1])**2 + (p[2]-closest[2])**2)
+    return dist - radius
+```
+
+## Subtopics
+
+### [Polyhedral Primitives](2529-polyhedral-primitives.md)
+This family defines Signed Distance Functions (SDFs) for convex polyhedra and prisms, enabling ray marching of complex geometric shapes without mesh intersection tests. It differs from [Basic Primitive Definitions](5346-basic-primitive-definitions.md) by handling shapes with flat faces and sharp edges (prisms, octahedra, dodecahedra) rather than smooth surfaces or simple quadratic forms.
+
+### [Arc Signed Distance Function](3922-arc-signed-distance-function.md)
+Computes the signed distance from a 3D point to a tube of radius `arc_tube_radius` running along a circular arc defined by a center, orientation, aperture, and radii `ra` and `rb`. It differs from the [Sphere Signed Distance Function](1237-sphere-signed-distance-function.md) by modeling a partial circular path rather than a closed surface, and from the [Capsule Signed Distance Function](2439-capsule-signed-distance-function.md) by using a curved (circular) axis instead of a linear segment.
+
+### [Basic Geometric Primitives](23026-basic-geometric-primitives.md)
+Basic Geometric Primitives provide exact Euclidean signed distance functions (SDFs) for fundamental shapes, serving as the atomic building blocks for procedural geometry in distance-field ray marching. They differ from sibling primitives like the [Ellipsoid](2397-ellipsoid-signed-distance-function.md) or [Capsule](2439-capsule-signed-distance-function.md) by defining canonical, analytically simple volumes (sphere, box, plane) that form the basis for complex scene construction via boolean operations.
+
+### Rhombic Triacontahedron SDF
+A Signed Distance Function for a Rhombic Triacontahedron crystal shape, constructed by folding 3D space using specific magic numbers and directions multiple times [S12, unofficial].
+*   **Magic Numbers**: $c = \cos(\pi/5)$, $s = \sqrt{0.75 - c^2}$ [S12, unofficial].
+*   **Magic Direction**: $n = (-0.5, -c, s)$ [S12, unofficial].
+*   **Steps**:
+    1.  $p = |p|$ [S12, unofficial].
+    2.  Fold along $n$: $p -= 2 \cdot \min(0, p \cdot n) \cdot n$ [S12, unofficial].
+    3.  $p_{xy} = |p_{xy}|$ [S12, unofficial].
+    4.  Fold along $n$: $p -= 2 \cdot \min(0, p \cdot n) \cdot n$ [S12, unofficial].
+    5.  $p_{xy} = |p_{xy}|$ [S12, unofficial].
+    6.  Fold along $n$: $p -= 2 \cdot \min(0, p \cdot n) \cdot n$ [S12, unofficial].
+    7.  Return $p_z - 1$ [S12, unofficial].
+
+### Inverted Torus
+Renders the torus interior tube as empty space by negating the torus SDF, enabling natural front-to-back occlusion and eliminating donut-hole artifacts [S13, unofficial].
+*   **Formula**: $d(p) = -(d_{ring} - r)$ [S13, unofficial].
+*   **Behavior**: Negative SDF (inside tube) is treated as empty space; positive SDF (donut hole, outside) is treated as solid [S13, unofficial].
+*   **Pitfall**: Prevents donut-hole artifacts by ensuring ray marching only operates inside the tube cavity [S13, unofficial].
+
+### Butterfly SDF Primitives
+Signed Distance Field functions for the butterfly's components: `sdWing` for the flapping wings, `sdBody` for the thorax/abdomen, and `sdAntenna` for the antennae [S14, unofficial].
+*   **Wing**: Un-bends point to wing space, checks outline (two rounded triangles with a notch), then calculates thickness and camber to form a slab [S14, unofficial].
+*   **Body**: Uses a parametric radius function based on normalized Z coordinate [S14, unofficial].
+*   **Antenna**: Uses a quadratic bezier-like curve for the spine and varying radius [S14, unofficial].
+*   **Combination**: Returns the minimum distance and material ID [S14, unofficial].
+
+### Death Star SDF Primitive
+Constructs a Death Star shape using specific radii $r_a=5.0, r_b=2.0, d=6.0$ and rotation [S15, unofficial].
+
+### Spherical Signed Distance Field
+A structure used to represent visibility by encoding the signed distance to the boundary of the occluded region in the sphere [S16, unofficial].
+
+### Superellipsoid Primitives
+Using superellipsoids and a 'slice-27 grid' (3D equivalent of Flash's slice-9 grids) for geometry primitives, allowing rounded 3D shapes with customizable corners [S17, unofficial].
+*   **Properties**: Corner distance (independently for xyz), wall thickness, or bounding box [S17, unofficial].
+*   **Combination**: Voronoi style distance or advanced boolean intersections with material priority [S17, unofficial].
+*   **Texturing**: Volumetric texturing in object space with automatically generated texture coordinates measured in meters [S17, unofficial].
+
+### Dispatch-based SDF Primitive Evaluation
+Dispatches SDF primitive evaluation based on op code [S18, unofficial].
+*   **Code 0 (Sphere)**: Returns `point.truncate().length() - op_specific.floats[0]` [S18, unofficial].
+*   **Other Codes**: Panics with "Unsupported primitive op code" [S18, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per primitive evaluation [S5, S7, unofficial]. The cost is dominated by a few arithmetic operations and square roots.
+*   **Memory Complexity**: $O(1)$ per primitive [S5, unofficial]. Only parameters (radius, extents) are stored.
+*   **Performance**: Extremely fast, suitable for real-time ray marching [S5, S7, unofficial].
+*   **Strengths**: Exact distance, no discretization error, smooth gradients (except at sharp features where derivatives are discontinuous), easy to combine [S7, unofficial].
+*   **Limitations**: Limited to canonical shapes; complex geometry requires many primitives or domain manipulation . Sharp edges/corners have discontinuous normals [S7, unofficial].
+*   **When to Use**: As building blocks for procedural scenes, boolean operations, and domain manipulation [S7, unofficial].
+*   **When Not to Use**: For highly detailed organic geometry that cannot be approximated by combinations of basic shapes .
+
+## Background
+Basic Signed Distance Functions for common geometric shapes (Sphere, Box, Torus, etc.) were popularized by Inigo Quilez in his article "Signed Distance Functions" [S9, S1, unofficial]. These functions are a cornerstone of ray marching techniques, allowing for the rendering of complex procedural geometry without traditional mesh-based rendering pipelines [S5, S7, unofficial]. The techniques are widely used in creative coding, demoscene, and real-time graphics [S9, S12, unofficial].
+
+## Sources
+[S1] skmhrk1209/Sphere-Tracing-PyTorch3D, https://github.com/skmhrk1209/Sphere-Tracing-PyTorch3D, fetched 2026-10-26 (unofficial)
+[S2] AustinGoodman/non-linear-sphere-tracing, https://github.com/AustinGoodman/non-linear-sphere-tracing, fetched 2026-10-26 (unofficial)
+[S3] nopjia/WebGL-RayMarch, https://github.com/nopjia/WebGL-RayMarch, fetched 2026-10-26 (unofficial)
+[S4] ChadMcKinney/Dirac-Sea-Engine, https://github.com/ChadMcKinney/Dirac-Sea-Engine, fetched 2026-10-26 (unofficial)
+[S5] arguskern/lumina-graphics-lab, https://github.com/arguskern/lumina-graphics-lab, fetched 2026-10-26 (unofficial)
+[S6] JamesRicher/TerminalSignedDistanceFieldRenderer, https://github.com/JamesRicher/TerminalSignedDistanceFieldRenderer, fetched 2026-10-27 (unofficial)
+[S7] 0gecco/csRaymarching, https://github.com/0gecco/csRaymarching, fetched 2026-10-27 (unofficial)
+[S8] trimesh33/sdf, https://github.com/trimesh33/sdf, fetched 2026-10-27 (unofficial)
+[S9] jk9g13/LaFortuna-SDF-Ray-marching, https://github.com/jk9g13/LaFortuna-SDF-Ray-marching, fetched 2026-10-27 (unofficial)
+[S10] GPU Ray Marching Techniques, https://www.scribd.com/document/814069988/5-GPU-Ray-Marching, fetched 2026-10-28 (unofficial)
+[S11] Ray Marching and Signed Distance Functions — GLSL in the..., https://www.mysimulator.uk/content/articles/ray-marching-sdf.html, fetched 2026-10-29 (unofficial)
+[S12] Show HN: Iridescent crystal with raymarching and signed distance fields, https://varun.ca/ray-march-sdf/, fetched 2026-10-26 (unofficial)
+[S13] Add OpenGL GPU ray marching renderers for Intel HD Graphics 630 with Jump Flood Algorithm optimization, https://github.com/rhythmatician/phyllotaxis-torus/pull/1, fetched 2026-10-26 (unofficial)
+[S14] el-bakkali/manim-glsl-butterflies, https://github.com/el-bakkali/manim-glsl-butterflies, fetched 2026-10-26 (unofficial)
+[S15] agill-dev-0/SDF-ray-marcher, https://github.com/agill-dev-0/SDF-ray-marcher, fetched 2026-10-26 (unofficial)
+[S16] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)
+[S17] How Does It Work?, https://www.voxelquest.com/news/how-does-it-work, fetched 2026-10-29 (unofficial)
+[S18] holger-kibur/sdf, https://github.com/holger-kibur/sdf, fetched 2026-10-27 (unofficial)

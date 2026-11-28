@@ -1,0 +1,116 @@
+--- v001.md
++++ v002.md
+@@ -4,20 +4,20 @@
+ 
+ ## Overview
+-This method provides scene reflections for volumetric clouds by ray marching reflection surfaces using data from the Sky Light component [S2]. It addresses the limitation of standard Screen-Space Reflections (SSR), which can only reflect clouds currently visible within the screen space [S1, unofficial]. To capture clouds outside the current view, it renders a low-resolution panoramic view in an extra pass and blends it into the sky cubemap [S1, unofficial]. This approach is distinct from [Screen-Space Reflections](9698-screen-space-reflections.md) by its reliance on a pre-captured panoramic texture rather than real-time depth buffers, and from [Ray Marching with Refraction and Beer's Law Absorption](1947-ray-marching-with-refraction-and-beer-s-law-absorption.md) by its specific focus on reflective sky lighting rather than transmissive volume scattering.
++This method provides scene reflections for volumetric clouds by ray marching reflection surfaces using data from the Sky Light component [S2]. It addresses the limitation of standard Screen-Space Reflections (SSR), which can only reflect clouds currently visible within the screen space [S1, unofficial]. To capture clouds outside the current view, it renders a low-resolution panoramic view in an extra pass and blends it into the sky cubemap [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   Volumetric Cloud component data (density, height, position).
+-*   Sky Light component (environmental lighting, cubemap).
+-*   Camera view parameters.
++*   Volumetric cloud data (position, normal) [G].
++*   Sky Light component containing the environment cubemap [S2].
++*   Camera view direction [G].
++*   `Reflection Sample Count Scale` and `Shadow Reflection Sample Count Scale` parameters [S2].
+ 
+ **Outputs:**
+-*   Reflection contribution to the final cloud shading.
++*   Reflection contribution to the final cloud shading [G].
+ 
+ **Data Structures:**
+ *   **Panoramic Cloud Texture:** A low-resolution texture, typically $256 \times 128$ pixels [S1, unofficial].
+-*   **Sky Cubemap:** The environment map used for lighting, updated with the panoramic cloud data [S1, unofficial].
+-*   **Reflection Sample Count:** A scalar value scaled by `Reflection Sample Count Scale` [S2].
+-*   **Shadow Reflection Sample Count:** A scalar value scaled by `Shadow Reflection Sample Count Scale` [S2].
++*   **Sky Cubemap:** The environment map updated with the panoramic cloud data [S1, unofficial].
++*   **Sample Count Scalars:** Multipliers for reflection and shadowed reflection ray marching [S2].
+ 
+ **Parameters:**
+@@ -32,5 +32,5 @@
+ 
+ **Steps:**
+-1.  **Render Panoramic Cloud View:** In a separate pass, render a low-resolution ($256 \times 128$) panoramic view of the clouds [S1, unofficial].
++1.  **Render Panoramic Cloud View:** In a separate render pass, render a low-resolution ($256 \times 128$) panoramic view of the clouds [S1, unofficial].
+ 2.  **Blend into Sky Cubemap:** Blend the rendered panoramic cloud data into the Sky Light's cubemap [S1, unofficial].
+ 3.  **Ray March Reflections:** During the main cloud shading pass, use the Sky Light component to ray march reflection surfaces in the scene [S2].
+@@ -40,38 +40,26 @@
+ **Pseudocode:**
+ ```python
+-def compute_cloud_reflection(cloud_data, sky_light, reflection_scale, shadow_reflection_scale):
+-    # Step 1 & 2: Ensure panoramic cloud is blended into sky cubemap
+-    # This is typically done in a separate render pass, not per-pixel.
+-    # sky_light.cubemap = blend(sky_light.cubemap, render_low_res_panoramic_cloud(cloud_data))
+-    
+-    # Step 3: Determine base sample count from Sky Light
+-    # The exact base count is implementation-specific, but scaled by the provided factors.
+-    base_samples = get_base_ray_march_samples(sky_light)
+-    
+-    # Step 4: Calculate reflection samples
+-    reflection_samples = base_samples * reflection_scale
+-    
+-    # Step 5: Calculate shadow reflection samples
+-    shadow_reflection_samples = base_samples * shadow_reflection_scale
+-    
+-    # Ray march reflection surfaces using the calculated sample counts
+-    # The ray direction is determined by the reflection vector of the view ray
+-    # against the cloud surface normal, sampled from the Sky Light cubemap.
+-    reflected_color = ray_march_reflection(
+-        origin=cloud_data.position,
+-        direction=reflect(view_direction, cloud_data.normal),
+-        sample_count=reflection_samples,
+-        environment_map=sky_light.cubemap
+-    )
+-    
+-    shadowed_reflected_color = ray_march_reflection(
+-        origin=cloud_data.position,
+-        direction=reflect(view_direction, cloud_data.normal),
+-        sample_count=shadow_reflection_samples,
+-        environment_map=sky_light.cubemap,
+-        shadowed=True
+-    )
+-    
++def compute_cloud_reflection(cloud_position, cloud_normal, view_direction, sky_cubemap, reflection_scale, shadow_reflection_scale, base_sample_count):
++    # Clamp scales to valid range [0.25, 8] [S2]
++    reflection_scale = max(0.25, min(8.0, reflection_scale))
++    shadow_reflection_scale = max(0.25, min(8.0, shadow_reflection_scale))
++
++    # Calculate sample counts [S2]
++    reflection_samples = int(base_sample_count * reflection_scale)
++    shadow_reflection_samples = int(base_sample_count * shadow_reflection_scale)
++
++    # Compute reflection direction
++    reflection_direction = reflect(view_direction, cloud_normal)
++
++    # Ray march reflection surfaces using the calculated sample counts [S2]
++    # For blurry reflections, this typically samples the environment map [S1, unofficial]
++    reflected_color = sample_environment(sky_cubemap, reflection_direction, reflection_samples)
++    shadowed_reflected_color = sample_environment(sky_cubemap, reflection_direction, shadow_reflection_samples)
++
+     return reflected_color, shadowed_reflected_color
++
++def sample_environment(environment_map, direction, sample_count):
++    # Standard environment sampling [G]
++    return environment_map.sample(direction)
+ ```
+ 
+@@ -90,14 +78,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dependent on the `Reflection Sample Count Scale` and `Shadow Reflection Sample Count Scale`. The base cost includes an extra render pass for the $256 \times 128$ panoramic cloud view [S1, unofficial].
++*   **Time Complexity:** Dependent on the `Reflection Sample Count Scale` and `Shadow Reflection Sample Count Scale` [S2]. The base cost includes an extra render pass for the $256 \times 128$ panoramic cloud view [S1, unofficial].
+ *   **Memory Complexity:** Requires storage for the low-resolution panoramic texture and the updated Sky Cubemap [S1, unofficial].
+ *   **Performance:** The low resolution ($256 \times 128$) of the panoramic pass keeps the overhead manageable for real-time applications [S1, unofficial]. However, the low precision limits its use to blurry reflections [S1, unofficial].
+ *   **Strengths:** Captures reflections of clouds outside the current screen space, which SSR cannot do [S1, unofficial].
+ *   **Limitations:** Low precision; not suitable for sharp reflections or water surfaces [S1, unofficial].
+-*   **When to use:** When blurry, screen-space-independent cloud reflections are needed in real-time volumetric cloud rendering.
++*   **When to use:** When blurry, screen-space-independent cloud reflections are needed in real-time volumetric cloud rendering [S1, unofficial].
+ *   **When not to use:** When sharp reflections are required, or for water surface reflections [S1, unofficial].
+ 
+ ## Background
+-This method is part of the volumetric cloud rendering pipeline in Unreal Engine, specifically leveraging the Sky Light component for environmental reflections [S2]. It addresses the artifacts and limitations of pure screen-space approaches by incorporating a panoramic capture pass [S1, unofficial]. The implementation details, such as the sample count scales and console commands, are documented in the Unreal Engine 5.8 documentation for the Volumetric Cloud Component [S2]. The conceptual basis for handling reflections in atmospheric scattering and cloud rendering, including the use of transmittance LUTs and depth blending, is discussed in general volumetric cloud implementation guides [S1, unofficial].
++This method is part of the volumetric cloud rendering pipeline in Unreal Engine, specifically leveraging the Sky Light component for environmental reflections [S2]. It addresses the artifacts and limitations of pure screen-space approaches by incorporating a panoramic capture pass [S1, unofficial]. The implementation details, including the sample count scales and console commands, are documented in the Unreal Engine 5.8 documentation for the Volumetric Cloud Component [S2]. The conceptual basis for handling reflections in atmospheric scattering and cloud rendering, including the use of transmittance LUTs and depth blending, is discussed in general volumetric cloud implementation guides [S1, unofficial].
+ 
+ ## Sources

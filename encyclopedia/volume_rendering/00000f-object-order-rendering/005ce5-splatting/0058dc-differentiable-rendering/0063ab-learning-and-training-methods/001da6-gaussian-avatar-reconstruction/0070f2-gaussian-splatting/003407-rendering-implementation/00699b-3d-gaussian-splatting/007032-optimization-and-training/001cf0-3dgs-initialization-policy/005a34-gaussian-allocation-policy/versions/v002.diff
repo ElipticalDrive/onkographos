@@ -1,0 +1,158 @@
+--- v001.md
++++ v002.md
+@@ -7,11 +7,11 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of anchor tokens $\{a_n\}_{n=1}^N$ encoding local 3D regions, and a target Gaussian budget $B$.
++*   **Inputs:** A set of anchor tokens $\{a_n\}_{n=1}^N$ encoding local 3D regions, and a target Gaussian budget $B$ [S1, unofficial].
+ *   **Outputs:** A discrete allocation vector $k = \{k_n\}_{n=1}^N$, where $k_n$ is the integer count of Gaussians assigned to anchor $n$, such that $\sum_{n=1}^N k_n = B$ [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Anchor Tokens:** Feature vectors representing geometric primitives.
+-*   **Policy Network $\pi_\psi$:** A neural network that takes anchor tokens as input and outputs allocation proportions $p = \{p_n\}_{n=1}^N$.
+-*   **Allocation Vector $k$:** Integer array of size $N$.
++*   **Anchor Tokens:** Feature vectors representing geometric primitives [S1, unofficial].
++*   **Policy Network $\pi_\psi$:** A neural network that takes anchor tokens as input and outputs allocation proportions $p = \{p_n\}_{n=1}^N$ [S1, unofficial].
++*   **Allocation Vector $k$:** Integer array of size $N$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -37,4 +37,7 @@
+ **Pseudocode:**
+ ```python
++import math
++import random
++
+ def gaussian_allocation_policy(anchor_tokens, budget, num_rollouts, clip_epsilon, policy_net):
+     """
+@@ -55,5 +58,4 @@
+     
+     # 2. Sample rollouts using stop-gradient on proportions
+-    # k_samples shape: (num_rollouts, num_anchors)
+     k_samples = sample_multinomial(budget, stop_gradient(proportions), num_rollouts)
+     
+@@ -65,5 +67,4 @@
+         
+         # 3. Generate 3DGS representation and render
+-        # Note: In practice, this involves spawning Gaussians and rasterizing
+         rendered_image = render_3dgs(anchor_tokens, k_c)
+         ground_truth_image = get_ground_truth_view()
+@@ -75,27 +76,18 @@
+         
+         # 5. Compute importance ratio
+-        # s_c = exp( (1/B) * sum( k_n * log(p_n / sg(p_n)) ) )
+-        log_ratio_sum = 0.0
+-        for n in range(len(anchor_tokens)):
+-            log_ratio_sum += k_c[n] * log(proportions[n] / stop_gradient(proportions[n]))
+-        importance_ratio = exp(log_ratio_sum / budget)
++        log_ratio_sum = sum(k_c[n] * math.log(proportions[n] / stop_gradient(proportions[n])) for n in range(len(anchor_tokens)))
++        importance_ratio = math.exp(log_ratio_sum / budget)
+         importance_ratios.append(importance_ratio)
+         
+     # 6. Compute group-relative advantage
+-    rewards_tensor = tensor(rewards)
+-    mean_reward = mean(rewards_tensor)
+-    std_reward = std(rewards_tensor)
+-    advantages = (rewards_tensor - mean_reward) / std_reward
++    mean_reward = sum(rewards) / num_rollouts
++    std_reward = math.sqrt(sum((r - mean_reward)**2 for r in rewards) / num_rollouts)
++    advantages = [(r - mean_reward) / std_reward for r in rewards]
+     
+     # 7. Update policy via clipped objective
+-    # J = E[ (1/C) * sum( min(s_c * A_c, clip(s_c, 1-eps, 1+eps) * A_c) ) ]
+-    ratios_tensor = tensor(importance_ratios)
+-    clipped_ratios = clip(ratios_tensor, 1 - clip_epsilon, 1 + clip_epsilon)
++    clipped_ratios = [max(1 - clip_epsilon, min(1 + clip_epsilon, s)) for s in importance_ratios]
+     
+-    term1 = ratios_tensor * advantages
+-    term2 = clipped_ratios * advantages
+-    losses = min(term1, term2)
+-    
+-    policy_loss = mean(losses)
++    losses = [min(s * a, c * a) for s, a, c in zip(importance_ratios, advantages, clipped_ratios)]
++    policy_loss = sum(losses) / num_rollouts
+     
+     # Backpropagate through policy_net to update psi
+@@ -104,18 +96,42 @@
+     return policy_net
+ 
++def stop_gradient(x):
++    """Detaches x from the computational graph."""
++    return x
++
+ def sample_multinomial(budget, probs, num_samples):
+-    """
+-    Samples discrete allocations from a multinomial distribution.
+-    Args:
+-        budget: Integer B.
+-        probs: Tensor of probabilities p.
+-        num_samples: Integer C.
+-    Returns:
+-        Tensor of shape (num_samples, len(probs)) with integer counts summing to budget.
+-    """
+-    # Implementation detail: Use a library function or custom C++/CUDA kernel
+-    # for efficient multinomial sampling that respects the sum constraint.
+-    # Here we assume a standard multinomial sampler exists.
+-    return multinomial_sample(probs, budget, num_samples)
++    """Draws num_samples independent trials from Mult(budget, probs)."""
++    allocations = []
++    for _ in range(num_samples):
++        counts = [0] * len(probs)
++        cum_probs = []
++        s = 0.0
++        for p in probs:
++            s += p
++            cum_probs.append(s)
++        for _ in range(budget):
++            r = random.random()
++            for j in range(len(cum_probs)):
++                if r <= cum_probs[j]:
++                    counts[j] += 1
++                    break
++        allocations.append(counts)
++    return allocations
++
++def render_3dgs(anchor_tokens, k):
++    """Calls the resource-linear decoder and rasterizer to produce an image."""
++    return rendered_image
++
++def get_ground_truth_view():
++    """Returns the ground truth image for the target novel view."""
++    return ground_truth_image
++
++def compute_reconstruction_loss(rendered, ground_truth):
++    """Computes the reconstruction loss between rendered and ground truth images."""
++    return loss
++
++def update_parameters(net, loss):
++    """Performs a standard gradient descent step to update network weights."""
++    pass
+ ```
+ 
+@@ -125,17 +141,20 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Zero Probability:** If $p_n = 0$ but $k_n > 0$, the log term in the importance ratio becomes undefined. The stop-gradient on the denominator prevents this during training if the policy is well-initialized, but numerical stability requires ensuring $p_n > 0$ or handling the limit [S1, unofficial].
+-*   **Rounding Errors:** At inference, the deterministic rounding of $B p$ must ensure $\sum k_n = B$. Standard rounding may fail this constraint; a specific rounding procedure (e.g., largest remainder method) is required [S1, unofficial].
++*   **Rounding Errors:** At inference, the deterministic rounding of $B p$ must ensure $\sum k_n = B$. The exact rounding procedure details are provided in the source's appendix and are not given in the main text [S1, unofficial].
++*   **Numerical Stability:** The stop-gradient operator on the denominator of the importance ratio prevents gradient flow through the sampling distribution during training [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### DART (Distance-Aware Replication on Tangent-planes)
+-A heuristic initialization method that replicates Gaussians based on distance to tangent planes, lacking the learned adaptive allocation of GAP. See [DART](12512-dart-distance-aware-replication-on-tangent-planes.md).
++A heuristic initialization method that replicates Gaussians based on distance to tangent planes, lacking the learned adaptive allocation of GAP [S1, unofficial]. Choose it when a simple, non-learned initialization is sufficient [G]. See [DART](12512-dart-distance-aware-replication-on-tangent-planes.md).
++
++### Gaussian Pruning (Monocular)
++A post-training optimization method that removes redundant Gaussians to reduce memory and rendering cost, contrasting with GAP's pre-training allocation strategy. Choose it when memory constraints require reducing an already initialized representation [G]. See [Gaussian Pruning (Monocular)](10098-gaussian-pruning-monocular.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The policy optimization step scales linearly with the number of rollouts $C$ and the number of anchors $N$. Rendering $C$ views per step adds overhead, but 3DGS rasterization is highly efficient, keeping this minimal [S1, unofficial].
+-*   **Memory Complexity:** Requires storing $C$ intermediate 3DGS representations and gradients for the policy network. Memory usage scales with $C \times B$ [S1, unofficial].
+-*   **Strengths:** Enables resource-linear decoding where Gaussian count scales linearly with budget $B$. Adapts allocation to geometric complexity automatically [S1, unofficial].
+-*   **Limitations:** Requires reinforcement learning training loop, which is more complex to implement than static initialization. Performance depends on the quality of the anchor tokens [S1, unofficial].
++*   **Time Complexity:** The policy optimization step scales linearly with the number of rollouts $C$ and the number of anchors $N$ [S1, unofficial]. Rendering $C$ views per step adds overhead, but 3DGS rasterization is highly efficient, keeping this minimal [S1, unofficial].
++*   **Memory Complexity:** Requires storing $C$ intermediate 3DGS representations and gradients for the policy network [S1, unofficial].
++*   **Strengths:** Enables resource-linear decoding where Gaussian count scales linearly with budget $B$ [S1, unofficial]. Adapts allocation to geometric complexity automatically [S1, unofficial].
++*   **Limitations:** Requires reinforcement learning training loop, which is more complex to implement than static initialization [S1, unofficial]. Performance depends on the quality of the anchor tokens [S1, unofficial].
+ 
+ ## Background

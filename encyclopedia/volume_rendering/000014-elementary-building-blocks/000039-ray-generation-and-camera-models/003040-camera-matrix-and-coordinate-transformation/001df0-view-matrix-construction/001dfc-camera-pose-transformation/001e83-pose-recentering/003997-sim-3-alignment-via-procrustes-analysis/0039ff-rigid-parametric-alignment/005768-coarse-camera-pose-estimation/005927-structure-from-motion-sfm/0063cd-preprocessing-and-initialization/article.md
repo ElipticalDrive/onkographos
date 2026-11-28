@@ -1,0 +1,232 @@
+# Preprocessing and Initialization
+
+Also called: SfM Preprocessing, Camera Pose Initialization, Point Cloud Initialization
+
+## Overview
+Preprocessing and Initialization establishes the geometric foundation for volume rendering by estimating camera poses and generating an initial sparse or dense point cloud from input images. It solves the problem of providing accurate extrinsic parameters and a valid spatial prior for subsequent neural rendering or 3D reconstruction pipelines. What sets it apart from its siblings, [Canonical Frame Estimation via Facial Landmarks](16399-canonical-frame-estimation-via-facial-landmarks.md) and [Deep Image Matching Initialization](16400-deep-image-matching-initialization.md), is its reliance on traditional geometry-based multi-view stereo (MVS) techniques, such as feature matching and triangulation, often augmented with specific constraints like low-frequency masking or omnidirectional rectification, rather than purely learned canonical frames or deep matching networks [S1, S2].
+
+## How it works
+The method consists of two primary phases: Camera Pose Estimation and Point Cloud Initialization. The specific implementation details vary depending on the variant (e.g., standard SfM vs. Low-Frequency-Aware SfM) and the rendering representation (e.g., spherical binoctree vs. standard Euclidean space).
+
+### Inputs and Outputs
+**Inputs:**
+*   A set of $N$ input images $\{I_i\}_{i=1}^N$.
+*   (Optional) Intrinsic camera parameters. If unknown, they are estimated during the SfM process.
+*   (Optional) Pre-trained depth estimation model (e.g., for dense point cloud extraction).
+
+**Outputs:**
+*   Estimated camera poses $\{P_i\}_{i=1}^N$ (extrinsic matrices).
+*   Estimated camera intrinsics $\{K_i\}_{i=1}^N$ (if not provided).
+*   An initial 3D point cloud $P_0$ in a global coordinate frame.
+*   (Optional) A scaling coefficient $s$ for normalizing coordinates to a unit sphere.
+*   (Optional) A background sphere definition for far-plane representation.
+
+### Data Structures
+1.  **Camera Pose ($P_i$):** A $4 \times 4$ transformation matrix mapping world coordinates to camera coordinates.
+2.  **Camera Intrinsic ($K_i$):** A $3 \times 3$ matrix containing focal lengths and principal point coordinates.
+3.  **Point Cloud ($P_0$):** A list of 3D points $\{X_m\}$, where each point $X_m$ has a 3D coordinate and an associated track $V_m$ (the set of image indices where the point is visible).
+4.  **Sphoxel (for Binoctree variants):** A spherical voxel defined by a center, radius, and subdivision level. Initialized to reach a minimum solid angle $\alpha_{min}$.
+
+### Steps
+
+#### 1. Feature Extraction and Matching
+Extract local features (e.g., ORB, SIFT, or learned descriptors) from all input images. Match features between image pairs to establish correspondences.
+
+#### 2. Camera Pose Estimation
+Estimate the relative rotation and translation between matched image pairs. Perform bundle adjustment to optimize camera poses $\{P_i\}$ and intrinsic parameters $\{K_i\}$ (if estimated) to minimize reprojection error.
+
+*   **Standard SfM:** Requires tracks with a minimum length of $|V_m| \ge 3$ views [S2].
+*   **Low-Frequency-Aware SfM:** Relaxes the minimum track length to $|V_m| \ge 2$ views to increase point density in low-texture regions [S2].
+
+#### 3. Triangulation
+Reconstruct 3D points $\{X_m\}$ from the matched 2D points and estimated camera poses using triangulation.
+
+#### 4. Coordinate Frame Formation
+Establish a global coordinate system for the point cloud.
+*   **Origin:** Place the origin at the center of the camera positions [S1].
+*   **Near Bound:** Set the near sphere bound to contain all camera positions [S1].
+*   **Far Bound:** Set the far sphere bound to fit the recovered point cloud inside the sphere [S1].
+*   **Background:** For spherical representations, place a final sphere at the far plane with view-independent color decoded by a background MLP to represent scene elements at infinity [S1].
+
+#### 5. Normalization
+Scale the binoctree and point cloud coordinates into a unit sphere. Store the scaling coefficient $s$ for later metric re-scaling [S1].
+
+#### 6. Initialization of Spatial Representation
+*   **For Binoctree (Spherical):** Subdivide the tree to its finest level using the scaled initial 3D point cloud until all sphoxels reach a minimum solid angle $\alpha_{min}$. The value of $\alpha_{min}$ is derived from the baseline and image sizes, typically set between $5 \times 10^{-4}$ and $1 \times 10^{-3}$ [S1].
+*   **For Standard 3DGS:** Use the triangulated points as the initial Gaussian primitives.
+
+### Formulas
+
+**Reprojection Error Minimization (Low-Frequency-Aware SfM):**
+The optimization problem for estimating 3D points $\{X'_m\}$ given camera poses $\{\hat{P}_i\}$ is:
+$$
+\{X'_m\} = \arg \min_{\{X'_m\}} \sum_{m: |V_m| \ge 2} \sum_{i \in V_m} \rho \left( \pi(K_i, \hat{P}_i, X'_m) - \tilde{x}_{i,m} \right)^2
+$$
+Where:
+*   $V_m$ is the set of views where point $m$ is visible.
+*   $|V_m| \ge 2$ is the relaxed track length constraint [S2].
+*   $\pi(K_i, \hat{P}_i, X'_m)$ is the projection of point $X'_m$ into image $i$ using intrinsic $K_i$ and pose $\hat{P}_i$.
+*   $\tilde{x}_{i,m}$ is the observed 2D point location in image $i$.
+*   $\rho$ is a robust loss function (e.g., Huber loss) [S2].
+
+**Low-Frequency Image Generation:**
+Low-frequency images $\{I_{mask}\}$ are derived from input views $\{I_i\}$ using gradient-based masking (e.g., Sobel operator) [S2].
+$$
+I_{mask} = \text{Mask}(I_i)
+$$
+Where $\text{Mask}$ removes high-frequency content [S2].
+
+**Augmented View Set:**
+$$
+I_{aug} = \{I_i, I_{mask}\}_{i=1}^N
+$$
+This doubles the number of views to $2N$ for feature extraction and SfM [S2].
+
+### Parameters
+*   **Minimum Track Length:** $|V_m| \ge 2$ for Low-Frequency-Aware SfM; $|V_m| \ge 3$ for Standard SfM [S2].
+*   **Minimum Solid Angle ($\alpha_{min}$):** Between $5 \times 10^{-4}$ and $1 \times 10^{-3}$ for sphoxel initialization [S1].
+*   **Scaling Coefficient:** Determined by the bounding sphere of the point cloud [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def preprocess_and_initialize(images, use_low_freq_variant=False, use_omnidirectional=False):
+    """
+    Preprocesses images to estimate camera poses and initialize a point cloud.
+    
+    Args:
+        images: List of N input images.
+        use_low_freq_variant: Boolean flag for Low-Frequency-Aware SfM.
+        use_omnidirectional: Boolean flag for omnidirectional video processing.
+        
+    Returns:
+        poses: List of camera pose matrices.
+        intrinsics: List of camera intrinsic matrices.
+        point_cloud: List of 3D points.
+        scale_factor: Scaling factor for unit sphere normalization.
+        alpha_min: Minimum solid angle for sphoxel initialization (if applicable).
+    """
+    
+    # Step 1: Pre-processing based on variant
+    if use_low_freq_variant:
+        # Derive low-frequency images using gradient-based masking
+        low_freq_images = []
+        for img in images:
+            # Apply Sobel filter and mask high-frequency regions
+            low_freq_img = apply_gradient_mask(img)
+            low_freq_images.append(low_freq_img)
+        
+        # Create augmented view set
+        augmented_images = []
+        for img, low_freq_img in zip(images, low_freq_images):
+            augmented_images.append(img)
+            augmented_images.append(low_freq_img)
+        
+        input_images = augmented_images
+    else:
+        input_images = images
+
+    # Step 2: Feature Extraction and Matching
+    features = extract_features(input_images)
+    matches = match_features(features)
+
+    # Step 3: Camera Pose Estimation
+    # Estimate relative poses and perform bundle adjustment
+    poses, intrinsics = estimate_poses_and_intrinsics(matches, use_omnidirectional)
+
+    # Step 4: Triangulation
+    # Determine minimum track length based on variant
+    min_track_length = 2 if use_low_freq_variant else 3
+    
+    # Triangulate points
+    point_cloud = triangulate_points(poses, intrinsics, matches, min_track_length)
+
+    # Step 5: Coordinate Frame Formation
+    # Place origin at center of cameras
+    camera_centers = get_camera_centers(poses)
+    origin = mean(camera_centers)
+    
+    # Transform point cloud and poses to new coordinate frame
+    transform_matrix = translation_matrix(-origin)
+    point_cloud = apply_transform(point_cloud, transform_matrix)
+    poses = apply_transform(poses, transform_matrix)
+
+    # Step 6: Normalization
+    # Calculate bounding sphere of point cloud
+    max_dist = max(distance(p, origin) for p in point_cloud)
+    scale_factor = 1.0 / max_dist
+    
+    # Scale point cloud
+    point_cloud = [p * scale_factor for p in point_cloud]
+    
+    # Scale poses (extrinsic part)
+    for i in range(len(poses)):
+        poses[i][:3, 3] *= scale_factor
+
+    # Step 7: Sphoxel Initialization (if using binoctree)
+    # Calculate alpha_min based on baseline and image size
+    # Not given in the sources: specific formula for alpha_min derivation
+    alpha_min = 1e-3  # Typical value from [S1]
+    
+    # Initialize binoctree structure
+    # Subdivide tree to finest level until all sphoxels reach alpha_min
+    binoctree = initialize_binoctree(point_cloud, alpha_min)
+
+    return poses, intrinsics, point_cloud, scale_factor, alpha_min
+
+def apply_gradient_mask(image):
+    """
+    Applies gradient-based masking to remove high-frequency content.
+    Uses Sobel operator to detect edges and masks them out.
+    """
+    # Convert to grayscale
+    gray = to_grayscale(image)
+    
+    # Apply Sobel operator
+    sobel_x = apply_sobel(gray, axis=0)
+    sobel_y = apply_sobel(gray, axis=1)
+    
+    # Calculate gradient magnitude
+    magnitude = sqrt(sobel_x**2 + sobel_y**2)
+    
+    # Threshold to identify high-frequency regions
+    threshold = mean(magnitude) * 2.0
+    high_freq_mask = magnitude > threshold
+    
+    # Mask high-frequency regions (e.g., set to zero or blur)
+    # Not given in the sources: specific masking operation (e.g., blur, zeroing)
+    low_freq_image = image.copy()
+    low_freq_image[high_freq_mask] = 0  # Placeholder for specific masking strategy
+    
+    return low_freq_image
+```
+
+### Edge Cases and Pitfalls
+*   **Low-Texture Regions:** Standard SfM may fail to produce sufficient points in smooth areas. The Low-Frequency-Aware variant mitigates this by relaxing track length constraints and masking high-frequency content [S2].
+*   **Omnidirectional Video:** Requires spherical rectification and specific disparity estimation networks for dense point cloud extraction [S1].
+*   **Precision:** Scaling coordinates to a unit sphere is crucial for numerical stability in neural network training. The scaling coefficient must be stored for metric re-scaling [S1].
+*   **Degenerate Input:** If the input images have insufficient overlap, SfM may fail to estimate poses. The Low-Frequency-Aware variant helps by increasing the number of views and relaxing constraints [S2].
+
+## Subtopics
+
+### Low-Frequency-Aware Structure-from-Motion
+A variant of the standard SfM pipeline designed to improve coverage in low-texture regions by relaxing track matching constraints and augmenting input images with low-frequency content. It pre-masks high-frequency regions and utilizes two-view tracks (minimum track length of 2) to yield a denser initial point set. This method is chosen when the input scene has large smooth areas or low-texture regions where standard SfM fails to produce sufficient points. It builds on [Structure-from-Motion (SfM)](16341-structure-from-motion-sfm.md) by modifying the track length constraint and input image set.
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by feature extraction and matching, which is typically $O(N^2)$ for pairwise matching, where $N$ is the number of images. Bundle adjustment is iterative and depends on the number of points and cameras.
+*   **Memory Complexity:** Proportional to the number of matches and points. The augmented view set doubles the memory requirement for feature extraction in the Low-Frequency-Aware variant.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales with the number of input images and the complexity of the scene (number of features).
+*   **Strengths:** Provides a geometrically accurate initial point cloud and camera poses. The Low-Frequency-Aware variant improves coverage in challenging regions.
+*   **Limitations:** Relies on the presence of sufficient texture and overlap. May fail in highly repetitive or featureless scenes without augmentation.
+*   **When to Use:** When accurate camera poses and a dense initial point cloud are required for volume rendering or 3D reconstruction.
+*   **When Not to Use:** When real-time performance is critical and the scene is highly dynamic or lacks sufficient texture.
+
+## Background
+The method originates from traditional Structure-from-Motion (SfM) and Multi-View Stereo (MVS) techniques. The Low-Frequency-Aware variant was introduced in "Initialize to Generalize: A Stronger Initialization Pipeline for Sparse-View 3DGS" (2026) to address the limitations of standard SfM in sparse-view scenarios [S2]. The omnidirectional variant was introduced in "OmniSDF: Scene Reconstruction Using Omnidirectional Signed Distance Functions and Adaptive Binoctrees" (2024) for spherical scene representations [S1]. These methods are widely used in neural rendering pipelines, such as NeRF and 3D Gaussian Splatting, to provide initial camera poses and point clouds.
+
+## Sources
+[S1] OmniSDF: Scene Reconstruction Using Omnidirectional Signed Distance Functions and Adaptive Binoctrees, https://doi.org/10.1109/cvpr52733.2024.01912, fetched 2026-10-26
+[S2] Initialize to Generalize: A Stronger Initialization Pipeline for Sparse-View 3DGS., https://doi.org/10.1109/tvcg.2026.3736471, fetched 2026-10-26

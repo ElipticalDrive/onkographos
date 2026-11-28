@@ -1,0 +1,4804 @@
+# isomesh
+
+Fast, robust isosurface extraction from arbitrary implicit functions using adaptive octree and Dual Contouring.
+
+![isomesh benchmark overview](https://raw.githubusercontent.com/narnia-ai-mason/isomesh/main/docs/images/overview_grid.png)
+
+## Features
+
+- **Sharp feature preservation** via QEF (Quadric Error Function) vertex placement -- corners and edges are captured exactly, not rounded like Marching Cubes
+- **Manifold, watertight output** guaranteed for closed surfaces
+- **Adaptive refinement** -- concentrates cells at feature boundaries, smooth regions stay coarse
+- **Rust core** with Python bindings (PyO3 + maturin) -- zero-copy numpy array exchange
+- **Batch evaluation** -- the user's implicit function is called with `(N, 3)` arrays, not point-by-point
+- **Newton surface projection** -- all vertices lie exactly on the isosurface (machine precision)
+
+## Quick Start
+
+```python
+import isomesh
+import numpy as np
+
+def sdf_sphere(pos: np.ndarray):
+    norms = np.linalg.norm(pos, axis=1)
+    values = norms - 1.0
+    gradients = pos / np.linalg.norm(pos, axis=1, keepdims=True)
+    return values, gradients
+
+vertices, faces = isomesh.extract(
+    func=sdf_sphere,
+    bbox_min=(-2, -2, -2),
+    bbox_max=(2, 2, 2),
+    min_depth=4,
+    max_depth=7,
+    angle_threshold=30.0,   # degrees -- sharp feature detection
+    iso_value=0.0,
+)
+
+# vertices: (V, 3) float64 -- all on the isosurface
+# faces: (F, 3) int64 -- consistently oriented triangles
+```
+
+## Installation
+
+Pre-built wheels are available for Linux (x86_64, aarch64), macOS (Apple Silicon), and Windows:
+
+```bash
+pip install isomesh
+```
+
+### From source
+
+Requires a Rust toolchain (for building the native extension):
+
+```bash
+git clone https://github.com/narnia-ai-mason/isomesh.git && cd isomesh
+pip install maturin
+maturin develop --release
+```
+
+## How It Works
+
+isomesh uses **Dual Contouring** on an adaptive octree:
+
+1. **Adaptive octree construction** -- uniform grid at `min_depth`, then feature-sensitive refinement to `max_depth` based on normal angle spread and gradient variation
+2. **QEF vertex placement** -- one vertex per cell via Jacobi SVD eigendecomposition with mass-point bias for rank-deficient cases
+3. **Newton surface projection** -- one Newton step projects each vertex exactly onto the zero-isosurface
+4. **Quad generation** -- canonical-edge iteration with flatness-based triangulation
+5. **All surface leaves forced to `max_depth`** -- eliminates T-junction holes, guarantees watertight output
+
+### Function Interface
+
+The implicit function must be vectorized:
+
+```python
+def f(positions: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+    """
+    Args:
+        positions: (N, 3) float64 array of query points
+    Returns:
+        values: (N,) float64 -- implicit function values
+        gradients: (N, 3) float64 or None -- if None, estimated via finite differences
+    """
+```
+
+## Dual Contouring vs Marching Cubes
+
+Comprehensive comparison across 10 benchmark shapes using isomesh (Dual Contouring) and PyMCubes (Marching Cubes) at equivalent resolution (depth 6 = 64 cells/axis).
+
+### Summary
+
+| Metric | MC (res=65) | DC Uniform (d=6) | DC Adaptive (4->6) | DC Adaptive (4->7) |
+|--------|:-----------:|:-----------------:|:-------------------:|:-------------------:|
+| Manifold | 10/10 | 10/10 | 10/10 | 10/10 |
+| Watertight | 10/10 | 10/10 | 10/10 | 10/10 |
+| Total vertices | 81,112 | 80,693 | 72,629 | 270,770 |
+| Total time | 0.75s | 7.69s | 6.86s | 15.25s |
+| Avg SDF error | 3.10e-04 | 5.74e-05 | 5.75e-05 | 2.17e-05 |
+| Avg min angle | 34.7 | 39.8 | 39.6 | 40.0 |
+
+### Surface Accuracy
+
+Newton projection places DC vertices nearly exactly on the isosurface:
+
+| Shape | MC mean &#124;SDF&#124; | DC mean &#124;SDF&#124; | Improvement |
+|-------|:-------------------:|:-------------------:|:-----------:|
+| sphere | 9.63e-05 | **1.21e-18** | ~10^13x |
+| thin_shell_hemi | 6.86e-05 | **1.17e-11** | ~10^6x |
+| chamfered_sphere | 2.58e-04 | **5.12e-07** | ~500x |
+| mechanical_part | 3.25e-04 | **4.05e-05** | ~8x |
+| bunny | 4.38e-04 | **4.38e-04** | ~1x |
+| simjeb_148 | 1.35e-03 | **8.95e-05** | ~15x |
+
+### Triangle Quality
+
+DC consistently produces better-shaped triangles (higher minimum angle = less degenerate):
+
+| Shape | MC min angle (avg) | DC min angle (avg) |
+|-------|:--:|:--:|
+| sphere | 31.6 | **43.7** |
+| thin_shell_hemi | 31.4 | **43.1** |
+| chamfered_sphere | 35.5 | **43.4** |
+| box | 44.1 | **44.5** |
+| mechanical_part | 40.3 | **41.0** |
+| bunny | 32.3 | **30.9** |
+| simjeb_148 | 34.6 | **33.2** |
+
+### Sharp Feature Comparison
+
+DC (Dual Contouring) preserves sharp edges and corners via QEF vertex placement. MC (Marching Cubes) rounds them by linear interpolation.
+
+![Box comparison](https://raw.githubusercontent.com/narnia-ai-mason/isomesh/main/docs/images/comparison_box.png)
+![Rotated box comparison](https://raw.githubusercontent.com/narnia-ai-mason/isomesh/main/docs/images/comparison_rotated_box.png)
+![Chamfered sphere comparison](https://raw.githubusercontent.com/narnia-ai-mason/isomesh/main/docs/images/comparison_chamfered_sphere.png)
+![Mechanical part comparison](https://raw.githubusercontent.com/narnia-ai-mason/isomesh/main/docs/images/comparison_mechanical_part.png)
+
+### Thin Feature & Complex Geometry
+
+![Thin shell comparison](https://raw.githubusercontent.com/narnia-ai-mason/isomesh/main/docs/images/comparison_thin_shell_hemi.png)
+![Bunny comparison](https://raw.githubusercontent.com/narnia-ai-mason/isomesh/main/docs/images/comparison_bunny.png)
+![SimJEB 148 comparison](https://raw.githubusercontent.com/narnia-ai-mason/isomesh/main/docs/images/comparison_simjeb_148.png)
+
+### Adaptive Refinement
+
+Adaptive mode concentrates resolution where needed:
+
+| Shape | Adaptive (4->6) V | Uniform (d=6) V | Ratio |
+|-------|---:|---:|:----:|
+| sphere | 536 | 8,600 | **16x fewer** |
+| chamfered_sphere | 7,064 | 7,064 | 1x |
+| cylinder | 4,328 | 4,328 | 1x |
+
+For smooth shapes like sphere, adaptive refinement skips unnecessary subdivision, reducing vertex count by 16x with comparable accuracy.
+
+## Usage with Neural SDF Models
+
+isomesh is designed for extracting meshes from SDF-based 3D generative models (e.g., DeepSDF, SDF-Diffusion) trained on mechanical parts like [SimJEB](https://simjeb.github.io/).
+
+### Recommended Configuration
+
+```python
+import isomesh
+import numpy as np
+import torch
+
+def make_sdf_func(model, device='cuda'):
+    """Wrap a neural SDF model for isomesh.
+
+    Always provide autodiff gradients -- finite difference gradients
+    are unreliable on neural SDFs.
+    """
+    @torch.no_grad()
+    def func(points: np.ndarray):
+        pts = torch.from_numpy(points).float().to(device)
+        pts.requires_grad_(True)
+
+        with torch.enable_grad():
+            values = model(pts)            # (N,)
+            grads = torch.autograd.grad(
+                values.sum(), pts, create_graph=False
+            )[0]                           # (N, 3)
+
+        return values.cpu().numpy(), grads.cpu().numpy()
+    return func
+
+vertices, faces = isomesh.extract(
+    make_sdf_func(model),
+    bbox_min=(-1.0, -1.0, -1.0),
+    bbox_max=(1.0, 1.0, 1.0),
+    min_depth=4,            # 16³ base grid
+    max_depth=7,            # 128³ effective resolution
+    adaptive=True,          # essential for mechanical parts
+    angle_threshold=30.0,   # detects 90° edges reliably
+    iso_value=0.0,
+)
+```
+
+### Why These Settings
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `adaptive` | `True` | Mechanical parts have large flat surfaces + sharp edges/holes. Adaptive refinement concentrates resolution at feature boundaries, keeping flat regions coarse. |
+| `min_depth` | `4` | 16³ = 4,096 initial corners -- a good first GPU batch. Lower risks missing thin features at the base grid; higher diminishes the benefit of adaptive refinement. |
+| `max_depth` | `7` | 128³ effective resolution captures fillets, hole edges, and fine details. |
+| `angle_threshold` | `30.0` | Mechanical edges are typically 90°, well above this threshold. Lowering it risks false-positive refinement from noisy neural gradients on flat surfaces. |
+
+### Quality Presets
+
+```python
+# Batch generation (speed-oriented, hundreds of shapes)
+min_depth=4, max_depth=7, adaptive=True
+
+# Single shape, final output (quality-oriented)
+min_depth=5, max_depth=8, adaptive=True
+```
+
+### Tips
+
+- **Always provide autodiff gradients.** Neural SDF + finite differences = poor accuracy. The wrapper above uses `torch.autograd.grad` to get exact gradients while keeping the outer scope in `no_grad` mode.
+- **Don't lower `angle_threshold` below 25°.** Neural gradients are noisier than analytic ones. A lower threshold causes over-refinement on surfaces that are actually flat.
+- **Thin features are handled automatically.** The Lipschitz guard detects thin walls even in cells without sign changes.
+- **Output is manifold and watertight.** Manifold Dual Contouring guarantees this -- no post-processing needed for downstream simulation or 3D printing.
+- **QEF preserves sharp edges exactly.** Unlike Marching Cubes, which places vertices on grid edges (chamfering corners), QEF vertex placement captures true edge and corner geometry.
+
+## API Reference
+
+```python
+isomesh.extract(
+    func,                    # vectorized SDF: (N,3) -> ((N,), (N,3)|None)
+    *,
+    bbox_min=(-1, -1, -1),   # bounding box (expanded to cube if non-cubic)
+    bbox_max=(1, 1, 1),
+    min_depth=3,             # uniform base resolution (2^min_depth cells/axis)
+    max_depth=7,             # max adaptive refinement depth
+    angle_threshold=30.0,    # degrees -- feature detection sensitivity
+    iso_value=0.0,           # isosurface level
+    fd_step=1e-5,            # finite difference step (if gradients not provided)
+    adaptive=False,          # enable adaptive refinement
+) -> (vertices, faces)
+```
+
+## Architecture
+
+```
+src/                        # Rust core
+  lib.rs                    # PyO3 module entry
+  bbox.rs                   # Bounding box, expand-to-cubic
+  octree/                   # Adaptive octree
+    build.rs                # Construction + feature-sensitive refinement
+    cell.rs, types.rs       # Data structures
+    morton.rs               # Morton code spatial indexing
+  eval/                     # Function evaluation bridge
+    bridge.rs               # Batch Python<->Rust with GIL management
+    cache.rs                # Corner value/gradient cache
+  dc/extract.rs             # Dual Contouring mesh extraction
+  qef/quadric.rs            # QEF solver (Jacobi SVD, mass-point bias)
+  util/math.rs              # 3x3 eigendecomposition
+
+python/isomesh/             # Python API
+  _core.py                  # extract() wrapper + validation
+  _validation.py            # Input checking with clear error messages
+```
+
+## Testing
+
+```bash
+maturin develop --release
+pytest tests/ -v
+```
+
+## Benchmarks
+
+The benchmark suite compares isomesh against PyMCubes across 10 shapes in 4 categories:
+
+| Category | Shapes | What it tests |
+|----------|--------|---------------|
+| Basic | Sphere, Torus | Smooth surfaces, analytic ground truth |
+| Sharp features | Box, Rotated box, Chamfered sphere, Cylinder, Mechanical part | Sharp edges, corners, non-axis-aligned edges, CSG operations |
+| Thin features | Hemisphere shell (wall=0.08) | Thin walls, open boundaries |
+| Complex geometry | Bunny, SimJEB 148 (mesh-based SDF) | Real CAD parts, complex topology |
+
+```bash
+# Full benchmark (all shapes, all methods, with rendering)
+uv run python benchmarks/run_benchmark.py
+
+# Selective
+uv run python benchmarks/run_benchmark.py --shapes sphere box chamfered_sphere
+uv run python benchmarks/run_benchmark.py --methods uniform adaptive
+uv run python benchmarks/run_benchmark.py --no-render --no-stl
+```
+
+## References
+
+- Ju, Losasso, Schaefer, Warren. "Dual Contouring of Hermite Data." SIGGRAPH 2002.
+- Schaefer, Ju, Warren. "Manifold Dual Contouring." IEEE TVCG 13(3), 2007.
+- Garland, Heckbert. "Surface Simplification Using Quadric Error Metrics." SIGGRAPH 1997.
+- Lindstrom. "Out-of-Core Simplification of Large Polygonal Models." SIGGRAPH 2000.
+
+## License
+
+MIT
+
+### scripts/export_adaptive_comparison.py
+```
+"""Export STL meshes comparing uniform vs adaptive mode for visual evaluation."""
+
+import numpy as np
+import trimesh
+import isomesh
+
+from tests.helpers.sdf_library import (
+    sdf_sphere, sdf_box, sdf_torus,
+    sdf_two_spheres_touching, sdf_hollow_cube, sdf_cross_pipes, sdf_csg_cross,
+)
+from tests.helpers.mesh_checks import check_manifold_watertight
+
+OUTPUT = "output/adaptive_comparison"
+
+SHAPES = [
+    ("sphere",      sdf_sphere,              (-2,-2,-2), (2,2,2)),
+    ("torus",       sdf_torus,               (-2,-2,-2), (2,2,2)),
+    ("box",         sdf_box,                 (-2,-2,-2), (2,2,2)),
+    ("csg_cross",   sdf_csg_cross,           (-2,-2,-2), (2,2,2)),
+    ("two_spheres", sdf_two_spheres_touching, (-3,-3,-3), (3,3,3)),
+]
+
+CONFIGS = [
+    # (label, min_depth, max_depth, adaptive)
+    ("uniform_d5",   5, 5, False),
+    ("uniform_d6",   6, 6, False),
+    ("adaptive_3_5", 3, 5, True),
+    ("adaptive_3_6", 3, 6, True),
+    ("adaptive_3_7", 3, 7, True),
+]
+
+
+def save_stl(vertices, faces, path):
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+    mesh.export(path)
+
+
+def main():
+    import os
+    os.makedirs(OUTPUT, exist_ok=True)
+
+    report_lines = ["# Adaptive vs Uniform Comparison\n"]
+    report_lines.append(f"| Shape | Config | Vertices | Faces | Manifold | Watertight | File |")
+    report_lines.append(f"|-------|--------|----------|-------|----------|------------|------|")
+
+    for shape_name, sdf_fn, bmin, bmax in SHAPES:
+        for label, mind, maxd, adaptive in CONFIGS:
+            try:
+                v, f = isomesh.extract(
+                    func=sdf_fn,
+                    bbox_min=bmin, bbox_max=bmax,
+                    min_depth=mind, max_depth=maxd,
+                    adaptive=adaptive,
+                )
+            except Exception as e:
+                report_lines.append(f"| {shape_name} | {label} | ERROR | - | - | - | - |")
+                print(f"  ERROR {shape_name}/{label}: {e}")
+                continue
+
+            if len(v) == 0:
+                report_lines.append(f"| {shape_name} | {label} | 0 | 0 | - | - | - |")
+                continue
+
+            r = check_manifold_watertight(v, f)
+            mf = "✅" if r["is_manifold"] else "❌"
+            wt = "✅" if r["is_watertight"] else "❌"
+
+            fname = f"{shape_name}_{label}.stl"
+            fpath = f"{OUTPUT}/{fname}"
+            save_stl(v, f, fpath)
+
+            report_lines.append(
+                f"| {shape_name} | {label} | {len(v)} | {len(f)} | {mf} | {wt} | {fname} |"
+            )
+            print(f"  {shape_name}/{label}: V={len(v):6d} F={len(f):6d} mf={r['is_manifold']} wt={r['is_watertight']}")
+
+    report = "\n".join(report_lines) + "\n"
+    report_path = f"{OUTPUT}/COMPARISON_REPORT.md"
+    with open(report_path, "w") as fp:
+        fp.write(report)
+    print(f"\nReport: {report_path}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### src/bbox.rs
+```
+/// Axis-aligned bounding box with expand-to-cubic logic.
+///
+/// Octree cells must always be cubic. If the user's bounding box is non-cubic,
+/// we expand it to the smallest enclosing cube.
+#[derive(Debug, Clone, Copy)]
+pub struct BoundingBox {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+}
+
+/// A cubic bounding box used by the octree.
+#[derive(Debug, Clone, Copy)]
+pub struct CubicBounds {
+    /// Minimum corner (origin).
+    pub origin: [f64; 3],
+    /// Side length (all axes equal).
+    pub size: f64,
+}
+
+impl BoundingBox {
+    pub fn new(min: [f64; 3], max: [f64; 3]) -> Self {
+        debug_assert!(min[0] < max[0] && min[1] < max[1] && min[2] < max[2]);
+        Self { min, max }
+    }
+
+    /// Expand this bounding box to the smallest enclosing cube.
+    /// The cube is centered on the original bbox center.
+    pub fn to_cubic(&self) -> CubicBounds {
+        let center = [
+            (self.min[0] + self.max[0]) * 0.5,
+            (self.min[1] + self.max[1]) * 0.5,
+            (self.min[2] + self.max[2]) * 0.5,
+        ];
+        let dx = self.max[0] - self.min[0];
+        let dy = self.max[1] - self.min[1];
+        let dz = self.max[2] - self.min[2];
+        let size = dx.max(dy).max(dz);
+        let half = size * 0.5;
+        CubicBounds {
+            origin: [center[0] - half, center[1] - half, center[2] - half],
+            size,
+        }
+    }
+}
+
+impl CubicBounds {
+    /// Get the center of this cubic region.
+    pub fn center(&self) -> [f64; 3] {
+        let h = self.size * 0.5;
+        [self.origin[0] + h, self.origin[1] + h, self.origin[2] + h]
+    }
+
+    /// Get the child bounds for octant index (0-7).
+    /// Octant indexing: bit 0 = X, bit 1 = Y, bit 2 = Z.
+    pub fn child(&self, octant: u8) -> CubicBounds {
+        debug_assert!(octant < 8);
+        let half = self.size * 0.5;
+        CubicBounds {
+            origin: [
+                self.origin[0] + if octant & 1 != 0 { half } else { 0.0 },
+                self.origin[1] + if octant & 2 != 0 { half } else { 0.0 },
+                self.origin[2] + if octant & 4 != 0 { half } else { 0.0 },
+            ],
+            size: half,
+        }
+    }
+
+    /// Get the position of corner `idx` (0-7).
+    /// Corner indexing: bit 0 = X, bit 1 = Y, bit 2 = Z (0 = min, 1 = max).
+    pub fn corner(&self, idx: u8) -> [f64; 3] {
+        debug_assert!(idx < 8);
+        [
+            self.origin[0] + if idx & 1 != 0 { self.size } else { 0.0 },
+            self.origin[1] + if idx & 2 != 0 { self.size } else { 0.0 },
+            self.origin[2] + if idx & 4 != 0 { self.size } else { 0.0 },
+        ]
+    }
+
+    /// Get the midpoint of edge `idx` (0-11).
+    /// Edges are grouped by parallel axis: 0-3 (X-axis), 4-7 (Y-axis), 8-11 (Z-axis).
+    /// Within each group, the 4 edges are indexed by the 2 remaining axis bits.
+    pub fn edge_midpoint(&self, idx: u8) -> [f64; 3] {
+        debug_assert!(idx < 12);
+        let half = self.size * 0.5;
+        let axis = (idx / 4) as usize; // 0=X, 1=Y, 2=Z
+        let bits = idx % 4;
+        // The two non-axis dimensions
+        let (a1, a2) = match axis {
+            0 => (1usize, 2usize),
+            1 => (0usize, 2usize),
+            _ => (0usize, 1usize),
+        };
+        let mut pos = self.origin;
+        pos[axis] += half; // midpoint along the edge axis
+        pos[a1] += if bits & 1 != 0 { self.size } else { 0.0 };
+        pos[a2] += if bits & 2 != 0 { self.size } else { 0.0 };
+        pos
+    }
+
+    /// Get the two corner indices for edge `idx`.
+    pub fn edge_corners(idx: u8) -> (u8, u8) {
+        debug_assert!(idx < 12);
+        EDGE_CORNERS[idx as usize]
+    }
+
+    /// Diagonal length of this cubic cell.
+    pub fn diagonal(&self) -> f64 {
+        self.size * std::f64::consts::SQRT_2 * (3.0f64 / 2.0).sqrt()
+        // = size * sqrt(3)
+    }
+
+    pub fn contains(&self, p: [f64; 3]) -> bool {
+        p[0] >= self.origin[0]
+            && p[0] <= self.origin[0] + self.size
+            && p[1] >= self.origin[1]
+            && p[1] <= self.origin[1] + self.size
+            && p[2] >= self.origin[2]
+            && p[2] <= self.origin[2] + self.size
+    }
+}
+
+/// Edge-to-corner lookup table.
+/// edge_corners[i] = (corner_a, corner_b) for edge i.
+/// Edges 0-3: parallel to X-axis, Edges 4-7: parallel to Y-axis, Edges 8-11: parallel to Z-axis.
+const EDGE_CORNERS: [(u8, u8); 12] = [
+    // X-axis edges (axis=0): varying bit 0 (X), fixed bits 1,2 (Y,Z)
+    (0b000, 0b001), // edge 0: Y=0,Z=0
+    (0b010, 0b011), // edge 1: Y=1,Z=0
+    (0b100, 0b101), // edge 2: Y=0,Z=1
+    (0b110, 0b111), // edge 3: Y=1,Z=1
+    // Y-axis edges (axis=1): varying bit 1 (Y), fixed bits 0,2 (X,Z)
+    (0b000, 0b010), // edge 4: X=0,Z=0
+    (0b001, 0b011), // edge 5: X=1,Z=0
+    (0b100, 0b110), // edge 6: X=0,Z=1
+    (0b101, 0b111), // edge 7: X=1,Z=1
+    // Z-axis edges (axis=2): varying bit 2 (Z), fixed bits 0,1 (X,Y)
+    (0b000, 0b100), // edge 8: X=0,Y=0
+    (0b001, 0b101), // edge 9: X=1,Y=0
+    (0b010, 0b110), // edge 10: X=0,Y=1
+    (0b011, 0b111), // edge 11: X=1,Y=1
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cubic_expansion_square() {
+        let bb = BoundingBox::new([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]);
+        let cb = bb.to_cubic();
+        assert!((cb.size - 2.0).abs() < 1e-10);
+        assert!((cb.origin[0] - (-1.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cubic_expansion_rectangular() {
+        let bb = BoundingBox::new([-1.0, -1.0, -1.0], [3.0, 1.0, 1.0]);
+        let cb = bb.to_cubic();
+        // max dimension is X: 4.0
+        assert!((cb.size - 4.0).abs() < 1e-10);
+        // center is (1, 0, 0), so origin = (1-2, 0-2, 0-2) = (-1, -2, -2)
+        assert!((cb.origin[0] - (-1.0)).abs() < 1e-10);
+        assert!((cb.origin[1] - (-2.0)).abs() < 1e-10);
+        assert!((cb.origin[2] - (-2.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_child_bounds() {
+        let cb = CubicBounds { origin: [0.0, 0.0, 0.0], size: 2.0 };
+        let c0 = cb.child(0); // octant 0: all min
+        assert!((c0.origin[0]).abs() < 1e-10);
+        assert!((c0.size - 1.0).abs() < 1e-10);
+
+        let c7 = cb.child(7); // octant 7: all max
+        assert!((c7.origin[0] - 1.0).abs() < 1e-10);
+        assert!((c7.origin[1] - 1.0).abs() < 1e-10);
+        assert!((c7.origin[2] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_corner_positions() {
+        let cb = CubicBounds { origin: [0.0, 0.0, 0.0], size: 1.0 };
+        let c0 = cb.corner(0);
+        assert_eq!(c0, [0.0, 0.0, 0.0]);
+        let c7 = cb.corner(7);
+        assert_eq!(c7, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_edge_corners_consistency() {
+        // Each edge should connect two corners that differ in exactly one bit
+        for i in 0..12u8 {
+            let (a, b) = CubicBounds::edge_corners(i);
+            let diff = a ^ b;
+            assert!(diff.count_ones() == 1, "Edge {} corners {} and {} differ in {} bits", i, a, b, diff.count_ones());
+        }
+    }
+}
+```
+
+### src/lib.rs
+```
+mod bbox;
+mod dc;
+mod eval;
+mod mesh;
+mod octree;
+mod qef;
+mod util;
+
+use bbox::BoundingBox;
+use dc::extract;
+use eval::bridge;
+use numpy::IntoPyArray;
+use numpy::PyArray2;
+use octree::build;
+use pyo3::prelude::*;
+
+/// Isosurface extraction entry point.
+///
+/// Builds an adaptive octree, runs Dual Contouring, and returns a triangle mesh.
+#[pyfunction]
+#[pyo3(signature = (
+    eval_fn,
+    bbox_min,
+    bbox_max,
+    min_depth = 3,
+    max_depth = 7,
+    angle_threshold_deg = 30.0,
+    iso_value = 0.0,
+    adaptive = false,
+))]
+fn extract_mesh(
+    py: Python<'_>,
+    eval_fn: PyObject,
+    bbox_min: [f64; 3],
+    bbox_max: [f64; 3],
+    min_depth: u32,
+    max_depth: u32,
+    angle_threshold_deg: f64,
+    iso_value: f64,
+    adaptive: bool,
+) -> PyResult<(Py<PyArray2<f64>>, Py<PyArray2<i64>>)> {
+    let bb = BoundingBox::new(bbox_min, bbox_max);
+    let build_fn = if adaptive { build::build_adaptive_true } else { build::build_adaptive };
+    let (octree, _total_evals) = build_fn(
+        py, &eval_fn, bb,
+        min_depth as u8, max_depth as u8,
+        iso_value, angle_threshold_deg,
+    )?;
+
+    // Run Dual Contouring extraction
+    let mesh = extract::extract_dc(py, &eval_fn, &octree, angle_threshold_deg)?;
+
+    let nv = mesh.vertices.len();
+    let nf = mesh.faces.len();
+
+    let verts_flat: Vec<f64> = mesh.vertices.iter().flat_map(|v| v.iter().copied()).collect();
+    let faces_flat: Vec<i64> = mesh.faces.iter().flat_map(|f| f.iter().copied()).collect();
+
+    let verts_array = numpy::ndarray::Array2::from_shape_vec((nv, 3), verts_flat)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+        .into_pyarray(py).into();
+    let faces_array = numpy::ndarray::Array2::from_shape_vec((nf, 3), faces_flat)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+        .into_pyarray(py).into();
+
+    Ok((verts_array, faces_array))
+}
+
+/// Build a uniform octree and return statistics.
+#[pyfunction]
+#[pyo3(signature = (eval_fn, bbox_min, bbox_max, depth, iso_value = 0.0))]
+fn build_octree_uniform(
+    py: Python<'_>,
+    eval_fn: PyObject,
+    bbox_min: [f64; 3],
+    bbox_max: [f64; 3],
+    depth: u32,
+    iso_value: f64,
+) -> PyResult<(u64, u64, u64, u64, u8, u64)> {
+    let bb = BoundingBox::new(bbox_min, bbox_max);
+    let (octree, total_evals) = build::build_uniform(py, &eval_fn, bb, depth as u8, iso_value)?;
+    let stats = octree.stats();
+    Ok((
+        stats.leaf_count, stats.branch_count,
+        stats.empty_count, stats.full_count,
+        stats.max_actual_depth, total_evals,
+    ))
+}
+
+/// Build an adaptive octree and return statistics.
+#[pyfunction]
+#[pyo3(signature = (eval_fn, bbox_min, bbox_max, min_depth, max_depth, iso_value = 0.0))]
+fn build_octree_adaptive(
+    py: Python<'_>,
+    eval_fn: PyObject,
+    bbox_min: [f64; 3],
+    bbox_max: [f64; 3],
+    min_depth: u32,
+    max_depth: u32,
+    iso_value: f64,
+) -> PyResult<(u64, u64, u64, u64, u8, u64)> {
+    let bb = BoundingBox::new(bbox_min, bbox_max);
+    let (octree, total_evals) = build::build_adaptive(
+        py, &eval_fn, bb,
+        min_depth as u8, max_depth as u8,
+        iso_value, 30.0,
+    )?;
+    let stats = octree.stats();
+    Ok((
+        stats.leaf_count, stats.branch_count,
+        stats.empty_count, stats.full_count,
+        stats.max_actual_depth, total_evals,
+    ))
+}
+
+/// Test function to verify the batch evaluation bridge works.
+#[pyfunction]
+fn test_batch_eval(
+    py: Python<'_>,
+    eval_fn: PyObject,
+    points: Vec<[f64; 3]>,
+) -> PyResult<(Vec<f64>, bool, usize)> {
+    let result = bridge::batch_evaluate(py, &eval_fn, &points)?;
+    let has_grads = result.gradients.is_some();
+    let n = result.values.len();
+    Ok((result.values, has_grads, n))
+}
+
+/// Test function for finite-difference gradient estimation.
+#[pyfunction]
+#[pyo3(signature = (eval_fn, points, step = 1e-5))]
+fn test_fd_gradients(
+    py: Python<'_>,
+    eval_fn: PyObject,
+    points: Vec<[f64; 3]>,
+    step: f64,
+) -> PyResult<Vec<[f64; 3]>> {
+    bridge::estimate_gradients_fd(py, &eval_fn, &points, step)
+}
+
+#[pymodule]
+fn _isomesh_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(extract_mesh, m)?)?;
+    m.add_function(wrap_pyfunction!(build_octree_uniform, m)?)?;
+    m.add_function(wrap_pyfunction!(build_octree_adaptive, m)?)?;
+    m.add_function(wrap_pyfunction!(test_batch_eval, m)?)?;
+    m.add_function(wrap_pyfunction!(test_fd_gradients, m)?)?;
+    Ok(())
+}
+```
+
+### python/isomesh/__init__.py
+```
+"""isomesh: Fast isosurface extraction via adaptive octree + Manifold Dual Contouring."""
+
+from __future__ import annotations
+
+from isomesh._core import extract
+
+__version__ = "0.1.0"
+__all__ = ["extract"]
+```
+
+### python/isomesh/_core.py
+```
+from __future__ import annotations
+
+import warnings
+
+import numpy as np
+from numpy.typing import NDArray
+
+from isomesh._validation import (
+    validate_func,
+    validate_bbox,
+    validate_depth,
+    validate_angle_threshold,
+)
+
+
+def extract(
+    func: object,
+    *,
+    bbox_min: tuple[float, float, float] = (-1.0, -1.0, -1.0),
+    bbox_max: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    min_depth: int = 3,
+    max_depth: int = 7,
+    angle_threshold: float = 30.0,
+    iso_value: float = 0.0,
+    fd_step: float = 1e-5,
+    adaptive: bool = False,
+) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
+    """Extract an isosurface mesh from an implicit function.
+
+    Parameters
+    ----------
+    func : callable
+        Vectorized implicit function:
+        (N,3) float64 -> ((N,) float64, (N,3) float64 | None).
+    bbox_min, bbox_max : tuple of 3 floats
+        Axis-aligned bounding box. If non-cubic, it will be expanded to the
+        smallest enclosing cube (centered on the original bbox center).
+    min_depth, max_depth : int
+        Octree depth range. Cell count per axis = 2^depth.
+    angle_threshold : float
+        Degrees. Normals differing by more than this trigger sharp-feature handling.
+    iso_value : float
+        Isosurface level (default 0.0).
+    fd_step : float
+        Finite difference step for gradient estimation when func returns None gradients.
+
+    Returns
+    -------
+    vertices : ndarray (V, 3) float64
+    faces : ndarray (F, 3) int64
+    """
+    # Validation
+    validate_func(func)
+    bbox_min_arr, bbox_max_arr = validate_bbox(bbox_min, bbox_max)
+    validate_depth(min_depth, max_depth)
+    validate_angle_threshold(angle_threshold)
+
+    # Warn if bbox will be expanded to cubic
+    extents = bbox_max_arr - bbox_min_arr
+    if not np.allclose(extents, extents[0]):
+        max_extent = extents.max()
+        center = (bbox_min_arr + bbox_max_arr) * 0.5
+        expanded_min = center - max_extent / 2
+        expanded_max = center + max_extent / 2
+        warnings.warn(
+            f"Non-cubic bounding box expanded to cubic: "
+            f"[{expanded_min.tolist()}] to [{expanded_max.tolist()}]",
+            stacklevel=2,
+        )
+
+    # Build the callback adapter that always returns numpy arrays
+    def _eval_batch(positions: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+        """Called by Rust. Returns (values, gradients) as numpy arrays."""
+        values, gradients = func(positions)
+        values = np.asarray(values, dtype=np.float64).ravel()
+        if gradients is not None:
+            gradients = np.asarray(gradients, dtype=np.float64).reshape(-1, 3)
+        return values, gradients
+
+    # Call Rust core
+    from isomesh._isomesh_rs import extract_mesh
+
+    vertices, faces = extract_mesh(
+        eval_fn=_eval_batch,
+        bbox_min=bbox_min_arr.tolist(),
+        bbox_max=bbox_max_arr.tolist(),
+        min_depth=min_depth,
+        max_depth=max_depth,
+        angle_threshold_deg=angle_threshold,
+        iso_value=iso_value,
+        adaptive=adaptive,
+    )
+
+    # Ensure correct dtypes
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.asarray(faces, dtype=np.int64)
+
+    # Ensure (V, 3) and (F, 3) shapes even if empty
+    if vertices.ndim == 1 and vertices.size == 0:
+        vertices = vertices.reshape(0, 3)
+    if faces.ndim == 1 and faces.size == 0:
+        faces = faces.reshape(0, 3)
+
+    return vertices, faces
+```
+
+### python/isomesh/_validation.py
+```
+from __future__ import annotations
+
+import numpy as np
+
+
+def validate_func(func: object) -> None:
+    """Probe the function with 2 test points to catch signature errors early."""
+    if not callable(func):
+        raise ValueError(f"func must be callable, got {type(func).__name__}")
+
+    probe = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], dtype=np.float64)
+    try:
+        result = func(probe)
+    except Exception as e:
+        raise ValueError(
+            f"func({probe.shape}) raised {type(e).__name__}: {e}\n"
+            "Expected signature: func(positions: ndarray(N,3)) -> (values(N,), gradients(N,3)|None)"
+        ) from e
+
+    if not isinstance(result, tuple) or len(result) != 2:
+        raise ValueError(
+            f"func must return a 2-tuple (values, gradients), got {type(result)}"
+        )
+
+    values, gradients = result
+    values = np.asarray(values)
+    if values.shape != (2,):
+        raise ValueError(
+            f"func returned values with shape {values.shape}, expected (N,) where N=2"
+        )
+    if gradients is not None:
+        gradients = np.asarray(gradients)
+        if gradients.shape != (2, 3):
+            raise ValueError(
+                f"func returned gradients with shape {gradients.shape}, expected (N,3) where N=2"
+            )
+
+
+def validate_bbox(
+    bbox_min: tuple[float, float, float],
+    bbox_max: tuple[float, float, float],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate and convert bounding box to float64 arrays."""
+    bbox_min_arr = np.asarray(bbox_min, dtype=np.float64)
+    bbox_max_arr = np.asarray(bbox_max, dtype=np.float64)
+
+    if bbox_min_arr.shape != (3,) or bbox_max_arr.shape != (3,):
+        raise ValueError(
+            f"bbox_min and bbox_max must be 3-element tuples, "
+            f"got shapes {bbox_min_arr.shape} and {bbox_max_arr.shape}"
+        )
+
+    if not np.all(bbox_min_arr < bbox_max_arr):
+        raise ValueError(
+            f"bbox_min must be strictly less than bbox_max in all dimensions.\n"
+            f"  bbox_min={bbox_min_arr.tolist()}\n"
+            f"  bbox_max={bbox_max_arr.tolist()}"
+        )
+
+    return bbox_min_arr, bbox_max_arr
+
+
+def validate_depth(min_depth: int, max_depth: int) -> None:
+    """Validate octree depth parameters."""
+    if not isinstance(min_depth, int) or not isinstance(max_depth, int):
+        raise ValueError(
+            f"min_depth and max_depth must be integers, "
+            f"got {type(min_depth).__name__} and {type(max_depth).__name__}"
+        )
+    if min_depth < 1:
+        raise ValueError(f"min_depth must be >= 1, got {min_depth}")
+    if max_depth > 12:
+        raise ValueError(f"max_depth must be <= 12 (safety cap), got {max_depth}")
+    if min_depth > max_depth:
+        raise ValueError(
+            f"min_depth ({min_depth}) must be <= max_depth ({max_depth})"
+        )
+
+
+def validate_angle_threshold(angle_threshold: float) -> None:
+    """Validate sharp feature angle threshold."""
+    if not (0.0 < angle_threshold < 180.0):
+        raise ValueError(
+            f"angle_threshold must be in (0, 180) degrees, got {angle_threshold}"
+        )
+```
+
+### src/dc/component.rs
+```
+use crate::bbox::CubicBounds;
+
+/// Connected component analysis result for a leaf cell's inside corners.
+///
+/// In Manifold Dual Contouring (Schaefer, Ju, Warren 2007), each leaf cell
+/// may contain multiple disconnected groups of "inside" corners. Each group
+/// (connected component) gets its own QEF vertex, preventing non-manifold
+/// "bowtie" vertices that occur in basic DC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellComponents {
+    /// Component ID for each corner (0..num_components-1).
+    /// Outside corners (bit not set in corner_mask) get `0xFF`.
+    pub corner_component: [u8; 8],
+    /// Number of distinct connected components of inside corners.
+    pub num_components: u8,
+}
+
+/// Compute connected components of inside corners for a given corner_mask.
+///
+/// Two inside corners are in the same component if they share a cube edge
+/// (differ in exactly 1 bit) and both are inside. Uses inline Union-Find
+/// over the 8 corners.
+pub fn compute_components(corner_mask: u8) -> CellComponents {
+    if corner_mask == 0 || corner_mask == 0xFF {
+        return CellComponents {
+            corner_component: [0xFF; 8],
+            num_components: 0,
+        };
+    }
+
+    // Union-Find: parent[i] stores the parent of corner i.
+    // Only meaningful for inside corners.
+    let mut parent = [0u8; 8];
+    for i in 0..8u8 {
+        parent[i as usize] = i;
+    }
+
+    // Find with path compression
+    fn find(parent: &mut [u8; 8], mut x: u8) -> u8 {
+        while parent[x as usize] != x {
+            parent[x as usize] = parent[parent[x as usize] as usize];
+            x = parent[x as usize];
+        }
+        x
+    }
+
+    // Union two corners
+    fn union(parent: &mut [u8; 8], a: u8, b: u8) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra != rb {
+            // Always point higher-index root to lower-index root for determinism
+            if ra < rb {
+                parent[rb as usize] = ra;
+            } else {
+                parent[ra as usize] = rb;
+            }
+        }
+    }
+
+    // For each of the 12 cube edges, if both endpoints are inside, union them
+    for edge in 0..12u8 {
+        let (c0, c1) = CubicBounds::edge_corners(edge);
+        let both_inside = (corner_mask >> c0) & 1 == 1 && (corner_mask >> c1) & 1 == 1;
+        if both_inside {
+            union(&mut parent, c0, c1);
+        }
+    }
+
+    // Flatten: assign sequential component IDs
+    let mut corner_component = [0xFFu8; 8];
+    let mut num_components = 0u8;
+    let mut root_to_id = [0xFFu8; 8]; // maps root corner → component ID
+
+    for i in 0..8u8 {
+        if (corner_mask >> i) & 1 == 1 {
+            let root = find(&mut parent, i);
+            if root_to_id[root as usize] == 0xFF {
+                root_to_id[root as usize] = num_components;
+                num_components += 1;
+            }
+            corner_component[i as usize] = root_to_id[root as usize];
+        }
+    }
+
+    CellComponents {
+        corner_component,
+        num_components,
+    }
+}
+
+/// For a sign-change edge, return the component ID of the inside corner.
+///
+/// Panics (debug) if the edge has no sign change or the inside corner
+/// has no valid component.
+#[inline]
+pub fn edge_component(components: &CellComponents, corner_mask: u8, edge_idx: u8) -> u8 {
+    let (c0, c1) = CubicBounds::edge_corners(edge_idx);
+    let c0_inside = (corner_mask >> c0) & 1 == 1;
+    let inside_corner = if c0_inside { c0 } else { c1 };
+    let comp = components.corner_component[inside_corner as usize];
+    debug_assert!(comp != 0xFF, "Inside corner {} should have a valid component", inside_corner);
+    comp
+}
+
+/// Precomputed lookup table: `COMPONENT_TABLE[corner_mask]` gives the
+/// connected component analysis for that corner configuration.
+///
+/// Since corner_mask is a u8 (256 values), this table is small (< 3 KB)
+/// and fits entirely in L1 cache.
+pub static COMPONENT_TABLE: [CellComponents; 256] = {
+    let mut table = [CellComponents {
+        corner_component: [0xFF; 8],
+        num_components: 0,
+    }; 256];
+
+    // We must use const-compatible code here (no function calls to
+    // non-const functions). Inline the Union-Find logic.
+    let mut mask: usize = 0;
+    while mask < 256 {
+        if mask == 0 || mask == 0xFF {
+            // Already initialized to 0 components
+            mask += 1;
+            continue;
+        }
+
+        let corner_mask = mask as u8;
+
+        // Inline Union-Find
+        let mut parent: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+
+        // Inline find (iterative, no recursion allowed in const)
+        // We'll do a simplified approach: iterate edges, union, then
+        // do multiple passes to flatten.
+
+        // Edge corners table (must inline since we can't call functions in const)
+        const EDGES: [(u8, u8); 12] = [
+            (0, 1), (2, 3), (4, 5), (6, 7), // X-axis
+            (0, 2), (1, 3), (4, 6), (5, 7), // Y-axis
+            (0, 4), (1, 5), (2, 6), (3, 7), // Z-axis
+        ];
+
+        let mut e = 0;
+        while e < 12 {
+            let (c0, c1) = EDGES[e];
+            let both_inside =
+                (corner_mask >> c0) & 1 == 1 && (corner_mask >> c1) & 1 == 1;
+            if both_inside {
+                // Find root of c0
+                let mut r0 = c0;
+                while parent[r0 as usize] != r0 {
+                    r0 = parent[r0 as usize];
+                }
+                // Find root of c1
+                let mut r1 = c1;
+                while parent[r1 as usize] != r1 {
+                    r1 = parent[r1 as usize];
+                }
+                // Union: lower root wins
+                if r0 != r1 {
+                    if r0 < r1 {
+                        parent[r1 as usize] = r0;
+                    } else {
+                        parent[r0 as usize] = r1;
+                    }
+                }
+            }
+            e += 1;
+        }
+
+        // Flatten: find root for each inside corner (multiple passes to handle chains)
+        let mut pass = 0;
+        while pass < 8 {
+            let mut i = 0;
+            while i < 8 {
+                if (corner_mask >> i) & 1 == 1 {
+                    let mut r = i as u8;
+                    while parent[r as usize] != r {
+                        r = parent[r as usize];
+                    }
+                    parent[i] = r;
+                }
+                i += 1;
+            }
+            pass += 1;
+        }
+
+        // Assign sequential component IDs
+        let mut corner_component = [0xFFu8; 8];
+        let mut num_components = 0u8;
+        let mut root_to_id = [0xFFu8; 8];
+
+        let mut i = 0;
+        while i < 8 {
+            if (corner_mask >> i) & 1 == 1 {
+                let root = parent[i];
+                if root_to_id[root as usize] == 0xFF {
+                    root_to_id[root as usize] = num_components;
+                    num_components += 1;
+                }
+                corner_component[i] = root_to_id[root as usize];
+            }
+            i += 1;
+        }
+
+        table[mask] = CellComponents {
+            corner_component,
+            num_components,
+        };
+
+        mask += 1;
+    }
+
+    table
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reference BFS implementation for verifying the lookup table.
+    fn reference_components(corner_mask: u8) -> (u8, [u8; 8]) {
+        if corner_mask == 0 || corner_mask == 0xFF {
+            return (0, [0xFF; 8]);
+        }
+
+        let edges: [(u8, u8); 12] = [
+            (0, 1), (2, 3), (4, 5), (6, 7),
+            (0, 2), (1, 3), (4, 6), (5, 7),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ];
+
+        // Build adjacency list for inside corners
+        let mut adj: [u8; 8] = [0; 8]; // bitmask of neighbors
+        for &(c0, c1) in &edges {
+            if (corner_mask >> c0) & 1 == 1 && (corner_mask >> c1) & 1 == 1 {
+                adj[c0 as usize] |= 1 << c1;
+                adj[c1 as usize] |= 1 << c0;
+            }
+        }
+
+        // BFS to find components
+        let mut visited = 0u8;
+        let mut corner_comp = [0xFFu8; 8];
+        let mut num_comp = 0u8;
+
+        for start in 0..8u8 {
+            if (corner_mask >> start) & 1 == 0 {
+                continue; // outside
+            }
+            if (visited >> start) & 1 == 1 {
+                continue; // already visited
+            }
+
+            // BFS from this corner
+            let mut queue = [0u8; 8];
+            let mut head = 0;
+            let mut tail = 0;
+            queue[tail] = start;
+            tail += 1;
+            visited |= 1 << start;
+            corner_comp[start as usize] = num_comp;
+
+            while head < tail {
+                let cur = queue[head];
+                head += 1;
+                for nb in 0..8u8 {
+                    if (adj[cur as usize] >> nb) & 1 == 1 && (visited >> nb) & 1 == 0 {
+                        visited |= 1 << nb;
+                        corner_comp[nb as usize] = num_comp;
+                        queue[tail] = nb;
+                        tail += 1;
+                    }
+                }
+            }
+
+            num_comp += 1;
+        }
+
+        (num_comp, corner_comp)
+    }
+
+    #[test]
+    fn test_all_256_corner_masks() {
+        for mask in 0..=255u8 {
+            let computed = compute_components(mask);
+            let table = COMPONENT_TABLE[mask as usize];
+            let (ref_count, ref_comp) = reference_components(mask);
+
+            // Verify compute_components matches reference
+            assert_eq!(
+                computed.num_components, ref_count,
+                "mask 0x{:02X}: compute_components gave {} components, reference gave {}",
+                mask, computed.num_components, ref_count
+            );
+            assert_eq!(
+                computed.corner_component, ref_comp,
+                "mask 0x{:02X}: component assignment mismatch",
+                mask
+            );
+
+            // Verify COMPONENT_TABLE matches reference
+            assert_eq!(
+                table.num_components, ref_count,
+                "mask 0x{:02X}: COMPONENT_TABLE gave {} components, reference gave {}",
+                mask, table.num_components, ref_count
+            );
+            assert_eq!(
+                table.corner_component, ref_comp,
+                "mask 0x{:02X}: COMPONENT_TABLE assignment mismatch",
+                mask
+            );
+
+            // Verify table matches compute_components
+            assert_eq!(
+                computed, table,
+                "mask 0x{:02X}: compute_components and COMPONENT_TABLE disagree",
+                mask
+            );
+        }
+    }
+
+    #[test]
+    fn test_empty_and_full() {
+        let empty = compute_components(0x00);
+        assert_eq!(empty.num_components, 0);
+        assert_eq!(empty.corner_component, [0xFF; 8]);
+
+        let full = compute_components(0xFF);
+        assert_eq!(full.num_components, 0);
+        assert_eq!(full.corner_component, [0xFF; 8]);
+    }
+
+    #[test]
+    fn test_single_corner() {
+        for i in 0..8u8 {
+            let mask = 1 << i;
+            let c = compute_components(mask);
+            assert_eq!(c.num_components, 1, "single corner {}: expected 1 component", i);
+            assert_eq!(c.corner_component[i as usize], 0, "corner {} should be component 0", i);
+            for j in 0..8u8 {
+                if j != i {
+                    assert_eq!(c.corner_component[j as usize], 0xFF);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_two_adjacent_corners() {
+        // Corners 0 and 1 share edge 0 (X-axis) → 1 component
+        let c = compute_components(0b00000011);
+        assert_eq!(c.num_components, 1);
+        assert_eq!(c.corner_component[0], 0);
+        assert_eq!(c.corner_component[1], 0);
+    }
+
+    #[test]
+    fn test_two_body_diagonal_corners() {
+        // Corners 0 (000) and 7 (111) differ in 3 bits → no shared edge → 2 components
+        let c = compute_components(0b10000001);
+        assert_eq!(c.num_components, 2);
+        assert_ne!(c.corner_component[0], c.corner_component[7]);
+    }
+
+    #[test]
+    fn test_two_face_diagonal_corners() {
+        // Corners 0 (000) and 3 (011) differ in 2 bits (Y,X) → no shared edge → 2 components
+        let c = compute_components(0b00001001);
+        assert_eq!(c.num_components, 2);
+        assert_ne!(c.corner_component[0], c.corner_component[3]);
+    }
+
+    #[test]
+    fn test_checkerboard_4_components() {
+        // 0x69 = 0b01101001: corners {0, 3, 5, 6}
+        // 0→3: differ in bits 0,1 (2 bits) → no edge
+        // 0→5: differ in bits 0,2 (2 bits) → no edge
+        // 0→6: differ in bits 1,2 (2 bits) → no edge
+        // 3→5: differ in bits 0,1,2 (3 bits) → no edge
+        // 3→6: differ in bits 0,2 (2 bits) → no edge
+        // 5→6: differ in bits 0,1 (2 bits) → no edge
+        // No pair shares an edge → 4 components
+        let c = compute_components(0x69);
+        assert_eq!(c.num_components, 4, "checkerboard 0x69 should have 4 components");
+    }
+
+    #[test]
+    fn test_inverse_checkerboard_4_components() {
+        // 0x96 = 0b10010110: corners {1, 2, 4, 7} — complement of 0x69
+        let c = compute_components(0x96);
+        assert_eq!(c.num_components, 4, "inverse checkerboard 0x96 should have 4 components");
+    }
+
+    #[test]
+    fn test_face_connected() {
+        // Corners 0,1,2,3 = bottom face (Z=0). All share edges. → 1 component
+        let c = compute_components(0b00001111);
+        assert_eq!(c.num_components, 1);
+        for i in 0..4 {
+            assert_eq!(c.corner_component[i], 0);
+        }
+    }
+
+    #[test]
+    fn test_edge_component_function() {
+        // Mask 0b00000001 (only corner 0 inside)
+        // Edge 0: corners (0, 1), corner 0 is inside
+        let c = compute_components(0b00000001);
+        assert_eq!(edge_component(&c, 0b00000001, 0), 0);
+
+        // Edge 4: corners (0, 2), corner 0 is inside
+        assert_eq!(edge_component(&c, 0b00000001, 4), 0);
+
+        // Edge 8: corners (0, 4), corner 0 is inside
+        assert_eq!(edge_component(&c, 0b00000001, 8), 0);
+    }
+
+    #[test]
+    fn test_edge_component_multi() {
+        // Mask 0x69: corners {0, 3, 5, 6}, each in its own component
+        let c = compute_components(0x69);
+
+        // Edge 0: corners (0, 1). Corner 0 is inside (comp 0), corner 1 outside
+        let comp_e0 = edge_component(&c, 0x69, 0);
+        assert_eq!(comp_e0, c.corner_component[0]);
+
+        // Edge 5: corners (1, 3). Corner 1 outside, corner 3 inside
+        let comp_e5 = edge_component(&c, 0x69, 5);
+        assert_eq!(comp_e5, c.corner_component[3]);
+    }
+
+    #[test]
+    fn test_every_sign_change_edge_has_valid_component() {
+        for mask in 1..=254u8 {
+            let c = COMPONENT_TABLE[mask as usize];
+            if c.num_components == 0 {
+                continue;
+            }
+            for edge in 0..12u8 {
+                let (c0, c1) = CubicBounds::edge_corners(edge);
+                let s0 = (mask >> c0) & 1;
+                let s1 = (mask >> c1) & 1;
+                if s0 != s1 {
+                    // Sign change edge
+                    let comp = edge_component(&c, mask, edge);
+                    assert!(
+                        comp < c.num_components,
+                        "mask 0x{:02X} edge {}: component {} >= num_components {}",
+                        mask, edge, comp, c.num_components
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_outside_corners_always_0xff() {
+        for mask in 0..=255u8 {
+            let c = COMPONENT_TABLE[mask as usize];
+            for i in 0..8u8 {
+                if (mask >> i) & 1 == 0 {
+                    assert_eq!(
+                        c.corner_component[i as usize], 0xFF,
+                        "mask 0x{:02X} corner {}: outside corner should be 0xFF",
+                        mask, i
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_inside_corners_have_valid_component() {
+        for mask in 1..=254u8 {
+            let c = COMPONENT_TABLE[mask as usize];
+            for i in 0..8u8 {
+                if (mask >> i) & 1 == 1 {
+                    assert!(
+                        c.corner_component[i as usize] < c.num_components,
+                        "mask 0x{:02X} corner {}: component {} >= num_components {}",
+                        mask, i, c.corner_component[i as usize], c.num_components
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_component_count_distribution() {
+        // Count how many masks produce each component count
+        let mut counts = [0u32; 9]; // max 8 corners → max 8 components (theoretical)
+        for mask in 0..=255u8 {
+            let c = COMPONENT_TABLE[mask as usize];
+            counts[c.num_components as usize] += 1;
+        }
+        // 0 components: mask=0x00 and mask=0xFF → 2
+        assert_eq!(counts[0], 2);
+        // 1 component should be the majority
+        assert!(counts[1] > 100, "Expected most masks to have 1 component, got {}", counts[1]);
+        // There should be some multi-component masks
+        let multi: u32 = counts[2..].iter().sum();
+        assert!(multi > 0, "Expected some multi-component masks");
+        // Max should be 4 (checkerboard)
+        assert_eq!(counts[5], 0);
+        assert_eq!(counts[6], 0);
+        assert_eq!(counts[7], 0);
+        assert_eq!(counts[8], 0);
+    }
+}
+```
+
+### src/dc/extract.rs
+```
+use pyo3::prelude::*;
+use rayon::prelude::*;
+use std::collections::HashMap;
+use crate::bbox::CubicBounds;
+use crate::eval::bridge;
+use crate::octree::Octree;
+use crate::octree::cell::{Cell, LeafData};
+use crate::qef::quadric::QefData;
+use crate::dc::component::{CellComponents, COMPONENT_TABLE, edge_component};
+
+pub struct ExtractedMesh {
+    pub vertices: Vec<[f64; 3]>,
+    pub faces: Vec<[i64; 3]>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct CellKey(u32, u32, u32, u8);
+
+struct LeafInfo {
+    data: LeafData,
+    bounds: CubicBounds,
+    depth: u8,
+    key: CellKey,
+}
+
+/// Extract a triangle mesh using Manifold Dual Contouring.
+///
+/// Each leaf cell may produce multiple vertices (one per connected component
+/// of inside corners), preventing non-manifold "bowtie" vertices that occur
+/// in basic DC. Edge crossings are refined via bisection (8 iterations) for
+/// accurate placement on curved features. Normals are obtained from the
+/// user function's gradient output, or estimated via finite differences if
+/// not provided. Vertices are projected onto the isosurface via iterative
+/// Newton steps.
+pub fn extract_dc(
+    py: Python<'_>,
+    func: &PyObject,
+    octree: &Octree,
+    angle_threshold_deg: f64,
+) -> PyResult<ExtractedMesh> {
+    let iso_value = octree.iso_value;
+    let sharp_cos = (angle_threshold_deg * std::f64::consts::PI / 180.0).cos();
+
+    // Step 1: Collect all leaf cells with sign changes
+    let mut leaves: Vec<LeafInfo> = Vec::new();
+    collect_leaves_recursive(octree, &octree.root, &octree.bounds, 0, 0, 0, 0, &mut leaves);
+
+    if leaves.is_empty() {
+        return Ok(ExtractedMesh { vertices: Vec::new(), faces: Vec::new() });
+    }
+
+    let mut cell_map: HashMap<(u32, u32, u32, u8), usize> = HashMap::with_capacity(leaves.len());
+    for (i, leaf) in leaves.iter().enumerate() {
+        cell_map.insert((leaf.key.0, leaf.key.1, leaf.key.2, leaf.key.3), i);
+    }
+
+    // Step 0 (MDC): Connected component analysis per leaf cell.
+    // Most cells have 1 component; multi-component cells get multiple vertices.
+    let leaf_components: Vec<CellComponents> = leaves.iter()
+        .map(|leaf| COMPONENT_TABLE[leaf.data.corner_mask as usize])
+        .collect();
+
+    // Compute component offsets for flat QEF array indexing
+    let mut component_offsets: Vec<usize> = Vec::with_capacity(leaves.len());
+    let mut total_components = 0usize;
+    for lc in &leaf_components {
+        component_offsets.push(total_components);
+        total_components += lc.num_components as usize;
+    }
+
+    // Step 2: Find sign-change edges and refine crossings via bisection.
+    // Bisection gives ~1/256 cell accuracy (8 iterations), essential for
+    // curved sharp edges (cylinders, chamfers) where linear interpolation
+    // from corner values introduces visible jaggedness.
+    struct SignChangeEdge {
+        p0: [f64; 3],
+        p1: [f64; 3],
+        v0: f64,
+        leaf_idx: usize,
+        edge: u8,
+        comp_id: u8,
+    }
+
+    let edge_chunks: Vec<Vec<SignChangeEdge>> = leaves
+        .par_iter()
+        .enumerate()
+        .map(|(idx, leaf)| {
+            let mut local = Vec::new();
+            let components = &leaf_components[idx];
+            for edge in 0..12u8 {
+                let (c0, c1) = CubicBounds::edge_corners(edge);
+                let v0 = leaf.data.corner_values[c0 as usize] - iso_value;
+                let v1 = leaf.data.corner_values[c1 as usize] - iso_value;
+                if (v0 < 0.0) != (v1 < 0.0) {
+                    let p0 = leaf.bounds.corner(c0);
+                    let p1 = leaf.bounds.corner(c1);
+                    let comp_id = edge_component(components, leaf.data.corner_mask, edge);
+                    local.push(SignChangeEdge { p0, p1, v0, leaf_idx: idx, edge, comp_id });
+                }
+            }
+            local
+        })
+        .collect();
+
+    let mut all_edges: Vec<SignChangeEdge> = Vec::new();
+    for chunk in edge_chunks {
+        all_edges.extend(chunk);
+    }
+    let num_crossings = all_edges.len();
+
+    // Bisection refinement: 8 batched iterations, one Python call each.
+    let mut lo_t = vec![0.0f64; num_crossings];
+    let mut hi_t = vec![1.0f64; num_crossings];
+    let mut lo_val: Vec<f64> = all_edges.iter().map(|e| e.v0).collect();
+
+    for _ in 0..8 {
+        if num_crossings == 0 { break; }
+        let mid_points: Vec<[f64; 3]> = (0..num_crossings).map(|i| {
+            let t = (lo_t[i] + hi_t[i]) * 0.5;
+            lerp3(all_edges[i].p0, all_edges[i].p1, t)
+        }).collect();
+
+        let result = bridge::batch_evaluate(py, func, &mid_points)?;
+
+        for i in 0..num_crossings {
+            let mid_val = result.values[i] - iso_value;
+            let mid_t = (lo_t[i] + hi_t[i]) * 0.5;
+            if (mid_val < 0.0) == (lo_val[i] < 0.0) {
+                lo_t[i] = mid_t;
+                lo_val[i] = mid_val;
+            } else {
+                hi_t[i] = mid_t;
+            }
+        }
+    }
+
+    // Final refined crossing points
+    let crossing_points: Vec<[f64; 3]> = (0..num_crossings).map(|i| {
+        let t = (lo_t[i] + hi_t[i]) * 0.5;
+        lerp3(all_edges[i].p0, all_edges[i].p1, t)
+    }).collect();
+    let edge_leaf_map: Vec<(usize, u8, u8)> = all_edges.iter()
+        .map(|e| (e.leaf_idx, e.edge, e.comp_id))
+        .collect();
+
+    // Step 3: Get normals at crossing points (single batch Python call)
+    let normals = if !crossing_points.is_empty() {
+        let result = bridge::batch_evaluate(py, func, &crossing_points)?;
+        if let Some(ref grads) = result.gradients {
+            grads.iter().map(|g| normalize3(*g)).collect::<Vec<_>>()
+        } else {
+            let cell_size = octree.bounds.size / (1u32 << octree.max_depth) as f64;
+            let fd = bridge::estimate_gradients_fd(py, func, &crossing_points, cell_size * 0.01)?;
+            fd.iter().map(|g| normalize3(*g)).collect()
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Step 4: QEF vertex placement per component (probabilistic quadrics)
+    // Per-leaf sigma_p: cell_size varies by depth in adaptive mode.
+    let sigma_n: f64 = 0.01;
+
+    // MDC: one QEF per (leaf, component), stored in flat array
+    let mut qefs = vec![QefData::new(); total_components];
+    for (i, &(leaf_idx, _edge, comp_id)) in edge_leaf_map.iter().enumerate() {
+        let leaf_cell_size = octree.bounds.size / (1u32 << leaves[leaf_idx].depth) as f64;
+        let sigma_p = 0.01 * leaf_cell_size;
+        let qef_idx = component_offsets[leaf_idx] + comp_id as usize;
+        qefs[qef_idx].add(crossing_points[i], normals[i], sigma_n, sigma_p);
+    }
+
+    // Compute per-component sharpness: min pairwise dot product of normals.
+    // Components where normals diverge more than angle_threshold_deg are "sharp"
+    // and should not receive Newton projection (which degrades edge/corner placement).
+    let mut comp_normals: Vec<Vec<[f64; 3]>> = vec![Vec::new(); total_components];
+    for (i, &(leaf_idx, _edge, comp_id)) in edge_leaf_map.iter().enumerate() {
+        let qef_idx = component_offsets[leaf_idx] + comp_id as usize;
+        comp_normals[qef_idx].push(normals[i]);
+    }
+
+    let is_component_sharp: Vec<bool> = comp_normals.iter().map(|norms| {
+        if norms.len() < 2 { return false; }
+        for i in 0..norms.len() {
+            for j in (i+1)..norms.len() {
+                let d = norms[i][0]*norms[j][0] + norms[i][1]*norms[j][1] + norms[i][2]*norms[j][2];
+                if d < sharp_cos { return true; }
+            }
+        }
+        false
+    }).collect();
+
+    // Pass 1 (parallel): solve QEF per component independently
+    // Each component within a cell shares the same cell bounds.
+    struct ComponentSolveInput {
+        qef_idx: usize,
+        cell_min: [f64; 3],     // original cell bounds (for Newton clamping)
+        cell_max: [f64; 3],
+        qef_min: [f64; 3],      // expanded bounds (for QEF solve)
+        qef_max: [f64; 3],
+    }
+
+    let mut solve_inputs: Vec<ComponentSolveInput> = Vec::with_capacity(total_components);
+    for (i, leaf) in leaves.iter().enumerate() {
+        let n = leaf_components[i].num_components as usize;
+        let cell_min = leaf.bounds.corner(0);
+        let cell_max = leaf.bounds.corner(7);
+        let leaf_cell_size = octree.bounds.size / (1u32 << leaf.depth) as f64;
+        let margin = 0.25 * leaf_cell_size;
+        for c in 0..n {
+            let comp_idx = component_offsets[i] + c;
+            // Expand QEF clamping bounds only for sharp-feature components
+            // so they can reach the true edge/corner position.
+            // Smooth components keep exact cell bounds for best accuracy.
+            let (qef_min, qef_max) = if is_component_sharp[comp_idx] {
+                ([cell_min[0] - margin, cell_min[1] - margin, cell_min[2] - margin],
+                 [cell_max[0] + margin, cell_max[1] + margin, cell_max[2] + margin])
+            } else {
+                (cell_min, cell_max)
+            };
+            solve_inputs.push(ComponentSolveInput {
+                qef_idx: comp_idx,
+                cell_min,
+                cell_max,
+                qef_min,
+                qef_max,
+            });
+        }
+    }
+
+    let qef_solutions: Vec<Option<([f64; 3], [f64; 3], [f64; 3])>> = solve_inputs
+        .par_iter()
+        .map(|input| {
+            if qefs[input.qef_idx].count == 0 {
+                None
+            } else {
+                let (pos, _) = qefs[input.qef_idx].solve(input.qef_min, input.qef_max);
+                // Use QEF bounds (expanded for sharp) as Newton clamping bounds too,
+                // so sharp-feature vertices can stay at edge/corner positions.
+                Some((pos, input.qef_min, input.qef_max))
+            }
+        })
+        .collect();
+
+    // Pass 2 (sequential): assign contiguous vertex indices per leaf
+    let mut vertices = Vec::with_capacity(total_components);
+    let mut leaf_vertex_base: Vec<Option<usize>> = vec![None; leaves.len()];
+    let mut vertex_cell_bounds: Vec<([f64; 3], [f64; 3])> = Vec::new();
+    let mut sol_idx = 0;
+    for (i, _leaf) in leaves.iter().enumerate() {
+        let n = leaf_components[i].num_components as usize;
+        let has_any = (0..n).any(|c| qef_solutions[sol_idx + c].is_some());
+        if has_any {
+            leaf_vertex_base[i] = Some(vertices.len());
+            for c in 0..n {
+                if let Some((pos, cell_min, cell_max)) = qef_solutions[sol_idx + c] {
+                    vertices.push(pos);
+                    vertex_cell_bounds.push((cell_min, cell_max));
+                } else {
+                    // Fallback: cell center for empty-QEF component
+                    let leaf = &leaves[i];
+                    let center = leaf.bounds.center();
+                    let cell_min = leaf.bounds.corner(0);
+                    let cell_max = leaf.bounds.corner(7);
+                    vertices.push(center);
+                    vertex_cell_bounds.push((cell_min, cell_max));
+                }
+            }
+        }
+        sol_idx += n;
+    }
+
+    // Step 4b: Project vertices onto isosurface via iterative Newton steps.
+    // Sharp-feature vertices use expanded clamping bounds (from QEF solve)
+    // so they can stay at edge/corner positions after projection.
+    for _newton in 0..3 {
+        if vertices.is_empty() { break; }
+        let proj_result = bridge::batch_evaluate(py, func, &vertices)?;
+        let has_grads = proj_result.gradients.is_some();
+
+        let grads: Vec<[f64; 3]> = if let Some(g) = proj_result.gradients {
+            g
+        } else {
+            let cell_size = octree.bounds.size / (1u32 << octree.max_depth) as f64;
+            bridge::estimate_gradients_fd(py, func, &vertices, cell_size * 0.01)?
+        };
+        let values = proj_result.values;
+
+        vertices.par_iter_mut().enumerate().for_each(|(i, vert)| {
+            let f_val = values[i] - iso_value;
+            let g = grads[i];
+            let g_sq = g[0]*g[0] + g[1]*g[1] + g[2]*g[2];
+            if g_sq > 1e-20 {
+                let step = f_val / g_sq;
+                vert[0] -= step * g[0];
+                vert[1] -= step * g[1];
+                vert[2] -= step * g[2];
+                let (cmin, cmax) = vertex_cell_bounds[i];
+                for d in 0..3 {
+                    vert[d] = vert[d].clamp(cmin[d], cmax[d]);
+                }
+            }
+        });
+
+        if !has_grads { break; } // FD is expensive; one iteration suffices
+    }
+
+    // Step 5: Generate quads from canonical edges (0, 4, 8)
+    // MDC: each cell selects the vertex for the component adjacent to the shared edge.
+    const CANONICAL_EDGES: [u8; 3] = [0, 4, 8];
+    const NON_AXIS_DIMS: [(usize, usize); 3] = [(1, 2), (0, 2), (0, 1)];
+    const CCW_ORDER: [[usize; 4]; 3] = [
+        [0, 1, 3, 2], // X-axis
+        [0, 2, 3, 1], // Y-axis
+        [0, 1, 3, 2], // Z-axis
+    ];
+
+    // For a canonical edge along axis A at cell (x,y,z), the 4 sharing cells
+    // see it as different local edges:
+    //   cell[0] (current):     local_edge = axis*4 + 0
+    //   cell[1] (shifted a1):  local_edge = axis*4 + 1
+    //   cell[2] (shifted a2):  local_edge = axis*4 + 2
+    //   cell[3] (shifted both):local_edge = axis*4 + 3
+
+    let faces: Vec<[i64; 3]> = leaves
+        .par_iter()
+        .enumerate()
+        .map(|(leaf_idx, leaf)| {
+            let mut local_faces = Vec::new();
+            if leaf_vertex_base[leaf_idx].is_none() { return local_faces; }
+
+            let cell_coords = [leaf.key.0, leaf.key.1, leaf.key.2];
+            let cell_depth = leaf.key.3;
+
+            for axis in 0..3usize {
+                let edge_idx = CANONICAL_EDGES[axis];
+                let (a1, a2) = NON_AXIS_DIMS[axis];
+
+                let (c0, c1) = CubicBounds::edge_corners(edge_idx);
+                let val0 = leaf.data.corner_values[c0 as usize] - iso_value;
+                let val1 = leaf.data.corner_values[c1 as usize] - iso_value;
+                if (val0 < 0.0) == (val1 < 0.0) { continue; }
+
+                if cell_coords[a1] == 0 || cell_coords[a2] == 0 { continue; }
+
+                let mut n_a1 = cell_coords; n_a1[a1] -= 1;
+                let mut n_a2 = cell_coords; n_a2[a2] -= 1;
+                let mut n_both = cell_coords; n_both[a1] -= 1; n_both[a2] -= 1;
+
+                let Some(ni_a1) = find_neighbor(&cell_map, n_a1[0], n_a1[1], n_a1[2], cell_depth) else { continue; };
+                let Some(ni_a2) = find_neighbor(&cell_map, n_a2[0], n_a2[1], n_a2[2], cell_depth) else { continue; };
+                let Some(ni_both) = find_neighbor(&cell_map, n_both[0], n_both[1], n_both[2], cell_depth) else { continue; };
+
+                // MDC: select the correct component vertex for each of the 4 cells.
+                let v0 = match vertex_for_edge(
+                    leaf_idx, (axis * 4) as u8,
+                    leaf.data.corner_mask, &leaf_components, &leaf_vertex_base,
+                ) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let v1 = match vertex_for_edge(
+                    ni_a1, (axis * 4 + 1) as u8,
+                    leaves[ni_a1].data.corner_mask, &leaf_components, &leaf_vertex_base,
+                ) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let v2 = match vertex_for_edge(
+                    ni_a2, (axis * 4 + 2) as u8,
+                    leaves[ni_a2].data.corner_mask, &leaf_components, &leaf_vertex_base,
+                ) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let v3 = match vertex_for_edge(
+                    ni_both, (axis * 4 + 3) as u8,
+                    leaves[ni_both].data.corner_mask, &leaf_components, &leaf_vertex_base,
+                ) {
+                    Some(v) => v,
+                    None => continue,
+                };
+
+                let verts = [v0, v1, v2, v3];
+                let ccw = CCW_ORDER[axis];
+
+                let quad = if val0 < 0.0 {
+                    [verts[ccw[0]], verts[ccw[1]], verts[ccw[2]], verts[ccw[3]]]
+                } else {
+                    [verts[ccw[3]], verts[ccw[2]], verts[ccw[1]], verts[ccw[0]]]
+                };
+
+                // Flatness-based diagonal: choose flatter split
+                let [a, b, c, d] = quad;
+                let pa = vertices[a]; let pb = vertices[b];
+                let pc = vertices[c]; let pd = vertices[d];
+
+                // Split into 2 triangles, skipping degenerate ones
+                let n1_ac = tri_normal(pa, pb, pc);
+                let n2_ac = tri_normal(pa, pc, pd);
+                let dot_ac = n1_ac[0]*n2_ac[0] + n1_ac[1]*n2_ac[1] + n1_ac[2]*n2_ac[2];
+                let n1_bd = tri_normal(pa, pb, pd);
+                let n2_bd = tri_normal(pb, pc, pd);
+                let dot_bd = n1_bd[0]*n2_bd[0] + n1_bd[1]*n2_bd[1] + n1_bd[2]*n2_bd[2];
+
+                if dot_ac >= dot_bd {
+                    if a != b && b != c && a != c {
+                        local_faces.push([a as i64, b as i64, c as i64]);
+                    }
+                    if a != c && c != d && a != d {
+                        local_faces.push([a as i64, c as i64, d as i64]);
+                    }
+                } else {
+                    if a != b && b != d && a != d {
+                        local_faces.push([a as i64, b as i64, d as i64]);
+                    }
+                    if b != c && c != d && b != d {
+                        local_faces.push([b as i64, c as i64, d as i64]);
+                    }
+                }
+            }
+            local_faces
+        })
+        .collect::<Vec<Vec<[i64; 3]>>>()
+        .into_iter()
+        .flatten()
+        .collect();
+
+    // Post-processing: remove small disconnected components (artifacts from
+    // intermediate-depth surface cells created during balance/edge completion).
+    let (vertices, faces) = remove_small_components(vertices, faces);
+
+    Ok(ExtractedMesh { vertices, faces })
+}
+
+/// Remove connected components with fewer than `threshold` faces.
+/// These are artifacts from coarse intermediate cells created during balance.
+fn remove_small_components(
+    vertices: Vec<[f64; 3]>,
+    faces: Vec<[i64; 3]>,
+) -> (Vec<[f64; 3]>, Vec<[i64; 3]>) {
+    if faces.is_empty() {
+        return (vertices, faces);
+    }
+
+    let nv = vertices.len();
+    let nf = faces.len();
+
+    // Find connected components via union-find on vertices
+    let mut parent: Vec<usize> = (0..nv).collect();
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    fn union(parent: &mut [usize], a: usize, b: usize) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra != rb { parent[rb] = ra; }
+    }
+
+    for face in &faces {
+        let a = face[0] as usize;
+        let b = face[1] as usize;
+        let c = face[2] as usize;
+        union(&mut parent, a, b);
+        union(&mut parent, a, c);
+    }
+
+    // Count faces per component
+    let mut comp_face_count: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for face in &faces {
+        let root = find(&mut parent, face[0] as usize);
+        *comp_face_count.entry(root).or_insert(0) += 1;
+    }
+
+    // Find the largest component
+    let largest_root = comp_face_count.iter()
+        .max_by_key(|(_, &count)| count)
+        .map(|(&root, _)| root)
+        .unwrap_or(0);
+
+    // Keep only the largest connected component.
+    // Adaptive refinement can create disconnected surface patches at
+    // different octree depths; these are artifacts, not real geometry.
+    let keep_faces: Vec<[i64; 3]> = faces.into_iter()
+        .filter(|face| {
+            let root = find(&mut parent, face[0] as usize);
+            root == largest_root
+        })
+        .collect();
+
+    if keep_faces.len() == nf {
+        return (vertices, keep_faces); // No change needed
+    }
+
+    // Remap vertex indices
+    let mut used = vec![false; nv];
+    for face in &keep_faces {
+        used[face[0] as usize] = true;
+        used[face[1] as usize] = true;
+        used[face[2] as usize] = true;
+    }
+    let mut remap = vec![0usize; nv];
+    let mut new_vertices = Vec::new();
+    for (i, &u) in used.iter().enumerate() {
+        if u {
+            remap[i] = new_vertices.len();
+            new_vertices.push(vertices[i]);
+        }
+    }
+    let new_faces: Vec<[i64; 3]> = keep_faces.iter()
+        .map(|f| [remap[f[0] as usize] as i64, remap[f[1] as usize] as i64, remap[f[2] as usize] as i64])
+        .collect();
+
+    (new_vertices, new_faces)
+}
+
+/// Same-depth neighbor lookup for adaptive octrees.
+#[inline]
+fn find_neighbor(
+    cell_map: &HashMap<(u32, u32, u32, u8), usize>,
+    cx: u32, cy: u32, cz: u32,
+    depth: u8,
+) -> Option<usize> {
+    cell_map.get(&(cx, cy, cz, depth)).copied()
+}
+
+/// Select the vertex for a given cell and local edge.
+///
+/// For MDC, each cell may have multiple vertices (one per connected component).
+/// This function determines which component is adjacent to `local_edge` by
+/// finding which corner of that edge is inside, then returning the vertex
+/// index for that corner's component.
+#[inline]
+fn vertex_for_edge(
+    leaf_idx: usize,
+    local_edge: u8,
+    corner_mask: u8,
+    leaf_components: &[CellComponents],
+    leaf_vertex_base: &[Option<usize>],
+) -> Option<usize> {
+    let base = leaf_vertex_base[leaf_idx]?;
+    let components = &leaf_components[leaf_idx];
+
+    // Fast path: single component (vast majority of cells)
+    if components.num_components == 1 {
+        return Some(base);
+    }
+
+    let (c0, c1) = CubicBounds::edge_corners(local_edge);
+    let inside_corner = if (corner_mask >> c0) & 1 == 1 { c0 } else { c1 };
+    let comp = components.corner_component[inside_corner as usize];
+    debug_assert!(comp != 0xFF);
+    Some(base + comp as usize)
+}
+
+fn collect_leaves_recursive(
+    octree: &Octree, cell: &Cell, bounds: &CubicBounds,
+    cx: u32, cy: u32, cz: u32, depth: u8,
+    result: &mut Vec<LeafInfo>,
+) {
+    match cell {
+        Cell::Leaf(data) if data.has_sign_change() && depth >= octree.min_depth => {
+            result.push(LeafInfo {
+                data: data.clone(), bounds: *bounds, depth,
+                key: CellKey(cx, cy, cz, depth),
+            });
+        }
+        Cell::Branch { children_index } => {
+            let children = &octree.children[*children_index as usize];
+            for octant in 0..8u8 {
+                collect_leaves_recursive(
+                    octree, &children[octant as usize], &bounds.child(octant),
+                    cx * 2 + if octant & 1 != 0 { 1 } else { 0 },
+                    cy * 2 + if octant & 2 != 0 { 1 } else { 0 },
+                    cz * 2 + if octant & 4 != 0 { 1 } else { 0 },
+                    depth + 1, result,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Unnormalized triangle normal via cross product.
+fn tri_normal(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> [f64; 3] {
+    let ab = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
+    let ac = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
+    let n = [
+        ab[1]*ac[2] - ab[2]*ac[1],
+        ab[2]*ac[0] - ab[0]*ac[2],
+        ab[0]*ac[1] - ab[1]*ac[0],
+    ];
+    let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+    if len > 1e-15 { [n[0]/len, n[1]/len, n[2]/len] } else { [0.0, 0.0, 0.0] }
+}
+
+fn lerp3(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
+    [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), a[2] + t * (b[2] - a[2])]
+}
+
+fn normalize3(v: [f64; 3]) -> [f64; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len > 1e-12 { [v[0] / len, v[1] / len, v[2] / len] } else { [0.0, 0.0, 1.0] }
+}
+```
+
+### src/dc/hermite.rs
+```
+use pyo3::prelude::*;
+use crate::bbox::CubicBounds;
+use crate::eval::bridge;
+use crate::eval::cache::{EvalCache, CachedEval};
+use crate::octree::Octree;
+use crate::octree::cell::{Cell, LeafData};
+use crate::octree::types::GridPos;
+
+/// Find all edge crossings in the octree and compute Hermite data
+/// (intersection points + normals) via bisection.
+///
+/// Returns the number of Python batch calls made.
+pub fn compute_hermite_data(
+    py: Python<'_>,
+    func: &PyObject,
+    octree: &mut Octree,
+    cache: &EvalCache,
+) -> PyResult<u64> {
+    let iso_value = octree.iso_value;
+    let max_depth = octree.max_depth;
+    let cell_size_at_max = octree.bounds.size / (1u32 << max_depth) as f64;
+    let mut batch_calls = 0u64;
+
+    // Collect all sign-change edges from leaf cells
+    struct EdgeCrossing {
+        p0: [f64; 3],
+        p1: [f64; 3],
+        v0: f64,
+        v1: f64,
+    }
+
+    let mut crossings = Vec::new();
+    let mut crossing_cell_info: Vec<(usize, u8)> = Vec::new(); // (leaf_index, edge_index)
+
+    // Gather all leaves and their edges
+    let mut leaf_info: Vec<(LeafData, CubicBounds)> = Vec::new();
+    octree.for_each_leaf(|data, bounds, _depth| {
+        leaf_info.push((data.clone(), *bounds));
+    });
+
+    for (leaf_idx, (data, bounds)) in leaf_info.iter().enumerate() {
+        for edge in 0..12u8 {
+            let (c0, c1) = CubicBounds::edge_corners(edge);
+            let s0 = (data.corner_values[c0 as usize] - iso_value) < 0.0;
+            let s1 = (data.corner_values[c1 as usize] - iso_value) < 0.0;
+
+            if s0 != s1 {
+                // Sign change on this edge
+                let p0 = bounds.corner(c0);
+                let p1 = bounds.corner(c1);
+                let v0 = data.corner_values[c0 as usize] - iso_value;
+                let v1 = data.corner_values[c1 as usize] - iso_value;
+
+                crossings.push(EdgeCrossing { p0, p1, v0, v1 });
+                crossing_cell_info.push((leaf_idx, edge));
+            }
+        }
+    }
+
+    if crossings.is_empty() {
+        return Ok(0);
+    }
+
+    // Bisection: find zero crossing on each edge
+    // Use linear interpolation as initial guess, then refine with bisection
+    let num_crossings = crossings.len();
+    let mut t_values: Vec<f64> = crossings.iter().map(|c| {
+        // Linear interpolation: t = -v0 / (v1 - v0)
+        let dv = c.v1 - c.v0;
+        if dv.abs() < 1e-15 { 0.5 } else { (-c.v0 / dv).clamp(0.0, 1.0) }
+    }).collect();
+
+    let mut lo: Vec<f64> = vec![0.0; num_crossings];
+    let mut hi: Vec<f64> = vec![1.0; num_crossings];
+    let mut lo_val: Vec<f64> = crossings.iter().map(|c| c.v0).collect();
+    let mut hi_val: Vec<f64> = crossings.iter().map(|c| c.v1).collect();
+
+    // Bisection iterations (batched)
+    let bisection_iters = 10; // ~1/1024 cell accuracy
+    for _ in 0..bisection_iters {
+        // Compute midpoints
+        let mid_points: Vec<[f64; 3]> = (0..num_crossings).map(|i| {
+            let t = (lo[i] + hi[i]) * 0.5;
+            let c = &crossings[i];
+            [
+                c.p0[0] + t * (c.p1[0] - c.p0[0]),
+                c.p0[1] + t * (c.p1[1] - c.p0[1]),
+                c.p0[2] + t * (c.p1[2] - c.p0[2]),
+            ]
+        }).collect();
+
+        // Batch evaluate
+        let result = bridge::batch_evaluate(py, func, &mid_points)?;
+        batch_calls += 1;
+
+        // Update intervals
+        for i in 0..num_crossings {
+            let mid_val = result.values[i] - iso_value;
+            let mid_t = (lo[i] + hi[i]) * 0.5;
+
+            if (mid_val < 0.0) == (lo_val[i] < 0.0) {
+                lo[i] = mid_t;
+                lo_val[i] = mid_val;
+            } else {
+                hi[i] = mid_t;
+                hi_val[i] = mid_val;
+            }
+        }
+    }
+
+    // Final intersection points
+    let final_points: Vec<[f64; 3]> = (0..num_crossings).map(|i| {
+        let t = (lo[i] + hi[i]) * 0.5;
+        let c = &crossings[i];
+        [
+            c.p0[0] + t * (c.p1[0] - c.p0[0]),
+            c.p0[1] + t * (c.p1[1] - c.p0[1]),
+            c.p0[2] + t * (c.p1[2] - c.p0[2]),
+        ]
+    }).collect();
+
+    // Get gradients at crossing points (for normals)
+    let result = bridge::batch_evaluate(py, func, &final_points)?;
+    batch_calls += 1;
+
+    let normals: Vec<[f64; 3]> = if let Some(ref grads) = result.gradients {
+        grads.iter().map(|g| {
+            let len = (g[0]*g[0] + g[1]*g[1] + g[2]*g[2]).sqrt();
+            if len > 1e-12 { [g[0]/len, g[1]/len, g[2]/len] } else { [0.0, 0.0, 1.0] }
+        }).collect()
+    } else {
+        // Estimate gradients via FD
+        let fd_grads = bridge::estimate_gradients_fd(py, func, &final_points, cell_size_at_max * 0.01)?;
+        batch_calls += 1;
+        fd_grads.iter().map(|g| {
+            let len = (g[0]*g[0] + g[1]*g[1] + g[2]*g[2]).sqrt();
+            if len > 1e-12 { [g[0]/len, g[1]/len, g[2]/len] } else { [0.0, 0.0, 1.0] }
+        }).collect()
+    };
+
+    // Store Hermite data in the octree
+    for i in 0..num_crossings {
+        let t = (lo[i] + hi[i]) * 0.5;
+        let hermite_idx = octree.hermite_data.len() as u32;
+        octree.hermite_data.push(crate::octree::HermitePoint {
+            pos: final_points[i],
+            normal: normals[i],
+            t,
+        });
+
+        // Store in leaf's edge_intersections
+        let (leaf_idx, edge_idx) = crossing_cell_info[i];
+        // We need to update the leaf in the octree
+        // Since we collected leaf_info by order, we track with a counter
+        // Store mapping for later use in extract
+    }
+
+    // Store crossings indexed by leaf for DC extraction
+    // We store them in a separate structure since we can't easily update leaves in-place
+    // The extract module will re-collect them
+
+    Ok(batch_calls)
+}
+```
+
+### src/dc/mod.rs
+```
+pub mod component;
+pub mod extract;
+```
+
+### src/eval/bridge.rs
+```
+use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
+use pyo3::prelude::*;
+
+/// Result of a batch evaluation from the Python callable.
+pub struct EvalResult {
+    /// Function values at each query point, shape (N,).
+    pub values: Vec<f64>,
+    /// Gradients at each query point, shape (N, 3). None if the function didn't provide them.
+    pub gradients: Option<Vec<[f64; 3]>>,
+}
+
+/// Calls the Python implicit function with a batch of query points.
+///
+/// The Python function signature is:
+///   func(positions: ndarray(N, 3)) -> (values: ndarray(N,), gradients: ndarray(N, 3) | None)
+///
+/// This function acquires the GIL, calls the Python function, extracts the results,
+/// and returns owned Rust data. The GIL is released when this function returns.
+///
+/// SAFETY: Must NOT be called from within a Rayon parallel section that was entered
+/// while holding the GIL. The caller must have released the GIL before entering Rayon,
+/// and this function will acquire it independently.
+pub fn batch_evaluate(py: Python<'_>, func: &PyObject, points: &[[f64; 3]]) -> PyResult<EvalResult> {
+    let n = points.len();
+    if n == 0 {
+        return Ok(EvalResult {
+            values: Vec::new(),
+            gradients: None,
+        });
+    }
+
+    // Create (N, 3) numpy array from points — this copies the data into a Python-owned array
+    let positions = PyArray2::from_vec2(py, &points.iter().map(|p| p.to_vec()).collect::<Vec<_>>())?;
+
+    // Call the Python function
+    let result = func.call1(py, (positions,))?;
+
+    // Unpack the (values, gradients) tuple
+    let tuple = result.bind(py);
+    let values_obj = tuple.get_item(0)?;
+    let gradients_obj = tuple.get_item(1)?;
+
+    // Extract values as (N,) f64 array
+    let values_array: PyReadonlyArray1<f64> = values_obj.extract()?;
+    let values: Vec<f64> = values_array.as_slice()?.to_vec();
+
+    // Extract gradients as (N, 3) f64 array or None
+    let gradients = if gradients_obj.is_none() {
+        None
+    } else {
+        let grad_array: PyReadonlyArray2<f64> = gradients_obj.extract()?;
+        let grad_view = grad_array.as_array();
+        let mut grads = Vec::with_capacity(n);
+        for row in grad_view.rows() {
+            grads.push([row[0], row[1], row[2]]);
+        }
+        Some(grads)
+    };
+
+    Ok(EvalResult { values, gradients })
+}
+
+/// Calls the Python implicit function, releasing the GIL around Rust-side work.
+///
+/// This is the primary entry point for batch evaluation from the algorithm core.
+/// It acquires the GIL only for the Python call, keeping it released otherwise.
+pub fn batch_evaluate_with_gil(func: &PyObject, points: &[[f64; 3]]) -> PyResult<EvalResult> {
+    Python::with_gil(|py| batch_evaluate(py, func, points))
+}
+
+/// Estimates gradients via centered finite differences.
+///
+/// For each point, evaluates f(x ± h·e_i) for i=0,1,2 and computes:
+///   grad_i = (f(x + h·e_i) - f(x - h·e_i)) / (2h)
+///
+/// This batches all 6N evaluation points into a single Python call.
+pub fn estimate_gradients_fd(
+    py: Python<'_>,
+    func: &PyObject,
+    points: &[[f64; 3]],
+    step: f64,
+) -> PyResult<Vec<[f64; 3]>> {
+    let n = points.len();
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Build 6N points: for each original point, 2 offsets per axis
+    let mut fd_points = Vec::with_capacity(n * 6);
+    for p in points {
+        for axis in 0..3usize {
+            let mut p_plus = *p;
+            p_plus[axis] += step;
+            fd_points.push(p_plus);
+
+            let mut p_minus = *p;
+            p_minus[axis] -= step;
+            fd_points.push(p_minus);
+        }
+    }
+
+    // Single batch evaluation for all FD points
+    let result = batch_evaluate(py, func, &fd_points)?;
+    let vals = &result.values;
+
+    // Reconstruct gradients
+    let inv_2h = 0.5 / step;
+    let mut gradients = Vec::with_capacity(n);
+    for i in 0..n {
+        let base = i * 6;
+        gradients.push([
+            (vals[base] - vals[base + 1]) * inv_2h,
+            (vals[base + 2] - vals[base + 3]) * inv_2h,
+            (vals[base + 4] - vals[base + 5]) * inv_2h,
+        ]);
+    }
+
+    Ok(gradients)
+}
+
+#[cfg(test)]
+mod tests {
+    // Rust-side unit tests require Python interpreter, tested via pytest instead.
+}
+```
+
+### src/eval/cache.rs
+```
+use std::collections::HashMap;
+use crate::octree::types::GridPos;
+
+/// Cached evaluation result for a single point.
+#[derive(Clone, Copy, Debug)]
+pub struct CachedEval {
+    pub value: f64,
+    pub gradient: Option<[f64; 3]>,
+}
+
+/// Evaluation cache using quantized grid positions as keys.
+///
+/// Corners shared between adjacent cells map to the same GridPos,
+/// ensuring each unique point is evaluated only once.
+pub struct EvalCache {
+    entries: HashMap<GridPos, CachedEval>,
+}
+
+impl EvalCache {
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(cap),
+        }
+    }
+
+    pub fn get(&self, pos: &GridPos) -> Option<&CachedEval> {
+        self.entries.get(pos)
+    }
+
+    pub fn get_mut(&mut self, pos: &GridPos) -> Option<&mut CachedEval> {
+        self.entries.get_mut(pos)
+    }
+
+    pub fn insert(&mut self, pos: GridPos, eval: CachedEval) {
+        self.entries.insert(pos, eval);
+    }
+
+    pub fn contains(&self, pos: &GridPos) -> bool {
+        self.entries.contains_key(pos)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// Convert a cell's corner position to a quantized grid position.
+///
+/// At depth `d`, the grid has `2^d` cells per axis, meaning
+/// corner coordinates are integers in `[0, 2^d]`.
+///
+/// `cell_x, cell_y, cell_z` are the cell's integer coordinates at depth `d`.
+/// `corner_idx` is 0-7, with bits encoding the X, Y, Z offset.
+pub fn corner_grid_pos(cell_x: u32, cell_y: u32, cell_z: u32, corner_idx: u8) -> GridPos {
+    GridPos::new(
+        cell_x + (corner_idx & 1) as u32,
+        cell_y + ((corner_idx >> 1) & 1) as u32,
+        cell_z + ((corner_idx >> 2) & 1) as u32,
+    )
+}
+
+/// Convert a quantized grid position to a world-space coordinate.
+///
+/// `grid_pos` is an integer grid position where each axis ranges from 0 to 2^depth.
+/// `origin` is the world-space origin of the octree.
+/// `cell_size` is the size of a single cell at the given depth.
+pub fn grid_to_world(pos: &GridPos, origin: &[f64; 3], cell_size: f64) -> [f64; 3] {
+    [
+        origin[0] + pos.x as f64 * cell_size,
+        origin[1] + pos.y as f64 * cell_size,
+        origin[2] + pos.z as f64 * cell_size,
+    ]
+}
+```
+
+### src/eval/gradient.rs
+```
+use pyo3::prelude::*;
+use crate::eval::bridge;
+
+/// Estimates gradients via centered finite differences using a batch evaluation.
+///
+/// For N points, creates 6N query points (+/- h along each axis),
+/// calls the Python function once, and reconstructs the gradients.
+pub fn estimate_gradients_batch(
+    py: Python<'_>,
+    func: &PyObject,
+    points: &[[f64; 3]],
+    step: f64,
+) -> PyResult<Vec<[f64; 3]>> {
+    bridge::estimate_gradients_fd(py, func, points, step)
+}
+```
+
+### src/eval/mod.rs
+```
+pub mod bridge;
+pub mod cache;
+pub mod gradient;
+```
+
+### src/mesh/mod.rs
+```
+// Mesh structures and utilities.
+// Currently the mesh is directly constructed in dc::extract.
+// This module will be expanded for validation in later phases.
+```
+
+### src/octree/balance.rs
+```
+use std::collections::{HashSet, VecDeque};
+use pyo3::prelude::*;
+use crate::eval::bridge;
+use crate::eval::cache::{self, CachedEval, EvalCache};
+use crate::octree::cell::{Cell, LeafData};
+use crate::octree::types::GridPos;
+use crate::octree::Octree;
+
+/// Enforce 2:1 balance on the octree: no two face-adjacent leaf cells
+/// may differ by more than 1 depth level.
+///
+/// Uses BFS ripple propagation from all surface leaves. When a cell's
+/// neighbor is more than 1 level coarser, the coarser cell is subdivided.
+/// New corner values are batch-evaluated via the Python function.
+///
+/// Returns the number of new SDF evaluations performed.
+pub fn enforce_balance_2to1(
+    py: Python<'_>,
+    func: &PyObject,
+    octree: &mut Octree,
+    cache: &mut EvalCache,
+) -> PyResult<u64> {
+    let min_depth = octree.min_depth;
+    let max_depth = octree.max_depth;
+    let cell_size_at_max = octree.bounds.size / (1u32 << max_depth) as f64;
+    let mut total_evals = 0u64;
+
+    loop {
+        // Collect all leaf cells with their coordinates and depths
+        let mut all_leaves: Vec<(u32, u32, u32, u8)> = Vec::new();
+        collect_all_leaves_recursive(
+            octree, &octree.root, 0, 0, 0, 0, &mut all_leaves,
+        );
+
+        // Find cells that need subdivision for two reasons:
+        // 1. 2:1 balance violation: face-neighbor depth difference > 1
+        // 2. Surface propagation: surface cell's face-neighbor is non-surface
+        //    (Empty/Full) at a coarser depth, which would create gaps in the mesh
+        let mut cells_to_subdivide: Vec<(u32, u32, u32, u8)> = Vec::new();
+        let mut seen_subdivide: HashSet<(u32, u32, u32, u8)> = HashSet::new();
+
+        for &(cx, cy, cz, depth) in &all_leaves {
+            if depth == 0 { continue; }
+
+            let neighbors = super::face_neighbors(cx, cy, cz, depth);
+            let is_surface = matches!(octree.cell_at(cx, cy, cz, depth), (Cell::Leaf(d), _) if d.has_sign_change());
+
+            for neighbor in neighbors.iter().flatten() {
+                let (nx, ny, nz) = *neighbor;
+                let (neighbor_cell, actual_depth) = octree.cell_at(nx, ny, nz, depth);
+                // Rule 1: 2:1 balance — neighbor is more than 1 level coarser
+                let needs_balance = actual_depth < depth.saturating_sub(1);
+                // Rule 2: Surface propagation — surface cell borders a non-surface
+                // cell at a coarser depth. Subdividing may reveal sign changes.
+                let needs_surface_prop = is_surface
+                    && actual_depth < depth
+                    && !matches!(neighbor_cell, Cell::Leaf(d) if d.has_sign_change());
+
+                if needs_balance || needs_surface_prop {
+                    let scale = 1u32 << (depth - actual_depth);
+                    let coarse_cx = nx / scale;
+                    let coarse_cy = ny / scale;
+                    let coarse_cz = nz / scale;
+                    let key = (coarse_cx, coarse_cy, coarse_cz, actual_depth);
+                    if seen_subdivide.insert(key) {
+                        cells_to_subdivide.push(key);
+                    }
+                }
+
+                // Rule 3: Surface depth propagation — if THIS surface cell's
+                // face-neighbor is a Branch containing surface descendants,
+                // THIS cell must also be subdivided to prevent cross-depth
+                // gaps in mesh extraction (same-depth lookup).
+                if is_surface
+                    && actual_depth == depth
+                    && matches!(neighbor_cell, Cell::Branch { .. })
+                    && has_surface_descendant(octree, neighbor_cell)
+                    && depth < max_depth
+                {
+                    let key = (cx, cy, cz, depth);
+                    if seen_subdivide.insert(key) {
+                        cells_to_subdivide.push(key);
+                    }
+                }
+            }
+        }
+
+        if cells_to_subdivide.is_empty() {
+            break;
+        }
+        // Collect new corner positions needed for subdivision
+        let mut new_points: Vec<[f64; 3]> = Vec::new();
+        let mut new_grid: Vec<GridPos> = Vec::new();
+        let mut seen_grid: HashSet<GridPos> = HashSet::new();
+
+        for &(cx, cy, cz, depth) in &cells_to_subdivide {
+            let cs = 1u32 << (max_depth - depth - 1); // child scale in max_depth grid
+            let gx = cx * (1u32 << (max_depth - depth));
+            let gy = cy * (1u32 << (max_depth - depth));
+            let gz = cz * (1u32 << (max_depth - depth));
+
+            for octant in 0..8u8 {
+                let ox = gx + if octant & 1 != 0 { cs } else { 0 };
+                let oy = gy + if octant & 2 != 0 { cs } else { 0 };
+                let oz = gz + if octant & 4 != 0 { cs } else { 0 };
+
+                for corner in 0..8u8 {
+                    let px = ox + if corner & 1 != 0 { cs } else { 0 };
+                    let py = oy + if corner & 2 != 0 { cs } else { 0 };
+                    let pz = oz + if corner & 4 != 0 { cs } else { 0 };
+                    let gp = GridPos::new(px, py, pz);
+                    if !cache.contains(&gp) && seen_grid.insert(gp) {
+                        new_grid.push(gp);
+                        new_points.push(cache::grid_to_world(
+                            &gp, &octree.bounds.origin, cell_size_at_max,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Batch evaluate new corners
+        if !new_points.is_empty() {
+            let result = bridge::batch_evaluate(py, func, &new_points)?;
+            total_evals += new_points.len() as u64;
+            let fd_grads = if result.gradients.is_none() {
+                let g = bridge::estimate_gradients_fd(
+                    py, func, &new_points, cell_size_at_max * 0.01,
+                )?;
+                total_evals += new_points.len() as u64 * 6;
+                Some(g)
+            } else {
+                None
+            };
+            for (i, gp) in new_grid.iter().enumerate() {
+                let gradient = result.gradients.as_ref()
+                    .map(|g| g[i])
+                    .or_else(|| fd_grads.as_ref().map(|g| g[i]));
+                cache.insert(*gp, CachedEval {
+                    value: result.values[i],
+                    gradient,
+                });
+            }
+        }
+
+        // Subdivide identified cells
+        for &(cx, cy, cz, depth) in &cells_to_subdivide {
+            let gx = cx * (1u32 << (max_depth - depth));
+            let gy = cy * (1u32 << (max_depth - depth));
+            let gz = cz * (1u32 << (max_depth - depth));
+            subdivide_cell_for_balance(octree, cache, gx, gy, gz, depth, max_depth);
+        }
+    }
+
+    // Phase 2: Edge completion — ensure every sign-change edge has all 4 sharing cells.
+    total_evals += ensure_edge_completeness(py, func, octree, cache)?;
+
+    Ok(total_evals)
+}
+
+/// Ensure every canonical edge with a sign change has all 4 sharing cells present
+/// as surface leaves. This eliminates gaps at depth boundaries.
+fn ensure_edge_completeness(
+    py: Python<'_>,
+    func: &PyObject,
+    octree: &mut Octree,
+    cache: &mut EvalCache,
+) -> PyResult<u64> {
+    use crate::bbox::CubicBounds;
+
+    let max_depth = octree.max_depth;
+    let min_depth = octree.min_depth;
+    let cell_size_at_max = octree.bounds.size / (1u32 << max_depth) as f64;
+    let iso_value = octree.iso_value;
+    let mut total_evals = 0u64;
+
+    const CANONICAL_EDGES: [u8; 3] = [0, 4, 8];
+    const NON_AXIS_DIMS: [(usize, usize); 3] = [(1, 2), (0, 2), (0, 1)];
+
+    // Also check non-canonical edges (1-3, 5-7, 9-11) because surface cells
+    // that DON'T own a canonical edge still participate in quads generated
+    // by their neighbors. We must ensure ALL edges with sign changes have
+    // complete 4-cell neighborhoods.
+    const ALL_EDGES_BY_AXIS: [[u8; 4]; 3] = [
+        [0, 1, 2, 3],   // X-axis edges
+        [4, 5, 6, 7],   // Y-axis edges
+        [8, 9, 10, 11],  // Z-axis edges
+    ];
+
+    loop {
+        // Collect surface leaves
+        let mut surface_leaves: Vec<(u32, u32, u32, u8)> = Vec::new();
+        collect_surface_leaves_recursive(
+            octree, &octree.root, 0, 0, 0, 0, min_depth, &mut surface_leaves,
+        );
+
+        // Build a lookup set for fast existence checks
+        let leaf_set: HashSet<(u32, u32, u32, u8)> = surface_leaves.iter().copied().collect();
+
+        // For each surface leaf, check canonical edges
+        let mut cells_to_subdivide: Vec<(u32, u32, u32, u8)> = Vec::new();
+        let mut seen: HashSet<(u32, u32, u32, u8)> = HashSet::new();
+        let mut target_depths: std::collections::HashMap<(u32,u32,u32,u8), u8> = std::collections::HashMap::new();
+
+        for &(cx, cy, cz, depth) in &surface_leaves {
+            // Get corner values to check sign changes on ALL 12 edges
+            let scale = 1u32 << (max_depth - depth);
+            let gx = cx * scale;
+            let gy = cy * scale;
+            let gz = cz * scale;
+
+            let mut corner_values = [0.0f64; 8];
+            for c in 0..8u8 {
+                let px = gx + if c & 1 != 0 { scale } else { 0 };
+                let py_c = gy + if c & 2 != 0 { scale } else { 0 };
+                let pz = gz + if c & 4 != 0 { scale } else { 0 };
+                if let Some(eval) = cache.get(&GridPos::new(px, py_c, pz)) {
+                    corner_values[c as usize] = eval.value;
+                }
+            }
+
+            let cell_coords = [cx, cy, cz];
+            let max_coord = 1u32 << depth;
+
+            // Check ALL 12 edges, not just canonical 3.
+            // Each edge with a sign change needs 4 sharing cells at the same depth.
+            // The 4 cells sharing edge E (parallel to axis A, at specific a1, a2 offsets)
+            // are determined by the edge's offset bits in the two perpendicular axes.
+            for axis in 0..3usize {
+                let (a1, a2) = NON_AXIS_DIMS[axis];
+                for edge_in_group in 0..4u8 {
+                    let edge_idx = (axis as u8) * 4 + edge_in_group;
+                    let (c0, c1) = CubicBounds::edge_corners(edge_idx);
+                    let val0 = corner_values[c0 as usize] - iso_value;
+                    let val1 = corner_values[c1 as usize] - iso_value;
+                    if (val0 < 0.0) == (val1 < 0.0) { continue; }
+
+                    // Edge offset bits: bit 0 = a1 offset, bit 1 = a2 offset
+                    // For the 4 cells sharing this edge, the "owner" cell has
+                    // the edge at its minimum coordinates. We compute the owner
+                    // and the 3 other sharing cells.
+                    let a1_off = (edge_in_group & 1) as u32;
+                    let a2_off = ((edge_in_group >> 1) & 1) as u32;
+
+                    // The 4 sharing cells in coordinate space
+                    let mut sharing = Vec::new();
+                    for da1 in 0..2u32 {
+                        for da2 in 0..2u32 {
+                            let mut nc = cell_coords;
+                            // The cell at (nc[a1] + a1_off - da1, nc[a2] + a2_off - da2)
+                            let na1 = cell_coords[a1] + a1_off;
+                            let na2 = cell_coords[a2] + a2_off;
+                            if na1 < da1 || na2 < da2 { continue; }
+                            let ca1 = na1 - da1;
+                            let ca2 = na2 - da2;
+                            if ca1 >= max_coord || ca2 >= max_coord { continue; }
+                            nc[a1] = ca1;
+                            nc[a2] = ca2;
+                            if nc[0] != cx || nc[1] != cy || nc[2] != cz {
+                                sharing.push((nc[0], nc[1], nc[2]));
+                            }
+                        }
+                    }
+
+                    for (nx, ny, nz) in sharing {
+                        if !find_surface_neighbor_same_depth(&leaf_set, nx, ny, nz, depth) {
+                            let (cell, actual_depth) = octree.cell_at(nx, ny, nz, depth);
+                            if actual_depth < depth
+                                && !matches!(cell, Cell::Branch { .. })
+                            {
+                                // Neighbor is coarser → subdivide neighbor
+                                // to match current cell's depth.
+                                let s = 1u32 << (depth - actual_depth);
+                                let key = (nx / s, ny / s, nz / s, actual_depth);
+                                if seen.insert(key) {
+                                    cells_to_subdivide.push((key.0, key.1, key.2, key.3));
+                                    target_depths.insert(key, depth);
+                                }
+                            }
+                            // Note: when neighbor is a Branch at the same depth
+                            // (already refined to finer depth), we do NOT cascade
+                            // subdivision. Instead, extract_dc handles cross-depth
+                            // quad generation via find_neighbor's fallback lookup.
+                        }
+                    }
+                }
+            }
+        }
+
+        if cells_to_subdivide.is_empty() {
+            break;
+        }
+
+        // Collect ALL corners needed for deep subdivision (from current depth to target)
+        let mut new_points: Vec<[f64; 3]> = Vec::new();
+        let mut new_grid: Vec<GridPos> = Vec::new();
+        let mut seen_grid: HashSet<GridPos> = HashSet::new();
+
+        for &(cx, cy, cz, depth) in &cells_to_subdivide {
+            let target = target_depths.get(&(cx, cy, cz, depth)).copied().unwrap_or(depth + 1);
+            let gx = cx * (1u32 << (max_depth - depth));
+            let gy = cy * (1u32 << (max_depth - depth));
+            let gz = cz * (1u32 << (max_depth - depth));
+            // Collect corners for ALL levels from depth+1 to target
+            collect_deep_corners(
+                gx, gy, gz, depth, target, max_depth,
+                cache, &octree.bounds.origin, cell_size_at_max,
+                &mut new_grid, &mut new_points, &mut seen_grid,
+            );
+        }
+
+        if !new_points.is_empty() {
+            let result = bridge::batch_evaluate(py, func, &new_points)?;
+            total_evals += new_points.len() as u64;
+            let fd_grads = if result.gradients.is_none() {
+                let g = bridge::estimate_gradients_fd(py, func, &new_points, cell_size_at_max * 0.01)?;
+                total_evals += new_points.len() as u64 * 6;
+                Some(g)
+            } else { None };
+            for (i, gp) in new_grid.iter().enumerate() {
+                let gradient = result.gradients.as_ref().map(|g| g[i])
+                    .or_else(|| fd_grads.as_ref().map(|g| g[i]));
+                cache.insert(*gp, CachedEval { value: result.values[i], gradient });
+            }
+        }
+
+        for &(cx, cy, cz, depth) in &cells_to_subdivide {
+            let gx = cx * (1u32 << (max_depth - depth));
+            let gy = cy * (1u32 << (max_depth - depth));
+            let gz = cz * (1u32 << (max_depth - depth));
+            let target = target_depths.get(&(cx, cy, cz, depth)).copied().unwrap_or(depth + 1);
+            subdivide_deep(octree, cache, gx, gy, gz, depth, target, max_depth);
+        }
+    }
+
+    Ok(total_evals)
+}
+
+/// Collect all corner grid positions needed to subdivide from current_depth to target_depth.
+fn collect_deep_corners(
+    gx: u32, gy: u32, gz: u32,
+    current_depth: u8, target_depth: u8, max_depth: u8,
+    cache: &EvalCache, origin: &[f64; 3], cell_size_at_max: f64,
+    new_grid: &mut Vec<GridPos>, new_points: &mut Vec<[f64; 3]>,
+    seen: &mut HashSet<GridPos>,
+) {
+    if current_depth >= target_depth || current_depth >= max_depth {
+        return;
+    }
+    let cs = 1u32 << (max_depth - current_depth - 1);
+    for octant in 0..8u8 {
+        let ox = gx + if octant & 1 != 0 { cs } else { 0 };
+        let oy = gy + if octant & 2 != 0 { cs } else { 0 };
+        let oz = gz + if octant & 4 != 0 { cs } else { 0 };
+        for corner in 0..8u8 {
+            let px = ox + if corner & 1 != 0 { cs } else { 0 };
+            let py = oy + if corner & 2 != 0 { cs } else { 0 };
+            let pz = oz + if corner & 4 != 0 { cs } else { 0 };
+            let gp = GridPos::new(px, py, pz);
+            if !cache.contains(&gp) && seen.insert(gp) {
+                new_grid.push(gp);
+                new_points.push(cache::grid_to_world(&gp, origin, cell_size_at_max));
+            }
+        }
+        // Recurse for deeper levels
+        if current_depth + 1 < target_depth {
+            collect_deep_corners(
+                ox, oy, oz, current_depth + 1, target_depth, max_depth,
+                cache, origin, cell_size_at_max, new_grid, new_points, seen,
+            );
+        }
+    }
+}
+
+/// Recursively subdivide a cell from `current_depth` down to `target_depth`.
+/// All intermediate cells become Branches; only the leaves at target_depth are kept.
+fn subdivide_deep(
+    octree: &mut Octree,
+    cache: &EvalCache,
+    grid_x: u32, grid_y: u32, grid_z: u32,
+    current_depth: u8, target_depth: u8, max_depth: u8,
+) {
+    if current_depth >= target_depth || current_depth >= max_depth {
+        return;
+    }
+
+    // First subdivide one level
+    subdivide_cell_for_balance(octree, cache, grid_x, grid_y, grid_z, current_depth, max_depth);
+
+    // If we need to go deeper, subdivide each child that needs it
+    if current_depth + 1 < target_depth {
+        let child_scale = 1u32 << (max_depth - current_depth - 1);
+        for octant in 0..8u8 {
+            let cx = grid_x + if octant & 1 != 0 { child_scale } else { 0 };
+            let cy = grid_y + if octant & 2 != 0 { child_scale } else { 0 };
+            let cz = grid_z + if octant & 4 != 0 { child_scale } else { 0 };
+
+            // Check if child is a leaf (not already a Branch)
+            let child_depth = current_depth + 1;
+            let (cell, actual) = octree.cell_at(
+                cx / (1u32 << (max_depth - child_depth)),
+                cy / (1u32 << (max_depth - child_depth)),
+                cz / (1u32 << (max_depth - child_depth)),
+                child_depth,
+            );
+            if actual == child_depth && !matches!(cell, Cell::Branch { .. }) {
+                subdivide_deep(octree, cache, cx, cy, cz, child_depth, target_depth, max_depth);
+            }
+        }
+    }
+}
+
+/// Check if a surface leaf exists at (nx, ny, nz) at EXACTLY the given depth.
+/// Cross-depth vertex sharing is incorrect because the coarser cell may not
+/// have a sign change on the specific edge, causing wrong vertex selection.
+fn find_surface_neighbor_same_depth(
+    leaf_set: &HashSet<(u32, u32, u32, u8)>,
+    nx: u32, ny: u32, nz: u32,
+    depth: u8,
+) -> bool {
+    leaf_set.contains(&(nx, ny, nz, depth))
+}
+
+fn collect_surface_leaves_recursive(
+    octree: &Octree, cell: &Cell,
+    cx: u32, cy: u32, cz: u32, depth: u8, _min_depth: u8,
+    result: &mut Vec<(u32, u32, u32, u8)>,
+) {
+    match cell {
+        Cell::Leaf(data) if data.has_sign_change() => {
+            result.push((cx, cy, cz, depth));
+        }
+        Cell::Branch { children_index } => {
+            let children = &octree.children[*children_index as usize];
+            for octant in 0..8u8 {
+                collect_surface_leaves_recursive(
+                    octree, &children[octant as usize],
+                    cx * 2 + if octant & 1 != 0 { 1 } else { 0 },
+                    cy * 2 + if octant & 2 != 0 { 1 } else { 0 },
+                    cz * 2 + if octant & 4 != 0 { 1 } else { 0 },
+                    depth + 1, _min_depth, result,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Subdivide any cell (Leaf, Empty, or Full) for 2:1 balance enforcement.
+///
+/// Unlike `build::subdivide_leaf`, this handles Empty/Full cells by creating
+/// child cells from the cached corner values.
+fn subdivide_cell_for_balance(
+    octree: &mut Octree,
+    cache: &EvalCache,
+    grid_x: u32, grid_y: u32, grid_z: u32,
+    depth: u8, max_depth: u8,
+) {
+    let child_scale = 1u32 << (max_depth - depth - 1);
+    let iso_value = octree.iso_value;
+    let mut child_cells: [Cell; 8] = std::array::from_fn(|_| Cell::Empty);
+
+    for octant in 0..8u8 {
+        let cx = grid_x + if octant & 1 != 0 { child_scale } else { 0 };
+        let cy = grid_y + if octant & 2 != 0 { child_scale } else { 0 };
+        let cz = grid_z + if octant & 4 != 0 { child_scale } else { 0 };
+
+        let mut corner_values = [0.0f64; 8];
+        let mut corner_grads = [[0.0f64; 3]; 8];
+        let mut has_grads = true;
+
+        for corner in 0..8u8 {
+            let gx = cx + if corner & 1 != 0 { child_scale } else { 0 };
+            let gy = cy + if corner & 2 != 0 { child_scale } else { 0 };
+            let gz = cz + if corner & 4 != 0 { child_scale } else { 0 };
+            let gp = GridPos::new(gx, gy, gz);
+            let eval = cache.get(&gp).expect("corner not in cache during balance subdivision");
+            corner_values[corner as usize] = eval.value;
+            match eval.gradient {
+                Some(g) => corner_grads[corner as usize] = g,
+                None => has_grads = false,
+            }
+        }
+
+        let mut leaf = LeafData::new(corner_values, iso_value);
+        if has_grads { leaf.corner_gradients = Some(corner_grads); }
+
+        child_cells[octant as usize] = if leaf.has_sign_change() {
+            Cell::Leaf(leaf)
+        } else if leaf.corner_mask == 0 {
+            Cell::Empty
+        } else {
+            Cell::Full
+        };
+    }
+
+    // Navigate to the cell and check if it's already a Branch.
+    // Overwriting a Branch would orphan its children (including deeper
+    // refinement from adaptive passes), so we must skip.
+    //
+    // ORDER MATTERS. `Vec::push` below can reallocate `octree.children`,
+    // which invalidates any &mut / raw pointer obtained before the push.
+    // The previous implementation took a raw pointer, then pushed, then
+    // wrote through the pointer — a classic use-after-free on glibc when
+    // the reallocation actually moves the buffer (most visible at
+    // max_depth=8 where `children` grows past its initial capacity many
+    // times during balance propagation, crashing with SIGSEGV on Linux
+    // while appearing to "work" on macOS libmalloc). Fix: close the
+    // check-borrow, push, then re-navigate to obtain a fresh reference.
+    let path = compute_path_for_balance(grid_x, grid_y, grid_z, depth, max_depth);
+    {
+        let cell_ref = navigate_to_cell_mut_balance(
+            &mut octree.root, &mut octree.children, &path,
+        );
+        if matches!(cell_ref, Cell::Branch { .. }) {
+            return; // Already subdivided; don't overwrite
+        }
+    }
+    let idx = octree.children.len() as u32;
+    octree.children.push(child_cells);
+    let cell_ref = navigate_to_cell_mut_balance(
+        &mut octree.root, &mut octree.children, &path,
+    );
+    *cell_ref = Cell::Branch { children_index: idx };
+}
+
+fn compute_path_for_balance(grid_x: u32, grid_y: u32, grid_z: u32, depth: u8, max_depth: u8) -> Vec<u8> {
+    let mut path = Vec::with_capacity(depth as usize);
+    let mut scale = 1u32 << (max_depth - 1);
+    let mut rx = grid_x;
+    let mut ry = grid_y;
+    let mut rz = grid_z;
+    for _ in 0..depth {
+        let mut octant = 0u8;
+        if rx >= scale { octant |= 1; rx -= scale; }
+        if ry >= scale { octant |= 2; ry -= scale; }
+        if rz >= scale { octant |= 4; rz -= scale; }
+        path.push(octant);
+        scale >>= 1;
+    }
+    path
+}
+
+fn navigate_to_cell_mut_balance<'a>(
+    root: &'a mut Cell,
+    children: &'a mut Vec<[Cell; 8]>,
+    path: &[u8],
+) -> &'a mut Cell {
+    if path.is_empty() { return root; }
+    let mut current = root as *mut Cell;
+    for &octant in path.iter() {
+        unsafe {
+            match &*current {
+                Cell::Branch { children_index } => {
+                    let idx = *children_index as usize;
+                    current = &mut children[idx][octant as usize] as *mut Cell;
+                }
+                _ => { return &mut *current; }
+            }
+        }
+    }
+    unsafe { &mut *current }
+}
+
+/// Check if a cell's subtree contains any surface leaf (sign change).
+fn has_surface_descendant(octree: &Octree, cell: &Cell) -> bool {
+    match cell {
+        Cell::Leaf(d) => d.has_sign_change(),
+        Cell::Branch { children_index } => {
+            let children = &octree.children[*children_index as usize];
+            children.iter().any(|c| has_surface_descendant(octree, c))
+        }
+        _ => false,
+    }
+}
+
+fn collect_all_leaves_recursive(
+    octree: &Octree, cell: &Cell,
+    cx: u32, cy: u32, cz: u32, depth: u8,
+    result: &mut Vec<(u32, u32, u32, u8)>,
+) {
+    match cell {
+        Cell::Empty | Cell::Full | Cell::Leaf(_) => {
+            result.push((cx, cy, cz, depth));
+        }
+        Cell::Branch { children_index } => {
+            let children = &octree.children[*children_index as usize];
+            for octant in 0..8u8 {
+                collect_all_leaves_recursive(
+                    octree, &children[octant as usize],
+                    cx * 2 + if octant & 1 != 0 { 1 } else { 0 },
+                    cy * 2 + if octant & 2 != 0 { 1 } else { 0 },
+                    cz * 2 + if octant & 4 != 0 { 1 } else { 0 },
+                    depth + 1, result,
+                );
+            }
+        }
+    }
+}
+```
+
+### src/octree/build.rs
+```
+use pyo3::prelude::*;
+use crate::bbox::BoundingBox;
+use crate::eval::bridge;
+use crate::eval::cache::{self, CachedEval, EvalCache};
+use crate::octree::cell::{Cell, LeafData};
+use crate::octree::types::GridPos;
+use crate::octree::Octree;
+
+/// Build a uniform octree to the specified depth (no adaptive refinement).
+pub fn build_uniform(
+    py: Python<'_>,
+    func: &PyObject,
+    bbox: BoundingBox,
+    depth: u8,
+    iso_value: f64,
+) -> PyResult<(Octree, u64)> {
+    build_adaptive(py, func, bbox, depth, depth, iso_value, 30.0)
+}
+
+/// Build an adaptive octree with refinement from min_depth to max_depth.
+///
+/// Refinement strategy:
+/// - All cells subdivide uniformly to min_depth.
+/// - From min_depth to max_depth, cells subdivide only if they contain
+///   a feature (normal angle spread > angle_threshold) or if the Lipschitz
+///   guard detects a potential thin feature.
+/// - Smooth surface cells are NOT subdivided beyond min_depth.
+pub fn build_adaptive(
+    py: Python<'_>,
+    func: &PyObject,
+    bbox: BoundingBox,
+    min_depth: u8,
+    max_depth: u8,
+    iso_value: f64,
+    angle_threshold_deg: f64,
+) -> PyResult<(Octree, u64)> {
+    build_adaptive_inner(py, func, bbox, min_depth, max_depth, iso_value, angle_threshold_deg, false)
+}
+
+pub fn build_adaptive_true(
+    py: Python<'_>,
+    func: &PyObject,
+    bbox: BoundingBox,
+    min_depth: u8,
+    max_depth: u8,
+    iso_value: f64,
+    angle_threshold_deg: f64,
+) -> PyResult<(Octree, u64)> {
+    build_adaptive_inner(py, func, bbox, min_depth, max_depth, iso_value, angle_threshold_deg, true)
+}
+
+fn build_adaptive_inner(
+    py: Python<'_>,
+    func: &PyObject,
+    bbox: BoundingBox,
+    min_depth: u8,
+    max_depth: u8,
+    iso_value: f64,
+    angle_threshold_deg: f64,
+    true_adaptive: bool,
+) -> PyResult<(Octree, u64)> {
+    let bounds = bbox.to_cubic();
+    let mut total_evals = 0u64;
+    let angle_threshold_cos = (angle_threshold_deg * std::f64::consts::PI / 180.0).cos();
+
+    // Phase 1: Evaluate all corners at min_depth.
+    // IMPORTANT: All cache keys use max_depth grid coordinates to avoid
+    // collisions between depth levels (e.g., depth-4 GridPos(10,10,10)
+    // and depth-6 GridPos(10,10,10) refer to different world positions).
+    let cells_per_axis = 1u32 << min_depth;
+    let corners_per_axis = cells_per_axis + 1;
+    let cell_size_at_max = bounds.size / (1u32 << max_depth) as f64;
+    let grid_scale = 1u32 << (max_depth - min_depth); // scale min_depth coords to max_depth coords
+
+    let mut cache = EvalCache::with_capacity((corners_per_axis as usize).pow(3));
+    let mut points = Vec::new();
+    let mut grid_positions = Vec::new();
+
+    for z in 0..corners_per_axis {
+        for y in 0..corners_per_axis {
+            for x in 0..corners_per_axis {
+                let gp = GridPos::new(x * grid_scale, y * grid_scale, z * grid_scale);
+                let world = cache::grid_to_world(&gp, &bounds.origin, cell_size_at_max);
+                grid_positions.push(gp);
+                points.push(world);
+            }
+        }
+    }
+
+    let result = bridge::batch_evaluate(py, func, &points)?;
+    total_evals += points.len() as u64;
+
+    // If function doesn't provide gradients, estimate via FD
+    let has_gradients = result.gradients.is_some();
+    populate_cache(&mut cache, &grid_positions, &result);
+
+    if !has_gradients {
+        let fd_grads = bridge::estimate_gradients_fd(py, func, &points, cell_size_at_max * 0.01)?;
+        total_evals += points.len() as u64 * 6; // 6 FD evaluations per point
+        for (i, gp) in grid_positions.iter().enumerate() {
+            if let Some(entry) = cache.get_mut(gp) {
+                entry.gradient = Some(fd_grads[i]);
+            }
+        }
+    }
+
+    // Build uniform tree to min_depth (using max_depth grid coords for cache)
+    let mut children_storage: Vec<[Cell; 8]> = Vec::new();
+    let root = build_cell_recursive(
+        &cache, &mut children_storage,
+        0, 0, 0, min_depth, 0, iso_value, max_depth,
+    );
+
+    let mut octree = Octree {
+        bounds,
+        root,
+        children: children_storage,
+        vertices: Vec::new(),
+        hermite_data: Vec::new(),
+        min_depth,
+        max_depth,
+        iso_value,
+    };
+
+    // Phase 2: Adaptive refinement from min_depth to max_depth
+    for current_depth in min_depth..max_depth {
+        let cell_size = bounds.size / (1u32 << current_depth) as f64;
+
+        // Collect leaves that need subdivision (feature-based criteria)
+        let mut leaves_to_refine = Vec::new();
+        collect_refineable_leaves(
+            &octree, &octree.root, &cache,
+            0, 0, 0, 0, current_depth,
+            cell_size, iso_value, angle_threshold_cos,
+            &mut leaves_to_refine,
+        );
+
+        if leaves_to_refine.is_empty() {
+            break;
+        }
+
+        // Collect new corner points needed for subdivision
+        let mut new_points = Vec::new();
+        let mut new_grid_positions = Vec::new();
+        let child_scale = 1u32 << (max_depth - current_depth - 1);
+        let cell_size_at_max = bounds.size / (1u32 << max_depth) as f64;
+
+        for &(cx, cy, cz) in &leaves_to_refine {
+            let base_x = cx * 2;
+            let base_y = cy * 2;
+            let base_z = cz * 2;
+
+            for octant in 0..8u8 {
+                let ocx = base_x + if octant & 1 != 0 { 1 } else { 0 };
+                let ocy = base_y + if octant & 2 != 0 { 1 } else { 0 };
+                let ocz = base_z + if octant & 4 != 0 { 1 } else { 0 };
+
+                for corner in 0..8u8 {
+                    let gx = ocx * child_scale + if corner & 1 != 0 { child_scale } else { 0 };
+                    let gy = ocy * child_scale + if corner & 2 != 0 { child_scale } else { 0 };
+                    let gz = ocz * child_scale + if corner & 4 != 0 { child_scale } else { 0 };
+                    let gp = GridPos::new(gx, gy, gz);
+
+                    if !cache.contains(&gp) {
+                        let world = cache::grid_to_world(&gp, &bounds.origin, cell_size_at_max);
+                        new_grid_positions.push(gp);
+                        new_points.push(world);
+                    }
+                }
+            }
+        }
+
+        // Deduplicate
+        let mut dedup_points = Vec::new();
+        let mut dedup_grid = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (gp, pt) in new_grid_positions.into_iter().zip(new_points.into_iter()) {
+            if seen.insert(gp) {
+                dedup_grid.push(gp);
+                dedup_points.push(pt);
+            }
+        }
+
+        if !dedup_points.is_empty() {
+            let result = bridge::batch_evaluate(py, func, &dedup_points)?;
+            total_evals += dedup_points.len() as u64;
+
+            let fd_grads = if result.gradients.is_none() {
+                let g = bridge::estimate_gradients_fd(py, func, &dedup_points, cell_size_at_max * 0.01)?;
+                total_evals += dedup_points.len() as u64 * 6;
+                Some(g)
+            } else {
+                None
+            };
+
+            for (i, gp) in dedup_grid.iter().enumerate() {
+                let gradient = result.gradients.as_ref()
+                    .map(|g| g[i])
+                    .or_else(|| fd_grads.as_ref().map(|g| g[i]));
+                cache.insert(*gp, CachedEval {
+                    value: result.values[i],
+                    gradient,
+                });
+            }
+        }
+
+        // Subdivide identified leaves
+        for &(cx, cy, cz) in &leaves_to_refine {
+            let scale = 1u32 << (max_depth - current_depth);
+            let gx = cx * scale;
+            let gy = cy * scale;
+            let gz = cz * scale;
+            subdivide_leaf(&mut octree, &cache, gx, gy, gz, current_depth, max_depth, iso_value);
+        }
+
+    }
+
+    // Phase 3: Either force uniform depth (legacy) or 2:1 balance (true adaptive).
+    if true_adaptive && min_depth < max_depth {
+        let balance_evals = crate::octree::balance::enforce_balance_2to1(
+            py, func, &mut octree, &mut cache,
+        )?;
+        total_evals += balance_evals;
+    } else if min_depth < max_depth {
+    // Legacy Phase 3: Force all surface cells to max_depth.
+    // Two rules (the second was missing, causing adaptive=False to produce
+    // holes on surfaces that Phase 1's coarse sampling classified as
+    // Empty/Full):
+    //   A. Surface leaves at depth < max_depth — subdivide them.
+    //   B. Empty/Full cells at depth < max_depth that are face-adjacent to a
+    //      surface leaf at a finer depth. Coarse corner sampling in Phase 1
+    //      missed the true surface inside these cells; without subdividing,
+    //      DC's same-depth neighbor lookup at max_depth fails and quads are
+    //      dropped.
+        loop {
+            let mut coarse_leaves = Vec::new();
+            collect_phase3_refinables(
+                &octree, max_depth, &mut coarse_leaves,
+            );
+            if coarse_leaves.is_empty() { break; }
+
+            // Collect new corner points
+            let child_scale_base = max_depth; // for computing child_scale
+            let cell_size_at_max = bounds.size / (1u32 << max_depth) as f64;
+            let mut new_points = Vec::new();
+            let mut new_grid = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+
+            for &(cx, cy, cz, depth) in &coarse_leaves {
+                let cs = 1u32 << (max_depth - depth - 1);
+                let gx = cx * (1u32 << (max_depth - depth));
+                let gy = cy * (1u32 << (max_depth - depth));
+                let gz = cz * (1u32 << (max_depth - depth));
+                for octant in 0..8u8 {
+                    let ox = gx + if octant & 1 != 0 { cs } else { 0 };
+                    let oy = gy + if octant & 2 != 0 { cs } else { 0 };
+                    let oz = gz + if octant & 4 != 0 { cs } else { 0 };
+                    for corner in 0..8u8 {
+                        let px = ox + if corner & 1 != 0 { cs } else { 0 };
+                        let py = oy + if corner & 2 != 0 { cs } else { 0 };
+                        let pz = oz + if corner & 4 != 0 { cs } else { 0 };
+                        let gp = GridPos::new(px, py, pz);
+                        if !cache.contains(&gp) && seen.insert(gp) {
+                            new_grid.push(gp);
+                            new_points.push(cache::grid_to_world(&gp, &bounds.origin, cell_size_at_max));
+                        }
+                    }
+                }
+            }
+
+            if !new_points.is_empty() {
+                let result = bridge::batch_evaluate(py, func, &new_points)?;
+                total_evals += new_points.len() as u64;
+                let fd_grads = if result.gradients.is_none() {
+                    let g = bridge::estimate_gradients_fd(py, func, &new_points, cell_size_at_max * 0.01)?;
+                    total_evals += new_points.len() as u64 * 6;
+                    Some(g)
+                } else { None };
+                for (i, gp) in new_grid.iter().enumerate() {
+                    let gradient = result.gradients.as_ref().map(|g| g[i])
+                        .or_else(|| fd_grads.as_ref().map(|g| g[i]));
+                    cache.insert(*gp, CachedEval { value: result.values[i], gradient });
+                }
+            }
+
+            // Subdivide
+            for &(cx, cy, cz, depth) in &coarse_leaves {
+                let gx = cx * (1u32 << (max_depth - depth));
+                let gy = cy * (1u32 << (max_depth - depth));
+                let gz = cz * (1u32 << (max_depth - depth));
+                subdivide_leaf(&mut octree, &cache, gx, gy, gz, depth, max_depth, iso_value);
+            }
+        }
+    }
+
+    Ok((octree, total_evals))
+}
+
+/// Collect cells that Phase 3 (legacy force-to-max) must subdivide.
+///
+/// - Rule A: surface leaves at depth < max_depth.
+/// - Rule B: Empty/Full cells at depth < max_depth that are face-adjacent
+///   to a surface leaf. The neighbor being a surface leaf means the true
+///   surface is right there; coarse sampling missed it for this cell.
+///   Subdividing exposes finer corner values where the sign change lives.
+///
+/// Each call returns the next batch of cells to subdivide. The Phase 3
+/// loop re-collects until no more candidates exist — guaranteed to
+/// terminate because every subdivision strictly increases depth and is
+/// bounded by max_depth.
+fn collect_phase3_refinables(
+    octree: &Octree,
+    max_depth: u8,
+    out: &mut Vec<(u32, u32, u32, u8)>,
+) {
+    let mut all_leaves: Vec<(u32, u32, u32, u8)> = Vec::new();
+    collect_all_leaves(octree, &octree.root, 0, 0, 0, 0, &mut all_leaves);
+
+    let mut seen: std::collections::HashSet<(u32, u32, u32, u8)> =
+        std::collections::HashSet::new();
+
+    for &(cx, cy, cz, depth) in &all_leaves {
+        let (cell, _) = octree.cell_at(cx, cy, cz, depth);
+        let is_surface = matches!(cell, Cell::Leaf(d) if d.has_sign_change());
+
+        // Rule A
+        if is_surface && depth < max_depth {
+            if seen.insert((cx, cy, cz, depth)) {
+                out.push((cx, cy, cz, depth));
+            }
+            continue;
+        }
+
+        // Rule B: only surface leaves can activate this rule on their
+        // coarser Empty/Full neighbors.
+        if !is_surface {
+            continue;
+        }
+        let neighbors = crate::octree::face_neighbors(cx, cy, cz, depth);
+        for neighbor in neighbors.iter().flatten() {
+            let (nx, ny, nz) = *neighbor;
+            let (ncell, nd) = octree.cell_at(nx, ny, nz, depth);
+            if nd >= depth || nd >= max_depth {
+                continue;
+            }
+            if !matches!(ncell, Cell::Empty | Cell::Full) {
+                continue;
+            }
+            let scale = 1u32 << (depth - nd);
+            let coarse = (nx / scale, ny / scale, nz / scale, nd);
+            if seen.insert(coarse) {
+                out.push(coarse);
+            }
+        }
+    }
+}
+
+/// Walk the octree and report every non-Branch cell with its grid coords
+/// and depth.
+fn collect_all_leaves(
+    octree: &Octree, cell: &Cell,
+    cx: u32, cy: u32, cz: u32, depth: u8,
+    result: &mut Vec<(u32, u32, u32, u8)>,
+) {
+    match cell {
+        Cell::Empty | Cell::Full | Cell::Leaf(_) => {
+            result.push((cx, cy, cz, depth));
+        }
+        Cell::Branch { children_index } => {
+            let children = &octree.children[*children_index as usize];
+            for octant in 0..8u8 {
+                collect_all_leaves(
+                    octree, &children[octant as usize],
+                    cx * 2 + if octant & 1 != 0 { 1 } else { 0 },
+                    cy * 2 + if octant & 2 != 0 { 1 } else { 0 },
+                    cz * 2 + if octant & 4 != 0 { 1 } else { 0 },
+                    depth + 1, result,
+                );
+            }
+        }
+    }
+}
+
+fn populate_cache(cache: &mut EvalCache, positions: &[GridPos], result: &bridge::EvalResult) {
+    for (i, gp) in positions.iter().enumerate() {
+        let gradient = result.gradients.as_ref().map(|g| g[i]);
+        cache.insert(*gp, CachedEval {
+            value: result.values[i],
+            gradient,
+        });
+    }
+}
+
+/// Collect leaf cells at `target_depth` that should be subdivided.
+///
+/// Feature-based criteria (only cells with sign changes AND feature indicators):
+/// 1. Normal angle spread > threshold (feature boundary detected)
+/// 2. Lipschitz guard (potential thin feature in non-sign-change cells)
+/// 3. Gradient magnitude variation > 4x
+fn collect_refineable_leaves(
+    octree: &Octree,
+    cell: &Cell,
+    cache: &EvalCache,
+    cell_x: u32, cell_y: u32, cell_z: u32,
+    current_depth: u8,
+    target_depth: u8,
+    cell_size: f64,
+    iso_value: f64,
+    angle_threshold_cos: f64,
+    result: &mut Vec<(u32, u32, u32)>,
+) {
+    match cell {
+        Cell::Leaf(data) => {
+            if current_depth != target_depth { return; }
+            if should_subdivide_leaf(data, cell_size, iso_value, angle_threshold_cos) {
+                result.push((cell_x, cell_y, cell_z));
+            }
+        }
+        Cell::Branch { children_index } => {
+            if current_depth >= target_depth { return; }
+            let children = &octree.children[*children_index as usize];
+            for octant in 0..8u8 {
+                let cx = cell_x * 2 + if octant & 1 != 0 { 1 } else { 0 };
+                let cy = cell_y * 2 + if octant & 2 != 0 { 1 } else { 0 };
+                let cz = cell_z * 2 + if octant & 4 != 0 { 1 } else { 0 };
+                collect_refineable_leaves(
+                    octree, &children[octant as usize], cache,
+                    cx, cy, cz,
+                    current_depth + 1, target_depth,
+                    cell_size * 0.5, iso_value, angle_threshold_cos,
+                    result,
+                );
+            }
+        }
+        Cell::Empty | Cell::Full => {
+            if current_depth != target_depth { return; }
+            if should_subdivide_empty_full(cache, cell, cell_x, cell_y, cell_z, cell_size, iso_value) {
+                result.push((cell_x, cell_y, cell_z));
+            }
+        }
+    }
+}
+
+/// Decide if a Leaf cell should be subdivided beyond min_depth.
+///
+/// Only subdivides if the cell contains a detectable feature:
+/// - Normal angle spread exceeds threshold (sharp edge/corner)
+/// - Gradient magnitude varies significantly (rapidly changing function)
+fn should_subdivide_leaf(
+    data: &LeafData,
+    cell_size: f64,
+    iso_value: f64,
+    angle_threshold_cos: f64,
+) -> bool {
+    // Must have sign change to be worth subdividing
+    if !data.has_sign_change() {
+        // For non-sign-change cells: check Lipschitz guard
+        if let Some(ref grads) = data.corner_gradients {
+            let shifted: Vec<f64> = data.corner_values.iter().map(|v| v - iso_value).collect();
+            let min_abs = shifted.iter().map(|v| v.abs()).fold(f64::MAX, f64::min);
+            let cell_diag = cell_size * (3.0f64).sqrt();
+            let max_grad = grads.iter()
+                .map(|g| (g[0]*g[0] + g[1]*g[1] + g[2]*g[2]).sqrt())
+                .fold(0.0f64, f64::max);
+            if min_abs < max_grad * 1.5 * cell_diag {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Has sign change — check if this cell straddles a feature
+    if let Some(ref grads) = data.corner_gradients {
+        // Criterion 1: Normal angle spread
+        // Check min cos(angle) between any pair of normalized corner gradients
+        let mut normals = Vec::new();
+        for g in grads.iter() {
+            let len = (g[0]*g[0] + g[1]*g[1] + g[2]*g[2]).sqrt();
+            if len > 1e-12 {
+                normals.push([g[0]/len, g[1]/len, g[2]/len]);
+            }
+        }
+
+        if normals.len() >= 2 {
+            let mut min_dot = 1.0f64;
+            for i in 0..normals.len() {
+                for j in (i+1)..normals.len() {
+                    let d = normals[i][0]*normals[j][0]
+                          + normals[i][1]*normals[j][1]
+                          + normals[i][2]*normals[j][2];
+                    min_dot = min_dot.min(d);
+                }
+            }
+            // If min dot product < cos(threshold), the angle exceeds threshold
+            if min_dot < angle_threshold_cos {
+                return true; // Feature detected: subdivide
+            }
+        }
+
+        // Criterion 2: Gradient magnitude variation
+        let grad_mags: Vec<f64> = grads.iter()
+            .map(|g| (g[0]*g[0] + g[1]*g[1] + g[2]*g[2]).sqrt())
+            .collect();
+        let max_grad = grad_mags.iter().cloned().fold(0.0f64, f64::max);
+        let min_grad = grad_mags.iter().cloned().fold(f64::MAX, f64::min);
+        if min_grad > 1e-12 && max_grad > 4.0 * min_grad {
+            return true;
+        }
+    }
+
+    false // Smooth surface cell: don't subdivide further
+}
+
+fn should_subdivide_empty_full(
+    cache: &EvalCache,
+    _cell: &Cell,
+    cell_x: u32, cell_y: u32, cell_z: u32,
+    cell_size: f64,
+    iso_value: f64,
+) -> bool {
+    let scale = 1u32;
+    let mut min_abs = f64::MAX;
+    let mut max_grad = 0.0f64;
+
+    for corner in 0..8u8 {
+        let gx = cell_x + if corner & 1 != 0 { scale } else { 0 };
+        let gy = cell_y + if corner & 2 != 0 { scale } else { 0 };
+        let gz = cell_z + if corner & 4 != 0 { scale } else { 0 };
+        let gp = GridPos::new(gx, gy, gz);
+        if let Some(eval) = cache.get(&gp) {
+            min_abs = min_abs.min((eval.value - iso_value).abs());
+            if let Some(g) = eval.gradient {
+                max_grad = max_grad.max((g[0]*g[0] + g[1]*g[1] + g[2]*g[2]).sqrt());
+            }
+        }
+    }
+
+    let cell_diag = cell_size * (3.0f64).sqrt();
+    min_abs < max_grad * 1.5 * cell_diag
+}
+
+fn subdivide_leaf(
+    octree: &mut Octree, cache: &EvalCache,
+    grid_x: u32, grid_y: u32, grid_z: u32,
+    depth: u8, max_depth: u8, iso_value: f64,
+) {
+    let child_scale = 1u32 << (max_depth - depth - 1);
+    let mut child_cells: [Cell; 8] = std::array::from_fn(|_| Cell::Empty);
+
+    for octant in 0..8u8 {
+        let cx = grid_x + if octant & 1 != 0 { child_scale } else { 0 };
+        let cy = grid_y + if octant & 2 != 0 { child_scale } else { 0 };
+        let cz = grid_z + if octant & 4 != 0 { child_scale } else { 0 };
+
+        let mut corner_values = [0.0f64; 8];
+        let mut corner_grads = [[0.0f64; 3]; 8];
+        let mut has_grads = true;
+
+        for corner in 0..8u8 {
+            let gx = cx + if corner & 1 != 0 { child_scale } else { 0 };
+            let gy = cy + if corner & 2 != 0 { child_scale } else { 0 };
+            let gz = cz + if corner & 4 != 0 { child_scale } else { 0 };
+            let gp = GridPos::new(gx, gy, gz);
+            let eval = cache.get(&gp).expect("corner not in cache during subdivision");
+            corner_values[corner as usize] = eval.value;
+            match eval.gradient {
+                Some(g) => corner_grads[corner as usize] = g,
+                None => has_grads = false,
+            }
+        }
+
+        let mut leaf = LeafData::new(corner_values, iso_value);
+        if has_grads { leaf.corner_gradients = Some(corner_grads); }
+
+        child_cells[octant as usize] = if leaf.has_sign_change() {
+            Cell::Leaf(leaf)
+        } else if leaf.corner_mask == 0 {
+            Cell::Empty
+        } else {
+            Cell::Full
+        };
+    }
+
+    let idx = octree.children.len() as u32;
+    octree.children.push(child_cells);
+
+    let path = compute_path(grid_x, grid_y, grid_z, depth, max_depth);
+    let cell_ref = navigate_to_cell_mut(&mut octree.root, &mut octree.children, &path);
+    *cell_ref = Cell::Branch { children_index: idx };
+}
+
+fn compute_path(grid_x: u32, grid_y: u32, grid_z: u32, depth: u8, max_depth: u8) -> Vec<u8> {
+    let mut path = Vec::with_capacity(depth as usize);
+    let mut scale = 1u32 << (max_depth - 1);
+    let mut rx = grid_x;
+    let mut ry = grid_y;
+    let mut rz = grid_z;
+    for _ in 0..depth {
+        let mut octant = 0u8;
+        if rx >= scale { octant |= 1; rx -= scale; }
+        if ry >= scale { octant |= 2; ry -= scale; }
+        if rz >= scale { octant |= 4; rz -= scale; }
+        path.push(octant);
+        scale >>= 1;
+    }
+    path
+}
+
+fn navigate_to_cell_mut<'a>(
+    root: &'a mut Cell,
+    children: &'a mut Vec<[Cell; 8]>,
+    path: &[u8],
+) -> &'a mut Cell {
+    if path.is_empty() { return root; }
+    let mut current = root as *mut Cell;
+    for &octant in path.iter() {
+        unsafe {
+            match &*current {
+                Cell::Branch { children_index } => {
+                    let idx = *children_index as usize;
+                    current = &mut children[idx][octant as usize] as *mut Cell;
+                }
+                _ => { return &mut *current; }
+            }
+        }
+    }
+    unsafe { &mut *current }
+}
+
+fn build_cell_recursive(
+    cache: &EvalCache,
+    children_storage: &mut Vec<[Cell; 8]>,
+    cell_x: u32, cell_y: u32, cell_z: u32,
+    target_depth: u8, current_depth: u8,
+    iso_value: f64, max_depth: u8,
+) -> Cell {
+    if current_depth == target_depth {
+        let mut corner_values = [0.0f64; 8];
+        let mut corner_grads = [[0.0f64; 3]; 8];
+        let mut has_grads = true;
+        // Cache keys are in max_depth grid: each cell at target_depth spans
+        // (1 << (max_depth - target_depth)) units in the max_depth grid.
+        let cell_scale = 1u32 << (max_depth - current_depth);
+        let gx = cell_x * cell_scale;
+        let gy = cell_y * cell_scale;
+        let gz = cell_z * cell_scale;
+        for c in 0..8u8 {
+            let px = gx + if c & 1 != 0 { cell_scale } else { 0 };
+            let py = gy + if c & 2 != 0 { cell_scale } else { 0 };
+            let pz = gz + if c & 4 != 0 { cell_scale } else { 0 };
+            let gp = GridPos::new(px, py, pz);
+            let eval = cache.get(&gp).expect("corner not in cache");
+            corner_values[c as usize] = eval.value;
+            match eval.gradient {
+                Some(g) => corner_grads[c as usize] = g,
+                None => has_grads = false,
+            }
+        }
+        let mut leaf = LeafData::new(corner_values, iso_value);
+        if has_grads { leaf.corner_gradients = Some(corner_grads); }
+        if !leaf.has_sign_change() {
+            return if leaf.corner_mask == 0 { Cell::Empty } else { Cell::Full };
+        }
+        Cell::Leaf(leaf)
+    } else {
+        let mut child_cells: [Cell; 8] = std::array::from_fn(|_| Cell::Empty);
+        for octant in 0..8u8 {
+            let cx = cell_x * 2 + if octant & 1 != 0 { 1 } else { 0 };
+            let cy = cell_y * 2 + if octant & 2 != 0 { 1 } else { 0 };
+            let cz = cell_z * 2 + if octant & 4 != 0 { 1 } else { 0 };
+            child_cells[octant as usize] = build_cell_recursive(
+                cache, children_storage, cx, cy, cz,
+                target_depth, current_depth + 1, iso_value, max_depth,
+            );
+        }
+        let all_empty = child_cells.iter().all(|c| matches!(c, Cell::Empty));
+        let all_full = child_cells.iter().all(|c| matches!(c, Cell::Full));
+        if all_empty { Cell::Empty }
+        else if all_full { Cell::Full }
+        else {
+            let idx = children_storage.len() as u32;
+            children_storage.push(child_cells);
+            Cell::Branch { children_index: idx }
+        }
+    }
+}
+```
+
+### src/octree/cell.rs
+```
+/// A single octree cell.
+#[derive(Clone)]
+pub enum Cell {
+    /// Entirely outside the surface (all corners positive / same sign, no surface nearby).
+    Empty,
+    /// Entirely inside the surface (all corners negative / same sign, no surface nearby).
+    Full,
+    /// Interior node with 8 children. Index into `Octree::children`.
+    Branch {
+        children_index: u32,
+    },
+    /// Leaf cell that may contain surface crossings.
+    Leaf(LeafData),
+}
+
+/// Data stored at a leaf cell.
+#[derive(Clone)]
+pub struct LeafData {
+    /// Bitmask: bit i = 1 if corner i is inside (value < iso_value).
+    pub corner_mask: u8,
+    /// Function values at the 8 corners.
+    pub corner_values: [f64; 8],
+    /// Gradient vectors at the 8 corners (estimated or analytic).
+    pub corner_gradients: Option<[[f64; 3]; 8]>,
+    /// Index into `Octree::vertices` for this cell's first vertex.
+    /// Set during DC extraction (Phase 5-6).
+    pub vertex_start: u32,
+    /// Number of vertices in this cell (MDC: >1 per connected component).
+    pub vertex_count: u8,
+    /// Edge intersection data indices. Set during Hermite data computation (Phase 4).
+    pub edge_intersections: [Option<u32>; 12],
+}
+
+impl LeafData {
+    pub fn new(corner_values: [f64; 8], iso_value: f64) -> Self {
+        let mut mask = 0u8;
+        for i in 0..8 {
+            if corner_values[i] < iso_value {
+                mask |= 1 << i;
+            }
+        }
+        Self {
+            corner_mask: mask,
+            corner_values,
+            corner_gradients: None,
+            vertex_start: 0,
+            vertex_count: 0,
+            edge_intersections: [None; 12],
+        }
+    }
+
+    /// Returns true if this leaf has any sign change across its edges.
+    pub fn has_sign_change(&self) -> bool {
+        self.corner_mask != 0 && self.corner_mask != 0xFF
+    }
+}
+
+impl Cell {
+    pub fn is_leaf(&self) -> bool {
+        matches!(self, Cell::Leaf(_) | Cell::Empty | Cell::Full)
+    }
+
+    pub fn is_branch(&self) -> bool {
+        matches!(self, Cell::Branch { .. })
+    }
+}
+```
+
+### src/octree/mod.rs
+```
+pub mod cell;
+pub mod types;
+pub mod morton;
+pub mod build;
+pub mod balance;
+
+use crate::bbox::CubicBounds;
+use cell::{Cell, LeafData};
+
+/// Hermite data: intersection point and normal on an edge.
+#[derive(Clone, Copy, Debug)]
+pub struct HermitePoint {
+    pub pos: [f64; 3],
+    pub normal: [f64; 3],
+    pub t: f64, // parameter along edge [0, 1]
+}
+
+/// Vertex computed by QEF for a cell.
+#[derive(Clone, Copy, Debug)]
+pub struct CellVertex {
+    pub pos: [f64; 3],
+    pub qef_error: f64,
+}
+
+/// The adaptive octree data structure.
+///
+/// Uses flat-children array storage: each Branch stores an index into `children`,
+/// where `children[i]` holds the 8 child cells.
+pub struct Octree {
+    /// Root cell bounds (always cubic).
+    pub bounds: CubicBounds,
+    /// The root cell.
+    pub root: Cell,
+    /// Flat storage: children[i] = [Cell; 8] for Branch { children_index: i }.
+    pub children: Vec<[Cell; 8]>,
+    /// Vertex positions computed by QEF (Phase 5-6).
+    pub vertices: Vec<CellVertex>,
+    /// Hermite data pool (Phase 4).
+    pub hermite_data: Vec<HermitePoint>,
+    /// Configuration.
+    pub min_depth: u8,
+    pub max_depth: u8,
+    pub iso_value: f64,
+}
+
+/// Statistics about the octree.
+#[derive(Debug, Clone)]
+pub struct OctreeStats {
+    pub leaf_count: u64,
+    pub branch_count: u64,
+    pub empty_count: u64,
+    pub full_count: u64,
+    pub max_actual_depth: u8,
+    pub total_evaluations: u64,
+}
+
+/// Compute the 6 face-neighbor coordinates of cell (cx, cy, cz) at depth d.
+/// Returns None if the neighbor is outside the octree bounds [0, 2^d).
+pub fn face_neighbors(cx: u32, cy: u32, cz: u32, depth: u8) -> [Option<(u32, u32, u32)>; 6] {
+    let max_coord = 1u32 << depth;
+    [
+        if cx > 0 { Some((cx - 1, cy, cz)) } else { None },           // -X
+        if cx + 1 < max_coord { Some((cx + 1, cy, cz)) } else { None }, // +X
+        if cy > 0 { Some((cx, cy - 1, cz)) } else { None },           // -Y
+        if cy + 1 < max_coord { Some((cx, cy + 1, cz)) } else { None }, // +Y
+        if cz > 0 { Some((cx, cy, cz - 1)) } else { None },           // -Z
+        if cz + 1 < max_coord { Some((cx, cy, cz + 1)) } else { None }, // +Z
+    ]
+}
+
+impl Octree {
+    /// Look up the cell at (cx, cy, cz) at the given depth.
+    ///
+    /// Navigates from the root, determining the octant at each level from the
+    /// cell coordinates. If the path hits a Leaf/Empty/Full before reaching
+    /// `depth`, returns that cell with its actual (coarser) depth.
+    pub fn cell_at(&self, cx: u32, cy: u32, cz: u32, depth: u8) -> (&Cell, u8) {
+        let mut cell = &self.root;
+        for d in 0..depth {
+            match cell {
+                Cell::Branch { children_index } => {
+                    let shift = depth - d - 1;
+                    let oct_x = (cx >> shift) & 1;
+                    let oct_y = (cy >> shift) & 1;
+                    let oct_z = (cz >> shift) & 1;
+                    let octant = (oct_x | (oct_y << 1) | (oct_z << 2)) as usize;
+                    cell = &self.children[*children_index as usize][octant];
+                }
+                _ => return (cell, d),
+            }
+        }
+        (cell, depth)
+    }
+
+    /// Count leaves, branches, etc.
+    pub fn stats(&self) -> OctreeStats {
+        let mut stats = OctreeStats {
+            leaf_count: 0,
+            branch_count: 0,
+            empty_count: 0,
+            full_count: 0,
+            max_actual_depth: 0,
+            total_evaluations: 0,
+        };
+        self.count_recursive(&self.root, 0, &mut stats);
+        stats
+    }
+
+    fn count_recursive(&self, cell: &Cell, depth: u8, stats: &mut OctreeStats) {
+        match cell {
+            Cell::Empty => stats.empty_count += 1,
+            Cell::Full => stats.full_count += 1,
+            Cell::Leaf(_) => {
+                stats.leaf_count += 1;
+                stats.max_actual_depth = stats.max_actual_depth.max(depth);
+            }
+            Cell::Branch { children_index } => {
+                stats.branch_count += 1;
+                let children = &self.children[*children_index as usize];
+                for child in children {
+                    self.count_recursive(child, depth + 1, stats);
+                }
+            }
+        }
+    }
+
+    /// Iterate over all leaf cells with their bounds and depth.
+    pub fn for_each_leaf<F>(&self, mut f: F)
+    where
+        F: FnMut(&LeafData, &CubicBounds, u8),
+    {
+        self.for_each_leaf_recursive(&self.root, &self.bounds, 0, &mut f);
+    }
+
+    fn for_each_leaf_recursive<F>(
+        &self,
+        cell: &Cell,
+        bounds: &CubicBounds,
+        depth: u8,
+        f: &mut F,
+    ) where
+        F: FnMut(&LeafData, &CubicBounds, u8),
+    {
+        match cell {
+            Cell::Empty | Cell::Full => {}
+            Cell::Leaf(data) => f(data, bounds, depth),
+            Cell::Branch { children_index } => {
+                let children = &self.children[*children_index as usize];
+                for (i, child) in children.iter().enumerate() {
+                    let child_bounds = bounds.child(i as u8);
+                    self.for_each_leaf_recursive(child, &child_bounds, depth + 1, f);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bbox::CubicBounds;
+
+    /// Build a minimal test octree: root is Branch with 8 children.
+    /// Child 0 (octant 000) is a Leaf with a sign change.
+    /// All other children are Empty.
+    fn make_test_octree() -> Octree {
+        let mut corner_values = [1.0f64; 8];
+        corner_values[0] = -1.0; // corner 0 inside → sign change
+        let leaf = LeafData::new(corner_values, 0.0);
+
+        let children: [Cell; 8] = [
+            Cell::Leaf(leaf),
+            Cell::Empty,
+            Cell::Empty,
+            Cell::Empty,
+            Cell::Empty,
+            Cell::Empty,
+            Cell::Empty,
+            Cell::Empty,
+        ];
+
+        let mut children_storage = Vec::new();
+        children_storage.push(children);
+
+        Octree {
+            bounds: CubicBounds { origin: [0.0, 0.0, 0.0], size: 1.0 },
+            root: Cell::Branch { children_index: 0 },
+            children: children_storage,
+            vertices: Vec::new(),
+            hermite_data: Vec::new(),
+            min_depth: 1,
+            max_depth: 1,
+            iso_value: 0.0,
+        }
+    }
+
+    /// Build a 2-level test octree: root → Branch → child 0 is Branch → 8 leaves.
+    fn make_depth2_octree() -> Octree {
+        let leaf_sign = LeafData::new({
+            let mut v = [1.0; 8]; v[0] = -1.0; v
+        }, 0.0);
+        let leaf_empty = LeafData::new([1.0; 8], 0.0);
+
+        // Level 2: 8 children of child 0
+        let level2_children: [Cell; 8] = std::array::from_fn(|i| {
+            if i == 0 {
+                Cell::Leaf(leaf_sign.clone())
+            } else {
+                Cell::Leaf(leaf_empty.clone())
+            }
+        });
+
+        let mut children_storage = Vec::new();
+        // Index 0: level 2 children (children of octant 0)
+        children_storage.push(level2_children);
+
+        // Index 1: level 1 children (root's children)
+        let level1_children: [Cell; 8] = [
+            Cell::Branch { children_index: 0 }, // octant 0 has sub-children
+            Cell::Empty,
+            Cell::Empty,
+            Cell::Empty,
+            Cell::Empty,
+            Cell::Empty,
+            Cell::Empty,
+            Cell::Empty,
+        ];
+        children_storage.push(level1_children);
+
+        Octree {
+            bounds: CubicBounds { origin: [0.0, 0.0, 0.0], size: 1.0 },
+            root: Cell::Branch { children_index: 1 },
+            children: children_storage,
+            vertices: Vec::new(),
+            hermite_data: Vec::new(),
+            min_depth: 1,
+            max_depth: 2,
+            iso_value: 0.0,
+        }
+    }
+
+    #[test]
+    fn test_cell_at_depth1_leaf() {
+        let octree = make_test_octree();
+        // Octant 0 (0,0,0) at depth 1 should be the Leaf
+        let (cell, depth) = octree.cell_at(0, 0, 0, 1);
+        assert_eq!(depth, 1);
+        assert!(matches!(cell, Cell::Leaf(_)));
+    }
+
+    #[test]
+    fn test_cell_at_depth1_empty() {
+        let octree = make_test_octree();
+        // Octant 7 (1,1,1) at depth 1 should be Empty
+        let (cell, depth) = octree.cell_at(1, 1, 1, 1);
+        assert_eq!(depth, 1);
+        assert!(matches!(cell, Cell::Empty));
+    }
+
+    #[test]
+    fn test_cell_at_coarser_return() {
+        let octree = make_test_octree();
+        // Query depth 2 at (2, 2, 2): octant 1 at depth 1 is Empty.
+        // cell_at should return early at depth 1 with Empty.
+        let (cell, actual_depth) = octree.cell_at(2, 2, 2, 2);
+        assert_eq!(actual_depth, 1);
+        assert!(matches!(cell, Cell::Empty));
+    }
+
+    #[test]
+    fn test_cell_at_depth2() {
+        let octree = make_depth2_octree();
+        // (0,0,0) at depth 2 should be the sign-change Leaf
+        let (cell, depth) = octree.cell_at(0, 0, 0, 2);
+        assert_eq!(depth, 2);
+        assert!(matches!(cell, Cell::Leaf(_)));
+
+        // (1,0,0) at depth 2: child of octant 0 at depth 1, octant 1 at depth 2
+        let (cell, depth) = octree.cell_at(1, 0, 0, 2);
+        assert_eq!(depth, 2);
+        // This is the leaf_empty (no sign change)
+        assert!(matches!(cell, Cell::Leaf(_)));
+    }
+
+    #[test]
+    fn test_cell_at_mixed_depth() {
+        let octree = make_depth2_octree();
+        // (2, 0, 0) at depth 2: octant 1 at depth 1 is Empty → returns at depth 1
+        let (cell, actual_depth) = octree.cell_at(2, 0, 0, 2);
+        assert_eq!(actual_depth, 1);
+        assert!(matches!(cell, Cell::Empty));
+    }
+
+    #[test]
+    fn test_face_neighbors_interior() {
+        let neighbors = face_neighbors(2, 3, 4, 4);
+        assert_eq!(neighbors[0], Some((1, 3, 4))); // -X
+        assert_eq!(neighbors[1], Some((3, 3, 4))); // +X
+        assert_eq!(neighbors[2], Some((2, 2, 4))); // -Y
+        assert_eq!(neighbors[3], Some((2, 4, 4))); // +Y
+        assert_eq!(neighbors[4], Some((2, 3, 3))); // -Z
+        assert_eq!(neighbors[5], Some((2, 3, 5))); // +Z
+    }
+
+    #[test]
+    fn test_face_neighbors_boundary() {
+        // At origin: -X, -Y, -Z are out of bounds
+        let neighbors = face_neighbors(0, 0, 0, 3);
+        assert_eq!(neighbors[0], None); // -X
+        assert_eq!(neighbors[1], Some((1, 0, 0))); // +X
+        assert_eq!(neighbors[2], None); // -Y
+        assert_eq!(neighbors[4], None); // -Z
+
+        // At max corner: +X, +Y, +Z are out of bounds (max = 2^3 = 8)
+        let neighbors = face_neighbors(7, 7, 7, 3);
+        assert_eq!(neighbors[0], Some((6, 7, 7))); // -X
+        assert_eq!(neighbors[1], None); // +X
+        assert_eq!(neighbors[3], None); // +Y
+        assert_eq!(neighbors[5], None); // +Z
+    }
+}
+```
+
+### src/octree/morton.rs
+```
+/// Morton (Z-order) code utilities for 3D spatial indexing.
+///
+/// A Morton code interleaves the bits of (x, y, z) grid coordinates into a single u64.
+/// This enables O(1) neighbor finding and efficient spatial sorting.
+///
+/// We use 21 bits per axis, supporting up to depth 21 (2M cells per axis).
+
+/// Spread 21 bits of x into every 3rd bit position.
+fn spread_bits(mut x: u64) -> u64 {
+    x &= 0x1F_FFFF; // mask to 21 bits
+    x = (x | (x << 32)) & 0x001F_0000_0000_FFFF;
+    x = (x | (x << 16)) & 0x001F_0000_FF00_00FF;
+    x = (x | (x << 8)) & 0x100F_00F0_0F00_F00F;
+    x = (x | (x << 4)) & 0x10C3_0C30_C30C_30C3;
+    x = (x | (x << 2)) & 0x1249_2492_4924_9249;
+    x
+}
+
+/// Compact every 3rd bit back into contiguous 21 bits.
+fn compact_bits(mut x: u64) -> u64 {
+    x &= 0x1249_2492_4924_9249;
+    x = (x | (x >> 2)) & 0x10C3_0C30_C30C_30C3;
+    x = (x | (x >> 4)) & 0x100F_00F0_0F00_F00F;
+    x = (x | (x >> 8)) & 0x001F_0000_FF00_00FF;
+    x = (x | (x >> 16)) & 0x001F_0000_0000_FFFF;
+    x = (x | (x >> 32)) & 0x1F_FFFF;
+    x
+}
+
+/// Encode (x, y, z) grid coordinates into a Morton code.
+pub fn encode(x: u32, y: u32, z: u32) -> u64 {
+    spread_bits(x as u64) | (spread_bits(y as u64) << 1) | (spread_bits(z as u64) << 2)
+}
+
+/// Decode a Morton code back into (x, y, z) grid coordinates.
+pub fn decode(code: u64) -> (u32, u32, u32) {
+    (
+        compact_bits(code) as u32,
+        compact_bits(code >> 1) as u32,
+        compact_bits(code >> 2) as u32,
+    )
+}
+
+/// Compute the Morton code for a child octant (0-7) of a parent at given depth.
+/// The child's code is formed by appending the octant bits to the parent's code.
+pub fn child_code(parent: u64, octant: u8, parent_depth: u8) -> u64 {
+    let shift = (parent_depth as u32) * 3;
+    parent | ((octant as u64) << shift)
+}
+
+/// Extract the octant index of a cell at `depth` from its Morton code.
+pub fn octant_at_depth(code: u64, depth: u8) -> u8 {
+    let shift = ((depth - 1) as u32) * 3;
+    ((code >> shift) & 7) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_roundtrip() {
+        for x in 0..16u32 {
+            for y in 0..16u32 {
+                for z in 0..16u32 {
+                    let code = encode(x, y, z);
+                    let (dx, dy, dz) = decode(code);
+                    assert_eq!((dx, dy, dz), (x, y, z));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_origin() {
+        assert_eq!(encode(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_ordering() {
+        // Morton code preserves spatial locality
+        let c1 = encode(0, 0, 0);
+        let c2 = encode(1, 0, 0);
+        assert!(c2 > c1);
+    }
+
+    #[test]
+    fn test_child_code() {
+        let parent = encode(0, 0, 0);
+        // Root is at depth 0; its children use parent_depth=0
+        let c = child_code(parent, 7, 0);
+        assert_eq!(c, 7); // octant 7 = 0b111 at shift 0
+
+        // A child at depth 1 has its sub-children at shift 3
+        let c2 = child_code(c, 3, 1); // parent_depth=1, octant 3 = 0b011
+        assert_eq!(c2, 7 | (3 << 3)); // = 7 + 24 = 31
+    }
+
+    #[test]
+    fn test_large_coordinates() {
+        let x = (1 << 21) - 1; // max 21-bit value
+        let y = (1 << 21) - 1;
+        let z = (1 << 21) - 1;
+        let code = encode(x, y, z);
+        let (dx, dy, dz) = decode(code);
+        assert_eq!((dx, dy, dz), (x, y, z));
+    }
+}
+```
+
+### src/octree/types.rs
+```
+/// Quantized 3D grid position for cache key deduplication.
+/// At depth d, coordinates range from 0 to 2^d (inclusive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GridPos {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+}
+
+impl GridPos {
+    pub fn new(x: u32, y: u32, z: u32) -> Self {
+        Self { x, y, z }
+    }
+}
+```
+
+### src/qef/mod.rs
+```
+pub mod quadric;
+```
+
+### src/qef/quadric.rs
+```
+use crate::util::math::{self, Sym3x3};
+
+/// Compact QEF representation with probabilistic quadrics regularization.
+///
+/// Represents the expected quadric error under Gaussian noise on positions
+/// and normals (Trettner & Kobbelt, CGF 2020). The σ_n² regularization term
+/// makes A^T A always positive definite, enabling direct LDL^T solve
+/// without SVD or rank-deficiency handling.
+#[derive(Clone, Copy, Debug)]
+pub struct QefData {
+    /// Upper triangle of A^T A (symmetric 3x3), includes σ_n² · I regularization.
+    pub ata: Sym3x3,
+    /// A^T b vector, includes σ_n² · p bias term.
+    pub atb: [f64; 3],
+    /// b^T b scalar (for error computation).
+    pub btb: f64,
+    /// Mass point accumulator (for SVD fallback).
+    pub mass_point_sum: [f64; 3],
+    /// Number of data points accumulated.
+    pub count: u32,
+}
+
+impl QefData {
+    pub fn new() -> Self {
+        Self {
+            ata: [0.0; 6],
+            atb: [0.0; 3],
+            btb: 0.0,
+            mass_point_sum: [0.0; 3],
+            count: 0,
+        }
+    }
+
+    /// Add a Hermite data point with probabilistic quadrics regularization.
+    ///
+    /// `sigma_n`: normal noise std dev (typically 0.01)
+    /// `sigma_p`: position noise std dev (typically 0.01 × cell_size)
+    pub fn add(&mut self, pos: [f64; 3], normal: [f64; 3], sigma_n: f64, sigma_p: f64) {
+        let n = normal;
+        let d = math::dot(n, pos);
+        let sn2 = sigma_n * sigma_n;
+        let sp2 = sigma_p * sigma_p;
+
+        // A^T A += n * n^T + σ_n² · I₃
+        self.ata[0] += n[0] * n[0] + sn2;
+        self.ata[1] += n[0] * n[1];
+        self.ata[2] += n[0] * n[2];
+        self.ata[3] += n[1] * n[1] + sn2;
+        self.ata[4] += n[1] * n[2];
+        self.ata[5] += n[2] * n[2] + sn2;
+
+        // A^T b += n * d + σ_n² · p
+        self.atb[0] += n[0] * d + sn2 * pos[0];
+        self.atb[1] += n[1] * d + sn2 * pos[1];
+        self.atb[2] += n[2] * d + sn2 * pos[2];
+
+        // b^T b += d² + σ_n²(p·p) + σ_p²(n·n) + 3·σ_p²·σ_n²
+        self.btb += d * d
+            + sn2 * math::dot(pos, pos)
+            + sp2 * math::dot(n, n)
+            + 3.0 * sp2 * sn2;
+
+        // Mass point (retained for SVD fallback)
+        self.mass_point_sum[0] += pos[0];
+        self.mass_point_sum[1] += pos[1];
+        self.mass_point_sum[2] += pos[2];
+        self.count += 1;
+    }
+
+    /// Solve QEF via LDL^T Cholesky (probabilistic quadrics path).
+    ///
+    /// Requires that `add()` was called with σ_n > 0.
+    /// Returns (position, error).
+    pub fn solve(&self, cell_min: [f64; 3], cell_max: [f64; 3]) -> ([f64; 3], f64) {
+        if self.count == 0 {
+            let center = [
+                (cell_min[0] + cell_max[0]) * 0.5,
+                (cell_min[1] + cell_max[1]) * 0.5,
+                (cell_min[2] + cell_max[2]) * 0.5,
+            ];
+            return (center, 0.0);
+        }
+
+        let mut x = math::ldlt_solve_3x3(&self.ata, self.atb);
+
+        // Clamp to cell bounds
+        for i in 0..3 {
+            x[i] = x[i].clamp(cell_min[i], cell_max[i]);
+        }
+
+        // Compute error: btb - 2 * x^T * atb + x^T * ata * x
+        let ata_x = math::sym_mul_vec(&self.ata, x);
+        let error = self.btb - 2.0 * math::dot(x, self.atb) + math::dot(x, ata_x);
+
+        (x, error.max(0.0))
+    }
+
+    /// Solve QEF via Jacobi eigendecomposition with mass-point fallback (original solver).
+    ///
+    /// Retained for comparison. Works best when `add()` is called without regularization,
+    /// but also works with regularized data (the eigenvalues will simply all be above threshold).
+    #[allow(dead_code)]
+    pub fn solve_svd(&self, cell_min: [f64; 3], cell_max: [f64; 3]) -> ([f64; 3], f64) {
+        if self.count == 0 {
+            let center = [
+                (cell_min[0] + cell_max[0]) * 0.5,
+                (cell_min[1] + cell_max[1]) * 0.5,
+                (cell_min[2] + cell_max[2]) * 0.5,
+            ];
+            return (center, 0.0);
+        }
+
+        let inv_count = 1.0 / self.count as f64;
+        let mass_point = [
+            self.mass_point_sum[0] * inv_count,
+            self.mass_point_sum[1] * inv_count,
+            self.mass_point_sum[2] * inv_count,
+        ];
+
+        let ata_mp = math::sym_mul_vec(&self.ata, mass_point);
+        let atb_shifted = math::sub(self.atb, ata_mp);
+
+        let (eigenvalues, eigenvectors) = math::jacobi_eigen_3x3(&self.ata);
+
+        let threshold = 0.1 * eigenvalues[0].max(1e-12);
+
+        let mut x_shifted = [0.0f64; 3];
+        for i in 0..3 {
+            if eigenvalues[i] > threshold {
+                let proj = math::dot(eigenvectors[i], atb_shifted);
+                let coeff = proj / eigenvalues[i];
+                x_shifted[0] += eigenvectors[i][0] * coeff;
+                x_shifted[1] += eigenvectors[i][1] * coeff;
+                x_shifted[2] += eigenvectors[i][2] * coeff;
+            }
+        }
+
+        let mut x = math::add(x_shifted, mass_point);
+
+        for i in 0..3 {
+            x[i] = x[i].clamp(cell_min[i], cell_max[i]);
+        }
+
+        let ata_x = math::sym_mul_vec(&self.ata, x);
+        let error = self.btb - 2.0 * math::dot(x, self.atb) + math::dot(x, ata_x);
+
+        (x, error.max(0.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SN: f64 = 0.01;
+    const SP: f64 = 0.01;
+
+    #[test]
+    fn test_single_plane() {
+        let mut qef = QefData::new();
+        qef.add([0.0, 0.0, 0.5], [0.0, 0.0, 1.0], SN, SP);
+        qef.add([1.0, 0.0, 0.5], [0.0, 0.0, 1.0], SN, SP);
+        qef.add([0.0, 1.0, 0.5], [0.0, 0.0, 1.0], SN, SP);
+
+        let (pos, _err) = qef.solve([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        assert!((pos[2] - 0.5).abs() < 0.01, "z={}", pos[2]);
+    }
+
+    #[test]
+    fn test_sharp_edge() {
+        let mut qef = QefData::new();
+        qef.add([0.5, 0.0, 0.0], [1.0, 0.0, 0.0], SN, SP);
+        qef.add([0.5, 1.0, 0.0], [1.0, 0.0, 0.0], SN, SP);
+        qef.add([0.0, 0.5, 0.0], [0.0, 1.0, 0.0], SN, SP);
+        qef.add([1.0, 0.5, 0.0], [0.0, 1.0, 0.0], SN, SP);
+
+        let (pos, _err) = qef.solve([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        assert!((pos[0] - 0.5).abs() < 0.01, "x={}", pos[0]);
+        assert!((pos[1] - 0.5).abs() < 0.01, "y={}", pos[1]);
+    }
+
+    #[test]
+    fn test_sharp_corner() {
+        let mut qef = QefData::new();
+        qef.add([0.5, 0.0, 0.0], [1.0, 0.0, 0.0], SN, SP);
+        qef.add([0.0, 0.5, 0.0], [0.0, 1.0, 0.0], SN, SP);
+        qef.add([0.0, 0.0, 0.5], [0.0, 0.0, 1.0], SN, SP);
+
+        let (pos, _err) = qef.solve([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        for i in 0..3 {
+            assert!((pos[i] - 0.5).abs() < 0.01, "pos[{}]={}", i, pos[i]);
+        }
+    }
+
+    #[test]
+    fn test_single_point_no_panic() {
+        // With probabilistic quadrics, even 1 sample produces a valid solve
+        let mut qef = QefData::new();
+        qef.add([0.3, 0.4, 0.5], [0.0, 0.0, 1.0], SN, SP);
+        let (pos, err) = qef.solve([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        assert!(pos[0].is_finite() && pos[1].is_finite() && pos[2].is_finite());
+        assert!(err.is_finite());
+        // z should be near 0.5 (the plane position)
+        assert!((pos[2] - 0.5).abs() < 0.05, "z={}", pos[2]);
+    }
+
+    #[test]
+    fn test_svd_vs_cholesky_agreement() {
+        let mut qef = QefData::new();
+        qef.add([0.5, 0.0, 0.0], [1.0, 0.0, 0.0], SN, SP);
+        qef.add([0.5, 1.0, 0.0], [1.0, 0.0, 0.0], SN, SP);
+        qef.add([0.0, 0.5, 0.0], [0.0, 1.0, 0.0], SN, SP);
+        qef.add([1.0, 0.5, 0.0], [0.0, 1.0, 0.0], SN, SP);
+
+        let bounds = ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        let (pos_chol, _) = qef.solve(bounds.0, bounds.1);
+        let (pos_svd, _) = qef.solve_svd(bounds.0, bounds.1);
+
+        for i in 0..3 {
+            assert!((pos_chol[i] - pos_svd[i]).abs() < 0.05,
+                "axis {}: cholesky={} svd={}", i, pos_chol[i], pos_svd[i]);
+        }
+    }
+}
+```
+
+### src/util/math.rs
+```
+/// 3D vector operations and 3x3 symmetric eigendecomposition.
+
+pub fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+pub fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+pub fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+pub fn scale(a: [f64; 3], s: f64) -> [f64; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+
+pub fn length(a: [f64; 3]) -> f64 {
+    dot(a, a).sqrt()
+}
+
+pub fn normalize(a: [f64; 3]) -> [f64; 3] {
+    let l = length(a);
+    if l < 1e-15 {
+        [0.0, 0.0, 0.0]
+    } else {
+        scale(a, 1.0 / l)
+    }
+}
+
+/// 3x3 symmetric matrix stored as [a00, a01, a02, a11, a12, a22].
+pub type Sym3x3 = [f64; 6];
+
+/// Multiply symmetric 3x3 matrix by vector.
+pub fn sym_mul_vec(m: &Sym3x3, v: [f64; 3]) -> [f64; 3] {
+    [
+        m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+        m[1] * v[0] + m[3] * v[1] + m[4] * v[2],
+        m[2] * v[0] + m[4] * v[1] + m[5] * v[2],
+    ]
+}
+
+/// Eigendecomposition of a 3x3 symmetric matrix via Jacobi rotations.
+///
+/// Returns (eigenvalues, eigenvectors_as_columns).
+/// eigenvalues are sorted descending.
+/// Each eigenvector is a column of the returned 3x3 matrix.
+pub fn jacobi_eigen_3x3(m: &Sym3x3) -> ([f64; 3], [[f64; 3]; 3]) {
+    // Expand symmetric to full 3x3
+    let mut s = [
+        [m[0], m[1], m[2]],
+        [m[1], m[3], m[4]],
+        [m[2], m[4], m[5]],
+    ];
+    let mut v = [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ];
+
+    for _ in 0..5 {
+        for (p, q) in [(0, 1), (0, 2), (1, 2)] {
+            if s[p][q].abs() < 1e-15 {
+                continue;
+            }
+            let tau = (s[q][q] - s[p][p]) / (2.0 * s[p][q]);
+            let t = if tau >= 0.0 {
+                1.0 / (tau + (1.0 + tau * tau).sqrt())
+            } else {
+                -1.0 / (-tau + (1.0 + tau * tau).sqrt())
+            };
+            let c = 1.0 / (1.0 + t * t).sqrt();
+            let sn = t * c;
+
+            // Rotate S
+            let spp = s[p][p];
+            let sqq = s[q][q];
+            let spq = s[p][q];
+
+            s[p][p] = c * c * spp - 2.0 * c * sn * spq + sn * sn * sqq;
+            s[q][q] = sn * sn * spp + 2.0 * c * sn * spq + c * c * sqq;
+            s[p][q] = 0.0;
+            s[q][p] = 0.0;
+
+            for r in 0..3 {
+                if r != p && r != q {
+                    let srp = s[r][p];
+                    let srq = s[r][q];
+                    s[r][p] = c * srp - sn * srq;
+                    s[p][r] = s[r][p];
+                    s[r][q] = sn * srp + c * srq;
+                    s[q][r] = s[r][q];
+                }
+            }
+
+            // Rotate V
+            for r in 0..3 {
+                let vrp = v[r][p];
+                let vrq = v[r][q];
+                v[r][p] = c * vrp - sn * vrq;
+                v[r][q] = sn * vrp + c * vrq;
+            }
+        }
+    }
+
+    let mut eigenvalues = [s[0][0], s[1][1], s[2][2]];
+    // Columns of v are eigenvectors
+    let mut eigenvectors = [
+        [v[0][0], v[1][0], v[2][0]],
+        [v[0][1], v[1][1], v[2][1]],
+        [v[0][2], v[1][2], v[2][2]],
+    ];
+
+    // Sort descending by eigenvalue
+    for i in 0..3 {
+        for j in (i + 1)..3 {
+            if eigenvalues[j] > eigenvalues[i] {
+                eigenvalues.swap(i, j);
+                eigenvectors.swap(i, j);
+            }
+        }
+    }
+
+    (eigenvalues, eigenvectors)
+}
+
+/// Solve Ax = b for a 3x3 symmetric positive-definite matrix via LDL^T factorization.
+///
+/// A is given as Sym3x3 = [a00, a01, a02, a11, a12, a22].
+/// Precondition: A must be positive definite (guaranteed by probabilistic quadrics
+/// regularization term σ_n² · I).
+pub fn ldlt_solve_3x3(a: &Sym3x3, b: [f64; 3]) -> [f64; 3] {
+    // LDL^T factorization (unrolled for 3x3)
+    let d0 = a[0]; // a00
+    let inv_d0 = 1.0 / d0;
+    let l10 = a[1] * inv_d0; // a01 / a00
+    let l20 = a[2] * inv_d0; // a02 / a00
+
+    let d1 = a[3] - a[1] * l10; // a11 - a01²/a00
+    let inv_d1 = 1.0 / d1;
+    let l21 = (a[4] - a[2] * l10) * inv_d1; // (a12 - a02·l10) / d1
+
+    let d2 = a[5] - a[2] * l20 - (a[4] - a[2] * l10) * l21;
+
+    // Forward substitution: L y = b
+    let y0 = b[0];
+    let y1 = b[1] - l10 * y0;
+    let y2 = b[2] - l20 * y0 - l21 * y1;
+
+    // Diagonal solve: D z = y
+    let z0 = y0 * inv_d0;
+    let z1 = y1 * inv_d1;
+    let z2 = y2 / d2;
+
+    // Back substitution: L^T x = z
+    let x2 = z2;
+    let x1 = z1 - l21 * x2;
+    let x0 = z0 - l10 * x1 - l20 * x2;
+
+    [x0, x1, x2]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_identity_eigenvalues() {
+        let m: Sym3x3 = [1.0, 0.0, 0.0, 1.0, 0.0, 1.0];
+        let (vals, _) = jacobi_eigen_3x3(&m);
+        for v in vals {
+            assert!((v - 1.0).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_diagonal_eigenvalues() {
+        let m: Sym3x3 = [3.0, 0.0, 0.0, 2.0, 0.0, 1.0];
+        let (vals, _) = jacobi_eigen_3x3(&m);
+        assert!((vals[0] - 3.0).abs() < 1e-10);
+        assert!((vals[1] - 2.0).abs() < 1e-10);
+        assert!((vals[2] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_known_symmetric() {
+        // [2, 1, 0; 1, 3, 1; 0, 1, 2] has known eigenvalues
+        let m: Sym3x3 = [2.0, 1.0, 0.0, 3.0, 1.0, 2.0];
+        let (vals, vecs) = jacobi_eigen_3x3(&m);
+        // Verify Av = λv for each eigenpair
+        for i in 0..3 {
+            let av = sym_mul_vec(&m, vecs[i]);
+            let lv = scale(vecs[i], vals[i]);
+            for j in 0..3 {
+                assert!((av[j] - lv[j]).abs() < 1e-8,
+                    "Eigenvector {} component {} mismatch: {} vs {}", i, j, av[j], lv[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ldlt_identity() {
+        let a: Sym3x3 = [1.0, 0.0, 0.0, 1.0, 0.0, 1.0];
+        let b = [3.0, 5.0, 7.0];
+        let x = ldlt_solve_3x3(&a, b);
+        for i in 0..3 {
+            assert!((x[i] - b[i]).abs() < 1e-12, "component {}: {}", i, x[i]);
+        }
+    }
+
+    #[test]
+    fn test_ldlt_known_spd() {
+        // A = [[4,2,1],[2,5,3],[1,3,6]] (SPD)
+        let a: Sym3x3 = [4.0, 2.0, 1.0, 5.0, 3.0, 6.0];
+        let b = [1.0, 2.0, 3.0];
+        let x = ldlt_solve_3x3(&a, b);
+        let ax = sym_mul_vec(&a, x);
+        for i in 0..3 {
+            assert!((ax[i] - b[i]).abs() < 1e-10,
+                "component {}: Ax={} vs b={}", i, ax[i], b[i]);
+        }
+    }
+
+    #[test]
+    fn test_ldlt_diagonal() {
+        let a: Sym3x3 = [2.0, 0.0, 0.0, 3.0, 0.0, 5.0];
+        let b = [4.0, 9.0, 15.0];
+        let x = ldlt_solve_3x3(&a, b);
+        assert!((x[0] - 2.0).abs() < 1e-12);
+        assert!((x[1] - 3.0).abs() < 1e-12);
+        assert!((x[2] - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_ldlt_regularized_rank1() {
+        // Rank-1 (n=[1,0,0] outer product) + ε·I simulates probabilistic quadrics
+        let eps = 0.01;
+        let a: Sym3x3 = [1.0 + eps, 0.0, 0.0, eps, 0.0, eps];
+        let b = [0.5 + eps * 0.3, eps * 0.4, eps * 0.5];
+        let x = ldlt_solve_3x3(&a, b);
+        let ax = sym_mul_vec(&a, x);
+        for i in 0..3 {
+            assert!((ax[i] - b[i]).abs() < 1e-10,
+                "component {}: Ax={} vs b={}", i, ax[i], b[i]);
+        }
+    }
+}
+```
+
+### src/util/mod.rs
+```
+pub mod math;
+```

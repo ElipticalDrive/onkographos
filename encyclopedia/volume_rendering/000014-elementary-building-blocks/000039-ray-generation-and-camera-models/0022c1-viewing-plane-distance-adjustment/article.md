@@ -1,0 +1,80 @@
+# Viewing Plane Distance Adjustment
+Also called: Divergence minimization, Ray Divergence Reduction via Viewing Plane Distance
+
+## Overview
+Viewing Plane Distance Adjustment minimizes aliasing artifacts caused by ray divergence in volume rendering by increasing the distance between the viewer's eye and the viewing plane [S1, unofficial]. By reducing the angle between neighboring rays, it ensures adjacent pixels sample adjacent regions of the data volume [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: Camera eye position $\mathbf{o}$, viewing plane distance $d$, and pixel grid dimensions [G].
+- **Output**: Adjusted viewing plane distance $d_{adj}$ and updated ray directions [G].
+
+**Data Structures**
+Standard camera parameters (eye position, viewing plane distance, pixel grid dimensions) [G].
+
+**Steps**
+1. **Calculate Ray Divergence**: Determine the angular separation between rays passing through adjacent pixels using standard geometric projection [G].
+2. **Adjust Distance**: Increase the distance $d$ between the viewer's eye and the viewing plane [S1, unofficial].
+3. **Convergence Check**: As $d$ increases, the angle of divergence between rays decreases [S1, unofficial]. Continue increasing $d$ until the divergence angle is sufficiently small to prevent sampling gaps [S1, unofficial].
+4. **Ray Generation**: Generate rays using the adjusted distance [G].
+
+**Formulas**
+For small angles, the divergence angle $\alpha$ between neighboring rays is approximated by $\alpha \approx \text{pixel\_pitch} / d$ [G].
+
+**Parameters**
+- **Typical Distance**: In the source example, a $512 \times 512$ pixel image plane was set at a distance of 5000 units from the viewer's eye [S1, unofficial].
+- **Resulting Divergence**: With the above configuration, the maximum divergence between neighboring rays was $0.011^\circ$ [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Precision**: Floating-point precision may limit the maximum usable distance [G].
+- **Degenerate Input**: If the viewing plane distance is zero or negative, ray generation is undefined [G].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+from typing import Tuple
+import math
+
+class Ray:
+    def __init__(self, origin: Tuple[float, float, float], direction: Tuple[float, float, float]):
+        self.origin = origin
+        self.direction = direction
+
+def adjust_viewing_plane_distance(pixel_pitch: float, target_divergence_angle_rad: float) -> float:
+    # Step 1-3: Increase distance until divergence angle is sufficiently small [S1, unofficial]
+    if target_divergence_angle_rad <= 0:
+        raise ValueError("Target divergence angle must be positive.")
+    # Standard geometric approximation: distance ≈ pixel_pitch / divergence_angle [G]
+    return pixel_pitch / target_divergence_angle_rad
+
+def generate_ray(eye_pos: Tuple[float, float, float], pixel_pos_3d: Tuple[float, float, float]) -> Ray:
+    # Step 4: Generate rays using the adjusted distance [G]
+    dx = pixel_pos_3d[0] - eye_pos[0]
+    dy = pixel_pos_3d[1] - eye_pos[1]
+    dz = pixel_pos_3d[2] - eye_pos[2]
+    length = math.sqrt(dx*dx + dy*dy + dz*dz)
+    if length == 0:
+        raise ValueError("Eye position and pixel position cannot be identical.")
+    return Ray(eye_pos, (dx/length, dy/length, dz/length))
+```
+
+## Subtopics
+
+### Geometric Phase Lens Viewing Distance Reduction
+A flat field lens exploiting spatial anisotropy to gather diffracted light and reduce the minimum viewing distance required for pixel overlap in holographic displays [S2]. It uses a Geometric Phase Lens (GPL) with 98% diffraction efficiency across the visible spectrum [S2]. The minimum viewing distance is calculated as $D = 0.5 \times L / \tan(\theta/2)$, where $L$ is the horizontal display length and $\theta$ is the viewing angle [S2]. For a 10-inch display ($L \approx 22$ cm) and $\theta = 0.25^\circ$, the distance is reduced from ~25 m to ~1 m (25× reduction) using a 1 m focal length GPL [S2].
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ for distance adjustment calculation [G]. Ray generation remains $O(N)$ for $N$ pixels [G].
+- **Memory Complexity**: $O(1)$ additional memory for distance parameter [G].
+- **Strengths**: Not given in the sources.
+- **Limitations**: Not given in the sources.
+- **When to Use**: Not given in the sources.
+- **When Not to Use**: Not given in the sources.
+
+## Background
+Described in a DTIC report on volumetric rendering techniques for aerodynamic flow field data [S1, unofficial], it addresses the problem of rays diverging and failing to sample adjacent pixels [S1, unofficial]. The technique is applied in the context of subvolume isolation via cutting plane methods [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA202661: Volumetric Rendering Techniques for the Display of Three-Dimensional Aerodynamic Flow Field Data, https://archive.org/details/DTIC_ADA202661, fetched 2026-10-26 (unofficial)
+[S2] Slim-panel holographic video display, https://doi.org/10.1038/s41467-020-19298-4, fetched 2026-10-26

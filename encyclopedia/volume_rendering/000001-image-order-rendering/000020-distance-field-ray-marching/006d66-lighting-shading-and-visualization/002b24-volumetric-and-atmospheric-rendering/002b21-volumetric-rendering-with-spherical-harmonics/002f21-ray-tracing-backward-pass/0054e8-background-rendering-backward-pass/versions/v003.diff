@@ -1,0 +1,276 @@
+--- v002.md
++++ v003.md
+@@ -1,99 +1,52 @@
+ # Background Rendering Backward Pass
+ 
+-Also called: Background Backpropagation, Background Rendering Kernel (Backward)
++Also called: Background Backpropagation
+ 
+ ## Overview
+-The Background Rendering Backward Pass computes the gradients of the loss with respect to the background volumetric field (typically a sparse grid of spherical harmonic coefficients or density values) and the accumulated transmittance, given the rendered background color, ground truth, and ray parameters. It serves as the differentiable counterpart to the concentric sphere sampling and trilinear interpolation used in the forward background rendering pass. Unlike the foreground ray casting which traverses a dense or sparse voxel grid, this method specifically handles the unbounded background field, often using a separate sparse grid structure [S1, unofficial]. It is distinct from the general Ray Tracing Backward Pass by isolating the gradient computation for the background component, allowing for specialized handling of RGB normalization and sparsity regularization specific to the background layer [S2, unofficial].
++Computes gradients for the background rendering pass, backpropagating through concentric sphere sampling and trilinear interpolation to update the background volumetric field and accumulated transmittance [S1, unofficial]. It handles RGB gradient normalization and calls the background backward function [S2, unofficial]. Unlike the foreground pass, it operates on a separate sparse grid structure for unbounded backgrounds [S1, unofficial].
+ 
+ ## How it works
+-The method is implemented as a CUDA kernel that processes rays in parallel. It assumes the forward pass has already computed the accumulated transmittance (`log_transmit`) and the final background color contribution. The backward pass iterates through the same sampling steps as the forward pass to compute local gradients and accumulate them into the background data structure.
++Inputs: `grid` (SparseGridSpec), `rgb_gt` (ground truth RGB tensor), `rgb_out` (rendered RGB tensor), `rays` (RaysSpec with origins, directions, IDs), `opt` (RenderOptions: `background_nlayers`, `step_size`, `use_background`, `grad_out_is_rgb`), `log_transmit` (per-ray log-transmittance tensor), `accum` (per-ray accumulated color tensor), `sparsity_loss` (boolean flag), `grad_output` (loss gradient w.r.t. output RGB).
++Outputs: `grads.grad_background_out` (gradient buffer for background volumetric data).
+ 
+-### Inputs and Outputs
+-**Inputs:**
+-*   `grid`: SparseGridSpec containing the background volumetric data (density/sigma and SH coefficients).
+-*   `rgb_gt`: Ground truth RGB tensor for the current batch.
+-*   `rgb_out`: Rendered background RGB tensor.
+-*   `rays`: RaysSpec containing ray origins, directions, and IDs.
+-*   `opt`: RenderOptions including `background_nlayers`, `step_size`, and `use_background`.
+-*   `log_transmit`: Tensor of accumulated log-transmittance values per ray.
+-*   `accum`: Tensor of accumulated color contributions per ray.
+-*   `sparsity_loss`: Boolean flag indicating if sparsity regularization is active.
+-*   `grad_output`: Gradient of the loss with respect to the final output color (RGB).
++Data structures:
++- `SparseGridSpec`: Contains layout for the background sparse grid. Internal layout (hash map keys, leaf node sizes) is defined by the parent `Background Volume Rendering with Sparse Grid` implementation [S1, unofficial].
++- `SingleRaySpec`: Temporary structure holding interpolated values (`ray.pos`, `ray.l`, `invr_mid`) for the current sampling step.
+ 
+-**Outputs:**
+-*   `grads.grad_background_out`: Gradient buffer for the background volumetric data.
+-*   `grads.grad_log_transmit`: (Optional) Gradient for accumulated transmittance.
++Parameters:
++- `background_nlayers`: Number of layers in the background grid. Default 32 [S2, unofficial].
++- `step_size`: Step size for concentric sphere sampling. Not given in the sources.
++- `TRACE_RAY_BG_CUDA_THREADS`: Number of CUDA threads per block. Default 256 [S1, unofficial].
++- `sparsity_loss`: Weight for Cauchy sparsity regularization. Passed as argument [S3, unofficial].
++- `use_background`: Boolean flag to enable/disable the background backward pass [S1, unofficial].
+ 
+-### Data Structures
+-*   **SparseGridSpec**: Contains the layout for the background sparse grid. The exact internal layout (e.g., hash map keys, leaf node sizes) is defined by the parent `Background Volume Rendering with Sparse Grid` implementation [S1, unofficial].
+-*   **ConcentricSpheresIntersector**: Helper object for intersecting rays with concentric spheres. It stores `ray.origin` and `ray.dir`.
+-*   **SingleRaySpec**: Temporary structure holding interpolated values (`ray.pos`, `ray.l`, `invr_mid`) for the current sampling step.
++Steps:
++1. Check `use_background`. If false, return [S1, unofficial].
++2. Get `ray_id` for the current thread. If `log_transmit[ray_id] < -25.0f`, return early [S2, unofficial].
++3. Initialize `total_color = 0.0f` [S1, unofficial].
++4. Initialize concentric sphere intersector with `ray.origin` and `ray.dir`. Calculate `inner_radius = max(dist_ray_to_origin(ray.origin, ray.dir) + 1e-3f, 1.0f)`. Calculate `n_steps = int(grid.background_nlayers / opt.step_size) + 2`. Initialize `invr_last = 1.0f / inner_radius` [G].
++5. Prepare `grad_out`: if `grad_out_is_rgb` is true, `grad_out = (rgb_gt - rgb_out) * (2.0f / (3.0f * Q))`; else `grad_out = grad_output` [S2, unofficial].
++6. Loop `i` from 0 to `n_steps - 1`:
++   - Calculate radius `r = n_steps / (n_steps - i - 0.5)` [G].
++   - If `r < inner_radius` or ray-sphere intersection fails, continue [G].
++   - Calculate position `ray.pos = origin + t * dir`.
++   - Calculate `invr_mid = 1.0f / norm(ray.pos)`. Normalize `ray.pos *= invr_mid`.
++   - Convert to equirectangular coordinates. Calculate layer index and integer lattice `ray.l`, clamp to grid bounds, and compute fractional part `ray.pos` [G].
++   - Trilinearly interpolate sigma: `sigma = trilerp(grid, ray.l, ray.pos)`.
++   - If `sigma > 0.0f`:
++     - `pcnt = ray.world_step * (invr_last - invr_mid) * sigma`.
++     - `weight = exp(log_transmit[ray_id]) * (1.0f - exp(-pcnt))`.
++     - `log_transmit[ray_id] -= pcnt` [G].
++     - For each RGB channel `i`:
++       - `color = trilerp(grid, ray.l, ray.pos) * C0 + 0.5f` (where `C0` is the base color coefficient).
++       - `total_color += max(color, 0.0f) * grad_out[i]` [S1, unofficial].
++       - If `color > 0.0f`: `curr_grad_color = C0 * weight * grad_out[i]`. Backpropagate to background data using trilinear interpolation backward [S1, unofficial].
++   - `invr_last = invr_mid` [G].
++7. Accumulate color gradient: `accum[ray_id] -= weight * total_color` [S1, unofficial].
++8. Sparsity loss gradient (if `sparsity_loss`): `curr_grad_sigma = sparsity_loss * (4.0f * sigma / (1.0f + 2.0f * sigma * sigma))`. Backpropagate to background data using trilinear interpolation backward [S1, unofficial].
++9. Sigma gradient from color: `curr_grad_sigma = ray.world_step * (invr_last - invr_mid) * (total_color * exp(log_transmit[ray_id]) - accum[ray_id])` [S3, unofficial]. Backpropagate to background data using trilinear interpolation backward [S3, unofficial].
++10. Calculate blocks: `blocks = CUDA_N_BLOCKS_NEEDED(Q, TRACE_RAY_BG_CUDA_THREADS)`. Launch kernel. Check CUDA errors [S1, unofficial].
+ 
+-### Parameters
+-*   `background_nlayers`: Number of layers in the background grid. Typical value: 32 [S2, unofficial].
+-*   `step_size`: Step size for concentric sphere sampling. Typical value: Not given in the sources.
+-*   `inner_radius`: Minimum radius for background sampling. Calculated as `fmaxf(_dist_ray_to_origin(ray.origin, ray.dir) + 1e-3f, 1.f)` [S3, unofficial].
+-*   `TRACE_RAY_BG_CUDA_THREADS`: Number of CUDA threads per block. Typical value: 256 [S1, unofficial].
+-*   `sparsity_loss`: Weight for Cauchy sparsity regularization. Passed as an argument [S3, unofficial].
+-*   `use_background`: Boolean flag to enable/disable the background backward pass [S1, unofficial].
+-
+-### Steps
+-1.  **Initialization**:
+-    *   If `use_background` is false, return.
+-    *   Get `ray_id` for the current thread.
+-    *   **Early Exit**: If `log_transmit[ray_id] < -25.0f`, the ray is fully transparent or saturated; return early [S1, S2, unofficial].
+-    *   Initialize `total_color = 0.0f`.
+-    *   Initialize `ConcentricSpheresIntersector csi` with `ray.origin` and `ray.dir` [S3, unofficial].
+-    *   Calculate `inner_radius = fmaxf(_dist_ray_to_origin(ray.origin, ray.dir) + 1e-3f, 1.0f)` [S3, unofficial].
+-    *   Calculate `n_steps = int(grid.background_nlayers / opt.step_size) + 2` [S3, unofficial].
+-    *   Initialize `invr_last = 1.0f / inner_radius` [S3, unofficial].
+-
+-2.  **Gradient Output Preparation**:
+-    *   Determine `grad_out` based on `grad_out_is_rgb` flag:
+-        *   If `grad_out_is_rgb` is true: `grad_out = resid * norm_factor`, where `norm_factor = 2.0f / (3.0f * Q)` and `Q` is the number of rays [S2, unofficial].
+-        *   Else: `grad_out = grad_output` [S2, unofficial].
+-
+-3.  **Sampling Loop**:
+-    *   Loop `i` from `0` to `n_steps - 1`:
+-        *   Calculate radius `r = n_steps / (n_steps - i - 0.5)` [S3, unofficial].
+-        *   If `r < inner_radius` or `!csi.intersect(r, &t)`, continue to next iteration [S3, unofficial].
+-        *   Calculate position `ray.pos = origin + t * dir` [S3, unofficial].
+-        *   Calculate `invr_mid = _rnorm(ray.pos)` (inverse norm of position) [S3, unofficial].
+-        *   Normalize position: `ray.pos *= invr_mid` [S3, unofficial].
+-        *   Convert to equirectangular coordinates: `_unitvec2equirect(ray.pos)` [S3, unofficial].
+-        *   Calculate layer index and integer lattice `ray.l`, clamp to grid bounds, and compute fractional part `ray.pos` for interpolation [S3, unofficial].
+-        *   **Trilinear Interpolation of Sigma**:
+-            *   `sigma = trilerp_bg_one(grid, ray.l, ray.pos)` [S3, unofficial].
+-        *   **Compute Weight and Transmittance Update**:
+-            *   If `sigma > 0.0f`:
+-                *   `pcnt = ray.world_step * (invr_last - invr_mid) * sigma` [S3, unofficial].
+-                *   `weight = exp(log_transmit[ray_id]) * (1.0f - exp(-pcnt))` [S3, unofficial].
+-                *   `log_transmit[ray_id] -= pcnt` [S3, unofficial].
+-        *   **Color Accumulation**:
+-            *   For each RGB channel `i`:
+-                *   Interpolate color: `color = trilerp_bg_one(grid, ray.l, ray.pos) * C0 + 0.5f` (where `C0` is the base color coefficient) [S3, unofficial].
+-                *   `total_color += fmaxf(color, 0.0f) * grad_out[i]` [S3, unofficial].
+-        *   **Gradient Propagation to Background Data**:
+-            *   If `color > 0.0f`:
+-                *   Compute `curr_grad_color = C0 * weight * grad_out[i]` [S3, unofficial].
+-                *   Call `trilerp_backward_bg_one` to propagate `curr_grad_color` to `grads.grad_background_out` [S3, unofficial].
+-
+-4.  **Accumulation and Sparsity Gradient**:
+-    *   **Accumulate Color Gradient**:
+-        *   `accum[ray_id] -= weight * total_color` [S1, unofficial].
+-    *   **Sparsity Loss Gradient** (if `sparsity_loss` is true):
+-        *   For each sampled `sigma`:
+-            *   `curr_grad_sigma = sparsity_loss * (4.0f * sigma / (1.0f + 2.0f * (sigma * sigma)))` [S1, unofficial].
+-            *   Call `trilerp_backward_bg_one` with `curr_grad_sigma` to update `grads.grad_background_out` [S1, unofficial].
+-    *   **Sigma Gradient from Color**:
+-        *   Compute `curr_grad_sigma = ray.world_step * (invr_last - invr_mid) * (total_color * exp(log_transmit[ray_id]) - accum[ray_id])` [S1, unofficial].
+-        *   Call `trilerp_backward_bg_one` with `curr_grad_sigma` to update `grads.grad_background_out` [S1, unofficial].
+-
+-5.  **Kernel Launch**:
+-    *   Calculate blocks: `blocks = CUDA_N_BLOCKS_NEEDED(Q, TRACE_RAY_BG_CUDA_THREADS)` [S1, unofficial].
+-    *   Launch kernel with `blocks` and `TRACE_RAY_BG_CUDA_THREADS`.
+-    *   Check for CUDA errors using `CUDA_CHECK_ERRORS` [S1, unofficial].
+-
+-### Pseudocode
++Pseudocode:
+ ```python
+ def render_background_backward(grid, rgb_gt, rgb_out, rays, opt, log_transmit, accum, sparsity_loss, grad_output):
+@@ -107,10 +60,6 @@
+     threads = 256  # TRACE_RAY_BG_CUDA_THREADS
+     blocks = (Q + threads - 1) // threads
+-
+-    # Initialize gradient buffer
+     grads = GradientBuffer(grid)
+ 
+-    # Launch CUDA kernel
+-    # Note: This is a conceptual representation of the CUDA kernel logic
+     for ray_id in range(Q):
+         ray = rays[ray_id]
+@@ -125,8 +74,6 @@
+         invr_last = 1.0 / inner_radius
+         
+-        csi = ConcentricSpheresIntersector(ray.origin, ray.dir)
+-        
+         # Prepare gradient output
+-        if grad_out_is_rgb:
++        if opt.grad_out_is_rgb:
+             norm_factor = 2.0 / (3.0 * Q)
+             resid = rgb_gt[ray_id] - rgb_out[ray_id]
+@@ -141,5 +88,5 @@
+                 continue
+             
+-            t = csi.intersect(r)
++            t = intersect_sphere(ray.origin, ray.dir, r)
+             if t is None:
+                 continue
+@@ -147,15 +94,10 @@
+             ray_pos = ray.origin + t * ray.dir
+             invr_mid = 1.0 / norm(ray_pos)
+-            ray_pos_normalized = ray_pos * invr_mid
++            ray_pos_norm = ray_pos * invr_mid
+             
+-            # Convert to equirectangular coordinates
+-            eq_coords = unitvec2equirect(ray_pos_normalized)
+-            
+-            # Get grid indices and fractional part
++            eq_coords = unitvec2equirect(ray_pos_norm)
+             lattice, frac = get_lattice_and_frac(eq_coords, grid.background_reso)
+             
+-            # Trilinear interpolation of sigma
+-            sigma = trilerp_bg_one(grid, lattice, frac)
+-            
++            sigma = trilerp(grid, lattice, frac)
+             if sigma > 0.0:
+                 pcnt = ray.world_step * (invr_last - invr_mid) * sigma
+@@ -163,28 +105,62 @@
+                 log_transmit[ray_id] -= pcnt
+                 
+-                # Interpolate color
+-                color = trilerp_bg_one(grid, lattice, frac) * C0 + 0.5
+-                
+-                # Accumulate color gradient
+                 for ch in range(3):
++                    color = trilerp(grid, lattice, frac) * C0 + 0.5
+                     total_color += max(color[ch], 0.0) * grad_out[ch]
+-                
+-                # Backpropagate to background data
+-                if color[ch] > 0.0:
+-                    curr_grad_color = C0 * weight * grad_out[ch]
+-                    trilerp_backward_bg_one(grads, lattice, frac, curr_grad_color)
+-                
+-                # Sparsity loss gradient
++                    if color[ch] > 0.0:
++                        curr_grad_color = C0 * weight * grad_out[ch]
++                        trilerp_backward(grads, lattice, frac, curr_grad_color)
++                        
+                 if sparsity_loss:
+                     curr_grad_sigma = sparsity_loss * (4.0 * sigma / (1.0 + 2.0 * sigma * sigma))
+-                    trilerp_backward_bg_one(grads, lattice, frac, curr_grad_sigma)
++                    trilerp_backward(grads, lattice, frac, curr_grad_sigma)
++                    
++                curr_grad_sigma = ray.world_step * (invr_last - invr_mid) * (total_color * exp(log_transmit[ray_id]) - accum[ray_id])
++                trilerp_backward(grads, lattice, frac, curr_grad_sigma)
+                 
+-                # Sigma gradient from color
+-                curr_grad_sigma = ray.world_step * (invr_last - invr_mid) * (total_color * exp(log_transmit[ray_id]) - accum[ray_id])
+-                trilerp_backward_bg_one(grads, lattice, frac, curr_grad_sigma)
++            invr_last = invr_mid
+             
+-            invr_last = invr_mid
++        accum[ray_id] -= weight * total_color
++        
++    return grads
+ 
+-    return grads
++def dist_ray_to_origin(origin, dir):
++    return norm(origin)
++
++def intersect_sphere(origin, dir, radius):
++    # Returns distance t along dir to sphere of given radius centered at origin
++    # Simplified for concentric spheres centered at origin
++    return radius
++
++def norm(v):
++    return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++
++def unitvec2equirect(v):
++    # Converts unit vector to equirectangular (theta, phi)
++    theta = acos(v[2] / norm(v))
++    phi = atan2(v[1], v[0])
++    return (theta, phi)
++
++def get_lattice_and_frac(coords, reso):
++    # Converts equirectangular coords to grid lattice and fractional part
++    theta, phi = coords
++    x = int(theta * reso / pi)
++    y = int(phi * reso / (2 * pi))
++    frac_x = (theta * reso / pi) - x
++    frac_y = (phi * reso / (2 * pi)) - y
++    return ((x, y), (frac_x, frac_y))
++
++def trilerp(grid, lattice, frac):
++    # Standard trilinear interpolation on grid at lattice with fractional offset frac
++    # Returns interpolated value
++    return 0.0  # Placeholder for actual grid lookup and interpolation
++
++def trilerp_backward(grads, lattice, frac, grad_val):
++    # Accumulates grad_val to the gradient buffer at lattice and frac
++    pass
++
++class GradientBuffer:
++    def __init__(self, grid):
++        self.data = [0.0] * grid.size
+ ```
+ 
+@@ -192,5 +168,5 @@
+ *   **Transmittance Saturation**: If `log_transmit[ray_id] < -25.0f`, the thread returns early to avoid numerical instability and wasted computation [S1, S2, unofficial].
+ *   **Precision**: The use of `float` (single precision) is standard in the CUDA implementation [S1, unofficial]. Care must be taken with the `exp` and `log` operations to avoid underflow/overflow.
+-*   **Boundary Conditions**: The `inner_radius` calculation ensures that rays do not sample inside the origin sphere, preventing division by zero or invalid intersections [S3, unofficial].
++*   **Boundary Conditions**: The `inner_radius` calculation ensures that rays do not sample inside the origin sphere, preventing division by zero or invalid intersections [G].
+ *   **CUDA Errors**: The kernel launch must be followed by error checking to catch invalid memory accesses or configuration errors [S1, unofficial].
+ 

@@ -1,0 +1,192 @@
+# Softmax-GS Rendering Algorithm
+
+Also called: Softmax Gaussian Splatting
+
+## Overview
+Softmax-GS is a rendering method for 3D Gaussian Splatting that employs a softmax-based competition mechanism to handle overlapping Gaussians, aiming to provide order-invariance and smooth transitions at Gaussian boundaries [S1]. Unlike standard 3D Gaussian Splatting, which suffers from popping artifacts due to sorting dependencies, or StopThePop, which exhibits abrupt color changes, Softmax-GS produces flicker-free, smooth transitions by treating overlapping splats as a competitive blending process rather than a strict depth-sorted accumulation [S1]. It builds on [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md) by replacing the standard alpha blending step with this differentiable, order-invariant softmax competition [S1].
+
+## How it works
+**Inputs and Outputs:**
+The algorithm takes a set of $K$ Gaussians projected onto a pixel, along with the pixel coordinate $x_{\text{pixel}}$ [S1]. It outputs the final pixel color $c_{\text{past}}$, depth $d_{\text{past}}$, and transmittance $T_{\text{past}}$ after processing all $K$ Gaussians [S1].
+
+**Data Structures:**
+The method maintains running accumulators for the current pixel:
+- $T_{\text{past}}$: Current transmittance (initialized to 1).
+- $c_{\text{past}}$: Accumulated color (initialized to 0).
+- $d_{\text{past}}$: Moving average of depth (initialized to 0).
+- $p_{\text{past}}$: Moving average of the Gaussian exponent (initialized to 0).
+
+Each Gaussian $k$ provides:
+- $x[k]$: 2D center coordinate.
+- $\sigma[k]$: 2D conic matrix (inverse covariance).
+- $o[k]$: Opacity scalar.
+- $c[k]$: Color vector (RGB).
+- $d[k]$: Depth scalar.
+- $\alpha[k]$: Boundary sharpness parameter (Generalized Exponential Function exponent).
+- $\beta[k]$: Softmax competition temperature parameter.
+- $\gamma[k]$: Depth decay influence parameter.
+
+**Steps:**
+1. Initialize accumulators: $T_{\text{past}} = 1$, $c_{\text{past}} = 0$, $d_{\text{past}} = 0$, $p_{\text{past}} = 0$ [S1].
+2. Loop for each Gaussian $k$ from 1 to $K$:
+   a. Compute the vector difference $x' = x[k] - x_{\text{pixel}}$ [S1].
+   b. Compute the Mahalanobis distance squared using the conic $\sigma[k]$. Let $p_{\text{cur}}$ be negative half of this distance:
+      $$ p_{\text{cur}} = -0.5 \cdot (x')^T \sigma[k] x' $$
+   c. Compute the raw absorbance $a_{\text{cur}}$ using the Generalized Exponential Function (GEF) controlled by $\alpha[k]$:
+      $$ a_{\text{cur}} = o[k] \cdot \exp(-(-p_{\text{cur}})^{\alpha[k]}) $$
+   d. If $T_{\text{past}} < 1$ (i.e., not the first Gaussian or previous Gaussians did not fully block the ray), perform the softmax blending block [S1]:
+      i. Record the original transmittance: $T_{\text{orig}} = T_{\text{past}} \cdot (1 - a_{\text{cur}})$ [S1].
+      ii. Compute the past absorbance: $a_{\text{past}} = 1 - T_{\text{past}}$ [S1].
+      iii. Compute the softmax weight $w_{\text{cur}}$ for the current Gaussian based on the competition between the current exponent $p_{\text{cur}}$ and the past average exponent $p_{\text{past}}$:
+           $$ w_{\text{cur}} = \frac{1}{1 + \exp(\beta[k] \cdot (p_{\text{past}} - p_{\text{cur}}))} $$
+      iv. Compute the softmax-weighted current absorbance: $\hat{a}_{\text{cur}} = w_{\text{cur}} \cdot a_{\text{cur}}$ [S1].
+      v. Compute the softmax-weighted past absorbance: $w_{\text{past}} = 1 - w_{\text{cur}}$, then $\hat{a}_{\text{past}} = w_{\text{past}} \cdot a_{\text{past}}$ [S1].
+      vi. Enforce order invariance and transmittance maintenance by re-normalizing the absorbances to match the original transmittance $T_{\text{orig}}$. The target sum of absorbances is $1 - T_{\text{orig}}$. The algorithm solves for a scaling factor $m$ such that the new absorbances $\bar{a}_{\text{past}}$ and $\bar{a}_{\text{cur}}$ satisfy the quadratic constraint derived from $T_{\text{orig}} = 1 - (\bar{a}_{\text{past}} + \bar{a}_{\text{cur}})$ while preserving their ratio [S1].
+          Specifically, the source defines an intermediate step involving $s$ (see below) and then computes $m$:
+          $$ m = \frac{\bar{a}_{\text{past}} + \bar{a}_{\text{cur}} - \sqrt{(\bar{a}_{\text{past}} + \bar{a}_{\text{cur}})^2 - 4(1 - T_{\text{orig}})\bar{a}_{\text{past}}\bar{a}_{\text{cur}}}}{2\bar{a}_{\text{past}}\bar{a}_{\text{cur}}} $$
+          *Note: The source pseudocode applies a depth-dependent interpolation factor $s$ before this normalization. The exact sequence in Algorithm 1 is:*
+          1. Compute depth decay factor: $s = \exp(-\gamma[k] |d[k] - d_{\text{past}}|)$ [S1].
+          2. Interpolate original and softmax-ed absorbances:
+             $$ \bar{a}_{\text{past}} = s \cdot \hat{a}_{\text{past}} + (1 - s) \cdot a_{\text{past}} $$
+             $$ \bar{a}_{\text{cur}} = s \cdot \hat{a}_{\text{cur}} + (1 - s) \cdot a_{\text{cur}} $$
+          3. Compute $m$ using the formula above with $\bar{a}_{\text{past}}$ and $\bar{a}_{\text{cur}}$ [S1].
+          4. Update absorbances: $\bar{a}_{\text{past}} \leftarrow m \cdot \bar{a}_{\text{past}}$, $\bar{a}_{\text{cur}} \leftarrow m \cdot \bar{a}_{\text{cur}}$ [S1].
+      vii. Update the running accumulators:
+          - Update transmittance: $T_{\text{past}} \leftarrow 1 - \bar{a}_{\text{past}}$ [S1].
+          - Update color: $c_{\text{past}} \leftarrow c_{\text{past}} \cdot \frac{\bar{a}_{\text{past}}}{a_{\text{past}}}$ [S1].
+          - Add current contribution: $c_{\text{past}} \leftarrow c_{\text{past}} + c[k] \cdot \bar{a}_{\text{cur}} \cdot T_{\text{past}}$ [S1].
+          - Update depth average: $d_{\text{past}} \leftarrow \frac{d_{\text{past}} \cdot (1 - T_{\text{past}}) + d[k] \cdot \bar{a}_{\text{cur}} \cdot T_{\text{past}}}{1 - T_{\text{past}} + \bar{a}_{\text{cur}} \cdot T_{\text{past}}}$ [S1].
+          - Update exponent average: $p_{\text{past}} \leftarrow \frac{p_{\text{past}} \cdot (1 - T_{\text{past}}) + p_{\text{cur}} \cdot \bar{a}_{\text{cur}} \cdot T_{\text{past}}}{1 - T_{\text{past}} + \bar{a}_{\text{cur}} \cdot T_{\text{past}}}$ [S1].
+   e. Increment $k$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def softmax_gs_render(K, x_pixel, x, sigma, o, c, d, alpha, beta, gamma):
+    # Initialize accumulators
+    T_past = 1.0
+    c_past = 0.0
+    d_past = 0.0
+    p_past = 0.0
+    
+    # Helper definitions for standard operations
+    def dot(u, v):
+        return sum(a * b for a, b in zip(u, v))
+    
+    def mat_vec(M, v):
+        return [sum(M[i][j] * v[j] for j in range(len(v))) for i in range(len(M))]
+    
+    for k in range(1, K + 1):
+        # 1. Compute current Gaussian properties
+        x_prime = x[k] - x_pixel
+        mahalanobis_sq = dot(x_prime, mat_vec(sigma[k], x_prime))
+        p_cur = -0.5 * mahalanobis_sq
+        
+        # Generalized Exponential Function for absorbance
+        neg_p_cur = -p_cur
+        a_cur = o[k] * exp(-(neg_p_cur ** alpha[k]))
+        
+        if T_past < 1.0:
+            # Record original transmittance before modification
+            T_orig = T_past * (1.0 - a_cur)
+            
+            # Past absorbance
+            a_past = 1.0 - T_past
+            
+            # Softmax competition weight
+            w_cur = 1.0 / (1.0 + exp(beta[k] * (p_past - p_cur)))
+            
+            # Softmax-weighted absorbances
+            a_hat_cur = w_cur * a_cur
+            w_past = 1.0 - w_cur
+            a_hat_past = w_past * a_past
+            
+            # Order invariance and transmittance maintenance (Normalization)
+            scale = (1.0 - T_orig) / (a_hat_past + a_hat_cur)
+            a_hat_past *= scale
+            a_hat_cur *= scale
+            
+            # Depth decay influence
+            s = exp(-gamma[k] * abs(d[k] - d_past))
+            
+            # Interpolate original and softmax-ed absorbances
+            a_bar_past = s * a_hat_past + (1.0 - s) * a_past
+            a_bar_cur = s * a_hat_cur + (1.0 - s) * a_cur
+            
+            # Transmittance maintenance again (Quadratic solution for m)
+            sum_abars = a_bar_past + a_bar_cur
+            prod_abars = a_bar_past * a_bar_cur
+            discriminant = sum_abars**2 - 4.0 * (1.0 - T_orig) * prod_abars
+            if discriminant < 0:
+                discriminant = 0.0
+            m = (sum_abars - sqrt(discriminant)) / (2.0 * prod_abars)
+            
+            # Update absorbances with m
+            a_bar_past *= m
+            a_bar_cur *= m
+            
+            # Update past accumulators for next iteration
+            T_past = 1.0 - a_bar_past
+            
+            # Update color: scale previous color by absorbance ratio, then add current contribution
+            if a_past != 0:
+                c_past = c_past * (a_bar_past / a_past)
+            else:
+                c_past = 0.0
+            c_past += c[k] * a_bar_cur * T_past
+            
+            # Update Depth and Exponent Averages (using OLD T_past for weighting)
+            weight_new = a_bar_cur * T_past
+            weight_old = 1.0 - T_past
+            total_weight = weight_old + weight_new
+            if total_weight > 0:
+                d_past = (d_past * weight_old + d[k] * weight_new) / total_weight
+                p_past = (p_past * weight_old + p_cur * weight_new) / total_weight
+            else:
+                d_past = d[k]
+                p_past = p_cur
+        else:
+            # First Gaussian or fully opaque previous
+            c_past += c[k] * a_cur * T_past
+            d_past = d[k]
+            p_past = p_cur
+            T_past = 1.0 - a_cur
+            
+    return c_past, d_past, T_past
+```
+
+**Parameters:**
+- $\alpha[k]$: Controls boundary sharpness using the Generalized Exponential Function. Learning rate 0.0008 for real-world benchmarks [S1].
+- $\beta[k]$: Controls the softmax competition temperature. Learning rate 0.008 for real-world benchmarks [S1].
+- $\gamma[k]$: Controls the decay influence of softmax based on depth distance. Learning rate 0.0004 for real-world benchmarks [S1].
+
+**Edge Cases and Pitfalls:**
+- The algorithm is applied only to the first 128 Gaussians along each ray to maintain linear complexity in the backward pass [S1]. This results in incomplete coverage (approx. 85% for indoor, 70% for outdoor scenes) [S1].
+- The order-invariance mechanism does not extend to cases with three or more overlapping Gaussians with distinct colors due to bookkeeping complexity under linear-time constraints [S1].
+- Distant semi-transparent Gaussians can bias running estimates of accumulated depth and opacity toward intermediate values, affecting softmax-based competition [S1].
+
+## Subtopics
+
+### [Late-Argmax Rendering](20841-late-argmax-rendering.md)
+A pixel-level fusion method for 3D Gaussian Splatting that computes instance labels by aggregating the full top-M label distributions of contributing Gaussians before applying an argmax operation. It solves the problem of staircase boundary artifacts inherent in hard-label rendering, where discrete Gaussian assignments cause jagged edges at object boundaries. Unlike Softmax-GS, which uses a softmax-based competition mechanism for order-invariance, Late-Argmax explicitly preserves the full distributional evidence of each Gaussian to allow boundary Gaussians to contribute proportionally to adjacent labels, enabling a majority vote of neighbors to resolve ambiguity.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The algorithm maintains linear complexity in the backward pass by limiting the number of Gaussians processed per ray to 128 [S1].
+
+**Measured Performance:**
+- On Mip-NeRF360 indoor scenes, Softmax-GS accounts for approximately 85% of pixels across test images [S1].
+- On Mip-NeRF360 outdoor scenes, Softmax-GS accounts for around 70% of pixels [S1].
+- In view consistency benchmarks, Softmax-GS achieves higher PSNR and lower FLIP7 scores compared to 3D GS and StopThePop on scenes like "bicycle", "counter", "kitchen", "train", and "truck" [S1].
+
+**Strengths and Limitations:**
+- **Strengths:** Produces smooth, flicker-free transitions at Gaussian crossings, avoiding the popping artifacts of 3D GS and the abrupt color changes of StopThePop [S1]. It effectively merges intersecting Gaussians into a single surface [S1].
+- **Limitations:** Incomplete coverage due to the 128-Gaussian limit; inability to handle >2 overlapping distinct-color Gaussians with order invariance; sensitivity to distant semi-transparent Gaussians biasing depth/opacity estimates [S1].
+
+## Background
+Softmax-GS was introduced in the paper "Softmax-GS: Generalized Gaussians Learning When to Blend or Bound" by dmand, Delio Vicini, George Kopanas, Dmitry Lagun, Kwang Moo Yi, Mark Matthews, and Andrea Tagliasacchi [S1]. The method was published as an arXiv preprint in 2025 [S1]. It addresses the view-consistency issues in 3D Gaussian Splatting by introducing a differentiable, order-invariant blending mechanism.
+
+## Sources
+[S1] Softmax-GS: Generalized Gaussians Learning When to Blend or Bound, https://doi.org/10.1109/cvprf71909.2026.00053, fetched 2026-10-31

@@ -1,0 +1,389 @@
+# Point Cloud Labeler
+This method voxelizes point clouds in .ply, passes them to a 3D Convolutional Neural Network, and determines building geometries (hopefully)
+
+
+##### Tech Stack
+
+Code
+
+(1) Import Pointcloud 
+
+
+(2) Voxelize
+
+    a) compute Pointcloud boundary
+
+    b) divide into cells N x N x N
+        - cube radius R = 
+
+    c) occupancy or density
+
+    d) provide unique index label for Tsraining Data
+        - use voting for points with multiple classes
+
+
+(3) 3D Convolutional Neural Network
+
+    a) first convolutional layer
+
+    b) first max-pooling layer
+
+    c) second convolutional layer
+
+    d) second max-pooling layer
+
+    e) dense layer
+
+    f) softmax function
+
+### CNN.py
+```
+## Example 2D CNN ##
+
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
+import numpy as np
+import tensorflow as tf
+
+tf.logging.set_verbosity(tf.logging.INFO)
+
+def cnn_model_fn(features, labels, mode):
+  """Model function for CNN."""
+  # Input Layer
+  # Reshape X to 4-D tensor: [batch_size, width, height, channels]
+  # MNIST images are 28x28 pixels, and have one color channel
+  input_layer = tf.reshape(features["x"], [-1, 28, 28, 1])
+
+  # Convolutional Layer #1
+  # Computes 32 features using a 5x5 filter with ReLU activation.
+  # Padding is added to preserve width and height.
+  # Input Tensor Shape: [batch_size, 28, 28, 1]
+  # Output Tensor Shape: [batch_size, 28, 28, 32]
+  conv1 = tf.layers.conv2d(
+      inputs=input_layer,
+      filters=32,
+      kernel_size=[5, 5],
+      padding="same",
+      activation=tf.nn.relu)
+
+  # Pooling Layer #1
+  # First max pooling layer with a 2x2 filter and stride of 2
+  # Input Tensor Shape: [batch_size, 28, 28, 32]
+  # Output Tensor Shape: [batch_size, 14, 14, 32]
+  pool1 = tf.layers.max_pooling2d(inputs=conv1, pool_size=[2, 2], strides=2)
+
+  # Convolutional Layer #2
+  # Computes 64 features using a 5x5 filter.
+  # Padding is added to preserve width and height.
+  # Input Tensor Shape: [batch_size, 14, 14, 32]
+  # Output Tensor Shape: [batch_size, 14, 14, 64]
+  conv2 = tf.layers.conv2d(
+      inputs=pool1,
+      filters=64,
+      kernel_size=[5, 5],
+      padding="same",
+      activation=tf.nn.relu)
+
+  # Pooling Layer #2
+  # Second max pooling layer with a 2x2 filter and stride of 2
+  # Input Tensor Shape: [batch_size, 14, 14, 64]
+  # Output Tensor Shape: [batch_size, 7, 7, 64]
+  pool2 = tf.layers.max_pooling2d(inputs=conv2, pool_size=[2, 2], strides=2)
+
+  # Flatten tensor into a batch of vectors
+  # Input Tensor Shape: [batch_size, 7, 7, 64]
+  # Output Tensor Shape: [batch_size, 7 * 7 * 64]
+  pool2_flat = tf.reshape(pool2, [-1, 7 * 7 * 64])
+
+  # Dense Layer
+  # Densely connected layer with 1024 neurons
+  # Input Tensor Shape: [batch_size, 7 * 7 * 64]
+  # Output Tensor Shape: [batch_size, 1024]
+  dense = tf.layers.dense(inputs=pool2_flat, units=1024, activation=tf.nn.relu)
+
+  # Add dropout operation; 0.6 probability that element will be kept
+  dropout = tf.layers.dropout(
+      inputs=dense, rate=0.4, training=mode == tf.estimator.ModeKeys.TRAIN)
+
+  # Logits layer
+  # Input Tensor Shape: [batch_size, 1024]
+  # Output Tensor Shape: [batch_size, 10]
+  logits = tf.layers.dense(inputs=dropout, units=10)
+
+  predictions = {
+      # Generate predictions (for PREDICT and EVAL mode)
+      "classes": tf.argmax(input=logits, axis=1),
+      # Add `softmax_tensor` to the graph. It is used for PREDICT and by the
+      # `logging_hook`.
+      "probabilities": tf.nn.softmax(logits, name="softmax_tensor")
+  }
+  if mode == tf.estimator.ModeKeys.PREDICT:
+    return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
+
+  # Calculate Loss (for both TRAIN and EVAL modes)
+  loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
+
+  # Configure the Training Op (for TRAIN mode)
+  if mode == tf.estimator.ModeKeys.TRAIN:
+    optimizer = tf.train.GradientDescentOptimizer(learning_rate=0.001)
+    train_op = optimizer.minimize(
+        loss=loss,
+        global_step=tf.train.get_global_step())
+    return tf.estimator.EstimatorSpec(mode=mode, loss=loss, train_op=train_op)
+
+  # Add evaluation metrics (for EVAL mode)
+  eval_metric_ops = {
+      "accuracy": tf.metrics.accuracy(
+          labels=labels, predictions=predictions["classes"])}
+  return tf.estimator.EstimatorSpec(
+      mode=mode, loss=loss, eval_metric_ops=eval_metric_ops)
+
+
+def main(unused_argv):
+  # Load training and eval data
+  mnist = tf.contrib.learn.datasets.load_dataset("mnist")
+  train_data = mnist.train.images  # Returns np.array
+  train_labels = np.asarray(mnist.train.labels, dtype=np.int32)
+  eval_data = mnist.test.images  # Returns np.array
+  eval_labels = np.asarray(mnist.test.labels, dtype=np.int32)
+
+  # Create the Estimator
+  mnist_classifier = tf.estimator.Estimator(
+      model_fn=cnn_model_fn, model_dir="/tmp/mnist_convnet_model")
+
+  # Set up logging for predictions
+  # Log the values in the "Softmax" tensor with label "probabilities"
+  tensors_to_log = {"probabilities": "softmax_tensor"}
+  logging_hook = tf.train.LoggingTensorHook(
+      tensors=tensors_to_log, every_n_iter=50)
+
+  # Train the model
+  train_input_fn = tf.estimator.inputs.numpy_input_fn(
+      x={"x": train_data},
+      y=train_labels,
+      batch_size=100,
+      num_epochs=None,
+      shuffle=True)
+  mnist_classifier.train(
+      input_fn=train_input_fn,
+      steps=20000,
+      hooks=[logging_hook])
+
+  # Evaluate the model and print results
+  eval_input_fn = tf.estimator.inputs.numpy_input_fn(
+      x={"x": eval_data},
+      y=eval_labels,
+      num_epochs=1,
+      shuffle=False)
+  eval_results = mnist_classifier.evaluate(input_fn=eval_input_fn)
+  print(eval_results)
+
+
+if __name__ == "__main__":
+  tf.app.run()
+```
+
+### voxelize.py
+```
+### This takes in point cloud data from .ply files and turns them into voxels
+
+from pyntcloud import PyntCloud
+
+cloud = PyntCloud.from_file("/Data/georeferenced_model.ply")
+
+cloud.add_scalar_field("hsv")
+
+voxelgrid_id = cloud.add_structure("voxelgrid", x_y_z=[32, 32, 32])
+
+points = cloud.get_sample("voxelgrid_nearest", voxelgrid=voxelgrid_id)
+
+new_cloud = PyntCloud(points)
+
+new_cloud.to_file("out_file.ply")
+```
+
+### PointcloudVoxelizer/source/p_to_v_main.py
+```
+# Freddy Fangyu Liu @Jiange, Sichuan, China 16/8/2017
+
+from pointclouds_to_voxelgrid import *
+from os import sys
+import numpy as np
+import h5py
+
+# print(sys.argv[1])
+
+data_loader = data_loader(sys.argv[1],(0,1,2))
+xyz_range = data_loader.__xyz_range__()
+
+#print(data_loader.d.shape)
+#print(xyz_range)
+
+full_mat, threeD_mat, threeD_label, list_mat, label_mat = data_loader(xyz_range,10,sys.argv[3]) # invoke __call__
+
+#print(list_mat.shape)
+#print(list_mat[0])
+#print(label_mat.shape)
+#print(label_mat[0])
+#print(threeD_mat.shape)
+#print(threeD_label.shape)
+
+h5f = h5py.File(sys.argv[2], 'w')
+h5f.create_dataset('default',data = full_mat)
+
+#np.savez(sys.argv[2], full_mat)
+
+print(sys.argv[2]+" done")
+print("shape: "+ str(full_mat.shape))
+```
+
+### PointcloudVoxelizer/source/pointclouds_to_voxelgrid.py
+```
+# Freddy Fangyu Liu @Jiange, Sichuan, China
+
+import numpy as np
+import pandas as pd
+from os import sys
+
+
+class data_loader:
+    def __init__(self, data_dir, xyz_index=(0,1,2), ext=False):
+        self.d = np.genfromtxt(data_dir,delimiter=' ')
+        self.ext = ext
+        self.x, self.y, self.z = xyz_index
+
+    def __call__(self, xyz_range=None,threshold=10, mag_coeff=100,_format='xyzrgbl'):
+        if not xyz_range:
+            xyz_range=[int(itm) for itm in [
+        self.d[:, self.x].min(),
+        self.d[:, self.y].min(),
+        self.d[:, self.z].min(),
+        self.d[:, self.x].max(),
+        self.d[:, self.y].max(),
+        self.d[:, self.z].max(),
+        ]]
+        full_list, list_matrix, label_matrix = self.__get_list_matrix__(xyz_range)
+        if not self.ext:
+            threeD_xyz_rgb_label, threeD_matrix, threeD_label = self.__get_3D_matrix__(full_list, list_matrix, xyz_range, mag_coeff,_format)
+        else:
+            #TODO
+            raise "data_loader >> extension temporarily-unavailable !"
+        return threeD_xyz_rgb_label, threeD_matrix, threeD_label, list_matrix, label_matrix
+
+  # data matrix -(xyz range)-> list and label matrix 
+    def __get_list_matrix__(self,  xyz_range):
+        X = self.d
+        lx,ly,lz,hx,hy,hz = xyz_range
+        X = X[
+                (X[:,self.x]>=lx)&
+                (X[:,self.x]<hx)&
+                (X[:,self.y]>=ly)&
+                (X[:,self.y]<hy)&
+                (X[:,self.z]>=lz)&
+                (X[:,self.z]<hz)
+                ]
+        return X, X[:,:-1], X[:, (self.x, self.y, self.z,-1)]
+        # last column is label
+
+    # list matrix -> 3D matrix
+    def __get_3D_matrix__(self, full_list, list_matrix, xyz_range, mag_coeff,_format):
+        lx,ly,lz,hx,hy,hz = xyz_range
+        magnifier = int(mag_coeff)/(hx-lx) # control the scale of x (to be ...)
+        dx, dy, dz = map(int, [(hx-lx)*magnifier, (hy-ly)*magnifier, (hz-lz)*magnifier])
+        threeD_xyz_rgb_label = np.zeros(shape=[dx,dy,dz,self.d.shape[1]], dtype=np.float32)
+        threeD_matrix = np.zeros(shape=[dx, dy, dz, list_matrix.shape[1]], dtype=np.float32)
+        threeD_label = np.zeros(shape=[dx, dy, dz], dtype=np.float32)
+        for itm in full_list:
+            x,y,z = itm[[self.x, self.y, self.z]]
+            threeD_xyz_rgb_label[int((x-lx)*magnifier)-1][int((y-ly)*magnifier)-1][int((z-lz)*magnifier)-1] = itm
+            threeD_matrix[int((x-lx)*magnifier)-1][int((y-ly)*magnifier)-1][int((z-lz)*magnifier)-1] = itm[0:6]#to be fixed
+            threeD_label[int((x-lx)*magnifier)-1][int((y-ly)*magnifier)-1][int((z-lz)*magnifier)-1] = itm[-1]
+        return threeD_xyz_rgb_label, threeD_matrix, threeD_label
+    
+    def __xyz_range__(self):
+        x_min = self.d[:,self.x].min()
+        x_max = self.d[:,self.x].max()
+        y_min = self.d[:,self.y].min()   
+        y_max = self.d[:,self.y].max()   
+        z_min = self.d[:,self.z].min()
+        z_max = self.d[:,self.z].max()
+        return x_min,y_min,z_min,x_max,y_max,z_max
+```
+
+### PointcloudVoxelizer/source/pyjoint.py
+```
+# Freddy Fangyu Liu @BNU 387
+# Aug 23, 2017
+
+import numpy as np
+import sys
+
+# argv1 [the file to process]
+
+# a dictionary
+
+label_dict = {
+	"ceiling":0, 
+	"floor":1, 
+	"wall":2, 
+	"column":3, 
+	"beam":4, 
+	"window":5 , 
+	"door":6, 
+	"table":7,
+	"chair":8, 
+	"bookcase":9, 
+	"sofa":10, 
+	"board":11, 
+	"clutter":12
+}
+
+
+data = np.loadtxt(sys.argv[2],delimiter=' ')
+new_col = [label_dict[sys.argv[1]]]*len(data)
+new_col = np.array(new_col)
+
+data = np.column_stack((data, new_col))
+np.savetxt(sys.argv[2]+".tmp",data,fmt='%.3f %.3f %.3f %i %i %i %i ')
+```
+
+### PointcloudVoxelizer/visualization/visualize_npy.py
+```
+import mayavi.mlab
+import numpy as np
+import tqdm
+import h5py
+from os import sys
+
+#data = np.load(sys.argv[1])
+data = h5py.File(sys.argv[1], 'r')
+data = data['default'][:]
+
+#print data.shape
+
+xx, yy, zz, sub = np.where(data != 0)
+
+print(xx.shape, sub.shape)
+
+rgbs = [(0,0,0)]*len(xx)
+labels = [0]*len(xx)
+for count in range(len(xx)):
+    item = data[xx[count]][yy[count]][zz[count]]
+    rgbs[count] = (float(item[3]),float(item[4]),float(item[5]))
+    labels[count] = float(item[6])/12
+
+rgbs = np.array(rgbs)
+labels = np.array(labels)
+print(rgbs.shape, labels.shape)
+
+nodes = mayavi.mlab.points3d(xx, yy, zz, mode="cube", scale_factor=0.8)
+
+
+nodes.glyph.scale_mode = 'scale_by_vector'
+nodes.mlab_source.dataset.point_data.scalars = labels
+
+
+mayavi.mlab.show()
+```

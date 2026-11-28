@@ -1,0 +1,75 @@
+# Atomic Operation Variants
+
+Also called: atomicAdd, atomicCAS, atomicMin
+
+## Overview
+Atomic Operation Variants provide hardware-supported read-modify-write operations on global memory to avoid race conditions without explicit locking [S1, unofficial]. This family extends the base atomic write primitive with arithmetic, logical, and conditional updates, differing from sibling techniques like [Thread-Safe Circular Buffer for Brick Allocation](4567-thread-safe-circular-buffer-for-brick-allocation.md) by operating directly on scalar or vector memory locations rather than managing buffer indices [S1, unofficial].
+
+## Shared principles
+All variants operate on a memory location `mem` and one or more input arguments, guaranteeing an indivisible read-modify-write sequence with respect to other threads accessing the same location [S1, unofficial]. Each operation returns the original value of `mem` before the update, enabling callers to detect changes or implement retry loops [S1, unofficial]. The supported operations are:
+- **Arithmetic**: `atomicAdd(inout int mem, int data)` performs addition, `atomicMin(inout int mem, int data)` computes the minimum, and `atomicMax(inout int mem, int data)` computes the maximum [S1, unofficial].
+- **Logical**: `atomicAnd(inout int mem, int data)` performs bitwise AND, `atomicOr(inout int mem, int data)` performs bitwise OR, and `atomicXor(inout int mem, int data)` performs bitwise XOR [S1, unofficial].
+- **Exchange**: `atomicExchange(inout int mem, int data)` swaps the value of `mem` with `data` and returns the original value [S1, unofficial].
+- **Conditional Swap**: `atomicCompSwap(inout int mem, uint compare, uint data)` performs a compare-and-swap if the current value matches a comparison value [S1, unofficial].
+All operations assume the memory location is of an integer or unsigned integer type, as the sources primarily detail integer variants [S1, unofficial].
+
+## Subtopics
+
+### atomicAdd
+Performs an atomic addition of `data` to `mem` [S1, unofficial]. Definition: `atomicAdd(inout int mem, int data)` adds `data` to the current value of `mem` [S1, unofficial]. Deprecated `atomicCounterIncrement` and `atomicCounterDecrement` functions in Vulkan can be replaced by `atomicAdd` with `+1` or `-1` [S1, unofficial].
+
+### atomicMin
+Computes the minimum of `mem` and `data` [S1, unofficial]. Definition: `atomicMin(inout int mem, int data)` updates `mem` to $\min(\text{mem}, \text{data})$ [S1, unofficial].
+
+### atomicMax
+Computes the maximum of `mem` and `data` [S1, unofficial]. Definition: `atomicMax(inout int mem, int data)` updates `mem` to $\max(\text{mem}, \text{data})$ [S1, unofficial].
+
+### atomicAnd
+Performs a bitwise logical AND [S1, unofficial]. Definition: `atomicAnd(inout int mem, int data)` updates `mem` to $\text{mem} \ \& \ \text{data}$ [S1, unofficial].
+
+### atomicOr
+Performs a bitwise logical OR [S1, unofficial]. Definition: `atomicOr(inout int mem, int data)` updates `mem` to $\text{mem} \ | \ \text{data}$ [S1, unofficial].
+
+### atomicXor
+Performs a bitwise logical XOR [S1, unofficial]. Definition: `atomicXor(inout int mem, int data)` updates `mem` to $\text{mem} \ \oplus \ \text{data}$ [S1, unofficial].
+
+### atomicExchange
+Swaps the value of `mem` with `data` and returns the original value [S1, unofficial]. Definition: `atomicExchange(inout int mem, int data)` sets `mem = data` and returns the old value of `mem` [S1, unofficial].
+
+### atomicCompSwap
+Performs a conditional swap if the current value matches a comparison value [S1, unofficial]. Definition: `atomicCompSwap(inout int mem, uint compare, uint data)` checks if `mem == compare`. If true, sets `mem = data`. Returns the original value of `mem` regardless of whether the swap occurred [S1, unofficial].
+Pseudocode:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def atomicCompSwap(mem_ref, compare, data):
+    old = mem_ref[0]
+    if mem_ref[0] == compare:
+        mem_ref[0] = data
+    return old
+```
+Note: `mem_ref` is a mutable container (e.g., a list or array) representing the `inout` memory reference.
+
+### Atomic Average Image Store
+Performs an atomic weighted average operation on a 3D image buffer [S2, unofficial]. Definition: Atomically updates a 3D image buffer with the average of the current stored value and a new incoming value [S2, unofficial].
+Mechanism:
+1. Convert the incoming vector value `val` to a 255 scale and pack it into a `uint` `newVal` using `vecToRgba` [S2, unofficial].
+2. Enter an infinite loop.
+3. Perform an atomic compare-swap: `curVal = imageAtomicCompSwap(imgUI, coords, prevVal, newVal)` [S2, unofficial].
+4. If `curVal == prevVal`, the swap succeeded; return [S2, unofficial].
+5. If `curVal != prevVal`, another thread modified the value. Update `prevVal = curVal` [S2, unofficial].
+6. Convert `curVal` back to a floating-point vector `rval` using `rgbaToVec` [S2, unofficial].
+7. Calculate the weighted average:
+   $$ \text{rval.xyz} = (\text{rval.xyz} \times \text{rval.w}) $$
+   $$ \text{curValF} = \text{rval} + \text{val} $$
+   $$ \text{curValF.xyz} /= \text{curValF.w} $$
+   [S2, unofficial]
+8. Pack the new average `curValF` into `newVal` using `vecToRgba` and repeat the loop [S2, unofficial].
+Pitfall: The implementation using `imageAtomicCompSwap` may not compile on some drivers [S2, unofficial].
+
+## Background
+Atomic operations are a fundamental primitive in GPU programming [G]. The specific variants listed (Add, Min, Max, And, Or, Xor, Exchange, CompSwap) are standard in OpenGL/GLSL and Vulkan shading languages [S1, unofficial]. The `atomicCounter` functions were deprecated in favor of `atomicAdd` in Vulkan to unify the API [S1, unofficial]. The Atomic Average Image Store variant is implemented in the `gidemo` project to handle concurrent writes to 3D textures using a CAS loop [S2, unofficial].
+
+## Sources
+[S1] 【WIP】GPUのatomic演算とsubgroup演算の練習帳(GLSL/OpenGL), https://zenn.dev/nishiki/articles/3db056030aaad1, fetched 2026-10-30 (unofficial)
+[S2] righier/gidemo, https://github.com/righier/gidemo, fetched 2026-10-26 (unofficial)

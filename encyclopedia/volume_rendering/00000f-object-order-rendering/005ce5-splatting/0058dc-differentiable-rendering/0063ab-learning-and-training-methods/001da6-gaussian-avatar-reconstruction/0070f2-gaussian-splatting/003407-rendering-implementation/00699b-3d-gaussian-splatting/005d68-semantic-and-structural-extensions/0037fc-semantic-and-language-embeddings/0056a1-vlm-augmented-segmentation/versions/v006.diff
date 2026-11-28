@@ -1,0 +1,168 @@
+--- v005.md
++++ v006.md
+@@ -1,128 +1,61 @@
+ # VLM-Augmented Segmentation
+-
+ Also called: Open-Vocabulary Segmentation via InnerGS
+ 
+ ## Overview
+-This method enables open-vocabulary 3D segmentation by augmenting 3D Gaussians with compact language features distilled from a Vision-Language Model (VLM) [S1, unofficial]. It solves the problem of high memory consumption associated with explicit high-dimensional semantic modeling by compressing VLM embeddings into latent attributes per Gaussian, aggregating them via differentiable splatting, and decoding them for semantic alignment [S1, unofficial]. It distinguishes itself from siblings like [Language Embedded 3D Gaussians](8103-language-embedded-3d-gaussians.md) by using a scene-specific autoencoder for distillation rather than direct optimization or static embedding storage, thereby preserving volumetric consistency while circumventing memory explosion [S1, unofficial].
++This method augments 3D Gaussians with compact language features distilled from a Vision-Language Model (VLM) to enable open-vocabulary 3D segmentation [S1, unofficial]. It solves the problem of high memory consumption associated with explicit high-dimensional semantic modeling by distilling embeddings into compact latent attributes, while preserving volumetric consistency through differentiable splatting [S1, unofficial]. It differs from siblings like [Language Embedded 3D Gaussians](8103-language-embedded-3d-gaussians.md) by using a scene-specific autoencoder for distillation rather than direct embedding storage, and from [LSeg Feature Encoding](12078-lseg-feature-encoding.md) by explicitly targeting open-vocabulary alignment via a lightweight decoder [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   A set of 3D Gaussians $\mathcal{G}$, each defined by position, covariance, opacity $\alpha_i$, and color.
+-*   A knowledge-enhanced medical VLM (e.g., Zhao et al., 2025) [S1, unofficial].
+-*   A scene-specific autoencoder (e.g., Qin et al., 2024) [S1, unofficial].
+-*   A lightweight decoder for projecting latent maps back to semantic space.
+-*   Open-vocabulary text queries.
+-
+-**Outputs:**
+-*   A rendered latent map $F(v)$ for a given view $v$.
+-*   Segmentation masks for queried semantic classes.
++**Inputs and Outputs:**
++*   **Input:** A set of 3D Gaussians $\mathcal{G}$ (initialized via the parent method's reconstruction), a knowledge-enhanced medical VLM, and a scene-specific autoencoder.
++*   **Output:** A rendered latent map $F(v)$ for a view $v$, which is decoded into semantic predictions for open-vocabulary queries.
+ 
+ **Data Structures:**
+ *   **Gaussian Attributes:** Each Gaussian $i$ stores a compact latent attribute vector $\mathbf{f}_i$. The dimensionality of $\mathbf{f}_i$ is determined by the bottleneck of the scene-specific autoencoder, significantly smaller than the original VLM embedding dimension [S1, unofficial].
+-*   **Autoencoder:** Encodes high-dimensional VLM embeddings into $\mathbf{f}_i$ and decodes $\mathbf{f}_i$ back to the semantic space.
++*   **Autoencoder:** A scene-specific autoencoder that maps high-dimensional VLM embeddings to the compact latent space $\mathbf{f}_i$ [S1, unofficial].
++*   **Lightweight Decoder:** A network that projects the rendered latent map back to the semantic space [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Feature Distillation:** For each Gaussian $i$, obtain a high-dimensional embedding from the knowledge-enhanced medical VLM. Distill this embedding into a compact latent attribute $\mathbf{f}_i$ using the scene-specific autoencoder [S1, unofficial].
+-2.  **Rasterization (Aggregation):** For a target view $v$, sort the candidate Gaussians $N$ front-to-back. Compute the rendered latent map $F(v)$ using the differentiable splatting equation:
++1.  **Feature Distillation:** For each Gaussian $i$ in the scene, extract a high-dimensional embedding from the knowledge-enhanced medical VLM. Pass this embedding through the scene-specific autoencoder to obtain the compact latent attribute $\mathbf{f}_i$ [S1, unofficial].
++2.  **Differentiable Splatting:** For a target view $v$, identify the set of candidate Gaussians $N$ that project to the pixel or region of interest. Aggregate the compact latent attributes using the differentiable alpha-blending equation:
+     $$
+     F(v) = \sum_{i \in N} \mathbf{f}_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)
+     $$
+-    where $\mathbf{f}_i$ is the compact latent attribute of Gaussian $i$, $\alpha_i$ is its opacity, and $N$ is the set of candidate Gaussians covering the pixel [S1, unofficial].
+-3.  **Semantic Projection:** Project the rendered latent map $F(v)$ back to the semantic space using the lightweight decoder [S1, unofficial].
+-4.  **Open-Vocabulary Alignment:** Compare the projected semantic features with text embeddings of the open-vocabulary queries to generate segmentation masks [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def render_latent_map(gaussians, camera_view, autoencoder, decoder):
+-    """
+-    Renders a latent map from 3D Gaussians using VLM-distilled features.
+-    
+-    Args:
+-        gaussians: List of Gaussian objects with attributes:
+-                   - position: (x, y, z)
+-                   - opacity: alpha
+-                   - vlm_embedding: High-dimensional vector from VLM
+-        camera_view: Camera parameters for projection
+-        autoencoder: Scene-specific autoencoder for compression/decompression
+-        decoder: Lightweight decoder for semantic projection
+-        
+-    Returns:
+-        semantic_map: Segmentation-ready feature map
+-    """
+-    # Step 1: Distill features (performed once during initialization or update)
+-    for g in gaussians:
+-        # Compress high-dimensional VLM embedding into compact latent attribute
+-        g.latent_attr = autoencoder.encode(g.vlm_embedding)
+-        
+-    # Step 2: Rasterize
+-    # Sort Gaussians front-to-back based on camera_view
+-    sorted_gaussians = sort_front_to_back(gaussians, camera_view)
+-    
+-    # Initialize latent map with zeros
+-    latent_map = zeros_like(image_shape)
+-    
+-    for g in sorted_gaussians:
+-        # Project Gaussian to 2D screen space
+-        screen_coords = project_to_screen(g.position, camera_view)
+-        
+-        # Compute contribution to latent map
+-        # F(v) = sum(f_i * alpha_i * transmittance)
+-        contribution = g.latent_attr * g.opacity
+-        
+-        # Accumulate into latent_map at screen_coords
+-        # Note: In implementation, this is done via differentiable rasterizer
+-        latent_map = accumulate_latent(latent_map, contribution, screen_coords, g.opacity)
+-        
+-    # Step 3: Project to semantic space
+-    semantic_map = decoder.decode(latent_map)
+-    
+-    return semantic_map
+-
+-def segment_open_vocabulary(semantic_map, text_queries, vlm_text_encoder):
+-    """
+-    Segments the scene based on open-vocabulary text queries.
+-    
+-    Args:
+-        semantic_map: Output from render_latent_map
+-        text_queries: List of text strings
+-        vlm_text_encoder: Encoder for text embeddings
+-        
+-    Returns:
+-        masks: List of segmentation masks for each query
+-    """
+-    # Encode text queries
+-    text_embeddings = vlm_text_encoder.encode(text_queries)
+-    
+-    masks = []
+-    for text_emb in text_embeddings:
+-        # Compute similarity between semantic_map and text_emb
+-        similarity = cosine_similarity(semantic_map, text_emb)
+-        # Threshold similarity to create mask
+-        mask = (similarity > threshold).astype(float)
+-        masks.append(mask)
+-        
+-    return masks
+-```
++    where:
++    *   $F(v)$ is the rendered latent map at view $v$.
++    *   $\mathbf{f}_i$ is the compact latent attribute (language feature) for Gaussian $i$.
++    *   $\alpha_i$ is the opacity of Gaussian $i$.
++    *   $N$ is the set of candidate Gaussians sorted front-to-back [S1, unofficial].
++3.  **Semantic Projection:** Pass the rendered latent map $F(v)$ through a lightweight decoder to project it back to the semantic space [S1, unofficial].
++4.  **Open-Vocabulary Alignment:** Use the projected semantic features to align with text embeddings from the VLM, enabling segmentation of Regions of Interest (ROIs) via open-vocabulary queries [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Autoencoder Bottleneck Dimension:** Not given in the sources. Determines the size of $\mathbf{f}_i$.
+-*   **Threshold:** Not given in the sources. Used in open-vocabulary alignment.
++*   **Autoencoder Bottleneck Dimension:** Not given in the sources.
++*   **Decoder Architecture:** Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory Explosion:** Explicit high-dimensional modeling is avoided by using compact latent attributes [S1, unofficial].
+-*   **Volumetric Consistency:** The method preserves volumetric consistency through the differentiable splatting aggregation [S1, unofficial].
+-*   **Degenerate Input:** If a Gaussian has zero opacity, it contributes nothing to the sum. If no Gaussians cover a pixel, the latent map value is zero [S1, unofficial].
++*   **Memory Explosion:** The method is designed to circumvent the memory explosion of explicit high-dimensional modeling [S1, unofficial]. Failure to use the autoencoder distillation would lead to excessive VRAM usage.
++*   **Volumetric Consistency:** The use of differentiable splatting ensures volumetric consistency, which is critical for accurate 3D segmentation [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the rasterization step, which is linear in the number of Gaussians $N$ per pixel, similar to standard 3D Gaussian Splatting [S1, unofficial]. The distillation and decoding steps are performed per Gaussian or per pixel respectively, adding constant overhead relative to the latent dimension.
+-*   **Memory Complexity:** Significantly reduced compared to storing full VLM embeddings per Gaussian. Memory usage is proportional to the number of Gaussians times the compact latent dimension plus the memory for the autoencoder and decoder [S1, unofficial].
+-*   **Measured Performance:** On the CT-ORG subset in SAT-DS, the method achieved a mean Dice Similarity Coefficient (mDSC) of 88.17%, mean Intersection-over-Union (mIoU) of 83.72%, and Pixel Accuracy (PA) of 98.97% [S1, unofficial]. Liver DSC was consistently above 84.62% [S1, unofficial].
+-*   **Strengths:** Enables open-vocabulary segmentation; circumvents memory explosion; preserves volumetric consistency; superior performance on medical imaging tasks [S1, unofficial].
+-*   **Limitations:** Requires a knowledge-enhanced medical VLM and a scene-specific autoencoder; performance is tied to the quality of the VLM and autoencoder [S1, unofficial].
+-*   **When to Use:** When open-vocabulary 3D segmentation is required, especially in domains like medical imaging where specific VLM knowledge is beneficial [S1, unofficial].
+-*   **When Not to Use:** When computational resources for training the autoencoder and VLM distillation are unavailable, or when closed-set segmentation is sufficient [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Significantly reduced compared to explicit high-dimensional modeling due to the compact latent attributes $\mathbf{f}_i$ [S1, unofficial].
++*   **Measured Performance:** Evaluated on the CT-ORG subset in SAT-DS [S1, unofficial].
++    *   Mean Dice Similarity Coefficient (mDSC): 88.17%
++    *   Mean Intersection-over-Union (mIoU): 83.72%
++    *   Pixel Accuracy (PA): 98.97%
++    *   Liver DSC: Consistently above 84.62% [S1, unofficial].
++*   **Top 5 Slices Performance (CT-ORG):**
++    *   Slice 32: PA 99.42%, mIoU 95.31%, mDSC 99.42%
++    *   Slice 70: PA 98.81%, mIoU 94.32%, mDSC 98.81%
++    *   Slice 29: PA 99.20%, mIoU 99.20%, mDSC 99.20%
++    *   Slice 65: PA 98.62%, mIoU 98.62%, mDSC 98.62%
++    *   Slice 30: PA 99.16%, mIoU 99.16%, mDSC 99.16% [S1, unofficial].
++*   **Strengths:** Enables precise 3D segmentation of ROIs through open-vocabulary queries; preserves volumetric consistency; computationally efficient compared to high-dimensional explicit modeling [S1, unofficial].
++*   **Limitations:** Performance may vary across different anatomical regions (e.g., Liver DSC is lower than overall PA) [S1, unofficial].
++*   **When to use:** When open-vocabulary 3D segmentation is required in medical or complex scenes where memory efficiency is critical.
++*   **When not to use:** When high-dimensional feature fidelity is more important than memory efficiency, or when open-vocabulary capabilities are not needed.
+ 
+ ## Background
+-The method was introduced in "InnerGS: Internal Scenes Reconstruction and Segmentation via Factorized 3D Gaussian Splatting" [S1, unofficial]. It builds upon the potential for downstream clinical tasks by extending the InnerGS framework to facilitate multimodal medical scene understanding [S1, unofficial]. It integrates Vision-Language Models (VLMs) by augmenting 3D Gaussians with compact language features distilled from a knowledge-enhanced medical VLM (Zhao et al., 2025) via a scene-specific autoencoder (Qin et al., 2024) [S1, unofficial]. The method demonstrates superior segmentation performance on the CT-ORG subset in SAT-DS (Rister et al., 2019; Zhao et al., 2025) [S1, unofficial].
++This method is part of the InnerGS framework, which extends 3D Gaussian Splatting for multimodal medical scene understanding [S1, unofficial]. It integrates Vision-Language Models (VLMs) by distilling high-dimensional embeddings into compact latent attributes using a scene-specific autoencoder [S1, unofficial]. The approach was proposed to facilitate downstream clinical tasks such as segmentation [S1, unofficial]. The VLM used is a knowledge-enhanced medical VLM (Zhao et al., 2025), and the autoencoder is based on (Qin et al., 2024) [S1, unofficial]. The method was evaluated on the CT-ORG subset of the SAT-DS dataset (Rister et al., 2019; Zhao et al., 2025) [S1, unofficial].
+ 
+ ## Sources

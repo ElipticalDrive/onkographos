@@ -1,0 +1,89 @@
+🟢 2026-10-08 — injection into the grid is shipped practice, and it is nearly free Researched against primary sources. Particles as volumes is not research-grade: Frostbite shipped "particle voxelization" in 2015 and UE documents it as a ...
+
+feat(render): volumetric particles in the froxel grid · Issue #1235 · lobinuxsoft/kooch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(render): volumetric particles in the froxel grid #1235
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+feat(render): volumetric particles in the froxel grid#1235
+Copy link
+Labels
+area:renderRender pipeline — passes, materials, post-processing, sky, shadowsRender pipeline — passes, materials, post-processing, sky, shadowsenhancementNew feature or requestNew feature or request
+Description
+lobinuxsoft
+opened on Sep 19, 2026
+Issue body actions
+🟢 2026-10-08 — injection into the grid is shipped practice, and it is nearly free
+Researched against primary sources. Particles as volumes is not research-grade: Frostbite shipped "particle voxelization" in 2015 and UE documents it as a feature.
+Cost, measured on PS4 (Frostbite 2015, slide 41):
+cost
+1k particles injected
+0.03 ms (default) / 0.25 ms (high quality)
+Volumetric shadow map, 32³ raymarch
+spot 0.04 ms / point 0.14 ms
+UE's wording for the same feature: "Placing a single Particle System with the material causes a sphere of density to be added to the Volumetric Fog, creating a fully 3D effect with no billboards involved."
+How, concretely
+A uint volume with atomics, not float. Frostbite voxelises with InterlockedAdd — "required for particleCount compute threads coherent write to memory" — mapping extinction 1.0 → 2048u, then converts and adds to f16. Godot does the same: density/light/emissive are R32_UINT with atomics. Without atomics, N emitters writing one froxel overwrite each other.
+Per-emitter footprint: a 2×2×2 cube (point or trilinear) or a sphere. Cost is proportional to the footprint in froxels, not to screen area — which is why many of them stay cheap.
+🔴 Extinction must be normalised by volume. Frostbite: "For large voxel cascades, particles write more often into same voxels → result in overshadow." Distribute per volume, not per particle.
+A separate cascaded clip map (3 levels, camera-following, world-space snapping) beside the clip-space volume, "required for out of view shadow caster, clip space volume would not be enough."
+Why injection and not shading them separately
+This is the argument for the whole design: injecting before the light pass means the volume is lit by the same scattering pass as the global fog. Shade it apart and there are two light models that do not agree, with a visible seam where the volume starts. Frostbite: "Decouple material from lighting / Unified volumetric interactions." RDR2: "Single lighting and data model."
+RDR2 keeps up to 32 volumes in the cluster grid with Z-binning, artist-placed and "attached to particles and vehicles", sphere or box, additive or alpha — which is exactly what CLUSTER_TYPE_VOLUME is reserved for in cluster_common.wgsl.
+⚠️ Simulating the particles as a 3D fluid is a different, unaffordable thing
+Worth separating, because the two get conflated. Injecting particles into the grid is 0.03 ms. Simulating a 3D Eulerian fluid is not affordable here: a 128³ pressure solve at 40 Jacobi iterations moves ~320 MB/frame, which is ~3.5 ms of bandwidth alone before advection or rendering — a quarter of the 13.9 ms budget for one effect. (Arithmetic, not a published measurement; no froxel or fluid figures exist for RDNA at 10 W.)
+Epic's own guidance agrees on the shape: Niagara Fluids 2D Gas is "best suited for games and real-time use" while 3D Gas is "best used for hero effects... and for cinematics", and the plugin is Beta with "high VRAM consumption and low rendering resolution" reported.
+So: injection for the 95 % of cases, baked VDB / 3D textures for authored detail (Nubis3 grows its clouds with fluid sims in Houdini and only samples a voxel grid at runtime), and a 3D solver only ever for a single hero effect, never two at once.
+Memory is not the constraint
+Nubis3's published figures, for calibration: 128³ 4-channel noise = 4.19 MB; 512×512×64 density field = 33.55 MB, or 8.39 MB as BC4. This engine's whole froxel grid at 85×48×128 with three RGBA16F volumes is ~12 MB. The constraint is scattering-pass bandwidth, not footprint.
+Sources: Frostbite 2015, slides 38/41/52-56 · RDR2 2019, slides 22/44 · UE Volumetric Fog · Niagara Fluids Reference · Nubis Cubed 2023 · Godot fog.cpp
+Depends on #1115 (the particle pools and their simulation) and #977 (the froxel grid).
+What is missing
+A particle system draws sprites. Smoke, steam, an energy discharge or a fluid's spray are media: they take light from the scene, cast it back, and have no edge. Drawn as sprites they neither receive a lamp's light nor show a beam through themselves, and they clip against geometry as flat cards.
+The shape of it
+Particles that opt in are injected as density into the same frustum-aligned volume #977 builds for fog and aerial perspective, as Frostbite's and UE's volumetric fog take theirs. Per froxel: scattering colour, density, and an emissive term for the ones that give off light. The froxel pass already resolves lighting and shadowing per cell, so an injected particle is lit once per cell, not once per pixel per layer — which is what makes dense smoke affordable at all.
+Sprites stay for everything with a crisp edge; this is the second path, chosen per emitter.
+🔴 Precision: froxels for the space, a refinement inside for the detail
+A froxel is 8–16 px across and tens of slices deep. That is right for fog and for the light lists, and far too coarse for a fluid's surface or an arc of electricity. The refinement is for these effects only, never for everything the grid serves — clustering (#780), fog (#977) and aerial perspective read the coarse cells as they are.
+The grid decides where: which froxels the medium touches at all, so the cost follows the medium and not the screen.
+A sparse per-froxel refinement decides the detail: a brick or a small octree hung off the froxels that hold particles, with the injection writing into it.
+🔴 Fixed steps, capped. The march inside a froxel takes a set number of samples — not "until it converges" — so a dense cell cannot cost more than a sparse one. The cap is a setting, measured on the handheld; past it, detail degrades and the frame does not.
+Only froxels holding particles carry a refinement; the rest read one value.
+Acceptance
+A smoke plume lit by a moving lamp, showing a beam through it, with the light's shadow on the smoke.
+An energy discharge that lights the wall behind it through the same volume.
+The refinement runs only where particles are, and the frame cost is flat against the medium's density once the step cap is hit.
+Measured on the OneXFly against the 13.9 ms budget, with the grid resolution, the refinement's size and the step cap as the knobs.
+Reactions are currently unavailable
+Activity
+lobinuxsoft
+added
+enhancementNew feature or requestNew feature or request
+area:renderRender pipeline — passes, materials, post-processing, sky, shadowsRender pipeline — passes, materials, post-processing, sky, shadows
+on Sep 19, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:renderRender pipeline — passes, materials, post-processing, sky, shadowsRender pipeline — passes, materials, post-processing, sky, shadowsenhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

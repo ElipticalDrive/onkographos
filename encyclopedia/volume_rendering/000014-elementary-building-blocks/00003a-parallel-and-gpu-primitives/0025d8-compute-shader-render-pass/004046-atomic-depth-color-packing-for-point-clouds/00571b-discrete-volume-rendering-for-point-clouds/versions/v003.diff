@@ -1,0 +1,151 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Discrete volume rendering for point clouds is a technique that renders point cloud data by assigning opacity and color to each point and computing ray colors via a discrete volume rendering equation using a fixed number of points per pixel buffer [S1]. It builds on [Atomic Depth-Color Packing for Point Clouds](10206-atomic-depth-color-packing-for-point-clouds.md) by resolving visibility and color simultaneously, but extends the representation to support differentiable opacity parameters and color prediction via MLPs, enabling end-to-end optimization with sparse regularization [S1].
++Discrete volume rendering for point clouds is a technique that renders point cloud data by assigning an opacity parameter $\alpha_i$ and a color $\mathbf{c}_i$ to each point, then computing ray colors via a discrete volume rendering equation using a fixed number of points per pixel buffer [S1]. It builds on [Atomic Depth-Color Packing for Point Clouds](10206-atomic-depth-color-packing-for-point-clouds.md) by resolving visibility and color simultaneously, but extends the representation to support differentiable opacity parameters and color prediction via MLPs, enabling end-to-end optimization with sparse regularization [S1].
+ 
+ ## How it works
+@@ -12,9 +12,6 @@
+ 
+ **Data Structures:**
+-- Point Cloud: A list of $N$ points. Each point $i$ has:
+-  - Position: 3D vector (not explicitly detailed in sources, but implied by ray casting).
+-  - Opacity: Scalar $\alpha_i \in [0, 1]$.
+-  - Color: 3D vector $\mathbf{c}_i$ predicted by an MLP [S1].
+-- Pixel Buffer: For each pixel, a buffer storing up to $k$ points sorted by depth (closest first) [S1].
++- Point Cloud: A list of $N$ points. Each point $i$ stores a 3D position, a scalar opacity $\alpha_i \in [0, 1]$, and a 3D color vector $\mathbf{c}_i$ [S1].
++- Pixel Buffer: For each pixel, a buffer storing up to $k$ points ordered by depth from closest to farthest [G].
+ 
+ **Parameters:**
+@@ -47,43 +44,29 @@
+ 
+ **Steps:**
+-1. For each pixel, cast a ray and collect points from the point cloud that intersect the pixel's area.
+-2. Sort the intersecting points by depth (closest to farthest) [S1].
++1. For each pixel, cast a ray and collect points from the point cloud that intersect the pixel's area [G].
++2. Order the collected points by depth from closest to farthest [G].
+ 3. Keep the top $k=16$ points in the pixel buffer [S1].
+-4. For each point $i$ from 0 to $k-1$:
+-   a. Compute transmittance $T_i = \prod_{j=0}^{i-1}(1-\alpha_j)$. For $i=0$, $T_0 = 1$.
+-   b. Accumulate color contribution: $\hat{C}(\mathbf{r}) += T_i \alpha_i \mathbf{c}_i$.
++4. For each point $i$ from $0$ to $k-1$:
++   a. Compute transmittance $T_i = \prod_{j=0}^{i-1}(1-\alpha_j)$, with $T_0 = 1$ [S1].
++   b. Accumulate color contribution: $\hat{C}(\mathbf{r}) \mathrel{+}= T_i \alpha_i \mathbf{c}_i$ [S1].
+ 5. Compute the loss $\mathcal{L}$ using the rendered color $\hat{C}(\mathbf{r})$ and ground truth $C_{gt}$ [S1].
+-6. Optimize $\alpha_i$ and MLP parameters for $\mathbf{c}_i$ using gradient descent [S1].
++6. Optimize $\alpha_i$ and MLP parameters for $\mathbf{c}_i$ using gradient descent [G].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
+ def render_point_cloud(points, rays, k=16):
+-    """
+-    Render a point cloud using discrete volume rendering.
+-    
+-    Args:
+-        points: List of points, each with position, opacity alpha, and color c.
+-        rays: List of rays, each with origin and direction.
+-        k: Number of points per pixel buffer.
+-        
+-    Returns:
+-        rendered_image: Rendered image with color for each pixel.
+-    """
++    """Render a point cloud using discrete volume rendering."""
+     rendered_image = []
+-    
+     for ray in rays:
+-        # Step 1: Collect points intersecting the ray's pixel area
+         intersecting_points = []
+         for point in points:
+-            if point_intersects_pixel(point, ray):
+-                intersecting_points.append(point)
+-        
+-        # Step 2: Sort by depth (closest first)
+-        intersecting_points.sort(key=lambda p: depth(p, ray))
+-        
+-        # Step 3: Keep top k points
++            # Standard point-to-ray projection and radius check [G]
++            # Intersection logic not given in sources
++            intersecting_points.append(point)
++        # Sort by depth along ray [G]
++        intersecting_points.sort(key=lambda p: p.depth)
+         top_k_points = intersecting_points[:k]
+-        
+-        # Step 4: Compute rendered color
+         T = 1.0
+         color = [0.0, 0.0, 0.0]
+@@ -91,57 +74,37 @@
+             alpha = point.alpha
+             c = point.color
+-            # Transmittance T_i is product of (1-alpha_j) for j < i
+-            # T is updated iteratively
+-            color += T * alpha * c
+-            T *= (1 - alpha)
+-        
++            color[0] += T * alpha * c[0]
++            color[1] += T * alpha * c[1]
++            color[2] += T * alpha * c[2]
++            T *= (1.0 - alpha)
+         rendered_image.append(color)
+-    
+     return rendered_image
+ 
+ def compute_loss(rendered_image, ground_truth, alphas, lambda_sparse):
+-    """
+-    Compute the loss for optimization.
+-    
+-    Args:
+-        rendered_image: List of rendered colors for each pixel.
+-        ground_truth: List of ground truth colors for each pixel.
+-        alphas: List of opacity values for all points.
+-        lambda_sparse: Sparse regularization weight.
+-        
+-    Returns:
+-        loss: Total loss value.
+-    """
+-    # L_RGB = ||C_hat - C_gt||_2^2
++    """Compute the loss for optimization."""
+     l_rgb = 0.0
+     for rendered, gt in zip(rendered_image, ground_truth):
+         l_rgb += sum((r - g) ** 2 for r, g in zip(rendered, gt))
+-    
+-    # L_sparse = (1/N) * sum(log(alpha_i) + log(1-alpha_i))
+     n = len(alphas)
+     l_sparse = 0.0
+     for alpha in alphas:
+-        l_sparse += log(alpha) + log(1 - alpha)
++        l_sparse += math.log(alpha) + math.log(1.0 - alpha)
+     l_sparse /= n
+-    
+-    # Total loss
+-    loss = l_rgb + lambda_sparse * l_sparse
+-    return loss
++    return l_rgb + lambda_sparse * l_sparse
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- Precision: Logarithms in $\mathcal{L}_{\text{sparse}}$ can cause numerical issues if $\alpha_i$ is 0 or 1. Clamping $\alpha_i$ to $[\epsilon, 1-\epsilon]$ is recommended [G].
+-- Boundaries: Points near the edge of the pixel area may be inconsistently included/excluded. Consistent pixel-point intersection testing is required [G].
+-- Degenerate Input: If fewer than $k$ points intersect a pixel, the buffer is filled with fewer points, and $T_i$ computation adjusts accordingly [S1].
++- Precision: Logarithms in $\mathcal{L}_{\text{sparse}}$ can cause numerical issues if $\alpha_i$ is $0$ or $1$. Clamping $\alpha_i$ to $[\epsilon, 1-\epsilon]$ is recommended [G].
++- Boundaries: Points near the edge of the pixel area may be inconsistently included or excluded. Consistent pixel-point intersection testing is required [G].
++- Degenerate Input: If fewer than $k$ points intersect a pixel, the buffer is filled with fewer points, and the transmittance computation adjusts accordingly [S1].
+ 
+ ## Operating characteristics
+-- Time Complexity: $O(N \cdot R)$ for collecting intersecting points, where $N$ is the number of points and $R$ is the number of rays (pixels). Sorting and accumulation are $O(k \log k + k)$ per pixel, which is negligible for small $k$ [S1].
+-- Memory Complexity: $O(N)$ for storing point attributes and $O(R \cdot k)$ for pixel buffers [S1].
++- Time Complexity: $O(N \cdot R)$ for collecting intersecting points, where $N$ is the number of points and $R$ is the number of rays (pixels) [G]. Sorting and accumulation are $O(k \log k + k)$ per pixel, which is negligible for small $k$ [G].
++- Memory Complexity: $O(N)$ for storing point attributes and $O(R \cdot k)$ for pixel buffers [G].
+ - Measured Performance: Not given in the sources.
+-- Scaling: Performance scales linearly with the number of points and pixels. The fixed $k$ ensures constant-time accumulation per pixel [S1].
++- Scaling: Performance scales linearly with the number of points and pixels. The fixed $k$ ensures constant-time accumulation per pixel [G].
+ - Strengths: Differentiable, supports end-to-end optimization with sparse regularization, and provides fine-grained control over opacity and color [S1].
+-- Limitations: Requires careful tuning of $\lambda_{\text{sparse}}$ and may need extensive fine-tuning (e.g., >10 hours) for convergence [S1].
++- Limitations: Requires careful tuning of $\lambda_{\text{sparse}}$ and may need extensive fine-tuning (e.g., more than ten hours) for convergence [S1].
+ - When to Use: Suitable for applications requiring differentiable rendering of point clouds, such as novel view synthesis with point-based representations [S1].
+-- When Not to Use: Not suitable for real-time applications due to optimization overhead and lack of hardware acceleration details [S1].
+ 
+ ## Background

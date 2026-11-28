@@ -1,0 +1,102 @@
+# Background Blending for Loss Computation
+
+Also called: Loss Computation Background Blending
+
+## Overview
+This method blends the predicted RGB image with a resolved background color for accurate loss computation, particularly when the background is not black [S2, unofficial]. It resolves the background configuration (e.g., `'last_sample'`, `'random'`, or explicit) and applies alpha-compositing to both the predicted and ground truth images before loss evaluation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Predicted RGB image ($C_{\text{pred}}$), accumulated opacity ($\alpha_{\text{acc}}$), ground truth RGB image ($C_{\text{gt}}$), and background color configuration.
+- **Output:** Blended predicted RGB ($C_{\text{blend}}$) and blended ground truth RGB ($C_{\text{gt,blend}}$) for loss computation.
+
+**Data Structures:**
+- RGB images are tensors of shape $(H, W, 3)$ with floating-point values in $[0, 1]$ [G].
+- Accumulation is a tensor of shape $(H, W)$ or $(H, W, 1)$ representing ray opacity [G].
+
+**Steps:**
+1. Resolve `background_color` from the configuration. If the configuration is `'last_sample'`, set `background_color` to black $(0, 0, 0)$, which disables background blending for the ground truth [S1, unofficial].
+2. If the configuration is `'random'`, generate a random tensor of the same shape as $C_{\text{pred}}$ to serve as `background_color` [S1, unofficial].
+3. Otherwise, use the explicitly provided `background_color` tensor [S1, unofficial].
+4. Compute the transmittance to the background as $T = 1.0 - \alpha_{\text{acc}}$ [G].
+5. Blend the predicted image: $C_{\text{blend}} = C_{\text{pred}} + T \times C_{\text{bg}}$ [S1, unofficial].
+6. Blend the ground truth image using the same resolved background color: $C_{\text{gt,blend}} = C_{\text{gt}} + T \times C_{\text{bg}}$ [S1, unofficial].
+7. Pass $C_{\text{blend}}$, $\alpha_{\text{acc}}$, and $C_{\text{gt,blend}}$ to the renderer's loss computation routine [S2, unofficial].
+
+**Formula:**
+$$ C_{\text{blend}} = C_{\text{pred}} + (1 - \alpha_{\text{acc}}) \times C_{\text{bg}} $$
+where $C_{\text{bg}}$ is the resolved background color tensor [S1, unofficial].
+
+**Parameters:**
+- `background_color_config`: Controls resolution; typical values are `'last_sample'`, `'random'`, or a $(3,)$/$(H, W, 3)$ tensor [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If $\alpha_{\text{acc}} \approx 1$, $T \approx 0$ and the background contribution vanishes [G].
+- If $\alpha_{\text{acc}} \approx 0$, $T \approx 1$ and the output equals $C_{\text{bg}}$ [G].
+- Degenerate inputs (e.g., negative accumulation) must be clamped to $[0, 1]$ before blending to prevent invalid transmittance [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def blend_background_for_loss_computation(predicted_rgb: np.ndarray, accumulation: np.ndarray, ground_truth_rgb: np.ndarray, background_color_config) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Blends predicted and ground truth RGB images with a resolved background color for loss computation.
+    
+    Args:
+        predicted_rgb: Array of shape (H, W, 3), predicted volume color.
+        accumulation: Array of shape (H, W) or (H, W, 1), accumulated opacity.
+        ground_truth_rgb: Array of shape (H, W, 3), ground truth image.
+        background_color_config: String ('last_sample', 'random') or array for background color.
+        
+    Returns:
+        blended_rgb: Array of shape (H, W, 3), blended predicted color.
+        blended_gt: Array of shape (H, W, 3), blended ground truth color.
+    """
+    # Clamp accumulation to valid range
+    alpha = np.clip(accumulation, 0.0, 1.0)
+    # Compute transmittance
+    transmittance = 1.0 - alpha
+    
+    # Resolve background color
+    if background_color_config == "last_sample":
+        background_color = np.array([0.0, 0.0, 0.0])
+    elif background_color_config == "random":
+        background_color = np.random.rand(*predicted_rgb.shape)
+    else:
+        background_color = np.asarray(background_color_config)
+        
+    # Broadcast background_color to (H, W, 3) if it is a single color
+    if background_color.ndim == 1:
+        background_color = background_color[np.newaxis, np.newaxis, :]
+        
+    # Apply alpha-compositing blending
+    blended_rgb = predicted_rgb + transmittance[..., np.newaxis] * background_color
+    blended_gt = ground_truth_rgb + transmittance[..., np.newaxis] * background_color
+    
+    return blended_rgb, blended_gt
+```
+
+## Subtopics
+
+### [Composite Loss for Radiance Fields](16877-composite-loss-for-radiance-fields.md)
+The Composite Loss is the primary optimization objective used in NeO 360 to train dedicated near and far background MLPs for few-shot novel-view synthesis. It addresses the problem of accurately modeling outdoor backgrounds where the background is not black, by combining a pixel-wise L2 color loss, a distortion regularization term, and a perceptual LPIPS loss. It differs from standard volumetric alpha-compositing losses by explicitly enforcing sparsity in the background MLP weights to ensure efficient rendering and distinct background geometry, rather than merely blending colors.
+
+### Luminance Background Calculation
+Computes the luminance value $L$ of a reference style's average RGB color to serve as a background color for NNFM loss computation with VGG-16, ensuring the stylization matches the style's overall brightness [S3]. Normalize each component ($R, G, B$) of the selected style's average color to $[0, 1]$ [S3]. Convert each normalized RGB component to linear scale by raising it to the power of 2.2: $R_{\text{lin}} = R^{2.2}$, $G_{\text{lin}} = G^{2.2}$, $B_{\text{lin}} = B^{2.2}$ [S3]. Compute luminance as $L = 0.2126 \times R_{\text{lin}} + 0.7152 \times G_{\text{lin}} + 0.0722 \times B_{\text{lin}}$, where the coefficients reflect the average spectral sensitivity of human-perceived lighting [S3]. The computed $L$ is used as the corresponding background color for each style rendering to match overall brightness [S3].
+
+## Operating characteristics
+- **Time Complexity:** $O(H \times W)$ for the element-wise blending operation [G].
+- **Memory Complexity:** $O(H \times W)$ for storing the blended images [G].
+- **Strengths:** Ensures that loss computation is not biased by the background color, which is critical when the background is not black [S2, unofficial].
+- **Limitations:** Requires correct background configuration; using `'random'` may introduce variance, and `'last_sample'` forces black backgrounds [S1, unofficial].
+
+## Background
+Originated in differentiable rendering pipelines like nerfstudio and ganerf for photometric loss computation [S1, S2, unofficial]. Adapted in StyleRF-VolVis for style transfer to match overall brightness via luminance-based background calculation [S3].
+
+## Sources
+[S1] nerfstudio-project/nerfstudio, https://github.com/nerfstudio-project/nerfstudio, fetched 2026-10-26 (unofficial)
+[S2] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+[S3] StyleRF-VolVis: Style Transfer of Neural Radiance Fields for Expressive Volume Visualization., https://doi.org/10.1109/tvcg.2024.3456342, fetched 2026-10-26

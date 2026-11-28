@@ -1,0 +1,1038 @@
+Rendering Participating Media Using Path Graphs
+arXiv:2404.11894v1 [cs.GR] 18 Apr 2024
+BECKY HU, Cornell University, USA
+XI DENG, Cornell University, USA
+FUJUN LUAN, Adobe Research, USA
+MILOŠ HAŠAN, Adobe Research, USA
+STEVE MARSCHNER, Cornell University, USA
+Fig. 1. A heterogeneous cloud, left, and a homogeneous buddha statue with a dielectric interface, right, both illuminated by a sun-sky model and an area light.
+At the top we show an equal-sample comparison between path tracing and our method (path tracing + path graph); our method reduces variance significantly.
+At the bottom we show that using our method with a very small number of samples can both take less time and produce a more accurate result than using a
+larger number of samples with path tracing.
+Rendering volumetric scattering media, including clouds, fog, smoke, and
+other complex materials, is crucial for realism in computer graphics. Traditional path tracing, while unbiased, requires many long path samples to
+converge in scenes with scattering media, and a lot of work is wasted by
+paths that make a negligible contribution to the image. Methods to make
+better use of the information learned during path tracing range from photon mapping to radiance caching, but struggle to support the full range of
+heterogeneous scattering media. This paper introduces a new volumetric
+rendering algorithm that extends and adapts the previous path graph surface rendering algorithm. Our method leverages the information collected
+through multiple-scattering transport paths to compute lower-noise estimates, increasing computational efficiency by reducing the required sample
+count. Our key contributions include an extended path graph for participating media and new aggregation and propagation operators for efficient
+Authors’ addresses: Becky Hu, Cornell University, USA; Xi Deng, Cornell University,
+USA; Fujun Luan, Adobe Research, USA; Miloš Hašan, Adobe Research, USA; Steve
+Marschner, Cornell University, USA.
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.
+© 2024 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+XXXX-XXXX/2024/4-ART $15.00
+https://doi.org/10.1145/nnnnnnn.nnnnnnn
+path reuse in volumes. Compared to previous methods, our approach significantly boosts convergence in scenes with challenging volumetric light
+transport, including heterogeneous media with high scattering albedos and
+dense, forward-scattering translucent materials, under complex lighting
+conditions.
+CCS Concepts: • Computing methodologies → Ray tracing.
+Additional Key Words and Phrases: Rendering, volume rendering, raytracing,
+global illumination
+ACM Reference Format:
+Becky Hu, Xi Deng, Fujun Luan, Miloš Hašan, and Steve Marschner. 2024.
+Rendering Participating Media Using Path Graphs. 1, 1 (April 2024), 10 pages.
+https://doi.org/10.1145/nnnnnnn.nnnnnnn
+1
+INTRODUCTION
+Volumetric scattering media (such as clouds, fog, smoke, juice, soap,
+or marble) are common in real-world scenes, and accurate rendering
+of such materials is key to realism in scenes with scattering atmospheres such as clouds, fog, or smoke; turbid fluids like juice, milk,
+or seawater; or translucent solids like marble. However, simulating
+light transport in participating media presents well-known challenges: compared to scenes with only surfaces there is an increased
+number of scattering events, especially in media with anisotropic
+phase functions, and it is challenging to sample fast-varying optical
+properties, especially when optical density varies spectrally.
+, Vol. 1, No. 1, Article . Publication date: April 2024.
+2 •
+Firstauthor et al.
+Monte Carlo path tracing is widely used for rendering scenes
+with participating media; while unbiased, it requires a large number
+of samples to converge. High sample counts become particularly
+problematic when artists need fast turnaround during the scene
+design process. Denoisers improve convergence to some extent;
+however, better sampling methods with lower variance are desirable
+independent of whether denoising is used. The high-level goal of
+this paper is to extract as much information as possible from a very
+small number of volumetric scattering paths so that we can obtain
+useful images quickly and ultimately achieve faster convergence.
+Participating media are characterized by long multiple-scattering
+transport paths. By tracing these paths through the volume, a path
+tracer collects a lot of valuable information about the scene, but
+then computes a single pixel contribution and discards all the other
+information. While this has the benefit of requiring minimal storage,
+it clearly feels suboptimal in terms of computational efficiency, and
+many methods have been proposed to make better use of the traced
+paths. This path information can be stored in the scene and then
+gathered by density estimators, including photon points [Jensen
+1996; Jensen and Christensen 1995], photon beams [Jarosz et al.
+2008a], and photon primitives [Bitterli and Jarosz 2017; Deng et al.
+2019]; weighted by multiple importance sampling [Veach and Guibas
+1995] to combine different sampling techniques [Georgiev et al.
+2012b; Hachisuka et al. 2012; Křivánek et al. 2014]; or cached to
+guide smarter future sampling [Bitterli et al. 2020; Herholz et al.
+2019; Lin et al. 2021]. However, the reuse of information in these
+methods is constrained to be relatively local, among spatially close
+paths or paths from neighboring pixels. We would prefer more
+global information sharing, especially in scenes with complex, long
+paths where the information is hidden behind multiple bounces or in
+scenes dominated by indirect illumination where the majority of the
+paths fail to find the light source. In fact, such cases are ubiquitous
+in volumetric scenes, such as subsurface-scattering materials with
+dielectric boundaries, or clouds and smoke with challenging lighting
+conditions and high single-scattering albedos.
+Recent work on path graphs [Deng et al. 2021] has shown the
+benefits of sharing information globally across all traced paths in
+scenes dominated by indirect illumination. As illustrated in Fig. 2,
+the path graph framework records the information of all sampled
+paths during the path sampling process and builds a graph over these
+paths. Iterative refinement (through aggregation and propagation)
+is then applied to the path graph to refine the radiance returned
+from each path. This approach is beneficial because it not only
+shares radiance among spatially nearby shading points, but also
+iteratively propagates the updated radiance along paths to refine
+the estimates at distant shading points, making extensive use of the
+initial sampled paths. However, this technique is limited to surfaces.
+Our goal is to develop a new method based on the path graph
+framework that applies to volumetric scattering. This requires several changes to the framework, since the original path graph method
+relies on surface shading points and related concepts such as normals, BRDFs, and their importance sampling pdfs. Furthermore,
+light extinction (transmittance) is unique to volumes and introduces important subtleties when extinction varies spectrally. We
+show how the framework can be extended to volumetric rendering
+and demonstrate that the resulting method significantly improves
+, Vol. 1, No. 1, Article . Publication date: April 2024.
+convergence across a variety of scenes with challenging volumetric transport, including heterogeneous media with high scattering
+albedos, subsurface scattering materials, and challenging lighting
+conditions.
+2 RELATED WORK AND BACKGROUND
+2.1 Volumetric rendering
+Volumetric rendering is typically accomplished by solving the radiative transfer equation (RTE) [Kajiya and Kay 1989] using Monte
+Carlo estimation. Naive path tracing is the most popular rendering
+algorithm for participating media due to its unbiased nature and
+applicability to a wide variety of volumes. However, naive path
+tracing suffers from a low convergence rate in challenging lighting
+conditions, anisotropic scattering properties, and heterogeneous
+optical properties.
+To address the low convergence rate issue, path samples can be
+reused. Bidirectional path tracing [Lafortune and Willems 1993;
+Veach 1997; Veach and Guibas 1994] (BPT) samples paths from both
+the camera and light sources, then connects the sub-paths and combines them using multiple importance sampling [Veach and Guibas
+1995]. Paths can be also reused to improve sampling techniques.
+Volumetric path guiding [Herholz et al. 2019] caches paths to estimate adjacent transport solutions and uses them to navigate future
+sampling. The idea of spatiotemporal reservoir resampling [Bitterli
+et al. 2020] has also been applied in fast volume rendering [Lin et al.
+2021].
+Methods that reuse path samples by connecting paths sampled
+from sensors and from sources using photon density estimators,
+such as photon mapping [Jensen 1996; Jensen and Christensen 1998],
+are more efficient, although they introduce bias from blurring kernels. To mitigate this bias, researchers have proposed techniques
+like photon beams, sensor beams [Jarosz et al. 2008a,b]. Similarly to
+BPT, research has sought to combine these density estimators with
+each other and with unbiased techniques [Georgiev et al. 2012a;
+Hachisuka et al. 2012; Křivánek et al. 2014]. Over time, unbiased
+photon density estimators like photon planes, photon volumes [Bitterli and Jarosz 2017], and even photon surfaces [Deng et al. 2019]
+have been developed. However, the effectiveness of these unbiased
+density estimators is limited to homogeneous volumes.
+Neural networks have been used for fast prediction in participating media. For instance Hu et al. [Hu et al. 2023] applied radiancepredicting neural networks to store directional light transmittance.
+However, this approach is limited to specific lighting conditions.
+2.2
+Path Reuse Techniques
+Beyond volumetric rendering, many path reuse technique has been
+applied in surface rendering scenario. Early work in irradiance
+caching [Ward et al. 1988] stores the irradiance estimates for future
+interpolation of efficient indirect illumination. [Křivánek et al. 2008]
+extends to cache radiance allowing indirect lighting computation
+with the presence of glossy surface. [Keller et al. 2014] directly
+computes weighted average of from noisy radiance estimates on the
+path in Monte Carlo path tracing. [West et al. 2020] later extends
+the work by applying continuous multiple important sampling in
+combining the noise irradiance estimates, [Deng et al. 2021] further
+Rendering Participating Media Using Path Graphs
+improved the efficiency of filtering using clusters for aggregation
+and iteratively propagate the updated refinement from indirect
+bounce to pixel.
+Path Tracing
+iterative
+refinement
+paths
+Aggregation
+& Propagation
+Graph construction
+3
+METHOD
+In this section, we will briefly review the key ideas and concepts
+of the path graph framework (Sec. 3.1), and derive our path graph
+operators for participating media starting from standard radiative
+transfer equations (Sec. 3.2-Sec. 3.6).
+3.1
+Path Graph Framework
+In the rendering framework of path graphs (Fig. 2), the path tracing
+phase is instrumented to record enough intermediate results to recompute the pixel value given a change to any outgoing radiance
+value along the path. The key idea is to update these intermediate results in an iterative process where nearby shading points exchange
+information and then recompute the radiance values from the updated values. We think of these intermediate values as variables
+attached to the vertices and edges of a graph in which every shading
+point is a vertex and the edges record all the relevant relationships
+between vertices including which values are used to update which
+other values and which points are “nearby” so that they exchange
+information.
+In the following context, we refer to a path graph 𝐺 = ⟨𝑉 , 𝐸⟩
+as an information sharing data structure built upon a collection of
+complete light paths which are sampled by path tracing of a full
+resolution image at one sample per pixel. 𝑉 is the union of all the
+light points 𝑉𝑦 and shading points 𝑉𝑥 . The vertices are connected
+to each other by three different types of edges in 𝐸: continuation
+edges 𝐸𝐶 , light edges 𝐸𝐿 and neighbor edges 𝐸 𝑁 . A continuation
+edge e𝐶 ∈ 𝐸𝐶 stands for the propagation of a radiance value from
+one shading point to another; the outgoing value on a point becomes
+the incoming value on another. A light edge e𝐿 ∈ 𝐸𝐿 connects a light
+point with a shading point. It propagates emitted light from source
+points to surface points. A neighbor edge e𝑁 ∈ 𝐸 𝑁 connects shading points with other shading points in their spatial neighborhood
+(cluster).
+The construction of light edges and continuation edges is done
+simultaneously with path tracing. The neighbor edges can be constructed by a simple nearest neighbor clustering of all shading points.
+Given 𝑁 shading points and a desired number of shading points
+per a cluster, 𝐾, approximately 𝑁 /𝐾 shading points are chosen as
+cluster centers, and all other shading points are assigned to the
+clusters with the nearest cluster centers. This process is repeated
+for large clusters until the number of shading points per cluster is
+relatively even.
+Shading points within a cluster are assumed to share the same
+incoming radiance distribution, and the neighbor edges serve as
+bridges for aggregation across those shading points. We treat the
+neighbors’ incoming radiance samples as samples of the point’s
+incoming radiance. Therefore, intuitively, we can treat each of the
+𝑁 points in the cluster as a sampling technique with its own pdf,
+and combine the 𝑁 techniques using multiple importance sampling.
+The resulting improved estimates can further be used to improve
+estimates in other clusters that depend on them, until convergence
+• 3
+Reconstruction
+& Denoising
+Final gather
+Fig. 2. Our method fits between the traditional steps of path tracing and
+denoising. This means that it can provide additional benefits on top of
+(rather than replacing) techniques like neural denoisers or advanced path
+sampling. Unlike the surface Path Graph, the final gather is optional in
+the volume case. The final gather serves to remove correlations between
+neighboring pixels, which are very subtle in volumes since path vertices are
+scattered in the volume.
+is reached. In the following sections, we turn these intuitions into a
+precise estimator for volume scattering media.
+3.2
+Radiative Transfer Equation in a Medium
+We will start with the radiative transfer equation (RTE) in a medium
+(Sec. 3.2) and review the Monte Carlo solution to the RTE (Sec. 3.3).
+We then derive the path graph propagation and aggregation operators that apply to participating media.
+The radiance propagating in direction 𝜔 at a point x in the
+medium can be written as
+𝐿(x, 𝜔) = 𝜏 (x, y)𝐿𝑒 (y, 𝜔) +
+
+
+∫
+∫
+𝜏 (x, x′ ) 𝐿𝑣 (x′, 𝜔) +
+𝑓𝜌 (x′, 𝜔, 𝜔 ′ )𝐿(x′, 𝜔 ′ )d𝜔 ′ dx′,
+(1)
+𝑆2
+′
+′
+′
+where 𝑓𝜌 (x , 𝜔, 𝜔 ) = 𝜎𝑠 (x )𝜌 (x′, 𝜔, 𝜔 ′ ), y is the visible surface
+point in the direction −𝜔 from x and the outer integral is along
+the line segment joining x and y. 𝐿𝑒 (y, 𝜔) is the surface emitted
+radiance at y, 𝐿𝑣 (x′, 𝜔) is the volume emitted radiance per unit
+length at x′ , ∫𝜌 (x′, 𝜔, 𝜔 ′ ) is the phase function of the medium at x′ ,
+y
+′
+′
+𝜏 (x, y) = 𝑒 − x 𝜎𝑡 (x )dx is the transmittance between two points,
+and 𝜎𝑡 (x) and 𝜎𝑠 (x) are the attenuation and scattering coefficients
+of the medium.
+For compactness of notation we encapsulate the two nested integrals in Eq. (1) inside linear operators K and G:
+∫
+[K 𝑓 ] (x, 𝜔) =
+𝑓𝜌 (x, 𝜔, 𝜔 ′ )𝑓 (x, 𝜔 ′ )d𝜔 ′
+(2)
+𝑆2
+∫
+[G𝑓 ] (x, 𝜔) =
+𝜏 (x, x′ ) 𝑓 (x, 𝜔)dx′ .
+(3)
+so that Eq. (1) reads
+𝐿 = 𝑄 + G(𝐿𝑣 + K𝐿).
+(4)
+where 𝑄 (x, 𝜔) = 𝜏 (x, y)𝐿𝑒 (y, 𝜔). This operator notation is inspired
+by Arvo [1993].
+To align our transport equations with the quantities stored in the
+path graph, we rearrange the RTE in two ways. First, we introduce
+scattered radiance 𝐿 and write Eq. (4) in two steps as:
+(
+𝐿 = K𝐿
+(5)
+𝐿 = 𝑄 + G(𝐿𝑣 + 𝐿).
+, Vol. 1, No. 1, Article . Publication date: April 2024.
+4
+•
+Firstauthor et al.
+Like volume emission, 𝐿 is a radiance per unit length with units
+𝑊 /(𝑚 3 · 𝑠𝑟 ), whereas 𝐿 has units 𝑊 /(𝑚 2 · 𝑠𝑟 ).
+Second, we write the radiance 𝐿 as a sum of 𝐿 o = 𝑄 + G𝐿𝑣 ,
+which is incoming radiance due to direct illumination and volume
+emission, and 𝐿 + = G𝐿, the radiance due to multiple scattering. We
+also introduce corresponding scattered quantities 𝐿 o = K𝐿 o and
+𝐿 + = K𝐿 + . The RTE then reads
+(
+𝐿 + = K𝐿 +
+(6)
+𝐿 + = G𝐿 o + G𝐿 +
+In this pair of equations 𝐿 o is known (it is an integral of known
+quantities) and 𝐿 + is the unknown to solve for, after which the
+complete solution is simply 𝐿 = 𝐿 o + 𝐿 + .
+The steps of the path graph algorithm will correspond to these
+operators; Eq. (2) corresponds to the aggregation step and Eq. (3)
+corresponds to the propagation step. One aggregation step is used to
+compute 𝐿 o ; a series of alternating aggregations and propagations
+serve to solve for 𝐿 + ; and a final addition computes 𝐿 for the pixels
+of the image.
+In the next subsection, we will review the general form of Monte
+Carlo estimators for K and G, then show how the path graph algorithm efficiently approximates these operators from a limited
+number of sampled paths.
+3.3
+area light
+env. light
+env. light
+volume
+camera
+shading point
+light point
+neighbor edge
+continuation edge
+cluster
+light edge
+Fig. 3. Illustration of the volume path graph construction from paths sampled during a standard volumetric path tracing pass with next event estimation in participating media.
+application of the above estimators, and introduce the construction
+of a path graph from the resulting path samples.
+Monte Carlo Estimator for RTE
+∫
+Consider a general integral 𝐼 = Ω 𝑓 (𝑧)d𝑧 on the space Ω. Let
+𝑧 1, 𝑧 2 · · · 𝑧 𝑁 be random sample on Ω drawn from a probability density function 𝑝 (𝑧), and assume 𝑝 (𝑧) is nonzero whenever 𝑓 (𝑧) is
+𝑓 (𝑧 )
+nonzero. One can prove that 𝜉 (𝑧) = 𝑝 (𝑧 ) is an unbiased estimator
+of 𝐼 , because
+∫
+∫
+𝑓 (𝑧)
+𝐸 [𝜉 (𝑧)] =
+𝑝 (𝑧)d𝑧 =
+𝑓 (𝑧)d𝑧 = 𝐼 .
+(7)
+Ω 𝑝 (𝑧)
+Ω
+Applying the Monte Carlo estimator Eq. (7) to the operator K defined in Sec. 3.2, we find that the scattered quantities 𝐿 o and 𝐿 +
+can be estimated by a sample drawn from the solid angle space
+with probability density 𝑝 𝑤 (𝜔), ideally equal to the phase function
+(which causes cancellation):
+𝑓𝜌 (x′, 𝜔, 𝜔 ′ )𝐿 o (x′, 𝜔 ′ )
+,
+(8)
+𝑝 𝑤 (𝜔 ′ )
+𝑓𝜌 (x′, 𝜔, 𝜔 ′ )𝐿 + (x′, 𝜔 ′ )
+𝐿 + (x′, 𝜔) ≈
+.
+(9)
+𝑝 𝑤 (𝜔 ′ )
+The right sides are unbiased estimators, not just approximations.
+Similarly, to apply the Monte Carlo estimator to the operator G, we
+take a sample x′ along the direction 𝜔 from x:
+
+
+𝜏 (x, x′ ) 𝐿 + (x′, 𝜔) + 𝐿 o (x′, 𝜔)
+𝐿 + (x, 𝜔) ≈
+,
+(10)
+𝑝𝑡 (x′ |x)
+𝐿 o (x′, 𝜔) ≈
+where again the right side is an unbiased estimator, 𝑝𝑡 (x′ |x) is the
+probability density function of sampling distance ||x − x′ || from x,
+ideally proportional to 𝜏 (x, x′ ). The Monte Carlo estimators turn
+the continuous operators from Sec. 3.2 to discrete samples from
+continuous distributions. In the following section, we will briefly
+review volumetric path tracing, which is nothing but recursive
+, Vol. 1, No. 1, Article . Publication date: April 2024.
+3.4
+Volume Path Tracing
+With Eq. (8), Eq. (9) and Eq. (10) one can estimate the integral by taking discrete random samples and continue by recursively expanding
+the indirect incoming radiance term as another Monte Carlo estimate until the emission is queried. A consecutive chain of shading
+points x0 · · · x𝑘 are sampled, with each point representing a scattering event or a surface event. Typically, each shading point x𝑖 has
+a connection to an emission point y𝑖 due to next event estimation,
+completing a light path. When a direction is sampled in proportion
+to the local phase function, it may also create a connection to light
+source if there is an unoccluded emission along the direction. The
+pixel value is computed from the contribution of those complete
+light paths. In standard volume path tracing, all intermediate path
+samples are dropped once the contribution is computed, but in path
+graph framework, we record enough information to reconstruct
+these complete light paths and build the information sharing graph.
+3.5
+Aggregation and Propagation
+After a path graph is constructed, the next step is the aggregation of
+information across neighbor edges and propagation along continuation edges. We use 𝑖 = 0 · · · 𝐷 to index shading points on a complete
+light path z with 𝐷 being max depth of the path, and 𝑗 = 1 · · · 𝐾 to
+index the shading points within a cluster, with 𝐾 being the number
+of shading points in a cluster.
+For a shading point x𝑖 in a cluster 𝐶, we aggregate direct and
+indirect radiance estimates from all neighbors. One is the incoming
+indirect radiance 𝐿 + (x 𝑗 , 𝜔 𝑗 ), which updates the scattered indirect
+radiance (noted as 𝐿 + (x𝑖 , 𝜔𝑖 )) at point x𝑖 . Another quantity we
+aggregate is the direct radiance 𝐿 o (x 𝑗 , 𝜔 𝑗 ), updating refined estimates of scattered direct radiance 𝐿 o (x𝑖 , 𝜔𝑖 ). Combining those two
+Rendering Participating Media Using Path Graphs
+aggregations gives an updated estimate of total scattered radiance:
+𝐿(x𝑖 , 𝜔𝑖 ) = 𝐿 + (x𝑖 , 𝜔𝑖 ) + 𝐿 o (x𝑖 , 𝜔𝑖 )
+Eq. (16) and Eq. (15) yields:
+(11)
+This updated outgoing radiance at x𝑖 corresponds to the incoming
+indirect radiance at the previous shading point on the path (if any).
+It is propagated along its outgoing continuation edge to update the
+indirect radiance 𝐿 + (x𝑖 −1, 𝜔𝑖 −1 ) at the (𝑖 − 1)-th shading point x𝑖 −1
+on z. In the surface case, [Deng et al. 2021] assumes light transport
+in vacuum between surfaces, so 𝐿 + (x𝑖 −1, 𝜔𝑖 −1 ) = 𝐿(x𝑖 , 𝜔𝑖 ). Unlike
+the simple copying operation used in the surface case, propagation
+for the volume path graph should consider the transmittance term
+and the probability of sampling distance ||x𝑖 − x𝑖 −1 || from x𝑖 −1 in
+Eq. (10), where
+
+𝜏 (x𝑖 , x𝑖 −1 )  +
+𝐿 + (x𝑖 −1, 𝜔𝑖 −1 ) =
+𝐿 (x𝑖 , 𝜔𝑖 ) + 𝐿 o (x𝑖 , 𝜔𝑖 ) . (12)
+𝑝𝑡 (x𝑖 |x𝑖 −1 )
+• 5
+𝐿 + (x, 𝜔) =
+𝐾
+∑︁
+𝑓𝜌 (x, 𝜔, 𝜔 𝑗 )
+𝑝𝑚 (𝜔 𝑗 )
+𝑗=1
+𝐿 + (x 𝑗 , 𝜔 𝑗 ).
+(17)
+The above can be computed for each shading point in time linear in
+𝐾, computing the marginal densities in a first pass and Eq. (17) in a
+second pass over the cluster.
+We define L+ as a vector that holds the scattered indirect radiance
+of all shading points 𝑉𝑥 along all the outgoing continuation edges
+in 𝐸𝐶 and L+ as a vector that holds incoming indirect radiance at
+all the shading points 𝑉𝑥 from all the incoming continuation edges
+in 𝐸𝐶 . Then Eq. (17) can be expressed in matrix form as follow
+L+ = A+ L+,
+(18)
+where A+ is a |𝑉𝑥 | × |𝑉𝑥 | matrix with its element on row 𝑟 column
+𝑐 being
+3.6
+Path Graph Operators
+( 𝑓 (x ,𝜔 ,𝜔 )
+𝜌
+In path graph, we use an aggregation operator to gather incoming
+radiance from nearby shading points and recompute the outgoing
+radiance at the points. Then we use a propagation operator to
+propagate the updated quantity to previous shading points on their
+path. Finally after a few iterations of alternating aggregation and
+propagation, we propagate updated radiance to the pixels.
+The outgoing radiance of a point is updated by a weighted average
+of the contribution from nearby shading points in the current cluster.
+More precisely, this is done by treating other points in the cluster as
+independent sampling techniques, and combining them by multiple
+importance sampling. Recall that multiple importance sampling with
+the balance heuristic [Veach and Guibas 1995] provides weights for
+combining 𝑚 sampling strategies as follows:
+𝑝𝑖 (𝑧𝑖 )
+𝑤 (𝑧𝑖 ) = Í𝑚
+,
+𝑝 (𝑧 )
+𝑙=1 𝑙 𝑖
++
+A𝑟𝑐
+=
+𝑚
+∑︁
+𝑗=1
+𝑤 (𝑧 𝑗 )
+𝑓 (𝑧 𝑗 )
+.
+𝑝 𝑗 (𝑧 𝑗 )
+𝑗=1
+𝑤 ( x̂, 𝜔 𝑗 )
+𝑓𝜌 (x, 𝜔, 𝜔 𝑗 )𝐿 + (x 𝑗 , 𝜔 𝑗 )
+.
+𝑝 ( x̂, 𝜔 𝑗 )
+(13)
+x𝑟 , x𝑐 ∈ the same cluster
+(19)
+𝑒 o
+𝑒
+𝐾
+1 ∑︁ 𝐾 𝑓𝜌 (x, 𝜔, 𝜔 𝑗 )𝐿 (x 𝑗 , 𝜔 𝑗 )
+Í
+𝐾 𝑗=1 𝐾 𝑝 𝜌 ( xˆ𝑙 , 𝜔 𝑒 ) + 𝐾𝑝𝑒 (𝜔 𝑒 )
+(20)
+𝑓𝜌 (x, 𝜔, 𝜔 𝑗 )𝐿 o (x 𝑗 , 𝜔 𝑗 )
+,
+Í𝐾
+𝑗=1 𝑙=1 𝑝 𝜌 ( xˆ𝑙 , 𝜔 𝑗 ) + 𝐾𝑝𝑒 (𝜔 𝑗 )
+(21)
+𝑙=1
+(14)
++
+𝑗
+𝑗
+𝐾
+∑︁
+where 𝜔 𝑒 stands for the directional sample taken from emitter sampling with a PDF 𝑝𝑒 (𝜔 𝑒 ), and 𝑝 𝜌 ( xˆ𝑙 , 𝜔) is the PDF of sampling 𝜔
+from phase function at a shading point x𝑙 . Similar to the indirect
+Í𝐾
+radiance case, we define 𝑝𝑚 (𝜔) = 𝑙=1
+𝑝 𝜌 ( xˆ𝑙 , 𝜔) + 𝐾𝑝𝑒 (𝜔 𝑗 ) as the
+marginal density for direction 𝜔 in its cluster, which gives us
+𝐾 𝑓𝜌 (x, 𝜔, 𝜔 𝑒 )
+∑︁
+𝑗
+𝑗=1
+𝑝𝑚 (𝜔 𝑒𝑗 )
+𝐿 o (x 𝑗 , 𝜔 𝑒𝑗 ) +
+𝐾
+∑︁
+𝑓𝜌 (x, 𝜔, 𝜔 𝑗 )
+𝑗=1
+𝑝𝑚 (𝜔 𝑗 )
+𝐿 o (x 𝑗 , 𝜔 𝑗 ).
+(22)
+(15)
+To turn Eq. (22) into a matrix form, we define Lo as a vector of length
+Applying Eq. (13) to weigh the contribution from direction 𝜔 𝑗 in
+cluster 𝐶 with 𝐾 points, we get the following weight
+𝑝 ( x̂, 𝜔 𝑗 )
+𝑤 ( x̂, 𝜔 𝑗 ) = Í𝐾
+,
+𝑝 ( xˆ𝑙 , 𝜔 𝑗 )
+𝑙=1
+,
+Aggregation of the direct radiance is slightly different from the
+indirect aggregation. For each shading point x in the cluster, it has
+two directions sampled for the incoming direct radiance, one from
+emitters and one from the local phase function. Therefore, when
+combining the estimations from all the direct radiance samples in a
+cluster, we consider 2𝐾 samples from 𝐾 + 1 sampling strategies: 𝐾
+samples from emitter sampling (here we view all emitter sampling as
+one strategy), and 𝐾 local phase function strategies for each sample.
+Applying this multi-sample MIS on the 2𝐾 direct light samples for
+Eq. (8) and cancelling some terms gives us
+𝐿 o (x, 𝜔) =
+𝐾
+∑︁
+𝑐
+x𝑟 , x𝑐 in different clusters.
+𝐿 o (x, 𝜔) =
+We apply MIS to aggregate the indirect radiance from Eq. (9) for
+point x in a cluster 𝐶 of size 𝐾. Given the sampling strategy xˆ𝑗 at
+point x 𝑗 with its sampled direction 𝜔 𝑗 ,
+𝐿 + (x, 𝜔) =
+𝑟
+0,
+where 𝑝𝑖 (𝑧) is the probability of sampling 𝑧 with the 𝑖-th strategy.
+The estimate of 𝑓 (𝑧) from 𝑚 strategies is then
+𝐸 [𝑓 (𝑧)] ≈
+𝑟
+𝑝𝑚 (𝜔𝑐 )
+(16)
+where {x𝑙 ∈ 𝐶} and 𝑝 ( xˆ𝑙 , 𝜔 𝑗 ) is the probability of choosing 𝜔 𝑗 at x𝑙
+Í𝐾
+using the sampling strategy xˆ𝑙 . We call 𝑝𝑚 (𝜔 𝑗 ) = 𝑙=1
+𝑝 ( xˆ𝑙 , 𝜔 𝑗 ) the
+marginal density of directional sample 𝜔 𝑗 in cluster 𝐶. Combining
+|𝑉𝑦 | = 2|𝑉𝑥 |, with interleaved entries being incoming direct radiance
+from the light edges on the path graph which are sampled from
+the emitter distribution (entries with even indices) or in proportion
+to the local phase function (entries with odd indices); then Lo is a
+vector of size |𝑉𝑥 | holding the scattered direct radiance on all the
+shading points along all continuation edges. Writing Eq. (22) in a
+matrix form, we have
+Lo = A𝑜 Lo,
+(23)
+, Vol. 1, No. 1, Article . Publication date: April 2024.
+6 •
+Firstauthor et al.
+where the direct aggregation matrix A𝑜 has a size of |𝑉𝑥 | × |𝑉𝑦 |; its
+entry on row 𝑟 and column 𝑐 is
+𝑒 )
+𝑓𝜌 (x𝑟 ,𝜔𝑟 ,𝜔𝑐/2
+
+
+
+,
+𝑒 )
+
+𝑝
+(𝜔
+
+𝑚
+𝑐/2
+
+
+x𝑟 , x𝑐/2 in same cluster and c is even
+
+
+ 0,
+
+otherwise.
+A𝑜𝑟𝑐 = 𝑓𝜌 (x𝑟 ,𝜔𝑟 ,𝜔𝑐/2 ) ,
+
+ 𝑝𝑚 (𝜔𝑐/2 )
+x𝑟 , x𝑐/2 in same cluster and c is odd
+(24)
+Putting Eq. (23) and Eq. (18) into Eq. (11) we get
+L = L+ + Lo = A+ L+ + A𝑜 Lo .
+(25)
+Eq. (25) is the aggregation operation; it gives us the equations for
+recomputing the outgoing radiance at each shading point from the
+recorded quantities on the path graph.
+Once the outgoing radiance L of a shading point is refined, we
+need to propagate this refinement towards the previous shading
+point through the continuations edges. This propagation operation
+is described in Eq. (12), and we also write it in matrix multiplication
+form as
+L+ = PL
+(26)
+with a propagation matrix P of size |𝑉𝑥 | 2 whose entry at row 𝑟 and
+column 𝑐 is
+( 𝜏 (x ,x )
+𝑟 𝑐
+, x𝑟 is the previous shading point of x𝑐
+P𝑟𝑐 = 𝑝𝑡 (x𝑟 |x𝑐 )
+(27)
+0.0 ,
+otherwise.
+Expanding Eq. (26) by Eq. (25) yields
+L+ = PA+ L+ + PA𝑜 Lo,
+(28)
+Now that we have introduced the aggregation operators (A𝑜 , A+ )
+and the propagation operator (P) over the path graph, given a path
+graph 𝐺 = ⟨𝑉 , 𝐸⟩ and the recorded variables on the path graph, we
+are solving for a fixed point L+ for the updating rule in Eq. (28),
+and each image pixel value can be reconstructed by selecting the
+entries of L+ that tie to that pixel. Since the direct illumination vector
+PA𝑜 𝐿 o is independent of the variable L+ that is being updated, it is
+computed once and remains constant throughout the iteration. With
+L+ initialized to the indirect radiance estimates from path tracing,
+the linear system converges within a few iterations.
+Path graph solver. Once the shading points are on the GPU, 𝑚 cluster
+centers are randomly selected such that 𝑚𝐾 = 𝑛 where 𝐾 is the
+expected cluster size and 𝑛 is the total number of shading points. A
+hash-grid on the shading points’ positions is built, and a nearestneighbor clustering is performed by searching through neighboring
+bins in the hash grid. After forming the clusters, we use data from
+the recorded light points to perform one pass of direct radiance
+aggregation following Eq. (22). We also use the recorded incoming
+indirect radiance for each shading point to compute the aggregated
+indirect radiance by following Eq. (17). The sum of aggregated direct
+and indirect light is then propagated across each continuation edge.
+We then perform a few iterations of alternating indirect radiance
+aggregation and propagation to get to the final result. Note that we
+could have initialized a zero-valued incoming indirect radiance at
+each shading point, but it would take 𝑞 iterations of aggregation and
+propagation to correctly compute the radiance for a path of length 𝑞;
+that is not ideal for volumetric rendering, which can have especially
+long paths. Starting from path-tracing estimates of indirect incoming
+radiance puts the image at the correct energy level from the first
+iteration, and the iterative refinements are only used to improve the
+image smoothness. It normally takes a small number of iterations
+(less than 10) to obtain a converged output, even if many paths are
+much longer than 10 bounces.
+Handling direct Light. Direct radiance aggregation is only performed
+to better optimize indirect radiance (through propagation). In order
+to remove significant correlations between neighboring points, we
+use the non-aggregated direct radiance from path tracing instead of
+the aggregated direct radiance when writing the final output. This
+means that our method can be expected mainly to improve on scenes
+dominated by indirect radiance. However, for certain scenes that
+are dominated by participating media but have a few direct radiance
+components (e.g. emitters in a medium or media encapsulated by
+dielectric surfaces), Path Graph can still show a benefit, but only if
+the direct radiance is handled well. To this end we optionally record
+a few extra emitter samples for the first bounce on each path. In
+scenes where direct radiance needs more improvement, we apply
+Path Graph as normal by using the aggregated direct radiance in
+propagation, but then use the extra direct light samples, instead
+of the non-aggregated direct radiance, to compute the final pixel
+values.
+We implemented an instrumented volumetric path tracer for path
+graph recording based on the open source renderer Mitsuba v0.6
+[Jakob 2013] and added our volumetric path graph solver as a CUDA
+plugin.
+Final output. The radiance on the continuation edge for the first
+shading point of each path represents the radiance propagated into
+the camera. These radiance values will be the output for the Path
+Graph after a few iterations of aggregation and propagation. The
+output values for each path are written into the corresponding pixels
+of the output image, which can then be optionally fed into a denoiser
+for the final output.
+Instrumented path tracer. Path tracing is performed on the CPU.
+During path tracing, we record data for the emitter sampling and
+phase function sampling at each shading point. Additionally, the
+incoming indirect radiance for each shading point is recorded. Once
+a path is traced, all of its shading points are stored into a global
+array x that preserves their order on the path. x is stored in pinned
+memory to minimize data transfer time onto the GPU.
+We study the behavior of path graph on a variety of volumetric
+scattering scenes under challenging lighting conditions. Our tests
+contain both homogeneous (Buddha, Traffic Light, Foggy Forest) and heterogeneous volumes (Bunny Cloud, Disney Cloud,
+Dust Shockwave, Colored Smoke, Industry Smoke, and Golden
+4
+RENDERING SYSTEM
+, Vol. 1, No. 1, Article . Publication date: April 2024.
+5
+EXPERIMENTS
+Rendering Participating Media Using Path Graphs
+• 7
+Table 1. Detailed timing of our pipeline steps. The 2nd to 5th columns are the average render time of 1 sample per pixel for both path tracing, revised path
+tracing with data recording, recording of extra direct light samples (only applicable to Buddha and Traffic Light), and the total execution time of our path
+graph iteration. The ratio is the number of samples that a path tracer could compute during the same time of 1spp using our method, with path sample
+recording overhead. The number of PT/PG samples used in 5 min equal time comparison is computed from the time for a single sample run, with an additional
+note that if extra direct light samples are recorded, this operation will only be performed once and thus its time would not multiply with the number of Path
+Graph samples.
+time ( s )
+Scene Name
+ratio
+path tr
+Buddha
+Traffic-Light
+Foggy-Forest
+Disney-Cloud
+Industry-Smoke
+Mitsuba-Colored-Smoke
+Golden-Gate
+18.9
+4.3
+6.8
+3.0
+12.5
+6.2
+43.8
+record path tr
+24.2
+6.0
+10.4
+15.8
+13.1
+6.9
+50.4
+ours
+record extra direct samples
+2.8 (15spp)
+31.1 (69spp)
+N/A
+N/A
+N/A
+N/A
+N/A
+Gate). The resolution of all renderings is 1440x960 pixels. The CPU
+we use is an Intel Xeon Silver 4214 with 8 cores, and the GPU is an
+Nvidia RTX 3090.
+Equal sample comparison. In Fig. 4 we show an 1 spp comparison
+between our method and path tracing on scenes with heterogeneous
+media. Our method is much closer to the reference and produces a
+much smaller MSE than path tracing.
+Equal time comparison. Our method necessarily has some overhead
+per sample. Therefore, we also render some more challenging scenes
+using both path tracing and our method in 5 minutes. In all tested
+cases, our method still visually gives a smoother result than path
+tracing and numerically has a smaller MSE, as we can see in Fig. 5
+and Fig. 6. The detailed breakdown of path tracing and our method’s
+time and MSE is shown in Table 1. Our method produces even
+more variance reduction in scenes that have more indirect light (e.g.
+Colored Smoke) and/or media with a high density and high albedo
+(e.g. Industry Smoke).
+Note that despite being dominated by indirect light, Buddha and
+Traffic Light both have some noticeable direct light components
+(specular reflections on the dielectric surface in Buddha and the
+emitters in Traffic Light), and as mentioned in Sec. 4, here we
+used additional direct light samples to render the final result. Again
+these 1-bounce samples are not used in the path graph itself but
+only when writing the final output to make up for the path graph’s
+non-aggregated direct radiance. We make it so that path graph has
+an equal number of direct illumination samples as path tracing,
+and thus any variance reduction comes from path graph itself. The
+time for the additional samples is accounted for in the equal time
+comparison. Since the Path Graph already handles the more difficult
+indirect illumination, the direct illumination samples do not take
+long to render and won’t significantly reduce the number of path
+graph samples that could be run. We can see that path graph still
+gives more desirable results in both scenes.
+Photon mapping and BDPT. Photon mapping and Bidirectional Path
+Tracing (BDPT) are two well-known methods for rendering homogeneous media. We include them in our equal time comparison shown
+in Fig. 5. These two methods show certain strengths in some types
+path graph
+16.92
+9.426
+13.74
+5.148
+1.826
+6.882
+17.36
+2.32
+10.82
+3.55
+6.98
+1.25
+2.22
+1.55
+MSE
+for 1SPP
+path
+ours
+tr
+0.0184 0.000837
+0.0263 0.000999
+0.0708 0.00515
+0.0786 0.00391
+0.0432 0.00721
+0.212
+0.0238
+0.128
+0.0135
+pathtr:ours SPP
+for equal time(300s)
+Equal time (300s) MSE ratio
+path tr: ours
+15:7
+69:17
+44:12
+100:14
+24:19
+48:21
+7:4
+1.24e-3 : 2.68e-4 = 4.62
+8.98e-4 : 2.12e-4 = 4.24
+1.61e-3 : 4.34e-4 = 3.70
+7.87e-4 : 3.07e-4 = 2.57
+1.80e-3 : 3.84e-4 = 4.69
+4.31e-3 : 3.95e-4 = 10.91
+1.85e-2 : 3.48e-3 = 5.32
+of scenes but both have significant limitations. Photon mapping
+gives a reasonable result in a small enclosed medium (Buddha),
+but it struggles particularly in outdoor scenes (Traffic Light and
+Foggy Forest) where targeting the photons into the camera view is
+non-trivial. BDPT, though theoretically unbiased, converges slowly
+and thus has a larger MSE when rendered in a small amount of time
+like here. Our method adapts well to the various lighting conditions
+and has barely noticeable bias.
+Log-log error curves. In Fig. 6, we further show a log-log convergence curve up to 2000 iterations of path tracing and our method.
+Due to the bias we introduce during aggregation, the curve for our
+method will eventually intersect with path tracing’s curve when it
+is more preferable to use path tracing. Nevertheless, this will happen well beyond 2000 spp, showing that our method can improve
+convergence across a reasonable range of spp settings.
+Study of Path Graph iterations. As mentioned in Sec. 4, it often takes
+less than 10 iterations of aggregation and propagation for Path
+Graph to converge. To support our claim, we show in Fig. 7 how
+Path Graph’s output changes as the number of iterations varies. It
+can be seen that even though the two scenes differ in the amount
+of direct illumination (the bunny scene has more indirect light and
+thus takes a few more iterations to converge), they both converge
+within 10 iterations.
+6
+CONCLUSION
+In this work, we extended the path graph framework to scenes
+involving volumetric scattering media like clouds and fog. Our
+method focuses on more effective reuse of multiple-scattering paths
+and offers a notable improvement in sampling efficiency and speed
+over traditional path tracing techniques, particularly in challenging
+environments with heterogeneous, highly scattering media and
+complex lighting. While our approach shows significant potential
+in enhancing volumetric rendering, it represents just one step in
+addressing the broader challenges of the field. Future explorations
+could include deeper integration of volume and surface path graphs.
+, Vol. 1, No. 1, Article . Publication date: April 2024.
+8 •
+Firstauthor et al.
+BUNNY CLOUD
+MSE: 3.46e-2
+1.0x
+MSE: 4.51e-2
+1.0x
+MANY CLOUDS
+DUST SHOCK WAVE
+MSE: 2.21e-2
+0.278x
+MSE: 2.33e-3
+0.067x
+MSE: 1.20e-2
+0.266x
+MSE: 7.94e-2
+1.0x
+MSE: 7.47e-2
+0.272x
+MSE: 2.75e-1
+1.0x
+Reference
+PT (left) vs. Ours (right)
+COLORED SMOKE 2
+Fig. 4. We show an equal sample (at 1 sample per pixel) comparison between ours and path tracing. Our method extensively reuses the paths’ information
+even with only one sample per pixel, significantly improving rendering efficiency.
+(a) BDPT
+(b) PM
+(d) Ours
+(c) PT
+BDPT
+MSE: 5.65e-4
+0.457x
+MSE: 1.24e-3
+1.0x
+MSE: 2.68e-4
+0.216x
+MSE: 3.10e-4
+0.345x
+MSE: 1.65e-2
+18.385x
+MSE: 8.98e-4
+1.0x
+MSE: 2.12e-4
+0.236x
+MSE: 3.19e-3
+1.986x
+MSE: 2.88e-3
+1.792x
+MSE: 1.61e-3
+1.0x
+MSE: 4.34e-4
+0.270x
+PM
+PT
+Ours
+Reference
+FOGGY FOREST
+TRAFFIC LIGHT
+BUDDHA
+MSE: 7.94e-3
+6.414x
+Fig. 5. Comparison between (a) bidirectional path tracing, (b) photon mapping, (c) path tracing and (d) our method (path tracing + path graphs) on an equal
+time (5 min) in scenes with the presence of homogeneous volume. We show full light transport in all the scenes and our method provides significant variance
+reduction over previous methods on rendering the participating media. The 2nd and 3rd scenes contain large volume of outdoor medium (e.g. fog), where
+(unguided) photon mapping suffers since only a small amount of photons arrive at the region where the camera is looking towards due to strong multiple
+scattering. The 2nd scene has a skydom as environment lighting as well as the traffic lights, where the bidirectional method failed to sample the small light
+sources.
+REFERENCES
+James Arvo. 1993. Linear Operators and Integral Equations in Global Illumination. In
+Global Illumination. Vol. 42. Chapter 2, 1–21.
+Benedikt Bitterli and Wojciech Jarosz. 2017. Beyond Points and Beams: HigherDimensional Photon Samples for Volumetric Light Transport. 36, 4 (July 2017),
+1–12. https://doi.org/10/gfznbr
+Benedikt Bitterli, Chris Wyman, Matt Pharr, Peter Shirley, Aaron Lefohn, and Wojciech
+Jarosz. 2020. Spatiotemporal reservoir resampling for real-time ray tracing with
+dynamic direct lighting. ACM Transactions on Graphics (Proceedings of SIGGRAPH)
+39, 4 (July 2020). https://doi.org/10/gg8xc7
+, Vol. 1, No. 1, Article . Publication date: April 2024.
+Xi Deng, Miloš Hašan, Nathan Carr, Zexiang Xu, and Steve Marschner. 2021. Path
+graphs: iterative path space filtering. ACM Transactions on Graphics (Proceedings of
+SIGGRAPH) 40, 6 (dec 2021). https://doi.org/10.1145/3478513.3480547
+Xi Deng, Shaojie Jiao, Benedikt Bitterli, and Wojciech Jarosz. 2019. Photon surfaces
+for robust, unbiased volumetric density estimation. ACM Transactions on Graphics
+(Proceedings of SIGGRAPH) 38, 4 (jul 2019). https://doi.org/10.1145/3306346.3323041
+Iliyan Georgiev, Jaroslav Křivánek, Tomáš Davidovič, and Philipp Slusallek. 2012a.
+Light Transport Simulation with Vertex Connection and Merging. 31, 6 (Nov. 2012),
+192:1–192:10. https://doi.org/10/gbb6q7
+Iliyan Georgiev, Jaroslav Křivánek, Stefan Popov, and Philipp Slusallek. 2012b. Importance Caching for Complex Illumination. 31, 2 (June 2012), 701–710. https:
+Rendering Participating Media Using Path Graphs
+GOLDEN GATE BRIDGE
+COLORED SMOKE
+INDUSTRY SMOKE
+DISNEY CLOUD
+(a) PT
+(b) Ours
+PT
+MSE: 7.87e-4
+1.0x
+MSE: 3.07e-4
+0.390x
+MSE: 1.80e-3
+1.0x
+MSE: 3.84e-4
+0.213x
+MSE: 4.31e-3
+1.0x
+MSE: 3.95e-4
+0.092x
+MSE: 1.85e-2
+1.0x
+MSE: 3.48e-3
+0.188x
+Ours
+• 9
+Reference
+Fig. 6. Comparison between (a) path tracing and (b) our method (path tracing + path graphs) on an equal time (5 min) in scenes with the presence of
+heterogeneous volume. We show full light transport in all the image and our method out perform the path tracing especially around the area where the pixel
+value is dominated by multi-bounces.
+Fig. 7. Two 1spp scenes with a varying number of Path Graph iterations. Path Graph converges well within 10 iterations in both cases.
+, Vol. 1, No. 1, Article . Publication date: April 2024.
+10
+•
+Firstauthor et al.
+//doi.org/10/gbbdcc
+Toshiya Hachisuka, Jacopo Pantaleoni, and Henrik Wann Jensen. 2012. A Path Space
+Extension for Robust Light Transport Simulation. 31, 6 (Jan. 2012), 191:1–191:10.
+https://doi.org/10/gbb6n3
+Sebastian Herholz, Yangyang Zhao, Oskar Elek, Derek Nowrouzezahrai, Hendrik P. A.
+Lensch, and Jaroslav Křivánek. 2019. Volume Path Guiding Based on Zero-Variance
+Random Walk Theory. ACM Trans. Graph. 38, 3, Article 25 (jun 2019), 19 pages.
+https://doi.org/10.1145/3230635
+Jinkai Hu, Chengzhong Yu, Hongli Liu, Lingqi Yan, Yiqian Wu, and Xiaogang Jin.
+2023. Deep Real-Time Volumetric Rendering Using Multi-Feature Fusion. In ACM
+SIGGRAPH 2023 Conference Proceedings (Los Angeles, CA, USA) (SIGGRAPH ’23).
+Association for Computing Machinery, New York, NY, USA, Article 61, 10 pages.
+https://doi.org/10.1145/3588432.3591493
+Wenzel Jakob. 2013. Mitsuba Renderer. http://www.mitsuba-renderer.org.
+Wojciech Jarosz, Matthias Zwicker, and Henrik Wann Jensen. 2008a. The Beam Radiance
+Estimate for Volumetric Photon Mapping. Technical Report CS2008-0914. University
+of California, San Diego.
+Wojciech Jarosz, Matthias Zwicker, and Henrik Wann Jensen. 2008b. The Beam Radiance
+Estimate for Volumetric Photon Mapping. 27, 2 (April 2008), 557–566. https:
+//doi.org/10/bjsfsx
+Henrik Wann Jensen. 1996. The Photon Map in Global Illumination. Ph.D. Thesis.
+Technical University of Denmark.
+Henrik Wann Jensen and Niels Jørgen Christensen. 1995. Photon Maps in Bidirectional
+Monte Carlo Ray Tracing of Complex Objects. 19, 2 (March 1995), 215–224. https:
+//doi.org/10/d9xr6q
+Henrik Wann Jensen and Per H. Christensen. 1998. Efficient Simulation of Light
+Transport in Scenes with Participating Media Using Photon Maps, Vol. 32. ACM,
+311–320. https://doi.org/10/b64p36
+James T. Kajiya and Timothy L. Kay. 1989. Rendering Fur with Three Dimensional
+Textures. 23, 3 (July 1989), 271–280.
+, Vol. 1, No. 1, Article . Publication date: April 2024.
+Alexander Keller, Ken Dahm, and Nikolaus Binder. 2014. Path Space Filtering (SIGGRAPH ’14). ACM, Article 68, 1 pages. https://doi.org/10/gfz6mr
+Jaroslav Křivánek, Pascal Gautron, Greg Ward, Henrik Wann Jensen, Eric Tabellion,
+and Per Christensen. 2008. Practical Global Illumination with Irradiance Caching.
+https://doi.org/10/bhnsjz
+Jaroslav Křivánek, Iliyan Georgiev, Toshiya Hachisuka, Petr Vévoda, Martin Šik, Derek
+Nowrouzezahrai, and Wojciech Jarosz. 2014. Unifying Points, Beams, and Paths
+in Volumetric Light Transport Simulation. 33, 4 (July 2014), 103:1–103:13. https:
+//doi.org/10/f6cz72
+Eric P. Lafortune and Yves D. Willems. 1993. Bi-Directional Path Tracing, H. P. Santo
+(Ed.), Vol. 93. Alvor, Portugal, 145–153.
+Daqi Lin, Chris Wyman, and Cem Yuksel. 2021. Fast Volume Rendering with Spatiotemporal Reservoir Resampling. ACM Trans. Graph. 40, 6, Article 279 (dec 2021),
+18 pages. https://doi.org/10.1145/3478513.3480499
+Eric Veach. 1997. Robust Monte Carlo Methods for Light Transport Simulation. Ph.D.
+Thesis. Stanford University, United States – California.
+Eric Veach and Leonidas J. Guibas. 1994. Bidirectional Estimators for Light Transport,
+Georgios Sakas, Peter Shirley, and Stefan Müller (Eds.). 145–167. https://doi.org/
+10/gfznbh
+Eric Veach and Leonidas J. Guibas. 1995. Optimally Combining Sampling Techniques
+for Monte Carlo Rendering, Vol. 29. 419–428. https://doi.org/10/d7b6n4
+Gregory J. Ward, Francis M. Rubinstein, and Robert D. Clear. 1988. A Ray Tracing
+Solution for Diffuse Interreflection. 22, 4 (Aug. 1988), 85–92. https://doi.org/10/
+dk6rt5
+Rex West, Iliyan Georgiev, Adrien Gruson, and Toshiya Hachisuka. 2020. Continuous
+Multiple Importance Sampling. ACM Transactions on Graphics (Proceedings of
+SIGGRAPH) 39, 4, Article 136 (July 2020), 12 pages. https://doi.org/10.1145/3386569.
+3392436

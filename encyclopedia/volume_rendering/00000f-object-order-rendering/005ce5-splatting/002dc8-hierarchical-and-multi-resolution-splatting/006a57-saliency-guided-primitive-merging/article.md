@@ -1,0 +1,263 @@
+# Saliency-Guided Primitive Merging
+
+Also called: Compact FF-3DGS, FF-GS, Saliency-Guided Superpixel Merging, Superpixel-based merging
+
+## Overview
+Saliency-Guided Primitive Merging is a post-processing pipeline for Feed-Forward 3D Gaussian Splatting (FF-3DGS) that compresses per-pixel Gaussian predictions into a compact, hierarchical representation by grouping them into superpixels and merging them via learned encoders and decoders [S1]. It solves the problem of excessive primitive counts and memory usage in feed-forward novel view synthesis by reducing redundancy both within single views (via superpixel merging) and across multiple views (via cross-view matching), while preserving high-fidelity reconstruction quality [S1]. It sets itself apart from sibling methods like [Multi Resolution Alpha Blending](12118-multi-resolution-alpha-blending.md) or [Octree-based Hierarchy](12129-octree-based-hierarchy.md) by using a learned, content-adaptive segmentation (BASS with Shi-Tomasi seeding) and a neural encoder-decoder architecture rather than heuristic spatial partitioning or fixed-resolution grids [S1].
+
+## How it works
+The method operates on per-pixel 3D Gaussians predicted by a frozen feed-forward backbone (e.g., DA3, AnySplat, DepthSplat) from $N$ input views [S1]. The pipeline consists of segmentation, encoding, cross-view matching, merging, refinement, and decoding [S1].
+
+### Inputs and Outputs
+- **Input:** $N$ input images $\{I_v\}_{v=1}^N$, camera parameters (intrinsics/extrinsics) if using a posed backbone, and the predicted per-pixel Gaussian set $G_{FF}$ from a frozen backbone $M_{FF}$ [S1]. Each Gaussian $G_i$ is parameterized by mean $\mu_i \in \mathbb{R}^3$, quaternion rotation $q_i \in \mathbb{R}^4$, scale $s_i \in \mathbb{R}^3$, opacity $\alpha_i \in \mathbb{R}$, and spherical harmonic (SH) coefficients $\hat{c}_{k,i}$ for view-dependent color [S1].
+- **Output:** A compressed set of Feature Gaussians $\tilde{G}$, which can be decoded into $K$ output Gaussians per Feature Gaussian for rendering [S1].
+
+### Data Structures
+**Feature Gaussian ($\tilde{G}_j$):**
+A compressed primitive representing a group of original Gaussians. It contains:
+- Spatial parameters: $\tilde{\mu}_j \in \mathbb{R}^3$, $\tilde{q}_j \in \mathbb{R}^4$, $\tilde{s}_j \in \mathbb{R}^3$ (identical format to standard Gaussians) [S1].
+- Appearance: Base color $\tilde{c}_j$ (diffuse color, no SH coefficients) and a latent feature vector $\tilde{z}_j \in \mathbb{R}^d$ [S1].
+- Opacity: $\tilde{\alpha}_j$ [S1].
+
+**Superpixel Group ($S_j$):**
+A set of original Gaussians $\{G_i\}$ assigned to a single superpixel segment [S1].
+
+### Numbered Steps
+
+1. **Per-Pixel Gaussian Prediction:**
+   Pass input views through the frozen feed-forward backbone $M_{FF}$ to obtain the initial set of per-pixel Gaussians $G_{FF}$ [S1].
+
+2. **Saliency-Guided Superpixel Segmentation:**
+   a. Compute the Shi-Tomasi corner response $\lambda_v$ at each pixel, defined as the minimum eigenvalue of the image structure tensor [S1].
+   b. Sample seeds densely where $\lambda_v$ is high and sparsely elsewhere [S1].
+   c. Run the BASS segmentation algorithm using these seeds to partition the image into superpixels, producing a partition map $M_v$ that assigns each pixel (and its Gaussian) to a group $S_j$ [S1].
+
+3. **Feature Gaussian Encoding (Within-View Compression):**
+   For each superpixel group $S_j$:
+   a. Project per-Gaussian attributes into tokens using an MLP [S1].
+   b. Refine tokens using a stack of Set Attention Blocks (SABs) for pairwise interactions [S1].
+   c. Aggregate the set into a single output using Pooling-by-Multihead-Attention (PMA) with a learnable query $Q$ [S1].
+   d. Produce the latent feature $\tilde{z}_j$ via a final MLP [S1].
+   e. Compute $\tilde{\mu}_j$ as the opacity-weighted centroid of $S_j$ plus a learned position offset to compensate for outliers [S1].
+   f. Compute $\tilde{c}_j$ as the opacity-weighted average of the group members' diffuse color [S1].
+   g. **Note:** The encoder does *not* predict $\tilde{s}_j$ or $\tilde{q}_j$; these are produced by the decoder to prevent geometry collapse [S1].
+
+4. **Cross-View Matching:**
+   a. For each Feature Gaussian $\tilde{G}_j$, retrieve $k$ nearest neighbors via 3D kNN on positions $\tilde{\mu}$, excluding candidates from the same input view [S1].
+   b. Apply a match gate: a candidate pair is matched if:
+      - Cosine similarity between latent features $\tilde{z}_j$ and $\tilde{z}_{neighbor}$ $> \tau_f$ [S1].
+      - Axis-Aligned Bounding Box (AABB) intersection-over-union (IoU) of the Feature Gaussians' geometry $> \tau_g$ [S1].
+   c. Form connected components of the resulting match edges to define merge groups [S1].
+   d. Unmatched Feature Gaussians are appended to the final set unchanged [S1].
+
+5. **Feature Gaussian Merging (Cross-View Compression):**
+   For each merge group of Feature Gaussians:
+   a. Use the same SAB+PMA backbone as the encoder [S1].
+   b. Apply zero-initialized residual heads to predict parameter updates $\Delta \mu, \Delta z, \Delta m, \Delta c_0, \Delta s, \Delta q$ to the 0th Feature Gaussian in the group [S1].
+   c. Update the 0th Feature Gaussian with these deltas to produce the merged Feature Gaussian [S1].
+
+6. **Refinement:**
+   Apply a refiner $M_{ref}$ to each Feature Gaussian $\tilde{G}_j$ using self-attention over its $k$ nearest neighbors in the Feature Gaussian set to ensure continuity across thin structures and depth boundaries [S1].
+
+7. **Decoding:**
+   For each final Feature Gaussian $\tilde{G}_j$, apply the decoder $M_{dec}^K$ to expand it into $K$ output Gaussians compatible with standard differentiable rasterizers [S1]. The decoder has multiple heads for $K=1, 2, 4$ [S1].
+
+### Formulas
+**Rendering:**
+The final pixel color is obtained by front-to-back alpha blending [S1]:
+$$ c_{pixel} = \sum_{i=1}^{N} T_i \alpha_i c_i $$
+$$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+where $c_i$ is the view-dependent color of Gaussian $i$, computed via SH basis functions $H_k$:
+$$ c_i = \sum_{k=0}^{M} \hat{c}_{k,i} H_k(d) $$
+for view direction $d \in \mathbb{R}^3$ [S1].
+
+**Teacher Loss (Moment Matching):**
+During training, a closed-form moment-matching target is computed for each superpixel group $S_j$ [S1]:
+$$ \mu_j^{teach} = \frac{\sum_{i \in S_j} \alpha_i \mu_i}{\sum_{i \in S_j} \alpha_i} $$
+$$ \Sigma_j^{teach} = \frac{\sum_{i \in S_j} \alpha_i (\mu_i - \mu_j^{teach})(\mu_i - \mu_j^{teach})^\top}{\sum_{i \in S_j} \alpha_i} $$
+The loss compares the pipeline output to these targets using geodesic quaternion loss for $q_i$ and L1 losses for other parameters [S1].
+
+**Total Loss:**
+$$ L = \lambda_{MSE} L_{MSE} + \lambda_{SSIM} L_{SSIM} + \lambda_{LPIPS} L_{LPIPS} + \lambda_{teach} L_{teach} + \lambda_{div} L_{div} $$
+where $L_{MSE}, L_{SSIM}, L_{LPIPS}$ are photometric losses between rendered and ground-truth images [S1].
+
+### Parameters
+- **$K$:** Number of output Gaussians per Feature Gaussian. Typical values: $K=1, 2, 4$ [S1].
+- **Learning Rate:** $5 \times 10^{-5}$ with cosine schedule [S1].
+- **Optimizer:** AdamW [S1].
+- **Training Steps:** 300,000 steps [S1].
+- **Input Views:** 3, 6, 9, or 12 views [S1].
+- **Image Resolution:** Longer side resized to 476 pixels [S1].
+- **Match Thresholds:** $\tau_f$ (feature cosine similarity) and $\tau_g$ (AABB IoU) [S1].
+- **Loss Weights:** $\lambda_{teach}$ and $\lambda_{div}$ follow a decay schedule [S1].
+
+### Edge Cases and Pitfalls
+- **Encoder Collapse:** If the encoder predicts scale $s_j$ or rotation $q_j$, it may shrink geometry to avoid cross-view matching. The method prevents this by having the encoder *not* predict $s_j$ or $q_j$; these are produced by the decoder $M_{dec}^1$ [S1].
+- **LPIPS Sensitivity:** LPIPS is sensitive to texture degradation from merging, so the pipeline does not fully preserve LPIPS scores compared to unmerged baselines [S1].
+- **Superpixel Size:** Larger superpixels reduce the relative primitive count ($rc$) but degrade quality (e.g., PSNR drops from 14.14 dB to 13.97 dB at roughly half $rc$) [S1].
+- **VolSplat Performance:** VolSplat performs significantly worse than other methods and fails to reproduce reported quality, likely due to training on RealEstate-10K which has smaller viewpoint changes [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.spatial import KDTree
+
+def saliency_guided_segmentation(image):
+    """
+    Step 2: Saliency-Guided Superpixel Segmentation
+    """
+    # Compute Shi-Tomasi corner response (minimum eigenvalue of structure tensor)
+    # This is a placeholder for the actual eigenvalue computation
+    lambda_v = compute_shi_tomasi_response(image)
+    
+    # Sample seeds densely where lambda_v is high, sparsely elsewhere
+    seeds = sample_seeds_dynamically(image.shape, lambda_v)
+    
+    # Run BASS segmentation
+    # Returns a map assigning each pixel to a superpixel ID
+    partition_map = bass_segmentation(image, seeds)
+    return partition_map
+
+def encode_superpixel(group_gaussians):
+    """
+    Step 3: Feature Gaussian Encoding
+    Input: List of Gaussians in a superpixel group S_j
+    Output: Feature Gaussian parameters
+    """
+    # Project attributes to tokens
+    tokens = mlp_project(group_gaussians.attributes)
+    
+    # Refine with Set Attention Blocks
+    tokens = set_attention_blocks(tokens)
+    
+    # Aggregate with Pooling-by-Multihead-Attention
+    latent_z = pooling_by_multihead_attention(tokens, learnable_query=Q)
+    
+    # Compute mean as opacity-weighted centroid + offset
+    mu_teich = opacity_weighted_mean(group_gaussians, key='mu')
+    mu_j = mu_teich + position_offset
+    
+    # Compute base color as opacity-weighted average of diffuse color
+    c_j = opacity_weighted_mean(group_gaussians, key='diffuse_color')
+    
+    # Note: s_j and q_j are NOT predicted here
+    return {
+        'mu': mu_j,
+        'z': latent_z,
+        'c': c_j,
+        'alpha': opacity_weighted_mean(group_gaussians, key='alpha')
+    }
+
+def cross_view_matching(feature_gaussians):
+    """
+    Step 4: Cross-View Matching
+    Input: List of Feature Gaussians from all views
+    Output: List of merge groups (connected components)
+    """
+    # Build KDTree for 3D kNN
+    positions = np.array([fg['mu'] for fg in feature_gaussians])
+    tree = KDTree(positions)
+    
+    match_edges = []
+    for i, fg_i in enumerate(feature_gaussians):
+        # Find k nearest neighbors, excluding same-view candidates
+        # Assuming view_id is stored in fg_i
+        dists, indices = tree.query(fg_i['mu'], k=k+1) # +1 to exclude self
+        for idx, dist in zip(indices[1:], dists[1:]): # Skip self
+            fg_j = feature_gaussians[idx]
+            if fg_i['view_id'] == fg_j['view_id']:
+                continue
+            
+            # Match gate
+            cos_sim = cosine_similarity(fg_i['z'], fg_j['z'])
+            aabb_iou = compute_aabb_iou(fg_i, fg_j)
+            
+            if cos_sim > tau_f and aabb_iou > tau_g:
+                match_edges.append((i, idx))
+    
+    # Form connected components
+    merge_groups = find_connected_components(match_edges, len(feature_gaussians))
+    return merge_groups
+
+def merge_feature_gaussians(group_fg_indices, feature_gaussians):
+    """
+    Step 5: Feature Gaussian Merging
+    Input: Indices of Feature Gaussians in a merge group
+    Output: Merged Feature Gaussian
+    """
+    # Use SAB+PMA backbone
+    tokens = [feature_gaussians[i] for i in group_fg_indices]
+    # Process through merger network
+    # Predict deltas for the 0th FG
+    deltas = merger_network(tokens)
+    
+    # Apply deltas to the 0th Feature Gaussian
+    fg_0 = feature_gaussians[group_fg_indices[0]]
+    merged_fg = {
+        'mu': fg_0['mu'] + deltas['delta_mu'],
+        'z': fg_0['z'] + deltas['delta_z'],
+        'c': fg_0['c'] + deltas['delta_c0'],
+        's': fg_0['s'] + deltas['delta_s'],
+        'q': apply_quaternion_delta(fg_0['q'], deltas['delta_q']),
+        'alpha': fg_0['alpha'] # Opacity handling as per source
+    }
+    return merged_fg
+
+def decode_feature_gaussian(fg, K):
+    """
+    Step 7: Decoding
+    Input: Feature Gaussian, K (number of output Gaussians)
+    Output: List of K Gaussians
+    """
+    # Use the appropriate decoder head for K
+    decoder_head = get_decoder_head(K)
+    output_gaussians = decoder_head(fg)
+    return output_gaussians
+
+def render(feature_gaussians, K, camera_params):
+    """
+    Render the scene using the compressed Feature Gaussians
+    """
+    # Decode all Feature Gaussians to output Gaussians
+    all_gaussians = []
+    for fg in feature_gaussians:
+        all_gaussians.extend(decode_feature_gaussian(fg, K))
+    
+    # Sort by depth for front-to-back blending
+    all_gaussians.sort(key=lambda g: depth(g['mu'], camera_params))
+    
+    # Front-to-back alpha blending
+    image = np.zeros((height, width, 3))
+    transmittance = np.ones((height, width))
+    
+    for g in all_gaussians:
+        # Splat g onto image
+        splat_mask, splat_alpha, splat_color = splat_gaussian(g, camera_params)
+        
+        # Update image
+        # c_pixel = sum(T_i * alpha_i * c_i)
+        # T_i = product(1 - alpha_j)
+        # This is a simplified representation of the rasterization step
+        image = update_image_with_splat(image, splat_mask, splat_alpha, splat_color, transmittance)
+        transmittance = transmittance * (1 - splat_alpha)
+        
+    return image
+```
+
+## Operating characteristics
+- **Time Complexity:** The segmentation and encoding steps are performed per-view and are relatively fast due to the frozen backbone and efficient set transformer architecture. Cross-view matching involves 3D kNN, which scales with the number of Feature Gaussians. Decoding is constant per Feature Gaussian. Overall, it is significantly faster than per-scene optimization and faster than naive feed-forward rendering due to reduced primitive count [S1].
+- **Memory Complexity:** The method reduces the primitive count by up to 16x compared to the naïve baseline (e.g., 0.82 M vs 12.9 M Gaussians at 84 views) [S1]. This leads to proportional reductions in memory usage and rendering time (6.1x faster for K=1) [S1].
+- **Measured Performance:** On DL3DV-Bench, MipNeRF360, and Tanks & Temples, the DA3 backbone with K=1 achieves 17.41 dB PSNR at 4.4% relative primitive count (rc) [S1]. It outperforms heuristic moment matching and other feed-forward methods like ReSplat and VolSplat [S1].
+- **Strengths:** Content-adaptive compression via saliency-guided superpixels; effective cross-view redundancy removal; online reconstruction capability; high quality at low primitive counts.
+- **Limitations:** LPIPS scores are degraded due to texture smoothing from merging; performance depends on the quality of the feed-forward backbone; VolSplat baseline fails on certain benchmarks [S1].
+- **When to use:** When high-fidelity novel view synthesis is required from a small number of input views, and memory/latency constraints necessitate a compact representation.
+- **When not to use:** When LPIPS fidelity is critical and cannot tolerate texture degradation; when input views have very small viewpoint changes (VolSplat issue); when per-scene optimization is feasible and higher quality is needed at the cost of time.
+
+## Background
+Saliency-Guided Primitive Merging was introduced by Faasch, Kall, and Stachniess in the paper "Compact Feed-Forward 3D Gaussians via Saliency-Guided Primitive Merging" [S1]. It builds on the principles of [Hierarchical and Multi-Resolution Splatting](5618-hierarchical-and-multi-resolution-splatting.md) and [Splatting](23-splatting.md) [G]. The method addresses the limitations of feed-forward 3D Gaussian Splatting, which produces large numbers of primitives, by introducing a learned compression pipeline. It was evaluated on datasets like DL3DV-10K, MipNeRF360, and Tanks & Temples [S1].
+
+## Sources
+[S1] Compact Feed-Forward 3D Gaussians via Saliency-Guided Primitive Merging, https://arxiv.org/abs/2608.10712, fetched 2026-10-29

@@ -1,0 +1,232 @@
+--- v001.md
++++ v002.md
+@@ -8,14 +8,14 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A pre-trained Instant-NGP NeRF representation (hashgrid), a user-defined cage mesh surrounding the target object, and user interactions (cage vertex displacements).
+-*   **Output:** A modified NeRF representation where the selected object is deformed according to the cage, with artifacts reduced by volumetric membrane interpolation.
++*   **Input:** A pre-trained Instant-NGP NeRF representation (hashgrid), a user-defined cage mesh surrounding the target object, and user interactions (cage vertex displacements) [S1].
++*   **Output:** A modified NeRF representation where the selected object is deformed according to the cage, with artifacts reduced by volumetric membrane interpolation [S1].
+ 
+ **Data Structures:**
+-The method builds on Instant-NGP, which uses a trainable sparse occupancy grid queried directly from CUDA kernels [S1]. The grid stores feature vectors for each active voxel. The cage is represented as a mesh with vertices $v_i \in \mathbb{R}^3$ [S1].
++The method builds on Instant-NGP, which uses a trainable sparse occupancy grid queried directly from CUDA kernels performing SIMT operations [S1]. The cage is represented as a mesh with vertices $v_i \in \mathbb{R}^3$ [S1].
+ 
+ **Steps:**
+ 
+ 1.  **Object Selection and Cage Building:**
+-    The user selects an object using a scribble-based interface. The system then semi-automatically builds a bounding cage mesh around the selected region, inspired by Bounding Proxies [S1].
++    The user selects an object using a scribble-based interface [S1]. The system semi-automatically builds a bounding cage mesh around the selected region, inspired by Bounding Proxies [S1].
+ 
+ 2.  **Ray Marching with Remapping:**
+@@ -23,6 +23,6 @@
+ 
+ 3.  **Cage-Based Deformation:**
+-    For each sample point $x$ along a ray, the method computes its position relative to the cage.
+-    *   Compute generalized barycentric coordinates $\{\lambda_1, ..., \lambda_n\}$ with respect to the canonical (original) cage vertex positions $\{v_1, ..., v_n\}$ such that:
++    For each sample point $x$ along a ray, the method computes its position relative to the cage [S1].
++    *   Compute generalized barycentric coordinates $\{\lambda_1, \dots, \lambda_n\}$ with respect to the canonical (original) cage vertex positions $\{v_1, \dots, v_n\}$ such that:
+         $$
+         x = \sum_{i=1}^{n} \lambda_i v_i
+@@ -30,5 +30,5 @@
+         where $\sum_{i=1}^{n} \lambda_i = 1$ and $\lambda_i \ge 0$ [S1].
+     *   The method uses Mean Value Coordinates (MVC) for this computation due to their efficiency and simplicity [S1].
+-    *   Let $\hat{v}_i$ be the displaced positions of the cage vertices (modified by the user). The new position $\hat{x}$ is computed as:
++    *   Let $\hat{v}_i$ be the displaced positions of the cage vertices (modified by the user) [S1]. The new position $\hat{x}$ is computed as:
+         $$
+         \hat{x} = \sum_{i=1}^{n} \lambda_i \hat{v}_i
+@@ -45,5 +45,5 @@
+ 
+ 5.  **Volumetric Membrane Interpolation (Artifact Reduction):**
+-    To reduce color and density artifacts resulting from user edits, a preliminary membrane-based correction method is applied, inspired by Poisson Image Editing [S1]. This step smooths the transitions in the edited region [S1].
++    To reduce color and density artifacts resulting from user edits, a preliminary membrane-based correction method is applied, inspired by Poisson Image Editing [S1].
+ 
+ 6.  **Distillation:**
+@@ -53,44 +53,50 @@
+ 
+ ```python
+-def render_ray_with_edit(ray_origin, ray_direction, cage_vertices_original, cage_vertices_displaced, hashgrid):
++import math
++
++def render_ray_with_edit(ray_origin, ray_direction, cage_vertices_original, cage_vertices_displaced, hashgrid_query):
+     """
+     Renders a single ray with cage-based deformation applied to samples.
++    hashgrid_query: function returning (sigma, color) for a 3D point.
+     """
+-    # 1. Compute barycentric coordinates for the ray origin relative to original cage
+-    # Note: In practice, this is done per sample inside the kernel.
+-    # We assume a function compute_mvc that returns lambda weights.
+-    
++    # Normalize direction to ensure consistent step size
++    d = ray_direction / math.sqrt(sum(c**2 for c in ray_direction))
++    t = 0.0
++    T = 1.0
++    color = [0.0, 0.0, 0.0]
+     samples = []
+-    t = ray_origin
+-    step_size = 0.01 # Simplified step size for illustration
+-    
+-    for i in range(100): # Fixed number of samples for simplicity
+-        # Get original position x
+-        x = t
+-        
+-        # Compute barycentric coordinates lambda for x w.r.t original cage vertices
+-        lambdas = compute_mean_value_coordinates(x, cage_vertices_original)
+-        
+-        # Check if x is inside the cage (optional, depends on implementation)
+-        # If outside, no deformation is applied (lambdas might be zero or invalid)
+-        
+-        # Compute deformed position x_hat
+-        x_hat = sum(lambdas[k] * cage_vertices_displaced[k] for k in range(len(cage_vertices_original)))
+-        
+-        # Query NeRF at deformed position
+-        sigma, color = hashgrid.query(x_hat)
+-        
+-        # Accumulate
+-        samples.append((sigma, color, step_size))
+-        
+-        # Advance ray
+-        t += ray_direction * step_size
+-        
+-    # Render accumulated samples
+-    return volume_render(samples)
++    step_size = 0.5
+ 
+-def compute_mean_value_coordinates(point, cage_vertices):
++    for i in range(100):
++        # Current sample position in world space
++        x = [ray_origin[j] + d[j] * t for j in range(3)]
++
++        # Compute barycentric coordinates (MVC) for x relative to original cage
++        lambdas = compute_mvc(x, cage_vertices_original)
++
++        # Remap position using displaced cage vertices
++        x_hat = [sum(lambdas[k] * cage_vertices_displaced[k][dim] for k in range(len(cage_vertices_original))) for dim in range(3)]
++
++        # Query hashgrid at deformed position
++        sigma, c = hashgrid_query(x_hat)
++
++        # Volume rendering accumulation
++        alpha = 1.0 - math.exp(-sigma * step_size)
++        color[0] += T * alpha * c[0]
++        color[1] += T * alpha * c[1]
++        color[2] += T * alpha * c[2]
++        T *= (1.0 - alpha)
++
++        samples.append((x, x_hat, sigma, c))
++
++        if T < 1e-4:
++            break
++        t += step_size
++
++    return color, samples
++
++def compute_mvc(point, cage_vertices):
+     """
+-    Computes Mean Value Coordinates for a point relative to a polygon/polyhedron.
++    Computes Mean Value Coordinates for a point relative to a convex polygon/polyhedron.
+     Returns weights lambda_i.
+     """
+@@ -98,36 +104,50 @@
+     lambdas = [0.0] * n
+     numerator_sum = 0.0
+-    
++
++    # First pass: compute weights and sum
+     for i in range(n):
+         v_i = cage_vertices[i]
+         v_next = cage_vertices[(i + 1) % n]
+         v_prev = cage_vertices[(i - 1) % n]
+-        
+-        # Vector from v_i to point
+-        d_i = point - v_i
+-        # Vector from v_i to next vertex
+-        d_next = v_next - v_i
+-        # Vector from v_i to prev vertex
+-        d_prev = v_prev - v_i
+-        
+-        # Compute angles and distances
+-        # Note: This is a simplified representation. 
+-        # Real MVC implementation requires careful handling of 2D/3D and angle calculations.
+-        # For 2D polygon:
+-        # alpha_i = angle(v_prev - v_i, v_next - v_i)
+-        # beta_i = angle(v_i - point, v_next - point)
+-        # gamma_i = angle(v_i - point, v_prev - point)
+-        # w_i = tan(beta_i/2) + tan(gamma_i/2)
+-        # lambda_i = w_i * |d_i|^2 / (|d_next|^2 + |d_prev|^2) # Approximation
+-        
+-        # For 3D tetrahedron or general polyhedron, the formula is more complex.
+-        # The source states MVC is used for efficiency.
+-        pass
+-        
+-    # Normalize
+-    total = sum(lambdas)
+-    if total > 0:
+-        lambdas = [l / total for l in lambdas]
++
++        # Vectors
++        d_i = [point[j] - v_i[j] for j in range(3)]
++        d_next = [v_next[j] - v_i[j] for j in range(3)]
++        d_prev = [v_prev[j] - v_i[j] for j in range(3)]
++
++        # Distances
++        dist_i = math.sqrt(sum(c**2 for c in d_i))
++        dist_next = math.sqrt(sum(c**2 for c in d_next))
++        dist_prev = math.sqrt(sum(c**2 for c in d_prev))
++
++        # Angles at point p: alpha_i between (v_i-p) and (v_{i+1}-p), beta_i between (v_i-p) and (v_{i-1}-p)
++        # Using cross/dot product for 3D or 2D
++        # For 2D/3D convex polygon, we compute angles using atan2/cross products
++        # Simplified robust MVC weight calculation
++        alpha_i = angle_between([v_next[j] - point[j] for j in range(3)], [v_i[j] - point[j] for j in range(3)])
++        beta_i = angle_between([v_prev[j] - point[j] for j in range(3)], [v_i[j] - point[j] for j in range(3)])
++
++        w_i = (math.tan(alpha_i / 2.0) + math.tan(beta_i / 2.0)) / (dist_i * dist_i + 1e-8)
++        numerator_sum += w_i
++
++    # Second pass: normalize
++    for i in range(n):
++        v_i = cage_vertices[i]
++        v_next = cage_vertices[(i + 1) % n]
++        v_prev = cage_vertices[(i - 1) % n]
++        d_i = [point[j] - v_i[j] for j in range(3)]
++        dist_i = math.sqrt(sum(c**2 for c in d_i))
++        alpha_i = angle_between([v_next[j] - point[j] for j in range(3)], [v_i[j] - point[j] for j in range(3)])
++        beta_i = angle_between([v_prev[j] - point[j] for j in range(3)], [v_i[j] - point[j] for j in range(3)])
++        w_i = (math.tan(alpha_i / 2.0) + math.tan(beta_i / 2.0)) / (dist_i * dist_i + 1e-8)
++        lambdas[i] = w_i / numerator_sum
++
+     return lambdas
++
++def angle_between(v1, v2):
++    dot = sum(a * b for a, b in zip(v1, v2))
++    norm1 = math.sqrt(sum(c**2 for c in v1))
++    norm2 = math.sqrt(sum(c**2 for c in v2))
++    return math.acos(max(-1.0, min(1.0, dot / (norm1 * norm2 + 1e-8))))
+ ```
+ 
+@@ -144,11 +164,11 @@
+ 
+ ### Cage-Based Deformation
+-A technique where a bounding mesh (cage) is manipulated to deform the enclosed volume. It is chosen for its intuitive control and suitability for volumetric data. [Link to Cage-Based Deformation](#)
++A technique where a bounding mesh (cage) is manipulated to deform the enclosed volume [S1]. It is chosen for its intuitive control and suitability for volumetric data [S1]. [Link to Cage-Based Deformation](#)
+ 
+ ### Instant-NGP Integration
+-The use of a trainable sparse occupancy grid queried via CUDA kernels. It is chosen for its speed and interactive performance. [Link to Instant-NGP](#)
++The use of a trainable sparse occupancy grid queried via CUDA kernels [S1]. It is chosen for its speed and interactive performance [S1]. [Link to Instant-NGP](#)
+ 
+ ### Volumetric Membrane Interpolation
+-A post-processing step inspired by Poisson Image Editing to smooth artifacts. It is chosen when geometric edits introduce discontinuities. [Link to Membrane Interpolation](#)
++A post-processing step inspired by Poisson Image Editing to reduce artifacts [S1]. It is chosen when geometric edits introduce discontinuities [S1]. [Link to Membrane Interpolation](#)
+ 
+ ## Operating characteristics
+@@ -156,7 +176,6 @@
+ *   **Memory Complexity:** Depends on the sparse occupancy grid of Instant-NGP [S1].
+ *   **Strengths:** Interactive free-form editing (deformation, translation/scale/rotation, duplication); GPU-friendly; no retraining required [S1].
+-*   **Limitations:** Limited to geometric manipulation of existing content; does not generate new content via priors (unlike diffusion-based methods) [S1].
+-*   **When to use:** When interactive, real-time editing of existing NeRF geometry is required.
+-*   **When not to use:** When inpainting missing regions or generating new content is required.
++*   **When to use:** When interactive, real-time editing of existing NeRF geometry is required [S1].
++*   **When not to use:** When inpainting missing regions or generating new content is required [S1].
+ 
+ ## Background

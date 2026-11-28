@@ -1,0 +1,79 @@
+# Space Repetition
+
+Also called: Infinite Domain Repetition, Infinite Repetition, Modular Repetition, Modulo Tiling, Primitive Repetition, Tiling via Modulo, repeat2d
+
+## Overview
+Space Repetition is a technique to repeat a primitive (such as a rounded box or sphere) across space by mapping the input position into a periodic cell using modulo arithmetic, then computing the distance to the primitive within that cell [S2, unofficial]. Unlike primitive blending which smoothly interpolates between shapes, Space Repetition creates hard, periodic boundaries via modulo arithmetic, allowing infinite instances of a shape without increasing geometric complexity [S2, unofficial]. It is often described as "cheating" because it allows repeating objects "for free" without explicitly instantiating them [S5, unofficial].
+
+## How it works
+**Inputs:**
+- $P$: The query position in world space (vector).
+- $C$: The repetition cell size (vector), defining the period in each dimension.
+
+**Outputs:**
+- $d$: The signed distance to the nearest instance of the base primitive.
+
+**Data Structures:**
+- None required beyond standard vector types.
+
+**Steps:**
+1.  **Map to Periodic Cell:** Transform the input position $P$ into the fundamental domain (the cell containing the origin) using modulo arithmetic. The standard formula maps $P$ to the range $[-C/2, C/2)$ centered at the origin:
+    $$ Q = P - C \cdot \text{round}\left(\frac{P}{C}\right) $$
+    Alternatively, using a modulo operator that returns values in $[0, C)$, the centering step is explicit:
+    $$ Q = \text{mod}(P, C) - 0.5 \cdot C $$
+    Where $\text{mod}(a, b) = a - b \cdot \lfloor a/b \rfloor$ [S2, unofficial].
+
+2.  **Query Base SDF:** Compute the signed distance to the base primitive using the transformed position $Q$ [S2, unofficial].
+    $$ d = \text{SDF}_{\text{base}}(Q) $$
+
+**Parameters:**
+- $C$: The repetition cell size. For uniform spacing, $C = (c, c, c)$. A typical value is $\text{vec3}(8.0, 8.0, 8.0)$ [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Near the boundaries of the cells ($P \approx k \cdot C$), floating-point precision errors in the modulo operation can cause artifacts or incorrect distance calculations [G].
+- **Boundary Continuity:** The distance function is continuous across cell boundaries because the base primitive's distance is evaluated at the same relative position in every cell [G]. However, the gradient may be discontinuous if the base primitive has sharp features aligned with the cell boundaries [G].
+- **Negative Coordinates:** The formula $P - C \cdot \text{round}(P/C)$ handles negative coordinates correctly, centering the cell around the origin. Simple `mod` implementations often return positive values only, requiring the explicit $-0.5 \cdot C$ shift [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def space_repetition(p: Vector3, c: Vector3, base_sdf: Callable[[Vector3], float]) -> float:
+    """
+    Repeats the base_sdf infinitely in 3D space with period c.
+    
+    Args:
+        p: Query position.
+        c: Repetition cell size (vector).
+        base_sdf: Signed distance function for the primitive to repeat.
+        
+    Returns:
+        Signed distance to the nearest repeated primitive.
+    """
+    # Map p to the fundamental domain centered at origin
+    # Formula: q = p - c * round(p / c)
+    # Note: round() rounds to nearest integer. 
+    # In languages without vectorized round, apply component-wise.
+    q = p - c * round(p / c)
+    
+    # Query the base primitive at the wrapped position
+    return base_sdf(q)
+```
+
+## Subtopics
+
+### [Polar Modulo](3358-polar-modulo.md)
+Repeats primitives in polar coordinates (cylindrical symmetry) rather than Cartesian. Choose when you need radial tiling (e.g., rings, spokes) instead of grid tiling.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Space Repetition appears in SDF raymarching tutorials and implementations [S2, unofficial][S4, unofficial]. It is often described as "cheating" because it allows repeating objects "for free" without explicitly instantiating them [S5, unofficial].
+
+## Sources
+[S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
+[S2] 9 – Raymarching: Primitive Repetition, http://www.geeks3d.com/20130524/building-worlds-with-distance-functions-in-glsl-raymarching-glslhacker-tutorial-opengl/9/, fetched 2026-10-26 (unofficial)
+[S3] JamesRicher/TerminalSignedDistanceFieldRenderer, https://github.com/JamesRicher/TerminalSignedDistanceFieldRenderer, fetched 2026-10-27 (unofficial)
+[S4] bhubbard/sdf-math-rs, https://github.com/bhubbard/sdf-math-rs, fetched 2026-10-27 (unofficial)
+[S5] Introduction to Raymarching Distance Functions, https://observablehq.com/@gre/introduction-to-raymarching-distance-functions, fetched 2026-10-29 (unofficial)

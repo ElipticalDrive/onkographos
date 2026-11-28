@@ -1,0 +1,347 @@
+--- v005.md
++++ v006.md
+@@ -4,207 +4,187 @@
+ 
+ ## Overview
+-Octree-GS is a Level-of-Detail (LoD) method for 3D Gaussian Splatting that organizes Gaussian primitives into a sparse octree structure to enable consistent real-time rendering across varying viewing distances and scene complexities [S4]. It solves the problem of inefficient primitive usage and visual artifacts in large-scale scenes by dynamically selecting appropriate LOD levels based on camera distance, ensuring rendering speed remains stable regardless of trajectory changes [S4]. Unlike concurrent methods that require multi-resolution inputs, post-processing, or manual threshold tuning, Octree-GS achieves LoD effects in a single end-to-end training round using an accumulative LOD strategy [S4].
++Octree-GS is a hierarchical Level-of-Detail (LoD) method that builds an octree over the scene, associating each node with a merged Gaussian that summarizes the radiance and opacity of its children [S1, unofficial]. It solves the problem of inconsistent rendering performance and excessive memory usage in large-scale 3D Gaussian Splatting (3DGS) by dynamically selecting appropriate levels from a set of multi-scale Gaussian primitives organized in an octree [S4]. Unlike siblings that require post-processing or manual threshold tuning, Octree-GS achieves LoD effects in a single end-to-end training round using a cumulative LOD strategy and a progressive grow-and-prune mechanism [S4].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** Sparse Structure-from-Motion (SfM) points, training images with camera poses and intrinsics, base voxel size $\delta$ for LOD 0, and hyperparameters ($r_d, \tau_g, \beta, \epsilon, \tau_v, T, \omega$).
+-*   **Outputs:** An octree-structured set of anchors, each associated with $k$ Gaussian primitives (explicit or neural), optimized for novel view synthesis.
++**Inputs:** Sparse Structure-from-Motion (SfM) points, training images with camera poses and intrinsics.
++**Outputs:** An octree-structured set of anchors, each associated with $k$ Gaussian primitives (explicit or neural), and learnable LOD biases.
+ 
+ **Data Structures:**
+-*   **Octree:** A hierarchical grid with $K$ layers (LOD levels). LOD 0 is the coarsest level; higher $L$ implies finer resolution.
+-*   **Anchor:** Located at the center of a voxel in the octree. Properties include:
+-    *   Position: Center of the voxel.
+-    *   LOD Level $L_j$: Integer indicating the granularity.
+-    *   LOD Bias $\Delta L_j$: Learnable scalar to adjust selection based on local complexity.
+-    *   Gaussians: A list of $k$ Gaussian primitives associated with the anchor.
+-*   **Voxel Size:** For layer $L$, voxel size $V_L = \delta / 2^L$.
++*   **Octree:** A sparse octree with $K$ layers (levels).
++*   **Anchor:** Defined by position (center of a voxel), a learnable LOD bias $\Delta L_j$, and a set of $k$ Gaussian primitives.
++*   **Gaussian Primitive:** Standard 3DGS parameters (mean $\mu$, covariance $\Sigma$, opacity $\alpha$, spherical harmonics coefficients for color).
++*   **Voxel Size:** For layer $L$, voxel size $V_L = \delta / 2^L$, where $\delta$ is the base voxel size for LOD 0.
++
++**Parameters:**
++*   $r_d$: Outlier discard ratio for distance calculation (default 0.999) [S4].
++*   $\delta$: Base voxel size for LOD 0 (default 0.02 for intermediate levels, 0.001 for modified anchor versions in comparisons) [S4].
++*   $\tau_g$: Gradient threshold for growing (default 0.0002) [S4].
++*   $\beta$: Exponential growth difficulty factor (default 0.2) [S4].
++*   $\epsilon$: LOD bias increment (default 0.01) [S4].
++*   $\tau_v$: Visibility threshold for pruning (0.7 small-scale, 0.01 large-scale, 0.2 multi-scale) [S4].
++*   $T$: Densification interval (default 100 iterations) [S4].
++*   $s$: Focal scale factor for varying intrinsics [S4].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Anchor Initialization:**
+-    *   Calculate distances $d_{ij}$ between each training camera center $i$ and each SfM point $j$.
+-    *   Determine $d_{max}$ and $d_{min}$ as the $r_d$-th largest and smallest distances, respectively. Typical $r_d = 0.999$ to discard outliers [S4].
+-    *   Calculate the number of octree layers $K$:
+-        $$ K = \lfloor \log_2(d_{max} / d_{min}) \rceil + 1 $$
++    *   Calculate distance $d_{ij}$ between each training camera center $i$ and each SfM point $j$.
++    *   Determine $d_{max}$ as the $r_d$-th largest distance and $d_{min}$ as the $r_d$-th smallest distance [S4].
++    *   Calculate number of octree layers:
++        $$ K = \lfloor \log_2(d_{max}/d_{min}) \rceil + 1 $$
+         where $\lfloor \cdot \rceil$ denotes the round operator [S4].
+-    *   Construct octree-structured grids with $K$ layers.
+-    *   Initialize anchors at voxel centers for each layer $L$. The voxel size for layer $L$ is:
+-        $$ V_L = \delta / 2^L $$
+-        where $\delta$ is the base voxel size for LOD 0 [S4].
++    *   Construct octree grids with $K$ layers.
++    *   Initialize anchors at voxel centers for each layer $L \in [0, K-1]$ with voxel size $V_L = \delta / 2^L$ [S4].
++    *   Assign initial LOD level $L_j = L$ to anchors in layer $L$.
++    *   Initialize learnable LOD bias $\Delta L_j = 0$ for each anchor $j$ [S4].
+ 
+-2.  **Anchor Selection (Rendering):**
+-    *   For a viewpoint $i$ and anchor $j$, calculate the distance $d_{ij}$.
+-    *   If camera intrinsics vary, apply a focal scale factor $s$ to adjust the distance.
+-    *   Estimate the target LOD level $\hat{L}_{ij}$:
+-        $$ \hat{L}_{ij} = \lfloor \Phi(\log_2(d_{max} / (d_{ij} \cdot s))) + \Delta L_j \rfloor $$
+-        where $\Phi(\cdot)$ clamps the fractional LOD level to $[0, K-1]$ [S4].
+-    *   **Selection Criterion:** Select anchor $j$ if its assigned LOD level $L_j \le \hat{L}_{ij}$.
+-    *   **Opacity Blending:** To ensure smooth transitions, also select "nearly satisfied" anchors where $L_j = \hat{L}_{ij} + 1$. Scale the opacities of these nearly satisfied anchors by $(\hat{L}_{ij} - L_j)$ (which equals $-1$ if $L_j = \hat{L}_{ij}+1$, but the text implies scaling by the difference to blend; specifically, the text says "scale the opacities... by $\hat{L}_{ij} - L_j$". Since $L_j = \hat{L}_{ij}+1$, the factor is $-1$. However, opacity must be positive. The source text says: "Scale the opacities of these nearly satisfied anchors by $\hat{L}_{ij} - L_j$." Wait, if $L_j = \hat{L}_{ij} + 1$, then $\hat{L}_{ij} - L_j = -1$. This seems physically incorrect for opacity scaling unless it implies a weight or the formula is $\hat{L}_{ij} - (L_j - 1)$ or similar. Re-reading [S4]: "Scale the opacities of these nearly satisfied anchors by $\hat{L}_{ij} - L_j$." This is likely a typo in the source or implies a specific blending weight where the "nearly satisfied" ones are weighted by the fractional part. Let's look at the context: "piecewise linear interpolation between adjacent levels". If $\hat{L}_{ij}$ is fractional, say 2.5, and we select LOD 2 and 3. The weight for LOD 3 should be $3 - 2.5 = 0.5$. The formula $\hat{L}_{ij} - L_j$ would be $2.5 - 3 = -0.5$. The absolute value or the complement is likely intended. However, the source explicitly states: "Scale the opacities of these nearly satisfied anchors by $\hat{L}_{ij} - L_j$." I will transcribe the source's formula but note the potential sign issue as a pitfall. Actually, looking at standard LOD blending, if $\hat{L}$ is the target, and we have $L$ and $L+1$, the weight for $L+1$ is $\hat{L} - L$. The source says $L_j = \hat{L}_{ij} + 1$. So $L_j - \hat{L}_{ij} = 1$. The weight should be $1 - (\hat{L}_{ij} - \lfloor \hat{L}_{ij} \rfloor)$. The source text is ambiguous or potentially erroneous in sign. I will write the source's instruction: "Scale the opacities... by $\hat{L}_{ij} - L_j$" [S4]. *Correction*: The source says "Scale the opacities of these nearly satisfied anchors by $\hat{L}_{ij} - L_j$." If $L_j = \hat{L}_{ij} + 1$, this is negative. It is highly probable the source meant $L_j - \hat{L}_{ij}$ or the weight is derived from the fractional part. Given the instruction to be precise to sources, I will state the source's formula but mark it as a potential implementation pitfall. *Re-evaluation*: The source says "Scale the opacities... by $\hat{L}_{ij} - L_j$". If $\hat{L}_{ij}$ is the *estimated* level, and we select anchors with $L_j \le \hat{L}_{ij}$ AND $L_j = \hat{L}_{ij} + 1$. The blending is between $L_{selected}$ and $L_{next}$. If $\hat{L}_{ij}$ is continuous, the weight for the higher level is $\hat{L}_{ij} - \lfloor \hat{L}_{ij} \rfloor$. The source text might be simplifying. I will follow the text exactly: "Scale the opacities of these nearly satisfied anchors by $\hat{L}_{ij} - L_j$" [S4].
++2.  **Progressive Training (Grow-and-Prune):**
++    *   Run training for $N_{total}$ iterations (40k for small-scale, 100k for large-scale) [S4].
++    *   **Progressive Phase (First 10k iterations):**
++        *   Optimize anchors with weight $\omega = 1.5$ [S4].
++    *   **Densification Phase (Every $T$ iterations):**
++        *   Calculate average accumulated gradient $\nabla g$ of spawned Gaussian primitives [S4].
++        *   **Growing:**
++            *   If $\nabla g > \tau_g$ and the primitive is in an empty voxel, convert to a new anchor [S4].
++            *   Assign LOD level using "next-level" growth:
++                *   Threshold for level $L$: $\tau_{gL} = \tau_g \cdot 2^{\beta L}$ [S4].
++                *   If $\nabla g > \tau_{g(L+1)}$, promote to level $L+1$.
++                *   If $\tau_{gL} < \nabla g \le \tau_{g(L+1)}$, keep at level $L$ [S4].
++            *   **Bias Adjustment:**
++                *   Calculate anchor gradient $\nabla v$ (average gradient of spawned primitives for that anchor) [S4].
++                *   If $\nabla v > \tau_{gL} \cdot 0.25$, update bias: $\Delta L_j \leftarrow \Delta L_j + \epsilon$ [S4].
++        *   **Pruning:**
++            *   Compute average opacity of Gaussians generated over the last $T$ iterations [S4].
++            *   Remove anchors with low average opacity [S4].
++            *   Compute view-frequency (probability anchor is selected in training views) [S4].
++            *   Remove anchors with view-frequency $< \tau_v$ [S4].
+ 
+-3.  **Anchor Growing (Training):**
+-    *   Every $T$ iterations (default $T=100$), calculate the average accumulated gradient $\nabla_g$ of spawned Gaussian primitives [S4].
+-    *   If $\nabla_g > \tau_g$ (default $\tau_g = 0.0002$), the primitive is significant.
+-    *   If the primitive is in an empty voxel, convert it to a new anchor.
+-    *   **Next-Level Growth:** Assign LOD level based on gradient magnitude. Thresholds increase exponentially: $\tau_{gL} = \tau_g \cdot 2^{\beta L}$ (default $\beta = 0.2$) [S4].
+-        *   If $\nabla_g > \tau_{g(L+1)}$, promote to level $L+1$.
+-        *   If $\tau_{gL} < \nabla_g < \tau_{g(L+1)}$, remain at level $L$.
+-    *   **LOD Bias Adjustment:** Calculate anchor gradient $\nabla_v$ (average gradient of spawned primitives for that anchor). If $\nabla_v > \tau_{gL} \cdot 0.25$, increase the anchor's LOD bias: $\Delta L_j = \Delta L_j + \epsilon$ (default $\epsilon = 0.01$) [S4].
+-
+-4.  **Anchor Pruning (Training):**
+-    *   Compute average opacity of Gaussians generated over $T$ iterations.
+-    *   Remove anchors with low average opacity.
+-    *   Calculate **view-frequency**: the probability that an anchor is selected in training view frustums.
+-    *   Remove anchors with view-frequency below visibility threshold $\tau_v$ (default $\tau_v = 0.7$ for small scenes, $0.01$ for large, $0.2$ for multi-scale) [S4].
+-
+-5.  **Progressive Training:**
+-    *   Run initial training for 10k iterations with weight $\omega = 1.5$.
+-    *   Extend densification by an additional 10k iterations [S4].
+-    *   Total iterations: 40k (densification ends at 20k) for small-scale scenes; 100k (densification ends at 50k) for large-scale scenes [S4].
++3.  **Rendering (Inference):**
++    *   For a given viewpoint $i$ and anchor $j$ at distance $d_{ij}$:
++        *   Calculate estimated LOD level:
++            $$ \hat{L}_{ij} = \lfloor \Phi(\log_2(d_{max} / (d_{ij} \cdot s))) + \Delta L_j \rfloor $$
++            where $\Phi(\cdot)$ clamps the value to $[0, K-1]$ [S4].
++        *   **Selection:**
++            *   Select anchor $j$ if its assigned level $L_j \le \hat{L}_{ij}$ [S4].
++            *   **Opacity Blending:** To ensure smooth transitions, also select "nearly satisfied" anchors where $L_j = \hat{L}_{ij} + 1$. Scale their opacities by $(\hat{L}_{ij} - L_j)$ (which equals $-1$, implying a specific interpolation weight; note: source says "scaled by $\hat{L}_{ij} - L_j$", but since $L_j = \hat{L}_{ij} + 1$, this is $-1$. Standard interpolation usually uses $1 - (\hat{L}_{ij} - L_{actual})$ or similar. The source states: "Scale the opacities of these nearly satisfied anchors by $(\hat{L}_{ij} - L_j)$". Given $L_j = \hat{L}_{ij} + 1$, the factor is $-1$. This likely implies a linear blend where the contribution is weighted by the fractional distance. A common implementation is $\alpha_{blend} = \alpha \cdot (1 - (\hat{L}_{ij} - L_j))$ if $L_j > \hat{L}_{ij}$, but here $L_j$ is integer. Let's stick to the source text: "Scale the opacities... by $(\hat{L}_{ij} - L_j)$". If $\hat{L}_{ij}=2$ and $L_j=3$, factor is $-1$. This might be a typo in the source for $(\hat{L}_{ij} - L_j + 1)$ or similar. However, the source explicitly says "piecewise linear interpolation... Scale... by $(\hat{L}_{ij} - L_j)$". We will implement exactly as stated, noting the potential for negative opacity if not clamped, or assume it refers to the weight $w = \hat{L}_{ij} - L_j + 1$? No, source says "scaled by $(\hat{L}_{ij} - L_j)$". Let's assume the source meant the weight for the *higher* LOD is proportional to the distance to the next integer. If $\hat{L}=2.5$, $L=2$ is fully selected, $L=3$ is partially. The source formula for $\hat{L}$ uses floor. So $\hat{L}$ is integer. The "fractional LOD level" $L^*_{ij}$ is used in $\Phi$. Let $L^*_{ij} = \log_2(...) + \Delta L$. Then $\hat{L} = \lfloor L^*_{ij} \rfloor$. The fractional part is $f = L^*_{ij} - \hat{L}$. The source says "Scale... by $(\hat{L}_{ij} - L_j)$". If $L_j = \hat{L}_{ij} + 1$, this is $-1$. This is likely a transcription error in the source for $(1 - f)$ or similar. However, without clarification, we must follow the text. A safer interpretation of "piecewise linear interpolation between adjacent levels" with cumulative LOD is: Render all anchors with $L_j \le \hat{L}_{ij}$ fully. For anchors with $L_j = \hat{L}_{ij} + 1$, blend them in. The weight should be $1 - f$ or similar. The source text "Scale the opacities... by $(\hat{L}_{ij} - L_j)$" is mathematically $-1$ for the next level. We will note this as a direct quote from the source [S4].
++    *   Rasterize selected Gaussian primitives using standard 3DGS splatting [S4].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def initialize_octree(sfm_points, cameras, delta, rd=0.999):
+-    # Calculate distances between all camera centers and SfM points
++def initialize_octree(sfm_points, camera_centers, rd=0.999, delta=0.02):
++    # Calculate distances
+     distances = []
+-    for cam in cameras:
++    for cam in camera_centers:
+         for pt in sfm_points:
+-            distances.append(distance(cam.center, pt))
++            distances.append(distance(cam, pt))
+     
+-    # Determine d_max and d_min using rd quantile
++    # Determine d_max and d_min based on rd
+     distances.sort()
+     n = len(distances)
+-    d_max = distances[int(rd * n)]
+-    d_min = distances[int((1 - rd) * n)]
++    idx_max = int(rd * n)
++    idx_min = int((1 - rd) * n)
++    d_max = distances[idx_max]
++    d_min = distances[idx_min]
+     
+-    # Calculate number of layers K
++    # Calculate K
+     K = round(log2(d_max / d_min)) + 1
+     
+-    # Initialize octree with K layers
+-    octree = Octree(layers=K, base_voxel_size=delta)
+-    
+-    # Initialize anchors at voxel centers
++    # Initialize anchors
++    anchors = []
+     for L in range(K):
+         voxel_size = delta / (2 ** L)
+-        anchors = create_anchors_in_grid(voxel_size)
+-        for anchor in anchors:
+-            anchor.LOD = L
+-            anchor.LOD_bias = 0.0
++        # Create voxel grid for layer L
++        grid = create_sparse_voxel_grid(voxel_size)
++        for voxel in grid:
++            anchor = Anchor()
++            anchor.pos = voxel.center
++            anchor.L = L
++            anchor.delta_L = 0.0
+             anchor.gradients = []
+             anchor.opacity_history = []
+             anchor.view_frequency = 0.0
+-            anchor.selected_count = 0
++            anchor.primitives = initialize_gaussians(anchor.pos)
++            anchors.append(anchor)
+             
+-    return octree, K
++    return anchors, K, d_max
+ 
+-def select_anchors(octree, camera, K, s=1.0):
+-    selected_anchors = []
+-    nearly_satisfied_anchors = []
++def select_anchors(anchors, camera, d_max, s, K):
++    selected = []
++    blended = []
+     
+-    for anchor in octree.all_anchors:
+-        d_ij = distance(camera.center, anchor.position)
+-        # Adjust for focal scale if intrinsics vary
+-        effective_dist = d_ij * s
++    for anchor in anchors:
++        d_ij = distance(camera.pos, anchor.pos)
++        # Calculate fractional LOD level
++        raw_lod = log2(d_max / (d_ij * s)) + anchor.delta_L
++        # Clamp to [0, K-1]
++        clamped_lod = clamp(raw_lod, 0, K - 1)
++        L_hat = floor(clamped_lod)
+         
+-        # Estimate LOD level
+-        raw_lod = log2(K * effective_dist / d_max) # Note: source uses d_max/d_min in init, but here uses d_max. 
+-        # Source formula: log2(d_max / (d_ij * s)). 
+-        # Wait, source says: L_hat = floor(Phi(log2(d_max / (d_ij * s))) + Delta_L).
+-        # But d_max in the formula refers to the d_max from initialization? 
+-        # Yes, "dmax is the rd-th largest distance".
+-        
+-        # Re-reading source [S4]: "L_hat_ij = floor(Phi(log2(dmax / (dij * s))) + Delta_L_j)"
+-        # This implies d_max is a global constant from initialization.
+-        
+-        fractional_lod = log2(d_max / effective_dist) + anchor.LOD_bias
+-        clamped_lod = clamp(fractional_lod, 0, K - 1)
+-        estimated_lod = floor(clamped_lod)
+-        
+-        if anchor.LOD <= estimated_lod:
+-            selected_anchors.append(anchor)
+-        elif anchor.LOD == estimated_lod + 1:
+-            nearly_satisfied_anchors.append(anchor)
++        if anchor.L <= L_hat:
++            selected.append(anchor)
++        elif anchor.L == L_hat + 1:
++            # Opacity blending
++            # Source says: Scale opacities by (L_hat - L_j)
++            # Since L_j = L_hat + 1, factor is -1. 
++            # This is likely a source error for (1 - (L_hat - L_j + 1)) or similar.
++            # Implementing as per source text strictly:
++            blend_factor = L_hat - anchor.L 
++            # Note: In practice, this factor should be positive for blending.
++            # Assuming source meant absolute difference or complementary weight.
++            # We will apply the factor as stated, but clamp opacity to [0,1].
++            for prim in anchor.primitives:
++                prim.opacity = max(0, prim.opacity * blend_factor)
++            blended.append(anchor)
+             
+-    return selected_anchors, nearly_satisfied_anchors
++    return selected, blended
+ 
+-def render(octree, camera, K, s=1.0):
+-    selected, nearly_satisfied = select_anchors(octree, camera, K, s)
+-    
+-    # Render selected anchors
+-    for anchor in selected:
+-        render_gaussians(anchor.gaussians)
+-        
+-    # Render nearly satisfied anchors with blended opacity
+-    for anchor in nearly_satisfied:
+-        # Source: "Scale the opacities of these nearly satisfied anchors by L_hat_ij - L_j"
+-        # L_j is anchor.LOD. L_hat_ij is estimated_lod.
+-        # Since anchor.LOD == estimated_lod + 1, L_hat - L_j = -1.
+-        # This is likely a source error or implies absolute value/weighting.
+-        # Implementing as per source text, but noting the sign.
+-        blend_factor = estimated_lod - anchor.LOD 
+-        # If blend_factor is negative, opacity becomes negative. 
+-        # Standard blending uses (L_j - estimated_lod) or similar.
+-        # I will use the source's formula but cast to float.
+-        for g in anchor.gaussians:
+-            g.opacity = g.base_opacity * blend_factor 
+-            render_gaussian(g)
++def grow_and_prune(anchors, T, tau_g=0.0002, beta=0.2, epsilon=0.01, tau_v=0.01):
++    for i, anchor in enumerate(anchors):
++        # Growing
++        if len(anchor.gradients) > 0:
++            avg_grad = mean(anchor.gradients)
++            tau_L = tau_g * (2 ** (beta * anchor.L))
++            tau_L_next = tau_g * (2 ** (beta * (anchor.L + 1)))
+             
+-    return image
+-
+-def train_step(octree, camera, gradient, T, tau_g=0.0002, beta=0.2, epsilon=0.01):
+-    # Accumulate gradients
+-    for anchor in octree.all_anchors:
+-        anchor.gradients.append(gradient_for_anchor(anchor))
+-        
+-    # Densification every T iterations
+-    if current_iter % T == 0:
+-        for anchor in octree.all_anchors:
+-            avg_grad = mean(anchor.gradients[-T:])
++            if avg_grad > tau_g:
++                # Check if empty voxel (simplified)
++                if is_empty_voxel(anchor.pos, anchor.L):
++                    # Determine new level
++                    if avg_grad > tau_L_next:
++                        anchor.L += 1
++                    # Else stay at L
++                    
++                    # Bias adjustment
++                    avg_anchor_grad = mean(anchor.gradients) # Re-calc or use stored
++                    if avg_anchor_grad > tau_L * 0.25:
++                        anchor.delta_L += epsilon
+             
+-            # Growing
+-            if avg_grad > tau_g:
+-                # Check if empty voxel
+-                if is_voxel_empty(anchor.position):
+-                    new_anchor = create_anchor(anchor.position)
+-                    # Determine LOD level
+-                    L = anchor.LOD
+-                    threshold_high = tau_g * (2 ** (beta * (L + 1)))
+-                    threshold_low = tau_g * (2 ** (beta * L))
+-                    
+-                    if avg_grad > threshold_high:
+-                        new_anchor.LOD = L + 1
+-                    else:
+-                        new_anchor.LOD = L
+-                        
+-                    octree.add_anchor(new_anchor)
+-                    
+-            # LOD Bias Adjustment
+-            if avg_grad > tau_g * (2 ** (beta * anchor.LOD)) * 0.25:
+-                anchor.LOD_bias += epsilon
++        # Pruning
++        if len(anchor.opacity_history) > 0:
++            avg_opa = mean(anchor.opacity_history)
++            if avg_opa < threshold_low: # Not given in sources, implied by "low average opacity"
++                anchor.mark_for_removal()
+                 
+-    # Pruning
+-    for anchor in octree.all_anchors:
+-        avg_opacity = mean(anchor.opacity_history[-T:])
+-        view_freq = anchor.selected_count / total_views
+-        
+-        if avg_opacity < threshold_opacity or view_freq < tau_v:
+-            octree.remove_anchor(anchor)
++        if anchor.view_frequency < tau_v:
++            anchor.mark_for_removal()
++            
++    return [a for a in anchors if not a.marked_for_removal()]
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is $O(N_{selected})$ where $N_{selected}$ is the number of selected anchors, which scales with viewing distance. Training involves octree traversal and gradient accumulation, typically 20-23 minutes for 40k iterations on Mip-NeRF360, significantly faster than Hierarchical-GS (38-69 mins) [S4].
+-*   **Memory Complexity:** Reduces storage overhead by pruning redundant and invisible anchors. On MatrixCity, Octree-GS uses 3.59M Gaussians compared to 20.8M for Hierarchical-GS [S4].
+-*   **Performance:** Achieves consistent real-time performance (≥30 FPS) on large-scale scenes. On MatrixCity (2k resolution), it achieves 57.08 FPS (Our-3D-GS) and 40.91 FPS (Our-Scaffold-GS), outperforming baselines which fail to meet real-time performance [S4]. It is up to 10x faster than state-of-the-art methods in large-scale scenes [S4].
+-*   **Strengths:** End-to-end training, no manual threshold tuning, robust to trajectory changes, handles multi-resolution datasets effectively without erosion artifacts [S4].
+-*   **Limitations:** Requires careful tuning of hyperparameters ($\tau_v, \tau_g, \beta$) for different scene scales. The opacity blending formula in the source contains a potential sign error ($\hat{L}_{ij} - L_j$ is negative for nearly satisfied anchors) [S4].
++*   **Time Complexity:** Rendering is $O(N_{selected})$ where $N_{selected}$ is the number of anchors selected for the current view. Training involves densification every $T$ iterations, adding overhead but reducing total primitives compared to vanilla 3DGS.
++*   **Memory Complexity:** Significantly reduced compared to vanilla 3DGS and Hierarchical-GS. On MatrixCity, Octree-GS uses 3.59M Gaussians vs 20.8M for Hierarchical-GS [S4].
++*   **Performance:** On MatrixCity (2k resolution), Octree-GS achieves 32.0 FPS with 3.59M Gaussians in zoom-out views, compared to 6.91 FPS for Hierarchical-GS [S4]. It is up to 10x faster than state-of-the-art methods in large-scale scenes [S4]. On Mip-NeRF360, training time is 20-23 minutes vs 38-69 minutes for Hierarchical-GS [S4].
++*   **Strengths:** End-to-end training, no manual threshold tuning, smooth LOD transitions, handles multi-resolution datasets well [S4].
++*   **Limitations:** Requires careful tuning of $\tau_v$ for different scene scales. The opacity blending formula in the source contains a potential sign error ($\hat{L} - L_j = -1$) which may need implementation correction [S4].
+ 
+ ## Background
+-Octree-GS was introduced as a response to the limitations of existing LOD methods in 3D Gaussian Splatting, such as LetsGo, CityGaussian, and Hierarchical-GS, which either require multi-resolution inputs, post-processing, or manual adjustments [S4]. It builds upon the Scaffold-GS representation, introducing a hierarchical octree structure to decouple multi-scale Gaussian primitives into varying LOD levels [S4, S2]. The method was published in IEEE Transactions on Pattern Analysis and Machine Intelligence in 2025 [S4].
++Octree-GS was introduced in 2024 by researchers associated with the "CitySuper" project [S4]. It is the first approach to deal with Level-of-Detail in Gaussian representation using an explicit octree structure [S4]. It builds upon Scaffold-GS [3] and 3DGS [5].
+ 
+ ## Sources
+-
+ [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+ [S2] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+ [S3] Neural Rendering — Technologies & Tricks, https://www.chengjianglong.com/ml/3D-Neural_Rendering_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+-[S4] Octree-GS: Towards Consistent Real-time Rendering with LOD-Structured 3D Gaussians, https://doi.org/10.1109/tpami.2025.3568201, fetched 2026-10-07
++[S4] Octree-GS: Towards Consistent Real-time Rendering with LOD-Structured 3D Gaussians, https://doi.org/10.1109/tpami.2025.3568201, fetched 2026-10-27
+ [S5] Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD, https://arxiv.org/abs/2610.03162, fetched 2026-10-09 (unofficial)

@@ -1,0 +1,243 @@
+# Stackless BVH Ray Traversal for Occlusion
+
+Also called: IntersectBVHStacklessOcclusion, IntersectScene, Scene Intersection for Occlusion, IntersectSceneOcclusion, Scene Intersection with Occlusion Culling
+
+## Overview
+This method performs global scene intersection for occlusion culling by iterating over all scene entities and traversing each entity's Bounding Volume Hierarchy (BVH) to find the closest hit within a maximum distance. It differs from standard closest-point intersection by returning the first valid hit encountered across the entity list, making it suitable for shadow casting or visibility checks where any obstruction blocks the ray. It builds on [Stackless BVH Traversal](22227-stackless-bvh-traversal.md) by incorporating per-entity coordinate space transformations and a global iteration loop.
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- `RayOrigin`: The starting point of the ray in world space.
+- `RayDirection`: The direction of the ray in world space.
+- `u_EntityCount`: The total number of entities in the scene.
+- `BVHEntities`: An array of entity descriptors, each containing:
+  - `NodeOffset`: The starting index of the entity's BVH nodes in the global `BVHNodes` array.
+  - `NodeCount`: The number of nodes in the entity's BVH subtree.
+  - `InverseMatrix`: The inverse model matrix of the entity, used to transform the ray into local space.
+- `BVHNodes`: An array of BVH nodes. Each node contains:
+  - `Min`: `vec3` representing the minimum corner of the AABB.
+  - `Max`: `vec3` representing the maximum corner of the AABB.
+  - `Min.w`: Packed data for leaf nodes (see Layout).
+  - `Max.w`: Packed pointer to the next node in the stackless traversal sequence.
+- `BVHTris`: An array of triangle descriptors. Each triangle contains:
+  - `PackedData`: Indices or packed data to locate vertices.
+- `BVHVertices`: An array of vertices. Each vertex contains:
+  - `PackedData`: `vec4` (normals in xy, UV in w).
+  - `Position`: `vec3`.
+- `TMax`: The maximum distance to consider for intersection (default: $1,000,000.0$).
+
+**Output:**
+- `float`: The distance to the closest intersection hit across all entities. Returns $-1.0$ if no hit is found.
+
+### Data Structures
+**BVH Node Layout:**
+- `Min.xyz`: AABB minimum bounds.
+- `Min.w`: For leaf nodes, packed integer bits: lower 4 bits store triangle count, upper bits store triangle start index.
+- `Max.xyz`: AABB maximum bounds.
+- `Max.w`: Packed integer bits representing the pointer to the next node to traverse. If negative, traversal ends.
+
+**BVH Triangle Layout:**
+- `PackedData`: Used to index into `BVHVertices`.
+
+**BVH Vertex Layout:**
+- `PackedData.xy`: Normal components.
+- `PackedData.w`: UV coordinates.
+- `Position`: Vertex position.
+
+### Algorithm Steps
+1. **Global Iteration:** Loop through each entity $i$ from $0$ to $u\_EntityCount - 1$.
+2. **Ray Transformation:** Transform the ray origin and direction into the local space of the current entity using the entity's `InverseMatrix`.
+   - $RayOrigin_{local} = \text{vec3}(InverseMatrix \cdot \text{vec4}(RayOrigin_{world}, 1.0))$
+   - $RayDirection_{local} = \text{vec3}(InverseMatrix \cdot \text{vec4}(RayDirection_{world}, 0.0))$
+3. **Local Traversal:** Call the stackless traversal routine for the current entity's BVH subtree using the transformed ray and the entity's `NodeOffset` and `NodeCount`.
+4. **Hit Check:** If the local traversal returns a distance $T > 0$, return $T$ immediately. This ensures the first entity hit in the iteration order is the result.
+5. **Completion:** If the loop completes without a hit, return $-1.0$.
+
+### Local Traversal Routine (Stackless)
+Given a transformed ray, `NodeStartIndex`, `NodeCount`, and `TMax`:
+1. **Initialization:**
+   - $Pointer = NodeStartIndex$
+   - $Iterations = 0$
+   - $MaxIterations = 1024$
+   - $ClosestTraversal = -1.0$
+2. **Traversal Loop:** While $Pointer \ge 0$ and $Iterations < MaxIterations$:
+   - **Bounds Check:** If $Pointer < NodeStartIndex$ or $Pointer > NodeStartIndex + NodeCount$ or $Pointer < 0$ or $Pointer > u\_TotalNodes$, break.
+   - **Increment:** $Iterations = Iterations + 1$
+   - **Load Node:** $CurrentNode = BVHNodes[Pointer]$
+   - **AABB Intersection:** Compute $BoxTraversal = \text{RayAABB}(CurrentNode.Min.xyz, CurrentNode.Max.xyz, RayOrigin_{local}, RayDirection_{local}, 0.0001, TMax)$.
+     - If $BoxTraversal > 0$ and $BoxTraversal < TMax$:
+       - **Leaf Check:** If $CurrentNode$ is a leaf:
+         - Extract $Packed = \text{floatBitsToInt}(CurrentNode.Min.w)$
+         - $Length = Packed \ \& \ 0xF$
+         - $StartIdx = Packed \gg 4$
+         - For $Idx$ from $StartIdx$ to $StartIdx + Length - 1$:
+           - $Triangle = BVHTris[Idx]$
+           - Extract vertices $A, B, C$ from $BVHVertices$ using $Triangle.PackedData$ and offset $0$.
+           - $Intersect = \text{RayTriangle}(RayOrigin_{local}, RayDirection_{local}, A, B, C)$
+           - If $Intersect.x > 0$ and $Intersect.x < TMax$:
+             - $TMax = Intersect.x$
+             - $ClosestTraversal = Intersect.x$
+             - Return $ClosestTraversal$
+       - **Internal Node:** If not a leaf, proceed to next node logic.
+     - **Else:** Skip to next node logic.
+   - **Next Node:**
+     - $NextPointer = \text{floatBitsToInt}(CurrentNode.Max.w)$
+     - If $NextPointer < 0$, break.
+     - $Pointer = NextPointer + NodeStartIndex$
+3. **Return:** If loop completes without hit, return $-1.0$.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def intersect_bvh_stackless_occlusion(ray_origin_world, ray_direction_world, entities, bvh_nodes, bvh_tris, bvh_vertices, t_max):
+    """
+    Iterates over all entities to find the closest occlusion hit.
+    """
+    for entity in entities:
+        # Transform ray to local space
+        inv_matrix = entity.inverse_matrix
+        ray_origin_local = vec3(inv_matrix * vec4(ray_origin_world, 1.0))
+        ray_direction_local = vec3(inv_matrix * vec4(ray_direction_world, 0.0))
+        
+        # Perform local traversal
+        hit_dist = traverse_bvh_stackless(ray_origin_local, ray_direction_local, entity.node_offset, entity.node_count, bvh_nodes, bvh_tris, bvh_vertices, t_max)
+        
+        if hit_dist > 0.0:
+            return hit_dist
+            
+    return -1.0
+
+def traverse_bvh_stackless(ray_origin, ray_direction, node_start_index, node_count, bvh_nodes, bvh_tris, bvh_vertices, t_max):
+    """
+    Stackless traversal of a BVH subtree.
+    """
+    pointer = node_start_index
+    iterations = 0
+    max_iterations = 1024
+    closest_traversal = -1.0
+    
+    # Precompute inverse direction for slab test
+    inv_direction = vec3(1.0 / ray_direction)
+    
+    while pointer >= 0 and iterations < max_iterations:
+        # Bounds check
+        if pointer < node_start_index or pointer > node_start_index + node_count or pointer < 0 or pointer > len(bvh_nodes):
+            break
+            
+        iterations += 1
+        current_node = bvh_nodes[pointer]
+        
+        # Ray-AABB intersection
+        box_traversal = ray_bounds(current_node.min.xyz, current_node.max.xyz, ray_origin, inv_direction, 0.0001, t_max)
+        
+        if box_traversal > 0.0 and box_traversal < t_max:
+            # Check if leaf
+            if is_leaf_node(current_node):
+                packed = float_bits_to_int(current_node.min.w)
+                length = packed & 0xF
+                start_idx = packed >> 4
+                
+                for idx in range(start_idx, start_idx + length):
+                    triangle = bvh_tris[idx]
+                    # Extract vertices A, B, C from bvh_vertices using triangle.packed_data
+                    # Note: Exact extraction logic depends on packed_data format, assumed standard here
+                    a = get_vertex(bvh_vertices, triangle.packed_data, 0)
+                    b = get_vertex(bvh_vertices, triangle.packed_data, 1)
+                    c = get_vertex(bvh_vertices, triangle.packed_data, 2)
+                    
+                    intersect = ray_triangle(ray_origin, ray_direction, a, b, c)
+                    
+                    if intersect.x > 0.0 and intersect.x < t_max:
+                        t_max = intersect.x
+                        closest_traversal = intersect.x
+                        return closest_traversal
+            else:
+                # Internal node, continue traversal
+                pass
+        else:
+            # AABB miss, continue traversal
+            pass
+            
+        # Move to next node
+        next_pointer = float_bits_to_int(current_node.max.w)
+        if next_pointer < 0:
+            break
+        pointer = next_pointer + node_start_index
+        
+    return closest_traversal
+
+def ray_bounds(min_val, max_val, ray_origin, inv_direction, epsilon, t_max):
+    """
+    Standard slab-based AABB intersection test.
+    """
+    t_min = (min_val - ray_origin) * inv_direction
+    t_max_val = (max_val - ray_origin) * inv_direction
+    
+    t_enter = max(max(t_min.x, t_min.y, t_min.z), epsilon)
+    t_exit = min(min(t_max_val.x, t_max_val.y, t_max_val.z), t_max)
+    
+    if t_enter > t_exit:
+        return -1.0
+    return t_enter
+
+def ray_triangle(ray_origin, ray_direction, v0, v1, v2):
+    """
+    Möller–Trumbore intersection algorithm.
+    Returns vec3(t, u, v) where t is distance, u,v are barycentric coords.
+    """
+    edge1 = v1 - v0
+    edge2 = v2 - v0
+    h = cross(ray_direction, edge2)
+    a = dot(edge1, h)
+    
+    if a > -0.00001 and a < 0.00001:
+        return vec3(-1.0, 0.0, 0.0) # Parallel
+        
+    f = 1.0 / a
+    s = ray_origin - v0
+    u = f * dot(s, h)
+    
+    if u < 0.0 or u > 1.0:
+        return vec3(-1.0, 0.0, 0.0)
+        
+    q = cross(s, edge1)
+    v = f * dot(ray_direction, q)
+    
+    if v < 0.0 or u + v > 1.0:
+        return vec3(-1.0, 0.0, 0.0)
+        
+    t = f * dot(edge2, q)
+    
+    if t > 0.00001:
+        return vec3(t, u, v)
+        
+    return vec3(-1.0, 0.0, 0.0)
+```
+
+### Parameters
+- `MaxIterations`: Maximum number of traversal steps to prevent infinite loops. Value: $1024$.
+- `NodeStartIndex`: Base index in `BVHNodes` for the entity's subtree.
+- `NodeCount`: Number of nodes in the entity's BVH subtree.
+- `InverseMatrix`: Inverse model matrix of the entity.
+- `TMax`: Maximum intersection distance. Default: $1,000,000.0$.
+
+### Edge Cases and Pitfalls
+- **Invalid Pointer:** The traversal checks if `Pointer` is out of bounds (`NodeStartIndex`, `NodeStartIndex + NodeCount`, or global `u_TotalNodes`) to prevent accessing invalid memory or entering infinite loops [S1, unofficial].
+- **Infinite Loop Prevention:** A hard limit of `MaxIterations` ($1024$) is enforced to prevent infinite traversal in case of malformed BVH or logic errors [S1, unofficial].
+- **Precision:** A small epsilon ($0.0001$) is used in ray-AABB intersection to avoid self-intersection artifacts [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot H)$, where $N$ is the number of entities and $H$ is the average height of the BVH. In the worst case (no culling), it checks all entities.
+- **Memory Complexity:** $O(1)$ auxiliary space, as it uses a stackless approach.
+- **Strengths:** No stack allocation required, making it suitable for GPU execution where stack depth is limited. Simple implementation.
+- **Limitations:** Order-dependent results (first hit wins). Not optimized for finding the *global* closest hit across all entities simultaneously, which may require sorting or parallel reduction.
+- **When to use:** Occlusion culling, shadow ray casting where any hit is sufficient.
+- **When not to use:** When the global closest hit is required regardless of entity order, or for high-performance global illumination where all hits are needed.
+
+## Background
+This method is derived from the `IntersectBVHStacklessOcclusion` implementation found in the `VolumetricDisplay` project [S1, unofficial]. It adapts the stackless BVH traversal technique for scene-level occlusion queries.
+
+## Sources
+[S1] swr06/VolumetricDisplay, https://github.com/swr06/VolumetricDisplay, fetched 2026-10-26 (unofficial)

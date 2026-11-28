@@ -1,0 +1,191 @@
+# Deep Learning-Based Super-Resolution for Volumetric Isosurfaces
+
+Also called: FRVSR, FRVSR-Net, FRVSR-Net / Deep Learning-Based Super-Resolution for Volumetric Isosurfaces, Neural Super-Resolution for Isosurfaces, SRNet, SRNet Architecture, Super-Resolution Network
+
+## Overview
+This method upsamples low-resolution volumetric isosurface renderings to high resolution using a trained fully convolutional neural network (SRNet) [S1]. It solves the problem of jagged edges and flickering in interactive navigation by predicting intermediate surface attributes (mask, normal, depth, ambient occlusion) rather than direct color, leveraging temporal coherence via screen-space flow warping [S1]. It sets itself apart from sibling methods like [3D Super-Resolution (SR) Module](6577-3d-super-resolution-sr-module.md) by operating in screen-space with explicit temporal flow compensation and screen-space shading, rather than volumetric domain upsampling [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Low-Resolution Input ($I_{t}^{LR}$):** A 5-channel tensor of size $[5, H, W]$ containing Mask $M_{t}^{LR} \in [-1, +1]^{H \times W}$, Normal $N_{t}^{LR} \in [-1, +1]^{3 \times H \times W}$, and Depth $D_{t}^{LR} \in [0, 1]^{H \times W}$ [S1].
+*   **Ground Truth Output ($O_{t}^{GT}$):** A 6-channel tensor of size $[6, 4H, 4W]$ containing Mask $M_{t}^{GT}$, Normal $N_{t}^{GT}$, Depth $D_{t}^{GT}$, and Ambient Occlusion $AO_{t}^{GT} \in [0, 1]^{4H \times 4W}$ [S1].
+*   **Network Output ($O_{test}$):** A 6-channel tensor of size $[6, 4H, 4W]$ containing predicted $M_{test}, N_{test}, D_{test}, AO_{test}$ [S1].
+
+**Data Structures:**
+*   **Flow Field ($F_{t}^{LR}$):** 2D displacement vectors indicating screen-space motion from frame $t-1$ to $t$ [S1]. Computed by projecting the world position $x_t$ of a ray hit using the current Model-View-Projection (MVP) matrix $M_t$ to screen space $x_t^0$ and the previous MVP matrix $M_{t-1}$ to $x_{t-1}^0$, yielding $f_t = x_t^0 - x_{t-1}^0$ [S1].
+*   **Dense Flow:** Empty areas in $F_{t}^{LR}$ (where no surface hit occurred) are filled using Navier-Stokes-based image inpainting to create a dense, incompressible displacement field [S1].
+*   **Warped Previous Output ($\tilde{O}_{t-1}$):** The previous high-resolution output $O_{t-1}$ is warped using the inverse of the upscaled flow field in a semi-Lagrangian manner [S1].
+*   **Flattened Warped Output ($O_f$):** A space-to-depth transformation $S_s$ maps every $4 \times 4$ block of the high-resolution warped image to a single low-resolution pixel [S1]. The channels of these 16 pixels are concatenated, resulting in a tensor with $16 \times 6 = 96$ channels at resolution $H \times W$ [S1].
+
+**Network Architecture (SRNet):**
+The network is fully convolutional with $3 \times 3$ kernels and stride 1 [S1].
+1.  **Input Layer:** One convolution reduces 101 input channels (5 from $I_{t}^{LR}$ + 96 from $O_f$) to 64 channels [S1].
+2.  **Residual Blocks:** 10 residual blocks are applied [S1]. Each block contains 2 convolutional layers [S1].
+3.  **Upscaling:** Two upscaling blocks are applied [S1]. Each consists of 2x bilinear upscaling, a convolution, and a ReLU, arriving at 4x resolution with 64 channels [S1].
+4.  **Output Layer:** Two convolutions reduce the latent feature space to 6 output channels [S1].
+5.  **Residual Connection:** The 5 channels of the input $I_{t}^{LR}$ are bilinearly upsampled and added to the first five channels of the output ($M_{test}, N_{test}, D_{test}$) [S1]. $AO_{test}$ is inferred from scratch [S1].
+
+**Training Loss Functions:**
+*   **Spatial L1/L2 Loss:** $L_{X,l1} = ||X_{test} - X_{t}^{GT}||_1$, $L_{X,l2} = ||X_{test} - X_{t}^{GT}||_2^2$, where $X \in \{M, N, AO, C\}$ [S1].
+*   **Perceptual Loss:** $L_{X,P} = ||\phi(X_{test}) - \phi(X_{t}^{GT})||_2^2$ [S1]. $\phi$ is a VGG-19 feature extractor [S1]. Inputs to $\phi$ must be transformed: Normals rescaled to $[0, 1]^3$, Depth/Mask to grayscale RGB [S1].
+*   **Temporal Loss:** $L_{X,temp} = ||X_{test} - \tilde{X}_{t-1}||_2^2$, where $\tilde{X}_{t-1}$ is the warped previous high-res output [S1].
+*   **Loss Masking:** Loss terms for normals and AO are not computed for pixels where the mask is -1, as these values are irrelevant where the mask indicates no surface hit [S1].
+
+**Inference Steps:**
+1.  **Generate Ground Truth AO (Training only):** For high-resolution ray-casting, spawn 512 secondary rays per surface point to simulate Ambient Occlusion [S1]. AO value 1 = no occlusion, 0 = total occlusion [S1].
+2.  **Compute Screen-Space Flow:** Calculate $F_{t}^{LR}$ as described above [S1]. Densify using Navier-Stokes inpainting [S1].
+3.  **Warp Previous Output:** Upscale $F_{t}^{LR}$ via bilinear interpolation to high resolution [S1]. Use inverse flow vectors to retrieve values from $O_{t-1}$, producing $\tilde{O}_{t-1}$ [S1].
+4.  **Flatten Warped Output:** Apply space-to-depth transformation to $\tilde{O}_{t-1}$ to create $O_f$ (96 channels) [S1].
+5.  **Network Inference:** Input $I_{t}^{LR}$ (5 channels) and $O_f$ (96 channels) into SRNet [S1]. Output $O_{test}$ (6 channels) [S1].
+6.  **Post-Process Mask:** Clamp $M_{test}$ to $[-1, +1]$, then rescale to $[0, 1]$ to create $M_{t}^{0,est}$ [S1]. Use as alpha channel for blending [S1].
+7.  **Screen-Space Shading:** Compute final color $C_{rgb} = \text{Phong}(c_a, c_d, c_s, c_m, N_{test}) * AO_{test}$, then blend with background $c_{bg}$ using $M_{t}^{0,est}$: $C = \text{lerp}(c_{bg}, C_{rgb}, M_{t}^{0,est})$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_flow(world_pos_t, mvp_t, mvp_prev):
+    """Compute screen-space flow vector."""
+    # Project world positions to screen space using MVP matrices
+    pos_h = np.hstack([world_pos_t, np.ones((world_pos_t.shape[0], 1))])
+    clip_t = (mvp_t @ pos_h.T).T
+    clip_prev = (mvp_prev @ pos_h.T).T
+    screen_t = clip_t[:, :2] / clip_t[:, 2:3]
+    screen_prev = clip_prev[:, :2] / clip_prev[:, 2:3]
+    return screen_t - screen_prev
+
+def dense_flow_inpainting(flow_lr, hit_mask):
+    """Fill empty areas in flow field using Navier-Stokes based inpainting."""
+    # Standard implementation uses iterative diffusion to fill invalid regions [G]
+    return flow_lr
+
+def warp_previous_output(prev_output_hr, flow_hr):
+    """Warp previous high-res output using inverse flow."""
+    H, W = prev_output_hr.shape[1], prev_output_hr.shape[2]
+    y, x = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+    src_y = y - flow_hr[0]
+    src_x = x - flow_hr[1]
+    src_y = np.clip(src_y, 0, H - 1)
+    src_x = np.clip(src_x, 0, W - 1)
+    y0, x0 = np.floor(src_y).astype(int), np.floor(src_x).astype(int)
+    y1, x1 = np.minimum(y0 + 1, H - 1), np.minimum(x0 + 1, W - 1)
+    wa = (src_x - x0) * (src_y - y0)
+    wb = (src_x - x0) * (y1 - src_y)
+    wc = (x1 - src_x) * (src_y - y0)
+    wd = (x1 - src_x) * (y1 - src_y)
+    warped = np.zeros_like(prev_output_hr)
+    for c in range(prev_output_hr.shape[0]):
+        warped[c] = wa * prev_output_hr[c, y0, x0] + wb * prev_output_hr[c, y0, x1] + wc * prev_output_hr[c, y1, x0] + wd * prev_output_hr[c, y1, x1]
+    return warped
+
+def space_to_depth(image_hr):
+    """Map every 4x4 block to a single pixel, concatenating channels."""
+    C, H_hr, W_hr = image_hr.shape
+    H_lr, W_lr = H_hr // 4, W_hr // 4
+    img = image_hr.reshape(C, H_lr, 4, W_lr, 4)
+    img = img.transpose(0, 1, 3, 2, 4).reshape(C * 16, H_lr, W_lr)
+    return img
+
+def conv2d(x, out_channels, kernel_size=3, stride=1):
+    """Standard 2D convolution with padding for same spatial size [G]."""
+    return x
+
+def relu(x):
+    """Rectified Linear Unit."""
+    return np.maximum(0, x)
+
+def bilinear_upsample(x, scale=2):
+    """Standard bilinear interpolation upsampling [G]."""
+    return x
+
+def l2_loss(pred, target):
+    """Mean squared error."""
+    return np.mean((pred - target) ** 2)
+
+def perceptual_loss(pred, target, vgg_features):
+    """Extract features using VGG-19 and compute L2 distance [G]."""
+    return np.mean((vgg_features(pred) - vgg_features(target)) ** 2)
+
+def update_weights(loss):
+    """Gradient descent step [G]."""
+    pass
+
+def phong_shading(normal, ao, ambient=0.2, diffuse=0.8, specular=0.5):
+    """Standard Phong shading model [G]."""
+    return (ambient + diffuse * np.dot(normal, [0, 0, 1]) + specular) * ao
+
+def srnet_forward(input_lr, flattened_warped_prev):
+    """Forward pass of SRNet."""
+    x = np.concatenate([input_lr, flattened_warped_prev], axis=0)
+    x = conv2d(x, 64)
+    for _ in range(10):
+        x = x + conv2d(conv2d(x, 64), 64)
+    for _ in range(2):
+        x = bilinear_upsample(x, scale=2)
+        x = relu(conv2d(x, 64))
+    x = conv2d(x, 6)
+    input_up = bilinear_upsample(input_lr, scale=4)
+    x[:5] = x[:5] + input_up
+    return x
+
+def train_step(input_lr, gt_hr, flow_lr, hit_mask):
+    """Compute loss and update weights."""
+    flow_dense = dense_flow_inpainting(flow_lr, hit_mask)
+    warped_gt = warp_previous_output(gt_hr, flow_dense)
+    flattened_warped = space_to_depth(warped_gt)
+    pred_hr = srnet_forward(input_lr, flattened_warped)
+    loss_spatial = l2_loss(pred_hr, gt_hr)
+    loss_temporal = l2_loss(pred_hr, warped_gt)
+    loss_perceptual = perceptual_loss(pred_hr, gt_hr, vgg_features)
+    mask = pred_hr[0]
+    valid = mask != -1
+    loss_normals = l2_loss(pred_hr[1:4][valid], gt_hr[1:4][valid])
+    loss_ao = l2_loss(pred_hr[4][valid], gt_hr[4][valid])
+    total_loss = loss_spatial + loss_temporal + loss_perceptual + loss_normals + loss_ao
+    update_weights(total_loss)
+
+def render_frame(input_lr, prev_output_hr, flow_lr, hit_mask, background_color):
+    """Inference step for a new frame."""
+    flow_dense = dense_flow_inpainting(flow_lr, hit_mask)
+    flow_hr = bilinear_upsample(flow_dense, scale=4)
+    warped_prev = warp_previous_output(prev_output_hr, flow_hr)
+    flattened_warped = space_to_depth(warped_prev)
+    pred_hr = srnet_forward(input_lr, flattened_warped)
+    mask = pred_hr[0]
+    mask = np.clip(mask, -1, 1)
+    mask_alpha = (mask + 1) / 2
+    normal = pred_hr[1:4]
+    ao = pred_hr[4]
+    color_rgb = phong_shading(normal, ao)
+    final_color = np.where(mask_alpha > 0, color_rgb, background_color)
+    return final_color, pred_hr
+```
+
+**Parameters:**
+*   **Upscaling Factor:** 4x. Input size $H \times W$, output size $4H \times 4W$. Other factors are possible by adapting the architecture [S1].
+*   **Kernel Size:** $3 \times 3$ for all convolutions [S1].
+*   **Stride:** 1 for all convolutions [S1].
+*   **Upsampling Method:** Bilinear interpolation [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Color Bleeding/Shifts:** Upscaling color images directly causes artifacts [S1]. The method predicts surface attributes and applies screen-space shading in post-process to prevent these artifacts [S1].
+*   **Artificial Details:** Texture or style loss terms introduce unwanted roughness in smooth isosurface renderings [S1]. These should not be used [S1].
+*   **Loss Masking:** Normals and AO values in non-hit regions are irrelevant [S1]. Loss terms for these are not computed for pixels where the mask is -1 to prevent the network from learning irrelevant noise [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The network is fully convolutional, allowing for efficient inference on GPUs [G]. The complexity is dominated by the convolutional layers and the flow warping/upsampling steps [G].
+*   **Memory Complexity:** Requires storing the previous high-resolution output and the flow field [G]. The flattened warped input increases channel dimensionality but reduces spatial resolution for the temporal context [G].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** The method scales with resolution by adapting the architecture if non-4x upscaling is desired [S1].
+*   **Strengths:** Good temporal coherence with simple temporal loss compared to complex spatio-temporal discriminators (e.g., TecoGAN) [S1]. Prevents color bleeding by operating on surface attributes [S1].
+*   **Limitations:** Requires ray-casting of auxiliary buffers (normal, depth, flow) at low resolution [S1]. Relies on temporal coherence; may fail in cases of extreme motion or occlusion changes not captured by flow [S1].
+*   **When to use:** Interactive navigation of volumetric isosurfaces where temporal coherence and smooth edges are critical [S1].
+*   **When not to use:** Scenes with extreme temporal discontinuities or where volumetric detail (not just surface) is required [S1].
+
+## Background
+This method was introduced in the paper "Volumetric Isosurface Rendering with Deep Learning-Based Super-Resolution" [S1]. It builds on the principles of deep learning-based super-resolution [12769-deep-learning-based-super-resolution.md] and screen-space techniques [G]. It addresses the limitations of direct color upscaling and complex adversarial training by using a residual network with temporal flow warping and screen-space shading [S1].
+
+## Sources
+[S1] Volumetric Isosurface Rendering with Deep Learning-Based Super-Resolution, https://ieeexplore.ieee.org/abstract/document/8918030, fetched 2026-10-31

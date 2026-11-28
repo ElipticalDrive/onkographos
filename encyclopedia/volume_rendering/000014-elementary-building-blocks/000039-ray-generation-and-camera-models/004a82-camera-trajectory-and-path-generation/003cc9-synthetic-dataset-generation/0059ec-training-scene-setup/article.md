@@ -1,0 +1,116 @@
+# Training Scene Setup
+Also called: Lighting and View Configuration for Training
+## Overview
+Training Scene Setup defines the configuration of lighting and viewing angles used to generate ground truth and approximate images for neural rendering optimization [S1]. It ensures that solved material properties, such as albedo, generalize well across different settings by fitting against multiple lighting and viewing configurations [S1]. It differs from sibling methods like [Novel View Synthesis Rendering](6402-novel-view-synthesis-rendering.md) by focusing on the specific generation of training data for material decomposition rather than just view interpolation, and from [Data Augmentation](20546-data-augmentation.md) by using deterministic, structured geometric and lighting variations rather than stochastic perturbations.
+## How it works
+**Inputs:**
+- A 3D object model (mesh or voxel representation).
+- A bounding box defining the object's spatial extent.
+- A target number of clusters $K$ for albedo decomposition (typically 2–5) [S1].
+
+**Outputs:**
+- A set of rendered images $I$ (ground truth) and $\tilde{I}$ (approximate) for optimization.
+- Clustered albedo values $\bar{\alpha}_i$ [S1].
+
+**Data Structures:**
+- **View Directions:** A set of 6 unit vectors corresponding to the axes of the bounding box: $\pm X, \pm Y, \pm Z$ [S1].
+- **Lighting Configurations:** A set of spherical harmonic (SH) lighting coefficients. The specific number of SH bands is not explicitly defined in the provided notes, but "a few" are used [S1].
+- **Rendered Images:** 2D arrays of pixel intensities. Foreground pixels are identified to compute mean intensity [S1].
+
+**Steps:**
+1. **Define View Directions:** Identify the six canonical directions relative to the object's bounding box: $+X, -X, +Y, -Y, +Z, -Z$ [S1].
+2. **Define Lighting Configurations:** Select a set of spherical harmonic lighting environments. The specific SH order is not given [S1].
+3. **Render Ground Truth Images:** For each of the 6 view directions, render the object using each of the selected spherical harmonic lighting configurations. This produces the set of ground truth images $I$ [S1].
+4. **Render Approximate Images:** Render the object from the same views and lighting configurations using the current estimate of the material properties (e.g., albedo) to produce approximate images $\tilde{I}$ [S1].
+5. **Compute Error Metric:** For each configuration $r$, calculate the error between the ground truth image $I_r$ and the approximate image $\tilde{I}_r$. The error is defined as the squared difference between the mean pixel intensities of the foreground pixels:
+   $$ E_r = (\text{mean}(I_r) - \text{mean}(\tilde{I}_r))^2 $$
+   where $\text{mean}(I)$ is the average intensity of all foreground pixels in image $I$ [S1].
+6. **Optimize Material Properties:** Adjust the factors $w_1, \dots, w_K$ (representing the material properties, such as albedo) to minimize the total error across all configurations [S1].
+7. **Cluster Albedos (Optional/Post-processing):** Apply K-means clustering to the downsampled albedos $\bar{\alpha}_i$ to refine the material representation. The number of clusters $K$ is typically small (2–5) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def training_scene_setup(object_mesh, bounding_box, num_clusters=3):
+    # Step 1: Define 6 canonical view directions
+    view_directions = [
+        [1, 0, 0], [-1, 0, 0],
+        [0, 1, 0], [0, -1, 0],
+        [0, 0, 1], [0, 0, -1]
+    ]
+    
+    # Step 2: Define spherical harmonic lighting configurations
+    # Note: Specific SH order is not given in sources [S1]
+    lighting_configs = get_spherical_harmonic_lights() 
+    
+    ground_truth_images = []
+    approximate_images = []
+    
+    # Step 3 & 4: Render images for all view/lighting combinations
+    for view_dir in view_directions:
+        for lighting in lighting_configs:
+            # Render ground truth
+            I_r = render(object_mesh, view_dir, lighting)
+            ground_truth_images.append(I_r)
+            
+            # Render approximate using current material estimate
+            # Material estimate is updated during optimization loop
+            alpha_estimate = get_current_albedo_estimate()
+            I_tilde_r = render_with_material(object_mesh, view_dir, lighting, alpha_estimate)
+            approximate_images.append(I_tilde_r)
+            
+    # Step 5: Compute error metric
+    total_error = 0.0
+    for I_r, I_tilde_r in zip(ground_truth_images, approximate_images):
+        mean_I = compute_mean_intensity(I_r)
+        mean_I_tilde = compute_mean_intensity(I_tilde_r)
+        error = (mean_I - mean_I_tilde) ** 2
+        total_error += error
+        
+    # Step 6: Optimize factors w_1...w_K to minimize total_error
+    # This is typically done via gradient descent or similar optimizer
+    # outside the scope of this setup function
+    optimize_material_factors(total_error)
+    
+    # Step 7: Cluster albedos
+    downsampled_albedos = downsample_albedos(get_current_albedos())
+    clustered_albedos = kmeans(downsampled_albedos, k=num_clusters)
+    
+    return clustered_albedos
+
+def compute_mean_intensity(image):
+    # Identify foreground pixels (implementation detail not in sources)
+    foreground_pixels = get_foreground_pixels(image)
+    if not foreground_pixels:
+        return 0.0
+    return sum(foreground_pixels) / len(foreground_pixels)
+```
+
+**Parameters:**
+- $K$: Number of albedo clusters. Typical values: 2–5 [S1].
+- View Directions: Fixed to 6 canonical axes [S1].
+- Lighting: Spherical Harmonics. Order not specified [S1].
+
+**Edge Cases:**
+- **No Foreground:** If an image has no foreground pixels, the mean intensity is undefined. The pseudocode handles this by returning 0.0 [G].
+- **Degenerate Bounding Box:** If the bounding box is degenerate (zero volume), the view directions may be ill-defined. Not given in sources [G].
+
+## Subtopics
+
+### [Single-category ShapeNet Training Protocol](21634-single-category-shapenet-training-protocol.md)
+This protocol defines the training and evaluation configuration for single-category ShapeNet datasets, specifically chairs and cars, within the context of few-shot neural rendering. It addresses the problem of optimizing a neural radiance field from one or two input views by structuring the training schedule to balance convergence speed and generalization. It differs from the category-agnostic protocol by focusing on specific object classes and using fixed evaluation views (64 and 128) rather than random sampling for baseline comparisons.
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of views (6), the number of lighting configurations, and the complexity of the rendering engine. Clustering is $O(N \cdot K \cdot I)$ where $N$ is the number of voxels/pixels, $K$ is clusters, and $I$ is iterations.
+- **Memory Complexity:** Stores rendered images for all configurations. Not given in sources.
+- **Strengths:** Ensures generalization of material properties by exposing the optimizer to diverse lighting and viewing conditions [S1]. Simple and deterministic setup.
+- **Limitations:** Limited to 6 views, which may not capture all geometric details. Relies on spherical harmonics for lighting, which may not capture complex shadows or high-frequency lighting effects.
+- **When to use:** When decomposing material properties (albedo) from multi-view images.
+- **When not to use:** When high-fidelity lighting effects (e.g., complex shadows) are critical and SH is insufficient.
+
+## Background
+The method originates from work on downsampling scattering parameters for rendering anisotropic media [S1]. It is used in the context of neural rendering optimization, specifically for material decomposition tasks where generalization across lighting and viewing conditions is required. The approach builds on previous work using mean pixel intensity differences for error metrics [S1].
+
+## Sources
+[S1] Downsampling scattering parameters for rendering anisotropic media, https://doi.org/10.1145/2980179.2980228, fetched 2026-10-28

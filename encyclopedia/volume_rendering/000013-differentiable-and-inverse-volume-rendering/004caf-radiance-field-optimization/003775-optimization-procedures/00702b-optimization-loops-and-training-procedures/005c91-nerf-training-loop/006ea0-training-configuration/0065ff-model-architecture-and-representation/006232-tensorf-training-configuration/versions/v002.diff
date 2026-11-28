@@ -1,0 +1,149 @@
+--- v001.md
++++ v002.md
+@@ -26,5 +26,4 @@
+     *   Activation: ReLU [S1, unofficial].
+     *   Input features: 27-dimensional appearance features [S1, unofficial].
+-    *   Output: Color $\mathbf{c} \in \mathbb{R}^3$ [S1, unofficial].
+ 3.  **Positional Encoding:**
+     *   Frequencies: 6 [S1, unofficial].
+@@ -38,10 +37,10 @@
+     *   Compute raw density output $f_\theta(\mathbf{x})$ from the VM decomposition [S1, unofficial].
+     *   Apply the corrected density parameterization:
+-        $$ \sigma(\mathbf{x}) = \text{ReLU}(f_\theta(\mathbf{x}) \cdot s + \Delta) $$
++        $$ \sigma(\mathbf{x}) = \text{ReLU}(f_\theta(\mathbf{x}) + \Delta) \cdot s $$
+         With $\Delta=0, s=1$, this simplifies to $\sigma(\mathbf{x}) = \text{ReLU}(f_\theta(\mathbf{x}))$ [S1, unofficial].
+ 3.  **Rendering:**
+     *   Sample rays (batch size 2048) [S1, unofficial].
+-    *   Query $\sigma(\mathbf{x})$ and color $\mathbf{c}(\mathbf{x}, \mathbf{d})$ along rays [S1, unofficial].
+-    *   Integrate using volume rendering equation to produce predicted image $\hat{I}$ [S1, unofficial].
++    *   Query $\sigma(\mathbf{x})$ along rays [S1, unofficial].
++    *   Compute photometric loss against target views [S1, unofficial].
+ 4.  **Loss Calculation:**
+     *   Compute photometric loss: $L_{photo} = \text{MSE}(\hat{I}, I)$ [S1, unofficial].
+@@ -66,52 +65,87 @@
+ def train_tensorf_aert(views, poses, iterations=3000, batch_size=2048):
+     # 1. Initialize Density Grid (VM Rank-16)
+-    # P_i: density feature planes, L_i: density feature lines
+-    P = initialize_grid(rank=16, shape=(16, 16, 16))
+-    L = initialize_lines(rank=16)
++    # P: density feature planes (16x16x16), L: density feature lines (16x16)
++    P = [[[0.0 for _ in range(16)] for _ in range(16)] for _ in range(16)]
++    L = [[[0.0 for _ in range(16)] for _ in range(16)] for _ in range(16)]
++    # Appearance MLP (2x128 ReLU)
++    W = [np.random.randn(27, 128), np.random.randn(128, 128), np.random.randn(128, 3)]
+     
+-    # 2. Initialize Appearance MLP (2x128 ReLU)
+-    mlp = initialize_mlp(hidden_units=[128, 128], activation='relu')
++    # Adam state
++    m_P, v_P = np.zeros_like(P), np.zeros_like(P)
++    m_L, v_L = np.zeros_like(L), np.zeros_like(L)
++    m_W, v_W = [np.zeros_like(w) for w in W], [np.zeros_like(w) for w in W]
+     
+-    # 3. Set Optimizers
+-    optimizer_grid = Adam(params=P + L, lr=0.02)
+-    optimizer_mlp = Adam(params=mlp.parameters(), lr=0.002)
+-    
+-    # 4. Training Loop
+     for step in range(iterations):
+-        # Sample batch of rays
+         rays = sample_rays(views, poses, batch_size)
+         
+-        # Query Density
+-        # f_theta(x) from VM decomposition of P and L
+-        f_theta = query_vm_decomposition(rays.x, P, L)
++        # Query Density via VM decomposition
++        f_theta = vm_decompose(rays.x, P, L)
++        sigma = relu(f_theta)
+         
+-        # Corrected Density Parameterization (Delta=0, s=1)
+-        # Avoids zero gradient flow caused by default Delta=-10
+-        sigma = relu(f_theta) 
++        # Query Appearance Features and MLP
++        features = get_appearance_features(rays.x, rays.d, P, L)
++        c = mlp_forward(features, W)
+         
+-        # Query Color
+-        c = mlp(rays.x, rays.d, f_theta) # Assuming 27-dim features passed or derived
+-        
+-        # Render
++        # Render predicted image
+         I_hat = volume_render(rays, sigma, c)
+         
+         # Compute Losses
+         L_photo = mse(I_hat, rays.I)
+-        L_sparse = sum(abs(P)) # L1 on density planes
+-        L_TV = sum(abs(horizontal_diff(P))) + sum(abs(vertical_diff(P)))
+-        
++        L_sparse = sum(np.sum(np.abs(plane)) for plane in P)
++        L_TV = sum(np.sum(np.abs(np.diff(plane, axis=0))) + np.sum(np.abs(np.diff(plane, axis=1))) for plane in P)
+         L = L_photo + 1e-4 * L_sparse + 1e-5 * L_TV
+         
+-        # Backpropagate
+-        optimizer_grid.zero_grad()
+-        optimizer_mlp.zero_grad()
+-        L.backward()
++        # Backpropagate (conceptual)
++        g_P, g_L, g_W = compute_gradients(L, rays, sigma, c, P, L, W)
+         
+-        optimizer_grid.step()
+-        optimizer_mlp.step()
+-        
+-        # Alpha mask updates
++        # Adam update
++        adam_step(P, m_P, v_P, g_P, lr=0.02, step=step)
++        adam_step(L, m_L, v_L, g_L, lr=0.02, step=step)
++        for i in range(3):
++            adam_step(W[i], m_W[i], v_W[i], g_W[i], lr=0.002, step=step)
++            
+         if step in [1500, 2500]:
+             update_alpha_masks(rays, sigma)
++
++def vm_decompose(x, P, L):
++    # f_theta(x) = sum_i (P_i(x) * L_i(x))
++    return sum(P[i][int(x[0]*16)][int(x[1]*16)] * L[i][int(x[1]*16)][int(x[2]*16)] for i in range(16))
++
++def relu(x): return max(0.0, x)
++
++def get_appearance_features(x, d, P, L):
++    # Not given in sources [G]
++    return np.zeros(27)
++
++def mlp_forward(features, W):
++    h1 = relu(features @ W[0])
++    h2 = relu(h1 @ W[1])
++    return h2 @ W[2]
++
++def volume_render(rays, sigma, c):
++    # Not given in sources [G]
++    return np.mean(c)
++
++def mse(pred, target): return np.mean((pred - target)**2)
++
++def compute_gradients(loss, rays, sigma, c, P, L, W):
++    # Conceptual gradient computation
++    return np.zeros_like(P), np.zeros_like(L), [np.zeros_like(w) for w in W]
++
++def adam_step(params, m, v, grad, lr, step):
++    beta1, beta2, eps = 0.9, 0.999, 1e-8
++    m[:] = beta1 * m + (1 - beta1) * grad
++    v[:] = beta2 * v + (1 - beta2) * grad**2
++    m_hat = m / (1 - beta1**(step+1))
++    v_hat = v / (1 - beta2**(step+1))
++    params -= lr * m_hat / (np.sqrt(v_hat) + eps)
++
++def update_alpha_masks(rays, sigma):
++    # Not given in sources [G]
++    pass
++
++def sample_rays(views, poses, batch_size):
++    # Not given in sources [G]
++    return type('Rays', (), {'x': np.zeros((batch_size, 3)), 'd': np.zeros((batch_size, 3)), 'I': np.zeros((batch_size, 3))})()
+ ```
+ 
+@@ -124,5 +158,5 @@
+ *   **Time Complexity:** Converges in approximately 8 minutes per patient on an NVIDIA T4 GPU [S1, unofficial].
+ *   **Memory Complexity:** The density grid is $16^3$ voxels with rank-16 VM decomposition; the appearance MLP is small (2x128) [S1, unofficial].
+-*   **Strengths:** The corrected parameterization ($\Delta=0, s=1$) ensures stable gradient flow and geometric consistency, reducing Marching Cubes error to ~13.8-14.3% compared to >200% with default parameters [S1, unofficial]. Anatomy-aware regularization ($L_{sparse}, L_{TV}$) effectively prevents overfitting in sparse-view scenarios [S1, unofficial].
++*   **Strengths:** The corrected parameterization ($\Delta=0, s=1$) ensures stable gradient flow and geometric consistency, reducing Marching Cubes error to ~13.8-14.3% compared to >200% with default parameters [S1, unofficial]. Explicit regularization is essential to prevent overfitting in sparse-view scenarios [S1, unofficial].
+ *   **Limitations:** Highly sensitive to threshold selection during Marching Cubes extraction if not properly regularized; default parameterization leads to complete training failure (zero density) [S1, unofficial].
+ *   **When to use:** Sparse-view volumetric reconstruction where geometric consistency is critical and standard NeRF/TensoRF fails to produce stable isosurfaces [S1, unofficial].
